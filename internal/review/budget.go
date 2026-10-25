@@ -6,7 +6,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/pkg/dag"
+	"github.com/LeXwDeX/tribunal/pkg/dag"
 )
 
 var errSynthesisBudgetExhausted = errors.New("review: workflow token budget exhausted during synthesis")

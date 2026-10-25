@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/config"
 	"golang.org/x/time/rate"
 )
 

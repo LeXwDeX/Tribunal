@@ -200,11 +200,11 @@ type ProfileConfig struct {
 {
   "mcpServers": {
     "codebase-memory": {
-      "command": "/usr/local/bin/crc-codebase-memory-mcp",
+      "command": "/usr/local/bin/tribunal-codebase-memory-mcp",
       "args": ["--tool-profile=analysis", "--ui=false"],
       "env": {},
       "x-review": {
-        "index_command": ["/usr/local/bin/crc-codebase-memory-mcp", "cli", "--quiet", "index_repository", "{\"repo_path\":\"{base_dir}\"}"],
+        "index_command": ["/usr/local/bin/tribunal-codebase-memory-mcp", "cli", "--quiet", "index_repository", "{\"repo_path\":\"{base_dir}\"}"],
         "env_allowlist": ["PATH"],
         "home": ".mcp/codebase-memory/home",
         "call_timeout": "60s",
@@ -225,7 +225,7 @@ type ProfileConfig struct {
 
 `index_command` 中的工具参数以实际版本的 `codebase-memory-mcp cli --help` 为准。
 
-示例使用仓库的 [MCP 隔离启动脚本](../../scripts/codebase-memory-mcp.sh)，而不是直接启动上游二进制。由部署管理员把脚本安装或只读挂载到 `/usr/local/bin/crc-codebase-memory-mcp`，并把上游 `codebase-memory-mcp` 放到服务的 `PATH`。标准镜像不包含上游二进制；容器部署需自行安装或挂载它及其许可证，不要挂载 Docker socket。
+示例使用仓库的 [MCP 隔离启动脚本](../../scripts/codebase-memory-mcp.sh)，而不是直接启动上游二进制。由部署管理员把脚本安装或只读挂载到 `/usr/local/bin/tribunal-codebase-memory-mcp`，并把上游 `codebase-memory-mcp` 放到服务的 `PATH`。主机上已安装的旧名 wrapper 必须重命名或提供兼容符号链接：旧路径 `crc-codebase-memory-mcp` 只有在主机仍保留该名称时才可解析，否则 MCP server 启动失败。标准镜像不包含上游二进制；容器部署需自行安装或挂载它及其许可证，不要挂载 Docker socket。
 
 脚本同时供 MCP server 和 `index_command` 使用。它把 `CBM_CACHE_DIR` 与 `CBM_RUNTIME_DIR` 固定在应用提供的项目 `HOME` 下，并关闭自动索引、watcher 和 UI。0.12.1 的 daemon 默认按账号共享，只有不同 `HOME` 或 `XDG_RUNTIME_DIR` 不足以隔离：第二个项目可能因 cache 不同而连接失败。不要把所有项目改用共享 cache 来消除报错，那会让代码地图跨项目可见。
 
@@ -298,11 +298,26 @@ review:
 |---|---|
 | `REVIEW_MASTER_KEY` | 主密钥（base64 32 字节），加密项目 token 和 webhook secret |
 | `REVIEW_ADMIN_TOKEN` | 平台管理面的 bootstrap Bearer token，至少 32 字节；无用户 ID 和项目 grant，轮换由部署方修改环境变量并重启 |
-| `CRC_SESSION_KEY` | base64，解码后至少 32 字节；签名会话 cookie、OAuth state 和派生 CSRF。固定该值并复用 SQLite 时重启可继续登录；未设置时每进程随机生成并告警，重启后旧会话失效 |
+| `TRIBUNAL_SESSION_KEY` | base64，解码后至少 32 字节；签名会话 cookie、OAuth state 和派生 CSRF。固定该值并复用 SQLite 时重启可继续登录；未设置时每进程随机生成并告警，重启后旧会话失效。旧名 `CRC_SESSION_KEY` 仍兼容，新旧同时设置时新名优先；新值非法时启动失败，不回退旧值 |
 | `GITLAB_OAUTH_CLIENT_ID` / `GITLAB_OAUTH_CLIENT_SECRET` | 控制台登录 |
 | `ANTHROPIC_API_KEY`、`OPENAI_API_KEY`、… | 按 `providers.*.api_key_env` 自定义 |
 | `REVIEW_LOG_LEVEL` | `debug` / `info` / `warn` / `error` |
 | `REVIEW_LOG_FORMAT` | `json`（默认）/ `text` |
+
+部署示例还使用 Compose 插值变量 `TRIBUNAL_PUBLIC_URL` 和 `TRIBUNAL_HTTP_PORT`。`server.docker.yaml` 把 `TRIBUNAL_PUBLIC_URL` 展开为 `server.public_url`；`TRIBUNAL_HTTP_PORT` 只控制宿主机端口映射，应用不读取。旧名 `CRC_PUBLIC_URL`、`CRC_HTTP_PORT` 仍兼容；新旧同时设置时新名优先。旧占位符和新占位符都接受任一非空的公开地址变量，因此旧持久化 YAML 在只设置新名时仍可用。
+
+应用只检查自身进程可见的环境变量；三个旧名在这些变量中只要配置了非空值，都会各记录一次弃用日志。即使新名已覆盖，日志仍会提示旧名处于已配置状态（configured），不代表旧值生效。日志只记录变量名，不记录值。
+
+兼容契约如下：
+
+| 设置 | 结果 |
+|---|---|
+| 仅旧名 `CRC_SESSION_KEY` / `CRC_PUBLIC_URL` / `CRC_HTTP_PORT` | 按旧值工作；三个旧名各记录一次弃用日志（只含变量名，不含值） |
+| 仅新名 `TRIBUNAL_SESSION_KEY` / `TRIBUNAL_PUBLIC_URL` / `TRIBUNAL_HTTP_PORT` | 按新值工作；不记录旧名弃用日志 |
+| 新旧同时设置 | 新名优先；旧值忽略，不报冲突；已配置的旧名仍各记录一次弃用日志 |
+| 新名已设置但值非法 | 启动失败（fail closed），不回退旧值 |
+
+升级时把原 session key 的同一个值传给 `TRIBUNAL_SESSION_KEY`，不要重新生成；重新生成会使现有浏览器会话失效。
 
 ---
 

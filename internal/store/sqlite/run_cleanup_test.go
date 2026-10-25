@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
 func insertCleanupWorkflow(t *testing.T, s *Store, id string, projectID int64, status string) {

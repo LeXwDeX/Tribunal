@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/prompts"
+	"github.com/LeXwDeX/tribunal/prompts"
 )
 
 func TestBuildPromptStablePrefixAndNonceBoundaries(t *testing.T) {

@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store/migrations"
+	"github.com/LeXwDeX/tribunal/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/store/migrations"
 )
 
 func TestWebhookStateMigrationPreservesLegacyProjects(t *testing.T) {

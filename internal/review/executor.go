@@ -10,11 +10,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/agent"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/config"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/llm"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/pkg/dag"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/prompts"
+	"github.com/LeXwDeX/tribunal/internal/agent"
+	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/llm"
+	"github.com/LeXwDeX/tribunal/pkg/dag"
+	"github.com/LeXwDeX/tribunal/prompts"
 )
 
 const (

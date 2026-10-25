@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/config"
 )
 
 func TestParseSettingsPreservesExplicitFalse(t *testing.T) {

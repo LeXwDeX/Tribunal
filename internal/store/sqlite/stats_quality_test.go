@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
 func qualityWorkflow(t *testing.T, st *Store, workflowID string, projectID, mrIID int64, at time.Time, proposer, challenger string) {

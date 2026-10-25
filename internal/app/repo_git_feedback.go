@@ -3,7 +3,7 @@ package app
 import (
 	"context"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/repo"
+	"github.com/LeXwDeX/tribunal/internal/repo"
 )
 
 // FileDiff exposes the zero-context diff capability F8 needs without widening

@@ -257,49 +257,211 @@ func TestRunStartsAndStopsCleanly(t *testing.T) {
 }
 
 func TestSessionKeyFromEnv(t *testing.T) {
-	t.Setenv("CRC_SESSION_KEY", "")
-	generated, err := sessionKeyFromEnv()
-	if err != nil || len(generated) != 32 {
-		t.Fatalf("generated key = %d bytes, err=%v", len(generated), err)
-	}
+	legacy := []byte("0123456789abcdef0123456789abcdef")
+	tribunal := []byte("abcdef0123456789abcdef0123456789")
+	encoded := func(key []byte) string { return base64.StdEncoding.EncodeToString(key) }
 
-	raw := []byte("0123456789abcdef0123456789abcdef")
-	t.Setenv("CRC_SESSION_KEY", base64.StdEncoding.EncodeToString(raw))
-	key, err := sessionKeyFromEnv()
-	if err != nil || !bytes.Equal(key, raw) {
-		t.Fatalf("decoded key = %v, err=%v", key, err)
-	}
+	t.Run("generated when both are empty", func(t *testing.T) {
+		t.Setenv("TRIBUNAL_SESSION_KEY", "")
+		t.Setenv("CRC_SESSION_KEY", "")
+		generated, err := sessionKeyFromEnv()
+		if err != nil || len(generated) != 32 {
+			t.Fatalf("generated key = %d bytes, err=%v", len(generated), err)
+		}
+	})
 
-	t.Setenv("CRC_SESSION_KEY", base64.RawStdEncoding.EncodeToString(raw))
-	if _, err := sessionKeyFromEnv(); err != nil {
-		t.Fatalf("raw base64 key: %v", err)
-	}
+	t.Run("tribunal key", func(t *testing.T) {
+		t.Setenv("TRIBUNAL_SESSION_KEY", encoded(tribunal))
+		t.Setenv("CRC_SESSION_KEY", "")
+		key, err := sessionKeyFromEnv()
+		if err != nil || !bytes.Equal(key, tribunal) {
+			t.Fatalf("decoded key = %v, err=%v", key, err)
+		}
+	})
 
-	t.Setenv("CRC_SESSION_KEY", base64.StdEncoding.EncodeToString([]byte("too-short")))
-	if _, err := sessionKeyFromEnv(); err == nil {
-		t.Fatal("short session key accepted")
-	}
-	t.Setenv("CRC_SESSION_KEY", "not-base64!!!")
-	if _, err := sessionKeyFromEnv(); err == nil {
-		t.Fatal("invalid base64 accepted")
-	}
+	t.Run("legacy key", func(t *testing.T) {
+		t.Setenv("TRIBUNAL_SESSION_KEY", "")
+		t.Setenv("CRC_SESSION_KEY", encoded(legacy))
+		key, err := sessionKeyFromEnv()
+		if err != nil || !bytes.Equal(key, legacy) {
+			t.Fatalf("decoded key = %v, err=%v", key, err)
+		}
+	})
+
+	t.Run("tribunal key wins", func(t *testing.T) {
+		t.Setenv("TRIBUNAL_SESSION_KEY", encoded(tribunal))
+		t.Setenv("CRC_SESSION_KEY", encoded(legacy))
+		key, err := sessionKeyFromEnv()
+		if err != nil || !bytes.Equal(key, tribunal) {
+			t.Fatalf("decoded key = %v, err=%v", key, err)
+		}
+	})
+
+	t.Run("invalid tribunal key does not fall back", func(t *testing.T) {
+		t.Setenv("TRIBUNAL_SESSION_KEY", "not-base64!!!")
+		t.Setenv("CRC_SESSION_KEY", encoded(legacy))
+		_, err := sessionKeyFromEnv()
+		if err == nil || !strings.Contains(err.Error(), "TRIBUNAL_SESSION_KEY") {
+			t.Fatalf("error = %v, want TRIBUNAL_SESSION_KEY", err)
+		}
+	})
+
+	t.Run("short tribunal key does not fall back", func(t *testing.T) {
+		t.Setenv("TRIBUNAL_SESSION_KEY", encoded([]byte("too-short")))
+		t.Setenv("CRC_SESSION_KEY", encoded(legacy))
+		if _, err := sessionKeyFromEnv(); err == nil {
+			t.Fatal("short session key accepted")
+		}
+	})
+
+	t.Run("whitespace tribunal key falls back", func(t *testing.T) {
+		t.Setenv("TRIBUNAL_SESSION_KEY", "  ")
+		t.Setenv("CRC_SESSION_KEY", encoded(legacy))
+		key, err := sessionKeyFromEnv()
+		if err != nil || !bytes.Equal(key, legacy) {
+			t.Fatalf("decoded key = %v, err=%v", key, err)
+		}
+	})
+
+	t.Run("whitespace keys generate", func(t *testing.T) {
+		t.Setenv("TRIBUNAL_SESSION_KEY", "  ")
+		t.Setenv("CRC_SESSION_KEY", "\t")
+		generated, err := sessionKeyFromEnv()
+		if err != nil || len(generated) != 32 {
+			t.Fatalf("generated key = %d bytes, err=%v", len(generated), err)
+		}
+	})
+
+	t.Run("raw base64 tribunal key", func(t *testing.T) {
+		t.Setenv("TRIBUNAL_SESSION_KEY", base64.RawStdEncoding.EncodeToString(tribunal))
+		t.Setenv("CRC_SESSION_KEY", "")
+		if _, err := sessionKeyFromEnv(); err != nil {
+			t.Fatalf("raw base64 key: %v", err)
+		}
+	})
+
+	t.Run("invalid legacy key", func(t *testing.T) {
+		t.Setenv("TRIBUNAL_SESSION_KEY", "")
+		t.Setenv("CRC_SESSION_KEY", "not-base64!!!")
+		_, err := sessionKeyFromEnv()
+		if err == nil || !strings.Contains(err.Error(), "CRC_SESSION_KEY") {
+			t.Fatalf("error = %v, want CRC_SESSION_KEY", err)
+		}
+	})
 }
 
 func TestEphemeralSessionKeyWarns(t *testing.T) {
+	t.Setenv("TRIBUNAL_SESSION_KEY", "")
 	t.Setenv("CRC_SESSION_KEY", "")
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
 	warnEphemeralSessionKey(logger)
-	if !strings.Contains(logs.String(), "CRC_SESSION_KEY") || !strings.Contains(logs.String(), "restart") {
+	if !strings.Contains(logs.String(), "TRIBUNAL_SESSION_KEY") || !strings.Contains(logs.String(), "restart") {
 		t.Fatalf("warning = %q", logs.String())
 	}
 
 	logs.Reset()
-	t.Setenv("CRC_SESSION_KEY", base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")))
+	t.Setenv("TRIBUNAL_SESSION_KEY", base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")))
 	warnEphemeralSessionKey(logger)
 	if logs.Len() != 0 {
 		t.Fatalf("pinned key warned: %q", logs.String())
 	}
+
+	logs.Reset()
+	t.Setenv("TRIBUNAL_SESSION_KEY", "")
+	t.Setenv("CRC_SESSION_KEY", base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")))
+	warnEphemeralSessionKey(logger)
+	if logs.Len() != 0 {
+		t.Fatalf("legacy pinned key warned: %q", logs.String())
+	}
+}
+
+func TestDeprecatedEnvironmentWarnings(t *testing.T) {
+	const (
+		legacyURL    = "https://legacy.invalid/do-not-log"
+		tribunalURL  = "https://tribunal.invalid"
+		legacyPort   = "45678"
+		tribunalPort = "56789"
+	)
+	source, err := os.ReadFile("../../config/server.example.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "server.yaml")
+	if err := os.WriteFile(path, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("REVIEW_MASTER_KEY", base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")))
+	t.Setenv("REVIEW_ADMIN_TOKEN", strings.Repeat("a", 32))
+	t.Setenv("REVIEW_LOG_FORMAT", "text")
+	t.Setenv("REVIEW_LOG_LEVEL", "info")
+
+	runCheck := func(t *testing.T) string {
+		t.Helper()
+		stderr := &bytes.Buffer{}
+		if err := run(context.Background(), []string{"--config", path, "--check-config"}, &bytes.Buffer{}, stderr); err != nil {
+			t.Fatalf("run: %v", err)
+		}
+		return stderr.String()
+	}
+
+	t.Run("legacy names warn once without values", func(t *testing.T) {
+		t.Setenv("TRIBUNAL_PUBLIC_URL", tribunalURL)
+		t.Setenv("CRC_PUBLIC_URL", legacyURL)
+		t.Setenv("TRIBUNAL_HTTP_PORT", tribunalPort)
+		t.Setenv("CRC_HTTP_PORT", legacyPort)
+		t.Setenv("TRIBUNAL_SESSION_KEY", base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")))
+		t.Setenv("CRC_SESSION_KEY", "do-not-log-session")
+		logs := runCheck(t)
+		for _, name := range []string{"CRC_PUBLIC_URL", "CRC_HTTP_PORT", "CRC_SESSION_KEY"} {
+			if strings.Count(logs, "legacy="+name) != 1 {
+				t.Fatalf("warning count for %s in %q, want one", name, logs)
+			}
+		}
+		if !strings.Contains(logs, "configured") {
+			t.Fatalf("warning does not say the legacy name is configured: %q", logs)
+		}
+		for _, value := range []string{legacyURL, legacyPort, "do-not-log-session"} {
+			if strings.Contains(logs, value) {
+				t.Fatalf("warning leaked configured value %q: %q", value, logs)
+			}
+		}
+	})
+
+	t.Run("legacy session key only warns", func(t *testing.T) {
+		const sessionValue = "session-value-must-not-appear-0123456789"
+		t.Setenv("TRIBUNAL_PUBLIC_URL", tribunalURL)
+		t.Setenv("CRC_PUBLIC_URL", "")
+		t.Setenv("TRIBUNAL_HTTP_PORT", tribunalPort)
+		t.Setenv("CRC_HTTP_PORT", "")
+		t.Setenv("TRIBUNAL_SESSION_KEY", "")
+		t.Setenv("CRC_SESSION_KEY", sessionValue)
+		logs := runCheck(t)
+		if strings.Count(logs, "legacy=CRC_SESSION_KEY") != 1 {
+			t.Fatalf("CRC_SESSION_KEY warning count in %q, want one", logs)
+		}
+		if !strings.Contains(logs, "prefer TRIBUNAL_SESSION_KEY") {
+			t.Fatalf("warning does not name TRIBUNAL_SESSION_KEY: %q", logs)
+		}
+		if strings.Contains(logs, sessionValue) {
+			t.Fatalf("warning leaked the session key value: %q", logs)
+		}
+	})
+
+	t.Run("tribunal names do not warn", func(t *testing.T) {
+		t.Setenv("TRIBUNAL_PUBLIC_URL", tribunalURL)
+		t.Setenv("CRC_PUBLIC_URL", "")
+		t.Setenv("TRIBUNAL_HTTP_PORT", tribunalPort)
+		t.Setenv("CRC_HTTP_PORT", "")
+		t.Setenv("TRIBUNAL_SESSION_KEY", base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")))
+		t.Setenv("CRC_SESSION_KEY", "")
+		logs := runCheck(t)
+		for _, name := range []string{"CRC_PUBLIC_URL", "CRC_HTTP_PORT", "CRC_SESSION_KEY"} {
+			if strings.Contains(logs, "legacy="+name) {
+				t.Fatalf("unexpected warning for %s: %q", name, logs)
+			}
+		}
+	})
 }
 
 func TestSecureCookies(t *testing.T) {

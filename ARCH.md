@@ -88,7 +88,7 @@ GitLab webhook / 评论命令 / 手动 API
 
 ```
 cmd/server/            入口
-cmd/reviewctl/         管理 CLI（只调用 HTTP API）
+cmd/tribunalctl/       管理 CLI（只调用 HTTP API）
 internal/server/       HTTP、webhook handler、管理 API、SSE、embed 前端
 internal/app/          服务层：MR 事件 → 工作流、项目注册、工作区编排、反馈收集
 internal/jobs/         持久化任务队列与 worker
@@ -133,7 +133,7 @@ web/                   Web 控制台（M6）
 - 用户首次通过 GitLab OAuth 登录后建立本地 `users` 行；`auth.bootstrap_admins` 只决定平台管理角色。项目业务数据的读取和写入由本地 `project_grants` 的 `read` / `manage` 决定，默认无权限，平台管理员也不例外。
 - 平台管理员可以管理用户、项目授权和系统配置；读取项目、评审、工作区、统计、SSE 或项目扩展仍需该项目 grant。无 grant 或项目不存在统一返回 404，只有 `read` 时执行写操作返回 403。
 - `auth.bootstrap_token_env` 指向的静态 Bearer 只用于平台管理面，没有本地用户 ID 和 grant，不接受项目业务路由。它的轮换由部署方更新环境变量并重启完成。
-- 用户被本地停用后不能登录、使用已有会话/API token 或获得新凭据；撤销凭据与停用都是本地控制。GitLab 组成员关系变化不会自动同步到 CRC，退组后仍需删除 grant 或停用本地用户。
+- 用户被本地停用后不能登录、使用已有会话/API token 或获得新凭据；撤销凭据与停用都是本地控制。GitLab 组成员关系变化不会自动同步到 Tribunal，退组后仍需删除 grant 或停用本地用户。
 
 ### 4.2 触发
 
@@ -448,13 +448,15 @@ data/workspaces/<project_id>/
 {
   "mcpServers": {
     "codebase-memory": {
-      "command": "/usr/local/bin/crc-codebase-memory-mcp",
+      "command": "/usr/local/bin/tribunal-codebase-memory-mcp",
       "args": ["--tool-profile=analysis", "--ui=false"],
       "env": {}
     }
   }
 }
 ```
+
+示例路径使用 `tribunal-codebase-memory-mcp`。主机安装的 wrapper 必须改用该名称，或提供一个指向旧名 `crc-codebase-memory-mcp` 的兼容符号链接；只改配置不改主机文件会导致 MCP 启动失败。完整要求见 [MCP 配置](docs/design/06-config.md#2-mcp-配置文件)。
 
 ### 8.4 codebase-memory-mcp 接入要点
 

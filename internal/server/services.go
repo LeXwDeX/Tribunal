@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
 // Store is the read surface of the persistence layer used by the M6 admin

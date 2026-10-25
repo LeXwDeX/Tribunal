@@ -1,13 +1,13 @@
 # 交付就绪、升级/回退与真实验收记录
 
-> 状态：已验证运行时候选的执行记录与剩余回读项，不是最终验收或发布声明。交付证据以 [PR #30](https://github.com/LeXwDeX/Code-Review-For-Gitlab-CE/pull/30) 为主；完整日志与原始响应由主任务在 PR 中维护。本文不复制完整日志，也不把测试实例结果扩大为生产验收。
+> 状态：已验证运行时候选的执行记录与剩余回读项，不是最终验收或发布声明。交付证据以 [PR #30](https://github.com/LeXwDeX/Tribunal/pull/30) 为主；完整日志与原始响应由主任务在 PR 中维护。本文不复制完整日志，也不把测试实例结果扩大为生产验收。
 
 ## 当前结论
 
 - 目标：v1 M0–M6，对应 PR #30。
 - 已验证运行时候选/源码快照 `f143e7a7835e1e99345b1df9b289bb499e3c67416598d30e6184a558374eb0ac`（402 文件）的检查通过：`go build ./...`、`go vet ./...`、`go test -race -count=1 ./...`；语句覆盖率 77.09%（17665/22916）；`go mod verify`、65 个模块的 `licensecheck`、许可证 bundle `-check`；Web 27 个测试文件、160 个测试及 `npm run build`；Responses race 20 次通过，`dist` 未变。旧 `27c9b1c`（77.11%）仅历史，不作为当前结果。
 - 旧快照的本地 review ACCEPT 不覆盖新的 Responses header。较早的独立代码评审未发现 code blocker，但因缺少 f143 运行时 manifest 与 `12a62d1` 文档 manifest/source-equivalence 而记为 evidence BLOCKING；该缺口已关闭。最终独立 review（`ses_fe5e8e8d28a2Mm41JlrHzyCxwp`）对 `12a62d1` 文档树给出 code/documentation PASS、0 blockers；之后的文档澄清只关联 PR #30，不构成新的 review，也不代表 native CI 已完成。
-- 最终 commit、CI、平台评审和 Release 回读以 [PR #30](https://github.com/LeXwDeX/Code-Review-For-Gitlab-CE/pull/30) 为准；本文不固化会随提交变化的状态。
+- 最终 commit、CI、平台评审和 Release 回读以 [PR #30](https://github.com/LeXwDeX/Tribunal/pull/30) 为准；本文不固化会随提交变化的状态。
 - 已验证快照的隔离测试实例结果见下节，覆盖 OAuth/项目授权、CSRF、跨项目隔离、升级会话、webhook 归属、GitLab 发布和迁移恢复。
 - 连续两次实际无诊断代理 full deep 均为 0 call errors、0 failed nodes；MCP 成功/调用分别为 10/10 和 10/11（第二次一次模型工具错误已纠正），不能声称所有工具调用成功。两次均 BLOCKING/published；BLOCKING 是合成授权回归的预期结论，不是验收失败。实际镜像、离线恢复和在线替换均 PASS。
 - 范围外与 UI 限制见下节；这些项不作为本次 v1 发布门槛。
@@ -75,6 +75,8 @@
 
 升级前必须同时满足：旧镜像可用、备份完整且已校验、主密钥可用、入口已隔离、目标机资源足够。任一不满足即停止，不进入迁移。
 
+Tribunal 升级注意：镜像 tag 改为 `tribunal:*`；CLI 使用 `/app/tribunalctl`，旧 `/app/reviewctl` 兼容符号链接仍保留。环境变量主名 `TRIBUNAL_SESSION_KEY`、`TRIBUNAL_PUBLIC_URL`、`TRIBUNAL_HTTP_PORT` 优先，旧 `CRC_*` 名仍兼容。复用原 session key 的同一个值，不要重新生成。
+
 ## 入口隔离与备份
 
 1. 暂停 GitLab webhook 或按项目禁用 hook，阻止人工触发、定时触发和 API 触发；如不能暂停，先在反向代理阻断 webhook 入口并记录 GitLab 侧可能的重试。
@@ -103,8 +105,8 @@
 先用管理员凭据列出本地用户和全部已登记项目，结合人工批准矩阵确定“本地用户 ID × 项目 ID × read/manage”：
 
 ```bash
-docker compose exec -T review /app/reviewctl users list
-docker compose exec -T review /app/reviewctl projects all
+docker compose exec -T review /app/tribunalctl users list
+docker compose exec -T review /app/tribunalctl projects all
 ```
 
 - `users list` 与 `projects all` 会自动跟随 `next_cursor` 汇总全部页。
@@ -115,10 +117,10 @@ docker compose exec -T review /app/reviewctl projects all
 本地用户 ID 即 GitLab user id；项目 ID 使用 `projects all` 返回的数字 ID。只通过管理面授权，不直接写 SQL。以下是四个独立用法示例，不要顺序执行；按批准矩阵选择一次操作，示例 ID 不代表真实授权对象。
 
 ```bash
-docker compose exec -T review /app/reviewctl projects grants list 42
-docker compose exec -T review /app/reviewctl projects grants set 42 17 read
-docker compose exec -T review /app/reviewctl projects grants set 42 17 manage
-docker compose exec -T review /app/reviewctl projects grants delete 42 17
+docker compose exec -T review /app/tribunalctl projects grants list 42
+docker compose exec -T review /app/tribunalctl projects grants set 42 17 read
+docker compose exec -T review /app/tribunalctl projects grants set 42 17 manage
+docker compose exec -T review /app/tribunalctl projects grants delete 42 17
 ```
 
 - `projects grants list <项目 ID>` 只请求单页，默认 50 条、上限 200 条，CLI 不会自动翻页；超过 50 条时用管理 API 的 `GET /api/v1/admin/projects/{id}/grants?cursor=...` 继续读取。
@@ -200,7 +202,7 @@ docker compose exec -T review /app/reviewctl projects grants delete 42 17
 
 ### 归档
 
-- 交付证据以 [PR #30](https://github.com/LeXwDeX/Code-Review-For-Gitlab-CE/pull/30) 为主；不复制整套 Issue ledger。
+- 交付证据以 [PR #30](https://github.com/LeXwDeX/Tribunal/pull/30) 为主；不复制整套 Issue ledger。
 - 本地证据目录中的 `run-state.md` 是执行日志，不是验收或发布证明；更早目录可能属于历史候选。归档更新由主 agent 负责。不得把真实密钥、token、数据库副本或含真实凭据的日志放入仓库。
 - 运行时快照 manifest 保留在 `artifacts/delivery/2026-10-25-v1-final/candidate-f143e7a/candidate-f143e7a-manifest.json`；f143 截图与 DOM 记录（`isolation-ui-admin-1440.png`、`isolation-ui-viewer-390.png`、`isolation-ui-viewer-390.json`）和 GitLab 回读 `final-gitlab-before.json` 将归档到同目录，不含真实凭据。
 - 已评审文档快照位于 `artifacts/delivery/2026-10-25-v1-final/candidate-12a62d1/candidate-12a62d1-manifest.json`，同目录 `source-equivalence.json` 记录它相对 f143 只有 6 个 Markdown 文档不同、运行时输入未变。最终交付 manifest 和 commit 由主任务在 PR #30 维护，本文不嵌入会随本次修改变化的自引用指纹。

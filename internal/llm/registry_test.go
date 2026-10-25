@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/config"
 )
 
 const chatOK = `{"id":"x","object":"chat.completion","created":1,"model":"test","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`

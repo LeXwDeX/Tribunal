@@ -5,7 +5,7 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
 // AccessStore is the project authorization and account-administration surface.

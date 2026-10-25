@@ -12,16 +12,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/config"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/jobs"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/mcp"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/repo"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/review"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/secret"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/workspace"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/pkg/dag"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/prompts"
+	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/jobs"
+	"github.com/LeXwDeX/tribunal/internal/mcp"
+	"github.com/LeXwDeX/tribunal/internal/repo"
+	"github.com/LeXwDeX/tribunal/internal/review"
+	"github.com/LeXwDeX/tribunal/internal/secret"
+	"github.com/LeXwDeX/tribunal/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/workspace"
+	"github.com/LeXwDeX/tribunal/pkg/dag"
+	"github.com/LeXwDeX/tribunal/prompts"
 )
 
 // MCPFactory builds the MCP manager for one project workspace. A nil factory

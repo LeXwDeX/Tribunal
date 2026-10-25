@@ -9,9 +9,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/agent"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/llm"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/pkg/dag"
+	"github.com/LeXwDeX/tribunal/internal/agent"
+	"github.com/LeXwDeX/tribunal/internal/llm"
+	"github.com/LeXwDeX/tribunal/pkg/dag"
 )
 
 // runReviewWorkflow drives a full review graph with the deterministic review

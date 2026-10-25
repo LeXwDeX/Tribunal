@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
 func TestListFindingsFiltersByEffectiveSeverity(t *testing.T) {

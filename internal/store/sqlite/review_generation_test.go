@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
 // A queued review job keeps its ID when a newer push replaces its payload. The

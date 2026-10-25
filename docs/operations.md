@@ -1,6 +1,6 @@
 # 部署与运维（Docker / SQLite）
 
-本文对应 ARCH14：内嵌控制台的服务镜像、镜像内 `git` 与管理 CLI、许可证文件、SQLite 单实例、非 root 用户和可写数据目录。已验证运行时候选/源码快照 `f143e7a7835e1e99345b1df9b289bb499e3c67416598d30e6184a558374eb0ac`（402 文件）已构建实际镜像、通过配置检查，并完成离线恢复/在线替换和连续两次无诊断代理 deep。最终 commit/CI/Release 事实以 [PR #30](https://github.com/LeXwDeX/Code-Review-For-Gitlab-CE/pull/30) 为准；旧 `27c9b1c` 仅历史。详见[验证状态](#10-验证状态)。
+本文对应 ARCH14：内嵌控制台的服务镜像、镜像内 `git` 与管理 CLI、许可证文件、SQLite 单实例、非 root 用户和可写数据目录。已验证运行时候选/源码快照 `f143e7a7835e1e99345b1df9b289bb499e3c67416598d30e6184a558374eb0ac`（402 文件）已构建实际镜像、通过配置检查，并完成离线恢复/在线替换和连续两次无诊断代理 deep。最终 commit/CI/Release 事实以 [PR #30](https://github.com/LeXwDeX/Tribunal/pull/30) 为准；旧 `27c9b1c` 仅历史。详见[验证状态](#10-验证状态)。
 
 交付前准备、升级/回退边界与真实验收记录见 [交付就绪与验收记录](delivery-readiness.md)。
 
@@ -27,9 +27,11 @@ chmod 600 .env
 | `LLM_MODEL` / `LLM_API_KEY` | 供应方实际支持的模型 ID 和访问密钥 |
 | `REVIEW_MASTER_KEY` | `openssl rand -base64 32`，仅首次生成，必须连同数据备份 |
 | `REVIEW_ADMIN_TOKEN` | `openssl rand -hex 32`，管理 API 的 Bearer token |
-| `CRC_SESSION_KEY` | 单独执行 `openssl rand -base64 32`，跨重启保持不变 |
-| `CRC_PUBLIC_URL` | 用户和 GitLab 可访问的服务地址；生产应为 HTTPS，默认仅供本机使用 |
-| `CRC_HTTP_PORT` | 宿主机端口，默认 8080；容器始终监听 8080。改变它时检查 `CRC_PUBLIC_URL` 是否也需修改 |
+| `TRIBUNAL_SESSION_KEY` | 单独执行 `openssl rand -base64 32`，跨重启保持不变 |
+| `TRIBUNAL_PUBLIC_URL` | 用户和 GitLab 可访问的服务地址；生产应为 HTTPS，默认仅供本机使用 |
+| `TRIBUNAL_HTTP_PORT` | 宿主机端口，默认 8080；容器始终监听 8080。改变它时检查 `TRIBUNAL_PUBLIC_URL` 是否也需修改 |
+
+旧环境变量名 `CRC_SESSION_KEY`、`CRC_PUBLIC_URL`、`CRC_HTTP_PORT` 仍兼容；新旧同时设置时新名优先。三个旧名只要配置了非空值，都会各记录一次弃用日志；即使新名已覆盖，日志仍提示旧名处于已配置状态，不代表旧值生效，且只含变量名、不含值。新名值非法时启动失败，不回退旧值。完整兼容规则见[环境变量](design/06-config.md#5-环境变量)。升级时必须复用原 session key 的同一个值，不要重新生成，否则现有浏览器会话失效。
 
 `.env` 值包含 `$` 或 `#` 时使用单引号。不要把真实密钥写进 YAML、提交到仓库或放进 Docker build args。Compose 从 `.env` 做变量替换，再通过 `environment` 允许列表传入容器，不会把整个 `.env` 挂载或注入。宿主机已导出的同名变量优先于 `.env`；部署前检查是否有旧值，但不要把秘密输出到日志。环境变量仍对 Docker 管理员可见。
 
@@ -44,7 +46,7 @@ docker compose run --rm --no-deps review --config /app/config/server.yaml --chec
 docker compose up -d --wait --wait-timeout 120
 docker compose ps
 docker compose logs --tail=100 review
-docker compose exec -T review /app/reviewctl projects all
+docker compose exec -T review /app/tribunalctl projects all
 ```
 
 `config --quiet` 检查 Compose 结构和必填变量，避免普通 `config` 将展开后的秘密打印到终端。`--check-config` 检查应用配置，但不验证外部凭据、完整运行时或网络连接。`up --wait` 还会等待镜像中的 `/readyz` 健康检查；就绪只证明数据库与 worker 可用，不证明模型或 GitLab 可用。
@@ -55,25 +57,25 @@ docker compose exec -T review /app/reviewctl projects all
 
 OAuth 默认关闭，访问 `/auth/login` 得到 503 是预期行为，Bearer API 和 CLI 仍可使用。启用控制台登录时：
 
-1. 在 GitLab 创建 OAuth Application，scope 为 `read_user`，回调 URI 为 `<CRC_PUBLIC_URL>/auth/callback`。
+1. 在 GitLab 创建 OAuth Application，scope 为 `read_user`，回调 URI 为 `<TRIBUNAL_PUBLIC_URL>/auth/callback`。
 2. 在 `.env` 设置 `GITLAB_OAUTH_CLIENT_ID`、`GITLAB_OAUTH_CLIENT_SECRET` 和 `GITLAB_ADMIN_USERNAME`。管理员值填写 GitLab 用户名；留空不会给任何正常账号平台管理员标签。该标签只用于平台管理面，不授予项目业务数据访问，项目授权见下文。
-3. 在 `config/server.docker.yaml` 取消 `oauth` 及两个子字段、`bootstrap_admins` 的注释。设置正确的 HTTPS `CRC_PUBLIC_URL`，配置反向代理，再执行 `docker compose up -d --force-recreate --wait --wait-timeout 120`。
+3. 在 `config/server.docker.yaml` 取消 `oauth` 及两个子字段、`bootstrap_admins` 的注释。设置正确的 HTTPS `TRIBUNAL_PUBLIC_URL`，配置反向代理，再执行 `docker compose up -d --force-recreate --wait --wait-timeout 120`。
 
 模型密钥不是 GitLab 项目 token。注册项目需要单独的 `GITLAB_PROJECT_TOKEN`，由安全环境注入当前 shell，scope 为 `api` 和 `read_repository`。该变量不放进长期运行服务的 `.env`，仅传给这次 CLI 进程：
 
 ```bash
-docker compose exec -T -e GITLAB_PROJECT_TOKEN review /app/reviewctl projects register \
+docker compose exec -T -e GITLAB_PROJECT_TOKEN review /app/tribunalctl projects register \
   --project group/backend-api \
   --token-env GITLAB_PROJECT_TOKEN \
   --profile default
-docker compose exec -T review /app/reviewctl projects all
+docker compose exec -T review /app/tribunalctl projects all
 ```
 
-注册会访问真实 GitLab 并创建后台 onboarding 任务，可能产生模型费用。默认需要手工创建 webhook，注册返回的 `webhook_secret` 只显示一次，请安全保管。要自动创建，增加 `--auto-webhook`，项目 token 还需 Maintainer 权限，`CRC_PUBLIC_URL` 必须可由 GitLab 访问。完整权限与 webhook 事件见 [README 注册项目](../README.md#注册项目)。
+注册会访问真实 GitLab 并创建后台 onboarding 任务，可能产生模型费用。默认需要手工创建 webhook，注册返回的 `webhook_secret` 只显示一次，请安全保管。要自动创建，增加 `--auto-webhook`，项目 token 还需 Maintainer 权限，`TRIBUNAL_PUBLIC_URL` 必须可由 GitLab 访问。完整权限与 webhook 事件见 [README 注册项目](../README.md#注册项目)。
 
 ### 项目授权、用户停用和凭据撤销
 
-项目访问是 CRC 本地的 `project_grants`，不从 GitLab 组成员关系推导。`bootstrap_admins` 只决定平台管理标签；平台管理员读取或写入项目业务数据同样需要该项目授权。默认没有任何授权，`admin` 标签也不例外。无授权或项目不存在统一返回 404，只有 `read` 授权执行写操作返回 403。
+项目访问是 Tribunal 本地的 `project_grants`，不从 GitLab 组成员关系推导。`bootstrap_admins` 只决定平台管理标签；平台管理员读取或写入项目业务数据同样需要该项目授权。默认没有任何授权，`admin` 标签也不例外。无授权或项目不存在统一返回 404，只有 `read` 授权执行写操作返回 403。
 
 **迁移已有部署并首次授权**
 
@@ -83,25 +85,25 @@ docker compose exec -T review /app/reviewctl projects all
 2. 用平台管理员 Bearer token 列出本地用户和全部已登记项目：
 
    ```bash
-   docker compose exec -T review /app/reviewctl users list
-   docker compose exec -T review /app/reviewctl projects all
+   docker compose exec -T review /app/tribunalctl users list
+   docker compose exec -T review /app/tribunalctl projects all
    ```
 
    `projects list` 按 bearer 所属用户的项目授权过滤；bootstrap token 没有用户 ID 和 grant，通常返回空列表，不能用它确认“没有项目”。`projects all` 和 `users list` 是管理面列表，需要平台管理员凭据。
 3. 授予只读或管理权限，并核对结果：
 
    ```bash
-   docker compose exec -T review /app/reviewctl projects grants list 42
-   docker compose exec -T review /app/reviewctl projects grants set 42 17 read
-   docker compose exec -T review /app/reviewctl projects grants set 42 17 manage
-   docker compose exec -T review /app/reviewctl projects grants delete 42 17
+   docker compose exec -T review /app/tribunalctl projects grants list 42
+   docker compose exec -T review /app/tribunalctl projects grants set 42 17 read
+   docker compose exec -T review /app/tribunalctl projects grants set 42 17 manage
+   docker compose exec -T review /app/tribunalctl projects grants delete 42 17
    ```
 
    参数依次是项目 ID、GitLab 用户 ID 和角色。`read` 可读取项目、评审、工作区、统计、SSE 和项目扩展；`manage` 还可修改项目设置、触发/取消评审、重新发布、人工标注、刷新工作区、轮换项目 Key 和重建 webhook。项目级 MCP/Skill/块绑定属于宿主执行配置，写入还需平台管理员标签，`manage` 本身不授予平台配置能力。
 4. 让用户用自己的 API token 验证业务列表：
 
    ```bash
-   docker compose exec -T -e USER_TOKEN review /app/reviewctl \
+   docker compose exec -T -e USER_TOKEN review /app/tribunalctl \
      --api-token-env USER_TOKEN projects list
    ```
 
@@ -109,7 +111,7 @@ docker compose exec -T review /app/reviewctl projects all
 
 **GitLab 退组、停用和撤销**
 
-- 从 GitLab 组移除用户不会自动撤销 CRC 授权。CRC 不轮询组成员关系；本地 grant、会话和 API token 仍然有效，GitLab 账号未禁用时还可能重新 OAuth 登录。退组后必须显式处理：删除项目 grant（保留其他项目访问）或停用本地用户（撤销全部访问）。
+- 从 GitLab 组移除用户不会自动撤销 Tribunal 授权。Tribunal 不轮询组成员关系；本地 grant、会话和 API token 仍然有效，GitLab 账号未禁用时还可能重新 OAuth 登录。退组后必须显式处理：删除项目 grant（保留其他项目访问）或停用本地用户（撤销全部访问）。
 - `users disable <id>` 在一个事务中标记账号 disabled 并删除该用户的全部会话和 API token；之后的 OAuth 登录、token 签发和已有凭据认证都会被拒绝，已打开的 SSE 在下一次轮询关闭。
 - `users revoke <id>` 只撤销会话和 API token，不禁用账号；用户重新 OAuth 登录后可以继续使用已有项目 grant。需要阻止重新登录时使用 `users disable`。
 - `users enable <id>` 恢复登录，但不会恢复已撤销的会话或 token。恢复后需重新登录并重新创建 token；项目 grant 不受停用影响。
@@ -117,7 +119,7 @@ docker compose exec -T review /app/reviewctl projects all
 
 **bootstrap 凭据轮换**
 
-`REVIEW_ADMIN_TOKEN` 由部署方生成、保存和轮换，CRC 不提供在线轮换 API。修改 `.env` 或 secret 注入后执行 `docker compose up -d --force-recreate --wait --wait-timeout 120`，重启后旧 token 立即失效；不要用数据库操作或用户 grant 替代这次轮换。`bootstrap_admins` 是 GitLab 用户名列表，修改后同样需要重启服务，不会创建 GitLab 账号，也不等于项目授权。
+`REVIEW_ADMIN_TOKEN` 由部署方生成、保存和轮换，Tribunal 不提供在线轮换 API。修改 `.env` 或 secret 注入后执行 `docker compose up -d --force-recreate --wait --wait-timeout 120`，重启后旧 token 立即失效；不要用数据库操作或用户 grant 替代这次轮换。`bootstrap_admins` 是 GitLab 用户名列表，修改后同样需要重启服务，不会创建 GitLab 账号，也不等于项目授权。
 
 ### 停止、修改和备份
 
@@ -127,11 +129,11 @@ docker compose start review
 docker compose down
 ```
 
-`down` 保留命名卷；**不要执行 `down -v`**，它会删除数据库和工作区。默认项目名为 `crc-review`，数据卷为 `crc-review_data`；若用 `-p` 更换项目名，也会使用另一数据卷。不要同时启动多个实例共享同一卷。
+`down` 保留命名卷；**不要执行 `down -v`**，它会删除数据库和工作区。默认项目名仍为 `crc-review`，数据卷仍为 `crc-review_data`；这是刻意保留的兼容身份，改名会创建新卷并让现有数据不可见。若用 `-p` 更换项目名，也会使用另一数据卷。不要同时启动多个实例共享同一卷。
 
 修改 `.env` 或配置后使用 `docker compose up -d --force-recreate --wait --wait-timeout 120`。`restart` 不会加载新的容器环境变量。升级程序需重新构建镜像，并按第 8 节先备份；不支持只回退镜像却保留升级后的数据库。
 
-Compose 的停机一致性备份示例（先准备 `/srv/crc` 并限制备份访问）：
+Compose 的停机一致性备份示例（先准备 `/srv/crc` 并限制备份访问；该目录是部署方自有的兼容路径，不随产品改名迁移）：
 
 ```bash
 docker compose stop review
@@ -147,12 +149,14 @@ docker compose start review
 镜像分三阶段构建：
 
 1. `web`：执行 `npm ci` 和 `npm run build`，生成控制台 `web/dist`。
-2. `build`：先 `go mod download`，再构建 `cmd/server` 和 `cmd/reviewctl`；服务嵌入上一步的新 `web/dist`。
-3. `runtime`：包含 `/app/server`、`/app/reviewctl`、示例配置、许可证、CA 证书，以及 `curl`、`git` 和创建非 root 用户所需的 `passwd` 工具。
+2. `build`：先 `go mod download`，再构建 `cmd/server` 和 `cmd/tribunalctl`；服务嵌入上一步的新 `web/dist`。
+3. `runtime`：包含 `/app/server`、`/app/tribunalctl`、示例配置、许可证、CA 证书，以及 `curl`、`git` 和创建非 root 用户所需的 `passwd` 工具。
+
+镜像保留兼容符号链接 `/app/reviewctl`，指向 `/app/tribunalctl`；旧编排脚本可继续调用该旧路径。源码用户改用 `go run ./cmd/tribunalctl`。
 
 运行特征：
 
-- 以 UID/GID `10001:10001` 的非 root 用户运行，工作目录 `/app`。
+- 以 UID/GID `10001:10001` 的非 root 用户 `tribunal` 运行，家目录 `/home/tribunal`，工作目录 `/app`。
 - 持久化目录为 `/app/data`，声明为卷；SQLite 数据库、WAL/SHM 文件和项目工作区都在这里。
 - 默认监听 `8080`，容器内为 HTTP；TLS 由反向代理终止。
 - 镜像不包含 `.git`、`node_modules`、本地 `data`、真实 `config/server.yaml`、`.env`、证书或私钥。
@@ -176,7 +180,7 @@ docker compose start review
 在仓库根目录、且 `docker` 命令和容器运行时可用时执行：
 
 ```bash
-docker build -t crc-review:local .
+docker build -t tribunal:local .
 ```
 
 构建需要网络拉取基础镜像、Debian 包、Go 模块和 npm 依赖。`web/dist` 即使在本地已存在也会被 `.dockerignore` 排除；镜像内始终由 `web` 阶段重新构建，然后复制给 Go 阶段。
@@ -195,41 +199,43 @@ docker build -t crc-review:local .
 docker volume create crc-data
 ```
 
+卷名 `crc-data` 是刻意保留的兼容名称；继续使用同名卷才能复用已有数据库。产品改名不迁移该卷。
+
 秘密从部署环境注入，不要写进镜像、Compose 文件或命令历史：
 
 ```bash
 export REVIEW_MASTER_KEY="$(openssl rand -base64 32)"
 export REVIEW_ADMIN_TOKEN="$(openssl rand -hex 32)"
-export CRC_SESSION_KEY="$(openssl rand -base64 32)"
+export TRIBUNAL_SESSION_KEY="$(openssl rand -base64 32)"
 ```
 
 启动容器：
 
 ```bash
-docker run -d --name crc-review \
+docker run -d --name tribunal \
   --restart unless-stopped \
   -p 127.0.0.1:8080:8080 \
   -e REVIEW_MASTER_KEY \
   -e REVIEW_ADMIN_TOKEN \
-  -e CRC_SESSION_KEY \
+  -e TRIBUNAL_SESSION_KEY \
   -v crc-data:/app/data \
   -v /srv/crc/server.yaml:/app/config/server.yaml:ro \
-  crc-review:local --config /app/config/server.yaml
+  tribunal:local --config /app/config/server.yaml
 ```
 
 检查：
 
 ```bash
-docker logs crc-review
+docker logs tribunal
 curl -fsS http://127.0.0.1:8080/healthz
 curl -fsS http://127.0.0.1:8080/readyz
-docker inspect --format '{{.State.Health.Status}}' crc-review
+docker inspect --format '{{.State.Health.Status}}' tribunal
 ```
 
 注意：
 
 - 必须覆盖默认 `--config`。镜像内的 `server.example.yaml` 只用于烟测，不是生产配置，也没有 `providers` 和 `propose`，不能执行真实评审。
-- 启用模型 provider 时，还要传入配置中 `api_key_env` 指定的变量，例如 `-e LLM_API_KEY`。复用 `server.docker.yaml` 时还需 `-e CRC_PUBLIC_URL -e GITLAB_URL -e LLM_PROTOCOL -e LLM_BASE_URL -e LLM_MODEL`；这些值都需先在宿主机环境中设置。不要仅传入三个平台秘密就把它当作完整评审部署。
+- 启用模型 provider 时，还要传入配置中 `api_key_env` 指定的变量，例如 `-e LLM_API_KEY`。复用 `server.docker.yaml` 时还需 `-e TRIBUNAL_PUBLIC_URL -e GITLAB_URL -e LLM_PROTOCOL -e LLM_BASE_URL -e LLM_MODEL`；这些值都需先在宿主机环境中设置。不要仅传入三个平台秘密就把它当作完整评审部署。
 - 必须挂载 `/app/data`。删除卷会丢失数据库，并且已保存的项目凭据无法恢复。
 - 命名卷为空时会继承镜像内 `/app/data` 的属主 `10001:10001`。绑定挂载宿主机目录时，先修正属主：
   ```bash
@@ -245,18 +251,18 @@ docker inspect --format '{{.State.Health.Status}}' crc-review
 |---|---|---|
 | `REVIEW_MASTER_KEY` | base64，解码后恰好 32 字节 | 用于解密已保存的项目令牌和 webhook secret。丢失后旧凭据无法解密，需要恢复旧 key 或重新登记项目。 |
 | `REVIEW_ADMIN_TOKEN` | 至少 32 字节 | 平台管理面的 bootstrap Bearer 令牌，不授予项目业务数据访问。轮换由部署方更新环境变量并重启；重启后旧客户端立即失效。 |
-| `CRC_SESSION_KEY` | base64，解码后至少 32 字节 | 用于签名会话 cookie、OAuth state，并派生 CSRF token。浏览器会话持久化在 SQLite；固定该值时可跨重启继续使用未过期会话。未设置时每进程随机生成并输出告警，重启后旧 cookie 失效。轮换该值会让所有现有浏览器会话失效。 |
+| `TRIBUNAL_SESSION_KEY` | base64，解码后至少 32 字节 | 用于签名会话 cookie、OAuth state，并派生 CSRF token。浏览器会话持久化在 SQLite；固定该值时可跨重启继续使用未过期会话。未设置时每进程随机生成并输出告警，重启后旧 cookie 失效。轮换该值会让所有现有浏览器会话失效。 |
 
 生成示例：
 
 ```bash
-openssl rand -base64 32   # REVIEW_MASTER_KEY / CRC_SESSION_KEY
+openssl rand -base64 32   # REVIEW_MASTER_KEY / TRIBUNAL_SESSION_KEY
 openssl rand -hex 32      # REVIEW_ADMIN_TOKEN
 ```
 
 `secrets.master_key_env` 和 `auth.bootstrap_token_env` 可以改名；改名后实际环境变量也要对应修改。
 
-`REVIEW_MASTER_KEY` 必须跨升级、重启和回滚保持不变。备份数据库时同时备份该 key；只有数据库而没有 key 无法解密项目凭据。`CRC_SESSION_KEY` 也应持久化；固定 key 且复用同一 SQLite 数据卷时，重启后浏览器会话仍可继续使用。
+`REVIEW_MASTER_KEY` 必须跨升级、重启和回滚保持不变。备份数据库时同时备份该 key；只有数据库而没有 key 无法解密项目凭据。`TRIBUNAL_SESSION_KEY` 也应持久化；固定 key 且复用同一 SQLite 数据卷时，重启后浏览器会话仍可继续使用。
 
 ## 5. OAuth（可选）
 
@@ -292,17 +298,17 @@ export GITLAB_OAUTH_CLIENT_SECRET="..."
 宿主机导出的变量不会自动进入容器。启用 OAuth 时，`docker run` 必须增加 `-e GITLAB_OAUTH_CLIENT_ID -e GITLAB_OAUTH_CLIENT_SECRET`，否则容器看不到这两个变量，配置校验会失败。使用不带值的 `-e NAME` 时，Docker 从当前 shell 取值。
 
 ```bash
-docker run -d --name crc-review \
+docker run -d --name tribunal \
   --restart unless-stopped \
   -p 127.0.0.1:8080:8080 \
   -e REVIEW_MASTER_KEY \
   -e REVIEW_ADMIN_TOKEN \
-  -e CRC_SESSION_KEY \
+  -e TRIBUNAL_SESSION_KEY \
   -e GITLAB_OAUTH_CLIENT_ID \
   -e GITLAB_OAUTH_CLIENT_SECRET \
   -v crc-data:/app/data \
   -v /srv/crc/server.yaml:/app/config/server.yaml:ro \
-  crc-review:local --config /app/config/server.yaml
+  tribunal:local --config /app/config/server.yaml
 ```
 
 说明：
@@ -342,7 +348,7 @@ location / {
 - 若使用 OAuth，`server.public_url` 必须是 HTTPS；应用据此设置安全 Cookie。
 - 只将 `8080` 绑定到本机或内网，由反向代理暴露 HTTPS。不要把明文管理接口直接暴露到公网。
 - `/healthz` 不检查数据库，适合存活探测；`/readyz` 才适合就绪探测和流量接入。
-- 镜像的 `HEALTHCHECK` 固定请求 `127.0.0.1:8080`。推荐保持容器监听 8080，仅通过 `CRC_HTTP_PORT` 修改宿主机映射。自定义容器内监听端口时，`docker run` 用 `--health-cmd` 覆盖；Compose 则需同步修改服务的 `healthcheck.test`、`ports` 和应用 `server.listen`，不能把 `--health-cmd` 直接传给 Compose。
+- 镜像的 `HEALTHCHECK` 固定请求 `127.0.0.1:8080`。推荐保持容器监听 8080，仅通过 `TRIBUNAL_HTTP_PORT` 修改宿主机映射。自定义容器内监听端口时，`docker run` 用 `--health-cmd` 覆盖；Compose 则需同步修改服务的 `healthcheck.test`、`ports` 和应用 `server.listen`，不能把 `--health-cmd` 直接传给 Compose。
 
 ## 7. SQLite 一致性备份与恢复
 
@@ -351,10 +357,10 @@ location / {
 备份：
 
 ```bash
-docker stop crc-review
+docker stop tribunal
 BACKUP_DIR="$(mktemp -d /srv/crc/backup-XXXXXXXX)"
-docker cp crc-review:/app/data/. "$BACKUP_DIR/"
-docker start crc-review
+docker cp tribunal:/app/data/. "$BACKUP_DIR/"
+docker start tribunal
 ```
 
 目录中至少包含：
@@ -369,25 +375,25 @@ docker start crc-review
 恢复到新建的空卷，不把备份覆盖到旧数据目录。`docker cp` 和 `cp` 都会合并目录；旧 WAL 或工作区文件若残留，可能与备份不匹配。保留旧容器和旧卷，直到新容器验收通过。
 
 ```bash
-docker stop crc-review
+docker stop tribunal
 RESTORE_VOLUME="$(docker volume create)"
 docker run --rm --user 0 --entrypoint sh \
   -v "$BACKUP_DIR:/backup:ro" \
   -v "$RESTORE_VOLUME:/restore" \
-  crc-review:local -c 'cp -a /backup/. /restore/ && chown -R 10001:10001 /restore'
-docker run -d --name crc-review-restored \
+  tribunal:local -c 'cp -a /backup/. /restore/ && chown -R 10001:10001 /restore'
+docker run -d --name tribunal-restored \
   --restart unless-stopped \
   -p 127.0.0.1:8080:8080 \
-  -e REVIEW_MASTER_KEY -e REVIEW_ADMIN_TOKEN -e CRC_SESSION_KEY \
+  -e REVIEW_MASTER_KEY -e REVIEW_ADMIN_TOKEN -e TRIBUNAL_SESSION_KEY \
   -v "$RESTORE_VOLUME:/app/data" \
   -v /srv/crc/server.yaml:/app/config/server.yaml:ro \
-  crc-review:local --config /app/config/server.yaml
+  tribunal:local --config /app/config/server.yaml
 ```
 
 恢复后检查：
 
 ```bash
-docker logs crc-review-restored
+docker logs tribunal-restored
 curl -fsS http://127.0.0.1:8080/readyz
 ```
 
@@ -417,6 +423,9 @@ curl -fsS http://127.0.0.1:8080/readyz
 
 注意事项：
 
+- 镜像 tag 改为 `tribunal:*`；旧镜像的仓库名是 `crc-review`，升级时重新构建或改 tag。Compose 项目名 `crc-review`、旧数据卷 `crc-review_data` 和 `crc-data` 刻意不改名；继续挂载原卷即可保留数据。
+- 管理 CLI 改用 `tribunalctl`；旧镜像路径 `/app/reviewctl` 以兼容符号链接保留。源码用户改用 `go run ./cmd/tribunalctl`。
+- 环境变量主名改为 `TRIBUNAL_SESSION_KEY`、`TRIBUNAL_PUBLIC_URL`、`TRIBUNAL_HTTP_PORT`；旧 `CRC_*` 名仍兼容，新旧同时设置时新名优先。三个旧名只要配置了非空值，都会各记录一次弃用日志；即使新名已覆盖，日志仍提示旧名处于已配置状态，不代表旧值生效，且只含变量名、不含值。升级时复用原 session key 的同一个值，否则现有浏览器会话失效。
 - 旧二进制直接读取已被新版本迁移过的 schema 不受支持。仅回退镜像而不恢复数据快照，可能因列/表变化失败或产生错误数据。
 - 不要更换 `REVIEW_MASTER_KEY`，否则已保存的项目凭据无法解密。
 - 生产环境使用不可变 tag 或 digest，保留旧镜像以便回滚。
@@ -433,7 +442,7 @@ cd web
 npm ci
 npm run build
 cd ..
-go build -o /tmp/crc-server ./cmd/server
+go build -o /tmp/tribunal-server ./cmd/server
 ```
 
 准备临时配置和数据：
@@ -442,7 +451,7 @@ go build -o /tmp/crc-server ./cmd/server
 TMP="$(mktemp -d)"
 export REVIEW_MASTER_KEY="$(openssl rand -base64 32)"
 export REVIEW_ADMIN_TOKEN="$(openssl rand -hex 32)"
-export CRC_SESSION_KEY="$(openssl rand -base64 32)"
+export TRIBUNAL_SESSION_KEY="$(openssl rand -base64 32)"
 cat > "$TMP/override.yaml" <<EOF
 server:
   listen: "127.0.0.1:18080"
@@ -457,14 +466,14 @@ EOF
 校验示例配置合并后的结果（OAuth 未启用）：
 
 ```bash
-/tmp/crc-server --config config/server.example.yaml \
+/tmp/tribunal-server --config config/server.example.yaml \
   --config "$TMP/override.yaml" --check-config
 ```
 
 启动并检查：
 
 ```bash
-/tmp/crc-server --config config/server.example.yaml \
+/tmp/tribunal-server --config config/server.example.yaml \
   --config "$TMP/override.yaml" >"$TMP/server.log" 2>&1 &
 PID=$!
 for i in $(seq 1 50); do
@@ -508,7 +517,7 @@ storage:
 workspace:
   root: "$TMP_OAUTH/workspaces"
 EOF
-/tmp/crc-server --config config/server.example.yaml \
+/tmp/tribunal-server --config config/server.example.yaml \
   --config "$TMP_OAUTH/oauth.yaml" --check-config
 unset GITLAB_OAUTH_CLIENT_ID GITLAB_OAUTH_CLIENT_SECRET
 rm -rf "$TMP_OAUTH"
@@ -528,16 +537,16 @@ bash scripts/docker-smoke.sh
 
 ### Docker 可用时的单镜像烟测
 
-先构建 `crc-review:local`，然后检查镜像内容：
+先构建 `tribunal:local`，然后检查镜像内容：
 
 ```bash
-docker run --rm --entrypoint git crc-review:local --version
-docker run --rm --entrypoint id crc-review:local
-docker run --rm --entrypoint stat crc-review:local -c '%u:%g %a' /app/data
+docker run --rm --entrypoint git tribunal:local --version
+docker run --rm --entrypoint id tribunal:local
+docker run --rm --entrypoint stat tribunal:local -c '%u:%g %a' /app/data
 docker run --rm \
   -e REVIEW_MASTER_KEY="$(openssl rand -base64 32)" \
   -e REVIEW_ADMIN_TOKEN="$(openssl rand -hex 32)" \
-  crc-review:local --config /app/config/server.example.yaml --check-config
+  tribunal:local --config /app/config/server.example.yaml --check-config
 ```
 
 预期：`git version` 有输出，`id` 显示 uid 10001 和 gid 10001，`stat` 输出 `10001:10001 700`，`--check-config` 输出 `configuration OK`。
@@ -545,13 +554,13 @@ docker run --rm \
 启动一个临时容器，只验证启动、readiness 和 Bearer 接口；使用示例配置，不连接外部 GitLab：
 
 ```bash
-docker run -d --name crc-arch14-smoke \
+docker run -d --name tribunal-arch14-smoke \
   -p 127.0.0.1:18080:8080 \
   -e REVIEW_MASTER_KEY="$(openssl rand -base64 32)" \
   -e REVIEW_ADMIN_TOKEN="smoke-admin-token-0123456789abcdef" \
-  -e CRC_SESSION_KEY="$(openssl rand -base64 32)" \
-  -v crc-arch14-smoke-data:/app/data \
-  crc-review:local
+  -e TRIBUNAL_SESSION_KEY="$(openssl rand -base64 32)" \
+  -v tribunal-arch14-smoke-data:/app/data \
+  tribunal:local
 
 for i in $(seq 1 60); do
   if curl -fsS http://127.0.0.1:18080/readyz >/dev/null 2>&1; then break; fi
@@ -564,21 +573,21 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18080/auth/login
 curl -fsS -H 'Authorization: Bearer smoke-admin-token-0123456789abcdef' \
   http://127.0.0.1:18080/api/v1/projects
 
-docker rm -f crc-arch14-smoke
-docker volume rm crc-arch14-smoke-data
+docker rm -f tribunal-arch14-smoke
+docker volume rm tribunal-arch14-smoke-data
 ```
 
-清理只删除本次创建的 `crc-arch14-smoke` 容器和 `crc-arch14-smoke-data` 卷。不要删除其他容器或卷。该烟测不验证真实 GitLab、OAuth、webhook 或评审执行，不能当作集成验收。
+清理只删除本次创建的 `tribunal-arch14-smoke` 容器和 `tribunal-arch14-smoke-data` 卷。不要删除其他容器或卷。该烟测不验证真实 GitLab、OAuth、webhook 或评审执行，不能当作集成验收。
 
 ## 10. 验证状态
 
-完整的当前证据和原始响应由主任务在 [PR #30](https://github.com/LeXwDeX/Code-Review-For-Gitlab-CE/pull/30) 中维护，本节只保留运维相关摘要。
+完整的当前证据和原始响应由主任务在 [PR #30](https://github.com/LeXwDeX/Tribunal/pull/30) 中维护，本节只保留运维相关摘要。
 
 ### 已验证运行时候选/源码快照
 
 - `f143e7a7835e1e99345b1df9b289bb499e3c67416598d30e6184a558374eb0ac`（402 文件）的 Go/Web 检查通过：`go build ./...`、`go vet ./...`、`go test -race -count=1 ./...`；语句覆盖率 77.09%（17665/22916）；`go mod verify`、65 个模块的 `licensecheck`、许可证 bundle `-check`；Web 27 个测试文件、160 个测试及 `npm run build`；Responses race 20 次通过，`dist` 未变。
-- 实际镜像 `crc-v1-acceptance:candidate-f143e7a`（ID `sha256:1a20aa96065a24986990de94d0e2e6466df04a379ed2e6b50f076271ff52574e`）构建并通过配置检查；离线恢复和在线替换均 PASS。
-- 最终 commit、CI、平台评审和 Release 回读以 [PR #30](https://github.com/LeXwDeX/Code-Review-For-Gitlab-CE/pull/30) 为准。
+- 实际镜像 `crc-v1-acceptance:candidate-f143e7a`（ID `sha256:1a20aa96065a24986990de94d0e2e6466df04a379ed2e6b50f076271ff52574e`）构建并通过配置检查；离线恢复和在线替换均 PASS。该 tag 是历史验收标识，刻意保留。
+- 最终 commit、CI、平台评审和 Release 回读以 [PR #30](https://github.com/LeXwDeX/Tribunal/pull/30) 为准。
 
 ### 隔离实例结果
 

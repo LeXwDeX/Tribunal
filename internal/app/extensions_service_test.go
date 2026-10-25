@@ -17,10 +17,10 @@ import (
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/config"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/llm"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/mcp"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store/sqlite"
+	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/llm"
+	"github.com/LeXwDeX/tribunal/internal/mcp"
+	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
 )
 
 func newExtensionFixture(t *testing.T) (*ExtensionService, *sqlite.Store) {

@@ -321,7 +321,7 @@ CREATE TABLE sessions (
 );
 ```
 
-> 当前浏览器会话持久化在 `sessions` 表，沿用 `0001_init.sql`，没有新增迁移。cookie 保存随机 token 及其 HMAC 签名；数据库只保存 token 的 SHA-256。CSRF token 由会话 token 和 `CRC_SESSION_KEY` 按 HMAC 域派生，不单独存储。固定 `CRC_SESSION_KEY` 时，未过期会话在重启后仍可用；未设置时每个进程生成随机 key 并告警，重启后旧 cookie 失效。浏览器请求的 `admin`/`viewer` 标签每次按当前 `auth.bootstrap_admins` 计算；读取会话时要求 `users.disabled=0`。停用用户的 SSE 在下一轮授权检查时关闭。
+> 当前浏览器会话持久化在 `sessions` 表，沿用 `0001_init.sql`，没有新增迁移。cookie 保存随机 token 及其 HMAC 签名；数据库只保存 token 的 SHA-256。CSRF token 由会话 token 和 `TRIBUNAL_SESSION_KEY` 按 HMAC 域派生，不单独存储。固定 `TRIBUNAL_SESSION_KEY`（旧名 `CRC_SESSION_KEY` 仍兼容，新名优先）时，未过期会话在重启后仍可用；未设置时每个进程生成随机 key 并告警，重启后旧 cookie 失效。浏览器请求的 `admin`/`viewer` 标签每次按当前 `auth.bootstrap_admins` 计算；读取会话时要求 `users.disabled=0`。停用用户的 SSE 在下一轮授权检查时关闭。
 >
 > `project_grants` 是项目业务数据访问的唯一来源。默认没有行；平台管理员也不会自动获得 grant。`read` 可读取项目、评审、工作区、统计、SSE 和项目扩展，`manage` 还可执行项目写操作。无 grant 或项目不存在统一返回 404，`read` 执行写操作返回 403。删除 grant 会立即影响列表、详情、统计和已打开的 SSE；停用用户还会删除全部会话和 API token。
 

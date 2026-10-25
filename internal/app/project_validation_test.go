@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/gitlab"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/gitlab"
+	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
 type probeCall struct {

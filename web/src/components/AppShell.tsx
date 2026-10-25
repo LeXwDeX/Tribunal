@@ -25,7 +25,7 @@ function ThemeToggle() {
     const next = theme === 'dark' ? 'light' : 'dark'
     setTheme(next)
     document.documentElement.dataset.theme = next
-    try { localStorage.setItem('crc-theme', next) } catch { /* storage may be unavailable */ }
+    try { localStorage.setItem('tribunal-theme', next) } catch { /* storage may be unavailable */ }
   }
   return (
     <button
@@ -105,7 +105,7 @@ export function AppShell({ me }: { me: Me }) {
           <NavLink to="/" className={styles.brand} end>
             <BrandMark />
             <span className={styles.brandText}>
-              <span className={styles.brandName}>Code Review CE</span>
+              <span className={styles.brandName}>Tribunal</span>
               <span className={styles.brandSub}>评审平台</span>
             </span>
           </NavLink>
@@ -148,7 +148,7 @@ export function AppShell({ me }: { me: Me }) {
           <div className={styles.mobileBar}>
             <NavLink to="/" className={styles.mobileBrand} end>
               <BrandMark size={24} />
-              Code Review CE
+              Tribunal
             </NavLink>
             <button
               ref={menuButtonRef}

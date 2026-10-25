@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
 func prepareProject(t *testing.T, env *m6Env, projectID int64, baseSHA string) {

@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/app"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/config"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store/sqlite"
+	"github.com/LeXwDeX/tribunal/internal/app"
+	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
 )
 
 // adminFieldsStore adds controlled failures on top of the review fake. The

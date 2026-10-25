@@ -7,13 +7,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/agent"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/config"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/gitlab"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/review"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/pkg/dag"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/prompts"
+	"github.com/LeXwDeX/tribunal/internal/agent"
+	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/gitlab"
+	"github.com/LeXwDeX/tribunal/internal/review"
+	"github.com/LeXwDeX/tribunal/internal/store"
+	"github.com/LeXwDeX/tribunal/pkg/dag"
+	"github.com/LeXwDeX/tribunal/prompts"
 )
 
 const publicationSecret = "glpat-supersecret-value"

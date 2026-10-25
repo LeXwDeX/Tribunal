@@ -11,7 +11,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/pkg/dag"
+	"github.com/LeXwDeX/tribunal/pkg/dag"
 )
 
 // GatherOut is the code node output for gather.

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/agent"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/pkg/dag"
+	"github.com/LeXwDeX/tribunal/internal/agent"
+	"github.com/LeXwDeX/tribunal/pkg/dag"
 )
 
 func coverageWorkflow(files ...string) dag.WorkflowView {

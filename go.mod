@@ -1,4 +1,4 @@
-module github.com/LeXwDeX/Code-Review-For-Gitlab-CE
+module github.com/LeXwDeX/tribunal
 
 go 1.26.0
 

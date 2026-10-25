@@ -3,7 +3,7 @@
 Inventory of third-party code distributed with this repository: Go modules linked into the binary
 and npm packages bundled into the embedded web console (`web/dist`, embedded by `web/embed.go`).
 
-Generated: 2026-10-22. Scope: Go module `github.com/LeXwDeX/Code-Review-For-Gitlab-CE`.
+Generated: 2026-10-22. Scope: Go module `github.com/LeXwDeX/tribunal`.
 
 ## How this inventory was built
 

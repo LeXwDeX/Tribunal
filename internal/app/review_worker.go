@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/jobs"
+	"github.com/LeXwDeX/tribunal/internal/jobs"
 )
 
 // ReviewWorker composes the review and workspace job handlers registered with

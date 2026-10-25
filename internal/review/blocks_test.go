@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/config"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/pkg/dag"
+	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/pkg/dag"
 )
 
 func defaultProfile() Profile {
@@ -132,20 +132,24 @@ func TestBuildGraphOnboarding(t *testing.T) {
 
 func TestBuildGraphDockerProfiles(t *testing.T) {
 	for k, v := range map[string]string{
-		"CRC_PUBLIC_URL":     "https://review.example.test",
-		"GITLAB_URL":         "https://gitlab.example.test",
-		"LLM_PROTOCOL":       "anthropic",
-		"LLM_BASE_URL":       "https://llm.example.test",
-		"LLM_MODEL":          "test-model",
-		"LLM_API_KEY":        "test-key",
-		"REVIEW_ADMIN_TOKEN": "0123456789abcdef0123456789abcdef",
-		"REVIEW_MASTER_KEY":  "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+		"CRC_PUBLIC_URL":      "https://legacy.example.test",
+		"TRIBUNAL_PUBLIC_URL": "https://review.example.test",
+		"GITLAB_URL":          "https://gitlab.example.test",
+		"LLM_PROTOCOL":        "anthropic",
+		"LLM_BASE_URL":        "https://llm.example.test",
+		"LLM_MODEL":           "test-model",
+		"LLM_API_KEY":         "test-key",
+		"REVIEW_ADMIN_TOKEN":  "0123456789abcdef0123456789abcdef",
+		"REVIEW_MASTER_KEY":   "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
 	} {
 		t.Setenv(k, v)
 	}
 	cfg, err := config.Load("../../config/server.docker.yaml")
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
+	}
+	if cfg.Server.PublicURL != "https://review.example.test" {
+		t.Fatalf("server.public_url = %q, want TRIBUNAL_PUBLIC_URL", cfg.Server.PublicURL)
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Config.Validate: %v", err)

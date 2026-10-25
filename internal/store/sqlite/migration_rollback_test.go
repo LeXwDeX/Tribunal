@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store/migrations"
+	"github.com/LeXwDeX/tribunal/internal/store/migrations"
 )
 
 func TestMigrationRollbackAfterLateFailure(t *testing.T) {

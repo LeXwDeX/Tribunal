@@ -10,7 +10,7 @@
 ```
 cmd/server ─┬─→ internal/server ──→ internal/app ──┬─→ internal/review ──→ pkg/dag
             │                                     ├─→ internal/workspace
-cmd/reviewctl (只调 HTTP API)                      ├─→ internal/gitlab
+cmd/tribunalctl (只调 HTTP API)                    ├─→ internal/gitlab
                                                   ├─→ internal/jobs
                                                   └─→ internal/store
 internal/review ──→ internal/agent ──→ internal/llm
@@ -37,7 +37,7 @@ internal/review ──→ internal/agent ──→ internal/llm
 ```
 cmd/
   server/main.go                 读配置 → 建依赖 → 启动 HTTP、job worker、恢复未完成工作流
-  reviewctl/main.go              管理 CLI，只通过 HTTP API 操作（项目注册/列表、用户停用/撤销、项目授权、触发评审、查看状态）
+  tribunalctl/main.go            管理 CLI，只通过 HTTP API 操作（项目注册/列表、用户停用/撤销、项目授权、触发评审、查看状态）
 internal/
   config/
     config.go                    配置结构体、默认值、Validate()

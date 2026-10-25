@@ -1,4 +1,4 @@
-# Code Review CE
+# Tribunal
 
 <!-- impeccable:product-schema 1 -->
 
@@ -51,8 +51,9 @@ on a desktop, but must also be able to operate the console at 390px width.
 
 ## Brand Commitments
 
-Use the existing Code Review CE name and Chinese console labels. The local
-prototype defines the visual reference; this task is implementation, not rebrand.
+Use the user-approved Tribunal name and the existing Chinese console labels. The
+local prototype still defines the visual reference; this rename is branding, not
+a redesign of the console or review flow.
 
 ## Evidence on Hand
 

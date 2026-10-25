@@ -12,12 +12,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/app"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/config"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/gitlab"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/secret"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store/sqlite"
+	"github.com/LeXwDeX/tribunal/internal/app"
+	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/gitlab"
+	"github.com/LeXwDeX/tribunal/internal/secret"
+	"github.com/LeXwDeX/tribunal/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
 )
 
 func testProjectService(t *testing.T, st *sqlite.Store, api *stubGitLab, workspace string) *app.ProjectService {

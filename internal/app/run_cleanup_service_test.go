@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/repo"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/workspace"
+	"github.com/LeXwDeX/tribunal/internal/repo"
+	"github.com/LeXwDeX/tribunal/internal/workspace"
 )
 
 type cleanupTestStore struct {

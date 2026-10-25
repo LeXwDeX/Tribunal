@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/prompts"
+	"github.com/LeXwDeX/tribunal/prompts"
 )
 
 const (

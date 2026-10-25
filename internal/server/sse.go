@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
 const streamHeartbeatInterval = 15 * time.Second

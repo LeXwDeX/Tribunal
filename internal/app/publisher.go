@@ -14,12 +14,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/config"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/gitlab"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/review"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/secret"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/pkg/dag"
+	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/gitlab"
+	"github.com/LeXwDeX/tribunal/internal/review"
+	"github.com/LeXwDeX/tribunal/internal/secret"
+	"github.com/LeXwDeX/tribunal/internal/store"
+	"github.com/LeXwDeX/tribunal/pkg/dag"
 )
 
 const (

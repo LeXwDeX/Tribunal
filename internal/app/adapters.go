@@ -13,17 +13,17 @@ import (
 	"sync"
 	"time"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/agent"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/config"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/gitlab"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/llm"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/mcp"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/repo"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/review"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/skill"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store/sqlite"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/pkg/dag"
+	"github.com/LeXwDeX/tribunal/internal/agent"
+	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/gitlab"
+	"github.com/LeXwDeX/tribunal/internal/llm"
+	"github.com/LeXwDeX/tribunal/internal/mcp"
+	"github.com/LeXwDeX/tribunal/internal/repo"
+	"github.com/LeXwDeX/tribunal/internal/review"
+	"github.com/LeXwDeX/tribunal/internal/skill"
+	"github.com/LeXwDeX/tribunal/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
+	"github.com/LeXwDeX/tribunal/pkg/dag"
 )
 
 // GitLabClient is the GitLab surface consumed by review orchestration and

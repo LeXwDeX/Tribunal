@@ -12,7 +12,7 @@ export function AuthScreen({
         <div className={styles.brandBar}>
           <BrandMark size={30} />
           <div className={styles.brandText}>
-            <span className={styles.brandName}>Code Review CE</span>
+            <span className={styles.brandName}>Tribunal</span>
             <span className={styles.brandSub}>GitLab 合并请求评审平台</span>
           </div>
         </div>

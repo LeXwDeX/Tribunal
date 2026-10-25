@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
 func mustReviewStatus(t *testing.T, s *Store, projectID, mrIID int64) *store.ReviewStatus {

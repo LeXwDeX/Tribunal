@@ -10,11 +10,11 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/config"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/gitlab"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/jobs"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/secret"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/gitlab"
+	"github.com/LeXwDeX/tribunal/internal/jobs"
+	"github.com/LeXwDeX/tribunal/internal/secret"
+	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
 const (

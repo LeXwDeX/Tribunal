@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/app"
+	"github.com/LeXwDeX/tribunal/internal/app"
 )
 
 // AppExtensions adapts the app extension service to the admin HTTP
