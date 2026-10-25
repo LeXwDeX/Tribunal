@@ -451,9 +451,10 @@ export function SystemPage() {
           value={tab}
           onChange={setTab}
           label="系统设置"
+          idPrefix="system-tab"
         />
 
-        <div id={`system-tabpanel-${tab}`} role="tabpanel" aria-labelledby={`tab-${tab}`}>
+        <div id={`system-tabpanel-${tab}`} role="tabpanel" aria-labelledby={`system-tab-${tab}`}>
           {tab === 'tokens' ? (
             <Panel
               title="我的 API token"

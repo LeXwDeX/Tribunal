@@ -148,10 +148,10 @@ export function PageHeader({ title, description, actions }: { title: ReactNode; 
 }
 
 export function Panel({
-  title, aside, children, className,
-}: { title?: ReactNode; aside?: ReactNode; children: ReactNode; className?: string }) {
+  title, aside, children, className, flush,
+}: { title?: ReactNode; aside?: ReactNode; children: ReactNode; className?: string; flush?: boolean }) {
   return (
-    <section className={classNames(styles.panel, className)}>
+    <section className={classNames(styles.panel, flush && styles.panelFlush, className)}>
       {title || aside ? (
         <div className={styles.panelHeader}>
           {title ? <h2 className={styles.panelTitle}>{title}</h2> : <span />}
@@ -251,8 +251,8 @@ export function Pagination({
 }
 
 export function Tabs({
-  items, value, onChange, label,
-}: { items: Array<{ key: string; label: string; count?: number; panelId?: string }>; value: string; onChange: (key: string) => void; label: string }) {
+  items, value, onChange, label, idPrefix = 'tab',
+}: { items: Array<{ key: string; label: string; count?: number; panelId?: string }>; value: string; onChange: (key: string) => void; label: string; idPrefix?: string }) {
   const refs = useRef<Array<HTMLButtonElement | null>>([])
   const onKeyDown = (event: React.KeyboardEvent, index: number) => {
     let next = index
@@ -275,9 +275,9 @@ export function Tabs({
             ref={(element) => { refs.current[index] = element }}
             type="button"
             role="tab"
-            id={`tab-${item.key}`}
+            id={`${idPrefix}-${item.key}`}
             aria-selected={selected}
-            aria-controls={item.panelId}
+            aria-controls={selected ? item.panelId : undefined}
             tabIndex={selected ? 0 : -1}
             className={classNames(styles.tab, selected && styles.tabActive)}
             onClick={() => onChange(item.key)}
@@ -531,9 +531,9 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return (
     <ToastContext.Provider value={{ push }}>
       {children}
-      <div className={styles.toastRegion} role="status" aria-live="polite">
+      <div className={styles.toastRegion}>
         {items.map((item) => (
-          <div key={item.id} className={classNames(styles.toast, item.tone === 'success' && styles.toastSuccess, item.tone === 'error' && styles.toastError)}>
+          <div key={item.id} role={item.tone === 'error' ? 'alert' : 'status'} className={classNames(styles.toast, item.tone === 'success' && styles.toastSuccess, item.tone === 'error' && styles.toastError)}>
             <span style={{ flex: 1 }}>{item.message}</span>
             <button type="button" className={styles.iconButton} onClick={() => remove(item.id)} aria-label="关闭提示">
               <Icon name="close" size={14} />
@@ -574,7 +574,7 @@ export function CopyButton({ value, label = '复制' }: { value: string; label?:
   return (
     <Button variant="secondary" onClick={() => { void onCopy() }}>
       <Icon name={state === 'copied' ? 'check' : 'copy'} size={15} />
-      {state === 'copied' ? '已复制' : state === 'failed' ? '复制失败，请手动复制' : label}
+      <span aria-live="polite">{state === 'copied' ? '已复制' : state === 'failed' ? '复制失败，请手动复制' : label}</span>
     </Button>
   )
 }

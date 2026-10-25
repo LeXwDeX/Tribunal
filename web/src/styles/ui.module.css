@@ -242,7 +242,7 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-sm);
-  overflow: hidden;
+  overflow: visible;
   display: flex;
   flex-direction: column;
   padding: 18px 20px;
@@ -286,13 +286,12 @@
   padding: 16px 18px;
 }
 
-/* Existing pages still pass direct children; panelBody opts into the full-bleed v2 layout. */
-.panel:has(> .panelBody) {
+.panelFlush {
   padding: 0;
   gap: 0;
 }
 
-.panel:has(> .panelBody) > .panelHeader {
+.panelFlush > .panelHeader {
   min-height: 52px;
   padding: 14px 18px;
   border-bottom: 1px solid var(--border);
@@ -433,26 +432,6 @@
 .errorText {
   color: var(--danger-fg);
   font-size: 12px;
-}
-
-.checkboxRow {
-  display: inline-flex;
-  align-items: center;
-  gap: 9px;
-  min-height: var(--control-h);
-  padding: 0 4px;
-  cursor: pointer;
-  font-size: 13px;
-}
-
-.checkboxRow input {
-  width: 18px;
-  height: 18px;
-  accent-color: var(--accent);
-}
-
-.checkboxRow input:disabled + span {
-  color: var(--muted);
 }
 
 .empty {
@@ -883,7 +862,7 @@
   width: 34px;
   height: 20px;
   border-radius: 999px;
-  background: var(--control-border);
+  background: var(--muted);
 }
 
 .switch::after {
@@ -931,7 +910,7 @@
   .panelBody {
     padding: 14px 16px;
   }
-  .panel:has(> .panelBody) {
+  .panelFlush {
     padding: 0;
   }
   .modalOverlay {

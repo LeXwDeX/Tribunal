@@ -592,6 +592,14 @@
   text-align: center;
 }
 
+.matrix th {
+  background: transparent;
+}
+
+.matrix tbody tr:last-child td {
+  border-bottom: 1px solid var(--border);
+}
+
 .matrix thead th {
   color: var(--muted);
   font-weight: 500;

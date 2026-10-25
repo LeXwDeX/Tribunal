@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {
-  Badge, Button, Dialog, Drawer, ErrorState, Field, Metric, Panel, PanelBody, Segmented, SevCounts, SeverityBadge, Sparkline, StatusBadge, Switch, Tabs,
+  Badge, Button, CopyButton, Dialog, Drawer, ErrorState, Field, Metric, Panel, PanelBody, Segmented, SevCounts, SeverityBadge, Sparkline, StatusBadge, Switch, Tabs, ToastProvider, useToast,
 } from '../src/components/ui'
 import { ApiError } from '../src/api/client'
 import ui from '../src/styles/ui.module.css'
@@ -28,6 +28,11 @@ function DialogHarness({ onClose }: { onClose: () => void }) {
       </Dialog>
     </>
   )
+}
+
+function ToastHarness() {
+  const toast = useToast()
+  return <Button onClick={() => toast.push('error', '发生错误')}>显示错误</Button>
 }
 
 describe('dialogs and form states', () => {
@@ -111,13 +116,16 @@ describe('dialogs and form states', () => {
           label="项目页签"
           value="overview"
           onChange={onChange}
+          idPrefix="test-tab"
           items={[{ key: 'overview', label: '概览', count: 3, panelId: 'tab-panel-overview' }, { key: 'settings', label: '设置', panelId: 'tab-panel-settings' }]}
         />
       </>,
     )
     expect(screen.getByRole('button', { name: /全部/ })).toHaveAttribute('aria-pressed', 'true')
     expect(screen.getByRole('tab', { name: /概览/ })).toHaveTextContent('3')
+    expect(screen.getByRole('tab', { name: /概览/ })).toHaveAttribute('id', 'test-tab-overview')
     expect(screen.getByRole('tab', { name: /概览/ })).toHaveAttribute('aria-controls', 'tab-panel-overview')
+    expect(screen.getByRole('tab', { name: /设置/ })).not.toHaveAttribute('aria-controls')
     await user.click(screen.getByRole('button', { name: /失败/ }))
     expect(onChange).toHaveBeenCalledWith('failed')
   })
@@ -143,7 +151,7 @@ describe('dialogs and form states', () => {
     const onChange = vi.fn()
     render(
       <>
-        <Panel title="面板">
+        <Panel title="面板" flush>
           <PanelBody><span>面板正文</span></PanelBody>
         </Panel>
         <div className={ui.metricStrip}><Metric label="指标" value={1} /></div>
@@ -151,8 +159,22 @@ describe('dialogs and form states', () => {
       </>,
     )
     expect(screen.getByText('面板正文').parentElement).toHaveClass(ui.panelBody)
+    expect(screen.getByText('面板正文').closest(`.${ui.panel}`)).toHaveClass(ui.panelFlush)
     expect(screen.getByText('指标').parentElement?.parentElement).toHaveClass(ui.metricStrip)
     expect(screen.getByText('指标').parentElement).toHaveClass(ui.metric)
     expect(screen.getByRole('switch', { name: '启用' })).toBeDisabled()
+  })
+
+  it('announces toast errors and copy status', () => {
+    render(
+      <ToastProvider>
+        <ToastHarness />
+        <CopyButton value="secret" />
+      </ToastProvider>,
+    )
+    fireEvent.click(screen.getByRole('button', { name: '显示错误' }))
+    expect(screen.getByRole('alert')).toHaveTextContent('发生错误')
+    expect(screen.getByRole('button', { name: '复制' }).querySelector('[aria-live="polite"]')).toHaveTextContent('复制')
+    fireEvent.click(screen.getByRole('button', { name: '关闭提示' }))
   })
 })
