@@ -109,8 +109,8 @@ describe('project access gates write controls', () => {
     renderWithProviders(<ExtensionsPage />, { route: '/extensions', me: viewerMe })
     expect(await screen.findByText(/项目级 · group\/backend/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '平台级' })).not.toBeInTheDocument()
+    await waitFor(() => expect(urls.some((url) => url.includes('scope=project') && url.includes('project_id=42'))).toBe(true))
     expect(urls.some((url) => url.includes('scope=platform'))).toBe(false)
-    expect(urls.some((url) => url.includes('scope=project') && url.includes('project_id=42'))).toBe(true)
   })
 
   it('keeps platform-scope extensions admin-only', async () => {
