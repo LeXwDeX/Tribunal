@@ -5,9 +5,9 @@ import {
 import { createPortal } from 'react-dom'
 import { ApiError, errorMessage } from '../api/client'
 import {
-  formatDate, formatRelative, labelForPublication, labelForStatus, publicationTone, safeExternalUrl, severityTone, statusTone, verdictTone,
+  formatDate, formatRelative, labelForPublication, labelForStatus, publicationTone, safeExternalUrl, statusTone, verdictTone,
 } from '../lib/format'
-import type { PublicationState } from '../api/types'
+import type { FindingsSummary, PublicationState } from '../api/types'
 import { Icon } from './Icons'
 import styles from '../styles/ui.module.css'
 
@@ -40,16 +40,26 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
   )
 })
 
-export function Badge({ tone = 'neutral', children }: { tone?: 'ok' | 'warn' | 'danger' | 'info' | 'neutral'; children: ReactNode }) {
+export function Badge({
+  tone = 'neutral', live, plain, children,
+}: { tone?: 'ok' | 'warn' | 'danger' | 'info' | 'neutral'; live?: boolean; plain?: boolean; children: ReactNode }) {
   const classes = {
     ok: styles.badgeOk, warn: styles.badgeWarn, danger: styles.badgeDanger, info: styles.badgeInfo, neutral: styles.badgeNeutral,
   }
-  return <span className={classNames(styles.badge, classes[tone])}>{children}</span>
+  return (
+    <span className={classNames(styles.badge, classes[tone], live && styles.badgeLive, plain && styles.badgePlain)}>
+      {children}
+    </span>
+  )
 }
 
 export function StatusBadge({ status, label }: { status?: string; label?: string }) {
   const tone = statusTone(status)
-  return <Badge tone={tone}>{label || labelForStatus(status)}</Badge>
+  return (
+    <Badge tone={tone} live={status === 'running' || status === 'refreshing'}>
+      {label || labelForStatus(status)}
+    </Badge>
+  )
 }
 
 export function VerdictBadge({ verdict }: { verdict?: string | null }) {
@@ -64,9 +74,65 @@ export function PublicationBadge({ state }: { state?: PublicationState }) {
   return <Badge tone={publicationTone(state)}>{labelForPublication(state)}</Badge>
 }
 
+const SEVERITY_CLASSES: Record<string, string> = {
+  P0: styles.sevP0,
+  P1: styles.sevP1,
+  P2: styles.sevP2,
+  info: styles.sevInfo,
+}
+
 export function SeverityBadge({ severity }: { severity?: string }) {
   if (!severity) return <span className={styles.visuallyEmpty}>—</span>
-  return <Badge tone={severityTone(severity)}>{severity}</Badge>
+  return <span className={classNames(styles.sev, SEVERITY_CLASSES[severity])}>{severity}</span>
+}
+
+const SEVERITY_COUNTS = [
+  { key: 'P0', color: 'var(--danger-solid)' },
+  { key: 'P1', color: 'var(--danger-dot)' },
+  { key: 'P2', color: 'var(--warn-dot)' },
+] as const
+
+export function SevCounts({ summary }: { summary?: FindingsSummary }) {
+  const bySeverity = summary?.by_severity
+  if (!bySeverity) return <span className={styles.visuallyEmpty}>—</span>
+  return (
+    <span className={styles.sevCounts}>
+      {SEVERITY_COUNTS.map(({ key, color }) => {
+        const count = bySeverity[key] ?? 0
+        return (
+          <span key={key} title={key} role="img" aria-label={`${key} ${count}`} className={count === 0 ? styles.zero : undefined}>
+            <i style={{ background: count === 0 ? 'var(--border)' : color }} />
+            {count}
+          </span>
+        )
+      })}
+    </span>
+  )
+}
+
+export function Segmented({
+  options, value, onChange, label,
+}: {
+  options: Array<{ value: string; label: string; count?: number }>
+  value: string
+  onChange: (value: string) => void
+  label: string
+}) {
+  return (
+    <div className={styles.segmented} role="group" aria-label={label}>
+      {options.map((option) => (
+        <button
+          key={option.value}
+          type="button"
+          aria-pressed={option.value === value}
+          onClick={() => onChange(option.value)}
+        >
+          {option.label}
+          {option.count != null ? <em>{option.count}</em> : null}
+        </button>
+      ))}
+    </div>
+  )
 }
 
 export function PageHeader({ title, description, actions }: { title: ReactNode; description?: ReactNode; actions?: ReactNode }) {
@@ -81,7 +147,9 @@ export function PageHeader({ title, description, actions }: { title: ReactNode; 
   )
 }
 
-export function Panel({ title, aside, children, className }: { title?: ReactNode; aside?: ReactNode; children: ReactNode; className?: string }) {
+export function Panel({
+  title, aside, children, className,
+}: { title?: ReactNode; aside?: ReactNode; children: ReactNode; className?: string }) {
   return (
     <section className={classNames(styles.panel, className)}>
       {title || aside ? (
@@ -103,6 +171,24 @@ export function Metric({ label, value, note }: { label: string; value: ReactNode
       <span className={classNames(styles.metricValue, unavailable && styles.metricUnavailable)}>{unavailable ? '不可用' : value}</span>
       {note ? <span className={styles.metricNote}>{note}</span> : null}
     </div>
+  )
+}
+
+export function Sparkline({ points, color = 'var(--accent)' }: { points: number[]; color?: string }) {
+  const values = points.filter((point) => Number.isFinite(point))
+  if (values.length < 2) return null
+  const max = Math.max(...values)
+  const scale = max > 0 ? max : 1
+  const step = 64 / (values.length - 1)
+  const polyline = values.map((point, index) => {
+    const x = index * step
+    const y = 18 - (Math.min(Math.max(point, 0), scale) / scale) * 18
+    return `${x.toFixed(2)},${y.toFixed(2)}`
+  }).join(' ')
+  return (
+    <svg width="64" height="18" viewBox="0 0 64 18" aria-hidden="true" focusable="false">
+      <polyline points={polyline} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round" />
+    </svg>
   )
 }
 
@@ -162,7 +248,7 @@ export function Pagination({
 
 export function Tabs({
   items, value, onChange, label,
-}: { items: Array<{ key: string; label: string }>; value: string; onChange: (key: string) => void; label: string }) {
+}: { items: Array<{ key: string; label: string; count?: number }>; value: string; onChange: (key: string) => void; label: string }) {
   const refs = useRef<Array<HTMLButtonElement | null>>([])
   const onKeyDown = (event: React.KeyboardEvent, index: number) => {
     let next = index
@@ -193,6 +279,7 @@ export function Tabs({
             onKeyDown={(event) => onKeyDown(event, index)}
           >
             {item.label}
+            {item.count != null ? <span className={styles.tabCount}>{item.count}</span> : null}
           </button>
         )
       })}
@@ -325,7 +412,7 @@ export function Dialog({ open, onClose, title, description, children, footer, wi
             <Icon name="close" />
           </button>
         </div>
-        {children}
+        {children != null ? <div className={styles.modalBody}>{children}</div> : null}
         {footer ? <div className={styles.modalFooter}>{footer}</div> : null}
       </div>
     </div>,
@@ -350,7 +437,7 @@ export function Drawer({ open, onClose, title, description, children, footer }: 
         tabIndex={-1}
         className={styles.drawer}
       >
-        <div className={styles.modalHeader}>
+        <div className={styles.drawerHeader}>
           <div className={styles.stack}>
             <h2 className={styles.modalTitle} id={titleId}>{title}</h2>
             {description ? <p className={styles.modalDescription} id={descriptionId}>{description}</p> : null}
@@ -359,7 +446,7 @@ export function Drawer({ open, onClose, title, description, children, footer }: 
             <Icon name="close" />
           </button>
         </div>
-        {children}
+        {children != null ? <div className={styles.drawerBody}>{children}</div> : null}
         {footer ? <div className={styles.modalFooter}>{footer}</div> : null}
       </aside>
     </div>,
@@ -480,4 +567,3 @@ export function SecretField({ label, value }: { label: string; value: string }) 
     </div>
   )
 }
-
