@@ -31,7 +31,7 @@ chmod 600 .env
 | `TRIBUNAL_PUBLIC_URL` | 用户和 GitLab 可访问的服务地址；生产应为 HTTPS，默认仅供本机使用 |
 | `TRIBUNAL_HTTP_PORT` | 宿主机端口，默认 8080；容器始终监听 8080。改变它时检查 `TRIBUNAL_PUBLIC_URL` 是否也需修改 |
 
-旧环境变量名 `CRC_SESSION_KEY`、`CRC_PUBLIC_URL`、`CRC_HTTP_PORT` 仍兼容；新旧同时设置时新名优先。三个旧名只要配置了非空值，都会各记录一次弃用日志；即使新名已覆盖，日志仍提示旧名处于已配置状态，不代表旧值生效，且只含变量名、不含值。新名值非法时启动失败，不回退旧值。完整兼容规则见[环境变量](design/06-config.md#5-环境变量)。升级时必须复用原 session key 的同一个值，不要重新生成，否则现有浏览器会话失效。
+旧环境变量名 `CRC_SESSION_KEY`、`CRC_PUBLIC_URL`、`CRC_HTTP_PORT` 仍兼容；新旧同时设置时新名优先。三个旧名只要配置了非空值，都会各记录一次弃用日志；日志只含变量名、不含值。日志表示旧名仍配置，不代表旧值一定生效或一定被忽略：Compose 会把仅设置的 `CRC_HTTP_PORT` 作为 `TRIBUNAL_HTTP_PORT` 的插值回退值，仅用于宿主机端口映射，并把仅设置的 `CRC_SESSION_KEY` 复制给容器的 `TRIBUNAL_SESSION_KEY`。`TRIBUNAL_HTTP_PORT` / `CRC_HTTP_PORT` 只影响宿主机映射，不是应用监听端口。`TRIBUNAL_SESSION_KEY` 未设置或恰好为空字符串时才回退旧名；非空但只含空白是非法值，启动失败，不回退旧名，也不生成临时 key。完整兼容规则见[环境变量](design/06-config.md#5-环境变量)。升级时必须复用原 session key 的同一个值，不要重新生成，否则现有浏览器会话失效。
 
 `.env` 值包含 `$` 或 `#` 时使用单引号。不要把真实密钥写进 YAML、提交到仓库或放进 Docker build args。Compose 从 `.env` 做变量替换，再通过 `environment` 允许列表传入容器，不会把整个 `.env` 挂载或注入。宿主机已导出的同名变量优先于 `.env`；部署前检查是否有旧值，但不要把秘密输出到日志。环境变量仍对 Docker 管理员可见。
 
@@ -49,7 +49,7 @@ docker compose logs --tail=100 review
 docker compose exec -T review /app/tribunalctl projects all
 ```
 
-`config --quiet` 检查 Compose 结构和必填变量，避免普通 `config` 将展开后的秘密打印到终端。`--check-config` 检查应用配置，但不验证外部凭据、完整运行时或网络连接。`up --wait` 还会等待镜像中的 `/readyz` 健康检查；就绪只证明数据库与 worker 可用，不证明模型或 GitLab 可用。
+`config --quiet` 检查 Compose 结构和必填变量，避免普通 `config` 将展开后的秘密打印到终端。`--check-config` 检查应用配置，但不验证 session key、外部凭据、完整运行时或网络连接；session key 在实际启动时校验。`up --wait` 还会等待镜像中的 `/readyz` 健康检查；就绪只证明数据库与 worker 可用，不证明模型或 GitLab 可用。
 
 默认访问 `http://localhost:8080`。服务只向宿主机 `127.0.0.1` 发布端口；GitLab webhook 和远程浏览器需要第 6 节的 HTTPS 反向代理。容器内 `localhost` 指容器本身，不是宿主机或其他 GitLab 容器。内部 CA 需由部署方配置可信证书，不要关闭 TLS 校验。
 
@@ -251,7 +251,7 @@ docker inspect --format '{{.State.Health.Status}}' tribunal
 |---|---|---|
 | `REVIEW_MASTER_KEY` | base64，解码后恰好 32 字节 | 用于解密已保存的项目令牌和 webhook secret。丢失后旧凭据无法解密，需要恢复旧 key 或重新登记项目。 |
 | `REVIEW_ADMIN_TOKEN` | 至少 32 字节 | 平台管理面的 bootstrap Bearer 令牌，不授予项目业务数据访问。轮换由部署方更新环境变量并重启；重启后旧客户端立即失效。 |
-| `TRIBUNAL_SESSION_KEY` | base64，解码后至少 32 字节 | 用于签名会话 cookie、OAuth state，并派生 CSRF token。浏览器会话持久化在 SQLite；固定该值时可跨重启继续使用未过期会话。未设置时每进程随机生成并输出告警，重启后旧 cookie 失效。轮换该值会让所有现有浏览器会话失效。 |
+| `TRIBUNAL_SESSION_KEY` | base64，解码后至少 32 字节 | 用于签名会话 cookie、OAuth state，并派生 CSRF token。浏览器会话持久化在 SQLite；固定该值时可跨重启继续使用未过期会话。未设置或恰好为空字符串时回退旧名；旧名也未配置时每进程随机生成并输出告警，重启后旧 cookie 失效。非空但只含空白（去除空白后为空）是非法值，启动失败，不回退旧名，也不生成临时 key。轮换该值会让所有现有浏览器会话失效。 |
 
 生成示例：
 
@@ -425,7 +425,7 @@ curl -fsS http://127.0.0.1:8080/readyz
 
 - 镜像 tag 改为 `tribunal:*`；旧镜像的仓库名是 `crc-review`，升级时重新构建或改 tag。Compose 项目名 `crc-review`、旧数据卷 `crc-review_data` 和 `crc-data` 刻意不改名；继续挂载原卷即可保留数据。
 - 管理 CLI 改用 `tribunalctl`；旧镜像路径 `/app/reviewctl` 以兼容符号链接保留。源码用户改用 `go run ./cmd/tribunalctl`。
-- 环境变量主名改为 `TRIBUNAL_SESSION_KEY`、`TRIBUNAL_PUBLIC_URL`、`TRIBUNAL_HTTP_PORT`；旧 `CRC_*` 名仍兼容，新旧同时设置时新名优先。三个旧名只要配置了非空值，都会各记录一次弃用日志；即使新名已覆盖，日志仍提示旧名处于已配置状态，不代表旧值生效，且只含变量名、不含值。升级时复用原 session key 的同一个值，否则现有浏览器会话失效。
+- 环境变量主名改为 `TRIBUNAL_SESSION_KEY`、`TRIBUNAL_PUBLIC_URL`、`TRIBUNAL_HTTP_PORT`；旧 `CRC_*` 名仍兼容，新旧同时设置时新名优先。三个旧名只要配置了非空值，都会各记录一次弃用日志；日志只含变量名、不含值。日志表示旧名仍配置，不代表旧值一定生效或一定被忽略。升级时复用原 session key 的同一个值，否则现有浏览器会话失效。
 - 旧二进制直接读取已被新版本迁移过的 schema 不受支持。仅回退镜像而不恢复数据快照，可能因列/表变化失败或产生错误数据。
 - 不要更换 `REVIEW_MASTER_KEY`，否则已保存的项目凭据无法解密。
 - 生产环境使用不可变 tag 或 digest，保留旧镜像以便回滚。

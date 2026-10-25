@@ -314,8 +314,11 @@ func TestSessionKeyFromEnv(t *testing.T) {
 		}
 	})
 
-	t.Run("whitespace tribunal key falls back", func(t *testing.T) {
-		t.Setenv("TRIBUNAL_SESSION_KEY", "  ")
+	t.Run("unset tribunal key falls back", func(t *testing.T) {
+		t.Setenv("TRIBUNAL_SESSION_KEY", "")
+		if err := os.Unsetenv("TRIBUNAL_SESSION_KEY"); err != nil {
+			t.Fatal(err)
+		}
 		t.Setenv("CRC_SESSION_KEY", encoded(legacy))
 		key, err := sessionKeyFromEnv()
 		if err != nil || !bytes.Equal(key, legacy) {
@@ -323,12 +326,39 @@ func TestSessionKeyFromEnv(t *testing.T) {
 		}
 	})
 
-	t.Run("whitespace keys generate", func(t *testing.T) {
+	t.Run("whitespace tribunal key does not fall back", func(t *testing.T) {
 		t.Setenv("TRIBUNAL_SESSION_KEY", "  ")
+		t.Setenv("CRC_SESSION_KEY", encoded(legacy))
+		key, err := sessionKeyFromEnv()
+		if key != nil || err == nil || !strings.Contains(err.Error(), "TRIBUNAL_SESSION_KEY") {
+			t.Fatalf("key = %v, error = %v, want TRIBUNAL_SESSION_KEY error", key, err)
+		}
+	})
+
+	t.Run("whitespace tribunal key does not generate", func(t *testing.T) {
+		t.Setenv("TRIBUNAL_SESSION_KEY", "  ")
+		t.Setenv("CRC_SESSION_KEY", "")
+		key, err := sessionKeyFromEnv()
+		if key != nil || err == nil || !strings.Contains(err.Error(), "TRIBUNAL_SESSION_KEY") {
+			t.Fatalf("key = %v, error = %v, want TRIBUNAL_SESSION_KEY error", key, err)
+		}
+	})
+
+	t.Run("legacy whitespace only still generates", func(t *testing.T) {
+		t.Setenv("TRIBUNAL_SESSION_KEY", "")
 		t.Setenv("CRC_SESSION_KEY", "\t")
 		generated, err := sessionKeyFromEnv()
 		if err != nil || len(generated) != 32 {
 			t.Fatalf("generated key = %d bytes, err=%v", len(generated), err)
+		}
+	})
+
+	t.Run("padded tribunal key", func(t *testing.T) {
+		t.Setenv("TRIBUNAL_SESSION_KEY", "  "+encoded(tribunal)+"  ")
+		t.Setenv("CRC_SESSION_KEY", encoded(legacy))
+		key, err := sessionKeyFromEnv()
+		if err != nil || !bytes.Equal(key, tribunal) {
+			t.Fatalf("decoded key = %v, err=%v", key, err)
 		}
 	})
 
@@ -373,6 +403,30 @@ func TestEphemeralSessionKeyWarns(t *testing.T) {
 	warnEphemeralSessionKey(logger)
 	if logs.Len() != 0 {
 		t.Fatalf("legacy pinned key warned: %q", logs.String())
+	}
+
+	logs.Reset()
+	t.Setenv("TRIBUNAL_SESSION_KEY", "  ")
+	t.Setenv("CRC_SESSION_KEY", "")
+	warnEphemeralSessionKey(logger)
+	if logs.Len() != 0 {
+		t.Fatalf("invalid whitespace-only key warned as ephemeral: %q", logs.String())
+	}
+
+	logs.Reset()
+	t.Setenv("TRIBUNAL_SESSION_KEY", "  ")
+	t.Setenv("CRC_SESSION_KEY", base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")))
+	warnEphemeralSessionKey(logger)
+	if logs.Len() != 0 {
+		t.Fatalf("invalid whitespace-only key with legacy key warned as ephemeral: %q", logs.String())
+	}
+
+	logs.Reset()
+	t.Setenv("TRIBUNAL_SESSION_KEY", "")
+	t.Setenv("CRC_SESSION_KEY", "\t")
+	warnEphemeralSessionKey(logger)
+	if !strings.Contains(logs.String(), "TRIBUNAL_SESSION_KEY") || !strings.Contains(logs.String(), "restart") {
+		t.Fatalf("warning for generated key = %q", logs.String())
 	}
 }
 

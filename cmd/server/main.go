@@ -333,16 +333,18 @@ func warnDeprecatedEnv(logger *slog.Logger) {
 // warnEphemeralSessionKey tells the operator that sessions persisted in
 // SQLite become unreachable after a restart without a pinned key.
 func warnEphemeralSessionKey(logger *slog.Logger) {
-	if _, value := sessionKeySource(); value == "" {
+	if name, _ := sessionKeySource(); name == "" {
 		logger.Warn(tribunalSessionKeyEnv + " is not set; generated an ephemeral session key, so browser sessions will not survive restart")
 	}
 }
 
 // sessionKeySource prefers TRIBUNAL_SESSION_KEY and falls back to the legacy
-// CRC_SESSION_KEY only when the new value is empty or whitespace.
+// CRC_SESSION_KEY only when the new variable is unset or exactly empty. The
+// new value is returned untrimmed so sessionKeyFromEnv can reject a
+// whitespace-only value instead of falling back.
 func sessionKeySource() (string, string) {
-	if value := strings.TrimSpace(os.Getenv(tribunalSessionKeyEnv)); value != "" {
-		return tribunalSessionKeyEnv, value
+	if raw := os.Getenv(tribunalSessionKeyEnv); raw != "" {
+		return tribunalSessionKeyEnv, raw
 	}
 	if value := strings.TrimSpace(os.Getenv(legacySessionKeyEnv)); value != "" {
 		return legacySessionKeyEnv, value
@@ -351,12 +353,17 @@ func sessionKeySource() (string, string) {
 }
 
 // sessionKeyFromEnv reads the preferred key as base64 (standard or raw) and
-// requires at least 32 bytes. An absent key is generated per process; stored
-// sessions survive restart but their cookies no longer verify, so the caller
-// must warn the operator (see warnEphemeralSessionKey). An invalid non-empty
-// TRIBUNAL_SESSION_KEY is an error and never falls back to the legacy name.
+// requires at least 32 bytes. An absent or exactly empty key is generated per
+// process; stored sessions survive restart but their cookies no longer verify,
+// so the caller must warn the operator (see warnEphemeralSessionKey). A
+// non-empty TRIBUNAL_SESSION_KEY that is whitespace only, or otherwise
+// invalid, is an error and never falls back to the legacy name.
 func sessionKeyFromEnv() ([]byte, error) {
 	name, value := sessionKeySource()
+	value = strings.TrimSpace(value)
+	if name == tribunalSessionKeyEnv && value == "" {
+		return nil, fmt.Errorf("auth: %s must not be whitespace only", name)
+	}
 	if value == "" {
 		key := make([]byte, 32)
 		if _, err := rand.Read(key); err != nil {
