@@ -10,7 +10,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/config"
 )
 
 // settingsOverride carries only the fields present in a registration request.

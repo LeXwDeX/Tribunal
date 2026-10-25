@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/gitlab"
+	"github.com/LeXwDeX/tribunal/internal/gitlab"
 )
 
 const (

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/repo"
+	"github.com/LeXwDeX/tribunal/internal/repo"
 )
 
 func TestValidRunID(t *testing.T) {

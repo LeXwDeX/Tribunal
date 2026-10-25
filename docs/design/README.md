@@ -2,7 +2,7 @@
 
 [ARCH.md](../../ARCH.md) 是设计基线，讲清楚「做什么、为什么」；本目录是实现层面的细化，讲清楚「怎么做」：接口签名、表结构、API、流程步骤和配置格式。
 
-当前 M0–M6 主体功能已有本地实现，包括人工标注和质量指标。已验证运行时候选/源码快照 `f143e7a7835e1e99345b1df9b289bb499e3c67416598d30e6184a558374eb0ac`（402 文件）通过本地全量检查、实际镜像和连续两次无诊断代理 deep。较早的独立代码评审未发现 code blocker，但因缺少 f143 运行时 manifest 与 `12a62d1` 文档 manifest/source-equivalence 而记为 evidence BLOCKING；缺口关闭后，最终独立 review 对 `12a62d1` 文档树给出 code/documentation PASS、0 blockers。之后的文档澄清只关联 [PR #30](https://github.com/LeXwDeX/Code-Review-For-Gitlab-CE/pull/30)，不构成新的 review；native CI、平台评审、合并和 Release 仍以 PR #30 回读为准。
+当前 M0–M6 主体功能已有本地实现，包括人工标注和质量指标。已验证运行时候选/源码快照 `f143e7a7835e1e99345b1df9b289bb499e3c67416598d30e6184a558374eb0ac`（402 文件）通过本地全量检查、实际镜像和连续两次无诊断代理 deep。较早的独立代码评审未发现 code blocker，但因缺少 f143 运行时 manifest 与 `12a62d1` 文档 manifest/source-equivalence 而记为 evidence BLOCKING；缺口关闭后，最终独立 review 对 `12a62d1` 文档树给出 code/documentation PASS、0 blockers。之后的文档澄清只关联 [PR #30](https://github.com/LeXwDeX/Tribunal/pull/30)，不构成新的 review；native CI、平台评审、合并和 Release 仍以 PR #30 回读为准。
 
 已验证快照的隔离实例覆盖 OAuth/项目授权、CSRF、webhook 归属保护、GitLab Note Hook/状态 note/commit status/应用新增行行内评论、升级恢复、SSE 撤权关闭和 MCP 隔离。两次实际 deep 分别 0 call errors/0 failed nodes，MCP 成功/调用 10/10 与 10/11（第二次一次模型工具错误已纠正），两家 provider 均实际调用 MCP，结果均 BLOCKING/published。详见[项目 README](../../README.md#验证)和[交付就绪](../delivery-readiness.md)。实际启动方式和运行边界见 [部署与运维](../operations.md)。下文保留目标设计；实现与文档不同处标在各文档的「实现状态与偏差」中。
 

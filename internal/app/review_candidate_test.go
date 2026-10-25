@@ -9,8 +9,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/jobs"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/jobs"
+	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
 func (f *reviewFixture) handleCandidate(t *testing.T, wantID string) {

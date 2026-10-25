@@ -1,9 +1,9 @@
 # 03 HTTP API
 
-> 服务对外提供三类接口：GitLab webhook、管理 API（Web 控制台和 `reviewctl` 共用）、健康检查。
+> 服务对外提供三类接口：GitLab webhook、管理 API（Web 控制台和 `tribunalctl` 共用）、健康检查。
 > 管理 API 前缀 `/api/v1`，请求和响应都是 JSON（SSE 除外）。
 
-> 主体接口已有本地实现，覆盖 webhook、健康检查、OAuth 持久会话、管理 API 和 API token，并补充项目/评审摘要与 `stats.feedback`（含 `by_provider` 归因）。`auth.bootstrap_token_env` 指向的管理员 Bearer token 仍可用于平台管理脚本，但不授予项目业务数据访问；浏览器登录需要配置 `auth.oauth`。已验证运行时候选/源码快照 `f143e7a7835e1e99345b1df9b289bb499e3c67416598d30e6184a558374eb0ac`（402 文件）的隔离实例覆盖 OAuth/项目授权、CSRF、webhook 归属保护、GitLab Note Hook/状态 note/commit status/应用新增行行内评论、升级恢复和 SSE 撤权关闭；连续两次无诊断代理 deep 均 0 call errors/0 failed nodes（MCP 10/10、10/11）。最终 commit/CI/Release 事实以 [PR #30](https://github.com/LeXwDeX/Code-Review-For-Gitlab-CE/pull/30) 为准。实现差异见正文对应小节。
+> 主体接口已有本地实现，覆盖 webhook、健康检查、OAuth 持久会话、管理 API 和 API token，并补充项目/评审摘要与 `stats.feedback`（含 `by_provider` 归因）。`auth.bootstrap_token_env` 指向的管理员 Bearer token 仍可用于平台管理脚本，但不授予项目业务数据访问；浏览器登录需要配置 `auth.oauth`。已验证运行时候选/源码快照 `f143e7a7835e1e99345b1df9b289bb499e3c67416598d30e6184a558374eb0ac`（402 文件）的隔离实例覆盖 OAuth/项目授权、CSRF、webhook 归属保护、GitLab Note Hook/状态 note/commit status/应用新增行行内评论、升级恢复和 SSE 撤权关闭；连续两次无诊断代理 deep 均 0 call errors/0 failed nodes（MCP 10/10、10/11）。最终 commit/CI/Release 事实以 [PR #30](https://github.com/LeXwDeX/Tribunal/pull/30) 为准。实现差异见正文对应小节。
 
 ---
 
@@ -15,7 +15,7 @@
 |---|---|
 | GitLab webhook | `X-Gitlab-Token` 与项目的 webhook secret 比对（常量时间比较） |
 | Web 控制台 | GitLab OAuth 登录后下发会话 cookie（`HttpOnly`、`Secure`、`SameSite=Lax`）；写操作要求 `X-CSRF-Token` |
-| `reviewctl` / 脚本 | `Authorization: Bearer <api_token>`；bootstrap Bearer 仅用于平台管理面 |
+| `tribunalctl` / 脚本 | `Authorization: Bearer <api_token>`；bootstrap Bearer 仅用于平台管理面 |
 
 平台角色只有 `admin` / `viewer`，由当前 `auth.bootstrap_admins` 按 GitLab 用户名计算；`users.role` 只记录签发时标签，不作为已有 token 的权限来源。平台管理员可管理用户、项目授权、项目注册和系统配置，但不会自动获得项目业务数据权限。
 
@@ -23,7 +23,7 @@
 
 `auth.bootstrap_token_env` 指定的静态 Bearer 只用于平台管理面：没有本地用户 ID，也没有任何项目 grant，不能读取项目业务数据。它的轮换由部署方更新环境变量并重启；`bootstrap_admins` 变化同样在重启后生效。
 
-浏览器会话保存在 SQLite `sessions` 表，cookie 保存随机 token 及其 HMAC 签名，数据库只保存 token 的 SHA-256。CSRF token 由会话 token 和 `CRC_SESSION_KEY` 派生，不单独存储。固定 `CRC_SESSION_KEY` 时，重启后未过期会话仍有效；未设置时进程内随机生成 key 并输出告警，旧 cookie 在重启后失效。
+浏览器会话保存在 SQLite `sessions` 表，cookie 保存随机 token 及其 HMAC 签名，数据库只保存 token 的 SHA-256。CSRF token 由会话 token 和 `TRIBUNAL_SESSION_KEY` 派生，不单独存储。固定 `TRIBUNAL_SESSION_KEY`（旧名 `CRC_SESSION_KEY` 仍兼容，新名优先）时，重启后未过期会话仍有效；未设置时进程内随机生成 key 并输出告警，旧 cookie 在重启后失效。
 
 ### 错误格式
 
@@ -47,7 +47,7 @@
 
 上述管理列表的 cursor 绑定列表类型和筛选条件：projects 绑定 `q` / `enabled` 和访问范围，API token 绑定当前用户，扩展列表绑定 `scope` / `project_id`，users/grants 绑定各自列表类型和项目。跨列表、跨用户、跨访问范围或改变筛选后续用 cursor 返回 `400 bad_request`，不能复用。
 
-兼容性：只请求一次列表的旧客户端现在只会看到第一页（最多 50 条），必须循环 `next_cursor` 才能取全。`reviewctl projects list` 已自动遍历所有页；对没有 `next_cursor` 的旧服务，它按单页处理。
+兼容性：只请求一次列表的旧客户端现在只会看到第一页（最多 50 条），必须循环 `next_cursor` 才能取全。`tribunalctl projects list` 已自动遍历所有页；对没有 `next_cursor` 的旧服务，它按单页处理。
 
 Web 控制台的“重试加载更多”复用失败请求的同一 cursor，不会跳到下一页；“刷新”会重新加载已加载页（从第一页开始）。首屏失败的重试同样从第一页发起。
 
@@ -157,6 +157,8 @@ POST /api/v1/projects
 - `unknown`：升级前已有 `hook_id` 的项目；hook 可能存在但状态未验证。
 
 `POST /api/v1/projects/{id}/webhook` 是显式幂等 provisioning：先将状态置为 `pending`，列出 hook 后只按持久化的 `hook_id` 查找已记录 hook；URL 不参与归属判断。已记录 hook 仍存在时，沿用已存 secret 并更新为期望的 URL 和事件；已记录 hook 已被外部删除时创建新 hook。同 URL 但未记录的 hook 从不复用、修改或删除。返回 `200 {project, hook_id, state, events, last_error, managed_by?, created_at?, updated_at?}`（`last_error` 为空字符串表示无错误），secret 永不返回。创建后本地持久化失败会补偿删除新建 hook；失败状态不报告为 `enabled`。重复启用不会重复创建 hook。
+
+升级迁移 `0012_project_webhook_ownership.sql` 写入的持久化归属值仍为 `crc`；它是刻意保留的数据兼容值，不随产品改名，也不能用产品名替换。
 
 `POST /api/v1/projects/{id}/webhook/rebuild` 使用同一归属规则并轮换 secret：已记录 hook 仍存在时更新为新 secret 和期望 URL/事件，已被外部删除时创建新 hook。`DELETE /api/v1/projects/{id}/webhook` 只删除已记录的 service hook 并把状态置为 `disabled`；上游返回 404 视为已停用。停用保留加密 secret 供再次启用。这些接口都不会修改或删除用户自建且未被记录的 hook。Key 轮换不隐式创建或修改 hook。
 

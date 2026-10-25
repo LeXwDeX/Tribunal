@@ -4,12 +4,25 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
-    <title>Code Review CE</title>
+    <title>Tribunal</title>
     <script>
       try {
-        var saved = localStorage.getItem('crc-theme');
+        var saved = null;
+        try {
+          var current = localStorage.getItem('tribunal-theme');
+          if (current === 'dark' || current === 'light') saved = current;
+        } catch (_) {}
+        if (!saved) {
+          try {
+            var legacy = localStorage.getItem('crc-theme');
+            if (legacy === 'dark' || legacy === 'light') {
+              saved = legacy;
+              try { localStorage.setItem('tribunal-theme', legacy); } catch (_) {}
+            }
+          } catch (_) {}
+        }
         var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-        document.documentElement.dataset.theme = saved === 'dark' || saved === 'light' ? saved : (dark ? 'dark' : 'light');
+        document.documentElement.dataset.theme = saved || (dark ? 'dark' : 'light');
       } catch (_) {}
     </script>
   </head>

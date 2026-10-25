@@ -264,12 +264,19 @@ func TestInvalidServiceURLs(t *testing.T) {
 }
 
 func TestHelpAndUsage(t *testing.T) {
-	_, _, err := runCtl(t, []string{"--help"}, nil, nil)
+	_, stderr, err := runCtl(t, nil, map[string]string{"REVIEW_ADMIN_TOKEN": "admin"}, nil)
+	if err == nil {
+		t.Fatal("missing projects subcommand accepted")
+	}
+	if !strings.Contains(stderr, "Usage: tribunalctl") || strings.Contains(stderr, "Usage: reviewctl") {
+		t.Fatalf("usage does not use tribunalctl: %q", stderr)
+	}
+	_, helpStderr, err := runCtl(t, []string{"--help"}, nil, nil)
 	if !errors.Is(err, flag.ErrHelp) {
 		t.Fatalf("help error = %v", err)
 	}
-	if _, _, err := runCtl(t, nil, map[string]string{"REVIEW_ADMIN_TOKEN": "admin"}, nil); err == nil {
-		t.Fatal("missing projects subcommand accepted")
+	if !strings.Contains(helpStderr, "Usage: tribunalctl") {
+		t.Fatalf("help usage does not use tribunalctl: %q", helpStderr)
 	}
 	if _, _, err := runCtl(t, []string{"projects", "bogus"}, map[string]string{"REVIEW_ADMIN_TOKEN": "admin"}, nil); err == nil {
 		t.Fatal("unknown action accepted")

@@ -7,7 +7,7 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/app"
+	"github.com/LeXwDeX/tribunal/internal/app"
 )
 
 type errorEnvelope struct {

@@ -71,6 +71,6 @@
 
 独立检查：Go build/vet/全量 race 通过，覆盖率 **77.36%**；许可证 65 模块通过；web **155/155** 测试、覆盖率门槛与 build 通过。两组代码复审和文档增量复审均 PASS，无阻塞项。
 
-统一远端证据入口：[Issue #20 验证评论](https://github.com/LeXwDeX/Code-Review-For-Gitlab-CE/issues/20#issuecomment-6369328377)。#16–#27 各自保留独立回归和限制说明，全部仍 OPEN。本文不替代 Issue 工作账本。
+统一远端证据入口：[Issue #20 验证评论](https://github.com/LeXwDeX/Tribunal/issues/20#issuecomment-6369328377)。#16–#27 各自保留独立回归和限制说明，全部仍 OPEN。本文不替代 Issue 工作账本。
 
 本轮只重验归档完整性、相关迁移测试及交付文档，不重复无改动的 Go/Web 全量测试。已完成本机隔离模拟（不同项目隔离、旧库升级、回滚风险演示），但**没有**远端 CI、新镜像、真实 OAuth/GitLab/provider 验收或目标环境升级/回退演练；这些仍是下一阶段的明确门槛。

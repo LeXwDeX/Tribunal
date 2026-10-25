@@ -1,4 +1,4 @@
-// Command reviewctl is a thin HTTP client for the M0 management API.
+// Command tribunalctl is a thin HTTP client for the M0 management API.
 package main
 
 import (
@@ -31,7 +31,7 @@ func main() {
 		if errors.Is(err, flag.ErrHelp) {
 			os.Exit(0)
 		}
-		fmt.Fprintln(os.Stderr, "reviewctl:", err)
+		fmt.Fprintln(os.Stderr, "tribunalctl:", err)
 		os.Exit(1)
 	}
 }
@@ -59,10 +59,10 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 	}
 	g := &globals{stdout: stdout, stderr: stderr, getenv: getenv}
 
-	global := flag.NewFlagSet("reviewctl", flag.ContinueOnError)
+	global := flag.NewFlagSet("tribunalctl", flag.ContinueOnError)
 	global.SetOutput(stderr)
 	global.Usage = func() {
-		fmt.Fprintln(stderr, "Usage: reviewctl [--url URL] [--api-token-env NAME] <projects|users> <action> [options]")
+		fmt.Fprintln(stderr, "Usage: tribunalctl [--url URL] [--api-token-env NAME] <projects|users> <action> [options]")
 		global.PrintDefaults()
 	}
 	global.StringVar(&g.serviceURL, "url", defaultURL, "service base URL")
@@ -433,7 +433,7 @@ type registerRequest struct {
 }
 
 func (g *globals) register(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("reviewctl projects register", flag.ContinueOnError)
+	fs := flag.NewFlagSet("tribunalctl projects register", flag.ContinueOnError)
 	fs.SetOutput(g.stderr)
 	var (
 		project     string

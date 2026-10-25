@@ -11,7 +11,8 @@ const dockerConfigPath = "../../config/server.docker.yaml"
 func setDockerConfigEnv(t *testing.T) {
 	t.Helper()
 	setRequiredEnv(t)
-	t.Setenv("CRC_PUBLIC_URL", "https://review.example.test")
+	t.Setenv("TRIBUNAL_PUBLIC_URL", "https://review.example.test")
+	t.Setenv("CRC_PUBLIC_URL", "")
 	t.Setenv("GITLAB_URL", "https://gitlab.example.test")
 	t.Setenv("LLM_PROTOCOL", "openai-responses")
 	t.Setenv("LLM_BASE_URL", "https://llm.example.test/v1")
@@ -96,6 +97,128 @@ func TestDockerConfigArtifact(t *testing.T) {
 	onboarding, ok := cfg.Profiles["onboarding"]
 	if !ok || onboarding.Agent == nil || onboarding.Agent.Provider != "primary" {
 		t.Fatal("onboarding profile must bind its agent to primary for project registration")
+	}
+}
+
+func TestDockerConfigPublicURLEnvPrecedence(t *testing.T) {
+	const (
+		legacyURL   = "https://legacy.example.test"
+		tribunalURL = "https://tribunal.example.test"
+	)
+	value := func(v string) *string { return &v }
+	tests := []struct {
+		name     string
+		legacy   *string
+		tribunal *string
+		want     string
+		wantErr  bool
+	}{
+		{name: "legacy only", legacy: value(legacyURL), want: legacyURL},
+		{name: "tribunal only", tribunal: value(tribunalURL), want: tribunalURL},
+		{name: "empty legacy prefers tribunal", legacy: value(""), tribunal: value(tribunalURL), want: tribunalURL},
+		{name: "both prefer tribunal", legacy: value(legacyURL), tribunal: value(tribunalURL), want: tribunalURL},
+		{name: "whitespace tribunal falls back", legacy: value(legacyURL), tribunal: value("  "), want: legacyURL},
+		{name: "missing both", wantErr: true},
+		{name: "whitespace only", tribunal: value("  "), wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setDockerConfigEnv(t)
+			if tt.legacy == nil {
+				unsetEnv(t, "CRC_PUBLIC_URL")
+			} else {
+				t.Setenv("CRC_PUBLIC_URL", *tt.legacy)
+			}
+			if tt.tribunal == nil {
+				unsetEnv(t, "TRIBUNAL_PUBLIC_URL")
+			} else {
+				t.Setenv("TRIBUNAL_PUBLIC_URL", *tt.tribunal)
+			}
+
+			cfg, err := Load(dockerConfigPath)
+			if tt.wantErr {
+				requireErrorContains(t, err, "TRIBUNAL_PUBLIC_URL", "not set")
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load(%s) = %v", dockerConfigPath, err)
+			}
+			if cfg.Server.PublicURL != tt.want {
+				t.Errorf("server.public_url = %q, want %q", cfg.Server.PublicURL, tt.want)
+			}
+		})
+	}
+}
+
+func TestDockerConfigUsesTribunalPublicURLPlaceholder(t *testing.T) {
+	data, err := os.ReadFile(dockerConfigPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", dockerConfigPath, err)
+	}
+	body := string(data)
+	if strings.Contains(body, "${CRC_PUBLIC_URL}") {
+		t.Errorf("%s still contains the legacy ${CRC_PUBLIC_URL} placeholder", dockerConfigPath)
+	}
+	if !strings.Contains(body, `public_url: "${TRIBUNAL_PUBLIC_URL}"`) {
+		t.Errorf("%s active public_url does not use ${TRIBUNAL_PUBLIC_URL}", dockerConfigPath)
+	}
+	if !strings.Contains(body, "Redirect URI: ${TRIBUNAL_PUBLIC_URL}/auth/callback") {
+		t.Errorf("%s OAuth callback comment does not use ${TRIBUNAL_PUBLIC_URL}", dockerConfigPath)
+	}
+}
+
+func TestPublicURLEnvAliasLookup(t *testing.T) {
+	const (
+		legacyURL   = "https://legacy.example.test"
+		tribunalURL = "https://tribunal.example.test"
+	)
+	value := func(v string) *string { return &v }
+	tests := []struct {
+		name        string
+		placeholder string
+		legacy      *string
+		tribunal    *string
+		want        string
+		wantErr     string
+	}{
+		{name: "new placeholder old env only", placeholder: "TRIBUNAL_PUBLIC_URL", legacy: value(legacyURL), want: legacyURL},
+		{name: "new placeholder new env only", placeholder: "TRIBUNAL_PUBLIC_URL", tribunal: value(tribunalURL), want: tribunalURL},
+		{name: "new placeholder both prefer new", placeholder: "TRIBUNAL_PUBLIC_URL", legacy: value(legacyURL), tribunal: value(tribunalURL), want: tribunalURL},
+		{name: "old yaml old env only", placeholder: "CRC_PUBLIC_URL", legacy: value(legacyURL), want: legacyURL},
+		{name: "old yaml new env only", placeholder: "CRC_PUBLIC_URL", tribunal: value(tribunalURL), want: tribunalURL},
+		{name: "old yaml both prefer new", placeholder: "CRC_PUBLIC_URL", legacy: value(legacyURL), tribunal: value(tribunalURL), want: tribunalURL},
+		{name: "old yaml whitespace new falls back", placeholder: "CRC_PUBLIC_URL", legacy: value(legacyURL), tribunal: value("  "), want: legacyURL},
+		{name: "new placeholder missing both", placeholder: "TRIBUNAL_PUBLIC_URL", wantErr: "TRIBUNAL_PUBLIC_URL"},
+		{name: "old yaml missing both", placeholder: "CRC_PUBLIC_URL", wantErr: "CRC_PUBLIC_URL"},
+		{name: "new placeholder whitespace only", placeholder: "TRIBUNAL_PUBLIC_URL", tribunal: value("  "), wantErr: "TRIBUNAL_PUBLIC_URL"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setRequiredEnv(t)
+			if tt.legacy == nil {
+				unsetEnv(t, "CRC_PUBLIC_URL")
+			} else {
+				t.Setenv("CRC_PUBLIC_URL", *tt.legacy)
+			}
+			if tt.tribunal == nil {
+				unsetEnv(t, "TRIBUNAL_PUBLIC_URL")
+			} else {
+				t.Setenv("TRIBUNAL_PUBLIC_URL", *tt.tribunal)
+			}
+			path := writeConfig(t, "server.yaml", "server:\n  public_url: \"${"+tt.placeholder+"}\"\n")
+
+			cfg, err := Load(path)
+			if tt.wantErr != "" {
+				requireErrorContains(t, err, tt.wantErr, "not set")
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load() = %v", err)
+			}
+			if cfg.Server.PublicURL != tt.want {
+				t.Errorf("server.public_url = %q, want %q", cfg.Server.PublicURL, tt.want)
+			}
+		})
 	}
 }
 

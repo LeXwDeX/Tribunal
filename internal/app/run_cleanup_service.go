@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/workspace"
+	"github.com/LeXwDeX/tribunal/internal/workspace"
 )
 
 const defaultRunCleanupInterval = time.Hour

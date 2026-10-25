@@ -25,10 +25,10 @@ CONFIG_FILE="$REPO_ROOT/config/server.docker.yaml"
 [ -f "$CONFIG_FILE" ] || fail "missing $CONFIG_FILE"
 
 umask 077
-TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/crc-smoke.XXXXXX")
-PROJECT="crc-smoke-$(date +%s)-$$"
+TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/tribunal-smoke.XXXXXX")
+PROJECT="tribunal-smoke-$(date +%s)-$$"
 VOLUME_NAME="${PROJECT}_data"
-SMOKE_IMAGE="crc-review:smoke-$PROJECT"
+SMOKE_IMAGE="tribunal:smoke-$PROJECT"
 FAKE_ENV="$TMP_DIR/smoke.env"
 OVERRIDE_FILE="$TMP_DIR/override.yaml"
 LOG="$TMP_DIR/smoke.log"
@@ -48,13 +48,17 @@ volumes:
     name: $VOLUME_NAME
 EOF
 
-# Shell exports take precedence over --env-file and the project .env. Setting
-# them here also overrides production variables the caller already exported.
+# Shell exports take precedence over --env-file and the project .env. Override
+# both the new and legacy names so a caller's exported values or secrets never
+# reach Compose interpolation.
+export TRIBUNAL_HTTP_PORT=0
 export CRC_HTTP_PORT=0
+export TRIBUNAL_PUBLIC_URL="http://127.0.0.1:8080"
 export CRC_PUBLIC_URL="http://127.0.0.1:8080"
 export GITLAB_URL="https://gitlab.invalid"
 export REVIEW_MASTER_KEY="MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
 export REVIEW_ADMIN_TOKEN="smoke-admin-token-0123456789abcdef"
+export TRIBUNAL_SESSION_KEY="MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVm"
 export CRC_SESSION_KEY="MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVm"
 export LLM_PROTOCOL="openai-chat"
 export LLM_BASE_URL="https://llm.invalid/v1"
@@ -91,7 +95,7 @@ cleanup() {
         "$PROJECT" "$VOLUME_NAME" >&2
       status=1
     fi
-    # Exact tag only: the base image crc-review:local belongs to the user.
+    # Exact tag only: the base image tribunal:local belongs to the user.
     if [ "$IMAGE_BUILT" = 1 ] && ! docker image rm "$SMOKE_IMAGE" >>"$LOG" 2>&1; then
       printf 'docker-smoke: warning: could not remove image %s\n' "$SMOKE_IMAGE" >&2
       status=1
@@ -162,13 +166,19 @@ status=$(http_status http://127.0.0.1:8080/api/v1/projects) \
 status=$(http_status http://127.0.0.1:8080/auth/login) || fail "OAuth login request failed"
 [ "$status" = 503 ] || fail "OAuth login status is $status, want 503"
 
-step "checking reviewctl"
-projects=$(compose exec -T review /app/reviewctl \
+step "checking tribunalctl and compatibility path"
+projects=$(compose exec -T review /app/tribunalctl \
   --url http://127.0.0.1:8080 projects list 2>>"$LOG") \
-  || fail "reviewctl projects list failed"
+  || fail "tribunalctl projects list failed"
 compact=$(printf '%s' "$projects" | tr -d '[:space:]')
 [ "$compact" = '{"projects":[]}' ] \
-  || fail "reviewctl projects list did not return an empty project list"
+  || fail "tribunalctl projects list did not return an empty project list"
+legacy_projects=$(compose exec -T review /app/reviewctl \
+  --url http://127.0.0.1:8080 projects list 2>>"$LOG") \
+  || fail "compatibility reviewctl path failed"
+legacy_compact=$(printf '%s' "$legacy_projects" | tr -d '[:space:]')
+[ "$legacy_compact" = '{"projects":[]}' ] \
+  || fail "compatibility reviewctl path did not return an empty project list"
 
 step "checking runtime contract"
 # shellcheck disable=SC2016 # commands expand inside the container
@@ -183,14 +193,14 @@ assert_exec "license texts are missing" \
   sh -eu -c 'test -s /licenses/LICENSE && test -s /licenses/THIRD_PARTY_NOTICES.txt'
 assert_exec "database is missing" sh -eu -c 'test -f /app/data/review.db'
 assert_exec "data directory is not writable" \
-  sh -eu -c 'printf "%s" "crc-smoke-marker" > /app/data/smoke-marker'
+  sh -eu -c 'printf "%s" "tribunal-smoke-marker" > /app/data/smoke-marker'
 
 step "recreating $PROJECT and checking volume persistence"
 compose up -d --force-recreate --wait --wait-timeout 180 >>"$LOG" 2>&1 \
   || fail "recreated service was not healthy within 180s"
 marker=$(compose exec -T review cat /app/data/smoke-marker 2>>"$LOG") \
   || fail "cannot read the persisted marker"
-[ "$marker" = "crc-smoke-marker" ] || fail "persisted marker changed after recreation"
+[ "$marker" = "tribunal-smoke-marker" ] || fail "persisted marker changed after recreation"
 assert_exec "database did not persist across recreation" \
   sh -eu -c 'test -f /app/data/review.db'
 

@@ -4,7 +4,9 @@
 # expanded by the server from the container environment supplied by Compose.
 server:
   listen: ":8080"
-  public_url: "${CRC_PUBLIC_URL}"
+  # Config lookup also accepts the legacy CRC_PUBLIC_URL for old persisted
+  # YAML, preferring a non-empty TRIBUNAL_PUBLIC_URL.
+  public_url: "${TRIBUNAL_PUBLIC_URL}"
 
 gitlab:
   url: "${GITLAB_URL}"
@@ -13,7 +15,7 @@ auth:
   bootstrap_token_env: REVIEW_ADMIN_TOKEN
   # Optional GitLab OAuth browser login, off by default. To enable /auth/login,
   # uncomment the oauth mapping and bootstrap_admins below, then set the
-  # matching variables in .env. Redirect URI: ${CRC_PUBLIC_URL}/auth/callback;
+  # matching variables in .env. Redirect URI: ${TRIBUNAL_PUBLIC_URL}/auth/callback;
   # scope: read_user.
   # oauth:
   #   client_id_env: GITLAB_OAUTH_CLIENT_ID

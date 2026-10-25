@@ -20,13 +20,18 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/app"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/config"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/gitlab"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/jobs"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/secret"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/server"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store/sqlite"
+	"github.com/LeXwDeX/tribunal/internal/app"
+	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/gitlab"
+	"github.com/LeXwDeX/tribunal/internal/jobs"
+	"github.com/LeXwDeX/tribunal/internal/secret"
+	"github.com/LeXwDeX/tribunal/internal/server"
+	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
+)
+
+const (
+	tribunalSessionKeyEnv = "TRIBUNAL_SESSION_KEY"
+	legacySessionKeyEnv   = "CRC_SESSION_KEY"
 )
 
 func main() {
@@ -89,6 +94,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	warnDeprecatedEnv(logger)
 	key, err := decodeMasterKey(cfg.Secrets.MasterKeyEnv)
 	if err != nil {
 		return err
@@ -304,20 +310,60 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	return runErr
 }
 
-// warnEphemeralSessionKey tells the operator that sessions persisted in
-// SQLite become unreachable after a restart without a pinned key.
-func warnEphemeralSessionKey(logger *slog.Logger) {
-	if strings.TrimSpace(os.Getenv("CRC_SESSION_KEY")) == "" {
-		logger.Warn("CRC_SESSION_KEY is not set; generated an ephemeral session key, so browser sessions will not survive restart")
+// warnDeprecatedEnv tells the operator once per startup which legacy
+// compatibility variables are still present. It never logs their values.
+func warnDeprecatedEnv(logger *slog.Logger) {
+	for _, deprecation := range []struct {
+		legacy      string
+		replacement string
+		detail      string
+	}{
+		{legacy: "CRC_PUBLIC_URL", replacement: "TRIBUNAL_PUBLIC_URL"},
+		{legacy: "CRC_HTTP_PORT", replacement: "TRIBUNAL_HTTP_PORT", detail: " for the host port mapping"},
+		{legacy: "CRC_SESSION_KEY", replacement: "TRIBUNAL_SESSION_KEY"},
+	} {
+		if strings.TrimSpace(os.Getenv(deprecation.legacy)) == "" {
+			continue
+		}
+		logger.Warn("deprecated environment variable is configured; prefer "+deprecation.replacement+deprecation.detail,
+			"legacy", deprecation.legacy)
 	}
 }
 
-// sessionKeyFromEnv reads CRC_SESSION_KEY as base64 (standard or raw) and
-// requires at least 32 bytes. An absent key is generated per process; stored
-// sessions survive restart but their cookies no longer verify, so the caller
-// must warn the operator (see warnEphemeralSessionKey).
+// warnEphemeralSessionKey tells the operator that sessions persisted in
+// SQLite become unreachable after a restart without a pinned key.
+func warnEphemeralSessionKey(logger *slog.Logger) {
+	if name, _ := sessionKeySource(); name == "" {
+		logger.Warn(tribunalSessionKeyEnv + " is not set; generated an ephemeral session key, so browser sessions will not survive restart")
+	}
+}
+
+// sessionKeySource prefers TRIBUNAL_SESSION_KEY and falls back to the legacy
+// CRC_SESSION_KEY only when the new variable is unset or exactly empty. The
+// new value is returned untrimmed so sessionKeyFromEnv can reject a
+// whitespace-only value instead of falling back.
+func sessionKeySource() (string, string) {
+	if raw := os.Getenv(tribunalSessionKeyEnv); raw != "" {
+		return tribunalSessionKeyEnv, raw
+	}
+	if value := strings.TrimSpace(os.Getenv(legacySessionKeyEnv)); value != "" {
+		return legacySessionKeyEnv, value
+	}
+	return "", ""
+}
+
+// sessionKeyFromEnv reads the preferred key as base64 (standard or raw) and
+// requires at least 32 bytes. An absent or exactly empty key is generated per
+// process; stored sessions survive restart but their cookies no longer verify,
+// so the caller must warn the operator (see warnEphemeralSessionKey). A
+// non-empty TRIBUNAL_SESSION_KEY that is whitespace only, or otherwise
+// invalid, is an error and never falls back to the legacy name.
 func sessionKeyFromEnv() ([]byte, error) {
-	value := strings.TrimSpace(os.Getenv("CRC_SESSION_KEY"))
+	name, value := sessionKeySource()
+	value = strings.TrimSpace(value)
+	if name == tribunalSessionKeyEnv && value == "" {
+		return nil, fmt.Errorf("auth: %s must not be whitespace only", name)
+	}
 	if value == "" {
 		key := make([]byte, 32)
 		if _, err := rand.Read(key); err != nil {
@@ -330,7 +376,7 @@ func sessionKeyFromEnv() ([]byte, error) {
 		key, err = base64.RawStdEncoding.DecodeString(value)
 	}
 	if err != nil || len(key) < 32 {
-		return nil, errors.New("auth: CRC_SESSION_KEY must be base64 of at least 32 bytes")
+		return nil, fmt.Errorf("auth: %s must be base64 of at least 32 bytes", name)
 	}
 	return key, nil
 }

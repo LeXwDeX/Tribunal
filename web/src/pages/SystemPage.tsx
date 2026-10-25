@@ -72,7 +72,7 @@ function TokenCreateDialog({ open, onClose }: { open: boolean; onClose: () => vo
       title={created ? '复制新 API token' : '创建 API token'}
       description={created
         ? '明文 token 只显示这一次。关闭对话框后将从界面状态中清除。'
-        : 'API token 用于 reviewctl 或脚本访问管理 API。请设置名称和有效期。'}
+        : 'API token 用于 tribunalctl 或脚本访问管理 API。请设置名称和有效期。'}
       footer={created ? (
         <Button variant="primary" onClick={onClose}>我已复制，关闭</Button>
       ) : (
@@ -92,7 +92,7 @@ function TokenCreateDialog({ open, onClose }: { open: boolean; onClose: () => vo
           {error ? <ErrorState error={error} title="创建失败" /> : null}
           <div className="formGrid">
             <Field label="名称" htmlFor={nameId} error={fieldError}>
-              <input id={nameId} className="input" value={name} onChange={(event) => setName(event.target.value)} placeholder="例如 ci-reviewctl" aria-invalid={Boolean(fieldError)} />
+              <input id={nameId} className="input" value={name} onChange={(event) => setName(event.target.value)} placeholder="例如 ci-tribunalctl" aria-invalid={Boolean(fieldError)} />
             </Field>
             <Field label="有效天数" htmlFor={expiresId} hint="正整数，最长 365 天。">
               <input id={expiresId} className="input" type="number" min={1} max={365} value={days} onChange={(event) => setDays(event.target.value)} />
@@ -465,7 +465,7 @@ export function SystemPage() {
             ) : null}
             {tokens.isPending ? <LoadingState /> : null}
             {tokens.isError ? <ErrorState error={tokens.error} onRetry={tokens.retry} /> : null}
-            {tokens.isSuccess && tokens.items.length === 0 ? <EmptyState title="还没有 API token" description={canSelfService ? '创建一个 token 供 reviewctl 或脚本使用。' : '当前账号没有 API token。'} /> : null}
+            {tokens.isSuccess && tokens.items.length === 0 ? <EmptyState title="还没有 API token" description={canSelfService ? '创建一个 token 供 tribunalctl 或脚本使用。' : '当前账号没有 API token。'} /> : null}
             {tokens.items.length ? (
               <div className="tableWrap">
                 <table className="dataTable" style={{ minWidth: 760 }}>

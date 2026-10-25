@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/config"
 )
 
 func floatPtr(value float64) *float64 { return &value }

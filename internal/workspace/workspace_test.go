@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/repo"
+	"github.com/LeXwDeX/tribunal/internal/repo"
 )
 
 type fixture struct {

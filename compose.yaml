@@ -2,11 +2,13 @@
 # values, build the image with `docker compose build`, then run
 # `docker compose up -d`. Compose loads .env implicitly for interpolation; the
 # environment block below is an explicit allowlist, not an env_file.
+# The project and volume names intentionally keep the crc-review identity so
+# existing deployments keep their data; the image and CLI use the new name.
 name: crc-review
 
 services:
   review:
-    image: crc-review:local
+    image: tribunal:local
     build:
       context: .
       dockerfile: Dockerfile
@@ -14,7 +16,8 @@ services:
     init: true
     stop_grace_period: 30s
     ports:
-      - "127.0.0.1:${CRC_HTTP_PORT:-8080}:8080"
+      # TRIBUNAL_HTTP_PORT only maps the host port; the server listens on 8080.
+      - "127.0.0.1:${TRIBUNAL_HTTP_PORT:-${CRC_HTTP_PORT:-8080}}:8080"
     volumes:
       - data:/app/data
       - type: bind
@@ -24,11 +27,16 @@ services:
         bind:
           create_host_path: false
     environment:
-      CRC_PUBLIC_URL: "${CRC_PUBLIC_URL:-http://localhost:8080}"
+      TRIBUNAL_PUBLIC_URL: "${TRIBUNAL_PUBLIC_URL:-${CRC_PUBLIC_URL:-http://localhost:8080}}"
+      # Raw legacy names stay visible to the server for deprecation notices.
+      CRC_PUBLIC_URL: "${CRC_PUBLIC_URL:-}"
       GITLAB_URL: "${GITLAB_URL:?GITLAB_URL is required}"
       REVIEW_MASTER_KEY: "${REVIEW_MASTER_KEY:?REVIEW_MASTER_KEY is required}"
       REVIEW_ADMIN_TOKEN: "${REVIEW_ADMIN_TOKEN:?REVIEW_ADMIN_TOKEN is required}"
-      CRC_SESSION_KEY: "${CRC_SESSION_KEY:?CRC_SESSION_KEY is required}"
+      # Fail closed when neither session-key name is configured.
+      TRIBUNAL_SESSION_KEY: "${TRIBUNAL_SESSION_KEY:-${CRC_SESSION_KEY:?TRIBUNAL_SESSION_KEY or CRC_SESSION_KEY is required}}"
+      CRC_SESSION_KEY: "${CRC_SESSION_KEY:-}"
+      CRC_HTTP_PORT: "${CRC_HTTP_PORT:-}"
       LLM_BASE_URL: "${LLM_BASE_URL:?LLM_BASE_URL is required}"
       LLM_MODEL: "${LLM_MODEL:?LLM_MODEL is required}"
       LLM_API_KEY: "${LLM_API_KEY:?LLM_API_KEY is required}"

@@ -1,4 +1,4 @@
-# Server and reviewctl image: embedded web console, git, and license texts.
+# Server and tribunalctl image: embedded web console, git, and license texts.
 # Base tags were checked on Docker Hub on 2026-10-22:
 #   node:22.20.0-bookworm-slim
 #   golang:1.26.10-bookworm
@@ -22,25 +22,27 @@ COPY . .
 # from the web stage so the binary always embeds a matching console.
 COPY --from=web /src/web/dist ./web/dist
 RUN go build -trimpath -buildvcs=false -ldflags="-s -w" -o /out/server ./cmd/server \
-    && go build -trimpath -buildvcs=false -ldflags="-s -w" -o /out/reviewctl ./cmd/reviewctl
+    && go build -trimpath -buildvcs=false -ldflags="-s -w" -o /out/tribunalctl ./cmd/tribunalctl
 
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl git passwd \
     && rm -rf /var/lib/apt/lists/* \
-    && groupadd --gid 10001 crc \
-    && useradd --uid 10001 --gid crc --create-home --home-dir /home/crc --shell /bin/false crc
+    && groupadd --gid 10001 tribunal \
+    && useradd --uid 10001 --gid tribunal --create-home --home-dir /home/tribunal --shell /bin/false tribunal
 
 WORKDIR /app
 COPY --from=build /out/server /app/server
-COPY --from=build /out/reviewctl /app/reviewctl
+COPY --from=build /out/tribunalctl /app/tribunalctl
+# Keep the old path for scripts written against the previous image.
+RUN ln -s tribunalctl /app/reviewctl
 COPY LICENSE THIRD_PARTY_LICENSES /licenses/
 COPY licenses/ /licenses/
 COPY config/server.example.yaml /app/config/
-RUN install -d -o crc -g crc -m 0700 /app/data
+RUN install -d -o tribunal -g tribunal -m 0700 /app/data
 
 USER 10001:10001
-ENV HOME=/home/crc
+ENV HOME=/home/tribunal
 EXPOSE 8080
 VOLUME ["/app/data"]
 STOPSIGNAL SIGTERM

@@ -10,6 +10,51 @@ import (
 	"testing"
 )
 
+const (
+	smokeSessionKey = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVm"
+	smokePublicURL  = "http://127.0.0.1:8080"
+	callerSecret    = "caller-secret-must-not-leak"
+)
+
+func TestDockerArtifactsUseTribunalIdentity(t *testing.T) {
+	files := map[string][]string{
+		"../Dockerfile": {
+			"-o /out/tribunalctl ./cmd/tribunalctl",
+			"COPY --from=build /out/tribunalctl /app/tribunalctl",
+			"ln -s tribunalctl /app/reviewctl",
+			"groupadd --gid 10001 tribunal",
+			"useradd --uid 10001 --gid tribunal --create-home --home-dir /home/tribunal",
+			"USER 10001:10001",
+			"ENV HOME=/home/tribunal",
+		},
+		"../compose.yaml": {
+			"name: crc-review",
+			"image: tribunal:local",
+			`TRIBUNAL_SESSION_KEY: "${TRIBUNAL_SESSION_KEY:-${CRC_SESSION_KEY:?`,
+			`CRC_SESSION_KEY: "${CRC_SESSION_KEY:-}"`,
+			`TRIBUNAL_PUBLIC_URL: "${TRIBUNAL_PUBLIC_URL:-${CRC_PUBLIC_URL:-`,
+			`CRC_PUBLIC_URL: "${CRC_PUBLIC_URL:-}"`,
+			`127.0.0.1:${TRIBUNAL_HTTP_PORT:-${CRC_HTTP_PORT:-8080}}:8080`,
+			`CRC_HTTP_PORT: "${CRC_HTTP_PORT:-}"`,
+		},
+		"../config/server.docker.yaml": {
+			`public_url: "${TRIBUNAL_PUBLIC_URL}"`,
+		},
+	}
+	for path, wants := range files {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		body := string(data)
+		for _, want := range wants {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s does not contain %q", path, want)
+			}
+		}
+	}
+}
+
 // TestDockerSmokeCleanup runs the real smoke script against a fake Docker CLI.
 // It proves cleanup status handling, not that Compose or Docker work.
 func TestDockerSmokeCleanup(t *testing.T) {
@@ -55,6 +100,7 @@ func TestDockerSmokeCleanup(t *testing.T) {
 				}
 			}
 			callLog := filepath.Join(root, "calls.log")
+			envLog := filepath.Join(root, "env.log")
 			writeExecutable(t, filepath.Join(bin, "docker"), fakeDocker)
 			writeExecutable(t, filepath.Join(bin, "rm"), fakeRM)
 
@@ -64,11 +110,18 @@ func TestDockerSmokeCleanup(t *testing.T) {
 				"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"),
 				"TMPDIR=" + tmpRoot,
 				"SMOKE_FAKE_CALL_LOG=" + callLog,
+				"SMOKE_FAKE_ENV_LOG=" + envLog,
 				"SMOKE_FAKE_TMP_ROOT=" + tmpRoot,
 				"SMOKE_FAKE_BUILD_FAIL=" + boolEnv(tc.buildFail),
 				"SMOKE_FAKE_DOWN_FAIL=" + boolEnv(tc.downFail),
 				"SMOKE_FAKE_IMAGE_RM_FAIL=" + boolEnv(tc.imageFail),
 				"SMOKE_FAKE_RM_FAIL=" + boolEnv(tc.rmFail),
+				"TRIBUNAL_SESSION_KEY=" + callerSecret,
+				"CRC_SESSION_KEY=" + callerSecret,
+				"TRIBUNAL_PUBLIC_URL=https://caller.invalid",
+				"CRC_PUBLIC_URL=https://caller.invalid",
+				"TRIBUNAL_HTTP_PORT=12345",
+				"CRC_HTTP_PORT=12345",
 			}
 			output, runErr := cmd.CombinedOutput()
 			exitCode := 0
@@ -88,14 +141,37 @@ func TestDockerSmokeCleanup(t *testing.T) {
 				}
 			}
 
+			env := readEnv(t, envLog)
+			for name, want := range map[string]string{
+				"TRIBUNAL_SESSION_KEY": smokeSessionKey,
+				"CRC_SESSION_KEY":      smokeSessionKey,
+				"TRIBUNAL_PUBLIC_URL":  smokePublicURL,
+				"CRC_PUBLIC_URL":       smokePublicURL,
+				"TRIBUNAL_HTTP_PORT":   "0",
+				"CRC_HTTP_PORT":        "0",
+			} {
+				if env[name] != want {
+					t.Errorf("%s override = %q, want fake value", name, env[name])
+				}
+				if env[name] == callerSecret || env[name] == "https://caller.invalid" || env[name] == "12345" {
+					t.Errorf("%s kept a caller value", name)
+				}
+			}
+
 			calls := readCalls(t, callLog)
 			project := ""
 			downCalls := 0
 			var imageRemoves []string
 			var rmCalls [][]string
+			var cliCalls []string
 			for _, args := range calls {
 				if len(args) == 0 {
 					continue
+				}
+				for _, arg := range args {
+					if arg == "/app/tribunalctl" || arg == "/app/reviewctl" {
+						cliCalls = append(cliCalls, arg)
+					}
 				}
 				switch args[0] {
 				case "compose":
@@ -127,8 +203,13 @@ func TestDockerSmokeCleanup(t *testing.T) {
 					rmCalls = append(rmCalls, args)
 				}
 			}
-			if !regexp.MustCompile(`^crc-smoke-[0-9]+-[0-9]+$`).MatchString(project) {
-				t.Fatalf("project %q is not a generated crc-smoke project", project)
+			if !regexp.MustCompile(`^tribunal-smoke-[0-9]+-[0-9]+$`).MatchString(project) {
+				t.Fatalf("project %q is not a generated tribunal-smoke project", project)
+			}
+			if !tc.buildFail {
+				if !contains(cliCalls, "/app/tribunalctl") || !contains(cliCalls, "/app/reviewctl") {
+					t.Fatalf("smoke did not exercise both CLI paths: %v", cliCalls)
+				}
 			}
 			if downCalls != 1 {
 				t.Fatalf("compose down calls = %d, want 1", downCalls)
@@ -137,7 +218,7 @@ func TestDockerSmokeCleanup(t *testing.T) {
 				if len(imageRemoves) != 1 {
 					t.Fatalf("image removals = %v, want one", imageRemoves)
 				}
-				if want := "crc-review:smoke-" + project; imageRemoves[0] != want {
+				if want := "tribunal:smoke-" + project; imageRemoves[0] != want {
 					t.Fatalf("image removal = %q, want %q", imageRemoves[0], want)
 				}
 			} else if len(imageRemoves) != 0 {
@@ -150,7 +231,7 @@ func TestDockerSmokeCleanup(t *testing.T) {
 			if len(rmArgs) != 2 || rmArgs[0] != "-rf" {
 				t.Fatalf("unexpected rm invocation: %v", rmArgs)
 			}
-			if filepath.Dir(rmArgs[1]) != tmpRoot || !strings.HasPrefix(filepath.Base(rmArgs[1]), "crc-smoke.") {
+			if filepath.Dir(rmArgs[1]) != tmpRoot || !strings.HasPrefix(filepath.Base(rmArgs[1]), "tribunal-smoke.") {
 				t.Fatalf("rm target %q is not the generated temporary directory", rmArgs[1])
 			}
 			entries, err := os.ReadDir(tmpRoot)
@@ -158,7 +239,7 @@ func TestDockerSmokeCleanup(t *testing.T) {
 				t.Fatal(err)
 			}
 			if tc.rmFail {
-				if len(entries) != 1 || !strings.HasPrefix(entries[0].Name(), "crc-smoke.") {
+				if len(entries) != 1 || !strings.HasPrefix(entries[0].Name(), "tribunal-smoke.") {
 					t.Fatalf("temporary directory after failed removal = %v, want the smoke directory", entries)
 				}
 			} else if len(entries) != 0 {
@@ -202,6 +283,22 @@ func readCalls(t *testing.T, path string) [][]string {
 	return calls
 }
 
+func readEnv(t *testing.T, path string) map[string]string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := make(map[string]string)
+	for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
+		name, value, ok := strings.Cut(line, "=")
+		if ok {
+			values[name] = value
+		}
+	}
+	return values
+}
+
 func optionValue(args []string, option string) string {
 	for i := 0; i+1 < len(args); i++ {
 		if args[i] == option {
@@ -230,7 +327,16 @@ log_call() {
   done >>"$SMOKE_FAKE_CALL_LOG"
   printf '\n' >>"$SMOKE_FAKE_CALL_LOG"
 }
+log_env() {
+  printf 'TRIBUNAL_SESSION_KEY=%s\n' "${TRIBUNAL_SESSION_KEY:-}" >>"$SMOKE_FAKE_ENV_LOG"
+  printf 'CRC_SESSION_KEY=%s\n' "${CRC_SESSION_KEY:-}" >>"$SMOKE_FAKE_ENV_LOG"
+  printf 'TRIBUNAL_PUBLIC_URL=%s\n' "${TRIBUNAL_PUBLIC_URL:-}" >>"$SMOKE_FAKE_ENV_LOG"
+  printf 'CRC_PUBLIC_URL=%s\n' "${CRC_PUBLIC_URL:-}" >>"$SMOKE_FAKE_ENV_LOG"
+  printf 'TRIBUNAL_HTTP_PORT=%s\n' "${TRIBUNAL_HTTP_PORT:-}" >>"$SMOKE_FAKE_ENV_LOG"
+  printf 'CRC_HTTP_PORT=%s\n' "${CRC_HTTP_PORT:-}" >>"$SMOKE_FAKE_ENV_LOG"
+}
 log_call "$@"
+log_env
 
 if [ "$#" -eq 1 ] && [ "$1" = "info" ]; then
   exit 0
@@ -300,10 +406,10 @@ if [ "$#" -ge 1 ] && [ "$1" = "compose" ]; then
       exit 0
       ;;
     cat)
-      printf 'crc-smoke-marker\n'
+      printf 'tribunal-smoke-marker\n'
       exit 0
       ;;
-    /app/reviewctl)
+    /app/tribunalctl|/app/reviewctl)
       printf '{"projects":[]}\n'
       exit 0
       ;;

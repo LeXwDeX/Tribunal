@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
 const annotationURL = "/api/v1/reviews/wf-1/findings/f1/annotation"

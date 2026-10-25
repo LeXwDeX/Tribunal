@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/app"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/app"
+	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
 // adminProjectView is the minimal management-plane project list. It

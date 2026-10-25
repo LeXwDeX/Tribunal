@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/app"
+	"github.com/LeXwDeX/tribunal/internal/app"
 )
 
 func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/agent"
+	"github.com/LeXwDeX/tribunal/internal/agent"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 

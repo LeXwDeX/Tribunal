@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/gitlab"
+	"github.com/LeXwDeX/tribunal/internal/gitlab"
 )
 
 // DossierSchemaVersion is the persisted materials-snapshot version.

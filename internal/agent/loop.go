@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/llm"
+	"github.com/LeXwDeX/tribunal/internal/llm"
 )
 
 const mustSubmitPrompt = "You must call the " + SubmitToolName +

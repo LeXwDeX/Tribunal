@@ -338,7 +338,7 @@ func expandEnv(node *yaml.Node, errs *[]error) {
 				*errs = append(*errs, fmt.Errorf("line %d: invalid environment variable reference", node.Line))
 				return ref
 			}
-			value, ok := os.LookupEnv(name)
+			value, ok := envValue(name)
 			if !ok {
 				*errs = append(*errs, fmt.Errorf("line %d: environment variable %s is not set", node.Line, name))
 				return ref
@@ -349,6 +349,25 @@ func expandEnv(node *yaml.Node, errs *[]error) {
 	for _, child := range node.Content {
 		expandEnv(child, errs)
 	}
+}
+
+// envValue lets both spellings of the public URL resolve from either
+// environment name so old persisted YAML keeps working after the rename.
+func envValue(name string) (string, bool) {
+	switch name {
+	case "TRIBUNAL_PUBLIC_URL", "CRC_PUBLIC_URL":
+		return publicURLEnv()
+	}
+	return os.LookupEnv(name)
+}
+
+// publicURLEnv always prefers a non-empty TRIBUNAL_PUBLIC_URL and falls back to
+// the legacy name.
+func publicURLEnv() (string, bool) {
+	if value, ok := os.LookupEnv("TRIBUNAL_PUBLIC_URL"); ok && strings.TrimSpace(value) != "" {
+		return value, true
+	}
+	return os.LookupEnv("CRC_PUBLIC_URL")
 }
 
 func decodeStrict(root *yaml.Node, cfg *Config) error {

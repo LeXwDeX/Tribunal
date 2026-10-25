@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	webui "github.com/LeXwDeX/Code-Review-For-Gitlab-CE/web"
+	webui "github.com/LeXwDeX/tribunal/web"
 )
 
 const (

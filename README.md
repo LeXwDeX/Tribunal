@@ -1,16 +1,18 @@
-# Code Review for GitLab CE
+# Tribunal
+
+GitLab CE MR 多 agent 自动评审服务
 
 基于 Go 的 GitLab CE MR 自动评审服务，使用 MIT 协议。
 
 当前 M0–M6 功能已有本地实现，覆盖项目注册与 webhook、三种 LLM 协议、agent 工具循环、DAG 与持久化、主 agent 编排/对抗核验/裁决、GitLab 发布、工作区、MCP/Skill、OAuth 持久会话、项目 `read`/`manage` 授权与 CSRF、管理 API、React 控制台、API token、统计、反馈采集、人工标注与许可证清单。
 
-已验证运行时候选/源码快照 `f143e7a7835e1e99345b1df9b289bb499e3c67416598d30e6184a558374eb0ac`（402 文件）通过本地全量检查、实际镜像构建、离线恢复/在线升级和连续两次无诊断代理 deep 运行；BLOCKING 是合成授权回归的预期结论。旧 `27c9b1c` 只是更早的已测快照，不代表本次已验证快照，也不覆盖新的 Responses header。较早的独立代码评审未发现 code blocker，但因缺少 f143 运行时 manifest 与 `12a62d1` 文档 manifest/source-equivalence 而记为 evidence BLOCKING；该缺口已关闭，最终独立 review 对 `12a62d1` 文档树给出 code/documentation PASS、0 blockers。之后的文档澄清只关联 [PR #30](https://github.com/LeXwDeX/Code-Review-For-Gitlab-CE/pull/30)，不构成新的 review；native CI、平台评审、合并和 Release 仍需在 PR #30 回读，本文不预判结果。详见[验证](#验证)与[交付就绪](docs/delivery-readiness.md)。
+已验证运行时候选/源码快照 `f143e7a7835e1e99345b1df9b289bb499e3c67416598d30e6184a558374eb0ac`（402 文件）通过本地全量检查、实际镜像构建、离线恢复/在线升级和连续两次无诊断代理 deep 运行；BLOCKING 是合成授权回归的预期结论。旧 `27c9b1c` 只是更早的已测快照，不代表本次已验证快照，也不覆盖新的 Responses header。较早的独立代码评审未发现 code blocker，但因缺少 f143 运行时 manifest 与 `12a62d1` 文档 manifest/source-equivalence 而记为 evidence BLOCKING；该缺口已关闭，最终独立 review 对 `12a62d1` 文档树给出 code/documentation PASS、0 blockers。之后的文档澄清只关联 [PR #30](https://github.com/LeXwDeX/Tribunal/pull/30)，不构成新的 review；native CI、平台评审、合并和 Release 仍需在 PR #30 回读，本文不预判结果。详见[验证](#验证)与[交付就绪](docs/delivery-readiness.md)。
 
 总体目标见 [ARCH.md](ARCH.md)，实现层面的设计与已知偏差见 [详细设计](docs/design/README.md)，部署、备份与运行边界见 [部署与运维](docs/operations.md)。
 
 ## Docker Compose 部署
 
-需要 Docker Engine 或 Docker Desktop，以及 Compose v2.20 或更新版本。宿主机不需要安装 Go 或 Node。镜像包含控制台、服务和 `reviewctl`，SQLite 与工作区放在同一个持久卷中。
+需要 Docker Engine 或 Docker Desktop，以及 Compose v2.20 或更新版本。宿主机不需要安装 Go 或 Node。镜像包含控制台、服务和 `tribunalctl`，SQLite 与工作区放在同一个持久卷中。
 
 首次部署，在仓库根目录准备 `.env`：
 
@@ -19,19 +21,23 @@ cp -n .env.example .env
 chmod 600 .env
 ```
 
-填写真实 `GITLAB_URL`、`LLM_MODEL`、`LLM_API_KEY`，检查 `LLM_PROTOCOL` 和 `LLM_BASE_URL` 是否匹配模型接口。分别生成并持久保存 `REVIEW_MASTER_KEY`、`REVIEW_ADMIN_TOKEN`、`CRC_SESSION_KEY`，生成方法见 `.env.example`。`.env` 已被 Git 和 Docker 构建上下文忽略；Compose 只传入显式列出的环境变量。
+填写真实 `GITLAB_URL`、`LLM_MODEL`、`LLM_API_KEY`，检查 `LLM_PROTOCOL` 和 `LLM_BASE_URL` 是否匹配模型接口。分别生成并持久保存 `REVIEW_MASTER_KEY`、`REVIEW_ADMIN_TOKEN`、`TRIBUNAL_SESSION_KEY`，生成方法见 `.env.example`。`.env` 已被 Git 和 Docker 构建上下文忽略；Compose 只传入显式列出的环境变量。
+
+本文环境变量示例使用新主名 `TRIBUNAL_SESSION_KEY`、`TRIBUNAL_PUBLIC_URL`、`TRIBUNAL_HTTP_PORT`。旧名 `CRC_SESSION_KEY`、`CRC_PUBLIC_URL`、`CRC_HTTP_PORT` 仍兼容；新旧同时设置时新名优先。`TRIBUNAL_SESSION_KEY` 未设置或恰好为空字符串时才回退旧名；非空但只含空白是非法值，启动失败，不回退旧名，也不生成临时 key。三个旧名只要配置了非空值，都会各记录一次弃用日志；日志只含变量名、不含值。日志表示旧名仍配置，不代表旧值一定生效或一定被忽略：Compose 会把仅设置的 `CRC_HTTP_PORT` 作为 `TRIBUNAL_HTTP_PORT` 的插值回退值，仅用于宿主机端口映射，并把仅设置的 `CRC_SESSION_KEY` 复制给容器的 `TRIBUNAL_SESSION_KEY`。`TRIBUNAL_HTTP_PORT` / `CRC_HTTP_PORT` 只影响 Compose 宿主机映射，不是应用监听端口。若部署的 `.env` 仍列出旧名，照常可用。升级时复用原 session key 的同一个值，不要重新生成，否则现有浏览器会话失效。
 
 ```bash
 docker compose config --quiet
 docker compose build
 docker compose run --rm --no-deps review --config /app/config/server.yaml --check-config
 docker compose up -d --wait --wait-timeout 120
-docker compose exec -T review /app/reviewctl projects all
+docker compose exec -T review /app/tribunalctl projects all
 ```
 
-默认地址为 `http://localhost:8080`，端口仅绑定本机。默认支持 API/Bearer 管理，**浏览器登录需要另外启用 GitLab OAuth**：填写 `.env` 的 OAuth 变量及管理员用户名，取消 `config/server.docker.yaml` 中对应配置的注释，并配置 HTTPS 反向代理与 `CRC_PUBLIC_URL`。修改 `.env` 后用 `docker compose up -d --force-recreate`，单纯 `restart` 不会更新容器环境变量。
+`/app/tribunalctl` 是当前镜像内的 CLI。旧镜像的 CLI 路径是 `/app/reviewctl`；新镜像保留指向 `/app/tribunalctl` 的 `/app/reviewctl` 兼容符号链接，旧编排脚本可继续调用。源码用户改用 `go run ./cmd/tribunalctl`。
 
-停止使用 `docker compose down`，不要加 `-v`，否则会删除数据库和工作区。完整启动、项目注册、OAuth、备份及验证步骤见 [部署与运维](docs/operations.md)。已验证候选已构建实际镜像 `crc-v1-acceptance:candidate-f143e7a` 并通过配置检查；更早的远程测试机记录仅作历史参考。
+默认地址为 `http://localhost:8080`，端口仅绑定本机。默认支持 API/Bearer 管理，**浏览器登录需要另外启用 GitLab OAuth**：填写 `.env` 的 OAuth 变量及管理员用户名，取消 `config/server.docker.yaml` 中对应配置的注释，并配置 HTTPS 反向代理与 `TRIBUNAL_PUBLIC_URL`。修改 `.env` 后用 `docker compose up -d --force-recreate`，单纯 `restart` 不会更新容器环境变量。
+
+停止使用 `docker compose down`，不要加 `-v`，否则会删除数据库和工作区。完整启动、项目注册、OAuth、备份及验证步骤见 [部署与运维](docs/operations.md)。已验证候选已构建实际镜像 `crc-v1-acceptance:candidate-f143e7a` 并通过配置检查；`crc-v1-acceptance` 是刻意保留的历史验收镜像名，不改写。更早的远程测试机记录仅作历史参考。
 
 ## 本地启动
 
@@ -41,7 +47,7 @@ docker compose exec -T review /app/reviewctl projects all
 cd web && npm ci && npm run build && cd ..
 export REVIEW_MASTER_KEY="$(openssl rand -base64 32)"
 export REVIEW_ADMIN_TOKEN="$(openssl rand -hex 32)"
-export CRC_SESSION_KEY="$(openssl rand -base64 32)"
+export TRIBUNAL_SESSION_KEY="$(openssl rand -base64 32)"
 go run ./cmd/server --config config/server.example.yaml --check-config
 go run ./cmd/server --config config/server.example.yaml
 ```
@@ -55,7 +61,7 @@ export GITLAB_OAUTH_CLIENT_ID="..."
 export GITLAB_OAUTH_CLIENT_SECRET="..."
 ```
 
-`REVIEW_MASTER_KEY` 必须持久保存，重启时使用同一个值。丢失或更换它将无法解密已注册项目的凭据。不要在每次启动时重新生成。`REVIEW_ADMIN_TOKEN` 是管理员 bootstrap Bearer token，应由部署环境保管，不写入 YAML 或命令行参数。浏览器会话持久化在 SQLite；固定 `CRC_SESSION_KEY` 时，未过期会话在重启后仍有效；每次启动重新生成 key 会让旧 cookie 失效并只记录告警。
+`REVIEW_MASTER_KEY` 必须持久保存，重启时使用同一个值。丢失或更换它将无法解密已注册项目的凭据。不要在每次启动时重新生成。`REVIEW_ADMIN_TOKEN` 是管理员 bootstrap Bearer token，应由部署环境保管，不写入 YAML 或命令行参数。浏览器会话持久化在 SQLite；固定 `TRIBUNAL_SESSION_KEY`（旧名 `CRC_SESSION_KEY` 仍兼容，见上文兼容说明）时，未过期会话在重启后仍有效；每次启动重新生成 key 会让旧 cookie 失效并只记录告警。
 
 未配置 OAuth 时，浏览器端无法登录；`REVIEW_ADMIN_TOKEN` 仍可作为 Bearer 使用，但它只是平台管理面 token：可调用用户、授权和系统配置接口，没有本地用户 ID，也不获得任何项目业务数据访问。已通过控制台创建的用户 API token（明文只在创建时显示一次）也继续可用于 Bearer，但创建 token 本身需要浏览器会话。浏览器会话和 API token 的 `admin`/`viewer` 标签在每次请求时按当前 `bootstrap_admins` 计算；项目业务数据另由本地 `project_grants` 的 `read`/`manage` 决定。平台管理员不会因为 `admin` 标签而自动获得项目权限，必须显式授予 grant；无 grant 或项目不存在统一返回 404，只有 `read` 时执行写操作返回 403。`users.role` 只记录签发时的标签，不作为已有 token 的项目权限来源。`REVIEW_ADMIN_TOKEN` 由配置固定，轮换由部署环境更新变量并重启完成，不受本地用户停用影响；从 `bootstrap_admins` 移除用户名并重启后，其平台管理标签失效。用户新签发的 API token 默认 90 天、最长 365 天；历史无过期时间的 token 在撤销前继续有效。
 
@@ -66,7 +72,7 @@ export GITLAB_OAUTH_CLIENT_SECRET="..."
 ```bash
 curl --fail http://localhost:8080/healthz
 curl --fail http://localhost:8080/readyz
-go run ./cmd/reviewctl --url http://localhost:8080 projects all
+go run ./cmd/tribunalctl --url http://localhost:8080 projects all
 ```
 
 `/healthz` 检查进程，`/readyz` 检查数据库和 worker 生命周期。非本机部署应使用 HTTPS 反向代理和访问控制，不能把明文 HTTP 管理接口暴露到公网。
@@ -76,11 +82,11 @@ go run ./cmd/reviewctl --url http://localhost:8080 projects all
 先通过部署环境设置 `GITLAB_PROJECT_TOKEN`。项目 token 需要 `api` 和 `read_repository` scope。自动创建 webhook 还需要 Maintainer 权限。
 
 ```bash
-go run ./cmd/reviewctl --url http://localhost:8080 projects register \
+go run ./cmd/tribunalctl --url http://localhost:8080 projects register \
   --project group/backend-api \
   --token-env GITLAB_PROJECT_TOKEN \
   --profile default
-go run ./cmd/reviewctl --url http://localhost:8080 projects get 42
+go run ./cmd/tribunalctl --url http://localhost:8080 projects get 42
 ```
 
 `--project` 也可以是 GitLab 项目 ID 或配置的 GitLab 根地址下的完整 HTTP(S) 仓库 URL。默认手工创建 webhook：注册响应中的 `webhook_secret` 只显示这一次，用它配置 GitLab 的 Secret token。URL 为服务地址加 `/webhooks/gitlab`，启用 Merge request、Comments 和 Push 事件。
@@ -89,17 +95,17 @@ go run ./cmd/reviewctl --url http://localhost:8080 projects get 42
 
 自动创建时添加 `--auto-webhook`，并把 `server.public_url` 配为 GitLab 能访问的服务地址。重复注册返回冲突，不覆盖已有凭据。自动创建 hook 成功但入库失败时会尝试删除刚创建的 hook；网络中断等异常仍可能需要管理员核对 GitLab 上的 hook。
 
-CLI 默认读取 `REVIEW_ADMIN_TOKEN`，可以用全局参数 `--api-token-env NAME` 改变环境变量名。注册响应和普通查询都不会返回项目 access token 或数据库密文。项目业务列表按当前 bearer 所属用户的项目授权过滤；静态 bootstrap token 没有用户 ID 和 grant，因此 `reviewctl projects list` 返回空列表是正常的。管理面列出全部已登记项目用 `reviewctl projects all`。用户和授权管理命令：
+CLI 默认读取 `REVIEW_ADMIN_TOKEN`，可以用全局参数 `--api-token-env NAME` 改变环境变量名。注册响应和普通查询都不会返回项目 access token 或数据库密文。项目业务列表按当前 bearer 所属用户的项目授权过滤；静态 bootstrap token 没有用户 ID 和 grant，因此 `tribunalctl projects list` 返回空列表是正常的。管理面列出全部已登记项目用 `tribunalctl projects all`。用户和授权管理命令：
 
 ```bash
-reviewctl users list
-reviewctl projects grants list <project-id>
-reviewctl projects grants set <project-id> <user-id> read
-reviewctl projects grants set <project-id> <user-id> manage
-reviewctl projects grants delete <project-id> <user-id>
-reviewctl users disable <user-id>
-reviewctl users enable <user-id>
-reviewctl users revoke <user-id>
+tribunalctl users list
+tribunalctl projects grants list <project-id>
+tribunalctl projects grants set <project-id> <user-id> read
+tribunalctl projects grants set <project-id> <user-id> manage
+tribunalctl projects grants delete <project-id> <user-id>
+tribunalctl users disable <user-id>
+tribunalctl users enable <user-id>
+tribunalctl users revoke <user-id>
 ```
 
 这些用户和授权命令需要平台管理员凭据；用户自己的 API token 只用于其已有项目 grant 的业务访问。首次授权前，目标用户需要先通过 OAuth 登录一次，才能在 `users list` 中得到 GitLab 用户 ID。`users disable` 会同时撤销该用户的全部会话和 API token；`users revoke` 只撤销凭据，不禁用账号。已有部署升级后所有用户默认没有 project grant，包括平台管理员；迁移和撤销步骤见 [部署与运维](docs/operations.md#项目授权用户停用和凭据撤销)。
@@ -119,7 +125,7 @@ Webhook 不调用 GitLab 或模型。认证失败返回 401；其他情况返回
 
 启用仓库配置（`allow_repo_config=true`）时，Draft 的最终过滤在 worker 读取目标分支配置后完成，webhook 保持无网络调用；标签只允许仓库追加排除，项目级早期过滤仍安全；目标分支由 worker 按实际 MR 重新确认。自动评审、裸 `/review` 和未带 profile 的手动 API 优先采用仓库 `profile`；显式命令或显式 API profile 优先。
 
-`GET /api/v1/projects` 按当前用户的项目授权过滤；静态 bootstrap bearer 或没有 grant 的账号会得到空列表。管理面的 `/api/v1/admin/projects`、`reviewctl projects all` 返回全部登记项目，用于选择授权对象。`projects`、`users`、`grants`、`api-tokens`、`mcp-servers`、`skills`、`block-bindings` 列表使用游标分页，默认 50、最大 200。`reviewctl projects list`、`reviewctl projects all` 和 `reviewctl users list` 会自动遍历所有页；只调用一次并假定返回全量列表的旧客户端现在只会得到第一页（最多 50 条），必须循环 `next_cursor`。
+`GET /api/v1/projects` 按当前用户的项目授权过滤；静态 bootstrap bearer 或没有 grant 的账号会得到空列表。管理面的 `/api/v1/admin/projects`、`tribunalctl projects all` 返回全部登记项目，用于选择授权对象。`projects`、`users`、`grants`、`api-tokens`、`mcp-servers`、`skills`、`block-bindings` 列表使用游标分页，默认 50、最大 200。`tribunalctl projects list`、`tribunalctl projects all` 和 `tribunalctl users list` 会自动遍历所有页；只调用一次并假定返回全量列表的旧客户端现在只会得到第一页（最多 50 条），必须循环 `next_cursor`。
 
 UUID 在项目内去重，去重记录和入队在同一事务中提交。同一 key 最多保留一个 running 和一个 queued 任务；新 webhook 或通过权限检查的评审命令替换待执行任务的内容，不覆盖正在执行的内容。同一 key 的任务不会并行领取。完成、失败及续租均校验 worker、attempt 和租约，过期 worker 无法覆盖新执行结果。替换 payload 不重置 attempt，以免旧执行编号重新生效。
 
@@ -164,7 +170,7 @@ go mod verify
 
 **范围外 / 不构成本次 v1 发布门槛**
 
-生产规模、负载和计费、物理设备/完整 WCAG、Postgres、其他协议/provider、每个 MCP HTTP backend 的具体实现不在本次 v1 范围；最终 commit、CI、平台评审和 Release 回读以 [PR #30](https://github.com/LeXwDeX/Code-Review-For-Gitlab-CE/pull/30) 为准。以上均不新增为本次 v1 发布条件。
+生产规模、负载和计费、物理设备/完整 WCAG、Postgres、其他协议/provider、每个 MCP HTTP backend 的具体实现不在本次 v1 范围；最终 commit、CI、平台评审和 Release 回读以 [PR #30](https://github.com/LeXwDeX/Tribunal/pull/30) 为准。以上均不新增为本次 v1 发布条件。
 
 **已知限制**
 
@@ -176,7 +182,7 @@ go mod verify
 - 上下文文档保存采用追加版本：每个 `(project, kind)` 只有一个 active 版本。人工保存会追加 active 版本；生成任务在当前 active 版本 locked 时写入新版本但不切换；同一 base 和 workflow 的重试复用已有版本。数据库是 source of truth，人工保存和锁定会同步工作区上下文文件与 metadata；`workspaces.context_sha` 只跟踪 agents。
 - 仓库级 `.gitlab-review.yml` 在评审 worker 中按目标分支合并。`allow_repo_config=true` 时 Draft 由 worker 最终判断；标签只追加排除；目标分支不能被仓库配置覆盖。手动命令不受自动 Draft/标签/分支过滤限制。
 - 后台 run cleanup 在启动后立即执行、之后每小时运行。它先读取项目列表、保护集合和上下文 SHA 集合，再进入项目文件：删除超过 `workspace.run_cleanup_after` 且未被未终态 workflow、queued/running job、`publication_state=pending` 的 dossier 或本进程注册 run 引用的 `runs/<id>`；同时删除超过同一阈值、未被任何 `context_docs` 记录或当前 workspace/未终态/待发布 workflow base 保护的 `context/<sha>`。metadata 标记 locked 或 metadata 缺失/非法时保留并 fail closed。项目列表查询失败时整轮不删除；某个项目的保护查询失败时跳过该项目。缺失 mirror 时只有通过全部检查的 run 才删除；其他 Git 失败保留目录。
-- 浏览器会话持久化在 SQLite，cookie 保存随机 token 及其 HMAC 签名；固定 `CRC_SESSION_KEY` 时重启后未过期会话仍有效。未设置该变量时每进程随机生成 key 并告警，重启后旧会话失效。浏览器会话和 API token 的 `admin`/`viewer` 标签每请求按 `bootstrap_admins` 计算，重启并移除管理员配置后平台管理权限同步降级；项目业务数据由 `project_grants` 独立控制，默认无权限，平台管理员也不例外。静态 `REVIEW_ADMIN_TOKEN` 保持平台管理权限，但没有用户 ID 和项目授权。
+- 浏览器会话持久化在 SQLite，cookie 保存随机 token 及其 HMAC 签名；固定 `TRIBUNAL_SESSION_KEY`（旧名 `CRC_SESSION_KEY` 仍兼容）时重启后未过期会话仍有效。直接运行应用且新旧名都未配置时，每进程随机生成 key 并告警，重启后旧会话失效；本仓库 Compose 要求配置其中一个名字。浏览器会话和 API token 的 `admin`/`viewer` 标签每请求按 `bootstrap_admins` 计算，重启并移除管理员配置后平台管理权限同步降级；项目业务数据由 `project_grants` 独立控制，默认无权限，平台管理员也不例外。静态 `REVIEW_ADMIN_TOKEN` 保持平台管理权限，但没有用户 ID 和项目授权。
 - 项目列表返回 `workspace` 和 `last_review`，项目详情返回 `workspace` 和最多 20 条 `recent_reviews`，并保留原有扁平项目字段；列表当前按项目逐项补充摘要（每个项目 2 次读取），分页默认 50、最大 200。评审详情的 `mr_title` 来自已存储 dossier；`publications.commit_status` 只从 `status:<sha>:<state>` 发布键解析 `success`/`failed`，旧键没有状态时视为未知。
 - 反馈采集写入 `thumbsup` / `thumbsdown` 与 `resolved_*` signal。讨论只采集发布者首条 note 的 award，不把 thread reply 的表情当作对 finding 的反馈；汇总评论的 award 保持未关联 finding。`stats.feedback` 返回原始计数 `{total, by_signal, by_provider}`，按项目和 `observed_at` 的 `[from,to)` 过滤；归因只统计能按持久化 `feedback.finding_id` 精确匹配 finding 且 publication 一致的 discussion。summary、unlinked 和关联不一致的信号仍计入原始总数；同一 signal 可同时计入提出方和挑战方，两个角色的计数不能相加当作总数。它们不自动修改人工标注。顶层 `overturned_ratio` 是规则裁决中 `drop` 的占比，不是挑战推翻率或误杀率。
 - 人工标注仅保留最新结论，采用最后一次成功写入，不提供历史审计或并发编辑冲突提示；清除时一并清空操作者和时间。质量指标按 workflow 创建时间筛选，但使用当前标注，因此旧时间窗的结果可随更正变化。去重后的 finding 每行只归给保存的提出方，挑战方按同一 workflow 的 `challenge_node` 关联；缺失 provider 的角色不计入该角色统计。样本可能存在人工选择偏差，不代表模型总体效果；标注不改变发布结果或 verdict。
@@ -204,6 +210,6 @@ go mod verify
 - Issue #3（2026-10-25 确认）：按既定发布键边界验收。相同事件 UUID、相同 `publish_key` 和同一评审重复发布不新增重复评论；显式新评审可创建新代次，模型换标题可能再次发布同一问题。本版不增加跨次问题语义去重。真实相同 UUID 并发重放三次和重复发布两次均未增加工作流、评论或讨论。
 - 上述口径只覆盖所列验收点，不代表整个 MVP 已验收；该确认不构成新的上游授权或法律审计。
 
-最终 commit、CI、平台评审和 Release 回读以 [PR #30](https://github.com/LeXwDeX/Code-Review-For-Gitlab-CE/pull/30) 为准。
+最终 commit、CI、平台评审和 Release 回读以 [PR #30](https://github.com/LeXwDeX/Tribunal/pull/30) 为准。
 
-本次文档修正没有运行构建、测试、真实服务或 CI；上述验证数字来自 f143 快照记录。最终 commit、CI、平台评审和 Release 回读以 [PR #30](https://github.com/LeXwDeX/Code-Review-For-Gitlab-CE/pull/30) 为准。
+本次文档修正没有运行构建、测试、真实服务或 CI；上述验证数字来自 f143 快照记录。最终 commit、CI、平台评审和 Release 回读以 [PR #30](https://github.com/LeXwDeX/Tribunal/pull/30) 为准。

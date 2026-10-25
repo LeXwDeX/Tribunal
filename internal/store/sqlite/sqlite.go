@@ -17,8 +17,8 @@ import (
 	"github.com/google/uuid"
 	sqlitedrv "modernc.org/sqlite"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store/migrations"
+	"github.com/LeXwDeX/tribunal/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/store/migrations"
 )
 
 const (

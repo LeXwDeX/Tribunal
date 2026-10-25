@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/llm"
+	"github.com/LeXwDeX/tribunal/internal/llm"
 )
 
 type fakeClient struct {
