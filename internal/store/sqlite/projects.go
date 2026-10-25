@@ -236,6 +236,9 @@ func (s *Store) UpdateProjectWebhook(ctx context.Context, id int64, update store
 	if id <= 0 {
 		return errors.New("sqlite: project id is required")
 	}
+	if update.HookID != nil && update.ClearHookID {
+		return errors.New("sqlite: cannot set and clear the webhook hook ID")
+	}
 	switch update.State {
 	case store.WebhookStateDisabled, store.WebhookStatePending,
 		store.WebhookStateEnabled, store.WebhookStateFailed, store.WebhookStateUnknown:
@@ -250,18 +253,26 @@ func (s *Store) UpdateProjectWebhook(ctx context.Context, id int64, update store
 	if err != nil {
 		return fmt.Errorf("sqlite: encode webhook events: %w", err)
 	}
+	now := formatTime(s.now().UTC())
 	sets := []string{"webhook_state = ?", "webhook_error = ?", "webhook_events = ?"}
 	args := []any{update.State, truncateWebhookError(update.Error), string(eventsJSON)}
 	if update.HookID != nil {
-		sets = append(sets, "hook_id = ?")
-		args = append(args, *update.HookID)
+		sets = append(sets, "hook_id = ?", "webhook_created_at = COALESCE(webhook_created_at, ?)")
+		args = append(args, *update.HookID, now)
+	}
+	if update.ClearHookID {
+		sets = append(sets, "hook_id = NULL")
 	}
 	if len(update.SecretEnc) > 0 {
 		sets = append(sets, "webhook_secret_enc = ?")
 		args = append(args, update.SecretEnc)
 	}
-	sets = append(sets, "updated_at = ?")
-	args = append(args, formatTime(s.now().UTC()), id)
+	if update.ManagedBy != "" {
+		sets = append(sets, "webhook_managed_by = ?")
+		args = append(args, update.ManagedBy)
+	}
+	sets = append(sets, "webhook_updated_at = ?", "updated_at = ?")
+	args = append(args, now, now, id)
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE projects SET `+strings.Join(sets, ", ")+` WHERE id = ?`, args...)
 	if err != nil {
@@ -319,6 +330,8 @@ func (s *Store) DeleteProject(ctx context.Context, id int64) error {
 		{`DELETE FROM webhook_deliveries WHERE project_id = ?`, []any{id}},
 		{`DELETE FROM block_bindings WHERE project_id = ?`, []any{id}},
 		{`DELETE FROM review_controls WHERE project_id = ?`, []any{id}},
+		{`DELETE FROM review_status WHERE project_id = ?`, []any{id}},
+		{`DELETE FROM review_reactions WHERE project_id = ?`, []any{id}},
 		{`DELETE FROM llm_calls WHERE workflow_id IN (` + workflowScope + `)`, []any{id}},
 		{`DELETE FROM events WHERE workflow_id IN (` + workflowScope + `)`, []any{id}},
 		{`DELETE FROM workflow_dossiers WHERE workflow_id IN (` + workflowScope + `)`, []any{id}},
@@ -327,11 +340,15 @@ func (s *Store) DeleteProject(ctx context.Context, id int64) error {
 		)`, []any{id}},
 		{`DELETE FROM jobs
 		  WHERE "key" = ? OR "key" LIKE ? OR "key" LIKE ? OR "key" LIKE ?
-		     OR "key" = ? OR "key" LIKE ?`,
+		     OR "key" = ? OR "key" LIKE ?
+		     OR "key" LIKE ? OR "key" LIKE ? OR "key" LIKE ?`,
 			[]any{fmt.Sprintf("workspace.onboard:%d", id),
 				fmt.Sprintf("review:%d:%%", id), fmt.Sprintf("review.cancel:%d:%%", id),
 				fmt.Sprintf("review.command:%d:%%", id),
-				fmt.Sprintf("ws:%d", id), fmt.Sprintf("ws:%d:%%", id)}},
+				fmt.Sprintf("ws:%d", id), fmt.Sprintf("ws:%d:%%", id),
+				fmt.Sprintf("review.candidate:%d:%%", id),
+				fmt.Sprintf("review.status:%d:%%", id),
+				fmt.Sprintf("review.reaction:%d:%%", id)}},
 	}
 	for _, statement := range statements {
 		if _, err := tx.ExecContext(ctx, statement.query, statement.args...); err != nil {

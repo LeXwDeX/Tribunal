@@ -49,6 +49,7 @@ type ReviewStore interface {
 	dag.EventStore
 	GetProject(ctx context.Context, id int64) (*store.Project, error)
 	GetReviewControl(ctx context.Context, projectID, mrIID int64) (*store.ReviewControl, error)
+	ActivateReviewCandidate(ctx context.Context, activation store.ReviewCandidateActivation) (string, int64, error)
 	FindActiveReview(ctx context.Context, projectID, mrIID int64) (*store.Workflow, error)
 	CreateReviewWorkflow(ctx context.Context, req sqlite.ReviewWorkflowRequest) (string, bool, error)
 	DetachWorkflowJob(ctx context.Context, workflowID, jobID string) error
@@ -75,6 +76,22 @@ type ReviewStore interface {
 	SetActiveContext(ctx context.Context, projectID int64, baseSHA string) error
 	UpsertFeedback(ctx context.Context, f store.Feedback) (*store.Feedback, error)
 	ListFeedback(ctx context.Context, filter store.FeedbackFilter) ([]store.Feedback, string, error)
+	Enqueue(ctx context.Context, job store.Job) (string, bool, error)
+	SetReviewStatus(ctx context.Context, goal store.ReviewStatusGoal) (bool, error)
+	GetReviewStatus(ctx context.Context, projectID, mrIID int64) (*store.ReviewStatus, error)
+	MarkReviewStatusApplied(ctx context.Context, projectID, mrIID int64, version, noteID int64, bodyHash, lastError string) error
+	ListPendingReviewStatuses(ctx context.Context) ([]store.ReviewStatus, error)
+	ListReviewStatusesByState(ctx context.Context, states []string, updatedBefore time.Time) ([]store.ReviewStatus, error)
+	SetReviewReaction(ctx context.Context, goal store.ReviewReactionGoal) (bool, error)
+	GetReviewReaction(ctx context.Context, projectID, mrIID, noteID int64) (*store.ReviewReaction, error)
+	MarkReviewReactionApplied(ctx context.Context, projectID, mrIID, noteID int64, version int64, lastError string) error
+	ListPendingReviewReactions(ctx context.Context) ([]store.ReviewReaction, error)
+	ListReviewReactionsByDesired(ctx context.Context, desired string, updatedBefore time.Time) ([]store.ReviewReaction, error)
+	ClearOlderReviewReactions(ctx context.Context, projectID, mrIID, generation int64) ([]int64, error)
+	ClearReviewReactionsForGeneration(ctx context.Context, projectID, mrIID, generation int64) ([]int64, error)
+	HasActiveReviewJob(ctx context.Context, projectID, mrIID int64) (bool, error)
+	LatestReviewWorkflow(ctx context.Context, projectID, mrIID int64) (*store.Workflow, error)
+	RecentReviewDurations(ctx context.Context, projectID int64, profile string, since time.Time, limit int) ([]time.Duration, error)
 }
 
 // ReviewService implements F1/F2: MR review orchestration. It owns workflow
@@ -202,8 +219,14 @@ func (s *ReviewService) Handle(ctx context.Context, job *jobs.Job) error {
 		err = s.RunReview(ctx, job)
 	case "review.cancel":
 		err = s.CancelReview(ctx, job)
+	case "review.candidate":
+		err = s.RunCandidate(ctx, job)
 	case "review.publish":
 		err = s.RepublishReview(ctx, job)
+	case "review.status":
+		err = s.RunStatusJob(ctx, job)
+	case "review.reaction":
+		err = s.RunReactionJob(ctx, job)
 	default:
 		return nil
 	}
@@ -226,6 +249,19 @@ type reviewRunPayload struct {
 	Trigger         string `json:"trigger"`
 	Full            bool   `json:"full"`
 	NoteID          int64  `json:"note_id,omitempty"`
+	ActivationSeq   int64  `json:"activation_seq,omitempty"`
+}
+
+type reviewCandidatePayload struct {
+	ProjectID     int64  `json:"project_id"`
+	MRIID         int64  `json:"mr_iid"`
+	HeadSHA       string `json:"head_sha"`
+	CandidateSeq  int64  `json:"candidate_seq"`
+	Generation    int64  `json:"generation,omitempty"`
+	ActivationSeq int64  `json:"activation_seq,omitempty"`
+	Profile       string `json:"profile"`
+	Trigger       string `json:"trigger"`
+	Full          bool   `json:"full"`
 }
 
 type reviewCancelPayload struct {
@@ -233,6 +269,7 @@ type reviewCancelPayload struct {
 	MRIID      int64  `json:"mr_iid"`
 	Generation int64  `json:"generation"`
 	Trigger    string `json:"trigger"`
+	NoteID     int64  `json:"note_id,omitempty"`
 }
 
 type reviewPublishPayload struct {
@@ -247,14 +284,122 @@ func decodeReviewPayload(raw json.RawMessage, target any) error {
 	return nil
 }
 
+// RunCandidate executes one deferred review.candidate job. It reads only the
+// MR and target-branch configuration, so a filtered event completes without a
+// control write, status note, or cancellation of the active review. Acceptance
+// activates the candidate and enqueues review.run in one store transaction.
+func (s *ReviewService) RunCandidate(ctx context.Context, job *jobs.Job) error {
+	var payload reviewCandidatePayload
+	if err := decodeReviewPayload(job.Payload, &payload); err != nil {
+		return err
+	}
+	if payload.ProjectID <= 0 || payload.MRIID <= 0 || !shaRE.MatchString(payload.HeadSHA) ||
+		payload.CandidateSeq <= 0 || payload.Generation != 0 || payload.ActivationSeq != 0 {
+		return PermanentJob(fmt.Errorf("invalid review.candidate payload"))
+	}
+	payload.HeadSHA = strings.ToLower(payload.HeadSHA)
+	if strings.TrimSpace(job.ID) == "" || strings.TrimSpace(job.LeaseOwner) == "" || job.Attempts <= 0 {
+		return PermanentJob(fmt.Errorf("review candidate job lease is required"))
+	}
+
+	project, token, err := s.projectToken(ctx, payload.ProjectID)
+	if err != nil {
+		return err
+	}
+	control, err := s.store.GetReviewControl(ctx, payload.ProjectID, payload.MRIID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return PermanentJob(fmt.Errorf("review control is missing"))
+		}
+		return err
+	}
+	if control.BarrierSeq >= payload.CandidateSeq {
+		// A newer run/cancel or this candidate's earlier activation already
+		// consumed the event. No GitLab call and no control write is needed.
+		s.logger.Info("review candidate already consumed",
+			"project_id", project.ID, "mr_iid", payload.MRIID, "candidate_seq", payload.CandidateSeq)
+		return nil
+	}
+
+	mr, docs, err := s.collectFilterInputs(ctx, project, token, payload.MRIID, payload.HeadSHA)
+	if err != nil {
+		if errors.Is(err, ErrMRClosed) || errors.Is(err, ErrReviewSuperseded) {
+			s.logger.Info("review candidate event is no longer applicable",
+				"project_id", project.ID, "mr_iid", payload.MRIID, "reason", err.Error())
+			return nil
+		}
+		return err
+	}
+	cfg := s.resolveConfig(project, docs)
+	if reason := reviewFilterReason(payload.Trigger, mr, project, cfg.Settings); reason != "" {
+		// The effective configuration rejected this event. Keep the active
+		// review untouched; a later event can still supersede it.
+		s.logger.Info("review candidate filtered after configuration merge",
+			"project_id", project.ID, "mr_iid", payload.MRIID, "trigger", payload.Trigger, "reason", reason)
+		return nil
+	}
+
+	runJobID, generation, err := s.store.ActivateReviewCandidate(ctx, store.ReviewCandidateActivation{
+		JobID:        job.ID,
+		LeaseOwner:   job.LeaseOwner,
+		Attempts:     job.Attempts,
+		ProjectID:    payload.ProjectID,
+		MRIID:        payload.MRIID,
+		HeadSHA:      payload.HeadSHA,
+		CandidateSeq: payload.CandidateSeq,
+	})
+	switch {
+	case errors.Is(err, store.ErrSuperseded):
+		s.logger.Info("review candidate superseded before activation",
+			"project_id", project.ID, "mr_iid", payload.MRIID, "candidate_seq", payload.CandidateSeq)
+		return nil
+	case errors.Is(err, store.ErrNotFound):
+		return PermanentJob(fmt.Errorf("review control is missing"))
+	case err != nil:
+		return err
+	}
+	s.logger.Info("review candidate activated", "project_id", project.ID, "mr_iid", payload.MRIID,
+		"candidate_seq", payload.CandidateSeq, "generation", generation, "job_id", runJobID)
+	return nil
+}
+
+// collectFilterInputs reads only the MR and its target-branch repository
+// configuration. The candidate filter decision must not require the full diff.
+func (s *ReviewService) collectFilterInputs(ctx context.Context, project *store.Project, token string, mrIID int64, head string) (*gitlab.MergeRequest, review.RepoDocs, error) {
+	mr, err := s.gitlab.GetMergeRequest(ctx, token, project.ID, mrIID)
+	if err != nil {
+		if gitlab.IsNotFound(err) {
+			return nil, review.RepoDocs{}, PermanentJob(fmt.Errorf("%w: merge request not found", ErrMRClosed))
+		}
+		return nil, review.RepoDocs{}, err
+	}
+	if mr == nil || !isOpenState(mr.State) {
+		return nil, review.RepoDocs{}, PermanentJob(fmt.Errorf("%w: state %s", ErrMRClosed, mrState(mr)))
+	}
+	if mr.TargetProjectID > 0 && mr.TargetProjectID != project.ID {
+		return nil, review.RepoDocs{}, PermanentJob(fmt.Errorf("%w: target project mismatch", ErrReviewSuperseded))
+	}
+	if !strings.EqualFold(strings.TrimSpace(mr.SHA), head) {
+		return nil, review.RepoDocs{}, PermanentJob(fmt.Errorf("%w: merge request head changed", ErrReviewSuperseded))
+	}
+	if strings.TrimSpace(mr.TargetBranch) == "" {
+		return nil, review.RepoDocs{}, PermanentJob(fmt.Errorf("merge request target branch is empty"))
+	}
+	configDoc, err := s.rawDoc(ctx, token, project.ID, ".gitlab-review.yml", mr.TargetBranch)
+	if err != nil {
+		return nil, review.RepoDocs{}, err
+	}
+	return mr, review.RepoDocs{GitLabReviewConfig: configDoc}, nil
+}
+
 // RunReview executes one review.run job.
-func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) error {
+func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error) {
 	var payload reviewRunPayload
 	if err := decodeReviewPayload(job.Payload, &payload); err != nil {
 		return err
 	}
 	if payload.ProjectID <= 0 || payload.MRIID <= 0 || payload.Generation <= 0 ||
-		!shaRE.MatchString(payload.HeadSHA) || payload.NoteID < 0 {
+		!shaRE.MatchString(payload.HeadSHA) || payload.NoteID < 0 || payload.ActivationSeq < 0 {
 		return PermanentJob(fmt.Errorf("invalid review.run payload"))
 	}
 	payload.HeadSHA = strings.ToLower(payload.HeadSHA)
@@ -266,15 +411,25 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) error {
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if err == nil || ctx.Err() != nil || !IsPermanentJob(err) {
+			return
+		}
+		state, detail := reviewStatusFailed, reviewExecutionFailedReason
+		if errors.Is(err, ErrReviewSuperseded) || errors.Is(err, ErrMRClosed) {
+			state, detail = reviewStatusStale, "review is no longer current"
+		}
+		s.settleReviewStatus(ctx, payload.ProjectID, payload.MRIID, payload.Generation,
+			job.Attempts, payload.HeadSHA, payload.Profile, state, detail,
+			payload.NoteID, reviewAwardNone)
+	}()
 	control, err := s.currentControl(ctx, payload.ProjectID, payload.MRIID, payload.Generation, payload.HeadSHA)
 	if err != nil {
 		return err
 	}
 	// The generation fence passed, so this worker still owns the status note.
-	s.reportStatus(ctx, project, token, control.MRIID, payload.Generation, payload.HeadSHA, reviewStatusUpdate{
-		State:   reviewStatusRunning,
-		HeadSHA: payload.HeadSHA,
-	})
+	s.setReviewStatus(ctx, project.ID, control.MRIID, payload.Generation, job.Attempts,
+		payload.HeadSHA, payload.Profile, reviewStatusRunning, "")
 	// Claim application ownership before preparing a worktree or registering
 	// an executor. A concurrent recovery or lease-reclaimed handler shares the
 	// same job ID and must stop here; Engine.Run's late ErrAlreadyRunning would
@@ -293,20 +448,19 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) error {
 	}
 
 	cfg := s.resolveConfig(project, inputs.RepoDocs)
-	if reason := reviewFilterReason(payload.Trigger, inputs.MR, project, cfg.Settings); reason != "" {
-		// Webhook filtering cannot read repository configuration without a
-		// network call. When repo config is enabled the worker makes the final
-		// decision here, after the target-branch config is merged.
-		s.logger.Info("review job filtered after configuration merge",
-			"project_id", project.ID, "mr_iid", control.MRIID, "trigger", payload.Trigger, "reason", reason)
-		s.reportTerminal(ctx, project, token, control.MRIID, payload.Generation, payload.HeadSHA, reviewStatusUpdate{
-			State:     reviewStatusStale,
-			Detail:    "review skipped: " + reason,
-			HeadSHA:   payload.HeadSHA,
-			NoteID:    payload.NoteID,
-			ClearEyes: true,
-		})
-		return nil
+	if payload.ActivationSeq == 0 {
+		if reason := reviewFilterReason(payload.Trigger, inputs.MR, project, cfg.Settings); reason != "" {
+			// Webhook filtering cannot read repository configuration without a
+			// network call. When repo config is enabled the worker makes the final
+			// decision here, after the target-branch config is merged. An
+			// activated candidate already made that decision.
+			s.logger.Info("review job filtered after configuration merge",
+				"project_id", project.ID, "mr_iid", control.MRIID, "trigger", payload.Trigger, "reason", reason)
+			s.settleReviewStatus(ctx, project.ID, control.MRIID, payload.Generation,
+				job.Attempts, payload.HeadSHA, payload.Profile, reviewStatusStale,
+				"review skipped: "+reason, payload.NoteID, reviewAwardNone)
+			return nil
+		}
 	}
 	if !resumable {
 		// Filtering happens first so a draft or excluded-label update never
@@ -500,7 +654,7 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) error {
 	}
 	if superseded {
 		s.logger.Info("review superseded while running", "workflow_id", wfID)
-		s.reportSuperseded(ctx, project, token, control.MRIID, payload.Generation, payload.HeadSHA, wfID)
+		s.settleRunSuperseded(ctx, payload, wfID)
 		return s.skipPublication(ctx, wfID, reviewSupersededReason)
 	}
 
@@ -510,49 +664,72 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) error {
 	}
 	switch snapshot.Status {
 	case dag.WorkflowCompleted:
-		s.reportStatus(ctx, project, token, control.MRIID, payload.Generation, payload.HeadSHA, reviewStatusUpdate{
-			State:   reviewStatusPublishing,
-			HeadSHA: payload.HeadSHA,
-			NoteID:  payload.NoteID,
-		})
+		s.setReviewStatus(ctx, project.ID, control.MRIID, payload.Generation, job.Attempts,
+			payload.HeadSHA, payload.Profile, reviewStatusPublishing, "")
 		if err := s.publish(ctx, wfID); err != nil {
-			s.reportPublishFailure(ctx, project, token, control.MRIID, payload.Generation, payload.HeadSHA, payload.NoteID, err)
+			s.settlePublishFailure(ctx, payload, job.Attempts, err)
 			return err
 		}
-		s.reportVerdict(ctx, project, token, control.MRIID, payload.Generation, payload.HeadSHA, payload.NoteID, wfID)
+		state, reaction := reviewStatusForVerdict(s.workflowVerdict(ctx, wfID))
+		s.settleReviewStatus(ctx, project.ID, control.MRIID, payload.Generation, job.Attempts,
+			payload.HeadSHA, payload.Profile, state, "", payload.NoteID, reaction)
 		return nil
 	case dag.WorkflowFailed:
-		s.reportStatus(ctx, project, token, control.MRIID, payload.Generation, payload.HeadSHA, reviewStatusUpdate{
-			State:   reviewStatusPublishing,
-			HeadSHA: payload.HeadSHA,
-			NoteID:  payload.NoteID,
-		})
+		s.setReviewStatus(ctx, project.ID, control.MRIID, payload.Generation, job.Attempts,
+			payload.HeadSHA, payload.Profile, reviewStatusPublishing, "")
 		var publishErr error
 		if cfg.Settings.PostFailureNote {
 			publishErr = s.publishFailure(ctx, wfID, snapshot)
 		} else {
 			publishErr = s.skipPublication(ctx, wfID, failureNoteDisabledReason)
 		}
-		s.reportTerminal(ctx, project, token, control.MRIID, payload.Generation, payload.HeadSHA, reviewStatusUpdate{
-			State:     reviewStatusFailed,
-			HeadSHA:   payload.HeadSHA,
-			NoteID:    payload.NoteID,
-			Reaction:  reviewAwardFail,
-			ClearEyes: true,
-		})
+		s.settleReviewStatus(ctx, project.ID, control.MRIID, payload.Generation, job.Attempts,
+			payload.HeadSHA, payload.Profile, reviewStatusFailed, "", payload.NoteID, reviewAwardFail)
 		return publishErr
 	case dag.WorkflowCancelled:
 		publishErr := s.skipPublication(ctx, wfID, reviewCancelledReason)
-		s.reportTerminal(ctx, project, token, control.MRIID, payload.Generation, payload.HeadSHA, reviewStatusUpdate{
-			State:     reviewStatusCancelled,
-			HeadSHA:   payload.HeadSHA,
-			NoteID:    payload.NoteID,
-			ClearEyes: true,
-		})
+		s.settleReviewStatus(ctx, project.ID, control.MRIID, payload.Generation, job.Attempts,
+			payload.HeadSHA, payload.Profile, reviewStatusCancelled, "", payload.NoteID, reviewAwardNone)
 		return publishErr
 	default:
 		return nil
 	}
+}
+
+// settleRunSuperseded writes a terminal state only while this generation still
+// owns the MR. A successor's status is left untouched.
+func (s *ReviewService) settleRunSuperseded(ctx context.Context, payload reviewRunPayload, workflowID string) {
+	control, err := s.store.GetReviewControl(ctx, payload.ProjectID, payload.MRIID)
+	if err != nil || control.Generation != payload.Generation {
+		return
+	}
+	state := reviewStatusStale
+	detail := "merge request changed before publication"
+	if control.Cancelled {
+		state = reviewStatusCancelled
+		detail = "review cancelled"
+	}
+	noteID := payload.NoteID
+	if noteID <= 0 {
+		noteID = s.workflowNoteID(ctx, workflowID)
+	}
+	s.settleReviewStatus(ctx, payload.ProjectID, payload.MRIID, payload.Generation, 0,
+		payload.HeadSHA, payload.Profile, state, detail, noteID, reviewAwardNone)
+}
+
+// settlePublishFailure records a failed or stale publication without changing
+// the workflow verdict.
+func (s *ReviewService) settlePublishFailure(ctx context.Context, payload reviewRunPayload, attempt int, cause error) {
+	state := reviewStatusFailed
+	reaction := reviewAwardFail
+	detail := "publication failed"
+	if errors.Is(cause, ErrStalePublication) {
+		state = reviewStatusStale
+		reaction = reviewAwardNone
+		detail = "review is no longer current"
+	}
+	s.settleReviewStatus(ctx, payload.ProjectID, payload.MRIID, payload.Generation, attempt,
+		payload.HeadSHA, payload.Profile, state, detail, payload.NoteID, reaction)
 }
 
 // CancelReview executes one review.cancel job. It never publishes.
@@ -561,9 +738,20 @@ func (s *ReviewService) CancelReview(ctx context.Context, job *jobs.Job) error {
 	if err := decodeReviewPayload(job.Payload, &payload); err != nil {
 		return err
 	}
-	if payload.ProjectID <= 0 || payload.MRIID <= 0 {
+	if payload.ProjectID <= 0 || payload.MRIID <= 0 || payload.NoteID < 0 {
 		return PermanentJob(fmt.Errorf("invalid review.cancel payload"))
 	}
+	err := s.cancelReview(ctx, payload)
+	if err == nil || IsPermanentJob(err) {
+		// The /review cancel note is this job's own receipt. Settle it whenever
+		// the cancel reaches a conclusion, including when a successor replaced
+		// it; the generation fence keeps the successor's status intact.
+		s.settleCancellation(ctx, payload)
+	}
+	return err
+}
+
+func (s *ReviewService) cancelReview(ctx context.Context, payload reviewCancelPayload) error {
 	control, err := s.store.GetReviewControl(ctx, payload.ProjectID, payload.MRIID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -581,9 +769,7 @@ func (s *ReviewService) CancelReview(ctx context.Context, job *jobs.Job) error {
 	active, err := s.store.FindActiveReview(ctx, payload.ProjectID, payload.MRIID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			// The review was still queued; there is no workflow to cancel, but
-			// the status note still needs its terminal state.
-			s.reportCancelled(ctx, payload.ProjectID, payload.MRIID, payload.Generation, "")
+			// The review was still queued; there is no workflow to cancel.
 			return nil
 		}
 		return err
@@ -619,18 +805,14 @@ func (s *ReviewService) CancelReview(ctx context.Context, job *jobs.Job) error {
 	}
 	if err := s.engine.Cancel(ctx, active.ID, "user_cancelled"); err != nil {
 		if errors.Is(err, dag.ErrNotFound) {
-			publishErr := s.skipPublication(ctx, active.ID, reviewCancelledReason)
-			s.reportCancelled(ctx, payload.ProjectID, payload.MRIID, payload.Generation, active.ID)
-			return publishErr
+			return s.skipPublication(ctx, active.ID, reviewCancelledReason)
 		}
 		return err
 	}
 	if err := s.waitTerminal(ctx, active.ID); err != nil {
 		return err
 	}
-	publishErr := s.skipPublication(ctx, active.ID, reviewCancelledReason)
-	s.reportCancelled(ctx, payload.ProjectID, payload.MRIID, payload.Generation, active.ID)
-	return publishErr
+	return s.skipPublication(ctx, active.ID, reviewCancelledReason)
 }
 
 // RepublishReview executes one review.publish job. It delegates to the
@@ -902,91 +1084,471 @@ func failureReason(snapshot dag.WorkflowView) string {
 	return reviewExecutionFailedReason
 }
 
-// reportStatus writes one best-effort status while this worker's generation
-// still owns the MR. Every failure is logged inside the reporter and never
-// changes the review outcome.
-func (s *ReviewService) reportStatus(ctx context.Context, project *store.Project, token string, mrIID, generation int64, head string, update reviewStatusUpdate) {
-	if s.status == nil || project == nil {
+// setReviewStatus records the desired status note. A failure here never
+// changes the review verdict; the durable row and reconciliation retry it.
+func (s *ReviewService) setReviewStatus(ctx context.Context, projectID, mrIID, generation int64, attempt int, head, profile, state, detail string) {
+	if generation <= 0 {
 		return
 	}
-	if _, err := s.currentControl(ctx, project.ID, mrIID, generation, head); err != nil {
-		return
+	if _, err := s.store.SetReviewStatus(ctx, store.ReviewStatusGoal{
+		ProjectID:  projectID,
+		MRIID:      mrIID,
+		Generation: generation,
+		Attempt:    attempt,
+		HeadSHA:    head,
+		Profile:    profile,
+		State:      state,
+		Detail:     detail,
+	}); err != nil && !errors.Is(err, store.ErrSuperseded) {
+		s.logger.Warn("review status goal write failed", "project_id", projectID,
+			"mr_iid", mrIID, "generation", generation, "error", err.Error())
 	}
-	s.status.report(ctx, project.ID, mrIID, token, update)
 }
 
-// reportTerminal writes a terminal status after a fresh control read. A stale
-// worker never replaces the status note owned by a successor generation.
-func (s *ReviewService) reportTerminal(ctx context.Context, project *store.Project, token string, mrIID, generation int64, head string, update reviewStatusUpdate) {
-	if s.status == nil || project == nil {
+// setReviewReaction records the desired reaction for one source note.
+func (s *ReviewService) setReviewReaction(ctx context.Context, projectID, mrIID, noteID, generation int64, desired string) {
+	if noteID <= 0 || generation <= 0 {
 		return
 	}
-	control, err := s.store.GetReviewControl(ctx, project.ID, mrIID)
+	if _, err := s.store.SetReviewReaction(ctx, store.ReviewReactionGoal{
+		ProjectID:  projectID,
+		MRIID:      mrIID,
+		NoteID:     noteID,
+		Generation: generation,
+		Desired:    desired,
+	}); err != nil && !errors.Is(err, store.ErrSuperseded) {
+		s.logger.Warn("review reaction goal write failed", "project_id", projectID,
+			"mr_iid", mrIID, "note_id", noteID, "error", err.Error())
+	}
+}
+
+func (s *ReviewService) settleReviewStatus(ctx context.Context, projectID, mrIID, generation int64, attempt int, head, profile, state, detail string, noteID int64, reaction string) {
+	s.setReviewStatus(ctx, projectID, mrIID, generation, attempt, head, profile, state, detail)
+	if noteID > 0 {
+		if reaction == "" {
+			reaction = reviewAwardNone
+		}
+		s.setReviewReaction(ctx, projectID, mrIID, noteID, generation, reaction)
+	}
+}
+
+// estimateReviewMinutes returns a coarse product estimate. A query failure
+// keeps the default; it never fails a review or a status job.
+func (s *ReviewService) estimateReviewMinutes(ctx context.Context, projectID int64, profile string) int {
+	const (
+		defaultMinutes = 5
+		minMinutes     = 1
+		maxMinutes     = 30
+	)
+	profile = strings.TrimSpace(profile)
+	if profile == "" {
+		profile = "default"
+	}
+	durations, err := s.store.RecentReviewDurations(ctx, projectID, profile, s.now().UTC().Add(-30*24*time.Hour), 20)
 	if err != nil {
-		return
+		s.logger.Warn("review estimate query failed", "project_id", projectID, "error", err.Error())
+		return defaultMinutes
 	}
-	if control.Generation != generation || !strings.EqualFold(control.HeadSHA, head) {
-		return
+	if len(durations) == 0 {
+		return defaultMinutes
 	}
-	if control.Cancelled && update.State != reviewStatusCancelled && update.State != reviewStatusStale {
-		return
+	sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
+	median := durations[len(durations)/2]
+	if len(durations)%2 == 0 {
+		median = (durations[len(durations)/2-1] + durations[len(durations)/2]) / 2
 	}
-	s.status.report(ctx, project.ID, mrIID, token, update)
+	minutes := int((median + time.Minute - 1) / time.Minute)
+	if minutes < minMinutes {
+		minutes = minMinutes
+	}
+	if minutes > maxMinutes {
+		minutes = maxMinutes
+	}
+	return minutes
 }
 
-// reportSuperseded writes the terminal state when no successor generation has
-// claimed the MR. A successor owns its own status note and is left untouched.
-func (s *ReviewService) reportSuperseded(ctx context.Context, project *store.Project, token string, mrIID, generation int64, head, workflowID string) {
-	if s.status == nil || project == nil {
-		return
-	}
-	control, err := s.store.GetReviewControl(ctx, project.ID, mrIID)
-	if err != nil || control.Generation != generation {
-		return
-	}
-	state := reviewStatusStale
-	detail := "merge request changed before publication"
-	if control.Cancelled {
-		state = reviewStatusCancelled
-		detail = "review cancelled"
-	}
-	s.status.report(ctx, project.ID, mrIID, token, reviewStatusUpdate{
-		State:     state,
-		Detail:    detail,
-		HeadSHA:   head,
-		NoteID:    s.workflowNoteID(ctx, workflowID),
-		ClearEyes: true,
-	})
+type reviewSideEffectPayload struct {
+	ProjectID int64 `json:"project_id"`
+	MRIID     int64 `json:"mr_iid"`
+	NoteID    int64 `json:"note_id,omitempty"`
 }
 
-func (s *ReviewService) reportPublishFailure(ctx context.Context, project *store.Project, token string, mrIID, generation int64, head string, noteID int64, cause error) {
-	state := reviewStatusFailed
-	reaction := reviewAwardFail
-	detail := "publication failed"
-	if errors.Is(cause, ErrStalePublication) {
-		state = reviewStatusStale
-		reaction = ""
-		detail = "review is no longer current"
+func decodeReviewSideEffectPayload(raw json.RawMessage, wantNote bool) (reviewSideEffectPayload, error) {
+	var payload reviewSideEffectPayload
+	if err := decodeReviewPayload(raw, &payload); err != nil {
+		return payload, err
 	}
-	s.reportTerminal(ctx, project, token, mrIID, generation, head, reviewStatusUpdate{
-		State:     state,
-		Detail:    detail,
-		HeadSHA:   head,
-		NoteID:    noteID,
-		Reaction:  reaction,
-		ClearEyes: true,
-	})
+	if payload.ProjectID <= 0 || payload.MRIID <= 0 {
+		return payload, PermanentJob(fmt.Errorf("invalid review side-effect payload"))
+	}
+	if wantNote && payload.NoteID <= 0 {
+		return payload, PermanentJob(fmt.Errorf("invalid review.reaction payload"))
+	}
+	return payload, nil
 }
 
-func (s *ReviewService) reportVerdict(ctx context.Context, project *store.Project, token string, mrIID, generation int64, head string, noteID int64, workflowID string) {
-	state, reaction := reviewStatusForVerdict(s.workflowVerdict(ctx, workflowID))
-	s.reportTerminal(ctx, project, token, mrIID, generation, head, reviewStatusUpdate{
-		State:     state,
-		HeadSHA:   head,
-		NoteID:    noteID,
-		Reaction:  reaction,
-		ClearEyes: true,
-	})
+// RunStatusJob publishes one durable status row. The row version is a CAS: a
+// newer desired state written while GitLab was called stays pending for its
+// own job and reconciliation.
+func (s *ReviewService) RunStatusJob(ctx context.Context, job *jobs.Job) error {
+	payload, err := decodeReviewSideEffectPayload(job.Payload, false)
+	if err != nil {
+		return err
+	}
+	row, err := s.store.GetReviewStatus(ctx, payload.ProjectID, payload.MRIID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	if row.AppliedVersion >= row.Version {
+		return nil
+	}
+	project, token, err := s.projectToken(ctx, row.ProjectID)
+	if err != nil {
+		// A disabled project keeps the row pending; reconciliation resumes it
+		// after the project is enabled again.
+		return err
+	}
+	control, err := s.store.GetReviewControl(ctx, row.ProjectID, row.MRIID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return s.markStatusApplied(ctx, row, 0, "", "review control is missing")
+		}
+		return err
+	}
+	if control.Generation != row.Generation ||
+		(row.HeadSHA != "" && !strings.EqualFold(control.HeadSHA, row.HeadSHA)) {
+		return s.markStatusApplied(ctx, row, 0, "", "review superseded")
+	}
+	if control.Cancelled && row.State != reviewStatusCancelled && row.State != reviewStatusStale {
+		return s.markStatusApplied(ctx, row, 0, "", "review cancelled")
+	}
+	if s.status == nil {
+		return errors.New("app: status reporter is not configured")
+	}
+	update := reviewStatusUpdate{
+		State:      row.State,
+		Detail:     row.Detail,
+		HeadSHA:    row.HeadSHA,
+		Generation: row.Generation,
+	}
+	switch row.State {
+	case reviewStatusQueued, reviewStatusRunning, reviewStatusPublishing:
+		update.EstimateMinutes = s.estimateReviewMinutes(ctx, row.ProjectID, row.Profile)
+	}
+	noteID, hash, err := s.status.writeStatus(ctx, project.ID, row.MRIID, token, update)
+	if err != nil {
+		if reviewSideEffectRetryable(err) {
+			return err
+		}
+		return s.markStatusApplied(ctx, row, 0, "", reviewSideEffectReason(err))
+	}
+	return s.markStatusApplied(ctx, row, noteID, hash, "")
+}
+
+func (s *ReviewService) markStatusApplied(ctx context.Context, row *store.ReviewStatus, noteID int64, bodyHash, reason string) error {
+	err := s.store.MarkReviewStatusApplied(ctx, row.ProjectID, row.MRIID, int64(row.Version), noteID, bodyHash, reason)
+	if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("app: mark review status applied: %w", err)
+	}
+	return nil
+}
+
+// RunReactionJob publishes one durable reaction row. Only the bot's own awards
+// are changed; a stale generation may remove its own eyes but never publishes
+// a success or failure over a newer review.
+func (s *ReviewService) RunReactionJob(ctx context.Context, job *jobs.Job) error {
+	payload, err := decodeReviewSideEffectPayload(job.Payload, true)
+	if err != nil {
+		return err
+	}
+	row, err := s.store.GetReviewReaction(ctx, payload.ProjectID, payload.MRIID, payload.NoteID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	if row.AppliedVersion >= row.Version {
+		return nil
+	}
+	project, token, err := s.projectToken(ctx, row.ProjectID)
+	if err != nil {
+		return err
+	}
+	control, err := s.store.GetReviewControl(ctx, row.ProjectID, row.MRIID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return s.markReactionApplied(ctx, row, "review control is missing")
+		}
+		return err
+	}
+	if row.Desired != reviewAwardNone {
+		if control.Generation != row.Generation {
+			return s.markReactionApplied(ctx, row, "generation superseded")
+		}
+		if control.Cancelled {
+			return s.markReactionApplied(ctx, row, "review cancelled")
+		}
+	}
+	if s.status == nil {
+		return errors.New("app: status reporter is not configured")
+	}
+	err = s.status.applyReaction(ctx, project.ID, row.MRIID, token, row.NoteID, row.Desired)
+	if err != nil {
+		if errors.Is(err, errReactionNoteGone) {
+			return s.markReactionApplied(ctx, row, "note not found")
+		}
+		if reviewSideEffectRetryable(err) {
+			return err
+		}
+		return s.markReactionApplied(ctx, row, reviewSideEffectReason(err))
+	}
+	return s.markReactionApplied(ctx, row, "")
+}
+
+func (s *ReviewService) markReactionApplied(ctx context.Context, row *store.ReviewReaction, reason string) error {
+	err := s.store.MarkReviewReactionApplied(ctx, row.ProjectID, row.MRIID, row.NoteID, int64(row.Version), reason)
+	if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("app: mark review reaction applied: %w", err)
+	}
+	return nil
+}
+
+// reviewSideEffectRetryable separates a transient upstream failure from a
+// terminal one. Transport, timeout, 5xx and 429 retry; authentication,
+// permission, missing resource and validation errors settle the row.
+func reviewSideEffectRetryable(err error) bool {
+	if err == nil || errors.Is(err, errReactionNoteGone) {
+		return false
+	}
+	switch gitlab.StatusOf(err) {
+	case 401, 403, 404, 422:
+		return false
+	}
+	return true
+}
+
+func reviewSideEffectReason(err error) string {
+	if err == nil {
+		return ""
+	}
+	return truncateRunes(sanitizeStatusDetail(err.Error()), 300)
+}
+
+// settleCancellation records the terminal cancel status and removes the
+// cancel/source eyes. If a newer run already owns the MR the generation fence
+// rejects the status write; removing the old note's eyes is still safe.
+func (s *ReviewService) settleCancellation(ctx context.Context, payload reviewCancelPayload) {
+	if payload.Generation <= 0 {
+		return
+	}
+	s.setReviewStatus(ctx, payload.ProjectID, payload.MRIID, payload.Generation, 0,
+		"", "", reviewStatusCancelled, "review cancelled")
+	s.setReviewReaction(ctx, payload.ProjectID, payload.MRIID, payload.NoteID, payload.Generation, reviewAwardNone)
+	if _, err := s.store.ClearReviewReactionsForGeneration(ctx, payload.ProjectID, payload.MRIID, payload.Generation); err != nil {
+		s.logger.Warn("review cancel reaction cleanup failed", "project_id", payload.ProjectID,
+			"mr_iid", payload.MRIID, "generation", payload.Generation, "error", err.Error())
+	}
+}
+
+// ReconcileSideEffects re-enqueues pending durable writes and settles work
+// that no live job can finish. It never re-runs a model.
+func (s *ReviewService) ReconcileSideEffects(ctx context.Context) error {
+	var errs []error
+	now := s.now().UTC()
+
+	statuses, err := s.store.ListPendingReviewStatuses(ctx)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	for _, row := range statuses {
+		if err := s.enqueueReviewSideEffectJob(ctx, "review.status", "review.status:"+itoa(row.ProjectID)+":"+itoa(row.MRIID), map[string]any{
+			"project_id": row.ProjectID, "mr_iid": row.MRIID,
+		}); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	reactions, err := s.store.ListPendingReviewReactions(ctx)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	for _, row := range reactions {
+		if err := s.enqueueReviewSideEffectJob(ctx, "review.reaction",
+			"review.reaction:"+itoa(row.ProjectID)+":"+itoa(row.MRIID)+":"+itoa(row.NoteID), map[string]any{
+				"project_id": row.ProjectID, "mr_iid": row.MRIID, "note_id": row.NoteID,
+			}); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	staleEyes, err := s.store.ListReviewReactionsByDesired(ctx, reviewAwardEyes, now.Add(-15*time.Minute))
+	if err != nil {
+		errs = append(errs, err)
+	}
+	for _, row := range staleEyes {
+		active, err := s.store.HasActiveReviewJob(ctx, row.ProjectID, row.MRIID)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if active {
+			continue
+		}
+		if _, err := s.store.FindActiveReview(ctx, row.ProjectID, row.MRIID); err == nil {
+			continue
+		} else if !errors.Is(err, store.ErrNotFound) {
+			errs = append(errs, err)
+			continue
+		}
+		if _, err := s.store.SetReviewReaction(ctx, store.ReviewReactionGoal{
+			ProjectID: row.ProjectID, MRIID: row.MRIID, NoteID: row.NoteID,
+			Generation: row.Generation, Desired: store.ReviewReactionNone,
+		}); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	unfinished, err := s.store.ListReviewStatusesByState(ctx,
+		[]string{reviewStatusRunning, reviewStatusPublishing}, now.Add(-2*time.Hour))
+	if err != nil {
+		errs = append(errs, err)
+	}
+	for _, row := range unfinished {
+		active, err := s.store.HasActiveReviewJob(ctx, row.ProjectID, row.MRIID)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if active {
+			continue
+		}
+		if _, err := s.store.FindActiveReview(ctx, row.ProjectID, row.MRIID); err == nil {
+			continue
+		} else if !errors.Is(err, store.ErrNotFound) {
+			errs = append(errs, err)
+			continue
+		}
+		// A completed or cancelled workflow is not "active", but declaring the
+		// status failed would contradict a publication that already exists.
+		// Recover its terminal state when the generation still matches.
+		if wf, err := s.store.LatestReviewWorkflow(ctx, row.ProjectID, row.MRIID); err == nil {
+			record, dossierErr := s.store.GetWorkflowDossier(ctx, wf.ID)
+			if dossierErr != nil {
+				if !errors.Is(dossierErr, store.ErrNotFound) {
+					errs = append(errs, dossierErr)
+				}
+				continue
+			}
+			var dossier review.Dossier
+			if err := json.Unmarshal(record.Data, &dossier); err != nil {
+				errs = append(errs, fmt.Errorf("app: decode recovery dossier: %w", err))
+				continue
+			}
+			if record.Generation != row.Generation ||
+				!strings.EqualFold(dossier.DiffVersion.HeadSHA, row.HeadSHA) {
+				continue
+			}
+			var state, detail string
+			var reaction string
+			switch wf.Status {
+			case string(dag.WorkflowCompleted):
+				state, reaction = reviewStatusForVerdict(wf.Verdict)
+			case string(dag.WorkflowFailed):
+				state, reaction = reviewStatusFailed, reviewAwardFail
+			case string(dag.WorkflowCancelled):
+				state, reaction = reviewStatusCancelled, reviewAwardNone
+			default:
+				continue
+			}
+			if _, err := s.store.SetReviewStatus(ctx, store.ReviewStatusGoal{
+				ProjectID: row.ProjectID, MRIID: row.MRIID, Generation: row.Generation,
+				Attempt: row.Attempt, HeadSHA: row.HeadSHA, Profile: row.Profile,
+				State: state, Detail: detail,
+			}); err != nil && !errors.Is(err, store.ErrSuperseded) {
+				errs = append(errs, err)
+				continue
+			}
+			noteID := dossierNoteID(dossier)
+			if noteID > 0 {
+				if _, err := s.store.SetReviewReaction(ctx, store.ReviewReactionGoal{
+					ProjectID: row.ProjectID, MRIID: row.MRIID, NoteID: noteID,
+					Generation: row.Generation, Desired: reaction,
+				}); err != nil && !errors.Is(err, store.ErrSuperseded) {
+					errs = append(errs, err)
+				}
+			}
+			continue
+		} else if !errors.Is(err, store.ErrNotFound) {
+			errs = append(errs, err)
+			continue
+		}
+		if _, err := s.store.SetReviewStatus(ctx, store.ReviewStatusGoal{
+			ProjectID: row.ProjectID, MRIID: row.MRIID, Generation: row.Generation,
+			Attempt: row.Attempt, HeadSHA: row.HeadSHA, Profile: row.Profile,
+			State: reviewStatusFailed, Detail: "review worker ended without terminal status",
+		}); err != nil && !errors.Is(err, store.ErrSuperseded) {
+			errs = append(errs, err)
+		}
+	}
+
+	queued, err := s.store.ListReviewStatusesByState(ctx, []string{reviewStatusQueued}, now.Add(time.Second))
+	if err != nil {
+		errs = append(errs, err)
+	}
+	for _, row := range queued {
+		control, err := s.store.GetReviewControl(ctx, row.ProjectID, row.MRIID)
+		if err != nil {
+			if !errors.Is(err, store.ErrNotFound) {
+				errs = append(errs, err)
+			}
+			continue
+		}
+		if !control.Cancelled || control.Generation != row.Generation {
+			continue
+		}
+		active, err := s.store.HasActiveReviewJob(ctx, row.ProjectID, row.MRIID)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if active {
+			continue
+		}
+		if _, err := s.store.SetReviewStatus(ctx, store.ReviewStatusGoal{
+			ProjectID: row.ProjectID, MRIID: row.MRIID, Generation: row.Generation,
+			Attempt: row.Attempt, HeadSHA: row.HeadSHA, Profile: row.Profile,
+			State: reviewStatusCancelled, Detail: "review cancelled",
+		}); err != nil && !errors.Is(err, store.ErrSuperseded) {
+			errs = append(errs, err)
+			continue
+		}
+		if _, err := s.store.ClearReviewReactionsForGeneration(ctx, row.ProjectID, row.MRIID, row.Generation); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (s *ReviewService) enqueueReviewSideEffectJob(ctx context.Context, kind, key string, payload any) error {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	if _, _, err := s.store.Enqueue(ctx, store.Job{
+		Kind: kind, Key: key, Payload: raw, MaxAttempts: sqlite.ReviewSideEffectMaxAttempts,
+	}); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *ReviewService) workflowVerdict(ctx context.Context, workflowID string) string {
@@ -1020,29 +1582,6 @@ func dossierNoteID(dossier review.Dossier) int64 {
 		return 0
 	}
 	return value
-}
-
-// reportCancelled settles the status for a confirmed user cancellation. The
-// control is read again so a newer generation that replaced the cancel is not
-// overwritten.
-func (s *ReviewService) reportCancelled(ctx context.Context, projectID, mrIID, generation int64, workflowID string) {
-	if s.status == nil || generation <= 0 {
-		return
-	}
-	control, err := s.store.GetReviewControl(ctx, projectID, mrIID)
-	if err != nil || !control.Cancelled || control.Generation != generation {
-		return
-	}
-	project, token, err := s.projectToken(ctx, projectID)
-	if err != nil {
-		return
-	}
-	s.status.report(ctx, project.ID, mrIID, token, reviewStatusUpdate{
-		State:     reviewStatusCancelled,
-		Detail:    "review cancelled",
-		NoteID:    s.workflowNoteID(ctx, workflowID),
-		ClearEyes: true,
-	})
 }
 
 func reviewStatusForVerdict(verdict string) (string, string) {
@@ -1649,11 +2188,8 @@ func (s *ReviewService) publishEmptyWithNote(ctx context.Context, project *store
 	if err := recheck(); err != nil {
 		return err
 	}
-	s.reportStatus(ctx, project, token, control.MRIID, control.Generation, inputs.Version.HeadSHA, reviewStatusUpdate{
-		State:   reviewStatusPublishing,
-		HeadSHA: inputs.Version.HeadSHA,
-		NoteID:  noteID,
-	})
+	s.setReviewStatus(ctx, project.ID, control.MRIID, control.Generation, 0,
+		inputs.Version.HeadSHA, "", reviewStatusPublishing, "")
 	profileName, _ := s.profileFor(project, "", cfg.Profile, inputs.MR.Labels, false)
 	fingerprint := sha256Hex(strings.Join([]string{
 		inputs.Version.HeadSHA, reviewConfigHash(cfg), profileName,
@@ -1707,17 +2243,21 @@ func (s *ReviewService) publishEmptyWithNote(ctx context.Context, project *store
 	// late write is replaced by the next review instead of creating a second
 	// summary.
 	if err := s.publisher.PublishStandaloneSummary(ctx, project.ID, control.MRIID, token, fingerprint, body); err != nil {
-		s.reportPublishFailure(ctx, project, token, control.MRIID, control.Generation, inputs.Version.HeadSHA, noteID, err)
+		state := reviewStatusFailed
+		reaction := reviewAwardFail
+		detail := "publication failed"
+		if errors.Is(err, ErrStalePublication) {
+			state = reviewStatusStale
+			reaction = reviewAwardNone
+			detail = "review is no longer current"
+		}
+		s.settleReviewStatus(ctx, project.ID, control.MRIID, control.Generation, 0,
+			inputs.Version.HeadSHA, "", state, detail, noteID, reaction)
 		return err
 	}
 	state, reaction := reviewStatusForVerdict(summaryInput.Verdict)
-	s.reportTerminal(ctx, project, token, control.MRIID, control.Generation, inputs.Version.HeadSHA, reviewStatusUpdate{
-		State:     state,
-		HeadSHA:   inputs.Version.HeadSHA,
-		NoteID:    noteID,
-		Reaction:  reaction,
-		ClearEyes: true,
-	})
+	s.settleReviewStatus(ctx, project.ID, control.MRIID, control.Generation, 0,
+		inputs.Version.HeadSHA, "", state, "", noteID, reaction)
 	return nil
 }
 
@@ -2024,6 +2564,11 @@ statuses:
 			errs = append(errs, err)
 		}
 	}
+	if ctx.Err() == nil {
+		if err := s.ReconcileSideEffects(ctx); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	return errors.Join(errs...)
 }
 
@@ -2115,16 +2660,15 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 	s.executors.Register(workflow.ID, executor)
 	defer s.executors.Unregister(workflow.ID)
 	noteID := dossierNoteID(dossier)
-	s.reportStatus(ctx, project, token, *workflow.MRIID, record.Generation, dossier.DiffVersion.HeadSHA, reviewStatusUpdate{
-		State:   reviewStatusRunning,
-		HeadSHA: dossier.DiffVersion.HeadSHA,
-	})
+	s.setReviewStatus(ctx, project.ID, *workflow.MRIID, record.Generation, 0,
+		dossier.DiffVersion.HeadSHA, profileName, reviewStatusRunning, "")
 	superseded, err := s.runWithControl(ctx, project.ID, *workflow.MRIID, workflow.ID, record.Generation, dossier.DiffVersion.HeadSHA)
 	if err != nil {
 		return err
 	}
 	if superseded {
-		s.reportSuperseded(ctx, project, token, *workflow.MRIID, record.Generation, dossier.DiffVersion.HeadSHA, workflow.ID)
+		s.settleRecoveredSuperseded(ctx, project.ID, *workflow.MRIID, record.Generation,
+			dossier.DiffVersion.HeadSHA, profileName, noteID, workflow.ID)
 		return s.skipPublication(ctx, workflow.ID, reviewSupersededReason)
 	}
 	snapshot, err := s.engine.Snapshot(ctx, workflow.ID)
@@ -2134,48 +2678,61 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 	cfg := s.resolveConfig(project, dossier.RepoDocs)
 	switch snapshot.Status {
 	case dag.WorkflowCompleted:
-		s.reportStatus(ctx, project, token, *workflow.MRIID, record.Generation, dossier.DiffVersion.HeadSHA, reviewStatusUpdate{
-			State:   reviewStatusPublishing,
-			HeadSHA: dossier.DiffVersion.HeadSHA,
-			NoteID:  noteID,
-		})
+		s.setReviewStatus(ctx, project.ID, *workflow.MRIID, record.Generation, 0,
+			dossier.DiffVersion.HeadSHA, profileName, reviewStatusPublishing, "")
 		if err := s.publish(ctx, workflow.ID); err != nil {
-			s.reportPublishFailure(ctx, project, token, *workflow.MRIID, record.Generation, dossier.DiffVersion.HeadSHA, noteID, err)
+			state := reviewStatusFailed
+			reaction := reviewAwardFail
+			detail := "publication failed"
+			if errors.Is(err, ErrStalePublication) {
+				state = reviewStatusStale
+				reaction = reviewAwardNone
+				detail = "review is no longer current"
+			}
+			s.settleReviewStatus(ctx, project.ID, *workflow.MRIID, record.Generation, 0,
+				dossier.DiffVersion.HeadSHA, profileName, state, detail, noteID, reaction)
 			return err
 		}
-		s.reportVerdict(ctx, project, token, *workflow.MRIID, record.Generation, dossier.DiffVersion.HeadSHA, noteID, workflow.ID)
+		state, reaction := reviewStatusForVerdict(s.workflowVerdict(ctx, workflow.ID))
+		s.settleReviewStatus(ctx, project.ID, *workflow.MRIID, record.Generation, 0,
+			dossier.DiffVersion.HeadSHA, profileName, state, "", noteID, reaction)
 		return nil
 	case dag.WorkflowFailed:
-		s.reportStatus(ctx, project, token, *workflow.MRIID, record.Generation, dossier.DiffVersion.HeadSHA, reviewStatusUpdate{
-			State:   reviewStatusPublishing,
-			HeadSHA: dossier.DiffVersion.HeadSHA,
-			NoteID:  noteID,
-		})
+		s.setReviewStatus(ctx, project.ID, *workflow.MRIID, record.Generation, 0,
+			dossier.DiffVersion.HeadSHA, profileName, reviewStatusPublishing, "")
 		var publishErr error
 		if cfg.Settings.PostFailureNote {
 			publishErr = s.publishFailure(ctx, workflow.ID, snapshot)
 		} else {
 			publishErr = s.skipPublication(ctx, workflow.ID, failureNoteDisabledReason)
 		}
-		s.reportTerminal(ctx, project, token, *workflow.MRIID, record.Generation, dossier.DiffVersion.HeadSHA, reviewStatusUpdate{
-			State:     reviewStatusFailed,
-			HeadSHA:   dossier.DiffVersion.HeadSHA,
-			NoteID:    noteID,
-			Reaction:  reviewAwardFail,
-			ClearEyes: true,
-		})
+		s.settleReviewStatus(ctx, project.ID, *workflow.MRIID, record.Generation, 0,
+			dossier.DiffVersion.HeadSHA, profileName, reviewStatusFailed, "", noteID, reviewAwardFail)
 		return publishErr
 	case dag.WorkflowCancelled:
 		publishErr := s.skipPublication(ctx, workflow.ID, reviewCancelledReason)
-		s.reportTerminal(ctx, project, token, *workflow.MRIID, record.Generation, dossier.DiffVersion.HeadSHA, reviewStatusUpdate{
-			State:     reviewStatusCancelled,
-			HeadSHA:   dossier.DiffVersion.HeadSHA,
-			NoteID:    noteID,
-			ClearEyes: true,
-		})
+		s.settleReviewStatus(ctx, project.ID, *workflow.MRIID, record.Generation, 0,
+			dossier.DiffVersion.HeadSHA, profileName, reviewStatusCancelled, "", noteID, reviewAwardNone)
 		return publishErr
 	}
 	return nil
+}
+
+func (s *ReviewService) settleRecoveredSuperseded(ctx context.Context, projectID, mrIID, generation int64, head, profile string, noteID int64, workflowID string) {
+	control, err := s.store.GetReviewControl(ctx, projectID, mrIID)
+	if err != nil || control.Generation != generation {
+		return
+	}
+	state := reviewStatusStale
+	detail := "merge request changed before publication"
+	if control.Cancelled {
+		state = reviewStatusCancelled
+		detail = "review cancelled"
+	}
+	if noteID <= 0 {
+		noteID = s.workflowNoteID(ctx, workflowID)
+	}
+	s.settleReviewStatus(ctx, projectID, mrIID, generation, 0, head, profile, state, detail, noteID, reviewAwardNone)
 }
 
 func (s *ReviewService) recoverRun(ctx context.Context, project *store.Project, token string, mrIID int64, jobID, workflowID string, dossier review.Dossier) (string, func(), error) {

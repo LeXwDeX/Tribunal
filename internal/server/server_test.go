@@ -54,13 +54,14 @@ func (b *lockedBuffer) String() string {
 type stubGitLab struct {
 	mu sync.Mutex
 
-	project     *gitlab.Project
-	projectErr  error
-	tokenInfo   *gitlab.TokenInfo
-	hookID      int64
-	listHookErr error
-	hooks       []gitlab.Hook
-	calls       []string
+	project      *gitlab.Project
+	projectErr   error
+	tokenInfo    *gitlab.TokenInfo
+	hookID       int64
+	listHookErr  error
+	hooks        []gitlab.Hook
+	deletedHooks []int64
+	calls        []string
 }
 
 func (s *stubGitLab) record(call string) {
@@ -164,10 +165,18 @@ func (s *stubGitLab) UpdateProjectHook(_ context.Context, _ string, _, hookID in
 	return &gitlab.Error{Op: "update_hook", Status: 404}
 }
 
-func (s *stubGitLab) DeleteProjectHook(context.Context, string, int64, int64) error {
+func (s *stubGitLab) DeleteProjectHook(_ context.Context, _ string, _ int64, hookID int64) error {
 	s.record("DeleteProjectHook")
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.deletedHooks = append(s.deletedHooks, hookID)
+	kept := s.hooks[:0]
+	for _, hook := range s.hooks {
+		if hook.ID != hookID {
+			kept = append(kept, hook)
+		}
+	}
+	s.hooks = kept
 	return nil
 }
 
@@ -574,7 +583,7 @@ func TestWebhookEndpoint(t *testing.T) {
 		t.Fatalf("webhook response = %v", result)
 	}
 	job, err := env.store.GetJob(context.Background(), result["job_id"].(string))
-	if err != nil || job.Kind != "review.run" {
+	if err != nil || job.Kind != "review.candidate" {
 		t.Fatalf("job = %+v, %v", job, err)
 	}
 	if env.api.callCount("GetProject") != 0 || env.api.callCount("GetTokenInfo") != 0 {
@@ -705,6 +714,12 @@ func (panicAdmin) RotateToken(context.Context, int64, string) (*store.Project, e
 func (panicAdmin) CreateWebhook(context.Context, int64) (*app.WebhookRegistration, error) {
 	return &app.WebhookRegistration{}, nil
 }
+func (panicAdmin) RebuildWebhook(context.Context, int64) (*app.WebhookRegistration, error) {
+	return &app.WebhookRegistration{}, nil
+}
+func (panicAdmin) DisableWebhook(context.Context, int64) (*store.Project, error) {
+	return &store.Project{}, nil
+}
 func (panicAdmin) Delete(context.Context, int64) error { return nil }
 
 type stubAdmin struct{}
@@ -733,6 +748,12 @@ func (stubAdmin) RotateToken(context.Context, int64, string) (*store.Project, er
 }
 func (stubAdmin) CreateWebhook(context.Context, int64) (*app.WebhookRegistration, error) {
 	return &app.WebhookRegistration{}, nil
+}
+func (stubAdmin) RebuildWebhook(context.Context, int64) (*app.WebhookRegistration, error) {
+	return &app.WebhookRegistration{}, nil
+}
+func (stubAdmin) DisableWebhook(context.Context, int64) (*store.Project, error) {
+	return &store.Project{}, nil
 }
 func (stubAdmin) Delete(context.Context, int64) error { return nil }
 
@@ -866,4 +887,126 @@ type panicWebhook struct{}
 
 func (panicWebhook) Handle(context.Context, app.WebhookRequest) (app.WebhookResult, error) {
 	panic("webhook boom")
+}
+
+func TestProjectWebhookLifecycleEndpoints(t *testing.T) {
+	env := newTestEnv(t)
+	defer env.close()
+	resp := env.register("group/repo", testProjectTok, false, json.RawMessage(`{}`))
+	if resp.status != http.StatusCreated {
+		t.Fatalf("register status = %d, body=%s", resp.status, resp.body)
+	}
+	const userID = int64(7)
+	cookie := env.sessionCookie(userID, "alice")
+	if err := env.store.SetProjectGrant(context.Background(), 42, userID, store.ProjectAccessManage); err != nil {
+		t.Fatalf("SetProjectGrant: %v", err)
+	}
+	me := env.request(http.MethodGet, "/api/v1/me", "", nil, map[string]string{"Cookie": cookie})
+	if me.status != http.StatusOK {
+		t.Fatalf("me status = %d, body=%s", me.status, me.body)
+	}
+	headers := map[string]string{
+		"Cookie":       cookie,
+		csrfHeaderName: decodeMap(t, me.body)["csrf_token"].(string),
+	}
+
+	enable := env.request(http.MethodPost, "/api/v1/projects/42/webhook", "", nil, headers)
+	if enable.status != http.StatusOK {
+		t.Fatalf("enable status = %d, body=%s", enable.status, enable.body)
+	}
+	enabled := decodeMap(t, enable.body)
+	if enabled["state"] != store.WebhookStateEnabled || enabled["managed_by"] != store.WebhookManagedByService ||
+		enabled["hook_id"] != float64(99) {
+		t.Fatalf("enable response = %v", enabled)
+	}
+	events, _ := enabled["events"].([]any)
+	if len(events) != 3 {
+		t.Fatalf("events = %v", enabled["events"])
+	}
+	if created, _ := enabled["created_at"].(string); created == "" {
+		t.Fatalf("created_at = %v", enabled["created_at"])
+	}
+	for _, key := range []string{"webhook_secret", "token", "webhook_secret_enc"} {
+		if _, ok := enabled[key]; ok {
+			t.Fatalf("enable response leaked %q: %s", key, enable.body)
+		}
+	}
+
+	again := env.request(http.MethodPost, "/api/v1/projects/42/webhook", "", nil, headers)
+	if again.status != http.StatusOK {
+		t.Fatalf("second enable status = %d, body=%s", again.status, again.body)
+	}
+	if env.api.callCount("CreateProjectHook") != 1 {
+		t.Fatalf("enable created %d hooks", env.api.callCount("CreateProjectHook"))
+	}
+
+	rebuild := env.request(http.MethodPost, "/api/v1/projects/42/webhook/rebuild", "", nil, headers)
+	if rebuild.status != http.StatusOK {
+		t.Fatalf("rebuild status = %d, body=%s", rebuild.status, rebuild.body)
+	}
+	rebuilt := decodeMap(t, rebuild.body)
+	if rebuilt["state"] != store.WebhookStateEnabled || rebuilt["hook_id"] != float64(99) {
+		t.Fatalf("rebuild response = %v", rebuilt)
+	}
+	if env.api.callCount("CreateProjectHook") != 1 || env.api.callCount("UpdateProjectHook") != 2 {
+		t.Fatalf("rebuild creates = %d, updates = %d",
+			env.api.callCount("CreateProjectHook"), env.api.callCount("UpdateProjectHook"))
+	}
+
+	disable := env.request(http.MethodDelete, "/api/v1/projects/42/webhook", "", nil, headers)
+	if disable.status != http.StatusOK {
+		t.Fatalf("disable status = %d, body=%s", disable.status, disable.body)
+	}
+	disabled := decodeMap(t, disable.body)
+	if disabled["state"] != store.WebhookStateDisabled || disabled["hook_id"] != float64(0) {
+		t.Fatalf("disable response = %v", disabled)
+	}
+	if len(env.api.deletedHooks) != 1 || env.api.deletedHooks[0] != 99 {
+		t.Fatalf("deleted hooks = %v", env.api.deletedHooks)
+	}
+	stored, err := env.store.GetProject(context.Background(), 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.HookID != nil || stored.WebhookState != store.WebhookStateDisabled ||
+		stored.WebhookManagedBy != store.WebhookManagedByService {
+		t.Fatalf("stored = %+v", stored)
+	}
+}
+
+func TestProjectWebhookControlRequiresManageGrant(t *testing.T) {
+	env := newTestEnv(t)
+	defer env.close()
+	if resp := env.register("group/repo", testProjectTok, false, nil); resp.status != http.StatusCreated {
+		t.Fatalf("register status = %d", resp.status)
+	}
+	const userID = int64(7)
+	cookie := env.sessionCookie(userID, "alice")
+	if err := env.store.SetProjectGrant(context.Background(), 42, userID, store.ProjectAccessRead); err != nil {
+		t.Fatal(err)
+	}
+	me := env.request(http.MethodGet, "/api/v1/me", "", nil, map[string]string{"Cookie": cookie})
+	if me.status != http.StatusOK {
+		t.Fatalf("me status = %d", me.status)
+	}
+	headers := map[string]string{
+		"Cookie":       cookie,
+		csrfHeaderName: decodeMap(t, me.body)["csrf_token"].(string),
+	}
+	for _, request := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPost, "/api/v1/projects/42/webhook"},
+		{http.MethodPost, "/api/v1/projects/42/webhook/rebuild"},
+		{http.MethodDelete, "/api/v1/projects/42/webhook"},
+	} {
+		resp := env.request(request.method, request.path, "", nil, headers)
+		if resp.status != http.StatusForbidden {
+			t.Fatalf("%s %s status = %d, body=%s", request.method, request.path, resp.status, resp.body)
+		}
+	}
+	if env.api.callCount("CreateProjectHook") != 0 || len(env.api.deletedHooks) != 0 {
+		t.Fatalf("read grant reached GitLab")
+	}
 }

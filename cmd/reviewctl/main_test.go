@@ -430,6 +430,41 @@ func TestAdminUserAndGrantCommands(t *testing.T) {
 	}
 }
 
+func TestProjectsWebhookLifecycle(t *testing.T) {
+	cases := []struct {
+		action string
+		method string
+		path   string
+	}{
+		{"enable", http.MethodPost, "/api/v1/projects/42/webhook"},
+		{"rebuild", http.MethodPost, "/api/v1/projects/42/webhook/rebuild"},
+		{"disable", http.MethodDelete, "/api/v1/projects/42/webhook"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.action, func(t *testing.T) {
+			var captured capturedRequest
+			ts := httptest.NewServer(captureHandler(t, http.StatusOK,
+				`{"state":"enabled","managed_by":"crc"}`, &captured))
+			defer ts.Close()
+			stdout, _, err := runCtl(t, []string{
+				"--url", ts.URL, "projects", "webhook", tc.action, "42",
+			}, map[string]string{"REVIEW_ADMIN_TOKEN": "admin"}, ts.Client())
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if captured.method != tc.method || captured.path != tc.path {
+				t.Fatalf("request = %s %s", captured.method, captured.path)
+			}
+			if captured.auth != "Bearer admin" {
+				t.Fatalf("auth = %q", captured.auth)
+			}
+			if !strings.Contains(stdout, `"managed_by": "crc"`) {
+				t.Fatalf("stdout = %s", stdout)
+			}
+		})
+	}
+}
+
 func TestAdminCommandValidation(t *testing.T) {
 	for _, args := range [][]string{
 		{"users", "bogus"},
@@ -439,6 +474,10 @@ func TestAdminCommandValidation(t *testing.T) {
 		{"projects", "grants"},
 		{"projects", "grants", "set", "42", "7", "owner"},
 		{"projects", "grants", "delete", "42"},
+		{"projects", "webhook"},
+		{"projects", "webhook", "enable"},
+		{"projects", "webhook", "enable", "0"},
+		{"projects", "webhook", "bogus", "42"},
 	} {
 		if _, _, err := runCtl(t, append([]string{"--url", "http://example.com"}, args...),
 			map[string]string{"REVIEW_ADMIN_TOKEN": "admin"}, nil); err == nil {

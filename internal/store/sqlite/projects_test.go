@@ -369,4 +369,111 @@ func TestListProjectsFilteredPage(t *testing.T) {
 	}
 }
 
+func TestUpdateProjectWebhookTracksOwnershipAndClearsHookID(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	s := openTestStore(t, clock)
+	mustProject(t, s, 42)
+
+	hookID := int64(1234)
+	if err := s.UpdateProjectWebhook(ctx, 42, store.ProjectWebhookUpdate{
+		HookID: &hookID, SecretEnc: []byte{4, 5},
+		State: store.WebhookStateEnabled, Events: []string{"push_events"},
+		ManagedBy: store.WebhookManagedByService,
+	}); err != nil {
+		t.Fatalf("UpdateProjectWebhook: %v", err)
+	}
+	saved, err := s.GetProject(ctx, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.WebhookManagedBy != store.WebhookManagedByService ||
+		saved.WebhookCreatedAt == nil || saved.WebhookUpdatedAt == nil ||
+		!saved.WebhookUpdatedAt.Equal(clock.Now()) {
+		t.Fatalf("ownership = %+v", saved)
+	}
+	firstCreated := *saved.WebhookCreatedAt
+
+	clock.Advance(time.Minute)
+	if err := s.UpdateProjectWebhook(ctx, 42, store.ProjectWebhookUpdate{
+		State: store.WebhookStateDisabled, ClearHookID: true,
+	}); err != nil {
+		t.Fatalf("clear hook: %v", err)
+	}
+	saved, err = s.GetProject(ctx, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.HookID != nil || saved.WebhookState != store.WebhookStateDisabled ||
+		string(saved.WebhookSecretEnc) != string([]byte{4, 5}) ||
+		saved.WebhookManagedBy != store.WebhookManagedByService ||
+		saved.WebhookCreatedAt == nil || !saved.WebhookCreatedAt.Equal(firstCreated) {
+		t.Fatalf("cleared hook = %+v", saved)
+	}
+	if saved.WebhookUpdatedAt == nil || !saved.WebhookUpdatedAt.Equal(clock.Now()) {
+		t.Fatalf("updated_at = %v", saved.WebhookUpdatedAt)
+	}
+
+	if err := s.UpdateProjectWebhook(ctx, 42, store.ProjectWebhookUpdate{
+		HookID: &hookID, ClearHookID: true, State: store.WebhookStateDisabled,
+	}); err == nil {
+		t.Fatal("setting and clearing the hook in one update was accepted")
+	}
+}
+
+func TestDeleteProjectRemovesReviewSideEffectsAndJobs(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t, newFakeClock())
+	mustProject(t, s, 42)
+	mustProject(t, s, 43)
+
+	for _, projectID := range []int64{42, 43} {
+		if _, err := s.EnqueueReviewLatest(ctx, store.ReviewCommand{
+			ProjectID: projectID, MRIID: 7, HeadSHA: reviewHead("a"),
+			Payload: json.RawMessage(`{"trigger":"command","note_id":555}`),
+		}); err != nil {
+			t.Fatalf("EnqueueReviewLatest(%d): %v", projectID, err)
+		}
+	}
+	for _, key := range []string{
+		"review.candidate:42:7", "review.candidate:43:7",
+	} {
+		if _, _, err := s.Enqueue(ctx, store.Job{Kind: "review.candidate", Key: key, Payload: json.RawMessage(`{}`)}); err != nil {
+			t.Fatalf("enqueue %s: %v", key, err)
+		}
+	}
+
+	if err := s.DeleteProject(ctx, 42); err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
+	for _, query := range []string{
+		`SELECT COUNT(*) FROM review_status WHERE project_id = 42`,
+		`SELECT COUNT(*) FROM review_reactions WHERE project_id = 42`,
+		`SELECT COUNT(*) FROM jobs WHERE "key" LIKE 'review.candidate:42:%'`,
+		`SELECT COUNT(*) FROM jobs WHERE "key" LIKE 'review.status:42:%'`,
+		`SELECT COUNT(*) FROM jobs WHERE "key" LIKE 'review.reaction:42:%'`,
+	} {
+		if got := rowCount(t, s, query); got != 0 {
+			t.Fatalf("%s = %d", query, got)
+		}
+	}
+	if got := rowCount(t, s, `SELECT COUNT(*) FROM review_status WHERE project_id = 43`); got != 1 {
+		t.Fatalf("other project review_status = %d", got)
+	}
+	if got := rowCount(t, s, `SELECT COUNT(*) FROM review_reactions WHERE project_id = 43`); got != 1 {
+		t.Fatalf("other project review_reactions = %d", got)
+	}
+	if got := rowCount(t, s, `SELECT COUNT(*) FROM jobs WHERE "key" LIKE 'review.candidate:43:%'`); got != 1 {
+		t.Fatalf("other project candidate jobs = %d", got)
+	}
+	if _, err := s.GetProject(ctx, 42); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("deleted project = %v", err)
+	}
+
+	mustProject(t, s, 42)
+	if _, err := s.GetProject(ctx, 42); err != nil {
+		t.Fatalf("re-registered project: %v", err)
+	}
+}
+
 func ptrBool(value bool) *bool { return &value }

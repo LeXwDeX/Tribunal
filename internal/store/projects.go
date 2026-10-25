@@ -31,12 +31,16 @@ type ProjectTokenUpdate struct {
 }
 
 // ProjectWebhookUpdate atomically records webhook provisioning state. A nil
-// HookID and an empty SecretEnc keep the stored values; state, error and
-// events are always replaced.
+// HookID and an empty SecretEnc keep the stored values; ClearHookID removes
+// the recorded hook without discarding the encrypted secret. An empty
+// ManagedBy keeps the stored ownership. State, error and events are always
+// replaced.
 type ProjectWebhookUpdate struct {
-	HookID    *int64
-	SecretEnc []byte
-	State     string
-	Error     string
-	Events    []string
+	HookID      *int64
+	ClearHookID bool
+	SecretEnc   []byte
+	State       string
+	Error       string
+	Events      []string
+	ManagedBy   string
 }

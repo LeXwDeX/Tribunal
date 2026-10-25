@@ -94,6 +94,14 @@ func (a *adminFieldsAdmin) CreateWebhook(context.Context, int64) (*app.WebhookRe
 	return nil, errors.New("not used")
 }
 
+func (a *adminFieldsAdmin) RebuildWebhook(context.Context, int64) (*app.WebhookRegistration, error) {
+	return nil, errors.New("not used")
+}
+
+func (a *adminFieldsAdmin) DisableWebhook(context.Context, int64) (*store.Project, error) {
+	return nil, errors.New("not used")
+}
+
 func (a *adminFieldsAdmin) Delete(context.Context, int64) error {
 	return errors.New("not used")
 }

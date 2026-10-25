@@ -1,53 +1,62 @@
-# 交付就绪、升级/回退与真实验收计划
+# 交付就绪、升级/回退与真实验收记录
 
-> 状态：计划与记录模板，不是执行结果。本文不表示已连接测试机、已升级、已回退或已通过外部集成验收。实际执行需按阶段另行授权。
+> 状态：已验证运行时候选的执行记录与剩余回读项，不是最终验收或发布声明。交付证据以 [PR #30](https://github.com/LeXwDeX/Code-Review-For-Gitlab-CE/pull/30) 为主；完整日志与原始响应由主任务在 PR 中维护。本文不复制完整日志，也不把测试实例结果扩大为生产验收。
 
-本轮完成源码核对、证据归档、文档整理及隔离数据库测试；未连接远程环境，未读取 Docker/Compose 项目、卷或磁盘状态，未对真实数据运行升级、迁移、GitLab/OAuth/provider 调用。未知项在下方明确标为“未知”。
+## 当前结论
+
+- 目标：v1 M0–M6，对应 PR #30。
+- 已验证运行时候选/源码快照 `f143e7a7835e1e99345b1df9b289bb499e3c67416598d30e6184a558374eb0ac`（402 文件）的检查通过：`go build ./...`、`go vet ./...`、`go test -race -count=1 ./...`；语句覆盖率 77.09%（17665/22916）；`go mod verify`、65 个模块的 `licensecheck`、许可证 bundle `-check`；Web 27 个测试文件、160 个测试及 `npm run build`；Responses race 20 次通过，`dist` 未变。旧 `27c9b1c`（77.11%）仅历史，不作为当前结果。
+- 旧快照的本地 review ACCEPT 不覆盖新的 Responses header。较早的独立代码评审未发现 code blocker，但因缺少 f143 运行时 manifest 与 `12a62d1` 文档 manifest/source-equivalence 而记为 evidence BLOCKING；该缺口已关闭。最终独立 review（`ses_fe5e8e8d28a2Mm41JlrHzyCxwp`）对 `12a62d1` 文档树给出 code/documentation PASS、0 blockers；之后的文档澄清只关联 PR #30，不构成新的 review，也不代表 native CI 已完成。
+- 最终 commit、CI、平台评审和 Release 回读以 [PR #30](https://github.com/LeXwDeX/Code-Review-For-Gitlab-CE/pull/30) 为准；本文不固化会随提交变化的状态。
+- 已验证快照的隔离测试实例结果见下节，覆盖 OAuth/项目授权、CSRF、跨项目隔离、升级会话、webhook 归属、GitLab 发布和迁移恢复。
+- 连续两次实际无诊断代理 full deep 均为 0 call errors、0 failed nodes；MCP 成功/调用分别为 10/10 和 10/11（第二次一次模型工具错误已纠正），不能声称所有工具调用成功。两次均 BLOCKING/published；BLOCKING 是合成授权回归的预期结论，不是验收失败。实际镜像、离线恢复和在线替换均 PASS。
+- 范围外与 UI 限制见下节；这些项不作为本次 v1 发布门槛。
 
 ## 证据与边界
 
-- 迁移实现：`internal/store/sqlite/sqlite.go:108-184`。
-- 迁移文件：`internal/store/migrations/0001_init.sql`、`0003_review_state.sql`、`0004_context_revisions.sql`、`0005_retention_indexes.sql`、`0006_finding_annotations.sql`、`0007_project_access.sql`、`0008_publication_state.sql`。
-- CLI：`cmd/reviewctl/main.go`；分页上限：`internal/server/params.go`。示例默认从 `REVIEW_ADMIN_TOKEN` 读取 bootstrap 凭据；若部署改了变量名，须在子命令前加 `--api-token-env <NAME>`。
-- 操作步骤复用 [operations.md](operations.md)，本文不重复停止、整目录备份、空卷恢复和 masterkey 保持等全文。
-- 交付边界、完整修复清单和归档由主 agent 维护，见 [delivery-boundary.md](delivery-boundary.md)。既有验证记录见 [Issue #20 评论 6369328377](https://github.com/LeXwDeX/Code-Review-For-Gitlab-CE/issues/20#issuecomment-6369328377)，本文不复制整套 Issue ledger。
-- 本地证据目录：`artifacts/delivery/2026-10-24-review-repairs/`，已生成并由 `.gitignore` 排除，不提交；归档中不得放入真实密钥、token、数据库副本或含真实凭据的日志。
-
-### 已核对事实
-
-- 迁移按文件名排序，每个未应用文件单独开事务；`0001` 与 `0003` 是最早的两个版本，序列为 `1,3,4,5,6,7,8`，共 **7** 个文件。不能用 `max(version)=8` 当作已应用数量。
-- 启动时读取 `schema_migrations` 中已应用版本，只跳过这些版本；数据库中已记录、但不在当前嵌入文件列表的高版本会被忽略而不报错。没有 down migration。
-- `migration_rollback_test` 只覆盖 `0004` 单文件在“建表完成、记录版本前”失败时的事务回滚，以及之后重试；不覆盖整个升级批次失败、跨版本回滚或降级。
-- `0007` 给 `users` 增加 `disabled INTEGER NOT NULL DEFAULT 0`，并新建空的 `project_grants` 表；升级不会给任何用户创建 grant。
-- `0008` 增加 `publication_error TEXT NOT NULL DEFAULT ''`，用于保存有界、已脱敏的发布失败原因；`publication_state` 的终态 `failed` 由代码写入，不是该迁移新增的列值。
+- 迁移实现：`internal/store/sqlite/sqlite.go` 的 `migrate()`；迁移文件为 `0001`、`0003`–`0012`，共 11 个。
+- 每个未应用迁移单独开事务；没有 down migration。启动时只跳过 `schema_migrations` 已记录的版本；数据库中已记录、但不在当前嵌入文件列表的高版本会被忽略而不报错。
+- `migration_rollback_test` 只覆盖 `0004` 单文件在“建表完成、记录版本前”失败时的事务回滚及之后重试；不覆盖整批升级失败、跨版本回滚或降级。
+- `0007` 给 `users` 增加 `disabled`，并新建空的 `project_grants`；升级不会给任何用户创建 grant。
+- `0008` 增加 `publication_error`；`0009` 增加 webhook 状态/事件/错误，并把已有 `hook_id` 的行标为 `unknown`；`0010` 增加 deferred review candidate 序号；`0011` 增加状态 note 与逐 note 表情的持久化表；`0012` 增加 webhook 归属和时间戳，已有 `hook_id` 的行视为本服务所有。
 - 旧二进制可能打开已被新版本迁移的 schema，但它没有新权限逻辑，不能据此把“能启动”当作可安全回退。
+- `artifacts/delivery/2026-10-25-v1-final/run-state.md` 是当次执行日志（execution journal），按运行顺序记录过程、失败和临时决定，不是验收或发布证明，也不是只记录某个旧候选。本文的验收结论来自下文列出的 f143 检查与 `12a62d1` 文档快照；PR #30 是主交付入口，完整日志由主任务维护。
 
-## 当前准备状态与待真实执行
+### 已验证快照的隔离测试实例结果
 
-### 已完成（文档层）
+- 管理面：bootstrap 可访问 admin 路由（200），项目业务路由返回 404；viewer 仅见项目 1332，跨项目 1331 的项目/评审/SSE/统计均 404，admin users 403。
+- OAuth/项目授权：管理员用户 199 对项目 1331 有 `manage`，viewer 用户 200 对项目 1332 有 `read`；CSRF 缺失返回 403、有效 token 返回 200；跨项目读取返回 404；viewer 写操作返回 403；既有两个 OAuth 会话跨升级保留。
+- SSE/撤权：撤 grant 后已有 SSE 在 1986ms 内关闭；撤权后读取 404，恢复 grant 后读取 200。
+- Webhook：真实启用并发幂等；停用、重新启用和重建都保留外部同 URL hook；归属只按持久化的自有 hook ID 判断，不做 URL 匹配。
+- GitLab：真实 Note Hook、状态 note 与表情反应、commit status，以及应用新增行（added line）行内评论发布成功。最终回读（`final-gitlab-before.json`）显示 `ai-review` status 52895/52896 在 `bae78e9980348c621cc0e1132e21b1656d44f212` 上为 failed；命令源 note 100746/100748 为 x、无 eyes，summary 100734 与 status note 100733 各一条。不同随机运行的 finding 集合和行内 diff key 可能不同，不能据此声称所有运行只有一条行内评论；幂等重放/重复发布结果以 PR #30 记录为准，本文不预判。
+- 离线恢复与在线升级：迁移版本 1、3–12 完整应用；SQLite integrity、用户/授权/会话/任务/工作流/工作区保留。
+- Deep：连续两次实际无诊断代理 full deep 均 0 call errors/0 failed nodes；MCP 成功/调用 10/10、10/11（第二次一次模型工具错误已纠正），两家 provider 均实际调用 MCP。两次均使用 `deepseek-flash` 与 `gpt-6-astra`，结果 BLOCKING/published；BLOCKING 是合成授权回归的预期结论。
+- Responses header：adapter 每次 Generate 发送请求级随机不透明 `X-Session-Id`，仅 Responses，无新配置/依赖/400 重试。它是网关兼容措施，不是 OpenAI 标准、会话认证或幂等保证；已部署网关内部根因未证实，缓存/握手成本可能存在。
+- 上述结果只覆盖该隔离测试实例；范围外项不作为本次 v1 门槛。
 
-- [x] 明确交付边界：不提交、不推送、不合并、不部署。
-- [x] 核对迁移、回退测试、`0007`/`0008` 和现有 CLI 参数。
-- [x] 设计两阶段授权、验收矩阵、回退触发和记录模板。
-- [x] 复用现有运维文档的停服备份/空卷恢复/主密钥规则，避免重复流程。
-- [x] 固定本地证据路径，并确定只链接边界文档和 Issue #20 评论。
-- [x] 生成证据归档及 `delivery-boundary.md`，校验归档哈希和 Git 忽略规则。
+## 当前状态与待执行
 
-### 待真实执行（未做）
+### 已完成
 
-- [ ] 连接目标测试机，读取实际 Compose 项目、卷映射、镜像和磁盘状态。
-- [ ] 记录旧/新镜像的 tag 与 digest；确认旧镜像仍可取得或本地保留。
-- [ ] 停机备份整个 `data`（含 WAL/SHM、workspaces）及配置/secret，并验证备份可恢复。
-- [x] 本机隔离副本用旧 schema 升级到新 schema，验证迁移和授权默认值；未使用目标环境数据库。
-- [ ] 在目标环境的断网副本上启动新镜像，验证 worker、recover 和 cleanup 不接触真实服务。
-- [ ] 经另行授权后，在目标测试数据卷执行升级并等待 `/readyz`。
-- [x] 本机模拟完成 2 用户/2 项目、grant/撤销/禁用/凭据撤销和发布状态接口验证（合成数据）。
-- [ ] 在目标环境完成两阶段授权和 2 用户/2 项目真实验收。
-- [ ] 执行真实 GitLab OAuth、webhook、SSE、publication 和外部 provider 测试；这些会访问真实环境并可能产生费用，需单独授权。
+以下为已验证快照记录；本次文档修正没有重新连接实例或重跑这些检查。
+
+- `f143e7a` 的本地全量检查、模块/许可证检查和 Web 检查通过；实际镜像构建及配置检查通过。
+- 离线恢复和在线替换应用迁移 1、3–12，保留用户、授权、会话、工作区、任务、工作流和 integrity。
+- 隔离实例完成管理面/项目路由边界、两项目 OAuth/项目授权、CSRF、跨项目隔离、viewer 写拒绝、升级后会话保留、SSE 撤权关闭和 webhook 归属保护。
+- 完成真实 GitLab Note Hook、状态 note/表情、commit status 和应用新增行行内评论验证。
+- 完成连续两次实际无诊断代理 full deep，0 call errors/0 failed nodes；MCP 成功/调用 10/10、10/11（第二次一次模型工具错误已纠正）。
+- f143 隔离实例在 1440 管理设置页和 390 viewer 设置页完成实际截图与 DOM 读取（浏览器传输于 2026-10-25T05:14Z 恢复）。390 视口为 390×844、scrollWidth 390，无横向溢出；viewer 页仅显示只读说明，无管理按钮。此前的截图工具超时和传输挂起是临时工具故障，不是产品失败；这不等同物理设备或完整 WCAG 验收。
+- 最终独立 review（`ses_fe5e8e8d28a2Mm41JlrHzyCxwp`）已在 `12a62d1` 文档树完成：code/documentation PASS、0 blockers。对此后文档澄清不再声称新的 review。
+
+### 待执行
+
+- [ ] 在 PR #30 回读最终 commit、CI、平台评审和 Release 结果；这些事实不固化在本文。
+
+生产部署、容量与计费认证、物理设备/完整 WCAG、Postgres 和所有 MCP HTTP backend 不属于本次 v1 隔离验收范围，不作为新增发布门槛。目标部署仍需按下方运维模板单独核对。
 
 ## 首次升级前记录（模板）
 
-不假设旧测试机仍保持文档中的“99% 磁盘占用”；以下字段必须在目标机现场读取，未知时保持空白。
+不假设旧测试机仍保持历史磁盘状态；以下字段必须在目标机现场读取，未知时保持空白。
 
 | 字段 | 实际值 |
 |---|---|
@@ -79,11 +88,11 @@
 
 1. 完成前置记录和备份校验，确认旧镜像与备份均可恢复。
 2. 隔离入口，停止旧服务，保存升级前全量快照。
-3. 复制快照到隔离环境，启动新镜像；阻断外联，观察迁移、worker、recover 和 cleanup。确认迁移记录为 7 个已知版本，不把最大版本号当数量。
+3. 复制快照到隔离环境，启动新镜像；阻断外联，观察迁移、worker、recover 和 cleanup。确认迁移记录为 11 个已知版本，不把最大版本号当数量。
 4. 隔离验证通过且已获部署授权后，在目标测试数据卷启动新镜像；等待 `/readyz` 200，检查日志和迁移错误。生产部署不在本计划当前执行范围内。
 5. 先完成阶段 A 管理面检查，再执行阶段 B 授权；授权完成前不向普通用户开放业务入口。
 6. 按验收矩阵逐项记录；任何跨项目访问、误 PASS、数据损坏或迁移失败都触发回退评估。
-7. 本轮只形成计划和记录模板；实际升级、推送、部署和外部调用另行授权。
+7. 本次用户已授权产品交付所需的隔离外部调用、提交、推送、合并与 Release。测试实例已完成一次离线恢复和在线升级；不因此修改其他共享服务或生产数据。
 
 ## 两阶段授权
 
@@ -116,30 +125,37 @@ docker compose exec -T review /app/reviewctl projects grants delete 42 17
 - 每次 `set` 后重新 `list` 核对，再让用户用自己的 session/API token 验证业务读取。
 - 授权矩阵先由人工批准；禁止用直接 SQL 插入 `project_grants` 代替审批和审计。
 
+已验证快照的测试实例确认管理员用户 199/manage 项目 1331、viewer 用户 200/read 项目 1332；该结果不替代目标环境的审批和授权。
+
 ## 真实验收矩阵
 
-使用 2 个用户、2 个项目，建议记为 U1/U2、P1/P2；结果栏留空，真实执行后再填。外部 GitLab/provider 调用需另行授权并确认费用。
+使用 2 个用户、2 个项目，建议记为 U1/U2、P1/P2。结果栏只填已验证快照的隔离测试实例实际覆盖的项；空白表示未覆盖。本次隔离外部调用已获授权，会产生真实模型用量。
 
 | 场景 | 操作 | 预期 | 结果 |
 |---|---|---|---|
-| 管理面 | bootstrap 调 `users list`、`projects all` | 成功；项目业务接口仍不可读 |  |
-| 仅管理面 | bootstrap 读 P1 项目详情、指定评审、项目统计 | 404，不泄露存在性 |  |
-| 跨项目 | U1 仅授权 P1，读取 P2 | 404；列表不出现 P2 |  |
-| 只读边界 | U1 对 P1 执行 manage 写操作 | 403 |  |
-| 管理授权 | U2 对 P2 有 manage，执行允许的项目写操作 | 成功 |  |
+| 管理面 | bootstrap 调 `users list`、`projects all` | 成功；项目业务接口仍不可读 | 200 admin 路由；404 项目业务路由 |
+| 仅管理面 | bootstrap 读 P1 项目详情、指定评审、项目统计 | 404，不泄露存在性 | 已覆盖（测试实例） |
+| 跨项目 | U1 仅授权 P1，读取 P2 | 404；列表不出现 P2 | 已覆盖（测试实例） |
+| 只读边界 | U1 对 P1 执行 manage 写操作 | 403 | viewer 写操作返回 403 |
+| 管理授权 | U2 对 P2 有 manage，执行允许的项目写操作 | 成功 | 管理员用户 199/manage 项目 1331 |
 | 宿主配置 | U2 用 manage 创建项目级 MCP/Skill/块绑定 | 403；宿主执行配置仍需平台管理员 + manage |  |
 | 会话/Token | 同一用户分别用当前 session 和 API token 读取 | 授权结果一致 |  |
+| CSRF | 浏览器会话写操作缺少/带有效 CSRF token | 403 / 200 | 已覆盖（测试实例） |
 | 撤销/禁用 | `users revoke` 后旧 token 失效；`users disable` 后 session/token 失效且 OAuth 被拒 | 旧凭据不可用 |  |
 | 重新登录 | `enable` 后重新 OAuth；不恢复旧 token | 登录成功、旧凭据仍无效、grant 保留 |  |
-| SSE | 打开已授权评审流，随后撤 grant 或禁用用户 | 下一轮询关闭，不继续泄露 |  |
+| 升级会话 | 在线升级后使用原浏览器会话 | 会话仍有效 | 已覆盖；两个既有 OAuth 会话跨升级保留 |
+| webhook 归属 | 启用/停用/重新启用/重建，并保留外部同 URL hook | 只操作持久化自有 hook；外部 hook 保留 | 已覆盖（测试实例） |
+| SSE | 打开已授权评审流，随后撤 grant 或禁用用户 | 下一轮询关闭，不继续泄露 | 已覆盖；撤 grant 后 1986ms 内关闭，读取 404，恢复 grant 后 200 |
 | 统计 | 有 read 的用户读取授权项目统计；bootstrap 读项目统计 | 仅授权范围可见；bootstrap 404 |  |
 | Payload | read 用户请求 `include_payload=true` | 403；manage 才可读 |  |
 | 扩展 | read 用户列项目级扩展；访问平台级扩展 | 项目级按 grant；平台级 403 |  |
-| 正常发布 | 完成评审并发布 | `published`，汇总评论/状态与 MR 一致 |  |
+| 正常发布 | 完成评审并发布 | `published`，汇总评论/状态与 MR 一致 | 两次 deep 均 BLOCKING/published；commit status failed；应用新增行行内评论存在 |
 | 部分失败 | 模拟一项发布失败、其他项成功 | 可重试失败保持 `pending`；永久失败为 `failed`；不重复副作用 |  |
 | 重启恢复 | 发布 pending 或运行中断后重启 | recover 继续，状态最终一致 |  |
 | stale | 发布前改变 MR head/base | `skipped` 并记录原因，不发布旧结果 |  |
 | INCOMPLETE | 评审结果为 INCOMPLETE | 明确显示 INCOMPLETE，不得写 PASS 或绿灯状态 |  |
+
+连续两次实际无诊断代理 full deep 均已取得 0 call errors/0 failed nodes；BLOCKING 是合成授权回归的预期结论，不是全绿验收。最终独立 review 已对 `12a62d1` 文档树 PASS（code/documentation，0 blockers）；最终 commit/CI、native 评审和 Release 回读仍以 PR #30 为准。
 
 ## 回退触发与操作计划
 
@@ -150,7 +166,7 @@ docker compose exec -T review /app/reviewctl projects grants delete 42 17
 - 数据损坏、SQLite integrity 失败、workspaces 与数据库不一致。
 - 迁移失败、迁移记录不完整，或启动后 schema 与预期不符。
 
-回退操作计划（本轮不执行）：
+回退操作计划（本文不执行生产回退）：
 
 1. 停止新实例并隔离入口；保存升级后新数据的只读事故快照，保留新卷、旧卷、旧镜像和日志。
 2. 新建空卷，恢复升级前全量数据，准备匹配的旧镜像、旧配置和原 masterkey；不覆盖旧卷，不混入新 WAL。**启动旧实例之前必须阻断 GitLab/OAuth/provider 出站访问**，并确认入站维护隔离生效。不能先启动再补防火墙规则，也不能把停用 webhook 当作阻止后台发布。
@@ -176,22 +192,26 @@ docker compose exec -T review /app/reviewctl projects grants delete 42 17
 - [ ] 断网副本完成迁移、worker、recover 和 cleanup 验证。
 - [ ] 两阶段授权完成，2 用户/2 项目矩阵全部通过。
 - [ ] publication 正常、部分失败、重启恢复、stale、INCOMPLETE 均有记录。
+- [x] deep 执行干净：连续两次实际无诊断代理 full deep 均为 0 call errors、0 failed nodes；两次 verdict 均为 BLOCKING、已发布。BLOCKING 是合成授权回归的预期结论，不是验收失败，也不等于全绿验收。
+- [ ] 在 PR #30 回读最终 commit/CI 和原生合并/Release 结果；final rereview 已完成（见上），不因后续文档澄清重开。
 - [ ] 没有未处置的跨项目访问、误 PASS、数据损坏或迁移失败。
 
-前两项及入口隔离是进入授权测试升级的前置条件；迁移、授权和发布验收在隔离的测试实例中完成，全部勾选后才可开放该实例的普通业务入口。任一未满足或出现 0 容忍触发，保持维护状态。生产部署还需另行授权、当前提交的 CI 和发布审批，不能由此表自动放行。
+已验证快照的测试实例已覆盖跨项目、viewer 写、CSRF、升级会话、SSE 撤权、webhook 归属、真实 GitLab 发布和迁移恢复；完整 2 用户/2 项目矩阵仍有空白。final rereview 已完成（`12a62d1`，PASS）；最终 commit/CI 和原生合并/Release 回读见 PR #30；此表不替代该回读，也不授权向生产用户开放测试实例。
 
 ### 归档
 
-- 固定证据目录：`artifacts/delivery/2026-10-24-review-repairs/`（已生成，作为 local only/gitignored 证据保留，不提交）。
-- 归档内容建议按证据类别保存：前置记录、镜像 digest、备份校验、迁移/就绪日志、授权矩阵、验收结果、回退决策；不复制整套 Issue ledger。
-- 已用 `git check-ignore` 核对归档目录被排除；完整性清单与有限敏感信息检查见边界文档。部署前记录尚未产生，不应与本地修复验证日志混为一谈。
-- 关联文档：[delivery-boundary.md](delivery-boundary.md)；既有验证评论：[Issue #20 / 6369328377](https://github.com/LeXwDeX/Code-Review-For-Gitlab-CE/issues/20#issuecomment-6369328377)。
+- 交付证据以 [PR #30](https://github.com/LeXwDeX/Code-Review-For-Gitlab-CE/pull/30) 为主；不复制整套 Issue ledger。
+- 本地证据目录中的 `run-state.md` 是执行日志，不是验收或发布证明；更早目录可能属于历史候选。归档更新由主 agent 负责。不得把真实密钥、token、数据库副本或含真实凭据的日志放入仓库。
+- 运行时快照 manifest 保留在 `artifacts/delivery/2026-10-25-v1-final/candidate-f143e7a/candidate-f143e7a-manifest.json`；f143 截图与 DOM 记录（`isolation-ui-admin-1440.png`、`isolation-ui-viewer-390.png`、`isolation-ui-viewer-390.json`）和 GitLab 回读 `final-gitlab-before.json` 将归档到同目录，不含真实凭据。
+- 已评审文档快照位于 `artifacts/delivery/2026-10-25-v1-final/candidate-12a62d1/candidate-12a62d1-manifest.json`，同目录 `source-equivalence.json` 记录它相对 f143 只有 6 个 Markdown 文档不同、运行时输入未变。最终交付 manifest 和 commit 由主任务在 PR #30 维护，本文不嵌入会随本次修改变化的自引用指纹。
+- 归档内容建议按证据类别保存：前置记录、镜像 digest、备份校验、迁移/就绪日志、授权矩阵、验收结果、回退决策。
+- 最终 commit、CI、平台评审和 Release 事实以 PR #30 当前内容为准，不在本文硬编码。
 
-## 本轮文档检查
+## 本次文档修正的检查
 
-- 已执行：源码与现有运维文档核对、代码围栏与相对链接检查；`operations.md` 已加入导航和回退启动前的出站隔离要求。
-- 相对链接：`operations.md`、`delivery-boundary.md` 均存在。
-- 外部链接：Issue #20 与评论 `6369328377` 已用 `gh` 只读核对（Issue 为 OPEN，评论存在）。
-- 独立验证：SQLite 迁移、授权、撤销和发布状态 12 个针对性测试以 `-race -count=1` 通过；使用临时或内存数据库。归档初始 790 个文件的大小/哈希、350 文件基线、权限及忽略规则均通过；日志归档在 `checks/`。
-- 本机隔离模拟：真实 HTTP 认证/授权路径 11/11 通过；旧库升级与回滚风险演示 6/6 通过。详见 [模拟报告](simulation-report.md)。该结果不代表真实 OAuth/GitLab/provider 或部署验收。
-- 未执行：未连接远程环境、未运行 Docker/Compose、未对真实数据库执行迁移或回退、未调用真实 GitLab/OAuth/provider。隔离单元测试不等于真实升级演练。
+- 已核对迁移实现、迁移文件和 `0007`–`0012` 语义；迁移数量为 11，序列为 1、3–12。
+- 已核对 webhook 归属实现：`recordedHookID` 只比较持久化的 hook ID，不要求 URL 匹配；启用/重建随后应用期望的 URL 和事件。
+- 已核对 command worker 表情语义：受理 run/cancel 时入队事务记录 eyes，终态由状态 worker 协调；webhook 无网络、无 emoji。
+- 已核对 Responses adapter：每次 Generate 发送请求级随机 `X-Session-Id`，仅 Responses，无新配置/依赖/400 重试。
+- 文档相对链接、代码围栏和 JSON 块已检查；`git diff --check` 已执行通过。
+- 本次文档修正未重新运行构建、测试、真实服务、CI 或发布；已验证快照结论来自现有候选记录。

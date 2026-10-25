@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -70,7 +71,10 @@ func (a *openAIResponsesAdapter) Generate(ctx context.Context, req *Request) (*R
 		params.Tools = tools
 		params.ToolChoice = responsesToolChoice(req.ToolChoice)
 	}
-	generated, err := a.sdk.Responses.New(ctx, params)
+	// X-Session-Id is not part of the OpenAI API. The compatibility gateway
+	// uses it to isolate provider state per attempt, so every attempt gets a
+	// fresh opaque value.
+	generated, err := a.sdk.Responses.New(ctx, params, option.WithHeader("X-Session-Id", rand.Text()))
 	if err != nil {
 		return nil, sdkError(err)
 	}

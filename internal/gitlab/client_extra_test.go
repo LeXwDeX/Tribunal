@@ -206,6 +206,83 @@ func TestCreateDiscussionSendsPosition(t *testing.T) {
 	}
 }
 
+func TestCreateDiscussionOmitsZeroLineFields(t *testing.T) {
+	cases := []struct {
+		name         string
+		position     Position
+		wantOld      bool
+		wantNew      bool
+		wantOldValue string
+		wantNewValue string
+	}{
+		{
+			name: "added line",
+			position: Position{
+				BaseSHA: sha("a"), StartSHA: sha("b"), HeadSHA: sha("c"),
+				OldPath: "a.go", NewPath: "a.go", NewLine: 7,
+			},
+			wantNew:      true,
+			wantNewValue: "7",
+		},
+		{
+			name: "deleted line",
+			position: Position{
+				BaseSHA: sha("a"), StartSHA: sha("b"), HeadSHA: sha("c"),
+				OldPath: "a.go", NewPath: "a.go", OldLine: 5,
+			},
+			wantOld:      true,
+			wantOldValue: "5",
+		},
+		{
+			name: "context line",
+			position: Position{
+				BaseSHA: sha("a"), StartSHA: sha("b"), HeadSHA: sha("c"),
+				OldPath: "a.go", NewPath: "a.go", OldLine: 5, NewLine: 9,
+			},
+			wantOld:      true,
+			wantNew:      true,
+			wantOldValue: "5",
+			wantNewValue: "9",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var position map[string]json.RawMessage
+			client := newExtraClient(t, func(w http.ResponseWriter, r *http.Request) {
+				var body struct {
+					Position map[string]json.RawMessage `json:"position"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Errorf("decode body: %v", err)
+				}
+				position = body.Position
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, `{"id":"disc-1","notes":[]}`)
+			})
+			positionCopy := tc.position
+			if _, err := client.CreateDiscussion(context.Background(), "token", 42, 7, NewDiscussion{
+				Body: "found a bug", Position: &positionCopy,
+			}); err != nil {
+				t.Fatalf("CreateDiscussion: %v", err)
+			}
+			oldRaw, hasOld := position["old_line"]
+			newRaw, hasNew := position["new_line"]
+			if hasOld != tc.wantOld {
+				t.Fatalf("old_line present = %v, want %v (position = %v)", hasOld, tc.wantOld, position)
+			}
+			if hasNew != tc.wantNew {
+				t.Fatalf("new_line present = %v, want %v (position = %v)", hasNew, tc.wantNew, position)
+			}
+			if tc.wantOld && string(oldRaw) != tc.wantOldValue {
+				t.Fatalf("old_line = %s, want %s", oldRaw, tc.wantOldValue)
+			}
+			if tc.wantNew && string(newRaw) != tc.wantNewValue {
+				t.Fatalf("new_line = %s, want %s", newRaw, tc.wantNewValue)
+			}
+		})
+	}
+}
+
 func TestNoteDiscussionAndAwardRequests(t *testing.T) {
 	var createdNoteBody, updatedNoteBody, addedAwardName string
 	var deletedAward bool

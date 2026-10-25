@@ -27,7 +27,10 @@ func (w *ReviewWorker) Handlers() map[string]jobs.Handler {
 	return map[string]jobs.Handler{
 		"review.run":        w.reviews.Handle,
 		"review.cancel":     w.reviews.Handle,
+		"review.candidate":  w.reviews.Handle,
 		"review.publish":    w.reviews.Handle,
+		"review.status":     w.reviews.Handle,
+		"review.reaction":   w.reviews.Handle,
 		"workspace.onboard": w.workspace.Handle,
 		"workspace.refresh": w.workspace.Handle,
 	}
@@ -39,7 +42,8 @@ func (w *ReviewWorker) Handle(ctx context.Context, job *jobs.Job) error {
 		return nil
 	}
 	switch job.Kind {
-	case "review.run", "review.cancel", "review.publish":
+	case "review.run", "review.cancel", "review.candidate", "review.publish",
+		"review.status", "review.reaction":
 		return w.reviews.Handle(ctx, job)
 	case "workspace.onboard", "workspace.refresh":
 		return w.workspace.Handle(ctx, job)

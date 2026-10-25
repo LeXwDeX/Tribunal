@@ -509,9 +509,15 @@ func (c *Client) CreateDiscussion(ctx context.Context, token string, projectID, 
 			HeadSHA:      &position.HeadSHA,
 			OldPath:      &position.OldPath,
 			NewPath:      &position.NewPath,
-			OldLine:      int64Ptr(position.OldLine),
-			NewLine:      int64Ptr(position.NewLine),
 			PositionType: &positionType,
+		}
+		// GitLab rejects a zero line as an invalid line_code. An added line has
+		// no old line and a deleted line has no new line, so omit the absent side.
+		if position.OldLine > 0 {
+			opts.Position.OldLine = int64Ptr(position.OldLine)
+		}
+		if position.NewLine > 0 {
+			opts.Position.NewLine = int64Ptr(position.NewLine)
 		}
 	}
 

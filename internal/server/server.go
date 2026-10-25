@@ -39,6 +39,8 @@ type AdminService interface {
 	Update(ctx context.Context, id int64, in app.UpdateProjectInput) (*store.Project, error)
 	RotateToken(ctx context.Context, id int64, token string) (*store.Project, error)
 	CreateWebhook(ctx context.Context, id int64) (*app.WebhookRegistration, error)
+	RebuildWebhook(ctx context.Context, id int64) (*app.WebhookRegistration, error)
+	DisableWebhook(ctx context.Context, id int64) (*store.Project, error)
 	Delete(ctx context.Context, id int64) error
 }
 
@@ -179,6 +181,8 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("PATCH /api/v1/projects/{id}", s.apiAuth(s.guard(policyProjectManage, s.handleUpdateProject)))
 	mux.HandleFunc("PUT /api/v1/projects/{id}/token", s.apiAuth(s.guard(policyProjectManage, s.handleRotateProjectToken)))
 	mux.HandleFunc("POST /api/v1/projects/{id}/webhook", s.apiAuth(s.guard(policyProjectManage, s.handleCreateProjectWebhook)))
+	mux.HandleFunc("POST /api/v1/projects/{id}/webhook/rebuild", s.apiAuth(s.guard(policyProjectManage, s.handleRebuildProjectWebhook)))
+	mux.HandleFunc("DELETE /api/v1/projects/{id}/webhook", s.apiAuth(s.guard(policyProjectManage, s.handleDisableProjectWebhook)))
 	mux.HandleFunc("DELETE /api/v1/projects/{id}", s.apiAuth(s.guard(policyProjectManage, s.handleDeleteProject)))
 	// Reviews (workflows).
 	mux.HandleFunc("GET /api/v1/reviews", s.apiAuth(s.handleListReviews))

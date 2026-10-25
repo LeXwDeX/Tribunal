@@ -422,7 +422,12 @@ func TestStaleRetryCancellationStopsProgress(t *testing.T) {
 			}
 		},
 	}
-	engine := NewEngine(store, funcExecutor(func(context.Context, NodeInput) (NodeOutput, error) {
+	engine := NewEngine(store, funcExecutor(func(_ context.Context, in NodeInput) (NodeOutput, error) {
+		if in.Node.ID != "a" {
+			// Injected siblings are legitimate dependency-free nodes; only a is
+			// fenced by the start commit this test keeps stale.
+			return NodeOutput{Data: json.RawMessage(`{}`)}, nil
+		}
 		t.Error("executor must not run while the start commit keeps staling")
 		return NodeOutput{}, nil
 	}), nil, Options{})
@@ -439,6 +444,15 @@ func TestStaleRetryCancellationStopsProgress(t *testing.T) {
 	}
 	if wf.Status != WorkflowCancelled || wf.CancelReason != "context_cancelled" {
 		t.Fatalf("workflow = %s reason=%q", wf.Status, wf.CancelReason)
+	}
+	if node := wf.Nodes["a"]; node.Status != NodeSkipped || node.Reason != "workflow_cancelled" {
+		t.Fatalf("a = %+v, want skipped by cancellation", node)
+	}
+	if got := countNodeEvents(t, inner, wfID, EventNodeStarted, "a"); got != 0 {
+		t.Fatalf("started events = %d, want 0", got)
+	}
+	if got := countNodeEvents(t, inner, wfID, EventNodeCompleted, "a"); got != 0 {
+		t.Fatalf("completed events = %d, want 0", got)
 	}
 }
 

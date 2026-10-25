@@ -37,16 +37,16 @@ type recordingCommandStore struct {
 	dup []bool
 }
 
-func (s *recordingCommandStore) EnqueueLatest(ctx context.Context, job store.Job) (string, bool, error) {
-	id, duplicate, err := s.CommandStore.EnqueueLatest(ctx, job)
+func (s *recordingCommandStore) EnqueueReviewLatest(ctx context.Context, command store.ReviewCommand) (store.ReviewEnqueueResult, error) {
+	result, err := s.CommandStore.EnqueueReviewLatest(ctx, command)
 	if err != nil {
-		return id, duplicate, err
+		return result, err
 	}
 	s.mu.Lock()
-	s.ids = append(s.ids, id)
-	s.dup = append(s.dup, duplicate)
+	s.ids = append(s.ids, result.JobID)
+	s.dup = append(s.dup, result.Duplicate)
 	s.mu.Unlock()
-	return id, duplicate, nil
+	return result, nil
 }
 
 func TestCommandWorkerReplacesQueuedLatestPayload(t *testing.T) {
@@ -776,7 +776,7 @@ func TestHelpWebhookWorkerEndToEnd(t *testing.T) {
 	}
 }
 
-func TestCommandWorkerAddsEyesOnce(t *testing.T) {
+func TestCommandWorkerEnqueuesSourceNoteForStoreReceipt(t *testing.T) {
 	fakeStore := openFakeStore(t, newTestCipher(t))
 	api := defaultFakeGitLab()
 	worker := newCommandTestWorker(t, api, fakeStore, nil)
@@ -786,29 +786,52 @@ func TestCommandWorkerAddsEyesOnce(t *testing.T) {
 			t.Fatalf("Handle %d: %v", i, err)
 		}
 	}
+	jobs := fakeStore.enqueued()
+	if len(jobs) != 2 {
+		t.Fatalf("jobs = %d, want both retries to enqueue", len(jobs))
+	}
+	for _, enqueued := range jobs {
+		var payload map[string]any
+		if err := json.Unmarshal(enqueued.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["note_id"] != float64(555) {
+			t.Fatalf("enqueued payload lost the source note: %v", payload)
+		}
+	}
 	api.mu.Lock()
 	adds := append([]string(nil), api.awardAdds...)
 	api.mu.Unlock()
-	if len(adds) != 1 || adds[0] != reviewAwardEyes {
-		t.Fatalf("eyes reactions = %v, want one", adds)
-	}
-	if jobs := fakeStore.enqueued(); len(jobs) != 2 {
-		t.Fatalf("jobs = %d, want both retries to enqueue", len(jobs))
+	if len(adds) != 0 {
+		t.Fatalf("command worker wrote pre-enqueue reactions: %v", adds)
 	}
 }
 
-func TestCommandWorkerCancelAddsEyes(t *testing.T) {
+func TestCommandWorkerCancelEnqueuesCancelNote(t *testing.T) {
 	fakeStore := openFakeStore(t, newTestCipher(t))
 	api := defaultFakeGitLab()
 	worker := newCommandTestWorker(t, api, fakeStore, nil)
-	if err := worker.Handle(context.Background(), commandJob(t, defaultCommandPayload("cancel"))); err != nil {
+	payload := defaultCommandPayload("cancel")
+	payload.NoteID = 777
+	if err := worker.Handle(context.Background(), commandJob(t, payload)); err != nil {
 		t.Fatal(err)
+	}
+	jobs := fakeStore.enqueued()
+	if len(jobs) != 1 || jobs[0].Kind != "review.cancel" {
+		t.Fatalf("cancel jobs = %+v", jobs)
+	}
+	var enqueued map[string]any
+	if err := json.Unmarshal(jobs[0].Payload, &enqueued); err != nil {
+		t.Fatal(err)
+	}
+	if enqueued["note_id"] != float64(777) {
+		t.Fatalf("cancel payload lost its note: %v", enqueued)
 	}
 	api.mu.Lock()
 	adds := append([]string(nil), api.awardAdds...)
 	api.mu.Unlock()
-	if len(adds) != 1 || adds[0] != reviewAwardEyes {
-		t.Fatalf("cancel eyes reactions = %v", adds)
+	if len(adds) != 0 {
+		t.Fatalf("cancel worker wrote pre-enqueue reactions: %v", adds)
 	}
 }
 
@@ -828,49 +851,55 @@ func TestCommandWorkerDeniedDoesNotAddEyes(t *testing.T) {
 	}
 }
 
-func TestCommandWorkerEyesFailureDoesNotBlock(t *testing.T) {
+func TestCommandWorkerEnqueueFailureDoesNotTouchReactions(t *testing.T) {
 	fakeStore := openFakeStore(t, newTestCipher(t))
+	fakeStore.enqueueErr = errors.New("queue unavailable")
 	api := defaultFakeGitLab()
-	api.addAwardErr = errors.New("reaction unavailable")
 	worker := newCommandTestWorker(t, api, fakeStore, nil)
-	if err := worker.Handle(context.Background(), commandJob(t, defaultCommandPayload("run"))); err != nil {
-		t.Fatalf("reaction failure blocked the command: %v", err)
+	if err := worker.Handle(context.Background(), commandJob(t, defaultCommandPayload("run"))); err == nil {
+		t.Fatal("enqueue failure was swallowed")
 	}
-	if jobs := fakeStore.enqueued(); len(jobs) != 1 {
-		t.Fatalf("jobs = %d, want one", len(jobs))
+	api.mu.Lock()
+	adds := append([]string(nil), api.awardAdds...)
+	api.mu.Unlock()
+	if len(adds) != 0 {
+		t.Fatalf("failed enqueue left reactions: %v", adds)
+	}
+	if jobs := fakeStore.enqueued(); len(jobs) != 0 {
+		t.Fatalf("jobs = %d, want none", len(jobs))
 	}
 }
 
-func TestCommandWorkerReportsQueuedStatus(t *testing.T) {
-	fakeStore := openFakeStore(t, newTestCipher(t))
+func TestCommandWorkerRecordsQueuedStatusAndReaction(t *testing.T) {
+	ctx := context.Background()
+	db := openTestStore(t)
+	cipher := newTestCipher(t)
+	seedProject(t, db, cipher, 42, "whsec", "{}", "default")
 	api := defaultFakeGitLab()
 	worker, err := NewCommandWorker(CommandWorkerConfig{
-		Store:    fakeStore,
+		Store:    db,
 		GitLab:   api,
-		Cipher:   newTestCipher(t),
+		Cipher:   cipher,
 		Profiles: testProfiles(),
-		Status:   newStatusReporter(api, nil),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := worker.Handle(context.Background(), commandJob(t, defaultCommandPayload("run"))); err != nil {
+	if err := worker.Handle(ctx, commandJob(t, defaultCommandPayload("run"))); err != nil {
 		t.Fatal(err)
 	}
-	notes := api.noteSnapshot()
-	var statusBody string
-	for _, note := range notes {
-		if strings.HasPrefix(note.Body, reviewStatusMarkerPrefix) {
-			statusBody = note.Body
-		}
+	status, err := db.GetReviewStatus(ctx, 42, 7)
+	if err != nil {
+		t.Fatalf("GetReviewStatus: %v", err)
 	}
-	if statusBody == "" {
-		t.Fatalf("queued status note missing: %+v", notes)
+	if status.State != reviewStatusQueued || status.Generation != 1 {
+		t.Fatalf("queued status = %+v", status)
 	}
-	if !strings.Contains(statusBody, reviewStatusQueued) {
-		t.Fatalf("queued status = %q", statusBody)
+	reaction, err := db.GetReviewReaction(ctx, 42, 7, 555)
+	if err != nil || reaction.Desired != reviewAwardEyes {
+		t.Fatalf("source-note reaction = %+v, %v", reaction, err)
 	}
-	if len(api.awardAdds) != 1 || api.awardAdds[0] != reviewAwardEyes {
-		t.Fatalf("eyes reactions = %v", api.awardAdds)
+	if len(api.noteSnapshot()) != 0 {
+		t.Fatalf("command worker wrote GitLab before the side-effect job: %+v", api.noteSnapshot())
 	}
 }

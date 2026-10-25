@@ -163,9 +163,41 @@ func (g *globals) runProjects(ctx context.Context, args []string) error {
 		return g.listAllProjects(ctx)
 	case "grants":
 		return g.runGrants(ctx, args[1:])
+	case "webhook":
+		return g.projectWebhook(ctx, args[1:])
 	default:
 		return fmt.Errorf("unknown projects action %q", args[0])
 	}
+}
+
+// projectWebhook enables, rebuilds or disables the service-managed hook.
+func (g *globals) projectWebhook(ctx context.Context, args []string) error {
+	if len(args) == 0 {
+		return errors.New("projects webhook action is required")
+	}
+	if len(args) != 2 {
+		return fmt.Errorf("projects webhook %s requires exactly one project ID", args[0])
+	}
+	id, err := parsePositiveID(args[1], "project ID")
+	if err != nil {
+		return err
+	}
+	var method, path string
+	switch args[0] {
+	case "enable":
+		method, path = http.MethodPost, "/api/v1/projects/"+strconv.FormatInt(id, 10)+"/webhook"
+	case "rebuild":
+		method, path = http.MethodPost, "/api/v1/projects/"+strconv.FormatInt(id, 10)+"/webhook/rebuild"
+	case "disable":
+		method, path = http.MethodDelete, "/api/v1/projects/"+strconv.FormatInt(id, 10)+"/webhook"
+	default:
+		return fmt.Errorf("unknown projects webhook action %q", args[0])
+	}
+	raw, err := g.request(ctx, method, path, nil)
+	if err != nil {
+		return err
+	}
+	return writeRaw(g.stdout, raw)
 }
 
 func (g *globals) runUsers(ctx context.Context, args []string) error {

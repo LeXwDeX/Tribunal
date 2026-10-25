@@ -1,8 +1,8 @@
 # 部署与运维（Docker / SQLite）
 
-本文对应 ARCH14：内嵌控制台的服务镜像、镜像内 `git` 与管理 CLI、许可证文件、SQLite 单实例、非 root 用户和可写数据目录。远程容器、真实接入和上下文生成，以及人工回放事件到 MR 汇总评论的链路已有验证；自动 webhook、真实 OAuth、MCP 仍未验收，不把人工回放当作真实 GitLab 投递。
+本文对应 ARCH14：内嵌控制台的服务镜像、镜像内 `git` 与管理 CLI、许可证文件、SQLite 单实例、非 root 用户和可写数据目录。已验证运行时候选/源码快照 `f143e7a7835e1e99345b1df9b289bb499e3c67416598d30e6184a558374eb0ac`（402 文件）已构建实际镜像、通过配置检查，并完成离线恢复/在线替换和连续两次无诊断代理 deep。最终 commit/CI/Release 事实以 [PR #30](https://github.com/LeXwDeX/Code-Review-For-Gitlab-CE/pull/30) 为准；旧 `27c9b1c` 仅历史。详见[验证状态](#10-验证状态)。
 
-交付前准备、升级/回退边界与真实验收记录见 [交付就绪与验收计划](delivery-readiness.md)。
+交付前准备、升级/回退边界与真实验收记录见 [交付就绪与验收记录](delivery-readiness.md)。
 
 ## Compose 快速部署（推荐）
 
@@ -312,7 +312,7 @@ docker run -d --name crc-review \
 - `bootstrap_admins` 填 GitLab **用户名**，不区分大小写。匹配的用户登录后获得平台 `admin` 标签；其他登录用户为 `viewer`。它不会创建 GitLab 账号，也不授予任何项目数据访问；项目权限仍需 `project_grants`。
 - OAuth 配置存在时，`client_id_env` 和 `client_secret_env` 必须同时设置，且两个环境变量都必须非空；`server.public_url` 必须是非空的绝对 HTTP(S) 地址，否则启动校验失败。
 - `REVIEW_ADMIN_TOKEN` 与 OAuth 相互独立；没有浏览器会话时仍可用它调用用户、授权和系统配置等平台管理 API。它没有用户 ID 和项目 grant，不能读取项目业务数据；轮换由部署方更新环境变量并重启。
-- 真实 OAuth 登录尚未与本机或真实 GitLab 联调，只能作为部署后验收项。
+- 真实 OAuth 登录已在已验证快照的隔离测试实例验证；未单独复测其他生产 IdP 或所有设备场景。
 
 ## 6. 健康检查与 HTTPS 反向代理
 
@@ -572,52 +572,28 @@ docker volume rm crc-arch14-smoke-data
 
 ## 10. 验证状态
 
-验证任务记录的本机快照（2026-10-23，macOS，无 Docker CLI；结果会随代码和依赖变化）：
+完整的当前证据和原始响应由主任务在 [PR #30](https://github.com/LeXwDeX/Code-Review-For-Gitlab-CE/pull/30) 中维护，本节只保留运维相关摘要。
 
-- Go 1.27.3 和 Go 1.26.10 的构建、vet、race 测试，以及模块/许可证检查通过；最新覆盖率、Web 测试数和构建产物统一记录在 [README 验证结果](../README.md#验证)。
-- 全部主路由及项目/扩展子页在隔离 Chrome 的 1440px/390px 和亮暗主题下完成布局检查；标注、质量指标和趋势另有交互检查，当时已目视复查，截图未保留。检查使用假 API 和模拟视口，不替代真实登录、业务写入与实体手机验收。
-- 示例配置与临时覆盖合并后的 `--check-config`。
-- 无外部凭据的服务启动、`/healthz`、`/readyz`、控制台静态页、Bearer 管理接口和 OAuth 关闭时的 503。
-- OAuth 注释模板对应的临时配置解析。
-- 带 dummy OAuth 配置启动后，`/auth/login` 返回 302，Location 包含 `/oauth/authorize`、`scope=read_user` 和 `redirect_uri=https://review.example.internal/auth/callback`。这只验证跳转参数，不验证真实 GitLab 登录。
-- Compose 部署配置新增 4 个回归测试，覆盖默认 provider 绑定、绝对数据路径、OAuth 默认关闭及注释模板启用、缺失插值变量与模型密钥。
-- `TestBuildGraphDockerProfiles` 直接加载实际部署 YAML，使用假环境变量构建 `default` 和 `onboarding` 工作流。补齐 `challenge.provider: primary` 前因缺少该字段失败，补齐后构图及 config/review/app/scripts race 测试通过；不访问外部服务，也不替代真实评审验收。
-- `compose.yaml`、应用配置和 CI YAML 可解析；`bash -n`、ShellCheck、actionlint 通过。Docker 冒烟脚本在缺少 Docker CLI 时明确退出失败，不将跳过记作成功。
-- 冒烟脚本的清理回归在重启后重新通过：成功、构建失败、项目删除失败、镜像删除失败、临时目录删除失败共 5 个场景。删除失败会返回非零状态；构建失败不会尝试删除未成功构建的镜像。测试使用 fake Docker CLI，只证明脚本控制流与清理范围，不证明真实容器行为。
-- Go 1.26.10 下 `server` 和 `reviewctl` 的 Linux/amd64、`CGO_ENABLED=0` 静态交叉编译通过。这不是 Linux 容器运行证据。
-- 实际 `server.docker.yaml` 加临时监听地址和数据路径覆盖，在 macOS 上依次以 `openai-chat`、`openai-responses`、`anthropic` 初始化客户端并启动服务；配置检查、数据库/worker 就绪、静态控制台、匿名 401、Bearer CLI 空项目列表和关闭通过。默认 OAuth 为 503，启用实际注释模板后跳转参数符合预期。测试使用 `.invalid` 地址和假密钥，没有执行 GitLab/模型请求。
+### 已验证运行时候选/源码快照
 
-重启前的临时日志和截图已清空，以上浏览器检查、原生启动冒烟和交叉编译为历史记录。本轮重新保存了 Go 全量 build/vet/race、模块与许可证、脚本回归及静态检查的日志；未重做的历史检查不能当作重启后环境的运行证据。
+- `f143e7a7835e1e99345b1df9b289bb499e3c67416598d30e6184a558374eb0ac`（402 文件）的 Go/Web 检查通过：`go build ./...`、`go vet ./...`、`go test -race -count=1 ./...`；语句覆盖率 77.09%（17665/22916）；`go mod verify`、65 个模块的 `licensecheck`、许可证 bundle `-check`；Web 27 个测试文件、160 个测试及 `npm run build`；Responses race 20 次通过，`dist` 未变。
+- 实际镜像 `crc-v1-acceptance:candidate-f143e7a`（ID `sha256:1a20aa96065a24986990de94d0e2e6466df04a379ed2e6b50f076271ff52574e`）构建并通过配置检查；离线恢复和在线替换均 PASS。
+- 最终 commit、CI、平台评审和 Release 回读以 [PR #30](https://github.com/LeXwDeX/Code-Review-For-Gitlab-CE/pull/30) 为准。
 
-后续远程验证（2026-10-23，Linux/amd64，Docker 29.5.0 / Compose 5.1.3）：
+### 隔离实例结果
 
-- 使用隔离目录、Compose 项目名、镜像标签和命名卷完成多阶段构建，前端在镜像内重新构建。未停止或覆盖既有服务。
-- 真实 `scripts/docker-smoke.sh` 通过，包含非 root UID/GID 10001、数据目录 0700、Git/许可证、健康接口、静态控制台、匿名 401、Bearer CLI、默认 OAuth 503 和重建容器后的数据保留；脚本创建的容器与卷已清理。
-- 长期测试实例仅绑定宿主机 loopback，通过 SSH 隧道访问；配置文件只读挂载，秘密放在构建目录外的 0600 环境文件。实例限制为 2 CPU / 2 GiB 内存并限制日志大小。
-- 应用内真实模型 provider 测试返回 `ok:true`。真实 GitLab 的身份、项目、仓库 API 与 token scope 检查通过，服务项目注册返回 201，凭据按现有逻辑加密入库；未自动创建 webhook 或发布评论。
-- 修复部署配置缺少 `onboarding` 档位的问题：新增回归先失败，配置绑定 `primary` 后 config/app/review/scripts race 测试通过。只更新测试实例的挂载配置并重建容器，数据库和主密钥保持不变。
-- 独立复核发现默认评审档位还缺少必填的 `challenge.provider`，已绑定 `primary` 并补上述构图回归。新配置在现有镜像内通过 `--check-config`，备份旧配置后仅重建测试服务，未重建镜像或更换数据卷。容器内外配置哈希一致，服务 healthy、readiness 200、匿名 API 401、默认 OAuth 503；已注册项目仍在，工作区仍为下述 Git 拉取错误。
-- 随后通过管理 API 更新有效项目凭据，身份、项目和仓库 API、scope、容器内 `git ls-remote` 均通过；工作区刷新后 Git 拉取成功，`state=ready`。未创建 webhook 或发布评审评论。
-- 上下文生成调用真实模型时返回 400，已复现网关拒绝 `submit_result` 工具 schema 的 `$ref` 根，要求显式 `type: object`。本地 `ContractSchema` 改为展开根结构，所有 contract 增加根 object、无根 `$ref`、禁止额外属性的回归，先失败后通过。该修复与只读项目校验端点、网页两步接入流程一起通过全量 Go/Web 检查；仍需构建新镜像验证，不将工作区 ready 等同于上下文生成完成。
-- 后续新镜像验证已完成：只读校验使用真实完整 URL 和 Key 返回项目身份、Developer 权限与 HEAD；项目记录未修改。onboarding 完成 24 轮真实调用并保存 agents 上下文，工作区 base/context SHA 一致。
-- 对授权测试 MR 人工回放 Merge Request Hook，服务 accepted 后完成 9 轮真实模型调用和代码工具读取。工作流 completed、任务 done、publication_state=published；汇总评论 `100202` 从 GitLab 读回，作者、目标 MR 和 head SHA 一致。结果 PASS、2 条 P2；因未定位到 diff 行，两条均进入汇总，没有行内讨论。未触发独立 challenge，未写 commit status、未合并或修改仓库。
-- 测试将项目 `commit_status`、`allow_repo_config`、`allow_repo_skills` 显式设为 false，保持只回写评审评论的边界。没有配置自动 webhook、OAuth、MCP 或索引命令；索引仍 unknown。模型用量是实际记录，不将未配置价格时的零 cost 当作免费。
-- 升级前停机备份整个数据卷并完成 SQLite integrity_check；旧镜像、主密钥、卷均保留。macOS 源码归档带入元数据造成的一次启动失败，已通过干净源码清单重建解决。最终实例 healthy、UID/GID 10001、readiness 200、匿名 API 401，镜像内 Git 2.39.5。测试机磁盘已用 98%，未执行全局清理。
-- 实跑发现 DAG started 事件漏带 provider/model。最新本地实现通过可选 executor 元数据接口补齐，真实引擎/SQLite/统计回归覆盖成功、失败、动态模型节点及代码节点；元数据 panic 降级为空，旧 executor 兼容。最新 Go 覆盖率 76.67%，Web 122 测试通过。历史空字段不回填；归属表示配置选择，不代表实际调用次数，此修复未额外复跑付费模型。
-- 元数据修复经精确源码 diff、文件哈希和验证记录绑定后独立终审通过，已部署镜像 `crc-review:test-20261023T105656Z`（digest `a8a1075d…`）。升级前再次备份数据，升级后 healthy、readiness 200、SQLite integrity_check 正常，原评审仍 published。最终磁盘已用 99%，剩余约 35 GiB；未清理其他服务或资源。元数据新写入的行为由本地引擎/SQLite 集成回归验证，未再次触发付费评审，历史节点仍可能为空。
+- OAuth/项目授权：admin 用户 199 对项目 1331 有 `manage`，viewer 用户 200 对项目 1332 有 `read`；CSRF 缺失 403、有效 200；跨项目读取 404；viewer 写 403；既有两个 OAuth 会话跨升级保留。
+- SSE/授权：撤 grant 后已有 SSE 在 1986ms 内关闭；撤权后读取 404，恢复 grant 后读取 200。
+- Webhook：启用并发幂等；停用、重新启用和重建保留外部同 URL hook；归属只按持久化的自有 hook ID。
+- GitLab：真实 Note Hook、状态 note/表情、commit status 和应用新增行行内评论发布成功。最终回读（`final-gitlab-before.json`）显示 `ai-review` status 52895/52896 在 `bae78e9980348c621cc0e1132e21b1656d44f212` 上为 failed；命令源 note 100746/100748 为 x、无 eyes，summary 100734 与 status note 100733 各一条。不同随机运行的 finding 集合和行内 diff key 可能不同，不能据此声称所有运行只有一条行内评论；幂等重放/重复发布结果以 PR #30 记录为准，本文不预判。
+- 升级/恢复：离线恢复和在线替换应用迁移 1、3–12，SQLite integrity、用户/授权/会话/任务/工作流/工作区保留。
+- Deep：连续两次实际无诊断代理 full deep 均为 0 call errors/0 failed nodes；MCP 成功/调用 10/10、10/11（第二次一次模型工具错误已纠正，不能声称所有工具调用成功），两家 provider 均实际调用 MCP。两次均使用 `deepseek-flash`/`gpt-6-astra`，完成 plan/fan-out/cross-verify/synthesis，BLOCKING/published；BLOCKING 是合成授权回归的预期结论。
 
-未完成（阻塞）：
+### 范围外与 UI 限制
 
-- 原凭据错误及工具 schema 400 已解除，上下文生成和授权 MR 汇总评论已通过。索引未运行，`index_status=unknown`。
-- 新增 CI `docker` job 执行同一脚本，但当前改动未提交、未推送，尚无该 job 的远端 CI 运行结果。
+- 生产规模/负载/计费、物理设备/完整 WCAG、Postgres、每个 MCP HTTP backend、其他协议/其他 provider 的实际评审不在本次 v1 隔离验收范围，不作为新增发布门槛。
+- `web/dist` 未变；f143 隔离实例在 1440 管理设置页和 390 viewer 设置页完成实际截图与 DOM 读取（浏览器传输于 2026-10-25T05:14Z 恢复）。390 视口为 390×844、scrollWidth 390，无横向溢出；viewer 页仅显示只读说明，无管理按钮。此前的截图工具超时和传输挂起是临时工具故障，不是产品失败；这不等同物理设备或完整 WCAG 验收。
 
-未验证（需部署后验收）：
+### 历史记录
 
-- GitLab 自动投递 webhook、行内讨论和 commit status；本次只验证人工回放入口到汇总评论。
-- 真实 GitLab OAuth 登录、回调、`read_user` 和 `bootstrap_admins` 角色映射。
-- 多模型对抗、其他协议的真实评审、应用内真实 MCP 和 `index_command`；本次默认单 provider 链路不覆盖这些项目。
-- HTTPS 反向代理下的实际 SSE 长连接。
-
-本轮只修订文档中的事实和运行口径，没有构建或部署新镜像，没有运行远端 CI、平台评审或发布。上述远程验证和部署记录保持为历史，不代表本轮变更已部署或已通过当前校验。
-
-独立的 codebase-memory-mcp 探针（2026-10-23，macOS arm64，版本 0.12.1，最小环境、隔离空 HOME）只覆盖配置/索引隔离、MCP `tools/list` profile 和小型合成 fixture；随后 `tools/call` 负向补测因隔离 daemon endpoint 创建失败而阻塞，未发出调用。它不证明调用层拒绝、应用内 MCP 端到端、Linux、大型生产仓库或实际索引性能。详情和限制见 [ARCH §8.4](../ARCH.md#84-codebase-memory-mcp-接入要点)。
+更早的本地日志、远程测试机记录和更早截图属于历史候选，不能作为当前证据；需要追溯时以 PR #30 的历史讨论和仓库历史为准。

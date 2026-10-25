@@ -32,6 +32,7 @@ var shaRE = regexp.MustCompile(`^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$`)
 type WebhookStore interface {
 	GetProject(ctx context.Context, id int64) (*store.Project, error)
 	RecordDelivery(ctx context.Context, delivery store.Delivery, job *store.Job) (string, bool, error)
+	RecordReviewCandidateDelivery(ctx context.Context, delivery store.Delivery, candidate *store.ReviewCandidate) (store.ReviewEnqueueResult, error)
 }
 
 // WebhookRequest is the authenticated HTTP request metadata plus body.
@@ -200,7 +201,18 @@ func (s *WebhookService) recordJob(ctx context.Context, projectID int64, event, 
 		duplicate bool
 		err       error
 	)
-	if command, ok := reviewCommandFromJob(job); ok {
+	if job.Kind == "review.candidate" {
+		// A candidate owns its durable sequence; falling back to the generic
+		// delivery would enqueue a payload that can never activate.
+		candidate, ok := reviewCandidateFromJob(job)
+		if !ok {
+			s.logger.Warn("webhook candidate job is invalid", "project_id", projectID, "event", event)
+			return WebhookResult{Ignored: "storage_error"}, errors.New("app: invalid review.candidate job")
+		}
+		var result store.ReviewEnqueueResult
+		result, err = s.store.RecordReviewCandidateDelivery(ctx, delivery, candidate)
+		jobID, duplicate = result.JobID, result.Duplicate
+	} else if command, ok := reviewCommandFromJob(job); ok {
 		if recorder, supported := s.store.(interface {
 			RecordReviewDelivery(ctx context.Context, d store.Delivery, command *store.ReviewCommand) (store.ReviewEnqueueResult, error)
 		}); supported {
@@ -222,6 +234,32 @@ func (s *WebhookService) recordJob(ctx context.Context, projectID int64, event, 
 	}
 	s.logger.Info("webhook accepted", "project_id", projectID, "event", event, "kind", job.Kind, "job_id", jobID)
 	return WebhookResult{Accepted: true, JobID: jobID}, nil
+}
+
+// reviewCandidateFromJob extracts the deferred review event from a candidate
+// job. The store allocates its sequence and writes the durable payload.
+func reviewCandidateFromJob(job *store.Job) (*store.ReviewCandidate, bool) {
+	if job == nil || job.Kind != "review.candidate" {
+		return nil, false
+	}
+	var fields struct {
+		ProjectID int64  `json:"project_id"`
+		MRIID     int64  `json:"mr_iid"`
+		HeadSHA   string `json:"head_sha"`
+	}
+	if err := json.Unmarshal(job.Payload, &fields); err != nil {
+		return nil, false
+	}
+	if fields.ProjectID <= 0 || fields.MRIID <= 0 {
+		return nil, false
+	}
+	return &store.ReviewCandidate{
+		ProjectID:   fields.ProjectID,
+		MRIID:       fields.MRIID,
+		HeadSHA:     fields.HeadSHA,
+		Payload:     job.Payload,
+		MaxAttempts: job.MaxAttempts,
+	}, true
 }
 
 func webhookProjectID(payload *gitlab.Webhook) (int64, string) {
@@ -374,6 +412,19 @@ func (s *WebhookService) newReviewJob(project *store.Project, settings config.Pr
 	profile := ProfileForLabels(labels, project.Profile, settings)
 	if _, ok := s.profiles[profile]; !ok {
 		profile = "default"
+	}
+	if settings.AllowRepoConfig {
+		// The effective target-branch configuration can reject the event. A
+		// deferred candidate avoids fencing the active review until the worker
+		// accepts it.
+		return newJob("review.candidate", reviewCandidateKey(project.ID, iid), map[string]any{
+			"project_id": project.ID,
+			"mr_iid":     iid,
+			"head_sha":   strings.ToLower(sha),
+			"profile":    profile,
+			"trigger":    trigger,
+			"full":       full,
+		}), ""
 	}
 	key := reviewRunKey(project.ID, iid)
 	return newJob("review.run", key, map[string]any{
@@ -539,6 +590,10 @@ func newJob(kind, key string, payload any) *store.Job {
 		encoded = []byte(`{}`)
 	}
 	return &store.Job{Kind: kind, Key: key, Payload: encoded, MaxAttempts: 3}
+}
+
+func reviewCandidateKey(projectID, iid int64) string {
+	return "review.candidate:" + itoa(projectID) + ":" + itoa(iid)
 }
 
 func reviewRunKey(projectID, iid int64) string {

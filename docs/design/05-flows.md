@@ -91,7 +91,7 @@ sequenceDiagram
 
 ## F3 评论命令
 
-M0 先把命令持久化为 `review.command`，以下 GitLab 校验由 worker 执行，不在 webhook handler 内执行。worker 完成权限校验、help/拒绝回复和目标任务入队；它不执行评审，也不添加表情回执。
+M0 先把命令持久化为 `review.command`，以下 GitLab 校验由 worker 执行，不在 webhook handler 内执行。worker 完成权限校验、help/拒绝回复和目标任务入队；它不执行评审。受理 run/cancel 时，入队事务记录源 note 的 eyes；help/拒绝不添加表情。webhook handler 不添加 emoji，也不做网络调用。
 
 1. Note Hook 到达，正文以 `/review` 开头。
 2. 忽略：作者是项目 bot 用户；MR 已关闭或合并。
@@ -100,7 +100,7 @@ M0 先把命令持久化为 `review.command`，以下 GitLab 校验由 worker �
    - `/review`、`/review full`、`/review <profile>` → 入队 `review.run`（trigger=`command`，带 `full`、`profile`、`triggered_by`）。
    - `/review cancel` → 入队 `review.cancel`。
    - `/review help` → worker 回复可用命令和档位说明，不创建评审任务。
-5. 两类回复都使用 worker 自己的隐藏 per-note marker（`command-reply note=<source_note_id>`），按源 note 查找并更新已有回复，因此任务重试不会重复创建。webhook 自身的回显会被 `command_reply` 过滤，机器人评论也不会再次触发。当前不添加 👀 等表情回执。
+5. 两类回复都使用 worker 自己的隐藏 per-note marker（`command-reply note=<source_note_id>`），按源 note 查找并更新已有回复，因此任务重试不会重复创建。受理 run/cancel 时，入队事务在源 note 上设置 eyes；任务进入终态后，状态 worker 将自有 reaction 协调为完成/失败标记或清除。help/拒绝不添加表情；webhook 自身不添加 emoji，也不做网络调用。机器人评论和 command-reply note 不会再次触发。
 
 ---
 
@@ -163,6 +163,8 @@ M0 先把命令持久化为 `review.command`，以下 GitLab 校验由 worker �
    3. 写 `publications`。
 4. **commit status**（项目开启时）：`POST /projects/:id/statuses/:head_sha`，`name=ai-review`，只有 PASS 写 `success`，BLOCKING 和 INCOMPLETE 写 `failed`，`target_url` 指向控制台评审详情，`description` ≤ 140 字符。调用成功后以 `publish_key=status:<head_sha>:<state>` 记录 `publications`；旧格式 `status:<head_sha>` 没有状态，评审详情视为未知，不根据 verdict 推断。commit status 的 failed 是评审结论，不是发布失败。
 5. 每一步写 `publications` 与调用 GitLab 不在同一事务：先调用 GitLab 成功，再写记录；崩溃导致漏记时，第 2.2 步的标记查找可以兜底汇总评论，行内讨论则可能重复一条（可接受，并在下一次运行时以 `publish_key` 去重）。
+
+2026-10-25 用户确认 Issue #3 按上述发布键边界验收：相同事件 UUID、相同发布键和同一评审的重复发布不新增重复评论。显式新评审可创建新代次；`publish_key` 包含路径、规范化标题和代码片段，模型换措辞可能生成不同键并再次发布同一问题。本版不承诺跨次评审的语义去重。
 
 发布执行状态与 workflow 执行状态分开持久化：
 

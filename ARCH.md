@@ -1,6 +1,6 @@
 # ARCH — GitLab CE 自动评审服务设计基线
 
-> 状态：**设计基线 v0.2（讨论稿）**。主体功能已有本地实现，管理 API 的游标分页、项目/评审摘要、反馈原始计数、人工标注与质量指标、上下文版本与保留清理均已落地；仓库配置在评审 worker 中合并。远程 Linux/amd64 测试机已完成 Docker 构建与容器冒烟、真实项目接入和仓库上下文生成；人工回放 webhook 至汇总评论也已验证。GitLab 自动投递 webhook、真实 OAuth、应用内 MCP、`index_command`、全部模型协议和大型仓库规模仍未验收。实际能力、未验证项与限制见 [README.md](README.md)。
+> 状态：**设计基线 v0.2（讨论稿）**。主体功能已有本地实现，管理 API 的游标分页、项目/评审摘要、反馈原始计数、人工标注与质量指标、上下文版本与保留清理均已落地；仓库配置在评审 worker 中合并。2026-10-25 的有界隔离实例（Linux/amd64、真实 GitLab 19.5.1 CE）已验证 GitLab 自动投递 webhook、真实 OAuth、项目授权/CSRF、应用内 MCP 调用和 onboarding CLI 索引；连续两次实际 deep 均为 0 call errors、0 failed nodes，verdict 为预期的 BLOCKING。尚未验收或实现：协议、provider 与 MCP HTTP backend 的全部组合，大型仓库与生产负载，操作系统级文件沙箱，物理设备/完整 WCAG；Postgres 未实现。实际能力、未验证项与限制见 [README.md](README.md)，最终交付事实见 PR #30。
 > 本文汇总了立项讨论中的全部结论。标注「已定」的条目是用户确认过的决策；标注「建议默认」的条目是讨论中提出、尚待确认的方案，见 §16 待决事项。
 > 实现层面的细化（接口签名、表结构、API、流程、配置）见 [docs/design/](docs/design/README.md)。
 
@@ -146,7 +146,7 @@ web/                   Web 控制台（M6）
 | Push Hook | 目标分支有新 push | 刷新项目工作区（见 §8.1），不触发评审 |
 
 - webhook handler 只做三件事：校验 `X-Gitlab-Token`、入队、返回 200。GitLab 有 webhook 超时限制，连续失败还会自动禁用 hook。
-- **幂等键**：`(project_id, mr_iid, head_sha, profile)`。同一个 MR 有新 push 时，旧工作流转为 `cancelled`，旧结果作废。
+- **投递去重**：按 GitLab event UUID 去重；显式新命令可对相同 head/profile 创建新代次。同一个 MR 有新 push 时，旧工作流转为 `cancelled`，旧结果作废。发布去重边界见 §6.7。
 - **增量评审**：记录上次已评审的 `head_sha`，默认只评审新增变更，`/review full` 强制全量。
 
 ### 4.3 取 diff 与代码
@@ -347,7 +347,7 @@ pending ─→ queued ─→ running ─→ completed
 评审是只读的，恢复比原引擎简单得多：
 
 - 服务重启后，`running` 和 `queued` 的节点直接重新执行。LLM 调用无副作用，重跑是安全的。
-- 只有发布阶段需要幂等：汇总评论按隐藏标记就地更新；行内讨论按 `(fingerprint, finding_id)` 去重。
+- 发布阶段另有幂等保护：汇总评论按隐藏标记就地更新；行内讨论按项目/MR 内的 `publish_key` 去重。该键包含路径、规范化标题和代码片段，不是语义相似度判断。2026-10-25 用户确认按此边界验收：显式重跑时模型换标题可能再次发布同一问题；本版不增加跨次问题语义去重。
 - 评审执行状态与发布状态分开恢复：`publication_state=pending` 的终态工作流在启动后重试；failed execution 在 `post_failure_note=true` 时发布未完成摘要，关闭时记为 skipped；取消或 superseded 记为 skipped；自动恢复不会覆盖 published/failed（手动 republish 是显式例外）。失败原因有界脱敏保存，永久发布失败需要手动 republish。
 
 ### 6.8 预算
@@ -448,8 +448,8 @@ data/workspaces/<project_id>/
 {
   "mcpServers": {
     "codebase-memory": {
-      "command": "codebase-memory-mcp",
-      "args": ["--tool-profile=analysis"],
+      "command": "/usr/local/bin/crc-codebase-memory-mcp",
+      "args": ["--tool-profile=analysis", "--ui=false"],
       "env": {}
     }
   }
@@ -460,9 +460,10 @@ data/workspaces/<project_id>/
 
 首个接入的代码地图工具是 `codebase-memory-mcp`（本机验证版本 0.12.1）：
 
-- MCP server 的 `--tool-profile=analysis|scout` 只限制对外 advertise 的工具：探针中 analysis 为 13 个、scout 为 8 个，均不含 `index_repository`、`delete_project`、`ingest_traces`、`manage_adr` 四个写入/管理工具。该结论只验证了 `tools/list`；`tools/call` 的拒绝行为未测试。
+- MCP server 的 `--tool-profile=analysis|scout` 提供受限工具面。analysis 为 13 个、scout 为 8 个，均不含 `index_repository`、`delete_project`、`ingest_traces`、`manage_adr` 四个写入/管理工具。2026-10-25 的 Linux/amd64 容器探针已验证 analysis 的 `list_projects` 调用成功，直接调用未公开的 `delete_project` 在工具层被拒绝；不把一次负向调用推广为全部工具的安全证明。
 - CLI 的 `--tool-profile` 不限制本地 CLI 工具调用；不要把 MCP profile 当作 CLI 沙箱。
-- onboarding 阶段用 `cli` 模式建索引，不必建立 MCP 会话。
+- onboarding 阶段用 `cli` 模式建索引，不必由应用建立 MCP 会话；0.12.1 的 CLI 仍会使用上游 daemon。
+- 用 [MCP 隔离启动脚本](scripts/codebase-memory-mcp.sh) 同时启动 server 和索引命令。脚本在项目 `HOME` 下分别设置 `CBM_CACHE_DIR` 和 `CBM_RUNTIME_DIR`；仅设置 `HOME` 或 `XDG_RUNTIME_DIR` 不能隔离默认的账号级 daemon。完整配置与部署要求见 [MCP 配置](docs/design/06-config.md#2-mcp-配置文件)。
 - 服务端部署时关闭 `auto_watch` / `watcher_enabled` 和 UI（默认端口 9749）。索引刷新由 Push Hook 驱动，UI 端口不对外暴露。
 - 索引只对 base 建。MR 改动的文件由 agent 在 worktree 中直接读取。prompt 中明确说明「图谱反映 base 版本，改动的文件以 worktree 为准」（借鉴 review agent 的 `check_index_coverage` 原则）。
 
@@ -470,12 +471,16 @@ data/workspaces/<project_id>/
 - **工作区主键用 GitLab `project_id`**：项目改名或转移 namespace 后 git 地址会变，但 `project_id` 不变；git 地址只作为属性记录，变化时更新 mirror 的 remote，不重建工作区。
 - **未来方向**：推动 codebase-memory 支持以仓库身份（规范化的 git remote 地址或 `project_id`）作为索引 key，与路径解耦，使同一仓库在不同路径（如多实例、迁移数据目录）下可直接复用索引。见 §16 Q18。
 
-探针记录（2026-10-23，macOS arm64，codebase-memory-mcp 0.12.1，最小环境、隔离且初始为空的 `HOME`；日志见部署验证目录）：
+历史探针记录（2026-10-23，macOS arm64，codebase-memory-mcp 0.12.1，最小环境、隔离且初始为空的 `HOME`；日志见部署验证目录）。以下第 1–4 条只代表当日结果，其中第 2 条为部分验证，不能作为当前应用内 MCP 结论：
 
-1. 配置和索引可用独立 `HOME` 隔离；本次观察到它们落在 `$HOME/.cache/codebase-memory-mcp`，未观察到写入 XDG 目录。结论仅限该平台和版本。
+1. 配置和索引文件落在独立 `HOME` 的 `$HOME/.cache/codebase-memory-mcp`，未观察到写入 XDG 目录。该历史探针没有证明两个 daemon 能同时运行，不能据此省略 `CBM_RUNTIME_DIR`。
 2. MCP server profile 的 advertised tool 列表符合预期（analysis 13 / scout 8）；CLI 调用不受该 profile 限制。随后尝试在新的隔离 HOME/cache/runtime 下补测 `tools/call`，server 在 initialize 前退出并报告 `secure daemon endpoint could not be created`；没有发出工具调用，也未连接或停止当前会话的默认 daemon。因此调用是否被拒绝仍未知，不能把启动失败当作权限拒绝证据。结论是部分验证。
 3. 小型合成 fixture（4 个 `.go` 文件和 `go.mod`，最终 20 nodes / 29 edges）可用同一项目身份增量更新：首次 fast index 约 1.72s / 25 MiB，unchanged 约 0.95s / 15.9 MiB，新增 `Difference` 符号后约 1.2s / 26.6 MiB。没有真实大型仓库、生产规模或 Linux 运行数据，因此大仓库耗时和内存仍未解决；不得把合成 fixture 当作生产基准。
 4. 探针运行时没有 GitLab、模型 provider 或 OAuth 凭据，未建立真实应用端到端链路。
+
+后续 Linux/amd64 容器探针（2026-10-25，0.12.1）复现了仅按 `HOME` 隔离时的 cache 冲突。使用上述脚本后，两个项目并发初始化、列工具和调用 `list_projects` 均成功；每个会话只列出自己固定 `base/` 路径的一个索引项目，`delete_project` 均被拒绝。此结果验证部署隔离与调用层拒绝，不替代完整评审链路、大型仓库性能或操作系统级文件隔离验收。
+
+2026-10-25 的应用内端到端记录（f143 隔离实例，真实 GitLab 19.5.1 CE）：连续两次实际无诊断代理 deep 分别使用 `deepseek-flash` 与 `gpt-6-astra` 两家 provider，模型实际调用 `list_projects`、`search_graph`、`get_code_snippet`；MCP 成功/调用为 10/10 与 10/11（第二次一次模型工具错误已纠正），未出现跨项目索引引用。真实 stdio 会话验证 `delete_project` 不可用；onboarding 的 CLI 索引成功，未变更的固定 `base/` 索引被复用而不是重建。该记录验证应用侧 MCP 接入与有界隔离，不构成操作系统级沙箱、并发/负载、每个 HTTP backend 或通用后端兼容性结论。运行计数与 run ID 见 [README 验证](README.md#验证)和 PR #30。
 
 ### 8.5 Skill 接入
 

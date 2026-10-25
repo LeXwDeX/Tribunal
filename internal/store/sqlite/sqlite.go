@@ -697,6 +697,15 @@ func (s *Store) RegisterProject(ctx context.Context, p store.Project) (string, e
 	}
 
 	now := s.now().UTC()
+	if p.HookID != nil && p.WebhookManagedBy == "" {
+		// Compatibility for pre-ownership callers: a stored hook ID can only
+		// belong to a service-created hook.
+		p.WebhookManagedBy = store.WebhookManagedByService
+	}
+	if p.WebhookManagedBy != "" && p.WebhookCreatedAt == nil {
+		p.WebhookCreatedAt = &now
+		p.WebhookUpdatedAt = &now
+	}
 	// New registrations are active; a later management API controls enabled.
 	p.Enabled = true
 	p.CreatedAt = now
@@ -711,11 +720,13 @@ func (s *Store) RegisterProject(ctx context.Context, p store.Project) (string, e
 	_, err = tx.ExecContext(ctx, `INSERT INTO projects
 		(id, path_with_namespace, web_url, default_branch, token_enc, token_expires_at,
 		 token_scopes, webhook_secret_enc, hook_id, webhook_state, webhook_events,
-		 webhook_error, profile, settings, enabled, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 webhook_error, webhook_managed_by, webhook_created_at, webhook_updated_at,
+		 profile, settings, enabled, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.ID, p.PathWithNamespace, p.WebURL, p.DefaultBranch, p.TokenEnc,
 		nullableTime(p.TokenExpiresAt), string(scopesJSON), p.WebhookSecretEnc,
 		nullableInt(p.HookID), p.WebhookState, string(eventsJSON), p.WebhookError,
+		p.WebhookManagedBy, nullableTime(p.WebhookCreatedAt), nullableTime(p.WebhookUpdatedAt),
 		p.Profile, string(settings), 1,
 		formatTime(p.CreatedAt), formatTime(p.UpdatedAt))
 	if err != nil {
@@ -754,7 +765,8 @@ func (s *Store) RegisterProject(ctx context.Context, p store.Project) (string, e
 
 const projectColumns = `id, path_with_namespace, web_url, default_branch, token_enc,
 	token_expires_at, token_scopes, webhook_secret_enc, hook_id, webhook_state,
-	webhook_events, webhook_error, profile, settings, enabled, created_at, updated_at`
+	webhook_events, webhook_error, webhook_managed_by, webhook_created_at,
+	webhook_updated_at, profile, settings, enabled, created_at, updated_at`
 
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -762,21 +774,38 @@ type rowScanner interface {
 
 func scanProject(row rowScanner) (*store.Project, error) {
 	var (
-		p            store.Project
-		tokenExpires sql.NullString
-		scopesText   string
-		hookID       sql.NullInt64
-		eventsText   string
-		settings     string
-		enabled      int
-		createdAt    string
-		updatedAt    string
+		p              store.Project
+		tokenExpires   sql.NullString
+		scopesText     string
+		hookID         sql.NullInt64
+		eventsText     string
+		webhookCreated sql.NullString
+		webhookUpdated sql.NullString
+		settings       string
+		enabled        int
+		createdAt      string
+		updatedAt      string
 	)
 	if err := row.Scan(&p.ID, &p.PathWithNamespace, &p.WebURL, &p.DefaultBranch,
 		&p.TokenEnc, &tokenExpires, &scopesText, &p.WebhookSecretEnc, &hookID,
 		&p.WebhookState, &eventsText, &p.WebhookError,
+		&p.WebhookManagedBy, &webhookCreated, &webhookUpdated,
 		&p.Profile, &settings, &enabled, &createdAt, &updatedAt); err != nil {
 		return nil, err
+	}
+	if webhookCreated.Valid {
+		t, err := parseTime(webhookCreated.String)
+		if err != nil {
+			return nil, err
+		}
+		p.WebhookCreatedAt = &t
+	}
+	if webhookUpdated.Valid {
+		t, err := parseTime(webhookUpdated.String)
+		if err != nil {
+			return nil, err
+		}
+		p.WebhookUpdatedAt = &t
 	}
 	if tokenExpires.Valid {
 		t, err := parseTime(tokenExpires.String)

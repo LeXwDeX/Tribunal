@@ -35,6 +35,7 @@ import type {
   Project,
   ProjectRegistration,
   ProjectValidation,
+  ProjectWebhookState,
   Provider,
   ProviderTestResult,
   ReviewDetail,
@@ -105,8 +106,22 @@ export async function rotateProjectToken(id: number | string, token: string): Pr
   await request<void>(`/api/v1/projects/${segment(id)}/token`, { method: 'PUT', body: { token } })
 }
 
-export async function recreateWebhook(id: number | string): Promise<Record<string, unknown>> {
-  return request<Record<string, unknown>>(`/api/v1/projects/${segment(id)}/webhook`, { method: 'POST' })
+// Explicit webhook lifecycle. The legacy recreateWebhook name stays as a
+// rebuild alias for existing callers.
+export async function enableWebhook(id: number | string): Promise<ProjectWebhookState> {
+  return request<ProjectWebhookState>(`/api/v1/projects/${segment(id)}/webhook`, { method: 'POST' })
+}
+
+export async function rebuildWebhook(id: number | string): Promise<ProjectWebhookState> {
+  return request<ProjectWebhookState>(`/api/v1/projects/${segment(id)}/webhook/rebuild`, { method: 'POST' })
+}
+
+export async function recreateWebhook(id: number | string): Promise<ProjectWebhookState> {
+  return rebuildWebhook(id)
+}
+
+export async function disableWebhook(id: number | string): Promise<ProjectWebhookState> {
+  return request<ProjectWebhookState>(`/api/v1/projects/${segment(id)}/webhook`, { method: 'DELETE' })
 }
 
 export async function unregisterProject(id: number | string): Promise<void> {

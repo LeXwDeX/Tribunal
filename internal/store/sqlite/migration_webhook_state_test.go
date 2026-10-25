@@ -66,12 +66,19 @@ func TestWebhookStateMigrationPreservesLegacyProjects(t *testing.T) {
 	if linked.WebhookState != store.WebhookStateUnknown || linked.HookID == nil || *linked.HookID != 77 {
 		t.Fatalf("linked project = %+v", linked)
 	}
+	if linked.WebhookManagedBy != store.WebhookManagedByService ||
+		linked.WebhookCreatedAt == nil || linked.WebhookUpdatedAt == nil {
+		t.Fatalf("legacy managed hook ownership = %+v", linked)
+	}
 	plain, err := s.GetProject(ctx, 2)
 	if err != nil {
 		t.Fatalf("GetProject plain: %v", err)
 	}
 	if plain.WebhookState != store.WebhookStateDisabled || plain.HookID != nil {
 		t.Fatalf("plain project = %+v", plain)
+	}
+	if plain.WebhookManagedBy != "" || plain.WebhookCreatedAt != nil || plain.WebhookUpdatedAt != nil {
+		t.Fatalf("legacy plain hook ownership = %+v", plain)
 	}
 	for _, project := range []*store.Project{linked, plain} {
 		if project.WebhookEvents == nil || len(project.WebhookEvents) != 0 || project.WebhookError != "" {

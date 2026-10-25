@@ -222,9 +222,10 @@ func TestLegacyDatabaseKeepsOldSessionRowsUntrusted(t *testing.T) {
 	if _, err := s.GetSession(ctx, sessionHash("legacy-plaintext-id"), clock.Now()); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("legacy plaintext session id was accepted: %v", err)
 	}
-	if got := rowCount(t, s, `SELECT COUNT(*) FROM schema_migrations`); got != len(applied)+5 {
-		// Open applies the newer retention, access, and webhook state migrations on upgrade.
-		t.Fatalf("schema_migrations = %d, want %d", got, len(applied)+5)
+	if got := rowCount(t, s, `SELECT COUNT(*) FROM schema_migrations`); got != len(applied)+8 {
+		// Open applies the newer retention, access, webhook state, review intent,
+		// review side-effect, and webhook ownership migrations on upgrade.
+		t.Fatalf("schema_migrations = %d, want %d", got, len(applied)+8)
 	}
 }
 

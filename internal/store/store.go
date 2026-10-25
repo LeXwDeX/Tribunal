@@ -41,6 +41,10 @@ const (
 	WebhookStateUnknown  = "unknown"
 )
 
+// WebhookManagedByService marks hooks this service created. It is recorded so
+// later update/delete operations never act on a same-URL hook owned by a user.
+const WebhookManagedByService = "crc"
+
 // Project matches the projects table. TokenEnc and WebhookSecretEnc only
 // contain ciphertext and are excluded from JSON serialization.
 type Project struct {
@@ -56,6 +60,9 @@ type Project struct {
 	WebhookState      string          `json:"webhook_state"`
 	WebhookEvents     []string        `json:"webhook_events"`
 	WebhookError      string          `json:"webhook_error"`
+	WebhookManagedBy  string          `json:"webhook_managed_by,omitempty"`
+	WebhookCreatedAt  *time.Time      `json:"webhook_created_at,omitempty"`
+	WebhookUpdatedAt  *time.Time      `json:"webhook_updated_at,omitempty"`
 	Profile           string          `json:"profile"`
 	Settings          json.RawMessage `json:"settings"`
 	Enabled           bool            `json:"enabled"`

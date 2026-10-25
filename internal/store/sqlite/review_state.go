@@ -23,6 +23,7 @@ import (
 const (
 	reviewRunKind            = "review.run"
 	reviewCancelKind         = "review.cancel"
+	reviewCandidateKind      = "review.candidate"
 	defaultReviewMaxAttempts = 3
 	maxWorkflowDossierBytes  = 1 << 20 // uncompressed JSON ceiling
 	maxPublicationErrorRunes = 500
@@ -41,9 +42,10 @@ func (s *Store) GetReviewControl(ctx context.Context, projectID, mrIID int64) (*
 		updatedRaw string
 	)
 	err := s.db.QueryRowContext(ctx, `SELECT project_id, mr_iid, generation, head_sha,
-		cancelled, updated_at FROM review_controls WHERE project_id = ? AND mr_iid = ?`,
+		cancelled, candidate_seq, barrier_seq, updated_at
+		FROM review_controls WHERE project_id = ? AND mr_iid = ?`,
 		projectID, mrIID).Scan(&control.ProjectID, &control.MRIID, &control.Generation,
-		&control.HeadSHA, &cancelled, &updatedRaw)
+		&control.HeadSHA, &cancelled, &control.CandidateSeq, &control.BarrierSeq, &updatedRaw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%w: review control for project %d MR %d", store.ErrNotFound, projectID, mrIID)
 	}
@@ -191,6 +193,13 @@ func (s *Store) enqueueReviewTx(ctx context.Context, tx *sql.Tx, command store.R
 	if err != nil {
 		return "", 0, err
 	}
+	control, err := getReviewControlTx(ctx, tx, command.ProjectID, command.MRIID)
+	if err != nil {
+		return "", 0, err
+	}
+	if err := s.recordReviewSideEffectsTx(ctx, tx, command, control, generation, now); err != nil {
+		return "", 0, err
+	}
 	if command.MaxAttempts == 0 {
 		command.MaxAttempts = defaultReviewMaxAttempts
 	}
@@ -215,6 +224,48 @@ func (s *Store) enqueueReviewTx(ctx context.Context, tx *sql.Tx, command store.R
 	return jobID, generation, nil
 }
 
+// reviewCommandSideEffects parses the fields the queue owns for side effects.
+// The queued command payload keeps its existing shape; no new key is required.
+type reviewCommandSideEffects struct {
+	NoteID  int64  `json:"note_id"`
+	Profile string `json:"profile"`
+}
+
+func (s *Store) recordReviewSideEffectsTx(ctx context.Context, tx *sql.Tx, command store.ReviewCommand, control *store.ReviewControl, generation int64, now time.Time) error {
+	var meta reviewCommandSideEffects
+	if raw := bytes.TrimSpace(command.Payload); len(raw) > 0 {
+		if err := json.Unmarshal(raw, &meta); err != nil {
+			return fmt.Errorf("sqlite: review payload must be a JSON object: %w", err)
+		}
+	}
+	goal := store.ReviewStatusGoal{
+		ProjectID:  command.ProjectID,
+		MRIID:      command.MRIID,
+		Generation: generation,
+		HeadSHA:    control.HeadSHA,
+		Profile:    meta.Profile,
+		State:      store.ReviewStatusQueued,
+	}
+	if _, err := s.setReviewStatusTx(ctx, tx, goal, now); err != nil {
+		return err
+	}
+	if _, err := s.clearReviewReactionsTx(ctx, tx, command.ProjectID, command.MRIID, generation, true, now); err != nil {
+		return err
+	}
+	if meta.NoteID > 0 {
+		if _, err := s.setReviewReactionTx(ctx, tx, store.ReviewReactionGoal{
+			ProjectID:  command.ProjectID,
+			MRIID:      command.MRIID,
+			NoteID:     meta.NoteID,
+			Generation: generation,
+			Desired:    store.ReviewReactionEyes,
+		}, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func bumpReviewControlTx(ctx context.Context, tx *sql.Tx, command store.ReviewCommand, head string, now time.Time) (int64, error) {
 	cancelled := 0
 	if command.Cancel {
@@ -222,13 +273,14 @@ func bumpReviewControlTx(ctx context.Context, tx *sql.Tx, command store.ReviewCo
 	}
 	var generation int64
 	err := tx.QueryRowContext(ctx, `INSERT INTO review_controls
-		(project_id, mr_iid, generation, head_sha, cancelled, updated_at)
-		VALUES (?, ?, 1, ?, ?, ?)
+		(project_id, mr_iid, generation, head_sha, cancelled, candidate_seq, barrier_seq, updated_at)
+		VALUES (?, ?, 1, ?, ?, 0, 0, ?)
 		ON CONFLICT (project_id, mr_iid) DO UPDATE SET
 			generation = review_controls.generation + 1,
 			head_sha = CASE WHEN excluded.cancelled = 1
 				THEN review_controls.head_sha ELSE excluded.head_sha END,
 			cancelled = excluded.cancelled,
+			barrier_seq = review_controls.candidate_seq,
 			updated_at = excluded.updated_at
 		RETURNING generation`,
 		command.ProjectID, command.MRIID, head, cancelled, formatTime(now)).Scan(&generation)
@@ -717,9 +769,10 @@ func decompressDossier(compressed []byte) ([]byte, error) {
 }
 
 // HasPublishedSevereFinding reports whether incremental history is unsafe for
-// one MR. A summary from a non-completed workflow is treated as unknown, so a
-// failure summary cannot narrow the next review. Findings that were dropped
-// (refuted) are excluded; published and marked findings count.
+// one MR. A summary from a non-completed workflow, or from a completed workflow
+// whose verdict is INCOMPLETE, is treated as unknown, so an empty summary
+// cannot narrow the next review. Findings that were dropped (refuted) are
+// excluded; published and marked findings count.
 func (s *Store) HasPublishedSevereFinding(ctx context.Context, projectID, mrIID int64) (bool, error) {
 	if projectID <= 0 || mrIID <= 0 {
 		return false, errors.New("sqlite: project id and mr iid are required")
@@ -727,6 +780,7 @@ func (s *Store) HasPublishedSevereFinding(ctx context.Context, projectID, mrIID 
 	var one int
 	err := s.db.QueryRowContext(ctx, `SELECT CASE
 			WHEN w.status <> 'completed' THEN 1
+			WHEN w.verdict = 'INCOMPLETE' THEN 1
 			WHEN EXISTS (
 				SELECT 1 FROM findings f
 				WHERE f.workflow_id = w.id

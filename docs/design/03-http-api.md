@@ -3,7 +3,7 @@
 > 服务对外提供三类接口：GitLab webhook、管理 API（Web 控制台和 `reviewctl` 共用）、健康检查。
 > 管理 API 前缀 `/api/v1`，请求和响应都是 JSON（SSE 除外）。
 
-> 主体接口已有本地实现，覆盖 webhook、健康检查、OAuth 持久会话、管理 API 和 API token，并补充项目/评审摘要与 `stats.feedback`（含 `by_provider` 归因）。`auth.bootstrap_token_env` 指向的管理员 Bearer token 仍可用于平台管理脚本，但不授予项目业务数据访问；浏览器登录需要配置 `auth.oauth`。单 provider 真实模型调用、真实 GitLab 注册与读取、仓库上下文生成及人工回放 webhook 到汇总评论已验证；GitLab 自动投递 webhook、真实 OAuth 登录和应用内 MCP 未联调，最新验证范围见 [项目 README](../../README.md)。实现差异见正文对应小节。
+> 主体接口已有本地实现，覆盖 webhook、健康检查、OAuth 持久会话、管理 API 和 API token，并补充项目/评审摘要与 `stats.feedback`（含 `by_provider` 归因）。`auth.bootstrap_token_env` 指向的管理员 Bearer token 仍可用于平台管理脚本，但不授予项目业务数据访问；浏览器登录需要配置 `auth.oauth`。已验证运行时候选/源码快照 `f143e7a7835e1e99345b1df9b289bb499e3c67416598d30e6184a558374eb0ac`（402 文件）的隔离实例覆盖 OAuth/项目授权、CSRF、webhook 归属保护、GitLab Note Hook/状态 note/commit status/应用新增行行内评论、升级恢复和 SSE 撤权关闭；连续两次无诊断代理 deep 均 0 call errors/0 failed nodes（MCP 10/10、10/11）。最终 commit/CI/Release 事实以 [PR #30](https://github.com/LeXwDeX/Code-Review-For-Gitlab-CE/pull/30) 为准。实现差异见正文对应小节。
 
 ---
 
@@ -80,7 +80,7 @@ Web 控制台的“重试加载更多”复用失败请求的同一 cursor，不
 
 `review.run` 的 job key：`review:<project_id>:<mr_iid>`。去重记录与入队在同一事务中提交，新 webhook 就地替换同 key、同 kind 的 queued 内容；running 内容不变，允许保留一个 queued 后继。取消任务使用独立 key `review.cancel:<project_id>:<mr_iid>`。工作流取消由评审处理器负责（见 05-flows.md F2）；webhook handler 本身不执行评审。
 
-Note Hook 先入队 `review.command`，由 worker 请求 GitLab 校验身份、MR 状态和权限后入队 run/cancel；这样 webhook handler 不等待网络调用。通过校验的 run 命令使用最新参数替换已有 queued run，保留 `full`、`profile` 和最新 `head_sha`；不覆盖 running 任务。`/review help` 和权限不足由 worker 各回复一条 GitLab note；回复正文以 `<!-- gitlab-ce-review:command-reply note=<note_id>` 隐藏 marker 开头，按源 note 幂等，重试时更新同一条回复。命令 worker 不添加表情回执，webhook 自身仍无网络调用，也会忽略机器人自己发出的 command-reply note。数据库失败返回 `ignored: storage_error`，不会写入去重记录或假报 accepted；由于 HTTP 仍是 200，运维需监控并重放失败事件。
+Note Hook 先入队 `review.command`，由 worker 请求 GitLab 校验身份、MR 状态和权限后入队 run/cancel；这样 webhook handler 不等待网络调用。通过校验的 run 命令使用最新参数替换已有 queued run，保留 `full`、`profile` 和最新 `head_sha`；不覆盖 running 任务。`/review help` 和权限不足由 worker 各回复一条 GitLab note；回复正文以 `<!-- gitlab-ce-review:command-reply note=<note_id>` 隐藏 marker 开头，按源 note 幂等，重试时更新同一条回复。受理 run/cancel 时，入队事务记录源 note 的 eyes，终态由状态 worker 协调；help/拒绝不添加表情。Webhook 自身仍无网络调用，也会忽略机器人自己发出的 command-reply note。数据库失败返回 `ignored: storage_error`，不会写入去重记录或假报 accepted；由于 HTTP 仍是 200，运维需监控并重放失败事件。
 
 自动触发（`mr_open` / `mr_update`）在 worker 合并配置后做最终 Draft、标签和目标分支过滤。`allow_repo_config=true` 时，Draft 检查不在 webhook 做，避免 webhook 调用 GitLab；标签仍可先用项目设置快速过滤，仓库配置只能追加排除；目标分支条件不被仓库配置覆盖。手动命令不受这些自动过滤限制。
 
@@ -114,19 +114,22 @@ Note Hook 先入队 `review.command`，由 worker 请求 GitLab 校验身份、M
 | GET | `/api/v1/projects/{id}` | 项目 `read`：详情（含工作区状态、最近评审和 `access`） |
 | PATCH | `/api/v1/projects/{id}` | 项目 `manage`：修改 `profile`、`settings`、`enabled` |
 | PUT | `/api/v1/projects/{id}/token` | 项目 `manage`：轮换 token：`{token}` |
-| POST | `/api/v1/projects/{id}/webhook` | 项目 `manage`：显式启用或重建 GitLab webhook；幂等复用已记录或同 URL hook |
+| POST | `/api/v1/projects/{id}/webhook` | 项目 `manage`：显式启用 GitLab webhook；只复用仍存在的已记录 `hook_id`，沿用已存 secret |
+| POST | `/api/v1/projects/{id}/webhook/rebuild` | 项目 `manage`：轮换 secret 并重建 GitLab webhook；只复用仍存在的已记录 `hook_id`，没有可复用 hook 时创建 |
+| DELETE | `/api/v1/projects/{id}/webhook` | 项目 `manage`：停用 webhook，只删除已记录的 service hook，保留 secret 供再次启用 |
 | DELETE | `/api/v1/projects/{id}` | 项目 `manage`：注销并删除 webhook（若由本服务创建）、清理工作区 |
 
 `GET /api/v1/projects` 是业务列表，按当前用户的项目授权过滤；平台管理员或静态 bootstrap Bearer 没有 grant 时得到空列表。选择授权对象时使用 §4.6 的 `/api/v1/admin/projects` 管理列表。列表中的 `access` 为 `read` 或 `manage`；授权在分页读取后被撤销的项目不会出现在结果中。
 
-`project` 支持正整数 ID、`namespace/path` 或配置的 GitLab 根地址下的完整 HTTP(S) 仓库 URL，可带 `.git` 后缀和尾斜杠。拒绝外域、URL 用户信息、query/fragment 和路径穿越；不会按用户输入连接任意主机。注册和连接校验要求平台管理员；项目详情读取需要 `read`，项目设置写入、Key 轮换、hook 重建和注销需要 `manage`，不要求平台管理员。
+`project` 支持正整数 ID、`namespace/path` 或配置的 GitLab 根地址下的完整 HTTP(S) 仓库 URL，可带 `.git` 后缀和尾斜杠。拒绝外域、URL 用户信息、query/fragment 和路径穿越；不会按用户输入连接任意主机。注册和连接校验要求平台管理员；项目详情读取需要 `read`，项目设置写入、Key 轮换、webhook 启用/重建/停用和注销需要 `manage`，不要求平台管理员。
 
 只读校验依次确认项目身份、当前用户及至少 Reporter 的项目权限、`api` 和 `read_repository` scope、有效期，以及 `git ls-remote ... HEAD`。全程默认限时 30 秒。成功返回 `200 {project_id, path_with_namespace, web_url, default_branch, username, access_level, token_scopes, token_expires_at?, git_head}`；未配置可信 GitLab 根地址或 Git 探针时返回 503。校验不落库、不创建 webhook、不入队、不调用模型；读取 HEAD 不等于完整 clone 或评论写权限验证。注册仍独立复核凭据，不依赖先前校验结果。
 
 注册请求：
 
-```json
 POST /api/v1/projects
+
+```json
 {
   "project": "group/backend-api",
   "token": "glpat-…",
@@ -140,7 +143,7 @@ POST /api/v1/projects
 
 1. 用 token 调 `GET /projects/:id` 确认可访问；读出 `default_branch`、`web_url`。
 2. 调 `GET /personal_access_tokens/self` 读取 scope 和过期时间；缺少 `api` 或 `read_repository` → `400 validation_failed`。
-3. `auto_webhook=true` 时先列出现有 hook（`GET /projects/:id/hooks`，需要 Maintainer）：已有本服务记录的 hook 或同 URL hook 时复用并更新事件与 secret，否则调 `POST /projects/:id/hooks` 创建；勾选 Merge request、Comments、Push 事件并写入生成的 secret。成功后 `webhook_state=enabled`，失败则注册失败且不落库。
+3. `auto_webhook=true` 时直接调 `POST /projects/:id/hooks` 创建新 hook，不列出或复用已有 hook；需要 Maintainer。新 hook 使用期望 URL，勾选 Merge request、Comments、Push 事件并写入生成的 secret。注册流程不会修改或删除已有 hook，即使存在同 URL hook 也只创建新 hook。创建成功但入库失败时会补偿删除刚创建的 hook；创建失败则注册失败且不落库。
 4. 入库后入队 `workspace.onboard`。
 
 注册响应：`201 {project, job_id, webhook_secret?}`。`auto_webhook` 默认 false，此时只在注册响应中返回一次 `webhook_secret`，供手工配置 webhook，`webhook_state=disabled`；自动创建时不返回 secret，`webhook_state=enabled`。项目列表支持 `q` / `enabled` 筛选和游标分页；筛选值会绑定到 cursor。
@@ -153,7 +156,9 @@ POST /api/v1/projects
 - `failed`：最近一次启用或重建失败，`webhook_error` 为有界脱敏文本（不含上游响应体或凭据）。
 - `unknown`：升级前已有 `hook_id` 的项目；hook 可能存在但状态未验证。
 
-`POST /api/v1/projects/{id}/webhook` 是显式幂等 provisioning：先将状态置为 `pending`，列出 hook 后优先复用已记录 `hook_id`（且 URL 匹配）的 hook，其次复用同 URL 的 hook 并更新事件/secret；没有可复用 hook 时才创建，返回 `200 {project, hook_id, state, events, last_error}`（`last_error` 为空字符串表示无错误），secret 永不返回。创建后本地持久化失败会补偿删除新建 hook；失败状态不报告为 `enabled`。重复启用不会重复创建 hook。本服务不修改或删除用户自建的非本服务 URL hook；重建时只删除已记录的旧 hook。Key 轮换不隐式创建 hook，已有 hook 被外部删除后可由该接口显式重建。
+`POST /api/v1/projects/{id}/webhook` 是显式幂等 provisioning：先将状态置为 `pending`，列出 hook 后只按持久化的 `hook_id` 查找已记录 hook；URL 不参与归属判断。已记录 hook 仍存在时，沿用已存 secret 并更新为期望的 URL 和事件；已记录 hook 已被外部删除时创建新 hook。同 URL 但未记录的 hook 从不复用、修改或删除。返回 `200 {project, hook_id, state, events, last_error, managed_by?, created_at?, updated_at?}`（`last_error` 为空字符串表示无错误），secret 永不返回。创建后本地持久化失败会补偿删除新建 hook；失败状态不报告为 `enabled`。重复启用不会重复创建 hook。
+
+`POST /api/v1/projects/{id}/webhook/rebuild` 使用同一归属规则并轮换 secret：已记录 hook 仍存在时更新为新 secret 和期望 URL/事件，已被外部删除时创建新 hook。`DELETE /api/v1/projects/{id}/webhook` 只删除已记录的 service hook 并把状态置为 `disabled`；上游返回 404 视为已停用。停用保留加密 secret 供再次启用。这些接口都不会修改或删除用户自建且未被记录的 hook。Key 轮换不隐式创建或修改 hook。
 
 项目详情保留项目行的全部扁平字段，并附加 `access`、`workspace`（无工作区记录时省略）和 `recent_reviews`（仅 `kind=review`，按创建时间最新优先，最多 20 条）。项目列表同样保留扁平项目字段，并附加 `access`、`workspace` 和 `last_review`（仅最新一条 review，缺失时省略）。当前列表在分页结果上为每个项目额外读取工作区和最近评审（2 次/项目，属于 N+1）；分页默认 50、最大 200。
 
@@ -348,4 +353,4 @@ Provider 返回 `name`、`protocol`、`base_url`、`model`、`max_concurrency`�
 | `/review cancel` | 取消正在运行的评审 |
 | `/review help` | 回复命令说明 |
 
-权限：发起人在该项目的访问级别必须 **≥ Developer（30）**；否则 worker 回复一条说明并忽略命令，不创建评审任务。机器人自己的评论和命令回复 note 一律忽略，防止循环触发。`/review help` 回复可用命令和档位说明；两类回复都按源 note ID 使用隐藏 marker，重试幂等。实现不添加 👀 等表情回执，除非后续有明确的来源变更。
+权限：发起人在该项目的访问级别必须 **≥ Developer（30）**；否则 worker 回复一条说明并忽略命令，不创建评审任务。机器人自己的评论和命令回复 note 一律忽略，防止循环触发。`/review help` 回复可用命令和档位说明；两类回复都按源 note ID 使用隐藏 marker，重试幂等。受理 run/cancel 时通过入队事务记录源 note eyes；终态由状态 worker 协调为完成/失败标记或清除。help/拒绝不添加表情。

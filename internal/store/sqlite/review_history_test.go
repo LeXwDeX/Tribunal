@@ -158,6 +158,65 @@ func TestHasPublishedSevereFindingTreatsFailedSummaryAsUnknown(t *testing.T) {
 	}
 }
 
+// A completed workflow can publish an empty summary when its verdict is
+// INCOMPLETE. That summary is not evidence that older P0/P1 findings were
+// rechecked, so incremental history must stay unsafe.
+func TestHasPublishedSevereFindingTreatsIncompleteSummaryAsUnknown(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	s := openTestStore(t, clock)
+	mustProject(t, s, 42)
+
+	first, err := s.EnqueueReviewLatest(ctx, store.ReviewCommand{
+		ProjectID: 42, MRIID: 7, HeadSHA: reviewHead("a"),
+	})
+	if err != nil {
+		t.Fatalf("enqueue first: %v", err)
+	}
+	wfA, _, err := s.CreateReviewWorkflow(ctx, reviewWorkflowRequest(first.JobID, first.Generation, 42, 7, reviewHead("a")))
+	if err != nil {
+		t.Fatalf("create first: %v", err)
+	}
+	finishWorkflow(t, s, wfA, 1, clock.Now())
+	if err := s.SetWorkflowVerdict(ctx, wfA, "BLOCKING"); err != nil {
+		t.Fatalf("set first verdict: %v", err)
+	}
+	mustPublication(t, s, 42, 7, wfA, "summary-a")
+	if err := s.ReplaceFindings(ctx, wfA, []store.Finding{publishedFinding("f-a", "P0", "publish")}); err != nil {
+		t.Fatalf("ReplaceFindings: %v", err)
+	}
+
+	clock.Advance(time.Second)
+	second, err := s.EnqueueReviewLatest(ctx, store.ReviewCommand{
+		ProjectID: 42, MRIID: 7, HeadSHA: reviewHead("b"),
+	})
+	if err != nil {
+		t.Fatalf("enqueue second: %v", err)
+	}
+	wfB, _, err := s.CreateReviewWorkflow(ctx, reviewWorkflowRequest(second.JobID, second.Generation, 42, 7, reviewHead("b")))
+	if err != nil {
+		t.Fatalf("create second: %v", err)
+	}
+	finishWorkflow(t, s, wfB, 1, clock.Now())
+	if err := s.SetWorkflowVerdict(ctx, wfB, "INCOMPLETE"); err != nil {
+		t.Fatalf("set second verdict: %v", err)
+	}
+	mustPublication(t, s, 42, 7, wfB, "summary-b")
+
+	severe, err := s.HasPublishedSevereFinding(ctx, 42, 7)
+	if err != nil || !severe {
+		t.Fatalf("incomplete summary history = %v, %v, want true (unknown)", severe, err)
+	}
+
+	// A clean completed PASS review still allows incremental narrowing.
+	if err := s.SetWorkflowVerdict(ctx, wfB, "PASS"); err != nil {
+		t.Fatalf("set second verdict PASS: %v", err)
+	}
+	if severe, err = s.HasPublishedSevereFinding(ctx, 42, 7); err != nil || severe {
+		t.Fatalf("clean PASS summary history = %v, %v, want false", severe, err)
+	}
+}
+
 func TestHasPublishedSevereFindingWithoutPublication(t *testing.T) {
 	s := openTestStore(t, newFakeClock())
 	mustProject(t, s, 42)

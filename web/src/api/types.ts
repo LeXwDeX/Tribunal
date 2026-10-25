@@ -112,6 +112,12 @@ export interface Project {
   token_expires_at?: string
   token_scopes?: string[]
   hook_id?: number
+  webhook_state?: 'disabled' | 'pending' | 'enabled' | 'failed' | 'unknown' | string
+  webhook_events?: string[]
+  webhook_error?: string
+  webhook_managed_by?: string
+  webhook_created_at?: string
+  webhook_updated_at?: string
   profile: string
   settings: ProjectSettings
   enabled: boolean
@@ -126,6 +132,17 @@ export interface ProjectRegistration {
   project: Project
   job_id: string
   webhook_secret?: string
+}
+
+export interface ProjectWebhookState {
+  project?: Project
+  hook_id: number
+  state: string
+  events: string[]
+  last_error: string
+  managed_by?: string
+  created_at?: string
+  updated_at?: string
 }
 
 export interface ProjectValidation {

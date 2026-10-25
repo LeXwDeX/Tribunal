@@ -200,13 +200,13 @@ type ProfileConfig struct {
 {
   "mcpServers": {
     "codebase-memory": {
-      "command": "codebase-memory-mcp",
-      "args": ["--tool-profile=analysis"],
+      "command": "/usr/local/bin/crc-codebase-memory-mcp",
+      "args": ["--tool-profile=analysis", "--ui=false"],
       "env": {},
       "x-review": {
-        "index_command": ["codebase-memory-mcp", "cli", "--quiet", "index_repository", "{\"repo_path\":\"{base_dir}\"}"],
-        "env_allowlist": ["PATH", "HOME"],
-        "home": "{workspace}/index/codebase-memory",
+        "index_command": ["/usr/local/bin/crc-codebase-memory-mcp", "cli", "--quiet", "index_repository", "{\"repo_path\":\"{base_dir}\"}"],
+        "env_allowlist": ["PATH"],
+        "home": ".mcp/codebase-memory/home",
         "call_timeout": "60s",
         "max_output_chars": 20000,
         "idle_timeout": "10m"
@@ -220,10 +220,16 @@ type ProfileConfig struct {
 |---|---|
 | `index_command` | onboarding 和刷新时执行的建索引命令；`{base_dir}`、`{workspace}` 为占位符 |
 | `env_allowlist` | 子进程可继承的环境变量；默认只有 `PATH` |
-| `home` | 为子进程设置的 `HOME`，用于按工作区隔离索引（是否有效需按 ARCH.md §8.4 验证） |
+| `home` | 工作区内的相对目录或绝对目录；应用创建并校验该目录，用作子进程 `HOME`。此字段不展开 `{workspace}` |
 | `call_timeout`、`max_output_chars`、`idle_timeout` | 调用超时、输出上限、空闲回收时间 |
 
 `index_command` 中的工具参数以实际版本的 `codebase-memory-mcp cli --help` 为准。
+
+示例使用仓库的 [MCP 隔离启动脚本](../../scripts/codebase-memory-mcp.sh)，而不是直接启动上游二进制。由部署管理员把脚本安装或只读挂载到 `/usr/local/bin/crc-codebase-memory-mcp`，并把上游 `codebase-memory-mcp` 放到服务的 `PATH`。标准镜像不包含上游二进制；容器部署需自行安装或挂载它及其许可证，不要挂载 Docker socket。
+
+脚本同时供 MCP server 和 `index_command` 使用。它把 `CBM_CACHE_DIR` 与 `CBM_RUNTIME_DIR` 固定在应用提供的项目 `HOME` 下，并关闭自动索引、watcher 和 UI。0.12.1 的 daemon 默认按账号共享，只有不同 `HOME` 或 `XDG_RUNTIME_DIR` 不足以隔离：第二个项目可能因 cache 不同而连接失败。不要把所有项目改用共享 cache 来消除报错，那会让代码地图跨项目可见。
+
+`HOME` 必须由应用在工作区内创建并校验；脚本不是文件系统沙箱，也不替代应用的环境变量和工具白名单。Unix socket 对路径长度有限制，应保持工作区根路径较短，例如 `/app/data/workspaces`。在新平台或新上游版本上，需重新验证两个项目并发连接、索引复用和未授权工具拒绝，不能只凭 `index_status=ready` 判断隔离成功。
 
 ---
 

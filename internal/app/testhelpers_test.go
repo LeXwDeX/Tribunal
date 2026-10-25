@@ -437,6 +437,23 @@ func (s *recordingDeliveryStore) RecordDelivery(ctx context.Context, d store.Del
 	return s.WebhookStore.RecordDelivery(ctx, d, j)
 }
 
+func (s *recordingDeliveryStore) RecordReviewCandidateDelivery(ctx context.Context, d store.Delivery, candidate *store.ReviewCandidate) (store.ReviewEnqueueResult, error) {
+	s.mu.Lock()
+	s.records = append(s.records, d)
+	if candidate != nil {
+		payload := candidate.Payload
+		s.jobs = append(s.jobs, &store.Job{
+			Kind: "review.candidate", Key: "review.candidate:" + itoa(candidate.ProjectID) + ":" + itoa(candidate.MRIID),
+			Payload: payload, MaxAttempts: candidate.MaxAttempts,
+		})
+	}
+	s.mu.Unlock()
+	if s.recErr != nil {
+		return store.ReviewEnqueueResult{}, s.recErr
+	}
+	return s.WebhookStore.RecordReviewCandidateDelivery(ctx, d, candidate)
+}
+
 type failingProjectStore struct {
 	ProjectStore
 	err   error
@@ -465,22 +482,20 @@ func (s *commandFakeStore) GetProject(_ context.Context, id int64) (*store.Proje
 	return s.project, nil
 }
 
-func (s *commandFakeStore) Enqueue(_ context.Context, job store.Job) (string, bool, error) {
-	return s.save(job)
-}
-
-func (s *commandFakeStore) EnqueueLatest(_ context.Context, job store.Job) (string, bool, error) {
-	return s.save(job)
-}
-
-func (s *commandFakeStore) save(job store.Job) (string, bool, error) {
+func (s *commandFakeStore) EnqueueReviewLatest(_ context.Context, command store.ReviewCommand) (store.ReviewEnqueueResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.enqueueErr != nil {
-		return "", false, s.enqueueErr
+		return store.ReviewEnqueueResult{}, s.enqueueErr
 	}
-	s.jobs = append(s.jobs, job)
-	return "job-1", s.duplicate, nil
+	kind, key := "review.run", reviewRunKey(command.ProjectID, command.MRIID)
+	if command.Cancel {
+		kind, key = "review.cancel", reviewCancelKey(command.ProjectID, command.MRIID)
+	}
+	s.jobs = append(s.jobs, store.Job{
+		Kind: kind, Key: key, Payload: command.Payload, MaxAttempts: command.MaxAttempts,
+	})
+	return store.ReviewEnqueueResult{JobID: "job-1", Duplicate: s.duplicate}, nil
 }
 
 func (s *commandFakeStore) enqueued() []store.Job {

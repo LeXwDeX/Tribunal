@@ -234,9 +234,10 @@ func TestWebhookMergeRequestDecisions(t *testing.T) {
 		wantHead string
 		profile  string
 	}{
-		{name: "open", accepted: true, kind: "review.run", key: "review:42:7", trigger: "mr_open", full: true, wantHead: sha40, profile: "default"},
-		{name: "reopen", mutate: func(b map[string]any) { patchAttr(b, "action", "reopen") }, accepted: true, kind: "review.run", key: "review:42:7", trigger: "mr_open", full: true},
-		{name: "update", mutate: func(b map[string]any) { patchAttr(b, "action", "update"); patchAttr(b, "oldrev", sha40) }, accepted: true, kind: "review.run", key: "review:42:7", trigger: "mr_update", wantHead: sha40},
+		{name: "open", accepted: true, kind: "review.candidate", key: "review.candidate:42:7", trigger: "mr_open", full: true, wantHead: sha40, profile: "default"},
+		{name: "immediate open", settings: `{"allow_repo_config":false}`, accepted: true, kind: "review.run", key: "review:42:7", trigger: "mr_open", full: true, wantHead: sha40, profile: "default"},
+		{name: "reopen", mutate: func(b map[string]any) { patchAttr(b, "action", "reopen") }, accepted: true, kind: "review.candidate", key: "review.candidate:42:7", trigger: "mr_open", full: true},
+		{name: "update", mutate: func(b map[string]any) { patchAttr(b, "action", "update"); patchAttr(b, "oldrev", sha40) }, accepted: true, kind: "review.candidate", key: "review.candidate:42:7", trigger: "mr_update", wantHead: sha40},
 		{name: "update without oldrev", mutate: func(b map[string]any) { patchAttr(b, "action", "update") }, ignored: "missing_oldrev"},
 		{name: "close", mutate: func(b map[string]any) { patchAttr(b, "action", "close") }, accepted: true, kind: "review.cancel", key: "review.cancel:42:7"},
 		{name: "merge", mutate: func(b map[string]any) { patchAttr(b, "action", "merge") }, accepted: true, kind: "review.cancel", key: "review.cancel:42:7"},
@@ -249,7 +250,7 @@ func TestWebhookMergeRequestDecisions(t *testing.T) {
 		{name: "label include miss", settings: `{"labels_include":["review"]}`, ignored: "labels_filtered"},
 		{name: "label include hit", settings: `{"labels_include":["review"]}`, mutate: func(b map[string]any) {
 			patchAttr(b, "labels", []string{"review"})
-		}, accepted: true, kind: "review.run", key: "review:42:7", full: true},
+		}, accepted: true, kind: "review.candidate", key: "review.candidate:42:7", full: true},
 		{name: "branch filtered", mutate: func(b map[string]any) {
 			patchAttr(b, "target_branch", "feature")
 			patchMR(b, "target_branch", "feature")
@@ -257,7 +258,7 @@ func TestWebhookMergeRequestDecisions(t *testing.T) {
 		{name: "custom branch", settings: `{"target_branches":["release/*"]}`, mutate: func(b map[string]any) {
 			patchAttr(b, "target_branch", "release/1.0")
 			patchMR(b, "target_branch", "release/1.0")
-		}, accepted: true, kind: "review.run", key: "review:42:7", full: true},
+		}, accepted: true, kind: "review.candidate", key: "review.candidate:42:7", full: true},
 		{name: "target project mismatch", mutate: func(b map[string]any) {
 			patchAttr(b, "target_project_id", 99)
 		}, ignored: "project_mismatch"},
@@ -275,7 +276,7 @@ func TestWebhookMergeRequestDecisions(t *testing.T) {
 		}, ignored: "bad_request"},
 		{name: "label profile", settings: `{"profile_by_label":{"deep-review":"deep"}}`, mutate: func(b map[string]any) {
 			patchAttr(b, "labels", []string{"deep-review"})
-		}, accepted: true, kind: "review.run", key: "review:42:7", profile: "deep", full: true},
+		}, accepted: true, kind: "review.candidate", key: "review.candidate:42:7", profile: "deep", full: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -298,7 +299,7 @@ func TestWebhookMergeRequestDecisions(t *testing.T) {
 			if job.Kind != tt.kind || job.Key != tt.key {
 				t.Fatalf("job = %+v, want kind=%s key=%s", job, tt.kind, tt.key)
 			}
-			if tt.kind == "review.run" {
+			if tt.kind == "review.run" || tt.kind == "review.candidate" {
 				var payload map[string]any
 				if err := json.Unmarshal(job.Payload, &payload); err != nil {
 					t.Fatal(err)
@@ -643,5 +644,20 @@ func TestWebhookRejectsTargetProjectFromOtherProject(t *testing.T) {
 func TestWebhookServiceRequiresDependencies(t *testing.T) {
 	if _, err := NewWebhookService(WebhookServiceConfig{}); err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestWebhookInvalidCandidateDoesNotFallBackToGenericDelivery(t *testing.T) {
+	f := newWebhookFixture(t, "{}")
+	_, err := f.service.recordJob(context.Background(), 42, "Merge Request Hook", uuid.NewString(), &store.Job{
+		Kind:        "review.candidate",
+		Payload:     json.RawMessage(`{"project_id":0}`),
+		MaxAttempts: 3,
+	})
+	if err == nil {
+		t.Fatal("expected invalid candidate error")
+	}
+	if got := len(f.records()); got != 0 {
+		t.Fatalf("invalid candidate wrote %d deliveries", got)
 	}
 }

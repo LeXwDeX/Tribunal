@@ -416,3 +416,13 @@ func TestReviewWorkerRegistersPublishHandler(t *testing.T) {
 		t.Fatal("review.publish handler is not registered")
 	}
 }
+
+func TestReviewWorkerRegistersCandidateHandler(t *testing.T) {
+	worker, err := NewReviewWorker(&ReviewService{}, &WorkspaceService{})
+	if err != nil {
+		t.Fatalf("NewReviewWorker: %v", err)
+	}
+	if _, ok := worker.Handlers()["review.candidate"]; !ok {
+		t.Fatal("review.candidate handler is not registered")
+	}
+}

@@ -10,7 +10,7 @@ import {
   StatusBadge, Switch, useToast,
 } from '../components/ui'
 import { usePaginated } from '../lib/hooks'
-import { formatDate, labelForStatus } from '../lib/format'
+import { formatDate, labelForStatus, labelForWebhookState, webhookTone } from '../lib/format'
 import ui from '../styles/ui.module.css'
 import styles from './pages.module.css'
 
@@ -407,6 +407,7 @@ export function ProjectsPage() {
                   {projects.items.map((project) => {
                     const expiry = tokenExpiry(project)
                     const workspaceState = project.workspace?.state || project.workspace_state
+                    const webhookState = project.webhook_state || (project.hook_id ? 'unknown' : 'disabled')
                     const lastReview = project.last_review
                     return (
                       <tr key={project.id}>
@@ -427,7 +428,10 @@ export function ProjectsPage() {
                           ) : <span className="muted">—</span>}
                         </td>
                         <td><Badge tone={expiry.tone}>{expiry.label}</Badge></td>
-                        <td>{project.hook_id ? <Badge tone="ok">本服务创建</Badge> : <Badge tone="neutral">手动配置</Badge>}</td>
+                        <td>
+                          <Badge tone={webhookTone(webhookState)}>{labelForWebhookState(webhookState)}</Badge>
+                          {project.hook_id ? <span className={styles.tableMeta}> · #{project.hook_id}</span> : null}
+                        </td>
                         <td>
                           {project.access === 'manage' ? (
                             <Switch

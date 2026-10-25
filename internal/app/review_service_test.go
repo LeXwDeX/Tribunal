@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/gitlab"
+	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/jobs"
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/review"
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store/sqlite"
@@ -828,12 +829,84 @@ func TestReviewRunNoReviewableFilesPublishesSummary(t *testing.T) {
 	}
 }
 
+// cancelJobWithNote enqueues a real /review cancel command and returns the job
+// payload the handler receives. The enqueue owns the durable cancel-note eyes
+// and queued status.
+func cancelJobWithNote(t *testing.T, f *reviewFixture, jobID string, noteID int64) *jobs.Job {
+	t.Helper()
+	result, err := f.db.EnqueueReviewLatest(context.Background(), store.ReviewCommand{
+		ProjectID: 42,
+		MRIID:     7,
+		Cancel:    true,
+		Payload: mustJSONBody(t, map[string]any{
+			"trigger": "command",
+			"note_id": noteID,
+		}),
+		MaxAttempts: 3,
+	})
+	if err != nil {
+		t.Fatalf("enqueue cancel: %v", err)
+	}
+	payload, err := json.Marshal(map[string]any{
+		"project_id": 42,
+		"mr_iid":     7,
+		"generation": result.Generation,
+		"trigger":    "command",
+		"note_id":    noteID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &jobs.Job{ID: jobID, Kind: "review.cancel", Payload: payload, MaxAttempts: 3}
+}
+
+func addStatusEyes(f *reviewFixture, noteID, userID int64) {
+	f.gitlab.mu.Lock()
+	defer f.gitlab.mu.Unlock()
+	f.gitlab.nextAwardID++
+	f.gitlab.awards[noteID] = append(f.gitlab.awards[noteID], gitlab.Award{
+		ID: f.gitlab.nextAwardID, Name: reviewAwardEyes, UserID: userID,
+	})
+}
+
+// seedWorkflowNoteID stores the command note identity the review started from.
+func seedWorkflowNoteID(t *testing.T, f *reviewFixture, workflowID string, noteID int64) {
+	t.Helper()
+	record, err := f.db.GetWorkflowDossier(context.Background(), workflowID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dossier review.Dossier
+	if err := json.Unmarshal(record.Data, &dossier); err != nil {
+		t.Fatal(err)
+	}
+	if dossier.Metadata == nil {
+		dossier.Metadata = map[string]string{}
+	}
+	dossier.Metadata["note_id"] = itoa(noteID)
+	raw, err := review.MarshalDossier(&dossier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash, err := review.DossierHash(&dossier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Data = raw
+	record.Hash = hash
+	if _, err := f.db.SaveWorkflowDossier(context.Background(), *record); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestReviewCancelSettlesRunningWorkflow(t *testing.T) {
 	f := newReviewFixture(t, reviewTestHead)
+	f.service.status = testStatusReporter(f.gitlab)
 	f.runner.block = make(chan struct{})
 	f.runner.started = make(chan struct{})
 	runJob := f.seedReview(t, "job-running-cancel")
 	wfID := createPendingReview(t, f, "job-running-cancel", jobGeneration(t, runJob))
+	seedWorkflowNoteID(t, f, wfID, 555)
 	dossier := testDossier(t, f.head)
 	index := gitlab.BuildDiffIndex(dossier.DiffVersion, dossierDiffs(dossier))
 	executor, err := review.NewExecutor(review.ExecutorDeps{
@@ -858,10 +931,15 @@ func TestReviewCancelSettlesRunningWorkflow(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("review did not start")
 	}
-	cancelJob := f.seedCancel(t, "job-cancel-running")
+	f.service.setReviewReaction(context.Background(), 42, 7, 555, jobGeneration(t, runJob), reviewAwardEyes)
+	addStatusEyes(f, 555, f.gitlab.currentUser.ID)
+	addStatusEyes(f, 777, f.gitlab.currentUser.ID)
+	addStatusEyes(f, 777, 3)
+	cancelJob := cancelJobWithNote(t, f, "job-cancel-running", 777)
 	if err := f.service.Handle(context.Background(), cancelJob); err != nil {
 		t.Fatalf("cancel Handle: %v", err)
 	}
+	drainReviewSideEffects(t, f)
 	select {
 	case <-runDone:
 	case <-time.After(2 * time.Second):
@@ -880,6 +958,21 @@ func TestReviewCancelSettlesRunningWorkflow(t *testing.T) {
 	}
 	if len(publications) != 0 {
 		t.Fatalf("cancelled workflow published %d objects", len(publications))
+	}
+	if awards := f.gitlab.awardSnapshot(777); len(awards) != 1 || awards[0].UserID != 3 {
+		t.Fatalf("cancel note awards = %+v, want only the foreign user's eyes", awards)
+	}
+	if awards := f.gitlab.awardSnapshot(555); len(awards) != 0 {
+		t.Fatalf("review note awards = %+v, want bot eyes cleared", awards)
+	}
+	if phases := statusPhases(f.gitlab.statusUpdates); len(phases) != 1 || phases[0] != reviewStatusCancelled {
+		t.Fatalf("status phases = %v, want one cancelled", phases)
+	}
+	if err := f.service.CancelReview(context.Background(), cancelJob); err != nil {
+		t.Fatalf("retried cancel: %v", err)
+	}
+	if phases := statusPhases(f.gitlab.statusUpdates); len(phases) != 1 {
+		t.Fatalf("retried cancel rewrote status phases: %v", phases)
 	}
 }
 
@@ -1016,6 +1109,132 @@ func TestCancelReviewNewerDossierIsSuperseded(t *testing.T) {
 	}
 	if workflow.Status == string(dag.WorkflowCancelled) {
 		t.Fatalf("newer dossier workflow was cancelled")
+	}
+}
+
+func TestCancelReviewNewerDossierClearsOnlyCancelEyes(t *testing.T) {
+	f := newReviewFixture(t, reviewTestHead)
+	f.service.status = testStatusReporter(f.gitlab)
+	runJob := f.seedReview(t, "job-cancel-superseded-run")
+	wfID := createPendingReview(t, f, runJob.ID, jobGeneration(t, runJob))
+	seedWorkflowNoteID(t, f, wfID, 555)
+	before := append([]string(nil), f.gitlab.statusUpdates...)
+	addStatusEyes(f, 555, f.gitlab.currentUser.ID)
+	addStatusEyes(f, 888, f.gitlab.currentUser.ID)
+	cancelJob := cancelJobWithNote(t, f, "job-cancel-superseded", 777)
+	addStatusEyes(f, 777, f.gitlab.currentUser.ID)
+	f.service.store = &dossierOverrideStore{Store: f.db, dossier: &store.WorkflowDossier{
+		Generation: jobGeneration(t, cancelJob) + 1,
+	}}
+
+	err := f.service.CancelReview(context.Background(), cancelJob)
+	if !IsPermanentJob(err) || !errors.Is(err, ErrReviewSuperseded) {
+		t.Fatalf("CancelReview error = %v, want a permanent ErrReviewSuperseded", err)
+	}
+	drainReviewJobs(t, f, "review.reaction")
+	if awards := f.gitlab.awardSnapshot(777); len(awards) != 0 {
+		t.Fatalf("cancel note awards = %+v, want cleared", awards)
+	}
+	if awards := f.gitlab.awardSnapshot(555); len(awards) != 1 {
+		t.Fatalf("review note awards = %+v, want untouched", awards)
+	}
+	if awards := f.gitlab.awardSnapshot(888); len(awards) != 1 {
+		t.Fatalf("successor note awards = %+v, want untouched", awards)
+	}
+	if len(f.gitlab.statusUpdates) != len(before) {
+		t.Fatalf("stale cancel rewrote successor status: %v", f.gitlab.statusUpdates)
+	}
+	workflow, err := f.db.GetWorkflow(context.Background(), wfID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workflow.Status != string(dag.WorkflowPending) {
+		t.Fatalf("workflow status = %q, want pending", workflow.Status)
+	}
+}
+
+func TestSupersededCancelClearsOnlyItsOwnEyes(t *testing.T) {
+	f := newReviewFixture(t, reviewTestHead)
+	f.service.status = testStatusReporter(f.gitlab)
+	runJob := f.seedReview(t, "job-superseded-old")
+	wfID := createPendingReview(t, f, runJob.ID, jobGeneration(t, runJob))
+	seedWorkflowNoteID(t, f, wfID, 555)
+	f.service.setReviewReaction(context.Background(), 42, 7, 555, jobGeneration(t, runJob), reviewAwardEyes)
+	cancelJob := cancelJobWithNote(t, f, "job-superseded-cancel", 777)
+	addStatusEyes(f, 555, f.gitlab.currentUser.ID)
+	addStatusEyes(f, 888, f.gitlab.currentUser.ID)
+	addStatusEyes(f, 777, f.gitlab.currentUser.ID)
+	if _, err := f.db.EnqueueReviewLatest(context.Background(), store.ReviewCommand{
+		ProjectID:   42,
+		MRIID:       7,
+		HeadSHA:     f.head,
+		Payload:     json.RawMessage(`{"trigger":"mr_update","profile":"default","full":true}`),
+		MaxAttempts: 3,
+	}); err != nil {
+		t.Fatalf("successor enqueue: %v", err)
+	}
+
+	if err := f.service.CancelReview(context.Background(), cancelJob); err != nil {
+		t.Fatalf("CancelReview: %v", err)
+	}
+	drainReviewJobs(t, f, "review.reaction")
+	if awards := f.gitlab.awardSnapshot(777); len(awards) != 0 {
+		t.Fatalf("cancel note awards = %+v, want cleared", awards)
+	}
+	if awards := f.gitlab.awardSnapshot(555); len(awards) != 0 {
+		t.Fatalf("old review note awards = %+v, want the stale bot eyes cleared", awards)
+	}
+	if awards := f.gitlab.awardSnapshot(888); len(awards) != 1 {
+		t.Fatalf("successor note awards = %+v, want untouched", awards)
+	}
+	if len(f.gitlab.statusUpdates) != 0 {
+		t.Fatalf("stale cancel wrote a status note: %v", f.gitlab.statusUpdates)
+	}
+	workflow, err := f.db.GetWorkflow(context.Background(), wfID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workflow.Status != string(dag.WorkflowPending) {
+		t.Fatalf("workflow status = %q, want pending", workflow.Status)
+	}
+}
+
+func TestCancelReviewQueuedClearsCancelNoteEyes(t *testing.T) {
+	f := newReviewFixture(t, reviewTestHead)
+	f.service.status = testStatusReporter(f.gitlab)
+	cancelJob := cancelJobWithNote(t, f, "job-cancel-queued", 777)
+	addStatusEyes(f, 777, f.gitlab.currentUser.ID)
+	addStatusEyes(f, 777, 3)
+
+	for i := 0; i < 2; i++ {
+		if err := f.service.CancelReview(context.Background(), cancelJob); err != nil {
+			t.Fatalf("CancelReview %d: %v", i, err)
+		}
+	}
+	drainReviewSideEffects(t, f)
+	if awards := f.gitlab.awardSnapshot(777); len(awards) != 1 || awards[0].UserID != 3 {
+		t.Fatalf("cancel note awards = %+v, want only the foreign user's eyes", awards)
+	}
+	if got := f.gitlab.noteCount(); got != 1 {
+		t.Fatalf("notes = %d, want only the status note", got)
+	}
+	if phases := statusPhases(f.gitlab.statusUpdates); len(phases) != 1 || phases[0] != reviewStatusCancelled {
+		t.Fatalf("status phases = %v, want one cancelled", phases)
+	}
+}
+
+func TestCancelReviewRejectsNegativeNoteID(t *testing.T) {
+	f := newReviewFixture(t, reviewTestHead)
+	cancelJob := f.seedCancel(t, "job-cancel-negative")
+	var payload map[string]any
+	if err := json.Unmarshal(cancelJob.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	payload["note_id"] = -1
+	cancelJob.Payload = mustJSONBody(t, payload)
+
+	if err := f.service.CancelReview(context.Background(), cancelJob); !IsPermanentJob(err) {
+		t.Fatalf("CancelReview error = %v, want a permanent error", err)
 	}
 }
 

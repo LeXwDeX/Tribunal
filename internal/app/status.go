@@ -2,13 +2,17 @@ package app
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode"
 
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/gitlab"
+	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
 )
 
 const (
@@ -19,20 +23,25 @@ const (
 	reviewStatusDetailRunes  = 160
 
 	reviewStatusReceived   = "received"
-	reviewStatusQueued     = "queued"
-	reviewStatusRunning    = "running"
-	reviewStatusPublishing = "publishing"
-	reviewStatusPass       = "PASS"
-	reviewStatusBlocking   = "BLOCKING"
-	reviewStatusIncomplete = "INCOMPLETE"
-	reviewStatusFailed     = "failed"
-	reviewStatusCancelled  = "cancelled"
-	reviewStatusStale      = "stale"
+	reviewStatusQueued     = store.ReviewStatusQueued
+	reviewStatusRunning    = store.ReviewStatusRunning
+	reviewStatusPublishing = store.ReviewStatusPublishing
+	reviewStatusPass       = store.ReviewStatusPass
+	reviewStatusBlocking   = store.ReviewStatusBlocking
+	reviewStatusIncomplete = store.ReviewStatusIncomplete
+	reviewStatusFailed     = store.ReviewStatusFailed
+	reviewStatusCancelled  = store.ReviewStatusCancelled
+	reviewStatusStale      = store.ReviewStatusStale
 
-	reviewAwardEyes = "eyes"
-	reviewAwardPass = "white_check_mark"
-	reviewAwardFail = "x"
+	reviewAwardEyes = store.ReviewReactionEyes
+	reviewAwardPass = store.ReviewReactionPass
+	reviewAwardFail = store.ReviewReactionFail
+	reviewAwardNone = store.ReviewReactionNone
 )
+
+// errReactionNoteGone marks a source note (and its awards) deleted upstream.
+// The desired reaction is settled instead of retried forever.
+var errReactionNoteGone = errors.New("app: review reaction note is gone")
 
 var (
 	statusTokenRE = regexp.MustCompile(`(?i)\b(?:glpat|gloas|glrt|gldt|glcbt|glptt|glft)-[A-Za-z0-9_-]+`)
@@ -51,22 +60,19 @@ type statusGitLab interface {
 	DeleteNoteAward(ctx context.Context, token string, projectID, iid, noteID, awardID int64) error
 }
 
-// reviewStatusUpdate is one best-effort status write. NoteID is the command
-// source note, when the review was triggered by a note. Reaction and ClearEyes
-// apply only to that source note; automated merge-request hooks never receive
-// a fabricated reaction.
+// reviewStatusUpdate is one desired status note. Generation and estimate are
+// display-only; the store fences the write by generation and head.
 type reviewStatusUpdate struct {
-	State     string
-	Detail    string
-	HeadSHA   string
-	NoteID    int64
-	Reaction  string
-	ClearEyes bool
+	State           string
+	Detail          string
+	HeadSHA         string
+	Generation      int64
+	EstimateMinutes int
 }
 
-// statusReporter keeps one marker-keyed note per merge request and manages the
-// bot's own reactions. Every failure is logged and swallowed: status reporting
-// must never fail or retry a review.
+// statusReporter writes the durable status and reaction goals to GitLab. It
+// returns upstream errors so a job can retry; callers that must not fail a
+// review log the error instead.
 type statusReporter struct {
 	gitlab statusGitLab
 	logger *slog.Logger
@@ -82,77 +88,138 @@ func newStatusReporter(api statusGitLab, logger *slog.Logger) *statusReporter {
 	return &statusReporter{gitlab: api, logger: logger}
 }
 
-// report updates the status note and applies terminal reactions. It returns
-// no error by design.
-func (r *statusReporter) report(ctx context.Context, projectID, mrIID int64, token string, update reviewStatusUpdate) {
-	if r == nil || r.gitlab == nil || projectID <= 0 || mrIID <= 0 || token == "" {
-		return
+// writeStatus creates or updates the single marker note and returns the note
+// ID and body hash for the applied row.
+func (r *statusReporter) writeStatus(ctx context.Context, projectID, mrIID int64, token string, update reviewStatusUpdate) (int64, string, error) {
+	if r == nil || r.gitlab == nil {
+		return 0, "", errors.New("app: status reporter is not configured")
 	}
-	if ctx.Err() != nil {
-		return
+	if projectID <= 0 || mrIID <= 0 || token == "" {
+		return 0, "", errors.New("app: review status ids and token are required")
 	}
-	botID := int64(0)
 	user, err := r.gitlab.CurrentUser(ctx, token)
 	if err != nil {
-		r.logger.Warn("review status identity lookup failed", "project_id", projectID, "mr_iid", mrIID)
-		return
-	} else if user != nil {
-		botID = user.ID
+		return 0, "", fmt.Errorf("app: status identity lookup: %w", err)
 	}
-	if botID <= 0 {
-		return
+	if user == nil || user.ID <= 0 {
+		return 0, "", errors.New("app: status identity is unavailable")
 	}
-
-	r.upsertNote(ctx, projectID, mrIID, token, botID, update)
-
-	if update.NoteID <= 0 {
-		return
-	}
-	if update.ClearEyes {
-		r.removeAward(ctx, projectID, mrIID, token, update.NoteID, botID, reviewAwardEyes)
-	}
-	if update.Reaction != "" {
-		r.ensureAward(ctx, projectID, mrIID, token, update.NoteID, botID, update.Reaction)
-	}
-}
-
-func (r *statusReporter) upsertNote(ctx context.Context, projectID, mrIID int64, token string, botID int64, update reviewStatusUpdate) {
 	body := reviewStatusBody(update)
+	hash := sha256Hex(body)
 	notes, err := r.gitlab.ListMRNotes(ctx, token, projectID, mrIID)
 	if err != nil {
-		r.logger.Warn("review status note lookup failed", "project_id", projectID, "mr_iid", mrIID)
-		return
+		return 0, "", fmt.Errorf("app: status note lookup: %w", err)
 	}
 	for _, note := range notes {
 		if !strings.HasPrefix(note.Body, reviewStatusMarkerPrefix) {
 			continue
 		}
-		if botID > 0 && note.AuthorID != botID {
+		if note.AuthorID != user.ID {
 			continue
 		}
 		if note.Body == body {
-			return
+			return note.ID, hash, nil
 		}
 		// A queued acknowledgement may race a worker that already started the
-		// review. Never move a visible status backwards to received/queued.
+		// review. Never move a visible status backwards.
 		if !statusMayRegress(note.Body, update.State) {
-			return
+			return note.ID, hash, nil
 		}
-		if err := r.gitlab.UpdateMRNote(ctx, token, projectID, mrIID, note.ID, body); err != nil {
-			r.logger.Warn("review status note update failed", "project_id", projectID, "mr_iid", mrIID, "note_id", note.ID)
+		err := r.gitlab.UpdateMRNote(ctx, token, projectID, mrIID, note.ID, body)
+		if err == nil {
+			return note.ID, hash, nil
 		}
-		return
+		if !gitlab.IsNotFound(err) {
+			return 0, "", fmt.Errorf("app: status note update: %w", err)
+		}
+		// The note was deleted between list and update. Recreate it below.
+		break
 	}
-	if _, err := r.gitlab.CreateMRNote(ctx, token, projectID, mrIID, body); err != nil {
-		r.logger.Warn("review status note creation failed", "project_id", projectID, "mr_iid", mrIID)
+	created, err := r.gitlab.CreateMRNote(ctx, token, projectID, mrIID, body)
+	if err != nil {
+		return 0, "", fmt.Errorf("app: status note creation: %w", err)
 	}
+	if created == nil || created.ID <= 0 {
+		return 0, "", errors.New("app: status note creation returned no note")
+	}
+	return created.ID, hash, nil
 }
 
-// statusMayRegress reports whether next may replace the previous phase. Only
-// the pre-run acknowledgements are monotonic; later phases intentionally allow
-// a retry to report running again.
-func statusMayRegress(previousBody, next string) bool {
-	if next != reviewStatusReceived && next != reviewStatusQueued {
+// applyReaction converges the bot's own awards on one note to desired.
+func (r *statusReporter) applyReaction(ctx context.Context, projectID, mrIID int64, token string, noteID int64, desired string) error {
+	if r == nil || r.gitlab == nil {
+		return errors.New("app: status reporter is not configured")
+	}
+	if projectID <= 0 || mrIID <= 0 || noteID <= 0 || token == "" {
+		return errors.New("app: review reaction ids and token are required")
+	}
+	user, err := r.gitlab.CurrentUser(ctx, token)
+	if err != nil {
+		return fmt.Errorf("app: reaction identity lookup: %w", err)
+	}
+	if user == nil || user.ID <= 0 {
+		return errors.New("app: reaction identity is unavailable")
+	}
+	awards, err := r.gitlab.ListNoteAwards(ctx, token, projectID, mrIID, noteID)
+	if err != nil {
+		if gitlab.IsNotFound(err) {
+			return fmt.Errorf("%w: %v", errReactionNoteGone, err)
+		}
+		return fmt.Errorf("app: reaction lookup: %w", err)
+	}
+	remove := reactionAwardsToRemove(desired)
+	haveDesired := false
+	for _, award := range awards {
+		if award.UserID != user.ID {
+			continue
+		}
+		if desired != reviewAwardNone && award.Name == desired {
+			haveDesired = true
+			continue
+		}
+		if !remove[award.Name] {
+			continue
+		}
+		if err := r.gitlab.DeleteNoteAward(ctx, token, projectID, mrIID, noteID, award.ID); err != nil {
+			if gitlab.IsNotFound(err) {
+				continue
+			}
+			return fmt.Errorf("app: reaction removal: %w", err)
+		}
+	}
+	if desired == reviewAwardNone || haveDesired {
+		return nil
+	}
+	if _, err := r.gitlab.AddNoteAward(ctx, token, projectID, mrIID, noteID, desired); err != nil {
+		// A concurrent retry may have added it already.
+		if gitlab.StatusOf(err) == 409 {
+			return nil
+		}
+		return fmt.Errorf("app: reaction creation: %w", err)
+	}
+	return nil
+}
+
+func reactionAwardsToRemove(desired string) map[string]bool {
+	remove := map[string]bool{reviewAwardEyes: true}
+	switch desired {
+	case reviewAwardEyes:
+		return map[string]bool{reviewAwardPass: true, reviewAwardFail: true}
+	case reviewAwardPass:
+		return map[string]bool{reviewAwardEyes: true, reviewAwardFail: true}
+	case reviewAwardFail:
+		return map[string]bool{reviewAwardEyes: true, reviewAwardPass: true}
+	case reviewAwardNone:
+		return map[string]bool{reviewAwardEyes: true, reviewAwardPass: true, reviewAwardFail: true}
+	}
+	return remove
+}
+
+// statusMayRegress reports whether nextState may replace the previous phase.
+// Only the pre-run acknowledgements are monotonic; later phases intentionally
+// allow a retry to report running again.
+func statusMayRegress(previousBody, nextState string) bool {
+	if nextState != reviewStatusReceived && nextState != reviewStatusQueued {
 		return true
 	}
 	switch parseStatusPhase(previousBody) {
@@ -178,44 +245,6 @@ func parseStatusPhase(body string) string {
 	return rest[:end]
 }
 
-func (r *statusReporter) ensureAward(ctx context.Context, projectID, mrIID int64, token string, noteID, botID int64, name string) {
-	if botID <= 0 || noteID <= 0 || name == "" {
-		return
-	}
-	awards, err := r.gitlab.ListNoteAwards(ctx, token, projectID, mrIID, noteID)
-	if err != nil {
-		r.logger.Warn("review status award lookup failed", "project_id", projectID, "mr_iid", mrIID, "note_id", noteID)
-		return
-	}
-	for _, award := range awards {
-		if award.UserID == botID && award.Name == name {
-			return
-		}
-	}
-	if _, err := r.gitlab.AddNoteAward(ctx, token, projectID, mrIID, noteID, name); err != nil {
-		r.logger.Warn("review status award creation failed", "project_id", projectID, "mr_iid", mrIID, "note_id", noteID)
-	}
-}
-
-func (r *statusReporter) removeAward(ctx context.Context, projectID, mrIID int64, token string, noteID, botID int64, name string) {
-	if botID <= 0 || noteID <= 0 || name == "" {
-		return
-	}
-	awards, err := r.gitlab.ListNoteAwards(ctx, token, projectID, mrIID, noteID)
-	if err != nil {
-		r.logger.Warn("review status award lookup failed", "project_id", projectID, "mr_iid", mrIID, "note_id", noteID)
-		return
-	}
-	for _, award := range awards {
-		if award.UserID != botID || award.Name != name {
-			continue
-		}
-		if err := r.gitlab.DeleteNoteAward(ctx, token, projectID, mrIID, noteID, award.ID); err != nil {
-			r.logger.Warn("review status award deletion failed", "project_id", projectID, "mr_iid", mrIID, "note_id", noteID)
-		}
-	}
-}
-
 // reviewStatusBody renders a deterministic status note. The first line is the
 // hidden marker so repeated reports of the same state are no-ops.
 func reviewStatusBody(update reviewStatusUpdate) string {
@@ -228,10 +257,20 @@ func reviewStatusBody(update reviewStatusUpdate) string {
 	b.WriteString("- 阶段：`")
 	b.WriteString(sanitizeStatusDetail(update.State))
 	b.WriteString("`\n")
+	if update.Generation > 0 {
+		b.WriteString("- 代次：`")
+		b.WriteString(strconv.FormatInt(update.Generation, 10))
+		b.WriteString("`\n")
+	}
 	if head := strings.TrimSpace(update.HeadSHA); head != "" {
 		b.WriteString("- 提交：`")
 		b.WriteString(shortSHA(head))
 		b.WriteString("`\n")
+	}
+	if update.EstimateMinutes > 0 {
+		b.WriteString("- 预计：约 ")
+		b.WriteString(strconv.Itoa(update.EstimateMinutes))
+		b.WriteString(" 分钟\n")
 	}
 	if detail := sanitizeStatusDetail(update.Detail); detail != "" {
 		b.WriteString("- 详情：")

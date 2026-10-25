@@ -83,8 +83,8 @@ func TestContextDocsMigrationPreservesLegacyRows(t *testing.T) {
 	}
 	defer s.Close()
 
-	if got := rowCount(t, s, `SELECT COUNT(*) FROM schema_migrations`); got != 8 {
-		t.Fatalf("schema_migrations = %d, want 8", got)
+	if got := rowCount(t, s, `SELECT COUNT(*) FROM schema_migrations`); got != 11 {
+		t.Fatalf("schema_migrations = %d, want 10", got)
 	}
 	if got := rowCount(t, s, `SELECT COUNT(*) FROM context_docs`); got != 3 {
 		t.Fatalf("context_docs = %d, want 3 preserved rows", got)

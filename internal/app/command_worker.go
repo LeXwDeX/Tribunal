@@ -39,17 +39,12 @@ type CommandGitLab interface {
 	DeleteNoteAward(ctx context.Context, token string, projectID, iid, noteID, awardID int64) error
 }
 
-// reviewEnqueuer is implemented by stores that assign review generations in
-// the enqueue transaction. Fakes without it keep the M0 behavior.
-type reviewEnqueuer interface {
-	EnqueueReviewLatest(ctx context.Context, command store.ReviewCommand) (store.ReviewEnqueueResult, error)
-}
-
-// CommandStore is the persistence surface needed by CommandWorker.
+// CommandStore is the persistence surface needed by CommandWorker. The enqueue
+// transaction owns the generation and the durable status/reaction goals, so a
+// command cannot leave a pre-enqueue reaction behind after a failed write.
 type CommandStore interface {
 	GetProject(ctx context.Context, id int64) (*store.Project, error)
-	Enqueue(ctx context.Context, job store.Job) (string, bool, error)
-	EnqueueLatest(ctx context.Context, job store.Job) (string, bool, error)
+	EnqueueReviewLatest(ctx context.Context, command store.ReviewCommand) (store.ReviewEnqueueResult, error)
 }
 
 // CommandWorker revalidates `/review` note commands and only then enqueues a
@@ -61,7 +56,6 @@ type CommandWorker struct {
 	cipher       *secret.Cipher
 	profiles     map[string]config.ProfileConfig
 	botUsernames map[string]bool
-	status       *statusReporter
 	logger       *slog.Logger
 }
 
@@ -72,7 +66,6 @@ type CommandWorkerConfig struct {
 	Cipher       *secret.Cipher
 	Profiles     map[string]config.ProfileConfig
 	BotUsernames []string
-	Status       *statusReporter
 	Logger       *slog.Logger
 }
 
@@ -97,7 +90,6 @@ func NewCommandWorker(cfg CommandWorkerConfig) (*CommandWorker, error) {
 		cipher:       cfg.Cipher,
 		profiles:     cfg.Profiles,
 		botUsernames: bots,
-		status:       cfg.Status,
 		logger:       logger,
 	}, nil
 }
@@ -212,42 +204,21 @@ func (w *CommandWorker) Handle(ctx context.Context, job *jobs.Job) error {
 			return errors.New("app: merge request head SHA is unavailable")
 		}
 	}
-	// Acknowledged commands get the Codex-style working reaction before the
-	// queue write. The reaction is best-effort and never blocks the command.
-	w.ensureEyes(ctx, string(token), project.ID, payload.MRIID, payload.NoteID, replyAuthorID)
-	w.reportStatus(ctx, string(token), project.ID, payload.MRIID, reviewStatusUpdate{
-		State:   reviewStatusReceived,
-		HeadSHA: mr.SHA,
-	})
-
+	// The enqueue transaction writes the queued status and the source-note
+	// eyes. A failed enqueue therefore leaves neither behind.
 	if payload.Command == commandCancel {
 		commandPayload := map[string]any{"project_id": project.ID, "mr_iid": payload.MRIID, "trigger": "command", "note_id": payload.NoteID, "author_id": payload.AuthorID}
-		if enqueuer, ok := w.store.(reviewEnqueuer); ok {
-			result, err := enqueuer.EnqueueReviewLatest(ctx, store.ReviewCommand{
-				ProjectID:   project.ID,
-				MRIID:       payload.MRIID,
-				Cancel:      true,
-				Payload:     mustJSON(commandPayload),
-				MaxAttempts: 3,
-			})
-			if err != nil {
-				return err
-			}
-			w.logAccepted(project.ID, payload, result.JobID, result.Duplicate)
-			w.reportStatus(ctx, string(token), project.ID, payload.MRIID, reviewStatusUpdate{State: reviewStatusQueued, HeadSHA: mr.SHA})
-			return nil
-		}
-		jobID, duplicate, err := w.store.Enqueue(ctx, store.Job{
-			Kind:        "review.cancel",
-			Key:         reviewCancelKey(project.ID, payload.MRIID),
+		result, err := w.store.EnqueueReviewLatest(ctx, store.ReviewCommand{
+			ProjectID:   project.ID,
+			MRIID:       payload.MRIID,
+			Cancel:      true,
 			Payload:     mustJSON(commandPayload),
 			MaxAttempts: 3,
 		})
 		if err != nil {
 			return err
 		}
-		w.logAccepted(project.ID, payload, jobID, duplicate)
-		w.reportStatus(ctx, string(token), project.ID, payload.MRIID, reviewStatusUpdate{State: reviewStatusQueued, HeadSHA: mr.SHA})
+		w.logAccepted(project.ID, payload, result.JobID, result.Duplicate)
 		return nil
 	}
 
@@ -272,62 +243,18 @@ func (w *CommandWorker) Handle(ctx context.Context, job *jobs.Job) error {
 		"full":             payload.Full,
 		"note_id":          payload.NoteID,
 	}
-	if enqueuer, ok := w.store.(reviewEnqueuer); ok {
-		result, err := enqueuer.EnqueueReviewLatest(ctx, store.ReviewCommand{
-			ProjectID:   project.ID,
-			MRIID:       payload.MRIID,
-			HeadSHA:     strings.ToLower(strings.TrimSpace(mr.SHA)),
-			Payload:     mustJSON(runPayload),
-			MaxAttempts: 3,
-		})
-		if err != nil {
-			return err
-		}
-		w.logAccepted(project.ID, payload, result.JobID, result.Duplicate)
-		w.reportStatus(ctx, string(token), project.ID, payload.MRIID, reviewStatusUpdate{State: reviewStatusQueued, HeadSHA: mr.SHA})
-		return nil
-	}
-	jobID, duplicate, err := w.store.EnqueueLatest(ctx, store.Job{
-		Kind:        "review.run",
-		Key:         reviewRunKey(project.ID, payload.MRIID),
+	result, err := w.store.EnqueueReviewLatest(ctx, store.ReviewCommand{
+		ProjectID:   project.ID,
+		MRIID:       payload.MRIID,
+		HeadSHA:     strings.ToLower(strings.TrimSpace(mr.SHA)),
 		Payload:     mustJSON(runPayload),
 		MaxAttempts: 3,
 	})
 	if err != nil {
 		return err
 	}
-	w.logAccepted(project.ID, payload, jobID, duplicate)
-	w.reportStatus(ctx, string(token), project.ID, payload.MRIID, reviewStatusUpdate{State: reviewStatusQueued, HeadSHA: mr.SHA})
+	w.logAccepted(project.ID, payload, result.JobID, result.Duplicate)
 	return nil
-}
-
-// ensureEyes marks the source note as being processed. It only looks at the
-// token user's own reactions, so a retried command never adds a duplicate and
-// never touches another user's emoji.
-func (w *CommandWorker) ensureEyes(ctx context.Context, token string, projectID, mrIID, noteID, botID int64) {
-	if botID <= 0 || noteID <= 0 {
-		return
-	}
-	awards, err := w.gitlab.ListNoteAwards(ctx, token, projectID, mrIID, noteID)
-	if err != nil {
-		w.logger.Warn("review command reaction lookup failed", "project_id", projectID, "mr_iid", mrIID, "note_id", noteID)
-		return
-	}
-	for _, award := range awards {
-		if award.UserID == botID && award.Name == reviewAwardEyes {
-			return
-		}
-	}
-	if _, err := w.gitlab.AddNoteAward(ctx, token, projectID, mrIID, noteID, reviewAwardEyes); err != nil {
-		w.logger.Warn("review command reaction failed", "project_id", projectID, "mr_iid", mrIID, "note_id", noteID)
-	}
-}
-
-func (w *CommandWorker) reportStatus(ctx context.Context, token string, projectID, mrIID int64, update reviewStatusUpdate) {
-	if w.status == nil {
-		return
-	}
-	w.status.report(ctx, projectID, mrIID, token, update)
 }
 
 func (w *CommandWorker) reply(ctx context.Context, token string, project *store.Project, payload commandPayload, authorID int64, kind, text string) error {

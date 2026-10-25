@@ -80,6 +80,23 @@ type projectWebhookResponse struct {
 	State     string         `json:"state"`
 	Events    []string       `json:"events"`
 	LastError string         `json:"last_error"`
+	ManagedBy string         `json:"managed_by,omitempty"`
+	CreatedAt *time.Time     `json:"created_at,omitempty"`
+	UpdatedAt *time.Time     `json:"updated_at,omitempty"`
+}
+
+func webhookResponse(project *store.Project, hookID int64) projectWebhookResponse {
+	response := projectWebhookResponse{Project: project, HookID: hookID, Events: []string{}}
+	if project == nil {
+		return response
+	}
+	response.State = project.WebhookState
+	response.Events = append([]string{}, project.WebhookEvents...)
+	response.LastError = project.WebhookError
+	response.ManagedBy = project.WebhookManagedBy
+	response.CreatedAt = project.WebhookCreatedAt
+	response.UpdatedAt = project.WebhookUpdatedAt
+	return response
 }
 
 func (s *Server) handleRegisterProject(w http.ResponseWriter, r *http.Request) {
@@ -381,19 +398,35 @@ func (s *Server) handleCreateProjectWebhook(w http.ResponseWriter, r *http.Reque
 		writeAppError(w, r, err)
 		return
 	}
-	response := projectWebhookResponse{
-		Project: registration.Project,
-		HookID:  registration.HookID,
+	writeJSON(w, http.StatusOK, webhookResponse(registration.Project, registration.HookID))
+}
+
+func (s *Server) handleRebuildProjectWebhook(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r.PathValue("id"))
+	if err != nil {
+		validationFailed(w, r, "id", "id must be a positive integer")
+		return
 	}
-	if registration.Project != nil {
-		response.State = registration.Project.WebhookState
-		response.Events = append([]string(nil), registration.Project.WebhookEvents...)
-		response.LastError = registration.Project.WebhookError
+	registration, err := s.projects.RebuildWebhook(r.Context(), id)
+	if err != nil {
+		writeAppError(w, r, err)
+		return
 	}
-	if response.Events == nil {
-		response.Events = []string{}
+	writeJSON(w, http.StatusOK, webhookResponse(registration.Project, registration.HookID))
+}
+
+func (s *Server) handleDisableProjectWebhook(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r.PathValue("id"))
+	if err != nil {
+		validationFailed(w, r, "id", "id must be a positive integer")
+		return
 	}
-	writeJSON(w, http.StatusOK, response)
+	project, err := s.projects.DisableWebhook(r.Context(), id)
+	if err != nil {
+		writeAppError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, webhookResponse(project, 0))
 }
 
 func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {

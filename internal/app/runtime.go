@@ -409,7 +409,6 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		Cipher:       deps.Cipher,
 		Profiles:     cfg.Profiles,
 		BotUsernames: cfg.GitLab.BotUsernames,
-		Status:       statusFeed,
 		Logger:       logger,
 	})
 	if err != nil {
@@ -557,14 +556,39 @@ func (r *Runtime) Recover(ctx context.Context) error {
 	return r.reviews.Recover(ctx)
 }
 
-// StartBackground starts the feedback, retention, and run-cleanup tickers.
+// reviewSideEffectReconcileInterval bounds how long a pending status or
+// reaction survives a worker crash.
+const reviewSideEffectReconcileInterval = 5 * time.Minute
+
+// reconcileReviewSideEffects periodically re-enqueues pending side-effect
+// goals and settles rows that no live job can finish.
+func (r *Runtime) reconcileReviewSideEffects(ctx context.Context, interval time.Duration) {
+	if r.reviews == nil {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := r.reviews.ReconcileSideEffects(ctx); err != nil {
+				r.logger.Warn("review side-effect reconciliation failed", "error", err.Error())
+			}
+		}
+	}
+}
+
+// StartBackground starts the feedback, retention, run-cleanup, and review
+// side-effect tickers.
 // The returned function stops them and waits for the goroutines.
 func (r *Runtime) StartBackground(ctx context.Context) func() {
 	r.startOnce.Do(func() {
 		bgCtx, cancel := context.WithCancel(ctx)
 		r.startStop = cancel
 		var wg sync.WaitGroup
-		wg.Add(3)
+		wg.Add(4)
 		go func() {
 			defer wg.Done()
 			r.feedback.Start(bgCtx, defaultFeedbackInterval)
@@ -576,6 +600,10 @@ func (r *Runtime) StartBackground(ctx context.Context) func() {
 		go func() {
 			defer wg.Done()
 			r.runCleanup.Start(bgCtx, 0)
+		}()
+		go func() {
+			defer wg.Done()
+			r.reconcileReviewSideEffects(bgCtx, reviewSideEffectReconcileInterval)
 		}()
 		go func() {
 			wg.Wait()

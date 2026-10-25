@@ -127,6 +127,33 @@ const STATUS_LABELS: Record<string, string> = {
   closed: '已关闭',
 }
 
+const WEBHOOK_STATE_LABELS: Record<string, string> = {
+  disabled: '未启用',
+  pending: '配置中',
+  enabled: '已启用',
+  failed: '配置失败',
+  unknown: '待确认',
+}
+
+export function labelForWebhookState(state?: string): string {
+  if (!state) return '未启用'
+  return WEBHOOK_STATE_LABELS[state] || state
+}
+
+export function webhookTone(state?: string): 'ok' | 'warn' | 'danger' | 'neutral' {
+  switch (state) {
+    case 'enabled':
+      return 'ok'
+    case 'failed':
+      return 'danger'
+    case 'pending':
+    case 'unknown':
+      return 'warn'
+    default:
+      return 'neutral'
+  }
+}
+
 const TRIGGER_LABELS: Record<string, string> = {
   mr_open: 'MR 打开',
   mr_update: 'MR 更新',

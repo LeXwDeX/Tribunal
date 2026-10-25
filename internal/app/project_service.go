@@ -280,6 +280,7 @@ func (s *ProjectService) Register(ctx context.Context, in RegisterInput) (*Regis
 
 	webhookState := store.WebhookStateDisabled
 	webhookEvents := []string{}
+	webhookManagedBy := ""
 	var hookID *int64
 	if in.AutoWebhook {
 		created, err := s.gitlab.CreateProjectHook(ctx, in.AccessToken, project.ID, gitlab.HookSpec{
@@ -300,6 +301,7 @@ func (s *ProjectService) Register(ctx context.Context, in RegisterInput) (*Regis
 		hookID = &created
 		webhookState = store.WebhookStateEnabled
 		webhookEvents = append([]string(nil), managedWebhookEvents...)
+		webhookManagedBy = store.WebhookManagedByService
 	}
 
 	stored := store.Project{
@@ -314,6 +316,7 @@ func (s *ProjectService) Register(ctx context.Context, in RegisterInput) (*Regis
 		HookID:            hookID,
 		WebhookState:      webhookState,
 		WebhookEvents:     webhookEvents,
+		WebhookManagedBy:  webhookManagedBy,
 		Profile:           profile,
 		Settings:          canonicalSettings,
 		Enabled:           true,
@@ -712,10 +715,23 @@ func (s *ProjectService) RotateToken(ctx context.Context, id int64, token string
 	return s.Get(ctx, id)
 }
 
-// CreateWebhook explicitly provisions (or reuses) the managed GitLab webhook.
-// It marks the project pending before the API call, records enabled or failed
-// afterwards, and never returns the secret or an upstream response body.
+// CreateWebhook explicitly enables the managed GitLab webhook. Repeated calls
+// reuse only the recorded hook ID; an unrecorded same-URL hook belongs to the
+// user and is never adopted, updated or removed. It marks the project pending
+// before the API call, records enabled or failed afterwards, and never returns
+// the secret or an upstream response body.
 func (s *ProjectService) CreateWebhook(ctx context.Context, id int64) (*WebhookRegistration, error) {
+	return s.provisionWebhook(ctx, id, false)
+}
+
+// RebuildWebhook re-provisions the managed hook with a fresh secret. It still
+// reuses the recorded hook when that hook exists, so rebuild is not an
+// unconditional create.
+func (s *ProjectService) RebuildWebhook(ctx context.Context, id int64) (*WebhookRegistration, error) {
+	return s.provisionWebhook(ctx, id, true)
+}
+
+func (s *ProjectService) provisionWebhook(ctx context.Context, id int64, rotateSecret bool) (*WebhookRegistration, error) {
 	if id <= 0 {
 		return nil, validationError("invalid project id", Detail{Field: "id", Message: "must be positive"})
 	}
@@ -724,7 +740,7 @@ func (s *ProjectService) CreateWebhook(ctx context.Context, id int64) (*WebhookR
 	}
 
 	// Serialize provisioning per service, matching registration: concurrent
-	// enable requests must not create duplicate hooks.
+	// enable or rebuild requests must not create duplicate hooks.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -735,6 +751,11 @@ func (s *ProjectService) CreateWebhook(ctx context.Context, id int64) (*WebhookR
 	token, err := s.cipher.Decrypt(project.TokenEnc)
 	if err != nil {
 		return nil, internalError()
+	}
+
+	secret, secretEnc, err := s.webhookSecret(project, rotateSecret)
+	if err != nil {
+		return nil, err
 	}
 	if err := s.store.UpdateProjectWebhook(ctx, id, store.ProjectWebhookUpdate{
 		State:  store.WebhookStatePending,
@@ -751,70 +772,111 @@ func (s *ProjectService) CreateWebhook(ctx context.Context, id int64) (*WebhookR
 	if err != nil {
 		return nil, s.failWebhook(ctx, project, "list", err)
 	}
-	storedSecret := ""
-	if len(project.WebhookSecretEnc) > 0 {
-		if plain, decErr := s.cipher.Decrypt(project.WebhookSecretEnc); decErr == nil {
-			storedSecret = string(plain)
+	hookID, found := recordedHookID(hooks, project.HookID)
+	reused := found
+	if !found {
+		created, err := s.gitlab.CreateProjectHook(ctx, string(token), id, s.hookSpec(secret))
+		if err != nil {
+			return nil, s.failWebhook(ctx, project, "create", err)
 		}
+		hookID = created
+	} else if err := s.gitlab.UpdateProjectHook(ctx, string(token), id, hookID, s.hookSpec(secret)); err != nil {
+		return nil, s.failWebhook(ctx, project, "update", err)
 	}
 
-	if hook := s.findManagedHook(hooks, project.HookID); hook != nil {
-		secret := storedSecret
-		var newSecret []byte
-		if secret == "" {
-			secret, err = newWebhookSecret()
-			if err != nil {
-				return nil, internalError()
-			}
-			newSecret, err = s.cipher.Encrypt([]byte(secret))
-			if err != nil {
-				return nil, internalError()
-			}
-		}
-		if err := s.gitlab.UpdateProjectHook(ctx, string(token), id, hook.ID, s.hookSpec(secret)); err != nil {
-			return nil, s.failWebhook(ctx, project, "update", err)
-		}
-		if err := s.store.UpdateProjectWebhook(ctx, id, store.ProjectWebhookUpdate{
-			HookID:    &hook.ID,
-			SecretEnc: newSecret,
-			State:     store.WebhookStateEnabled,
-			Events:    append([]string(nil), managedWebhookEvents...),
-		}); err != nil {
-			s.markWebhookFailed(ctx, project, "webhook state persistence failed")
-			s.logger.Warn("webhook state persistence failed after reuse", "project_id", id)
-			return nil, internalError()
-		}
-		s.deleteReplacedHook(ctx, string(token), id, hooks, project.HookID, hook.ID)
-		return s.webhookResult(ctx, project, hook.ID, newSecret), nil
-	}
-
-	secret, err := newWebhookSecret()
-	if err != nil {
-		return nil, internalError()
-	}
-	secretEnc, err := s.cipher.Encrypt([]byte(secret))
-	if err != nil {
-		return nil, internalError()
-	}
-	created, err := s.gitlab.CreateProjectHook(ctx, string(token), id, s.hookSpec(secret))
-	if err != nil {
-		return nil, s.failWebhook(ctx, project, "create", err)
-	}
 	if err := s.store.UpdateProjectWebhook(ctx, id, store.ProjectWebhookUpdate{
-		HookID:    &created,
+		HookID:    &hookID,
 		SecretEnc: secretEnc,
 		State:     store.WebhookStateEnabled,
 		Events:    append([]string(nil), managedWebhookEvents...),
+		ManagedBy: store.WebhookManagedByService,
 	}); err != nil {
 		s.markWebhookFailed(ctx, project, "webhook state persistence failed")
-		if delErr := s.gitlab.DeleteProjectHook(context.WithoutCancel(ctx), string(token), id, created); delErr != nil {
-			s.logger.Warn("webhook compensation failed", "project_id", id)
-			return nil, &Error{Code: "internal", Message: "webhook update failed and cleanup failed", Compensate: true}
+		if !reused {
+			if delErr := s.gitlab.DeleteProjectHook(context.WithoutCancel(ctx), string(token), id, hookID); delErr != nil {
+				s.logger.Warn("webhook compensation failed", "project_id", id)
+				return nil, &Error{Code: "internal", Message: "webhook update failed and cleanup failed", Compensate: true}
+			}
 		}
+		s.logger.Warn("webhook state persistence failed", "project_id", id)
 		return nil, internalError()
 	}
-	s.deleteReplacedHook(ctx, string(token), id, hooks, project.HookID, created)
-	return s.webhookResult(ctx, project, created, secretEnc), nil
+	return s.webhookResult(ctx, project, hookID, secretEnc), nil
+}
+
+// webhookSecret returns the plain secret and its ciphertext. Rebuild always
+// rotates. Enable keeps the stored secret so reusing a hook does not interrupt
+// delivery; a stored secret that cannot be decrypted is an internal error
+// instead of a silent rotation that would leave the old hook broken.
+func (s *ProjectService) webhookSecret(project *store.Project, rotate bool) (string, []byte, error) {
+	if !rotate && len(project.WebhookSecretEnc) > 0 {
+		plain, err := s.cipher.Decrypt(project.WebhookSecretEnc)
+		if err != nil {
+			return "", nil, internalError()
+		}
+		return string(plain), nil, nil
+	}
+	secret, err := newWebhookSecret()
+	if err != nil {
+		return "", nil, internalError()
+	}
+	enc, err := s.cipher.Encrypt([]byte(secret))
+	if err != nil {
+		return "", nil, internalError()
+	}
+	return secret, enc, nil
+}
+
+// recordedHookID returns the recorded hook only when it still exists. Hooks at
+// the same URL without a recorded ID are owned by another party.
+func recordedHookID(hooks []gitlab.Hook, recorded *int64) (int64, bool) {
+	if recorded == nil {
+		return 0, false
+	}
+	for _, hook := range hooks {
+		if hook.ID == *recorded {
+			return hook.ID, true
+		}
+	}
+	return 0, false
+}
+
+// DisableWebhook removes only the recorded service hook. A missing hook is
+// already disabled; the encrypted secret is kept for a later re-enable.
+func (s *ProjectService) DisableWebhook(ctx context.Context, id int64) (*store.Project, error) {
+	if id <= 0 {
+		return nil, validationError("invalid project id", Detail{Field: "id", Message: "must be positive"})
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	project, err := s.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if project.HookID != nil {
+		token, err := s.cipher.Decrypt(project.TokenEnc)
+		if err != nil {
+			return nil, internalError()
+		}
+		if err := s.gitlab.DeleteProjectHook(context.WithoutCancel(ctx), string(token), id, *project.HookID); err != nil {
+			if gitlab.StatusOf(err) != 404 {
+				return nil, s.failWebhook(ctx, project, "delete", err)
+			}
+		}
+	}
+	if err := s.store.UpdateProjectWebhook(ctx, id, store.ProjectWebhookUpdate{
+		ClearHookID: true,
+		State:       store.WebhookStateDisabled,
+		Events:      project.WebhookEvents,
+	}); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, notFoundError("project not registered")
+		}
+		s.logger.Warn("webhook disable state persistence failed", "project_id", id)
+		return nil, internalError()
+	}
+	return s.Get(ctx, id)
 }
 
 func (s *ProjectService) hookSpec(secret string) gitlab.HookSpec {
@@ -825,45 +887,6 @@ func (s *ProjectService) hookSpec(secret string) gitlab.HookSpec {
 		MergeRequestsEvents:   true,
 		NoteEvents:            true,
 		EnableSSLVerification: true,
-	}
-}
-
-// findManagedHook prefers the recorded hook ID, then any hook at the service
-// URL. Hooks at other URLs are user-managed and never reused or modified.
-func (s *ProjectService) findManagedHook(hooks []gitlab.Hook, recorded *int64) *gitlab.Hook {
-	if recorded != nil {
-		for i := range hooks {
-			if hooks[i].ID == *recorded && hooks[i].URL == s.hookURL {
-				return &hooks[i]
-			}
-		}
-	}
-	for i := range hooks {
-		if hooks[i].URL == s.hookURL {
-			return &hooks[i]
-		}
-	}
-	return nil
-}
-
-// deleteReplacedHook removes only a previously recorded hook that still exists
-// at GitLab. An unrecorded hook is never deleted.
-func (s *ProjectService) deleteReplacedHook(ctx context.Context, token string, projectID int64, hooks []gitlab.Hook, old *int64, current int64) {
-	if old == nil || *old == current {
-		return
-	}
-	found := false
-	for _, hook := range hooks {
-		if hook.ID == *old {
-			found = true
-			break
-		}
-	}
-	if !found {
-		return
-	}
-	if err := s.gitlab.DeleteProjectHook(context.WithoutCancel(ctx), token, projectID, *old); err != nil {
-		s.logger.Warn("previous webhook removal failed", "project_id", projectID, "hook_id", *old)
 	}
 }
 
@@ -908,6 +931,7 @@ func (s *ProjectService) webhookResult(ctx context.Context, fallback *store.Proj
 		copy.WebhookState = store.WebhookStateEnabled
 		copy.WebhookEvents = append([]string(nil), managedWebhookEvents...)
 		copy.WebhookError = ""
+		copy.WebhookManagedBy = store.WebhookManagedByService
 		s.logger.Warn("project read-back after webhook update failed", "project_id", fallback.ID)
 		saved = &copy
 	}
@@ -920,6 +944,11 @@ func (s *ProjectService) Delete(ctx context.Context, id int64) error {
 	if id <= 0 {
 		return validationError("invalid project id", Detail{Field: "id", Message: "must be positive"})
 	}
+	// Serialize with enable/disable/register so deletion cannot race a hook
+	// that is being provisioned and leave it unaccounted for at GitLab.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	project, err := s.Get(ctx, id)
 	if err != nil {
 		return err
