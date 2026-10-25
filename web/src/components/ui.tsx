@@ -5,9 +5,9 @@ import {
 import { createPortal } from 'react-dom'
 import { ApiError, errorMessage } from '../api/client'
 import {
-  formatDate, formatRelative, labelForPublication, labelForStatus, publicationTone, safeExternalUrl, severityTone, statusTone, verdictTone,
+  formatDate, formatRelative, labelForPublication, labelForStatus, publicationTone, safeExternalUrl, statusTone, verdictTone,
 } from '../lib/format'
-import type { PublicationState } from '../api/types'
+import type { FindingsSummary, PublicationState } from '../api/types'
 import { Icon } from './Icons'
 import styles from '../styles/ui.module.css'
 
@@ -40,16 +40,26 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
   )
 })
 
-export function Badge({ tone = 'neutral', children }: { tone?: 'ok' | 'warn' | 'danger' | 'info' | 'neutral'; children: ReactNode }) {
+export function Badge({
+  tone = 'neutral', live, plain, children,
+}: { tone?: 'ok' | 'warn' | 'danger' | 'info' | 'neutral'; live?: boolean; plain?: boolean; children: ReactNode }) {
   const classes = {
     ok: styles.badgeOk, warn: styles.badgeWarn, danger: styles.badgeDanger, info: styles.badgeInfo, neutral: styles.badgeNeutral,
   }
-  return <span className={classNames(styles.badge, classes[tone])}>{children}</span>
+  return (
+    <span className={classNames(styles.badge, classes[tone], live && styles.badgeLive, plain && styles.badgePlain)}>
+      {children}
+    </span>
+  )
 }
 
 export function StatusBadge({ status, label }: { status?: string; label?: string }) {
   const tone = statusTone(status)
-  return <Badge tone={tone}>{label || labelForStatus(status)}</Badge>
+  return (
+    <Badge tone={tone} live={status === 'running' || status === 'refreshing'}>
+      {label || labelForStatus(status)}
+    </Badge>
+  )
 }
 
 export function VerdictBadge({ verdict }: { verdict?: string | null }) {
@@ -64,9 +74,65 @@ export function PublicationBadge({ state }: { state?: PublicationState }) {
   return <Badge tone={publicationTone(state)}>{labelForPublication(state)}</Badge>
 }
 
+const SEVERITY_CLASSES: Record<string, string> = {
+  P0: styles.sevP0,
+  P1: styles.sevP1,
+  P2: styles.sevP2,
+  info: styles.sevInfo,
+}
+
 export function SeverityBadge({ severity }: { severity?: string }) {
   if (!severity) return <span className={styles.visuallyEmpty}>—</span>
-  return <Badge tone={severityTone(severity)}>{severity}</Badge>
+  return <span className={classNames(styles.sev, SEVERITY_CLASSES[severity] || styles.sevInfo)}>{severity}</span>
+}
+
+const SEVERITY_COUNTS = [
+  { key: 'P0', color: 'var(--danger-solid)' },
+  { key: 'P1', color: 'var(--danger-dot)' },
+  { key: 'P2', color: 'var(--warn-dot)' },
+] as const
+
+export function SevCounts({ summary }: { summary?: FindingsSummary }) {
+  const bySeverity = summary?.by_severity
+  if (!bySeverity) return <span className={styles.visuallyEmpty}>—</span>
+  return (
+    <span className={styles.sevCounts}>
+      {SEVERITY_COUNTS.map(({ key, color }) => {
+        const count = bySeverity[key] ?? 0
+        return (
+          <span key={key} title={key} role="img" aria-label={`${key} ${count}`} className={count === 0 ? styles.zero : undefined}>
+            <i style={{ background: count === 0 ? 'var(--border)' : color }} />
+            {count}
+          </span>
+        )
+      })}
+    </span>
+  )
+}
+
+export function Segmented({
+  options, value, onChange, label,
+}: {
+  options: Array<{ value: string; label: string; count?: number }>
+  value: string
+  onChange: (value: string) => void
+  label: string
+}) {
+  return (
+    <div className={styles.segmented} role="group" aria-label={label}>
+      {options.map((option) => (
+        <button
+          key={option.value}
+          type="button"
+          aria-pressed={option.value === value}
+          onClick={() => onChange(option.value)}
+        >
+          {option.label}
+          {option.count != null ? <em>{option.count}</em> : null}
+        </button>
+      ))}
+    </div>
+  )
 }
 
 export function PageHeader({ title, description, actions }: { title: ReactNode; description?: ReactNode; actions?: ReactNode }) {
@@ -81,9 +147,11 @@ export function PageHeader({ title, description, actions }: { title: ReactNode; 
   )
 }
 
-export function Panel({ title, aside, children, className }: { title?: ReactNode; aside?: ReactNode; children: ReactNode; className?: string }) {
+export function Panel({
+  title, aside, children, className, flush,
+}: { title?: ReactNode; aside?: ReactNode; children: ReactNode; className?: string; flush?: boolean }) {
   return (
-    <section className={classNames(styles.panel, className)}>
+    <section className={classNames(styles.panel, flush && styles.panelFlush, className)}>
       {title || aside ? (
         <div className={styles.panelHeader}>
           {title ? <h2 className={styles.panelTitle}>{title}</h2> : <span />}
@@ -95,6 +163,11 @@ export function Panel({ title, aside, children, className }: { title?: ReactNode
   )
 }
 
+// PanelBody keeps its own padding, so full-bleed layouts belong inside <Panel flush>.
+export function PanelBody({ children, className }: { children: ReactNode; className?: string }) {
+  return <div className={classNames(styles.panelBody, className)}>{children}</div>
+}
+
 export function Metric({ label, value, note }: { label: string; value: ReactNode; note?: ReactNode }) {
   const unavailable = value === null || value === undefined || value === '不可用'
   return (
@@ -103,6 +176,24 @@ export function Metric({ label, value, note }: { label: string; value: ReactNode
       <span className={classNames(styles.metricValue, unavailable && styles.metricUnavailable)}>{unavailable ? '不可用' : value}</span>
       {note ? <span className={styles.metricNote}>{note}</span> : null}
     </div>
+  )
+}
+
+export function Sparkline({ points, color = 'var(--accent)' }: { points: number[]; color?: string }) {
+  const values = points.filter((point) => Number.isFinite(point))
+  if (values.length < 2) return null
+  const max = Math.max(...values)
+  const scale = max > 0 ? max : 1
+  const step = 64 / (values.length - 1)
+  const polyline = values.map((point, index) => {
+    const x = index * step
+    const y = 18 - (Math.min(Math.max(point, 0), scale) / scale) * 18
+    return `${x.toFixed(2)},${y.toFixed(2)}`
+  }).join(' ')
+  return (
+    <svg width="64" height="18" viewBox="0 0 64 18" aria-hidden="true" focusable="false">
+      <polyline points={polyline} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round" />
+    </svg>
   )
 }
 
@@ -161,8 +252,8 @@ export function Pagination({
 }
 
 export function Tabs({
-  items, value, onChange, label,
-}: { items: Array<{ key: string; label: string }>; value: string; onChange: (key: string) => void; label: string }) {
+  items, value, onChange, label, idPrefix = 'tab',
+}: { items: Array<{ key: string; label: string; count?: number; panelId?: string }>; value: string; onChange: (key: string) => void; label: string; idPrefix?: string }) {
   const refs = useRef<Array<HTMLButtonElement | null>>([])
   const onKeyDown = (event: React.KeyboardEvent, index: number) => {
     let next = index
@@ -185,14 +276,16 @@ export function Tabs({
             ref={(element) => { refs.current[index] = element }}
             type="button"
             role="tab"
-            id={`tab-${item.key}`}
+            id={`${idPrefix}-${item.key}`}
             aria-selected={selected}
+            aria-controls={selected ? item.panelId : undefined}
             tabIndex={selected ? 0 : -1}
             className={classNames(styles.tab, selected && styles.tabActive)}
             onClick={() => onChange(item.key)}
             onKeyDown={(event) => onKeyDown(event, index)}
           >
             {item.label}
+            {item.count != null ? <span className={styles.tabCount}>{item.count}</span> : null}
           </button>
         )
       })}
@@ -246,7 +339,9 @@ function useModalFocus(open: boolean, onClose: () => void, containerRef: React.R
     returnFocusRef.current = previous instanceof HTMLElement ? previous : null
     const container = containerRef.current
     if (!container) return
-    const focusables = Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE))
+    const getFocusable = () => Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE))
+      .filter((element) => !element.closest('[aria-hidden="true"]'))
+    const focusables = getFocusable()
     ;(focusables[0] || container).focus()
     const previousOverflow = document.body.style.overflow
     document.body.style.overflow = 'hidden'
@@ -258,8 +353,7 @@ function useModalFocus(open: boolean, onClose: () => void, containerRef: React.R
         return
       }
       if (event.key !== 'Tab') return
-      const elements = Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE))
-        .filter((element) => !element.hasAttribute('aria-hidden'))
+      const elements = getFocusable()
       if (!elements.length) {
         event.preventDefault()
         container.focus()
@@ -267,6 +361,11 @@ function useModalFocus(open: boolean, onClose: () => void, containerRef: React.R
       }
       const first = elements[0]
       const last = elements[elements.length - 1]
+      if (!container.contains(document.activeElement)) {
+        event.preventDefault()
+        ;(event.shiftKey ? last : first).focus()
+        return
+      }
       if (event.shiftKey && document.activeElement === first) {
         event.preventDefault()
         last.focus()
@@ -325,7 +424,7 @@ export function Dialog({ open, onClose, title, description, children, footer, wi
             <Icon name="close" />
           </button>
         </div>
-        {children}
+        {children != null ? <div className={styles.modalBody}>{children}</div> : null}
         {footer ? <div className={styles.modalFooter}>{footer}</div> : null}
       </div>
     </div>,
@@ -350,7 +449,7 @@ export function Drawer({ open, onClose, title, description, children, footer }: 
         tabIndex={-1}
         className={styles.drawer}
       >
-        <div className={styles.modalHeader}>
+        <div className={styles.drawerHeader}>
           <div className={styles.stack}>
             <h2 className={styles.modalTitle} id={titleId}>{title}</h2>
             {description ? <p className={styles.modalDescription} id={descriptionId}>{description}</p> : null}
@@ -359,8 +458,8 @@ export function Drawer({ open, onClose, title, description, children, footer }: 
             <Icon name="close" />
           </button>
         </div>
-        {children}
-        {footer ? <div className={styles.modalFooter}>{footer}</div> : null}
+        {children != null ? <div className={styles.drawerBody}>{children}</div> : null}
+        {footer ? <div className={styles.drawerFooter}>{footer}</div> : null}
       </aside>
     </div>,
     document.body,
@@ -406,9 +505,14 @@ const ToastContext = createContext<{ push: (tone: ToastTone, message: string) =>
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<ToastItem[]>([])
   const idRef = useRef(0)
-  const timers = useRef<number[]>([])
+  const timers = useRef(new Map<number, number>())
 
   const remove = useCallback((id: number) => {
+    const timer = timers.current.get(id)
+    if (timer !== undefined) {
+      window.clearTimeout(timer)
+      timers.current.delete(id)
+    }
     setItems((list) => list.filter((item) => item.id !== id))
   }, [])
 
@@ -417,11 +521,12 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     const id = idRef.current
     setItems((list) => [...list, { id, tone, message }])
     const timer = window.setTimeout(() => remove(id), 6000)
-    timers.current.push(timer)
+    timers.current.set(id, timer)
   }, [remove])
 
   useEffect(() => () => {
-    for (const timer of timers.current) window.clearTimeout(timer)
+    for (const timer of timers.current.values()) window.clearTimeout(timer)
+    timers.current.clear()
   }, [])
 
   return (
@@ -429,9 +534,9 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       {children}
       <div className={styles.toastRegion} role="status" aria-live="polite">
         {items.map((item) => (
-          <div key={item.id} className={classNames(styles.toast, item.tone === 'success' && styles.toastSuccess, item.tone === 'error' && styles.toastError)}>
+          <div key={item.id} role={item.tone === 'error' ? 'alert' : undefined} className={classNames(styles.toast, item.tone === 'success' && styles.toastSuccess, item.tone === 'error' && styles.toastError)}>
             <span style={{ flex: 1 }}>{item.message}</span>
-            <button type="button" className={styles.iconButton} style={{ width: 28, height: 28 }} onClick={() => remove(item.id)} aria-label="关闭提示">
+            <button type="button" className={styles.iconButton} onClick={() => remove(item.id)} aria-label="关闭提示">
               <Icon name="close" size={14} />
             </button>
           </div>
@@ -449,20 +554,38 @@ export function useToast() {
 
 export function CopyButton({ value, label = '复制' }: { value: string; label?: string }) {
   const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle')
+  const resetTimer = useRef<number | null>(null)
+  const mounted = useRef(true)
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+      if (resetTimer.current !== null) window.clearTimeout(resetTimer.current)
+    }
+  }, [])
   const onCopy = async () => {
+    let next: 'copied' | 'failed'
     try {
       if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable')
       await navigator.clipboard.writeText(value)
-      setState('copied')
+      next = 'copied'
     } catch {
-      setState('failed')
+      next = 'failed'
     }
-    window.setTimeout(() => setState('idle'), 2500)
+    if (!mounted.current) return
+    setState(next)
+    if (resetTimer.current !== null) window.clearTimeout(resetTimer.current)
+    resetTimer.current = window.setTimeout(() => {
+      resetTimer.current = null
+      setState('idle')
+    }, 2500)
   }
+  const status = state === 'copied' ? '已复制' : state === 'failed' ? '复制失败，请手动复制' : ''
   return (
-    <Button variant="secondary" onClick={() => { void onCopy() }}>
+    <Button variant="secondary" aria-label={label} onClick={() => { void onCopy() }}>
       <Icon name={state === 'copied' ? 'check' : 'copy'} size={15} />
-      {state === 'copied' ? '已复制' : state === 'failed' ? '复制失败，请手动复制' : label}
+      <span aria-hidden="true">{status || label}</span>
+      <span className="srOnly" role="status" aria-live="polite">{status}</span>
     </Button>
   )
 }
@@ -473,11 +596,10 @@ export function SecretField({ label, value }: { label: string; value: string }) 
     <div className={styles.field}>
       <label className={styles.label} htmlFor={id}>{label}</label>
       <div className={styles.secret}>
-        <input id={id} className={styles.input} readOnly value={value} onFocus={(event) => event.currentTarget.select()} />
+        <input id={id} className="input" readOnly value={value} onFocus={(event) => event.currentTarget.select()} />
         <CopyButton value={value} />
       </div>
       <span className={styles.hint}>只显示这一次，关闭后将无法再次查看。</span>
     </div>
   )
 }
-

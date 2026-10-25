@@ -17,9 +17,9 @@ import styles from '../../pages/pages.module.css'
 
 const blocks = ['code-review', 'review', 'reasoner', 'verify', 'synthesize', 'onboarding']
 const tabs = [
-  { key: 'mcp', label: 'MCP 服务器' },
-  { key: 'skills', label: 'Skill' },
-  { key: 'bindings', label: '块绑定' },
+  { key: 'mcp', label: 'MCP 服务器', panelId: 'tabpanel-mcp' },
+  { key: 'skills', label: 'Skill', panelId: 'tabpanel-skills' },
+  { key: 'bindings', label: '块绑定', panelId: 'tabpanel-bindings' },
 ]
 
 const mcpCommand = (server: McpServer): string => {
@@ -163,8 +163,8 @@ export function ExtensionsManager({
 
   return (
     <div className={ui.pageStack}>
-      <Tabs items={tabs} value={tab} onChange={onTabChange} label="扩展类型" />
-      <div role="tabpanel" id={`tabpanel-${tab}`} aria-labelledby={`tab-${tab}`} className={ui.pageStack}>
+      <Tabs items={tabs} value={tab} onChange={onTabChange} label="扩展类型" idPrefix="extension-tab" />
+      <div role="tabpanel" id={`tabpanel-${tab}`} aria-labelledby={`extension-tab-${tab}`} className={ui.pageStack}>
       {!projectEnabled ? (
         <EmptyState title="请选择项目" description="项目级扩展需要指定项目后才能读取。" />
       ) : null}

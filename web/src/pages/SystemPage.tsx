@@ -413,11 +413,11 @@ export function SystemPage() {
   })
 
   const tabs = [
-    { key: 'tokens', label: 'API Token' },
+    { key: 'tokens', label: 'API Token', panelId: 'system-tabpanel-tokens' },
     ...(isAdmin ? [
-      { key: 'settings', label: '平台配置（只读）' },
-      { key: 'users', label: '用户与账号' },
-      { key: 'access', label: '项目授权' },
+      { key: 'settings', label: '平台配置（只读）', panelId: 'system-tabpanel-settings' },
+      { key: 'users', label: '用户与账号', panelId: 'system-tabpanel-users' },
+      { key: 'access', label: '项目授权', panelId: 'system-tabpanel-access' },
     ] : []),
   ]
 
@@ -451,71 +451,74 @@ export function SystemPage() {
           value={tab}
           onChange={setTab}
           label="系统设置"
+          idPrefix="system-tab"
         />
 
-        {tab === 'tokens' ? (
-          <Panel
-            title="我的 API token"
-            aside={canSelfService ? '登录用户可管理自己的 token；写操作由 CSRF 保护' : '当前会话不能创建或撤销 token'}
-          >
-            {canSelfService ? (
-              <div className={styles.actionsRight}>
-                <Button variant="primary" onClick={() => setCreateOpen(true)}>创建 token</Button>
-              </div>
-            ) : null}
-            {tokens.isPending ? <LoadingState /> : null}
-            {tokens.isError ? <ErrorState error={tokens.error} onRetry={tokens.retry} /> : null}
-            {tokens.isSuccess && tokens.items.length === 0 ? <EmptyState title="还没有 API token" description={canSelfService ? '创建一个 token 供 tribunalctl 或脚本使用。' : '当前账号没有 API token。'} /> : null}
-            {tokens.items.length ? (
-              <div className="tableWrap">
-                <table className="dataTable" style={{ minWidth: 760 }}>
-                  <thead>
-                    <tr>
-                      <th scope="col">名称</th>
-                      <th scope="col">创建时间</th>
-                      <th scope="col">过期时间</th>
-                      <th scope="col">最近使用</th>
-                      {canSelfService ? <th scope="col">操作</th> : null}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {tokens.items.map((token) => (
-                      <tr key={token.id}>
-                        <td>{tokenLabel(token)}</td>
-                        <td>{token.created_at ? formatDate(token.created_at) : '—'}</td>
-                        <td>{token.expires_at ? formatDate(token.expires_at) : '—'}</td>
-                        <td>{token.last_used_at ? formatDate(token.last_used_at) : '从未使用或未提供'}</td>
-                        {canSelfService ? <td><Button variant="danger" onClick={() => setRevokeTarget(token)}>撤销</Button></td> : null}
+        <div id={`system-tabpanel-${tab}`} role="tabpanel" aria-labelledby={`system-tab-${tab}`}>
+          {tab === 'tokens' ? (
+            <Panel
+              title="我的 API token"
+              aside={canSelfService ? '登录用户可管理自己的 token；写操作由 CSRF 保护' : '当前会话不能创建或撤销 token'}
+            >
+              {canSelfService ? (
+                <div className={styles.actionsRight}>
+                  <Button variant="primary" onClick={() => setCreateOpen(true)}>创建 token</Button>
+                </div>
+              ) : null}
+              {tokens.isPending ? <LoadingState /> : null}
+              {tokens.isError ? <ErrorState error={tokens.error} onRetry={tokens.retry} /> : null}
+              {tokens.isSuccess && tokens.items.length === 0 ? <EmptyState title="还没有 API token" description={canSelfService ? '创建一个 token 供 tribunalctl 或脚本使用。' : '当前账号没有 API token。'} /> : null}
+              {tokens.items.length ? (
+                <div className="tableWrap">
+                  <table className="dataTable" style={{ minWidth: 760 }}>
+                    <thead>
+                      <tr>
+                        <th scope="col">名称</th>
+                        <th scope="col">创建时间</th>
+                        <th scope="col">过期时间</th>
+                        <th scope="col">最近使用</th>
+                        {canSelfService ? <th scope="col">操作</th> : null}
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : null}
-            {tokens.hasNextPage ? <Button variant="secondary" onClick={tokens.fetchNextPage} loading={tokens.isFetchingNextPage}>加载更多</Button> : null}
-          </Panel>
-        ) : null}
+                    </thead>
+                    <tbody>
+                      {tokens.items.map((token) => (
+                        <tr key={token.id}>
+                          <td>{tokenLabel(token)}</td>
+                          <td>{token.created_at ? formatDate(token.created_at) : '—'}</td>
+                          <td>{token.expires_at ? formatDate(token.expires_at) : '—'}</td>
+                          <td>{token.last_used_at ? formatDate(token.last_used_at) : '从未使用或未提供'}</td>
+                          {canSelfService ? <td><Button variant="danger" onClick={() => setRevokeTarget(token)}>撤销</Button></td> : null}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : null}
+              {tokens.hasNextPage ? <Button variant="secondary" onClick={tokens.fetchNextPage} loading={tokens.isFetchingNextPage}>加载更多</Button> : null}
+            </Panel>
+          ) : null}
 
-        {tab === 'settings' && isAdmin ? (
-          <Panel
-            title="平台配置"
-            aside="服务端脱敏只读视图"
-          >
-            {settings.isPending ? <LoadingState label="正在读取平台配置…" /> : null}
-            {settings.isError ? <ErrorState error={settings.error} onRetry={() => { void settings.refetch() }} /> : null}
-            {settings.isSuccess ? (
-              <>
-                <div className={styles.notice}>此页面不提供编辑；密钥和凭据由服务端脱敏，界面不显示其值。</div>
-                {Object.keys(settings.data || {}).length ? (
-                  <pre className="pre" style={settingsStyle}>{JSON.stringify(settings.data, null, 2)}</pre>
-                ) : <EmptyState title="平台配置为空" description="服务端返回了空对象；这不代表配置缺失或加载成功。" />}
-              </>
-            ) : null}
-          </Panel>
-        ) : null}
+          {tab === 'settings' && isAdmin ? (
+            <Panel
+              title="平台配置"
+              aside="服务端脱敏只读视图"
+            >
+              {settings.isPending ? <LoadingState label="正在读取平台配置…" /> : null}
+              {settings.isError ? <ErrorState error={settings.error} onRetry={() => { void settings.refetch() }} /> : null}
+              {settings.isSuccess ? (
+                <>
+                  <div className={styles.notice}>此页面不提供编辑；密钥和凭据由服务端脱敏，界面不显示其值。</div>
+                  {Object.keys(settings.data || {}).length ? (
+                    <pre className="pre" style={settingsStyle}>{JSON.stringify(settings.data, null, 2)}</pre>
+                  ) : <EmptyState title="平台配置为空" description="服务端返回了空对象；这不代表配置缺失或加载成功。" />}
+                </>
+              ) : null}
+            </Panel>
+          ) : null}
 
-        {tab === 'users' && isAdmin ? <AdminUsersPanel /> : null}
-        {tab === 'access' && isAdmin ? <AdminGrantsPanel /> : null}
+          {tab === 'users' && isAdmin ? <AdminUsersPanel /> : null}
+          {tab === 'access' && isAdmin ? <AdminGrantsPanel /> : null}
+        </div>
       </div>
 
       {canSelfService ? <TokenCreateDialog open={createOpen} onClose={() => setCreateOpen(false)} /> : null}
