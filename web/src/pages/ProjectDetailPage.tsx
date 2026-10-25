@@ -19,10 +19,10 @@ import ui from '../styles/ui.module.css'
 import styles from './pages.module.css'
 
 const projectTabs = [
-  { key: 'overview', label: '概览' },
-  { key: 'workspace', label: '工作区与上下文' },
-  { key: 'settings', label: '设置' },
-  { key: 'extensions', label: '扩展绑定' },
+  { key: 'overview', label: '概览', panelId: 'project-tabpanel-overview' },
+  { key: 'workspace', label: '工作区与上下文', panelId: 'project-tabpanel-workspace' },
+  { key: 'settings', label: '设置', panelId: 'project-tabpanel-settings' },
+  { key: 'extensions', label: '扩展绑定', panelId: 'project-tabpanel-extensions' },
 ]
 
 function ProjectOverview({ project }: { project: Project }) {
@@ -195,7 +195,7 @@ export function ProjectDetailPage() {
           label="项目详情"
         />
 
-        <div role="tabpanel" aria-labelledby={`tab-${tab}`}>
+        <div id={`project-tabpanel-${tab}`} role="tabpanel" aria-labelledby={`tab-${tab}`}>
           {tab === 'overview' ? <ProjectOverview project={data} /> : null}
           {tab === 'workspace' ? <WorkspacePanel projectId={data.id} canManage={data.access === 'manage'} /> : null}
           {tab === 'settings' ? <SettingsPanel project={data} /> : null}

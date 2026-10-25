@@ -17,9 +17,9 @@ import styles from '../../pages/pages.module.css'
 
 const blocks = ['code-review', 'review', 'reasoner', 'verify', 'synthesize', 'onboarding']
 const tabs = [
-  { key: 'mcp', label: 'MCP 服务器' },
-  { key: 'skills', label: 'Skill' },
-  { key: 'bindings', label: '块绑定' },
+  { key: 'mcp', label: 'MCP 服务器', panelId: 'tabpanel-mcp' },
+  { key: 'skills', label: 'Skill', panelId: 'tabpanel-skills' },
+  { key: 'bindings', label: '块绑定', panelId: 'tabpanel-bindings' },
 ]
 
 const mcpCommand = (server: McpServer): string => {

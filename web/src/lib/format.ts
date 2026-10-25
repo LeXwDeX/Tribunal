@@ -259,19 +259,6 @@ export function decisionTone(decision?: string): 'ok' | 'warn' | 'danger' | 'inf
   }
 }
 
-export function severityTone(severity?: string): 'danger' | 'warn' | 'info' | 'neutral' {
-  switch (severity) {
-    case 'P0':
-      return 'danger'
-    case 'P1':
-      return 'warn'
-    case 'P2':
-      return 'info'
-    default:
-      return 'neutral'
-  }
-}
-
 export function formatJson(value: unknown): string {
   if (value === undefined || value === null) return ''
   if (typeof value === 'string') return value

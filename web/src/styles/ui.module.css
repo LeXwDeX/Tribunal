@@ -245,6 +245,8 @@
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  padding: 18px 20px;
+  gap: 14px;
 }
 
 .panelHeader {
@@ -253,9 +255,6 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  min-height: 52px;
-  padding: 14px 18px;
-  border-bottom: 1px solid var(--border);
 }
 
 .panelTitle {
@@ -285,6 +284,18 @@
 .panelBody {
   min-width: 0;
   padding: 16px 18px;
+}
+
+/* Existing pages still pass direct children; panelBody opts into the full-bleed v2 layout. */
+.panel:has(> .panelBody) {
+  padding: 0;
+  gap: 0;
+}
+
+.panel:has(> .panelBody) > .panelHeader {
+  min-height: 52px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
 }
 
 .pageHeader {
@@ -334,15 +345,13 @@
 .metric {
   flex: 1 1 170px;
   min-width: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
   padding: 14px 18px;
   display: flex;
   flex-direction: column;
   gap: 4px;
-  border-right: 1px solid var(--border);
-}
-
-.metric:last-child {
-  border-right: 0;
 }
 
 .metricStrip .metric {
@@ -421,59 +430,6 @@
   font-size: 12px;
 }
 
-.input,
-.select,
-.textarea {
-  width: 100%;
-  min-height: var(--control-h);
-  padding: 0 10px;
-  border: 1px solid var(--control-border);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-  color: var(--text);
-  font-size: 13.5px;
-  outline: none;
-}
-
-.input::placeholder,
-.textarea::placeholder {
-  color: var(--muted);
-  opacity: 1;
-}
-
-.input:focus,
-.select:focus,
-.textarea:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-ring);
-}
-
-.input[aria-invalid="true"],
-.textarea[aria-invalid="true"],
-.select[aria-invalid="true"] {
-  border-color: var(--danger-fg);
-}
-
-.textarea {
-  min-height: 120px;
-  padding: 10px 12px;
-  resize: vertical;
-  line-height: 1.6;
-}
-
-.select {
-  padding-right: 28px;
-  appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='none' stroke='%2398a2b3' stroke-width='1.6'%3E%3Cpath d='M3 4.5l3 3 3-3'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 9px center;
-}
-
-.textareaCode {
-  font-family: var(--font-mono);
-  font-size: 12.5px;
-}
-
 .errorText {
   color: var(--danger-fg);
   font-size: 12px;
@@ -497,16 +453,6 @@
 
 .checkboxRow input:disabled + span {
   color: var(--muted);
-}
-
-.formGrid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px;
-}
-
-.formGrid > * {
-  min-width: 0;
 }
 
 .empty {
@@ -705,7 +651,6 @@
   overflow-y: auto;
   background: var(--surface);
   color: var(--text);
-  border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-modal);
   display: flex;
@@ -734,7 +679,7 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
-  padding: 20px 24px;
+  padding: 20px 24px 0;
 }
 
 .drawerHeader {
@@ -758,6 +703,10 @@
 }
 
 .modalBody {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
   padding: 20px 24px;
 }
 
@@ -777,6 +726,16 @@
   justify-content: flex-end;
   gap: 8px;
   padding: 14px 24px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-2);
+}
+
+.drawerFooter {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 14px 22px;
   border-top: 1px solid var(--border);
   background: var(--surface-2);
 }
@@ -830,8 +789,8 @@
   padding: 10px 14px;
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
-  background: var(--nav);
-  color: var(--nav-text);
+  background: var(--text);
+  color: var(--surface);
   box-shadow: var(--shadow-md);
   font-size: 13px;
   animation: pageIn 200ms ease-out;
@@ -842,7 +801,7 @@
 }
 
 .toast .iconButton:hover {
-  background: color-mix(in srgb, var(--nav-text) 18%, transparent);
+  background: color-mix(in srgb, var(--surface) 18%, transparent);
   color: inherit;
 }
 
@@ -919,10 +878,10 @@
 .switch::before {
   content: "";
   position: absolute;
-  left: 0;
-  top: 8px;
-  width: 46px;
-  height: 28px;
+  left: 6px;
+  top: 12px;
+  width: 34px;
+  height: 20px;
   border-radius: 999px;
   background: var(--control-border);
 }
@@ -930,10 +889,10 @@
 .switch::after {
   content: "";
   position: absolute;
-  top: 11px;
-  left: 3px;
-  width: 20px;
-  height: 20px;
+  top: 14px;
+  left: 8px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
   background: #fff;
   transition: transform 140ms ease;
@@ -944,11 +903,15 @@
 }
 
 .switchOn::after {
-  transform: translateX(18px);
+  transform: translateX(14px);
 }
 
 .switch:focus-visible {
   outline-offset: 3px;
+}
+
+.switch:disabled {
+  opacity: 0.55;
 }
 
 .visuallyEmpty {
@@ -959,14 +922,17 @@
   .page {
     padding: 18px 16px 48px;
   }
-  .formGrid {
-    grid-template-columns: minmax(0, 1fr);
+  .panel {
+    padding: 16px;
   }
   .metricStrip .metric {
     border-bottom: 1px solid var(--border);
   }
   .panelBody {
     padding: 14px 16px;
+  }
+  .panel:has(> .panelBody) {
+    padding: 0;
   }
   .modalOverlay {
     padding: 12px;

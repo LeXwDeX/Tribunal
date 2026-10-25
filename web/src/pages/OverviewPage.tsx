@@ -341,10 +341,10 @@ export function OverviewPage() {
               </div>
             ))}
             {projectsPage.hasNextPage ? (
-              <Button variant="secondary" className="smallButton" onClick={projectsPage.fetchNextPage} loading={projectsPage.isFetchingNextPage}>加载更多项目以继续检查</Button>
+              <Button variant="secondary" className={ui.smallButton} onClick={projectsPage.fetchNextPage} loading={projectsPage.isFetchingNextPage}>加载更多项目以继续检查</Button>
             ) : null}
             {hasMoreReviewAlerts ? (
-              <Button variant="secondary" className="smallButton" onClick={loadMoreReviewAlerts} loading={reviewAlertsFetching}>加载更多告警数据</Button>
+              <Button variant="secondary" className={ui.smallButton} onClick={loadMoreReviewAlerts} loading={reviewAlertsFetching}>加载更多告警数据</Button>
             ) : null}
           </Panel>
         </div>

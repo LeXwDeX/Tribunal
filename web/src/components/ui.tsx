@@ -83,7 +83,7 @@ const SEVERITY_CLASSES: Record<string, string> = {
 
 export function SeverityBadge({ severity }: { severity?: string }) {
   if (!severity) return <span className={styles.visuallyEmpty}>—</span>
-  return <span className={classNames(styles.sev, SEVERITY_CLASSES[severity])}>{severity}</span>
+  return <span className={classNames(styles.sev, SEVERITY_CLASSES[severity] || styles.sevInfo)}>{severity}</span>
 }
 
 const SEVERITY_COUNTS = [
@@ -161,6 +161,10 @@ export function Panel({
       {children}
     </section>
   )
+}
+
+export function PanelBody({ children, className }: { children: ReactNode; className?: string }) {
+  return <div className={classNames(styles.panelBody, className)}>{children}</div>
 }
 
 export function Metric({ label, value, note }: { label: string; value: ReactNode; note?: ReactNode }) {
@@ -248,7 +252,7 @@ export function Pagination({
 
 export function Tabs({
   items, value, onChange, label,
-}: { items: Array<{ key: string; label: string; count?: number }>; value: string; onChange: (key: string) => void; label: string }) {
+}: { items: Array<{ key: string; label: string; count?: number; panelId?: string }>; value: string; onChange: (key: string) => void; label: string }) {
   const refs = useRef<Array<HTMLButtonElement | null>>([])
   const onKeyDown = (event: React.KeyboardEvent, index: number) => {
     let next = index
@@ -273,6 +277,7 @@ export function Tabs({
             role="tab"
             id={`tab-${item.key}`}
             aria-selected={selected}
+            aria-controls={item.panelId}
             tabIndex={selected ? 0 : -1}
             className={classNames(styles.tab, selected && styles.tabActive)}
             onClick={() => onChange(item.key)}
@@ -333,7 +338,9 @@ function useModalFocus(open: boolean, onClose: () => void, containerRef: React.R
     returnFocusRef.current = previous instanceof HTMLElement ? previous : null
     const container = containerRef.current
     if (!container) return
-    const focusables = Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE))
+    const getFocusable = () => Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE))
+      .filter((element) => !element.closest('[aria-hidden="true"]'))
+    const focusables = getFocusable()
     ;(focusables[0] || container).focus()
     const previousOverflow = document.body.style.overflow
     document.body.style.overflow = 'hidden'
@@ -345,8 +352,7 @@ function useModalFocus(open: boolean, onClose: () => void, containerRef: React.R
         return
       }
       if (event.key !== 'Tab') return
-      const elements = Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE))
-        .filter((element) => !element.hasAttribute('aria-hidden'))
+      const elements = getFocusable()
       if (!elements.length) {
         event.preventDefault()
         container.focus()
@@ -354,6 +360,11 @@ function useModalFocus(open: boolean, onClose: () => void, containerRef: React.R
       }
       const first = elements[0]
       const last = elements[elements.length - 1]
+      if (!container.contains(document.activeElement)) {
+        event.preventDefault()
+        ;(event.shiftKey ? last : first).focus()
+        return
+      }
       if (event.shiftKey && document.activeElement === first) {
         event.preventDefault()
         last.focus()
@@ -447,7 +458,7 @@ export function Drawer({ open, onClose, title, description, children, footer }: 
           </button>
         </div>
         {children != null ? <div className={styles.drawerBody}>{children}</div> : null}
-        {footer ? <div className={styles.modalFooter}>{footer}</div> : null}
+        {footer ? <div className={styles.drawerFooter}>{footer}</div> : null}
       </aside>
     </div>,
     document.body,
@@ -493,9 +504,14 @@ const ToastContext = createContext<{ push: (tone: ToastTone, message: string) =>
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<ToastItem[]>([])
   const idRef = useRef(0)
-  const timers = useRef<number[]>([])
+  const timers = useRef(new Map<number, number>())
 
   const remove = useCallback((id: number) => {
+    const timer = timers.current.get(id)
+    if (timer !== undefined) {
+      window.clearTimeout(timer)
+      timers.current.delete(id)
+    }
     setItems((list) => list.filter((item) => item.id !== id))
   }, [])
 
@@ -504,11 +520,12 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     const id = idRef.current
     setItems((list) => [...list, { id, tone, message }])
     const timer = window.setTimeout(() => remove(id), 6000)
-    timers.current.push(timer)
+    timers.current.set(id, timer)
   }, [remove])
 
   useEffect(() => () => {
-    for (const timer of timers.current) window.clearTimeout(timer)
+    for (const timer of timers.current.values()) window.clearTimeout(timer)
+    timers.current.clear()
   }, [])
 
   return (
@@ -518,7 +535,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         {items.map((item) => (
           <div key={item.id} className={classNames(styles.toast, item.tone === 'success' && styles.toastSuccess, item.tone === 'error' && styles.toastError)}>
             <span style={{ flex: 1 }}>{item.message}</span>
-            <button type="button" className={styles.iconButton} style={{ width: 28, height: 28 }} onClick={() => remove(item.id)} aria-label="关闭提示">
+            <button type="button" className={styles.iconButton} onClick={() => remove(item.id)} aria-label="关闭提示">
               <Icon name="close" size={14} />
             </button>
           </div>
@@ -536,6 +553,10 @@ export function useToast() {
 
 export function CopyButton({ value, label = '复制' }: { value: string; label?: string }) {
   const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle')
+  const resetTimer = useRef<number | null>(null)
+  useEffect(() => () => {
+    if (resetTimer.current !== null) window.clearTimeout(resetTimer.current)
+  }, [])
   const onCopy = async () => {
     try {
       if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable')
@@ -544,7 +565,11 @@ export function CopyButton({ value, label = '复制' }: { value: string; label?:
     } catch {
       setState('failed')
     }
-    window.setTimeout(() => setState('idle'), 2500)
+    if (resetTimer.current !== null) window.clearTimeout(resetTimer.current)
+    resetTimer.current = window.setTimeout(() => {
+      resetTimer.current = null
+      setState('idle')
+    }, 2500)
   }
   return (
     <Button variant="secondary" onClick={() => { void onCopy() }}>
@@ -560,7 +585,7 @@ export function SecretField({ label, value }: { label: string; value: string }) 
     <div className={styles.field}>
       <label className={styles.label} htmlFor={id}>{label}</label>
       <div className={styles.secret}>
-        <input id={id} className={styles.input} readOnly value={value} onFocus={(event) => event.currentTarget.select()} />
+        <input id={id} className="input" readOnly value={value} onFocus={(event) => event.currentTarget.select()} />
         <CopyButton value={value} />
       </div>
       <span className={styles.hint}>只显示这一次，关闭后将无法再次查看。</span>
