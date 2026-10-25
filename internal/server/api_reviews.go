@@ -1,10 +1,15 @@
 package server
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/repo"
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
 )
 
@@ -29,8 +34,9 @@ type reviewUsage struct {
 }
 
 type publicationsSummary struct {
-	SummaryNoteID *int64 `json:"summary_note_id,omitempty"`
-	Discussions   int    `json:"discussions"`
+	SummaryNoteID *int64  `json:"summary_note_id,omitempty"`
+	Discussions   int     `json:"discussions"`
+	CommitStatus  *string `json:"commit_status,omitempty"`
 }
 
 type reviewNode struct {
@@ -45,6 +51,8 @@ type reviewNode struct {
 
 type reviewDetail struct {
 	store.Workflow
+	Access          string              `json:"access"`
+	MRTitle         *string             `json:"mr_title,omitempty"`
 	DurationMS      *int64              `json:"duration_ms,omitempty"`
 	Nodes           []reviewNode        `json:"nodes"`
 	FindingsSummary findingsSummary     `json:"findings_summary"`
@@ -73,9 +81,22 @@ func (s *Server) handleListReviews(w http.ResponseWriter, r *http.Request) {
 	if !s.requireStore(w, r) {
 		return
 	}
+	if !s.requireAccess(w, r) {
+		return
+	}
 	projectID, err := queryInt64(r, "project_id")
 	if err != nil {
 		validationFailed(w, r, "project_id", err.Error())
+		return
+	}
+	if projectID != nil {
+		if _, ok := s.requireProjectAccess(w, r, *projectID, false); !ok {
+			return
+		}
+	}
+	publicationState, err := publicationStateFilter(r)
+	if err != nil {
+		validationFailed(w, r, "publication_state", err.Error())
 		return
 	}
 	mrIID, err := queryInt64(r, "mr_iid")
@@ -94,14 +115,16 @@ func (s *Server) handleListReviews(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	filter := store.WorkflowFilter{
-		ProjectID: projectID,
-		MRIID:     mrIID,
-		Kind:      "review", // reviews only; onboarding workflows are not reviews
-		Status:    queryFilterValue(r, "status"),
-		Verdict:   queryFilterValue(r, "verdict"),
-		Profile:   queryFilterValue(r, "profile"),
-		Trigger:   queryFilterValue(r, "trigger"),
-		Since:     since,
+		ProjectID:        projectID,
+		AccessUserID:     accessUserIDPtr(currentUserID(r)),
+		MRIID:            mrIID,
+		Kind:             "review", // reviews only; onboarding workflows are not reviews
+		Status:           queryFilterValue(r, "status"),
+		Verdict:          queryFilterValue(r, "verdict"),
+		PublicationState: publicationState,
+		Profile:          queryFilterValue(r, "profile"),
+		Trigger:          queryFilterValue(r, "trigger"),
+		Since:            since,
 	}
 	workflows, next, err := s.store.ListWorkflows(r.Context(), filter, r.URL.Query().Get("cursor"), limit)
 	if err != nil {
@@ -123,6 +146,20 @@ func queryFilterValue(r *http.Request, name string) string {
 		value = value[:64]
 	}
 	return value
+}
+
+// publicationStateFilter validates the optional publication filter. The set
+// matches the persisted publication states; an unknown value is a request
+// error instead of a silent empty result.
+func publicationStateFilter(r *http.Request) (string, error) {
+	value := strings.TrimSpace(r.URL.Query().Get("publication_state"))
+	switch value {
+	case "", store.WorkflowPublicationPending, store.WorkflowPublicationPublished,
+		store.WorkflowPublicationSkipped, store.WorkflowPublicationFailed:
+		return value, nil
+	default:
+		return "", errors.New("publication_state must be pending, published, skipped or failed")
+	}
 }
 
 func workflowDuration(wf store.Workflow) *int64 {
@@ -159,6 +196,11 @@ func (s *Server) handleTriggerReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.requireReviews(w, r) {
+		return
+	}
+	// The route guard already checked manage; keep the check here explicit so a
+	// future route registration cannot skip it.
+	if _, ok := s.requireProjectAccess(w, r, projectID, true); !ok {
 		return
 	}
 	var request struct {
@@ -201,8 +243,15 @@ func (s *Server) handleGetReview(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, r, err)
 		return
 	}
+	mrTitle, err := reviewMRTitle(r.Context(), s.store, wf.ID)
+	if err != nil {
+		s.writeStoreError(w, r, err)
+		return
+	}
 	detail := reviewDetail{
 		Workflow:        *wf,
+		Access:          grantedAccess(r.Context()),
+		MRTitle:         mrTitle,
 		DurationMS:      workflowDuration(*wf),
 		Nodes:           reviewNodes(nodes),
 		FindingsSummary: summarizeFindings(findings),
@@ -256,11 +305,43 @@ func summarizeFindings(findings []store.Finding) findingsSummary {
 	return summary
 }
 
-// summarizePublications reports only what the store actually knows. The
-// store records whether a commit status was posted, not its GitLab state, so
-// commit_status is deliberately omitted instead of invented.
+// reviewMRTitle reads the title from the stored dossier snapshot. A workflow
+// without a dossier has no title; it is never fetched from GitLab here.
+func reviewMRTitle(ctx context.Context, st Store, workflowID string) (*string, error) {
+	record, err := st.GetWorkflowDossier(ctx, workflowID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if record == nil || len(record.Data) == 0 {
+		return nil, nil
+	}
+	var snapshot struct {
+		MR struct {
+			Title string `json:"title"`
+		} `json:"mr"`
+	}
+	if err := json.Unmarshal(record.Data, &snapshot); err != nil {
+		return nil, nil
+	}
+	title := strings.TrimSpace(snapshot.MR.Title)
+	if title == "" {
+		return nil, nil
+	}
+	return &title, nil
+}
+
+// summarizePublications reports only what the store actually knows. A commit
+// status state is recorded in the publication key at publish time; a legacy
+// key without a state stays unknown instead of being inferred from the verdict.
+// Newest means the greatest UpdatedAt, then the greatest ID (UUIDv7). The
+// result therefore does not depend on slice order or SQLite pagination.
 func summarizePublications(publications []store.Publication) publicationsSummary {
 	summary := publicationsSummary{}
+	var latestStatus time.Time
+	latestID := ""
 	for _, publication := range publications {
 		switch publication.Kind {
 		case "summary":
@@ -271,9 +352,44 @@ func summarizePublications(publications []store.Publication) publicationsSummary
 			}
 		case "discussion":
 			summary.Discussions++
+		case "commit_status":
+			state, ok := commitStatusState(publication.PublishKey)
+			if !ok {
+				continue
+			}
+			newer := publication.UpdatedAt.After(latestStatus) ||
+				(publication.UpdatedAt.Equal(latestStatus) && publication.ID > latestID)
+			if summary.CommitStatus == nil || newer {
+				value := state
+				summary.CommitStatus = &value
+				latestStatus = publication.UpdatedAt
+				latestID = publication.ID
+			}
 		}
 	}
 	return summary
+}
+
+// commitStatusState parses the state suffix written by the publisher. The
+// legacy key "status:<sha>" has no state and must not be guessed. A SHA that
+// fails the repository object-ID policy is not a commit status key at all.
+func commitStatusState(publishKey string) (string, bool) {
+	rest, ok := strings.CutPrefix(publishKey, "status:")
+	if !ok {
+		return "", false
+	}
+	separator := strings.LastIndex(rest, ":")
+	if separator <= 0 || separator == len(rest)-1 {
+		return "", false
+	}
+	if repo.ValidateSHA(rest[:separator]) != nil {
+		return "", false
+	}
+	state := rest[separator+1:]
+	if state != "success" && state != "failed" {
+		return "", false
+	}
+	return state, true
 }
 
 func (s *Server) handleReviewGraph(w http.ResponseWriter, r *http.Request) {
@@ -329,6 +445,42 @@ func (s *Server) handleReviewFindings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"findings": page, "next_cursor": next})
+}
+
+// handleSetFindingAnnotation stores one human label. The actor comes from the
+// authenticated principal and the timestamp from the store; neither is read
+// from the request body.
+func (s *Server) handleSetFindingAnnotation(w http.ResponseWriter, r *http.Request) {
+	if !s.requireStore(w, r) {
+		return
+	}
+	var request struct {
+		Annotation *string `json:"annotation"`
+	}
+	if err := decodeJSON(w, r, adminBodyLimit, &request); err != nil {
+		decodeRequestError(w, r, err)
+		return
+	}
+	if request.Annotation == nil {
+		validationFailed(w, r, "annotation", "annotation is required")
+		return
+	}
+	annotation := *request.Annotation
+	if !store.ValidFindingAnnotation(annotation) {
+		validationFailed(w, r, "annotation", "annotation must be valid, invalid, uncertain, or empty")
+		return
+	}
+	actor := ""
+	if principal, ok := principalFrom(r.Context()); ok {
+		actor = principal.user.Username
+	}
+	finding, err := s.store.SetFindingAnnotation(r.Context(),
+		r.PathValue("wf_id"), r.PathValue("finding_id"), annotation, actor)
+	if err != nil {
+		s.writeStoreError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, finding)
 }
 
 // pageFindings paginates the already-filtered finding list. Filters are
@@ -419,6 +571,16 @@ func (s *Server) handleNodeCalls(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	wfID := r.PathValue("wf_id")
+	if includePayload {
+		workflow, ok := guardedWorkflow(r.Context())
+		if !ok {
+			writeError(w, r, http.StatusForbidden, "forbidden", "project manage role required", nil)
+			return
+		}
+		if !s.requireManageGranted(w, r, workflow.ProjectID) {
+			return
+		}
+	}
 	nodeID := r.PathValue("node_id")
 	if _, err := s.store.GetWorkflow(r.Context(), wfID); err != nil {
 		s.writeStoreError(w, r, err)

@@ -9,7 +9,16 @@ interface StreamEvent {
   id?: string
   status?: string
   verdict?: string | null
+  publication_state?: string
   decision?: string
+}
+
+// The backend keeps the stream open until the publication settles. Mirror that
+// rule so a completed review that is still publishing does not close early.
+function workflowSettled(status?: string, publicationState?: string): boolean {
+  if (!status || !['completed', 'failed', 'cancelled'].includes(status)) return false
+  return publicationState === undefined || publicationState === ''
+    || ['published', 'skipped', 'failed'].includes(publicationState)
 }
 
 export function useReviewStream(reviewId: string | undefined, review: ReviewDetail | undefined) {
@@ -18,7 +27,7 @@ export function useReviewStream(reviewId: string | undefined, review: ReviewDeta
   const [error, setError] = useState<string | null>(null)
   const [attempt, setAttempt] = useState(0)
   const sourceRef = useRef<EventSource | null>(null)
-  const terminal = Boolean(review && ['completed', 'failed', 'cancelled'].includes(review.status))
+  const terminal = workflowSettled(review?.status, review?.publication_state)
 
   useEffect(() => {
     if (!reviewId || terminal) {
@@ -73,7 +82,7 @@ export function useReviewStream(reviewId: string | undefined, review: ReviewDeta
         const data = JSON.parse(event.data) as StreamEvent
         invalidateReview()
         invalidateList()
-        if (data.status && ['completed', 'failed', 'cancelled'].includes(data.status)) {
+        if (workflowSettled(data.status, data.publication_state)) {
           source.close()
           setState('closed')
         }

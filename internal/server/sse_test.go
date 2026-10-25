@@ -22,6 +22,11 @@ type sseEvent struct {
 // written, so mutating the fake store after Do returns is race-free.
 func streamEvents(t *testing.T, env *m6Env, workflowID string) (*http.Response, <-chan sseEvent) {
 	t.Helper()
+	return streamEventsAs(t, env, env.businessClient(), workflowID)
+}
+
+func streamEventsAs(t *testing.T, env *m6Env, client *m6Client, workflowID string) (*http.Response, <-chan sseEvent) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	t.Cleanup(cancel)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
@@ -29,8 +34,7 @@ func streamEvents(t *testing.T, env *m6Env, workflowID string) (*http.Response, 
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+testAdminToken)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.client.Do(req)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
 	}
@@ -219,6 +223,6 @@ func TestReviewStreamTerminalWorkflowEndsImmediately(t *testing.T) {
 
 func TestReviewStreamUnknownWorkflow(t *testing.T) {
 	env := newM6Env(t, m6Options{store: newFakeReviewStore()})
-	response := env.bearerClient().request(http.MethodGet, "/api/v1/reviews/missing/stream", nil, nil)
+	response := env.businessClient().request(http.MethodGet, "/api/v1/reviews/missing/stream", nil, nil)
 	assertStatus(t, response, http.StatusNotFound)
 }

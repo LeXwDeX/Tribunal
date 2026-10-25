@@ -15,13 +15,26 @@ gitlab:
   max_concurrency: 16
 
 auth:
+  # Optional GitLab OAuth application for browser login. Add the oauth mapping
+  # and export both variables; with oauth absent, /auth/login returns 503 and
+  # Bearer authentication keeps working.
+  # GitLab redirect URI: https://review.example.internal/auth/callback
+  # GitLab scope: read_user
+  # oauth:
+  #   client_id_env: GITLAB_OAUTH_CLIENT_ID
+  #   client_secret_env: GITLAB_OAUTH_CLIENT_SECRET
   bootstrap_token_env: REVIEW_ADMIN_TOKEN
+  # GitLab usernames that receive the admin role after OAuth login.
+  # bootstrap_admins: ["alice"]
   session_ttl: 168h
 
 storage:
   driver: sqlite
   dsn: "file:data/review.db"
   llm_call_retention: 720h
+  delivery_retention: 336h
+  job_retention: 168h
+  context_versions: 5
 
 secrets:
   master_key_env: REVIEW_MASTER_KEY

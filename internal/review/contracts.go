@@ -95,8 +95,8 @@ type FindingOut struct {
 	Severity   Severity   `json:"severity" jsonschema:"enum=P0,enum=P1,enum=P2,enum=info"`
 	Category   string     `json:"category" jsonschema:"pattern=^[a-z][a-z0-9_-]{0,31}$"`
 	Title      string     `json:"title" jsonschema:"minLength=1,maxLength=120"`
-	Body       string     `json:"body" jsonschema:"minLength=1,maxLength=8000"`
-	Suggestion string     `json:"suggestion,omitempty" jsonschema:"maxLength=8000"`
+	Body       string     `json:"body" jsonschema:"minLength=1,maxLength=8000,description=Structured Markdown with short paragraphs, lists, fenced code blocks for code or commands, and inline code for identifiers."`
+	Suggestion string     `json:"suggestion,omitempty" jsonschema:"maxLength=8000,description=Structured Markdown with fenced code blocks for code or commands and inline code for identifiers."`
 	Evidence   string     `json:"evidence" jsonschema:"minLength=1,maxLength=8000"`
 	Confidence Confidence `json:"confidence" jsonschema:"enum=high,enum=medium,enum=low"`
 }
@@ -384,14 +384,10 @@ func (r CodeRef) Validate() error {
 }
 
 // HasValidCodeEvidence reports whether at least one evidence reference is a
-// real code location. Non-empty prose alone is not a refutation.
+// syntactically valid code location. Non-empty prose alone is not a
+// refutation. Snapshot-backed callers must use ValidCodeEvidence instead.
 func HasValidCodeEvidence(refs []CodeRef) bool {
-	for _, ref := range refs {
-		if ref.Validate() == nil {
-			return true
-		}
-	}
-	return false
+	return ValidCodeEvidence(refs, nil)
 }
 
 func (p Package) Validate() error {
@@ -1087,7 +1083,7 @@ func ContractSchema(kind string) (json.RawMessage, error) {
 	if !ok {
 		return nil, fmt.Errorf("unknown contract kind %q", kind)
 	}
-	reflector := &jsonschema.Reflector{AllowAdditionalProperties: false}
+	reflector := &jsonschema.Reflector{AllowAdditionalProperties: false, ExpandedStruct: true}
 	schema := reflector.Reflect(example.newValue())
 	raw, err := json.Marshal(schema)
 	if err != nil {

@@ -3,6 +3,8 @@
 // inventing defaults.
 
 export type Role = 'admin' | 'viewer'
+export type ProjectAccess = 'read' | 'manage'
+export type PublicationState = 'pending' | 'published' | 'skipped' | 'failed'
 
 export interface Me {
   id: number | string
@@ -37,6 +39,30 @@ export type ProfilesPage = Page<Profile> & { profiles: Profile[] }
 export type ApiTokenPage = Page<ApiToken> & { tokens: ApiToken[] }
 export type ContextDocPage = Page<ContextDoc> & { documents: ContextDoc[] }
 export type CallPage = Page<LlmCall> & { calls: LlmCall[] }
+
+export interface AdminUser {
+  id: number
+  username: string
+  name?: string
+  disabled: boolean
+  last_login_at?: string
+}
+
+export interface AdminProject {
+  id: number
+  path_with_namespace: string
+}
+
+export interface ProjectGrant {
+  project_id: number
+  user_id: number
+  role: ProjectAccess
+  username?: string
+}
+
+export type AdminUserPage = Page<AdminUser> & { users: AdminUser[] }
+export type AdminProjectPage = Page<AdminProject> & { projects: AdminProject[] }
+export type ProjectGrantPage = Page<ProjectGrant> & { grants: ProjectGrant[] }
 
 export interface ProjectSettings {
   language?: string
@@ -80,11 +106,18 @@ export interface ProjectWorkspaceSummary {
 export interface Project {
   id: number
   path_with_namespace: string
+  access?: ProjectAccess
   web_url?: string
   default_branch?: string
   token_expires_at?: string
   token_scopes?: string[]
   hook_id?: number
+  webhook_state?: 'disabled' | 'pending' | 'enabled' | 'failed' | 'unknown' | string
+  webhook_events?: string[]
+  webhook_error?: string
+  webhook_managed_by?: string
+  webhook_created_at?: string
+  webhook_updated_at?: string
   profile: string
   settings: ProjectSettings
   enabled: boolean
@@ -101,6 +134,29 @@ export interface ProjectRegistration {
   webhook_secret?: string
 }
 
+export interface ProjectWebhookState {
+  project?: Project
+  hook_id: number
+  state: string
+  events: string[]
+  last_error: string
+  managed_by?: string
+  created_at?: string
+  updated_at?: string
+}
+
+export interface ProjectValidation {
+  project_id: number
+  path_with_namespace: string
+  web_url: string
+  default_branch: string
+  username: string
+  access_level: number
+  token_scopes: string[]
+  token_expires_at?: string
+  git_head: string
+}
+
 export interface PatchProject {
   profile?: string
   settings?: ProjectSettings
@@ -110,6 +166,7 @@ export interface PatchProject {
 export type Severity = 'P0' | 'P1' | 'P2' | 'info'
 export type FindingDecision = 'publish' | 'drop' | 'mark' | 'downgrade'
 export type ChallengeStatus = 'confirmed' | 'refuted' | 'uncertain' | 'skipped'
+export type FindingAnnotation = '' | 'valid' | 'invalid' | 'uncertain'
 
 export interface GraphNode {
   id: string
@@ -163,6 +220,9 @@ export interface ReviewSummary {
   trigger?: string
   status: string
   verdict?: string | null
+  error?: string
+  publication_state?: PublicationState
+  publication_error?: string
   findings_summary?: FindingsSummary
   usage?: ReviewUsage
   duration_ms?: number
@@ -173,6 +233,7 @@ export interface ReviewSummary {
 }
 
 export interface ReviewDetail extends ReviewSummary {
+  access?: ProjectAccess
   publications?: Publications
   error?: string
   cancel_reason?: string
@@ -202,6 +263,9 @@ export interface Finding {
   decision?: FindingDecision
   decision_reason?: string
   position_ok?: boolean
+  annotation?: FindingAnnotation
+  annotated_by?: string
+  annotated_at?: string
 }
 
 export interface NodeUsage {
@@ -353,9 +417,62 @@ export interface Profile {
   [key: string]: unknown
 }
 
-// The stats payload is not fully specified by the API document; render only
-// keys that are actually present.
-export type Stats = Record<string, unknown>
+export interface DailyStats {
+  day: string
+  runs: number
+  cost_micros: number
+  duration_samples: number
+  avg_duration_ms: number | null
+  p95_duration_ms: number | null
+}
+
+export interface StatsBreakdown {
+  runs: number
+  cost_micros: number
+  duration_samples: number
+  avg_duration_ms: number | null
+  p95_duration_ms: number | null
+  trend: DailyStats[]
+}
+
+export interface ProjectStatsRow extends StatsBreakdown {
+  project_id: number
+  blocking: number
+  published: number
+}
+
+export interface ProviderStatsRow extends StatsBreakdown {
+  provider: string
+}
+
+export interface BlockStatsRow extends StatsBreakdown {
+  block: string
+}
+
+export interface ProviderQualityRow {
+  provider: string
+  proposed: number
+  reviewed: number
+  valid: number
+  invalid: number
+  accuracy: number | null
+  overturned: number
+  overturned_ratio: number | null
+  refuted: number
+  refuted_reviewed: number
+  false_refuted: number
+  false_kill_rate: number | null
+}
+
+// Older servers omit some fields; render only keys that are actually present.
+export interface Stats extends Record<string, unknown> {
+  duration_samples?: number
+  trend?: DailyStats[]
+  by_project?: ProjectStatsRow[]
+  by_provider?: ProviderStatsRow[]
+  by_block?: BlockStatsRow[]
+  quality_by_provider?: ProviderQualityRow[]
+}
 
 export interface PlatformSettings {
   [key: string]: unknown

@@ -41,7 +41,7 @@ func (e *Engine) Run(ctx context.Context, wfID string) error {
 		return err
 	}
 
-	staleRetries := 0
+	var scheduleRetry staleRetry
 	for {
 		if err := handle.getErr(); err != nil {
 			return err
@@ -64,21 +64,22 @@ func (e *Engine) Run(ctx context.Context, wfID string) error {
 		if !wf.Deadline.IsZero() && !now.Before(wf.Deadline) {
 			return e.cancelDurable(runCtx, wfID, "deadline")
 		}
+		if err := scheduleRetry.observe(wf.Revision); err != nil {
+			return err
+		}
 
 		if wf.Spec.Budget.MaxTokens > 0 && wf.Usage.totalTokens() >= wf.Spec.Budget.MaxTokens {
+			handle.cancelTokenBudgetNodes(wf)
 			events := tokenBudgetEvents(wf, now)
 			if len(events) > 0 {
 				if err := e.appendBatch(runCtx, wfID, wf.Revision, events); err != nil {
 					if errors.Is(err, ErrStaleRevision) {
-						staleRetries++
-						if staleRetries > maxCommitAttempts*4 {
-							return ErrStaleRevision
-						}
+						scheduleRetry.mark(wf.Revision)
 						continue
 					}
 					return err
 				}
-				staleRetries = 0
+				scheduleRetry.reset()
 				continue
 			}
 		}
@@ -87,15 +88,12 @@ func (e *Engine) Run(ctx context.Context, wfID string) error {
 		if len(events) > 0 {
 			if err := e.appendBatch(runCtx, wfID, wf.Revision, events); err != nil {
 				if errors.Is(err, ErrStaleRevision) {
-					staleRetries++
-					if staleRetries > maxCommitAttempts*4 {
-						return ErrStaleRevision
-					}
+					scheduleRetry.mark(wf.Revision)
 					continue
 				}
 				return err
 			}
-			staleRetries = 0
+			scheduleRetry.reset()
 			continue
 		}
 
@@ -112,12 +110,17 @@ func (e *Engine) Run(ctx context.Context, wfID string) error {
 			}(id)
 		}
 		if launched {
-			staleRetries = 0
+			scheduleRetry.reset()
 			continue
 		}
 
 		if allTerminal(wf) {
-			return e.finalize(runCtx, wfID)
+			// finalize can reload after a concurrent Extend added nodes; a nil
+			// result then means the workflow is no longer all-terminal.
+			if err := e.finalize(runCtx, wfID); err != nil {
+				return err
+			}
+			continue
 		}
 		if handle.activeCount() == 0 {
 			// A worker may have just committed and released its slot between
@@ -142,6 +145,9 @@ func (e *Engine) Run(ctx context.Context, wfID string) error {
 			if latest.Revision != wf.Revision || handle.activeCount() > 0 {
 				continue
 			}
+			if err := handle.getErr(); err != nil {
+				return err
+			}
 			return fmt.Errorf("dag: workflow %s has no runnable node and no active worker", wfID)
 		}
 
@@ -150,7 +156,8 @@ func (e *Engine) Run(ctx context.Context, wfID string) error {
 }
 
 func (e *Engine) ensureStarted(ctx context.Context, wfID string) error {
-	for attempt := 0; attempt < maxCommitAttempts; attempt++ {
+	var retry staleRetry
+	for {
 		wf, err := e.loadView(ctx, wfID)
 		if err != nil {
 			return err
@@ -159,12 +166,16 @@ func (e *Engine) ensureStarted(ctx context.Context, wfID string) error {
 		case WorkflowRunning:
 			return nil
 		case WorkflowPending:
+			if err := retry.observe(wf.Revision); err != nil {
+				return err
+			}
 			ev, err := makeEvent(EventWorkflowStarted, struct{}{}, e.clock())
 			if err != nil {
 				return err
 			}
 			if _, err := e.store.Append(ctx, wfID, wf.Revision, ev); err != nil {
 				if errors.Is(err, ErrStaleRevision) {
+					retry.mark(wf.Revision)
 					continue
 				}
 				return err
@@ -175,7 +186,6 @@ func (e *Engine) ensureStarted(ctx context.Context, wfID string) error {
 			return nil
 		}
 	}
-	return ErrStaleRevision
 }
 
 func (e *Engine) wait(ctx context.Context, handle *runHandle, deadline time.Time) {
@@ -307,7 +317,7 @@ func tokenBudgetEvents(wf WorkflowView, now time.Time) []Event {
 	var events []Event
 	for _, id := range wf.Order {
 		view := wf.Nodes[id]
-		if view.Status.Terminal() {
+		if view.Status.Terminal() || view.Spec.TokenFree {
 			continue
 		}
 		var (
@@ -346,7 +356,8 @@ func allTerminal(wf WorkflowView) bool {
 }
 
 func (e *Engine) finalize(ctx context.Context, wfID string) error {
-	for attempt := 0; attempt < maxCommitAttempts; attempt++ {
+	var retry staleRetry
+	for {
 		wf, err := e.loadView(ctx, wfID)
 		if err != nil {
 			return err
@@ -356,6 +367,9 @@ func (e *Engine) finalize(ctx context.Context, wfID string) error {
 		}
 		if !allTerminal(wf) {
 			return nil
+		}
+		if err := retry.observe(wf.Revision); err != nil {
+			return err
 		}
 		failed := false
 		failedNode := ""
@@ -383,6 +397,7 @@ func (e *Engine) finalize(ctx context.Context, wfID string) error {
 		}
 		if _, err := e.store.Append(ctx, wfID, wf.Revision, ev); err != nil {
 			if errors.Is(err, ErrStaleRevision) {
+				retry.mark(wf.Revision)
 				continue
 			}
 			return err
@@ -390,7 +405,6 @@ func (e *Engine) finalize(ctx context.Context, wfID string) error {
 		e.signal(wfID)
 		return nil
 	}
-	return ErrStaleRevision
 }
 
 func (e *Engine) runNode(runCtx context.Context, handle *runHandle, wfID, nodeID string) {
@@ -421,21 +435,31 @@ func (e *Engine) runNode(runCtx context.Context, handle *runHandle, wfID, nodeID
 	}
 	queueDeadline := queuedAt.Add(timeout)
 
-	waitCtx := runCtx
-	var waitCancel context.CancelFunc
-	if !queueDeadline.IsZero() {
-		waitCtx, waitCancel = context.WithDeadline(runCtx, queueDeadline)
-		defer waitCancel()
+	// Queue wait is measured with the engine clock, not wall time. Mixing
+	// context.WithDeadline (wall clock) with a custom engine clock makes a
+	// fixed test clock appear already expired.
+	var timeoutCh <-chan time.Time
+	if remaining := queueDeadline.Sub(e.clock()); remaining <= 0 {
+		if err := e.commitNodeFailure(runCtx, wfID, nodeID, view.Attempt, "queue_timeout", "queue wait exceeded node timeout"); err != nil {
+			handle.setErr(err)
+		}
+		return
+	} else {
+		timer := time.NewTimer(remaining)
+		defer timer.Stop()
+		timeoutCh = timer.C
 	}
 	select {
 	case e.sem <- struct{}{}:
-	case <-waitCtx.Done():
+	case <-timeoutCh:
 		if runCtx.Err() != nil {
 			return
 		}
 		if err := e.commitNodeFailure(runCtx, wfID, nodeID, view.Attempt, "queue_timeout", "queue wait exceeded node timeout"); err != nil {
 			handle.setErr(err)
 		}
+		return
+	case <-runCtx.Done():
 		return
 	}
 	released := false
@@ -461,6 +485,16 @@ func (e *Engine) runNode(runCtx context.Context, handle *runHandle, wfID, nodeID
 	if !ok || view.Status != NodeQueued {
 		return
 	}
+	if !view.Spec.TokenFree && wf.Spec.Budget.MaxTokens > 0 && wf.Usage.totalTokens() >= wf.Spec.Budget.MaxTokens {
+		if view.Spec.Required {
+			if err := e.commitNodeFailure(runCtx, wfID, nodeID, view.Attempt, "budget_exhausted", "workflow token budget exhausted"); err != nil {
+				handle.setErr(err)
+			}
+		} else if err := e.commitNodeSkipped(runCtx, wfID, nodeID, view.Attempt, "budget_exhausted"); err != nil {
+			handle.setErr(err)
+		}
+		return
+	}
 
 	remaining := queueDeadline.Sub(e.clock())
 	if remaining <= 0 {
@@ -470,7 +504,13 @@ func (e *Engine) runNode(runCtx context.Context, handle *runHandle, wfID, nodeID
 		}
 		return
 	}
-	started, err := e.commitNodeStarted(runCtx, wfID, nodeID, view.Attempt)
+	nodeCtx, nodeCancel := context.WithCancelCause(runCtx)
+	handle.setNodeCancel(nodeID, nodeCancel)
+	defer handle.clearNodeCancel(nodeID)
+	defer nodeCancel(nil)
+
+	input := buildNodeInput(wf, view.Spec, view.Attempt)
+	started, err := e.commitNodeStarted(runCtx, wfID, nodeID, view.Attempt, nodeMetadata(e.exec, input))
 	if err != nil {
 		if runCtx.Err() == nil {
 			handle.setErr(err)
@@ -480,13 +520,16 @@ func (e *Engine) runNode(runCtx context.Context, handle *runHandle, wfID, nodeID
 	if !started {
 		return
 	}
-	input := buildNodeInput(wf, view.Spec, view.Attempt)
-	execCtx, execCancel := context.WithTimeout(runCtx, remaining)
+	execCtx, execCancel := context.WithTimeout(nodeCtx, remaining)
 	out, execErr := executeSafely(execCtx, e.exec, input)
 	timedOut := errors.Is(execCtx.Err(), context.DeadlineExceeded) || errors.Is(execErr, context.DeadlineExceeded)
 	execCancel()
 	release()
 
+	if errors.Is(context.Cause(nodeCtx), errTokenBudget) {
+		// The scheduler owns the durable budget event for this node.
+		return
+	}
 	if runCtx.Err() != nil {
 		// Cancel or the caller owns the durable abort/skip path.
 		return
@@ -496,15 +539,20 @@ func (e *Engine) runNode(runCtx context.Context, handle *runHandle, wfID, nodeID
 		if timedOut {
 			reason = "timeout"
 		}
-		if err := e.commitNodeFailure(runCtx, wfID, nodeID, view.Attempt, reason, execErr.Error()); err != nil {
+		if err := e.commitNodeFailureUsage(runCtx, wfID, nodeID, view.Attempt, reason, execErr.Error(), out.Usage); err != nil {
 			handle.setErr(err)
 		}
 		return
 	}
-	e.commitNodeSuccess(runCtx, wfID, nodeID, view.Spec, view.Attempt, out)
+	if err := e.commitNodeSuccess(runCtx, wfID, nodeID, view.Spec, view.Attempt, out); err != nil {
+		handle.setErr(err)
+	}
 }
 
 func executeSafely(ctx context.Context, exec NodeExecutor, in NodeInput) (out NodeOutput, err error) {
+	if err := ctx.Err(); err != nil {
+		return NodeOutput{}, err
+	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("executor panic: %v", recovered)
@@ -513,8 +561,25 @@ func executeSafely(ctx context.Context, exec NodeExecutor, in NodeInput) (out No
 	return exec.Execute(ctx, in)
 }
 
-func (e *Engine) commitNodeStarted(ctx context.Context, wfID, nodeID string, attempt int) (bool, error) {
-	for i := 0; i < maxCommitAttempts; i++ {
+// nodeMetadata asks an executor for optional attribution. Metadata is
+// advisory: a legacy executor, an unresolved provider, or a panicking lookup
+// leaves the node unattributed and never changes scheduling.
+func nodeMetadata(exec NodeExecutor, in NodeInput) (meta NodeMetadata) {
+	provider, ok := exec.(NodeMetadataProvider)
+	if !ok {
+		return NodeMetadata{}
+	}
+	defer func() {
+		if recover() != nil {
+			meta = NodeMetadata{}
+		}
+	}()
+	return provider.NodeMetadata(in)
+}
+
+func (e *Engine) commitNodeStarted(ctx context.Context, wfID, nodeID string, attempt int, meta NodeMetadata) (bool, error) {
+	var retry staleRetry
+	for {
 		wf, err := e.loadView(ctx, wfID)
 		if err != nil {
 			return false, err
@@ -526,12 +591,21 @@ func (e *Engine) commitNodeStarted(ctx context.Context, wfID, nodeID string, att
 		if !ok || view.Attempt != attempt || view.Status != NodeQueued {
 			return false, nil
 		}
-		ev, err := makeEvent(EventNodeStarted, NodeStartedPayload{NodeID: nodeID, Attempt: attempt}, e.clock())
+		if err := retry.observe(wf.Revision); err != nil {
+			return false, err
+		}
+		ev, err := makeEvent(EventNodeStarted, NodeStartedPayload{
+			NodeID:   nodeID,
+			Attempt:  attempt,
+			Provider: meta.Provider,
+			Model:    meta.Model,
+		}, e.clock())
 		if err != nil {
 			return false, err
 		}
 		if _, err := e.store.Append(ctx, wfID, wf.Revision, ev); err != nil {
 			if errors.Is(err, ErrStaleRevision) {
+				retry.mark(wf.Revision)
 				continue
 			}
 			return false, err
@@ -539,14 +613,21 @@ func (e *Engine) commitNodeStarted(ctx context.Context, wfID, nodeID string, att
 		e.signal(wfID)
 		return true, nil
 	}
-	return false, ErrStaleRevision
 }
 
 func (e *Engine) commitNodeFailure(ctx context.Context, wfID, nodeID string, attempt int, reason, message string) error {
+	return e.commitNodeFailureUsage(ctx, wfID, nodeID, attempt, reason, message, Usage{})
+}
+
+// commitNodeFailureUsage persists a failed attempt together with any usage the
+// executor already knows. Retries and recovery therefore see the spend even
+// though the node did not complete.
+func (e *Engine) commitNodeFailureUsage(ctx context.Context, wfID, nodeID string, attempt int, reason, message string, usage Usage) error {
 	if ctx.Err() != nil {
 		return nil
 	}
-	for i := 0; i < maxCommitAttempts; i++ {
+	var retry staleRetry
+	for {
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -561,18 +642,23 @@ func (e *Engine) commitNodeFailure(ctx context.Context, wfID, nodeID string, att
 		if !ok || view.Attempt != attempt || view.Status.Terminal() {
 			return nil
 		}
+		if err := retry.observe(wf.Revision); err != nil {
+			return err
+		}
 		ev, err := makeEvent(EventNodeFailed, NodeFailedPayload{
 			NodeID:    nodeID,
 			Attempt:   attempt,
 			Error:     message,
 			ErrorKind: reason,
 			Reason:    reason,
+			Usage:     usage,
 		}, e.clock())
 		if err != nil {
 			return err
 		}
 		if _, err := e.store.Append(ctx, wfID, wf.Revision, ev); err != nil {
 			if errors.Is(err, ErrStaleRevision) {
+				retry.mark(wf.Revision)
 				continue
 			}
 			return err
@@ -580,16 +666,57 @@ func (e *Engine) commitNodeFailure(ctx context.Context, wfID, nodeID string, att
 		e.signal(wfID)
 		return nil
 	}
-	return ErrStaleRevision
 }
 
-func (e *Engine) commitNodeSuccess(ctx context.Context, wfID, nodeID string, spec NodeSpec, attempt int, out NodeOutput) {
+func (e *Engine) commitNodeSkipped(ctx context.Context, wfID, nodeID string, attempt int, reason string) error {
 	if ctx.Err() != nil {
-		return
+		return nil
+	}
+	var retry staleRetry
+	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+		wf, err := e.loadView(ctx, wfID)
+		if err != nil {
+			return err
+		}
+		if wf.Terminal() {
+			return nil
+		}
+		view, ok := wf.Nodes[nodeID]
+		if !ok || view.Attempt != attempt || view.Status.Terminal() {
+			return nil
+		}
+		if err := retry.observe(wf.Revision); err != nil {
+			return err
+		}
+		ev, err := makeEvent(EventNodeSkipped, NodeSkippedPayload{
+			NodeID:  nodeID,
+			Attempt: attempt,
+			Reason:  reason,
+		}, e.clock())
+		if err != nil {
+			return err
+		}
+		if _, err := e.store.Append(ctx, wfID, wf.Revision, ev); err != nil {
+			if errors.Is(err, ErrStaleRevision) {
+				retry.mark(wf.Revision)
+				continue
+			}
+			return err
+		}
+		e.signal(wfID)
+		return nil
+	}
+}
+
+func (e *Engine) commitNodeSuccess(ctx context.Context, wfID, nodeID string, spec NodeSpec, attempt int, out NodeOutput) error {
+	if ctx.Err() != nil {
+		return nil
 	}
 	if len(out.Data) > 0 && !json.Valid(out.Data) {
-		_ = e.commitNodeFailure(ctx, wfID, nodeID, attempt, "invalid_output", "executor returned invalid JSON")
-		return
+		return e.commitNodeFailure(ctx, wfID, nodeID, attempt, "invalid_output", "executor returned invalid JSON")
 	}
 	var (
 		extension *Extension
@@ -597,8 +724,14 @@ func (e *Engine) commitNodeSuccess(ctx context.Context, wfID, nodeID string, spe
 	)
 	if spec.Expands {
 		wf, err := e.loadView(ctx, wfID)
-		if err != nil || wf.Terminal() {
-			return
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+		if wf.Terminal() {
+			return nil
 		}
 		if e.exp == nil {
 			expandErr = errors.New("dag: node expands but no Expander is configured")
@@ -615,35 +748,47 @@ func (e *Engine) commitNodeSuccess(ctx context.Context, wfID, nodeID string, spe
 		}
 	}
 
-	for i := 0; i < maxCommitAttempts; i++ {
+	var retry staleRetry
+	for {
 		if ctx.Err() != nil {
-			return
+			return nil
 		}
 		wf, err := e.loadView(ctx, wfID)
-		if err != nil || wf.Terminal() {
-			return
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+		if wf.Terminal() {
+			return nil
 		}
 		view, ok := wf.Nodes[nodeID]
 		if !ok || view.Attempt != attempt || view.Status != NodeRunning {
-			return
+			return nil
+		}
+		if err := retry.observe(wf.Revision); err != nil {
+			return err
 		}
 		if expandErr != nil {
-			_ = e.commitNodeFailure(ctx, wfID, nodeID, attempt, "expand_failed", expandErr.Error())
-			return
+			return e.commitNodeFailure(ctx, wfID, nodeID, attempt, "expand_failed", expandErr.Error())
 		}
 		events, err := e.resultEvents(wf, nodeID, spec, attempt, out, extension)
 		if err != nil {
-			_ = e.commitNodeFailure(ctx, wfID, nodeID, attempt, "expand_failed", err.Error())
-			return
+			return e.commitNodeFailure(ctx, wfID, nodeID, attempt, "expand_failed", err.Error())
 		}
 		if _, err := e.store.Append(ctx, wfID, wf.Revision, events...); err != nil {
 			if errors.Is(err, ErrStaleRevision) {
+				retry.mark(wf.Revision)
 				continue
 			}
-			return
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
 		}
 		e.signal(wfID)
-		return
+		return nil
 	}
 }
 

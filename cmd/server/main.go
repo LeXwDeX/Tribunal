@@ -147,6 +147,13 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	contexts, err := app.NewContextService(app.ContextServiceConfig{
+		Store:     db,
+		Workspace: runtime.WorkspaceManager(),
+	})
+	if err != nil {
+		return err
+	}
 	extensions, err := app.NewExtensionService(app.ExtensionServiceConfig{
 		Store:     db,
 		MCP:       runtime.MCPManager(),
@@ -162,6 +169,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	warnEphemeralSessionKey(logger)
 	extensionsAPI := server.NewAppExtensions(extensions)
 	apiServer, err := server.New(server.Config{
 		AdminToken: adminToken,
@@ -183,10 +191,13 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		Store:      db,
 		Reviews:    dispatcher,
 		Workspace:  dispatcher,
+		Contexts:   contexts,
 		Extensions: extensionsAPI,
 		MCP:        extensionsAPI,
 		LLM:        extensionsAPI,
+		Sessions:   db,
 		Tokens:     db,
+		Access:     db,
 		Platform:   cfg,
 	})
 	if err != nil {
@@ -293,9 +304,18 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	return runErr
 }
 
+// warnEphemeralSessionKey tells the operator that sessions persisted in
+// SQLite become unreachable after a restart without a pinned key.
+func warnEphemeralSessionKey(logger *slog.Logger) {
+	if strings.TrimSpace(os.Getenv("CRC_SESSION_KEY")) == "" {
+		logger.Warn("CRC_SESSION_KEY is not set; generated an ephemeral session key, so browser sessions will not survive restart")
+	}
+}
+
 // sessionKeyFromEnv reads CRC_SESSION_KEY as base64 (standard or raw) and
-// requires at least 32 bytes. An absent key keeps sessions valid only until
-// the process restarts.
+// requires at least 32 bytes. An absent key is generated per process; stored
+// sessions survive restart but their cookies no longer verify, so the caller
+// must warn the operator (see warnEphemeralSessionKey).
 func sessionKeyFromEnv() ([]byte, error) {
 	value := strings.TrimSpace(os.Getenv("CRC_SESSION_KEY"))
 	if value == "" {

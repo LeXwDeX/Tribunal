@@ -156,6 +156,36 @@ func validateExtensionScope(scope string, projectID *int64, required bool) (exte
 	return extensionScope{scope: scope, projectID: projectID}, nil
 }
 
+// authorizeExtensionScope applies the project boundary to extension lists and
+// writes. A project-scoped read needs a stored grant. Global scope and any
+// write/test/delete of host execution configuration need the platform admin
+// role; project-scoped writes additionally need the manage grant.
+func (s *Server) authorizeExtensionScope(w http.ResponseWriter, r *http.Request, scope extensionScope, write bool) bool {
+	switch scope.scope {
+	case "project":
+		if scope.projectID == nil {
+			validationFailed(w, r, "project_id", "project_id is required for project scope")
+			return false
+		}
+		if write && !s.requirePlatformAdmin(w, r) {
+			return false
+		}
+		_, ok := s.requireProjectAccess(w, r, *scope.projectID, write)
+		return ok
+	case "platform":
+		return s.requirePlatformAdmin(w, r)
+	default:
+		// An empty selector means "all scopes". That global view is admin-only.
+		return s.requirePlatformAdmin(w, r)
+	}
+}
+
+// authorizeExtensionResource reuses the stored resource scope for update,
+// delete and test operations, which do not receive a scope selector.
+func (s *Server) authorizeExtensionResource(w http.ResponseWriter, r *http.Request, scope string, projectID *int64, write bool) bool {
+	return s.authorizeExtensionScope(w, r, extensionScope{scope: scope, projectID: projectID}, write)
+}
+
 func (s *Server) handleListMCPServers(w http.ResponseWriter, r *http.Request) {
 	if !s.requireExtensions(w, r) {
 		return
@@ -165,7 +195,16 @@ func (s *Server) handleListMCPServers(w http.ResponseWriter, r *http.Request) {
 		validationFailed(w, r, "scope", err.Error())
 		return
 	}
-	servers, err := s.extensions.ListMCPServers(r.Context(), scope.scope, scope.projectID)
+	if !s.authorizeExtensionScope(w, r, scope, false) {
+		return
+	}
+	limit, err := pageLimit(r)
+	if err != nil {
+		validationFailed(w, r, "limit", err.Error())
+		return
+	}
+	servers, next, err := s.extensions.ListMCPServersPage(r.Context(),
+		scope.scope, scope.projectID, r.URL.Query().Get("cursor"), limit)
 	if err != nil {
 		s.writeServiceError(w, r, err)
 		return
@@ -174,7 +213,7 @@ func (s *Server) handleListMCPServers(w http.ResponseWriter, r *http.Request) {
 	for _, server := range servers {
 		out = append(out, maskMCPServer(server))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"servers": out})
+	writeJSON(w, http.StatusOK, map[string]any{"servers": out, "next_cursor": next})
 }
 
 type mcpServerRequest struct {
@@ -197,6 +236,9 @@ func (s *Server) handleCreateMCPServer(w http.ResponseWriter, r *http.Request) {
 	scope, err := validateExtensionScope(strings.TrimSpace(request.Scope), request.ProjectID, true)
 	if err != nil {
 		validationFailed(w, r, "scope", err.Error())
+		return
+	}
+	if !s.authorizeExtensionScope(w, r, scope, true) {
 		return
 	}
 	name := strings.TrimSpace(request.Name)
@@ -241,6 +283,14 @@ func (s *Server) handleUpdateMCPServer(w http.ResponseWriter, r *http.Request) {
 		validationFailed(w, r, "id", "id is required")
 		return
 	}
+	current, err := s.extensions.GetMCPServer(r.Context(), id)
+	if err != nil {
+		s.writeServiceError(w, r, err)
+		return
+	}
+	if !s.authorizeExtensionResource(w, r, current.Scope, current.ProjectID, true) {
+		return
+	}
 	var request mcpServerUpdateRequest
 	if err := decodeJSON(w, r, adminBodyLimit, &request); err != nil {
 		decodeRequestError(w, r, err)
@@ -266,11 +316,6 @@ func (s *Server) handleUpdateMCPServer(w http.ResponseWriter, r *http.Request) {
 		}
 		// Masked placeholders are display-only. Restore the stored value (or
 		// drop the key) so a masked placeholder is never persisted.
-		current, err := s.extensions.GetMCPServer(r.Context(), id)
-		if err != nil {
-			s.writeServiceError(w, r, err)
-			return
-		}
 		update.Config = restoreMaskedMCPConfig(request.Config, current.Config)
 	}
 	server, err := s.extensions.UpdateMCPServer(r.Context(), id, update)
@@ -285,7 +330,16 @@ func (s *Server) handleDeleteMCPServer(w http.ResponseWriter, r *http.Request) {
 	if !s.requireExtensions(w, r) {
 		return
 	}
-	if err := s.extensions.DeleteMCPServer(r.Context(), r.PathValue("id")); err != nil {
+	id := r.PathValue("id")
+	server, err := s.extensions.GetMCPServer(r.Context(), id)
+	if err != nil {
+		s.writeServiceError(w, r, err)
+		return
+	}
+	if !s.authorizeExtensionResource(w, r, server.Scope, server.ProjectID, true) {
+		return
+	}
+	if err := s.extensions.DeleteMCPServer(r.Context(), id); err != nil {
 		s.writeServiceError(w, r, err)
 		return
 	}
@@ -299,6 +353,9 @@ func (s *Server) handleImportMCPServers(w http.ResponseWriter, r *http.Request) 
 	scope, err := parseExtensionScope(r, true)
 	if err != nil {
 		validationFailed(w, r, "scope", err.Error())
+		return
+	}
+	if !s.authorizeExtensionScope(w, r, scope, true) {
 		return
 	}
 	// The body is the pasted document itself: {"mcpServers": {...}}. Unknown
@@ -352,6 +409,9 @@ func (s *Server) handleTestMCPServer(w http.ResponseWriter, r *http.Request) {
 	server, err := s.extensions.GetMCPServer(r.Context(), id)
 	if err != nil {
 		s.writeServiceError(w, r, err)
+		return
+	}
+	if !s.authorizeExtensionResource(w, r, server.Scope, server.ProjectID, true) {
 		return
 	}
 	tools, err := s.mcp.TestMCPServer(r.Context(), *server)
@@ -462,7 +522,16 @@ func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {
 		validationFailed(w, r, "scope", err.Error())
 		return
 	}
-	skills, err := s.extensions.ListSkills(r.Context(), scope.scope, scope.projectID)
+	if !s.authorizeExtensionScope(w, r, scope, false) {
+		return
+	}
+	limit, err := pageLimit(r)
+	if err != nil {
+		validationFailed(w, r, "limit", err.Error())
+		return
+	}
+	skills, next, err := s.extensions.ListSkillsPage(r.Context(),
+		scope.scope, scope.projectID, r.URL.Query().Get("cursor"), limit)
 	if err != nil {
 		s.writeServiceError(w, r, err)
 		return
@@ -470,7 +539,7 @@ func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {
 	if skills == nil {
 		skills = []Skill{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"skills": skills})
+	writeJSON(w, http.StatusOK, map[string]any{"skills": skills, "next_cursor": next})
 }
 
 // handleUploadSkillOrRegisterDirectory dispatches the two documented shapes
@@ -500,6 +569,9 @@ func (s *Server) handleUploadSkill(w http.ResponseWriter, r *http.Request) {
 		parseFormInt64(r.FormValue("project_id")), true)
 	if err != nil {
 		validationFailed(w, r, "scope", err.Error())
+		return
+	}
+	if !s.authorizeExtensionScope(w, r, scope, true) {
 		return
 	}
 	file, _, err := r.FormFile("file")
@@ -567,6 +639,9 @@ func (s *Server) handleRegisterSkillDirectory(w http.ResponseWriter, r *http.Req
 		validationFailed(w, r, "scope", err.Error())
 		return
 	}
+	if !s.authorizeExtensionScope(w, r, scope, true) {
+		return
+	}
 	dir := strings.TrimSpace(request.Dir)
 	if dir == "" || !filepath.IsAbs(dir) {
 		validationFailed(w, r, "dir", "dir must be an absolute server path")
@@ -598,7 +673,25 @@ func (s *Server) handleDeleteSkill(w http.ResponseWriter, r *http.Request) {
 	if !s.requireExtensions(w, r) {
 		return
 	}
-	if err := s.extensions.DeleteSkill(r.Context(), r.PathValue("id")); err != nil {
+	id := r.PathValue("id")
+	// The delete endpoint has no scope selector. Resolve the skill's stored
+	// scope so a project-scoped skill also requires the manage grant; the
+	// route guard already requires the platform admin role.
+	skills, err := s.extensions.ListSkills(r.Context(), "", nil)
+	if err != nil {
+		s.writeServiceError(w, r, err)
+		return
+	}
+	for _, skill := range skills {
+		if skill.ID != id {
+			continue
+		}
+		if !s.authorizeExtensionResource(w, r, skill.Scope, skill.ProjectID, true) {
+			return
+		}
+		break
+	}
+	if err := s.extensions.DeleteSkill(r.Context(), id); err != nil {
 		s.writeServiceError(w, r, err)
 		return
 	}
@@ -687,7 +780,16 @@ func (s *Server) handleListBlockBindings(w http.ResponseWriter, r *http.Request)
 		validationFailed(w, r, "scope", err.Error())
 		return
 	}
-	bindings, err := s.extensions.ListBlockBindings(r.Context(), scope.scope, scope.projectID)
+	if !s.authorizeExtensionScope(w, r, scope, false) {
+		return
+	}
+	limit, err := pageLimit(r)
+	if err != nil {
+		validationFailed(w, r, "limit", err.Error())
+		return
+	}
+	bindings, next, err := s.extensions.ListBlockBindingsPage(r.Context(),
+		scope.scope, scope.projectID, r.URL.Query().Get("cursor"), limit)
 	if err != nil {
 		s.writeServiceError(w, r, err)
 		return
@@ -695,7 +797,7 @@ func (s *Server) handleListBlockBindings(w http.ResponseWriter, r *http.Request)
 	if bindings == nil {
 		bindings = []BlockBinding{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"bindings": bindings})
+	writeJSON(w, http.StatusOK, map[string]any{"bindings": bindings, "next_cursor": next})
 }
 
 type blockBindingRequest struct {
@@ -722,6 +824,9 @@ func (s *Server) handleUpsertBlockBinding(w http.ResponseWriter, r *http.Request
 	scope, err := validateExtensionScope(strings.TrimSpace(request.Scope), request.ProjectID, true)
 	if err != nil {
 		validationFailed(w, r, "scope", err.Error())
+		return
+	}
+	if !s.authorizeExtensionScope(w, r, scope, true) {
 		return
 	}
 	tools := request.MCPTools

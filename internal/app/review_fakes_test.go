@@ -34,18 +34,28 @@ type reviewGitLab struct {
 	version *gitlab.Version
 	diffs   []gitlab.FileDiff
 	docs    map[string]string
+	rawErr  map[string]error
+	mrErr   error
+	noteErr error
 
-	notes       []gitlab.Note
-	nextNoteID  int64
-	discussions []gitlab.Discussion
-	nextDiscID  int64
-	statuses    []gitlab.CommitStatus
-	awards      map[int64][]gitlab.Award
-	currentUser *gitlab.User
+	notes         []gitlab.Note
+	nextNoteID    int64
+	discussions   []gitlab.Discussion
+	nextDiscID    int64
+	statuses      []gitlab.CommitStatus
+	awards        map[int64][]gitlab.Award
+	nextAwardID   int64
+	awardErr      error
+	addAwardErr   error
+	delAwardErr   error
+	noteUpdateErr error
+	statusNoteErr error
+	currentUser   *gitlab.User
 
 	summaryCreates    int
 	summaryUpdates    int
 	discussionCreates int
+	statusUpdates     []string
 }
 
 func newReviewGitLab(head string) *reviewGitLab {
@@ -73,9 +83,11 @@ func newReviewGitLab(head string) *reviewGitLab {
 			Diff:    "@@ -1,2 +1,3 @@\n a\n+bad := 1\n b\n",
 		}},
 		docs:        map[string]string{},
+		rawErr:      map[string]error{},
 		nextNoteID:  100,
 		nextDiscID:  200,
 		awards:      map[int64][]gitlab.Award{},
+		nextAwardID: 700,
 		currentUser: &gitlab.User{ID: 9, Username: "review-bot"},
 	}
 }
@@ -87,6 +99,9 @@ func (f *reviewGitLab) CurrentUser(context.Context, string) (*gitlab.User, error
 func (f *reviewGitLab) GetMergeRequest(context.Context, string, int64, int64) (*gitlab.MergeRequest, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.mrErr != nil {
+		return nil, f.mrErr
+	}
 	copy := *f.mr
 	return &copy, nil
 }
@@ -119,6 +134,9 @@ func (f *reviewGitLab) ListClosingIssues(context.Context, string, int64, int64) 
 func (f *reviewGitLab) GetRawFile(_ context.Context, _ string, _ int64, path, _ string) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err, ok := f.rawErr[path]; ok {
+		return nil, err
+	}
 	if body, ok := f.docs[path]; ok {
 		return []byte(body), nil
 	}
@@ -134,24 +152,44 @@ func (f *reviewGitLab) ListMRNotes(context.Context, string, int64, int64) ([]git
 func (f *reviewGitLab) CreateMRNote(_ context.Context, _ string, _, _ int64, body string) (*gitlab.Note, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.noteErr != nil {
+		return nil, f.noteErr
+	}
+	if f.statusNoteErr != nil && strings.HasPrefix(body, reviewStatusMarkerPrefix) {
+		return nil, f.statusNoteErr
+	}
 	f.nextNoteID++
 	note := gitlab.Note{ID: f.nextNoteID, Body: body, AuthorID: f.currentUser.ID}
 	f.notes = append(f.notes, note)
 	f.summaryCreates++
+	f.recordStatusBody(body)
 	return &note, nil
 }
 
 func (f *reviewGitLab) UpdateMRNote(_ context.Context, _ string, _, _, noteID int64, body string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.noteUpdateErr != nil {
+		return f.noteUpdateErr
+	}
+	if f.statusNoteErr != nil && strings.HasPrefix(body, reviewStatusMarkerPrefix) {
+		return f.statusNoteErr
+	}
 	for i := range f.notes {
 		if f.notes[i].ID == noteID {
 			f.notes[i].Body = body
 			f.summaryUpdates++
+			f.recordStatusBody(body)
 			return nil
 		}
 	}
 	return &gitlab.Error{Op: "update_note", Status: 404}
+}
+
+func (f *reviewGitLab) recordStatusBody(body string) {
+	if strings.HasPrefix(body, reviewStatusMarkerPrefix) {
+		f.statusUpdates = append(f.statusUpdates, body)
+	}
 }
 
 func (f *reviewGitLab) ListDiscussions(context.Context, string, int64, int64) ([]gitlab.Discussion, error) {
@@ -186,7 +224,39 @@ func (f *reviewGitLab) SetCommitStatus(_ context.Context, _ string, _ int64, _ s
 func (f *reviewGitLab) ListNoteAwards(_ context.Context, _ string, _, _, noteID int64) ([]gitlab.Award, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.awardErr != nil {
+		return nil, f.awardErr
+	}
 	return append([]gitlab.Award(nil), f.awards[noteID]...), nil
+}
+
+func (f *reviewGitLab) AddNoteAward(_ context.Context, _ string, _, _, noteID int64, name string) (*gitlab.Award, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.addAwardErr != nil {
+		return nil, f.addAwardErr
+	}
+	f.nextAwardID++
+	award := gitlab.Award{ID: f.nextAwardID, Name: name, UserID: f.currentUser.ID, Username: f.currentUser.Username}
+	f.awards[noteID] = append(f.awards[noteID], award)
+	return &award, nil
+}
+
+func (f *reviewGitLab) DeleteNoteAward(_ context.Context, _ string, _, _, noteID, awardID int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.delAwardErr != nil {
+		return f.delAwardErr
+	}
+	awards := f.awards[noteID]
+	for i, award := range awards {
+		if award.ID != awardID {
+			continue
+		}
+		f.awards[noteID] = append(append([]gitlab.Award(nil), awards[:i]...), awards[i+1:]...)
+		return nil
+	}
+	return &gitlab.Error{Op: "delete_note_award", Status: 404}
 }
 
 func (f *reviewGitLab) noteCount() int {
@@ -253,6 +323,17 @@ func (f *fakeGitOps) IsAncestor(context.Context, string, string, string) (bool, 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.ancestor, nil
+}
+
+func (f *fakeGitOps) FileDiff(_ context.Context, _, _, _, path string) (*repo.FileDiff, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, changed := range f.changed {
+		if changed == path {
+			return &repo.FileDiff{OldPath: path, Deleted: true}, nil
+		}
+	}
+	return nil, nil
 }
 
 func writeTestDir(dir string) error {
@@ -524,7 +605,13 @@ func jobGeneration(t *testing.T, job *jobs.Job) int64 {
 
 func createPendingReview(t *testing.T, f *reviewFixture, jobID string, generation int64) string {
 	t.Helper()
+	project, err := f.db.GetProject(context.Background(), 42)
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	configHash := reviewConfigHash(f.service.resolveConfig(project, review.RepoDocs{}))
 	dossier := testDossier(t, f.head)
+	dossier.Metadata = map[string]string{"config_hash": configHash, "prompt_hash": f.bundle.Hash}
 	raw, err := review.MarshalDossier(dossier)
 	if err != nil {
 		t.Fatal(err)
@@ -537,7 +624,7 @@ func createPendingReview(t *testing.T, f *reviewFixture, jobID string, generatio
 	wfID, _, err := f.db.CreateReviewWorkflow(context.Background(), sqlite.ReviewWorkflowRequest{
 		JobID:              jobID,
 		Spec:               spec,
-		Meta:               map[string]string{"trigger": "mr_open", "base_sha": dossier.DiffVersion.BaseSHA, "fingerprint": hash, "config_hash": "cfg", "prompt_hash": f.bundle.Hash},
+		Meta:               map[string]string{"trigger": "mr_open", "base_sha": dossier.DiffVersion.BaseSHA, "fingerprint": reviewFingerprint(hash, configHash, f.bundle.Hash), "config_hash": configHash, "prompt_hash": f.bundle.Hash},
 		DossierVersion:     review.DossierSchemaVersion,
 		DossierHash:        hash,
 		DossierData:        raw,

@@ -157,6 +157,114 @@ func TestFetchUsesWhitelistedEnvAndNoArgvToken(t *testing.T) {
 	}
 }
 
+func TestRemoteHEADReadsHeadWithoutArgvToken(t *testing.T) {
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args")
+	envFile := filepath.Join(dir, "env")
+	sha := strings.Repeat("a", 40)
+	token := "sekret-token-value"
+	g := &Git{
+		Bin: fakeGit(t),
+		BaseEnv: []string{
+			"FAKE_ARGS=" + argsFile,
+			"FAKE_ENV=" + envFile,
+			"FAKE_STDOUT=" + sha + "\tHEAD",
+		},
+	}
+
+	got, err := g.RemoteHEAD(context.Background(),
+		"https://gitlab.example.com/group/repo.git", Auth{Token: token})
+	if err != nil {
+		t.Fatalf("RemoteHEAD() error = %v", err)
+	}
+	if got != sha {
+		t.Fatalf("RemoteHEAD() = %q, want %q", got, sha)
+	}
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(args)
+	for _, want := range []string{"ls-remote", "--exit-code", "--", "HEAD", "https://gitlab.example.com/group/repo.git", "http.followRedirects=false"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("argv missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, token) {
+		t.Fatalf("token leaked into argv:\n%s", text)
+	}
+	env, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(env), "http.extraHeader") {
+		t.Fatalf("token header missing from environment:\n%s", env)
+	}
+}
+
+func TestRemoteHEADRejectsInvalidURLBeforeRunning(t *testing.T) {
+	argsFile := filepath.Join(t.TempDir(), "args")
+	g := &Git{
+		Bin:     fakeGit(t),
+		BaseEnv: []string{"FAKE_ARGS=" + argsFile},
+	}
+	if _, err := g.RemoteHEAD(context.Background(), "ssh://git@example.com/group/repo.git", Auth{}); !errors.Is(err, ErrInvalidURL) {
+		t.Fatalf("RemoteHEAD(ssh URL) = %v, want ErrInvalidURL", err)
+	}
+	if _, err := os.Stat(argsFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("git ran for an invalid URL: %v", err)
+	}
+}
+
+func TestRemoteHEADRejectsMalformedOutput(t *testing.T) {
+	for name, stdout := range map[string]string{
+		"missing":   "",
+		"not sha":   "not-a-sha\tHEAD",
+		"other ref": strings.Repeat("a", 40) + "\trefs/heads/main",
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			g := &Git{
+				Bin: fakeGit(t),
+				BaseEnv: []string{
+					"FAKE_ARGS=" + filepath.Join(dir, "args"),
+					"FAKE_ENV=" + filepath.Join(dir, "env"),
+					"FAKE_STDOUT=" + stdout,
+				},
+			}
+			if _, err := g.RemoteHEAD(context.Background(),
+				"https://gitlab.example.com/group/repo.git", Auth{}); err == nil {
+				t.Fatal("RemoteHEAD() = nil, want error")
+			}
+		})
+	}
+}
+
+func TestRemoteHEADHonorsContextDeadline(t *testing.T) {
+	dir := t.TempDir()
+	g := &Git{
+		Bin: fakeGit(t),
+		BaseEnv: []string{
+			"FAKE_ARGS=" + filepath.Join(dir, "args"),
+			"FAKE_ENV=" + filepath.Join(dir, "env"),
+			"FAKE_SLEEP=5",
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := g.RemoteHEAD(ctx, "https://gitlab.example.com/group/repo.git", Auth{})
+	if err == nil {
+		t.Fatal("RemoteHEAD() = nil, want timeout error")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("RemoteHEAD() error = %v, want DeadlineExceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("RemoteHEAD() took %v, want bounded by ctx", elapsed)
+	}
+}
+
 func TestFetchErrorDoesNotLeakStderr(t *testing.T) {
 	dir := t.TempDir()
 	secret := "sekret-token-value"
@@ -366,6 +474,8 @@ func fakeGit(t *testing.T) string {
 : > "$FAKE_ARGS"
 for arg in "$@"; do printf '%s\n' "$arg" >> "$FAKE_ARGS"; done
 env > "$FAKE_ENV"
+if [ -n "$FAKE_SLEEP" ]; then sleep "$FAKE_SLEEP"; fi
+if [ -n "$FAKE_STDOUT" ]; then printf '%s\n' "$FAKE_STDOUT"; fi
 if [ -n "$FAKE_STDERR" ]; then printf '%s\n' "$FAKE_STDERR" >&2; fi
 exit "${FAKE_EXIT:-0}"
 `
@@ -456,6 +566,76 @@ func TestRemoveWorktreePrunesMissingRegistration(t *testing.T) {
 	}
 	if err := g.AddWorktree(ctx, mirror, dir, sha); err != nil {
 		t.Fatalf("AddWorktree() after prune = %v", err)
+	}
+}
+
+func TestRemoveWorktreeAcceptsMissingMirror(t *testing.T) {
+	ctx := context.Background()
+	source := initRepo(t)
+	sha := commitFile(t, source, "a.txt", "one\n", "first")
+	root := t.TempDir()
+	mirror := filepath.Join(root, "mirror.git")
+	g := &Git{}
+	if err := g.EnsureMirror(ctx, mirror, "https://example.com/group/repo.git", Auth{}); err != nil {
+		t.Fatal(err)
+	}
+	pushToMirror(t, source, mirror)
+	dir := filepath.Join(root, "run")
+	if err := g.AddWorktree(ctx, mirror, dir, sha); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(mirror); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.RemoveWorktree(ctx, mirror, dir); err != nil {
+		t.Fatalf("RemoveWorktree(missing mirror) = %v, want nil", err)
+	}
+	if _, err := os.Lstat(dir); err != nil {
+		t.Fatalf("RemoveWorktree touched the caller-owned directory: %v", err)
+	}
+}
+
+func TestRemoveWorktreeMissingMirrorHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	root := t.TempDir()
+	dir := filepath.Join(root, "run")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	g := &Git{}
+	if err := g.RemoveWorktree(ctx, filepath.Join(root, "missing.git"), dir); !errors.Is(err, context.Canceled) {
+		t.Fatalf("RemoveWorktree(cancelled) = %v, want context.Canceled", err)
+	}
+	if _, err := os.Lstat(dir); err != nil {
+		t.Fatalf("RemoveWorktree touched the directory after cancellation: %v", err)
+	}
+}
+
+func TestRemoveWorktreeRejectsUnsafeMirror(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "run")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(root, "file.git")
+	if err := os.WriteFile(file, []byte("not a mirror"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link.git")
+	if err := os.Symlink(t.TempDir(), link); err != nil {
+		t.Fatal(err)
+	}
+	g := &Git{}
+	for name, mirror := range map[string]string{"file": file, "symlink": link} {
+		t.Run(name, func(t *testing.T) {
+			if err := g.RemoveWorktree(context.Background(), mirror, dir); !errors.Is(err, ErrUnsafePath) {
+				t.Fatalf("RemoveWorktree(%s mirror) = %v, want ErrUnsafePath", name, err)
+			}
+			if _, err := os.Lstat(dir); err != nil {
+				t.Fatalf("RemoveWorktree touched the directory: %v", err)
+			}
+		})
 	}
 }
 

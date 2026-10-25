@@ -1,0 +1,42 @@
+# Docker Compose deployment. Copy .env.example to .env, fill in the required
+# values, build the image with `docker compose build`, then run
+# `docker compose up -d`. Compose loads .env implicitly for interpolation; the
+# environment block below is an explicit allowlist, not an env_file.
+name: crc-review
+
+services:
+  review:
+    image: crc-review:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    ports:
+      - "127.0.0.1:${CRC_HTTP_PORT:-8080}:8080"
+    volumes:
+      - data:/app/data
+      - type: bind
+        source: ./config/server.docker.yaml
+        target: /app/config/server.yaml
+        read_only: true
+        bind:
+          create_host_path: false
+    environment:
+      CRC_PUBLIC_URL: "${CRC_PUBLIC_URL:-http://localhost:8080}"
+      GITLAB_URL: "${GITLAB_URL:?GITLAB_URL is required}"
+      REVIEW_MASTER_KEY: "${REVIEW_MASTER_KEY:?REVIEW_MASTER_KEY is required}"
+      REVIEW_ADMIN_TOKEN: "${REVIEW_ADMIN_TOKEN:?REVIEW_ADMIN_TOKEN is required}"
+      CRC_SESSION_KEY: "${CRC_SESSION_KEY:?CRC_SESSION_KEY is required}"
+      LLM_BASE_URL: "${LLM_BASE_URL:?LLM_BASE_URL is required}"
+      LLM_MODEL: "${LLM_MODEL:?LLM_MODEL is required}"
+      LLM_API_KEY: "${LLM_API_KEY:?LLM_API_KEY is required}"
+      LLM_PROTOCOL: "${LLM_PROTOCOL:-openai-chat}"
+      GITLAB_OAUTH_CLIENT_ID: "${GITLAB_OAUTH_CLIENT_ID:-}"
+      GITLAB_OAUTH_CLIENT_SECRET: "${GITLAB_OAUTH_CLIENT_SECRET:-}"
+      GITLAB_ADMIN_USERNAME: "${GITLAB_ADMIN_USERNAME:-}"
+    command: ["--config", "/app/config/server.yaml"]
+
+volumes:
+  data:

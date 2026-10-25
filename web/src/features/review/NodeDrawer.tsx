@@ -91,7 +91,7 @@ export function NodeDrawer({
           <section className={styles.drawerSection}>
             <h3 className={styles.drawerSectionTitle}>模型调用（{calls.items.length}{calls.hasNextPage ? '+' : ''}）</h3>
             {calls.isPending ? <LoadingState label="正在读取模型调用…" /> : null}
-            {calls.isError ? <ErrorState error={calls.error} onRetry={calls.refetch} /> : null}
+            {calls.isError ? <ErrorState error={calls.error} onRetry={calls.retry} /> : null}
             {calls.isSuccess && calls.items.length === 0 ? <span className="muted small">这是一段代码节点，没有模型调用。</span> : null}
             <div className={styles.list}>
               {calls.items.map((call, index) => <CallItem key={call.id || `${call.turn}-${index}`} call={call} />)}

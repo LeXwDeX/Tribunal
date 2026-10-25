@@ -33,6 +33,9 @@ storage:
   driver: sqlite
   dsn: "file:data/review.db"
   llm_call_retention: 720h
+  delivery_retention: 336h
+  job_retention: 168h
+  context_versions: 5
 secrets:
   master_key_env: REVIEW_MASTER_KEY
 workspace:

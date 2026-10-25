@@ -26,19 +26,28 @@ const (
 // of the GitLab client.
 type LocateFunc func(path string, line int, side Side) bool
 
+// EvidenceValidator checks one CodeRef against a fixed head/base snapshot.
+// A non-nil error means the reference is not proven: callers must not treat
+// the refutation as successful. A nil validator keeps the legacy syntax-only
+// behavior for pure callers; production executors always supply one.
+type EvidenceValidator func(CodeRef) error
+
 // AdjudicateInput is the profile and diff context for rule adjudication.
 type AdjudicateInput struct {
 	MinVotes      float64
 	ChallengeOnly []Severity
 	OnUncertain   OnUncertain
 	Locator       LocateFunc
+	CodeEvidence  EvidenceValidator
 	Warnings      []string
+	Unresolved    []UnresolvedSignal
 }
 
 // AdjudicateResult is deterministic rule output.
 type AdjudicateResult struct {
-	Groups   []Group
-	Warnings []string
+	Groups     []Group
+	Warnings   []string
+	Unresolved []UnresolvedSignal
 }
 
 // Adjudicate applies the ARCH.md decision table. It never calls an LLM.
@@ -59,8 +68,12 @@ func Adjudicate(groups []Group, in AdjudicateInput) (AdjudicateResult, error) {
 	if in.MinVotes < 0 {
 		return AdjudicateResult{}, invalid("min_votes", "must be zero or positive")
 	}
+	unresolved, err := normalizeUnresolved(in.Unresolved)
+	if err != nil {
+		return AdjudicateResult{}, err
+	}
 
-	out := AdjudicateResult{Groups: cloneGroups(groups)}
+	out := AdjudicateResult{Groups: cloneGroups(groups), Unresolved: unresolved}
 	if in.Locator == nil {
 		for _, group := range out.Groups {
 			if group.Line > 0 && group.Path != "" {
@@ -95,14 +108,14 @@ func Adjudicate(groups []Group, in AdjudicateInput) (AdjudicateResult, error) {
 		case !severityIn(group.Severity, challengeOnly):
 			group.Decision = &FindingDecision{Action: ActionPublish, Reason: "severity is outside challenge_only", Source: "rules"}
 		default:
-			action, reason := adjudicateChallenge(group, onUncertain)
+			action, reason := adjudicateChallenge(group, onUncertain, in.CodeEvidence)
 			group.Decision = &FindingDecision{Action: action, Reason: reason, Source: "rules"}
 		}
 	}
 	return out, nil
 }
 
-func adjudicateChallenge(group *Group, onUncertain OnUncertain) (Action, string) {
+func adjudicateChallenge(group *Group, onUncertain OnUncertain, evidence EvidenceValidator) (Action, string) {
 	challenge := group.Challenge
 	if challenge == nil {
 		reason := "no challenge result"
@@ -113,10 +126,10 @@ func adjudicateChallenge(group *Group, onUncertain OnUncertain) (Action, string)
 	case ChallengeConfirmed:
 		return ActionPublish, "challenge confirmed"
 	case ChallengeRefuted:
-		if HasValidCodeEvidence(challenge.Evidence) {
+		if ValidCodeEvidence(challenge.Evidence, evidence) {
 			return ActionDrop, "challenge refuted with a code location"
 		}
-		reason := "refutation has no valid code location"
+		reason := "refutation has no verifiable code location in the fixed snapshot"
 		challenge.Status = ChallengeUncertain
 		challenge.Reason = reason
 		return uncertainAction(onUncertain, reason)
@@ -148,6 +161,21 @@ func adjudicateChallenge(group *Group, onUncertain OnUncertain) (Action, string)
 		challenge.Reason = "unknown challenge status"
 		return uncertainAction(onUncertain, "unknown challenge status")
 	}
+}
+
+// ValidCodeEvidence reports whether at least one reference is valid and, when
+// an EvidenceValidator is supplied, present in the fixed snapshot. A failed
+// read never justifies a refutation.
+func ValidCodeEvidence(refs []CodeRef, validator EvidenceValidator) bool {
+	for _, ref := range refs {
+		if ref.Validate() != nil {
+			continue
+		}
+		if validator == nil || validator(ref) == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func uncertainAction(policy OnUncertain, reason string) (Action, string) {

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
+	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/pkg/dag"
 )
 
 func reviewHead(seed string) string {
@@ -584,10 +585,11 @@ func TestReviewStateSurvivesReopenAndPublicationScan(t *testing.T) {
 	}
 	if len(pending) != 1 || pending[0].WorkflowID != wfID ||
 		pending[0].JobID != queued.JobID || pending[0].Generation != 1 ||
-		pending[0].ProjectID != 42 || pending[0].MRIID != 7 || pending[0].HeadSHA != head {
+		pending[0].ProjectID != 42 || pending[0].MRIID != 7 || pending[0].HeadSHA != head ||
+		pending[0].Status != string(dag.WorkflowCompleted) {
 		t.Fatalf("pending publication = %+v", pending)
 	}
-	if err := s.SetWorkflowPublicationState(ctx, wfID, store.WorkflowPublicationPublished); err != nil {
+	if err := s.SetWorkflowPublicationState(ctx, wfID, store.WorkflowPublicationPublished, ""); err != nil {
 		t.Fatalf("SetWorkflowPublicationState: %v", err)
 	}
 	pending, err = s.ListPendingPublications(ctx, 10)
@@ -597,10 +599,10 @@ func TestReviewStateSurvivesReopenAndPublicationScan(t *testing.T) {
 	if len(pending) != 0 {
 		t.Fatalf("published workflow still pending: %v", pending)
 	}
-	if err := s.SetWorkflowPublicationState(ctx, "missing", store.WorkflowPublicationPublished); !errors.Is(err, store.ErrNotFound) {
+	if err := s.SetWorkflowPublicationState(ctx, "missing", store.WorkflowPublicationPublished, ""); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("unknown workflow error = %v", err)
 	}
-	if err := s.SetWorkflowPublicationState(ctx, wfID, "bogus"); err == nil {
+	if err := s.SetWorkflowPublicationState(ctx, wfID, "bogus", ""); err == nil {
 		t.Fatal("invalid state was accepted")
 	}
 }

@@ -8,7 +8,7 @@
 
 默认路径 `config/server.yaml`，可用 `--config` 指定，也可以传多个文件按顺序合并。字符串中的 `${ENV_NAME}` 在加载时展开；密钥类字段**只接受** `*_env` 形式，不允许明文写在文件里。
 
-当前最小启动示例见 [`config/server.example.yaml`](../../config/server.example.yaml)，但它没有 `providers` 和 `profiles.*.propose`，只能启动服务、注册项目和跑路由，**不能执行真实评审**；要跑评审必须先补齐 provider、profile 的 `propose` / `challenge` 等配置。OAuth 可选：不配置时 `/auth/login` 返回 503，Bearer 仍可用。当前存储只实现 SQLite，配置 `postgres` 会在启动时明确报错。管理 API 使用 `auth.bootstrap_token_env`（默认 `REVIEW_ADMIN_TOKEN`，至少 32 字节）；浏览器登录和用户级 API token 已实现。多文件加载递归合并映射、替换数组，拒绝未知字段、重复键和多文档 YAML；环境变量在解析后的字符串上展开，避免改变 YAML 结构。
+当前最小启动示例见 [`config/server.example.yaml`](../../config/server.example.yaml)，但它没有 `providers` 和 `profiles.*.propose`，只能启动服务、注册项目和跑路由，**不能执行真实评审**；要跑评审必须先补齐 provider、profile 的 `propose` / `challenge` 等配置。OAuth 可选：不配置时 `/auth/login` 返回 503，Bearer 仍可用。当前存储只实现 SQLite，配置 `postgres` 会在启动时明确报错。管理 API 使用 `auth.bootstrap_token_env`（默认 `REVIEW_ADMIN_TOKEN`，至少 32 字节），该静态 Bearer 仅用于平台管理面；浏览器登录、用户级 API token 和本地项目 `read`/`manage` 授权已实现。多文件加载递归合并映射、替换数组，拒绝未知字段、重复键和多文档 YAML；环境变量在解析后的字符串上展开，避免改变 YAML 结构。
 
 ```yaml
 server:
@@ -28,13 +28,16 @@ auth:
   oauth:
     client_id_env: GITLAB_OAUTH_CLIENT_ID
     client_secret_env: GITLAB_OAUTH_CLIENT_SECRET
-  bootstrap_admins: ["alice"]       # GitLab 用户名
-  session_ttl: 168h
+  bootstrap_admins: ["alice"]       # GitLab 用户名；仅平台 admin 标签，重启后生效，项目数据仍需 grant
+  session_ttl: 168h                 # 持久化浏览器会话有效期
 
 storage:
   driver: sqlite                    # sqlite | postgres
   dsn: "file:data/review.db"
   llm_call_retention: 720h
+  delivery_retention: 336h
+  job_retention: 168h
+  context_versions: 5
 
 secrets:
   master_key_env: REVIEW_MASTER_KEY # 32 字节，base64 编码
@@ -45,7 +48,7 @@ workspace:
   context_refresh:
     changed_files: 200
     max_age: 168h
-  run_cleanup_after: 1h
+  run_cleanup_after: 1h             # run 目录年龄阈值；后台清理周期固定 1h
 
 jobs:
   workers: 4
@@ -197,13 +200,13 @@ type ProfileConfig struct {
 {
   "mcpServers": {
     "codebase-memory": {
-      "command": "codebase-memory-mcp",
-      "args": ["--tool-profile=analysis"],
+      "command": "/usr/local/bin/crc-codebase-memory-mcp",
+      "args": ["--tool-profile=analysis", "--ui=false"],
       "env": {},
       "x-review": {
-        "index_command": ["codebase-memory-mcp", "cli", "--quiet", "index_repository", "{\"repo_path\":\"{base_dir}\"}"],
-        "env_allowlist": ["PATH", "HOME"],
-        "home": "{workspace}/index/codebase-memory",
+        "index_command": ["/usr/local/bin/crc-codebase-memory-mcp", "cli", "--quiet", "index_repository", "{\"repo_path\":\"{base_dir}\"}"],
+        "env_allowlist": ["PATH"],
+        "home": ".mcp/codebase-memory/home",
         "call_timeout": "60s",
         "max_output_chars": 20000,
         "idle_timeout": "10m"
@@ -217,10 +220,16 @@ type ProfileConfig struct {
 |---|---|
 | `index_command` | onboarding 和刷新时执行的建索引命令；`{base_dir}`、`{workspace}` 为占位符 |
 | `env_allowlist` | 子进程可继承的环境变量；默认只有 `PATH` |
-| `home` | 为子进程设置的 `HOME`，用于按工作区隔离索引（是否有效需按 ARCH.md §8.4 验证） |
+| `home` | 工作区内的相对目录或绝对目录；应用创建并校验该目录，用作子进程 `HOME`。此字段不展开 `{workspace}` |
 | `call_timeout`、`max_output_chars`、`idle_timeout` | 调用超时、输出上限、空闲回收时间 |
 
 `index_command` 中的工具参数以实际版本的 `codebase-memory-mcp cli --help` 为准。
+
+示例使用仓库的 [MCP 隔离启动脚本](../../scripts/codebase-memory-mcp.sh)，而不是直接启动上游二进制。由部署管理员把脚本安装或只读挂载到 `/usr/local/bin/crc-codebase-memory-mcp`，并把上游 `codebase-memory-mcp` 放到服务的 `PATH`。标准镜像不包含上游二进制；容器部署需自行安装或挂载它及其许可证，不要挂载 Docker socket。
+
+脚本同时供 MCP server 和 `index_command` 使用。它把 `CBM_CACHE_DIR` 与 `CBM_RUNTIME_DIR` 固定在应用提供的项目 `HOME` 下，并关闭自动索引、watcher 和 UI。0.12.1 的 daemon 默认按账号共享，只有不同 `HOME` 或 `XDG_RUNTIME_DIR` 不足以隔离：第二个项目可能因 cache 不同而连接失败。不要把所有项目改用共享 cache 来消除报错，那会让代码地图跨项目可见。
+
+`HOME` 必须由应用在工作区内创建并校验；脚本不是文件系统沙箱，也不替代应用的环境变量和工具白名单。Unix socket 对路径长度有限制，应保持工作区根路径较短，例如 `/app/data/workspaces`。在新平台或新上游版本上，需重新验证两个项目并发连接、索引复用和未授权工具拒绝，不能只凭 `index_status=ready` 判断隔离成功。
 
 ---
 
@@ -258,9 +267,9 @@ type ProfileConfig struct {
 
 ## 4. 仓库内 `.gitlab-review.yml`
 
-> 实现偏差：平台 → 项目设置 → 仓库配置的三层优先级只在评审执行阶段由 `resolveReviewConfig` 部分应用。webhook 过滤（Draft、标签、目标分支）在入队前使用项目设置，早于仓库配置的合并；因此仓库级 `skip_draft` / `labels_exclude` 不能阻止已入队的评审。仓库级 `profile` 会在评审时覆盖项目档位。
+平台 → 项目设置 → 仓库配置的三层优先级在评审 worker 内由 `resolveReviewConfig` 合并。仓库配置只读取**目标分支**上的版本；`allow_repo_config=false` 时完全忽略。webhook 不发起 GitLab 请求，因此 `allow_repo_config=true` 时 Draft 的最终判断在 worker 完成；仓库的 `review.skip_draft` 覆盖项目设置，可过滤 Draft 或关闭过滤。
 
-只读取**目标分支**上的版本；`allow_repo_config=false` 时完全忽略。
+标签的早期过滤仍可保留：`review.labels_exclude` 只追加到项目设置，不能取消项目级排除，所以 webhook 先按项目设置过滤不会误删本应评审的 MR；worker 合并后还会复核。目标分支条件不能被仓库配置覆盖，worker 会按实际目标分支再检查。启用仓库配置时，自动评审、裸 `/review` 和未带 profile 的手动 API 都先采用仓库 `profile`；有效显式命令或显式 API profile 优先于仓库 profile。队列 payload 的 `profile_explicit` 缺失时，`command` / `manual` 旧 payload 仍按显式处理，自动 webhook 按非显式处理。
 
 ```yaml
 version: 1
@@ -279,6 +288,8 @@ review:
 
 **不允许**覆盖：provider、预算、commit_status、MCP 和 Skill 绑定。非白名单字段忽略并在汇总中提示一次。
 
+`language` 在合并时折叠为单行，最多 128 个字符。超长值整项忽略并写入警告，评审仍继续。有效值只作为「评审语言」放入项目背景的 scoped 数据块，不能修改平台规则、工具权限或输出结构；prompt 渲染会中和可闭合该数据块的标签。
+
 ---
 
 ## 5. 环境变量
@@ -286,7 +297,8 @@ review:
 | 变量 | 用途 |
 |---|---|
 | `REVIEW_MASTER_KEY` | 主密钥（base64 32 字节），加密项目 token 和 webhook secret |
-| `REVIEW_ADMIN_TOKEN` | 管理 API 的 bootstrap Bearer token，至少 32 字节；可由 `auth.bootstrap_token_env` 改名 |
+| `REVIEW_ADMIN_TOKEN` | 平台管理面的 bootstrap Bearer token，至少 32 字节；无用户 ID 和项目 grant，轮换由部署方修改环境变量并重启 |
+| `CRC_SESSION_KEY` | base64，解码后至少 32 字节；签名会话 cookie、OAuth state 和派生 CSRF。固定该值并复用 SQLite 时重启可继续登录；未设置时每进程随机生成并告警，重启后旧会话失效 |
 | `GITLAB_OAUTH_CLIENT_ID` / `GITLAB_OAUTH_CLIENT_SECRET` | 控制台登录 |
 | `ANTHROPIC_API_KEY`、`OPENAI_API_KEY`、… | 按 `providers.*.api_key_env` 自定义 |
 | `REVIEW_LOG_LEVEL` | `debug` / `info` / `warn` / `error` |

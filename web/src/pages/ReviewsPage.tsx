@@ -3,7 +3,6 @@ import { useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { listProfiles, listProjects, listReviews } from '../api/api'
 import type { Project, ReviewSummary } from '../api/types'
-import { useCanWrite } from '../components/RoleContext'
 import { ReviewTable } from '../components/ReviewTable'
 import { TriggerReviewDialog } from '../components/TriggerReviewDialog'
 import { Button, EmptyState, ErrorState, LoadingState, PageHeader, Panel, useToast } from '../components/ui'
@@ -20,7 +19,7 @@ const statuses = [
   ['cancelled', '已取消'],
 ]
 
-const verdicts = [['', '全部结论'], ['PASS', 'PASS'], ['BLOCKING', 'BLOCKING']]
+const verdicts = [['', '全部结论'], ['PASS', 'PASS'], ['BLOCKING', 'BLOCKING'], ['INCOMPLETE', 'INCOMPLETE']]
 const triggers = [
   ['', '全部触发方式'],
   ['mr_open', 'MR 打开'],
@@ -33,7 +32,6 @@ const triggers = [
 
 export function ReviewsPage() {
   const [params, setParams] = useSearchParams()
-  const canWrite = useCanWrite()
   const toast = useToast()
   const queryClient = useQueryClient()
   const [triggerOpen, setTriggerOpen] = useState(false)
@@ -76,6 +74,8 @@ export function ReviewsPage() {
   const activeCount = [projectId, status, verdict, profile, trigger, sinceDate].filter(Boolean).length
   const hasFilters = activeCount > 0
   const projectsList: Project[] = projects.data?.projects ?? []
+  const manageableProjects = projectsList.filter((project) => project.access === 'manage')
+  const canTrigger = manageableProjects.length > 0
 
   const clear = () => setParams(new URLSearchParams(), { replace: true })
 
@@ -92,8 +92,8 @@ export function ReviewsPage() {
         <PageHeader
           title="评审"
           description="按项目、状态、结论、档位、触发方式或起始时间筛选。表格在面板内横向滚动。"
-          actions={canWrite ? (
-            <Button variant="primary" onClick={() => setTriggerOpen(true)} disabled={projects.isPending || projectsList.length === 0}>
+          actions={canTrigger ? (
+            <Button variant="primary" onClick={() => setTriggerOpen(true)} disabled={projects.isPending}>
               手动触发评审
             </Button>
           ) : undefined}
@@ -150,7 +150,7 @@ export function ReviewsPage() {
           aside={reviews.isSuccess ? `${reviews.items.length}${reviews.hasNextPage ? '+' : ''} 条` : undefined}
         >
           {reviews.isPending ? <LoadingState /> : null}
-          {reviews.isError ? <ErrorState error={reviews.error} onRetry={reviews.refetch} /> : null}
+          {reviews.isError ? <ErrorState error={reviews.error} onRetry={reviews.retry} /> : null}
           {reviews.isSuccess && reviews.items.length === 0 ? (
             <EmptyState
               title={hasFilters ? '没有符合条件的评审' : '还没有评审记录'}
@@ -167,11 +167,11 @@ export function ReviewsPage() {
         </Panel>
       </div>
 
-      {canWrite ? (
+      {canTrigger ? (
         <TriggerReviewDialog
           open={triggerOpen}
           onClose={() => setTriggerOpen(false)}
-          projects={projectsList}
+          projects={manageableProjects}
           onTriggered={onTriggered}
         />
       ) : null}

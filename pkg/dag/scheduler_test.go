@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 )
@@ -281,5 +282,345 @@ func TestEngineOptionalTokenBudgetCompletes(t *testing.T) {
 	}
 	if wf.Status != WorkflowCompleted {
 		t.Fatalf("workflow: %s", wf.Status)
+	}
+}
+
+func TestTokenBudgetEventsSkipTokenFreeNodes(t *testing.T) {
+	wf := WorkflowView{
+		Spec: GraphSpec{Nodes: []NodeSpec{
+			node("a"),
+			{ID: "b", Kind: "x", DependsOn: []string{"a"}, Required: true, TokenFree: true},
+		}},
+		Nodes: map[string]NodeView{
+			"a": {ID: "a", Spec: node("a"), Status: NodeCompleted},
+			"b": {ID: "b", Spec: NodeSpec{ID: "b", Kind: "x", Required: true, TokenFree: true}, Status: NodePending},
+		},
+		Order: []string{"a", "b"},
+	}
+	if events := tokenBudgetEvents(wf, testNow); len(events) != 0 {
+		t.Fatalf("token-free node received budget events: %v", events)
+	}
+}
+
+func TestEngineTokenFreeRequiredNodeCompletesAfterBudget(t *testing.T) {
+	var calls int
+	exec := funcExecutor(func(ctx context.Context, in NodeInput) (NodeOutput, error) {
+		if in.Node.ID == "a" {
+			return NodeOutput{Data: json.RawMessage(`{}`), Usage: Usage{InputTokens: 10}}, nil
+		}
+		calls++
+		return NodeOutput{Data: json.RawMessage(`{"settled":true}`)}, nil
+	})
+	engine := fastEngine(exec, Options{})
+	wfID, _ := engine.Create(context.Background(), GraphSpec{
+		Nodes: []NodeSpec{
+			node("a"),
+			{ID: "b", Kind: "x", DependsOn: []string{"a"}, Required: true, TokenFree: true},
+		},
+		Budget: Budget{MaxTokens: 5},
+	}, nil)
+	if err := engine.Run(context.Background(), wfID); err != nil {
+		t.Fatal(err)
+	}
+	wf, _ := engine.Snapshot(context.Background(), wfID)
+	if wf.Status != WorkflowCompleted {
+		t.Fatalf("workflow = %s (%s)", wf.Status, wf.Error)
+	}
+	if wf.Nodes["b"].Status != NodeCompleted || calls != 1 {
+		t.Fatalf("b = %+v calls=%d", wf.Nodes["b"], calls)
+	}
+}
+
+func TestEngineTokenBudgetCancelsRunningNonTokenFreeNode(t *testing.T) {
+	startedB := make(chan struct{})
+	canceledB := make(chan struct{})
+	var once sync.Once
+	exec := funcExecutor(func(ctx context.Context, in NodeInput) (NodeOutput, error) {
+		switch in.Node.ID {
+		case "a":
+			<-startedB
+			return NodeOutput{Data: json.RawMessage(`{}`), Usage: Usage{InputTokens: 10}}, nil
+		case "b":
+			once.Do(func() { close(startedB) })
+			select {
+			case <-ctx.Done():
+				close(canceledB)
+				return NodeOutput{}, ctx.Err()
+			case <-time.After(300 * time.Millisecond):
+				return NodeOutput{Data: json.RawMessage(`{"late":true}`)}, nil
+			}
+		case "c":
+			// Keep the workflow alive after the budget event so only a per-node
+			// cancel can stop the running proposal.
+			select {
+			case <-canceledB:
+			case <-time.After(time.Second):
+			}
+			return NodeOutput{Data: json.RawMessage(`{"settled":true}`)}, nil
+		}
+		return NodeOutput{}, errors.New("unexpected node")
+	})
+	engine := fastEngine(exec, Options{MaxConcurrentNodes: 3})
+	wfID, _ := engine.Create(context.Background(), GraphSpec{
+		Nodes: []NodeSpec{
+			node("a"),
+			{ID: "b", Kind: "x"},
+			{ID: "c", Kind: "x", DependsOn: []string{"a"}, Required: true, TokenFree: true},
+		},
+		Budget: Budget{MaxTokens: 5},
+	}, nil)
+	if err := engine.Run(context.Background(), wfID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-canceledB:
+	default:
+		t.Fatal("running non-token-free node was not canceled after budget exhaustion")
+	}
+	wf, _ := engine.Snapshot(context.Background(), wfID)
+	if wf.Nodes["b"].Status != NodeSkipped || wf.Nodes["b"].Reason != "budget_exhausted" {
+		t.Fatalf("b = %+v, want skipped budget_exhausted", wf.Nodes["b"])
+	}
+	if wf.Nodes["c"].Status != NodeCompleted {
+		t.Fatalf("c = %+v, want completed", wf.Nodes["c"])
+	}
+	if wf.Status != WorkflowCompleted {
+		t.Fatalf("workflow = %s", wf.Status)
+	}
+}
+
+func TestEngineQueuedNodeDoesNotStartAfterBudgetExhaustion(t *testing.T) {
+	calls := 0
+	exec := funcExecutor(func(ctx context.Context, in NodeInput) (NodeOutput, error) {
+		calls++
+		return NodeOutput{Data: json.RawMessage(`{}`)}, nil
+	})
+	engine := fastEngine(exec, Options{Clock: func() time.Time { return testNow }})
+	wfID, _ := engine.Create(context.Background(), GraphSpec{
+		Nodes:  []NodeSpec{node("a"), {ID: "b", Kind: "x"}},
+		Budget: Budget{MaxTokens: 5},
+	}, nil)
+	wf, _ := engine.Snapshot(context.Background(), wfID)
+	events := []struct {
+		typ     string
+		payload any
+	}{
+		{EventNodeQueued, NodeQueuedPayload{NodeID: "a", Attempt: 1, Reason: "ready"}},
+		{EventNodeStarted, NodeStartedPayload{NodeID: "a", Attempt: 1}},
+		{EventNodeCompleted, NodeCompletedPayload{NodeID: "a", Attempt: 1, Output: json.RawMessage(`{}`), Usage: Usage{InputTokens: 10}}},
+		{EventNodeQueued, NodeQueuedPayload{NodeID: "b", Attempt: 1, Reason: "ready"}},
+	}
+	batch := make([]Event, 0, len(events))
+	for _, item := range events {
+		ev, err := makeEvent(item.typ, item.payload, testNow)
+		if err != nil {
+			t.Fatal(err)
+		}
+		batch = append(batch, ev)
+	}
+	if _, err := engine.store.Append(context.Background(), wfID, wf.Revision, batch...); err != nil {
+		t.Fatal(err)
+	}
+	handle := &runHandle{
+		active:      map[string]bool{"b": true},
+		nodeCancels: map[string]context.CancelCauseFunc{},
+		wake:        make(chan struct{}, 1),
+	}
+	engine.runNode(context.Background(), handle, wfID, "b")
+	if calls != 0 {
+		t.Fatalf("queued node b entered the executor %d times after budget exhaustion", calls)
+	}
+	wf, _ = engine.Snapshot(context.Background(), wfID)
+	if wf.Nodes["b"].Status != NodeSkipped || wf.Nodes["b"].Reason != "budget_exhausted" {
+		t.Fatalf("b = %+v, want skipped budget_exhausted", wf.Nodes["b"])
+	}
+}
+
+// metadataExecutor is a NodeMetadataProvider used to prove the scheduler
+// stamps node.started with the executor's selected provider and model.
+type metadataExecutor struct {
+	funcExecutor
+	provider string
+	model    string
+	codeKind string
+}
+
+func (m metadataExecutor) NodeMetadata(in NodeInput) NodeMetadata {
+	if m.codeKind != "" && in.Node.Kind == m.codeKind {
+		return NodeMetadata{}
+	}
+	return NodeMetadata{Provider: m.provider, Model: m.model}
+}
+
+func metadataPayloads(t *testing.T, store *MemoryEventStore, wfID string) map[string]NodeStartedPayload {
+	t.Helper()
+	events, err := store.Load(context.Background(), wfID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make(map[string]NodeStartedPayload)
+	for _, ev := range events {
+		if ev.Type != EventNodeStarted {
+			continue
+		}
+		var payload NodeStartedPayload
+		if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+			t.Fatalf("decode node.started: %v", err)
+		}
+		out[payload.NodeID] = payload
+	}
+	return out
+}
+
+// TestEnginePersistsStartedMetadata covers success and failure attribution.
+// The code node proves code-mode work stays unattributed.
+func TestEnginePersistsStartedMetadata(t *testing.T) {
+	exec := metadataExecutor{
+		funcExecutor: func(ctx context.Context, in NodeInput) (NodeOutput, error) {
+			if in.Node.ID == "fail" {
+				return NodeOutput{}, errors.New("boom")
+			}
+			return NodeOutput{Data: json.RawMessage(`{}`)}, nil
+		},
+		provider: "fake",
+		model:    "fake-model",
+		codeKind: "code",
+	}
+	engine := fastEngine(exec, Options{MaxConcurrentNodes: 3})
+	wfID, err := engine.Create(context.Background(), GraphSpec{Nodes: []NodeSpec{
+		node("ok"),
+		node("fail"),
+		{ID: "code", Kind: "code", Required: true},
+	}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Run(context.Background(), wfID); err != nil {
+		t.Fatal(err)
+	}
+	wf, err := engine.Snapshot(context.Background(), wfID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"ok", "fail"} {
+		if wf.Nodes[id].Provider != "fake" || wf.Nodes[id].Model != "fake-model" {
+			t.Fatalf("%s attribution = (%q,%q), want (fake,fake-model) status=%s",
+				id, wf.Nodes[id].Provider, wf.Nodes[id].Model, wf.Nodes[id].Status)
+		}
+	}
+	if wf.Nodes["code"].Provider != "" || wf.Nodes["code"].Model != "" {
+		t.Fatalf("code node attribution = (%q,%q), want empty",
+			wf.Nodes["code"].Provider, wf.Nodes["code"].Model)
+	}
+	payloads := metadataPayloads(t, engine.store.(*MemoryEventStore), wfID)
+	for _, id := range []string{"ok", "fail"} {
+		if payloads[id].Provider != "fake" || payloads[id].Model != "fake-model" {
+			t.Fatalf("%s node.started payload = %+v", id, payloads[id])
+		}
+	}
+	if payloads["code"].Provider != "" || payloads["code"].Model != "" {
+		t.Fatalf("code node.started payload = %+v, want empty", payloads["code"])
+	}
+}
+
+// TestEnginePersistsStartedMetadataForExpandedNodes proves dynamically added
+// nodes use the same attribution path as initial nodes.
+func TestEnginePersistsStartedMetadataForExpandedNodes(t *testing.T) {
+	exec := metadataExecutor{
+		funcExecutor: func(ctx context.Context, in NodeInput) (NodeOutput, error) {
+			return NodeOutput{Data: json.RawMessage(`{"ok":true}`)}, nil
+		},
+		provider: "fake",
+		model:    "fake-model",
+	}
+	exp := funcExpander(func(ctx context.Context, wf WorkflowView, from NodeSpec, out json.RawMessage) (Extension, error) {
+		return Extension{Nodes: []NodeSpec{{ID: "dyn", Kind: "model", DependsOn: []string{from.ID}}}}, nil
+	})
+	store := NewMemoryEventStore()
+	engine := NewEngine(store, exec, exp, Options{})
+	wfID, err := engine.Create(context.Background(), GraphSpec{Nodes: []NodeSpec{
+		{ID: "plan", Kind: "test", Required: true, Expands: true},
+	}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Run(context.Background(), wfID); err != nil {
+		t.Fatal(err)
+	}
+	wf, err := engine.Snapshot(context.Background(), wfID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, ok := wf.Nodes["dyn"]
+	if !ok || node.Status != NodeCompleted {
+		t.Fatalf("dyn = %+v", node)
+	}
+	if node.Provider != "fake" || node.Model != "fake-model" {
+		t.Fatalf("dyn attribution = (%q,%q), want (fake,fake-model)", node.Provider, node.Model)
+	}
+	if payloads := metadataPayloads(t, store, wfID); payloads["dyn"].Provider != "fake" || payloads["dyn"].Model != "fake-model" {
+		t.Fatalf("dyn node.started payload = %+v", payloads["dyn"])
+	}
+}
+
+// panickingMetadataExecutor has a working Execute but a metadata lookup that
+// panics. Attribution is advisory and must never fail or crash the node.
+type panickingMetadataExecutor struct {
+	funcExecutor
+}
+
+func (panickingMetadataExecutor) NodeMetadata(NodeInput) NodeMetadata {
+	panic("metadata lookup failed")
+}
+
+// TestNodeMetadataAdvisoryPanicFallsBackToEmpty checks the helper in isolation
+// so a regression fails the test instead of crashing the test process.
+func TestNodeMetadataAdvisoryPanicFallsBackToEmpty(t *testing.T) {
+	exec := panickingMetadataExecutor{funcExecutor: func(context.Context, NodeInput) (NodeOutput, error) {
+		return NodeOutput{Data: json.RawMessage(`{}`)}, nil
+	}}
+	var got NodeMetadata
+	func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				t.Fatalf("nodeMetadata panic escaped: %v", recovered)
+			}
+		}()
+		got = nodeMetadata(exec, NodeInput{Node: NodeSpec{ID: "a", Kind: "x"}})
+	}()
+	if got != (NodeMetadata{}) {
+		t.Fatalf("metadata = %+v, want empty", got)
+	}
+}
+
+// TestEngineMetadataPanicLeavesNodeUnattributed drives the real scheduler: a
+// panicking metadata lookup must not escape runNode, and Execute must still
+// complete the node with no attribution.
+func TestEngineMetadataPanicLeavesNodeUnattributed(t *testing.T) {
+	exec := panickingMetadataExecutor{funcExecutor: func(ctx context.Context, in NodeInput) (NodeOutput, error) {
+		return NodeOutput{Data: json.RawMessage(`{"ok":true}`)}, nil
+	}}
+	store := NewMemoryEventStore()
+	engine := NewEngine(store, exec, nil, Options{})
+	wfID, err := engine.Create(context.Background(), GraphSpec{Nodes: []NodeSpec{node("a")}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Run(context.Background(), wfID); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	wf, err := engine.Snapshot(context.Background(), wfID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wf.Status != WorkflowCompleted || wf.Nodes["a"].Status != NodeCompleted {
+		t.Fatalf("workflow = %s node = %+v, want completed", wf.Status, wf.Nodes["a"])
+	}
+	if wf.Nodes["a"].Provider != "" || wf.Nodes["a"].Model != "" {
+		t.Fatalf("node attribution = (%q,%q), want empty", wf.Nodes["a"].Provider, wf.Nodes["a"].Model)
+	}
+	payloads := metadataPayloads(t, store, wfID)
+	if payloads["a"].Provider != "" || payloads["a"].Model != "" {
+		t.Fatalf("node.started payload = %+v, want empty attribution", payloads["a"])
 	}
 }

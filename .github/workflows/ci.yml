@@ -1,0 +1,71 @@
+name: CI
+
+"on":
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test with coverage
+        run: go test -race -coverprofile=coverage.out ./...
+      - name: Check coverage
+        run: go run ./scripts/coveragecheck -profile coverage.out -min 70
+      - name: Download modules
+        run: go mod download
+      - name: Verify modules
+        run: go mod verify
+      - name: Check licenses
+        run: go run ./scripts/licensecheck -min 1
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Docker Compose smoke
+        timeout-minutes: 20
+        run: bash scripts/docker-smoke.sh
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install
+        run: npm ci
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Check license bundle
+        working-directory: ${{ github.workspace }}
+        run: go run ./scripts/licensebundle -check
+      - name: Build
+        run: npm run build
+      - name: Test with coverage
+        run: npm test -- --coverage

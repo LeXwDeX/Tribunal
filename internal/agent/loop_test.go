@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/llm"
 )
@@ -277,6 +278,31 @@ func TestRunForcesSubmitOnLastTurn(t *testing.T) {
 	}
 }
 
+func TestRunFallsBackWhenForcedSubmitIsRejected(t *testing.T) {
+	client := &fakeClient{replies: []*llm.Response{
+		nil,
+		toolResponse(llm.StopToolUse, call("s1", SubmitToolName, `{"ok":true}`)),
+	}, errs: []error{
+		&llm.Error{Kind: llm.ErrBadRequest, Status: 400},
+	}}
+	spec := testSpec(client)
+	spec.MaxTurns = 1
+	result, err := Run(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Turns != 1 {
+		t.Fatalf("turns = %d, want 1", result.Turns)
+	}
+	requests := client.requests()
+	if len(requests) != 2 {
+		t.Fatalf("requests = %d, want forced request plus fallback", len(requests))
+	}
+	if requests[0].ToolChoice != SubmitToolName || requests[1].ToolChoice != "" {
+		t.Fatalf("tool choices = %q, %q", requests[0].ToolChoice, requests[1].ToolChoice)
+	}
+}
+
 func TestRunClampsTinyToolOutputLimit(t *testing.T) {
 	long := strings.Repeat("x", 5000)
 	client := &fakeClient{replies: []*llm.Response{
@@ -491,5 +517,126 @@ func TestRunReturnsContextErrorAfterGenerate(t *testing.T) {
 	_, err := Run(ctx, spec)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+}
+
+func TestRunBeforeTurnStopsBeforeGenerating(t *testing.T) {
+	stop := errors.New("budget exhausted")
+	client := &fakeClient{replies: []*llm.Response{
+		toolResponse(llm.StopToolUse, call("s1", SubmitToolName, `{}`)),
+	}}
+	spec := testSpec(client)
+	calls := 0
+	spec.BeforeTurn = func(context.Context, llm.Usage) error {
+		calls++
+		return stop
+	}
+	_, err := Run(context.Background(), spec)
+	if !errors.Is(err, stop) {
+		t.Fatalf("error = %v, want stop error", err)
+	}
+	if calls != 1 {
+		t.Fatalf("before-turn calls = %d, want 1", calls)
+	}
+	if got := len(client.requests()); got != 0 {
+		t.Fatalf("model requests = %d, want 0", got)
+	}
+}
+
+func TestRunBeforeTurnBlocksSecondModelCall(t *testing.T) {
+	stop := errors.New("budget exhausted")
+	first := toolResponse(llm.StopToolUse, call("c1", "echo", `{"value":"a"}`))
+	first.Usage = llm.Usage{InputTokens: 3}
+	client := &fakeClient{replies: []*llm.Response{first}}
+	spec := testSpec(client, echoTool{name: "echo"})
+	calls := 0
+	spec.BeforeTurn = func(_ context.Context, usage llm.Usage) error {
+		calls++
+		if calls == 2 && usage.InputTokens == 3 {
+			return stop
+		}
+		return nil
+	}
+	_, err := Run(context.Background(), spec)
+	if !errors.Is(err, stop) {
+		t.Fatalf("error = %v, want stop error", err)
+	}
+	if got := len(client.requests()); got != 1 {
+		t.Fatalf("model requests = %d, want 1", got)
+	}
+}
+
+type blockingClient struct {
+	mu      sync.Mutex
+	calls   int
+	started chan struct{}
+}
+
+func (c *blockingClient) Generate(ctx context.Context, _ *llm.Request) (*llm.Response, error) {
+	c.mu.Lock()
+	c.calls++
+	if c.calls == 1 {
+		close(c.started)
+	}
+	c.mu.Unlock()
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (c *blockingClient) Info() llm.ProviderInfo { return llm.ProviderInfo{Name: "blocking"} }
+
+func (c *blockingClient) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
+}
+
+func TestRunCancelStopsInFlightGenerateWithoutAnotherRequest(t *testing.T) {
+	client := &blockingClient{started: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := Run(ctx, testSpec(client))
+		done <- err
+	}()
+	select {
+	case <-client.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Generate was not called")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want context canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not stop after cancellation")
+	}
+	if got := client.count(); got != 1 {
+		t.Fatalf("model requests = %d, want 1", got)
+	}
+}
+
+func TestRunReturnsUsageAfterTransportFailure(t *testing.T) {
+	first := toolResponse(llm.StopToolUse, call("c1", "echo", `{"value":"a"}`))
+	first.Usage = llm.Usage{InputTokens: 30, OutputTokens: 5}
+	transient := &llm.Error{Kind: llm.ErrTransient}
+	client := &fakeClient{
+		replies: []*llm.Response{first},
+		errs:    []error{nil, transient},
+	}
+	result, err := Run(context.Background(), testSpec(client, echoTool{name: "echo"}))
+	if !errors.Is(err, transient) {
+		t.Fatalf("error = %v, want transport error", err)
+	}
+	if result == nil {
+		t.Fatal("failed Run dropped the usage from the successful tool turn")
+	}
+	if result.Usage.InputTokens != 30 || result.Usage.OutputTokens != 5 {
+		t.Fatalf("usage = %+v, want the first turn usage", result.Usage)
+	}
+	if result.Turns != 1 {
+		t.Fatalf("turns = %d, want 1", result.Turns)
 	}
 }

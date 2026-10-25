@@ -59,12 +59,27 @@ type FileChange struct {
 	Generated bool   `json:"generated,omitempty"`
 }
 
-// DiffSummary is the counts-only view of the MR diff index.
+// OmittedFile records one changed path that is absent from the materials
+// snapshot. Reason is a stable reason code owned by the app collector.
+type OmittedFile struct {
+	Path   string `json:"path"`
+	Reason string `json:"reason"`
+}
+
+// DiffSummary is the counts-only view of the MR diff index. Files counts
+// paths included in the snapshot, not paths that were reviewed; callers must
+// not use it as an "actually reviewed" count.
 type DiffSummary struct {
 	Files     int  `json:"files"`
 	Additions int  `json:"additions"`
 	Deletions int  `json:"deletions"`
 	Truncated bool `json:"truncated,omitempty"`
+	// Total is the number of changed paths seen before ignore rules.
+	// Zero means the field is absent (older snapshots).
+	Total int `json:"total,omitempty"`
+	// Omitted lists paths missing from the snapshot and why. Ignored paths
+	// are tracked separately in Dossier.Ignored and are not coverage gaps.
+	Omitted []OmittedFile `json:"omitted,omitempty"`
 }
 
 // JobSummary is one failed CI job shown to the planner.
@@ -128,6 +143,7 @@ type Dossier struct {
 	Issues        []IssueRef        `json:"issues,omitempty"`
 	RepoDocs      RepoDocs          `json:"repo_docs,omitempty"`
 	ContextDocs   string            `json:"context_docs,omitempty"`
+	Language      string            `json:"language,omitempty"`
 	CustomRules   []string          `json:"custom_rules,omitempty"`
 	Incremental   *IncrementalRange `json:"incremental,omitempty"`
 	PriorFindings []FindingOut      `json:"prior_findings,omitempty"`
@@ -149,6 +165,7 @@ type DossierInput struct {
 	Issues        []IssueRef
 	RepoDocs      RepoDocs
 	ContextDocs   string
+	Language      string
 	CustomRules   []string
 	Incremental   *IncrementalRange
 	PriorFindings []FindingOut
@@ -183,6 +200,7 @@ func BuildDossier(in DossierInput) (*Dossier, error) {
 		Issues:        append([]IssueRef(nil), in.Issues...),
 		RepoDocs:      in.RepoDocs,
 		ContextDocs:   in.ContextDocs,
+		Language:      in.Language,
 		CustomRules:   append([]string(nil), in.CustomRules...),
 		PriorFindings: append([]FindingOut(nil), in.PriorFindings...),
 		HeadDir:       in.HeadDir,
@@ -294,8 +312,21 @@ func ValidateDossier(d *Dossier) error {
 			return fmt.Errorf("%w: %v", ErrInvalidDossier, err)
 		}
 	}
-	if d.DiffSummary.Files < 0 || d.DiffSummary.Additions < 0 || d.DiffSummary.Deletions < 0 {
+	if d.DiffSummary.Files < 0 || d.DiffSummary.Additions < 0 || d.DiffSummary.Deletions < 0 ||
+		d.DiffSummary.Total < 0 {
 		return dossierErr("diff_summary", "counts must not be negative")
+	}
+	if d.DiffSummary.Total > 0 && d.DiffSummary.Files > d.DiffSummary.Total {
+		return dossierErr("diff_summary.files", "must not exceed total")
+	}
+	for i, omitted := range d.DiffSummary.Omitted {
+		field := fmt.Sprintf("diff_summary.omitted[%d]", i)
+		if err := checkRepoPath(field+".path", omitted.Path, true); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidDossier, err)
+		}
+		if err := checkOneLine(field+".reason", omitted.Reason, 64, true); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidDossier, err)
+		}
 	}
 	if d.Pipeline != nil {
 		if strings.TrimSpace(d.Pipeline.Status) == "" {
@@ -327,6 +358,9 @@ func ValidateDossier(d *Dossier) error {
 			}
 			seenFiles[file] = struct{}{}
 		}
+	}
+	if err := checkOneLine("language", d.Language, 128, false); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidDossier, err)
 	}
 	for i, finding := range d.PriorFindings {
 		if err := finding.Validate(); err != nil {

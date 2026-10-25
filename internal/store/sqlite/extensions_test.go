@@ -352,3 +352,199 @@ func TestProjectDeleteCascadesExtensions(t *testing.T) {
 		t.Fatalf("platform servers = %+v, %v", platformServers, err)
 	}
 }
+
+func TestListExtensionsPage(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	s := openTestStore(t, clock)
+	mustProject(t, s, 42)
+	mustProject(t, s, 43)
+	project42 := int64(42)
+	project43 := int64(43)
+
+	for _, name := range []string{"p1", "p2", "p3"} {
+		if _, err := s.CreateMCPServer(ctx, store.MCPServer{
+			Scope: "platform", Name: name, Config: json.RawMessage(`{"command":"x"}`),
+		}); err != nil {
+			t.Fatalf("create platform mcp %s: %v", name, err)
+		}
+	}
+	for _, name := range []string{"42a", "42b"} {
+		if _, err := s.CreateMCPServer(ctx, store.MCPServer{
+			Scope: "project", ProjectID: &project42, Name: name, Config: json.RawMessage(`{"command":"x"}`),
+		}); err != nil {
+			t.Fatalf("create project mcp %s: %v", name, err)
+		}
+	}
+	if _, err := s.CreateMCPServer(ctx, store.MCPServer{
+		Scope: "project", ProjectID: &project43, Name: "43a", Config: json.RawMessage(`{"command":"x"}`),
+	}); err != nil {
+		t.Fatalf("create other mcp: %v", err)
+	}
+
+	for _, name := range []string{"s1", "s2", "s3"} {
+		if _, err := s.CreateSkill(ctx, store.Skill{
+			Scope: "platform", Name: name, Description: "d",
+		}); err != nil {
+			t.Fatalf("create platform skill %s: %v", name, err)
+		}
+	}
+	for _, name := range []string{"s42a", "s42b"} {
+		if _, err := s.CreateSkill(ctx, store.Skill{
+			Scope: "project", ProjectID: &project42, Name: name, Description: "d",
+		}); err != nil {
+			t.Fatalf("create project skill %s: %v", name, err)
+		}
+	}
+
+	for _, block := range []string{"a", "b", "c"} {
+		if _, err := s.UpsertBlockBinding(ctx, store.BlockBinding{
+			Scope: "platform", Block: block,
+		}); err != nil {
+			t.Fatalf("create platform binding %s: %v", block, err)
+		}
+	}
+	for _, block := range []string{"a", "b"} {
+		if _, err := s.UpsertBlockBinding(ctx, store.BlockBinding{
+			Scope: "project", ProjectID: &project42, Block: block,
+		}); err != nil {
+			t.Fatalf("create project binding %s: %v", block, err)
+		}
+	}
+
+	platformServers := collectMCPServerPages(t, s, "platform", nil, 1)
+	if len(platformServers) != 3 {
+		t.Fatalf("platform servers = %+v", platformServers)
+	}
+	for i, want := range []string{"p3", "p2", "p1"} {
+		if platformServers[i].Name != want {
+			t.Fatalf("platform server[%d] = %s, want %s", i, platformServers[i].Name, want)
+		}
+		if !platformServers[i].CreatedAt.Equal(clock.Now()) {
+			t.Fatalf("platform server[%d] created_at = %v", i, platformServers[i].CreatedAt)
+		}
+	}
+	projectServers := collectMCPServerPages(t, s, "project", &project42, 1)
+	if len(projectServers) != 2 || projectServers[0].Name != "42b" || projectServers[1].Name != "42a" {
+		t.Fatalf("project servers = %+v", projectServers)
+	}
+
+	_, cursor, err := s.ListMCPServersPage(ctx, "platform", nil, "", 1)
+	if err != nil || cursor == "" {
+		t.Fatalf("platform page = %q, %v", cursor, err)
+	}
+	if _, _, err := s.ListMCPServersPage(ctx, "project", &project42, cursor, 1); !errors.Is(err, store.ErrInvalidCursor) {
+		t.Fatalf("cross-scope cursor = %v", err)
+	}
+	_, projectCursor, err := s.ListMCPServersPage(ctx, "project", &project42, "", 1)
+	if err != nil || projectCursor == "" {
+		t.Fatalf("project page = %q, %v", projectCursor, err)
+	}
+	if _, _, err := s.ListMCPServersPage(ctx, "project", &project43, projectCursor, 1); !errors.Is(err, store.ErrInvalidCursor) {
+		t.Fatalf("cross-project cursor = %v", err)
+	}
+
+	platformSkills := collectSkillPages(t, s, "platform", nil, 1)
+	if len(platformSkills) != 3 {
+		t.Fatalf("platform skills = %+v", platformSkills)
+	}
+	projectSkills := collectSkillPages(t, s, "project", &project42, 1)
+	if len(projectSkills) != 2 {
+		t.Fatalf("project skills = %+v", projectSkills)
+	}
+	_, skillCursor, err := s.ListSkillsPage(ctx, "platform", nil, "", 1)
+	if err != nil || skillCursor == "" {
+		t.Fatalf("skill page = %q, %v", skillCursor, err)
+	}
+	if _, _, err := s.ListSkillsPage(ctx, "project", &project42, skillCursor, 1); !errors.Is(err, store.ErrInvalidCursor) {
+		t.Fatalf("cross-scope skill cursor = %v", err)
+	}
+
+	platformBindings := collectBindingPages(t, s, "platform", nil, 1)
+	if len(platformBindings) != 3 {
+		t.Fatalf("platform bindings = %+v", platformBindings)
+	}
+	for i, want := range []string{"a", "b", "c"} {
+		if platformBindings[i].Block != want {
+			t.Fatalf("platform binding[%d] = %s, want %s", i, platformBindings[i].Block, want)
+		}
+	}
+	projectBindings := collectBindingPages(t, s, "project", &project42, 1)
+	if len(projectBindings) != 2 || projectBindings[0].Block != "a" || projectBindings[1].Block != "b" {
+		t.Fatalf("project bindings = %+v", projectBindings)
+	}
+	allBindings := collectBindingPages(t, s, "", nil, 2)
+	if len(allBindings) != 5 {
+		t.Fatalf("all bindings = %+v", allBindings)
+	}
+	_, bindingCursor, err := s.ListBlockBindingsPage(ctx, "platform", nil, "", 1)
+	if err != nil || bindingCursor == "" {
+		t.Fatalf("binding page = %q, %v", bindingCursor, err)
+	}
+	if _, _, err := s.ListBlockBindingsPage(ctx, "project", &project42, bindingCursor, 1); !errors.Is(err, store.ErrInvalidCursor) {
+		t.Fatalf("cross-scope binding cursor = %v", err)
+	}
+	if _, _, err := s.ListBlockBindingsPage(ctx, "", nil, "not-a-cursor", 1); !errors.Is(err, store.ErrInvalidCursor) {
+		t.Fatalf("invalid binding cursor = %v", err)
+	}
+}
+
+func collectMCPServerPages(t *testing.T, s *Store, scope string, projectID *int64, limit int) []store.MCPServer {
+	t.Helper()
+	out := make([]store.MCPServer, 0)
+	cursor := ""
+	for {
+		page, next, err := s.ListMCPServersPage(context.Background(), scope, projectID, cursor, limit)
+		if err != nil {
+			t.Fatalf("ListMCPServersPage: %v", err)
+		}
+		out = append(out, page...)
+		if next == "" {
+			return out
+		}
+		if next == cursor {
+			t.Fatal("repeating mcp cursor")
+		}
+		cursor = next
+	}
+}
+
+func collectSkillPages(t *testing.T, s *Store, scope string, projectID *int64, limit int) []store.Skill {
+	t.Helper()
+	out := make([]store.Skill, 0)
+	cursor := ""
+	for {
+		page, next, err := s.ListSkillsPage(context.Background(), scope, projectID, cursor, limit)
+		if err != nil {
+			t.Fatalf("ListSkillsPage: %v", err)
+		}
+		out = append(out, page...)
+		if next == "" {
+			return out
+		}
+		if next == cursor {
+			t.Fatal("repeating skill cursor")
+		}
+		cursor = next
+	}
+}
+
+func collectBindingPages(t *testing.T, s *Store, scope string, projectID *int64, limit int) []store.BlockBinding {
+	t.Helper()
+	out := make([]store.BlockBinding, 0)
+	cursor := ""
+	for {
+		page, next, err := s.ListBlockBindingsPage(context.Background(), scope, projectID, cursor, limit)
+		if err != nil {
+			t.Fatalf("ListBlockBindingsPage: %v", err)
+		}
+		out = append(out, page...)
+		if next == "" {
+			return out
+		}
+		if next == cursor {
+			t.Fatal("repeating binding cursor")
+		}
+		cursor = next
+	}
+}

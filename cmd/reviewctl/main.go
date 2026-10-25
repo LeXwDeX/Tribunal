@@ -62,7 +62,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 	global := flag.NewFlagSet("reviewctl", flag.ContinueOnError)
 	global.SetOutput(stderr)
 	global.Usage = func() {
-		fmt.Fprintln(stderr, "Usage: reviewctl [--url URL] [--api-token-env NAME] projects <register|list|get> [options]")
+		fmt.Fprintln(stderr, "Usage: reviewctl [--url URL] [--api-token-env NAME] <projects|users> <action> [options]")
 		global.PrintDefaults()
 	}
 	global.StringVar(&g.serviceURL, "url", defaultURL, "service base URL")
@@ -75,11 +75,19 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 		return err
 	}
 	rest := global.Args()
-	if len(rest) == 0 || rest[0] != "projects" {
+	if len(rest) == 0 {
 		global.Usage()
-		return errors.New("projects subcommand is required")
+		return errors.New("projects or users subcommand is required")
 	}
-	return g.runProjects(ctx, rest[1:])
+	switch rest[0] {
+	case "projects":
+		return g.runProjects(ctx, rest[1:])
+	case "users":
+		return g.runUsers(ctx, rest[1:])
+	default:
+		global.Usage()
+		return fmt.Errorf("unknown subcommand %q", rest[0])
+	}
 }
 
 func (g *globals) prepare(getenv func(string) string, client *http.Client) error {
@@ -134,27 +142,286 @@ func (g *globals) runProjects(ctx context.Context, args []string) error {
 		if len(args) != 1 {
 			return errors.New("projects list takes no arguments")
 		}
-		raw, err := g.request(ctx, http.MethodGet, "/api/v1/projects", nil)
-		if err != nil {
-			return err
-		}
-		return writeRaw(g.stdout, raw)
+		return g.listProjects(ctx)
 	case "get":
 		if len(args) != 2 {
 			return errors.New("projects get requires exactly one project ID")
 		}
-		id, err := strconv.ParseInt(args[1], 10, 64)
-		if err != nil || id <= 0 {
-			return errors.New("project ID must be a positive integer")
+		id, err := parsePositiveID(args[1], "project ID")
+		if err != nil {
+			return err
 		}
 		raw, err := g.request(ctx, http.MethodGet, "/api/v1/projects/"+strconv.FormatInt(id, 10), nil)
 		if err != nil {
 			return err
 		}
 		return writeRaw(g.stdout, raw)
+	case "all":
+		if len(args) != 1 {
+			return errors.New("projects all takes no arguments")
+		}
+		return g.listAllProjects(ctx)
+	case "grants":
+		return g.runGrants(ctx, args[1:])
+	case "webhook":
+		return g.projectWebhook(ctx, args[1:])
 	default:
 		return fmt.Errorf("unknown projects action %q", args[0])
 	}
+}
+
+// projectWebhook enables, rebuilds or disables the service-managed hook.
+func (g *globals) projectWebhook(ctx context.Context, args []string) error {
+	if len(args) == 0 {
+		return errors.New("projects webhook action is required")
+	}
+	if len(args) != 2 {
+		return fmt.Errorf("projects webhook %s requires exactly one project ID", args[0])
+	}
+	id, err := parsePositiveID(args[1], "project ID")
+	if err != nil {
+		return err
+	}
+	var method, path string
+	switch args[0] {
+	case "enable":
+		method, path = http.MethodPost, "/api/v1/projects/"+strconv.FormatInt(id, 10)+"/webhook"
+	case "rebuild":
+		method, path = http.MethodPost, "/api/v1/projects/"+strconv.FormatInt(id, 10)+"/webhook/rebuild"
+	case "disable":
+		method, path = http.MethodDelete, "/api/v1/projects/"+strconv.FormatInt(id, 10)+"/webhook"
+	default:
+		return fmt.Errorf("unknown projects webhook action %q", args[0])
+	}
+	raw, err := g.request(ctx, method, path, nil)
+	if err != nil {
+		return err
+	}
+	return writeRaw(g.stdout, raw)
+}
+
+func (g *globals) runUsers(ctx context.Context, args []string) error {
+	if len(args) == 0 {
+		return errors.New("users action is required")
+	}
+	switch args[0] {
+	case "list":
+		if len(args) != 1 {
+			return errors.New("users list takes no arguments")
+		}
+		return g.listUsers(ctx)
+	case "disable", "enable":
+		if len(args) != 2 {
+			return fmt.Errorf("users %s requires exactly one user ID", args[0])
+		}
+		id, err := parsePositiveID(args[1], "user ID")
+		if err != nil {
+			return err
+		}
+		raw, err := g.request(ctx, http.MethodPatch,
+			"/api/v1/admin/users/"+strconv.FormatInt(id, 10),
+			map[string]any{"disabled": args[0] == "disable"})
+		if err != nil {
+			return err
+		}
+		return writeRaw(g.stdout, raw)
+	case "revoke":
+		if len(args) != 2 {
+			return errors.New("users revoke requires exactly one user ID")
+		}
+		id, err := parsePositiveID(args[1], "user ID")
+		if err != nil {
+			return err
+		}
+		_, err = g.request(ctx, http.MethodDelete,
+			"/api/v1/admin/users/"+strconv.FormatInt(id, 10)+"/credentials", nil)
+		return err
+	default:
+		return fmt.Errorf("unknown users action %q", args[0])
+	}
+}
+
+func (g *globals) runGrants(ctx context.Context, args []string) error {
+	if len(args) == 0 {
+		return errors.New("projects grants action is required")
+	}
+	switch args[0] {
+	case "list":
+		if len(args) != 2 {
+			return errors.New("projects grants list requires exactly one project ID")
+		}
+		projectID, err := parsePositiveID(args[1], "project ID")
+		if err != nil {
+			return err
+		}
+		raw, err := g.request(ctx, http.MethodGet,
+			"/api/v1/admin/projects/"+strconv.FormatInt(projectID, 10)+"/grants", nil)
+		if err != nil {
+			return err
+		}
+		return writeRaw(g.stdout, raw)
+	case "set":
+		if len(args) != 4 {
+			return errors.New("projects grants set requires <project ID> <user ID> <read|manage>")
+		}
+		projectID, err := parsePositiveID(args[1], "project ID")
+		if err != nil {
+			return err
+		}
+		userID, err := parsePositiveID(args[2], "user ID")
+		if err != nil {
+			return err
+		}
+		if args[3] != "read" && args[3] != "manage" {
+			return errors.New("grant role must be read or manage")
+		}
+		raw, err := g.request(ctx, http.MethodPut,
+			"/api/v1/admin/projects/"+strconv.FormatInt(projectID, 10)+"/grants/"+strconv.FormatInt(userID, 10),
+			map[string]any{"role": args[3]})
+		if err != nil {
+			return err
+		}
+		return writeRaw(g.stdout, raw)
+	case "delete":
+		if len(args) != 3 {
+			return errors.New("projects grants delete requires <project ID> <user ID>")
+		}
+		projectID, err := parsePositiveID(args[1], "project ID")
+		if err != nil {
+			return err
+		}
+		userID, err := parsePositiveID(args[2], "user ID")
+		if err != nil {
+			return err
+		}
+		_, err = g.request(ctx, http.MethodDelete,
+			"/api/v1/admin/projects/"+strconv.FormatInt(projectID, 10)+"/grants/"+strconv.FormatInt(userID, 10), nil)
+		return err
+	default:
+		return fmt.Errorf("unknown projects grants action %q", args[0])
+	}
+}
+
+func parsePositiveID(raw, label string) (int64, error) {
+	id, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || id <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer", label)
+	}
+	return id, nil
+}
+
+// listAllProjects follows next_cursor over the minimal management list.
+func (g *globals) listAllProjects(ctx context.Context) error {
+	all := make([]json.RawMessage, 0)
+	cursor := ""
+	seen := map[string]bool{}
+	for {
+		path := "/api/v1/admin/projects"
+		if cursor != "" {
+			path += "?cursor=" + url.QueryEscape(cursor)
+		}
+		raw, err := g.request(ctx, http.MethodGet, path, nil)
+		if err != nil {
+			return err
+		}
+		var page struct {
+			Projects   []json.RawMessage `json:"projects"`
+			NextCursor string            `json:"next_cursor"`
+		}
+		if err := json.Unmarshal(raw, &page); err != nil {
+			return errors.New("server returned an invalid admin project list")
+		}
+		all = append(all, page.Projects...)
+		if page.NextCursor == "" {
+			break
+		}
+		if seen[page.NextCursor] {
+			return errors.New("server returned a repeating project cursor")
+		}
+		seen[page.NextCursor] = true
+		cursor = page.NextCursor
+	}
+	merged, err := json.Marshal(map[string]any{"projects": all})
+	if err != nil {
+		return errors.New("encode admin project list")
+	}
+	return writeRaw(g.stdout, merged)
+}
+
+func (g *globals) listUsers(ctx context.Context) error {
+	all := make([]json.RawMessage, 0)
+	cursor := ""
+	seen := map[string]bool{}
+	for {
+		path := "/api/v1/admin/users"
+		if cursor != "" {
+			path += "?cursor=" + url.QueryEscape(cursor)
+		}
+		raw, err := g.request(ctx, http.MethodGet, path, nil)
+		if err != nil {
+			return err
+		}
+		var page struct {
+			Users      []json.RawMessage `json:"users"`
+			NextCursor string            `json:"next_cursor"`
+		}
+		if err := json.Unmarshal(raw, &page); err != nil {
+			return errors.New("server returned an invalid user list")
+		}
+		all = append(all, page.Users...)
+		if page.NextCursor == "" {
+			break
+		}
+		if seen[page.NextCursor] {
+			return errors.New("server returned a repeating user cursor")
+		}
+		seen[page.NextCursor] = true
+		cursor = page.NextCursor
+	}
+	merged, err := json.Marshal(map[string]any{"users": all})
+	if err != nil {
+		return errors.New("encode user list")
+	}
+	return writeRaw(g.stdout, merged)
+}
+
+// listProjects follows next_cursor so the CLI keeps its historical "list all
+// projects" contract. An old server without next_cursor yields one page.
+func (g *globals) listProjects(ctx context.Context) error {
+	all := make([]json.RawMessage, 0)
+	cursor := ""
+	seen := map[string]bool{}
+	for {
+		path := "/api/v1/projects"
+		if cursor != "" {
+			path += "?cursor=" + url.QueryEscape(cursor)
+		}
+		raw, err := g.request(ctx, http.MethodGet, path, nil)
+		if err != nil {
+			return err
+		}
+		var page struct {
+			Projects   []json.RawMessage `json:"projects"`
+			NextCursor string            `json:"next_cursor"`
+		}
+		if err := json.Unmarshal(raw, &page); err != nil {
+			return errors.New("server returned an invalid project list")
+		}
+		all = append(all, page.Projects...)
+		if page.NextCursor == "" {
+			break
+		}
+		if seen[page.NextCursor] {
+			return errors.New("server returned a repeating project cursor")
+		}
+		seen[page.NextCursor] = true
+		cursor = page.NextCursor
+	}
+	merged, err := json.Marshal(map[string]any{"projects": all})
+	if err != nil {
+		return errors.New("encode project list")
+	}
+	return writeRaw(g.stdout, merged)
 }
 
 type registerRequest struct {
@@ -253,6 +520,9 @@ func (g *globals) request(ctx context.Context, method, path string, body any) (j
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, responseError(resp.StatusCode, data)
+	}
+	if len(data) == 0 {
+		return json.RawMessage("{}"), nil
 	}
 	if !json.Valid(data) {
 		return nil, errors.New("server returned invalid JSON")

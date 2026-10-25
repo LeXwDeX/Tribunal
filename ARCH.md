@@ -1,6 +1,6 @@
 # ARCH — GitLab CE 自动评审服务设计基线
 
-> 状态：**设计基线 v0.2（讨论稿）**。M0–M6 的本地实现已完成，实际能力、未验证项与限制见 [README.md](README.md)。尚未与真实 GitLab CE、模型 provider 或 OAuth 联调。
+> 状态：**设计基线 v0.2（讨论稿）**。主体功能已有本地实现，管理 API 的游标分页、项目/评审摘要、反馈原始计数、人工标注与质量指标、上下文版本与保留清理均已落地；仓库配置在评审 worker 中合并。2026-10-25 的有界隔离实例（Linux/amd64、真实 GitLab 19.5.1 CE）已验证 GitLab 自动投递 webhook、真实 OAuth、项目授权/CSRF、应用内 MCP 调用和 onboarding CLI 索引；连续两次实际 deep 均为 0 call errors、0 failed nodes，verdict 为预期的 BLOCKING。尚未验收或实现：协议、provider 与 MCP HTTP backend 的全部组合，大型仓库与生产负载，操作系统级文件沙箱，物理设备/完整 WCAG；Postgres 未实现。实际能力、未验证项与限制见 [README.md](README.md)，最终交付事实见 PR #30。
 > 本文汇总了立项讨论中的全部结论。标注「已定」的条目是用户确认过的决策；标注「建议默认」的条目是讨论中提出、尚待确认的方案，见 §16 待决事项。
 > 实现层面的细化（接口签名、表结构、API、流程、配置）见 [docs/design/](docs/design/README.md)。
 
@@ -13,7 +13,7 @@
 - 通过**项目级 Token** 授权，既能被 GitLab webhook 回调触发，也能主动触发评审，并把结果回写到 MR。
 - 服务拥有 clone 项目代码的权限，评审时不只看 diff，也能读取完整仓库上下文。
 - 评审由一个**主 agent 单入口**统一编排：主 agent 派发多种评审模式，经过跨模型或同模型的**对抗性核验**后，回到主 agent 评估，最终输出结论到 MR。
-- 编排层以 **DAG 引擎**为唯一执行架构。当前 `pkg/dag` 按本设计独立实现；是否移植 OpenCode-GraphAgent 的上游引擎及授权仍未确认（见 §13）。
+- 编排层以 **DAG 引擎**为唯一执行架构。当前 `pkg/dag` 按本设计独立实现，用户已于 2026-10-23 确认接受该实现用于本地验收，不要求移植；未来如移植，授权确认见 §13。
 - 每个项目有一个常驻**工作区**：模型可以预先生成 AGENTS.md / CLAUDE.md 等项目上下文，并通过 **MCP 和 Skill** 接入外部能力（如 codebase-memory-mcp 的代码地图检索）。这些内容只在平台内部使用（见 §8）。
 
 ### 非目标
@@ -38,7 +38,7 @@
 | D7 | 评审模式：`reasoner`、`review`、`verify`、`code-review`（传统） | 已定 |
 | D8 | 支持跨模型和同模型的对抗性审核 | 已定 |
 | D9 | 主 agent 单入口 → 多模式评审 → 回到主 agent 评估 → 输出结论到 MR | 已定 |
-| D10 | 参考 OpenCode-GraphAgent 的 DAG 引擎；是否移植上游代码及 MIT 授权仍待确认。当前 `pkg/dag` 为独立实现 | 待确认 |
+| D10 | 参考 OpenCode-GraphAgent 的 DAG 引擎；当前 `pkg/dag` 为独立实现，用户已确认按本地实现验收，不要求移植。未来移植仍需先完成授权确认（§13） | 已定 |
 | D11 | `verify` 在 MR 场景下定位为**挑战者**：对单条 finding 做只读反证，不跑测试 | 建议默认 |
 | D12 | 驱动方式：规划 → 执行 → 汇总，允许有限轮补派（extend），不用自由工具循环 | 建议默认 |
 | D13 | 部署形态：单个二进制，默认 SQLite、可选 Postgres，提供 Docker 镜像，任务队列在进程内 | 建议默认 |
@@ -46,7 +46,7 @@
 | D15 | 采用项目工作区，允许模型生成 AGENTS.md / CLAUDE.md 等上下文文档；**生成内容只存平台内部，不提交到仓库** | 已定 |
 | D16 | 支持 MCP 接入（配置格式兼容 Claude Code），首个接入 codebase-memory-mcp 用于代码地图检索 | 已定 |
 | D17 | 支持 Skill 接入（格式兼容 Claude Code Skill） | 已定 |
-| D18 | Web 控制台：SPA（Vite + React + TypeScript）embed 进二进制；用 GitLab OAuth 登录，角色分 admin / viewer | 建议默认 |
+| D18 | Web 控制台：SPA（Vite + React + TypeScript）embed 进二进制；用 GitLab OAuth 登录，平台角色分 admin / viewer，项目业务数据另由本地 read / manage grant 控制 | 建议默认 |
 | D19 | DAG 节点分 agent 节点和代码节点（如 gather、adjudicate）两类，对引擎透明 | 建议默认 |
 
 ---
@@ -128,6 +128,13 @@ web/                   Web 控制台（M6）
 
 - 是否同时支持 Group Token 或 bot 账号 PAT，见 §16。
 
+平台登录授权与 GitLab 项目 token 分离：
+
+- 用户首次通过 GitLab OAuth 登录后建立本地 `users` 行；`auth.bootstrap_admins` 只决定平台管理角色。项目业务数据的读取和写入由本地 `project_grants` 的 `read` / `manage` 决定，默认无权限，平台管理员也不例外。
+- 平台管理员可以管理用户、项目授权和系统配置；读取项目、评审、工作区、统计、SSE 或项目扩展仍需该项目 grant。无 grant 或项目不存在统一返回 404，只有 `read` 时执行写操作返回 403。
+- `auth.bootstrap_token_env` 指向的静态 Bearer 只用于平台管理面，没有本地用户 ID 和 grant，不接受项目业务路由。它的轮换由部署方更新环境变量并重启完成。
+- 用户被本地停用后不能登录、使用已有会话/API token 或获得新凭据；撤销凭据与停用都是本地控制。GitLab 组成员关系变化不会自动同步到 CRC，退组后仍需删除 grant 或停用本地用户。
+
 ### 4.2 触发
 
 | 来源 | 条件 | 说明 |
@@ -139,7 +146,7 @@ web/                   Web 控制台（M6）
 | Push Hook | 目标分支有新 push | 刷新项目工作区（见 §8.1），不触发评审 |
 
 - webhook handler 只做三件事：校验 `X-Gitlab-Token`、入队、返回 200。GitLab 有 webhook 超时限制，连续失败还会自动禁用 hook。
-- **幂等键**：`(project_id, mr_iid, head_sha, profile)`。同一个 MR 有新 push 时，旧工作流转为 `cancelled`，旧结果作废。
+- **投递去重**：按 GitLab event UUID 去重；显式新命令可对相同 head/profile 创建新代次。同一个 MR 有新 push 时，旧工作流转为 `cancelled`，旧结果作废。发布去重边界见 §6.7。
 - **增量评审**：记录上次已评审的 `head_sha`，默认只评审新增变更，`/review full` 强制全量。
 
 ### 4.3 取 diff 与代码
@@ -154,7 +161,7 @@ web/                   Web 控制台（M6）
 
 - **汇总评论**：每个 MR 一条，内嵌隐藏标记 `<!-- gitlab-ce-review:summary -->`，重跑时就地更新，不重复发布。
 - **行内讨论**：Discussions API，`position_type=text`，带 `new_path` / `old_path` 和 `new_line` / `old_line`。行号**必须落在 diff hunk 内**，否则 GitLab 返回 400。校验不通过的条目降级并入汇总评论。
-- **commit status（可选）**：评审结论为 BLOCKING 时，给 `head_sha` 写入名为 `ai-review` 的 `failed` 状态。项目开启「Pipelines must succeed」后即可拦截合并，这是 CE 不依赖付费审批规则也能做门禁的方式。是否默认开启，见 §16。
+- **commit status（可选）**：只有明确 PASS 写 `success`；BLOCKING 和 INCOMPLETE 都写名为 `ai-review` 的 `failed` 状态。项目开启「Pipelines must succeed」后即可拦截合并，这是 CE 不依赖付费审批规则也能做门禁的方式。是否默认开启，见 §16。
 - 发布前再次比对 MR 当前的 `head_sha`。如果已经变化，丢弃本次结果，不发布。
 
 ---
@@ -171,7 +178,7 @@ web/                   Web 控制台（M6）
      "challenge": { "only": ["P0", "P1"] } }
    ```
    这些参数由代码严格校验：块类型、provider 必须在项目允许列表内，文件必须属于本次变更，总节点数受预算限制。
-2. **synthesize**：接收所有子节点的结构化结果（**只接收结论，不接收子 agent 的完整对话**），逐条采纳或反驳，给出最终 findings、PASS/BLOCKING 和汇总文案。最多可申请 1 次 `extend` 补派节点（例如对争议条目追加反证）。
+2. **synthesize**：接收所有子节点的结构化结果（**只接收结论，不接收子 agent 的完整对话**），逐条采纳或反驳，给出最终 findings 和汇总文案。模型合同仍为 PASS/BLOCKING；代码可在存在未解决证据或覆盖缺口时把最终 SynthesisResult 覆盖为 INCOMPLETE。最多可申请 1 次 `extend` 补派节点（例如对争议条目追加反证）。
 
 `brain.md` 的「严肃决策、风险取舍」定位可以作为 synthesize 阶段 prompt 的基础。
 
@@ -182,7 +189,7 @@ web/                   Web 控制台（M6）
 | 模式 | 原定位 | MR 场景的改写 |
 |---|---|---|
 | `code-review` | 无（新写） | diff 加少量上下文，一次调用，输出带行号的 findings。轻量、高覆盖，作为默认 |
-| `review` | 独立终审，需要验证证据，输出 PASS/BLOCKING | `spec_goal` 取自 MR 标题、描述和关联 issue；验证证据取自 **GitLab pipeline 和 job 状态**；保留 PASS/BLOCKING 和 P0/P1/P2；去掉 `reflow_target`、`ready_for_patcher` 等开发流水线字段。可展开为 standards 和 intent 两条独立通道，再加裁决 |
+| `review` | 独立终审，需要验证证据，输出 PASS/BLOCKING | `spec_goal` 取自 MR 标题、描述和关联 issue；验证证据取自 **GitLab pipeline 和 job 状态**；保留 PASS/BLOCKING 和 P0/P1/P2（review/review.gate 子输出合同）；最终 SynthesisResult 可由代码覆盖为 INCOMPLETE；去掉 `reflow_target`、`ready_for_patcher` 等开发流水线字段。可展开为 standards 和 intent 两条独立通道，再加裁决 |
 | `reasoner` | 审方案和设计文档，不审 diff | 输入改为 MR 描述、关联 issue、本次改动的设计文档（`*.md`、ADR），检查「声称要做的事在逻辑上是否成立、漏了哪些边界」 |
 | `verify` | 运行测试并诊断 | 改为**挑战者**：对单条 finding 只读反证，输出 CONFIRMED / REFUTED / UNCERTAIN，并且必须引用代码证据。读取 CI 日志诊断失败原因作为后续可选能力 |
 
@@ -228,9 +235,9 @@ type Finding struct {
 2. 信息不对称：challenger 只看到结论、位置和相关代码，看不到 proposer 的推理过程、置信度和模型身份。
 3. 立场相反：proposer 被要求「找出问题」，challenger 被要求「假设它是误报，去找证据推翻」。
 4. 采样差异：temperature 不同，或者给出的上下文顺序和范围不同。
-5. 拓扑 B 投票时，同模型的票按权重打折（默认 0.5）。
+5. 拓扑 B 投票时，同模型的票按权重打折（默认 0.5）。投票和 challenger 选择按配置的规范化 endpoint + model 身份归一：同端点同模型的 provider 别名视为同一模型，不增加独立票，也不能作为跨模型确认。无法解析身份的多个 provider 共用同一个 unknown bucket：known 与 unknown 可各计一票，unknown 之间不增加独立票；metadata 缺失会限制挑战者独立性，不能据此声称跨模型确认。没有独立 challenger 时使用已声明的 fallback 并显式提示。
 
-**跨模型**：challenger 可配置为 `cross`，自动选择与 proposer 不同的 provider。反证比从头发现容易，challenger 可以用较便宜的模型，但 P0/P1 条目建议用强模型反证。
+**跨模型**：challenger 可配置为 `cross`。实现按 allowed providers 顺序选择第一个已知、且未被来源使用的 endpoint + model 身份；任一来源身份未知时会跳过候选，只能使用 fallback 并标记同模型。反证比从头发现容易，challenger 可以用较便宜的模型，但 P0/P1 条目建议用强模型反证。
 
 **默认裁决规则**：
 
@@ -250,11 +257,16 @@ type Finding struct {
 |---|---|
 | I1 | 每个节点的输出必须通过 `output_schema` 校验。缺失时补问 1 次，仍失败则节点 `failed` |
 | I2 | finding 的行号必须落在 diff 的行集合内，否则去掉行号，降级进汇总 |
-| I3 | REFUTED 必须引用代码位置作为证据，否则按 UNCERTAIN 处理 |
+| I3 | REFUTED 必须引用代码位置作为证据；生产裁决还要求在固定 head/base 快照中路径存在且行号范围有效，缺失快照或读取失败按 UNCERTAIN 处理 |
 | I4 | 子节点已 CONFIRMED 的 P0/P1，synthesize 要丢弃或降级，必须给出逐条反驳及理由，否则结算失败；当前实现用 `decision.finding_id` + `reason`（见 docs/design/04） |
 | I5 | synthesize 自提的 finding 标记为 `origin=main`，同样要经过 verify 反证 |
 | I6 | 最终结论一致性：存在已确认的 P0/P1 时，不得给出 PASS |
 | I7 | 结论绑定 fingerprint（见 §6.5）。发布前 fingerprint 不一致，结果作废 |
+
+完成条件（不能由 synthesize 清除）：
+
+- 上游 `review` 通道声明 `evidence_status=insufficient`、review gate 为 BLOCKING 却没有 accepted finding、材料采集/提示词截断或完成 plan 后非 generated included 文件未被任何评审节点覆盖时，最终结论为 INCOMPLETE。INCOMPLETE 必须携带具体未解决信号，不能同时写成 PASS 或 commit status success。
+- `DiffSummary.files` 是进入材料快照的文件数，不是已评审数；`omitted` 记录容量截断、`too_large`、`collapsed` 等采集缺口，用户配置的 `ignored` 路径单独记录，不属于缺口。所有文件都被 ignore 时发布「无需评审」；全部变更文件都 omitted 时不创建空 workflow，只发布 INCOMPLETE 摘要，列出 omitted 总数、原因计数和最多 4 条路径，其余只计数；正常 dossier 保留完整的 omitted 列表。历史记录不得补造不存在的 dossier。
 
 I4 的「逐条反驳」规则参考 GraphAgent 的 accept 结算规则（裁决为 ACCEPT 时不得自带 required_actions；每条 required_actions 必须逐条反驳）；当前没有复制上游代码。
 
@@ -335,7 +347,8 @@ pending ─→ queued ─→ running ─→ completed
 评审是只读的，恢复比原引擎简单得多：
 
 - 服务重启后，`running` 和 `queued` 的节点直接重新执行。LLM 调用无副作用，重跑是安全的。
-- 只有发布阶段需要幂等：汇总评论按隐藏标记就地更新；行内讨论按 `(fingerprint, finding_id)` 去重。
+- 发布阶段另有幂等保护：汇总评论按隐藏标记就地更新；行内讨论按项目/MR 内的 `publish_key` 去重。该键包含路径、规范化标题和代码片段，不是语义相似度判断。2026-10-25 用户确认按此边界验收：显式重跑时模型换标题可能再次发布同一问题；本版不增加跨次问题语义去重。
+- 评审执行状态与发布状态分开恢复：`publication_state=pending` 的终态工作流在启动后重试；failed execution 在 `post_failure_note=true` 时发布未完成摘要，关闭时记为 skipped；取消或 superseded 记为 skipped；自动恢复不会覆盖 published/failed（手动 republish 是显式例外）。失败原因有界脱敏保存，永久发布失败需要手动 republish。
 
 ### 6.8 预算
 
@@ -345,6 +358,8 @@ pending ─→ queued ─→ running ─→ completed
 | extend 次数 | 1 |
 | 每个工作流的 token 上限 / 金额上限 / 时长上限 | 项目配置 |
 | 超出预算时 | 降级为拓扑 A，或者只挑战 P0/P1 |
+
+`max_tokens` 是 workflow 共享预算，按 `input_tokens + output_tokens` 计算。cache read/write 和 reasoning 在 usage 中分别表示，但不额外加入预算，避免与 input/output 重复计数。调度器和节点执行器在每次模型请求前检查已提交用量加当前 attempt 已知的 partial usage；并发节点不预留额度，已发出的请求可能在检查后完成并造成有界超支，因此这是尽力上限，不是精确账单。transport 重试的已知 usage 计入下一次 attempt 的预算检查和最终节点用量；预算不足时保留已有结果，按 required / optional 和确定性规则兜底，不能无提示地给出 PASS。
 
 ---
 
@@ -395,7 +410,7 @@ data/workspaces/<project_id>/
   index/                    外部工具的索引（如 codebase-memory）
   skills/                   项目级 Skill
   mcp.json                  项目级 MCP 配置
-  runs/<workflow_id>/       每个 MR 的临时 worktree，工作流结束即删除
+  runs/<id>/                每个 MR 的临时 worktree，评审通常使用 job ID，结束后清理
 ```
 
 | 时机 | 动作 |
@@ -420,7 +435,7 @@ data/workspaces/<project_id>/
 
 - **SDK**：官方 `github.com/modelcontextprotocol/go-sdk`。
 - **配置格式兼容 Claude Code**：沿用 `mcpServers` JSON 结构（stdio 的 `command` / `args` / `env`，HTTP 的 `url` / `headers`），可以从 Claude Code 的配置直接复制。
-- **分层**：平台级（所有项目共享）加项目级（工作区 `mcp.json`），同名时项目级覆盖平台级。
+- **分层**：平台级（所有项目共享）加项目级（工作区 `mcp.json`），同名时项目级覆盖平台级。平台级配置和任何范围写入需要平台管理员；项目级写入还需该项目 `manage`，项目 `read` 只能查看，不能修改宿主执行配置。Skill 和块绑定使用相同边界。
 - **工具命名**：`mcp__<server>__<tool>`。
 - **按块授权**：每个块声明允许使用的 MCP 工具白名单，未列入的工具对该块不可见。
 - **进程管理**：stdio 服务器按工作区建立进程池，cwd 指向工作区；每次调用都有超时和输出长度上限；空闲超时后回收；崩溃后自动重启，并计入节点错误。
@@ -433,8 +448,8 @@ data/workspaces/<project_id>/
 {
   "mcpServers": {
     "codebase-memory": {
-      "command": "codebase-memory-mcp",
-      "args": ["--tool-profile=analysis"],
+      "command": "/usr/local/bin/crc-codebase-memory-mcp",
+      "args": ["--tool-profile=analysis", "--ui=false"],
       "env": {}
     }
   }
@@ -445,8 +460,10 @@ data/workspaces/<project_id>/
 
 首个接入的代码地图工具是 `codebase-memory-mcp`（本机验证版本 0.12.1）：
 
-- 用 `--tool-profile=analysis|scout` 只暴露受限的检查类工具。
-- onboarding 阶段用 `cli` 模式建索引，不必建立 MCP 会话。
+- MCP server 的 `--tool-profile=analysis|scout` 提供受限工具面。analysis 为 13 个、scout 为 8 个，均不含 `index_repository`、`delete_project`、`ingest_traces`、`manage_adr` 四个写入/管理工具。2026-10-25 的 Linux/amd64 容器探针已验证 analysis 的 `list_projects` 调用成功，直接调用未公开的 `delete_project` 在工具层被拒绝；不把一次负向调用推广为全部工具的安全证明。
+- CLI 的 `--tool-profile` 不限制本地 CLI 工具调用；不要把 MCP profile 当作 CLI 沙箱。
+- onboarding 阶段用 `cli` 模式建索引，不必由应用建立 MCP 会话；0.12.1 的 CLI 仍会使用上游 daemon。
+- 用 [MCP 隔离启动脚本](scripts/codebase-memory-mcp.sh) 同时启动 server 和索引命令。脚本在项目 `HOME` 下分别设置 `CBM_CACHE_DIR` 和 `CBM_RUNTIME_DIR`；仅设置 `HOME` 或 `XDG_RUNTIME_DIR` 不能隔离默认的账号级 daemon。完整配置与部署要求见 [MCP 配置](docs/design/06-config.md#2-mcp-配置文件)。
 - 服务端部署时关闭 `auto_watch` / `watcher_enabled` 和 UI（默认端口 9749）。索引刷新由 Push Hook 驱动，UI 端口不对外暴露。
 - 索引只对 base 建。MR 改动的文件由 agent 在 worktree 中直接读取。prompt 中明确说明「图谱反映 base 版本，改动的文件以 worktree 为准」（借鉴 review agent 的 `check_index_coverage` 原则）。
 
@@ -454,11 +471,16 @@ data/workspaces/<project_id>/
 - **工作区主键用 GitLab `project_id`**：项目改名或转移 namespace 后 git 地址会变，但 `project_id` 不变；git 地址只作为属性记录，变化时更新 mirror 的 remote，不重建工作区。
 - **未来方向**：推动 codebase-memory 支持以仓库身份（规范化的 git remote 地址或 `project_id`）作为索引 key，与路径解耦，使同一仓库在不同路径（如多实例、迁移数据目录）下可直接复用索引。见 §16 Q18。
 
-待验证：
+历史探针记录（2026-10-23，macOS arm64，codebase-memory-mcp 0.12.1，最小环境、隔离且初始为空的 `HOME`；日志见部署验证目录）。以下第 1–4 条只代表当日结果，其中第 2 条为部分验证，不能作为当前应用内 MCP 结论：
 
-1. 索引和配置能否按工作区隔离（例如通过 `HOME` 或 `XDG_*` 环境变量为每个工作区指定独立目录）。
-2. `--tool-profile` 在 stdio 服务模式下是否生效。
-3. 大仓库的全量与增量索引耗时和内存占用。
+1. 配置和索引文件落在独立 `HOME` 的 `$HOME/.cache/codebase-memory-mcp`，未观察到写入 XDG 目录。该历史探针没有证明两个 daemon 能同时运行，不能据此省略 `CBM_RUNTIME_DIR`。
+2. MCP server profile 的 advertised tool 列表符合预期（analysis 13 / scout 8）；CLI 调用不受该 profile 限制。随后尝试在新的隔离 HOME/cache/runtime 下补测 `tools/call`，server 在 initialize 前退出并报告 `secure daemon endpoint could not be created`；没有发出工具调用，也未连接或停止当前会话的默认 daemon。因此调用是否被拒绝仍未知，不能把启动失败当作权限拒绝证据。结论是部分验证。
+3. 小型合成 fixture（4 个 `.go` 文件和 `go.mod`，最终 20 nodes / 29 edges）可用同一项目身份增量更新：首次 fast index 约 1.72s / 25 MiB，unchanged 约 0.95s / 15.9 MiB，新增 `Difference` 符号后约 1.2s / 26.6 MiB。没有真实大型仓库、生产规模或 Linux 运行数据，因此大仓库耗时和内存仍未解决；不得把合成 fixture 当作生产基准。
+4. 探针运行时没有 GitLab、模型 provider 或 OAuth 凭据，未建立真实应用端到端链路。
+
+后续 Linux/amd64 容器探针（2026-10-25，0.12.1）复现了仅按 `HOME` 隔离时的 cache 冲突。使用上述脚本后，两个项目并发初始化、列工具和调用 `list_projects` 均成功；每个会话只列出自己固定 `base/` 路径的一个索引项目，`delete_project` 均被拒绝。此结果验证部署隔离与调用层拒绝，不替代完整评审链路、大型仓库性能或操作系统级文件隔离验收。
+
+2026-10-25 的应用内端到端记录（f143 隔离实例，真实 GitLab 19.5.1 CE）：连续两次实际无诊断代理 deep 分别使用 `deepseek-flash` 与 `gpt-6-astra` 两家 provider，模型实际调用 `list_projects`、`search_graph`、`get_code_snippet`；MCP 成功/调用为 10/10 与 10/11（第二次一次模型工具错误已纠正），未出现跨项目索引引用。真实 stdio 会话验证 `delete_project` 不可用；onboarding 的 CLI 索引成功，未变更的固定 `base/` 索引被复用而不是重建。该记录验证应用侧 MCP 接入与有界隔离，不构成操作系统级沙箱、并发/负载、每个 HTTP backend 或通用后端兼容性结论。运行计数与 run ID 见 [README 验证](README.md#验证)和 PR #30。
 
 ### 8.5 Skill 接入
 
@@ -496,6 +518,8 @@ data/workspaces/<project_id>/
 | `publications` | 已发布到 GitLab 的评论和讨论 ID，用于幂等更新 |
 | `llm_calls` | 每次模型调用的 prompt 摘要或完整内容、模型版本、原始输出、用量（保留期可配置） |
 | `feedback` | 来自 GitLab 的反馈信号（见 §12） |
+| `users`、`sessions`、`api_tokens`、`project_grants` | 本地用户、会话/API token、停用状态与每项目 read/manage 授权 |
+| `workflow_dossiers` | 脱敏材料快照、评审代次，以及独立于执行的 publication 状态和脱敏失败原因 |
 
 ---
 
@@ -570,6 +594,9 @@ blocks:                     # 按块授权 MCP 工具、挂载 Skill
 | 仓库内 AGENTS.md / CLAUDE.md 被篡改 | 只读目标分支版本，作为非授权背景注入 |
 | MCP 服务器子进程 | 环境变量白名单，不传 token 和 API key；只开放只读工具；超时与输出上限 |
 | Skill 内容 | 只支持指令类，不执行脚本；附属文件读取限定在 skill 目录 |
+| 越权读取/写入 | 项目业务路由检查本地 grant；无 grant 统一 404，只有 read 时写操作 403；列表、统计和 SSE 按 grant 过滤 |
+| 退组或离职后的残留访问 | GitLab 组成员关系不自动同步；本地停用用户并撤销全部会话/API token，或删除项目 grant |
+| 静态管理 token 泄露 | 仅平台管理面，无用户 ID 和项目授权；由部署方轮换环境变量并重启 |
 
 ---
 
@@ -577,7 +604,10 @@ blocks:                     # 按块授权 MCP 工具、挂载 Skill
 
 - 每个工作流可完整回放：事件日志、每次 LLM 调用的输入输出、模型版本、用量。
 - 指标：工作流耗时、节点失败率、各 provider 的延迟、错误率和 token 用量、每个 MR 的成本。
-- **反馈闭环**：从 GitLab 收集信号，包括评论的 👍/👎（award emoji）、讨论被 resolve 时对应行是否真的被改动。据此统计**每个模型作为提出方的准确率、作为挑战方的误杀率**，作为模型选择和 prompt 迭代的依据。
+- **反馈信号**：从 GitLab 收集发布者评论的 👍/👎（award emoji），以及讨论 resolve 后对应行是否改动。这些信号仅供参考，不自动判定问题有效性。
+- **原始计数**：`stats.feedback` 提供 `total`、`by_signal` 和按 `{provider, role, total, by_signal}` 的归因。归因只统计能按持久化 `feedback.finding_id` 精确关联 finding、且 publication 一致的 discussion；提出方取 `findings.origin_provider`，挑战方取 `challenge_node` 的 provider；汇总/未关联反馈不计入 provider 归因，但仍计入原始总数；同一 signal 可同时进入两个角色。讨论 award 只取发布者首条 note，不取 thread reply。
+- **执行与发布状态**：workflow 执行状态和 GitLab 发布状态分开保存。`publication_state` 为 `pending`（等待或可重试）、`published`（发布完成）、`skipped`（stale、取消或关闭 failure note）或 `failed`（永久失败，需手动 republish）；失败原因和跳过原因有界、脱敏保存。SSE 和轮询在两者都达到终态后结束。
+- **人工质量指标**：项目 `manage` 权限可将 finding 标为有效、无效或未确定，也可清除标注。提出方准确率为有效数除以有效与无效之和；挑战方误杀率为被反驳且人工判有效数除以被反驳且人工已有明确结论数。未标注和未确定不进入分母。`stats.quality_by_provider` 按 provider 返回分子、分母及比例；零分母返回 `null`，不猜测缺失来源。另列挑战推翻率，与顶层规则 `drop` 占比区分。指标按 workflow 创建时间筛选，反映当前标注，不是历史时点快照或模型效果保证。完整口径见 [统计 API](docs/design/03-http-api.md#45-系统)。
 
 ---
 
@@ -593,10 +623,11 @@ blocks:                     # 按块授权 MCP 工具、挂载 Skill
 | `gitlab.com/gitlab-org/api/client-go` (v1.46.0) | Apache-2.0 | 间接依赖 `hashicorp/go-retryablehttp`、`go-cleanhttp`（MPL-2.0，不修改即可正常使用） |
 | `github.com/modelcontextprotocol/go-sdk` | MIT → Apache-2.0（迁移中） | 两者均与 MIT 兼容 |
 
-- 发布物中附带 `THIRD_PARTY_LICENSES`，构建时用 `go-licenses` 自动收集。
+- 发布物使用单一声明文件 `licenses/THIRD_PARTY_NOTICES.txt`，由 `go run ./scripts/licensebundle` 生成。内容覆盖 Go 标准库、Linux/amd64 服务端链接的 40 个模块许可证，以及 9 个 production npm 包；本机 inventory 记录的主机模块为 42 个，运行时清单为 40 个；两者不同。CI 用 `go run ./scripts/licensebundle -check` 验证文件是否最新，并运行 `licensecheck`；本机验证还运行 `go mod verify`。
+- Dockerfile 把 `licenses/` 复制到 `/licenses/`，发布路径是 `/licenses/THIRD_PARTY_NOTICES.txt`。当前 Dockerfile 仍同时复制遗留的 `THIRD_PARTY_LICENSES`；新单文件是权威发布声明，旧文件不再作为生成目标。
 - 外部 MCP 服务器（如 codebase-memory-mcp）以独立进程运行，不链接进本项目，其许可证不影响本项目；若打包进 Docker 镜像分发，需遵守其自身许可证。
-- CI 许可证检查：允许 MIT、BSD、Apache-2.0、ISC、MPL-2.0（不修改）；**禁止 GPL、AGPL**。
-- **DAG 引擎来源**：`pkg/dag` 当前是依据本设计独立实现的 Go 代码，**不是**从 OpenCode-GraphAgent 移植的产物；没有复制上游代码，也没有添加 `NOTICE`。若未来选择移植，需先确认上游署名与授权（原仓库标注 AGPL-3.0-or-later，Copyright (c) 2026 LeXwDeX），并保留相应版权声明。以下事项仅适用于未来的移植评估：
+- CI 许可证检查：允许 MIT、BSD、Apache-2.0、ISC、MPL-2.0（不修改）；**禁止 GPL、AGPL**。`licensecheck` 在主机清单上检查 65 个模块，不能把该数字与 bundle 的 40 个 Linux 运行时模块混同。
+- **DAG 引擎来源**：`pkg/dag` 当前是依据本设计独立实现的 Go 代码，**不是**从 OpenCode-GraphAgent 移植的产物；没有复制上游代码，也没有添加 `NOTICE`。用户已于 2026-10-23 确认接受该独立实现作为本地验收口径，不要求移植，也不虚构上游 NOTICE、版权人或来源。若未来选择移植，需先确认上游署名与授权（原仓库标注 AGPL-3.0-or-later，Copyright (c) 2026 LeXwDeX），并保留相应版权声明；以下事项仅适用于该未来移植评估，不是当前实现的验收阻塞项：
   - 原 DAG 代码引用的上游 opencode 模块是 MIT（Copyright (c) 2025 opencode），若一并移植，需保留其版权声明。
   - 原块合约改编自 mattpocock/skills（MIT），若移植相关 prompt，需保留出处。
   - 移植前需确认原仓库中署名为 `Test <test@opencode.test>` 的两个提交（含引擎首个提交 `c8e7b676fd`）出自版权人本人。
@@ -638,7 +669,7 @@ blocks:                     # 按块授权 MCP 工具、挂载 Skill
 | M3 主 agent 编排 | plan / fan_out / synthesize、`review` 与 `reasoner` 块、只读工具循环、裁决不变量 I1–I7 |
 | M4 对抗核验 | `verify` 挑战者、拓扑 A 和 B、跨模型选择、去重、UNCERTAIN 策略、commit status |
 | M5 工作区与扩展 | 项目工作区与生命周期、Push Hook、onboarding 工作流与上下文文档、MCP 接入（首个为 codebase-memory-mcp）、Skill 接入 |
-| M6 运维与反馈 | 管理界面或 CLI、可观测性、反馈收集、许可证检查与 `THIRD_PARTY_LICENSES` |
+| M6 运维与反馈 | 管理界面或 CLI、可观测性、反馈收集、许可证检查与 `licenses/THIRD_PARTY_NOTICES.txt` |
 
 ---
 

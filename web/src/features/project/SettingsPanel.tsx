@@ -1,16 +1,17 @@
-import { useEffect, useId, useMemo, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  listProfiles, recreateWebhook, rotateProjectToken, unregisterProject, updateProject,
+  disableWebhook, enableWebhook, listProfiles, rebuildWebhook, rotateProjectToken, unregisterProject,
+  updateProject, validateProjectConnection,
 } from '../../api/api'
 import { ApiError, errorMessage } from '../../api/client'
-import type { Project } from '../../api/types'
+import type { Project, ProjectValidation } from '../../api/types'
 import { useCanWrite } from '../../components/RoleContext'
 import {
   Badge, Button, ConfirmDialog, Dialog, ErrorState, Field, LoadingState, Panel, Switch, useToast,
 } from '../../components/ui'
-import { formatDate } from '../../lib/format'
+import { formatDate, labelForWebhookState, webhookTone } from '../../lib/format'
 import ui from '../../styles/ui.module.css'
 import styles from '../../pages/pages.module.css'
 
@@ -18,6 +19,34 @@ type SettingsDraft = Record<string, unknown>
 
 function splitComma(value: unknown): string {
   return Array.isArray(value) ? value.join(', ') : ''
+}
+
+const ACCESS_LEVEL_ROLES: Record<number, string> = {
+  10: 'Guest',
+  20: 'Reporter',
+  30: 'Developer',
+  40: 'Maintainer',
+  50: 'Owner',
+}
+
+function accessLevelLabel(level: number): string {
+  return `${ACCESS_LEVEL_ROLES[level] || '未知角色'}（${level}）`
+}
+
+const WEBHOOK_EVENT_LABELS: Record<string, string> = {
+  push_events: 'Push',
+  merge_requests_events: 'Merge request',
+  note_events: 'Note',
+}
+
+function webhookEventLabel(event: string): string {
+  return WEBHOOK_EVENT_LABELS[event] || event
+}
+
+function webhookManagedByLabel(managedBy?: string, hookID?: number): string {
+  if (managedBy === 'crc') return '本服务'
+  if (hookID) return '待确认'
+  return '未配置'
 }
 
 function splitLines(value: unknown): string {
@@ -58,7 +87,10 @@ function BoolSetting({
 }
 
 export function SettingsPanel({ project }: { project: Project }) {
-  const canWrite = useCanWrite()
+  // A project access grant is the only source of project write capability.
+  const canWrite = project.access === 'manage'
+  // Platform-only surfaces stay hidden for ordinary project managers.
+  const isAdmin = useCanWrite()
   const toast = useToast()
   const queryClient = useQueryClient()
   const navigate = useNavigate()
@@ -72,11 +104,18 @@ export function SettingsPanel({ project }: { project: Project }) {
   const [pendingEnabled, setPendingEnabled] = useState(false)
   const [rotateOpen, setRotateOpen] = useState(false)
   const [token, setToken] = useState('')
+  const [rotateValidation, setRotateValidation] = useState<ProjectValidation | null>(null)
+  const [validating, setValidating] = useState(false)
   const [rotating, setRotating] = useState(false)
   const [rotateError, setRotateError] = useState<unknown>(null)
+  const validateRef = useRef(0)
+  const hookRequestRef = useRef(0)
   const [hookOpen, setHookOpen] = useState(false)
   const [hookPending, setHookPending] = useState(false)
   const [hookError, setHookError] = useState<unknown>(null)
+  const [disableOpen, setDisableOpen] = useState(false)
+  const [disablePending, setDisablePending] = useState(false)
+  const [disableError, setDisableError] = useState<unknown>(null)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [deletePending, setDeletePending] = useState(false)
   const [deleteError, setDeleteError] = useState<unknown>(null)
@@ -84,7 +123,7 @@ export function SettingsPanel({ project }: { project: Project }) {
   const profiles = useQuery({
     queryKey: ['profiles', 'project-settings'],
     queryFn: () => listProfiles(),
-    enabled: canWrite,
+    enabled: canWrite && isAdmin,
   })
 
   useEffect(() => {
@@ -93,6 +132,20 @@ export function SettingsPanel({ project }: { project: Project }) {
     setJsonText(JSON.stringify(project.settings || {}, null, 2))
     setJsonError(null)
     setSaveError(null)
+    validateRef.current += 1
+    setValidating(false)
+    setRotating(false)
+    setRotateOpen(false)
+    setToken('')
+    setRotateValidation(null)
+    setRotateError(null)
+    hookRequestRef.current += 1
+    setHookOpen(false)
+    setHookPending(false)
+    setHookError(null)
+    setDisableOpen(false)
+    setDisablePending(false)
+    setDisableError(null)
   }, [project.id])
 
   const updateDraft = (key: string, value: unknown) => {
@@ -146,42 +199,149 @@ export function SettingsPanel({ project }: { project: Project }) {
     }
   }
 
+  const openKeyDialog = () => {
+    setRotateError(null)
+    setToken('')
+    setRotateValidation(null)
+    setRotateOpen(true)
+  }
+
+  const closeKeyDialog = () => {
+    if (rotating || validating) return
+    validateRef.current += 1
+    setRotateOpen(false)
+    setToken('')
+    setRotateValidation(null)
+    setRotateError(null)
+  }
+
+  const changeKey = (value: string) => {
+    setToken(value)
+    setRotateValidation(null)
+    setRotateError(null)
+  }
+
+  const validateKey = async () => {
+    if (!canWrite || !isAdmin) return
+    if (!token.trim()) {
+      setRotateError(new Error('请输入新的访问 Key。'))
+      return
+    }
+    const requestId = validateRef.current + 1
+    validateRef.current = requestId
+    setValidating(true)
+    setRotateError(null)
+    setRotateValidation(null)
+    try {
+      const value = await validateProjectConnection({ project: String(project.id), token: token.trim() })
+      if (validateRef.current !== requestId) return
+      if (value.project_id !== project.id) {
+        setRotateError(new Error('校验返回的项目与当前项目不一致，未更新访问 Key。'))
+        return
+      }
+      setRotateValidation(value)
+    } catch (error) {
+      if (validateRef.current !== requestId) return
+      setRotateError(error)
+    } finally {
+      if (validateRef.current === requestId) setValidating(false)
+    }
+  }
+
   const rotate = async () => {
     if (!canWrite) return
     if (!token.trim()) {
-      setRotateError(new Error('请输入新的 Project Access Token。'))
+      setRotateError(new Error('请输入新的访问 Key。'))
       return
     }
+    // Platform admins keep the optional preflight. Project managers rely on
+    // the rotate handler, which validates the credential server-side.
+    if (isAdmin && !rotateValidation) {
+      setRotateError(new Error('请先校验新的访问 Key。'))
+      return
+    }
+    const requestId = validateRef.current + 1
+    validateRef.current = requestId
     setRotating(true)
     setRotateError(null)
     try {
       await rotateProjectToken(project.id, token.trim())
+      if (validateRef.current !== requestId) return
       setToken('')
+      setRotateValidation(null)
       setRotateOpen(false)
-      toast.push('success', '项目 token 已轮换。')
+      toast.push('success', '仅更新平台保存的访问 Key；未在 GitLab 创建或撤销 Token，也不会自动触发评审或初始化。')
       await queryClient.invalidateQueries({ queryKey: ['project', project.id] })
       await queryClient.invalidateQueries({ queryKey: ['projects'] })
     } catch (error) {
+      if (validateRef.current !== requestId) return
       setRotateError(error)
     } finally {
-      setRotating(false)
+      if (validateRef.current === requestId) setRotating(false)
+    }
+  }
+
+  const refreshWebhook = async (message: string) => {
+    toast.push('success', message)
+    await queryClient.invalidateQueries({ queryKey: ['project', project.id] })
+    await queryClient.invalidateQueries({ queryKey: ['projects'] })
+  }
+
+  const beginHookRequest = () => {
+    const requestId = hookRequestRef.current + 1
+    hookRequestRef.current = requestId
+    return requestId
+  }
+
+  const enableHook = async () => {
+    if (!canWrite) return
+    const requestId = beginHookRequest()
+    setHookPending(true)
+    setHookError(null)
+    try {
+      const response = await enableWebhook(project.id)
+      if (hookRequestRef.current !== requestId) return
+      const hookId = response?.hook_id
+      await refreshWebhook(hookId ? `GitLab webhook 已启用（#${hookId}）。` : 'GitLab webhook 已启用。')
+    } catch (error) {
+      if (hookRequestRef.current === requestId) setHookError(error)
+    } finally {
+      if (hookRequestRef.current === requestId) setHookPending(false)
     }
   }
 
   const rebuildHook = async () => {
     if (!canWrite) return
+    const requestId = beginHookRequest()
     setHookPending(true)
     setHookError(null)
     try {
-      const response = await recreateWebhook(project.id)
+      const response = await rebuildWebhook(project.id)
+      if (hookRequestRef.current !== requestId) return
       setHookOpen(false)
-      const hookId = response && (typeof response.hook_id === 'number' || typeof response.hook_id === 'string') ? String(response.hook_id) : ''
-      toast.push('success', hookId ? `GitLab webhook 已重建（#${hookId}）。` : 'GitLab webhook 已重建。')
-      await queryClient.invalidateQueries({ queryKey: ['project', project.id] })
+      const hookId = response?.hook_id
+      await refreshWebhook(hookId ? `GitLab webhook 已重建（#${hookId}）。` : 'GitLab webhook 已重建。')
     } catch (error) {
-      setHookError(error)
+      if (hookRequestRef.current === requestId) setHookError(error)
     } finally {
-      setHookPending(false)
+      if (hookRequestRef.current === requestId) setHookPending(false)
+    }
+  }
+
+  const disableHook = async () => {
+    if (!canWrite) return
+    const requestId = beginHookRequest()
+    setDisablePending(true)
+    setDisableError(null)
+    try {
+      await disableWebhook(project.id)
+      if (hookRequestRef.current !== requestId) return
+      setDisableOpen(false)
+      await refreshWebhook('GitLab webhook 已禁用；未删除手动或外部 hook。')
+    } catch (error) {
+      if (hookRequestRef.current === requestId) setDisableError(error)
+    } finally {
+      if (hookRequestRef.current === requestId) setDisablePending(false)
     }
   }
 
@@ -217,6 +377,10 @@ export function SettingsPanel({ project }: { project: Project }) {
     }
   }
 
+  const webhookState = project.webhook_state || (project.hook_id ? 'unknown' : 'disabled')
+  const webhookEvents = project.webhook_events || []
+  const webhookBusy = hookPending || disablePending
+
   if (!canWrite) {
     return (
       <div className={styles.split}>
@@ -227,9 +391,13 @@ export function SettingsPanel({ project }: { project: Project }) {
             <div><dt>评审语言</dt><dd>{String(project.settings?.language || '继承平台默认')}</dd></div>
             <div><dt>跳过 Draft</dt><dd>{project.settings?.skip_draft === undefined ? '继承平台默认' : project.settings.skip_draft ? '启用' : '禁用'}</dd></div>
             <div><dt>commit status</dt><dd>{project.settings?.commit_status === undefined ? '继承平台默认' : project.settings.commit_status ? '启用' : '禁用'}</dd></div>
-            <div><dt>webhook</dt><dd>{project.hook_id ? '本服务创建' : '手动配置'}</dd></div>
+            <div><dt>webhook</dt><dd><Badge tone={webhookTone(webhookState)}>{labelForWebhookState(webhookState)}</Badge></dd></div>
+            <div><dt>托管方</dt><dd>{webhookManagedByLabel(project.webhook_managed_by, project.hook_id)}</dd></div>
+            {project.hook_id ? <div><dt>hook</dt><dd className="mono">#{project.hook_id}</dd></div> : null}
+            {webhookEvents.length ? <div><dt>事件</dt><dd>{webhookEvents.map(webhookEventLabel).join(' · ')}</dd></div> : null}
           </dl>
-          <div className={styles.notice}>只读账号不能修改项目设置、轮换 token、重建 webhook 或注销项目。</div>
+          {project.webhook_error ? <span className={styles.resultError}>{project.webhook_error}</span> : null}
+          <div className={styles.notice}>只读账号不能修改项目设置、更新访问 Key、启用、重建或禁用 webhook，也不能注销项目。</div>
           <details>
             <summary style={{ minHeight: 44, display: 'flex', alignItems: 'center', cursor: 'pointer' }}>查看设置 JSON</summary>
             <pre className="pre" style={jsonStyle}>{JSON.stringify(project.settings || {}, null, 2)}</pre>
@@ -247,11 +415,17 @@ export function SettingsPanel({ project }: { project: Project }) {
           aside={projectsAside(project)}
         >
           <div className="formGrid">
-            <Field label="评审档位" htmlFor={profileId} hint="来自平台配置；此处可改项目默认档位。">
-              <input id={profileId} className="input" list="project-profile-options" value={profile} onChange={(event) => setProfile(event.target.value)} />
-              <datalist id="project-profile-options">
-                {(profiles.data?.profiles || []).map((item) => <option key={item.name} value={item.name} />)}
-              </datalist>
+            <Field
+              label="评审档位"
+              htmlFor={profileId}
+              hint={isAdmin ? '来自平台配置；此处可改项目默认档位。' : '当前项目档位。普通项目管理员不读取全局档位列表；输入值由服务端校验。'}
+            >
+              <input id={profileId} className="input" list={isAdmin ? 'project-profile-options' : undefined} value={profile} onChange={(event) => setProfile(event.target.value)} />
+              {isAdmin ? (
+                <datalist id="project-profile-options">
+                  {(profiles.data?.profiles || []).map((item) => <option key={item.name} value={item.name} />)}
+                </datalist>
+              ) : null}
             </Field>
             <Field label="评审语言" htmlFor="setting-language" hint="留空时继承平台默认。">
               <select id="setting-language" className="select" value={typeof draft.language === 'string' ? draft.language : ''} onChange={(event) => updateDraft('language', event.target.value)}>
@@ -327,9 +501,45 @@ export function SettingsPanel({ project }: { project: Project }) {
           <div className={ui.stack}>
             <span className="small muted">token 过期时间：{project.token_expires_at ? formatDate(project.token_expires_at) : '未提供'}</span>
             <span className="small muted">token scope：<span className="mono">{project.token_scopes?.join(', ') || '不可用'}</span></span>
-            <Button variant="secondary" onClick={() => { setRotateError(null); setToken(''); setRotateOpen(true) }}>轮换 token</Button>
-            <Button variant="secondary" onClick={() => { setHookError(null); setHookOpen(true) }}>重建 webhook</Button>
-            <span className="small muted">{project.hook_id ? `当前由本服务创建（hook #${project.hook_id}）` : '当前为手动配置或未提供 hook ID'}</span>
+            <Button variant="secondary" onClick={openKeyDialog}>更新访问 Key</Button>
+            <div className={ui.rowBetween}>
+              <span>GitLab Activity</span>
+              <Badge tone={webhookTone(webhookState)}>{labelForWebhookState(webhookState)}</Badge>
+            </div>
+            <span className="small muted">
+              托管方：{webhookManagedByLabel(project.webhook_managed_by, project.hook_id)}
+              {project.hook_id ? ` · hook #${project.hook_id}` : ''}
+            </span>
+            <span className="small muted">
+              事件：{webhookEvents.length ? webhookEvents.map(webhookEventLabel).join(' · ') : '未记录'}
+            </span>
+            {project.webhook_updated_at ? (
+              <span className="small muted">最近更新：{formatDate(project.webhook_updated_at)}</span>
+            ) : null}
+            {project.webhook_error ? <span className={styles.resultError}>{project.webhook_error}</span> : null}
+            <div className={ui.row}>
+              {webhookState === 'enabled' ? (
+                <>
+                  <Button variant="secondary" onClick={() => { setHookError(null); setHookOpen(true) }} disabled={webhookBusy}>
+                    重建 webhook
+                  </Button>
+                  <Button variant="danger" onClick={() => { setDisableError(null); setDisableOpen(true) }} disabled={webhookBusy}>
+                    禁用 webhook
+                  </Button>
+                </>
+              ) : (
+                <Button variant="primary" onClick={() => { void enableHook() }} loading={hookPending} disabled={webhookState === 'pending'}>
+                  {webhookState === 'failed' ? '重试启用 GitLab Activity' : '启用 GitLab Activity'}
+                </Button>
+              )}
+              {webhookState !== 'enabled' && project.hook_id ? (
+                <Button variant="secondary" onClick={() => { setHookError(null); setHookOpen(true) }} disabled={webhookBusy}>
+                  重建 webhook
+                </Button>
+              ) : null}
+            </div>
+            {hookError ? <ErrorState error={hookError} title="启用 webhook 失败" /> : null}
+            <span className="small muted">启用会在 GitLab 创建或复用本服务记录的 hook；同 URL 的手动 hook 不会被接管或删除。</span>
           </div>
         </Panel>
         <Panel title="启用状态">
@@ -346,19 +556,65 @@ export function SettingsPanel({ project }: { project: Project }) {
 
       <Dialog
         open={rotateOpen}
-        onClose={() => { if (!rotating) { setRotateOpen(false); setToken('') } }}
-        title="轮换 Project Access Token"
-        description="新 token 应具有 api 和 read_repository scope，且属于可访问该项目的 bot 用户。新值不会在界面回显。"
+        onClose={closeKeyDialog}
+        title="更新访问 Key"
+        description={isAdmin
+          ? '输入新的访问 Key，先只读校验它是否属于当前项目。保存只会替换平台存储的 Key，新值不会在界面回显。'
+          : '输入新的访问 Key。保存时由服务端校验它是否属于当前项目；新值不会在界面回显。'}
         footer={(
           <>
-            <Button variant="secondary" onClick={() => { setRotateOpen(false); setToken('') }} disabled={rotating}>取消</Button>
-            <Button variant="primary" onClick={() => { void rotate() }} loading={rotating}>保存新 token</Button>
+            <Button variant="secondary" onClick={closeKeyDialog} disabled={rotating || validating}>取消</Button>
+            {isAdmin ? (
+              <Button variant="secondary" onClick={() => { void validateKey() }} loading={validating} disabled={rotating}>校验连接</Button>
+            ) : null}
+            <Button
+              variant="primary"
+              onClick={() => { void rotate() }}
+              loading={rotating}
+              disabled={isAdmin ? (!rotateValidation || validating) : validating}
+            >
+              保存访问 Key
+            </Button>
           </>
         )}
       >
-        {rotateError ? <ErrorState error={rotateError} title="轮换失败" /> : null}
-        <Field label="新的 Project Access Token" htmlFor="rotate-token">
-          <input id="rotate-token" className="input" type="password" value={token} onChange={(event) => setToken(event.target.value)} autoComplete="new-password" />
+        {rotateError ? <ErrorState error={rotateError} title="校验或保存失败" /> : null}
+        {!isAdmin ? (
+          <div className={styles.notice}>保存时由服务端校验 Key 归属和权限；界面不会显示或保存明文。</div>
+        ) : null}
+        {rotateValidation ? (
+          <>
+            <div className={styles.notice} role="status">
+              <strong>校验通过，尚未保存</strong>
+            </div>
+            <dl className={ui.definitionGrid}>
+              <div><dt>项目</dt><dd className="mono">{rotateValidation.path_with_namespace}</dd></div>
+              <div><dt>当前身份</dt><dd>{rotateValidation.username}</dd></div>
+              <div><dt>项目角色</dt><dd>{accessLevelLabel(rotateValidation.access_level)}</dd></div>
+              <div>
+                <dt>所需 scope</dt>
+                <dd>{rotateValidation.token_scopes.length ? (
+                  <span className={styles.badgeGroup}>
+                    {rotateValidation.token_scopes.map((scope) => <Badge key={scope} tone="neutral">{scope}</Badge>)}
+                  </span>
+                ) : '未提供'}</dd>
+              </div>
+              <div><dt>Key 有效期</dt><dd>{rotateValidation.token_expires_at ? formatDate(rotateValidation.token_expires_at) : '未提供'}</dd></div>
+              <div><dt>仓库 HEAD</dt><dd className="mono">{rotateValidation.git_head}</dd></div>
+            </dl>
+            <div className={styles.notice}>只读校验未更新平台记录，也未在 GitLab 中创建或撤销任何内容；保存时服务端仍会复核凭据。</div>
+          </>
+        ) : null}
+        <Field label="新的访问 Key" htmlFor="rotate-token">
+          <input
+            id="rotate-token"
+            className="input"
+            type="password"
+            value={token}
+            onChange={(event) => changeKey(event.target.value)}
+            autoComplete="new-password"
+            disabled={rotating || validating}
+          />
         </Field>
       </Dialog>
 
@@ -367,11 +623,23 @@ export function SettingsPanel({ project }: { project: Project }) {
         onClose={() => setHookOpen(false)}
         onConfirm={() => { void rebuildHook() }}
         title="重建 GitLab webhook？"
-        description="服务端会重新创建或更新该项目的 GitLab webhook。旧 hook 可能被删除，请确认当前部署地址和权限有效。"
+        description="服务端会轮换 webhook secret，并优先更新本服务记录的 hook；记录不存在时才重新创建。手动或外部 hook 不受影响。"
         confirmLabel="重建 webhook"
         danger={false}
         pending={hookPending}
         error={hookError}
+      />
+
+      <ConfirmDialog
+        open={disableOpen}
+        onClose={() => setDisableOpen(false)}
+        onConfirm={() => { void disableHook() }}
+        title="禁用 GitLab webhook？"
+        description="只删除本服务创建并记录的 hook；手动或外部 hook 不受影响。项目与历史评审保留，可稍后重新启用。"
+        confirmLabel="禁用 webhook"
+        danger
+        pending={disablePending}
+        error={disableError}
       />
 
       <ConfirmDialog

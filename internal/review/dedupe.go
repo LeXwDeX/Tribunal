@@ -128,14 +128,19 @@ func (g Group) Published() bool {
 	return g.Decision != nil && (g.Decision.Action == ActionPublish || g.Decision.Action == ActionMark || g.Decision.Action == ActionDowngrade)
 }
 
-// Proposal is one proposer node's qualified findings.
+// Proposal is one proposer node's qualified findings. Verdict, EvidenceStatus,
+// and EvidenceGaps keep the review channel's explicit evidence state so gather
+// can distinguish an explained BLOCKING from unresolved missing evidence.
 type Proposal struct {
-	Node     string
-	Kind     string
-	Provider string
-	Model    string
-	Attempt  int
-	Findings []FindingOut
+	Node           string
+	Kind           string
+	Provider       string
+	Model          string
+	Attempt        int
+	Verdict        string
+	EvidenceStatus string
+	EvidenceGaps   []string
+	Findings       []FindingOut
 }
 
 // DroppedFinding is a review.gate rebuttal. The finding is recorded but not
@@ -150,6 +155,9 @@ type GatherInput struct {
 	WorkflowID string
 	Proposals  []Proposal
 	Dropped    []DroppedFinding
+	// Unresolved carries review-level signals that no finding explains, such
+	// as a BLOCKING gate with no accepted finding.
+	Unresolved []UnresolvedSignal
 }
 
 // GatherOptions is the profile context for dedupe and challenge fan-out.
@@ -160,7 +168,12 @@ type GatherOptions struct {
 	ChallengeProvider string
 	FallbackProvider  string
 	AllowedProviders  []string
-	BudgetExhausted   bool
+	// Identities maps a provider name to a stable endpoint+model identity.
+	// nil keeps the legacy provider/model vote key; a non-nil map is
+	// conservative: missing or empty metadata is treated as possibly the same
+	// model and cannot prove an independent vote.
+	Identities      map[string]string
+	BudgetExhausted bool
 }
 
 // ChallengeTarget asks the engine to expand one verify node.
@@ -177,6 +190,7 @@ type GatherResult struct {
 	Dropped     []Finding
 	ToChallenge []ChallengeTarget
 	Warnings    []string
+	Unresolved  []UnresolvedSignal
 }
 
 // ProposalFromCodeReview converts a strict code-review output.
@@ -190,7 +204,12 @@ func ProposalFromReview(node, kind, provider, model string, attempt int, out Rev
 	if kind == "" {
 		kind = ContractReview
 	}
-	return Proposal{Node: node, Kind: kind, Provider: provider, Model: model, Attempt: attempt, Findings: out.Findings}
+	return Proposal{
+		Node: node, Kind: kind, Provider: provider, Model: model, Attempt: attempt,
+		Verdict: out.Verdict, EvidenceStatus: out.EvidenceStatus,
+		EvidenceGaps: append([]string(nil), out.EvidenceGaps...),
+		Findings:     out.Findings,
+	}
 }
 
 // ProposalFromReasoner normalizes the reasoner severity names and fields.
@@ -301,6 +320,14 @@ func Gather(in GatherInput, opts GatherOptions) (GatherResult, error) {
 	if err != nil {
 		return GatherResult{}, err
 	}
+	derived := make([]UnresolvedSignal, 0)
+	for _, proposal := range in.Proposals {
+		derived = append(derived, proposalUnresolved(proposal)...)
+	}
+	unresolved, err := normalizeUnresolved(append(derived, in.Unresolved...))
+	if err != nil {
+		return GatherResult{}, err
+	}
 	droppedRefs := make(map[Ref]struct{}, len(dropped))
 	for _, finding := range dropped {
 		droppedRefs[Ref{Node: finding.Origin.Node, Index: finding.Origin.Index}] = struct{}{}
@@ -313,11 +340,11 @@ func Gather(in GatherInput, opts GatherOptions) (GatherResult, error) {
 	}
 	groups := Dedupe(kept)
 
-	result := GatherResult{Groups: groups, Dropped: dropped}
+	result := GatherResult{Groups: groups, Dropped: dropped, Unresolved: unresolved}
 	budgetWarning := false
 	for i := range result.Groups {
 		group := &result.Groups[i]
-		group.Votes = CountVotes(group.Sources, weight)
+		group.Votes = countVotes(group.Sources, weight, opts.Identities)
 		group.Consensus = meetsVotes(group.Votes, opts.MinVotes)
 		if !severityIn(group.Severity, challengeOnly) || group.Consensus {
 			continue
@@ -568,7 +595,12 @@ func confidenceRank(value Confidence) int {
 // CountVotes counts one full vote per provider/model pair and applies the
 // configured weight to extra findings from the same pair. Standards and intent
 // channels from the same model therefore do not become independent votes.
+// Callers that know endpoint/model identities should use GatherOptions.
 func CountVotes(sources []Finding, sameModelWeight float64) float64 {
+	return countVotes(sources, sameModelWeight, nil)
+}
+
+func countVotes(sources []Finding, sameModelWeight float64, identities map[string]string) float64 {
 	weight := sameModelWeight
 	if weight == 0 {
 		weight = defaultSameModelWeight
@@ -579,9 +611,17 @@ func CountVotes(sources []Finding, sameModelWeight float64) float64 {
 	seen := make(map[string]struct{}, len(sources))
 	total := 0.0
 	for _, source := range sources {
-		key := source.Origin.Provider + "\x1f" + source.Origin.Model
-		if source.Origin.Provider == "" && source.Origin.Model == "" {
-			key = "\x00anonymous"
+		key := ""
+		if identities == nil {
+			key = source.Origin.Provider + "\x1f" + source.Origin.Model
+			if source.Origin.Provider == "" && source.Origin.Model == "" {
+				key = "\x00anonymous"
+			}
+		} else {
+			key = identities[source.Origin.Provider]
+			if key == "" {
+				key = "\x00unknown-model"
+			}
 		}
 		if _, ok := seen[key]; ok {
 			total += weight
@@ -598,43 +638,101 @@ func meetsVotes(votes, minVotes float64) bool {
 }
 
 func selectChallenger(group Group, opts GatherOptions) (string, bool, string, error) {
-	sourceProviders := make(map[string]struct{}, len(group.Sources))
-	for _, source := range group.Sources {
-		if source.Origin.Provider != "" {
-			sourceProviders[source.Origin.Provider] = struct{}{}
-		}
-	}
 	allowed := stringSet(opts.AllowedProviders)
 	switch opts.ChallengeProvider {
 	case "":
 		return "", false, "", invalid("challenge_provider", "must be configured when a finding needs challenge")
 	case "cross":
+		if opts.Identities == nil {
+			return selectCrossByProvider(group, opts)
+		}
+		sourceIdentities, sourceUnknown := groupSourceIdentities(group, opts.Identities)
 		for _, candidate := range opts.AllowedProviders {
 			if candidate == "" {
 				continue
 			}
-			if _, used := sourceProviders[candidate]; !used {
+			identity := opts.Identities[candidate]
+			if identity == "" || sourceUnknown {
+				continue
+			}
+			if _, used := sourceIdentities[identity]; !used {
 				return candidate, false, "", nil
 			}
 		}
 		if opts.FallbackProvider == "" {
-			return "", false, "", invalid("fallback_provider", "cross challenge has no unused provider and no fallback")
+			return "", false, "", invalid("fallback_provider", "cross challenge has no independent model and no fallback")
 		}
-		_, sameModel := sourceProviders[opts.FallbackProvider]
-		warning := ""
+		fallbackIdentity := opts.Identities[opts.FallbackProvider]
+		_, used := sourceIdentities[fallbackIdentity]
+		sameModel := sourceUnknown || fallbackIdentity == "" || used
 		if sameModel {
-			warning = "cross challenge fallback uses a proposer provider for group " + group.ID
+			return opts.FallbackProvider, true, "cross challenge cannot use an independent model for group " + group.ID + "; fallback " + opts.FallbackProvider + " is not cross-model confirmation", nil
 		}
-		return opts.FallbackProvider, sameModel, warning, nil
+		return opts.FallbackProvider, false, "", nil
 	default:
 		if len(allowed) > 0 {
 			if _, ok := allowed[opts.ChallengeProvider]; !ok {
 				return "", false, "", invalid("challenge_provider", "provider %q is not allowed", opts.ChallengeProvider)
 			}
 		}
-		_, sameModel := sourceProviders[opts.ChallengeProvider]
-		return opts.ChallengeProvider, sameModel, "", nil
+		if opts.Identities == nil {
+			_, sameModel := sourceProviders(group)[opts.ChallengeProvider]
+			return opts.ChallengeProvider, sameModel, "", nil
+		}
+		sourceIdentities, sourceUnknown := groupSourceIdentities(group, opts.Identities)
+		identity := opts.Identities[opts.ChallengeProvider]
+		_, used := sourceIdentities[identity]
+		return opts.ChallengeProvider, sourceUnknown || identity == "" || used, "", nil
 	}
+}
+
+func selectCrossByProvider(group Group, opts GatherOptions) (string, bool, string, error) {
+	sourceProviders := sourceProviders(group)
+	for _, candidate := range opts.AllowedProviders {
+		if candidate == "" {
+			continue
+		}
+		if _, used := sourceProviders[candidate]; !used {
+			return candidate, false, "", nil
+		}
+	}
+	if opts.FallbackProvider == "" {
+		return "", false, "", invalid("fallback_provider", "cross challenge has no unused provider and no fallback")
+	}
+	_, sameModel := sourceProviders[opts.FallbackProvider]
+	warning := ""
+	if sameModel {
+		warning = "cross challenge fallback uses a proposer provider for group " + group.ID
+	}
+	return opts.FallbackProvider, sameModel, warning, nil
+}
+
+func sourceProviders(group Group) map[string]struct{} {
+	out := make(map[string]struct{}, len(group.Sources))
+	for _, source := range group.Sources {
+		if source.Origin.Provider != "" {
+			out[source.Origin.Provider] = struct{}{}
+		}
+	}
+	return out
+}
+
+func groupSourceIdentities(group Group, identities map[string]string) (map[string]struct{}, bool) {
+	out := make(map[string]struct{}, len(group.Sources))
+	unknown := false
+	for _, source := range group.Sources {
+		if source.Origin.Provider == "" {
+			unknown = true
+			continue
+		}
+		identity := identities[source.Origin.Provider]
+		if identity == "" {
+			unknown = true
+			continue
+		}
+		out[identity] = struct{}{}
+	}
+	return out, unknown
 }
 
 func appendUnique(values []string, value string) []string {

@@ -374,6 +374,37 @@ func TestContextLockedDocumentIsNotOverwritten(t *testing.T) {
 	}
 }
 
+func TestWriteActiveContextReplacesLockedProjection(t *testing.T) {
+	shaA := strings.Repeat("c", 40)
+	shaB := strings.Repeat("d", 40)
+	ws := NewManager(t.TempDir(), nil).Get(9)
+	meta := ContextMeta{SourceSHA: shaA, Model: "test", GeneratedAt: time.Now().UTC()}
+	if err := ws.WriteContext(shaA, map[string][]byte{"AGENTS.md": []byte("original")}, meta); err != nil {
+		t.Fatalf("WriteContext() error = %v", err)
+	}
+	if err := ws.SetContextLocked(shaA, true); err != nil {
+		t.Fatalf("SetContextLocked() error = %v", err)
+	}
+	activeMeta := ContextMeta{SourceSHA: shaB, Model: "test", GeneratedAt: time.Now().UTC(), Locked: true}
+	if err := ws.WriteActiveContext(shaB, map[string][]byte{"AGENTS.md": []byte("database active")}, activeMeta); err != nil {
+		t.Fatalf("WriteActiveContext() error = %v", err)
+	}
+	data, err := ws.ReadContext(shaB, "AGENTS.md")
+	if err != nil || string(data) != "database active" {
+		t.Fatalf("active document = %q, %v", data, err)
+	}
+	got, err := ws.ContextMeta(shaB)
+	if err != nil || !got.Locked {
+		t.Fatalf("active metadata = %+v, %v", got, err)
+	}
+	if err := ws.WriteContext(shaB, map[string][]byte{"AGENTS.md": []byte("file writer")}, activeMeta); !errors.Is(err, ErrContextLocked) {
+		t.Fatalf("WriteContext(locked) = %v, want ErrContextLocked", err)
+	}
+	if data, err := ws.ReadContext(shaB, "AGENTS.md"); err != nil || string(data) != "database active" {
+		t.Fatalf("locked projection changed: %q, %v", data, err)
+	}
+}
+
 func TestContextRejectsEscapeAndSymlinks(t *testing.T) {
 	sha := strings.Repeat("b", 40)
 	ws := NewManager(t.TempDir(), nil).Get(6)

@@ -302,3 +302,186 @@ func TestAPIErrorEnvelope(t *testing.T) {
 		t.Fatalf("envelope = %+v", envelope)
 	}
 }
+
+func TestListFollowsNextCursor(t *testing.T) {
+	var requests atomic.Int32
+	var secondQuery string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Query().Get("cursor") {
+		case "":
+			_, _ = io.WriteString(w, `{"projects":[{"id":42}],"next_cursor":"page-two"}`)
+		case "page-two":
+			secondQuery = r.URL.RawQuery
+			_, _ = io.WriteString(w, `{"projects":[{"id":43}],"next_cursor":""}`)
+		default:
+			http.Error(w, "bad cursor", http.StatusBadRequest)
+		}
+	}))
+	defer ts.Close()
+
+	stdout, _, err := runCtl(t, []string{"--url", ts.URL, "projects", "list"}, map[string]string{
+		"REVIEW_ADMIN_TOKEN": "admin",
+	}, ts.Client())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if requests.Load() != 2 {
+		t.Fatalf("requests = %d", requests.Load())
+	}
+	if secondQuery != "cursor=page-two" {
+		t.Fatalf("second query = %q", secondQuery)
+	}
+	for _, want := range []string{`"id": 42`, `"id": 43`} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("stdout missing %s: %s", want, stdout)
+		}
+	}
+	if strings.Contains(stdout, "next_cursor") {
+		t.Fatalf("stdout contains pagination metadata: %s", stdout)
+	}
+}
+
+func TestAdminUserAndGrantCommands(t *testing.T) {
+	cases := []struct {
+		name       string
+		args       []string
+		method     string
+		path       string
+		status     int
+		response   string
+		wantBody   map[string]any
+		wantOutput bool
+	}{
+		{
+			name: "users list", args: []string{"users", "list"},
+			method: http.MethodGet, path: "/api/v1/admin/users", status: http.StatusOK,
+			response:   `{"users":[{"id":7,"username":"alice","disabled":false}],"next_cursor":""}`,
+			wantOutput: true,
+		},
+		{
+			name: "disable", args: []string{"users", "disable", "7"},
+			method: http.MethodPatch, path: "/api/v1/admin/users/7", status: http.StatusOK,
+			response:   `{"id":7,"disabled":true}`,
+			wantBody:   map[string]any{"disabled": true},
+			wantOutput: true,
+		},
+		{
+			name: "enable", args: []string{"users", "enable", "7"},
+			method: http.MethodPatch, path: "/api/v1/admin/users/7", status: http.StatusOK,
+			response:   `{"id":7,"disabled":false}`,
+			wantBody:   map[string]any{"disabled": false},
+			wantOutput: true,
+		},
+		{
+			name: "revoke credentials", args: []string{"users", "revoke", "7"},
+			method: http.MethodDelete, path: "/api/v1/admin/users/7/credentials", status: http.StatusNoContent,
+		},
+		{
+			name: "all projects", args: []string{"projects", "all"},
+			method: http.MethodGet, path: "/api/v1/admin/projects", status: http.StatusOK,
+			response:   `{"projects":[{"id":42,"path_with_namespace":"group/repo"}],"next_cursor":""}`,
+			wantOutput: true,
+		},
+		{
+			name: "list grants", args: []string{"projects", "grants", "list", "42"},
+			method: http.MethodGet, path: "/api/v1/admin/projects/42/grants", status: http.StatusOK,
+			response:   `{"grants":[{"project_id":42,"user_id":7,"role":"manage"}],"next_cursor":""}`,
+			wantOutput: true,
+		},
+		{
+			name: "set grant", args: []string{"projects", "grants", "set", "42", "7", "read"},
+			method: http.MethodPut, path: "/api/v1/admin/projects/42/grants/7", status: http.StatusOK,
+			response:   `{"project_id":42,"user_id":7,"role":"read"}`,
+			wantBody:   map[string]any{"role": "read"},
+			wantOutput: true,
+		},
+		{
+			name: "delete grant", args: []string{"projects", "grants", "delete", "42", "7"},
+			method: http.MethodDelete, path: "/api/v1/admin/projects/42/grants/7", status: http.StatusNoContent,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var captured capturedRequest
+			ts := httptest.NewServer(captureHandler(t, tc.status, tc.response, &captured))
+			defer ts.Close()
+			stdout, _, err := runCtl(t, append([]string{"--url", ts.URL}, tc.args...),
+				map[string]string{"REVIEW_ADMIN_TOKEN": "admin"}, ts.Client())
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if captured.method != tc.method || captured.path != tc.path {
+				t.Fatalf("request = %s %s, want %s %s", captured.method, captured.path, tc.method, tc.path)
+			}
+			for key, value := range tc.wantBody {
+				if captured.body[key] != value {
+					t.Fatalf("body[%s] = %v, want %v", key, captured.body[key], value)
+				}
+			}
+			if tc.wantOutput && strings.TrimSpace(stdout) == "" {
+				t.Fatal("stdout is empty")
+			}
+			if !tc.wantOutput && strings.TrimSpace(stdout) != "" {
+				t.Fatalf("stdout = %q, want empty", stdout)
+			}
+		})
+	}
+}
+
+func TestProjectsWebhookLifecycle(t *testing.T) {
+	cases := []struct {
+		action string
+		method string
+		path   string
+	}{
+		{"enable", http.MethodPost, "/api/v1/projects/42/webhook"},
+		{"rebuild", http.MethodPost, "/api/v1/projects/42/webhook/rebuild"},
+		{"disable", http.MethodDelete, "/api/v1/projects/42/webhook"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.action, func(t *testing.T) {
+			var captured capturedRequest
+			ts := httptest.NewServer(captureHandler(t, http.StatusOK,
+				`{"state":"enabled","managed_by":"crc"}`, &captured))
+			defer ts.Close()
+			stdout, _, err := runCtl(t, []string{
+				"--url", ts.URL, "projects", "webhook", tc.action, "42",
+			}, map[string]string{"REVIEW_ADMIN_TOKEN": "admin"}, ts.Client())
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if captured.method != tc.method || captured.path != tc.path {
+				t.Fatalf("request = %s %s", captured.method, captured.path)
+			}
+			if captured.auth != "Bearer admin" {
+				t.Fatalf("auth = %q", captured.auth)
+			}
+			if !strings.Contains(stdout, `"managed_by": "crc"`) {
+				t.Fatalf("stdout = %s", stdout)
+			}
+		})
+	}
+}
+
+func TestAdminCommandValidation(t *testing.T) {
+	for _, args := range [][]string{
+		{"users", "bogus"},
+		{"users", "disable"},
+		{"users", "disable", "abc"},
+		{"users", "revoke", "0"},
+		{"projects", "grants"},
+		{"projects", "grants", "set", "42", "7", "owner"},
+		{"projects", "grants", "delete", "42"},
+		{"projects", "webhook"},
+		{"projects", "webhook", "enable"},
+		{"projects", "webhook", "enable", "0"},
+		{"projects", "webhook", "bogus", "42"},
+	} {
+		if _, _, err := runCtl(t, append([]string{"--url", "http://example.com"}, args...),
+			map[string]string{"REVIEW_ADMIN_TOKEN": "admin"}, nil); err == nil {
+			t.Fatalf("%v accepted", args)
+		}
+	}
+}

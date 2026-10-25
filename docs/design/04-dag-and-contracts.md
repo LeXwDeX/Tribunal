@@ -58,7 +58,7 @@ plan(code) ──expands──▶ cr.p1 ─┐
 ```
 
 - 初始图只有 `plan`、`gather`、`adjudicate`、`synthesize` 四个节点；`gather` 依赖 `plan`，展开时把新增的 `cr.*` 加进 `gather` 的依赖（见 §5.3）。
-- `gather` 只把 P0/P1（由 `challenge.only` 配置）交给 `verify`；其余不挑战，直接进入 `adjudicate`。
+- `gather` 只把 P0/P1（由 `challenge.only` 配置）交给 `verify`；其余不挑战，直接进入 `adjudicate`。受 `max_nodes` 约束时，按严重级别优先选择挑战目标，超出节点容量的条目标记 `skipped` 并写 warning。
 - `default` 档的 `synthesize` 可以配置为代码实现（`synthesize.mode: code`），直接把 `adjudicate` 结果渲染，不再调用 LLM。
 
 ### 3.2 `deep` 档（拓扑 B）
@@ -135,7 +135,7 @@ Run(wf):
     if 所有节点终态:
         if 存在 required 节点 failed: emit workflow.failed
         else: emit workflow.completed
-        return
+        continue                            # 重读，确认没有并发 Extend 增加节点
     wait(节点完成通知 | ctx 取消 | 定时器)
 ```
 
@@ -160,7 +160,9 @@ runNode(n):
       emit node.completed(out)
 ```
 
-所有 `emit` 都走 `EventStore.Append(expectRev)`；遇到 `ErrStaleRevision` 时重新读取快照后再判断是否还需要写。
+所有 `emit` 都走 `EventStore.Append(expectRev)`；遇到 `ErrStaleRevision` 时重新读取快照后再判断是否还需要写。内部提交看到 revision 前进时继续重试，不因兄弟节点正常提交耗尽固定重试次数；同一 revision 连续 4 次冲突则返回错误。重试保留 attempt 栅栏，不重新执行 executor 或 expander；非版本冲突的持久化错误返回 `Run`，不能静默丢失完成结果。调用方取消仍可终止重试，持久化取消另有 10 秒写入上限；公开 `Extend(expectRev)` 的调用方版本约束不变。
+
+finalize 若在重读时发现新节点，返回主循环继续调度，而不是把未终态工作流当作成功结束。该路径与默认并发 8 下的 deep 流程均有回归测试。
 
 ### 5.3 展开时的依赖改写
 
@@ -186,7 +188,14 @@ runNode(n):
 - 显式补派（`source=extend`）次数 ≤ `budget.max_extends`（默认 1）；plan 和 gather 的正常 `fan_out` 不消耗此额度。
 - 累计 token 超过 `budget.max_tokens` 时（设计意图）：不再展开 verify（`gather` 只输出不挑战的结果），并在汇总里注明「预算不足，部分条目未经核验」。
 
-> 实现偏差：当前 `pkg/dag` 在预算耗尽时会终止未完成的节点：required 节点写 `failed(budget_exhausted)`，可选节点写 `skipped(budget_exhausted)`。它不会降级为「不展开 verify、继续发布未核验结果」。
+当前实现的 token 预算语义：
+
+- `pkg/dag` 在预算耗尽时终止未完成的非 `TokenFree` 节点：required 节点写 `failed(budget_exhausted)`，optional 节点写 `skipped(budget_exhausted)`。
+- 标记为 `TokenFree` 的节点不会被引擎终止，仍会运行。当前构建把 `plan`（code 模式）、`gather`、`adjudicate`、`synthesize` 和 `synthesize.2` 标为 `TokenFree`；其他未完成节点按 required/optional 失败或跳过。
+- `gather` 在预算耗尽时不展开 verify，把待挑战组标记为 `skipped(budget_exhausted)`，并写入 warning；`adjudicate` 按 `on_uncertain` 处理这些组，汇总会注明部分条目未核验。
+- 引擎不会因为 plan 超出 token 预算而自动减少包或降级 plan。code 模式的 plan 仍按原包数展开，后续 LLM 节点按上面的规则失败或跳过；agent 模式的 plan 本身不是 `TokenFree`，预算耗尽时按 required 节点失败处理。
+- agent 循环在至少完成一轮后失败会返回 partial usage。`synthesize` 的预算中断或 transport 失败不重试，直接使用确定性规则兜底，并保留该次调用已知的 partial usage；兜底不是一次成功重试。其他 agent 节点仍只对 transport 错误重试，每次重试携带上一次已知 partial usage 参与下一轮预算检查，最终节点 usage 也包含这些已知用量；上游未返回 usage 的请求仍无法精确计费，因此跨重试 token/成本只能按已知边界使用，不能当账单。
+- workflow 的 `max_tokens` 是共享预算，按 `input_tokens + output_tokens` 计算。cache read/write 和 reasoning 在 usage 中分别表示，但不额外相加，避免与输入/输出重复计数。执行器在每次模型请求前检查已提交用量加当前 attempt 已知 partial usage；并发节点不预留额度，已发出的请求可能在检查后完成，因此允许有界超支，不是账单级硬上限。
 
 ---
 
@@ -207,8 +216,8 @@ type FindingOut struct {
 	Severity   Severity   `json:"severity"`
 	Category   string     `json:"category"`          // correctness | security | concurrency | compat | performance | logic | maintainability
 	Title      string     `json:"title"`             // ≤ 120 字符
-	Body       string     `json:"body"`              // 问题说明 + 触发条件 + 影响
-	Suggestion string     `json:"suggestion,omitempty"`
+	Body       string     `json:"body"`              // 结构化 Markdown：问题、触发条件、影响；代码用围栏或行内代码
+	Suggestion string     `json:"suggestion,omitempty"` // 结构化 Markdown；代码或命令用围栏
 	Evidence   string     `json:"evidence"`          // 引用的代码或依据
 	Confidence Confidence `json:"confidence"`
 }
@@ -221,6 +230,10 @@ type CodeRef struct {
 	Note      string `json:"note"`
 }
 ```
+
+生产裁决会针对固定 dossier 的 head/base 快照验证 CodeRef：路径必须存在、行号范围必须有效，`root` 为空时按 `head`；缺失快照或读取失败不能证明反驳，按 `UNCERTAIN` 处理。语法有效或 diff 外的合法代码位置都可能通过，但存在性检查不等于证明语义正确。
+
+材料覆盖使用 `DiffSummary`：`files` 是进入材料快照的 included 文件数，不是已评审数；omitted 文件另有带原因和路径的记录，不能从 included 数或总数反推原因。`total` 是 ignore 规则前的变更文件总数；`ignored` 是用户规则排除，不算覆盖缺口；`omitted` 记录 `max_files`、`max_diff_lines`、`too_large`、`collapsed`、`invalid_path` 等缺口及路径。上述 omitted 总是进入 unresolved；完成 plan 后未被分配评审节点的非 generated included 文件、以及评审节点实际遇到的文件/包文本截断，也会进入 unresolved，最终不能无提示 PASS。正常 dossier 保存完整的 omitted 路径列表；只有不创建 workflow 的独立摘要把路径展示限制为最多 4 条，其余只计数。
 
 ### 6.2 各节点
 
@@ -299,12 +312,13 @@ type VerifyOut struct {
 
 // synthesize
 type SynthesizeOut struct {
-	Verdict        string          `json:"verdict"`  // PASS | BLOCKING
+	Verdict        string          `json:"verdict"`  // 模型契约仍为 PASS | BLOCKING
 	Summary        string          `json:"summary"`  // 汇总评论正文（Markdown，≤ 3000 字符）
 	Decisions      []Decision      `json:"decisions"`
 	NewFindings    []FindingOut    `json:"new_findings"`    // origin=main，必须经过挑战（I5）
 	ExtendRequests []ExtendRequest `json:"extend_requests"` // 最多 max_extends 次
 }
+
 type Decision struct {
 	FindingID string   `json:"finding_id"`
 	Action    string   `json:"action"` // publish | drop | mark | downgrade
@@ -336,6 +350,8 @@ type Module struct {
 ```
 
 > 实现偏差：`new_finding_index` 是当前实现新增的字段，用于对 `new_findings` 中尚未成为已有组的条目发起 verify；`verify` 必须且只能给出 `finding_id` 或 `new_finding_index` 之一。
+>
+> 最终持久化和发布使用代码拥有的 `SynthesisResult`，它包含 `verdict`、`groups` 和 `unresolved`。上游证据/覆盖不足会把 `verdict` 覆盖为 `INCOMPLETE` 并携带具体信号；模型契约本身仍只接受 PASS 或 BLOCKING。
 
 ### 6.3 严重级别归一化
 
@@ -353,11 +369,11 @@ type Module struct {
 
 1. 收集所有 proposer 节点（`cr.*`、`rv.std.*`、`rv.intent.*`、`reasoner`）的 findings；`rv.gate.*` 中被反驳的条目标记为 `drop`（有理由），不再挑战。
 2. 去重：同一 `path`，行号区间重叠（±3 行）且 `category` 相同 → 同组。组内取最高严重级别，正文保留证据最充分的一条，记录所有来源。
-3. 计票（拓扑 B）：每个来源 1 票，同一 provider 的多票按 `same_model_weight` 打折。
-4. 选择待挑战：严重级别在 `challenge_only` 内，且票数 < `consensus.min_votes` 的组。
-5. 写入 `findings` 表，输出 `GatherOut{groups, to_challenge}`，并展开 `verify.<seq>` 节点。
+3. 计票（拓扑 B）：按配置的规范化 endpoint + model 身份计票；每个身份 1 票，同一身份的多票按 `same_model_weight` 打折。同端点同模型的 provider 别名视为同一模型。无法解析身份的来源共用一个 unknown bucket：known 与 unknown 可各计一票，但多个 unknown 来源之间不增加独立票；metadata 缺失不能证明跨模型独立。
+4. 选择待挑战：严重级别在 `challenge_only` 内，且票数 < `consensus.min_votes` 的组。受 `max_nodes` 约束时，按严重级别（P0/P1 优先）排序后截断，未入选的组标记为 skipped 并写 warning。
+5. 写入 `findings` 表，输出 `GatherOut{groups, dropped, to_challenge, warnings}`，并展开 `verify.<seq>` 节点。
 
-挑战者 provider 选择（`challenge.provider: cross`）：从允许列表中选一个**不在该组来源 provider 集合里**的；没有可选的就用配置的 fallback，并把该 finding 的同模型标记设为真。
+挑战者 provider 选择（`challenge.provider: cross`）：按 allowed providers 顺序选择第一个已知、且未被该组来源使用的 endpoint + model 身份；候选身份为空时跳过。若任一来源身份未知，则跳过所有候选，只使用配置的 fallback，并把该 finding 的同模型标记设为真、写出「不是跨模型确认」的 warning。来源身份全部已知时，fallback 只有在该身份也已知且未被来源使用时才算独立，否则同样标为同模型。身份 metadata 缺失会限制挑战者独立性。
 
 ### 7.2 adjudicate（代码）
 
@@ -392,6 +408,8 @@ for g in groups:
 
 校验失败：把错误回给模型重提一次；再失败则退回规则裁决结果，并在汇总里注明。
 
+最终完成条件由代码执行：`review` 通道 `evidence_status=insufficient`、review gate 为 BLOCKING 且没有 accepted finding、材料或提示词覆盖缺口、完成 plan 后非 generated 的 included 文件未被分配等上游信号会合并进 `unresolved`。只要存在 unresolved，最终 verdict 就是 INCOMPLETE，summary 列出具体缺口；模型不能通过 `PASS` 或空 findings 清除这些信号。code 和 agent synthesis 使用同一规则。
+
 extend：`extend_requests` 非空且预算允许时，引擎追加对应节点和一个新的 `synthesize.2`（依赖这些新节点），原 `synthesize` 的输出作为 `synthesize.2` 的输入之一。`synthesize.2` 不允许再次 extend。
 
 ---
@@ -424,11 +442,13 @@ user                本节点任务：MR 摘要、包内文件列表与 diff、f
 
 ### 9.1 汇总评论
 
-```markdown
+````markdown
 <!-- gitlab-ce-review:summary v1 fp=9f3c2a1:7be0… -->
 ### AI 评审：🔴 BLOCKING
 
-**结论**：<synthesize.summary 第一段>
+**结论**：
+
+<synthesize.summary，结构化 Markdown，可含列表与代码块>
 
 | 级别 | 数量 |
 |---|---|
@@ -436,22 +456,45 @@ user                本节点任务：MR 摘要、包内文件列表与 diff、f
 | P1 | 2 |
 | P2 | 3 |
 
-<details><summary>无法定位到行的问题（2）</summary>
+### 无法定位到行的问题（2）
 
-- **[P2] 标题** — `path/to/file.go` — 说明
-</details>
+#### [P2] 标题
 
-<details><summary>存疑条目（1）</summary>
+位置：`path/to/file.go:42`
 
-- **[P1?] 标题** — 挑战结果：UNCERTAIN — 说明
-</details>
+触发条件与影响，可使用列表：
 
-<sub>head 9f3c2a1 · profile deep · 用时 2m14s · <a href="…/reviews/0192f0c1">详情</a></sub>
+- 列表项
+
+```go
+changed()
 ```
 
+**建议**：
+
+```go
+replacement()
+```
+
+### 存疑条目（1）
+
+#### [P1?] 标题
+
+位置：`path/to/file.go:9`
+
+**标记原因**：挑战结果：UNCERTAIN
+
+说明正文。
+
+<sub>head 9f3c2a1 · profile deep · 用时 2m14s · <a href="…/reviews/0192f0c1">详情</a></sub>
+````
+
 - 首行隐藏标记用于找到并就地更新这条评论（见 05-flows.md F7）。
+- `body` 和 `suggestion` 由模型按提示词输出结构化 Markdown：短段落、列表、代码围栏和行内代码。渲染器保留这些结构，仅中和原始 HTML、链接语法和隐藏 marker；代码围栏不会被转义成 HTML 实体。
+- 汇总条目正文最多 2000 字符、建议最多 1000 字符；超限时明确追加“内容已截断”，不再静默截到半句。完整正文仍在评审详情中。
 - PASS 用 🟢，评审未完成用 ⚪ 并说明原因。
 - 是否标注模型来源由项目设置 `show_model_attribution` 决定（默认关闭）。
+
 
 ### 9.2 行内讨论
 

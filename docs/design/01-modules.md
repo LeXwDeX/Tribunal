@@ -37,7 +37,7 @@ internal/review ──→ internal/agent ──→ internal/llm
 ```
 cmd/
   server/main.go                 读配置 → 建依赖 → 启动 HTTP、job worker、恢复未完成工作流
-  reviewctl/main.go              管理 CLI，只通过 HTTP API 操作（项目注册、触发评审、查看状态）
+  reviewctl/main.go              管理 CLI，只通过 HTTP API 操作（项目注册/列表、用户停用/撤销、项目授权、触发评审、查看状态）
 internal/
   config/
     config.go                    配置结构体、默认值、Validate()
@@ -46,6 +46,8 @@ internal/
     server.go                    http.Server、路由、中间件（request id、日志、recover）
     webhook.go                   POST /webhooks/gitlab：校验 → 去重 → 入队
     auth.go                      GitLab OAuth 登录、会话 cookie、API token
+    access.go                    路由授权策略与项目 grant 检查
+    api_admin.go                 平台管理面的用户停用/凭据撤销与项目授权
     api_projects.go              项目相关 API
     api_reviews.go               评审（工作流）相关 API
     api_workspace.go             工作区、上下文文档
@@ -605,8 +607,9 @@ type Dossier struct {
 	Project     ProjectRef
 	MR          MRMeta          // 标题、描述、作者、源/目标分支、标签、draft
 	Version     gitlab.Version  // base/start/head sha
+	DiffSummary DiffSummary     // included 文件/行数、变更总数、omitted 路径与原因
 	Files       []FileChange    // 路径、状态（added/modified/deleted/renamed）、diff、行数
-	Ignored     []string        // 被 ignore 规则过滤的文件
+	Ignored     []string        // 被 ignore 规则过滤的文件；不是覆盖缺口
 	Pipeline    *PipelineSummary
 	Issues      []IssueRef
 	ContextDoc  string          // 工作区上下文文档（base 版本）
@@ -665,4 +668,4 @@ func Publish(ctx context.Context, deps PublishDeps, wfID string) (*PublishReport
 | 指标（可选） | `github.com/prometheus/client_golang` | Apache-2.0 |
 | 测试对比 | `github.com/google/go-cmp` | BSD-3 |
 
-以上许可证以 CI 中 `go-licenses` 的检查结果为准。
+以上许可证以 CI 中 `licensecheck` 和 `licensebundle -check` 的结果为准；发布声明是 `licenses/THIRD_PARTY_NOTICES.txt`。

@@ -17,20 +17,22 @@ import (
 // an administrator action, never a model tool. Commands run without a shell,
 // with the same restricted environment as stdio servers, and their output is
 // discarded. The first failure stops the sequence and returns a message that
-// does not include arguments or command output.
-func (m *Manager) RunIndex(ctx context.Context, baseDir string) error {
+// does not include arguments or command output. The count is the number of
+// commands that completed successfully; a server without an index command
+// contributes nothing.
+func (m *Manager) RunIndex(ctx context.Context, baseDir string) (int, error) {
 	if m == nil {
-		return ErrClosed
+		return 0, ErrClosed
 	}
 	m.mu.Lock()
 	closed := m.closed
 	m.mu.Unlock()
 	if closed {
-		return ErrClosed
+		return 0, ErrClosed
 	}
 	base, err := existingDir(baseDir, "base directory")
 	if err != nil {
-		return err
+		return 0, err
 	}
 	names := make([]string, 0)
 	for name, cfg := range m.servers {
@@ -39,19 +41,21 @@ func (m *Manager) RunIndex(ctx context.Context, baseDir string) error {
 		}
 	}
 	sort.Strings(names)
+	count := 0
 	for _, name := range names {
 		m.mu.Lock()
 		closed := m.closed
 		m.mu.Unlock()
 		if closed {
-			return ErrClosed
+			return count, ErrClosed
 		}
 		cfg := m.servers[name]
 		if err := m.runIndexOne(ctx, name, cfg, base); err != nil {
-			return err
+			return count, err
 		}
+		count++
 	}
-	return nil
+	return count, nil
 }
 
 func (m *Manager) runIndexOne(ctx context.Context, server string, cfg ServerConfig, baseDir string) error {

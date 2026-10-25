@@ -130,6 +130,47 @@ func TestBuildGraphOnboarding(t *testing.T) {
 	}
 }
 
+func TestBuildGraphDockerProfiles(t *testing.T) {
+	for k, v := range map[string]string{
+		"CRC_PUBLIC_URL":     "https://review.example.test",
+		"GITLAB_URL":         "https://gitlab.example.test",
+		"LLM_PROTOCOL":       "anthropic",
+		"LLM_BASE_URL":       "https://llm.example.test",
+		"LLM_MODEL":          "test-model",
+		"LLM_API_KEY":        "test-key",
+		"REVIEW_ADMIN_TOKEN": "0123456789abcdef0123456789abcdef",
+		"REVIEW_MASTER_KEY":  "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+	} {
+		t.Setenv(k, v)
+	}
+	cfg, err := config.Load("../../config/server.docker.yaml")
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Config.Validate: %v", err)
+	}
+	allowed := []string{"primary"}
+
+	defaultSpec, err := BuildGraph(Profile{Name: "default", Config: cfg.Profiles["default"]}, validDossier(t), GraphConfig{AllowedProviders: allowed})
+	if err != nil {
+		t.Fatalf("default BuildGraph: %v", err)
+	}
+	for _, id := range []string{NodePlan, NodeGather, NodeAdjudicate, NodeSynth} {
+		if _, ok := nodeByID(defaultSpec, id); !ok {
+			t.Fatalf("default graph missing node %q", id)
+		}
+	}
+
+	onboardingSpec, err := BuildGraph(Profile{Name: "onboarding", Config: cfg.Profiles["onboarding"]}, nil, GraphConfig{AllowedProviders: allowed})
+	if err != nil {
+		t.Fatalf("onboarding BuildGraph: %v", err)
+	}
+	if len(onboardingSpec.Nodes) != 1 || onboardingSpec.Nodes[0].ID != KindOnboarding {
+		t.Fatalf("unexpected onboarding graph: %+v", onboardingSpec.Nodes)
+	}
+}
+
 func TestPlanFanOutAndDepPatch(t *testing.T) {
 	profile := defaultProfile()
 	profile.Config.Plan.MaxPackages = 2

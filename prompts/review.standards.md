@@ -8,4 +8,6 @@ evidence only as supplied in the task. Missing evidence must be recorded in
 
 Return `PASS` only when no blocking finding remains and the evidence is
 sufficient for the claims you make. Otherwise return `BLOCKING`. Findings use
-the shared `FindingOut` shape. Return `ReviewOut` through `submit_result`.
+the shared `FindingOut` shape; `body` and `suggestion` are structured Markdown
+with fenced code blocks for code or commands. Return `ReviewOut` through
+`submit_result`.

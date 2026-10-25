@@ -275,6 +275,74 @@ func TestRenderSummaryIncompleteAndBadFingerprint(t *testing.T) {
 	}
 }
 
+func TestRenderFindingPreservesStructuredMarkdown(t *testing.T) {
+	body := "触发条件：\n\n```go\nif x {\n\treturn\n}\n```\n\n影响：\n\n- 第一条\n- 第二条"
+	suggestion := "改成：\n\n```go\nif !x {\n\treturn\n}\n```"
+	group := renderGroup("markdown", ActionPublish, SeverityP2, true, "Structured issue", body)
+	group.Suggestion = suggestion
+	out, err := RenderFinding(group, FindingRenderOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"```go\nif x {", "```", "- 第一条", "- 第二条", "**建议**：", "if !x {"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing structured Markdown %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "&#96;") {
+		t.Fatalf("code was escaped instead of kept as Markdown:\n%s", out)
+	}
+}
+
+func TestRenderSummaryPreservesStructuredMarkdownAndTruncation(t *testing.T) {
+	body := "### 触发条件\n\n```go\nif x {\n\treturn\n}\n```\n\n" + strings.Repeat("影", 400)
+	group := renderGroup("summary-markdown", ActionPublish, SeverityP1, false, "Structured summary issue", body)
+	group.Suggestion = "改为：\n\n```go\nif !x { return }\n```"
+	out, err := RenderSummary(SummaryInput{
+		Verdict: VerdictBlocking, Summary: "## 总览\n\n- 第一项\n- 第二项", Groups: []Group{group}, Fingerprint: "abc",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"## 总览", "- 第一项", "### 触发条件", "```go\nif x {", "**建议**：", "if !x { return }"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing structured summary content %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "&#96;") {
+		t.Fatalf("summary code was escaped instead of kept as Markdown:\n%s", out)
+	}
+	if strings.Contains(out, "…（内容已截断）") {
+		t.Fatalf("summary item under its own limit was truncated:\n%s", out)
+	}
+
+	long := renderGroup("long-summary", ActionPublish, SeverityP2, false, "Long", strings.Repeat("长", summaryItemBodyRunes+10))
+	longOut, err := RenderSummary(SummaryInput{Verdict: VerdictPass, Summary: "ok", Groups: []Group{long}, Fingerprint: "abc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(longOut, "…（内容已截断）") {
+		t.Fatalf("long summary item lacks a truncation notice:\n%s", longOut)
+	}
+}
+
+func TestRenderMarkdownEscapesHTMLAndLinksButKeepsCode(t *testing.T) {
+	group := renderGroup("safe-markdown", ActionPublish, SeverityP2, true, "Safe", "<script>alert(1)</script> [link](javascript:alert(1)) `safe <tag>`")
+	out, err := RenderFinding(group, FindingRenderOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "<script") || strings.Contains(out, "](javascript:") {
+		t.Fatalf("unsafe Markdown survived:\n%s", out)
+	}
+	if !strings.Contains(out, "&#91;link&#93;") {
+		t.Fatalf("link syntax was not neutralized:\n%s", out)
+	}
+	if !strings.Contains(out, "`safe <tag>`") {
+		t.Fatalf("inline code content was not preserved:\n%s", out)
+	}
+}
+
 func TestRenderSummaryNoGroups(t *testing.T) {
 	out, err := RenderSummary(SummaryInput{Verdict: VerdictPass, Summary: "No findings.", Fingerprint: "abc"})
 	if err != nil {

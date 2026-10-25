@@ -9,6 +9,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"net/url"
 	"strings"
 )
 
@@ -143,6 +144,36 @@ type ProviderInfo struct {
 	Protocol string `json:"protocol"`
 	Model    string `json:"model"`
 	BaseURL  string `json:"base_url"`
+}
+
+// ModelIdentity returns a stable identity for votes and challenger selection.
+// Providers with the same endpoint and model are the same model even when
+// their display names or API protocols differ. A missing BaseURL groups
+// providers that share a model; the actual upstream default cannot be
+// observed here, so this is deliberately conservative.
+func (p ProviderInfo) ModelIdentity() string {
+	model := strings.TrimSpace(p.Model)
+	if model == "" {
+		return ""
+	}
+	return normalizeEndpoint(p.BaseURL) + "\x1f" + model
+}
+
+func normalizeEndpoint(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return strings.TrimSuffix(raw, "/")
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	parsed.Host = strings.ToLower(parsed.Host)
+	parsed.Path = strings.TrimSuffix(parsed.Path, "/")
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
 }
 
 // resolveRequest applies provider defaults without mutating the caller request.

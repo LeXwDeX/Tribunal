@@ -6,9 +6,11 @@ import (
 	"io"
 	"log/slog"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/gitlab"
+	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/repo"
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/secret"
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/workspace"
@@ -19,7 +21,14 @@ const (
 	feedbackWindow          = 14 * 24 * time.Hour
 	feedbackPageLimit       = 100
 	feedbackMaxPages        = 5
+	mergedFeedbackWindow    = 3 * 24 * time.Hour
 )
+
+// feedbackDiff is the minimal line-level git capability F8 needs. It stays
+// separate from GitOps so the shared interface does not grow for one caller.
+type feedbackDiff interface {
+	FileDiff(ctx context.Context, dir, from, to, path string) (*repo.FileDiff, error)
+}
 
 // FeedbackService implements F8: periodic award and resolve collection.
 type FeedbackService struct {
@@ -27,6 +36,7 @@ type FeedbackService struct {
 	gitlab    GitLabClient
 	cipher    *secret.Cipher
 	git       GitOps
+	diff      feedbackDiff
 	workspace *workspace.Manager
 	logger    *slog.Logger
 	now       func() time.Time
@@ -56,11 +66,16 @@ func NewFeedbackService(cfg FeedbackServiceConfig) (*FeedbackService, error) {
 	if now == nil {
 		now = time.Now
 	}
+	var diff feedbackDiff
+	if cfg.Git != nil {
+		diff, _ = cfg.Git.(feedbackDiff)
+	}
 	return &FeedbackService{
 		store:     cfg.Store,
 		gitlab:    cfg.GitLab,
 		cipher:    cfg.Cipher,
 		git:       cfg.Git,
+		diff:      diff,
 		workspace: cfg.Workspace,
 		logger:    logger,
 		now:       now,
@@ -129,7 +144,7 @@ func (s *FeedbackService) collectWorkflow(ctx context.Context, workflow store.Wo
 	if err != nil {
 		return
 	}
-	if mr == nil || mr.State == "closed" {
+	if mr == nil || !s.eligibleMR(mr) {
 		return
 	}
 	publications, err := s.store.ListPublications(ctx, workflow.ID)
@@ -145,11 +160,13 @@ func (s *FeedbackService) collectWorkflow(ctx context.Context, workflow store.Wo
 			}
 			s.collectAwards(ctx, token, publication, mrIID, noteID)
 		case discussionPublishKind:
-			s.collectDiscussion(ctx, token, publication, workflow, mr, mrIID)
+			s.collectDiscussion(ctx, token, project, publication, workflow, mr, mrIID)
 		}
 	}
 }
 
+// collectAwards records reactions on the summary note. A summary describes the
+// whole review, so it stays workflow-level and is never linked to one finding.
 func (s *FeedbackService) collectAwards(ctx context.Context, token string, publication store.Publication, mrIID, noteID int64) {
 	awards, err := s.gitlab.ListNoteAwards(ctx, token, publication.ProjectID, mrIID, noteID)
 	if err != nil {
@@ -179,7 +196,7 @@ func (s *FeedbackService) collectAwards(ctx context.Context, token string, publi
 	}
 }
 
-func (s *FeedbackService) collectDiscussion(ctx context.Context, token string, publication store.Publication, workflow store.Workflow, mr *gitlab.MergeRequest, mrIID int64) {
+func (s *FeedbackService) collectDiscussion(ctx context.Context, token string, project *store.Project, publication store.Publication, workflow store.Workflow, mr *gitlab.MergeRequest, mrIID int64) {
 	discussions, err := s.gitlab.ListDiscussions(ctx, token, publication.ProjectID, mrIID)
 	if err != nil {
 		return
@@ -192,20 +209,28 @@ func (s *FeedbackService) collectDiscussion(ctx context.Context, token string, p
 		notes = discussion.Notes
 		break
 	}
-	if notes == nil {
+	if len(notes) == 0 {
 		return
+	}
+	// The publisher creates the thread with the finding note; later notes are
+	// reviewer replies. Their reactions describe the discussion, not approval
+	// of the published finding.
+	publisherNote := notes[0]
+	findingID := ""
+	if finding := s.publicationFinding(ctx, workflow, publication); finding != nil {
+		findingID = finding.ID
 	}
 	resolved := false
 	for _, note := range notes {
 		if note.Resolved {
 			resolved = true
 		}
-		s.collectNoteAwards(ctx, token, publication, mrIID, note.ID)
 	}
+	s.collectNoteAwards(ctx, token, publication, publisherNote.ID, findingID)
 	if !resolved {
 		return
 	}
-	signal := s.resolveSignal(ctx, publication, workflow, mr)
+	signal := s.resolveSignal(ctx, token, project, publication, workflow, mr, mrIID)
 	if signal == "" {
 		return
 	}
@@ -213,6 +238,7 @@ func (s *FeedbackService) collectDiscussion(ctx context.Context, token string, p
 		ProjectID:     publication.ProjectID,
 		MRIID:         mrIID,
 		PublicationID: publication.ID,
+		FindingID:     findingID,
 		Signal:        signal,
 		ObservedAt:    s.now().UTC(),
 	}); err != nil {
@@ -220,8 +246,30 @@ func (s *FeedbackService) collectDiscussion(ctx context.Context, token string, p
 	}
 }
 
-func (s *FeedbackService) collectNoteAwards(ctx context.Context, token string, publication store.Publication, mrIID, noteID int64) {
-	awards, err := s.gitlab.ListNoteAwards(ctx, token, publication.ProjectID, mrIID, noteID)
+// publicationFinding resolves the exact persisted finding a discussion
+// publication announced. The workflow, project and merge request must all
+// agree, so a publish key reused by another review cannot steal a signal.
+func (s *FeedbackService) publicationFinding(ctx context.Context, workflow store.Workflow, publication store.Publication) *store.Finding {
+	if publication.PublishKey == "" || publication.WorkflowID != workflow.ID {
+		return nil
+	}
+	if publication.ProjectID != workflow.ProjectID || workflow.MRIID == nil || publication.MRIID != *workflow.MRIID {
+		return nil
+	}
+	findings, err := s.store.ListFindings(ctx, store.FindingFilter{WorkflowID: workflow.ID})
+	if err != nil {
+		return nil
+	}
+	for i := range findings {
+		if findings[i].PublishKey == publication.PublishKey {
+			return &findings[i]
+		}
+	}
+	return nil
+}
+
+func (s *FeedbackService) collectNoteAwards(ctx context.Context, token string, publication store.Publication, noteID int64, findingID string) {
+	awards, err := s.gitlab.ListNoteAwards(ctx, token, publication.ProjectID, publication.MRIID, noteID)
 	if err != nil {
 		return
 	}
@@ -238,8 +286,9 @@ func (s *FeedbackService) collectNoteAwards(ctx context.Context, token string, p
 		userID := award.UserID
 		if _, err := s.store.UpsertFeedback(ctx, store.Feedback{
 			ProjectID:     publication.ProjectID,
-			MRIID:         mrIID,
+			MRIID:         publication.MRIID,
 			PublicationID: publication.ID,
+			FindingID:     findingID,
 			Signal:        signal,
 			GitlabUserID:  &userID,
 			ObservedAt:    s.now().UTC(),
@@ -249,40 +298,103 @@ func (s *FeedbackService) collectNoteAwards(ctx context.Context, token string, p
 	}
 }
 
-// resolveSignal reports resolved_changed when the finding path changed between
-// the published head and the current head.
-func (s *FeedbackService) resolveSignal(ctx context.Context, publication store.Publication, workflow store.Workflow, mr *gitlab.MergeRequest) string {
-	findings, err := s.store.ListFindings(ctx, store.FindingFilter{WorkflowID: workflow.ID})
-	if err != nil {
-		return "resolved_unchanged"
-	}
-	path := ""
-	for _, finding := range findings {
-		if finding.PublishKey == publication.PublishKey {
-			path = finding.Path
-			break
+// eligibleMR reports whether the merge request can still produce feedback.
+// Merged requests are collected only for three days after merging.
+func (s *FeedbackService) eligibleMR(mr *gitlab.MergeRequest) bool {
+	switch mr.State {
+	case "opened":
+		return true
+	case "merged", "locked":
+		if mr.MergedAt == nil {
+			return false
 		}
+		return s.now().UTC().Sub(mr.MergedAt.UTC()) <= mergedFeedbackWindow
+	default:
+		return false
 	}
-	if path == "" || mr == nil || mr.SHA == "" || workflow.HeadSHA == "" || s.git == nil {
+}
+
+// resolveSignal reports resolved_changed only when a zero-context diff proves
+// that the published finding line was removed or replaced between the
+// published head and the current head. It returns an empty signal when the
+// evidence is missing or incomplete, so the caller records neither a positive
+// nor a negative signal and can retry next pass.
+func (s *FeedbackService) resolveSignal(ctx context.Context, token string, project *store.Project, publication store.Publication, workflow store.Workflow, mr *gitlab.MergeRequest, mrIID int64) string {
+	if s.git == nil || s.diff == nil || s.workspace == nil || project == nil || mr == nil {
+		return ""
+	}
+	if publication.ProjectID != project.ID || publication.MRIID != mrIID {
+		return ""
+	}
+	if repo.ValidateSHA(workflow.HeadSHA) != nil || repo.ValidateSHA(mr.SHA) != nil {
+		return ""
+	}
+	finding := s.publicationFinding(ctx, workflow, publication)
+	if finding == nil || finding.Path == "" || finding.Line == nil || *finding.Line <= 0 {
+		return ""
+	}
+	// Old-side lines belong to the base revision, which is not the published
+	// head. Without a proven mapping they must stay unrecorded.
+	if finding.Side != "" && finding.Side != "new" {
+		return ""
+	}
+	if strings.EqualFold(workflow.HeadSHA, mr.SHA) {
 		return "resolved_unchanged"
 	}
-	if mr.SHA == workflow.HeadSHA {
-		return "resolved_unchanged"
-	}
-	ws := s.workspace.Get(publication.ProjectID)
+	ws := s.workspace.Get(project.ID)
 	if ws == nil {
-		return "resolved_unchanged"
+		return ""
 	}
-	changed, err := s.git.ChangedFiles(ctx, ws.MirrorDir(), workflow.HeadSHA, mr.SHA)
+	if !s.ensureHead(ctx, token, project, ws, mrIID, mr.SHA) {
+		return ""
+	}
+	change, err := s.diff.FileDiff(ctx, ws.MirrorDir(), workflow.HeadSHA, mr.SHA, finding.Path)
 	if err != nil {
+		return ""
+	}
+	if change == nil {
 		return "resolved_unchanged"
 	}
-	for _, file := range changed {
-		if file == path {
+	if change.Incomparable || change.Binary || change.OldPath != finding.Path {
+		return ""
+	}
+	if change.Deleted {
+		return "resolved_changed"
+	}
+	line := *finding.Line
+	for _, hunk := range change.Hunks {
+		if hunk.OldLines > 0 && line >= hunk.OldStart && line < hunk.OldStart+hunk.OldLines {
 			return "resolved_changed"
 		}
 	}
 	return "resolved_unchanged"
+}
+
+// ensureHead makes sha available in the project mirror. A missing object is
+// fetched through the merge request ref; any failure leaves the caller without
+// evidence instead of guessing.
+func (s *FeedbackService) ensureHead(ctx context.Context, token string, project *store.Project, ws *workspace.Workspace, mrIID int64, sha string) bool {
+	mirror := ws.MirrorDir()
+	if _, err := s.git.Resolve(ctx, mirror, sha); err == nil {
+		return true
+	}
+	if mrIID <= 0 {
+		return false
+	}
+	remote := trimProjectWebURL(project.WebURL)
+	if remote == "" {
+		return false
+	}
+	auth := repo.Auth{Token: token}
+	if err := s.git.EnsureMirror(ctx, mirror, remote, auth); err != nil {
+		return false
+	}
+	ref := fmt.Sprintf("refs/merge-requests/%d/head", mrIID)
+	if err := s.git.Fetch(ctx, mirror, auth, "+"+ref+":"+ref); err != nil {
+		return false
+	}
+	resolved, err := s.git.Resolve(ctx, mirror, ref)
+	return err == nil && strings.EqualFold(resolved, sha)
 }
 
 func (s *FeedbackService) project(ctx context.Context, projectID int64, projects map[int64]*store.Project, tokens map[int64]string) (*store.Project, string, bool) {

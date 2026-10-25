@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -88,8 +89,8 @@ func TestAPITokenCreateOnceAndRevoke(t *testing.T) {
 	if secondBody["token"] == plaintext || secondBody["id"] == tokenID {
 		t.Fatalf("second token reused material: %v", secondBody)
 	}
-	if _, present := secondBody["expires_at"]; present {
-		t.Fatalf("unexpected expiry: %v", secondBody)
+	if secondBody["expires_at"] == nil {
+		t.Fatalf("new tokens must expire by default: %v", secondBody)
 	}
 
 	revoked := client.request(http.MethodDelete, "/api/v1/api-tokens/"+tokenID, nil, nil)
@@ -102,11 +103,11 @@ func TestAPITokenCreateOnceAndRevoke(t *testing.T) {
 	missing := client.request(http.MethodDelete, "/api/v1/api-tokens/"+tokenID, nil, nil)
 	assertStatus(t, missing, http.StatusNotFound)
 
-	// A viewer cannot reach token writes at all: the auth middleware rejects
-	// unsafe methods before ownership is checked.
+	// Self-service is limited to the caller's own tokens. A different user
+	// cannot see or delete the admin's token, but can create their own.
 	viewer := env.loginAs("code-viewer")
 	foreign := viewer.request(http.MethodDelete, "/api/v1/api-tokens/"+secondBody["id"].(string), nil, nil)
-	assertStatus(t, foreign, http.StatusForbidden)
+	assertStatus(t, foreign, http.StatusNotFound)
 }
 
 func TestAPITokenValidationAndSessionOnly(t *testing.T) {
@@ -138,7 +139,8 @@ func TestAPITokenValidationAndSessionOnly(t *testing.T) {
 	}
 
 	viewer := env.loginAs("code-viewer")
-	// Viewers may list their own tokens but cannot create or revoke them.
+	// Browser self-service lets any authenticated user manage their own
+	// tokens; it grants no project access.
 	viewerList := viewer.request(http.MethodGet, "/api/v1/api-tokens", nil, nil)
 	if viewerList.status != http.StatusOK {
 		t.Fatalf("viewer list status = %d, body=%s", viewerList.status, viewerList.body)
@@ -146,9 +148,13 @@ func TestAPITokenValidationAndSessionOnly(t *testing.T) {
 	if tokens := env.decode(t, viewerList)["tokens"].([]any); len(tokens) != 0 {
 		t.Fatalf("viewer tokens = %v", tokens)
 	}
-	denied := viewer.json(http.MethodPost, "/api/v1/api-tokens", map[string]any{"name": "viewer"})
-	if denied.status != http.StatusForbidden {
-		t.Fatalf("viewer create status = %d, body=%s", denied.status, denied.body)
+	created := viewer.json(http.MethodPost, "/api/v1/api-tokens", map[string]any{"name": "viewer"})
+	if created.status != http.StatusCreated {
+		t.Fatalf("viewer create status = %d, body=%s", created.status, created.body)
+	}
+	viewerList = viewer.request(http.MethodGet, "/api/v1/api-tokens", nil, nil)
+	if tokens := env.decode(t, viewerList)["tokens"].([]any); len(tokens) != 1 {
+		t.Fatalf("viewer tokens after create = %v", tokens)
 	}
 }
 
@@ -223,4 +229,95 @@ func TestAPITokenExpiryAndViewerRole(t *testing.T) {
 	}
 	write := viewer.json(http.MethodPost, "/api/v1/projects", map[string]any{"project": "42", "token": "x"})
 	assertStatus(t, write, http.StatusForbidden)
+}
+
+func TestAPITokenListPagination(t *testing.T) {
+	ctx := context.Background()
+	env := newM6Env(t, m6Options{})
+	client := env.loginAs("code-admin")
+
+	created := make([]string, 0, 5)
+	for i := 0; i < 5; i++ {
+		response := client.json(http.MethodPost, "/api/v1/api-tokens",
+			map[string]any{"name": "token-" + strconv.Itoa(i)})
+		assertStatus(t, response, http.StatusCreated)
+		id, _ := decodeMap(t, response.body)["id"].(string)
+		if id == "" {
+			t.Fatalf("created token %d has no id", i)
+		}
+		created = append(created, id)
+	}
+
+	var collected []string
+	cursor := ""
+	var adminCursor string
+	for {
+		path := "/api/v1/api-tokens?limit=2"
+		if cursor != "" {
+			path += "&cursor=" + cursor
+		}
+		response := client.request(http.MethodGet, path, nil, nil)
+		assertStatus(t, response, http.StatusOK)
+		body := env.decode(t, response)
+		for _, item := range body["tokens"].([]any) {
+			collected = append(collected, item.(map[string]any)["id"].(string))
+		}
+		next, _ := body["next_cursor"].(string)
+		if adminCursor == "" {
+			adminCursor = next
+		}
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+	if len(collected) != len(created) {
+		t.Fatalf("collected = %v", collected)
+	}
+	seen := map[string]bool{}
+	for _, id := range collected {
+		if seen[id] {
+			t.Fatalf("duplicate token %s", id)
+		}
+		seen[id] = true
+	}
+	if adminCursor == "" {
+		t.Fatal("page cursor is empty")
+	}
+
+	sum := sha256.Sum256([]byte("viewer-pagination-token"))
+	if _, err := env.sqlite.CreateAPIToken(ctx, store.TokenUser{
+		ID: 8, Username: "bob", Name: "Bob Viewer", Role: roleViewer,
+	}, store.APIToken{Name: "viewer", TokenHash: sum[:]}); err != nil {
+		t.Fatalf("CreateAPIToken viewer: %v", err)
+	}
+	viewer := env.loginAs("code-viewer")
+	viewerPage := viewer.request(http.MethodGet, "/api/v1/api-tokens?limit=1", nil, nil)
+	assertStatus(t, viewerPage, http.StatusOK)
+	viewerBody := env.decode(t, viewerPage)
+	viewerTokens := viewerBody["tokens"].([]any)
+	if len(viewerTokens) != 1 || viewerTokens[0].(map[string]any)["name"] != "viewer" {
+		t.Fatalf("viewer tokens = %v", viewerBody)
+	}
+	crossUser := viewer.request(http.MethodGet, "/api/v1/api-tokens?limit=1&cursor="+adminCursor, nil, nil)
+	assertStatus(t, crossUser, http.StatusBadRequest)
+	invalid := client.request(http.MethodGet, "/api/v1/api-tokens?cursor=not-a-cursor", nil, nil)
+	assertStatus(t, invalid, http.StatusBadRequest)
+
+	head := client.request(http.MethodGet, "/api/v1/api-tokens?limit=1", nil, nil)
+	assertStatus(t, head, http.StatusOK)
+	headBody := env.decode(t, head)
+	headTokens := headBody["tokens"].([]any)
+	headID := headTokens[0].(map[string]any)["id"].(string)
+	headCursor, _ := headBody["next_cursor"].(string)
+	if headCursor == "" {
+		t.Fatal("head page is missing next_cursor")
+	}
+	assertStatus(t, client.request(http.MethodDelete, "/api/v1/api-tokens/"+headID, nil, nil), http.StatusNoContent)
+	afterDelete := client.request(http.MethodGet, "/api/v1/api-tokens?limit=1&cursor="+headCursor, nil, nil)
+	assertStatus(t, afterDelete, http.StatusOK)
+	afterTokens := env.decode(t, afterDelete)["tokens"].([]any)
+	if len(afterTokens) != 1 || afterTokens[0].(map[string]any)["id"] == headID {
+		t.Fatalf("page after delete = %v", afterTokens)
+	}
 }

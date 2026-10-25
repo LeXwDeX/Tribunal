@@ -70,6 +70,12 @@ func (f *webhookFixture) records() []store.Delivery {
 	return append([]store.Delivery(nil), f.rec.records...)
 }
 
+func (f *webhookFixture) jobs() []*store.Job {
+	f.rec.mu.Lock()
+	defer f.rec.mu.Unlock()
+	return append([]*store.Job(nil), f.rec.jobs...)
+}
+
 func TestWebhookProjectLookupAndAuthentication(t *testing.T) {
 	body := mrBody(42, 7, nil)
 	t.Run("unknown project", func(t *testing.T) {
@@ -228,22 +234,23 @@ func TestWebhookMergeRequestDecisions(t *testing.T) {
 		wantHead string
 		profile  string
 	}{
-		{name: "open", accepted: true, kind: "review.run", key: "review:42:7", trigger: "mr_open", full: true, wantHead: sha40, profile: "default"},
-		{name: "reopen", mutate: func(b map[string]any) { patchAttr(b, "action", "reopen") }, accepted: true, kind: "review.run", key: "review:42:7", trigger: "mr_open", full: true},
-		{name: "update", mutate: func(b map[string]any) { patchAttr(b, "action", "update"); patchAttr(b, "oldrev", sha40) }, accepted: true, kind: "review.run", key: "review:42:7", trigger: "mr_update", wantHead: sha40},
+		{name: "open", accepted: true, kind: "review.candidate", key: "review.candidate:42:7", trigger: "mr_open", full: true, wantHead: sha40, profile: "default"},
+		{name: "immediate open", settings: `{"allow_repo_config":false}`, accepted: true, kind: "review.run", key: "review:42:7", trigger: "mr_open", full: true, wantHead: sha40, profile: "default"},
+		{name: "reopen", mutate: func(b map[string]any) { patchAttr(b, "action", "reopen") }, accepted: true, kind: "review.candidate", key: "review.candidate:42:7", trigger: "mr_open", full: true},
+		{name: "update", mutate: func(b map[string]any) { patchAttr(b, "action", "update"); patchAttr(b, "oldrev", sha40) }, accepted: true, kind: "review.candidate", key: "review.candidate:42:7", trigger: "mr_update", wantHead: sha40},
 		{name: "update without oldrev", mutate: func(b map[string]any) { patchAttr(b, "action", "update") }, ignored: "missing_oldrev"},
 		{name: "close", mutate: func(b map[string]any) { patchAttr(b, "action", "close") }, accepted: true, kind: "review.cancel", key: "review.cancel:42:7"},
 		{name: "merge", mutate: func(b map[string]any) { patchAttr(b, "action", "merge") }, accepted: true, kind: "review.cancel", key: "review.cancel:42:7"},
-		{name: "draft flag", mutate: func(b map[string]any) { patchAttr(b, "draft", true) }, ignored: "draft"},
-		{name: "draft title", mutate: func(b map[string]any) { patchAttr(b, "title", "Draft: something") }, ignored: "draft"},
-		{name: "wip title", mutate: func(b map[string]any) { patchAttr(b, "title", "WIP: something") }, ignored: "draft"},
+		{name: "draft flag", settings: `{"allow_repo_config":false}`, mutate: func(b map[string]any) { patchAttr(b, "draft", true) }, ignored: "draft"},
+		{name: "draft title", settings: `{"allow_repo_config":false}`, mutate: func(b map[string]any) { patchAttr(b, "title", "Draft: something") }, ignored: "draft"},
+		{name: "wip title", settings: `{"allow_repo_config":false}`, mutate: func(b map[string]any) { patchAttr(b, "title", "WIP: something") }, ignored: "draft"},
 		{name: "label excluded", settings: `{"labels_exclude":["no-ai"]}`, mutate: func(b map[string]any) {
 			patchAttr(b, "labels", []string{"no-ai"})
 		}, ignored: "labels_filtered"},
 		{name: "label include miss", settings: `{"labels_include":["review"]}`, ignored: "labels_filtered"},
 		{name: "label include hit", settings: `{"labels_include":["review"]}`, mutate: func(b map[string]any) {
 			patchAttr(b, "labels", []string{"review"})
-		}, accepted: true, kind: "review.run", key: "review:42:7", full: true},
+		}, accepted: true, kind: "review.candidate", key: "review.candidate:42:7", full: true},
 		{name: "branch filtered", mutate: func(b map[string]any) {
 			patchAttr(b, "target_branch", "feature")
 			patchMR(b, "target_branch", "feature")
@@ -251,7 +258,7 @@ func TestWebhookMergeRequestDecisions(t *testing.T) {
 		{name: "custom branch", settings: `{"target_branches":["release/*"]}`, mutate: func(b map[string]any) {
 			patchAttr(b, "target_branch", "release/1.0")
 			patchMR(b, "target_branch", "release/1.0")
-		}, accepted: true, kind: "review.run", key: "review:42:7", full: true},
+		}, accepted: true, kind: "review.candidate", key: "review.candidate:42:7", full: true},
 		{name: "target project mismatch", mutate: func(b map[string]any) {
 			patchAttr(b, "target_project_id", 99)
 		}, ignored: "project_mismatch"},
@@ -269,7 +276,7 @@ func TestWebhookMergeRequestDecisions(t *testing.T) {
 		}, ignored: "bad_request"},
 		{name: "label profile", settings: `{"profile_by_label":{"deep-review":"deep"}}`, mutate: func(b map[string]any) {
 			patchAttr(b, "labels", []string{"deep-review"})
-		}, accepted: true, kind: "review.run", key: "review:42:7", profile: "deep", full: true},
+		}, accepted: true, kind: "review.candidate", key: "review.candidate:42:7", profile: "deep", full: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -292,7 +299,7 @@ func TestWebhookMergeRequestDecisions(t *testing.T) {
 			if job.Kind != tt.kind || job.Key != tt.key {
 				t.Fatalf("job = %+v, want kind=%s key=%s", job, tt.kind, tt.key)
 			}
-			if tt.kind == "review.run" {
+			if tt.kind == "review.run" || tt.kind == "review.candidate" {
 				var payload map[string]any
 				if err := json.Unmarshal(job.Payload, &payload); err != nil {
 					t.Fatal(err)
@@ -415,13 +422,14 @@ func TestWebhookNoteCommands(t *testing.T) {
 		ignored  string
 		command  string
 		profile  string
+		explicit *bool
 		full     bool
 	}{
-		{name: "review", note: "/review", accepted: true, command: "run", profile: "default"},
-		{name: "review full", note: "/review full", accepted: true, command: "run", profile: "default", full: true},
-		{name: "review profile", note: "/review deep", accepted: true, command: "run", profile: "deep"},
+		{name: "review", note: "/review", accepted: true, command: "run", profile: "default", explicit: boolPtr(false)},
+		{name: "review full", note: "/review full", accepted: true, command: "run", profile: "default", explicit: boolPtr(false), full: true},
+		{name: "review profile", note: "/review deep", accepted: true, command: "run", profile: "deep", explicit: boolPtr(true)},
 		{name: "cancel", note: "/review cancel", accepted: true, command: "cancel"},
-		{name: "help", note: "/review help", ignored: "help_not_implemented"},
+		{name: "help", note: "/review help", accepted: true, command: "help"},
 		{name: "unknown args", note: "/review full extra", ignored: "unknown_command"},
 		{name: "unknown profile", note: "/review nope", ignored: "unknown_profile"},
 		{name: "not a command", note: "/reviewevil", ignored: "not_review_command"},
@@ -483,12 +491,54 @@ func TestWebhookNoteCommands(t *testing.T) {
 			if payload["full"] != tt.full {
 				t.Errorf("full = %v, want %v", payload["full"], tt.full)
 			}
+			if tt.explicit != nil && payload["profile_explicit"] != *tt.explicit {
+				t.Errorf("profile_explicit = %v, want %v", payload["profile_explicit"], *tt.explicit)
+			}
 			if payload["author_id"] != float64(12) || payload["note_id"] != float64(555) {
 				t.Errorf("payload = %v", payload)
 			}
 		})
 	}
 }
+
+func TestWebhookHelpEnqueuesWithoutReply(t *testing.T) {
+	f := newWebhookFixture(t, "{}")
+	result, err := f.request("Note Hook", "whsec-test", noteBody(42, 7, 555, 12, "alice", "/review help"))
+	if err != nil || !result.Accepted {
+		t.Fatalf("result = %+v, err = %v", result, err)
+	}
+	job := f.job(result.JobID)
+	if job.Kind != "review.command" || job.Key != "review.command:42:555" {
+		t.Fatalf("job = %+v", job)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(job.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["command"] != "help" {
+		t.Fatalf("command = %v", payload["command"])
+	}
+	if len(f.jobs()) != 1 {
+		t.Fatalf("webhook enqueued %d jobs, want only review.command", len(f.jobs()))
+	}
+}
+
+func TestWebhookIgnoresCommandReplyNote(t *testing.T) {
+	f := newWebhookFixture(t, "{}")
+	body := noteBody(42, 7, 9701, 9, "review-bot", commandReplyBody(555, "help", "should not loop"))
+	result, err := f.request("Note Hook", "whsec-test", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Ignored != "command_reply" {
+		t.Fatalf("ignored = %q", result.Ignored)
+	}
+	if len(f.jobs()) != 0 {
+		t.Fatalf("reply note enqueued %d jobs", len(f.jobs()))
+	}
+}
+
+func boolPtr(value bool) *bool { return &value }
 
 func TestWebhookConfiguredBotUsername(t *testing.T) {
 	f := newWebhookFixture(t, "{}")
@@ -594,5 +644,20 @@ func TestWebhookRejectsTargetProjectFromOtherProject(t *testing.T) {
 func TestWebhookServiceRequiresDependencies(t *testing.T) {
 	if _, err := NewWebhookService(WebhookServiceConfig{}); err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestWebhookInvalidCandidateDoesNotFallBackToGenericDelivery(t *testing.T) {
+	f := newWebhookFixture(t, "{}")
+	_, err := f.service.recordJob(context.Background(), 42, "Merge Request Hook", uuid.NewString(), &store.Job{
+		Kind:        "review.candidate",
+		Payload:     json.RawMessage(`{"project_id":0}`),
+		MaxAttempts: 3,
+	})
+	if err == nil {
+		t.Fatal("expected invalid candidate error")
+	}
+	if got := len(f.records()); got != 0 {
+		t.Fatalf("invalid candidate wrote %d deliveries", got)
 	}
 }

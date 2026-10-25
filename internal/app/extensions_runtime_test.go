@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/mcp"
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/review"
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/skill"
+	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
 )
 
 func TestUploadSkillExtractsAndIsLoadable(t *testing.T) {
@@ -283,11 +285,186 @@ func TestProjectExtensionResolverMergesOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ForProject platform-only: %v", err)
 	}
-	if platformSet.mcp != nil || platformSet.loader != nil {
-		t.Fatal("platform-only project built a project runtime")
+	if platformSet.mcp == nil {
+		t.Fatal("platform-only project did not rebuild an MCP manager")
+	}
+	if platformSet.loader != nil {
+		t.Fatal("platform-only project built a project skill loader")
+	}
+	if got := strings.Join(platformSet.mcp.Servers(), ","); got != "alpha,gamma,shared" {
+		t.Fatalf("platform-only servers = %q", got)
 	}
 	if got := platformSet.blocks["code-review"]; len(got.MCPTools) != 1 || got.MCPTools[0] != "platform-tool" {
 		t.Fatalf("platform-only blocks = %+v", got)
+	}
+}
+
+func TestProjectExtensionResolverAppliesMergedBindingsWithoutProjectServers(t *testing.T) {
+	ctx := context.Background()
+	service, _ := newExtensionFixture(t)
+	httpServer := newHTTPMCPTestServer(t)
+	project42 := int64(42)
+	project43 := int64(43)
+
+	if _, err := service.CreateMCPServer(ctx, MCPServerInput{
+		Scope: "platform", Name: "remote", Enabled: true,
+		Config: json.RawMessage(`{"url":"` + httpServer.URL + `"}`),
+	}); err != nil {
+		t.Fatalf("platform MCP: %v", err)
+	}
+	if _, err := service.UpsertBlockBinding(ctx, BlockBindingInput{
+		Scope: "project", ProjectID: &project42, Block: "code-review",
+	}); err != nil {
+		t.Fatalf("narrowed binding: %v", err)
+	}
+	if _, err := service.UpsertBlockBinding(ctx, BlockBindingInput{
+		Scope: "project", ProjectID: &project43, Block: "code-review",
+		MCPTools: []string{"mcp__remote__echo"},
+	}); err != nil {
+		t.Fatalf("widened binding: %v", err)
+	}
+
+	resolver, err := NewProjectExtensionResolver(ProjectExtensionResolverConfig{
+		Store: service.store,
+		Blocks: map[string]config.BlockBinding{
+			"code-review": {MCPTools: []string{"mcp__remote__echo"}},
+		},
+		Workspace: service.workspace,
+	})
+	if err != nil {
+		t.Fatalf("resolver: %v", err)
+	}
+	t.Cleanup(func() { _ = resolver.Close() })
+
+	narrowed, err := resolver.ForProject(ctx, project42)
+	if err != nil {
+		t.Fatalf("ForProject narrowed: %v", err)
+	}
+	if narrowed.mcp == nil {
+		t.Fatal("empty project binding skipped the MCP manager rebuild")
+	}
+	if got := narrowed.mcpConfig.MCPServers["remote"].URL; got != httpServer.URL {
+		t.Fatalf("database-only platform server missing: %q", got)
+	}
+	if tools, err := narrowed.tools.Tools(ctx, "code-review"); err != nil || len(tools) != 0 {
+		t.Fatalf("empty project binding did not revoke platform tools: %v, %v", tools, err)
+	}
+
+	widened, err := resolver.ForProject(ctx, project43)
+	if err != nil {
+		t.Fatalf("ForProject widened: %v", err)
+	}
+	if widened.mcp == nil {
+		t.Fatal("widened project binding skipped the MCP manager rebuild")
+	}
+	tools, err := widened.tools.Tools(ctx, "code-review")
+	if err != nil {
+		t.Fatalf("Tools: %v", err)
+	}
+	if len(tools) != 1 || tools[0].Def().Name != "mcp__remote__echo" {
+		t.Fatalf("widened tools = %+v", tools)
+	}
+	if got := strings.Join(widened.mcp.Servers(), ","); got != "remote" {
+		t.Fatalf("widened servers = %q", got)
+	}
+}
+
+func TestProjectExtensionResolverExpandsStoredMCPServerEnv(t *testing.T) {
+	ctx := context.Background()
+	service, _ := newExtensionFixture(t)
+	t.Setenv("MCP_STORED_VALUE", "expanded-value")
+	if _, err := service.CreateMCPServer(ctx, MCPServerInput{
+		Scope: "platform", Name: "stored", Enabled: true,
+		Config: json.RawMessage(`{"command":"echo","env":{"VALUE":"${MCP_STORED_VALUE}"}}`),
+	}); err != nil {
+		t.Fatalf("CreateMCPServer: %v", err)
+	}
+
+	resolver, err := NewProjectExtensionResolver(ProjectExtensionResolverConfig{
+		Store:     service.store,
+		Workspace: service.workspace,
+	})
+	if err != nil {
+		t.Fatalf("resolver: %v", err)
+	}
+	t.Cleanup(func() { _ = resolver.Close() })
+
+	set, err := resolver.ForProject(ctx, 42)
+	if err != nil {
+		t.Fatalf("ForProject: %v", err)
+	}
+	if got := set.mcpConfig.MCPServers["stored"].Env["VALUE"]; got != "expanded-value" {
+		t.Fatalf("stored env = %q, want expanded value", got)
+	}
+}
+
+func TestProjectExtensionResolverFailsClosedOnStoredMCPServer(t *testing.T) {
+	cases := []struct {
+		name      string
+		config    json.RawMessage
+		env       map[string]string
+		denied    []string
+		wantErr   error
+		wantText  string
+		forbidden string
+	}{
+		{
+			name:      "denied template",
+			config:    json.RawMessage(`{"command":"echo","env":{"CUSTOM":"${CUSTOM_DENIED_FLAG}"}}`),
+			env:       map[string]string{"CUSTOM_DENIED_FLAG": "super-secret-value"},
+			denied:    []string{"CUSTOM_DENIED_FLAG"},
+			wantErr:   mcp.ErrSensitiveEnv,
+			forbidden: "super-secret-value",
+		},
+		{
+			name:     "missing environment",
+			config:   json.RawMessage(`{"command":"echo","env":{"CUSTOM":"${MCP_TEST_MISSING_NEVER_SET}"}}`),
+			wantErr:  mcp.ErrInvalidConfig,
+			wantText: "environment variable MCP_TEST_MISSING_NEVER_SET is not set",
+		},
+		{
+			name:      "unknown field",
+			config:    json.RawMessage(`{"command":"echo","bogus":"super-secret-value"}`),
+			wantErr:   mcp.ErrInvalidConfig,
+			forbidden: "super-secret-value",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			service, _ := newExtensionFixture(t)
+			for name, value := range tc.env {
+				t.Setenv(name, value)
+			}
+			if _, err := service.store.CreateMCPServer(ctx, store.MCPServer{
+				Scope: store.ScopePlatform, Name: "stored", Config: tc.config, Enabled: true,
+			}); err != nil {
+				t.Fatalf("store server: %v", err)
+			}
+			resolver, err := NewProjectExtensionResolver(ProjectExtensionResolverConfig{
+				Store:     service.store,
+				Workspace: service.workspace,
+				DeniedEnv: tc.denied,
+			})
+			if err != nil {
+				t.Fatalf("resolver: %v", err)
+			}
+			t.Cleanup(func() { _ = resolver.Close() })
+
+			_, err = resolver.ForProject(ctx, 42)
+			if err == nil {
+				t.Fatal("invalid stored MCP server did not fail closed")
+			}
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("error = %v, want %v", err, tc.wantErr)
+			}
+			if tc.wantText != "" && !strings.Contains(err.Error(), tc.wantText) {
+				t.Fatalf("error = %v, want %q", err, tc.wantText)
+			}
+			if tc.forbidden != "" && strings.Contains(err.Error(), tc.forbidden) {
+				t.Fatalf("error leaked a config or environment value: %v", err)
+			}
+		})
 	}
 }
 
@@ -312,6 +489,93 @@ func catalogueNames(loader *skill.Loader) []string {
 		names = append(names, item.Name)
 	}
 	return names
+}
+
+func TestLoadStoredPlatformExtensionsExpandsStoredMCPEnv(t *testing.T) {
+	ctx := context.Background()
+	service, st := newExtensionFixture(t)
+	t.Setenv("MCP_PLATFORM_STORED_VALUE", "expanded-platform-value")
+	if _, err := service.CreateMCPServer(ctx, MCPServerInput{
+		Scope: "platform", Name: "stored", Enabled: true,
+		Config: json.RawMessage(`{"command":"stored","env":{"VALUE":"${MCP_PLATFORM_STORED_VALUE}"}}`),
+	}); err != nil {
+		t.Fatalf("CreateMCPServer: %v", err)
+	}
+
+	_, mcpConfig, _, err := loadStoredPlatformExtensions(ctx, st, nil, mcp.Config{}, nil)
+	if err != nil {
+		t.Fatalf("loadStoredPlatformExtensions: %v", err)
+	}
+	if got := mcpConfig.MCPServers["stored"].Env["VALUE"]; got != "expanded-platform-value" {
+		t.Fatalf("stored env = %q, want expanded value", got)
+	}
+}
+
+func TestLoadStoredPlatformExtensionsFailsClosedOnStoredMCP(t *testing.T) {
+	cases := []struct {
+		name      string
+		config    json.RawMessage
+		env       map[string]string
+		denied    []string
+		wantErr   error
+		wantText  string
+		forbidden string
+	}{
+		{
+			name:      "denied environment",
+			config:    json.RawMessage(`{"command":"stored","env":{"CUSTOM":"${CUSTOM_DENIED_FLAG}"}}`),
+			env:       map[string]string{"CUSTOM_DENIED_FLAG": "super-secret-value"},
+			denied:    []string{"CUSTOM_DENIED_FLAG"},
+			wantErr:   mcp.ErrSensitiveEnv,
+			forbidden: "super-secret-value",
+		},
+		{
+			name:     "missing environment",
+			config:   json.RawMessage(`{"command":"stored","env":{"VALUE":"${MCP_PLATFORM_MISSING_NEVER_SET}"}}`),
+			wantErr:  mcp.ErrInvalidConfig,
+			wantText: "environment variable MCP_PLATFORM_MISSING_NEVER_SET is not set",
+		},
+		{
+			name:      "unknown field",
+			config:    json.RawMessage(`{"command":"stored","bogus":"super-secret-value"}`),
+			wantErr:   mcp.ErrInvalidConfig,
+			forbidden: "super-secret-value",
+		},
+		{
+			name:      "sensitive reference",
+			config:    json.RawMessage(`{"command":"stored","env":{"VALUE":"${OPENAI_API_KEY}"}}`),
+			env:       map[string]string{"OPENAI_API_KEY": "super-secret-value"},
+			wantErr:   mcp.ErrSensitiveEnv,
+			forbidden: "super-secret-value",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			st := openTestStore(t)
+			for name, value := range tc.env {
+				t.Setenv(name, value)
+			}
+			if _, err := st.CreateMCPServer(ctx, store.MCPServer{
+				Scope: store.ScopePlatform, Name: "stored", Config: tc.config, Enabled: true,
+			}); err != nil {
+				t.Fatalf("store server: %v", err)
+			}
+			_, _, _, err := loadStoredPlatformExtensions(ctx, st, nil, mcp.Config{}, nil, tc.denied...)
+			if err == nil {
+				t.Fatal("invalid stored MCP server did not fail closed")
+			}
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("error = %v, want %v", err, tc.wantErr)
+			}
+			if tc.wantText != "" && !strings.Contains(err.Error(), tc.wantText) {
+				t.Fatalf("error = %v, want %q", err, tc.wantText)
+			}
+			if tc.forbidden != "" && strings.Contains(err.Error(), tc.forbidden) {
+				t.Fatalf("error leaked a config or environment value: %v", err)
+			}
+		})
+	}
 }
 
 func TestLoadStoredPlatformExtensions(t *testing.T) {

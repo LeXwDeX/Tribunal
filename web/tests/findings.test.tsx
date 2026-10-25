@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { describe, expect, it } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { FindingRow } from '../src/pages/ReviewDetailPage'
 import { finding } from './fixtures'
@@ -38,5 +38,23 @@ describe('findings rendering', () => {
     expect(screen.getByText('<b>not markup</b>')).toBeInTheDocument()
     expect(container.querySelector('img')).toBeNull()
     expect(container.querySelector('script')).toBeNull()
+  })
+
+  it('shows 未标注 for a read-only legacy finding without an annotation', () => {
+    render(
+      <table>
+        <tbody>
+          <FindingRow
+            finding={finding({ annotation: undefined })}
+            index={0}
+            expanded
+            onToggle={() => {}}
+          />
+        </tbody>
+      </table>,
+    )
+    const saved = screen.getByRole('status', { name: '已保存的人工标注' })
+    expect(within(saved).getByText('未标注')).toBeInTheDocument()
+    expect(saved.querySelector('[class*="badge"]')).toHaveTextContent('未标注')
   })
 })

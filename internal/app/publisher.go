@@ -28,6 +28,12 @@ const (
 	discussionPublishKind = "discussion"
 	statusPublishKind     = "commit_status"
 	defaultPublishRetries = 3
+
+	// publicationRetryReason is the fixed reason for a retryable publication
+	// failure. Raw upstream text never reaches storage.
+	publicationRetryReason = "retry pending"
+	// publicationFailedReason is the generic terminal reason.
+	publicationFailedReason = "publication is not possible"
 )
 
 // Publisher implements F7: fingerprint-checked, idempotent publication.
@@ -103,7 +109,45 @@ type loadedReview struct {
 
 // Publish publishes one completed workflow idempotently. A stale fingerprint
 // marks the workflow skipped and returns ErrStalePublication without retrying.
+// Every other failure keeps publication state independent from the completed
+// workflow: retryable failures stay pending, permanent failures become failed.
 func (p *Publisher) Publish(ctx context.Context, workflowID string) error {
+	err := p.publish(ctx, workflowID)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, ErrStalePublication) {
+		// stale() already stored the skipped state and reason.
+		return err
+	}
+	if recordErr := p.recordPublicationFailure(ctx, workflowID, err); recordErr != nil {
+		return errors.Join(err, recordErr)
+	}
+	return err
+}
+
+// recordPublicationFailure persists a bounded sanitized reason. The original
+// error stays in logs only.
+func (p *Publisher) recordPublicationFailure(ctx context.Context, workflowID string, cause error) error {
+	state, reason := store.WorkflowPublicationPending, publicationRetryReason
+	if IsPermanentJob(cause) {
+		state = store.WorkflowPublicationFailed
+		reason = publicationFailedReason
+		if errors.Is(cause, ErrMRClosed) {
+			reason = "merge request is not available"
+		}
+	}
+	if err := p.store.SetWorkflowPublicationState(ctx, workflowID, state, reason); err != nil {
+		p.logger.Warn("publication state update failed",
+			"workflow_id", workflowID, "state", state, "error", err.Error())
+		return err
+	}
+	p.logger.Warn("publication failed",
+		"workflow_id", workflowID, "state", state, "reason", reason)
+	return nil
+}
+
+func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 	loaded, err := p.load(ctx, workflowID)
 	if err != nil {
 		return err
@@ -258,9 +302,11 @@ func (p *Publisher) Publish(ctx context.Context, workflowID string) error {
 	}
 
 	if cfg.Settings.CommitStatus {
-		state := "success"
-		if result.Verdict == review.VerdictBlocking {
-			state = "failed"
+		// Only an explicit PASS may report success. BLOCKING and any future
+		// non-PASS verdict must never green-light the commit status.
+		state := "failed"
+		if result.Verdict == review.VerdictPass {
+			state = "success"
 		}
 		status := gitlab.CommitStatus{
 			State:       state,
@@ -275,7 +321,7 @@ func (p *Publisher) Publish(ctx context.Context, workflowID string) error {
 			ProjectID:   loaded.project.ID,
 			MRIID:       loaded.mrIID,
 			Kind:        statusPublishKind,
-			PublishKey:  "status:" + loaded.dossier.DiffVersion.HeadSHA,
+			PublishKey:  commitStatusPublishKey(loaded.dossier.DiffVersion.HeadSHA, state),
 			GitlabID:    status.Name,
 			WorkflowID:  workflowID,
 			Fingerprint: loaded.record.Hash,
@@ -283,18 +329,65 @@ func (p *Publisher) Publish(ctx context.Context, workflowID string) error {
 			return err
 		}
 	}
-	return p.store.SetWorkflowPublicationState(ctx, workflowID, store.WorkflowPublicationPublished)
+	return p.store.SetWorkflowPublicationState(ctx, workflowID, store.WorkflowPublicationPublished, "")
 }
 
 // PublishFailure publishes the incomplete-review summary. It never writes a
-// commit status or findings.
+// commit status or findings. Publication state follows the same retry rules as
+// a normal publication.
 func (p *Publisher) PublishFailure(ctx context.Context, workflowID, reason string) error {
+	err := p.publishFailure(ctx, workflowID, reason)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, ErrStalePublication) {
+		return err
+	}
+	if recordErr := p.recordPublicationFailure(ctx, workflowID, err); recordErr != nil {
+		return errors.Join(err, recordErr)
+	}
+	return err
+}
+
+func (p *Publisher) publishFailure(ctx context.Context, workflowID, reason string) error {
 	loaded, err := p.load(ctx, workflowID)
 	if err != nil {
 		return err
 	}
+	if loaded.workflow.Status != string(dag.WorkflowFailed) {
+		return PermanentJob(fmt.Errorf("workflow %s did not fail", workflowID))
+	}
+	configHash, hasConfig := loaded.dossier.Metadata["config_hash"]
+	promptHash, hasPrompt := loaded.dossier.Metadata["prompt_hash"]
+	expectedFingerprint := loaded.record.Hash
+	if hasConfig && configHash != "" && hasPrompt && promptHash != "" {
+		expectedFingerprint = reviewFingerprint(loaded.record.Hash, configHash, promptHash)
+	}
+	if loaded.workflow.Fingerprint != "" && loaded.workflow.Fingerprint != expectedFingerprint {
+		return p.stale(ctx, workflowID, "workflow fingerprint changed")
+	}
 	if _, err := p.controlMatches(ctx, loaded); err != nil {
 		return err
+	}
+	cfg, err := p.freshConfig(ctx, loaded)
+	if err != nil {
+		return err
+	}
+	if hasConfig && configHash != "" && configHash != reviewConfigHash(cfg) {
+		return p.stale(ctx, workflowID, "configuration changed")
+	}
+	if hasPrompt && promptHash != "" && p.promptsHash != "" && promptHash != p.promptsHash {
+		return p.stale(ctx, workflowID, "prompt bundle changed")
+	}
+	version, err := p.gitlab.LatestMRVersion(ctx, loaded.token, loaded.project.ID, loaded.mrIID)
+	if err != nil {
+		return err
+	}
+	if version == nil || !strings.EqualFold(version.HeadSHA, loaded.dossier.DiffVersion.HeadSHA) {
+		return p.stale(ctx, workflowID, "merge request head changed")
+	}
+	if loaded.dossier.DiffVersion.BaseSHA != "" && !strings.EqualFold(version.BaseSHA, loaded.dossier.DiffVersion.BaseSHA) {
+		return p.stale(ctx, workflowID, "merge request base changed")
 	}
 	body, err := review.RenderSummary(review.SummaryInput{
 		Verdict:          review.VerdictIncomplete,
@@ -311,14 +404,29 @@ func (p *Publisher) PublishFailure(ctx context.Context, workflowID, reason strin
 	if _, err := p.upsertSummary(ctx, loaded.project.ID, loaded.mrIID, loaded.token, loaded.record.Hash, body, workflowID); err != nil {
 		return err
 	}
-	return p.store.SetWorkflowPublicationState(ctx, workflowID, store.WorkflowPublicationPublished)
+	return p.store.SetWorkflowPublicationState(ctx, workflowID, store.WorkflowPublicationPublished, "")
 }
 
-// Republish re-runs publication for a completed workflow, including a manual
-// request after a previous failure.
+// Republish re-runs publication for a terminal workflow, including a manual
+// request after a previous failure. Failed executions publish the failure
+// summary, never a normal review result. The stale and generation fences stay
+// inside Publish and PublishFailure.
 func (p *Publisher) Republish(ctx context.Context, workflowID string) error {
-	if err := p.store.SetWorkflowPublicationState(ctx, workflowID, store.WorkflowPublicationPending); err != nil {
+	loaded, err := p.load(ctx, workflowID)
+	if err != nil {
 		return err
+	}
+	switch loaded.workflow.Status {
+	case string(dag.WorkflowCompleted):
+	case string(dag.WorkflowFailed):
+	default:
+		return PermanentJob(fmt.Errorf("workflow %s is not publishable", workflowID))
+	}
+	if err := p.store.SetWorkflowPublicationState(ctx, workflowID, store.WorkflowPublicationPending, ""); err != nil {
+		return err
+	}
+	if loaded.workflow.Status == string(dag.WorkflowFailed) {
+		return p.PublishFailure(ctx, workflowID, reviewExecutionFailedReason)
 	}
 	return p.Publish(ctx, workflowID)
 }
@@ -408,32 +516,43 @@ func (p *Publisher) freshConfig(ctx context.Context, loaded *loadedReview) (effe
 		return effectiveReviewConfig{}, err
 	}
 	if mr == nil || !isOpenState(mr.State) {
-		return effectiveReviewConfig{}, PermanentJob(fmt.Errorf("%w: merge request is not open", ErrStalePublication))
+		return effectiveReviewConfig{}, p.stale(ctx, loaded.workflow.ID, "merge request is not open")
 	}
 	if !strings.EqualFold(mr.SHA, loaded.dossier.DiffVersion.HeadSHA) {
-		return effectiveReviewConfig{}, PermanentJob(fmt.Errorf("%w: merge request head changed", ErrStalePublication))
+		return effectiveReviewConfig{}, p.stale(ctx, loaded.workflow.ID, "merge request head changed")
 	}
 	if loaded.dossier.MR.TargetBranch != "" && mr.TargetBranch != loaded.dossier.MR.TargetBranch {
 		return effectiveReviewConfig{}, p.stale(ctx, loaded.workflow.ID, "target branch changed")
 	}
-	docs := review.RepoDocs{
-		GitLabReviewConfig: p.rawDoc(ctx, loaded.token, loaded.project.ID, ".gitlab-review.yml", mr.TargetBranch),
-		AGENTS:             p.rawDoc(ctx, loaded.token, loaded.project.ID, "AGENTS.md", mr.TargetBranch),
-		CLAUDE:             p.rawDoc(ctx, loaded.token, loaded.project.ID, "CLAUDE.md", mr.TargetBranch),
+	configDoc, err := p.rawDoc(ctx, loaded.token, loaded.project.ID, ".gitlab-review.yml", mr.TargetBranch)
+	if err != nil {
+		return effectiveReviewConfig{}, err
 	}
+	agents, err := p.rawDoc(ctx, loaded.token, loaded.project.ID, "AGENTS.md", mr.TargetBranch)
+	if err != nil {
+		return effectiveReviewConfig{}, err
+	}
+	claude, err := p.rawDoc(ctx, loaded.token, loaded.project.ID, "CLAUDE.md", mr.TargetBranch)
+	if err != nil {
+		return effectiveReviewConfig{}, err
+	}
+	docs := review.RepoDocs{GitLabReviewConfig: configDoc, AGENTS: agents, CLAUDE: claude}
 	return resolveReviewConfig(loaded.project, docs, p.reviewDefaults, p.profiles), nil
 }
 
-func (p *Publisher) rawDoc(ctx context.Context, token string, projectID int64, path, ref string) string {
+func (p *Publisher) rawDoc(ctx context.Context, token string, projectID int64, path, ref string) (string, error) {
 	data, err := p.gitlab.GetRawFile(ctx, token, projectID, path, ref)
 	if err != nil {
-		return ""
+		if gitlab.IsNotFound(err) {
+			return "", nil
+		}
+		return "", err
 	}
-	return string(data)
+	return string(data), nil
 }
 
 func (p *Publisher) stale(ctx context.Context, workflowID, reason string) error {
-	if err := p.store.SetWorkflowPublicationState(ctx, workflowID, store.WorkflowPublicationSkipped); err != nil {
+	if err := p.store.SetWorkflowPublicationStateIfPending(ctx, workflowID, "stale: "+reason); err != nil {
 		return err
 	}
 	p.logger.Info("publication skipped as stale", "workflow_id", workflowID, "reason", reason)
@@ -550,6 +669,13 @@ func (p *Publisher) createDiscussion(ctx context.Context, token string, projectI
 		return nil
 	})
 	return discussion, err
+}
+
+// commitStatusPublishKey records the effective state with the SHA. GitLab
+// stores each status as a separate object, so the state belongs to the
+// idempotency key. internal/server parses this format for the admin detail.
+func commitStatusPublishKey(sha, state string) string {
+	return "status:" + sha + ":" + state
 }
 
 func (p *Publisher) setCommitStatus(ctx context.Context, token string, projectID int64, sha string, status gitlab.CommitStatus) error {

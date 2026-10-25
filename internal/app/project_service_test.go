@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -76,6 +79,9 @@ func TestRegisterWithoutWebhook(t *testing.T) {
 	}
 	if saved.HookID != nil {
 		t.Errorf("hook id = %v, want nil", *saved.HookID)
+	}
+	if saved.WebhookState != store.WebhookStateDisabled || len(saved.WebhookEvents) != 0 {
+		t.Errorf("webhook state = %q, events = %v", saved.WebhookState, saved.WebhookEvents)
 	}
 	if string(saved.Settings) != `{"skip_draft":false}` {
 		t.Errorf("settings = %s", saved.Settings)
@@ -157,6 +163,10 @@ func TestRegisterAutoWebhook(t *testing.T) {
 	}
 	if saved.HookID == nil || *saved.HookID != 99 {
 		t.Errorf("hook id = %v", saved.HookID)
+	}
+	if saved.WebhookState != store.WebhookStateEnabled ||
+		strings.Join(saved.WebhookEvents, ",") != "push_events,merge_requests_events,note_events" {
+		t.Errorf("webhook state = %q, events = %v", saved.WebhookState, saved.WebhookEvents)
 	}
 	decrypted, err := cipher.Decrypt(saved.WebhookSecretEnc)
 	if err != nil || string(decrypted) != spec.Secret {
@@ -429,5 +439,142 @@ func TestRegisterDuplicateNonConcurrent(t *testing.T) {
 func TestProjectServiceRequiresDependencies(t *testing.T) {
 	if _, err := NewProjectService(ProjectServiceConfig{}); err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func newWorkspaceProjectService(t *testing.T, st ProjectStore, api gitlab.API, cipher *secret.Cipher, root string) *ProjectService {
+	t.Helper()
+	service, err := NewProjectService(ProjectServiceConfig{
+		Store:     st,
+		GitLab:    api,
+		Cipher:    cipher,
+		Profiles:  testProfiles(),
+		Workspace: root,
+	})
+	if err != nil {
+		t.Fatalf("NewProjectService: %v", err)
+	}
+	return service
+}
+
+func TestProjectDeleteRemovesWorkspaceAndManagedSkills(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	cipher := newTestCipher(t)
+	root := t.TempDir()
+	seedProject(t, st, cipher, 42, "webhook-secret", "", "default")
+	service := newWorkspaceProjectService(t, st, defaultFakeGitLab(), cipher, root)
+
+	paths := []string{
+		filepath.Join(root, "42"),
+		filepath.Join(root, "skills", "project-42"),
+	}
+	for _, path := range paths {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "project-data"), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := service.Delete(ctx, 42); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	for _, path := range paths {
+		if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("%s still exists: %v", path, err)
+		}
+	}
+	if _, err := st.GetProject(ctx, 42); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("project still registered: %v", err)
+	}
+}
+
+func TestProjectDeleteRefusesSymlinkedWorkspaceRoot(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	cipher := newTestCipher(t)
+	seedProject(t, st, cipher, 42, "webhook-secret", "", "default")
+
+	outside := t.TempDir()
+	outsidePaths := []string{
+		filepath.Join(outside, "42"),
+		filepath.Join(outside, "skills", "project-42"),
+	}
+	for _, path := range outsidePaths {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(t.TempDir(), "workspace")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink fixture unavailable: %v", err)
+	}
+	service := newWorkspaceProjectService(t, st, defaultFakeGitLab(), cipher, link)
+
+	if err := service.Delete(ctx, 42); err == nil {
+		t.Fatal("Delete followed a symlinked workspace root")
+	}
+	for _, path := range outsidePaths {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("outside path %s was removed: %v", path, err)
+		}
+	}
+}
+
+func TestProjectDeleteRefusesSymlinkedSkillsDir(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	cipher := newTestCipher(t)
+	seedProject(t, st, cipher, 42, "webhook-secret", "", "default")
+
+	root := t.TempDir()
+	outside := t.TempDir()
+	outsideSkill := filepath.Join(outside, "project-42")
+	if err := os.MkdirAll(outsideSkill, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "42"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "skills")); err != nil {
+		t.Skipf("symlink fixture unavailable: %v", err)
+	}
+	service := newWorkspaceProjectService(t, st, defaultFakeGitLab(), cipher, root)
+
+	if err := service.Delete(ctx, 42); err == nil {
+		t.Fatal("Delete followed a symlinked skills directory")
+	}
+	if _, err := os.Stat(outsideSkill); err != nil {
+		t.Errorf("outside skill %s was removed: %v", outsideSkill, err)
+	}
+}
+
+func TestProjectDeleteRemovesSymlinkedProjectDirLinkOnly(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	cipher := newTestCipher(t)
+	seedProject(t, st, cipher, 42, "webhook-secret", "", "default")
+
+	root := t.TempDir()
+	outside := t.TempDir()
+	outsideFile := filepath.Join(outside, "keep")
+	if err := os.WriteFile(outsideFile, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	projectLink := filepath.Join(root, "42")
+	if err := os.Symlink(outside, projectLink); err != nil {
+		t.Skipf("symlink fixture unavailable: %v", err)
+	}
+	service := newWorkspaceProjectService(t, st, defaultFakeGitLab(), cipher, root)
+
+	if err := service.Delete(ctx, 42); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := os.Lstat(projectLink); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("project symlink still exists: %v", err)
+	}
+	if _, err := os.Stat(outsideFile); err != nil {
+		t.Errorf("outside content was removed: %v", err)
 	}
 }

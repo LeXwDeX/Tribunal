@@ -169,11 +169,22 @@ func NewExtensionService(cfg ExtensionServiceConfig) (*ExtensionService, error) 
 	if now == nil {
 		now = time.Now
 	}
+	workspace := strings.TrimSpace(cfg.Workspace)
+	if workspace != "" {
+		absolute, err := filepath.Abs(workspace)
+		if err != nil {
+			return nil, fmt.Errorf("app: resolve extension workspace: %w", err)
+		}
+		if filepath.Dir(absolute) == absolute {
+			return nil, errors.New("app: extension workspace must not be a filesystem root")
+		}
+		workspace = absolute
+	}
 	return &ExtensionService{
 		store:     cfg.Store,
 		mcp:       cfg.MCP,
 		clients:   cfg.Clients,
-		workspace: cfg.Workspace,
+		workspace: workspace,
 		deniedEnv: append([]string(nil), cfg.DeniedEnv...),
 		logger:    logger,
 		now:       now,
@@ -191,6 +202,19 @@ func (s *ExtensionService) ListMCPServers(ctx context.Context, scope string, pro
 		out = append(out, mcpServerFromStore(row))
 	}
 	return out, nil
+}
+
+// ListMCPServersPage returns one bounded page for the scope selector.
+func (s *ExtensionService) ListMCPServersPage(ctx context.Context, scope string, projectID *int64, cursor string, limit int) ([]MCPServer, string, error) {
+	rows, next, err := s.store.ListMCPServersPage(ctx, scope, projectID, cursor, limit)
+	if err != nil {
+		return nil, "", extensionStoreError(err)
+	}
+	out := make([]MCPServer, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, mcpServerFromStore(row))
+	}
+	return out, next, nil
 }
 
 // GetMCPServer returns one stored server.
@@ -213,10 +237,13 @@ func (s *ExtensionService) CreateMCPServer(ctx context.Context, in MCPServerInpu
 	if name == "" {
 		return nil, validationError("name is required", Detail{Field: "name", Message: "name is required"})
 	}
+	if err := validateMCPServerName(name); err != nil {
+		return nil, err
+	}
 	if err := guardMaskedConfig(in.Config); err != nil {
 		return nil, err
 	}
-	if err := validateExtensionConfig(in.Config); err != nil {
+	if err := s.validateMCPConfig(in.Config); err != nil {
 		return nil, err
 	}
 	row, err := s.store.CreateMCPServer(ctx, store.MCPServer{
@@ -235,11 +262,18 @@ func (s *ExtensionService) CreateMCPServer(ctx context.Context, in MCPServerInpu
 
 // UpdateMCPServer replaces only the provided fields.
 func (s *ExtensionService) UpdateMCPServer(ctx context.Context, id string, update MCPServerUpdate) (*MCPServer, error) {
+	if update.Name != nil {
+		name := strings.TrimSpace(*update.Name)
+		if err := validateMCPServerName(name); err != nil {
+			return nil, err
+		}
+		update.Name = &name
+	}
 	if update.Config != nil {
 		if err := guardMaskedConfig(update.Config); err != nil {
 			return nil, err
 		}
-		if err := validateExtensionConfig(update.Config); err != nil {
+		if err := s.validateMCPConfig(update.Config); err != nil {
 			return nil, err
 		}
 	}
@@ -278,11 +312,14 @@ func (s *ExtensionService) ImportMCPServers(ctx context.Context, in MCPImportInp
 	}
 	sort.Strings(names)
 	for _, name := range names {
+		if err := validateMCPServerName(name); err != nil {
+			return nil, err
+		}
 		config := in.Servers[name]
 		if err := guardMaskedConfig(config); err != nil {
 			return nil, err
 		}
-		if err := validateExtensionConfig(config); err != nil {
+		if err := s.validateMCPConfig(config); err != nil {
 			return nil, err
 		}
 	}
@@ -335,6 +372,19 @@ func (s *ExtensionService) ListSkills(ctx context.Context, scope string, project
 		out = append(out, skillFromStore(row))
 	}
 	return out, nil
+}
+
+// ListSkillsPage returns one bounded page for the scope selector.
+func (s *ExtensionService) ListSkillsPage(ctx context.Context, scope string, projectID *int64, cursor string, limit int) ([]Skill, string, error) {
+	rows, next, err := s.store.ListSkillsPage(ctx, scope, projectID, cursor, limit)
+	if err != nil {
+		return nil, "", extensionStoreError(err)
+	}
+	out := make([]Skill, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, skillFromStore(row))
+	}
+	return out, next, nil
 }
 
 // UploadSkill extracts the archive below the managed skills root and persists
@@ -752,6 +802,19 @@ func (s *ExtensionService) ListBlockBindings(ctx context.Context, scope string, 
 	return out, nil
 }
 
+// ListBlockBindingsPage returns one bounded page for the scope selector.
+func (s *ExtensionService) ListBlockBindingsPage(ctx context.Context, scope string, projectID *int64, cursor string, limit int) ([]BlockBinding, string, error) {
+	rows, next, err := s.store.ListBlockBindingsPage(ctx, scope, projectID, cursor, limit)
+	if err != nil {
+		return nil, "", extensionStoreError(err)
+	}
+	out := make([]BlockBinding, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, blockBindingFromStore(row))
+	}
+	return out, next, nil
+}
+
 // UpsertBlockBinding creates or replaces one binding.
 func (s *ExtensionService) UpsertBlockBinding(ctx context.Context, in BlockBindingInput) (*BlockBinding, error) {
 	scope, projectID, err := extensionScope(in.Scope, in.ProjectID)
@@ -772,51 +835,47 @@ func (s *ExtensionService) UpsertBlockBinding(ctx context.Context, in BlockBindi
 	return &binding, nil
 }
 
-// TestMCPServer lists tools from an existing server, or starts a short-lived
-// manager for a server that the runtime manager does not own.
+// TestMCPServer starts a short-lived manager from the submitted configuration.
+// It never reuses the runtime manager: a project server can share a name with
+// a platform server and carry different configuration.
 func (s *ExtensionService) TestMCPServer(ctx context.Context, server MCPServer) ([]MCPTool, error) {
-	var config mcp.ServerConfig
-	if err := json.Unmarshal(server.Config, &config); err != nil {
-		return nil, validationError("config must be a valid MCP server object", Detail{Field: "config", Message: "config must be a valid MCP server object"})
-	}
 	name := strings.TrimSpace(server.Name)
 	if name == "" {
 		return nil, validationError("name is required", Detail{Field: "name", Message: "name is required"})
 	}
-	manager := s.mcp
-	owned := false
-	if manager != nil && !containsString(manager.Servers(), name) {
-		manager = nil
+	config, err := mcp.ParseServer(server.Config, s.deniedEnv...)
+	if err != nil {
+		return nil, fmt.Errorf("app: MCP server test failed: %w", err)
 	}
-	if manager == nil {
-		workspace := s.workspace
-		if strings.TrimSpace(workspace) == "" {
-			dir, err := os.MkdirTemp("", "mcp-test-")
-			if err != nil {
-				return nil, errors.New("app: cannot prepare MCP test workspace")
-			}
-			defer os.RemoveAll(dir)
-			workspace = dir
-		}
-		created, err := mcp.New(mcp.Options{
-			Platform:  mcp.Config{MCPServers: map[string]mcp.ServerConfig{name: config}},
-			Workspace: workspace,
-			DeniedEnv: s.deniedEnv,
-			Now:       s.now,
-		})
+	workspace := s.workspace
+	if strings.TrimSpace(workspace) == "" {
+		dir, err := os.MkdirTemp("", "mcp-test-")
 		if err != nil {
-			return nil, fmt.Errorf("app: MCP server test failed: %w", err)
+			return nil, errors.New("app: cannot prepare MCP test workspace")
 		}
-		manager = created
-		owned = true
+		defer os.RemoveAll(dir)
+		workspace = dir
 	}
-	if owned {
-		defer func() {
-			if err := manager.Close(); err != nil {
-				s.logger.Warn("mcp test manager close failed")
-			}
-		}()
+	if server.Scope == store.ScopeProject {
+		if server.ProjectID == nil || *server.ProjectID <= 0 {
+			return nil, validationError("project_id is required for project scope", Detail{Field: "project_id", Message: "must be positive"})
+		}
+		workspace = filepath.Join(workspace, fmt.Sprintf("%d", *server.ProjectID))
 	}
+	manager, err := mcp.New(mcp.Options{
+		Platform:  mcp.Config{MCPServers: map[string]mcp.ServerConfig{name: config}},
+		Workspace: workspace,
+		DeniedEnv: s.deniedEnv,
+		Now:       s.now,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("app: MCP server test failed: %w", err)
+	}
+	defer func() {
+		if err := manager.Close(); err != nil {
+			s.logger.Warn("mcp test manager close failed")
+		}
+	}()
 	infos, err := manager.ListTools(ctx, name)
 	if err != nil {
 		return nil, fmt.Errorf("app: MCP server test failed: %w", err)
@@ -876,10 +935,20 @@ func extensionScope(scope string, projectID *int64) (string, *int64, error) {
 	return scope, projectID, nil
 }
 
-func validateExtensionConfig(raw json.RawMessage) error {
-	var object map[string]json.RawMessage
-	if len(raw) == 0 || json.Unmarshal(raw, &object) != nil || len(object) == 0 {
-		return validationError("config must be a non-empty JSON object", Detail{Field: "config", Message: "config must be a non-empty JSON object"})
+func validateMCPServerName(name string) error {
+	if err := mcp.ValidateServerName(name); err != nil {
+		return validationError("invalid server name", Detail{Field: "name", Message: "server name is invalid"})
+	}
+	return nil
+}
+
+// validateMCPConfig applies the runtime MCP parser without expanding ${NAME}
+// templates, so stored configuration keeps its references and secret values
+// are never copied into the row. The error stays generic to avoid echoing
+// unknown field names or values.
+func (s *ExtensionService) validateMCPConfig(raw json.RawMessage) error {
+	if err := mcp.ValidateServerJSON("", raw, s.deniedEnv...); err != nil {
+		return validationError("config must be a valid MCP server object", Detail{Field: "config", Message: "config must be a valid MCP server object"})
 	}
 	return nil
 }

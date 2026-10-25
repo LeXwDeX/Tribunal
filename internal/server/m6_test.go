@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -11,13 +12,17 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"sort"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/app"
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/config"
+	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/repo"
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store/sqlite"
+	workspacepkg "github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/workspace"
 )
 
 // ---------------------------------------------------------------- fake store
@@ -30,12 +35,15 @@ type fakeReviewStore struct {
 	findings     map[string][]store.Finding
 	calls        map[string][]store.LLMCall
 	publications map[string][]store.Publication
+	dossiers     map[string]*store.WorkflowDossier
+	dossierErr   error
 	stats        store.Stats
 
 	lastFilter     store.WorkflowFilter
 	lastLimit      int
 	lastCallFilter store.LLMCallFilter
 	lastStats      store.StatsFilter
+	accessByUser   map[int64]map[int64]bool
 }
 
 func newFakeReviewStore() *fakeReviewStore {
@@ -44,6 +52,7 @@ func newFakeReviewStore() *fakeReviewStore {
 		findings:     map[string][]store.Finding{},
 		calls:        map[string][]store.LLMCall{},
 		publications: map[string][]store.Publication{},
+		dossiers:     map[string]*store.WorkflowDossier{},
 	}
 }
 
@@ -57,6 +66,11 @@ func (f *fakeReviewStore) ListWorkflows(ctx context.Context, filter store.Workfl
 		if filter.ProjectID != nil && wf.ProjectID != *filter.ProjectID {
 			continue
 		}
+		if filter.AccessUserID != nil && f.accessByUser != nil {
+			if !f.accessByUser[*filter.AccessUserID][wf.ProjectID] {
+				continue
+			}
+		}
 		if filter.MRIID != nil && (wf.MRIID == nil || *wf.MRIID != *filter.MRIID) {
 			continue
 		}
@@ -67,6 +81,9 @@ func (f *fakeReviewStore) ListWorkflows(ctx context.Context, filter store.Workfl
 			continue
 		}
 		if filter.Verdict != "" && wf.Verdict != filter.Verdict {
+			continue
+		}
+		if filter.PublicationState != "" && wf.PublicationState != filter.PublicationState {
 			continue
 		}
 		if filter.Profile != "" && wf.Profile != filter.Profile {
@@ -141,6 +158,18 @@ func (f *fakeReviewStore) setWorkflow(wf store.Workflow) {
 	f.workflows = append(f.workflows, wf)
 }
 
+func (f *fakeReviewStore) GetWorkflowDossier(_ context.Context, workflowID string) (*store.WorkflowDossier, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.dossierErr != nil {
+		return nil, f.dossierErr
+	}
+	if dossier, ok := f.dossiers[workflowID]; ok {
+		return dossier, nil
+	}
+	return nil, store.ErrNotFound
+}
+
 func (f *fakeReviewStore) GetWorkflowNodes(ctx context.Context, workflowID string) ([]store.WorkflowNode, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -193,6 +222,29 @@ func (f *fakeReviewStore) ListFindings(ctx context.Context, filter store.Finding
 		out = append(out, finding)
 	}
 	return out, nil
+}
+
+func (f *fakeReviewStore) SetFindingAnnotation(ctx context.Context, workflowID, findingID, annotation, annotatedBy string) (store.Finding, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	items := f.findings[workflowID]
+	for i := range items {
+		if items[i].ID != findingID {
+			continue
+		}
+		items[i].Annotation = annotation
+		if annotation == "" {
+			items[i].AnnotatedBy = ""
+			items[i].AnnotatedAt = nil
+		} else {
+			items[i].AnnotatedBy = annotatedBy
+			at := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+			items[i].AnnotatedAt = &at
+		}
+		f.findings[workflowID] = items
+		return items[i], nil
+	}
+	return store.Finding{}, store.ErrNotFound
 }
 
 func (f *fakeReviewStore) ListLLMCalls(ctx context.Context, filter store.LLMCallFilter) ([]store.LLMCall, string, error) {
@@ -401,6 +453,11 @@ func (f *fakeExtensions) ListMCPServers(ctx context.Context, scope string, proje
 	return out, f.err
 }
 
+func (f *fakeExtensions) ListMCPServersPage(ctx context.Context, scope string, projectID *int64, cursor string, limit int) ([]MCPServer, string, error) {
+	servers, err := f.ListMCPServers(ctx, scope, projectID)
+	return servers, "", err
+}
+
 func (f *fakeExtensions) GetMCPServer(ctx context.Context, id string) (*MCPServer, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -485,6 +542,11 @@ func (f *fakeExtensions) ListSkills(ctx context.Context, scope string, projectID
 	return append([]Skill(nil), f.skills...), f.err
 }
 
+func (f *fakeExtensions) ListSkillsPage(ctx context.Context, scope string, projectID *int64, cursor string, limit int) ([]Skill, string, error) {
+	skills, err := f.ListSkills(ctx, scope, projectID)
+	return skills, "", err
+}
+
 func (f *fakeExtensions) UploadSkill(ctx context.Context, in SkillUpload) (*Skill, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -524,6 +586,11 @@ func (f *fakeExtensions) ListBlockBindings(ctx context.Context, scope string, pr
 	return append([]BlockBinding(nil), f.bindings...), f.err
 }
 
+func (f *fakeExtensions) ListBlockBindingsPage(ctx context.Context, scope string, projectID *int64, cursor string, limit int) ([]BlockBinding, string, error) {
+	bindings, err := f.ListBlockBindings(ctx, scope, projectID)
+	return bindings, "", err
+}
+
 func (f *fakeExtensions) UpsertBlockBinding(ctx context.Context, in BlockBindingInput) (*BlockBinding, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -546,6 +613,7 @@ type m6Env struct {
 	store      Store
 	reviews    *fakeReviews
 	workspace  *fakeWorkspace
+	contexts   ContextService
 	extensions *fakeExtensions
 	mcp        *fakeMCP
 	llm        *fakeLLM
@@ -558,6 +626,7 @@ type m6Options struct {
 	adminFactory func(*sqlite.Store) AdminService
 	platform     *config.Config
 	streamPoll   time.Duration
+	noContexts   bool
 }
 
 func newM6Env(t *testing.T, opts m6Options) *m6Env {
@@ -589,6 +658,16 @@ func newM6Env(t *testing.T, opts m6Options) *m6Env {
 	}
 	reviews := &fakeReviews{}
 	workspace := &fakeWorkspace{}
+	var contexts ContextService
+	if !opts.noContexts {
+		contexts, err = app.NewContextService(app.ContextServiceConfig{
+			Store:     st,
+			Workspace: workspacepkg.NewManager(t.TempDir(), &repo.Git{}),
+		})
+		if err != nil {
+			t.Fatalf("NewContextService: %v", err)
+		}
+	}
 	extensions := &fakeExtensions{}
 	mcp := &fakeMCP{}
 	llm := &fakeLLM{}
@@ -608,8 +687,10 @@ func newM6Env(t *testing.T, opts m6Options) *m6Env {
 			Now:             time.Now,
 		},
 		Store:      view,
+		Access:     st,
 		Reviews:    reviews,
 		Workspace:  workspace,
+		Contexts:   contexts,
 		Extensions: extensions,
 		MCP:        mcp,
 		LLM:        llm,
@@ -626,9 +707,73 @@ func newM6Env(t *testing.T, opts m6Options) *m6Env {
 		server.Close()
 		gitlab.Close()
 	})
-	return &m6Env{t: t, server: server, gitlab: gitlab, sqlite: st, store: view,
-		reviews: reviews, workspace: workspace, extensions: extensions, mcp: mcp, llm: llm,
-		platform: platform}
+	env := &m6Env{t: t, server: server, gitlab: gitlab, sqlite: st, store: view,
+		reviews: reviews, workspace: workspace, contexts: contexts,
+		extensions: extensions, mcp: mcp, llm: llm, platform: platform}
+	return env
+}
+
+// ensureFixtureProject creates the minimum project row needed by a grant when
+// a test uses a fake business store.
+func (e *m6Env) ensureFixtureProject(projectID int64) {
+	e.t.Helper()
+	ctx := context.Background()
+	if _, err := e.sqlite.GetProject(ctx, projectID); err == nil {
+		return
+	}
+	path := "fixture/project-" + strconv.FormatInt(projectID, 10)
+	if _, err := e.sqlite.RegisterProject(ctx, store.Project{
+		ID: projectID, PathWithNamespace: path,
+		WebURL: "https://gitlab.example.com/" + path, DefaultBranch: "main",
+		TokenEnc: []byte{1}, WebhookSecretEnc: []byte{2}, TokenScopes: []string{"api"},
+	}); err != nil {
+		e.t.Fatalf("fixture RegisterProject(%d): %v", projectID, err)
+	}
+}
+
+// grant records one explicit project grant used by a test fixture.
+func (e *m6Env) grant(userID, projectID int64, role string) {
+	e.t.Helper()
+	e.ensureFixtureProject(projectID)
+	switch userID {
+	case 7:
+		e.ensureUser(7, "alice", "Alice Admin", roleAdmin)
+	case 8:
+		e.ensureUser(8, "bob", "Bob Viewer", roleViewer)
+	default:
+		e.ensureUser(userID, "fixture-"+strconv.FormatInt(userID, 10), "Fixture", roleViewer)
+	}
+	if err := e.sqlite.SetProjectGrant(context.Background(), projectID, userID, role); err != nil {
+		e.t.Fatalf("SetProjectGrant(%d,%d): %v", projectID, userID, err)
+	}
+}
+
+// businessClient is the platform-admin session with explicit fixture grants.
+// It is used where the test exercises project business data.
+func (e *m6Env) businessClient() *m6Client {
+	e.t.Helper()
+	client := e.loginAs("code-admin")
+	for _, projectID := range []int64{42, 43, 44} {
+		e.grant(7, projectID, store.ProjectAccessManage)
+	}
+	return client
+}
+
+// ensureUser creates the local user row a grant references. It uses the
+// session store because tests cannot insert users through the public API.
+func (e *m6Env) ensureUser(userID int64, username, name, role string) {
+	e.t.Helper()
+	if _, err := e.sqlite.GetUser(context.Background(), userID); err == nil {
+		return
+	}
+	now := time.Now()
+	sum := sha256.Sum256([]byte("fixture-user-" + strconv.FormatInt(userID, 10)))
+	if err := e.sqlite.CreateSession(context.Background(), store.Session{
+		IDHash: sum[:], UserID: userID, Username: username, Name: name, Role: role,
+		ExpiresAt: now.Add(time.Hour), CreatedAt: now,
+	}, 4096); err != nil {
+		e.t.Fatalf("fixture user %d: %v", userID, err)
+	}
 }
 
 type m6Client struct {

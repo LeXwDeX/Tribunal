@@ -15,6 +15,44 @@ const (
 	defaultNodeTimeout = 10 * time.Minute
 )
 
+// staleRetry retries an optimistic commit while the store revision advances.
+// A newer revision means another writer made progress, so the retry has no
+// fixed attempt limit. Repeated stale results at an unchanged revision bound
+// the loop and surface a real failure; context cancellation bounds the
+// progress case, and cancelDurable adds a write deadline.
+type staleRetry struct {
+	fenced    int64
+	pending   bool
+	unchanged int
+}
+
+func (r *staleRetry) mark(expect int64) {
+	r.fenced = expect
+	r.pending = true
+}
+
+func (r *staleRetry) observe(rev int64) error {
+	if !r.pending {
+		return nil
+	}
+	r.pending = false
+	if rev > r.fenced {
+		r.unchanged = 0
+		return nil
+	}
+	r.unchanged++
+	if r.unchanged >= maxCommitAttempts {
+		return fmt.Errorf("%w: revision %d did not advance after %d stale commits", ErrStaleRevision, rev, r.unchanged)
+	}
+	return nil
+}
+
+func (r *staleRetry) reset() {
+	r.fenced = 0
+	r.pending = false
+	r.unchanged = 0
+}
+
 // Engine drives workflows. One Engine process owns at most one Run per
 // workflow; the event store revision fences every write.
 type Engine struct {
@@ -29,12 +67,17 @@ type Engine struct {
 	runs map[string]*runHandle
 }
 
+// errTokenBudget identifies a per-node cancellation caused by the workflow
+// token budget. It does not cancel the workflow or token-free nodes.
+var errTokenBudget = errors.New("dag: token budget exhausted")
+
 type runHandle struct {
-	mu     sync.Mutex
-	cancel context.CancelFunc
-	active map[string]bool
-	wake   chan struct{}
-	err    error
+	mu          sync.Mutex
+	cancel      context.CancelFunc
+	nodeCancels map[string]context.CancelCauseFunc
+	active      map[string]bool
+	wake        chan struct{}
+	err         error
 }
 
 func (h *runHandle) setErr(err error) {
@@ -66,6 +109,40 @@ func (h *runHandle) stop() {
 	h.mu.Unlock()
 	if cancel != nil {
 		cancel()
+	}
+}
+
+func (h *runHandle) setNodeCancel(id string, cancel context.CancelCauseFunc) {
+	h.mu.Lock()
+	if h.nodeCancels == nil {
+		h.nodeCancels = make(map[string]context.CancelCauseFunc)
+	}
+	h.nodeCancels[id] = cancel
+	h.mu.Unlock()
+}
+
+func (h *runHandle) clearNodeCancel(id string) {
+	h.mu.Lock()
+	delete(h.nodeCancels, id)
+	h.mu.Unlock()
+}
+
+// cancelTokenBudgetNodes stops running nodes that consume model tokens. The
+// workflow and token-free settlement nodes keep running.
+func (h *runHandle) cancelTokenBudgetNodes(wf WorkflowView) {
+	h.mu.Lock()
+	cancels := make([]context.CancelCauseFunc, 0, len(h.nodeCancels))
+	for id, view := range wf.Nodes {
+		if view.Status != NodeRunning || view.Spec.TokenFree {
+			continue
+		}
+		if cancel := h.nodeCancels[id]; cancel != nil {
+			cancels = append(cancels, cancel)
+		}
+	}
+	h.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel(errTokenBudget)
 	}
 }
 
@@ -196,8 +273,8 @@ func (e *Engine) cancelDurable(ctx context.Context, wfID, reason string) error {
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 
-	var lastErr error
-	for attempt := 0; attempt < maxCommitAttempts; attempt++ {
+	var retry staleRetry
+	for {
 		wf, err := e.loadView(writeCtx, wfID)
 		if err != nil {
 			return err
@@ -237,9 +314,12 @@ func (e *Engine) cancelDurable(ctx context.Context, wfID, reason string) error {
 			return err
 		}
 		events = append(events, ev)
+		if err := retry.observe(wf.Revision); err != nil {
+			return err
+		}
 		if _, err := e.store.Append(writeCtx, wfID, wf.Revision, events...); err != nil {
 			if errors.Is(err, ErrStaleRevision) {
-				lastErr = err
+				retry.mark(wf.Revision)
 				continue
 			}
 			return err
@@ -247,7 +327,6 @@ func (e *Engine) cancelDurable(ctx context.Context, wfID, reason string) error {
 		e.signal(wfID)
 		return nil
 	}
-	return lastErr
 }
 
 // Recover prepares unfinished workflows for a later Run. Running nodes restart
@@ -273,7 +352,8 @@ func (e *Engine) Recover(ctx context.Context) error {
 }
 
 func (e *Engine) recoverOne(ctx context.Context, wfID string) error {
-	for attempt := 0; attempt < maxCommitAttempts; attempt++ {
+	var retry staleRetry
+	for {
 		wf, err := e.loadView(ctx, wfID)
 		if err != nil {
 			return err
@@ -306,15 +386,18 @@ func (e *Engine) recoverOne(ctx context.Context, wfID string) error {
 		if len(events) == 0 {
 			return nil
 		}
+		if err := retry.observe(wf.Revision); err != nil {
+			return err
+		}
 		if _, err := e.store.Append(ctx, wfID, wf.Revision, events...); err != nil {
 			if errors.Is(err, ErrStaleRevision) {
+				retry.mark(wf.Revision)
 				continue
 			}
 			return err
 		}
 		return nil
 	}
-	return ErrStaleRevision
 }
 
 func (e *Engine) loadView(ctx context.Context, wfID string) (WorkflowView, error) {
@@ -341,7 +424,11 @@ func (e *Engine) registerRun(wfID string) (*runHandle, error) {
 	if _, exists := e.runs[wfID]; exists {
 		return nil, ErrAlreadyRunning
 	}
-	handle := &runHandle{active: make(map[string]bool), wake: make(chan struct{}, 1)}
+	handle := &runHandle{
+		active:      make(map[string]bool),
+		nodeCancels: make(map[string]context.CancelCauseFunc),
+		wake:        make(chan struct{}, 1),
+	}
 	e.runs[wfID] = handle
 	return handle, nil
 }

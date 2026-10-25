@@ -3,6 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { listProjects } from '../api/api'
 import { ExtensionsManager } from '../features/extensions/ExtensionsManager'
+import { useCanWrite } from '../components/RoleContext'
 import { EmptyState, ErrorState, LoadingState, PageHeader } from '../components/ui'
 import ui from '../styles/ui.module.css'
 import styles from './pages.module.css'
@@ -12,8 +13,11 @@ const validTabs = ['mcp', 'skills', 'bindings']
 export function ExtensionsPage() {
   const { tab: rawTab } = useParams()
   const navigate = useNavigate()
+  const isAdmin = useCanWrite()
   const tab = rawTab && validTabs.includes(rawTab) ? rawTab : 'mcp'
-  const [scope, setScope] = useState<'platform' | 'project'>('platform')
+  // Platform extension reads are admin-only. Other users start in project
+  // scope so the page never issues a platform query they cannot run.
+  const [scope, setScope] = useState<'platform' | 'project'>(isAdmin ? 'platform' : 'project')
   const [projectId, setProjectId] = useState('')
 
   const projects = useQuery({ queryKey: ['projects', 'extensions'], queryFn: () => listProjects({ limit: 100 }) })
@@ -34,7 +38,9 @@ export function ExtensionsPage() {
         />
         <div className={styles.scopeBar}>
           <div className={styles.filterChips} role="group" aria-label="扩展作用域">
-            <button type="button" className={[styles.chip, scope === 'platform' ? styles.chipActive : ''].filter(Boolean).join(' ')} aria-pressed={scope === 'platform'} onClick={() => { setScope('platform'); setProjectId('') }}>平台级</button>
+            {isAdmin ? (
+              <button type="button" className={[styles.chip, scope === 'platform' ? styles.chipActive : ''].filter(Boolean).join(' ')} aria-pressed={scope === 'platform'} onClick={() => { setScope('platform'); setProjectId('') }}>平台级</button>
+            ) : null}
             <button type="button" className={[styles.chip, scope === 'project' ? styles.chipActive : ''].filter(Boolean).join(' ')} aria-pressed={scope === 'project'} onClick={() => setScope('project')}>项目级</button>
           </div>
           {scope === 'project' ? (
@@ -65,6 +71,7 @@ export function ExtensionsPage() {
             key={`${scope}-${projectId}`}
             scope={scope}
             projectId={scope === 'project' ? Number(projectId) : undefined}
+            canManage={scope === 'project' && projectOptions.find((project) => String(project.id) === projectId)?.access === 'manage'}
             tab={tab}
             onTabChange={(next) => navigate(`/extensions/${next}`)}
             projects={projectOptions}

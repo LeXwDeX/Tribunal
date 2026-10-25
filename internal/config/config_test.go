@@ -28,6 +28,42 @@ func TestValidateDefaultConfigWithoutProviders(t *testing.T) {
 	}
 }
 
+func TestValidateStorageRetention(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "llm call retention",
+			body: "storage:\n  llm_call_retention: 0s\n",
+			want: "storage.llm_call_retention",
+		},
+		{
+			name: "delivery retention",
+			body: "storage:\n  delivery_retention: -1h\n",
+			want: "storage.delivery_retention",
+		},
+		{
+			name: "job retention",
+			body: "storage:\n  job_retention: 0s\n",
+			want: "storage.job_retention",
+		},
+		{
+			name: "context versions",
+			body: "storage:\n  context_versions: 0\n",
+			want: "storage.context_versions",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setRequiredEnv(t)
+			cfg := loadConfig(t, writeConfig(t, "config.yaml", validGitLab+tt.body))
+			requireErrorContains(t, cfg.Validate(), tt.want, "must be positive")
+		})
+	}
+}
+
 func TestValidateAggregatesErrorsWithoutLeakingValues(t *testing.T) {
 	const (
 		providerEnv = "CFG_TEST_PROVIDER_KEY"
@@ -408,6 +444,8 @@ auth:
 		{
 			name: "both configured",
 			body: validGitLab + `
+server:
+  public_url: "https://review.example.com"
 auth:
   oauth:
     client_id_env: CFG_TEST_OAUTH_ID
@@ -588,6 +626,63 @@ func TestValidatePositiveTimeoutsAndConcurrency(t *testing.T) {
 			setRequiredEnv(t)
 			cfg := loadConfig(t, writeConfig(t, "config.yaml", tt.body))
 			requireErrorContains(t, cfg.Validate(), tt.want)
+		})
+	}
+}
+
+func TestValidateOAuthRequiresPublicURL(t *testing.T) {
+	const oauthEnv = `
+auth:
+  oauth:
+    client_id_env: CFG_TEST_OAUTH_ID
+    client_secret_env: CFG_TEST_OAUTH_SECRET
+`
+	tests := []struct {
+		name    string
+		body    string
+		oauth   bool
+		wantErr string
+	}{
+		{
+			name:    "missing public url",
+			body:    validGitLab + oauthEnv,
+			oauth:   true,
+			wantErr: "server.public_url is required",
+		},
+		{
+			name:    "relative public url",
+			body:    validGitLab + oauthEnv + "server:\n  public_url: \"/review\"\n",
+			oauth:   true,
+			wantErr: "server.public_url",
+		},
+		{
+			name:  "valid public url",
+			body:  validGitLab + oauthEnv + "server:\n  public_url: \"https://review.example.com\"\n",
+			oauth: true,
+		},
+		{
+			name: "no oauth without public url",
+			body: validGitLab,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setRequiredEnv(t)
+			unsetEnv(t, "CFG_TEST_OAUTH_ID")
+			unsetEnv(t, "CFG_TEST_OAUTH_SECRET")
+			if tt.oauth {
+				t.Setenv("CFG_TEST_OAUTH_ID", "client-id")
+				t.Setenv("CFG_TEST_OAUTH_SECRET", "client-secret")
+			}
+			cfg := loadConfig(t, writeConfig(t, "config.yaml", tt.body))
+			err := cfg.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() = %v", err)
+				}
+				return
+			}
+			requireErrorContains(t, err, tt.wantErr)
 		})
 	}
 }

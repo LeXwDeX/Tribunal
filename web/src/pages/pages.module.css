@@ -318,6 +318,31 @@
   line-height: 1.65;
 }
 
+.annotationSaved {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin-bottom: 10px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.annotationControls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.annotationControls button {
+  min-width: 0;
+}
+
+.annotationControls .chip:disabled {
+  opacity: 0.55;
+}
+
 .expandButton {
   min-height: var(--control-h);
   padding: 0 10px;

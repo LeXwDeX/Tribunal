@@ -12,7 +12,7 @@ import (
 func TestListReviewsAppliesFiltersBeforePaging(t *testing.T) {
 	fake := newFakeReviewStore()
 	env := newM6Env(t, m6Options{store: fake})
-	client := env.bearerClient()
+	client := env.businessClient()
 
 	base := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
 	for i, projectID := range []int64{42, 42, 42, 43, 42} {
@@ -95,7 +95,7 @@ func TestListReviewsAppliesFiltersBeforePaging(t *testing.T) {
 func TestListReviewsRejectsInvalidQueries(t *testing.T) {
 	fake := newFakeReviewStore()
 	env := newM6Env(t, m6Options{store: fake})
-	client := env.bearerClient()
+	client := env.businessClient()
 
 	for _, path := range []string{
 		"/api/v1/reviews?cursor=not-base64",
@@ -115,7 +115,7 @@ func TestReviewDetailGraphNodeAndCalls(t *testing.T) {
 	fake := newFakeReviewStore()
 	env := newM6Env(t, m6Options{store: fake})
 	seedWorkflow(env)
-	client := env.bearerClient()
+	client := env.businessClient()
 
 	detail := client.request(http.MethodGet, "/api/v1/reviews/wf-1", nil, nil)
 	assertStatus(t, detail, http.StatusOK)
@@ -200,7 +200,7 @@ func TestReviewFindingsFiltersAndCursor(t *testing.T) {
 	fake := newFakeReviewStore()
 	env := newM6Env(t, m6Options{store: fake})
 	seedWorkflow(env)
-	client := env.bearerClient()
+	client := env.businessClient()
 
 	drop := client.request(http.MethodGet, "/api/v1/reviews/wf-1/findings?decision=drop", nil, nil)
 	assertStatus(t, drop, http.StatusOK)
@@ -238,7 +238,7 @@ func TestTriggerCancelAndRepublish(t *testing.T) {
 	fake := newFakeReviewStore()
 	env := newM6Env(t, m6Options{store: fake})
 	seedWorkflow(env)
-	client := env.loginAs("code-admin")
+	client := env.businessClient()
 
 	trigger := client.json(http.MethodPost, "/api/v1/projects/42/merge_requests/7/reviews",
 		map[string]any{"profile": "deep", "full": true})
@@ -281,6 +281,9 @@ func TestReviewReadIsOpenToViewersAndWritesRequireCSRF(t *testing.T) {
 	fake := newFakeReviewStore()
 	env := newM6Env(t, m6Options{store: fake})
 	seedWorkflow(env)
+	// The viewer has a read grant, so a write is a 403 rather than the 404
+	// used for an absent grant.
+	env.grant(8, 42, store.ProjectAccessRead)
 
 	viewer := env.loginAs("code-viewer")
 	read := viewer.request(http.MethodGet, "/api/v1/reviews", nil, nil)
@@ -288,7 +291,7 @@ func TestReviewReadIsOpenToViewersAndWritesRequireCSRF(t *testing.T) {
 	write := viewer.request(http.MethodPost, "/api/v1/reviews/wf-1/cancel", nil, nil)
 	assertStatus(t, write, http.StatusForbidden)
 
-	admin := env.loginAs("code-admin")
+	admin := env.businessClient()
 	noCSRF := admin.withoutCSRF().request(http.MethodPost, "/api/v1/reviews/wf-1/cancel", nil, nil)
 	assertStatus(t, noCSRF, http.StatusForbidden)
 	withCSRF := admin.request(http.MethodPost, "/api/v1/reviews/wf-1/cancel", nil, nil)

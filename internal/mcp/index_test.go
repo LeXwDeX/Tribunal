@@ -74,8 +74,12 @@ func TestRunIndexUsesArgvRestrictedEnvironment(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	defer m.Close()
-	if err := m.RunIndex(context.Background(), baseDir); err != nil {
+	count, err := m.RunIndex(context.Background(), baseDir)
+	if err != nil {
 		t.Fatalf("RunIndex: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("RunIndex count = %d, want 1", count)
 	}
 
 	data, err := os.ReadFile(out)
@@ -115,12 +119,32 @@ func TestRunIndexUsesArgvRestrictedEnvironment(t *testing.T) {
 	}
 }
 
+func TestRunIndexWithNoConfiguredCommand(t *testing.T) {
+	m, err := New(Options{
+		Workspace: t.TempDir(),
+		Project: Config{MCPServers: map[string]ServerConfig{
+			"local": {Command: "/usr/bin/true"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	count, err := m.RunIndex(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("RunIndex: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("RunIndex count = %d, want 0", count)
+	}
+}
+
 func TestRunIndexFailureDoesNotLeakArguments(t *testing.T) {
 	m, err := New(Options{
 		Workspace: t.TempDir(),
 		Project: Config{MCPServers: map[string]ServerConfig{
 			"local": {
-				Command: "/bin/true",
+				Command: "/usr/bin/true",
 				XReview: XReviewConfig{
 					IndexCommand: []string{"/definitely/not/a/command", "TOP-SECRET-ARG"},
 				},
@@ -131,9 +155,12 @@ func TestRunIndexFailureDoesNotLeakArguments(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer m.Close()
-	err = m.RunIndex(context.Background(), t.TempDir())
+	count, err := m.RunIndex(context.Background(), t.TempDir())
 	if err == nil {
 		t.Fatal("RunIndex succeeded with a missing executable")
+	}
+	if count != 0 {
+		t.Fatalf("RunIndex count = %d, want 0", count)
 	}
 	if strings.Contains(err.Error(), "TOP-SECRET-ARG") {
 		t.Fatalf("error leaked a command argument: %v", err)
@@ -144,14 +171,14 @@ func TestRunIndexRejectsMissingBase(t *testing.T) {
 	m, err := New(Options{
 		Workspace: t.TempDir(),
 		Project: Config{MCPServers: map[string]ServerConfig{
-			"local": {Command: "/bin/true"},
+			"local": {Command: "/usr/bin/true"},
 		}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer m.Close()
-	if err := m.RunIndex(context.Background(), filepath.Join(t.TempDir(), "missing")); err == nil {
+	if _, err := m.RunIndex(context.Background(), filepath.Join(t.TempDir(), "missing")); err == nil {
 		t.Fatal("RunIndex accepted a missing base directory")
 	}
 }

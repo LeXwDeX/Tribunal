@@ -854,7 +854,7 @@ func TestEngineRecoverQueuedPreserved(t *testing.T) {
 		return NodeOutput{}, nil
 	})
 	store := NewMemoryEventStore()
-	engine := NewEngine(store, exec, nil, Options{})
+	engine := NewEngine(store, exec, nil, Options{Clock: func() time.Time { return testNow }})
 	wfID, _ := engine.Create(context.Background(), GraphSpec{Nodes: []NodeSpec{node("a")}}, nil)
 	if _, err := store.Append(context.Background(), wfID, 1,
 		mustEv(t, EventWorkflowStarted, struct{}{}, testNow),

@@ -25,5 +25,10 @@ when possible. Use `line: 0` only when no changed line can be identified. A
 verification result of `REFUTED` requires a code location with a non-empty
 note; otherwise deterministic code treats it as uncertain.
 
+Finding `body` and `suggestion` must be structured Markdown: short paragraphs,
+lists, and fenced code blocks for code or commands. Use inline code for
+identifiers, paths, and symbols. Do not use raw HTML, bare links, or hidden
+comment markers; they are escaped by code.
+
 Use the requested output contract exactly. Prefer fewer, high-confidence
 findings over speculative volume.

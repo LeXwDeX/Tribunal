@@ -127,6 +127,33 @@ const STATUS_LABELS: Record<string, string> = {
   closed: '已关闭',
 }
 
+const WEBHOOK_STATE_LABELS: Record<string, string> = {
+  disabled: '未启用',
+  pending: '配置中',
+  enabled: '已启用',
+  failed: '配置失败',
+  unknown: '待确认',
+}
+
+export function labelForWebhookState(state?: string): string {
+  if (!state) return '未启用'
+  return WEBHOOK_STATE_LABELS[state] || state
+}
+
+export function webhookTone(state?: string): 'ok' | 'warn' | 'danger' | 'neutral' {
+  switch (state) {
+    case 'enabled':
+      return 'ok'
+    case 'failed':
+      return 'danger'
+    case 'pending':
+    case 'unknown':
+      return 'warn'
+    default:
+      return 'neutral'
+  }
+}
+
 const TRIGGER_LABELS: Record<string, string> = {
   mr_open: 'MR 打开',
   mr_update: 'MR 更新',
@@ -150,6 +177,13 @@ const CHALLENGE_LABELS: Record<string, string> = {
   skipped: '未挑战',
 }
 
+const PUBLICATION_LABELS: Record<string, string> = {
+  pending: '待发布',
+  published: '已发布',
+  skipped: '已跳过',
+  failed: '发布失败',
+}
+
 const SOURCE_LABELS: Record<string, string> = {
   generated: '生成',
   manual: '人工',
@@ -160,6 +194,7 @@ export const labelForTrigger = (trigger?: string): string => (trigger ? TRIGGER_
 export const labelForDecision = (decision?: string): string => (decision ? DECISION_LABELS[decision] || decision : '—')
 export const labelForChallenge = (status?: string): string => (status ? CHALLENGE_LABELS[status] || status : '未挑战')
 export const labelForSource = (source?: string): string => (source ? SOURCE_LABELS[source] || source : '—')
+export const labelForPublication = (state?: string): string => (state ? PUBLICATION_LABELS[state] || state : '不适用')
 
 export function statusTone(status?: string): 'ok' | 'warn' | 'danger' | 'info' | 'neutral' {
   switch (status) {
@@ -189,10 +224,25 @@ export function statusTone(status?: string): 'ok' | 'warn' | 'danger' | 'info' |
   }
 }
 
-export function verdictTone(verdict?: string | null): 'ok' | 'danger' | 'neutral' {
+export function verdictTone(verdict?: string | null): 'ok' | 'warn' | 'danger' | 'neutral' {
   if (verdict === 'PASS') return 'ok'
   if (verdict === 'BLOCKING') return 'danger'
+  if (verdict === 'INCOMPLETE') return 'warn'
   return 'neutral'
+}
+
+export function publicationTone(state?: string): 'ok' | 'warn' | 'danger' | 'info' | 'neutral' {
+  switch (state) {
+    case 'published':
+      return 'ok'
+    case 'failed':
+      return 'danger'
+    case 'pending':
+      return 'info'
+    case 'skipped':
+    default:
+      return 'neutral'
+  }
 }
 
 export function decisionTone(decision?: string): 'ok' | 'warn' | 'danger' | 'info' | 'neutral' {

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -34,6 +35,54 @@ func newExtensionFixture(t *testing.T) (*ExtensionService, *sqlite.Store) {
 		t.Fatalf("NewExtensionService: %v", err)
 	}
 	return service, st
+}
+
+func TestNewExtensionServiceResolvesRelativeWorkspace(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	absolute := t.TempDir()
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	relative, err := filepath.Rel(cwd, absolute)
+	if err != nil {
+		t.Fatalf("Rel: %v", err)
+	}
+	if filepath.IsAbs(relative) {
+		t.Fatalf("relative workspace is absolute: %q", relative)
+	}
+
+	service, err := NewExtensionService(ExtensionServiceConfig{Store: st, Workspace: relative})
+	if err != nil {
+		t.Fatalf("NewExtensionService: %v", err)
+	}
+	want, err := filepath.Abs(relative)
+	if err != nil {
+		t.Fatalf("Abs: %v", err)
+	}
+	if service.workspace != want {
+		t.Fatalf("workspace = %q, want %q", service.workspace, want)
+	}
+	uploaded, err := service.UploadSkill(ctx, SkillUpload{
+		Scope: "platform", Data: testSkillArchive(t, testSkillBody),
+	})
+	if err != nil {
+		t.Fatalf("UploadSkill: %v", err)
+	}
+	if !filepath.IsAbs(uploaded.Dir) || !strings.HasPrefix(uploaded.Dir, filepath.Join(want, "skills")) {
+		t.Fatalf("uploaded dir = %q, want below %q", uploaded.Dir, filepath.Join(want, "skills"))
+	}
+}
+
+func TestNewExtensionServiceRejectsRootWorkspace(t *testing.T) {
+	_, err := NewExtensionService(ExtensionServiceConfig{
+		Store:     openTestStore(t),
+		Workspace: string(filepath.Separator),
+	})
+	if err == nil {
+		t.Fatal("filesystem root accepted as extension workspace")
+	}
 }
 
 func TestExtensionServiceMCPCRUDAndMaskGuard(t *testing.T) {
@@ -294,6 +343,102 @@ func TestExtensionServiceTestMCPServerBothPaths(t *testing.T) {
 	}
 }
 
+func TestExtensionServiceTestMCPServerUsesSubmittedConfig(t *testing.T) {
+	ctx := context.Background()
+	service, _ := newExtensionFixture(t)
+	stale, err := mcp.New(mcp.Options{
+		Platform: mcp.Config{MCPServers: map[string]mcp.ServerConfig{
+			"same": {URL: "http://127.0.0.1:1/mcp"},
+		}},
+		Workspace: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("stale manager: %v", err)
+	}
+	t.Cleanup(func() { _ = stale.Close() })
+	service.mcp = stale
+
+	httpServer := newHTTPMCPTestServer(t)
+	tools, err := service.TestMCPServer(ctx, MCPServer{
+		Name: "same", Config: json.RawMessage(`{"url":"` + httpServer.URL + `"}`),
+	})
+	if err != nil {
+		t.Fatalf("TestMCPServer: %v", err)
+	}
+	if len(tools) != 1 || tools[0].Name != "echo" {
+		t.Fatalf("tools = %+v", tools)
+	}
+}
+
+func TestExtensionServiceTestMCPServerParsesConfig(t *testing.T) {
+	ctx := context.Background()
+	httpServer := newHTTPMCPTestServer(t)
+
+	t.Run("expands environment", func(t *testing.T) {
+		service, _ := newExtensionFixture(t)
+		t.Setenv("MCP_TEST_URL", httpServer.URL)
+		tools, err := service.TestMCPServer(ctx, MCPServer{
+			Name: "expanded", Config: json.RawMessage(`{"url":"${MCP_TEST_URL}"}`),
+		})
+		if err != nil {
+			t.Fatalf("TestMCPServer: %v", err)
+		}
+		if len(tools) != 1 || tools[0].Name != "echo" {
+			t.Fatalf("tools = %+v", tools)
+		}
+	})
+
+	t.Run("denied environment", func(t *testing.T) {
+		service, err := NewExtensionService(ExtensionServiceConfig{
+			Store:     openTestStore(t),
+			Workspace: t.TempDir(),
+			DeniedEnv: []string{"MCP_DENIED_URL"},
+		})
+		if err != nil {
+			t.Fatalf("NewExtensionService: %v", err)
+		}
+		t.Setenv("MCP_DENIED_URL", httpServer.URL)
+		_, err = service.TestMCPServer(ctx, MCPServer{
+			Name: "denied", Config: json.RawMessage(`{"url":"${MCP_DENIED_URL}"}`),
+		})
+		if !errors.Is(err, mcp.ErrSensitiveEnv) {
+			t.Fatalf("error = %v, want ErrSensitiveEnv", err)
+		}
+		if strings.Contains(err.Error(), httpServer.URL) {
+			t.Fatalf("error leaked the environment value: %v", err)
+		}
+	})
+
+	t.Run("missing environment", func(t *testing.T) {
+		service, _ := newExtensionFixture(t)
+		_, err := service.TestMCPServer(ctx, MCPServer{
+			Name: "missing", Config: json.RawMessage(`{"url":"${MCP_TEST_MISSING_NEVER_SET}"}`),
+		})
+		if err == nil || !strings.Contains(err.Error(), "environment variable MCP_TEST_MISSING_NEVER_SET is not set") {
+			t.Fatalf("error = %v, want a missing environment error", err)
+		}
+	})
+}
+
+func TestExtensionServiceTestMCPServerUsesProjectWorkspace(t *testing.T) {
+	ctx := context.Background()
+	service, _ := newExtensionFixture(t)
+	projectID := int64(42)
+	command := filepath.Join(t.TempDir(), "missing-mcp-server")
+	_, err := service.TestMCPServer(ctx, MCPServer{
+		Scope:     "project",
+		ProjectID: &projectID,
+		Name:      "cwd",
+		Config:    json.RawMessage(`{"command":"` + command + `","x-review":{"home":"probe","call_timeout":"200ms"}}`),
+	})
+	if err == nil {
+		t.Fatal("missing command did not fail")
+	}
+	if _, statErr := os.Stat(filepath.Join(service.workspace, "42", "probe")); statErr != nil {
+		t.Fatalf("project workspace was not used: %v", statErr)
+	}
+}
+
 func TestExtensionServiceTestProvider(t *testing.T) {
 	ctx := context.Background()
 	t.Setenv("EXT_TEST_API_KEY", "test-secret-key")
@@ -397,6 +542,153 @@ func TestExtensionServiceValidation(t *testing.T) {
 	}
 	if _, err := service.ListMCPServers(ctx, "global", nil); err == nil {
 		t.Fatal("invalid scope accepted")
+	}
+}
+
+func TestExtensionServiceRejectsInvalidMCPNamesAndConfigs(t *testing.T) {
+	ctx := context.Background()
+	service, _ := newExtensionFixture(t)
+
+	cases := []struct {
+		name   string
+		config json.RawMessage
+	}{
+		{name: "stdio without command", config: json.RawMessage(`{"type":"stdio"}`)},
+		{name: "http without url", config: json.RawMessage(`{"type":"http","url":""}`)},
+		{name: "unknown field", config: json.RawMessage(`{"command":"x","bogus":"super-secret"}`)},
+		{name: "unknown x-review field", config: json.RawMessage(`{"command":"x","x-review":{"bogus":true}}`)},
+		{name: "invalid env name", config: json.RawMessage(`{"command":"x","env":{"BAD-NAME":"value"}}`)},
+		{name: "HOME override", config: json.RawMessage(`{"command":"x","env":{"HOME":"/tmp"}}`)},
+		{name: "sensitive template", config: json.RawMessage(`{"command":"x","args":["${GITLAB_TOKEN}"]}`)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := service.CreateMCPServer(ctx, MCPServerInput{
+				Scope: "platform", Name: "invalid", Config: tc.config,
+			})
+			if err == nil {
+				t.Fatal("invalid config accepted")
+			}
+			if strings.Contains(err.Error(), "super-secret") {
+				t.Fatalf("validation error leaked a config value: %v", err)
+			}
+		})
+	}
+	servers, err := service.ListMCPServers(ctx, "platform", nil)
+	if err != nil {
+		t.Fatalf("ListMCPServers: %v", err)
+	}
+	if len(servers) != 0 {
+		t.Fatalf("invalid creates persisted rows: %+v", servers)
+	}
+
+	if _, err := service.CreateMCPServer(ctx, MCPServerInput{
+		Scope: "platform", Name: "bad/name", Config: json.RawMessage(`{"command":"x"}`),
+	}); err == nil {
+		t.Fatal("invalid server name accepted")
+	}
+}
+
+func TestExtensionServiceInvalidUpdatePersistsNothing(t *testing.T) {
+	ctx := context.Background()
+	service, _ := newExtensionFixture(t)
+	created, err := service.CreateMCPServer(ctx, MCPServerInput{
+		Scope: "platform", Name: "original", Config: json.RawMessage(`{"command":"original"}`),
+	})
+	if err != nil {
+		t.Fatalf("CreateMCPServer: %v", err)
+	}
+
+	badName := "bad/name"
+	if _, err := service.UpdateMCPServer(ctx, created.ID, MCPServerUpdate{Name: &badName}); err == nil {
+		t.Fatal("invalid update name accepted")
+	}
+	if _, err := service.UpdateMCPServer(ctx, created.ID, MCPServerUpdate{
+		Config: json.RawMessage(`{"command":"x","bogus":"super-secret"}`),
+	}); err == nil {
+		t.Fatal("invalid update config accepted")
+	} else if strings.Contains(err.Error(), "super-secret") {
+		t.Fatalf("validation error leaked a config value: %v", err)
+	}
+
+	stored, err := service.GetMCPServer(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetMCPServer: %v", err)
+	}
+	if stored.Name != "original" || string(stored.Config) != `{"command":"original"}` {
+		t.Fatalf("invalid update changed the row: %+v", stored)
+	}
+}
+
+func TestExtensionServiceImportValidatesBeforeWriting(t *testing.T) {
+	ctx := context.Background()
+	service, _ := newExtensionFixture(t)
+
+	if _, err := service.ImportMCPServers(ctx, MCPImportInput{
+		Scope: "platform",
+		Servers: map[string]json.RawMessage{
+			"good": json.RawMessage(`{"command":"good"}`),
+			"bad":  json.RawMessage(`{"command":"x","bogus":"super-secret"}`),
+		},
+	}); err == nil {
+		t.Fatal("invalid import accepted")
+	} else if strings.Contains(err.Error(), "super-secret") {
+		t.Fatalf("validation error leaked a config value: %v", err)
+	}
+	if _, err := service.ImportMCPServers(ctx, MCPImportInput{
+		Scope:   "platform",
+		Servers: map[string]json.RawMessage{"bad/name": json.RawMessage(`{"command":"x"}`)},
+	}); err == nil {
+		t.Fatal("invalid import name accepted")
+	}
+	servers, err := service.ListMCPServers(ctx, "platform", nil)
+	if err != nil {
+		t.Fatalf("ListMCPServers: %v", err)
+	}
+	if len(servers) != 0 {
+		t.Fatalf("invalid import persisted rows: %+v", servers)
+	}
+}
+
+func TestExtensionServiceValidatesEnvTemplatesWithoutExpanding(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	service, err := NewExtensionService(ExtensionServiceConfig{
+		Store:     st,
+		Workspace: t.TempDir(),
+		DeniedEnv: []string{"CUSTOM_DENIED_FLAG"},
+	})
+	if err != nil {
+		t.Fatalf("NewExtensionService: %v", err)
+	}
+
+	created, err := service.CreateMCPServer(ctx, MCPServerInput{
+		Scope: "platform", Name: "templated",
+		Config: json.RawMessage(`{"command":"npx","env":{"SAFE":"${SAFE_VALUE}"}}`),
+	})
+	if err != nil {
+		t.Fatalf("CreateMCPServer: %v", err)
+	}
+	if !strings.Contains(string(created.Config), "${SAFE_VALUE}") {
+		t.Fatalf("stored config expanded a template: %s", created.Config)
+	}
+	if _, err := service.CreateMCPServer(ctx, MCPServerInput{
+		Scope: "platform", Name: "denied",
+		Config: json.RawMessage(`{"command":"npx","env":{"CUSTOM":"${CUSTOM_DENIED_FLAG}"}}`),
+	}); err == nil {
+		t.Fatal("denied environment template accepted")
+	}
+	if _, err := service.CreateMCPServer(ctx, MCPServerInput{
+		Scope: "platform", Name: "denied-key",
+		Config: json.RawMessage(`{"command":"npx","env":{"CUSTOM_DENIED_FLAG":"value"}}`),
+	}); err == nil {
+		t.Fatal("denied environment variable accepted")
+	}
+	if _, err := service.CreateMCPServer(ctx, MCPServerInput{
+		Scope: "platform", Name: "sensitive",
+		Config: json.RawMessage(`{"command":"npx","env":{"CUSTOM":"${OPENAI_API_KEY}"}}`),
+	}); err == nil {
+		t.Fatal("sensitive environment template accepted")
 	}
 }
 

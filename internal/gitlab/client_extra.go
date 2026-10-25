@@ -16,6 +16,7 @@ const (
 	pageSize       = 100
 	defaultStatus  = "ai-review"
 	maxDescription = 140
+	maxAwardName   = 100
 )
 
 func positiveIDs(ids ...int64) bool {
@@ -508,9 +509,15 @@ func (c *Client) CreateDiscussion(ctx context.Context, token string, projectID, 
 			HeadSHA:      &position.HeadSHA,
 			OldPath:      &position.OldPath,
 			NewPath:      &position.NewPath,
-			OldLine:      int64Ptr(position.OldLine),
-			NewLine:      int64Ptr(position.NewLine),
 			PositionType: &positionType,
+		}
+		// GitLab rejects a zero line as an invalid line_code. An added line has
+		// no old line and a deleted line has no new line, so omit the absent side.
+		if position.OldLine > 0 {
+			opts.Position.OldLine = int64Ptr(position.OldLine)
+		}
+		if position.NewLine > 0 {
+			opts.Position.NewLine = int64Ptr(position.NewLine)
 		}
 	}
 
@@ -604,14 +611,64 @@ func (c *Client) ListNoteAwards(ctx context.Context, token string, projectID, ii
 		if item == nil {
 			continue
 		}
-		out = append(out, Award{
-			ID:       item.ID,
-			Name:     item.Name,
-			UserID:   item.User.ID,
-			Username: item.User.Username,
-		})
+		out = append(out, awardFromSDK(item))
 	}
 	return out, nil
+}
+
+// AddNoteAward adds one emoji reaction to a merge request note.
+func (c *Client) AddNoteAward(ctx context.Context, token string, projectID, iid, noteID int64, name string) (*Award, error) {
+	if !positiveIDs(projectID, iid, noteID) {
+		return nil, errors.New("gitlab: invalid project, merge request, or note ID")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" || utf8.RuneCountInString(name) > maxAwardName {
+		return nil, errors.New("gitlab: invalid award name")
+	}
+	reqCtx, client, done, err := c.prepare(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	defer done()
+
+	out, resp, err := client.AwardEmoji.CreateMergeRequestAwardEmojiOnNote(projectID, iid, noteID, &sdk.CreateAwardEmojiOptions{
+		Name: name,
+	}, sdk.WithContext(reqCtx))
+	if err != nil {
+		return nil, mapError(reqCtx, "add_note_award", resp, err)
+	}
+	if out == nil {
+		return nil, &Error{Op: "add_note_award"}
+	}
+	mapped := awardFromSDK(out)
+	return &mapped, nil
+}
+
+// DeleteNoteAward deletes one emoji reaction from a merge request note.
+func (c *Client) DeleteNoteAward(ctx context.Context, token string, projectID, iid, noteID, awardID int64) error {
+	if !positiveIDs(projectID, iid, noteID, awardID) {
+		return errors.New("gitlab: invalid project, merge request, note, or award ID")
+	}
+	reqCtx, client, done, err := c.prepare(ctx, token)
+	if err != nil {
+		return err
+	}
+	defer done()
+
+	resp, err := client.AwardEmoji.DeleteMergeRequestAwardEmojiOnNote(projectID, iid, noteID, awardID, sdk.WithContext(reqCtx))
+	if err != nil {
+		return mapError(reqCtx, "delete_note_award", resp, err)
+	}
+	return nil
+}
+
+func awardFromSDK(item *sdk.AwardEmoji) Award {
+	return Award{
+		ID:       item.ID,
+		Name:     item.Name,
+		UserID:   item.User.ID,
+		Username: item.User.Username,
+	}
 }
 
 func int64Ptr(value int) *int64 {

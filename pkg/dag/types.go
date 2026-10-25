@@ -112,10 +112,19 @@ type NodeSpec struct {
 	Params       json.RawMessage   `json:"params,omitempty"`
 	Timeout      time.Duration     `json:"timeout,omitempty"`
 	Expands      bool              `json:"expands,omitempty"`
+	// TokenFree marks a node that may still run after the workflow token
+	// budget is exhausted. Its executor must stop starting model calls once
+	// the budget is exhausted and settle with deterministic code instead.
+	TokenFree bool `json:"token_free,omitempty"`
 }
 
 // Budget bounds one workflow. Zero values are normalized by Create: MaxNodes
 // defaults to 30 and MaxExtends to 1. Negative values are invalid.
+//
+// MaxTokens is a shared workflow budget. The scheduler and node executors
+// check committed usage before each request. A model request already in
+// flight can finish after the check and overshoot the limit; this is a bounded
+// best-effort cap, not an exact upstream billing guarantee.
 type Budget struct {
 	MaxNodes   int           `json:"max_nodes"`
 	MaxExtends int           `json:"max_extends"`
@@ -146,14 +155,34 @@ type NodeOutput struct {
 
 // Usage accounts for node work.
 type Usage struct {
-	InputTokens  int64 `json:"input_tokens"`
-	OutputTokens int64 `json:"output_tokens"`
-	CostMicros   int64 `json:"cost_micros"`
+	InputTokens      int64 `json:"input_tokens"`
+	OutputTokens     int64 `json:"output_tokens"`
+	CostMicros       int64 `json:"cost_micros"`
+	CacheReadTokens  int64 `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens int64 `json:"cache_write_tokens,omitempty"`
+	ReasoningTokens  int64 `json:"reasoning_tokens,omitempty"`
 }
 
 // NodeExecutor is implemented by the caller. Any returned error fails the node.
 type NodeExecutor interface {
 	Execute(ctx context.Context, in NodeInput) (NodeOutput, error)
+}
+
+// NodeMetadata is the provider and model selected for one node. The engine
+// records it on node.started before Execute runs.
+type NodeMetadata struct {
+	Provider string
+	Model    string
+}
+
+// NodeMetadataProvider is an optional NodeExecutor extension. The engine asks
+// it for attribution immediately before node.started. The lookup must be
+// synchronous, local, and non-blocking (for example an in-memory provider
+// lookup); it must not perform network work. The result is advisory: legacy
+// executors stay valid, empty values leave the node unattributed, and a panic
+// degrades to empty attribution instead of failing the node.
+type NodeMetadataProvider interface {
+	NodeMetadata(in NodeInput) NodeMetadata
 }
 
 // DepPatch appends dependencies to an existing pending node. It is applied

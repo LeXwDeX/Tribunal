@@ -56,6 +56,7 @@ type MergeRequest struct {
 	State           string
 	TargetProjectID int64
 	SHA             string
+	MergedAt        *time.Time
 	Title           string
 	Description     string
 	SourceBranch    string
@@ -76,6 +77,18 @@ type HookSpec struct {
 	EnableSSLVerification bool
 }
 
+// Hook is the safe projection of a project webhook used for provisioning
+// decisions. GitLab does not return the hook token, so it is not included.
+type Hook struct {
+	ID                    int64
+	URL                   string
+	PushEvents            bool
+	MergeRequestsEvents   bool
+	NoteEvents            bool
+	EnableSSLVerification bool
+	AlertStatus           string
+}
+
 // API is the GitLab surface consumed by the application layer. All methods
 // accept the project token explicitly and never log or include it in errors.
 type API interface {
@@ -84,7 +97,9 @@ type API interface {
 	CurrentUser(ctx context.Context, token string) (*User, error)
 	GetMergeRequest(ctx context.Context, token string, projectID, iid int64) (*MergeRequest, error)
 	GetMemberAccess(ctx context.Context, token string, projectID, userID int64) (int, error)
+	ListProjectHooks(ctx context.Context, token string, projectID int64) ([]Hook, error)
 	CreateProjectHook(ctx context.Context, token string, projectID int64, spec HookSpec) (int64, error)
+	UpdateProjectHook(ctx context.Context, token string, projectID, hookID int64, spec HookSpec) error
 	DeleteProjectHook(ctx context.Context, token string, projectID, hookID int64) error
 }
 
@@ -394,6 +409,10 @@ func (c *Client) GetMergeRequest(ctx context.Context, token string, projectID, i
 		Draft:           mr.Draft,
 		WebURL:          mr.WebURL,
 	}
+	if mr.MergedAt != nil {
+		merged := *mr.MergedAt
+		out.MergedAt = &merged
+	}
 	if mr.Author != nil {
 		out.Author = &User{ID: mr.Author.ID, Username: mr.Author.Username, Name: mr.Author.Name}
 	}
@@ -419,6 +438,51 @@ func (c *Client) GetMemberAccess(ctx context.Context, token string, projectID, u
 		return 0, &Error{Op: "get_member"}
 	}
 	return int(member.AccessLevel), nil
+}
+
+// ListProjectHooks returns every project webhook. The hook token is never
+// returned by GitLab, so callers can only match hooks by ID or URL.
+func (c *Client) ListProjectHooks(ctx context.Context, token string, projectID int64) ([]Hook, error) {
+	if projectID <= 0 {
+		return nil, errors.New("gitlab: invalid project ID")
+	}
+	reqCtx, client, done, err := c.prepare(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	defer done()
+
+	const perPage = int64(100)
+	hooks := make([]Hook, 0)
+	for page := int64(1); ; page++ {
+		if page > int64(maxListPages) {
+			return nil, errors.New("gitlab: list_hooks pagination limit exceeded")
+		}
+		batch, resp, err := client.Projects.ListProjectHooks(projectID,
+			&sdk.ListProjectHooksOptions{ListOptions: sdk.ListOptions{Page: page, PerPage: perPage}},
+			sdk.WithContext(reqCtx))
+		if err != nil {
+			return nil, mapError(reqCtx, "list_hooks", resp, err)
+		}
+		for _, hook := range batch {
+			if hook == nil {
+				continue
+			}
+			hooks = append(hooks, Hook{
+				ID:                    hook.ID,
+				URL:                   hook.URL,
+				PushEvents:            hook.PushEvents,
+				MergeRequestsEvents:   hook.MergeRequestsEvents,
+				NoteEvents:            hook.NoteEvents,
+				EnableSSLVerification: hook.EnableSSLVerification,
+				AlertStatus:           hook.AlertStatus,
+			})
+		}
+		if int64(len(batch)) < perPage {
+			break
+		}
+	}
+	return hooks, nil
 }
 
 // CreateProjectHook creates a project webhook. Retries are disabled globally,
@@ -449,6 +513,36 @@ func (c *Client) CreateProjectHook(ctx context.Context, token string, projectID 
 		return 0, &Error{Op: "create_hook"}
 	}
 	return hook.ID, nil
+}
+
+// UpdateProjectHook reconfigures a managed project webhook. The secret is set
+// again so a re-enable restores the token the service verifies on delivery.
+func (c *Client) UpdateProjectHook(ctx context.Context, token string, projectID, hookID int64, spec HookSpec) error {
+	if projectID <= 0 || hookID <= 0 {
+		return errors.New("gitlab: invalid project or hook ID")
+	}
+	reqCtx, client, done, err := c.prepare(ctx, token)
+	if err != nil {
+		return err
+	}
+	defer done()
+
+	options := &sdk.EditProjectHookOptions{
+		URL:                   &spec.URL,
+		Token:                 &spec.Secret,
+		PushEvents:            boolPtr(spec.PushEvents),
+		MergeRequestsEvents:   boolPtr(spec.MergeRequestsEvents),
+		NoteEvents:            boolPtr(spec.NoteEvents),
+		EnableSSLVerification: boolPtr(spec.EnableSSLVerification),
+	}
+	hook, resp, err := client.Projects.EditProjectHook(projectID, hookID, options, sdk.WithContext(reqCtx))
+	if err != nil {
+		return mapError(reqCtx, "update_hook", resp, err)
+	}
+	if hook == nil || hook.ID != hookID {
+		return &Error{Op: "update_hook"}
+	}
+	return nil
 }
 
 // DeleteProjectHook deletes a webhook. It is used only to compensate a failed

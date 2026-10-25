@@ -5,7 +5,6 @@ import {
 } from '../../api/api'
 import { ApiError, errorMessage } from '../../api/client'
 import type { ContextDoc } from '../../api/types'
-import { useCanWrite } from '../../components/RoleContext'
 import {
   Button, EmptyState, ErrorState, LoadingState, Panel, StatusBadge, Switch, useToast,
 } from '../../components/ui'
@@ -22,8 +21,8 @@ const docKinds: Array<{ key: DocKind; label: string }> = [
   { key: 'claude', label: 'CLAUDE' },
 ]
 
-export function WorkspacePanel({ projectId }: { projectId: number }) {
-  const canWrite = useCanWrite()
+export function WorkspacePanel({ projectId, canManage = false }: { projectId: number; canManage?: boolean }) {
+  const canWrite = canManage
   const toast = useToast()
   const queryClient = useQueryClient()
   const [kind, setKind] = useState<DocKind>('agents')
@@ -241,7 +240,7 @@ export function WorkspacePanel({ projectId }: { projectId: number }) {
       <aside className={styles.sideColumn} aria-label="上下文版本历史">
         <Panel title="版本历史" aside={history.isSuccess ? `${versions.length}${history.hasNextPage ? '+' : ''} 个版本` : undefined}>
           {history.isPending ? <LoadingState label="正在读取版本…" /> : null}
-          {history.isError ? <ErrorState error={history.error} onRetry={history.refetch} /> : null}
+          {history.isError ? <ErrorState error={history.error} onRetry={history.retry} /> : null}
           {history.isSuccess && versions.length === 0 ? <EmptyState title="没有历史版本" /> : null}
           <div className={styles.list}>
             {versions.map((doc) => (

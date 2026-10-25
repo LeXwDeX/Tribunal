@@ -63,6 +63,9 @@ func (s *Store) CreateAPIToken(ctx context.Context, user store.TokenUser, token 
 		user.ID, user.Username, name, user.Role); err != nil {
 		return nil, fmt.Errorf("sqlite: upsert api token user: %w", err)
 	}
+	if err := requireEnabledUserTx(ctx, tx, user.ID); err != nil {
+		return nil, err
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO api_tokens
 		(id, user_id, name, token_hash, last_used_at, expires_at, created_at)
 		VALUES (?, ?, ?, ?, NULL, ?, ?)`,
@@ -142,6 +145,61 @@ func (s *Store) ListAPITokens(ctx context.Context, userID int64) ([]store.APITok
 	return tokens, nil
 }
 
+// ListAPITokensPage returns one bounded page of one user's tokens. The cursor
+// binds to that user so a token ID cannot be resumed across accounts.
+func (s *Store) ListAPITokensPage(ctx context.Context, userID int64, cursor string, limit int) ([]store.APIToken, string, error) {
+	if userID <= 0 {
+		return nil, "", errors.New("sqlite: api token user id is required")
+	}
+	limit = normalizeLimit(limit)
+	where := []string{"user_id = ?"}
+	args := []any{userID}
+	if cursor != "" {
+		bound, err := decodeListCursor(cursor, listCursorTokens)
+		if err != nil {
+			return nil, "", err
+		}
+		if bound.UserID != userID || bound.ID == "" {
+			return nil, "", fmt.Errorf("%w: api token cursor scope", store.ErrInvalidCursor)
+		}
+		at, err := parseTime(bound.At)
+		if err != nil {
+			return nil, "", fmt.Errorf("%w: api token cursor", store.ErrInvalidCursor)
+		}
+		where = append(where, "(created_at < ? OR (created_at = ? AND id < ?))")
+		args = append(args, formatTime(at), formatTime(at), bound.ID)
+	}
+	args = append(args, limit+1)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+apiTokenColumns+` FROM api_tokens
+		WHERE `+strings.Join(where, " AND ")+`
+		ORDER BY created_at DESC, id DESC LIMIT ?`, args...)
+	if err != nil {
+		return nil, "", fmt.Errorf("sqlite: list api tokens: %w", err)
+	}
+	defer rows.Close()
+	tokens := make([]store.APIToken, 0, limit)
+	for rows.Next() {
+		token, err := scanAPIToken(rows)
+		if err != nil {
+			return nil, "", fmt.Errorf("sqlite: scan api token: %w", err)
+		}
+		tokens = append(tokens, *token)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", fmt.Errorf("sqlite: iterate api tokens: %w", err)
+	}
+	next := ""
+	if len(tokens) > limit {
+		tokens = tokens[:limit]
+		last := tokens[len(tokens)-1]
+		next = encodeListCursor(listCursor{
+			Kind: listCursorTokens, UserID: userID,
+			At: formatTime(last.CreatedAt), ID: last.ID,
+		})
+	}
+	return tokens, next, nil
+}
+
 // FindAPITokenByHash resolves a bearer token digest to its token and owning
 // user. The digest comparison is constant time; expired tokens are reported
 // as not found and never update last_used_at.
@@ -159,7 +217,7 @@ func (s *Store) FindAPITokenByHash(ctx context.Context, hash []byte, now time.Ti
 	err := s.db.QueryRowContext(ctx, `SELECT t.id, t.user_id, t.name, t.token_hash,
 		t.last_used_at, t.expires_at, t.created_at, u.username, u.name, u.role
 		FROM api_tokens t JOIN users u ON u.id = t.user_id
-		WHERE t.token_hash = ?`, hash).Scan(
+		WHERE t.token_hash = ? AND u.disabled = 0`, hash).Scan(
 		&token.ID, &token.UserID, &token.Name, &token.TokenHash,
 		&lastUsedAt, &expiresAt, &createdAt,
 		&user.Username, &user.Name, &user.Role)

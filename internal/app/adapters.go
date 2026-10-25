@@ -45,6 +45,8 @@ type GitLabClient interface {
 	CreateDiscussion(ctx context.Context, token string, projectID, iid int64, d gitlab.NewDiscussion) (*gitlab.Discussion, error)
 	SetCommitStatus(ctx context.Context, token string, projectID int64, sha string, st gitlab.CommitStatus) error
 	ListNoteAwards(ctx context.Context, token string, projectID, iid, noteID int64) ([]gitlab.Award, error)
+	AddNoteAward(ctx context.Context, token string, projectID, iid, noteID int64, name string) (*gitlab.Award, error)
+	DeleteNoteAward(ctx context.Context, token string, projectID, iid, noteID, awardID int64) error
 }
 
 // GitLabService is the complete GitLab surface used by the app layer:
@@ -175,17 +177,48 @@ func newCostFunc(providers map[string]config.ProviderConfig) review.CostFunc {
 type executorRegistry struct {
 	mu            sync.RWMutex
 	exec          map[string]*review.Executor
-	projectLookup func(context.Context, string) (int64, bool)
+	owned         map[string]struct{}
+	projectLookup func(context.Context, string) (int64, error)
 }
 
 func newExecutorRegistry() *executorRegistry {
-	return &executorRegistry{exec: make(map[string]*review.Executor)}
+	return &executorRegistry{
+		exec:  make(map[string]*review.Executor),
+		owned: make(map[string]struct{}),
+	}
+}
+
+// Acquire claims exclusive application-level ownership of one workflow run.
+// Ownership is keyed by the job ID so startup recovery and a lease-reclaimed
+// handler contend for the same key. The winner alone may prepare the worktree,
+// register an executor, or remove either of them.
+func (r *executorRegistry) Acquire(workflowID string) bool {
+	if r == nil || workflowID == "" {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, held := r.owned[workflowID]; held {
+		return false
+	}
+	r.owned[workflowID] = struct{}{}
+	return true
+}
+
+// Release drops ownership acquired by Acquire. Only the owner calls it.
+func (r *executorRegistry) Release(workflowID string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	delete(r.owned, workflowID)
+	r.mu.Unlock()
 }
 
 // SetProjectLookup installs the workflow-to-project resolver used to attach a
-// project ID to node contexts. Without it, providers fall back to platform
-// configuration.
-func (r *executorRegistry) SetProjectLookup(lookup func(context.Context, string) (int64, bool)) {
+// project ID to node contexts. A nil lookup is allowed only for standalone test
+// registries; production must set it so every workflow resolves its project.
+func (r *executorRegistry) SetProjectLookup(lookup func(context.Context, string) (int64, error)) {
 	if r == nil {
 		return
 	}
@@ -201,21 +234,24 @@ func projectIDFromContext(ctx context.Context) (int64, bool) {
 	return id, ok && id > 0
 }
 
-func (r *executorRegistry) withProject(ctx context.Context, workflowID string) context.Context {
+func (r *executorRegistry) withProject(ctx context.Context, workflowID string) (context.Context, error) {
 	if r == nil || workflowID == "" {
-		return ctx
+		return ctx, nil
 	}
 	r.mu.RLock()
 	lookup := r.projectLookup
 	r.mu.RUnlock()
 	if lookup == nil {
-		return ctx
+		return ctx, nil
 	}
-	id, ok := lookup(ctx, workflowID)
-	if !ok || id <= 0 {
-		return ctx
+	id, err := lookup(ctx, workflowID)
+	if err != nil {
+		return nil, fmt.Errorf("app: resolve workflow %q project: %w", workflowID, err)
 	}
-	return context.WithValue(ctx, projectIDContextKey{}, id)
+	if id <= 0 {
+		return nil, fmt.Errorf("app: workflow %q has no project", workflowID)
+	}
+	return context.WithValue(ctx, projectIDContextKey{}, id), nil
 }
 
 // Register attaches an executor to a workflow ID. It replaces a previous
@@ -252,13 +288,27 @@ func (r *executorRegistry) lookup(workflowID string) (*review.Executor, error) {
 	return executor, nil
 }
 
+// NodeMetadata implements dag.NodeMetadataProvider. The engine asks before
+// node.started; an unregistered or legacy executor stays unattributed.
+func (r *executorRegistry) NodeMetadata(in dag.NodeInput) dag.NodeMetadata {
+	executor, err := r.lookup(in.WorkflowID)
+	if err != nil {
+		return dag.NodeMetadata{}
+	}
+	return executor.NodeMetadata(in)
+}
+
 // Execute implements dag.NodeExecutor.
 func (r *executorRegistry) Execute(ctx context.Context, in dag.NodeInput) (dag.NodeOutput, error) {
 	executor, err := r.lookup(in.WorkflowID)
 	if err != nil {
 		return dag.NodeOutput{}, err
 	}
-	return executor.Execute(r.withProject(ctx, in.WorkflowID), in)
+	projectCtx, err := r.withProject(ctx, in.WorkflowID)
+	if err != nil {
+		return dag.NodeOutput{}, err
+	}
+	return executor.Execute(projectCtx, in)
 }
 
 // Expand implements dag.Expander.
@@ -267,10 +317,15 @@ func (r *executorRegistry) Expand(ctx context.Context, wf dag.WorkflowView, from
 	if err != nil {
 		return dag.Extension{}, err
 	}
-	return executor.Expand(r.withProject(ctx, wf.ID), wf, from, out)
+	projectCtx, err := r.withProject(ctx, wf.ID)
+	if err != nil {
+		return dag.Extension{}, err
+	}
+	return executor.Expand(projectCtx, wf, from, out)
 }
 
 var _ dag.NodeExecutor = (*executorRegistry)(nil)
+var _ dag.NodeMetadataProvider = (*executorRegistry)(nil)
 var _ dag.Expander = (*executorRegistry)(nil)
 
 // trimProjectWebURL normalizes a GitLab project URL to a clone URL.
@@ -287,7 +342,10 @@ func trimProjectWebURL(webURL string) string {
 
 // ProjectExtensionResolver builds and caches project-scoped review inputs:
 // merged block bindings, a project-aware MCP manager and a project skill
-// loader. A project without stored overrides reuses the platform providers.
+// loader. Each project manager is rebuilt from the effective platform and
+// project configuration, including when the project adds no MCP servers, so
+// merged bindings and the project workspace apply. The cache is built on first
+// use and requires a restart to observe extension changes.
 type ProjectExtensionResolver struct {
 	store      *sqlite.Store
 	blocks     map[string]config.BlockBinding
@@ -297,15 +355,15 @@ type ProjectExtensionResolver struct {
 	deniedEnv  []string
 	now        func() time.Time
 	logger     *slog.Logger
-	baseTools  review.ToolProvider
 	baseSkills review.SkillProvider
 
-	mu   sync.Mutex
-	sets map[int64]*projectExtensionSet
+	mu     sync.Mutex
+	sets   map[int64]*projectExtensionSet
+	closed bool
 }
 
-// ProjectExtensionResolverConfig configures ProjectExtensionResolver. Base
-// providers are the platform-only providers and are never closed here.
+// ProjectExtensionResolverConfig configures ProjectExtensionResolver. The base
+// skill provider is platform-only and is never closed here.
 type ProjectExtensionResolverConfig struct {
 	Store      *sqlite.Store
 	Blocks     map[string]config.BlockBinding
@@ -315,7 +373,6 @@ type ProjectExtensionResolverConfig struct {
 	DeniedEnv  []string
 	Now        func() time.Time
 	Logger     *slog.Logger
-	BaseTools  review.ToolProvider
 	BaseSkills review.SkillProvider
 }
 
@@ -350,11 +407,12 @@ func NewProjectExtensionResolver(cfg ProjectExtensionResolverConfig) (*ProjectEx
 		deniedEnv:  append([]string(nil), cfg.DeniedEnv...),
 		now:        now,
 		logger:     logger,
-		baseTools:  cfg.BaseTools,
 		baseSkills: cfg.BaseSkills,
 		sets:       make(map[int64]*projectExtensionSet),
 	}, nil
 }
+
+var errProjectExtensionResolverClosed = errors.New("app: project extension resolver is closed")
 
 // ForProject returns the project-scoped inputs, building them on first use.
 // A read error is returned instead of silently running with platform-only
@@ -364,6 +422,10 @@ func (r *ProjectExtensionResolver) ForProject(ctx context.Context, projectID int
 		return nil, errors.New("app: project id is required")
 	}
 	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return nil, errProjectExtensionResolverClosed
+	}
 	if existing := r.sets[projectID]; existing != nil {
 		r.mu.Unlock()
 		return existing, nil
@@ -375,6 +437,13 @@ func (r *ProjectExtensionResolver) ForProject(ctx context.Context, projectID int
 		return nil, err
 	}
 	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		if set.mcp != nil {
+			_ = set.mcp.Close()
+		}
+		return nil, errProjectExtensionResolverClosed
+	}
 	if existing := r.sets[projectID]; existing != nil {
 		r.mu.Unlock()
 		if set.mcp != nil {
@@ -393,6 +462,11 @@ func (r *ProjectExtensionResolver) Close() error {
 		return nil
 	}
 	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return nil
+	}
+	r.closed = true
 	sets := r.sets
 	r.sets = make(map[int64]*projectExtensionSet)
 	r.mu.Unlock()
@@ -433,19 +507,12 @@ func (r *ProjectExtensionResolver) build(ctx context.Context, projectID int64) (
 		if !row.Enabled {
 			continue
 		}
-		var server mcp.ServerConfig
-		if err := json.Unmarshal(row.Config, &server); err != nil {
-			return nil, fmt.Errorf("app: decode platform MCP server %q: %w", row.Name, err)
+		server, err := mcp.ParseServer(row.Config, r.deniedEnv...)
+		if err != nil {
+			return nil, fmt.Errorf("app: parse platform MCP server %q: %w", row.Name, err)
 		}
 		platformConfig.MCPServers[row.Name] = server
 	}
-	set := &projectExtensionSet{
-		blocks:    blocks,
-		tools:     r.baseTools,
-		skills:    r.baseSkills,
-		mcpConfig: platformConfig,
-	}
-
 	servers, err := r.store.ListMCPServers(ctx, store.ScopeProject, &projectID)
 	if err != nil {
 		return nil, fmt.Errorf("app: load project MCP servers: %w", err)
@@ -455,28 +522,32 @@ func (r *ProjectExtensionResolver) build(ctx context.Context, projectID int64) (
 		if !row.Enabled {
 			continue
 		}
-		var server mcp.ServerConfig
-		if err := json.Unmarshal(row.Config, &server); err != nil {
-			return nil, fmt.Errorf("app: decode project MCP server %q: %w", row.Name, err)
+		server, err := mcp.ParseServer(row.Config, r.deniedEnv...)
+		if err != nil {
+			return nil, fmt.Errorf("app: parse project MCP server %q: %w", row.Name, err)
 		}
 		projectMCP.MCPServers[row.Name] = server
 	}
-	if len(projectMCP.MCPServers) > 0 {
-		set.mcpConfig = mcp.Merge(platformConfig, projectMCP)
-		workspace := r.projectWorkspace(projectID)
-		manager, err := mcp.New(mcp.Options{
-			Platform:  platformConfig,
-			Project:   projectMCP,
-			Workspace: workspace,
-			DeniedEnv: r.deniedEnv,
-			Now:       r.now,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("app: build project MCP manager: %w", err)
-		}
-		set.mcp = manager
-		set.tools = NewMCPToolProvider(manager, blocks)
+	// Build a project manager even when the project adds no servers: the
+	// merged bindings must apply and stdio servers must run in the project
+	// workspace rather than the platform workspace.
+	set := &projectExtensionSet{
+		blocks:    blocks,
+		skills:    r.baseSkills,
+		mcpConfig: mcp.Merge(platformConfig, projectMCP),
 	}
+	manager, err := mcp.New(mcp.Options{
+		Platform:  platformConfig,
+		Project:   projectMCP,
+		Workspace: r.projectWorkspace(projectID),
+		DeniedEnv: r.deniedEnv,
+		Now:       r.now,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("app: build project MCP manager: %w", err)
+	}
+	set.mcp = manager
+	set.tools = NewMCPToolProvider(manager, blocks)
 
 	// Platform skills are re-read on every project build so skills uploaded
 	// after startup are visible to the next review. The runtime base loader is
@@ -544,7 +615,7 @@ func (r *ProjectExtensionResolver) projectWorkspace(projectID int64) string {
 // loadStoredPlatformExtensions merges database-backed platform extensions over
 // file configuration. Database rows win on a name conflict.
 func loadStoredPlatformExtensions(ctx context.Context, st *sqlite.Store, blocks map[string]config.BlockBinding,
-	mcpConfig mcp.Config, skillDirs []string) (map[string]config.BlockBinding, mcp.Config, []string, error) {
+	mcpConfig mcp.Config, skillDirs []string, denied ...string) (map[string]config.BlockBinding, mcp.Config, []string, error) {
 	if st == nil {
 		return cloneBlockBindings(blocks), mcpConfig, append([]string(nil), skillDirs...), nil
 	}
@@ -577,9 +648,9 @@ func loadStoredPlatformExtensions(ctx context.Context, st *sqlite.Store, blocks 
 		if !row.Enabled {
 			continue
 		}
-		var server mcp.ServerConfig
-		if err := json.Unmarshal(row.Config, &server); err != nil {
-			return nil, mcp.Config{}, nil, fmt.Errorf("app: decode platform MCP server %q: %w", row.Name, err)
+		server, err := mcp.ParseServer(row.Config, denied...)
+		if err != nil {
+			return nil, mcp.Config{}, nil, fmt.Errorf("app: parse platform MCP server %q: %w", row.Name, err)
 		}
 		mcpConfig.MCPServers[row.Name] = server
 	}
@@ -660,11 +731,18 @@ func (p *projectAwareToolProvider) Tools(ctx context.Context, block string) ([]a
 	if p == nil {
 		return nil, nil
 	}
-	if id, ok := projectIDFromContext(ctx); ok && p.resolver != nil {
-		set, err := p.resolver.ForProject(ctx, id)
-		if err == nil && set.tools != nil {
-			return set.tools.Tools(ctx, block)
+	if id, ok := projectIDFromContext(ctx); ok {
+		if p.resolver == nil {
+			return nil, errors.New("app: project extension resolver is not configured")
 		}
+		set, err := p.resolver.ForProject(ctx, id)
+		if err != nil {
+			return nil, fmt.Errorf("app: resolve project tools: %w", err)
+		}
+		if set == nil || set.tools == nil {
+			return nil, nil
+		}
+		return set.tools.Tools(ctx, block)
 	}
 	if p.base == nil {
 		return nil, nil
@@ -688,19 +766,24 @@ func (p *projectAwareSkillProvider) BindSkills(ctx context.Context, names []stri
 	if len(names) == 1 && strings.HasPrefix(names[0], projectSkillStubBase) {
 		block = strings.TrimPrefix(names[0], projectSkillStubBase)
 	}
-	if id, ok := projectIDFromContext(ctx); ok && p.resolver != nil {
-		if set, err := p.resolver.ForProject(ctx, id); err == nil {
-			if block != "" {
-				names = set.blocks[block].Skills
-				if len(names) == 0 {
-					return review.SkillBinding{}, nil
-				}
-			}
-			if set.skills == nil {
-				return review.SkillBinding{}, nil
-			}
-			return set.skills.BindSkills(ctx, names)
+	if id, ok := projectIDFromContext(ctx); ok {
+		if p.resolver == nil {
+			return review.SkillBinding{}, errors.New("app: project extension resolver is not configured")
 		}
+		set, err := p.resolver.ForProject(ctx, id)
+		if err != nil {
+			return review.SkillBinding{}, fmt.Errorf("app: resolve project skills: %w", err)
+		}
+		if block != "" {
+			names = set.blocks[block].Skills
+		}
+		if block != "" && len(names) == 0 {
+			return review.SkillBinding{}, nil
+		}
+		if set.skills == nil {
+			return review.SkillBinding{}, nil
+		}
+		return set.skills.BindSkills(ctx, names)
 	}
 	if block != "" {
 		names = p.blocks[block].Skills

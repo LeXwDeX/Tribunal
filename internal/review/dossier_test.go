@@ -1,6 +1,7 @@
 package review
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -156,5 +157,35 @@ func TestComputeIncrementalScope(t *testing.T) {
 	})
 	if err != nil || !called || strings.Join(loaded.Files, ",") != "b.go" {
 		t.Fatalf("LoadChanged scope = %+v, called=%v, err=%v", loaded, called, err)
+	}
+}
+
+func TestDossierLegacyDiffSummaryStillFailsClosed(t *testing.T) {
+	d := validDossier(t)
+	d.DiffSummary.Truncated = true
+	raw, err := json.Marshal(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatal(err)
+	}
+	summary := fields["diff_summary"].(map[string]any)
+	delete(summary, "total")
+	delete(summary, "omitted")
+	legacyRaw, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacy Dossier
+	if err := json.Unmarshal(legacyRaw, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateDossier(&legacy); err != nil {
+		t.Fatalf("legacy dossier is no longer valid: %v", err)
+	}
+	if !legacy.DiffSummary.Truncated || legacy.DiffSummary.Total != 0 || len(legacy.DiffSummary.Omitted) != 0 {
+		t.Fatalf("legacy diff summary = %+v", legacy.DiffSummary)
 	}
 }

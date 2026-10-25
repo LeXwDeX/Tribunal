@@ -24,7 +24,8 @@ var nonceFallback atomic.Uint64
 // Every model turn is bounded: unknown tools produce error results, tool
 // errors are returned to the model, and each tool call ID gets exactly one
 // matching result before the next request. Context cancellation returns
-// immediately without another model call.
+// immediately without another model call. A failure after at least one
+// response returns a partial RunResult carrying the known usage.
 func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 	if ctx == nil {
 		return nil, errors.New("agent: nil context")
@@ -96,10 +97,25 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 	submitFailures := 0
 	var lastSubmitErr error
 	askedForSubmit := false
+	partial := func(err error) (*RunResult, error) {
+		if turns == 0 {
+			return nil, err
+		}
+		return &RunResult{
+			Usage:      usage,
+			Turns:      turns,
+			Transcript: append([]llm.Message(nil), messages...),
+		}, err
+	}
 
 	for turn := 1; turn <= maxTurns; turn++ {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return partial(err)
+		}
+		if spec.BeforeTurn != nil {
+			if err := spec.BeforeTurn(ctx, usage); err != nil {
+				return partial(err)
+			}
 		}
 
 		req := &llm.Request{
@@ -119,14 +135,24 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 		callCtx := llm.WithCallMeta(ctx, meta)
 
 		resp, err := spec.Client.Generate(callCtx, req)
+		if err != nil && req.ToolChoice == SubmitToolName {
+			var failure *llm.Error
+			if errors.As(err, &failure) && failure.Kind == llm.ErrBadRequest {
+				// Some reasoning gateways reject every non-auto tool choice. Let
+				// the final prompt request submit_result without forcing the choice.
+				fallback := *req
+				fallback.ToolChoice = ""
+				resp, err = spec.Client.Generate(callCtx, &fallback)
+			}
+		}
 		if err != nil {
-			return nil, err
+			return partial(err)
 		}
 		if resp == nil {
-			return nil, errors.New("agent: model returned a nil response")
+			return partial(errors.New("agent: model returned a nil response"))
 		}
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return partial(err)
 		}
 		turns = turn
 		addUsage(&usage, resp.Usage)
@@ -134,7 +160,7 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 
 		calls, err := responseToolCalls(resp.Message)
 		if err != nil {
-			return nil, err
+			return partial(err)
 		}
 		if len(calls) == 0 {
 			if resp.StopReason == llm.StopEndTurn && !askedForSubmit && turn < maxTurns {
@@ -146,9 +172,9 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 				continue
 			}
 			if submitFailures > 0 {
-				return nil, fmt.Errorf("%w: %v", ErrInvalidSubmit, lastSubmitErr)
+				return partial(fmt.Errorf("%w: %v", ErrInvalidSubmit, lastSubmitErr))
 			}
-			return nil, ErrNoSubmit
+			return partial(ErrNoSubmit)
 		}
 
 		results := make([]llm.Part, 0, len(calls))
@@ -200,7 +226,7 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 			}
 			results = append(results, wrapToolResult(call.ID, call.Name, res, maxOutput))
 			if err := ctx.Err(); err != nil {
-				return nil, err
+				return partial(err)
 			}
 		}
 
@@ -214,14 +240,14 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 			}, nil
 		}
 		if submitFailures > maxSubmitRetries {
-			return nil, fmt.Errorf("%w: %v", ErrInvalidSubmit, lastSubmitErr)
+			return partial(fmt.Errorf("%w: %v", ErrInvalidSubmit, lastSubmitErr))
 		}
 	}
 
 	if submitFailures > 0 {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidSubmit, lastSubmitErr)
+		return partial(fmt.Errorf("%w: %v", ErrInvalidSubmit, lastSubmitErr))
 	}
-	return nil, ErrNoSubmit
+	return partial(ErrNoSubmit)
 }
 
 func addUsage(dst *llm.Usage, add llm.Usage) {

@@ -107,10 +107,12 @@ func (d *Dispatcher) StartReview(ctx context.Context, projectID, mrIID int64, pr
 	if !shaRE.MatchString(head) {
 		return "", &Error{Code: "gitlab_rejected", Message: "merge request head is unavailable"}
 	}
+	requested := strings.TrimSpace(profile)
 	payload, err := json.Marshal(map[string]any{
-		"profile": d.resolveProfile(project, profile),
-		"trigger": "manual",
-		"full":    full,
+		"profile":          d.resolveProfile(project, requested),
+		"profile_explicit": requested != "",
+		"trigger":          "manual",
+		"full":             full,
 	})
 	if err != nil {
 		return "", internalError()

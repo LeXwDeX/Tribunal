@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
@@ -33,6 +34,8 @@ func prepareProject(t *testing.T, env *m6Env, projectID int64, baseSHA string) {
 func TestWorkspaceStatusAndRefresh(t *testing.T) {
 	env := newM6Env(t, m6Options{})
 	prepareProject(t, env, 42, "base-1")
+	env.grant(7, 42, store.ProjectAccessManage)
+	env.grant(8, 42, store.ProjectAccessRead)
 	client := env.loginAs("code-admin")
 
 	status := client.request(http.MethodGet, "/api/v1/projects/42/workspace", nil, nil)
@@ -66,7 +69,9 @@ func TestWorkspaceStatusAndRefresh(t *testing.T) {
 
 func TestContextDocsKindValidationAndManualSave(t *testing.T) {
 	env := newM6Env(t, m6Options{})
-	prepareProject(t, env, 42, "base-1")
+	base := strings.Repeat("a", 40)
+	prepareProject(t, env, 42, base)
+	env.grant(7, 42, store.ProjectAccessManage)
 	client := env.loginAs("code-admin")
 
 	list := client.request(http.MethodGet, "/api/v1/projects/42/context-docs", nil, nil)
@@ -98,7 +103,7 @@ func TestContextDocsKindValidationAndManualSave(t *testing.T) {
 	assertStatus(t, saved, http.StatusOK)
 	savedBody := env.decode(t, saved)
 	firstID, _ := savedBody["id"].(string)
-	if firstID == "" || savedBody["source"] != "manual" || savedBody["base_sha"] != "base-1" {
+	if firstID == "" || savedBody["source"] != "manual" || savedBody["base_sha"] != base {
 		t.Fatalf("saved doc = %v", savedBody)
 	}
 	if savedBody["locked"] != false {
@@ -108,23 +113,42 @@ func TestContextDocsKindValidationAndManualSave(t *testing.T) {
 		t.Fatalf("updated_by = %v", savedBody["updated_by"])
 	}
 
-	// The schema keeps one row per (project, base_sha, kind), so the second
-	// manual edit updates the same version in place.
+	// Every manual save appends a new version; the previous row stays intact.
 	again := client.json(http.MethodPut, "/api/v1/projects/42/context-docs/current?kind=agents",
 		map[string]any{"content": "second body"})
 	assertStatus(t, again, http.StatusOK)
 	againBody := env.decode(t, again)
-	if againBody["id"] != firstID || againBody["content"] != "second body" {
+	secondID, _ := againBody["id"].(string)
+	if secondID == "" || secondID == firstID || againBody["content"] != "second body" {
 		t.Fatalf("second save = %v", againBody)
+	}
+	if againBody["active"] != true {
+		t.Fatalf("second save is not active: %v", againBody)
 	}
 	listAgain := client.request(http.MethodGet, "/api/v1/projects/42/context-docs?kind=agents", nil, nil)
 	assertStatus(t, listAgain, http.StatusOK)
 	docs := env.decode(t, listAgain)["documents"].([]any)
-	if len(docs) != 1 {
-		t.Fatalf("manual save created %d versions", len(docs))
+	if len(docs) != 2 {
+		t.Fatalf("manual save created %d versions, want 2", len(docs))
+	}
+	byID := make(map[string]map[string]any, len(docs))
+	active := 0
+	for _, item := range docs {
+		doc := item.(map[string]any)
+		byID[doc["id"].(string)] = doc
+		if doc["active"] == true {
+			active++
+		}
+	}
+	if active != 1 || byID[secondID]["active"] != true {
+		t.Fatalf("active versions = %v, want only %s", docs, secondID)
+	}
+	if byID[firstID]["content"] != "first body" || byID[firstID]["active"] != false {
+		t.Fatalf("first version changed: %v", byID[firstID])
 	}
 
-	// A locked document may still be replaced through the manual path.
+	// A locked document may still be replaced through the manual path; the new
+	// version inherits the current lock when the request omits it.
 	lock := client.json(http.MethodPost, "/api/v1/projects/42/context-docs/current/lock?kind=agents",
 		map[string]any{"locked": true})
 	assertStatus(t, lock, http.StatusNoContent)
@@ -132,6 +156,19 @@ func TestContextDocsKindValidationAndManualSave(t *testing.T) {
 	assertStatus(t, current, http.StatusOK)
 	if env.decode(t, current)["locked"] != true {
 		t.Fatalf("locked document = %s", current.body)
+	}
+	third := client.json(http.MethodPut, "/api/v1/projects/42/context-docs/current?kind=agents",
+		map[string]any{"content": "third body"})
+	assertStatus(t, third, http.StatusOK)
+	thirdBody := env.decode(t, third)
+	thirdID, _ := thirdBody["id"].(string)
+	if thirdID == "" || thirdID == secondID || thirdBody["locked"] != true || thirdBody["active"] != true {
+		t.Fatalf("manual save over locked version = %v", thirdBody)
+	}
+	list = client.request(http.MethodGet, "/api/v1/projects/42/context-docs?kind=agents", nil, nil)
+	assertStatus(t, list, http.StatusOK)
+	if got := len(env.decode(t, list)["documents"].([]any)); got != 3 {
+		t.Fatalf("versions after locked edit = %d, want 3", got)
 	}
 
 	// A different kind is a separate document.
@@ -146,8 +183,25 @@ func TestContextDocsKindValidationAndManualSave(t *testing.T) {
 func TestContextDocLockRequiresBody(t *testing.T) {
 	env := newM6Env(t, m6Options{})
 	prepareProject(t, env, 42, "base-1")
+	env.grant(7, 42, store.ProjectAccessManage)
 	client := env.loginAs("code-admin")
 	response := client.json(http.MethodPost, "/api/v1/projects/42/context-docs/current/lock?kind=agents",
 		map[string]any{})
 	assertStatus(t, response, http.StatusBadRequest)
+}
+
+func TestContextDetailsRequireContextService(t *testing.T) {
+	env := newM6Env(t, m6Options{noContexts: true})
+	base := strings.Repeat("a", 40)
+	prepareProject(t, env, 42, base)
+	env.grant(7, 42, store.ProjectAccessManage)
+	client := env.loginAs("code-admin")
+
+	save := client.json(http.MethodPut, "/api/v1/projects/42/context-docs/current?kind=agents",
+		map[string]any{"content": "body"})
+	assertStatus(t, save, http.StatusServiceUnavailable)
+
+	lock := client.json(http.MethodPost, "/api/v1/projects/42/context-docs/current/lock?kind=agents",
+		map[string]any{"locked": true})
+	assertStatus(t, lock, http.StatusServiceUnavailable)
 }

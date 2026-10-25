@@ -18,9 +18,11 @@ import (
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/config"
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/gitlab"
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/llm"
+	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/repo"
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/secret"
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store/sqlite"
+	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/workspace"
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/pkg/dag"
 )
 
@@ -103,6 +105,13 @@ func newWiringEnv(t *testing.T) *wiringEnv {
 	if err != nil {
 		t.Fatalf("NewDispatcher: %v", err)
 	}
+	contexts, err := app.NewContextService(app.ContextServiceConfig{
+		Store:     db,
+		Workspace: workspace.NewManager(t.TempDir(), &repo.Git{}),
+	})
+	if err != nil {
+		t.Fatalf("NewContextService: %v", err)
+	}
 
 	t.Setenv("WIRING_PROVIDER_KEY", "wiring-provider-secret")
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -156,10 +165,12 @@ func newWiringEnv(t *testing.T) *wiringEnv {
 		Store:      db,
 		Reviews:    dispatcher,
 		Workspace:  dispatcher,
+		Contexts:   contexts,
 		Extensions: backend,
 		MCP:        backend,
 		LLM:        backend,
 		Tokens:     db,
+		Access:     db,
 		Platform: &config.Config{
 			Providers: map[string]config.ProviderConfig{"fake": providerConfig},
 			Profiles:  map[string]config.ProfileConfig{"default": {}, "deep": {}},
@@ -178,6 +189,17 @@ func newWiringEnv(t *testing.T) *wiringEnv {
 
 func (e *wiringEnv) bearer() *m6Client {
 	return &m6Client{t: e.t, base: e.server.URL, client: &http.Client{}, bearer: testAdminToken}
+}
+
+// business returns the platform-admin session with an explicit manage grant on
+// the wiring project.
+func (e *wiringEnv) business() *m6Client {
+	e.t.Helper()
+	client := e.loginAs("code-admin")
+	if err := e.db.SetProjectGrant(context.Background(), 42, 7, store.ProjectAccessManage); err != nil {
+		e.t.Fatalf("SetProjectGrant: %v", err)
+	}
+	return client
 }
 
 func (e *wiringEnv) loginAs(code string) *m6Client {
@@ -240,7 +262,7 @@ func (e *wiringEnv) seededWorkflow() string {
 
 func TestWiringReviewTriggerEnqueuesRun(t *testing.T) {
 	env := newWiringEnv(t)
-	client := env.bearer()
+	client := env.business()
 
 	response := client.json(http.MethodPost, "/api/v1/projects/42/merge_requests/7/reviews", map[string]any{
 		"profile": "deep", "full": true,
@@ -284,7 +306,7 @@ func TestWiringReviewTriggerRejectsClosedMR(t *testing.T) {
 	env.api.mr.State = "closed"
 	env.api.mu.Unlock()
 
-	response := env.bearer().json(http.MethodPost, "/api/v1/projects/42/merge_requests/7/reviews", nil)
+	response := env.business().json(http.MethodPost, "/api/v1/projects/42/merge_requests/7/reviews", nil)
 	assertStatus(t, response, http.StatusConflict)
 	body := decodeMap(t, response.body)
 	errBody, _ := body["error"].(map[string]any)
@@ -298,7 +320,7 @@ func TestWiringReviewTriggerRejectsClosedMR(t *testing.T) {
 
 func TestWiringCancelAndRepublishEnqueueJobs(t *testing.T) {
 	env := newWiringEnv(t)
-	client := env.bearer()
+	client := env.business()
 	trigger := client.json(http.MethodPost, "/api/v1/projects/42/merge_requests/7/reviews", nil)
 	assertStatus(t, trigger, http.StatusAccepted)
 	workflowID := env.seededWorkflow()
@@ -335,7 +357,7 @@ func TestWiringCancelAndRepublishEnqueueJobs(t *testing.T) {
 
 func TestWiringWorkspaceRefreshEnqueuesJob(t *testing.T) {
 	env := newWiringEnv(t)
-	response := env.bearer().json(http.MethodPost, "/api/v1/projects/42/workspace/refresh", map[string]any{
+	response := env.business().json(http.MethodPost, "/api/v1/projects/42/workspace/refresh", map[string]any{
 		"regenerate_context": true, "reindex": false,
 	})
 	assertStatus(t, response, http.StatusAccepted)
@@ -453,7 +475,7 @@ func TestWiringAPITokensRequireSession(t *testing.T) {
 	assertStatus(t, noCSRF, http.StatusForbidden)
 
 	viewer := env.loginAs("code-viewer")
-	assertStatus(t, viewer.json(http.MethodPost, "/api/v1/api-tokens", map[string]any{"name": "nope"}), http.StatusForbidden)
+	assertStatus(t, viewer.json(http.MethodPost, "/api/v1/api-tokens", map[string]any{"name": "self-service"}), http.StatusCreated)
 
 	deleted := admin.request(http.MethodDelete, "/api/v1/api-tokens/"+id, nil, nil)
 	assertStatus(t, deleted, http.StatusNoContent)
@@ -462,5 +484,146 @@ func TestWiringAPITokensRequireSession(t *testing.T) {
 	afterBody := decodeMap(t, after.body)
 	if tokens, _ := afterBody["tokens"].([]any); len(tokens) != 0 {
 		t.Fatalf("tokens after delete = %v", tokens)
+	}
+}
+
+func TestWiringFindingAnnotationQualityLifecycle(t *testing.T) {
+	env := newWiringEnv(t)
+	ctx := context.Background()
+
+	// Establish the review control used by the shared seededWorkflow fixture.
+	trigger := env.business().json(http.MethodPost, "/api/v1/projects/42/merge_requests/7/reviews", nil)
+	assertStatus(t, trigger, http.StatusAccepted)
+	workflowID := env.seededWorkflow()
+
+	wf, err := env.db.GetWorkflow(ctx, workflowID)
+	if err != nil {
+		t.Fatalf("GetWorkflow: %v", err)
+	}
+	at := time.Now().UTC()
+	queued, err := json.Marshal(dag.NodeQueuedPayload{NodeID: "seed", Attempt: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := json.Marshal(dag.NodeStartedPayload{
+		NodeID: "seed", Attempt: 1, Provider: "challenger", Model: "m",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.db.Append(ctx, workflowID, wf.GraphRev,
+		dag.Event{Type: dag.EventNodeQueued, Payload: queued, At: at},
+		dag.Event{Type: dag.EventNodeStarted, Payload: started, At: at},
+	); err != nil {
+		t.Fatalf("Append node events: %v", err)
+	}
+
+	finding := store.Finding{
+		ID: "wiring-annotation-f1", OriginNode: "seed", OriginProvider: "proposer",
+		Severity: "P1", Category: "logic", Title: "producer title", Body: "body",
+		ChallengeNode: "seed", ChallengeStatus: "refuted",
+	}
+	if err := env.db.ReplaceFindings(ctx, workflowID, []store.Finding{finding}); err != nil {
+		t.Fatalf("ReplaceFindings: %v", err)
+	}
+
+	findingsURL := "/api/v1/reviews/" + workflowID + "/findings"
+	annotationURL := findingsURL + "/" + finding.ID + "/annotation"
+	admin := env.loginAs("code-admin")
+	getFinding := func() map[string]any {
+		response := admin.request(http.MethodGet, findingsURL, nil, nil)
+		assertStatus(t, response, http.StatusOK)
+		for _, item := range decodeMap(t, response.body)["findings"].([]any) {
+			entry := item.(map[string]any)
+			if entry["id"] == finding.ID {
+				return entry
+			}
+		}
+		t.Fatalf("finding %s not returned", finding.ID)
+		return nil
+	}
+	getQuality := func() map[string]map[string]any {
+		response := admin.request(http.MethodGet, "/api/v1/stats?project_id=42", nil, nil)
+		assertStatus(t, response, http.StatusOK)
+		out := make(map[string]map[string]any)
+		for _, item := range decodeMap(t, response.body)["quality_by_provider"].([]any) {
+			entry := item.(map[string]any)
+			out[entry["provider"].(string)] = entry
+		}
+		return out
+	}
+
+	set := admin.json(http.MethodPut, annotationURL, map[string]any{"annotation": "valid"})
+	assertStatus(t, set, http.StatusOK)
+	setBody := decodeMap(t, set.body)
+	if setBody["annotation"] != "valid" || setBody["annotated_by"] != "alice" {
+		t.Fatalf("set response = %v", setBody)
+	}
+	if _, err := time.Parse(time.RFC3339, setBody["annotated_at"].(string)); err != nil {
+		t.Fatalf("annotated_at = %v: %v", setBody["annotated_at"], err)
+	}
+
+	listed := getFinding()
+	if listed["annotation"] != "valid" || listed["annotated_by"] != "alice" {
+		t.Fatalf("listed finding after set = %v", listed)
+	}
+
+	quality := getQuality()
+	proposer, challenger := quality["proposer"], quality["challenger"]
+	if proposer == nil || challenger == nil || len(quality) != 2 {
+		t.Fatalf("quality_by_provider = %v", quality)
+	}
+	if proposer["reviewed"] != 1.0 || proposer["valid"] != 1.0 || proposer["accuracy"] != 1.0 ||
+		proposer["overturned"] != 1.0 || proposer["overturned_ratio"] != 1.0 {
+		t.Fatalf("proposer quality = %v", proposer)
+	}
+	if challenger["refuted"] != 1.0 || challenger["refuted_reviewed"] != 1.0 ||
+		challenger["false_refuted"] != 1.0 || challenger["false_kill_rate"] != 1.0 {
+		t.Fatalf("challenger quality = %v", challenger)
+	}
+
+	replacement := finding
+	replacement.Title = "replacement title"
+	replacement.Annotation = "invalid"
+	replacement.AnnotatedBy = "producer"
+	if err := env.db.ReplaceFindings(ctx, workflowID, []store.Finding{replacement}); err != nil {
+		t.Fatalf("ReplaceFindings same ID: %v", err)
+	}
+	replaced := getFinding()
+	if replaced["title"] != "replacement title" || replaced["annotation"] != "valid" ||
+		replaced["annotated_by"] != "alice" {
+		t.Fatalf("finding after same-ID replacement = %v", replaced)
+	}
+
+	clear := admin.json(http.MethodPut, annotationURL, map[string]any{"annotation": ""})
+	assertStatus(t, clear, http.StatusOK)
+	cleared := decodeMap(t, clear.body)
+	if cleared["annotation"] != "" {
+		t.Fatalf("cleared response = %v", cleared)
+	}
+	if _, ok := cleared["annotated_by"]; ok {
+		t.Fatalf("cleared response kept annotated_by: %v", cleared)
+	}
+	if _, ok := cleared["annotated_at"]; ok {
+		t.Fatalf("cleared response kept annotated_at: %v", cleared)
+	}
+	clearedFinding := getFinding()
+	if clearedFinding["annotation"] != "" {
+		t.Fatalf("finding after clear = %v", clearedFinding)
+	}
+	if _, ok := clearedFinding["annotated_by"]; ok {
+		t.Fatalf("listed finding kept annotated_by: %v", clearedFinding)
+	}
+	if _, ok := clearedFinding["annotated_at"]; ok {
+		t.Fatalf("listed finding kept annotated_at: %v", clearedFinding)
+	}
+
+	quality = getQuality()
+	proposer, challenger = quality["proposer"], quality["challenger"]
+	if proposer["proposed"] != 1.0 || proposer["reviewed"] != 0.0 || proposer["accuracy"] != nil {
+		t.Fatalf("proposer denominator after clear = %v", proposer)
+	}
+	if challenger["refuted"] != 1.0 || challenger["refuted_reviewed"] != 0.0 || challenger["false_kill_rate"] != nil {
+		t.Fatalf("challenger denominator after clear = %v", challenger)
 	}
 }

@@ -49,6 +49,21 @@ func (a *AppExtensions) ListMCPServers(ctx context.Context, scope string, projec
 	return out, nil
 }
 
+func (a *AppExtensions) ListMCPServersPage(ctx context.Context, scope string, projectID *int64, cursor string, limit int) ([]MCPServer, string, error) {
+	if err := a.ready(); err != nil {
+		return nil, "", err
+	}
+	servers, next, err := a.service.ListMCPServersPage(ctx, scope, projectID, cursor, limit)
+	if err != nil {
+		return nil, "", err
+	}
+	out := make([]MCPServer, 0, len(servers))
+	for _, server := range servers {
+		out = append(out, mcpServerFromApp(server))
+	}
+	return out, next, nil
+}
+
 func (a *AppExtensions) GetMCPServer(ctx context.Context, id string) (*MCPServer, error) {
 	if err := a.ready(); err != nil {
 		return nil, err
@@ -136,6 +151,21 @@ func (a *AppExtensions) ListSkills(ctx context.Context, scope string, projectID 
 	return out, nil
 }
 
+func (a *AppExtensions) ListSkillsPage(ctx context.Context, scope string, projectID *int64, cursor string, limit int) ([]Skill, string, error) {
+	if err := a.ready(); err != nil {
+		return nil, "", err
+	}
+	skills, next, err := a.service.ListSkillsPage(ctx, scope, projectID, cursor, limit)
+	if err != nil {
+		return nil, "", err
+	}
+	out := make([]Skill, 0, len(skills))
+	for _, skill := range skills {
+		out = append(out, skillFromApp(skill))
+	}
+	return out, next, nil
+}
+
 func (a *AppExtensions) UploadSkill(ctx context.Context, in SkillUpload) (*Skill, error) {
 	if err := a.ready(); err != nil {
 		return nil, err
@@ -190,6 +220,21 @@ func (a *AppExtensions) ListBlockBindings(ctx context.Context, scope string, pro
 		out = append(out, blockBindingFromApp(binding))
 	}
 	return out, nil
+}
+
+func (a *AppExtensions) ListBlockBindingsPage(ctx context.Context, scope string, projectID *int64, cursor string, limit int) ([]BlockBinding, string, error) {
+	if err := a.ready(); err != nil {
+		return nil, "", err
+	}
+	bindings, next, err := a.service.ListBlockBindingsPage(ctx, scope, projectID, cursor, limit)
+	if err != nil {
+		return nil, "", err
+	}
+	out := make([]BlockBinding, 0, len(bindings))
+	for _, binding := range bindings {
+		out = append(out, blockBindingFromApp(binding))
+	}
+	return out, next, nil
 }
 
 func (a *AppExtensions) UpsertBlockBinding(ctx context.Context, in BlockBindingInput) (*BlockBinding, error) {

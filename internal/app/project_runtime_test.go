@@ -11,6 +11,7 @@ import (
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/agent"
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/config"
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/review"
+	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/pkg/dag"
 )
 
 type recordingToolProvider struct {
@@ -126,12 +127,10 @@ func TestProjectAwareSkillProviderUsesProjectBinding(t *testing.T) {
 func TestProjectAwareToolProviderDelegatesByProject(t *testing.T) {
 	ctx := context.Background()
 	service, _ := newExtensionFixture(t)
-	resolverBase := &recordingToolProvider{}
 	routerBase := &recordingToolProvider{err: errors.New("platform tool provider must not be called")}
 	resolver, err := NewProjectExtensionResolver(ProjectExtensionResolverConfig{
 		Store:     service.store,
 		Workspace: service.workspace,
-		BaseTools: resolverBase,
 	})
 	if err != nil {
 		t.Fatalf("resolver: %v", err)
@@ -164,19 +163,139 @@ func TestProjectAwareToolProviderDelegatesByProject(t *testing.T) {
 
 func TestExecutorRegistryInjectsProjectContext(t *testing.T) {
 	registry := newExecutorRegistry()
-	registry.SetProjectLookup(func(_ context.Context, workflowID string) (int64, bool) {
+	registry.SetProjectLookup(func(_ context.Context, workflowID string) (int64, error) {
 		if workflowID == "wf-42" {
-			return 42, true
+			return 42, nil
 		}
-		return 0, false
+		return 0, errors.New("unknown workflow")
 	})
-	ctx := registry.withProject(context.Background(), "wf-42")
+	ctx, err := registry.withProject(context.Background(), "wf-42")
+	if err != nil {
+		t.Fatalf("withProject: %v", err)
+	}
 	id, ok := projectIDFromContext(ctx)
 	if !ok || id != 42 {
 		t.Fatalf("project id = %d, %v", id, ok)
 	}
-	if _, ok := projectIDFromContext(registry.withProject(context.Background(), "missing")); ok {
-		t.Fatal("unknown workflow received a project id")
+	if _, err := registry.withProject(context.Background(), "missing"); err == nil {
+		t.Fatal("failed lookup returned a project context")
+	}
+
+	standalone := context.Background()
+	unresolved, err := newExecutorRegistry().withProject(standalone, "wf-42")
+	if err != nil || unresolved != standalone {
+		t.Fatalf("standalone registry = %v, %v", unresolved, err)
+	}
+}
+
+func TestExecutorRegistryFailsClosedOnProjectLookup(t *testing.T) {
+	ctx := context.Background()
+	lookupErr := errors.New("workflow lookup failed")
+	calls := 0
+	executor, err := review.NewExecutor(review.ExecutorDeps{
+		Profile: review.Profile{Name: "default", Config: testReviewProfile()},
+		AgentRun: func(context.Context, agent.RunSpec) (*agent.RunResult, error) {
+			calls++
+			return &agent.RunResult{Output: map[string]any{}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("review.NewExecutor: %v", err)
+	}
+	registry := newExecutorRegistry()
+	registry.Register("wf-failed", executor)
+	registry.SetProjectLookup(func(context.Context, string) (int64, error) {
+		return 0, lookupErr
+	})
+
+	if _, err := registry.Execute(ctx, dag.NodeInput{
+		WorkflowID: "wf-failed",
+		Node:       dag.NodeSpec{ID: "node", Kind: review.KindReasoner},
+	}); err == nil || !strings.Contains(err.Error(), "resolve workflow") || !errors.Is(err, lookupErr) {
+		t.Fatalf("Execute error = %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("executor ran after lookup failure: %d calls", calls)
+	}
+	if _, err := registry.Expand(ctx, dag.WorkflowView{ID: "wf-failed"}, dag.NodeSpec{ID: "node"}, nil); err == nil || !strings.Contains(err.Error(), "resolve workflow") {
+		t.Fatalf("Expand error = %v", err)
+	}
+
+	registry.SetProjectLookup(func(context.Context, string) (int64, error) {
+		return 0, nil
+	})
+	if _, err := registry.Execute(ctx, dag.NodeInput{
+		WorkflowID: "wf-failed",
+		Node:       dag.NodeSpec{ID: "node", Kind: review.KindReasoner},
+	}); err == nil || !strings.Contains(err.Error(), "has no project") {
+		t.Fatalf("missing project error = %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("executor ran without a project: %d calls", calls)
+	}
+}
+
+func TestProjectAwareProvidersFailClosedOnResolverError(t *testing.T) {
+	ctx := context.Background()
+	service, _ := newExtensionFixture(t)
+	projectID := int64(42)
+	baseTools := &recordingToolProvider{err: errors.New("platform fallback must not run")}
+	baseSkills := &recordingSkillProvider{err: errors.New("platform fallback must not run")}
+	resolver, err := NewProjectExtensionResolver(ProjectExtensionResolverConfig{
+		Store:      service.store,
+		Workspace:  service.workspace,
+		BaseSkills: baseSkills,
+	})
+	if err != nil {
+		t.Fatalf("resolver: %v", err)
+	}
+	t.Cleanup(func() { _ = resolver.Close() })
+	if err := service.store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+	projectCtx := context.WithValue(ctx, projectIDContextKey{}, projectID)
+
+	tools := &projectAwareToolProvider{resolver: resolver, base: baseTools}
+	if _, err := tools.Tools(projectCtx, "code-review"); err == nil {
+		t.Fatal("tool provider fell back after a resolver error")
+	}
+	if len(baseTools.calls) != 0 {
+		t.Fatalf("platform tool provider was called: %v", baseTools.calls)
+	}
+
+	skills := &projectAwareSkillProvider{
+		resolver: resolver,
+		base:     baseSkills,
+		blocks:   map[string]config.BlockBinding{"code-review": {Skills: []string{"platform-skill"}}},
+	}
+	if _, err := skills.BindSkills(projectCtx, []string{projectSkillStubBase + "code-review"}); err == nil {
+		t.Fatal("skill provider fell back after a resolver error")
+	}
+	if len(baseSkills.calls) != 0 {
+		t.Fatalf("platform skill provider was called: %v", baseSkills.calls)
+	}
+}
+
+func TestProjectExtensionResolverCloseRejectsForProject(t *testing.T) {
+	ctx := context.Background()
+	service, _ := newExtensionFixture(t)
+	resolver, err := NewProjectExtensionResolver(ProjectExtensionResolverConfig{
+		Store:     service.store,
+		Workspace: service.workspace,
+	})
+	if err != nil {
+		t.Fatalf("resolver: %v", err)
+	}
+	t.Cleanup(func() { _ = resolver.Close() })
+
+	if err := resolver.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	if err := resolver.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+	if _, err := resolver.ForProject(ctx, 42); err == nil || !strings.Contains(err.Error(), "closed") {
+		t.Fatalf("ForProject after Close = %v, want a closed error", err)
 	}
 }
 

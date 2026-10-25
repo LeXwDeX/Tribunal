@@ -2,13 +2,12 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  cancelReview, getProject, getReview, getReviewGraph, listFindings, listProjects, republishReview,
+  cancelReview, getProject, getReview, getReviewGraph, listFindings, listProjects, republishReview, setFindingAnnotation,
 } from '../api/api'
-import type { Finding, ReviewDetail, ReviewSummary } from '../api/types'
-import { useCanWrite } from '../components/RoleContext'
+import type { Finding, FindingAnnotation, ReviewDetail } from '../api/types'
 import { TriggerReviewDialog } from '../components/TriggerReviewDialog'
 import {
-  Badge, Button, ConfirmDialog, EmptyState, ErrorState, LoadingState, Panel, RelativeTime, SeverityBadge, StatusBadge, VerdictBadge, useToast,
+  Badge, Button, ConfirmDialog, EmptyState, ErrorState, LoadingState, Panel, PublicationBadge, RelativeTime, SeverityBadge, StatusBadge, VerdictBadge, useToast,
 } from '../components/ui'
 import { ExecutionGraph } from '../features/review/ExecutionGraph'
 import { NodeDrawer } from '../features/review/NodeDrawer'
@@ -30,8 +29,130 @@ const decisionOptions = [
   ['downgrade', '降级'],
 ]
 const severityOptions = [['', '全部级别'], ['P0', 'P0'], ['P1', 'P1'], ['P2', 'P2'], ['info', 'info']]
+const annotationOptions: Array<{ value: FindingAnnotation; label: string }> = [
+  { value: 'valid', label: '有效' },
+  { value: 'invalid', label: '无效' },
+  { value: 'uncertain', label: '未确定' },
+  { value: '', label: '未标注' },
+]
+const annotationLabels: Record<FindingAnnotation, string> = {
+  valid: '有效',
+  invalid: '无效',
+  uncertain: '未确定',
+  '': '未标注',
+}
 
-export function FindingRow({ finding, index, expanded, onToggle }: { finding: Finding; index: number; expanded: boolean; onToggle: () => void }) {
+function annotationTone(value: FindingAnnotation): 'ok' | 'danger' | 'warn' | 'neutral' {
+  if (value === 'valid') return 'ok'
+  if (value === 'invalid') return 'danger'
+  if (value === 'uncertain') return 'warn'
+  return 'neutral'
+}
+
+function FindingAnnotationEditor({
+  finding,
+  canAnnotate,
+  onSave,
+}: {
+  finding: Finding
+  canAnnotate: boolean
+  onSave: (annotation: FindingAnnotation) => Promise<Finding>
+}) {
+  const [draft, setDraft] = useState<FindingAnnotation>(finding.annotation ?? '')
+  const [saved, setSaved] = useState({
+    annotation: finding.annotation ?? '',
+    annotated_by: finding.annotated_by,
+    annotated_at: finding.annotated_at,
+  })
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState<unknown>(null)
+
+  useEffect(() => {
+    const next = {
+      annotation: finding.annotation ?? '',
+      annotated_by: finding.annotated_by,
+      annotated_at: finding.annotated_at,
+    }
+    setDraft(next.annotation)
+    setSaved(next)
+    setError(null)
+  }, [finding.id, finding.annotation, finding.annotated_by, finding.annotated_at])
+
+  const save = async () => {
+    setPending(true)
+    setError(null)
+    try {
+      const updated = await onSave(draft)
+      setSaved({
+        annotation: updated.annotation ?? '',
+        annotated_by: updated.annotated_by,
+        annotated_at: updated.annotated_at,
+      })
+      setDraft(updated.annotation ?? '')
+    } catch (caught) {
+      setError(caught)
+    } finally {
+      setPending(false)
+    }
+  }
+
+  return (
+    <section aria-label="人工标注">
+      <h4>人工标注</h4>
+      <p className="small muted" style={annotationIntroStyle}>
+        人工标注是评审人员对问题是否有效的评估，不会改变发布结果或评审结论。
+      </p>
+      <div className={styles.annotationSaved} role="status" aria-label="已保存的人工标注">
+        <span className="small">已保存：</span>
+        <Badge tone={annotationTone(saved.annotation)}>{annotationLabels[saved.annotation]}</Badge>
+        {saved.annotation ? (
+          <span className="small muted">
+            标注人 {saved.annotated_by || '不可用'} · 时间 <RelativeTime value={saved.annotated_at} fallback="不可用" />
+          </span>
+        ) : null}
+      </div>
+      {canAnnotate ? (
+        <>
+          <div role="group" aria-label="人工标注" className={styles.annotationControls}>
+            {annotationOptions.map((option) => (
+              <button
+                key={option.value || 'none'}
+                type="button"
+                className={[styles.chip, draft === option.value ? styles.chipActive : ''].filter(Boolean).join(' ')}
+                aria-pressed={draft === option.value}
+                disabled={pending}
+                onClick={() => setDraft(option.value)}
+              >
+                {option.label}
+              </button>
+            ))}
+            <Button variant="secondary" onClick={() => { void save() }} loading={pending}>
+              保存标注
+            </Button>
+          </div>
+          {draft !== saved.annotation ? <span className="small muted">有未保存的更改。</span> : null}
+          {error ? <ErrorState error={error} onRetry={() => { void save() }} title="标注保存失败" /> : null}
+        </>
+      ) : null}
+    </section>
+  )
+}
+
+export function FindingRow({
+  finding,
+  index,
+  expanded,
+  onToggle,
+  canAnnotate = false,
+  onSaveAnnotation,
+}: {
+  finding: Finding
+  index: number
+  expanded: boolean
+  onToggle: () => void
+  canAnnotate?: boolean
+  onSaveAnnotation?: (annotation: FindingAnnotation) => Promise<Finding>
+}) {
   const bodyId = `finding-body-${index}`
   return (
     <>
@@ -81,6 +202,11 @@ export function FindingRow({ finding, index, expanded, onToggle }: { finding: Fi
                   <pre className="pre" style={evidenceStyle}>{stringifyUnknown(finding.challenge_evidence)}</pre>
                 </section>
               ) : null}
+              <FindingAnnotationEditor
+                finding={finding}
+                canAnnotate={canAnnotate && Boolean(onSaveAnnotation)}
+                onSave={onSaveAnnotation || (async () => finding)}
+              />
               <section>
                 <h4>其他字段</h4>
                 <dl className={styles.docMeta} style={{ display: 'grid', gap: 4 }}>
@@ -98,14 +224,50 @@ export function FindingRow({ finding, index, expanded, onToggle }: { finding: Fi
   )
 }
 
+function publicationHint(state?: string, reason?: string): string {
+  switch (state) {
+    case 'pending':
+      return '评审执行已结束，正在等待 GitLab 发布终态。'
+    case 'published':
+      return 'GitLab 发布已确认完成。'
+    case 'skipped':
+      if (reason?.startsWith('stale:')) {
+        return `发布已跳过：${reason}。这是过期结果，不会自动重发，也不会自动修复。`
+      }
+      if (reason) return `发布已跳过：${reason}。`
+      return '本次发布已跳过。'
+    case 'failed':
+      return 'GitLab 发布失败，不能视为 PASS。'
+    default:
+      return '服务端没有返回发布状态；这不表示发布成功。'
+  }
+}
+
 function PublicationsPanel({ review, mrUrl }: { review: ReviewDetail; mrUrl?: string }) {
   const publications = review.publications
   return (
     <Panel title="发布结果">
+      <div className={styles.publicationGrid}>
+        <div className={styles.publicationCard}>
+          <span className={styles.publicationLabel}>发布状态</span>
+          <span className={styles.publicationValue}><PublicationBadge state={review.publication_state} /></span>
+          <span className={styles.tableMeta}>{publicationHint(review.publication_state, review.publication_error)}</span>
+        </div>
+      </div>
+      {review.publication_error ? (
+        <div className={styles.warning} role="alert" style={{ marginTop: 12 }}>
+          <strong>{review.publication_state === 'failed'
+            ? '发布失败原因'
+            : review.publication_state === 'skipped' ? '跳过原因' : '发布说明'}</strong>
+          <p style={{ margin: '6px 0 0', overflowWrap: 'anywhere' }}>{review.publication_error}</p>
+        </div>
+      ) : null}
       {!publications ? (
-        <EmptyState title="尚无发布结果记录" description="服务端详情没有 publications 字段；这不表示发布成功。" />
+        <div style={{ marginTop: 12 }}>
+          <EmptyState title="尚无发布结果记录" description="服务端详情没有 publications 字段；这不表示发布成功。" />
+        </div>
       ) : (
-        <div className={styles.publicationGrid}>
+        <div className={styles.publicationGrid} style={{ marginTop: 12 }}>
           <div className={styles.publicationCard}>
             <span className={styles.publicationLabel}>汇总评论</span>
             <span className={styles.publicationValue}>
@@ -126,7 +288,15 @@ function PublicationsPanel({ review, mrUrl }: { review: ReviewDetail; mrUrl?: st
           <div className={styles.publicationCard}>
             <span className={styles.publicationLabel}>commit status</span>
             <span className={styles.publicationValue}>{publications.commit_status || '不可用'}</span>
-            {publications.commit_status === 'failed' ? <span className={styles.tableMeta}>发布状态失败，不能视为 PASS。</span> : null}
+            {publications.commit_status === 'failed' ? (
+              <span className={styles.tableMeta}>
+                {review.publication_state === 'published' && review.verdict === 'BLOCKING'
+                  ? 'commit status 为 failed，表示评审结论为 BLOCKING（阻断合并）；发布本身已成功。'
+                  : review.publication_state === 'failed'
+                    ? '发布失败，不能视为 PASS。'
+                    : 'commit status 为 failed，请结合发布状态判断，不能直接视为 PASS。'}
+              </span>
+            ) : null}
           </div>
           {Object.entries(publications)
             .filter(([key]) => !['summary_note_id', 'discussions', 'commit_status'].includes(key))
@@ -150,7 +320,6 @@ function challengeTone(status?: string): 'ok' | 'warn' | 'neutral' {
 
 export function ReviewDetailPage() {
   const { id = '' } = useParams()
-  const canWrite = useCanWrite()
   const toast = useToast()
   const queryClient = useQueryClient()
   const [decision, setDecision] = useState('')
@@ -168,6 +337,9 @@ export function ReviewDetailPage() {
     queryFn: () => getReview(id),
     enabled: Boolean(id),
   })
+  // Route access comes from the review detail. A missing grant or a missing
+  // field never grants write controls.
+  const canWrite = detail.data?.access === 'manage'
   const graph = useQuery({
     queryKey: ['review', id, 'graph'],
     queryFn: () => getReviewGraph(id),
@@ -221,7 +393,13 @@ export function ReviewDetailPage() {
       : undefined,
   )
   const canCancel = canWrite && (review.status === 'running' || review.status === 'pending')
-  const canRepublish = canWrite && review.status === 'completed'
+  // Republish covers completed and failed executions once the previous
+  // publication is terminal and repairable. Pending waits for the backend
+  // retry, and a stale skipped result cannot be repaired by republishing.
+  const canRepublish = canWrite
+    && (review.status === 'completed' || review.status === 'failed')
+    && review.publication_state !== 'skipped'
+    && (review.publication_state !== 'pending' || Boolean(review.publication_error))
 
   const onCancel = async () => {
     if (!canWrite) return
@@ -252,6 +430,15 @@ export function ReviewDetailPage() {
     } finally {
       setRepublishing(false)
     }
+  }
+
+  const annotateFinding = async (target: Finding, annotation: FindingAnnotation) => {
+    if (!canWrite) throw new Error('当前账号没有项目管理权限。')
+    const updated = await setFindingAnnotation(id, target.id, annotation)
+    toast.push('success', annotation ? '已保存人工标注。' : '已清除人工标注。')
+    void queryClient.invalidateQueries({ queryKey: ['review', id, 'findings'] })
+    void queryClient.invalidateQueries({ queryKey: ['stats'] })
+    return updated
   }
 
   return (
@@ -351,7 +538,7 @@ export function ReviewDetailPage() {
             </label>
           </div>
           {findings.isPending ? <LoadingState label="正在读取问题…" /> : null}
-          {findings.isError ? <ErrorState error={findings.error} onRetry={findings.refetch} /> : null}
+          {findings.isError ? <ErrorState error={findings.error} onRetry={findings.retry} /> : null}
           {findings.isSuccess && findings.items.length === 0 ? <EmptyState title="没有符合条件的问题" description="调整处置或级别筛选；这不表示评审没有产生过问题。" /> : null}
           {findings.items.length ? (
             <div className="tableWrap">
@@ -374,6 +561,8 @@ export function ReviewDetailPage() {
                       finding={finding}
                       index={index}
                       expanded={expanded.has(finding.id)}
+                      canAnnotate={canWrite}
+                      onSaveAnnotation={(annotation) => annotateFinding(finding, annotation)}
                       onToggle={() => {
                         setExpanded((current) => {
                           const next = new Set(current)
@@ -459,3 +648,5 @@ const fieldStyle = {
   gap: 6,
   minWidth: 0,
 } as const
+
+const annotationIntroStyle = { margin: '0 0 8px' } as const

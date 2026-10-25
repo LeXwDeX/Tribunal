@@ -65,11 +65,15 @@ type OAuthConfig struct {
 	ClientSecretEnv string `yaml:"client_secret_env" json:"client_secret_env"`
 }
 
-// StorageConfig selects the persistence backend. Only sqlite is supported at runtime in M0.
+// StorageConfig selects the persistence backend and retention windows. Only
+// sqlite is supported at runtime in M0.
 type StorageConfig struct {
-	Driver           string        `yaml:"driver" json:"driver"`
-	DSN              string        `yaml:"dsn" json:"dsn"`
-	LLMCallRetention time.Duration `yaml:"llm_call_retention" json:"llm_call_retention"`
+	Driver            string        `yaml:"driver" json:"driver"`
+	DSN               string        `yaml:"dsn" json:"dsn"`
+	LLMCallRetention  time.Duration `yaml:"llm_call_retention" json:"llm_call_retention"`
+	DeliveryRetention time.Duration `yaml:"delivery_retention" json:"delivery_retention"`
+	JobRetention      time.Duration `yaml:"job_retention" json:"job_retention"`
+	ContextVersions   int           `yaml:"context_versions" json:"context_versions"`
 }
 
 // SecretsConfig names the environment variable that holds the base64 master key.
@@ -264,7 +268,8 @@ func (c *Config) Validate() error {
 	if c.Server.WriteTimeout <= 0 {
 		p.add("server.write_timeout must be positive")
 	}
-	validateURL(&p, "server.public_url", c.Server.PublicURL, false)
+	oauthEnabled := c.Auth.OAuth.ClientIDEnv != "" || c.Auth.OAuth.ClientSecretEnv != ""
+	validateURL(&p, "server.public_url", c.Server.PublicURL, oauthEnabled)
 
 	validateURL(&p, "gitlab.url", c.GitLab.URL, true)
 	if c.GitLab.RequestTimeout <= 0 {
@@ -294,6 +299,18 @@ func (c *Config) Validate() error {
 	}
 	if c.Storage.DSN == "" {
 		p.add("storage.dsn must not be empty")
+	}
+	if c.Storage.LLMCallRetention <= 0 {
+		p.add("storage.llm_call_retention must be positive")
+	}
+	if c.Storage.DeliveryRetention <= 0 {
+		p.add("storage.delivery_retention must be positive")
+	}
+	if c.Storage.JobRetention <= 0 {
+		p.add("storage.job_retention must be positive")
+	}
+	if c.Storage.ContextVersions <= 0 {
+		p.add("storage.context_versions must be positive")
 	}
 
 	masterKey, ok := p.env("secrets.master_key_env", c.Secrets.MasterKeyEnv)

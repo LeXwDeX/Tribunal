@@ -18,10 +18,13 @@ export interface PaginatedResult<T> {
   isError: boolean
   error: unknown
   refetch: () => void
+  retry: () => void
   hasNextPage: boolean
   fetchNextPage: () => void
   isFetchingNextPage: boolean
   isFetching: boolean
+  isRefetchError: boolean
+  isFetchNextPageError: boolean
 }
 
 export function usePaginated<T>(
@@ -47,6 +50,14 @@ export function usePaginated<T>(
   }
 
   const auxiliaryError = query.isFetchNextPageError || query.isRefetchError
+  // Retry only the request that failed. Refetch stays a full refresh of loaded pages.
+  const retry = () => {
+    if (query.isFetchNextPageError && query.hasNextPage) {
+      query.fetchNextPage().catch(() => {})
+    } else {
+      query.refetch().catch(() => {})
+    }
+  }
   return {
     items,
     isPending: query.isPending,
@@ -54,10 +65,13 @@ export function usePaginated<T>(
     isError: query.isError || auxiliaryError,
     error: query.error,
     refetch: () => { query.refetch().catch(() => {}) },
+    retry,
     hasNextPage: Boolean(query.hasNextPage),
     fetchNextPage: () => { query.fetchNextPage().catch(() => {}) },
     isFetchingNextPage: query.isFetchingNextPage,
     isFetching: query.isFetching,
+    isRefetchError: query.isRefetchError,
+    isFetchNextPageError: query.isFetchNextPageError,
   }
 }
 

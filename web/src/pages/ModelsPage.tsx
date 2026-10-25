@@ -192,7 +192,7 @@ export function ModelsPage() {
           aside={providers.isSuccess ? `${providers.items.length}${providers.hasNextPage ? '+' : ''} 个` : undefined}
         >
           {providers.isPending ? <LoadingState /> : null}
-          {providers.isError ? <ErrorState error={providers.error} onRetry={providers.refetch} /> : null}
+          {providers.isError ? <ErrorState error={providers.error} onRetry={providers.retry} /> : null}
           {providers.isSuccess && providers.items.length === 0 ? <EmptyState title="平台还没有配置 provider" description="在服务端配置文件中添加 provider 并重启或热加载后，会显示在这里。" /> : null}
           {providers.items.length ? (
             <div className={styles.cards}>
@@ -204,7 +204,7 @@ export function ModelsPage() {
 
         <Panel title="评审档位" aside="定义来自平台配置，只读">
           {profiles.isPending ? <LoadingState /> : null}
-          {profiles.isError ? <ErrorState error={profiles.error} onRetry={profiles.refetch} /> : null}
+          {profiles.isError ? <ErrorState error={profiles.error} onRetry={profiles.retry} /> : null}
           {profiles.isSuccess && profiles.items.length === 0 ? <EmptyState title="平台还没有评审档位配置" /> : null}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             {profiles.items.map((profile) => <ProfileCard key={profile.name} profile={profile} />)}

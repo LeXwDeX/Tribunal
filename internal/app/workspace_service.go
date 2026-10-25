@@ -274,13 +274,13 @@ func (s *WorkspaceService) RefreshWithOptions(ctx context.Context, projectID int
 	}
 	reindex := options.Reindex == nil || *options.Reindex
 	indexSHA := state.IndexSHA
-	if reindex {
-		indexSHA = ""
-		if s.mcpFactory != nil {
-			if err := s.runIndex(ctx, projectID, ws.BaseDir()); err != nil {
-				s.markWorkspaceError(ctx, projectID, err)
-				return err
-			}
+	if reindex && s.mcpFactory != nil {
+		count, err := s.runIndex(ctx, projectID, ws.BaseDir())
+		if err != nil {
+			s.markWorkspaceError(ctx, projectID, err)
+			return err
+		}
+		if count > 0 {
 			indexSHA = newBase
 		}
 	}
@@ -291,12 +291,20 @@ func (s *WorkspaceService) RefreshWithOptions(ctx context.Context, projectID int
 	contextAfter := state.ContextSHA
 	if regenerate {
 		if err := s.generateContext(ctx, project, token, ws, newBase, false); err != nil {
+			if errors.Is(err, ErrContextProjection) {
+				// The database owns the active revision; a failed disk projection
+				// must not be reported as a successful refresh.
+				s.markWorkspaceError(ctx, projectID, err)
+				return err
+			}
 			// Context generation is best effort on refresh: the base moved and
 			// reviews can still run.
 			s.logger.Warn("context refresh failed", "project_id", projectID)
 		} else {
-			contextAfter = newBase
-			_ = ws.SetContextStale(newBase, false)
+			// A locked current revision keeps the workspace on its own base; a
+			// successful generation only moves it when the store activated it.
+			contextAfter = s.activeContextBase(ctx, projectID, newBase)
+			_ = ws.SetContextStale(contextAfter, contextAfter != newBase)
 		}
 	}
 	s.saveWorkspace(ctx, store.Workspace{
@@ -313,6 +321,16 @@ func (s *WorkspaceService) RefreshWithOptions(ctx context.Context, projectID int
 func contextDocLocked(ctx context.Context, st ReviewStore, projectID int64) bool {
 	current, err := st.GetCurrentContextDoc(ctx, projectID, "agents")
 	return err == nil && current.Locked
+}
+
+// activeContextBase returns the base of the store's active agents revision.
+// The fallback applies before the first document exists.
+func (s *WorkspaceService) activeContextBase(ctx context.Context, projectID int64, fallback string) string {
+	current, err := s.store.GetCurrentContextDoc(ctx, projectID, "agents")
+	if err == nil && current != nil && current.BaseSHA != "" {
+		return current.BaseSHA
+	}
+	return fallback
 }
 
 func (s *WorkspaceService) onboardLocked(ctx context.Context, project *store.Project, token string, fetchBase bool) error {
@@ -339,11 +357,14 @@ func (s *WorkspaceService) onboardLocked(ctx context.Context, project *store.Pro
 	}
 	indexed := false
 	if s.mcpFactory != nil {
-		if err := s.runIndex(ctx, project.ID, ws.BaseDir()); err != nil {
+		count, err := s.runIndex(ctx, project.ID, ws.BaseDir())
+		if err != nil {
 			s.markWorkspaceError(ctx, project.ID, err)
 			return err
 		}
-		indexed = true
+		// An MCP manager can exist without an index command. Only a command
+		// that actually ran proves this base was indexed.
+		indexed = count > 0
 	}
 	if err := s.generateContext(ctx, project, token, ws, base, false); err != nil {
 		s.markWorkspaceError(ctx, project.ID, err)
@@ -358,7 +379,7 @@ func (s *WorkspaceService) onboardLocked(ctx context.Context, project *store.Pro
 		State:      "ready",
 		BaseSHA:    base,
 		IndexSHA:   indexSHA,
-		ContextSHA: base,
+		ContextSHA: s.activeContextBase(ctx, project.ID, base),
 	})
 	return nil
 }
@@ -428,34 +449,19 @@ func (s *WorkspaceService) generateContext(ctx context.Context, project *store.P
 		return PermanentJob(fmt.Errorf("decode onboarding output: %w", err))
 	}
 	content := renderOnboardingMarkdown(out)
-	saved := true
-	if _, err := s.store.SaveContextDoc(ctx, store.ContextDoc{
+	savedDoc, err := s.store.SaveContextDoc(ctx, store.ContextDoc{
 		ProjectID:  project.ID,
 		BaseSHA:    baseSHA,
 		Kind:       "agents",
 		Content:    content,
 		Model:      profileCfg.Agent.Provider,
 		WorkflowID: wfID,
-	}); err != nil {
-		if errors.Is(err, store.ErrContextLocked) {
-			saved = false
-		} else {
-			return err
-		}
+	})
+	if err != nil {
+		return err
 	}
-	metaDoc := workspace.ContextMeta{SourceSHA: baseSHA, Model: profileCfg.Agent.Provider, GeneratedAt: s.now().UTC()}
-	if err := ws.WriteContext(baseSHA, map[string][]byte{"AGENTS.md": []byte(content)}, metaDoc); err != nil && !errors.Is(err, workspace.ErrContextLocked) {
-		s.logger.Warn("workspace context write failed", "project_id", project.ID)
-	}
-	if saved {
-		if current, err := s.store.GetCurrentContextDoc(ctx, project.ID, "agents"); err == nil && current.Locked {
-			saved = false
-		}
-	}
-	if saved {
-		if err := s.store.SetActiveContext(ctx, project.ID, baseSHA); err != nil {
-			s.logger.Warn("context activation failed", "project_id", project.ID)
-		}
+	if err := projectContextDoc(ws, savedDoc, false); err != nil {
+		return fmt.Errorf("%w: %v", ErrContextProjection, err)
 	}
 	if saveState {
 		state, _ := s.store.GetWorkspace(ctx, project.ID)
@@ -463,12 +469,13 @@ func (s *WorkspaceService) generateContext(ctx context.Context, project *store.P
 		if state != nil {
 			indexSHA = state.IndexSHA
 		}
+		contextSHA := s.activeContextBase(ctx, project.ID, savedDoc.BaseSHA)
 		s.saveWorkspace(ctx, store.Workspace{
 			ProjectID:  project.ID,
 			State:      "ready",
 			BaseSHA:    baseSHA,
 			IndexSHA:   indexSHA,
-			ContextSHA: baseSHA,
+			ContextSHA: contextSHA,
 		})
 	}
 	return nil
@@ -543,13 +550,16 @@ func (s *WorkspaceService) refreshBase(ctx context.Context, ws *workspace.Worksp
 	return sha, nil
 }
 
-func (s *WorkspaceService) runIndex(ctx context.Context, projectID int64, baseDir string) error {
+func (s *WorkspaceService) runIndex(ctx context.Context, projectID int64, baseDir string) (int, error) {
+	if s.mcpFactory == nil {
+		return 0, nil
+	}
 	manager, err := s.mcpFactory(ctx, projectID)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if manager == nil {
-		return nil
+		return 0, nil
 	}
 	// The manager is owned by the runtime and shared with review tools; do not
 	// close it here.

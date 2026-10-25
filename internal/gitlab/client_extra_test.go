@@ -206,8 +206,86 @@ func TestCreateDiscussionSendsPosition(t *testing.T) {
 	}
 }
 
+func TestCreateDiscussionOmitsZeroLineFields(t *testing.T) {
+	cases := []struct {
+		name         string
+		position     Position
+		wantOld      bool
+		wantNew      bool
+		wantOldValue string
+		wantNewValue string
+	}{
+		{
+			name: "added line",
+			position: Position{
+				BaseSHA: sha("a"), StartSHA: sha("b"), HeadSHA: sha("c"),
+				OldPath: "a.go", NewPath: "a.go", NewLine: 7,
+			},
+			wantNew:      true,
+			wantNewValue: "7",
+		},
+		{
+			name: "deleted line",
+			position: Position{
+				BaseSHA: sha("a"), StartSHA: sha("b"), HeadSHA: sha("c"),
+				OldPath: "a.go", NewPath: "a.go", OldLine: 5,
+			},
+			wantOld:      true,
+			wantOldValue: "5",
+		},
+		{
+			name: "context line",
+			position: Position{
+				BaseSHA: sha("a"), StartSHA: sha("b"), HeadSHA: sha("c"),
+				OldPath: "a.go", NewPath: "a.go", OldLine: 5, NewLine: 9,
+			},
+			wantOld:      true,
+			wantNew:      true,
+			wantOldValue: "5",
+			wantNewValue: "9",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var position map[string]json.RawMessage
+			client := newExtraClient(t, func(w http.ResponseWriter, r *http.Request) {
+				var body struct {
+					Position map[string]json.RawMessage `json:"position"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Errorf("decode body: %v", err)
+				}
+				position = body.Position
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, `{"id":"disc-1","notes":[]}`)
+			})
+			positionCopy := tc.position
+			if _, err := client.CreateDiscussion(context.Background(), "token", 42, 7, NewDiscussion{
+				Body: "found a bug", Position: &positionCopy,
+			}); err != nil {
+				t.Fatalf("CreateDiscussion: %v", err)
+			}
+			oldRaw, hasOld := position["old_line"]
+			newRaw, hasNew := position["new_line"]
+			if hasOld != tc.wantOld {
+				t.Fatalf("old_line present = %v, want %v (position = %v)", hasOld, tc.wantOld, position)
+			}
+			if hasNew != tc.wantNew {
+				t.Fatalf("new_line present = %v, want %v (position = %v)", hasNew, tc.wantNew, position)
+			}
+			if tc.wantOld && string(oldRaw) != tc.wantOldValue {
+				t.Fatalf("old_line = %s, want %s", oldRaw, tc.wantOldValue)
+			}
+			if tc.wantNew && string(newRaw) != tc.wantNewValue {
+				t.Fatalf("new_line = %s, want %s", newRaw, tc.wantNewValue)
+			}
+		})
+	}
+}
+
 func TestNoteDiscussionAndAwardRequests(t *testing.T) {
-	var createdNoteBody, updatedNoteBody string
+	var createdNoteBody, updatedNoteBody, addedAwardName string
+	var deletedAward bool
 	client := newExtraClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -231,6 +309,16 @@ func TestNoteDiscussionAndAwardRequests(t *testing.T) {
 			fmt.Fprint(w, `[{"id":"d1","individual_note":false,"notes":[{"id":21,"body":"inline","author":{"id":9,"username":"bot"},"position":{"base_sha":"`+sha("a")+`","head_sha":"`+sha("c")+`","old_path":"a.go","new_path":"a.go","old_line":3,"new_line":3}}]}]`)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v4/projects/42/merge_requests/7/notes/11/award_emoji":
 			fmt.Fprint(w, `[{"id":1,"name":"thumbsup","user":{"id":3,"username":"dev"}},{"id":2,"name":"thumbsdown","user":{"id":4,"username":"other"}}]`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v4/projects/42/merge_requests/7/notes/11/award_emoji":
+			var body struct {
+				Name string `json:"name"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			addedAwardName = body.Name
+			fmt.Fprint(w, `{"id":3,"name":"eyes","user":{"id":9,"username":"bot"}}`)
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v4/projects/42/merge_requests/7/notes/11/award_emoji/3":
+			deletedAward = true
+			w.WriteHeader(http.StatusNoContent)
 		default:
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
@@ -256,6 +344,13 @@ func TestNoteDiscussionAndAwardRequests(t *testing.T) {
 	awards, err := client.ListNoteAwards(context.Background(), "token", 42, 7, 11)
 	if err != nil || len(awards) != 2 || awards[0].Name != "thumbsup" || awards[0].Username != "dev" {
 		t.Fatalf("awards = %+v, %v", awards, err)
+	}
+	added, err := client.AddNoteAward(context.Background(), "token", 42, 7, 11, "eyes")
+	if err != nil || added == nil || added.ID != 3 || added.Name != "eyes" || addedAwardName != "eyes" {
+		t.Fatalf("AddNoteAward = %+v, name = %q, err = %v", added, addedAwardName, err)
+	}
+	if err := client.DeleteNoteAward(context.Background(), "token", 42, 7, 11, 3); err != nil || !deletedAward {
+		t.Fatalf("DeleteNoteAward err = %v, deleted = %v", err, deletedAward)
 	}
 }
 
@@ -416,6 +511,9 @@ func TestExtraMethodsRejectMissingTokenAndInvalidIDs(t *testing.T) {
 		},
 		func() error { return client.SetCommitStatus(ctx, "token", 42, "short", CommitStatus{State: "success"}) },
 		func() error { _, err := client.ListNoteAwards(ctx, "token", 42, 7, 0); return err },
+		func() error { _, err := client.AddNoteAward(ctx, "token", 42, 7, 0, "eyes"); return err },
+		func() error { _, err := client.AddNoteAward(ctx, "token", 42, 7, 11, " "); return err },
+		func() error { return client.DeleteNoteAward(ctx, "token", 42, 7, 11, 0) },
 	}
 	for i, fn := range cases {
 		if err := fn(); err == nil {

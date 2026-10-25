@@ -3,15 +3,22 @@ package server
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/app"
+	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
+	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store/sqlite"
 )
 
 func multipartBody(t *testing.T, fields map[string]string, fileField, fileName string, fileData []byte) ([]byte, string) {
@@ -168,6 +175,7 @@ func TestMCPServerTestUsesUnmaskedConfig(t *testing.T) {
 
 func TestMCPImportDocument(t *testing.T) {
 	env := newM6Env(t, m6Options{})
+	env.grant(7, 42, store.ProjectAccessManage)
 	client := env.loginAs("code-admin")
 
 	body := []byte(`{"mcpServers":{"alpha":{"command":"npx"},"beta":{"url":"https://mcp.example.com"}}}`)
@@ -206,6 +214,7 @@ func TestMCPImportDocument(t *testing.T) {
 
 func TestSkillUploadValidation(t *testing.T) {
 	env := newM6Env(t, m6Options{})
+	env.grant(7, 42, store.ProjectAccessManage)
 	client := env.loginAs("code-admin")
 
 	noFile, contentType := multipartBody(t, map[string]string{"scope": "platform"}, "file", "x.zip", nil)
@@ -317,4 +326,213 @@ func TestBlockBindingUpsert(t *testing.T) {
 		"scope": "platform", "project_id": 42,
 	})
 	assertStatus(t, platformWithProject, http.StatusBadRequest)
+}
+
+func newExtensionPaginationServer(t *testing.T) (*sqlite.Store, *Server) {
+	t.Helper()
+	st, err := sqlite.Open(context.Background(), filepath.Join(t.TempDir(), "extensions.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	service, err := app.NewExtensionService(app.ExtensionServiceConfig{
+		Store: st, Workspace: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("NewExtensionService: %v", err)
+	}
+	return st, &Server{extensions: NewAppExtensions(service), access: paginationAccess{}, logger: newTestLogger(io.Discard)}
+}
+
+// paginationAccess grants the project read used by handler-level extension
+// unit tests, which bypass the route guards.
+type paginationAccess struct{}
+
+func (paginationAccess) GetProjectAccess(context.Context, int64, int64) (string, error) {
+	return store.ProjectAccessManage, nil
+}
+func (paginationAccess) ListUsers(context.Context, string, int) ([]store.User, string, error) {
+	return nil, "", nil
+}
+func (paginationAccess) SetUserDisabled(context.Context, int64, bool) error { return nil }
+func (paginationAccess) RevokeUserCredentials(context.Context, int64) error { return nil }
+func (paginationAccess) ListProjectGrants(context.Context, int64, string, int) ([]store.ProjectGrant, string, error) {
+	return nil, "", nil
+}
+func (paginationAccess) SetProjectGrant(context.Context, int64, int64, string) error { return nil }
+func (paginationAccess) DeleteProjectGrant(context.Context, int64, int64) error      { return nil }
+
+func extensionList(t *testing.T, handler http.HandlerFunc, path string) (int, map[string]any, string) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	ctx := context.WithValue(req.Context(), principalKey, principal{
+		user: sessionUser{ID: 7, Username: "alice", Role: roleAdmin},
+	})
+	handler(rec, req.WithContext(ctx))
+	var body map[string]any
+	if rec.Code == http.StatusOK {
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode list response: %v", err)
+		}
+	}
+	return rec.Code, body, rec.Body.String()
+}
+
+func TestExtensionListPagination(t *testing.T) {
+	ctx := context.Background()
+	st, srv := newExtensionPaginationServer(t)
+	for _, id := range []int64{42, 43} {
+		path := fmt.Sprintf("group/project-%d", id)
+		if _, err := st.RegisterProject(ctx, store.Project{
+			ID:                id,
+			PathWithNamespace: path,
+			WebURL:            "https://gitlab.example.com/" + path,
+			DefaultBranch:     "main",
+			TokenEnc:          []byte{1},
+			WebhookSecretEnc:  []byte{2},
+		}); err != nil {
+			t.Fatalf("RegisterProject %d: %v", id, err)
+		}
+	}
+	project42 := int64(42)
+	project43 := int64(43)
+
+	for _, name := range []string{"p1", "p2", "p3"} {
+		if _, err := st.CreateMCPServer(ctx, store.MCPServer{
+			Scope: "platform", Name: name, Config: json.RawMessage(`{"command":"x"}`),
+		}); err != nil {
+			t.Fatalf("create platform mcp %s: %v", name, err)
+		}
+	}
+	for _, name := range []string{"42a", "42b"} {
+		if _, err := st.CreateMCPServer(ctx, store.MCPServer{
+			Scope: "project", ProjectID: &project42, Name: name, Config: json.RawMessage(`{"command":"x"}`),
+		}); err != nil {
+			t.Fatalf("create project mcp %s: %v", name, err)
+		}
+	}
+	if _, err := st.CreateMCPServer(ctx, store.MCPServer{
+		Scope: "project", ProjectID: &project43, Name: "43a", Config: json.RawMessage(`{"command":"x"}`),
+	}); err != nil {
+		t.Fatalf("create other mcp: %v", err)
+	}
+	for _, name := range []string{"s1", "s2", "s3"} {
+		if _, err := st.CreateSkill(ctx, store.Skill{
+			Scope: "platform", Name: name, Description: "d",
+		}); err != nil {
+			t.Fatalf("create platform skill %s: %v", name, err)
+		}
+	}
+	for _, name := range []string{"s42a", "s42b"} {
+		if _, err := st.CreateSkill(ctx, store.Skill{
+			Scope: "project", ProjectID: &project42, Name: name, Description: "d",
+		}); err != nil {
+			t.Fatalf("create project skill %s: %v", name, err)
+		}
+	}
+	for _, block := range []string{"a", "b", "c"} {
+		if _, err := st.UpsertBlockBinding(ctx, store.BlockBinding{
+			Scope: "platform", Block: block,
+		}); err != nil {
+			t.Fatalf("create platform binding %s: %v", block, err)
+		}
+	}
+	for _, block := range []string{"a", "b"} {
+		if _, err := st.UpsertBlockBinding(ctx, store.BlockBinding{
+			Scope: "project", ProjectID: &project42, Block: block,
+		}); err != nil {
+			t.Fatalf("create project binding %s: %v", block, err)
+		}
+	}
+
+	code, body, text := extensionList(t, srv.handleListMCPServers, "/api/v1/mcp-servers?scope=platform&limit=1")
+	if code != http.StatusOK || len(body["servers"].([]any)) != 1 {
+		t.Fatalf("mcp first page = %d %s", code, text)
+	}
+	firstCursor, _ := body["next_cursor"].(string)
+	if firstCursor == "" {
+		t.Fatalf("mcp first page has no cursor: %s", text)
+	}
+	code, _, _ = extensionList(t, srv.handleListMCPServers,
+		"/api/v1/mcp-servers?scope=project&project_id=42&limit=1&cursor="+firstCursor)
+	if code != http.StatusBadRequest {
+		t.Fatalf("cross-scope mcp cursor = %d", code)
+	}
+	code, body, text = extensionList(t, srv.handleListMCPServers,
+		"/api/v1/mcp-servers?scope=project&project_id=42&limit=1")
+	if code != http.StatusOK {
+		t.Fatalf("project mcp page = %d %s", code, text)
+	}
+	projectCursor, _ := body["next_cursor"].(string)
+	if projectCursor == "" {
+		t.Fatalf("project mcp page has no cursor: %s", text)
+	}
+	code, _, _ = extensionList(t, srv.handleListMCPServers,
+		"/api/v1/mcp-servers?scope=project&project_id=43&limit=1&cursor="+projectCursor)
+	if code != http.StatusBadRequest {
+		t.Fatalf("cross-project mcp cursor = %d", code)
+	}
+
+	seen := map[string]bool{}
+	cursor := ""
+	for {
+		path := "/api/v1/mcp-servers?scope=platform&limit=1"
+		if cursor != "" {
+			path += "&cursor=" + cursor
+		}
+		code, body, text := extensionList(t, srv.handleListMCPServers, path)
+		if code != http.StatusOK {
+			t.Fatalf("mcp page = %d %s", code, text)
+		}
+		for _, item := range body["servers"].([]any) {
+			id := item.(map[string]any)["id"].(string)
+			if seen[id] {
+				t.Fatalf("duplicate mcp %s", id)
+			}
+			seen[id] = true
+		}
+		next, _ := body["next_cursor"].(string)
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+	if len(seen) != 3 {
+		t.Fatalf("platform mcp count = %d", len(seen))
+	}
+
+	code, body, text = extensionList(t, srv.handleListSkills, "/api/v1/skills?scope=platform&limit=1")
+	if code != http.StatusOK || len(body["skills"].([]any)) != 1 {
+		t.Fatalf("skills first page = %d %s", code, text)
+	}
+	skillCursor, _ := body["next_cursor"].(string)
+	if skillCursor == "" {
+		t.Fatalf("skills first page has no cursor: %s", text)
+	}
+	code, _, _ = extensionList(t, srv.handleListSkills,
+		"/api/v1/skills?scope=project&project_id=42&limit=1&cursor="+skillCursor)
+	if code != http.StatusBadRequest {
+		t.Fatalf("cross-scope skill cursor = %d", code)
+	}
+
+	code, body, text = extensionList(t, srv.handleListBlockBindings, "/api/v1/block-bindings?scope=platform&limit=1")
+	if code != http.StatusOK || len(body["bindings"].([]any)) != 1 {
+		t.Fatalf("bindings first page = %d %s", code, text)
+	}
+	bindingCursor, _ := body["next_cursor"].(string)
+	if bindingCursor == "" {
+		t.Fatalf("bindings first page has no cursor: %s", text)
+	}
+	code, _, _ = extensionList(t, srv.handleListBlockBindings,
+		"/api/v1/block-bindings?scope=project&project_id=42&limit=1&cursor="+bindingCursor)
+	if code != http.StatusBadRequest {
+		t.Fatalf("cross-scope binding cursor = %d", code)
+	}
+
+	code, _, text = extensionList(t, srv.handleListMCPServers,
+		"/api/v1/mcp-servers?scope=platform&cursor=not-a-cursor")
+	if code != http.StatusBadRequest || !strings.Contains(text, "invalid cursor") {
+		t.Fatalf("invalid mcp cursor = %d %s", code, text)
+	}
 }

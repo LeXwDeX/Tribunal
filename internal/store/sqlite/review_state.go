@@ -23,8 +23,10 @@ import (
 const (
 	reviewRunKind            = "review.run"
 	reviewCancelKind         = "review.cancel"
+	reviewCandidateKind      = "review.candidate"
 	defaultReviewMaxAttempts = 3
 	maxWorkflowDossierBytes  = 1 << 20 // uncompressed JSON ceiling
+	maxPublicationErrorRunes = 500
 )
 
 var reviewHeadRE = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
@@ -40,9 +42,10 @@ func (s *Store) GetReviewControl(ctx context.Context, projectID, mrIID int64) (*
 		updatedRaw string
 	)
 	err := s.db.QueryRowContext(ctx, `SELECT project_id, mr_iid, generation, head_sha,
-		cancelled, updated_at FROM review_controls WHERE project_id = ? AND mr_iid = ?`,
+		cancelled, candidate_seq, barrier_seq, updated_at
+		FROM review_controls WHERE project_id = ? AND mr_iid = ?`,
 		projectID, mrIID).Scan(&control.ProjectID, &control.MRIID, &control.Generation,
-		&control.HeadSHA, &cancelled, &updatedRaw)
+		&control.HeadSHA, &cancelled, &control.CandidateSeq, &control.BarrierSeq, &updatedRaw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%w: review control for project %d MR %d", store.ErrNotFound, projectID, mrIID)
 	}
@@ -190,6 +193,13 @@ func (s *Store) enqueueReviewTx(ctx context.Context, tx *sql.Tx, command store.R
 	if err != nil {
 		return "", 0, err
 	}
+	control, err := getReviewControlTx(ctx, tx, command.ProjectID, command.MRIID)
+	if err != nil {
+		return "", 0, err
+	}
+	if err := s.recordReviewSideEffectsTx(ctx, tx, command, control, generation, now); err != nil {
+		return "", 0, err
+	}
 	if command.MaxAttempts == 0 {
 		command.MaxAttempts = defaultReviewMaxAttempts
 	}
@@ -214,6 +224,48 @@ func (s *Store) enqueueReviewTx(ctx context.Context, tx *sql.Tx, command store.R
 	return jobID, generation, nil
 }
 
+// reviewCommandSideEffects parses the fields the queue owns for side effects.
+// The queued command payload keeps its existing shape; no new key is required.
+type reviewCommandSideEffects struct {
+	NoteID  int64  `json:"note_id"`
+	Profile string `json:"profile"`
+}
+
+func (s *Store) recordReviewSideEffectsTx(ctx context.Context, tx *sql.Tx, command store.ReviewCommand, control *store.ReviewControl, generation int64, now time.Time) error {
+	var meta reviewCommandSideEffects
+	if raw := bytes.TrimSpace(command.Payload); len(raw) > 0 {
+		if err := json.Unmarshal(raw, &meta); err != nil {
+			return fmt.Errorf("sqlite: review payload must be a JSON object: %w", err)
+		}
+	}
+	goal := store.ReviewStatusGoal{
+		ProjectID:  command.ProjectID,
+		MRIID:      command.MRIID,
+		Generation: generation,
+		HeadSHA:    control.HeadSHA,
+		Profile:    meta.Profile,
+		State:      store.ReviewStatusQueued,
+	}
+	if _, err := s.setReviewStatusTx(ctx, tx, goal, now); err != nil {
+		return err
+	}
+	if _, err := s.clearReviewReactionsTx(ctx, tx, command.ProjectID, command.MRIID, generation, true, now); err != nil {
+		return err
+	}
+	if meta.NoteID > 0 {
+		if _, err := s.setReviewReactionTx(ctx, tx, store.ReviewReactionGoal{
+			ProjectID:  command.ProjectID,
+			MRIID:      command.MRIID,
+			NoteID:     meta.NoteID,
+			Generation: generation,
+			Desired:    store.ReviewReactionEyes,
+		}, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func bumpReviewControlTx(ctx context.Context, tx *sql.Tx, command store.ReviewCommand, head string, now time.Time) (int64, error) {
 	cancelled := 0
 	if command.Cancel {
@@ -221,13 +273,14 @@ func bumpReviewControlTx(ctx context.Context, tx *sql.Tx, command store.ReviewCo
 	}
 	var generation int64
 	err := tx.QueryRowContext(ctx, `INSERT INTO review_controls
-		(project_id, mr_iid, generation, head_sha, cancelled, updated_at)
-		VALUES (?, ?, 1, ?, ?, ?)
+		(project_id, mr_iid, generation, head_sha, cancelled, candidate_seq, barrier_seq, updated_at)
+		VALUES (?, ?, 1, ?, ?, 0, 0, ?)
 		ON CONFLICT (project_id, mr_iid) DO UPDATE SET
 			generation = review_controls.generation + 1,
 			head_sha = CASE WHEN excluded.cancelled = 1
 				THEN review_controls.head_sha ELSE excluded.head_sha END,
 			cancelled = excluded.cancelled,
+			barrier_seq = review_controls.candidate_seq,
 			updated_at = excluded.updated_at
 		RETURNING generation`,
 		command.ProjectID, command.MRIID, head, cancelled, formatTime(now)).Scan(&generation)
@@ -349,6 +402,9 @@ func (s *Store) CreateReviewWorkflow(ctx context.Context, req ReviewWorkflowRequ
 	if existing, err := s.GetWorkflowByJob(ctx, req.JobID); err == nil {
 		dossier, err := s.GetWorkflowDossier(ctx, existing.ID)
 		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return "", false, fmt.Errorf("%w: workflow %s for job %s", store.ErrIncompleteWorkflow, existing.ID, req.JobID)
+			}
 			return "", false, err
 		}
 		control, err := s.GetReviewControl(ctx, req.ProjectID, req.MRIID)
@@ -356,12 +412,21 @@ func (s *Store) CreateReviewWorkflow(ctx context.Context, req ReviewWorkflowRequ
 			return "", false, err
 		}
 		if control.Cancelled || control.Generation != req.ExpectedGeneration ||
-			control.HeadSHA != head || dossier.Generation != req.ExpectedGeneration ||
-			existing.HeadSHA != head {
+			control.HeadSHA != head {
 			return "", false, fmt.Errorf("%w: workflow %s for job %s has generation %d head %s",
 				store.ErrSuperseded, existing.ID, req.JobID, dossier.Generation, existing.HeadSHA)
 		}
-		return existing.ID, true, nil
+		if dossier.Generation == req.ExpectedGeneration && strings.EqualFold(existing.HeadSHA, head) {
+			return existing.ID, true, nil
+		}
+		// A queued job keeps its ID when a newer push replaces its payload.
+		// The old mapping belongs to a stale generation; the current control
+		// matches this request, so detach the mapping and create the current
+		// workflow. The old workflow and dossier remain for audit.
+		if err := s.DetachWorkflowJob(ctx, existing.ID, req.JobID); err != nil &&
+			!errors.Is(err, store.ErrNotFound) {
+			return "", false, err
+		}
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return "", false, err
 	}
@@ -518,9 +583,11 @@ func (s *Store) DetachWorkflowJob(ctx context.Context, workflowID, jobID string)
 	res, err := s.db.ExecContext(ctx, `UPDATE workflow_dossiers
 		SET job_id = NULL,
 		    publication_state = CASE WHEN publication_state = ? THEN ? ELSE publication_state END,
+		    publication_error = CASE WHEN publication_state = ? THEN ? ELSE publication_error END,
 		    updated_at = ?
 		WHERE workflow_id = ? AND job_id = ?`,
 		store.WorkflowPublicationPending, store.WorkflowPublicationSkipped,
+		store.WorkflowPublicationPending, "review superseded by a newer review",
 		formatTime(s.now().UTC()), workflowID, jobID)
 	if err != nil {
 		return fmt.Errorf("sqlite: detach workflow job: %w", err)
@@ -554,8 +621,8 @@ func (s *Store) SaveWorkflowDossier(ctx context.Context, dossier store.WorkflowD
 	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO workflow_dossiers
 		(workflow_id, job_id, generation, version, hash, data, publication_state,
-		 created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 publication_error, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (workflow_id) DO UPDATE SET
 			job_id = excluded.job_id,
 			generation = excluded.generation,
@@ -563,10 +630,11 @@ func (s *Store) SaveWorkflowDossier(ctx context.Context, dossier store.WorkflowD
 			hash = excluded.hash,
 			data = excluded.data,
 			publication_state = excluded.publication_state,
+			publication_error = excluded.publication_error,
 			updated_at = excluded.updated_at`,
 		dossier.WorkflowID, nullString(dossier.JobID), dossier.Generation,
 		dossier.Version, dossier.Hash, compressed, dossier.PublicationState,
-		formatTime(created), formatTime(now))
+		dossier.PublicationError, formatTime(created), formatTime(now))
 	if err != nil {
 		if isConstraintErr(err) {
 			return nil, fmt.Errorf("%w: workflow dossier job %s is already bound", store.ErrConflict, dossier.JobID)
@@ -589,10 +657,11 @@ func (s *Store) GetWorkflowDossier(ctx context.Context, workflowID string) (*sto
 		updatedRaw string
 	)
 	err := s.db.QueryRowContext(ctx, `SELECT workflow_id, job_id, generation, version,
-		hash, data, publication_state, created_at, updated_at
+		hash, data, publication_state, publication_error, created_at, updated_at
 		FROM workflow_dossiers WHERE workflow_id = ?`, workflowID).Scan(
 		&dossier.WorkflowID, &jobID, &dossier.Generation, &dossier.Version,
-		&dossier.Hash, &compressed, &dossier.PublicationState, &createdRaw, &updatedRaw)
+		&dossier.Hash, &compressed, &dossier.PublicationState, &dossier.PublicationError,
+		&createdRaw, &updatedRaw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%w: workflow dossier %s", store.ErrNotFound, workflowID)
 	}
@@ -640,11 +709,31 @@ func normalizeDossier(dossier store.WorkflowDossier) (store.WorkflowDossier, []b
 		dossier.PublicationState = store.WorkflowPublicationPending
 	}
 	switch dossier.PublicationState {
-	case store.WorkflowPublicationPending, store.WorkflowPublicationPublished, store.WorkflowPublicationSkipped:
+	case store.WorkflowPublicationPending, store.WorkflowPublicationPublished,
+		store.WorkflowPublicationSkipped, store.WorkflowPublicationFailed:
 	default:
 		return dossier, nil, fmt.Errorf("sqlite: invalid workflow publication state %q", dossier.PublicationState)
 	}
+	dossier.PublicationError = normalizePublicationError(dossier.PublicationState, dossier.PublicationError)
 	return dossier, data, nil
+}
+
+// normalizePublicationError keeps a bounded reason for states that can carry
+// one. A successful publication always clears the reason; pending keeps a
+// retry reason so operators can see why the workflow is still unpublished.
+func normalizePublicationError(state, reason string) string {
+	if state == store.WorkflowPublicationPublished {
+		return ""
+	}
+	return truncateRunes(strings.TrimSpace(reason), maxPublicationErrorRunes)
+}
+
+func truncateRunes(value string, max int) string {
+	runes := []rune(value)
+	if len(runes) <= max {
+		return value
+	}
+	return string(runes[:max])
 }
 
 func compressDossier(data []byte) ([]byte, error) {
@@ -679,16 +768,54 @@ func decompressDossier(compressed []byte) ([]byte, error) {
 	return data, nil
 }
 
-// SetWorkflowPublicationState updates the publish recovery state.
-func (s *Store) SetWorkflowPublicationState(ctx context.Context, workflowID, state string) error {
+// HasPublishedSevereFinding reports whether incremental history is unsafe for
+// one MR. A summary from a non-completed workflow, or from a completed workflow
+// whose verdict is INCOMPLETE, is treated as unknown, so an empty summary
+// cannot narrow the next review. Findings that were dropped (refuted) are
+// excluded; published and marked findings count.
+func (s *Store) HasPublishedSevereFinding(ctx context.Context, projectID, mrIID int64) (bool, error) {
+	if projectID <= 0 || mrIID <= 0 {
+		return false, errors.New("sqlite: project id and mr iid are required")
+	}
+	var one int
+	err := s.db.QueryRowContext(ctx, `SELECT CASE
+			WHEN w.status <> 'completed' THEN 1
+			WHEN w.verdict = 'INCOMPLETE' THEN 1
+			WHEN EXISTS (
+				SELECT 1 FROM findings f
+				WHERE f.workflow_id = w.id
+				  AND COALESCE(NULLIF(f.final_severity, ''), f.severity) IN ('P0', 'P1')
+				  AND f.decision IN ('publish', 'mark', 'downgrade')
+			) THEN 1
+			ELSE 0
+		END
+		FROM publications p
+		JOIN workflows w ON w.id = p.workflow_id
+		WHERE p.project_id = ? AND p.mr_iid = ? AND p.kind = 'summary'
+		ORDER BY p.updated_at DESC, p.id DESC LIMIT 1`, projectID, mrIID).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("sqlite: has published severe finding: %w", err)
+	}
+	return one != 0, nil
+}
+
+// SetWorkflowPublicationState updates the publish state and its bounded,
+// caller-sanitized reason. A published row always clears the reason; pending,
+// skipped, and failed rows keep the supplied reason.
+func (s *Store) SetWorkflowPublicationState(ctx context.Context, workflowID, state, reason string) error {
 	switch state {
-	case store.WorkflowPublicationPending, store.WorkflowPublicationPublished, store.WorkflowPublicationSkipped:
+	case store.WorkflowPublicationPending, store.WorkflowPublicationPublished,
+		store.WorkflowPublicationSkipped, store.WorkflowPublicationFailed:
 	default:
 		return fmt.Errorf("sqlite: invalid workflow publication state %q", state)
 	}
+	reason = normalizePublicationError(state, reason)
 	res, err := s.db.ExecContext(ctx, `UPDATE workflow_dossiers
-		SET publication_state = ?, updated_at = ? WHERE workflow_id = ?`,
-		state, formatTime(s.now().UTC()), workflowID)
+		SET publication_state = ?, publication_error = ?, updated_at = ? WHERE workflow_id = ?`,
+		state, reason, formatTime(s.now().UTC()), workflowID)
 	if err != nil {
 		return fmt.Errorf("sqlite: set workflow publication state: %w", err)
 	}
@@ -700,8 +827,40 @@ func (s *Store) SetWorkflowPublicationState(ctx context.Context, workflowID, sta
 	return nil
 }
 
-// ListPendingPublications returns completed workflows that still need their
-// publish step. Unfinished engine recovery stays in ListUnfinished.
+// SetWorkflowPublicationStateIfPending settles a still-pending publication.
+// It never overwrites published, skipped, or failed state, so cancellation and
+// publishing cannot race into one another.
+func (s *Store) SetWorkflowPublicationStateIfPending(ctx context.Context, workflowID, reason string) error {
+	reason = normalizePublicationError(store.WorkflowPublicationSkipped, reason)
+	res, err := s.db.ExecContext(ctx, `UPDATE workflow_dossiers
+		SET publication_state = ?, publication_error = ?, updated_at = ?
+		WHERE workflow_id = ? AND publication_state = ?`,
+		store.WorkflowPublicationSkipped, reason, formatTime(s.now().UTC()),
+		workflowID, store.WorkflowPublicationPending)
+	if err != nil {
+		return fmt.Errorf("sqlite: settle pending publication: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("sqlite: settle pending publication: %w", err)
+	}
+	if n == 1 {
+		return nil
+	}
+	var found int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM workflow_dossiers WHERE workflow_id = ?`, workflowID).Scan(&found); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: workflow dossier %s", store.ErrNotFound, workflowID)
+		}
+		return fmt.Errorf("sqlite: check workflow dossier: %w", err)
+	}
+	return nil
+}
+
+// ListPendingPublications returns terminal workflows that still need their
+// publish step. Completed rows publish the normal review; failed rows publish
+// the failure summary. Unfinished engine recovery stays in ListUnfinished.
 func (s *Store) ListPendingPublications(ctx context.Context, limit int) ([]store.PendingPublication, error) {
 	if limit <= 0 {
 		limit = defaultListLimit
@@ -710,11 +869,12 @@ func (s *Store) ListPendingPublications(ctx context.Context, limit int) ([]store
 		limit = maxListLimit
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT d.workflow_id, d.job_id, w.project_id,
-		w.mr_iid, w.head_sha, d.generation, d.updated_at
+		w.mr_iid, w.head_sha, d.generation, w.status, d.updated_at
 		FROM workflow_dossiers d JOIN workflows w ON w.id = d.workflow_id
-		WHERE w.status = ? AND d.publication_state = ?
+		WHERE w.status IN (?, ?) AND d.publication_state = ?
 		ORDER BY d.updated_at, d.workflow_id LIMIT ?`,
-		string(dag.WorkflowCompleted), store.WorkflowPublicationPending, limit)
+		string(dag.WorkflowCompleted), string(dag.WorkflowFailed),
+		store.WorkflowPublicationPending, limit)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: list pending publications: %w", err)
 	}
@@ -729,7 +889,7 @@ func (s *Store) ListPendingPublications(ctx context.Context, limit int) ([]store
 			updatedRaw string
 		)
 		if err := rows.Scan(&item.WorkflowID, &jobID, &item.ProjectID, &mrIID,
-			&headSHA, &item.Generation, &updatedRaw); err != nil {
+			&headSHA, &item.Generation, &item.Status, &updatedRaw); err != nil {
 			return nil, fmt.Errorf("sqlite: scan pending publication: %w", err)
 		}
 		item.JobID = jobID.String

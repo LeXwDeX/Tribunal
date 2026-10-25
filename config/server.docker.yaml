@@ -1,0 +1,54 @@
+# Container overrides for Docker Compose. Compose mounts this file read-only
+# at /app/config/server.yaml; the server still loads its built-in defaults, so
+# only values that differ from them are listed here. ${NAME} values are
+# expanded by the server from the container environment supplied by Compose.
+server:
+  listen: ":8080"
+  public_url: "${CRC_PUBLIC_URL}"
+
+gitlab:
+  url: "${GITLAB_URL}"
+
+auth:
+  bootstrap_token_env: REVIEW_ADMIN_TOKEN
+  # Optional GitLab OAuth browser login, off by default. To enable /auth/login,
+  # uncomment the oauth mapping and bootstrap_admins below, then set the
+  # matching variables in .env. Redirect URI: ${CRC_PUBLIC_URL}/auth/callback;
+  # scope: read_user.
+  # oauth:
+  #   client_id_env: GITLAB_OAUTH_CLIENT_ID
+  #   client_secret_env: GITLAB_OAUTH_CLIENT_SECRET
+  # GitLab usernames that receive the admin role after OAuth login.
+  # bootstrap_admins: ["${GITLAB_ADMIN_USERNAME}"]
+
+storage:
+  driver: sqlite
+  # Absolute paths keep both the database and checkouts on the data volume.
+  dsn: "file:/app/data/review.db"
+
+workspace:
+  root: /app/data/workspaces
+
+secrets:
+  master_key_env: REVIEW_MASTER_KEY
+
+providers:
+  primary:
+    # anthropic | openai-chat | openai-responses.
+    # Anthropic base_url is the API root; OpenAI base_url includes /v1.
+    protocol: "${LLM_PROTOCOL}"
+    base_url: "${LLM_BASE_URL}"
+    model: "${LLM_MODEL}"
+    api_key_env: LLM_API_KEY
+    max_concurrency: 4
+
+profiles:
+  onboarding:
+    agent:
+      provider: primary
+  default:
+    propose:
+      - block: code-review
+        provider: primary
+    challenge:
+      provider: primary

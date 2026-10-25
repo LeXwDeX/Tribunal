@@ -465,7 +465,12 @@ func nullableJSON(value json.RawMessage) any {
 
 const workflowColumns = `id, kind, project_id, mr_iid, head_sha, base_sha, fingerprint,
 	profile, trigger, triggered_by, status, graph_rev, extends_used, verdict,
-	cancel_reason, error, tokens_in, tokens_out, cost_micros, created_at,
+	cancel_reason, error,
+	COALESCE((SELECT d.publication_state FROM workflow_dossiers d
+		WHERE d.workflow_id = workflows.id), ''),
+	COALESCE((SELECT d.publication_error FROM workflow_dossiers d
+		WHERE d.workflow_id = workflows.id), ''),
+	tokens_in, tokens_out, cost_micros, created_at,
 	started_at, finished_at`
 
 func scanWorkflow(row rowScanner) (*store.Workflow, error) {
@@ -480,14 +485,16 @@ func scanWorkflow(row rowScanner) (*store.Workflow, error) {
 		verdict    sql.NullString
 		cancel     sql.NullString
 		errText    sql.NullString
+		pubState   sql.NullString
+		pubError   sql.NullString
 		createdAt  string
 		startedAt  sql.NullString
 		finishedAt sql.NullString
 	)
 	if err := row.Scan(&wf.ID, &wf.Kind, &wf.ProjectID, &mrIID, &headSHA, &baseSHA,
 		&fingerpr, &profile, &wf.Trigger, &triggerBy, &wf.Status, &wf.GraphRev,
-		&wf.ExtendsUsed, &verdict, &cancel, &errText, &wf.TokensIn, &wf.TokensOut,
-		&wf.CostMicros, &createdAt, &startedAt, &finishedAt); err != nil {
+		&wf.ExtendsUsed, &verdict, &cancel, &errText, &pubState, &pubError,
+		&wf.TokensIn, &wf.TokensOut, &wf.CostMicros, &createdAt, &startedAt, &finishedAt); err != nil {
 		return nil, err
 	}
 	if mrIID.Valid {
@@ -505,6 +512,8 @@ func scanWorkflow(row rowScanner) (*store.Workflow, error) {
 	wf.Verdict = verdict.String
 	wf.CancelReason = cancel.String
 	wf.Error = errText.String
+	wf.PublicationState = pubState.String
+	wf.PublicationError = pubError.String
 	var err error
 	if wf.CreatedAt, err = parseTime(createdAt); err != nil {
 		return nil, err
@@ -558,11 +567,13 @@ func (s *Store) FindActiveReview(ctx context.Context, projectID, mrIID int64) (*
 	return wf, nil
 }
 
-// SetWorkflowVerdict stores the final PASS/BLOCKING verdict. It stays separate
-// from the event projection so it may be written after the workflow finishes.
+// SetWorkflowVerdict stores the final review verdict. INCOMPLETE is a valid
+// terminal result; a non-PASS verdict must never be treated as a successful
+// publication. It stays separate from the event projection so it may be
+// written after the workflow finishes.
 func (s *Store) SetWorkflowVerdict(ctx context.Context, id, verdict string) error {
 	switch verdict {
-	case "PASS", "BLOCKING":
+	case "PASS", "BLOCKING", "INCOMPLETE":
 	default:
 		return fmt.Errorf("sqlite: invalid verdict %q", verdict)
 	}
@@ -578,13 +589,14 @@ func (s *Store) SetWorkflowVerdict(ctx context.Context, id, verdict string) erro
 	return nil
 }
 
-// LastPublishedHead returns the head SHA of the most recent publication for an
-// MR. It returns an empty string when nothing was published.
+// LastPublishedHead returns the head SHA of the most recent summary publication
+// for an MR. It returns an empty string when nothing was published.
 func (s *Store) LastPublishedHead(ctx context.Context, projectID, mrIID int64) (string, error) {
 	var sha string
 	err := s.db.QueryRowContext(ctx, `SELECT w.head_sha
 		FROM publications p JOIN workflows w ON w.id = p.workflow_id
 		WHERE p.project_id = ? AND p.mr_iid = ?
+		  AND p.kind = 'summary'
 		  AND w.head_sha IS NOT NULL AND w.head_sha <> ''
 		ORDER BY p.updated_at DESC, p.id DESC LIMIT 1`, projectID, mrIID).Scan(&sha)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -622,6 +634,11 @@ func (s *Store) ListWorkflows(ctx context.Context, filter store.WorkflowFilter, 
 		where = append(where, "verdict = ?")
 		args = append(args, filter.Verdict)
 	}
+	if filter.PublicationState != "" {
+		where = append(where, `EXISTS (SELECT 1 FROM workflow_dossiers d
+			WHERE d.workflow_id = workflows.id AND d.publication_state = ?)`)
+		args = append(args, filter.PublicationState)
+	}
 	if filter.Profile != "" {
 		where = append(where, "profile = ?")
 		args = append(args, filter.Profile)
@@ -637,6 +654,10 @@ func (s *Store) ListWorkflows(ctx context.Context, filter store.WorkflowFilter, 
 	if !filter.Since.IsZero() {
 		where = append(where, "created_at >= ?")
 		args = append(args, formatTime(filter.Since.UTC()))
+	}
+	if clause, accessArgs := projectAccessClause("workflows.project_id", filter.AccessUserID); clause != "" {
+		where = append(where, clause)
+		args = append(args, accessArgs...)
 	}
 	if cursor != "" {
 		created, id, err := decodeCursor(cursor, store.ErrInvalidCursor)
@@ -877,7 +898,8 @@ func (s *Store) ListPublications(ctx context.Context, workflowID string) ([]stor
 const findingColumns = `id, workflow_id, origin_node, origin_index, origin_provider,
 	severity, category, path, line, side, title, body, evidence, confidence,
 	dedupe_group, votes, challenge_status, challenge_node, challenge_evidence,
-	decision, decision_reason, final_severity, position_ok, publish_key`
+	decision, decision_reason, final_severity, position_ok, publish_key,
+	annotation, annotated_by, annotated_at`
 
 func scanFinding(row rowScanner) (*store.Finding, error) {
 	var (
@@ -897,12 +919,15 @@ func scanFinding(row rowScanner) (*store.Finding, error) {
 		finalSeverity     sql.NullString
 		positionOK        sql.NullInt64
 		publishKey        sql.NullString
+		annotatedBy       sql.NullString
+		annotatedAt       sql.NullString
 	)
 	if err := row.Scan(&f.ID, &f.WorkflowID, &f.OriginNode, &f.OriginIndex,
 		&originProvider, &f.Severity, &f.Category, &path, &line, &side, &f.Title,
 		&f.Body, &evidence, &confidence, &dedupeGroup, &f.Votes, &challengeStatus,
 		&challengeNode, &challengeEvidence, &decision, &decisionReason,
-		&finalSeverity, &positionOK, &publishKey); err != nil {
+		&finalSeverity, &positionOK, &publishKey, &f.Annotation, &annotatedBy,
+		&annotatedAt); err != nil {
 		return nil, err
 	}
 	f.OriginProvider = originProvider.String
@@ -928,14 +953,32 @@ func scanFinding(row rowScanner) (*store.Finding, error) {
 		f.PositionOK = &value
 	}
 	f.PublishKey = publishKey.String
+	f.AnnotatedBy = annotatedBy.String
+	if annotatedAt.Valid {
+		value, err := parseTime(annotatedAt.String)
+		if err != nil {
+			return nil, err
+		}
+		f.AnnotatedAt = &value
+	}
 	return &f, nil
 }
 
-// ReplaceFindings atomically replaces all findings for one workflow.
+// existingFindingAnnotation is the human-owned part of a finding row. Producer
+// replacements carry the current value forward and never write their own.
+type existingFindingAnnotation struct {
+	annotation  string
+	annotatedBy string
+	annotatedAt *time.Time
+}
+
+// ReplaceFindings atomically replaces all findings for one workflow. Human
+// annotations survive by ID; producer-supplied annotation fields are ignored.
 func (s *Store) ReplaceFindings(ctx context.Context, workflowID string, findings []store.Finding) error {
 	if strings.TrimSpace(workflowID) == "" {
 		return errors.New("sqlite: workflow id is required")
 	}
+	seen := make(map[string]struct{}, len(findings))
 	for i := range findings {
 		f := &findings[i]
 		if f.WorkflowID == "" {
@@ -951,6 +994,10 @@ func (s *Store) ReplaceFindings(ctx context.Context, workflowID string, findings
 			}
 			f.ID = id
 		}
+		if _, duplicate := seen[f.ID]; duplicate {
+			return fmt.Errorf("%w: duplicate finding %s", store.ErrConflict, f.ID)
+		}
+		seen[f.ID] = struct{}{}
 		if strings.TrimSpace(f.OriginNode) == "" || strings.TrimSpace(f.Severity) == "" ||
 			strings.TrimSpace(f.Category) == "" || strings.TrimSpace(f.Title) == "" ||
 			strings.TrimSpace(f.Body) == "" {
@@ -979,6 +1026,10 @@ func (s *Store) ReplaceFindings(ctx context.Context, workflowID string, findings
 		}
 		return fmt.Errorf("sqlite: check workflow: %w", err)
 	}
+	existing, err := loadFindingAnnotations(ctx, tx, workflowID)
+	if err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM findings WHERE workflow_id = ?`, workflowID); err != nil {
 		return fmt.Errorf("sqlite: clear findings: %w", err)
 	}
@@ -990,19 +1041,22 @@ func (s *Store) ReplaceFindings(ctx context.Context, workflowID string, findings
 		if f.PositionOK != nil {
 			positionOK = boolInt(*f.PositionOK)
 		}
+		human := existing[f.ID]
 		_, err := tx.ExecContext(ctx, `INSERT INTO findings
 			(id, workflow_id, origin_node, origin_index, origin_provider, severity,
 			 category, path, line, side, title, body, evidence, confidence,
 			 dedupe_group, votes, challenge_status, challenge_node, challenge_evidence,
-			 decision, decision_reason, final_severity, position_ok, publish_key)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 decision, decision_reason, final_severity, position_ok, publish_key,
+			 annotation, annotated_by, annotated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			f.ID, workflowID, f.OriginNode, f.OriginIndex, nullString(f.OriginProvider),
 			f.Severity, f.Category, nullString(f.Path), line, nullString(f.Side),
 			f.Title, f.Body, nullString(f.Evidence), nullString(f.Confidence),
 			nullString(f.DedupeGroup), f.Votes, nullString(f.ChallengeStatus),
 			nullString(f.ChallengeNode), nullableJSON(f.ChallengeEvidence),
 			nullString(f.Decision), nullString(f.DecisionReason),
-			nullString(f.FinalSeverity), positionOK, nullString(f.PublishKey))
+			nullString(f.FinalSeverity), positionOK, nullString(f.PublishKey),
+			human.annotation, nullString(human.annotatedBy), nullableTime(human.annotatedAt))
 		if err != nil {
 			if isConstraintErr(err) {
 				return fmt.Errorf("%w: finding %s", store.ErrConflict, f.ID)
@@ -1014,6 +1068,95 @@ func (s *Store) ReplaceFindings(ctx context.Context, workflowID string, findings
 		return fmt.Errorf("sqlite: commit findings: %w", err)
 	}
 	return nil
+}
+
+func loadFindingAnnotations(ctx context.Context, tx *sql.Tx, workflowID string) (map[string]existingFindingAnnotation, error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT id, annotation, annotated_by, annotated_at FROM findings WHERE workflow_id = ?`, workflowID)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: load finding annotations: %w", err)
+	}
+	existing := make(map[string]existingFindingAnnotation)
+	for rows.Next() {
+		var (
+			id          string
+			annotation  string
+			annotatedBy sql.NullString
+			annotatedAt sql.NullString
+		)
+		if err := rows.Scan(&id, &annotation, &annotatedBy, &annotatedAt); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("sqlite: scan finding annotation: %w", err)
+		}
+		entry := existingFindingAnnotation{annotation: annotation, annotatedBy: annotatedBy.String}
+		if annotatedAt.Valid {
+			value, err := parseTime(annotatedAt.String)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			entry.annotatedAt = &value
+		}
+		existing[id] = entry
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("sqlite: iterate finding annotations: %w", err)
+	}
+	rows.Close()
+	return existing, nil
+}
+
+// SetFindingAnnotation atomically sets or clears the manual annotation on one
+// finding scoped to its workflow. The caller supplies the authenticated actor;
+// the store generates the timestamp. An empty annotation clears both.
+func (s *Store) SetFindingAnnotation(ctx context.Context, workflowID, findingID, annotation, annotatedBy string) (store.Finding, error) {
+	if strings.TrimSpace(workflowID) == "" || strings.TrimSpace(findingID) == "" {
+		return store.Finding{}, errors.New("sqlite: workflow and finding ids are required")
+	}
+	if !store.ValidFindingAnnotation(annotation) {
+		return store.Finding{}, fmt.Errorf("sqlite: unsupported finding annotation %q", annotation)
+	}
+	annotatedBy = strings.TrimSpace(annotatedBy)
+	var at any
+	if annotation != store.FindingAnnotationNone {
+		at = formatTime(s.now().UTC())
+	} else {
+		annotatedBy = ""
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return store.Finding{}, fmt.Errorf("sqlite: begin finding annotation: %w", err)
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE findings
+		SET annotation = ?, annotated_by = ?, annotated_at = ?
+		WHERE id = ? AND workflow_id = ?`,
+		annotation, nullString(annotatedBy), at, findingID, workflowID)
+	if err != nil {
+		return store.Finding{}, fmt.Errorf("sqlite: update finding annotation: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return store.Finding{}, fmt.Errorf("sqlite: finding annotation rows: %w", err)
+	}
+	if affected == 0 {
+		return store.Finding{}, fmt.Errorf("%w: finding %s", store.ErrNotFound, findingID)
+	}
+	row := tx.QueryRowContext(ctx, `SELECT `+findingColumns+` FROM findings
+		WHERE id = ? AND workflow_id = ?`, findingID, workflowID)
+	finding, err := scanFinding(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return store.Finding{}, fmt.Errorf("%w: finding %s", store.ErrNotFound, findingID)
+		}
+		return store.Finding{}, fmt.Errorf("sqlite: load finding annotation: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return store.Finding{}, fmt.Errorf("sqlite: commit finding annotation: %w", err)
+	}
+	return *finding, nil
 }
 
 // ListFindings returns findings for one workflow in stable origin order.
@@ -1028,7 +1171,7 @@ func (s *Store) ListFindings(ctx context.Context, filter store.FindingFilter) ([
 		args = append(args, filter.Decision)
 	}
 	if filter.Severity != "" {
-		where = append(where, "severity = ?")
+		where = append(where, "COALESCE(NULLIF(final_severity, ''), severity) = ?")
 		args = append(args, filter.Severity)
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT `+findingColumns+` FROM findings

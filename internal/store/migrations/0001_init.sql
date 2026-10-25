@@ -244,7 +244,7 @@ CREATE TABLE feedback (
   mr_iid         INTEGER NOT NULL,
   publication_id TEXT    NOT NULL,
   finding_id     TEXT,
-  signal         TEXT    NOT NULL,    -- thumbs_up | thumbs_down | resolved_changed | resolved_unchanged
+  signal         TEXT    NOT NULL,    -- thumbsup | thumbsdown | resolved_changed | resolved_unchanged
   gitlab_user_id INTEGER,
   observed_at    TEXT    NOT NULL,
   UNIQUE (publication_id, signal, gitlab_user_id)

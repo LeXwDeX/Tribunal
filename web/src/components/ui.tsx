@@ -4,7 +4,10 @@ import {
 } from 'react'
 import { createPortal } from 'react-dom'
 import { ApiError, errorMessage } from '../api/client'
-import { formatDate, formatRelative, labelForStatus, safeExternalUrl, severityTone, statusTone, verdictTone } from '../lib/format'
+import {
+  formatDate, formatRelative, labelForPublication, labelForStatus, publicationTone, safeExternalUrl, severityTone, statusTone, verdictTone,
+} from '../lib/format'
+import type { PublicationState } from '../api/types'
 import { Icon } from './Icons'
 import styles from '../styles/ui.module.css'
 
@@ -51,7 +54,14 @@ export function StatusBadge({ status, label }: { status?: string; label?: string
 
 export function VerdictBadge({ verdict }: { verdict?: string | null }) {
   if (!verdict) return <Badge tone="neutral">—</Badge>
+  if (verdict === 'INCOMPLETE') return <Badge tone="warn">INCOMPLETE（未完成）</Badge>
   return <Badge tone={verdictTone(verdict)}>{verdict}</Badge>
+}
+
+// Publication is tracked independently from execution; a completed workflow
+// with a failed publication is not a success.
+export function PublicationBadge({ state }: { state?: PublicationState }) {
+  return <Badge tone={publicationTone(state)}>{labelForPublication(state)}</Badge>
 }
 
 export function SeverityBadge({ severity }: { severity?: string }) {

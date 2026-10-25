@@ -43,10 +43,16 @@ func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
 	if !s.requireStore(w, r) {
 		return
 	}
+	if !s.requireAccess(w, r) {
+		return
+	}
 	now := s.now()
+	// Provider usage is still business data. Scope it to the caller's grants
+	// even for platform administrators; the static bearer (ID 0) sees none.
 	stats, err := s.store.Stats(r.Context(), store.StatsFilter{
-		From: now.Add(-24 * time.Hour),
-		To:   now,
+		From:         now.Add(-24 * time.Hour),
+		To:           now,
+		AccessUserID: accessUserIDPtr(currentUserID(r)),
 	})
 	if err != nil {
 		s.writeStoreError(w, r, err)
@@ -169,6 +175,9 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	if !s.requireStore(w, r) {
 		return
 	}
+	if !s.requireAccess(w, r) {
+		return
+	}
 	from, err := queryTime(r, "from")
 	if err != nil {
 		validationFailed(w, r, "from", err.Error())
@@ -188,7 +197,17 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		validationFailed(w, r, "project_id", err.Error())
 		return
 	}
-	stats, err := s.store.Stats(r.Context(), store.StatsFilter{From: from, To: to, ProjectID: projectID})
+	if projectID != nil {
+		if _, ok := s.requireProjectAccess(w, r, *projectID, false); !ok {
+			return
+		}
+	}
+	stats, err := s.store.Stats(r.Context(), store.StatsFilter{
+		From:         from,
+		To:           to,
+		ProjectID:    projectID,
+		AccessUserID: accessUserIDPtr(currentUserID(r)),
+	})
 	if err != nil {
 		s.writeStoreError(w, r, err)
 		return
@@ -196,11 +215,44 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	if stats.ByProject == nil {
 		stats.ByProject = []store.ProjectStats{}
 	}
+	for i := range stats.ByProject {
+		if stats.ByProject[i].Trend == nil {
+			stats.ByProject[i].Trend = []store.DailyStats{}
+		}
+	}
 	if stats.ByModel == nil {
 		stats.ByModel = []store.ModelStats{}
 	}
+	if stats.ByProvider == nil {
+		stats.ByProvider = []store.ProviderStats{}
+	}
+	for i := range stats.ByProvider {
+		if stats.ByProvider[i].Trend == nil {
+			stats.ByProvider[i].Trend = []store.DailyStats{}
+		}
+	}
+	if stats.ByBlock == nil {
+		stats.ByBlock = []store.BlockStats{}
+	}
+	if stats.QualityByProvider == nil {
+		stats.QualityByProvider = []store.ProviderQualityStats{}
+	}
+	for i := range stats.ByBlock {
+		if stats.ByBlock[i].Trend == nil {
+			stats.ByBlock[i].Trend = []store.DailyStats{}
+		}
+	}
+	if stats.Trend == nil {
+		stats.Trend = []store.DailyStats{}
+	}
 	if stats.Decisions == nil {
 		stats.Decisions = map[string]int64{}
+	}
+	if stats.Feedback != nil && stats.Feedback.BySignal == nil {
+		stats.Feedback.BySignal = map[string]int64{}
+	}
+	if stats.Feedback != nil && stats.Feedback.ByProvider == nil {
+		stats.Feedback.ByProvider = []store.FeedbackProviderStats{}
 	}
 	writeJSON(w, http.StatusOK, stats)
 }

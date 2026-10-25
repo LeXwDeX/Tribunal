@@ -12,6 +12,7 @@ export function project(overrides: Partial<Project> = {}): Project {
     profile: 'default',
     settings: {},
     enabled: true,
+    access: 'manage',
     ...overrides,
   }
 }
@@ -28,6 +29,7 @@ export function review(overrides: Partial<ReviewDetail> = {}): ReviewDetail {
     status: 'running',
     verdict: null,
     created_at: '2026-10-22T05:00:00Z',
+    access: 'manage',
     ...overrides,
   }
 }
@@ -56,6 +58,7 @@ export function finding(overrides: Partial<Finding> = {}): Finding {
     challenge_status: 'confirmed',
     decision: 'publish',
     decision_reason: '确认',
+    annotation: '',
     path: 'internal/file.go',
     line: 88,
     ...overrides,

@@ -12,10 +12,11 @@ import (
 )
 
 const (
-	apiTokenPrefix       = "crc_"
-	apiTokenBytes        = 32
-	apiTokenNameMax      = 100
-	apiTokenMaxExpiresIn = 3650
+	apiTokenPrefix           = "crc_"
+	apiTokenBytes            = 32
+	apiTokenNameMax          = 100
+	apiTokenDefaultExpiresIn = 90
+	apiTokenMaxExpiresIn     = 365
 )
 
 type createdAPIToken struct {
@@ -49,7 +50,12 @@ func (s *Server) handleListAPITokens(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusServiceUnavailable, "internal", "token store is not configured", nil)
 		return
 	}
-	tokens, err := s.tokens.ListAPITokens(r.Context(), user.ID)
+	limit, err := pageLimit(r)
+	if err != nil {
+		validationFailed(w, r, "limit", err.Error())
+		return
+	}
+	tokens, next, err := s.tokens.ListAPITokensPage(r.Context(), user.ID, r.URL.Query().Get("cursor"), limit)
 	if err != nil {
 		s.writeStoreError(w, r, err)
 		return
@@ -57,7 +63,7 @@ func (s *Server) handleListAPITokens(w http.ResponseWriter, r *http.Request) {
 	if tokens == nil {
 		tokens = []store.APIToken{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"tokens": tokens})
+	writeJSON(w, http.StatusOK, map[string]any{"tokens": tokens, "next_cursor": next})
 }
 
 type createAPITokenRequest struct {
@@ -85,16 +91,16 @@ func (s *Server) handleCreateAPIToken(w http.ResponseWriter, r *http.Request) {
 		validationFailed(w, r, "name", "name must be between 1 and 100 characters")
 		return
 	}
-	var expiresAt *time.Time
-	if request.ExpiresInDays != nil && *request.ExpiresInDays != 0 {
-		days := *request.ExpiresInDays
-		if days < 1 || days > apiTokenMaxExpiresIn {
-			validationFailed(w, r, "expires_in_days", "expires_in_days must be between 1 and 3650, or 0 for no expiry")
-			return
-		}
-		value := s.now().UTC().Add(time.Duration(days) * 24 * time.Hour)
-		expiresAt = &value
+	days := apiTokenDefaultExpiresIn
+	if request.ExpiresInDays != nil {
+		days = *request.ExpiresInDays
 	}
+	if days < 1 || days > apiTokenMaxExpiresIn {
+		validationFailed(w, r, "expires_in_days", "expires_in_days must be between 1 and 365")
+		return
+	}
+	expiry := s.now().UTC().Add(time.Duration(days) * 24 * time.Hour)
+	expiresAt := &expiry
 	plaintext, err := newAPIToken()
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "internal", "internal error", nil)

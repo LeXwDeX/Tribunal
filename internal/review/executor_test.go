@@ -654,3 +654,89 @@ func TestAdjudicateNodeAppliesVerifyResult(t *testing.T) {
 		t.Fatalf("expected a positioned finding")
 	}
 }
+
+// metadataClients resolves fixed provider metadata for attribution tests.
+type metadataClients map[string]llm.Client
+
+func (c metadataClients) Client(name string) (llm.Client, error) {
+	client, ok := c[name]
+	if !ok {
+		return nil, fmt.Errorf("provider %q is not configured", name)
+	}
+	return client, nil
+}
+
+type metadataClient struct{ model string }
+
+func (c metadataClient) Generate(context.Context, *llm.Request) (*llm.Response, error) {
+	return nil, errors.New("unexpected model call")
+}
+
+func (c metadataClient) Info() llm.ProviderInfo { return llm.ProviderInfo{Model: c.model} }
+
+func TestExecutorNodeMetadata(t *testing.T) {
+	executor := newTestExecutor(t, ExecutorDeps{
+		Profile: deepProfile(),
+		Clients: metadataClients{
+			"claude": metadataClient{model: "claude-model"},
+			"local":  metadataClient{model: "local-model"},
+		},
+	})
+	params := func(value any) json.RawMessage {
+		raw, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	tests := []struct {
+		name     string
+		kind     string
+		params   json.RawMessage
+		provider string
+		model    string
+	}{
+		{name: "plan code", kind: KindPlan, params: params(planParams{Mode: "code", Provider: "claude"})},
+		{name: "plan agent", kind: KindPlan, params: params(planParams{Mode: "agent", Provider: "claude"}), provider: "claude", model: "claude-model"},
+		{name: "code review", kind: KindCodeReview, params: params(reviewNodeParams{Provider: "local"}), provider: "local", model: "local-model"},
+		{name: "review std", kind: KindReviewStd, params: params(reviewNodeParams{Provider: "claude"}), provider: "claude", model: "claude-model"},
+		{name: "review intent", kind: KindReviewInt, params: params(reviewNodeParams{Provider: "claude"}), provider: "claude", model: "claude-model"},
+		{name: "review gate", kind: KindReviewGate, params: params(gateParams{}), provider: "claude", model: "claude-model"},
+		{name: "reasoner explicit", kind: KindReasoner, params: params(reasonerParams{Provider: "local", When: "always"}), provider: "local", model: "local-model"},
+		{name: "reasoner profile fallback", kind: KindReasoner, params: params(reasonerParams{When: "always"}), provider: "claude", model: "claude-model"},
+		{name: "verify", kind: KindVerify, params: params(verifyParams{Provider: "claude"}), provider: "claude", model: "claude-model"},
+		{name: "synthesize code", kind: KindSynthesize, params: params(synthesizeParams{Mode: "code", Provider: "claude"})},
+		{name: "synthesize agent", kind: KindSynthesize, params: params(synthesizeParams{Mode: "agent", Provider: "local"}), provider: "local", model: "local-model"},
+		{name: "synthesize profile fallback", kind: KindSynthesize, params: params(synthesizeParams{Mode: "agent"}), provider: "claude", model: "claude-model"},
+		{name: "onboarding", kind: KindOnboarding, params: params(onboardingParams{Provider: "claude"}), provider: "claude", model: "claude-model"},
+		{name: "onboarding profile fallback", kind: KindOnboarding, params: params(onboardingParams{})},
+		{name: "gather", kind: KindGather, params: params(gatherParams{ChallengeProvider: "claude"})},
+		{name: "adjudicate", kind: KindAdjudicate, params: params(adjudicateParams{})},
+		{name: "unknown kind", kind: "bogus"},
+		{name: "invalid params", kind: KindVerify, params: json.RawMessage(`{`)},
+		{name: "trailing params", kind: KindCodeReview, params: json.RawMessage(`{"provider":"local"}{"x":1}`)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := executor.NodeMetadata(dag.NodeInput{Node: dag.NodeSpec{ID: "n", Kind: tc.kind, Params: tc.params}})
+			if got.Provider != tc.provider || got.Model != tc.model {
+				t.Fatalf("metadata = (%q,%q), want (%q,%q)", got.Provider, got.Model, tc.provider, tc.model)
+			}
+		})
+	}
+}
+
+func TestExecutorNodeMetadataOnboardingProfileFallback(t *testing.T) {
+	executor := newTestExecutor(t, ExecutorDeps{
+		Profile: onboardingProfile(),
+		Clients: metadataClients{"claude": metadataClient{model: "claude-model"}},
+	})
+	raw, err := json.Marshal(onboardingParams{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := executor.NodeMetadata(dag.NodeInput{Node: dag.NodeSpec{ID: "onboarding", Kind: KindOnboarding, Params: raw}})
+	if got.Provider != "claude" || got.Model != "claude-model" {
+		t.Fatalf("metadata = (%q,%q), want (claude,claude-model)", got.Provider, got.Model)
+	}
+}

@@ -13,8 +13,9 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
+
+	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
 )
 
 const (
@@ -171,6 +172,12 @@ func (a *authService) sealSession(id string) string {
 	return id + "." + a.signature("session", id)
 }
 
+// csrfFor derives a stable per-session CSRF token from the signing key, so no
+// second secret needs a database column.
+func (a *authService) csrfFor(id string) string {
+	return a.signature("csrf", id)
+}
+
 func (a *authService) openSession(value string) (string, bool) {
 	if len(value) > 256 {
 		return "", false
@@ -193,85 +200,9 @@ type sessionUser struct {
 }
 
 type session struct {
-	id      string
-	user    sessionUser
-	csrf    string
-	expires time.Time
-}
-
-// sessionStore keeps browser sessions and their CSRF tokens in memory. It is
-// bounded by count and expires entries; no token material is persisted.
-type sessionStore struct {
-	mu      sync.Mutex
-	entries map[string]session
-	limit   int
-	now     func() time.Time
-}
-
-func newSessionStore(limit int, now func() time.Time) *sessionStore {
-	if limit <= 0 {
-		limit = sessionLimit
-	}
-	return &sessionStore{
-		entries: make(map[string]session),
-		limit:   limit,
-		now:     now,
-	}
-}
-
-func (st *sessionStore) create(user sessionUser, ttl time.Duration) (session, error) {
-	id, err := randomToken(32)
-	if err != nil {
-		return session{}, err
-	}
-	csrf, err := randomToken(32)
-	if err != nil {
-		return session{}, err
-	}
-	now := st.now()
-	entry := session{id: id, user: user, csrf: csrf, expires: now.Add(ttl)}
-
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	for key, existing := range st.entries {
-		if !now.Before(existing.expires) {
-			delete(st.entries, key)
-		}
-	}
-	if len(st.entries) >= st.limit {
-		var oldestKey string
-		var oldestExpiry time.Time
-		for key, existing := range st.entries {
-			if oldestKey == "" || existing.expires.Before(oldestExpiry) {
-				oldestKey, oldestExpiry = key, existing.expires
-			}
-		}
-		if oldestKey != "" {
-			delete(st.entries, oldestKey)
-		}
-	}
-	st.entries[id] = entry
-	return entry, nil
-}
-
-func (st *sessionStore) get(id string) (session, bool) {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	entry, ok := st.entries[id]
-	if !ok {
-		return session{}, false
-	}
-	if !st.now().Before(entry.expires) {
-		delete(st.entries, id)
-		return session{}, false
-	}
-	return entry, true
-}
-
-func (st *sessionStore) delete(id string) {
-	st.mu.Lock()
-	delete(st.entries, id)
-	st.mu.Unlock()
+	id   string
+	user sessionUser
+	csrf string
 }
 
 type principal struct {
@@ -350,12 +281,20 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	user.Role = s.roleFor(user.Username)
 
-	// Rotate any existing session before issuing the new one.
-	if old, ok := s.sessionFromRequest(r); ok {
-		s.sessions.delete(old.id)
+	// Rotate any existing session before issuing the new one. A failed delete
+	// aborts login: issuing a second cookie would leave a live old session.
+	if err := s.deleteSession(r.Context(), r); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "internal", "internal error", nil)
+		return
 	}
-	entry, err := s.sessions.create(user, s.auth.ttl)
+	entry, err := s.createSession(r.Context(), user)
 	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			// A disabled or removed account cannot log in. The response does not
+			// distinguish the two cases.
+			writeError(w, r, http.StatusForbidden, "forbidden", "account is not allowed to sign in", nil)
+			return
+		}
 		writeError(w, r, http.StatusInternalServerError, "internal", "internal error", nil)
 		return
 	}
@@ -364,8 +303,9 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	if old, ok := s.sessionFromRequest(r); ok {
-		s.sessions.delete(old.id)
+	if err := s.deleteSession(r.Context(), r); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "internal", "internal error", nil)
+		return
 	}
 	s.clearSessionCookie(w)
 	w.WriteHeader(http.StatusNoContent)
@@ -463,7 +403,55 @@ func (s *Server) roleFor(username string) string {
 	return roleViewer
 }
 
+// createSession persists the session before the cookie is signed. A storage
+// error leaves no usable cookie behind.
+func (s *Server) createSession(ctx context.Context, user sessionUser) (session, error) {
+	if s.sessions == nil {
+		return session{}, errors.New("server: session store is not configured")
+	}
+	id, err := randomToken(32)
+	if err != nil {
+		return session{}, err
+	}
+	now := s.auth.now()
+	expires := now.Add(s.auth.ttl)
+	sum := sha256.Sum256([]byte(id))
+	if err := s.sessions.CreateSession(ctx, store.Session{
+		IDHash:    sum[:],
+		UserID:    user.ID,
+		Username:  user.Username,
+		Name:      user.Name,
+		Role:      user.Role,
+		ExpiresAt: expires,
+		CreatedAt: now,
+	}, sessionLimit); err != nil {
+		return session{}, err
+	}
+	return session{id: id, user: user, csrf: s.auth.csrfFor(id)}, nil
+}
+
+// deleteSession revokes the session named by a valid signed cookie. An
+// absent or unsigned cookie is not an error.
+func (s *Server) deleteSession(ctx context.Context, r *http.Request) error {
+	if s.sessions == nil {
+		return nil
+	}
+	cookie, err := r.Cookie(sessionCookieName)
+	if err != nil {
+		return nil
+	}
+	id, ok := s.auth.openSession(cookie.Value)
+	if !ok {
+		return nil
+	}
+	sum := sha256.Sum256([]byte(id))
+	return s.sessions.DeleteSession(ctx, sum[:])
+}
+
 func (s *Server) sessionFromRequest(r *http.Request) (session, bool) {
+	if s.sessions == nil {
+		return session{}, false
+	}
 	cookie, err := r.Cookie(sessionCookieName)
 	if err != nil {
 		return session{}, false
@@ -472,7 +460,20 @@ func (s *Server) sessionFromRequest(r *http.Request) (session, bool) {
 	if !ok {
 		return session{}, false
 	}
-	return s.sessions.get(id)
+	sum := sha256.Sum256([]byte(id))
+	stored, err := s.sessions.GetSession(r.Context(), sum[:], s.auth.now())
+	if err != nil || stored == nil {
+		return session{}, false
+	}
+	// Roles come from the current configuration, not from login time, so
+	// removing a bootstrap admin also downgrades existing sessions.
+	user := sessionUser{
+		ID:       stored.UserID,
+		Username: stored.Username,
+		Name:     stored.Name,
+		Role:     s.roleFor(stored.Username),
+	}
+	return session{id: id, user: user, csrf: s.auth.csrfFor(id)}, true
 }
 
 func (s *Server) setSessionCookie(w http.ResponseWriter, value string) {
@@ -551,14 +552,14 @@ func (s *Server) authenticateAPIToken(r *http.Request, hash []byte) (sessionUser
 	if err != nil || owner == nil {
 		return sessionUser{}, false
 	}
-	if owner.Role != roleAdmin && owner.Role != roleViewer {
-		return sessionUser{}, false
-	}
+	// The stored users.role reflects login time. Re-evaluate against the
+	// current bootstrap_admins so removing an admin also downgrades tokens
+	// minted earlier. The configured bootstrap bearer token keeps admin.
 	return sessionUser{
 		ID:       owner.ID,
 		Username: owner.Username,
 		Name:     owner.Name,
-		Role:     owner.Role,
+		Role:     s.roleFor(owner.Username),
 	}, true
 }
 
@@ -573,9 +574,11 @@ func bearerValue(r *http.Request) string {
 	return strings.TrimSpace(value)
 }
 
-// apiAuth authenticates browser sessions and M0 bearer clients, enforces
-// read-only viewers, and requires the per-session CSRF token for unsafe
-// session requests. Bearer clients are not session-bound and need no CSRF.
+// apiAuth authenticates browser sessions and bearer clients and requires the
+// per-session CSRF token for unsafe session requests. Authorization is a
+// separate per-route decision: a route must pick an explicit policy, and an
+// unknown policy denies. Bearer clients are not session-bound and need no
+// CSRF token.
 func (s *Server) apiAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		value, ok := s.authenticate(r)
@@ -584,17 +587,11 @@ func (s *Server) apiAuth(next http.HandlerFunc) http.HandlerFunc {
 			writeError(w, r, http.StatusUnauthorized, "unauthenticated", "authentication required", nil)
 			return
 		}
-		if !safeMethod(r.Method) {
-			if value.user.Role != roleAdmin {
-				writeError(w, r, http.StatusForbidden, "forbidden", "admin role required", nil)
+		if !safeMethod(r.Method) && !value.bearer {
+			token := strings.TrimSpace(r.Header.Get(csrfHeaderName))
+			if token == "" || !constantTimeEqualStrings(value.csrf, token) {
+				writeError(w, r, http.StatusForbidden, "forbidden", "invalid CSRF token", nil)
 				return
-			}
-			if !value.bearer {
-				token := strings.TrimSpace(r.Header.Get(csrfHeaderName))
-				if token == "" || !constantTimeEqualStrings(value.csrf, token) {
-					writeError(w, r, http.StatusForbidden, "forbidden", "invalid CSRF token", nil)
-					return
-				}
 			}
 		}
 		ctx := context.WithValue(r.Context(), principalKey, value)

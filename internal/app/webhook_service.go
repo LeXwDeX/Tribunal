@@ -23,6 +23,7 @@ import (
 const (
 	commandRun    = "run"
 	commandCancel = "cancel"
+	commandHelp   = "help"
 )
 
 var shaRE = regexp.MustCompile(`^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$`)
@@ -31,6 +32,7 @@ var shaRE = regexp.MustCompile(`^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$`)
 type WebhookStore interface {
 	GetProject(ctx context.Context, id int64) (*store.Project, error)
 	RecordDelivery(ctx context.Context, delivery store.Delivery, job *store.Job) (string, bool, error)
+	RecordReviewCandidateDelivery(ctx context.Context, delivery store.Delivery, candidate *store.ReviewCandidate) (store.ReviewEnqueueResult, error)
 }
 
 // WebhookRequest is the authenticated HTTP request metadata plus body.
@@ -199,7 +201,18 @@ func (s *WebhookService) recordJob(ctx context.Context, projectID int64, event, 
 		duplicate bool
 		err       error
 	)
-	if command, ok := reviewCommandFromJob(job); ok {
+	if job.Kind == "review.candidate" {
+		// A candidate owns its durable sequence; falling back to the generic
+		// delivery would enqueue a payload that can never activate.
+		candidate, ok := reviewCandidateFromJob(job)
+		if !ok {
+			s.logger.Warn("webhook candidate job is invalid", "project_id", projectID, "event", event)
+			return WebhookResult{Ignored: "storage_error"}, errors.New("app: invalid review.candidate job")
+		}
+		var result store.ReviewEnqueueResult
+		result, err = s.store.RecordReviewCandidateDelivery(ctx, delivery, candidate)
+		jobID, duplicate = result.JobID, result.Duplicate
+	} else if command, ok := reviewCommandFromJob(job); ok {
 		if recorder, supported := s.store.(interface {
 			RecordReviewDelivery(ctx context.Context, d store.Delivery, command *store.ReviewCommand) (store.ReviewEnqueueResult, error)
 		}); supported {
@@ -221,6 +234,32 @@ func (s *WebhookService) recordJob(ctx context.Context, projectID int64, event, 
 	}
 	s.logger.Info("webhook accepted", "project_id", projectID, "event", event, "kind", job.Kind, "job_id", jobID)
 	return WebhookResult{Accepted: true, JobID: jobID}, nil
+}
+
+// reviewCandidateFromJob extracts the deferred review event from a candidate
+// job. The store allocates its sequence and writes the durable payload.
+func reviewCandidateFromJob(job *store.Job) (*store.ReviewCandidate, bool) {
+	if job == nil || job.Kind != "review.candidate" {
+		return nil, false
+	}
+	var fields struct {
+		ProjectID int64  `json:"project_id"`
+		MRIID     int64  `json:"mr_iid"`
+		HeadSHA   string `json:"head_sha"`
+	}
+	if err := json.Unmarshal(job.Payload, &fields); err != nil {
+		return nil, false
+	}
+	if fields.ProjectID <= 0 || fields.MRIID <= 0 {
+		return nil, false
+	}
+	return &store.ReviewCandidate{
+		ProjectID:   fields.ProjectID,
+		MRIID:       fields.MRIID,
+		HeadSHA:     fields.HeadSHA,
+		Payload:     job.Payload,
+		MaxAttempts: job.MaxAttempts,
+	}, true
 }
 
 func webhookProjectID(payload *gitlab.Webhook) (int64, string) {
@@ -354,7 +393,9 @@ func (s *WebhookService) newReviewJob(project *store.Project, settings config.Pr
 	if !shaRE.MatchString(sha) {
 		return nil, "missing_head_sha"
 	}
-	if settings.SkipDraft && isDraft(attrs, payload.MergeRequest) {
+	if !settings.AllowRepoConfig && settings.SkipDraft && isDraft(attrs, payload.MergeRequest) {
+		// Repository config may disable skip_draft. With repo config enabled
+		// the worker re-checks after reading the target branch.
 		return nil, "draft"
 	}
 	labels := mergeLabels(attrs.Labels, payload.MergeRequest.Labels, payload.Labels)
@@ -371,6 +412,19 @@ func (s *WebhookService) newReviewJob(project *store.Project, settings config.Pr
 	profile := ProfileForLabels(labels, project.Profile, settings)
 	if _, ok := s.profiles[profile]; !ok {
 		profile = "default"
+	}
+	if settings.AllowRepoConfig {
+		// The effective target-branch configuration can reject the event. A
+		// deferred candidate avoids fencing the active review until the worker
+		// accepts it.
+		return newJob("review.candidate", reviewCandidateKey(project.ID, iid), map[string]any{
+			"project_id": project.ID,
+			"mr_iid":     iid,
+			"head_sha":   strings.ToLower(sha),
+			"profile":    profile,
+			"trigger":    trigger,
+			"full":       full,
+		}), ""
 	}
 	key := reviewRunKey(project.ID, iid)
 	return newJob("review.run", key, map[string]any{
@@ -421,21 +475,25 @@ func (s *WebhookService) decideNote(project *store.Project, settings config.Proj
 	if user.Bot || s.botUsernames[user.Username] {
 		return nil, "bot_note"
 	}
-	command, profile, full, reason := parseCommand(attrs.Note, project.Profile, s.profiles)
+	if isCommandReplyBody(attrs.Note) {
+		return nil, "command_reply"
+	}
+	command, profile, full, explicit, reason := parseCommand(attrs.Note, project.Profile, s.profiles)
 	if reason != "" {
 		return nil, reason
 	}
 	return newJob("review.command", commandKey(project.ID, attrs.ID), map[string]any{
-		"project_id":      project.ID,
-		"mr_iid":          iid,
-		"note_id":         attrs.ID,
-		"author_id":       user.ID,
-		"author_username": user.Username,
-		"author_bot":      user.Bot,
-		"command":         command,
-		"profile":         profile,
-		"full":            full,
-		"trigger":         "command",
+		"project_id":       project.ID,
+		"mr_iid":           iid,
+		"note_id":          attrs.ID,
+		"author_id":        user.ID,
+		"author_username":  user.Username,
+		"author_bot":       user.Bot,
+		"command":          command,
+		"profile":          profile,
+		"profile_explicit": explicit,
+		"full":             full,
+		"trigger":          "command",
 	}), ""
 }
 
@@ -464,34 +522,34 @@ func (s *WebhookService) decidePush(project *store.Project, settings config.Proj
 	}), ""
 }
 
-func parseCommand(note, defaultProfile string, profiles map[string]config.ProfileConfig) (command, profile string, full bool, reason string) {
+func parseCommand(note, defaultProfile string, profiles map[string]config.ProfileConfig) (command, profile string, full, explicit bool, reason string) {
 	line := note
 	if idx := strings.IndexByte(line, '\n'); idx >= 0 {
 		line = line[:idx]
 	}
 	fields := strings.Fields(line)
 	if len(fields) == 0 || fields[0] != "/review" {
-		return "", "", false, "not_review_command"
+		return "", "", false, false, "not_review_command"
 	}
 	switch len(fields) {
 	case 1:
-		return commandRun, defaultProfile, false, ""
+		return commandRun, defaultProfile, false, false, ""
 	case 2:
 		switch fields[1] {
 		case "full":
-			return commandRun, defaultProfile, true, ""
+			return commandRun, defaultProfile, true, false, ""
 		case "cancel":
-			return commandCancel, "", false, ""
+			return commandCancel, "", false, false, ""
 		case "help":
-			return "", "", false, "help_not_implemented"
+			return commandHelp, "", false, false, ""
 		default:
 			if _, ok := profiles[fields[1]]; ok {
-				return commandRun, fields[1], false, ""
+				return commandRun, fields[1], false, true, ""
 			}
-			return "", "", false, "unknown_profile"
+			return "", "", false, false, "unknown_profile"
 		}
 	default:
-		return "", "", false, "unknown_command"
+		return "", "", false, false, "unknown_command"
 	}
 }
 
@@ -532,6 +590,10 @@ func newJob(kind, key string, payload any) *store.Job {
 		encoded = []byte(`{}`)
 	}
 	return &store.Job{Kind: kind, Key: key, Payload: encoded, MaxAttempts: 3}
+}
+
+func reviewCandidateKey(projectID, iid int64) string {
+	return "review.candidate:" + itoa(projectID) + ":" + itoa(iid)
 }
 
 func reviewRunKey(projectID, iid int64) string {

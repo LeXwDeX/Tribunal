@@ -1,9 +1,13 @@
 /bin/
 /data/
 /config/server.yaml
+/.env
+/.env.*
+!/.env.example
 *.test
 /coverage.out
 /.opencode/workflow-drafts/
 /.impeccable/review/
 /web/node_modules/
 /web/coverage/
+/artifacts/delivery/

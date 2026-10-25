@@ -26,8 +26,10 @@ type streamFindingEvent struct {
 }
 
 type streamWorkflowEvent struct {
-	Status  string `json:"status"`
-	Verdict string `json:"verdict,omitempty"`
+	Status           string `json:"status"`
+	Verdict          string `json:"verdict,omitempty"`
+	PublicationState string `json:"publication_state,omitempty"`
+	PublicationError string `json:"publication_error,omitempty"`
 }
 
 type streamPublishedEvent struct {
@@ -49,8 +51,11 @@ type streamPublication struct {
 // the store because no pub/sub bus exists in the single-process deployment;
 // two snapshots are diffed per tick and flushes happen immediately.
 type streamSnapshot struct {
+	projectID        int64
 	status           string
 	verdict          string
+	publicationState string
+	publicationError string
 	nodeOrder        []string
 	nodes            map[string]streamNode
 	findingOrder     []string
@@ -59,9 +64,19 @@ type streamSnapshot struct {
 	publications     map[string]streamPublication
 }
 
+// terminal means both the workflow execution and its GitLab publication have
+// settled. A pending publication keeps the stream open after the workflow
+// itself completes, so clients see the final publication state instead of
+// closing on execution alone.
 func (snap *streamSnapshot) terminal() bool {
 	switch snap.status {
 	case "completed", "failed", "cancelled":
+	default:
+		return false
+	}
+	switch snap.publicationState {
+	case "", store.WorkflowPublicationPublished, store.WorkflowPublicationSkipped,
+		store.WorkflowPublicationFailed:
 		return true
 	default:
 		return false
@@ -86,11 +101,14 @@ func (s *Server) loadStreamSnapshot(ctx context.Context, workflowID string) (*st
 		return nil, err
 	}
 	snap := &streamSnapshot{
-		status:       wf.Status,
-		verdict:      wf.Verdict,
-		nodes:        make(map[string]streamNode, len(nodes)),
-		findings:     make(map[string]string, len(findings)),
-		publications: make(map[string]streamPublication, len(publications)),
+		projectID:        wf.ProjectID,
+		status:           wf.Status,
+		verdict:          wf.Verdict,
+		publicationState: wf.PublicationState,
+		publicationError: wf.PublicationError,
+		nodes:            make(map[string]streamNode, len(nodes)),
+		findings:         make(map[string]string, len(findings)),
+		publications:     make(map[string]streamPublication, len(publications)),
 	}
 	for _, node := range nodes {
 		if _, seen := snap.nodes[node.ID]; !seen {
@@ -155,13 +173,41 @@ func diffStreamSnapshots(previous, next *streamSnapshot) []streamEvent {
 			value: streamPublishedEvent{Kind: value.kind, GitlabID: value.gitlabID},
 		})
 	}
-	if previous.status != next.status || previous.verdict != next.verdict {
+	if previous.status != next.status || previous.verdict != next.verdict ||
+		previous.publicationState != next.publicationState ||
+		previous.publicationError != next.publicationError {
 		events = append(events, streamEvent{
-			name:  "workflow",
-			value: streamWorkflowEvent{Status: next.status, Verdict: next.verdict},
+			name: "workflow",
+			value: streamWorkflowEvent{
+				Status:           next.status,
+				Verdict:          next.verdict,
+				PublicationState: next.publicationState,
+				PublicationError: next.publicationError,
+			},
 		})
 	}
 	return events
+}
+
+func workflowStreamEvent(snapshot streamSnapshot) streamWorkflowEvent {
+	return streamWorkflowEvent{
+		Status:           snapshot.status,
+		Verdict:          snapshot.verdict,
+		PublicationState: snapshot.publicationState,
+		PublicationError: snapshot.publicationError,
+	}
+}
+
+// streamStillAuthorized repeats authentication and the project grant check.
+// It never writes a response: the stream is already open, so the only safe
+// outcome is closing it.
+func (s *Server) streamStillAuthorized(r *http.Request, projectID int64) bool {
+	value, ok := s.authenticate(r)
+	if !ok || value.user.ID <= 0 || s.access == nil {
+		return false
+	}
+	_, err := s.access.GetProjectAccess(r.Context(), value.user.ID, projectID)
+	return err == nil
 }
 
 func writeSSEEvent(w io.Writer, name string, value any) error {
@@ -207,7 +253,7 @@ func (s *Server) handleReviewStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if snapshot.terminal() {
-		if err := writeSSEEvent(w, "workflow", streamWorkflowEvent{Status: snapshot.status, Verdict: snapshot.verdict}); err != nil {
+		if err := writeSSEEvent(w, "workflow", workflowStreamEvent(*snapshot)); err != nil {
 			return
 		}
 		_ = controller.Flush()
@@ -235,6 +281,11 @@ func (s *Server) handleReviewStream(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		case <-ticker.C:
+			// Re-authenticate every poll: a revoked session or API token, a
+			// disabled user, or a removed grant must close an open stream.
+			if !s.streamStillAuthorized(r, snapshot.projectID) {
+				return
+			}
 			next, err := s.loadStreamSnapshot(r.Context(), wfID)
 			if err != nil {
 				if errors.Is(err, store.ErrNotFound) || r.Context().Err() != nil {

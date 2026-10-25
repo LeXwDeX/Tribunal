@@ -269,3 +269,56 @@ func TestParseExpandsNonSensitiveEnvironment(t *testing.T) {
 		t.Fatalf("url = %q", got)
 	}
 }
+
+func TestValidateServerJSONPreservesTemplates(t *testing.T) {
+	data := []byte(`{"command":"${MCP_COMMAND}","env":{"SAFE":"${SAFE_VALUE}"}}`)
+	if err := ValidateServerJSON("local", data); err != nil {
+		t.Fatalf("ValidateServerJSON: %v", err)
+	}
+}
+
+func TestValidateServerJSONRejectsInvalidEntries(t *testing.T) {
+	cases := []struct {
+		name    string
+		server  string
+		denied  []string
+		wantErr error
+	}{
+		{name: "empty", server: ``, wantErr: ErrInvalidConfig},
+		{name: "unknown field", server: `{"command":"x","bogus":1}`, wantErr: ErrInvalidConfig},
+		{name: "unknown x-review field", server: `{"command":"x","x-review":{"bogus":1}}`, wantErr: ErrInvalidConfig},
+		{name: "stdio without command", server: `{"type":"stdio"}`, wantErr: ErrInvalidConfig},
+		{name: "http without url", server: `{"type":"http","url":""}`, wantErr: ErrInvalidConfig},
+		{name: "sensitive template", server: `{"command":"x","args":["${OPENAI_API_KEY}"]}`, wantErr: ErrSensitiveEnv},
+		{name: "denied template", server: `{"command":"x","env":{"CUSTOM":"${CUSTOM_DENIED_FLAG}"}}`, denied: []string{"CUSTOM_DENIED_FLAG"}, wantErr: ErrSensitiveEnv},
+		{name: "denied variable", server: `{"command":"x","env":{"CUSTOM_DENIED_FLAG":"value"}}`, denied: []string{"CUSTOM_DENIED_FLAG"}, wantErr: ErrInvalidConfig},
+		{name: "malformed template", server: `{"command":"x","args":["${BAD-NAME}"]}`, wantErr: ErrInvalidConfig},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateServerJSON("local", []byte(tc.server), tc.denied...)
+			if err == nil {
+				t.Fatal("ValidateServerJSON accepted an invalid entry")
+			}
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("error = %v, want %v", err, tc.wantErr)
+			}
+			if strings.Contains(err.Error(), "secret-value") {
+				t.Fatalf("error leaked a secret value: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateServerName(t *testing.T) {
+	for _, name := range []string{"local", "remote-1", "a.b_c"} {
+		if err := ValidateServerName(name); err != nil {
+			t.Fatalf("ValidateServerName(%q): %v", name, err)
+		}
+	}
+	for _, name := range []string{"", "bad/name", "bad__name", strings.Repeat("a", 65)} {
+		if err := ValidateServerName(name); !errors.Is(err, ErrInvalidConfig) {
+			t.Fatalf("ValidateServerName(%q) = %v", name, err)
+		}
+	}
+}

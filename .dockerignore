@@ -1,0 +1,25 @@
+# VCS and local tooling
+.git
+.github
+.agents
+.impeccable
+.idea
+.vscode
+.DS_Store
+
+# Local data and build artifacts
+data
+bin
+coverage.out
+*.test
+web/node_modules
+web/coverage
+web/dist
+web/*.tsbuildinfo
+
+# Local secrets and real deployment configuration
+config/server.yaml
+.env
+.env.*
+*.pem
+*.key

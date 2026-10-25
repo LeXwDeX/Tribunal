@@ -131,7 +131,7 @@ func TestClientProjectsAndTokenInfo(t *testing.T) {
 		case r.URL.Path == "/api/v4/projects/42/members/all/7":
 			fmt.Fprint(w, `{"id":7,"access_level":30}`)
 		case r.URL.Path == "/api/v4/projects/42/merge_requests/8":
-			fmt.Fprint(w, `{"iid":8,"state":"opened","target_project_id":42,"sha":"`+strings.Repeat("b", 40)+`","title":"Fix bug","description":"body","source_branch":"feat","target_branch":"main","labels":["bug"],"draft":false,"web_url":"https://gitlab.example.com/group/repo/-/merge_requests/8","author":{"id":9,"username":"review-bot","name":"Review Bot"}}`)
+			fmt.Fprint(w, `{"iid":8,"state":"opened","target_project_id":42,"sha":"`+strings.Repeat("b", 40)+`","merged_at":"2026-10-20T10:00:00Z","title":"Fix bug","description":"body","source_branch":"feat","target_branch":"main","labels":["bug"],"draft":false,"web_url":"https://gitlab.example.com/group/repo/-/merge_requests/8","author":{"id":9,"username":"review-bot","name":"Review Bot"}}`)
 		default:
 			t.Errorf("unexpected path %q", r.URL.Path)
 			http.NotFound(w, r)
@@ -171,6 +171,9 @@ func TestClientProjectsAndTokenInfo(t *testing.T) {
 	mr, err := client.GetMergeRequest(ctx, token, 42, 8)
 	if err != nil || mr.State != "opened" || mr.TargetProjectID != 42 {
 		t.Fatalf("GetMergeRequest = %+v, %v", mr, err)
+	}
+	if mr.MergedAt == nil || !mr.MergedAt.Equal(time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)) {
+		t.Errorf("merge request merged_at = %v", mr.MergedAt)
 	}
 	if mr.Title != "Fix bug" || mr.Description != "body" || mr.SourceBranch != "feat" ||
 		mr.TargetBranch != "main" || mr.Draft || len(mr.Labels) != 1 || mr.Labels[0] != "bug" ||
@@ -295,6 +298,81 @@ func TestCreateAndDeleteHookPayload(t *testing.T) {
 	}
 	if !created || !deleted {
 		t.Fatalf("created=%v deleted=%v", created, deleted)
+	}
+}
+
+func TestListAndUpdateHookPayload(t *testing.T) {
+	var listed bool
+	_, client := newSDKTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v4/projects/42/hooks":
+			listed = true
+			if got := r.URL.Query().Get("page"); got != "1" {
+				t.Errorf("page = %q", got)
+			}
+			fmt.Fprint(w, `[{"id":11,"url":"https://review.example.com/webhooks/gitlab",
+				"push_events":true,"merge_requests_events":true,"note_events":false,
+				"enable_ssl_verification":true,"alert_status":"executable"}]`)
+		case r.Method == http.MethodPut && r.URL.Path == "/api/v4/projects/42/hooks/11":
+			var body struct {
+				URL                   string `json:"url"`
+				Token                 string `json:"token"`
+				MergeRequestsEvents   bool   `json:"merge_requests_events"`
+				NoteEvents            bool   `json:"note_events"`
+				PushEvents            bool   `json:"push_events"`
+				EnableSSLVerification bool   `json:"enable_ssl_verification"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode hook body: %v", err)
+			}
+			if body.URL != "https://review.example.com/webhooks/gitlab" || body.Token != "whsec" ||
+				!body.PushEvents || !body.MergeRequestsEvents || !body.NoteEvents || !body.EnableSSLVerification {
+				t.Errorf("update body = %+v", body)
+			}
+			fmt.Fprint(w, `{"id":11,"url":"https://review.example.com/webhooks/gitlab"}`)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	})
+
+	hooks, err := client.ListProjectHooks(context.Background(), "token", 42)
+	if err != nil || !listed || len(hooks) != 1 {
+		t.Fatalf("ListProjectHooks = %+v, %v (listed=%v)", hooks, err, listed)
+	}
+	hook := hooks[0]
+	if hook.ID != 11 || hook.URL != "https://review.example.com/webhooks/gitlab" ||
+		!hook.PushEvents || !hook.MergeRequestsEvents || hook.NoteEvents ||
+		!hook.EnableSSLVerification || hook.AlertStatus != "executable" {
+		t.Fatalf("hook = %+v", hook)
+	}
+	if err := client.UpdateProjectHook(context.Background(), "token", 42, 11, HookSpec{
+		URL:                   "https://review.example.com/webhooks/gitlab",
+		Secret:                "whsec",
+		PushEvents:            true,
+		MergeRequestsEvents:   true,
+		NoteEvents:            true,
+		EnableSSLVerification: true,
+	}); err != nil {
+		t.Fatalf("UpdateProjectHook: %v", err)
+	}
+}
+
+func TestUpdateHookFailureIsSanitized(t *testing.T) {
+	_, client := newSDKTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "upstream-secret-body", http.StatusForbidden)
+	})
+	err := client.UpdateProjectHook(context.Background(), "glpat-secret", 42, 11, HookSpec{
+		URL:    "https://review.example.com/webhooks/gitlab",
+		Secret: "whsec",
+	})
+	if err == nil || StatusOf(err) != http.StatusForbidden {
+		t.Fatalf("error = %v", err)
+	}
+	for _, forbidden := range []string{"upstream-secret-body", "glpat-secret", "https://review.example.com"} {
+		if strings.Contains(err.Error(), forbidden) {
+			t.Errorf("error %q leaked %q", err, forbidden)
+		}
 	}
 }
 

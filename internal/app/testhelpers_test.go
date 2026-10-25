@@ -59,29 +59,56 @@ func testDefaults() config.ProjectSettings {
 type fakeGitLab struct {
 	mu sync.Mutex
 
-	project    *gitlab.Project
-	projectErr error
-	tokenInfo  *gitlab.TokenInfo
-	tokenErr   error
-	user       *gitlab.User
-	userErr    error
-	mr         *gitlab.MergeRequest
-	mrErr      error
-	access     int
-	accessErr  error
+	project     *gitlab.Project
+	projectErr  error
+	projectRefs []string
+	tokenInfo   *gitlab.TokenInfo
+	tokenErr    error
+	user        *gitlab.User
+	userErr     error
+	mr          *gitlab.MergeRequest
+	mrErr       error
+	access      int
+	accessErr   error
 
-	hookID       int64
-	hookErr      error
-	deleteErr    error
-	hookSpecs    []gitlab.HookSpec
-	deletedHooks []int64
-	calls        []string
+	hookID        int64
+	hookErr       error
+	listHooksErr  error
+	updateHookErr error
+	deleteErr     error
+	hookSpecs     []gitlab.HookSpec
+	hooks         []gitlab.Hook
+	editedHooks   []int64
+	deletedHooks  []int64
+	calls         []string
+
+	notes         []gitlab.Note
+	nextNoteID    int64
+	listNotesErr  error
+	createNoteErr error
+	updateNoteErr error
+	noteCreates   int
+	noteUpdates   int
+
+	awards       map[int64][]gitlab.Award
+	nextAwardID  int64
+	listAwardErr error
+	addAwardErr  error
+	delAwardErr  error
+	awardAdds    []string
+	awardDeletes []int64
 }
 
 func (f *fakeGitLab) record(name string) {
 	f.mu.Lock()
 	f.calls = append(f.calls, name)
 	f.mu.Unlock()
+}
+
+func (f *fakeGitLab) callList() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.calls...)
 }
 
 func (f *fakeGitLab) callCount(name string) int {
@@ -96,6 +123,12 @@ func (f *fakeGitLab) callCount(name string) int {
 	return count
 }
 
+func (f *fakeGitLab) projectRefSnapshot() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.projectRefs...)
+}
+
 func (f *fakeGitLab) GetProject(_ context.Context, token, ref string) (*gitlab.Project, error) {
 	f.record("GetProject")
 	f.mu.Lock()
@@ -103,8 +136,12 @@ func (f *fakeGitLab) GetProject(_ context.Context, token, ref string) (*gitlab.P
 	if token == "" {
 		return nil, fmt.Errorf("empty token")
 	}
+	f.projectRefs = append(f.projectRefs, ref)
 	if f.projectErr != nil {
 		return nil, f.projectErr
+	}
+	if f.project == nil {
+		return nil, fmt.Errorf("no project fixture")
 	}
 	return f.project, nil
 }
@@ -140,6 +177,113 @@ func (f *fakeGitLab) GetMemberAccess(_ context.Context, token string, projectID,
 	return f.access, f.accessErr
 }
 
+func (f *fakeGitLab) ListMRNotes(_ context.Context, _ string, _, _ int64) ([]gitlab.Note, error) {
+	f.record("ListMRNotes")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.listNotesErr != nil {
+		return nil, f.listNotesErr
+	}
+	return append([]gitlab.Note(nil), f.notes...), nil
+}
+
+func (f *fakeGitLab) CreateMRNote(_ context.Context, _ string, _, _ int64, body string) (*gitlab.Note, error) {
+	f.record("CreateMRNote")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.createNoteErr != nil {
+		return nil, f.createNoteErr
+	}
+	f.nextNoteID++
+	var authorID int64
+	if f.user != nil {
+		authorID = f.user.ID
+	}
+	note := gitlab.Note{ID: f.nextNoteID, Body: body, AuthorID: authorID}
+	f.notes = append(f.notes, note)
+	f.noteCreates++
+	return &note, nil
+}
+
+func (f *fakeGitLab) UpdateMRNote(_ context.Context, _ string, _, _, noteID int64, body string) error {
+	f.record("UpdateMRNote")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.updateNoteErr != nil {
+		return f.updateNoteErr
+	}
+	for i := range f.notes {
+		if f.notes[i].ID == noteID {
+			f.notes[i].Body = body
+			f.noteUpdates++
+			return nil
+		}
+	}
+	return &gitlab.Error{Op: "update_note", Status: 404}
+}
+
+func (f *fakeGitLab) ListNoteAwards(_ context.Context, _ string, _, _, noteID int64) ([]gitlab.Award, error) {
+	f.record("ListNoteAwards")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.listAwardErr != nil {
+		return nil, f.listAwardErr
+	}
+	return append([]gitlab.Award(nil), f.awards[noteID]...), nil
+}
+
+func (f *fakeGitLab) AddNoteAward(_ context.Context, _ string, _, _, noteID int64, name string) (*gitlab.Award, error) {
+	f.record("AddNoteAward")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.addAwardErr != nil {
+		return nil, f.addAwardErr
+	}
+	if f.awards == nil {
+		f.awards = map[int64][]gitlab.Award{}
+	}
+	f.nextAwardID++
+	award := gitlab.Award{ID: f.nextAwardID, Name: name, UserID: f.user.ID, Username: f.user.Username}
+	f.awards[noteID] = append(f.awards[noteID], award)
+	f.awardAdds = append(f.awardAdds, name)
+	return &award, nil
+}
+
+func (f *fakeGitLab) DeleteNoteAward(_ context.Context, _ string, _, _, noteID, awardID int64) error {
+	f.record("DeleteNoteAward")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.delAwardErr != nil {
+		return f.delAwardErr
+	}
+	awards := f.awards[noteID]
+	for i, award := range awards {
+		if award.ID != awardID {
+			continue
+		}
+		f.awards[noteID] = append(append([]gitlab.Award(nil), awards[:i]...), awards[i+1:]...)
+		f.awardDeletes = append(f.awardDeletes, awardID)
+		return nil
+	}
+	return &gitlab.Error{Op: "delete_note_award", Status: 404}
+}
+
+func (f *fakeGitLab) noteSnapshot() []gitlab.Note {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]gitlab.Note(nil), f.notes...)
+}
+
+func (f *fakeGitLab) ListProjectHooks(_ context.Context, _ string, _ int64) ([]gitlab.Hook, error) {
+	f.record("ListProjectHooks")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.listHooksErr != nil {
+		return nil, f.listHooksErr
+	}
+	return append([]gitlab.Hook(nil), f.hooks...), nil
+}
+
 func (f *fakeGitLab) CreateProjectHook(_ context.Context, token string, projectID int64, spec gitlab.HookSpec) (int64, error) {
 	f.record("CreateProjectHook")
 	f.mu.Lock()
@@ -148,7 +292,37 @@ func (f *fakeGitLab) CreateProjectHook(_ context.Context, token string, projectI
 		return 0, f.hookErr
 	}
 	f.hookSpecs = append(f.hookSpecs, spec)
+	f.hooks = append(f.hooks, gitlab.Hook{
+		ID:                    f.hookID,
+		URL:                   spec.URL,
+		PushEvents:            spec.PushEvents,
+		MergeRequestsEvents:   spec.MergeRequestsEvents,
+		NoteEvents:            spec.NoteEvents,
+		EnableSSLVerification: spec.EnableSSLVerification,
+	})
 	return f.hookID, nil
+}
+
+func (f *fakeGitLab) UpdateProjectHook(_ context.Context, _ string, _, hookID int64, spec gitlab.HookSpec) error {
+	f.record("UpdateProjectHook")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.updateHookErr != nil {
+		return f.updateHookErr
+	}
+	f.editedHooks = append(f.editedHooks, hookID)
+	for i := range f.hooks {
+		if f.hooks[i].ID != hookID {
+			continue
+		}
+		f.hooks[i].URL = spec.URL
+		f.hooks[i].PushEvents = spec.PushEvents
+		f.hooks[i].MergeRequestsEvents = spec.MergeRequestsEvents
+		f.hooks[i].NoteEvents = spec.NoteEvents
+		f.hooks[i].EnableSSLVerification = spec.EnableSSLVerification
+		return nil
+	}
+	return &gitlab.Error{Op: "update_hook", Status: 404}
 }
 
 func (f *fakeGitLab) DeleteProjectHook(_ context.Context, token string, projectID, hookID int64) error {
@@ -156,7 +330,17 @@ func (f *fakeGitLab) DeleteProjectHook(_ context.Context, token string, projectI
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.deletedHooks = append(f.deletedHooks, hookID)
-	return f.deleteErr
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	kept := f.hooks[:0]
+	for _, hook := range f.hooks {
+		if hook.ID != hookID {
+			kept = append(kept, hook)
+		}
+	}
+	f.hooks = kept
+	return nil
 }
 
 func defaultFakeGitLab() *fakeGitLab {
@@ -165,16 +349,19 @@ func defaultFakeGitLab() *fakeGitLab {
 			ID:                42,
 			PathWithNamespace: "group/repo",
 			WebURL:            "https://gitlab.example.com/group/repo",
+			HTTPURLToRepo:     "https://gitlab.example.com/group/repo.git",
 			DefaultBranch:     "main",
 		},
 		tokenInfo: &gitlab.TokenInfo{
 			Scopes: []string{"api", "read_repository"},
 			Active: true,
 		},
-		hookID: 99,
-		user:   &gitlab.User{ID: 9, Username: "review-bot"},
-		mr:     &gitlab.MergeRequest{IID: 7, State: "opened", TargetProjectID: 42, SHA: sha40},
-		access: 30,
+		hookID:      99,
+		awards:      map[int64][]gitlab.Award{},
+		nextAwardID: 500,
+		user:        &gitlab.User{ID: 9, Username: "review-bot"},
+		mr:          &gitlab.MergeRequest{IID: 7, State: "opened", TargetProjectID: 42, SHA: sha40},
+		access:      30,
 	}
 }
 
@@ -250,6 +437,23 @@ func (s *recordingDeliveryStore) RecordDelivery(ctx context.Context, d store.Del
 	return s.WebhookStore.RecordDelivery(ctx, d, j)
 }
 
+func (s *recordingDeliveryStore) RecordReviewCandidateDelivery(ctx context.Context, d store.Delivery, candidate *store.ReviewCandidate) (store.ReviewEnqueueResult, error) {
+	s.mu.Lock()
+	s.records = append(s.records, d)
+	if candidate != nil {
+		payload := candidate.Payload
+		s.jobs = append(s.jobs, &store.Job{
+			Kind: "review.candidate", Key: "review.candidate:" + itoa(candidate.ProjectID) + ":" + itoa(candidate.MRIID),
+			Payload: payload, MaxAttempts: candidate.MaxAttempts,
+		})
+	}
+	s.mu.Unlock()
+	if s.recErr != nil {
+		return store.ReviewEnqueueResult{}, s.recErr
+	}
+	return s.WebhookStore.RecordReviewCandidateDelivery(ctx, d, candidate)
+}
+
 type failingProjectStore struct {
 	ProjectStore
 	err   error
@@ -278,22 +482,20 @@ func (s *commandFakeStore) GetProject(_ context.Context, id int64) (*store.Proje
 	return s.project, nil
 }
 
-func (s *commandFakeStore) Enqueue(_ context.Context, job store.Job) (string, bool, error) {
-	return s.save(job)
-}
-
-func (s *commandFakeStore) EnqueueLatest(_ context.Context, job store.Job) (string, bool, error) {
-	return s.save(job)
-}
-
-func (s *commandFakeStore) save(job store.Job) (string, bool, error) {
+func (s *commandFakeStore) EnqueueReviewLatest(_ context.Context, command store.ReviewCommand) (store.ReviewEnqueueResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.enqueueErr != nil {
-		return "", false, s.enqueueErr
+		return store.ReviewEnqueueResult{}, s.enqueueErr
 	}
-	s.jobs = append(s.jobs, job)
-	return "job-1", s.duplicate, nil
+	kind, key := "review.run", reviewRunKey(command.ProjectID, command.MRIID)
+	if command.Cancel {
+		kind, key = "review.cancel", reviewCancelKey(command.ProjectID, command.MRIID)
+	}
+	s.jobs = append(s.jobs, store.Job{
+		Kind: kind, Key: key, Payload: command.Payload, MaxAttempts: command.MaxAttempts,
+	})
+	return store.ReviewEnqueueResult{JobID: "job-1", Duplicate: s.duplicate}, nil
 }
 
 func (s *commandFakeStore) enqueued() []store.Job {

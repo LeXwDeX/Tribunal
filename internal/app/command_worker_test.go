@@ -10,7 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/gitlab"
+	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/jobs"
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
 )
 
@@ -34,16 +37,16 @@ type recordingCommandStore struct {
 	dup []bool
 }
 
-func (s *recordingCommandStore) EnqueueLatest(ctx context.Context, job store.Job) (string, bool, error) {
-	id, duplicate, err := s.CommandStore.EnqueueLatest(ctx, job)
+func (s *recordingCommandStore) EnqueueReviewLatest(ctx context.Context, command store.ReviewCommand) (store.ReviewEnqueueResult, error) {
+	result, err := s.CommandStore.EnqueueReviewLatest(ctx, command)
 	if err != nil {
-		return id, duplicate, err
+		return result, err
 	}
 	s.mu.Lock()
-	s.ids = append(s.ids, id)
-	s.dup = append(s.dup, duplicate)
+	s.ids = append(s.ids, result.JobID)
+	s.dup = append(s.dup, result.Duplicate)
 	s.mu.Unlock()
-	return id, duplicate, nil
+	return result, nil
 }
 
 func TestCommandWorkerReplacesQueuedLatestPayload(t *testing.T) {
@@ -294,6 +297,157 @@ func TestCommandWorkerDeniesReporter(t *testing.T) {
 	if len(fakeStore.enqueued()) != 0 {
 		t.Fatal("reporter was allowed to enqueue a review")
 	}
+	notes := api.noteSnapshot()
+	if len(notes) != 1 {
+		t.Fatalf("permission replies = %d, want 1", len(notes))
+	}
+	if !strings.Contains(notes[0].Body, "Developer") {
+		t.Fatalf("permission reply = %q", notes[0].Body)
+	}
+	if !strings.HasPrefix(notes[0].Body, commandReplyPrefix(555)) {
+		t.Fatalf("permission reply marker missing: %q", notes[0].Body)
+	}
+}
+
+func TestCommandWorkerDeniedHelpGetsPermissionReply(t *testing.T) {
+	fakeStore := openFakeStore(t, newTestCipher(t))
+	api := defaultFakeGitLab()
+	api.access = 20
+	worker := newCommandTestWorker(t, api, fakeStore, nil)
+	if err := worker.Handle(context.Background(), commandJob(t, defaultCommandPayload(commandHelp))); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(fakeStore.enqueued()) != 0 {
+		t.Fatal("denied help enqueued a review")
+	}
+	notes := api.noteSnapshot()
+	if len(notes) != 1 || !strings.Contains(notes[0].Body, "Developer") {
+		t.Fatalf("permission reply = %+v", notes)
+	}
+	if strings.Contains(notes[0].Body, "可用命令") {
+		t.Fatal("denied help received the command help text")
+	}
+}
+
+func TestCommandWorkerHelpRepliesWithoutEnqueue(t *testing.T) {
+	fakeStore := openFakeStore(t, newTestCipher(t))
+	api := defaultFakeGitLab()
+	worker := newCommandTestWorker(t, api, fakeStore, nil)
+	payload := defaultCommandPayload(commandHelp)
+	if err := worker.Handle(context.Background(), commandJob(t, payload)); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(fakeStore.enqueued()) != 0 {
+		t.Fatal("help enqueued a review job")
+	}
+	notes := api.noteSnapshot()
+	if len(notes) != 1 {
+		t.Fatalf("help replies = %d, want 1", len(notes))
+	}
+	body := notes[0].Body
+	if !strings.HasPrefix(body, commandReplyPrefix(payload.NoteID)) {
+		t.Fatalf("help marker missing: %q", body)
+	}
+	for _, command := range []string{"/review full", "/review cancel", "/review help"} {
+		if !strings.Contains(body, command) {
+			t.Errorf("help reply is missing %q: %q", command, body)
+		}
+	}
+	if strings.Index(body, "`deep`") > strings.Index(body, "`default`") {
+		t.Fatalf("profiles are not sorted: %q", body)
+	}
+	if strings.Contains(body, "alice") || strings.Contains(body, "run arbitrary") {
+		t.Fatalf("help reply echoed note content: %q", body)
+	}
+	if api.callCount("ListMRNotes") != 1 || api.callCount("CreateMRNote") != 1 {
+		t.Fatalf("reply calls = list %d create %d", api.callCount("ListMRNotes"), api.callCount("CreateMRNote"))
+	}
+}
+
+func TestCommandWorkerReplyRetryDoesNotDuplicate(t *testing.T) {
+	fakeStore := openFakeStore(t, newTestCipher(t))
+	api := defaultFakeGitLab()
+	api.access = 20
+	worker := newCommandTestWorker(t, api, fakeStore, nil)
+	job := commandJob(t, defaultCommandPayload("run"))
+	for i := 0; i < 2; i++ {
+		if err := worker.Handle(context.Background(), job); err != nil {
+			t.Fatalf("Handle %d: %v", i, err)
+		}
+	}
+	if notes := api.noteSnapshot(); len(notes) != 1 {
+		t.Fatalf("retry created %d replies", len(notes))
+	}
+	if api.noteCreates != 1 || api.noteUpdates != 0 {
+		t.Fatalf("reply writes = create %d update %d", api.noteCreates, api.noteUpdates)
+	}
+	if len(fakeStore.enqueued()) != 0 {
+		t.Fatal("denied command enqueued a review")
+	}
+}
+
+func TestCommandWorkerReplyUpdatesStaleBody(t *testing.T) {
+	fakeStore := openFakeStore(t, newTestCipher(t))
+	api := defaultFakeGitLab()
+	api.access = 20
+	api.notes = []gitlab.Note{{ID: 7, AuthorID: api.user.ID, Body: commandReplyBody(555, "help", "stale")}}
+	worker := newCommandTestWorker(t, api, fakeStore, nil)
+	if err := worker.Handle(context.Background(), commandJob(t, defaultCommandPayload("run"))); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	notes := api.noteSnapshot()
+	if len(notes) != 1 || api.noteUpdates != 1 || api.noteCreates != 0 {
+		t.Fatalf("reply writes = notes %d create %d update %d", len(notes), api.noteCreates, api.noteUpdates)
+	}
+	if !strings.Contains(notes[0].Body, "Developer") {
+		t.Fatalf("stale reply was not updated: %q", notes[0].Body)
+	}
+}
+
+func TestCommandWorkerReplyFailuresRetry(t *testing.T) {
+	t.Run("help note list", func(t *testing.T) {
+		fakeStore := openFakeStore(t, newTestCipher(t))
+		api := defaultFakeGitLab()
+		api.listNotesErr = errors.New("transport glpat-seeded-token https://gitlab.example.com")
+		worker := newCommandTestWorker(t, api, fakeStore, nil)
+		err := worker.Handle(context.Background(), commandJob(t, defaultCommandPayload(commandHelp)))
+		if err == nil {
+			t.Fatal("expected retryable error")
+		}
+		for _, forbidden := range []string{"glpat", "https://"} {
+			if strings.Contains(err.Error(), forbidden) {
+				t.Fatalf("error leaked %q: %v", forbidden, err)
+			}
+		}
+		if len(fakeStore.enqueued()) != 0 || len(api.noteSnapshot()) != 0 {
+			t.Fatal("failed help reply mutated state")
+		}
+	})
+	t.Run("help note create", func(t *testing.T) {
+		fakeStore := openFakeStore(t, newTestCipher(t))
+		api := defaultFakeGitLab()
+		api.createNoteErr = errors.New("create failed")
+		worker := newCommandTestWorker(t, api, fakeStore, nil)
+		if err := worker.Handle(context.Background(), commandJob(t, defaultCommandPayload(commandHelp))); err == nil {
+			t.Fatal("expected retryable error")
+		}
+		if len(fakeStore.enqueued()) != 0 {
+			t.Fatal("failed help reply enqueued a review")
+		}
+	})
+	t.Run("canceled context", func(t *testing.T) {
+		fakeStore := openFakeStore(t, newTestCipher(t))
+		api := defaultFakeGitLab()
+		worker := newCommandTestWorker(t, api, fakeStore, nil)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := worker.Handle(ctx, commandJob(t, defaultCommandPayload(commandHelp))); !errors.Is(err, context.Canceled) {
+			t.Fatalf("Handle = %v, want context.Canceled", err)
+		}
+		if api.callCount("CurrentUser") != 0 || len(api.noteSnapshot()) != 0 {
+			t.Fatal("canceled command reached GitLab")
+		}
+	})
 }
 
 func TestCommandWorkerIgnoresSelfBot(t *testing.T) {
@@ -309,6 +463,9 @@ func TestCommandWorkerIgnoresSelfBot(t *testing.T) {
 	}
 	if api.callCount("GetMemberAccess") != 0 || api.callCount("GetMergeRequest") != 0 {
 		t.Fatal("self bot note was not rejected before MR/member calls")
+	}
+	if len(api.noteSnapshot()) != 0 {
+		t.Fatal("self bot note received a reply")
 	}
 }
 
@@ -370,6 +527,38 @@ func TestCommandWorkerIgnoresClosedMR(t *testing.T) {
 	if api.callCount("GetMemberAccess") != 0 {
 		t.Fatal("closed MR reached member validation")
 	}
+	if len(api.noteSnapshot()) != 0 {
+		t.Fatal("closed MR received a reply")
+	}
+}
+
+func TestCommandWorkerIgnoresMismatchedProject(t *testing.T) {
+	fakeStore := openFakeStore(t, newTestCipher(t))
+	api := defaultFakeGitLab()
+	api.mr.TargetProjectID = 99
+	worker := newCommandTestWorker(t, api, fakeStore, nil)
+	if err := worker.Handle(context.Background(), commandJob(t, defaultCommandPayload("run"))); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(fakeStore.enqueued()) != 0 || len(api.noteSnapshot()) != 0 {
+		t.Fatal("mismatched project received a review or reply")
+	}
+	if api.callCount("GetMemberAccess") != 0 {
+		t.Fatal("mismatched project reached member validation")
+	}
+}
+
+func TestCommandWorkerIgnoresMissingMR(t *testing.T) {
+	fakeStore := openFakeStore(t, newTestCipher(t))
+	api := defaultFakeGitLab()
+	api.mrErr = &gitlab.Error{Op: "get_mr", Status: 404}
+	worker := newCommandTestWorker(t, api, fakeStore, nil)
+	if err := worker.Handle(context.Background(), commandJob(t, defaultCommandPayload("run"))); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(fakeStore.enqueued()) != 0 || len(api.noteSnapshot()) != 0 {
+		t.Fatal("missing MR received a review or reply")
+	}
 }
 
 func TestCommandWorkerCancel(t *testing.T) {
@@ -397,6 +586,9 @@ func TestCommandWorkerMemberLookupOutcomes(t *testing.T) {
 		if len(fakeStore.enqueued()) != 0 {
 			t.Fatal("unknown member was allowed")
 		}
+		if notes := api.noteSnapshot(); len(notes) != 1 || !strings.Contains(notes[0].Body, "Developer") {
+			t.Fatalf("permission reply = %+v", notes)
+		}
 	})
 	t.Run("upstream error retries", func(t *testing.T) {
 		fakeStore := openFakeStore(t, newTestCipher(t))
@@ -408,6 +600,9 @@ func TestCommandWorkerMemberLookupOutcomes(t *testing.T) {
 		}
 		if len(fakeStore.enqueued()) != 0 {
 			t.Fatal("job enqueued without access verification")
+		}
+		if len(api.noteSnapshot()) != 0 {
+			t.Fatal("upstream failure was reported as a definitive denial")
 		}
 	})
 }
@@ -525,5 +720,186 @@ func TestLifecycle(t *testing.T) {
 func TestCommandWorkerRequiresDependencies(t *testing.T) {
 	if _, err := NewCommandWorker(CommandWorkerConfig{}); err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestHelpWebhookWorkerEndToEnd(t *testing.T) {
+	ctx := context.Background()
+	db := openTestStore(t)
+	cipher := newTestCipher(t)
+	seedProject(t, db, cipher, 42, "whsec-test", "{}", "default")
+	api := defaultFakeGitLab()
+	webhook, err := NewWebhookService(WebhookServiceConfig{
+		Store:          db,
+		Cipher:         cipher,
+		Profiles:       testProfiles(),
+		ReviewDefaults: testDefaults(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := webhook.Handle(ctx, WebhookRequest{
+		Event: "Note Hook",
+		Token: "whsec-test",
+		UUID:  uuid.NewString(),
+		Body:  noteBody(42, 7, 777, 12, "alice", "/review help"),
+	})
+	if err != nil || !result.Accepted {
+		t.Fatalf("webhook = %+v, err = %v", result, err)
+	}
+	if len(api.callList()) != 0 {
+		t.Fatalf("webhook called GitLab: %v", api.callList())
+	}
+	command, err := db.GetJob(ctx, result.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := NewCommandWorker(CommandWorkerConfig{
+		Store: db, GitLab: api, Cipher: cipher, Profiles: testProfiles(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Handle(ctx, &jobs.Job{ID: command.ID, Kind: command.Kind, Payload: command.Payload}); err != nil {
+		t.Fatalf("worker: %v", err)
+	}
+	notes := api.noteSnapshot()
+	if len(notes) != 1 || !strings.Contains(notes[0].Body, "/review full") {
+		t.Fatalf("help replies = %+v", notes)
+	}
+	claimed, err := db.Claim(ctx, "help-e2e", []string{"review.run"}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed != nil {
+		t.Fatalf("help enqueued review.run: %+v", claimed)
+	}
+}
+
+func TestCommandWorkerEnqueuesSourceNoteForStoreReceipt(t *testing.T) {
+	fakeStore := openFakeStore(t, newTestCipher(t))
+	api := defaultFakeGitLab()
+	worker := newCommandTestWorker(t, api, fakeStore, nil)
+	job := commandJob(t, defaultCommandPayload("run"))
+	for i := 0; i < 2; i++ {
+		if err := worker.Handle(context.Background(), job); err != nil {
+			t.Fatalf("Handle %d: %v", i, err)
+		}
+	}
+	jobs := fakeStore.enqueued()
+	if len(jobs) != 2 {
+		t.Fatalf("jobs = %d, want both retries to enqueue", len(jobs))
+	}
+	for _, enqueued := range jobs {
+		var payload map[string]any
+		if err := json.Unmarshal(enqueued.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["note_id"] != float64(555) {
+			t.Fatalf("enqueued payload lost the source note: %v", payload)
+		}
+	}
+	api.mu.Lock()
+	adds := append([]string(nil), api.awardAdds...)
+	api.mu.Unlock()
+	if len(adds) != 0 {
+		t.Fatalf("command worker wrote pre-enqueue reactions: %v", adds)
+	}
+}
+
+func TestCommandWorkerCancelEnqueuesCancelNote(t *testing.T) {
+	fakeStore := openFakeStore(t, newTestCipher(t))
+	api := defaultFakeGitLab()
+	worker := newCommandTestWorker(t, api, fakeStore, nil)
+	payload := defaultCommandPayload("cancel")
+	payload.NoteID = 777
+	if err := worker.Handle(context.Background(), commandJob(t, payload)); err != nil {
+		t.Fatal(err)
+	}
+	jobs := fakeStore.enqueued()
+	if len(jobs) != 1 || jobs[0].Kind != "review.cancel" {
+		t.Fatalf("cancel jobs = %+v", jobs)
+	}
+	var enqueued map[string]any
+	if err := json.Unmarshal(jobs[0].Payload, &enqueued); err != nil {
+		t.Fatal(err)
+	}
+	if enqueued["note_id"] != float64(777) {
+		t.Fatalf("cancel payload lost its note: %v", enqueued)
+	}
+	api.mu.Lock()
+	adds := append([]string(nil), api.awardAdds...)
+	api.mu.Unlock()
+	if len(adds) != 0 {
+		t.Fatalf("cancel worker wrote pre-enqueue reactions: %v", adds)
+	}
+}
+
+func TestCommandWorkerDeniedDoesNotAddEyes(t *testing.T) {
+	fakeStore := openFakeStore(t, newTestCipher(t))
+	api := defaultFakeGitLab()
+	api.access = 20
+	worker := newCommandTestWorker(t, api, fakeStore, nil)
+	job := commandJob(t, defaultCommandPayload("run"))
+	for i := 0; i < 2; i++ {
+		if err := worker.Handle(context.Background(), job); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(api.awardAdds) != 0 {
+		t.Fatalf("denied command added reactions: %v", api.awardAdds)
+	}
+}
+
+func TestCommandWorkerEnqueueFailureDoesNotTouchReactions(t *testing.T) {
+	fakeStore := openFakeStore(t, newTestCipher(t))
+	fakeStore.enqueueErr = errors.New("queue unavailable")
+	api := defaultFakeGitLab()
+	worker := newCommandTestWorker(t, api, fakeStore, nil)
+	if err := worker.Handle(context.Background(), commandJob(t, defaultCommandPayload("run"))); err == nil {
+		t.Fatal("enqueue failure was swallowed")
+	}
+	api.mu.Lock()
+	adds := append([]string(nil), api.awardAdds...)
+	api.mu.Unlock()
+	if len(adds) != 0 {
+		t.Fatalf("failed enqueue left reactions: %v", adds)
+	}
+	if jobs := fakeStore.enqueued(); len(jobs) != 0 {
+		t.Fatalf("jobs = %d, want none", len(jobs))
+	}
+}
+
+func TestCommandWorkerRecordsQueuedStatusAndReaction(t *testing.T) {
+	ctx := context.Background()
+	db := openTestStore(t)
+	cipher := newTestCipher(t)
+	seedProject(t, db, cipher, 42, "whsec", "{}", "default")
+	api := defaultFakeGitLab()
+	worker, err := NewCommandWorker(CommandWorkerConfig{
+		Store:    db,
+		GitLab:   api,
+		Cipher:   cipher,
+		Profiles: testProfiles(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Handle(ctx, commandJob(t, defaultCommandPayload("run"))); err != nil {
+		t.Fatal(err)
+	}
+	status, err := db.GetReviewStatus(ctx, 42, 7)
+	if err != nil {
+		t.Fatalf("GetReviewStatus: %v", err)
+	}
+	if status.State != reviewStatusQueued || status.Generation != 1 {
+		t.Fatalf("queued status = %+v", status)
+	}
+	reaction, err := db.GetReviewReaction(ctx, 42, 7, 555)
+	if err != nil || reaction.Desired != reviewAwardEyes {
+		t.Fatalf("source-note reaction = %+v, %v", reaction, err)
+	}
+	if len(api.noteSnapshot()) != 0 {
+		t.Fatalf("command worker wrote GitLab before the side-effect job: %+v", api.noteSnapshot())
 	}
 }

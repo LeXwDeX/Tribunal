@@ -16,10 +16,11 @@ import (
 
 // GatherOut is the code node output for gather.
 type GatherOut struct {
-	Groups      []Group           `json:"groups"`
-	Dropped     []Finding         `json:"dropped,omitempty"`
-	ToChallenge []ChallengeTarget `json:"to_challenge"`
-	Warnings    []string          `json:"warnings,omitempty"`
+	Groups      []Group            `json:"groups"`
+	Dropped     []Finding          `json:"dropped,omitempty"`
+	ToChallenge []ChallengeTarget  `json:"to_challenge"`
+	Warnings    []string           `json:"warnings,omitempty"`
+	Unresolved  []UnresolvedSignal `json:"unresolved,omitempty"`
 }
 
 // Validate checks the gather contract invariants used by the expander.
@@ -29,6 +30,9 @@ func (g GatherOut) Validate() error {
 	}
 	if g.ToChallenge == nil {
 		return invalid("to_challenge", "is required")
+	}
+	if err := validateUnresolved(g.Unresolved); err != nil {
+		return wrapField("unresolved", err)
 	}
 	byID := make(map[string]Group, len(g.Groups))
 	for i, group := range g.Groups {
@@ -61,14 +65,18 @@ func (g GatherOut) Validate() error {
 
 // AdjudicateOut is the code node output for adjudicate.
 type AdjudicateOut struct {
-	Groups   []Group  `json:"groups"`
-	Warnings []string `json:"warnings,omitempty"`
+	Groups     []Group            `json:"groups"`
+	Warnings   []string           `json:"warnings,omitempty"`
+	Unresolved []UnresolvedSignal `json:"unresolved,omitempty"`
 }
 
 // Validate checks the adjudicate contract invariants.
 func (a AdjudicateOut) Validate() error {
 	if a.Groups == nil {
 		return invalid("groups", "is required")
+	}
+	if err := validateUnresolved(a.Unresolved); err != nil {
+		return wrapField("unresolved", err)
 	}
 	seen := make(map[string]struct{}, len(a.Groups))
 	for i, group := range a.Groups {
@@ -109,20 +117,21 @@ func (v VerifyResult) Validate() error {
 // SynthesisResult is the synthesize node output. Output preserves the model
 // contract; Groups is the code-owned final state used by rendering/publishing.
 type SynthesisResult struct {
-	Verdict  string        `json:"verdict"`
-	Summary  string        `json:"summary"`
-	Groups   []Group       `json:"groups"`
-	Warnings []string      `json:"warnings,omitempty"`
-	Output   SynthesizeOut `json:"output"`
-	Fallback bool          `json:"fallback,omitempty"`
+	Verdict    string             `json:"verdict"`
+	Summary    string             `json:"summary"`
+	Groups     []Group            `json:"groups"`
+	Warnings   []string           `json:"warnings,omitempty"`
+	Unresolved []UnresolvedSignal `json:"unresolved,omitempty"`
+	Output     SynthesizeOut      `json:"output"`
+	Fallback   bool               `json:"fallback,omitempty"`
 }
 
 // Validate checks the final synthesis envelope.
 func (s SynthesisResult) Validate() error {
 	switch s.Verdict {
-	case VerdictPass, VerdictBlocking:
+	case VerdictPass, VerdictBlocking, VerdictIncomplete:
 	default:
-		return invalid("verdict", "must be PASS or BLOCKING")
+		return invalid("verdict", "must be PASS, BLOCKING, or INCOMPLETE")
 	}
 	if err := checkText("summary", s.Summary, MaxSummaryRunes, true); err != nil {
 		return err
@@ -135,10 +144,20 @@ func (s SynthesisResult) Validate() error {
 			return wrapField(fmt.Sprintf("groups[%d]", i), err)
 		}
 	}
+	if err := validateUnresolved(s.Unresolved); err != nil {
+		return wrapField("unresolved", err)
+	}
+	if s.Verdict == VerdictIncomplete {
+		if len(s.Unresolved) == 0 {
+			return invalid("unresolved", "is required when verdict is INCOMPLETE")
+		}
+	} else if len(s.Unresolved) != 0 {
+		return invalid("unresolved", "must be empty unless verdict is INCOMPLETE")
+	}
 	if err := s.Output.Validate(); err != nil {
 		return wrapField("output", err)
 	}
-	if s.Output.Verdict != s.Verdict {
+	if s.Output.Verdict != s.Verdict && s.Verdict != VerdictIncomplete {
 		return invalid("verdict", "must match output.verdict")
 	}
 	return nil
@@ -266,6 +285,43 @@ func (e *Executor) snapshot(ctx context.Context, workflowID string) (dag.Workflo
 	return e.deps.Snapshot(ctx, workflowID)
 }
 
+// providerIdentities resolves endpoint+model identity for every provider the
+// gather can vote on or choose as a challenger. A client lookup failure keeps
+// the provider in the map with an empty identity, which makes voting and
+// cross-model selection conservative instead of inventing independence.
+func (e *Executor) providerIdentities(proposals []Proposal, params gatherParams) map[string]string {
+	if e == nil || e.deps.Clients == nil {
+		return nil
+	}
+	names := make(map[string]struct{})
+	for _, proposal := range proposals {
+		if proposal.Provider != "" {
+			names[proposal.Provider] = struct{}{}
+		}
+	}
+	for _, name := range params.AllowedProviders {
+		if name != "" {
+			names[name] = struct{}{}
+		}
+	}
+	if params.FallbackProvider != "" {
+		names[params.FallbackProvider] = struct{}{}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(names))
+	for name := range names {
+		client, err := e.deps.Clients.Client(name)
+		if err != nil {
+			out[name] = ""
+			continue
+		}
+		out[name] = client.Info().ModelIdentity()
+	}
+	return out
+}
+
 // executeGather collects completed proposals, applies gate rebuttals, and
 // deduplicates findings. It never calls an LLM.
 func (e *Executor) executeGather(ctx context.Context, in dag.NodeInput) (dag.NodeOutput, error) {
@@ -277,10 +333,11 @@ func (e *Executor) executeGather(ctx context.Context, in dag.NodeInput) (dag.Nod
 	if err != nil {
 		return dag.NodeOutput{}, err
 	}
-	proposals, dropped, warnings, err := e.collectProposals(wf)
+	proposals, dropped, signals, warnings, err := e.collectProposals(wf)
 	if err != nil {
 		return dag.NodeOutput{}, err
 	}
+	signals = append(signals, e.coverageUnresolved(wf)...)
 	if scope := e.incrementalFiles(); scope != nil {
 		filtered := make([]Proposal, 0, len(proposals))
 		for _, proposal := range proposals {
@@ -323,6 +380,7 @@ func (e *Executor) executeGather(ctx context.Context, in dag.NodeInput) (dag.Nod
 		WorkflowID: in.WorkflowID,
 		Proposals:  proposals,
 		Dropped:    dropped,
+		Unresolved: signals,
 	}, GatherOptions{
 		ChallengeOnly:     params.ChallengeOnly,
 		MinVotes:          params.MinVotes,
@@ -330,6 +388,7 @@ func (e *Executor) executeGather(ctx context.Context, in dag.NodeInput) (dag.Nod
 		ChallengeProvider: params.ChallengeProvider,
 		FallbackProvider:  params.FallbackProvider,
 		AllowedProviders:  params.AllowedProviders,
+		Identities:        e.providerIdentities(proposals, params),
 		BudgetExhausted:   budgetExhausted,
 	})
 	if err != nil {
@@ -341,7 +400,9 @@ func (e *Executor) executeGather(ctx context.Context, in dag.NodeInput) (dag.Nod
 		Dropped:     gathered.Dropped,
 		ToChallenge: gathered.ToChallenge,
 		Warnings:    warnings,
+		Unresolved:  gathered.Unresolved,
 	}
+	applyChallengeLimit(&out, wf)
 	if out.Groups == nil {
 		out.Groups = []Group{}
 	}
@@ -354,7 +415,7 @@ func (e *Executor) executeGather(ctx context.Context, in dag.NodeInput) (dag.Nod
 	return marshalNodeOutput(out, dag.Usage{})
 }
 
-func (e *Executor) collectProposals(wf dag.WorkflowView) ([]Proposal, []DroppedFinding, []string, error) {
+func (e *Executor) collectProposals(wf dag.WorkflowView) ([]Proposal, []DroppedFinding, []UnresolvedSignal, []string, error) {
 	order := append([]string(nil), wf.Order...)
 	if len(order) == 0 {
 		for id := range wf.Nodes {
@@ -364,6 +425,7 @@ func (e *Executor) collectProposals(wf dag.WorkflowView) ([]Proposal, []DroppedF
 	}
 	proposals := make([]Proposal, 0)
 	dropped := make([]DroppedFinding, 0)
+	signals := make([]UnresolvedSignal, 0)
 	warnings := make([]string, 0)
 	for _, id := range order {
 		node, ok := wf.Nodes[id]
@@ -387,32 +449,37 @@ func (e *Executor) collectProposals(wf dag.WorkflowView) ([]Proposal, []DroppedF
 		case KindCodeReview:
 			out, err := DecodeStrict[*CodeReviewOut](node.Output)
 			if err != nil {
-				return nil, nil, nil, fmt.Errorf("review: decode %s: %w", node.ID, err)
+				return nil, nil, nil, nil, fmt.Errorf("review: decode %s: %w", node.ID, err)
 			}
 			proposals = append(proposals, ProposalFromCodeReview(node.ID, provider, model, node.Attempt, *out))
 		case KindReviewStd, KindReviewInt:
 			out, err := DecodeStrict[*ReviewOut](node.Output)
 			if err != nil {
-				return nil, nil, nil, fmt.Errorf("review: decode %s: %w", node.ID, err)
+				return nil, nil, nil, nil, fmt.Errorf("review: decode %s: %w", node.ID, err)
 			}
-			proposals = append(proposals, ProposalFromReview(node.ID, node.Spec.Kind, provider, model, node.Attempt, *out))
+			proposal := ProposalFromReview(node.ID, node.Spec.Kind, provider, model, node.Attempt, *out)
+			proposals = append(proposals, proposal)
+			// Collect evidence signals before incremental filtering: a filtered
+			// finding must not hide a missing-evidence declaration.
+			signals = append(signals, proposalUnresolved(proposal)...)
 		case KindReasoner:
 			out, err := DecodeStrict[*ReasonerOut](node.Output)
 			if err != nil {
-				return nil, nil, nil, fmt.Errorf("review: decode %s: %w", node.ID, err)
+				return nil, nil, nil, nil, fmt.Errorf("review: decode %s: %w", node.ID, err)
 			}
 			proposals = append(proposals, ProposalFromReasoner(node.ID, provider, model, node.Attempt, *out))
 		case KindReviewGate:
 			out, err := DecodeStrict[*ReviewGateOut](node.Output)
 			if err != nil {
-				return nil, nil, nil, fmt.Errorf("review: decode %s: %w", node.ID, err)
+				return nil, nil, nil, nil, fmt.Errorf("review: decode %s: %w", node.ID, err)
 			}
 			for _, rebut := range out.Rebutted {
 				dropped = append(dropped, DroppedFinding{Ref: rebut.Ref, Reason: rebut.Reason})
 			}
+			signals = append(signals, gateUnresolved(node.ID, *out)...)
 		}
 	}
-	return proposals, dropped, warnings, nil
+	return proposals, dropped, signals, warnings, nil
 }
 
 func nodeProvider(node dag.NodeView) string {
@@ -496,12 +563,14 @@ func (e *Executor) executeAdjudicate(ctx context.Context, in dag.NodeInput) (dag
 		ChallengeOnly: params.ChallengeOnly,
 		OnUncertain:   params.OnUncertain,
 		Locator:       e.deps.Locate,
+		CodeEvidence:  e.validateCodeRef,
 		Warnings:      warnings,
+		Unresolved:    gathered.Unresolved,
 	})
 	if err != nil {
 		return dag.NodeOutput{}, err
 	}
-	out := AdjudicateOut{Groups: result.Groups, Warnings: result.Warnings}
+	out := AdjudicateOut{Groups: result.Groups, Warnings: result.Warnings, Unresolved: result.Unresolved}
 	if out.Groups == nil {
 		out.Groups = []Group{}
 	}

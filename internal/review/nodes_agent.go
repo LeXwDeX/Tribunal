@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/agent"
+	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/llm"
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/pkg/dag"
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/prompts"
 )
@@ -71,11 +72,12 @@ func (e *Executor) executePlanAgent(ctx context.Context, in dag.NodeInput, param
 		},
 	}
 	result, err := e.callAgent(ctx, in, agentOptions{
-		Role:     role,
-		Provider: params.Provider,
-		Submit:   submit,
-		Task:     planTask(e.deps.Dossier, params),
-		Builtins: true,
+		Role:       role,
+		Provider:   params.Provider,
+		Submit:     submit,
+		Task:       planTask(e.deps.Dossier, params),
+		Builtins:   true,
+		BeforeTurn: e.budgetHook(in.WorkflowID),
 	})
 	if err != nil {
 		return dag.NodeOutput{}, err
@@ -111,6 +113,7 @@ func (e *Executor) executeCodeReview(ctx context.Context, in dag.NodeInput) (dag
 		Task:       reviewTask(e.deps.Dossier, params),
 		Builtins:   true,
 		BlockTools: true,
+		BeforeTurn: e.budgetHook(in.WorkflowID),
 	})
 	if err != nil {
 		return dag.NodeOutput{}, err
@@ -151,6 +154,7 @@ func (e *Executor) executeReviewChannel(ctx context.Context, in dag.NodeInput) (
 		Task:       reviewChannelTask(e.deps.Dossier, params, kind),
 		Builtins:   true,
 		BlockTools: true,
+		BeforeTurn: e.budgetHook(in.WorkflowID),
 	})
 	if err != nil {
 		return dag.NodeOutput{}, err
@@ -215,10 +219,11 @@ func (e *Executor) executeReviewGate(ctx context.Context, in dag.NodeInput) (dag
 	}
 	provider := e.reviewProvider()
 	result, err := e.callAgent(ctx, in, agentOptions{
-		Role:     role,
-		Provider: provider,
-		Submit:   submit,
-		Task:     reviewGateTask(e.deps.Dossier, params, channels),
+		Role:       role,
+		Provider:   provider,
+		Submit:     submit,
+		Task:       reviewGateTask(e.deps.Dossier, params, channels),
+		BeforeTurn: e.budgetHook(in.WorkflowID),
 	})
 	if err != nil {
 		return dag.NodeOutput{}, err
@@ -260,11 +265,12 @@ func (e *Executor) executeReasoner(ctx context.Context, in dag.NodeInput) (dag.N
 		},
 	}
 	result, err := e.callAgent(ctx, in, agentOptions{
-		Role:     role,
-		Provider: provider,
-		Submit:   submit,
-		Task:     reasonerTask(e.deps.Dossier),
-		Builtins: true,
+		Role:       role,
+		Provider:   provider,
+		Submit:     submit,
+		Task:       reasonerTask(e.deps.Dossier),
+		Builtins:   true,
+		BeforeTurn: e.budgetHook(in.WorkflowID),
 	})
 	if err != nil {
 		return dag.NodeOutput{}, err
@@ -305,6 +311,7 @@ func (e *Executor) executeVerify(ctx context.Context, in dag.NodeInput) (dag.Nod
 		Task:       verifyTask(params.Finding),
 		Builtins:   true,
 		BlockTools: true,
+		BeforeTurn: e.budgetHook(in.WorkflowID),
 	})
 	if err != nil {
 		return dag.NodeOutput{}, err
@@ -331,7 +338,7 @@ func (e *Executor) executeSynthesize(ctx context.Context, in dag.NodeInput) (dag
 	if err != nil {
 		return dag.NodeOutput{}, err
 	}
-	groups, extendsUsed, warnings, err := e.synthesisGroups(ctx, in, params)
+	groups, extendsUsed, unresolved, warnings, err := e.synthesisGroups(ctx, in, params)
 	if err != nil {
 		return dag.NodeOutput{}, err
 	}
@@ -342,15 +349,40 @@ func (e *Executor) executeSynthesize(ctx context.Context, in dag.NodeInput) (dag
 	if mode == "" {
 		mode = "code"
 	}
+	exhausted, err := e.tokenBudgetExhausted(ctx, in.WorkflowID)
+	if err != nil {
+		return dag.NodeOutput{}, err
+	}
+	if exhausted {
+		warnings = mergeWarnings(warnings, []string{"budget exhausted: some findings were not verified"})
+	}
 	if mode == "code" {
 		result, err := buildCodeSynthesis(groups, params, warnings)
 		if err != nil {
+			return dag.NodeOutput{}, err
+		}
+		applyUnresolved(&result, unresolved)
+		applyBudgetGap(&result, exhausted)
+		if err := result.Validate(); err != nil {
 			return dag.NodeOutput{}, err
 		}
 		return marshalNodeOutput(result, dag.Usage{})
 	}
 	if mode != "agent" {
 		return dag.NodeOutput{}, fmt.Errorf("review: unsupported synthesize mode %q", mode)
+	}
+	if exhausted {
+		warnings = mergeWarnings(warnings, []string{"token budget exhausted before model synthesis; deterministic rules settlement used"})
+		result, err := buildCodeSynthesis(groups, params, warnings)
+		if err != nil {
+			return dag.NodeOutput{}, err
+		}
+		applyUnresolved(&result, unresolved)
+		applyBudgetGap(&result, exhausted)
+		if err := result.Validate(); err != nil {
+			return dag.NodeOutput{}, err
+		}
+		return marshalNodeOutput(result, dag.Usage{})
 	}
 	provider := params.Provider
 	if provider == "" {
@@ -387,7 +419,7 @@ func (e *Executor) executeSynthesize(ctx context.Context, in dag.NodeInput) (dag
 				lastValidationErr = validateErr
 				return nil, validateErr
 			}
-			if validateErr := validateMainChallenges(out, groups); validateErr != nil {
+			if validateErr := validateMainChallenges(out, groups, e.validateCodeRef); validateErr != nil {
 				lastValidationErr = validateErr
 				return nil, validateErr
 			}
@@ -401,10 +433,29 @@ func (e *Executor) executeSynthesize(ctx context.Context, in dag.NodeInput) (dag
 		Task:       synthesizeTask(e.deps.Dossier, groups, params),
 		Builtins:   true,
 		BlockTools: false,
+		NoRetry:    true,
+		BeforeTurn: func(ctx context.Context, usage llm.Usage) error {
+			base, max, err := e.tokenBudget(ctx, in.WorkflowID)
+			if err != nil {
+				return err
+			}
+			if max > 0 && base+usage.InputTokens+usage.OutputTokens >= max {
+				return errSynthesisBudgetExhausted
+			}
+			return nil
+		},
 	})
 	if runErr != nil {
-		if !errors.Is(runErr, agent.ErrInvalidSubmit) && !errors.Is(runErr, agent.ErrNoSubmit) {
+		budgetStopped := errors.Is(runErr, errSynthesisBudgetExhausted)
+		transportStopped := retryableTransport(runErr)
+		if !budgetStopped && !transportStopped && !errors.Is(runErr, agent.ErrInvalidSubmit) && !errors.Is(runErr, agent.ErrNoSubmit) {
 			return dag.NodeOutput{}, runErr
+		}
+		if budgetStopped {
+			warnings = appendUnique(warnings, "token budget exhausted during model synthesis; deterministic rules settlement used")
+		}
+		if transportStopped {
+			warnings = appendUnique(warnings, "model synthesis transport failed; deterministic rules settlement used")
 		}
 		cause := lastValidationErr
 		if cause == nil {
@@ -412,14 +463,20 @@ func (e *Executor) executeSynthesize(ctx context.Context, in dag.NodeInput) (dag
 		}
 		fallback := BuildRulesFallback(groups, cause)
 		out := synthesizeOutFromFallback(fallback)
+		mergedWarnings := mergeWarnings(warnings, fallback.Warnings)
+		if err := validatePublishedMainGroups(fallback.Groups, e.validateCodeRef); err != nil {
+			return dag.NodeOutput{}, err
+		}
 		final := SynthesisResult{
 			Verdict:  fallback.Verdict,
-			Summary:  fallback.Summary,
+			Summary:  withVerificationCaveat(fallback.Summary, mergedWarnings),
 			Groups:   fallback.Groups,
-			Warnings: mergeWarnings(warnings, fallback.Warnings),
+			Warnings: mergedWarnings,
 			Output:   out,
 			Fallback: true,
 		}
+		applyUnresolved(&final, unresolved)
+		applyBudgetGap(&final, exhausted || budgetStopped)
 		usage := dag.Usage{}
 		if result != nil {
 			usage = e.dagUsage(provider, result.Usage)
@@ -438,17 +495,44 @@ func (e *Executor) executeSynthesize(ctx context.Context, in dag.NodeInput) (dag
 		applied = append(applied, newFindingGroups(in.WorkflowID, in.Node.ID, in.Attempt, out.NewFindings)...)
 		warnings = appendUnique(warnings, "new findings await verification and were not published")
 	}
+	if !isSecondSynthesis(in.Node.ID) && len(out.ExtendRequests) > 0 {
+		fits, err := e.extensionFits(ctx, in.WorkflowID, len(out.ExtendRequests))
+		if err != nil {
+			return dag.NodeOutput{}, err
+		}
+		if !fits {
+			warnings = appendUnique(warnings, "max_nodes limit reached: extension requests were not scheduled")
+		}
+	}
+	if err := validatePublishedMainGroups(applied, e.validateCodeRef); err != nil {
+		return dag.NodeOutput{}, err
+	}
 	final := SynthesisResult{
 		Verdict:  out.Verdict,
-		Summary:  out.Summary,
+		Summary:  withVerificationCaveat(out.Summary, warnings),
 		Groups:   applied,
 		Warnings: warnings,
 		Output:   *out,
 	}
+	applyUnresolved(&final, unresolved)
+	applyBudgetGap(&final, exhausted)
 	if err := final.Validate(); err != nil {
 		return dag.NodeOutput{}, err
 	}
 	return marshalNodeOutput(final, e.dagUsage(provider, result.Usage))
+}
+
+// applyBudgetGap prevents an exhausted budget from producing a clean PASS
+// when the remaining scope was never verified or synthesized. Existing
+// BLOCKING findings stay blocking; only PASS becomes INCOMPLETE.
+func applyBudgetGap(result *SynthesisResult, exhausted bool) {
+	if result == nil || !exhausted || result.Verdict != VerdictPass {
+		return
+	}
+	applyUnresolved(result, []UnresolvedSignal{{
+		Node: "budget", Kind: UnresolvedEvidence,
+		Message: "workflow token budget exhausted before the remaining review scope was verified or synthesized",
+	}})
 }
 
 func (e *Executor) executeOnboarding(ctx context.Context, in dag.NodeInput) (dag.NodeOutput, error) {
@@ -482,6 +566,7 @@ func (e *Executor) executeOnboarding(ctx context.Context, in dag.NodeInput) (dag
 		Task:       onboardingTask(e.deps.Dossier),
 		Builtins:   true,
 		BlockTools: true,
+		BeforeTurn: e.budgetHook(in.WorkflowID),
 	})
 	if err != nil {
 		return dag.NodeOutput{}, err
@@ -525,27 +610,70 @@ func isSecondSynthesis(nodeID string) bool {
 	return nodeID == NodeSynth2 || strings.HasPrefix(nodeID, NodeSynth2+".")
 }
 
+// extensionFits reports whether the graph has room for the requested nodes
+// plus synthesize.2. The synthesize expander applies the same rule.
+func (e *Executor) extensionFits(ctx context.Context, workflowID string, requests int) (bool, error) {
+	if e.deps.Snapshot == nil {
+		return true, nil
+	}
+	wf, err := e.snapshot(ctx, workflowID)
+	if err != nil {
+		return false, err
+	}
+	limit := challengeLimit(wf)
+	if limit < 0 {
+		return true, nil
+	}
+	return requests+1 <= limit, nil
+}
+
+// tokenBudget returns the committed usage and the configured limit.
+func (e *Executor) tokenBudget(ctx context.Context, workflowID string) (int64, int64, error) {
+	if e.deps.Snapshot == nil {
+		return 0, 0, nil
+	}
+	wf, err := e.snapshot(ctx, workflowID)
+	if err != nil {
+		return 0, 0, err
+	}
+	return wf.Usage.InputTokens + wf.Usage.OutputTokens, wf.Spec.Budget.MaxTokens, nil
+}
+
+// tokenBudgetExhausted reports whether the workflow has consumed its token
+// budget. It reads the same snapshot the node executors already use.
+func (e *Executor) tokenBudgetExhausted(ctx context.Context, workflowID string) (bool, error) {
+	used, max, err := e.tokenBudget(ctx, workflowID)
+	if err != nil {
+		return false, err
+	}
+	if max <= 0 {
+		return false, nil
+	}
+	return used >= max, nil
+}
+
 // synthesisGroups loads adjudicate groups and, for synthesize.2, the verified
 // main findings from the previous synthesize result.
-func (e *Executor) synthesisGroups(ctx context.Context, in dag.NodeInput, params synthesizeParams) ([]Group, int, []string, error) {
+func (e *Executor) synthesisGroups(ctx context.Context, in dag.NodeInput, params synthesizeParams) ([]Group, int, []UnresolvedSignal, []string, error) {
 	wf, err := e.snapshot(ctx, in.WorkflowID)
 	if err != nil {
-		return nil, 0, nil, err
+		return nil, 0, nil, nil, err
 	}
 	extendsUsed := wf.ExtendsUsed
 	adjudicated, err := e.adjudicateInput(ctx, in)
 	if err != nil {
-		return nil, 0, nil, err
+		return nil, 0, nil, nil, err
 	}
 	groups := cloneGroups(adjudicated.Groups)
 	warnings := append([]string(nil), adjudicated.Warnings...)
 	if !isSecondSynthesis(in.Node.ID) {
-		return groups, extendsUsed, warnings, nil
+		return groups, extendsUsed, adjudicated.Unresolved, warnings, nil
 	}
 	previous, err := e.previousSynthesis(ctx, in, params)
 	if err != nil {
-		return nil, 0, nil, err
+		return nil, 0, nil, nil, err
 	}
+	unresolved := mergeUnresolved(adjudicated.Unresolved, previous.Unresolved)
 	byID := make(map[string]Group, len(groups)+len(previous.Groups))
 	for _, group := range groups {
 		byID[group.ID] = group
@@ -571,12 +699,12 @@ func (e *Executor) synthesisGroups(ctx context.Context, in dag.NodeInput, params
 	if len(main) > 0 {
 		results, failed, err := collectVerifyResults(wf)
 		if err != nil {
-			return nil, 0, nil, err
+			return nil, 0, nil, nil, err
 		}
 		for i := range main {
 			group := &main[i]
 			if application, ok := results[group.ID]; ok {
-				if application.Result.Status == "REFUTED" && !HasValidCodeEvidence(application.Result.Evidence) {
+				if application.Result.Status == "REFUTED" && !ValidCodeEvidence(application.Result.Evidence, e.validateCodeRef) {
 					application.Result.Status = "UNCERTAIN"
 				}
 				group.Challenge = &Challenge{
@@ -589,7 +717,7 @@ func (e *Executor) synthesisGroups(ctx context.Context, in dag.NodeInput, params
 					SuggestedSeverity: application.Result.SuggestedSeverity,
 					SameModel:         application.SameModel,
 				}
-				group.Decision = mainFindingDecision(*group, OnUncertain(params.OnUncertain))
+				group.Decision = mainFindingDecision(*group, OnUncertain(params.OnUncertain), e.validateCodeRef)
 			} else if reason, ok := failed[group.ID]; ok {
 				group.Challenge = &Challenge{Status: ChallengeFailed, Reason: reason}
 				group.Decision = &FindingDecision{Action: ActionDrop, Reason: "verification failed; the new finding is not published", Source: "rules"}
@@ -604,11 +732,11 @@ func (e *Executor) synthesisGroups(ctx context.Context, in dag.NodeInput, params
 	}
 	extensionGroups, extensionWarnings, err := extensionReviewGroups(wf, merged)
 	if err != nil {
-		return nil, 0, nil, err
+		return nil, 0, nil, nil, err
 	}
 	merged = append(merged, extensionGroups...)
 	warnings = mergeWarnings(warnings, extensionWarnings)
-	return merged, extendsUsed, warnings, nil
+	return merged, extendsUsed, unresolved, warnings, nil
 }
 
 // extensionReviewGroups folds findings from extend review nodes into the
@@ -719,7 +847,7 @@ func (e *Executor) previousSynthesis(ctx context.Context, in dag.NodeInput, para
 	return decodeSynthesisResult(node.Output)
 }
 
-func mainFindingDecision(group Group, policy OnUncertain) *FindingDecision {
+func mainFindingDecision(group Group, policy OnUncertain, validators ...EvidenceValidator) *FindingDecision {
 	if group.Challenge == nil {
 		return &FindingDecision{Action: ActionMark, Reason: "no challenge result", Source: "rules"}
 	}
@@ -727,7 +855,7 @@ func mainFindingDecision(group Group, policy OnUncertain) *FindingDecision {
 	case ChallengeConfirmed:
 		return &FindingDecision{Action: ActionPublish, Reason: "challenge confirmed", Source: "rules"}
 	case ChallengeRefuted:
-		if HasValidCodeEvidence(group.Challenge.Evidence) {
+		if ValidCodeEvidence(group.Challenge.Evidence, firstEvidenceValidator(validators)) {
 			return &FindingDecision{Action: ActionDrop, Reason: "challenge refuted with a code location", Source: "rules"}
 		}
 	}
@@ -787,7 +915,8 @@ func newFindingGroups(workflowID, nodeID string, attempt int, findings []Finding
 
 // validateMainChallenges enforces I5 for synthesize.2: a main finding without
 // a completed verification cannot be published or marked.
-func validateMainChallenges(out *SynthesizeOut, groups []Group) error {
+func validateMainChallenges(out *SynthesizeOut, groups []Group, validators ...EvidenceValidator) error {
+	validator := firstEvidenceValidator(validators)
 	main := make(map[string]Group)
 	for _, group := range groups {
 		if group.Origin.Main {
@@ -799,22 +928,61 @@ func validateMainChallenges(out *SynthesizeOut, groups []Group) error {
 		if !ok {
 			continue
 		}
-		if group.Challenge == nil || group.Challenge.Status == ChallengePending ||
-			group.Challenge.Status == ChallengeFailed || group.Challenge.Status == ChallengeSkipped {
-			if decision.Action == string(ActionPublish) || decision.Action == string(ActionMark) {
-				return invalid(fmt.Sprintf("decisions[%d].finding_id", i), "new finding %s has no successful verification result", group.ID)
-			}
+		if publishingAction(Action(decision.Action)) && !verificationSettled(group.Challenge, validator) {
+			return invalid(fmt.Sprintf("decisions[%d].finding_id", i), "new finding %s has no successful verification result", group.ID)
 		}
 	}
 	for _, group := range groups {
 		if !group.Origin.Main {
 			continue
 		}
-		if group.Decision != nil && (group.Decision.Action == ActionPublish || group.Decision.Action == ActionMark) {
-			if group.Challenge == nil || group.Challenge.Status == ChallengePending ||
-				group.Challenge.Status == ChallengeFailed || group.Challenge.Status == ChallengeSkipped {
-				return invalid("groups", "new finding %s has no successful verification result", group.ID)
-			}
+		if group.Decision != nil && publishingAction(group.Decision.Action) && !verificationSettled(group.Challenge, validator) {
+			return invalid("groups", "new finding %s has no successful verification result", group.ID)
+		}
+	}
+	return nil
+}
+
+func firstEvidenceValidator(validators []EvidenceValidator) EvidenceValidator {
+	for _, validator := range validators {
+		if validator != nil {
+			return validator
+		}
+	}
+	return nil
+}
+
+func publishingAction(action Action) bool {
+	switch action {
+	case ActionPublish, ActionMark, ActionDowngrade:
+		return true
+	default:
+		return false
+	}
+}
+
+func verificationSettled(challenge *Challenge, validators ...EvidenceValidator) bool {
+	validator := firstEvidenceValidator(validators)
+	if challenge == nil {
+		return false
+	}
+	switch challenge.Status {
+	case ChallengeConfirmed, ChallengeUncertain:
+		return true
+	case ChallengeRefuted:
+		return ValidCodeEvidence(challenge.Evidence, validator)
+	default:
+		return false
+	}
+}
+
+// validatePublishedMainGroups is the final guard: a main finding may not be
+// published, marked, or downgraded unless a verification actually completed.
+func validatePublishedMainGroups(groups []Group, validators ...EvidenceValidator) error {
+	validator := firstEvidenceValidator(validators)
+	for _, group := range groups {
+		if group.Origin.Main && group.Published() && !verificationSettled(group.Challenge, validator) {
+			return invalid("groups", "main finding %s cannot be published without a completed verification", group.ID)
 		}
 	}
 	return nil
@@ -856,12 +1024,16 @@ func buildCodeSynthesis(groups []Group, params synthesizeParams, warnings []stri
 	if len(warnings) > 0 {
 		summary += " 存在规则告警，详见评审提示。"
 	}
+	summary = truncateRunes(withVerificationCaveat(summary, warnings), MaxSummaryRunes)
 	output := SynthesizeOut{
 		Verdict:        verdict,
 		Summary:        truncateRunes(summary, MaxSummaryRunes),
 		Decisions:      decisionsForGroups(final),
 		NewFindings:    []FindingOut{},
 		ExtendRequests: []ExtendRequest{},
+	}
+	if err := validatePublishedMainGroups(final); err != nil {
+		return SynthesisResult{}, err
 	}
 	result := SynthesisResult{
 		Verdict:  verdict,

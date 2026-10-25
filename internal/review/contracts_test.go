@@ -785,13 +785,23 @@ func TestContractSchemas(t *testing.T) {
 		if len(schemas[kind]) == 0 {
 			t.Fatalf("missing schema %s", kind)
 		}
+		var schema map[string]any
+		if err := json.Unmarshal(schemas[kind], &schema); err != nil {
+			t.Fatalf("decode %s schema: %v", kind, err)
+		}
+		if schema["type"] != "object" || schema["$ref"] != nil {
+			t.Fatalf("%s tool schema must expose an object root, got type=%v ref=%v", kind, schema["type"], schema["$ref"])
+		}
+		if schema["additionalProperties"] != false {
+			t.Fatalf("%s tool schema must reject additional properties", kind)
+		}
 	}
 	var plan map[string]any
 	if err := json.Unmarshal(schemas[ContractPlan], &plan); err != nil {
 		t.Fatalf("decode schema: %v", err)
 	}
 	defs := plan["$defs"].(map[string]any)
-	planDef := defs["PlanOut"].(map[string]any)
+	planDef := plan
 	if planDef["additionalProperties"] != false {
 		t.Fatalf("schema must reject additional properties: %#v", planDef["additionalProperties"])
 	}

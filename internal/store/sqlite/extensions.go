@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,95 @@ import (
 
 	"github.com/LeXwDeX/Code-Review-For-Gitlab-CE/internal/store"
 )
+
+const (
+	listCursorProjects = "projects"
+	listCursorTokens   = "tokens"
+	listCursorMCP      = "mcp"
+	listCursorSkills   = "skills"
+	listCursorBindings = "bindings"
+)
+
+// listCursor is the shared opaque keyset cursor. Each list method fills only
+// the fields it needs and rejects a cursor bound to another filter.
+type listCursor struct {
+	Kind         string `json:"kind"`
+	Query        string `json:"query,omitempty"`
+	Enabled      *bool  `json:"enabled,omitempty"`
+	UserID       int64  `json:"user_id,omitempty"`
+	Scope        string `json:"scope,omitempty"`
+	ProjectID    *int64 `json:"project_id,omitempty"`
+	At           string `json:"at,omitempty"`
+	ID           string `json:"id,omitempty"`
+	RowScope     string `json:"row_scope,omitempty"`
+	RowProjectID int64  `json:"row_project_id,omitempty"`
+	Block        string `json:"block,omitempty"`
+}
+
+func encodeListCursor(cursor listCursor) string {
+	raw, err := json.Marshal(cursor)
+	if err != nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+func decodeListCursor(raw, kind string) (listCursor, error) {
+	var cursor listCursor
+	data, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil || len(data) == 0 {
+		return cursor, fmt.Errorf("%w: %s cursor", store.ErrInvalidCursor, kind)
+	}
+	if err := json.Unmarshal(data, &cursor); err != nil || cursor.Kind != kind {
+		return cursor, fmt.Errorf("%w: %s cursor", store.ErrInvalidCursor, kind)
+	}
+	if cursor.At != "" {
+		if _, err := parseTime(cursor.At); err != nil {
+			return cursor, fmt.Errorf("%w: %s cursor", store.ErrInvalidCursor, kind)
+		}
+	}
+	return cursor, nil
+}
+
+func sameProjectID(a, b *int64) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+func sameBool(a, b *bool) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+// extensionScopeClauses builds the shared scope/project selector. The
+// platformProject predicate differs because block bindings store platform
+// ownership as project_id 0 while MCP servers and skills use NULL.
+func extensionScopeClauses(scope string, projectID *int64, platformProject string) ([]string, []any, error) {
+	scope = strings.TrimSpace(scope)
+	if err := store.ValidateExtensionScope(scope, projectID, false); err != nil {
+		return nil, nil, err
+	}
+	where := []string{"1 = 1"}
+	args := make([]any, 0, 2)
+	switch scope {
+	case store.ScopePlatform:
+		where = append(where, "scope = ?", platformProject)
+		args = append(args, store.ScopePlatform)
+	case store.ScopeProject:
+		where = append(where, "scope = ?", "project_id = ?")
+		args = append(args, store.ScopeProject, *projectID)
+	default:
+		if projectID != nil {
+			where = append(where, "project_id = ?")
+			args = append(args, *projectID)
+		}
+	}
+	return where, args, nil
+}
 
 // ---------------------------------------------------------------------------
 // MCP servers
@@ -44,24 +134,9 @@ func scanMCPServer(row rowScanner) (*store.MCPServer, error) {
 // ListMCPServers returns servers matching the scope selector. An empty scope
 // lists every scope; a nil project ID with project scope is rejected.
 func (s *Store) ListMCPServers(ctx context.Context, scope string, projectID *int64) ([]store.MCPServer, error) {
-	scope = strings.TrimSpace(scope)
-	if err := store.ValidateExtensionScope(scope, projectID, false); err != nil {
+	where, args, err := extensionScopeClauses(scope, projectID, "project_id IS NULL")
+	if err != nil {
 		return nil, err
-	}
-	where := []string{"1 = 1"}
-	args := make([]any, 0, 2)
-	switch scope {
-	case store.ScopePlatform:
-		where = append(where, "scope = ?", "project_id IS NULL")
-		args = append(args, store.ScopePlatform)
-	case store.ScopeProject:
-		where = append(where, "scope = ?", "project_id = ?")
-		args = append(args, store.ScopeProject, *projectID)
-	default:
-		if projectID != nil {
-			where = append(where, "project_id = ?")
-			args = append(args, *projectID)
-		}
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT `+mcpServerColumns+` FROM mcp_servers
 		WHERE `+strings.Join(where, " AND ")+` ORDER BY created_at DESC, id DESC`, args...)
@@ -81,6 +156,61 @@ func (s *Store) ListMCPServers(ctx context.Context, scope string, projectID *int
 		return nil, fmt.Errorf("sqlite: iterate mcp servers: %w", err)
 	}
 	return servers, nil
+}
+
+// ListMCPServersPage returns one bounded page of servers. The cursor binds to
+// the scope selector so it cannot resume another scope or project.
+func (s *Store) ListMCPServersPage(ctx context.Context, scope string, projectID *int64, cursor string, limit int) ([]store.MCPServer, string, error) {
+	scope = strings.TrimSpace(scope)
+	limit = normalizeLimit(limit)
+	where, args, err := extensionScopeClauses(scope, projectID, "project_id IS NULL")
+	if err != nil {
+		return nil, "", err
+	}
+	if cursor != "" {
+		bound, err := decodeListCursor(cursor, listCursorMCP)
+		if err != nil {
+			return nil, "", err
+		}
+		if bound.Scope != scope || !sameProjectID(bound.ProjectID, projectID) || bound.ID == "" {
+			return nil, "", fmt.Errorf("%w: mcp cursor scope", store.ErrInvalidCursor)
+		}
+		at, err := parseTime(bound.At)
+		if err != nil {
+			return nil, "", fmt.Errorf("%w: mcp cursor", store.ErrInvalidCursor)
+		}
+		where = append(where, "(created_at < ? OR (created_at = ? AND id < ?))")
+		args = append(args, formatTime(at), formatTime(at), bound.ID)
+	}
+	args = append(args, limit+1)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+mcpServerColumns+` FROM mcp_servers
+		WHERE `+strings.Join(where, " AND ")+`
+		ORDER BY created_at DESC, id DESC LIMIT ?`, args...)
+	if err != nil {
+		return nil, "", fmt.Errorf("sqlite: list mcp servers: %w", err)
+	}
+	defer rows.Close()
+	servers := make([]store.MCPServer, 0, limit)
+	for rows.Next() {
+		server, err := scanMCPServer(rows)
+		if err != nil {
+			return nil, "", fmt.Errorf("sqlite: scan mcp server: %w", err)
+		}
+		servers = append(servers, *server)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", fmt.Errorf("sqlite: iterate mcp servers: %w", err)
+	}
+	next := ""
+	if len(servers) > limit {
+		servers = servers[:limit]
+		last := servers[len(servers)-1]
+		next = encodeListCursor(listCursor{
+			Kind: listCursorMCP, Scope: scope, ProjectID: projectID,
+			At: formatTime(last.CreatedAt), ID: last.ID,
+		})
+	}
+	return servers, next, nil
 }
 
 // GetMCPServer returns one server by ID.
@@ -264,24 +394,9 @@ func scanSkill(row rowScanner) (*store.Skill, error) {
 
 // ListSkills returns skills matching the scope selector.
 func (s *Store) ListSkills(ctx context.Context, scope string, projectID *int64) ([]store.Skill, error) {
-	scope = strings.TrimSpace(scope)
-	if err := store.ValidateExtensionScope(scope, projectID, false); err != nil {
+	where, args, err := extensionScopeClauses(scope, projectID, "project_id IS NULL")
+	if err != nil {
 		return nil, err
-	}
-	where := []string{"1 = 1"}
-	args := make([]any, 0, 2)
-	switch scope {
-	case store.ScopePlatform:
-		where = append(where, "scope = ?", "project_id IS NULL")
-		args = append(args, store.ScopePlatform)
-	case store.ScopeProject:
-		where = append(where, "scope = ?", "project_id = ?")
-		args = append(args, store.ScopeProject, *projectID)
-	default:
-		if projectID != nil {
-			where = append(where, "project_id = ?")
-			args = append(args, *projectID)
-		}
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT `+skillColumns+` FROM skills
 		WHERE `+strings.Join(where, " AND ")+` ORDER BY created_at DESC, id DESC`, args...)
@@ -301,6 +416,60 @@ func (s *Store) ListSkills(ctx context.Context, scope string, projectID *int64) 
 		return nil, fmt.Errorf("sqlite: iterate skills: %w", err)
 	}
 	return skills, nil
+}
+
+// ListSkillsPage returns one bounded page of skills for the scope selector.
+func (s *Store) ListSkillsPage(ctx context.Context, scope string, projectID *int64, cursor string, limit int) ([]store.Skill, string, error) {
+	scope = strings.TrimSpace(scope)
+	limit = normalizeLimit(limit)
+	where, args, err := extensionScopeClauses(scope, projectID, "project_id IS NULL")
+	if err != nil {
+		return nil, "", err
+	}
+	if cursor != "" {
+		bound, err := decodeListCursor(cursor, listCursorSkills)
+		if err != nil {
+			return nil, "", err
+		}
+		if bound.Scope != scope || !sameProjectID(bound.ProjectID, projectID) || bound.ID == "" {
+			return nil, "", fmt.Errorf("%w: skills cursor scope", store.ErrInvalidCursor)
+		}
+		at, err := parseTime(bound.At)
+		if err != nil {
+			return nil, "", fmt.Errorf("%w: skills cursor", store.ErrInvalidCursor)
+		}
+		where = append(where, "(created_at < ? OR (created_at = ? AND id < ?))")
+		args = append(args, formatTime(at), formatTime(at), bound.ID)
+	}
+	args = append(args, limit+1)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+skillColumns+` FROM skills
+		WHERE `+strings.Join(where, " AND ")+`
+		ORDER BY created_at DESC, id DESC LIMIT ?`, args...)
+	if err != nil {
+		return nil, "", fmt.Errorf("sqlite: list skills: %w", err)
+	}
+	defer rows.Close()
+	skills := make([]store.Skill, 0, limit)
+	for rows.Next() {
+		skill, err := scanSkill(rows)
+		if err != nil {
+			return nil, "", fmt.Errorf("sqlite: scan skill: %w", err)
+		}
+		skills = append(skills, *skill)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", fmt.Errorf("sqlite: iterate skills: %w", err)
+	}
+	next := ""
+	if len(skills) > limit {
+		skills = skills[:limit]
+		last := skills[len(skills)-1]
+		next = encodeListCursor(listCursor{
+			Kind: listCursorSkills, Scope: scope, ProjectID: projectID,
+			At: formatTime(last.CreatedAt), ID: last.ID,
+		})
+	}
+	return skills, next, nil
 }
 
 // CreateSkill stores one skill row. Uploaded archives keep Dir empty.
@@ -410,24 +579,9 @@ func scanBlockBinding(row rowScanner) (*store.BlockBinding, error) {
 
 // ListBlockBindings returns bindings matching the scope selector.
 func (s *Store) ListBlockBindings(ctx context.Context, scope string, projectID *int64) ([]store.BlockBinding, error) {
-	scope = strings.TrimSpace(scope)
-	if err := store.ValidateExtensionScope(scope, projectID, false); err != nil {
+	where, args, err := extensionScopeClauses(scope, projectID, "project_id = 0")
+	if err != nil {
 		return nil, err
-	}
-	where := []string{"1 = 1"}
-	args := make([]any, 0, 2)
-	switch scope {
-	case store.ScopePlatform:
-		where = append(where, "scope = ?", "project_id = 0")
-		args = append(args, store.ScopePlatform)
-	case store.ScopeProject:
-		where = append(where, "scope = ?", "project_id = ?")
-		args = append(args, store.ScopeProject, *projectID)
-	default:
-		if projectID != nil {
-			where = append(where, "project_id = ?")
-			args = append(args, *projectID)
-		}
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT `+blockBindingColumns+` FROM block_bindings
 		WHERE `+strings.Join(where, " AND ")+` ORDER BY scope, project_id, block`, args...)
@@ -447,6 +601,65 @@ func (s *Store) ListBlockBindings(ctx context.Context, scope string, projectID *
 		return nil, fmt.Errorf("sqlite: iterate block bindings: %w", err)
 	}
 	return bindings, nil
+}
+
+// ListBlockBindingsPage returns one bounded page ordered by
+// (scope, project_id, block). The cursor binds to the request scope and to
+// the last row key, so deleted rows do not invalidate it.
+func (s *Store) ListBlockBindingsPage(ctx context.Context, scope string, projectID *int64, cursor string, limit int) ([]store.BlockBinding, string, error) {
+	scope = strings.TrimSpace(scope)
+	limit = normalizeLimit(limit)
+	where, args, err := extensionScopeClauses(scope, projectID, "project_id = 0")
+	if err != nil {
+		return nil, "", err
+	}
+	if cursor != "" {
+		bound, err := decodeListCursor(cursor, listCursorBindings)
+		if err != nil {
+			return nil, "", err
+		}
+		if bound.Scope != scope || !sameProjectID(bound.ProjectID, projectID) ||
+			bound.RowScope == "" || bound.Block == "" {
+			return nil, "", fmt.Errorf("%w: bindings cursor scope", store.ErrInvalidCursor)
+		}
+		where = append(where,
+			"(scope > ? OR (scope = ? AND project_id > ?) OR (scope = ? AND project_id = ? AND block > ?))")
+		args = append(args, bound.RowScope, bound.RowScope, bound.RowProjectID,
+			bound.RowScope, bound.RowProjectID, bound.Block)
+	}
+	args = append(args, limit+1)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+blockBindingColumns+` FROM block_bindings
+		WHERE `+strings.Join(where, " AND ")+`
+		ORDER BY scope, project_id, block LIMIT ?`, args...)
+	if err != nil {
+		return nil, "", fmt.Errorf("sqlite: list block bindings: %w", err)
+	}
+	defer rows.Close()
+	bindings := make([]store.BlockBinding, 0, limit)
+	for rows.Next() {
+		binding, err := scanBlockBinding(rows)
+		if err != nil {
+			return nil, "", fmt.Errorf("sqlite: scan block binding: %w", err)
+		}
+		bindings = append(bindings, *binding)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", fmt.Errorf("sqlite: iterate block bindings: %w", err)
+	}
+	next := ""
+	if len(bindings) > limit {
+		bindings = bindings[:limit]
+		last := bindings[len(bindings)-1]
+		rowProject := int64(0)
+		if last.ProjectID != nil {
+			rowProject = *last.ProjectID
+		}
+		next = encodeListCursor(listCursor{
+			Kind: listCursorBindings, Scope: scope, ProjectID: projectID,
+			RowScope: last.Scope, RowProjectID: rowProject, Block: last.Block,
+		})
+	}
+	return bindings, next, nil
 }
 
 // UpsertBlockBinding creates or replaces one block binding.

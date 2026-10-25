@@ -24,6 +24,12 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Storage.Driver != "sqlite" || cfg.Storage.DSN == "" {
 		t.Errorf("storage defaults = %q/%q", cfg.Storage.Driver, cfg.Storage.DSN)
 	}
+	if cfg.Storage.LLMCallRetention != 720*time.Hour ||
+		cfg.Storage.DeliveryRetention != 336*time.Hour ||
+		cfg.Storage.JobRetention != 168*time.Hour ||
+		cfg.Storage.ContextVersions != 5 {
+		t.Errorf("storage retention defaults = %+v", cfg.Storage)
+	}
 	if cfg.Secrets.MasterKeyEnv != "REVIEW_MASTER_KEY" {
 		t.Errorf("secrets.master_key_env = %q", cfg.Secrets.MasterKeyEnv)
 	}

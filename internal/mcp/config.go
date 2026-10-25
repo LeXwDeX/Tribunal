@@ -207,9 +207,10 @@ func parseRaw(data []byte) (Config, error) {
 	return Config{MCPServers: *raw.MCPServers}, nil
 }
 
-// ParseServer reads one mcpServers entry, as posted by the extension API. It
-// applies environment expansion, defaults and validation.
-func ParseServer(data []byte, denied ...string) (ServerConfig, error) {
+// DecodeServer reads one strict, bounded mcpServers entry. It rejects unknown
+// fields and trailing data but does not expand ${NAME} references, so stored
+// configuration keeps its templates.
+func DecodeServer(data []byte) (ServerConfig, error) {
 	if len(data) == 0 || len(data) > MaxConfigBytes {
 		return ServerConfig{}, fmt.Errorf("%w: invalid server document size", ErrInvalidConfig)
 	}
@@ -222,7 +223,17 @@ func ParseServer(data []byte, denied ...string) (ServerConfig, error) {
 	if err := ensureJSONEOF(dec); err != nil {
 		return ServerConfig{}, err
 	}
-	cfg, err := expandServer("", cfg, os.LookupEnv, cleanDenied(denied))
+	return cfg, nil
+}
+
+// ParseServer reads one mcpServers entry, as posted by the extension API. It
+// applies environment expansion, defaults and validation.
+func ParseServer(data []byte, denied ...string) (ServerConfig, error) {
+	cfg, err := DecodeServer(data)
+	if err != nil {
+		return ServerConfig{}, err
+	}
+	cfg, err = expandServer("", cfg, os.LookupEnv, cleanDenied(denied))
 	if err != nil {
 		return ServerConfig{}, err
 	}
@@ -231,6 +242,43 @@ func ParseServer(data []byte, denied ...string) (ServerConfig, error) {
 		return ServerConfig{}, err
 	}
 	return cfg, nil
+}
+
+// ValidateServerJSON validates one stored entry without expanding environment
+// references or reading the process environment. Unknown fields, invalid
+// values and references to denied or sensitive variables are rejected.
+func ValidateServerJSON(name string, data []byte, denied ...string) error {
+	cfg, err := DecodeServer(data)
+	if err != nil {
+		return err
+	}
+	cfg = cfg.withDefaults()
+	if name != "" {
+		if err := ValidateServerName(name); err != nil {
+			return err
+		}
+	}
+	if err := cfg.Validate(name); err != nil {
+		return err
+	}
+	denied = cleanDenied(denied)
+	for _, key := range sortedKeys(cfg.Env) {
+		if nameDenied(key, denied) {
+			return fmt.Errorf("%w: server config: env[%s]: environment variable is not allowed", ErrInvalidConfig, key)
+		}
+	}
+	return validateTemplateRefs(cfg, denied)
+}
+
+// ValidateServerName checks the stable server identifier used in tool names.
+func ValidateServerName(name string) error {
+	if !serverNameRE.MatchString(name) {
+		return fmt.Errorf("%w: invalid server name", ErrInvalidConfig)
+	}
+	if strings.Contains(name, "__") {
+		return fmt.Errorf("%w: server name must not contain \"__\"", ErrInvalidConfig)
+	}
+	return nil
 }
 
 // LoadFile reads a bounded MCP configuration file.
@@ -380,15 +428,79 @@ func expandValue(value string, lookup func(string) (string, bool), denied []stri
 	return out, firstErr
 }
 
+// validateTemplateRefs rejects sensitive or malformed ${NAME} references
+// without resolving them. Error messages name the variable, never its value.
+func validateTemplateRefs(cfg ServerConfig, denied []string) error {
+	check := func(field, value string) error {
+		if !strings.Contains(value, "${") {
+			return nil
+		}
+		var firstErr error
+		out := envRefRE.ReplaceAllStringFunc(value, func(ref string) string {
+			name := ref[2 : len(ref)-1]
+			if dangerousName(name) || sensitiveName(name) || nameDenied(name, denied) {
+				if firstErr == nil {
+					firstErr = fmt.Errorf("%w: environment variable %s is not allowed", ErrSensitiveEnv, name)
+				}
+				return ref
+			}
+			return ""
+		})
+		if strings.Contains(out, "${") && firstErr == nil {
+			firstErr = errors.New("invalid environment variable reference")
+		}
+		if firstErr != nil {
+			return fmt.Errorf("%w: server config: %s: %w", ErrInvalidConfig, field, firstErr)
+		}
+		return nil
+	}
+	if err := check("command", cfg.Command); err != nil {
+		return err
+	}
+	if err := check("url", cfg.URL); err != nil {
+		return err
+	}
+	for i, arg := range cfg.Args {
+		if err := check(fmt.Sprintf("args[%d]", i), arg); err != nil {
+			return err
+		}
+	}
+	for i, arg := range cfg.XReview.IndexCommand {
+		if err := check(fmt.Sprintf("x-review.index_command[%d]", i), arg); err != nil {
+			return err
+		}
+	}
+	if err := check("x-review.home", cfg.XReview.Home); err != nil {
+		return err
+	}
+	for _, key := range sortedKeys(cfg.Env) {
+		if err := check("env["+key+"]", cfg.Env[key]); err != nil {
+			return err
+		}
+	}
+	for _, key := range sortedKeys(cfg.Headers) {
+		if err := check("headers["+key+"]", cfg.Headers[key]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func sortedKeys(values map[string]string) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 // Validate checks one named server. An empty name validates the shape only,
 // as used by ParseServer.
 func (cfg ServerConfig) Validate(name string) error {
 	if name != "" {
-		if !serverNameRE.MatchString(name) {
-			return fmt.Errorf("%w: invalid server name", ErrInvalidConfig)
-		}
-		if strings.Contains(name, "__") {
-			return fmt.Errorf("%w: server name must not contain \"__\"", ErrInvalidConfig)
+		if err := ValidateServerName(name); err != nil {
+			return err
 		}
 	}
 	kind := strings.ToLower(strings.TrimSpace(cfg.Type))

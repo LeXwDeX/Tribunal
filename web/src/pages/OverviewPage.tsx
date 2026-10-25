@@ -24,7 +24,14 @@ interface Alert {
   action: string
 }
 
-function buildAlerts(projects: Project[], providers: Provider[], failed: ReviewSummary[]): Alert[] {
+type ReviewIssueKind = 'run' | 'publication' | 'retry'
+
+interface ReviewIssue {
+  review: ReviewSummary
+  kind: ReviewIssueKind
+}
+
+function buildAlerts(projects: Project[], providers: Provider[], reviewIssues: ReviewIssue[]): Alert[] {
   const alerts: Alert[] = []
   const now = Date.now()
   for (const project of projects) {
@@ -78,17 +85,39 @@ function buildAlerts(projects: Project[], providers: Provider[], failed: ReviewS
       })
     }
   }
-  for (const review of failed.slice(0, 5)) {
-    alerts.push({
-      id: `review-${review.id}`,
-      tone: 'danger',
-      label: '评审失败',
-      text: `!${review.mr_iid} ${review.mr_title || ''} 执行失败。`,
-      href: `/reviews/${encodeURIComponent(review.id)}`,
-      action: '查看评审',
-    })
+  for (const { review, kind } of reviewIssues) {
+    const title = `!${review.mr_iid} ${review.mr_title || ''}`.trim()
+    if (kind === 'run') {
+      alerts.push({
+        id: `review-${review.id}`,
+        tone: 'danger',
+        label: '评审失败',
+        text: `${title} 执行失败。`,
+        href: `/reviews/${encodeURIComponent(review.id)}`,
+        action: '查看评审',
+      })
+    } else if (kind === 'publication') {
+      alerts.push({
+        id: `publication-${review.id}`,
+        tone: 'danger',
+        label: '发布失败',
+        text: `${title} 发布失败${review.publication_error ? `：${review.publication_error}` : '，原因不可用'}。`,
+        href: `/reviews/${encodeURIComponent(review.id)}`,
+        action: '查看评审',
+      })
+    } else {
+      const retryReason = review.publication_error || review.error
+      alerts.push({
+        id: `retry-${review.id}`,
+        tone: 'warn',
+        label: '发布重试中',
+        text: `${title} ${review.status === 'failed' ? '执行失败，' : ''}发布正在重试${retryReason ? `：${retryReason}` : '。'}`,
+        href: `/reviews/${encodeURIComponent(review.id)}`,
+        action: '查看评审',
+      })
+    }
   }
-  return alerts.slice(0, 12)
+  return alerts
 }
 
 function MetricStrip({ stats, loading, error, onRetry }: { stats?: Stats; loading: boolean; error: unknown; onRetry: () => void }) {
@@ -111,17 +140,17 @@ function MetricStrip({ stats, loading, error, onRetry }: { stats?: Stats; loadin
   const p95 = statNumber(stats, 'p95_duration_ms')
   return (
     <section aria-label="近 7 天指标" className={styles.statGrid}>
-      <Metric label="评审次数" value={runs === null ? '不可用' : runs} note={blocking === null ? 'BLOCKING 次数不可用' : `其中 BLOCKING ${blocking} 次`} />
+      <Metric label="运行次数" value={runs === null ? '不可用' : runs} note={blocking === null ? '包含评审与 onboarding · BLOCKING 次数不可用' : `包含评审与 onboarding · 其中 BLOCKING ${blocking} 次`} />
       <Metric label="BLOCKING 比例" value={formatRatio(blockingRatio)} note="按已结束评审计" />
       <Metric label="已发布问题" value={published === null ? '不可用' : published} note="GitLab 已发布条目" />
-      <Metric label="被挑战推翻" value={formatRatio(overturned)} note="挑战后丢弃的比例" />
+      <Metric label="规则丢弃比例" value={formatRatio(overturned)} note="规则 drop 占比，不是模型准确率" />
       <Metric label="成本" value={cost === null ? '不可用' : formatCost(cost)} note={`平均 ${formatMs(avg)} · P95 ${formatMs(p95)}`} />
     </section>
   )
 }
 
 export function OverviewPage() {
-  const canWrite = useCanWrite()
+  const canRegister = useCanWrite()
   const toast = useToast()
   const now = useNow(1000)
   const [triggerOpen, setTriggerOpen] = useState(false)
@@ -142,14 +171,28 @@ export function OverviewPage() {
     (cursor) => listProjects({}, cursor),
     'projects',
   )
+  // Provider health is a platform-admin view. Ordinary users must not receive
+  // a false 403 alert from a query they cannot run.
+  const providersEnabled = canRegister
   const providersPage = usePaginated<Provider>(
     ['providers', 'overview'],
     (cursor) => listProviders(cursor),
     'providers',
+    { enabled: providersEnabled },
   )
-  const failed = usePaginated<ReviewSummary>(
+  const failedRuns = usePaginated<ReviewSummary>(
     ['reviews', 'overview', 'failed'],
     (cursor) => listReviews({ status: 'failed' }, cursor),
+    'reviews',
+  )
+  const failedPublications = usePaginated<ReviewSummary>(
+    ['reviews', 'overview', 'publication-failed'],
+    (cursor) => listReviews({ publication_state: 'failed' }, cursor),
+    'reviews',
+  )
+  const pendingPublications = usePaginated<ReviewSummary>(
+    ['reviews', 'overview', 'publication-pending'],
+    (cursor) => listReviews({ publication_state: 'pending' }, cursor),
     'reviews',
   )
   const recent = usePaginated<ReviewSummary>(
@@ -166,11 +209,38 @@ export function OverviewPage() {
     () => new Map(projectsPage.items.map((project) => [project.id, project.path_with_namespace])),
     [projectsPage.items],
   )
+  const reviewIssues = useMemo(() => {
+    const issues = new Map<string, ReviewIssue>()
+    for (const item of failedRuns.items) issues.set(item.id, { review: item, kind: 'run' })
+    for (const item of failedPublications.items) issues.set(item.id, { review: item, kind: 'publication' })
+    // A retryable publication failure stays pending with a bounded reason.
+    // Completed workflows have an empty execution error, so the reason is the
+    // only reliable signal. Normal pending publications have no reason.
+    for (const item of pendingPublications.items) {
+      if (item.publication_error) issues.set(item.id, { review: item, kind: 'retry' })
+    }
+    return Array.from(issues.values())
+  }, [failedRuns.items, failedPublications.items, pendingPublications.items])
   const alerts = useMemo(
-    () => buildAlerts(projectsPage.items, providersPage.items, failed.items),
-    [projectsPage.items, providersPage.items, failed.items],
+    () => buildAlerts(projectsPage.items, providersPage.items, reviewIssues),
+    [projectsPage.items, providersPage.items, reviewIssues],
   )
+  const issuesError = projectsPage.error || failedRuns.error || failedPublications.error
+    || pendingPublications.error || (providersEnabled ? providersPage.error : null)
+  const hasIssuesError = projectsPage.isError || failedRuns.isError || failedPublications.isError
+    || pendingPublications.isError || (providersEnabled && providersPage.isError)
+  const issuesPending = projectsPage.isPending || failedRuns.isPending || failedPublications.isPending
+    || pendingPublications.isPending || (providersEnabled && providersPage.isPending)
+  const reviewAlertsFetching = failedRuns.isFetchingNextPage || failedPublications.isFetchingNextPage || pendingPublications.isFetchingNextPage
+  const hasMoreReviewAlerts = failedRuns.hasNextPage || failedPublications.hasNextPage || pendingPublications.hasNextPage
+  const loadMoreReviewAlerts = () => {
+    if (failedRuns.hasNextPage) failedRuns.fetchNextPage()
+    if (failedPublications.hasNextPage) failedPublications.fetchNextPage()
+    if (pendingPublications.hasNextPage) pendingPublications.fetchNextPage()
+  }
   const runningCount = running.items.length
+  const manageableProjects = projectsPage.items.filter((project) => project.access === 'manage')
+  const canTrigger = manageableProjects.length > 0
 
   const onTriggered = (jobId?: string) => {
     setTriggerOpen(false)
@@ -189,15 +259,15 @@ export function OverviewPage() {
               7 天统计 · {projectsPage.isPending ? '正在读取项目…' : `${projectsPage.items.length}${projectsPage.hasNextPage ? '+' : ''} 个已注册项目`} · {running.isPending ? '正在读取运行状态…' : `${runningCount} 个评审正在运行`}
             </>
           }
-          actions={canWrite ? (
+          actions={canRegister || canTrigger ? (
             <>
-              <Link to="/projects" style={secondaryLinkStyle}>注册项目</Link>
-              <Button variant="primary" onClick={() => setTriggerOpen(true)} disabled={projectsPage.isPending || projectsPage.items.length === 0}>手动触发评审</Button>
+              {canRegister ? <Link to="/projects" style={secondaryLinkStyle}>注册项目</Link> : null}
+              {canTrigger ? <Button variant="primary" onClick={() => setTriggerOpen(true)} disabled={projectsPage.isPending}>手动触发评审</Button> : null}
             </>
           ) : undefined}
         />
 
-        {!canWrite ? <p className={styles.notice}>当前账号为只读用户，不显示写操作入口。后端会独立校验权限。</p> : null}
+        {!canRegister && !canTrigger ? <p className={styles.notice}>当前账号没有平台管理权限，也没有可管理的项目；只显示可读数据。后端会独立校验权限。</p> : null}
 
         <MetricStrip
           stats={stats.data}
@@ -213,7 +283,7 @@ export function OverviewPage() {
             className={styles.mainColumn}
           >
             {running.isPending ? <LoadingState /> : null}
-            {running.isError ? <ErrorState error={running.error} onRetry={running.refetch} /> : null}
+            {running.isError ? <ErrorState error={running.error} onRetry={running.retry} /> : null}
             {running.isSuccess && running.items.length === 0 ? <EmptyState title="当前没有运行中的评审" description="新的 webhook 或手动触发会出现在这里。" /> : null}
             <ul className={styles.list}>
               {running.items.map((review) => {
@@ -244,17 +314,23 @@ export function OverviewPage() {
           </Panel>
 
           <Panel title="需要处理" className={styles.sideColumn}>
-            {projectsPage.isError || providersPage.isError || failed.isError ? (
+            {hasIssuesError ? (
               <ErrorState
-                error={projectsPage.error || providersPage.error || failed.error}
-                onRetry={() => { projectsPage.refetch(); providersPage.refetch(); failed.refetch() }}
+                error={issuesError}
+                onRetry={() => {
+                  projectsPage.retry()
+                  failedRuns.retry()
+                  failedPublications.retry()
+                  pendingPublications.retry()
+                  if (providersEnabled) providersPage.retry()
+                }}
                 title="异常检查未完整加载"
               />
             ) : null}
-            {alerts.length === 0 && !projectsPage.isPending && !providersPage.isPending && !failed.isPending ? (
-              <EmptyState title="暂无需要处理的异常" description="检查了 token 过期、工作区状态、停用项目、provider 错误和失败评审。" />
+            {alerts.length === 0 && !issuesPending ? (
+              <EmptyState title="暂无需要处理的异常" description="检查了 token 过期、工作区状态、停用项目、provider 错误、评审执行失败和发布失败。" />
             ) : null}
-            {projectsPage.isPending || providersPage.isPending || failed.isPending ? <LoadingState /> : null}
+            {issuesPending ? <LoadingState /> : null}
             {alerts.map((alert) => (
               <div key={alert.id} className={styles.alert}>
                 <Badge tone={alert.tone}>{alert.label}</Badge>
@@ -267,6 +343,9 @@ export function OverviewPage() {
             {projectsPage.hasNextPage ? (
               <Button variant="secondary" className="smallButton" onClick={projectsPage.fetchNextPage} loading={projectsPage.isFetchingNextPage}>加载更多项目以继续检查</Button>
             ) : null}
+            {hasMoreReviewAlerts ? (
+              <Button variant="secondary" className="smallButton" onClick={loadMoreReviewAlerts} loading={reviewAlertsFetching}>加载更多告警数据</Button>
+            ) : null}
           </Panel>
         </div>
 
@@ -275,7 +354,7 @@ export function OverviewPage() {
           aside={<Link to="/reviews">查看全部</Link>}
         >
           {recent.isPending ? <LoadingState /> : null}
-          {recent.isError ? <ErrorState error={recent.error} onRetry={recent.refetch} /> : null}
+          {recent.isError ? <ErrorState error={recent.error} onRetry={recent.retry} /> : null}
           {recent.isSuccess && recent.items.length === 0 ? <EmptyState title="还没有评审记录" description="注册项目并打开 MR，或在评审页手动触发。" /> : null}
           {recent.items.length ? <ReviewTable reviews={recent.items} projectNames={projectNames} /> : null}
           {recent.hasNextPage ? (
@@ -284,11 +363,11 @@ export function OverviewPage() {
         </Panel>
       </div>
 
-      {canWrite ? (
+      {canTrigger ? (
         <TriggerReviewDialog
           open={triggerOpen}
           onClose={() => setTriggerOpen(false)}
-          projects={projectsPage.items}
+          projects={manageableProjects}
           onTriggered={onTriggered}
         />
       ) : null}

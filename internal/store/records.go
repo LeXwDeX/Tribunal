@@ -11,8 +11,9 @@ import (
 var (
 	// ErrInvalidCursor means an opaque list cursor could not be decoded.
 	ErrInvalidCursor = errors.New("store: invalid cursor")
-	// ErrContextLocked means a generated refresh tried to overwrite a locked
-	// context document. Manual edits use the explicit manual save method.
+	// ErrContextLocked is retained for callers that still map the old
+	// generated-refresh conflict. Generated saves now append an inactive
+	// revision instead of returning this error.
 	ErrContextLocked = errors.New("store: context document is locked")
 )
 
@@ -59,8 +60,9 @@ type Workspace struct {
 	UpdatedAt     time.Time  `json:"updated_at"`
 }
 
-// ContextDoc is one generated or manually maintained context document.
-// Active and Stale are computed from the workspace row, not stored.
+// ContextDoc is one generated or manually maintained context document
+// revision. Active is stored per (project, kind); Stale is computed from the
+// workspace base.
 type ContextDoc struct {
 	ID         string    `json:"id"`
 	ProjectID  int64     `json:"project_id"`
@@ -98,20 +100,37 @@ type Feedback struct {
 	ObservedAt    time.Time `json:"observed_at"`
 }
 
-// FeedbackFilter narrows ListFeedback and FeedbackTotals.
+// FeedbackFilter narrows ListFeedback and FeedbackTotals. Time filters apply
+// to Feedback.ObservedAt; From is inclusive and To is exclusive.
 type FeedbackFilter struct {
 	ProjectID     *int64
+	AccessUserID  *int64
 	MRIID         *int64
 	PublicationID string
 	Signal        string
+	From          time.Time
+	To            time.Time
 	Cursor        string
 	Limit         int
 }
 
-// FeedbackTotals aggregates feedback signals.
-type FeedbackTotals struct {
+// FeedbackProviderStats counts observed signals attributed to one provider in
+// one review role. A signal can appear for both roles, so these totals are
+// attribution counts, not a correctness or accuracy rate.
+type FeedbackProviderStats struct {
+	Provider string           `json:"provider"`
+	Role     string           `json:"role"`
 	Total    int64            `json:"total"`
 	BySignal map[string]int64 `json:"by_signal"`
+}
+
+// FeedbackTotals aggregates feedback signals. ByProvider is additive and
+// optional: it is empty when no stored signal resolves to a provider. Total
+// remains the raw signal count and is never multiplied by role attribution.
+type FeedbackTotals struct {
+	Total      int64                   `json:"total"`
+	BySignal   map[string]int64        `json:"by_signal"`
+	ByProvider []FeedbackProviderStats `json:"by_provider"`
 }
 
 // StatsFilter bounds workflow and audit aggregates. To is exclusive.
@@ -119,15 +138,59 @@ type StatsFilter struct {
 	From      time.Time
 	To        time.Time
 	ProjectID *int64
+	// AccessUserID restricts every aggregate branch to projects granted to that
+	// user. Nil is the trusted internal path; a non-positive value matches
+	// nothing.
+	AccessUserID *int64
 }
 
 // ProjectStats is the per-project part of Stats.
 type ProjectStats struct {
-	ProjectID  int64 `json:"project_id"`
-	Runs       int64 `json:"runs"`
-	Blocking   int64 `json:"blocking"`
-	Published  int64 `json:"published"`
-	CostMicros int64 `json:"cost_micros"`
+	ProjectID       int64        `json:"project_id"`
+	Runs            int64        `json:"runs"`
+	Blocking        int64        `json:"blocking"`
+	Published       int64        `json:"published"`
+	CostMicros      int64        `json:"cost_micros"`
+	DurationSamples int64        `json:"duration_samples"`
+	AvgDurationMS   *float64     `json:"avg_duration_ms"`
+	P95DurationMS   *float64     `json:"p95_duration_ms"`
+	Trend           []DailyStats `json:"trend"`
+}
+
+// DailyStats is one UTC day of workflow or started-node activity. A workflow
+// is bucketed by created_at, never by completion time. AvgDurationMS and
+// P95DurationMS are nil when no paired timestamps yielded a duration.
+type DailyStats struct {
+	Day             string   `json:"day"`
+	Runs            int64    `json:"runs"`
+	CostMicros      int64    `json:"cost_micros"`
+	DurationSamples int64    `json:"duration_samples"`
+	AvgDurationMS   *float64 `json:"avg_duration_ms"`
+	P95DurationMS   *float64 `json:"p95_duration_ms"`
+}
+
+// ProviderStats aggregates started workflow nodes by persisted provider. Runs
+// counts distinct persisted node rows, not LLM turns or retry attempts.
+type ProviderStats struct {
+	Provider        string       `json:"provider"`
+	Runs            int64        `json:"runs"`
+	CostMicros      int64        `json:"cost_micros"`
+	DurationSamples int64        `json:"duration_samples"`
+	AvgDurationMS   *float64     `json:"avg_duration_ms"`
+	P95DurationMS   *float64     `json:"p95_duration_ms"`
+	Trend           []DailyStats `json:"trend"`
+}
+
+// BlockStats aggregates started workflow nodes by node kind. Code nodes
+// without a provider still count here.
+type BlockStats struct {
+	Block           string       `json:"block"`
+	Runs            int64        `json:"runs"`
+	CostMicros      int64        `json:"cost_micros"`
+	DurationSamples int64        `json:"duration_samples"`
+	AvgDurationMS   *float64     `json:"avg_duration_ms"`
+	P95DurationMS   *float64     `json:"p95_duration_ms"`
+	Trend           []DailyStats `json:"trend"`
 }
 
 // ModelStats is the per-provider/model part of Stats.
@@ -144,18 +207,47 @@ type ModelStats struct {
 	ErrorRate    *float64 `json:"error_rate"`
 }
 
+// ProviderQualityStats combines a provider's proposer and challenger
+// performance. Proposed, Valid, Invalid and Reviewed count findings proposed by
+// the provider; Refuted, RefutedReviewed and FalseRefuted count findings
+// challenged by the provider. Only human "valid" and "invalid" labels enter
+// Reviewed and RefutedReviewed; unannotated and "uncertain" never do. Ratios
+// stay nil when their denominator is zero.
+type ProviderQualityStats struct {
+	Provider        string   `json:"provider"`
+	Proposed        int64    `json:"proposed"`
+	Reviewed        int64    `json:"reviewed"`
+	Valid           int64    `json:"valid"`
+	Invalid         int64    `json:"invalid"`
+	Accuracy        *float64 `json:"accuracy"`
+	Overturned      int64    `json:"overturned"`
+	OverturnedRatio *float64 `json:"overturned_ratio"`
+	Refuted         int64    `json:"refuted"`
+	RefutedReviewed int64    `json:"refuted_reviewed"`
+	FalseRefuted    int64    `json:"false_refuted"`
+	FalseKillRate   *float64 `json:"false_kill_rate"`
+}
+
 // Stats is the M6 aggregate view. Ratios and durations stay nil when there is
 // no denominator instead of pretending to be zero.
 type Stats struct {
-	Runs            int64            `json:"runs"`
-	Blocking        int64            `json:"blocking"`
-	BlockingRatio   *float64         `json:"blocking_ratio"`
-	Published       int64            `json:"published"`
-	OverturnedRatio *float64         `json:"overturned_ratio"`
-	AvgDurationMS   *float64         `json:"avg_duration_ms"`
-	P95DurationMS   *float64         `json:"p95_duration_ms"`
-	CostMicros      int64            `json:"cost_micros"`
-	ByProject       []ProjectStats   `json:"by_project"`
-	ByModel         []ModelStats     `json:"by_model"`
-	Decisions       map[string]int64 `json:"decisions"`
+	Runs              int64                  `json:"runs"`
+	Blocking          int64                  `json:"blocking"`
+	BlockingRatio     *float64               `json:"blocking_ratio"`
+	Published         int64                  `json:"published"`
+	OverturnedRatio   *float64               `json:"overturned_ratio"`
+	AvgDurationMS     *float64               `json:"avg_duration_ms"`
+	P95DurationMS     *float64               `json:"p95_duration_ms"`
+	DurationSamples   int64                  `json:"duration_samples"`
+	CostMicros        int64                  `json:"cost_micros"`
+	ByProject         []ProjectStats         `json:"by_project"`
+	ByModel           []ModelStats           `json:"by_model"`
+	ByProvider        []ProviderStats        `json:"by_provider"`
+	ByBlock           []BlockStats           `json:"by_block"`
+	QualityByProvider []ProviderQualityStats `json:"quality_by_provider"`
+	Trend             []DailyStats           `json:"trend"`
+	Decisions         map[string]int64       `json:"decisions"`
+	// Feedback is a pointer so an older response without the field stays
+	// distinguishable from a counted empty range.
+	Feedback *FeedbackTotals `json:"feedback,omitempty"`
 }

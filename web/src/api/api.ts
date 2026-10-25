@@ -1,5 +1,9 @@
 import { LOGOUT_EVENT, request, segment, streamUrl, withQuery } from './client'
 import type {
+  AdminProject,
+  AdminProjectPage,
+  AdminUser,
+  AdminUserPage,
   ApiToken,
   ApiTokenPage,
   BlockBinding,
@@ -8,6 +12,7 @@ import type {
   ContextDocPage,
   CreatedApiToken,
   Finding,
+  FindingAnnotation,
   FindingPage,
   FindingsSummary,
   LlmCall,
@@ -17,6 +22,9 @@ import type {
   Me,
   CallPage,
   Page,
+  ProjectAccess,
+  ProjectGrant,
+  ProjectGrantPage,
   ProjectPage,
   ProviderPage,
   ReviewPage,
@@ -26,6 +34,8 @@ import type {
   ProfilesPage,
   Project,
   ProjectRegistration,
+  ProjectValidation,
+  ProjectWebhookState,
   Provider,
   ProviderTestResult,
   ReviewDetail,
@@ -78,6 +88,10 @@ export async function registerProject(input: RegisterProjectInput): Promise<Proj
   return request<ProjectRegistration>('/api/v1/projects', { method: 'POST', body: input })
 }
 
+export async function validateProjectConnection(input: { project: string; token: string }): Promise<ProjectValidation> {
+  return request<ProjectValidation>('/api/v1/projects/validate', { method: 'POST', body: input })
+}
+
 export interface UpdateProjectInput {
   profile?: string
   settings?: Record<string, unknown>
@@ -92,8 +106,22 @@ export async function rotateProjectToken(id: number | string, token: string): Pr
   await request<void>(`/api/v1/projects/${segment(id)}/token`, { method: 'PUT', body: { token } })
 }
 
-export async function recreateWebhook(id: number | string): Promise<Record<string, unknown>> {
-  return request<Record<string, unknown>>(`/api/v1/projects/${segment(id)}/webhook`, { method: 'POST' })
+// Explicit webhook lifecycle. The legacy recreateWebhook name stays as a
+// rebuild alias for existing callers.
+export async function enableWebhook(id: number | string): Promise<ProjectWebhookState> {
+  return request<ProjectWebhookState>(`/api/v1/projects/${segment(id)}/webhook`, { method: 'POST' })
+}
+
+export async function rebuildWebhook(id: number | string): Promise<ProjectWebhookState> {
+  return request<ProjectWebhookState>(`/api/v1/projects/${segment(id)}/webhook/rebuild`, { method: 'POST' })
+}
+
+export async function recreateWebhook(id: number | string): Promise<ProjectWebhookState> {
+  return rebuildWebhook(id)
+}
+
+export async function disableWebhook(id: number | string): Promise<ProjectWebhookState> {
+  return request<ProjectWebhookState>(`/api/v1/projects/${segment(id)}/webhook`, { method: 'DELETE' })
 }
 
 export async function unregisterProject(id: number | string): Promise<void> {
@@ -144,6 +172,7 @@ export interface ReviewFilters {
   mr_iid?: number | string
   status?: string
   verdict?: string
+  publication_state?: string
   profile?: string
   trigger?: string
   since?: string
@@ -170,6 +199,17 @@ export interface FindingFilters {
 
 export async function listFindings(reviewId: string, filters: FindingFilters = {}, cursor?: string): Promise<FindingPage> {
   return request<FindingPage>(withQuery(`/api/v1/reviews/${segment(reviewId)}/findings`, { ...filters, cursor }))
+}
+
+export async function setFindingAnnotation(
+  reviewId: string,
+  findingId: string,
+  annotation: FindingAnnotation,
+): Promise<Finding> {
+  return request<Finding>(`/api/v1/reviews/${segment(reviewId)}/findings/${segment(findingId)}/annotation`, {
+    method: 'PUT',
+    body: { annotation },
+  })
 }
 
 export async function getReviewNode(reviewId: string, nodeId: string): Promise<ReviewNodeDetail> {
@@ -314,6 +354,39 @@ export async function createApiToken(input: { name: string; expires_in_days: num
 
 export async function revokeApiToken(id: string | number): Promise<void> {
   await request<void>(`/api/v1/api-tokens/${segment(id)}`, { method: 'DELETE' })
+}
+
+// Access administration ----------------------------------------------------
+
+export async function listAdminUsers(cursor?: string): Promise<AdminUserPage> {
+  return request<AdminUserPage>(withQuery('/api/v1/admin/users', { cursor }))
+}
+
+export async function setAdminUserDisabled(id: number | string, disabled: boolean): Promise<AdminUser> {
+  return request<AdminUser>(`/api/v1/admin/users/${segment(id)}`, { method: 'PATCH', body: { disabled } })
+}
+
+export async function revokeAdminUserCredentials(id: number | string): Promise<void> {
+  await request<void>(`/api/v1/admin/users/${segment(id)}/credentials`, { method: 'DELETE' })
+}
+
+export async function listAdminProjects(cursor?: string): Promise<AdminProjectPage> {
+  return request<AdminProjectPage>(withQuery('/api/v1/admin/projects', { cursor }))
+}
+
+export async function listAdminGrants(projectId: number | string, cursor?: string): Promise<ProjectGrantPage> {
+  return request<ProjectGrantPage>(withQuery(`/api/v1/admin/projects/${segment(projectId)}/grants`, { cursor }))
+}
+
+export async function setAdminGrant(projectId: number | string, userId: number | string, role: ProjectAccess): Promise<ProjectGrant> {
+  return request<ProjectGrant>(`/api/v1/admin/projects/${segment(projectId)}/grants/${segment(userId)}`, {
+    method: 'PUT',
+    body: { role },
+  })
+}
+
+export async function deleteAdminGrant(projectId: number | string, userId: number | string): Promise<void> {
+  await request<void>(`/api/v1/admin/projects/${segment(projectId)}/grants/${segment(userId)}`, { method: 'DELETE' })
 }
 
 export function summaryFindings(summary?: FindingsSummary): FindingsSummary {

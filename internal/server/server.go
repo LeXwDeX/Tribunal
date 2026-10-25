@@ -31,12 +31,16 @@ const (
 // AdminService is the project registration and lifecycle surface.
 type AdminService interface {
 	Register(ctx context.Context, in app.RegisterInput) (*app.Registration, error)
+	Validate(ctx context.Context, in app.ValidateProjectInput) (*app.ProjectValidation, error)
 	List(ctx context.Context) ([]store.Project, error)
 	ListFiltered(ctx context.Context, filter app.ProjectListFilter) ([]store.Project, error)
+	ListFilteredPage(ctx context.Context, filter app.ProjectListFilter, cursor string, limit int) ([]store.Project, string, error)
 	Get(ctx context.Context, id int64) (*store.Project, error)
 	Update(ctx context.Context, id int64, in app.UpdateProjectInput) (*store.Project, error)
 	RotateToken(ctx context.Context, id int64, token string) (*store.Project, error)
 	CreateWebhook(ctx context.Context, id int64) (*app.WebhookRegistration, error)
+	RebuildWebhook(ctx context.Context, id int64) (*app.WebhookRegistration, error)
+	DisableWebhook(ctx context.Context, id int64) (*store.Project, error)
 	Delete(ctx context.Context, id int64) error
 }
 
@@ -69,10 +73,13 @@ type Config struct {
 	Store      Store
 	Reviews    ReviewController
 	Workspace  WorkspaceService
+	Contexts   ContextService
 	Extensions ExtensionService
 	MCP        MCPTester
 	LLM        ProviderTester
 	Tokens     TokenStore
+	Sessions   SessionStore
+	Access     AccessStore
 	Platform   *config.Config
 	StreamPoll time.Duration
 	Now        func() time.Time
@@ -86,7 +93,7 @@ type Server struct {
 	database   Pinger
 	worker     WorkerState
 	auth       *authService
-	sessions   *sessionStore
+	sessions   SessionStore
 	web        fs.FS
 	logger     *slog.Logger
 	handler    http.Handler
@@ -94,10 +101,12 @@ type Server struct {
 	store      Store
 	reviews    ReviewController
 	workspace  WorkspaceService
+	contexts   ContextService
 	extensions ExtensionService
 	mcp        MCPTester
 	llm        ProviderTester
 	tokens     TokenStore
+	access     AccessStore
 	platform   *config.Config
 	streamPoll time.Duration
 	now        func() time.Time
@@ -120,6 +129,16 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	sessions := cfg.Sessions
+	if sessions == nil {
+		// The SQLite store implements both interfaces; reusing the token store
+		// keeps test wiring that predates Sessions working without a second
+		// in-memory session backend.
+		sessions, _ = cfg.Tokens.(SessionStore)
+	}
+	if auth.enabled() && sessions == nil {
+		return nil, errors.New("server: session store is required when OAuth is configured")
+	}
 	s := &Server{
 		adminToken: cfg.AdminToken,
 		projects:   cfg.Projects,
@@ -127,16 +146,18 @@ func New(cfg Config) (*Server, error) {
 		database:   cfg.Database,
 		worker:     cfg.Worker,
 		auth:       auth,
-		sessions:   newSessionStore(sessionLimit, auth.now),
+		sessions:   sessions,
 		web:        web,
 		logger:     logger,
 		store:      cfg.Store,
 		reviews:    cfg.Reviews,
 		workspace:  cfg.Workspace,
+		contexts:   cfg.Contexts,
 		extensions: cfg.Extensions,
 		mcp:        cfg.MCP,
 		llm:        cfg.LLM,
 		tokens:     cfg.Tokens,
+		access:     cfg.Access,
 		platform:   cfg.Platform,
 		streamPoll: cfg.StreamPoll,
 		now:        cfg.Now,
@@ -153,53 +174,69 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("GET /auth/callback", s.handleCallback)
 	mux.HandleFunc("POST /auth/logout", s.handleLogout)
 	mux.HandleFunc("GET /api/v1/me", s.apiAuth(s.handleMe))
-	mux.HandleFunc("POST /api/v1/projects", s.apiAuth(s.handleRegisterProject))
+	mux.HandleFunc("POST /api/v1/projects", s.apiAuth(s.guard(policyPlatformAdmin, s.handleRegisterProject)))
+	mux.HandleFunc("POST /api/v1/projects/validate", s.apiAuth(s.guard(policyPlatformAdmin, s.handleValidateProject)))
 	mux.HandleFunc("GET /api/v1/projects", s.apiAuth(s.handleListProjects))
-	mux.HandleFunc("GET /api/v1/projects/{id}", s.apiAuth(s.handleGetProject))
-	mux.HandleFunc("PATCH /api/v1/projects/{id}", s.apiAuth(s.handleUpdateProject))
-	mux.HandleFunc("PUT /api/v1/projects/{id}/token", s.apiAuth(s.handleRotateProjectToken))
-	mux.HandleFunc("POST /api/v1/projects/{id}/webhook", s.apiAuth(s.handleCreateProjectWebhook))
-	mux.HandleFunc("DELETE /api/v1/projects/{id}", s.apiAuth(s.handleDeleteProject))
+	mux.HandleFunc("GET /api/v1/projects/{id}", s.apiAuth(s.guard(policyProjectRead, s.handleGetProject)))
+	mux.HandleFunc("PATCH /api/v1/projects/{id}", s.apiAuth(s.guard(policyProjectManage, s.handleUpdateProject)))
+	mux.HandleFunc("PUT /api/v1/projects/{id}/token", s.apiAuth(s.guard(policyProjectManage, s.handleRotateProjectToken)))
+	mux.HandleFunc("POST /api/v1/projects/{id}/webhook", s.apiAuth(s.guard(policyProjectManage, s.handleCreateProjectWebhook)))
+	mux.HandleFunc("POST /api/v1/projects/{id}/webhook/rebuild", s.apiAuth(s.guard(policyProjectManage, s.handleRebuildProjectWebhook)))
+	mux.HandleFunc("DELETE /api/v1/projects/{id}/webhook", s.apiAuth(s.guard(policyProjectManage, s.handleDisableProjectWebhook)))
+	mux.HandleFunc("DELETE /api/v1/projects/{id}", s.apiAuth(s.guard(policyProjectManage, s.handleDeleteProject)))
 	// Reviews (workflows).
 	mux.HandleFunc("GET /api/v1/reviews", s.apiAuth(s.handleListReviews))
-	mux.HandleFunc("POST /api/v1/projects/{id}/merge_requests/{iid}/reviews", s.apiAuth(s.handleTriggerReview))
-	mux.HandleFunc("GET /api/v1/reviews/{wf_id}", s.apiAuth(s.handleGetReview))
-	mux.HandleFunc("GET /api/v1/reviews/{wf_id}/graph", s.apiAuth(s.handleReviewGraph))
-	mux.HandleFunc("GET /api/v1/reviews/{wf_id}/findings", s.apiAuth(s.handleReviewFindings))
-	mux.HandleFunc("GET /api/v1/reviews/{wf_id}/nodes/{node_id}", s.apiAuth(s.handleReviewNode))
-	mux.HandleFunc("GET /api/v1/reviews/{wf_id}/nodes/{node_id}/calls", s.apiAuth(s.handleNodeCalls))
-	mux.HandleFunc("GET /api/v1/reviews/{wf_id}/stream", s.apiAuth(s.handleReviewStream))
-	mux.HandleFunc("POST /api/v1/reviews/{wf_id}/cancel", s.apiAuth(s.handleCancelReview))
-	mux.HandleFunc("POST /api/v1/reviews/{wf_id}/republish", s.apiAuth(s.handleRepublishReview))
+	mux.HandleFunc("POST /api/v1/projects/{id}/merge_requests/{iid}/reviews", s.apiAuth(s.guard(policyProjectManage, s.handleTriggerReview)))
+	mux.HandleFunc("GET /api/v1/reviews/{wf_id}", s.apiAuth(s.guard(policyReviewRead, s.handleGetReview)))
+	mux.HandleFunc("GET /api/v1/reviews/{wf_id}/graph", s.apiAuth(s.guard(policyReviewRead, s.handleReviewGraph)))
+	mux.HandleFunc("GET /api/v1/reviews/{wf_id}/findings", s.apiAuth(s.guard(policyReviewRead, s.handleReviewFindings)))
+	mux.HandleFunc("PUT /api/v1/reviews/{wf_id}/findings/{finding_id}/annotation", s.apiAuth(s.guard(policyReviewManage, s.handleSetFindingAnnotation)))
+	mux.HandleFunc("GET /api/v1/reviews/{wf_id}/nodes/{node_id}", s.apiAuth(s.guard(policyReviewRead, s.handleReviewNode)))
+	mux.HandleFunc("GET /api/v1/reviews/{wf_id}/nodes/{node_id}/calls", s.apiAuth(s.guard(policyReviewRead, s.handleNodeCalls)))
+	mux.HandleFunc("GET /api/v1/reviews/{wf_id}/stream", s.apiAuth(s.guard(policyReviewRead, s.handleReviewStream)))
+	mux.HandleFunc("POST /api/v1/reviews/{wf_id}/cancel", s.apiAuth(s.guard(policyReviewManage, s.handleCancelReview)))
+	mux.HandleFunc("POST /api/v1/reviews/{wf_id}/republish", s.apiAuth(s.guard(policyReviewManage, s.handleRepublishReview)))
 	// Workspace and context documents.
-	mux.HandleFunc("GET /api/v1/projects/{id}/workspace", s.apiAuth(s.handleGetWorkspace))
-	mux.HandleFunc("POST /api/v1/projects/{id}/workspace/refresh", s.apiAuth(s.handleRefreshWorkspace))
-	mux.HandleFunc("GET /api/v1/projects/{id}/context-docs", s.apiAuth(s.handleListContextDocs))
-	mux.HandleFunc("GET /api/v1/projects/{id}/context-docs/current", s.apiAuth(s.handleGetCurrentContextDoc))
-	mux.HandleFunc("PUT /api/v1/projects/{id}/context-docs/current", s.apiAuth(s.handleSaveCurrentContextDoc))
-	mux.HandleFunc("POST /api/v1/projects/{id}/context-docs/current/lock", s.apiAuth(s.handleLockContextDoc))
-	// Extensions: MCP servers, skills, block bindings.
-	mux.HandleFunc("GET /api/v1/mcp-servers", s.apiAuth(s.handleListMCPServers))
-	mux.HandleFunc("POST /api/v1/mcp-servers", s.apiAuth(s.handleCreateMCPServer))
-	mux.HandleFunc("POST /api/v1/mcp-servers/import", s.apiAuth(s.handleImportMCPServers))
-	mux.HandleFunc("PUT /api/v1/mcp-servers/{id}", s.apiAuth(s.handleUpdateMCPServer))
-	mux.HandleFunc("DELETE /api/v1/mcp-servers/{id}", s.apiAuth(s.handleDeleteMCPServer))
-	mux.HandleFunc("POST /api/v1/mcp-servers/{id}/test", s.apiAuth(s.handleTestMCPServer))
-	mux.HandleFunc("GET /api/v1/skills", s.apiAuth(s.handleListSkills))
-	mux.HandleFunc("POST /api/v1/skills", s.apiAuth(s.handleUploadSkillOrRegisterDirectory))
-	mux.HandleFunc("DELETE /api/v1/skills/{id}", s.apiAuth(s.handleDeleteSkill))
-	mux.HandleFunc("GET /api/v1/block-bindings", s.apiAuth(s.handleListBlockBindings))
-	mux.HandleFunc("PUT /api/v1/block-bindings/{block}", s.apiAuth(s.handleUpsertBlockBinding))
+	mux.HandleFunc("GET /api/v1/projects/{id}/workspace", s.apiAuth(s.guard(policyProjectRead, s.handleGetWorkspace)))
+	mux.HandleFunc("POST /api/v1/projects/{id}/workspace/refresh", s.apiAuth(s.guard(policyProjectManage, s.handleRefreshWorkspace)))
+	mux.HandleFunc("GET /api/v1/projects/{id}/context-docs", s.apiAuth(s.guard(policyProjectRead, s.handleListContextDocs)))
+	mux.HandleFunc("GET /api/v1/projects/{id}/context-docs/current", s.apiAuth(s.guard(policyProjectRead, s.handleGetCurrentContextDoc)))
+	mux.HandleFunc("PUT /api/v1/projects/{id}/context-docs/current", s.apiAuth(s.guard(policyProjectManage, s.handleSaveCurrentContextDoc)))
+	mux.HandleFunc("POST /api/v1/projects/{id}/context-docs/current/lock", s.apiAuth(s.guard(policyProjectManage, s.handleLockContextDoc)))
+	// Extensions: MCP servers, skills, block bindings. Scope-level grants are
+	// checked inside each handler because the selector is in the query or body.
+	mux.HandleFunc("GET /api/v1/mcp-servers", s.apiAuth(s.guard(policyAuthenticated, s.handleListMCPServers)))
+	mux.HandleFunc("POST /api/v1/mcp-servers", s.apiAuth(s.guard(policyAuthenticated, s.handleCreateMCPServer)))
+	mux.HandleFunc("POST /api/v1/mcp-servers/import", s.apiAuth(s.guard(policyAuthenticated, s.handleImportMCPServers)))
+	mux.HandleFunc("PUT /api/v1/mcp-servers/{id}", s.apiAuth(s.guard(policyAuthenticated, s.handleUpdateMCPServer)))
+	mux.HandleFunc("DELETE /api/v1/mcp-servers/{id}", s.apiAuth(s.guard(policyAuthenticated, s.handleDeleteMCPServer)))
+	mux.HandleFunc("POST /api/v1/mcp-servers/{id}/test", s.apiAuth(s.guard(policyAuthenticated, s.handleTestMCPServer)))
+	mux.HandleFunc("GET /api/v1/skills", s.apiAuth(s.guard(policyAuthenticated, s.handleListSkills)))
+	mux.HandleFunc("POST /api/v1/skills", s.apiAuth(s.guard(policyAuthenticated, s.handleUploadSkillOrRegisterDirectory)))
+	mux.HandleFunc("DELETE /api/v1/skills/{id}", s.apiAuth(s.guard(policyPlatformAdmin, s.handleDeleteSkill)))
+	mux.HandleFunc("GET /api/v1/block-bindings", s.apiAuth(s.guard(policyAuthenticated, s.handleListBlockBindings)))
+	mux.HandleFunc("PUT /api/v1/block-bindings/{block}", s.apiAuth(s.guard(policyAuthenticated, s.handleUpsertBlockBinding)))
 	// System.
-	mux.HandleFunc("GET /api/v1/providers", s.apiAuth(s.handleListProviders))
-	mux.HandleFunc("POST /api/v1/providers/{name}/test", s.apiAuth(s.handleTestProvider))
-	mux.HandleFunc("GET /api/v1/profiles", s.apiAuth(s.handleListProfiles))
+	mux.HandleFunc("GET /api/v1/providers", s.apiAuth(s.guard(policyPlatformAdmin, s.handleListProviders)))
+	mux.HandleFunc("POST /api/v1/providers/{name}/test", s.apiAuth(s.guard(policyPlatformAdmin, s.handleTestProvider)))
+	mux.HandleFunc("GET /api/v1/profiles", s.apiAuth(s.guard(policyPlatformAdmin, s.handleListProfiles)))
 	mux.HandleFunc("GET /api/v1/stats", s.apiAuth(s.handleStats))
-	mux.HandleFunc("GET /api/v1/settings", s.apiAuth(s.handleSettings))
-	// API tokens (browser sessions only).
-	mux.HandleFunc("GET /api/v1/api-tokens", s.apiAuth(s.handleListAPITokens))
-	mux.HandleFunc("POST /api/v1/api-tokens", s.apiAuth(s.handleCreateAPIToken))
-	mux.HandleFunc("DELETE /api/v1/api-tokens/{id}", s.apiAuth(s.handleDeleteAPIToken))
+	mux.HandleFunc("GET /api/v1/settings", s.apiAuth(s.guard(policyPlatformAdmin, s.handleSettings)))
+	// API tokens (browser self-service; CSRF still applies).
+	mux.HandleFunc("GET /api/v1/api-tokens", s.apiAuth(s.guard(policyAuthenticated, s.handleListAPITokens)))
+	mux.HandleFunc("POST /api/v1/api-tokens", s.apiAuth(s.guard(policyAuthenticated, s.handleCreateAPIToken)))
+	mux.HandleFunc("DELETE /api/v1/api-tokens/{id}", s.apiAuth(s.guard(policyAuthenticated, s.handleDeleteAPIToken)))
+	// Access administration. The documented /admin surface and the /api/v1
+	// equivalent share handlers.
+	for _, prefix := range []string{"/admin", "/api/v1/admin"} {
+		mux.HandleFunc("GET "+prefix+"/users", s.apiAuth(s.guard(policyPlatformAdmin, s.handleAdminListUsers)))
+		mux.HandleFunc("PATCH "+prefix+"/users/{id}", s.apiAuth(s.guard(policyPlatformAdmin, s.handleAdminSetUserDisabled)))
+		mux.HandleFunc("DELETE "+prefix+"/users/{id}/credentials", s.apiAuth(s.guard(policyPlatformAdmin, s.handleAdminRevokeCredentials)))
+		mux.HandleFunc("GET "+prefix+"/projects", s.apiAuth(s.guard(policyPlatformAdmin, s.handleAdminListProjects)))
+		mux.HandleFunc("GET "+prefix+"/projects/{id}/grants", s.apiAuth(s.guard(policyPlatformAdmin, s.handleAdminListGrants)))
+		mux.HandleFunc("PUT "+prefix+"/projects/{id}/grants/{user_id}", s.apiAuth(s.guard(policyPlatformAdmin, s.handleAdminSetGrant)))
+		mux.HandleFunc("DELETE "+prefix+"/projects/{id}/grants/{user_id}", s.apiAuth(s.guard(policyPlatformAdmin, s.handleAdminDeleteGrant)))
+	}
 	mux.HandleFunc("/api/", s.apiAuth(s.handleAPINotFound))
 	mux.HandleFunc("/api/v1", s.apiAuth(s.handleAPINotFound))
 	mux.HandleFunc("/", s.handleWeb)

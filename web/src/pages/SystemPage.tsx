@@ -1,10 +1,15 @@
 import { useEffect, useId, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { createApiToken, getSettings, listApiTokens, revokeApiToken } from '../api/api'
-import type { ApiToken, CreatedApiToken } from '../api/types'
-import { useCanWrite } from '../components/RoleContext'
 import {
-  Button, ConfirmDialog, Dialog, EmptyState, ErrorState, Field, LoadingState, PageHeader, Panel, SecretField, Tabs, useToast,
+  createApiToken, deleteAdminGrant, getSettings, listAdminGrants, listAdminProjects, listAdminUsers,
+  listApiTokens, revokeAdminUserCredentials, revokeApiToken, setAdminGrant, setAdminUserDisabled,
+} from '../api/api'
+import type {
+  AdminProject, AdminUser, ApiToken, CreatedApiToken, ProjectAccess, ProjectGrant,
+} from '../api/types'
+import { useCanSelfService, useCanWrite } from '../components/RoleContext'
+import {
+  Badge, Button, ConfirmDialog, Dialog, EmptyState, ErrorState, Field, LoadingState, PageHeader, Panel, SecretField, Tabs, useToast,
 } from '../components/ui'
 import { usePaginated } from '../lib/hooks'
 import { formatDate } from '../lib/format'
@@ -41,7 +46,10 @@ function TokenCreateDialog({ open, onClose }: { open: boolean; onClose: () => vo
   const submit = async () => {
     const parsedDays = Number(days)
     if (!name.trim()) { setFieldError('请输入 token 名称。'); return }
-    if (!Number.isInteger(parsedDays) || parsedDays <= 0) { setFieldError('有效天数必须是正整数。'); return }
+    if (!Number.isInteger(parsedDays) || parsedDays <= 0 || parsedDays > 365) {
+      setFieldError('有效天数必须在 1 到 365 之间。')
+      return
+    }
     setFieldError('')
     setPending(true)
     setError(null)
@@ -86,8 +94,8 @@ function TokenCreateDialog({ open, onClose }: { open: boolean; onClose: () => vo
             <Field label="名称" htmlFor={nameId} error={fieldError}>
               <input id={nameId} className="input" value={name} onChange={(event) => setName(event.target.value)} placeholder="例如 ci-reviewctl" aria-invalid={Boolean(fieldError)} />
             </Field>
-            <Field label="有效天数" htmlFor={expiresId} hint="正整数。">
-              <input id={expiresId} className="input" type="number" min={1} value={days} onChange={(event) => setDays(event.target.value)} />
+            <Field label="有效天数" htmlFor={expiresId} hint="正整数，最长 365 天。">
+              <input id={expiresId} className="input" type="number" min={1} max={365} value={days} onChange={(event) => setDays(event.target.value)} />
             </Field>
           </div>
         </>
@@ -96,8 +104,295 @@ function TokenCreateDialog({ open, onClose }: { open: boolean; onClose: () => vo
   )
 }
 
+function userLabel(user: AdminUser): string {
+  return user.name ? `${user.name} (@${user.username})` : `@${user.username}`
+}
+
+function AdminUsersPanel() {
+  const toast = useToast()
+  const queryClient = useQueryClient()
+  const users = usePaginated<AdminUser>(['admin-users'], (cursor) => listAdminUsers(cursor), 'users')
+  const [disableTarget, setDisableTarget] = useState<AdminUser | null>(null)
+  const [disablePending, setDisablePending] = useState(false)
+  const [disableError, setDisableError] = useState<unknown>(null)
+  const [revokeTarget, setRevokeTarget] = useState<AdminUser | null>(null)
+  const [revokePending, setRevokePending] = useState(false)
+  const [revokeError, setRevokeError] = useState<unknown>(null)
+
+  const toggleDisabled = async () => {
+    if (!disableTarget) return
+    setDisablePending(true)
+    setDisableError(null)
+    try {
+      const next = !disableTarget.disabled
+      await setAdminUserDisabled(disableTarget.id, next)
+      setDisableTarget(null)
+      toast.push('success', next ? '账号已停用。' : '账号已启用。')
+      await queryClient.invalidateQueries({ queryKey: ['admin-users'] })
+    } catch (error) {
+      setDisableError(error)
+    } finally {
+      setDisablePending(false)
+    }
+  }
+
+  const revoke = async () => {
+    if (!revokeTarget) return
+    setRevokePending(true)
+    setRevokeError(null)
+    try {
+      await revokeAdminUserCredentials(revokeTarget.id)
+      setRevokeTarget(null)
+      toast.push('success', '该账号的全部凭据已撤销。')
+      await queryClient.invalidateQueries({ queryKey: ['admin-users'] })
+    } catch (error) {
+      setRevokeError(error)
+    } finally {
+      setRevokePending(false)
+    }
+  }
+
+  return (
+    <>
+      <Panel
+        title="用户与账号"
+        aside={users.isSuccess ? `${users.items.length}${users.hasNextPage ? '+' : ''} 个用户` : undefined}
+      >
+        <div className={styles.notice}>停用后该账号不能登录、使用现有会话或 API token，也不能获得新凭据。撤销凭据会立即使全部会话与 token 失效。</div>
+        {users.isPending ? <LoadingState label="正在读取用户…" /> : null}
+        {users.isError ? <ErrorState error={users.error} onRetry={users.retry} /> : null}
+        {users.isSuccess && users.items.length === 0 ? <EmptyState title="还没有本地用户" description="用户首次通过 GitLab 登录后会出现在这里。" /> : null}
+        {users.items.length ? (
+          <div className="tableWrap">
+            <table className="dataTable" style={{ minWidth: 760 }}>
+              <thead>
+                <tr>
+                  <th scope="col">用户名</th>
+                  <th scope="col">显示名</th>
+                  <th scope="col">状态</th>
+                  <th scope="col">最近登录</th>
+                  <th scope="col">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {users.items.map((user) => (
+                  <tr key={user.id}>
+                    <td className="mono">{user.username}</td>
+                    <td>{user.name || '—'}</td>
+                    <td><Badge tone={user.disabled ? 'danger' : 'ok'}>{user.disabled ? '已停用' : '启用'}</Badge></td>
+                    <td>{user.last_login_at ? formatDate(user.last_login_at) : '从未登录'}</td>
+                    <td>
+                      <div className={styles.cardActions}>
+                        <Button variant="secondary" onClick={() => setDisableTarget(user)}>
+                          {user.disabled ? '启用账号' : '停用账号'}
+                        </Button>
+                        <Button variant="danger" onClick={() => setRevokeTarget(user)}>撤销全部凭据</Button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
+        {users.hasNextPage ? <Button variant="secondary" onClick={users.fetchNextPage} loading={users.isFetchingNextPage}>加载更多用户</Button> : null}
+      </Panel>
+
+      <ConfirmDialog
+        open={Boolean(disableTarget)}
+        onClose={() => { setDisableTarget(null); setDisableError(null) }}
+        onConfirm={() => { void toggleDisabled() }}
+        title={`${disableTarget?.disabled ? '启用账号' : '停用账号'}？`}
+        description={disableTarget
+          ? `${disableTarget.disabled ? '启用' : '停用'} ${userLabel(disableTarget)}。${disableTarget.disabled ? '账号恢复后可以重新登录并使用 API token。' : '停用后现有会话与 token 立即失效，且不能重新登录。'}`
+          : ''}
+        confirmLabel={disableTarget?.disabled ? '启用' : '停用'}
+        danger={!disableTarget?.disabled}
+        pending={disablePending}
+        error={disableError}
+      />
+
+      <ConfirmDialog
+        open={Boolean(revokeTarget)}
+        onClose={() => { setRevokeTarget(null); setRevokeError(null) }}
+        onConfirm={() => { void revoke() }}
+        title="撤销全部凭据？"
+        description={revokeTarget
+          ? `将撤销 ${userLabel(revokeTarget)} 的全部会话和 API token。该账号必须重新登录并重新创建 token。此操作不可撤销。`
+          : ''}
+        confirmLabel="撤销"
+        pending={revokePending}
+        error={revokeError}
+      />
+    </>
+  )
+}
+
+function AdminGrantsPanel() {
+  const toast = useToast()
+  const queryClient = useQueryClient()
+  const projects = usePaginated<AdminProject>(['admin-projects'], (cursor) => listAdminProjects(cursor), 'projects')
+  const users = usePaginated<AdminUser>(['admin-users'], (cursor) => listAdminUsers(cursor), 'users')
+  const [projectId, setProjectId] = useState('')
+  const [userId, setUserId] = useState('')
+  const [role, setRole] = useState<ProjectAccess>('read')
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<unknown>(null)
+  const [deleteTarget, setDeleteTarget] = useState<ProjectGrant | null>(null)
+  const [deletePending, setDeletePending] = useState(false)
+  const [deleteError, setDeleteError] = useState<unknown>(null)
+
+  const grants = usePaginated<ProjectGrant>(
+    ['admin-grants', projectId],
+    (cursor) => listAdminGrants(projectId, cursor),
+    'grants',
+    { enabled: Boolean(projectId) },
+  )
+
+  const selectedProject = projects.items.find((project) => String(project.id) === projectId)
+
+  const grant = async () => {
+    if (!projectId || !userId) {
+      setSaveError(new Error('请选择项目和用户。'))
+      return
+    }
+    setSaving(true)
+    setSaveError(null)
+    try {
+      await setAdminGrant(projectId, userId, role)
+      toast.push('success', '项目授权已保存。')
+      setUserId('')
+      await queryClient.invalidateQueries({ queryKey: ['admin-grants', projectId] })
+    } catch (error) {
+      setSaveError(error)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const removeGrant = async () => {
+    if (!deleteTarget) return
+    setDeletePending(true)
+    setDeleteError(null)
+    try {
+      await deleteAdminGrant(deleteTarget.project_id, deleteTarget.user_id)
+      setDeleteTarget(null)
+      toast.push('success', '项目授权已撤销。')
+      await queryClient.invalidateQueries({ queryKey: ['admin-grants', projectId] })
+    } catch (error) {
+      setDeleteError(error)
+    } finally {
+      setDeletePending(false)
+    }
+  }
+
+  return (
+    <>
+      <Panel title="项目授权" aside={selectedProject ? selectedProject.path_with_namespace : '未选择项目'}>
+        <div className={styles.notice}>
+          管理员也不会自动获得项目业务数据；请在这里为账号授予 read 或 manage。项目列表来自管理面，不需要管理员自身拥有 grant。
+        </div>
+        <div className={styles.inlineFilters}>
+          <label className={styles.field} style={{ flex: '1 1 280px' }}>
+            <span className="small">选择项目</span>
+            <select
+              className="select"
+              aria-label="选择项目"
+              value={projectId}
+              onChange={(event) => setProjectId(event.target.value)}
+              disabled={projects.isPending}
+            >
+              <option value="">选择项目</option>
+              {projects.items.map((project) => (
+                <option key={project.id} value={project.id}>{project.path_with_namespace}</option>
+              ))}
+            </select>
+          </label>
+          {projects.hasNextPage ? (
+            <Button variant="secondary" onClick={projects.fetchNextPage} loading={projects.isFetchingNextPage}>加载更多项目</Button>
+          ) : null}
+        </div>
+        {projects.isError ? <ErrorState error={projects.error} onRetry={projects.retry} title="项目列表加载失败" /> : null}
+
+        {projectId ? (
+          <>
+            <div className="formGrid" style={{ marginTop: 16 }}>
+              <Field label="选择用户" htmlFor="grant-user">
+                <select id="grant-user" className="select" value={userId} onChange={(event) => setUserId(event.target.value)} disabled={users.isPending}>
+                  <option value="">选择用户</option>
+                  {users.items.map((user) => <option key={user.id} value={user.id}>{userLabel(user)}</option>)}
+                </select>
+              </Field>
+              <Field label="权限角色" htmlFor="grant-role">
+                <select id="grant-role" className="select" value={role} onChange={(event) => setRole(event.target.value as ProjectAccess)}>
+                  <option value="read">只读（read）</option>
+                  <option value="manage">管理（manage）</option>
+                </select>
+              </Field>
+            </div>
+            {users.hasNextPage ? <Button variant="secondary" onClick={users.fetchNextPage} loading={users.isFetchingNextPage}>加载更多用户</Button> : null}
+            {users.isError ? <ErrorState error={users.error} onRetry={users.retry} title="用户列表加载失败" /> : null}
+            {saveError ? <ErrorState error={saveError} title="保存授权失败" /> : null}
+            <div className={styles.actionsRight} style={{ marginTop: 12 }}>
+              <Button variant="primary" onClick={() => { void grant() }} loading={saving}>授予权限</Button>
+            </div>
+
+            <h3 style={{ marginTop: 20 }}>当前授权</h3>
+            {grants.isPending ? <LoadingState label="正在读取项目授权…" /> : null}
+            {grants.isError ? <ErrorState error={grants.error} onRetry={grants.retry} /> : null}
+            {grants.isSuccess && grants.items.length === 0 ? (
+              <EmptyState title="该项目还没有授权" description="使用上方表单为账号授予 read 或 manage。" />
+            ) : null}
+            {grants.items.length ? (
+              <div className="tableWrap">
+                <table className="dataTable" style={{ minWidth: 680 }}>
+                  <thead>
+                    <tr>
+                      <th scope="col">用户</th>
+                      <th scope="col">用户 ID</th>
+                      <th scope="col">角色</th>
+                      <th scope="col">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {grants.items.map((item) => (
+                      <tr key={`${item.project_id}-${item.user_id}`}>
+                        <td>{item.username || `用户 ${item.user_id}`}</td>
+                        <td className="tabular">{item.user_id}</td>
+                        <td>{item.role === 'manage' ? '管理（manage）' : '只读（read）'}</td>
+                        <td><Button variant="danger" onClick={() => setDeleteTarget(item)}>撤销</Button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
+            {grants.hasNextPage ? (
+              <Button variant="secondary" onClick={grants.fetchNextPage} loading={grants.isFetchingNextPage}>加载更多授权</Button>
+            ) : null}
+          </>
+        ) : <EmptyState title="请选择项目" description="选择项目后可以查看并维护该项目的用户授权。" />}
+      </Panel>
+
+      <ConfirmDialog
+        open={Boolean(deleteTarget)}
+        onClose={() => { setDeleteTarget(null); setDeleteError(null) }}
+        onConfirm={() => { void removeGrant() }}
+        title="撤销项目授权？"
+        description={deleteTarget
+          ? `将撤销用户 ${deleteTarget.username || deleteTarget.user_id} 在项目 ${deleteTarget.project_id} 的 ${deleteTarget.role} 权限。该用户会立即失去对应的项目访问能力。`
+          : ''}
+        confirmLabel="撤销授权"
+        pending={deletePending}
+        error={deleteError}
+      />
+    </>
+  )
+}
+
 export function SystemPage() {
-  const canWrite = useCanWrite()
+  const isAdmin = useCanWrite()
+  const canSelfService = useCanSelfService()
   const toast = useToast()
   const queryClient = useQueryClient()
   const [tab, setTab] = useState('tokens')
@@ -114,8 +409,17 @@ export function SystemPage() {
   const settings = useQuery({
     queryKey: ['settings'],
     queryFn: getSettings,
-    enabled: tab === 'settings',
+    enabled: isAdmin && tab === 'settings',
   })
+
+  const tabs = [
+    { key: 'tokens', label: 'API Token' },
+    ...(isAdmin ? [
+      { key: 'settings', label: '平台配置（只读）' },
+      { key: 'users', label: '用户与账号' },
+      { key: 'access', label: '项目授权' },
+    ] : []),
+  ]
 
   const revoke = async () => {
     if (!revokeTarget) return
@@ -138,10 +442,12 @@ export function SystemPage() {
       <div className={ui.pageStack}>
         <PageHeader
           title="系统"
-          description="管理当前用户的 API token，查看平台配置的脱敏只读视图。"
+          description={isAdmin
+            ? '管理个人 API token、平台配置只读视图、用户账号和项目授权。'
+            : '管理当前用户的 API token。平台配置与用户管理仅管理员可见。'}
         />
         <Tabs
-          items={[{ key: 'tokens', label: 'API Token' }, { key: 'settings', label: '平台配置（只读）' }]}
+          items={tabs}
           value={tab}
           onChange={setTab}
           label="系统设置"
@@ -150,16 +456,16 @@ export function SystemPage() {
         {tab === 'tokens' ? (
           <Panel
             title="我的 API token"
-            aside={canWrite ? 'cookie 写操作由 CSRF 保护' : '只读账号可查看 token 列表，但不能创建或撤销'}
+            aside={canSelfService ? '登录用户可管理自己的 token；写操作由 CSRF 保护' : '当前会话不能创建或撤销 token'}
           >
-            {canWrite ? (
+            {canSelfService ? (
               <div className={styles.actionsRight}>
                 <Button variant="primary" onClick={() => setCreateOpen(true)}>创建 token</Button>
               </div>
             ) : null}
             {tokens.isPending ? <LoadingState /> : null}
-            {tokens.isError ? <ErrorState error={tokens.error} onRetry={tokens.refetch} /> : null}
-            {tokens.isSuccess && tokens.items.length === 0 ? <EmptyState title="还没有 API token" description={canWrite ? '创建一个 token 供 reviewctl 或脚本使用。' : '当前账号没有 API token。'} /> : null}
+            {tokens.isError ? <ErrorState error={tokens.error} onRetry={tokens.retry} /> : null}
+            {tokens.isSuccess && tokens.items.length === 0 ? <EmptyState title="还没有 API token" description={canSelfService ? '创建一个 token 供 reviewctl 或脚本使用。' : '当前账号没有 API token。'} /> : null}
             {tokens.items.length ? (
               <div className="tableWrap">
                 <table className="dataTable" style={{ minWidth: 760 }}>
@@ -169,7 +475,7 @@ export function SystemPage() {
                       <th scope="col">创建时间</th>
                       <th scope="col">过期时间</th>
                       <th scope="col">最近使用</th>
-                      {canWrite ? <th scope="col">操作</th> : null}
+                      {canSelfService ? <th scope="col">操作</th> : null}
                     </tr>
                   </thead>
                   <tbody>
@@ -179,7 +485,7 @@ export function SystemPage() {
                         <td>{token.created_at ? formatDate(token.created_at) : '—'}</td>
                         <td>{token.expires_at ? formatDate(token.expires_at) : '—'}</td>
                         <td>{token.last_used_at ? formatDate(token.last_used_at) : '从未使用或未提供'}</td>
-                        {canWrite ? <td><Button variant="danger" onClick={() => setRevokeTarget(token)}>撤销</Button></td> : null}
+                        {canSelfService ? <td><Button variant="danger" onClick={() => setRevokeTarget(token)}>撤销</Button></td> : null}
                       </tr>
                     ))}
                   </tbody>
@@ -188,7 +494,9 @@ export function SystemPage() {
             ) : null}
             {tokens.hasNextPage ? <Button variant="secondary" onClick={tokens.fetchNextPage} loading={tokens.isFetchingNextPage}>加载更多</Button> : null}
           </Panel>
-        ) : (
+        ) : null}
+
+        {tab === 'settings' && isAdmin ? (
           <Panel
             title="平台配置"
             aside="服务端脱敏只读视图"
@@ -204,10 +512,13 @@ export function SystemPage() {
               </>
             ) : null}
           </Panel>
-        )}
+        ) : null}
+
+        {tab === 'users' && isAdmin ? <AdminUsersPanel /> : null}
+        {tab === 'access' && isAdmin ? <AdminGrantsPanel /> : null}
       </div>
 
-      {canWrite ? <TokenCreateDialog open={createOpen} onClose={() => setCreateOpen(false)} /> : null}
+      {canSelfService ? <TokenCreateDialog open={createOpen} onClose={() => setCreateOpen(false)} /> : null}
       <ConfirmDialog
         open={Boolean(revokeTarget)}
         onClose={() => setRevokeTarget(null)}

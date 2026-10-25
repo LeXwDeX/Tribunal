@@ -67,6 +67,10 @@ type RunSpec struct {
 	MaxTokens     int
 	Temperature   *float64
 	Reasoning     *llm.ReasoningOpts
+	// BeforeTurn runs before every model request with the usage already
+	// consumed by this run. A non-nil error stops the loop without another
+	// Generate call.
+	BeforeTurn func(context.Context, llm.Usage) error
 }
 
 // RunResult is the accepted output and the conversation that produced it.

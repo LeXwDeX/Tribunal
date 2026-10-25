@@ -217,12 +217,13 @@ func BuildGraph(profile Profile, d *Dossier, cfg GraphConfig) (dag.GraphSpec, er
 		return dag.GraphSpec{}, err
 	}
 	nodes = append(nodes, dag.NodeSpec{
-		ID:       NodePlan,
-		Kind:     KindPlan,
-		Required: true,
-		Expands:  true,
-		Timeout:  DefaultPlanTimeout,
-		Params:   planRaw,
+		ID:        NodePlan,
+		Kind:      KindPlan,
+		Required:  true,
+		Expands:   true,
+		Timeout:   DefaultPlanTimeout,
+		Params:    planRaw,
+		TokenFree: normalized.Config.Plan.Mode == "code",
 	})
 
 	if normalized.Config.Reasoner != nil && normalized.Config.Reasoner.When != "never" {
@@ -270,6 +271,7 @@ func BuildGraph(profile Profile, d *Dossier, cfg GraphConfig) (dag.GraphSpec, er
 		Expands:   true,
 		Timeout:   DefaultGatherTimeout,
 		Params:    gatherRaw,
+		TokenFree: true,
 	})
 
 	adjudicateRaw, err := encodeParams(adjudicateParams{
@@ -287,6 +289,7 @@ func BuildGraph(profile Profile, d *Dossier, cfg GraphConfig) (dag.GraphSpec, er
 		Required:  true,
 		Timeout:   DefaultAdjudicateTimeout,
 		Params:    adjudicateRaw,
+		TokenFree: true,
 	})
 
 	synthesizeRaw, err := encodeParams(synthesizeParams{
@@ -306,6 +309,7 @@ func BuildGraph(profile Profile, d *Dossier, cfg GraphConfig) (dag.GraphSpec, er
 		Expands:   normalized.Config.Synthesize.Mode == "agent" && normalized.Config.Budget.MaxExtends > 0,
 		Timeout:   DefaultSynthesizeTimeout,
 		Params:    synthesizeRaw,
+		TokenFree: true,
 	})
 
 	spec := dag.GraphSpec{Nodes: nodes, Budget: budget}
@@ -1155,9 +1159,18 @@ func (g GatherExpander) Expand(ctx context.Context, wf dag.WorkflowView, from da
 	for _, group := range gathered.Groups {
 		byID[group.ID] = group
 	}
-	nodes := make([]dag.NodeSpec, 0, len(gathered.ToChallenge))
-	verifyIDs := make([]string, 0, len(gathered.ToChallenge))
-	for i, target := range gathered.ToChallenge {
+	for _, target := range gathered.ToChallenge {
+		if _, ok := byID[target.GroupID]; !ok {
+			return dag.Extension{}, &ExtensionError{Field: "to_challenge", Problem: fmt.Sprintf("unknown group %q", target.GroupID)}
+		}
+	}
+	targets, _ := limitChallengeTargets(byID, gathered.ToChallenge, challengeLimit(wf))
+	if len(targets) == 0 {
+		return dag.Extension{Source: dag.ExtensionSourceFanOut, FromNode: from.ID}, nil
+	}
+	nodes := make([]dag.NodeSpec, 0, len(targets))
+	verifyIDs := make([]string, 0, len(targets))
+	for i, target := range targets {
 		group, ok := byID[target.GroupID]
 		if !ok {
 			return dag.Extension{}, &ExtensionError{Field: "to_challenge", Problem: fmt.Sprintf("unknown group %q", target.GroupID)}
@@ -1233,6 +1246,9 @@ func (s SynthesizeExpander) Expand(ctx context.Context, wf dag.WorkflowView, fro
 	if len(requests) == 0 || result.Fallback {
 		return dag.Extension{Source: dag.ExtensionSourceFanOut, FromNode: from.ID}, nil
 	}
+	if limit := challengeLimit(wf); limit >= 0 && len(requests)+1 > limit {
+		return dag.Extension{Source: dag.ExtensionSourceFanOut, FromNode: from.ID}, nil
+	}
 	if params.MaxExtends <= 0 {
 		return dag.Extension{}, &ExtensionError{Field: "extend_requests", Problem: "profile does not allow extensions"}
 	}
@@ -1298,6 +1314,7 @@ func (s SynthesizeExpander) Expand(ctx context.Context, wf dag.WorkflowView, fro
 		Required:  true,
 		Timeout:   DefaultSynthesizeTimeout,
 		Params:    synth2Params,
+		TokenFree: true,
 	}
 	nodes = append(nodes, synth2)
 	ext := dag.Extension{

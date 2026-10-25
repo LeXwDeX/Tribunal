@@ -51,8 +51,8 @@ class FakeEventSource {
   }
 }
 
-function Harness({ id, status }: { id: string; status: string }) {
-  const stream = useReviewStream(id, review({ id, status }))
+function Harness({ id, status, publicationState }: { id: string; status: string; publicationState?: string }) {
+  const stream = useReviewStream(id, review({ id, status, publication_state: publicationState as never }))
   return <span data-testid="stream-state">{stream.state}</span>
 }
 
@@ -100,8 +100,42 @@ describe('review SSE lifecycle', () => {
   it('does not connect for an already-terminal review', () => {
     const client = createTestQueryClient()
     render(
-      <QueryClientProvider client={client}><Harness id="done.review" status="completed" /></QueryClientProvider>,
+      <QueryClientProvider client={client}><Harness id="done.review" status="completed" publicationState="published" /></QueryClientProvider>,
     )
     expect(FakeEventSource.instances).toHaveLength(0)
+  })
+
+  it('keeps the stream open while a completed review is still publishing', async () => {
+    const client = createTestQueryClient()
+    render(
+      <QueryClientProvider client={client}>
+        <Harness id="published.review" status="completed" publicationState="pending" />
+      </QueryClientProvider>,
+    )
+    await vi.waitFor(() => expect(FakeEventSource.instances).toHaveLength(1))
+    const source = FakeEventSource.instances[0]
+    await act(async () => {
+      source.emit('workflow', JSON.stringify({ status: 'completed', verdict: 'PASS', publication_state: 'pending' }))
+    })
+    expect(source.closed).toBe(false)
+    await act(async () => {
+      source.emit('workflow', JSON.stringify({
+        status: 'completed', verdict: 'PASS', publication_state: 'failed', publication_error: 'merge request is not available',
+      }))
+    })
+    await vi.waitFor(() => expect(source.closed).toBe(true))
+  })
+
+  it('closes after execution fails even without a publication state', async () => {
+    const client = createTestQueryClient()
+    const { getByTestId } = render(
+      <QueryClientProvider client={client}><Harness id="failed.review" status="running" /></QueryClientProvider>,
+    )
+    await vi.waitFor(() => expect(FakeEventSource.instances).toHaveLength(1))
+    const source = FakeEventSource.instances[0]
+    await act(async () => {
+      source.emit('workflow', JSON.stringify({ status: 'failed' }))
+    })
+    await vi.waitFor(() => expect(getByTestId('stream-state')).toHaveTextContent('closed'))
   })
 })

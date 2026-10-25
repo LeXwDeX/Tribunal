@@ -18,8 +18,10 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -79,11 +81,14 @@ var (
 	ErrNotMirror = errors.New("repo: directory is not a bare mirror")
 	// ErrPathExists reports an existing worktree target.
 	ErrPathExists = errors.New("repo: path already exists")
+	// ErrInvalidPath reports a path outside the clean repository-relative shape.
+	ErrInvalidPath = errors.New("repo: invalid repository path")
 )
 
 var (
-	shaRE = regexp.MustCompile(`^[0-9a-fA-F]{40}$|^[0-9a-fA-F]{64}$`)
-	refRE = regexp.MustCompile(`^refs/[A-Za-z0-9._/+-]+$`)
+	shaRE        = regexp.MustCompile(`^[0-9a-fA-F]{40}$|^[0-9a-fA-F]{64}$`)
+	refRE        = regexp.MustCompile(`^refs/[A-Za-z0-9._/+-]+$`)
+	hunkHeaderRE = regexp.MustCompile(`^@@ -([0-9]+)(?:,([0-9]+))? \+([0-9]+)(?:,([0-9]+))? @@`)
 )
 
 func (g *Git) bin() string {
@@ -223,6 +228,10 @@ func requireExistingDir(path string) error {
 // run executes git with the hardened environment and returns stdout. Errors
 // are reduced to an operation name and exit status.
 func (g *Git) run(ctx context.Context, op, dir string, a Auth, args ...string) ([]byte, error) {
+	return g.runWithWaitDelay(ctx, op, dir, a, gitWaitDelay, args...)
+}
+
+func (g *Git) runWithWaitDelay(ctx context.Context, op, dir string, a Auth, waitDelay time.Duration, args ...string) ([]byte, error) {
 	env, err := g.buildEnv(a)
 	if err != nil {
 		return nil, wrapEnvError(err)
@@ -236,7 +245,7 @@ func (g *Git) run(ctx context.Context, op, dir string, a Auth, args ...string) (
 
 	cmd := exec.CommandContext(ctx, g.bin(), full...)
 	cmd.Env = env
-	cmd.WaitDelay = gitWaitDelay
+	cmd.WaitDelay = waitDelay
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = io.Discard
@@ -253,6 +262,32 @@ func (g *Git) run(ctx context.Context, op, dir string, a Auth, args ...string) (
 		return nil, &Error{Op: op, ExitCode: exitErr.ExitCode()}
 	}
 	return nil, fmt.Errorf("repo: %s: %w", op, runErr)
+}
+
+// RemoteHEAD resolves the commit named by HEAD on an http(s) remote without
+// creating a repository or writing to disk. The token is supplied through the
+// hardened environment; redirects are disabled by globalArgs.
+func (g *Git) RemoteHEAD(ctx context.Context, remoteURL string, a Auth) (string, error) {
+	if err := validateRemoteURL(remoteURL); err != nil {
+		return "", err
+	}
+	out, err := g.runWithWaitDelay(ctx, "ls-remote", "", a, 250*time.Millisecond,
+		"ls-remote", "--exit-code", "--", remoteURL, "HEAD")
+	if err != nil {
+		return "", err
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) != 1 {
+		return "", &Error{Op: "ls-remote"}
+	}
+	fields := strings.Fields(lines[0])
+	if len(fields) != 2 || fields[1] != "HEAD" {
+		return "", &Error{Op: "ls-remote"}
+	}
+	if err := ValidateSHA(fields[0]); err != nil {
+		return "", &Error{Op: "ls-remote"}
+	}
+	return strings.ToLower(fields[0]), nil
 }
 
 // EnsureMirror initializes a bare mirror, or updates the origin of an
@@ -371,7 +406,8 @@ func (g *Git) AddWorktree(ctx context.Context, mirror, dir, sha string) error {
 }
 
 // RemoveWorktree removes a registered linked worktree. It is a no-op when the
-// worktree directory is already gone.
+// worktree directory is already gone. A missing mirror is also a no-op: no
+// registration can remain, so callers may reclaim the directory themselves.
 func (g *Git) RemoveWorktree(ctx context.Context, mirror, dir string) error {
 	if err := validateAbsPath(mirror); err != nil {
 		return err
@@ -379,7 +415,16 @@ func (g *Git) RemoveWorktree(ctx context.Context, mirror, dir string) error {
 	if err := validateAbsPath(dir); err != nil {
 		return err
 	}
+	// Callers delete dir after a nil error, so a cancelled cleanup must not be
+	// reported as a successful no-op.
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("repo: remove worktree: %w", err)
+	}
 	if err := requireExistingDir(mirror); err != nil {
+		// No mirror means no registration remains; the caller may reclaim dir.
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
 		return err
 	}
 	info, err := os.Lstat(dir)
@@ -491,4 +536,202 @@ func (g *Git) IsAncestor(ctx context.Context, dir, ancestor, descendant string) 
 		return false, nil
 	}
 	return false, err
+}
+
+// LineChange is one zero-context diff hunk. A zero line count marks a pure
+// insertion or deletion at the given start position.
+type LineChange struct {
+	OldStart int
+	OldLines int
+	NewStart int
+	NewLines int
+}
+
+// FileDiff describes the line changes of one repository path between two
+// revisions. Deleted reports a removed path, Binary reports content Git cannot
+// compare by line, and Incomparable reports a change the caller cannot map
+// back to the old path (an addition or a rename into the path).
+type FileDiff struct {
+	OldPath      string
+	NewPath      string
+	Deleted      bool
+	Binary       bool
+	Incomparable bool
+	Hunks        []LineChange
+}
+
+type diffStatus struct {
+	Code byte
+	Old  string
+	New  string
+}
+
+func validateRepoPath(value string) error {
+	if value == "" || len(value) > maxPathLen || strings.ContainsAny(value, "\\\x00\r\n") {
+		return ErrInvalidPath
+	}
+	if strings.HasPrefix(value, "/") {
+		return ErrInvalidPath
+	}
+	cleaned := path.Clean(value)
+	if cleaned != value || cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return ErrInvalidPath
+	}
+	for _, segment := range strings.Split(value, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return ErrInvalidPath
+		}
+	}
+	return nil
+}
+
+// FileDiff returns the zero-context line changes for pathValue between from
+// and to. Renames that start at pathValue are followed to their new path. It
+// returns nil when the path is unchanged. Binary and added paths are reported
+// instead of being treated as unchanged, so callers can refuse to guess.
+func (g *Git) FileDiff(ctx context.Context, dir, from, to, pathValue string) (*FileDiff, error) {
+	if err := validateAbsPath(dir); err != nil {
+		return nil, err
+	}
+	if err := validateRevision(from); err != nil {
+		return nil, err
+	}
+	if err := validateRevision(to); err != nil {
+		return nil, err
+	}
+	if err := validateRepoPath(pathValue); err != nil {
+		return nil, err
+	}
+	if err := requireExistingDir(dir); err != nil {
+		return nil, err
+	}
+	out, err := g.run(ctx, "diff names", dir, Auth{},
+		"diff", "--name-status", "-z", "--find-renames", "--no-ext-diff", "--no-textconv", from, to)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := parseNameStatus(out)
+	if err != nil {
+		return nil, err
+	}
+	var entry *diffStatus
+	for i := range entries {
+		if entries[i].Old == pathValue || entries[i].New == pathValue {
+			entry = &entries[i]
+			break
+		}
+	}
+	if entry == nil {
+		return nil, nil
+	}
+	change := &FileDiff{OldPath: entry.Old, NewPath: entry.New}
+	switch entry.Code {
+	case 'D':
+		change.NewPath = ""
+		change.Deleted = true
+		return change, nil
+	case 'A', 'T', 'U':
+		change.Incomparable = true
+		return change, nil
+	case 'C':
+		if entry.Old != pathValue {
+			change.Incomparable = true
+		}
+		return change, nil
+	case 'M':
+		if entry.Old != pathValue {
+			change.Incomparable = true
+			return change, nil
+		}
+		return g.diffHunks(ctx, dir, from, to, change, entry.Old)
+	case 'R':
+		if entry.Old != pathValue {
+			change.Incomparable = true
+			return change, nil
+		}
+		return g.diffHunks(ctx, dir, from, to, change, entry.Old, entry.New)
+	default:
+		change.Incomparable = true
+		return change, nil
+	}
+}
+
+func (g *Git) diffHunks(ctx context.Context, dir, from, to string, change *FileDiff, targets ...string) (*FileDiff, error) {
+	args := []string{"diff", "--unified=0", "--no-color", "--no-ext-diff", "--no-textconv", "--find-renames", from, to, "--"}
+	for _, target := range targets {
+		if target == "" {
+			continue
+		}
+		args = append(args, ":(literal)"+target)
+	}
+	out, err := g.run(ctx, "diff hunks", dir, Auth{}, args...)
+	if err != nil {
+		return nil, err
+	}
+	change.Hunks, change.Binary = parseDiffHunks(out)
+	return change, nil
+}
+
+func parseNameStatus(out []byte) ([]diffStatus, error) {
+	fields := bytes.Split(out, []byte{0})
+	entries := make([]diffStatus, 0, len(fields)/2)
+	for i := 0; i < len(fields); {
+		if len(fields[i]) == 0 {
+			i++
+			continue
+		}
+		rawCode := fields[i]
+		code := rawCode[0]
+		if code < 'A' || code > 'Z' {
+			return nil, fmt.Errorf("repo: parse name-status")
+		}
+		i++
+		if i >= len(fields) {
+			return nil, fmt.Errorf("repo: parse name-status")
+		}
+		oldPath := string(fields[i])
+		i++
+		newPath := oldPath
+		if code == 'R' || code == 'C' {
+			if i >= len(fields) {
+				return nil, fmt.Errorf("repo: parse name-status")
+			}
+			newPath = string(fields[i])
+			i++
+		}
+		if oldPath == "" {
+			return nil, fmt.Errorf("repo: parse name-status")
+		}
+		entries = append(entries, diffStatus{Code: code, Old: oldPath, New: newPath})
+	}
+	return entries, nil
+}
+
+func parseDiffHunks(out []byte) ([]LineChange, bool) {
+	var hunks []LineChange
+	binary := false
+	for _, line := range bytes.Split(out, []byte{'\n'}) {
+		if bytes.HasPrefix(line, []byte("Binary files ")) || bytes.HasPrefix(line, []byte("GIT binary patch")) {
+			binary = true
+			continue
+		}
+		match := hunkHeaderRE.FindSubmatch(line)
+		if match == nil {
+			continue
+		}
+		hunk := LineChange{OldStart: atoi(match[1]), OldLines: 1, NewStart: atoi(match[3]), NewLines: 1}
+		if match[2] != nil {
+			hunk.OldLines = atoi(match[2])
+		}
+		if match[4] != nil {
+			hunk.NewLines = atoi(match[4])
+		}
+		hunks = append(hunks, hunk)
+	}
+	return hunks, binary
+}
+
+func atoi(raw []byte) int {
+	value, _ := strconv.Atoi(string(raw))
+	return value
 }

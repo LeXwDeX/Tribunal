@@ -1,8 +1,10 @@
 package agent
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -239,6 +241,58 @@ func pathWithin(name string) bool {
 		}
 	}
 	return false
+}
+
+// ValidateLineRange verifies that rel is a readable regular file inside
+// rootName and contains every line in [start, end]. It uses the same escape
+// checks as builtin reads and reports unknown roots, missing files, symlink
+// escapes, and short files as errors. Callers use the error as evidence that a
+// refutation is not proven; it must not become a successful refutation.
+func (s *Sandbox) ValidateLineRange(rootName, rel string, start, end int) error {
+	if start <= 0 {
+		return errors.New("agent: start line must be positive")
+	}
+	if end < start {
+		return errors.New("agent: end line must not be before start line")
+	}
+	file, clean, err := s.open(rootName, rel)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	lines, err := countLines(file)
+	if err != nil {
+		return fmt.Errorf("agent: read %s: %w", clean, err)
+	}
+	if end > lines {
+		return fmt.Errorf("agent: %s has %d lines; range %d-%d is outside the file", clean, lines, start, end)
+	}
+	return nil
+}
+
+func countLines(reader io.Reader) (int, error) {
+	buf := make([]byte, 32*1024)
+	lines := 0
+	nonEmpty := false
+	last := byte('\n')
+	for {
+		n, err := reader.Read(buf)
+		if n > 0 {
+			nonEmpty = true
+			lines += bytes.Count(buf[:n], []byte{'\n'})
+			last = buf[n-1]
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return 0, err
+		}
+	}
+	if nonEmpty && last != '\n' {
+		lines++
+	}
+	return lines, nil
 }
 
 // open opens a sandboxed file for reading. os.Root rejects symlinks that

@@ -51,15 +51,20 @@ function useScopeQuery(enabled: boolean, scope: string, projectId?: number) {
 }
 
 export function ExtensionsManager({
-  scope, projectId, tab, onTabChange, projects = [],
+  scope, projectId, tab, onTabChange, projects = [], canManage = false,
 }: {
   scope: 'platform' | 'project'
   projectId?: number
   tab: string
   onTabChange: (tab: string) => void
   projects?: Project[]
+  canManage?: boolean
 }) {
-  const canWrite = useCanWrite()
+  const platformAdmin = useCanWrite()
+  // Every extension write changes host execution security, so the server
+  // requires the platform admin role. Project scope additionally requires the
+  // project manage grant and fails closed when it is missing.
+  const canWrite = platformAdmin && (scope === 'platform' || (Boolean(projectId) && canManage))
   const toast = useToast()
   const queryClient = useQueryClient()
   const [testResults, setTestResults] = useState<Record<string, { tools?: McpTool[]; error?: string; pending?: boolean }>>({})
@@ -266,7 +271,7 @@ function McpTab({
         </div>
       ) : null}
       {servers.isPending ? <LoadingState /> : null}
-      {servers.isError ? <ErrorState error={servers.error} onRetry={servers.refetch} /> : null}
+      {servers.isError ? <ErrorState error={servers.error} onRetry={servers.retry} /> : null}
       {servers.isSuccess && servers.items.length === 0 ? (
         <EmptyState title="还没有 MCP 服务器" description="可新增 stdio 或 HTTP MCP 服务器，或粘贴 Claude Code 的 mcpServers 配置。" />
       ) : null}
@@ -359,7 +364,7 @@ function SkillsTab({
         </div>
       ) : null}
       {skills.isPending ? <LoadingState /> : null}
-      {skills.isError ? <ErrorState error={skills.error} onRetry={skills.refetch} /> : null}
+      {skills.isError ? <ErrorState error={skills.error} onRetry={skills.retry} /> : null}
       {skills.isSuccess && skills.items.length === 0 ? <EmptyState title="还没有 Skill" description="上传包含 SKILL.md 的 zip，或登记服务器上的目录。" /> : null}
       {skills.items.length ? (
         <div className="tableWrap">
@@ -494,7 +499,7 @@ function BindingsTab({
   }
 
   if (bindingState.isPending) return <Panel title="块绑定"><LoadingState /></Panel>
-  if (bindingState.isError) return <Panel title="块绑定"><ErrorState error={bindingState.error} onRetry={bindingState.refetch} /></Panel>
+  if (bindingState.isError) return <Panel title="块绑定"><ErrorState error={bindingState.error} onRetry={bindingState.retry} /></Panel>
 
   return (
     <Panel

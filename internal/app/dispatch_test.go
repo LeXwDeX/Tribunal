@@ -57,13 +57,14 @@ func TestDispatcherStartReviewEnqueuesRun(t *testing.T) {
 		t.Fatalf("decode payload: %v", err)
 	}
 	want := map[string]any{
-		"project_id": float64(42),
-		"mr_iid":     float64(7),
-		"head_sha":   sha40,
-		"generation": float64(1),
-		"profile":    "deep",
-		"trigger":    "manual",
-		"full":       true,
+		"project_id":       float64(42),
+		"mr_iid":           float64(7),
+		"head_sha":         sha40,
+		"generation":       float64(1),
+		"profile":          "deep",
+		"profile_explicit": true,
+		"trigger":          "manual",
+		"full":             true,
 	}
 	for key, value := range want {
 		if payload[key] != value {
@@ -94,6 +95,78 @@ func TestDispatcherStartReviewEnqueuesRun(t *testing.T) {
 	}
 	if nextPayload["full"] != false {
 		t.Fatalf("full = %v, want false", nextPayload["full"])
+	}
+}
+
+func TestDispatcherImplicitProfileFollowsRepoDefault(t *testing.T) {
+	ctx := context.Background()
+	f := newReviewFixture(t, reviewTestHead)
+	f.profiles["deep"] = testReviewProfile()
+	f.setRepoConfig(t, "version: 1\nprofile: deep\n")
+	dispatcher := newTestDispatcher(t, f.db, f.gitlab)
+
+	jobID, err := dispatcher.StartReview(ctx, 42, 7, "", false)
+	if err != nil {
+		t.Fatalf("StartReview: %v", err)
+	}
+	job, err := f.db.GetJob(ctx, jobID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(job.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["profile_explicit"] != false {
+		t.Fatalf("implicit profile_explicit = %v, want false (payload=%s)", payload["profile_explicit"], job.Payload)
+	}
+	if err := f.service.RunReview(ctx, &jobs.Job{
+		ID: job.ID, Kind: job.Kind, Payload: job.Payload, MaxAttempts: job.MaxAttempts,
+	}); err != nil {
+		t.Fatalf("RunReview: %v", err)
+	}
+	workflow, err := f.db.GetWorkflowByJob(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workflow.Profile != "deep" {
+		t.Fatalf("implicit profile = %q, want repo default deep", workflow.Profile)
+	}
+}
+
+func TestDispatcherExplicitProfileWinsOverRepoDefault(t *testing.T) {
+	ctx := context.Background()
+	f := newReviewFixture(t, reviewTestHead)
+	f.profiles["deep"] = testReviewProfile()
+	f.setRepoConfig(t, "version: 1\nprofile: deep\n")
+	dispatcher := newTestDispatcher(t, f.db, f.gitlab)
+
+	jobID, err := dispatcher.StartReview(ctx, 42, 7, "default", false)
+	if err != nil {
+		t.Fatalf("StartReview: %v", err)
+	}
+	job, err := f.db.GetJob(ctx, jobID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(job.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["profile_explicit"] != true {
+		t.Fatalf("explicit profile_explicit = %v, want true (payload=%s)", payload["profile_explicit"], job.Payload)
+	}
+	if err := f.service.RunReview(ctx, &jobs.Job{
+		ID: job.ID, Kind: job.Kind, Payload: job.Payload, MaxAttempts: job.MaxAttempts,
+	}); err != nil {
+		t.Fatalf("RunReview: %v", err)
+	}
+	workflow, err := f.db.GetWorkflowByJob(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workflow.Profile != "default" {
+		t.Fatalf("explicit profile = %q, want default", workflow.Profile)
 	}
 }
 
@@ -341,5 +414,15 @@ func TestReviewWorkerRegistersPublishHandler(t *testing.T) {
 	}
 	if _, ok := worker.Handlers()["review.publish"]; !ok {
 		t.Fatal("review.publish handler is not registered")
+	}
+}
+
+func TestReviewWorkerRegistersCandidateHandler(t *testing.T) {
+	worker, err := NewReviewWorker(&ReviewService{}, &WorkspaceService{})
+	if err != nil {
+		t.Fatalf("NewReviewWorker: %v", err)
+	}
+	if _, ok := worker.Handlers()["review.candidate"]; !ok {
+		t.Fatal("review.candidate handler is not registered")
 	}
 }

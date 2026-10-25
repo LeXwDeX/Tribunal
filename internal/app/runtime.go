@@ -95,6 +95,8 @@ type Runtime struct {
 	reviews     *ReviewService
 	workspaces  *WorkspaceService
 	feedback    *FeedbackService
+	retention   *RetentionService
+	runCleanup  *RunCleanupService
 	publisher   *Publisher
 	worker      *ReviewWorker
 	lifecycle   *Lifecycle
@@ -155,7 +157,7 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		return nil, err
 	}
 	blocks, platformMCP, skillDirs, err := loadStoredPlatformExtensions(
-		ctx, deps.Store, cfg.Blocks, platformMCP, cfg.Skills.Dirs)
+		ctx, deps.Store, cfg.Blocks, platformMCP, cfg.Skills.Dirs, deniedEnvNames(cfg)...)
 	if err != nil {
 		return nil, err
 	}
@@ -186,12 +188,18 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 	}
 
 	executors := newExecutorRegistry()
-	executors.SetProjectLookup(func(ctx context.Context, workflowID string) (int64, bool) {
+	executors.SetProjectLookup(func(ctx context.Context, workflowID string) (int64, error) {
 		workflow, err := deps.Store.GetWorkflow(ctx, workflowID)
-		if err != nil || workflow == nil || workflow.ProjectID <= 0 {
-			return 0, false
+		if err != nil {
+			return 0, err
 		}
-		return workflow.ProjectID, true
+		if workflow == nil {
+			return 0, fmt.Errorf("workflow %q is missing", workflowID)
+		}
+		if workflow.ProjectID <= 0 {
+			return 0, fmt.Errorf("workflow %q has no project", workflowID)
+		}
+		return workflow.ProjectID, nil
 	})
 	engine := dag.NewEngine(deps.Store, executors, executors, dag.Options{
 		MaxConcurrentNodes: cfg.Engine.MaxConcurrentNodes,
@@ -217,7 +225,6 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		return nil, err
 	}
 	toolProvider := NewMCPToolProvider(mcpManager, blocks)
-	mcpFactory := func(context.Context, int64) (*mcp.Manager, error) { return mcpManager, nil }
 	projectExts, err := NewProjectExtensionResolver(ProjectExtensionResolverConfig{
 		Store:      deps.Store,
 		Blocks:     blocks,
@@ -227,7 +234,6 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		DeniedEnv:  deniedEnvNames(cfg),
 		Now:        now,
 		Logger:     logger,
-		BaseTools:  toolProvider,
 		BaseSkills: skillProvider,
 	})
 	if err != nil {
@@ -236,9 +242,22 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		}
 		return nil, err
 	}
+	// Workspace indexing uses the project manager built from the effective
+	// platform and project configuration.
+	mcpFactory := func(ctx context.Context, projectID int64) (*mcp.Manager, error) {
+		set, err := projectExts.ForProject(ctx, projectID)
+		if err != nil {
+			return nil, err
+		}
+		if set != nil && set.mcp != nil {
+			return set.mcp, nil
+		}
+		return mcpManager, nil
+	}
 	projectTools := &projectAwareToolProvider{resolver: projectExts, base: toolProvider}
 	projectSkills := &projectAwareSkillProvider{resolver: projectExts, base: skillProvider, blocks: blocks}
 	reviewBlocks := projectBindingStubs(blocks)
+	statusFeed := newStatusReporter(deps.GitLab, logger)
 	reviews, err := NewReviewService(ReviewServiceConfig{
 		Store:            deps.Store,
 		GitLab:           deps.GitLab,
@@ -256,6 +275,7 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		Skills:           projectSkills,
 		Cost:             newCostFunc(cfg.Providers),
 		Publisher:        publisher,
+		Status:           statusFeed,
 		AllowedProviders: providerNames(cfg.Providers),
 		PublicURL:        cfg.Server.PublicURL,
 		Logger:           logger,
@@ -310,7 +330,36 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		}
 		return nil, err
 	}
+	retention, err := NewRetentionService(RetentionConfig{
+		Store:             deps.Store,
+		LLMCallRetention:  cfg.Storage.LLMCallRetention,
+		DeliveryRetention: cfg.Storage.DeliveryRetention,
+		JobRetention:      cfg.Storage.JobRetention,
+		ContextVersions:   cfg.Storage.ContextVersions,
+		Logger:            logger,
+		Now:               now,
+	})
+	if err != nil {
+		if ownedMCP {
+			_ = mcpManager.Close()
+		}
+		return nil, err
+	}
 	worker, err := NewReviewWorker(reviews, workspaces)
+	if err != nil {
+		if ownedMCP {
+			_ = mcpManager.Close()
+		}
+		return nil, err
+	}
+	runCleanup, err := NewRunCleanupService(RunCleanupConfig{
+		Store:     deps.Store,
+		Workspace: workspaceManager,
+		Git:       gitBackend,
+		After:     cfg.Workspace.RunCleanupAfter,
+		Logger:    logger,
+		Now:       now,
+	})
 	if err != nil {
 		if ownedMCP {
 			_ = mcpManager.Close()
@@ -323,8 +372,15 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		Cipher:    deps.Cipher,
 		Profiles:  cfg.Profiles,
 		PublicURL: cfg.Server.PublicURL,
-		Logger:    logger,
-		Now:       now,
+		Workspace: workspaceManager.Root(),
+		GitLabURL: cfg.GitLab.URL,
+		ProbeRemote: func(ctx context.Context, remoteURL, token string) (string, error) {
+			git := &repo.Git{Bin: cfg.Workspace.GitBin}
+			return git.RemoteHEAD(ctx, remoteURL, repo.Auth{Token: token})
+		},
+		ValidationTimeout: cfg.GitLab.RequestTimeout,
+		Logger:            logger,
+		Now:               now,
 	})
 	if err != nil {
 		if ownedMCP {
@@ -376,6 +432,8 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		reviews:     reviews,
 		workspaces:  workspaces,
 		feedback:    feedback,
+		retention:   retention,
+		runCleanup:  runCleanup,
 		publisher:   publisher,
 		worker:      worker,
 		lifecycle:   &Lifecycle{},
@@ -452,8 +510,19 @@ func (r *Runtime) Reviews() *ReviewService { return r.reviews }
 // WorkspaceService returns the onboarding and refresh service.
 func (r *Runtime) WorkspaceService() *WorkspaceService { return r.workspaces }
 
+// WorkspaceManager exposes the shared per-project workspace lock and
+// directory owner. Context projections must reuse it instead of opening a
+// second manager.
+func (r *Runtime) WorkspaceManager() *workspace.Manager { return r.workspace }
+
 // Feedback returns the feedback collector.
 func (r *Runtime) Feedback() *FeedbackService { return r.feedback }
+
+// Retention returns the periodic cleanup service.
+func (r *Runtime) Retention() *RetentionService { return r.retention }
+
+// RunCleanup returns the periodic stale-run cleanup service.
+func (r *Runtime) RunCleanup() *RunCleanupService { return r.runCleanup }
 
 // Publisher exposes manual republish for the review API.
 func (r *Runtime) Publisher() *Publisher { return r.publisher }
@@ -487,15 +556,58 @@ func (r *Runtime) Recover(ctx context.Context) error {
 	return r.reviews.Recover(ctx)
 }
 
-// StartBackground starts the feedback ticker. The returned function stops it
-// and waits for the goroutine.
+// reviewSideEffectReconcileInterval bounds how long a pending status or
+// reaction survives a worker crash.
+const reviewSideEffectReconcileInterval = 5 * time.Minute
+
+// reconcileReviewSideEffects periodically re-enqueues pending side-effect
+// goals and settles rows that no live job can finish.
+func (r *Runtime) reconcileReviewSideEffects(ctx context.Context, interval time.Duration) {
+	if r.reviews == nil {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := r.reviews.ReconcileSideEffects(ctx); err != nil {
+				r.logger.Warn("review side-effect reconciliation failed", "error", err.Error())
+			}
+		}
+	}
+}
+
+// StartBackground starts the feedback, retention, run-cleanup, and review
+// side-effect tickers.
+// The returned function stops them and waits for the goroutines.
 func (r *Runtime) StartBackground(ctx context.Context) func() {
 	r.startOnce.Do(func() {
 		bgCtx, cancel := context.WithCancel(ctx)
 		r.startStop = cancel
+		var wg sync.WaitGroup
+		wg.Add(4)
 		go func() {
-			defer close(r.startDone)
+			defer wg.Done()
 			r.feedback.Start(bgCtx, defaultFeedbackInterval)
+		}()
+		go func() {
+			defer wg.Done()
+			r.retention.Start(bgCtx, 0)
+		}()
+		go func() {
+			defer wg.Done()
+			r.runCleanup.Start(bgCtx, 0)
+		}()
+		go func() {
+			defer wg.Done()
+			r.reconcileReviewSideEffects(bgCtx, reviewSideEffectReconcileInterval)
+		}()
+		go func() {
+			wg.Wait()
+			close(r.startDone)
 		}()
 	})
 	return func() {

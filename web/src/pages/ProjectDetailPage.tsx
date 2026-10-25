@@ -11,7 +11,9 @@ import {
   Badge, Button, EmptyState, ErrorState, LoadingState, Metric, PageHeader, Panel, StatusBadge, Tabs,
 } from '../components/ui'
 import { usePaginated } from '../lib/hooks'
-import { formatCost, formatDate, safeExternalUrl, shortSha } from '../lib/format'
+import {
+  formatCost, formatDate, labelForWebhookState, safeExternalUrl, shortSha, webhookTone,
+} from '../lib/format'
 import { formatMs, formatRatio, statNumber } from '../lib/stats'
 import ui from '../styles/ui.module.css'
 import styles from './pages.module.css'
@@ -40,6 +42,7 @@ function ProjectOverview({ project }: { project: Project }) {
   )
   const projectNames = useMemo(() => new Map([[project.id, project.path_with_namespace]]), [project.id, project.path_with_namespace])
   const workspaceState = project.workspace?.state || project.workspace_state
+  const webhookState = project.webhook_state || (project.hook_id ? 'unknown' : 'disabled')
 
   const runs = statNumber(stats.data, 'runs')
   const blocking = statNumber(stats.data, 'blocking')
@@ -62,9 +65,17 @@ function ProjectOverview({ project }: { project: Project }) {
             <div><dt>启用</dt><dd>{project.enabled ? '启用' : '停用'}</dd></div>
             <div><dt>token 过期</dt><dd>{project.token_expires_at ? formatDate(project.token_expires_at) : '未提供'}</dd></div>
             <div><dt>token scopes</dt><dd className="mono">{project.token_scopes?.join(', ') || '不可用'}</dd></div>
-            <div><dt>webhook</dt><dd>{project.hook_id ? `本服务创建（#${project.hook_id}）` : '手动配置或未提供'}</dd></div>
+            <div>
+              <dt>webhook</dt>
+              <dd>
+                <Badge tone={webhookTone(webhookState)}>{labelForWebhookState(webhookState)}</Badge>
+                {project.hook_id ? <span className="mono"> #{project.hook_id}</span> : null}
+                <span className="muted"> · {project.webhook_managed_by === 'crc' ? '本服务' : '手动或外部'}</span>
+              </dd>
+            </div>
             <div><dt>更新时间</dt><dd>{project.updated_at ? formatDate(project.updated_at) : '—'}</dd></div>
           </dl>
+          {project.webhook_error ? <span className={styles.resultError}>{project.webhook_error}</span> : null}
           <div className={styles.cardActions}>
             <Link to={`/projects/${project.id}/workspace`} style={secondaryLinkStyle}>工作区</Link>
             <Link to={`/projects/${project.id}/settings`} style={secondaryLinkStyle}>设置</Link>
@@ -88,10 +99,10 @@ function ProjectOverview({ project }: { project: Project }) {
         {stats.isError ? <ErrorState error={stats.error} onRetry={() => { void stats.refetch() }} title="项目统计加载失败" /> : null}
         {!stats.isPending && !stats.isError ? (
           <div className={styles.statGrid}>
-            <Metric label="评审次数" value={runs === null ? '不可用' : runs} note={`BLOCKING ${blocking === null ? '不可用' : blocking} 次`} />
+            <Metric label="运行次数" value={runs === null ? '不可用' : runs} note={`包含评审与 onboarding · BLOCKING ${blocking === null ? '不可用' : blocking} 次`} />
             <Metric label="BLOCKING 比例" value={formatRatio(blockingRatio)} note="来自 stats.blocking_ratio" />
             <Metric label="已发布问题" value={published === null ? '不可用' : published} note="来自 stats.published" />
-            <Metric label="被挑战推翻" value={formatRatio(overturned)} note="来自 stats.overturned_ratio" />
+            <Metric label="规则丢弃比例" value={formatRatio(overturned)} note="规则 drop 占比，不是模型准确率" />
             <Metric label="成本" value={cost === null ? '不可用' : formatCost(cost)} note={`平均 ${formatMs(avg)} · P95 ${formatMs(p95)}`} />
           </div>
         ) : null}
@@ -99,7 +110,7 @@ function ProjectOverview({ project }: { project: Project }) {
 
       <Panel title="最近评审" aside={<Link to={`/reviews?project_id=${project.id}`}>查看全部</Link>}>
         {reviews.isPending ? <LoadingState /> : null}
-        {reviews.isError ? <ErrorState error={reviews.error} onRetry={reviews.refetch} /> : null}
+        {reviews.isError ? <ErrorState error={reviews.error} onRetry={reviews.retry} /> : null}
         {reviews.isSuccess && reviews.items.length === 0 ? <EmptyState title="这个项目还没有评审记录" description="打开 MR 或手动触发一次评审。" /> : null}
         {reviews.items.length ? <ReviewTable reviews={reviews.items} projectNames={projectNames} /> : null}
         {reviews.hasNextPage ? <Button variant="secondary" onClick={reviews.fetchNextPage} loading={reviews.isFetchingNextPage}>加载更多评审</Button> : null}
@@ -114,6 +125,7 @@ function ProjectExtensionsPanel({ project }: { project: Project }) {
     <ExtensionsManager
       scope="project"
       projectId={project.id}
+      canManage={project.access === 'manage'}
       projects={[project]}
       tab={subTab}
       onTabChange={setSubTab}
@@ -185,7 +197,7 @@ export function ProjectDetailPage() {
 
         <div role="tabpanel" aria-labelledby={`tab-${tab}`}>
           {tab === 'overview' ? <ProjectOverview project={data} /> : null}
-          {tab === 'workspace' ? <WorkspacePanel projectId={data.id} /> : null}
+          {tab === 'workspace' ? <WorkspacePanel projectId={data.id} canManage={data.access === 'manage'} /> : null}
           {tab === 'settings' ? <SettingsPanel project={data} /> : null}
           {tab === 'extensions' ? <ProjectExtensionsPanel project={data} /> : null}
         </div>

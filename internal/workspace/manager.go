@@ -80,6 +80,14 @@ func NewManager(root string, git *repo.Git) *Manager {
 	return &Manager{root: root, git: git, byID: make(map[int64]*Workspace)}
 }
 
+// Root returns the normalized absolute workspace root.
+func (m *Manager) Root() string {
+	if m == nil {
+		return ""
+	}
+	return m.root
+}
+
 // Get returns the shared workspace for a positive GitLab project ID. It
 // performs no I/O; directories are created by the operations that need them.
 func (m *Manager) Get(pid int64) *Workspace {
@@ -295,6 +303,22 @@ func pathWithin(root, candidate string) bool {
 	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
+// ValidRunID reports whether id is safe to use as a direct runs/ directory
+// name.
+func ValidRunID(id string) bool { return runIDRE.MatchString(id) }
+
+// RegisteredRuns returns a snapshot of the runs this workspace created and
+// has not cleaned up yet. Periodic cleanup must not delete these directories.
+func (w *Workspace) RegisteredRuns() map[string]string {
+	w.runsMu.Lock()
+	defer w.runsMu.Unlock()
+	out := make(map[string]string, len(w.runs))
+	for id, dir := range w.runs {
+		out[id] = dir
+	}
+	return out
+}
+
 // NewRun creates a detached worktree for headSHA under runs/<wfID>. The
 // cleanup function removes only this run and reports failures.
 func (w *Workspace) NewRun(ctx context.Context, wfID, headSHA string) (string, func() error, error) {
@@ -317,13 +341,24 @@ func (w *Workspace) NewRun(ctx context.Context, wfID, headSHA string) (string, f
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return "", nil, fmt.Errorf("workspace: inspect run: %w", err)
 	}
-	if err := w.git.AddWorktree(ctx, w.MirrorDir(), dir, headSHA); err != nil {
-		return "", nil, err
-	}
-
+	// Register before creating the worktree so a concurrent cleanup skips it.
+	// The directory does not exist yet, so cleanup that wins this race sees a
+	// registration without a directory and deletes nothing.
 	w.runsMu.Lock()
+	if _, exists := w.runs[wfID]; exists {
+		w.runsMu.Unlock()
+		return "", nil, ErrRunExists
+	}
 	w.runs[wfID] = dir
 	w.runsMu.Unlock()
+	if err := w.git.AddWorktree(ctx, w.MirrorDir(), dir, headSHA); err != nil {
+		w.runsMu.Lock()
+		if w.runs[wfID] == dir {
+			delete(w.runs, wfID)
+		}
+		w.runsMu.Unlock()
+		return "", nil, err
+	}
 
 	cleanupCtx := context.WithoutCancel(ctx)
 	cleanup := func() error { return w.cleanupRun(cleanupCtx, wfID, dir) }

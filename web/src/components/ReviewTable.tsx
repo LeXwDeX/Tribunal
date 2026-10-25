@@ -1,7 +1,7 @@
 import { Link } from 'react-router-dom'
 import type { ReviewSummary } from '../api/types'
 import { formatCost, formatDuration, formatNumber } from '../lib/format'
-import { RelativeTime, SeverityBadge, StatusBadge, VerdictBadge } from './ui'
+import { PublicationBadge, RelativeTime, SeverityBadge, StatusBadge, VerdictBadge } from './ui'
 
 export function projectLabel(review: ReviewSummary, names: Map<number, string>): string {
   return review.project_path || names.get(review.project_id) || `项目 ${review.project_id}`
@@ -10,13 +10,14 @@ export function projectLabel(review: ReviewSummary, names: Map<number, string>):
 export function ReviewTable({ reviews, projectNames }: { reviews: ReviewSummary[]; projectNames: Map<number, string> }) {
   return (
     <div className="tableWrap">
-      <table className="dataTable" style={{ minWidth: 980 }}>
+      <table className="dataTable" style={{ minWidth: 1140 }}>
         <thead>
           <tr>
             <th scope="col">MR</th>
             <th scope="col">项目</th>
             <th scope="col">档位</th>
-            <th scope="col">状态</th>
+            <th scope="col">执行状态</th>
+            <th scope="col">发布</th>
             <th scope="col">结论</th>
             <th scope="col">P0 / P1 / P2</th>
             <th scope="col">用时</th>
@@ -40,6 +41,16 @@ export function ReviewTable({ reviews, projectNames }: { reviews: ReviewSummary[
                 <td><span className="mono small">{projectLabel(review, projectNames)}</span></td>
                 <td>{review.profile || '—'}</td>
                 <td><StatusBadge status={review.status} /></td>
+                <td>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 150 }}>
+                    <PublicationBadge state={review.publication_state} />
+                    {review.publication_error ? (
+                      <span className="small" style={{ color: 'var(--danger-fg)', maxWidth: 240, overflowWrap: 'anywhere' }} title={review.publication_error}>
+                        {review.publication_error}
+                      </span>
+                    ) : null}
+                  </div>
+                </td>
                 <td><VerdictBadge verdict={review.verdict} /></td>
                 <td className="tabular">
                   {counts ? (

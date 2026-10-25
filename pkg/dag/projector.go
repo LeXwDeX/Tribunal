@@ -537,6 +537,9 @@ func (u *Usage) add(other Usage) {
 	u.InputTokens += other.InputTokens
 	u.OutputTokens += other.OutputTokens
 	u.CostMicros += other.CostMicros
+	u.CacheReadTokens += other.CacheReadTokens
+	u.CacheWriteTokens += other.CacheWriteTokens
+	u.ReasoningTokens += other.ReasoningTokens
 }
 
 func (u Usage) totalTokens() int64 {

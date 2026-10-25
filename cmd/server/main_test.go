@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -281,6 +282,23 @@ func TestSessionKeyFromEnv(t *testing.T) {
 	t.Setenv("CRC_SESSION_KEY", "not-base64!!!")
 	if _, err := sessionKeyFromEnv(); err == nil {
 		t.Fatal("invalid base64 accepted")
+	}
+}
+
+func TestEphemeralSessionKeyWarns(t *testing.T) {
+	t.Setenv("CRC_SESSION_KEY", "")
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	warnEphemeralSessionKey(logger)
+	if !strings.Contains(logs.String(), "CRC_SESSION_KEY") || !strings.Contains(logs.String(), "restart") {
+		t.Fatalf("warning = %q", logs.String())
+	}
+
+	logs.Reset()
+	t.Setenv("CRC_SESSION_KEY", base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")))
+	warnEphemeralSessionKey(logger)
+	if logs.Len() != 0 {
+		t.Fatalf("pinned key warned: %q", logs.String())
 	}
 }
 
