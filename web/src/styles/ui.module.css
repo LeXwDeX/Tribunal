@@ -508,6 +508,11 @@
   color: var(--text);
 }
 
+/* The horizontal scroll container clips a positive outline offset. */
+.tab:focus-visible {
+  outline-offset: -2px;
+}
+
 .tabActive {
   color: var(--text);
   font-weight: 600;
@@ -873,7 +878,7 @@
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: #fff;
+  background: var(--surface);
   transition: transform 140ms ease;
 }
 
@@ -935,5 +940,17 @@
   }
   .toolbar .field {
     flex: 1 1 100%;
+  }
+  .smallButton {
+    height: 44px;
+    min-height: 44px;
+  }
+  .segmented button {
+    height: 44px;
+    min-width: 44px;
+  }
+  .tab {
+    height: 44px;
+    min-width: 44px;
   }
 }

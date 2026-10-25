@@ -163,6 +163,7 @@ export function Panel({
   )
 }
 
+// PanelBody keeps its own padding, so full-bleed layouts belong inside <Panel flush>.
 export function PanelBody({ children, className }: { children: ReactNode; className?: string }) {
   return <div className={classNames(styles.panelBody, className)}>{children}</div>
 }
@@ -531,9 +532,9 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return (
     <ToastContext.Provider value={{ push }}>
       {children}
-      <div className={styles.toastRegion}>
+      <div className={styles.toastRegion} role="status" aria-live="polite">
         {items.map((item) => (
-          <div key={item.id} role={item.tone === 'error' ? 'alert' : 'status'} className={classNames(styles.toast, item.tone === 'success' && styles.toastSuccess, item.tone === 'error' && styles.toastError)}>
+          <div key={item.id} role={item.tone === 'error' ? 'alert' : undefined} className={classNames(styles.toast, item.tone === 'success' && styles.toastSuccess, item.tone === 'error' && styles.toastError)}>
             <span style={{ flex: 1 }}>{item.message}</span>
             <button type="button" className={styles.iconButton} onClick={() => remove(item.id)} aria-label="关闭提示">
               <Icon name="close" size={14} />
@@ -554,27 +555,37 @@ export function useToast() {
 export function CopyButton({ value, label = '复制' }: { value: string; label?: string }) {
   const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle')
   const resetTimer = useRef<number | null>(null)
-  useEffect(() => () => {
-    if (resetTimer.current !== null) window.clearTimeout(resetTimer.current)
+  const mounted = useRef(true)
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+      if (resetTimer.current !== null) window.clearTimeout(resetTimer.current)
+    }
   }, [])
   const onCopy = async () => {
+    let next: 'copied' | 'failed'
     try {
       if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable')
       await navigator.clipboard.writeText(value)
-      setState('copied')
+      next = 'copied'
     } catch {
-      setState('failed')
+      next = 'failed'
     }
+    if (!mounted.current) return
+    setState(next)
     if (resetTimer.current !== null) window.clearTimeout(resetTimer.current)
     resetTimer.current = window.setTimeout(() => {
       resetTimer.current = null
       setState('idle')
     }, 2500)
   }
+  const status = state === 'copied' ? '已复制' : state === 'failed' ? '复制失败，请手动复制' : ''
   return (
-    <Button variant="secondary" onClick={() => { void onCopy() }}>
+    <Button variant="secondary" aria-label={label} onClick={() => { void onCopy() }}>
       <Icon name={state === 'copied' ? 'check' : 'copy'} size={15} />
-      <span aria-live="polite">{state === 'copied' ? '已复制' : state === 'failed' ? '复制失败，请手动复制' : label}</span>
+      <span aria-hidden="true">{status || label}</span>
+      <span className="srOnly" role="status" aria-live="polite">{status}</span>
     </Button>
   )
 }
