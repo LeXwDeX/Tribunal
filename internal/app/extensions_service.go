@@ -353,13 +353,16 @@ func (s *ExtensionService) ImportMCPServers(ctx context.Context, in MCPImportInp
 	for _, row := range existing {
 		byName[row.Name] = row
 	}
+	// Reject before writing so a conflict leaves no partial import behind.
+	for _, name := range names {
+		if current, ok := byName[name]; ok && current.Builtin != "" {
+			return nil, conflictError(errBuiltinMCPServerManaged)
+		}
+	}
 	out := make([]MCPServer, 0, len(in.Servers))
 	for _, name := range names {
 		config := in.Servers[name]
 		if current, ok := byName[name]; ok {
-			if current.Builtin != "" {
-				return nil, conflictError(errBuiltinMCPServerManaged)
-			}
 			enabled := current.Enabled
 			row, err := s.store.UpdateMCPServer(ctx, current.ID, store.MCPServerUpdate{
 				Config:  config,

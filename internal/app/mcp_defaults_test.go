@@ -231,6 +231,36 @@ func TestBuiltinMCPServerAllowsOnlyEnableChanges(t *testing.T) {
 	}
 }
 
+func TestImportOverBuiltinMCPServerWritesNothing(t *testing.T) {
+	// Names import in sorted order. A conflict on the built-in server must
+	// not leave the servers sorted before it written.
+	ctx := context.Background()
+	service, st := newExtensionFixture(t)
+	applyMCPDefaults(t, service, st, nil, mcp.Config{}, graphDefault(analysisArgs))
+	if _, err := st.CreateMCPServer(ctx, store.MCPServer{
+		Scope: store.ScopePlatform, Name: "a-existing", Enabled: true,
+		Config: json.RawMessage(`{"command":"/opt/old"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var appErr *Error
+	_, err := service.ImportMCPServers(ctx, MCPImportInput{Scope: store.ScopePlatform, Servers: map[string]json.RawMessage{
+		"a-custom":        json.RawMessage(`{"command":"/bin/true"}`),
+		"a-existing":      json.RawMessage(`{"command":"/bin/true"}`),
+		"codebase-memory": json.RawMessage(`{"command":"/bin/true"}`),
+	}})
+	if !errors.As(err, &appErr) || appErr.Code != "conflict" {
+		t.Fatalf("import over the built-in server = %v, want a conflict", err)
+	}
+	if got := platformMCPServer(t, st, "a-custom"); got != nil {
+		t.Fatalf("failed import created a server: %+v", got)
+	}
+	if got := platformMCPServer(t, st, "a-existing"); got == nil || !strings.Contains(string(got.Config), "/opt/old") {
+		t.Fatalf("failed import changed a server: %+v", got)
+	}
+}
+
 func TestMCPDefaultsRejectInvalidServer(t *testing.T) {
 	service, _ := newExtensionFixture(t)
 	_, err := service.MCPDefaults([]config.DefaultMCPServer{{
