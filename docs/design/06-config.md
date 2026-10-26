@@ -382,3 +382,15 @@ review:
 ## 6. prompt 覆盖
 
 `prompts/` 目录 embed 进二进制。部署时可设置 `prompts_dir` 指向外部目录，同名文件优先使用外部版本；每个 prompt 文件首行写版本号注释（如 `<!-- v3 -->`），版本号参与 fingerprint 计算。
+
+所选全部 prompt 的内容和版本合成一个 bundle hash，记录为 dossier 的 `prompt_hash`，并参与工作流 fingerprint。内置 bundle 的 hash 固定在 `prompts/prompts_test.go` 的 `embeddedBundleHash` 中：修改任何内置 prompt 都必须同时提升该文件的版本注释、更新这个常量，并在 PR 中写明。
+
+**图谱时效规则**：`_platform_rules.md`（v2 起）规定 codebase-memory 图谱只反映固定 `base/` 的目标分支版本；MR 改动过的文件和符号以 worktree 中 `read_file`、`grep` 的结果为准，图谱结果只作 base 侧线索，不能作为改动后的事实或 finding 的唯一证据。规则放在所有块共享的平台规则里，管理员把图谱工具绑定到其他块时同样生效。用 `prompts_dir` 覆盖 `_platform_rules.md` 的部署须自行保留这条规则。
+
+**hash 变化的影响**：升级到 prompt bundle 不同的版本（或修改 `prompts_dir` 中的文件）后：
+
+- 已发布的评论、commit status 和工作流记录保持不变，不会被撤回，也不会自动重新评审。
+- 用旧 hash 完成、尚未发布或正在重试发布的工作流，发布时转为 `skipped`，原因 `prompt bundle changed`；手动 republish 同样会被跳过。
+- 进程重启后恢复的旧 hash 工作流会被取消，保留旧 dossier 供审计，并按新 bundle 重新建立 dossier 和评审。
+- 之后 MR 的下一次触发（新推送、手动触发等）使用新 hash 评审。
+
