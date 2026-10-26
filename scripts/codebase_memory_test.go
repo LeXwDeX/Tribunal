@@ -271,3 +271,66 @@ if [ "${FAKE_STDOUT:-}" != "" ]; then
 fi
 exit "${FAKE_EXIT:-0}"
 `
+
+// TestDockerfileBundlesVerifiedCodebaseMemoryMCP pins the bundled upstream
+// release: exact version, static portable archives per TARGETARCH, SHA-256
+// values from the v0.12.1 release assets, the isolating wrapper under both
+// names, and no upstream installer run.
+func TestDockerfileBundlesVerifiedCodebaseMemoryMCP(t *testing.T) {
+	data, err := os.ReadFile("../Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(data)
+	for _, want := range []string{
+		"ARG CODEBASE_MEMORY_MCP_VERSION=0.12.1",
+		"ARG TARGETARCH",
+		"ARG CODEBASE_MEMORY_MCP_SHA256_AMD64=8c3d0341064301e78ecc84cf7348d4e2c6562a0f57448243ea560aaa34de36c1",
+		"ARG CODEBASE_MEMORY_MCP_SHA256_ARM64=ed0f1f548cd79b121c401c2e9f7841c189a001af26d3768368088c24f6a53533",
+		"codebase-memory-mcp-linux-${TARGETARCH}-portable.tar.gz",
+		"https://github.com/DeusData/codebase-memory-mcp/releases/download/v${CODEBASE_MEMORY_MCP_VERSION}/",
+		"sha256sum -c -",
+		"cmp /tmp/expected-LICENSE /out/LICENSE",
+		"COPY --from=codebase-memory /out/codebase-memory-mcp /usr/local/bin/codebase-memory-mcp",
+		"COPY scripts/codebase-memory-mcp.sh /usr/local/bin/tribunal-codebase-memory-mcp",
+		"ln -s tribunal-codebase-memory-mcp /usr/local/bin/crc-codebase-memory-mcp",
+		"/licenses/codebase-memory-mcp/",
+		"USER 10001:10001",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("Dockerfile does not contain %q", want)
+		}
+	}
+	for _, forbidden := range []string{"install.sh", "codebase-memory-mcp install", "codebase-memory-mcp update"} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("Dockerfile runs the upstream installer (%q); it would write agent config and hooks", forbidden)
+		}
+	}
+	if user := strings.LastIndex(body, "USER 10001:10001"); user < strings.LastIndex(body, "/usr/local/bin/tribunal-codebase-memory-mcp") {
+		t.Error("the wrapper must be installed by root before the image drops to the non-root user")
+	}
+}
+
+// TestBundledCodebaseMemoryMCPVersionMatchesLicenseRecord keeps the license
+// record in third_party in step with the version the Dockerfile downloads.
+func TestBundledCodebaseMemoryMCPVersionMatchesLicenseRecord(t *testing.T) {
+	version, err := os.ReadFile("../third_party/codebase-memory-mcp/VERSION")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dockerfile, err := os.ReadFile("../Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "ARG CODEBASE_MEMORY_MCP_VERSION=" + strings.TrimSpace(string(version)) + "\n"
+	if !strings.Contains(string(dockerfile), want) {
+		t.Fatalf("Dockerfile does not pin %q from third_party/codebase-memory-mcp/VERSION", strings.TrimSpace(want))
+	}
+	license, err := os.ReadFile("../third_party/codebase-memory-mcp/LICENSE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(license), "MIT License") || !strings.Contains(string(license), "Copyright (c) 2025 DeusData") {
+		t.Fatal("third_party/codebase-memory-mcp/LICENSE is not the upstream MIT license")
+	}
+}

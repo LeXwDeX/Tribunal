@@ -1,8 +1,9 @@
 // Command licensebundle builds the release third-party notices file.
 //
 // It combines the Go standard library license, Go modules linked into the
-// Linux/amd64 server, npm production packages from web/package-lock.json, and
-// the skills embedded from internal/skill/builtin.
+// Linux/amd64 server, npm production packages from web/package-lock.json, the
+// skills embedded from internal/skill/builtin, and the executables bundled in
+// the Docker image (third_party/<name>/ with LICENSE and VERSION).
 // The output is a single deterministic file: licenses/THIRD_PARTY_NOTICES.txt.
 // Run with -check to verify that the checked-in file is current.
 package main
@@ -146,7 +147,7 @@ func build(root string, list func(string) ([]byte, error)) ([]byte, error) {
 
 	var b strings.Builder
 	b.WriteString(marker)
-	b.WriteString("\nScope: Go standard library, Go modules linked into the Linux/amd64 server, npm production packages, and bundled skills.\n")
+	b.WriteString("\nScope: Go standard library, Go modules linked into the Linux/amd64 server, npm production packages, bundled skills, and executables bundled in the Docker image.\n")
 	writeSection(&b, "Go standard library", "LICENSE", goLicense)
 
 	for _, mod := range mods {
@@ -196,7 +197,58 @@ func build(root string, list func(string) ([]byte, error)) ([]byte, error) {
 			writeSection(&b, title, text.name, text.text)
 		}
 	}
+
+	executables, err := bundledExecutables(root)
+	if err != nil {
+		return nil, err
+	}
+	for _, exe := range executables {
+		title := fmt.Sprintf("Bundled executable: %s %s (separate process; notices in /licenses/%s/)", exe.name, exe.version, exe.name)
+		texts, err := packageTexts(title, exe.dir)
+		if err != nil {
+			return nil, err
+		}
+		for _, text := range texts {
+			writeSection(&b, title, text.name, text.text)
+		}
+	}
 	return []byte(b.String()), nil
+}
+
+type bundledExecutable struct {
+	name    string
+	version string
+	dir     string
+}
+
+// bundledExecutables lists third_party components in name order. Each needs a
+// VERSION file; packageTexts then requires its LICENSE.
+func bundledExecutables(root string) ([]bundledExecutable, error) {
+	base := filepath.Join(root, "third_party")
+	entries, err := os.ReadDir(base)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("bundled executables: %w", err)
+	}
+	var out []bundledExecutable
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		dir := filepath.Join(base, entry.Name())
+		raw, err := readManagedFile(dir, "VERSION")
+		if err != nil {
+			return nil, fmt.Errorf("bundled executable %s: VERSION: %w", entry.Name(), err)
+		}
+		version := strings.TrimSpace(string(raw))
+		if version == "" || strings.ContainsAny(version, " \t\r\n") {
+			return nil, fmt.Errorf("bundled executable %s: VERSION must be one token", entry.Name())
+		}
+		out = append(out, bundledExecutable{name: entry.Name(), version: version, dir: dir})
+	}
+	return out, nil
 }
 
 // bundledSkills lists the skill directories embedded into the server binary.

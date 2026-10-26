@@ -127,6 +127,13 @@ http_status() {
   compose exec -T review curl --max-time 5 -sS -o /dev/null -w '%{http_code}' "$1" 2>>"$LOG"
 }
 
+# api sends one authenticated management request with the fake bootstrap
+# token. The MCP test call starts a stdio server, so it gets a longer bound.
+api() {
+  compose exec -T review curl --max-time 90 -fsS -X "$1" \
+    -H "Authorization: Bearer $REVIEW_ADMIN_TOKEN" "http://127.0.0.1:8080$2" 2>>"$LOG"
+}
+
 step "validating Compose configuration for $PROJECT"
 compose config --quiet >>"$LOG" 2>&1 || fail "docker compose config rejected the deployment files"
 
@@ -194,6 +201,52 @@ assert_exec "license texts are missing" \
 assert_exec "database is missing" sh -eu -c 'test -f /app/data/review.db'
 assert_exec "data directory is not writable" \
   sh -eu -c 'printf "%s" "tribunal-smoke-marker" > /app/data/smoke-marker'
+
+step "checking bundled codebase-memory MCP"
+# shellcheck disable=SC2016
+assert_exec "codebase-memory-mcp 0.12.1 is not on PATH" \
+  sh -eu -c '[ "$(codebase-memory-mcp --version)" = "codebase-memory-mcp 0.12.1" ]'
+assert_exec "MCP wrapper is missing or writable by the service user" \
+  sh -eu -c 'test -x /usr/local/bin/tribunal-codebase-memory-mcp && ! test -w /usr/local/bin/tribunal-codebase-memory-mcp'
+# shellcheck disable=SC2016
+assert_exec "crc-codebase-memory-mcp compatibility link is missing" \
+  sh -eu -c '[ "$(readlink /usr/local/bin/crc-codebase-memory-mcp)" = tribunal-codebase-memory-mcp ]'
+assert_exec "codebase-memory-mcp license texts are missing" \
+  sh -eu -c 'test -s /licenses/codebase-memory-mcp/LICENSE && test -s /licenses/codebase-memory-mcp/THIRD_PARTY_NOTICES.md'
+# The onboarding index_command form: the CLI indexes a fixed directory under
+# an isolated HOME, and the index is visible only in that HOME. The files stay
+# on the smoke volume, which cleanup removes.
+if ! compose exec -T review sh -eu >>"$LOG" 2>&1 <<'EOF'
+root=/app/data/cbm-smoke
+mkdir -p "$root/home" "$root/other" "$root/base"
+printf 'package a\n\nfunc Add(a, b int) int { return a + b }\n' >"$root/base/a.go"
+HOME="$root/home" tribunal-codebase-memory-mcp cli --quiet index_repository "{\"repo_path\":\"$root/base\"}"
+HOME="$root/home" tribunal-codebase-memory-mcp cli list_projects | grep -q cbm-smoke-base
+! HOME="$root/other" tribunal-codebase-memory-mcp cli list_projects | grep -q cbm-smoke-base
+EOF
+then
+  fail "codebase-memory CLI could not index an isolated repository"
+fi
+servers=$(api GET '/api/v1/mcp-servers?scope=platform') || fail "platform MCP server list request failed"
+case "$servers" in
+  *'"name":"codebase-memory"'*) ;;
+  *) fail "default platform MCP server codebase-memory is not registered" ;;
+esac
+server_id=$(printf '%s' "$servers" | grep -o '"id":"[^"]*"' | head -n 1 | cut -d'"' -f4)
+[ -n "$server_id" ] || fail "cannot read the codebase-memory server id"
+tools=$(api POST "/api/v1/mcp-servers/$server_id/test") \
+  || fail "codebase-memory MCP did not start and list tools"
+for tool in search_graph trace_path get_code_snippet; do
+  case "$tools" in
+    *"\"name\":\"$tool\""*) ;;
+    *) fail "codebase-memory MCP does not list $tool" ;;
+  esac
+done
+for tool in index_repository delete_project ingest_traces manage_adr; do
+  case "$tools" in
+    *"\"name\":\"$tool\""*) fail "codebase-memory MCP exposes write tool $tool" ;;
+  esac
+done
 
 step "recreating $PROJECT and checking volume persistence"
 compose up -d --force-recreate --wait --wait-timeout 180 >>"$LOG" 2>&1 \
