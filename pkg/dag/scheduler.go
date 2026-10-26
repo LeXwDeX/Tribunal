@@ -930,10 +930,13 @@ func unavailable(reason string) json.RawMessage {
 	return data
 }
 
+// claimNode refuses once the run has a fatal error. A worker sets the error
+// before releasing its node, so a scheduler that passed its error check before
+// the release still cannot relaunch the node afterwards.
 func (h *runHandle) claimNode(id string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.active[id] {
+	if h.err != nil || h.active[id] {
 		return false
 	}
 	h.active[id] = true
