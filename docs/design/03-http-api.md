@@ -40,6 +40,7 @@
 | 409 | `conflict`（如工作流已在运行、项目已注册） |
 | 422 | `gitlab_rejected`（GitLab 返回错误，附原始状态码） |
 | 500 | `internal` |
+| 503 | `unavailable`（依赖未配置，或服务端内部超时且客户端仍在连接） |
 
 ### 分页
 

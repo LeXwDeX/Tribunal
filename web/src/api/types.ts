@@ -131,7 +131,6 @@ export interface Project {
 export interface ProjectRegistration {
   project: Project
   job_id: string
-  webhook_secret?: string
 }
 
 export interface ProjectWebhookState {

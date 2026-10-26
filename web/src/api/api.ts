@@ -80,7 +80,6 @@ export interface RegisterProjectInput {
   project: string
   token: string
   profile: string
-  auto_webhook: boolean
   settings: Record<string, unknown>
 }
 
