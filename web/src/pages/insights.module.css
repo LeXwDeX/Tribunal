@@ -1,0 +1,431 @@
+/* Page-level styles for 模型与档位 / 统计与反馈 / 系统 (v2 PR 6). */
+
+/* --- shared --- */
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.sectionHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px 12px;
+}
+
+.sectionTitle {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.sectionAside {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.subTitle {
+  margin: 4px 0 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--muted-strong);
+}
+
+.panelActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.loadMore {
+  display: flex;
+  justify-content: center;
+}
+
+.flushLoadMore {
+  display: flex;
+  justify-content: center;
+  padding: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.rowActions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.actionsCol {
+  text-align: right;
+}
+
+/* Table minimum widths: tables scroll inside .tableWrap instead of the page. */
+.min480 { min-width: 480px; }
+.min560 { min-width: 560px; }
+.min640 { min-width: 640px; }
+.min680 { min-width: 680px; }
+.min760 { min-width: 760px; }
+.min820 { min-width: 820px; }
+.min920 { min-width: 920px; }
+
+.autoTable { min-width: 560px; }
+.autoTable th { min-width: 130px; }
+
+/* --- 模型与档位 --- */
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr));
+  gap: 16px;
+}
+
+.providerCard {
+  gap: 12px;
+}
+
+.providerHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.cardTitle {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: 14.5px;
+  overflow-wrap: anywhere;
+}
+
+.cardMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  color: var(--muted);
+  font-size: 12.5px;
+  min-width: 0;
+}
+
+.cardMeta code,
+.cardMeta .mono {
+  overflow-wrap: anywhere;
+}
+
+.cardStats {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.cardStats li {
+  background: var(--surface-2);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.cardStats span {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.cardStats b {
+  font: 600 13.5px var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.cardStats .statUnavailable {
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-weight: 500;
+}
+
+.cardActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: auto;
+}
+
+.testResult {
+  font-size: 12px;
+  color: var(--muted-strong);
+  overflow-wrap: anywhere;
+}
+
+.resultOk { color: var(--ok-fg); }
+.resultError { color: var(--danger-fg); }
+
+.profileTitle {
+  font-family: var(--font-mono);
+}
+
+.profileMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.profileSteps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 8px 22px;
+}
+
+.profileStep {
+  position: relative;
+  min-width: 96px;
+  max-width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.profileStep + .profileStep::before {
+  content: '›';
+  position: absolute;
+  left: -16px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+}
+
+.profileStepN { font-size: 11px; color: var(--muted); }
+.profileStepWhat { font-size: 12.5px; font-weight: 500; overflow-wrap: anywhere; }
+.profileStepWho { font: 500 12px var(--font-mono); color: var(--link); overflow-wrap: anywhere; }
+
+.budget {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+/* --- 统计与反馈 --- */
+
+.headerFilters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+  margin-left: auto;
+}
+
+.headerFilters input[type="date"] {
+  width: 150px;
+}
+
+.headerFilters select {
+  width: 200px;
+}
+
+.filterStatus {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.chartWrap {
+  width: 100%;
+  min-width: 0;
+}
+
+.chart {
+  width: 100%;
+  height: 220px;
+  display: block;
+  overflow: visible;
+}
+
+.chart rect {
+  fill: var(--accent);
+}
+
+.chart rect:hover {
+  opacity: 0.8;
+}
+
+.chartGrid {
+  stroke: var(--border);
+  stroke-dasharray: 2 4;
+}
+
+.chartAxis {
+  display: flex;
+  margin-top: 4px;
+}
+
+.chartAxis span {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: visible;
+  white-space: nowrap;
+  text-align: center;
+  color: var(--muted);
+  font: 11px var(--font-mono);
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend i {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  display: inline-block;
+  background: var(--accent);
+}
+
+.trendCaption {
+  caption-side: top;
+  text-align: left;
+  padding: 0 14px 8px;
+  color: var(--muted);
+}
+
+.trendCell {
+  padding: 12px;
+  background: var(--surface-2);
+}
+
+.ratio {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 120px;
+}
+
+.ratioBar {
+  height: 5px;
+  border-radius: 3px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+
+.ratioFill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+}
+
+.ratio small {
+  color: var(--muted);
+  font: 11.5px var(--font-mono);
+}
+
+.ratioEmpty {
+  color: var(--muted);
+}
+
+.signals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+}
+
+/* --- 系统 --- */
+
+.grantPicker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.grantPicker .field {
+  flex: 1 1 280px;
+  min-width: 0;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.flushSection {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 18px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.grantForm {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.formActions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+@media (max-width: 900px) {
+  .headerFilters {
+    justify-content: flex-start;
+    width: 100%;
+  }
+  .headerFilters > * {
+    flex: 1 1 100%;
+  }
+  .headerFilters input[type="date"],
+  .headerFilters select {
+    width: auto;
+  }
+  .chart {
+    height: 180px;
+  }
+  .profileSteps {
+    flex-direction: column;
+    gap: 8px;
+  }
+  .profileStep + .profileStep::before {
+    content: none;
+  }
+}
