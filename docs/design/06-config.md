@@ -224,12 +224,13 @@ default_extensions:
 - `skills[].name` 必须是内置 Skill，`blocks` 只能取 `code-review`、`review`、`reasoner`、`verify`、`synthesize`、`onboarding`；同名不能重复。校验失败与其他配置错误一起报告。
 - 内置文件复制到 `<workspace.root>/skills/platform/<id>/skill`，行上 `builtin` 列记录内置名。API 以 `builtin: true` 返回，控制台显示「内置」标签。
 - **禁用而不是删除**：内置 Skill 可以用 `PATCH /api/v1/skills/{id}` 或控制台禁用、启用；删除返回 409。禁用后不加载，仍引用它的块绑定在绑定阶段跳过它，评审照常运行。启用状态只由管理员决定，重启和升级都不改。
-- **随平台升级**：每次启动比较嵌入文件和已登记副本，不同就原地替换目录内容（多余的旧文件一并删除），并更新描述；行 ID、路径和启用状态不变。
+- **随平台升级**：每次启动比较嵌入文件和已登记副本，不同就原地替换目录内容（多余的旧文件一并删除），并更新描述；行 ID、路径和启用状态不变。刷新失败（例如修改 `workspace.root` 后已登记目录不在受管 Skill 根目录下）只记 Warn 日志，服务照常启动；已登记副本保持原样，能否加载与普通 Skill 相同。
 - **内置 MCP 服务器**：`mcp_servers[].name` 须为合法服务器名，`config` 非空，`tools` 的键只能取上述块，工具名不带 `mcp__` 前缀；登记时按 MCP 规则严格校验 `config`，未知字段或禁止的环境变量引用会让启动失败。行上 `builtin` 列记录内置名，API 返回 `builtin: true`。每次启动把 `config` 同步为当前版本附带的内容，`enabled` 保持原值；API 只允许修改 `enabled`，改名、改配置、导入覆盖和删除都返回 409。数据库中已有管理员自建的同名平台服务器，或 `mcp.config` 中已定义同名服务器时，视为管理员所有，不登记也不绑定。
 - **块绑定**记录在 `extension_defaults` 表：
   - `<kind>:<name>`：已登记，或因已有管理员自建的同名平台扩展而跳过（不覆盖，也不绑定）。
   - `<kind>:<name>@<block>`：已授权到该块，或跳过。配置文件 `blocks` 已声明该块、或数据库中该块的平台绑定已被管理员修改时跳过，升级不会改写自定义绑定。
-  - `block:<block>`：默认机制最后写入的绑定。只要该行未被改动，后续版本新增的内置扩展（例如 MCP）可以继续合并进来。
+  - `block:<block>`：默认机制最后写入的绑定。只要该行未被改动，后续版本新增的内置扩展（例如 MCP）可以继续合并进来。绑定行与对应的 ledger 记录在同一事务中写入，中途失败不会让该块被误判为管理员已修改。
+  - 默认机制写入某块之后，又在配置文件 `blocks` 中声明了该块：若数据库中该块的平台绑定仍等于 `block:<block>` 快照，启动时删除这行（记一次 Info 日志，快照改记为跳过），以 YAML 为准；管理员改过的绑定仍以数据库为准。即使 `default_extensions` 已清空也会执行这一步。
   - 已授权的 `<kind>:<name>@<block>` 在 detail 中记录当时授予的条目。后续版本改变授权内容（例如更新 MCP 工具白名单）时，只要该块绑定仍等于 `block:<block>` 快照，就用新授权替换旧授权的条目；管理员改过的绑定保持不变。
 - 管理员从某个块解绑后，重启不会恢复。
 - `skills: []` 只是不再登记新的默认项，不删除已登记的扩展和绑定。
@@ -281,7 +282,7 @@ default_extensions:
 - **镜像**：Dockerfile 固定 `CODEBASE_MEMORY_MCP_VERSION=0.12.1`，按 `TARGETARCH`（amd64/arm64）下载上游 `-portable` 静态链接发布包，并用写死在 Dockerfile 中的 SHA-256 校验。非 portable 的 glibc 版本需要 `GLIBC_2.38`，bookworm 运行镜像只有 2.36，不能使用。镜像只复制二进制和许可证文本，不运行上游 `install`（它会写 agent 配置和 hooks）。二进制在 `/usr/local/bin/codebase-memory-mcp`，wrapper 在 `/usr/local/bin/tribunal-codebase-memory-mcp`，许可证在 `/licenses/codebase-memory-mcp/`；均属 root，服务以 UID 10001 运行。
 - **默认登记**：示例配置和 Docker 配置通过 `default_extensions.mcp_servers` 登记内置平台服务器 `codebase-memory`，规则见 [默认扩展](#默认扩展default_extensions)。
 - **隔离**：项目 MCP 管理器以项目工作区为 cwd 和 `HOME` 根，wrapper 把 `CBM_CACHE_DIR`、`CBM_RUNTIME_DIR` 放在该 `HOME` 下，因此每个项目使用自己的索引和 daemon，查不到其他项目的索引；不使用账号级 daemon。`auto_index`、`auto_watch`、`watcher_enabled`、`ui_enabled` 都被关闭，不启动 CBM Lens UI。
-- **降级**：二进制缺失或 MCP 启动、列工具失败时，评审节点不带 MCP 工具继续执行，并在节点输出中记录代码生成的 `tool_gaps`；汇总把它们写入告警，原本的 PASS 改为 INCOMPLETE，原有 BLOCKING 结论保持不变。建索引失败不阻断 onboarding 或刷新，工作区记录 `last_error`，刷新时继续使用上一次索引。管理员停用服务器后，绑定中引用它的工具直接不提供，不算降级。
+- **降级**：二进制缺失或 MCP 启动、列工具失败时，评审节点不带 MCP 工具继续执行，并在节点输出中记录代码生成的 `tool_gaps`。只有部分绑定工具可用时（服务器未公布某个工具，或工具带写入注解被跳过），可用工具照常提供，每个缺失工具各记一条 `tool_gaps`；汇总把它们写入告警，原本的 PASS 改为 INCOMPLETE，原有 BLOCKING 结论保持不变。建索引失败不阻断 onboarding 或刷新，工作区记录 `last_error`，刷新时继续使用上一次索引。管理员停用服务器后，绑定中引用它的工具直接不提供，不算降级。
 - **停用**：控制台「扩展」页点「停用」，或调用 `PUT /api/v1/mcp-servers/{id}` 设置 `enabled: false`。重启和升级都保持停用。和其他数据库扩展变更一样，需要重启服务才对运行中的进程生效。要让新部署不登记它，把配置中的 `mcp_servers` 设为 `[]`。
 - **升级版本**：同时修改 Dockerfile 中的版本和两个 SHA-256（取自上游 release 资产和 `checksums.txt`）、`third_party/codebase-memory-mcp/VERSION` 和 `LICENSE`，用 `gh attestation verify <archive> -R DeusData/codebase-memory-mcp` 核对 SLSA provenance，再运行 `go run ./scripts/licensebundle`、`go test ./scripts/...` 和 Docker smoke。新版本须重新确认 analysis profile 不含写入工具。已部署实例在新镜像首次启动时同步内置服务器的配置和默认工具白名单，见上文规则。
 

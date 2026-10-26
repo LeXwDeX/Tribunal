@@ -160,3 +160,14 @@ type FindingFilter struct {
 	Decision   string
 	Severity   string
 }
+
+// FindingCount is the number of findings in one workflow that share a
+// decision and an effective severity. Severity is final_severity when it is
+// set and the raw severity otherwise, the same rule ListFindings uses for its
+// severity filter.
+type FindingCount struct {
+	WorkflowID string
+	Decision   string
+	Severity   string
+	Count      int
+}

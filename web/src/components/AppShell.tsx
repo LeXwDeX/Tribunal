@@ -81,6 +81,12 @@ function Breadcrumbs() {
     queryFn: () => getProject(projectId),
     enabled: false,
   })
+  const reviewProjectId = review.data?.project_id
+  const reviewProject = useQuery({
+    queryKey: ['project', reviewProjectId],
+    queryFn: () => getProject(reviewProjectId!),
+    enabled: false,
+  })
 
   const section = location.pathname.split('/')[1] || ''
   const sectionLabel = sectionLabels[section]
@@ -89,7 +95,8 @@ function Breadcrumbs() {
   if (reviewMatch) {
     parent = { to: '/reviews', label: '评审' }
     const data = review.data
-    current = data ? `${data.project_path || `项目 #${data.project_id}`} !${data.mr_iid}` : reviewId
+    const path = reviewProject.data?.path_with_namespace || data?.project_path
+    current = data ? `${path || `项目 #${data.project_id}`} !${data.mr_iid}` : reviewId
   } else if (projectMatch && projectMatch.params.id) {
     parent = { to: '/projects', label: '项目' }
     current = project.data?.path_with_namespace || `#${projectMatch.params.id}`

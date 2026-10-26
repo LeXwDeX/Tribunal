@@ -68,8 +68,22 @@ type ClientProvider interface {
 type AgentRunner func(ctx context.Context, spec agent.RunSpec) (*agent.RunResult, error)
 
 // ToolProvider returns the explicitly bound MCP tools for one block.
+// A provider that can bind only part of the block's tools returns a
+// *PartialToolsError carrying the usable tools and one gap per missing tool.
 type ToolProvider interface {
 	Tools(ctx context.Context, block string) ([]agent.Tool, error)
+}
+
+// PartialToolsError reports a partially bound tool set. Tools stay usable;
+// each Gaps entry names one bound tool that is not available. Gaps must not
+// contain configuration values.
+type PartialToolsError struct {
+	Tools []agent.Tool
+	Gaps  []string
+}
+
+func (e *PartialToolsError) Error() string {
+	return "some bound MCP tools are unavailable: " + strings.Join(e.Gaps, "; ")
 }
 
 // SkillBinding is the prompt catalogue plus the load_skill tool.
@@ -575,10 +589,23 @@ func (e *Executor) callAgent(ctx context.Context, in dag.NodeInput, opts agentOp
 	}
 	if opts.BlockTools && len(binding.MCPTools) > 0 && e.deps.Tools != nil {
 		mcpTools, err := e.deps.Tools.Tools(ctx, opts.Block)
+		var partial *PartialToolsError
 		switch {
 		case err == nil:
 			tools = append(tools, mcpTools...)
-		case ctx.Err() != nil || errors.Is(err, context.Canceled) || opts.ToolGaps == nil:
+		case ctx.Err() != nil || errors.Is(err, context.Canceled):
+			return nil, fmt.Errorf("review: bind MCP tools: %w", err)
+		case errors.As(err, &partial):
+			// The usable tools stay; each missing one is a gap so synthesis
+			// cannot settle a clean PASS. Nodes without gap recording keep
+			// the usable subset, as before.
+			tools = append(tools, partial.Tools...)
+			if opts.ToolGaps != nil {
+				for _, gap := range partial.Gaps {
+					*opts.ToolGaps = append(*opts.ToolGaps, toolGapMessage(opts.Block, errors.New(gap)))
+				}
+			}
+		case opts.ToolGaps == nil:
 			return nil, fmt.Errorf("review: bind MCP tools: %w", err)
 		default:
 			// A missing or broken MCP server must not stop the review. The

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/errclass"
 	"github.com/LeXwDeX/tribunal/internal/skill/builtin"
 	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
@@ -66,7 +67,13 @@ const (
 //   - "<kind>:<name>@<block>": granted on the block, or skipped because the
 //     configuration file binds the block or an administrator owns its row.
 //   - "block:<block>": the binding the defaults last wrote. A block row that
-//     still matches it is default-owned and may receive later defaults.
+//     still matches it is default-owned and may receive later defaults. The
+//     row and its ledger rows are written in one transaction.
+//
+// When the configuration file declares a block whose row is still
+// default-owned, the row is removed so the file binding takes effect; the
+// snapshot is then recorded as skipped. A row an administrator changed keeps
+// winning over the file.
 //
 // Unbinding a default therefore survives restarts, and upgrades never rewrite
 // a customised binding. The built-in row itself is refreshed by Sync on every
@@ -74,7 +81,7 @@ const (
 // not recorded and is retried on the next start.
 func ApplyExtensionDefaults(ctx context.Context, st *sqlite.Store, fileBlocks map[string]config.BlockBinding,
 	defaults []ExtensionDefault, logger *slog.Logger) error {
-	if len(defaults) == 0 {
+	if len(defaults) == 0 && len(fileBlocks) == 0 {
 		return nil
 	}
 	if st == nil {
@@ -97,6 +104,9 @@ func ApplyExtensionDefaults(ctx context.Context, st *sqlite.Store, fileBlocks ma
 		ledger[row.Key] = row
 	}
 	seeder := &defaultSeeder{st: st, fileBlocks: fileBlocks, ledger: ledger, logger: logger}
+	if err := seeder.releaseFileBlocks(ctx); err != nil {
+		return err
+	}
 	for _, d := range defaults {
 		if err := seeder.apply(ctx, d); err != nil {
 			return err
@@ -171,12 +181,12 @@ func (s *defaultSeeder) apply(ctx context.Context, d ExtensionDefault) error {
 			if done.Outcome != store.ExtensionDefaultApplied || !registered || done.Detail == want {
 				continue
 			}
-			outcome, _, err := s.grant(ctx, block, d.Bindings[block], decodeDefaultGrant(done.Detail))
+			merged, _, err := s.grant(ctx, block, d.Bindings[block], decodeDefaultGrant(done.Detail))
 			if err != nil {
 				return err
 			}
-			if outcome == store.ExtensionDefaultApplied {
-				if err := s.record(ctx, grantKey, outcome, want); err != nil {
+			if merged != nil {
+				if err := s.commitGrant(ctx, *merged, grantKey, want); err != nil {
 					return err
 				}
 			}
@@ -188,16 +198,18 @@ func (s *defaultSeeder) apply(ctx context.Context, d ExtensionDefault) error {
 			}
 			continue
 		}
-		outcome, reason, err := s.grant(ctx, block, d.Bindings[block], DefaultGrant{})
+		merged, reason, err := s.grant(ctx, block, d.Bindings[block], DefaultGrant{})
 		if err != nil {
 			return err
 		}
-		if outcome == store.ExtensionDefaultSkipped {
-			s.logger.Info("default extension binding skipped", "kind", d.Kind, "name", d.Name, "block", block, "reason", reason)
-		} else {
-			reason = want
+		if merged != nil {
+			if err := s.commitGrant(ctx, *merged, grantKey, want); err != nil {
+				return err
+			}
+			continue
 		}
-		if err := s.record(ctx, grantKey, outcome, reason); err != nil {
+		s.logger.Info("default extension binding skipped", "kind", d.Kind, "name", d.Name, "block", block, "reason", reason)
+		if err := s.record(ctx, grantKey, store.ExtensionDefaultSkipped, reason); err != nil {
 			return err
 		}
 	}
@@ -228,32 +240,25 @@ func decodeDefaultGrant(detail string) DefaultGrant {
 }
 
 // grant merges one default grant into a default-owned platform binding,
-// first dropping the entries of the previous grant it replaces. Defaults must
-// not grant overlapping entries: replacing one default's grant would also
-// drop an entry another default shares. MCP tools carry their server name,
-// and each skill default grants only its own name.
-func (s *defaultSeeder) grant(ctx context.Context, block string, grant, previous DefaultGrant) (string, string, error) {
+// first dropping the entries of the previous grant it replaces, and returns
+// the binding to write. It returns nil and the reason when the block is not
+// default-owned. Defaults must not grant overlapping entries: replacing one
+// default's grant would also drop an entry another default shares. MCP tools
+// carry their server name, and each skill default grants only its own name.
+func (s *defaultSeeder) grant(ctx context.Context, block string, grant, previous DefaultGrant) (*store.BlockBinding, string, error) {
 	if _, ok := s.fileBlocks[block]; ok {
-		return store.ExtensionDefaultSkipped, reasonFileBinding, nil
+		return nil, reasonFileBinding, nil
 	}
-	rows, err := s.st.ListBlockBindings(ctx, store.ScopePlatform, nil)
+	current, err := s.platformBinding(ctx, block)
 	if err != nil {
-		return "", "", fmt.Errorf("app: load platform block bindings: %w", err)
+		return nil, "", err
 	}
-	var current *store.BlockBinding
-	for i := range rows {
-		if rows[i].Block == block {
-			current = &rows[i]
-			break
-		}
-	}
-	snapshotKey := "block:" + block
-	snapshot, owned := s.ledger[snapshotKey]
+	snapshot, owned := s.ledger[blockSnapshotKey(block)]
 	switch {
 	case current == nil && owned:
-		return store.ExtensionDefaultSkipped, reasonCustomBinding, nil
+		return nil, reasonCustomBinding, nil
 	case current != nil && (!owned || !sameDefaultBinding(*current, snapshot.Detail)):
-		return store.ExtensionDefaultSkipped, reasonCustomBinding, nil
+		return nil, reasonCustomBinding, nil
 	}
 	merged := store.BlockBinding{Scope: store.ScopePlatform, Block: block}
 	if current != nil {
@@ -262,17 +267,77 @@ func (s *defaultSeeder) grant(ctx context.Context, block string, grant, previous
 	}
 	merged.MCPTools = appendMissing(merged.MCPTools, grant.MCPTools)
 	merged.Skills = appendMissing(merged.Skills, grant.Skills)
-	if _, err := s.st.UpsertBlockBinding(ctx, merged); err != nil {
-		return "", "", fmt.Errorf("app: write default block binding %q: %w", block, err)
-	}
+	return &merged, "", nil
+}
+
+// commitGrant writes a merged default-owned binding together with its block
+// snapshot and the grant's ledger row in one transaction, so a failure never
+// leaves a default-written row that a later start takes for an
+// administrator's change.
+func (s *defaultSeeder) commitGrant(ctx context.Context, merged store.BlockBinding, grantKey, want string) error {
 	detail, err := encodeDefaultBinding(merged)
 	if err != nil {
-		return "", "", err
+		return err
 	}
-	if err := s.record(ctx, snapshotKey, store.ExtensionDefaultApplied, detail); err != nil {
-		return "", "", err
+	rows := []store.ExtensionDefault{
+		{Key: blockSnapshotKey(merged.Block), Outcome: store.ExtensionDefaultApplied, Detail: detail},
+		{Key: grantKey, Outcome: store.ExtensionDefaultApplied, Detail: want},
 	}
-	return store.ExtensionDefaultApplied, "", nil
+	if err := s.st.SetDefaultBlockBinding(ctx, merged.Block, &merged, rows...); err != nil {
+		return fmt.Errorf("app: write default block binding %q: %w", merged.Block, err)
+	}
+	for _, row := range rows {
+		s.ledger[row.Key] = row
+	}
+	return nil
+}
+
+// releaseFileBlocks removes the default-owned platform row of every block the
+// configuration file declares, so a row the defaults wrote before the block
+// was configured does not shadow the file binding. Rows an administrator
+// changed are kept. The removal and its ledger row are one transaction, and
+// the snapshot is recorded as skipped so the release happens once.
+func (s *defaultSeeder) releaseFileBlocks(ctx context.Context) error {
+	blocks := make([]string, 0, len(s.fileBlocks))
+	for block := range s.fileBlocks {
+		if snapshot, ok := s.ledger[blockSnapshotKey(block)]; ok && snapshot.Outcome == store.ExtensionDefaultApplied {
+			blocks = append(blocks, block)
+		}
+	}
+	sort.Strings(blocks)
+	for _, block := range blocks {
+		current, err := s.platformBinding(ctx, block)
+		if err != nil {
+			return err
+		}
+		if current == nil || !sameDefaultBinding(*current, s.ledger[blockSnapshotKey(block)].Detail) {
+			continue
+		}
+		row := store.ExtensionDefault{Key: blockSnapshotKey(block), Outcome: store.ExtensionDefaultSkipped, Detail: reasonFileBinding}
+		if err := s.st.SetDefaultBlockBinding(ctx, block, nil, row); err != nil {
+			return fmt.Errorf("app: release default block binding %q: %w", block, err)
+		}
+		s.ledger[row.Key] = row
+		s.logger.Info("file configuration replaces default block binding", "block", block)
+	}
+	return nil
+}
+
+func (s *defaultSeeder) platformBinding(ctx context.Context, block string) (*store.BlockBinding, error) {
+	rows, err := s.st.ListBlockBindings(ctx, store.ScopePlatform, nil)
+	if err != nil {
+		return nil, fmt.Errorf("app: load platform block bindings: %w", err)
+	}
+	for i := range rows {
+		if rows[i].Block == block {
+			return &rows[i], nil
+		}
+	}
+	return nil, nil
+}
+
+func blockSnapshotKey(block string) string {
+	return "block:" + block
 }
 
 func (s *defaultSeeder) record(ctx context.Context, key, outcome, detail string) error {
@@ -365,7 +430,14 @@ func (s *ExtensionService) SkillDefaults(specs []config.DefaultSkill) ([]Extensi
 				if err != nil || row == nil || row.Builtin != name {
 					return err
 				}
-				return s.refreshBuiltinSkill(ctx, row)
+				// A refresh failure, such as a row left outside the managed
+				// root after workspace.root moved, must not stop the service.
+				// The installed copy stays as it is and loads, or fails to
+				// load, like any other skill.
+				if err := s.refreshBuiltinSkill(ctx, row); err != nil {
+					s.logger.Warn("built-in skill refresh failed", "name", name, "error_class", errclass.Of(err))
+				}
+				return nil
 			},
 			Bindings: bindings,
 		})
@@ -539,6 +611,10 @@ func copyEmbeddedSkill(files fs.FS, dst string) error {
 // reads stored platform extensions, so the first start already uses them.
 func seedDefaultExtensions(ctx context.Context, cfg *config.Config, st *sqlite.Store, logger *slog.Logger, now func() time.Time) error {
 	if len(cfg.DefaultExtensions.Skills) == 0 && len(cfg.DefaultExtensions.MCPServers) == 0 {
+		// Still release default-owned rows of blocks the file now declares.
+		if err := ApplyExtensionDefaults(ctx, st, cfg.Blocks, nil, logger); err != nil {
+			return fmt.Errorf("app: apply default extensions: %w", err)
+		}
 		return nil
 	}
 	service, err := NewExtensionService(ExtensionServiceConfig{

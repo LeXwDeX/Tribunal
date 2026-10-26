@@ -9,6 +9,7 @@ import (
 
 	"github.com/LeXwDeX/tribunal/internal/agent"
 	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/llm"
 	"github.com/LeXwDeX/tribunal/pkg/dag"
 )
 
@@ -155,6 +156,64 @@ func TestSynthesisWithoutToolGapsStaysPass(t *testing.T) {
 	result := runEvidenceSynthesis(t, evidenceExecutor(t, wf), wf, AdjudicateOut{Groups: []Group{}})
 	if result.Verdict != VerdictPass {
 		t.Fatalf("verdict = %s, want PASS", result.Verdict)
+	}
+}
+
+type namedTool struct{ name string }
+
+func (t namedTool) Def() llm.ToolDef { return llm.ToolDef{Name: t.name} }
+func (namedTool) Call(context.Context, json.RawMessage) (agent.Result, error) {
+	return agent.Result{}, nil
+}
+
+type partialTools struct{ gaps []string }
+
+func (p partialTools) Tools(context.Context, string) ([]agent.Tool, error) {
+	return nil, &PartialToolsError{
+		Tools: []agent.Tool{namedTool{name: "mcp__codebase-memory__search_graph"}},
+		Gaps:  p.gaps,
+	}
+}
+
+func TestCodeReviewKeepsAvailableToolsAndRecordsPartialGaps(t *testing.T) {
+	var seen []string
+	executor := newTestExecutor(t, ExecutorDeps{
+		Dossier: validDossier(t),
+		Blocks: map[string]config.BlockBinding{
+			BlockCodeReview: {MCPTools: []string{"mcp__codebase-memory__search_graph", "mcp__codebase-memory__trace_path"}},
+		},
+		Tools:    partialTools{gaps: []string{`server "codebase-memory": tool "trace_path" is not advertised`}},
+		AgentRun: submitCodeReview(`{"summary":"no issues","findings":[]}`, &seen),
+	})
+	out, err := executor.Execute(context.Background(), codeReviewInput(t))
+	if err != nil {
+		t.Fatalf("code-review failed instead of degrading: %v", err)
+	}
+	if !containsText(seen, "mcp__codebase-memory__search_graph") {
+		t.Fatalf("agent tools = %q, want the available MCP tool kept", seen)
+	}
+	decoded, err := DecodeStrict[*CodeReviewOut](out.Data)
+	if err != nil {
+		t.Fatalf("decode output: %v", err)
+	}
+	if len(decoded.ToolGaps) != 1 || !strings.Contains(decoded.ToolGaps[0], "trace_path") ||
+		!strings.Contains(decoded.ToolGaps[0], "not advertised") {
+		t.Fatalf("tool gaps = %q, want the missing tool recorded", decoded.ToolGaps)
+	}
+}
+
+func TestCodeReviewFailsOnPartialToolsAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var seen []string
+	executor := newTestExecutor(t, ExecutorDeps{
+		Dossier:  validDossier(t),
+		Blocks:   graphBlocks,
+		Tools:    partialTools{gaps: []string{"missing"}},
+		AgentRun: submitCodeReview(`{"summary":"ok","findings":[]}`, &seen),
+	})
+	if _, err := executor.Execute(ctx, codeReviewInput(t)); err == nil {
+		t.Fatal("Execute succeeded after cancellation")
 	}
 }
 

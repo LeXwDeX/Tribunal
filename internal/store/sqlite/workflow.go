@@ -783,6 +783,89 @@ func (s *Store) GetWorkflowNodes(ctx context.Context, workflowID string) ([]stor
 	return nodes, nil
 }
 
+// workflowNodeSummaryColumns matches workflowNodeColumns but leaves out the
+// potentially large params and output payloads. List views only need the
+// node's identity, state, dependencies and timing.
+const workflowNodeSummaryColumns = `workflow_id, id, kind, status, required, depends_on,
+	'{}', attempt, provider, model, NULL, error, tokens_in, tokens_out,
+	cost_micros, added_rev, queued_at, started_at, finished_at`
+
+// ListWorkflowNodesByWorkflow loads the nodes of several workflows in one
+// query, keyed by workflow ID and in the same order as GetWorkflowNodes.
+// Params and Output are not loaded. Workflows without nodes are absent from
+// the result.
+func (s *Store) ListWorkflowNodesByWorkflow(ctx context.Context, workflowIDs []string) (map[string][]store.WorkflowNode, error) {
+	out := make(map[string][]store.WorkflowNode, len(workflowIDs))
+	if len(workflowIDs) == 0 {
+		return out, nil
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+workflowNodeSummaryColumns+` FROM workflow_nodes
+		 WHERE workflow_id IN (`+sqlPlaceholders(len(workflowIDs))+`)
+		 ORDER BY workflow_id, added_rev, id`, stringArgs(workflowIDs)...)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: list workflow nodes by workflow: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		node, err := scanWorkflowNode(rows)
+		if err != nil {
+			return nil, fmt.Errorf("sqlite: scan workflow node: %w", err)
+		}
+		out[node.WorkflowID] = append(out[node.WorkflowID], *node)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sqlite: iterate workflow nodes: %w", err)
+	}
+	return out, nil
+}
+
+// CountFindingsByWorkflow groups the findings of several workflows by
+// decision and effective severity in one query. The effective severity is
+// final_severity when non-empty and the raw severity otherwise.
+func (s *Store) CountFindingsByWorkflow(ctx context.Context, workflowIDs []string) ([]store.FindingCount, error) {
+	counts := make([]store.FindingCount, 0)
+	if len(workflowIDs) == 0 {
+		return counts, nil
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT workflow_id, COALESCE(decision, ''),
+		        COALESCE(NULLIF(final_severity, ''), severity, '') AS effective_severity,
+		        COUNT(*)
+		 FROM findings
+		 WHERE workflow_id IN (`+sqlPlaceholders(len(workflowIDs))+`)
+		 GROUP BY workflow_id, COALESCE(decision, ''), effective_severity
+		 ORDER BY workflow_id, 2, effective_severity`, stringArgs(workflowIDs)...)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: count findings by workflow: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var count store.FindingCount
+		if err := rows.Scan(&count.WorkflowID, &count.Decision, &count.Severity, &count.Count); err != nil {
+			return nil, fmt.Errorf("sqlite: scan finding count: %w", err)
+		}
+		counts = append(counts, count)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sqlite: iterate finding counts: %w", err)
+	}
+	return counts, nil
+}
+
+// sqlPlaceholders returns n comma-separated bind placeholders for an IN list.
+func sqlPlaceholders(n int) string {
+	return strings.TrimSuffix(strings.Repeat("?, ", n), ", ")
+}
+
+func stringArgs(values []string) []any {
+	args := make([]any, len(values))
+	for i, value := range values {
+		args[i] = value
+	}
+	return args
+}
+
 const publicationColumns = `id, project_id, mr_iid, kind, publish_key, gitlab_id,
 	workflow_id, fingerprint, body_hash, created_at, updated_at`
 

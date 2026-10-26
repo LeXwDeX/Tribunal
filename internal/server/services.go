@@ -19,6 +19,10 @@ type Store interface {
 	GetWorkflowNodes(ctx context.Context, workflowID string) ([]store.WorkflowNode, error)
 	GetWorkflowDossier(ctx context.Context, workflowID string) (*store.WorkflowDossier, error)
 	ListFindings(ctx context.Context, filter store.FindingFilter) ([]store.Finding, error)
+	// Batched reads for one page of the review list: one query per kind of
+	// data for every workflow on the page instead of one per row.
+	ListWorkflowNodesByWorkflow(ctx context.Context, workflowIDs []string) (map[string][]store.WorkflowNode, error)
+	CountFindingsByWorkflow(ctx context.Context, workflowIDs []string) ([]store.FindingCount, error)
 	SetFindingAnnotation(ctx context.Context, workflowID, findingID, annotation, annotatedBy string) (store.Finding, error)
 	ListLLMCalls(ctx context.Context, filter store.LLMCallFilter) ([]store.LLMCall, string, error)
 	ListPublications(ctx context.Context, workflowID string) ([]store.Publication, error)

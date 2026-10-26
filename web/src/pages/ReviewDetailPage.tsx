@@ -208,7 +208,7 @@ export function FindingRow({
   const position = finding.path ? `${finding.path}${finding.line ? `:${finding.line}` : ''}` : ''
   return (
     <>
-      <tr className={rv.findingRow}>
+      <tr>
         <td className={rv.sevCell}>
           <SeverityBadge severity={finalSeverity} />
           {downgraded ? <span className={rv.sevOriginal}><span className="srOnly">原级别 </span>{finding.severity}</span> : null}

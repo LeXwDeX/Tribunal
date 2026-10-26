@@ -601,3 +601,40 @@ func TestShutdownHTTPServerClosesAfterTimeout(t *testing.T) {
 		t.Fatalf("missing timeout warning: %q", logs.String())
 	}
 }
+
+func TestStopRecoveryWaitsForRecoveryToReturn(t *testing.T) {
+	started := make(chan struct{})
+	done := make(chan struct{})
+	stop := startRecovery(context.Background(), func(ctx context.Context) error {
+		defer close(done)
+		close(started)
+		<-ctx.Done()
+		// A publication finishing its bookkeeping after cancellation.
+		time.Sleep(50 * time.Millisecond)
+		return ctx.Err()
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	<-started
+	stop(5 * time.Second)
+	select {
+	case <-done:
+	default:
+		t.Fatal("stopRecovery returned before startup recovery finished")
+	}
+}
+
+func TestStopRecoveryIsBounded(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	started := make(chan struct{})
+	stop := startRecovery(context.Background(), func(context.Context) error {
+		close(started)
+		<-release // ignores cancellation
+		return nil
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	<-started
+	begin := time.Now()
+	stop(50 * time.Millisecond)
+	if elapsed := time.Since(begin); elapsed > 2*time.Second {
+		t.Fatalf("stopRecovery waited %v past its timeout", elapsed)
+	}
+}

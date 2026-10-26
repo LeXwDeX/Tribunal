@@ -73,6 +73,63 @@ func TestExtensionDefaultLedgerRejectsInvalidRows(t *testing.T) {
 	}
 }
 
+func TestSetDefaultBlockBindingIsAtomic(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t, newFakeClock())
+	binding := store.BlockBinding{Scope: store.ScopePlatform, Block: "review", Skills: []string{"code-review"}}
+	snapshot := store.ExtensionDefault{Key: "block:review", Outcome: store.ExtensionDefaultApplied, Detail: `{"skills":["code-review"]}`}
+
+	// An invalid ledger row rolls the binding back.
+	if err := s.SetDefaultBlockBinding(ctx, "review", &binding, snapshot,
+		store.ExtensionDefault{Key: "skill:x", Outcome: "maybe"}); err == nil {
+		t.Fatal("invalid ledger row accepted")
+	}
+	if rows, _ := s.ListBlockBindings(ctx, store.ScopePlatform, nil); len(rows) != 0 {
+		t.Fatalf("binding kept after rollback: %+v", rows)
+	}
+	if rows, _ := s.ListExtensionDefaults(ctx); len(rows) != 0 {
+		t.Fatalf("ledger kept after rollback: %+v", rows)
+	}
+
+	if err := s.SetDefaultBlockBinding(ctx, "review", &binding, snapshot); err != nil {
+		t.Fatalf("SetDefaultBlockBinding: %v", err)
+	}
+	rows, err := s.ListBlockBindings(ctx, store.ScopePlatform, nil)
+	if err != nil || len(rows) != 1 || rows[0].Skills[0] != "code-review" {
+		t.Fatalf("bindings = %+v, %v", rows, err)
+	}
+
+	released := store.ExtensionDefault{Key: "block:review", Outcome: store.ExtensionDefaultSkipped, Detail: "file"}
+	if err := s.SetDefaultBlockBinding(ctx, "review", nil, released); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if rows, _ := s.ListBlockBindings(ctx, store.ScopePlatform, nil); len(rows) != 0 {
+		t.Fatalf("binding kept after release: %+v", rows)
+	}
+	ledger, err := s.ListExtensionDefaults(ctx)
+	if err != nil || len(ledger) != 1 || ledger[0].Outcome != store.ExtensionDefaultSkipped {
+		t.Fatalf("ledger after release = %+v, %v", ledger, err)
+	}
+}
+
+func TestSetDefaultBlockBindingRejectsForeignRows(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t, newFakeClock())
+	project := int64(7)
+	for _, tc := range []struct {
+		block   string
+		binding *store.BlockBinding
+	}{
+		{block: " "},
+		{block: "review", binding: &store.BlockBinding{Scope: store.ScopeProject, ProjectID: &project, Block: "review"}},
+		{block: "review", binding: &store.BlockBinding{Scope: store.ScopePlatform, Block: "verify"}},
+	} {
+		if err := s.SetDefaultBlockBinding(ctx, tc.block, tc.binding); err == nil {
+			t.Fatalf("SetDefaultBlockBinding(%q, %+v) succeeded", tc.block, tc.binding)
+		}
+	}
+}
+
 func TestBuiltinMarkerAndSkillUpdates(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t, newFakeClock())

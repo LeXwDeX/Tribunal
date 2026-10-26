@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/config"
@@ -49,6 +50,53 @@ type Publisher struct {
 	logger         *slog.Logger
 	now            func() time.Time
 	retries        int
+	// locks serializes publication of one workflow within this process so
+	// startup recovery and the worker cannot both create the same discussion.
+	locks workflowLocks
+}
+
+// workflowLocks is a keyed mutex whose entries live only while held or awaited.
+type workflowLocks struct {
+	mu      sync.Mutex
+	entries map[string]*workflowLock
+}
+
+type workflowLock struct {
+	ch   chan struct{}
+	refs int
+}
+
+// lock waits for the workflow's lock or ctx. The returned func releases it.
+func (l *workflowLocks) lock(ctx context.Context, key string) (func(), error) {
+	l.mu.Lock()
+	if l.entries == nil {
+		l.entries = make(map[string]*workflowLock)
+	}
+	entry := l.entries[key]
+	if entry == nil {
+		entry = &workflowLock{ch: make(chan struct{}, 1)}
+		l.entries[key] = entry
+	}
+	entry.refs++
+	l.mu.Unlock()
+	drop := func() {
+		l.mu.Lock()
+		entry.refs--
+		if entry.refs == 0 {
+			delete(l.entries, key)
+		}
+		l.mu.Unlock()
+	}
+	select {
+	case entry.ch <- struct{}{}:
+	case <-ctx.Done():
+		drop()
+		return nil, ctx.Err()
+	}
+	return func() {
+		<-entry.ch
+		drop()
+	}, nil
 }
 
 // PublisherConfig configures Publisher.
@@ -112,7 +160,12 @@ type loadedReview struct {
 // Every other failure keeps publication state independent from the completed
 // workflow: retryable failures stay pending, permanent failures become failed.
 func (p *Publisher) Publish(ctx context.Context, workflowID string) error {
-	err := p.publish(ctx, workflowID)
+	unlock, err := p.locks.lock(ctx, workflowID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	err = p.publish(ctx, workflowID)
 	if err == nil {
 		return nil
 	}
@@ -336,7 +389,12 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 // commit status or findings. Publication state follows the same retry rules as
 // a normal publication.
 func (p *Publisher) PublishFailure(ctx context.Context, workflowID, reason string) error {
-	err := p.publishFailure(ctx, workflowID, reason)
+	unlock, err := p.locks.lock(ctx, workflowID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	err = p.publishFailure(ctx, workflowID, reason)
 	if err == nil {
 		return nil
 	}

@@ -738,6 +738,10 @@ func (s *Store) ListBlockBindingsPage(ctx context.Context, scope string, project
 
 // UpsertBlockBinding creates or replaces one block binding.
 func (s *Store) UpsertBlockBinding(ctx context.Context, binding store.BlockBinding) (*store.BlockBinding, error) {
+	return upsertBlockBinding(ctx, s.db, binding)
+}
+
+func upsertBlockBinding(ctx context.Context, db execer, binding store.BlockBinding) (*store.BlockBinding, error) {
 	binding.Scope = strings.TrimSpace(binding.Scope)
 	binding.Block = strings.TrimSpace(binding.Block)
 	if err := store.ValidateExtensionScope(binding.Scope, binding.ProjectID, true); err != nil {
@@ -764,7 +768,7 @@ func (s *Store) UpsertBlockBinding(ctx context.Context, binding store.BlockBindi
 	if binding.ProjectID != nil {
 		projectValue = *binding.ProjectID
 	}
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO block_bindings
+	if _, err := db.ExecContext(ctx, `INSERT INTO block_bindings
 		(scope, project_id, block, mcp_tools, skills) VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT (scope, project_id, block) DO UPDATE SET
 			mcp_tools = excluded.mcp_tools,
