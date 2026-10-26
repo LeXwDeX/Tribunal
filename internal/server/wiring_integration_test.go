@@ -55,11 +55,11 @@ type wiringEnv struct {
 
 func seedWiringProject(t *testing.T, db *sqlite.Store, cipher *secret.Cipher) {
 	t.Helper()
-	token, err := cipher.Encrypt([]byte("glpat-wiring-token"))
+	token, err := cipher.Seal([]byte("glpat-wiring-token"), secret.TokenAAD(42))
 	if err != nil {
 		t.Fatalf("encrypt token: %v", err)
 	}
-	hook, err := cipher.Encrypt([]byte("whsec"))
+	hook, err := cipher.Seal([]byte("whsec"), secret.WebhookSecretAAD(42))
 	if err != nil {
 		t.Fatalf("encrypt hook secret: %v", err)
 	}

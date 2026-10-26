@@ -451,11 +451,11 @@ func TestRegisterInspectAndRedact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetProject: %v", err)
 	}
-	token, err := env.cipher.Decrypt(stored.TokenEnc)
+	token, err := env.cipher.Open(stored.TokenEnc, secret.TokenAAD(stored.ID))
 	if err != nil || string(token) != testProjectTok {
 		t.Fatalf("stored token = %q, %v", token, err)
 	}
-	secretPlain, err := env.cipher.Decrypt(stored.WebhookSecretEnc)
+	secretPlain, err := env.cipher.Open(stored.WebhookSecretEnc, secret.WebhookSecretAAD(stored.ID))
 	if err != nil || string(secretPlain) != webhookSecret {
 		t.Fatalf("stored webhook secret mismatch: %v", err)
 	}

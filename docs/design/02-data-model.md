@@ -36,10 +36,10 @@ CREATE TABLE projects (
   path_with_namespace TEXT    NOT NULL,
   web_url             TEXT    NOT NULL,
   default_branch      TEXT    NOT NULL,
-  token_enc           BLOB    NOT NULL,             -- AES-GCM: nonce || ciphertext
+  token_enc           BLOB    NOT NULL,             -- AES-GCM: "\x00tb1" || nonce || ciphertext，AAD 绑定项目 ID 与字段
   token_expires_at    TEXT,
   token_scopes        TEXT    NOT NULL DEFAULT '[]',-- JSON 数组，注册时从 GitLab 读取
-  webhook_secret_enc  BLOB    NOT NULL,
+  webhook_secret_enc  BLOB    NOT NULL,             -- 格式同 token_enc，AAD 字段为 webhook_secret
   hook_id             INTEGER,                      -- 本服务管理的 webhook ID
   webhook_state       TEXT    NOT NULL DEFAULT 'disabled', -- disabled|pending|enabled|failed|unknown
   webhook_events      TEXT    NOT NULL DEFAULT '[]',-- JSON 数组，如 ["push_events",...]

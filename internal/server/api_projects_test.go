@@ -122,7 +122,7 @@ func TestProjectWriteEndpoints(t *testing.T) {
 		t.Fatalf("GetProject: %v", err)
 	}
 	cipher, _ := secret.New([]byte("0123456789abcdef0123456789abcdef"))
-	plain, err := cipher.Decrypt(saved.TokenEnc)
+	plain, err := cipher.Open(saved.TokenEnc, secret.TokenAAD(saved.ID))
 	if err != nil || string(plain) != "glpat-rotated" {
 		t.Fatalf("rotated token = %q, %v", plain, err)
 	}

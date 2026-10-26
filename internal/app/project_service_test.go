@@ -69,11 +69,11 @@ func TestRegisterWithoutWebhook(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetProject: %v", err)
 	}
-	token, err := cipher.Decrypt(saved.TokenEnc)
+	token, err := cipher.Open(saved.TokenEnc, secret.TokenAAD(saved.ID))
 	if err != nil || string(token) != "glpat-project-token" {
 		t.Fatalf("decrypt token = %q, %v", token, err)
 	}
-	secretPlain, err := cipher.Decrypt(saved.WebhookSecretEnc)
+	secretPlain, err := cipher.Open(saved.WebhookSecretEnc, secret.WebhookSecretAAD(saved.ID))
 	if err != nil || string(secretPlain) != registration.WebhookSecret {
 		t.Fatalf("decrypt webhook secret = %q, %v", secretPlain, err)
 	}
@@ -168,7 +168,7 @@ func TestRegisterAutoWebhook(t *testing.T) {
 		strings.Join(saved.WebhookEvents, ",") != "push_events,merge_requests_events,note_events" {
 		t.Errorf("webhook state = %q, events = %v", saved.WebhookState, saved.WebhookEvents)
 	}
-	decrypted, err := cipher.Decrypt(saved.WebhookSecretEnc)
+	decrypted, err := cipher.Open(saved.WebhookSecretEnc, secret.WebhookSecretAAD(saved.ID))
 	if err != nil || string(decrypted) != spec.Secret {
 		t.Fatalf("stored webhook secret does not match created hook (%v)", err)
 	}

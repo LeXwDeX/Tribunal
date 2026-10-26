@@ -85,7 +85,7 @@ func (d *Dispatcher) StartReview(ctx context.Context, projectID, mrIID int64, pr
 	if !project.Enabled {
 		return "", conflictError("project is disabled")
 	}
-	token, err := d.cipher.Decrypt(project.TokenEnc)
+	token, err := d.cipher.Open(project.TokenEnc, secret.TokenAAD(project.ID))
 	if err != nil {
 		return "", internalError()
 	}

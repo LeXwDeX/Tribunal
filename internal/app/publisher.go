@@ -473,7 +473,7 @@ func (p *Publisher) load(ctx context.Context, workflowID string) (*loadedReview,
 	if project == nil || !project.Enabled {
 		return nil, PermanentJob(fmt.Errorf("project %d is disabled", workflow.ProjectID))
 	}
-	token, err := p.cipher.Decrypt(project.TokenEnc)
+	token, err := p.cipher.Open(project.TokenEnc, secret.TokenAAD(project.ID))
 	if err != nil {
 		return nil, PermanentJob(fmt.Errorf("project token is unavailable"))
 	}

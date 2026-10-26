@@ -256,7 +256,7 @@ func (s *ProjectService) Register(ctx context.Context, in RegisterInput) (*Regis
 		return nil, err
 	}
 
-	tokenEnc, err := s.cipher.Encrypt([]byte(in.AccessToken))
+	tokenEnc, err := s.cipher.Seal([]byte(in.AccessToken), secret.TokenAAD(project.ID))
 	if err != nil {
 		return nil, internalError()
 	}
@@ -264,7 +264,7 @@ func (s *ProjectService) Register(ctx context.Context, in RegisterInput) (*Regis
 	if err != nil {
 		return nil, internalError()
 	}
-	secretEnc, err := s.cipher.Encrypt([]byte(webhookSecret))
+	secretEnc, err := s.cipher.Seal([]byte(webhookSecret), secret.WebhookSecretAAD(project.ID))
 	if err != nil {
 		return nil, internalError()
 	}
@@ -697,7 +697,7 @@ func (s *ProjectService) RotateToken(ctx context.Context, id int64, token string
 	if err := validateTokenInfo(info, s.now()); err != nil {
 		return nil, err
 	}
-	tokenEnc, err := s.cipher.Encrypt([]byte(token))
+	tokenEnc, err := s.cipher.Seal([]byte(token), secret.TokenAAD(id))
 	if err != nil {
 		return nil, internalError()
 	}
@@ -748,7 +748,7 @@ func (s *ProjectService) provisionWebhook(ctx context.Context, id int64, rotateS
 	if err != nil {
 		return nil, err
 	}
-	token, err := s.cipher.Decrypt(project.TokenEnc)
+	token, err := s.cipher.Open(project.TokenEnc, secret.TokenAAD(project.ID))
 	if err != nil {
 		return nil, internalError()
 	}
@@ -810,21 +810,21 @@ func (s *ProjectService) provisionWebhook(ctx context.Context, id int64, rotateS
 // instead of a silent rotation that would leave the old hook broken.
 func (s *ProjectService) webhookSecret(project *store.Project, rotate bool) (string, []byte, error) {
 	if !rotate && len(project.WebhookSecretEnc) > 0 {
-		plain, err := s.cipher.Decrypt(project.WebhookSecretEnc)
+		plain, err := s.cipher.Open(project.WebhookSecretEnc, secret.WebhookSecretAAD(project.ID))
 		if err != nil {
 			return "", nil, internalError()
 		}
 		return string(plain), nil, nil
 	}
-	secret, err := newWebhookSecret()
+	value, err := newWebhookSecret()
 	if err != nil {
 		return "", nil, internalError()
 	}
-	enc, err := s.cipher.Encrypt([]byte(secret))
+	enc, err := s.cipher.Seal([]byte(value), secret.WebhookSecretAAD(project.ID))
 	if err != nil {
 		return "", nil, internalError()
 	}
-	return secret, enc, nil
+	return value, enc, nil
 }
 
 // recordedHookID returns the recorded hook only when it still exists. Hooks at
@@ -855,7 +855,7 @@ func (s *ProjectService) DisableWebhook(ctx context.Context, id int64) (*store.P
 		return nil, err
 	}
 	if project.HookID != nil {
-		token, err := s.cipher.Decrypt(project.TokenEnc)
+		token, err := s.cipher.Open(project.TokenEnc, secret.TokenAAD(project.ID))
 		if err != nil {
 			return nil, internalError()
 		}
@@ -954,7 +954,7 @@ func (s *ProjectService) Delete(ctx context.Context, id int64) error {
 		return err
 	}
 	if project.HookID != nil {
-		if token, decErr := s.cipher.Decrypt(project.TokenEnc); decErr != nil {
+		if token, decErr := s.cipher.Open(project.TokenEnc, secret.TokenAAD(project.ID)); decErr != nil {
 			s.logger.Warn("project token decrypt failed during delete", "project_id", id)
 		} else if delErr := s.gitlab.DeleteProjectHook(context.WithoutCancel(ctx), string(token), id, *project.HookID); delErr != nil {
 			s.logger.Warn("webhook removal failed during project delete", "project_id", id, "status", gitlab.StatusOf(delErr))

@@ -369,11 +369,11 @@ const sha40 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 func seedProject(t *testing.T, st *sqlite.Store, cipher *secret.Cipher, id int64, webhookSecret, settings, profile string) *store.Project {
 	t.Helper()
-	tokenEnc, err := cipher.Encrypt([]byte("glpat-seeded-token"))
+	tokenEnc, err := cipher.Seal([]byte("glpat-seeded-token"), secret.TokenAAD(id))
 	if err != nil {
 		t.Fatalf("encrypt token: %v", err)
 	}
-	secretEnc, err := cipher.Encrypt([]byte(webhookSecret))
+	secretEnc, err := cipher.Seal([]byte(webhookSecret), secret.WebhookSecretAAD(id))
 	if err != nil {
 		t.Fatalf("encrypt secret: %v", err)
 	}
