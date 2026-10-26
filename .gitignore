@@ -11,6 +11,7 @@
 /web/node_modules/
 /web/coverage/
 /artifacts/delivery/
+/.serena/
 
 # macOS
 .DS_Store
