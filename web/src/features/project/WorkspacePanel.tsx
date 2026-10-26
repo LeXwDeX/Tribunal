@@ -224,7 +224,7 @@ export function WorkspacePanel({ projectId, canManage = false }: { projectId: nu
                 </>
               ) : (
                 <>
-                  <pre className="pre" style={docPreStyle}>{display.content}</pre>
+                  <pre className={`pre ${styles.docPreview}`}>{display.content}</pre>
                   {canWrite && isCurrent ? (
                     <div className={styles.docActions}>
                       <Button variant="secondary" onClick={startEdit}>编辑</Button>
@@ -273,14 +273,3 @@ export function WorkspacePanel({ projectId, canManage = false }: { projectId: nu
     </div>
   )
 }
-
-const docPreStyle = {
-  margin: 0,
-  padding: 14,
-  background: 'var(--preview-bg)',
-  border: '1px solid var(--border)',
-  borderRadius: 8,
-  color: 'var(--text)',
-  maxHeight: 480,
-  overflow: 'auto',
-} as const

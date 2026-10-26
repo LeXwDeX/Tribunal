@@ -546,6 +546,10 @@
   margin-top: auto;
 }
 
+.cardActionsEnd {
+  justify-content: flex-end;
+}
+
 .testResult {
   font-size: 12px;
   color: var(--muted-strong);
@@ -742,4 +746,34 @@
   .publicationCard { flex-basis: 100%; }
   .infoCard { flex-basis: 100%; }
   .triggerGrid { grid-template-columns: 1fr; }
+}
+
+.docPreview {
+  margin: 0;
+  padding: 14px;
+  background: var(--preview-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  max-height: 480px;
+  overflow: auto;
+}
+
+.nodePre {
+  margin: 0;
+  padding: 12px;
+  background: var(--code-bg);
+  color: var(--code-fg);
+  border-radius: var(--radius-sm);
+  max-height: 280px;
+  overflow: auto;
+}
+
+.notFound {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 32px;
 }

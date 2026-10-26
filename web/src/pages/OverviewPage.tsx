@@ -7,7 +7,7 @@ import { useCanWrite } from '../components/RoleContext'
 import { ReviewTable } from '../components/ReviewTable'
 import { TriggerReviewDialog } from '../components/TriggerReviewDialog'
 import {
-  Badge, Button, EmptyState, ErrorState, LoadingState, Metric, PageHeader, Panel, useToast,
+  Badge, Button, ButtonLink, EmptyState, ErrorState, LoadingState, Metric, PageHeader, Panel, useToast,
 } from '../components/ui'
 import { elapsedSince, useNow, usePaginated } from '../lib/hooks'
 import { formatCost, labelForStatus, readNumber } from '../lib/format'
@@ -261,7 +261,7 @@ export function OverviewPage() {
           }
           actions={canRegister || canTrigger ? (
             <>
-              {canRegister ? <Link to="/projects" style={secondaryLinkStyle}>注册项目</Link> : null}
+              {canRegister ? <ButtonLink to="/projects" variant="primary">注册项目</ButtonLink> : null}
               {canTrigger ? <Button variant="primary" onClick={() => setTriggerOpen(true)} disabled={projectsPage.isPending}>手动触发评审</Button> : null}
             </>
           ) : undefined}
@@ -309,7 +309,7 @@ export function OverviewPage() {
             </ul>
             <div className={styles.actionsRight}>
               {running.hasNextPage ? <Button variant="secondary" onClick={running.fetchNextPage} loading={running.isFetchingNextPage}>加载更多运行中评审</Button> : null}
-              <Link to="/reviews" style={secondaryLinkStyle}>查看全部评审</Link>
+              <ButtonLink to="/reviews">查看全部评审</ButtonLink>
             </div>
           </Panel>
 
@@ -374,16 +374,3 @@ export function OverviewPage() {
     </main>
   )
 }
-
-const secondaryLinkStyle = {
-  display: 'inline-flex',
-  alignItems: 'center',
-  minHeight: 44,
-  padding: '0 16px',
-  borderRadius: 8,
-  border: '1px solid var(--control-border)',
-  background: 'var(--surface)',
-  color: 'var(--text)',
-  fontWeight: 500,
-  textDecoration: 'none',
-} as const

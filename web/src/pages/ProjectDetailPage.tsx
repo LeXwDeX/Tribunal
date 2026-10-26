@@ -8,7 +8,7 @@ import { SettingsPanel } from '../features/project/SettingsPanel'
 import { WorkspacePanel } from '../features/project/WorkspacePanel'
 import { ReviewTable } from '../components/ReviewTable'
 import {
-  Badge, Button, EmptyState, ErrorState, LoadingState, Metric, PageHeader, Panel, StatusBadge, Tabs,
+  Badge, Button, ButtonLink, EmptyState, ErrorState, LoadingState, Metric, PageHeader, Panel, StatusBadge, Tabs,
 } from '../components/ui'
 import { usePaginated } from '../lib/hooks'
 import {
@@ -77,8 +77,8 @@ function ProjectOverview({ project }: { project: Project }) {
           </dl>
           {project.webhook_error ? <span className={styles.resultError}>{project.webhook_error}</span> : null}
           <div className={styles.cardActions}>
-            <Link to={`/projects/${project.id}/workspace`} style={secondaryLinkStyle}>工作区</Link>
-            <Link to={`/projects/${project.id}/settings`} style={secondaryLinkStyle}>设置</Link>
+            <ButtonLink to={`/projects/${project.id}/workspace`}>工作区</ButtonLink>
+            <ButtonLink to={`/projects/${project.id}/settings`}>设置</ButtonLink>
           </div>
         </section>
         <section className={styles.infoCard}>
@@ -182,7 +182,7 @@ export function ProjectDetailPage() {
           }
           actions={
             <>
-              {gitlabUrl ? <a href={gitlabUrl} target="_blank" rel="noopener noreferrer" style={secondaryLinkStyle}>在 GitLab 中打开</a> : null}
+              {gitlabUrl ? <ButtonLink href={gitlabUrl} target="_blank" rel="noopener noreferrer">在 GitLab 中打开</ButtonLink> : null}
               {data.enabled ? <Badge tone="ok">已启用</Badge> : <Badge tone="neutral">已停用</Badge>}
             </>
           }
@@ -206,16 +206,3 @@ export function ProjectDetailPage() {
     </main>
   )
 }
-
-const secondaryLinkStyle = {
-  display: 'inline-flex',
-  alignItems: 'center',
-  minHeight: 44,
-  padding: '0 16px',
-  borderRadius: 8,
-  border: '1px solid var(--control-border)',
-  background: 'var(--surface)',
-  color: 'var(--text)',
-  fontWeight: 500,
-  textDecoration: 'none',
-} as const

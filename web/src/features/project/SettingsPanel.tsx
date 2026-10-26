@@ -398,9 +398,9 @@ export function SettingsPanel({ project }: { project: Project }) {
           </dl>
           {project.webhook_error ? <span className={styles.resultError}>{project.webhook_error}</span> : null}
           <div className={styles.notice}>只读账号不能修改项目设置、更新访问 Key、启用、重建或禁用 webhook，也不能注销项目。</div>
-          <details>
-            <summary style={{ minHeight: 44, display: 'flex', alignItems: 'center', cursor: 'pointer' }}>查看设置 JSON</summary>
-            <pre className="pre" style={jsonStyle}>{JSON.stringify(project.settings || {}, null, 2)}</pre>
+          <details className={ui.disclosure}>
+            <summary>查看设置 JSON</summary>
+            <pre className={`pre ${ui.jsonBlock}`}>{JSON.stringify(project.settings || {}, null, 2)}</pre>
           </details>
         </Panel>
       </div>
@@ -466,8 +466,8 @@ export function SettingsPanel({ project }: { project: Project }) {
             </Field>
           </div>
 
-          <details>
-            <summary style={{ minHeight: 44, display: 'flex', alignItems: 'center', cursor: 'pointer' }}>高级 JSON（profile_by_label 等）</summary>
+          <details className={ui.disclosure}>
+            <summary>高级 JSON（profile_by_label 等）</summary>
             <div className={ui.stack} style={{ marginTop: 8 }}>
               <label className="srOnly" htmlFor="settings-json">项目设置 JSON</label>
               <textarea id="settings-json" className="textarea textareaCode" rows={12} value={jsonText} onChange={(event) => setJsonText(event.target.value)} spellCheck={false} />
@@ -660,12 +660,3 @@ function projectsAside(project: Project) {
   return <span>项目 ID {project.id} · 最后更新 {project.updated_at ? formatDate(project.updated_at) : '—'}</span>
 }
 
-const jsonStyle = {
-  background: 'var(--surface-2)',
-  border: '1px solid var(--border)',
-  borderRadius: 8,
-  padding: 12,
-  maxHeight: 360,
-  overflow: 'auto',
-  color: 'var(--text)',
-} as const

@@ -588,6 +588,99 @@
   justify-content: space-between;
 }
 
+/* Toolbar: one aligned row of filters. Fixed to the control height so
+   switching scope or filters never moves the content below it. */
+.filterBar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  min-height: var(--control-h);
+  min-width: 0;
+}
+
+.filterBarMain {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  min-width: 0;
+}
+
+.filterBarActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.filterBarField {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.filterBarFieldGrow {
+  flex: 1 1 280px;
+  max-width: 440px;
+}
+
+.filterBarField > span {
+  flex: none;
+  color: var(--muted-strong);
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.filterBarField > :is(input, select) {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Collapsible raw-data disclosure such as "查看设置 JSON". */
+.disclosure > summary {
+  display: flex;
+  align-items: center;
+  min-height: var(--control-h);
+  cursor: pointer;
+  color: var(--muted-strong);
+  font-size: 13px;
+}
+
+.jsonBlock {
+  margin: 0;
+  padding: 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  max-height: 360px;
+  overflow: auto;
+}
+
+.jsonBlockTall {
+  max-height: 520px;
+}
+
+.toastMessage {
+  flex: 1;
+}
+
+.modalWide {
+  width: min(920px, 100%);
+}
+
+.inlineList {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
 .tableNote {
   padding: 10px 18px;
   border-top: 1px solid var(--border);
@@ -821,8 +914,8 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: #343a46;
-  color: #fff;
+  background: var(--nav-active);
+  color: var(--nav-text);
   font-weight: 700;
 }
 
@@ -938,7 +1031,8 @@
     bottom: 12px;
     width: calc(100vw - 24px);
   }
-  .toolbar .field {
+  .toolbar .field,
+  .filterBarField {
     flex: 1 1 100%;
   }
   .smallButton {

@@ -7,7 +7,7 @@ import {
 import type { Finding, FindingAnnotation, ReviewDetail } from '../api/types'
 import { TriggerReviewDialog } from '../components/TriggerReviewDialog'
 import {
-  Badge, Button, ConfirmDialog, EmptyState, ErrorState, LoadingState, Panel, PublicationBadge, RelativeTime, SeverityBadge, StatusBadge, VerdictBadge, useToast,
+  Badge, Button, ButtonLink, ConfirmDialog, EmptyState, ErrorState, LoadingState, Panel, PublicationBadge, RelativeTime, SeverityBadge, StatusBadge, VerdictBadge, useToast,
 } from '../components/ui'
 import { ExecutionGraph } from '../features/review/ExecutionGraph'
 import { NodeDrawer } from '../features/review/NodeDrawer'
@@ -472,9 +472,9 @@ export function ReviewDetailPage() {
               {review.error ? <div className={styles.warning} role="alert">执行失败：{review.error}</div> : null}
               {review.cancel_reason ? <div className={styles.notice}>取消原因：{review.cancel_reason}</div> : null}
             </div>
-            <div className={styles.cardActions} style={{ justifyContent: 'flex-end' }}>
+            <div className={`${styles.cardActions} ${styles.cardActionsEnd}`}>
               {mrUrl ? (
-                <a href={mrUrl} target="_blank" rel="noopener noreferrer" style={secondaryLinkStyle}>在 GitLab 中打开</a>
+                <ButtonLink href={mrUrl} target="_blank" rel="noopener noreferrer">在 GitLab 中打开</ButtonLink>
               ) : null}
               {canWrite ? <Button variant="secondary" onClick={() => setTriggerOpen(true)}>重新触发评审</Button> : null}
               {canRepublish ? <Button variant="secondary" onClick={() => { void onRepublish() }} loading={republishing}>重新发布</Button> : null}
@@ -629,18 +629,6 @@ const evidenceStyle = {
   color: 'var(--text)',
 } as const
 
-const secondaryLinkStyle = {
-  display: 'inline-flex',
-  alignItems: 'center',
-  minHeight: 44,
-  padding: '0 16px',
-  borderRadius: 8,
-  border: '1px solid var(--control-border)',
-  background: 'var(--surface)',
-  color: 'var(--text)',
-  fontWeight: 500,
-  textDecoration: 'none',
-} as const
 
 const fieldStyle = {
   display: 'flex',

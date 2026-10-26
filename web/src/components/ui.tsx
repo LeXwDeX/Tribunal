@@ -1,8 +1,9 @@
 import {
   createContext, forwardRef, useCallback, useContext, useEffect, useId, useRef, useState,
-  type ButtonHTMLAttributes, type ReactNode,
+  type AnchorHTMLAttributes, type ButtonHTMLAttributes, type ReactNode,
 } from 'react'
 import { createPortal } from 'react-dom'
+import { Link, type LinkProps } from 'react-router-dom'
 import { ApiError, errorMessage } from '../api/client'
 import {
   formatDate, formatRelative, labelForPublication, labelForStatus, publicationTone, safeExternalUrl, statusTone, verdictTone,
@@ -39,6 +40,44 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
     </button>
   )
 })
+
+// ButtonLink is navigation that looks like a Button. Pass `to` for in-app
+// routes or `href` for a plain anchor; both share the Button size and variants.
+type ButtonLinkProps = { variant?: ButtonVariant } & (
+  | (LinkProps & { href?: never })
+  | (AnchorHTMLAttributes<HTMLAnchorElement> & { href: string; to?: never })
+)
+
+export function ButtonLink({ variant = 'secondary', className, ...props }: ButtonLinkProps) {
+  const classes = classNames(styles.button, styles[variant], className)
+  if (props.to !== undefined) return <Link {...(props as LinkProps)} className={classes} />
+  return <a {...(props as AnchorHTMLAttributes<HTMLAnchorElement>)} className={classes} />
+}
+
+// Toolbar holds filters and scope controls on one aligned row. Its height is
+// fixed to the control height, so status messages belong below it.
+export function Toolbar({
+  children, actions, label, inset, className,
+}: { children: ReactNode; actions?: ReactNode; label?: string; inset?: boolean; className?: string }) {
+  return (
+    <div className={classNames(styles.filterBar, inset && styles.toolbar, className)} role={label ? 'toolbar' : undefined} aria-label={label}>
+      <div className={styles.filterBarMain}>{children}</div>
+      {actions ? <div className={styles.filterBarActions}>{actions}</div> : null}
+    </div>
+  )
+}
+
+// ToolbarField puts a compact label beside its control so toolbars never grow taller.
+export function ToolbarField({
+  label, htmlFor, grow, children,
+}: { label: string; htmlFor?: string; grow?: boolean; children: ReactNode }) {
+  return (
+    <label className={classNames(styles.filterBarField, grow && styles.filterBarFieldGrow)} htmlFor={htmlFor}>
+      <span>{label}</span>
+      {children}
+    </label>
+  )
+}
 
 export function Badge({
   tone = 'neutral', live, plain, children,
@@ -412,8 +451,7 @@ export function Dialog({ open, onClose, title, description, children, footer, wi
         aria-labelledby={titleId}
         aria-describedby={description ? descriptionId : undefined}
         tabIndex={-1}
-        className={styles.modal}
-        style={wide ? { width: 'min(920px, 100%)' } : undefined}
+        className={classNames(styles.modal, wide && styles.modalWide)}
       >
         <div className={styles.modalHeader}>
           <div className={styles.stack}>
@@ -535,7 +573,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       <div className={styles.toastRegion} role="status" aria-live="polite">
         {items.map((item) => (
           <div key={item.id} role={item.tone === 'error' ? 'alert' : undefined} className={classNames(styles.toast, item.tone === 'success' && styles.toastSuccess, item.tone === 'error' && styles.toastError)}>
-            <span style={{ flex: 1 }}>{item.message}</span>
+            <span className={styles.toastMessage}>{item.message}</span>
             <button type="button" className={styles.iconButton} onClick={() => remove(item.id)} aria-label="关闭提示">
               <Icon name="close" size={14} />
             </button>

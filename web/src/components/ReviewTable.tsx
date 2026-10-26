@@ -2,6 +2,8 @@ import { Link } from 'react-router-dom'
 import type { ReviewSummary } from '../api/types'
 import { formatCost, formatDuration, formatNumber } from '../lib/format'
 import { PublicationBadge, RelativeTime, SeverityBadge, StatusBadge, VerdictBadge } from './ui'
+import ui from '../styles/ui.module.css'
+import styles from './ReviewTable.module.css'
 
 export function projectLabel(review: ReviewSummary, names: Map<number, string>): string {
   return review.project_path || names.get(review.project_id) || `项目 ${review.project_id}`
@@ -10,7 +12,7 @@ export function projectLabel(review: ReviewSummary, names: Map<number, string>):
 export function ReviewTable({ reviews, projectNames }: { reviews: ReviewSummary[]; projectNames: Map<number, string> }) {
   return (
     <div className="tableWrap">
-      <table className="dataTable" style={{ minWidth: 1140 }}>
+      <table className={`dataTable ${styles.table}`}>
         <thead>
           <tr>
             <th scope="col">MR</th>
@@ -31,8 +33,8 @@ export function ReviewTable({ reviews, projectNames }: { reviews: ReviewSummary[
             return (
               <tr key={review.id}>
                 <td>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 210 }}>
-                    <Link to={`/reviews/${encodeURIComponent(review.id)}`} style={{ fontWeight: 500 }}>
+                  <div className={`${styles.cellStack} ${styles.titleCell}`}>
+                    <Link to={`/reviews/${encodeURIComponent(review.id)}`} className={styles.titleLink}>
                       !{review.mr_iid}{review.mr_title ? ` ${review.mr_title}` : ''}
                     </Link>
                     <span className="mono small muted">{review.id}</span>
@@ -42,10 +44,10 @@ export function ReviewTable({ reviews, projectNames }: { reviews: ReviewSummary[
                 <td>{review.profile || '—'}</td>
                 <td><StatusBadge status={review.status} /></td>
                 <td>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 150 }}>
+                  <div className={`${styles.cellStack} ${styles.publicationCell}`}>
                     <PublicationBadge state={review.publication_state} />
                     {review.publication_error ? (
-                      <span className="small" style={{ color: 'var(--danger-fg)', maxWidth: 240, overflowWrap: 'anywhere' }} title={review.publication_error}>
+                      <span className={`small ${styles.publicationError}`} title={review.publication_error}>
                         {review.publication_error}
                       </span>
                     ) : null}
@@ -54,10 +56,10 @@ export function ReviewTable({ reviews, projectNames }: { reviews: ReviewSummary[
                 <td><VerdictBadge verdict={review.verdict} /></td>
                 <td className="tabular">
                   {counts ? (
-                    <span style={{ display: 'inline-flex', gap: 10, flexWrap: 'wrap' }}>
-                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}><SeverityBadge severity="P0" />{formatNumber(counts.P0 ?? 0)}</span>
-                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}><SeverityBadge severity="P1" />{formatNumber(counts.P1 ?? 0)}</span>
-                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}><SeverityBadge severity="P2" />{formatNumber(counts.P2 ?? 0)}</span>
+                    <span className={ui.inlineList}>
+                      <span className={styles.sevItem}><SeverityBadge severity="P0" />{formatNumber(counts.P0 ?? 0)}</span>
+                      <span className={styles.sevItem}><SeverityBadge severity="P1" />{formatNumber(counts.P1 ?? 0)}</span>
+                      <span className={styles.sevItem}><SeverityBadge severity="P2" />{formatNumber(counts.P2 ?? 0)}</span>
                     </span>
                   ) : '—'}
                 </td>
