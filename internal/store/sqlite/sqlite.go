@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	sqlitedrv "modernc.org/sqlite"
 
+	"github.com/LeXwDeX/tribunal/internal/errclass"
 	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/internal/store/migrations"
 )
@@ -556,10 +557,10 @@ func (s *Store) Complete(ctx context.Context, j store.Job) error {
 }
 
 // Fail records a failed attempt. Handler error text is deliberately not
-// stored; only a fixed generic reason is persisted. If a queued successor
-// exists, the stale running job is cancelled instead of overwriting it.
+// stored; only a fixed reason and the sanitized error class are persisted. If
+// a queued successor exists, the stale running job is cancelled instead of
+// overwriting it.
 func (s *Store) Fail(ctx context.Context, j store.Job, cause error, retryAt *time.Time) error {
-	_ = cause
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -598,6 +599,9 @@ func (s *Store) Fail(ctx context.Context, j store.Job, cause error, retryAt *tim
 		lastError = "job failed after maximum attempts"
 	} else if retryAt != nil {
 		runAfter = retryAt.UTC()
+	}
+	if class := errclass.Of(cause); class != "" && successors == 0 {
+		lastError += " (" + class + ")"
 	}
 
 	res, err := tx.ExecContext(ctx, `UPDATE jobs

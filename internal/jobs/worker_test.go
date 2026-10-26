@@ -1,11 +1,14 @@
 package jobs_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -514,5 +517,60 @@ func TestWorkerPersistentHeartbeatErrorCancelsAfterLeaseExpires(t *testing.T) {
 	case <-canceled:
 	case <-time.After(3 * time.Second):
 		t.Fatal("handler kept running after its lease expired")
+	}
+}
+
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+func TestWorkerRecordsSanitizedFailureClass(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	q := openStore(t, clock)
+	jobID, _, err := q.Enqueue(ctx, jobs.Job{Kind: "boom", Key: "boom:1", MaxAttempts: 1})
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	var logs lockedBuffer
+	w := jobs.NewWorker(q, jobs.WorkerConfig{
+		Handlers: map[string]jobs.Handler{
+			"boom": func(context.Context, *jobs.Job) error {
+				panic("token=SECRET-TOKEN")
+			},
+		},
+		Workers:      1,
+		Lease:        time.Second,
+		Now:          clock.Now,
+		PollInterval: 5 * time.Millisecond,
+		Logger:       slog.New(slog.NewJSONHandler(&logs, nil)),
+	})
+	_, _ = runWorker(t, w)
+	job := waitJob(t, q, jobID, store.JobFailed)
+	if !strings.Contains(job.LastError, "(panic)") || strings.Contains(job.LastError, "SECRET") {
+		t.Fatalf("last_error = %q", job.LastError)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for !strings.Contains(logs.String(), `"error_class":"panic"`) {
+		if time.Now().After(deadline) {
+			t.Fatalf("failure log lacks class: %s", logs.String())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if strings.Contains(logs.String(), "SECRET") {
+		t.Fatalf("log leaked handler text: %s", logs.String())
 	}
 }
