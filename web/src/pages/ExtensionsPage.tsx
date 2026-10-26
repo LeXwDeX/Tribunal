@@ -32,10 +32,14 @@ export function ExtensionsPage() {
 
   // Project-scope states render under the tabs so the toolbar and tabs never move.
   let projectPlaceholder: ReactNode
-  if (projects.isError) projectPlaceholder = <ErrorState error={projects.error} onRetry={() => { void projects.refetch() }} title="项目列表加载失败" />
+  if (projects.isError && projectOptions.length === 0) projectPlaceholder = <ErrorState error={projects.error} onRetry={() => { void projects.refetch() }} title="项目列表加载失败" />
   else if (projects.isPending) projectPlaceholder = <LoadingState label="正在读取项目…" />
   else if (projectOptions.length === 0) projectPlaceholder = <EmptyState title="还没有项目" description="先注册项目，再维护项目级扩展。" />
   else projectPlaceholder = <EmptyState title="请选择项目" description="项目级 MCP、Skill 和块绑定需要指定项目。" />
+  // A failed refresh keeps the cached projects selectable but must stay retryable.
+  const projectNotice = scope === 'project' && projects.isError && projectOptions.length > 0
+    ? <ErrorState error={projects.error} onRetry={() => { void projects.refetch() }} title="项目列表刷新失败" />
+    : null
 
   return (
     <main className={ui.page}>
@@ -62,7 +66,7 @@ export function ExtensionsPage() {
               value={projectId}
               onChange={(event) => setProjectId(event.target.value)}
               aria-label="扩展作用域项目"
-              disabled={scope !== 'project' || projects.isPending || projects.isError}
+              disabled={scope !== 'project' || projectOptions.length === 0}
             >
               {/* Project scope auto-selects the first project, so the placeholder is not selectable then. */}
               <option value="" disabled={scope === 'project' && projectOptions.length > 0}>{scope === 'platform' ? '平台级无需选择项目' : '选择项目'}</option>
@@ -80,6 +84,7 @@ export function ExtensionsPage() {
           onTabChange={(next) => navigate(`/extensions/${next}`)}
           projects={projectOptions}
           placeholder={projectPlaceholder}
+          notice={projectNotice}
         />
       </div>
     </main>

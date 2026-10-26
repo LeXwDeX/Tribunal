@@ -3,7 +3,7 @@ import { screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { ExtensionsPage } from '../src/pages/ExtensionsPage'
 import { project } from './fixtures'
-import { installFetch, jsonResponse, renderWithProviders } from './test-utils'
+import { createTestQueryClient, installFetch, jsonResponse, renderWithProviders } from './test-utils'
 
 function extensionRoutes(projects: () => Response | Promise<Response>) {
   return (url: string) => {
@@ -74,5 +74,26 @@ describe('extensions page layout', () => {
     expect(await screen.findByText('还没有项目')).toBeInTheDocument()
     const { panel } = expectStableLayout()
     expect(within(panel).getByText('还没有项目')).toBeInTheDocument()
+  })
+})
+
+describe('extensions page project refresh failure', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('keeps the selector usable and offers a retry when a cached project list fails to refresh', async () => {
+    const queryClient = createTestQueryClient()
+    queryClient.setQueryData(['projects', 'extensions'], { projects: [project({ access: 'manage' }), project({ id: 43, path_with_namespace: 'group/frontend' })] })
+    installFetch(extensionRoutes(() => jsonResponse({ error: { code: 'internal', message: 'boom' } }, 500)))
+    renderWithProviders(<ExtensionsPage />, { route: '/extensions', queryClient })
+    await userEvent.click(screen.getByRole('button', { name: '项目级' }))
+
+    expect(await screen.findByText('项目列表刷新失败')).toBeInTheDocument()
+    const { panel } = expectStableLayout()
+    expect(within(panel).getByRole('button', { name: '重试' })).toBeInTheDocument()
+    const selector = screen.getByRole('combobox', { name: '扩展作用域项目' })
+    expect(selector).toBeEnabled()
+    await userEvent.selectOptions(selector, '43')
+    expect(await screen.findByText(/项目级 · group\/frontend/)).toBeInTheDocument()
+    expect(screen.getByText('项目列表刷新失败')).toBeInTheDocument()
   })
 })

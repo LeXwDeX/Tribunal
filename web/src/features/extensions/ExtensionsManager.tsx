@@ -51,7 +51,7 @@ function useScopeQuery(enabled: boolean, scope: string, projectId?: number) {
 }
 
 export function ExtensionsManager({
-  scope, projectId, tab, onTabChange, projects = [], canManage = false, placeholder,
+  scope, projectId, tab, onTabChange, projects = [], canManage = false, placeholder, notice,
 }: {
   scope: 'platform' | 'project'
   projectId?: number
@@ -61,6 +61,8 @@ export function ExtensionsManager({
   canManage?: boolean
   // Shown in the tab panel while project scope has no project selected.
   placeholder?: ReactNode
+  // Shown at the top of the tab panel in every state, e.g. a failed project refresh.
+  notice?: ReactNode
 }) {
   const platformAdmin = useCanWrite()
   // Every extension write changes host execution security, so the server
@@ -167,6 +169,7 @@ export function ExtensionsManager({
     <div className={ui.pageStack}>
       <Tabs items={tabs} value={tab} onChange={onTabChange} label="扩展类型" idPrefix="extension-tab" />
       <div role="tabpanel" id={`tabpanel-${tab}`} aria-labelledby={`extension-tab-${tab}`} className={ui.pageStack}>
+      {notice}
       {!projectEnabled ? (
         placeholder ?? <EmptyState title="请选择项目" description="项目级扩展需要指定项目后才能读取。" />
       ) : null}
