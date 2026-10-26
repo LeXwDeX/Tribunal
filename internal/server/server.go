@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -110,6 +111,11 @@ type Server struct {
 	platform   *config.Config
 	streamPoll time.Duration
 	now        func() time.Time
+
+	// shutdown closes when the HTTP server starts shutting down. Long-lived
+	// responses watch it because Shutdown does not cancel active requests.
+	shutdown     chan struct{}
+	shutdownOnce sync.Once
 }
 
 // New validates dependencies and builds the routing tree.
@@ -161,6 +167,7 @@ func New(cfg Config) (*Server, error) {
 		platform:   cfg.Platform,
 		streamPoll: cfg.StreamPoll,
 		now:        cfg.Now,
+		shutdown:   make(chan struct{}),
 	}
 	if s.now == nil {
 		s.now = time.Now
@@ -248,6 +255,12 @@ func New(cfg Config) (*Server, error) {
 // Handler returns the composed HTTP handler.
 func (s *Server) Handler() http.Handler {
 	return s.handler
+}
+
+// BeginShutdown ends open review streams. Register it with
+// http.Server.RegisterOnShutdown; it is safe to call more than once.
+func (s *Server) BeginShutdown() {
+	s.shutdownOnce.Do(func() { close(s.shutdown) })
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
