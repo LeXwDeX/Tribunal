@@ -56,15 +56,20 @@ v1.0.0 之后的第一个版本：产品改名为 Tribunal，修复 1.0 复审�
 - **DAG 调度**：运行已经判定出错后，不再重新占用并启动同一个节点，避免多一次提交或多执行一次节点（[#80](https://github.com/LeXwDeX/Tribunal/pull/80)）。
 - **MCP 批量导入**：改为在一个事务内完成，遇到内置服务器同名时一条都不写（[#50](https://github.com/LeXwDeX/Tribunal/pull/50)、[#71](https://github.com/LeXwDeX/Tribunal/pull/71)）。
 - **扩展页**：作用域切换时布局不再跳动，Tabs 始终显示（[#42](https://github.com/LeXwDeX/Tribunal/pull/42)）。
+- **评审列表**：列表接口不返回 MR 标题，各列表行不再显示「未命名 MR」，改为显示 `!iid`；「成本」列读取接口实际返回的字段，不再一直是「—」；评审详情面包屑显示项目路径（[#84](https://github.com/LeXwDeX/Tribunal/pull/84)）。
 
 ### 验证范围
 
 - CI（go、web、docker 三项，其中 docker 含 Compose 冒烟测试）在每个 PR 和 main 上都已通过；Go 语句覆盖率保持在 70% 以上。
+- Docker 冒烟逐个确认内置 codebase-memory-mcp 公布了默认配置绑定的全部只读工具（[#86](https://github.com/LeXwDeX/Tribunal/pull/86)）。
 - **没有**在真实 GitLab 实例上验收。v1.0.0 的真实实例验收（f143 快照）不覆盖本版本的改动。上线前建议按 [交付就绪](docs/delivery-readiness.md#v110-验证状态) 列出的项目做一次升级验收。
 
 ### 已知限制
 
 - Webhook 处理时如果存储出错，仍然返回 200 加 `ignored: storage_error`，GitLab 不会重试，需要监控日志后手动重放。
+- 评审列表接口不返回 `findings_summary` 和节点信息，列表里的「P0 · P1 · P2」列和总览的阶段条暂不显示；详情页不受影响。
+- 默认扩展只在首次写入块绑定时参考 YAML 的 `blocks`。之后再在 YAML 中为同一个块新增绑定不会生效，块绑定以控制台为准。新部署请在首次启动前写好 `blocks`。
+- 绑定到块的 MCP 工具如果服务器没有公布，评审只记一条告警并继续，不会把 PASS 降为 INCOMPLETE。默认配置与内置版本的一致性由 Docker 冒烟保证。
 
 ## [1.0.0] - 2026-10-25
 
