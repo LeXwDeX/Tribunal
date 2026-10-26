@@ -598,7 +598,7 @@ func (s *WorkspaceService) projectToken(ctx context.Context, projectID int64) (*
 	if project == nil || !project.Enabled {
 		return nil, "", PermanentJob(fmt.Errorf("project is disabled"))
 	}
-	token, err := s.cipher.Decrypt(project.TokenEnc)
+	token, err := s.cipher.Open(project.TokenEnc, secret.TokenAAD(project.ID))
 	if err != nil {
 		return nil, "", PermanentJob(fmt.Errorf("project token is unavailable"))
 	}

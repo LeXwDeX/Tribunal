@@ -141,7 +141,7 @@ func (w *CommandWorker) Handle(ctx context.Context, job *jobs.Job) error {
 	if payload.AuthorBot || w.botUsernames[payload.AuthorUsername] {
 		return nil
 	}
-	token, err := w.cipher.Decrypt(project.TokenEnc)
+	token, err := w.cipher.Open(project.TokenEnc, secret.TokenAAD(project.ID))
 	if err != nil {
 		w.logger.Warn("command worker could not decrypt project token", "project_id", project.ID)
 		return errors.New("app: project token unavailable")

@@ -127,3 +127,93 @@ func TestDecryptRejectsWrongKey(t *testing.T) {
 		t.Fatal("Decrypt with a different key succeeded")
 	}
 }
+
+func TestSealBindsProjectAndField(t *testing.T) {
+	c, err := New(testKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := c.Seal([]byte("glpat-token"), TokenAAD(7))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !IsSealed(sealed) {
+		t.Fatal("sealed value lacks the versioned prefix")
+	}
+	got, err := c.Open(sealed, TokenAAD(7))
+	if err != nil || string(got) != "glpat-token" {
+		t.Fatalf("Open = %q, %v", got, err)
+	}
+	for name, aad := range map[string][]byte{
+		"other project": TokenAAD(8),
+		"other field":   WebhookSecretAAD(7),
+		"nil":           nil,
+	} {
+		if _, err := c.Open(sealed, aad); err == nil {
+			t.Fatalf("Open with %s AAD succeeded", name)
+		}
+	}
+}
+
+func TestOpenRejectsLegacyAndTamperedValues(t *testing.T) {
+	c, err := New(testKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := c.Encrypt([]byte("legacy"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if IsSealed(legacy) && bytes.HasPrefix(legacy, []byte(sealedPrefix)) {
+		t.Skip("random nonce collided with the prefix")
+	}
+	if _, err := c.Open(legacy, TokenAAD(1)); err == nil {
+		t.Fatal("Open accepted a legacy value")
+	}
+	sealed, err := c.Seal([]byte("value"), TokenAAD(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed[len(sealed)-1] ^= 0xff
+	if _, err := c.Open(sealed, TokenAAD(1)); err == nil {
+		t.Fatal("Open accepted a tampered value")
+	}
+	if _, err := c.Open([]byte(sealedPrefix), TokenAAD(1)); err == nil {
+		t.Fatal("Open accepted a truncated value")
+	}
+	var nilCipher *Cipher
+	if _, err := nilCipher.Seal([]byte("x"), nil); err == nil {
+		t.Fatal("nil cipher Seal succeeded")
+	}
+	if _, err := nilCipher.Open(sealed, nil); err == nil {
+		t.Fatal("nil cipher Open succeeded")
+	}
+}
+
+func TestRewrapUpgradesLegacyAndKeepsSealed(t *testing.T) {
+	c, err := New(testKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := c.Encrypt([]byte("legacy-secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	upgraded, changed, err := c.Rewrap(legacy, WebhookSecretAAD(3))
+	if err != nil || !changed {
+		t.Fatalf("Rewrap legacy = changed %v, %v", changed, err)
+	}
+	if got, err := c.Open(upgraded, WebhookSecretAAD(3)); err != nil || string(got) != "legacy-secret" {
+		t.Fatalf("Open upgraded = %q, %v", got, err)
+	}
+	same, changed, err := c.Rewrap(upgraded, WebhookSecretAAD(3))
+	if err != nil || changed || !bytes.Equal(same, upgraded) {
+		t.Fatalf("Rewrap sealed = changed %v, %v", changed, err)
+	}
+	if _, _, err := c.Rewrap(upgraded, WebhookSecretAAD(4)); err == nil {
+		t.Fatal("Rewrap accepted a value sealed for another project")
+	}
+	if out, changed, err := c.Rewrap(nil, TokenAAD(1)); err != nil || changed || out != nil {
+		t.Fatalf("Rewrap empty = %v, %v, %v", out, changed, err)
+	}
+}
