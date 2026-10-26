@@ -44,7 +44,7 @@
 | D13 | 部署形态：单个二进制，默认 SQLite、可选 Postgres，提供 Docker 镜像，任务队列在进程内 | 建议默认 |
 | D14 | 评审图由**块模板**生成，主 agent 只输出受限的规划参数，不手写整张图 | 建议默认 |
 | D15 | 采用项目工作区，允许模型生成 AGENTS.md / CLAUDE.md 等上下文文档；**生成内容只存平台内部，不提交到仓库** | 已定 |
-| D16 | 支持 MCP 接入（配置格式兼容 Claude Code），首个接入 codebase-memory-mcp 用于代码地图检索 | 已定 |
+| D16 | 支持 MCP 接入（配置格式兼容 Claude Code），首个接入 codebase-memory-mcp 用于代码地图检索；Docker 镜像默认内置并启用（§8.4） | 已定 |
 | D17 | 支持 Skill 接入（格式兼容 Claude Code Skill） | 已定 |
 | D18 | Web 控制台：SPA（Vite + React + TypeScript）embed 进二进制；用 GitLab OAuth 登录，平台角色分 admin / viewer，项目业务数据另由本地 read / manage grant 控制 | 建议默认 |
 | D19 | DAG 节点分 agent 节点和代码节点（如 gather、adjudicate）两类，对引擎透明 | 建议默认 |
@@ -457,6 +457,8 @@ data/workspaces/<project_id>/
 }
 ```
 
+平台还可以通过配置 `default_extensions.mcp_servers` 登记内置 MCP 服务器：标记 `builtin`，可停用、不可删除，配置和默认工具白名单随平台版本更新，管理员的启用状态和改过的块绑定保持不变。规则见 [默认扩展](docs/design/06-config.md#默认扩展default_extensions)。
+
 示例路径使用 `tribunal-codebase-memory-mcp`。主机安装的 wrapper 必须改用该名称，或提供一个指向旧名 `crc-codebase-memory-mcp` 的兼容符号链接；只改配置不改主机文件会导致 MCP 启动失败。完整要求见 [MCP 配置](docs/design/06-config.md#2-mcp-配置文件)。
 
 ### 8.4 codebase-memory-mcp 接入要点
@@ -480,6 +482,8 @@ data/workspaces/<project_id>/
 2. MCP server profile 的 advertised tool 列表符合预期（analysis 13 / scout 8）；CLI 调用不受该 profile 限制。随后尝试在新的隔离 HOME/cache/runtime 下补测 `tools/call`，server 在 initialize 前退出并报告 `secure daemon endpoint could not be created`；没有发出工具调用，也未连接或停止当前会话的默认 daemon。因此调用是否被拒绝仍未知，不能把启动失败当作权限拒绝证据。结论是部分验证。
 3. 小型合成 fixture（4 个 `.go` 文件和 `go.mod`，最终 20 nodes / 29 edges）可用同一项目身份增量更新：首次 fast index 约 1.72s / 25 MiB，unchanged 约 0.95s / 15.9 MiB，新增 `Difference` 符号后约 1.2s / 26.6 MiB。没有真实大型仓库、生产规模或 Linux 运行数据，因此大仓库耗时和内存仍未解决；不得把合成 fixture 当作生产基准。
 4. 探针运行时没有 GitLab、模型 provider 或 OAuth 凭据，未建立真实应用端到端链路。
+
+**默认内置（Issue #44）**：Docker 镜像按 `TARGETARCH` 打包 0.12.1 的 `-portable` 静态链接发布包（glibc 版本需要 `GLIBC_2.38`，bookworm 不满足），SHA-256 写死在 Dockerfile 中，两个架构的 SLSA provenance 于 2026-10-26 用 `gh attestation verify` 核对；不运行上游 `install`。wrapper 安装为 `/usr/local/bin/tribunal-codebase-memory-mcp`，保留 `crc-codebase-memory-mcp` 兼容链接。示例配置和 Docker 配置登记内置平台 stdio 服务器 `codebase-memory`（`--tool-profile=analysis`），`code-review`、`review` 获得只读图谱工具，`verify` 只获得 `get_code_snippet`，onboarding 用 CLI 为 `base/` 建索引。二进制缺失或启动失败时，评审节点不带 MCP 工具继续执行并记录 `tool_gaps`，汇总给出告警，PASS 降为 INCOMPLETE；建索引失败只记录工作区 `last_error`。Docker smoke 覆盖版本、wrapper、CLI 隔离建索引，以及控制台测试接口只列出只读工具。停用方式、版本升级和降级细节见 [内置 codebase-memory-mcp](docs/design/06-config.md#内置-codebase-memory-mcp)。
 
 后续 Linux/amd64 容器探针（2026-10-25，0.12.1）复现了仅按 `HOME` 隔离时的 cache 冲突。使用上述脚本后，两个项目并发初始化、列工具和调用 `list_projects` 均成功；每个会话只列出自己固定 `base/` 路径的一个索引项目，`delete_project` 均被拒绝。此结果验证部署隔离与调用层拒绝，不替代完整评审链路、大型仓库性能或操作系统级文件隔离验收。
 
@@ -629,7 +633,7 @@ blocks:                     # 按块授权 MCP 工具、挂载 Skill
 
 - 发布物使用单一声明文件 `licenses/THIRD_PARTY_NOTICES.txt`，由 `go run ./scripts/licensebundle` 生成。内容覆盖 Go 标准库、Linux/amd64 服务端链接的 40 个模块许可证，以及 9 个 production npm 包；本机 inventory 记录的主机模块为 42 个，运行时清单为 40 个；两者不同。CI 用 `go run ./scripts/licensebundle -check` 验证文件是否最新，并运行 `licensecheck`；本机验证还运行 `go mod verify`。
 - Dockerfile 把 `licenses/` 复制到 `/licenses/`，发布路径是 `/licenses/THIRD_PARTY_NOTICES.txt`。当前 Dockerfile 仍同时复制遗留的 `THIRD_PARTY_LICENSES`；新单文件是权威发布声明，旧文件不再作为生成目标。
-- 外部 MCP 服务器（如 codebase-memory-mcp）以独立进程运行，不链接进本项目，其许可证不影响本项目；若打包进 Docker 镜像分发，需遵守其自身许可证。
+- 外部 MCP 服务器（如 codebase-memory-mcp）以独立进程运行，不链接进本项目，其许可证不影响本项目；若打包进 Docker 镜像分发，需遵守其自身许可证。Docker 镜像内置 codebase-memory-mcp 0.12.1（MIT）：许可证记录在 `third_party/codebase-memory-mcp/`，由 `licensebundle` 写入发布声明、`licensecheck` 检查；镜像在 `/licenses/codebase-memory-mcp/` 附带上游 `LICENSE` 和 `THIRD_PARTY_NOTICES.md`。
 - CI 许可证检查：允许 MIT、BSD、Apache-2.0、ISC、MPL-2.0（不修改）；**禁止 GPL、AGPL**。`licensecheck` 在主机清单上检查 65 个模块，不能把该数字与 bundle 的 40 个 Linux 运行时模块混同。
 - **DAG 引擎来源**：`pkg/dag` 当前是依据本设计独立实现的 Go 代码，**不是**从 OpenCode-GraphAgent 移植的产物；没有复制上游代码，也没有添加 `NOTICE`。用户已于 2026-10-23 确认接受该独立实现作为本地验收口径，不要求移植，也不虚构上游 NOTICE、版权人或来源。若未来选择移植，需先确认上游署名与授权（原仓库标注 AGPL-3.0-or-later，Copyright (c) 2026 LeXwDeX），并保留相应版权声明；以下事项仅适用于该未来移植评估，不是当前实现的验收阻塞项：
   - 原 DAG 代码引用的上游 opencode 模块是 MIT（Copyright (c) 2025 opencode），若一并移植，需保留其版权声明。
@@ -659,7 +663,7 @@ blocks:                     # 按块授权 MCP 工具、挂载 Skill
 
 - 单个静态二进制，提供 Docker 镜像（内含 git）。
 - 依赖：一个可写的数据目录（SQLite 数据库和项目工作区）。
-- 外部 MCP 服务器（如 codebase-memory-mcp）由部署方安装，或提供包含它们的扩展镜像。
+- Docker 镜像内置 codebase-memory-mcp（§8.4）；其他外部 MCP 服务器由部署方安装，或提供包含它们的扩展镜像。
 - 水平扩展（多实例、外部队列）不在首版范围内；`store` 和任务队列通过接口隔离，为将来换成 Postgres 加外部队列预留空间。
 
 ---

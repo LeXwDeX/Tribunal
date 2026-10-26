@@ -142,6 +142,13 @@ UUID 在项目内去重，去重记录和入队在同一事务中提交。同一
 - 在「块绑定」中把它从某个块移除后，重启不会恢复；升级也不会改写管理员改过的绑定。
 - 配置 `default_extensions.skills: []` 可以让新部署不登记默认 Skill。详见 [默认扩展配置](docs/design/06-config.md#默认扩展default_extensions)。
 
+Docker 镜像还内置校验过的 [codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp) 0.12.1（MIT）代码图谱服务和隔离 wrapper `/usr/local/bin/tribunal-codebase-memory-mcp`。示例配置和 `config/server.docker.yaml` 会登记内置平台 MCP 服务器 `codebase-memory`（只读 analysis 工具面），并为 `code-review`、`review`、`verify` 块授权只读图谱工具；注册项目后 onboarding 用 CLI 为 `base/` 建索引，每个项目的索引只在自己的工作区内可见。
+
+- 控制台「扩展 → MCP 服务器」中它带「内置」标签，可以测试、停用和重新启用，不能编辑或删除（API 返回 409）。重启和升级都保留停用状态。
+- 平台升级后，下次启动会把它的配置和默认工具白名单更新为新版本附带的内容；启用状态和管理员改过的块绑定不变。
+- 二进制缺失或启动失败时评审照常完成，带 `MCP tools unavailable` 告警，原本的 PASS 显示为 INCOMPLETE。
+- 停用方式和版本升级步骤见 [内置 codebase-memory-mcp](docs/design/06-config.md#内置-codebase-memory-mcp)。
+
 ## 验证
 
 ```bash
@@ -204,7 +211,7 @@ go mod verify
 - 统计页项目筛选使用游标分页，每次加载 100 项，可继续加载或重试；使用 `usePaginated` 的分页列表的“重试加载更多”沿用失败请求的同一 cursor，首屏重试或“刷新”才从第一页重新加载。统计日期筛选把结束日映射到次日本地午夜，服务端按 `[from,to)` 计数。
 - 统计页、总览和项目详情均把 `stats.runs` 标为“运行次数”，并说明包含评审和 onboarding。`blocking_ratio` 的分母仍是全部 workflow，因此 onboarding 会稀释该比例，不应把它解释为仅评审的阻断比例。
 - 节点 provider/model 表示启动时选择的配置，不等于模型调用次数或响应实际模型标识；reasoner 自跳过和 agent synthesize 回退仍可能带归属。修复前历史节点的空归属不回填，因此旧时间窗的按 provider 节点统计仍不完整；逐次调用信息可查 `llm_calls`。
-- 许可证发布清单是单一文件 `licenses/THIRD_PARTY_NOTICES.txt`，由 `go run ./scripts/licensebundle` 生成，CI 用 `-check` 验证。内容覆盖 Go 标准库、Linux/amd64 服务端的 40 个模块和 9 个 production npm 包；主机模块清单是 42 个，与运行时清单不同。当前 Dockerfile 仍复制遗留的 `THIRD_PARTY_LICENSES`，但发布声明以新单文件为准。
+- 许可证发布清单是单一文件 `licenses/THIRD_PARTY_NOTICES.txt`，由 `go run ./scripts/licensebundle` 生成，CI 用 `-check` 验证。内容覆盖 Go 标准库、Linux/amd64 服务端的 40 个模块、9 个 production npm 包、内置 Skill 和镜像内置的 codebase-memory-mcp；主机模块清单是 42 个，与运行时清单不同。当前 Dockerfile 仍复制遗留的 `THIRD_PARTY_LICENSES`，但发布声明以新单文件为准。
 - 实际镜像 `crc-v1-acceptance:candidate-f143e7a`（ID `sha256:1a20aa96065a24986990de94d0e2e6466df04a379ed2e6b50f076271ff52574e`）已构建并通过配置检查；更早的 Docker 和远程测试机记录仍属历史。
 - MCP `tools/call` 已在两家 provider 的实际 deep 中验证（成功/调用 10/10、10/11；第二次一次模型工具错误已纠正），`delete_project` 不可用，项目只看到自己的索引；真实 stdio 已测，并非每个 HTTP backend 都已验证。详见 [ARCH §8.4](ARCH.md#84-codebase-memory-mcp-接入要点)。
 - OpenAI Responses adapter 在每次 Generate 时发送请求级随机不透明 `X-Session-Id`；仅 Responses 协议，无新配置、依赖或 400 重试。该 header 是网关兼容措施，不是 OpenAI 标准、会话认证或幂等保证；已部署网关的内部实现未证实，可能增加缓存/握手成本。
