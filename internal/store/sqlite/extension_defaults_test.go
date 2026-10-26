@@ -72,3 +72,62 @@ func TestExtensionDefaultLedgerRejectsInvalidRows(t *testing.T) {
 		}
 	}
 }
+
+func TestBuiltinMarkerAndSkillUpdates(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t, newFakeClock())
+
+	builtin, err := s.CreateSkill(ctx, store.Skill{
+		Scope: "platform", Name: "code-review", Description: "old", Dir: "/x/skill", Enabled: true, Builtin: "code-review",
+	})
+	if err != nil {
+		t.Fatalf("CreateSkill builtin: %v", err)
+	}
+	custom, err := s.CreateSkill(ctx, store.Skill{Scope: "platform", Name: "team", Description: "team", Enabled: true})
+	if err != nil {
+		t.Fatalf("CreateSkill custom: %v", err)
+	}
+
+	if err := s.SetSkillEnabled(ctx, builtin.ID, false); err != nil {
+		t.Fatalf("SetSkillEnabled: %v", err)
+	}
+	if err := s.SetSkillDescription(ctx, builtin.ID, "new"); err != nil {
+		t.Fatalf("SetSkillDescription: %v", err)
+	}
+	got, err := s.GetSkill(ctx, builtin.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Builtin != "code-review" || got.Enabled || got.Description != "new" {
+		t.Fatalf("builtin skill = %+v", got)
+	}
+	rows, err := s.ListSkills(ctx, "platform", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.ID == custom.ID && row.Builtin != "" {
+			t.Fatalf("custom skill marked builtin: %+v", row)
+		}
+	}
+	for _, err := range []error{
+		s.SetSkillEnabled(ctx, "missing", true),
+		s.SetSkillDescription(ctx, "missing", "x"),
+		s.SetSkillDescription(ctx, builtin.ID, " "),
+	} {
+		if err == nil {
+			t.Fatal("invalid skill update succeeded")
+		}
+	}
+
+	server, err := s.CreateMCPServer(ctx, store.MCPServer{
+		Scope: "platform", Name: "codebase-memory", Config: []byte(`{"command":"x"}`), Enabled: true, Builtin: "codebase-memory",
+	})
+	if err != nil {
+		t.Fatalf("CreateMCPServer builtin: %v", err)
+	}
+	read, err := s.GetMCPServer(ctx, server.ID)
+	if err != nil || read.Builtin != "codebase-memory" {
+		t.Fatalf("GetMCPServer = %+v, %v", read, err)
+	}
+}

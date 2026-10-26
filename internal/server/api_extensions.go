@@ -75,14 +75,17 @@ type MCPImportInput struct {
 // Skill is one registered skill. Dir is the managed server-side directory
 // for both uploaded archives and registered directories.
 type Skill struct {
-	ID          string    `json:"id"`
-	Scope       string    `json:"scope"`
-	ProjectID   *int64    `json:"project_id,omitempty"`
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	Dir         string    `json:"dir,omitempty"`
-	Enabled     bool      `json:"enabled"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID          string `json:"id"`
+	Scope       string `json:"scope"`
+	ProjectID   *int64 `json:"project_id,omitempty"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Dir         string `json:"dir,omitempty"`
+	Enabled     bool   `json:"enabled"`
+	// Builtin marks a skill shipped with the platform: it can be disabled
+	// but not deleted.
+	Builtin   bool      `json:"builtin"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // SkillUpload carries the validated archive and manifest fields. Data is the
@@ -696,6 +699,46 @@ func (s *Server) handleDeleteSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type skillUpdateRequest struct {
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
+// handleUpdateSkill enables or disables one skill. It is the only way to
+// switch off a built-in skill, which cannot be deleted.
+func (s *Server) handleUpdateSkill(w http.ResponseWriter, r *http.Request) {
+	if !s.requireExtensions(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	if strings.TrimSpace(id) == "" {
+		validationFailed(w, r, "id", "id is required")
+		return
+	}
+	current, err := s.extensions.GetSkill(r.Context(), id)
+	if err != nil {
+		s.writeServiceError(w, r, err)
+		return
+	}
+	if !s.authorizeExtensionResource(w, r, current.Scope, current.ProjectID, true) {
+		return
+	}
+	var request skillUpdateRequest
+	if err := decodeJSON(w, r, adminBodyLimit, &request); err != nil {
+		decodeRequestError(w, r, err)
+		return
+	}
+	if request.Enabled == nil {
+		validationFailed(w, r, "enabled", "enabled is required")
+		return
+	}
+	skill, err := s.extensions.SetSkillEnabled(r.Context(), id, *request.Enabled)
+	if err != nil {
+		s.writeServiceError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, skill)
 }
 
 // parseSkillArchive validates the uploaded zip and reads name/description from

@@ -19,6 +19,7 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/review"
 	"github.com/LeXwDeX/tribunal/internal/secret"
 	"github.com/LeXwDeX/tribunal/internal/skill"
+	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
 	"github.com/LeXwDeX/tribunal/internal/workspace"
 	"github.com/LeXwDeX/tribunal/pkg/dag"
@@ -102,6 +103,7 @@ type Runtime struct {
 	lifecycle   *Lifecycle
 	mcp         *mcp.Manager
 	projectExts *ProjectExtensionResolver
+	skillBinder *projectAwareSkillProvider
 	clients     review.ClientProvider
 	skills      *skill.Loader
 	logger      *slog.Logger
@@ -174,6 +176,11 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		loader = created
 		skillProvider = NewSkillProvider(created)
 	}
+	platformSkills, err := deps.Store.ListSkills(ctx, store.ScopePlatform, nil)
+	if err != nil {
+		return nil, fmt.Errorf("app: load platform skills: %w", err)
+	}
+	skillProvider = withoutDisabledSkills(skillProvider, disabledSkillNames(platformSkills))
 	mcpManager := deps.MCP
 	ownedMCP := false
 	if mcpManager == nil {
@@ -442,6 +449,7 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		lifecycle:   &Lifecycle{},
 		mcp:         mcpManager,
 		projectExts: projectExts,
+		skillBinder: projectSkills,
 		clients:     clients,
 		skills:      loader,
 		logger:      logger,

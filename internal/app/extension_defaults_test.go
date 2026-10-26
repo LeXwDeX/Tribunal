@@ -65,8 +65,8 @@ func TestSkillDefaultsRegisterAndBindOnFreshStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListSkills: %v", err)
 	}
-	if len(skills) != 1 || skills[0].Name != "code-review" || !skills[0].Enabled {
-		t.Fatalf("platform skills = %+v, want enabled code-review", skills)
+	if len(skills) != 1 || skills[0].Name != "code-review" || !skills[0].Enabled || !skills[0].Builtin {
+		t.Fatalf("platform skills = %+v, want enabled built-in code-review", skills)
 	}
 	rel, err := filepath.Rel(managedSkillsRoot(service.workspace), skills[0].Dir)
 	if err != nil || strings.HasPrefix(rel, "..") {
@@ -125,28 +125,87 @@ func TestSkillDefaultsRespectAdministratorUnbind(t *testing.T) {
 	}
 }
 
-func TestSkillDefaultsRespectAdministratorDelete(t *testing.T) {
+func TestBuiltinSkillCannotBeDeleted(t *testing.T) {
 	ctx := context.Background()
 	service, st := newExtensionFixture(t)
 	applySkillDefaults(t, service, st, nil, defaultCodeReview)
-	for _, block := range []string{"code-review", "review"} {
-		if _, err := service.UpsertBlockBinding(ctx, BlockBindingInput{Scope: store.ScopePlatform, Block: block}); err != nil {
-			t.Fatalf("unbind %s: %v", block, err)
-		}
-	}
 	skills, _ := service.ListSkills(ctx, store.ScopePlatform, nil)
-	if err := service.DeleteSkill(ctx, skills[0].ID); err != nil {
-		t.Fatalf("DeleteSkill: %v", err)
+	err := service.DeleteSkill(ctx, skills[0].ID)
+	var appErr *Error
+	if !errors.As(err, &appErr) || appErr.Code != "conflict" {
+		t.Fatalf("DeleteSkill(builtin) = %v, want conflict", err)
+	}
+	if got := platformSkillNames(t, st); !reflect.DeepEqual(got, []string{"code-review"}) {
+		t.Fatalf("builtin skill removed: %v", got)
+	}
+	if _, err := os.Stat(filepath.Join(skills[0].Dir, "SKILL.md")); err != nil {
+		t.Fatalf("builtin skill files removed: %v", err)
+	}
+}
+
+func TestDisabledBuiltinSkillStaysDisabled(t *testing.T) {
+	ctx := context.Background()
+	service, st := newExtensionFixture(t)
+	applySkillDefaults(t, service, st, nil, defaultCodeReview)
+	skills, _ := service.ListSkills(ctx, store.ScopePlatform, nil)
+	disabled, err := service.SetSkillEnabled(ctx, skills[0].ID, false)
+	if err != nil || disabled.Enabled || !disabled.Builtin {
+		t.Fatalf("SetSkillEnabled = %+v, %v", disabled, err)
+	}
+	applySkillDefaults(t, service, st, nil, defaultCodeReview)
+	skills, _ = service.ListSkills(ctx, store.ScopePlatform, nil)
+	if len(skills) != 1 || skills[0].Enabled {
+		t.Fatalf("disabled builtin re-enabled on restart: %+v", skills)
+	}
+	if _, err := service.SetSkillEnabled(ctx, "missing", true); err == nil {
+		t.Fatal("SetSkillEnabled(missing) succeeded")
+	}
+}
+
+// A newer release ships different skill files: the next start refreshes the
+// installed copy in place and keeps the administrator's enabled state.
+func TestBuiltinSkillUpgradesInstalledContent(t *testing.T) {
+	ctx := context.Background()
+	service, st := newExtensionFixture(t)
+	applySkillDefaults(t, service, st, nil, defaultCodeReview)
+	skills, _ := service.ListSkills(ctx, store.ScopePlatform, nil)
+	installed := skills[0]
+	if _, err := service.SetSkillEnabled(ctx, installed.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the copy an older release installed.
+	writeSkill(t, installed.Dir, "code-review", "Old description")
+	if err := os.WriteFile(filepath.Join(installed.Dir, "OBSOLETE.md"), []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetSkillDescription(ctx, installed.ID, "Old description"); err != nil {
+		t.Fatal(err)
 	}
 
 	applySkillDefaults(t, service, st, nil, defaultCodeReview)
-	if got := platformSkillNames(t, st); len(got) != 0 {
-		t.Fatalf("deleted default skill was restored: %v", got)
+	skills, _ = service.ListSkills(ctx, store.ScopePlatform, nil)
+	if len(skills) != 1 {
+		t.Fatalf("skills after upgrade = %+v", skills)
 	}
-	for block, binding := range platformBindings(t, st) {
-		if len(binding.Skills) != 0 {
-			t.Fatalf("%s binding restored: %v", block, binding.Skills)
-		}
+	upgraded := skills[0]
+	if upgraded.ID != installed.ID || upgraded.Dir != installed.Dir {
+		t.Fatalf("upgrade replaced the row: before %+v after %+v", installed, upgraded)
+	}
+	if upgraded.Enabled {
+		t.Fatal("upgrade re-enabled a disabled builtin skill")
+	}
+	if !strings.Contains(upgraded.Description, "Standards") {
+		t.Fatalf("description not refreshed: %q", upgraded.Description)
+	}
+	body, err := os.ReadFile(filepath.Join(upgraded.Dir, "SKILL.md"))
+	if err != nil || !strings.Contains(string(body), "Refused Bequest") {
+		t.Fatalf("SKILL.md not refreshed: %v\n%s", err, body)
+	}
+	if _, err := os.Stat(filepath.Join(upgraded.Dir, "OBSOLETE.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale file kept after upgrade: %v", err)
+	}
+	if got := platformBindings(t, st)["review"].Skills; !reflect.DeepEqual(got, []string{"code-review"}) {
+		t.Fatalf("upgrade changed bindings: %v", got)
 	}
 }
 
@@ -363,6 +422,61 @@ func TestRuntimeSeedsDefaultSkillForReviewBlocks(t *testing.T) {
 	}
 	if got := set.blocks["review"].Skills; !reflect.DeepEqual(got, []string{"code-review"}) {
 		t.Fatalf("review skills after restart = %v", got)
+	}
+}
+
+// A disabled skill that a block still names is skipped at bind time instead
+// of failing the review node.
+func TestRuntimeSkipsDisabledBoundSkill(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	cipher := newTestCipher(t)
+	cfg := &config.Config{
+		Workspace: config.WorkspaceConfig{Root: t.TempDir(), RunCleanupAfter: time.Hour},
+		Storage: config.StorageConfig{
+			LLMCallRetention: time.Hour, DeliveryRetention: time.Hour, JobRetention: time.Hour, ContextVersions: 1,
+		},
+		Engine:            config.EngineConfig{MaxConcurrentNodes: 1, DefaultNodeTimeout: time.Minute},
+		Profiles:          testProfiles(),
+		DefaultExtensions: config.DefaultExtensionsConfig{Skills: defaultCodeReview},
+	}
+	deps := RuntimeDeps{Store: st, Cipher: cipher, GitLab: newRuntimeTestGitLab(), LLM: runtimeTestClients{}, Git: repoGit{git: &repo.Git{}}}
+	first, err := NewRuntime(ctx, cfg, deps)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	_ = first.Close()
+	rows, err := st.ListSkills(ctx, store.ScopePlatform, nil)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("ListSkills = %+v, %v", rows, err)
+	}
+	if err := st.SetSkillEnabled(ctx, rows[0].ID, false); err != nil {
+		t.Fatal(err)
+	}
+
+	runtime, err := NewRuntime(ctx, cfg, deps)
+	if err != nil {
+		t.Fatalf("NewRuntime after disable: %v", err)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+	seedProject(t, st, cipher, 42, "webhook-secret", "", "default")
+	projectCtx := context.WithValue(ctx, projectIDContextKey{}, int64(42))
+	providers := map[string]*projectAwareSkillProvider{
+		"project":  {resolver: runtime.projectExts},
+		"platform": runtime.skillBinder,
+	}
+	for name, provider := range providers {
+		callCtx := projectCtx
+		if name == "platform" {
+			callCtx = ctx
+		}
+		binding, err := provider.BindSkills(callCtx, []string{projectSkillStubBase + "code-review"})
+		if err != nil {
+			t.Fatalf("%s BindSkills with a disabled skill: %v", name, err)
+		}
+		if len(binding.Skills) != 0 || binding.Tool != nil {
+			t.Fatalf("%s binding = %+v, want disabled skill skipped", name, binding)
+		}
 	}
 }
 

@@ -291,6 +291,10 @@ export async function uploadSkill(input: { scope: 'platform' | 'project'; projec
   return request<Skill>('/api/v1/skills', { method: 'POST', body: form })
 }
 
+export async function setSkillEnabled(id: string, enabled: boolean): Promise<Skill> {
+  return request<Skill>(`/api/v1/skills/${segment(id)}`, { method: 'PATCH', body: { enabled } })
+}
+
 export async function deleteSkill(id: string): Promise<void> {
   await request<void>(`/api/v1/skills/${segment(id)}`, { method: 'DELETE' })
 }

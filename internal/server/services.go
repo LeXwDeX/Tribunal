@@ -111,6 +111,8 @@ type ExtensionService interface {
 	UploadSkill(ctx context.Context, in SkillUpload) (*Skill, error)
 	RegisterSkillDir(ctx context.Context, in SkillDirInput) (*Skill, error)
 	DeleteSkill(ctx context.Context, id string) error
+	GetSkill(ctx context.Context, id string) (*Skill, error)
+	SetSkillEnabled(ctx context.Context, id string, enabled bool) (*Skill, error)
 
 	ListBlockBindings(ctx context.Context, scope string, projectID *int64) ([]BlockBinding, error)
 	ListBlockBindingsPage(ctx context.Context, scope string, projectID *int64, cursor string, limit int) ([]BlockBinding, string, error)

@@ -492,7 +492,7 @@ data/workspaces/<project_id>/
 - **来源**：平台级（如 security-review、各语言的编码规范）加项目级（工作区 `skills/`）。仓库自带的 `.claude/skills` 默认不读取，可按项目开启（只读目标分支版本）。
 - **按块挂载**：例如 review 的 standards 通道挂项目编码规范，安全相关的块挂 security-review。
 - **脚本**：首版只支持**指令类 skill，不执行其中的任何脚本**。
-- **默认 Skill**：平台内置 `code-review`（改编自 mattpocock/skills，MIT，上游 commit `3da8c01`），首次启动登记为平台级 Skill，并挂到 `code-review` 和 `review` 块。它只补充方法论：Standards / Spec 双轴、Fowler 坏味道基线，以及「仓库标准优先于基线」「坏味道一律是判断项」两条规则；fixed point 取 MR 的 base/target SHA，spec 取 MR 描述和其中引用的 issue。块合约（`prompts/review.standards.md`、`review.intent.md`、`code-review.md`）仍定义角色、通道和 `submit_result` 输出，两者不重复注入同一指令。默认登记和绑定只执行一次，管理员解绑或删除后不恢复，升级不覆盖自定义绑定；机制与配置见 [默认扩展](docs/design/06-config.md#默认扩展default_extensions)。
+- **默认 Skill**：平台内置 `code-review`（改编自 mattpocock/skills，MIT，上游 commit `3da8c01`），首次启动登记为平台级 Skill，并挂到 `code-review` 和 `review` 块。它只补充方法论：Standards / Spec 双轴、Fowler 坏味道基线，以及「仓库标准优先于基线」「坏味道一律是判断项」两条规则；fixed point 取 MR 的 base/target SHA，spec 取 MR 描述和其中引用的 issue。块合约（`prompts/review.standards.md`、`review.intent.md`、`code-review.md`）仍定义角色、通道和 `submit_result` 输出，两者不重复注入同一指令。内置 Skill 标记为 `builtin`，可禁用、不可删除，每次启动随平台版本更新文件但保留启用状态；默认块绑定只执行一次，管理员解绑后不恢复，升级不覆盖自定义绑定；机制与配置见 [默认扩展](docs/design/06-config.md#默认扩展default_extensions)。
 
 ### 8.6 agent 可用工具汇总
 

@@ -58,9 +58,10 @@ profiles:
     challenge:
       provider: primary
 
-# Platform extensions registered once on first start (see docs/design/06-config.md).
-# The bundled code-review skill is mounted on the code-review and review blocks.
-# Unbinding or deleting it in the console is never undone by a restart; an
+# Built-in platform extensions (see docs/design/06-config.md). The bundled
+# code-review skill is registered on first start, refreshed on upgrades and
+# mounted on the code-review and review blocks. It can be disabled in the
+# console but not deleted; disabling and unbinding survive restarts, and an
 # existing binding for a block is kept as is. Use `skills: []` to register no
 # new defaults.
 default_extensions:

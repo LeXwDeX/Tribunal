@@ -47,3 +47,37 @@ func (s *Store) SetSkillDir(ctx context.Context, id, dir string) error {
 	}
 	return nil
 }
+
+// SetSkillEnabled enables or disables one skill without touching its files.
+func (s *Store) SetSkillEnabled(ctx context.Context, id string, enabled bool) error {
+	return s.updateSkillColumn(ctx, id, "enabled", enabled)
+}
+
+// SetSkillDescription replaces the catalogue description, for example after a
+// built-in skill was refreshed from a newer release.
+func (s *Store) SetSkillDescription(ctx context.Context, id, description string) error {
+	description = strings.TrimSpace(description)
+	if description == "" {
+		return errors.New("sqlite: skill description is required")
+	}
+	return s.updateSkillColumn(ctx, id, "description", description)
+}
+
+// updateSkillColumn writes one fixed column; column is never caller input.
+func (s *Store) updateSkillColumn(ctx context.Context, id, column string, value any) error {
+	if strings.TrimSpace(id) == "" {
+		return errors.New("sqlite: skill id is required")
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE skills SET `+column+` = ? WHERE id = ?`, value, id)
+	if err != nil {
+		return fmt.Errorf("sqlite: update skill %s: %w", column, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("sqlite: update skill %s: %w", column, err)
+	}
+	if n != 1 {
+		return fmt.Errorf("%w: skill %s", store.ErrNotFound, id)
+	}
+	return nil
+}

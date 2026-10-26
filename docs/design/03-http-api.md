@@ -247,11 +247,12 @@ Finding 始终返回 `annotation`：`""` 为未标注，`valid` 为有效，`inv
 | POST | `/api/v1/mcp-servers/import` | 粘贴整份 `{"mcpServers": {...}}` 批量导入 |
 | GET | `/api/v1/skills` | `?scope=&project_id=&limit=&cursor=`，响应 `{skills, next_cursor}` |
 | POST | `/api/v1/skills` | multipart 上传 zip（含 `SKILL.md`），或 `{scope, dir}` 登记服务器上的目录 |
-| DELETE | `/api/v1/skills/{id}` | 删除 |
+| PATCH | `/api/v1/skills/{id}` | `{enabled: bool}` 启用或禁用；禁用后不加载，仍引用它的块绑定会跳过它 |
+| DELETE | `/api/v1/skills/{id}` | 删除；内置 Skill（`builtin: true`）返回 409，只能禁用 |
 | GET | `/api/v1/block-bindings` | `?scope=&project_id=&limit=&cursor=`，响应 `{bindings, next_cursor}` |
 | PUT | `/api/v1/block-bindings/{block}` | `{scope, project_id?, mcp_tools: [], skills: []}` |
 
-权限边界：`scope=project` 的读取需要该项目 `read` grant；`scope=platform` 或省略 scope 的全局列表只允许平台管理员。创建、导入、更新、删除、测试和块绑定写入都要求平台管理员；项目 scope 写入还必须同时具备该项目 `manage`。项目 `manage` 本身不是宿主执行权限，不能写平台配置或绕过平台管理员。MCP 删除/更新/测试和 Skill 删除按资源已存储的 scope 重新检查，不信任请求里的 scope。
+权限边界：`scope=project` 的读取需要该项目 `read` grant；`scope=platform` 或省略 scope 的全局列表只允许平台管理员。创建、导入、更新、删除、测试和块绑定写入都要求平台管理员；项目 scope 写入还必须同时具备该项目 `manage`。项目 `manage` 本身不是宿主执行权限，不能写平台配置或绕过平台管理员。MCP 删除/更新/测试和 Skill 删除/启停按资源已存储的 scope 重新检查，不信任请求里的 scope。
 
 导入 MCP 时，查询参数指定 `scope`、`project_id`，body 直接使用 `{"mcpServers": {...}}`，不增加包装层。项目作用域必须有有效的项目 ID。MCP 更新允许只传 `name` 或 `enabled`；传入 `config` 则完整替换配置。读取时敏感 env/header 值脱敏，前端不得把脱敏占位符当作密钥保存。保存时对配置做严格语义校验：未知字段、非法值、越界字段和尾随 JSON 都返回 `400`；`${NAME}` 引用按模板保存，不在保存阶段展开环境变量，也不把解析值写入数据库。运行或测试时才展开。
 

@@ -2,7 +2,7 @@ import { useEffect, useId, useMemo, useState, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   createMcpServer, deleteMcpServer, deleteSkill, importMcpServers, listBindings, listMcpServers,
-  listSkills, registerSkillDirectory, saveBinding, testMcpServer, updateMcpServer, uploadSkill,
+  listSkills, registerSkillDirectory, saveBinding, setSkillEnabled, testMcpServer, updateMcpServer, uploadSkill,
 } from '../../api/api'
 import { ApiError, errorMessage } from '../../api/client'
 import type { BlockBinding, McpServer, McpTool, Project, Skill } from '../../api/types'
@@ -165,6 +165,16 @@ export function ExtensionsManager({
     }
   }
 
+  const toggleSkill = async (target: Skill) => {
+    try {
+      await setSkillEnabled(target.id, !target.enabled)
+      toast.push('success', target.enabled ? 'Skill 已禁用，重启服务后生效。' : 'Skill 已启用，重启服务后生效。')
+      await invalidateSkills()
+    } catch (error) {
+      toast.push('error', errorMessage(error))
+    }
+  }
+
   return (
     <div className={ui.pageStack}>
       <Tabs items={tabs} value={tab} onChange={onTabChange} label="扩展类型" idPrefix="extension-tab" />
@@ -197,6 +207,7 @@ export function ExtensionsManager({
           bindings={bindings.items}
           onUpload={() => setUploadOpen(true)}
           onDirectory={() => setDirectoryOpen(true)}
+          onToggle={toggleSkill}
           onDelete={setDeleteSkillTarget}
         />
       ) : null}
@@ -339,13 +350,14 @@ function McpTab({
 }
 
 function SkillsTab({
-  canWrite, skills, bindings, onUpload, onDirectory, onDelete,
+  canWrite, skills, bindings, onUpload, onDirectory, onToggle, onDelete,
 }: {
   canWrite: boolean
   skills: ReturnType<typeof usePaginated<Skill>>
   bindings: BlockBinding[]
   onUpload: () => void
   onDirectory: () => void
+  onToggle: (skill: Skill) => void
   onDelete: (skill: Skill) => void
 }) {
   const usage = useMemo(() => {
@@ -373,7 +385,7 @@ function SkillsTab({
       {skills.isSuccess && skills.items.length === 0 ? <EmptyState title="还没有 Skill" description="上传包含 SKILL.md 的 zip，或登记服务器上的目录。" /> : null}
       {skills.items.length ? (
         <div className="tableWrap">
-          <table className="dataTable" style={{ minWidth: 820 }}>
+          <table className="dataTable" style={{ minWidth: 900 }}>
             <thead>
               <tr>
                 <th scope="col">名称</th>
@@ -381,19 +393,30 @@ function SkillsTab({
                 <th scope="col">作用域</th>
                 <th scope="col">来源目录</th>
                 <th scope="col">挂载到</th>
+                <th scope="col">状态</th>
                 {canWrite ? <th scope="col">操作</th> : null}
               </tr>
             </thead>
             <tbody>
               {skills.items.map((skill) => (
                 <tr key={skill.id}>
-                  <td className="mono">{skill.name}</td>
+                  <td>
+                    <span className="mono">{skill.name}</span>
+                    {skill.builtin ? <> <Badge tone="info">内置</Badge></> : null}
+                  </td>
                   <td>{skill.description || '—'}</td>
                   <td>{skill.scope === 'platform' ? '平台级' : `项目级${skill.project_id ? ` #${skill.project_id}` : ''}`}</td>
                   <td className="mono small">{skill.dir || '—'}</td>
                   <td className="mono small">{usage.get(skill.name)?.join(', ') || '—'}</td>
+                  <td><Badge tone={skill.enabled ? 'ok' : 'neutral'}>{skill.enabled ? '启用' : '已禁用'}</Badge></td>
                   {canWrite ? (
-                    <td><Button variant="secondary" onClick={() => onDelete(skill)}>删除</Button></td>
+                    <td>
+                      <div className={styles.actionsRight}>
+                        <Button variant="secondary" onClick={() => onToggle(skill)}>{skill.enabled ? '禁用' : '启用'}</Button>
+                        {/* Built-in skills ship with the platform: disable them instead. */}
+                        {skill.builtin ? null : <Button variant="secondary" onClick={() => onDelete(skill)}>删除</Button>}
+                      </div>
+                    </td>
                   ) : null}
                 </tr>
               ))}

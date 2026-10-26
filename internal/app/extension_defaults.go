@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -22,18 +23,24 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
 )
 
-// ExtensionDefault is one platform extension that Tribunal registers once
-// and grants to review blocks by default. Kind and Name form the ledger key,
-// so they must stay stable across releases. Skills and MCP servers use the
-// same seeder; only Exists and Install differ.
+// ExtensionDefault is one built-in platform extension: Tribunal registers it
+// once, keeps it current with the running release, and grants it to review
+// blocks by default. Kind and Name form the ledger key, so they must stay
+// stable across releases. Skills and MCP servers use the same seeder; only
+// the callbacks differ.
 type ExtensionDefault struct {
 	Kind string
 	Name string
-	// Exists reports a platform extension with the same name. An existing
-	// row is never replaced, and the default is then not bound either.
+	// Exists reports an administrator-owned platform extension with the same
+	// name. It is never replaced, and the default is then not bound either.
 	Exists func(ctx context.Context) (bool, error)
-	// Install creates the platform extension row.
+	// Install creates the built-in row. It must be a no-op when the built-in
+	// row already exists, so an interrupted first start can be retried.
 	Install func(ctx context.Context) error
+	// Sync, when set, runs on every start after registration and brings the
+	// built-in row up to the running release. It must keep the row's
+	// enabled state.
+	Sync func(ctx context.Context) error
 	// Bindings maps a block to the entries this default adds to it.
 	Bindings map[string]DefaultGrant
 }
@@ -61,9 +68,10 @@ const (
 //   - "block:<block>": the binding the defaults last wrote. A block row that
 //     still matches it is default-owned and may receive later defaults.
 //
-// Deleting or unbinding a default therefore survives restarts, and upgrades
-// never rewrite a customised binding. A failed install is not recorded and
-// is retried on the next start.
+// Unbinding a default therefore survives restarts, and upgrades never rewrite
+// a customised binding. The built-in row itself is refreshed by Sync on every
+// start; its enabled state belongs to the administrator. A failed install is
+// not recorded and is retried on the next start.
 func ApplyExtensionDefaults(ctx context.Context, st *sqlite.Store, fileBlocks map[string]config.BlockBinding,
 	defaults []ExtensionDefault, logger *slog.Logger) error {
 	if len(defaults) == 0 {
@@ -140,6 +148,11 @@ func (s *defaultSeeder) apply(ctx context.Context, d ExtensionDefault) error {
 		}
 	}
 	registered := s.ledger[key].Outcome == store.ExtensionDefaultApplied
+	if registered && d.Sync != nil {
+		if err := d.Sync(ctx); err != nil {
+			return fmt.Errorf("app: update default %s %q: %w", d.Kind, d.Name, err)
+		}
+	}
 	blocks := make([]string, 0, len(d.Bindings))
 	for block := range d.Bindings {
 		blocks = append(blocks, block)
@@ -260,8 +273,9 @@ func appendMissing(values, add []string) []string {
 
 // SkillDefaults turns the configured bundled skills into extension defaults.
 // Install copies the embedded skill into the managed platform skills root, so
-// the row behaves like an uploaded skill: it is listed, deletable and loaded
-// from disk.
+// the row is listed and loaded like an uploaded skill; it is marked built-in,
+// can be disabled and cannot be deleted. Sync refreshes the installed files
+// and description when the release ships different content.
 func (s *ExtensionService) SkillDefaults(specs []config.DefaultSkill) ([]ExtensionDefault, error) {
 	out := make([]ExtensionDefault, 0, len(specs))
 	for _, spec := range specs {
@@ -277,20 +291,23 @@ func (s *ExtensionService) SkillDefaults(specs []config.DefaultSkill) ([]Extensi
 			Kind: "skill",
 			Name: name,
 			Exists: func(ctx context.Context) (bool, error) {
-				rows, err := s.store.ListSkills(ctx, store.ScopePlatform, nil)
-				if err != nil {
-					return false, err
-				}
-				for _, row := range rows {
-					if row.Name == name {
-						return true, nil
-					}
-				}
-				return false, nil
+				row, err := s.platformSkillNamed(ctx, name)
+				return row != nil && row.Builtin == "", err
 			},
 			Install: func(ctx context.Context) error {
-				_, err := s.installBuiltinSkill(ctx, name)
+				row, err := s.platformSkillNamed(ctx, name)
+				if err != nil || row != nil {
+					return err
+				}
+				_, err = s.installBuiltinSkill(ctx, name)
 				return err
+			},
+			Sync: func(ctx context.Context) error {
+				row, err := s.platformSkillNamed(ctx, name)
+				if err != nil || row == nil || row.Builtin != name {
+					return err
+				}
+				return s.refreshBuiltinSkill(ctx, row)
 			},
 			Bindings: bindings,
 		})
@@ -298,31 +315,146 @@ func (s *ExtensionService) SkillDefaults(specs []config.DefaultSkill) ([]Extensi
 	return out, nil
 }
 
-// installBuiltinSkill stages the embedded files below the platform skills
-// root and persists them through the same path as an upload.
-func (s *ExtensionService) installBuiltinSkill(ctx context.Context, name string) (*Skill, error) {
-	files, err := builtin.Sub(name)
+func (s *ExtensionService) platformSkillNamed(ctx context.Context, name string) (*store.Skill, error) {
+	rows, err := s.store.ListSkills(ctx, store.ScopePlatform, nil)
 	if err != nil {
 		return nil, err
 	}
+	for i := range rows {
+		if rows[i].Name == name {
+			return &rows[i], nil
+		}
+	}
+	return nil, nil
+}
+
+// installBuiltinSkill stages the embedded files below the platform skills
+// root and persists them through the same path as an upload.
+func (s *ExtensionService) installBuiltinSkill(ctx context.Context, name string) (*Skill, error) {
 	scopeRoot, err := s.skillScopeRoot(store.ScopePlatform, nil)
 	if err != nil {
 		return nil, err
 	}
-	staged, err := os.MkdirTemp(scopeRoot, ".builtin-*")
+	staged, description, err := stageBuiltinSkill(name, scopeRoot)
 	if err != nil {
-		return nil, fmt.Errorf("app: create skill directory: %w", err)
+		return nil, err
+	}
+	return s.persistSkillDir(ctx, store.ScopePlatform, nil, name, description, name, scopeRoot, staged)
+}
+
+// refreshBuiltinSkill replaces the installed files when they differ from the
+// embedded release copy. The row, its path and its enabled state are kept.
+func (s *ExtensionService) refreshBuiltinSkill(ctx context.Context, row *store.Skill) error {
+	container, managed := s.managedSkillContainer(row)
+	if !managed {
+		return fmt.Errorf("app: built-in skill %q is outside the managed skills root", row.Name)
+	}
+	files, err := builtin.Sub(row.Builtin)
+	if err != nil {
+		return err
+	}
+	current, err := sameSkillFiles(files, row.Dir)
+	if err != nil {
+		return err
+	}
+	if !current {
+		staged, _, err := stageBuiltinSkill(row.Builtin, container)
+		if err != nil {
+			return err
+		}
+		retired := filepath.Join(container, fmt.Sprintf(".retired-%d", s.now().UnixNano()))
+		if err := os.Rename(row.Dir, retired); err != nil && !errors.Is(err, os.ErrNotExist) {
+			_ = os.RemoveAll(staged)
+			return fmt.Errorf("app: replace built-in skill %q: %w", row.Name, err)
+		}
+		if err := os.Rename(staged, row.Dir); err != nil {
+			_ = os.Rename(retired, row.Dir)
+			_ = os.RemoveAll(staged)
+			return fmt.Errorf("app: replace built-in skill %q: %w", row.Name, err)
+		}
+		if err := os.RemoveAll(retired); err != nil {
+			s.logger.Warn("retired built-in skill cleanup failed", "skill_id", row.ID)
+		}
+		s.logger.Info("built-in skill updated", "name", row.Name)
+	}
+	_, description, err := readSkillManifest(row.Dir)
+	if err != nil {
+		return fmt.Errorf("app: built-in skill %q: %w", row.Name, err)
+	}
+	if description != row.Description {
+		if err := s.store.SetSkillDescription(ctx, row.ID, description); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// stageBuiltinSkill copies one embedded skill into a new directory below
+// parent and returns it with the manifest description.
+func stageBuiltinSkill(name, parent string) (string, string, error) {
+	files, err := builtin.Sub(name)
+	if err != nil {
+		return "", "", err
+	}
+	staged, err := os.MkdirTemp(parent, ".builtin-*")
+	if err != nil {
+		return "", "", fmt.Errorf("app: create skill directory: %w", err)
 	}
 	if err := copyEmbeddedSkill(files, staged); err != nil {
 		_ = os.RemoveAll(staged)
-		return nil, err
+		return "", "", err
 	}
 	manifestName, description, err := readSkillManifest(staged)
 	if err != nil || manifestName != name {
 		_ = os.RemoveAll(staged)
-		return nil, fmt.Errorf("app: bundled skill %q has an invalid manifest", name)
+		return "", "", fmt.Errorf("app: bundled skill %q has an invalid manifest", name)
 	}
-	return s.persistSkillDir(ctx, store.ScopePlatform, nil, name, description, scopeRoot, staged)
+	return staged, description, nil
+}
+
+// sameSkillFiles reports whether dir holds exactly the embedded files.
+func sameSkillFiles(files fs.FS, dir string) (bool, error) {
+	want := make(map[string][]byte)
+	if err := fs.WalkDir(files, ".", func(name string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return err
+		}
+		data, err := fs.ReadFile(files, name)
+		want[name] = data
+		return err
+	}); err != nil {
+		return false, err
+	}
+	same := true
+	err := filepath.WalkDir(dir, func(current string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			same = false
+			return fs.SkipAll
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, current)
+		if err != nil {
+			return err
+		}
+		expected, ok := want[filepath.ToSlash(rel)]
+		if !ok || !entry.Type().IsRegular() {
+			same = false
+			return fs.SkipAll
+		}
+		data, err := os.ReadFile(current)
+		if err != nil || !bytes.Equal(data, expected) {
+			same = false
+			return fs.SkipAll
+		}
+		delete(want, filepath.ToSlash(rel))
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return same && len(want) == 0, nil
 }
 
 func copyEmbeddedSkill(files fs.FS, dst string) error {

@@ -352,6 +352,8 @@ export interface Skill {
   description?: string
   dir?: string
   enabled: boolean
+  /** Shipped with the platform: can be disabled, not deleted. */
+  builtin?: boolean
   created_at?: string
 }
 
