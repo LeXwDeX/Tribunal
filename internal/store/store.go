@@ -9,9 +9,11 @@ import (
 )
 
 var (
-	ErrNotFound  = errors.New("store: not found")
-	ErrConflict  = errors.New("store: conflict")
-	ErrLeaseLost = errors.New("store: lease lost")
+	ErrNotFound = errors.New("store: not found")
+	ErrConflict = errors.New("store: conflict")
+	// ErrBuiltinManaged rejects a write to a row managed by the platform release.
+	ErrBuiltinManaged = errors.New("store: built-in row is managed by the platform")
+	ErrLeaseLost      = errors.New("store: lease lost")
 	// ErrIncompleteWorkflow marks a workflow row without its dossier. Retrying
 	// the job cannot repair it, so callers must settle it as permanent.
 	ErrIncompleteWorkflow = errors.New("store: workflow has no dossier")

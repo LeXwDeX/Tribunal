@@ -38,6 +38,12 @@ type MCPServerUpdate struct {
 	Enabled *bool
 }
 
+// MCPServerImport is one named entry of an atomic mcpServers import.
+type MCPServerImport struct {
+	Name   string
+	Config json.RawMessage
+}
+
 // Skill is one registered skill directory. Uploaded archives keep an empty
 // Dir; registered directories carry their absolute server path.
 type Skill struct {
