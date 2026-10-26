@@ -109,3 +109,40 @@ func TestMigrateProjectSecretsSkipsConcurrentChangeAndBadRows(t *testing.T) {
 		t.Fatalf("concurrent rotation was overwritten: %q, %v", got, err)
 	}
 }
+
+func TestMigrateProjectSecretsUpgradesUsableFieldBesideDamagedOne(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	cipher := newTestCipher(t)
+	tokenEnc, err := cipher.Encrypt([]byte("glpat-usable"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	damaged := []byte("damaged webhook secret")
+	if _, err := st.RegisterProject(ctx, store.Project{
+		ID: 30, PathWithNamespace: "group/half", WebURL: "https://gitlab.example.com/group/half",
+		DefaultBranch: "main", TokenEnc: tokenEnc, TokenScopes: []string{"api"},
+		WebhookSecretEnc: damaged, Profile: "default", Settings: json.RawMessage(`{}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := MigrateProjectSecrets(ctx, st, cipher, nil)
+	if err != nil || migrated != 1 {
+		t.Fatalf("migration = %d, %v; want 1", migrated, err)
+	}
+	p, err := st.GetProject(ctx, 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The usable token keeps working; the damaged secret is left for a rebuild.
+	if got, err := cipher.Open(p.TokenEnc, secret.TokenAAD(30)); err != nil || string(got) != "glpat-usable" {
+		t.Fatalf("token after migration = %q, %v", got, err)
+	}
+	if string(p.WebhookSecretEnc) != string(damaged) {
+		t.Fatalf("damaged webhook secret was rewritten: %q", p.WebhookSecretEnc)
+	}
+	if again, err := MigrateProjectSecrets(ctx, st, cipher, nil); err != nil || again != 0 {
+		t.Fatalf("second migration = %d, %v; want 0", again, err)
+	}
+}
