@@ -25,7 +25,7 @@ function routes(writes: Array<{ url: string; init?: RequestInit }>) {
 }
 
 function card(name: string): HTMLElement {
-  return screen.getByText(name).closest('article') as HTMLElement
+  return screen.getByText(name).closest('tr') as HTMLElement
 }
 
 describe('built-in MCP servers in the extensions console', () => {

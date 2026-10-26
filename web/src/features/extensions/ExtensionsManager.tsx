@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useState, type ReactNode } from 'react'
+import { Fragment, useEffect, useId, useMemo, useState, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   createMcpServer, deleteMcpServer, deleteSkill, importMcpServers, listBindings, listMcpServers,
@@ -14,6 +14,7 @@ import { usePaginated } from '../../lib/hooks'
 import { formatJson } from '../../lib/format'
 import ui from '../../styles/ui.module.css'
 import styles from '../../pages/pages.module.css'
+import ext from './extensions.module.css'
 
 const blocks = ['code-review', 'review', 'reasoner', 'verify', 'synthesize', 'onboarding']
 const tabs = [
@@ -185,9 +186,18 @@ export function ExtensionsManager({
     }
   }
 
+  // Counts are shown only when a list is fully loaded; a paged list has no total.
+  const loadedCount = (list: { isSuccess: boolean; hasNextPage?: boolean; items: unknown[] }) => (
+    projectEnabled && list.isSuccess && !list.hasNextPage ? list.items.length : undefined
+  )
+  const tabItems = tabs.map((item) => ({
+    ...item,
+    count: item.key === 'mcp' ? loadedCount(servers) : item.key === 'skills' ? loadedCount(skills) : undefined,
+  }))
+
   return (
     <div className={ui.pageStack}>
-      <Tabs items={tabs} value={tab} onChange={onTabChange} label="扩展类型" idPrefix="extension-tab" />
+      <Tabs items={tabItems} value={tab} onChange={onTabChange} label="扩展类型" idPrefix="extension-tab" />
       <div role="tabpanel" id={`tabpanel-${tab}`} aria-labelledby={`extension-tab-${tab}`} className={ui.pageStack}>
       {notice}
       {!projectEnabled ? (
@@ -304,62 +314,90 @@ function McpTab({
         <EmptyState title="还没有 MCP 服务器" description="可新增 stdio 或 HTTP MCP 服务器，或粘贴 Claude Code 的 mcpServers 配置。" />
       ) : null}
       {servers.items.length ? (
-        <div className={styles.cards}>
-          {servers.items.map((server) => {
-            const result = testResults[server.id]
-            return (
-              <article key={server.id} className={styles.infoCard}>
-                <div className={styles.cardTitle}>
-                  <span className="mono">{server.name}</span>
-                  {server.builtin ? <Badge tone="info">内置</Badge> : null}
-                  <Badge tone={server.enabled ? 'ok' : 'neutral'}>{server.enabled ? '启用' : '停用'}</Badge>
-                </div>
-                <div className={styles.cardMeta}>
-                  <span>{server.scope === 'platform' ? '平台级' : `项目级 · ${projectName || `#${server.project_id}`}`}</span>
-                  <span>{server.status || '状态未提供'}</span>
-                  <span>{server.tools?.length ? `${server.tools.length} 个工具` : '工具数未提供'}</span>
-                </div>
-                <code className={styles.commandLine}>{mcpCommand(server)}</code>
-                {server.last_error ? <span className={styles.resultError}>{server.last_error}</span> : null}
-                <div className={styles.cardActions}>
-                  {canWrite ? (
-                    <Button variant="secondary" onClick={() => onTest(server)} loading={result?.pending}>测试并列出工具</Button>
-                  ) : null}
-                  {canWrite && server.builtin ? (
-                    // Built-in servers follow the platform release: they can
-                    // only be switched off and on.
-                    <Button variant="secondary" onClick={() => onToggle(server)}>{server.enabled ? '停用' : '启用'}</Button>
-                  ) : null}
-                  {canWrite && !server.builtin ? (
-                    <>
-                      <Button variant="secondary" onClick={() => onEdit(server)}>编辑</Button>
-                      <Button variant="danger" onClick={() => onDelete(server)}>删除</Button>
-                    </>
-                  ) : null}
-                </div>
-                {result?.error ? <span className={styles.resultError} role="status">测试失败：{result.error}</span> : null}
-                {result?.tools ? (
-                  <div className={styles.testResult} role="status">
-                    {result.tools.length ? (
-                      <details className={ui.disclosure}>
-                        <summary>测试成功：{result.tools.length} 个工具</summary>
-                        <ul className={styles.list} style={{ marginTop: 6 }}>
-                          {result.tools.map((tool) => (
-                            <li key={tool.name} className={styles.listItem}>
-                              <div className={styles.listMain}>
-                                <span className="mono small">{tool.name}</span>
-                                {tool.description ? <span className="small muted">{tool.description}</span> : null}
-                              </div>
-                            </li>
-                          ))}
-                        </ul>
-                      </details>
-                    ) : <span>测试成功，但服务端没有返回工具列表。</span>}
-                  </div>
-                ) : null}
-              </article>
-            )
-          })}
+        <div className="tableWrap">
+          <table className="dataTable" style={{ minWidth: 860 }}>
+            <thead>
+              <tr>
+                <th scope="col">名称</th>
+                <th scope="col">作用域</th>
+                <th scope="col">命令</th>
+                <th scope="col">状态</th>
+                <th scope="col" className="right">工具</th>
+                {canWrite ? <th scope="col" className="right">操作</th> : null}
+              </tr>
+            </thead>
+            <tbody>
+              {servers.items.map((server) => {
+                const result = testResults[server.id]
+                const hasDetail = Boolean(server.last_error || result?.error || result?.tools)
+                return (
+                  <Fragment key={server.id}>
+                    <tr>
+                      <td>
+                        <div className={ext.nameCell}>
+                          <span className="mono">{server.name}</span>
+                          {server.builtin ? <Badge tone="info" plain>内置</Badge> : null}
+                        </div>
+                      </td>
+                      <td className="muted">{server.scope === 'platform' ? '平台级' : `项目级 · ${projectName || `#${server.project_id}`}`}</td>
+                      <td><code className={ext.command}>{mcpCommand(server)}</code></td>
+                      <td>
+                        <div className={ext.nameCell}>
+                          <Badge tone={server.enabled ? 'ok' : 'neutral'}>{server.enabled ? '启用' : '停用'}</Badge>
+                          <span className="small muted">{server.status || '状态未提供'}</span>
+                        </div>
+                      </td>
+                      <td className="right num">{server.tools?.length ? server.tools.length : <span className="muted">未提供</span>}</td>
+                      {canWrite ? (
+                        <td className="right">
+                          <div className={ext.rowActions}>
+                            <Button variant="secondary" className={ui.smallButton} onClick={() => onTest(server)} loading={result?.pending}>测试并列出工具</Button>
+                            {server.builtin ? (
+                              // Built-in servers follow the platform release: they can
+                              // only be switched off and on.
+                              <Button variant="secondary" className={ui.smallButton} onClick={() => onToggle(server)}>{server.enabled ? '停用' : '启用'}</Button>
+                            ) : (
+                              <>
+                                <Button variant="secondary" className={ui.smallButton} onClick={() => onEdit(server)}>编辑</Button>
+                                <Button variant="danger" className={ui.smallButton} onClick={() => onDelete(server)}>删除</Button>
+                              </>
+                            )}
+                          </div>
+                        </td>
+                      ) : null}
+                    </tr>
+                    {hasDetail ? (
+                      <tr className={ext.detailRow}>
+                        <td colSpan={canWrite ? 6 : 5}>
+                          {server.last_error ? <span className={styles.resultError}>{server.last_error}</span> : null}
+                          {result?.error ? <span className={styles.resultError} role="status">测试失败：{result.error}</span> : null}
+                          {result?.tools ? (
+                            <div className={styles.testResult} role="status">
+                              {result.tools.length ? (
+                                <details className={ui.disclosure}>
+                                  <summary>测试成功：{result.tools.length} 个工具</summary>
+                                  <ul className={styles.list} style={{ marginTop: 6 }}>
+                                    {result.tools.map((tool) => (
+                                      <li key={tool.name} className={styles.listItem}>
+                                        <div className={styles.listMain}>
+                                          <span className="mono small">{tool.name}</span>
+                                          {tool.description ? <span className="small muted">{tool.description}</span> : null}
+                                        </div>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </details>
+                              ) : <span>测试成功，但服务端没有返回工具列表。</span>}
+                            </div>
+                          ) : null}
+                        </td>
+                      </tr>
+                    ) : null}
+                  </Fragment>
+                )
+              })}
+            </tbody>
+          </table>
         </div>
       ) : null}
       {servers.hasNextPage ? <Button variant="secondary" onClick={servers.fetchNextPage} loading={servers.isFetchingNextPage}>加载更多 MCP 服务器</Button> : null}
@@ -401,45 +439,40 @@ function SkillsTab({
       {skills.isPending ? <LoadingState /> : null}
       {skills.isError ? <ErrorState error={skills.error} onRetry={skills.retry} /> : null}
       {skills.isSuccess && skills.items.length === 0 ? <EmptyState title="还没有 Skill" description="上传包含 SKILL.md 的 zip，或登记服务器上的目录。" /> : null}
-      {skills.items.length ? (
-        <div className="tableWrap">
-          <table className="dataTable" style={{ minWidth: 900 }}>
-            <thead>
-              <tr>
-                <th scope="col">名称</th>
-                <th scope="col">描述</th>
-                <th scope="col">作用域</th>
-                <th scope="col">来源目录</th>
-                <th scope="col">挂载到</th>
-                <th scope="col">状态</th>
-                {canWrite ? <th scope="col">操作</th> : null}
-              </tr>
-            </thead>
-            <tbody>
-              {skills.items.map((skill) => (
-                <tr key={skill.id}>
-                  <td>
-                    <span className="mono">{skill.name}</span>
-                    {skill.builtin ? <> <Badge tone="info">内置</Badge></> : null}
-                  </td>
-                  <td>{skill.description || '—'}</td>
-                  <td>{skill.scope === 'platform' ? '平台级' : `项目级${skill.project_id ? ` #${skill.project_id}` : ''}`}</td>
-                  <td className="mono small">{skill.dir || '—'}</td>
-                  <td className="mono small">{usage.get(skill.name)?.join(', ') || '—'}</td>
-                  <td><Badge tone={skill.enabled ? 'ok' : 'neutral'}>{skill.enabled ? '启用' : '已禁用'}</Badge></td>
-                  {canWrite ? (
-                    <td>
-                      <div className={styles.actionsRight}>
-                        <Button variant="secondary" onClick={() => onToggle(skill)}>{skill.enabled ? '禁用' : '启用'}</Button>
-                        {/* Built-in skills ship with the platform: disable them instead. */}
-                        {skill.builtin ? null : <Button variant="secondary" onClick={() => onDelete(skill)}>删除</Button>}
-                      </div>
-                    </td>
-                  ) : null}
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      {skills.items.length || (canWrite && skills.isSuccess) ? (
+        <div className={ext.skillCards}>
+          {skills.items.map((skill) => (
+            <article key={skill.id} className={ext.skillCard}>
+              <div className={ext.skillHeader}>
+                <span className={ext.skillName}>{skill.name}</span>
+                <span className={ext.nameCell}>
+                  {skill.builtin ? <Badge tone="info" plain>内置</Badge> : null}
+                  <Badge tone="neutral" plain>{skill.scope === 'platform' ? '平台级' : `项目级${skill.project_id ? ` #${skill.project_id}` : ''}`}</Badge>
+                </span>
+              </div>
+              <p className={ext.skillDescription}>{skill.description || '—'}</p>
+              <dl className={ext.skillMeta}>
+                <dt>来源目录</dt><dd>{skill.dir || '—'}</dd>
+                <dt>挂载到</dt><dd>{usage.get(skill.name)?.join(', ') || '—'}</dd>
+              </dl>
+              <div className={ext.skillActions}>
+                <Badge tone={skill.enabled ? 'ok' : 'neutral'}>{skill.enabled ? '启用' : '已禁用'}</Badge>
+                {canWrite ? (
+                  <span className={ext.rowActions} style={{ marginLeft: 'auto' }}>
+                    <Button variant="secondary" className={ui.smallButton} onClick={() => onToggle(skill)}>{skill.enabled ? '禁用' : '启用'}</Button>
+                    {/* Built-in skills ship with the platform: disable them instead. */}
+                    {skill.builtin ? null : <Button variant="secondary" className={ui.smallButton} onClick={() => onDelete(skill)}>删除</Button>}
+                  </span>
+                ) : null}
+              </div>
+            </article>
+          ))}
+          {canWrite ? (
+            <button type="button" className={ext.uploadCard} onClick={onUpload}>
+              <span className={ext.uploadPlus} aria-hidden="true">+</span>
+              上传 Skill zip
+            </button>
+          ) : null}
         </div>
       ) : null}
       {skills.hasNextPage ? <Button variant="secondary" onClick={skills.fetchNextPage} loading={skills.isFetchingNextPage}>加载更多 Skill</Button> : null}

@@ -17,6 +17,7 @@ import {
 import { formatMs, formatRatio, statNumber } from '../lib/stats'
 import ui from '../styles/ui.module.css'
 import styles from './pages.module.css'
+import page from './projects.module.css'
 
 const projectTabs = [
   { key: 'overview', label: '概览', panelId: 'project-tabpanel-overview' },
@@ -55,50 +56,12 @@ function ProjectOverview({ project }: { project: Project }) {
 
   return (
     <div className={ui.pageStack}>
-      <div className={styles.cards}>
-        <section className={styles.infoCard}>
-          <h2 className={styles.cardTitle}>项目信息</h2>
-          <dl className={ui.definitionGrid}>
-            <div><dt>项目 ID</dt><dd className="tabular">{project.id}</dd></div>
-            <div><dt>默认分支</dt><dd className="mono">{project.default_branch || '—'}</dd></div>
-            <div><dt>档位</dt><dd>{project.profile || '—'}</dd></div>
-            <div><dt>启用</dt><dd>{project.enabled ? '启用' : '停用'}</dd></div>
-            <div><dt>token 过期</dt><dd>{project.token_expires_at ? formatDate(project.token_expires_at) : '未提供'}</dd></div>
-            <div><dt>token scopes</dt><dd className="mono">{project.token_scopes?.join(', ') || '不可用'}</dd></div>
-            <div>
-              <dt>webhook</dt>
-              <dd>
-                <Badge tone={webhookTone(webhookState)}>{labelForWebhookState(webhookState)}</Badge>
-                {project.hook_id ? <span className="mono"> #{project.hook_id}</span> : null}
-                <span className="muted"> · {project.webhook_managed_by === 'crc' ? '本服务' : '手动或外部'}</span>
-              </dd>
-            </div>
-            <div><dt>更新时间</dt><dd>{project.updated_at ? formatDate(project.updated_at) : '—'}</dd></div>
-          </dl>
-          {project.webhook_error ? <span className={styles.resultError}>{project.webhook_error}</span> : null}
-          <div className={styles.cardActions}>
-            <ButtonLink to={`/projects/${project.id}/workspace`}>工作区</ButtonLink>
-            <ButtonLink to={`/projects/${project.id}/settings`}>设置</ButtonLink>
-          </div>
-        </section>
-        <section className={styles.infoCard}>
-          <h2 className={styles.cardTitle}>工作区摘要 <StatusBadge status={workspaceState} /></h2>
-          <dl className={ui.definitionGrid}>
-            <div><dt>状态</dt><dd>{workspaceState ? <StatusBadge status={workspaceState} /> : '项目详情未提供'}</dd></div>
-            <div><dt>base sha</dt><dd className="mono">{project.workspace?.base_sha ? shortSha(project.workspace.base_sha) : '—'}</dd></div>
-            <div><dt>索引状态</dt><dd>{project.workspace?.index_status || '—'}</dd></div>
-            <div><dt>最近刷新</dt><dd>{project.workspace?.last_refresh_at ? formatDate(project.workspace.last_refresh_at) : '—'}</dd></div>
-          </dl>
-          {project.workspace?.last_error ? <span className={styles.resultError}>{project.workspace.last_error}</span> : null}
-          <Link to={`/projects/${project.id}/workspace`} className={styles.listMeta}>查看完整工作区与上下文 →</Link>
-        </section>
-      </div>
-
-      <Panel title="本项目近 7 天" aside="所有数值来自 stats API；缺失时显示不可用">
+      <section className={ui.stack} aria-label="本项目近 7 天">
+        <span className="small muted">本项目近 7 天 · 所有数值来自 stats API；缺失时显示不可用</span>
         {stats.isPending ? <LoadingState label="正在读取项目统计…" /> : null}
         {stats.isError ? <ErrorState error={stats.error} onRetry={() => { void stats.refetch() }} title="项目统计加载失败" /> : null}
         {!stats.isPending && !stats.isError ? (
-          <div className={styles.statGrid}>
+          <div className={ui.metricStrip}>
             <Metric label="运行次数" value={runs === null ? '不可用' : runs} note={`包含评审与 onboarding · BLOCKING ${blocking === null ? '不可用' : blocking} 次`} />
             <Metric label="BLOCKING 比例" value={formatRatio(blockingRatio)} note="来自 stats.blocking_ratio" />
             <Metric label="已发布问题" value={published === null ? '不可用' : published} note="来自 stats.published" />
@@ -106,15 +69,55 @@ function ProjectOverview({ project }: { project: Project }) {
             <Metric label="成本" value={cost === null ? '不可用' : formatCost(cost)} note={`平均 ${formatMs(avg)} · P95 ${formatMs(p95)}`} />
           </div>
         ) : null}
-      </Panel>
+      </section>
 
-      <Panel title="最近评审" aside={<Link to={`/reviews?project_id=${project.id}`}>查看全部</Link>}>
-        {reviews.isPending ? <LoadingState /> : null}
-        {reviews.isError ? <ErrorState error={reviews.error} onRetry={reviews.retry} /> : null}
-        {reviews.isSuccess && reviews.items.length === 0 ? <EmptyState title="这个项目还没有评审记录" description="打开 MR 或手动触发一次评审。" /> : null}
-        {reviews.items.length ? <ReviewTable reviews={reviews.items} projectNames={projectNames} /> : null}
-        {reviews.hasNextPage ? <Button variant="secondary" onClick={reviews.fetchNextPage} loading={reviews.isFetchingNextPage}>加载更多评审</Button> : null}
-      </Panel>
+      <div className={styles.split}>
+        <div className={styles.mainColumn}>
+          <Panel title="最近评审" aside={<Link to={`/reviews?project_id=${project.id}`}>查看全部</Link>}>
+            {reviews.isPending ? <LoadingState /> : null}
+            {reviews.isError ? <ErrorState error={reviews.error} onRetry={reviews.retry} /> : null}
+            {reviews.isSuccess && reviews.items.length === 0 ? <EmptyState title="这个项目还没有评审记录" description="打开 MR 或手动触发一次评审。" /> : null}
+            {reviews.items.length ? <ReviewTable reviews={reviews.items} projectNames={projectNames} /> : null}
+            {reviews.hasNextPage ? <Button variant="secondary" onClick={reviews.fetchNextPage} loading={reviews.isFetchingNextPage}>加载更多评审</Button> : null}
+          </Panel>
+        </div>
+        <div className={styles.sideColumn}>
+          <Panel title="基本信息">
+            <dl className={ui.definitionGrid}>
+              <div><dt>项目 ID</dt><dd className="tabular">{project.id}</dd></div>
+              <div><dt>默认分支</dt><dd className="mono">{project.default_branch || '—'}</dd></div>
+              <div><dt>档位</dt><dd>{project.profile ? <Badge plain>{project.profile}</Badge> : '—'}</dd></div>
+              <div><dt>启用</dt><dd>{project.enabled ? '启用' : '停用'}</dd></div>
+              <div><dt>token 过期</dt><dd>{project.token_expires_at ? formatDate(project.token_expires_at) : '未提供'}</dd></div>
+              <div><dt>token scopes</dt><dd className="mono">{project.token_scopes?.join(', ') || '不可用'}</dd></div>
+              <div>
+                <dt>webhook</dt>
+                <dd>
+                  <Badge tone={webhookTone(webhookState)}>{labelForWebhookState(webhookState)}</Badge>
+                  {project.hook_id ? <span className="mono"> #{project.hook_id}</span> : null}
+                  <span className="muted"> · {project.webhook_managed_by === 'crc' ? '本服务' : '手动或外部'}</span>
+                </dd>
+              </div>
+              <div><dt>更新时间</dt><dd>{project.updated_at ? formatDate(project.updated_at) : '—'}</dd></div>
+            </dl>
+            {project.webhook_error ? <span className={styles.resultError}>{project.webhook_error}</span> : null}
+            <div className={styles.cardActions}>
+              <ButtonLink to={`/projects/${project.id}/workspace`}>工作区</ButtonLink>
+              <ButtonLink to={`/projects/${project.id}/settings`}>设置</ButtonLink>
+            </div>
+          </Panel>
+          <Panel title="工作区摘要" aside={workspaceState ? <StatusBadge status={workspaceState} /> : undefined}>
+            <dl className={ui.definitionGrid}>
+              <div><dt>状态</dt><dd>{workspaceState ? <StatusBadge status={workspaceState} /> : '项目详情未提供'}</dd></div>
+              <div><dt>base sha</dt><dd className="mono">{project.workspace?.base_sha ? shortSha(project.workspace.base_sha) : '—'}</dd></div>
+              <div><dt>索引状态</dt><dd>{project.workspace?.index_status || '—'}</dd></div>
+              <div><dt>最近刷新</dt><dd>{project.workspace?.last_refresh_at ? formatDate(project.workspace.last_refresh_at) : '—'}</dd></div>
+            </dl>
+            {project.workspace?.last_error ? <span className={styles.resultError}>{project.workspace.last_error}</span> : null}
+            <Link to={`/projects/${project.id}/workspace`} className={styles.listMeta}>查看完整工作区与上下文 →</Link>
+          </Panel>
+        </div>
+      </div>
     </div>
   )
 }
@@ -174,10 +177,11 @@ export function ProjectDetailPage() {
         </div>
 
         <PageHeader
-          title={<span className={styles.projectTitleMono}>{data.path_with_namespace}</span>}
+          title={<span className={page.projectTitle}>{data.path_with_namespace}</span>}
           description={
             <>
-              默认分支 <span className="mono">{data.default_branch || '—'}</span> · 档位 {data.profile || '—'} · 生成的上下文与索引只保存在平台内部
+              默认分支 <span className="mono">{data.default_branch || '—'}</span> · 档位 {data.profile || '—'}
+              {data.access ? <> · {data.access === 'manage' ? '可管理' : '只读'}</> : null} · 生成的上下文与索引只保存在平台内部
             </>
           }
           actions={
