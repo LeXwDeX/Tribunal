@@ -32,8 +32,8 @@ describe('built-in skills in the extensions console', () => {
     installFetch(routes(writes))
     renderWithProviders(<ExtensionsManager scope="platform" tab="skills" onTabChange={() => {}} />)
 
-    const builtinRow = (await screen.findByText('code-review')).closest('tr') as HTMLElement
-    const customRow = screen.getByText('team-standards').closest('tr') as HTMLElement
+    const builtinRow = (await screen.findByText('code-review')).closest('article') as HTMLElement
+    const customRow = screen.getByText('team-standards').closest('article') as HTMLElement
     expect(within(builtinRow).getByText('内置')).toBeInTheDocument()
     expect(within(builtinRow).queryByRole('button', { name: '删除' })).not.toBeInTheDocument()
     expect(within(customRow).queryByText('内置')).not.toBeInTheDocument()
@@ -52,7 +52,7 @@ describe('built-in skills in the extensions console', () => {
   it('shows the marker but no actions to a viewer', async () => {
     installFetch(routes([]))
     renderWithProviders(<ExtensionsManager scope="platform" tab="skills" onTabChange={() => {}} />, { me: viewerMe })
-    const builtinRow = (await screen.findByText('code-review')).closest('tr') as HTMLElement
+    const builtinRow = (await screen.findByText('code-review')).closest('article') as HTMLElement
     expect(within(builtinRow).getByText('内置')).toBeInTheDocument()
     expect(within(builtinRow).queryByRole('button')).not.toBeInTheDocument()
   })

@@ -1,0 +1,314 @@
+/* v2 项目列表、项目详情与工作区的页面级样式（prototype/v2 第 4 节）。 */
+
+.pathCell {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.expiryWarn {
+  color: var(--warn-fg);
+}
+
+.expiryDanger {
+  color: var(--danger-fg);
+}
+
+.expiry {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.reviewCell {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+/* 注册对话框：两步进度 */
+.stepper {
+  display: flex;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.step {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--muted);
+  padding-bottom: 8px;
+  border-bottom: 2px solid var(--border);
+}
+
+.step b {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  background: var(--surface-3);
+}
+
+.stepOn {
+  color: var(--text);
+  border-color: var(--accent);
+  font-weight: 500;
+}
+
+.stepOn b {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.resultOk {
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--ok-bg);
+  color: var(--ok-fg);
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.resultOk dl {
+  color: var(--text);
+}
+
+.costNotice {
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  font-size: 12.5px;
+}
+
+/* 项目详情页头 */
+.projectTitle {
+  font-family: var(--font-mono);
+  font-size: 20px;
+}
+
+/* 工作区状态四格 */
+.statusTiles {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.statusTiles > div {
+  padding: 14px 18px;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+}
+
+.statusTiles > div:last-child {
+  border-right: 0;
+}
+
+.tileLabel {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.tileValue {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.tileFooter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--border);
+}
+
+.tileFooter .hint {
+  margin-left: auto;
+}
+
+.hint {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.tileMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  padding: 10px 18px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.tileMeta code {
+  font-size: 12px;
+}
+
+.tileAlert {
+  margin: 0 18px 14px;
+}
+
+/* 上下文文档：左侧版本列表，右侧预览与编辑 */
+.docLayout {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  min-height: 380px;
+}
+
+.docList {
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  min-width: 0;
+}
+
+.docListHeader {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.docItem {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 16px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.docItem:hover {
+  background: var(--surface-2);
+}
+
+.docItemActive {
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.docItemTop {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.docListFooter {
+  padding: 10px 16px;
+}
+
+.docBody {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  min-width: 0;
+}
+
+.docBodyHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+}
+
+.docMeta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.docControls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.docTextarea {
+  min-height: 300px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+
+.docPreview {
+  min-height: 300px;
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+@media (max-width: 900px) {
+  .statusTiles,
+  .docLayout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .statusTiles > div {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .docList {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .tileFooter .hint {
+    margin-left: 0;
+  }
+}
+
+/* 项目列表：flush 面板里的工具栏与全宽表格 */
+.search {
+  flex: 0 1 280px;
+  min-width: 0;
+}
+
+.projectTable {
+  min-width: 1060px;
+}
+
+.projectTable .pathCell {
+  color: var(--text);
+}
+
+.projectTable .pathCell:hover {
+  color: var(--link);
+}
+
+.tableFooter {
+  padding: 12px 18px;
+  border-top: 1px solid var(--border);
+}
+
+@media (max-width: 900px) {
+  .search {
+    flex: 1 1 100%;
+  }
+}

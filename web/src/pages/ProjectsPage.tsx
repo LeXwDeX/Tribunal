@@ -1,17 +1,19 @@
 import { useEffect, useId, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { listProfiles, listProjects, registerProject, updateProject, validateProjectConnection } from '../api/api'
 import { ApiError, errorMessage } from '../api/client'
 import type { Project, ProjectRegistration, ProjectValidation } from '../api/types'
 import { useCanWrite } from '../components/RoleContext'
 import {
-  Badge, Button, Dialog, EmptyState, ErrorState, ExternalLink, Field, LoadingState, PageHeader, Panel, StatusBadge, Switch, Toolbar, ToolbarField, useToast,
+  Badge, Button, Dialog, EmptyState, ErrorState, ExternalLink, Field, LoadingState, PageHeader, Panel, PanelBody, RelativeTime, Segmented, StatusBadge,
+  Switch, Toolbar, VerdictBadge, useToast,
 } from '../components/ui'
 import { usePaginated } from '../lib/hooks'
 import { formatDate, labelForStatus, labelForWebhookState, webhookTone } from '../lib/format'
 import ui from '../styles/ui.module.css'
 import styles from './pages.module.css'
+import page from './projects.module.css'
 
 function tokenExpiry(project: Project): { label: string; tone: 'ok' | 'warn' | 'danger' | 'neutral' } {
   if (!project.token_expires_at) return { label: '未提供', tone: 'neutral' }
@@ -21,6 +23,22 @@ function tokenExpiry(project: Project): { label: string; tone: 'ok' | 'warn' | '
   if (days <= 0) return { label: '已过期', tone: 'danger' }
   if (days <= 30) return { label: `${days} 天后到期`, tone: 'warn' }
   return { label: formatDate(project.token_expires_at), tone: 'neutral' }
+}
+
+const ENABLED_FILTERS = [
+  { value: '', label: '全部' },
+  { value: 'true', label: '已启用' },
+  { value: 'false', label: '已停用' },
+]
+
+const ACCESS_LABELS: Record<string, string> = {
+  manage: '可管理',
+  read: '只读',
+}
+
+const EXPIRY_TONES: Record<string, string | undefined> = {
+  warn: page.expiryWarn,
+  danger: page.expiryDanger,
 }
 
 function fieldErrorsFrom(error: unknown): Record<string, string> {
@@ -215,16 +233,19 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
         </div>
       ) : (
         <>
+          <ol className={page.stepper} aria-label="注册步骤">
+            <li className={`${page.step} ${page.stepOn}`} aria-current={validation ? undefined : 'step'}><b>1</b>校验连接</li>
+            <li className={validation ? `${page.step} ${page.stepOn}` : page.step} aria-current={validation ? 'step' : undefined}><b>2</b>保存并初始化</li>
+          </ol>
           {validationError ? <ErrorState error={validationError} title="校验失败" /> : null}
           {error ? <ErrorState error={error} title="保存并初始化失败" /> : null}
           {validation ? (
             <>
-              <div className={styles.notice} role="status">
+              <div className={page.resultOk} role="status">
                 <div className={ui.stack}>
                   <strong>校验通过，尚未保存</strong>
                   <span className="small">只读校验未登记项目、未保存 Key、未创建 Webhook、未入队、未调用模型，也未写仓库。</span>
                 </div>
-              </div>
               <dl className={ui.definitionGrid}>
                 <div>
                   <dt>项目</dt>
@@ -250,6 +271,7 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
                 </div>
                 <div><dt>仓库 HEAD</dt><dd className="mono">{validation.git_head}</dd></div>
               </dl>
+              </div>
               <div className={styles.notice}>
                 这是只读校验：确认项目可读取、当前身份与 scope、Key 有效期，并已读取仓库 HEAD。它不证明评论写入、Webhook 或完整 clone；保存时服务端仍会复核凭据。
               </div>
@@ -286,7 +308,7 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
               {profiles.isError ? <span className="small muted">档位列表加载失败，仍可输入档位名。</span> : null}
             </div>
           </details>
-          <div className={styles.notice}>
+          <div className={page.costNotice}>
             保存并初始化会登记项目、加密保存访问 Key、按档位入队后台拉取与上下文生成，并可能在初始化或评审时产生模型费用；不创建或修改 Webhook，Webhook 在项目设置中单独配置。所有操作都不会修改仓库代码。
           </div>
         </>
@@ -297,6 +319,7 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
 
 export function ProjectsPage() {
   const canRegister = useCanWrite()
+  const navigate = useNavigate()
   const toast = useToast()
   const queryClient = useQueryClient()
   const [search, setSearch] = useState('')
@@ -348,43 +371,47 @@ export function ProjectsPage() {
           actions={canRegister ? <Button variant="primary" onClick={() => setRegisterOpen(true)}>注册项目</Button> : undefined}
         />
 
-        <Panel
-          title="已注册项目"
-          aside={projects.isSuccess ? `已加载 ${projects.items.length}${projects.hasNextPage ? '+' : ''} 个项目 · ${enabledCount} 个启用` : undefined}
-        >
-          <Toolbar actions={projects.isFetching ? <span className="small muted" role="status">刷新中…</span> : undefined}>
-            <ToolbarField label="搜索项目路径" grow>
-              <input className="input" name="q" type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索项目路径" aria-label="搜索项目路径" />
-            </ToolbarField>
-            <ToolbarField label="启用状态">
-              <select className="select" name="enabled" value={enabled} onChange={(event) => setEnabled(event.target.value)} aria-label="按启用状态筛选">
-                <option value="">全部</option>
-                <option value="true">已启用</option>
-                <option value="false">已停用</option>
-              </select>
-            </ToolbarField>
+        <Panel flush>
+          <Toolbar
+            inset
+            label="项目筛选"
+            actions={(
+              <>
+                {projects.isFetching ? <span className="small muted" role="status">刷新中…</span> : null}
+                {projects.isSuccess ? <span className="small muted">已加载 {projects.items.length}{projects.hasNextPage ? '+' : ''} 个项目 · {enabledCount} 个启用</span> : null}
+                <Segmented
+                  label="按启用状态筛选"
+                  options={ENABLED_FILTERS}
+                  value={enabled}
+                  onChange={setEnabled}
+                />
+              </>
+            )}
+          >
+            <input className={`input ${page.search}`} name="q" type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索项目路径" aria-label="搜索项目路径" />
           </Toolbar>
 
-          {projects.isPending ? <LoadingState /> : null}
-          {projects.isError ? <ErrorState error={projects.error} onRetry={projects.retry} /> : null}
+          {projects.isPending ? <PanelBody><LoadingState /></PanelBody> : null}
+          {projects.isError ? <PanelBody><ErrorState error={projects.error} onRetry={projects.retry} /></PanelBody> : null}
           {projects.isSuccess && projects.items.length === 0 ? (
-            <EmptyState
+            <PanelBody><EmptyState
               title={debouncedSearch || enabled ? '没有符合条件的项目' : '还没有注册项目'}
               description={debouncedSearch || enabled ? '调整搜索或启用状态筛选。' : '注册第一个 GitLab 项目后，这里会显示工作区、token 和 webhook 状态。'}
               action={canRegister && !debouncedSearch && !enabled ? <Button variant="primary" onClick={() => setRegisterOpen(true)}>注册项目</Button> : undefined}
-            />
+            /></PanelBody>
           ) : null}
           {projects.items.length ? (
             <div className="tableWrap">
-              <table className="dataTable" style={{ minWidth: 980 }}>
+              <table className={page.projectTable}>
                 <thead>
                   <tr>
                     <th scope="col">项目</th>
                     <th scope="col">档位</th>
                     <th scope="col">工作区</th>
                     <th scope="col">最近评审</th>
-                    <th scope="col">token 过期</th>
+                    <th scope="col">Key 过期</th>
                     <th scope="col">webhook</th>
+                    <th scope="col">权限</th>
                     <th scope="col">启用</th>
                   </tr>
                 </thead>
@@ -395,28 +422,43 @@ export function ProjectsPage() {
                     const webhookState = project.webhook_state || (project.hook_id ? 'unknown' : 'disabled')
                     const lastReview = project.last_review
                     return (
-                      <tr key={project.id}>
+                      <tr
+                        key={project.id}
+                        className="clickable"
+                        onClick={(event) => {
+                          // Links, switches and buttons inside the row keep their own behavior.
+                          if ((event.target as HTMLElement).closest('a, button, input, label')) return
+                          navigate(`/projects/${project.id}`)
+                        }}
+                      >
                         <td>
                           <div className={styles.tablePrimary}>
-                            <Link to={`/projects/${project.id}`} className="mono">{project.path_with_namespace}</Link>
+                            <Link to={`/projects/${project.id}`} className={page.pathCell}>{project.path_with_namespace}</Link>
                             <span className={styles.tableMeta}>ID {project.id}{project.default_branch ? ` · 默认分支 ${project.default_branch}` : ''}</span>
                           </div>
                         </td>
-                        <td>{project.profile || '—'}</td>
+                        <td>{project.profile ? <Badge plain>{project.profile}</Badge> : '—'}</td>
                         <td>{workspaceState ? <StatusBadge status={workspaceState} label={labelForStatus(workspaceState)} /> : <span className="muted">未提供</span>}</td>
                         <td>
                           {lastReview ? (
                             <div className={styles.tablePrimary}>
-                              <Link to={`/reviews/${encodeURIComponent(lastReview.id)}`}>!{lastReview.mr_iid} {lastReview.mr_title || ''}</Link>
-                              <span className={styles.tableMeta}>{labelForStatus(lastReview.status)}</span>
+                              <span className={page.reviewCell}>
+                                {lastReview.verdict ? <VerdictBadge verdict={lastReview.verdict} /> : <StatusBadge status={lastReview.status} />}
+                                <Link to={`/reviews/${encodeURIComponent(lastReview.id)}`}>!{lastReview.mr_iid} {lastReview.mr_title || ''}</Link>
+                              </span>
+                              <span className={styles.tableMeta}>
+                                {labelForStatus(lastReview.status)}
+                                {lastReview.created_at ? <> · <RelativeTime value={lastReview.created_at} /></> : null}
+                              </span>
                             </div>
                           ) : <span className="muted">—</span>}
                         </td>
-                        <td><Badge tone={expiry.tone}>{expiry.label}</Badge></td>
+                        <td><span className={[page.expiry, EXPIRY_TONES[expiry.tone]].filter(Boolean).join(' ')}>{expiry.label}</span></td>
                         <td>
                           <Badge tone={webhookTone(webhookState)}>{labelForWebhookState(webhookState)}</Badge>
                           {project.hook_id ? <span className={styles.tableMeta}> · #{project.hook_id}</span> : null}
                         </td>
+                        <td className="muted">{project.access ? ACCESS_LABELS[project.access] || project.access : '—'}</td>
                         <td>
                           {project.access === 'manage' ? (
                             <Switch
@@ -435,7 +477,7 @@ export function ProjectsPage() {
             </div>
           ) : null}
           {projects.hasNextPage ? (
-            <div className={styles.actionsRight}>
+            <div className={`${styles.actionsRight} ${page.tableFooter}`}>
               <Button variant="secondary" onClick={projects.fetchNextPage} loading={projects.isFetchingNextPage}>加载更多项目</Button>
             </div>
           ) : null}
