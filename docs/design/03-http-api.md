@@ -245,7 +245,7 @@ Finding 始终返回 `annotation`：`""` 为未标注，`valid` 为有效，`inv
 | POST | `/api/v1/mcp-servers` | `{scope, project_id?, name, config}`；`config` 为单个 Claude Code `mcpServers` 条目 |
 | PUT / DELETE | `/api/v1/mcp-servers/{id}` | 修改 / 删除；内置服务器（`builtin: true`）只能修改 `enabled`，改名、改配置和删除返回 409 |
 | POST | `/api/v1/mcp-servers/{id}/test` | 启动并列出工具：`{tools:[{name, description}]}` |
-| POST | `/api/v1/mcp-servers/import` | 粘贴整份 `{"mcpServers": {...}}` 批量导入；与内置服务器同名时返回 409 |
+| POST | `/api/v1/mcp-servers/import` | 粘贴整份 `{"mcpServers": {...}}` 批量导入，整体在一个事务内完成，任一条失败则全部不写入；与内置服务器同名时返回 409 |
 | GET | `/api/v1/skills` | `?scope=&project_id=&limit=&cursor=`，响应 `{skills, next_cursor}` |
 | POST | `/api/v1/skills` | multipart 上传 zip（含 `SKILL.md`），或 `{scope, dir}` 登记服务器上的目录 |
 | PATCH | `/api/v1/skills/{id}` | `{enabled: bool}` 启用或禁用；禁用后不加载，仍引用它的块绑定会跳过它 |

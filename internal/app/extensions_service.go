@@ -345,46 +345,22 @@ func (s *ExtensionService) ImportMCPServers(ctx context.Context, in MCPImportInp
 			return nil, err
 		}
 	}
-	existing, err := s.store.ListMCPServers(ctx, scope, projectID)
+	imports := make([]store.MCPServerImport, 0, len(names))
+	for _, name := range names {
+		imports = append(imports, store.MCPServerImport{Name: name, Config: in.Servers[name]})
+	}
+	// One transaction: a built-in name or any write failure leaves no partial
+	// import behind.
+	rows, err := s.store.ImportMCPServers(ctx, scope, projectID, imports)
+	if errors.Is(err, store.ErrBuiltinManaged) {
+		return nil, conflictError(errBuiltinMCPServerManaged)
+	}
 	if err != nil {
 		return nil, extensionStoreError(err)
 	}
-	byName := make(map[string]store.MCPServer, len(existing))
-	for _, row := range existing {
-		byName[row.Name] = row
-	}
-	// Reject before writing so a conflict leaves no partial import behind.
-	for _, name := range names {
-		if current, ok := byName[name]; ok && current.Builtin != "" {
-			return nil, conflictError(errBuiltinMCPServerManaged)
-		}
-	}
-	out := make([]MCPServer, 0, len(in.Servers))
-	for _, name := range names {
-		config := in.Servers[name]
-		if current, ok := byName[name]; ok {
-			enabled := current.Enabled
-			row, err := s.store.UpdateMCPServer(ctx, current.ID, store.MCPServerUpdate{
-				Config:  config,
-				Enabled: &enabled,
-			})
-			if err != nil {
-				return nil, extensionStoreError(err)
-			}
-			out = append(out, mcpServerFromStore(*row))
-			continue
-		}
-		row, err := s.store.CreateMCPServer(ctx, store.MCPServer{
-			Scope:     scope,
-			ProjectID: projectID,
-			Name:      name,
-			Config:    config,
-			Enabled:   true,
-		})
-		if err != nil {
-			return nil, extensionStoreError(err)
-		}
-		out = append(out, mcpServerFromStore(*row))
+	out := make([]MCPServer, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, mcpServerFromStore(row))
 	}
 	return out, nil
 }

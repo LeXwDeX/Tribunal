@@ -333,6 +333,80 @@ func (s *Store) UpdateMCPServer(ctx context.Context, id string, update store.MCP
 	return current, nil
 }
 
+// ImportMCPServers upserts servers by name in one transaction, so a failure
+// on any entry leaves no partial import. An existing row keeps its ID and
+// enabled flag; a new row is enabled. A built-in row is never overwritten: the
+// check runs inside the transaction and returns store.ErrBuiltinManaged.
+func (s *Store) ImportMCPServers(ctx context.Context, scope string, projectID *int64, servers []store.MCPServerImport) ([]store.MCPServer, error) {
+	scope = strings.TrimSpace(scope)
+	if err := store.ValidateExtensionScope(scope, projectID, true); err != nil {
+		return nil, err
+	}
+	if len(servers) == 0 {
+		return nil, errors.New("sqlite: mcp import is empty")
+	}
+	for _, server := range servers {
+		if strings.TrimSpace(server.Name) == "" {
+			return nil, errors.New("sqlite: mcp server name is required")
+		}
+		if !validJSONObject(server.Config) {
+			return nil, errors.New("sqlite: mcp server config must be a JSON object")
+		}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: begin mcp import: %w", err)
+	}
+	defer tx.Rollback()
+
+	now := s.now().UTC()
+	out := make([]store.MCPServer, 0, len(servers))
+	for _, in := range servers {
+		name := strings.TrimSpace(in.Name)
+		current, err := scanMCPServer(tx.QueryRowContext(ctx, `SELECT `+mcpServerColumns+` FROM mcp_servers
+			WHERE scope = ? AND project_id IS ? AND name = ?`, scope, nullableProjectID(projectID), name))
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			id, err := newID()
+			if err != nil {
+				return nil, err
+			}
+			row := store.MCPServer{
+				ID: id, Scope: scope, ProjectID: projectID, Name: name,
+				Config: append(json.RawMessage(nil), in.Config...), Enabled: true,
+				CreatedAt: now, UpdatedAt: now,
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO mcp_servers
+				(id, scope, project_id, name, config, enabled, builtin, created_at, updated_at)
+				VALUES (?, ?, ?, ?, ?, ?, '', ?, ?)`,
+				row.ID, row.Scope, nullableProjectID(row.ProjectID), row.Name, []byte(row.Config),
+				row.Enabled, formatTime(now), formatTime(now)); err != nil {
+				if isConstraintErr(err) {
+					return nil, fmt.Errorf("%w: mcp server %s", store.ErrConflict, name)
+				}
+				return nil, fmt.Errorf("sqlite: insert mcp server: %w", err)
+			}
+			out = append(out, row)
+		case err != nil:
+			return nil, fmt.Errorf("sqlite: read mcp server: %w", err)
+		case current.Builtin != "":
+			return nil, fmt.Errorf("%w: mcp server %s", store.ErrBuiltinManaged, name)
+		default:
+			current.Config = append(json.RawMessage(nil), in.Config...)
+			current.UpdatedAt = now
+			if _, err := tx.ExecContext(ctx, `UPDATE mcp_servers SET config = ?, updated_at = ? WHERE id = ?`,
+				[]byte(current.Config), formatTime(now), current.ID); err != nil {
+				return nil, fmt.Errorf("sqlite: update mcp server: %w", err)
+			}
+			out = append(out, *current)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("sqlite: commit mcp import: %w", err)
+	}
+	return out, nil
+}
+
 // DeleteMCPServer removes one server.
 func (s *Store) DeleteMCPServer(ctx context.Context, id string) error {
 	if strings.TrimSpace(id) == "" {

@@ -6,19 +6,19 @@ import type { Project, ReviewSummary } from '../api/types'
 import { ReviewTable } from '../components/ReviewTable'
 import { TriggerReviewDialog } from '../components/TriggerReviewDialog'
 import {
-  Button, EmptyState, ErrorState, LoadingState, PageHeader, Panel, Toolbar, ToolbarField, useToast,
+  Button, EmptyState, ErrorState, LoadingState, PageHeader, Panel, Segmented, Toolbar, useToast,
 } from '../components/ui'
 import { usePaginated } from '../lib/hooks'
 import ui from '../styles/ui.module.css'
-import styles from './pages.module.css'
+import reviewsStyles from './ReviewsPage.module.css'
 
 const statuses = [
-  ['', '全部状态'],
-  ['pending', '排队中'],
-  ['running', '运行中'],
-  ['completed', '已完成'],
-  ['failed', '失败'],
-  ['cancelled', '已取消'],
+  { value: '', label: '全部' },
+  { value: 'pending', label: '排队中' },
+  { value: 'running', label: '运行中' },
+  { value: 'completed', label: '已完成' },
+  { value: 'failed', label: '失败' },
+  { value: 'cancelled', label: '已取消' },
 ]
 
 const verdicts = [['', '全部结论'], ['PASS', 'PASS'], ['BLOCKING', 'BLOCKING'], ['INCOMPLETE', 'INCOMPLETE']]
@@ -93,7 +93,7 @@ export function ReviewsPage() {
       <div className={ui.pageStack}>
         <PageHeader
           title="评审"
-          description="按项目、状态、结论、档位、触发方式或起始时间筛选。表格在面板内横向滚动。"
+          description="所有有权限项目的评审记录，可按状态、项目、结论、档位、触发方式和起始日期筛选。"
           actions={canTrigger ? (
             <Button variant="primary" onClick={() => setTriggerOpen(true)} disabled={projects.isPending}>
               手动触发评审
@@ -101,62 +101,59 @@ export function ReviewsPage() {
           ) : undefined}
         />
 
-        <Panel title="筛选" aside={hasFilters ? `${activeCount} 个条件` : '未筛选'}>
-          <Toolbar actions={<Button variant="secondary" onClick={clear} disabled={!hasFilters}>清除筛选</Button>}>
-            <ToolbarField label="项目">
-              <select className="select" name="project_id" value={projectId} onChange={(event) => update('project_id', event.target.value)} aria-label="按项目筛选">
-                <option value="">全部项目</option>
-                {projectsList.map((project) => (
-                  <option key={project.id} value={project.id}>{project.path_with_namespace}</option>
-                ))}
-              </select>
-            </ToolbarField>
-            <ToolbarField label="状态">
-              <select className="select" name="status" value={status} onChange={(event) => update('status', event.target.value)} aria-label="按状态筛选">
-                {statuses.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-              </select>
-            </ToolbarField>
-            <ToolbarField label="结论">
-              <select className="select" name="verdict" value={verdict} onChange={(event) => update('verdict', event.target.value)} aria-label="按结论筛选">
-                {verdicts.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-              </select>
-            </ToolbarField>
-            <ToolbarField label="档位">
-              <select className="select" name="profile" value={profile} onChange={(event) => update('profile', event.target.value)} aria-label="按档位筛选">
-                <option value="">全部档位</option>
-                {(profiles.data?.profiles || []).map((item) => <option key={item.name} value={item.name}>{item.name}</option>)}
-              </select>
-            </ToolbarField>
-            <ToolbarField label="触发方式">
-              <select className="select" name="trigger" value={trigger} onChange={(event) => update('trigger', event.target.value)} aria-label="按触发方式筛选">
-                {triggers.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-              </select>
-            </ToolbarField>
-            <ToolbarField label="起始日期">
-              <input className="input" name="since" type="date" value={sinceDate} onChange={(event) => update('since', event.target.value)} aria-label="起始日期" />
-            </ToolbarField>
-          </Toolbar>
-          {projects.isError ? <span className="small muted">项目筛选列表加载失败，仍可查看全部项目。</span> : null}
-          {profiles.isError ? <span className="small muted">档位筛选列表加载失败。</span> : null}
-        </Panel>
-
         <Panel
+          flush
           title="评审记录"
           aside={reviews.isSuccess ? `${reviews.items.length}${reviews.hasNextPage ? '+' : ''} 条` : undefined}
         >
-          {reviews.isPending ? <LoadingState /> : null}
-          {reviews.isError ? <ErrorState error={reviews.error} onRetry={reviews.retry} /> : null}
+          <Toolbar
+            inset
+            label="筛选评审"
+            className={reviewsStyles.filters}
+            actions={<Button variant="secondary" className={ui.smallButton} onClick={clear} disabled={!hasFilters}>清除筛选{hasFilters ? `（${activeCount}）` : ''}</Button>}
+          >
+            <div className={reviewsStyles.statusFilter}>
+              <Segmented label="按状态筛选" options={statuses} value={status} onChange={(value) => update('status', value)} />
+            </div>
+            <select className="select" name="project_id" value={projectId} onChange={(event) => update('project_id', event.target.value)} aria-label="按项目筛选">
+              <option value="">全部项目</option>
+              {projectsList.map((project) => (
+                <option key={project.id} value={project.id}>{project.path_with_namespace}</option>
+              ))}
+            </select>
+            <select className="select" name="verdict" value={verdict} onChange={(event) => update('verdict', event.target.value)} aria-label="按结论筛选">
+              {verdicts.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+            </select>
+            <select className="select" name="profile" value={profile} onChange={(event) => update('profile', event.target.value)} aria-label="按档位筛选">
+              <option value="">全部档位</option>
+              {(profiles.data?.profiles || []).map((item) => <option key={item.name} value={item.name}>{item.name}</option>)}
+            </select>
+            <select className="select" name="trigger" value={trigger} onChange={(event) => update('trigger', event.target.value)} aria-label="按触发方式筛选">
+              {triggers.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+            </select>
+            <input className="input" name="since" type="date" value={sinceDate} onChange={(event) => update('since', event.target.value)} aria-label="起始日期" title="起始日期" />
+          </Toolbar>
+          {projects.isError || profiles.isError ? (
+            <div className={reviewsStyles.notes}>
+              {projects.isError ? <span className="small muted">项目筛选列表加载失败，仍可查看全部项目。</span> : null}
+              {profiles.isError ? <span className="small muted">档位筛选列表加载失败。</span> : null}
+            </div>
+          ) : null}
+          {reviews.isPending ? <div className={reviewsStyles.state}><LoadingState /></div> : null}
+          {reviews.isError ? <div className={reviewsStyles.state}><ErrorState error={reviews.error} onRetry={reviews.retry} /></div> : null}
           {reviews.isSuccess && reviews.items.length === 0 ? (
-            <EmptyState
-              title={hasFilters ? '没有符合条件的评审' : '还没有评审记录'}
-              description={hasFilters ? '调整筛选条件，或清除筛选查看全部记录。' : '注册项目并打开 MR，或手动触发一次评审。'}
-              action={hasFilters ? <Button variant="secondary" onClick={clear}>清除筛选</Button> : undefined}
-            />
+            <div className={reviewsStyles.state}>
+              <EmptyState
+                title={hasFilters ? '没有符合条件的评审' : '还没有评审记录'}
+                description={hasFilters ? '调整筛选条件，或清除筛选查看全部记录。' : '注册项目并打开 MR，或手动触发一次评审。'}
+                action={hasFilters ? <Button variant="secondary" onClick={clear}>清除筛选</Button> : undefined}
+              />
+            </div>
           ) : null}
           {reviews.items.length ? <ReviewTable reviews={reviews.items} projectNames={projectNames} /> : null}
           {reviews.hasNextPage ? (
-            <div className={styles.actionsRight}>
-              <Button variant="secondary" onClick={reviews.fetchNextPage} loading={reviews.isFetchingNextPage}>加载更多</Button>
+            <div className={ui.loadMore}>
+              <Button variant="secondary" className={ui.smallButton} onClick={reviews.fetchNextPage} loading={reviews.isFetchingNextPage}>加载更多</Button>
             </div>
           ) : null}
         </Panel>
