@@ -224,6 +224,10 @@ export interface ReviewSummary {
   publication_error?: string
   findings_summary?: FindingsSummary
   usage?: ReviewUsage
+  // List items carry usage at the top level (store.Workflow); detail adds `usage`.
+  tokens_in?: number
+  tokens_out?: number
+  cost_micros?: number
   duration_ms?: number
   created_at?: string
   started_at?: string

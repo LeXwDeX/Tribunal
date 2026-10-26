@@ -94,6 +94,16 @@ describe('AppShell breadcrumbs', () => {
     expect(within(crumbs()).getByText('group/app !42')).toHaveAttribute('aria-current', 'page')
   })
 
+  it('reads the project path from the cached project when the detail API omits it', () => {
+    installFetch(() => new Promise<Response>(() => {}))
+    const client = createTestQueryClient()
+    const { project_path: _omitted, ...detail } = review('r2')
+    client.setQueryData(['review', 'r2', 'detail'], detail)
+    client.setQueryData(['project', detail.project_id], { id: detail.project_id, path_with_namespace: 'group/cached' })
+    renderShell('/reviews/r2', client)
+    expect(within(crumbs()).getByText(`group/cached !${detail.mr_iid}`)).toHaveAttribute('aria-current', 'page')
+  })
+
   it('falls back to the review ID before the detail has loaded', () => {
     installFetch(() => new Promise<Response>(() => {}))
     renderShell('/reviews/r9')

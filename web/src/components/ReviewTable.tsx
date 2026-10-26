@@ -41,7 +41,9 @@ export function ReviewTable({ reviews, projectNames }: { reviews: ReviewSummary[
         <tbody>
           {reviews.map((review) => {
             const href = reviewHref(review)
-            const title = review.mr_title || '未命名 MR'
+            // The list API does not return mr_title; fall back to the MR reference.
+            const title = review.mr_title || `!${review.mr_iid}`
+            const label = review.mr_title ? `!${review.mr_iid} ${review.mr_title}` : `!${review.mr_iid}`
             return (
               <tr
                 key={review.id}
@@ -53,7 +55,7 @@ export function ReviewTable({ reviews, projectNames }: { reviews: ReviewSummary[
               >
                 <td>
                   <div className={styles.primary}>
-                    <Link to={href} className={styles.titleLink} aria-label={`!${review.mr_iid} ${title}`} title={title}>
+                    <Link to={href} className={styles.titleLink} aria-label={label} title={title}>
                       {title}
                     </Link>
                     <span className={styles.meta}>
@@ -77,7 +79,7 @@ export function ReviewTable({ reviews, projectNames }: { reviews: ReviewSummary[
                 <td>{review.verdict ? <VerdictBadge verdict={review.verdict} /> : <span className="muted">—</span>}</td>
                 <td><SevCounts summary={review.findings_summary} /></td>
                 <td className="right num mono">{formatDuration(review.duration_ms)}</td>
-                <td className="right num mono">{formatCost(review.usage?.cost_micros)}</td>
+                <td className="right num mono">{formatCost(review.usage?.cost_micros ?? review.cost_micros)}</td>
                 <td className="muted nowrap"><RelativeTime value={review.created_at} /></td>
               </tr>
             )

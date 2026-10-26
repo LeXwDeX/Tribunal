@@ -337,7 +337,7 @@ export function OverviewPage() {
               <ul className={overview.liveList}>
                 {running.items.map((review) => {
                   const stage = deriveReviewStage(review.nodes)
-                  const title = review.mr_title || '未命名 MR'
+                  const title = review.mr_title || `!${review.mr_iid}`
                   return (
                     <li key={review.id} className={overview.liveItem}>
                       <div className={overview.primary}>
