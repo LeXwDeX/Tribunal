@@ -206,6 +206,7 @@ func TestRunStartsAndStopsCleanly(t *testing.T) {
 	config := strings.ReplaceAll(string(source), ":8080", fmt.Sprintf("127.0.0.1:%d", port))
 	config = strings.ReplaceAll(config, "http://localhost:8080", fmt.Sprintf("http://127.0.0.1:%d", port))
 	config = strings.ReplaceAll(config, "file:data/review.db", "file:"+filepath.Join(dir, "review.db"))
+	config = strings.ReplaceAll(config, `root: "data/workspaces"`, fmt.Sprintf("root: %q", filepath.Join(dir, "workspaces")))
 	config = strings.ReplaceAll(config, "https://gitlab.example.internal", "http://127.0.0.1:1")
 	path := filepath.Join(dir, "server.yaml")
 	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
