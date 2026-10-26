@@ -1,6 +1,7 @@
 // Command licensecheck rejects modules with forbidden or unrecognized licenses.
-// It applies the same rule to every bundled skill directory, which must carry
-// its own permissive LICENSE.
+// It applies the same rule to every bundled skill directory and to every
+// executable bundled in the Docker image (one directory per component under
+// third_party), each of which must carry its own permissive LICENSE.
 package main
 
 import (
@@ -52,6 +53,7 @@ func run(args []string, stdout, stderr io.Writer, list func() ([]byte, error)) i
 	fs.SetOutput(stderr)
 	min := fs.Int("min", 0, "minimum number of non-main modules to check")
 	skills := fs.String("skills", "", "bundled skills directory to check (default internal/skill/builtin when present)")
+	executables := fs.String("bundled", "", "bundled executables directory to check (default third_party when present)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -97,28 +99,51 @@ func run(args []string, stdout, stderr io.Writer, list func() ([]byte, error)) i
 	if bundled >= 0 {
 		fmt.Fprintf(stdout, "licensecheck: checked %d bundled skills\n", bundled)
 	}
+
+	dir, explicit = *executables, *executables != ""
+	if !explicit {
+		dir = defaultExecutablesDir
+	}
+	components, err := checkBundledDirs(dir, explicit, stdout, "bundled executable")
+	if err != nil {
+		fmt.Fprintf(stderr, "licensecheck: %v\n", err)
+		return 1
+	}
+	if components >= 0 {
+		fmt.Fprintf(stdout, "licensecheck: checked %d bundled executables\n", components)
+	}
 	return 0
 }
 
-const defaultSkillsDir = "internal/skill/builtin"
+const (
+	defaultSkillsDir      = "internal/skill/builtin"
+	defaultExecutablesDir = "third_party"
+)
 
 // checkBundledSkills checks each skill directory below dir. It returns -1
 // when the default directory does not exist, for example outside the
 // repository root.
 func checkBundledSkills(dir string, explicit bool, stdout io.Writer) (int, error) {
+	return checkBundledDirs(dir, explicit, stdout, "bundled skill")
+}
+
+// checkBundledDirs checks each component directory below dir, labelled
+// "<kind> <name>" in errors. It returns -1 when the default directory does
+// not exist.
+func checkBundledDirs(dir string, explicit bool, stdout io.Writer, kind string) (int, error) {
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, os.ErrNotExist) && !explicit {
 		return -1, nil
 	}
 	if err != nil {
-		return 0, fmt.Errorf("bundled skills: %w", err)
+		return 0, fmt.Errorf("%ss: %w", kind, err)
 	}
 	checked := 0
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
-		if err := checkLicensedDir(filepath.Join(dir, entry.Name()), stdout, "bundled skill "+entry.Name()); err != nil {
+		if err := checkLicensedDir(filepath.Join(dir, entry.Name()), stdout, kind+" "+entry.Name()); err != nil {
 			return checked, err
 		}
 		checked++

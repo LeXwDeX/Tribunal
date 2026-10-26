@@ -68,3 +68,43 @@ default_extensions:
   skills:
     - name: code-review
       blocks: [code-review, review]
+  # Built-in code graph: codebase-memory-mcp 0.12.1 (MIT), bundled in the
+  # Docker image. Its config follows the release on every start and it can be
+  # disabled but not deleted. The wrapper keeps HOME, cache and runtime inside
+  # each project workspace and turns off auto-indexing, the file watcher and
+  # the graph UI; the analysis profile exposes read-only tools only.
+  # index_repository, delete_project, ingest_traces and manage_adr are never
+  # granted to a block.
+  mcp_servers:
+    - name: codebase-memory
+      config:
+        command: /usr/local/bin/tribunal-codebase-memory-mcp
+        args: ["--tool-profile=analysis"]
+        x-review:
+          # Onboarding and refresh index the fixed base/ checkout via the CLI.
+          index_command:
+            - /usr/local/bin/tribunal-codebase-memory-mcp
+            - cli
+            - --quiet
+            - index_repository
+            - '{"repo_path":"{base_dir}"}'
+          env_allowlist: ["PATH"]
+          home: .mcp/codebase-memory/home
+          call_timeout: 60s
+          max_output_chars: 20000
+          idle_timeout: 10m
+      tools:
+        code-review: &codebase_memory_read_tools
+          - list_projects
+          - index_status
+          - search_graph
+          - trace_path
+          - get_code_snippet
+          - query_graph
+          - get_graph_schema
+          - get_file_outline
+          - get_architecture
+          - search_code
+          - check_index_coverage
+        review: *codebase_memory_read_tools
+        verify: [get_code_snippet]

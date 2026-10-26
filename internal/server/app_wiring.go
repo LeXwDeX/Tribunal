@@ -322,6 +322,7 @@ func mcpServerFromApp(server app.MCPServer) MCPServer {
 		Name:      server.Name,
 		Config:    server.Config,
 		Enabled:   server.Enabled,
+		Builtin:   server.Builtin,
 		CreatedAt: server.CreatedAt,
 		UpdatedAt: server.UpdatedAt,
 	}

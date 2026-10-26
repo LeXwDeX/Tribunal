@@ -64,8 +64,8 @@ func TestOnboardingOnlyRecordsIndexAfterCommandRuns(t *testing.T) {
 	cases := []struct {
 		name      string
 		manager   func(*testing.T) *mcp.Manager
-		wantErr   bool
 		wantIndex string
+		wantError string
 	}{
 		{
 			name:    "no manager",
@@ -89,7 +89,10 @@ func TestOnboardingOnlyRecordsIndexAfterCommandRuns(t *testing.T) {
 			manager: func(t *testing.T) *mcp.Manager {
 				return indexTestManager(t, []string{"/definitely/not/a/command"})
 			},
-			wantErr: true,
+			// A missing or broken indexer degrades onboarding instead of
+			// failing it: context documents are still generated and the
+			// workspace records a diagnosable error.
+			wantError: `mcp: index command for "indexer" failed`,
 		},
 	}
 	for _, tc := range cases {
@@ -99,19 +102,6 @@ func TestOnboardingOnlyRecordsIndexAfterCommandRuns(t *testing.T) {
 			setIndexFactory(service, tc.manager(t))
 
 			err := service.Onboard(context.Background(), 42)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatal("Onboard succeeded with a failing index command")
-				}
-				state, stateErr := f.db.GetWorkspace(context.Background(), 42)
-				if stateErr != nil {
-					t.Fatalf("GetWorkspace: %v", stateErr)
-				}
-				if state.IndexSHA != "" {
-					t.Fatalf("failed index recorded sha %q", state.IndexSHA)
-				}
-				return
-			}
 			if err != nil {
 				t.Fatalf("Onboard: %v", err)
 			}
@@ -124,6 +114,12 @@ func TestOnboardingOnlyRecordsIndexAfterCommandRuns(t *testing.T) {
 			}
 			if state.State != "ready" {
 				t.Fatalf("workspace state = %q, want ready", state.State)
+			}
+			if tc.wantError == "" && state.LastError != "" {
+				t.Fatalf("last error = %q, want none", state.LastError)
+			}
+			if tc.wantError != "" && !strings.Contains(state.LastError, tc.wantError) {
+				t.Fatalf("last error = %q, want %q", state.LastError, tc.wantError)
 			}
 		})
 	}
@@ -181,5 +177,37 @@ func TestRefreshRecordsIndexWhenCommandRuns(t *testing.T) {
 	}
 	if state.IndexSHA != reviewTestHead {
 		t.Fatalf("index sha = %q, want %q after the configured command ran", state.IndexSHA, reviewTestHead)
+	}
+}
+
+func TestRefreshKeepsPreviousIndexWhenIndexerFails(t *testing.T) {
+	f := newReviewFixture(t, reviewTestHead)
+	oldBase := strings.Repeat("a", 40)
+	if _, err := f.db.SaveWorkspace(context.Background(), store.Workspace{
+		ProjectID: 42, State: "ready", BaseSHA: oldBase, IndexSHA: oldBase,
+	}); err != nil {
+		t.Fatalf("SaveWorkspace: %v", err)
+	}
+	service := newOnboardingContextService(t, f, onboardingIndexRunner)
+	setIndexFactory(service, indexTestManager(t, []string{"/definitely/not/a/command"}))
+
+	if err := service.RefreshWithOptions(context.Background(), 42, "main", WorkspaceRefreshOptions{
+		Reindex:           contextBoolPtr(true),
+		RegenerateContext: contextBoolPtr(false),
+	}); err != nil {
+		t.Fatalf("RefreshWithOptions failed instead of degrading: %v", err)
+	}
+	state, err := f.db.GetWorkspace(context.Background(), 42)
+	if err != nil {
+		t.Fatalf("GetWorkspace: %v", err)
+	}
+	if state.State != "ready" || state.BaseSHA != reviewTestHead {
+		t.Fatalf("workspace = %+v, want ready on the new base", state)
+	}
+	if state.IndexSHA != oldBase {
+		t.Fatalf("index sha = %q, want the previous index %q", state.IndexSHA, oldBase)
+	}
+	if !strings.Contains(state.LastError, "index command") {
+		t.Fatalf("last error = %q, want the index failure", state.LastError)
 	}
 }

@@ -300,3 +300,38 @@ func TestRunRejectsMissingExplicitSkillsDir(t *testing.T) {
 		t.Fatalf("missing skills dir: code = %d, stderr = %s", code, stderr)
 	}
 }
+
+func TestRunChecksBundledExecutables(t *testing.T) {
+	modDir := t.TempDir()
+	writeFile(t, modDir, "LICENSE", mitText)
+	data, err := encodeModules(module{Path: "example.com/a", Dir: modDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := func() ([]byte, error) { return data, nil }
+
+	bundled := t.TempDir()
+	tool := filepath.Join(bundled, "graph-tool")
+	if err := os.MkdirAll(tool, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, tool, "LICENSE", mitText)
+	code, stdout, stderr := runWithList([]string{"-min", "1", "-bundled", bundled}, list)
+	if code != 0 {
+		t.Fatalf("run = %d, stderr = %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "checked 1 bundled executables") {
+		t.Fatalf("stdout = %q", stdout)
+	}
+
+	writeFile(t, tool, "LICENSE", "GNU General Public License v3\n")
+	code, _, stderr = runWithList([]string{"-min", "1", "-bundled", bundled}, list)
+	if code == 0 || !strings.Contains(stderr, "bundled executable graph-tool") {
+		t.Fatalf("GPL bundled executable: code %d stderr %q", code, stderr)
+	}
+
+	code, _, stderr = runWithList([]string{"-min", "1", "-bundled", filepath.Join(bundled, "missing")}, list)
+	if code == 0 || !strings.Contains(stderr, "bundled executables") {
+		t.Fatalf("missing bundled dir: code %d stderr %q", code, stderr)
+	}
+}

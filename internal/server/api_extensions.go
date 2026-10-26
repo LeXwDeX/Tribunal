@@ -38,8 +38,11 @@ type MCPServer struct {
 	Name      string          `json:"name"`
 	Config    json.RawMessage `json:"config"`
 	Enabled   bool            `json:"enabled"`
-	CreatedAt time.Time       `json:"created_at"`
-	UpdatedAt time.Time       `json:"updated_at"`
+	// Builtin marks a server shipped with the platform: it can be disabled
+	// but not renamed, reconfigured or deleted.
+	Builtin   bool      `json:"builtin"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // MCPTool is one tool listed by a test connection.

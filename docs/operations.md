@@ -146,11 +146,12 @@ docker compose start review
 
 ## 1. 镜像内容与边界
 
-镜像分三阶段构建：
+镜像分四阶段构建：
 
 1. `web`：执行 `npm ci` 和 `npm run build`，生成控制台 `web/dist`。
 2. `build`：先 `go mod download`，再构建 `cmd/server` 和 `cmd/tribunalctl`；服务嵌入上一步的新 `web/dist`。
-3. `runtime`：包含 `/app/server`、`/app/tribunalctl`、示例配置、许可证、CA 证书，以及 `curl`、`git` 和创建非 root 用户所需的 `passwd` 工具。
+3. `codebase-memory`：按 `TARGETARCH` 下载 codebase-memory-mcp 0.12.1 的 `-portable` 发布包，校验固定的 SHA-256，核对许可证与仓库记录一致，只取出二进制和许可证文本。
+4. `runtime`：包含 `/app/server`、`/app/tribunalctl`、示例配置、许可证、CA 证书、`/usr/local/bin/codebase-memory-mcp` 与隔离 wrapper，以及 `curl`、`git` 和创建非 root 用户所需的 `passwd` 工具。
 
 镜像保留兼容符号链接 `/app/reviewctl`，指向 `/app/tribunalctl`；旧编排脚本可继续调用该旧路径。源码用户改用 `go run ./cmd/tribunalctl`。
 
@@ -160,8 +161,8 @@ docker compose start review
 - 持久化目录为 `/app/data`，声明为卷；SQLite 数据库、WAL/SHM 文件和项目工作区都在这里。
 - 默认监听 `8080`，容器内为 HTTP；TLS 由反向代理终止。
 - 镜像不包含 `.git`、`node_modules`、本地 `data`、真实 `config/server.yaml`、`.env`、证书或私钥。
-- 许可证位于 `/licenses/LICENSE` 和 `/licenses/THIRD_PARTY_NOTICES.txt`；后者是单一声明文件，覆盖 Go 标准库、Linux/amd64 服务端的 40 个模块和 9 个 production npm 包。当前 Dockerfile 仍把遗留的 `THIRD_PARTY_LICENSES` 一并复制到 `/licenses/`，但发布声明以 `THIRD_PARTY_NOTICES.txt` 为准。`git` 及 Debian 软件包自身的许可证在 `/usr/share/doc/`。
-- 工作区只使用 http(s) Git remote，镜像不安装 SSH 客户端。外部 MCP 服务器（如 codebase-memory-mcp）不在此镜像内；需要时由部署方安装或使用扩展镜像。
+- 许可证位于 `/licenses/LICENSE` 和 `/licenses/THIRD_PARTY_NOTICES.txt`；后者是单一声明文件，覆盖 Go 标准库、Linux/amd64 服务端的 40 个模块、9 个 production npm 包和镜像内置的 codebase-memory-mcp。当前 Dockerfile 仍把遗留的 `THIRD_PARTY_LICENSES` 一并复制到 `/licenses/`，但发布声明以 `THIRD_PARTY_NOTICES.txt` 为准。`git` 及 Debian 软件包自身的许可证在 `/usr/share/doc/`。
+- 工作区只使用 http(s) Git remote，镜像不安装 SSH 客户端。镜像内置 codebase-memory-mcp（见下文）；其他 MCP 服务器由部署方安装或使用扩展镜像。
 - 仅支持一个服务实例使用一个 SQLite 数据目录。不要用多个容器共享同一数据库文件或同一数据卷。
 - 后台 run cleanup 在启动后立即执行、之后每小时执行。它先查询 `workspaces`、run 保护集合和 context 保护 SHA，再触碰项目文件；只处理有 `workspaces` 记录的项目。超过 `workspace.run_cleanup_after` 的 `runs/<id>` 需未被未终态 workflow、queued/running job、`publication_state=pending` 的 dossier 或本进程注册 run 引用；`context/<sha>` 需未被任何 DB revision、当前 workspace base/context、未终态或待发布 workflow base 引用。locked/非法 metadata 保留并 fail closed；项目列表查询失败时整轮保留，某项保护查询失败时跳过该项目。
 
@@ -174,6 +175,24 @@ docker compose start review
 | 运行时 | `debian:bookworm-slim` |
 
 `Dockerfile` 使用这些标签，不使用 `latest` 或未核对的标签。生产发布建议进一步固定镜像 digest。
+
+### 内置代码图谱服务 codebase-memory-mcp
+
+镜像内置 [codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp) 0.12.1（MIT，独立进程，不链接进 Go 二进制）：
+
+| 路径 | 内容 |
+|---|---|
+| `/usr/local/bin/codebase-memory-mcp` | 上游静态链接二进制，SHA-256 在 Dockerfile 中固定 |
+| `/usr/local/bin/tribunal-codebase-memory-mcp` | [隔离 wrapper](../scripts/codebase-memory-mcp.sh) |
+| `/usr/local/bin/crc-codebase-memory-mcp` | 指向 wrapper 的旧名兼容链接 |
+| `/licenses/codebase-memory-mcp/` | 上游 `LICENSE` 与 `THIRD_PARTY_NOTICES.md` |
+
+镜像不运行上游 `install`，不写任何 agent 配置或 hooks。示例配置和 `config/server.docker.yaml` 的 `default_extensions` 在首次启动时登记平台级 stdio 服务器 `codebase-memory`（`--tool-profile=analysis`），并为 `code-review`、`review` 授权只读图谱工具、为 `verify` 授权 `get_code_snippet`。项目 onboarding 和刷新用 CLI 为固定的 `base/` 建索引。每个项目的 `HOME`、`CBM_CACHE_DIR`、`CBM_RUNTIME_DIR` 都在该项目工作区内，项目之间查不到彼此的索引；auto_index、watcher 和 UI 均关闭。规则详见 [默认扩展](design/06-config.md#默认扩展default_extensions) 和 [内置 codebase-memory-mcp](design/06-config.md#内置-codebase-memory-mcp)。
+
+- **查看和测试**：控制台「扩展」页列出 `codebase-memory`；「测试并列出工具」返回的列表不含 `index_repository`、`delete_project`、`ingest_traces`、`manage_adr`。
+- **内置标识**：它带「内置」标签，只能停用或启用。名称和配置随平台版本走，不能在控制台编辑；删除、改名、改配置或用导入覆盖都返回 409。
+- **禁用**：在「扩展」页点「停用」，或 `PUT /api/v1/mcp-servers/{id}` 设置 `"enabled": false`，然后重启服务。重启和升级都保持停用。
+- **故障表现**：二进制缺失或无法启动时评审照常完成，但没有图谱工具；评审结论里出现 `MCP tools unavailable` 告警，原本会 PASS 的评审显示为 INCOMPLETE。建索引失败时 onboarding 照常完成，工作区的 `last_error` 记录 `index: ...`。
 
 ## 2. 构建
 
@@ -425,6 +444,8 @@ curl -fsS http://127.0.0.1:8080/readyz
 
 注意事项：
 
+- 内置扩展随平台升级：新镜像附带的 codebase-memory-mcp 配置（版本、参数）在下次启动时写入已登记的内置服务器，启用状态保持不变；默认工具白名单在块绑定仍是默认机制写入的样子时同步更新，管理员改过的绑定和 YAML `blocks` 中声明的块不动。已有部署若在数据库或 `mcp.config` 中自建了同名 `codebase-memory` 服务器，服务不会接管它，也不会绑定它的工具。
+- 升级内置的 codebase-memory-mcp 版本时，按 [内置 codebase-memory-mcp](design/06-config.md#内置-codebase-memory-mcp) 同时更新 Dockerfile 版本与 SHA-256、`third_party/codebase-memory-mcp/` 和许可证清单，并重新跑 Docker smoke。
 - 镜像 tag 改为 `tribunal:*`；旧镜像的仓库名是 `crc-review`，升级时重新构建或改 tag。Compose 项目名 `crc-review`、旧数据卷 `crc-review_data` 和 `crc-data` 刻意不改名；继续挂载原卷即可保留数据。
 - 管理 CLI 改用 `tribunalctl`；旧镜像路径 `/app/reviewctl` 以兼容符号链接保留。源码用户改用 `go run ./cmd/tribunalctl`。
 - 环境变量主名改为 `TRIBUNAL_SESSION_KEY`、`TRIBUNAL_PUBLIC_URL`、`TRIBUNAL_HTTP_PORT`；旧 `CRC_*` 名仍兼容，新旧同时设置时新名优先。三个旧名只要配置了非空值，都会各记录一次弃用日志；日志只含变量名、不含值。日志表示旧名仍配置，不代表旧值一定生效或一定被忽略。升级时复用原 session key 的同一个值，否则现有浏览器会话失效。
@@ -535,7 +556,7 @@ rm -rf "$TMP_OAUTH"
 bash scripts/docker-smoke.sh
 ```
 
-脚本使用独立临时 Compose 项目、数据卷、假环境变量和随机宿主机端口，不使用用户 `.env` 的真实凭据，也不登记真实项目。它验证 Compose 配置、镜像构建、非 root 身份、卷权限、Git、许可证、静态控制台、健康接口、Bearer CLI、默认 OAuth 关闭，以及重建容器后数据仍存在。退出时只清理本次测试拥有的资源，不执行全局 prune。该脚本需要真实 Docker daemon；仅通过 shell 语法检查不算容器验证。
+脚本使用独立临时 Compose 项目、数据卷、假环境变量和随机宿主机端口，不使用用户 `.env` 的真实凭据，也不登记真实项目。它验证 Compose 配置、镜像构建、非 root 身份、卷权限、Git、许可证、静态控制台、健康接口、Bearer CLI、默认 OAuth 关闭、内置 codebase-memory-mcp（版本、wrapper、兼容链接、许可证、CLI 在隔离 `HOME` 中建索引、默认服务器已登记且测试接口只列出只读工具），以及重建容器后数据仍存在。退出时只清理本次测试拥有的资源，不执行全局 prune。该脚本需要真实 Docker daemon；仅通过 shell 语法检查不算容器验证。
 
 ### Docker 可用时的单镜像烟测
 

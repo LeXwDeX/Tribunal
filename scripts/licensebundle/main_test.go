@@ -636,3 +636,40 @@ func TestBuildIncludesBundledSkills(t *testing.T) {
 		t.Fatalf("build with unlicensed skill = %v", err)
 	}
 }
+
+func TestBuildIncludesBundledExecutables(t *testing.T) {
+	root, list := newFixture(t)
+	dir := filepath.Join(root, "third_party", "graph-tool")
+	writeFile(t, dir, "LICENSE", "graph tool MIT text\n")
+	writeFile(t, dir, "VERSION", "1.2.3\n")
+
+	content, err := build(root, list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(content)
+	for _, want := range []string{
+		"executables bundled in the Docker image",
+		"Bundled executable: graph-tool 1.2.3 (separate process; notices in /licenses/graph-tool/)",
+		"graph tool MIT text",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("bundle is missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestBuildRejectsBundledExecutableWithoutVersionOrLicense(t *testing.T) {
+	root, list := newFixture(t)
+	dir := filepath.Join(root, "third_party", "graph-tool")
+	writeFile(t, dir, "LICENSE", "graph tool MIT text\n")
+	if _, err := build(root, list); err == nil || !strings.Contains(err.Error(), "VERSION") {
+		t.Fatalf("build without VERSION = %v", err)
+	}
+	other := filepath.Join(root, "third_party", "no-license")
+	writeFile(t, dir, "VERSION", "1.2.3\n")
+	writeFile(t, other, "VERSION", "1.0.0\n")
+	if _, err := build(root, list); err == nil || !strings.Contains(err.Error(), "no-license") {
+		t.Fatalf("build without LICENSE = %v", err)
+	}
+}

@@ -274,13 +274,18 @@ func (s *WorkspaceService) RefreshWithOptions(ctx context.Context, projectID int
 	}
 	reindex := options.Reindex == nil || *options.Reindex
 	indexSHA := state.IndexSHA
+	indexErr := ""
 	if reindex && s.mcpFactory != nil {
 		count, err := s.runIndex(ctx, projectID, ws.BaseDir())
-		if err != nil {
+		switch {
+		case err != nil && ctx.Err() != nil:
 			s.markWorkspaceError(ctx, projectID, err)
 			return err
-		}
-		if count > 0 {
+		case err != nil:
+			// The previous index stays in use; reviews continue and report
+			// the missing code graph themselves.
+			indexErr = s.indexDegraded(projectID, err)
+		case count > 0:
 			indexSHA = newBase
 		}
 	}
@@ -314,6 +319,7 @@ func (s *WorkspaceService) RefreshWithOptions(ctx context.Context, projectID int
 		IndexSHA:      indexSHA,
 		ContextSHA:    contextAfter,
 		LastRefreshAt: timePtr(s.now().UTC()),
+		LastError:     indexErr,
 	})
 	return nil
 }
@@ -356,15 +362,22 @@ func (s *WorkspaceService) onboardLocked(ctx context.Context, project *store.Pro
 		}
 	}
 	indexed := false
+	indexErr := ""
 	if s.mcpFactory != nil {
 		count, err := s.runIndex(ctx, project.ID, ws.BaseDir())
-		if err != nil {
+		switch {
+		case err != nil && ctx.Err() != nil:
 			s.markWorkspaceError(ctx, project.ID, err)
 			return err
+		case err != nil:
+			// A missing or broken indexer must not block onboarding: the
+			// context documents are still generated without a code graph.
+			indexErr = s.indexDegraded(project.ID, err)
+		default:
+			// An MCP manager can exist without an index command. Only a
+			// command that actually ran proves this base was indexed.
+			indexed = count > 0
 		}
-		// An MCP manager can exist without an index command. Only a command
-		// that actually ran proves this base was indexed.
-		indexed = count > 0
 	}
 	if err := s.generateContext(ctx, project, token, ws, base, false); err != nil {
 		s.markWorkspaceError(ctx, project.ID, err)
@@ -380,6 +393,7 @@ func (s *WorkspaceService) onboardLocked(ctx context.Context, project *store.Pro
 		BaseSHA:    base,
 		IndexSHA:   indexSHA,
 		ContextSHA: s.activeContextBase(ctx, project.ID, base),
+		LastError:  indexErr,
 	})
 	return nil
 }
@@ -548,6 +562,13 @@ func (s *WorkspaceService) refreshBase(ctx context.Context, ws *workspace.Worksp
 		return "", statErr
 	}
 	return sha, nil
+}
+
+// indexDegraded logs a failed index run and returns the workspace error text.
+// MCP index errors never contain arguments or command output.
+func (s *WorkspaceService) indexDegraded(projectID int64, err error) string {
+	s.logger.Warn("code graph index failed; continuing without it", "project_id", projectID, "error", err)
+	return "index: " + err.Error()
 }
 
 func (s *WorkspaceService) runIndex(ctx context.Context, projectID int64, baseDir string) (int, error) {

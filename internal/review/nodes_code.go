@@ -101,6 +101,7 @@ type VerifyResult struct {
 	Model     string    `json:"model,omitempty"`
 	SameModel bool      `json:"same_model,omitempty"`
 	Result    VerifyOut `json:"result"`
+	ToolGaps  []string  `json:"tool_gaps,omitempty"`
 }
 
 // Validate checks the verify envelope and the embedded contract.

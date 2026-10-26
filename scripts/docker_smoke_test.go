@@ -75,9 +75,11 @@ func TestDockerSmokeCleanup(t *testing.T) {
 		downFail        bool
 		imageFail       bool
 		rmFail          bool
+		mcpWriteTool    bool
 		wantExit        int
 		wantImageRemove bool
 		wantWarnings    []string
+		wantOutput      string
 	}{
 		{name: "success", wantExit: 0, wantImageRemove: true},
 		{name: "build failure", buildFail: true, wantExit: 1},
@@ -87,6 +89,8 @@ func TestDockerSmokeCleanup(t *testing.T) {
 			wantWarnings: []string{"could not remove image"}},
 		{name: "temporary directory removal failure", rmFail: true, wantExit: 1, wantImageRemove: true,
 			wantWarnings: []string{"could not remove temporary directory"}},
+		{name: "MCP exposes a write tool", mcpWriteTool: true, wantExit: 1, wantImageRemove: true,
+			wantOutput: "codebase-memory MCP exposes write tool delete_project"},
 	}
 
 	for _, tc := range tests {
@@ -116,6 +120,7 @@ func TestDockerSmokeCleanup(t *testing.T) {
 				"SMOKE_FAKE_DOWN_FAIL=" + boolEnv(tc.downFail),
 				"SMOKE_FAKE_IMAGE_RM_FAIL=" + boolEnv(tc.imageFail),
 				"SMOKE_FAKE_RM_FAIL=" + boolEnv(tc.rmFail),
+				"SMOKE_FAKE_MCP_WRITE_TOOL=" + boolEnv(tc.mcpWriteTool),
 				"TRIBUNAL_SESSION_KEY=" + callerSecret,
 				"CRC_SESSION_KEY=" + callerSecret,
 				"TRIBUNAL_PUBLIC_URL=https://caller.invalid",
@@ -134,6 +139,9 @@ func TestDockerSmokeCleanup(t *testing.T) {
 			}
 			if exitCode != tc.wantExit {
 				t.Fatalf("exit code = %d, want %d\n%s", exitCode, tc.wantExit, output)
+			}
+			if tc.wantOutput != "" && !strings.Contains(string(output), tc.wantOutput) {
+				t.Fatalf("missing failure %q\n%s", tc.wantOutput, output)
 			}
 			for _, warning := range tc.wantWarnings {
 				if !strings.Contains(string(output), "warning: "+warning) {
@@ -164,6 +172,7 @@ func TestDockerSmokeCleanup(t *testing.T) {
 			var imageRemoves []string
 			var rmCalls [][]string
 			var cliCalls []string
+			mcpTested := false
 			for _, args := range calls {
 				if len(args) == 0 {
 					continue
@@ -171,6 +180,9 @@ func TestDockerSmokeCleanup(t *testing.T) {
 				for _, arg := range args {
 					if arg == "/app/tribunalctl" || arg == "/app/reviewctl" {
 						cliCalls = append(cliCalls, arg)
+					}
+					if strings.HasSuffix(arg, "/api/v1/mcp-servers/srv-codebase-memory/test") {
+						mcpTested = true
 					}
 				}
 				switch args[0] {
@@ -209,6 +221,9 @@ func TestDockerSmokeCleanup(t *testing.T) {
 			if !tc.buildFail {
 				if !contains(cliCalls, "/app/tribunalctl") || !contains(cliCalls, "/app/reviewctl") {
 					t.Fatalf("smoke did not exercise both CLI paths: %v", cliCalls)
+				}
+				if !mcpTested {
+					t.Fatal("smoke did not test the default codebase-memory MCP server")
 				}
 			}
 			if downCalls != 1 {
@@ -432,6 +447,16 @@ if [ "$#" -ge 1 ] && [ "$1" = "compose" ]; then
       else
         case "$url" in
           */) printf '<div id="root"></div>' ;;
+          *"/api/v1/mcp-servers?scope=platform")
+            printf '{"servers":[{"id":"srv-codebase-memory","scope":"platform","name":"codebase-memory","enabled":true}],"next_cursor":""}'
+            ;;
+          *"/api/v1/mcp-servers/srv-codebase-memory/test")
+            printf '{"tools":[{"name":"list_projects"},{"name":"search_graph"},{"name":"trace_path"},{"name":"get_code_snippet"}'
+            if [ "${SMOKE_FAKE_MCP_WRITE_TOOL:-0}" = "1" ]; then
+              printf ',{"name":"delete_project"}'
+            fi
+            printf ']}'
+            ;;
           *) printf 'fake docker: unexpected fetch URL %s\n' "$url" >&2; exit 9 ;;
         esac
       fi

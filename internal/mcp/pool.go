@@ -67,6 +67,16 @@ type Manager struct {
 	wg      sync.WaitGroup
 }
 
+// HasServer reports whether name is a configured server. Disabled and
+// deleted servers are not configured.
+func (m *Manager) HasServer(name string) bool {
+	if m == nil {
+		return false
+	}
+	_, ok := m.servers[name]
+	return ok
+}
+
 type entryKey struct {
 	workspace   string
 	server      string
