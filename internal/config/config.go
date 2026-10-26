@@ -33,6 +33,9 @@ type Config struct {
 	Blocks         map[string]BlockBinding   `yaml:"blocks" json:"blocks"`
 	ReviewDefaults ProjectSettings           `yaml:"review_defaults" json:"review_defaults"`
 	PromptsDir     string                    `yaml:"prompts_dir" json:"prompts_dir"`
+
+	// DefaultExtensions are platform extensions registered once on first start.
+	DefaultExtensions DefaultExtensionsConfig `yaml:"default_extensions" json:"default_extensions"`
 }
 
 // ServerConfig controls the HTTP listener.
@@ -374,6 +377,7 @@ func (c *Config) Validate() error {
 		validateProfile(&p, c.Providers, "profiles."+name, c.Profiles[name])
 	}
 	validateMCP(&p, c)
+	validateDefaultExtensions(&p, c.DefaultExtensions)
 
 	return p.err()
 }

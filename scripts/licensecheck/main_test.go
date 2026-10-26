@@ -251,7 +251,52 @@ func encodeModules(mods ...module) ([]byte, error) {
 
 func writeFile(t *testing.T, dir, name, content string) {
 	t.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRunChecksBundledSkills(t *testing.T) {
+	modDir := t.TempDir()
+	writeFile(t, modDir, "LICENSE", mitText)
+	data, err := encodeModules(module{Path: "example.com/mod", Dir: modDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := func() ([]byte, error) { return data, nil }
+
+	skills := t.TempDir()
+	writeFile(t, filepath.Join(skills, "code-review"), "LICENSE", mitText)
+	writeFile(t, filepath.Join(skills, "code-review"), "SKILL.md", "---\nname: code-review\n---\n")
+	writeFile(t, skills, "builtin.go", "package builtin\n")
+	code, stdout, stderr := runWithList([]string{"-skills", skills}, list)
+	if code != 0 {
+		t.Fatalf("run = %d, stderr = %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "checked 1 bundled skills") {
+		t.Fatalf("stdout = %q", stdout)
+	}
+
+	writeFile(t, filepath.Join(skills, "copyleft"), "LICENSE", gplText)
+	if code, _, stderr := runWithList([]string{"-skills", skills}, list); code == 0 || !strings.Contains(stderr, "bundled skill copyleft") {
+		t.Fatalf("forbidden skill license: code = %d, stderr = %s", code, stderr)
+	}
+	if err := os.RemoveAll(filepath.Join(skills, "copyleft")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(skills, "unlicensed"), "SKILL.md", "---\nname: unlicensed\n---\n")
+	if code, _, stderr := runWithList([]string{"-skills", skills}, list); code == 0 || !strings.Contains(stderr, "bundled skill unlicensed") {
+		t.Fatalf("missing skill license: code = %d, stderr = %s", code, stderr)
+	}
+}
+
+func TestRunRejectsMissingExplicitSkillsDir(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+	code, _, stderr := runWithList([]string{"-skills", missing}, func() ([]byte, error) { return nil, nil })
+	if code == 0 || !strings.Contains(stderr, "bundled skills") {
+		t.Fatalf("missing skills dir: code = %d, stderr = %s", code, stderr)
 	}
 }

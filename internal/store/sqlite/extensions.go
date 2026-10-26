@@ -104,7 +104,7 @@ func extensionScopeClauses(scope string, projectID *int64, platformProject strin
 // ---------------------------------------------------------------------------
 // MCP servers
 
-const mcpServerColumns = `id, scope, project_id, name, config, enabled, created_at, updated_at`
+const mcpServerColumns = `id, scope, project_id, name, config, enabled, builtin, created_at, updated_at`
 
 func scanMCPServer(row rowScanner) (*store.MCPServer, error) {
 	var (
@@ -114,7 +114,7 @@ func scanMCPServer(row rowScanner) (*store.MCPServer, error) {
 		updatedAt string
 	)
 	if err := row.Scan(&server.ID, &server.Scope, &projectID, &server.Name,
-		&server.Config, &server.Enabled, &createdAt, &updatedAt); err != nil {
+		&server.Config, &server.Enabled, &server.Builtin, &createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
 	if projectID.Valid {
@@ -262,10 +262,10 @@ func (s *Store) CreateMCPServer(ctx context.Context, server store.MCPServer) (*s
 		return nil, err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO mcp_servers
-		(id, scope, project_id, name, config, enabled, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		(id, scope, project_id, name, config, enabled, builtin, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		server.ID, server.Scope, nullableProjectID(server.ProjectID), server.Name,
-		[]byte(server.Config), server.Enabled, formatTime(server.CreatedAt), formatTime(server.UpdatedAt)); err != nil {
+		[]byte(server.Config), server.Enabled, server.Builtin, formatTime(server.CreatedAt), formatTime(server.UpdatedAt)); err != nil {
 		if isConstraintErr(err) {
 			return nil, fmt.Errorf("%w: mcp server %s", store.ErrConflict, server.Name)
 		}
@@ -369,7 +369,7 @@ func requireMCPNameFree(ctx context.Context, tx *sql.Tx, scope string, projectID
 // ---------------------------------------------------------------------------
 // Skills
 
-const skillColumns = `id, scope, project_id, name, description, dir, enabled, created_at`
+const skillColumns = `id, scope, project_id, name, description, dir, enabled, builtin, created_at`
 
 func scanSkill(row rowScanner) (*store.Skill, error) {
 	var (
@@ -378,7 +378,7 @@ func scanSkill(row rowScanner) (*store.Skill, error) {
 		createdAt string
 	)
 	if err := row.Scan(&skill.ID, &skill.Scope, &projectID, &skill.Name,
-		&skill.Description, &skill.Dir, &skill.Enabled, &createdAt); err != nil {
+		&skill.Description, &skill.Dir, &skill.Enabled, &skill.Builtin, &createdAt); err != nil {
 		return nil, err
 	}
 	if projectID.Valid {
@@ -509,10 +509,10 @@ func (s *Store) CreateSkill(ctx context.Context, skill store.Skill) (*store.Skil
 		return nil, fmt.Errorf("sqlite: check skill name: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO skills
-		(id, scope, project_id, name, description, dir, enabled, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		(id, scope, project_id, name, description, dir, enabled, builtin, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		skill.ID, skill.Scope, nullableProjectID(skill.ProjectID), skill.Name,
-		skill.Description, skill.Dir, skill.Enabled, formatTime(skill.CreatedAt)); err != nil {
+		skill.Description, skill.Dir, skill.Enabled, skill.Builtin, formatTime(skill.CreatedAt)); err != nil {
 		if isConstraintErr(err) {
 			return nil, fmt.Errorf("%w: skill %s", store.ErrConflict, skill.Name)
 		}

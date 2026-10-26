@@ -190,6 +190,29 @@ type ProfileConfig struct {
 
 校验失败直接退出，并逐条打印错误。
 
+### 默认扩展（`default_extensions`）
+
+平台自带的内置扩展在这里声明，首次启动时自动登记为**平台级**扩展并写入平台块绑定。内置默认值与 `config/server.example.yaml`、`config/server.docker.yaml` 相同：
+
+```yaml
+default_extensions:
+  skills:
+    - name: code-review            # 内置 Skill，随二进制分发（internal/skill/builtin/）
+      blocks: [code-review, review]
+```
+
+- `skills[].name` 必须是内置 Skill，`blocks` 只能取 `code-review`、`review`、`reasoner`、`verify`、`synthesize`、`onboarding`；同名不能重复。校验失败与其他配置错误一起报告。
+- 内置文件复制到 `<workspace.root>/skills/platform/<id>/skill`，行上 `builtin` 列记录内置名。API 以 `builtin: true` 返回，控制台显示「内置」标签。
+- **禁用而不是删除**：内置 Skill 可以用 `PATCH /api/v1/skills/{id}` 或控制台禁用、启用；删除返回 409。禁用后不加载，仍引用它的块绑定在绑定阶段跳过它，评审照常运行。启用状态只由管理员决定，重启和升级都不改。
+- **随平台升级**：每次启动比较嵌入文件和已登记副本，不同就原地替换目录内容（多余的旧文件一并删除），并更新描述；行 ID、路径和启用状态不变。
+- **块绑定只决定一次**，记录在 `extension_defaults` 表：
+  - `<kind>:<name>`：已登记，或因已有管理员自建的同名平台扩展而跳过（不覆盖，也不绑定）。
+  - `<kind>:<name>@<block>`：已授权到该块，或跳过。配置文件 `blocks` 已声明该块、或数据库中该块的平台绑定已被管理员修改时跳过，升级不会改写自定义绑定。
+  - `block:<block>`：默认机制最后写入的绑定。只要该行未被改动，后续版本新增的内置扩展（例如 MCP）可以继续合并进来。
+- 管理员从某个块解绑后，重启不会恢复。
+- `skills: []` 只是不再登记新的默认项，不删除已登记的扩展和绑定。
+- 登记或更新失败（例如工作区不可写）会让启动失败；登记失败不写台账，下次启动重试。
+
 ---
 
 ## 2. MCP 配置文件

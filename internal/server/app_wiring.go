@@ -207,6 +207,30 @@ func (a *AppExtensions) DeleteSkill(ctx context.Context, id string) error {
 	return a.service.DeleteSkill(ctx, id)
 }
 
+func (a *AppExtensions) GetSkill(ctx context.Context, id string) (*Skill, error) {
+	if err := a.ready(); err != nil {
+		return nil, err
+	}
+	skill, err := a.service.GetSkill(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	out := skillFromApp(*skill)
+	return &out, nil
+}
+
+func (a *AppExtensions) SetSkillEnabled(ctx context.Context, id string, enabled bool) (*Skill, error) {
+	if err := a.ready(); err != nil {
+		return nil, err
+	}
+	skill, err := a.service.SetSkillEnabled(ctx, id, enabled)
+	if err != nil {
+		return nil, err
+	}
+	out := skillFromApp(*skill)
+	return &out, nil
+}
+
 func (a *AppExtensions) ListBlockBindings(ctx context.Context, scope string, projectID *int64) ([]BlockBinding, error) {
 	if err := a.ready(); err != nil {
 		return nil, err
@@ -312,6 +336,7 @@ func skillFromApp(skill app.Skill) Skill {
 		Description: skill.Description,
 		Dir:         skill.Dir,
 		Enabled:     skill.Enabled,
+		Builtin:     skill.Builtin,
 		CreatedAt:   skill.CreatedAt,
 	}
 }

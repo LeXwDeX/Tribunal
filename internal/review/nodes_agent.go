@@ -1261,6 +1261,9 @@ func summaryForPrompt(d *Dossier) string {
 	b.WriteString("## MR\n\n")
 	b.WriteString(fmt.Sprintf("- 标题：%s\n", d.MR.Title))
 	b.WriteString(fmt.Sprintf("- 源分支：%s → 目标分支：%s\n", d.MR.SourceBranch, d.MR.TargetBranch))
+	if version := d.DiffVersion; version.BaseSHA != "" || version.HeadSHA != "" {
+		b.WriteString(fmt.Sprintf("- 比较基准：base %s，target %s → head %s\n", version.BaseSHA, version.StartSHA, version.HeadSHA))
+	}
 	if d.MR.Author != "" {
 		b.WriteString(fmt.Sprintf("- 作者：%s\n", d.MR.Author))
 	}

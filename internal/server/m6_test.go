@@ -580,6 +580,31 @@ func (f *fakeExtensions) DeleteSkill(ctx context.Context, id string) error {
 	return f.err
 }
 
+func (f *fakeExtensions) GetSkill(ctx context.Context, id string) (*Skill, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, skill := range f.skills {
+		if skill.ID == id {
+			copy := skill
+			return &copy, f.err
+		}
+	}
+	return nil, store.ErrNotFound
+}
+
+func (f *fakeExtensions) SetSkillEnabled(ctx context.Context, id string, enabled bool) (*Skill, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.skills {
+		if f.skills[i].ID == id {
+			f.skills[i].Enabled = enabled
+			copy := f.skills[i]
+			return &copy, f.err
+		}
+	}
+	return nil, store.ErrNotFound
+}
+
 func (f *fakeExtensions) ListBlockBindings(ctx context.Context, scope string, projectID *int64) ([]BlockBinding, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

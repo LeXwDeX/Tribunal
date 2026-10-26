@@ -23,8 +23,11 @@ type MCPServer struct {
 	Name      string          `json:"name"`
 	Config    json.RawMessage `json:"config"`
 	Enabled   bool            `json:"enabled"`
-	CreatedAt time.Time       `json:"created_at"`
-	UpdatedAt time.Time       `json:"updated_at"`
+	// Builtin names the bundled default this row was created from; empty for
+	// rows an administrator created.
+	Builtin   string    `json:"builtin,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // MCPServerUpdate replaces only the fields that are set. A nil field keeps
@@ -38,14 +41,17 @@ type MCPServerUpdate struct {
 // Skill is one registered skill directory. Uploaded archives keep an empty
 // Dir; registered directories carry their absolute server path.
 type Skill struct {
-	ID          string    `json:"id"`
-	Scope       string    `json:"scope"`
-	ProjectID   *int64    `json:"project_id,omitempty"`
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	Dir         string    `json:"dir,omitempty"`
-	Enabled     bool      `json:"enabled"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID          string `json:"id"`
+	Scope       string `json:"scope"`
+	ProjectID   *int64 `json:"project_id,omitempty"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Dir         string `json:"dir,omitempty"`
+	Enabled     bool   `json:"enabled"`
+	// Builtin names the bundled skill this row was installed from; empty for
+	// uploaded or registered skills.
+	Builtin   string    `json:"builtin,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // BlockBinding grants MCP tools and skills to one review block. Platform
@@ -86,4 +92,20 @@ func ValidateExtensionScope(scope string, projectID *int64, required bool) error
 	default:
 		return fmt.Errorf("scope must be %s or %s", ScopePlatform, ScopeProject)
 	}
+}
+
+// Extension default outcomes. A recorded key is never processed again.
+const (
+	ExtensionDefaultApplied = "applied"
+	ExtensionDefaultSkipped = "skipped"
+)
+
+// ExtensionDefault is one ledger row of the platform default extension
+// seeder: a registration, a block grant or a block snapshot. Detail is a
+// bounded reason or the JSON binding the defaults last wrote.
+type ExtensionDefault struct {
+	Key       string    `json:"key"`
+	Outcome   string    `json:"outcome"`
+	Detail    string    `json:"detail,omitempty"`
+	AppliedAt time.Time `json:"applied_at"`
 }

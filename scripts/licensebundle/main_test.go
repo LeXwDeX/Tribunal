@@ -609,3 +609,30 @@ func runWithList(args []string, list func(string) ([]byte, error)) (int, string,
 	code := run(args, &stdout, &stderr, list)
 	return code, stdout.String(), stderr.String()
 }
+
+func TestBuildIncludesBundledSkills(t *testing.T) {
+	root, list := newFixture(t)
+	skillDir := filepath.Join(root, "internal", "skill", "builtin", "code-review")
+	writeFile(t, skillDir, "LICENSE", "skill license text\n")
+	writeFile(t, skillDir, "NOTICE.md", "skill provenance text\n")
+	writeFile(t, skillDir, "SKILL.md", "---\nname: code-review\n---\n")
+
+	content, err := build(root, list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(content)
+	for _, want := range []string{"Bundled skill: code-review", "skill license text", "skill provenance text"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("bundle is missing %q", want)
+		}
+	}
+	if strings.Contains(text, "name: code-review") {
+		t.Fatal("bundle copied SKILL.md instead of license files only")
+	}
+
+	writeFile(t, filepath.Join(root, "internal", "skill", "builtin", "unlicensed"), "SKILL.md", "---\nname: unlicensed\n---\n")
+	if _, err := build(root, list); err == nil || !strings.Contains(err.Error(), "Bundled skill: unlicensed") {
+		t.Fatalf("build with unlicensed skill = %v", err)
+	}
+}

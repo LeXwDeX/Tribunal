@@ -585,7 +585,55 @@ func (r *ProjectExtensionResolver) build(ctx context.Context, projectID int64) (
 		set.loader = loader
 		set.skills = NewSkillProvider(loader)
 	}
+	set.skills = withoutDisabledSkills(set.skills, disabledSkillNames(platformSkills, projectSkills))
 	return set, nil
+}
+
+// disabledSkillNames returns names that only disabled rows carry. A name that
+// also has an enabled row in a visible scope stays bindable.
+func disabledSkillNames(groups ...[]store.Skill) map[string]bool {
+	disabled := make(map[string]bool)
+	enabled := make(map[string]bool)
+	for _, rows := range groups {
+		for _, row := range rows {
+			if row.Enabled {
+				enabled[row.Name] = true
+			} else {
+				disabled[row.Name] = true
+			}
+		}
+	}
+	for name := range enabled {
+		delete(disabled, name)
+	}
+	return disabled
+}
+
+// withoutDisabledSkills drops disabled names before binding, so a block that
+// still names a disabled skill runs without it instead of failing.
+func withoutDisabledSkills(base review.SkillProvider, disabled map[string]bool) review.SkillProvider {
+	if len(disabled) == 0 {
+		return base
+	}
+	return &enabledSkillProvider{base: base, disabled: disabled}
+}
+
+type enabledSkillProvider struct {
+	base     review.SkillProvider
+	disabled map[string]bool
+}
+
+func (p *enabledSkillProvider) BindSkills(ctx context.Context, names []string) (review.SkillBinding, error) {
+	kept := make([]string, 0, len(names))
+	for _, name := range names {
+		if !p.disabled[strings.TrimSpace(name)] {
+			kept = append(kept, name)
+		}
+	}
+	if len(kept) == 0 || p.base == nil {
+		return review.SkillBinding{}, nil
+	}
+	return p.base.BindSkills(ctx, kept)
 }
 
 func appendSkillContainers(dirs []string, seen map[string]bool, rows []store.Skill) ([]string, bool) {
@@ -702,7 +750,7 @@ func projectBindingStubs(blocks map[string]config.BlockBinding) map[string]confi
 	if out == nil {
 		out = make(map[string]config.BlockBinding)
 	}
-	for _, block := range []string{"code-review", "review", "reasoner", "verify", "synthesize", "onboarding"} {
+	for _, block := range config.BindableBlocks {
 		out[block] = config.BlockBinding{
 			MCPTools: []string{projectMCPStub},
 			Skills:   []string{projectSkillStubBase + block},

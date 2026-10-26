@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/store/migrations"
 )
 
 type fakeClock struct {
@@ -97,8 +99,8 @@ func TestMigrationPragmasAndReopen(t *testing.T) {
 			t.Errorf("PRAGMA %s = %q, want %q", pragma, got, want)
 		}
 	}
-	if got := rowCount(t, s, `SELECT COUNT(*) FROM schema_migrations`); got != 12 {
-		t.Fatalf("schema_migrations = %d, want 12", got)
+	if got := rowCount(t, s, `SELECT COUNT(*) FROM schema_migrations`); got != migrationCount(t) {
+		t.Fatalf("schema_migrations = %d, want %d", got, migrationCount(t))
 	}
 	if _, err := s.db.Exec(`INSERT INTO workspaces (project_id, state, updated_at) VALUES (999, 'new', '2026-10-22T12:00:00.000000000Z')`); err == nil {
 		t.Fatal("foreign_keys pragma was not enforced")
@@ -123,8 +125,8 @@ func TestMigrationPragmasAndReopen(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer s.Close()
-	if got := rowCount(t, s, `SELECT COUNT(*) FROM schema_migrations`); got != 12 {
-		t.Fatalf("schema_migrations after reopen = %d, want 12", got)
+	if got := rowCount(t, s, `SELECT COUNT(*) FROM schema_migrations`); got != migrationCount(t) {
+		t.Fatalf("schema_migrations after reopen = %d, want %d", got, migrationCount(t))
 	}
 	project, err := s.GetProject(ctx, projectID)
 	if err != nil {
@@ -936,8 +938,8 @@ func TestOpenMemoryDSN(t *testing.T) {
 	if err := s.Ping(ctx); err != nil {
 		t.Fatalf("Ping: %v", err)
 	}
-	if got := rowCount(t, s, `SELECT COUNT(*) FROM schema_migrations`); got != 12 {
-		t.Fatalf("schema_migrations = %d, want 12", got)
+	if got := rowCount(t, s, `SELECT COUNT(*) FROM schema_migrations`); got != migrationCount(t) {
+		t.Fatalf("schema_migrations = %d, want %d", got, migrationCount(t))
 	}
 }
 
@@ -1214,4 +1216,15 @@ func TestQueuedReplacementPreservesAttemptFenceAndBudget(t *testing.T) {
 			}
 		})
 	}
+}
+
+// migrationCount is the number of embedded migrations a fully migrated
+// database records.
+func migrationCount(t *testing.T) int {
+	t.Helper()
+	names, err := fs.Glob(migrations.FS, "*.sql")
+	if err != nil {
+		t.Fatalf("glob migrations: %v", err)
+	}
+	return len(names)
 }

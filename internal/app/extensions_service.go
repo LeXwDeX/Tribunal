@@ -82,14 +82,17 @@ type MCPImportInput struct {
 
 // Skill is one registered skill.
 type Skill struct {
-	ID          string    `json:"id"`
-	Scope       string    `json:"scope"`
-	ProjectID   *int64    `json:"project_id,omitempty"`
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	Dir         string    `json:"dir,omitempty"`
-	Enabled     bool      `json:"enabled"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID          string `json:"id"`
+	Scope       string `json:"scope"`
+	ProjectID   *int64 `json:"project_id,omitempty"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Dir         string `json:"dir,omitempty"`
+	Enabled     bool   `json:"enabled"`
+	// Builtin marks a skill shipped with the platform. It can be disabled
+	// but not deleted.
+	Builtin   bool      `json:"builtin"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // SkillUpload carries a validated archive. Uploads are extracted below the
@@ -409,7 +412,7 @@ func (s *ExtensionService) UploadSkill(ctx context.Context, in SkillUpload) (*Sk
 	if err != nil {
 		return nil, validationError(err.Error(), Detail{Field: "file", Message: err.Error()})
 	}
-	return s.persistSkillDir(ctx, scope, projectID, name, description, scopeRoot, extracted)
+	return s.persistSkillDir(ctx, scope, projectID, name, description, "", scopeRoot, extracted)
 }
 
 // RegisterSkillDir copies the registered directory into the managed skills
@@ -435,12 +438,13 @@ func (s *ExtensionService) RegisterSkillDir(ctx context.Context, in SkillDirInpu
 	if err != nil {
 		return nil, validationError(err.Error(), Detail{Field: "dir", Message: err.Error()})
 	}
-	return s.persistSkillDir(ctx, scope, projectID, name, description, scopeRoot, extracted)
+	return s.persistSkillDir(ctx, scope, projectID, name, description, "", scopeRoot, extracted)
 }
 
 // persistSkillDir renames the staged directory to <scope>/<id>/skill, stores
-// the row, and records the final path.
-func (s *ExtensionService) persistSkillDir(ctx context.Context, scope string, projectID *int64, name, description, scopeRoot, staged string) (*Skill, error) {
+// the row, and records the final path. builtin is the bundled skill name, or
+// empty for administrator skills.
+func (s *ExtensionService) persistSkillDir(ctx context.Context, scope string, projectID *int64, name, description, builtin, scopeRoot, staged string) (*Skill, error) {
 	if !skillDirNameRE.MatchString(name) {
 		_ = os.RemoveAll(staged)
 		return nil, validationError("invalid skill name", Detail{Field: "name", Message: "must match " + skillDirNameRE.String()})
@@ -451,6 +455,7 @@ func (s *ExtensionService) persistSkillDir(ctx context.Context, scope string, pr
 		Name:        name,
 		Description: description,
 		Enabled:     true,
+		Builtin:     builtin,
 	})
 	if err != nil {
 		_ = os.RemoveAll(staged)
@@ -481,11 +486,15 @@ func (s *ExtensionService) persistSkillDir(ctx context.Context, scope string, pr
 }
 
 // DeleteSkill removes one skill row and its managed directory. Directories
-// outside the managed root (legacy rows) are left untouched.
+// outside the managed root (legacy rows) are left untouched. Built-in skills
+// cannot be deleted; they are disabled instead.
 func (s *ExtensionService) DeleteSkill(ctx context.Context, id string) error {
 	row, err := s.store.GetSkill(ctx, id)
 	if err != nil {
 		return extensionStoreError(err)
+	}
+	if row.Builtin != "" {
+		return conflictError("built-in skills cannot be deleted; disable them instead")
 	}
 	if err := s.store.DeleteSkill(ctx, id); err != nil {
 		return extensionStoreError(err)
@@ -496,6 +505,25 @@ func (s *ExtensionService) DeleteSkill(ctx context.Context, id string) error {
 		}
 	}
 	return nil
+}
+
+// GetSkill returns one stored skill.
+func (s *ExtensionService) GetSkill(ctx context.Context, id string) (*Skill, error) {
+	row, err := s.store.GetSkill(ctx, id)
+	if err != nil {
+		return nil, extensionStoreError(err)
+	}
+	skill := skillFromStore(*row)
+	return &skill, nil
+}
+
+// SetSkillEnabled enables or disables one skill. A disabled skill is not
+// loaded, and blocks that still name it run without it.
+func (s *ExtensionService) SetSkillEnabled(ctx context.Context, id string, enabled bool) (*Skill, error) {
+	if err := s.store.SetSkillEnabled(ctx, id, enabled); err != nil {
+		return nil, extensionStoreError(err)
+	}
+	return s.GetSkill(ctx, id)
 }
 
 // skillScopeRoot returns <workspace>/skills/<platform|project-id>.
@@ -1016,6 +1044,7 @@ func skillFromStore(row store.Skill) Skill {
 		Description: row.Description,
 		Dir:         row.Dir,
 		Enabled:     row.Enabled,
+		Builtin:     row.Builtin != "",
 		CreatedAt:   row.CreatedAt,
 	}
 }
