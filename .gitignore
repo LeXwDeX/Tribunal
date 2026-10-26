@@ -11,3 +11,15 @@
 /web/node_modules/
 /web/coverage/
 /artifacts/delivery/
+
+# macOS
+.DS_Store
+._*
+.AppleDouble
+.LSOverride
+Icon[\r]
+.Spotlight-V100
+.Trashes
+.fseventsd
+.DocumentRevisions-V100
+.TemporaryItems
