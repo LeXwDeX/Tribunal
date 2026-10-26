@@ -9,12 +9,13 @@ import type {
 } from '../api/types'
 import { useCanSelfService, useCanWrite } from '../components/RoleContext'
 import {
-  Badge, Button, ConfirmDialog, Dialog, EmptyState, ErrorState, Field, LoadingState, PageHeader, Panel, SecretField, Tabs, useToast,
+  Badge, Button, ConfirmDialog, Dialog, EmptyState, ErrorState, Field, LoadingState, PageHeader, Panel, PanelBody, SecretField, Tabs, useToast,
 } from '../components/ui'
 import { usePaginated } from '../lib/hooks'
 import { formatDate } from '../lib/format'
 import ui from '../styles/ui.module.css'
 import styles from './pages.module.css'
+import insights from './insights.module.css'
 
 function tokenLabel(token: ApiToken): string {
   return token.name || `token ${token.id}`
@@ -155,23 +156,26 @@ function AdminUsersPanel() {
   return (
     <>
       <Panel
+        flush
         title="用户与账号"
         aside={users.isSuccess ? `${users.items.length}${users.hasNextPage ? '+' : ''} 个用户` : undefined}
       >
-        <div className={styles.notice}>停用后该账号不能登录、使用现有会话或 API token，也不能获得新凭据。撤销凭据会立即使全部会话与 token 失效。</div>
-        {users.isPending ? <LoadingState label="正在读取用户…" /> : null}
-        {users.isError ? <ErrorState error={users.error} onRetry={users.retry} /> : null}
-        {users.isSuccess && users.items.length === 0 ? <EmptyState title="还没有本地用户" description="用户首次通过 GitLab 登录后会出现在这里。" /> : null}
+        <PanelBody>
+          <div className={styles.notice}>停用后该账号不能登录、使用现有会话或 API token，也不能获得新凭据。撤销凭据会立即使全部会话与 token 失效。</div>
+          {users.isPending ? <LoadingState label="正在读取用户…" /> : null}
+          {users.isError ? <ErrorState error={users.error} onRetry={users.retry} /> : null}
+          {users.isSuccess && users.items.length === 0 ? <EmptyState title="还没有本地用户" description="用户首次通过 GitLab 登录后会出现在这里。" /> : null}
+        </PanelBody>
         {users.items.length ? (
           <div className="tableWrap">
-            <table className="dataTable" style={{ minWidth: 760 }}>
+            <table className={`dataTable ${insights.min760}`}>
               <thead>
                 <tr>
                   <th scope="col">用户名</th>
                   <th scope="col">显示名</th>
                   <th scope="col">状态</th>
                   <th scope="col">最近登录</th>
-                  <th scope="col">操作</th>
+                  <th scope="col" className={insights.actionsCol}>操作</th>
                 </tr>
               </thead>
               <tbody>
@@ -182,11 +186,11 @@ function AdminUsersPanel() {
                     <td><Badge tone={user.disabled ? 'danger' : 'ok'}>{user.disabled ? '已停用' : '启用'}</Badge></td>
                     <td>{user.last_login_at ? formatDate(user.last_login_at) : '从未登录'}</td>
                     <td>
-                      <div className={styles.cardActions}>
-                        <Button variant="secondary" onClick={() => setDisableTarget(user)}>
+                      <div className={insights.rowActions}>
+                        <Button variant="secondary" className={ui.smallButton} onClick={() => setDisableTarget(user)}>
                           {user.disabled ? '启用账号' : '停用账号'}
                         </Button>
-                        <Button variant="danger" onClick={() => setRevokeTarget(user)}>撤销全部凭据</Button>
+                        <Button variant="danger" className={ui.smallButton} onClick={() => setRevokeTarget(user)}>撤销全部凭据</Button>
                       </div>
                     </td>
                   </tr>
@@ -195,7 +199,11 @@ function AdminUsersPanel() {
             </table>
           </div>
         ) : null}
-        {users.hasNextPage ? <Button variant="secondary" onClick={users.fetchNextPage} loading={users.isFetchingNextPage}>加载更多用户</Button> : null}
+        {users.hasNextPage ? (
+          <div className={insights.flushLoadMore}>
+            <Button variant="secondary" onClick={users.fetchNextPage} loading={users.isFetchingNextPage}>加载更多用户</Button>
+          </div>
+        ) : null}
       </Panel>
 
       <ConfirmDialog
@@ -288,70 +296,78 @@ function AdminGrantsPanel() {
 
   return (
     <>
-      <Panel title="项目授权" aside={selectedProject ? selectedProject.path_with_namespace : '未选择项目'}>
-        <div className={styles.notice}>
-          管理员也不会自动获得项目业务数据；请在这里为账号授予 read 或 manage。项目列表来自管理面，不需要管理员自身拥有 grant。
-        </div>
-        <div className={styles.inlineFilters}>
-          <label className={styles.field} style={{ flex: '1 1 280px' }}>
-            <span className="small">选择项目</span>
-            <select
-              className="select"
-              aria-label="选择项目"
-              value={projectId}
-              onChange={(event) => setProjectId(event.target.value)}
-              disabled={projects.isPending}
-            >
-              <option value="">选择项目</option>
-              {projects.items.map((project) => (
-                <option key={project.id} value={project.id}>{project.path_with_namespace}</option>
-              ))}
-            </select>
-          </label>
-          {projects.hasNextPage ? (
-            <Button variant="secondary" onClick={projects.fetchNextPage} loading={projects.isFetchingNextPage}>加载更多项目</Button>
-          ) : null}
-        </div>
-        {projects.isError ? <ErrorState error={projects.error} onRetry={projects.retry} title="项目列表加载失败" /> : null}
+      <Panel flush title="项目授权" aside={selectedProject ? selectedProject.path_with_namespace : '未选择项目'}>
+        <PanelBody className={insights.grantForm}>
+          <div className={styles.notice}>
+            管理员也不会自动获得项目业务数据；请在这里为账号授予 read 或 manage。项目列表来自管理面，不需要管理员自身拥有 grant。
+          </div>
+          <div className={insights.grantPicker}>
+            <label className={insights.field}>
+              <span className="small">选择项目</span>
+              <select
+                className="select"
+                aria-label="选择项目"
+                value={projectId}
+                onChange={(event) => setProjectId(event.target.value)}
+                disabled={projects.isPending}
+              >
+                <option value="">选择项目</option>
+                {projects.items.map((project) => (
+                  <option key={project.id} value={project.id}>{project.path_with_namespace}</option>
+                ))}
+              </select>
+            </label>
+            {projects.hasNextPage ? (
+              <Button variant="secondary" onClick={projects.fetchNextPage} loading={projects.isFetchingNextPage}>加载更多项目</Button>
+            ) : null}
+          </div>
+          {projects.isError ? <ErrorState error={projects.error} onRetry={projects.retry} title="项目列表加载失败" /> : null}
+
+          {projectId ? (
+            <>
+              <div className="formGrid">
+                <Field label="选择用户" htmlFor="grant-user">
+                  <select id="grant-user" className="select" value={userId} onChange={(event) => setUserId(event.target.value)} disabled={users.isPending}>
+                    <option value="">选择用户</option>
+                    {users.items.map((user) => <option key={user.id} value={user.id}>{userLabel(user)}</option>)}
+                  </select>
+                </Field>
+                <Field label="权限角色" htmlFor="grant-role">
+                  <select id="grant-role" className="select" value={role} onChange={(event) => setRole(event.target.value as ProjectAccess)}>
+                    <option value="read">只读（read）</option>
+                    <option value="manage">管理（manage）</option>
+                  </select>
+                </Field>
+              </div>
+              {users.hasNextPage ? <Button variant="secondary" onClick={users.fetchNextPage} loading={users.isFetchingNextPage}>加载更多用户</Button> : null}
+              {users.isError ? <ErrorState error={users.error} onRetry={users.retry} title="用户列表加载失败" /> : null}
+              {saveError ? <ErrorState error={saveError} title="保存授权失败" /> : null}
+              <div className={insights.formActions}>
+                <Button variant="primary" onClick={() => { void grant() }} loading={saving}>授予权限</Button>
+              </div>
+            </>
+          ) : <EmptyState title="请选择项目" description="选择项目后可以查看并维护该项目的用户授权。" />}
+        </PanelBody>
 
         {projectId ? (
           <>
-            <div className="formGrid" style={{ marginTop: 16 }}>
-              <Field label="选择用户" htmlFor="grant-user">
-                <select id="grant-user" className="select" value={userId} onChange={(event) => setUserId(event.target.value)} disabled={users.isPending}>
-                  <option value="">选择用户</option>
-                  {users.items.map((user) => <option key={user.id} value={user.id}>{userLabel(user)}</option>)}
-                </select>
-              </Field>
-              <Field label="权限角色" htmlFor="grant-role">
-                <select id="grant-role" className="select" value={role} onChange={(event) => setRole(event.target.value as ProjectAccess)}>
-                  <option value="read">只读（read）</option>
-                  <option value="manage">管理（manage）</option>
-                </select>
-              </Field>
+            <div className={insights.flushSection}>
+              <h3 className={insights.sectionTitle}>当前授权</h3>
+              {grants.isPending ? <LoadingState label="正在读取项目授权…" /> : null}
+              {grants.isError ? <ErrorState error={grants.error} onRetry={grants.retry} /> : null}
+              {grants.isSuccess && grants.items.length === 0 ? (
+                <EmptyState title="该项目还没有授权" description="使用上方表单为账号授予 read 或 manage。" />
+              ) : null}
             </div>
-            {users.hasNextPage ? <Button variant="secondary" onClick={users.fetchNextPage} loading={users.isFetchingNextPage}>加载更多用户</Button> : null}
-            {users.isError ? <ErrorState error={users.error} onRetry={users.retry} title="用户列表加载失败" /> : null}
-            {saveError ? <ErrorState error={saveError} title="保存授权失败" /> : null}
-            <div className={styles.actionsRight} style={{ marginTop: 12 }}>
-              <Button variant="primary" onClick={() => { void grant() }} loading={saving}>授予权限</Button>
-            </div>
-
-            <h3 style={{ marginTop: 20 }}>当前授权</h3>
-            {grants.isPending ? <LoadingState label="正在读取项目授权…" /> : null}
-            {grants.isError ? <ErrorState error={grants.error} onRetry={grants.retry} /> : null}
-            {grants.isSuccess && grants.items.length === 0 ? (
-              <EmptyState title="该项目还没有授权" description="使用上方表单为账号授予 read 或 manage。" />
-            ) : null}
             {grants.items.length ? (
               <div className="tableWrap">
-                <table className="dataTable" style={{ minWidth: 680 }}>
+                <table className={`dataTable ${insights.min680}`}>
                   <thead>
                     <tr>
                       <th scope="col">用户</th>
                       <th scope="col">用户 ID</th>
                       <th scope="col">角色</th>
-                      <th scope="col">操作</th>
+                      <th scope="col" className={insights.actionsCol}>操作</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -359,8 +375,8 @@ function AdminGrantsPanel() {
                       <tr key={`${item.project_id}-${item.user_id}`}>
                         <td>{item.username || `用户 ${item.user_id}`}</td>
                         <td className="tabular">{item.user_id}</td>
-                        <td>{item.role === 'manage' ? '管理（manage）' : '只读（read）'}</td>
-                        <td><Button variant="danger" onClick={() => setDeleteTarget(item)}>撤销</Button></td>
+                        <td><Badge tone={item.role === 'manage' ? 'info' : 'neutral'} plain>{item.role === 'manage' ? '管理（manage）' : '只读（read）'}</Badge></td>
+                        <td className={insights.actionsCol}><Button variant="danger" className={ui.smallButton} onClick={() => setDeleteTarget(item)}>撤销</Button></td>
                       </tr>
                     ))}
                   </tbody>
@@ -368,10 +384,12 @@ function AdminGrantsPanel() {
               </div>
             ) : null}
             {grants.hasNextPage ? (
-              <Button variant="secondary" onClick={grants.fetchNextPage} loading={grants.isFetchingNextPage}>加载更多授权</Button>
+              <div className={insights.flushLoadMore}>
+                <Button variant="secondary" onClick={grants.fetchNextPage} loading={grants.isFetchingNextPage}>加载更多授权</Button>
+              </div>
             ) : null}
           </>
-        ) : <EmptyState title="请选择项目" description="选择项目后可以查看并维护该项目的用户授权。" />}
+        ) : null}
       </Panel>
 
       <ConfirmDialog
@@ -457,44 +475,51 @@ export function SystemPage() {
         <div id={`system-tabpanel-${tab}`} role="tabpanel" aria-labelledby={`system-tab-${tab}`}>
           {tab === 'tokens' ? (
             <Panel
+              flush
               title="我的 API token"
-              aside={canSelfService ? '登录用户可管理自己的 token；写操作由 CSRF 保护' : '当前会话不能创建或撤销 token'}
+              aside={canSelfService ? (
+                <Button variant="primary" className={ui.smallButton} onClick={() => setCreateOpen(true)}>创建 token</Button>
+              ) : '当前会话不能创建或撤销 token'}
             >
-              {canSelfService ? (
-                <div className={styles.actionsRight}>
-                  <Button variant="primary" onClick={() => setCreateOpen(true)}>创建 token</Button>
-                </div>
+              {tokens.isPending || tokens.isError || (tokens.isSuccess && tokens.items.length === 0) ? (
+                <PanelBody>
+                  {tokens.isPending ? <LoadingState /> : null}
+                  {tokens.isError ? <ErrorState error={tokens.error} onRetry={tokens.retry} /> : null}
+                  {tokens.isSuccess && tokens.items.length === 0 ? <EmptyState title="还没有 API token" description={canSelfService ? '创建一个 token 供 tribunalctl 或脚本使用。' : '当前账号没有 API token。'} /> : null}
+                </PanelBody>
               ) : null}
-              {tokens.isPending ? <LoadingState /> : null}
-              {tokens.isError ? <ErrorState error={tokens.error} onRetry={tokens.retry} /> : null}
-              {tokens.isSuccess && tokens.items.length === 0 ? <EmptyState title="还没有 API token" description={canSelfService ? '创建一个 token 供 tribunalctl 或脚本使用。' : '当前账号没有 API token。'} /> : null}
               {tokens.items.length ? (
                 <div className="tableWrap">
-                  <table className="dataTable" style={{ minWidth: 760 }}>
+                  <table className={`dataTable ${insights.min760}`}>
                     <thead>
                       <tr>
                         <th scope="col">名称</th>
                         <th scope="col">创建时间</th>
                         <th scope="col">过期时间</th>
                         <th scope="col">最近使用</th>
-                        {canSelfService ? <th scope="col">操作</th> : null}
+                        {canSelfService ? <th scope="col" className={insights.actionsCol}>操作</th> : null}
                       </tr>
                     </thead>
                     <tbody>
                       {tokens.items.map((token) => (
                         <tr key={token.id}>
-                          <td>{tokenLabel(token)}</td>
-                          <td>{token.created_at ? formatDate(token.created_at) : '—'}</td>
-                          <td>{token.expires_at ? formatDate(token.expires_at) : '—'}</td>
-                          <td>{token.last_used_at ? formatDate(token.last_used_at) : '从未使用或未提供'}</td>
-                          {canSelfService ? <td><Button variant="danger" onClick={() => setRevokeTarget(token)}>撤销</Button></td> : null}
+                          <td><b>{tokenLabel(token)}</b></td>
+                          <td className="muted">{token.created_at ? formatDate(token.created_at) : '—'}</td>
+                          <td className="mono small">{token.expires_at ? formatDate(token.expires_at) : '—'}</td>
+                          <td className="muted">{token.last_used_at ? formatDate(token.last_used_at) : '从未使用或未提供'}</td>
+                          {canSelfService ? <td className={insights.actionsCol}><Button variant="danger" className={ui.smallButton} onClick={() => setRevokeTarget(token)}>撤销</Button></td> : null}
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
               ) : null}
-              {tokens.hasNextPage ? <Button variant="secondary" onClick={tokens.fetchNextPage} loading={tokens.isFetchingNextPage}>加载更多</Button> : null}
+              {tokens.hasNextPage ? (
+                <div className={insights.flushLoadMore}>
+                  <Button variant="secondary" onClick={tokens.fetchNextPage} loading={tokens.isFetchingNextPage}>加载更多</Button>
+                </div>
+              ) : null}
+              {canSelfService ? <div className={ui.tableNote}>登录用户可管理自己的 token；写操作由 CSRF 保护。明文 token 只在创建时显示一次。</div> : null}
             </Panel>
           ) : null}
 
