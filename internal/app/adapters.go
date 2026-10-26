@@ -102,6 +102,14 @@ func (p *mcpToolProvider) Tools(ctx context.Context, block string) ([]agent.Tool
 	if err != nil {
 		return nil, fmt.Errorf("app: bind MCP tools for block %q: %w", block, err)
 	}
+	// Tools that are bound but not advertised, or skipped as unsafe, leave
+	// the review without part of its evidence: report them as gaps.
+	if len(set.Warnings) > 0 {
+		return nil, &review.PartialToolsError{
+			Tools: set.Tools,
+			Gaps:  append([]string(nil), set.Warnings...),
+		}
+	}
 	return set.Tools, nil
 }
 
