@@ -1,10 +1,13 @@
 import type { GraphEdge, GraphNode } from '../api/types'
 
 export const NODE_WIDTH = 192
-export const NODE_HEIGHT = 96
-export const COLUMN_GAP = 64
-export const ROW_GAP = 28
-export const PADDING = 24
+export const NODE_HEIGHT = 64
+// Column pitch 220 and row pitch 84 match the v2 console prototype.
+export const COLUMN_GAP = 28
+export const ROW_GAP = 20
+export const PADDING = 16
+// Room above the first row for the lane headers.
+export const LANE_HEADER = 28
 
 export interface PositionedNode extends GraphNode {
   x: number
@@ -139,7 +142,7 @@ export function layoutDag(inputNodes: GraphNode[], inputEdges: GraphEdge[]): Dag
       layer,
       row,
       x: PADDING + layer * (NODE_WIDTH + COLUMN_GAP),
-      y: PADDING + row * (NODE_HEIGHT + ROW_GAP),
+      y: PADDING + LANE_HEADER + row * (NODE_HEIGHT + ROW_GAP),
     })
   }
 
@@ -153,13 +156,13 @@ export function layoutDag(inputNodes: GraphNode[], inputEdges: GraphEdge[]): Dag
     const startY = from.y + NODE_HEIGHT / 2
     const endX = to.x
     const endY = to.y + NODE_HEIGHT / 2
-    const bend = Math.max(24, (endX - startX) / 2)
+    const middle = (startX + endX) / 2
     edges.push({
       from: edge.from,
       to: edge.to,
       key: `${edge.from}->${edge.to}`,
       implicit: edge.implicit,
-      path: `M ${startX} ${startY} C ${startX + bend} ${startY}, ${endX - bend} ${endY}, ${endX} ${endY}`,
+      path: `M ${startX} ${startY} C ${middle} ${startY}, ${middle} ${endY},${endX} ${endY}`,
     })
   }
 
@@ -167,7 +170,7 @@ export function layoutDag(inputNodes: GraphNode[], inputEdges: GraphEdge[]): Dag
     nodes: positioned,
     edges,
     width: PADDING * 2 + layerCount * NODE_WIDTH + Math.max(0, layerCount - 1) * COLUMN_GAP,
-    height: PADDING * 2 + maxRows * NODE_HEIGHT + Math.max(0, maxRows - 1) * ROW_GAP,
+    height: PADDING * 2 + LANE_HEADER + maxRows * NODE_HEIGHT + Math.max(0, maxRows - 1) * ROW_GAP,
     layerCount,
     cycleNodes,
     unknownEdges,
