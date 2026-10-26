@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1139,5 +1140,79 @@ func TestEngineInvalidExecutorOutput(t *testing.T) {
 	wf, _ := engine.Snapshot(context.Background(), wfID)
 	if wf.Nodes["a"].Status != NodeFailed || wf.Nodes["a"].Reason != "invalid_output" {
 		t.Fatalf("a: %+v", wf.Nodes["a"])
+	}
+}
+
+func TestEngineInterruptLeavesWorkflowForRecover(t *testing.T) {
+	var mu sync.Mutex
+	calls := map[string]int{}
+	started := make(chan struct{})
+	exec := funcExecutor(func(ctx context.Context, in NodeInput) (NodeOutput, error) {
+		mu.Lock()
+		calls[in.Node.ID]++
+		first := in.Node.ID == "b" && calls["b"] == 1
+		mu.Unlock()
+		if first {
+			close(started)
+			<-ctx.Done()
+			return NodeOutput{}, ctx.Err()
+		}
+		return output(t, map[string]any{"node": in.Node.ID}), nil
+	})
+	store := NewMemoryEventStore()
+	engine := NewEngine(store, exec, nil, Options{})
+	spec := GraphSpec{Nodes: []NodeSpec{node("a"), node("b", "a")}}
+	wfID, err := engine.Create(context.Background(), spec, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancelCause(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- engine.Run(ctx, wfID) }()
+	<-started
+	cancel(ErrInterrupted)
+	if err := waitRun(t, nil, done); !errors.Is(err, context.Canceled) {
+		t.Fatalf("interrupted Run error = %v, want context.Canceled", err)
+	}
+	wf, _ := engine.Snapshot(context.Background(), wfID)
+	if wf.Terminal() || wf.Nodes["a"].Status != NodeCompleted || wf.Nodes["b"].Status != NodeRunning {
+		t.Fatalf("interrupt changed durable state: status=%s a=%s b=%s", wf.Status, wf.Nodes["a"].Status, wf.Nodes["b"].Status)
+	}
+
+	// A new engine on the same store models the restarted process.
+	restarted := NewEngine(store, exec, nil, Options{})
+	if err := restarted.Recover(context.Background()); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	if err := restarted.Run(context.Background(), wfID); err != nil {
+		t.Fatalf("resumed Run: %v", err)
+	}
+	wf, _ = restarted.Snapshot(context.Background(), wfID)
+	if wf.Status != WorkflowCompleted {
+		t.Fatalf("resumed workflow status = %s, want completed", wf.Status)
+	}
+	if b := wf.Nodes["b"]; b.Status != NodeCompleted || b.Attempt != 2 {
+		t.Fatalf("b = %s attempt %d, want completed attempt 2", b.Status, b.Attempt)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls["a"] != 1 || calls["b"] != 2 {
+		t.Fatalf("executor calls = %v, want a once and b twice", calls)
+	}
+}
+
+func TestEngineInterruptBeforeStartKeepsPendingWorkflow(t *testing.T) {
+	engine := fastEngine(funcExecutor(func(context.Context, NodeInput) (NodeOutput, error) {
+		return NodeOutput{}, nil
+	}), Options{})
+	wfID, _ := engine.Create(context.Background(), GraphSpec{Nodes: []NodeSpec{node("a")}}, nil)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(fmt.Errorf("shutdown: %w", ErrInterrupted))
+	if err := engine.Run(ctx, wfID); err == nil {
+		t.Fatal("interrupted Run returned nil")
+	}
+	wf, _ := engine.Snapshot(context.Background(), wfID)
+	if wf.Terminal() {
+		t.Fatalf("interrupt before start wrote terminal status %s (%s)", wf.Status, wf.CancelReason)
 	}
 }

@@ -347,6 +347,7 @@ pending ─→ queued ─→ running ─→ completed
 评审是只读的，恢复比原引擎简单得多：
 
 - 服务重启后，`running` 和 `queued` 的节点直接重新执行。LLM 调用无副作用，重跑是安全的。
+- 进程停机或 job 丢失租约只中断本进程的执行（`dag.ErrInterrupted`），不写入 durable 取消；只有用户取消、被新版本取代、超过截止时间才把工作流写成 `cancelled`。
 - 发布阶段另有幂等保护：汇总评论按隐藏标记就地更新；行内讨论按项目/MR 内的 `publish_key` 去重。该键包含路径、规范化标题和代码片段，不是语义相似度判断。2026-10-25 用户确认按此边界验收：显式重跑时模型换标题可能再次发布同一问题；本版不增加跨次问题语义去重。
 - 评审执行状态与发布状态分开恢复：`publication_state=pending` 的终态工作流在启动后重试；failed execution 在 `post_failure_note=true` 时发布未完成摘要，关闭时记为 skipped；取消或 superseded 记为 skipped；自动恢复不会覆盖 published/failed（手动 republish 是显式例外）。失败原因有界脱敏保存，永久发布失败需要手动 republish。
 
