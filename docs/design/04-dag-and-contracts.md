@@ -446,41 +446,21 @@ user                本节点任务：MR 摘要、包内文件列表与 diff、f
 <!-- gitlab-ce-review:summary v1 fp=9f3c2a1:7be0… -->
 ### AI 评审：🔴 BLOCKING
 
-**结论**：
+<synthesize.summary，1–3 句：结论与主要理由，不复述各条问题>
 
-<synthesize.summary，结构化 Markdown，可含列表与代码块>
-
-| 级别 | 数量 |
-|---|---|
-| P0 | 0 |
-| P1 | 2 |
-| P2 | 3 |
+**P1** × 2 · **P2** × 3
 
 ### 无法定位到行的问题（2）
 
-#### [P2] 标题
+**[P2] 标题** · `path/to/file.go`:42
 
-位置：`path/to/file.go:42`
+一段话：先写触发条件，再写影响。
 
-触发条件与影响，可使用列表：
-
-- 列表项
-
-```go
-changed()
-```
-
-**建议**：
-
-```go
-replacement()
-```
+**建议**：一句话建议。
 
 ### 存疑条目（1）
 
-#### [P1?] 标题
-
-位置：`path/to/file.go:9`
+**[P1?] 标题** · `path/to/file.go`:9
 
 **标记原因**：挑战结果：UNCERTAIN
 
@@ -490,7 +470,8 @@ replacement()
 ````
 
 - 首行隐藏标记用于找到并就地更新这条评论（见 05-flows.md F7）。
-- `body` 和 `suggestion` 由模型按提示词输出结构化 Markdown：短段落、列表、代码围栏和行内代码。渲染器保留这些结构，仅中和原始 HTML、链接语法和隐藏 marker；代码围栏不会被转义成 HTML 实体。
+- 级别计数只列非零项，排成一行；没有已发布问题时不输出计数行。
+- 写法规则在 `_platform_rules.md` 的 Reporting bar 与 Comment style：只报本次 MR 引入、作者会修的离散问题；`body` 为一段话，先写触发条件再写影响，代码不超过 3 行；`suggestion` 是一句话或替换被评论行的 GitLab `suggestion` 块。渲染器保留 Markdown 结构，仅中和原始 HTML、链接语法和隐藏 marker；代码围栏不会被转义成 HTML 实体。
 - 汇总条目正文最多 2000 字符、建议最多 1000 字符；超限时明确追加“内容已截断”，不再静默截到半句。完整正文仍在评审详情中。
 - PASS 用 🟢，评审未完成用 ⚪ 并说明原因。
 - 是否标注模型来源由项目设置 `show_model_attribution` 决定（默认关闭）。
@@ -502,20 +483,13 @@ replacement()
 <!-- gitlab-ce-review:finding key=3a91… -->
 **[P1] 并发写 map 未加锁**
 
-`handleBatch` 在多个 goroutine 中写入 `results`，没有同步。
-
-**触发条件**：批量导入 > 1 个文件时。
-**影响**：可能 panic（concurrent map writes）。
-
-<details><summary>证据</summary>
-
-```go
-// internal/importer/batch.go:88
-results[name] = r
-```
-</details>
+批量导入多于 1 个文件时，`handleBatch` 在多个 goroutine 中无锁写入 `results`，会触发 `concurrent map writes` panic。
 
 **建议**：使用 `sync.Mutex` 或按下标写入切片。
 ~~~
+
+- 讨论挂在对应行上，正文不再重复位置。
+- `suggestion` 以围栏开头（如 GitLab `suggestion` 块）时原样输出，不加“建议”标签。
+- 证据只在存疑条目中以折叠的 `<details>` 保留；已确认条目的证据仍存在评审详情中。
 
 存疑条目（`mark`）在标题前加 `[存疑]`。

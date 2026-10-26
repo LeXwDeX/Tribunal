@@ -116,7 +116,7 @@ func TestPromptFilesContainNoSecrets(t *testing.T) {
 // every review fingerprint, so changing any prompt invalidates pending
 // publications and makes the next trigger review the MR again. Update this
 // value only together with a role version bump and a note in the change.
-const embeddedBundleHash = "9dc2e93402038b3d3aabb11e82380fcf2f1b3cad6c7e2a88ff89121ea7d03ca2"
+const embeddedBundleHash = "1c2475c13fd8d3036eb440b6496252dddf58ac298dee03ad48ffb59890284664"
 
 func TestEmbeddedBundleHashIsPinned(t *testing.T) {
 	bundle, err := Load("")
@@ -133,13 +133,36 @@ func TestPlatformRulesExplainGraphReflectsBase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := bundle.RoleVersion(PlatformRules); got != "2" {
-		t.Fatalf("platform rules version = %q, want 2", got)
+	if got := bundle.RoleVersion(PlatformRules); got != "3" {
+		t.Fatalf("platform rules version = %q, want 3", got)
 	}
 	rules, _ := bundle.Content(PlatformRules)
 	for _, want := range []string{"codebase-memory", "`base`", "worktree", "`read_file`", "`grep`"} {
 		if !strings.Contains(rules, want) {
 			t.Fatalf("platform rules missing %q", want)
 		}
+	}
+}
+
+func TestPlatformRulesSetReportingBarAndCommentStyle(t *testing.T) {
+	bundle, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules, _ := bundle.Content(PlatformRules)
+	for _, want := range []string{"## Reporting bar", "This merge request introduced it", "Speculation that something may break is not a finding", "## Comment style", "one short paragraph", "Lead with the\n  trigger", "at most 3 lines", "`suggestion` fenced block"} {
+		if !strings.Contains(rules, want) {
+			t.Fatalf("platform rules missing %q", want)
+		}
+	}
+	for _, name := range []string{CodeReview, ReviewStandards} {
+		content, _ := bundle.Content(name)
+		if strings.Contains(content, "structured Markdown") || strings.Contains(content, "Structured Markdown") {
+			t.Fatalf("%s still asks for structured Markdown", name)
+		}
+	}
+	synth, _ := bundle.Content(Synthesize)
+	if !strings.Contains(synth, "1 to 3 sentences") {
+		t.Fatal("synthesize summary is not bounded to 1 to 3 sentences")
 	}
 }

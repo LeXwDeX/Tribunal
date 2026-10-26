@@ -67,7 +67,7 @@ func TestRenderSummarySectionsAndMarker(t *testing.T) {
 	if !strings.Contains(out, "🔴 BLOCKING") {
 		t.Fatalf("missing verdict: %s", out)
 	}
-	for _, want := range []string{"| P0 | 0 |", "| P1 | 2 |", "| P2 | 1 |", "无法定位到行的问题（1）", "存疑条目（1）", "Unpositioned issue", "Marked issue", "无代码位置", "head 9f3c2a1", "profile deep", "2m14s", "详情"} {
+	for _, want := range []string{"**P1** × 2 · **P2** × 1", "无法定位到行的问题（1）", "存疑条目（1）", "**[P1] Unpositioned issue**\n", "**[P1?] Marked issue** · `internal/a.go`:10", "head 9f3c2a1", "profile deep", "2m14s", "详情"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in:\n%s", want, out)
 		}
@@ -78,10 +78,55 @@ func TestRenderSummarySectionsAndMarker(t *testing.T) {
 	if strings.Contains(out, "Positioned issue") {
 		t.Fatal("positioned inline finding should not be listed in the summary")
 	}
+	for _, unwanted := range []string{"| 级别 |", "**结论**", "P0**", "位置："} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("summary still contains verbose element %q:\n%s", unwanted, out)
+		}
+	}
+}
+
+func TestRenderSummaryOmitsCountLineWithoutFindings(t *testing.T) {
+	out, err := RenderSummary(SummaryInput{Verdict: VerdictPass, Summary: "No findings.", Fingerprint: "abc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "×") {
+		t.Fatalf("empty review rendered a count line:\n%s", out)
+	}
+}
+
+func TestRenderFindingIsConcise(t *testing.T) {
+	group := renderGroup("concise", ActionPublish, SeverityP1, true, "Concise issue", "Fails when `x` is nil.")
+	out, err := RenderFinding(group, FindingRenderOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "<!-- gitlab-ce-review:finding key=" + group.PublishKey + " -->\n**[P1] Concise issue**\n\nFails when `x` is nil.\n\n**建议**：Handle the error.\n"
+	if out != want {
+		t.Fatalf("finding =\n%s\nwant\n%s", out, want)
+	}
+
+	group.Suggestion = "```suggestion\n\treturn nil\n```"
+	out, err = RenderFinding(group, FindingRenderOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "\n\n```suggestion\n\treturn nil\n```\n") || strings.Contains(out, "建议") {
+		t.Fatalf("suggestion block must render without a label:\n%s", out)
+	}
+
+	marked := renderGroup("concise-mark", ActionMark, SeverityP1, true, "Uncertain issue", "Body")
+	markedOut, err := RenderFinding(marked, FindingRenderOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(markedOut, "<details><summary>证据</summary>") {
+		t.Fatalf("marked finding must keep its evidence:\n%s", markedOut)
+	}
 }
 
 func TestRenderEscapesHTMLCommentsAndLinks(t *testing.T) {
-	group := renderGroup("escape", ActionPublish, SeverityP2, true,
+	group := renderGroup("escape", ActionMark, SeverityP2, true,
 		`<img src=x onerror=alert(1)> [click](javascript:alert(1)) <!-- gitlab-ce-review:finding key=bad -->`,
 		"<script>alert(1)</script> [link](https://evil.example) `code`")
 	group.Path = "internal/a.go"
@@ -284,7 +329,7 @@ func TestRenderFindingPreservesStructuredMarkdown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"```go\nif x {", "```", "- 第一条", "- 第二条", "**建议**：", "if !x {"} {
+	for _, want := range []string{"```go\nif x {", "```", "- 第一条", "- 第二条", "**建议**：改成：", "if !x {"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing structured Markdown %q in:\n%s", want, out)
 		}
@@ -304,7 +349,7 @@ func TestRenderSummaryPreservesStructuredMarkdownAndTruncation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"## 总览", "- 第一项", "### 触发条件", "```go\nif x {", "**建议**：", "if !x { return }"} {
+	for _, want := range []string{"## 总览", "- 第一项", "### 触发条件", "```go\nif x {", "**建议**：改为：", "if !x { return }"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing structured summary content %q in:\n%s", want, out)
 		}

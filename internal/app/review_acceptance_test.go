@@ -366,7 +366,7 @@ func TestReviewDeepTopologyPublishesBlockingGraph(t *testing.T) {
 		t.Fatalf("notes = %d, want 1", got)
 	}
 	body := f.gitlab.notes[0].Body
-	for _, want := range []string{"🔴 BLOCKING", "review-gate confirmed P1", "| P1 | 1 |"} {
+	for _, want := range []string{"🔴 BLOCKING", "review-gate confirmed P1", "**P1** × 1"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("summary is missing %q:\n%s", want, body)
 		}
