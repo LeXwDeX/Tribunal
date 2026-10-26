@@ -6,7 +6,11 @@ GitLab CE MR 多 agent 自动评审服务
 
 当前 M0–M6 功能已有本地实现，覆盖项目注册与 webhook、三种 LLM 协议、agent 工具循环、DAG 与持久化、主 agent 编排/对抗核验/裁决、GitLab 发布、工作区、MCP/Skill、OAuth 持久会话、项目 `read`/`manage` 授权与 CSRF、管理 API、React 控制台、API token、统计、反馈采集、人工标注与许可证清单。
 
-已验证运行时候选/源码快照 `f143e7a7835e1e99345b1df9b289bb499e3c67416598d30e6184a558374eb0ac`（402 文件）通过本地全量检查、实际镜像构建、离线恢复/在线升级和连续两次无诊断代理 deep 运行；BLOCKING 是合成授权回归的预期结论。旧 `27c9b1c` 只是更早的已测快照，不代表本次已验证快照，也不覆盖新的 Responses header。较早的独立代码评审未发现 code blocker，但因缺少 f143 运行时 manifest 与 `12a62d1` 文档 manifest/source-equivalence 而记为 evidence BLOCKING；该缺口已关闭，最终独立 review 对 `12a62d1` 文档树给出 code/documentation PASS、0 blockers。之后的文档澄清只关联 [PR #30](https://github.com/LeXwDeX/Tribunal/pull/30)，不构成新的 review；native CI、平台评审、合并和 Release 仍需在 PR #30 回读，本文不预判结果。详见[验证](#验证)与[交付就绪](docs/delivery-readiness.md)。
+当前版本是 **v1.1.0**，变更和升级必读见 [CHANGELOG](CHANGELOG.md)。v1.1.0 通过了 CI，包括 Compose 冒烟测试，但没有在真实 GitLab 实例上验收；具体做过哪些验证、还缺哪些，见 [v1.1.0 验证状态](docs/delivery-readiness.md#v110-验证状态)。下面这段以及[验证](#验证)一节描述的都是 **v1.0.0** 的真实实例验收。
+
+部署时：人工部署看 [部署与运维](docs/operations.md)，由 agent 代为部署和接入时用 [Agent 部署指南](docs/agent-deployment.md)。
+
+v1.0.0 已验证运行时候选/源码快照 `f143e7a7835e1e99345b1df9b289bb499e3c67416598d30e6184a558374eb0ac`（402 文件）通过本地全量检查、实际镜像构建、离线恢复/在线升级和连续两次无诊断代理 deep 运行；BLOCKING 是合成授权回归的预期结论。旧 `27c9b1c` 只是更早的已测快照，不代表本次已验证快照，也不覆盖新的 Responses header。较早的独立代码评审未发现 code blocker，但因缺少 f143 运行时 manifest 与 `12a62d1` 文档 manifest/source-equivalence 而记为 evidence BLOCKING；该缺口已关闭，最终独立 review 对 `12a62d1` 文档树给出 code/documentation PASS、0 blockers。之后的文档澄清只关联 [PR #30](https://github.com/LeXwDeX/Tribunal/pull/30)，不构成新的 review；native CI、平台评审、合并和 Release 仍需在 PR #30 回读，本文不预判结果。详见[验证](#验证)与[交付就绪](docs/delivery-readiness.md)。
 
 总体目标见 [ARCH.md](ARCH.md)，实现层面的设计与已知偏差见 [详细设计](docs/design/README.md)，部署、备份与运行边界见 [部署与运维](docs/operations.md)。
 

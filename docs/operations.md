@@ -4,6 +4,8 @@
 
 交付前准备、升级/回退边界与真实验收记录见 [交付就绪与验收记录](delivery-readiness.md)。
 
+> 当前版本是 v1.1.0。本段和第 10 节的 f143 记录都是 v1.0.0 的验收结果，v1.1.0 的验证状态见 [v1.1.0 验证状态](delivery-readiness.md#v110-验证状态)。从 v1.0.0 升级前必须先读 [从 v1.0.0 升级到 v1.1.0](#从-v100-升级到-v110)。由 agent 代为部署时，使用 [Agent 部署指南](agent-deployment.md)。
+
 ## Compose 快速部署（推荐）
 
 前提：Docker Engine 或 Docker Desktop，以及 Compose v2.20 或更新版本。宿主机无需 Go 或 Node。Docker daemon 所在机器需要能读取仓库配置文件；本示例不是远程 Docker daemon 的文件分发方案。首次构建需要访问基础镜像、Debian 软件源、Go 模块源和 npm registry。
@@ -453,6 +455,31 @@ curl -fsS http://127.0.0.1:8080/readyz
 - 不要更换 `REVIEW_MASTER_KEY`，否则已保存的项目凭据无法解密。
 - 生产环境使用不可变 tag 或 digest，保留旧镜像以便回滚。
 - 升级窗口内不要同时运行两个容器指向同一个 SQLite 数据卷。
+
+### 从 v1.0.0 升级到 v1.1.0
+
+完整变更见 [CHANGELOG](../CHANGELOG.md#110---2026-10-26)。除了上面的通用步骤，这次升级还有以下几点：
+
+1. **升级后旧版本读不了数据，回退只能靠备份。** 新版本启动时会：
+   - 应用迁移 `0013_admin_bindings`、`0014_extension_defaults`；
+   - 在各服务初始化前运行 `MigrateProjectSecrets`，把已存的项目 token 和 webhook secret 改写成绑定项目与字段的新加密格式（前缀 `\x00tb1`）。
+
+   v1.0.0 读不了新格式。所以必须先做第 7 节的一致性备份；回退时恢复这份备份，不能只换回 v1.0.0 镜像。
+2. **继续使用原来的 `REVIEW_MASTER_KEY`。** 迁移要用它解开旧密文。迁移是幂等的，每个字段单独迁移，迁移期间被并发修改的行会跳过。解不开的字段只记一条告警（只含 `project_id`），保持原样，不阻止启动；这类字段在升级前使用时同样会失败，需要在设置页用「更新访问 Key」或 Webhook「重建」重新写入。
+3. **镜像和 CLI 改了名，数据卷没改。** 用新代码重新构建镜像（`docker compose build`）。Compose 项目名 `crc-review` 和数据卷 `crc-review_data` 保持不变，直接沿用。脚本里的 `/app/reviewctl` 可以继续用，建议改成 `/app/tribunalctl`。环境变量可以逐步改为 `TRIBUNAL_*` 新名，session key 要沿用原来的值。
+4. **管理员配置。** `bootstrap_admins` 推荐改成 `id:<GitLab 用户 ID>`（用 `tribunalctl users list` 查 ID）。保留用户名写法也可以：该用户名第一次以管理员身份出现时，会被绑定到当时的 GitLab 用户 ID 并写入 `admin_bindings`；之后其他账号即使改成这个用户名，也只有 viewer 权限。如果想换一个账号当管理员，改用 `id:` 写法。
+5. **会话数量。** 每个用户最多保留 10 个浏览器会话，超出时淘汰该用户自己最旧的会话。升级时已有的会话保留，用户下次登录时才按上限淘汰。
+6. **默认扩展。** 首次启动时会登记内置 Skill `code-review` 和内置 MCP 服务器 `codebase-memory`，并按 `default_extensions` 绑定到评审块。已有部署如果在数据库或 `mcp.config` 里自建了同名项，服务不会接管，也不会绑定它的工具。`config/server.docker.yaml` 已带默认配置；自定义配置文件要参照 [默认扩展配置](design/06-config.md#默认扩展default_extensions) 补上 `default_extensions`，不需要就写 `skills: []`。
+7. **Webhook 的配置位置变了。** 控制台注册项目不再创建 Webhook，要在项目设置的「GitLab Webhook」面板里启用。已有项目的 Webhook 状态不受影响。CLI 的 `--auto-webhook` 仍然可用。
+
+升级后检查：
+
+```bash
+docker compose logs --tail=200 review | grep -Ei 'migrat|secret|deprecat|error'
+docker compose exec -T review /app/tribunalctl projects all
+```
+
+日志里不应出现 `stored project token cannot be decrypted` 或 `stored webhook secret cannot be decrypted` 告警，`projects all` 应列出全部已有项目。然后在控制台确认：内置 Skill 和 MCP 带「内置」标签；对一个已有项目执行「测试」MCP 或手动触发一次评审，确认能正常发布。
 
 ## 9. 无外部凭据的本地烟测
 
