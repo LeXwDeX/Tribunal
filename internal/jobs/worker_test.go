@@ -397,3 +397,122 @@ func TestWorkerDoesNotRunQueuedSuccessorEarly(t *testing.T) {
 	}
 	waitJob(t, q, successorID, store.JobDone)
 }
+
+// flakyHeartbeatQueue fails heartbeats with a configurable error while
+// delegating everything else to the real store.
+type flakyHeartbeatQueue struct {
+	*sqlite.Store
+	mu       sync.Mutex
+	failures int // remaining failures; negative fails forever
+	err      error
+	calls    atomic.Int32
+}
+
+func (q *flakyHeartbeatQueue) Heartbeat(ctx context.Context, j store.Job, lease time.Duration) error {
+	q.calls.Add(1)
+	q.mu.Lock()
+	fail := q.failures != 0
+	if q.failures > 0 {
+		q.failures--
+	}
+	err := q.err
+	q.mu.Unlock()
+	if fail {
+		return err
+	}
+	return q.Store.Heartbeat(ctx, j, lease)
+}
+
+// heartbeatHandler blocks until release or cancellation and reports which.
+func heartbeatHandler(started, canceled chan struct{}, release <-chan struct{}) jobs.Handler {
+	return func(ctx context.Context, _ *jobs.Job) error {
+		close(started)
+		select {
+		case <-ctx.Done():
+			close(canceled)
+			return ctx.Err()
+		case <-release:
+			return nil
+		}
+	}
+}
+
+func TestWorkerTransientHeartbeatErrorKeepsJobRunning(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	q := &flakyHeartbeatQueue{Store: openStore(t, clock), failures: 2, err: errors.New("database is locked")}
+	jobID, _, err := q.Enqueue(ctx, jobs.Job{Kind: "flaky", Key: "flaky:1"})
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	started, canceled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	w := jobs.NewWorker(q, jobs.WorkerConfig{
+		Handlers:     map[string]jobs.Handler{"flaky": heartbeatHandler(started, canceled, release)},
+		Lease:        60 * time.Millisecond,
+		PollInterval: time.Second,
+		Now:          clock.Now,
+	})
+	runWorker(t, w)
+	<-started
+	waitFor(t, 3*time.Second, "heartbeat after transient failures", func() bool { return q.calls.Load() >= 3 })
+	select {
+	case <-canceled:
+		t.Fatal("transient heartbeat error cancelled the handler")
+	default:
+	}
+	close(release)
+	waitJob(t, q.Store, jobID, store.JobDone)
+}
+
+func TestWorkerHeartbeatLeaseLostCancelsHandler(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	q := &flakyHeartbeatQueue{Store: openStore(t, clock), failures: -1, err: fmt.Errorf("heartbeat: %w", store.ErrLeaseLost)}
+	if _, _, err := q.Enqueue(ctx, jobs.Job{Kind: "lost", Key: "lost:1"}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	started, canceled := make(chan struct{}), make(chan struct{})
+	w := jobs.NewWorker(q, jobs.WorkerConfig{
+		Handlers:     map[string]jobs.Handler{"lost": heartbeatHandler(started, canceled, nil)},
+		Lease:        60 * time.Millisecond,
+		PollInterval: time.Second,
+		Now:          clock.Now,
+	})
+	runWorker(t, w)
+	<-started
+	select {
+	case <-canceled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("lost lease did not cancel the handler")
+	}
+}
+
+func TestWorkerPersistentHeartbeatErrorCancelsAfterLeaseExpires(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	q := &flakyHeartbeatQueue{Store: openStore(t, clock), failures: -1, err: errors.New("database is locked")}
+	if _, _, err := q.Enqueue(ctx, jobs.Job{Kind: "stuck", Key: "stuck:1"}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	started, canceled := make(chan struct{}), make(chan struct{})
+	w := jobs.NewWorker(q, jobs.WorkerConfig{
+		Handlers:     map[string]jobs.Handler{"stuck": heartbeatHandler(started, canceled, nil)},
+		Lease:        60 * time.Millisecond,
+		PollInterval: time.Second,
+		Now:          clock.Now,
+	})
+	runWorker(t, w)
+	<-started
+	waitFor(t, 3*time.Second, "failed heartbeats", func() bool { return q.calls.Load() >= 3 })
+	select {
+	case <-canceled:
+		t.Fatal("handler cancelled while its lease was still valid")
+	default:
+	}
+	clock.Advance(time.Second)
+	select {
+	case <-canceled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("handler kept running after its lease expired")
+	}
+}

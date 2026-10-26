@@ -207,6 +207,12 @@ func (w *Worker) execute(ctx context.Context, claimed *Job) {
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	// leaseUntil is a conservative local view of the stored lease. A failed
+	// heartbeat that is not a lost lease is retried until this passes.
+	leaseUntil := w.now().Add(w.lease)
+	if owner.LeaseUntil != nil {
+		leaseUntil = *owner.LeaseUntil
+	}
 
 	for {
 		select {
@@ -218,7 +224,13 @@ func (w *Worker) execute(ctx context.Context, claimed *Job) {
 			}
 			return
 		case <-ticker.C:
-			if err := w.heartbeat(ctx, owner); err != nil {
+			sent := w.now()
+			err := w.heartbeat(ctx, owner)
+			if err == nil {
+				leaseUntil = sent.Add(w.lease)
+				continue
+			}
+			if errors.Is(err, store.ErrLeaseLost) || !w.now().Before(leaseUntil) {
 				// A job without a live lease must not keep running.
 				cancel()
 				<-done
@@ -247,7 +259,7 @@ func (w *Worker) heartbeat(parent context.Context, job Job) error {
 	err := w.queue.Heartbeat(ctx, job, w.lease)
 	if err != nil {
 		if !errors.Is(err, store.ErrLeaseLost) {
-			w.logger.Warn("job heartbeat failed", "job_id", job.ID, "kind", job.Kind)
+			w.logger.Warn("job heartbeat failed; retrying until the lease expires", "job_id", job.ID, "kind", job.Kind)
 		}
 		return err
 	}
