@@ -702,7 +702,7 @@ func projectBindingStubs(blocks map[string]config.BlockBinding) map[string]confi
 	if out == nil {
 		out = make(map[string]config.BlockBinding)
 	}
-	for _, block := range []string{"code-review", "review", "reasoner", "verify", "synthesize", "onboarding"} {
+	for _, block := range config.BindableBlocks {
 		out[block] = config.BlockBinding{
 			MCPTools: []string{projectMCPStub},
 			Skills:   []string{projectSkillStubBase + block},

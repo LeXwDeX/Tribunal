@@ -492,6 +492,7 @@ data/workspaces/<project_id>/
 - **来源**：平台级（如 security-review、各语言的编码规范）加项目级（工作区 `skills/`）。仓库自带的 `.claude/skills` 默认不读取，可按项目开启（只读目标分支版本）。
 - **按块挂载**：例如 review 的 standards 通道挂项目编码规范，安全相关的块挂 security-review。
 - **脚本**：首版只支持**指令类 skill，不执行其中的任何脚本**。
+- **默认 Skill**：平台内置 `code-review`（改编自 mattpocock/skills，MIT，上游 commit `3da8c01`），首次启动登记为平台级 Skill，并挂到 `code-review` 和 `review` 块。它只补充方法论：Standards / Spec 双轴、Fowler 坏味道基线，以及「仓库标准优先于基线」「坏味道一律是判断项」两条规则；fixed point 取 MR 的 base/target SHA，spec 取 MR 描述和其中引用的 issue。块合约（`prompts/review.standards.md`、`review.intent.md`、`code-review.md`）仍定义角色、通道和 `submit_result` 输出，两者不重复注入同一指令。默认登记和绑定只执行一次，管理员解绑或删除后不恢复，升级不覆盖自定义绑定；机制与配置见 [默认扩展](docs/design/06-config.md#默认扩展default_extensions)。
 
 ### 8.6 agent 可用工具汇总
 
@@ -633,6 +634,7 @@ blocks:                     # 按块授权 MCP 工具、挂载 Skill
 - **DAG 引擎来源**：`pkg/dag` 当前是依据本设计独立实现的 Go 代码，**不是**从 OpenCode-GraphAgent 移植的产物；没有复制上游代码，也没有添加 `NOTICE`。用户已于 2026-10-23 确认接受该独立实现作为本地验收口径，不要求移植，也不虚构上游 NOTICE、版权人或来源。若未来选择移植，需先确认上游署名与授权（原仓库标注 AGPL-3.0-or-later，Copyright (c) 2026 LeXwDeX），并保留相应版权声明；以下事项仅适用于该未来移植评估，不是当前实现的验收阻塞项：
   - 原 DAG 代码引用的上游 opencode 模块是 MIT（Copyright (c) 2025 opencode），若一并移植，需保留其版权声明。
   - 原块合约改编自 mattpocock/skills（MIT），若移植相关 prompt，需保留出处。
+- **内置 Skill**：`internal/skill/builtin/code-review/` 改编自 mattpocock/skills 的 `skills/engineering/code-review/SKILL.md`（MIT，Copyright (c) 2026 Matt Pocock，commit `3da8c01116264675eeefbd6e9d59c734de9095cc`），目录内保留 `LICENSE` 和说明改动的 `NOTICE.md`。`licensecheck` 检查每个内置 Skill 的许可证，`licensebundle` 把它们写入 `licenses/THIRD_PARTY_NOTICES.txt` 随镜像分发。
   - 移植前需确认原仓库中署名为 `Test <test@opencode.test>` 的两个提交（含引擎首个提交 `c8e7b676fd`）出自版权人本人。
 
 ### 13.1 未来移植参考清单（当前未执行）

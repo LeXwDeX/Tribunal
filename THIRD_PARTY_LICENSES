@@ -216,6 +216,19 @@ not part of the shipped bundle and are excluded.
 - `github.com/segmentio/asm`, `github.com/segmentio/encoding`: MIT top-level license; no additional
   third-party license files at the module root.
 
+## Bundled skills (1)
+
+Instruction skills embedded into the server binary from `internal/skill/builtin/` and copied into
+the managed skills directory on first start. Each directory keeps the upstream `LICENSE` and a
+`NOTICE.md` with the source and modifications; `scripts/licensecheck` and `scripts/licensebundle`
+read both.
+
+| Skill | Upstream | Commit | License | Copyright |
+|---|---|---|---|---|
+| `code-review` | `mattpocock/skills` `skills/engineering/code-review/SKILL.md` | `3da8c01116264675eeefbd6e9d59c734de9095cc` | MIT | Copyright (c) 2026 Matt Pocock |
+
+The bundled version is adapted for non-interactive merge request review; see its `NOTICE.md`.
+
 ## Copyleft and unknown licenses
 
 - MPL-2.0 (file-level copyleft): 3 modules. `github.com/hashicorp/go-cleanhttp` and

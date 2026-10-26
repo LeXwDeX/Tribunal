@@ -87,3 +87,19 @@ func ValidateExtensionScope(scope string, projectID *int64, required bool) error
 		return fmt.Errorf("scope must be %s or %s", ScopePlatform, ScopeProject)
 	}
 }
+
+// Extension default outcomes. A recorded key is never processed again.
+const (
+	ExtensionDefaultApplied = "applied"
+	ExtensionDefaultSkipped = "skipped"
+)
+
+// ExtensionDefault is one ledger row of the platform default extension
+// seeder: a registration, a block grant or a block snapshot. Detail is a
+// bounded reason or the JSON binding the defaults last wrote.
+type ExtensionDefault struct {
+	Key       string    `json:"key"`
+	Outcome   string    `json:"outcome"`
+	Detail    string    `json:"detail,omitempty"`
+	AppliedAt time.Time `json:"applied_at"`
+}

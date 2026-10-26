@@ -1,4 +1,6 @@
 // Command licensecheck rejects modules with forbidden or unrecognized licenses.
+// It applies the same rule to every bundled skill directory, which must carry
+// its own permissive LICENSE.
 package main
 
 import (
@@ -49,6 +51,7 @@ func run(args []string, stdout, stderr io.Writer, list func() ([]byte, error)) i
 	fs := flag.NewFlagSet("licensecheck", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	min := fs.Int("min", 0, "minimum number of non-main modules to check")
+	skills := fs.String("skills", "", "bundled skills directory to check (default internal/skill/builtin when present)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -81,7 +84,46 @@ func run(args []string, stdout, stderr io.Writer, list func() ([]byte, error)) i
 		return 1
 	}
 	fmt.Fprintf(stdout, "licensecheck: checked %d modules, minimum %d\n", checked, *min)
+
+	dir, explicit := *skills, *skills != ""
+	if !explicit {
+		dir = defaultSkillsDir
+	}
+	bundled, err := checkBundledSkills(dir, explicit, stdout)
+	if err != nil {
+		fmt.Fprintf(stderr, "licensecheck: %v\n", err)
+		return 1
+	}
+	if bundled >= 0 {
+		fmt.Fprintf(stdout, "licensecheck: checked %d bundled skills\n", bundled)
+	}
 	return 0
+}
+
+const defaultSkillsDir = "internal/skill/builtin"
+
+// checkBundledSkills checks each skill directory below dir. It returns -1
+// when the default directory does not exist, for example outside the
+// repository root.
+func checkBundledSkills(dir string, explicit bool, stdout io.Writer) (int, error) {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) && !explicit {
+		return -1, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("bundled skills: %w", err)
+	}
+	checked := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if err := checkLicensedDir(filepath.Join(dir, entry.Name()), stdout, "bundled skill "+entry.Name()); err != nil {
+			return checked, err
+		}
+		checked++
+	}
+	return checked, nil
 }
 
 func goListModules() ([]byte, error) {
@@ -115,36 +157,44 @@ func checkModules(mods []module, stdout io.Writer) (int, error) {
 		if m.Main || m.Dir == "" {
 			continue
 		}
-		files, err := licenseFiles(m.Dir)
-		if err != nil {
-			return checked, fmt.Errorf("module %s: %w", m.Path, err)
-		}
-		if len(files) == 0 {
-			return checked, fmt.Errorf("module %s: no LICENSE, COPYING, or NOTICE file in %s", m.Path, m.Dir)
-		}
-		recognized := false
-		for _, name := range files {
-			path := filepath.Join(m.Dir, name)
-			text, err := os.ReadFile(path)
-			if err != nil {
-				return checked, fmt.Errorf("module %s: %w", m.Path, err)
-			}
-			switch classify(string(text)) {
-			case forbiddenLicense:
-				return checked, fmt.Errorf("module %s: forbidden license in %s", m.Path, name)
-			case mplLicense:
-				fmt.Fprintf(stdout, "licensecheck: %s: MPL in %s (allowed)\n", m.Path, name)
-				recognized = true
-			case allowedLicense:
-				recognized = true
-			}
-		}
-		if !recognized {
-			return checked, fmt.Errorf("module %s: unrecognized license in %s", m.Path, m.Dir)
+		if err := checkLicensedDir(m.Dir, stdout, "module "+m.Path); err != nil {
+			return checked, err
 		}
 		checked++
 	}
 	return checked, nil
+}
+
+// checkLicensedDir requires at least one recognized, non-forbidden license
+// file in dir. label prefixes errors, for example "module example.com/x".
+func checkLicensedDir(dir string, stdout io.Writer, label string) error {
+	files, err := licenseFiles(dir)
+	if err != nil {
+		return fmt.Errorf("%s: %w", label, err)
+	}
+	if len(files) == 0 {
+		return fmt.Errorf("%s: no LICENSE, COPYING, or NOTICE file in %s", label, dir)
+	}
+	recognized := false
+	for _, name := range files {
+		text, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			return fmt.Errorf("%s: %w", label, err)
+		}
+		switch classify(string(text)) {
+		case forbiddenLicense:
+			return fmt.Errorf("%s: forbidden license in %s", label, name)
+		case mplLicense:
+			fmt.Fprintf(stdout, "licensecheck: %s: MPL in %s (allowed)\n", strings.TrimPrefix(label, "module "), name)
+			recognized = true
+		case allowedLicense:
+			recognized = true
+		}
+	}
+	if !recognized {
+		return fmt.Errorf("%s: unrecognized license in %s", label, dir)
+	}
+	return nil
 }
 
 func licenseFiles(dir string) ([]string, error) {

@@ -1,7 +1,9 @@
 package config
 
 import (
+	"os"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -22,6 +24,13 @@ func TestShippedConfigsDeclareDefaultSkill(t *testing.T) {
 	setDockerConfigEnv(t)
 	setRequiredEnv(t)
 	for _, path := range []string{"../../config/server.example.yaml", dockerConfigPath} {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(raw), "default_extensions:") || !strings.Contains(string(raw), "- name: code-review") {
+			t.Errorf("%s does not declare the default code-review skill", path)
+		}
 		cfg := loadConfig(t, path)
 		if !reflect.DeepEqual(cfg.DefaultExtensions.Skills, wantDefaultSkills) {
 			t.Errorf("%s default skills = %+v", path, cfg.DefaultExtensions.Skills)

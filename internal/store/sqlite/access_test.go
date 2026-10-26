@@ -630,7 +630,7 @@ func TestProjectAccessMigrationFreshAndLegacy(t *testing.T) {
 	if err := s.SetProjectGrant(ctx, 42, 7, store.ProjectAccessRead); err != nil {
 		t.Fatalf("legacy grant: %v", err)
 	}
-	if got := rowCount(t, s, `SELECT COUNT(*) FROM schema_migrations`); got != 12 {
-		t.Fatalf("schema_migrations = %d, want 12", got)
+	if got := rowCount(t, s, `SELECT COUNT(*) FROM schema_migrations`); got != migrationCount(t) {
+		t.Fatalf("schema_migrations = %d, want %d", got, migrationCount(t))
 	}
 }

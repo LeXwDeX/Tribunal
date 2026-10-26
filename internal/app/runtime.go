@@ -156,6 +156,9 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 	if err != nil {
 		return nil, err
 	}
+	if err := seedDefaultExtensions(ctx, cfg, deps.Store, logger, now); err != nil {
+		return nil, err
+	}
 	blocks, platformMCP, skillDirs, err := loadStoredPlatformExtensions(
 		ctx, deps.Store, cfg.Blocks, platformMCP, cfg.Skills.Dirs, deniedEnvNames(cfg)...)
 	if err != nil {

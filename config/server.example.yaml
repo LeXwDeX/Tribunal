@@ -68,3 +68,13 @@ profiles:
 review_defaults:
   language: zh-CN
   skip_draft: true
+
+# Platform extensions registered once on first start (see docs/design/06-config.md).
+# The bundled code-review skill is mounted on the code-review and review blocks.
+# Unbinding or deleting it in the console is never undone by a restart; an
+# existing binding for a block is kept as is. Use `skills: []` to register no
+# new defaults.
+default_extensions:
+  skills:
+    - name: code-review
+      blocks: [code-review, review]

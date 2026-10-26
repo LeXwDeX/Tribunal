@@ -1,7 +1,8 @@
 // Command licensebundle builds the release third-party notices file.
 //
 // It combines the Go standard library license, Go modules linked into the
-// Linux/amd64 server, and npm production packages from web/package-lock.json.
+// Linux/amd64 server, npm production packages from web/package-lock.json, and
+// the skills embedded from internal/skill/builtin.
 // The output is a single deterministic file: licenses/THIRD_PARTY_NOTICES.txt.
 // Run with -check to verify that the checked-in file is current.
 package main
@@ -145,7 +146,7 @@ func build(root string, list func(string) ([]byte, error)) ([]byte, error) {
 
 	var b strings.Builder
 	b.WriteString(marker)
-	b.WriteString("\nScope: Go standard library, Go modules linked into the Linux/amd64 server, and npm production packages.\n")
+	b.WriteString("\nScope: Go standard library, Go modules linked into the Linux/amd64 server, npm production packages, and bundled skills.\n")
 	writeSection(&b, "Go standard library", "LICENSE", goLicense)
 
 	for _, mod := range mods {
@@ -180,7 +181,46 @@ func build(root string, list func(string) ([]byte, error)) ([]byte, error) {
 			writeSection(&b, title, text.name, text.text)
 		}
 	}
+
+	skills, err := bundledSkills(root)
+	if err != nil {
+		return nil, err
+	}
+	for _, name := range skills {
+		title := "Bundled skill: " + name
+		texts, err := packageTexts(title, filepath.Join(bundledSkillsDir(root), name))
+		if err != nil {
+			return nil, err
+		}
+		for _, text := range texts {
+			writeSection(&b, title, text.name, text.text)
+		}
+	}
 	return []byte(b.String()), nil
+}
+
+// bundledSkills lists the skill directories embedded into the server binary.
+// A missing directory means none.
+func bundledSkills(root string) ([]string, error) {
+	entries, err := os.ReadDir(bundledSkillsDir(root))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("bundled skills: %w", err)
+	}
+	var names []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			names = append(names, entry.Name())
+		}
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+func bundledSkillsDir(root string) string {
+	return filepath.Join(root, "internal", "skill", "builtin")
 }
 
 func packageTexts(label, dir string) ([]licenseText, error) {

@@ -133,6 +133,14 @@ UUID 在项目内去重，去重记录和入队在同一事务中提交。同一
 
 `review.run`、`review.cancel`、`review.command`、`review.publish`、`workspace.onboard` 和 `workspace.refresh` 均已注册处理器。`/review help` 和权限不足由 command worker 回复一条说明；每条回复带该源 note ID 的隐藏 marker，重试时更新同一条回复，不重复创建。受理 run/cancel 时，入队事务记录源 note 的 eyes，终态由状态 worker 协调；help/拒绝不添加表情。webhook 仍不调用 GitLab，也不添加 emoji。目标分支模式采用 Go `path.Match`，不提供递归 `**` 语义。
 
+## 默认扩展
+
+新部署首次启动时会自动登记内置的平台级 Skill `code-review`，并挂到 `code-review` 和 `review` 评审块。它改编自 [mattpocock/skills 的 code-review](https://www.skills.sh/mattpocock/skills/code-review)（MIT，出处见 `internal/skill/builtin/code-review/NOTICE.md`），提供 Standards / Spec 双轴评审方法和代码坏味道基线，改成了无需交互的版本。
+
+- 在控制台「扩展」页的平台范围可以看到它；在「块绑定」中移除即可停用。重启不会恢复已解绑或已删除的默认项，升级也不会覆盖已改过的绑定。
+- 删除前先解绑，否则仍引用它的块会在评审时报错。
+- 配置 `default_extensions.skills: []` 可以让新部署不登记默认 Skill。详见 [默认扩展配置](docs/design/06-config.md#默认扩展default_extensions)。
+
 ## 验证
 
 ```bash
