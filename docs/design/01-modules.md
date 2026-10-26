@@ -56,7 +56,12 @@ internal/
     sse.go                       工作流进度推送（Server-Sent Events）
     web.go                       embed 前端构建产物
   app/
-    review_service.go            MR 事件 → 工作流：幂等键、取消旧工作流、启动新工作流
+    review_service.go            MR 事件 → 工作流：幂等键、候选过滤、运行评审
+    review_control.go            取消、重发、运行控制与发布
+    review_side_effects.go       评审状态 note、表情与副作用对账
+    review_inputs.go             MR 输入收集与评审配置解析
+    review_prepare.go            增量范围、运行准备、diff 文件与路径过滤
+    review_recovery.go           启动恢复与待发布补偿
     project_service.go           项目注册、token 校验与加密、自动创建 webhook
     workspace_service.go         onboarding 与刷新编排
     feedback_service.go          周期性收集 👍/👎 与 resolve 信号
