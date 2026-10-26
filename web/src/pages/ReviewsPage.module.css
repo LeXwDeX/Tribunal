@@ -1,0 +1,36 @@
+.notes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding: 8px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.state {
+  padding: 16px 18px;
+}
+
+/* Six statuses do not fit a phone row; scroll them instead of wrapping labels. */
+.statusFilter {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.statusFilter button {
+  flex: none;
+  white-space: nowrap;
+}
+
+.filters select,
+.filters input {
+  width: auto;
+  max-width: 180px;
+}
+
+@media (max-width: 900px) {
+  .filters select,
+  .filters input {
+    flex: 1 1 100%;
+    max-width: none;
+  }
+}

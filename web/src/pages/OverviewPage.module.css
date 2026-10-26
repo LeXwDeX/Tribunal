@@ -1,0 +1,169 @@
+.split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 20px;
+  align-items: start;
+}
+
+.metricNoteText {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.liveList {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.liveItem {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px 16px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.liveItem:last-child {
+  border-bottom: 0;
+}
+
+.primary {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.liveTitle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-weight: 500;
+}
+
+.liveTitle:hover {
+  color: var(--accent);
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.mrRef {
+  font: 500 12.5px var(--font-mono);
+  color: var(--muted-strong);
+}
+
+.elapsed {
+  font: 500 13px var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted-strong);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.stageTrack {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.stage {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.stage i {
+  display: block;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--surface-3);
+}
+
+.stageDone i {
+  background: var(--ok-dot);
+}
+
+.stageNow {
+  color: var(--info-fg);
+  font-weight: 500;
+}
+
+.stageNow i {
+  background: linear-gradient(90deg, var(--info-dot) 55%, var(--surface-3) 55%);
+}
+
+.alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 13px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.alert:last-child {
+  border-bottom: 0;
+}
+
+.alertBody {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.alertAction {
+  align-self: flex-start;
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.panelFooter {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--border);
+}
+
+.state {
+  padding: 16px 18px;
+}
+
+@media (max-width: 1100px) {
+  .split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 900px) {
+  .liveItem,
+  .alert {
+    padding: 12px 16px;
+  }
+
+  .stage {
+    font-size: 11px;
+  }
+}
