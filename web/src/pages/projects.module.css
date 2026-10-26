@@ -31,6 +31,9 @@
 .stepper {
   display: flex;
   gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
 .step {
@@ -278,5 +281,34 @@
   }
   .tileFooter .hint {
     margin-left: 0;
+  }
+}
+
+/* 项目列表：flush 面板里的工具栏与全宽表格 */
+.search {
+  flex: 0 1 280px;
+  min-width: 0;
+}
+
+.projectTable {
+  min-width: 1060px;
+}
+
+.projectTable .pathCell {
+  color: var(--text);
+}
+
+.projectTable .pathCell:hover {
+  color: var(--link);
+}
+
+.tableFooter {
+  padding: 12px 18px;
+  border-top: 1px solid var(--border);
+}
+
+@media (max-width: 900px) {
+  .search {
+    flex: 1 1 100%;
   }
 }

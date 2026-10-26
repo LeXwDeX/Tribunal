@@ -6,8 +6,8 @@ import { ApiError, errorMessage } from '../api/client'
 import type { Project, ProjectRegistration, ProjectValidation } from '../api/types'
 import { useCanWrite } from '../components/RoleContext'
 import {
-  Badge, Button, Dialog, EmptyState, ErrorState, ExternalLink, Field, LoadingState, PageHeader, Panel, RelativeTime, Segmented, StatusBadge,
-  Switch, Toolbar, ToolbarField, VerdictBadge, useToast,
+  Badge, Button, Dialog, EmptyState, ErrorState, ExternalLink, Field, LoadingState, PageHeader, Panel, PanelBody, RelativeTime, Segmented, StatusBadge,
+  Switch, Toolbar, VerdictBadge, useToast,
 } from '../components/ui'
 import { usePaginated } from '../lib/hooks'
 import { formatDate, labelForStatus, labelForWebhookState, webhookTone } from '../lib/format'
@@ -234,7 +234,7 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
       ) : (
         <>
           <ol className={page.stepper} aria-label="注册步骤">
-            <li className={validation ? page.step : `${page.step} ${page.stepOn}`} aria-current={validation ? undefined : 'step'}><b>1</b>校验连接</li>
+            <li className={`${page.step} ${page.stepOn}`} aria-current={validation ? undefined : 'step'}><b>1</b>校验连接</li>
             <li className={validation ? `${page.step} ${page.stepOn}` : page.step} aria-current={validation ? 'step' : undefined}><b>2</b>保存并初始化</li>
           </ol>
           {validationError ? <ErrorState error={validationError} title="校验失败" /> : null}
@@ -371,34 +371,38 @@ export function ProjectsPage() {
           actions={canRegister ? <Button variant="primary" onClick={() => setRegisterOpen(true)}>注册项目</Button> : undefined}
         />
 
-        <Panel
-          title="已注册项目"
-          aside={projects.isSuccess ? `已加载 ${projects.items.length}${projects.hasNextPage ? '+' : ''} 个项目 · ${enabledCount} 个启用` : undefined}
-        >
-          <Toolbar actions={projects.isFetching ? <span className="small muted" role="status">刷新中…</span> : undefined}>
-            <ToolbarField label="搜索项目路径" grow>
-              <input className="input" name="q" type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索项目路径" aria-label="搜索项目路径" />
-            </ToolbarField>
-            <Segmented
-              label="按启用状态筛选"
-              options={ENABLED_FILTERS}
-              value={enabled}
-              onChange={setEnabled}
-            />
+        <Panel flush>
+          <Toolbar
+            inset
+            label="项目筛选"
+            actions={(
+              <>
+                {projects.isFetching ? <span className="small muted" role="status">刷新中…</span> : null}
+                {projects.isSuccess ? <span className="small muted">已加载 {projects.items.length}{projects.hasNextPage ? '+' : ''} 个项目 · {enabledCount} 个启用</span> : null}
+                <Segmented
+                  label="按启用状态筛选"
+                  options={ENABLED_FILTERS}
+                  value={enabled}
+                  onChange={setEnabled}
+                />
+              </>
+            )}
+          >
+            <input className={`input ${page.search}`} name="q" type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索项目路径" aria-label="搜索项目路径" />
           </Toolbar>
 
-          {projects.isPending ? <LoadingState /> : null}
-          {projects.isError ? <ErrorState error={projects.error} onRetry={projects.retry} /> : null}
+          {projects.isPending ? <PanelBody><LoadingState /></PanelBody> : null}
+          {projects.isError ? <PanelBody><ErrorState error={projects.error} onRetry={projects.retry} /></PanelBody> : null}
           {projects.isSuccess && projects.items.length === 0 ? (
-            <EmptyState
+            <PanelBody><EmptyState
               title={debouncedSearch || enabled ? '没有符合条件的项目' : '还没有注册项目'}
               description={debouncedSearch || enabled ? '调整搜索或启用状态筛选。' : '注册第一个 GitLab 项目后，这里会显示工作区、token 和 webhook 状态。'}
               action={canRegister && !debouncedSearch && !enabled ? <Button variant="primary" onClick={() => setRegisterOpen(true)}>注册项目</Button> : undefined}
-            />
+            /></PanelBody>
           ) : null}
           {projects.items.length ? (
             <div className="tableWrap">
-              <table className="dataTable" style={{ minWidth: 1060 }}>
+              <table className={page.projectTable}>
                 <thead>
                   <tr>
                     <th scope="col">项目</th>
@@ -473,7 +477,7 @@ export function ProjectsPage() {
             </div>
           ) : null}
           {projects.hasNextPage ? (
-            <div className={styles.actionsRight}>
+            <div className={`${styles.actionsRight} ${page.tableFooter}`}>
               <Button variant="secondary" onClick={projects.fetchNextPage} loading={projects.isFetchingNextPage}>加载更多项目</Button>
             </div>
           ) : null}

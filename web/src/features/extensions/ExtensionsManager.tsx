@@ -315,7 +315,7 @@ function McpTab({
       ) : null}
       {servers.items.length ? (
         <div className="tableWrap">
-          <table className="dataTable" style={{ minWidth: 860 }}>
+          <table className={ext.mcpTable}>
             <thead>
               <tr>
                 <th scope="col">名称</th>
