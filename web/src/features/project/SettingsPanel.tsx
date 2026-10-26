@@ -2,8 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  disableWebhook, enableWebhook, listProfiles, rebuildWebhook, rotateProjectToken, unregisterProject,
-  updateProject, validateProjectConnection,
+  listProfiles, rotateProjectToken, unregisterProject, updateProject, validateProjectConnection,
 } from '../../api/api'
 import { ApiError, errorMessage } from '../../api/client'
 import type { Project, ProjectValidation } from '../../api/types'
@@ -14,6 +13,7 @@ import {
 import { formatDate, labelForWebhookState, webhookTone } from '../../lib/format'
 import ui from '../../styles/ui.module.css'
 import styles from '../../pages/pages.module.css'
+import { WebhookPanel, webhookEventLabel, webhookManagedByLabel } from './WebhookPanel'
 
 type SettingsDraft = Record<string, unknown>
 
@@ -31,22 +31,6 @@ const ACCESS_LEVEL_ROLES: Record<number, string> = {
 
 function accessLevelLabel(level: number): string {
   return `${ACCESS_LEVEL_ROLES[level] || '未知角色'}（${level}）`
-}
-
-const WEBHOOK_EVENT_LABELS: Record<string, string> = {
-  push_events: 'Push',
-  merge_requests_events: 'Merge request',
-  note_events: 'Note',
-}
-
-function webhookEventLabel(event: string): string {
-  return WEBHOOK_EVENT_LABELS[event] || event
-}
-
-function webhookManagedByLabel(managedBy?: string, hookID?: number): string {
-  if (managedBy === 'crc') return '本服务'
-  if (hookID) return '待确认'
-  return '未配置'
 }
 
 function splitLines(value: unknown): string {
@@ -109,13 +93,6 @@ export function SettingsPanel({ project }: { project: Project }) {
   const [rotating, setRotating] = useState(false)
   const [rotateError, setRotateError] = useState<unknown>(null)
   const validateRef = useRef(0)
-  const hookRequestRef = useRef(0)
-  const [hookOpen, setHookOpen] = useState(false)
-  const [hookPending, setHookPending] = useState(false)
-  const [hookError, setHookError] = useState<unknown>(null)
-  const [disableOpen, setDisableOpen] = useState(false)
-  const [disablePending, setDisablePending] = useState(false)
-  const [disableError, setDisableError] = useState<unknown>(null)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [deletePending, setDeletePending] = useState(false)
   const [deleteError, setDeleteError] = useState<unknown>(null)
@@ -139,13 +116,6 @@ export function SettingsPanel({ project }: { project: Project }) {
     setToken('')
     setRotateValidation(null)
     setRotateError(null)
-    hookRequestRef.current += 1
-    setHookOpen(false)
-    setHookPending(false)
-    setHookError(null)
-    setDisableOpen(false)
-    setDisablePending(false)
-    setDisableError(null)
   }, [project.id])
 
   const updateDraft = (key: string, value: unknown) => {
@@ -281,70 +251,6 @@ export function SettingsPanel({ project }: { project: Project }) {
     }
   }
 
-  const refreshWebhook = async (message: string) => {
-    toast.push('success', message)
-    await queryClient.invalidateQueries({ queryKey: ['project', project.id] })
-    await queryClient.invalidateQueries({ queryKey: ['projects'] })
-  }
-
-  const beginHookRequest = () => {
-    const requestId = hookRequestRef.current + 1
-    hookRequestRef.current = requestId
-    return requestId
-  }
-
-  const enableHook = async () => {
-    if (!canWrite) return
-    const requestId = beginHookRequest()
-    setHookPending(true)
-    setHookError(null)
-    try {
-      const response = await enableWebhook(project.id)
-      if (hookRequestRef.current !== requestId) return
-      const hookId = response?.hook_id
-      await refreshWebhook(hookId ? `GitLab webhook 已启用（#${hookId}）。` : 'GitLab webhook 已启用。')
-    } catch (error) {
-      if (hookRequestRef.current === requestId) setHookError(error)
-    } finally {
-      if (hookRequestRef.current === requestId) setHookPending(false)
-    }
-  }
-
-  const rebuildHook = async () => {
-    if (!canWrite) return
-    const requestId = beginHookRequest()
-    setHookPending(true)
-    setHookError(null)
-    try {
-      const response = await rebuildWebhook(project.id)
-      if (hookRequestRef.current !== requestId) return
-      setHookOpen(false)
-      const hookId = response?.hook_id
-      await refreshWebhook(hookId ? `GitLab webhook 已重建（#${hookId}）。` : 'GitLab webhook 已重建。')
-    } catch (error) {
-      if (hookRequestRef.current === requestId) setHookError(error)
-    } finally {
-      if (hookRequestRef.current === requestId) setHookPending(false)
-    }
-  }
-
-  const disableHook = async () => {
-    if (!canWrite) return
-    const requestId = beginHookRequest()
-    setDisablePending(true)
-    setDisableError(null)
-    try {
-      await disableWebhook(project.id)
-      if (hookRequestRef.current !== requestId) return
-      setDisableOpen(false)
-      await refreshWebhook('GitLab webhook 已禁用；未删除手动或外部 hook。')
-    } catch (error) {
-      if (hookRequestRef.current === requestId) setDisableError(error)
-    } finally {
-      if (hookRequestRef.current === requestId) setDisablePending(false)
-    }
-  }
-
   const remove = async () => {
     if (!canWrite) return
     setDeletePending(true)
@@ -379,7 +285,6 @@ export function SettingsPanel({ project }: { project: Project }) {
 
   const webhookState = project.webhook_state || (project.hook_id ? 'unknown' : 'disabled')
   const webhookEvents = project.webhook_events || []
-  const webhookBusy = hookPending || disablePending
 
   if (!canWrite) {
     return (
@@ -497,51 +402,15 @@ export function SettingsPanel({ project }: { project: Project }) {
       </div>
 
       <div className={styles.sideColumn}>
-        <Panel title="凭据与 webhook">
+        <Panel title="访问凭据">
           <div className={ui.stack}>
             <span className="small muted">token 过期时间：{project.token_expires_at ? formatDate(project.token_expires_at) : '未提供'}</span>
             <span className="small muted">token scope：<span className="mono">{project.token_scopes?.join(', ') || '不可用'}</span></span>
             <Button variant="secondary" onClick={openKeyDialog}>更新访问 Key</Button>
-            <div className={ui.rowBetween}>
-              <span>GitLab Activity</span>
-              <Badge tone={webhookTone(webhookState)}>{labelForWebhookState(webhookState)}</Badge>
-            </div>
-            <span className="small muted">
-              托管方：{webhookManagedByLabel(project.webhook_managed_by, project.hook_id)}
-              {project.hook_id ? ` · hook #${project.hook_id}` : ''}
-            </span>
-            <span className="small muted">
-              事件：{webhookEvents.length ? webhookEvents.map(webhookEventLabel).join(' · ') : '未记录'}
-            </span>
-            {project.webhook_updated_at ? (
-              <span className="small muted">最近更新：{formatDate(project.webhook_updated_at)}</span>
-            ) : null}
-            {project.webhook_error ? <span className={styles.resultError}>{project.webhook_error}</span> : null}
-            <div className={ui.row}>
-              {webhookState === 'enabled' ? (
-                <>
-                  <Button variant="secondary" onClick={() => { setHookError(null); setHookOpen(true) }} disabled={webhookBusy}>
-                    重建 webhook
-                  </Button>
-                  <Button variant="danger" onClick={() => { setDisableError(null); setDisableOpen(true) }} disabled={webhookBusy}>
-                    禁用 webhook
-                  </Button>
-                </>
-              ) : (
-                <Button variant="primary" onClick={() => { void enableHook() }} loading={hookPending} disabled={webhookState === 'pending'}>
-                  {webhookState === 'failed' ? '重试启用 GitLab Activity' : '启用 GitLab Activity'}
-                </Button>
-              )}
-              {webhookState !== 'enabled' && project.hook_id ? (
-                <Button variant="secondary" onClick={() => { setHookError(null); setHookOpen(true) }} disabled={webhookBusy}>
-                  重建 webhook
-                </Button>
-              ) : null}
-            </div>
-            {hookError ? <ErrorState error={hookError} title="启用 webhook 失败" /> : null}
-            <span className="small muted">启用会在 GitLab 创建或复用本服务记录的 hook；同 URL 的手动 hook 不会被接管或删除。</span>
+            <span className="small muted">更新访问 Key 不会修改 GitLab Webhook。</span>
           </div>
         </Panel>
+        <WebhookPanel project={project} />
         <Panel title="启用状态">
           <div className={ui.rowBetween}>
             <div className={ui.stack}>
@@ -617,30 +486,6 @@ export function SettingsPanel({ project }: { project: Project }) {
           />
         </Field>
       </Dialog>
-
-      <ConfirmDialog
-        open={hookOpen}
-        onClose={() => setHookOpen(false)}
-        onConfirm={() => { void rebuildHook() }}
-        title="重建 GitLab webhook？"
-        description="服务端会轮换 webhook secret，并优先更新本服务记录的 hook；记录不存在时才重新创建。手动或外部 hook 不受影响。"
-        confirmLabel="重建 webhook"
-        danger={false}
-        pending={hookPending}
-        error={hookError}
-      />
-
-      <ConfirmDialog
-        open={disableOpen}
-        onClose={() => setDisableOpen(false)}
-        onConfirm={() => { void disableHook() }}
-        title="禁用 GitLab webhook？"
-        description="只删除本服务创建并记录的 hook；手动或外部 hook 不受影响。项目与历史评审保留，可稍后重新启用。"
-        confirmLabel="禁用 webhook"
-        danger
-        pending={disablePending}
-        error={disableError}
-      />
 
       <ConfirmDialog
         open={deleteOpen}
