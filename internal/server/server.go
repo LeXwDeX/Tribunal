@@ -94,6 +94,7 @@ type Server struct {
 	worker     WorkerState
 	auth       *authService
 	sessions   SessionStore
+	bindings   AdminBindingStore // from the session or token store; SQLite implements it
 	web        fs.FS
 	logger     *slog.Logger
 	handler    http.Handler
@@ -139,6 +140,10 @@ func New(cfg Config) (*Server, error) {
 	if auth.enabled() && sessions == nil {
 		return nil, errors.New("server: session store is required when OAuth is configured")
 	}
+	bindings, _ := sessions.(AdminBindingStore)
+	if bindings == nil {
+		bindings, _ = cfg.Tokens.(AdminBindingStore)
+	}
 	s := &Server{
 		adminToken: cfg.AdminToken,
 		projects:   cfg.Projects,
@@ -147,6 +152,7 @@ func New(cfg Config) (*Server, error) {
 		worker:     cfg.Worker,
 		auth:       auth,
 		sessions:   sessions,
+		bindings:   bindings,
 		web:        web,
 		logger:     logger,
 		store:      cfg.Store,

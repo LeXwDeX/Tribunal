@@ -24,8 +24,11 @@ auth:
   #   client_id_env: GITLAB_OAUTH_CLIENT_ID
   #   client_secret_env: GITLAB_OAUTH_CLIENT_SECRET
   bootstrap_token_env: REVIEW_ADMIN_TOKEN
-  # GitLab usernames that receive the admin role after OAuth login.
-  # bootstrap_admins: ["alice"]
+  # Platform admins after OAuth login. Prefer "id:<GitLab user id>", which
+  # survives GitLab renames. A plain username is bound to the first GitLab
+  # user ID that logs in with it; a later account reusing that username
+  # stays a viewer.
+  # bootstrap_admins: ["id:42", "alice"]
   session_ttl: 168h
 
 storage:

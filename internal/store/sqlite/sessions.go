@@ -15,9 +15,11 @@ import (
 
 // CreateSession persists one browser session and upserts its user in the same
 // transaction. IDHash is the SHA-256 digest of the cookie token; the plaintext
-// token is never stored. Expired rows are removed first, then the oldest
-// sessions are evicted until the new row fits within limit.
-func (s *Store) CreateSession(ctx context.Context, session store.Session, limit int) error {
+// token is never stored. Expired rows are removed first. The user's own oldest
+// sessions are then evicted until the new row fits within limits.PerUser, so
+// one account cannot push other users out. limits.Total is a global backstop
+// that evicts the oldest sessions of any user.
+func (s *Store) CreateSession(ctx context.Context, session store.Session, limits store.SessionLimits) error {
 	id, err := sessionID(session.IDHash)
 	if err != nil {
 		return err
@@ -31,9 +33,7 @@ func (s *Store) CreateSession(ctx context.Context, session store.Session, limit 
 	if session.Role != "admin" && session.Role != "viewer" {
 		return fmt.Errorf("sqlite: invalid session role %q", session.Role)
 	}
-	if limit <= 0 {
-		limit = 4096
-	}
+	limits = limits.Normalized()
 	created := session.CreatedAt
 	if created.IsZero() {
 		created = s.now().UTC()
@@ -70,14 +70,27 @@ func (s *Store) CreateSession(ctx context.Context, session store.Session, limit 
 		formatTime(created)); err != nil {
 		return fmt.Errorf("sqlite: delete expired sessions: %w", err)
 	}
+	var userCount int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions WHERE user_id = ?`,
+		session.UserID).Scan(&userCount); err != nil {
+		return fmt.Errorf("sqlite: count user sessions: %w", err)
+	}
+	if userCount >= limits.PerUser {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE id IN (
+			SELECT id FROM sessions WHERE user_id = ?
+			ORDER BY expires_at ASC, created_at ASC, id ASC LIMIT ?)`,
+			session.UserID, userCount-limits.PerUser+1); err != nil {
+			return fmt.Errorf("sqlite: evict old user sessions: %w", err)
+		}
+	}
 	var count int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions`).Scan(&count); err != nil {
 		return fmt.Errorf("sqlite: count sessions: %w", err)
 	}
-	if count >= limit {
+	if count >= limits.Total {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE id IN (
 			SELECT id FROM sessions ORDER BY expires_at ASC, created_at ASC, id ASC LIMIT ?)`,
-			count-limit+1); err != nil {
+			count-limits.Total+1); err != nil {
 			return fmt.Errorf("sqlite: evict old sessions: %w", err)
 		}
 	}

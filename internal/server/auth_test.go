@@ -201,8 +201,13 @@ func newFakeGitLab(t *testing.T) *httptest.Server {
 			username := "bob"
 			name := "Bob Viewer"
 			id := 8
-			if token == "access-token-code-admin" {
+			switch token {
+			case "access-token-code-admin":
 				username, name, id = "alice", "Alice Admin", 7
+			case "access-token-code-impostor":
+				// A different GitLab account that took the admin's old
+				// username after a rename.
+				username, name, id = "alice", "Mallory", 99
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"id":` + strconv.Itoa(id) + `,"username":"` + username + `","name":"` + name + `"}`))
@@ -576,7 +581,7 @@ type failingSessionStore struct {
 	deleteErr error
 }
 
-func (f failingSessionStore) CreateSession(context.Context, store.Session, int) error {
+func (f failingSessionStore) CreateSession(context.Context, store.Session, store.SessionLimits) error {
 	return f.createErr
 }
 
@@ -833,5 +838,80 @@ func TestAdminBearerStillWorks(t *testing.T) {
 	}
 	if role := decodeMap(t, me.body)["role"]; role != roleAdmin {
 		t.Fatalf("bearer me role = %v", role)
+	}
+}
+
+func TestBootstrapAdminUsernameDoesNotTransferToANewOwner(t *testing.T) {
+	env := newAuthEnv(t)
+	admin := env.client()
+	env.loginAs(admin, "code-admin")
+	if role := decodeMap(t, env.request(admin, http.MethodGet, "/api/v1/me", nil, nil).body)["role"]; role != roleAdmin {
+		t.Fatalf("original admin role = %v", role)
+	}
+
+	// alice renames her GitLab account and someone else takes "alice". The
+	// binding survives restarts, so the impostor stays a viewer.
+	env.restart()
+	impostor := env.client()
+	env.loginAs(impostor, "code-impostor")
+	me := decodeMap(t, env.request(impostor, http.MethodGet, "/api/v1/me", nil, nil).body)
+	if me["id"] != float64(99) || me["username"] != "alice" || me["role"] != roleViewer {
+		t.Fatalf("impostor me = %v", me)
+	}
+	if !strings.Contains(env.logs.String(), "bootstrap admin username is bound to another GitLab user") {
+		t.Fatalf("takeover attempt was not logged: %s", env.logs.String())
+	}
+
+	again := env.client()
+	env.loginAs(again, "code-admin")
+	if role := decodeMap(t, env.request(again, http.MethodGet, "/api/v1/me", nil, nil).body)["role"]; role != roleAdmin {
+		t.Fatalf("original admin role after takeover attempt = %v", role)
+	}
+}
+
+func TestBootstrapAdminByGitLabUserID(t *testing.T) {
+	env := newAuthEnv(t)
+	env.admins = []string{"id:8"}
+	env.restart()
+
+	bob := env.client()
+	env.loginAs(bob, "code-viewer")
+	if role := decodeMap(t, env.request(bob, http.MethodGet, "/api/v1/me", nil, nil).body)["role"]; role != roleAdmin {
+		t.Fatalf("id-configured admin role = %v", role)
+	}
+	alice := env.client()
+	env.loginAs(alice, "code-admin")
+	if role := decodeMap(t, env.request(alice, http.MethodGet, "/api/v1/me", nil, nil).body)["role"]; role != roleViewer {
+		t.Fatalf("username without a configured entry got role %v", role)
+	}
+}
+
+func TestBootstrapAdminsRejectInvalidIDEntry(t *testing.T) {
+	for _, entry := range []string{"id:", "id:abc", "id:0", "id:-4"} {
+		if _, err := newAuthService(AuthConfig{BootstrapAdmins: []string{entry}}); err == nil {
+			t.Errorf("newAuthService accepted %q", entry)
+		}
+	}
+}
+
+func TestUsernameAdminFailsClosedWithoutBindingStore(t *testing.T) {
+	logs := &lockedBuffer{}
+	srv, err := New(Config{
+		Projects: stubAdmin{},
+		Webhooks: stubWebhookAcceptor{},
+		Auth:     AuthConfig{BootstrapAdmins: []string{"alice", "id:8"}},
+		Logger:   newTestLogger(logs),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if role := srv.roleFor(context.Background(), sessionUser{ID: 7, Username: "alice"}); role != roleViewer {
+		t.Fatalf("username admin without binding store = %v", role)
+	}
+	if role := srv.roleFor(context.Background(), sessionUser{ID: 8, Username: "bob"}); role != roleAdmin {
+		t.Fatalf("id admin without binding store = %v", role)
+	}
+	if !strings.Contains(logs.String(), "cannot verify bootstrap admin username") {
+		t.Fatalf("missing binding store was not logged: %s", logs.String())
 	}
 }

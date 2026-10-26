@@ -321,10 +321,12 @@ CREATE TABLE sessions (
 );
 ```
 
-> 当前浏览器会话持久化在 `sessions` 表，沿用 `0001_init.sql`，没有新增迁移。cookie 保存随机 token 及其 HMAC 签名；数据库只保存 token 的 SHA-256。CSRF token 由会话 token 和 `TRIBUNAL_SESSION_KEY` 按 HMAC 域派生，不单独存储。固定 `TRIBUNAL_SESSION_KEY`（旧名 `CRC_SESSION_KEY` 仍兼容，新名优先）时，未过期会话在重启后仍可用；未设置时每个进程生成随机 key 并告警，重启后旧 cookie 失效。浏览器请求的 `admin`/`viewer` 标签每次按当前 `auth.bootstrap_admins` 计算；读取会话时要求 `users.disabled=0`。停用用户的 SSE 在下一轮授权检查时关闭。
+> 当前浏览器会话持久化在 `sessions` 表，表结构沿用 `0001_init.sql`；`0013_admin_bindings.sql` 只增加 `(user_id, expires_at)` 索引。每个用户最多保留 10 个会话，新登录超出时只淘汰该用户自己最旧的会话；全局 4096 只作存储兜底。cookie 保存随机 token 及其 HMAC 签名；数据库只保存 token 的 SHA-256。CSRF token 由会话 token 和 `TRIBUNAL_SESSION_KEY` 按 HMAC 域派生，不单独存储。固定 `TRIBUNAL_SESSION_KEY`（旧名 `CRC_SESSION_KEY` 仍兼容，新名优先）时，未过期会话在重启后仍可用；未设置时每个进程生成随机 key 并告警，重启后旧 cookie 失效。浏览器请求的 `admin`/`viewer` 标签每次按当前 `auth.bootstrap_admins` 计算；读取会话时要求 `users.disabled=0`。停用用户的 SSE 在下一轮授权检查时关闭。
 >
 > `project_grants` 是项目业务数据访问的唯一来源。默认没有行；平台管理员也不会自动获得 grant。`read` 可读取项目、评审、工作区、统计、SSE 和项目扩展，`manage` 还可执行项目写操作。无 grant 或项目不存在统一返回 404，`read` 执行写操作返回 403。删除 grant 会立即影响列表、详情、统计和已打开的 SSE；停用用户还会删除全部会话和 API token。
 
+> `admin_bindings`（`0013_admin_bindings.sql`）把 `auth.bootstrap_admins` 中的用户名条目绑定到 GitLab 用户 ID：`username` 为小写主键，`user_id` 为首次以该用户名出现的 GitLab 用户 ID，之后不再改写。GitLab 用户名可以改名后被他人占用，同名但 ID 不同的账号因此只得到 `viewer`。`id:<n>` 条目直接按 ID 匹配，不写这张表。
+>
 > API token 的 `admin`/`viewer` 标签与浏览器会话一致，在每次请求时按当前 `auth.bootstrap_admins` 计算。`users.role` 仍记录 OAuth 登录或 token 签发时的标签，但不作为已有 token 的项目权限来源；项目访问始终读取当前 `project_grants`。重启并更新管理员配置后，该用户已有的 API token 在下一个请求失去平台管理标签；静态 `auth.bootstrap_token_env` Bearer 保持平台管理标签，但没有用户 ID 和 grant。新签发的 API token 默认 90 天、最长 365 天；历史 `expires_at IS NULL` 的行可继续使用到撤销。`0007_project_access.sql` 为现有用户补 `disabled=0`，不创建 grant；升级后包括管理员在内都需显式授权。
 
 ```sql

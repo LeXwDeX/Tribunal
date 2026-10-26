@@ -13,3 +13,28 @@ type Session struct {
 	ExpiresAt time.Time
 	CreatedAt time.Time
 }
+
+// Default session limits. PerUser keeps one account from evicting other
+// users by logging in repeatedly; Total is only a storage backstop.
+const (
+	DefaultSessionsPerUser = 10
+	DefaultSessionsTotal   = 4096
+)
+
+// SessionLimits bounds persisted browser sessions. Zero or negative fields
+// use the defaults.
+type SessionLimits struct {
+	PerUser int
+	Total   int
+}
+
+// Normalized returns the limits with defaults applied.
+func (l SessionLimits) Normalized() SessionLimits {
+	if l.PerUser <= 0 {
+		l.PerUser = DefaultSessionsPerUser
+	}
+	if l.Total <= 0 {
+		l.Total = DefaultSessionsTotal
+	}
+	return l
+}

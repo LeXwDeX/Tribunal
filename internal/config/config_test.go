@@ -686,3 +686,16 @@ auth:
 		})
 	}
 }
+
+func TestValidateBootstrapAdminEntries(t *testing.T) {
+	setRequiredEnv(t)
+	cfg := loadConfig(t, writeConfig(t, "config.yaml", validGitLab+"auth:\n  bootstrap_admins: [\"alice\", \"id:42\", \"ID: 7\"]\n"))
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() = %v", err)
+	}
+
+	for _, entry := range []string{"id:", "id:abc", "id:0"} {
+		cfg := loadConfig(t, writeConfig(t, "config.yaml", validGitLab+"auth:\n  bootstrap_admins: [\""+entry+"\"]\n"))
+		requireErrorContains(t, cfg.Validate(), "auth.bootstrap_admins[0]", "positive GitLab user id")
+	}
+}

@@ -17,7 +17,7 @@
 | Web 控制台 | GitLab OAuth 登录后下发会话 cookie（`HttpOnly`、`Secure`、`SameSite=Lax`）；写操作要求 `X-CSRF-Token` |
 | `tribunalctl` / 脚本 | `Authorization: Bearer <api_token>`；bootstrap Bearer 仅用于平台管理面 |
 
-平台角色只有 `admin` / `viewer`，由当前 `auth.bootstrap_admins` 按 GitLab 用户名计算；`users.role` 只记录签发时标签，不作为已有 token 的权限来源。平台管理员可管理用户、项目授权、项目注册和系统配置，但不会自动获得项目业务数据权限。
+平台角色只有 `admin` / `viewer`，由当前 `auth.bootstrap_admins` 计算：`id:<n>` 条目按 GitLab 用户 ID 匹配；用户名条目在首次以 admin 身份出现时绑定到当时的 GitLab 用户 ID（`admin_bindings`），之后同名但 ID 不同的账号只得到 `viewer` 并记录告警；`users.role` 只记录签发时标签，不作为已有 token 的权限来源。平台管理员可管理用户、项目授权、项目注册和系统配置，但不会自动获得项目业务数据权限。
 
 项目业务数据由本地 `project_grants` 的 `read` / `manage` 决定，平台管理员也必须被显式授权。无 grant 或项目不存在统一返回 404；只有 `read` 时执行写操作返回 403。列表、统计、SSE、上下文和项目扩展在查询或流式读取时按 grant 过滤；删除 grant 会让已有 API token 失去该项目访问并关闭已打开的 SSE，停用用户会撤销全部会话和 API token。
 
