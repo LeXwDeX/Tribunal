@@ -6,7 +6,7 @@ import { ApiError, errorMessage } from '../api/client'
 import type { Project, ProjectRegistration, ProjectValidation } from '../api/types'
 import { useCanWrite } from '../components/RoleContext'
 import {
-  Badge, Button, Dialog, EmptyState, ErrorState, ExternalLink, Field, LoadingState, PageHeader, Panel, SecretField, StatusBadge, Switch, Toolbar, ToolbarField, useToast,
+  Badge, Button, Dialog, EmptyState, ErrorState, ExternalLink, Field, LoadingState, PageHeader, Panel, StatusBadge, Switch, Toolbar, ToolbarField, useToast,
 } from '../components/ui'
 import { usePaginated } from '../lib/hooks'
 import { formatDate, labelForStatus, labelForWebhookState, webhookTone } from '../lib/format'
@@ -55,7 +55,6 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
   const [project, setProject] = useState('')
   const [token, setToken] = useState('')
   const [profile, setProfile] = useState('default')
-  const [autoWebhook, setAutoWebhook] = useState(false)
   const [skipDraft, setSkipDraft] = useState(true)
   const [branches, setBranches] = useState('')
   const [validating, setValidating] = useState(false)
@@ -79,7 +78,6 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
       setProject('')
       setToken('')
       setProfile('default')
-      setAutoWebhook(false)
       setSkipDraft(true)
       setBranches('')
       setValidating(false)
@@ -160,7 +158,6 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
         project: project.trim(),
         token: token.trim(),
         profile: profile.trim() || 'default',
-        auto_webhook: autoWebhook,
         settings,
       })
       setResult(registration)
@@ -207,16 +204,14 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
             <div><dt>token scope</dt><dd className="mono">{result.project?.token_scopes?.join(', ') || '—'}</dd></div>
             <div><dt>token 过期</dt><dd>{result.project?.token_expires_at ? formatDate(result.project.token_expires_at) : '未提供'}</dd></div>
             <div><dt>初始化任务</dt><dd className="mono">{result.job_id || '—'}</dd></div>
-            <div><dt>webhook</dt><dd>{result.webhook_secret ? '需手工配置' : autoWebhook ? '已请求自动创建' : '未创建'}</dd></div>
           </dl>
-          {result.webhook_secret ? (
-            <>
-              <div className={styles.warning}>
-                服务端只在保存响应中返回 webhook secret。请立即复制并填写到 GitLab webhook 的 Secret token；关闭对话框后不可再查看。
-              </div>
-              <SecretField label="Webhook secret" value={result.webhook_secret} />
-            </>
-          ) : null}
+          <div className={styles.notice} role="status">
+            <div className={ui.stack}>
+              <strong>Webhook 需在项目设置中单独配置</strong>
+              <span className="small">注册不会创建、启用或修改 GitLab Webhook。需要自动触发评审时，在项目详情的「设置」中单独启用 Webhook。</span>
+              {result.project?.id ? <Link to={`/projects/${result.project.id}/settings`} onClick={close}>前往项目设置</Link> : null}
+            </div>
+          </div>
         </div>
       ) : (
         <>
@@ -269,7 +264,7 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
             </Field>
           </div>
           <details className={ui.disclosure}>
-            <summary>高级设置：档位、分支、Draft 与 Webhook</summary>
+            <summary>高级设置：档位、分支与 Draft</summary>
             <div className={ui.stack} style={{ marginTop: 8 }}>
               <div className="formGrid">
                 <Field label="评审档位" htmlFor={profileId} hint="从平台配置档位中选择，或输入已有档位名。">
@@ -284,10 +279,6 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
               </div>
               <div className={styles.filterChips} style={{ flexDirection: 'column', alignItems: 'flex-start' }}>
                 <label className="checkboxRow">
-                  <input type="checkbox" checked={autoWebhook} onChange={(event) => setAutoWebhook(event.target.checked)} disabled={pending} />
-                  <span>自动创建 GitLab webhook（需要 Maintainer 权限）</span>
-                </label>
-                <label className="checkboxRow">
                   <input type="checkbox" checked={skipDraft} onChange={(event) => setSkipDraft(event.target.checked)} disabled={pending} />
                   <span>跳过 Draft MR</span>
                 </label>
@@ -296,7 +287,7 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
             </div>
           </details>
           <div className={styles.notice}>
-            保存并初始化会登记项目、加密保存访问 Key、按档位入队后台拉取与上下文生成，并可能在初始化或评审时产生模型费用；默认不创建 Webhook。所有操作都不会修改仓库代码。
+            保存并初始化会登记项目、加密保存访问 Key、按档位入队后台拉取与上下文生成，并可能在初始化或评审时产生模型费用；不创建或修改 Webhook，Webhook 在项目设置中单独配置。所有操作都不会修改仓库代码。
           </div>
         </>
       )}

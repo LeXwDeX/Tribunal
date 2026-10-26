@@ -75,9 +75,11 @@ describe('project registration', () => {
     expect(screen.queryByText(/项目已注册|项目已保存/)).not.toBeInTheDocument()
   })
 
-  it('saves with auto_webhook off only after validation and clears the one-time secret on close', async () => {
-    const registerBodies: unknown[] = []
+  it('saves registration without any webhook field and ignores a returned secret', async () => {
+    const registerBodies: Array<Record<string, unknown>> = []
+    const webhookCalls: string[] = []
     installFetch((url, init) => {
+      if (url.includes('/webhook')) webhookCalls.push(url)
       if (url === '/api/v1/projects' && init?.method === 'POST') {
         registerBodies.push(JSON.parse(String(init.body)))
         return jsonResponse({ project: project(), job_id: 'job-1', webhook_secret: 'whsec_once_only' }, 201)
@@ -85,6 +87,7 @@ describe('project registration', () => {
       return baseRoutes()(url, init)
     })
     const user = await openRegisterDialog()
+    expect(screen.queryByLabelText(/自动创建 GitLab webhook/)).not.toBeInTheDocument()
     await user.type(screen.getByLabelText('仓库地址或项目 ID'), repositoryUrl)
     await user.type(screen.getByLabelText('访问 Key'), accessToken)
     const save = screen.getByRole('button', { name: '保存并初始化' })
@@ -96,25 +99,60 @@ describe('project registration', () => {
 
     const dialog = await screen.findByRole('dialog', { name: '项目已保存，初始化已开始' })
     expect(dialog).toHaveTextContent('job-1')
+    expect(dialog).toHaveTextContent('group/backend')
     expect(screen.getByText(/加密保存访问 Key/)).toBeInTheDocument()
     expect(screen.getByText(/可能产生模型费用/)).toBeInTheDocument()
+    expect(dialog).toHaveTextContent('Webhook 需在项目设置中单独配置')
     expect(registerBodies).toHaveLength(1)
-    expect(registerBodies[0]).toMatchObject({
+    expect(registerBodies[0]).toEqual({
       project: repositoryUrl,
       token: accessToken,
-      auto_webhook: false,
+      profile: 'default',
       settings: { skip_draft: true },
     })
-    const secret = screen.getByLabelText('Webhook secret')
-    expect(secret).toHaveValue('whsec_once_only')
-    expect(secret).toHaveAttribute('readonly')
+    expect(registerBodies[0]).not.toHaveProperty('auto_webhook')
+    expect(screen.queryByLabelText('Webhook secret')).not.toBeInTheDocument()
+    expect(document.body.textContent).not.toContain('whsec_once_only')
+    expect(webhookCalls).toEqual([])
     await user.click(screen.getByRole('button', { name: '完成' }))
 
-    await waitFor(() => expect(screen.queryByDisplayValue('whsec_once_only')).not.toBeInTheDocument())
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
     const registerButtons = await screen.findAllByRole('button', { name: '注册项目' })
     await user.click(registerButtons[0])
+    expect(screen.getByLabelText('仓库地址或项目 ID')).toHaveValue('')
     expect(screen.getByLabelText('访问 Key')).toHaveValue('')
     expect(screen.queryByText('校验通过，尚未保存')).not.toBeInTheDocument()
+    expect(screen.queryByText('项目已保存，初始化已开始')).not.toBeInTheDocument()
+    expect(webhookCalls).toEqual([])
+  })
+
+  it('sends edited profile, branches and draft settings without webhook fields', async () => {
+    const registerBodies: Array<Record<string, unknown>> = []
+    installFetch((url, init) => {
+      if (url === '/api/v1/projects' && init?.method === 'POST') {
+        registerBodies.push(JSON.parse(String(init.body)))
+        return jsonResponse({ project: project(), job_id: 'job-2' }, 201)
+      }
+      return baseRoutes()(url, init)
+    })
+    const user = await openRegisterDialog()
+    await user.type(screen.getByLabelText('仓库地址或项目 ID'), repositoryUrl)
+    await user.type(screen.getByLabelText('访问 Key'), accessToken)
+    const profile = screen.getByLabelText('评审档位')
+    await user.clear(profile)
+    await user.type(profile, 'strict')
+    await user.type(screen.getByLabelText('目标分支'), 'main, release/*')
+    await user.click(screen.getByLabelText('跳过 Draft MR'))
+    await user.click(screen.getByRole('button', { name: '校验连接' }))
+    await screen.findByText('校验通过，尚未保存')
+    await user.click(screen.getByRole('button', { name: '保存并初始化' }))
+    await screen.findByRole('dialog', { name: '项目已保存，初始化已开始' })
+    expect(registerBodies).toEqual([{
+      project: repositoryUrl,
+      token: accessToken,
+      profile: 'strict',
+      settings: { skip_draft: false, target_branches: ['main', 'release/*'] },
+    }])
   })
 
   it('invalidates validation when the address or key changes', async () => {
