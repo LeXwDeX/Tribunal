@@ -95,8 +95,8 @@ type FindingOut struct {
 	Severity   Severity   `json:"severity" jsonschema:"enum=P0,enum=P1,enum=P2,enum=info"`
 	Category   string     `json:"category" jsonschema:"pattern=^[a-z][a-z0-9_-]{0,31}$"`
 	Title      string     `json:"title" jsonschema:"minLength=1,maxLength=120"`
-	Body       string     `json:"body" jsonschema:"minLength=1,maxLength=8000,description=Structured Markdown with short paragraphs, lists, fenced code blocks for code or commands, and inline code for identifiers."`
-	Suggestion string     `json:"suggestion,omitempty" jsonschema:"maxLength=8000,description=Structured Markdown with fenced code blocks for code or commands and inline code for identifiers."`
+	Body       string     `json:"body" jsonschema:"minLength=1,maxLength=8000,description=One short paragraph: trigger then impact. At most 3 lines of code."`
+	Suggestion string     `json:"suggestion,omitempty" jsonschema:"maxLength=8000,description=One sentence or a GitLab suggestion block replacing the commented line."`
 	Evidence   string     `json:"evidence" jsonschema:"minLength=1,maxLength=8000"`
 	Confidence Confidence `json:"confidence" jsonschema:"enum=high,enum=medium,enum=low"`
 }

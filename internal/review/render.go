@@ -96,13 +96,12 @@ func RenderSummary(in SummaryInput) (string, error) {
 	b.WriteString(verdictLabel(in.Verdict))
 	b.WriteString("\n\n")
 	if summary != "" {
-		b.WriteString("**结论**：\n\n")
 		b.WriteString(renderMarkdown(summary, MaxSummaryRunes))
 		b.WriteString("\n\n")
 	}
-	b.WriteString("| 级别 | 数量 |\n|---|---|\n")
-	for _, severity := range []Severity{SeverityP0, SeverityP1, SeverityP2, SeverityInfo} {
-		fmt.Fprintf(&b, "| %s | %d |\n", severity, counts[severity])
+	if line := severityCountLine(counts); line != "" {
+		b.WriteString(line)
+		b.WriteByte('\n')
 	}
 	if len(unpositioned) > 0 {
 		fmt.Fprintf(&b, "\n### 无法定位到行的问题（%d）\n\n", len(unpositioned))
@@ -162,6 +161,18 @@ func verdictLabel(verdict string) string {
 	}
 }
 
+// severityCountLine renders non-zero counts on one line, for example
+// "**P1** × 2 · **P2** × 1". It is empty when nothing was published.
+func severityCountLine(counts map[Severity]int) string {
+	parts := make([]string, 0, 4)
+	for _, severity := range []Severity{SeverityP0, SeverityP1, SeverityP2, SeverityInfo} {
+		if counts[severity] > 0 {
+			parts = append(parts, fmt.Sprintf("**%s** × %d", severity, counts[severity]))
+		}
+	}
+	return strings.Join(parts, " · ")
+}
+
 func renderSummaryItem(group Group, marked bool) string {
 	severity := group.EffectiveSeverity()
 	display := string(severity)
@@ -169,19 +180,17 @@ func renderSummaryItem(group Group, marked bool) string {
 		display += "?"
 	}
 	var b strings.Builder
-	b.WriteString("#### [")
+	b.WriteString("**[")
 	b.WriteString(display)
 	b.WriteString("] ")
 	b.WriteString(escapeOneLine(group.Title, MaxTitleRunes))
-	b.WriteString("\n\n")
+	b.WriteString("**")
 	if group.Path != "" {
-		b.WriteString("位置：")
+		b.WriteString(" · ")
 		b.WriteString(inlineCode(group.Path))
 		if group.Line > 0 {
 			fmt.Fprintf(&b, ":%d", group.Line)
 		}
-	} else {
-		b.WriteString("位置：无代码位置")
 	}
 	b.WriteString("\n\n")
 	if marked {
@@ -200,12 +209,24 @@ func renderSummaryItem(group Group, marked bool) string {
 		b.WriteString(body)
 		b.WriteString("\n\n")
 	}
-	if suggestion := renderMarkdown(group.Suggestion, summaryItemSuggestionRunes); suggestion != "" {
-		b.WriteString("**建议**：\n\n")
+	if suggestion := renderSuggestion(group.Suggestion, summaryItemSuggestionRunes); suggestion != "" {
 		b.WriteString(suggestion)
 		b.WriteString("\n\n")
 	}
 	return strings.TrimRight(b.String(), "\n") + "\n"
+}
+
+// renderSuggestion shows a fenced block, such as a GitLab suggestion, as is.
+// A prose suggestion gets a short label on the same line.
+func renderSuggestion(value string, max int) string {
+	rendered := renderMarkdown(value, max)
+	if rendered == "" {
+		return ""
+	}
+	if _, _, ok := opensFence(strings.SplitN(rendered, "\n", 2)[0]); ok {
+		return rendered
+	}
+	return "**建议**：" + rendered
 }
 
 // RenderFinding renders one inline discussion. The first line is a stable
@@ -242,28 +263,22 @@ func RenderFinding(group Group, opts FindingRenderOptions) (string, error) {
 	b.WriteString("] ")
 	b.WriteString(escapeOneLine(group.Title, MaxTitleRunes))
 	b.WriteString("**\n")
-	if group.Path != "" {
-		b.WriteString("\n位置：")
-		b.WriteString(inlineCode(group.Path))
-		if group.Line > 0 {
-			fmt.Fprintf(&b, ":%d", group.Line)
-		}
-		b.WriteByte('\n')
-	}
+	// The discussion is anchored on the line, so the location is not repeated.
 	if body := renderMarkdown(group.Body, MaxBodyRunes); body != "" {
 		b.WriteString("\n")
 		b.WriteString(body)
 		b.WriteByte('\n')
 	}
-	if strings.TrimSpace(group.Evidence) != "" {
+	if suggestion := renderSuggestion(group.Suggestion, MaxSuggestionRunes); suggestion != "" {
+		b.WriteString("\n")
+		b.WriteString(suggestion)
+		b.WriteByte('\n')
+	}
+	// Evidence stays only on uncertain findings, where the reader must judge.
+	if group.Decision.Action == ActionMark && strings.TrimSpace(group.Evidence) != "" {
 		b.WriteString("\n<details><summary>证据</summary>\n\n")
 		b.WriteString(codeFence(group.Evidence))
 		b.WriteString("\n\n</details>\n")
-	}
-	if suggestion := renderMarkdown(group.Suggestion, MaxSuggestionRunes); suggestion != "" {
-		b.WriteString("\n**建议**：\n\n")
-		b.WriteString(suggestion)
-		b.WriteByte('\n')
 	}
 	if group.Decision.Action == ActionMark {
 		b.WriteString("\n**标记**：")
