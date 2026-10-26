@@ -11,7 +11,7 @@ function JsonSection({ title, value }: { title: string; value: unknown }) {
   return (
     <section className={styles.drawerSection}>
       <h3 className={styles.drawerSectionTitle}>{title}</h3>
-      {content ? <pre className="pre" style={preStyle}>{content}</pre> : <span className="muted small">没有记录。</span>}
+      {content ? <pre className={`pre ${styles.nodePre}`}>{content}</pre> : <span className="muted small">没有记录。</span>}
     </section>
   )
 }
@@ -25,7 +25,7 @@ function CallItem({ call }: { call: LlmCall }) {
         <span>{formatNumber(call.input_tokens)} / {formatNumber(call.output_tokens)} tokens</span>
         <span>{formatDuration(call.latency_ms)}</span>
         {call.stop_reason ? <span className="muted">stop: {call.stop_reason}</span> : null}
-        {call.error_kind ? <span style={{ color: 'var(--danger-fg)' }}>错误: {call.error_kind}</span> : null}
+        {call.error_kind ? <span className={styles.resultError}>错误: {call.error_kind}</span> : null}
       </div>
       {(call.request !== undefined || call.response !== undefined) ? (
         <details className={styles.callDetails}>
@@ -111,13 +111,3 @@ export function NodeDrawer({
     </Drawer>
   )
 }
-
-const preStyle = {
-  margin: 0,
-  padding: 12,
-  background: 'var(--code-bg)',
-  color: 'var(--code-fg)',
-  borderRadius: 8,
-  maxHeight: 280,
-  overflow: 'auto',
-} as const

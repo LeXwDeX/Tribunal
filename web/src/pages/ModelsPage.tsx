@@ -158,9 +158,9 @@ function ProfileCard({ profile }: { profile: Profile }) {
           ))}
         </div>
       ) : null}
-      <details>
-        <summary style={{ minHeight: 44, display: 'flex', alignItems: 'center', cursor: 'pointer' }}>查看完整档位配置</summary>
-        <pre className="pre" style={configStyle}>{formatJson(config)}</pre>
+      <details className={ui.disclosure}>
+        <summary>查看完整档位配置</summary>
+        <pre className={`pre ${ui.jsonBlock}`}>{formatJson(config)}</pre>
       </details>
     </article>
   )
@@ -216,12 +216,3 @@ export function ModelsPage() {
   )
 }
 
-const configStyle = {
-  background: 'var(--surface-2)',
-  border: '1px solid var(--border)',
-  borderRadius: 8,
-  padding: 12,
-  color: 'var(--text)',
-  maxHeight: 300,
-  overflow: 'auto',
-} as const

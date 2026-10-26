@@ -5,7 +5,9 @@ import { listProfiles, listProjects, listReviews } from '../api/api'
 import type { Project, ReviewSummary } from '../api/types'
 import { ReviewTable } from '../components/ReviewTable'
 import { TriggerReviewDialog } from '../components/TriggerReviewDialog'
-import { Button, EmptyState, ErrorState, LoadingState, PageHeader, Panel, useToast } from '../components/ui'
+import {
+  Button, EmptyState, ErrorState, LoadingState, PageHeader, Panel, Toolbar, ToolbarField, useToast,
+} from '../components/ui'
 import { usePaginated } from '../lib/hooks'
 import ui from '../styles/ui.module.css'
 import styles from './pages.module.css'
@@ -100,47 +102,40 @@ export function ReviewsPage() {
         />
 
         <Panel title="筛选" aside={hasFilters ? `${activeCount} 个条件` : '未筛选'}>
-          <div className={styles.inlineFilters}>
-            <label style={fieldStyle}>
-              <span className="small">项目</span>
+          <Toolbar actions={<Button variant="secondary" onClick={clear} disabled={!hasFilters}>清除筛选</Button>}>
+            <ToolbarField label="项目">
               <select className="select" name="project_id" value={projectId} onChange={(event) => update('project_id', event.target.value)} aria-label="按项目筛选">
                 <option value="">全部项目</option>
                 {projectsList.map((project) => (
                   <option key={project.id} value={project.id}>{project.path_with_namespace}</option>
                 ))}
               </select>
-            </label>
-            <label style={fieldStyle}>
-              <span className="small">状态</span>
+            </ToolbarField>
+            <ToolbarField label="状态">
               <select className="select" name="status" value={status} onChange={(event) => update('status', event.target.value)} aria-label="按状态筛选">
                 {statuses.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
               </select>
-            </label>
-            <label style={fieldStyle}>
-              <span className="small">结论</span>
+            </ToolbarField>
+            <ToolbarField label="结论">
               <select className="select" name="verdict" value={verdict} onChange={(event) => update('verdict', event.target.value)} aria-label="按结论筛选">
                 {verdicts.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
               </select>
-            </label>
-            <label style={fieldStyle}>
-              <span className="small">档位</span>
+            </ToolbarField>
+            <ToolbarField label="档位">
               <select className="select" name="profile" value={profile} onChange={(event) => update('profile', event.target.value)} aria-label="按档位筛选">
                 <option value="">全部档位</option>
                 {(profiles.data?.profiles || []).map((item) => <option key={item.name} value={item.name}>{item.name}</option>)}
               </select>
-            </label>
-            <label style={fieldStyle}>
-              <span className="small">触发方式</span>
+            </ToolbarField>
+            <ToolbarField label="触发方式">
               <select className="select" name="trigger" value={trigger} onChange={(event) => update('trigger', event.target.value)} aria-label="按触发方式筛选">
                 {triggers.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
               </select>
-            </label>
-            <label style={fieldStyle}>
-              <span className="small">起始日期</span>
+            </ToolbarField>
+            <ToolbarField label="起始日期">
               <input className="input" name="since" type="date" value={sinceDate} onChange={(event) => update('since', event.target.value)} aria-label="起始日期" />
-            </label>
-            <Button variant="secondary" onClick={clear} disabled={!hasFilters}>清除筛选</Button>
-          </div>
+            </ToolbarField>
+          </Toolbar>
           {projects.isError ? <span className="small muted">项目筛选列表加载失败，仍可查看全部项目。</span> : null}
           {profiles.isError ? <span className="small muted">档位筛选列表加载失败。</span> : null}
         </Panel>
@@ -178,10 +173,3 @@ export function ReviewsPage() {
     </main>
   )
 }
-
-const fieldStyle = {
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 6,
-  minWidth: 0,
-} as const

@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useState } from 'react'
+import { useEffect, useId, useMemo, useState, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   createMcpServer, deleteMcpServer, deleteSkill, importMcpServers, listBindings, listMcpServers,
@@ -51,7 +51,7 @@ function useScopeQuery(enabled: boolean, scope: string, projectId?: number) {
 }
 
 export function ExtensionsManager({
-  scope, projectId, tab, onTabChange, projects = [], canManage = false,
+  scope, projectId, tab, onTabChange, projects = [], canManage = false, placeholder, notice,
 }: {
   scope: 'platform' | 'project'
   projectId?: number
@@ -59,6 +59,10 @@ export function ExtensionsManager({
   onTabChange: (tab: string) => void
   projects?: Project[]
   canManage?: boolean
+  // Shown in the tab panel while project scope has no project selected.
+  placeholder?: ReactNode
+  // Shown at the top of the tab panel in every state, e.g. a failed project refresh.
+  notice?: ReactNode
 }) {
   const platformAdmin = useCanWrite()
   // Every extension write changes host execution security, so the server
@@ -165,8 +169,9 @@ export function ExtensionsManager({
     <div className={ui.pageStack}>
       <Tabs items={tabs} value={tab} onChange={onTabChange} label="扩展类型" idPrefix="extension-tab" />
       <div role="tabpanel" id={`tabpanel-${tab}`} aria-labelledby={`extension-tab-${tab}`} className={ui.pageStack}>
+      {notice}
       {!projectEnabled ? (
-        <EmptyState title="请选择项目" description="项目级扩展需要指定项目后才能读取。" />
+        placeholder ?? <EmptyState title="请选择项目" description="项目级扩展需要指定项目后才能读取。" />
       ) : null}
 
       {projectEnabled && tab === 'mcp' ? (
@@ -307,8 +312,8 @@ function McpTab({
                 {result?.tools ? (
                   <div className={styles.testResult} role="status">
                     {result.tools.length ? (
-                      <details>
-                        <summary style={{ minHeight: 44, display: 'flex', alignItems: 'center', cursor: 'pointer' }}>测试成功：{result.tools.length} 个工具</summary>
+                      <details className={ui.disclosure}>
+                        <summary>测试成功：{result.tools.length} 个工具</summary>
                         <ul className={styles.list} style={{ marginTop: 6 }}>
                           {result.tools.map((tool) => (
                             <li key={tool.name} className={styles.listItem}>
@@ -785,9 +790,9 @@ function EditMcpDialog({ server, onClose, onSaved }: { server: McpServer | null;
         </Field>
       </div>
       {server ? (
-        <details>
-          <summary style={{ minHeight: 44, display: 'flex', alignItems: 'center', cursor: 'pointer' }}>查看服务端返回的配置（可能脱敏）</summary>
-          <pre className="pre" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 8, padding: 12, color: 'var(--text)' }}>{formatJson(server.config)}</pre>
+        <details className={ui.disclosure}>
+          <summary>查看服务端返回的配置（可能脱敏）</summary>
+          <pre className={`pre ${ui.jsonBlock}`}>{formatJson(server.config)}</pre>
         </details>
       ) : null}
       <label className="checkboxRow">

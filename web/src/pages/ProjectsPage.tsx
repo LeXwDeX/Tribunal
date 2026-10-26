@@ -6,8 +6,7 @@ import { ApiError, errorMessage } from '../api/client'
 import type { Project, ProjectRegistration, ProjectValidation } from '../api/types'
 import { useCanWrite } from '../components/RoleContext'
 import {
-  Badge, Button, Dialog, EmptyState, ErrorState, ExternalLink, Field, LoadingState, PageHeader, Panel, SecretField,
-  StatusBadge, Switch, useToast,
+  Badge, Button, Dialog, EmptyState, ErrorState, ExternalLink, Field, LoadingState, PageHeader, Panel, SecretField, StatusBadge, Switch, Toolbar, ToolbarField, useToast,
 } from '../components/ui'
 import { usePaginated } from '../lib/hooks'
 import { formatDate, labelForStatus, labelForWebhookState, webhookTone } from '../lib/format'
@@ -269,8 +268,8 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
               <input id={tokenId} className="input" type="password" value={token} onChange={(event) => changeToken(event.target.value)} autoComplete="new-password" aria-invalid={Boolean(errors.token)} disabled={pending} />
             </Field>
           </div>
-          <details>
-            <summary style={{ minHeight: 44, display: 'flex', alignItems: 'center', cursor: 'pointer' }}>高级设置：档位、分支、Draft 与 Webhook</summary>
+          <details className={ui.disclosure}>
+            <summary>高级设置：档位、分支、Draft 与 Webhook</summary>
             <div className={ui.stack} style={{ marginTop: 8 }}>
               <div className="formGrid">
                 <Field label="评审档位" htmlFor={profileId} hint="从平台配置档位中选择，或输入已有档位名。">
@@ -362,23 +361,18 @@ export function ProjectsPage() {
           title="已注册项目"
           aside={projects.isSuccess ? `已加载 ${projects.items.length}${projects.hasNextPage ? '+' : ''} 个项目 · ${enabledCount} 个启用` : undefined}
         >
-          <div className={ui.toolbar} style={{ justifyContent: 'space-between' }}>
-            <div className={styles.inlineFilters}>
-              <label style={{ ...fieldStyle, flex: '1 1 280px' }}>
-                <span className="small">搜索项目路径</span>
-                <input className="input" name="q" type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索项目路径" aria-label="搜索项目路径" />
-              </label>
-              <label style={{ ...fieldStyle, flex: '0 1 160px' }}>
-                <span className="small">启用状态</span>
-                <select className="select" name="enabled" value={enabled} onChange={(event) => setEnabled(event.target.value)} aria-label="按启用状态筛选">
-                  <option value="">全部</option>
-                  <option value="true">已启用</option>
-                  <option value="false">已停用</option>
-                </select>
-              </label>
-            </div>
-            {projects.isFetching ? <span className="small muted" role="status">刷新中…</span> : null}
-          </div>
+          <Toolbar actions={projects.isFetching ? <span className="small muted" role="status">刷新中…</span> : undefined}>
+            <ToolbarField label="搜索项目路径" grow>
+              <input className="input" name="q" type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索项目路径" aria-label="搜索项目路径" />
+            </ToolbarField>
+            <ToolbarField label="启用状态">
+              <select className="select" name="enabled" value={enabled} onChange={(event) => setEnabled(event.target.value)} aria-label="按启用状态筛选">
+                <option value="">全部</option>
+                <option value="true">已启用</option>
+                <option value="false">已停用</option>
+              </select>
+            </ToolbarField>
+          </Toolbar>
 
           {projects.isPending ? <LoadingState /> : null}
           {projects.isError ? <ErrorState error={projects.error} onRetry={projects.retry} /> : null}
@@ -462,4 +456,3 @@ export function ProjectsPage() {
   )
 }
 
-const fieldStyle = { display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0 } as const

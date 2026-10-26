@@ -23,6 +23,10 @@
 .brandName { font-size: 16px; font-weight: 700; }
 .brandSub { color: var(--muted); font-size: 12px; }
 
+.column {
+  width: min(440px, 100%);
+}
+
 .card {
   width: min(440px, 100%);
   background: var(--surface);

@@ -1,0 +1,33 @@
+.table {
+  min-width: 1140px;
+}
+
+.cellStack {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.titleCell {
+  min-width: 210px;
+}
+
+.titleLink {
+  font-weight: 500;
+}
+
+.publicationCell {
+  min-width: 150px;
+}
+
+.publicationError {
+  max-width: 240px;
+  color: var(--danger-fg);
+  overflow-wrap: anywhere;
+}
+
+.sevItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}

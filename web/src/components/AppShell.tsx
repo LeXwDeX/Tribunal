@@ -126,7 +126,7 @@ export function AppShell({ me }: { me: Me }) {
           <div className={styles.navSpacer} />
           <div className={styles.sessionArea}>
             <div className={styles.sessionRow}>
-              <span style={avatarStyle} aria-hidden="true">
+              <span className={styles.avatar} aria-hidden="true">
                 {(me.name || me.username || '?').slice(0, 1).toUpperCase()}
               </span>
               <div className={styles.sessionText}>
@@ -168,17 +168,4 @@ export function AppShell({ me }: { me: Me }) {
     </SessionProvider>
   )
 }
-
-const avatarStyle = {
-  width: 32,
-  height: 32,
-  borderRadius: '50%',
-  background: '#343A46',
-  color: '#fff',
-  display: 'inline-flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  fontWeight: 700,
-  flex: '0 0 auto',
-} as const
 

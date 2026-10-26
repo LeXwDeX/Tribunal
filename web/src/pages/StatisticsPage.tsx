@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { getStats, listProjects } from '../api/api'
 import type { DailyStats, Project, ProviderQualityRow, Stats } from '../api/types'
 import {
-  Badge, Button, EmptyState, ErrorState, LoadingState, Metric, PageHeader, Panel,
+  Badge, Button, EmptyState, ErrorState, LoadingState, Metric, PageHeader, Panel, Toolbar, ToolbarField,
 } from '../components/ui'
 import { formatCost, formatNumber } from '../lib/format'
 import { usePaginated } from '../lib/hooks'
@@ -541,7 +541,7 @@ function ProviderAttribution({ providers }: { providers: ProviderFeedbackCounts[
                   <td><Badge tone={row.role === 'proposer' ? 'info' : 'neutral'}>{ROLE_LABELS[row.role]}</Badge></td>
                   <td className="tabular">{row.total}</td>
                   <td>
-                    <span style={{ display: 'inline-flex', gap: 10, flexWrap: 'wrap' }}>
+                    <span className={ui.inlineList}>
                       {row.signals.map((signal) => (
                         <span key={signal.label} className="small">{signal.label}: {signal.count}</span>
                       ))}
@@ -908,9 +908,9 @@ function StatsContent({ stats }: { stats: Stats }) {
         <DimensionTable rows={byModel} emptyLabel="没有按模型统计" />
       </Panel>
 
-      <details>
-        <summary style={{ minHeight: 44, display: 'flex', alignItems: 'center', cursor: 'pointer' }}>查看原始 stats 响应</summary>
-        <pre className="pre statsJson" style={jsonStyle}>{JSON.stringify(stats, null, 2)}</pre>
+      <details className={ui.disclosure}>
+        <summary>查看原始 stats 响应</summary>
+        <pre className={`pre statsJson ${ui.jsonBlock}`}>{JSON.stringify(stats, null, 2)}</pre>
       </details>
     </>
   )
@@ -964,33 +964,35 @@ export function StatisticsPage() {
           description="按时间与项目查看运行统计、每日趋势和节点维度数据；不可用的值不会显示为零。"
         />
         <Panel title="筛选">
-          <div className={styles.inlineFilters}>
-            <label style={fieldStyle}>
-              <span className="small">开始日期</span>
+          <Toolbar
+            actions={(
+              <>
+                {projects.hasNextPage ? (
+                  <Button
+                    variant="secondary"
+                    onClick={projects.fetchNextPage}
+                    loading={projects.isFetchingNextPage}
+                  >
+                    {projects.isFetchNextPageError ? '重试加载更多项目' : '加载更多项目'}
+                  </Button>
+                ) : null}
+                <Button variant="primary" onClick={apply}>应用</Button>
+              </>
+            )}
+          >
+            <ToolbarField label="开始日期">
               <input className="input" name="from" type="date" value={fromDate} onChange={(event) => setFromDate(event.target.value)} />
-            </label>
-            <label style={fieldStyle}>
-              <span className="small">结束日期</span>
+            </ToolbarField>
+            <ToolbarField label="结束日期">
               <input className="input" name="to" type="date" value={toDate} onChange={(event) => setToDate(event.target.value)} />
-            </label>
-            <label style={fieldStyle}>
-              <span className="small">项目</span>
+            </ToolbarField>
+            <ToolbarField label="项目">
               <select className="select" name="project_id" value={projectId} onChange={(event) => setProjectId(event.target.value)}>
                 <option value="">全部项目</option>
                 {projects.items.map((project) => <option key={project.id} value={project.id}>{project.path_with_namespace}</option>)}
               </select>
-            </label>
-            {projects.hasNextPage ? (
-              <Button
-                variant="secondary"
-                onClick={projects.fetchNextPage}
-                loading={projects.isFetchingNextPage}
-              >
-                {projects.isFetchNextPageError ? '重试加载更多项目' : '加载更多项目'}
-              </Button>
-            ) : null}
-            <Button variant="primary" onClick={apply}>应用</Button>
-          </div>
+            </ToolbarField>
+          </Toolbar>
           {validation ? <span className={styles.resultError} role="alert">{validation}</span> : null}
           {projects.isError ? (
             <div className={styles.scopeBar}>
@@ -1020,7 +1022,5 @@ export function StatisticsPage() {
 }
 
 const providerTitleStyle = { margin: '16px 0 8px', fontWeight: 600 } as const
-const fieldStyle = { display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0 } as const
-const jsonStyle = { background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 8, padding: 12, color: 'var(--text)' } as const
 const trendCaptionStyle = { textAlign: 'left', padding: '0 10px 8px', color: 'var(--muted)' } as const
 const trendCellStyle = { padding: 12, background: 'var(--surface-2)' } as const

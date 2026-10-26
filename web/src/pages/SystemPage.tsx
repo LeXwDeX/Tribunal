@@ -509,7 +509,7 @@ export function SystemPage() {
                 <>
                   <div className={styles.notice}>此页面不提供编辑；密钥和凭据由服务端脱敏，界面不显示其值。</div>
                   {Object.keys(settings.data || {}).length ? (
-                    <pre className="pre" style={settingsStyle}>{JSON.stringify(settings.data, null, 2)}</pre>
+                    <pre className={`pre ${ui.jsonBlock} ${ui.jsonBlockTall}`}>{JSON.stringify(settings.data, null, 2)}</pre>
                   ) : <EmptyState title="平台配置为空" description="服务端返回了空对象；这不代表配置缺失或加载成功。" />}
                 </>
               ) : null}
@@ -536,12 +536,3 @@ export function SystemPage() {
   )
 }
 
-const settingsStyle = {
-  background: 'var(--surface-2)',
-  border: '1px solid var(--border)',
-  borderRadius: 8,
-  padding: 12,
-  color: 'var(--text)',
-  maxHeight: 520,
-  overflow: 'auto',
-} as const

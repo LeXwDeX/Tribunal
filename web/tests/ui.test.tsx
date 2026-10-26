@@ -3,9 +3,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {
-  Badge, Button, CopyButton, Dialog, Drawer, ErrorState, Field, Metric, Panel, PanelBody, Segmented, SevCounts, SeverityBadge, Sparkline, StatusBadge, Switch, Tabs, ToastProvider, useToast,
+  Badge, Button, ButtonLink, CopyButton, Dialog, Drawer, ErrorState, Field, Metric, Panel, PanelBody, Segmented, SevCounts, SeverityBadge, Sparkline, StatusBadge, Switch, Tabs, ToastProvider, useToast,
 } from '../src/components/ui'
 import { ApiError } from '../src/api/client'
+import { MemoryRouter } from 'react-router-dom'
 import ui from '../src/styles/ui.module.css'
 
 const clipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
@@ -373,5 +374,27 @@ describe('modal focus boundaries', () => {
 
     fireEvent.keyDown(document, { key: 'Tab' })
     expect(dialog).toHaveFocus()
+  })
+})
+
+describe('button links', () => {
+  it('renders an in-app route with the shared button classes', () => {
+    render(
+      <MemoryRouter>
+        <ButtonLink to="/projects" variant="primary">注册项目</ButtonLink>
+      </MemoryRouter>,
+    )
+    const link = screen.getByRole('link', { name: '注册项目' })
+    expect(link).toHaveAttribute('href', '/projects')
+    expect(link).toHaveClass(ui.button, ui.primary)
+  })
+
+  it('renders a plain anchor with the secondary variant by default', () => {
+    render(<ButtonLink href="https://gitlab.example.com/mr/1" target="_blank" rel="noopener noreferrer">在 GitLab 中打开</ButtonLink>)
+    const link = screen.getByRole('link', { name: '在 GitLab 中打开' })
+    expect(link).toHaveAttribute('href', 'https://gitlab.example.com/mr/1')
+    expect(link).toHaveAttribute('target', '_blank')
+    expect(link).toHaveClass(ui.button, ui.secondary)
+    expect(link).not.toHaveAttribute('style')
   })
 })
