@@ -14,10 +14,13 @@ import (
 )
 
 // reviewSummary is the list item. store.Workflow already carries every field
-// the console renders; duration_ms is derived from the timestamps.
+// the console renders; duration_ms is derived from the timestamps. Nodes and
+// FindingsSummary have the same shape and meaning as on the detail endpoint.
 type reviewSummary struct {
 	store.Workflow
-	DurationMS *int64 `json:"duration_ms,omitempty"`
+	DurationMS      *int64          `json:"duration_ms,omitempty"`
+	Nodes           []reviewNode    `json:"nodes"`
+	FindingsSummary findingsSummary `json:"findings_summary"`
 }
 
 type findingsSummary struct {
@@ -131,11 +134,53 @@ func (s *Server) handleListReviews(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, r, err)
 		return
 	}
-	reviews := make([]reviewSummary, 0, len(workflows))
-	for _, wf := range workflows {
-		reviews = append(reviews, reviewSummary{Workflow: wf, DurationMS: workflowDuration(wf)})
+	reviews, err := s.summarizeReviewPage(r.Context(), workflows)
+	if err != nil {
+		s.writeStoreError(w, r, err)
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"reviews": reviews, "next_cursor": next})
+}
+
+// summarizeReviewPage adds nodes and findings counts to one page of the
+// list. The page is already access filtered; the batched reads cover exactly
+// its workflow IDs, with one query per kind of data.
+func (s *Server) summarizeReviewPage(ctx context.Context, workflows []store.Workflow) ([]reviewSummary, error) {
+	reviews := make([]reviewSummary, 0, len(workflows))
+	if len(workflows) == 0 {
+		return reviews, nil
+	}
+	ids := make([]string, 0, len(workflows))
+	for _, wf := range workflows {
+		ids = append(ids, wf.ID)
+	}
+	nodesByWorkflow, err := s.store.ListWorkflowNodesByWorkflow(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	counts, err := s.store.CountFindingsByWorkflow(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	summaries := make(map[string]*findingsSummary, len(workflows))
+	for _, id := range ids {
+		summary := newFindingsSummary()
+		summaries[id] = &summary
+	}
+	for _, count := range counts {
+		if summary, ok := summaries[count.WorkflowID]; ok {
+			summary.add(count.Decision, count.Severity, count.Count)
+		}
+	}
+	for _, wf := range workflows {
+		reviews = append(reviews, reviewSummary{
+			Workflow:        wf,
+			DurationMS:      workflowDuration(wf),
+			Nodes:           reviewNodes(nodesByWorkflow[wf.ID]),
+			FindingsSummary: *summaries[wf.ID],
+		})
+	}
+	return reviews, nil
 }
 
 // queryFilterValue bounds free-text filters so oversized values do not reach
@@ -281,26 +326,36 @@ func reviewNodes(nodes []store.WorkflowNode) []reviewNode {
 	return out
 }
 
-func summarizeFindings(findings []store.Finding) findingsSummary {
-	summary := findingsSummary{
+func newFindingsSummary() findingsSummary {
+	return findingsSummary{
 		BySeverity: map[string]int{"P0": 0, "P1": 0, "P2": 0, "info": 0},
 	}
+}
+
+// add counts n findings with one decision and effective severity. Detail and
+// list summaries both go through it so their numbers cannot drift apart.
+func (summary *findingsSummary) add(decision, severity string, n int) {
+	switch decision {
+	case "publish":
+		summary.Published += n
+	case "mark":
+		summary.Marked += n
+	case "drop":
+		summary.Dropped += n
+	}
+	if severity != "" {
+		summary.BySeverity[severity] += n
+	}
+}
+
+func summarizeFindings(findings []store.Finding) findingsSummary {
+	summary := newFindingsSummary()
 	for _, finding := range findings {
-		switch finding.Decision {
-		case "publish":
-			summary.Published++
-		case "mark":
-			summary.Marked++
-		case "drop":
-			summary.Dropped++
-		}
 		severity := finding.FinalSeverity
 		if severity == "" {
 			severity = finding.Severity
 		}
-		if severity != "" {
-			summary.BySeverity[severity]++
-		}
+		summary.add(finding.Decision, severity, 1)
 	}
 	return summary
 }
