@@ -86,8 +86,8 @@ func TestFindingAnnotationMigrationPreservesLegacyFindings(t *testing.T) {
 		t.Fatalf("reopen migrated db: %v", err)
 	}
 	defer st.Close()
-	if got := rowCount(t, st, `SELECT COUNT(*) FROM schema_migrations`); got != 11 {
-		t.Fatalf("schema_migrations = %d, want 10", got)
+	if got := rowCount(t, st, `SELECT COUNT(*) FROM schema_migrations`); got != 12 {
+		t.Fatalf("schema_migrations = %d, want 12", got)
 	}
 	findings, err := st.ListFindings(ctx, store.FindingFilter{WorkflowID: "wf-migrate"})
 	if err != nil {

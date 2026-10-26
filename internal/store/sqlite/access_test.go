@@ -31,7 +31,7 @@ func mustAccessUser(t *testing.T, s *Store, id int64, username, role string) {
 		Role:      role,
 		CreatedAt: now,
 		ExpiresAt: now.Add(time.Hour),
-	}, 4096); err != nil {
+	}, store.SessionLimits{}); err != nil {
 		t.Fatalf("create user %d: %v", id, err)
 	}
 }
@@ -204,7 +204,7 @@ func TestUsersDisabledAndCredentialRevocation(t *testing.T) {
 	if err := s.CreateSession(ctx, store.Session{
 		IDHash: accessHash(sessionToken), UserID: 7, Username: "alice", Name: "Alice",
 		Role: "admin", CreatedAt: s.now().UTC(), ExpiresAt: s.now().UTC().Add(time.Hour),
-	}, 4096); err != nil {
+	}, store.SessionLimits{}); err != nil {
 		t.Fatalf("pre-disable session: %v", err)
 	}
 	tokenHash := mustAccessToken(t, s, store.TokenUser{ID: 7, Username: "alice", Name: "Alice", Role: "admin"}, "pre-disable-token")
@@ -239,7 +239,7 @@ func TestUsersDisabledAndCredentialRevocation(t *testing.T) {
 	if err := s.CreateSession(ctx, store.Session{
 		IDHash: accessHash("rejected-session"), UserID: 7, Username: "alice", Name: "Alice",
 		Role: "admin", CreatedAt: s.now().UTC(), ExpiresAt: s.now().UTC().Add(time.Hour),
-	}, 4096); !errors.Is(err, store.ErrNotFound) {
+	}, store.SessionLimits{}); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("session for disabled user = %v", err)
 	}
 	if _, err := s.CreateAPIToken(ctx, store.TokenUser{ID: 7, Username: "alice", Name: "Alice", Role: "admin"},
@@ -266,7 +266,7 @@ func TestUsersDisabledAndCredentialRevocation(t *testing.T) {
 	if err := s.CreateSession(ctx, store.Session{
 		IDHash: accessHash("fresh-session"), UserID: 7, Username: "alice", Name: "Alice",
 		Role: "admin", CreatedAt: s.now().UTC(), ExpiresAt: s.now().UTC().Add(time.Hour),
-	}, 4096); err != nil {
+	}, store.SessionLimits{}); err != nil {
 		t.Fatalf("enabled session: %v", err)
 	}
 	freshToken := mustAccessToken(t, s, store.TokenUser{ID: 7, Username: "alice", Name: "Alice", Role: "admin"}, "fresh-token")
@@ -520,7 +520,7 @@ func TestDisableUserSerializesWithCredentialIssuance(t *testing.T) {
 				IDHash: accessHash(fmt.Sprintf("racing-session-%d", i)), UserID: 7,
 				Username: "alice", Name: "Alice", Role: "admin",
 				CreatedAt: s.now().UTC(), ExpiresAt: s.now().UTC().Add(time.Hour),
-			}, 4096)
+			}, store.SessionLimits{})
 			if err != nil && !errors.Is(err, store.ErrNotFound) {
 				errs <- err
 				return
@@ -630,7 +630,7 @@ func TestProjectAccessMigrationFreshAndLegacy(t *testing.T) {
 	if err := s.SetProjectGrant(ctx, 42, 7, store.ProjectAccessRead); err != nil {
 		t.Fatalf("legacy grant: %v", err)
 	}
-	if got := rowCount(t, s, `SELECT COUNT(*) FROM schema_migrations`); got != 11 {
-		t.Fatalf("schema_migrations = %d, want 10", got)
+	if got := rowCount(t, s, `SELECT COUNT(*) FROM schema_migrations`); got != 12 {
+		t.Fatalf("schema_migrations = %d, want 12", got)
 	}
 }

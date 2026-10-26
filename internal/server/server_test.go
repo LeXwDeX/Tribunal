@@ -285,7 +285,7 @@ func (e *testEnv) sessionCookie(userID int64, username string) string {
 	if err := e.store.CreateSession(context.Background(), store.Session{
 		IDHash: sum[:], UserID: userID, Username: username, Name: username,
 		Role: roleAdmin, ExpiresAt: now.Add(time.Hour), CreatedAt: now,
-	}, 10); err != nil {
+	}, store.SessionLimits{}); err != nil {
 		e.t.Fatalf("CreateSession: %v", err)
 	}
 	auth, err := newAuthService(AuthConfig{SessionKey: []byte("0123456789abcdef0123456789abcdef")})

@@ -73,9 +73,16 @@ type ProviderTester interface {
 // SessionStore persists browser sessions. IDHash is the SHA-256 digest of the
 // random cookie token; plaintext tokens never reach this interface.
 type SessionStore interface {
-	CreateSession(ctx context.Context, session store.Session, limit int) error
+	CreateSession(ctx context.Context, session store.Session, limits store.SessionLimits) error
 	GetSession(ctx context.Context, idHash []byte, now time.Time) (*store.Session, error)
 	DeleteSession(ctx context.Context, idHash []byte) error
+}
+
+// AdminBindingStore pins username-form bootstrap admins to a GitLab user ID.
+// BindAdminUsername binds username to userID if it is unbound and returns the
+// ID that owns the username.
+type AdminBindingStore interface {
+	BindAdminUsername(ctx context.Context, username string, userID int64, now time.Time) (int64, error)
 }
 
 // TokenStore persists API tokens per browser session user. Plaintext never

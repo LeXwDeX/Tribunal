@@ -89,8 +89,8 @@ func TestReviewIntentMigrationDefaultsAndPersistence(t *testing.T) {
 	if payload["generation"] != float64(5) || payload["head_sha"] != head {
 		t.Fatalf("legacy review payload = %v", payload)
 	}
-	if got := rowCount(t, s, `SELECT COUNT(*) FROM schema_migrations`); got != 11 {
-		t.Fatalf("schema_migrations = %d, want 11", got)
+	if got := rowCount(t, s, `SELECT COUNT(*) FROM schema_migrations`); got != 12 {
+		t.Fatalf("schema_migrations = %d, want 12", got)
 	}
 
 	// Candidate allocation persists without reviving the cancelled control.

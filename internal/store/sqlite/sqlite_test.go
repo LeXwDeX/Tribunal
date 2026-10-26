@@ -97,8 +97,8 @@ func TestMigrationPragmasAndReopen(t *testing.T) {
 			t.Errorf("PRAGMA %s = %q, want %q", pragma, got, want)
 		}
 	}
-	if got := rowCount(t, s, `SELECT COUNT(*) FROM schema_migrations`); got != 11 {
-		t.Fatalf("schema_migrations = %d, want 10", got)
+	if got := rowCount(t, s, `SELECT COUNT(*) FROM schema_migrations`); got != 12 {
+		t.Fatalf("schema_migrations = %d, want 12", got)
 	}
 	if _, err := s.db.Exec(`INSERT INTO workspaces (project_id, state, updated_at) VALUES (999, 'new', '2026-10-22T12:00:00.000000000Z')`); err == nil {
 		t.Fatal("foreign_keys pragma was not enforced")
@@ -123,8 +123,8 @@ func TestMigrationPragmasAndReopen(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer s.Close()
-	if got := rowCount(t, s, `SELECT COUNT(*) FROM schema_migrations`); got != 11 {
-		t.Fatalf("schema_migrations after reopen = %d, want 10", got)
+	if got := rowCount(t, s, `SELECT COUNT(*) FROM schema_migrations`); got != 12 {
+		t.Fatalf("schema_migrations after reopen = %d, want 12", got)
 	}
 	project, err := s.GetProject(ctx, projectID)
 	if err != nil {
@@ -936,8 +936,8 @@ func TestOpenMemoryDSN(t *testing.T) {
 	if err := s.Ping(ctx); err != nil {
 		t.Fatalf("Ping: %v", err)
 	}
-	if got := rowCount(t, s, `SELECT COUNT(*) FROM schema_migrations`); got != 11 {
-		t.Fatalf("schema_migrations = %d, want 10", got)
+	if got := rowCount(t, s, `SELECT COUNT(*) FROM schema_migrations`); got != 12 {
+		t.Fatalf("schema_migrations = %d, want 12", got)
 	}
 }
 

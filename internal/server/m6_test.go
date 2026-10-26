@@ -771,7 +771,7 @@ func (e *m6Env) ensureUser(userID int64, username, name, role string) {
 	if err := e.sqlite.CreateSession(context.Background(), store.Session{
 		IDHash: sum[:], UserID: userID, Username: username, Name: name, Role: role,
 		ExpiresAt: now.Add(time.Hour), CreatedAt: now,
-	}, 4096); err != nil {
+	}, store.SessionLimits{}); err != nil {
 		e.t.Fatalf("fixture user %d: %v", userID, err)
 	}
 }

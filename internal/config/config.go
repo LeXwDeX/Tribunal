@@ -11,6 +11,7 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -285,6 +286,15 @@ func (c *Config) Validate() error {
 	bootstrap, ok := p.env("auth.bootstrap_token_env", c.Auth.BootstrapTokenEnv)
 	if ok && len(bootstrap) < 32 {
 		p.add("auth.bootstrap_token_env: environment variable %s must be at least 32 bytes", c.Auth.BootstrapTokenEnv)
+	}
+	for i, entry := range c.Auth.BootstrapAdmins {
+		raw, ok := strings.CutPrefix(strings.ToLower(strings.TrimSpace(entry)), "id:")
+		if !ok {
+			continue
+		}
+		if id, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64); err != nil || id <= 0 {
+			p.add("auth.bootstrap_admins[%d]: %q must be id:<positive GitLab user id> or a username", i, entry)
+		}
 	}
 	validateOAuth(&p, c.Auth.OAuth)
 

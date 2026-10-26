@@ -27,7 +27,8 @@ const (
 	oauthBodyMax  = 1 << 20
 
 	defaultSessionTTL = 168 * time.Hour
-	sessionLimit      = 4096
+
+	adminIDPrefix = "id:"
 
 	roleAdmin  = "admin"
 	roleViewer = "viewer"
@@ -57,6 +58,7 @@ type authService struct {
 	ttl          time.Duration
 	secure       bool
 	admins       map[string]struct{}
+	adminIDs     map[int64]struct{}
 	client       *http.Client
 	now          func() time.Time
 }
@@ -88,12 +90,9 @@ func newAuthService(cfg AuthConfig) (*authService, error) {
 			return nil, errors.New("server: auth gitlab URL must be an absolute URL when OAuth is configured")
 		}
 	}
-	admins := make(map[string]struct{}, len(cfg.BootstrapAdmins))
-	for _, name := range cfg.BootstrapAdmins {
-		name = strings.ToLower(strings.TrimSpace(name))
-		if name != "" {
-			admins[name] = struct{}{}
-		}
+	admins, adminIDs, err := parseBootstrapAdmins(cfg.BootstrapAdmins)
+	if err != nil {
+		return nil, err
 	}
 	return &authService{
 		baseURL:      baseURL,
@@ -104,9 +103,34 @@ func newAuthService(cfg AuthConfig) (*authService, error) {
 		ttl:          ttl,
 		secure:       cfg.SecureCookies,
 		admins:       admins,
+		adminIDs:     adminIDs,
 		client:       client,
 		now:          now,
 	}, nil
+}
+
+// parseBootstrapAdmins splits bootstrap admin entries into GitLab user IDs
+// ("id:123") and usernames. Usernames are lower-cased; GitLab compares them
+// case-insensitively.
+func parseBootstrapAdmins(entries []string) (map[string]struct{}, map[int64]struct{}, error) {
+	names := make(map[string]struct{}, len(entries))
+	ids := make(map[int64]struct{})
+	for _, entry := range entries {
+		entry = strings.ToLower(strings.TrimSpace(entry))
+		if entry == "" {
+			continue
+		}
+		if raw, ok := strings.CutPrefix(entry, adminIDPrefix); ok {
+			id, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+			if err != nil || id <= 0 {
+				return nil, nil, errors.New("server: bootstrap admin " + strconv.Quote(entry) + " must be id:<positive GitLab user id>")
+			}
+			ids[id] = struct{}{}
+			continue
+		}
+		names[entry] = struct{}{}
+	}
+	return names, ids, nil
 }
 
 func (a *authService) enabled() bool {
@@ -279,7 +303,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusUnauthorized, "unauthenticated", "GitLab authentication failed", nil)
 		return
 	}
-	user.Role = s.roleFor(user.Username)
+	user.Role = s.roleFor(r.Context(), user)
 
 	// Rotate any existing session before issuing the new one. A failed delete
 	// aborts login: issuing a second cookie would leave a live old session.
@@ -396,11 +420,35 @@ func (s *Server) fetchUser(ctx context.Context, accessToken string) (sessionUser
 	return sessionUser{ID: payload.ID, Username: payload.Username, Name: name}, nil
 }
 
-func (s *Server) roleFor(username string) string {
-	if _, ok := s.auth.admins[strings.ToLower(strings.TrimSpace(username))]; ok {
+// roleFor maps a GitLab user to a platform role from the current
+// configuration. An id:<n> entry matches the GitLab user ID only. A username
+// entry is bound to the first GitLab user ID seen with that username, because
+// GitLab usernames can be renamed and reused: a later account that takes the
+// same username stays a viewer. Lookup failures fail closed.
+func (s *Server) roleFor(ctx context.Context, user sessionUser) string {
+	if _, ok := s.auth.adminIDs[user.ID]; ok && user.ID > 0 {
 		return roleAdmin
 	}
-	return roleViewer
+	name := strings.ToLower(strings.TrimSpace(user.Username))
+	if _, ok := s.auth.admins[name]; !ok || user.ID <= 0 {
+		return roleViewer
+	}
+	if s.bindings == nil {
+		s.logger.Warn("cannot verify bootstrap admin username without a binding store",
+			"username", name, "user_id", user.ID)
+		return roleViewer
+	}
+	owner, err := s.bindings.BindAdminUsername(ctx, name, user.ID, s.auth.now())
+	if err != nil {
+		s.logger.Warn("cannot verify bootstrap admin username", "username", name, "user_id", user.ID, "error", err)
+		return roleViewer
+	}
+	if owner != user.ID {
+		s.logger.Warn("bootstrap admin username is bound to another GitLab user",
+			"username", name, "user_id", user.ID, "bound_user_id", owner)
+		return roleViewer
+	}
+	return roleAdmin
 }
 
 // createSession persists the session before the cookie is signed. A storage
@@ -424,7 +472,7 @@ func (s *Server) createSession(ctx context.Context, user sessionUser) (session, 
 		Role:      user.Role,
 		ExpiresAt: expires,
 		CreatedAt: now,
-	}, sessionLimit); err != nil {
+	}, store.SessionLimits{}); err != nil {
 		return session{}, err
 	}
 	return session{id: id, user: user, csrf: s.auth.csrfFor(id)}, nil
@@ -471,8 +519,8 @@ func (s *Server) sessionFromRequest(r *http.Request) (session, bool) {
 		ID:       stored.UserID,
 		Username: stored.Username,
 		Name:     stored.Name,
-		Role:     s.roleFor(stored.Username),
 	}
+	user.Role = s.roleFor(r.Context(), user)
 	return session{id: id, user: user, csrf: s.auth.csrfFor(id)}, true
 }
 
@@ -555,12 +603,13 @@ func (s *Server) authenticateAPIToken(r *http.Request, hash []byte) (sessionUser
 	// The stored users.role reflects login time. Re-evaluate against the
 	// current bootstrap_admins so removing an admin also downgrades tokens
 	// minted earlier. The configured bootstrap bearer token keeps admin.
-	return sessionUser{
+	user := sessionUser{
 		ID:       owner.ID,
 		Username: owner.Username,
 		Name:     owner.Name,
-		Role:     s.roleFor(owner.Username),
-	}, true
+	}
+	user.Role = s.roleFor(r.Context(), user)
+	return user, true
 }
 
 // bearerValue extracts the trimmed bearer value. The bootstrap token check

@@ -37,7 +37,7 @@ func TestSessionStoresOnlyTheTokenHash(t *testing.T) {
 	clock := newFakeClock()
 	s := openTestStore(t, clock)
 
-	if err := s.CreateSession(ctx, testSession("raw-cookie-token", clock.Now(), time.Hour), 4096); err != nil {
+	if err := s.CreateSession(ctx, testSession("raw-cookie-token", clock.Now(), time.Hour), store.SessionLimits{}); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
 	var stored string
@@ -68,7 +68,7 @@ func TestSessionExpiryBoundaryDeletesRow(t *testing.T) {
 	clock := newFakeClock()
 	s := openTestStore(t, clock)
 	created := clock.Now()
-	if err := s.CreateSession(ctx, testSession("expiring", created, time.Hour), 4096); err != nil {
+	if err := s.CreateSession(ctx, testSession("expiring", created, time.Hour), store.SessionLimits{}); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
@@ -84,13 +84,60 @@ func TestSessionExpiryBoundaryDeletesRow(t *testing.T) {
 	}
 }
 
-func TestSessionLimitEvictsOldest(t *testing.T) {
+func sessionFor(token string, userID int64, username string, now time.Time) store.Session {
+	session := testSession(token, now, time.Hour)
+	session.UserID = userID
+	session.Username = username
+	session.Role = "viewer"
+	return session
+}
+
+func TestSessionPerUserLimitEvictsOnlyThatUsersOldest(t *testing.T) {
 	ctx := context.Background()
 	clock := newFakeClock()
 	s := openTestStore(t, clock)
-	for _, token := range []string{"first", "second", "third"} {
-		if err := s.CreateSession(ctx, testSession(token, clock.Now(), time.Hour), 2); err != nil {
+	limits := store.SessionLimits{PerUser: 2, Total: 100}
+	if err := s.CreateSession(ctx, sessionFor("bob-1", 8, "bob", clock.Now()), limits); err != nil {
+		t.Fatalf("CreateSession(bob-1): %v", err)
+	}
+	// One user logging in repeatedly must only evict their own sessions.
+	for _, token := range []string{"mallory-1", "mallory-2", "mallory-3", "mallory-4"} {
+		clock.Advance(time.Second)
+		if err := s.CreateSession(ctx, sessionFor(token, 99, "mallory", clock.Now()), limits); err != nil {
 			t.Fatalf("CreateSession(%s): %v", token, err)
+		}
+	}
+
+	if got := rowCount(t, s, `SELECT COUNT(*) FROM sessions WHERE user_id = 99`); got != 2 {
+		t.Fatalf("mallory session count = %d, want 2", got)
+	}
+	if _, err := s.GetSession(ctx, sessionHash("bob-1"), clock.Now()); err != nil {
+		t.Fatalf("another user's session was evicted: %v", err)
+	}
+	for _, token := range []string{"mallory-1", "mallory-2"} {
+		if _, err := s.GetSession(ctx, sessionHash(token), clock.Now()); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("old session %s was not evicted: %v", token, err)
+		}
+	}
+	for _, token := range []string{"mallory-3", "mallory-4"} {
+		if _, err := s.GetSession(ctx, sessionHash(token), clock.Now()); err != nil {
+			t.Fatalf("session %s: %v", token, err)
+		}
+	}
+}
+
+func TestSessionTotalLimitIsBackstop(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	s := openTestStore(t, clock)
+	limits := store.SessionLimits{PerUser: 10, Total: 2}
+	users := []struct {
+		token string
+		id    int64
+	}{{"first", 7}, {"second", 8}, {"third", 9}}
+	for _, user := range users {
+		if err := s.CreateSession(ctx, sessionFor(user.token, user.id, "user"+user.token, clock.Now()), limits); err != nil {
+			t.Fatalf("CreateSession(%s): %v", user.token, err)
 		}
 		clock.Advance(time.Second)
 	}
@@ -101,10 +148,21 @@ func TestSessionLimitEvictsOldest(t *testing.T) {
 	if _, err := s.GetSession(ctx, sessionHash("first"), clock.Now()); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("oldest session was not evicted: %v", err)
 	}
-	for _, token := range []string{"second", "third"} {
-		if _, err := s.GetSession(ctx, sessionHash(token), clock.Now()); err != nil {
-			t.Fatalf("session %s: %v", token, err)
+}
+
+func TestSessionLimitsDefaults(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	s := openTestStore(t, clock)
+	for i := 0; i < store.DefaultSessionsPerUser+2; i++ {
+		token := "token-" + strings.Repeat("x", i)
+		if err := s.CreateSession(ctx, testSession(token, clock.Now(), time.Hour), store.SessionLimits{}); err != nil {
+			t.Fatalf("CreateSession(%d): %v", i, err)
 		}
+		clock.Advance(time.Second)
+	}
+	if got := rowCount(t, s, `SELECT COUNT(*) FROM sessions`); got != store.DefaultSessionsPerUser {
+		t.Fatalf("session count = %d, want %d", got, store.DefaultSessionsPerUser)
 	}
 }
 
@@ -112,11 +170,11 @@ func TestCreateSessionPurgesExpiredRows(t *testing.T) {
 	ctx := context.Background()
 	clock := newFakeClock()
 	s := openTestStore(t, clock)
-	if err := s.CreateSession(ctx, testSession("old", clock.Now(), time.Minute), 4096); err != nil {
+	if err := s.CreateSession(ctx, testSession("old", clock.Now(), time.Minute), store.SessionLimits{}); err != nil {
 		t.Fatalf("CreateSession(old): %v", err)
 	}
 	clock.Advance(2 * time.Minute)
-	if err := s.CreateSession(ctx, testSession("new", clock.Now(), time.Hour), 4096); err != nil {
+	if err := s.CreateSession(ctx, testSession("new", clock.Now(), time.Hour), store.SessionLimits{}); err != nil {
 		t.Fatalf("CreateSession(new): %v", err)
 	}
 	if got := rowCount(t, s, `SELECT COUNT(*) FROM sessions`); got != 1 {
@@ -128,7 +186,7 @@ func TestDeleteSessionIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	clock := newFakeClock()
 	s := openTestStore(t, clock)
-	if err := s.CreateSession(ctx, testSession("token", clock.Now(), time.Hour), 4096); err != nil {
+	if err := s.CreateSession(ctx, testSession("token", clock.Now(), time.Hour), store.SessionLimits{}); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
 	if err := s.DeleteSession(ctx, sessionHash("token")); err != nil {
@@ -156,7 +214,7 @@ func TestSessionValidation(t *testing.T) {
 		"expired entry": {IDHash: valid.IDHash, UserID: 7, Username: "alice", Role: "admin", CreatedAt: clock.Now(), ExpiresAt: clock.Now()},
 	}
 	for name, session := range cases {
-		if err := s.CreateSession(ctx, session, 4096); err == nil {
+		if err := s.CreateSession(ctx, session, store.SessionLimits{}); err == nil {
 			t.Errorf("%s: CreateSession accepted an invalid session", name)
 		}
 	}
@@ -213,7 +271,7 @@ func TestLegacyDatabaseKeepsOldSessionRowsUntrusted(t *testing.T) {
 	}
 	defer s.Close()
 	clock := newFakeClock()
-	if err := s.CreateSession(ctx, testSession("fresh-token", clock.Now(), time.Hour), 4096); err != nil {
+	if err := s.CreateSession(ctx, testSession("fresh-token", clock.Now(), time.Hour), store.SessionLimits{}); err != nil {
 		t.Fatalf("CreateSession on legacy schema: %v", err)
 	}
 	if _, err := s.GetSession(ctx, sessionHash("fresh-token"), clock.Now()); err != nil {
@@ -222,10 +280,10 @@ func TestLegacyDatabaseKeepsOldSessionRowsUntrusted(t *testing.T) {
 	if _, err := s.GetSession(ctx, sessionHash("legacy-plaintext-id"), clock.Now()); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("legacy plaintext session id was accepted: %v", err)
 	}
-	if got := rowCount(t, s, `SELECT COUNT(*) FROM schema_migrations`); got != len(applied)+8 {
+	if got := rowCount(t, s, `SELECT COUNT(*) FROM schema_migrations`); got != len(applied)+9 {
 		// Open applies the newer retention, access, webhook state, review intent,
 		// review side-effect, and webhook ownership migrations on upgrade.
-		t.Fatalf("schema_migrations = %d, want %d", got, len(applied)+8)
+		t.Fatalf("schema_migrations = %d, want %d", got, len(applied)+9)
 	}
 }
 

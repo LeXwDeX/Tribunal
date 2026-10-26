@@ -58,7 +58,7 @@ docker compose exec -T review /app/tribunalctl projects all
 OAuth 默认关闭，访问 `/auth/login` 得到 503 是预期行为，Bearer API 和 CLI 仍可使用。启用控制台登录时：
 
 1. 在 GitLab 创建 OAuth Application，scope 为 `read_user`，回调 URI 为 `<TRIBUNAL_PUBLIC_URL>/auth/callback`。
-2. 在 `.env` 设置 `GITLAB_OAUTH_CLIENT_ID`、`GITLAB_OAUTH_CLIENT_SECRET` 和 `GITLAB_ADMIN_USERNAME`。管理员值填写 GitLab 用户名；留空不会给任何正常账号平台管理员标签。该标签只用于平台管理面，不授予项目业务数据访问，项目授权见下文。
+2. 在 `.env` 设置 `GITLAB_OAUTH_CLIENT_ID`、`GITLAB_OAUTH_CLIENT_SECRET` 和 `GITLAB_ADMIN_USERNAME`。管理员值推荐填写 `id:<GitLab 用户 ID>`，也可填 GitLab 用户名（首次登录即绑定该用户 ID，见第 5 节说明）；留空不会给任何正常账号平台管理员标签。该标签只用于平台管理面，不授予项目业务数据访问，项目授权见下文。
 3. 在 `config/server.docker.yaml` 取消 `oauth` 及两个子字段、`bootstrap_admins` 的注释。设置正确的 HTTPS `TRIBUNAL_PUBLIC_URL`，配置反向代理，再执行 `docker compose up -d --force-recreate --wait --wait-timeout 120`。
 
 模型密钥不是 GitLab 项目 token。注册项目需要单独的 `GITLAB_PROJECT_TOKEN`，由安全环境注入当前 shell，scope 为 `api` 和 `read_repository`。该变量不放进长期运行服务的 `.env`，仅传给这次 CLI 进程：
@@ -119,7 +119,7 @@ docker compose exec -T review /app/tribunalctl projects all
 
 **bootstrap 凭据轮换**
 
-`REVIEW_ADMIN_TOKEN` 由部署方生成、保存和轮换，Tribunal 不提供在线轮换 API。修改 `.env` 或 secret 注入后执行 `docker compose up -d --force-recreate --wait --wait-timeout 120`，重启后旧 token 立即失效；不要用数据库操作或用户 grant 替代这次轮换。`bootstrap_admins` 是 GitLab 用户名列表，修改后同样需要重启服务，不会创建 GitLab 账号，也不等于项目授权。
+`REVIEW_ADMIN_TOKEN` 由部署方生成、保存和轮换，Tribunal 不提供在线轮换 API。修改 `.env` 或 secret 注入后执行 `docker compose up -d --force-recreate --wait --wait-timeout 120`，重启后旧 token 立即失效；不要用数据库操作或用户 grant 替代这次轮换。`bootstrap_admins` 是 `id:<GitLab 用户 ID>` 或 GitLab 用户名的列表，修改后同样需要重启服务，不会创建 GitLab 账号，也不等于项目授权。
 
 ### 停止、修改和备份
 
@@ -315,7 +315,9 @@ docker run -d --name tribunal \
 
 - `server.public_url` 必须是 GitLab 能访问的外部地址，并且与 OAuth Application 的 Redirect URI 同源。应用固定使用 `public_url + /auth/callback`。
 - `read_user` 是登录所需的最小 scope；应用调用 GitLab `/api/v4/user` 获取用户名。
-- `bootstrap_admins` 填 GitLab **用户名**，不区分大小写。匹配的用户登录后获得平台 `admin` 标签；其他登录用户为 `viewer`。它不会创建 GitLab 账号，也不授予任何项目数据访问；项目权限仍需 `project_grants`。
+- `bootstrap_admins` 推荐填 `id:<GitLab 用户 ID>`（如 `id:42`），只按 ID 匹配，GitLab 改名不影响。用户 ID 可在 GitLab 个人资料页或 `GET /api/v4/users?username=<name>` 查到。也兼容旧写法 GitLab **用户名**（不区分大小写）：该用户名第一次以 admin 身份登录或访问时，Tribunal 把它绑定到当时的 GitLab 用户 ID 并写入 `admin_bindings`；之后其他账号即使改名为同一用户名，也只得到 `viewer`，日志记录 `bootstrap admin username is bound to another GitLab user`。匹配的用户获得平台 `admin` 标签；其他登录用户为 `viewer`。它不会创建 GitLab 账号，也不授予任何项目数据访问；项目权限仍需 `project_grants`。
+- 用户名绑定是首次使用即信任：升级前若该用户名已被他人占用，第一个登录的账号会拿到绑定。升级后请确认绑定正确（`SELECT username, user_id FROM admin_bindings;`），或直接改用 `id:` 写法。管理员 GitLab 账号重建、需要重新绑定时，先停服务，执行 `DELETE FROM admin_bindings WHERE username = '<小写用户名>';`，再启动并让正确账号登录；改用 `id:` 写法则不需要这一步。
+- 每个用户最多保留 10 个浏览器会话，再次登录会淘汰该用户自己最旧的会话，不影响其他用户；全局 4096 个会话只是存储兜底。
 - OAuth 配置存在时，`client_id_env` 和 `client_secret_env` 必须同时设置，且两个环境变量都必须非空；`server.public_url` 必须是非空的绝对 HTTP(S) 地址，否则启动校验失败。
 - `REVIEW_ADMIN_TOKEN` 与 OAuth 相互独立；没有浏览器会话时仍可用它调用用户、授权和系统配置等平台管理 API。它没有用户 ID 和项目 grant，不能读取项目业务数据；轮换由部署方更新环境变量并重启。
 - 真实 OAuth 登录已在已验证快照的隔离测试实例验证；未单独复测其他生产 IdP 或所有设备场景。

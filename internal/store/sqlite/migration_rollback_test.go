@@ -159,8 +159,8 @@ func TestMigrationRollbackAfterLateFailure(t *testing.T) {
 		t.Fatalf("Open after removing trigger: %v", err)
 	}
 	defer s.Close()
-	if got := rowCount(t, s, `SELECT COUNT(*) FROM schema_migrations`); got != 11 {
-		t.Fatalf("schema_migrations after retry = %d, want 10", got)
+	if got := rowCount(t, s, `SELECT COUNT(*) FROM schema_migrations`); got != 12 {
+		t.Fatalf("schema_migrations after retry = %d, want 12", got)
 	}
 	if got := rowCount(t, s, `SELECT COUNT(*) FROM schema_migrations WHERE version IN (4, 5, 6)`); got != 3 {
 		t.Fatalf("migrations 4-6 recorded = %d, want 3", got)
