@@ -11,7 +11,9 @@ import (
 
 // Run drives a workflow until it is terminal. Only one Run per workflow is
 // allowed in this Engine. A standalone Cancel or a parent context cancellation
-// aborts live executors and durably cancels the workflow.
+// aborts live executors and durably cancels the workflow. A parent
+// cancellation whose cause is ErrInterrupted only stops this Run; the
+// workflow stays unfinished for Recover.
 func (e *Engine) Run(ctx context.Context, wfID string) error {
 	if e.store == nil {
 		return errors.New("dag: nil EventStore")
@@ -29,7 +31,7 @@ func (e *Engine) Run(ctx context.Context, wfID string) error {
 	defer func() {
 		// A cancelled parent context must still leave a durable cancelled
 		// workflow, even if Run stopped before its loop reached the check below.
-		if ctx.Err() != nil && runCtx.Err() != nil {
+		if ctx.Err() != nil && runCtx.Err() != nil && !interrupted(ctx) {
 			_ = e.cancelDurable(runCtx, wfID, "context_cancelled")
 		}
 		runCancel()
@@ -47,8 +49,7 @@ func (e *Engine) Run(ctx context.Context, wfID string) error {
 			return err
 		}
 		if err := ctx.Err(); err != nil {
-			cancelErr := e.cancelDurable(runCtx, wfID, "context_cancelled")
-			return errors.Join(err, cancelErr)
+			return e.stopForParent(ctx, runCtx, wfID)
 		}
 		if err := runCtx.Err(); err != nil {
 			return err
@@ -126,8 +127,7 @@ func (e *Engine) Run(ctx context.Context, wfID string) error {
 			// A worker may have just committed and released its slot between
 			// this snapshot and the check. Reload once before declaring a stall.
 			if err := ctx.Err(); err != nil {
-				cancelErr := e.cancelDurable(runCtx, wfID, "context_cancelled")
-				return errors.Join(err, cancelErr)
+				return e.stopForParent(ctx, runCtx, wfID)
 			}
 			if err := runCtx.Err(); err != nil {
 				return err
@@ -153,6 +153,21 @@ func (e *Engine) Run(ctx context.Context, wfID string) error {
 
 		e.wait(runCtx, handle, wf.Deadline)
 	}
+}
+
+// stopForParent ends Run after its parent context was cancelled. An
+// interruption leaves running nodes for Recover; any other cancellation is
+// durable.
+func (e *Engine) stopForParent(ctx, runCtx context.Context, wfID string) error {
+	if interrupted(ctx) {
+		return ctx.Err()
+	}
+	cancelErr := e.cancelDurable(runCtx, wfID, "context_cancelled")
+	return errors.Join(ctx.Err(), cancelErr)
+}
+
+func interrupted(ctx context.Context) bool {
+	return errors.Is(context.Cause(ctx), ErrInterrupted)
 }
 
 func (e *Engine) ensureStarted(ctx context.Context, wfID string) error {

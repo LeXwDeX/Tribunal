@@ -1012,10 +1012,13 @@ func (s *ReviewService) waitTerminal(ctx context.Context, workflowID string) err
 }
 
 // runWithControl runs a workflow and watches the persisted review generation.
-// A superseded run is cancelled through the engine and never published.
+// A superseded run is cancelled through the engine and never published. When
+// ctx ends (shutdown or lost job lease) the run is only interrupted: the
+// workflow stays unfinished for recovery and ctx's error is returned so the
+// job is not settled as done.
 func (s *ReviewService) runWithControl(ctx context.Context, projectID, mrIID int64, workflowID string, generation int64, head string) (bool, error) {
-	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	runCtx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
+	defer cancel(nil)
 	done := make(chan error, 1)
 	go func() { done <- s.engine.Run(runCtx, workflowID) }()
 
@@ -1025,6 +1028,9 @@ func (s *ReviewService) runWithControl(ctx context.Context, projectID, mrIID int
 	for {
 		select {
 		case err := <-done:
+			if ctx.Err() != nil && !superseded {
+				return false, ctx.Err()
+			}
 			if err != nil {
 				if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 					return superseded, nil
@@ -1037,9 +1043,12 @@ func (s *ReviewService) runWithControl(ctx context.Context, projectID, mrIID int
 			}
 			return superseded, nil
 		case <-ctx.Done():
-			cancel()
+			cancel(dag.ErrInterrupted)
 			<-done
-			return superseded, nil
+			if superseded {
+				return true, nil
+			}
+			return false, ctx.Err()
 		case <-ticker.C:
 			control, err := s.store.GetReviewControl(ctx, projectID, mrIID)
 			if err != nil {

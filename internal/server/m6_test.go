@@ -607,6 +607,7 @@ func (f *fakeExtensions) UpsertBlockBinding(ctx context.Context, in BlockBinding
 
 type m6Env struct {
 	t          *testing.T
+	api        *Server
 	server     *httptest.Server
 	gitlab     *httptest.Server
 	sqlite     *sqlite.Store
@@ -707,7 +708,7 @@ func newM6Env(t *testing.T, opts m6Options) *m6Env {
 		server.Close()
 		gitlab.Close()
 	})
-	env := &m6Env{t: t, server: server, gitlab: gitlab, sqlite: st, store: view,
+	env := &m6Env{t: t, api: apiServer, server: server, gitlab: gitlab, sqlite: st, store: view,
 		reviews: reviews, workspace: workspace, contexts: contexts,
 		extensions: extensions, mcp: mcp, llm: llm, platform: platform}
 	return env

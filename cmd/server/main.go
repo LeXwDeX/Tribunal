@@ -250,13 +250,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if shutdownTimeout <= 0 || shutdownTimeout > 15*time.Second {
 		shutdownTimeout = 15 * time.Second
 	}
-	httpServer := &http.Server{
-		Handler:           apiServer.Handler(),
-		ReadHeaderTimeout: readHeaderTimeout(cfg.Server.ReadTimeout),
-		ReadTimeout:       cfg.Server.ReadTimeout,
-		WriteTimeout:      cfg.Server.WriteTimeout,
-		IdleTimeout:       60 * time.Second,
-	}
+	httpServer := newHTTPServer(cfg.Server, apiServer.Handler(), apiServer.BeginShutdown)
 	serveErr := make(chan error, 1)
 	go func() {
 		err := httpServer.Serve(listener)
@@ -288,13 +282,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		}
 	}
 
-	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownTimeout)
-	if err := httpServer.Shutdown(shutdownCtx); err != nil {
-		if runErr == nil {
-			runErr = fmt.Errorf("shutdown HTTP server: %w", err)
-		}
+	if err := shutdownHTTPServer(httpServer, shutdownTimeout, logger); err != nil && runErr == nil {
+		runErr = err
 	}
-	cancelShutdown()
 	stopWorker()
 	if !workerConsumed {
 		if err := <-workerDone; err != nil && runErr == nil {
@@ -308,6 +298,43 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 	logger.Info("server stopped")
 	return runErr
+}
+
+// newHTTPServer builds the HTTP server. onShutdown runs when Shutdown starts
+// so long-lived responses such as review streams can end; Shutdown itself
+// does not cancel active requests.
+func newHTTPServer(cfg config.ServerConfig, handler http.Handler, onShutdown func()) *http.Server {
+	srv := &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: readHeaderTimeout(cfg.ReadTimeout),
+		ReadTimeout:       cfg.ReadTimeout,
+		WriteTimeout:      cfg.WriteTimeout,
+		IdleTimeout:       60 * time.Second,
+	}
+	if onShutdown != nil {
+		srv.RegisterOnShutdown(onShutdown)
+	}
+	return srv
+}
+
+// shutdownHTTPServer drains connections for at most timeout, then closes the
+// rest. A forced close is logged but is still a normal stop: it only cuts
+// requests that outlived the grace period.
+func shutdownHTTPServer(srv *http.Server, timeout time.Duration, logger *slog.Logger) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	err := srv.Shutdown(ctx)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("shutdown HTTP server: %w", err)
+	}
+	logger.Warn("HTTP shutdown timed out; closing remaining connections", "timeout", timeout.String())
+	if err := srv.Close(); err != nil {
+		return fmt.Errorf("close HTTP server: %w", err)
+	}
+	return nil
 }
 
 // warnDeprecatedEnv tells the operator once per startup which legacy

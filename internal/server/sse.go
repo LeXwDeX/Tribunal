@@ -239,7 +239,8 @@ func (s *Server) handleReviewStream(w http.ResponseWriter, r *http.Request) {
 	}
 	controller := http.NewResponseController(w)
 	// Clear the server write deadline for this long-lived response; the
-	// request context and terminal workflow state end the stream.
+	// request context, server shutdown, and terminal workflow state end the
+	// stream.
 	_ = controller.SetWriteDeadline(time.Time{})
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -272,6 +273,8 @@ func (s *Server) handleReviewStream(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-s.shutdown:
 			return
 		case <-heartbeat.C:
 			if _, err := io.WriteString(w, ": heartbeat\n\n"); err != nil {

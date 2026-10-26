@@ -226,3 +226,19 @@ func TestReviewStreamUnknownWorkflow(t *testing.T) {
 	response := env.businessClient().request(http.MethodGet, "/api/v1/reviews/missing/stream", nil, nil)
 	assertStatus(t, response, http.StatusNotFound)
 }
+
+func TestReviewStreamEndsOnServerShutdown(t *testing.T) {
+	fake := newFakeReviewStore()
+	env := newM6Env(t, m6Options{store: fake, streamPoll: 10 * time.Millisecond})
+	fake.setWorkflow(store.Workflow{ID: "wf-s", Kind: "review", ProjectID: 42, Trigger: "api", Status: "running"})
+	fake.setNodes("wf-s", store.WorkflowNode{WorkflowID: "wf-s", ID: "plan", Kind: "plan", Status: "running"})
+
+	_, events := streamEvents(t, env, "wf-s")
+	env.api.BeginShutdown()
+	env.api.BeginShutdown() // idempotent
+	drainEvents(t, events)
+
+	// A stream opened after shutdown began must not stay open either.
+	_, late := streamEvents(t, env, "wf-s")
+	drainEvents(t, late)
+}

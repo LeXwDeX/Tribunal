@@ -5,14 +5,18 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/LeXwDeX/tribunal/internal/config"
 )
 
 func TestParseOptions(t *testing.T) {
@@ -202,6 +206,7 @@ func TestRunStartsAndStopsCleanly(t *testing.T) {
 	config := strings.ReplaceAll(string(source), ":8080", fmt.Sprintf("127.0.0.1:%d", port))
 	config = strings.ReplaceAll(config, "http://localhost:8080", fmt.Sprintf("http://127.0.0.1:%d", port))
 	config = strings.ReplaceAll(config, "file:data/review.db", "file:"+filepath.Join(dir, "review.db"))
+	config = strings.ReplaceAll(config, `root: "data/workspaces"`, fmt.Sprintf("root: %q", filepath.Join(dir, "workspaces")))
 	config = strings.ReplaceAll(config, "https://gitlab.example.internal", "http://127.0.0.1:1")
 	path := filepath.Join(dir, "server.yaml")
 	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
@@ -524,5 +529,75 @@ func TestSecureCookies(t *testing.T) {
 	}
 	if secureCookies("http://review.example.com") || secureCookies("") {
 		t.Fatal("non-https public URL enabled secure cookies")
+	}
+}
+
+// serveStream starts srv with a handler that holds one streaming response
+// open until release or request cancellation, and returns once the client has
+// the response headers.
+func serveStream(t *testing.T, srv *http.Server, release <-chan struct{}, ended chan<- struct{}) {
+	t.Helper()
+	srv.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(ended)
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	})
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		_ = srv.Serve(listener)
+	}()
+	t.Cleanup(func() {
+		_ = srv.Close()
+		<-served
+	})
+	resp, err := http.Get("http://" + listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
+}
+
+func TestShutdownHTTPServerNotifiesStreams(t *testing.T) {
+	release := make(chan struct{})
+	var once sync.Once
+	srv := newHTTPServer(config.ServerConfig{}, nil, func() { once.Do(func() { close(release) }) })
+	ended := make(chan struct{})
+	serveStream(t, srv, release, ended)
+
+	start := time.Now()
+	if err := shutdownHTTPServer(srv, 5*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("shutdown waited %s for an open stream", elapsed)
+	}
+	<-ended
+}
+
+func TestShutdownHTTPServerClosesAfterTimeout(t *testing.T) {
+	srv := newHTTPServer(config.ServerConfig{}, nil, nil)
+	ended := make(chan struct{})
+	serveStream(t, srv, nil, ended)
+
+	var logs bytes.Buffer
+	if err := shutdownHTTPServer(srv, 50*time.Millisecond, slog.New(slog.NewTextHandler(&logs, nil))); err != nil {
+		t.Fatalf("timed-out shutdown should still stop cleanly: %v", err)
+	}
+	select {
+	case <-ended:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not end the hanging request")
+	}
+	if !strings.Contains(logs.String(), "HTTP shutdown timed out") {
+		t.Fatalf("missing timeout warning: %q", logs.String())
 	}
 }

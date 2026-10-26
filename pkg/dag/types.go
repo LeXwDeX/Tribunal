@@ -52,6 +52,11 @@ var (
 	ErrAlreadyRunning = errors.New("dag: workflow already running")
 	// ErrBudgetExceeded means a hard graph or token budget was exceeded.
 	ErrBudgetExceeded = errors.New("dag: budget exceeded")
+	// ErrInterrupted is a context cancellation cause for Run. It means this
+	// process stopped driving the workflow (shutdown or lost job lease), not
+	// that the workflow was cancelled: Run stops live executors but leaves the
+	// durable state for Recover and a later Run.
+	ErrInterrupted = errors.New("dag: run interrupted")
 )
 
 // GraphError describes a validation failure and unwraps to ErrInvalidGraph.
