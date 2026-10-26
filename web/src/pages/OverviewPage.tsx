@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { getStats, listProjects, listProviders, listReviews } from '../api/api'
@@ -7,13 +7,15 @@ import { useCanWrite } from '../components/RoleContext'
 import { ReviewTable } from '../components/ReviewTable'
 import { TriggerReviewDialog } from '../components/TriggerReviewDialog'
 import {
-  Badge, Button, ButtonLink, EmptyState, ErrorState, LoadingState, Metric, PageHeader, Panel, useToast,
+  Badge, Button, ButtonLink, EmptyState, ErrorState, LoadingState, Metric, PageHeader, Panel, Sparkline, classNames, useToast,
 } from '../components/ui'
 import { elapsedSince, useNow, usePaginated } from '../lib/hooks'
-import { formatCost, labelForStatus, readNumber } from '../lib/format'
+import { formatCost, readNumber } from '../lib/format'
 import { formatMs, formatRatio, statNumber } from '../lib/stats'
+import { REVIEW_STAGES, deriveReviewStage } from '../lib/reviewStage'
 import styles from './pages.module.css'
 import ui from '../styles/ui.module.css'
+import overview from './OverviewPage.module.css'
 
 interface Alert {
   id: string
@@ -120,6 +122,20 @@ function buildAlerts(projects: Project[], providers: Provider[], reviewIssues: R
   return alerts
 }
 
+function trendPoints(stats: Stats | undefined, field: 'runs' | 'cost_micros'): number[] {
+  if (!Array.isArray(stats?.trend)) return []
+  return stats.trend.map((day) => Number(day?.[field])).filter((value) => Number.isFinite(value))
+}
+
+function TrendNote({ points, color, children }: { points: number[]; color?: string; children: ReactNode }) {
+  return (
+    <>
+      {points.length >= 2 ? <Sparkline points={points} color={color} /> : null}
+      <span className={overview.metricNoteText}>{children}</span>
+    </>
+  )
+}
+
 function MetricStrip({ stats, loading, error, onRetry }: { stats?: Stats; loading: boolean; error: unknown; onRetry: () => void }) {
   if (loading) return <LoadingState label="正在加载近 7 天统计…" />
   if (error) {
@@ -139,13 +155,43 @@ function MetricStrip({ stats, loading, error, onRetry }: { stats?: Stats; loadin
   const avg = statNumber(stats, 'avg_duration_ms')
   const p95 = statNumber(stats, 'p95_duration_ms')
   return (
-    <section aria-label="近 7 天指标" className={styles.statGrid}>
-      <Metric label="运行次数" value={runs === null ? '不可用' : runs} note={blocking === null ? '包含评审与 onboarding · BLOCKING 次数不可用' : `包含评审与 onboarding · 其中 BLOCKING ${blocking} 次`} />
+    <section aria-label="近 7 天指标" className={ui.metricStrip}>
+      <Metric
+        label="运行次数"
+        value={runs === null ? '不可用' : runs}
+        note={(
+          <TrendNote points={trendPoints(stats, 'runs')}>
+            {blocking === null ? '包含评审与 onboarding · BLOCKING 次数不可用' : `包含评审与 onboarding · 其中 BLOCKING ${blocking} 次`}
+          </TrendNote>
+        )}
+      />
       <Metric label="BLOCKING 比例" value={formatRatio(blockingRatio)} note="按已结束评审计" />
       <Metric label="已发布问题" value={published === null ? '不可用' : published} note="GitLab 已发布条目" />
       <Metric label="规则丢弃比例" value={formatRatio(overturned)} note="规则 drop 占比，不是模型准确率" />
-      <Metric label="成本" value={cost === null ? '不可用' : formatCost(cost)} note={`平均 ${formatMs(avg)} · P95 ${formatMs(p95)}`} />
+      <Metric
+        label="成本"
+        value={cost === null ? '不可用' : formatCost(cost)}
+        note={<TrendNote points={trendPoints(stats, 'cost_micros')} color="var(--warn-dot)">按日趋势</TrendNote>}
+      />
+      <Metric label="耗时 平均 / P95" value={avg === null ? '不可用' : formatMs(avg)} note={`P95 ${formatMs(p95)}`} />
     </section>
+  )
+}
+
+function StageTrack({ stage }: { stage: number }) {
+  return (
+    <ol className={overview.stageTrack} aria-label={`阶段：${REVIEW_STAGES[stage]}`}>
+      {REVIEW_STAGES.map((name, index) => (
+        <li
+          key={name}
+          className={classNames(overview.stage, index < stage && overview.stageDone, index === stage && overview.stageNow)}
+          aria-current={index === stage ? 'step' : undefined}
+        >
+          <i aria-hidden="true" />
+          {name}
+        </li>
+      ))}
+    </ol>
   )
 }
 
@@ -276,89 +322,105 @@ export function OverviewPage() {
           onRetry={() => { void stats.refetch() }}
         />
 
-        <div className={styles.split}>
+        <div className={overview.split}>
           <Panel
+            flush
             title="运行中"
             aside={<span>{runningCount}{running.hasNextPage ? '+' : ''} 个 · 每 10 秒刷新</span>}
-            className={styles.mainColumn}
           >
-            {running.isPending ? <LoadingState /> : null}
-            {running.isError ? <ErrorState error={running.error} onRetry={running.retry} /> : null}
-            {running.isSuccess && running.items.length === 0 ? <EmptyState title="当前没有运行中的评审" description="新的 webhook 或手动触发会出现在这里。" /> : null}
-            <ul className={styles.list}>
-              {running.items.map((review) => {
-                const activeNode = review.nodes?.find((node) => node.status === 'running')
-                return (
-                  <li key={review.id}>
-                    <Link className={styles.listItem} to={`/reviews/${encodeURIComponent(review.id)}`}>
-                      <div className={styles.listMain}>
-                        <span className={styles.listTitle}>!{review.mr_iid} {review.mr_title || '未命名 MR'}</span>
-                        <span className={styles.listMeta}>
+            {running.isPending ? <div className={overview.state}><LoadingState /></div> : null}
+            {running.isError ? <div className={overview.state}><ErrorState error={running.error} onRetry={running.retry} /></div> : null}
+            {running.isSuccess && running.items.length === 0 ? (
+              <div className={overview.state}><EmptyState title="当前没有运行中的评审" description="新的 webhook 或手动触发会出现在这里。" /></div>
+            ) : null}
+            {running.items.length ? (
+              <ul className={overview.liveList}>
+                {running.items.map((review) => {
+                  const stage = deriveReviewStage(review.nodes)
+                  const title = review.mr_title || '未命名 MR'
+                  return (
+                    <li key={review.id} className={overview.liveItem}>
+                      <div className={overview.primary}>
+                        <Link className={overview.liveTitle} to={`/reviews/${encodeURIComponent(review.id)}`} title={title}>{title}</Link>
+                        <span className={overview.meta}>
+                          <span className={overview.mrRef}>!{review.mr_iid}</span>
                           <span className="mono">{review.project_path || projectNames.get(review.project_id) || `项目 ${review.project_id}`}</span>
-                          {' · '}{review.profile || '默认档位'}{' · '}{labelForStatus(review.status)}
+                          <span aria-hidden="true">·</span>
+                          <Badge plain>{review.profile || '默认档位'}</Badge>
                         </span>
                       </div>
-                      <div className={styles.listMeta}>
-                        {activeNode ? `节点 ${activeNode.id}` : '阶段未提供'}
-                      </div>
-                      <span className={styles.listMeta + ' tabular'}>已用时 {elapsedSince(review.created_at, now)}</span>
-                    </Link>
-                  </li>
-                )
-              })}
-            </ul>
-            <div className={styles.actionsRight}>
-              {running.hasNextPage ? <Button variant="secondary" onClick={running.fetchNextPage} loading={running.isFetchingNextPage}>加载更多运行中评审</Button> : null}
-              <ButtonLink to="/reviews">查看全部评审</ButtonLink>
+                      <span className={overview.elapsed}>已用时 {elapsedSince(review.created_at, now)}</span>
+                      {stage === null ? null : <StageTrack stage={stage} />}
+                    </li>
+                  )
+                })}
+              </ul>
+            ) : null}
+            <div className={overview.panelFooter}>
+              {running.hasNextPage ? <Button variant="secondary" className={ui.smallButton} onClick={running.fetchNextPage} loading={running.isFetchingNextPage}>加载更多运行中评审</Button> : null}
+              <ButtonLink to="/reviews" className={ui.smallButton}>查看全部评审</ButtonLink>
             </div>
           </Panel>
 
-          <Panel title="需要处理" className={styles.sideColumn}>
+          <Panel flush title="需要处理" aside={alerts.length ? `${alerts.length} 项` : undefined}>
             {hasIssuesError ? (
-              <ErrorState
-                error={issuesError}
-                onRetry={() => {
-                  projectsPage.retry()
-                  failedRuns.retry()
-                  failedPublications.retry()
-                  pendingPublications.retry()
-                  if (providersEnabled) providersPage.retry()
-                }}
-                title="异常检查未完整加载"
-              />
+              <div className={overview.state}>
+                <ErrorState
+                  error={issuesError}
+                  onRetry={() => {
+                    projectsPage.retry()
+                    failedRuns.retry()
+                    failedPublications.retry()
+                    pendingPublications.retry()
+                    if (providersEnabled) providersPage.retry()
+                  }}
+                  title="异常检查未完整加载"
+                />
+              </div>
             ) : null}
             {alerts.length === 0 && !issuesPending ? (
-              <EmptyState title="暂无需要处理的异常" description="检查了 token 过期、工作区状态、停用项目、provider 错误、评审执行失败和发布失败。" />
+              <div className={overview.state}>
+                <EmptyState title="暂无需要处理的异常" description="检查了 token 过期、工作区状态、停用项目、provider 错误、评审执行失败和发布失败。" />
+              </div>
             ) : null}
-            {issuesPending ? <LoadingState /> : null}
+            {issuesPending ? <div className={overview.state}><LoadingState /></div> : null}
             {alerts.map((alert) => (
-              <div key={alert.id} className={styles.alert}>
+              <div key={alert.id} className={overview.alert}>
                 <Badge tone={alert.tone}>{alert.label}</Badge>
-                <div className={styles.alertBody}>
+                <div className={overview.alertBody}>
                   <span>{alert.text}</span>
-                  <Link to={alert.href} className={styles.alertAction}>{alert.action}</Link>
+                  <Link to={alert.href} className={overview.alertAction}>{alert.action}</Link>
                 </div>
               </div>
             ))}
-            {projectsPage.hasNextPage ? (
-              <Button variant="secondary" className={ui.smallButton} onClick={projectsPage.fetchNextPage} loading={projectsPage.isFetchingNextPage}>加载更多项目以继续检查</Button>
-            ) : null}
-            {hasMoreReviewAlerts ? (
-              <Button variant="secondary" className={ui.smallButton} onClick={loadMoreReviewAlerts} loading={reviewAlertsFetching}>加载更多告警数据</Button>
+            {projectsPage.hasNextPage || hasMoreReviewAlerts ? (
+              <div className={overview.panelFooter}>
+                {projectsPage.hasNextPage ? (
+                  <Button variant="secondary" className={ui.smallButton} onClick={projectsPage.fetchNextPage} loading={projectsPage.isFetchingNextPage}>加载更多项目以继续检查</Button>
+                ) : null}
+                {hasMoreReviewAlerts ? (
+                  <Button variant="secondary" className={ui.smallButton} onClick={loadMoreReviewAlerts} loading={reviewAlertsFetching}>加载更多告警数据</Button>
+                ) : null}
+              </div>
             ) : null}
           </Panel>
         </div>
 
         <Panel
+          flush
           title="最近评审"
           aside={<Link to="/reviews">查看全部</Link>}
         >
-          {recent.isPending ? <LoadingState /> : null}
-          {recent.isError ? <ErrorState error={recent.error} onRetry={recent.retry} /> : null}
-          {recent.isSuccess && recent.items.length === 0 ? <EmptyState title="还没有评审记录" description="注册项目并打开 MR，或在评审页手动触发。" /> : null}
+          {recent.isPending ? <div className={overview.state}><LoadingState /></div> : null}
+          {recent.isError ? <div className={overview.state}><ErrorState error={recent.error} onRetry={recent.retry} /></div> : null}
+          {recent.isSuccess && recent.items.length === 0 ? (
+            <div className={overview.state}><EmptyState title="还没有评审记录" description="注册项目并打开 MR，或在评审页手动触发。" /></div>
+          ) : null}
           {recent.items.length ? <ReviewTable reviews={recent.items} projectNames={projectNames} /> : null}
           {recent.hasNextPage ? (
-            <Button variant="secondary" onClick={recent.fetchNextPage} loading={recent.isFetchingNextPage}>加载更多</Button>
+            <div className={ui.loadMore}>
+              <Button variant="secondary" className={ui.smallButton} onClick={recent.fetchNextPage} loading={recent.isFetchingNextPage}>加载更多</Button>
+            </div>
           ) : null}
         </Panel>
       </div>

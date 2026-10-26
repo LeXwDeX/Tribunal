@@ -1,11 +1,12 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
 import { AppShell } from '../src/components/AppShell'
 import { AuthScreen } from '../src/components/AuthScreen'
 import { ToastProvider } from '../src/components/ui'
-import { adminMe } from './test-utils'
+import { adminMe, createTestQueryClient, installFetch, jsonResponse } from './test-utils'
 import indexHtml from '../index.html?raw'
 
 const startupScript = indexHtml.match(/<script>([\s\S]*?)<\/script>/)?.[1]
@@ -48,13 +49,17 @@ function mockPreferredTheme(theme: 'dark' | 'light') {
   }) as MediaQueryList)
 }
 
+// The shell polls running reviews for the navigation count.
 function renderShell() {
+  installFetch(() => jsonResponse({ reviews: [] }))
   return render(
-    <MemoryRouter>
-      <ToastProvider>
-        <AppShell me={adminMe} />
-      </ToastProvider>
-    </MemoryRouter>,
+    <QueryClientProvider client={createTestQueryClient()}>
+      <MemoryRouter>
+        <ToastProvider>
+          <AppShell me={adminMe} />
+        </ToastProvider>
+      </MemoryRouter>
+    </QueryClientProvider>,
   )
 }
 
@@ -140,6 +145,7 @@ describe('theme toggle persistence', () => {
 
   afterEach(() => {
     vi.restoreAllMocks()
+    vi.unstubAllGlobals()
     cleanup()
     localStorage.clear()
     delete document.documentElement.dataset.theme
@@ -168,7 +174,10 @@ describe('theme toggle persistence', () => {
 })
 
 describe('Tribunal product branding', () => {
-  afterEach(cleanup)
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+  })
 
   it('shows the product name in the desktop and mobile shell brand', () => {
     renderShell()

@@ -18,9 +18,10 @@ type projectSecretStore interface {
 
 // MigrateProjectSecrets rewrites legacy project ciphertexts in the sealed
 // format bound to their project and field. It is idempotent and runs before
-// the services start. A row that cannot be decrypted is logged and skipped:
-// using it would fail the same way before the migration. A row changed since
-// it was listed is left alone. It returns the number of rewritten projects.
+// the services start. Each field migrates independently: a field that cannot
+// be decrypted is logged and left unchanged, since using it would fail the
+// same way before the migration, and the other field still migrates. A row
+// changed since it was listed is left alone. It returns the number of rewritten projects.
 func MigrateProjectSecrets(ctx context.Context, st projectSecretStore, cipher *secret.Cipher, logger *slog.Logger) (int, error) {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -31,15 +32,17 @@ func MigrateProjectSecrets(ctx context.Context, st projectSecretStore, cipher *s
 	}
 	migrated := 0
 	for _, p := range projects {
+		// Each field migrates on its own: a damaged webhook secret must not
+		// keep a usable token in the legacy format, which Open rejects.
 		token, tokenChanged, err := cipher.Rewrap(p.TokenEnc, secret.TokenAAD(p.ID))
 		if err != nil {
-			logger.Warn("stored project token cannot be decrypted; skipped", "project_id", p.ID)
-			continue
+			logger.Warn("stored project token cannot be decrypted; left unchanged", "project_id", p.ID)
+			token, tokenChanged = p.TokenEnc, false
 		}
 		hook, hookChanged, err := cipher.Rewrap(p.WebhookSecretEnc, secret.WebhookSecretAAD(p.ID))
 		if err != nil {
-			logger.Warn("stored webhook secret cannot be decrypted; skipped", "project_id", p.ID)
-			continue
+			logger.Warn("stored webhook secret cannot be decrypted; left unchanged", "project_id", p.ID)
+			hook, hookChanged = p.WebhookSecretEnc, false
 		}
 		if !tokenChanged && !hookChanged {
 			continue
