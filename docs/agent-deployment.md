@@ -118,39 +118,44 @@ docker compose up -d --force-recreate --wait --wait-timeout 120
 
 **先向用户确认**：注册会访问 GitLab，并创建一个 onboarding 任务，这个任务会调用模型、产生费用。
 
-项目 token 只传给这一次 CLI 调用，不写进 `.env`：
+注册接口需要平台管理员权限，可以用 `.env` 里的 `REVIEW_ADMIN_TOKEN`，也就是 CLI 的默认凭据。注册之后的项目级操作（`projects get`、`projects webhook ...`）需要有该项目 `manage` 权限的用户 token；bootstrap token 没有用户 ID，调用这些接口会得到 404。所以 Webhook 最好在注册时就一起建好。
+
+**注册**
+
+注册响应里可能带有一次性的 `webhook_secret`，不能让它出现在终端或工具输出里。把响应直接重定向到只有自己可读的文件，再只读出项目 ID：
 
 ```bash
+REG="$(mktemp)"   # 权限 600，不在仓库目录里
 GITLAB_PROJECT_TOKEN='<由用户提供>' docker compose exec -T -e GITLAB_PROJECT_TOKEN review \
-  /app/tribunalctl projects register --project group/repo --token-env GITLAB_PROJECT_TOKEN --profile default
+  /app/tribunalctl projects register --project group/repo --token-env GITLAB_PROJECT_TOKEN \
+  --profile default --auto-webhook > "$REG"
+python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["project"]["id"])' "$REG"
 ```
 
 - `--project` 也可以写数字项目 ID，或者 `GITLAB_URL` 下的完整仓库 URL。
-- 注册成功后，记下返回的项目 ID。不要把整个响应贴给用户：手动 Webhook 模式下，响应里的 `webhook_secret` 只显示这一次。
-- 先只做校验、不落库，可以调用 `POST /api/v1/projects/validate`，见 [项目 API](design/03-http-api.md#41-项目)。
+- 只想校验、不落库，可以调用 `POST /api/v1/projects/validate`，见 [项目 API](design/03-http-api.md#41-项目)。
+- 不要 `cat` 这个文件，`$REG` 在执行完 Webhook 步骤前保持在同一个 shell 里。项目 token 只传给这一次 CLI 调用，不写进 `.env`。
 
-**配置 Webhook**（二选一，都要先征得用户同意）
+**Webhook**（二选一，都要先征得用户同意）
 
-- **自动**：token 需要 Maintainer 权限，并且 `TRIBUNAL_PUBLIC_URL` 能被 GitLab 访问。
-
-  ```bash
-  docker compose exec -T review /app/tribunalctl projects webhook enable <项目ID>
-  ```
-
-  也可以在控制台「项目 → 设置 → GitLab Webhook」里点「启用」。重建用 `webhook rebuild`，会轮换 secret；停用用 `webhook disable`。
-- **手动**：在 GitLab 项目的 Webhooks 页面添加：
+- **自动（推荐）**：注册时带上面的 `--auto-webhook`。项目 token 需要 Maintainer 权限，并且 `TRIBUNAL_PUBLIC_URL` 能被 GitLab 访问。注册成功就说明 hook 已经建好；之后执行 `rm "$REG"`。
+- **手动**：去掉 `--auto-webhook` 再注册，响应文件里的 `webhook_secret` 只在这一次返回。在 GitLab 项目的 Webhooks 页面添加：
   - URL：`<TRIBUNAL_PUBLIC_URL>/webhooks/gitlab`；
-  - Secret token：注册时返回的 `webhook_secret`；
+  - Secret token：响应文件里的 `webhook_secret`；
   - 勾选 Merge request events、Comments、Push events。
+
+  如果用 `glab api` 或 GitLab API 创建，从文件读取 secret 作为参数传进去，不要回显。也可以请用户在 GitLab 界面里粘贴。配置完成后执行 `rm "$REG"`。
+- **以后再启用、重建或停用**：在控制台「项目 → 设置 → GitLab Webhook」里操作，需要该项目的 `manage` 权限。或者在第 6 步授权之后，用授权用户的 API token 调用 CLI（`--api-token-env USER_TOKEN projects webhook enable|rebuild|disable <项目ID>`）。重建会轮换 secret。
 
 **验证**
 
 ```bash
-docker compose exec -T review /app/tribunalctl projects get <项目ID>
+docker compose exec -T review /app/tribunalctl projects all
 docker compose logs --tail=100 review
 ```
 
-- 控制台「项目 → 工作区与上下文」里，onboarding 任务最终应显示完成，索引状态正常。
+- `projects all` 里能看到新项目。这是管理面列表，bootstrap token 可以用。
+- 控制台「项目 → 工作区与上下文」里，onboarding 任务最终应显示完成，索引状态正常。查看这一页需要项目权限，见第 6 步。
 - GitLab 的 Webhook 页面「Test → Merge request events」应返回 200。
 - 在一个测试 MR 下评论 `/review`，MR 上应出现 eyes 表情和状态 note，评审完成后发布总结。
 
@@ -180,7 +185,19 @@ v1.1.0 开箱自带两项内置扩展，不需要额外配置：
 
 - **不想用内置项**：在控制台禁用即可，重启和升级后保持禁用。内置项不能删除。
 - **新部署不登记内置项**：配置里写 `default_extensions.skills: []`，MCP 同理，见 [默认扩展](design/06-config.md#默认扩展default_extensions)。
-- **接入自己的 MCP**：控制台「扩展 → MCP 服务器」支持直接粘贴 Claude Code 格式的 `mcpServers` JSON。然后在「块绑定」里给需要的块授权只读工具。配置里的秘密写成 `${NAME}` 模板，并把变量名加进 `env_allowlist`，不要直接写进 JSON。
+- **接入自己的 MCP**：控制台「扩展 → MCP 服务器」支持直接粘贴 Claude Code 格式的 `mcpServers` JSON。然后在「块绑定」里给需要的块授权只读工具。配置里的秘密不要直接写进 JSON，按下面三步把它传进容器：
+  1. 在 `.env` 里加上变量，比如 `MY_MCP_TOKEN=...`。
+  2. 在仓库根目录新建 `compose.override.yaml`，把变量加进容器环境。Compose 会自动加载这个文件。文件里只写变量映射，不写值：
+
+     ```yaml
+     services:
+       review:
+         environment:
+           MY_MCP_TOKEN: "${MY_MCP_TOKEN:?MY_MCP_TOKEN is required}"
+     ```
+
+     `compose.yaml` 只会把 `environment` 里列出的变量传进容器，所以光写在 `.env` 里，服务读不到。
+  3. 在 MCP 配置里写成 `${MY_MCP_TOKEN}` 模板。如果子进程也要读这个变量，把变量名加进 `x-review.env_allowlist`。然后用 `docker compose config --quiet` 检查，再执行 `docker compose up -d --force-recreate --wait` 重建容器。`env_allowlist` 只决定子进程能继承哪些变量，不能把变量带进容器。
 - **接入自己的 Skill**：上传 zip，或登记服务器上的目录，格式兼容 Claude Code Skill；Skill 里的脚本不会被执行。
 - 数据库里的扩展改动按进程缓存生效，改完通常要重启：`docker compose up -d --force-recreate --wait`。
 
