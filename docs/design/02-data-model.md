@@ -329,6 +329,8 @@ CREATE TABLE sessions (
 >
 > API token 的 `admin`/`viewer` 标签与浏览器会话一致，在每次请求时按当前 `auth.bootstrap_admins` 计算。`users.role` 仍记录 OAuth 登录或 token 签发时的标签，但不作为已有 token 的项目权限来源；项目访问始终读取当前 `project_grants`。重启并更新管理员配置后，该用户已有的 API token 在下一个请求失去平台管理标签；静态 `auth.bootstrap_token_env` Bearer 保持平台管理标签，但没有用户 ID 和 grant。新签发的 API token 默认 90 天、最长 365 天；历史 `expires_at IS NULL` 的行可继续使用到撤销。`0007_project_access.sql` 为现有用户补 `disabled=0`，不创建 grant；升级后包括管理员在内都需显式授权。
 
+> `secret_migration`（`0015_secret_migration.sql`）至多一行，记录项目 token 和 webhook secret 已全部是绑定项目与字段的新格式。启动迁移某次结束后不再有旧格式字段时写入；有这一行后启动不再解开旧格式密文，只按 `project_id` 和字段名告警并保持原值。
+
 ```sql
 CREATE TABLE api_tokens (
   id           TEXT    PRIMARY KEY,
