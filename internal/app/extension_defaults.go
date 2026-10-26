@@ -160,7 +160,26 @@ func (s *defaultSeeder) apply(ctx context.Context, d ExtensionDefault) error {
 	sort.Strings(blocks)
 	for _, block := range blocks {
 		grantKey := key + "@" + block
-		if _, done := s.ledger[grantKey]; done {
+		want, err := encodeDefaultGrant(d.Bindings[block])
+		if err != nil {
+			return err
+		}
+		if done, ok := s.ledger[grantKey]; ok {
+			// A release may change what a default grants. An applied grant
+			// follows it while the block row is still default-owned; the
+			// entries of the previous grant are replaced.
+			if done.Outcome != store.ExtensionDefaultApplied || !registered || done.Detail == want {
+				continue
+			}
+			outcome, _, err := s.grant(ctx, block, d.Bindings[block], decodeDefaultGrant(done.Detail))
+			if err != nil {
+				return err
+			}
+			if outcome == store.ExtensionDefaultApplied {
+				if err := s.record(ctx, grantKey, outcome, want); err != nil {
+					return err
+				}
+			}
 			continue
 		}
 		if !registered {
@@ -169,12 +188,14 @@ func (s *defaultSeeder) apply(ctx context.Context, d ExtensionDefault) error {
 			}
 			continue
 		}
-		outcome, reason, err := s.grant(ctx, block, d.Bindings[block])
+		outcome, reason, err := s.grant(ctx, block, d.Bindings[block], DefaultGrant{})
 		if err != nil {
 			return err
 		}
 		if outcome == store.ExtensionDefaultSkipped {
 			s.logger.Info("default extension binding skipped", "kind", d.Kind, "name", d.Name, "block", block, "reason", reason)
+		} else {
+			reason = want
 		}
 		if err := s.record(ctx, grantKey, outcome, reason); err != nil {
 			return err
@@ -183,8 +204,32 @@ func (s *defaultSeeder) apply(ctx context.Context, d ExtensionDefault) error {
 	return nil
 }
 
-// grant merges one default grant into a default-owned platform binding.
-func (s *defaultSeeder) grant(ctx context.Context, block string, grant DefaultGrant) (string, string, error) {
+// encodeDefaultGrant is the ledger detail of an applied grant: the entries it
+// added, so a later release can replace exactly those.
+func encodeDefaultGrant(grant DefaultGrant) (string, error) {
+	data, err := json.Marshal(defaultBindingSnapshot{
+		MCPTools: append([]string{}, grant.MCPTools...),
+		Skills:   append([]string{}, grant.Skills...),
+	})
+	if err != nil {
+		return "", fmt.Errorf("app: encode default grant: %w", err)
+	}
+	return string(data), nil
+}
+
+// decodeDefaultGrant reads an applied grant's detail. Grants recorded before
+// details were kept decode as empty, so an upgrade only adds entries.
+func decodeDefaultGrant(detail string) DefaultGrant {
+	var snapshot defaultBindingSnapshot
+	if json.Unmarshal([]byte(detail), &snapshot) != nil {
+		return DefaultGrant{}
+	}
+	return DefaultGrant{MCPTools: snapshot.MCPTools, Skills: snapshot.Skills}
+}
+
+// grant merges one default grant into a default-owned platform binding,
+// first dropping the entries of the previous grant it replaces.
+func (s *defaultSeeder) grant(ctx context.Context, block string, grant, previous DefaultGrant) (string, string, error) {
 	if _, ok := s.fileBlocks[block]; ok {
 		return store.ExtensionDefaultSkipped, reasonFileBinding, nil
 	}
@@ -209,8 +254,8 @@ func (s *defaultSeeder) grant(ctx context.Context, block string, grant DefaultGr
 	}
 	merged := store.BlockBinding{Scope: store.ScopePlatform, Block: block}
 	if current != nil {
-		merged.MCPTools = append(merged.MCPTools, current.MCPTools...)
-		merged.Skills = append(merged.Skills, current.Skills...)
+		merged.MCPTools = withoutValues(current.MCPTools, previous.MCPTools)
+		merged.Skills = withoutValues(current.Skills, previous.Skills)
 	}
 	merged.MCPTools = appendMissing(merged.MCPTools, grant.MCPTools)
 	merged.Skills = appendMissing(merged.Skills, grant.Skills)
@@ -260,6 +305,16 @@ func sameDefaultBinding(binding store.BlockBinding, detail string) bool {
 	}
 	return reflect.DeepEqual(append([]string{}, binding.MCPTools...), append([]string{}, snapshot.MCPTools...)) &&
 		reflect.DeepEqual(append([]string{}, binding.Skills...), append([]string{}, snapshot.Skills...))
+}
+
+func withoutValues(values, drop []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if !containsString(drop, value) {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func appendMissing(values, add []string) []string {
@@ -480,12 +535,13 @@ func copyEmbeddedSkill(files fs.FS, dst string) error {
 // seedDefaultExtensions applies the configured defaults before the runtime
 // reads stored platform extensions, so the first start already uses them.
 func seedDefaultExtensions(ctx context.Context, cfg *config.Config, st *sqlite.Store, logger *slog.Logger, now func() time.Time) error {
-	if len(cfg.DefaultExtensions.Skills) == 0 {
+	if len(cfg.DefaultExtensions.Skills) == 0 && len(cfg.DefaultExtensions.MCPServers) == 0 {
 		return nil
 	}
 	service, err := NewExtensionService(ExtensionServiceConfig{
 		Store:     st,
 		Workspace: cfg.Workspace.Root,
+		DeniedEnv: deniedEnvNames(cfg),
 		Logger:    logger,
 		Now:       now,
 	})
@@ -496,6 +552,15 @@ func seedDefaultExtensions(ctx context.Context, cfg *config.Config, st *sqlite.S
 	if err != nil {
 		return err
 	}
+	fileMCP, err := loadPlatformMCP(cfg)
+	if err != nil {
+		return err
+	}
+	servers, err := service.MCPDefaults(cfg.DefaultExtensions.MCPServers, fileMCP)
+	if err != nil {
+		return err
+	}
+	defaults = append(defaults, servers...)
 	if err := ApplyExtensionDefaults(ctx, st, cfg.Blocks, defaults, logger); err != nil {
 		return fmt.Errorf("app: apply default extensions: %w", err)
 	}

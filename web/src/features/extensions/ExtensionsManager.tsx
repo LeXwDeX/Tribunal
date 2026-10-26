@@ -165,6 +165,16 @@ export function ExtensionsManager({
     }
   }
 
+  const toggleServer = async (target: McpServer) => {
+    try {
+      await updateMcpServer(target.id, { enabled: !target.enabled })
+      toast.push('success', target.enabled ? 'MCP 服务器已停用，重启服务后生效。' : 'MCP 服务器已启用，重启服务后生效。')
+      await invalidateServers()
+    } catch (error) {
+      toast.push('error', errorMessage(error))
+    }
+  }
+
   const toggleSkill = async (target: Skill) => {
     try {
       await setSkillEnabled(target.id, !target.enabled)
@@ -196,6 +206,7 @@ export function ExtensionsManager({
           onAdd={() => setAddOpen(true)}
           onImport={() => setImportOpen(true)}
           onEdit={setEditServer}
+          onToggle={toggleServer}
           onDelete={setDeleteServer}
         />
       ) : null}
@@ -261,7 +272,7 @@ export function ExtensionsManager({
 }
 
 function McpTab({
-  canWrite, scope, projectName, servers, testResults, onTest, onAdd, onImport, onEdit, onDelete,
+  canWrite, scope, projectName, servers, testResults, onTest, onAdd, onImport, onEdit, onToggle, onDelete,
 }: {
   canWrite: boolean
   scope: string
@@ -273,6 +284,7 @@ function McpTab({
   onAdd: () => void
   onImport: () => void
   onEdit: (server: McpServer) => void
+  onToggle: (server: McpServer) => void
   onDelete: (server: McpServer) => void
 }) {
   return (
@@ -299,6 +311,7 @@ function McpTab({
               <article key={server.id} className={styles.infoCard}>
                 <div className={styles.cardTitle}>
                   <span className="mono">{server.name}</span>
+                  {server.builtin ? <Badge tone="info">内置</Badge> : null}
                   <Badge tone={server.enabled ? 'ok' : 'neutral'}>{server.enabled ? '启用' : '停用'}</Badge>
                 </div>
                 <div className={styles.cardMeta}>
@@ -312,7 +325,12 @@ function McpTab({
                   {canWrite ? (
                     <Button variant="secondary" onClick={() => onTest(server)} loading={result?.pending}>测试并列出工具</Button>
                   ) : null}
-                  {canWrite ? (
+                  {canWrite && server.builtin ? (
+                    // Built-in servers follow the platform release: they can
+                    // only be switched off and on.
+                    <Button variant="secondary" onClick={() => onToggle(server)}>{server.enabled ? '停用' : '启用'}</Button>
+                  ) : null}
+                  {canWrite && !server.builtin ? (
                     <>
                       <Button variant="secondary" onClick={() => onEdit(server)}>编辑</Button>
                       <Button variant="danger" onClick={() => onDelete(server)}>删除</Button>

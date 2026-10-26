@@ -332,6 +332,8 @@ export interface McpServer {
   name: string
   config: Record<string, unknown>
   enabled: boolean
+  /** Shipped with the platform: can be disabled, not edited or deleted. */
+  builtin?: boolean
   status?: string
   last_error?: string
   tools?: McpTool[]

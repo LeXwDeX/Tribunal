@@ -47,8 +47,11 @@ type MCPServer struct {
 	Name      string          `json:"name"`
 	Config    json.RawMessage `json:"config"`
 	Enabled   bool            `json:"enabled"`
-	CreatedAt time.Time       `json:"created_at"`
-	UpdatedAt time.Time       `json:"updated_at"`
+	// Builtin marks a server shipped with the platform. Its config follows
+	// the release; it can be disabled but not renamed, edited or deleted.
+	Builtin   bool      `json:"builtin"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // MCPTool is one tool advertised by a test connection.
@@ -265,6 +268,14 @@ func (s *ExtensionService) CreateMCPServer(ctx context.Context, in MCPServerInpu
 
 // UpdateMCPServer replaces only the provided fields.
 func (s *ExtensionService) UpdateMCPServer(ctx context.Context, id string, update MCPServerUpdate) (*MCPServer, error) {
+	current, err := s.store.GetMCPServer(ctx, id)
+	if err != nil {
+		return nil, extensionStoreError(err)
+	}
+	if current.Builtin != "" &&
+		(update.Config != nil || (update.Name != nil && strings.TrimSpace(*update.Name) != current.Name)) {
+		return nil, conflictError(errBuiltinMCPServerManaged)
+	}
 	if update.Name != nil {
 		name := strings.TrimSpace(*update.Name)
 		if err := validateMCPServerName(name); err != nil {
@@ -293,7 +304,15 @@ func (s *ExtensionService) UpdateMCPServer(ctx context.Context, id string, updat
 }
 
 // DeleteMCPServer removes one server.
+// Built-in servers cannot be deleted; they are disabled instead.
 func (s *ExtensionService) DeleteMCPServer(ctx context.Context, id string) error {
+	current, err := s.store.GetMCPServer(ctx, id)
+	if err != nil {
+		return extensionStoreError(err)
+	}
+	if current.Builtin != "" {
+		return conflictError("built-in MCP servers cannot be deleted; disable them instead")
+	}
 	if err := s.store.DeleteMCPServer(ctx, id); err != nil {
 		return extensionStoreError(err)
 	}
@@ -338,6 +357,9 @@ func (s *ExtensionService) ImportMCPServers(ctx context.Context, in MCPImportInp
 	for _, name := range names {
 		config := in.Servers[name]
 		if current, ok := byName[name]; ok {
+			if current.Builtin != "" {
+				return nil, conflictError(errBuiltinMCPServerManaged)
+			}
 			enabled := current.Enabled
 			row, err := s.store.UpdateMCPServer(ctx, current.ID, store.MCPServerUpdate{
 				Config:  config,
@@ -1030,10 +1052,14 @@ func mcpServerFromStore(row store.MCPServer) MCPServer {
 		Name:      row.Name,
 		Config:    append(json.RawMessage(nil), row.Config...),
 		Enabled:   row.Enabled,
+		Builtin:   row.Builtin != "",
 		CreatedAt: row.CreatedAt,
 		UpdatedAt: row.UpdatedAt,
 	}
 }
+
+// errBuiltinMCPServerManaged rejects changes the release owns.
+const errBuiltinMCPServerManaged = "built-in MCP servers follow the platform release; only enabled can change"
 
 func skillFromStore(row store.Skill) Skill {
 	return Skill{
