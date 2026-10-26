@@ -247,11 +247,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 
 	// Startup recovery runs after the worker owns the queue so recovered
 	// workflows can use the same engine and executor registry.
-	go func() {
-		if err := runtime.Recover(ctx); err != nil {
-			logger.Warn("startup recovery failed", "error", err.Error())
-		}
-	}()
+	stopRecovery := startRecovery(ctx, runtime.Recover, logger)
 	stopFeedback := runtime.StartBackground(ctx)
 	defer stopFeedback()
 
@@ -295,6 +291,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		runErr = err
 	}
 	stopWorker()
+	stopRecovery(shutdownTimeout)
 	if !workerConsumed {
 		if err := <-workerDone; err != nil && runErr == nil {
 			runErr = err
@@ -307,6 +304,30 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 	logger.Info("server stopped")
 	return runErr
+}
+
+// startRecovery runs startup recovery in the background. The returned stop
+// cancels recovery and waits at most timeout for it to return, so the
+// runtime and database are not closed under a publication in progress.
+func startRecovery(ctx context.Context, recover func(context.Context) error, logger *slog.Logger) func(time.Duration) {
+	recoveryCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := recover(recoveryCtx); err != nil && recoveryCtx.Err() == nil {
+			logger.Warn("startup recovery failed", "error", err.Error())
+		}
+	}()
+	return func(timeout time.Duration) {
+		cancel()
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		select {
+		case <-done:
+		case <-timer.C:
+			logger.Warn("startup recovery did not stop before shutdown timeout", "timeout", timeout.String())
+		}
+	}
 }
 
 // newHTTPServer builds the HTTP server. onShutdown runs when Shutdown starts
