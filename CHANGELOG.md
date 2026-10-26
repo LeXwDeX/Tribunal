@@ -10,7 +10,7 @@ v1.0.0 之后的第一个版本：产品改名为 Tribunal，修复 1.0 复审�
 
 从 v1.0.0 升级前，先读 [部署与运维 · 从 v1.0.0 升级](docs/operations.md#从-v100-升级到-v110)，其中有几处无法回退：
 
-- **先备份**：新增迁移 `0013_admin_bindings`、`0014_extension_defaults`，并且启动时会把已存项目凭据改写成新的加密格式（[#64](https://github.com/LeXwDeX/Tribunal/pull/64)、[#76](https://github.com/LeXwDeX/Tribunal/pull/76)）。v1.0.0 读不了新格式。要回退，只能恢复升级前的数据备份，不能只换回旧镜像。
+- **先备份**：新增迁移 `0013_admin_bindings`、`0014_extension_defaults`、`0015_secret_migration`，并且启动时会把已存项目凭据改写成新的加密格式（[#64](https://github.com/LeXwDeX/Tribunal/pull/64)、[#76](https://github.com/LeXwDeX/Tribunal/pull/76)）。v1.0.0 读不了新格式。要回退，只能恢复升级前的数据备份，不能只换回旧镜像。
 - **不要更换 `REVIEW_MASTER_KEY`**：迁移要用原主密钥解开旧密文。
 - **数据卷不改名**：Compose 项目名 `crc-review` 和数据卷 `crc-review_data` 保持原名，继续挂载原卷即可保留数据（[#32](https://github.com/LeXwDeX/Tribunal/pull/32)）。
 - **管理员配置**：`bootstrap_admins` 推荐改成 `id:<GitLab 用户 ID>`。旧的用户名写法仍然可用，会在第一次以管理员身份出现时绑定到当时的用户 ID（[#40](https://github.com/LeXwDeX/Tribunal/pull/40)）。
@@ -48,6 +48,14 @@ v1.0.0 之后的第一个版本：产品改名为 Tribunal，修复 1.0 复审�
   - 平台管理员改为按 GitLab 用户 ID 判定，杜绝改名接管（[#40](https://github.com/LeXwDeX/Tribunal/pull/40)）。
   - 项目 token 和 webhook secret 的密文绑定项目与字段作为 AAD，互换密文会解密失败（[#64](https://github.com/LeXwDeX/Tribunal/pull/64)）。
   - 启动时的密文迁移按字段分别进行，一个字段损坏不会拖累另一个（[#76](https://github.com/LeXwDeX/Tribunal/pull/76)）。
+  - 密文迁移全部完成后写入完成标记（迁移 `0015`），之后启动不再接受旧格式密文，防止把旧备份中的密文写回数据库后被重新绑定。标记写入后若出现旧格式字段，该字段保持原样并告警，需要重新设置对应凭据（[#96](https://github.com/LeXwDeX/Tribunal/pull/96)）。
+  - 没有写权限的用户更新 Skill、更新/删除/测试 MCP 服务器时，资源存在与否得到相同的 403，不再能借此探测 ID 是否存在（[#96](https://github.com/LeXwDeX/Tribunal/pull/96)）。
+- **评审结论**：块绑定的 MCP 工具只有部分可用时（服务器没有公布，或工具带写入注解被跳过），可用工具照常提供，缺失的每个工具记一条 `tool_gaps`，原本的 PASS 改判 INCOMPLETE（[#94](https://github.com/LeXwDeX/Tribunal/pull/94)）。
+- **发布**：同一进程内同一工作流的发布互斥，启动恢复与 worker 不会重复创建行内讨论；停机时先等启动恢复结束，再关闭运行时和数据库（[#94](https://github.com/LeXwDeX/Tribunal/pull/94)）。
+- **默认扩展**：
+  - YAML 声明了某个块、而数据库中该块绑定仍是默认值写入且未被管理员改过时，以 YAML 为准，启动时移除默认写入的那一行；管理员改过的绑定仍以控制台为准。
+  - 默认绑定与其账本记录在一个事务内写入，中途失败不会把块误判为「管理员已修改」。
+  - 内置 Skill 刷新失败只记告警并继续启动，不再导致服务起不来（[#95](https://github.com/LeXwDeX/Tribunal/pull/95)）。
 - **停机**：
   - 正常停机不再永久取消进行中的评审，重启后会续跑。
   - 心跳出现临时错误时不再取消 job。
@@ -56,15 +64,21 @@ v1.0.0 之后的第一个版本：产品改名为 Tribunal，修复 1.0 复审�
 - **DAG 调度**：运行已经判定出错后，不再重新占用并启动同一个节点，避免多一次提交或多执行一次节点（[#80](https://github.com/LeXwDeX/Tribunal/pull/80)）。
 - **MCP 批量导入**：改为在一个事务内完成，遇到内置服务器同名时一条都不写（[#50](https://github.com/LeXwDeX/Tribunal/pull/50)、[#71](https://github.com/LeXwDeX/Tribunal/pull/71)）。
 - **扩展页**：作用域切换时布局不再跳动，Tabs 始终显示（[#42](https://github.com/LeXwDeX/Tribunal/pull/42)）。
+- **评审列表**：列表接口不返回 MR 标题，各列表行不再显示「未命名 MR」，改为显示 `!iid`；「成本」列读取接口实际返回的字段，不再一直是「—」；评审详情面包屑显示项目路径（[#84](https://github.com/LeXwDeX/Tribunal/pull/84)）。列表接口每项新增 `findings_summary` 和 `nodes`（按页批量查询），列表的「P0 · P1 · P2」列和总览的阶段条开始显示（[#93](https://github.com/LeXwDeX/Tribunal/pull/93)）。
 
 ### 验证范围
 
 - CI（go、web、docker 三项，其中 docker 含 Compose 冒烟测试）在每个 PR 和 main 上都已通过；Go 语句覆盖率保持在 70% 以上。
+- Docker 冒烟逐个确认内置 codebase-memory-mcp 公布了默认配置绑定的全部只读工具（[#86](https://github.com/LeXwDeX/Tribunal/pull/86)）。
 - **没有**在真实 GitLab 实例上验收。v1.0.0 的真实实例验收（f143 快照）不覆盖本版本的改动。上线前建议按 [交付就绪](docs/delivery-readiness.md#v110-验证状态) 列出的项目做一次升级验收。
 
 ### 已知限制
 
 - Webhook 处理时如果存储出错，仍然返回 200 加 `ignored: storage_error`，GitLab 不会重试，需要监控日志后手动重放。
+- 评审列表接口不返回 MR 标题，列表行显示 `!iid`，标题只在详情页显示。
+- 发布互斥只在单个进程内生效，多个服务进程共用一个数据库时仍可能重复发布；当前部署形态为单实例。
+- 全局 4096 个会话的兜底上限触发时，淘汰最旧的会话，不区分用户角色。
+- `bootstrap_admins` 的用户名写法是首次出现时绑定（TOFU），推荐直接使用 `id:<GitLab 用户 ID>`。
 
 ## [1.0.0] - 2026-10-25
 
