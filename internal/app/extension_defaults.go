@@ -228,7 +228,10 @@ func decodeDefaultGrant(detail string) DefaultGrant {
 }
 
 // grant merges one default grant into a default-owned platform binding,
-// first dropping the entries of the previous grant it replaces.
+// first dropping the entries of the previous grant it replaces. Defaults must
+// not grant overlapping entries: replacing one default's grant would also
+// drop an entry another default shares. MCP tools carry their server name,
+// and each skill default grants only its own name.
 func (s *defaultSeeder) grant(ctx context.Context, block string, grant, previous DefaultGrant) (string, string, error) {
 	if _, ok := s.fileBlocks[block]; ok {
 		return store.ExtensionDefaultSkipped, reasonFileBinding, nil
