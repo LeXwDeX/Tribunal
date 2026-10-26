@@ -72,7 +72,9 @@ describe('review list summary fields', () => {
     routeList([listItem({ status: 'running', nodes: [] })])
     renderWithProviders(<OverviewPage />, { route: '/' })
 
-    await screen.findByRole('link', { name: '未命名 MR' })
+    // The list API has no mr_title, so the item falls back to !iid in both the
+    // running and recent panels.
+    await screen.findAllByRole('link', { name: '!318' })
     expect(screen.queryByRole('list', { name: /^阶段：/ })).not.toBeInTheDocument()
   })
 })

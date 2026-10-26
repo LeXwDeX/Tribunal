@@ -461,11 +461,11 @@ curl -fsS http://127.0.0.1:8080/readyz
 完整变更见 [CHANGELOG](../CHANGELOG.md#110---2026-10-26)。除了上面的通用步骤，这次升级还有以下几点：
 
 1. **升级后旧版本读不了数据，回退只能靠备份。** 新版本启动时会：
-   - 应用迁移 `0013_admin_bindings`、`0014_extension_defaults`；
+   - 应用迁移 `0013_admin_bindings`、`0014_extension_defaults`、`0015_secret_migration`；
    - 在各服务初始化前运行 `MigrateProjectSecrets`，把已存的项目 token 和 webhook secret 改写成绑定项目与字段的新加密格式（前缀 `\x00tb1`）。
 
    v1.0.0 读不了新格式。所以必须先做第 7 节的一致性备份；回退时恢复这份备份，不能只换回 v1.0.0 镜像。
-2. **继续使用原来的 `REVIEW_MASTER_KEY`。** 迁移要用它解开旧密文。迁移是幂等的，每个字段单独迁移，迁移期间被并发修改的行会跳过。解不开的字段只记一条告警（只含 `project_id`），保持原样，不阻止启动；这类字段在升级前使用时同样会失败，需要在设置页用「更新访问 Key」或 Webhook「重建」重新写入。
+2. **继续使用原来的 `REVIEW_MASTER_KEY`。** 迁移要用它解开旧密文。迁移是幂等的，每个字段单独迁移，迁移期间被并发修改的行会跳过。解不开的字段只记一条告警（只含 `project_id` 和字段名），保持原样，不阻止启动；这类字段在升级前使用时同样会失败，需要在设置页用「更新访问 Key」或 Webhook「重建」重新写入。某次启动后不再有旧格式字段时，服务在 `secret_migration` 表记下迁移完成；此后启动不再解开任何旧格式密文，遇到时保持原样并告警（只含 `project_id` 和字段名），该字段同样要重新写入。新部署首次启动即记为完成。
 3. **镜像和 CLI 改了名，数据卷没改。** 用新代码重新构建镜像（`docker compose build`）。Compose 项目名 `crc-review` 和数据卷 `crc-review_data` 保持不变，直接沿用。脚本里的 `/app/reviewctl` 可以继续用，建议改成 `/app/tribunalctl`。环境变量可以逐步改为 `TRIBUNAL_*` 新名，session key 要沿用原来的值。
 4. **管理员配置。** `bootstrap_admins` 推荐改成 `id:<GitLab 用户 ID>`（用 `tribunalctl users list` 查 ID）。保留用户名写法也可以：该用户名第一次以管理员身份出现时，会被绑定到当时的 GitLab 用户 ID 并写入 `admin_bindings`；之后其他账号即使改成这个用户名，也只有 viewer 权限。如果想换一个账号当管理员，改用 `id:` 写法。
 5. **会话数量。** 每个用户最多保留 10 个浏览器会话，超出时淘汰该用户自己最旧的会话。升级时已有的会话保留，用户下次登录时才按上限淘汰。

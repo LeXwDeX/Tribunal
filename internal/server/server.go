@@ -227,7 +227,9 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("GET /api/v1/skills", s.apiAuth(s.guard(policyAuthenticated, s.handleListSkills)))
 	mux.HandleFunc("POST /api/v1/skills", s.apiAuth(s.guard(policyAuthenticated, s.handleUploadSkillOrRegisterDirectory)))
 	mux.HandleFunc("DELETE /api/v1/skills/{id}", s.apiAuth(s.guard(policyPlatformAdmin, s.handleDeleteSkill)))
-	mux.HandleFunc("PATCH /api/v1/skills/{id}", s.apiAuth(s.guard(policyAuthenticated, s.handleUpdateSkill)))
+	// Every skill write needs the platform admin role. Checking it before the
+	// lookup keeps a missing and an existing skill indistinguishable to others.
+	mux.HandleFunc("PATCH /api/v1/skills/{id}", s.apiAuth(s.guard(policyPlatformAdmin, s.handleUpdateSkill)))
 	mux.HandleFunc("GET /api/v1/block-bindings", s.apiAuth(s.guard(policyAuthenticated, s.handleListBlockBindings)))
 	mux.HandleFunc("PUT /api/v1/block-bindings/{block}", s.apiAuth(s.guard(policyAuthenticated, s.handleUpsertBlockBinding)))
 	// System.

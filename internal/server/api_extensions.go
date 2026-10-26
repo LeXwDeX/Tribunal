@@ -192,6 +192,15 @@ func (s *Server) authorizeExtensionResource(w http.ResponseWriter, r *http.Reque
 	return s.authorizeExtensionScope(w, r, extensionScope{scope: scope, projectID: projectID}, write)
 }
 
+// requireExtensionWriter is the part of the write check that does not depend
+// on the resource: every extension write, in either scope, needs the platform
+// admin role. Id routes call it before the lookup so a caller who cannot write
+// gets the same answer for an existing and a missing id; the stored scope is
+// checked afterwards with authorizeExtensionResource.
+func (s *Server) requireExtensionWriter(w http.ResponseWriter, r *http.Request) bool {
+	return s.requirePlatformAdmin(w, r)
+}
+
 func (s *Server) handleListMCPServers(w http.ResponseWriter, r *http.Request) {
 	if !s.requireExtensions(w, r) {
 		return
@@ -289,6 +298,9 @@ func (s *Server) handleUpdateMCPServer(w http.ResponseWriter, r *http.Request) {
 		validationFailed(w, r, "id", "id is required")
 		return
 	}
+	if !s.requireExtensionWriter(w, r) {
+		return
+	}
 	current, err := s.extensions.GetMCPServer(r.Context(), id)
 	if err != nil {
 		s.writeServiceError(w, r, err)
@@ -337,6 +349,9 @@ func (s *Server) handleDeleteMCPServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
+	if !s.requireExtensionWriter(w, r) {
+		return
+	}
 	server, err := s.extensions.GetMCPServer(r.Context(), id)
 	if err != nil {
 		s.writeServiceError(w, r, err)
@@ -412,6 +427,9 @@ func (s *Server) handleTestMCPServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
+	if !s.requireExtensionWriter(w, r) {
+		return
+	}
 	server, err := s.extensions.GetMCPServer(r.Context(), id)
 	if err != nil {
 		s.writeServiceError(w, r, err)

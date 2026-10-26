@@ -1,8 +1,11 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/LeXwDeX/tribunal/internal/secret"
@@ -144,5 +147,84 @@ func TestMigrateProjectSecretsUpgradesUsableFieldBesideDamagedOne(t *testing.T) 
 	}
 	if again, err := MigrateProjectSecrets(ctx, st, cipher, nil); err != nil || again != 0 {
 		t.Fatalf("second migration = %d, %v; want 0", again, err)
+	}
+	// A damaged legacy value is still not in the sealed format, so the
+	// migration is not complete and a later start keeps trying.
+	if done, err := st.SecretMigrationComplete(ctx); err != nil || done {
+		t.Fatalf("migration complete = %v, %v; want false", done, err)
+	}
+}
+
+func TestMigrateProjectSecretsMarksFreshInstallComplete(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	cipher := newTestCipher(t)
+	if done, err := st.SecretMigrationComplete(ctx); err != nil || done {
+		t.Fatalf("fresh store complete = %v, %v; want false", done, err)
+	}
+	if migrated, err := MigrateProjectSecrets(ctx, st, cipher, nil); err != nil || migrated != 0 {
+		t.Fatalf("migration = %d, %v; want 0", migrated, err)
+	}
+	if done, err := st.SecretMigrationComplete(ctx); err != nil || !done {
+		t.Fatalf("fresh install complete = %v, %v; want true", done, err)
+	}
+}
+
+// Once every legacy value is migrated, a legacy value written later (for
+// example one copied from another project) is never accepted again.
+func TestMigrateProjectSecretsRejectsLegacyAfterCompletion(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	cipher := newTestCipher(t)
+	seedLegacyProject(t, st, cipher, 40, "glpat-forty", "whsec-forty")
+	seedProject(t, st, cipher, 41, "whsec-sealed", `{}`, "default")
+	// Keep project 40's legacy ciphertexts before the first migration.
+	before, err := st.GetProject(ctx, 40)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if migrated, err := MigrateProjectSecrets(ctx, st, cipher, nil); err != nil || migrated != 1 {
+		t.Fatalf("first migration = %d, %v; want 1", migrated, err)
+	}
+	if done, err := st.SecretMigrationComplete(ctx); err != nil || !done {
+		t.Fatalf("migration complete = %v, %v; want true", done, err)
+	}
+
+	// Replay project 40's old ciphertexts into project 41.
+	target, err := st.GetProject(ctx, 41)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := st.RewrapProjectSecrets(ctx, 41, target.TokenEnc, before.TokenEnc,
+		target.WebhookSecretEnc, before.WebhookSecretEnc); err != nil || !ok {
+		t.Fatalf("plant legacy values = %v, %v", ok, err)
+	}
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	if migrated, err := MigrateProjectSecrets(ctx, st, cipher, logger); err != nil || migrated != 0 {
+		t.Fatalf("migration after completion = %d, %v; want 0", migrated, err)
+	}
+	after, err := st.GetProject(ctx, 41)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after.TokenEnc, before.TokenEnc) || !bytes.Equal(after.WebhookSecretEnc, before.WebhookSecretEnc) {
+		t.Fatal("legacy values were rewritten after the migration completed")
+	}
+	if _, err := cipher.Open(after.TokenEnc, secret.TokenAAD(41)); err == nil {
+		t.Fatal("replayed legacy token opens for project 41")
+	}
+	out := logs.String()
+	for _, want := range []string{"level=WARN", "project_id=41", "field=token", "field=webhook_secret"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("log %q missing %q", out, want)
+		}
+	}
+	for _, secretText := range []string{"glpat-forty", "whsec-forty", string(before.TokenEnc)} {
+		if strings.Contains(out, secretText) {
+			t.Fatalf("log leaks secret material: %q", out)
+		}
 	}
 }
