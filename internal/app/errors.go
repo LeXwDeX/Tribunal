@@ -61,6 +61,14 @@ func (e *Error) Error() string {
 	return e.Code
 }
 
+// ErrorCode exposes the sanitized code for error classification.
+func (e *Error) ErrorCode() string {
+	if e == nil {
+		return ""
+	}
+	return e.Code
+}
+
 func validationError(message string, details ...Detail) *Error {
 	if message == "" {
 		message = "validation failed"

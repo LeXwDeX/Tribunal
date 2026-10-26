@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/LeXwDeX/tribunal/internal/errclass"
 	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
@@ -220,7 +221,7 @@ func (w *Worker) execute(ctx context.Context, claimed *Job) {
 			if err == nil {
 				w.complete(ctx, owner)
 			} else if ctx.Err() == nil {
-				w.fail(ctx, owner)
+				w.fail(ctx, owner, err)
 			}
 			return
 		case <-ticker.C:
@@ -247,7 +248,7 @@ func (w *Worker) execute(ctx context.Context, claimed *Job) {
 func callHandler(ctx context.Context, handler Handler, job *Job) (err error) {
 	defer func() {
 		if recover() != nil {
-			err = errors.New("handler panic")
+			err = errclass.ErrPanic
 		}
 	}()
 	return handler(ctx, job)
@@ -274,13 +275,15 @@ func (w *Worker) complete(parent context.Context, job Job) {
 	}
 }
 
-func (w *Worker) fail(parent context.Context, job Job) {
+func (w *Worker) fail(parent context.Context, job Job, cause error) {
 	retryAt := w.now().Add(w.backoff(job.Attempts))
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), cleanupTimeout)
 	defer cancel()
-	// The handler error is intentionally not logged or persisted: it may carry
-	// payload, token, or other sensitive text.
-	if err := w.queue.Fail(ctx, job, nil, &retryAt); err != nil && !errors.Is(err, store.ErrLeaseLost) {
+	// Only the sanitized class is logged or persisted: the handler error text
+	// may carry payload, token, or other sensitive text.
+	w.logger.Warn("job attempt failed", "job_id", job.ID, "kind", job.Kind,
+		"attempt", job.Attempts, "error_class", errclass.Of(cause))
+	if err := w.queue.Fail(ctx, job, cause, &retryAt); err != nil && !errors.Is(err, store.ErrLeaseLost) {
 		w.logger.Warn("job failure settlement failed", "job_id", job.ID, "kind", job.Kind)
 	}
 }

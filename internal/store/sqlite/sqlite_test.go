@@ -860,6 +860,35 @@ func TestFailRetriesWithSanitizedError(t *testing.T) {
 	}
 }
 
+func TestFailRecordsSanitizedErrorClass(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	s := openTestStore(t, clock)
+
+	jobID, _, err := s.Enqueue(ctx, store.Job{Kind: "fail", Key: "fail:class", MaxAttempts: 1})
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	job, err := s.Claim(ctx, "w", []string{"fail"}, 10*time.Second)
+	if err != nil || job == nil {
+		t.Fatalf("Claim: %v, %v", job, err)
+	}
+	cause := fmt.Errorf("gitlab token=SECRET-TOKEN: %w", context.DeadlineExceeded)
+	if err := s.Fail(ctx, *job, cause, nil); err != nil {
+		t.Fatalf("Fail: %v", err)
+	}
+	stored, err := s.GetJob(ctx, jobID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if stored.State != store.JobFailed || !strings.Contains(stored.LastError, "(timeout)") {
+		t.Fatalf("failed job = %+v, want timeout class", stored)
+	}
+	if strings.Contains(stored.LastError, "SECRET") {
+		t.Fatalf("handler error leaked: %q", stored.LastError)
+	}
+}
+
 func TestRecordDeliveryValidationAndIgnored(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t, newFakeClock())

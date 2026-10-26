@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/app"
+	"github.com/LeXwDeX/tribunal/internal/errclass"
 	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
@@ -181,9 +182,15 @@ func (s *Server) writeServiceError(w http.ResponseWriter, r *http.Request, err e
 // never logs the error text because it can embed row identifiers.
 func (s *Server) writeStoreError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
-	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+	case r.Context().Err() != nil:
 		// The client is gone; writing a response would be pointless.
 		return
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		// The client is still connected, so the deadline came from inside
+		// the server. Without a response net/http would send an empty 200.
+		s.logger.Warn("admin store request timed out",
+			"request_id", requestID(r.Context()), "path", r.URL.Path, "error_class", errclass.Of(err))
+		writeError(w, r, http.StatusServiceUnavailable, "unavailable", "service temporarily unavailable", nil)
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, r, http.StatusNotFound, "not_found", "not found", nil)
 	case errors.Is(err, store.ErrInvalidCursor):
@@ -194,7 +201,7 @@ func (s *Server) writeStoreError(w http.ResponseWriter, r *http.Request, err err
 		writeError(w, r, http.StatusConflict, "conflict", "conflict", nil)
 	default:
 		s.logger.Error("admin store request failed",
-			"request_id", requestID(r.Context()), "path", r.URL.Path)
+			"request_id", requestID(r.Context()), "path", r.URL.Path, "error_class", errclass.Of(err))
 		writeError(w, r, http.StatusInternalServerError, "internal", "internal error", nil)
 	}
 }
