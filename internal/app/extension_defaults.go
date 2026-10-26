@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/errclass"
 	"github.com/LeXwDeX/tribunal/internal/skill/builtin"
 	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
@@ -434,7 +435,7 @@ func (s *ExtensionService) SkillDefaults(specs []config.DefaultSkill) ([]Extensi
 				// The installed copy stays as it is and loads, or fails to
 				// load, like any other skill.
 				if err := s.refreshBuiltinSkill(ctx, row); err != nil {
-					s.logger.Warn("built-in skill refresh failed", "name", name, "error", err)
+					s.logger.Warn("built-in skill refresh failed", "name", name, "error_class", errclass.Of(err))
 				}
 				return nil
 			},
