@@ -1216,3 +1216,25 @@ func TestEngineInterruptBeforeStartKeepsPendingWorkflow(t *testing.T) {
 		t.Fatalf("interrupt before start wrote terminal status %s (%s)", wf.Status, wf.CancelReason)
 	}
 }
+
+// A worker records a fatal run error before it releases its node. The
+// scheduler may already have passed its error check, so a claim made after the
+// release must still fail instead of launching the node again.
+func TestClaimNodeRefusedAfterRunError(t *testing.T) {
+	e := NewEngine(NewMemoryEventStore(), nil, nil, Options{})
+	handle, err := e.registerRun("wf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !handle.claimNode("a") {
+		t.Fatal("first claim refused")
+	}
+	handle.setErr(fmt.Errorf("%w: injected", ErrStaleRevision))
+	handle.releaseNode("a")
+	if handle.claimNode("a") {
+		t.Fatal("claim after run error succeeded; the node would run again")
+	}
+	if handle.claimNode("b") {
+		t.Fatal("claim of another node after run error succeeded")
+	}
+}
