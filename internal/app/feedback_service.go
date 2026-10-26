@@ -406,7 +406,7 @@ func (s *FeedbackService) project(ctx context.Context, projectID int64, projects
 		projects[projectID] = nil
 		return nil, "", false
 	}
-	token, err := s.cipher.Decrypt(project.TokenEnc)
+	token, err := s.cipher.Open(project.TokenEnc, secret.TokenAAD(project.ID))
 	if err != nil {
 		projects[projectID] = nil
 		return nil, "", false

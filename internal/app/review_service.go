@@ -842,7 +842,7 @@ func (s *ReviewService) projectToken(ctx context.Context, projectID int64) (*sto
 	if project == nil || !project.Enabled {
 		return nil, "", PermanentJob(fmt.Errorf("project %d is disabled", projectID))
 	}
-	token, err := s.cipher.Decrypt(project.TokenEnc)
+	token, err := s.cipher.Open(project.TokenEnc, secret.TokenAAD(project.ID))
 	if err != nil {
 		return nil, "", PermanentJob(fmt.Errorf("project token is unavailable"))
 	}

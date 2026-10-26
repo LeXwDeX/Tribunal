@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
+	"github.com/LeXwDeX/tribunal/internal/secret"
 	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
@@ -72,7 +73,7 @@ func TestCreateWebhookReusesRecordedHook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plain, err := cipher.Decrypt(saved.WebhookSecretEnc)
+	plain, err := cipher.Open(saved.WebhookSecretEnc, secret.WebhookSecretAAD(saved.ID))
 	if err != nil || string(plain) != originalSecret {
 		t.Fatalf("reuse rotated the stored secret: %v", err)
 	}
@@ -126,7 +127,7 @@ func TestCreateWebhookDoesNotAdoptMatchingURLHook(t *testing.T) {
 		saved.WebhookManagedBy != store.WebhookManagedByService {
 		t.Fatalf("stored hook = %v, state = %q, owner = %q", saved.HookID, saved.WebhookState, saved.WebhookManagedBy)
 	}
-	plain, err := cipher.Decrypt(saved.WebhookSecretEnc)
+	plain, err := cipher.Open(saved.WebhookSecretEnc, secret.WebhookSecretAAD(saved.ID))
 	if err != nil || string(plain) != registration.WebhookSecret {
 		t.Fatalf("enable changed the stored secret: %v", err)
 	}
@@ -515,7 +516,7 @@ func TestRebuildWebhookRotatesSecretAndReusesRecordedHook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldSecret, err := cipher.Decrypt(before.WebhookSecretEnc)
+	oldSecret, err := cipher.Open(before.WebhookSecretEnc, secret.WebhookSecretAAD(before.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -533,7 +534,7 @@ func TestRebuildWebhookRotatesSecretAndReusesRecordedHook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	newSecret, err := cipher.Decrypt(saved.WebhookSecretEnc)
+	newSecret, err := cipher.Open(saved.WebhookSecretEnc, secret.WebhookSecretAAD(saved.ID))
 	if err != nil {
 		t.Fatal(err)
 	}

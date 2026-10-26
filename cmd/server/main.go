@@ -122,6 +122,15 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return errors.New("initialize secrets: invalid master key")
 	}
+	// Bind legacy ciphertexts to their project and field before any service
+	// reads them; services only open the sealed format.
+	migrated, err := app.MigrateProjectSecrets(ctx, db, cipher, logger)
+	if err != nil {
+		return errors.New("migrate stored secrets: storage update failed")
+	}
+	if migrated > 0 {
+		logger.Info("stored secrets migrated", "projects", migrated)
+	}
 	gitlabClient, err := gitlab.New(gitlab.Config{
 		BaseURL:        cfg.GitLab.URL,
 		RequestTimeout: cfg.GitLab.RequestTimeout,

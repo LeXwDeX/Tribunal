@@ -162,7 +162,7 @@ func (s *WebhookService) validToken(project *store.Project, presented string) bo
 	if presented == "" || len(project.WebhookSecretEnc) == 0 {
 		return false
 	}
-	expected, err := s.cipher.Decrypt(project.WebhookSecretEnc)
+	expected, err := s.cipher.Open(project.WebhookSecretEnc, secret.WebhookSecretAAD(project.ID))
 	if err != nil {
 		return false
 	}
