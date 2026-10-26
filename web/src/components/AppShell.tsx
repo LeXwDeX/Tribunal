@@ -1,21 +1,112 @@
 import { useEffect, useRef, useState } from 'react'
-import { NavLink, Outlet, useLocation } from 'react-router-dom'
-import { logout } from '../api/api'
-import type { Me } from '../api/types'
+import { useQuery } from '@tanstack/react-query'
+import { Link, NavLink, Outlet, useLocation, useMatch } from 'react-router-dom'
+import { getProject, getReview, listReviews, logout } from '../api/api'
+import type { Me, ReviewSummary } from '../api/types'
+import { usePaginated } from '../lib/hooks'
 import { BrandMark, Icon } from './Icons'
 import { classNames, useToast } from './ui'
 import { SessionProvider } from './RoleContext'
 import styles from './AppShell.module.css'
 
-const navItems = [
-  { to: '/', label: '总览', icon: 'overview' as const, end: true },
-  { to: '/reviews', label: '评审', icon: 'reviews' as const },
-  { to: '/projects', label: '项目', icon: 'projects' as const },
-  { to: '/extensions', label: '扩展', icon: 'extensions' as const },
-  { to: '/models', label: '模型与档位', icon: 'models' as const },
-  { to: '/statistics', label: '统计与反馈', icon: 'stats' as const },
-  { to: '/system', label: '系统', icon: 'system' as const },
+type NavItem = {
+  to: string
+  label: string
+  icon: 'overview' | 'reviews' | 'projects' | 'extensions' | 'models' | 'stats' | 'system'
+  end?: boolean
+  runningCount?: boolean
+}
+
+const navGroups: { label: string; items: NavItem[] }[] = [
+  {
+    label: '工作台',
+    items: [
+      { to: '/', label: '总览', icon: 'overview', end: true },
+      { to: '/reviews', label: '评审', icon: 'reviews', runningCount: true },
+    ],
+  },
+  {
+    label: '配置',
+    items: [
+      { to: '/projects', label: '项目', icon: 'projects' },
+      { to: '/extensions', label: '扩展', icon: 'extensions' },
+      { to: '/models', label: '模型与档位', icon: 'models' },
+    ],
+  },
+  {
+    label: '洞察',
+    items: [
+      { to: '/statistics', label: '统计与反馈', icon: 'stats' },
+      { to: '/system', label: '系统', icon: 'system' },
+    ],
+  },
 ]
+
+const sectionLabels: Record<string, string> = {
+  '': '总览',
+  reviews: '评审',
+  projects: '项目',
+  extensions: '扩展',
+  models: '模型与档位',
+  statistics: '统计与反馈',
+  system: '系统',
+}
+
+// Shares the overview page's query key, fetcher and interval so both read one cache entry.
+function useRunningCount() {
+  const running = usePaginated<ReviewSummary>(
+    ['reviews', 'overview', 'running'],
+    (cursor) => listReviews({ status: 'running' }, cursor),
+    'reviews',
+    { refetchInterval: 10_000 },
+  )
+  if (running.items.length === 0) return null
+  return `${running.items.length}${running.hasNextPage ? '+' : ''}`
+}
+
+// Detail crumbs only observe the detail pages' cached queries; they never fetch on their own.
+function Breadcrumbs() {
+  const location = useLocation()
+  const reviewMatch = useMatch('/reviews/:id')
+  const projectMatch = useMatch('/projects/:id/*')
+  const reviewId = reviewMatch?.params.id || ''
+  const projectId = Number(projectMatch?.params.id)
+  const review = useQuery({
+    queryKey: ['review', reviewId, 'detail'],
+    queryFn: () => getReview(reviewId),
+    enabled: false,
+  })
+  const project = useQuery({
+    queryKey: ['project', projectId],
+    queryFn: () => getProject(projectId),
+    enabled: false,
+  })
+
+  const section = location.pathname.split('/')[1] || ''
+  const sectionLabel = sectionLabels[section]
+  let parent: { to: string; label: string } | null = null
+  let current = sectionLabel || '页面不存在'
+  if (reviewMatch) {
+    parent = { to: '/reviews', label: '评审' }
+    const data = review.data
+    current = data ? `${data.project_path || `项目 #${data.project_id}`} !${data.mr_iid}` : reviewId
+  } else if (projectMatch && projectMatch.params.id) {
+    parent = { to: '/projects', label: '项目' }
+    current = project.data?.path_with_namespace || `#${projectMatch.params.id}`
+  }
+
+  return (
+    <nav aria-label="面包屑" className={styles.crumbs}>
+      {parent ? (
+        <>
+          <Link to={parent.to}>{parent.label}</Link>
+          <span className={styles.sep} aria-hidden="true">/</span>
+        </>
+      ) : null}
+      <b aria-current="page">{current}</b>
+    </nav>
+  )
+}
 
 const roleLabel = (role: string) => (role === 'admin' ? '管理员' : role === 'viewer' ? '只读用户' : role)
 
@@ -34,7 +125,7 @@ function ThemeToggle() {
       onClick={toggle}
       aria-label={theme === 'dark' ? '切换为亮色主题' : '切换为暗色主题'}
     >
-      <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={16} />
+      <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={14} />
       {theme === 'dark' ? '亮色主题' : '暗色主题'}
     </button>
   )
@@ -47,6 +138,7 @@ export function AppShell({ me }: { me: Me }) {
   const toast = useToast()
   const location = useLocation()
   const menuButtonRef = useRef<HTMLButtonElement>(null)
+  const runningCount = useRunningCount()
 
   useEffect(() => {
     setMenuOpen(false)
@@ -106,21 +198,32 @@ export function AppShell({ me }: { me: Me }) {
             <BrandMark />
             <span className={styles.brandText}>
               <span className={styles.brandName}>Tribunal</span>
-              <span className={styles.brandSub}>评审平台</span>
+              <span className={styles.brandSub}>代码评审控制台</span>
             </span>
           </NavLink>
           <div className={styles.navItems}>
-            {navItems.map((item) => (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                end={item.end}
-                className={({ isActive }) => classNames(styles.navItem, isActive && styles.navItemActive)}
-                onClick={() => setMenuOpen(false)}
-              >
-                <Icon name={item.icon} />
-                {item.label}
-              </NavLink>
+            {navGroups.map((group) => (
+              <div key={group.label} role="group" aria-label={group.label} className={styles.navSection}>
+                <div className={styles.navGroup} aria-hidden="true">{group.label}</div>
+                {group.items.map((item) => (
+                  <NavLink
+                    key={item.to}
+                    to={item.to}
+                    end={item.end}
+                    className={({ isActive }) => classNames(styles.navItem, isActive && styles.navItemActive)}
+                    onClick={() => setMenuOpen(false)}
+                  >
+                    <Icon name={item.icon} size={17} />
+                    {item.label}
+                    {item.runningCount && runningCount ? (
+                      <>
+                        <span className={styles.navCount} aria-hidden="true">{runningCount}</span>
+                        <span className="srOnly">{runningCount} 个运行中</span>
+                      </>
+                    ) : null}
+                  </NavLink>
+                ))}
+              </div>
             ))}
           </div>
           <div className={styles.navSpacer} />
@@ -137,7 +240,7 @@ export function AppShell({ me }: { me: Me }) {
             <div className={styles.navActions}>
               <ThemeToggle />
               <button type="button" className={styles.navAction} onClick={() => { void onLogout() }} disabled={loggingOut}>
-                <Icon name="logout" size={16} />
+                <Icon name="logout" size={14} />
                 {loggingOut ? '退出中…' : '退出登录'}
               </button>
             </div>
@@ -146,10 +249,6 @@ export function AppShell({ me }: { me: Me }) {
 
         <div className={styles.main}>
           <div className={styles.mobileBar}>
-            <NavLink to="/" className={styles.mobileBrand} end>
-              <BrandMark size={24} />
-              Tribunal
-            </NavLink>
             <button
               ref={menuButtonRef}
               type="button"
@@ -161,6 +260,13 @@ export function AppShell({ me }: { me: Me }) {
             >
               <Icon name={menuOpen ? 'close' : 'menu'} />
             </button>
+            <NavLink to="/" className={styles.mobileBrand} end>
+              <BrandMark size={24} />
+              Tribunal
+            </NavLink>
+          </div>
+          <div className={styles.topbar}>
+            <Breadcrumbs />
           </div>
           <Outlet />
         </div>
