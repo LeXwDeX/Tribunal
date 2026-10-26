@@ -542,6 +542,16 @@ type agentOptions struct {
 	BlockTools bool
 	NoRetry    bool
 	BeforeTurn func(context.Context, llm.Usage) error
+	// ToolGaps, when set, receives one message per MCP binding that failed.
+	// The node then runs without those tools instead of failing.
+	ToolGaps *[]string
+}
+
+// maxToolGapRunes bounds one recorded MCP binding failure.
+const maxToolGapRunes = 500
+
+func toolGapMessage(block string, err error) string {
+	return oneLine(fmt.Sprintf("block %s: MCP tools unavailable: %v", block, err), maxToolGapRunes)
 }
 
 // callAgent builds the prompt, tool set, and submit schema, then runs the
@@ -565,10 +575,17 @@ func (e *Executor) callAgent(ctx context.Context, in dag.NodeInput, opts agentOp
 	}
 	if opts.BlockTools && len(binding.MCPTools) > 0 && e.deps.Tools != nil {
 		mcpTools, err := e.deps.Tools.Tools(ctx, opts.Block)
-		if err != nil {
+		switch {
+		case err == nil:
+			tools = append(tools, mcpTools...)
+		case ctx.Err() != nil || errors.Is(err, context.Canceled) || opts.ToolGaps == nil:
 			return nil, fmt.Errorf("review: bind MCP tools: %w", err)
+		default:
+			// A missing or broken MCP server must not stop the review. The
+			// agent keeps its built-in tools and the recorded gap keeps
+			// synthesis from settling a clean PASS.
+			*opts.ToolGaps = append(*opts.ToolGaps, toolGapMessage(opts.Block, err))
 		}
-		tools = append(tools, mcpTools...)
 	}
 	built, err := BuildPrompt(PromptInput{
 		Bundle:            e.prompts,

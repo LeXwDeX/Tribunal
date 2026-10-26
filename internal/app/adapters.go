@@ -87,7 +87,14 @@ func (p *mcpToolProvider) Tools(ctx context.Context, block string) ([]agent.Tool
 	if p == nil || p.manager == nil || len(p.blocks) == 0 {
 		return nil, nil
 	}
-	allowed := p.blocks[block].MCPTools
+	// Tools of a disabled or deleted server stay in the binding but are not
+	// offered: the administrator turned the server off on purpose.
+	var allowed []string
+	for _, tool := range p.blocks[block].MCPTools {
+		if server, _, ok := strings.Cut(strings.TrimPrefix(tool, "mcp__"), "__"); !ok || p.manager.HasServer(server) {
+			allowed = append(allowed, tool)
+		}
+	}
 	if len(allowed) == 0 {
 		return nil, nil
 	}

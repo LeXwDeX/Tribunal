@@ -105,6 +105,7 @@ func (e *Executor) executeCodeReview(ctx context.Context, in dag.NodeInput) (dag
 			return DecodeStrict[*CodeReviewOut](raw)
 		},
 	}
+	var gaps []string
 	result, err := e.callAgent(ctx, in, agentOptions{
 		Role:       role,
 		Provider:   params.Provider,
@@ -114,6 +115,7 @@ func (e *Executor) executeCodeReview(ctx context.Context, in dag.NodeInput) (dag
 		Builtins:   true,
 		BlockTools: true,
 		BeforeTurn: e.budgetHook(in.WorkflowID),
+		ToolGaps:   &gaps,
 	})
 	if err != nil {
 		return dag.NodeOutput{}, err
@@ -122,6 +124,7 @@ func (e *Executor) executeCodeReview(ctx context.Context, in dag.NodeInput) (dag
 	if !ok || out == nil {
 		return dag.NodeOutput{}, errors.New("review: code-review decoder returned an unexpected type")
 	}
+	out.ToolGaps = gaps
 	return marshalNodeOutput(out, e.dagUsage(params.Provider, result.Usage))
 }
 
@@ -146,6 +149,7 @@ func (e *Executor) executeReviewChannel(ctx context.Context, in dag.NodeInput) (
 			return DecodeStrict[*ReviewOut](raw)
 		},
 	}
+	var gaps []string
 	result, err := e.callAgent(ctx, in, agentOptions{
 		Role:       role,
 		Provider:   params.Provider,
@@ -155,6 +159,7 @@ func (e *Executor) executeReviewChannel(ctx context.Context, in dag.NodeInput) (
 		Builtins:   true,
 		BlockTools: true,
 		BeforeTurn: e.budgetHook(in.WorkflowID),
+		ToolGaps:   &gaps,
 	})
 	if err != nil {
 		return dag.NodeOutput{}, err
@@ -163,6 +168,7 @@ func (e *Executor) executeReviewChannel(ctx context.Context, in dag.NodeInput) (
 	if !ok || out == nil {
 		return dag.NodeOutput{}, errors.New("review: review channel decoder returned an unexpected type")
 	}
+	out.ToolGaps = gaps
 	return marshalNodeOutput(out, e.dagUsage(params.Provider, result.Usage))
 }
 
@@ -303,6 +309,7 @@ func (e *Executor) executeVerify(ctx context.Context, in dag.NodeInput) (dag.Nod
 			return &normalized, nil
 		},
 	}
+	var gaps []string
 	result, err := e.callAgent(ctx, in, agentOptions{
 		Role:       role,
 		Provider:   params.Provider,
@@ -312,6 +319,7 @@ func (e *Executor) executeVerify(ctx context.Context, in dag.NodeInput) (dag.Nod
 		Builtins:   true,
 		BlockTools: true,
 		BeforeTurn: e.budgetHook(in.WorkflowID),
+		ToolGaps:   &gaps,
 	})
 	if err != nil {
 		return dag.NodeOutput{}, err
@@ -326,6 +334,7 @@ func (e *Executor) executeVerify(ctx context.Context, in dag.NodeInput) (dag.Nod
 		Model:     e.modelForProvider(params.Provider),
 		SameModel: params.SameModel,
 		Result:    *out,
+		ToolGaps:  gaps,
 	}
 	if err := envelope.Validate(); err != nil {
 		return dag.NodeOutput{}, err
@@ -339,6 +348,10 @@ func (e *Executor) executeSynthesize(ctx context.Context, in dag.NodeInput) (dag
 		return dag.NodeOutput{}, err
 	}
 	groups, extendsUsed, unresolved, warnings, err := e.synthesisGroups(ctx, in, params)
+	if err != nil {
+		return dag.NodeOutput{}, err
+	}
+	toolGaps, err := e.toolGapSignals(ctx, in.WorkflowID)
 	if err != nil {
 		return dag.NodeOutput{}, err
 	}
@@ -363,6 +376,7 @@ func (e *Executor) executeSynthesize(ctx context.Context, in dag.NodeInput) (dag
 		}
 		applyUnresolved(&result, unresolved)
 		applyBudgetGap(&result, exhausted)
+		applyToolGaps(&result, toolGaps)
 		if err := result.Validate(); err != nil {
 			return dag.NodeOutput{}, err
 		}
@@ -379,6 +393,7 @@ func (e *Executor) executeSynthesize(ctx context.Context, in dag.NodeInput) (dag
 		}
 		applyUnresolved(&result, unresolved)
 		applyBudgetGap(&result, exhausted)
+		applyToolGaps(&result, toolGaps)
 		if err := result.Validate(); err != nil {
 			return dag.NodeOutput{}, err
 		}
@@ -477,6 +492,7 @@ func (e *Executor) executeSynthesize(ctx context.Context, in dag.NodeInput) (dag
 		}
 		applyUnresolved(&final, unresolved)
 		applyBudgetGap(&final, exhausted || budgetStopped)
+		applyToolGaps(&final, toolGaps)
 		usage := dag.Usage{}
 		if result != nil {
 			usage = e.dagUsage(provider, result.Usage)
@@ -516,6 +532,7 @@ func (e *Executor) executeSynthesize(ctx context.Context, in dag.NodeInput) (dag
 	}
 	applyUnresolved(&final, unresolved)
 	applyBudgetGap(&final, exhausted)
+	applyToolGaps(&final, toolGaps)
 	if err := final.Validate(); err != nil {
 		return dag.NodeOutput{}, err
 	}
