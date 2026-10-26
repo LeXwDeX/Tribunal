@@ -76,6 +76,7 @@ func TestDockerSmokeCleanup(t *testing.T) {
 		imageFail       bool
 		rmFail          bool
 		mcpWriteTool    bool
+		mcpMissingTool  bool
 		wantExit        int
 		wantImageRemove bool
 		wantWarnings    []string
@@ -91,6 +92,8 @@ func TestDockerSmokeCleanup(t *testing.T) {
 			wantWarnings: []string{"could not remove temporary directory"}},
 		{name: "MCP exposes a write tool", mcpWriteTool: true, wantExit: 1, wantImageRemove: true,
 			wantOutput: "codebase-memory MCP exposes write tool delete_project"},
+		{name: "MCP misses a default tool", mcpMissingTool: true, wantExit: 1, wantImageRemove: true,
+			wantOutput: "codebase-memory MCP does not list default tool check_index_coverage"},
 	}
 
 	for _, tc := range tests {
@@ -121,6 +124,7 @@ func TestDockerSmokeCleanup(t *testing.T) {
 				"SMOKE_FAKE_IMAGE_RM_FAIL=" + boolEnv(tc.imageFail),
 				"SMOKE_FAKE_RM_FAIL=" + boolEnv(tc.rmFail),
 				"SMOKE_FAKE_MCP_WRITE_TOOL=" + boolEnv(tc.mcpWriteTool),
+				"SMOKE_FAKE_MCP_MISSING_TOOL=" + boolEnv(tc.mcpMissingTool),
 				"TRIBUNAL_SESSION_KEY=" + callerSecret,
 				"CRC_SESSION_KEY=" + callerSecret,
 				"TRIBUNAL_PUBLIC_URL=https://caller.invalid",
@@ -451,7 +455,10 @@ if [ "$#" -ge 1 ] && [ "$1" = "compose" ]; then
             printf '{"servers":[{"id":"srv-codebase-memory","scope":"platform","name":"codebase-memory","enabled":true}],"next_cursor":""}'
             ;;
           *"/api/v1/mcp-servers/srv-codebase-memory/test")
-            printf '{"tools":[{"name":"list_projects"},{"name":"search_graph"},{"name":"trace_path"},{"name":"get_code_snippet"}'
+            printf '{"tools":[{"name":"list_projects"},{"name":"index_status"},{"name":"search_graph"},{"name":"trace_path"},{"name":"get_code_snippet"},{"name":"query_graph"},{"name":"get_graph_schema"},{"name":"get_file_outline"},{"name":"get_architecture"},{"name":"search_code"}'
+            if [ "${SMOKE_FAKE_MCP_MISSING_TOOL:-0}" != "1" ]; then
+              printf ',{"name":"check_index_coverage"}'
+            fi
             if [ "${SMOKE_FAKE_MCP_WRITE_TOOL:-0}" = "1" ]; then
               printf ',{"name":"delete_project"}'
             fi

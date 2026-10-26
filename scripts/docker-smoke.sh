@@ -236,10 +236,14 @@ server_id=$(printf '%s' "$servers" | grep -o '"id":"[^"]*"' | head -n 1 | cut -d
 [ -n "$server_id" ] || fail "cannot read the codebase-memory server id"
 tools=$(api POST "/api/v1/mcp-servers/$server_id/test") \
   || fail "codebase-memory MCP did not start and list tools"
-for tool in search_graph trace_path get_code_snippet; do
+# Every read tool the default config binds must be advertised by the bundled
+# binary; review time drops a missing one with only a warning.
+default_tools=$(sed -n '/&codebase_memory_read_tools$/,/^ *review:/s/^ *- \([a-z_]*\)$/\1/p' "$CONFIG_FILE")
+[ -n "$default_tools" ] || fail "cannot read the default codebase-memory tool list"
+for tool in $default_tools; do
   case "$tools" in
     *"\"name\":\"$tool\""*) ;;
-    *) fail "codebase-memory MCP does not list $tool" ;;
+    *) fail "codebase-memory MCP does not list default tool $tool" ;;
   esac
 done
 for tool in index_repository delete_project ingest_traces manage_adr; do
