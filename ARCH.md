@@ -470,7 +470,7 @@ data/workspaces/<project_id>/
 - onboarding 阶段用 `cli` 模式建索引，不必由应用建立 MCP 会话；0.12.1 的 CLI 仍会使用上游 daemon。
 - 用 [MCP 隔离启动脚本](scripts/codebase-memory-mcp.sh) 同时启动 server 和索引命令。脚本在项目 `HOME` 下分别设置 `CBM_CACHE_DIR` 和 `CBM_RUNTIME_DIR`；仅设置 `HOME` 或 `XDG_RUNTIME_DIR` 不能隔离默认的账号级 daemon。完整配置与部署要求见 [MCP 配置](docs/design/06-config.md#2-mcp-配置文件)。
 - 服务端部署时关闭 `auto_watch` / `watcher_enabled` 和 UI（默认端口 9749）。索引刷新由 Push Hook 驱动，UI 端口不对外暴露。
-- 索引只对 base 建。MR 改动的文件由 agent 在 worktree 中直接读取。prompt 中明确说明「图谱反映 base 版本，改动的文件以 worktree 为准」（借鉴 review agent 的 `check_index_coverage` 原则）。
+- 索引只对 base 建。MR 改动的文件由 agent 在 worktree 中直接读取。prompt 中明确说明「图谱反映 base 版本，改动的文件以 worktree 为准」（借鉴 review agent 的 `check_index_coverage` 原则）。该规则写在 `prompts/_platform_rules.md`（v2），对所有绑定图谱工具的块生效；它改变了 prompt bundle hash，影响见 [prompt 覆盖](docs/design/06-config.md#6-prompt-覆盖)。
 
 - **索引按路径识别项目**：codebase-memory 以「项目名 + 根路径」标识索引。因此 `base/` 的路径必须**按项目固定**（`data/workspaces/<project_id>/base`），刷新时在原目录内 fetch + checkout，**不重新 clone、不换目录**，索引就能一直复用并增量更新。MR 的 worktree 路径每次不同，不建索引。
 - **工作区主键用 GitLab `project_id`**：项目改名或转移 namespace 后 git 地址会变，但 `project_id` 不变；git 地址只作为属性记录，变化时更新 mirror 的 remote，不重建工作区。
