@@ -9,7 +9,7 @@ import {
 } from '../components/ui'
 import { formatDuration, formatJson, formatNumber } from '../lib/format'
 import ui from '../styles/ui.module.css'
-import styles from './pages.module.css'
+import styles from './insights.module.css'
 
 function fmt(value: number | undefined, suffix = ''): string {
   return typeof value === 'number' && Number.isFinite(value) ? `${formatNumber(value)}${suffix}` : '不可用'
@@ -37,26 +37,39 @@ function ProviderCard({ provider, canWrite }: { provider: Provider; canWrite: bo
   const testOk = test.result?.ok === true
   const testFailed = test.result?.ok === false || test.invalid || Boolean(test.error)
 
+  const errorRate = typeof stats?.error_rate === 'number'
+    ? `${(stats.error_rate <= 1 ? stats.error_rate * 100 : stats.error_rate).toFixed(2)}%`
+    : '不可用'
+  const p50 = typeof stats?.p50_latency_ms === 'number' ? formatDuration(stats.p50_latency_ms) : '不可用'
+  const cells: Array<[string, string]> = [['24h 调用', fmt(stats?.calls)], ['错误率', errorRate], ['P50 延迟', p50]]
+
   return (
-    <article className={styles.infoCard} aria-labelledby={titleId}>
-      <div className={styles.cardTitle}>
-        <span className="mono" id={titleId}>{provider.name}</span>
-        {provider.protocol ? <Badge tone="info">{provider.protocol}</Badge> : <Badge tone="neutral">协议未提供</Badge>}
+    <article className={`${ui.panel} ${styles.providerCard}`} aria-labelledby={titleId}>
+      <div className={styles.providerHead}>
+        <span className={styles.cardTitle} id={titleId}>{provider.name}</span>
+        {provider.protocol ? <Badge tone="info" plain>{provider.protocol}</Badge> : <Badge tone="neutral" plain>协议未提供</Badge>}
       </div>
-      <dl className={ui.definitionGrid}>
-        <div><dt>base_url</dt><dd className="mono">{provider.base_url || '不可用'}</dd></div>
-        <div><dt>模型</dt><dd className="mono">{provider.model || '不可用'}</dd></div>
-        <div><dt>并发 / RPM</dt><dd>{provider.max_concurrency !== undefined ? provider.max_concurrency : '不可用'} / {provider.rpm !== undefined ? provider.rpm : '不可用'}</dd></div>
-        <div><dt>API key 环境变量</dt><dd className="mono">{provider.api_key_env || '不可用'}</dd></div>
-        <div><dt>近 24 小时调用</dt><dd>{fmt(stats?.calls)}</dd></div>
-        <div><dt>近 24 小时错误</dt><dd>{fmt(stats?.errors)}</dd></div>
-        <div><dt>错误率</dt><dd>{typeof stats?.error_rate === 'number' ? `${(stats.error_rate <= 1 ? stats.error_rate * 100 : stats.error_rate).toFixed(2)}%` : '不可用'}</dd></div>
-        <div><dt>P50 延迟</dt><dd>{typeof stats?.p50_latency_ms === 'number' ? formatDuration(stats.p50_latency_ms) : '不可用'}</dd></div>
-      </dl>
+      <div className={styles.cardMeta}>
+        <span>模型 <span className="mono">{provider.model || '不可用'}</span></span>
+        {typeof stats?.errors === 'number' ? <span>近 24 小时错误 {fmt(stats.errors)}</span> : null}
+      </div>
+      <ul className={styles.cardStats} aria-label={`${provider.name} 近 24 小时`}>
+        {cells.map(([label, value]) => (
+          <li key={label}>
+            <span>{label}</span>
+            <b className={value === '不可用' ? styles.statUnavailable : undefined}>{value}</b>
+          </li>
+        ))}
+      </ul>
+      <div className={styles.cardMeta}>
+        <span>并发 {provider.max_concurrency !== undefined ? provider.max_concurrency : '不可用'} · {provider.rpm !== undefined ? provider.rpm : '不可用'} RPM</span>
+        <span>base_url <code>{provider.base_url || '不可用'}</code></span>
+        <span>API key 环境变量 <code>{provider.api_key_env || '不可用'}</code></span>
+      </div>
       {provider.last_error ? <span className={styles.resultError}>{provider.last_error}</span> : null}
       {canWrite ? (
         <div className={styles.cardActions}>
-          <Button variant="secondary" onClick={() => { void runTest() }} loading={test.pending}>测试连通性</Button>
+          <Button variant="secondary" className={ui.smallButton} onClick={() => { void runTest() }} loading={test.pending}>测试连通性</Button>
         </div>
       ) : <span className="small muted">只读账号不能发起连通性测试。</span>}
       <div className={styles.testResult} role="status">
@@ -122,20 +135,24 @@ function profileSteps(config?: ProfileConfig): Step[] {
   return steps
 }
 
-function ProfileCard({ profile }: { profile: Profile }) {
-  const titleId = useId()
+function budgetLabel(budget?: Record<string, unknown>): string | undefined {
+  if (!budget) return undefined
+  const entries = Object.entries(budget)
+  if (!entries.length) return undefined
+  return `预算 ${entries.map(([key, value]) => `${key}: ${typeof value === 'object' ? JSON.stringify(value) : String(value)}`).join(' · ')}`
+}
+
+function ProfilePanel({ profile }: { profile: Profile }) {
   const config = profile.config
   const steps = useMemo(() => profileSteps(config), [config])
-  const budget = asRecord(config?.budget)
-  const budgetEntries = budget ? Object.entries(budget) : []
+  const budget = budgetLabel(asRecord(config?.budget))
 
   return (
-    <article className={styles.infoCard} aria-labelledby={titleId}>
-      <div className={styles.cardTitle}>
-        <span className="mono" id={titleId}>{profile.name}</span>
-        <Badge tone="neutral">只读</Badge>
-      </div>
-      <div className={styles.cardMeta}>
+    <Panel
+      title={<><span className={styles.profileTitle}>{profile.name}</span> <small>只读</small></>}
+      aside={budget ? <span className={styles.budget}>{budget}</span> : undefined}
+    >
+      <div className={styles.profileMeta}>
         <span>on_uncertain：{config?.on_uncertain || '不可用'}</span>
         <span>consensus：{config?.consensus ? '已配置' : '未配置'}</span>
         <span>agent：{config?.agent ? '已配置' : '未配置'}</span>
@@ -151,23 +168,18 @@ function ProfileCard({ profile }: { profile: Profile }) {
           ))}
         </ol>
       ) : <span className="small muted">配置未提供拓扑步骤。</span>}
-      {budgetEntries.length ? (
-        <div className={styles.budgetRow}>
-          {budgetEntries.map(([key, value]) => (
-            <span key={key}>{key}: {typeof value === 'object' ? JSON.stringify(value) : String(value)}</span>
-          ))}
-        </div>
-      ) : null}
       <details className={ui.disclosure}>
         <summary>查看完整档位配置</summary>
         <pre className={`pre ${ui.jsonBlock}`}>{formatJson(config)}</pre>
       </details>
-    </article>
+    </Panel>
   )
 }
 
 export function ModelsPage() {
   const canWrite = useCanWrite()
+  const providersId = useId()
+  const profilesId = useId()
   const providers = usePaginated<Provider>(
     ['providers', 'models'],
     (cursor) => listProviders(cursor),
@@ -187,10 +199,11 @@ export function ModelsPage() {
           description="来自平台配置文件，首版只读。API key 只从环境变量读取，界面不显示密钥值。"
         />
 
-        <Panel
-          title="Provider"
-          aside={providers.isSuccess ? `${providers.items.length}${providers.hasNextPage ? '+' : ''} 个` : undefined}
-        >
+        <section className={styles.section} aria-labelledby={providersId}>
+          <div className={styles.sectionHeader}>
+            <h2 className={styles.sectionTitle} id={providersId}>Provider</h2>
+            {providers.isSuccess ? <span className={styles.sectionAside}>{providers.items.length}{providers.hasNextPage ? '+' : ''} 个</span> : null}
+          </div>
           {providers.isPending ? <LoadingState /> : null}
           {providers.isError ? <ErrorState error={providers.error} onRetry={providers.retry} /> : null}
           {providers.isSuccess && providers.items.length === 0 ? <EmptyState title="平台还没有配置 provider" description="在服务端配置文件中添加 provider 并重启或热加载后，会显示在这里。" /> : null}
@@ -199,18 +212,28 @@ export function ModelsPage() {
               {providers.items.map((provider) => <ProviderCard key={provider.name} provider={provider} canWrite={canWrite} />)}
             </div>
           ) : null}
-          {providers.hasNextPage ? <Button variant="secondary" onClick={providers.fetchNextPage} loading={providers.isFetchingNextPage}>加载更多 Provider</Button> : null}
-        </Panel>
+          {providers.hasNextPage ? (
+            <div className={styles.loadMore}>
+              <Button variant="secondary" onClick={providers.fetchNextPage} loading={providers.isFetchingNextPage}>加载更多 Provider</Button>
+            </div>
+          ) : null}
+        </section>
 
-        <Panel title="评审档位" aside="定义来自平台配置，只读">
+        <section className={styles.section} aria-labelledby={profilesId}>
+          <div className={styles.sectionHeader}>
+            <h2 className={styles.sectionTitle} id={profilesId}>评审档位</h2>
+            <span className={styles.sectionAside}>定义来自平台配置，只读</span>
+          </div>
           {profiles.isPending ? <LoadingState /> : null}
           {profiles.isError ? <ErrorState error={profiles.error} onRetry={profiles.retry} /> : null}
           {profiles.isSuccess && profiles.items.length === 0 ? <EmptyState title="平台还没有评审档位配置" /> : null}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            {profiles.items.map((profile) => <ProfileCard key={profile.name} profile={profile} />)}
-          </div>
-          {profiles.hasNextPage ? <Button variant="secondary" onClick={profiles.fetchNextPage} loading={profiles.isFetchingNextPage}>加载更多档位</Button> : null}
-        </Panel>
+          {profiles.items.map((profile) => <ProfilePanel key={profile.name} profile={profile} />)}
+          {profiles.hasNextPage ? (
+            <div className={styles.loadMore}>
+              <Button variant="secondary" onClick={profiles.fetchNextPage} loading={profiles.isFetchingNextPage}>加载更多档位</Button>
+            </div>
+          ) : null}
+        </section>
       </div>
     </main>
   )

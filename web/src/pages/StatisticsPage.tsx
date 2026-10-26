@@ -3,13 +3,14 @@ import { useQuery } from '@tanstack/react-query'
 import { getStats, listProjects } from '../api/api'
 import type { DailyStats, Project, ProviderQualityRow, Stats } from '../api/types'
 import {
-  Badge, Button, EmptyState, ErrorState, LoadingState, Metric, PageHeader, Panel, Toolbar, ToolbarField,
+  Badge, Button, EmptyState, ErrorState, LoadingState, Metric, PageHeader, Panel, ToolbarField,
 } from '../components/ui'
 import { formatCost, formatNumber } from '../lib/format'
 import { usePaginated } from '../lib/hooks'
 import { formatMs, formatRatio, statNumber } from '../lib/stats'
 import ui from '../styles/ui.module.css'
 import styles from './pages.module.css'
+import insights from './insights.module.css'
 
 type Row = Record<string, unknown>
 
@@ -190,16 +191,20 @@ function parseProviderQuality(value: unknown): QualityState {
 function QualityRate({ numerator, denominator }: { numerator: number; denominator: number }) {
   if (denominator === 0) {
     return (
-      <div className={styles.tablePrimary}>
-        <span>无样本</span>
-        <span className={`mono small ${styles.tableMeta}`}>0 / 0</span>
+      <div className={insights.ratio}>
+        <span className={insights.ratioEmpty}>无样本</span>
+        <small>0 / 0</small>
       </div>
     )
   }
+  const ratio = Math.min(Math.max(numerator / denominator, 0), 1)
   return (
-    <div className={styles.tablePrimary}>
-      <span className="tabular">{formatRatio(numerator / denominator)}</span>
-      <span className={`mono small ${styles.tableMeta}`}>{formatNumber(numerator)} / {formatNumber(denominator)}</span>
+    <div className={insights.ratio}>
+      <b className="tabular">{formatRatio(ratio)}</b>
+      <span className={insights.ratioBar} aria-hidden="true">
+        <i className={insights.ratioFill} style={{ width: `${Number((ratio * 100).toFixed(2))}%` }} />
+      </span>
+      <small>{formatNumber(numerator)} / {formatNumber(denominator)}</small>
     </div>
   )
 }
@@ -207,7 +212,7 @@ function QualityRate({ numerator, denominator }: { numerator: number; denominato
 function ProposerQualityTable({ rows }: { rows: ProviderQualityRow[] }) {
   return (
     <div className="tableWrap">
-      <table className="dataTable" aria-label="按提出方统计的人工质量指标" style={{ minWidth: 760 }}>
+      <table className={`dataTable ${insights.min760}`} aria-label="按提出方统计的人工质量指标">
         <thead>
           <tr>
             <th scope="col">Provider</th>
@@ -242,7 +247,7 @@ function ProposerQualityTable({ rows }: { rows: ProviderQualityRow[] }) {
 function ChallengerQualityTable({ rows }: { rows: ProviderQualityRow[] }) {
   return (
     <div className="tableWrap">
-      <table className="dataTable" aria-label="按挑战方统计的人工质量指标" style={{ minWidth: 560 }}>
+      <table className={`dataTable ${insights.min560}`} aria-label="按挑战方统计的人工质量指标">
         <thead>
           <tr>
             <th scope="col">Provider</th>
@@ -295,13 +300,13 @@ function QualityPanel({ value }: { value: unknown }) {
         <EmptyState title="没有人工质量样本" description="筛选范围内没有可归因的提出或反驳记录；这是已统计的空结果，不是不可用。" />
       ) : (
         <>
-          <h3 className="small" style={providerTitleStyle}>提出方</h3>
+          <h3 className={insights.subTitle}>提出方</h3>
           {proposed.length ? (
             <ProposerQualityTable rows={proposed} />
           ) : (
             <p className="small muted">没有提出方样本。</p>
           )}
-          <h3 className="small" style={providerTitleStyle}>挑战方</h3>
+          <h3 className={insights.subTitle}>挑战方</h3>
           {refuted.length ? (
             <ChallengerQualityTable rows={refuted} />
           ) : (
@@ -501,7 +506,7 @@ function DimensionTable({ rows, emptyLabel }: { rows: Row[]; emptyLabel: string 
   if (!rows.length) return <EmptyState title={emptyLabel} description="stats API 没有返回该维度的数据。" />
   return (
     <div className="tableWrap">
-      <table className="dataTable" style={{ minWidth: Math.max(560, columns.length * 130) }}>
+      <table className={`dataTable ${insights.autoTable}`}>
         <thead><tr>{columns.map((column) => <th key={column} scope="col">{column}</th>)}</tr></thead>
         <tbody>
           {rows.map((row, index) => (
@@ -518,14 +523,14 @@ function DimensionTable({ rows, emptyLabel }: { rows: Row[]; emptyLabel: string 
 function ProviderAttribution({ providers }: { providers: ProviderFeedbackCounts[] | null }) {
   return (
     <>
-      <h3 className="small" style={providerTitleStyle}>按 provider 与角色归因</h3>
+      <h3 className={insights.subTitle}>按 provider 与角色归因</h3>
       {providers === null ? (
         <EmptyState title="按 provider 归因不可用" description="stats.feedback 没有 by_provider 字段；旧版服务端可能不返回归因。原始信号总数仍显示在上方。" />
       ) : providers.length === 0 ? (
         <EmptyState title="没有可归因的反馈" description="当前筛选范围内没有同时关联 finding 与挑战节点的反馈；summary、未关联或关联不一致的反馈不计入。" />
       ) : (
         <div className="tableWrap">
-          <table className="dataTable" style={{ minWidth: 480 }}>
+          <table className={`dataTable ${insights.min480}`}>
             <thead>
               <tr>
                 <th scope="col">Provider</th>
@@ -604,8 +609,8 @@ function FeedbackPanel({ value }: { value: unknown }) {
 function DailyTrendTable({ rows, label, countLabel }: { rows: DailyStats[]; label: string; countLabel: string }) {
   return (
     <div className="tableWrap">
-      <table className="dataTable" aria-label={label} style={{ minWidth: 640 }}>
-        <caption className="small" style={trendCaptionStyle}>
+      <table className={`dataTable ${insights.min640}`} aria-label={label}>
+        <caption className={`small ${insights.trendCaption}`}>
           按工作流创建时间归属 UTC 日；只显示有执行的日期，不补零。
         </caption>
         <thead>
@@ -642,6 +647,57 @@ function DimensionTrend({ trend, label, countLabel }: { trend: Trend; label: str
   return <DailyTrendTable rows={trend.rows} label={label} countLabel={countLabel} />
 }
 
+const CHART_W = 900
+const CHART_H = 200
+const CHART_GRID = [0.25, 0.5, 0.75, 1]
+
+// DailyRunsChart draws one bar per returned UTC day. Days without runs are
+// absent from stats.trend and stay absent here: the chart never fills gaps.
+export function DailyRunsChart({ rows }: { rows: DailyStats[] }) {
+  const peak = Math.max(0, ...rows.map((row) => row.runs))
+  const max = Math.max(1, peak)
+  const slot = CHART_W / rows.length
+  const width = Math.min(Math.max(slot - 14, 2), 56)
+  const labelEvery = Math.max(1, Math.ceil(rows.length / 8))
+  return (
+    <div className={insights.chartWrap}>
+      <svg
+        className={insights.chart}
+        viewBox={`0 0 ${CHART_W} ${CHART_H}`}
+        preserveAspectRatio="none"
+        role="img"
+        aria-label={`每日运行次数柱状图，共 ${rows.length} 个有执行的 UTC 日，数据见下方表格`}
+      >
+        {CHART_GRID.map((ratio) => (
+          <line
+            key={ratio}
+            className={insights.chartGrid}
+            x1="0"
+            x2={CHART_W}
+            y1={CHART_H - ratio * CHART_H}
+            y2={CHART_H - ratio * CHART_H}
+            vectorEffect="non-scaling-stroke"
+          />
+        ))}
+        {rows.map((row, index) => {
+          const height = (row.runs / max) * CHART_H
+          return (
+            <rect key={row.day} x={index * slot + (slot - width) / 2} y={CHART_H - height} width={width} height={height}>
+              <title>{`${row.day} · ${formatNumber(row.runs)} 次`}</title>
+            </rect>
+          )
+        })}
+      </svg>
+      <div className={insights.chartAxis} aria-hidden="true">
+        {rows.map((row, index) => <span key={row.day}>{index % labelEvery === 0 ? row.day.slice(5) : ''}</span>)}
+      </div>
+      <div className={insights.legend}>
+        <span><i />工作流次数 · UTC 日桶，无记录的日不补零 · 峰值 {formatNumber(peak)}</span>
+      </div>
+    </div>
+  )
+}
+
 function OverallTrend({ trend }: { trend: Trend }) {
   if (trend.kind === 'missing') {
     return <EmptyState title="每日趋势不可用" description="stats 响应没有 trend 字段；旧版服务端可能不返回每日趋势。" />
@@ -652,7 +708,12 @@ function OverallTrend({ trend }: { trend: Trend }) {
   if (trend.kind === 'empty') {
     return <EmptyState title="没有每日趋势" description="trend 为空表示筛选范围内没有执行；这是已统计的空结果，不是不可用。缺失日期不会补零。" />
   }
-  return <DailyTrendTable rows={trend.rows} label="每日运行趋势" countLabel="工作流次数" />
+  return (
+    <>
+      <DailyRunsChart rows={trend.rows} />
+      <DailyTrendTable rows={trend.rows} label="每日运行趋势" countLabel="工作流次数" />
+    </>
+  )
 }
 
 function ProjectStatsPanel({ value }: { value: unknown }) {
@@ -686,7 +747,7 @@ function ProjectStatsPanel({ value }: { value: unknown }) {
     <Panel title="项目统计" aside="按工作流创建时间 · 来自 stats.by_project">
       <p className="small muted">运行次数统计窗口内全部工作流（含评审与 onboarding）；BLOCKING 与已发布仍按项目工作流统计。</p>
       <div className="tableWrap">
-        <table className="dataTable" aria-label="按项目统计明细" style={{ minWidth: 920 }}>
+        <table className={`dataTable ${insights.min920}`} aria-label="按项目统计明细">
           <thead>
             <tr>
               <th scope="col">项目</th>
@@ -735,7 +796,7 @@ function ProjectStatsPanel({ value }: { value: unknown }) {
                   </tr>
                   {open ? (
                     <tr>
-                      <td colSpan={9} style={trendCellStyle}>
+                      <td colSpan={9} className={insights.trendCell}>
                         <div id={detailId} role="group" aria-label={`${label} 每日趋势`}>
                           <DimensionTrend trend={row.trend} label={`${label} 每日趋势`} countLabel="工作流次数" />
                         </div>
@@ -784,7 +845,7 @@ function GroupStatsPanel({ value, dimension }: { value: unknown; dimension: 'pro
   return (
     <Panel title={title} aside={`按已启动节点统计 · 来自 stats.by_${dimension}`}>
       <div className="tableWrap">
-        <table className="dataTable" aria-label={`按 ${dimension} 统计明细`} style={{ minWidth: 820 }}>
+        <table className={`dataTable ${insights.min820}`} aria-label={`按 ${dimension} 统计明细`}>
           <thead>
             <tr>
               <th scope="col">{dimension === 'provider' ? 'Provider' : 'Block'}</th>
@@ -824,7 +885,7 @@ function GroupStatsPanel({ value, dimension }: { value: unknown; dimension: 'pro
                   </tr>
                   {open ? (
                     <tr>
-                      <td colSpan={7} style={trendCellStyle}>
+                      <td colSpan={7} className={insights.trendCell}>
                         <div id={detailId} role="group" aria-label={`${row.key} 每日趋势`}>
                           <DimensionTrend trend={row.trend} label={`${row.key} 每日趋势`} countLabel="已启动节点数" />
                         </div>
@@ -865,7 +926,7 @@ function StatsContent({ stats }: { stats: Stats }) {
 
   return (
     <>
-      <div className={styles.statGrid}>
+      <div className={ui.metricStrip}>
         <Metric label="运行次数" value={runs === null ? '不可用' : runs} note={blocking === null ? '包含评审与 onboarding · BLOCKING 次数不可用' : `包含评审与 onboarding · BLOCKING ${blocking} 次`} />
         <Metric label="BLOCKING 比例" value={formatRatio(statNumber(stats, 'blocking_ratio'))} note="来自 stats.blocking_ratio" />
         <Metric label="已发布问题" value={published === null ? '不可用' : published} note="来自 stats.published" />
@@ -962,55 +1023,54 @@ export function StatisticsPage() {
         <PageHeader
           title="统计与反馈"
           description="按时间与项目查看运行统计、每日趋势和节点维度数据；不可用的值不会显示为零。"
-        />
-        <Panel title="筛选">
-          <Toolbar
-            actions={(
-              <>
-                {projects.hasNextPage ? (
-                  <Button
-                    variant="secondary"
-                    onClick={projects.fetchNextPage}
-                    loading={projects.isFetchingNextPage}
-                  >
-                    {projects.isFetchNextPageError ? '重试加载更多项目' : '加载更多项目'}
-                  </Button>
-                ) : null}
-                <Button variant="primary" onClick={apply}>应用</Button>
-              </>
-            )}
-          >
-            <ToolbarField label="开始日期">
-              <input className="input" name="from" type="date" value={fromDate} onChange={(event) => setFromDate(event.target.value)} />
-            </ToolbarField>
-            <ToolbarField label="结束日期">
-              <input className="input" name="to" type="date" value={toDate} onChange={(event) => setToDate(event.target.value)} />
-            </ToolbarField>
-            <ToolbarField label="项目">
-              <select className="select" name="project_id" value={projectId} onChange={(event) => setProjectId(event.target.value)}>
-                <option value="">全部项目</option>
-                {projects.items.map((project) => <option key={project.id} value={project.id}>{project.path_with_namespace}</option>)}
-              </select>
-            </ToolbarField>
-          </Toolbar>
-          {validation ? <span className={styles.resultError} role="alert">{validation}</span> : null}
-          {projects.isError ? (
-            <div className={styles.scopeBar}>
-              <span className="small muted">
-                {!projects.items.length
-                  ? '项目筛选列表加载失败，仍可查看全部项目统计。'
-                  : projects.isRefetchError
-                    ? '项目列表刷新失败；已加载的项目与当前选择仍保留。'
-                    : '更多项目加载失败；已加载的项目仍可选择。'}
-              </span>
-              {projects.items.length === 0 || projects.isRefetchError ? (
-                <Button variant="secondary" onClick={projects.refetch} loading={projects.isFetching}>
-                  {projects.items.length ? '重试刷新项目' : '重试加载项目'}
+          actions={(
+            <div className={insights.headerFilters} role="group" aria-label="筛选">
+              <ToolbarField label="开始日期">
+                <input className="input" name="from" type="date" value={fromDate} onChange={(event) => setFromDate(event.target.value)} />
+              </ToolbarField>
+              <ToolbarField label="结束日期">
+                <input className="input" name="to" type="date" value={toDate} onChange={(event) => setToDate(event.target.value)} />
+              </ToolbarField>
+              <ToolbarField label="项目">
+                <select className="select" name="project_id" value={projectId} onChange={(event) => setProjectId(event.target.value)}>
+                  <option value="">全部项目</option>
+                  {projects.items.map((project) => <option key={project.id} value={project.id}>{project.path_with_namespace}</option>)}
+                </select>
+              </ToolbarField>
+              {projects.hasNextPage ? (
+                <Button
+                  variant="secondary"
+                  onClick={projects.fetchNextPage}
+                  loading={projects.isFetchingNextPage}
+                >
+                  {projects.isFetchNextPageError ? '重试加载更多项目' : '加载更多项目'}
                 </Button>
               ) : null}
+              <Button variant="primary" onClick={apply}>应用</Button>
             </div>
-          ) : null}
-        </Panel>
+          )}
+        />
+        {validation || projects.isError ? (
+          <div className={insights.filterStatus}>
+            {validation ? <span className={styles.resultError} role="alert">{validation}</span> : null}
+            {projects.isError ? (
+              <>
+                <span className="small muted">
+                  {!projects.items.length
+                    ? '项目筛选列表加载失败，仍可查看全部项目统计。'
+                    : projects.isRefetchError
+                      ? '项目列表刷新失败；已加载的项目与当前选择仍保留。'
+                      : '更多项目加载失败；已加载的项目仍可选择。'}
+                </span>
+                {projects.items.length === 0 || projects.isRefetchError ? (
+                  <Button variant="secondary" onClick={projects.refetch} loading={projects.isFetching}>
+                    {projects.items.length ? '重试刷新项目' : '重试加载项目'}
+                  </Button>
+                ) : null}
+              </>
+            ) : null}
+          </div>
+        ) : null}
 
         {range && stats.isPending ? <LoadingState label="正在读取统计数据…" /> : null}
         {stats.isError ? <ErrorState error={stats.error} onRetry={() => { void stats.refetch() }} title="统计数据加载失败" /> : null}
@@ -1020,7 +1080,3 @@ export function StatisticsPage() {
     </main>
   )
 }
-
-const providerTitleStyle = { margin: '16px 0 8px', fontWeight: 600 } as const
-const trendCaptionStyle = { textAlign: 'left', padding: '0 10px 8px', color: 'var(--muted)' } as const
-const trendCellStyle = { padding: 12, background: 'var(--surface-2)' } as const
