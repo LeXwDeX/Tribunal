@@ -169,7 +169,7 @@ POST /api/v1/projects
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/v1/reviews` | 列表：`?project_id=&mr_iid=&status=&verdict=&publication_state=&profile=&trigger=&since=&limit=&cursor=`；所有筛选和项目授权过滤在服务端分页前应用 |
+| GET | `/api/v1/reviews` | 列表：`?project_id=&mr_iid=&status=&verdict=&publication_state=&profile=&trigger=&since=&limit=&cursor=`；所有筛选和项目授权过滤在服务端分页前应用；每项附 `nodes` 与 `findings_summary` |
 | POST | `/api/v1/projects/{id}/merge_requests/{iid}/reviews` | 项目 `manage` 手动触发：`{profile?, full?}` → `202 {job_id}` |
 | GET | `/api/v1/reviews/{wf_id}` | 工作流详情：基本信息 + `access` + 节点 + finding 统计 + 发布状态 |
 | GET | `/api/v1/reviews/{wf_id}/graph` | 节点和边，供 DAG 视图渲染 |
@@ -211,6 +211,25 @@ POST /api/v1/projects
 SSE 事件（`event:` 字段）：`node`（`{id, status, attempt}`）、`finding`（`{id, decision}`）、`workflow`（`{status, verdict, publication_state?, publication_error?}`）、`published`（`{kind, gitlab_id}`）。`workflow` 事件同时传播执行状态和发布状态；只有在 workflow 终态且 `publication_state` 为 `published`、`skipped`、`failed` 或空（旧数据）时，服务端才结束流。每轮轮询都重新认证并检查项目 grant；撤权、停用或 token 失效会关闭已打开的流。
 
 `mr_title` 从该工作流已存储的 dossier 快照读取；没有 dossier、数据为空或标题为空时省略，不在详情请求中调用 GitLab。`publications.commit_status` 从成功发布写入的 `status:<head_sha>:<state>` 发布键解析，只接受 `success` 或 `failed`；旧格式 `status:<head_sha>` 没有状态记录，此时字段缺失（unknown），不根据 verdict 猜测。SSE 仍由服务端每 2 秒轮询数据库生成，不是事件推送。
+
+评审列表响应为 `{reviews, next_cursor}`。每项保留工作流的扁平字段和 `duration_ms`，并附加 `nodes` 与 `findings_summary`，两者的形状和口径与详情完全一致：`nodes` 每项含 `id`、`kind`、`status`、`depends_on`（无依赖时省略），以及 `provider`、`attempt`、`duration_ms`，尚无节点时为 `[]`；`findings_summary` 的 `published`/`marked`/`dropped` 按 `decision` 计数，`by_severity` 按非空 `final_severity`、否则原始 `severity` 计数，并始终包含 `P0`、`P1`、`P2`、`info` 四个键。列表不返回 `access`、`mr_title`、`usage`、`publications`。服务端在已授权过滤并分页的结果上，按本页全部工作流 ID 各执行一次节点查询和一次 finding 分组计数查询（不按行 N+1）；空页不发起这两次查询。
+
+```json
+{
+  "reviews": [
+    {
+      "id": "0192f0c1-…", "project_id": 42, "mr_iid": 318, "status": "running",
+      "nodes": [
+        { "id": "plan", "kind": "plan", "status": "completed", "provider": "claude", "attempt": 1, "duration_ms": 8120 },
+        { "id": "review.std.p1", "kind": "review.standards", "status": "running", "depends_on": ["plan"], "attempt": 1 }
+      ],
+      "findings_summary": { "published": 0, "marked": 0, "dropped": 0, "by_severity": { "P0": 0, "P1": 0, "P2": 0, "info": 0 } },
+      "created_at": "…"
+    }
+  ],
+  "next_cursor": ""
+}
+```
 
 `GET /api/v1/reviews` 的 `publication_state` 只接受 `pending`、`published`、`skipped`、`failed`，其他值返回 `400`；筛选在分页前应用。`publication_state` 独立于 `status`，取值为 `pending`、`published`、`skipped`、`failed`。`pending` 表示评审执行已结束但 GitLab 发布尚未完成，可在重启或手动重试后继续；`published` 表示汇总评论/失败摘要已成功写入；`skipped` 表示 stale（head、配置或 prompt 变化）、取消/被新代次替换，或关闭 failure note，不会自动重发；`failed` 是永久发布失败，需要手动 republish。`publication_error` 是有界、脱敏的失败或跳过原因，不含上游响应正文或凭据。发布状态与 GitLab commit status 不同：BLOCKING 的 `commit_status=failed` 是评审结论，不是发布失败；只有 PASS 会写 success，INCOMPLETE 也不会写 success。没有 dossier 的工作流和旧数据不返回 `publication_state`；界面把缺失值显示为“不表示发布成功”，不能当作 published。
 

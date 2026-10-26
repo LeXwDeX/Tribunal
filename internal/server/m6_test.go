@@ -44,6 +44,13 @@ type fakeReviewStore struct {
 	lastCallFilter store.LLMCallFilter
 	lastStats      store.StatsFilter
 	accessByUser   map[int64]map[int64]bool
+
+	// Per-workflow and batched read counters let list tests prove the page is
+	// summarized with one query per kind of data instead of one per row.
+	nodeReads         int
+	findingReads      int
+	nodeBatchReads    [][]string
+	findingCountReads [][]string
 }
 
 func newFakeReviewStore() *fakeReviewStore {
@@ -173,10 +180,60 @@ func (f *fakeReviewStore) GetWorkflowDossier(_ context.Context, workflowID strin
 func (f *fakeReviewStore) GetWorkflowNodes(ctx context.Context, workflowID string) ([]store.WorkflowNode, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.nodeReads++
 	if _, ok := f.nodes[workflowID]; !ok {
 		return nil, store.ErrNotFound
 	}
 	return append([]store.WorkflowNode(nil), f.nodes[workflowID]...), nil
+}
+
+func (f *fakeReviewStore) ListWorkflowNodesByWorkflow(_ context.Context, workflowIDs []string) (map[string][]store.WorkflowNode, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nodeBatchReads = append(f.nodeBatchReads, append([]string(nil), workflowIDs...))
+	out := make(map[string][]store.WorkflowNode, len(workflowIDs))
+	for _, id := range workflowIDs {
+		if nodes, ok := f.nodes[id]; ok && len(nodes) > 0 {
+			out[id] = append([]store.WorkflowNode(nil), nodes...)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeReviewStore) CountFindingsByWorkflow(_ context.Context, workflowIDs []string) ([]store.FindingCount, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.findingCountReads = append(f.findingCountReads, append([]string(nil), workflowIDs...))
+	type key struct{ workflow, decision, severity string }
+	counts := map[key]int{}
+	order := []key{}
+	for _, id := range workflowIDs {
+		for _, finding := range f.findings[id] {
+			severity := finding.FinalSeverity
+			if severity == "" {
+				severity = finding.Severity
+			}
+			k := key{id, finding.Decision, severity}
+			if _, ok := counts[k]; !ok {
+				order = append(order, k)
+			}
+			counts[k]++
+		}
+	}
+	out := make([]store.FindingCount, 0, len(order))
+	for _, k := range order {
+		out = append(out, store.FindingCount{WorkflowID: k.workflow, Decision: k.decision, Severity: k.severity, Count: counts[k]})
+	}
+	return out, nil
+}
+
+func (f *fakeReviewStore) resetReadCounters() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nodeReads = 0
+	f.findingReads = 0
+	f.nodeBatchReads = nil
+	f.findingCountReads = nil
 }
 
 func (f *fakeReviewStore) setNodes(workflowID string, nodes ...store.WorkflowNode) {
@@ -210,6 +267,7 @@ func (f *fakeReviewStore) setCalls(workflowID, nodeID string, calls ...store.LLM
 func (f *fakeReviewStore) ListFindings(ctx context.Context, filter store.FindingFilter) ([]store.Finding, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.findingReads++
 	items := f.findings[filter.WorkflowID]
 	out := make([]store.Finding, 0, len(items))
 	for _, finding := range items {
