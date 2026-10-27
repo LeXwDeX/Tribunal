@@ -105,7 +105,8 @@ func NewWebhookService(cfg WebhookServiceConfig) (*WebhookService, error) {
 }
 
 // Handle authenticates and records one delivery. A storage error is returned
-// with an ignored result; the HTTP layer still responds 200.
+// with an ignored result and no delivery record, so the HTTP layer answers 503
+// and a resend with the same event UUID is accepted.
 func (s *WebhookService) Handle(ctx context.Context, req WebhookRequest) (WebhookResult, error) {
 	payload, err := gitlab.ParseWebhook(req.Event, req.UUID, req.Token, req.Body)
 	if err != nil {

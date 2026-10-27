@@ -619,6 +619,21 @@ func TestWebhookStorageFailure(t *testing.T) {
 	}
 }
 
+func TestWebhookStorageFailureAllowsResendWithSameUUID(t *testing.T) {
+	f := newWebhookFixture(t, "{}")
+	eventUUID := uuid.NewString()
+	body := mrBody(42, 7, nil)
+	f.rec.recErr = errors.New("disk full")
+	if _, err := f.send("Merge Request Hook", eventUUID, "whsec-test", body); err == nil {
+		t.Fatal("expected storage error")
+	}
+	f.rec.recErr = nil
+	result, err := f.send("Merge Request Hook", eventUUID, "whsec-test", body)
+	if err != nil || !result.Accepted || result.JobID == "" {
+		t.Fatalf("resend result = %+v, err = %v", result, err)
+	}
+}
+
 func TestWebhookStoredSettingsInvalid(t *testing.T) {
 	f := newWebhookFixture(t, `{"unknown_field":true}`)
 	result, err := f.request("Merge Request Hook", "whsec-test", mrBody(42, 7, nil))
