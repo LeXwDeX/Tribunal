@@ -46,7 +46,7 @@
 
 ## 证据
 
-`artifacts/delivery/2026-10-24-review-repairs/checks/simulation/` 包含：
+当时执行环境的本地证据目录（未纳入仓库）包含：
 
 - `result.json`、`upgrade-result.json`：逐项 PASS/FAIL 与耗时。
 - `run.mjs`、`run-upgrade.mjs`、`seed.sql`：可复现脚本和合成数据定义。

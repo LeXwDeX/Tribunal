@@ -87,6 +87,7 @@ CI runs the same `go`, `web` and `docker` jobs on every PR and on `main`.
 ## Delivery
 
 - One goal maps to one Issue (Why / Scope / Approach / Acceptance) and one PR. Every commit carries an `Issue: #N` trailer. Squash-merge only after CI is green, then confirm the Issue closed.
+- Before merging, bring the branch up to date with the latest `main` and wait for CI to pass on the new head. A green run on an outdated base does not count: two PRs can each pass alone and still break `main` together.
 - Do not create branches to host screenshots or other assets. Attach UI screenshots to the Issue through the GitHub web UI; if that is not possible, describe the checks in the PR instead.
 - Add user-visible changes to the `Unreleased` or upcoming version section of `CHANGELOG.md`.
 - Codex review comments are optional input. Do not block a merge waiting for a Codex re-run.
