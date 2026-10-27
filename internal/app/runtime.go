@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/errclass"
 	"github.com/LeXwDeX/tribunal/internal/jobs"
 	"github.com/LeXwDeX/tribunal/internal/llm"
 	"github.com/LeXwDeX/tribunal/internal/mcp"
@@ -562,7 +563,7 @@ func (r *Runtime) Handlers() map[string]jobs.Handler {
 // publications. It must be called after the job worker starts.
 func (r *Runtime) Recover(ctx context.Context) error {
 	if err := r.engine.Recover(ctx); err != nil {
-		r.logger.Warn("workflow recovery failed", "error", err.Error())
+		r.logger.Warn("workflow recovery failed", "error_class", errclass.Of(err))
 	}
 	return r.reviews.Recover(ctx)
 }
@@ -585,7 +586,7 @@ func (r *Runtime) reconcileReviewSideEffects(ctx context.Context, interval time.
 			return
 		case <-ticker.C:
 			if err := r.reviews.ReconcileSideEffects(ctx); err != nil {
-				r.logger.Warn("review side-effect reconciliation failed", "error", err.Error())
+				r.logger.Warn("review side-effect reconciliation failed", "error_class", errclass.Of(err))
 			}
 		}
 	}
