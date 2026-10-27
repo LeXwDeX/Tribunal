@@ -96,9 +96,3 @@ func (r *replayRecorder) body(index int) string {
 	}
 	return string(r.seen[index].Body)
 }
-
-func (r *replayRecorder) count() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return len(r.seen)
-}

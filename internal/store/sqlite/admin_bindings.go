@@ -38,6 +38,19 @@ func (s *Store) BindAdminUsername(ctx context.Context, username string, userID i
 	return s.adminBindingOwner(ctx, name)
 }
 
+// AdminBindingOwner reports the GitLab user ID bound to a username-form
+// bootstrap admin entry without creating a binding.
+func (s *Store) AdminBindingOwner(ctx context.Context, username string) (int64, bool, error) {
+	owner, err := s.adminBindingOwner(ctx, strings.ToLower(strings.TrimSpace(username)))
+	if errors.Is(err, errNoAdminBinding) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return owner, true, nil
+}
+
 var errNoAdminBinding = errors.New("sqlite: no admin binding")
 
 func (s *Store) adminBindingOwner(ctx context.Context, name string) (int64, error) {

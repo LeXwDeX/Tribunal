@@ -137,7 +137,7 @@ func TestCandidateActivatesOnceAndSkipsRefilter(t *testing.T) {
 	if manual.ID == "" {
 		t.Fatal("manual review job")
 	}
-	manual = f.runClaimedReview(t)
+	f.runClaimedReview(t)
 	notes := f.gitlab.noteCount()
 
 	f.setMRDraft(true)

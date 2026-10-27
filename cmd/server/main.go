@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -133,6 +134,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 	defer db.Close()
 	logger.Info("storage opened")
+	warnUsernameBootstrapAdmins(ctx, logger, cfg.Auth.BootstrapAdmins, db.AdminBindingOwner)
 
 	cipher, err := secret.New(key)
 	if err != nil {
@@ -400,6 +402,26 @@ func warnDeprecatedEnv(logger *slog.Logger) {
 		}
 		logger.Warn("deprecated environment variable is configured; prefer "+deprecation.replacement+deprecation.detail,
 			"legacy", deprecation.legacy)
+	}
+}
+
+// warnUsernameBootstrapAdmins logs one deprecation warning per username-form
+// bootstrap_admins entry. It logs the entry index, never the username, and
+// names the id:<n> replacement when the username is already bound.
+func warnUsernameBootstrapAdmins(ctx context.Context, logger *slog.Logger, entries []string,
+	lookup func(context.Context, string) (int64, bool, error)) {
+	auth := config.AuthConfig{BootstrapAdmins: entries}
+	for _, i := range auth.UsernameBootstrapAdmins() {
+		const msg = "auth.bootstrap_admins username entry is deprecated and will be removed in the next major release; use id:<GitLab user id>"
+		owner, ok, err := lookup(ctx, strings.ToLower(strings.TrimSpace(entries[i])))
+		switch {
+		case err != nil:
+			logger.Warn(msg, "index", i, "binding", "unavailable")
+		case ok:
+			logger.Warn(msg, "index", i, "replacement", "id:"+strconv.FormatInt(owner, 10))
+		default:
+			logger.Warn(msg, "index", i, "binding", "none")
+		}
 	}
 }
 

@@ -19,7 +19,6 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 )
@@ -528,9 +527,13 @@ func isNoticeName(name string) bool {
 }
 
 func goStandardLibrary() ([]byte, error) {
-	goroot := runtime.GOROOT()
+	out, err := exec.Command("go", "env", "GOROOT").Output()
+	if err != nil {
+		return nil, fmt.Errorf("go standard library: go env GOROOT: %w", err)
+	}
+	goroot := strings.TrimSpace(string(out))
 	if goroot == "" {
-		return nil, errors.New("Go standard library: GOROOT is empty")
+		return nil, errors.New("go standard library: GOROOT is empty")
 	}
 	candidates := []string{filepath.Join(goroot, "LICENSE")}
 	// Some distro layouts keep the Go LICENSE one level above GOROOT.
@@ -543,24 +546,24 @@ func goStandardLibrary() ([]byte, error) {
 			continue
 		}
 		if err != nil {
-			return nil, fmt.Errorf("Go standard library: %w", err)
+			return nil, fmt.Errorf("go standard library: %w", err)
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			return nil, fmt.Errorf("Go standard library: %s is a symlink", candidate)
+			return nil, fmt.Errorf("go standard library: %s is a symlink", candidate)
 		}
 		if !info.Mode().IsRegular() {
 			continue
 		}
 		data, err := os.ReadFile(candidate)
 		if err != nil {
-			return nil, fmt.Errorf("Go standard library: %w", err)
+			return nil, fmt.Errorf("go standard library: %w", err)
 		}
 		if len(data) == 0 {
 			continue
 		}
 		return data, nil
 	}
-	return nil, fmt.Errorf("Go standard library: no readable LICENSE at GOROOT %s", goroot)
+	return nil, fmt.Errorf("go standard library: no readable LICENSE at GOROOT %s", goroot)
 }
 
 func readManagedFile(dir, name string) ([]byte, error) {

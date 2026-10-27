@@ -8,16 +8,21 @@
 
 - **评审列表返回 MR 标题**：`GET /api/v1/reviews` 每项增加 `mr_title`，控制台的评审列表和总览显示标题。标题在保存评审 dossier 时写入新列 `workflow_dossiers.mr_title`（迁移 `0016_dossier_mr_title`，只追加列），列表按页一次批量读取，不请求 GitLab。升级前已有的评审没有该列的值，接口省略 `mr_title`，控制台继续显示 `!iid`（[#101](https://github.com/LeXwDeX/Tribunal/issues/101)）。
 
-### 已解决
-
-- v1.1.0 已知限制「评审列表接口不返回 MR 标题」：见上方新增条目（[#101](https://github.com/LeXwDeX/Tribunal/issues/101)）。
-
 ### 变更
 
 - **Webhook 存储失败改返回 503**：查项目、写投递记录或入队失败时，`POST /webhooks/gitlab` 由 200 改为 503，响应体仍是 `{"ignored":"storage_error","request_id":...}`，日志带脱敏的失败类别。GitLab 不会自动重试失败的投递，但会在 hook 的「Recent events」里记为失败，可以用 Resend request 重发，同一事件 UUID 会被正常受理。GitLab 连续收到失败响应时可能自动停用 hook，需要关注 GitLab 端的 hook 状态。输入错误、未登记项目、重复投递等情况仍返回 200（[#99](https://github.com/LeXwDeX/Tribunal/issues/99)）。
 - **全局会话上限优先保留管理员**：全局 4096 个会话的兜底上限触发时，先淘汰非管理员的最旧会话，只有剩下的会话全部属于管理员时才淘汰管理员的最旧会话。角色按当前的 `bootstrap_admins` 判断：服务启动时会按配置刷新已存用户的角色，会话被使用时也会刷新，所以改了配置后，不需要用户重新登录。每个用户 10 个会话的上限不变，无需迁移（[#102](https://github.com/LeXwDeX/Tribunal/issues/102)）。
+- **CI 接入静态分析与漏洞扫描**：go job 新增固定版本的 `staticcheck` 和 `govulncheck`，并清理了现有告警。`go.mod` 增加 `toolchain go1.26.10`，本地开发和 CI 不再用 go1.26.0 构建（该版本有 31 个可达的标准库漏洞）；发布镜像本来就是 1.26.10，不受影响（[#106](https://github.com/LeXwDeX/Tribunal/issues/106)）。
 - **日志不再记录原始错误文本**：工作区、评审副作用、运行时恢复、清理、发布状态、bootstrap 管理员绑定和启动恢复等日志不再输出 `error`（原始错误），改为 `error_class` 脱敏类别并保留项目、MR、工作流等标识字段；任务「settled without retry」日志的 `reason` 字段也改为 `error_class`（如 `mr_closed`、`review_superseded`、`permanent_job`）。依赖原 `error`/`reason` 字段的日志检索需要调整。新增 `scripts/logcheck`，`go test ./...` 会拒绝在 logger 调用里记录 `err` 或 `err.Error()`（[#107](https://github.com/LeXwDeX/Tribunal/issues/107)）。
 - **启动时独占数据目录**：服务在打开 SQLite 之前对数据库所在目录的 `tribunal.lock`（容器内 `/app/data/tribunal.lock`）加 `flock` 独占锁。第二个实例误用同一数据目录或数据卷时，记录带锁文件路径的错误日志并以退出码 1 退出，不再与第一个实例同时跑恢复、worker 或发布。锁随进程退出释放，崩溃后无需清理。v1.1.0 已知限制中「多个服务进程共用一个数据库时仍可能重复发布」改由启动锁防护。锁只在 Linux、macOS、BSD 上生效，Windows 不支持；网络文件系统上的数据目录不受保护（[#104](https://github.com/LeXwDeX/Tribunal/issues/104)）。
+
+### 弃用
+
+- **`bootstrap_admins` 用户名写法弃用**：`auth.bootstrap_admins` 里的 GitLab 用户名条目仍然可用，但启动时每个条目记一条弃用告警。告警只含条目序号，不含用户名；该用户名已绑定时同时给出可以直接替换的 `id:<N>`。示例配置只保留 `id:` 写法。计划在下一个大版本（v2.0.0）移除用户名写法，迁移步骤见 [部署与运维](docs/operations.md#bootstrap_admins-用户名写法弃用与迁移)（[#103](https://github.com/LeXwDeX/Tribunal/issues/103)）。
+
+### 已解决
+
+- v1.1.0 已知限制「评审列表接口不返回 MR 标题」：见上方新增条目（[#101](https://github.com/LeXwDeX/Tribunal/issues/101)）。
 
 ## [1.1.0] - 2026-10-26
 

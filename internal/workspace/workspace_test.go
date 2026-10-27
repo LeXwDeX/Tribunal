@@ -436,7 +436,7 @@ func TestGetRejectsNonPositiveIDs(t *testing.T) {
 	if m.Get(0) != nil || m.Get(-1) != nil {
 		t.Fatal("Get accepted a non-positive project ID")
 	}
-	if m.Get(1) != m.Get(1) {
+	if first := m.Get(1); first != m.Get(1) {
 		t.Fatal("Get returned different workspaces for one project")
 	}
 }

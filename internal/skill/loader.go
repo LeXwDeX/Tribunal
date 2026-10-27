@@ -388,17 +388,6 @@ func safeResourcePath(name string) bool {
 	return true
 }
 
-func boundedText(text string, max int) (string, bool) {
-	if len(text) <= max {
-		return text, false
-	}
-	text = text[:max]
-	for len(text) > 0 && !utf8.ValidString(text) {
-		text = text[:len(text)-1]
-	}
-	return text, true
-}
-
 func readFileBounded(root *os.Root, name string) ([]byte, error) {
 	info, err := root.Lstat(name)
 	if err != nil {

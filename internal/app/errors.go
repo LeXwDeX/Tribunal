@@ -118,11 +118,3 @@ func upstreamError(status int) *Error {
 func internalError() *Error {
 	return &Error{Code: "internal", Message: "internal error"}
 }
-
-func asError(err error) *Error {
-	var appErr *Error
-	if errors.As(err, &appErr) {
-		return appErr
-	}
-	return internalError()
-}

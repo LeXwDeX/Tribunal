@@ -46,3 +46,19 @@ func TestBindAdminUsernameValidation(t *testing.T) {
 		t.Error("non-positive user id was accepted")
 	}
 }
+
+func TestAdminBindingOwner(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	s := openTestStore(t, clock)
+	if _, ok, err := s.AdminBindingOwner(ctx, "alice"); err != nil || ok {
+		t.Fatalf("unbound owner ok=%v err=%v", ok, err)
+	}
+	if _, err := s.BindAdminUsername(ctx, "alice", 7, clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	owner, ok, err := s.AdminBindingOwner(ctx, " Alice ")
+	if err != nil || !ok || owner != 7 {
+		t.Fatalf("owner=%d ok=%v err=%v, want 7", owner, ok, err)
+	}
+}
