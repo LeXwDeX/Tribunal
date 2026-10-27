@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"io"
 	"net/http"
@@ -913,5 +914,60 @@ func TestUsernameAdminFailsClosedWithoutBindingStore(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "cannot verify bootstrap admin username") {
 		t.Fatalf("missing binding store was not logged: %s", logs.String())
+	}
+}
+
+func storedUserRole(t *testing.T, dsn string, userID int64) string {
+	t.Helper()
+	// The sqlite package registers the driver; a second read-only handle
+	// avoids adding a role accessor to the store just for tests.
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	var role string
+	if err := db.QueryRow(`SELECT role FROM users WHERE id = ?`, userID).Scan(&role); err != nil {
+		t.Fatalf("read user %d role: %v", userID, err)
+	}
+	return role
+}
+
+// Session eviction ranks sessions by the stored platform role, so the stored
+// role must follow bootstrap_admins after a restart even without a new login.
+func TestStoredRolesFollowBootstrapAdminsOnStartup(t *testing.T) {
+	env := newAuthEnv(t)
+	env.loginAs(env.client(), "code-admin")
+	env.loginAs(env.client(), "code-viewer")
+
+	env.admins = []string{"id:8"}
+	env.restart()
+
+	if role := storedUserRole(t, env.dsn, 7); role != roleViewer {
+		t.Fatalf("removed admin stored role = %q, want viewer", role)
+	}
+	if role := storedUserRole(t, env.dsn, 8); role != roleAdmin {
+		t.Fatalf("promoted admin stored role = %q, want admin", role)
+	}
+}
+
+// A username-form admin is only bound on first use, so its stored role is
+// refreshed when an existing session resolves the current role.
+func TestStoredRoleRefreshedWhenSessionRoleChanges(t *testing.T) {
+	env := newAuthEnv(t)
+	cookie := env.loginAs(env.client(), "code-viewer")
+
+	env.admins = []string{"bob"}
+	env.restart()
+	if role := storedUserRole(t, env.dsn, 8); role != roleViewer {
+		t.Fatalf("unbound username admin stored role = %q, want viewer before use", role)
+	}
+
+	me := env.request(env.clientWithCookie(cookie), http.MethodGet, "/api/v1/me", nil, nil)
+	if role := decodeMap(t, me.body)["role"]; role != roleAdmin {
+		t.Fatalf("session role = %v, want admin", role)
+	}
+	if role := storedUserRole(t, env.dsn, 8); role != roleAdmin {
+		t.Fatalf("stored role after session use = %q, want admin", role)
 	}
 }

@@ -15,7 +15,8 @@ type Session struct {
 }
 
 // Default session limits. PerUser keeps one account from evicting other
-// users by logging in repeatedly; Total is only a storage backstop.
+// users by logging in repeatedly; Total is only a storage backstop that
+// evicts non-admin sessions before admin sessions.
 const (
 	DefaultSessionsPerUser = 10
 	DefaultSessionsTotal   = 4096

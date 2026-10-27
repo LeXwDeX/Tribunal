@@ -150,6 +150,77 @@ func TestSessionTotalLimitIsBackstop(t *testing.T) {
 	}
 }
 
+func TestSessionTotalLimitEvictsViewersBeforeAdmins(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	s := openTestStore(t, clock)
+	limits := store.SessionLimits{PerUser: 10, Total: 3}
+	admin := func(token string, id int64) store.Session {
+		session := sessionFor(token, id, "admin"+token, clock.Now())
+		session.Role = "admin"
+		return session
+	}
+	// The admin sessions are the oldest, so plain age-based eviction would
+	// remove them first.
+	for _, session := range []store.Session{
+		admin("admin-1", 1),
+		admin("admin-2", 2),
+		sessionFor("viewer-1", 11, "viewer1", clock.Now()),
+	} {
+		if err := s.CreateSession(ctx, session, limits); err != nil {
+			t.Fatalf("CreateSession(seed): %v", err)
+		}
+		clock.Advance(time.Second)
+	}
+	for _, token := range []string{"viewer-2", "viewer-3"} {
+		if err := s.CreateSession(ctx, sessionFor(token, 12, "viewer2", clock.Now()), limits); err != nil {
+			t.Fatalf("CreateSession(%s): %v", token, err)
+		}
+		clock.Advance(time.Second)
+	}
+
+	if got := rowCount(t, s, `SELECT COUNT(*) FROM sessions`); got != 3 {
+		t.Fatalf("session count = %d, want 3", got)
+	}
+	for _, token := range []string{"admin-1", "admin-2", "viewer-3"} {
+		if _, err := s.GetSession(ctx, sessionHash(token), clock.Now()); err != nil {
+			t.Fatalf("session %s was evicted: %v", token, err)
+		}
+	}
+	for _, token := range []string{"viewer-1", "viewer-2"} {
+		if _, err := s.GetSession(ctx, sessionHash(token), clock.Now()); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("oldest viewer session %s was not evicted: %v", token, err)
+		}
+	}
+}
+
+func TestSessionTotalLimitEvictsOldestAdminWhenAllAreAdmins(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	s := openTestStore(t, clock)
+	limits := store.SessionLimits{PerUser: 10, Total: 2}
+	for i, token := range []string{"admin-1", "admin-2", "admin-3"} {
+		session := sessionFor(token, int64(i+1), "admin"+token, clock.Now())
+		session.Role = "admin"
+		if err := s.CreateSession(ctx, session, limits); err != nil {
+			t.Fatalf("CreateSession(%s): %v", token, err)
+		}
+		clock.Advance(time.Second)
+	}
+
+	if got := rowCount(t, s, `SELECT COUNT(*) FROM sessions`); got != 2 {
+		t.Fatalf("session count = %d, want 2", got)
+	}
+	if _, err := s.GetSession(ctx, sessionHash("admin-1"), clock.Now()); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("oldest admin session was not evicted: %v", err)
+	}
+	for _, token := range []string{"admin-2", "admin-3"} {
+		if _, err := s.GetSession(ctx, sessionHash(token), clock.Now()); err != nil {
+			t.Fatalf("session %s: %v", token, err)
+		}
+	}
+}
+
 func TestSessionLimitsDefaults(t *testing.T) {
 	ctx := context.Background()
 	clock := newFakeClock()
@@ -293,4 +364,52 @@ func migrationVersionForTest(t *testing.T, name string) int {
 		t.Fatalf("migrationVersion(%s): %v", name, err)
 	}
 	return version
+}
+
+func TestSyncPlatformRoles(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	s := openTestStore(t, clock)
+	seed := []store.Session{
+		testSession("former-admin", clock.Now(), time.Hour), // id 7, admin
+		sessionFor("promoted", 8, "bob", clock.Now()),       // viewer
+		sessionFor("bound", 9, "carol", clock.Now()),        // viewer
+		sessionFor("renamed", 10, "dave", clock.Now()),      // viewer
+	}
+	for _, session := range seed {
+		if err := s.CreateSession(ctx, session, store.SessionLimits{}); err != nil {
+			t.Fatalf("CreateSession: %v", err)
+		}
+	}
+	if _, err := s.BindAdminUsername(ctx, "carol", 9, clock.Now()); err != nil {
+		t.Fatalf("BindAdminUsername(carol): %v", err)
+	}
+	// dave's username is bound to another account, so dave stays a viewer.
+	if _, err := s.BindAdminUsername(ctx, "dave", 99, clock.Now()); err != nil {
+		t.Fatalf("BindAdminUsername(dave): %v", err)
+	}
+
+	if err := s.SyncPlatformRoles(ctx, []int64{8}, []string{"carol", "dave"}); err != nil {
+		t.Fatalf("SyncPlatformRoles: %v", err)
+	}
+	want := map[int64]string{7: "viewer", 8: "admin", 9: "admin", 10: "viewer"}
+	for id, role := range want {
+		var got string
+		if err := s.db.QueryRow(`SELECT role FROM users WHERE id = ?`, id).Scan(&got); err != nil {
+			t.Fatalf("read role %d: %v", id, err)
+		}
+		if got != role {
+			t.Fatalf("user %d role = %q, want %q", id, got, role)
+		}
+	}
+
+	if err := s.SetPlatformRole(ctx, 7, "admin"); err != nil {
+		t.Fatalf("SetPlatformRole: %v", err)
+	}
+	if got := rowCount(t, s, `SELECT COUNT(*) FROM users WHERE id = 7 AND role = 'admin'`); got != 1 {
+		t.Fatalf("SetPlatformRole did not update the stored role")
+	}
+	if err := s.SetPlatformRole(ctx, 7, "owner"); err == nil {
+		t.Fatalf("SetPlatformRole accepted an invalid role")
+	}
 }
