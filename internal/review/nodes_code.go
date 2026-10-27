@@ -571,7 +571,7 @@ func (e *Executor) executeAdjudicate(ctx context.Context, in dag.NodeInput) (dag
 	if err != nil {
 		return dag.NodeOutput{}, err
 	}
-	out := AdjudicateOut{Groups: result.Groups, Warnings: result.Warnings, Unresolved: result.Unresolved}
+	out := AdjudicateOut(result)
 	if out.Groups == nil {
 		out.Groups = []Group{}
 	}

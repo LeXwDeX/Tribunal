@@ -236,7 +236,7 @@ func decodeDefaultGrant(detail string) DefaultGrant {
 	if json.Unmarshal([]byte(detail), &snapshot) != nil {
 		return DefaultGrant{}
 	}
-	return DefaultGrant{MCPTools: snapshot.MCPTools, Skills: snapshot.Skills}
+	return DefaultGrant(snapshot)
 }
 
 // grant merges one default grant into a default-owned platform binding,

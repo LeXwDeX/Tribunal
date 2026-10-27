@@ -68,24 +68,6 @@ func streamEventsAs(t *testing.T, env *m6Env, client *m6Client, workflowID strin
 	return resp, events
 }
 
-func collectEvents(t *testing.T, events <-chan sseEvent, want int) []sseEvent {
-	t.Helper()
-	collected := make([]sseEvent, 0, want)
-	timeout := time.After(5 * time.Second)
-	for len(collected) < want {
-		select {
-		case event, ok := <-events:
-			if !ok {
-				return collected
-			}
-			collected = append(collected, event)
-		case <-timeout:
-			t.Fatalf("timed out after %d/%d events", len(collected), want)
-		}
-	}
-	return collected
-}
-
 func drainEvents(t *testing.T, events <-chan sseEvent) []sseEvent {
 	t.Helper()
 	collected := make([]sseEvent, 0)

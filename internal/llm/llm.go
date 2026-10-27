@@ -178,12 +178,7 @@ func normalizeEndpoint(raw string) string {
 
 // resolveRequest applies provider defaults without mutating the caller request.
 func resolveRequest(cfg providerDefaults, req *Request) resolvedRequest {
-	out := resolvedRequest{
-		maxTokens:    cfg.maxTokens,
-		temperature:  cfg.temperature,
-		effort:       cfg.effort,
-		budgetTokens: cfg.budgetTokens,
-	}
+	out := resolvedRequest(cfg)
 	if req.MaxTokens > 0 {
 		out.maxTokens = req.MaxTokens
 	}

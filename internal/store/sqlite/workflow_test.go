@@ -186,7 +186,7 @@ func TestWorkflowEventStoreReplayAndRecovery(t *testing.T) {
 
 	clock.Advance(time.Second)
 	rev = mustAppendEvent(t, st, wfID, rev, queuedEvent(t, "b", 1, clock.Now()))
-	rev = mustAppendEvent(t, st, wfID, rev, startedEvent(t, "b", 1, "p", "m", clock.Now()))
+	mustAppendEvent(t, st, wfID, rev, startedEvent(t, "b", 1, "p", "m", clock.Now()))
 	if err := st.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}

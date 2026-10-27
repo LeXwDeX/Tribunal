@@ -680,8 +680,7 @@ func (f *fakeExtensions) UpsertBlockBinding(ctx context.Context, in BlockBinding
 	if f.err != nil {
 		return nil, f.err
 	}
-	binding := BlockBinding{Scope: in.Scope, ProjectID: in.ProjectID, Block: in.Block,
-		MCPTools: in.MCPTools, Skills: in.Skills}
+	binding := BlockBinding(in)
 	f.bindings = append(f.bindings, binding)
 	return &binding, nil
 }
@@ -954,12 +953,6 @@ func (c *m6Client) json(method, path string, body any) apiResponse {
 		}
 	}
 	return c.request(method, path, raw, map[string]string{"Content-Type": "application/json"})
-}
-
-func (c *m6Client) withCSRF(csrf string) *m6Client {
-	copy := *c
-	copy.csrf = csrf
-	return &copy
 }
 
 func (c *m6Client) withoutCSRF() *m6Client {
