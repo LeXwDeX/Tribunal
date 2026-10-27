@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/LeXwDeX/tribunal/internal/errclass"
 	"github.com/LeXwDeX/tribunal/internal/workspace"
 )
 
@@ -171,7 +172,7 @@ func (s *RunCleanupService) RunOnce(ctx context.Context) error {
 		"removed_contexts", removedContexts,
 		"errors", len(errs))
 	for _, err := range errs {
-		s.logger.Warn("run cleanup failed", "error", err.Error())
+		s.logger.Warn("run cleanup failed", "error_class", errclass.Of(err))
 	}
 	return errors.Join(errs...)
 }

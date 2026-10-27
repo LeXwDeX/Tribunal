@@ -7,6 +7,7 @@
 ### 变更
 
 - **Webhook 存储失败改返回 503**：查项目、写投递记录或入队失败时，`POST /webhooks/gitlab` 由 200 改为 503，响应体仍是 `{"ignored":"storage_error","request_id":...}`，日志带脱敏的失败类别。GitLab 不会自动重试失败的投递，但会在 hook 的「Recent events」里记为失败，可以用 Resend request 重发，同一事件 UUID 会被正常受理。GitLab 连续收到失败响应时可能自动停用 hook，需要关注 GitLab 端的 hook 状态。输入错误、未登记项目、重复投递等情况仍返回 200（[#99](https://github.com/LeXwDeX/Tribunal/issues/99)）。
+- **日志不再记录原始错误文本**：工作区、评审副作用、运行时恢复、清理、发布状态、bootstrap 管理员绑定和启动恢复等日志不再输出 `error`（原始错误），改为 `error_class` 脱敏类别并保留项目、MR、工作流等标识字段；任务「settled without retry」日志的 `reason` 字段也改为 `error_class`（如 `mr_closed`、`review_superseded`、`permanent_job`）。依赖原 `error`/`reason` 字段的日志检索需要调整。新增 `scripts/logcheck`，`go test ./...` 会拒绝在 logger 调用里记录 `err` 或 `err.Error()`（[#107](https://github.com/LeXwDeX/Tribunal/issues/107)）。
 
 ## [1.1.0] - 2026-10-26
 
