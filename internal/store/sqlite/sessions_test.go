@@ -365,3 +365,51 @@ func migrationVersionForTest(t *testing.T, name string) int {
 	}
 	return version
 }
+
+func TestSyncPlatformRoles(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	s := openTestStore(t, clock)
+	seed := []store.Session{
+		testSession("former-admin", clock.Now(), time.Hour), // id 7, admin
+		sessionFor("promoted", 8, "bob", clock.Now()),       // viewer
+		sessionFor("bound", 9, "carol", clock.Now()),        // viewer
+		sessionFor("renamed", 10, "dave", clock.Now()),      // viewer
+	}
+	for _, session := range seed {
+		if err := s.CreateSession(ctx, session, store.SessionLimits{}); err != nil {
+			t.Fatalf("CreateSession: %v", err)
+		}
+	}
+	if _, err := s.BindAdminUsername(ctx, "carol", 9, clock.Now()); err != nil {
+		t.Fatalf("BindAdminUsername(carol): %v", err)
+	}
+	// dave's username is bound to another account, so dave stays a viewer.
+	if _, err := s.BindAdminUsername(ctx, "dave", 99, clock.Now()); err != nil {
+		t.Fatalf("BindAdminUsername(dave): %v", err)
+	}
+
+	if err := s.SyncPlatformRoles(ctx, []int64{8}, []string{"carol", "dave"}); err != nil {
+		t.Fatalf("SyncPlatformRoles: %v", err)
+	}
+	want := map[int64]string{7: "viewer", 8: "admin", 9: "admin", 10: "viewer"}
+	for id, role := range want {
+		var got string
+		if err := s.db.QueryRow(`SELECT role FROM users WHERE id = ?`, id).Scan(&got); err != nil {
+			t.Fatalf("read role %d: %v", id, err)
+		}
+		if got != role {
+			t.Fatalf("user %d role = %q, want %q", id, got, role)
+		}
+	}
+
+	if err := s.SetPlatformRole(ctx, 7, "admin"); err != nil {
+		t.Fatalf("SetPlatformRole: %v", err)
+	}
+	if got := rowCount(t, s, `SELECT COUNT(*) FROM users WHERE id = 7 AND role = 'admin'`); got != 1 {
+		t.Fatalf("SetPlatformRole did not update the stored role")
+	}
+	if err := s.SetPlatformRole(ctx, 7, "owner"); err == nil {
+		t.Fatalf("SetPlatformRole accepted an invalid role")
+	}
+}

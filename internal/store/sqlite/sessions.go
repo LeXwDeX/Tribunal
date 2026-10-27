@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -185,4 +186,49 @@ func sessionID(idHash []byte) (string, error) {
 		return "", errors.New("sqlite: session id hash must be 32 bytes")
 	}
 	return hex.EncodeToString(idHash), nil
+}
+
+// SyncPlatformRoles rewrites the stored platform role of every user from the
+// current bootstrap admin configuration: adminIDs are GitLab user IDs and
+// adminUsernames are lower-case usernames that count only for the user ID
+// already bound to them. Unbound usernames stay viewers until first use. The
+// stored role only ranks sessions for eviction; authorization recomputes it.
+func (s *Store) SyncPlatformRoles(ctx context.Context, adminIDs []int64, adminUsernames []string) error {
+	if adminIDs == nil {
+		adminIDs = []int64{}
+	}
+	if adminUsernames == nil {
+		adminUsernames = []string{}
+	}
+	ids, err := json.Marshal(adminIDs)
+	if err != nil {
+		return fmt.Errorf("sqlite: encode admin ids: %w", err)
+	}
+	names, err := json.Marshal(adminUsernames)
+	if err != nil {
+		return fmt.Errorf("sqlite: encode admin usernames: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `WITH admins (id) AS (
+			SELECT value FROM json_each(?)
+			UNION SELECT b.user_id FROM admin_bindings b
+				WHERE b.username IN (SELECT value FROM json_each(?)))
+		UPDATE users SET role = CASE WHEN id IN (SELECT id FROM admins)
+			THEN 'admin' ELSE 'viewer' END
+		WHERE (role = 'admin') != (id IN (SELECT id FROM admins))`, string(ids), string(names)); err != nil {
+		return fmt.Errorf("sqlite: sync platform roles: %w", err)
+	}
+	return nil
+}
+
+// SetPlatformRole stores one user's current platform role. Missing users are
+// not an error.
+func (s *Store) SetPlatformRole(ctx context.Context, userID int64, role string) error {
+	if role != "admin" && role != "viewer" {
+		return fmt.Errorf("sqlite: invalid platform role %q", role)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE users SET role = ? WHERE id = ? AND role != ?`,
+		role, userID, role); err != nil {
+		return fmt.Errorf("sqlite: set platform role: %w", err)
+	}
+	return nil
 }

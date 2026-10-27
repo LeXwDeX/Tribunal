@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/LeXwDeX/tribunal/internal/errclass"
 	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
@@ -521,7 +522,37 @@ func (s *Server) sessionFromRequest(r *http.Request) (session, bool) {
 		Name:     stored.Name,
 	}
 	user.Role = s.roleFor(r.Context(), user)
+	if user.Role != stored.Role && s.roles != nil {
+		// Best effort: the stored role only ranks sessions for eviction.
+		if err := s.roles.SetPlatformRole(r.Context(), user.ID, user.Role); err != nil {
+			s.logger.Warn("cannot refresh stored platform role",
+				"user_id", user.ID, "error_class", errclass.Of(err))
+		}
+	}
 	return session{id: id, user: user, csrf: s.auth.csrfFor(id)}, true
+}
+
+// syncPlatformRoles rewrites stored platform roles from the current
+// bootstrap_admins at startup, so global session eviction ranks sessions by
+// the configured roles even before their users log in again. A failure only
+// affects eviction order and is logged.
+func (s *Server) syncPlatformRoles() {
+	if s.roles == nil {
+		return
+	}
+	ids := make([]int64, 0, len(s.auth.adminIDs))
+	for id := range s.auth.adminIDs {
+		ids = append(ids, id)
+	}
+	names := make([]string, 0, len(s.auth.admins))
+	for name := range s.auth.admins {
+		names = append(names, name)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := s.roles.SyncPlatformRoles(ctx, ids, names); err != nil {
+		s.logger.Warn("cannot sync stored platform roles", "error_class", errclass.Of(err))
+	}
 }
 
 func (s *Server) setSessionCookie(w http.ResponseWriter, value string) {

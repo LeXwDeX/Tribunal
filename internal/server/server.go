@@ -96,6 +96,7 @@ type Server struct {
 	auth       *authService
 	sessions   SessionStore
 	bindings   AdminBindingStore // from the session or token store; SQLite implements it
+	roles      PlatformRoleStore // from the session or token store; SQLite implements it
 	web        fs.FS
 	logger     *slog.Logger
 	handler    http.Handler
@@ -150,6 +151,10 @@ func New(cfg Config) (*Server, error) {
 	if bindings == nil {
 		bindings, _ = cfg.Tokens.(AdminBindingStore)
 	}
+	roles, _ := sessions.(PlatformRoleStore)
+	if roles == nil {
+		roles, _ = cfg.Tokens.(PlatformRoleStore)
+	}
 	s := &Server{
 		adminToken: cfg.AdminToken,
 		projects:   cfg.Projects,
@@ -159,6 +164,7 @@ func New(cfg Config) (*Server, error) {
 		auth:       auth,
 		sessions:   sessions,
 		bindings:   bindings,
+		roles:      roles,
 		web:        web,
 		logger:     logger,
 		store:      cfg.Store,
@@ -178,6 +184,7 @@ func New(cfg Config) (*Server, error) {
 	if s.now == nil {
 		s.now = time.Now
 	}
+	s.syncPlatformRoles()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
