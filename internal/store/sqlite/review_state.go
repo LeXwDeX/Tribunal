@@ -621,8 +621,8 @@ func (s *Store) SaveWorkflowDossier(ctx context.Context, dossier store.WorkflowD
 	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO workflow_dossiers
 		(workflow_id, job_id, generation, version, hash, data, publication_state,
-		 publication_error, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 publication_error, mr_title, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (workflow_id) DO UPDATE SET
 			job_id = excluded.job_id,
 			generation = excluded.generation,
@@ -631,10 +631,11 @@ func (s *Store) SaveWorkflowDossier(ctx context.Context, dossier store.WorkflowD
 			data = excluded.data,
 			publication_state = excluded.publication_state,
 			publication_error = excluded.publication_error,
+			mr_title = excluded.mr_title,
 			updated_at = excluded.updated_at`,
 		dossier.WorkflowID, nullString(dossier.JobID), dossier.Generation,
 		dossier.Version, dossier.Hash, compressed, dossier.PublicationState,
-		dossier.PublicationError, formatTime(created), formatTime(now))
+		dossier.PublicationError, dossierMRTitle(data), formatTime(created), formatTime(now))
 	if err != nil {
 		if isConstraintErr(err) {
 			return nil, fmt.Errorf("%w: workflow dossier job %s is already bound", store.ErrConflict, dossier.JobID)
@@ -681,6 +682,49 @@ func (s *Store) GetWorkflowDossier(ctx context.Context, workflowID string) (*sto
 		return nil, err
 	}
 	return &dossier, nil
+}
+
+// dossierMRTitle returns the trimmed mr.title of a dossier, or "" when the
+// dossier has none. It is stored beside the compressed data so list views can
+// read titles without decompressing every dossier.
+func dossierMRTitle(data []byte) string {
+	var snapshot struct {
+		MR struct {
+			Title string `json:"title"`
+		} `json:"mr"`
+	}
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(snapshot.MR.Title)
+}
+
+// ListWorkflowMRTitles returns the persisted MR titles of several workflows
+// in one query. Workflows without a dossier or with an empty title are absent.
+func (s *Store) ListWorkflowMRTitles(ctx context.Context, workflowIDs []string) (map[string]string, error) {
+	out := make(map[string]string, len(workflowIDs))
+	if len(workflowIDs) == 0 {
+		return out, nil
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT workflow_id, mr_title FROM workflow_dossiers
+		 WHERE mr_title <> '' AND workflow_id IN (`+sqlPlaceholders(len(workflowIDs))+`)`,
+		stringArgs(workflowIDs)...)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: list workflow mr titles: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, title string
+		if err := rows.Scan(&id, &title); err != nil {
+			return nil, fmt.Errorf("sqlite: scan workflow mr title: %w", err)
+		}
+		out[id] = title
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sqlite: iterate workflow mr titles: %w", err)
+	}
+	return out, nil
 }
 
 func normalizeDossier(dossier store.WorkflowDossier) (store.WorkflowDossier, []byte, error) {
