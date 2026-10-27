@@ -1,10 +1,10 @@
 # 部署与运维（Docker / SQLite）
 
-本文对应 ARCH14：内嵌控制台的服务镜像、镜像内 `git` 与管理 CLI、许可证文件、SQLite 单实例、非 root 用户和可写数据目录。已验证运行时候选/源码快照 `f143e7a7835e1e99345b1df9b289bb499e3c67416598d30e6184a558374eb0ac`（402 文件）已构建实际镜像、通过配置检查，并完成离线恢复/在线替换和连续两次无诊断代理 deep。最终 commit/CI/Release 事实以 [PR #30](https://github.com/LeXwDeX/Tribunal/pull/30) 为准；旧 `27c9b1c` 仅历史。详见[验证状态](#10-验证状态)。
+本文对应 ARCH14：内嵌控制台的服务镜像、镜像内 `git` 与管理 CLI、许可证文件、SQLite 单实例、非 root 用户和可写数据目录。各版本做过哪些验证见[验证状态](#10-验证状态)。
 
 交付前准备、升级/回退边界与真实验收记录见 [交付就绪与验收记录](delivery-readiness.md)。
 
-> 当前版本是 v1.1.0。本段和第 10 节的 f143 记录都是 v1.0.0 的验收结果，v1.1.0 的验证状态见 [v1.1.0 验证状态](delivery-readiness.md#v110-验证状态)。从 v1.0.0 升级前必须先读 [从 v1.0.0 升级到 v1.1.0](#从-v100-升级到-v110)。由 agent 代为部署时，使用 [Agent 部署指南](agent-deployment.md)。
+> 当前版本是 v1.1.0，验证状态见 [当前版本（v1.1.x）验证状态](delivery-readiness.md#当前版本v11x验证状态)。从 v1.0.0 升级前必须先读 [从 v1.0.0 升级到 v1.1.0](#从-v100-升级到-v110)。由 agent 代为部署时，使用 [Agent 部署指南](agent-deployment.md)。
 
 ## Compose 快速部署（推荐）
 
@@ -631,28 +631,9 @@ docker volume rm tribunal-arch14-smoke-data
 
 ## 10. 验证状态
 
-完整的当前证据和原始响应由主任务在 [PR #30](https://github.com/LeXwDeX/Tribunal/pull/30) 中维护，本节只保留运维相关摘要。
+验证记录统一维护在 [交付就绪与验收记录](delivery-readiness.md)，本文不再重复：
 
-### 已验证运行时候选/源码快照
+- 当前版本：[当前版本（v1.1.x）验证状态](delivery-readiness.md#当前版本v11x验证状态)。
+- v1.0.0（f143 快照）在隔离测试实例上的验收记录：[v1.0.0 历史验收记录](delivery-readiness.md#v100-历史验收记录f143仅供追溯)，仅供追溯，不覆盖 v1.1.x 的改动。
 
-- `f143e7a7835e1e99345b1df9b289bb499e3c67416598d30e6184a558374eb0ac`（402 文件）的 Go/Web 检查通过：`go build ./...`、`go vet ./...`、`go test -race -count=1 ./...`；语句覆盖率 77.09%（17665/22916）；`go mod verify`、65 个模块的 `licensecheck`、许可证 bundle `-check`；Web 27 个测试文件、160 个测试及 `npm run build`；Responses race 20 次通过，`dist` 未变。
-- 实际镜像 `crc-v1-acceptance:candidate-f143e7a`（ID `sha256:1a20aa96065a24986990de94d0e2e6466df04a379ed2e6b50f076271ff52574e`）构建并通过配置检查；离线恢复和在线替换均 PASS。该 tag 是历史验收标识，刻意保留。
-- 最终 commit、CI、平台评审和 Release 回读以 [PR #30](https://github.com/LeXwDeX/Tribunal/pull/30) 为准。
-
-### 隔离实例结果
-
-- OAuth/项目授权：admin 用户 199 对项目 1331 有 `manage`，viewer 用户 200 对项目 1332 有 `read`；CSRF 缺失 403、有效 200；跨项目读取 404；viewer 写 403；既有两个 OAuth 会话跨升级保留。
-- SSE/授权：撤 grant 后已有 SSE 在 1986ms 内关闭；撤权后读取 404，恢复 grant 后读取 200。
-- Webhook：启用并发幂等；停用、重新启用和重建保留外部同 URL hook；归属只按持久化的自有 hook ID。
-- GitLab：真实 Note Hook、状态 note/表情、commit status 和应用新增行行内评论发布成功。最终回读（`final-gitlab-before.json`）显示 `ai-review` status 52895/52896 在 `bae78e9980348c621cc0e1132e21b1656d44f212` 上为 failed；命令源 note 100746/100748 为 x、无 eyes，summary 100734 与 status note 100733 各一条。不同随机运行的 finding 集合和行内 diff key 可能不同，不能据此声称所有运行只有一条行内评论；幂等重放/重复发布结果以 PR #30 记录为准，本文不预判。
-- 升级/恢复：离线恢复和在线替换应用迁移 1、3–12，SQLite integrity、用户/授权/会话/任务/工作流/工作区保留。
-- Deep：连续两次实际无诊断代理 full deep 均为 0 call errors/0 failed nodes；MCP 成功/调用 10/10、10/11（第二次一次模型工具错误已纠正，不能声称所有工具调用成功），两家 provider 均实际调用 MCP。两次均使用 `deepseek-flash`/`gpt-6-astra`，完成 plan/fan-out/cross-verify/synthesis，BLOCKING/published；BLOCKING 是合成授权回归的预期结论。
-
-### 范围外与 UI 限制
-
-- 生产规模/负载/计费、物理设备/完整 WCAG、Postgres、每个 MCP HTTP backend、其他协议/其他 provider 的实际评审不在本次 v1 隔离验收范围，不作为新增发布门槛。
-- `web/dist` 未变；f143 隔离实例在 1440 管理设置页和 390 viewer 设置页完成实际截图与 DOM 读取（浏览器传输于 2026-10-25T05:14Z 恢复）。390 视口为 390×844、scrollWidth 390，无横向溢出；viewer 页仅显示只读说明，无管理按钮。此前的截图工具超时和传输挂起是临时工具故障，不是产品失败；这不等同物理设备或完整 WCAG 验收。
-
-### 历史记录
-
-更早的本地日志、远程测试机记录和更早截图属于历史候选，不能作为当前证据；需要追溯时以 PR #30 的历史讨论和仓库历史为准。
+上面第 9 节的烟测不验证真实 GitLab、OAuth、webhook 或评审执行，不能当作集成验收。
