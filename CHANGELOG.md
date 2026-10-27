@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **评审列表返回 MR 标题**：`GET /api/v1/reviews` 每项增加 `mr_title`，控制台的评审列表和总览显示标题。标题在保存评审 dossier 时写入新列 `workflow_dossiers.mr_title`（迁移 `0016_dossier_mr_title`，只追加列），列表按页一次批量读取，不请求 GitLab。升级前已有的评审没有该列的值，接口省略 `mr_title`，控制台继续显示 `!iid`（[#101](https://github.com/LeXwDeX/Tribunal/issues/101)）。
+
+### 已解决
+
+- v1.1.0 已知限制「评审列表接口不返回 MR 标题」：见上方新增条目（[#101](https://github.com/LeXwDeX/Tribunal/issues/101)）。
+
 ### 变更
 
 - **Webhook 存储失败改返回 503**：查项目、写投递记录或入队失败时，`POST /webhooks/gitlab` 由 200 改为 503，响应体仍是 `{"ignored":"storage_error","request_id":...}`，日志带脱敏的失败类别。GitLab 不会自动重试失败的投递，但会在 hook 的「Recent events」里记为失败，可以用 Resend request 重发，同一事件 UUID 会被正常受理。GitLab 连续收到失败响应时可能自动停用 hook，需要关注 GitLab 端的 hook 状态。输入错误、未登记项目、重复投递等情况仍返回 200（[#99](https://github.com/LeXwDeX/Tribunal/issues/99)）。

@@ -5,8 +5,9 @@ import { ReviewsPage } from '../src/pages/ReviewsPage'
 import { installFetch, jsonResponse, renderWithProviders } from './test-utils'
 
 // listItem mirrors one GET /api/v1/reviews item as the server returns it:
-// workflow fields, duration_ms, nodes and findings_summary; no mr_title,
-// usage, access or publications.
+// workflow fields, duration_ms, nodes and findings_summary; no usage, access
+// or publications. mr_title is omitted unless an override sets it, as for a
+// review saved before titles were persisted.
 function listItem(overrides: Record<string, unknown> = {}) {
   return {
     id: 'wf-list-1',
@@ -72,9 +73,35 @@ describe('review list summary fields', () => {
     routeList([listItem({ status: 'running', nodes: [] })])
     renderWithProviders(<OverviewPage />, { route: '/' })
 
-    // The list API has no mr_title, so the item falls back to !iid in both the
-    // running and recent panels.
+    // Without mr_title the item falls back to !iid in both the running and
+    // recent panels.
     await screen.findAllByRole('link', { name: '!318' })
     expect(screen.queryByRole('list', { name: /^阶段：/ })).not.toBeInTheDocument()
+  })
+
+  it('shows the MR title in the review list when the API returns one', async () => {
+    routeList([listItem({ status: 'completed', verdict: 'PASS', mr_title: 'feat: 支持批量导入' })])
+    renderWithProviders(<ReviewsPage />, { route: '/reviews' })
+
+    const link = await screen.findByRole('link', { name: '!318 feat: 支持批量导入' })
+    expect(link).toHaveTextContent('feat: 支持批量导入')
+    expect(within(link.closest('tr')!).getByText('!318')).toBeInTheDocument()
+  })
+
+  it('falls back to !iid in the review list when mr_title is missing', async () => {
+    routeList([listItem({ status: 'completed', verdict: 'PASS' })])
+    renderWithProviders(<ReviewsPage />, { route: '/reviews' })
+
+    const link = await screen.findByRole('link', { name: '!318' })
+    expect(link).toHaveTextContent('!318')
+  })
+
+  it('shows the MR title in the overview running panel', async () => {
+    routeList([listItem({ mr_title: 'feat: 支持批量导入' })])
+    renderWithProviders(<OverviewPage />, { route: '/' })
+
+    const links = await screen.findAllByRole('link', { name: /feat: 支持批量导入/ })
+    expect(links.length).toBeGreaterThan(0)
+    expect(screen.queryByRole('link', { name: '!318' })).not.toBeInTheDocument()
   })
 })

@@ -51,6 +51,10 @@ type fakeReviewStore struct {
 	findingReads      int
 	nodeBatchReads    [][]string
 	findingCountReads [][]string
+	titleBatchReads   [][]string
+	// mrTitles is the persisted title per workflow, as the SQLite store keeps
+	// it next to the dossier.
+	mrTitles map[string]string
 }
 
 func newFakeReviewStore() *fakeReviewStore {
@@ -60,6 +64,7 @@ func newFakeReviewStore() *fakeReviewStore {
 		calls:        map[string][]store.LLMCall{},
 		publications: map[string][]store.Publication{},
 		dossiers:     map[string]*store.WorkflowDossier{},
+		mrTitles:     map[string]string{},
 	}
 }
 
@@ -227,6 +232,19 @@ func (f *fakeReviewStore) CountFindingsByWorkflow(_ context.Context, workflowIDs
 	return out, nil
 }
 
+func (f *fakeReviewStore) ListWorkflowMRTitles(_ context.Context, workflowIDs []string) (map[string]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.titleBatchReads = append(f.titleBatchReads, append([]string(nil), workflowIDs...))
+	out := make(map[string]string, len(workflowIDs))
+	for _, id := range workflowIDs {
+		if title, ok := f.mrTitles[id]; ok && title != "" {
+			out[id] = title
+		}
+	}
+	return out, nil
+}
+
 func (f *fakeReviewStore) resetReadCounters() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -234,6 +252,7 @@ func (f *fakeReviewStore) resetReadCounters() {
 	f.findingReads = 0
 	f.nodeBatchReads = nil
 	f.findingCountReads = nil
+	f.titleBatchReads = nil
 }
 
 func (f *fakeReviewStore) setNodes(workflowID string, nodes ...store.WorkflowNode) {
