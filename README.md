@@ -125,7 +125,7 @@ tribunalctl users revoke <user-id>
 | 项目注册 | 原子写入项目、初始工作区和 `workspace.onboard` 任务 |
 | API 重新发布 | 入队 `review.publish` |
 
-Webhook 不调用 GitLab 或模型。认证失败返回 401；其他情况返回 200，并通过 `accepted` 或 `ignored` 区分结果。缺少或非法的 `X-Gitlab-Event-UUID` 会被忽略。数据库失败返回 `ignored: storage_error`，不会假报已接收；按当前设计，HTTP 200 也意味着 GitLab 不会自动重试这次失败，需监控日志并重放事件。
+Webhook 不调用 GitLab 或模型。认证失败返回 401；数据库失败返回 503 和 `ignored: storage_error`，不写去重记录、不假报已接收；其他情况返回 200，并通过 `accepted` 或 `ignored` 区分结果。缺少或非法的 `X-Gitlab-Event-UUID` 会被忽略。GitLab 不会自动重试失败的投递：503 会让这次投递在 GitLab 的 Webhook「Recent events」里显示为失败，可以用 Resend request 重发，同一个事件 UUID 会被正常受理。GitLab 连续多次收到失败响应时可能自动停用这个 hook，需要关注 GitLab 端的 hook 状态。
 
 启用仓库配置（`allow_repo_config=true`）时，Draft 的最终过滤在 worker 读取目标分支配置后完成，webhook 保持无网络调用；标签只允许仓库追加排除，项目级早期过滤仍安全；目标分支由 worker 按实际 MR 重新确认。自动评审、裸 `/review` 和未带 profile 的手动 API 优先采用仓库 `profile`；显式命令或显式 API profile 优先。
 

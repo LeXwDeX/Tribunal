@@ -34,7 +34,7 @@ v1.1.0 的变更清单见 [CHANGELOG](../CHANGELOG.md)。本节记录 v1.1.0 实
 - [ ] 用新的 Webhook 面板启用、重建、停用 GitLab Webhook，并确认 GitLab 端的 hook 与之一致。
 - [ ] 在真实数据下浏览 v2 控制台的各个页面。
 
-**仍然存在的已知限制**：webhook 处理时如果存储出错，仍然返回 200 加 `ignored: storage_error`，GitLab 不会重试。
+**v1.1.0 的已知限制**：webhook 处理时如果存储出错，返回 200 加 `ignored: storage_error`，GitLab 不会重试。下一版本改为返回 503，失败投递可在 GitLab 中重发（[#99](https://github.com/LeXwDeX/Tribunal/issues/99)）。
 
 ## 当前结论
 

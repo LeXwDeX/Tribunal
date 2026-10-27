@@ -591,7 +591,7 @@ func TestWebhookEndpoint(t *testing.T) {
 	}
 
 	replay := env.request(http.MethodPost, "/webhooks/gitlab", "", body, headers)
-	if decodeMap(t, replay.body)["ignored"] != "duplicate" {
+	if replay.status != http.StatusOK || decodeMap(t, replay.body)["ignored"] != "duplicate" {
 		t.Fatalf("replay = %s", replay.body)
 	}
 
@@ -612,6 +612,27 @@ func TestWebhookEndpoint(t *testing.T) {
 	})
 	if missingUUID.status != http.StatusOK || decodeMap(t, missingUUID.body)["ignored"] != "missing_event_uuid" {
 		t.Fatalf("missing uuid = %s", missingUUID.body)
+	}
+
+	// Input problems and unregistered projects cannot succeed on resend, so
+	// they stay 200 instead of counting toward GitLab's auto-disable.
+	malformed := env.request(http.MethodPost, "/webhooks/gitlab", "", []byte("{"), map[string]string{
+		"Content-Type":        "application/json",
+		"X-Gitlab-Event":      "Merge Request Hook",
+		"X-Gitlab-Token":      webhookSecret,
+		"X-Gitlab-Event-UUID": uuid.NewString(),
+	})
+	if malformed.status != http.StatusOK || decodeMap(t, malformed.body)["ignored"] != "bad_request" {
+		t.Fatalf("malformed = %d %s", malformed.status, malformed.body)
+	}
+	unregistered := env.request(http.MethodPost, "/webhooks/gitlab", "", mrHTTPBody(99, 7, "open", ""), map[string]string{
+		"Content-Type":        "application/json",
+		"X-Gitlab-Event":      "Merge Request Hook",
+		"X-Gitlab-Token":      webhookSecret,
+		"X-Gitlab-Event-UUID": uuid.NewString(),
+	})
+	if unregistered.status != http.StatusOK || decodeMap(t, unregistered.body)["ignored"] != "project_not_registered" {
+		t.Fatalf("unregistered = %d %s", unregistered.status, unregistered.body)
 	}
 
 	oversized := bytes.Repeat([]byte("x"), webhookBodyLimit+1)
@@ -647,8 +668,18 @@ func TestWebhookStorageFailureResponse(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK || decodeMap(t, data)["ignored"] != "storage_error" {
+	// A 5xx makes the lost delivery visible in GitLab's Recent events so it
+	// can be resent; the body keeps the webhook response shape.
+	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("response = %d %s", resp.StatusCode, data)
+	}
+	body := decodeMap(t, data)
+	if body["ignored"] != "storage_error" || body["request_id"] != resp.Header.Get("X-Request-ID") || body["request_id"] == "" {
+		t.Fatalf("body = %s", data)
+	}
+	logged := logs.String()
+	if strings.Contains(logged, "disk full") || !strings.Contains(logged, `"error_class":"internal"`) {
+		t.Fatalf("logs = %s", logged)
 	}
 }
 

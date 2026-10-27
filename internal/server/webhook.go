@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/app"
+	"github.com/LeXwDeX/tribunal/internal/errclass"
 )
 
 func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
@@ -46,12 +47,15 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		Body:  body,
 	})
 	if err != nil {
-		// The service already sanitized the reason; do not log the body or error.
+		// The delivery was neither recorded nor enqueued. Answer 503 so GitLab
+		// marks it failed and an operator can resend it; the same event UUID is
+		// accepted then. Do not log the body or the raw error.
 		s.logger.Warn("webhook processing failed",
 			"request_id", requestID(r.Context()),
 			"event", r.Header.Get("X-Gitlab-Event"),
+			"error_class", errclass.Of(err),
 		)
-		writeWebhookResponse(w, r, map[string]any{"ignored": "storage_error"})
+		writeWebhookStatus(w, r, http.StatusServiceUnavailable, map[string]any{"ignored": "storage_error"})
 		return
 	}
 	if result.Unauthorized {
@@ -70,6 +74,10 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 }
 
 func writeWebhookResponse(w http.ResponseWriter, r *http.Request, payload map[string]any) {
+	writeWebhookStatus(w, r, http.StatusOK, payload)
+}
+
+func writeWebhookStatus(w http.ResponseWriter, r *http.Request, status int, payload map[string]any) {
 	payload["request_id"] = requestID(r.Context())
-	writeJSON(w, http.StatusOK, payload)
+	writeJSON(w, status, payload)
 }
