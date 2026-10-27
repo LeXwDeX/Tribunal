@@ -242,7 +242,7 @@ func TestDockerConfigOAuthTemplateOptIn(t *testing.T) {
 	}
 	t.Setenv("GITLAB_OAUTH_CLIENT_ID", "client-id")
 	t.Setenv("GITLAB_OAUTH_CLIENT_SECRET", "client-secret")
-	t.Setenv("GITLAB_ADMIN_USERNAME", "docker-admin")
+	t.Setenv("GITLAB_ADMIN_USERNAME", "id:42")
 
 	cfg := loadConfig(t, writeConfig(t, "server.docker.yaml", body))
 	if err := cfg.Validate(); err != nil {
@@ -252,7 +252,7 @@ func TestDockerConfigOAuthTemplateOptIn(t *testing.T) {
 		cfg.Auth.OAuth.ClientSecretEnv != "GITLAB_OAUTH_CLIENT_SECRET" {
 		t.Errorf("auth.oauth = %+v", cfg.Auth.OAuth)
 	}
-	if len(cfg.Auth.BootstrapAdmins) != 1 || cfg.Auth.BootstrapAdmins[0] != "docker-admin" {
+	if len(cfg.Auth.BootstrapAdmins) != 1 || cfg.Auth.BootstrapAdmins[0] != "id:42" {
 		t.Errorf("auth.bootstrap_admins = %v", cfg.Auth.BootstrapAdmins)
 	}
 }

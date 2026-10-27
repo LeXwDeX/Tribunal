@@ -63,6 +63,21 @@ type AuthConfig struct {
 	BootstrapTokenEnv string        `yaml:"bootstrap_token_env" json:"bootstrap_token_env"`
 }
 
+// UsernameBootstrapAdmins returns the positions of bootstrap_admins entries
+// written as a GitLab username rather than id:<n>. The username form is
+// deprecated and kept for compatibility until the next major release.
+func (a AuthConfig) UsernameBootstrapAdmins() []int {
+	var indexes []int
+	for i, entry := range a.BootstrapAdmins {
+		entry = strings.ToLower(strings.TrimSpace(entry))
+		if entry == "" || strings.HasPrefix(entry, "id:") {
+			continue
+		}
+		indexes = append(indexes, i)
+	}
+	return indexes
+}
+
 // OAuthConfig names the environment variables for an optional GitLab OAuth app.
 type OAuthConfig struct {
 	ClientIDEnv     string `yaml:"client_id_env" json:"client_id_env"`

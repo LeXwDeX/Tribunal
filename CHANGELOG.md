@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### 弃用
+
+- **`bootstrap_admins` 用户名写法弃用**：`auth.bootstrap_admins` 里的 GitLab 用户名条目仍然可用，但启动时每个条目记一条弃用告警。告警只含条目序号，不含用户名；该用户名已绑定时同时给出可以直接替换的 `id:<N>`。示例配置只保留 `id:` 写法。计划在下一个大版本（v2.0.0）移除用户名写法，迁移步骤见 [部署与运维](docs/operations.md#bootstrap_admins-用户名写法弃用与迁移)（[#103](https://github.com/LeXwDeX/Tribunal/issues/103)）。
+
 ### 变更
 
 - **Webhook 存储失败改返回 503**：查项目、写投递记录或入队失败时，`POST /webhooks/gitlab` 由 200 改为 503，响应体仍是 `{"ignored":"storage_error","request_id":...}`，日志带脱敏的失败类别。GitLab 不会自动重试失败的投递，但会在 hook 的「Recent events」里记为失败，可以用 Resend request 重发，同一事件 UUID 会被正常受理。GitLab 连续收到失败响应时可能自动停用 hook，需要关注 GitLab 端的 hook 状态。输入错误、未登记项目、重复投递等情况仍返回 200（[#99](https://github.com/LeXwDeX/Tribunal/issues/99)）。

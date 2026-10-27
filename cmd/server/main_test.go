@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -636,5 +637,47 @@ func TestStopRecoveryIsBounded(t *testing.T) {
 	stop(50 * time.Millisecond)
 	if elapsed := time.Since(begin); elapsed > 2*time.Second {
 		t.Fatalf("stopRecovery waited %v past its timeout", elapsed)
+	}
+}
+
+func TestWarnUsernameBootstrapAdmins(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	lookup := func(_ context.Context, username string) (int64, bool, error) {
+		switch username {
+		case "alice":
+			return 42, true, nil
+		case "carol":
+			return 0, false, errors.New("storage unavailable for carol")
+		}
+		return 0, false, nil
+	}
+	warnUsernameBootstrapAdmins(context.Background(), logger, []string{"id:7", " Alice ", "bob", "carol"}, lookup)
+	out := logs.String()
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("want one warning per username entry, got %d: %q", len(lines), out)
+	}
+	for _, name := range []string{"alice", "Alice", "bob", "carol"} {
+		if strings.Contains(out, name) {
+			t.Fatalf("warning leaks username %q: %q", name, out)
+		}
+	}
+	for i, want := range []string{"index=1", "index=2", "index=3"} {
+		if !strings.Contains(lines[i], "level=WARN") || !strings.Contains(lines[i], want) || !strings.Contains(lines[i], "deprecated") {
+			t.Fatalf("line %d = %q, want WARN with %s", i, lines[i], want)
+		}
+	}
+	if !strings.Contains(lines[0], "replacement=id:42") {
+		t.Fatalf("bound entry has no replacement: %q", lines[0])
+	}
+	if strings.Contains(lines[1], "replacement=") || strings.Contains(lines[2], "replacement=") {
+		t.Fatalf("unbound entry got a replacement: %q", out)
+	}
+
+	logs.Reset()
+	warnUsernameBootstrapAdmins(context.Background(), logger, []string{"id:7", "ID: 8"}, lookup)
+	if logs.Len() != 0 {
+		t.Fatalf("id-only entries warned: %q", logs.String())
 	}
 }
