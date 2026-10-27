@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/LeXwDeX/tribunal/internal/errclass"
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/jobs"
 	"github.com/LeXwDeX/tribunal/internal/review"
@@ -35,7 +36,7 @@ func (s *ReviewService) setReviewStatus(ctx context.Context, projectID, mrIID, g
 		Detail:     detail,
 	}); err != nil && !errors.Is(err, store.ErrSuperseded) {
 		s.logger.Warn("review status goal write failed", "project_id", projectID,
-			"mr_iid", mrIID, "generation", generation, "error", err.Error())
+			"mr_iid", mrIID, "generation", generation, "error_class", errclass.Of(err))
 	}
 }
 
@@ -52,7 +53,7 @@ func (s *ReviewService) setReviewReaction(ctx context.Context, projectID, mrIID,
 		Desired:    desired,
 	}); err != nil && !errors.Is(err, store.ErrSuperseded) {
 		s.logger.Warn("review reaction goal write failed", "project_id", projectID,
-			"mr_iid", mrIID, "note_id", noteID, "error", err.Error())
+			"mr_iid", mrIID, "note_id", noteID, "error_class", errclass.Of(err))
 	}
 }
 
@@ -80,7 +81,7 @@ func (s *ReviewService) estimateReviewMinutes(ctx context.Context, projectID int
 	}
 	durations, err := s.store.RecentReviewDurations(ctx, projectID, profile, s.now().UTC().Add(-30*24*time.Hour), 20)
 	if err != nil {
-		s.logger.Warn("review estimate query failed", "project_id", projectID, "error", err.Error())
+		s.logger.Warn("review estimate query failed", "project_id", projectID, "error_class", errclass.Of(err))
 		return defaultMinutes
 	}
 	if len(durations) == 0 {
@@ -290,7 +291,7 @@ func (s *ReviewService) settleCancellation(ctx context.Context, payload reviewCa
 	s.setReviewReaction(ctx, payload.ProjectID, payload.MRIID, payload.NoteID, payload.Generation, reviewAwardNone)
 	if _, err := s.store.ClearReviewReactionsForGeneration(ctx, payload.ProjectID, payload.MRIID, payload.Generation); err != nil {
 		s.logger.Warn("review cancel reaction cleanup failed", "project_id", payload.ProjectID,
-			"mr_iid", payload.MRIID, "generation", payload.Generation, "error", err.Error())
+			"mr_iid", payload.MRIID, "generation", payload.Generation, "error_class", errclass.Of(err))
 	}
 }
 

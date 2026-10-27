@@ -441,7 +441,7 @@ func (s *Server) roleFor(ctx context.Context, user sessionUser) string {
 	}
 	owner, err := s.bindings.BindAdminUsername(ctx, name, user.ID, s.auth.now())
 	if err != nil {
-		s.logger.Warn("cannot verify bootstrap admin username", "username", name, "user_id", user.ID, "error", err)
+		s.logger.Warn("cannot verify bootstrap admin username", "username", name, "user_id", user.ID, "error_class", errclass.Of(err))
 		return roleViewer
 	}
 	if owner != user.ID {

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/errclass"
 	"github.com/LeXwDeX/tribunal/internal/jobs"
 	"github.com/LeXwDeX/tribunal/internal/mcp"
 	"github.com/LeXwDeX/tribunal/internal/repo"
@@ -177,7 +178,7 @@ func (s *WorkspaceService) Handle(ctx context.Context, job *jobs.Job) error {
 	}
 	if err == nil || IsPermanentJob(err) {
 		if err != nil {
-			s.logger.Info("workspace job settled without retry", "job_id", job.ID, "kind", job.Kind, "reason", err.Error())
+			s.logger.Info("workspace job settled without retry", "job_id", job.ID, "kind", job.Kind, "error_class", jobSettleClass(err))
 		}
 		return nil
 	}
@@ -567,7 +568,7 @@ func (s *WorkspaceService) refreshBase(ctx context.Context, ws *workspace.Worksp
 // indexDegraded logs a failed index run and returns the workspace error text.
 // MCP index errors never contain arguments or command output.
 func (s *WorkspaceService) indexDegraded(projectID int64, err error) string {
-	s.logger.Warn("code graph index failed; continuing without it", "project_id", projectID, "error", err)
+	s.logger.Warn("code graph index failed; continuing without it", "project_id", projectID, "error_class", errclass.Of(err))
 	return "index: " + err.Error()
 }
 
