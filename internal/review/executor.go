@@ -732,23 +732,3 @@ func (e *Executor) validateCodeRef(ref CodeRef) error {
 	}
 	return nil
 }
-
-// providerForNode returns the provider selected by node params or the profile.
-func (e *Executor) providerForNode(in dag.NodeInput) string {
-	var params struct {
-		Provider string `json:"provider"`
-	}
-	if len(in.Node.Params) > 0 {
-		_ = json.Unmarshal(in.Node.Params, &params)
-	}
-	return params.Provider
-}
-
-// requestTimeout is exposed for tests verifying node timeout computation.
-func (e *Executor) requestTimeout(spec dag.NodeSpec) time.Duration {
-	timeout := spec.Timeout
-	if timeout <= 0 {
-		timeout = e.defaultTimeout
-	}
-	return timeout
-}
