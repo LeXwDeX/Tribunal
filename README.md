@@ -6,11 +6,11 @@ GitLab CE MR 多 agent 自动评审服务
 
 当前 M0–M6 功能已有本地实现，覆盖项目注册与 webhook、三种 LLM 协议、agent 工具循环、DAG 与持久化、主 agent 编排/对抗核验/裁决、GitLab 发布、工作区、MCP/Skill、OAuth 持久会话、项目 `read`/`manage` 授权与 CSRF、管理 API、React 控制台、API token、统计、反馈采集、人工标注与许可证清单。
 
-当前版本是 **v1.1.0**，变更和升级必读见 [CHANGELOG](CHANGELOG.md)。v1.1.0 通过了 CI，包括 Compose 冒烟测试，但没有在真实 GitLab 实例上验收；具体做过哪些验证、还缺哪些，见 [v1.1.0 验证状态](docs/delivery-readiness.md#v110-验证状态)。下面这段以及[验证](#验证)一节描述的都是 **v1.0.0** 的真实实例验收。
+当前版本是 **v1.1.0**，变更和升级必读见 [CHANGELOG](CHANGELOG.md)。v1.1.0 通过了 CI，包括 Compose 冒烟测试，但没有在真实 GitLab 实例上验收；具体做过哪些验证、还缺哪些，见 [当前版本（v1.1.x）验证状态](docs/delivery-readiness.md#当前版本v11x验证状态)。
 
 部署时：人工部署看 [部署与运维](docs/operations.md)，由 agent 代为部署和接入时用 [Agent 部署指南](docs/agent-deployment.md)。
 
-v1.0.0 已验证运行时候选/源码快照 `f143e7a7835e1e99345b1df9b289bb499e3c67416598d30e6184a558374eb0ac`（402 文件）通过本地全量检查、实际镜像构建、离线恢复/在线升级和连续两次无诊断代理 deep 运行；BLOCKING 是合成授权回归的预期结论。旧 `27c9b1c` 只是更早的已测快照，不代表本次已验证快照，也不覆盖新的 Responses header。较早的独立代码评审未发现 code blocker，但因缺少 f143 运行时 manifest 与 `12a62d1` 文档 manifest/source-equivalence 而记为 evidence BLOCKING；该缺口已关闭，最终独立 review 对 `12a62d1` 文档树给出 code/documentation PASS、0 blockers。之后的文档澄清只关联 [PR #30](https://github.com/LeXwDeX/Tribunal/pull/30)，不构成新的 review；native CI、平台评审、合并和 Release 仍需在 PR #30 回读，本文不预判结果。详见[验证](#验证)与[交付就绪](docs/delivery-readiness.md)。
+v1.0.0（[PR #30](https://github.com/LeXwDeX/Tribunal/pull/30)、[Release](https://github.com/LeXwDeX/Tribunal/releases/tag/v1.0.0)）曾在隔离测试实例上用 f143 快照做过真实验收，包括实际镜像、离线恢复/在线升级、真实 GitLab 发布和两次 deep 运行。该记录不覆盖 v1.1.x 的改动，只用于追溯，见 [v1.0.0 历史验收记录](docs/delivery-readiness.md#v100-历史验收记录f143仅供追溯)。
 
 总体目标见 [ARCH.md](ARCH.md)，实现层面的设计与已知偏差见 [详细设计](docs/design/README.md)，部署、备份与运行边界见 [部署与运维](docs/operations.md)。
 
@@ -41,7 +41,7 @@ docker compose exec -T review /app/tribunalctl projects all
 
 默认地址为 `http://localhost:8080`，端口仅绑定本机。默认支持 API/Bearer 管理，**浏览器登录需要另外启用 GitLab OAuth**：填写 `.env` 的 OAuth 变量及管理员用户名，取消 `config/server.docker.yaml` 中对应配置的注释，并配置 HTTPS 反向代理与 `TRIBUNAL_PUBLIC_URL`。修改 `.env` 后用 `docker compose up -d --force-recreate`，单纯 `restart` 不会更新容器环境变量。
 
-停止使用 `docker compose down`，不要加 `-v`，否则会删除数据库和工作区。完整启动、项目注册、OAuth、备份及验证步骤见 [部署与运维](docs/operations.md)。已验证候选已构建实际镜像 `crc-v1-acceptance:candidate-f143e7a` 并通过配置检查；`crc-v1-acceptance` 是刻意保留的历史验收镜像名，不改写。更早的远程测试机记录仅作历史参考。
+停止使用 `docker compose down`，不要加 `-v`，否则会删除数据库和工作区。完整启动、项目注册、OAuth、备份及验证步骤见 [部署与运维](docs/operations.md)。
 
 ## 本地启动
 
@@ -166,13 +166,7 @@ go mod verify
 
 `go build` 依赖 `web/dist`，因此在全新检出上必须先执行前端构建。测试使用临时 SQLite 数据库和本地 HTTP 假 GitLab，覆盖注册、加密、认证、事件过滤、并发去重、租约恢复、旧 attempt 拒绝、CLI、工作流、发布、工作区、扩展和控制台静态资源。
 
-已验证快照 `f143e7a` 的完整本地检查通过：`go build ./...`、`go vet ./...`、`go test -race -count=1 ./...`；语句覆盖率 77.09%（17665/22916）；`go mod verify`、65 个模块的 `licensecheck`、许可证 bundle `-check`；Web 27 个测试文件、160 个测试及 `npm run build`；Responses race 迭代 20 次通过，`dist` 未变。
-
-实际镜像 `crc-v1-acceptance:candidate-f143e7a` 已构建并通过配置检查；离线恢复和在线替换均 PASS，保留用户、授权、会话、工作区、任务、工作流和 integrity。隔离实例完成 OAuth/项目授权、CSRF、跨项目 404、viewer 写 403、升级会话保留、SSE 撤权关闭、webhook 归属保护，以及真实 GitLab Note Hook、状态 note/表情、commit status 和应用新增行行内评论。GitLab 回读（`final-gitlab-before.json`）显示 `ai-review` status 52895/52896 在 `bae78e9980348c621cc0e1132e21b1656d44f212` 上为 failed；命令源 note 100746/100748 为 x、无 eyes，summary 100734 与 status note 100733 各一条；不同随机运行的 finding 集合和行内 diff key 可能不同，不能据此说所有运行只有一条行内评论。幂等重放/重复发布结果以 PR #30 记录为准，本文不预判。连续两次实际无诊断代理 full deep 均为 0 call errors、0 failed nodes；MCP 成功/调用分别为 10/10 和 10/11（第二次一次模型工具错误已纠正），两家 provider 均实际调用 MCP；不能声称所有工具调用成功。两次均使用 `deepseek-flash` 与 `gpt-6-astra`，完成 plan/fan-out/cross-verify/synthesis，结果 BLOCKING/published；BLOCKING 是合成授权回归的预期结论，不是验收失败。详细计数、summary 与原始响应由主任务在 PR #30 中维护，本文不复制。
-
-旧快照的本地 review ACCEPT 不覆盖新的 Responses header。较早评审为 0 code blockers、evidence BLOCKING（缺 f143 运行时 manifest 与 `12a62d1` 文档 manifest/source-equivalence）；缺口已关闭，最终独立 review 对 `12a62d1` 文档树 PASS（code/documentation，0 blockers）。文档澄清只关联 PR #30，不构成新 review；native CI、平台评审、合并和 Release 尚未完成，以 PR #30 回读为准。
-
-更早的 Docker、远程测试机和浏览器记录属于历史候选，不再作为已验证快照的通过证据；也不再重复其逐日日志。
+各版本做过哪些验证见 [交付就绪与验收记录](docs/delivery-readiness.md)：当前版本看 [当前版本（v1.1.x）验证状态](docs/delivery-readiness.md#当前版本v11x验证状态)，v1.0.0 的 f143 隔离实例验收看 [v1.0.0 历史验收记录](docs/delivery-readiness.md#v100-历史验收记录f143仅供追溯)。
 
 ## 主体已实现 / 范围外 / 已知限制
 
@@ -188,9 +182,9 @@ go mod verify
 - finding 人工标注：项目 `manage` 权限可保存、更正或清除有效/无效/未确定结论，`read` 只读；保存操作者与时间，同一 finding ID 的重新发布保留标注。`quality_by_provider` 展示提出方准确率、被挑战推翻比例、挑战方误杀率及样本数，未标注/未确定不进入人工结论分母。
 - DAG 并发提交在 revision 前进时继续重试，同 revision 连续冲突有界失败；完成写入的持久化错误显式返回。finalize 遇到并发新增节点会回到调度循环。deep 完整执行、失败评审摘要、optional verify 失败转 uncertain、MR 描述的不可信边界与 P1 禁止 PASS 均有本地集成测试。模型替身只证明调用链和确定性约束，不证明真实模型抗提示注入。
 
-**范围外 / 不构成本次 v1 发布门槛**
+**范围外 / 不构成发布门槛**
 
-生产规模、负载和计费、物理设备/完整 WCAG、Postgres、其他协议/provider、每个 MCP HTTP backend 的具体实现不在本次 v1 范围；最终 commit、CI、平台评审和 Release 回读以 [PR #30](https://github.com/LeXwDeX/Tribunal/pull/30) 为准。以上均不新增为本次 v1 发布条件。
+生产规模、负载和计费、物理设备/完整 WCAG、Postgres、其他协议/provider、每个 MCP HTTP backend 的具体实现不在当前范围，不作为发布条件。
 
 **已知限制**
 
@@ -216,7 +210,6 @@ go mod verify
 - 统计页、总览和项目详情均把 `stats.runs` 标为“运行次数”，并说明包含评审和 onboarding。`blocking_ratio` 的分母仍是全部 workflow，因此 onboarding 会稀释该比例，不应把它解释为仅评审的阻断比例。
 - 节点 provider/model 表示启动时选择的配置，不等于模型调用次数或响应实际模型标识；reasoner 自跳过和 agent synthesize 回退仍可能带归属。修复前历史节点的空归属不回填，因此旧时间窗的按 provider 节点统计仍不完整；逐次调用信息可查 `llm_calls`。
 - 许可证发布清单是单一文件 `licenses/THIRD_PARTY_NOTICES.txt`，由 `go run ./scripts/licensebundle` 生成，CI 用 `-check` 验证。内容覆盖 Go 标准库、Linux/amd64 服务端的 40 个模块、9 个 production npm 包、内置 Skill 和镜像内置的 codebase-memory-mcp；主机模块清单是 42 个，与运行时清单不同。当前 Dockerfile 仍复制遗留的 `THIRD_PARTY_LICENSES`，但发布声明以新单文件为准。
-- 实际镜像 `crc-v1-acceptance:candidate-f143e7a`（ID `sha256:1a20aa96065a24986990de94d0e2e6466df04a379ed2e6b50f076271ff52574e`）已构建并通过配置检查；更早的 Docker 和远程测试机记录仍属历史。
 - MCP `tools/call` 已在两家 provider 的实际 deep 中验证（成功/调用 10/10、10/11；第二次一次模型工具错误已纠正），`delete_project` 不可用，项目只看到自己的索引；真实 stdio 已测，并非每个 HTTP backend 都已验证。详见 [ARCH §8.4](ARCH.md#84-codebase-memory-mcp-接入要点)。
 - OpenAI Responses adapter 在每次 Generate 时发送请求级随机不透明 `X-Session-Id`；仅 Responses 协议，无新配置、依赖或 400 重试。该 header 是网关兼容措施，不是 OpenAI 标准、会话认证或幂等保证；已部署网关的内部实现未证实，可能增加缓存/握手成本。
 - Postgres 未实现，配置 `storage.driver: postgres` 会在启动时报错。
@@ -229,7 +222,3 @@ go mod verify
 - Issue #4「独立实现验收」：接受现有独立 Go DAG 实现，不要求移植上游代码，不虚构上游 NOTICE、版权人或来源。该结论只验收本地实现，不是新的上游授权或法律审计。
 - Issue #3（2026-10-25 确认）：按既定发布键边界验收。相同事件 UUID、相同 `publish_key` 和同一评审重复发布不新增重复评论；显式新评审可创建新代次，模型换标题可能再次发布同一问题。本版不增加跨次问题语义去重。真实相同 UUID 并发重放三次和重复发布两次均未增加工作流、评论或讨论。
 - 上述口径只覆盖所列验收点，不代表整个 MVP 已验收；该确认不构成新的上游授权或法律审计。
-
-最终 commit、CI、平台评审和 Release 回读以 [PR #30](https://github.com/LeXwDeX/Tribunal/pull/30) 为准。
-
-本次文档修正没有运行构建、测试、真实服务或 CI；上述验证数字来自 f143 快照记录。最终 commit、CI、平台评审和 Release 回读以 [PR #30](https://github.com/LeXwDeX/Tribunal/pull/30) 为准。
