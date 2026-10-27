@@ -112,6 +112,21 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err := prepareSQLiteDirectory(cfg.Storage.DSN); err != nil {
 		return err
 	}
+	// Hold the data directory before opening the database so a second
+	// instance cannot run recovery, workers or publishing against it.
+	dataLock, err := lockSQLiteDirectory(cfg.Storage.DSN)
+	if errors.Is(err, sqlite.ErrDataDirLocked) {
+		path, _, _ := sqliteFilePath(cfg.Storage.DSN)
+		logger.Error("data directory is locked by another Tribunal instance; refusing to start",
+			"lock", filepath.Join(filepath.Dir(path), sqlite.LockFileName))
+		return errors.New("storage: data directory is locked by another Tribunal instance")
+	}
+	if err != nil {
+		return err
+	}
+	if dataLock != nil {
+		defer dataLock.Release()
+	}
 	db, err := sqlite.Open(ctx, cfg.Storage.DSN)
 	if err != nil {
 		return errors.New("open storage: SQLite database is unavailable")
@@ -538,6 +553,19 @@ func prepareSQLiteDirectory(dsn string) error {
 		return errors.New("storage: cannot create database directory")
 	}
 	return nil
+}
+
+// lockSQLiteDirectory takes the exclusive lock on the directory holding the
+// SQLite file. In-memory databases have no directory and return a nil lock.
+func lockSQLiteDirectory(dsn string) (*sqlite.DataDirLock, error) {
+	path, memory, err := sqliteFilePath(dsn)
+	if err != nil {
+		return nil, err
+	}
+	if memory || path == "" {
+		return nil, nil
+	}
+	return sqlite.LockDataDir(filepath.Dir(path))
 }
 
 func sqliteFilePath(dsn string) (string, bool, error) {

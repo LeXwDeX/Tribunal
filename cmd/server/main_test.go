@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
 )
 
 func TestParseOptions(t *testing.T) {
@@ -192,18 +193,14 @@ func TestBootstrapToken(t *testing.T) {
 	}
 }
 
-func TestRunStartsAndStopsCleanly(t *testing.T) {
+// writeRunConfig writes a runnable server config whose database and
+// workspaces live under dir, and sets the required environment.
+func writeRunConfig(t *testing.T, dir string, port int) string {
+	t.Helper()
 	source, err := os.ReadFile("../../config/server.example.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	probe, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := probe.Addr().(*net.TCPAddr).Port
-	_ = probe.Close()
-	dir := t.TempDir()
 	config := strings.ReplaceAll(string(source), ":8080", fmt.Sprintf("127.0.0.1:%d", port))
 	config = strings.ReplaceAll(config, "http://localhost:8080", fmt.Sprintf("http://127.0.0.1:%d", port))
 	config = strings.ReplaceAll(config, "file:data/review.db", "file:"+filepath.Join(dir, "review.db"))
@@ -218,6 +215,56 @@ func TestRunStartsAndStopsCleanly(t *testing.T) {
 	t.Setenv("REVIEW_ADMIN_TOKEN", strings.Repeat("a", 32))
 	t.Setenv("REVIEW_LOG_FORMAT", "text")
 	t.Setenv("REVIEW_LOG_LEVEL", "info")
+	return path
+}
+
+func TestRunRefusesLockedDataDirectory(t *testing.T) {
+	dir := t.TempDir()
+	path := writeRunConfig(t, dir, 1)
+	held, err := sqlite.LockDataDir(dir)
+	if err != nil {
+		t.Fatalf("hold lock: %v", err)
+	}
+	defer held.Release()
+	stderr := &bytes.Buffer{}
+	err = run(context.Background(), []string{"--config", path}, &bytes.Buffer{}, stderr)
+	if err == nil || !strings.Contains(err.Error(), "locked by another Tribunal instance") {
+		t.Fatalf("run error = %v, want data directory lock failure", err)
+	}
+	if !strings.Contains(stderr.String(), filepath.Join(dir, sqlite.LockFileName)) {
+		t.Fatalf("log does not name the lock file: %s", stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "review.db")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("database opened despite lock: %v", err)
+	}
+}
+
+func TestLockSQLiteDirectory(t *testing.T) {
+	dir := t.TempDir()
+	dsn := "file:" + filepath.Join(dir, "review.db") + "?cache=shared"
+	first, err := lockSQLiteDirectory(dsn)
+	if err != nil || first == nil {
+		t.Fatalf("first lock = %v, %v", first, err)
+	}
+	if _, err := lockSQLiteDirectory(dsn); !errors.Is(err, sqlite.ErrDataDirLocked) {
+		t.Fatalf("second lock error = %v", err)
+	}
+	if err := first.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if lock, err := lockSQLiteDirectory(":memory:"); err != nil || lock != nil {
+		t.Fatalf("memory dsn lock = %v, %v", lock, err)
+	}
+}
+
+func TestRunStartsAndStopsCleanly(t *testing.T) {
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := probe.Addr().(*net.TCPAddr).Port
+	_ = probe.Close()
+	path := writeRunConfig(t, t.TempDir(), port)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)

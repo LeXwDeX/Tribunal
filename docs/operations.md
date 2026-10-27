@@ -166,6 +166,9 @@ docker compose start review
 - 许可证位于 `/licenses/LICENSE` 和 `/licenses/THIRD_PARTY_NOTICES.txt`；后者是单一声明文件，覆盖 Go 标准库、Linux/amd64 服务端的 40 个模块、9 个 production npm 包和镜像内置的 codebase-memory-mcp。当前 Dockerfile 仍把遗留的 `THIRD_PARTY_LICENSES` 一并复制到 `/licenses/`，但发布声明以 `THIRD_PARTY_NOTICES.txt` 为准。`git` 及 Debian 软件包自身的许可证在 `/usr/share/doc/`。
 - 工作区只使用 http(s) Git remote，镜像不安装 SSH 客户端。镜像内置 codebase-memory-mcp（见下文）；其他 MCP 服务器由部署方安装或使用扩展镜像。
 - 仅支持一个服务实例使用一个 SQLite 数据目录。不要用多个容器共享同一数据库文件或同一数据卷。
+- 两个实例不能共用一个数据卷。服务启动时在 SQLite 文件所在目录对 `tribunal.lock` 加独占锁（容器内为 `/app/data/tribunal.lock`，源码运行时默认为 `data/tribunal.lock`），在打开数据库之前完成。锁已被另一个进程持有时，服务记录 `data directory is locked by another Tribunal instance` 错误日志（带锁文件路径）并以退出码 1 退出，不会打开数据库。锁随进程退出由内核释放，包括崩溃或 `kill -9`；锁文件本身会留在目录里，不需要也不应该手工删除，它的存在不代表被锁。
+  - 锁基于 `flock`，在 Linux（Docker 镜像）、macOS 和 BSD 上生效。Windows 等没有 `flock` 的平台只创建锁文件、不加锁，不在支持范围内。`flock` 只在同一内核内可靠：同一台宿主机上的多个容器共用一个卷可以互斥，跨主机共享的 NFS 等网络文件系统不受保护，不要把数据目录放在网络文件系统上。
+  - `tribunalctl` 的命令都走 HTTP API，不直接打开数据库，不受锁影响。用 `sqlite3` 等外部工具直接打开 `review.db` 不会检查这个锁；按第 7 节先停止服务再操作。
 - 后台 run cleanup 在启动后立即执行、之后每小时执行。它先查询 `workspaces`、run 保护集合和 context 保护 SHA，再触碰项目文件；只处理有 `workspaces` 记录的项目。超过 `workspace.run_cleanup_after` 的 `runs/<id>` 需未被未终态 workflow、queued/running job、`publication_state=pending` 的 dossier 或本进程注册 run 引用；`context/<sha>` 需未被任何 DB revision、当前 workspace base/context、未终态或待发布 workflow base 引用。locked/非法 metadata 保留并 fail closed；项目列表查询失败时整轮保留，某项保护查询失败时跳过该项目。
 
 基础镜像标签已在本机联网核对 Docker Hub（2026-10-22）：
