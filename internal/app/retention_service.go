@@ -7,6 +7,8 @@ import (
 	"io"
 	"log/slog"
 	"time"
+
+	"github.com/LeXwDeX/tribunal/internal/errclass"
 )
 
 const defaultRetentionInterval = 6 * time.Hour
@@ -105,7 +107,7 @@ func (s *RetentionService) RunOnce(ctx context.Context) error {
 
 	fail := func(category string, err error) {
 		errs = append(errs, fmt.Errorf("retention: %s: %w", category, err))
-		s.logger.Warn("retention cleanup failed", "category", category, "error", err.Error())
+		s.logger.Warn("retention cleanup failed", "category", category, "error_class", errclass.Of(err))
 	}
 
 	var llmCalls, deliveries, jobs, contextDocs int64

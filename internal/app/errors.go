@@ -5,6 +5,8 @@ package app
 import (
 	"errors"
 	"fmt"
+
+	"github.com/LeXwDeX/tribunal/internal/errclass"
 )
 
 var (
@@ -34,6 +36,27 @@ func IsPermanentJob(err error) bool {
 		errors.Is(err, ErrReviewSuperseded) ||
 		errors.Is(err, ErrMRClosed) ||
 		errors.Is(err, ErrStalePublication)
+}
+
+// jobSettleClass names why a job settled without retry for logs. Like
+// errclass.Of it never returns error text: permanent causes may wrap GitLab
+// responses or dossier contents.
+func jobSettleClass(err error) string {
+	switch {
+	case errors.Is(err, ErrMRClosed):
+		return "mr_closed"
+	case errors.Is(err, ErrReviewSuperseded):
+		return "review_superseded"
+	case errors.Is(err, ErrStalePublication):
+		return "stale_publication"
+	}
+	if class := errclass.Of(err); class != errclass.Internal {
+		return class
+	}
+	if errors.Is(err, ErrPermanentJob) {
+		return "permanent_job"
+	}
+	return errclass.Internal
 }
 
 // Error is the sanitized application error consumed by internal/server.

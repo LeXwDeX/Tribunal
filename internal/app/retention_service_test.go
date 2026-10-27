@@ -317,10 +317,13 @@ func TestRetentionServiceRunOnceContinuesOnCategoryError(t *testing.T) {
 			t.Errorf("%s calls = %d, want 1", category, got)
 		}
 	}
-	for _, want := range []string{"retention cleanup failed", "errors=1", "deliveries=0"} {
+	for _, want := range []string{"retention cleanup failed", `category="delete deliveries"`, "error_class=internal", "errors=1", "deliveries=0"} {
 		if !strings.Contains(logs.String(), want) {
 			t.Errorf("log %q does not contain %q", logs.String(), want)
 		}
+	}
+	if strings.Contains(logs.String(), "database is closed") {
+		t.Errorf("log %q records raw error text", logs.String())
 	}
 }
 

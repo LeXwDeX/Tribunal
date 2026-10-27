@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/errclass"
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/review"
 	"github.com/LeXwDeX/tribunal/internal/secret"
@@ -192,7 +193,7 @@ func (p *Publisher) recordPublicationFailure(ctx context.Context, workflowID str
 	}
 	if err := p.store.SetWorkflowPublicationState(ctx, workflowID, state, reason); err != nil {
 		p.logger.Warn("publication state update failed",
-			"workflow_id", workflowID, "state", state, "error", err.Error())
+			"workflow_id", workflowID, "state", state, "error_class", errclass.Of(err))
 		return err
 	}
 	p.logger.Warn("publication failed",

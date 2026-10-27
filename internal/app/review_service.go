@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/errclass"
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/jobs"
 	"github.com/LeXwDeX/tribunal/internal/review"
@@ -220,7 +221,7 @@ func (s *ReviewService) Handle(ctx context.Context, job *jobs.Job) error {
 	}
 	if err == nil || IsPermanentJob(err) {
 		if err != nil {
-			s.logger.Info("review job settled without retry", "job_id", job.ID, "kind", job.Kind, "reason", err.Error())
+			s.logger.Info("review job settled without retry", "job_id", job.ID, "kind", job.Kind, "error_class", jobSettleClass(err))
 		}
 		return nil
 	}
@@ -313,7 +314,7 @@ func (s *ReviewService) RunCandidate(ctx context.Context, job *jobs.Job) error {
 	if err != nil {
 		if errors.Is(err, ErrMRClosed) || errors.Is(err, ErrReviewSuperseded) {
 			s.logger.Info("review candidate event is no longer applicable",
-				"project_id", project.ID, "mr_iid", payload.MRIID, "reason", err.Error())
+				"project_id", project.ID, "mr_iid", payload.MRIID, "error_class", jobSettleClass(err))
 			return nil
 		}
 		return err
@@ -596,7 +597,7 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 	if _, err := s.currentControl(ctx, project.ID, control.MRIID, payload.Generation, payload.HeadSHA); err != nil {
 		if IsPermanentJob(err) {
 			if cancelErr := s.engine.Cancel(context.WithoutCancel(ctx), wfID, "superseded"); cancelErr != nil && !errors.Is(cancelErr, dag.ErrNotFound) {
-				s.logger.Warn("cancel superseded workflow failed", "workflow_id", wfID, "error", cancelErr.Error())
+				s.logger.Warn("cancel superseded workflow failed", "workflow_id", wfID, "error_class", errclass.Of(cancelErr))
 			}
 			return nil
 		}
