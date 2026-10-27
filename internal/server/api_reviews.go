@@ -14,10 +14,12 @@ import (
 )
 
 // reviewSummary is the list item. store.Workflow already carries every field
-// the console renders; duration_ms is derived from the timestamps. Nodes and
-// FindingsSummary have the same shape and meaning as on the detail endpoint.
+// the console renders; duration_ms is derived from the timestamps. MRTitle is
+// the title persisted with the dossier. Nodes and FindingsSummary have the
+// same shape and meaning as on the detail endpoint.
 type reviewSummary struct {
 	store.Workflow
+	MRTitle         *string         `json:"mr_title,omitempty"`
 	DurationMS      *int64          `json:"duration_ms,omitempty"`
 	Nodes           []reviewNode    `json:"nodes"`
 	FindingsSummary findingsSummary `json:"findings_summary"`
@@ -142,8 +144,8 @@ func (s *Server) handleListReviews(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"reviews": reviews, "next_cursor": next})
 }
 
-// summarizeReviewPage adds nodes and findings counts to one page of the
-// list. The page is already access filtered; the batched reads cover exactly
+// summarizeReviewPage adds titles, nodes and findings counts to one page of
+// the list. The page is already access filtered; the batched reads cover exactly
 // its workflow IDs, with one query per kind of data.
 func (s *Server) summarizeReviewPage(ctx context.Context, workflows []store.Workflow) ([]reviewSummary, error) {
 	reviews := make([]reviewSummary, 0, len(workflows))
@@ -162,6 +164,10 @@ func (s *Server) summarizeReviewPage(ctx context.Context, workflows []store.Work
 	if err != nil {
 		return nil, err
 	}
+	titles, err := s.store.ListWorkflowMRTitles(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
 	summaries := make(map[string]*findingsSummary, len(workflows))
 	for _, id := range ids {
 		summary := newFindingsSummary()
@@ -173,8 +179,13 @@ func (s *Server) summarizeReviewPage(ctx context.Context, workflows []store.Work
 		}
 	}
 	for _, wf := range workflows {
+		var mrTitle *string
+		if title, ok := titles[wf.ID]; ok && title != "" {
+			mrTitle = &title
+		}
 		reviews = append(reviews, reviewSummary{
 			Workflow:        wf,
+			MRTitle:         mrTitle,
 			DurationMS:      workflowDuration(wf),
 			Nodes:           reviewNodes(nodesByWorkflow[wf.ID]),
 			FindingsSummary: *summaries[wf.ID],

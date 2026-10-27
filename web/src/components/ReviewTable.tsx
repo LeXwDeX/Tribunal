@@ -41,7 +41,7 @@ export function ReviewTable({ reviews, projectNames }: { reviews: ReviewSummary[
         <tbody>
           {reviews.map((review) => {
             const href = reviewHref(review)
-            // The list API does not return mr_title; fall back to the MR reference.
+            // Reviews saved before titles were persisted have no mr_title; fall back to the MR reference.
             const title = review.mr_title || `!${review.mr_iid}`
             const label = review.mr_title ? `!${review.mr_iid} ${review.mr_title}` : `!${review.mr_iid}`
             return (
