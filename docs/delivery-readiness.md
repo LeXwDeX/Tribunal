@@ -165,31 +165,31 @@ docker compose exec -T review /app/tribunalctl projects grants delete 42 17
 
 ## 真实验收矩阵
 
-使用 2 个用户、2 个项目，建议记为 U1/U2、P1/P2。结果栏只填已验证快照的隔离测试实例实际覆盖的项；空白表示未覆盖。本次隔离外部调用已获授权，会产生真实模型用量。
+使用 2 个用户、2 个项目，建议记为 U1/U2、P1/P2。结果栏只填已验证快照的隔离测试实例实际覆盖的项；空白表示未覆盖。「自动化覆盖」列是用 fake store、fake GitLab 和 fake provider 跑的本地回归测试（`internal/server`、`internal/app`），证明代码路径的语义，不替代真实实例验收。本次隔离外部调用已获授权，会产生真实模型用量。
 
-| 场景 | 操作 | 预期 | 结果 |
-|---|---|---|---|
-| 管理面 | bootstrap 调 `users list`、`projects all` | 成功；项目业务接口仍不可读 | 200 admin 路由；404 项目业务路由 |
-| 仅管理面 | bootstrap 读 P1 项目详情、指定评审、项目统计 | 404，不泄露存在性 | 已覆盖（测试实例） |
-| 跨项目 | U1 仅授权 P1，读取 P2 | 404；列表不出现 P2 | 已覆盖（测试实例） |
-| 只读边界 | U1 对 P1 执行 manage 写操作 | 403 | viewer 写操作返回 403 |
-| 管理授权 | U2 对 P2 有 manage，执行允许的项目写操作 | 成功 | 管理员用户 199/manage 项目 1331 |
-| 宿主配置 | U2 用 manage 创建项目级 MCP/Skill/块绑定 | 403；宿主执行配置仍需平台管理员 + manage |  |
-| 会话/Token | 同一用户分别用当前 session 和 API token 读取 | 授权结果一致 |  |
-| CSRF | 浏览器会话写操作缺少/带有效 CSRF token | 403 / 200 | 已覆盖（测试实例） |
-| 撤销/禁用 | `users revoke` 后旧 token 失效；`users disable` 后 session/token 失效且 OAuth 被拒 | 旧凭据不可用 |  |
-| 重新登录 | `enable` 后重新 OAuth；不恢复旧 token | 登录成功、旧凭据仍无效、grant 保留 |  |
-| 升级会话 | 在线升级后使用原浏览器会话 | 会话仍有效 | 已覆盖；两个既有 OAuth 会话跨升级保留 |
-| webhook 归属 | 启用/停用/重新启用/重建，并保留外部同 URL hook | 只操作持久化自有 hook；外部 hook 保留 | 已覆盖（测试实例） |
-| SSE | 打开已授权评审流，随后撤 grant 或禁用用户 | 下一轮询关闭，不继续泄露 | 已覆盖；撤 grant 后 1986ms 内关闭，读取 404，恢复 grant 后 200 |
-| 统计 | 有 read 的用户读取授权项目统计；bootstrap 读项目统计 | 仅授权范围可见；bootstrap 404 |  |
-| Payload | read 用户请求 `include_payload=true` | 403；manage 才可读 |  |
-| 扩展 | read 用户列项目级扩展；访问平台级扩展 | 项目级按 grant；平台级 403 |  |
-| 正常发布 | 完成评审并发布 | `published`，汇总评论/状态与 MR 一致 | 两次 deep 均 BLOCKING/published；commit status failed；应用新增行行内评论存在 |
-| 部分失败 | 模拟一项发布失败、其他项成功 | 可重试失败保持 `pending`；永久失败为 `failed`；不重复副作用 |  |
-| 重启恢复 | 发布 pending 或运行中断后重启 | recover 继续，状态最终一致 |  |
-| stale | 发布前改变 MR head/base | `skipped` 并记录原因，不发布旧结果 |  |
-| INCOMPLETE | 评审结果为 INCOMPLETE | 明确显示 INCOMPLETE，不得写 PASS 或绿灯状态 |  |
+| 场景 | 操作 | 预期 | 结果 | 自动化覆盖 |
+|---|---|---|---|---|
+| 管理面 | bootstrap 调 `users list`、`projects all` | 成功；项目业务接口仍不可读 | 200 admin 路由；404 项目业务路由 | `TestBootstrapBearerIsManagementPlaneOnly`、`TestAdminAccessEndpoints` |
+| 仅管理面 | bootstrap 读 P1 项目详情、指定评审、项目统计 | 404，不泄露存在性 | 已覆盖（测试实例） | `TestBootstrapBearerIsManagementPlaneOnly` |
+| 跨项目 | U1 仅授权 P1，读取 P2 | 404；列表不出现 P2 | 已覆盖（测试实例） | `TestProjectAccessIsolationTwoUsersTwoProjects` |
+| 只读边界 | U1 对 P1 执行 manage 写操作 | 403 | viewer 写操作返回 403 | `TestProjectWritePermissions`、`TestViewerCannotUseUnsafeMethods` |
+| 管理授权 | U2 对 P2 有 manage，执行允许的项目写操作 | 成功 | 管理员用户 199/manage 项目 1331 | `TestProjectWebhookControlRequiresManageGrant`、`TestExtensionScopeAuthorization` |
+| 宿主配置 | U2 用 manage 创建项目级 MCP/Skill/块绑定 | 403；宿主执行配置仍需平台管理员 + manage |  | `TestAcceptanceManageGrantCannotConfigureHostExtensions` |
+| 会话/Token | 同一用户分别用当前 session 和 API token 读取 | 授权结果一致 |  | `TestAcceptanceSessionAndAPITokenAuthorizeAlike` |
+| CSRF | 浏览器会话写操作缺少/带有效 CSRF token | 403 / 200 | 已覆盖（测试实例） | `TestCSRFRequiredForUnsafeSessionRequests` |
+| 撤销/禁用 | `users revoke` 后旧 token 失效；`users disable` 后 session/token 失效且 OAuth 被拒 | 旧凭据不可用 |  | `TestAdminRevocationInvalidatesOldCredentials`、`TestDisabledUserCannotLoginOrReuseCredentials` |
+| 重新登录 | `enable` 后重新 OAuth；不恢复旧 token | 登录成功、旧凭据仍无效、grant 保留 |  | `TestAcceptanceReloginKeepsGrantWithoutOldCredentials` |
+| 升级会话 | 在线升级后使用原浏览器会话 | 会话仍有效 | 已覆盖；两个既有 OAuth 会话跨升级保留 | `TestSessionSurvivesRestartWithSameKey` |
+| webhook 归属 | 启用/停用/重新启用/重建，并保留外部同 URL hook | 只操作持久化自有 hook；外部 hook 保留 | 已覆盖（测试实例） | `TestCreateWebhookDoesNotAdoptMatchingURLHook`、`TestDisableWebhookDoesNotDeleteUnrecordedHook`、`TestDeleteProjectRemovesOnlyRecordedHook` |
+| SSE | 打开已授权评审流，随后撤 grant 或禁用用户 | 下一轮询关闭，不继续泄露 | 已覆盖；撤 grant 后 1986ms 内关闭，读取 404，恢复 grant 后 200 | `TestReviewStreamClosesOnGrantRevocationAndDisabledUser` |
+| 统计 | 有 read 的用户读取授权项目统计；bootstrap 读项目统计 | 仅授权范围可见；bootstrap 404 |  | `TestProjectAccessIsolationTwoUsersTwoProjects`、`TestBootstrapBearerIsManagementPlaneOnly` |
+| Payload | read 用户请求 `include_payload=true` | 403；manage 才可读 |  | `TestProjectAccessIsolationTwoUsersTwoProjects` |
+| 扩展 | read 用户列项目级扩展；访问平台级扩展 | 项目级按 grant；平台级 403 |  | `TestExtensionScopeAuthorization` |
+| 正常发布 | 完成评审并发布 | `published`，汇总评论/状态与 MR 一致 | 两次 deep 均 BLOCKING/published；commit status failed；应用新增行行内评论存在 | `TestReviewRunPublishesSummaryOnce`、`TestPublisherRecordsCommitStatusState` |
+| 部分失败 | 模拟一项发布失败、其他项成功 | 可重试失败保持 `pending`；永久失败为 `failed`；不重复副作用 |  | `TestPublisherPartialFailureDoesNotRepeatSideEffects`、`TestPublisherPermanentFailureMarksFailed` |
+| 重启恢复 | 发布 pending 或运行中断后重启 | recover 继续，状态最终一致 |  | `TestReviewRecoverRunsPendingAndPublishes`、`TestReviewShutdownResumesOnStartupRecovery` |
+| stale | 发布前改变 MR head/base | `skipped` 并记录原因，不发布旧结果 |  | `TestPublisherStalePublicationStoresSkippedReason`、`TestPublisherBaseChangeMarksStaleSkipped` |
+| INCOMPLETE | 评审结果为 INCOMPLETE | 明确显示 INCOMPLETE，不得写 PASS 或绿灯状态 |  | `TestReviewIncompleteVerdictPersistsAndNeverReportsSuccess`、`TestAcceptanceIncompleteReviewIsNeverShownAsPass` |
 
 连续两次实际无诊断代理 full deep 均已取得 0 call errors/0 failed nodes；BLOCKING 是合成授权回归的预期结论，不是全绿验收。最终独立 review 已对 `12a62d1` 文档树 PASS（code/documentation，0 blockers）；最终 commit/CI、native 评审和 Release 回读仍以 PR #30 为准。
 
