@@ -28,7 +28,7 @@ auth:
   oauth:
     client_id_env: GITLAB_OAUTH_CLIENT_ID
     client_secret_env: GITLAB_OAUTH_CLIENT_SECRET
-  bootstrap_admins: ["id:42", "alice"]  # 推荐 id:<GitLab 用户 ID>；用户名首次登录即绑定该用户 ID。仅平台 admin 标签，重启后生效，项目数据仍需 grant
+  bootstrap_admins: ["id:42"]  # id:<GitLab 用户 ID>；用户名写法已弃用，下一个大版本移除。仅平台 admin 标签，重启后生效，项目数据仍需 grant
   session_ttl: 168h                 # 持久化浏览器会话有效期
 
 storage:

@@ -60,7 +60,7 @@ docker compose exec -T review /app/tribunalctl projects all
 OAuth 默认关闭，访问 `/auth/login` 得到 503 是预期行为，Bearer API 和 CLI 仍可使用。启用控制台登录时：
 
 1. 在 GitLab 创建 OAuth Application，scope 为 `read_user`，回调 URI 为 `<TRIBUNAL_PUBLIC_URL>/auth/callback`。
-2. 在 `.env` 设置 `GITLAB_OAUTH_CLIENT_ID`、`GITLAB_OAUTH_CLIENT_SECRET` 和 `GITLAB_ADMIN_USERNAME`。管理员值推荐填写 `id:<GitLab 用户 ID>`，也可填 GitLab 用户名（首次登录即绑定该用户 ID，见第 5 节说明）；留空不会给任何正常账号平台管理员标签。该标签只用于平台管理面，不授予项目业务数据访问，项目授权见下文。
+2. 在 `.env` 设置 `GITLAB_OAUTH_CLIENT_ID`、`GITLAB_OAUTH_CLIENT_SECRET` 和 `GITLAB_ADMIN_USERNAME`。管理员值填写 `id:<GitLab 用户 ID>`；GitLab 用户名写法仍兼容但已弃用（见[用户名写法弃用与迁移](#bootstrap_admins-用户名写法弃用与迁移)）；留空不会给任何正常账号平台管理员标签。该标签只用于平台管理面，不授予项目业务数据访问，项目授权见下文。
 3. 在 `config/server.docker.yaml` 取消 `oauth` 及两个子字段、`bootstrap_admins` 的注释。设置正确的 HTTPS `TRIBUNAL_PUBLIC_URL`，配置反向代理，再执行 `docker compose up -d --force-recreate --wait --wait-timeout 120`。
 
 模型密钥不是 GitLab 项目 token。注册项目需要单独的 `GITLAB_PROJECT_TOKEN`，由安全环境注入当前 shell，scope 为 `api` 和 `read_repository`。该变量不放进长期运行服务的 `.env`，仅传给这次 CLI 进程：
@@ -309,7 +309,7 @@ auth:
   oauth:
     client_id_env: GITLAB_OAUTH_CLIENT_ID
     client_secret_env: GITLAB_OAUTH_CLIENT_SECRET
-  bootstrap_admins: ["alice"]
+  bootstrap_admins: ["id:42"]
 ```
 
 容器环境：
@@ -339,12 +339,22 @@ docker run -d --name tribunal \
 
 - `server.public_url` 必须是 GitLab 能访问的外部地址，并且与 OAuth Application 的 Redirect URI 同源。应用固定使用 `public_url + /auth/callback`。
 - `read_user` 是登录所需的最小 scope；应用调用 GitLab `/api/v4/user` 获取用户名。
-- `bootstrap_admins` 推荐填 `id:<GitLab 用户 ID>`（如 `id:42`），只按 ID 匹配，GitLab 改名不影响。用户 ID 可在 GitLab 个人资料页或 `GET /api/v4/users?username=<name>` 查到。也兼容旧写法 GitLab **用户名**（不区分大小写）：该用户名第一次以 admin 身份登录或访问时，Tribunal 把它绑定到当时的 GitLab 用户 ID 并写入 `admin_bindings`；之后其他账号即使改名为同一用户名，也只得到 `viewer`，日志记录 `bootstrap admin username is bound to another GitLab user`。匹配的用户获得平台 `admin` 标签；其他登录用户为 `viewer`。它不会创建 GitLab 账号，也不授予任何项目数据访问；项目权限仍需 `project_grants`。
+- `bootstrap_admins` 推荐填 `id:<GitLab 用户 ID>`（如 `id:42`），只按 ID 匹配，GitLab 改名不影响。用户 ID 可在 GitLab 个人资料页或 `GET /api/v4/users?username=<name>` 查到。也兼容旧写法 GitLab **用户名**（不区分大小写，已弃用，见下文迁移步骤）：该用户名第一次以 admin 身份登录或访问时，Tribunal 把它绑定到当时的 GitLab 用户 ID 并写入 `admin_bindings`；之后其他账号即使改名为同一用户名，也只得到 `viewer`，日志记录 `bootstrap admin username is bound to another GitLab user`。匹配的用户获得平台 `admin` 标签；其他登录用户为 `viewer`。它不会创建 GitLab 账号，也不授予任何项目数据访问；项目权限仍需 `project_grants`。
 - 用户名绑定是首次使用即信任：升级前若该用户名已被他人占用，第一个登录的账号会拿到绑定。升级后请确认绑定正确（`SELECT username, user_id FROM admin_bindings;`），或直接改用 `id:` 写法。管理员 GitLab 账号重建、需要重新绑定时，先停服务，执行 `DELETE FROM admin_bindings WHERE username = '<小写用户名>';`，再启动并让正确账号登录；改用 `id:` 写法则不需要这一步。
 - 每个用户最多保留 10 个浏览器会话，再次登录会淘汰该用户自己最旧的会话，不影响其他用户；全局 4096 个会话只是存储兜底。
 - OAuth 配置存在时，`client_id_env` 和 `client_secret_env` 必须同时设置，且两个环境变量都必须非空；`server.public_url` 必须是非空的绝对 HTTP(S) 地址，否则启动校验失败。
 - `REVIEW_ADMIN_TOKEN` 与 OAuth 相互独立；没有浏览器会话时仍可用它调用用户、授权和系统配置等平台管理 API。它没有用户 ID 和项目 grant，不能读取项目业务数据；轮换由部署方更新环境变量并重启。
 - 真实 OAuth 登录已在已验证快照的隔离测试实例验证；未单独复测其他生产 IdP 或所有设备场景。
+
+### bootstrap_admins 用户名写法弃用与迁移
+
+用户名写法已弃用，计划在下一个大版本（v2.0.0）移除；在此之前保持兼容。服务启动时，每个用户名条目记一条 `WARN`，消息为 `auth.bootstrap_admins username entry is deprecated ...`。日志只含条目在列表中的序号 `index`（从 0 开始），不含用户名：
+
+- 该用户名已在 `admin_bindings` 绑定：日志带 `replacement=id:<N>`，把第 `index` 个条目直接替换成这个值即可，权限不变。
+- 尚未绑定：日志带 `binding=none`。用 `GET <GITLAB_URL>/api/v4/users?username=<name>` 或 GitLab 个人资料页查到用户 ID 后写成 `id:<N>`；该用户登录过 Tribunal 的话，也可以用 `tribunalctl users list` 查 ID。
+- 读取绑定失败：日志带 `binding=unavailable`，按上一条手动查 ID。
+
+替换后重启服务，确认启动日志不再出现这条告警。`admin_bindings` 里的旧行不影响 `id:` 条目，可以保留。
 
 ## 6. 健康检查与 HTTPS 反向代理
 
@@ -470,7 +480,7 @@ curl -fsS http://127.0.0.1:8080/readyz
    v1.0.0 读不了新格式。所以必须先做第 7 节的一致性备份；回退时恢复这份备份，不能只换回 v1.0.0 镜像。
 2. **继续使用原来的 `REVIEW_MASTER_KEY`。** 迁移要用它解开旧密文。迁移是幂等的，每个字段单独迁移，迁移期间被并发修改的行会跳过。解不开的字段只记一条告警（只含 `project_id` 和字段名），保持原样，不阻止启动；这类字段在升级前使用时同样会失败，需要在设置页用「更新访问 Key」或 Webhook「重建」重新写入。某次启动后不再有旧格式字段时，服务在 `secret_migration` 表记下迁移完成；此后启动不再解开任何旧格式密文，遇到时保持原样并告警（只含 `project_id` 和字段名），该字段同样要重新写入。新部署首次启动即记为完成。
 3. **镜像和 CLI 改了名，数据卷没改。** 用新代码重新构建镜像（`docker compose build`）。Compose 项目名 `crc-review` 和数据卷 `crc-review_data` 保持不变，直接沿用。脚本里的 `/app/reviewctl` 可以继续用，建议改成 `/app/tribunalctl`。环境变量可以逐步改为 `TRIBUNAL_*` 新名，session key 要沿用原来的值。
-4. **管理员配置。** `bootstrap_admins` 推荐改成 `id:<GitLab 用户 ID>`（用 `tribunalctl users list` 查 ID）。保留用户名写法也可以：该用户名第一次以管理员身份出现时，会被绑定到当时的 GitLab 用户 ID 并写入 `admin_bindings`；之后其他账号即使改成这个用户名，也只有 viewer 权限。如果想换一个账号当管理员，改用 `id:` 写法。
+4. **管理员配置。** `bootstrap_admins` 推荐改成 `id:<GitLab 用户 ID>`（用 `tribunalctl users list` 查 ID）。用户名写法暂时仍可用，但已弃用，启动时会记告警，迁移见 [用户名写法弃用与迁移](#bootstrap_admins-用户名写法弃用与迁移)：该用户名第一次以管理员身份出现时，会被绑定到当时的 GitLab 用户 ID 并写入 `admin_bindings`；之后其他账号即使改成这个用户名，也只有 viewer 权限。如果想换一个账号当管理员，改用 `id:` 写法。
 5. **会话数量。** 每个用户最多保留 10 个浏览器会话，超出时淘汰该用户自己最旧的会话。升级时已有的会话保留，用户下次登录时才按上限淘汰。
 6. **默认扩展。** 首次启动时会登记内置 Skill `code-review` 和内置 MCP 服务器 `codebase-memory`，并按 `default_extensions` 绑定到评审块。已有部署如果在数据库或 `mcp.config` 里自建了同名项，服务不会接管，也不会绑定它的工具。`config/server.docker.yaml` 已带默认配置；自定义配置文件要参照 [默认扩展配置](design/06-config.md#默认扩展default_extensions) 补上 `default_extensions`，不需要就写 `skills: []`。
 7. **Webhook 的配置位置变了。** 控制台注册项目不再创建 Webhook，要在项目设置的「GitLab Webhook」面板里启用。已有项目的 Webhook 状态不受影响。CLI 的 `--auto-webhook` 仍然可用。
@@ -564,7 +574,7 @@ auth:
   oauth:
     client_id_env: GITLAB_OAUTH_CLIENT_ID
     client_secret_env: GITLAB_OAUTH_CLIENT_SECRET
-  bootstrap_admins: ["alice"]
+  bootstrap_admins: ["id:42"]
 storage:
   dsn: "file:$TMP_OAUTH/data/review.db"
 workspace:

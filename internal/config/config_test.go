@@ -699,3 +699,14 @@ func TestValidateBootstrapAdminEntries(t *testing.T) {
 		requireErrorContains(t, cfg.Validate(), "auth.bootstrap_admins[0]", "positive GitLab user id")
 	}
 }
+
+func TestUsernameBootstrapAdmins(t *testing.T) {
+	auth := AuthConfig{BootstrapAdmins: []string{"id:42", " Alice ", "", "ID: 7", "bob"}}
+	got := auth.UsernameBootstrapAdmins()
+	if len(got) != 2 || got[0] != 1 || got[1] != 4 {
+		t.Fatalf("UsernameBootstrapAdmins() = %v, want [1 4]", got)
+	}
+	if got := (AuthConfig{BootstrapAdmins: []string{"id:42", "ID: 7"}}).UsernameBootstrapAdmins(); len(got) != 0 {
+		t.Fatalf("id-only entries = %v, want none", got)
+	}
+}
