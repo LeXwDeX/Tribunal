@@ -150,6 +150,77 @@ func TestSessionTotalLimitIsBackstop(t *testing.T) {
 	}
 }
 
+func TestSessionTotalLimitEvictsViewersBeforeAdmins(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	s := openTestStore(t, clock)
+	limits := store.SessionLimits{PerUser: 10, Total: 3}
+	admin := func(token string, id int64) store.Session {
+		session := sessionFor(token, id, "admin"+token, clock.Now())
+		session.Role = "admin"
+		return session
+	}
+	// The admin sessions are the oldest, so plain age-based eviction would
+	// remove them first.
+	for _, session := range []store.Session{
+		admin("admin-1", 1),
+		admin("admin-2", 2),
+		sessionFor("viewer-1", 11, "viewer1", clock.Now()),
+	} {
+		if err := s.CreateSession(ctx, session, limits); err != nil {
+			t.Fatalf("CreateSession(seed): %v", err)
+		}
+		clock.Advance(time.Second)
+	}
+	for _, token := range []string{"viewer-2", "viewer-3"} {
+		if err := s.CreateSession(ctx, sessionFor(token, 12, "viewer2", clock.Now()), limits); err != nil {
+			t.Fatalf("CreateSession(%s): %v", token, err)
+		}
+		clock.Advance(time.Second)
+	}
+
+	if got := rowCount(t, s, `SELECT COUNT(*) FROM sessions`); got != 3 {
+		t.Fatalf("session count = %d, want 3", got)
+	}
+	for _, token := range []string{"admin-1", "admin-2", "viewer-3"} {
+		if _, err := s.GetSession(ctx, sessionHash(token), clock.Now()); err != nil {
+			t.Fatalf("session %s was evicted: %v", token, err)
+		}
+	}
+	for _, token := range []string{"viewer-1", "viewer-2"} {
+		if _, err := s.GetSession(ctx, sessionHash(token), clock.Now()); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("oldest viewer session %s was not evicted: %v", token, err)
+		}
+	}
+}
+
+func TestSessionTotalLimitEvictsOldestAdminWhenAllAreAdmins(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	s := openTestStore(t, clock)
+	limits := store.SessionLimits{PerUser: 10, Total: 2}
+	for i, token := range []string{"admin-1", "admin-2", "admin-3"} {
+		session := sessionFor(token, int64(i+1), "admin"+token, clock.Now())
+		session.Role = "admin"
+		if err := s.CreateSession(ctx, session, limits); err != nil {
+			t.Fatalf("CreateSession(%s): %v", token, err)
+		}
+		clock.Advance(time.Second)
+	}
+
+	if got := rowCount(t, s, `SELECT COUNT(*) FROM sessions`); got != 2 {
+		t.Fatalf("session count = %d, want 2", got)
+	}
+	if _, err := s.GetSession(ctx, sessionHash("admin-1"), clock.Now()); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("oldest admin session was not evicted: %v", err)
+	}
+	for _, token := range []string{"admin-2", "admin-3"} {
+		if _, err := s.GetSession(ctx, sessionHash(token), clock.Now()); err != nil {
+			t.Fatalf("session %s: %v", token, err)
+		}
+	}
+}
+
 func TestSessionLimitsDefaults(t *testing.T) {
 	ctx := context.Background()
 	clock := newFakeClock()

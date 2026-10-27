@@ -18,7 +18,8 @@ import (
 // token is never stored. Expired rows are removed first. The user's own oldest
 // sessions are then evicted until the new row fits within limits.PerUser, so
 // one account cannot push other users out. limits.Total is a global backstop
-// that evicts the oldest sessions of any user.
+// that evicts the oldest non-admin sessions first; admin sessions are evicted
+// only when every remaining session belongs to an admin.
 func (s *Store) CreateSession(ctx context.Context, session store.Session, limits store.SessionLimits) error {
 	id, err := sessionID(session.IDHash)
 	if err != nil {
@@ -88,8 +89,12 @@ func (s *Store) CreateSession(ctx context.Context, session store.Session, limits
 		return fmt.Errorf("sqlite: count sessions: %w", err)
 	}
 	if count >= limits.Total {
+		// Admin sessions sort last, so they are evicted only once no viewer
+		// session is left. The role is the user's current platform role.
 		if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE id IN (
-			SELECT id FROM sessions ORDER BY expires_at ASC, created_at ASC, id ASC LIMIT ?)`,
+			SELECT s.id FROM sessions s LEFT JOIN users u ON u.id = s.user_id
+			ORDER BY CASE WHEN u.role = 'admin' THEN 1 ELSE 0 END ASC,
+				s.expires_at ASC, s.created_at ASC, s.id ASC LIMIT ?)`,
 			count-limits.Total+1); err != nil {
 			return fmt.Errorf("sqlite: evict old sessions: %w", err)
 		}
