@@ -23,6 +23,7 @@ type Store interface {
 	// data for every workflow on the page instead of one per row.
 	ListWorkflowNodesByWorkflow(ctx context.Context, workflowIDs []string) (map[string][]store.WorkflowNode, error)
 	CountFindingsByWorkflow(ctx context.Context, workflowIDs []string) ([]store.FindingCount, error)
+	ListWorkflowMRTitles(ctx context.Context, workflowIDs []string) (map[string]string, error)
 	SetFindingAnnotation(ctx context.Context, workflowID, findingID, annotation, annotatedBy string) (store.Finding, error)
 	ListLLMCalls(ctx context.Context, filter store.LLMCallFilter) ([]store.LLMCall, string, error)
 	ListPublications(ctx context.Context, workflowID string) ([]store.Publication, error)

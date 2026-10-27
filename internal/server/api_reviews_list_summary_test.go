@@ -147,3 +147,33 @@ func listItemsByID(t *testing.T, body map[string]any) map[string]map[string]any 
 	}
 	return out
 }
+
+// TestListReviewsIncludesMRTitle checks that list items carry the persisted
+// MR title, read once for the whole page, and omit it when none is stored.
+func TestListReviewsIncludesMRTitle(t *testing.T) {
+	fake := newFakeReviewStore()
+	env := newM6Env(t, m6Options{store: fake})
+	seedWorkflow(env)
+	fake.setWorkflow(store.Workflow{
+		ID: "wf-2", Kind: "review", ProjectID: 42, Trigger: "api", Status: "queued",
+		CreatedAt: time.Date(2026, 10, 20, 11, 0, 0, 0, time.UTC),
+	})
+	fake.mrTitles["wf-1"] = "feat: 支持批量导入"
+	client := env.businessClient()
+
+	list := client.request(http.MethodGet, "/api/v1/reviews", nil, nil)
+	assertStatus(t, list, http.StatusOK)
+	items := listItemsByID(t, env.decode(t, list))
+	if items["wf-1"]["mr_title"] != "feat: 支持批量导入" {
+		t.Fatalf("wf-1 mr_title = %v", items["wf-1"]["mr_title"])
+	}
+	if title, present := items["wf-2"]["mr_title"]; present {
+		t.Fatalf("wf-2 mr_title present without a stored title: %v", title)
+	}
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.titleBatchReads) != 1 || !reflect.DeepEqual(fake.titleBatchReads[0], []string{"wf-2", "wf-1"}) {
+		t.Fatalf("title batch reads = %v", fake.titleBatchReads)
+	}
+}

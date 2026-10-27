@@ -212,7 +212,7 @@ SSE 事件（`event:` 字段）：`node`（`{id, status, attempt}`）、`finding
 
 `mr_title` 从该工作流已存储的 dossier 快照读取；没有 dossier、数据为空或标题为空时省略，不在详情请求中调用 GitLab。`publications.commit_status` 从成功发布写入的 `status:<head_sha>:<state>` 发布键解析，只接受 `success` 或 `failed`；旧格式 `status:<head_sha>` 没有状态记录，此时字段缺失（unknown），不根据 verdict 猜测。SSE 仍由服务端每 2 秒轮询数据库生成，不是事件推送。
 
-评审列表响应为 `{reviews, next_cursor}`。每项保留工作流的扁平字段和 `duration_ms`，并附加 `nodes` 与 `findings_summary`，两者的形状和口径与详情完全一致：`nodes` 每项含 `id`、`kind`、`status`、`depends_on`（无依赖时省略），以及 `provider`、`attempt`、`duration_ms`，尚无节点时为 `[]`；`findings_summary` 的 `published`/`marked`/`dropped` 按 `decision` 计数，`by_severity` 按非空 `final_severity`、否则原始 `severity` 计数，并始终包含 `P0`、`P1`、`P2`、`info` 四个键。列表不返回 `access`、`mr_title`、`usage`、`publications`。服务端在已授权过滤并分页的结果上，按本页全部工作流 ID 各执行一次节点查询和一次 finding 分组计数查询（不按行 N+1）；空页不发起这两次查询。
+评审列表响应为 `{reviews, next_cursor}`。每项保留工作流的扁平字段和 `duration_ms`，并附加 `nodes` 与 `findings_summary`，两者的形状和口径与详情完全一致：`nodes` 每项含 `id`、`kind`、`status`、`depends_on`（无依赖时省略），以及 `provider`、`attempt`、`duration_ms`，尚无节点时为 `[]`；`findings_summary` 的 `published`/`marked`/`dropped` 按 `decision` 计数，`by_severity` 按非空 `final_severity`、否则原始 `severity` 计数，并始终包含 `P0`、`P1`、`P2`、`info` 四个键。每项还带 `mr_title`：它在保存 dossier 时从 `mr.title` 去掉首尾空白后写入 `workflow_dossiers.mr_title`，列表只读这一列，不解压 dossier，也不请求 GitLab；没有 dossier、标题为空或是迁移 `0016` 之前保存的评审时省略该字段，控制台回退显示 `!iid`。列表不返回 `access`、`usage`、`publications`。服务端在已授权过滤并分页的结果上，按本页全部工作流 ID 各执行一次节点查询、一次 finding 分组计数查询和一次标题查询（不按行 N+1）；空页不发起这三次查询。
 
 ```json
 {

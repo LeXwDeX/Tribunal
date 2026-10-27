@@ -353,6 +353,8 @@ CREATE TABLE api_tokens (
 
 > `0008_publication_state.sql` 为 `workflow_dossiers` 增加 `publication_error`。发布状态独立于 workflow 执行状态，取值为 `pending`、`published`、`skipped` 或 `failed`；失败原因是有界、脱敏文本，不含上游响应正文或凭据。`skipped` 可表示 stale、取消/被新代次替换或关闭 failure note；`failed` 是永久发布失败，需要手动 republish。
 
+> `0016_dossier_mr_title.sql` 为 `workflow_dossiers` 增加 `mr_title`（默认空字符串）。保存 dossier 时从 `mr.title` 去掉首尾空白后写入，供评审列表按页批量读取标题。迁移前保存的 dossier 不回填，保持空值。
+
 ---
 
 ## 3. 事件 payload
