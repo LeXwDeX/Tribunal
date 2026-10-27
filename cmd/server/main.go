@@ -22,6 +22,7 @@ import (
 
 	"github.com/LeXwDeX/tribunal/internal/app"
 	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/errclass"
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/jobs"
 	"github.com/LeXwDeX/tribunal/internal/secret"
@@ -330,7 +331,7 @@ func startRecovery(ctx context.Context, recover func(context.Context) error, log
 	go func() {
 		defer close(done)
 		if err := recover(recoveryCtx); err != nil && recoveryCtx.Err() == nil {
-			logger.Warn("startup recovery failed", "error", err.Error())
+			logger.Warn("startup recovery failed", "error_class", errclass.Of(err))
 		}
 	}()
 	return func(timeout time.Duration) {
