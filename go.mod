@@ -2,6 +2,8 @@ module github.com/LeXwDeX/tribunal
 
 go 1.26.0
 
+toolchain go1.26.10
+
 require (
 	github.com/anthropics/anthropic-sdk-go v1.84.0
 	github.com/google/uuid v1.6.0
