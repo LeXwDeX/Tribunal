@@ -28,6 +28,12 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Install C toolchain
+        run: |
+          if ! command -v gcc >/dev/null 2>&1; then
+            sudo -n apt-get update
+            sudo -n apt-get install -y gcc
+          fi
       - name: Build
         run: go build ./...
       - name: Vet
