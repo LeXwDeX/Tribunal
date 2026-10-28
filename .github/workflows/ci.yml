@@ -20,6 +20,8 @@ concurrency:
 jobs:
   go:
     runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.self_hosted && fromJSON('["self-hosted", "Linux", "X64"]') || 'ubuntu-latest' }}
+    env:
+      CGO_ENABLED: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
