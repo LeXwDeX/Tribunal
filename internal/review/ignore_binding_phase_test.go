@@ -50,7 +50,7 @@ func TestIgnoredAgentOutputChecksAllFindingContracts(t *testing.T) {
 			"extend":      &SynthesizeOut{ExtendRequests: []ExtendRequest{{Files: []string{path}}}},
 		} {
 			t.Run(name+"/"+path, func(t *testing.T) {
-				want := path == "private/a.go" || path == "renamed-public.go" || (name == "verify" && path == "")
+				want := path == "private/a.go" || path == "renamed-public.go"
 				if e.ignoredAgentOutput(output) != want {
 					t.Fatalf("ignored output=%v, want %v", output, want)
 				}

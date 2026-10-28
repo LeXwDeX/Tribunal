@@ -756,8 +756,18 @@ func (e *Executor) ignoredAgentOutput(output any) bool {
 	case *VerifyOut:
 		if out != nil {
 			for _, ref := range out.Evidence {
-				if d.IgnoresPath(ref.Path) || (len(d.IgnorePolicy.Patterns) > 0 && e.validateCodeRef(ref) != nil) {
+				if d.IgnoresPath(ref.Path) {
 					return true
+				}
+				if len(d.IgnorePolicy.Patterns) > 0 {
+					// Only ignored/unsafe resolution or an unavailable snapshot
+					// (cannot prove safety) counts; ordinary range or missing-file
+					// errors are left to the verify logic.
+					err := e.validateCodeRef(ref)
+					if errors.Is(err, agent.ErrIgnoredPath) || errors.Is(err, agent.ErrUnsafePath) ||
+						errors.Is(err, errEvidenceSnapshotUnavailable) {
+						return true
+					}
 				}
 			}
 		}
@@ -888,6 +898,9 @@ func existingDir(value string) string {
 	return value
 }
 
+// errEvidenceSnapshotUnavailable marks a failure to open the evidence sandbox.
+var errEvidenceSnapshotUnavailable = errors.New("evidence snapshot unavailable")
+
 // validateCodeRef checks one evidence reference against the fixed dossier
 // snapshots. Missing snapshots and read failures return an error so a
 // refutation cannot succeed by syntax alone.
@@ -900,7 +913,7 @@ func (e *Executor) validateCodeRef(ref CodeRef) error {
 	}
 	sandbox, err := e.sandboxFor(nil)
 	if err != nil {
-		return fmt.Errorf("review: open evidence snapshot: %w", err)
+		return fmt.Errorf("review: open evidence snapshot: %w: %w", errEvidenceSnapshotUnavailable, err)
 	}
 	if sandbox == nil {
 		return errors.New("review: no fixed head/base snapshot is available")
