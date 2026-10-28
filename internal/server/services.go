@@ -99,10 +99,11 @@ type PlatformRoleStore interface {
 	SetPlatformRole(ctx context.Context, userID int64, role string) error
 }
 
-// TokenStore persists API tokens per browser session user. Plaintext never
-// reaches this interface; lookup receives the SHA-256 digest only.
+// TokenStore persists API tokens per browser session user. Issuance must check
+// the session hash, owner, expiry and enabled user atomically with insertion.
+// Plaintext never reaches this interface; hashes are SHA-256 digests.
 type TokenStore interface {
-	CreateAPIToken(ctx context.Context, user store.TokenUser, token store.APIToken) (*store.APIToken, error)
+	CreateAPITokenForSession(ctx context.Context, user store.TokenUser, token store.APIToken, sessionHash []byte) (*store.APIToken, error)
 	ListAPITokens(ctx context.Context, userID int64) ([]store.APIToken, error)
 	ListAPITokensPage(ctx context.Context, userID int64, cursor string, limit int) ([]store.APIToken, string, error)
 	DeleteAPIToken(ctx context.Context, userID int64, id string) error

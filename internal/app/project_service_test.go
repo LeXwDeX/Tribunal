@@ -17,6 +17,7 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/secret"
 	"github.com/LeXwDeX/tribunal/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/workspace"
 )
 
 func newProjectService(t *testing.T, st ProjectStore, api gitlab.API, cipher *secret.Cipher, publicURL string) *ProjectService {
@@ -27,6 +28,7 @@ func newProjectService(t *testing.T, st ProjectStore, api gitlab.API, cipher *se
 		Cipher:    cipher,
 		Profiles:  testProfiles(),
 		PublicURL: publicURL,
+		Workspace: workspace.NewManager(t.TempDir(), nil),
 	})
 	if err != nil {
 		t.Fatalf("NewProjectService: %v", err)
@@ -385,10 +387,11 @@ func TestRegisterSettingsOverrideKeepsDefaults(t *testing.T) {
 	api := defaultFakeGitLab()
 	defaults := testDefaults()
 	service, err := NewProjectService(ProjectServiceConfig{
-		Store:    st,
-		GitLab:   api,
-		Cipher:   newTestCipher(t),
-		Profiles: testProfiles(),
+		Store:     st,
+		GitLab:    api,
+		Cipher:    newTestCipher(t),
+		Profiles:  testProfiles(),
+		Workspace: workspace.NewManager(t.TempDir(), nil),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -441,6 +444,11 @@ func TestProjectServiceRequiresDependencies(t *testing.T) {
 	if _, err := NewProjectService(ProjectServiceConfig{}); err == nil {
 		t.Fatal("expected error")
 	}
+	if _, err := NewProjectService(ProjectServiceConfig{
+		Store: openLifecycleStore(t), GitLab: defaultFakeGitLab(), Cipher: newTestCipher(t),
+	}); err == nil {
+		t.Fatal("expected a shared workspace manager to be required")
+	}
 }
 
 func newWorkspaceProjectService(t *testing.T, st ProjectStore, api gitlab.API, cipher *secret.Cipher, root string) *ProjectService {
@@ -450,7 +458,7 @@ func newWorkspaceProjectService(t *testing.T, st ProjectStore, api gitlab.API, c
 		GitLab:    api,
 		Cipher:    cipher,
 		Profiles:  testProfiles(),
-		Workspace: root,
+		Workspace: workspace.NewManager(root, nil),
 	})
 	if err != nil {
 		t.Fatalf("NewProjectService: %v", err)

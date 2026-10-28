@@ -23,6 +23,7 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/review"
 	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
+	"github.com/LeXwDeX/tribunal/internal/workspace"
 )
 
 const maskedExtensionSecret = "****"
@@ -144,7 +145,7 @@ type ExtensionServiceConfig struct {
 	Store     *sqlite.Store
 	MCP       *mcp.Manager
 	Clients   review.ClientProvider
-	Workspace string
+	Workspace *workspace.Manager
 	DeniedEnv []string
 	Logger    *slog.Logger
 	Now       func() time.Time
@@ -153,19 +154,26 @@ type ExtensionServiceConfig struct {
 // ExtensionService persists MCP servers, skills and block bindings, tests MCP
 // connections, and probes configured providers.
 type ExtensionService struct {
-	store     *sqlite.Store
-	mcp       *mcp.Manager
-	clients   review.ClientProvider
-	workspace string
-	deniedEnv []string
-	logger    *slog.Logger
-	now       func() time.Time
+	store      *sqlite.Store
+	mcp        *mcp.Manager
+	clients    review.ClientProvider
+	workspace  string
+	workspaces *workspace.Manager
+	deniedEnv  []string
+	logger     *slog.Logger
+	now        func() time.Time
+	newMCPTest func(mcp.Options) (mcpTestSession, error)
+}
+
+type mcpTestSession interface {
+	ListTools(context.Context, string) ([]mcp.ToolInfo, error)
+	Close() error
 }
 
 // NewExtensionService validates dependencies and builds the service.
 func NewExtensionService(cfg ExtensionServiceConfig) (*ExtensionService, error) {
-	if cfg.Store == nil {
-		return nil, errors.New("app: extension store is required")
+	if cfg.Store == nil || cfg.Workspace == nil {
+		return nil, errors.New("app: extension store and workspace manager are required")
 	}
 	logger := cfg.Logger
 	if logger == nil {
@@ -175,26 +183,97 @@ func NewExtensionService(cfg ExtensionServiceConfig) (*ExtensionService, error) 
 	if now == nil {
 		now = time.Now
 	}
-	workspace := strings.TrimSpace(cfg.Workspace)
-	if workspace != "" {
-		absolute, err := filepath.Abs(workspace)
-		if err != nil {
-			return nil, fmt.Errorf("app: resolve extension workspace: %w", err)
-		}
-		if filepath.Dir(absolute) == absolute {
-			return nil, errors.New("app: extension workspace must not be a filesystem root")
-		}
-		workspace = absolute
+	root := cfg.Workspace.Root()
+	if !filepath.IsAbs(root) || filepath.Dir(root) == root {
+		return nil, errors.New("app: extension workspace must not be a filesystem root")
 	}
 	return &ExtensionService{
-		store:     cfg.Store,
-		mcp:       cfg.MCP,
-		clients:   cfg.Clients,
-		workspace: workspace,
-		deniedEnv: append([]string(nil), cfg.DeniedEnv...),
-		logger:    logger,
-		now:       now,
+		store:      cfg.Store,
+		mcp:        cfg.MCP,
+		clients:    cfg.Clients,
+		workspace:  root,
+		workspaces: cfg.Workspace,
+		deniedEnv:  append([]string(nil), cfg.DeniedEnv...),
+		logger:     logger,
+		now:        now,
+		newMCPTest: func(opts mcp.Options) (mcpTestSession, error) { return mcp.New(opts) },
 	}, nil
+}
+
+// lockScope protects project configuration and paths through the full operation.
+func (s *ExtensionService) lockScope(ctx context.Context, scope string, projectID *int64) (func(), error) {
+	if scope != store.ScopeProject {
+		return func() {}, nil
+	}
+	if projectID == nil || *projectID <= 0 {
+		return nil, validationError("project_id is required for project scope", Detail{Field: "project_id", Message: "must be positive"})
+	}
+	unlock, err := s.workspaces.Get(*projectID).RLock(ctx)
+	if err != nil {
+		return nil, err
+	}
+	project, err := s.store.GetProject(ctx, *projectID)
+	if err != nil || project == nil {
+		unlock()
+		if errors.Is(err, store.ErrNotFound) || (err == nil && project == nil) {
+			return nil, notFoundError("project not found")
+		}
+		return nil, err
+	}
+	return unlock, nil
+}
+
+func sameExtensionScope(scope string, projectID *int64, currentScope string, currentID *int64) bool {
+	if scope != currentScope || (projectID == nil) != (currentID == nil) {
+		return false
+	}
+	return projectID == nil || *projectID == *currentID
+}
+
+func (s *ExtensionService) lockMCPServer(ctx context.Context, id string) (*store.MCPServer, func(), error) {
+	row, err := s.store.GetMCPServer(ctx, id)
+	if err != nil {
+		return nil, nil, extensionStoreError(err)
+	}
+	if row == nil {
+		return nil, nil, notFoundError("extension not found")
+	}
+	unlock, err := s.lockScope(ctx, row.Scope, row.ProjectID)
+	if err != nil {
+		return nil, nil, err
+	}
+	current, err := s.store.GetMCPServer(ctx, id)
+	if err != nil || current == nil || !sameExtensionScope(row.Scope, row.ProjectID, current.Scope, current.ProjectID) {
+		unlock()
+		if err == nil {
+			err = store.ErrNotFound
+		}
+		return nil, nil, extensionStoreError(err)
+	}
+	return current, unlock, nil
+}
+
+func (s *ExtensionService) lockSkill(ctx context.Context, id string) (*store.Skill, func(), error) {
+	row, err := s.store.GetSkill(ctx, id)
+	if err != nil {
+		return nil, nil, extensionStoreError(err)
+	}
+	if row == nil {
+		return nil, nil, notFoundError("extension not found")
+	}
+	unlock, err := s.lockScope(ctx, row.Scope, row.ProjectID)
+	if err != nil {
+		return nil, nil, err
+	}
+	current, err := s.store.GetSkill(ctx, id)
+	if err != nil || current == nil || !sameExtensionScope(row.Scope, row.ProjectID, current.Scope, current.ProjectID) {
+		unlock()
+		if err == nil {
+			err = store.ErrNotFound
+		}
+		return nil, nil, extensionStoreError(err)
+	}
+	return current, unlock, nil
 }
 
 // ListMCPServers lists stored servers for the scope selector.
@@ -252,6 +331,11 @@ func (s *ExtensionService) CreateMCPServer(ctx context.Context, in MCPServerInpu
 	if err := s.validateMCPConfig(in.Config); err != nil {
 		return nil, err
 	}
+	unlock, err := s.lockScope(ctx, scope, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	row, err := s.store.CreateMCPServer(ctx, store.MCPServer{
 		Scope:     scope,
 		ProjectID: projectID,
@@ -268,10 +352,11 @@ func (s *ExtensionService) CreateMCPServer(ctx context.Context, in MCPServerInpu
 
 // UpdateMCPServer replaces only the provided fields.
 func (s *ExtensionService) UpdateMCPServer(ctx context.Context, id string, update MCPServerUpdate) (*MCPServer, error) {
-	current, err := s.store.GetMCPServer(ctx, id)
+	current, unlock, err := s.lockMCPServer(ctx, id)
 	if err != nil {
-		return nil, extensionStoreError(err)
+		return nil, err
 	}
+	defer unlock()
 	if current.Builtin != "" &&
 		(update.Config != nil || (update.Name != nil && strings.TrimSpace(*update.Name) != current.Name)) {
 		return nil, conflictError(errBuiltinMCPServerManaged)
@@ -306,10 +391,11 @@ func (s *ExtensionService) UpdateMCPServer(ctx context.Context, id string, updat
 // DeleteMCPServer removes one server.
 // Built-in servers cannot be deleted; they are disabled instead.
 func (s *ExtensionService) DeleteMCPServer(ctx context.Context, id string) error {
-	current, err := s.store.GetMCPServer(ctx, id)
+	current, unlock, err := s.lockMCPServer(ctx, id)
 	if err != nil {
-		return extensionStoreError(err)
+		return err
 	}
+	defer unlock()
 	if current.Builtin != "" {
 		return conflictError("built-in MCP servers cannot be deleted; disable them instead")
 	}
@@ -349,6 +435,11 @@ func (s *ExtensionService) ImportMCPServers(ctx context.Context, in MCPImportInp
 	for _, name := range names {
 		imports = append(imports, store.MCPServerImport{Name: name, Config: in.Servers[name]})
 	}
+	unlock, err := s.lockScope(ctx, scope, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	// One transaction: a built-in name or any write failure leaves no partial
 	// import behind.
 	rows, err := s.store.ImportMCPServers(ctx, scope, projectID, imports)
@@ -405,6 +496,11 @@ func (s *ExtensionService) UploadSkill(ctx context.Context, in SkillUpload) (*Sk
 	if len(in.Data) > maxSkillArchiveBytes {
 		return nil, validationError("skill archive is too large", Detail{Field: "file", Message: "must be at most 8 MiB"})
 	}
+	unlock, err := s.lockScope(ctx, scope, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	scopeRoot, err := s.skillScopeRoot(scope, projectID)
 	if err != nil {
 		return nil, err
@@ -431,6 +527,11 @@ func (s *ExtensionService) RegisterSkillDir(ctx context.Context, in SkillDirInpu
 	if err != nil {
 		return nil, validationError(err.Error(), Detail{Field: "dir", Message: err.Error()})
 	}
+	unlock, err := s.lockScope(ctx, scope, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	scopeRoot, err := s.skillScopeRoot(scope, projectID)
 	if err != nil {
 		return nil, err
@@ -490,10 +591,11 @@ func (s *ExtensionService) persistSkillDir(ctx context.Context, scope string, pr
 // outside the managed root (legacy rows) are left untouched. Built-in skills
 // cannot be deleted; they are disabled instead.
 func (s *ExtensionService) DeleteSkill(ctx context.Context, id string) error {
-	row, err := s.store.GetSkill(ctx, id)
+	row, unlock, err := s.lockSkill(ctx, id)
 	if err != nil {
-		return extensionStoreError(err)
+		return err
 	}
+	defer unlock()
 	if row.Builtin != "" {
 		return conflictError("built-in skills cannot be deleted; disable them instead")
 	}
@@ -521,6 +623,11 @@ func (s *ExtensionService) GetSkill(ctx context.Context, id string) (*Skill, err
 // SetSkillEnabled enables or disables one skill. A disabled skill is not
 // loaded, and blocks that still name it run without it.
 func (s *ExtensionService) SetSkillEnabled(ctx context.Context, id string, enabled bool) (*Skill, error) {
+	_, unlock, err := s.lockSkill(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	if err := s.store.SetSkillEnabled(ctx, id, enabled); err != nil {
 		return nil, extensionStoreError(err)
 	}
@@ -850,6 +957,11 @@ func (s *ExtensionService) UpsertBlockBinding(ctx context.Context, in BlockBindi
 	if err != nil {
 		return nil, err
 	}
+	unlock, err := s.lockScope(ctx, scope, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	row, err := s.store.UpsertBlockBinding(ctx, store.BlockBinding{
 		Scope:     scope,
 		ProjectID: projectID,
@@ -867,7 +979,22 @@ func (s *ExtensionService) UpsertBlockBinding(ctx context.Context, in BlockBindi
 // TestMCPServer starts a short-lived manager from the submitted configuration.
 // It never reuses the runtime manager: a project server can share a name with
 // a platform server and carry different configuration.
-func (s *ExtensionService) TestMCPServer(ctx context.Context, server MCPServer) ([]MCPTool, error) {
+func (s *ExtensionService) TestMCPServer(ctx context.Context, server MCPServer) (tools []MCPTool, err error) {
+	unlock, err := s.lockScope(ctx, server.Scope, server.ProjectID)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	if server.Scope == store.ScopeProject {
+		row, err := s.store.GetMCPServer(ctx, server.ID)
+		if err != nil {
+			return nil, extensionStoreError(err)
+		}
+		if row == nil || !sameExtensionScope(server.Scope, server.ProjectID, row.Scope, row.ProjectID) {
+			return nil, notFoundError("extension not found")
+		}
+		server = mcpServerFromStore(*row)
+	}
 	name := strings.TrimSpace(server.Name)
 	if name == "" {
 		return nil, validationError("name is required", Detail{Field: "name", Message: "name is required"})
@@ -877,21 +1004,13 @@ func (s *ExtensionService) TestMCPServer(ctx context.Context, server MCPServer) 
 		return nil, fmt.Errorf("app: MCP server test failed: %w", err)
 	}
 	workspace := s.workspace
-	if strings.TrimSpace(workspace) == "" {
-		dir, err := os.MkdirTemp("", "mcp-test-")
-		if err != nil {
-			return nil, errors.New("app: cannot prepare MCP test workspace")
-		}
-		defer os.RemoveAll(dir)
-		workspace = dir
-	}
 	if server.Scope == store.ScopeProject {
 		if server.ProjectID == nil || *server.ProjectID <= 0 {
 			return nil, validationError("project_id is required for project scope", Detail{Field: "project_id", Message: "must be positive"})
 		}
 		workspace = filepath.Join(workspace, fmt.Sprintf("%d", *server.ProjectID))
 	}
-	manager, err := mcp.New(mcp.Options{
+	manager, err := s.newMCPTest(mcp.Options{
 		Platform:  mcp.Config{MCPServers: map[string]mcp.ServerConfig{name: config}},
 		Workspace: workspace,
 		DeniedEnv: s.deniedEnv,
@@ -901,15 +1020,17 @@ func (s *ExtensionService) TestMCPServer(ctx context.Context, server MCPServer) 
 		return nil, fmt.Errorf("app: MCP server test failed: %w", err)
 	}
 	defer func() {
-		if err := manager.Close(); err != nil {
+		if closeErr := manager.Close(); closeErr != nil {
 			s.logger.Warn("mcp test manager close failed")
+			tools = nil
+			err = errors.Join(err, errors.New("app: MCP server test cleanup failed"))
 		}
 	}()
 	infos, err := manager.ListTools(ctx, name)
 	if err != nil {
 		return nil, fmt.Errorf("app: MCP server test failed: %w", err)
 	}
-	tools := make([]MCPTool, 0, len(infos))
+	tools = make([]MCPTool, 0, len(infos))
 	for _, info := range infos {
 		tools = append(tools, MCPTool{Name: info.Name, Description: info.Description})
 	}

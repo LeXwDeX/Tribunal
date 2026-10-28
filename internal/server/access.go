@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/LeXwDeX/tribunal/internal/app"
 	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
@@ -190,6 +191,25 @@ func currentUserID(r *http.Request) int64 {
 		return 0
 	}
 	return value.user.ID
+}
+
+// dispatchContext requires a fresh manage grant inside the dispatcher's
+// project lifecycle lock. It never grants an unauthenticated HTTP request.
+func (s *Server) dispatchContext(r *http.Request, projectID int64) context.Context {
+	userID := currentUserID(r)
+	return app.WithDispatchAuthorization(r.Context(), func(ctx context.Context, id int64) error {
+		if s.access == nil || userID <= 0 || projectID <= 0 || id != projectID {
+			return store.ErrNotFound
+		}
+		role, err := s.access.GetProjectAccess(ctx, userID, id)
+		if err != nil {
+			return err
+		}
+		if role != store.ProjectAccessManage {
+			return store.ErrNotFound
+		}
+		return nil
+	})
 }
 
 // accessUserIDPtr always returns a non-nil pointer for HTTP list and stats

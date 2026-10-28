@@ -17,8 +17,10 @@ import (
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/app"
+	"github.com/LeXwDeX/tribunal/internal/secret"
 	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
+	"github.com/LeXwDeX/tribunal/internal/workspace"
 )
 
 func multipartBody(t *testing.T, fields map[string]string, fileField, fileName string, fileData []byte) ([]byte, string) {
@@ -100,16 +102,8 @@ func TestMCPServersMaskSecretsOnRead(t *testing.T) {
 		t.Fatalf("servers = %v", servers)
 	}
 	config := servers[0].(map[string]any)["config"].(map[string]any)
-	envValues := config["env"].(map[string]any)
-	if envValues["API_KEY"] != maskedSecret {
-		t.Fatalf("env = %v", envValues)
-	}
-	headers := config["headers"].(map[string]any)
-	if headers["Authorization"] != maskedSecret {
-		t.Fatalf("authorization header = %v", headers)
-	}
-	if headers["X-Trace"] != "keep" {
-		t.Fatalf("non-sensitive header was masked: %v", headers)
+	if len(config) != 0 {
+		t.Fatalf("config must not be exposed: %v", config)
 	}
 }
 
@@ -335,8 +329,15 @@ func newExtensionPaginationServer(t *testing.T) (*sqlite.Store, *Server) {
 		t.Fatalf("sqlite.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
+	cipher, err := secret.New([]byte("0123456789abcdef0123456789abcdef"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ConfigureMCPSecrets(context.Background(), cipher); err != nil {
+		t.Fatal(err)
+	}
 	service, err := app.NewExtensionService(app.ExtensionServiceConfig{
-		Store: st, Workspace: t.TempDir(),
+		Store: st, Workspace: workspace.NewManager(t.TempDir(), nil),
 	})
 	if err != nil {
 		t.Fatalf("NewExtensionService: %v", err)

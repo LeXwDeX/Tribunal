@@ -91,5 +91,13 @@ jobs:
         run: go run ./scripts/licensebundle -check
       - name: Build
         run: npm run build
+      - name: Check committed web build
+        run: |
+          status=$(git status --porcelain --untracked-files=all -- dist)
+          if [ -n "$status" ]; then
+            echo "::error::web/dist differs from the committed build; run npm run build and commit the result"
+            echo "$status"
+            exit 1
+          fi
       - name: Test with coverage
         run: npm test -- --coverage

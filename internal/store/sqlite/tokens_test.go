@@ -11,6 +11,58 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
+func TestCreateAPITokenForSession(t *testing.T) {
+	for _, mode := range []string{"valid", "expires at now", "wrong user", "empty", "short", "revoked", "disabled"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := context.Background()
+			clock := newFakeClock()
+			s := openTestStore(t, clock)
+			created := clock.Now()
+			session := testSession("issuance-session", created, time.Hour)
+			if err := s.CreateSession(ctx, session, store.SessionLimits{}); err != nil {
+				t.Fatal(err)
+			}
+			user := store.TokenUser{ID: 7, Username: "alice", Name: "Alice", Role: "admin"}
+			hash := session.IDHash
+			switch mode {
+			case "expires at now":
+				clock.Advance(time.Hour)
+			case "wrong user":
+				user.ID = 8
+			case "empty":
+				hash = nil
+			case "short":
+				hash = []byte{1}
+			case "revoked":
+				if err := s.DeleteSession(ctx, hash); err != nil {
+					t.Fatal(err)
+				}
+			case "disabled":
+				if _, err := s.db.ExecContext(ctx, `UPDATE users SET disabled = 1 WHERE id = 7`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			sum := sha256.Sum256([]byte("api-token"))
+			token, err := s.CreateAPITokenForSession(ctx, user, store.APIToken{Name: "test", TokenHash: sum[:], CreatedAt: created}, hash)
+			if mode == "valid" {
+				if err != nil || token == nil {
+					t.Fatalf("valid session: token = %v, err = %v", token, err)
+				}
+			} else if token != nil || !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("invalid session: token = %v, err = %v", token, err)
+			}
+			tokens, err := s.ListAPITokens(ctx, user.ID)
+			want := 0
+			if mode == "valid" {
+				want = 1
+			}
+			if err != nil || len(tokens) != want {
+				t.Fatalf("tokens = %v, err = %v", tokens, err)
+			}
+		})
+	}
+}
+
 func TestFindAPITokenByHash(t *testing.T) {
 	ctx := context.Background()
 	clock := newFakeClock()

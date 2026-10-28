@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/errclass"
+	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/internal/workspace"
 )
 
@@ -21,6 +22,9 @@ const defaultRunCleanupInterval = time.Hour
 // RunCleanupStore is the persistence subset needed to find safe deletions.
 type RunCleanupStore interface {
 	ListWorkspaceProjectIDs(ctx context.Context) ([]int64, error)
+	GetProject(ctx context.Context, id int64) (*store.Project, error)
+	GetWorkspace(ctx context.Context, id int64) (*store.Workspace, error)
+	SettleOrphanDossiers(ctx context.Context, projectID int64) error
 	ProtectedRunRefs(ctx context.Context) (map[string]struct{}, error)
 	ProtectedContextSHAs(ctx context.Context, projectID int64) (map[string]struct{}, error)
 }
@@ -139,8 +143,24 @@ func (s *RunCleanupService) RunOnce(ctx context.Context) error {
 			}
 			continue
 		}
+		project, projectErr := s.store.GetProject(ctx, pid)
+		state, stateErr := s.store.GetWorkspace(ctx, pid)
+		if projectErr != nil || stateErr != nil || project == nil || state == nil || project.ID != pid || state.ProjectID != pid {
+			unlock()
+			for _, lookupErr := range []error{projectErr, stateErr} {
+				if lookupErr != nil && !errors.Is(lookupErr, store.ErrNotFound) {
+					errs = append(errs, fmt.Errorf("run cleanup: project %d: verify ownership: %w", pid, lookupErr))
+				}
+			}
+			continue
+		}
 		// Read the protection set while holding the write lock: prepareRun
 		// cannot create or reuse a run until this pass releases it.
+		if err := s.store.SettleOrphanDossiers(ctx, pid); err != nil {
+			unlock()
+			errs = append(errs, fmt.Errorf("run cleanup: project %d: settle orphan dossiers: %w", pid, err))
+			continue
+		}
 		protected, err := s.store.ProtectedRunRefs(ctx)
 		if err != nil {
 			unlock()

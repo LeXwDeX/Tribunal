@@ -13,6 +13,7 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/secret"
 	"github.com/LeXwDeX/tribunal/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/workspace"
 )
 
 // DispatchStore is the persistence surface used by the manual review,
@@ -33,25 +34,47 @@ type DispatchGitLab interface {
 // Dispatcher implements the admin review and workspace actions. It only
 // enqueues durable jobs; execution stays with the registered job handlers.
 type Dispatcher struct {
-	store    DispatchStore
-	gitlab   DispatchGitLab
-	cipher   *secret.Cipher
-	profiles map[string]config.ProfileConfig
-	logger   *slog.Logger
+	store     DispatchStore
+	workspace *workspace.Manager
+	gitlab    DispatchGitLab
+	cipher    *secret.Cipher
+	profiles  map[string]config.ProfileConfig
+	logger    *slog.Logger
 }
 
 // DispatcherConfig configures Dispatcher.
 type DispatcherConfig struct {
-	Store    DispatchStore
-	GitLab   DispatchGitLab
-	Cipher   *secret.Cipher
-	Profiles map[string]config.ProfileConfig
-	Logger   *slog.Logger
+	Store     DispatchStore
+	Workspace *workspace.Manager
+	GitLab    DispatchGitLab
+	Cipher    *secret.Cipher
+	Profiles  map[string]config.ProfileConfig
+	Logger    *slog.Logger
+}
+
+type dispatchAuthorizationKey struct{}
+
+// WithDispatchAuthorization binds an HTTP caller's project check to dispatch.
+// Contexts without this value are reserved for trusted internal callers.
+func WithDispatchAuthorization(ctx context.Context, authorize func(context.Context, int64) error) context.Context {
+	return context.WithValue(ctx, dispatchAuthorizationKey{}, authorize)
+}
+
+func authorizeDispatch(ctx context.Context, projectID int64) error {
+	value := ctx.Value(dispatchAuthorizationKey{})
+	if value == nil {
+		return nil
+	}
+	authorize, ok := value.(func(context.Context, int64) error)
+	if !ok || authorize == nil {
+		return store.ErrNotFound
+	}
+	return authorize(ctx, projectID)
 }
 
 // NewDispatcher validates dependencies and builds the dispatcher.
 func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
-	if cfg.Store == nil || cfg.GitLab == nil || cfg.Cipher == nil {
+	if cfg.Store == nil || cfg.GitLab == nil || cfg.Cipher == nil || cfg.Workspace == nil {
 		return nil, errors.New("app: dispatcher store, GitLab client, and cipher are required")
 	}
 	logger := cfg.Logger
@@ -59,11 +82,12 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	return &Dispatcher{
-		store:    cfg.Store,
-		gitlab:   cfg.GitLab,
-		cipher:   cfg.Cipher,
-		profiles: cfg.Profiles,
-		logger:   logger,
+		store:     cfg.Store,
+		workspace: cfg.Workspace,
+		gitlab:    cfg.GitLab,
+		cipher:    cfg.Cipher,
+		profiles:  cfg.Profiles,
+		logger:    logger,
 	}, nil
 }
 
@@ -74,6 +98,14 @@ func (d *Dispatcher) StartReview(ctx context.Context, projectID, mrIID int64, pr
 	if projectID <= 0 || mrIID <= 0 {
 		return "", validationError("project id and merge request iid must be positive",
 			Detail{Field: "id", Message: "must be a positive integer"})
+	}
+	unlock, err := d.workspace.Get(projectID).LifecycleRLock(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+	if err := authorizeDispatch(ctx, projectID); err != nil {
+		return "", err
 	}
 	project, err := d.store.GetProject(ctx, projectID)
 	if err != nil {
@@ -132,10 +164,11 @@ func (d *Dispatcher) StartReview(ctx context.Context, projectID, mrIID int64, pr
 
 // CancelReview enqueues review.cancel for the workflow's merge request.
 func (d *Dispatcher) CancelReview(ctx context.Context, workflowID string) (string, error) {
-	workflow, err := d.reviewWorkflow(ctx, workflowID)
+	workflow, unlock, err := d.lockReviewWorkflow(ctx, workflowID)
 	if err != nil {
 		return "", err
 	}
+	defer unlock()
 	payload, err := json.Marshal(map[string]any{"trigger": "manual"})
 	if err != nil {
 		return "", internalError()
@@ -156,10 +189,11 @@ func (d *Dispatcher) CancelReview(ctx context.Context, workflowID string) (strin
 // RepublishReview enqueues review.publish so the worker re-runs the publisher
 // with its normal retry and stale-fingerprint semantics.
 func (d *Dispatcher) RepublishReview(ctx context.Context, workflowID string) (string, error) {
-	workflow, err := d.reviewWorkflow(ctx, workflowID)
+	workflow, unlock, err := d.lockReviewWorkflow(ctx, workflowID)
 	if err != nil {
 		return "", err
 	}
+	defer unlock()
 	payload, err := json.Marshal(map[string]any{"workflow_id": workflow.ID})
 	if err != nil {
 		return "", internalError()
@@ -180,6 +214,14 @@ func (d *Dispatcher) RepublishReview(ctx context.Context, workflowID string) (st
 func (d *Dispatcher) RefreshWorkspace(ctx context.Context, projectID int64, regenerateContext, reindex bool) (string, error) {
 	if projectID <= 0 {
 		return "", validationError("project id must be positive", Detail{Field: "id", Message: "must be a positive integer"})
+	}
+	unlock, err := d.workspace.Get(projectID).LifecycleRLock(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+	if err := authorizeDispatch(ctx, projectID); err != nil {
+		return "", err
 	}
 	project, err := d.store.GetProject(ctx, projectID)
 	if err != nil {
@@ -213,6 +255,41 @@ func (d *Dispatcher) RefreshWorkspace(ctx context.Context, projectID int64, rege
 		return "", d.storeError(err)
 	}
 	return jobID, nil
+}
+
+// lockReviewWorkflow rechecks the original workflow after entering its project.
+func (d *Dispatcher) lockReviewWorkflow(ctx context.Context, id string) (*store.Workflow, func(), error) {
+	workflow, err := d.reviewWorkflow(ctx, id)
+	if err != nil {
+		return nil, nil, err
+	}
+	ws := d.workspace.Get(workflow.ProjectID)
+	if ws == nil {
+		return nil, nil, notFoundError("project not found")
+	}
+	unlock, err := ws.LifecycleRLock(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := authorizeDispatch(ctx, workflow.ProjectID); err != nil {
+		unlock()
+		return nil, nil, err
+	}
+	current, err := d.reviewWorkflow(ctx, id)
+	if err == nil && current.ProjectID != workflow.ProjectID {
+		err = notFoundError("review not found")
+	}
+	if err == nil {
+		_, err = d.store.GetProject(ctx, workflow.ProjectID)
+		if errors.Is(err, store.ErrNotFound) {
+			err = notFoundError("project not found")
+		}
+	}
+	if err != nil {
+		unlock()
+		return nil, nil, err
+	}
+	return current, unlock, nil
 }
 
 func (d *Dispatcher) reviewWorkflow(ctx context.Context, workflowID string) (*store.Workflow, error) {

@@ -12,10 +12,18 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
-// CreateAPIToken persists one API token and upserts its owning user in the
-// same transaction. The users table normally only sees OAuth logins, but an
-// admin session can mint a token before any OAuth user row exists.
+// CreateAPIToken is for trusted callers that do not require a browser session.
+// It persists the token and upserts its owner in the same transaction.
 func (s *Store) CreateAPIToken(ctx context.Context, user store.TokenUser, token store.APIToken) (*store.APIToken, error) {
+	return s.createAPIToken(ctx, user, token, nil, false)
+}
+
+// CreateAPITokenForSession checks the session hash and owner in the issuance transaction.
+func (s *Store) CreateAPITokenForSession(ctx context.Context, user store.TokenUser, token store.APIToken, sessionHash []byte) (*store.APIToken, error) {
+	return s.createAPIToken(ctx, user, token, sessionHash, true)
+}
+
+func (s *Store) createAPIToken(ctx context.Context, user store.TokenUser, token store.APIToken, sessionHash []byte, requireSession bool) (*store.APIToken, error) {
 	if user.ID <= 0 {
 		return nil, errors.New("sqlite: api token user id is required")
 	}
@@ -52,6 +60,27 @@ func (s *Store) CreateAPIToken(ctx context.Context, user store.TokenUser, token 
 		return nil, fmt.Errorf("sqlite: begin create api token: %w", err)
 	}
 	defer tx.Rollback()
+	if requireSession {
+		id, err := sessionID(sessionHash)
+		if err != nil {
+			return nil, fmt.Errorf("%w: session", store.ErrNotFound)
+		}
+		var expiresAt string
+		err = tx.QueryRowContext(ctx, `SELECT expires_at FROM sessions WHERE id = ? AND user_id = ?`, id, user.ID).Scan(&expiresAt)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("%w: session", store.ErrNotFound)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("sqlite: find issuance session: %w", err)
+		}
+		expires, err := parseTime(expiresAt)
+		if err != nil {
+			return nil, fmt.Errorf("sqlite: parse issuance session expiry: %w", err)
+		}
+		if !s.now().Before(expires) {
+			return nil, fmt.Errorf("%w: session", store.ErrNotFound)
+		}
+	}
 	// last_login_at is owned by the login path; a token creation must not
 	// overwrite it.
 	if _, err := tx.ExecContext(ctx, `INSERT INTO users (id, username, name, role, last_login_at)

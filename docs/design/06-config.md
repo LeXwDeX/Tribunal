@@ -242,6 +242,10 @@ default_extensions:
 
 ## 2. MCP 配置文件
 
+通过 API 登记的完整 MCP 配置存于 SQLite 的 `config_enc`，使用主密钥加密，AAD 绑定格式版本、作用域、项目 ID、服务器 ID 和配置字段。服务器改名不改变加密身份。创建、更新、导入和内置配置刷新都走同一加密存储路径；没有成功配置密钥时拒绝写入，读取也不回退到明文。API 响应只返回 `config: {}`，内部运行和测试仍可读取解密后的配置。
+
+启动先执行 `0017_mcp_config_seal` 结构迁移，再在服务和默认扩展启动前事务回填旧配置并写入密钥校验标记。完成后拒绝新出现的明文或损坏密文。配置文件本身不因此被加密；仍需限制文件权限并通过环境变量引用秘密。升级与旧备份边界见 [MCP 配置加密升级](../operations.md#mcp-配置加密升级unreleased)。
+
 格式与 Claude Code 的 `.mcp.json` 一致，额外允许一个平台扩展字段 `x-review`（Claude Code 会忽略未知字段，所以同一份文件可以两边共用）：
 
 ```json
@@ -320,6 +324,8 @@ default_extensions:
 - `custom_rules` 作为项目规则注入 prompt 的项目背景段。
 - `ignore` 与平台默认值**合并**，不是替换。
 
+有效 ignore 会作为版本化策略保存到新 dossier。它用于 diff、仓库工具、证据、上下文生成及发布检查，不只筛选变更文件。非空策略下暂停无法证明安全读取范围的 MCP 工具和全量索引；这是安全降级，不记 `tool_gaps`，不影响评审结论；仅索引身份无法证明（ignore 为空）时，实际启用的绑定工具才记为覆盖缺口。默认 ignore 非空，默认图谱也会降级。旧索引、上下文和管理员绑定保留，策略明确为空时才保留原工具行为。升级后的旧工作流处理和输入限制见 [ignore 安全边界](../operations.md#ignore-安全边界)。
+
 ---
 
 ## 4. 仓库内 `.gitlab-review.yml`
@@ -353,7 +359,7 @@ review:
 
 | 变量 | 用途 |
 |---|---|
-| `REVIEW_MASTER_KEY` | 主密钥（base64 32 字节），加密项目 token 和 webhook secret |
+| `REVIEW_MASTER_KEY` | 主密钥（base64 32 字节），加密项目 token、webhook secret 和数据库中的 MCP 配置 |
 | `REVIEW_ADMIN_TOKEN` | 平台管理面的 bootstrap Bearer token，至少 32 字节；无用户 ID 和项目 grant，轮换由部署方修改环境变量并重启 |
 | `TRIBUNAL_SESSION_KEY` | base64，解码后至少 32 字节；签名会话 cookie、OAuth state 和派生 CSRF。固定该值并复用 SQLite 时重启可继续登录；未设置或恰好为空字符串时回退旧名，旧名也未配置时每进程随机生成并告警，重启后旧会话失效。旧名 `CRC_SESSION_KEY` 仍兼容；新名非空时优先。新名非空但去除空白后为空（例如只含空格）或值非法时，启动失败，不回退旧值，也不生成临时 key |
 | `GITLAB_OAUTH_CLIENT_ID` / `GITLAB_OAUTH_CLIENT_SECRET` | 控制台登录 |
@@ -396,4 +402,3 @@ review:
 - 用旧 hash 完成、尚未发布或正在重试发布的工作流，发布时转为 `skipped`，原因 `prompt bundle changed`；手动 republish 同样会被跳过。
 - 进程重启后恢复的旧 hash 工作流会被取消，保留旧 dossier 供审计，并按新 bundle 重新建立 dossier 和评审。
 - 之后 MR 的下一次触发（新推送、手动触发等）使用新 hash 评审。
-

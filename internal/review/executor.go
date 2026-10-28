@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/agent"
@@ -72,6 +73,11 @@ type AgentRunner func(ctx context.Context, spec agent.RunSpec) (*agent.RunResult
 // *PartialToolsError carrying the usable tools and one gap per missing tool.
 type ToolProvider interface {
 	Tools(ctx context.Context, block string) ([]agent.Tool, error)
+}
+
+// ToolBindingProvider lists effective enabled bindings without contacting MCP.
+type ToolBindingProvider interface {
+	BoundToolNames(ctx context.Context, block string) ([]string, error)
 }
 
 // PartialToolsError reports a partially bound tool set. Tools stay usable;
@@ -556,7 +562,7 @@ type agentOptions struct {
 	BlockTools bool
 	NoRetry    bool
 	BeforeTurn func(context.Context, llm.Usage) error
-	// ToolGaps, when set, receives one message per MCP binding that failed.
+	// ToolGaps, when set, receives MCP binding and runtime availability failures.
 	// The node then runs without those tools instead of failing.
 	ToolGaps *[]string
 }
@@ -568,10 +574,34 @@ func toolGapMessage(block string, err error) string {
 	return oneLine(fmt.Sprintf("block %s: MCP tools unavailable: %v", block, err), maxToolGapRunes)
 }
 
+type gapRecordingTool struct {
+	agent.Tool
+	block string
+	gaps  *[]string
+	mu    *sync.Mutex
+}
+
+func (t gapRecordingTool) Call(ctx context.Context, input json.RawMessage) (agent.Result, error) {
+	result, err := t.Tool.Call(ctx, input)
+	var unavailable interface{ ToolUnavailable() bool }
+	if ctx.Err() == nil && !errors.Is(err, context.Canceled) && errors.As(err, &unavailable) && unavailable.ToolUnavailable() {
+		t.mu.Lock()
+		*t.gaps = append(*t.gaps, toolGapMessage(t.block, fmt.Errorf("tool %q became unavailable", t.Def().Name)))
+		t.mu.Unlock()
+	}
+	return result, err
+}
+
 // callAgent builds the prompt, tool set, and submit schema, then runs the
 // bounded agent loop. Nodes with a BeforeTurn budget hook run once so a
 // failed attempt's known usage is retained; others keep transport retries.
 func (e *Executor) callAgent(ctx context.Context, in dag.NodeInput, opts agentOptions) (*agent.RunResult, error) {
+	if err := e.ignorePolicyReady(); err != nil {
+		return nil, err
+	}
+	if e.deps.Dossier.MR.IID > 0 && e.deps.Dossier.ContextDocs != "" && !e.deps.Dossier.WorkspaceProvenanceValid() {
+		return nil, errors.New("review: workspace material identity unavailable; rerun review")
+	}
 	binding := e.blockBinding(opts.Block)
 	var skills []Skill
 	tools := append([]agent.Tool(nil), opts.ExtraTools...)
@@ -581,15 +611,53 @@ func (e *Executor) callAgent(ctx context.Context, in dag.NodeInput, opts agentOp
 		if err != nil {
 			return nil, fmt.Errorf("review: bind skills: %w", err)
 		}
+		if err := e.checkSkillRoots(skillBinding); err != nil {
+			return nil, err
+		}
 		skills = append(skills, skillBinding.Skills...)
 		skillRoots = append(skillRoots, skillBinding.Roots...)
 		if skillBinding.Tool != nil {
 			tools = append(tools, skillBinding.Tool)
 		}
 	}
-	if opts.BlockTools && len(binding.MCPTools) > 0 && e.deps.Tools != nil {
+	ignoreBlocked := e.deps.Dossier != nil && e.deps.Dossier.IgnorePolicy != nil && len(e.deps.Dossier.IgnorePolicy.Patterns) > 0
+	onboarding := opts.Block == BlockOnboarding && (e.deps.Dossier == nil || e.deps.Dossier.MR.IID == 0)
+	indexBlocked := !e.deps.Dossier.MCPIndexEligible()
+	// A non-empty ignore policy withholds MCP tools by design. That is a
+	// safety downgrade, not a coverage gap: no gap, no error, and the agent
+	// simply runs without MCP tools. Only an unprovable index identity is a gap.
+	mcpBound := opts.BlockTools && len(binding.MCPTools) > 0 && !ignoreBlocked
+	if mcpBound && indexBlocked {
+		const reason = "workspace index identity"
+		names := binding.MCPTools
+		if provider, ok := e.deps.Tools.(ToolBindingProvider); ok {
+			var err error
+			names, err = provider.BoundToolNames(ctx, opts.Block)
+			if err != nil {
+				return nil, fmt.Errorf("review: resolve MCP bindings: %w", err)
+			}
+		}
+		if len(names) > 0 && opts.ToolGaps == nil && !onboarding {
+			return nil, fmt.Errorf("review: bound MCP tools blocked by %s", reason)
+		}
+		if opts.ToolGaps != nil {
+			for _, name := range names {
+				*opts.ToolGaps = append(*opts.ToolGaps, toolGapMessage(opts.Block, fmt.Errorf("tool %q blocked by %s", name, reason)))
+			}
+		}
+	} else if mcpBound && e.deps.Tools != nil {
 		mcpTools, err := e.deps.Tools.Tools(ctx, opts.Block)
 		var partial *PartialToolsError
+		if errors.As(err, &partial) {
+			mcpTools = partial.Tools
+		}
+		if opts.ToolGaps != nil {
+			mcpTools = append([]agent.Tool(nil), mcpTools...)
+			mu := &sync.Mutex{}
+			for i, tool := range mcpTools {
+				mcpTools[i] = gapRecordingTool{Tool: tool, block: opts.Block, gaps: opts.ToolGaps, mu: mu}
+			}
+		}
 		switch {
 		case err == nil:
 			tools = append(tools, mcpTools...)
@@ -599,7 +667,7 @@ func (e *Executor) callAgent(ctx context.Context, in dag.NodeInput, opts agentOp
 			// The usable tools stay; each missing one is a gap so synthesis
 			// cannot settle a clean PASS. Nodes without gap recording keep
 			// the usable subset, as before.
-			tools = append(tools, partial.Tools...)
+			tools = append(tools, mcpTools...)
 			if opts.ToolGaps != nil {
 				for _, gap := range partial.Gaps {
 					*opts.ToolGaps = append(*opts.ToolGaps, toolGapMessage(opts.Block, errors.New(gap)))
@@ -647,6 +715,9 @@ func (e *Executor) callAgent(ctx context.Context, in dag.NodeInput, opts agentOp
 	}
 	ctx = llm.WithCallMeta(ctx, llm.CallMeta{WorkflowID: in.WorkflowID, NodeID: in.Node.ID, Turn: 0})
 	result, err := e.runAgent(ctx, opts.Provider, spec, !opts.NoRetry)
+	if err == nil && result != nil && e.ignoredAgentOutput(result.Output) {
+		err = errors.New("review: ignored path in agent output")
+	}
 	if err != nil {
 		usage := dag.Usage{}
 		if result != nil {
@@ -658,6 +729,104 @@ func (e *Executor) callAgent(ctx context.Context, in dag.NodeInput, opts agentOp
 		}
 	}
 	return result, err
+}
+
+func (e *Executor) ignoredAgentOutput(output any) bool {
+	d := e.deps.Dossier
+	ignoredFindings := func(findings []FindingOut) bool {
+		for _, f := range findings {
+			if d.IgnoresPath(f.Path) {
+				return true
+			}
+		}
+		return false
+	}
+	switch out := output.(type) {
+	case *CodeReviewOut:
+		return out != nil && ignoredFindings(out.Findings)
+	case *ReviewOut:
+		return out != nil && ignoredFindings(out.Findings)
+	case *ReasonerOut:
+		if out != nil {
+			for _, f := range out.Findings {
+				if d.IgnoresPath(f.Path) {
+					return true
+				}
+			}
+		}
+	case *VerifyOut:
+		if out != nil {
+			for _, ref := range out.Evidence {
+				if d.IgnoresPath(ref.Path) {
+					return true
+				}
+				if len(d.IgnorePolicy.Patterns) > 0 {
+					// Only ignored/unsafe resolution or an unavailable snapshot
+					// (cannot prove safety) counts; ordinary range or missing-file
+					// errors are left to the verify logic.
+					err := e.validateCodeRef(ref)
+					if errors.Is(err, agent.ErrIgnoredPath) || errors.Is(err, agent.ErrUnsafePath) ||
+						errors.Is(err, errEvidenceSnapshotUnavailable) {
+						return true
+					}
+				}
+			}
+		}
+	case *SynthesizeOut:
+		if out != nil {
+			if ignoredFindings(out.NewFindings) {
+				return true
+			}
+			for _, request := range out.ExtendRequests {
+				for _, file := range request.Files {
+					if d.IgnoresPath(file) {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+func (e *Executor) checkSkillRoots(binding SkillBinding) error {
+	if len(e.deps.Dossier.IgnorePolicy.Patterns) == 0 {
+		return nil
+	}
+	if len(binding.Roots) == 0 && (binding.Tool != nil || len(binding.Skills) > 0) {
+		return errors.New("review: skill source unavailable under ignore policy")
+	}
+	var repos []string
+	for _, root := range []string{e.deps.Dossier.HeadDir, e.deps.Dossier.BaseDir} {
+		if root == "" {
+			continue
+		}
+		real, err := filepath.EvalSymlinks(root)
+		if err != nil || !filepath.IsAbs(real) {
+			return errors.New("review: repository root unavailable under ignore policy")
+		}
+		repos = append(repos, filepath.Clean(real))
+	}
+	for _, root := range binding.Roots {
+		real, err := filepath.EvalSymlinks(root)
+		if err != nil || !filepath.IsAbs(real) {
+			return errors.New("review: skill source unavailable under ignore policy")
+		}
+		for _, repo := range repos {
+			if pathsOverlap(repo, real) {
+				return errors.New("review: repository skill blocked by ignore policy")
+			}
+		}
+	}
+	return nil
+}
+
+func pathsOverlap(a, b string) bool {
+	within := func(root, candidate string) bool {
+		rel, err := filepath.Rel(root, candidate)
+		return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	}
+	return within(a, b) || within(b, a)
 }
 
 // budgetHook stops the next model turn when committed workflow usage plus
@@ -677,6 +846,9 @@ func (e *Executor) budgetHook(workflowID string) func(context.Context, llm.Usage
 }
 
 func (e *Executor) sandboxFor(skillRoots []string) (*agent.Sandbox, error) {
+	if err := e.ignorePolicyReady(); err != nil {
+		return nil, err
+	}
 	var head, base string
 	var roots []string
 	if e.deps.Dossier != nil {
@@ -691,7 +863,29 @@ func (e *Executor) sandboxFor(skillRoots []string) (*agent.Sandbox, error) {
 	if head == "" && base == "" && len(roots) == 0 {
 		return nil, nil
 	}
-	return agent.NewSandbox(head, base, roots...)
+	var deny func(string) bool
+	if e.deps.Dossier != nil && e.deps.Dossier.IgnorePolicy != nil && (len(e.deps.Dossier.IgnorePolicy.Patterns) > 0 || len(e.deps.Dossier.Ignored) > 0) {
+		matcher := NewIgnoreMatcher(e.deps.Dossier.IgnorePolicy.Patterns)
+		ignored := make(map[string]bool, len(e.deps.Dossier.Ignored))
+		for _, name := range e.deps.Dossier.Ignored {
+			ignored[name] = true
+		}
+		deny = func(name string) bool {
+			if name == "." {
+				return false
+			}
+			return ignored[name] || matcher.MatchPath(name)
+		}
+	}
+	return agent.NewSandboxWithIgnore(head, base, deny, roots...)
+}
+
+func (e *Executor) ignorePolicyReady() error {
+	if e == nil || e.deps.Dossier == nil || e.deps.Dossier.IgnorePolicy == nil ||
+		e.deps.Dossier.IgnorePolicy.Version != IgnorePolicyVersion || e.deps.Dossier.IgnorePolicy.Patterns == nil {
+		return errors.New("review: missing or unsupported ignore policy")
+	}
+	return nil
 }
 
 func existingDir(value string) string {
@@ -705,6 +899,9 @@ func existingDir(value string) string {
 	return value
 }
 
+// errEvidenceSnapshotUnavailable marks a failure to open the evidence sandbox.
+var errEvidenceSnapshotUnavailable = errors.New("evidence snapshot unavailable")
+
 // validateCodeRef checks one evidence reference against the fixed dossier
 // snapshots. Missing snapshots and read failures return an error so a
 // refutation cannot succeed by syntax alone.
@@ -717,7 +914,7 @@ func (e *Executor) validateCodeRef(ref CodeRef) error {
 	}
 	sandbox, err := e.sandboxFor(nil)
 	if err != nil {
-		return fmt.Errorf("review: open evidence snapshot: %w", err)
+		return fmt.Errorf("review: open evidence snapshot: %w: %w", errEvidenceSnapshotUnavailable, err)
 	}
 	if sandbox == nil {
 		return errors.New("review: no fixed head/base snapshot is available")

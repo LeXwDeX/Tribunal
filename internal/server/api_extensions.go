@@ -29,8 +29,8 @@ var (
 	sensitiveKeyRE = regexp.MustCompile(`(?i)(authorization|token|secret|password|api[-_]?key|cookie|credential)`)
 )
 
-// MCPServer is one stored Claude Code mcpServers entry. Config holds the raw
-// server object; handlers mask env and sensitive header values on read.
+// MCPServer is one stored Claude Code mcpServers entry. Handlers hide Config
+// in responses; internal services use the full configuration.
 type MCPServer struct {
 	ID        string          `json:"id"`
 	Scope     string          `json:"scope"`
@@ -464,37 +464,10 @@ func validateMCPConfigObject(raw json.RawMessage) error {
 	return nil
 }
 
-// maskMCPServer returns a copy with env values and sensitive header values
-// replaced by a placeholder.
+// Config can contain secrets in any field, including keys and unknown fields.
 func maskMCPServer(server MCPServer) MCPServer {
-	if masked, ok := maskMCPConfig(server.Config); ok {
-		server.Config = masked
-	}
+	server.Config = json.RawMessage(`{}`)
 	return server
-}
-
-func maskMCPConfig(raw json.RawMessage) (json.RawMessage, bool) {
-	var object map[string]any
-	if err := json.Unmarshal(raw, &object); err != nil {
-		return raw, false
-	}
-	if env, ok := object["env"].(map[string]any); ok {
-		for key := range env {
-			env[key] = maskedSecret
-		}
-	}
-	if headers, ok := object["headers"].(map[string]any); ok {
-		for key := range headers {
-			if sensitiveKeyRE.MatchString(key) {
-				headers[key] = maskedSecret
-			}
-		}
-	}
-	masked, err := json.Marshal(object)
-	if err != nil {
-		return raw, false
-	}
-	return masked, true
 }
 
 // restoreMaskedMCPConfig merges a submitted config over the stored one: a

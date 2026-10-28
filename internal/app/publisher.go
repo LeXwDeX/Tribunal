@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/review"
 	"github.com/LeXwDeX/tribunal/internal/secret"
 	"github.com/LeXwDeX/tribunal/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/workspace"
 	"github.com/LeXwDeX/tribunal/pkg/dag"
 )
 
@@ -41,6 +43,7 @@ const (
 // Publisher implements F7: fingerprint-checked, idempotent publication.
 type Publisher struct {
 	store          ReviewStore
+	workspace      *workspace.Manager
 	gitlab         GitLabClient
 	cipher         *secret.Cipher
 	engine         *dag.Engine
@@ -103,6 +106,7 @@ func (l *workflowLocks) lock(ctx context.Context, key string) (func(), error) {
 // PublisherConfig configures Publisher.
 type PublisherConfig struct {
 	Store          ReviewStore
+	Workspace      *workspace.Manager
 	GitLab         GitLabClient
 	Cipher         *secret.Cipher
 	Engine         *dag.Engine
@@ -117,7 +121,7 @@ type PublisherConfig struct {
 
 // NewPublisher validates dependencies and builds the publication service.
 func NewPublisher(cfg PublisherConfig) (*Publisher, error) {
-	if cfg.Store == nil || cfg.GitLab == nil || cfg.Cipher == nil || cfg.Engine == nil {
+	if cfg.Store == nil || cfg.Workspace == nil || cfg.GitLab == nil || cfg.Cipher == nil || cfg.Engine == nil {
 		return nil, errors.New("app: publisher dependencies are required")
 	}
 	logger := cfg.Logger
@@ -134,6 +138,7 @@ func NewPublisher(cfg PublisherConfig) (*Publisher, error) {
 	}
 	return &Publisher{
 		store:          cfg.Store,
+		workspace:      cfg.Workspace,
 		gitlab:         cfg.GitLab,
 		cipher:         cfg.Cipher,
 		engine:         cfg.Engine,
@@ -161,6 +166,16 @@ type loadedReview struct {
 // Every other failure keeps publication state independent from the completed
 // workflow: retryable failures stay pending, permanent failures become failed.
 func (p *Publisher) Publish(ctx context.Context, workflowID string) error {
+	unlock, err := p.lockWorkflow(ctx, workflowID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return p.publishLocked(ctx, workflowID)
+}
+
+// publishLocked requires the project workspace read lock.
+func (p *Publisher) publishLocked(ctx context.Context, workflowID string) error {
 	unlock, err := p.locks.lock(ctx, workflowID)
 	if err != nil {
 		return err
@@ -202,12 +217,18 @@ func (p *Publisher) recordPublicationFailure(ctx context.Context, workflowID str
 }
 
 func (p *Publisher) publish(ctx context.Context, workflowID string) error {
+	if err := p.checkPublicationPolicy(ctx, workflowID); err != nil {
+		return err
+	}
 	loaded, err := p.load(ctx, workflowID)
 	if err != nil {
 		return err
 	}
 	if loaded.workflow.Status != string(dag.WorkflowCompleted) {
 		return nil
+	}
+	if !validPublicationPolicy(loaded.dossier) {
+		return p.stale(ctx, workflowID, publicationPolicyReason(loaded.dossier))
 	}
 	configHash, hasConfig := loaded.dossier.Metadata["config_hash"]
 	promptHash, hasPrompt := loaded.dossier.Metadata["prompt_hash"]
@@ -227,6 +248,9 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 	if err != nil {
 		return err
 	}
+	if !slices.Equal(loaded.dossier.IgnorePolicy.Patterns, cfg.Settings.Ignore) {
+		return p.stale(ctx, workflowID, "ignore policy changed")
+	}
 	if hasConfig && configHash != "" && configHash != reviewConfigHash(cfg) {
 		return p.stale(ctx, workflowID, "configuration changed")
 	}
@@ -244,11 +268,7 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 	if loaded.dossier.DiffVersion.BaseSHA != "" && !strings.EqualFold(version.BaseSHA, loaded.dossier.DiffVersion.BaseSHA) {
 		return p.stale(ctx, workflowID, "merge request base changed")
 	}
-	diffs, err := p.gitlab.ListMRDiffs(ctx, loaded.token, loaded.project.ID, loaded.mrIID)
-	if err != nil {
-		return err
-	}
-	index := gitlab.BuildDiffIndex(*version, diffs)
+	index := gitlab.BuildDiffIndex(*version, dossierDiffs(loaded.dossier))
 
 	snapshot, err := p.engine.Snapshot(ctx, workflowID)
 	if err != nil {
@@ -257,6 +277,28 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 	result, err := synthesisResult(snapshot)
 	if err != nil {
 		return PermanentJob(err)
+	}
+	for _, group := range result.Groups {
+		if loaded.dossier.IgnoresPath(group.Path) {
+			return p.stale(ctx, workflowID, "ignored finding rejected")
+		}
+		for _, source := range group.Sources {
+			if loaded.dossier.IgnoresPath(source.Path) {
+				return p.stale(ctx, workflowID, "ignored finding rejected")
+			}
+		}
+		if group.Challenge != nil {
+			for _, ref := range group.Challenge.Evidence {
+				if loaded.dossier.IgnoresPath(ref.Path) {
+					return p.stale(ctx, workflowID, "ignored finding rejected")
+				}
+			}
+		}
+	}
+	for _, finding := range result.Output.NewFindings {
+		if loaded.dossier.IgnoresPath(finding.Path) {
+			return p.stale(ctx, workflowID, "ignored finding rejected")
+		}
 	}
 	groups := markPositions(result.Groups, index)
 	if err := p.store.ReplaceFindings(ctx, workflowID, findingsForStore(workflowID, groups)); err != nil {
@@ -390,6 +432,16 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 // commit status or findings. Publication state follows the same retry rules as
 // a normal publication.
 func (p *Publisher) PublishFailure(ctx context.Context, workflowID, reason string) error {
+	unlock, err := p.lockWorkflow(ctx, workflowID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return p.publishFailureLocked(ctx, workflowID, reason)
+}
+
+// publishFailureLocked requires the project workspace read lock.
+func (p *Publisher) publishFailureLocked(ctx context.Context, workflowID, reason string) error {
 	unlock, err := p.locks.lock(ctx, workflowID)
 	if err != nil {
 		return err
@@ -409,12 +461,18 @@ func (p *Publisher) PublishFailure(ctx context.Context, workflowID, reason strin
 }
 
 func (p *Publisher) publishFailure(ctx context.Context, workflowID, reason string) error {
+	if err := p.checkPublicationPolicy(ctx, workflowID); err != nil {
+		return err
+	}
 	loaded, err := p.load(ctx, workflowID)
 	if err != nil {
 		return err
 	}
 	if loaded.workflow.Status != string(dag.WorkflowFailed) {
 		return PermanentJob(fmt.Errorf("workflow %s did not fail", workflowID))
+	}
+	if !validPublicationPolicy(loaded.dossier) {
+		return p.stale(ctx, workflowID, publicationPolicyReason(loaded.dossier))
 	}
 	configHash, hasConfig := loaded.dossier.Metadata["config_hash"]
 	promptHash, hasPrompt := loaded.dossier.Metadata["prompt_hash"]
@@ -431,6 +489,9 @@ func (p *Publisher) publishFailure(ctx context.Context, workflowID, reason strin
 	cfg, err := p.freshConfig(ctx, loaded)
 	if err != nil {
 		return err
+	}
+	if !slices.Equal(loaded.dossier.IgnorePolicy.Patterns, cfg.Settings.Ignore) {
+		return p.stale(ctx, workflowID, "ignore policy changed")
 	}
 	if hasConfig && configHash != "" && configHash != reviewConfigHash(cfg) {
 		return p.stale(ctx, workflowID, "configuration changed")
@@ -471,6 +532,19 @@ func (p *Publisher) publishFailure(ctx context.Context, workflowID, reason strin
 // summary, never a normal review result. The stale and generation fences stay
 // inside Publish and PublishFailure.
 func (p *Publisher) Republish(ctx context.Context, workflowID string) error {
+	unlock, err := p.lockWorkflow(ctx, workflowID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return p.republishLocked(ctx, workflowID)
+}
+
+// republishLocked requires the project workspace read lock.
+func (p *Publisher) republishLocked(ctx context.Context, workflowID string) error {
+	if err := p.checkPublicationPolicy(ctx, workflowID); err != nil {
+		return err
+	}
 	loaded, err := p.load(ctx, workflowID)
 	if err != nil {
 		return err
@@ -485,14 +559,41 @@ func (p *Publisher) Republish(ctx context.Context, workflowID string) error {
 		return err
 	}
 	if loaded.workflow.Status == string(dag.WorkflowFailed) {
-		return p.PublishFailure(ctx, workflowID, reviewExecutionFailedReason)
+		return p.publishFailureLocked(ctx, workflowID, reviewExecutionFailedReason)
 	}
-	return p.Publish(ctx, workflowID)
+	return p.publishLocked(ctx, workflowID)
 }
 
-// PublishStandaloneSummary upserts a summary for a review with no workflow
-// (for example, all files were ignored). The marker scan keeps it idempotent.
-func (p *Publisher) PublishStandaloneSummary(ctx context.Context, projectID, mrIID int64, token, fingerprint, body string) error {
+// lockWorkflow uses the durable workflow ID to fence a deleted registration.
+func (p *Publisher) lockWorkflow(ctx context.Context, id string) (func(), error) {
+	wf, err := p.store.GetWorkflow(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if wf == nil || wf.ProjectID <= 0 {
+		return nil, PermanentJob(fmt.Errorf("workflow is missing"))
+	}
+	ws := p.workspace.Get(wf.ProjectID)
+	if ws == nil {
+		return nil, PermanentJob(fmt.Errorf("workspace is unavailable"))
+	}
+	unlock, err := ws.RLock(ctx)
+	if err != nil {
+		return nil, err
+	}
+	current, err := p.store.GetWorkflow(ctx, id)
+	if err != nil || current == nil || current.ID != id || current.ProjectID != wf.ProjectID {
+		unlock()
+		if err != nil {
+			return nil, err
+		}
+		return nil, PermanentJob(fmt.Errorf("workflow is missing"))
+	}
+	return unlock, nil
+}
+
+// publishStandaloneSummaryLocked requires the project workspace read lock.
+func (p *Publisher) publishStandaloneSummaryLocked(ctx context.Context, projectID, mrIID int64, token, fingerprint, body string) error {
 	_, err := p.upsertSummary(ctx, projectID, mrIID, token, fingerprint, body, "")
 	return err
 }
@@ -596,7 +697,33 @@ func (p *Publisher) freshConfig(ctx context.Context, loaded *loadedReview) (effe
 		return effectiveReviewConfig{}, err
 	}
 	docs := review.RepoDocs{GitLabReviewConfig: configDoc, AGENTS: agents, CLAUDE: claude}
-	return resolveReviewConfig(loaded.project, docs, p.reviewDefaults, p.profiles), nil
+	return resolveSecureReviewConfig(loaded.project, docs, p.reviewDefaults, p.profiles)
+}
+
+func validPublicationPolicy(d *review.Dossier) bool {
+	return publicationPolicyReason(d) == ""
+}
+
+func publicationPolicyReason(d *review.Dossier) string {
+	if d == nil || d.IgnorePolicy == nil || d.IgnorePolicy.Version != review.IgnorePolicyVersion || d.IgnorePolicy.Patterns == nil {
+		return "ignore policy unavailable; rerun review"
+	}
+	if !d.WorkspaceProvenanceValid() {
+		return workspaceEvidenceReason
+	}
+	return ""
+}
+
+func (p *Publisher) checkPublicationPolicy(ctx context.Context, workflowID string) error {
+	record, err := p.store.GetWorkflowDossier(ctx, workflowID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	var dossier review.Dossier
+	if err == nil && record != nil && json.Unmarshal(record.Data, &dossier) == nil && validPublicationPolicy(&dossier) {
+		return nil
+	}
+	return p.stale(ctx, workflowID, publicationPolicyReason(&dossier))
 }
 
 func (p *Publisher) rawDoc(ctx context.Context, token string, projectID int64, path, ref string) (string, error) {
@@ -642,46 +769,71 @@ func (p *Publisher) upsertSummary(ctx context.Context, projectID, mrIID int64, t
 			return 0, err
 		}
 	}
-	notes, err := p.gitlab.ListMRNotes(ctx, token, projectID, mrIID)
+	user, err := p.gitlab.CurrentUser(ctx, token)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("app: summary identity lookup: %w", err)
 	}
-	authorID := p.botID(ctx, token)
-	for _, note := range notes {
-		if !strings.HasPrefix(note.Body, review.SummaryMarkerPrefix) {
-			continue
-		}
-		if authorID != 0 && note.AuthorID != authorID {
-			continue
-		}
-		if err := p.updateSummaryNote(ctx, token, projectID, mrIID, note.ID, body); err != nil {
+	if user == nil || user.ID <= 0 {
+		return 0, errors.New("app: summary identity is unavailable")
+	}
+	var id int64
+	var last error
+	for attempt := 0; attempt < p.retries; attempt++ {
+		notes, err := p.gitlab.ListMRNotes(ctx, token, projectID, mrIID)
+		if err != nil {
 			return 0, err
 		}
-		if workflowID != "" {
-			if _, err := p.store.UpsertPublication(ctx, store.Publication{
-				ProjectID: projectID, MRIID: mrIID, Kind: summaryPublishKind,
-				PublishKey: summaryPublicationKey, GitlabID: strconv.FormatInt(note.ID, 10),
-				WorkflowID: workflowID, Fingerprint: fingerprint, BodyHash: bodyHash(body),
-			}); err != nil {
-				return 0, err
+		for _, note := range notes {
+			if note.AuthorID != user.ID || !strings.HasPrefix(note.Body, review.SummaryMarkerPrefix) {
+				continue
 			}
+			if note.ID <= 0 {
+				return 0, errors.New("app: summary note has invalid ID")
+			}
+			if note.Body != body {
+				if err := p.updateSummaryNote(ctx, token, projectID, mrIID, note.ID, body); err != nil {
+					return 0, err
+				}
+			}
+			id = note.ID
+			break
 		}
-		return note.ID, nil
+		if id > 0 {
+			break
+		}
+		created, err := p.gitlab.CreateMRNote(ctx, token, projectID, mrIID, body)
+		if err == nil {
+			if created == nil || created.ID <= 0 {
+				return 0, errors.New("app: summary creation returned no valid note")
+			}
+			id = created.ID
+			break
+		}
+		last = err
+		if gitlab.StatusOf(err) == 400 || gitlab.StatusOf(err) == 404 ||
+			errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return 0, err
+		}
+		delay := time.Duration(attempt+1) * 250 * time.Millisecond
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-time.After(delay):
+		}
 	}
-	created, err := p.createNote(ctx, token, projectID, mrIID, body)
-	if err != nil {
-		return 0, err
+	if id == 0 {
+		return 0, last
 	}
 	if workflowID != "" {
 		if _, err := p.store.UpsertPublication(ctx, store.Publication{
 			ProjectID: projectID, MRIID: mrIID, Kind: summaryPublishKind,
-			PublishKey: summaryPublicationKey, GitlabID: strconv.FormatInt(created.ID, 10),
+			PublishKey: summaryPublicationKey, GitlabID: strconv.FormatInt(id, 10),
 			WorkflowID: workflowID, Fingerprint: fingerprint, BodyHash: bodyHash(body),
 		}); err != nil {
 			return 0, err
 		}
 	}
-	return created.ID, nil
+	return id, nil
 }
 
 func (p *Publisher) updateSummary(ctx context.Context, token string, projectID, mrIID, noteID int64, body, workflowID, fingerprint string) (int64, error) {
@@ -702,19 +854,6 @@ func (p *Publisher) updateSummaryNote(ctx context.Context, token string, project
 	return p.retry(ctx, func() error {
 		return p.gitlab.UpdateMRNote(ctx, token, projectID, mrIID, noteID, body)
 	})
-}
-
-func (p *Publisher) createNote(ctx context.Context, token string, projectID, mrIID int64, body string) (*gitlab.Note, error) {
-	var note *gitlab.Note
-	err := p.retry(ctx, func() error {
-		created, err := p.gitlab.CreateMRNote(ctx, token, projectID, mrIID, body)
-		if err != nil {
-			return err
-		}
-		note = created
-		return nil
-	})
-	return note, err
 }
 
 func (p *Publisher) createDiscussion(ctx context.Context, token string, projectID, mrIID int64, body string, position gitlab.Position) (*gitlab.Discussion, error) {
@@ -763,14 +902,6 @@ func (p *Publisher) retry(ctx context.Context, fn func() error) error {
 		}
 	}
 	return last
-}
-
-func (p *Publisher) botID(ctx context.Context, token string) int64 {
-	user, err := p.gitlab.CurrentUser(ctx, token)
-	if err != nil || user == nil {
-		return 0
-	}
-	return user.ID
 }
 
 func (p *Publisher) detailURL(workflowID string) string {
@@ -844,7 +975,11 @@ func synthesisResult(snapshot dag.WorkflowView) (review.SynthesisResult, error) 
 		return review.SynthesisResult{}, errors.New("app: workflow has no completed synthesize node")
 	}
 	var result review.SynthesisResult
-	if err := json.Unmarshal(selected.Output, &result); err != nil {
+	safeOutput, err := review.SafeDiagnosticOutput(selected.Spec.Kind, selected.Output, snapshot)
+	if err != nil {
+		return review.SynthesisResult{}, fmt.Errorf("app: sanitize synthesis result: %w", err)
+	}
+	if err := json.Unmarshal(safeOutput, &result); err != nil {
 		return review.SynthesisResult{}, fmt.Errorf("app: decode synthesis result: %w", err)
 	}
 	if err := result.Validate(); err != nil {

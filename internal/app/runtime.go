@@ -159,7 +159,7 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 	if err != nil {
 		return nil, err
 	}
-	if err := seedDefaultExtensions(ctx, cfg, deps.Store, logger, now); err != nil {
+	if err := seedDefaultExtensions(ctx, cfg, deps.Store, workspaceManager, logger, now); err != nil {
 		return nil, err
 	}
 	blocks, platformMCP, skillDirs, err := loadStoredPlatformExtensions(
@@ -219,6 +219,7 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 	})
 	publisher, err := NewPublisher(PublisherConfig{
 		Store:          deps.Store,
+		Workspace:      workspaceManager,
 		GitLab:         deps.GitLab,
 		Cipher:         deps.Cipher,
 		Engine:         engine,
@@ -241,7 +242,7 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		Blocks:     blocks,
 		MCP:        platformMCP,
 		SkillDirs:  skillDirs,
-		Workspace:  cfg.Workspace.Root,
+		Workspace:  workspaceManager.Root(),
 		DeniedEnv:  deniedEnvNames(cfg),
 		Now:        now,
 		Logger:     logger,
@@ -270,28 +271,30 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 	reviewBlocks := projectBindingStubs(blocks)
 	statusFeed := newStatusReporter(deps.GitLab, logger)
 	reviews, err := NewReviewService(ReviewServiceConfig{
-		Store:            deps.Store,
-		GitLab:           deps.GitLab,
-		Cipher:           deps.Cipher,
-		Workspace:        workspaceManager,
-		Git:              gitBackend,
-		Engine:           engine,
-		Executors:        executors,
-		Profiles:         cfg.Profiles,
-		Blocks:           reviewBlocks,
-		ReviewDefaults:   cfg.ReviewDefaults,
-		Prompts:          bundle,
-		Clients:          clients,
-		Tools:            projectTools,
-		Skills:           projectSkills,
-		Cost:             newCostFunc(cfg.Providers),
-		Publisher:        publisher,
-		Status:           statusFeed,
-		AllowedProviders: providerNames(cfg.Providers),
-		PublicURL:        cfg.Server.PublicURL,
-		Logger:           logger,
-		Now:              now,
-		CancelPoll:       2 * time.Second,
+		Store:             deps.Store,
+		GitLab:            deps.GitLab,
+		Cipher:            deps.Cipher,
+		Workspace:         workspaceManager,
+		Git:               gitBackend,
+		Engine:            engine,
+		Executors:         executors,
+		Profiles:          cfg.Profiles,
+		Blocks:            reviewBlocks,
+		ReviewDefaults:    cfg.ReviewDefaults,
+		Prompts:           bundle,
+		Clients:           clients,
+		Tools:             projectTools,
+		Skills:            projectSkills,
+		Cost:              newCostFunc(cfg.Providers),
+		Publisher:         publisher,
+		Status:            statusFeed,
+		AllowedProviders:  providerNames(cfg.Providers),
+		ProviderConfigs:   cloneProviderConfigs(cfg.Providers),
+		ProjectExtensions: projectExts,
+		PublicURL:         cfg.Server.PublicURL,
+		Logger:            logger,
+		Now:               now,
+		CancelPoll:        2 * time.Second,
 	})
 	if err != nil {
 		if ownedMCP {
@@ -378,13 +381,14 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		return nil, err
 	}
 	projects, err := NewProjectService(ProjectServiceConfig{
-		Store:     deps.Store,
-		GitLab:    deps.GitLab,
-		Cipher:    deps.Cipher,
-		Profiles:  cfg.Profiles,
-		PublicURL: cfg.Server.PublicURL,
-		Workspace: workspaceManager.Root(),
-		GitLabURL: cfg.GitLab.URL,
+		Store:             deps.Store,
+		GitLab:            deps.GitLab,
+		Cipher:            deps.Cipher,
+		Profiles:          cfg.Profiles,
+		PublicURL:         cfg.Server.PublicURL,
+		Workspace:         workspaceManager,
+		ProjectExtensions: projectExts,
+		GitLabURL:         cfg.GitLab.URL,
 		ProbeRemote: func(ctx context.Context, remoteURL, token string) (string, error) {
 			git := &repo.Git{Bin: cfg.Workspace.GitBin}
 			return git.RemoteHEAD(ctx, remoteURL, repo.Auth{Token: token})
@@ -401,6 +405,7 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 	}
 	webhooks, err := NewWebhookService(WebhookServiceConfig{
 		Store:          deps.Store,
+		Workspace:      workspaceManager,
 		Cipher:         deps.Cipher,
 		Profiles:       cfg.Profiles,
 		ReviewDefaults: cfg.ReviewDefaults,
@@ -416,6 +421,7 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 	}
 	commands, err := NewCommandWorker(CommandWorkerConfig{
 		Store:        deps.Store,
+		Workspace:    workspaceManager,
 		GitLab:       deps.GitLab,
 		Cipher:       deps.Cipher,
 		Profiles:     cfg.Profiles,
@@ -457,6 +463,14 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		now:         now,
 		startDone:   make(chan struct{}),
 	}, nil
+}
+
+func cloneProviderConfigs(providers map[string]config.ProviderConfig) map[string]config.ProviderConfig {
+	out := make(map[string]config.ProviderConfig, len(providers))
+	for name, cfg := range providers {
+		out[name] = cfg
+	}
+	return out
 }
 
 func loadPlatformMCP(cfg *config.Config) (mcp.Config, error) {

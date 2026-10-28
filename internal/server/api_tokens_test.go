@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
@@ -11,6 +12,100 @@ import (
 
 	"github.com/LeXwDeX/tribunal/internal/store"
 )
+
+type revokeAfterSessionLookup struct {
+	SessionStore
+	revoke func(context.Context, []byte) error
+}
+
+func (s revokeAfterSessionLookup) GetSession(ctx context.Context, hash []byte, now time.Time) (*store.Session, error) {
+	session, err := s.SessionStore.GetSession(ctx, hash, now)
+	if err == nil {
+		if err := s.revoke(ctx, hash); err != nil {
+			return nil, err
+		}
+	}
+	return session, err
+}
+
+func TestAPITokenSessionRevokedAfterAuthentication(t *testing.T) {
+	for _, mode := range []string{"logout", "all credentials"} {
+		t.Run(mode, func(t *testing.T) {
+			env := newM6Env(t, m6Options{})
+			client := env.loginAs("code-admin")
+			env.api.sessions = revokeAfterSessionLookup{SessionStore: env.sqlite, revoke: func(ctx context.Context, hash []byte) error {
+				if mode == "logout" {
+					return env.sqlite.DeleteSession(ctx, hash)
+				}
+				return env.sqlite.RevokeUserCredentials(ctx, 7)
+			}}
+			response := client.json(http.MethodPost, "/api/v1/api-tokens", map[string]any{"name": "race"})
+			if response.status != http.StatusUnauthorized {
+				t.Fatalf("status = %d, body = %s", response.status, response.body)
+			}
+			if strings.Contains(string(response.body), "crc_") {
+				t.Fatalf("response exposed a token: %s", response.body)
+			}
+			tokens, err := env.sqlite.ListAPITokens(context.Background(), 7)
+			if err != nil || len(tokens) != 0 {
+				t.Fatalf("tokens = %v, err = %v", tokens, err)
+			}
+		})
+	}
+}
+
+func TestAPITokenCreateRejectsEmptySessionPrincipal(t *testing.T) {
+	env := newM6Env(t, m6Options{})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/api-tokens", strings.NewReader(`{"name":"test"}`))
+	req = req.WithContext(context.WithValue(req.Context(), principalKey, principal{user: sessionUser{ID: 7, Username: "alice", Role: roleAdmin}}))
+	response := httptest.NewRecorder()
+	env.api.handleCreateAPIToken(response, req)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	tokens, err := env.sqlite.ListAPITokens(context.Background(), 7)
+	if err != nil || len(tokens) != 0 {
+		t.Fatalf("tokens = %v, err = %v", tokens, err)
+	}
+}
+
+func TestAPITokenCreateRejectsExpiredOrForeignSession(t *testing.T) {
+	for _, mode := range []string{"expired", "foreign"} {
+		t.Run(mode, func(t *testing.T) {
+			env := newM6Env(t, m6Options{})
+			id := "test-session-id"
+			hash := sha256.Sum256([]byte(id))
+			now := time.Now()
+			created, expires := now.Add(-time.Hour), now.Add(time.Hour)
+			if mode == "expired" {
+				created, expires = now.Add(-2*time.Hour), now.Add(-time.Hour)
+			}
+			if err := env.sqlite.CreateSession(context.Background(), store.Session{
+				IDHash: hash[:], UserID: 7, Username: "alice", Role: roleAdmin, CreatedAt: created, ExpiresAt: expires,
+			}, store.SessionLimits{}); err != nil {
+				t.Fatal(err)
+			}
+			userID := int64(7)
+			if mode == "foreign" {
+				userID = 8
+			}
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/api-tokens", strings.NewReader(`{"name":"test"}`))
+			req = req.WithContext(context.WithValue(req.Context(), principalKey, principal{user: sessionUser{ID: userID, Username: "alice", Role: roleAdmin}, sessionID: id}))
+			response := httptest.NewRecorder()
+			env.api.handleCreateAPIToken(response, req)
+			if response.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+			}
+			if strings.Contains(response.Body.String(), "crc_") {
+				t.Fatalf("response exposed a token: %s", response.Body.String())
+			}
+			tokens, err := env.sqlite.ListAPITokens(context.Background(), userID)
+			if err != nil || len(tokens) != 0 {
+				t.Fatalf("tokens = %v, err = %v", tokens, err)
+			}
+		})
+	}
+}
 
 func TestAPITokenCreateOnceAndRevoke(t *testing.T) {
 	env := newM6Env(t, m6Options{})
@@ -178,6 +273,7 @@ func TestAPITokenAuthenticates(t *testing.T) {
 	if profile["username"] != "alice" || profile["role"] != roleAdmin {
 		t.Fatalf("me = %v", profile)
 	}
+	assertStatus(t, client.json(http.MethodPost, "/api/v1/api-tokens", map[string]any{"name": "nested"}), http.StatusForbidden)
 
 	stored, err := env.sqlite.ListAPITokens(ctx, 7)
 	if err != nil {

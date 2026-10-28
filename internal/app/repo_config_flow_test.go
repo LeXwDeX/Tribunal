@@ -25,6 +25,7 @@ func (f *reviewFixture) repoConfigWebhook(t *testing.T) *WebhookService {
 	t.Helper()
 	service, err := NewWebhookService(WebhookServiceConfig{
 		Store:          f.db,
+		Workspace:      f.manager,
 		Cipher:         newTestCipher(t),
 		Profiles:       f.profiles,
 		ReviewDefaults: f.defaults,
@@ -314,6 +315,7 @@ func (f *reviewFixture) runCommandWebhook(t *testing.T, note string) *store.Job 
 	cipher := newTestCipher(t)
 	webhook, err := NewWebhookService(WebhookServiceConfig{
 		Store:          f.db,
+		Workspace:      f.manager,
 		Cipher:         cipher,
 		Profiles:       f.profiles,
 		ReviewDefaults: f.defaults,
@@ -335,10 +337,11 @@ func (f *reviewFixture) runCommandWebhook(t *testing.T, note string) *store.Job 
 		t.Fatal(err)
 	}
 	worker, err := NewCommandWorker(CommandWorkerConfig{
-		Store:    f.db,
-		GitLab:   &commandGitLab{reviewGitLab: f.gitlab, access: developerAccess},
-		Cipher:   cipher,
-		Profiles: f.profiles,
+		Store:     f.db,
+		Workspace: f.manager,
+		GitLab:    &commandGitLab{reviewGitLab: f.gitlab, access: developerAccess},
+		Cipher:    cipher,
+		Profiles:  f.profiles,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -493,15 +496,15 @@ func TestRepoLanguageCannotCloseScopedBlock(t *testing.T) {
 	}
 }
 
-func TestRepoConfigInvalidYAMLWarns(t *testing.T) {
+func TestRepoConfigInvalidYAMLFailsClosed(t *testing.T) {
 	f := newReviewFixture(t, reviewTestHead)
 	f.setRepoConfig(t, "review: [")
-	f.runWebhookCandidateReview(t, f.repoConfigWebhook(t), nil)
-	if f.gitlab.noteCount() != 1 {
-		t.Fatalf("notes = %d, want 1", f.gitlab.noteCount())
+	candidate, _ := f.sendMergeRequestWebhook(t, f.repoConfigWebhook(t), nil)
+	if job := f.activateCandidate(t, candidate); job != nil {
+		t.Fatalf("invalid repository config queued review: %+v", job)
 	}
-	if body := f.gitlab.notes[0].Body; !strings.Contains(body, "invalid") {
-		t.Fatalf("invalid repository config is not visible in the summary: %s", body)
+	if f.gitlab.noteCount() != 0 || f.runner.count() != 0 {
+		t.Fatal("invalid repository config ran or published a review")
 	}
 }
 

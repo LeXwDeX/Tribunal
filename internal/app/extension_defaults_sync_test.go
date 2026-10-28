@@ -16,6 +16,7 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/repo"
 	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
+	"github.com/LeXwDeX/tribunal/internal/workspace"
 )
 
 func ledgerRows(t *testing.T, st *sqlite.Store) map[string]store.ExtensionDefault {
@@ -81,7 +82,7 @@ func TestFileBlockReplacesDefaultOwnedBindingWithoutDefaults(t *testing.T) {
 		Workspace: config.WorkspaceConfig{Root: t.TempDir()},
 		Blocks:    map[string]config.BlockBinding{"review": {Skills: []string{"coding-standards"}}},
 	}
-	if err := seedDefaultExtensions(ctx, cfg, st, nil, time.Now); err != nil {
+	if err := seedDefaultExtensions(ctx, cfg, st, workspace.NewManager(cfg.Workspace.Root, nil), nil, time.Now); err != nil {
 		t.Fatalf("seedDefaultExtensions: %v", err)
 	}
 	if row, ok := platformBindings(t, st)["review"]; ok {
@@ -120,7 +121,7 @@ func TestDefaultBindingAndLedgerAreAtomic(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	service, err := NewExtensionService(ExtensionServiceConfig{Store: st, Workspace: t.TempDir()})
+	service, err := NewExtensionService(ExtensionServiceConfig{Store: st, Workspace: workspace.NewManager(t.TempDir(), nil)})
 	if err != nil {
 		t.Fatal(err)
 	}

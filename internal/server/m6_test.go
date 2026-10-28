@@ -20,6 +20,7 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/app"
 	"github.com/LeXwDeX/tribunal/internal/config"
 	"github.com/LeXwDeX/tribunal/internal/repo"
+	"github.com/LeXwDeX/tribunal/internal/secret"
 	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
 	workspacepkg "github.com/LeXwDeX/tribunal/internal/workspace"
@@ -738,6 +739,13 @@ func newM6Env(t *testing.T, opts m6Options) *m6Env {
 		t.Fatalf("sqlite.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
+	cipher, err := secret.New([]byte("0123456789abcdef0123456789abcdef"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ConfigureMCPSecrets(context.Background(), cipher); err != nil {
+		t.Fatal(err)
+	}
 	view := opts.store
 	if view == nil {
 		view = st

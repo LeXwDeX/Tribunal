@@ -26,8 +26,9 @@ func validDossier(t *testing.T) *Dossier {
 			SourceBranch: "feature/parser",
 			TargetBranch: "main",
 		},
-		DiffVersion: gitlab.Version{BaseSHA: testBaseSHA, StartSHA: testStartSHA, HeadSHA: testHeadSHA},
-		DiffSummary: DiffSummary{Files: 2, Additions: 12, Deletions: 3},
+		DiffVersion:         gitlab.Version{BaseSHA: testBaseSHA, StartSHA: testStartSHA, HeadSHA: testHeadSHA},
+		WorkspaceProvenance: &WorkspaceProvenance{Version: WorkspaceProvenanceVersion, TargetSHA: testStartSHA, IndexSHA: testStartSHA, MCPEligible: true},
+		DiffSummary:         DiffSummary{Files: 2, Additions: 12, Deletions: 3},
 		Files: []FileChange{
 			{Path: "a.go", Status: "modified", Diff: "@@ -1 +1 @@\n-a\n+b\n", Additions: 1, Deletions: 1},
 			{Path: "b.go", Status: "added", Diff: "+package b\n", Additions: 1},

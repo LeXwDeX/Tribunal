@@ -67,6 +67,13 @@ func setIndexFactory(service *WorkspaceService, manager *mcp.Manager) {
 	}
 }
 
+func unrestrictedIndexService(t *testing.T, f *reviewFixture) *WorkspaceService {
+	t.Helper()
+	service := newOnboardingContextService(t, f, onboardingIndexRunner)
+	service.reviewDefaults.Ignore = nil
+	return service
+}
+
 func TestOnboardingOnlyRecordsIndexAfterCommandRuns(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -106,7 +113,7 @@ func TestOnboardingOnlyRecordsIndexAfterCommandRuns(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			f := newReviewFixture(t, reviewTestHead)
-			service := newOnboardingContextService(t, f, onboardingIndexRunner)
+			service := unrestrictedIndexService(t, f)
 			setIndexFactory(service, tc.manager(t))
 
 			err := service.Onboard(context.Background(), 42)
@@ -141,7 +148,7 @@ func TestRefreshDoesNotRecordIndexWithoutCommand(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("SaveWorkspace: %v", err)
 	}
-	service := newOnboardingContextService(t, f, onboardingIndexRunner)
+	service := unrestrictedIndexService(t, f)
 	setIndexFactory(service, indexTestManager(t, nil))
 
 	if err := service.RefreshWithOptions(context.Background(), 42, "main", WorkspaceRefreshOptions{
@@ -170,7 +177,7 @@ func TestRefreshRecordsIndexWhenCommandRuns(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("SaveWorkspace: %v", err)
 	}
-	service := newOnboardingContextService(t, f, onboardingIndexRunner)
+	service := unrestrictedIndexService(t, f)
 	setIndexFactory(service, indexTestManager(t, []string{indexTrueCommand}))
 
 	if err := service.RefreshWithOptions(context.Background(), 42, "main", WorkspaceRefreshOptions{
@@ -196,7 +203,7 @@ func TestRefreshKeepsPreviousIndexWhenIndexerFails(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("SaveWorkspace: %v", err)
 	}
-	service := newOnboardingContextService(t, f, onboardingIndexRunner)
+	service := unrestrictedIndexService(t, f)
 	setIndexFactory(service, indexTestManager(t, []string{"/definitely/not/a/command"}))
 
 	if err := service.RefreshWithOptions(context.Background(), 42, "main", WorkspaceRefreshOptions{
@@ -252,7 +259,7 @@ func TestWorkspaceFailuresPersistAndLogOnlyFixedData(t *testing.T) {
 					}); err != nil {
 						t.Fatalf("SaveWorkspace: %v", err)
 					}
-					service := newOnboardingContextService(t, f, onboardingIndexRunner)
+					service := unrestrictedIndexService(t, f)
 					var logs bytes.Buffer
 					service.logger = slog.New(slog.NewJSONHandler(&logs, nil))
 					if failure == "workspace" {
@@ -326,7 +333,7 @@ func TestMarkWorkspaceErrorKeepsExistingCheckpoints(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("SaveWorkspace: %v", err)
 	}
-	service := newOnboardingContextService(t, f, onboardingIndexRunner)
+	service := unrestrictedIndexService(t, f)
 	service.markWorkspaceError(context.Background(), 42, errors.New("/private/work tree glpat-synthetic-secret"))
 	state, err := f.db.GetWorkspace(context.Background(), 42)
 	if err != nil {
@@ -347,7 +354,7 @@ func TestWorkspaceIndexCancellationStillReturnsError(t *testing.T) {
 			}); err != nil {
 				t.Fatalf("SaveWorkspace: %v", err)
 			}
-			service := newOnboardingContextService(t, f, onboardingIndexRunner)
+			service := unrestrictedIndexService(t, f)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			service.mcpFactory = func(context.Context, int64) (*mcp.Manager, error) {

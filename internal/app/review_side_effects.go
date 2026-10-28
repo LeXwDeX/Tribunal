@@ -130,6 +130,18 @@ func (s *ReviewService) RunStatusJob(ctx context.Context, job *jobs.Job) error {
 	if err != nil {
 		return err
 	}
+	ws := s.workspace.Get(payload.ProjectID)
+	if ws == nil {
+		return PermanentJob(fmt.Errorf("workspace is unavailable"))
+	}
+	unlock, err := ws.RLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := consumerJobExists(ctx, s.store, job, "review.status", payload.ProjectID); err != nil {
+		return err
+	}
 	row, err := s.store.GetReviewStatus(ctx, payload.ProjectID, payload.MRIID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -200,6 +212,18 @@ func (s *ReviewService) markStatusApplied(ctx context.Context, row *store.Review
 func (s *ReviewService) RunReactionJob(ctx context.Context, job *jobs.Job) error {
 	payload, err := decodeReviewSideEffectPayload(job.Payload, true)
 	if err != nil {
+		return err
+	}
+	ws := s.workspace.Get(payload.ProjectID)
+	if ws == nil {
+		return PermanentJob(fmt.Errorf("workspace is unavailable"))
+	}
+	unlock, err := ws.RLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := consumerJobExists(ctx, s.store, job, "review.reaction", payload.ProjectID); err != nil {
 		return err
 	}
 	row, err := s.store.GetReviewReaction(ctx, payload.ProjectID, payload.MRIID, payload.NoteID)
@@ -298,6 +322,33 @@ func (s *ReviewService) settleCancellation(ctx context.Context, payload reviewCa
 // ReconcileSideEffects re-enqueues pending durable writes and settles work
 // that no live job can finish. It never re-runs a model.
 func (s *ReviewService) ReconcileSideEffects(ctx context.Context) error {
+	projects, err := s.store.ListProjects(ctx)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, project := range projects {
+		ws := s.workspace.Get(project.ID)
+		if ws == nil {
+			continue
+		}
+		unlock, err := ws.RLock(ctx)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		// All rows are enumerated again under the lock. A status can exist
+		// before a workflow and has no non-reusable registration identity.
+		err = s.reconcileProjectSideEffects(ctx, project.ID)
+		unlock()
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (s *ReviewService) reconcileProjectSideEffects(ctx context.Context, projectID int64) error {
 	var errs []error
 	now := s.now().UTC()
 
@@ -306,6 +357,9 @@ func (s *ReviewService) ReconcileSideEffects(ctx context.Context) error {
 		errs = append(errs, err)
 	}
 	for _, row := range statuses {
+		if row.ProjectID != projectID {
+			continue
+		}
 		if err := s.enqueueReviewSideEffectJob(ctx, "review.status", "review.status:"+itoa(row.ProjectID)+":"+itoa(row.MRIID), map[string]any{
 			"project_id": row.ProjectID, "mr_iid": row.MRIID,
 		}); err != nil {
@@ -317,6 +371,9 @@ func (s *ReviewService) ReconcileSideEffects(ctx context.Context) error {
 		errs = append(errs, err)
 	}
 	for _, row := range reactions {
+		if row.ProjectID != projectID {
+			continue
+		}
 		if err := s.enqueueReviewSideEffectJob(ctx, "review.reaction",
 			"review.reaction:"+itoa(row.ProjectID)+":"+itoa(row.MRIID)+":"+itoa(row.NoteID), map[string]any{
 				"project_id": row.ProjectID, "mr_iid": row.MRIID, "note_id": row.NoteID,
@@ -330,6 +387,9 @@ func (s *ReviewService) ReconcileSideEffects(ctx context.Context) error {
 		errs = append(errs, err)
 	}
 	for _, row := range staleEyes {
+		if row.ProjectID != projectID {
+			continue
+		}
 		active, err := s.store.HasActiveReviewJob(ctx, row.ProjectID, row.MRIID)
 		if err != nil {
 			errs = append(errs, err)
@@ -358,6 +418,9 @@ func (s *ReviewService) ReconcileSideEffects(ctx context.Context) error {
 		errs = append(errs, err)
 	}
 	for _, row := range unfinished {
+		if row.ProjectID != projectID {
+			continue
+		}
 		active, err := s.store.HasActiveReviewJob(ctx, row.ProjectID, row.MRIID)
 		if err != nil {
 			errs = append(errs, err)
@@ -440,6 +503,9 @@ func (s *ReviewService) ReconcileSideEffects(ctx context.Context) error {
 		errs = append(errs, err)
 	}
 	for _, row := range queued {
+		if row.ProjectID != projectID {
+			continue
+		}
 		control, err := s.store.GetReviewControl(ctx, row.ProjectID, row.MRIID)
 		if err != nil {
 			if !errors.Is(err, store.ErrNotFound) {

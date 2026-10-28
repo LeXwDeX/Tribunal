@@ -1,9 +1,10 @@
-import { useEffect, useId, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   createApiToken, deleteAdminGrant, getSettings, listAdminGrants, listAdminProjects, listAdminUsers,
   listApiTokens, revokeAdminUserCredentials, revokeApiToken, setAdminGrant, setAdminUserDisabled,
 } from '../api/api'
+import { ApiError } from '../api/client'
 import type {
   AdminProject, AdminUser, ApiToken, CreatedApiToken, ProjectAccess, ProjectGrant,
 } from '../api/types'
@@ -32,53 +33,108 @@ function TokenCreateDialog({ open, onClose }: { open: boolean; onClose: () => vo
   const [error, setError] = useState<unknown>(null)
   const [created, setCreated] = useState<CreatedApiToken | null>(null)
   const [fieldError, setFieldError] = useState('')
+  const [notice, setNotice] = useState('')
+  const activeRequest = useRef<{ controller: AbortController; abandoned: boolean; stopped: boolean } | null>(null)
+  const mounted = useRef(false)
+
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+      if (activeRequest.current) {
+        activeRequest.current.abandoned = true
+        activeRequest.current.controller.abort()
+        activeRequest.current = null
+      }
+    }
+  }, [])
 
   useEffect(() => {
     if (!open) {
       setName('')
       setDays('90')
-      setPending(false)
       setError(null)
       setCreated(null)
       setFieldError('')
     }
   }, [open])
 
+  const close = () => {
+    if (activeRequest.current) {
+      activeRequest.current.abandoned = true
+      setNotice('关闭的请求可能已创建 token，明文无法再次查看。请检查 token 列表，撤销不需要的 token 后再决定是否重试。')
+      toast.push('info', '请求仍在进行；关闭后将无法查看明文。请检查 token 列表并撤销不需要的 token。')
+    }
+    onClose()
+  }
+
+  const stopWaiting = () => {
+    const request = activeRequest.current
+    if (!request) return
+    request.abandoned = true
+    request.stopped = true
+    activeRequest.current = null
+    request.controller.abort()
+    setPending(false)
+    setNotice('已停止等待，但 token 可能已在服务端创建。请刷新并检查 token 列表，撤销不需要的 token 后再决定是否重试。')
+    void queryClient.invalidateQueries({ queryKey: ['api-tokens'] })
+  }
+
   const submit = async () => {
+    if (activeRequest.current) return
     const parsedDays = Number(days)
     if (!name.trim()) { setFieldError('请输入 token 名称。'); return }
     if (!Number.isInteger(parsedDays) || parsedDays <= 0 || parsedDays > 365) {
       setFieldError('有效天数必须在 1 到 365 之间。')
       return
     }
+    const request = { controller: new AbortController(), abandoned: false, stopped: false }
+    activeRequest.current = request
     setFieldError('')
     setPending(true)
     setError(null)
+    setNotice('')
     try {
-      const result = await createApiToken({ name: name.trim(), expires_in_days: parsedDays })
-      setCreated(result)
-      toast.push('success', 'API token 已创建，请立即复制。')
-      await queryClient.invalidateQueries({ queryKey: ['api-tokens'] })
+      const result = await createApiToken({ name: name.trim(), expires_in_days: parsedDays }, request.controller.signal)
+      if (mounted.current && !request.abandoned && activeRequest.current === request) {
+        setCreated(result)
+        toast.push('success', 'API token 已创建，请立即复制。')
+      } else if (mounted.current) {
+        toast.push('info', 'API token 已创建，但明文无法再次查看。请在列表中撤销该 token 并重新创建。')
+      }
+      void queryClient.invalidateQueries({ queryKey: ['api-tokens'] })
     } catch (caught) {
-      setError(caught)
+      if (!request.stopped) {
+        if (mounted.current && !request.abandoned && activeRequest.current === request) {
+          setError(caught instanceof ApiError && caught.status === 0 ? new Error('无法连接服务器。') : caught)
+          setNotice('创建结果未知，token 可能已在服务端创建。请刷新并检查 token 列表，撤销不需要的 token 后再决定是否重试。')
+        } else if (mounted.current) {
+          toast.push('info', '创建结果未知，token 可能已在服务端创建。请刷新并检查 token 列表。')
+        }
+        void queryClient.invalidateQueries({ queryKey: ['api-tokens'] })
+      }
     } finally {
-      setPending(false)
+      if (activeRequest.current === request) {
+        activeRequest.current = null
+        if (mounted.current) setPending(false)
+      }
     }
   }
 
   return (
     <Dialog
       open={open}
-      onClose={onClose}
+      onClose={close}
       title={created ? '复制新 API token' : '创建 API token'}
       description={created
         ? '明文 token 只显示这一次。关闭对话框后将从界面状态中清除。'
         : 'API token 用于 tribunalctl 或脚本访问管理 API。请设置名称和有效期。'}
       footer={created ? (
-        <Button variant="primary" onClick={onClose}>我已复制，关闭</Button>
+        <Button variant="primary" onClick={close}>我已复制，关闭</Button>
       ) : (
         <>
-          <Button variant="secondary" onClick={onClose} disabled={pending}>取消</Button>
+          <Button variant="secondary" onClick={close}>{pending ? '关闭' : '取消'}</Button>
+          {pending ? <Button variant="secondary" onClick={stopWaiting}>停止等待</Button> : null}
           <Button variant="primary" onClick={() => { void submit() }} loading={pending}>创建</Button>
         </>
       )}
@@ -90,13 +146,15 @@ function TokenCreateDialog({ open, onClose }: { open: boolean; onClose: () => vo
         </>
       ) : (
         <>
-          {error ? <ErrorState error={error} title="创建失败" /> : null}
+          {error ? <ErrorState error={error} title="创建失败或结果未知" /> : null}
+          {notice ? <div className={styles.warning} role={error ? 'status' : 'alert'}>{notice}</div> : null}
+          {pending ? <div className={styles.notice} role="status">正在创建。关闭对话框不会取消请求，关闭后无法查看明文；如需停止等待，请先检查 token 列表再决定是否重试。</div> : null}
           <div className="formGrid">
             <Field label="名称" htmlFor={nameId} error={fieldError}>
-              <input id={nameId} className="input" value={name} onChange={(event) => setName(event.target.value)} placeholder="例如 ci-tribunalctl" aria-invalid={Boolean(fieldError)} />
+              <input id={nameId} className="input" value={name} onChange={(event) => setName(event.target.value)} placeholder="例如 ci-tribunalctl" aria-invalid={Boolean(fieldError)} disabled={pending} />
             </Field>
             <Field label="有效天数" htmlFor={expiresId} hint="正整数，最长 365 天。">
-              <input id={expiresId} className="input" type="number" min={1} max={365} value={days} onChange={(event) => setDays(event.target.value)} />
+              <input id={expiresId} className="input" type="number" min={1} max={365} value={days} onChange={(event) => setDays(event.target.value)} disabled={pending} />
             </Field>
           </div>
         </>
@@ -560,4 +618,3 @@ export function SystemPage() {
     </main>
   )
 }
-

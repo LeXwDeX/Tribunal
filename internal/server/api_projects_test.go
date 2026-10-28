@@ -18,6 +18,7 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/secret"
 	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
+	workspacepkg "github.com/LeXwDeX/tribunal/internal/workspace"
 )
 
 func testProjectService(t *testing.T, st *sqlite.Store, api *stubGitLab, workspace string) *app.ProjectService {
@@ -32,7 +33,7 @@ func testProjectService(t *testing.T, st *sqlite.Store, api *stubGitLab, workspa
 		Cipher:    cipher,
 		Profiles:  map[string]config.ProfileConfig{"default": {}, "deep": {}},
 		PublicURL: "https://review.example.com",
-		Workspace: workspace,
+		Workspace: workspacepkg.NewManager(workspace, nil),
 		GitLabURL: "https://gitlab.example.com",
 		ProbeRemote: func(context.Context, string, string) (string, error) {
 			return testSHA, nil
@@ -363,6 +364,7 @@ func TestValidateProjectEndpointUnavailable(t *testing.T) {
 		service, err := app.NewProjectService(app.ProjectServiceConfig{
 			Store: st, GitLab: api, Cipher: cipher,
 			Profiles:  map[string]config.ProfileConfig{"default": {}},
+			Workspace: workspacepkg.NewManager(t.TempDir(), nil),
 			GitLabURL: "https://gitlab.example.com",
 		})
 		if err != nil {

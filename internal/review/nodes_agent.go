@@ -681,12 +681,36 @@ func (e *Executor) synthesisGroups(ctx context.Context, in dag.NodeInput, params
 	if err != nil {
 		return nil, 0, nil, nil, err
 	}
+	raw, err := json.Marshal(adjudicated)
+	if err != nil {
+		return nil, 0, nil, nil, err
+	}
+	raw, err = SafeDiagnosticOutput(KindAdjudicate, raw, wf)
+	if err != nil {
+		return nil, 0, nil, nil, err
+	}
+	adjudicated, err = decodeAdjudicateOut(raw)
+	if err != nil {
+		return nil, 0, nil, nil, err
+	}
 	groups := cloneGroups(adjudicated.Groups)
 	warnings := append([]string(nil), adjudicated.Warnings...)
 	if !isSecondSynthesis(in.Node.ID) {
 		return groups, extendsUsed, adjudicated.Unresolved, warnings, nil
 	}
 	previous, err := e.previousSynthesis(ctx, in, params)
+	if err != nil {
+		return nil, 0, nil, nil, err
+	}
+	raw, err = json.Marshal(previous)
+	if err != nil {
+		return nil, 0, nil, nil, err
+	}
+	raw, err = SafeDiagnosticOutput(KindSynthesize, raw, wf)
+	if err != nil {
+		return nil, 0, nil, nil, err
+	}
+	previous, err = decodeSynthesisResult(raw)
 	if err != nil {
 		return nil, 0, nil, nil, err
 	}

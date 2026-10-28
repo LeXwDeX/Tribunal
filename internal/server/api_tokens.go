@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -77,6 +78,11 @@ func (s *Server) handleCreateAPIToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusForbidden, "forbidden", "API tokens require a browser session", nil)
 		return
 	}
+	principal, _ := principalFrom(r.Context())
+	if principal.sessionID == "" {
+		writeError(w, r, http.StatusForbidden, "forbidden", "API tokens require a browser session", nil)
+		return
+	}
 	if s.tokens == nil {
 		writeError(w, r, http.StatusServiceUnavailable, "internal", "token store is not configured", nil)
 		return
@@ -107,13 +113,18 @@ func (s *Server) handleCreateAPIToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sum := sha256.Sum256([]byte(plaintext))
-	token, err := s.tokens.CreateAPIToken(r.Context(), user, store.APIToken{
+	sessionHash := sha256.Sum256([]byte(principal.sessionID))
+	token, err := s.tokens.CreateAPITokenForSession(r.Context(), user, store.APIToken{
 		UserID:    user.ID,
 		Name:      name,
 		TokenHash: sum[:],
 		ExpiresAt: expiresAt,
-	})
+	}, sessionHash[:])
 	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, r, http.StatusUnauthorized, "unauthorized", "browser session is no longer valid", nil)
+			return
+		}
 		s.writeStoreError(w, r, err)
 		return
 	}

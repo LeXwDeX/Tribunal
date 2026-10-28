@@ -15,6 +15,7 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/jobs"
 	"github.com/LeXwDeX/tribunal/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/workspace"
 )
 
 func defaultCommandPayload(command string) commandPayload {
@@ -77,7 +78,7 @@ func TestCommandWorkerReplacesQueuedLatestPayload(t *testing.T) {
 	rec := &recordingCommandStore{CommandStore: db}
 	api := defaultFakeGitLab()
 	worker, err := NewCommandWorker(CommandWorkerConfig{
-		Store: rec, GitLab: api, Cipher: cipher, Profiles: testProfiles(),
+		Store: rec, GitLab: api, Cipher: cipher, Profiles: testProfiles(), Workspace: workspace.NewManager(t.TempDir(), nil),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -87,7 +88,7 @@ func TestCommandWorkerReplacesQueuedLatestPayload(t *testing.T) {
 	full.Full = true
 	full.NoteID = 1001
 	api.mr.SHA = newSHA
-	if err := worker.Handle(ctx, commandJob(t, full)); err != nil {
+	if err := worker.Handle(ctx, persistedCommandJob(t, db, full)); err != nil {
 		t.Fatalf("full command: %v", err)
 	}
 	deep := defaultCommandPayload("run")
@@ -95,7 +96,7 @@ func TestCommandWorkerReplacesQueuedLatestPayload(t *testing.T) {
 	deep.Profile = "deep"
 	deep.NoteID = 1002
 	api.mr.SHA = latestSHA
-	if err := worker.Handle(ctx, commandJob(t, deep)); err != nil {
+	if err := worker.Handle(ctx, persistedCommandJob(t, db, deep)); err != nil {
 		t.Fatalf("deep command: %v", err)
 	}
 
@@ -160,7 +161,7 @@ func TestCommandWorkerPreservesRunningAndQueuesSuccessor(t *testing.T) {
 	api := defaultFakeGitLab()
 	api.mr.SHA = strings.Repeat("c", 40)
 	worker, err := NewCommandWorker(CommandWorkerConfig{
-		Store: rec, GitLab: api, Cipher: cipher, Profiles: testProfiles(),
+		Store: rec, GitLab: api, Cipher: cipher, Profiles: testProfiles(), Workspace: workspace.NewManager(t.TempDir(), nil),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -168,7 +169,7 @@ func TestCommandWorkerPreservesRunningAndQueuesSuccessor(t *testing.T) {
 	payload := defaultCommandPayload("run")
 	payload.Full = true
 	payload.NoteID = 2001
-	if err := worker.Handle(ctx, commandJob(t, payload)); err != nil {
+	if err := worker.Handle(ctx, persistedCommandJob(t, db, payload)); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	rec.mu.Lock()
@@ -729,8 +730,10 @@ func TestHelpWebhookWorkerEndToEnd(t *testing.T) {
 	cipher := newTestCipher(t)
 	seedProject(t, db, cipher, 42, "whsec-test", "{}", "default")
 	api := defaultFakeGitLab()
+	manager := workspace.NewManager(t.TempDir(), nil)
 	webhook, err := NewWebhookService(WebhookServiceConfig{
 		Store:          db,
+		Workspace:      manager,
 		Cipher:         cipher,
 		Profiles:       testProfiles(),
 		ReviewDefaults: testDefaults(),
@@ -755,7 +758,7 @@ func TestHelpWebhookWorkerEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	worker, err := NewCommandWorker(CommandWorkerConfig{
-		Store: db, GitLab: api, Cipher: cipher, Profiles: testProfiles(),
+		Store: db, GitLab: api, Cipher: cipher, Profiles: testProfiles(), Workspace: manager,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -877,15 +880,16 @@ func TestCommandWorkerRecordsQueuedStatusAndReaction(t *testing.T) {
 	seedProject(t, db, cipher, 42, "whsec", "{}", "default")
 	api := defaultFakeGitLab()
 	worker, err := NewCommandWorker(CommandWorkerConfig{
-		Store:    db,
-		GitLab:   api,
-		Cipher:   cipher,
-		Profiles: testProfiles(),
+		Store:     db,
+		Workspace: workspace.NewManager(t.TempDir(), nil),
+		GitLab:    api,
+		Cipher:    cipher,
+		Profiles:  testProfiles(),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := worker.Handle(ctx, commandJob(t, defaultCommandPayload("run"))); err != nil {
+	if err := worker.Handle(ctx, persistedCommandJob(t, db, defaultCommandPayload("run"))); err != nil {
 		t.Fatal(err)
 	}
 	status, err := db.GetReviewStatus(ctx, 42, 7)

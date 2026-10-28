@@ -259,7 +259,12 @@ func TestReviewRetryRestartsRunningNodeAndKeepsTerminalOutput(t *testing.T) {
 	generation := jobGeneration(t, job)
 	dossier := testDossier(t, f.head)
 	configHash, promptHash := currentReviewHashes(t, f)
-	dossier.Metadata = map[string]string{"config_hash": configHash, "prompt_hash": promptHash}
+	dossier.Metadata = map[string]string{
+		"config_hash": configHash, "prompt_hash": promptHash,
+		"profile_hash":       f.service.reviewProfileHash(review.Profile{Name: "default", Config: f.profiles["default"]}),
+		"workspace_identity": "absent",
+		"execution_identity": testExecutionIdentity(t, f),
+	}
 	raw, err := review.MarshalDossier(dossier)
 	if err != nil {
 		t.Fatalf("MarshalDossier: %v", err)
@@ -278,7 +283,7 @@ func TestReviewRetryRestartsRunningNodeAndKeepsTerminalOutput(t *testing.T) {
 	wfID, _, err := f.db.CreateReviewWorkflow(context.Background(), sqlite.ReviewWorkflowRequest{
 		JobID:              job.ID,
 		Spec:               spec,
-		Meta:               map[string]string{"trigger": "mr_open", "base_sha": dossier.DiffVersion.BaseSHA, "fingerprint": reviewFingerprint(hash, configHash, promptHash), "config_hash": configHash, "prompt_hash": promptHash},
+		Meta:               map[string]string{"trigger": "mr_open", "base_sha": dossier.DiffVersion.BaseSHA, "fingerprint": reviewFingerprint(hash, configHash, promptHash), "config_hash": configHash, "prompt_hash": promptHash, "profile": "default"},
 		DossierVersion:     review.DossierSchemaVersion,
 		DossierHash:        hash,
 		DossierData:        raw,
@@ -322,6 +327,10 @@ func TestReviewRetryRestartsRunningNodeAndKeepsTerminalOutput(t *testing.T) {
 	plan := snapshot.Nodes["plan"]
 	if plan.Attempt != 1 || plan.Status != dag.NodeCompleted || string(plan.Output) != `{"ok":true}` {
 		t.Fatalf("terminal plan changed: attempt %d status %q output %s", plan.Attempt, plan.Status, plan.Output)
+	}
+	stored, err := f.db.GetWorkflowDossier(context.Background(), wfID)
+	if err != nil || string(stored.Data) != string(raw) {
+		t.Fatalf("retry did not preserve dossier: %v", err)
 	}
 }
 
@@ -472,7 +481,7 @@ func (s *successorStore) GetWorkflowDossier(ctx context.Context, workflowID stri
 
 // seedSuccessorReview advances the MR generation and creates its pending
 // workflow, as a successor job would after this worker's lease expired.
-func (f *reviewFixture) seedSuccessorReview(t *testing.T, jobID string) string {
+func (f *reviewFixture) seedSuccessorReview(t *testing.T, jobID, executionIdentity string) string {
 	t.Helper()
 	result, err := f.db.EnqueueReviewLatest(context.Background(), store.ReviewCommand{
 		ProjectID:   42,
@@ -484,7 +493,7 @@ func (f *reviewFixture) seedSuccessorReview(t *testing.T, jobID string) string {
 	if err != nil {
 		t.Fatalf("EnqueueReviewLatest successor: %v", err)
 	}
-	return createPendingReview(t, f, jobID, result.Generation)
+	return createPendingReviewIdentity(t, f, jobID, result.Generation, executionIdentity)
 }
 
 func TestStaleWorkerDoesNotCancelNewerGenerationOnConfigChange(t *testing.T) {
@@ -495,12 +504,13 @@ func TestStaleWorkerDoesNotCancelNewerGenerationOnConfigChange(t *testing.T) {
 	f.gitlab.docs["AGENTS.md"] = "changed repository configuration"
 	f.gitlab.mu.Unlock()
 
+	identity := testExecutionIdentity(t, f)
 	store := &successorStore{Store: f.db}
 	store.onRead = func() {
 		if err := f.engine.Cancel(context.Background(), oldWorkflowID, "successor"); err != nil {
 			t.Fatalf("cancel old workflow: %v", err)
 		}
-		f.seedSuccessorReview(t, "job-successor-config")
+		f.seedSuccessorReview(t, "job-successor-config", identity)
 	}
 	f.service.store = store
 
@@ -535,7 +545,7 @@ func TestRunStartCancelDoesNotCancelNewerGeneration(t *testing.T) {
 	if err := f.engine.Cancel(context.Background(), oldWorkflowID, "seed"); err != nil {
 		t.Fatalf("seed cancel: %v", err)
 	}
-	newWorkflowID := f.seedSuccessorReview(t, "job-start-successor")
+	newWorkflowID := f.seedSuccessorReview(t, "job-start-successor", testExecutionIdentity(t, f))
 
 	f.service.store = &staleControlStore{
 		Store: f.db,
@@ -618,6 +628,7 @@ func TestMaxFilesZeroNormalizesToSameReviewHash(t *testing.T) {
 func TestRecoverRunVerifiesWorktreeHead(t *testing.T) {
 	t.Run("matching head is reused", func(t *testing.T) {
 		f := newReviewFixture(t, reviewTestHead)
+		consumerReadLock(t, f.manager, 42)
 		project, err := f.db.GetProject(context.Background(), 42)
 		if err != nil {
 			t.Fatalf("GetProject: %v", err)
@@ -646,6 +657,7 @@ func TestRecoverRunVerifiesWorktreeHead(t *testing.T) {
 
 	t.Run("wrong head rebuilds", func(t *testing.T) {
 		f := newReviewFixture(t, reviewTestHead)
+		consumerReadLock(t, f.manager, 42)
 		project, err := f.db.GetProject(context.Background(), 42)
 		if err != nil {
 			t.Fatalf("GetProject: %v", err)
@@ -677,6 +689,7 @@ func TestRecoverRunVerifiesWorktreeHead(t *testing.T) {
 
 	t.Run("unowned path is never deleted", func(t *testing.T) {
 		f := newReviewFixture(t, reviewTestHead)
+		consumerReadLock(t, f.manager, 42)
 		project, err := f.db.GetProject(context.Background(), 42)
 		if err != nil {
 			t.Fatalf("GetProject: %v", err)
@@ -832,7 +845,7 @@ func TestReviewRunNoReviewableFilesPublishesSummary(t *testing.T) {
 // cancelJobWithNote enqueues a real /review cancel command and returns the job
 // payload the handler receives. The enqueue owns the durable cancel-note eyes
 // and queued status.
-func cancelJobWithNote(t *testing.T, f *reviewFixture, jobID string, noteID int64) *jobs.Job {
+func cancelJobWithNote(t *testing.T, f *reviewFixture, _ string, noteID int64) *jobs.Job {
 	t.Helper()
 	result, err := f.db.EnqueueReviewLatest(context.Background(), store.ReviewCommand{
 		ProjectID: 42,
@@ -847,17 +860,11 @@ func cancelJobWithNote(t *testing.T, f *reviewFixture, jobID string, noteID int6
 	if err != nil {
 		t.Fatalf("enqueue cancel: %v", err)
 	}
-	payload, err := json.Marshal(map[string]any{
-		"project_id": 42,
-		"mr_iid":     7,
-		"generation": result.Generation,
-		"trigger":    "command",
-		"note_id":    noteID,
-	})
+	job, err := f.db.GetJob(context.Background(), result.JobID)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("GetJob fixture cancel job: %v", err)
 	}
-	return &jobs.Job{ID: jobID, Kind: "review.cancel", Payload: payload, MaxAttempts: 3}
+	return job
 }
 
 func addStatusEyes(f *reviewFixture, noteID, userID int64) {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/repo"
+	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/internal/workspace"
 )
 
@@ -28,9 +29,19 @@ func (s *cleanupTestStore) ListWorkspaceProjectIDs(context.Context) ([]int64, er
 	return s.projects, s.projectsErr
 }
 
+func (s *cleanupTestStore) GetProject(_ context.Context, id int64) (*store.Project, error) {
+	return &store.Project{ID: id}, nil
+}
+
+func (s *cleanupTestStore) GetWorkspace(_ context.Context, id int64) (*store.Workspace, error) {
+	return &store.Workspace{ProjectID: id}, nil
+}
+
 func (s *cleanupTestStore) ProtectedRunRefs(context.Context) (map[string]struct{}, error) {
 	return s.protected, s.protectedErr
 }
+
+func (s *cleanupTestStore) SettleOrphanDossiers(context.Context, int64) error { return nil }
 
 func (s *cleanupTestStore) ProtectedContextSHAs(_ context.Context, projectID int64) (map[string]struct{}, error) {
 	if err := s.contextErr[projectID]; err != nil {

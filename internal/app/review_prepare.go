@@ -10,10 +10,8 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
@@ -77,40 +75,26 @@ func (s *ReviewService) incrementalRange(ctx context.Context, projectID int64, p
 }
 
 // prepareRun fetches the MR head and creates a detached worktree keyed by the
-// retried job ID. The returned cleanup removes the worktree and releases the
-// workspace read lock in every path.
+// retried job ID. The caller holds the workspace read lock through cleanup.
 func (s *ReviewService) prepareRun(ctx context.Context, project *store.Project, token string, mrIID int64, runID, head string) (string, func(), error) {
 	ws := s.workspace.Get(project.ID)
 	if ws == nil {
 		return "", nil, PermanentJob(fmt.Errorf("workspace is unavailable"))
 	}
-	unlock, err := ws.RLock(ctx)
-	if err != nil {
-		return "", nil, err
-	}
-	var once sync.Once
-	release := func() { once.Do(unlock) }
 	fail := func(err error) (string, func(), error) {
-		release()
 		return "", nil, err
 	}
-	remote := trimProjectWebURL(project.WebURL)
-	if remote == "" {
-		return fail(PermanentJob(fmt.Errorf("project web url is empty")))
+	remote, err := currentProjectRemote(ctx, s.gitlab, project, token)
+	if err != nil {
+		return fail(err)
 	}
 	if err := ensureReviewRoot(ws.Root); err != nil {
 		return fail(err)
 	}
 	auth := repo.Auth{Token: token}
-	if err := s.git.EnsureMirror(ctx, ws.MirrorDir(), remote, auth); err != nil {
-		return fail(err)
-	}
 	ref := fmt.Sprintf("refs/merge-requests/%d/head", mrIID)
 	refspec := fmt.Sprintf("+%s:%s", ref, ref)
-	if err := s.git.Fetch(ctx, ws.MirrorDir(), auth, refspec); err != nil {
-		return fail(err)
-	}
-	resolved, err := s.git.Resolve(ctx, ws.MirrorDir(), ref)
+	resolved, err := fetchProjectRef(ctx, ws, s.git, remote, auth, refspec, ref)
 	if err != nil {
 		return fail(err)
 	}
@@ -158,9 +142,41 @@ func (s *ReviewService) prepareRun(ctx context.Context, project *store.Project, 
 			s.logger.Warn("run worktree removal failed", "project_id", project.ID, "run_id", runID)
 		}
 		_ = os.RemoveAll(runDir)
-		release()
 	}
 	return runDir, cleanup, nil
+}
+
+// reviewBaseIdentity is called while holding the workspace read lock. An
+// unproven base is never passed to the sandbox or used to resume a workflow.
+func (s *ReviewService) reviewBaseIdentity(ctx context.Context, projectID int64, startSHA string) (string, string, error) {
+	ws := s.workspace.Get(projectID)
+	if ws == nil {
+		return "", "", nil
+	}
+	base := ws.BaseDir()
+	info, err := os.Lstat(base)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", "absent", nil
+	}
+	if err != nil {
+		return "", "", err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return "", "", nil
+	}
+	state, err := s.store.GetWorkspace(ctx, projectID)
+	if err != nil {
+		return "", "", err
+	}
+	if state == nil {
+		return "", "", nil
+	}
+	ownedHead := ws.BaseSHA()
+	head, err := s.git.Resolve(ctx, base, "HEAD")
+	if err != nil || !shaRE.MatchString(head) || !strings.EqualFold(head, ownedHead) || !strings.EqualFold(head, state.BaseSHA) || !strings.EqualFold(head, startSHA) {
+		return "", "", nil
+	}
+	return base, sha256Hex(strings.Join([]string{base, strings.ToLower(head), state.IndexSHA, state.ContextSHA}, "\n")), nil
 }
 
 // ensureReviewRoot creates the project workspace root and rejects a symlinked
@@ -280,7 +296,7 @@ func (s *ReviewService) publishEmptyWithNote(ctx context.Context, project *store
 	// That window is accepted: the summary marker keys the publication, so a
 	// late write is replaced by the next review instead of creating a second
 	// summary.
-	if err := s.publisher.PublishStandaloneSummary(ctx, project.ID, control.MRIID, token, fingerprint, body); err != nil {
+	if err := s.publisher.publishStandaloneSummaryLocked(ctx, project.ID, control.MRIID, token, fingerprint, body); err != nil {
 		state := reviewStatusFailed
 		reaction := reviewAwardFail
 		detail := "publication failed"
@@ -320,78 +336,8 @@ func truncateRunes(value string, max int) string {
 	return string(runes[:max])
 }
 
-// ignoreMatcher compiles GitLab-style glob ignore patterns.
-type ignoreMatcher struct {
-	patterns []*regexp.Regexp
-	basename []*regexp.Regexp
-}
-
-func newIgnoreMatcher(patterns []string) *ignoreMatcher {
-	out := &ignoreMatcher{}
-	for _, raw := range patterns {
-		pattern := strings.TrimSpace(raw)
-		if pattern == "" || strings.HasPrefix(pattern, "!") {
-			continue
-		}
-		if strings.HasSuffix(pattern, "/") {
-			pattern += "**"
-		}
-		re, err := compileGlob(pattern)
-		if err != nil {
-			continue
-		}
-		out.patterns = append(out.patterns, re)
-		if !strings.Contains(pattern, "/") {
-			if re, err := compileGlob("**/" + pattern); err == nil {
-				out.basename = append(out.basename, re)
-			}
-		}
-	}
-	return out
-}
-
-func (m *ignoreMatcher) Match(path string) bool {
-	if m == nil {
-		return false
-	}
-	for _, re := range m.patterns {
-		if re.MatchString(path) {
-			return true
-		}
-	}
-	for _, re := range m.basename {
-		if re.MatchString(path) {
-			return true
-		}
-	}
-	return false
-}
-
-func compileGlob(pattern string) (*regexp.Regexp, error) {
-	var b strings.Builder
-	b.WriteString("^")
-	for i := 0; i < len(pattern); i++ {
-		switch pattern[i] {
-		case '*':
-			if i+1 < len(pattern) && pattern[i+1] == '*' {
-				i++
-				if i+1 < len(pattern) && pattern[i+1] == '/' {
-					i++
-					b.WriteString("(?:.*/)?")
-				} else {
-					b.WriteString(".*")
-				}
-			} else {
-				b.WriteString("[^/]*")
-			}
-		case '?':
-			b.WriteString("[^/]")
-		default:
-			b.WriteString(regexp.QuoteMeta(string(pattern[i])))
-		}
-	}
-	b.WriteString("$")
-	return regexp.Compile(b.String())
+func newIgnoreMatcher(patterns []string) *review.IgnoreMatcher {
+	return review.NewIgnoreMatcher(patterns)
 }
 
 // buildReviewFiles filters diffs, applies ignore rules and bounds, and counts
@@ -421,7 +367,14 @@ func buildReviewFiles(diffs []gitlab.FileDiff, ignores []string, maxFiles, maxDi
 				"review coverage gap: skipped a changed file with an invalid path (%s)", label))
 			continue
 		}
-		if matcher.Match(filePath) {
+		if diff.OldPath != "" && !validRepoPath(diff.OldPath) {
+			label := invalidPathLabel(diff.OldPath)
+			omit(label, "invalid_path")
+			warnings = append(warnings, fmt.Sprintf(
+				"review coverage gap: skipped a changed file with an invalid path (%s)", label))
+			continue
+		}
+		if matcher.MatchPath(filePath) || matcher.MatchPath(strings.TrimSpace(diff.OldPath)) {
 			ignored = append(ignored, filePath)
 			continue
 		}

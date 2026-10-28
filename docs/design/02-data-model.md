@@ -90,7 +90,8 @@ CREATE TABLE mcp_servers (
   scope      TEXT    NOT NULL,        -- platform | project
   project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
   name       TEXT    NOT NULL,
-  config     TEXT    NOT NULL,        -- 单个 mcpServers 条目的 JSON（Claude Code 格式）
+  config     TEXT    NOT NULL,        -- 0017 数据迁移完成后固定为 '{}'
+  config_enc BLOB,                    -- 完整配置密文；仅迁移前可为 NULL
   enabled    INTEGER NOT NULL DEFAULT 1,
   created_at TEXT    NOT NULL,
   updated_at TEXT    NOT NULL,

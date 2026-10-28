@@ -99,6 +99,7 @@ const (
 // small hashes/pointers, not a second copy of this payload.
 type WorkflowDossier struct {
 	WorkflowID       string          `json:"workflow_id"`
+	ProjectID        int64           `json:"-"`
 	JobID            string          `json:"job_id,omitempty"`
 	Generation       int64           `json:"generation"`
 	Version          int             `json:"version"`

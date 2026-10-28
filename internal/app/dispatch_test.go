@@ -13,17 +13,19 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/jobs"
 	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
+	"github.com/LeXwDeX/tribunal/internal/workspace"
 	"github.com/LeXwDeX/tribunal/pkg/dag"
 )
 
 func newTestDispatcher(t *testing.T, st *sqlite.Store, api DispatchGitLab) *Dispatcher {
 	t.Helper()
 	dispatcher, err := NewDispatcher(DispatcherConfig{
-		Store:    st,
-		GitLab:   api,
-		Cipher:   newTestCipher(t),
-		Profiles: testProfiles(),
-		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Store:     st,
+		Workspace: workspace.NewManager(t.TempDir(), nil),
+		GitLab:    api,
+		Cipher:    newTestCipher(t),
+		Profiles:  testProfiles(),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
 		t.Fatalf("NewDispatcher: %v", err)

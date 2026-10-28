@@ -24,6 +24,7 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/repo"
 	"github.com/LeXwDeX/tribunal/internal/secret"
 	"github.com/LeXwDeX/tribunal/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/workspace"
 )
 
 // ProjectStore is the persistence surface needed by ProjectService.
@@ -107,6 +108,8 @@ type ProjectService struct {
 	publicURL         string
 	hookURL           string
 	workspace         string
+	workspaces        *workspace.Manager
+	projectExtensions interface{ CloseProject(int64) error }
 	gitLabOrigin      *gitLabOrigin
 	probeRemote       func(ctx context.Context, remoteURL, token string) (string, error)
 	validationTimeout time.Duration
@@ -145,9 +148,10 @@ type ProjectServiceConfig struct {
 	Cipher    *secret.Cipher
 	Profiles  map[string]config.ProfileConfig
 	PublicURL string
-	// Workspace is the workspace root shared with workspace.Manager. Project
-	// directories and uploaded skill directories live below it.
-	Workspace string
+	// Workspace owns the shared project locks and workspace root.
+	Workspace *workspace.Manager
+	// ProjectExtensions closes cached project sessions before deletion.
+	ProjectExtensions interface{ CloseProject(int64) error }
 	// GitLabURL is the trusted GitLab root used to accept full repository
 	// URLs. Requests still go through the configured GitLab API only.
 	GitLabURL string
@@ -162,7 +166,7 @@ type ProjectServiceConfig struct {
 
 // NewProjectService builds the registration service.
 func NewProjectService(cfg ProjectServiceConfig) (*ProjectService, error) {
-	if cfg.Store == nil || cfg.GitLab == nil || cfg.Cipher == nil {
+	if cfg.Store == nil || cfg.GitLab == nil || cfg.Cipher == nil || cfg.Workspace == nil {
 		return nil, errors.New("app: project service dependencies are required")
 	}
 	logger := cfg.Logger
@@ -196,7 +200,9 @@ func NewProjectService(cfg ProjectServiceConfig) (*ProjectService, error) {
 		profiles:          cfg.Profiles,
 		publicURL:         publicURL,
 		hookURL:           hookURL,
-		workspace:         strings.TrimSpace(cfg.Workspace),
+		workspace:         cfg.Workspace.Root(),
+		workspaces:        cfg.Workspace,
+		projectExtensions: cfg.ProjectExtensions,
 		gitLabOrigin:      origin,
 		probeRemote:       cfg.ProbeRemote,
 		validationTimeout: timeout,
@@ -271,11 +277,28 @@ func (s *ProjectService) Register(ctx context.Context, in RegisterInput) (*Regis
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Lock order: lifecycle first, content second.
+	unlockLifecycle, err := s.workspaces.Get(project.ID).LifecycleLock(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer unlockLifecycle()
+	unlock, err := s.workspaces.Get(project.ID).Lock(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 
 	if _, err := s.store.GetProject(ctx, project.ID); err == nil {
 		return nil, conflictError("project is already registered")
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return nil, internalError()
+	}
+	if exists, err := s.projectDataExists(project.ID); err != nil {
+		s.logger.Warn("project data inspection failed", "project_id", project.ID)
+		return nil, internalError()
+	} else if exists {
+		return nil, conflictError("local project data remains; manual cleanup is required before registration")
 	}
 
 	webhookState := store.WebhookStateDisabled
@@ -938,8 +961,7 @@ func (s *ProjectService) webhookResult(ctx context.Context, fallback *store.Proj
 	return &WebhookRegistration{Project: saved, HookID: hookID}
 }
 
-// Delete removes the service-created webhook, the project workspace and the
-// project-scoped extension rows, then deletes the project registration.
+// Delete commits the registration deletion before removing local project data.
 func (s *ProjectService) Delete(ctx context.Context, id int64) error {
 	if id <= 0 {
 		return validationError("invalid project id", Detail{Field: "id", Message: "must be positive"})
@@ -948,21 +970,60 @@ func (s *ProjectService) Delete(ctx context.Context, id int64) error {
 	// that is being provisioned and leave it unaccounted for at GitLab.
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	project, err := s.Get(ctx, id)
+	// Lock order: lifecycle first, content second.
+	unlockLifecycle, err := s.workspaces.Get(id).LifecycleLock(ctx)
 	if err != nil {
+		return err
+	}
+	defer unlockLifecycle()
+	unlock, err := s.workspaces.Get(id).Lock(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	project, err := s.store.GetProject(ctx, id)
+	missing := errors.Is(err, store.ErrNotFound)
+	if err != nil && !missing {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return internalError()
+	}
+	exists, err := s.projectDataExists(id)
+	if err != nil {
+		s.logger.Warn("project data inspection failed", "project_id", id)
+		return internalError()
+	}
+	if missing {
+		if exists {
+			return conflictError("local project data remains; manual cleanup is required")
+		}
+		return notFoundError("project not registered")
+	}
+	if s.projectExtensions != nil {
+		if err := s.projectExtensions.CloseProject(id); err != nil {
+			s.logger.Warn("project extensions close failed", "project_id", id)
+			return internalError()
+		}
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if project.HookID != nil {
 		if token, decErr := s.cipher.Open(project.TokenEnc, secret.TokenAAD(project.ID)); decErr != nil {
 			s.logger.Warn("project token decrypt failed during delete", "project_id", id)
-		} else if delErr := s.gitlab.DeleteProjectHook(context.WithoutCancel(ctx), string(token), id, *project.HookID); delErr != nil {
-			s.logger.Warn("webhook removal failed during project delete", "project_id", id, "status", gitlab.StatusOf(delErr))
+		} else {
+			hookCtx, cancel := context.WithTimeout(ctx, defaultValidationTimeout)
+			delErr := s.gitlab.DeleteProjectHook(hookCtx, string(token), id, *project.HookID)
+			cancel()
+			if delErr != nil {
+				s.logger.Warn("webhook removal failed during project delete", "project_id", id, "status", gitlab.StatusOf(delErr))
+			}
 		}
 	}
-	if err := s.removeProjectData(id); err != nil {
-		s.logger.Warn("project workspace cleanup failed", "project_id", id)
-		return internalError()
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if err := s.store.DeleteProject(ctx, id); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -971,24 +1032,38 @@ func (s *ProjectService) Delete(ctx context.Context, id int64) error {
 		s.logger.Warn("project delete failed", "project_id", id)
 		return internalError()
 	}
+	if err := s.removeProjectData(id); err != nil {
+		s.logger.Warn("project workspace cleanup failed after registration deletion", "project_id", id)
+		return &Error{Code: "internal", Message: "project registration deleted but local cleanup is incomplete", Compensate: true}
+	}
 	return nil
+}
+
+// projectDataExists checks both targets without following symlinked parents.
+func (s *ProjectService) projectDataExists(id int64) (bool, error) {
+	exists := false
+	for _, path := range s.projectDataPaths(id) {
+		found, err := inspectPathUnder(s.workspace, path)
+		if err != nil {
+			return false, err
+		}
+		exists = exists || found
+	}
+	return exists, nil
+}
+
+func (s *ProjectService) projectDataPaths(id int64) []string {
+	return []string{
+		filepath.Join(s.workspace, strconv.FormatInt(id, 10)),
+		projectSkillsContainer(s.workspace, id),
+	}
 }
 
 // removeProjectData removes the project workspace and its managed skill
 // directory. It refuses to follow symlinked workspace roots.
 func (s *ProjectService) removeProjectData(id int64) error {
-	root := strings.TrimSpace(s.workspace)
-	if root == "" {
-		return nil
-	}
-	if !filepath.IsAbs(root) {
-		return errors.New("app: workspace root is not absolute")
-	}
-	for _, path := range []string{
-		filepath.Join(root, strconv.FormatInt(id, 10)),
-		projectSkillsContainer(root, id),
-	} {
-		if err := removePathUnder(root, path); err != nil {
+	for _, path := range s.projectDataPaths(id) {
+		if err := removePathUnder(s.workspace, path); err != nil {
 			return err
 		}
 	}
@@ -999,9 +1074,19 @@ func (s *ProjectService) removeProjectData(id int64) error {
 // to its parent is a real directory. A symlinked workspace root or parent
 // must never redirect cleanup outside the configured workspace.
 func removePathUnder(root, target string) error {
+	if _, err := inspectPathUnder(root, target); err != nil {
+		return err
+	}
+	return removePath(target)
+}
+
+func inspectPathUnder(root, target string) (bool, error) {
+	if !filepath.IsAbs(root) {
+		return false, errors.New("app: workspace root is not absolute")
+	}
 	rel, err := filepath.Rel(root, target)
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return errors.New("app: cleanup path is outside the workspace")
+		return false, errors.New("app: cleanup path is outside the workspace")
 	}
 	current := root
 	parts := strings.Split(rel, string(filepath.Separator))
@@ -1009,19 +1094,23 @@ func removePathUnder(root, target string) error {
 	for i := 0; i <= len(parents); i++ {
 		info, err := os.Lstat(current)
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil
+			return false, nil
 		}
 		if err != nil {
-			return err
+			return false, err
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return errors.New("app: cleanup path contains a symlink")
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return false, errors.New("app: cleanup parent is not a real directory")
 		}
 		if i < len(parents) {
 			current = filepath.Join(current, parents[i])
 		}
 	}
-	return removePath(target)
+	_, err = os.Lstat(target)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 func removePath(path string) error {

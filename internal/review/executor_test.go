@@ -16,6 +16,15 @@ import (
 
 func newTestExecutor(t *testing.T, deps ExecutorDeps) *Executor {
 	t.Helper()
+	if deps.Dossier == nil {
+		deps.Dossier = &Dossier{}
+	} else {
+		dossier := *deps.Dossier
+		deps.Dossier = &dossier
+	}
+	if deps.Dossier.IgnorePolicy == nil {
+		deps.Dossier.IgnorePolicy = &IgnorePolicy{Version: 1, Patterns: []string{}}
+	}
 	if deps.Profile.Name == "" {
 		deps.Profile = defaultProfile()
 	}

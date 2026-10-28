@@ -17,6 +17,8 @@ var (
 	ErrUnsafePath = errors.New("agent: unsafe sandbox path")
 	// ErrUnknownRoot reports a root name that NewSandbox did not register.
 	ErrUnknownRoot = errors.New("agent: unknown sandbox root")
+	// ErrIgnoredPath reports a path excluded by the repository policy.
+	ErrIgnoredPath = errors.New("agent: path is ignored")
 )
 
 var rootNameRE = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
@@ -29,17 +31,31 @@ type Sandbox struct {
 	paths map[string]string
 	names []string
 	def   string
+	deny  func(string) bool
+	repos []string
 }
 
 // NewSandbox opens head (the MR worktree), base (the target-branch checkout)
 // and optional skill roots. Empty head or base is allowed when at least one
-// root remains. Optional roots are named after their basename; a name that
-// collides with head, base or another optional root is rejected, and a name
-// equal to head/base is replaced with skill-N. All roots must be absolute,
+// root remains. Optional roots use their basename when available; invalid,
+// reserved or duplicate names receive an available skill-N alias. Natural
+// optional names are reserved before aliases are assigned. All roots must be absolute,
 // existing, non-symlink directories. Callers must Close the sandbox after
 // all tool calls finish.
 func NewSandbox(head, base string, optionalRoots ...string) (*Sandbox, error) {
-	sb := &Sandbox{roots: make(map[string]*os.Root), paths: make(map[string]string)}
+	return NewSandboxWithIgnore(head, base, nil, optionalRoots...)
+}
+
+// NewSandboxWithIgnore applies deny to slash-separated repository-relative paths
+// under head and base, including optional roots that overlap either checkout.
+// It checks directory names both with and without a trailing slash; "." denotes
+// a checkout root. Ignored directories exclude their descendants.
+// A non-nil predicate also enables restricted git log output even if it never
+// matches. Callers must keep the predicate immutable and safe for concurrent use.
+// A nil predicate preserves NewSandbox behaviour. The checkout must not be
+// changed by an untrusted concurrent process while tools run.
+func NewSandboxWithIgnore(head, base string, deny func(string) bool, optionalRoots ...string) (*Sandbox, error) {
+	sb := &Sandbox{roots: make(map[string]*os.Root), paths: make(map[string]string), deny: deny}
 	add := func(name, path string) error {
 		if path == "" {
 			return nil
@@ -67,16 +83,40 @@ func NewSandbox(head, base string, optionalRoots ...string) (*Sandbox, error) {
 		sb.Close()
 		return nil, err
 	}
+	if deny != nil {
+		for _, name := range []string{"head", "base"} {
+			if root := sb.roots[name]; root != nil {
+				real, err := filepath.EvalSymlinks(root.Name())
+				if err != nil {
+					sb.Close()
+					return nil, errors.New("agent: repository root is not accessible")
+				}
+				sb.repos = append(sb.repos, real)
+			}
+		}
+	}
+	reserved := make(map[string]bool, len(optionalRoots))
+	for _, path := range optionalRoots {
+		if path == "" {
+			continue
+		}
+		name := sanitizeRootName(filepath.Base(filepath.Clean(path)))
+		if name != "" && name != "head" && name != "base" && !strings.EqualFold(name, ".git") {
+			reserved[name] = true
+		}
+	}
 	for i, path := range optionalRoots {
 		if path == "" {
 			continue
 		}
 		name := sanitizeRootName(filepath.Base(filepath.Clean(path)))
-		if name == "" || name == "." || strings.EqualFold(name, ".git") {
-			name = fmt.Sprintf("skill-%d", i+1)
-		}
-		if name == "head" || name == "base" {
-			name = fmt.Sprintf("skill-%d", i+1)
+		if _, exists := sb.roots[name]; name == "" || strings.EqualFold(name, ".git") || name == "head" || name == "base" || exists {
+			for n := i + 1; ; n++ {
+				name = fmt.Sprintf("skill-%d", n)
+				if _, exists := sb.roots[name]; !exists && !reserved[name] {
+					break
+				}
+			}
 		}
 		if err := add(name, path); err != nil {
 			sb.Close()
@@ -177,7 +217,70 @@ func (s *Sandbox) resolve(rootName, rel string) (*os.Root, string, string, error
 	if err := checkReal(root, clean); err != nil {
 		return nil, "", "", err
 	}
+	if err := s.checkIgnore(root, clean); err != nil {
+		return nil, "", "", err
+	}
 	return root, rootName, clean, nil
+}
+
+// checkIgnore checks the logical path and every resolved prefix. Checking
+// prefixes also blocks a symlink that enters an ignored directory and exits it.
+func (s *Sandbox) checkIgnore(root *os.Root, clean string) error {
+	if s.deny == nil {
+		return nil
+	}
+	rootPath, err := filepath.EvalSymlinks(root.Name())
+	if err != nil {
+		return errors.New("agent: path is not accessible")
+	}
+	current := rootPath
+	parts := []string{}
+	if clean != "." {
+		parts = strings.Split(clean, "/")
+	}
+	for i := 0; i <= len(parts); i++ {
+		if i > 0 {
+			current = filepath.Join(current, filepath.FromSlash(parts[i-1]))
+		}
+		real, err := filepath.EvalSymlinks(current)
+		if err != nil {
+			return errors.New("agent: path is not accessible")
+		}
+		info, err := os.Stat(real)
+		if err != nil {
+			return errors.New("agent: path is not accessible")
+		}
+		for _, candidate := range []string{current, real} {
+			for _, repo := range s.repos {
+				rel, err := filepath.Rel(repo, candidate)
+				if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+					continue
+				}
+				rel = filepath.ToSlash(rel)
+				if pathWithin(rel) {
+					return fmt.Errorf("%w: .git internals are not readable", ErrUnsafePath)
+				}
+				if s.ignoredRepoPath(rel, info.IsDir()) {
+					return ErrIgnoredPath
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Sandbox) ignoredRepoPath(rel string, isDir bool) bool {
+	if rel == "." {
+		return s.deny(rel)
+	}
+	parts := strings.Split(rel, "/")
+	for i := range parts {
+		prefix := strings.Join(parts[:i+1], "/")
+		if s.deny(prefix) || ((i < len(parts)-1 || isDir) && s.deny(prefix+"/")) {
+			return true
+		}
+	}
+	return false
 }
 
 // checkReal rejects paths whose symlink-resolved target leaves the root or

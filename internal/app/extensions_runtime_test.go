@@ -305,6 +305,7 @@ func TestProjectExtensionResolverAppliesMergedBindingsWithoutProjectServers(t *t
 	httpServer := newHTTPMCPTestServer(t)
 	project42 := int64(42)
 	project43 := int64(43)
+	seedProject(t, service.store, newTestCipher(t), project43, "synthetic-secret", "{}", "default")
 
 	if _, err := service.CreateMCPServer(ctx, MCPServerInput{
 		Scope: "platform", Name: "remote", Enabled: true,

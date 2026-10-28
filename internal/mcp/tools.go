@@ -13,6 +13,7 @@ import (
 
 	"github.com/LeXwDeX/tribunal/internal/agent"
 	"github.com/LeXwDeX/tribunal/internal/llm"
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -36,7 +37,8 @@ type ToolInfo struct {
 	Destructive bool   `json:"destructive,omitempty"`
 }
 
-// ToolSet is the explicitly allowlisted, read-only MCP tool set for one block.
+// ToolSet is the explicitly allowlisted MCP tool set for one block. Unannotated
+// tools remain available for compatibility, but are not known to be read-only.
 // Tool results are untrusted data; agent.Run wraps them before model input.
 // Warnings name skipped tools without exposing configuration values.
 type ToolSet struct {
@@ -82,8 +84,9 @@ func (m *Manager) ListTools(ctx context.Context, server string) ([]ToolInfo, err
 }
 
 // Tools returns only the explicitly allowlisted mcp__server__tool entries.
-// Read-only annotations never grant access; a tool with a destructive hint is
-// refused even when allowlisted. Missing tools become warnings.
+// Annotations never grant access. Explicitly non-read-only or destructive tools
+// are refused even when allowlisted; unannotated bindings remain compatible.
+// Missing or skipped tools become warnings.
 func (m *Manager) Tools(ctx context.Context, allowed []string) (*ToolSet, error) {
 	if m == nil {
 		return nil, ErrClosed
@@ -133,6 +136,10 @@ func (m *Manager) Tools(ctx context.Context, allowed []string) (*ToolSet, error)
 			if raw == nil {
 				continue
 			}
+			if _, duplicate := index[raw.Name]; duplicate {
+				index[raw.Name] = nil
+				continue
+			}
 			index[raw.Name] = raw
 		}
 		advertised[server] = index
@@ -145,8 +152,8 @@ func (m *Manager) Tools(ctx context.Context, allowed []string) (*ToolSet, error)
 			continue
 		}
 		info, ok := infoFor(raw)
-		if !ok || info.Destructive {
-			if ok && info.Destructive {
+		if !ok || !annotationsAllow(raw) {
+			if ok {
 				set.Warnings = append(set.Warnings, fmt.Sprintf("server %q: tool %q has mutation annotations and was skipped", ref.server, ref.tool))
 			} else {
 				set.Warnings = append(set.Warnings, fmt.Sprintf("server %q: tool %q has an unusable definition", ref.server, ref.tool))
@@ -160,9 +167,10 @@ func (m *Manager) Tools(ctx context.Context, allowed []string) (*ToolSet, error)
 		}
 		description := descriptionFor(ref.server, raw)
 		set.Tools = append(set.Tools, &mcpTool{
-			m:      m,
-			server: ref.server,
-			remote: ref.tool,
+			m:               m,
+			server:          ref.server,
+			remote:          ref.tool,
+			requireReadOnly: info.ReadOnly,
 			def: llm.ToolDef{
 				Name:        ToolName(ref.server, ref.tool),
 				Description: description,
@@ -212,12 +220,20 @@ func splitToolName(name string) (toolRef, error) {
 
 var toolNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 
+type listSeenKey struct{}
+type listSeen struct {
+	names map[string]int
+	count int
+}
+
 func (entry *serverEntry) list(ctx context.Context) ([]*sdk.Tool, error) {
 	session, err := entry.current()
 	if err != nil {
 		return nil, err
 	}
 	var tools []*sdk.Tool
+	seen := &listSeen{names: make(map[string]int)}
+	ctx = context.WithValue(ctx, listSeenKey{}, seen)
 	for tool, err := range session.Tools(ctx, &sdk.ListToolsParams{}) {
 		if err != nil {
 			return nil, err
@@ -229,6 +245,17 @@ func (entry *serverEntry) list(ctx context.Context) ([]*sdk.Tool, error) {
 			return nil, fmt.Errorf("mcp: server %q advertises too many tools", entry.key.server)
 		}
 		tools = append(tools, tool)
+	}
+	// The SDK filters invalid header schemas. Preserve duplicate names that it
+	// filtered out, so a conflicting definition cannot approve the other one.
+	visible := make(map[string]int, len(tools))
+	for _, tool := range tools {
+		visible[tool.Name]++
+	}
+	for name, count := range seen.names {
+		if count > 1 && visible[name] == 1 {
+			tools = append(tools, &sdk.Tool{Name: name})
+		}
 	}
 	return tools, nil
 }
@@ -262,6 +289,15 @@ func infoFor(raw *sdk.Tool) (ToolInfo, bool) {
 	return info, true
 }
 
+func annotationsAllow(raw *sdk.Tool) bool {
+	if raw.Annotations == nil {
+		return true
+	}
+	// The SDK cannot distinguish absent readOnlyHint from false; MCP defaults it to false.
+	return raw.Annotations.ReadOnlyHint &&
+		(raw.Annotations.DestructiveHint == nil || !*raw.Annotations.DestructiveHint)
+}
+
 func descriptionFor(server string, raw *sdk.Tool) string {
 	description := truncateUTF8(oneLine(raw.Description), maxDescription)
 	if description == "" {
@@ -290,11 +326,19 @@ func inputSchema(schema any) (json.RawMessage, bool) {
 }
 
 type mcpTool struct {
-	m      *Manager
-	server string
-	remote string
-	def    llm.ToolDef
+	m               *Manager
+	server          string
+	remote          string
+	requireReadOnly bool
+	def             llm.ToolDef
 }
+
+// unavailableToolError marks a tool unavailable without exposing server data.
+type unavailableToolError struct{ err error }
+
+func (e unavailableToolError) Error() string         { return e.err.Error() }
+func (e unavailableToolError) Unwrap() error         { return e.err }
+func (e unavailableToolError) ToolUnavailable() bool { return true }
 
 func (t *mcpTool) Def() llm.ToolDef { return t.def }
 
@@ -310,39 +354,61 @@ func (t *mcpTool) Call(ctx context.Context, raw json.RawMessage) (agent.Result, 
 	if err := json.Unmarshal(trimmed, &object); err != nil || object == nil {
 		return agent.Result{}, errors.New("mcp: tool input must be a JSON object")
 	}
-	result, err := t.m.call(ctx, t.server, t.remote, json.RawMessage(trimmed))
+	result, err := t.m.call(ctx, t.server, t.remote, json.RawMessage(trimmed), t.requireReadOnly)
 	if err != nil {
 		return agent.Result{}, err
 	}
 	return result, nil
 }
 
-func (m *Manager) call(ctx context.Context, server, tool string, args json.RawMessage) (agent.Result, error) {
+func (m *Manager) call(ctx context.Context, server, tool string, args json.RawMessage, requireReadOnly bool) (agent.Result, error) {
 	entry, err := m.acquire(ctx, server)
 	if err != nil {
-		return agent.Result{}, err
+		return agent.Result{}, unavailableToolError{err}
 	}
 	defer entry.end()
 
 	session, err := entry.current()
 	if err != nil {
-		return agent.Result{}, err
+		return agent.Result{}, unavailableToolError{err}
 	}
 	callCtx, cancel := context.WithTimeout(ctx, entry.cfg.XReview.CallTimeout.AsDuration())
 	defer cancel()
+
+	raws, err := entry.list(callCtx)
+	if err != nil {
+		return agent.Result{}, unavailableToolError{entry.callError(ctx, callCtx, err)}
+	}
+	var advertised *sdk.Tool
+	for _, raw := range raws {
+		if raw.Name == tool {
+			if advertised != nil {
+				return agent.Result{}, unavailableToolError{fmt.Errorf("%w: server %q: tool %q has duplicate definitions", ErrCallFailed, server, tool)}
+			}
+			advertised = raw
+		}
+	}
+	if _, ok := infoFor(advertised); !ok || !annotationsAllow(advertised) || (requireReadOnly && advertised.Annotations == nil) {
+		return agent.Result{}, unavailableToolError{fmt.Errorf("%w: server %q: tool %q is no longer permitted by its annotations", ErrCallFailed, server, tool)}
+	}
 
 	res, err := session.CallTool(callCtx, &sdk.CallToolParams{
 		Name:      tool,
 		Arguments: args,
 	})
 	if err != nil {
-		return agent.Result{}, entry.callError(ctx, callCtx, err)
+		safeErr := entry.callError(ctx, callCtx, err)
+		var rpcErr *jsonrpc.Error
+		if ctx.Err() == nil && errors.As(err, &rpcErr) && rpcErr.Code == jsonrpc.CodeInvalidParams {
+			return agent.Result{}, safeErr
+		}
+		return agent.Result{}, unavailableToolError{safeErr}
 	}
 	if res == nil {
-		return agent.Result{}, fmt.Errorf("%w: %q: empty result", ErrCallFailed, server)
+		return agent.Result{}, unavailableToolError{fmt.Errorf("%w: %q: empty result", ErrCallFailed, server)}
 	}
 	if res.NeedsInput() {
-		return agent.Result{}, fmt.Errorf("%w: %q: server requested interactive input", ErrCallFailed, server)
+		return agent.Result{}, unavailableToolError{fmt.Errorf("%w: %q: server requested interactive input", ErrCallFailed, server)}
 	}
 	content, truncated := formatCallResult(res, entry.cfg.XReview.MaxOutputChars)
 	return agent.Result{Content: content, IsError: res.IsError, Truncated: truncated}, nil
@@ -351,6 +417,11 @@ func (m *Manager) call(ctx context.Context, server, tool string, args json.RawMe
 func (entry *serverEntry) callError(parent, callCtx context.Context, err error) error {
 	if errors.Is(err, sdk.ErrConnectionClosed) {
 		entry.markDead(err)
+	}
+	if parent.Err() != nil {
+		return fmt.Errorf("%w: server %q", parent.Err(), entry.key.server)
+	}
+	if errors.Is(err, sdk.ErrConnectionClosed) {
 		return fmt.Errorf("%w: %q", ErrConnectionClosed, entry.key.server)
 	}
 	entry.mu.Lock()
@@ -358,9 +429,6 @@ func (entry *serverEntry) callError(parent, callCtx context.Context, err error) 
 	entry.mu.Unlock()
 	if dead {
 		return fmt.Errorf("%w: %q", ErrConnectionClosed, entry.key.server)
-	}
-	if parent.Err() != nil {
-		return fmt.Errorf("%w: server %q", parent.Err(), entry.key.server)
 	}
 	if errors.Is(callCtx.Err(), context.DeadlineExceeded) {
 		return fmt.Errorf("%w: server %q: call timed out", ErrCallFailed, entry.key.server)

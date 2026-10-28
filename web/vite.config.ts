@@ -21,14 +21,12 @@ export default defineConfig({
       reporter: ['text', 'lcov'],
       include: ['src/**/*.{ts,tsx}'],
       exclude: ['src/main.tsx', 'src/api/types.ts'],
-      // Vitest 4 enables AST-based V8 remapping: older thresholds (38/62/38/38)
-      // were calibrated against v8-to-istanbul false positives. Keep the
-      // measured v4 baseline so CI still rejects regressions.
+      // Recalibrated against the measured Vitest 4 coverage baseline.
       thresholds: {
-        statements: 33,
-        branches: 28,
-        functions: 27,
-        lines: 35,
+        statements: 74,
+        branches: 72,
+        functions: 71,
+        lines: 78,
       },
     },
   },
