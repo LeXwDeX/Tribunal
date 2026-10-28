@@ -1,8 +1,8 @@
 # Minimal M0 configuration.
 # 1. Replace gitlab.url with your GitLab base URL.
-# 2. Export REVIEW_MASTER_KEY (base64 of exactly 32 random bytes):
-#      openssl rand -base64 32
-# 3. Export REVIEW_ADMIN_TOKEN (at least 32 bytes).
+# 2. Generate REVIEW_MASTER_KEY and REVIEW_ADMIN_TOKEN without printing them,
+#    as described in docs/agent-deployment.md#2-准备配置, then inject them
+#    through the environment. Never write the values into this file.
 server:
   listen: ":8080"
   public_url: "http://localhost:8080"
@@ -25,9 +25,10 @@ auth:
   #   client_secret_env: GITLAB_OAUTH_CLIENT_SECRET
   bootstrap_token_env: REVIEW_ADMIN_TOKEN
   # Platform admins after OAuth login, as "id:<GitLab user id>". IDs survive
-  # GitLab renames. Plain usernames are deprecated, logged at startup and
-  # will be removed in the next major release.
-  # bootstrap_admins: ["id:42"]
+  # GitLab renames. Only add an ID after the user confirms the actual numeric
+  # ID and authorizes access. Plain usernames are deprecated, logged at startup
+  # and will be removed in the next major release.
+  # bootstrap_admins: []
   session_ttl: 168h
 
 storage:

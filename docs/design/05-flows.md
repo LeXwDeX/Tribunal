@@ -109,7 +109,7 @@ M0 先把命令持久化为 `review.command`，以下 GitLab 校验由 worker �
 1. Push Hook 到达，`ref` 匹配目标分支 → 入队 `workspace.refresh`（key=`ws:<pid>`，自动合并重复）。
 2. 工作区 `Lock`（等待进行中的评审释放读锁，最长 10 分钟，超时则延后重试）。
 3. `git fetch`，`base/` 检出到新的 `after` sha；`workspaces.base_sha` 更新。
-4. 外部索引增量更新（如 `codebase-memory-mcp cli index_repository`，cwd 为 `base/`）。
+4. 外部索引增量更新（如 `codebase-memory-mcp cli index_repository`，cwd 为 `base/`）。非取消的索引失败不阻断刷新，保留旧 `index_sha`；其他必要步骤及状态保存成功时最终 `state=ready` 并记录固定的索引失败消息。
 5. 判断是否重新生成上下文文档：自上次生成以来变更文件数 ≥ `context_refresh.changed_files`，或时间 ≥ `context_refresh.max_age`，且当前文档未锁定 → 运行 onboarding 工作流（F5 第 4 步起）。
 6. 释放锁。
 
@@ -127,7 +127,7 @@ M0 先把命令持久化为 `review.command`，以下 GitLab 校验由 worker �
    4. 创建 onboarding 工作流（单节点），产出 `OnboardingOut`。
    5. 渲染为 Markdown，追加到 `context_docs`（`source=generated`）；若当前 active 版本已锁定，新版本保存但不切换。
    6. `state=ready`。
-5. 任一步失败：`state=error`，`last_error` 记录原因；评审仍可进行，只是没有上下文文档和索引。
+5. 进入 onboarding 后的关键步骤失败时，尝试设置 `state=error`，`last_error` 使用固定消息，不记录错误原文。非取消的索引失败是例外：继续生成上下文，生成及状态保存成功后 `state=ready` 并记录固定的索引失败消息。预检查或锁失败沿用直接返回的行为；取消后 context 已失效时，状态保存也可能失败，不能保证一定写入 `error`。
 
 ---
 

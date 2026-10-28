@@ -565,11 +565,19 @@ func (s *WorkspaceService) refreshBase(ctx context.Context, ws *workspace.Worksp
 	return sha, nil
 }
 
-// indexDegraded logs a failed index run and returns the workspace error text.
-// MCP index errors never contain arguments or command output.
+// indexDegraded logs a failed index run and returns a fixed workspace message.
 func (s *WorkspaceService) indexDegraded(projectID int64, err error) string {
-	s.logger.Warn("code graph index failed; continuing without it", "project_id", projectID, "error_class", errclass.Of(err))
-	return "index: " + err.Error()
+	s.logger.Warn("code graph index failed; continuing without it", "project_id", projectID, "error_class", workspaceErrorClass(err))
+	return store.WorkspaceIndexFailed
+}
+
+func workspaceErrorClass(err error) string {
+	switch class := errclass.Of(err); class {
+	case errclass.Timeout, errclass.Canceled, errclass.Panic, errclass.Internal:
+		return class
+	default:
+		return errclass.Internal
+	}
 }
 
 func (s *WorkspaceService) runIndex(ctx context.Context, projectID int64, baseDir string) (int, error) {
@@ -621,8 +629,9 @@ func (s *WorkspaceService) saveWorkspace(ctx context.Context, ws store.Workspace
 }
 
 func (s *WorkspaceService) markWorkspaceError(ctx context.Context, projectID int64, cause error) {
+	s.logger.Warn("workspace operation failed", "project_id", projectID, "error_class", workspaceErrorClass(cause))
 	state, _ := s.store.GetWorkspace(ctx, projectID)
-	out := store.Workspace{ProjectID: projectID, State: "error", LastError: truncateRunes(cause.Error(), 1000)}
+	out := store.Workspace{ProjectID: projectID, State: "error", LastError: store.WorkspaceOperationFailed}
 	if state != nil {
 		out.BaseSHA = state.BaseSHA
 		out.IndexSHA = state.IndexSHA

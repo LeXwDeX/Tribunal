@@ -54,8 +54,18 @@ func workspaceSummary(workspace *store.Workspace) *projectWorkspaceSummary {
 		BaseSHA:       workspace.BaseSHA,
 		IndexStatus:   workspaceIndexStatus(workspace),
 		LastRefreshAt: workspace.LastRefreshAt,
-		LastError:     workspace.LastError,
+		LastError:     workspaceLastError(workspace),
 	}
+}
+
+func workspaceLastError(workspace *store.Workspace) string {
+	if workspace.LastError == "" {
+		return ""
+	}
+	if workspace.State == "ready" && strings.HasPrefix(workspace.LastError, "index: ") {
+		return store.WorkspaceIndexFailed
+	}
+	return store.WorkspaceOperationFailed
 }
 
 func (s *Server) handleGetWorkspace(w http.ResponseWriter, r *http.Request) {
@@ -72,8 +82,10 @@ func (s *Server) handleGetWorkspace(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, r, err)
 		return
 	}
+	responseWorkspace := *workspace
+	responseWorkspace.LastError = workspaceLastError(workspace)
 	writeJSON(w, http.StatusOK, workspaceResponse{
-		Workspace:   *workspace,
+		Workspace:   responseWorkspace,
 		IndexStatus: workspaceIndexStatus(workspace),
 	})
 }

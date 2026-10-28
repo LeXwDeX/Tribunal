@@ -28,7 +28,7 @@ auth:
   oauth:
     client_id_env: GITLAB_OAUTH_CLIENT_ID
     client_secret_env: GITLAB_OAUTH_CLIENT_SECRET
-  bootstrap_admins: ["id:42"]  # id:<GitLab 用户 ID>；用户名写法已弃用，下一个大版本移除。仅平台 admin 标签，重启后生效，项目数据仍需 grant
+  bootstrap_admins: []              # 默认不授予平台管理员；项目数据仍需 grant
   session_ttl: 168h                 # 持久化浏览器会话有效期
 
 storage:
@@ -131,6 +131,8 @@ review_defaults:                    # 项目设置的默认值（见 §3）
   post_failure_note: true
   show_model_attribution: false
 ```
+
+需要授予平台管理员时，先向用户确认实际 GitLab 数字用户 ID 和本次授权，再填写 `id:<GitLab 用户 ID>`；修改后重启生效。用户名写法已弃用，将在下一个大版本移除。
 
 ### Go 结构体（节选）
 

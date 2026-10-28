@@ -252,6 +252,8 @@ Finding 始终返回 `annotation`：`""` 为未标注，`valid` 为有效，`inv
 
 当前实现语义：数据库是上下文版本的 source of truth；`PUT .../context-docs/current` 和 lock 接口会同步工作区 `context/<base>` 下的文档和 `meta.json`，同步失败返回 500，不报告成功。`workspaces.context_sha` 只跟踪 agents 的 active base。`PUT .../context-docs/current` 追加一个 `source=manual` 的 active 版本，旧版本内容和锁定状态保持不变。生成保存同样追加版本；当前 active 版本 locked 时，新生成版本保存但不切换。同一 base 和 workflow 的重试返回已有版本，不重复追加。`GET .../current` 优先返回 active 版本，没有 active 时回退到最新版本。工作区响应包含 `state`、`base_sha`、`index_sha`、`context_sha`、`last_refresh_at`、`last_error` 和 `index_status`。
 
+工作区详情、项目详情和项目列表中的工作区 `last_error` 使用相同的固定消息，不返回存储的错误原文。空字符串或数据库 `NULL` 省略该字段；`state=ready` 且存储值以 `index: ` 开头时返回 `index: code graph indexing failed`；其他非空值返回 `workspace operation failed`。旧版索引错误使用该前缀，但历史值可能被伪造或无法准确分类，前缀不是索引失败的可信证明。读取不会改写数据库；正常刷新仍可能覆盖旧值。依赖旧版完整错误文本的客户端需要调整。
+
 `index_status` 只描述已存储的索引检查点：两项 SHA 相同为 `ready`，不同为 `stale`，缺少任一项为 `unknown`。平台 MCP 配置为空不能证明项目级索引已禁用，因此不返回推测的 `disabled`。新 onboarding/refresh 只有实际成功执行至少一个 `index_command` 才推进 `index_sha`；没有命令时不伪造新 SHA，refresh 保留旧检查点。历史版本可能在未执行命令时写过 SHA，本次没有迁移重写，`ready` 不是当前外部索引健康或历史命令执行的证明。
 
 手动 `POST .../workspace/refresh` 的两个布尔参数默认都是 `false`：空请求只更新 base，重建索引和重新生成上下文由界面的独立操作显式请求。目标分支 push 触发的刷新仍使用后台默认策略。项目扩展配置目前按项目缓存，已加载项目的 MCP/Skill/块绑定更新需重启服务才能可靠生效；缓存失效机制尚未实现。

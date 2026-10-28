@@ -130,6 +130,7 @@ func TestFeedbackResolveSignalUsesPublishedLine(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			published, current, root := feedbackRepo(t, tc.mutate)
 			f, service, workflow, publication := feedbackResolveFixture(t,
 				published, current, root, "job-feedback-"+strings.ReplaceAll(tc.name, " ", "-"), tc.line, tc.side)
@@ -268,6 +269,7 @@ func TestFeedbackCollectsMergedMROnlyWithinWindow(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			f := newReviewFixture(t, reviewTestHead)
 			job := f.seedReview(t, "job-feedback-merged-"+strings.ReplaceAll(tc.name, " ", "-"))
 			if err := f.service.Handle(context.Background(), job); err != nil {

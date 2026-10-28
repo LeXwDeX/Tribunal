@@ -1,8 +1,3 @@
-<!-- specgit:project:v2:start -->
-## SpecGit 2
-
-Read project-root `.agents/skills/specgit-native/SKILL.md` before work; if missing, initialize with the shared `specgit init` CLI or restore an existing integration with `specgit setup` ([installation](https://github.com/LeXwDeX/SpecGit/blob/main/docs/agent-install.md)).
-<!-- specgit:project:v2:end -->
 
 This file is the single instruction file for every coding agent working in this repository. There is no `CLAUDE.md`; tools that look for one should read this file.
 
@@ -37,6 +32,8 @@ Tribunal is a multi-agent code review service for GitLab CE merge requests: a Go
 
 ## Commands
 
+The full Go test suite requires Bash and a real Python 3 interpreter for the registration documentation tests. `go test -race` also requires cgo and a working C compiler. Verify these prerequisites on self-hosted runners before use. Python 3 is not a runtime dependency of the production binary or deployment; the documented manual registration steps separately require Python 3 on the host.
+
 ```bash
 # Web first: go build embeds web/dist.
 cd web && npm ci && npm test && npm run build && cd ..
@@ -45,7 +42,7 @@ go build ./...
 go vet ./...
 go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
 go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
-go test -race -coverprofile=coverage.out ./...
+go test -race -timeout=40m -coverprofile=coverage.out ./...
 go run ./scripts/coveragecheck -profile coverage.out -min 70
 go mod verify
 go run ./scripts/licensecheck -min 1
@@ -57,6 +54,10 @@ bash scripts/docker-smoke.sh
 ```
 
 CI runs the same `go`, `web` and `docker` jobs on every PR and on `main`.
+
+If hosted runners are blocked by billing, a user with repository write access can run additional CI evidence on a self-hosted runner after this workflow is merged into the default branch: `gh workflow run ci.yml --ref <trusted-branch> -f self_hosted=true`. This manual run alone does not guarantee a PR required check will pass. Push and PR runs remain on hosted runners.
+
+Only dispatch trusted branch code: untrusted code can persistently compromise a self-hosted machine. This is an operational requirement, not a security boundary enforced automatically by GitHub or this workflow. Anyone who can modify a workflow can request a self-hosted runner; runner access controls may restrict whether it executes. The generic `self-hosted`, `Linux`, `X64` labels can match any runner with those labels, not a specific machine. Verify runner isolation and its Docker, Docker Compose, Go, Node, Bash, Python 3 and race-enabled C compiler prerequisites before use.
 
 ## Test-driven development
 
@@ -94,3 +95,10 @@ CI runs the same `go`, `web` and `docker` jobs on every PR and on `main`.
 - Add user-visible changes to the `Unreleased` or upcoming version section of `CHANGELOG.md`.
 - Codex review comments are optional input. Do not block a merge waiting for a Codex re-run.
 - Releases: update `CHANGELOG.md` and `docs/delivery-readiness.md`, then the maintainer tags `vX.Y.Z` and publishes the GitHub Release.
+
+
+<!-- specgit:project:v2:start -->
+## SpecGit 2
+
+Read project-root `.agents/skills/specgit-native/SKILL.md` before work; if missing, initialize with the shared `specgit init` CLI or restore an existing integration with `specgit setup` ([installation](https://github.com/LeXwDeX/SpecGit/blob/main/docs/agent-install.md)).
+<!-- specgit:project:v2:end -->
