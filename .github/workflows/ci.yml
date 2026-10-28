@@ -28,12 +28,18 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Install C toolchain
+      - name: Check C toolchain
         run: |
-          if ! command -v gcc >/dev/null 2>&1; then
+          if command -v gcc >/dev/null 2>&1; then
+            exit 0
+          fi
+          if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
             sudo -n apt-get update
             sudo -n apt-get install -y gcc
+            exit 0
           fi
+          echo "::error::gcc is required by -race (cgo) but is missing and passwordless sudo is unavailable; install build-essential on this runner"
+          exit 1
       - name: Build
         run: go build ./...
       - name: Vet
