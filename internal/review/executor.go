@@ -623,11 +623,12 @@ func (e *Executor) callAgent(ctx context.Context, in dag.NodeInput, opts agentOp
 	ignoreBlocked := e.deps.Dossier != nil && e.deps.Dossier.IgnorePolicy != nil && len(e.deps.Dossier.IgnorePolicy.Patterns) > 0
 	onboarding := opts.Block == BlockOnboarding && (e.deps.Dossier == nil || e.deps.Dossier.MR.IID == 0)
 	indexBlocked := !e.deps.Dossier.MCPIndexEligible()
-	if opts.BlockTools && len(binding.MCPTools) > 0 && (ignoreBlocked || indexBlocked) {
-		reason := "workspace index identity"
-		if ignoreBlocked {
-			reason = "ignore policy"
-		}
+	// A non-empty ignore policy withholds MCP tools by design. That is a
+	// safety downgrade, not a coverage gap: no gap, no error, and the agent
+	// simply runs without MCP tools. Only an unprovable index identity is a gap.
+	mcpBound := opts.BlockTools && len(binding.MCPTools) > 0 && !ignoreBlocked
+	if mcpBound && indexBlocked {
+		const reason = "workspace index identity"
 		names := binding.MCPTools
 		if provider, ok := e.deps.Tools.(ToolBindingProvider); ok {
 			var err error
@@ -644,7 +645,7 @@ func (e *Executor) callAgent(ctx context.Context, in dag.NodeInput, opts agentOp
 				*opts.ToolGaps = append(*opts.ToolGaps, toolGapMessage(opts.Block, fmt.Errorf("tool %q blocked by %s", name, reason)))
 			}
 		}
-	} else if opts.BlockTools && len(binding.MCPTools) > 0 && e.deps.Tools != nil {
+	} else if mcpBound && e.deps.Tools != nil {
 		mcpTools, err := e.deps.Tools.Tools(ctx, opts.Block)
 		var partial *PartialToolsError
 		if errors.As(err, &partial) {

@@ -79,7 +79,7 @@ func TestIgnoreUsesEffectiveMCPBindingsWithoutConnecting(t *testing.T) {
 			t.Fatal(err)
 		}
 		result, err := DecodeStrict[*CodeReviewOut](out.Data)
-		if err != nil || len(result.ToolGaps) != len(names) || provider.calls != 0 {
+		if err != nil || len(result.ToolGaps) != 0 || provider.calls != 0 {
 			t.Fatalf("names=%v gaps=%v calls=%d err=%v", names, result.ToolGaps, provider.calls, err)
 		}
 	}

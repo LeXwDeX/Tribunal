@@ -68,7 +68,7 @@ func TestIgnorePolicyAgentToolsAndMCP(t *testing.T) {
 		wantCalls int
 		denied    bool
 	}{
-		{"nonempty-bound", []string{"private.txt"}, true, true, 0, true},
+		{"nonempty-bound", []string{"private.txt"}, true, false, 0, true},
 		{"nonempty-unbound", []string{"private.txt"}, false, false, 0, true},
 		{"empty-bound", []string{}, true, false, 1, false},
 	} {

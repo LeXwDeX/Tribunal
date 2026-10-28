@@ -79,9 +79,9 @@ func TestIgnoreProjectBindingStubsDoNotCreateFalseGaps(t *testing.T) {
 		state     *store.Workspace
 	}{
 		{"no-bindings", false, false, true, true, false, 0, nil},
-		{"platform-inherited", true, false, true, true, true, 0, nil},
+		{"platform-inherited", true, false, true, true, false, 0, nil},
 		{"project-empty-override", true, true, true, true, false, 0, nil},
-		{"project-only-binding", false, true, true, true, true, 0, nil},
+		{"project-only-binding", false, true, true, true, false, 0, nil},
 		{"disabled-server", true, false, false, true, false, 0, nil},
 		{"empty-policy-allows-mcp", true, false, true, false, false, 1, &store.Workspace{State: "ready", BaseSHA: strings.Repeat("1", 40), IndexSHA: target}},
 		{"index-mismatch", true, false, true, false, true, 0, &store.Workspace{State: "ready", IndexSHA: strings.Repeat("1", 40)}},

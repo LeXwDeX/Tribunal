@@ -25,7 +25,7 @@ func (p *ignoreCountingTools) Tools(context.Context, string) ([]agent.Tool, erro
 	return nil, nil
 }
 
-func TestNewReviewEffectiveIgnoreBlocksToolsAndMarksIncomplete(t *testing.T) {
+func TestNewReviewEffectiveIgnoreBlocksToolsAndStaysPass(t *testing.T) {
 	f := newReviewFixture(t, reviewTestHead)
 	if _, err := f.db.UpdateProject(context.Background(), 42, store.ProjectUpdate{Settings: json.RawMessage(`{"ignore":["project.txt"]}`)}); err != nil {
 		t.Fatal(err)
@@ -77,7 +77,7 @@ func TestNewReviewEffectiveIgnoreBlocksToolsAndMarksIncomplete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if called == 0 || provider.calls != 0 || wf.Verdict != review.VerdictIncomplete {
+	if called == 0 || provider.calls != 0 || wf.Verdict != review.VerdictPass {
 		t.Fatalf("calls=%d MCP=%d verdict=%s", called, provider.calls, wf.Verdict)
 	}
 	record, err := f.db.GetWorkflowDossier(context.Background(), wf.ID)
