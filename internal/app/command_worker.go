@@ -132,7 +132,7 @@ func (w *CommandWorker) Handle(ctx context.Context, job *jobs.Job) error {
 		payload.AuthorID <= 0 || (payload.Command != commandRun && payload.Command != commandCancel && payload.Command != commandHelp) {
 		return nil
 	}
-	unlock, err := w.workspace.Get(payload.ProjectID).RLock(ctx)
+	unlock, err := w.workspace.Get(payload.ProjectID).LifecycleRLock(ctx)
 	if err != nil {
 		return err
 	}

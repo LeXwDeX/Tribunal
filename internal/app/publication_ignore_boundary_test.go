@@ -158,7 +158,7 @@ func (s ignoredSynthesisStore) Append(ctx context.Context, id string, rev int64,
 
 func TestPublisherRejectsAllIgnoredFindingLocations(t *testing.T) {
 	for name, mutate := range map[string]func(*review.SynthesisResult){
-		"group": func(r *review.SynthesisResult) { r.Groups[0].Path = "private.txt" },
+		"group":  func(r *review.SynthesisResult) { r.Groups[0].Path = "private.txt" },
 		"source": func(r *review.SynthesisResult) { r.Groups[0].Sources[0].Path = "private.txt" },
 		"evidence": func(r *review.SynthesisResult) {
 			r.Groups[0].Challenge = &review.Challenge{Status: review.ChallengeConfirmed, Evidence: []review.CodeRef{{Path: "private.txt", StartLine: 1, EndLine: 1, Note: "CANARY_EVIDENCE"}}}

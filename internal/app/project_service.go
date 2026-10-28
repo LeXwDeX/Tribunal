@@ -277,6 +277,12 @@ func (s *ProjectService) Register(ctx context.Context, in RegisterInput) (*Regis
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Lock order: lifecycle first, content second.
+	unlockLifecycle, err := s.workspaces.Get(project.ID).LifecycleLock(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer unlockLifecycle()
 	unlock, err := s.workspaces.Get(project.ID).Lock(ctx)
 	if err != nil {
 		return nil, err
@@ -964,6 +970,12 @@ func (s *ProjectService) Delete(ctx context.Context, id int64) error {
 	// that is being provisioned and leave it unaccounted for at GitLab.
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Lock order: lifecycle first, content second.
+	unlockLifecycle, err := s.workspaces.Get(id).LifecycleLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlockLifecycle()
 	unlock, err := s.workspaces.Get(id).Lock(ctx)
 	if err != nil {
 		return err

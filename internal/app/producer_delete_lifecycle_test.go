@@ -500,7 +500,13 @@ func TestLifecycleProducerWaitsBeforeProjectReadOrSkillCreation(t *testing.T) {
 				t.Fatal(err)
 			}
 			archive := testSkillArchive(t, testSkillBody)
-			unlock, err := r.workspace.Get(42).Lock(context.Background())
+			// The webhook entry serializes on the lifecycle lock; the upload
+			// path still takes the content lock.
+			lockProject := r.workspace.Get(42).Lock
+			if operation == "webhook" {
+				lockProject = r.workspace.Get(42).LifecycleLock
+			}
+			unlock, err := lockProject(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}

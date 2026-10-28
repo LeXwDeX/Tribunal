@@ -99,7 +99,7 @@ func (d *Dispatcher) StartReview(ctx context.Context, projectID, mrIID int64, pr
 		return "", validationError("project id and merge request iid must be positive",
 			Detail{Field: "id", Message: "must be a positive integer"})
 	}
-	unlock, err := d.workspace.Get(projectID).RLock(ctx)
+	unlock, err := d.workspace.Get(projectID).LifecycleRLock(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -215,7 +215,7 @@ func (d *Dispatcher) RefreshWorkspace(ctx context.Context, projectID int64, rege
 	if projectID <= 0 {
 		return "", validationError("project id must be positive", Detail{Field: "id", Message: "must be a positive integer"})
 	}
-	unlock, err := d.workspace.Get(projectID).RLock(ctx)
+	unlock, err := d.workspace.Get(projectID).LifecycleRLock(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -267,7 +267,7 @@ func (d *Dispatcher) lockReviewWorkflow(ctx context.Context, id string) (*store.
 	if ws == nil {
 		return nil, nil, notFoundError("project not found")
 	}
-	unlock, err := ws.RLock(ctx)
+	unlock, err := ws.LifecycleRLock(ctx)
 	if err != nil {
 		return nil, nil, err
 	}

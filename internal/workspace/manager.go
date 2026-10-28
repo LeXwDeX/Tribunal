@@ -107,6 +107,7 @@ func (m *Manager) Get(pid int64) *Workspace {
 		Root:       filepath.Join(m.root, strconv.FormatInt(pid, 10)),
 		git:        m.git,
 		lock:       newCtxRWMutex(),
+		lifecycle:  newCtxRWMutex(),
 		mirrorLock: newCtxRWMutex(),
 		runs:       make(map[string]string),
 	}
@@ -121,6 +122,7 @@ type Workspace struct {
 
 	git        *repo.Git
 	lock       *ctxRWMutex
+	lifecycle  *ctxRWMutex
 	mirrorLock *ctxRWMutex
 
 	runsMu sync.Mutex
@@ -137,6 +139,25 @@ func (w *Workspace) Lock(ctx context.Context) (func(), error) {
 // The returned function must be called exactly once.
 func (w *Workspace) RLock(ctx context.Context) (func(), error) {
 	return w.lock.RLock(ctx)
+}
+
+// LifecycleLock takes the project lifecycle write lock held by project
+// registration and deletion. It serializes lifecycle changes against short
+// entry checks (LifecycleRLock) and does not protect workspace file contents.
+// Global lock order: lifecycle lock first, content lock (Lock/RLock) second.
+// Never acquire a lifecycle lock while holding the content lock. The returned
+// function must be called exactly once.
+func (w *Workspace) LifecycleLock(ctx context.Context) (func(), error) {
+	return w.lifecycle.Lock(ctx)
+}
+
+// LifecycleRLock takes the lifecycle read lock for entry points that only need
+// the project not to be deleted or replaced while they run. It is independent
+// of the content lock, so a long review holding RLock never blocks it. Do not
+// read or write workspace files under it, and do not take it while holding the
+// content lock. The returned function must be called exactly once.
+func (w *Workspace) LifecycleRLock(ctx context.Context) (func(), error) {
+	return w.lifecycle.RLock(ctx)
 }
 
 // LockMirror serializes origin updates, fetches and ref resolution within a project.

@@ -120,7 +120,7 @@ func (s *WebhookService) Handle(ctx context.Context, req WebhookRequest) (Webhoo
 	if reason != "" {
 		return WebhookResult{Ignored: reason}, nil
 	}
-	unlock, err := s.workspace.Get(projectID).RLock(ctx)
+	unlock, err := s.workspace.Get(projectID).LifecycleRLock(ctx)
 	if err != nil {
 		return WebhookResult{Ignored: "storage_error"}, err
 	}

@@ -27,7 +27,7 @@ func (s *ReviewService) CancelReview(ctx context.Context, job *jobs.Job) error {
 	if ws == nil {
 		return PermanentJob(fmt.Errorf("workspace is unavailable"))
 	}
-	unlock, err := ws.RLock(ctx)
+	unlock, err := ws.LifecycleRLock(ctx)
 	if err != nil {
 		return err
 	}
