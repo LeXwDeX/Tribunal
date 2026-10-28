@@ -594,8 +594,8 @@ func (r *Runtime) reconcileReviewSideEffects(ctx context.Context, interval time.
 
 // StartBackground starts the feedback, retention, run-cleanup, and review
 // side-effect tickers.
-// The returned function stops them and waits for the goroutines.
-func (r *Runtime) StartBackground(ctx context.Context) func() {
+// The returned function stops them and waits at most five seconds; done closes when they exit.
+func (r *Runtime) StartBackground(ctx context.Context) (stop func(), done <-chan struct{}) {
 	r.startOnce.Do(func() {
 		bgCtx, cancel := context.WithCancel(ctx)
 		r.startStop = cancel
@@ -630,7 +630,7 @@ func (r *Runtime) StartBackground(ctx context.Context) func() {
 		case <-r.startDone:
 		case <-time.After(5 * time.Second):
 		}
-	}
+	}, r.startDone
 }
 
 // Close releases runtime-owned resources that are not shared with main.

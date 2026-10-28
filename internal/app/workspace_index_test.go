@@ -1,13 +1,20 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/agent"
+	"github.com/LeXwDeX/tribunal/internal/errclass"
 	"github.com/LeXwDeX/tribunal/internal/mcp"
+	"github.com/LeXwDeX/tribunal/internal/repo"
 	"github.com/LeXwDeX/tribunal/internal/review"
 	"github.com/LeXwDeX/tribunal/internal/store"
 )
@@ -91,12 +98,13 @@ func TestOnboardingOnlyRecordsIndexAfterCommandRuns(t *testing.T) {
 			},
 			// A missing or broken indexer degrades onboarding instead of
 			// failing it: context documents are still generated and the
-			// workspace records a diagnosable error.
-			wantError: `mcp: index command for "indexer" failed`,
+			// workspace records a fixed, non-sensitive error.
+			wantError: "index: code graph indexing failed",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			f := newReviewFixture(t, reviewTestHead)
 			service := newOnboardingContextService(t, f, onboardingIndexRunner)
 			setIndexFactory(service, tc.manager(t))
@@ -118,7 +126,7 @@ func TestOnboardingOnlyRecordsIndexAfterCommandRuns(t *testing.T) {
 			if tc.wantError == "" && state.LastError != "" {
 				t.Fatalf("last error = %q, want none", state.LastError)
 			}
-			if tc.wantError != "" && !strings.Contains(state.LastError, tc.wantError) {
+			if state.LastError != tc.wantError {
 				t.Fatalf("last error = %q, want %q", state.LastError, tc.wantError)
 			}
 		})
@@ -207,7 +215,164 @@ func TestRefreshKeepsPreviousIndexWhenIndexerFails(t *testing.T) {
 	if state.IndexSHA != oldBase {
 		t.Fatalf("index sha = %q, want the previous index %q", state.IndexSHA, oldBase)
 	}
-	if !strings.Contains(state.LastError, "index command") {
+	if state.LastError != "index: code graph indexing failed" {
 		t.Fatalf("last error = %q, want the index failure", state.LastError)
+	}
+}
+
+type failingWorkspaceGit struct {
+	GitOps
+	err error
+}
+
+func (g failingWorkspaceGit) EnsureMirror(context.Context, string, string, repo.Auth) error {
+	return g.err
+}
+
+func TestWorkspaceFailuresPersistAndLogOnlyFixedData(t *testing.T) {
+	const raw = "/private/work tree/file\nglpat-synthetic-secret more failure details"
+	cases := []struct {
+		name  string
+		cause error
+		class string
+	}{
+		{"untrusted custom code", &Error{Code: "synth_secret", Message: raw}, "internal"},
+		{"timeout", fmt.Errorf("%s: %w", raw, context.DeadlineExceeded), "timeout"},
+		{"canceled error with active context", fmt.Errorf("%s: %w", raw, context.Canceled), "canceled"},
+		{"panic", fmt.Errorf("%s: %w", raw, errclass.ErrPanic), "panic"},
+	}
+	for _, tc := range cases {
+		for _, mode := range []string{"onboard", "refresh"} {
+			for _, failure := range []string{"workspace", "index"} {
+				t.Run(tc.name+"/"+mode+"/"+failure, func(t *testing.T) {
+					f := newReviewFixture(t, reviewTestHead)
+					oldBase := strings.Repeat("a", 40)
+					if _, err := f.db.SaveWorkspace(context.Background(), store.Workspace{
+						ProjectID: 42, State: "ready", BaseSHA: oldBase, IndexSHA: oldBase, ContextSHA: "old-context",
+					}); err != nil {
+						t.Fatalf("SaveWorkspace: %v", err)
+					}
+					service := newOnboardingContextService(t, f, onboardingIndexRunner)
+					var logs bytes.Buffer
+					service.logger = slog.New(slog.NewJSONHandler(&logs, nil))
+					if failure == "workspace" {
+						service.git = failingWorkspaceGit{GitOps: f.git, err: tc.cause}
+					} else {
+						service.mcpFactory = func(context.Context, int64) (*mcp.Manager, error) {
+							return nil, tc.cause
+						}
+					}
+					var err error
+					if mode == "onboard" {
+						err = service.Onboard(context.Background(), 42)
+					} else {
+						err = service.RefreshWithOptions(context.Background(), 42, "main", WorkspaceRefreshOptions{
+							Reindex: contextBoolPtr(true), RegenerateContext: contextBoolPtr(false),
+						})
+					}
+					if failure == "workspace" && !errors.Is(err, tc.cause) {
+						t.Fatalf("workspace failure = %v, want original cause", err)
+					}
+					if failure == "index" && err != nil {
+						t.Fatalf("index failure must not block %s: %v", mode, err)
+					}
+					state, err := f.db.GetWorkspace(context.Background(), 42)
+					if err != nil {
+						t.Fatalf("GetWorkspace: %v", err)
+					}
+					wantState, wantError := "error", "workspace operation failed"
+					if failure == "index" {
+						wantState, wantError = "ready", "index: code graph indexing failed"
+					}
+					if state.State != wantState || state.LastError != wantError {
+						t.Errorf("workspace state = %q, last error = %q; want %q, %q", state.State, state.LastError, wantState, wantError)
+					}
+					if mode == "refresh" && state.IndexSHA != oldBase {
+						t.Errorf("refresh lost previous index: %q", state.IndexSHA)
+					}
+					if mode == "refresh" && state.ContextSHA != "old-context" {
+						t.Errorf("refresh lost previous context: %q", state.ContextSHA)
+					}
+					if mode == "refresh" && failure == "workspace" && state.BaseSHA != oldBase {
+						t.Errorf("failed refresh lost previous base: %q", state.BaseSHA)
+					}
+					if mode == "refresh" && failure == "index" && state.LastRefreshAt == nil {
+						t.Error("degraded refresh did not record refresh time")
+					}
+					if failure == "index" && state.BaseSHA != reviewTestHead {
+						t.Errorf("degraded %s base = %q, want %q", mode, state.BaseSHA, reviewTestHead)
+					}
+					var event map[string]any
+					if err := json.Unmarshal(logs.Bytes(), &event); err != nil {
+						t.Fatalf("one structured warning required: %q: %v", logs.String(), err)
+					}
+					if event["level"] != "WARN" || event["project_id"] != float64(42) || event["error_class"] != tc.class {
+						t.Errorf("warning = %v, want project 42 and fixed class %q", event, tc.class)
+					}
+					if strings.Contains(logs.String(), "synth_secret") || strings.Contains(logs.String(), "glpat-") || strings.Contains(logs.String(), "/private/") {
+						t.Errorf("warning leaked untrusted data: %s", logs.String())
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestMarkWorkspaceErrorKeepsExistingCheckpoints(t *testing.T) {
+	f := newReviewFixture(t, reviewTestHead)
+	refreshed := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
+	if _, err := f.db.SaveWorkspace(context.Background(), store.Workspace{
+		ProjectID: 42, State: "ready", BaseSHA: "base", IndexSHA: "index", ContextSHA: "context", LastRefreshAt: &refreshed,
+	}); err != nil {
+		t.Fatalf("SaveWorkspace: %v", err)
+	}
+	service := newOnboardingContextService(t, f, onboardingIndexRunner)
+	service.markWorkspaceError(context.Background(), 42, errors.New("/private/work tree glpat-synthetic-secret"))
+	state, err := f.db.GetWorkspace(context.Background(), 42)
+	if err != nil {
+		t.Fatalf("GetWorkspace: %v", err)
+	}
+	if state.State != "error" || state.LastError != "workspace operation failed" || state.BaseSHA != "base" || state.IndexSHA != "index" || state.ContextSHA != "context" || state.LastRefreshAt == nil || !state.LastRefreshAt.Equal(refreshed) {
+		t.Fatalf("workspace error lost checkpoints or persisted raw data: %+v", state)
+	}
+}
+
+func TestWorkspaceIndexCancellationStillReturnsError(t *testing.T) {
+	for _, mode := range []string{"onboard", "refresh"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newReviewFixture(t, reviewTestHead)
+			oldBase := strings.Repeat("a", 40)
+			if _, err := f.db.SaveWorkspace(context.Background(), store.Workspace{
+				ProjectID: 42, State: "ready", BaseSHA: oldBase, IndexSHA: oldBase,
+			}); err != nil {
+				t.Fatalf("SaveWorkspace: %v", err)
+			}
+			service := newOnboardingContextService(t, f, onboardingIndexRunner)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			service.mcpFactory = func(context.Context, int64) (*mcp.Manager, error) {
+				cancel()
+				return nil, fmt.Errorf("/private/work tree glpat-synthetic-secret: %w", context.Canceled)
+			}
+			var err error
+			if mode == "onboard" {
+				err = service.Onboard(ctx, 42)
+			} else {
+				err = service.Refresh(ctx, 42, "main")
+			}
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("%s = %v, want cancellation", mode, err)
+			}
+			state, err := f.db.GetWorkspace(context.Background(), 42)
+			if err != nil {
+				t.Fatalf("GetWorkspace: %v", err)
+			}
+			if state.State == "ready" || strings.Contains(state.LastError, "glpat-") || strings.Contains(state.LastError, "/private/") {
+				t.Fatalf("canceled operation reported success or stored raw error: %+v", state)
+			}
+			if mode == "refresh" && state.IndexSHA != oldBase {
+				t.Fatalf("canceled refresh lost previous index: %q", state.IndexSHA)
+			}
+		})
 	}
 }

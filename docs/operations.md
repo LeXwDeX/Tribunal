@@ -4,7 +4,7 @@
 
 交付前准备、升级/回退边界与真实验收记录见 [交付就绪与验收记录](delivery-readiness.md)。
 
-> 当前版本是 v1.1.0，验证状态见 [当前版本（v1.1.x）验证状态](delivery-readiness.md#当前版本v11x验证状态)。从 v1.0.0 升级前必须先读 [从 v1.0.0 升级到 v1.1.0](#从-v100-升级到-v110)。由 agent 代为部署时，使用 [Agent 部署指南](agent-deployment.md)。
+> 当前已发布版本是 v1.1.0，验证状态见 [v1.1.x 验证状态](delivery-readiness.md#v110-验证状态)。v1.2.0 尚未发布，版本说明待合并，尚未打 tag；其验证状态见 [v1.2.0 验证状态](delivery-readiness.md#v120-验证状态)。从 v1.0.0 升级前必须先读 [从 v1.0.0 升级到 v1.1.0](#从-v100-升级到-v110)；从 v1.1.0 升级再读 [从 v1.1.0 升级到 v1.2.0](#从-v110-升级到-v120)。由 agent 代为部署时，使用 [Agent 部署指南](agent-deployment.md)。
 
 ## Compose 快速部署（推荐）
 
@@ -27,17 +27,17 @@ chmod 600 .env
 | `LLM_PROTOCOL` | `openai-chat`、`openai-responses` 或 `anthropic` |
 | `LLM_BASE_URL` | 与协议匹配的模型 API 地址；OpenAI 兼容接口通常包括 `/v1`，Anthropic 使用 API 根地址 |
 | `LLM_MODEL` / `LLM_API_KEY` | 供应方实际支持的模型 ID 和访问密钥 |
-| `REVIEW_MASTER_KEY` | `openssl rand -base64 32`，仅首次生成，必须连同数据备份 |
-| `REVIEW_ADMIN_TOKEN` | `openssl rand -hex 32`，管理 API 的 Bearer token |
-| `TRIBUNAL_SESSION_KEY` | 单独执行 `openssl rand -base64 32`，跨重启保持不变 |
+| `REVIEW_MASTER_KEY` | base64，解码后恰好 32 字节；仅首次生成，必须连同数据备份 |
+| `REVIEW_ADMIN_TOKEN` | 至少 32 字节，管理 API 的 Bearer token |
+| `TRIBUNAL_SESSION_KEY` | base64，解码后至少 32 字节；独立生成，跨重启保持不变 |
 | `TRIBUNAL_PUBLIC_URL` | 用户和 GitLab 可访问的服务地址；生产应为 HTTPS，默认仅供本机使用 |
 | `TRIBUNAL_HTTP_PORT` | 宿主机端口，默认 8080；容器始终监听 8080。改变它时检查 `TRIBUNAL_PUBLIC_URL` 是否也需修改 |
 
-旧环境变量名 `CRC_SESSION_KEY`、`CRC_PUBLIC_URL`、`CRC_HTTP_PORT` 仍兼容；新旧同时设置时新名优先。三个旧名只要配置了非空值，都会各记录一次弃用日志；日志只含变量名、不含值。日志表示旧名仍配置，不代表旧值一定生效或一定被忽略：Compose 会把仅设置的 `CRC_HTTP_PORT` 作为 `TRIBUNAL_HTTP_PORT` 的插值回退值，仅用于宿主机端口映射，并把仅设置的 `CRC_SESSION_KEY` 复制给容器的 `TRIBUNAL_SESSION_KEY`。`TRIBUNAL_HTTP_PORT` / `CRC_HTTP_PORT` 只影响宿主机映射，不是应用监听端口。`TRIBUNAL_SESSION_KEY` 未设置或恰好为空字符串时才回退旧名；非空但只含空白是非法值，启动失败，不回退旧名，也不生成临时 key。完整兼容规则见[环境变量](design/06-config.md#5-环境变量)。升级时必须复用原 session key 的同一个值，不要重新生成，否则现有浏览器会话失效。
+首次生成使用[私有密钥生成步骤](agent-deployment.md#2-准备配置)，不要直接在终端打印密钥。旧环境变量名 `CRC_SESSION_KEY`、`CRC_PUBLIC_URL`、`CRC_HTTP_PORT` 仍兼容；新旧同时设置时新名优先。三个旧名只要配置了非空值，都会各记录一次弃用日志；日志只含变量名、不含值。日志表示旧名仍配置，不代表旧值一定生效或一定被忽略：Compose 会把仅设置的 `CRC_HTTP_PORT` 作为 `TRIBUNAL_HTTP_PORT` 的插值回退值，仅用于宿主机端口映射，并把仅设置的 `CRC_SESSION_KEY` 复制给容器的 `TRIBUNAL_SESSION_KEY`。`TRIBUNAL_HTTP_PORT` / `CRC_HTTP_PORT` 只影响宿主机映射，不是应用监听端口。`TRIBUNAL_SESSION_KEY` 未设置或恰好为空字符串时才回退旧名；非空但只含空白是非法值，启动失败，不回退旧名，也不生成临时 key。完整兼容规则见[环境变量](design/06-config.md#5-环境变量)。升级时必须复用原 session key 的同一个值，不要重新生成，否则现有浏览器会话失效。
 
 `.env` 值包含 `$` 或 `#` 时使用单引号。不要把真实密钥写进 YAML、提交到仓库或放进 Docker build args。Compose 从 `.env` 做变量替换，再通过 `environment` 允许列表传入容器，不会把整个 `.env` 挂载或注入。宿主机已导出的同名变量优先于 `.env`；部署前检查是否有旧值，但不要把秘密输出到日志。环境变量仍对 Docker 管理员可见。
 
-`config/server.docker.yaml` 只读挂载到 `/app/config/server.yaml`。它绑定一个名为 `primary` 的 provider，`onboarding` 档位用其初始化仓库上下文，`default` 档位用同一个 provider 执行 `code-review` 和 challenge 核验；plan 和 synthesize 沿用代码模式，不默认启用多模型对抗。数据库与工作区分别使用 `/app/data/review.db` 和 `/app/data/workspaces`。其他参数沿用应用内置默认值。不要移除 `profiles.onboarding.agent.provider` 或 `profiles.default.challenge.provider`：前者会导致工作区初始化失败，后者会导致评审图构建失败，即使健康检查和 `--check-config` 通过。
+`config/server.docker.yaml` 只读挂载到 `/app/config/server.yaml`。它绑定一个名为 `primary` 的 provider，`onboarding` 档位用其初始化仓库上下文，`default` 档位用同一个 provider 执行 `code-review` 和 challenge 核验；plan 和 synthesize 沿用代码模式，不默认启用多模型对抗。该示例配置的数据库与工作区分别使用 `/app/data/review.db` 和 `/app/data/workspaces`；实际路径以生效配置和挂载为准。其他参数沿用应用内置默认值。不要移除 `profiles.onboarding.agent.provider` 或 `profiles.default.challenge.provider`：前者会导致工作区初始化失败，后者会导致评审图构建失败，即使健康检查和 `--check-config` 通过。
 
 ### 构建并启动
 
@@ -60,20 +60,166 @@ docker compose exec -T review /app/tribunalctl projects all
 OAuth 默认关闭，访问 `/auth/login` 得到 503 是预期行为，Bearer API 和 CLI 仍可使用。启用控制台登录时：
 
 1. 在 GitLab 创建 OAuth Application，scope 为 `read_user`，回调 URI 为 `<TRIBUNAL_PUBLIC_URL>/auth/callback`。
-2. 在 `.env` 设置 `GITLAB_OAUTH_CLIENT_ID`、`GITLAB_OAUTH_CLIENT_SECRET` 和 `GITLAB_ADMIN_USERNAME`。管理员值填写 `id:<GitLab 用户 ID>`；GitLab 用户名写法仍兼容但已弃用（见[用户名写法弃用与迁移](#bootstrap_admins-用户名写法弃用与迁移)）；留空不会给任何正常账号平台管理员标签。该标签只用于平台管理面，不授予项目业务数据访问，项目授权见下文。
+2. 在 `.env` 设置 `GITLAB_OAUTH_CLIENT_ID`、`GITLAB_OAUTH_CLIENT_SECRET` 和 `GITLAB_ADMIN_USERNAME`。管理员值填写 `id:<GitLab 用户 ID>`，必须先向用户确认实际数字 ID 和授权；GitLab 用户名写法仍兼容但已弃用（见[用户名写法弃用与迁移](#bootstrap_admins-用户名写法弃用与迁移)）；留空不会给任何正常账号平台管理员标签。该标签只用于平台管理面，不授予项目业务数据访问，项目授权见下文。
 3. 在 `config/server.docker.yaml` 取消 `oauth` 及两个子字段、`bootstrap_admins` 的注释。设置正确的 HTTPS `TRIBUNAL_PUBLIC_URL`，配置反向代理，再执行 `docker compose up -d --force-recreate --wait --wait-timeout 120`。
 
-模型密钥不是 GitLab 项目 token。注册项目需要单独的 `GITLAB_PROJECT_TOKEN`，由安全环境注入当前 shell，scope 为 `api` 和 `read_repository`。该变量不放进长期运行服务的 `.env`，仅传给这次 CLI 进程：
+注册会访问真实 GitLab 并创建后台 onboarding 任务，可能产生模型费用。执行前必须向用户确认目标 GitLab、项目、注册动作和可能费用，并获得明确授权；未授权时不要执行。
+
+模型密钥不是 GitLab 项目 token。在 Bash 当前 shell 中先关闭 xtrace，由用户或安全密钥管理器将项目 token 注入 `GITLAB_PROJECT_TOKEN`，scope 为 `api` 和 `read_repository`。不要将本步骤使用的变量设为 readonly。不要把真实 token 写入命令、终端、日志、聊天或长期运行服务的 `.env`。将 `GITLAB_PROJECT` 设为本次已确认的项目，将 `REGISTRATION_DIR` 设为仓库外、不被同步或备份的现有私有目录的绝对路径；目录及其父路径必须受控，不得有不可信的同 UID 进程。自行确认 ACL 等没有额外授权，命令只核验目录属主和模式位并解析实际路径。以下步骤需要宿主机的 Python 3；确保终端录制和日志不会捕获秘密。token 和打开的响应文件描述符可被宿主 shell 的子进程继承，因此秘密处理完成前只运行可信程序；Docker 管理员仍可访问容器环境：
 
 ```bash
-docker compose exec -T -e GITLAB_PROJECT_TOKEN review /app/tribunalctl projects register \
-  --project group/backend-api \
-  --token-env GITLAB_PROJECT_TOKEN \
-  --profile default
-docker compose exec -T review /app/tribunalctl projects all
+set +x
+if {
+  if ! (builtin unset -v GITLAB_PROJECT_TOKEN && [ "${GITLAB_PROJECT_TOKEN+x}" != x ]) 2>/dev/null; then
+    printf '无法确认项目 token 可以清除；已停止，请结束受影响的 shell。\n' >&2
+    false
+  elif [ "${REGISTRATION_CREATED_FILE+x}" = x ] || [ "${REGISTRATION_CREATED_ID+x}" = x ]; then
+    printf '本 shell 已有注册标记；请先安全处理响应，再使用新 shell。\n' >&2
+    false
+  elif ( : <&9 ) 2>/dev/null; then
+    printf '文件描述符 9 已被占用；请使用新 shell。\n' >&2
+    false
+  elif ! (builtin unset -v REGISTRATION_FILE && [ "${REGISTRATION_FILE+x}" != x ]) 2>/dev/null ||
+       ! (builtin unset -v registration_confirm && [ "${registration_confirm+x}" != x ]) 2>/dev/null ||
+       ! (builtin unset -v registration_dir && [ "${registration_dir+x}" != x ]) 2>/dev/null ||
+       ! (builtin unset -v registration_identity && [ "${registration_identity+x}" != x ]) 2>/dev/null; then
+    printf '响应路径或确认变量无法清除；已停止。\n' >&2
+    false
+  elif ! builtin unset -v PROJECT_ID 2>/dev/null || [ "${PROJECT_ID+x}" = x ]; then
+    printf '无法清除项目 ID；已停止。\n' >&2
+    false
+  elif [ -n "${REGISTRATION_FILE:-}" ]; then
+    printf '先安全处理上次的私有响应文件；已停止。\n' >&2
+    false
+  elif [ -z "${GITLAB_PROJECT_TOKEN:-}" ] || [ -z "${GITLAB_PROJECT:-}" ] ||
+     [ -z "${REGISTRATION_DIR:-}" ] || [[ "$REGISTRATION_DIR" != /* ]] || [ ! -d "$REGISTRATION_DIR" ] ||
+     ! command -v python3 >/dev/null 2>&1; then
+      printf '缺少项目 token、已确认的项目、私有目录绝对路径或 Python 3；已停止。\n' >&2
+    false
+  else
+    export GITLAB_PROJECT_TOKEN
+    printf '已获用户授权注册已确认的项目并承担可能费用？输入 yes 继续：' >&2
+    if ! IFS= read -r registration_confirm || [ "$registration_confirm" != yes ]; then
+      printf '未确认；已停止。\n' >&2
+      false
+    elif ! registration_dir="$(python3 -I -c 'import os, stat, sys
+p = os.path.realpath(sys.argv[1])
+s = os.stat(p)
+if not os.path.isabs(p) or "\n" in p or not stat.S_ISDIR(s.st_mode) or s.st_uid != os.geteuid() or s.st_mode & 0o077: sys.exit(1)
+sys.stdout.write(p)' "$REGISTRATION_DIR" 2>/dev/null)"; then
+      printf '无法核验私有目录；已停止。\n' >&2
+      false
+    elif ! REGISTRATION_FILE="$(umask 077; mktemp "$registration_dir/tribunal-registration.XXXXXXXX" 2>/dev/null)"; then
+      printf '无法创建私有响应文件；已停止。\n' >&2
+      false
+    elif ! { exec 9< "$REGISTRATION_FILE"; } 2>/dev/null; then
+      printf '无法保持本次响应文件；已停止并保留路径供安全核对。\n' >&2
+      false
+    elif ! registration_identity="$(python3 -I -c 'import os, re, stat, sys
+p, d = sys.argv[1:]
+s = os.lstat(p)
+f = os.fstat(9)
+if os.path.dirname(p) != d or not re.fullmatch(r"tribunal-registration\.[A-Za-z0-9]{8}", os.path.basename(p)) or not stat.S_ISREG(s.st_mode) or s.st_uid != os.geteuid() or s.st_mode & 0o777 != 0o600 or s.st_nlink != 1 or (s.st_dev, s.st_ino) != (f.st_dev, f.st_ino): sys.exit(1)
+sys.stdout.write(str(s.st_dev) + ":" + str(s.st_ino))' "$REGISTRATION_FILE" "$registration_dir" 2>/dev/null)"; then
+      exec 9<&-
+      printf '无法核验本次响应文件；已停止并保留路径供安全核对。\n' >&2
+      false
+    elif ! builtin readonly REGISTRATION_CREATED_FILE="$REGISTRATION_FILE" REGISTRATION_CREATED_ID="$registration_identity"; then
+      exec 9<&-
+      printf '无法记录本次响应文件；已停止并保留路径供安全核对。\n' >&2
+      false
+    elif ! docker compose exec -T -e GITLAB_PROJECT_TOKEN review /app/tribunalctl projects register \
+      --project "$GITLAB_PROJECT" --token-env GITLAB_PROJECT_TOKEN \
+      --profile default > "$REGISTRATION_FILE" 2>/dev/null; then
+      printf '注册失败或结果不确定；停止并核对状态，不要直接重试。\n' >&2
+      false
+    elif ! PROJECT_ID="$(python3 -I -c 'import json, sys; value = json.load(sys.stdin)["project"]["id"]; print(value) if type(value) is int and 0 < value <= 9223372036854775807 else sys.exit(1)' < "$REGISTRATION_FILE" 2>/dev/null)"; then
+      printf '无法读取项目 ID；保留私有响应并核对注册状态，不要直接重试。\n' >&2
+      false
+    fi
+  fi
+}; then
+  if builtin unset -v GITLAB_PROJECT_TOKEN 2>/dev/null && [ "${GITLAB_PROJECT_TOKEN+x}" != x ]; then
+    printf '%s\n' "$PROJECT_ID"
+  else
+    printf '无法清除项目 token；注册可能已成功，不要直接重试。请结束受影响的 shell 并安全处理私有响应。\n' >&2
+    false
+  fi
+else
+  if ! builtin unset -v GITLAB_PROJECT_TOKEN 2>/dev/null || [ "${GITLAB_PROJECT_TOKEN+x}" = x ]; then
+    printf '无法清除项目 token；请结束受影响的 shell 并安全处理私有响应。\n' >&2
+  fi
+  false
+fi
 ```
 
-注册会访问真实 GitLab 并创建后台 onboarding 任务，可能产生模型费用。默认需要手工创建 webhook，注册返回的 `webhook_secret` 只显示一次，请安全保管。要自动创建，增加 `--auto-webhook`，项目 token 还需 Maintainer 权限，`TRIBUNAL_PUBLIC_URL` 必须可由 GitLab 访问。完整权限与 webhook 事件见 [README 注册项目](../README.md#注册项目)。
+命令块先检查 token、响应路径和确认变量能否清除，并清除旧项目 ID；检查失败时不注册。注册后尝试清除当前 shell 的项目 token，只有确认清除后才输出项目 ID；清除失败则返回失败并提示结束受影响的 shell。此时注册可能已经成功，不要直接重试；安全核对项目和 webhook 状态。项目 ID 只证明响应中的 `project.id` 是正整数，不能证明 onboarding 任务已完成。检查和实际清理并非原子操作，信号中断也可能跳过清理。清除当前变量不会清除已继承 token 的子进程或其他副本。命令拒绝相对目录，核验目录属于当前用户且没有组或其他用户权限，并解析符号链接得到绝对路径；`mktemp` 在该目录创建唯一的 0600 文件。命令在当前 shell 保持文件描述符 9 打开，以防文件删除重建后复用 inode；描述符 9 已被占用时不注册。注册响应直接进入该文件，标准输出只显示经过正整数校验的项目 ID；确认提示和不含秘密的错误信息写入标准错误。保持同一个 shell 中的 `REGISTRATION_FILE`、只读的本次文件标记和描述符 9，直到本次文件安全处理完成；每次新的注册使用新 shell。目录及父路径必须始终受控；这些检查不能原子防护不可信同 UID 进程或不受控目录的替换。手动模式中的 `webhook_secret` 只返回一次；不要在终端、日志、聊天或命令行参数中输出它，也不要用 `cat` 查看响应。自动创建时在同一个注册命令的 `--profile default` 后添加 `--auto-webhook`，仍须使用并清理私有响应文件；项目 token 还需 Maintainer 权限，`TRIBUNAL_PUBLIC_URL` 必须可由 GitLab 访问。完整权限与 webhook 事件见 [README 注册项目](../README.md#注册项目)。
+
+手动配置时，在已验证 HTTPS 地址的 GitLab 项目 Webhooks 页面填写服务 URL、事件及 Secret token。仅在无录屏、无剪贴板历史或云同步、没有不可信进程的受控本地会话中，才可通过标准输入交给获批准的密钥管理器并自动填入 Secret token，不要将其发送到聊天或日志。例如在满足上述条件的 macOS 本地会话中，下列命令核对本次只读标记、路径和描述符 9，并从描述符读取该字段送入系统剪贴板，不输出到终端；若任何一步失败则停止：
+
+```bash
+(
+  set +x
+  set -o pipefail
+  [ -n "${REGISTRATION_FILE:-}" ] && [ "$REGISTRATION_FILE" = "${REGISTRATION_CREATED_FILE:-}" ] &&
+  [[ "$(builtin declare -p REGISTRATION_CREATED_FILE 2>/dev/null)" =~ ^declare[[:space:]]+-[^[:space:]]*r ]] &&
+  [[ "$(builtin declare -p REGISTRATION_CREATED_ID 2>/dev/null)" =~ ^declare[[:space:]]+-[^[:space:]]*r ]] &&
+  command -v pbcopy >/dev/null 2>&1 &&
+  python3 -I -c 'import json, os, stat, sys
+p, identity = sys.argv[1:]
+d = os.stat(os.path.dirname(p))
+s = os.lstat(p)
+f = os.fstat(9)
+if not os.path.isabs(p) or os.path.realpath(p) != p or not stat.S_ISDIR(d.st_mode) or d.st_uid != os.geteuid() or d.st_mode & 0o077 or not stat.S_ISREG(s.st_mode) or s.st_uid != os.geteuid() or s.st_mode & 0o777 != 0o600 or s.st_nlink != 1 or identity != str(s.st_dev) + ":" + str(s.st_ino) or (s.st_dev, s.st_ino) != (f.st_dev, f.st_ino): sys.exit(1)
+os.lseek(9, 0, os.SEEK_SET)
+with os.fdopen(9) as response: value = json.load(response)["webhook_secret"]
+if type(value) is not str or not value: sys.exit(1)
+sys.stdout.write(value)' "$REGISTRATION_FILE" "${REGISTRATION_CREATED_ID:-}" 2>/dev/null | pbcopy 2>/dev/null
+)
+```
+
+立即粘贴到 GitLab 的 Secret token 字段并保存，然后用 `printf '' | pbcopy` 清空剪贴板；失败时也要清空。其他环境使用获批准、可从标准输入接收秘密的密钥管理器，不要使用会记录内容或同步剪贴板的工具。如果无法保证受控渠道，就停止并由有权限的用户安全完成配置。
+
+完成手动配置或自动注册后，在同一个 shell 中删除本次文件并再次清除项目 token（不要使用通配符，不要重新启用 xtrace 直到秘密处理完毕）。命令使用本次注册留下的只读标记，核对绝对路径及文件身份；不能确认时先清除 token 并安全核对路径，不要删除其他文件：
+
+```bash
+set +x
+if ! builtin unset -v GITLAB_PROJECT_TOKEN 2>/dev/null || [ "${GITLAB_PROJECT_TOKEN+x}" = x ]; then
+  printf '无法清除项目 token；请结束受影响的 shell 并安全处理私有响应。\n' >&2
+  false
+elif ! (builtin unset -v REGISTRATION_FILE && [ "${REGISTRATION_FILE+x}" != x ]) 2>/dev/null; then
+  printf '无法清除响应路径；已停止，请安全处理私有响应。\n' >&2
+  false
+elif [ -z "${REGISTRATION_FILE:-}" ] || [ "$REGISTRATION_FILE" != "${REGISTRATION_CREATED_FILE:-}" ] ||
+     ! [[ "$(builtin declare -p REGISTRATION_CREATED_FILE 2>/dev/null)" =~ ^declare[[:space:]]+-[^[:space:]]*r ]] ||
+     ! [[ "$(builtin declare -p REGISTRATION_CREATED_ID 2>/dev/null)" =~ ^declare[[:space:]]+-[^[:space:]]*r ]] ||
+     ! python3 -I -c 'import os, re, stat, subprocess, sys
+p, identity = sys.argv[1:]
+parent = os.path.dirname(p)
+d = os.stat(parent)
+s = os.lstat(p)
+f = os.fstat(9)
+if not os.path.isabs(p) or os.path.realpath(p) != p or not re.fullmatch(r"tribunal-registration\.[A-Za-z0-9]{8}", os.path.basename(p)) or not stat.S_ISDIR(d.st_mode) or d.st_uid != os.geteuid() or d.st_mode & 0o077 or not stat.S_ISREG(s.st_mode) or s.st_uid != os.geteuid() or s.st_mode & 0o777 != 0o600 or s.st_nlink != 1 or identity != str(s.st_dev) + ":" + str(s.st_ino) or (s.st_dev, s.st_ino) != (f.st_dev, f.st_ino): sys.exit(1)
+if subprocess.run(["rm", "--", p], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode: sys.exit(1)
+after = os.stat(parent)
+f = os.fstat(9)
+if os.path.realpath(parent) != parent or (after.st_dev, after.st_ino) != (d.st_dev, d.st_ino) or not stat.S_ISDIR(after.st_mode) or after.st_uid != os.geteuid() or after.st_mode & 0o077 or identity != str(f.st_dev) + ":" + str(f.st_ino) or f.st_nlink != 0: sys.exit(1)
+try: os.lstat(p)
+except FileNotFoundError: pass
+else: sys.exit(1)' "$REGISTRATION_FILE" "${REGISTRATION_CREATED_ID:-}" 2>/dev/null; then
+  printf '未能确认本次响应文件已删除；请安全核对路径并处理，不要盲目重试。\n' >&2
+  false
+else
+  if ! builtin unset -v REGISTRATION_FILE 2>/dev/null || [ "${REGISTRATION_FILE+x}" = x ]; then
+    printf '已删除文件，但无法清除响应路径；请安全核对。\n' >&2
+    false
+  else
+    exec 9<&-
+  fi
+fi
+```
+
+只有确认 token 已清除、响应路径可清除且路径和文件身份与本次只读标记和打开的描述符一致后才删除；删除后还须确认原目录未改变、描述符所指文件的链接数为 0 且原路径不存在（包括悬空符号链接），才清除 `REGISTRATION_FILE` 并关闭描述符 9。标记未建立、描述符关闭或改变、路径被修改或文件被替换时拒绝删除，保留路径供安全核对。删除失败、删除后核验失败或文件不存在时返回失败并保留原路径和描述符，不要盲目重试。路径缺失时返回失败且不执行删除，应先安全查明路径。只读标记留在当前 shell 中；安全处理完成后，下一次注册使用新 shell。路径预检、删除、事后核验和清除变量并非原子操作，不保护不可信同 UID 进程或不受控目录；若删除后变量清理意外失败，命令返回失败并保留路径，需安全核对文件状态。注册或解析失败时不继续、不直接重试：请求可能已经提交，响应也可能部分写入。保留私有文件，通过受控渠道核对项目和 webhook 状态，再处理该文件；不要覆盖或删除其他文件。如果命令被信号中断，先尝试在当前 shell 清除 token；readonly 或其他原因导致无法确认清除时，结束受影响的 shell，并安全处理保留的私有响应。如果项目已注册但未收到完整的一次性 secret，须经用户授权后使用服务支持的 webhook 重建方式轮换，不能重新注册来取回原 secret。删除文件不保证从 SSD、快照或备份中物理擦除，因此私有目录应使用受控加密临时存储且不被备份或同步；若秘密可能泄露，也应按实际状态重建 webhook 以轮换它。
 
 ### 项目授权、用户停用和凭据撤销
 
@@ -92,16 +238,26 @@ docker compose exec -T review /app/tribunalctl projects all
    ```
 
    `projects list` 按 bearer 所属用户的项目授权过滤；bootstrap token 没有用户 ID 和 grant，通常返回空列表，不能用它确认“没有项目”。`projects all` 和 `users list` 是管理面列表，需要平台管理员凭据。
-3. 授予只读或管理权限，并核对结果：
+3. 先向用户明确确认实际项目 ID、目标 GitLab 用户 ID，以及本次唯一动作：授予 `read`、授予 `manage` 或删除授权。每次执行前，在当前 shell 将 `PROJECT_ID`、`GITLAB_USER_ID` 和 `GRANT_ACTION` 分别设置为这次确认的数字 ID 和动作（`read`、`manage` 或 `delete`）；不要沿用未重新确认的旧值。下列命令只执行一个动作，再核对结果；缺少输入、ID 不是无前导零的正整数或动作无效时不执行任何授权命令：
 
    ```bash
-   docker compose exec -T review /app/tribunalctl projects grants list 42
-   docker compose exec -T review /app/tribunalctl projects grants set 42 17 read
-   docker compose exec -T review /app/tribunalctl projects grants set 42 17 manage
-   docker compose exec -T review /app/tribunalctl projects grants delete 42 17
+   if [ -z "${PROJECT_ID:-}" ] || [ -z "${GITLAB_USER_ID:-}" ] ||
+      ! [[ "$PROJECT_ID" =~ ^[1-9][0-9]*$ && "$GITLAB_USER_ID" =~ ^[1-9][0-9]*$ ]]; then
+     printf '缺少有效的项目 ID 或用户 ID，已停止。\n' >&2
+     false
+   else
+     case "${GRANT_ACTION:-}" in
+       read|manage)
+         docker compose exec -T review /app/tribunalctl projects grants set "$PROJECT_ID" "$GITLAB_USER_ID" "$GRANT_ACTION" ;;
+       delete)
+         docker compose exec -T review /app/tribunalctl projects grants delete "$PROJECT_ID" "$GITLAB_USER_ID" ;;
+       *) printf '动作无效，已停止。\n' >&2; false ;;
+     esac &&
+     docker compose exec -T review /app/tribunalctl projects grants list "$PROJECT_ID"
+   fi
    ```
 
-   参数依次是项目 ID、GitLab 用户 ID 和角色。`read` 可读取项目、评审、工作区、统计、SSE 和项目扩展；`manage` 还可修改项目设置、触发/取消评审、重新发布、人工标注、刷新工作区、轮换项目 Key 和重建 webhook。项目级 MCP/Skill/块绑定属于宿主执行配置，写入还需平台管理员标签，`manage` 本身不授予平台配置能力。
+   `set` 参数依次是项目 ID、GitLab 用户 ID 和角色；`delete` 只接收两个 ID。`read` 可读取项目、评审、工作区、统计、SSE 和项目扩展；`manage` 还可修改项目设置、触发/取消评审、重新发布、人工标注、刷新工作区、轮换项目 Key 和重建 webhook。项目级 MCP/Skill/块绑定属于宿主执行配置，写入还需平台管理员标签，`manage` 本身不授予平台配置能力。
 4. 让用户用自己的 API token 验证业务列表：
 
    ```bash
@@ -119,32 +275,32 @@ docker compose exec -T review /app/tribunalctl projects all
 - `users enable <id>` 恢复登录，但不会恢复已撤销的会话或 token。恢复后需重新登录并重新创建 token；项目 grant 不受停用影响。
 - 普通用户可以在控制台撤销自己的 API token，不能停用账号、撤销他人凭据或管理 grant。跨用户停用、撤销和 grant 管理只允许平台管理员。
 
+每次执行前，先向用户确认目标 GitLab 用户 ID 及本次唯一动作（`disable`、`enable` 或 `revoke`），并说明上面的影响。在当前 shell 将 `GITLAB_USER_ID` 和 `USER_ACTION` 设为这次确认的值，不要沿用旧值。下列命令只执行一个动作，缺少输入、ID 不是无前导零的正整数或动作无效时不执行：
+
+```bash
+if [ -z "${GITLAB_USER_ID:-}" ] || ! [[ "$GITLAB_USER_ID" =~ ^[1-9][0-9]*$ ]]; then
+  printf '缺少有效的用户 ID，已停止。\n' >&2
+  false
+else
+  case "${USER_ACTION:-}" in
+    disable|enable|revoke)
+      docker compose exec -T review /app/tribunalctl users "$USER_ACTION" "$GITLAB_USER_ID" ;;
+    *) printf '动作无效，已停止。\n' >&2; false ;;
+  esac
+fi
+```
+
 **bootstrap 凭据轮换**
 
 `REVIEW_ADMIN_TOKEN` 由部署方生成、保存和轮换，Tribunal 不提供在线轮换 API。修改 `.env` 或 secret 注入后执行 `docker compose up -d --force-recreate --wait --wait-timeout 120`，重启后旧 token 立即失效；不要用数据库操作或用户 grant 替代这次轮换。`bootstrap_admins` 是 `id:<GitLab 用户 ID>` 或 GitLab 用户名的列表，修改后同样需要重启服务，不会创建 GitLab 账号，也不等于项目授权。
 
 ### 停止、修改和备份
 
-```bash
-docker compose stop review
-docker compose start review
-docker compose down
-```
-
-`down` 保留命名卷；**不要执行 `down -v`**，它会删除数据库和工作区。默认项目名仍为 `crc-review`，数据卷仍为 `crc-review_data`；这是刻意保留的兼容身份，改名会创建新卷并让现有数据不可见。若用 `-p` 更换项目名，也会使用另一数据卷。不要同时启动多个实例共享同一卷。
+单独停服使用 `docker compose stop review`。`docker compose down` 会删除容器但保留命名卷，不适用于需要从旧容器复制数据的备份；**不要执行 `down -v`**，它会删除数据库和工作区。默认项目名仍为 `crc-review`，数据卷仍为 `crc-review_data`；这是刻意保留的兼容身份，改名会创建新卷并让现有数据不可见。若用 `-p` 更换项目名，也会使用另一数据卷。不要同时启动多个实例共享同一卷。
 
 修改 `.env` 或配置后使用 `docker compose up -d --force-recreate --wait --wait-timeout 120`。`restart` 不会加载新的容器环境变量。升级程序需重新构建镜像，并按第 8 节先备份；不支持只回退镜像却保留升级后的数据库。
 
-Compose 的停机一致性备份示例（先准备 `/srv/crc` 并限制备份访问；该目录是部署方自有的兼容路径，不随产品改名迁移）：
-
-```bash
-docker compose stop review
-BACKUP_DIR="$(mktemp -d /srv/crc/backup-XXXXXXXX)"
-docker compose cp review:/app/data/. "$BACKUP_DIR/"
-docker compose start review
-```
-
-另行安全备份 `.env` 和实际配置。恢复时仍需使用新建空卷、匹配的镜像版本与主密钥，详见第 7 节；不要把旧 WAL 混进恢复数据。下文 `docker run` 示例使用独立容器名，不能与 Compose 实例同时占用同一端口或数据库。
+停机一致性备份前先核对实际路径和挂载，默认布局的命令见 [Compose 停机备份](#compose-停机备份)，自定义布局见第 7 节前提。备份命令不会重新启动旧服务；另行安全备份 `.env` 和实际配置。恢复时使用匹配布局的新空位置、匹配的镜像版本与主密钥，详见第 7 节；不要把旧 WAL 混进恢复数据。下文 `docker run` 示例使用独立容器名，不能与 Compose 实例同时占用同一端口或数据库。
 
 ## 1. 镜像内容与边界
 
@@ -159,14 +315,14 @@ docker compose start review
 
 运行特征：
 
-- 以 UID/GID `10001:10001` 的非 root 用户 `tribunal` 运行，家目录 `/home/tribunal`，工作目录 `/app`。
-- 持久化目录为 `/app/data`，声明为卷；SQLite 数据库、WAL/SHM 文件和项目工作区都在这里。
+- 以 UID/GID `10001:10001` 的非 root 用户 `tribunal` 运行，家目录 `/home/tribunal`；镜像默认工作目录为 `/app`，可由 `docker run -w` 或 Compose `working_dir` 覆盖。
+- 镜像声明 `/app/data` 为卷；示例配置把 SQLite 数据库、WAL/SHM 文件和项目工作区放在这里，自定义配置可能使用其他路径和挂载。
 - 默认监听 `8080`，容器内为 HTTP；TLS 由反向代理终止。
 - 镜像不包含 `.git`、`node_modules`、本地 `data`、真实 `config/server.yaml`、`.env`、证书或私钥。
 - 许可证位于 `/licenses/LICENSE` 和 `/licenses/THIRD_PARTY_NOTICES.txt`；后者是单一声明文件，覆盖 Go 标准库、Linux/amd64 服务端的 40 个模块、9 个 production npm 包和镜像内置的 codebase-memory-mcp。当前 Dockerfile 仍把遗留的 `THIRD_PARTY_LICENSES` 一并复制到 `/licenses/`，但发布声明以 `THIRD_PARTY_NOTICES.txt` 为准。`git` 及 Debian 软件包自身的许可证在 `/usr/share/doc/`。
 - 工作区只使用 http(s) Git remote，镜像不安装 SSH 客户端。镜像内置 codebase-memory-mcp（见下文）；其他 MCP 服务器由部署方安装或使用扩展镜像。
 - 仅支持一个服务实例使用一个 SQLite 数据目录。不要用多个容器共享同一数据库文件或同一数据卷。
-- 两个实例不能共用一个数据卷。服务启动时在 SQLite 文件所在目录对 `tribunal.lock` 加独占锁（容器内为 `/app/data/tribunal.lock`，源码运行时默认为 `data/tribunal.lock`），在打开数据库之前完成。锁已被另一个进程持有时，服务记录 `data directory is locked by another Tribunal instance` 错误日志（带锁文件路径）并以退出码 1 退出，不会打开数据库。锁随进程退出由内核释放，包括崩溃或 `kill -9`；锁文件本身会留在目录里，不需要也不应该手工删除，它的存在不代表被锁。
+- 两个实例不能共用一个数据卷。服务启动时在 SQLite 文件所在目录对 `tribunal.lock` 加独占锁（默认容器配置下为 `/app/data/tribunal.lock`，源码运行时默认为 `data/tribunal.lock`），在打开数据库之前完成。锁已被另一个进程持有时，服务记录 `data directory is locked by another Tribunal instance` 错误日志（带锁文件路径）并以退出码 1 退出，不会打开数据库。锁随进程退出由内核释放，包括崩溃或 `kill -9`；锁文件本身会留在目录里，不需要也不应该手工删除，它的存在不代表被锁。
   - 锁基于 `flock`，在 Linux（Docker 镜像）、macOS 和 BSD 上生效。Windows 等没有 `flock` 的平台只创建锁文件、不加锁，不在支持范围内。`flock` 只在同一内核内可靠：同一台宿主机上的多个容器共用一个卷可以互斥，跨主机共享的 NFS 等网络文件系统不受保护，不要把数据目录放在网络文件系统上。
   - `tribunalctl` 的命令都走 HTTP API，不直接打开数据库，不受锁影响。用 `sqlite3` 等外部工具直接打开 `review.db` 不会检查这个锁；按第 7 节先停止服务再操作。
 - 后台 run cleanup 在启动后立即执行、之后每小时执行。它先查询 `workspaces`、run 保护集合和 context 保护 SHA，再触碰项目文件；只处理有 `workspaces` 记录的项目。超过 `workspace.run_cleanup_after` 的 `runs/<id>` 需未被未终态 workflow、queued/running job、`publication_state=pending` 的 dossier 或本进程注册 run 引用；`context/<sha>` 需未被任何 DB revision、当前 workspace base/context、未终态或待发布 workflow base 引用。locked/非法 metadata 保留并 fail closed；项目列表查询失败时整轮保留，某项保护查询失败时跳过该项目。
@@ -197,7 +353,8 @@ docker compose start review
 - **查看和测试**：控制台「扩展」页列出 `codebase-memory`；「测试并列出工具」返回的列表不含 `index_repository`、`delete_project`、`ingest_traces`、`manage_adr`。
 - **内置标识**：它带「内置」标签，只能停用或启用。名称和配置随平台版本走，不能在控制台编辑；删除、改名、改配置或用导入覆盖都返回 409。
 - **禁用**：在「扩展」页点「停用」，或 `PUT /api/v1/mcp-servers/{id}` 设置 `"enabled": false`，然后重启服务。重启和升级都保持停用。
-- **故障表现**：二进制缺失或无法启动时评审照常完成，但没有图谱工具；评审结论里出现 `MCP tools unavailable` 告警，原本会 PASS 的评审显示为 INCOMPLETE。建索引失败时 onboarding 照常完成，工作区的 `last_error` 记录 `index: ...`。
+- **故障表现**：二进制缺失或无法启动时评审照常完成，但没有图谱工具；评审结论里出现 `MCP tools unavailable` 告警，原本会 PASS 的评审显示为 INCOMPLETE。非取消的建索引失败不阻断 onboarding 或刷新；其他必要步骤及状态保存成功时工作区最终为 `ready`，`last_error` 为固定消息 `index: code graph indexing failed`，刷新保留旧 `index_sha`。`index_status` 仅比较已存的 SHA，不代表当前索引健康。
+- **排查信息**：索引失败告警 `code graph index failed; continuing without it` 和一般工作区失败告警 `workspace operation failed` 含 `project_id` 与 `error_class`；类别限于 `timeout`、`canceled`、`panic`、`internal`，其他类别归为 `internal`。这些日志和工作区 API 不提供原始原因；按项目 ID 在受控环境中检查索引配置、可执行文件和运行环境。旧数据库和备份可能仍含错误原文，读取接口不会清除它们；应限制数据库和备份访问，回退旧版可能重新暴露原文。
 
 ## 2. 构建
 
@@ -225,12 +382,14 @@ docker volume create crc-data
 
 卷名 `crc-data` 是刻意保留的兼容名称；继续使用同名卷才能复用已有数据库。产品改名不迁移该卷。
 
-秘密从部署环境注入，不要写进镜像、Compose 文件或命令历史：
+秘密从部署环境注入，不要写进镜像、Compose 文件或命令历史。以下示例仅用于首次生成；任一步失败时停止，不使用部分结果：
 
 ```bash
-export REVIEW_MASTER_KEY="$(openssl rand -base64 32)"
-export REVIEW_ADMIN_TOKEN="$(openssl rand -hex 32)"
-export TRIBUNAL_SESSION_KEY="$(openssl rand -base64 32)"
+set +x
+REVIEW_MASTER_KEY="$(openssl rand -base64 32)" &&
+REVIEW_ADMIN_TOKEN="$(openssl rand -hex 32)" &&
+TRIBUNAL_SESSION_KEY="$(openssl rand -base64 32)" &&
+export REVIEW_MASTER_KEY REVIEW_ADMIN_TOKEN TRIBUNAL_SESSION_KEY
 ```
 
 启动容器：
@@ -260,7 +419,7 @@ docker inspect --format '{{.State.Health.Status}}' tribunal
 
 - 必须覆盖默认 `--config`。镜像内的 `server.example.yaml` 只用于烟测，不是生产配置，也没有 `providers` 和 `propose`，不能执行真实评审。
 - 启用模型 provider 时，还要传入配置中 `api_key_env` 指定的变量，例如 `-e LLM_API_KEY`。复用 `server.docker.yaml` 时还需 `-e TRIBUNAL_PUBLIC_URL -e GITLAB_URL -e LLM_PROTOCOL -e LLM_BASE_URL -e LLM_MODEL`；这些值都需先在宿主机环境中设置。不要仅传入三个平台秘密就把它当作完整评审部署。
-- 必须挂载 `/app/data`。删除卷会丢失数据库，并且已保存的项目凭据无法恢复。
+- 此示例按默认数据路径挂载 `/app/data`；自定义 `storage.dsn` 或 `workspace.root` 时还须持久化相应路径和挂载。删除数据卷会丢失其中的数据库或工作区；没有数据库备份时已保存的项目凭据无法恢复。
 - 命名卷为空时会继承镜像内 `/app/data` 的属主 `10001:10001`。绑定挂载宿主机目录时，先修正属主：
   ```bash
   sudo install -d -o 10001 -g 10001 -m 0700 /srv/crc/data
@@ -277,12 +436,7 @@ docker inspect --format '{{.State.Health.Status}}' tribunal
 | `REVIEW_ADMIN_TOKEN` | 至少 32 字节 | 平台管理面的 bootstrap Bearer 令牌，不授予项目业务数据访问。轮换由部署方更新环境变量并重启；重启后旧客户端立即失效。 |
 | `TRIBUNAL_SESSION_KEY` | base64，解码后至少 32 字节 | 用于签名会话 cookie、OAuth state，并派生 CSRF token。浏览器会话持久化在 SQLite；固定该值时可跨重启继续使用未过期会话。未设置或恰好为空字符串时回退旧名；旧名也未配置时每进程随机生成并输出告警，重启后旧 cookie 失效。非空但只含空白（去除空白后为空）是非法值，启动失败，不回退旧名，也不生成临时 key。轮换该值会让所有现有浏览器会话失效。 |
 
-生成示例：
-
-```bash
-openssl rand -base64 32   # REVIEW_MASTER_KEY / TRIBUNAL_SESSION_KEY
-openssl rand -hex 32      # REVIEW_ADMIN_TOKEN
-```
+新部署生成密钥时，使用[私有临时文件步骤](agent-deployment.md#2-准备配置)，不要将生成的秘密打印到终端或日志。已有部署必须保留原值，不能在恢复时重新生成。
 
 `secrets.master_key_env` 和 `auth.bootstrap_token_env` 可以改名；改名后实际环境变量也要对应修改。
 
@@ -309,7 +463,7 @@ auth:
   oauth:
     client_id_env: GITLAB_OAUTH_CLIENT_ID
     client_secret_env: GITLAB_OAUTH_CLIENT_SECRET
-  bootstrap_admins: ["id:42"]
+  bootstrap_admins: []
 ```
 
 容器环境：
@@ -339,7 +493,7 @@ docker run -d --name tribunal \
 
 - `server.public_url` 必须是 GitLab 能访问的外部地址，并且与 OAuth Application 的 Redirect URI 同源。应用固定使用 `public_url + /auth/callback`。
 - `read_user` 是登录所需的最小 scope；应用调用 GitLab `/api/v4/user` 获取用户名。
-- `bootstrap_admins` 推荐填 `id:<GitLab 用户 ID>`（如 `id:42`），只按 ID 匹配，GitLab 改名不影响。用户 ID 可在 GitLab 个人资料页或 `GET /api/v4/users?username=<name>` 查到。也兼容旧写法 GitLab **用户名**（不区分大小写，已弃用，见下文迁移步骤）：该用户名第一次以 admin 身份登录或访问时，Tribunal 把它绑定到当时的 GitLab 用户 ID 并写入 `admin_bindings`；之后其他账号即使改名为同一用户名，也只得到 `viewer`，日志记录 `bootstrap admin username is bound to another GitLab user`。匹配的用户获得平台 `admin` 标签；其他登录用户为 `viewer`。它不会创建 GitLab 账号，也不授予任何项目数据访问；项目权限仍需 `project_grants`。
+- `bootstrap_admins: []` 不授予任何账号平台管理员标签。需要授予时，先向用户确认实际 GitLab 数字用户 ID 和授权，再填写 `id:<GitLab 用户 ID>`；该写法只按 ID 匹配，GitLab 改名不影响。用户 ID 可在 GitLab 个人资料页或 `GET /api/v4/users?username=<name>` 查到。也兼容旧写法 GitLab **用户名**（不区分大小写，已弃用，见下文迁移步骤）：该用户名第一次以 admin 身份登录或访问时，Tribunal 把它绑定到当时的 GitLab 用户 ID 并写入 `admin_bindings`；之后其他账号即使改名为同一用户名，也只得到 `viewer`，日志记录 `bootstrap admin username is bound to another GitLab user`。匹配的用户获得平台 `admin` 标签；其他登录用户为 `viewer`。它不会创建 GitLab 账号，也不授予任何项目数据访问；项目权限仍需 `project_grants`。
 - 用户名绑定是首次使用即信任：升级前若该用户名已被他人占用，第一个登录的账号会拿到绑定。升级后请确认绑定正确（`SELECT username, user_id FROM admin_bindings;`），或直接改用 `id:` 写法。管理员 GitLab 账号重建、需要重新绑定时，先停服务，执行 `DELETE FROM admin_bindings WHERE username = '<小写用户名>';`，再启动并让正确账号登录；改用 `id:` 写法则不需要这一步。
 - 每个用户最多保留 10 个浏览器会话，再次登录会淘汰该用户自己最旧的会话，不影响其他用户；全局 4096 个会话只是存储兜底，触发时先淘汰非管理员的最旧会话，只有剩下的会话全部属于管理员时才淘汰管理员的会话。角色按当前 `bootstrap_admins` 判断，启动时和会话被使用时都会刷新；用户名写法的管理员要等第一次使用、完成绑定之后才算管理员。
 - OAuth 配置存在时，`client_id_env` 和 `client_secret_env` 必须同时设置，且两个环境变量都必须非空；`server.public_url` 必须是非空的绝对 HTTP(S) 地址，否则启动校验失败。
@@ -348,7 +502,7 @@ docker run -d --name tribunal \
 
 ### bootstrap_admins 用户名写法弃用与迁移
 
-用户名写法已弃用，计划在下一个大版本（v2.0.0）移除；在此之前保持兼容。服务启动时，每个用户名条目记一条 `WARN`，消息为 `auth.bootstrap_admins username entry is deprecated ...`。日志只含条目在列表中的序号 `index`（从 0 开始），不含用户名：
+用户名写法已弃用，计划在下一个大版本（v2.0.0）移除；在此之前保持兼容。服务启动时，每个用户名条目记一条 `WARN`，消息为 `auth.bootstrap_admins username entry is deprecated ...`。日志含条目在列表中的序号 `index`（从 0 开始）以及绑定状态或替代值，不含用户名：
 
 - 该用户名已在 `admin_bindings` 绑定：日志带 `replacement=id:<N>`，把第 `index` 个条目直接替换成这个值即可，权限不变。
 - 尚未绑定：日志带 `binding=none`。用 `GET <GITLAB_URL>/api/v4/users?username=<name>` 或 GitLab 个人资料页查到用户 ID 后写成 `id:<N>`；该用户登录过 Tribunal 的话，也可以用 `tribunalctl users list` 查 ID。
@@ -388,54 +542,103 @@ location / {
 
 ## 7. SQLite 一致性备份与恢复
 
-数据库启用 WAL。运行中只复制 `review.db` 会漏掉 `-wal`/`-shm`，不是一致备份。最稳妥的方式是停止服务后复制整个数据目录，同时带走工作区。
+数据库启用 WAL。运行中只复制数据库文件会漏掉 `-wal`/`-shm`，不是一致备份。先核对生效的 `storage.dsn` 和 `workspace.root`，包括配置合并、环境变量展开及相对路径解析，并核对容器的全部实际挂载及其来源、目标和覆盖关系；不要只看示例 YAML 或 Compose 文件。所有布局的备份位置都不得位于任何数据挂载来源内，需检查实际路径、符号链接和挂载别名。检查时不要输出环境变量或秘密。
 
-备份：
+`workspace.root` 的相对路径，以及 `storage.dsn` 中 SQLite 普通文件名或相对 `file:` URI 的路径，均按服务器进程的实际工作目录解析，不是配置文件所在目录。镜像默认工作目录为 `/app`，但 `docker run -w` 或 Compose `working_dir` 可以覆盖；必须核对运行时实际工作目录、解析后的文件和工作区位置及全部挂载。例如工作目录为 `/srv/tribunal` 时，`file:data/review.db` 和 `data/workspaces` 分别指向 `/srv/tribunal/data/review.db` 和 `/srv/tribunal/data/workspaces`。
+
+以下 `docker compose cp`、`docker cp` 和单卷恢复示例**仅适用**这些条件全部成立时：生效数据库路径是 `/app/data/review.db`，工作区根目录是 `/app/data/workspaces`，两者及各工作区目录解析后的实际位置都位于同一个 `/app/data` 持久化数据挂载中，且没有其他数据挂载，也没有任何遮盖该目录的重叠挂载（包括嵌套的配置或秘密挂载）。`/app/data` 外的配置和秘密非数据挂载可以保留。
+
+自定义路径、分离卷或额外/重叠数据挂载的部署不要执行这些默认命令。按实际布局操作：
+
+1. 确认数据库、工作区及嵌套挂载的实际来源，并记录备份项与挂载目标的对应关系；无法确定时停止并排查。
+2. 停止服务及所有其他写入进程，在整个备份期间保持停止。分别备份 `storage.dsn` 所指数据库、存在时的同名 `-wal`/`-shm`、`workspace.root` 及其中每个工作区目录，包括嵌套挂载实际提供的内容；核对各挂载来源，不能把缺失的目录当成空目录。另行安全备份实际配置和密钥。
+3. 恢复前确认备份完整且已校验，并先确定全部恢复目标及挂载覆盖顺序。为各数据部分新建匹配自定义布局的空卷或空目录，分别恢复到正确位置并核对，不能覆盖旧数据或混入其他 WAL。按实际服务进程的 UID/GID 设置每个数据挂载及嵌套挂载的所有权和目录权限；默认镜像为 `10001:10001`，自定义 `user` 时以实际身份为准。启用 rootless 或用户命名空间时，还需按容器与宿主机的 UID/GID 映射设置宿主机属主。全部恢复和校验完成后才可按下文隔离要求启动恢复副本；不要启动旧服务。
+
+默认布局示例先准备 `/srv/crc` 并限制备份访问；该目录是部署方自有的兼容路径，不随产品改名迁移。确认该目录及将创建的 `BACKUP_DIR` 不在任何数据挂载来源内；检查符号链接、实际路径和挂载别名，若不能确认则停止，另选独立位置并相应修改下面的 `mktemp` 路径，避免复制到源数据内。先停止使用相同数据的其他写入进程，并在整个备份期间保持停止；无法保证一致时停止并排查。按部署类型只选下面一种命令。每步均需成功：停服、创建目录或复制失败时立即停止并排查，不得启动服务。复制成功不等于备份已验证；还需核对数据完整性、数据库和工作区，并安全备份实际配置和秘密。
+
+### Compose 停机备份
+
+仅在符合上面的默认配置与挂载前提时，在原 Compose 项目的仓库根目录执行；如果部署时指定了 `-p` 或自定义 Compose 文件，所有命令必须使用相同的项目名和文件。保留原容器，不能先执行 `docker compose down`：
 
 ```bash
-docker stop tribunal
-BACKUP_DIR="$(mktemp -d /srv/crc/backup-XXXXXXXX)"
-docker cp tribunal:/app/data/. "$BACKUP_DIR/"
-docker start tribunal
+docker compose stop review &&
+  BACKUP_DIR="$(mktemp -d /srv/crc/backup-XXXXXXXX)" &&
+  docker compose cp review:/app/data/. "$BACKUP_DIR/"
 ```
+
+### 单独 docker run 停机备份
+
+此命令只适用于符合上面默认配置与挂载前提、第 3 节名为 `tribunal` 的独立容器，不适用于 Compose 的 `review` 服务：
+
+```bash
+docker stop tribunal &&
+BACKUP_DIR="$(mktemp -d /srv/crc/backup-XXXXXXXX)" &&
+docker cp tribunal:/app/data/. "$BACKUP_DIR/"
+```
+
+两种备份命令均保持旧服务停止。备份、恢复和升级期间不要重新启动旧服务。
 
 目录中至少包含：
 
 - `review.db`
 - `review.db-wal`（若存在）
 - `review.db-shm`（若存在）
-- `workspaces/`
+- `workspaces/`（原数据中存在时）
 
-`workspaces/` 包含项目 checkout、运行目录和上下文文件，属于恢复所需数据；上下文文档的元数据同时记录在数据库中。停止容器后复制的数据库与工作区处于同一静止时间点。
+`workspaces/` 包含项目 checkout、运行目录和上下文文件，属于恢复所需数据；上下文文档的元数据同时记录在数据库中。停止容器后复制的数据库与工作区处于同一静止时间点。备份中没有 `workspaces/` 时，先确认原数据确实没有该目录，不能把复制不完整当成空工作区。
 
-恢复到新建的空卷，不把备份覆盖到旧数据目录。`docker cp` 和 `cp` 都会合并目录；旧 WAL 或工作区文件若残留，可能与备份不匹配。保留旧容器和旧卷，直到新容器验收通过。
+### 校验备份
+
+所有布局都须核对备份中的数据库、工作区和全部文件是否完整。将备份数据库及同一快照中存在的同名 `-wal`/`-shm` 一起复制到隔离的受控副本，在宿主机或受控临时工具中对该副本执行 `PRAGMA integrity_check;`，结果必须只有 `ok`；仅有 `ok` 不能证明快照完整。副本及所在目录需允许写入，以便 SQLite 处理 WAL；不要使用 `immutable=1`，它可能忽略 WAL 并在缺少已提交数据时仍返回 `ok`。不得只检查主数据库而忽略 WAL；不要在原始备份上运行检查，SQLite 打开文件可能修改数据库或 WAL。检查失败、结果不是 `ok` 或无法确认完整性时，停止并排查，不得继续升级或恢复。运行镜像不含 SQLite 命令行，不需要为此安装。
+
+### 恢复
+
+确认选定的备份完整且已校验，将 `BACKUP_DIR` 设为该目录，并将 `RESTORE_IMAGE` 设为与快照匹配的镜像 tag 或 digest。按原部署类型停止旧服务：Compose 使用 `docker compose stop review`，独立容器使用 `docker stop tribunal`。确认旧服务已停止并保持停止，保留旧容器和旧卷，直到新容器验收通过。
+
+先在独立于恢复目标的全新空卷或目录中复制该快照，按实际布局、配置和 UID/GID 准备一次性验证副本。使用与快照匹配的镜像和主密钥，在完全断网且无入口的环境中启动该副本（独立 Docker 容器可使用 `--network none`，不要发布端口），在容器内按实际监听地址检查 `/readyz`，核对工作区及待处理任务，并按[回退计划](delivery-readiness.md#回退触发与操作计划)核对既有外部副作用。启动可能修改数据库、运行任务或执行迁移；验证副本不能作为恢复目标或覆盖原始备份。验证失败或无法隔离时停止并排查。验证通过后，仍须从原始备份重新复制到新的恢复目标并完成下述校验，不能复制验证副本中已改变的数据。
+
+启动恢复目标前隔离入口并阻断 GitLab、OAuth 和模型 provider 出站；核对完成并获得授权前不要解除限制。下面的目标启动命令不会自行设置这些隔离规则。
+
+所有布局在复制到恢复目标后、启动恢复副本前，还须核对恢复目标与备份中的数据库、工作区和全部文件是否一致，并将恢复目标中的数据库及同一快照中存在的 `-wal`/`-shm` 一起复制到新的受控副本，按上一步再次执行 `PRAGMA integrity_check;`。不要在实际恢复目标上运行检查。校验失败或无法确认完整性时停止并排查，不得启动。
+
+以下单卷示例仅适用于上述默认配置和挂载前提，且恢复时的生效配置和挂载也必须符合该前提，服务使用默认 UID/GID `10001:10001`；自定义布局或运行身份按上面的步骤分别恢复并调整所有权，不要先执行此示例。恢复到新建的空卷，不把备份覆盖到旧数据目录。`docker cp` 和 `cp` 都会合并目录；旧 WAL 或工作区文件若残留，可能与备份不匹配。先复制数据：
 
 ```bash
-docker stop tribunal
-RESTORE_VOLUME="$(docker volume create)"
+[ -n "${BACKUP_DIR:-}" ] && [ -f "$BACKUP_DIR/review.db" ] &&
+  [ -n "${RESTORE_IMAGE:-}" ] &&
+RESTORE_VOLUME="$(docker volume create)" &&
 docker run --rm --user 0 --entrypoint sh \
   -v "$BACKUP_DIR:/backup:ro" \
   -v "$RESTORE_VOLUME:/restore" \
-  tribunal:local -c 'cp -a /backup/. /restore/ && chown -R 10001:10001 /restore'
+  "$RESTORE_IMAGE" -c 'cp -a /backup/. /restore/ && chown -R 10001:10001 /restore'
+```
+
+复制失败时停止并排查，不得继续。按上文完成断网快照副本验证、恢复目标的全部校验且隔离规则已生效后，才可执行下面的启动命令。该启动和后续健康检查示例还要求生效配置的 `auth.bootstrap_token_env` 为 `REVIEW_ADMIN_TOKEN`、`secrets.master_key_env` 为 `REVIEW_MASTER_KEY`、`server.listen` 为 `:8080`，并在当前 shell 安全导出与快照匹配的主密钥、bootstrap token 和 session key。若配置改了变量名或容器监听地址/端口，必须按实际配置更改容器的 `-e`、端口映射和健康检查；不能直接套用下面的启动及检查命令。示例用独立容器恢复，无论旧服务是否使用 Compose；确认宿主机端口 18080 未被旧服务或其他程序占用，必要时改用另一个空闲端口，不要和旧服务共用端口或数据卷。保持同一 shell 中的 `RESTORE_VOLUME` 和 `RESTORE_IMAGE`：
+
+```bash
+[ -n "${RESTORE_VOLUME:-}" ] && [ -n "${RESTORE_IMAGE:-}" ] &&
+[ -n "${REVIEW_MASTER_KEY:-}" ] && [ -n "${REVIEW_ADMIN_TOKEN:-}" ] &&
+[ -n "${TRIBUNAL_SESSION_KEY:-}" ] &&
 docker run -d --name tribunal-restored \
-  --restart unless-stopped \
-  -p 127.0.0.1:8080:8080 \
+  -p 127.0.0.1:18080:8080 \
   -e REVIEW_MASTER_KEY -e REVIEW_ADMIN_TOKEN -e TRIBUNAL_SESSION_KEY \
   -v "$RESTORE_VOLUME:/app/data" \
   -v /srv/crc/server.yaml:/app/config/server.yaml:ro \
-  tribunal:local --config /app/config/server.yaml
+  "$RESTORE_IMAGE" --config /app/config/server.yaml
 ```
+
+任一步失败都不得继续启动恢复副本；检查并保留失败的卷供排查，不要覆盖旧卷。`/srv/crc/server.yaml` 是示例路径，需提前准备与快照匹配的实际配置；Compose 使用的配置和环境变量不会自动传给 `docker run`。若配置使用变量模板，必须按实际配置传入所需变量；复用 `server.docker.yaml` 所需的 GitLab、公开 URL 和模型变量见[单独 docker run](#3-单独-docker-run不用-compose-时)。启用 OAuth 时还要传入相应的客户端变量，以及配置引用的 `GITLAB_ADMIN_USERNAME`。
 
 恢复后检查：
 
 ```bash
 docker logs tribunal-restored
-curl -fsS http://127.0.0.1:8080/readyz
+curl -fsS http://127.0.0.1:18080/readyz
 ```
 
-恢复时将 `BACKUP_DIR` 设置为选定的备份目录，使用与该快照匹配的镜像和主密钥。启用 OAuth 或模型 provider 时，还要传入原容器使用的对应环境变量。一次性复制容器以 root 修正属主；服务容器仍以 `10001:10001` 运行。镜像内不含 SQLite 命令行，恢复库的 `PRAGMA integrity_check;` 需由宿主机或受控工具检查。
+恢复时使用与快照匹配的主密钥。启用 OAuth 或模型 provider 时，还要传入原容器使用的对应环境变量。一次性复制容器以 root 修正属主；服务容器仍以 `10001:10001` 运行。
 
-在线备份替代方案：使用宿主机或临时工具执行 SQLite `.backup` / `VACUUM INTO`，并对备份库运行 `PRAGMA integrity_check;`。这只能保证数据库快照一致；`workspaces/` 仍需单独备份，二者不保证同一事务时刻。不要把“在线数据库备份”描述成数据库与工作区的原子备份。
+在线备份替代方案：使用宿主机或临时工具执行 SQLite `.backup` / `VACUUM INTO`，并对备份库运行 `PRAGMA integrity_check;`。这只能保证数据库快照一致；生效的 `workspace.root` 及各挂载中的工作区仍需单独备份，二者不保证同一事务时刻。不要把“在线数据库备份”描述成数据库与工作区的原子备份。
 
 镜像不安装 `sqlite3` 命令行工具。需要在线备份时在宿主机或受控临时环境中执行，不要为了备份给运行时镜像增加长期依赖。
 
@@ -446,14 +649,14 @@ curl -fsS http://127.0.0.1:8080/readyz
 升级步骤：
 
 1. 记录当前镜像 tag/digest。
-2. 停止旧容器，备份 `/app/data`（见上一节）。
-3. 拉取并启动新镜像，继续使用同一数据卷、同一 `REVIEW_MASTER_KEY` 和真实配置。
+2. 按第 7 节核对生效路径与全部挂载，停止旧服务并备份、核验数据库和所有工作区，另存配置和秘密。只有符合默认布局前提时才能使用 [Compose](#compose-停机备份)或[独立容器](#单独-docker-run-停机备份)示例；在启动新镜像前保持旧服务停止。
+3. 隔离验证并获得部署授权后，拉取并启动新镜像，继续使用原来的全部数据挂载、同一 `REVIEW_MASTER_KEY` 和真实配置。
 4. 等待 `/readyz` 返回 200，检查日志和关键功能。
 
 回滚步骤：
 
 1. 停止新容器。
-2. 恢复升级前的 `/app/data` 快照。
+2. 按第 7 节将升级前数据库和全部工作区快照恢复到匹配原布局的新空卷或空目录，不覆盖旧数据。
 3. 在启动旧镜像之前隔离入站，并阻断 GitLab/OAuth/provider 出站访问；旧版也可能在启动时自动恢复任务和重试发布。先在隔离环境核对 pending 任务及已有 GitLab 副作用，核对完成并获授权前不解除出站限制。
 4. 使用旧镜像、匹配配置及原主密钥启动恢复副本；不能因启动成功就对普通用户开放。完整安全边界见 [回退触发与操作计划](delivery-readiness.md#回退触发与操作计划)。
 
@@ -461,7 +664,7 @@ curl -fsS http://127.0.0.1:8080/readyz
 
 - 内置扩展随平台升级：新镜像附带的 codebase-memory-mcp 配置（版本、参数）在下次启动时写入已登记的内置服务器，启用状态保持不变；默认工具白名单在块绑定仍是默认机制写入的样子时同步更新，管理员改过的绑定和 YAML `blocks` 中声明的块不动。首次启动后才在 YAML `blocks` 中声明的块：数据库里该块若仍是默认机制写入的绑定，启动时删除并以 YAML 为准（日志 `file configuration replaces default block binding`）；管理员改过的仍以数据库为准。内置 Skill 刷新失败（例如修改了 `workspace.root`）只记 Warn 日志 `built-in skill refresh failed`，不阻断启动。已有部署若在数据库或 `mcp.config` 中自建了同名 `codebase-memory` 服务器，服务不会接管它，也不会绑定它的工具。
 - 升级内置的 codebase-memory-mcp 版本时，按 [内置 codebase-memory-mcp](design/06-config.md#内置-codebase-memory-mcp) 同时更新 Dockerfile 版本与 SHA-256、`third_party/codebase-memory-mcp/` 和许可证清单，并重新跑 Docker smoke。
-- 镜像 tag 改为 `tribunal:*`；旧镜像的仓库名是 `crc-review`，升级时重新构建或改 tag。Compose 项目名 `crc-review`、旧数据卷 `crc-review_data` 和 `crc-data` 刻意不改名；继续挂载原卷即可保留数据。
+- 镜像 tag 改为 `tribunal:*`；旧镜像的仓库名是 `crc-review`，升级时重新构建或改 tag。Compose 项目名 `crc-review`、旧数据卷 `crc-review_data` 和 `crc-data` 刻意不改名；默认布局可继续挂载原卷，自定义布局还须保留全部实际数据挂载。
 - 管理 CLI 改用 `tribunalctl`；旧镜像路径 `/app/reviewctl` 以兼容符号链接保留。源码用户改用 `go run ./cmd/tribunalctl`。
 - 环境变量主名改为 `TRIBUNAL_SESSION_KEY`、`TRIBUNAL_PUBLIC_URL`、`TRIBUNAL_HTTP_PORT`；旧 `CRC_*` 名仍兼容，新旧同时设置时新名优先。三个旧名只要配置了非空值，都会各记录一次弃用日志；日志只含变量名、不含值。日志表示旧名仍配置，不代表旧值一定生效或一定被忽略。升级时复用原 session key 的同一个值，否则现有浏览器会话失效。
 - 旧二进制直接读取已被新版本迁移过的 schema 不受支持。仅回退镜像而不恢复数据快照，可能因列/表变化失败或产生错误数据。
@@ -477,9 +680,9 @@ curl -fsS http://127.0.0.1:8080/readyz
    - 应用迁移 `0013_admin_bindings`、`0014_extension_defaults`、`0015_secret_migration`；
    - 在各服务初始化前运行 `MigrateProjectSecrets`，把已存的项目 token 和 webhook secret 改写成绑定项目与字段的新加密格式（前缀 `\x00tb1`）。
 
-   v1.0.0 读不了新格式。所以必须先做第 7 节的一致性备份；回退时恢复这份备份，不能只换回 v1.0.0 镜像。
+   v1.0.0 读不了新格式。所以必须先按[第 7 节](#7-sqlite-一致性备份与恢复)的实际布局做一致性备份；回退时恢复这份备份，不能只换回 v1.0.0 镜像。
 2. **继续使用原来的 `REVIEW_MASTER_KEY`。** 迁移要用它解开旧密文。迁移是幂等的，每个字段单独迁移，迁移期间被并发修改的行会跳过。解不开的字段只记一条告警（只含 `project_id` 和字段名），保持原样，不阻止启动；这类字段在升级前使用时同样会失败，需要在设置页用「更新访问 Key」或 Webhook「重建」重新写入。某次启动后不再有旧格式字段时，服务在 `secret_migration` 表记下迁移完成；此后启动不再解开任何旧格式密文，遇到时保持原样并告警（只含 `project_id` 和字段名），该字段同样要重新写入。新部署首次启动即记为完成。
-3. **镜像和 CLI 改了名，数据卷没改。** 用新代码重新构建镜像（`docker compose build`）。Compose 项目名 `crc-review` 和数据卷 `crc-review_data` 保持不变，直接沿用。脚本里的 `/app/reviewctl` 可以继续用，建议改成 `/app/tribunalctl`。环境变量可以逐步改为 `TRIBUNAL_*` 新名，session key 要沿用原来的值。
+3. **镜像和 CLI 改了名，数据卷没改。** 用新代码重新构建镜像（`docker compose build`）。默认 Compose 项目名 `crc-review` 和数据卷 `crc-review_data` 保持不变，可直接沿用；自定义布局还须保留全部实际数据挂载。脚本里的 `/app/reviewctl` 可以继续用，建议改成 `/app/tribunalctl`。环境变量可以逐步改为 `TRIBUNAL_*` 新名，session key 要沿用原来的值。
 4. **管理员配置。** `bootstrap_admins` 推荐改成 `id:<GitLab 用户 ID>`（用 `tribunalctl users list` 查 ID）。用户名写法暂时仍可用，但已弃用，启动时会记告警，迁移见 [用户名写法弃用与迁移](#bootstrap_admins-用户名写法弃用与迁移)：该用户名第一次以管理员身份出现时，会被绑定到当时的 GitLab 用户 ID 并写入 `admin_bindings`；之后其他账号即使改成这个用户名，也只有 viewer 权限。如果想换一个账号当管理员，改用 `id:` 写法。
 5. **会话数量。** 每个用户最多保留 10 个浏览器会话，超出时淘汰该用户自己最旧的会话。升级时已有的会话保留，用户下次登录时才按上限淘汰。
 6. **默认扩展。** 首次启动时会登记内置 Skill `code-review` 和内置 MCP 服务器 `codebase-memory`，并按 `default_extensions` 绑定到评审块。已有部署如果在数据库或 `mcp.config` 里自建了同名项，服务不会接管，也不会绑定它的工具。`config/server.docker.yaml` 已带默认配置；自定义配置文件要参照 [默认扩展配置](design/06-config.md#默认扩展default_extensions) 补上 `default_extensions`，不需要就写 `skills: []`。
@@ -494,28 +697,76 @@ docker compose exec -T review /app/tribunalctl projects all
 
 日志里不应出现 `stored project token cannot be decrypted` 或 `stored webhook secret cannot be decrypted` 告警，`projects all` 应列出全部已有项目。然后在控制台确认：内置 Skill 和 MCP 带「内置」标签；对一个已有项目执行「测试」MCP 或手动触发一次评审，确认能正常发布。
 
+### 从 v1.1.0 升级到 v1.2.0
+
+**v1.2.0 尚未发布：版本说明属于待合并的文档改动，尚未打 tag，也未发布 Release。** 以下步骤以 `main` `86c3a668` 的代码为准；文档合并和打 tag 后需要重新核对镜像 digest。完整变更见 [CHANGELOG](../CHANGELOG.md) 的 `[1.2.0] - 待发布` 段，验证状态见 [v1.2.0 验证状态](delivery-readiness.md#v120-验证状态)。真实实例验收（[#108](https://github.com/LeXwDeX/Tribunal/issues/108)）尚未完成，发布前必须补齐。
+
+先按第 8 节的通用步骤操作：记录当前镜像 tag/digest，核对生效路径和全部挂载，停止旧容器并备份数据库和所有工作区。本次升级有这些额外注意点：
+
+1. **迁移 `0016_dossier_mr_title` 只追加列，但仍然必须先备份。**
+   - 迁移对 `workflow_dossiers` 执行 `ALTER TABLE ... ADD COLUMN mr_title TEXT NOT NULL DEFAULT ''`，不改写已有行，不回填旧评审，也不改变既有索引。
+   - 没有 down migration。回退只能恢复升级前的全量快照，不能只换回 v1.1.0 镜像而保留已迁移数据库；旧版本读取新 schema 不受支持。
+   - 升级前按[第 7 节](#7-sqlite-一致性备份与恢复)停止服务，备份生效数据库、可能存在的 `-wal`/`-shm` 和所有工作区；只有符合默认配置与挂载前提时才能复制整个 `/app/data`。运行中只复制数据库文件会漏掉 WAL，不是一致备份。
+   - 另存实际配置、镜像 digest 和 `REVIEW_MASTER_KEY`。恢复使用匹配布局的新空卷或空目录，不把快照覆盖到旧数据，也不混入旧 WAL。
+   - 升级后已有评审的标题为空：列表接口省略 `mr_title`，控制台继续显示 `!iid`。这是预期行为，不需要回填，也无法从旧数据恢复标题。
+2. **日志字段改名，检索和告警要同步调整。**
+   - 生产日志不再输出原始错误文本，原 `error` 字段改为 `error_class`（脱敏类别，例如 `timeout`、`canceled`、`internal`、`mr_closed`）。
+   - 任务结算日志 `review job settled without retry`、`workspace job settled without retry` 的 `reason` 字段也改名为 `error_class`，值为 `mr_closed`、`review_superseded`、`stale_publication`、`permanent_job` 等。
+   - 评审筛选、发布失败、扩展绑定跳过等业务 `reason` 字段仍然存在。不要把所有 `reason` 检索都直接替换成 `error_class`。
+   - `scripts/logcheck` 随 `go test ./...` 运行；本地修改代码后先跑它，避免在 logger 调用里记录 `err` 或 `err.Error()`。
+3. **启动锁：两个实例不能共用数据目录。**
+   - 新版本在打开 SQLite 前对数据库所在目录的 `tribunal.lock` 加 `flock` 独占锁（默认容器配置下为 `/app/data/tribunal.lock`）。锁被占用时，服务记录带锁文件路径的错误日志并以退出码 1 退出，不会打开数据库。
+   - 同一数据目录只能有一个进程；同一宿主机上多个容器共用同一卷可以互斥，但跨主机的 NFS 等网络文件系统不受保护。
+   - 锁随进程退出由内核释放，崩溃后无需清理；`tribunal.lock` 文件残留是正常的，不要手工删除。锁的限制见[镜像内容与边界](#1-镜像内容与边界)。
+4. **`bootstrap_admins` 用户名写法已弃用。**
+   - 用户名条目仍可用，但启动时每个条目记一条 `WARN`，含 `index` 及绑定状态或替代值，不含用户名；已绑定时给出 `replacement=id:<N>`。
+   - 计划和注意点见 [用户名写法弃用与迁移](#bootstrap_admins-用户名写法弃用与迁移)。计划在 v2.0.0 移除；在此之前改用 `id:<GitLab 用户 ID>`。
+   - `id:` 写法不受影响，也不需要在升级时重新绑定。
+5. **Webhook 存储失败改返回 503。** 查项目、写投递记录或入队失败时，`POST /webhooks/gitlab` 返回 503，不再返回 200 加 `ignored: storage_error`。GitLab 会把这次投递记为失败；连续失败可能自动停用 hook，升级后要检查 GitLab 端的 hook 状态。已停用的 hook 需要重新启用，失败投递可以用 Resend request 重发。
+6. **全局会话上限优先保留管理员。** 全局 4096 个会话的兜底上限触发时，先淘汰非管理员的最旧会话。角色按当前 `bootstrap_admins` 刷新，改配置并重启后不需要用户重新登录。每用户 10 个会话的上限不变，无需迁移。
+7. **升级后检查。**
+   - `docker compose logs` 中不应出现迁移失败、`data directory is locked by another Tribunal instance` 或 `bootstrap_admins` 未预期的弃用告警。
+   - `/readyz` 返回 200；已有项目可正常读取，已有评审列表可打开，旧评审显示 `!iid` 而不是报错。
+   - 触发一次新评审，确认列表能显示 `mr_title`，日志检索使用 `error_class` 仍能命中。
+   - v1.2.0 尚未完成真实实例验收；在 #108 完成前不要把本次升级当作发布验收。
+
 ## 9. 无外部凭据的本地烟测
 
 没有 Docker 时，可用本机 Go 和临时数据目录验证启动、readiness 和 OAuth 默认关闭行为。该烟测不接触 GitLab、模型 provider 或真实 OAuth。
 
-先构建前端和二进制：
+在受控的隔离环境执行以下完整代码块，不要拆分。先确认 `127.0.0.1:18080` 空闲且测试期间不会被其他进程使用；健康接口本身不能证明进程身份。它不启动 Docker；会构建前端，修改本检出的 `web` 构建产物，并在私有临时目录启动本次二进制。不要在不可信同 UID 进程或不受控目录的环境中运行。
 
 ```bash
-cd web
-npm ci
-npm run build
-cd ..
-go build -o /tmp/tribunal-server ./cmd/server
-```
+(
+  set +x
+  set -eu
+  set -o pipefail
+  unset REVIEW_MASTER_KEY REVIEW_ADMIN_TOKEN TRIBUNAL_SESSION_KEY
+  TMP="$(mktemp -d)"
+  PID=
+  cleanup_smoke() {
+    for child in $(jobs -pr); do
+      if [ "$child" = "$PID" ]; then kill "$PID" 2>/dev/null || true; fi
+    done
+    if [ -n "$PID" ]; then wait "$PID" 2>/dev/null || true; fi
+    rm -rf -- "$TMP"
+  }
+  trap cleanup_smoke EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  mkdir -p "$TMP/npm-home"
+  (
+    cd web
+    /usr/bin/env -i PATH="$PATH" HOME="$TMP/npm-home" npm ci
+    /usr/bin/env -i PATH="$PATH" HOME="$TMP/npm-home" npm run build
+  )
+  go build -o "$TMP/tribunal-server" ./cmd/server
 
-准备临时配置和数据：
-
-```bash
-TMP="$(mktemp -d)"
-export REVIEW_MASTER_KEY="$(openssl rand -base64 32)"
-export REVIEW_ADMIN_TOKEN="$(openssl rand -hex 32)"
-export TRIBUNAL_SESSION_KEY="$(openssl rand -base64 32)"
-cat > "$TMP/override.yaml" <<EOF
+  REVIEW_MASTER_KEY="$(openssl rand -base64 32)"
+  REVIEW_ADMIN_TOKEN="$(openssl rand -hex 32)"
+  TRIBUNAL_SESSION_KEY="$(openssl rand -base64 32)"
+  export REVIEW_MASTER_KEY REVIEW_ADMIN_TOKEN TRIBUNAL_SESSION_KEY
+  cat > "$TMP/override.yaml" <<EOF
 server:
   listen: "127.0.0.1:18080"
   public_url: "http://127.0.0.1:18080"
@@ -524,49 +775,26 @@ storage:
 workspace:
   root: "$TMP/workspaces"
 EOF
-```
+  "$TMP/tribunal-server" --config config/server.example.yaml \
+    --config "$TMP/override.yaml" --check-config
+  "$TMP/tribunal-server" --config config/server.example.yaml \
+    --config "$TMP/override.yaml" >"$TMP/server.log" 2>&1 &
+  PID=$!
+  for ((i=0; i<50; i++)); do
+    kill -0 "$PID"
+    if [ "$(curl -fsS --max-time 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/readyz 2>/dev/null)" = 200 ]; then break; fi
+    sleep 0.2
+  done
+  [ "$(curl -fsS --max-time 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/healthz)" = 200 ]
+  [ "$(curl -fsS --max-time 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/readyz)" = 200 ]
+  [ "$(curl -sS --max-time 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/)" = 200 ]
+  [ "$(curl -sS --max-time 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/auth/login)" = 503 ]
+  [ "$(printf 'Authorization: Bearer %s\n' "$REVIEW_ADMIN_TOKEN" |
+    curl -fsS --max-time 2 -o /dev/null -w '%{http_code}' -H @- http://127.0.0.1:18080/api/v1/projects)" = 200 ]
 
-校验示例配置合并后的结果（OAuth 未启用）：
-
-```bash
-/tmp/tribunal-server --config config/server.example.yaml \
-  --config "$TMP/override.yaml" --check-config
-```
-
-启动并检查：
-
-```bash
-/tmp/tribunal-server --config config/server.example.yaml \
-  --config "$TMP/override.yaml" >"$TMP/server.log" 2>&1 &
-PID=$!
-for i in $(seq 1 50); do
-  if curl -fsS http://127.0.0.1:18080/readyz >/dev/null 2>&1; then break; fi
-  sleep 0.2
-done
-curl -fsS http://127.0.0.1:18080/healthz
-curl -fsS http://127.0.0.1:18080/readyz
-curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18080/
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18080/auth/login
-kill "$PID"
-wait "$PID" || true
-rm -rf "$TMP"
-```
-
-预期：
-
-- `--check-config` 输出 `configuration OK`。
-- `/healthz` 和 `/readyz` 返回 200。
-- `/` 返回 200，返回嵌入的控制台页面。
-- 带 Bearer 管理令牌请求 `/api/v1/projects` 返回 200。
-- 未配置 OAuth 时 `/auth/login` 返回 503。
-
-单独验证 OAuth 模板的配置解析（不进行真实登录）。以下命令沿用本节前面导出的 secrets；若在新 shell 执行，先重新 export `REVIEW_MASTER_KEY` 和 `REVIEW_ADMIN_TOKEN`：
-
-```bash
-TMP_OAUTH="$(mktemp -d)"
-export GITLAB_OAUTH_CLIENT_ID="dummy-client-id"
-export GITLAB_OAUTH_CLIENT_SECRET="dummy-client-secret"
-cat > "$TMP_OAUTH/oauth.yaml" <<EOF
+  export GITLAB_OAUTH_CLIENT_ID="dummy-client-id"
+  export GITLAB_OAUTH_CLIENT_SECRET="dummy-client-secret"
+  cat > "$TMP/oauth.yaml" <<EOF
 server:
   listen: "127.0.0.1:18081"
   public_url: "https://review.example.internal"
@@ -576,17 +804,18 @@ auth:
     client_secret_env: GITLAB_OAUTH_CLIENT_SECRET
   bootstrap_admins: ["id:42"]
 storage:
-  dsn: "file:$TMP_OAUTH/data/review.db"
+  dsn: "file:$TMP/oauth-data/review.db"
 workspace:
-  root: "$TMP_OAUTH/workspaces"
+  root: "$TMP/oauth-workspaces"
 EOF
-/tmp/tribunal-server --config config/server.example.yaml \
-  --config "$TMP_OAUTH/oauth.yaml" --check-config
-unset GITLAB_OAUTH_CLIENT_ID GITLAB_OAUTH_CLIENT_SECRET
-rm -rf "$TMP_OAUTH"
+  "$TMP/tribunal-server" --config config/server.example.yaml \
+    --config "$TMP/oauth.yaml" --check-config
+)
 ```
 
-该检查只证明 OAuth 配置结构和环境变量引用合法，不证明 GitLab 回调、token 交换或用户角色映射已经通过真实集成验收。
+三个烟测密钥只存在于子 shell 和其子进程中，成功、失败或中断后不改变调用者的值或导出状态；`npm ci` 和构建只接收继承的 PATH 与临时 HOME，不继承其他环境变量。临时管理员 token 只经标准输入传给 curl，不作为命令行参数。子 shell 在退出时尝试停止其运行中的后台任务并删除本次临时目录；任务检查和发信号不是原子操作，不能在有不可信进程或共享端口的环境保证停机所有权。SIGKILL、机器故障等也可能跳过清理，应在受控环境核对残留，不要按 PID 盲目停止其他进程。
+
+预期两个 `--check-config` 输出 `configuration OK`；`/healthz`、`/readyz`、`/` 和带临时 Bearer 管理令牌的 `/api/v1/projects` 返回 200；未配置 OAuth 时 `/auth/login` 返回 503。任一步失败即停止。OAuth 检查只验证配置结构和环境变量引用，不证明 GitLab 回调、token 交换或用户角色映射已经通过真实集成验收。
 
 ### Docker 可用时的 Compose 烟测
 
@@ -606,47 +835,26 @@ bash scripts/docker-smoke.sh
 docker run --rm --entrypoint git tribunal:local --version
 docker run --rm --entrypoint id tribunal:local
 docker run --rm --entrypoint stat tribunal:local -c '%u:%g %a' /app/data
-docker run --rm \
-  -e REVIEW_MASTER_KEY="$(openssl rand -base64 32)" \
-  -e REVIEW_ADMIN_TOKEN="$(openssl rand -hex 32)" \
-  tribunal:local --config /app/config/server.example.yaml --check-config
+(
+  set +x
+  REVIEW_MASTER_KEY="$(openssl rand -base64 32)" &&
+  REVIEW_ADMIN_TOKEN="$(openssl rand -hex 32)" &&
+  export REVIEW_MASTER_KEY REVIEW_ADMIN_TOKEN &&
+  docker run --rm -e REVIEW_MASTER_KEY -e REVIEW_ADMIN_TOKEN \
+    tribunal:local --config /app/config/server.example.yaml --check-config
+)
 ```
 
 预期：`git version` 有输出，`id` 显示 uid 10001 和 gid 10001，`stat` 输出 `10001:10001 700`，`--check-config` 输出 `configuration OK`。
 
-启动一个临时容器，只验证启动、readiness 和 Bearer 接口；使用示例配置，不连接外部 GitLab：
-
-```bash
-docker run -d --name tribunal-arch14-smoke \
-  -p 127.0.0.1:18080:8080 \
-  -e REVIEW_MASTER_KEY="$(openssl rand -base64 32)" \
-  -e REVIEW_ADMIN_TOKEN="smoke-admin-token-0123456789abcdef" \
-  -e TRIBUNAL_SESSION_KEY="$(openssl rand -base64 32)" \
-  -v tribunal-arch14-smoke-data:/app/data \
-  tribunal:local
-
-for i in $(seq 1 60); do
-  if curl -fsS http://127.0.0.1:18080/readyz >/dev/null 2>&1; then break; fi
-  sleep 0.5
-done
-
-curl -fsS http://127.0.0.1:18080/healthz
-curl -fsS http://127.0.0.1:18080/readyz
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18080/auth/login
-curl -fsS -H 'Authorization: Bearer smoke-admin-token-0123456789abcdef' \
-  http://127.0.0.1:18080/api/v1/projects
-
-docker rm -f tribunal-arch14-smoke
-docker volume rm tribunal-arch14-smoke-data
-```
-
-清理只删除本次创建的 `tribunal-arch14-smoke` 容器和 `tribunal-arch14-smoke-data` 卷。不要删除其他容器或卷。该烟测不验证真实 GitLab、OAuth、webhook 或评审执行，不能当作集成验收。
+启动、readiness 和 Bearer 接口验证使用上面的[隔离 Compose 烟测](#docker-可用时的-compose-烟测)。该脚本需要 Docker daemon 和 Docker Compose v2，使用独立的临时项目和数据卷；仅检查脚本语法不算 Docker 实测。该烟测不验证真实 GitLab、OAuth、webhook 或评审执行，不能当作集成验收。
 
 ## 10. 验证状态
 
 验证记录统一维护在 [交付就绪与验收记录](delivery-readiness.md)，本文不再重复：
 
-- 当前版本：[当前版本（v1.1.x）验证状态](delivery-readiness.md#当前版本v11x验证状态)。
-- v1.0.0（f143 快照）在隔离测试实例上的验收记录：[v1.0.0 历史验收记录](delivery-readiness.md#v100-历史验收记录f143仅供追溯)，仅供追溯，不覆盖 v1.1.x 的改动。
+- 已发布版本：[v1.1.x 验证状态](delivery-readiness.md#v110-验证状态)。
+- 待发布版本：[v1.2.0 验证状态](delivery-readiness.md#v120-验证状态)。
+- v1.0.0（f143 快照）在隔离测试实例上的验收记录：[v1.0.0 历史验收记录](delivery-readiness.md#v100-历史验收记录f143仅供追溯)，仅供追溯，不覆盖 v1.1.x 和 v1.2.0 的改动。
 
 上面第 9 节的烟测不验证真实 GitLab、OAuth、webhook 或评审执行，不能当作集成验收。

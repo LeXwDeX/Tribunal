@@ -48,6 +48,12 @@ type LLMCallFilter struct {
 	IncludePayload bool
 }
 
+// Workspace error messages contain no underlying error text.
+const (
+	WorkspaceOperationFailed = "workspace operation failed"
+	WorkspaceIndexFailed     = "index: code graph indexing failed"
+)
+
 // Workspace is the project workspace state row.
 type Workspace struct {
 	ProjectID     int64      `json:"project_id"`

@@ -3,17 +3,110 @@ package app
 import (
 	"context"
 	"errors"
+	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/config"
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/llm"
 	"github.com/LeXwDeX/tribunal/internal/repo"
+	"github.com/LeXwDeX/tribunal/internal/store"
 )
+
+type blockingFeedbackStore struct {
+	ReviewStore
+	started   chan struct{}
+	release   chan struct{}
+	startOnce sync.Once
+}
+
+func (s *blockingFeedbackStore) ListWorkflows(context.Context, store.WorkflowFilter, string, int) ([]store.Workflow, string, error) {
+	s.startOnce.Do(func() { close(s.started) })
+	<-s.release
+	return nil, "", nil
+}
+
+type blockingRetentionStore struct {
+	*retentionStub
+	started   chan struct{}
+	release   chan struct{}
+	startOnce sync.Once
+}
+
+func (s *blockingRetentionStore) DeleteLLMCallsBefore(context.Context, time.Time) (int64, error) {
+	s.startOnce.Do(func() { close(s.started) })
+	<-s.release
+	return 0, nil
+}
+
+type emptyRunCleanupStore struct{ RunCleanupStore }
+
+func (emptyRunCleanupStore) ListWorkspaceProjectIDs(context.Context) ([]int64, error) {
+	return nil, nil
+}
+
+func TestStartBackgroundDoneAfterAllTasksExit(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		feedback := &blockingFeedbackStore{started: make(chan struct{}), release: make(chan struct{})}
+		retention := &blockingRetentionStore{retentionStub: newRetentionStub(), started: make(chan struct{}), release: make(chan struct{})}
+		var releaseFeedback, releaseRetention sync.Once
+		defer func() {
+			releaseFeedback.Do(func() { close(feedback.release) })
+			releaseRetention.Do(func() { close(retention.release) })
+		}()
+		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+		runtime := &Runtime{
+			feedback:   &FeedbackService{store: feedback, now: time.Now, logger: logger},
+			retention:  &RetentionService{store: retention, now: time.Now, logger: logger, interval: time.Hour},
+			runCleanup: &RunCleanupService{store: emptyRunCleanupStore{}, now: time.Now, logger: logger},
+			startDone:  make(chan struct{}),
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		stop, done := runtime.StartBackground(ctx)
+		synctest.Wait()
+		select {
+		case <-feedback.started:
+		default:
+			t.Fatal("feedback did not start")
+		}
+		select {
+		case <-retention.started:
+		default:
+			t.Fatal("retention did not start")
+		}
+		stopped := make(chan struct{})
+		go func() { defer close(stopped); stop() }()
+		<-stopped
+		synctest.Wait()
+		select {
+		case <-done:
+			t.Fatal("done closed while tasks were blocked")
+		default:
+		}
+		releaseFeedback.Do(func() { close(feedback.release) })
+		synctest.Wait()
+		select {
+		case <-done:
+			t.Fatal("done closed while retention was blocked")
+		default:
+		}
+		releaseRetention.Do(func() { close(retention.release) })
+		synctest.Wait()
+		select {
+		case <-done:
+		default:
+			t.Fatal("background tasks did not finish")
+		}
+	})
+}
 
 type runtimeTestClients struct{}
 

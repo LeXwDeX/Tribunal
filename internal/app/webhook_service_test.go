@@ -205,6 +205,7 @@ func TestWebhookEnvelopeValidation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			f := newWebhookFixture(t, "{}")
 			result, err := f.send(tt.event, tt.uuid, tt.token, tt.body)
 			if err != nil {
@@ -280,6 +281,7 @@ func TestWebhookMergeRequestDecisions(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			f := newWebhookFixture(t, tt.settings)
 			body := mrBody(42, 7, tt.mutate)
 			result, err := f.request("Merge Request Hook", "whsec-test", body)
@@ -451,6 +453,7 @@ func TestWebhookNoteCommands(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			f := newWebhookFixture(t, "{}")
 			body := noteBody(42, 7, 555, 12, "alice", tt.note)
 			if tt.mutate != nil {

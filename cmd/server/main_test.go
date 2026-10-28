@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -129,6 +131,92 @@ func TestNewLoggerEnvironment(t *testing.T) {
 	t.Setenv("REVIEW_LOG_FORMAT", "yaml")
 	if _, err := newLogger(&bytes.Buffer{}); err == nil {
 		t.Fatal("invalid format accepted")
+	}
+}
+
+type fakeRuntimeCloser struct {
+	err   error
+	calls int
+}
+
+func (c *fakeRuntimeCloser) Close() error {
+	c.calls++
+	return c.err
+}
+
+func TestCloseRuntime(t *testing.T) {
+	const (
+		fakeToken     = "fake-secret-token-do-not-log"
+		fakePath      = "/fake/private/runtime-path"
+		fakeAddress   = "https://fake-mcp.invalid"
+		fakeMCPOutput = "fake-mcp-output-do-not-log"
+	)
+	detail := fakeToken + " " + fakePath + " " + fakeAddress + " " + fakeMCPOutput
+	runErr := errors.New("existing run error")
+	tests := []struct {
+		name      string
+		closeErr  error
+		runErr    error
+		wantClass string
+	}{
+		{name: "success"},
+		{name: "close error on normal stop", closeErr: errors.New(detail), wantClass: "internal"},
+		{name: "close timeout on failed run", closeErr: errors.Join(errors.New(detail), context.DeadlineExceeded), runErr: runErr, wantClass: "timeout"},
+		{name: "canceled close", closeErr: fmt.Errorf("%s: %w", detail, context.Canceled), wantClass: "canceled"},
+	}
+	for _, format := range []string{"json", "text"} {
+		for _, tt := range tests {
+			t.Run(format+"/"+tt.name, func(t *testing.T) {
+				t.Setenv("REVIEW_LOG_LEVEL", "error")
+				t.Setenv("REVIEW_LOG_FORMAT", format)
+				var logs bytes.Buffer
+				logger, err := newLogger(&logs)
+				if err != nil {
+					t.Fatal(err)
+				}
+				closer := &fakeRuntimeCloser{err: tt.closeErr}
+				got := func() error {
+					defer closeRuntime(closer, logger)
+					return tt.runErr
+				}()
+				if got != tt.runErr {
+					t.Fatalf("run error changed: got %v, want %v", got, tt.runErr)
+				}
+				if closer.calls != 1 {
+					t.Fatalf("Close called %d times, want once", closer.calls)
+				}
+				out := logs.String()
+				if tt.wantClass == "" {
+					if out != "" {
+						t.Fatalf("successful Close logged %q", out)
+					}
+					return
+				}
+				for _, value := range []string{fakeToken, fakePath, fakeAddress, fakeMCPOutput} {
+					if strings.Contains(out, value) {
+						t.Fatalf("Close log leaked %q: %q", value, out)
+					}
+				}
+				if format == "json" {
+					var record map[string]any
+					if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
+						t.Fatalf("expected one JSON log record: %v; got %q", err, out)
+					}
+					if len(record) != 5 || record["level"] != "ERROR" || record["msg"] != "runtime close failed" || record["error_class"] != tt.wantClass || record["service"] != "review" || record["time"] == nil {
+						t.Fatalf("unexpected Close log record: %v", record)
+					}
+				} else {
+					for _, want := range []string{"level=ERROR", `msg="runtime close failed"`, "error_class=" + tt.wantClass, "service=review"} {
+						if !strings.Contains(out, want) {
+							t.Fatalf("Close log %q missing %q", out, want)
+						}
+					}
+					if strings.Count(out, "\n") != 1 {
+						t.Fatalf("expected one text log record, got %q", out)
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -653,7 +741,7 @@ func TestShutdownHTTPServerClosesAfterTimeout(t *testing.T) {
 func TestStopRecoveryWaitsForRecoveryToReturn(t *testing.T) {
 	started := make(chan struct{})
 	done := make(chan struct{})
-	stop := startRecovery(context.Background(), func(ctx context.Context) error {
+	stop, _ := startRecovery(context.Background(), func(ctx context.Context) error {
 		defer close(done)
 		close(started)
 		<-ctx.Done()
@@ -674,7 +762,7 @@ func TestStopRecoveryIsBounded(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)
 	started := make(chan struct{})
-	stop := startRecovery(context.Background(), func(context.Context) error {
+	stop, _ := startRecovery(context.Background(), func(context.Context) error {
 		close(started)
 		<-release // ignores cancellation
 		return nil
@@ -684,6 +772,250 @@ func TestStopRecoveryIsBounded(t *testing.T) {
 	stop(50 * time.Millisecond)
 	if elapsed := time.Since(begin); elapsed > 2*time.Second {
 		t.Fatalf("stopRecovery waited %v past its timeout", elapsed)
+	}
+}
+
+type recordedCloser struct {
+	name   string
+	events chan<- string
+}
+
+func (c recordedCloser) Close() error   { c.events <- c.name; return nil }
+func (c recordedCloser) Release() error { c.events <- c.name; return nil }
+
+func expectEvent(t *testing.T, events <-chan string, want string) {
+	t.Helper()
+	select {
+	case got := <-events:
+		if got != want {
+			t.Fatalf("event = %q, want %q", got, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("missing event %q", want)
+	}
+}
+
+func expectNoEvent(t *testing.T, events <-chan string) {
+	t.Helper()
+	select {
+	case got := <-events:
+		t.Fatalf("unexpected event %q", got)
+	default:
+	}
+}
+
+func finishBounded(t *testing.T, owner *resourceOwner) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { defer close(done); owner.Finish() }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Finish did not return while a user remained active")
+	}
+}
+
+func TestResourceOwnerRecoveryTimeout(t *testing.T) {
+	events := make(chan string, 4)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	started := make(chan struct{})
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	stop, done := startRecovery(context.Background(), func(context.Context) error {
+		close(started)
+		<-release
+		return nil
+	}, logger)
+	<-started
+	stop(10 * time.Millisecond)
+	owner := &resourceOwner{runtime: recordedCloser{"runtime", events}, db: recordedCloser{"db", events}, lock: recordedCloser{"lock", events}, logger: logger, recoveryDone: done}
+	finishBounded(t, owner)
+	expectEvent(t, events, "runtime")
+	expectNoEvent(t, events)
+	releaseOnce.Do(func() { close(release) })
+	expectEvent(t, events, "db")
+	expectEvent(t, events, "lock")
+	expectNoEvent(t, events)
+}
+
+func TestResourceOwnerWaitsForForcedHTTPHandler(t *testing.T) {
+	events := make(chan string, 4)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	entered := make(chan struct{})
+	tracker := newHTTPTracker(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(entered)
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		<-release
+	}))
+	srv := newHTTPServer(config.ServerConfig{}, tracker, nil)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	served := make(chan struct{})
+	go func() { defer close(served); _ = srv.Serve(listener) }()
+	t.Cleanup(func() { _ = srv.Close(); <-served })
+	resp, err := http.Get("http://" + listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	<-entered
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if err := shutdownHTTPServer(srv, 10*time.Millisecond, logger); err != nil {
+		t.Fatal(err)
+	}
+	tracker.seal()
+	owner := &resourceOwner{runtime: recordedCloser{"runtime", events}, db: recordedCloser{"db", events}, lock: recordedCloser{"lock", events}, logger: logger, tracker: tracker}
+	finishBounded(t, owner)
+	expectEvent(t, events, "runtime")
+	expectNoEvent(t, events)
+	releaseOnce.Do(func() { close(release) })
+	expectEvent(t, events, "db")
+	expectEvent(t, events, "lock")
+	expectNoEvent(t, events)
+}
+
+func TestResourceOwnerSealsTrackerOnPanicPath(t *testing.T) {
+	events := make(chan string, 4)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce, enteredOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	tracker := newHTTPTracker(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		enteredOnce.Do(func() { close(entered) })
+		<-release
+	}))
+	go tracker.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+	<-entered
+	owner := &resourceOwner{runtime: recordedCloser{"runtime", events}, db: recordedCloser{"db", events}, lock: recordedCloser{"lock", events}, logger: slog.New(slog.NewTextHandler(io.Discard, nil)), tracker: tracker}
+	finishBounded(t, owner)
+	expectEvent(t, events, "runtime")
+	expectNoEvent(t, events)
+	response := httptest.NewRecorder()
+	rejected := make(chan struct{})
+	go func() {
+		defer close(rejected)
+		tracker.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	}()
+	select {
+	case <-rejected:
+	case <-time.After(2 * time.Second):
+		t.Fatal("tracker accepted a handler after Finish")
+	}
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("late handler status = %d", response.Code)
+	}
+	releaseOnce.Do(func() { close(release) })
+	expectEvent(t, events, "db")
+	expectEvent(t, events, "lock")
+	owner.Finish()
+	expectNoEvent(t, events)
+}
+
+func TestResourceOwnerWaitsForWorker(t *testing.T) {
+	events := make(chan string, 4)
+	workerFinished := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(workerFinished) }) })
+	owner := &resourceOwner{db: recordedCloser{"db", events}, lock: recordedCloser{"lock", events}, workerFinished: workerFinished}
+	finishBounded(t, owner)
+	expectNoEvent(t, events)
+	releaseOnce.Do(func() { close(workerFinished) })
+	expectEvent(t, events, "db")
+	expectEvent(t, events, "lock")
+	owner.Finish()
+	expectNoEvent(t, events)
+}
+
+func TestResourceOwnerConcurrentFinish(t *testing.T) {
+	events := make(chan string, 20)
+	done := make(chan struct{})
+	var doneOnce sync.Once
+	t.Cleanup(func() { doneOnce.Do(func() { close(done) }) })
+	owner := &resourceOwner{runtime: recordedCloser{"runtime", events}, db: recordedCloser{"db", events}, lock: recordedCloser{"lock", events}, logger: slog.New(slog.NewTextHandler(io.Discard, nil)), backgroundDone: done}
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); owner.Finish() }()
+	}
+	finished := make(chan struct{})
+	go func() { defer close(finished); wg.Wait() }()
+	select {
+	case <-finished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("concurrent Finish calls did not return")
+	}
+	expectEvent(t, events, "runtime")
+	expectNoEvent(t, events)
+	doneOnce.Do(func() { close(done) })
+	expectEvent(t, events, "db")
+	expectEvent(t, events, "lock")
+	owner.Finish()
+	expectNoEvent(t, events)
+}
+
+func TestHTTPTrackerSealRejectsLateHandlers(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	tracker := newHTTPTracker(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		close(entered)
+		<-release
+	}))
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		tracker.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+	}()
+	<-entered
+	done := tracker.seal()
+	if tracker.seal() != done {
+		t.Fatal("seal returned a different completion signal")
+	}
+	select {
+	case <-done:
+		t.Fatal("tracker finished while handler was active")
+	default:
+	}
+	response := httptest.NewRecorder()
+	tracker.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("late handler status = %d", response.Code)
+	}
+	releaseOnce.Do(func() { close(release) })
+	<-finished
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("tracker did not finish")
+	}
+}
+
+func TestResourceOwnerInitializationFailureIsSynchronous(t *testing.T) {
+	for _, hasDB := range []bool{false, true} {
+		events := make(chan string, 3)
+		owner := &resourceOwner{lock: recordedCloser{"lock", events}, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+		if hasDB {
+			owner.db = recordedCloser{"db", events}
+		}
+		owner.Finish()
+		want := 1
+		if hasDB {
+			want++
+		}
+		if len(events) != want {
+			t.Fatalf("initialization cleanup was not synchronous: got %d events, want %d", len(events), want)
+		}
+		if hasDB {
+			expectEvent(t, events, "db")
+		}
+		expectEvent(t, events, "lock")
+		expectNoEvent(t, events)
 	}
 }
 

@@ -1,7 +1,10 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -77,6 +80,55 @@ func TestInputSchemaShape(t *testing.T) {
 	}
 	if _, ok := inputSchema(json.RawMessage(`{"properties":{}}`)); ok {
 		t.Fatal("schema without object type accepted")
+	}
+}
+
+func TestCallErrorConnectionClosedEvictsEntry(t *testing.T) {
+	previous := errors.New("watch connection failure")
+	for _, tc := range []struct {
+		name     string
+		dead     bool
+		previous error
+	}{
+		{name: "call detects closure"},
+		{name: "watch marked entry dead first", dead: true, previous: previous},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			key := entryKey{server: "local"}
+			manager := &Manager{entries: make(map[entryKey]*serverEntry)}
+			entry := &serverEntry{m: manager, key: key, dead: tc.dead, err: tc.previous}
+			manager.entries[key] = entry
+			cause := fmt.Errorf("transport: %w", sdk.ErrConnectionClosed)
+			ctx := context.Background()
+			if err := entry.callError(ctx, ctx, cause); !errors.Is(err, ErrConnectionClosed) {
+				t.Fatalf("callError = %v, want ErrConnectionClosed", err)
+			}
+			if !entry.dead {
+				t.Fatal("entry remained live after connection closed")
+			}
+			wantCause := cause
+			if tc.previous != nil {
+				wantCause = tc.previous
+			}
+			if entry.err != wantCause {
+				t.Fatalf("stored cause = %v, want %v", entry.err, wantCause)
+			}
+			if _, ok := manager.entries[key]; ok {
+				t.Fatal("closed entry remained in manager cache")
+			}
+		})
+	}
+}
+
+func TestCallErrorDeadEntryReturnsConnectionClosed(t *testing.T) {
+	previous := errors.New("watch connection failure")
+	entry := &serverEntry{m: &Manager{}, key: entryKey{server: "local"}, dead: true, err: previous}
+	ctx := context.Background()
+	if err := entry.callError(ctx, ctx, errors.New("call failure")); !errors.Is(err, ErrConnectionClosed) {
+		t.Fatalf("callError = %v, want ErrConnectionClosed", err)
+	}
+	if entry.err != previous {
+		t.Fatalf("stored cause = %v, want %v", entry.err, previous)
 	}
 }
 

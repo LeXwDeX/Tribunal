@@ -456,6 +456,83 @@ func TestStaleRetryCancellationStopsProgress(t *testing.T) {
 	}
 }
 
+func TestCancelRetriesAfterConcurrentExtension(t *testing.T) {
+	ctx := context.Background()
+	inner := NewMemoryEventStore()
+	store := &progressStore{
+		EventStore: inner,
+		targets:    map[string]int{EventWorkflowCancelled + "/": 1},
+	}
+	engine := NewEngine(store, nil, nil, Options{})
+	wfID, err := engine.Create(ctx, GraphSpec{Nodes: []NodeSpec{
+		node("running"), node("queued"), node("pending"), node("completed"),
+	}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wf, err := engine.Snapshot(ctx, wfID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeRevision, err := inner.Append(ctx, wfID, wf.Revision,
+		mustEv(t, EventWorkflowStarted, struct{}{}, testNow),
+		nodeEvent(t, EventNodeQueued, "running", 1),
+		nodeEvent(t, EventNodeStarted, "running", 1),
+		nodeEvent(t, EventNodeQueued, "queued", 1),
+		nodeEvent(t, EventNodeQueued, "completed", 1),
+		nodeEvent(t, EventNodeStarted, "completed", 1),
+		nodeEvent(t, EventNodeCompleted, "completed", 1),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Cancel(ctx, wfID, "manual"); err != nil {
+		t.Fatalf("Cancel after concurrent extension: %v", err)
+	}
+	store.mu.Lock()
+	injected := store.injected
+	store.mu.Unlock()
+	if injected != 1 {
+		t.Fatalf("revision injections = %d, want 1", injected)
+	}
+	events, err := inner.Load(ctx, wfID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) <= int(beforeRevision) || events[beforeRevision].Type != EventWorkflowExtended {
+		t.Fatalf("missing concurrent extension after revision %d: %v", beforeRevision, eventTypes(events))
+	}
+	wf, err = engine.Snapshot(ctx, wfID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wf.Status != WorkflowCancelled || wf.CancelReason != "manual" {
+		t.Fatalf("workflow status=%s reason=%q, want cancelled by manual", wf.Status, wf.CancelReason)
+	}
+	wantNodes := map[string]struct {
+		status NodeStatus
+		reason string
+	}{
+		"running":   {NodeAborted, "manual"},
+		"queued":    {NodeSkipped, "workflow_cancelled"},
+		"pending":   {NodeSkipped, "workflow_cancelled"},
+		"sibling-0": {NodeSkipped, "workflow_cancelled"},
+		"completed": {NodeCompleted, ""},
+	}
+	for id, want := range wantNodes {
+		got, ok := wf.Nodes[id]
+		if !ok || got.Status != want.status || got.Reason != want.reason {
+			t.Errorf("node %s = %+v (present=%v), want status=%s reason=%q", id, got, ok, want.status, want.reason)
+		}
+	}
+	if string(wf.Nodes["completed"].Output) != `{"ok":true}` {
+		t.Fatalf("completed output = %s", wf.Nodes["completed"].Output)
+	}
+	if got := countNodeEvents(t, inner, wfID, EventWorkflowCancelled, ""); got != 1 {
+		t.Fatalf("workflow cancelled events = %d, want 1", got)
+	}
+}
+
 func TestExecuteSafelySkipsCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

@@ -61,10 +61,12 @@ type Manager struct {
 	now       func() time.Time
 	baseHTTP  *http.Client
 
-	mu      sync.Mutex
-	entries map[entryKey]*serverEntry
-	closed  bool
-	wg      sync.WaitGroup
+	mu        sync.Mutex
+	entries   map[entryKey]*serverEntry
+	closed    bool
+	closeDone chan struct{}
+	closeErr  error
+	wg        sync.WaitGroup
 }
 
 // HasServer reports whether name is a configured server. Disabled and
@@ -131,13 +133,18 @@ func (m *Manager) Servers() []string {
 }
 
 // Close terminates all sessions and waits for their processes to exit.
+// Concurrent and subsequent calls return the same close result.
 func (m *Manager) Close() error {
 	m.mu.Lock()
 	if m.closed {
+		done := m.closeDone
 		m.mu.Unlock()
-		return nil
+		<-done
+		return m.closeErr
 	}
 	m.closed = true
+	done := make(chan struct{})
+	m.closeDone = done
 	m.cancel()
 	entries := make([]*serverEntry, 0, len(m.entries))
 	for _, entry := range m.entries {
@@ -164,9 +171,11 @@ func (m *Manager) Close() error {
 	m.wg.Wait()
 	if len(failed) > 0 {
 		sort.Strings(failed)
-		return fmt.Errorf("mcp: close failed for server(s): %s", strings.Join(failed, ", "))
+		m.closeErr = fmt.Errorf("mcp: close failed for server(s): %s", strings.Join(failed, ", "))
 	}
-	return nil
+	// Closing done publishes closeErr to every waiting caller.
+	close(done)
+	return m.closeErr
 }
 
 // ReapIdle closes sessions that have been idle for their configured timeout.
@@ -427,10 +436,8 @@ func (entry *serverEntry) markDead(err error) {
 
 func (entry *serverEntry) close() error {
 	entry.closeOnce.Do(func() {
-		select {
-		case <-entry.ready:
-		case <-time.After(5 * time.Second):
-		}
+		// Wait for start to publish or fail so a late session is not missed.
+		<-entry.ready
 		entry.mu.Lock()
 		session := entry.session
 		entry.mu.Unlock()

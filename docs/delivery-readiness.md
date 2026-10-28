@@ -2,17 +2,55 @@
 
 > 本文分三部分：
 >
-> 1. [当前版本（v1.1.x）验证状态](#当前版本v11x验证状态)：当前版本实际做过哪些验证、还缺哪些。
+> 1. [v1.2.0（待发布）验证状态](#v120-验证状态)：v1.2.0 实际做过哪些验证、还有哪些没做。
 > 2. 升级、授权、验收矩阵与回退计划：与版本无关的操作模板，从[首次升级前记录](#首次升级前记录模板)到[放行与归档](#放行与归档)。
-> 3. [v1.0.0 历史验收记录（f143，仅供追溯）](#v100-历史验收记录f143仅供追溯)：v1.0.0 在隔离测试实例上的验收结果，**不能**用来证明 v1.1.x 的改动。
+> 3. [v1.0.0 历史验收记录（f143，仅供追溯）](#v100-历史验收记录f143仅供追溯)：v1.0.0 在隔离测试实例上的验收结果，**不能**用来证明后续版本的改动。
 >
 > 本文不复制完整日志，也不把测试实例结果扩大为生产验收。
 
+<a id="v120-验证状态"></a>
+
+## v1.2.0（待发布）验证状态
+
+v1.2.0 尚未发布：版本说明属于待合并的文档改动，尚未打 tag，也未发布 Release。变更清单见 [CHANGELOG](../CHANGELOG.md) 的 `[1.2.0] - 待发布` 段；候选范围可用 [v1.1.0...main](https://github.com/LeXwDeX/Tribunal/compare/v1.1.0...main) 核对。本节以 `main` `86c3a668` 为发布候选基线，另列后续工作区的本地检查；发布前必须补齐未完成项。
+
+**未完成，不能声称通过**
+
+- [ ] **GitHub Actions**：截至 `main` `86c3a668`，CI 有 workflow run 记录，但 go、web、docker 三个 job 因账户计费/额度限制没有启动，job 注解说明了原因。v1.2.0 期间的 PR 在 CI job 未启动时按交接约定用本地全量检查放行，并把结果评论到 PR；本文件不逐 PR 重述，[PR #112 评论](https://github.com/LeXwDeX/Tribunal/pull/112#issuecomment-6432897860) 是一个已核实的例子。没有成功执行的 CI job 结果，不能把本地预检当作 CI 结果。
+- [ ] **真实 GitLab 实例验收**：[#108](https://github.com/LeXwDeX/Tribunal/issues/108) 要求的 v1.1.x/v1.2.0 真实实例升级验收尚未执行。这是给 `v1.2.0` 打 tag 的前置条件；v1.0.0 的 f143 结果不覆盖本版本，见[历史验收记录](#v100-历史验收记录f143仅供追溯)。
+
+**历史本地预检（引用 PR #112 交接记录）**
+
+- `main` `86c3a668` 对应的 PR #112 合并前 head 在本地通过：`go build ./...`、`go vet ./...`、`scripts/logcheck`、staticcheck v0.8.2、govulncheck v1.9.0、`go mod verify`、licensecheck、licensebundle `-check`、`go test -race -timeout 40m ./...`，Go 语句覆盖率 77.90%。
+- 记录位置：[PR #112 评论](https://github.com/LeXwDeX/Tribunal/pull/112#issuecomment-6432897860)。该结果表明当时工作树通过本地预检，不代表 CI job 成功执行，也不覆盖之后未提交的改动。
+
+**后续工作区本地检查（不属于 PR #112 或 CI）**
+
+- 在 `main` `86c3a668` 加未提交改动的工作区，2026-10-27 复跑 `go test -race -count=1 -timeout=150s -run '^TestRepositoryLogsUseErrorClass$' -v ./scripts/logcheck` 并通过。这是一次针对日志检查的本地测试，不代表工作区完整验证或发布验收。
+- 2026-10-28 针对停机资源收尾改动（`cmd/server/main.go`、`cmd/server/main_test.go`、`internal/app/runtime.go`、`internal/app/runtime_test.go`）运行 `go build ./...`、`go vet ./...`、staticcheck v0.8.2、govulncheck v1.9.0、`go test -race -timeout=40m ./...`，语句覆盖率 78.20%（18976/24266），并通过 `go mod verify`、licensecheck、licensebundle `-check` 和 `git diff --check`。独立 review 为 PASS，对抗推演确认 panic 路径的 handler/worker 屏障闭合。该结果只覆盖当前未提交工作区，不代表 CI 或真实实例验收；govulncheck 在本机读取了公共 Go 漏洞库元信息，不是离线扫描。
+- [#120](https://github.com/LeXwDeX/Tribunal/issues/120) 要求覆盖率不下降；尚未用可比的前后测量证明覆盖率严格不下降。PR #112 的 77.90% 不证明后续工作区的覆盖率达到 70% 或没有下降。
+
+**v1.2.0 改动的自动化覆盖（测试代码存在；实际运行结果见上述记录）**
+
+- 迁移文件 `0016_dossier_mr_title` 只追加列；接口层测试覆盖旧评审省略 `mr_title`、新 dossier 写入标题。
+- 日志字段：`scripts/logcheck` 扫描非测试代码，禁止 logger 调用记录 `err` 或 `err.Error()`。
+- 数据目录锁：独占锁在释放前阻止第二个持有者；启动时锁冲突以退出码 1 拒绝启动。
+- `bootstrap_admins` 用户名写法：启动告警含序号，已绑定时给出 `replacement=id:<N>`，未绑定或读取失败时给出 `binding=none` 或 `binding=unavailable`，不含用户名；`id:` 写法不产生此告警。
+- 会话淘汰保留管理员；webhook 存储失败返回 503。
+- 这些测试只证明代码路径的语义，不替代真实实例验收；上述后续工作区检查只覆盖所运行的测试，不代表本节所有测试或当前发布候选已完整验证。
+
+**升级边界**
+
+- 迁移 `0016` 只对 `workflow_dossiers` 追加 `mr_title TEXT NOT NULL DEFAULT ''`，不改写已有行，不回填旧评审；迁移没有 down migration。升级前必须做一致性备份，回退只能恢复该备份，不能只回退镜像。完整边界见[迁移与回退边界](#迁移与回退边界)，操作步骤见 [从 v1.1.0 升级到 v1.2.0](operations.md#从-v110-升级到-v120)。
+- 启动锁要求同一服务实例独占数据目录；平台和网络文件系统限制见 [部署与运维](operations.md#1-镜像内容与边界)。
+- 日志 `error` 和任务结算日志的 `reason` 已改名为 `error_class`；按旧字段配置的检索和告警需要调整。
+
 <a id="v110-验证状态"></a>
+<a id="当前版本v11x验证状态"></a>
 
-## 当前版本（v1.1.x）验证状态
+## v1.1.x 验证状态（已发布）
 
-变更清单见 [CHANGELOG](../CHANGELOG.md)，发布页见 [v1.1.0 Release](https://github.com/LeXwDeX/Tribunal/releases/tag/v1.1.0)。本节只记录 v1.1.x 实际做过的验证。
+变更清单见 [CHANGELOG](../CHANGELOG.md)，发布页见 [v1.1.0 Release](https://github.com/LeXwDeX/Tribunal/releases/tag/v1.1.0)。本节只记录 v1.1.x 实际做过的验证；待发布版本的状态见 [v1.2.0 验证状态](#v120-验证状态)。
 
 **已完成**
 
@@ -42,17 +80,19 @@
 - [ ] 用新的 Webhook 面板启用、重建、停用 GitLab Webhook，并确认 GitLab 端的 hook 与之一致。
 - [ ] 在真实数据下浏览 v2 控制台的各个页面。
 
-**v1.1.0 的已知限制**：webhook 处理时如果存储出错，返回 200 加 `ignored: storage_error`，GitLab 不会重试。main 已改为返回 503，失败投递可在 GitLab 中重发（[#99](https://github.com/LeXwDeX/Tribunal/issues/99)、[#100](https://github.com/LeXwDeX/Tribunal/pull/100)），随下一个版本发布，见 CHANGELOG 的 Unreleased 段。
+**v1.1.0 的已知限制**：webhook 处理时如果存储出错，返回 200 加 `ignored: storage_error`，GitLab 不会重试。该限制已在 `main` 修复（[#99](https://github.com/LeXwDeX/Tribunal/issues/99)、[#100](https://github.com/LeXwDeX/Tribunal/pull/100)），随 v1.2.0 发布（待发布），见 CHANGELOG 的 `[1.2.0]` 段。
 
-### 迁移与回退边界
+## 迁移与回退边界
 
-- 迁移实现：`internal/store/sqlite/sqlite.go` 的 `migrate()`；迁移文件为 `0001`、`0003`–`0015`，共 14 个（没有 `0002`）。确认迁移结果时按已知版本集合核对，不把最大版本号当数量。
+- 迁移实现：`internal/store/sqlite/sqlite.go` 的 `migrate()`；迁移文件为 `0001`、`0003`–`0016`，共 15 个（没有 `0002`）。确认迁移结果时按已知版本集合核对，不把最大版本号当数量。
 - 每个未应用迁移单独开事务；没有 down migration。启动时只跳过 `schema_migrations` 已记录的版本；数据库中已记录、但不在当前嵌入文件列表的高版本会被忽略而不报错。
 - `migration_rollback_test` 只覆盖 `0004` 单文件在“建表完成、记录版本前”失败时的事务回滚及之后重试；不覆盖整批升级失败、跨版本回滚或降级。
 - `0007` 给 `users` 增加 `disabled`，并新建空的 `project_grants`；升级不会给任何用户创建 grant。
 - `0008` 增加 `publication_error`；`0009` 增加 webhook 状态/事件/错误，并把已有 `hook_id` 的行标为 `unknown`；`0010` 增加 deferred review candidate 序号；`0011` 增加状态 note 与逐 note 表情的持久化表；`0012` 增加 webhook 归属和时间戳，已有 `hook_id` 的行视为本服务所有。
 - v1.1.0 新增 `0013_admin_bindings`、`0014_extension_defaults`、`0015_secret_migration`；启动时还会把已存项目凭据改写为新的加密格式，v1.0.0 读不了新格式。升级步骤见 [从 v1.0.0 升级到 v1.1.0](operations.md#从-v100-升级到-v110)。
-- 旧二进制可能打开已被新版本迁移的 schema，但它没有新权限逻辑，也读不了新格式密文，不能据此把“能启动”当作可安全回退。回退只能恢复升级前的数据备份。
+- v1.2.0 新增 `0016_dossier_mr_title`，只对 `workflow_dossiers` 执行 `ALTER TABLE ... ADD COLUMN mr_title TEXT NOT NULL DEFAULT ''`。它不改写已有行，不回填旧评审，也不改变既有索引；升级前保存的 dossier 标题为空。
+- 旧二进制可能打开已被新版本迁移的 schema，但它没有新权限逻辑，也读不了新格式密文，不能据此把“能启动”当作可安全回退。`0016` 之后旧二进制读取新 schema 不受支持；回退只能恢复升级前的一致性备份。
+- v1.2.0 升级前的一致性备份：核对生效的 `storage.dsn`、`workspace.root` 和全部实际挂载；停止旧服务后备份数据库、可能存在的 `-wal`/`-shm` 和所有工作区，并另存配置、镜像 digest 与 `REVIEW_MASTER_KEY`。只有符合默认路径和挂载前提时才能复制整个 `/app/data`；自定义路径、分离卷或额外/重叠挂载须按实际布局分别备份。运行中只复制数据库文件不是一致备份。恢复到匹配布局的新空位置，不覆盖旧数据、不混入旧 WAL，否则数据库与工作区可能来自不同时间点。操作步骤见 [SQLite 一致性备份与恢复](operations.md#7-sqlite-一致性备份与恢复)。
 
 ## 首次升级前记录（模板）
 
@@ -64,9 +104,10 @@
 | 旧镜像 tag@digest |  |
 | 新镜像 tag@digest |  |
 | 实际 Compose 项目名 |  |
-| 数据卷名称 / 容器内挂载点 |  |
+| 全部数据挂载来源 / 容器内挂载点及覆盖关系 |  |
+| 生效 `storage.dsn` 解析后的数据库路径 / `workspace.root`（不记录 secret） |  |
 | 配置文件与 secret 注入方式 |  |
-| `data`、数据库、workspaces 大小 |  |
+| 数据库及各工作区大小 |  |
 | Docker 主机可用磁盘 |  |
 | 备份目录 / 校验和 |  |
 | SQLite `PRAGMA integrity_check` |  |
@@ -81,16 +122,16 @@ Tribunal 升级注意：镜像 tag 改为 `tribunal:*`；CLI 使用 `/app/tribun
 
 1. 暂停 GitLab webhook 或按项目禁用 hook，阻止人工触发、定时触发和 API 触发；如不能暂停，先在反向代理阻断 webhook 入口并记录 GitLab 侧可能的重试。
 2. 记录旧实例停止时的 queued/running jobs、running/pending workflows 和 pending publications。新实例启动会由 worker/recover 接管并可能重放这些任务，不能假设队列为空；先人工核对 GitLab 已有评论/状态，避免重复副作用。
-3. 停止旧服务后备份整个 `/app/data`，同时备份实际配置和 secret；不要把真实密钥写入仓库、本文或证据目录。
+3. 按[第 7 节](operations.md#7-sqlite-一致性备份与恢复)先核对生效路径与全部挂载，停止旧服务并备份、核验数据库和所有工作区，同时备份实际配置和 secret；仅默认布局可使用其中的单目录命令。保持旧服务停止，不要把真实密钥写入仓库、本文或证据目录。
 4. 保留旧镜像、旧卷和升级前快照，直到新实例验收完成；不要让两个实例共享同一 SQLite 卷。
 5. 启动新实例会执行迁移、启动 worker、运行 recover/publish pending 和 cleanup，因此断网副本验证必须阻断对 GitLab、OAuth 和模型 provider 的出站访问，并使用占位配置；不得把真实库副本直接接到真实外部服务。
-6. 恢复或离线验证使用新空卷，不把备份覆盖到旧数据目录，不混入旧 WAL。
+6. 恢复或离线验证使用匹配实际布局的新空卷或空目录，分别恢复并核验各数据部分；不把备份覆盖到旧数据目录，不混入旧 WAL。
 
 ## 升级操作（计划）
 
 1. 完成前置记录和备份校验，确认旧镜像与备份均可恢复。
 2. 隔离入口，停止旧服务，保存升级前全量快照。
-3. 复制快照到隔离环境，启动新镜像；阻断外联，观察迁移、worker、recover 和 cleanup。确认迁移记录为 14 个已知版本（1、3–15），不把最大版本号当数量。
+3. 复制快照到隔离环境，启动新镜像；阻断外联，观察迁移、worker、recover 和 cleanup。确认迁移记录为 15 个已知版本（1、3–16），不把最大版本号当数量。
 4. 隔离验证通过且已获部署授权后，在目标测试数据卷启动新镜像；等待 `/readyz` 200，检查日志和迁移错误。
 5. 先完成阶段 A 管理面检查，再执行阶段 B 授权；授权完成前不向普通用户开放业务入口。
 6. 按验收矩阵逐项记录；任何跨项目访问、误 PASS、数据损坏或迁移失败都触发回退评估。
@@ -114,14 +155,7 @@ docker compose exec -T review /app/tribunalctl projects all
 
 ### 阶段 B：按数字 ID 授权并验证
 
-本地用户 ID 即 GitLab user id；项目 ID 使用 `projects all` 返回的数字 ID。只通过管理面授权，不直接写 SQL。以下是四个独立用法示例，不要顺序执行；按批准矩阵选择一次操作，示例 ID 不代表真实授权对象。
-
-```bash
-docker compose exec -T review /app/tribunalctl projects grants list 42
-docker compose exec -T review /app/tribunalctl projects grants set 42 17 read
-docker compose exec -T review /app/tribunalctl projects grants set 42 17 manage
-docker compose exec -T review /app/tribunalctl projects grants delete 42 17
-```
+本地用户 ID 即 GitLab user id；项目 ID 使用 `projects all` 返回的数字 ID。按批准矩阵先向用户确认实际项目 ID、目标 GitLab 用户 ID 和本次唯一动作，再使用[部署与运维中的受保护单次授权步骤](operations.md#项目授权用户停用和凭据撤销)。每次都重新设置确认过的 ID 和动作，不沿用旧值；该步骤校验输入，只执行一个授权动作并列出结果。只通过管理面授权，不直接写 SQL。
 
 - `projects grants list <项目 ID>` 只请求单页，默认 50 条、上限 200 条，CLI 不会自动翻页；超过 50 条时用管理 API 的 `GET /api/v1/admin/projects/{id}/grants?cursor=...` 继续读取。
 - 每次 `set` 后重新 `list` 核对，再让用户用自己的 session/API token 验证业务读取。
@@ -129,7 +163,7 @@ docker compose exec -T review /app/tribunalctl projects grants delete 42 17
 
 ## 真实验收矩阵
 
-使用 2 个用户、2 个项目，建议记为 U1/U2、P1/P2。本矩阵是每次升级都要用的模板；v1.1.x 尚无真实实例结果。v1.0.0（f143）测试实例的结果见 [v1.0.0 历史验收矩阵结果](#v100-验收矩阵结果)。隔离外部调用会产生真实模型用量，需事先获得授权。「自动化覆盖」列是用 fake store、fake GitLab 和 fake provider 跑的本地回归测试（`internal/server`、`internal/app`），只证明代码路径的语义，不替代真实实例验收。
+使用 2 个用户、2 个项目，建议记为 U1/U2、P1/P2。本矩阵是每次升级都要用的模板；v1.1.x 和 v1.2.0 均尚无真实实例结果。v1.0.0（f143）测试实例的结果见 [v1.0.0 历史验收矩阵结果](#v100-验收矩阵结果)。隔离外部调用会产生真实模型用量，需事先获得授权。「自动化覆盖」列是用 fake store、fake GitLab 和 fake provider 跑的本地回归测试（`internal/server`、`internal/app`），只证明代码路径的语义，不替代真实实例验收。
 
 | 场景 | 操作 | 预期 | 自动化覆盖 |
 |---|---|---|---|
@@ -167,9 +201,9 @@ docker compose exec -T review /app/tribunalctl projects grants delete 42 17
 回退操作计划（本文不执行生产回退）：
 
 1. 停止新实例并隔离入口；保存升级后新数据的只读事故快照，保留新卷、旧卷、旧镜像和日志。
-2. 新建空卷，恢复升级前全量数据，准备匹配的旧镜像、旧配置和原 masterkey；不覆盖旧卷，不混入新 WAL。**启动旧实例之前必须阻断 GitLab/OAuth/provider 出站访问**，并确认入站维护隔离生效。不能先启动再补防火墙规则，也不能把停用 webhook 当作阻止后台发布。
+2. 按记录的实际布局新建空卷或空目录，确认挂载覆盖关系后分别恢复并核验升级前的数据库和全部工作区，准备匹配的旧镜像、旧配置和原 masterkey；不覆盖旧数据，不混入新 WAL。**启动恢复副本之前必须阻断 GitLab/OAuth/provider 出站访问**，并确认入站维护隔离生效。不能先启动再补防火墙规则，也不能把停用 webhook 当作阻止后台发布。
 3. 不使用 down SQL，不删除 `schema_migrations` 行来绕过旧二进制检查，不只回退镜像而保留已迁移数据库。
-4. 先在出站阻断下启动旧实例，按同样的隔离要求处理未知的旧版 worker/recover/publish 行为；不假设旧版提供“仅启动管理面”开关。保留不可变的原始备份，因为副本启动也可能改写任务状态。核对旧数据、镜像 digest、queued/running jobs 和 pending publications，并逐项比对 GitLab 已有外部副作用；核对完成且获得授权前，不解除出站限制。
+4. 保持旧服务停止，先在出站阻断下启动旧镜像的恢复副本，按同样的隔离要求处理未知的旧版 worker/recover/publish 行为；不假设旧版提供“仅启动管理面”开关。保留不可变的原始备份，因为副本启动也可能改写任务状态。核对旧数据、镜像 digest、queued/running jobs 和 pending publications，并逐项比对 GitLab 已有外部副作用；核对完成且获得授权前，不解除出站限制。
 5. 数据库能打开只允许继续受控管理面/只读核对，不能据此开放普通业务；恢复访问必须满足下述安全边界。旧镜像不能满足项目隔离要求时维持维护状态，转向安全版本修复，不以恢复可用性覆盖授权要求。
 
 ### 回退后的安全边界
@@ -202,7 +236,7 @@ docker compose exec -T review /app/tribunalctl projects grants delete 42 17
 
 ## v1.0.0 历史验收记录（f143，仅供追溯）
 
-> 本节是 v1.0.0 发布前在隔离测试实例上的验收记录，对应 [PR #30](https://github.com/LeXwDeX/Tribunal/pull/30) 和 [v1.0.0 Release](https://github.com/LeXwDeX/Tribunal/releases/tag/v1.0.0)。它不覆盖 v1.1.x 的任何改动；当前版本的状态见[当前版本（v1.1.x）验证状态](#当前版本v11x验证状态)。本节内容保持当时的事实，不随后续版本更新。
+> 本节是 v1.0.0 发布前在隔离测试实例上的验收记录，对应 [PR #30](https://github.com/LeXwDeX/Tribunal/pull/30) 和 [v1.0.0 Release](https://github.com/LeXwDeX/Tribunal/releases/tag/v1.0.0)。它不覆盖后续版本的任何改动；待发布版本的状态见 [v1.2.0 验证状态](#v120-验证状态)。本节内容保持当时的事实，不随后续版本更新。
 
 ### 结论
 

@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -125,14 +126,16 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	owner := &resourceOwner{logger: logger}
 	if dataLock != nil {
-		defer dataLock.Release()
+		owner.lock = dataLock
 	}
+	defer owner.Finish()
 	db, err := sqlite.Open(ctx, cfg.Storage.DSN)
 	if err != nil {
 		return errors.New("open storage: SQLite database is unavailable")
 	}
-	defer db.Close()
+	owner.db = db
 	logger.Info("storage opened")
 	warnUsernameBootstrapAdmins(ctx, logger, cfg.Auth.BootstrapAdmins, db.AdminBindingOwner)
 
@@ -167,7 +170,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	defer runtime.Close()
+	owner.runtime = runtime
 	lifecycle := runtime.Lifecycle()
 
 	dispatcher, err := app.NewDispatcher(app.DispatcherConfig{
@@ -253,27 +256,34 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	workerCtx, stopWorker := context.WithCancel(ctx)
 	defer stopWorker()
 	workerDone := make(chan error, 1)
+	workerFinished := make(chan struct{})
+	owner.workerFinished = workerFinished
 	started := make(chan struct{})
 	go func() {
 		lifecycle.MarkStarted()
 		close(started)
 		err := worker.Run(workerCtx)
 		lifecycle.MarkStopped()
+		close(workerFinished)
 		workerDone <- err
 	}()
 	<-started
 
 	// Startup recovery runs after the worker owns the queue so recovered
 	// workflows can use the same engine and executor registry.
-	stopRecovery := startRecovery(ctx, runtime.Recover, logger)
-	stopFeedback := runtime.StartBackground(ctx)
+	stopRecovery, recoveryDone := startRecovery(ctx, runtime.Recover, logger)
+	owner.recoveryDone = recoveryDone
+	stopFeedback, backgroundDone := runtime.StartBackground(ctx)
+	owner.backgroundDone = backgroundDone
 	defer stopFeedback()
 
 	shutdownTimeout := cfg.Server.WriteTimeout
 	if shutdownTimeout <= 0 || shutdownTimeout > 15*time.Second {
 		shutdownTimeout = 15 * time.Second
 	}
-	httpServer := newHTTPServer(cfg.Server, apiServer.Handler(), apiServer.BeginShutdown)
+	tracker := newHTTPTracker(apiServer.Handler())
+	owner.tracker = tracker
+	httpServer := newHTTPServer(cfg.Server, tracker, apiServer.BeginShutdown)
 	serveErr := make(chan error, 1)
 	go func() {
 		err := httpServer.Serve(listener)
@@ -308,6 +318,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err := shutdownHTTPServer(httpServer, shutdownTimeout, logger); err != nil && runErr == nil {
 		runErr = err
 	}
+	tracker.seal()
 	stopWorker()
 	stopRecovery(shutdownTimeout)
 	if !workerConsumed {
@@ -324,10 +335,111 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	return runErr
 }
 
+func closeRuntime(runtime io.Closer, logger *slog.Logger) {
+	if err := runtime.Close(); err != nil {
+		logger.Error("runtime close failed", "error_class", errclass.Of(err))
+	}
+}
+
+type resourceOwner struct {
+	once                         sync.Once
+	tracker                      *httpTracker
+	workerFinished               <-chan struct{}
+	runtime                      io.Closer
+	db                           io.Closer
+	lock                         interface{ Release() error }
+	logger                       *slog.Logger
+	recoveryDone, backgroundDone <-chan struct{}
+}
+
+func (o *resourceOwner) Finish() {
+	o.once.Do(func() {
+		if o.runtime != nil {
+			closeRuntime(o.runtime, o.logger)
+		}
+		var handlersDone <-chan struct{}
+		if o.tracker != nil {
+			handlersDone = o.tracker.seal()
+		}
+		done := []<-chan struct{}{o.recoveryDone, o.backgroundDone, handlersDone, o.workerFinished}
+		finish := func() {
+			for _, ch := range done {
+				if ch != nil {
+					<-ch
+				}
+			}
+			if o.db != nil {
+				_ = o.db.Close()
+			}
+			if o.lock != nil {
+				_ = o.lock.Release()
+			}
+		}
+		if o.db == nil && o.lock == nil {
+			return
+		}
+		for _, ch := range done {
+			if ch == nil {
+				continue
+			}
+			select {
+			case <-ch:
+			default:
+				go finish()
+				return
+			}
+		}
+		finish()
+	})
+}
+
+type httpTracker struct {
+	handler http.Handler
+	mu      sync.Mutex
+	active  int
+	sealed  bool
+	done    chan struct{}
+}
+
+func newHTTPTracker(handler http.Handler) *httpTracker {
+	return &httpTracker{handler: handler, done: make(chan struct{})}
+}
+
+func (t *httpTracker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	t.mu.Lock()
+	if t.sealed {
+		t.mu.Unlock()
+		http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+		return
+	}
+	t.active++
+	t.mu.Unlock()
+	defer func() {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		t.active--
+		if t.sealed && t.active == 0 {
+			close(t.done)
+		}
+	}()
+	t.handler.ServeHTTP(w, r)
+}
+
+func (t *httpTracker) seal() <-chan struct{} {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.sealed {
+		t.sealed = true
+		if t.active == 0 {
+			close(t.done)
+		}
+	}
+	return t.done
+}
+
 // startRecovery runs startup recovery in the background. The returned stop
-// cancels recovery and waits at most timeout for it to return, so the
-// runtime and database are not closed under a publication in progress.
-func startRecovery(ctx context.Context, recover func(context.Context) error, logger *slog.Logger) func(time.Duration) {
+// cancels recovery and waits at most timeout for it to return.
+func startRecovery(ctx context.Context, recover func(context.Context) error, logger *slog.Logger) (func(time.Duration), <-chan struct{}) {
 	recoveryCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
@@ -345,7 +457,7 @@ func startRecovery(ctx context.Context, recover func(context.Context) error, log
 		case <-timer.C:
 			logger.Warn("startup recovery did not stop before shutdown timeout", "timeout", timeout.String())
 		}
-	}
+	}, done
 }
 
 // newHTTPServer builds the HTTP server. onShutdown runs when Shutdown starts

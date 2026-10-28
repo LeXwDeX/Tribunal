@@ -3,17 +3,23 @@ name: CI
 "on":
   push:
   pull_request:
+  workflow_dispatch:
+    inputs:
+      self_hosted:
+        description: Run on a self-hosted runner
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   go:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.self_hosted && fromJSON('["self-hosted", "Linux", "X64"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -29,7 +35,7 @@ jobs:
       - name: Govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
       - name: Test with coverage
-        run: go test -race -coverprofile=coverage.out ./...
+        run: go test -race -timeout=40m -coverprofile=coverage.out ./...
       - name: Check coverage
         run: go run ./scripts/coveragecheck -profile coverage.out -min 70
       - name: Download modules
@@ -40,7 +46,7 @@ jobs:
         run: go run ./scripts/licensecheck -min 1
 
   docker:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.self_hosted && fromJSON('["self-hosted", "Linux", "X64"]') || 'ubuntu-latest' }}
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -49,7 +55,7 @@ jobs:
         run: bash scripts/docker-smoke.sh
 
   web:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.self_hosted && fromJSON('["self-hosted", "Linux", "X64"]') || 'ubuntu-latest' }}
     defaults:
       run:
         working-directory: web

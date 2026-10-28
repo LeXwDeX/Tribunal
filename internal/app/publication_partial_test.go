@@ -154,6 +154,7 @@ func TestPublisherPartialFailureDoesNotRepeatSideEffects(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			f := newReviewFixture(t, reviewTestHead)
 			api := usePartialGitLab(f)
 			api.fail(tc.discussionErr, tc.statusErr)

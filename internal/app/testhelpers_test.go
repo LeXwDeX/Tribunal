@@ -2,9 +2,13 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -12,6 +16,7 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/secret"
 	"github.com/LeXwDeX/tribunal/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/store/migrations"
 	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
 )
 
@@ -26,14 +31,186 @@ func newTestCipher(t *testing.T) *secret.Cipher {
 	return cipher
 }
 
-func openTestStore(t *testing.T) *sqlite.Store {
+// testStoreTemplate builds one migrated database in a private directory. It
+// closes the only store connection and fails closed if SQLite left a WAL or
+// shared-memory file, because then the main file alone is not a complete
+// snapshot. Each test receives its own copy, so no mutable state is shared.
+var testStoreTemplate = sync.OnceValues(func() ([]byte, error) {
+	dir, err := os.MkdirTemp("", "tribunal-test-store-*")
+	if err != nil {
+		return nil, fmt.Errorf("create test store template dir: %w", err)
+	}
+	defer os.RemoveAll(dir)
+
+	path := filepath.Join(dir, "template.db")
+	st, err := sqlite.Open(context.Background(), path)
+	if err != nil {
+		return nil, fmt.Errorf("open test store template: %w", err)
+	}
+	if err := st.Close(); err != nil {
+		return nil, fmt.Errorf("close test store template: %w", err)
+	}
+	// SQLite checkpoints and removes WAL files when the last connection
+	// closes. A leftover file means the main file is not self-contained.
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if _, err := os.Stat(path + suffix); err == nil {
+			return nil, fmt.Errorf("test store template still has %s file", suffix)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("stat test store template %s: %w", suffix, err)
+		}
+	}
+	snapshot, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read test store template: %w", err)
+	}
+	return snapshot, nil
+})
+
+func openTestStorePath(t *testing.T) (*sqlite.Store, string) {
 	t.Helper()
-	st, err := sqlite.Open(context.Background(), filepath.Join(t.TempDir(), "review.db"))
+	snapshot, err := testStoreTemplate()
+	if err != nil {
+		t.Fatalf("test store template: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "review.db")
+	if err := os.WriteFile(path, snapshot, 0o600); err != nil {
+		t.Fatalf("write test store: %v", err)
+	}
+	st, err := sqlite.Open(context.Background(), path)
 	if err != nil {
 		t.Fatalf("sqlite.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
+	return st, path
+}
+
+func openTestStore(t *testing.T) *sqlite.Store {
+	t.Helper()
+	st, _ := openTestStorePath(t)
 	return st
+}
+
+func TestOpenTestStoreTemplateIsCompleteAndSelfContained(t *testing.T) {
+	snapshot, err := testStoreTemplate()
+	if err != nil {
+		t.Fatalf("test store template: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "template.db")
+	if err := os.WriteFile(path, snapshot, 0o600); err != nil {
+		t.Fatalf("write template: %v", err)
+	}
+	noSidecars := func() {
+		t.Helper()
+		for _, suffix := range []string{"-wal", "-shm"} {
+			if _, err := os.Stat(path + suffix); err == nil {
+				t.Fatalf("template copy has %s", suffix)
+			} else if !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("stat template %s: %v", suffix, err)
+			}
+		}
+	}
+	noSidecars()
+
+	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(DELETE)")
+	if err != nil {
+		t.Fatalf("open template: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	var journalMode string
+	if err := db.QueryRowContext(context.Background(), `PRAGMA journal_mode`).Scan(&journalMode); err != nil {
+		t.Fatalf("journal_mode: %v", err)
+	}
+	if !strings.EqualFold(journalMode, "delete") {
+		t.Fatalf("template journal mode = %q, want delete", journalMode)
+	}
+	noSidecars()
+
+	var integrity string
+	if err := db.QueryRowContext(context.Background(), `PRAGMA integrity_check`).Scan(&integrity); err != nil {
+		t.Fatalf("integrity_check: %v", err)
+	}
+	if integrity != "ok" {
+		t.Fatalf("integrity_check = %q", integrity)
+	}
+
+	entries, err := migrations.FS.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read migrations: %v", err)
+	}
+	missing := map[string]bool{}
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") {
+			missing[entry.Name()] = true
+		}
+	}
+	rows, err := db.QueryContext(context.Background(), `SELECT name FROM schema_migrations`)
+	if err != nil {
+		t.Fatalf("list migrations: %v", err)
+	}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			t.Fatalf("scan migration: %v", err)
+		}
+		if !missing[name] {
+			rows.Close()
+			t.Fatalf("template has unexpected migration %q", name)
+		}
+		delete(missing, name)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatalf("close migrations: %v", err)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate migrations: %v", err)
+	}
+	if len(missing) != 0 {
+		t.Fatalf("template is missing migrations %v", missing)
+	}
+
+	var projects int
+	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM projects`).Scan(&projects); err != nil {
+		t.Fatalf("count projects: %v", err)
+	}
+	if projects != 0 {
+		t.Fatalf("template projects = %d, want 0", projects)
+	}
+}
+
+func TestOpenTestStoreCopiesAreIsolated(t *testing.T) {
+	ctx := context.Background()
+	first, firstPath := openTestStorePath(t)
+	second, secondPath := openTestStorePath(t)
+	if firstPath == secondPath {
+		t.Fatalf("two tests share the database path %q", firstPath)
+	}
+
+	cipher := newTestCipher(t)
+	seedProject(t, first, cipher, 42, "first", "{}", "default")
+	if err := first.Close(); err != nil {
+		t.Fatalf("close first: %v", err)
+	}
+	reopened, err := sqlite.Open(ctx, firstPath)
+	if err != nil {
+		t.Fatalf("reopen first: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if _, err := reopened.GetProject(ctx, 42); err != nil {
+		t.Fatalf("write missing after reopen: %v", err)
+	}
+
+	if _, err := second.GetProject(ctx, 42); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("second copy sees first project: %v", err)
+	}
+	if projects, err := second.ListProjects(ctx); err != nil || len(projects) != 0 {
+		t.Fatalf("second copy projects = %v, %v", projects, err)
+	}
+	seedProject(t, second, cipher, 43, "second", "{}", "default")
+	if _, err := reopened.GetProject(ctx, 43); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("first copy sees second project: %v", err)
+	}
 }
 
 func testProfiles() map[string]config.ProfileConfig {

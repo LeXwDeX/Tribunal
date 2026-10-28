@@ -25,7 +25,7 @@ cp -n .env.example .env
 chmod 600 .env
 ```
 
-填写真实 `GITLAB_URL`、`LLM_MODEL`、`LLM_API_KEY`，检查 `LLM_PROTOCOL` 和 `LLM_BASE_URL` 是否匹配模型接口。分别生成并持久保存 `REVIEW_MASTER_KEY`、`REVIEW_ADMIN_TOKEN`、`TRIBUNAL_SESSION_KEY`，生成方法见 `.env.example`。`.env` 已被 Git 和 Docker 构建上下文忽略；Compose 只传入显式列出的环境变量。
+填写真实 `GITLAB_URL`、`LLM_MODEL`、`LLM_API_KEY`，检查 `LLM_PROTOCOL` 和 `LLM_BASE_URL` 是否匹配模型接口。分别生成并持久保存 `REVIEW_MASTER_KEY`、`REVIEW_ADMIN_TOKEN`、`TRIBUNAL_SESSION_KEY`，生成方法见[私有密钥生成步骤](docs/agent-deployment.md#2-准备配置)。`.env` 已被 Git 和 Docker 构建上下文忽略；Compose 只传入显式列出的环境变量。
 
 本文环境变量示例使用新主名 `TRIBUNAL_SESSION_KEY`、`TRIBUNAL_PUBLIC_URL`、`TRIBUNAL_HTTP_PORT`。旧名 `CRC_SESSION_KEY`、`CRC_PUBLIC_URL`、`CRC_HTTP_PORT` 仍兼容；新旧同时设置时新名优先。`TRIBUNAL_SESSION_KEY` 未设置或恰好为空字符串时才回退旧名；非空但只含空白是非法值，启动失败，不回退旧名，也不生成临时 key。三个旧名只要配置了非空值，都会各记录一次弃用日志；日志只含变量名、不含值。日志表示旧名仍配置，不代表旧值一定生效或一定被忽略：Compose 会把仅设置的 `CRC_HTTP_PORT` 作为 `TRIBUNAL_HTTP_PORT` 的插值回退值，仅用于宿主机端口映射，并把仅设置的 `CRC_SESSION_KEY` 复制给容器的 `TRIBUNAL_SESSION_KEY`。`TRIBUNAL_HTTP_PORT` / `CRC_HTTP_PORT` 只影响 Compose 宿主机映射，不是应用监听端口。若部署的 `.env` 仍列出旧名，照常可用。升级时复用原 session key 的同一个值，不要重新生成，否则现有浏览器会话失效。
 
@@ -45,18 +45,31 @@ docker compose exec -T review /app/tribunalctl projects all
 
 ## 本地启动
 
-需要 Go 1.26 或更新版本。SQLite 使用纯 Go 驱动，不需要 C 编译器。控制台产物通过 `//go:embed all:dist`（`web/embed.go`）打进二进制，因此**编译或运行前要先构建前端**：
+需要 Go 1.26 或更新版本。SQLite 使用纯 Go 驱动，不需要 C 编译器。控制台产物通过 `//go:embed all:dist`（`web/embed.go`）打进二进制，因此**编译或运行前要先构建前端**。
+
+在当前 Bash shell 中先执行 `set +x`，再由用户或安全密钥管理器将已持久保存的 `REVIEW_MASTER_KEY`、`REVIEW_ADMIN_TOKEN` 和 `TRIBUNAL_SESSION_KEY` 安全注入当前环境，不要把值写入命令、终端或日志。全新部署可先按[私有密钥生成步骤](docs/agent-deployment.md#2-准备配置)生成并保存；已有部署必须复用原值。若原会话密钥使用旧名 `CRC_SESSION_KEY`，本启动示例需要将同一个值安全注入 `TRIBUNAL_SESSION_KEY`，不要重新生成。
+
+以下启动、单独构建及验证命令在子 shell 中清除 `REVIEW_MASTER_KEY`、`REVIEW_ADMIN_TOKEN`、`TRIBUNAL_SESSION_KEY`、`CRC_SESSION_KEY`、`LLM_API_KEY`、`GITLAB_PROJECT_TOKEN` 和 `GITLAB_OAUTH_CLIENT_SECRET`，确认它们均未设置后才运行 npm。其他环境变量仍会被继承，请先移除其中的秘密。无法清除或确认清除时命令会失败并停止；只读变量无法清除时请改用没有这些只读变量的 shell。检查假定 Bash、变量展开和执行的命令可信，不能防御恶意 shell、函数、别名或被篡改的 npm。当前 shell 和服务使用的值不变；启动块会将三个新名标记为 export。保持 xtrace 关闭，然后运行：
 
 ```bash
-cd web && npm ci && npm run build && cd ..
-export REVIEW_MASTER_KEY="$(openssl rand -base64 32)"
-export REVIEW_ADMIN_TOKEN="$(openssl rand -hex 32)"
-export TRIBUNAL_SESSION_KEY="$(openssl rand -base64 32)"
-go run ./cmd/server --config config/server.example.yaml --check-config
-go run ./cmd/server --config config/server.example.yaml
+set +x
+if [ -n "${REVIEW_MASTER_KEY:-}" ] && [ -n "${REVIEW_ADMIN_TOKEN:-}" ] &&
+   [ -n "${TRIBUNAL_SESSION_KEY:-}" ]; then
+  export REVIEW_MASTER_KEY REVIEW_ADMIN_TOKEN TRIBUNAL_SESSION_KEY &&
+  (cd web && builtin unset -v REVIEW_MASTER_KEY REVIEW_ADMIN_TOKEN TRIBUNAL_SESSION_KEY CRC_SESSION_KEY \
+    LLM_API_KEY GITLAB_PROJECT_TOKEN GITLAB_OAUTH_CLIENT_SECRET &&
+    [ -z "${REVIEW_MASTER_KEY+x}${REVIEW_ADMIN_TOKEN+x}${TRIBUNAL_SESSION_KEY+x}${CRC_SESSION_KEY+x}" ] &&
+    [ -z "${LLM_API_KEY+x}${GITLAB_PROJECT_TOKEN+x}${GITLAB_OAUTH_CLIENT_SECRET+x}" ] &&
+    npm ci && npm run build) &&
+  go run ./cmd/server --config config/server.example.yaml --check-config &&
+  go run ./cmd/server --config config/server.example.yaml
+else
+  printf '缺少已保存的密钥或管理员 token；已停止。\n' >&2
+  false
+fi
 ```
 
-全新检出没有 `web/dist` 时，`go build ./...` / `go run ./cmd/server` 会因 embed 找不到目录而失败。先执行 `cd web && npm ci && npm run build`。
+全新检出没有 `web/dist` 时，`go build ./...` / `go run ./cmd/server` 会因 embed 找不到目录而失败。先执行 `(cd web && builtin unset -v REVIEW_MASTER_KEY REVIEW_ADMIN_TOKEN TRIBUNAL_SESSION_KEY CRC_SESSION_KEY LLM_API_KEY GITLAB_PROJECT_TOKEN GITLAB_OAUTH_CLIENT_SECRET && [ -z "${REVIEW_MASTER_KEY+x}${REVIEW_ADMIN_TOKEN+x}${TRIBUNAL_SESSION_KEY+x}${CRC_SESSION_KEY+x}" ] && [ -z "${LLM_API_KEY+x}${GITLAB_PROJECT_TOKEN+x}${GITLAB_OAUTH_CLIENT_SECRET+x}" ] && npm ci && npm run build)`。
 
 示例配置可以启动服务，并提供 Bearer 认证。浏览器控制台登录另外需要 GitLab OAuth application，并在配置中设置 `auth.oauth.client_id_env` / `client_secret_env` 和绝对 HTTP(S) 地址 `server.public_url`；启用 OAuth 但缺少该地址时启动校验失败。示例配置未启用 `auth.oauth`，`/auth/login` 会返回 503：
 
@@ -83,36 +96,109 @@ go run ./cmd/tribunalctl --url http://localhost:8080 projects all
 
 ## 注册项目
 
-先通过部署环境设置 `GITLAB_PROJECT_TOKEN`。项目 token 需要 `api` 和 `read_repository` scope。自动创建 webhook 还需要 Maintainer 权限。
+注册会访问真实 GitLab 并创建 onboarding 任务，可能产生模型费用。执行前必须向用户确认目标 GitLab、项目、注册动作和可能费用，并获得明确授权；未授权时不要执行。项目 token 需要 `api` 和 `read_repository` scope，自动创建 webhook 还需要 Maintainer 权限。
+
+在 Bash 当前 shell 中先关闭 xtrace，由用户或安全密钥管理器将 token 注入 `GITLAB_PROJECT_TOKEN`，不要把真实 token 写入命令、终端、日志或聊天。不要将本步骤使用的变量设为 readonly。将 `GITLAB_PROJECT` 设为本次已确认的项目，将 `REGISTRATION_DIR` 设为仓库外、不被同步或备份的现有私有目录的绝对路径；目录及其父路径必须受控，不得有不可信的同 UID 进程。自行确认 ACL 等没有额外授权，命令只核验目录属主和模式位并解析实际路径。以下步骤需要宿主机的 Python 3；确保终端录制和日志不会捕获秘密。token 和打开的响应文件描述符可被宿主 shell 的子进程继承，因此秘密处理完成前只运行可信程序。
 
 ```bash
-go run ./cmd/tribunalctl --url http://localhost:8080 projects register \
-  --project group/backend-api \
-  --token-env GITLAB_PROJECT_TOKEN \
-  --profile default
-go run ./cmd/tribunalctl --url http://localhost:8080 projects get 42
+set +x
+if {
+  if ! (builtin unset -v GITLAB_PROJECT_TOKEN && [ "${GITLAB_PROJECT_TOKEN+x}" != x ]) 2>/dev/null; then
+    printf '无法确认项目 token 可以清除；已停止，请结束受影响的 shell。\n' >&2
+    false
+  elif [ "${REGISTRATION_CREATED_FILE+x}" = x ] || [ "${REGISTRATION_CREATED_ID+x}" = x ]; then
+    printf '本 shell 已有注册标记；请先安全处理响应，再使用新 shell。\n' >&2
+    false
+  elif ( : <&9 ) 2>/dev/null; then
+    printf '文件描述符 9 已被占用；请使用新 shell。\n' >&2
+    false
+  elif ! (builtin unset -v REGISTRATION_FILE && [ "${REGISTRATION_FILE+x}" != x ]) 2>/dev/null ||
+       ! (builtin unset -v registration_confirm && [ "${registration_confirm+x}" != x ]) 2>/dev/null ||
+       ! (builtin unset -v registration_dir && [ "${registration_dir+x}" != x ]) 2>/dev/null ||
+       ! (builtin unset -v registration_identity && [ "${registration_identity+x}" != x ]) 2>/dev/null; then
+    printf '响应路径或确认变量无法清除；已停止。\n' >&2
+    false
+  elif ! builtin unset -v PROJECT_ID 2>/dev/null || [ "${PROJECT_ID+x}" = x ]; then
+    printf '无法清除项目 ID；已停止。\n' >&2
+    false
+  elif [ -n "${REGISTRATION_FILE:-}" ]; then
+    printf '先安全处理上次的私有响应文件；已停止。\n' >&2
+    false
+  elif [ -z "${GITLAB_PROJECT_TOKEN:-}" ] || [ -z "${GITLAB_PROJECT:-}" ] ||
+     [ -z "${REGISTRATION_DIR:-}" ] || [[ "$REGISTRATION_DIR" != /* ]] || [ ! -d "$REGISTRATION_DIR" ] ||
+     ! command -v python3 >/dev/null 2>&1; then
+      printf '缺少项目 token、已确认的项目、私有目录绝对路径或 Python 3；已停止。\n' >&2
+    false
+  else
+    export GITLAB_PROJECT_TOKEN
+    printf '已获用户授权注册已确认的项目并承担可能费用？输入 yes 继续：' >&2
+    if ! IFS= read -r registration_confirm || [ "$registration_confirm" != yes ]; then
+      printf '未确认；已停止。\n' >&2
+      false
+    elif ! registration_dir="$(python3 -I -c 'import os, stat, sys
+p = os.path.realpath(sys.argv[1])
+s = os.stat(p)
+if not os.path.isabs(p) or "\n" in p or not stat.S_ISDIR(s.st_mode) or s.st_uid != os.geteuid() or s.st_mode & 0o077: sys.exit(1)
+sys.stdout.write(p)' "$REGISTRATION_DIR" 2>/dev/null)"; then
+      printf '无法核验私有目录；已停止。\n' >&2
+      false
+    elif ! REGISTRATION_FILE="$(umask 077; mktemp "$registration_dir/tribunal-registration.XXXXXXXX" 2>/dev/null)"; then
+      printf '无法创建私有响应文件；已停止。\n' >&2
+      false
+    elif ! { exec 9< "$REGISTRATION_FILE"; } 2>/dev/null; then
+      printf '无法保持本次响应文件；已停止并保留路径供安全核对。\n' >&2
+      false
+    elif ! registration_identity="$(python3 -I -c 'import os, re, stat, sys
+p, d = sys.argv[1:]
+s = os.lstat(p)
+f = os.fstat(9)
+if os.path.dirname(p) != d or not re.fullmatch(r"tribunal-registration\.[A-Za-z0-9]{8}", os.path.basename(p)) or not stat.S_ISREG(s.st_mode) or s.st_uid != os.geteuid() or s.st_mode & 0o777 != 0o600 or s.st_nlink != 1 or (s.st_dev, s.st_ino) != (f.st_dev, f.st_ino): sys.exit(1)
+sys.stdout.write(str(s.st_dev) + ":" + str(s.st_ino))' "$REGISTRATION_FILE" "$registration_dir" 2>/dev/null)"; then
+      exec 9<&-
+      printf '无法核验本次响应文件；已停止并保留路径供安全核对。\n' >&2
+      false
+    elif ! builtin readonly REGISTRATION_CREATED_FILE="$REGISTRATION_FILE" REGISTRATION_CREATED_ID="$registration_identity"; then
+      exec 9<&-
+      printf '无法记录本次响应文件；已停止并保留路径供安全核对。\n' >&2
+      false
+    elif ! go run ./cmd/tribunalctl --url http://localhost:8080 projects register \
+      --project "$GITLAB_PROJECT" --token-env GITLAB_PROJECT_TOKEN \
+      --profile default > "$REGISTRATION_FILE" 2>/dev/null; then
+      printf '注册失败或结果不确定；停止并核对状态，不要直接重试。\n' >&2
+      false
+    elif ! PROJECT_ID="$(python3 -I -c 'import json, sys; value = json.load(sys.stdin)["project"]["id"]; print(value) if type(value) is int and 0 < value <= 9223372036854775807 else sys.exit(1)' < "$REGISTRATION_FILE" 2>/dev/null)"; then
+      printf '无法读取项目 ID；保留私有响应并核对注册状态，不要直接重试。\n' >&2
+      false
+    fi
+  fi
+}; then
+  if builtin unset -v GITLAB_PROJECT_TOKEN 2>/dev/null && [ "${GITLAB_PROJECT_TOKEN+x}" != x ]; then
+    printf '%s\n' "$PROJECT_ID"
+  else
+    printf '无法清除项目 token；注册可能已成功，不要直接重试。请结束受影响的 shell 并安全处理私有响应。\n' >&2
+    false
+  fi
+else
+  if ! builtin unset -v GITLAB_PROJECT_TOKEN 2>/dev/null || [ "${GITLAB_PROJECT_TOKEN+x}" = x ]; then
+    printf '无法清除项目 token；请结束受影响的 shell 并安全处理私有响应。\n' >&2
+  fi
+  false
+fi
 ```
 
-`--project` 也可以是 GitLab 项目 ID 或配置的 GitLab 根地址下的完整 HTTP(S) 仓库 URL。默认手工创建 webhook：注册响应中的 `webhook_secret` 只显示这一次，用它配置 GitLab 的 Secret token。URL 为服务地址加 `/webhooks/gitlab`，启用 Merge request、Comments 和 Push 事件。
+`--project` 也可以是 GitLab 项目 ID 或配置的 GitLab 根地址下的完整 HTTP(S) 仓库 URL。命令块会尝试清除当前 shell 的项目 token；无法确认或清除时返回失败，保留响应路径并提示结束受影响的 shell。即使最后清除 token 失败，注册也可能已经成功；不要直接重试，先安全核对项目和 webhook 状态。信号中断可能跳过清理；中断后先尝试在当前 shell 清除 token，若不能确认清除则结束该 shell。清除当前变量也不会清除已继承 token 的子进程或其他副本。响应先写入新建的 0600 私有文件，标准输出只显示项目 ID；该正整数校验不能证明 onboarding 已完成，须另行检查任务状态。确认提示和不含秘密的错误信息写入标准错误。不要输出、复制到日志或直接打开响应文件。默认手工创建 webhook，响应中的 `webhook_secret` 只返回一次。如何通过受控渠道填写 GitLab 的 Secret token、清理私有文件，以及失败时如何处理，见[部署与运维的项目注册步骤](docs/operations.md#浏览器登录与项目注册)。URL 为服务地址加 `/webhooks/gitlab`，启用 Merge request、Comments 和 Push 事件。
 
 控制台先「校验连接」，再「保存并初始化」。管理员也可调用 `POST /api/v1/projects/validate`，提交 `{project, token}`，只读验证身份、至少 Reporter 权限、scope、有效期和 Git HEAD；不会保存凭据、调用模型或创建 webhook。校验成功不证明完整 clone 或评论发布可用，详见 [项目 API](docs/design/03-http-api.md#41-项目)。设置页的「更新访问 Key」只更新本平台凭据，不在 GitLab 创建或撤销 token。
 
-自动创建时添加 `--auto-webhook`，并把 `server.public_url` 配为 GitLab 能访问的服务地址。重复注册返回冲突，不覆盖已有凭据。自动创建 hook 成功但入库失败时会尝试删除刚创建的 hook；网络中断等异常仍可能需要管理员核对 GitLab 上的 hook。
+自动创建时在同一个注册命令的 `--profile default` 后添加 `--auto-webhook`，仍须将响应写入私有文件并安全清理；把 `server.public_url` 配为 GitLab 能访问的服务地址。重复注册返回冲突，不覆盖已有凭据。自动创建 hook 成功但入库失败时会尝试删除刚创建的 hook；网络中断等异常仍可能需要管理员核对 GitLab 上的 hook。
 
 CLI 默认读取 `REVIEW_ADMIN_TOKEN`，可以用全局参数 `--api-token-env NAME` 改变环境变量名。注册响应和普通查询都不会返回项目 access token 或数据库密文。项目业务列表按当前 bearer 所属用户的项目授权过滤；静态 bootstrap token 没有用户 ID 和 grant，因此 `tribunalctl projects list` 返回空列表是正常的。管理面列出全部已登记项目用 `tribunalctl projects all`。用户和授权管理命令：
 
 ```bash
 tribunalctl users list
-tribunalctl projects grants list <project-id>
-tribunalctl projects grants set <project-id> <user-id> read
-tribunalctl projects grants set <project-id> <user-id> manage
-tribunalctl projects grants delete <project-id> <user-id>
-tribunalctl users disable <user-id>
-tribunalctl users enable <user-id>
-tribunalctl users revoke <user-id>
 ```
 
-这些用户和授权命令需要平台管理员凭据；用户自己的 API token 只用于其已有项目 grant 的业务访问。首次授权前，目标用户需要先通过 OAuth 登录一次，才能在 `users list` 中得到 GitLab 用户 ID。`users disable` 会同时撤销该用户的全部会话和 API token；`users revoke` 只撤销凭据，不禁用账号。已有部署升级后所有用户默认没有 project grant，包括平台管理员；迁移和撤销步骤见 [部署与运维](docs/operations.md#项目授权用户停用和凭据撤销)。
+查询用户需要平台管理员凭据；用户自己的 API token 只用于其已有项目 grant 的业务访问。首次授权前，目标用户需要先通过 OAuth 登录一次，才能在 `users list` 中得到 GitLab 用户 ID。`users disable` 会同时撤销该用户的全部会话和 API token；`users revoke` 只撤销凭据，不禁用账号。已有部署升级后所有用户默认没有 project grant，包括平台管理员；先确认具体用户、项目和动作，再按[部署与运维](docs/operations.md#项目授权用户停用和凭据撤销)中的单次授权或用户停用步骤执行，不要默认授予任何用户。
 
 ## 入口与队列
 
@@ -156,15 +242,19 @@ Docker 镜像还内置校验过的 [codebase-memory-mcp](https://github.com/Deus
 ## 验证
 
 ```bash
-cd web && npm test && npm run build && cd ..
-go build ./...
-go vet ./...
-go test ./...
-go test -race ./...
+(cd web && builtin unset -v REVIEW_MASTER_KEY REVIEW_ADMIN_TOKEN TRIBUNAL_SESSION_KEY CRC_SESSION_KEY \
+  LLM_API_KEY GITLAB_PROJECT_TOKEN GITLAB_OAUTH_CLIENT_SECRET &&
+  [ -z "${REVIEW_MASTER_KEY+x}${REVIEW_ADMIN_TOKEN+x}${TRIBUNAL_SESSION_KEY+x}${CRC_SESSION_KEY+x}" ] &&
+  [ -z "${LLM_API_KEY+x}${GITLAB_PROJECT_TOKEN+x}${GITLAB_OAUTH_CLIENT_SECRET+x}" ] &&
+  npm test && npm run build) &&
+go build ./... &&
+go vet ./... &&
+go test ./... &&
+go test -race ./... &&
 go mod verify
 ```
 
-`go build` 依赖 `web/dist`，因此在全新检出上必须先执行前端构建。测试使用临时 SQLite 数据库和本地 HTTP 假 GitLab，覆盖注册、加密、认证、事件过滤、并发去重、租约恢复、旧 attempt 拒绝、CLI、工作流、发布、工作区、扩展和控制台静态资源。
+`go build` 依赖 `web/dist`，因此在全新检出上必须先执行前端构建。完整 Go 测试需要 Bash 和真实的 Python 3（注册文档测试会执行 Python 3）；`go test -race` 还需要启用 cgo 和可用的 C 编译器。自托管 runner 必须在运行前确认这些前提。生产二进制和部署运行不依赖 Python 3；上面的人工注册文档示例单独需要宿主机 Python 3。测试使用临时 SQLite 数据库和本地 HTTP 假 GitLab，覆盖注册、加密、认证、事件过滤、并发去重、租约恢复、旧 attempt 拒绝、CLI、工作流、发布、工作区、扩展和控制台静态资源。
 
 各版本做过哪些验证见 [交付就绪与验收记录](docs/delivery-readiness.md)：当前版本看 [当前版本（v1.1.x）验证状态](docs/delivery-readiness.md#当前版本v11x验证状态)，v1.0.0 的 f143 隔离实例验收看 [v1.0.0 历史验收记录](docs/delivery-readiness.md#v100-历史验收记录f143仅供追溯)。
 
