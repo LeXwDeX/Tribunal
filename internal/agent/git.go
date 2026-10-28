@@ -50,8 +50,12 @@ type gitLogInput struct {
 type gitLogTool struct{ sb *Sandbox }
 
 func (t gitLogTool) Def() llm.ToolDef {
-	return def("git_log",
-		"Read-only git log --oneline for the selected root.",
+	description := "Read-only git log --oneline for the selected root."
+	if t.sb.deny != nil {
+		description = "Read-only git log with commit hashes and author timestamps only."
+	}
+	return def(t.sb, "git_log",
+		description,
 		`{"type":"object","properties":{
 			"path":{"type":"string"},
 			"max":{"type":"integer","minimum":1,"maximum":100},
@@ -75,8 +79,12 @@ func (t gitLogTool) Call(ctx context.Context, raw json.RawMessage) (Result, erro
 	if err != nil {
 		return Result{}, err
 	}
-	out, truncated, err := t.sb.runGit(ctx, in.Root, "log", "log", "--oneline", "--no-decorate", "--no-show-signature",
-		"-n", strconv.Itoa(max), "--", rel)
+	args := []string{"log", "--oneline"}
+	if t.sb.deny != nil {
+		args = []string{"log", "--format=%H %aI", "--no-notes", "--no-patch"}
+	}
+	args = append(args, "--no-decorate", "--no-show-signature", "-n", strconv.Itoa(max), "--", rel)
+	out, truncated, err := t.sb.runGit(ctx, in.Root, "log", args...)
 	if err != nil {
 		return Result{}, err
 	}
@@ -96,7 +104,7 @@ type gitBlameInput struct {
 type gitBlameTool struct{ sb *Sandbox }
 
 func (t gitBlameTool) Def() llm.ToolDef {
-	return def("git_blame",
+	return def(t.sb, "git_blame",
 		"Read-only git blame for a line range of one file.",
 		`{"type":"object","required":["path","start_line","end_line"],"properties":{
 			"path":{"type":"string"},
@@ -128,7 +136,12 @@ func (t gitBlameTool) Call(ctx context.Context, raw json.RawMessage) (Result, er
 		return Result{}, fmt.Errorf("%s is not a regular file", rel)
 	}
 	rangeArg := fmt.Sprintf("-L%d,%d", in.StartLine, in.EndLine)
-	out, truncated, err := t.sb.runGit(ctx, in.Root, "blame", "blame", "--date=short", "--no-textconv", rangeArg, "--", rel)
+	args := []string{"blame", "--date=short", "--no-textconv"}
+	if t.sb.deny != nil {
+		args = append(args, "-s")
+	}
+	args = append(args, rangeArg, "--", rel)
+	out, truncated, err := t.sb.runGit(ctx, in.Root, "blame", args...)
 	if err != nil {
 		return Result{}, err
 	}

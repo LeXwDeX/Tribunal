@@ -7,13 +7,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/config"
 	"github.com/LeXwDeX/tribunal/internal/errclass"
+	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/jobs"
 	"github.com/LeXwDeX/tribunal/internal/mcp"
 	"github.com/LeXwDeX/tribunal/internal/repo"
@@ -159,7 +159,7 @@ func (s *WorkspaceService) Handle(ctx context.Context, job *jobs.Job) error {
 		if decodeErr := json.Unmarshal(job.Payload, &payload); decodeErr != nil {
 			err = PermanentJob(fmt.Errorf("invalid workspace payload"))
 		} else {
-			err = s.Onboard(ctx, payload.ProjectID)
+			err = s.onboard(ctx, payload.ProjectID, job)
 		}
 	case "workspace.refresh":
 		var payload workspaceJobPayload
@@ -168,10 +168,10 @@ func (s *WorkspaceService) Handle(ctx context.Context, job *jobs.Job) error {
 		} else if payload.ProjectID <= 0 {
 			err = PermanentJob(fmt.Errorf("invalid workspace project"))
 		} else {
-			err = s.RefreshWithOptions(ctx, payload.ProjectID, payload.Ref, WorkspaceRefreshOptions{
+			err = s.refreshWithOptions(ctx, payload.ProjectID, payload.Ref, WorkspaceRefreshOptions{
 				RegenerateContext: payload.RegenerateContext,
 				Reindex:           payload.Reindex,
-			})
+			}, job)
 		}
 	default:
 		return nil
@@ -190,6 +190,11 @@ func (s *WorkspaceService) EnqueueOnboard(ctx context.Context, projectID int64) 
 	if s.queue == nil {
 		return "", errors.New("app: job queue is not configured")
 	}
+	unlock, err := s.lockEnqueueProject(ctx, projectID)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
 	return enqueueJob(ctx, s.queue, "workspace.onboard", fmt.Sprintf("ws:%d:onboard", projectID), map[string]any{
 		"project_id": projectID,
 		"trigger":    "register",
@@ -201,6 +206,11 @@ func (s *WorkspaceService) EnqueueRefresh(ctx context.Context, projectID int64, 
 	if s.queue == nil {
 		return "", errors.New("app: job queue is not configured")
 	}
+	unlock, err := s.lockEnqueueProject(ctx, projectID)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
 	return enqueueJob(ctx, s.queue, "workspace.refresh", fmt.Sprintf("ws:%d", projectID), map[string]any{
 		"project_id": projectID,
 		"ref":        ref,
@@ -208,6 +218,26 @@ func (s *WorkspaceService) EnqueueRefresh(ctx context.Context, projectID int64, 
 		"after_sha":  after,
 		"trigger":    "push",
 	})
+}
+
+func (s *WorkspaceService) lockEnqueueProject(ctx context.Context, projectID int64) (func(), error) {
+	ws := s.workspace.Get(projectID)
+	if ws == nil {
+		return nil, notFoundError("project not found")
+	}
+	unlock, err := ws.RLock(ctx)
+	if err != nil {
+		return nil, err
+	}
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil || project == nil {
+		unlock()
+		if errors.Is(err, store.ErrNotFound) || (err == nil && project == nil) {
+			return nil, notFoundError("project not found")
+		}
+		return nil, err
+	}
+	return unlock, nil
 }
 
 func enqueueJob(ctx context.Context, queue JobEnqueuer, kind, key string, payload any) (string, error) {
@@ -219,14 +249,38 @@ func enqueueJob(ctx context.Context, queue JobEnqueuer, kind, key string, payloa
 	return id, err
 }
 
-// Onboard implements F5.
-func (s *WorkspaceService) Onboard(ctx context.Context, projectID int64) error {
-	if projectID <= 0 {
-		return PermanentJob(fmt.Errorf("invalid project"))
+// consumerJobExists checks the original persisted job while holding its
+// project's workspace lock. Job IDs do not survive project deletion.
+func consumerJobExists(ctx context.Context, st interface {
+	GetJob(context.Context, string) (*store.Job, error)
+}, job *jobs.Job, kind string, projectID int64) error {
+	if job == nil || strings.TrimSpace(job.ID) == "" || job.Kind != kind {
+		return PermanentJob(fmt.Errorf("invalid consumer job"))
 	}
-	project, token, err := s.projectToken(ctx, projectID)
+	stored, err := st.GetJob(ctx, job.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		return PermanentJob(fmt.Errorf("consumer job no longer exists"))
+	}
 	if err != nil {
 		return err
+	}
+	var identity struct {
+		ProjectID int64 `json:"project_id"`
+	}
+	if stored == nil || stored.ID != job.ID || stored.Kind != kind || json.Unmarshal(stored.Payload, &identity) != nil || identity.ProjectID != projectID {
+		return PermanentJob(fmt.Errorf("consumer job identity changed"))
+	}
+	return nil
+}
+
+// Onboard implements F5.
+func (s *WorkspaceService) Onboard(ctx context.Context, projectID int64) error {
+	return s.onboard(ctx, projectID, nil)
+}
+
+func (s *WorkspaceService) onboard(ctx context.Context, projectID int64, job *jobs.Job) error {
+	if projectID <= 0 {
+		return PermanentJob(fmt.Errorf("invalid project"))
 	}
 	ws := s.workspace.Get(projectID)
 	if ws == nil {
@@ -237,6 +291,15 @@ func (s *WorkspaceService) Onboard(ctx context.Context, projectID int64) error {
 		return err
 	}
 	defer unlock()
+	if job != nil {
+		if err := consumerJobExists(ctx, s.store, job, "workspace.onboard", projectID); err != nil {
+			return err
+		}
+	}
+	project, token, err := s.projectToken(ctx, projectID)
+	if err != nil {
+		return err
+	}
 	return s.onboardLocked(ctx, project, token, true)
 }
 
@@ -247,10 +310,10 @@ func (s *WorkspaceService) Refresh(ctx context.Context, projectID int64, ref str
 
 // RefreshWithOptions implements F4 and honors explicit index/context flags.
 func (s *WorkspaceService) RefreshWithOptions(ctx context.Context, projectID int64, ref string, options WorkspaceRefreshOptions) error {
-	project, token, err := s.projectToken(ctx, projectID)
-	if err != nil {
-		return err
-	}
+	return s.refreshWithOptions(ctx, projectID, ref, options, nil)
+}
+
+func (s *WorkspaceService) refreshWithOptions(ctx context.Context, projectID int64, ref string, options WorkspaceRefreshOptions, job *jobs.Job) error {
 	ws := s.workspace.Get(projectID)
 	if ws == nil {
 		return PermanentJob(fmt.Errorf("workspace is unavailable"))
@@ -260,6 +323,15 @@ func (s *WorkspaceService) RefreshWithOptions(ctx context.Context, projectID int
 		return err
 	}
 	defer unlock()
+	if job != nil {
+		if err := consumerJobExists(ctx, s.store, job, "workspace.refresh", projectID); err != nil {
+			return err
+		}
+	}
+	project, token, err := s.projectToken(ctx, projectID)
+	if err != nil {
+		return err
+	}
 
 	state, err := s.store.GetWorkspace(ctx, projectID)
 	if err != nil || state == nil {
@@ -273,10 +345,18 @@ func (s *WorkspaceService) RefreshWithOptions(ctx context.Context, projectID int
 		s.markWorkspaceError(ctx, projectID, err)
 		return err
 	}
+	docs, cfg, err := s.workspaceReviewConfig(ctx, project, token, newBase)
+	if err != nil {
+		s.markWorkspaceError(ctx, projectID, err)
+		return err
+	}
 	reindex := options.Reindex == nil || *options.Reindex
 	indexSHA := state.IndexSHA
 	indexErr := ""
-	if reindex && s.mcpFactory != nil {
+	indexEligible := !reindex && state.State == "ready" && state.LastError == "" && shaRE.MatchString(newBase) && shaRE.MatchString(indexSHA) && strings.EqualFold(indexSHA, newBase)
+	if len(cfg.Settings.Ignore) > 0 {
+		indexErr = "index: blocked by ignore policy"
+	} else if reindex && s.mcpFactory != nil {
 		count, err := s.runIndex(ctx, projectID, ws.BaseDir())
 		switch {
 		case err != nil && ctx.Err() != nil:
@@ -288,7 +368,12 @@ func (s *WorkspaceService) RefreshWithOptions(ctx context.Context, projectID int
 			indexErr = s.indexDegraded(projectID, err)
 		case count > 0:
 			indexSHA = newBase
+			indexEligible = shaRE.MatchString(newBase)
+		default:
+			indexErr = store.WorkspaceIndexFailed
 		}
+	} else if !indexEligible && (state.LastError != "" || strings.EqualFold(indexSHA, newBase) && indexSHA != "") {
+		indexErr = store.WorkspaceIndexFailed
 	}
 	regenerate := s.shouldRefreshContext(ctx, projectID, oldBase, newBase, state)
 	if options.RegenerateContext != nil {
@@ -296,7 +381,7 @@ func (s *WorkspaceService) RefreshWithOptions(ctx context.Context, projectID int
 	}
 	contextAfter := state.ContextSHA
 	if regenerate {
-		if err := s.generateContext(ctx, project, token, ws, newBase, false); err != nil {
+		if err := s.generateContext(ctx, project, ws, newBase, docs, cfg, indexEligible && indexErr == ""); err != nil {
 			if errors.Is(err, ErrContextProjection) {
 				// The database owns the active revision; a failed disk projection
 				// must not be reported as a successful refresh.
@@ -345,7 +430,16 @@ func (s *WorkspaceService) onboardLocked(ctx context.Context, project *store.Pro
 	if ws == nil {
 		return PermanentJob(fmt.Errorf("workspace is unavailable"))
 	}
-	s.saveWorkspace(ctx, store.Workspace{ProjectID: project.ID, State: "onboarding"})
+	previous, err := s.store.GetWorkspace(ctx, project.ID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	state := store.Workspace{ProjectID: project.ID, State: "onboarding"}
+	if previous != nil {
+		state.BaseSHA, state.IndexSHA, state.ContextSHA = previous.BaseSHA, previous.IndexSHA, previous.ContextSHA
+		state.LastRefreshAt = previous.LastRefreshAt
+	}
+	s.saveWorkspace(ctx, state)
 
 	_, ok := s.profiles["onboarding"]
 	if !ok {
@@ -362,9 +456,16 @@ func (s *WorkspaceService) onboardLocked(ctx context.Context, project *store.Pro
 			return err
 		}
 	}
+	docs, cfg, err := s.workspaceReviewConfig(ctx, project, token, base)
+	if err != nil {
+		s.markWorkspaceError(ctx, project.ID, err)
+		return err
+	}
 	indexed := false
 	indexErr := ""
-	if s.mcpFactory != nil {
+	if len(cfg.Settings.Ignore) > 0 {
+		indexErr = "index: blocked by ignore policy"
+	} else if s.mcpFactory != nil {
 		count, err := s.runIndex(ctx, project.ID, ws.BaseDir())
 		switch {
 		case err != nil && ctx.Err() != nil:
@@ -380,13 +481,17 @@ func (s *WorkspaceService) onboardLocked(ctx context.Context, project *store.Pro
 			indexed = count > 0
 		}
 	}
-	if err := s.generateContext(ctx, project, token, ws, base, false); err != nil {
+	if err := s.generateContext(ctx, project, ws, base, docs, cfg, indexed); err != nil {
 		s.markWorkspaceError(ctx, project.ID, err)
 		return err
 	}
 	indexSHA := ""
 	if indexed {
 		indexSHA = base
+	} else if len(cfg.Settings.Ignore) > 0 {
+		if state, err := s.store.GetWorkspace(ctx, project.ID); err == nil && state != nil {
+			indexSHA = state.IndexSHA
+		}
 	}
 	s.saveWorkspace(ctx, store.Workspace{
 		ProjectID:  project.ID,
@@ -399,23 +504,23 @@ func (s *WorkspaceService) onboardLocked(ctx context.Context, project *store.Pro
 	return nil
 }
 
-func (s *WorkspaceService) generateContext(ctx context.Context, project *store.Project, token string, ws *workspace.Workspace, baseSHA string, saveState bool) error {
+func (s *WorkspaceService) generateContext(ctx context.Context, project *store.Project, ws *workspace.Workspace, baseSHA string, docs review.RepoDocs, cfg effectiveReviewConfig, indexEligible bool) error {
 	profileCfg, ok := s.profiles["onboarding"]
 	if !ok || profileCfg.Agent == nil || strings.TrimSpace(profileCfg.Agent.Provider) == "" {
 		return PermanentJob(fmt.Errorf("onboarding profile is not configured"))
 	}
-	docs := review.RepoDocs{
-		GitLabReviewConfig: s.rawDoc(ctx, token, project.ID, ".gitlab-review.yml", project.DefaultBranch),
-		AGENTS:             s.rawDoc(ctx, token, project.ID, "AGENTS.md", project.DefaultBranch),
-		CLAUDE:             s.rawDoc(ctx, token, project.ID, "CLAUDE.md", project.DefaultBranch),
-	}
 	dossier := &review.Dossier{
-		Project:     review.ProjectRef{ID: project.ID, Path: project.PathWithNamespace, WebURL: project.WebURL},
-		MR:          review.MRMeta{TargetBranch: project.DefaultBranch},
-		RepoDocs:    docs,
-		BaseDir:     ws.BaseDir(),
-		Files:       []review.FileChange{},
-		GeneratedAt: s.now().UTC(),
+		Project:             review.ProjectRef{ID: project.ID, Path: project.PathWithNamespace, WebURL: project.WebURL},
+		MR:                  review.MRMeta{TargetBranch: project.DefaultBranch},
+		DiffVersion:         gitlab.Version{StartSHA: baseSHA},
+		WorkspaceProvenance: &review.WorkspaceProvenance{Version: review.WorkspaceProvenanceVersion, TargetSHA: baseSHA, IndexSHA: baseSHA, MCPEligible: indexEligible},
+		RepoDocs:            filterRepoDocs(docs, cfg.Settings.Ignore),
+		IgnorePolicy:        &review.IgnorePolicy{Version: review.IgnorePolicyVersion, Patterns: append([]string{}, cfg.Settings.Ignore...)},
+		CustomRules:         cfg.Settings.CustomRules,
+		Language:            cfg.Settings.Language,
+		BaseDir:             ws.BaseDir(),
+		Files:               []review.FileChange{},
+		GeneratedAt:         s.now().UTC(),
 	}
 	profile := review.Profile{Name: "onboarding", Config: profileCfg}
 	graph, err := review.BuildGraph(profile, dossier, review.GraphConfig{})
@@ -437,10 +542,11 @@ func (s *WorkspaceService) generateContext(ctx context.Context, project *store.P
 		return PermanentJob(fmt.Errorf("build onboarding executor: %w", err))
 	}
 	meta := map[string]string{
-		"project_id": strconv.FormatInt(project.ID, 10),
-		"kind":       "onboarding",
-		"trigger":    "register",
-		"base_sha":   baseSHA,
+		"project_id":                 strconv.FormatInt(project.ID, 10),
+		"kind":                       "onboarding",
+		"trigger":                    "register",
+		"base_sha":                   baseSHA,
+		"workspace_material_version": contextMaterialVersion,
 	}
 	wfID, err := s.engine.Create(ctx, graph, meta)
 	if err != nil {
@@ -478,21 +584,6 @@ func (s *WorkspaceService) generateContext(ctx context.Context, project *store.P
 	if err := projectContextDoc(ws, savedDoc, false); err != nil {
 		return fmt.Errorf("%w: %v", ErrContextProjection, err)
 	}
-	if saveState {
-		state, _ := s.store.GetWorkspace(ctx, project.ID)
-		indexSHA := ""
-		if state != nil {
-			indexSHA = state.IndexSHA
-		}
-		contextSHA := s.activeContextBase(ctx, project.ID, savedDoc.BaseSHA)
-		s.saveWorkspace(ctx, store.Workspace{
-			ProjectID:  project.ID,
-			State:      "ready",
-			BaseSHA:    baseSHA,
-			IndexSHA:   indexSHA,
-			ContextSHA: contextSHA,
-		})
-	}
 	return nil
 }
 
@@ -523,14 +614,11 @@ func (s *WorkspaceService) shouldRefreshContext(ctx context.Context, projectID i
 }
 
 func (s *WorkspaceService) refreshBase(ctx context.Context, ws *workspace.Workspace, project *store.Project, token, branch, ref string) (string, error) {
-	remote := trimProjectWebURL(project.WebURL)
-	if remote == "" {
-		return "", PermanentJob(fmt.Errorf("project web url is empty"))
-	}
-	auth := repo.Auth{Token: token}
-	if err := s.git.EnsureMirror(ctx, ws.MirrorDir(), remote, auth); err != nil {
+	remote, err := currentProjectRemote(ctx, s.gitlab, project, token)
+	if err != nil {
 		return "", err
 	}
+	auth := repo.Auth{Token: token}
 	if strings.TrimSpace(ref) == "" {
 		if strings.TrimSpace(branch) == "" {
 			branch = project.DefaultBranch
@@ -540,27 +628,12 @@ func (s *WorkspaceService) refreshBase(ctx context.Context, ws *workspace.Worksp
 	if !strings.HasPrefix(ref, "refs/") {
 		ref = "refs/heads/" + ref
 	}
-	if err := s.git.Fetch(ctx, ws.MirrorDir(), auth, "+"+ref+":refs/workspace/base"); err != nil {
-		return "", err
-	}
-	sha, err := s.git.Resolve(ctx, ws.MirrorDir(), "refs/workspace/base")
+	sha, err := fetchProjectRef(ctx, ws, s.git, remote, auth, "+"+ref+":refs/workspace/base", "refs/workspace/base")
 	if err != nil {
 		return "", err
 	}
-	baseDir := ws.BaseDir()
-	if info, statErr := os.Lstat(baseDir); statErr == nil {
-		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-			return "", fmt.Errorf("app: base directory is not a directory")
-		}
-		if err := s.git.Checkout(ctx, baseDir, sha); err != nil {
-			return "", err
-		}
-	} else if errors.Is(statErr, os.ErrNotExist) {
-		if err := s.git.AddWorktree(ctx, ws.MirrorDir(), baseDir, sha); err != nil {
-			return "", err
-		}
-	} else {
-		return "", statErr
+	if err := ws.PrepareBase(ctx, sha, s.git); err != nil {
+		return "", err
 	}
 	return sha, nil
 }
@@ -614,12 +687,24 @@ func (s *WorkspaceService) projectToken(ctx context.Context, projectID int64) (*
 	return project, string(token), nil
 }
 
-func (s *WorkspaceService) rawDoc(ctx context.Context, token string, projectID int64, path, ref string) string {
-	data, err := s.gitlab.GetRawFile(ctx, token, projectID, path, ref)
-	if err != nil {
-		return ""
+func (s *WorkspaceService) workspaceReviewConfig(ctx context.Context, project *store.Project, token, ref string) (review.RepoDocs, effectiveReviewConfig, error) {
+	var docs review.RepoDocs
+	for _, item := range []struct {
+		path   string
+		target *string
+	}{
+		{".gitlab-review.yml", &docs.GitLabReviewConfig},
+		{"AGENTS.md", &docs.AGENTS},
+		{"CLAUDE.md", &docs.CLAUDE},
+	} {
+		data, err := s.gitlab.GetRawFile(ctx, token, project.ID, item.path, ref)
+		if err != nil && !gitlab.IsNotFound(err) {
+			return review.RepoDocs{}, effectiveReviewConfig{}, err
+		}
+		*item.target = string(data)
 	}
-	return string(data)
+	cfg, err := resolveSecureReviewConfig(project, docs, s.reviewDefaults, s.profiles)
+	return docs, cfg, err
 }
 
 func (s *WorkspaceService) saveWorkspace(ctx context.Context, ws store.Workspace) {

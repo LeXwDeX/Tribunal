@@ -339,31 +339,28 @@ func (e *Executor) executeGather(ctx context.Context, in dag.NodeInput) (dag.Nod
 		return dag.NodeOutput{}, err
 	}
 	signals = append(signals, e.coverageUnresolved(wf)...)
-	if scope := e.incrementalFiles(); scope != nil {
+	scope := e.incrementalFiles()
+	if scope != nil {
 		filtered := make([]Proposal, 0, len(proposals))
+		allowed := make(map[Ref]struct{})
+		// Keep each original slice so gate refs and finding IDs retain their indices.
 		for _, proposal := range proposals {
-			findings := make([]FindingOut, 0, len(proposal.Findings))
-			for _, finding := range proposal.Findings {
+			matched := false
+			for i, finding := range proposal.Findings {
 				if _, ok := scope[finding.Path]; ok {
-					findings = append(findings, finding)
+					matched = true
+					allowed[Ref{Node: proposal.Node, Index: i}] = struct{}{}
 				}
 			}
-			if len(findings) == 0 {
+			if !matched {
 				continue
 			}
-			proposal.Findings = findings
 			filtered = append(filtered, proposal)
 		}
 		if len(filtered) != len(proposals) {
 			warnings = appendUnique(warnings, "incremental review: findings outside the incremental file set were ignored")
 		}
 		proposals = filtered
-		allowed := make(map[Ref]struct{})
-		for _, proposal := range proposals {
-			for i := range proposal.Findings {
-				allowed[Ref{Node: proposal.Node, Index: i}] = struct{}{}
-			}
-		}
 		filteredDropped := dropped[:0]
 		for _, drop := range dropped {
 			if _, ok := allowed[drop.Ref]; ok {
@@ -377,7 +374,7 @@ func (e *Executor) executeGather(ctx context.Context, in dag.NodeInput) (dag.Nod
 		used := wf.Usage.InputTokens + wf.Usage.OutputTokens
 		budgetExhausted = used >= max
 	}
-	gathered, err := Gather(GatherInput{
+	gathered, err := gather(GatherInput{
 		WorkflowID: in.WorkflowID,
 		Proposals:  proposals,
 		Dropped:    dropped,
@@ -391,7 +388,7 @@ func (e *Executor) executeGather(ctx context.Context, in dag.NodeInput) (dag.Nod
 		AllowedProviders:  params.AllowedProviders,
 		Identities:        e.providerIdentities(proposals, params),
 		BudgetExhausted:   budgetExhausted,
-	})
+	}, scope)
 	if err != nil {
 		return dag.NodeOutput{}, err
 	}
@@ -645,6 +642,9 @@ func collectVerifyResults(wf dag.WorkflowView) (map[string]verifyApplication, ma
 			}
 		case dag.NodeFailed, dag.NodeAborted, dag.NodeSkipped:
 			reason := node.Error
+			if node.Status == dag.NodeFailed {
+				reason = "node failed"
+			}
 			if reason == "" {
 				reason = node.Reason
 			}

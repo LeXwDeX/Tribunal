@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/skill"
 	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
+	"github.com/LeXwDeX/tribunal/internal/workspace"
 	"github.com/LeXwDeX/tribunal/pkg/dag"
 )
 
@@ -71,6 +73,21 @@ type GitOps interface {
 	IsAncestor(ctx context.Context, dir, ancestor, descendant string) (bool, error)
 }
 
+func fetchProjectRef(ctx context.Context, ws *workspace.Workspace, git GitOps, remote string, auth repo.Auth, refspec, ref string) (string, error) {
+	unlock, err := ws.LockMirror(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+	if err := git.EnsureMirror(ctx, ws.MirrorDir(), remote, auth); err != nil {
+		return "", err
+	}
+	if err := git.Fetch(ctx, ws.MirrorDir(), auth, refspec); err != nil {
+		return "", err
+	}
+	return git.Resolve(ctx, ws.MirrorDir(), ref)
+}
+
 // mcpToolProvider exposes only the explicitly bound MCP tools for one block.
 // A nil manager means MCP is not configured.
 type mcpToolProvider struct {
@@ -111,6 +128,19 @@ func (p *mcpToolProvider) Tools(ctx context.Context, block string) ([]agent.Tool
 		}
 	}
 	return set.Tools, nil
+}
+
+func (p *mcpToolProvider) BoundToolNames(_ context.Context, block string) ([]string, error) {
+	if p == nil || p.manager == nil {
+		return nil, nil
+	}
+	var allowed []string
+	for _, tool := range p.blocks[block].MCPTools {
+		if server, _, ok := strings.Cut(strings.TrimPrefix(tool, "mcp__"), "__"); !ok || p.manager.HasServer(server) {
+			allowed = append(allowed, tool)
+		}
+	}
+	return allowed, nil
 }
 
 // skillProvider binds the skills named by a block and exposes load_skill.
@@ -355,6 +385,62 @@ func trimProjectWebURL(webURL string) string {
 	return value + ".git"
 }
 
+// currentProjectRemote resolves a project by its registered numeric ID before
+// sending its token to a Git remote. The stored URL is only an origin anchor.
+func currentProjectRemote(ctx context.Context, client GitLabClient, project *store.Project, token string) (string, error) {
+	lookup, ok := client.(interface {
+		GetProject(context.Context, string, string) (*gitlab.Project, error)
+	})
+	if !ok || project == nil || project.ID <= 0 {
+		return "", errors.New("app: project identity unavailable")
+	}
+	current, err := lookup.GetProject(ctx, token, fmt.Sprint(project.ID))
+	if err != nil {
+		return "", err
+	}
+	if current == nil || current.ID != project.ID {
+		return "", errors.New("app: project identity mismatch")
+	}
+	ref, err := gitlab.ParseProjectRef(current.PathWithNamespace)
+	if err != nil || ref.ID != 0 || ref.Path != current.PathWithNamespace {
+		return "", errors.New("app: project path invalid")
+	}
+	old, err := url.Parse(project.WebURL)
+	if err != nil || strings.TrimSpace(project.WebURL) != project.WebURL || strings.ContainsAny(project.WebURL, " \\%#") || hasControlChar(project.WebURL) ||
+		old.Opaque != "" || old.Host == "" || old.Hostname() == "" || old.User != nil || old.RawQuery != "" || old.ForceQuery || old.Fragment != "" || (old.Scheme != "http" && old.Scheme != "https") {
+		return "", errors.New("app: project origin invalid")
+	}
+	base := ""
+	if project.PathWithNamespace != "" {
+		suffix := "/" + project.PathWithNamespace
+		if !strings.HasSuffix(strings.TrimRight(old.Path, "/"), suffix) {
+			return "", errors.New("app: project origin invalid")
+		}
+		base = strings.TrimSuffix(strings.TrimRight(old.Path, "/"), suffix)
+	}
+	origin, err := parseGitLabOrigin(old.Scheme + "://" + old.Host + base)
+	if err != nil || origin == nil {
+		return "", errors.New("app: project origin invalid")
+	}
+	oldPath, err := origin.projectPath(project.WebURL, false)
+	if err != nil || (project.PathWithNamespace != "" && oldPath != project.PathWithNamespace) {
+		return "", errors.New("app: project origin invalid")
+	}
+	webPath, err := origin.projectPath(current.WebURL, false)
+	if err != nil || webPath != current.PathWithNamespace {
+		return "", errors.New("app: project web URL invalid")
+	}
+	remote := current.HTTPURLToRepo
+	if remote == "" {
+		remote = trimProjectWebURL(current.WebURL)
+	}
+	clonePath, err := origin.projectPath(remote, true)
+	if err != nil || clonePath != current.PathWithNamespace {
+		return "", errors.New("app: project clone URL invalid")
+	}
+	return remote, nil
+}
+
 // ProjectExtensionResolver builds and caches project-scoped review inputs:
 // merged block bindings, a project-aware MCP manager and a project skill
 // loader. Each project manager is rebuilt from the effective platform and
@@ -396,8 +482,18 @@ type projectExtensionSet struct {
 	tools     review.ToolProvider
 	skills    review.SkillProvider
 	mcp       *mcp.Manager
+	closer    io.Closer
 	loader    *skill.Loader
 	mcpConfig mcp.Config
+	closing   bool
+	closeErr  error
+}
+
+func (set *projectExtensionSet) close() error {
+	if set.closer == nil {
+		return nil
+	}
+	return set.closer.Close()
 }
 
 // NewProjectExtensionResolver validates dependencies and copies base state.
@@ -428,10 +524,45 @@ func NewProjectExtensionResolver(cfg ProjectExtensionResolverConfig) (*ProjectEx
 }
 
 var errProjectExtensionResolverClosed = errors.New("app: project extension resolver is closed")
+var errProjectExtensionsUnavailable = errors.New("app: project extensions are unavailable")
+
+// CloseProject closes cached inputs under the caller's project workspace write
+// lock. ForProject callers must hold the same workspace lock for reading.
+func (r *ProjectExtensionResolver) CloseProject(projectID int64) error {
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return errProjectExtensionResolverClosed
+	}
+	set := r.sets[projectID]
+	if set == nil {
+		r.mu.Unlock()
+		return nil
+	}
+	if set.closing || set.closeErr != nil {
+		r.mu.Unlock()
+		return errProjectExtensionsUnavailable
+	}
+	set.closing = true
+	r.mu.Unlock()
+
+	err := set.close()
+	r.mu.Lock()
+	set.closing = false
+	set.closeErr = err
+	if err == nil && r.sets[projectID] == set {
+		delete(r.sets, projectID)
+	}
+	r.mu.Unlock()
+	if err != nil {
+		return errProjectExtensionsUnavailable
+	}
+	return nil
+}
 
 // ForProject returns the project-scoped inputs, building them on first use.
 // A read error is returned instead of silently running with platform-only
-// configuration.
+// configuration. Callers must hold the shared project workspace lock.
 func (r *ProjectExtensionResolver) ForProject(ctx context.Context, projectID int64) (*projectExtensionSet, error) {
 	if projectID <= 0 {
 		return nil, errors.New("app: project id is required")
@@ -442,7 +573,11 @@ func (r *ProjectExtensionResolver) ForProject(ctx context.Context, projectID int
 		return nil, errProjectExtensionResolverClosed
 	}
 	if existing := r.sets[projectID]; existing != nil {
+		unavailable := existing.closing || existing.closeErr != nil
 		r.mu.Unlock()
+		if unavailable {
+			return nil, errProjectExtensionsUnavailable
+		}
 		return existing, nil
 	}
 	r.mu.Unlock()
@@ -454,15 +589,15 @@ func (r *ProjectExtensionResolver) ForProject(ctx context.Context, projectID int
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
-		if set.mcp != nil {
-			_ = set.mcp.Close()
-		}
+		_ = set.close()
 		return nil, errProjectExtensionResolverClosed
 	}
 	if existing := r.sets[projectID]; existing != nil {
+		unavailable := existing.closing || existing.closeErr != nil
 		r.mu.Unlock()
-		if set.mcp != nil {
-			_ = set.mcp.Close()
+		_ = set.close()
+		if unavailable {
+			return nil, errProjectExtensionsUnavailable
 		}
 		return existing, nil
 	}
@@ -487,9 +622,7 @@ func (r *ProjectExtensionResolver) Close() error {
 	r.mu.Unlock()
 	var errs []error
 	for _, set := range sets {
-		if set.mcp != nil {
-			errs = append(errs, set.mcp.Close())
-		}
+		errs = append(errs, set.close())
 	}
 	return errors.Join(errs...)
 }
@@ -562,6 +695,7 @@ func (r *ProjectExtensionResolver) build(ctx context.Context, projectID int64) (
 		return nil, fmt.Errorf("app: build project MCP manager: %w", err)
 	}
 	set.mcp = manager
+	set.closer = manager
 	set.tools = NewMCPToolProvider(manager, blocks)
 
 	// Platform skills are re-read on every project build so skills uploaded
@@ -811,6 +945,37 @@ func (p *projectAwareToolProvider) Tools(ctx context.Context, block string) ([]a
 		return nil, nil
 	}
 	return p.base.Tools(ctx, block)
+}
+
+func (p *projectAwareToolProvider) BoundToolNames(ctx context.Context, block string) ([]string, error) {
+	if p == nil {
+		return nil, nil
+	}
+	if id, ok := projectIDFromContext(ctx); ok {
+		if p.resolver == nil {
+			return nil, errors.New("app: project extension resolver is not configured")
+		}
+		set, err := p.resolver.ForProject(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if set == nil || set.tools == nil {
+			return nil, nil
+		}
+		provider, ok := set.tools.(review.ToolBindingProvider)
+		if !ok {
+			return nil, errors.New("app: MCP binding metadata unavailable")
+		}
+		return provider.BoundToolNames(ctx, block)
+	}
+	if p.base == nil {
+		return nil, nil
+	}
+	provider, ok := p.base.(review.ToolBindingProvider)
+	if !ok {
+		return nil, errors.New("app: MCP binding metadata unavailable")
+	}
+	return provider.BoundToolNames(ctx, block)
 }
 
 // projectAwareSkillProvider resolves the project from the node context and

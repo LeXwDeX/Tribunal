@@ -22,6 +22,7 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/skill/builtin"
 	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
+	"github.com/LeXwDeX/tribunal/internal/workspace"
 )
 
 // ExtensionDefault is one built-in platform extension: Tribunal registers it
@@ -609,7 +610,7 @@ func copyEmbeddedSkill(files fs.FS, dst string) error {
 
 // seedDefaultExtensions applies the configured defaults before the runtime
 // reads stored platform extensions, so the first start already uses them.
-func seedDefaultExtensions(ctx context.Context, cfg *config.Config, st *sqlite.Store, logger *slog.Logger, now func() time.Time) error {
+func seedDefaultExtensions(ctx context.Context, cfg *config.Config, st *sqlite.Store, manager *workspace.Manager, logger *slog.Logger, now func() time.Time) error {
 	if len(cfg.DefaultExtensions.Skills) == 0 && len(cfg.DefaultExtensions.MCPServers) == 0 {
 		// Still release default-owned rows of blocks the file now declares.
 		if err := ApplyExtensionDefaults(ctx, st, cfg.Blocks, nil, logger); err != nil {
@@ -619,7 +620,7 @@ func seedDefaultExtensions(ctx context.Context, cfg *config.Config, st *sqlite.S
 	}
 	service, err := NewExtensionService(ExtensionServiceConfig{
 		Store:     st,
-		Workspace: cfg.Workspace.Root,
+		Workspace: manager,
 		DeniedEnv: deniedEnvNames(cfg),
 		Logger:    logger,
 		Now:       now,

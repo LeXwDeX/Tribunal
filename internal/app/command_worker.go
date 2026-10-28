@@ -15,6 +15,7 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/jobs"
 	"github.com/LeXwDeX/tribunal/internal/secret"
 	"github.com/LeXwDeX/tribunal/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/workspace"
 )
 
 const (
@@ -44,6 +45,7 @@ type CommandGitLab interface {
 // command cannot leave a pre-enqueue reaction behind after a failed write.
 type CommandStore interface {
 	GetProject(ctx context.Context, id int64) (*store.Project, error)
+	GetJob(ctx context.Context, id string) (*store.Job, error)
 	EnqueueReviewLatest(ctx context.Context, command store.ReviewCommand) (store.ReviewEnqueueResult, error)
 }
 
@@ -52,6 +54,7 @@ type CommandStore interface {
 // keyed by the source note.
 type CommandWorker struct {
 	store        CommandStore
+	workspace    *workspace.Manager
 	gitlab       CommandGitLab
 	cipher       *secret.Cipher
 	profiles     map[string]config.ProfileConfig
@@ -62,6 +65,7 @@ type CommandWorker struct {
 // CommandWorkerConfig configures CommandWorker.
 type CommandWorkerConfig struct {
 	Store        CommandStore
+	Workspace    *workspace.Manager
 	GitLab       CommandGitLab
 	Cipher       *secret.Cipher
 	Profiles     map[string]config.ProfileConfig
@@ -71,7 +75,7 @@ type CommandWorkerConfig struct {
 
 // NewCommandWorker builds the bounded M0 command handler.
 func NewCommandWorker(cfg CommandWorkerConfig) (*CommandWorker, error) {
-	if cfg.Store == nil || cfg.GitLab == nil || cfg.Cipher == nil {
+	if cfg.Store == nil || cfg.GitLab == nil || cfg.Cipher == nil || cfg.Workspace == nil {
 		return nil, errors.New("app: command worker dependencies are required")
 	}
 	logger := cfg.Logger
@@ -86,6 +90,7 @@ func NewCommandWorker(cfg CommandWorkerConfig) (*CommandWorker, error) {
 	}
 	return &CommandWorker{
 		store:        cfg.Store,
+		workspace:    cfg.Workspace,
 		gitlab:       cfg.GitLab,
 		cipher:       cfg.Cipher,
 		profiles:     cfg.Profiles,
@@ -126,6 +131,17 @@ func (w *CommandWorker) Handle(ctx context.Context, job *jobs.Job) error {
 	if payload.ProjectID <= 0 || payload.MRIID <= 0 || payload.NoteID <= 0 ||
 		payload.AuthorID <= 0 || (payload.Command != commandRun && payload.Command != commandCancel && payload.Command != commandHelp) {
 		return nil
+	}
+	unlock, err := w.workspace.Get(payload.ProjectID).RLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := consumerJobExists(ctx, w.store, job, "review.command", payload.ProjectID); err != nil {
+		if IsPermanentJob(err) {
+			return nil
+		}
+		return err
 	}
 
 	project, err := w.store.GetProject(ctx, payload.ProjectID)

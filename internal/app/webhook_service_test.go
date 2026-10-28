@@ -12,6 +12,7 @@ import (
 
 	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
+	"github.com/LeXwDeX/tribunal/internal/workspace"
 )
 
 type webhookFixture struct {
@@ -31,6 +32,7 @@ func newWebhookFixture(t *testing.T, settings string) *webhookFixture {
 	rec := &recordingDeliveryStore{WebhookStore: st}
 	service, err := NewWebhookService(WebhookServiceConfig{
 		Store:          rec,
+		Workspace:      workspace.NewManager(t.TempDir(), nil),
 		Cipher:         cipher,
 		Profiles:       testProfiles(),
 		ReviewDefaults: testDefaults(),
@@ -81,7 +83,7 @@ func TestWebhookProjectLookupAndAuthentication(t *testing.T) {
 	t.Run("unknown project", func(t *testing.T) {
 		st := openTestStore(t)
 		rec := &recordingDeliveryStore{WebhookStore: st, getErr: store.ErrNotFound}
-		service, _ := NewWebhookService(WebhookServiceConfig{Store: rec, Cipher: newTestCipher(t), Profiles: testProfiles(), ReviewDefaults: testDefaults()})
+		service, _ := NewWebhookService(WebhookServiceConfig{Store: rec, Workspace: workspace.NewManager(t.TempDir(), nil), Cipher: newTestCipher(t), Profiles: testProfiles(), ReviewDefaults: testDefaults()})
 		result, err := service.Handle(context.Background(), WebhookRequest{
 			Event: "Merge Request Hook", Token: "x", UUID: uuid.NewString(), Body: mrBody(999, 7, nil),
 		})
@@ -94,7 +96,7 @@ func TestWebhookProjectLookupAndAuthentication(t *testing.T) {
 		disabled := seedProject(t, st, newTestCipher(t), 42, "whsec", "{}", "default")
 		disabled.Enabled = false
 		rec := &recordingDeliveryStore{WebhookStore: st, project: disabled}
-		service, _ := NewWebhookService(WebhookServiceConfig{Store: rec, Cipher: newTestCipher(t), Profiles: testProfiles(), ReviewDefaults: testDefaults()})
+		service, _ := NewWebhookService(WebhookServiceConfig{Store: rec, Workspace: workspace.NewManager(t.TempDir(), nil), Cipher: newTestCipher(t), Profiles: testProfiles(), ReviewDefaults: testDefaults()})
 		result, _ := service.Handle(context.Background(), WebhookRequest{
 			Event: "Merge Request Hook", Token: "whsec", UUID: uuid.NewString(), Body: mrBody(42, 7, nil),
 		})
@@ -124,7 +126,7 @@ func TestWebhookProjectLookupAndAuthentication(t *testing.T) {
 		project := seedProject(t, st, newTestCipher(t), 42, "whsec", "{}", "default")
 		project.WebhookSecretEnc = []byte("corrupt")
 		rec := &recordingDeliveryStore{WebhookStore: st, project: project}
-		service, _ := NewWebhookService(WebhookServiceConfig{Store: rec, Cipher: newTestCipher(t), Profiles: testProfiles(), ReviewDefaults: testDefaults()})
+		service, _ := NewWebhookService(WebhookServiceConfig{Store: rec, Workspace: workspace.NewManager(t.TempDir(), nil), Cipher: newTestCipher(t), Profiles: testProfiles(), ReviewDefaults: testDefaults()})
 		result, _ := service.Handle(context.Background(), WebhookRequest{
 			Event: "Merge Request Hook", Token: "whsec", UUID: uuid.NewString(), Body: body,
 		})
@@ -547,6 +549,7 @@ func TestWebhookConfiguredBotUsername(t *testing.T) {
 	f := newWebhookFixture(t, "{}")
 	service, err := NewWebhookService(WebhookServiceConfig{
 		Store:          f.rec,
+		Workspace:      f.service.workspace,
 		Cipher:         newTestCipher(t),
 		Profiles:       testProfiles(),
 		ReviewDefaults: testDefaults(),

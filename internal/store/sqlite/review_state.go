@@ -400,6 +400,9 @@ func (s *Store) CreateReviewWorkflow(ctx context.Context, req ReviewWorkflowRequ
 	}
 
 	if existing, err := s.GetWorkflowByJob(ctx, req.JobID); err == nil {
+		if existing.ProjectID != req.ProjectID {
+			return "", false, fmt.Errorf("%w: workflow job belongs to another project", store.ErrConflict)
+		}
 		dossier, err := s.GetWorkflowDossier(ctx, existing.ID)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
@@ -512,6 +515,7 @@ func (s *Store) reserveReviewDossier(ctx context.Context, req ReviewWorkflowRequ
 		}
 		_, err = s.SaveWorkflowDossier(ctx, store.WorkflowDossier{
 			WorkflowID:       wfID,
+			ProjectID:        req.ProjectID,
 			JobID:            req.JobID,
 			Generation:       req.ExpectedGeneration,
 			Version:          req.DossierVersion,
@@ -619,11 +623,36 @@ func (s *Store) SaveWorkflowDossier(ctx context.Context, dossier store.WorkflowD
 	if created.IsZero() {
 		created = now
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO workflow_dossiers
-		(workflow_id, job_id, generation, version, hash, data, publication_state,
+	if dossier.ProjectID < 0 {
+		return nil, errors.New("sqlite: invalid dossier project id")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: begin save dossier: %w", err)
+	}
+	defer tx.Rollback()
+	var current, linked int64
+	if err := tx.QueryRowContext(ctx, `SELECT
+		COALESCE((SELECT project_id FROM workflow_dossiers WHERE workflow_id = ?), 0),
+		COALESCE((SELECT project_id FROM workflows WHERE id = ?), 0)`, dossier.WorkflowID, dossier.WorkflowID).Scan(&current, &linked); err != nil {
+		return nil, fmt.Errorf("sqlite: check dossier owner: %w", err)
+	}
+	if (current > 0 && linked > 0 && current != linked) ||
+		(dossier.ProjectID > 0 && ((current > 0 && dossier.ProjectID != current) || (linked > 0 && dossier.ProjectID != linked))) {
+		return nil, fmt.Errorf("%w: dossier owner mismatch", store.ErrConflict)
+	}
+	if dossier.ProjectID == 0 {
+		dossier.ProjectID = current
+		if dossier.ProjectID == 0 {
+			dossier.ProjectID = linked
+		}
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO workflow_dossiers
+		(workflow_id, project_id, job_id, generation, version, hash, data, publication_state,
 		 publication_error, mr_title, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (workflow_id) DO UPDATE SET
+			project_id = excluded.project_id,
 			job_id = excluded.job_id,
 			generation = excluded.generation,
 			version = excluded.version,
@@ -633,7 +662,7 @@ func (s *Store) SaveWorkflowDossier(ctx context.Context, dossier store.WorkflowD
 			publication_error = excluded.publication_error,
 			mr_title = excluded.mr_title,
 			updated_at = excluded.updated_at`,
-		dossier.WorkflowID, nullString(dossier.JobID), dossier.Generation,
+		dossier.WorkflowID, dossier.ProjectID, nullString(dossier.JobID), dossier.Generation,
 		dossier.Version, dossier.Hash, compressed, dossier.PublicationState,
 		dossier.PublicationError, dossierMRTitle(data), formatTime(created), formatTime(now))
 	if err != nil {
@@ -641,6 +670,9 @@ func (s *Store) SaveWorkflowDossier(ctx context.Context, dossier store.WorkflowD
 			return nil, fmt.Errorf("%w: workflow dossier job %s is already bound", store.ErrConflict, dossier.JobID)
 		}
 		return nil, fmt.Errorf("sqlite: save workflow dossier: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("sqlite: commit dossier: %w", err)
 	}
 	return s.GetWorkflowDossier(ctx, dossier.WorkflowID)
 }
@@ -657,10 +689,10 @@ func (s *Store) GetWorkflowDossier(ctx context.Context, workflowID string) (*sto
 		createdRaw string
 		updatedRaw string
 	)
-	err := s.db.QueryRowContext(ctx, `SELECT workflow_id, job_id, generation, version,
+	err := s.db.QueryRowContext(ctx, `SELECT workflow_id, project_id, job_id, generation, version,
 		hash, data, publication_state, publication_error, created_at, updated_at
 		FROM workflow_dossiers WHERE workflow_id = ?`, workflowID).Scan(
-		&dossier.WorkflowID, &jobID, &dossier.Generation, &dossier.Version,
+		&dossier.WorkflowID, &dossier.ProjectID, &jobID, &dossier.Generation, &dossier.Version,
 		&dossier.Hash, &compressed, &dossier.PublicationState, &dossier.PublicationError,
 		&createdRaw, &updatedRaw)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -904,7 +936,8 @@ func (s *Store) SetWorkflowPublicationStateIfPending(ctx context.Context, workfl
 
 // ListPendingPublications returns terminal workflows that still need their
 // publish step. Completed rows publish the normal review; failed rows publish
-// the failure summary. Unfinished engine recovery stays in ListUnfinished.
+// the failure summary; cancelled rows only need a local skip. Unfinished
+// engine recovery stays in ListUnfinished.
 func (s *Store) ListPendingPublications(ctx context.Context, limit int) ([]store.PendingPublication, error) {
 	if limit <= 0 {
 		limit = defaultListLimit
@@ -915,9 +948,9 @@ func (s *Store) ListPendingPublications(ctx context.Context, limit int) ([]store
 	rows, err := s.db.QueryContext(ctx, `SELECT d.workflow_id, d.job_id, w.project_id,
 		w.mr_iid, w.head_sha, d.generation, w.status, d.updated_at
 		FROM workflow_dossiers d JOIN workflows w ON w.id = d.workflow_id
-		WHERE w.status IN (?, ?) AND d.publication_state = ?
-		ORDER BY d.updated_at, d.workflow_id LIMIT ?`,
-		string(dag.WorkflowCompleted), string(dag.WorkflowFailed),
+		WHERE w.status IN (?, ?, ?) AND d.publication_state = ?
+		ORDER BY (w.status != 'cancelled'), d.updated_at, d.workflow_id LIMIT ?`,
+		string(dag.WorkflowCompleted), string(dag.WorkflowFailed), string(dag.WorkflowCancelled),
 		store.WorkflowPublicationPending, limit)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: list pending publications: %w", err)

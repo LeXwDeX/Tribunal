@@ -1,9 +1,11 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -35,6 +37,54 @@ func newHTTPMCP(t *testing.T, token string) *httptest.Server {
 	serverHTTP := httptest.NewServer(handler)
 	t.Cleanup(serverHTTP.Close)
 	return serverHTTP
+}
+
+func TestHTTPIncompleteToolResponses(t *testing.T) {
+	for _, result := range []struct {
+		name, raw   string
+		unavailable bool
+	}{
+		// SDK decodes null as an empty result, indistinguishable from empty content.
+		{"null", `null`, false},
+		{"needs input", `{"resultType":"input_required","inputRequests":{}}`, true},
+	} {
+		t.Run(result.name, func(t *testing.T) {
+			server := testServer()
+			inner := sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server { return server }, &sdk.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
+			httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				r.Body = io.NopCloser(bytes.NewReader(body))
+				var req struct {
+					Method string          `json:"method"`
+					ID     json.RawMessage `json:"id"`
+				}
+				if json.Unmarshal(body, &req) == nil && req.Method == "tools/call" {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":` + string(req.ID) + `,"result":` + result.raw + `}`))
+					return
+				}
+				inner.ServeHTTP(w, r)
+			}))
+			t.Cleanup(httpServer.Close)
+			manager := newHTTPManager(t, httpServer.URL, 2*time.Second)
+			set, err := manager.Tools(context.Background(), []string{"mcp__remote__echo"})
+			if err != nil || len(set.Tools) != 1 {
+				t.Fatalf("binding: %+v %v", set, err)
+			}
+			out, err := set.Tools[0].Call(context.Background(), json.RawMessage(`{}`))
+			var unavailable interface{ ToolUnavailable() bool }
+			if result.unavailable && (err == nil || !errors.As(err, &unavailable) || !unavailable.ToolUnavailable()) {
+				t.Fatalf("incomplete result error = %v", err)
+			}
+			if !result.unavailable && (err != nil || out.Content != "(no output)") {
+				t.Fatalf("empty result = %+v, %v", out, err)
+			}
+		})
+	}
 }
 
 const testMaxOutput = 200
@@ -122,7 +172,7 @@ func TestHTTPAllowlistHeadersAndOutputBounds(t *testing.T) {
 		t.Fatalf("big result lacks truncation marker: %q", bigResult.Content)
 	}
 
-	_, err = m.call(context.Background(), "remote", "not-advertised", json.RawMessage(`{}`))
+	_, err = m.call(context.Background(), "remote", "not-advertised", json.RawMessage(`{}`), false)
 	if err == nil {
 		t.Fatal("unknown tool call succeeded")
 	}
@@ -142,6 +192,10 @@ func TestHTTPCallTimeoutKeepsSession(t *testing.T) {
 	_, err = slow.Call(context.Background(), json.RawMessage(`{"ms":2000}`))
 	if !errors.Is(err, ErrCallFailed) || !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("slow error = %v", err)
+	}
+	var unavailable interface{ ToolUnavailable() bool }
+	if !errors.As(err, &unavailable) || !unavailable.ToolUnavailable() {
+		t.Fatalf("timed out tool not marked unavailable: %v", err)
 	}
 	echo := findTool(t, set.Tools, "mcp__remote__echo")
 	res, err := echo.Call(context.Background(), json.RawMessage(`{"text":"alive"}`))

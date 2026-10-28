@@ -21,6 +21,7 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/llm"
 	"github.com/LeXwDeX/tribunal/internal/mcp"
 	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
+	"github.com/LeXwDeX/tribunal/internal/workspace"
 )
 
 func newExtensionFixture(t *testing.T) (*ExtensionService, *sqlite.Store) {
@@ -29,7 +30,7 @@ func newExtensionFixture(t *testing.T) (*ExtensionService, *sqlite.Store) {
 	seedProject(t, st, newTestCipher(t), 42, "whsec", "{}", "default")
 	service, err := NewExtensionService(ExtensionServiceConfig{
 		Store:     st,
-		Workspace: t.TempDir(),
+		Workspace: workspace.NewManager(t.TempDir(), nil),
 	})
 	if err != nil {
 		t.Fatalf("NewExtensionService: %v", err)
@@ -53,7 +54,7 @@ func TestNewExtensionServiceResolvesRelativeWorkspace(t *testing.T) {
 		t.Fatalf("relative workspace is absolute: %q", relative)
 	}
 
-	service, err := NewExtensionService(ExtensionServiceConfig{Store: st, Workspace: relative})
+	service, err := NewExtensionService(ExtensionServiceConfig{Store: st, Workspace: workspace.NewManager(relative, nil)})
 	if err != nil {
 		t.Fatalf("NewExtensionService: %v", err)
 	}
@@ -78,7 +79,7 @@ func TestNewExtensionServiceResolvesRelativeWorkspace(t *testing.T) {
 func TestNewExtensionServiceRejectsRootWorkspace(t *testing.T) {
 	_, err := NewExtensionService(ExtensionServiceConfig{
 		Store:     openTestStore(t),
-		Workspace: string(filepath.Separator),
+		Workspace: workspace.NewManager(string(filepath.Separator), nil),
 	})
 	if err == nil {
 		t.Fatal("filesystem root accepted as extension workspace")
@@ -391,7 +392,7 @@ func TestExtensionServiceTestMCPServerParsesConfig(t *testing.T) {
 	t.Run("denied environment", func(t *testing.T) {
 		service, err := NewExtensionService(ExtensionServiceConfig{
 			Store:     openTestStore(t),
-			Workspace: t.TempDir(),
+			Workspace: workspace.NewManager(t.TempDir(), nil),
 			DeniedEnv: []string{"MCP_DENIED_URL"},
 		})
 		if err != nil {
@@ -425,12 +426,16 @@ func TestExtensionServiceTestMCPServerUsesProjectWorkspace(t *testing.T) {
 	service, _ := newExtensionFixture(t)
 	projectID := int64(42)
 	command := filepath.Join(t.TempDir(), "missing-mcp-server")
-	_, err := service.TestMCPServer(ctx, MCPServer{
+	server, err := service.CreateMCPServer(ctx, MCPServerInput{
 		Scope:     "project",
 		ProjectID: &projectID,
 		Name:      "cwd",
 		Config:    json.RawMessage(`{"command":"` + command + `","x-review":{"home":"probe","call_timeout":"200ms"}}`),
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.TestMCPServer(ctx, *server)
 	if err == nil {
 		t.Fatal("missing command did not fail")
 	}
@@ -473,7 +478,7 @@ func TestExtensionServiceTestProvider(t *testing.T) {
 		t.Fatalf("NewRegistry: %v", err)
 	}
 	st := openTestStore(t)
-	service, err := NewExtensionService(ExtensionServiceConfig{Store: st, Clients: registry, Workspace: t.TempDir()})
+	service, err := NewExtensionService(ExtensionServiceConfig{Store: st, Clients: registry, Workspace: workspace.NewManager(t.TempDir(), nil)})
 	if err != nil {
 		t.Fatalf("NewExtensionService: %v", err)
 	}
@@ -655,7 +660,7 @@ func TestExtensionServiceValidatesEnvTemplatesWithoutExpanding(t *testing.T) {
 	st := openTestStore(t)
 	service, err := NewExtensionService(ExtensionServiceConfig{
 		Store:     st,
-		Workspace: t.TempDir(),
+		Workspace: workspace.NewManager(t.TempDir(), nil),
 		DeniedEnv: []string{"CUSTOM_DENIED_FLAG"},
 	})
 	if err != nil {

@@ -30,7 +30,7 @@ const mcpCommand = (server: McpServer): string => {
     return [config.command, ...args].join(' ')
   }
   if (typeof config.url === 'string') return config.url
-  return '配置未提供 command 或 url'
+  return '配置已隐藏'
 }
 
 function parseJsonObject(text: string, label: string): Record<string, unknown> {
@@ -842,7 +842,7 @@ function EditMcpDialog({ server, onClose, onSaved }: { server: McpServer | null;
       open={Boolean(server)}
       onClose={onClose}
       title="编辑 MCP 服务器"
-      description="默认只修改名称和启用状态。服务端返回的配置可能已脱敏，不能直接原样提交。"
+      description="默认只修改名称和启用状态。为保护密钥，服务端不返回配置内容。"
       wide
       footer={(
         <>
@@ -865,7 +865,7 @@ function EditMcpDialog({ server, onClose, onSaved }: { server: McpServer | null;
       </div>
       {server ? (
         <details className={ui.disclosure}>
-          <summary>查看服务端返回的配置（可能脱敏）</summary>
+          <summary>查看服务端返回的配置（已隐藏）</summary>
           <pre className={`pre ${ui.jsonBlock}`}>{formatJson(server.config)}</pre>
         </details>
       ) : null}

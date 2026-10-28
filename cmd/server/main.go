@@ -143,6 +143,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return errors.New("initialize secrets: invalid master key")
 	}
+	if err := db.ConfigureMCPSecrets(ctx, cipher); err != nil {
+		return errors.New("migrate MCP secrets: storage update failed")
+	}
 	// Bind legacy ciphertexts to their project and field before any service
 	// reads them; services only open the sealed format.
 	migrated, err := app.MigrateProjectSecrets(ctx, db, cipher, logger)
@@ -174,11 +177,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	lifecycle := runtime.Lifecycle()
 
 	dispatcher, err := app.NewDispatcher(app.DispatcherConfig{
-		Store:    db,
-		GitLab:   gitlabClient,
-		Cipher:   cipher,
-		Profiles: cfg.Profiles,
-		Logger:   logger,
+		Store:     db,
+		Workspace: runtime.WorkspaceManager(),
+		GitLab:    gitlabClient,
+		Cipher:    cipher,
+		Profiles:  cfg.Profiles,
+		Logger:    logger,
 	})
 	if err != nil {
 		return err
@@ -194,7 +198,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		Store:     db,
 		MCP:       runtime.MCPManager(),
 		Clients:   runtime.LLMClients(),
-		Workspace: cfg.Workspace.Root,
+		Workspace: runtime.WorkspaceManager(),
 		DeniedEnv: app.DeniedEnvNames(cfg),
 		Logger:    logger,
 	})

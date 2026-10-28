@@ -26,6 +26,7 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/secret"
 	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
+	"github.com/LeXwDeX/tribunal/internal/workspace"
 )
 
 const (
@@ -216,6 +217,9 @@ func newTestEnv(t *testing.T) *testEnv {
 	if err != nil {
 		t.Fatalf("secret.New: %v", err)
 	}
+	if err := st.ConfigureMCPSecrets(context.Background(), cipher); err != nil {
+		t.Fatalf("ConfigureMCPSecrets: %v", err)
+	}
 	api := defaultStubGitLab()
 	logs := &lockedBuffer{}
 	lifecycle := &app.Lifecycle{}
@@ -224,15 +228,17 @@ func newTestEnv(t *testing.T) *testEnv {
 		Language: "en", SkipDraft: true, Ignore: []string{"**/*.lock"},
 		MaxFiles: 200, MaxDiffLines: 8000, PostFailureNote: true, AllowRepoConfig: true,
 	}
+	manager := workspace.NewManager(t.TempDir(), nil)
 	projectService, err := app.NewProjectService(app.ProjectServiceConfig{
 		Store: st, GitLab: api, Cipher: cipher, Profiles: profiles,
 		PublicURL: "https://review.example.com",
+		Workspace: manager,
 	})
 	if err != nil {
 		t.Fatalf("NewProjectService: %v", err)
 	}
 	webhookService, err := app.NewWebhookService(app.WebhookServiceConfig{
-		Store: st, Cipher: cipher, Profiles: profiles, ReviewDefaults: defaults,
+		Store: st, Cipher: cipher, Profiles: profiles, ReviewDefaults: defaults, Workspace: manager,
 	})
 	if err != nil {
 		t.Fatalf("NewWebhookService: %v", err)

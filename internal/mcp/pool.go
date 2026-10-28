@@ -453,6 +453,30 @@ func (entry *serverEntry) connect(ctx context.Context) (*sdk.ClientSession, erro
 		&sdk.Implementation{Name: "gitlab-ce-review", Version: "0.1.0"},
 		&sdk.ClientOptions{Capabilities: &sdk.ClientCapabilities{}},
 	)
+	// SDK ListTools caches each page before the next call; discard the server's
+	// TTL before it reaches that cache so safety checks always fetch the list.
+	client.AddSendingMiddleware(func(next sdk.MethodHandler) sdk.MethodHandler {
+		return func(ctx context.Context, method string, req sdk.Request) (sdk.Result, error) {
+			result, err := next(ctx, method, req)
+			if method == "tools/list" {
+				if list, ok := result.(*sdk.ListToolsResult); ok && list != nil {
+					list.TTLMs = 0
+					if seen, ok := ctx.Value(listSeenKey{}).(*listSeen); ok {
+						for _, tool := range list.Tools {
+							if tool != nil {
+								seen.names[tool.Name]++
+								seen.count++
+								if seen.count > maxRemoteTools {
+									return nil, errors.New("mcp: too many advertised tools")
+								}
+							}
+						}
+					}
+				}
+			}
+			return result, err
+		}
+	})
 	if entry.cfg.URL != "" {
 		httpClient := entry.httpClient()
 		transport := &sdk.StreamableClientTransport{

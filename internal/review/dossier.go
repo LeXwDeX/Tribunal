@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"regexp"
 	"sort"
 	"strings"
@@ -16,6 +17,12 @@ import (
 
 // DossierSchemaVersion is the persisted materials-snapshot version.
 const DossierSchemaVersion = 1
+
+// IgnorePolicyVersion identifies the supported effective-ignore semantics.
+const IgnorePolicyVersion = 1
+
+// WorkspaceProvenanceVersion identifies the workspace material checks.
+const WorkspaceProvenanceVersion = 1
 
 // ErrInvalidDossier reports a dossier that cannot be persisted or replayed.
 var ErrInvalidDossier = errors.New("review: invalid dossier")
@@ -125,6 +132,153 @@ type IncrementalRange struct {
 	Reason   string   `json:"reason,omitempty"`
 }
 
+// IgnorePolicy snapshots effective repository ignore patterns for execution.
+type IgnorePolicy struct {
+	Version  int      `json:"version"`
+	Patterns []string `json:"patterns"`
+}
+
+// WorkspaceProvenance records the source of workspace materials at collection.
+type WorkspaceProvenance struct {
+	Version        int    `json:"version"`
+	TargetSHA      string `json:"target_sha"`
+	ContextBaseSHA string `json:"context_base_sha,omitempty"`
+	IndexSHA       string `json:"index_sha,omitempty"`
+	MCPEligible    bool   `json:"mcp_eligible"`
+}
+
+// WorkspaceProvenanceValid checks the persisted sources without consulting the current workspace.
+func (d *Dossier) WorkspaceProvenanceValid() bool {
+	if d == nil || d.WorkspaceProvenance == nil || d.IgnorePolicy == nil || d.IgnorePolicy.Version != IgnorePolicyVersion || d.IgnorePolicy.Patterns == nil {
+		return false
+	}
+	p := d.WorkspaceProvenance
+	if p.Version != WorkspaceProvenanceVersion || !validObjectID(p.TargetSHA) || !validObjectID(d.DiffVersion.StartSHA) || !strings.EqualFold(p.TargetSHA, d.DiffVersion.StartSHA) {
+		return false
+	}
+	if d.ContextDocs != "" && p.ContextBaseSHA == "" {
+		return false
+	}
+	if p.ContextBaseSHA != "" && (!validObjectID(p.ContextBaseSHA) || !strings.EqualFold(p.ContextBaseSHA, p.TargetSHA) || len(d.IgnorePolicy.Patterns) != 0) {
+		return false
+	}
+	return !p.MCPEligible || (len(d.IgnorePolicy.Patterns) == 0 && validObjectID(p.IndexSHA) && strings.EqualFold(p.IndexSHA, p.TargetSHA))
+}
+
+// MCPIndexEligible requires explicit evidence for this MR's target tip.
+func (d *Dossier) MCPIndexEligible() bool {
+	return d.WorkspaceProvenanceValid() && d.WorkspaceProvenance.MCPEligible
+}
+
+// IgnoresPath checks a repository path, including ignored directory ancestors
+// and changed paths excluded because the other side of a rename was ignored.
+func (d *Dossier) IgnoresPath(value string) bool {
+	if d == nil || d.IgnorePolicy == nil || value == "" {
+		return false
+	}
+	if checkRepoPath("path", value, true) != nil {
+		return true
+	}
+	clean := path.Clean(value)
+	matcher := NewIgnoreMatcher(d.IgnorePolicy.Patterns)
+	for _, ignored := range d.Ignored {
+		if clean == ignored {
+			return true
+		}
+	}
+	return matcher.MatchPath(clean)
+}
+
+// MatchPath applies ignore patterns to a file path and its parent directories.
+func (m *IgnoreMatcher) MatchPath(clean string) bool {
+	if clean == "" {
+		return false
+	}
+	parts := strings.Split(clean, "/")
+	for i := range parts {
+		part := strings.Join(parts[:i+1], "/")
+		if m.Match(part) || (i < len(parts)-1 && m.Match(part+"/")) {
+			return true
+		}
+	}
+	return false
+}
+
+// IgnoreMatcher implements the same glob semantics as diff collection.
+type IgnoreMatcher struct {
+	patterns []*regexp.Regexp
+	basename []*regexp.Regexp
+}
+
+func NewIgnoreMatcher(patterns []string) *IgnoreMatcher {
+	out := &IgnoreMatcher{}
+	for _, raw := range patterns {
+		pattern := strings.TrimSpace(raw)
+		if pattern == "" || strings.HasPrefix(pattern, "!") {
+			continue
+		}
+		if strings.HasSuffix(pattern, "/") {
+			pattern += "**"
+		}
+		re, err := compileIgnoreGlob(pattern)
+		if err != nil {
+			continue
+		}
+		out.patterns = append(out.patterns, re)
+		if !strings.Contains(pattern, "/") {
+			if re, err := compileIgnoreGlob("**/" + pattern); err == nil {
+				out.basename = append(out.basename, re)
+			}
+		}
+	}
+	return out
+}
+
+func (m *IgnoreMatcher) Match(path string) bool {
+	if m == nil {
+		return false
+	}
+	for _, re := range m.patterns {
+		if re.MatchString(path) {
+			return true
+		}
+	}
+	for _, re := range m.basename {
+		if re.MatchString(path) {
+			return true
+		}
+	}
+	return false
+}
+
+func compileIgnoreGlob(pattern string) (*regexp.Regexp, error) {
+	var b strings.Builder
+	b.WriteString("^")
+	runes := []rune(pattern)
+	for i := 0; i < len(runes); i++ {
+		switch runes[i] {
+		case '*':
+			if i+1 < len(runes) && runes[i+1] == '*' {
+				i++
+				if i+1 < len(runes) && runes[i+1] == '/' {
+					i++
+					b.WriteString("(?:.*/)?")
+				} else {
+					b.WriteString(".*")
+				}
+			} else {
+				b.WriteString("[^/]*")
+			}
+		case '?':
+			b.WriteString("[^/]")
+		default:
+			b.WriteString(regexp.QuoteMeta(string(runes[i])))
+		}
+	}
+	b.WriteString("$")
+	return regexp.Compile(b.String())
+}
+
 // Dossier is the sanitized, replayable materials snapshot for one workflow.
 //
 // SECURITY: callers must remove project tokens, provider keys, MCP secrets,
@@ -132,47 +286,51 @@ type IncrementalRange struct {
 // rejects secret-looking JSON keys as a second line of defense, but it does
 // not inspect free-form document text.
 type Dossier struct {
-	SchemaVersion int               `json:"schema_version"`
-	Project       ProjectRef        `json:"project"`
-	MR            MRMeta            `json:"mr"`
-	DiffVersion   gitlab.Version    `json:"diff_version"`
-	DiffSummary   DiffSummary       `json:"diff_summary"`
-	Files         []FileChange      `json:"files"`
-	Ignored       []string          `json:"ignored,omitempty"`
-	Pipeline      *PipelineSummary  `json:"pipeline,omitempty"`
-	Issues        []IssueRef        `json:"issues,omitempty"`
-	RepoDocs      RepoDocs          `json:"repo_docs,omitempty"`
-	ContextDocs   string            `json:"context_docs,omitempty"`
-	Language      string            `json:"language,omitempty"`
-	CustomRules   []string          `json:"custom_rules,omitempty"`
-	Incremental   *IncrementalRange `json:"incremental,omitempty"`
-	PriorFindings []FindingOut      `json:"prior_findings,omitempty"`
-	HeadDir       string            `json:"head_dir,omitempty"`
-	BaseDir       string            `json:"base_dir,omitempty"`
-	Metadata      map[string]string `json:"metadata,omitempty"`
-	GeneratedAt   time.Time         `json:"generated_at"`
+	SchemaVersion       int                  `json:"schema_version"`
+	Project             ProjectRef           `json:"project"`
+	MR                  MRMeta               `json:"mr"`
+	DiffVersion         gitlab.Version       `json:"diff_version"`
+	DiffSummary         DiffSummary          `json:"diff_summary"`
+	Files               []FileChange         `json:"files"`
+	Ignored             []string             `json:"ignored,omitempty"`
+	IgnorePolicy        *IgnorePolicy        `json:"ignore_policy,omitempty"`
+	WorkspaceProvenance *WorkspaceProvenance `json:"workspace_provenance,omitempty"`
+	Pipeline            *PipelineSummary     `json:"pipeline,omitempty"`
+	Issues              []IssueRef           `json:"issues,omitempty"`
+	RepoDocs            RepoDocs             `json:"repo_docs,omitempty"`
+	ContextDocs         string               `json:"context_docs,omitempty"`
+	Language            string               `json:"language,omitempty"`
+	CustomRules         []string             `json:"custom_rules,omitempty"`
+	Incremental         *IncrementalRange    `json:"incremental,omitempty"`
+	PriorFindings       []FindingOut         `json:"prior_findings,omitempty"`
+	HeadDir             string               `json:"head_dir,omitempty"`
+	BaseDir             string               `json:"base_dir,omitempty"`
+	Metadata            map[string]string    `json:"metadata,omitempty"`
+	GeneratedAt         time.Time            `json:"generated_at"`
 }
 
 // DossierInput is the explicit, already-sanitized input to BuildDossier.
 type DossierInput struct {
-	Project       ProjectRef
-	MR            MRMeta
-	DiffVersion   gitlab.Version
-	DiffSummary   DiffSummary
-	Files         []FileChange
-	Ignored       []string
-	Pipeline      *PipelineSummary
-	Issues        []IssueRef
-	RepoDocs      RepoDocs
-	ContextDocs   string
-	Language      string
-	CustomRules   []string
-	Incremental   *IncrementalRange
-	PriorFindings []FindingOut
-	HeadDir       string
-	BaseDir       string
-	Metadata      map[string]string
-	GeneratedAt   time.Time
+	Project             ProjectRef
+	MR                  MRMeta
+	DiffVersion         gitlab.Version
+	DiffSummary         DiffSummary
+	Files               []FileChange
+	Ignored             []string
+	IgnorePolicy        *IgnorePolicy
+	WorkspaceProvenance *WorkspaceProvenance
+	Pipeline            *PipelineSummary
+	Issues              []IssueRef
+	RepoDocs            RepoDocs
+	ContextDocs         string
+	Language            string
+	CustomRules         []string
+	Incremental         *IncrementalRange
+	PriorFindings       []FindingOut
+	HeadDir             string
+	BaseDir             string
+	Metadata            map[string]string
+	GeneratedAt         time.Time
 }
 
 // BuildDossier validates and snapshots explicit inputs. It performs no I/O
@@ -209,6 +367,17 @@ func BuildDossier(in DossierInput) (*Dossier, error) {
 		GeneratedAt:   generatedAt,
 	}
 	d.MR.Labels = append([]string(nil), in.MR.Labels...)
+	if in.IgnorePolicy != nil {
+		policy := *in.IgnorePolicy
+		if in.IgnorePolicy.Patterns != nil {
+			policy.Patterns = append([]string{}, in.IgnorePolicy.Patterns...)
+		}
+		d.IgnorePolicy = &policy
+	}
+	if in.WorkspaceProvenance != nil {
+		provenance := *in.WorkspaceProvenance
+		d.WorkspaceProvenance = &provenance
+	}
 	if in.Pipeline != nil {
 		pipeline := *in.Pipeline
 		pipeline.FailedJobs = append([]JobSummary(nil), in.Pipeline.FailedJobs...)

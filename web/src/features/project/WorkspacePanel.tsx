@@ -62,7 +62,7 @@ export function WorkspacePanel({ projectId, canManage = false }: { projectId: nu
   }, [current.data?.id, editing])
 
   const currentMissing = current.error instanceof ApiError && current.error.status === 404
-  const display = selected || current.data
+  const display = current.data && selected?.id === current.data.id ? current.data : selected || current.data
   const isCurrent = Boolean(display && current.data && display.id === current.data.id)
   const versions = useMemo(() => {
     const items = [...history.items]
@@ -111,7 +111,7 @@ export function WorkspacePanel({ projectId, canManage = false }: { projectId: nu
     setSaving(true)
     setSaveError(null)
     try {
-      await saveCurrentContextDoc(projectId, kind, draft, Boolean(display.locked))
+      await saveCurrentContextDoc(projectId, kind, draft)
       setEditing(false)
       setSelected(null)
       toast.push('success', '已生成一条人工上下文版本。')

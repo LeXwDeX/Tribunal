@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -205,9 +207,21 @@ func deepReviewOutputs(summary string) map[string]any {
 	}
 }
 
+type deepEvidenceGit struct{ GitOps }
+
+func (g deepEvidenceGit) AddWorktree(ctx context.Context, mirror, dir, sha string) error {
+	if err := g.GitOps.AddWorktree(ctx, mirror, dir, sha); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "main.go"), []byte("a\nbad := 1\nb\n"), 0600)
+}
+
+var _ GitOps = deepEvidenceGit{}
+
 func runDeepReview(t *testing.T, jobID string, configure func(*reviewFixture, *scriptedAgentRunner)) (*reviewFixture, *scriptedAgentRunner, *store.Workflow, dag.WorkflowView) {
 	t.Helper()
 	f := newReviewFixture(t, reviewTestHead)
+	f.service.git = deepEvidenceGit{GitOps: f.git}
 	f.profiles["default"] = deepReviewProfile()
 	runner := newScriptedAgentRunner(f.bundle, deepReviewOutputs("review-gate confirmed P1"))
 	f.service.agentRun = runner.Run
@@ -280,8 +294,8 @@ func TestReviewNoSubmitFailsRequiredNodeAndPublishesIncomplete(t *testing.T) {
 	if reviewNode.Status != dag.NodeFailed {
 		t.Fatalf("cr.p1 status = %s, want failed", reviewNode.Status)
 	}
-	if !strings.Contains(reviewNode.Error, "agent finished without submit_result") {
-		t.Fatalf("cr.p1 error = %q, want the no-submit failure", reviewNode.Error)
+	if reviewNode.Error != "node execution failed" || reviewNode.Reason != "executor_error" {
+		t.Fatalf("cr.p1 error = %q reason = %q, want safe executor failure", reviewNode.Error, reviewNode.Reason)
 	}
 	if got := f.gitlab.noteCount(); got != 1 {
 		t.Fatalf("notes = %d, want one INCOMPLETE summary", got)
@@ -478,8 +492,8 @@ func TestReviewOptionalVerifyFailureCompletesAsUncertain(t *testing.T) {
 	if verified.Status != dag.NodeFailed {
 		t.Fatalf("verify.1 status = %s, want failed", verified.Status)
 	}
-	if !strings.Contains(verified.Error, "injected verifier outage") {
-		t.Fatalf("verify.1 error = %q, want the runner failure", verified.Error)
+	if verified.Error != "node execution failed" || verified.Reason != "executor_error" {
+		t.Fatalf("verify.1 error = %q reason = %q, want safe executor failure", verified.Error, verified.Reason)
 	}
 
 	var adjudicated review.AdjudicateOut

@@ -134,6 +134,7 @@ func TestFeedbackResolveSignalUsesPublishedLine(t *testing.T) {
 			published, current, root := feedbackRepo(t, tc.mutate)
 			f, service, workflow, publication := feedbackResolveFixture(t,
 				published, current, root, "job-feedback-"+strings.ReplaceAll(tc.name, " ", "-"), tc.line, tc.side)
+			consumerReadLock(t, service.workspace, 42)
 			project, err := f.db.GetProject(context.Background(), 42)
 			if err != nil {
 				t.Fatalf("GetProject: %v", err)
@@ -154,11 +155,13 @@ func TestFeedbackResolveSignalFetchesMissingHead(t *testing.T) {
 	})
 	f, service, workflow, publication := feedbackResolveFixture(t,
 		published, current, root, "job-feedback-fetch", 3, "new")
+	consumerReadLock(t, service.workspace, 42)
 	project, err := f.db.GetProject(context.Background(), 42)
 	if err != nil {
 		t.Fatalf("GetProject: %v", err)
 	}
-	project.WebURL = remote
+	project.WebURL = strings.TrimSuffix(remote, ".git")
+	f.gitlab.project = &gitlab.Project{ID: 42, PathWithNamespace: "group/repo", WebURL: project.WebURL, HTTPURLToRepo: remote}
 	got := service.resolveSignal(context.Background(), "token", project, publication, *workflow, &gitlab.MergeRequest{
 		IID: 7, State: "opened", SHA: current,
 	}, 7)
@@ -416,7 +419,7 @@ func feedbackHTTPRepo(t *testing.T, mutate func(t *testing.T, dir string)) (stri
 	feedbackGitRun(t, "", "clone", "--bare", "-q", source, served)
 	feedbackGitRun(t, served, "fetch", "-q", source, current+":refs/merge-requests/7/head")
 	feedbackGitRun(t, served, "update-server-info")
-	server := httptest.NewServer(http.FileServer(http.Dir(serverRoot)))
+	server := httptest.NewServer(http.StripPrefix("/group/", http.FileServer(http.Dir(serverRoot))))
 	t.Cleanup(server.Close)
 
 	root := t.TempDir()
@@ -426,7 +429,7 @@ func feedbackHTTPRepo(t *testing.T, mutate func(t *testing.T, dir string)) (stri
 	}
 	feedbackGitRun(t, source, "init", "--bare", "-q", mirror)
 	feedbackGitRun(t, source, "push", "-q", mirror, published+":refs/heads/main")
-	return published, current, root, server.URL + "/repo.git"
+	return published, current, root, server.URL + "/group/repo.git"
 }
 
 func writeFeedbackFile(t *testing.T, dir, body string) {

@@ -24,6 +24,9 @@ const (
 	firstRetryBackoff = time.Second
 )
 
+// ErrDeferred reports temporary ownership contention, not a failed attempt.
+var ErrDeferred = errors.New("jobs: execution deferred")
+
 // WorkerConfig configures a Worker. Zero values select conservative defaults.
 type WorkerConfig struct {
 	Handlers     map[string]Handler
@@ -220,6 +223,8 @@ func (w *Worker) execute(ctx context.Context, claimed *Job) {
 		case err := <-done:
 			if err == nil {
 				w.complete(ctx, owner)
+			} else if ctx.Err() == nil && errors.Is(err, ErrDeferred) {
+				w.deferJob(ctx, owner)
 			} else if ctx.Err() == nil {
 				w.fail(ctx, owner, err)
 			}
@@ -242,6 +247,14 @@ func (w *Worker) execute(ctx context.Context, claimed *Job) {
 			<-done
 			return
 		}
+	}
+}
+
+func (w *Worker) deferJob(parent context.Context, job Job) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), cleanupTimeout)
+	defer cancel()
+	if err := w.queue.Defer(ctx, job, w.now().Add(w.poll)); err != nil && !errors.Is(err, store.ErrLeaseLost) {
+		w.logger.Warn("job deferral failed", "job_id", job.ID, "kind", job.Kind)
 	}
 }
 

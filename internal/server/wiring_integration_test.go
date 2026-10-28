@@ -29,14 +29,16 @@ import (
 const wiringHead = "cccccccccccccccccccccccccccccccccccccccc"
 
 type wiringGitLab struct {
-	mu  sync.Mutex
-	mr  *gitlab.MergeRequest
-	err error
+	mu    sync.Mutex
+	mr    *gitlab.MergeRequest
+	err   error
+	calls int
 }
 
 func (f *wiringGitLab) GetMergeRequest(context.Context, string, int64, int64) (*gitlab.MergeRequest, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.calls++
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -45,12 +47,17 @@ func (f *wiringGitLab) GetMergeRequest(context.Context, string, int64, int64) (*
 }
 
 type wiringEnv struct {
-	t       *testing.T
-	server  *httptest.Server
-	oauth   *httptest.Server
-	db      *sqlite.Store
-	api     *wiringGitLab
-	backend *AppExtensions
+	t          *testing.T
+	server     *httptest.Server
+	oauth      *httptest.Server
+	db         *sqlite.Store
+	api        *wiringGitLab
+	backend    *AppExtensions
+	handler    http.Handler
+	manager    *workspace.Manager
+	cipher     *secret.Cipher
+	service    *Server
+	dispatcher *app.Dispatcher
 }
 
 func seedWiringProject(t *testing.T, db *sqlite.Store, cipher *secret.Cipher) {
@@ -90,24 +97,29 @@ func newWiringEnv(t *testing.T) *wiringEnv {
 	if err != nil {
 		t.Fatalf("secret.New: %v", err)
 	}
+	if err := db.ConfigureMCPSecrets(ctx, cipher); err != nil {
+		t.Fatalf("ConfigureMCPSecrets: %v", err)
+	}
 	seedWiringProject(t, db, cipher)
 
 	api := &wiringGitLab{mr: &gitlab.MergeRequest{
 		IID: 7, State: "opened", TargetProjectID: 42, SHA: wiringHead,
 	}}
+	manager := workspace.NewManager(t.TempDir(), &repo.Git{})
 	dispatcher, err := app.NewDispatcher(app.DispatcherConfig{
-		Store:    db,
-		GitLab:   api,
-		Cipher:   cipher,
-		Profiles: map[string]config.ProfileConfig{"default": {}, "deep": {}},
-		Logger:   newTestLogger(io.Discard),
+		Store:     db,
+		Workspace: manager,
+		GitLab:    api,
+		Cipher:    cipher,
+		Profiles:  map[string]config.ProfileConfig{"default": {}, "deep": {}},
+		Logger:    newTestLogger(io.Discard),
 	})
 	if err != nil {
 		t.Fatalf("NewDispatcher: %v", err)
 	}
 	contexts, err := app.NewContextService(app.ContextServiceConfig{
 		Store:     db,
-		Workspace: workspace.NewManager(t.TempDir(), &repo.Git{}),
+		Workspace: manager,
 	})
 	if err != nil {
 		t.Fatalf("NewContextService: %v", err)
@@ -133,7 +145,7 @@ func newWiringEnv(t *testing.T) *wiringEnv {
 	extensions, err := app.NewExtensionService(app.ExtensionServiceConfig{
 		Store:     db,
 		Clients:   registry,
-		Workspace: t.TempDir(),
+		Workspace: manager,
 		Logger:    newTestLogger(io.Discard),
 	})
 	if err != nil {
@@ -184,7 +196,7 @@ func newWiringEnv(t *testing.T) *wiringEnv {
 		server.Close()
 		oauth.Close()
 	})
-	return &wiringEnv{t: t, server: server, oauth: oauth, db: db, api: api, backend: backend}
+	return &wiringEnv{t: t, server: server, oauth: oauth, db: db, api: api, backend: backend, handler: apiServer.Handler(), manager: manager, cipher: cipher, service: apiServer, dispatcher: dispatcher}
 }
 
 func (e *wiringEnv) bearer() *m6Client {

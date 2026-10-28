@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/secret"
+	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
 )
 
@@ -324,6 +326,48 @@ func TestRunRefusesLockedDataDirectory(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "review.db")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("database opened despite lock: %v", err)
+	}
+}
+
+func TestRunRejectsWrongMCPKeyAndReleasesResources(t *testing.T) {
+	dir := t.TempDir()
+	path := writeRunConfig(t, dir, 1)
+	ctx := context.Background()
+	db, err := sqlite.Open(ctx, filepath.Join(dir, "review.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cipher, err := secret.New([]byte("0123456789abcdef0123456789abcdef"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ConfigureMCPSecrets(ctx, cipher); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CreateMCPServer(ctx, store.MCPServer{Scope: store.ScopePlatform, Name: "synthetic", Config: json.RawMessage(`{"secret":"canary-startup"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("REVIEW_MASTER_KEY", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{2}, 32)))
+	var logs bytes.Buffer
+	err = run(ctx, []string{"--config", path}, &bytes.Buffer{}, &logs)
+	if err == nil || err.Error() != "migrate MCP secrets: storage update failed" || strings.Contains(logs.String(), "canary-startup") {
+		t.Fatalf("wrong key result: %v, logs=%s", err, &logs)
+	}
+	lock, err := sqlite.LockDataDir(dir)
+	if err != nil {
+		t.Fatalf("lock not released: %v", err)
+	}
+	defer lock.Release()
+	db, err = sqlite.Open(ctx, filepath.Join(dir, "review.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.ConfigureMCPSecrets(ctx, cipher); err != nil {
+		t.Fatalf("original key after rejected start: %v", err)
 	}
 }
 

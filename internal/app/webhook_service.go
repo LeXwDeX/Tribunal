@@ -18,6 +18,7 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/secret"
 	"github.com/LeXwDeX/tribunal/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/workspace"
 )
 
 const (
@@ -55,6 +56,7 @@ type WebhookResult struct {
 // calls GitLab or any other remote service.
 type WebhookService struct {
 	store          WebhookStore
+	workspace      *workspace.Manager
 	cipher         *secret.Cipher
 	profiles       map[string]config.ProfileConfig
 	reviewDefaults config.ProjectSettings
@@ -66,6 +68,7 @@ type WebhookService struct {
 // WebhookServiceConfig configures WebhookService.
 type WebhookServiceConfig struct {
 	Store          WebhookStore
+	Workspace      *workspace.Manager
 	Cipher         *secret.Cipher
 	Profiles       map[string]config.ProfileConfig
 	ReviewDefaults config.ProjectSettings
@@ -76,7 +79,7 @@ type WebhookServiceConfig struct {
 
 // NewWebhookService builds the webhook ingress service.
 func NewWebhookService(cfg WebhookServiceConfig) (*WebhookService, error) {
-	if cfg.Store == nil || cfg.Cipher == nil {
+	if cfg.Store == nil || cfg.Cipher == nil || cfg.Workspace == nil {
 		return nil, errors.New("app: webhook service dependencies are required")
 	}
 	logger := cfg.Logger
@@ -95,6 +98,7 @@ func NewWebhookService(cfg WebhookServiceConfig) (*WebhookService, error) {
 	}
 	return &WebhookService{
 		store:          cfg.Store,
+		workspace:      cfg.Workspace,
 		cipher:         cfg.Cipher,
 		profiles:       cfg.Profiles,
 		reviewDefaults: cfg.ReviewDefaults,
@@ -116,6 +120,11 @@ func (s *WebhookService) Handle(ctx context.Context, req WebhookRequest) (Webhoo
 	if reason != "" {
 		return WebhookResult{Ignored: reason}, nil
 	}
+	unlock, err := s.workspace.Get(projectID).RLock(ctx)
+	if err != nil {
+		return WebhookResult{Ignored: "storage_error"}, err
+	}
+	defer unlock()
 
 	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {

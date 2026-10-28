@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/review"
 	"github.com/LeXwDeX/tribunal/internal/store"
+	"github.com/LeXwDeX/tribunal/pkg/dag"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -194,6 +196,20 @@ type effectiveReviewConfig struct {
 	Warnings []string
 }
 
+func filterRepoDocs(docs review.RepoDocs, ignores []string) review.RepoDocs {
+	matcher := newIgnoreMatcher(ignores)
+	if matcher.Match(".gitlab-review.yml") {
+		docs.GitLabReviewConfig = ""
+	}
+	if matcher.Match("AGENTS.md") {
+		docs.AGENTS = ""
+	}
+	if matcher.Match("CLAUDE.md") {
+		docs.CLAUDE = ""
+	}
+	return docs
+}
+
 type repoReviewConfig struct {
 	Version  int      `yaml:"version"`
 	Language string   `yaml:"language"`
@@ -208,6 +224,20 @@ type repoReviewConfig struct {
 
 func (s *ReviewService) resolveConfig(project *store.Project, docs review.RepoDocs) effectiveReviewConfig {
 	return resolveReviewConfig(project, docs, s.reviewDefaults, s.profiles)
+}
+
+func resolveSecureReviewConfig(project *store.Project, docs review.RepoDocs, defaults config.ProjectSettings, profiles map[string]config.ProfileConfig) (effectiveReviewConfig, error) {
+	settings, err := ResolveSettings(project.Settings, defaults)
+	if err != nil {
+		return effectiveReviewConfig{}, errors.New("app: project settings cannot be read safely")
+	}
+	if settings.AllowRepoConfig && strings.TrimSpace(docs.GitLabReviewConfig) != "" {
+		var repo repoReviewConfig
+		if err := yaml.Unmarshal([]byte(docs.GitLabReviewConfig), &repo); err != nil {
+			return effectiveReviewConfig{}, errors.New("app: repository review configuration cannot be read safely")
+		}
+	}
+	return resolveReviewConfig(project, docs, defaults, profiles), nil
 }
 
 func resolveReviewConfig(project *store.Project, docs review.RepoDocs, defaults config.ProjectSettings, profiles map[string]config.ProfileConfig) effectiveReviewConfig {
@@ -230,8 +260,12 @@ func resolveReviewConfig(project *store.Project, docs review.RepoDocs, defaults 
 		out.Warnings = append(out.Warnings, ".gitlab-review.yml is invalid and was ignored")
 		return out
 	}
-	out.Warnings = append(out.Warnings, repoReviewConfigWarnings(docs.GitLabReviewConfig)...)
-	if language := strings.Join(strings.Fields(repo.Language), " "); language != "" {
+	out.Settings.Ignore = appendUnique(out.Settings.Ignore, repo.Ignore)
+	configIgnored := newIgnoreMatcher(out.Settings.Ignore).Match(".gitlab-review.yml")
+	if !configIgnored {
+		out.Warnings = append(out.Warnings, repoReviewConfigWarnings(docs.GitLabReviewConfig)...)
+	}
+	if language := strings.Join(strings.Fields(repo.Language), " "); !configIgnored && language != "" {
 		if len([]rune(language)) > 128 {
 			out.Warnings = append(out.Warnings, ".gitlab-review.yml: language is too long and was ignored")
 		} else {
@@ -245,8 +279,9 @@ func resolveReviewConfig(project *store.Project, docs review.RepoDocs, defaults 
 			out.Warnings = append(out.Warnings, "repository profile is not configured and was ignored")
 		}
 	}
-	out.Settings.Ignore = appendUnique(out.Settings.Ignore, repo.Ignore)
-	out.Settings.CustomRules = appendUnique(out.Settings.CustomRules, repo.Rules)
+	if !configIgnored {
+		out.Settings.CustomRules = appendUnique(out.Settings.CustomRules, repo.Rules)
+	}
 	if repo.Review.SkipDraft != nil {
 		out.Settings.SkipDraft = *repo.Review.SkipDraft
 	}
@@ -359,6 +394,18 @@ func reviewConfigHash(cfg effectiveReviewConfig) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func (s *ReviewService) reviewProfileHash(profile review.Profile) string {
+	data, err := json.Marshal(struct {
+		Profile   review.Profile
+		Blocks    map[string]config.BlockBinding
+		Providers []string
+	}{profile, s.blocks, s.allowedProviders()})
+	if err != nil {
+		return ""
+	}
+	return sha256Hex(string(data))
+}
+
 // reviewFingerprint binds a workflow to the exact dossier, configuration, and
 // prompt bundle used to produce it. Format:
 // sha256("<dossier hash>\n<config hash>\n<prompt hash>").
@@ -396,10 +443,29 @@ func (s *ReviewService) allowedProviders() []string {
 	return append([]string(nil), s.providerNames...)
 }
 
-func (s *ReviewService) contextDoc(ctx context.Context, projectID int64) string {
+func (s *ReviewService) contextDoc(ctx context.Context, projectID int64, targetSHA string) (string, string) {
 	doc, err := s.store.GetCurrentContextDoc(ctx, projectID, "agents")
-	if err != nil {
-		return ""
+	if err != nil || doc == nil || doc.ProjectID != projectID || doc.Kind != "agents" || !doc.Active || !shaRE.MatchString(targetSHA) || !shaRE.MatchString(doc.BaseSHA) || !strings.EqualFold(doc.BaseSHA, targetSHA) {
+		return "", ""
 	}
-	return doc.Content
+	switch doc.Source {
+	case "manual":
+	case "generated":
+		if doc.WorkflowID == "" {
+			return "", ""
+		}
+		snapshot, err := s.engine.Snapshot(ctx, doc.WorkflowID)
+		if err != nil || snapshot.Status != dag.WorkflowCompleted || snapshot.Meta["kind"] != "onboarding" ||
+			snapshot.Meta["project_id"] != itoa(projectID) || !strings.EqualFold(snapshot.Meta["base_sha"], doc.BaseSHA) ||
+			snapshot.Meta["workspace_material_version"] != contextMaterialVersion {
+			return "", ""
+		}
+		node, ok := snapshot.Nodes["onboarding"]
+		if !ok || node.Status != dag.NodeCompleted || node.Spec.Kind != review.KindOnboarding {
+			return "", ""
+		}
+	default:
+		return "", ""
+	}
+	return doc.Content, doc.BaseSHA
 }

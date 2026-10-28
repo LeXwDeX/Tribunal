@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/repo"
+	"github.com/LeXwDeX/tribunal/internal/review"
 	"github.com/LeXwDeX/tribunal/internal/store"
+	"github.com/LeXwDeX/tribunal/pkg/dag"
 )
 
 // reviewSummary is the list item. store.Workflow already carries every field
@@ -267,7 +269,7 @@ func (s *Server) handleTriggerReview(w http.ResponseWriter, r *http.Request) {
 		decodeRequestError(w, r, err)
 		return
 	}
-	jobID, err := s.reviews.StartReview(r.Context(), projectID, mrIID, strings.TrimSpace(request.Profile), request.Full)
+	jobID, err := s.reviews.StartReview(s.dispatchContext(r, projectID), projectID, mrIID, strings.TrimSpace(request.Profile), request.Full)
 	if err != nil {
 		s.writeServiceError(w, r, err)
 		return
@@ -505,6 +507,15 @@ func (s *Server) handleReviewFindings(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, r, err)
 		return
 	}
+	nodes, err := s.store.GetWorkflowNodes(r.Context(), wfID)
+	if err != nil {
+		s.writeStoreError(w, r, err)
+		return
+	}
+	wf := diagnosticWorkflow(nodes)
+	for i := range findings {
+		safeFindingDiagnostics(&findings[i], wf)
+	}
 	page, next, err := pageFindings(findings, r.URL.Query().Get("cursor"), limit)
 	if err != nil {
 		s.writeStoreError(w, r, err)
@@ -536,6 +547,11 @@ func (s *Server) handleSetFindingAnnotation(w http.ResponseWriter, r *http.Reque
 		validationFailed(w, r, "annotation", "annotation must be valid, invalid, uncertain, or empty")
 		return
 	}
+	nodes, err := s.store.GetWorkflowNodes(r.Context(), r.PathValue("wf_id"))
+	if err != nil {
+		s.writeStoreError(w, r, err)
+		return
+	}
 	actor := ""
 	if principal, ok := principalFrom(r.Context()); ok {
 		actor = principal.user.Username
@@ -546,7 +562,26 @@ func (s *Server) handleSetFindingAnnotation(w http.ResponseWriter, r *http.Reque
 		s.writeStoreError(w, r, err)
 		return
 	}
+	safeFindingDiagnostics(&finding, diagnosticWorkflow(nodes))
 	writeJSON(w, http.StatusOK, finding)
+}
+
+func diagnosticWorkflow(nodes []store.WorkflowNode) dag.WorkflowView {
+	wf := dag.WorkflowView{Nodes: make(map[string]dag.NodeView, len(nodes))}
+	for _, node := range nodes {
+		wf.Nodes[node.ID] = dag.NodeView{ID: node.ID, Status: dag.NodeStatus(node.Status), Error: node.Error, Spec: dag.NodeSpec{Kind: node.Kind, Params: node.Params}}
+	}
+	return wf
+}
+
+func safeFindingDiagnostics(finding *store.Finding, wf dag.WorkflowView) {
+	challenge, reason, err := review.SafeFindingDiagnostics(finding.ID, finding.ChallengeEvidence, finding.DecisionReason, wf)
+	if err != nil {
+		finding.ChallengeEvidence = nil
+		finding.DecisionReason = ""
+		return
+	}
+	finding.ChallengeEvidence, finding.DecisionReason = challenge, reason
 }
 
 // pageFindings paginates the already-filtered finding list. Filters are
@@ -607,6 +642,14 @@ func (s *Server) handleReviewNode(w http.ResponseWriter, r *http.Request) {
 	for _, node := range nodes {
 		if node.ID != nodeID {
 			continue
+		}
+		output, err := review.SafeDiagnosticOutput(node.Kind, node.Output, diagnosticWorkflow(nodes))
+		if err != nil {
+			output = nil
+		}
+		node.Output = output
+		if node.Error != "" {
+			node.Error = "node failed"
 		}
 		writeJSON(w, http.StatusOK, nodeDetail{
 			WorkflowNode: node,
@@ -689,7 +732,12 @@ func (s *Server) handleCancelReview(w http.ResponseWriter, r *http.Request) {
 	if !s.requireReviews(w, r) {
 		return
 	}
-	jobID, err := s.reviews.CancelReview(r.Context(), r.PathValue("wf_id"))
+	workflow, _ := guardedWorkflow(r.Context())
+	var projectID int64
+	if workflow != nil {
+		projectID = workflow.ProjectID
+	}
+	jobID, err := s.reviews.CancelReview(s.dispatchContext(r, projectID), r.PathValue("wf_id"))
 	if err != nil {
 		s.writeServiceError(w, r, err)
 		return
@@ -701,7 +749,12 @@ func (s *Server) handleRepublishReview(w http.ResponseWriter, r *http.Request) {
 	if !s.requireReviews(w, r) {
 		return
 	}
-	jobID, err := s.reviews.RepublishReview(r.Context(), r.PathValue("wf_id"))
+	workflow, _ := guardedWorkflow(r.Context())
+	var projectID int64
+	if workflow != nil {
+		projectID = workflow.ProjectID
+	}
+	jobID, err := s.reviews.RepublishReview(s.dispatchContext(r, projectID), r.PathValue("wf_id"))
 	if err != nil {
 		s.writeServiceError(w, r, err)
 		return

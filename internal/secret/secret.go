@@ -34,6 +34,21 @@ func WebhookSecretAAD(projectID int64) []byte {
 	return []byte(fmt.Sprintf("tribunal/project/%d/webhook_secret", projectID))
 }
 
+// MCPConfigAAD binds a server configuration to its immutable identity.
+// A nil projectID is required for platform servers; project IDs must be positive.
+func MCPConfigAAD(scope string, projectID *int64, serverID string) ([]byte, error) {
+	if serverID == "" || (scope == "platform" && projectID != nil) ||
+		(scope == "project" && (projectID == nil || *projectID <= 0)) ||
+		(scope != "platform" && scope != "project") {
+		return nil, errors.New("secret: invalid MCP server identity")
+	}
+	project := int64(0)
+	if projectID != nil {
+		project = *projectID
+	}
+	return []byte(fmt.Sprintf("tribunal/mcp-config/v1/%s/%d/%d:%s/config", scope, project, len(serverID), serverID)), nil
+}
+
 // IsSealed reports whether value carries the versioned prefix.
 func IsSealed(value []byte) bool {
 	return bytes.HasPrefix(value, []byte(sealedPrefix))

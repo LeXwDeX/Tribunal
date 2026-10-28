@@ -288,6 +288,10 @@ func truncateRunes(value string, max int) string {
 // Gather normalizes proposals, drops gate rebuttals, deduplicates, counts
 // weighted votes, and selects deterministic challenge targets.
 func Gather(in GatherInput, opts GatherOptions) (GatherResult, error) {
+	return gather(in, opts, nil)
+}
+
+func gather(in GatherInput, opts GatherOptions, scope map[string]struct{}) (GatherResult, error) {
 	if strings.TrimSpace(in.WorkflowID) == "" {
 		return GatherResult{}, invalid("workflow_id", "must not be empty")
 	}
@@ -312,7 +316,7 @@ func Gather(in GatherInput, opts GatherOptions) (GatherResult, error) {
 		}
 	}
 
-	findings, byRef, err := prepareFindings(in)
+	findings, byRef, err := prepareFindings(in, scope)
 	if err != nil {
 		return GatherResult{}, err
 	}
@@ -406,7 +410,7 @@ func severityIn(value Severity, values []Severity) bool {
 	return false
 }
 
-func prepareFindings(in GatherInput) ([]Finding, map[Ref]Finding, error) {
+func prepareFindings(in GatherInput, scope map[string]struct{}) ([]Finding, map[Ref]Finding, error) {
 	findings := make([]Finding, 0)
 	byRef := make(map[Ref]Finding)
 	for p, proposal := range in.Proposals {
@@ -417,6 +421,11 @@ func prepareFindings(in GatherInput) ([]Finding, map[Ref]Finding, error) {
 			return nil, nil, invalid(fmt.Sprintf("proposals[%d].attempt", p), "must be zero or positive")
 		}
 		for i, contractFinding := range proposal.Findings {
+			if scope != nil {
+				if _, ok := scope[contractFinding.Path]; !ok {
+					continue
+				}
+			}
 			if err := contractFinding.Validate(); err != nil {
 				return nil, nil, wrapField(fmt.Sprintf("proposals[%d].findings[%d]", p, i), err)
 			}

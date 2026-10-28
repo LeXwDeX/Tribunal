@@ -28,7 +28,8 @@ import (
 
 // reviewGitLab is a small in-memory GitLab fake for F1/F7/F8 tests.
 type reviewGitLab struct {
-	mu sync.Mutex
+	mu      sync.Mutex
+	project *gitlab.Project
 
 	mr      *gitlab.MergeRequest
 	version *gitlab.Version
@@ -60,6 +61,7 @@ type reviewGitLab struct {
 
 func newReviewGitLab(head string) *reviewGitLab {
 	return &reviewGitLab{
+		project: &gitlab.Project{ID: 42, PathWithNamespace: "group/repo", WebURL: "https://gitlab.example.com/group/repo", HTTPURLToRepo: "https://gitlab.example.com/group/repo.git"},
 		mr: &gitlab.MergeRequest{
 			IID:             7,
 			State:           "opened",
@@ -90,6 +92,16 @@ func newReviewGitLab(head string) *reviewGitLab {
 		nextAwardID: 700,
 		currentUser: &gitlab.User{ID: 9, Username: "review-bot"},
 	}
+}
+
+func (f *reviewGitLab) GetProject(context.Context, string, string) (*gitlab.Project, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.project == nil {
+		return nil, fmt.Errorf("missing project")
+	}
+	p := *f.project
+	return &p, nil
 }
 
 func (f *reviewGitLab) CurrentUser(context.Context, string) (*gitlab.User, error) {
@@ -436,6 +448,7 @@ func newReviewFixture(t *testing.T, head string) *reviewFixture {
 	engine := dag.NewEngine(db, executors, executors, dag.Options{Clock: func() time.Time { return time.Now().UTC() }})
 	publisher, err := NewPublisher(PublisherConfig{
 		Store:          db,
+		Workspace:      manager,
 		GitLab:         api,
 		Cipher:         cipher,
 		Engine:         engine,
@@ -448,23 +461,25 @@ func newReviewFixture(t *testing.T, head string) *reviewFixture {
 		t.Fatalf("NewPublisher: %v", err)
 	}
 	service, err := NewReviewService(ReviewServiceConfig{
-		Store:            db,
-		GitLab:           api,
-		Cipher:           cipher,
-		Workspace:        manager,
-		Git:              git,
-		Engine:           engine,
-		Executors:        executors,
-		Profiles:         profiles,
-		ReviewDefaults:   defaults,
-		Prompts:          bundle,
-		AgentRun:         runner.Run,
-		Publisher:        publisher,
-		AllowedProviders: []string{"fake"},
-		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Now:              time.Now,
-		CancelPoll:       10 * time.Millisecond,
-		CancelWait:       2 * time.Second,
+		Store:             db,
+		GitLab:            api,
+		Cipher:            cipher,
+		Workspace:         manager,
+		Git:               git,
+		Engine:            engine,
+		Executors:         executors,
+		Profiles:          profiles,
+		ReviewDefaults:    defaults,
+		Prompts:           bundle,
+		AgentRun:          runner.Run,
+		Publisher:         publisher,
+		AllowedProviders:  []string{"fake"},
+		ProviderConfigs:   map[string]config.ProviderConfig{"fake": {Model: "fixture"}},
+		ExecutionIdentity: "review-fixture-v1",
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Now:               time.Now,
+		CancelPoll:        10 * time.Millisecond,
+		CancelWait:        2 * time.Second,
 	})
 	if err != nil {
 		t.Fatalf("NewReviewService: %v", err)
@@ -479,7 +494,7 @@ func newReviewFixture(t *testing.T, head string) *reviewFixture {
 
 // seedReviewControl enqueues a generation-aware review job and returns the
 // job payload accepted by the handler.
-func (f *reviewFixture) seedReview(t *testing.T, jobID string) *jobs.Job {
+func (f *reviewFixture) seedReview(t *testing.T, _ string) *jobs.Job {
 	t.Helper()
 	result, err := f.db.EnqueueReviewLatest(context.Background(), store.ReviewCommand{
 		ProjectID:   42,
@@ -491,22 +506,14 @@ func (f *reviewFixture) seedReview(t *testing.T, jobID string) *jobs.Job {
 	if err != nil {
 		t.Fatalf("EnqueueReviewLatest: %v", err)
 	}
-	payload, err := json.Marshal(map[string]any{
-		"project_id": 42,
-		"mr_iid":     7,
-		"head_sha":   f.head,
-		"generation": result.Generation,
-		"profile":    "default",
-		"trigger":    "mr_open",
-		"full":       true,
-	})
+	stored, err := f.db.GetJob(context.Background(), result.JobID)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("GetJob fixture review job: %v", err)
 	}
-	return &jobs.Job{ID: jobID, Kind: "review.run", Payload: payload, MaxAttempts: 3}
+	return stored
 }
 
-func (f *reviewFixture) seedCancel(t *testing.T, jobID string) *jobs.Job {
+func (f *reviewFixture) seedCancel(t *testing.T, _ string) *jobs.Job {
 	t.Helper()
 	result, err := f.db.EnqueueReviewLatest(context.Background(), store.ReviewCommand{
 		ProjectID:   42,
@@ -518,16 +525,11 @@ func (f *reviewFixture) seedCancel(t *testing.T, jobID string) *jobs.Job {
 	if err != nil {
 		t.Fatalf("EnqueueReviewLatest cancel: %v", err)
 	}
-	payload, err := json.Marshal(map[string]any{
-		"project_id": 42,
-		"mr_iid":     7,
-		"generation": result.Generation,
-		"trigger":    "command",
-	})
+	job, err := f.db.GetJob(context.Background(), result.JobID)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("GetJob fixture cancel job: %v", err)
 	}
-	return &jobs.Job{ID: jobID, Kind: "review.cancel", Payload: payload, MaxAttempts: 3}
+	return job
 }
 
 func mustJSONBody(t *testing.T, value any) json.RawMessage {
@@ -542,7 +544,9 @@ func mustJSONBody(t *testing.T, value any) json.RawMessage {
 func testDossier(t *testing.T, head string) *review.Dossier {
 	t.Helper()
 	dossier, err := review.BuildDossier(review.DossierInput{
-		Project: review.ProjectRef{ID: 42, Path: "group/repo"},
+		IgnorePolicy:        &review.IgnorePolicy{Version: 1, Patterns: append([]string{}, testDefaults().Ignore...)},
+		WorkspaceProvenance: &review.WorkspaceProvenance{Version: review.WorkspaceProvenanceVersion, TargetSHA: strings.Repeat("2", 40)},
+		Project:             review.ProjectRef{ID: 42, Path: "group/repo"},
 		MR: review.MRMeta{
 			IID:          7,
 			Title:        "Add feature",
@@ -605,13 +609,23 @@ func jobGeneration(t *testing.T, job *jobs.Job) int64 {
 
 func createPendingReview(t *testing.T, f *reviewFixture, jobID string, generation int64) string {
 	t.Helper()
+	return createPendingReviewIdentity(t, f, jobID, generation, testExecutionIdentity(t, f))
+}
+
+func createPendingReviewIdentity(t *testing.T, f *reviewFixture, jobID string, generation int64, executionIdentity string) string {
+	t.Helper()
 	project, err := f.db.GetProject(context.Background(), 42)
 	if err != nil {
 		t.Fatalf("GetProject: %v", err)
 	}
 	configHash := reviewConfigHash(f.service.resolveConfig(project, review.RepoDocs{}))
 	dossier := testDossier(t, f.head)
-	dossier.Metadata = map[string]string{"config_hash": configHash, "prompt_hash": f.bundle.Hash}
+	dossier.Metadata = map[string]string{
+		"config_hash": configHash, "prompt_hash": f.bundle.Hash,
+		"profile_hash":       f.service.reviewProfileHash(review.Profile{Name: "default", Config: f.profiles["default"]}),
+		"workspace_identity": "absent", "requested_profile": "default", "profile_explicit": "false",
+		"execution_identity": executionIdentity,
+	}
 	raw, err := review.MarshalDossier(dossier)
 	if err != nil {
 		t.Fatal(err)
@@ -624,7 +638,7 @@ func createPendingReview(t *testing.T, f *reviewFixture, jobID string, generatio
 	wfID, _, err := f.db.CreateReviewWorkflow(context.Background(), sqlite.ReviewWorkflowRequest{
 		JobID:              jobID,
 		Spec:               spec,
-		Meta:               map[string]string{"trigger": "mr_open", "base_sha": dossier.DiffVersion.BaseSHA, "fingerprint": reviewFingerprint(hash, configHash, f.bundle.Hash), "config_hash": configHash, "prompt_hash": f.bundle.Hash},
+		Meta:               map[string]string{"trigger": "mr_open", "base_sha": dossier.DiffVersion.BaseSHA, "fingerprint": reviewFingerprint(hash, configHash, f.bundle.Hash), "config_hash": configHash, "prompt_hash": f.bundle.Hash, "profile": "default"},
 		DossierVersion:     review.DossierSchemaVersion,
 		DossierHash:        hash,
 		DossierData:        raw,
@@ -637,4 +651,22 @@ func createPendingReview(t *testing.T, f *reviewFixture, jobID string, generatio
 		t.Fatalf("CreateReviewWorkflow: %v", err)
 	}
 	return wfID
+}
+
+func testExecutionIdentity(t *testing.T, f *reviewFixture) string {
+	t.Helper()
+	unlock, err := f.service.workspace.Get(42).RLock(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	execution, err := f.service.resolveReviewExecution(context.Background(), 42, review.Profile{Name: "default", Config: f.profiles["default"]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := f.service.sealReviewExecution(42, execution.digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return identity
 }

@@ -103,11 +103,12 @@ func (m *Manager) Get(pid int64) *Workspace {
 		return w
 	}
 	w := &Workspace{
-		ProjectID: pid,
-		Root:      filepath.Join(m.root, strconv.FormatInt(pid, 10)),
-		git:       m.git,
-		lock:      newCtxRWMutex(),
-		runs:      make(map[string]string),
+		ProjectID:  pid,
+		Root:       filepath.Join(m.root, strconv.FormatInt(pid, 10)),
+		git:        m.git,
+		lock:       newCtxRWMutex(),
+		mirrorLock: newCtxRWMutex(),
+		runs:       make(map[string]string),
 	}
 	m.byID[pid] = w
 	return w
@@ -118,8 +119,9 @@ type Workspace struct {
 	ProjectID int64
 	Root      string
 
-	git  *repo.Git
-	lock *ctxRWMutex
+	git        *repo.Git
+	lock       *ctxRWMutex
+	mirrorLock *ctxRWMutex
 
 	runsMu sync.Mutex
 	runs   map[string]string
@@ -135,6 +137,11 @@ func (w *Workspace) Lock(ctx context.Context) (func(), error) {
 // The returned function must be called exactly once.
 func (w *Workspace) RLock(ctx context.Context) (func(), error) {
 	return w.lock.RLock(ctx)
+}
+
+// LockMirror serializes origin updates, fetches and ref resolution within a project.
+func (w *Workspace) LockMirror(ctx context.Context) (func(), error) {
+	return w.mirrorLock.Lock(ctx)
 }
 
 // MirrorDir is the fixed bare mirror path for this project.
@@ -183,6 +190,11 @@ func (w *Workspace) Refresh(ctx context.Context, remote, ref string, auth repo.A
 		return "", err
 	}
 	mirror := w.MirrorDir()
+	unlock, err := w.LockMirror(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
 	if err := w.git.EnsureMirror(ctx, mirror, remote, auth); err != nil {
 		return "", err
 	}
@@ -193,18 +205,23 @@ func (w *Workspace) Refresh(ctx context.Context, remote, ref string, auth repo.A
 	if err != nil {
 		return "", err
 	}
-	if err := w.prepareBase(ctx, sha); err != nil {
+	if err := w.PrepareBase(ctx, sha, w.git); err != nil {
 		return "", err
 	}
 	return sha, nil
 }
 
-func (w *Workspace) prepareBase(ctx context.Context, sha string) error {
+// PrepareBase creates or updates the base using git after verifying ownership.
+// The caller must hold the workspace write lock and have prepared the mirror.
+func (w *Workspace) PrepareBase(ctx context.Context, sha string, git interface {
+	AddWorktree(context.Context, string, string, string) error
+	Checkout(context.Context, string, string) error
+}) error {
 	base := w.BaseDir()
 	info, err := os.Lstat(base)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return w.git.AddWorktree(ctx, w.MirrorDir(), base, sha)
+		return git.AddWorktree(ctx, w.MirrorDir(), base, sha)
 	case err != nil:
 		return fmt.Errorf("workspace: inspect base: %w", err)
 	case info.Mode()&os.ModeSymlink != 0:
@@ -221,12 +238,12 @@ func (w *Workspace) prepareBase(ctx context.Context, sha string) error {
 		if err := os.Remove(base); err != nil {
 			return fmt.Errorf("workspace: remove empty base: %w", err)
 		}
-		return w.git.AddWorktree(ctx, w.MirrorDir(), base, sha)
+		return git.AddWorktree(ctx, w.MirrorDir(), base, sha)
 	}
 	if !w.ownsBase() {
 		return ErrBaseConflict
 	}
-	return w.git.Checkout(ctx, base, sha)
+	return git.Checkout(ctx, base, sha)
 }
 
 // ownsBase reports whether base is a linked worktree of this project's mirror.

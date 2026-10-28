@@ -554,7 +554,7 @@ func (e *Engine) runNode(runCtx context.Context, handle *runHandle, wfID, nodeID
 		if timedOut {
 			reason = "timeout"
 		}
-		if err := e.commitNodeFailureUsage(runCtx, wfID, nodeID, view.Attempt, reason, execErr.Error(), out.Usage); err != nil {
+		if err := e.commitNodeFailureUsage(runCtx, wfID, nodeID, view.Attempt, reason, "node execution failed", out.Usage); err != nil {
 			handle.setErr(err)
 		}
 		return
@@ -786,11 +786,11 @@ func (e *Engine) commitNodeSuccess(ctx context.Context, wfID, nodeID string, spe
 			return err
 		}
 		if expandErr != nil {
-			return e.commitNodeFailure(ctx, wfID, nodeID, attempt, "expand_failed", expandErr.Error())
+			return e.commitNodeFailure(ctx, wfID, nodeID, attempt, "expand_failed", "node expansion failed")
 		}
 		events, err := e.resultEvents(wf, nodeID, spec, attempt, out, extension)
 		if err != nil {
-			return e.commitNodeFailure(ctx, wfID, nodeID, attempt, "expand_failed", err.Error())
+			return e.commitNodeFailure(ctx, wfID, nodeID, attempt, "expand_failed", "node expansion failed")
 		}
 		if _, err := e.store.Append(ctx, wfID, wf.Revision, events...); err != nil {
 			if errors.Is(err, ErrStaleRevision) {

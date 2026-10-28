@@ -12,12 +12,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 	sqlitedrv "modernc.org/sqlite"
 
 	"github.com/LeXwDeX/tribunal/internal/errclass"
+	"github.com/LeXwDeX/tribunal/internal/secret"
 	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/internal/store/migrations"
 )
@@ -35,8 +37,9 @@ const (
 // Store is a SQLite-backed store. One connection serializes all reads and
 // writes; this is sufficient for the single-process M0 deployment.
 type Store struct {
-	db  *sql.DB
-	now func() time.Time
+	db        *sql.DB
+	now       func() time.Time
+	mcpCipher atomic.Pointer[secret.Cipher]
 }
 
 // Option customizes Open.
@@ -621,6 +624,31 @@ func (s *Store) Fail(ctx context.Context, j store.Job, cause error, retryAt *tim
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("sqlite: commit fail: %w", err)
+	}
+	return nil
+}
+
+// Defer releases a contended lease while preserving both the retry budget and
+// the monotonic attempt fence used to reject stale owners.
+func (s *Store) Defer(ctx context.Context, j store.Job, retryAt time.Time) error {
+	now := s.now().UTC()
+	res, err := s.db.ExecContext(ctx, `UPDATE jobs
+		SET state = CASE WHEN "key" IS NOT NULL AND EXISTS (
+		    SELECT 1 FROM jobs q WHERE q."key" = jobs."key" AND q.state = ?
+		) THEN ? ELSE ? END,
+		max_attempts = max_attempts + 1, run_after = ?, lease_owner = NULL,
+		lease_until = NULL, last_error = 'execution deferred', updated_at = ?
+		WHERE id = ? AND state = ? AND lease_owner = ? AND attempts = ?
+		  AND lease_until IS NOT NULL AND lease_until >= ?`,
+		store.JobQueued, store.JobCancelled, store.JobQueued, formatTime(retryAt.UTC()), formatTime(now),
+		j.ID, store.JobRunning, j.LeaseOwner, j.Attempts, formatTime(now))
+	if err != nil {
+		return fmt.Errorf("sqlite: defer job: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("sqlite: defer job: %w", err)
+	} else if n != 1 {
+		return store.ErrLeaseLost
 	}
 	return nil
 }

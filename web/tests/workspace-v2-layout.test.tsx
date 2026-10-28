@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { screen, within } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { WorkspacePanel } from '../src/features/project/WorkspacePanel'
 import { contextDoc } from './fixtures'
@@ -59,5 +59,103 @@ describe('workspace v2 layout', () => {
     await user.click(within(kindGroup).getByRole('button', { name: 'CLAUDE' }))
     expect(within(kindGroup).getByRole('button', { name: 'CLAUDE' })).toHaveAttribute('aria-pressed', 'true')
     expect(kinds).toContain('claude')
+  })
+
+  it('uses the refreshed current document after selecting it, while keeping historical records distinct', async () => {
+    const user = userEvent.setup()
+    let serverDoc = { ...current, locked: false }
+    const historical = { ...older, locked: true }
+    const lockBodies: unknown[] = []
+    installFetch((url, init) => {
+      if (url.includes('/context-docs/current/lock')) {
+        const body = JSON.parse(String(init?.body)) as { locked: boolean }
+        lockBodies.push(body)
+        serverDoc = { ...serverDoc, locked: body.locked, content: body.locked ? '# Refreshed current' : '# Current unlocked' }
+        return new Response(null, { status: 204 })
+      }
+      if (url.includes('/context-docs/current')) return jsonResponse(serverDoc)
+      // The list can contain an older copy of the current document.
+      if (url.includes('/context-docs')) return jsonResponse({ documents: [current, historical] })
+      if (url.endsWith('/workspace')) return jsonResponse({ state: 'ready' })
+      return jsonResponse({})
+    })
+    renderWithProviders(<WorkspacePanel projectId={42} canManage />)
+
+    await screen.findByText('# Current')
+    const versions = screen.getByRole('navigation', { name: '上下文版本历史' })
+    await user.click(within(versions).getByRole('button', { name: /1111111/ }))
+    const lock = screen.getByRole('switch', { name: '锁定当前上下文文档' })
+    expect(lock).toHaveAttribute('aria-checked', 'false')
+    await user.click(lock)
+    await waitFor(() => expect(lock).toHaveAttribute('aria-checked', 'true'))
+    expect(screen.getByText('已锁定')).toBeInTheDocument()
+    expect(screen.getByText('# Refreshed current')).toBeInTheDocument()
+    await waitFor(() => expect(lock).toBeEnabled())
+    await user.click(lock)
+    await waitFor(() => expect(lock).toHaveAttribute('aria-checked', 'false'))
+    expect(lockBodies).toEqual([{ locked: true }, { locked: false }])
+    expect(screen.getByText('未锁定')).toBeInTheDocument()
+    expect(screen.getByText('# Current unlocked')).toBeInTheDocument()
+
+    await user.click(within(versions).getByRole('button', { name: /2222222/ }))
+    expect(screen.getByText('# Older')).toBeInTheDocument()
+    expect(screen.getByText('历史版本（只读）')).toBeInTheDocument()
+    expect(screen.getByText('已锁定')).toBeInTheDocument()
+    expect(screen.queryByRole('switch', { name: '锁定当前上下文文档' })).not.toBeInTheDocument()
+    await user.click(within(versions).getByRole('button', { name: /1111111/ }))
+    expect(screen.getByText('# Current unlocked')).toBeInTheDocument()
+    expect(screen.getByText('未锁定')).toBeInTheDocument()
+  })
+
+  it.each([false, true])('inherits the server lock when saving a stale document (selected=%s)', async (selectCurrent) => {
+    const user = userEvent.setup()
+    let serverDoc = current
+    let savedBody: Record<string, unknown> | undefined
+    const lockBodies: unknown[] = []
+    installFetch((url, init) => {
+      if (url.includes('/context-docs/current/lock')) {
+        const body = JSON.parse(String(init?.body)) as { locked: boolean }
+        lockBodies.push(body)
+        serverDoc = { ...serverDoc, locked: body.locked }
+        return new Response(null, { status: 204 })
+      }
+      if (url.includes('/context-docs/current') && init?.method === 'PUT') {
+        savedBody = JSON.parse(String(init.body)) as Record<string, unknown>
+        serverDoc = contextDoc({
+          ...serverDoc,
+          id: 'd3',
+          content: String(savedBody.content),
+          locked: 'locked' in savedBody ? Boolean(savedBody.locked) : serverDoc.locked,
+        })
+        return jsonResponse(serverDoc)
+      }
+      if (url.includes('/context-docs/current')) return jsonResponse(serverDoc)
+      if (url.includes('/context-docs')) return jsonResponse({ documents: [serverDoc, older] })
+      if (url.endsWith('/workspace')) return jsonResponse({ state: 'ready' })
+      return jsonResponse({})
+    })
+    renderWithProviders(<WorkspacePanel projectId={42} canManage />)
+
+    await screen.findByText('# Current')
+    if (selectCurrent) {
+      await user.click(within(screen.getByRole('navigation', { name: '上下文版本历史' })).getByRole('button', { name: /1111111/ }))
+    }
+    await user.click(screen.getByRole('button', { name: '编辑' }))
+    await user.clear(screen.getByRole('textbox', { name: '编辑上下文文档' }))
+    await user.type(screen.getByRole('textbox', { name: '编辑上下文文档' }), 'New content')
+
+    // Another administrator locks the document after this page loaded.
+    serverDoc = { ...serverDoc, locked: true }
+    await user.click(screen.getByRole('button', { name: '保存为新版本' }))
+
+    await waitFor(() => expect(savedBody).toEqual({ kind: 'agents', content: 'New content' }))
+    expect(serverDoc.locked).toBe(true)
+    await waitFor(() => expect(screen.getByRole('switch', { name: '锁定当前上下文文档' })).toHaveAttribute('aria-checked', 'true'))
+
+    await user.click(screen.getByRole('switch', { name: '锁定当前上下文文档' }))
+    await waitFor(() => expect(lockBodies).toEqual([{ locked: false }]))
+    await waitFor(() => expect(screen.getByRole('switch', { name: '锁定当前上下文文档' })).toHaveAttribute('aria-checked', 'false'))
+    await user.click(screen.getByRole('switch', { name: '锁定当前上下文文档' }))
+    await waitFor(() => expect(lockBodies).toEqual([{ locked: false }, { locked: true }]))
   })
 })

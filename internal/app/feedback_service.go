@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -103,8 +104,6 @@ func (s *FeedbackService) Start(ctx context.Context, interval time.Duration) {
 
 // RunOnce performs one collection pass.
 func (s *FeedbackService) RunOnce(ctx context.Context) {
-	projects := make(map[int64]*store.Project)
-	tokens := make(map[int64]string)
 	seen := 0
 	cutoff := s.now().UTC().Add(-feedbackWindow)
 	cursor := ""
@@ -119,7 +118,7 @@ func (s *FeedbackService) RunOnce(ctx context.Context) {
 				return
 			}
 			seen++
-			s.collectWorkflow(ctx, workflow, projects, tokens)
+			s.collectWorkflow(ctx, workflow)
 		}
 		if len(workflows) < feedbackPageLimit || next == "" {
 			break
@@ -131,12 +130,30 @@ func (s *FeedbackService) RunOnce(ctx context.Context) {
 	}
 }
 
-func (s *FeedbackService) collectWorkflow(ctx context.Context, workflow store.Workflow, projects map[int64]*store.Project, tokens map[int64]string) {
+func (s *FeedbackService) collectWorkflow(ctx context.Context, workflow store.Workflow) {
 	if workflow.MRIID == nil {
 		return
 	}
+	ws := s.workspace.Get(workflow.ProjectID)
+	if ws == nil {
+		return
+	}
+	unlock, err := ws.RLock(ctx)
+	if err != nil {
+		return
+	}
+	defer unlock()
+	current, err := s.store.GetWorkflow(ctx, workflow.ID)
+	if err != nil || current == nil || current.ID != workflow.ID || current.ProjectID != workflow.ProjectID ||
+		current.Kind != "review" || current.Status != "completed" || current.MRIID == nil || *current.MRIID != *workflow.MRIID {
+		if err != nil && !errors.Is(err, store.ErrNotFound) && ctx.Err() == nil {
+			s.logger.Warn("feedback workflow lookup failed")
+		}
+		return
+	}
+	workflow = *current
 	mrIID := *workflow.MRIID
-	project, token, ok := s.project(ctx, workflow.ProjectID, projects, tokens)
+	project, token, ok := s.project(ctx, workflow.ProjectID)
 	if !ok {
 		return
 	}
@@ -318,7 +335,8 @@ func (s *FeedbackService) eligibleMR(mr *gitlab.MergeRequest) bool {
 // that the published finding line was removed or replaced between the
 // published head and the current head. It returns an empty signal when the
 // evidence is missing or incomplete, so the caller records neither a positive
-// nor a negative signal and can retry next pass.
+// nor a negative signal and can retry next pass. The caller holds the project
+// workspace read lock through resolve, fetch, and FileDiff.
 func (s *FeedbackService) resolveSignal(ctx context.Context, token string, project *store.Project, publication store.Publication, workflow store.Workflow, mr *gitlab.MergeRequest, mrIID int64) string {
 	if s.git == nil || s.diff == nil || s.workspace == nil || project == nil || mr == nil {
 		return ""
@@ -372,7 +390,7 @@ func (s *FeedbackService) resolveSignal(ctx context.Context, token string, proje
 
 // ensureHead makes sha available in the project mirror. A missing object is
 // fetched through the merge request ref; any failure leaves the caller without
-// evidence instead of guessing.
+// evidence instead of guessing. The caller holds the workspace read lock.
 func (s *FeedbackService) ensureHead(ctx context.Context, token string, project *store.Project, ws *workspace.Workspace, mrIID int64, sha string) bool {
 	mirror := ws.MirrorDir()
 	if _, err := s.git.Resolve(ctx, mirror, sha); err == nil {
@@ -381,37 +399,24 @@ func (s *FeedbackService) ensureHead(ctx context.Context, token string, project 
 	if mrIID <= 0 {
 		return false
 	}
-	remote := trimProjectWebURL(project.WebURL)
-	if remote == "" {
+	remote, err := currentProjectRemote(ctx, s.gitlab, project, token)
+	if err != nil {
 		return false
 	}
 	auth := repo.Auth{Token: token}
-	if err := s.git.EnsureMirror(ctx, mirror, remote, auth); err != nil {
-		return false
-	}
 	ref := fmt.Sprintf("refs/merge-requests/%d/head", mrIID)
-	if err := s.git.Fetch(ctx, mirror, auth, "+"+ref+":"+ref); err != nil {
-		return false
-	}
-	resolved, err := s.git.Resolve(ctx, mirror, ref)
+	resolved, err := fetchProjectRef(ctx, ws, s.git, remote, auth, "+"+ref+":"+ref, ref)
 	return err == nil && strings.EqualFold(resolved, sha)
 }
 
-func (s *FeedbackService) project(ctx context.Context, projectID int64, projects map[int64]*store.Project, tokens map[int64]string) (*store.Project, string, bool) {
-	if project, ok := projects[projectID]; ok {
-		return project, tokens[projectID], project != nil
-	}
+func (s *FeedbackService) project(ctx context.Context, projectID int64) (*store.Project, string, bool) {
 	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil || project == nil || !project.Enabled {
-		projects[projectID] = nil
 		return nil, "", false
 	}
 	token, err := s.cipher.Open(project.TokenEnc, secret.TokenAAD(project.ID))
 	if err != nil {
-		projects[projectID] = nil
 		return nil, "", false
 	}
-	projects[projectID] = project
-	tokens[projectID] = string(token)
-	return project, tokens[projectID], true
+	return project, string(token), true
 }

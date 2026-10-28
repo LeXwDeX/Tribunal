@@ -31,6 +31,9 @@ func workspaceIndexStatus(workspace *store.Workspace) string {
 	if workspace == nil {
 		return "unknown"
 	}
+	if workspace.LastError == "index: blocked by ignore policy" {
+		return "degraded"
+	}
 	base := strings.TrimSpace(workspace.BaseSHA)
 	index := strings.TrimSpace(workspace.IndexSHA)
 	if index == "" || base == "" {
@@ -61,6 +64,9 @@ func workspaceSummary(workspace *store.Workspace) *projectWorkspaceSummary {
 func workspaceLastError(workspace *store.Workspace) string {
 	if workspace.LastError == "" {
 		return ""
+	}
+	if workspace.LastError == "index: blocked by ignore policy" {
+		return "index: blocked by ignore policy"
 	}
 	if workspace.State == "ready" && strings.HasPrefix(workspace.LastError, "index: ") {
 		return store.WorkspaceIndexFailed
@@ -108,7 +114,7 @@ func (s *Server) handleRefreshWorkspace(w http.ResponseWriter, r *http.Request) 
 		decodeRequestError(w, r, err)
 		return
 	}
-	jobID, err := s.workspace.RefreshWorkspace(r.Context(), projectID, request.RegenerateContext, request.Reindex)
+	jobID, err := s.workspace.RefreshWorkspace(s.dispatchContext(r, projectID), projectID, request.RegenerateContext, request.Reindex)
 	if err != nil {
 		s.writeServiceError(w, r, err)
 		return

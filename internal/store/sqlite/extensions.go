@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/LeXwDeX/tribunal/internal/secret"
 	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
@@ -104,31 +105,64 @@ func extensionScopeClauses(scope string, projectID *int64, platformProject strin
 // ---------------------------------------------------------------------------
 // MCP servers
 
-const mcpServerColumns = `id, scope, project_id, name, config, enabled, builtin, created_at, updated_at`
+const mcpServerColumns = `id, scope, project_id, name, config, config_enc, enabled, builtin, created_at, updated_at`
 
-func scanMCPServer(row rowScanner) (*store.MCPServer, error) {
+func (s *Store) scanMCPServer(row rowScanner) (*store.MCPServer, error) {
 	var (
 		server    store.MCPServer
 		projectID sql.NullInt64
 		createdAt string
 		updatedAt string
+		plain     string
+		enc       []byte
 	)
 	if err := row.Scan(&server.ID, &server.Scope, &projectID, &server.Name,
-		&server.Config, &server.Enabled, &server.Builtin, &createdAt, &updatedAt); err != nil {
-		return nil, err
+		&plain, &enc, &server.Enabled, &server.Builtin, &createdAt, &updatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, sql.ErrNoRows
+		}
+		return nil, errors.New("sqlite: scan MCP server failed")
 	}
 	if projectID.Valid {
 		value := projectID.Int64
 		server.ProjectID = &value
 	}
-	var err error
+	cipher := s.mcpCipher.Load()
+	if cipher == nil || plain != "{}" || len(enc) == 0 {
+		return nil, errors.New("sqlite: MCP configuration unavailable")
+	}
+	aad, err := secret.MCPConfigAAD(server.Scope, server.ProjectID, server.ID)
+	if err != nil {
+		return nil, errors.New("sqlite: invalid MCP configuration identity")
+	}
+	config, err := cipher.Open(enc, aad)
+	if err != nil || !validJSONObject(config) {
+		return nil, errors.New("sqlite: invalid MCP sealed configuration")
+	}
+	server.Config = config
 	if server.CreatedAt, err = parseTime(createdAt); err != nil {
-		return nil, err
+		return nil, errors.New("sqlite: invalid MCP creation time")
 	}
 	if server.UpdatedAt, err = parseTime(updatedAt); err != nil {
-		return nil, err
+		return nil, errors.New("sqlite: invalid MCP update time")
 	}
 	return &server, nil
+}
+
+func (s *Store) sealMCPConfig(server *store.MCPServer) ([]byte, error) {
+	cipher := s.mcpCipher.Load()
+	if cipher == nil {
+		return nil, errors.New("sqlite: MCP cipher is required")
+	}
+	aad, err := secret.MCPConfigAAD(server.Scope, server.ProjectID, server.ID)
+	if err != nil {
+		return nil, errors.New("sqlite: invalid MCP configuration identity")
+	}
+	sealed, err := cipher.Seal(server.Config, aad)
+	if err != nil {
+		return nil, errors.New("sqlite: seal MCP configuration failed")
+	}
+	return sealed, nil
 }
 
 // ListMCPServers returns servers matching the scope selector. An empty scope
@@ -141,19 +175,19 @@ func (s *Store) ListMCPServers(ctx context.Context, scope string, projectID *int
 	rows, err := s.db.QueryContext(ctx, `SELECT `+mcpServerColumns+` FROM mcp_servers
 		WHERE `+strings.Join(where, " AND ")+` ORDER BY created_at DESC, id DESC`, args...)
 	if err != nil {
-		return nil, fmt.Errorf("sqlite: list mcp servers: %w", err)
+		return nil, errors.New("sqlite: list mcp servers failed")
 	}
 	defer rows.Close()
 	servers := make([]store.MCPServer, 0)
 	for rows.Next() {
-		server, err := scanMCPServer(rows)
+		server, err := s.scanMCPServer(rows)
 		if err != nil {
 			return nil, fmt.Errorf("sqlite: scan mcp server: %w", err)
 		}
 		servers = append(servers, *server)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("sqlite: iterate mcp servers: %w", err)
+		return nil, errors.New("sqlite: iterate mcp servers failed")
 	}
 	return servers, nil
 }
@@ -187,19 +221,19 @@ func (s *Store) ListMCPServersPage(ctx context.Context, scope string, projectID 
 		WHERE `+strings.Join(where, " AND ")+`
 		ORDER BY created_at DESC, id DESC LIMIT ?`, args...)
 	if err != nil {
-		return nil, "", fmt.Errorf("sqlite: list mcp servers: %w", err)
+		return nil, "", errors.New("sqlite: list mcp servers failed")
 	}
 	defer rows.Close()
 	servers := make([]store.MCPServer, 0, limit)
 	for rows.Next() {
-		server, err := scanMCPServer(rows)
+		server, err := s.scanMCPServer(rows)
 		if err != nil {
 			return nil, "", fmt.Errorf("sqlite: scan mcp server: %w", err)
 		}
 		servers = append(servers, *server)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, "", fmt.Errorf("sqlite: iterate mcp servers: %w", err)
+		return nil, "", errors.New("sqlite: iterate mcp servers failed")
 	}
 	next := ""
 	if len(servers) > limit {
@@ -218,7 +252,7 @@ func (s *Store) GetMCPServer(ctx context.Context, id string) (*store.MCPServer, 
 	if strings.TrimSpace(id) == "" {
 		return nil, errors.New("sqlite: mcp server id is required")
 	}
-	server, err := scanMCPServer(s.db.QueryRowContext(ctx,
+	server, err := s.scanMCPServer(s.db.QueryRowContext(ctx,
 		`SELECT `+mcpServerColumns+` FROM mcp_servers WHERE id = ?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%w: mcp server %s", store.ErrNotFound, id)
@@ -249,30 +283,34 @@ func (s *Store) CreateMCPServer(ctx context.Context, server store.MCPServer) (*s
 		return nil, err
 	}
 	server.ID = id
+	sealed, err := s.sealMCPConfig(&server)
+	if err != nil {
+		return nil, err
+	}
 	now := s.now().UTC()
 	server.CreatedAt = now
 	server.UpdatedAt = now
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, fmt.Errorf("sqlite: begin create mcp server: %w", err)
+		return nil, errors.New("sqlite: begin create mcp server failed")
 	}
 	defer tx.Rollback()
 	if err := requireMCPNameFree(ctx, tx, server.Scope, server.ProjectID, server.Name, ""); err != nil {
 		return nil, err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO mcp_servers
-		(id, scope, project_id, name, config, enabled, builtin, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(id, scope, project_id, name, config, config_enc, enabled, builtin, created_at, updated_at)
+		VALUES (?, ?, ?, ?, '{}', ?, ?, ?, ?, ?)`,
 		server.ID, server.Scope, nullableProjectID(server.ProjectID), server.Name,
-		[]byte(server.Config), server.Enabled, server.Builtin, formatTime(server.CreatedAt), formatTime(server.UpdatedAt)); err != nil {
+		sealed, server.Enabled, server.Builtin, formatTime(server.CreatedAt), formatTime(server.UpdatedAt)); err != nil {
 		if isConstraintErr(err) {
 			return nil, fmt.Errorf("%w: mcp server %s", store.ErrConflict, server.Name)
 		}
-		return nil, fmt.Errorf("sqlite: insert mcp server: %w", err)
+		return nil, errors.New("sqlite: insert mcp server failed")
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("sqlite: commit mcp server: %w", err)
+		return nil, errors.New("sqlite: commit mcp server failed")
 	}
 	return &server, nil
 }
@@ -288,10 +326,10 @@ func (s *Store) UpdateMCPServer(ctx context.Context, id string, update store.MCP
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, fmt.Errorf("sqlite: begin update mcp server: %w", err)
+		return nil, errors.New("sqlite: begin update mcp server failed")
 	}
 	defer tx.Rollback()
-	current, err := scanMCPServer(tx.QueryRowContext(ctx,
+	current, err := s.scanMCPServer(tx.QueryRowContext(ctx,
 		`SELECT `+mcpServerColumns+` FROM mcp_servers WHERE id = ?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%w: mcp server %s", store.ErrNotFound, id)
@@ -318,17 +356,21 @@ func (s *Store) UpdateMCPServer(ctx context.Context, id string, update store.MCP
 		current.Enabled = *update.Enabled
 	}
 	current.UpdatedAt = s.now().UTC()
+	sealed, err := s.sealMCPConfig(current)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE mcp_servers
-		SET name = ?, config = ?, enabled = ?, updated_at = ? WHERE id = ?`,
-		current.Name, []byte(current.Config), current.Enabled,
+		SET name = ?, config = '{}', config_enc = ?, enabled = ?, updated_at = ? WHERE id = ?`,
+		current.Name, sealed, current.Enabled,
 		formatTime(current.UpdatedAt), id); err != nil {
 		if isConstraintErr(err) {
 			return nil, fmt.Errorf("%w: mcp server %s", store.ErrConflict, current.Name)
 		}
-		return nil, fmt.Errorf("sqlite: update mcp server: %w", err)
+		return nil, errors.New("sqlite: update mcp server failed")
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("sqlite: commit mcp server update: %w", err)
+		return nil, errors.New("sqlite: commit mcp server update failed")
 	}
 	return current, nil
 }
@@ -353,9 +395,12 @@ func (s *Store) ImportMCPServers(ctx context.Context, scope string, projectID *i
 			return nil, errors.New("sqlite: mcp server config must be a JSON object")
 		}
 	}
+	if s.mcpCipher.Load() == nil {
+		return nil, errors.New("sqlite: MCP cipher is required")
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, fmt.Errorf("sqlite: begin mcp import: %w", err)
+		return nil, errors.New("sqlite: begin mcp import failed")
 	}
 	defer tx.Rollback()
 
@@ -363,7 +408,7 @@ func (s *Store) ImportMCPServers(ctx context.Context, scope string, projectID *i
 	out := make([]store.MCPServer, 0, len(servers))
 	for _, in := range servers {
 		name := strings.TrimSpace(in.Name)
-		current, err := scanMCPServer(tx.QueryRowContext(ctx, `SELECT `+mcpServerColumns+` FROM mcp_servers
+		current, err := s.scanMCPServer(tx.QueryRowContext(ctx, `SELECT `+mcpServerColumns+` FROM mcp_servers
 			WHERE scope = ? AND project_id IS ? AND name = ?`, scope, nullableProjectID(projectID), name))
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
@@ -376,15 +421,19 @@ func (s *Store) ImportMCPServers(ctx context.Context, scope string, projectID *i
 				Config: append(json.RawMessage(nil), in.Config...), Enabled: true,
 				CreatedAt: now, UpdatedAt: now,
 			}
+			sealed, err := s.sealMCPConfig(&row)
+			if err != nil {
+				return nil, err
+			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO mcp_servers
-				(id, scope, project_id, name, config, enabled, builtin, created_at, updated_at)
-				VALUES (?, ?, ?, ?, ?, ?, '', ?, ?)`,
-				row.ID, row.Scope, nullableProjectID(row.ProjectID), row.Name, []byte(row.Config),
+				(id, scope, project_id, name, config, config_enc, enabled, builtin, created_at, updated_at)
+				VALUES (?, ?, ?, ?, '{}', ?, ?, '', ?, ?)`,
+				row.ID, row.Scope, nullableProjectID(row.ProjectID), row.Name, sealed,
 				row.Enabled, formatTime(now), formatTime(now)); err != nil {
 				if isConstraintErr(err) {
 					return nil, fmt.Errorf("%w: mcp server %s", store.ErrConflict, name)
 				}
-				return nil, fmt.Errorf("sqlite: insert mcp server: %w", err)
+				return nil, errors.New("sqlite: insert mcp server failed")
 			}
 			out = append(out, row)
 		case err != nil:
@@ -394,15 +443,19 @@ func (s *Store) ImportMCPServers(ctx context.Context, scope string, projectID *i
 		default:
 			current.Config = append(json.RawMessage(nil), in.Config...)
 			current.UpdatedAt = now
-			if _, err := tx.ExecContext(ctx, `UPDATE mcp_servers SET config = ?, updated_at = ? WHERE id = ?`,
-				[]byte(current.Config), formatTime(now), current.ID); err != nil {
-				return nil, fmt.Errorf("sqlite: update mcp server: %w", err)
+			sealed, err := s.sealMCPConfig(current)
+			if err != nil {
+				return nil, err
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE mcp_servers SET config = '{}', config_enc = ?, updated_at = ? WHERE id = ?`,
+				sealed, formatTime(now), current.ID); err != nil {
+				return nil, errors.New("sqlite: update mcp server failed")
 			}
 			out = append(out, *current)
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("sqlite: commit mcp import: %w", err)
+		return nil, errors.New("sqlite: commit mcp import failed")
 	}
 	return out, nil
 }
@@ -414,11 +467,11 @@ func (s *Store) DeleteMCPServer(ctx context.Context, id string) error {
 	}
 	res, err := s.db.ExecContext(ctx, `DELETE FROM mcp_servers WHERE id = ?`, id)
 	if err != nil {
-		return fmt.Errorf("sqlite: delete mcp server: %w", err)
+		return errors.New("sqlite: delete mcp server failed")
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("sqlite: delete mcp server: %w", err)
+		return errors.New("sqlite: delete mcp server failed")
 	}
 	if n != 1 {
 		return fmt.Errorf("%w: mcp server %s", store.ErrNotFound, id)
@@ -435,7 +488,7 @@ func requireMCPNameFree(ctx context.Context, tx *sql.Tx, scope string, projectID
 		return fmt.Errorf("%w: mcp server %s", store.ErrConflict, name)
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("sqlite: check mcp server name: %w", err)
+		return errors.New("sqlite: check mcp server name failed")
 	}
 	return nil
 }

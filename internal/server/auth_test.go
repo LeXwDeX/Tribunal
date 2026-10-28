@@ -87,7 +87,7 @@ func newAuthEnv(t *testing.T) *authEnv {
 func (e *authEnv) start() {
 	e.t.Helper()
 	if e.db == nil {
-		db, err := sqlite.Open(context.Background(), e.dsn)
+		db, err := sqlite.Open(context.Background(), e.dsn, sqlite.WithClock(e.clock.Now))
 		if err != nil {
 			e.t.Fatalf("sqlite.Open: %v", err)
 		}

@@ -148,7 +148,7 @@ export async function getCurrentContextDoc(projectId: number | string, kind: str
   return request<ContextDoc>(withQuery(`/api/v1/projects/${segment(projectId)}/context-docs/current`, { kind }))
 }
 
-export async function saveCurrentContextDoc(projectId: number | string, kind: string, content: string, locked: boolean): Promise<ContextDoc> {
+export async function saveCurrentContextDoc(projectId: number | string, kind: string, content: string, locked?: boolean): Promise<ContextDoc> {
   return request<ContextDoc>(withQuery(`/api/v1/projects/${segment(projectId)}/context-docs/current`, { kind }), {
     method: 'PUT',
     body: { kind, content, locked },
@@ -351,8 +351,8 @@ export async function listApiTokens(cursor?: string): Promise<ApiTokenPage> {
   return request<ApiTokenPage>(withQuery('/api/v1/api-tokens', { cursor }))
 }
 
-export async function createApiToken(input: { name: string; expires_in_days: number }): Promise<CreatedApiToken> {
-  return request<CreatedApiToken>('/api/v1/api-tokens', { method: 'POST', body: input })
+export async function createApiToken(input: { name: string; expires_in_days: number }, signal?: AbortSignal): Promise<CreatedApiToken> {
+  return request<CreatedApiToken>('/api/v1/api-tokens', { method: 'POST', body: input, signal })
 }
 
 export async function revokeApiToken(id: string | number): Promise<void> {

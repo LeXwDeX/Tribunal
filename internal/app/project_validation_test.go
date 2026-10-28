@@ -9,6 +9,7 @@ import (
 
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/workspace"
 )
 
 type probeCall struct {
@@ -24,6 +25,7 @@ func newValidationService(t *testing.T, st ProjectStore, api gitlab.API, root st
 		GitLab:            api,
 		Cipher:            newTestCipher(t),
 		Profiles:          testProfiles(),
+		Workspace:         workspace.NewManager(t.TempDir(), nil),
 		GitLabURL:         root,
 		ProbeRemote:       probe,
 		ValidationTimeout: 2 * time.Second,
@@ -346,6 +348,7 @@ func TestValidateSanitizesGitProbeFailureAndTimesOut(t *testing.T) {
 			GitLab:            defaultFakeGitLab(),
 			Cipher:            newTestCipher(t),
 			Profiles:          testProfiles(),
+			Workspace:         workspace.NewManager(t.TempDir(), nil),
 			GitLabURL:         "https://gitlab.example.com",
 			ValidationTimeout: 25 * time.Millisecond,
 			ProbeRemote: func(ctx context.Context, _, _ string) (string, error) {
@@ -376,6 +379,7 @@ func TestValidateWithoutProbeConfigurationIsUnavailable(t *testing.T) {
 		GitLab:    defaultFakeGitLab(),
 		Cipher:    newTestCipher(t),
 		Profiles:  testProfiles(),
+		Workspace: workspace.NewManager(t.TempDir(), nil),
 		GitLabURL: "https://gitlab.example.com",
 	})
 	if err != nil {
@@ -395,6 +399,7 @@ func TestProjectServiceRejectsInvalidGitLabRoot(t *testing.T) {
 		GitLab:    defaultFakeGitLab(),
 		Cipher:    newTestCipher(t),
 		Profiles:  testProfiles(),
+		Workspace: workspace.NewManager(t.TempDir(), nil),
 		GitLabURL: "https://user:secret@gitlab.example.com",
 	})
 	if err == nil {

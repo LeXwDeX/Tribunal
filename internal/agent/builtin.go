@@ -62,7 +62,7 @@ type readFileInput struct {
 type readFileTool struct{ sb *Sandbox }
 
 func (t readFileTool) Def() llm.ToolDef {
-	return def("read_file",
+	return def(t.sb, "read_file",
 		"Read a text file with line numbers. Paths are relative to the selected root.",
 		`{"type":"object","required":["path"],"properties":{
 			"path":{"type":"string"},
@@ -169,7 +169,7 @@ type grepInput struct {
 type grepTool struct{ sb *Sandbox }
 
 func (t grepTool) Def() llm.ToolDef {
-	return def("grep",
+	return def(t.sb, "grep",
 		"Search text files with a Go regular expression. Returns path:line: text.",
 		`{"type":"object","required":["pattern"],"properties":{
 			"pattern":{"type":"string"},
@@ -295,6 +295,12 @@ func (t grepTool) Call(ctx context.Context, raw json.RawMessage) (Result, error)
 			if d.Type()&fs.ModeSymlink != 0 {
 				return nil
 			}
+			if err := t.sb.checkIgnore(root, filepath.ToSlash(name)); err != nil {
+				if d.IsDir() {
+					return fs.SkipDir
+				}
+				return nil
+			}
 			if d.IsDir() {
 				return nil
 			}
@@ -348,7 +354,7 @@ type globInput struct {
 type globTool struct{ sb *Sandbox }
 
 func (t globTool) Def() llm.ToolDef {
-	return def("glob",
+	return def(t.sb, "glob",
 		"List files matching a glob. Supports *, ?, [...] and ** across path segments.",
 		`{"type":"object","required":["pattern"],"properties":{
 			"pattern":{"type":"string"},
@@ -402,6 +408,9 @@ func (t globTool) Call(ctx context.Context, raw json.RawMessage) (Result, error)
 			if pathWithin(entry.Name()) || entry.IsDir() || entry.Type()&fs.ModeSymlink != 0 {
 				continue
 			}
+			if err := t.sb.checkIgnore(root, entry.Name()); err != nil {
+				continue
+			}
 			info, err := entry.Info()
 			if err != nil || !info.Mode().IsRegular() {
 				continue
@@ -443,7 +452,16 @@ func (t globTool) Call(ctx context.Context, raw json.RawMessage) (Result, error)
 			}
 			return nil
 		}
-		if d.IsDir() || d.Type()&fs.ModeSymlink != 0 {
+		if d.Type()&fs.ModeSymlink != 0 {
+			return nil
+		}
+		if err := t.sb.checkIgnore(root, filepath.ToSlash(name)); err != nil {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
 			return nil
 		}
 		info, err := d.Info()
@@ -482,7 +500,7 @@ type listDirInput struct {
 type listDirTool struct{ sb *Sandbox }
 
 func (t listDirTool) Def() llm.ToolDef {
-	return def("list_dir",
+	return def(t.sb, "list_dir",
 		"List one directory level. Directories end with /, symlinks with @.",
 		`{"type":"object","properties":{
 			"path":{"type":"string"},
@@ -527,6 +545,11 @@ func (t listDirTool) Call(ctx context.Context, raw json.RawMessage) (Result, err
 		if strings.EqualFold(entry.Name(), ".git") {
 			continue
 		}
+		if t.sb.deny != nil {
+			if _, _, _, err := t.sb.resolve(in.Root, path.Join(clean, entry.Name())); err != nil {
+				continue
+			}
+		}
 		name := entry.Name()
 		switch {
 		case entry.Type()&fs.ModeSymlink != 0:
@@ -547,7 +570,8 @@ func (t listDirTool) Call(ctx context.Context, raw json.RawMessage) (Result, err
 	return Result{Content: content, Truncated: truncated}, nil
 }
 
-func def(name, description, schema string) llm.ToolDef {
+func def(sb *Sandbox, name, description, schema string) llm.ToolDef {
+	description += " Available roots: " + strings.Join(sb.RootNames(), ", ") + ". Default root: " + sb.def + ". Omit root or use an empty string for the default."
 	return llm.ToolDef{Name: name, Description: description, InputSchema: json.RawMessage(schema)}
 }
 

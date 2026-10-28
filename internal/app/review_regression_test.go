@@ -50,6 +50,17 @@ func (s *recoverPageStore) GetWorkflowDossier(ctx context.Context, workflowID st
 	return s.Store.GetWorkflowDossier(ctx, workflowID)
 }
 
+func (s *recoverPageStore) GetWorkflow(ctx context.Context, workflowID string) (*store.Workflow, error) {
+	if s.bad[workflowID] {
+		for _, workflow := range s.page0 {
+			if workflow.ID == workflowID {
+				return &workflow, nil
+			}
+		}
+	}
+	return s.Store.GetWorkflow(ctx, workflowID)
+}
+
 func reviewInt64Ptr(v int64) *int64 { return &v }
 
 func badReviewWorkflows(count int) ([]store.Workflow, map[string]bool) {
@@ -193,6 +204,7 @@ func assertOutsideWorkspaceUntouched(t *testing.T, outside string, names ...stri
 
 func TestPrepareRunRejectsSymlinkedWorkspaceRoot(t *testing.T) {
 	f := newReviewFixture(t, reviewTestHead)
+	consumerReadLock(t, f.manager, 42)
 	project, err := f.db.GetProject(context.Background(), 42)
 	if err != nil {
 		t.Fatal(err)
@@ -247,6 +259,7 @@ func TestPrepareRunRejectsSymlinkedWorkspaceParent(t *testing.T) {
 				t.Fatal(err)
 			}
 			f.service.workspace = workspace.NewManager(parent, &repo.Git{})
+			consumerReadLock(t, f.service.workspace, 42)
 			git := &countingGitOps{fakeGitOps: f.git}
 			f.service.git = git
 

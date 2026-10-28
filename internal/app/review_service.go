@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -37,6 +38,8 @@ const (
 type ReviewStore interface {
 	dag.EventStore
 	GetProject(ctx context.Context, id int64) (*store.Project, error)
+	ListProjects(ctx context.Context) ([]store.Project, error)
+	GetJob(ctx context.Context, id string) (*store.Job, error)
 	GetReviewControl(ctx context.Context, projectID, mrIID int64) (*store.ReviewControl, error)
 	ActivateReviewCandidate(ctx context.Context, activation store.ReviewCandidateActivation) (string, int64, error)
 	FindActiveReview(ctx context.Context, projectID, mrIID int64) (*store.Workflow, error)
@@ -46,6 +49,7 @@ type ReviewStore interface {
 	GetWorkflow(ctx context.Context, id string) (*store.Workflow, error)
 	GetWorkflowDossier(ctx context.Context, workflowID string) (*store.WorkflowDossier, error)
 	SaveWorkflowDossier(ctx context.Context, dossier store.WorkflowDossier) (*store.WorkflowDossier, error)
+	SettleOrphanDossiers(ctx context.Context, projectID int64) error
 	SetWorkflowPublicationState(ctx context.Context, workflowID, state, reason string) error
 	SetWorkflowPublicationStateIfPending(ctx context.Context, workflowID, reason string) error
 	SetWorkflowVerdict(ctx context.Context, id, verdict string) error
@@ -102,6 +106,9 @@ type ReviewService struct {
 	tools          review.ToolProvider
 	skills         review.SkillProvider
 	providerNames  []string
+	providerConfig json.RawMessage
+	extensions     *ProjectExtensionResolver
+	testIdentity   string
 	cost           review.CostFunc
 	publisher      *Publisher
 	publicURL      string
@@ -114,30 +121,33 @@ type ReviewService struct {
 
 // ReviewServiceConfig configures ReviewService.
 type ReviewServiceConfig struct {
-	Store            ReviewStore
-	GitLab           GitLabClient
-	Cipher           *secret.Cipher
-	Workspace        *workspace.Manager
-	Git              GitOps
-	Engine           *dag.Engine
-	Executors        *executorRegistry
-	Profiles         map[string]config.ProfileConfig
-	Blocks           map[string]config.BlockBinding
-	ReviewDefaults   config.ProjectSettings
-	Prompts          prompts.Bundle
-	Clients          review.ClientProvider
-	AgentRun         review.AgentRunner
-	Tools            review.ToolProvider
-	Skills           review.SkillProvider
-	Cost             review.CostFunc
-	Publisher        *Publisher
-	Status           *statusReporter
-	AllowedProviders []string
-	PublicURL        string
-	Logger           *slog.Logger
-	Now              func() time.Time
-	CancelPoll       time.Duration
-	CancelWait       time.Duration
+	Store             ReviewStore
+	GitLab            GitLabClient
+	Cipher            *secret.Cipher
+	Workspace         *workspace.Manager
+	Git               GitOps
+	Engine            *dag.Engine
+	Executors         *executorRegistry
+	Profiles          map[string]config.ProfileConfig
+	Blocks            map[string]config.BlockBinding
+	ReviewDefaults    config.ProjectSettings
+	Prompts           prompts.Bundle
+	Clients           review.ClientProvider
+	AgentRun          review.AgentRunner
+	Tools             review.ToolProvider
+	Skills            review.SkillProvider
+	Cost              review.CostFunc
+	Publisher         *Publisher
+	Status            *statusReporter
+	AllowedProviders  []string
+	ProviderConfigs   map[string]config.ProviderConfig
+	ProjectExtensions *ProjectExtensionResolver
+	ExecutionIdentity string
+	PublicURL         string
+	Logger            *slog.Logger
+	Now               func() time.Time
+	CancelPoll        time.Duration
+	CancelWait        time.Duration
 }
 
 // NewReviewService validates dependencies and builds the F1/F2 service.
@@ -145,6 +155,23 @@ func NewReviewService(cfg ReviewServiceConfig) (*ReviewService, error) {
 	if cfg.Store == nil || cfg.GitLab == nil || cfg.Cipher == nil ||
 		cfg.Workspace == nil || cfg.Git == nil || cfg.Prompts.Files == nil {
 		return nil, errors.New("app: review service dependencies are required")
+	}
+	if cfg.ProviderConfigs == nil || (cfg.ProjectExtensions == nil && cfg.ExecutionIdentity == "") {
+		return nil, errors.New("app: review execution identity is required")
+	}
+	providers := make(map[string]config.ProviderConfig, len(cfg.ProviderConfigs))
+	for name, provider := range cfg.ProviderConfigs {
+		provider.APIKeyEnv = ""
+		providers[name] = provider
+	}
+	for _, name := range cfg.AllowedProviders {
+		if _, ok := providers[name]; !ok {
+			return nil, errors.New("app: review provider identity is incomplete")
+		}
+	}
+	providerConfig, err := json.Marshal(providers)
+	if err != nil {
+		return nil, errors.New("app: review provider identity is invalid")
 	}
 	logger := cfg.Logger
 	if logger == nil {
@@ -187,6 +214,9 @@ func NewReviewService(cfg ReviewServiceConfig) (*ReviewService, error) {
 		tools:          cfg.Tools,
 		skills:         cfg.Skills,
 		providerNames:  cfg.AllowedProviders,
+		providerConfig: providerConfig,
+		extensions:     cfg.ProjectExtensions,
+		testIdentity:   cfg.ExecutionIdentity,
 		publisher:      cfg.Publisher,
 		publicURL:      strings.TrimRight(cfg.PublicURL, "/"),
 		status:         cfg.Status,
@@ -291,6 +321,18 @@ func (s *ReviewService) RunCandidate(ctx context.Context, job *jobs.Job) error {
 		return PermanentJob(fmt.Errorf("review candidate job lease is required"))
 	}
 
+	ws := s.workspace.Get(payload.ProjectID)
+	if ws == nil {
+		return PermanentJob(fmt.Errorf("workspace is unavailable"))
+	}
+	unlock, err := ws.RLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := consumerJobExists(ctx, s.store, job, "review.candidate", payload.ProjectID); err != nil {
+		return err
+	}
 	project, token, err := s.projectToken(ctx, payload.ProjectID)
 	if err != nil {
 		return err
@@ -319,7 +361,10 @@ func (s *ReviewService) RunCandidate(ctx context.Context, job *jobs.Job) error {
 		}
 		return err
 	}
-	cfg := s.resolveConfig(project, docs)
+	cfg, err := resolveSecureReviewConfig(project, docs, s.reviewDefaults, s.profiles)
+	if err != nil {
+		return PermanentJob(err)
+	}
 	if reason := reviewFilterReason(payload.Trigger, mr, project, cfg.Settings); reason != "" {
 		// The effective configuration rejected this event. Keep the active
 		// review untouched; a later event can still supersede it.
@@ -396,6 +441,18 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 		return PermanentJob(fmt.Errorf("review job id is required"))
 	}
 
+	ws := s.workspace.Get(payload.ProjectID)
+	if ws == nil {
+		return PermanentJob(fmt.Errorf("workspace is unavailable"))
+	}
+	unlock, err := ws.RLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := consumerJobExists(ctx, s.store, job, "review.run", payload.ProjectID); err != nil {
+		return err
+	}
 	project, token, err := s.projectToken(ctx, payload.ProjectID)
 	if err != nil {
 		return err
@@ -416,17 +473,17 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 	if err != nil {
 		return err
 	}
-	// The generation fence passed, so this worker still owns the status note.
-	s.setReviewStatus(ctx, project.ID, control.MRIID, payload.Generation, job.Attempts,
-		payload.HeadSHA, payload.Profile, reviewStatusRunning, "")
 	// Claim application ownership before preparing a worktree or registering
 	// an executor. A concurrent recovery or lease-reclaimed handler shares the
 	// same job ID and must stop here; Engine.Run's late ErrAlreadyRunning would
 	// let the loser unregister the winner's executor and delete its worktree.
 	if !s.executors.Acquire(job.ID) {
-		return fmt.Errorf("app: review job %s is already owned by another handler", job.ID)
+		return jobs.ErrDeferred
 	}
 	defer s.executors.Release(job.ID)
+	// The generation fence passed and this handler owns the workflow.
+	s.setReviewStatus(ctx, project.ID, control.MRIID, payload.Generation, job.Attempts,
+		payload.HeadSHA, payload.Profile, reviewStatusRunning, "")
 	workflow, storedDossier, resumable, err := s.resumableWorkflow(ctx, job.ID, payload.Generation, payload.HeadSHA)
 	if err != nil {
 		return err
@@ -436,8 +493,14 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 		return err
 	}
 
-	cfg := s.resolveConfig(project, inputs.RepoDocs)
-	if payload.ActivationSeq == 0 {
+	cfg, err := resolveSecureReviewConfig(project, inputs.RepoDocs, s.reviewDefaults, s.profiles)
+	if err != nil {
+		return PermanentJob(err)
+	}
+	filtered := func() bool {
+		if payload.ActivationSeq != 0 {
+			return false
+		}
 		if reason := reviewFilterReason(payload.Trigger, inputs.MR, project, cfg.Settings); reason != "" {
 			// Webhook filtering cannot read repository configuration without a
 			// network call. When repo config is enabled the worker makes the final
@@ -448,22 +511,90 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 			s.settleReviewStatus(ctx, project.ID, control.MRIID, payload.Generation,
 				job.Attempts, payload.HeadSHA, payload.Profile, reviewStatusStale,
 				"review skipped: "+reason, payload.NoteID, reviewAwardNone)
-			return nil
+			return true
 		}
+		return false
 	}
-	if !resumable {
-		// Filtering happens first so a draft or excluded-label update never
-		// cancels the previous review before the worker knows it is filtered.
-		if err := s.cancelActive(ctx, control.ProjectID, control.MRIID, payload.Generation); err != nil {
-			return err
-		}
+	if workflow == nil && filtered() {
+		return nil
 	}
 	configHash := reviewConfigHash(cfg)
 	promptHash := s.prompts.Hash
-	if workflow != nil {
-		changed, err := dossierConfigChanged(workflow, storedDossier, configHash, promptHash)
+	profileName, profileCfg := s.profileFor(project, payload.Profile, cfg.Profile, inputs.MR.Labels, profileExplicit(payload))
+	profile := review.Profile{Name: profileName, Config: profileCfg}
+	profileHash := s.reviewProfileHash(profile)
+	execution, err := s.resolveReviewExecution(ctx, project.ID, profile)
+	if err != nil {
+		return err
+	}
+	var head, baseDir, workspaceIdentity, indexSHA string
+	var indexEligible bool
+	var cleanup func()
+	prepare := func() error {
+		var err error
+		head, cleanup, err = s.prepareRun(ctx, project, token, control.MRIID, job.ID, payload.HeadSHA)
 		if err != nil {
 			return err
+		}
+		defer func() {
+			if err != nil {
+				cleanup()
+			}
+		}()
+		baseDir, workspaceIdentity, err = s.reviewBaseIdentity(ctx, project.ID, inputs.Version.StartSHA)
+		if err != nil {
+			return err
+		}
+		indexSHA, indexEligible, err = s.reviewIndexState(ctx, project.ID, inputs.Version.StartSHA, cfg.Settings.Ignore)
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+	// Terminal snapshots need publication checks, not a new worktree.
+	if workflow == nil || resumable {
+		if err := prepare(); err != nil {
+			return err
+		}
+		defer cleanup()
+	}
+	var previous *review.Dossier
+	if workflow != nil {
+		changed := false
+		workspaceChanged := false
+		if storedDossier == nil {
+			changed = true
+			workspaceChanged = true
+		} else {
+			previous = new(review.Dossier)
+			if err := json.Unmarshal(storedDossier.Data, previous); err != nil {
+				changed = true
+			}
+			policy := previous.IgnorePolicy
+			if policy == nil || policy.Version != review.IgnorePolicyVersion || policy.Patterns == nil || !slices.Equal(policy.Patterns, cfg.Settings.Ignore) {
+				changed = true
+			}
+			if err := review.ValidateDossier(previous); err != nil {
+				changed = true
+			}
+			if !previous.WorkspaceProvenanceValid() || (resumable && previous.WorkspaceProvenance.MCPEligible && !indexEligible) {
+				changed = true
+				workspaceChanged = true
+			}
+			if configHash == "" || promptHash == "" || profileHash == "" ||
+				previous.Metadata["config_hash"] != configHash || previous.Metadata["prompt_hash"] != promptHash ||
+				previous.Metadata["profile_hash"] != profileHash ||
+				(resumable && (workspaceIdentity == "" || previous.Metadata["workspace_identity"] != workspaceIdentity)) ||
+				!s.matchesReviewExecution(project.ID, previous.Metadata["execution_identity"], execution.digest) ||
+				workflow.Profile != profileName || workflow.ProjectID != project.ID || workflow.MRIID == nil || *workflow.MRIID != control.MRIID ||
+				previous.Project.ID != project.ID || previous.MR.IID != control.MRIID ||
+				previous.MR.TargetBranch != inputs.MR.TargetBranch ||
+				previous.DiffVersion.BaseSHA == "" || previous.DiffVersion.StartSHA == "" ||
+				!strings.EqualFold(previous.DiffVersion.BaseSHA, inputs.Version.BaseSHA) ||
+				!strings.EqualFold(previous.DiffVersion.StartSHA, inputs.Version.StartSHA) ||
+				!strings.EqualFold(previous.DiffVersion.HeadSHA, inputs.Version.HeadSHA) {
+				changed = true
+			}
 		}
 		if changed {
 			// A successor generation may already own this MR. Re-check before
@@ -475,7 +606,17 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 			// bundle. Keep it for audit, cancel this workflow only, and free the
 			// job mapping so this retry can record a fresh dossier.
 			if resumable {
-				if err := s.cancelWorkflow(ctx, workflow.ID); err != nil {
+				var err error
+				if workspaceChanged {
+					err = s.cancelWorkspaceWorkflow(ctx, workflow.ID)
+				} else {
+					err = s.cancelWorkflow(ctx, workflow.ID)
+				}
+				if err != nil {
+					return err
+				}
+			} else if workspaceChanged {
+				if err := s.skipPublication(ctx, workflow.ID, workspaceEvidenceReason); err != nil {
 					return err
 				}
 			}
@@ -486,66 +627,103 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 			s.logger.Info("review workflow superseded by configuration or prompt change",
 				"workflow_id", workflow.ID, "job_id", job.ID)
 			resumable = false
+			workflow = nil
+			previous = nil
+			if filtered() {
+				return nil
+			}
 		}
 	}
-	files, ignored, summary, warnings := buildReviewFiles(inputs.Diffs, cfg.Settings.Ignore, cfg.Settings.MaxFiles, cfg.Settings.MaxDiffLines)
-	cfg.Warnings = append(cfg.Warnings, warnings...)
-	if len(files) == 0 {
-		// Everything is ignored: publish an informational summary without a
-		// workflow. Re-check the generation because collection takes time.
-		if _, err := s.currentControl(ctx, project.ID, control.MRIID, payload.Generation, payload.HeadSHA); err != nil {
+	if workflow != nil && !resumable {
+		snapshot, err := s.engine.Snapshot(ctx, workflow.ID)
+		if err != nil {
 			return err
 		}
-		return s.publishEmptyWithNote(ctx, project, token, control, payload.NoteID, inputs, cfg, summary, ignored)
+		return s.settleReviewSnapshot(ctx, payload, job.Attempts, workflow.ID, snapshot, cfg)
 	}
-	head, cleanup, err := s.prepareRun(ctx, project, token, control.MRIID, job.ID, payload.HeadSHA)
-	if err != nil {
-		return err
+	if workflow == nil && head == "" {
+		if err := prepare(); err != nil {
+			return err
+		}
+		defer cleanup()
 	}
-	defer cleanup()
-
-	profileName, profileCfg := s.profileFor(project, payload.Profile, cfg.Profile, inputs.MR.Labels, profileExplicit(payload))
-	profile := review.Profile{Name: profileName, Config: profileCfg}
-	contextDoc := s.contextDoc(ctx, project.ID)
+	if !resumable {
+		// Filtering happens first so an excluded update does not cancel a review.
+		if err := s.cancelActive(ctx, control.ProjectID, control.MRIID, payload.Generation); err != nil {
+			return err
+		}
+	}
 
 	trigger := payload.Trigger
 	if trigger == "" || trigger == "manual" {
 		// "manual" is an ingress-only marker; persisted workflows use "api".
 		trigger = "api"
 	}
-	incremental := s.incrementalRange(ctx, project.ID, payload, control, payload.HeadSHA, files)
-	dossier, err := review.BuildDossier(review.DossierInput{
-		Project: review.ProjectRef{ID: project.ID, Path: project.PathWithNamespace, WebURL: project.WebURL},
-		MR:      mrMeta(inputs.MR),
-		DiffVersion: gitlab.Version{
-			ID:       inputs.Version.ID,
-			BaseSHA:  inputs.Version.BaseSHA,
-			StartSHA: inputs.Version.StartSHA,
-			HeadSHA:  inputs.Version.HeadSHA,
-		},
-		DiffSummary: summary,
-		Files:       files,
-		Ignored:     ignored,
-		Pipeline:    inputs.Pipeline,
-		Issues:      inputs.Issues,
-		RepoDocs:    inputs.RepoDocs,
-		ContextDocs: contextDoc,
-		Language:    cfg.Settings.Language,
-		CustomRules: cfg.Settings.CustomRules,
-		Incremental: incremental,
-		HeadDir:     head,
-		BaseDir:     s.workspace.Get(project.ID).BaseDir(),
-		Metadata: map[string]string{
-			"trigger":     trigger,
-			"base_sha":    inputs.Version.BaseSHA,
-			"config_hash": configHash,
-			"prompt_hash": promptHash,
-			"note_id":     itoa(payload.NoteID),
-		},
-		GeneratedAt: s.now().UTC(),
-	})
-	if err != nil {
-		return PermanentJob(fmt.Errorf("build dossier: %w", err))
+	var dossier *review.Dossier
+	if workflow != nil {
+		dossier = previous
+		// Paths are runtime handles, not newly collected review materials.
+		dossier.HeadDir, dossier.BaseDir = head, baseDir
+	} else {
+		executionIdentity, err := s.sealReviewExecution(project.ID, execution.digest)
+		if err != nil {
+			return err
+		}
+		files, ignored, summary, warnings := buildReviewFiles(inputs.Diffs, cfg.Settings.Ignore, cfg.Settings.MaxFiles, cfg.Settings.MaxDiffLines)
+		cfg.Warnings = append(cfg.Warnings, warnings...)
+		if len(files) == 0 {
+			if _, err := s.currentControl(ctx, project.ID, control.MRIID, payload.Generation, payload.HeadSHA); err != nil {
+				return err
+			}
+			return s.publishEmptyWithNote(ctx, project, token, control, payload.NoteID, inputs, cfg, summary, ignored)
+		}
+		provenance := &review.WorkspaceProvenance{Version: review.WorkspaceProvenanceVersion, TargetSHA: inputs.Version.StartSHA}
+		contextDoc := ""
+		if len(cfg.Settings.Ignore) == 0 {
+			contextDoc, provenance.ContextBaseSHA = s.contextDoc(ctx, project.ID, inputs.Version.StartSHA)
+		}
+		provenance.IndexSHA, provenance.MCPEligible = indexSHA, indexEligible
+		incremental := s.incrementalRange(ctx, project.ID, payload, control, payload.HeadSHA, files)
+		dossier, err = review.BuildDossier(review.DossierInput{
+			Project: review.ProjectRef{ID: project.ID, Path: project.PathWithNamespace, WebURL: project.WebURL},
+			MR:      mrMeta(inputs.MR),
+			DiffVersion: gitlab.Version{
+				ID:       inputs.Version.ID,
+				BaseSHA:  inputs.Version.BaseSHA,
+				StartSHA: inputs.Version.StartSHA,
+				HeadSHA:  inputs.Version.HeadSHA,
+			},
+			DiffSummary:         summary,
+			Files:               files,
+			Ignored:             ignored,
+			IgnorePolicy:        &review.IgnorePolicy{Version: review.IgnorePolicyVersion, Patterns: append([]string{}, cfg.Settings.Ignore...)},
+			WorkspaceProvenance: provenance,
+			Pipeline:            inputs.Pipeline,
+			Issues:              inputs.Issues,
+			RepoDocs:            filterRepoDocs(inputs.RepoDocs, cfg.Settings.Ignore),
+			ContextDocs:         contextDoc,
+			Language:            cfg.Settings.Language,
+			CustomRules:         cfg.Settings.CustomRules,
+			Incremental:         incremental,
+			HeadDir:             head,
+			BaseDir:             baseDir,
+			Metadata: map[string]string{
+				"trigger":            trigger,
+				"base_sha":           inputs.Version.BaseSHA,
+				"config_hash":        configHash,
+				"prompt_hash":        promptHash,
+				"profile_hash":       profileHash,
+				"workspace_identity": workspaceIdentity,
+				"execution_identity": executionIdentity,
+				"requested_profile":  payload.Profile,
+				"profile_explicit":   fmt.Sprint(profileExplicit(payload)),
+				"note_id":            itoa(payload.NoteID),
+			},
+			GeneratedAt: s.now().UTC(),
+		})
+		if err != nil {
+			return PermanentJob(fmt.Errorf("build dossier: %w", err))
+		}
 	}
 	dossierData, err := review.MarshalDossier(dossier)
 	if err != nil {
@@ -570,18 +748,23 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 		"prompt_hash": promptHash,
 		"profile":     profileName,
 	}
-	wfID, reused, err := s.store.CreateReviewWorkflow(ctx, sqlite.ReviewWorkflowRequest{
-		JobID:              job.ID,
-		Spec:               spec,
-		Meta:               meta,
-		DossierVersion:     review.DossierSchemaVersion,
-		DossierHash:        dossierHash,
-		DossierData:        dossierData,
-		ExpectedGeneration: payload.Generation,
-		ProjectID:          project.ID,
-		MRIID:              control.MRIID,
-		HeadSHA:            payload.HeadSHA,
-	})
+	wfID, reused := "", false
+	if workflow != nil {
+		wfID, reused = workflow.ID, true
+	} else {
+		wfID, reused, err = s.store.CreateReviewWorkflow(ctx, sqlite.ReviewWorkflowRequest{
+			JobID:              job.ID,
+			Spec:               spec,
+			Meta:               meta,
+			DossierVersion:     review.DossierSchemaVersion,
+			DossierHash:        dossierHash,
+			DossierData:        dossierData,
+			ExpectedGeneration: payload.Generation,
+			ProjectID:          project.ID,
+			MRIID:              control.MRIID,
+			HeadSHA:            payload.HeadSHA,
+		})
+	}
 	if err != nil {
 		if errors.Is(err, store.ErrSuperseded) {
 			s.logger.Info("review workflow superseded before creation", "project_id", project.ID, "mr_iid", payload.MRIID)
@@ -613,21 +796,21 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 	}
 
 	diffIndex := gitlab.BuildDiffIndex(gitlab.Version{
-		BaseSHA:  inputs.Version.BaseSHA,
-		StartSHA: inputs.Version.StartSHA,
-		HeadSHA:  inputs.Version.HeadSHA,
-	}, inputs.Diffs)
+		BaseSHA:  dossier.DiffVersion.BaseSHA,
+		StartSHA: dossier.DiffVersion.StartSHA,
+		HeadSHA:  dossier.DiffVersion.HeadSHA,
+	}, dossierDiffs(dossier))
 	executor, err := review.NewExecutor(review.ExecutorDeps{
 		Dossier:  dossier,
 		Profile:  profile,
 		Graph:    graphCfg,
-		Blocks:   s.blocks,
+		Blocks:   execution.blocks,
 		Clients:  s.clients,
 		Prompts:  s.prompts,
-		AgentRun: s.agentRun,
+		AgentRun: execution.agentRunner(s.agentRun),
 		Snapshot: engineSnapshot(s.engine),
-		Tools:    s.tools,
-		Skills:   s.skills,
+		Tools:    execution.tools,
+		Skills:   execution.skills,
 		Locate:   locateFunc(diffIndex),
 		Cost:     s.cost,
 	})
@@ -651,20 +834,24 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 	if err != nil {
 		return err
 	}
+	return s.settleReviewSnapshot(ctx, payload, job.Attempts, wfID, snapshot, cfg)
+}
+
+func (s *ReviewService) settleReviewSnapshot(ctx context.Context, payload reviewRunPayload, attempts int, wfID string, snapshot dag.WorkflowView, cfg effectiveReviewConfig) error {
 	switch snapshot.Status {
 	case dag.WorkflowCompleted:
-		s.setReviewStatus(ctx, project.ID, control.MRIID, payload.Generation, job.Attempts,
+		s.setReviewStatus(ctx, payload.ProjectID, payload.MRIID, payload.Generation, attempts,
 			payload.HeadSHA, payload.Profile, reviewStatusPublishing, "")
 		if err := s.publish(ctx, wfID); err != nil {
-			s.settlePublishFailure(ctx, payload, job.Attempts, err)
+			s.settlePublishFailure(ctx, payload, attempts, err)
 			return err
 		}
 		state, reaction := reviewStatusForVerdict(s.workflowVerdict(ctx, wfID))
-		s.settleReviewStatus(ctx, project.ID, control.MRIID, payload.Generation, job.Attempts,
+		s.settleReviewStatus(ctx, payload.ProjectID, payload.MRIID, payload.Generation, attempts,
 			payload.HeadSHA, payload.Profile, state, "", payload.NoteID, reaction)
 		return nil
 	case dag.WorkflowFailed:
-		s.setReviewStatus(ctx, project.ID, control.MRIID, payload.Generation, job.Attempts,
+		s.setReviewStatus(ctx, payload.ProjectID, payload.MRIID, payload.Generation, attempts,
 			payload.HeadSHA, payload.Profile, reviewStatusPublishing, "")
 		var publishErr error
 		if cfg.Settings.PostFailureNote {
@@ -672,12 +859,12 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 		} else {
 			publishErr = s.skipPublication(ctx, wfID, failureNoteDisabledReason)
 		}
-		s.settleReviewStatus(ctx, project.ID, control.MRIID, payload.Generation, job.Attempts,
+		s.settleReviewStatus(ctx, payload.ProjectID, payload.MRIID, payload.Generation, attempts,
 			payload.HeadSHA, payload.Profile, reviewStatusFailed, "", payload.NoteID, reviewAwardFail)
 		return publishErr
 	case dag.WorkflowCancelled:
 		publishErr := s.skipPublication(ctx, wfID, reviewCancelledReason)
-		s.settleReviewStatus(ctx, project.ID, control.MRIID, payload.Generation, job.Attempts,
+		s.settleReviewStatus(ctx, payload.ProjectID, payload.MRIID, payload.Generation, attempts,
 			payload.HeadSHA, payload.Profile, reviewStatusCancelled, "", payload.NoteID, reviewAwardNone)
 		return publishErr
 	default:

@@ -18,6 +18,7 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/internal/store/migrations"
 	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
+	"github.com/LeXwDeX/tribunal/internal/workspace"
 )
 
 var testKey = []byte("0123456789abcdef0123456789abcdef")
@@ -81,6 +82,9 @@ func openTestStorePath(t *testing.T) (*sqlite.Store, string) {
 		t.Fatalf("sqlite.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
+	if err := st.ConfigureMCPSecrets(context.Background(), newTestCipher(t)); err != nil {
+		t.Fatalf("ConfigureMCPSecrets: %v", err)
+	}
 	return st, path
 }
 
@@ -659,6 +663,10 @@ func (s *commandFakeStore) GetProject(_ context.Context, id int64) (*store.Proje
 	return s.project, nil
 }
 
+func (s *commandFakeStore) GetJob(_ context.Context, id string) (*store.Job, error) {
+	return &store.Job{ID: id, Kind: "review.command", Payload: json.RawMessage(`{"project_id":42}`)}, nil
+}
+
 func (s *commandFakeStore) EnqueueReviewLatest(_ context.Context, command store.ReviewCommand) (store.ReviewEnqueueResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -685,6 +693,7 @@ func newCommandTestWorker(t *testing.T, api *fakeGitLab, store *commandFakeStore
 	t.Helper()
 	worker, err := NewCommandWorker(CommandWorkerConfig{
 		Store:        store,
+		Workspace:    workspace.NewManager(t.TempDir(), nil),
 		GitLab:       api,
 		Cipher:       newTestCipher(t),
 		Profiles:     testProfiles(),
@@ -703,6 +712,22 @@ func commandJob(t *testing.T, payload commandPayload) *store.Job {
 		t.Fatal(err)
 	}
 	return &store.Job{ID: "command-job", Kind: "review.command", Payload: raw}
+}
+
+func persistedCommandJob(t *testing.T, db *sqlite.Store, payload commandPayload) *store.Job {
+	t.Helper()
+	job := commandJob(t, payload)
+	job.ID = ""
+	job.Key = commandKey(payload.ProjectID, payload.NoteID)
+	id, _, err := db.Enqueue(context.Background(), *job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err = db.GetJob(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return job
 }
 
 func openFakeStore(t *testing.T, cipher *secret.Cipher) *commandFakeStore {

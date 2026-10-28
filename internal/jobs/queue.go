@@ -22,6 +22,7 @@ type Queue interface {
 	Heartbeat(ctx context.Context, j Job, lease time.Duration) error
 	Complete(ctx context.Context, j Job) error
 	Fail(ctx context.Context, j Job, cause error, retryAt *time.Time) error
+	Defer(ctx context.Context, j Job, retryAt time.Time) error
 	CancelByKey(ctx context.Context, key string) (int, error)
 	Recover(ctx context.Context) (int, error)
 }

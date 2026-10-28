@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/jobs"
-	"github.com/LeXwDeX/tribunal/internal/review"
 	"github.com/LeXwDeX/tribunal/internal/secret"
 	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/pkg/dag"
@@ -24,7 +23,26 @@ func (s *ReviewService) CancelReview(ctx context.Context, job *jobs.Job) error {
 	if payload.ProjectID <= 0 || payload.MRIID <= 0 || payload.NoteID < 0 {
 		return PermanentJob(fmt.Errorf("invalid review.cancel payload"))
 	}
-	err := s.cancelReview(ctx, payload)
+	ws := s.workspace.Get(payload.ProjectID)
+	if ws == nil {
+		return PermanentJob(fmt.Errorf("workspace is unavailable"))
+	}
+	unlock, err := ws.RLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := consumerJobExists(ctx, s.store, job, "review.cancel", payload.ProjectID); err != nil {
+		return err
+	}
+	project, err := s.store.GetProject(ctx, payload.ProjectID)
+	if errors.Is(err, store.ErrNotFound) || (err == nil && project == nil) {
+		return PermanentJob(fmt.Errorf("project is not registered"))
+	}
+	if err != nil {
+		return err
+	}
+	err = s.cancelReview(ctx, payload)
 	if err == nil || IsPermanentJob(err) {
 		// The /review cancel note is this job's own receipt. Settle it whenever
 		// the cancel reaches a conclusion, including when a successor replaced
@@ -111,7 +129,26 @@ func (s *ReviewService) RepublishReview(ctx context.Context, job *jobs.Job) erro
 	if s.publisher == nil {
 		return errors.New("app: review publisher is not configured")
 	}
-	return s.publisher.Republish(ctx, payload.WorkflowID)
+	unlock, err := s.publisher.lockWorkflow(ctx, payload.WorkflowID)
+	if errors.Is(err, store.ErrNotFound) {
+		return PermanentJob(fmt.Errorf("workflow is missing"))
+	}
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	stored, err := s.store.GetJob(ctx, job.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		return PermanentJob(fmt.Errorf("consumer job no longer exists"))
+	}
+	if err != nil {
+		return err
+	}
+	var original reviewPublishPayload
+	if stored == nil || stored.ID != job.ID || stored.Kind != "review.publish" || job.Kind != "review.publish" || json.Unmarshal(stored.Payload, &original) != nil || original.WorkflowID != payload.WorkflowID {
+		return PermanentJob(fmt.Errorf("consumer job identity changed"))
+	}
+	return s.publisher.republishLocked(ctx, payload.WorkflowID)
 }
 
 func (s *ReviewService) projectToken(ctx context.Context, projectID int64) (*store.Project, string, error) {
@@ -158,29 +195,6 @@ func (s *ReviewService) resumableWorkflow(ctx context.Context, jobID string, gen
 		return nil, nil, false, nil
 	}
 	return workflow, dossier, !workflowTerminal(workflow.Status), nil
-}
-
-// dossierConfigChanged compares the hashes stored with a dossier against the
-// hashes this retry would use now. Rows written before the dossier metadata
-// existed fall back to the workflow fingerprint, which binds the dossier,
-// configuration and prompt hashes together.
-func dossierConfigChanged(workflow *store.Workflow, dossier *store.WorkflowDossier, configHash, promptHash string) (bool, error) {
-	if dossier == nil {
-		return false, nil
-	}
-	var stored review.Dossier
-	if err := json.Unmarshal(dossier.Data, &stored); err != nil {
-		return false, fmt.Errorf("decode dossier: %w", err)
-	}
-	storedConfig := strings.TrimSpace(stored.Metadata["config_hash"])
-	storedPrompt := strings.TrimSpace(stored.Metadata["prompt_hash"])
-	if storedConfig != "" && storedPrompt != "" {
-		return storedConfig != configHash || storedPrompt != promptHash, nil
-	}
-	if workflow.Fingerprint == "" {
-		return false, nil
-	}
-	return workflow.Fingerprint != reviewFingerprint(dossier.Hash, configHash, promptHash), nil
 }
 
 func workflowTerminal(status string) bool {
@@ -353,14 +367,14 @@ func (s *ReviewService) publish(ctx context.Context, workflowID string) error {
 	if s.publisher == nil {
 		return errors.New("app: review publisher is not configured")
 	}
-	return s.publisher.Publish(ctx, workflowID)
+	return s.publisher.publishLocked(ctx, workflowID)
 }
 
 func (s *ReviewService) publishFailure(ctx context.Context, workflowID string, snapshot dag.WorkflowView) error {
 	if s.publisher == nil {
 		return errors.New("app: review publisher is not configured")
 	}
-	return s.publisher.PublishFailure(ctx, workflowID, failureReason(snapshot))
+	return s.publisher.publishFailureLocked(ctx, workflowID, failureReason(snapshot))
 }
 
 // failureReason returns a safe, bounded reason for a published failure note.

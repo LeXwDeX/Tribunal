@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
@@ -22,6 +23,9 @@ func (s *ReviewService) Recover(ctx context.Context) error {
 	var errs []error
 	// Running nodes left by a crash must restart before Engine.Run sees them.
 	if err := s.engine.Recover(ctx); err != nil {
+		errs = append(errs, err)
+	}
+	if err := s.settleOrphanDossiers(ctx); err != nil {
 		errs = append(errs, err)
 	}
 statuses:
@@ -68,19 +72,72 @@ statuses:
 	return errors.Join(errs...)
 }
 
+func (s *ReviewService) settleOrphanDossiers(ctx context.Context) error {
+	projects, err := s.store.ListProjects(ctx)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, project := range projects {
+		ws := s.workspace.Get(project.ID)
+		if ws == nil {
+			continue
+		}
+		unlock, err := ws.Lock(ctx)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		current, projectErr := s.store.GetProject(ctx, project.ID)
+		state, stateErr := s.store.GetWorkspace(ctx, project.ID)
+		if projectErr == nil && stateErr == nil && current != nil && current.ID == project.ID && state != nil && state.ProjectID == project.ID {
+			if err := s.store.SettleOrphanDossiers(ctx, project.ID); err != nil {
+				errs = append(errs, err)
+			}
+		} else {
+			for _, err := range []error{projectErr, stateErr} {
+				if err != nil && !errors.Is(err, store.ErrNotFound) {
+					errs = append(errs, err)
+				}
+			}
+		}
+		unlock()
+	}
+	return errors.Join(errs...)
+}
+
 func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Workflow) error {
 	if workflow.MRIID == nil || s.publisher == nil {
 		return nil
 	}
-	record, err := s.store.GetWorkflowDossier(ctx, workflow.ID)
+	ws := s.workspace.Get(workflow.ProjectID)
+	if ws == nil {
+		return nil
+	}
+	unlock, err := ws.RLock(ctx)
 	if err != nil {
 		return err
 	}
-	var dossier review.Dossier
-	if err := json.Unmarshal(record.Data, &dossier); err != nil {
-		return fmt.Errorf("decode dossier: %w", err)
+	defer unlock()
+	current, err := s.store.GetWorkflow(ctx, workflow.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
 	}
-	if err := review.ValidateDossier(&dossier); err != nil {
+	if err != nil {
+		return err
+	}
+	if current == nil || current.ID != workflow.ID || current.ProjectID != workflow.ProjectID ||
+		current.Kind != "review" || current.MRIID == nil || *current.MRIID != *workflow.MRIID ||
+		(current.Status != "running" && current.Status != "pending") {
+		return nil
+	}
+	workflow = *current
+	project, token, err := s.projectToken(ctx, workflow.ProjectID)
+	if err != nil {
+		return err
+	}
+	record, err := s.store.GetWorkflowDossier(ctx, workflow.ID)
+	if err != nil {
 		return err
 	}
 	ownershipKey := strings.TrimSpace(record.JobID)
@@ -92,9 +149,15 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 		return nil
 	}
 	defer s.executors.Release(ownershipKey)
-	project, token, err := s.projectToken(ctx, workflow.ProjectID)
-	if err != nil {
-		return err
+	var dossier review.Dossier
+	if err := json.Unmarshal(record.Data, &dossier); err != nil {
+		return s.cancelWorkspaceWorkflow(ctx, workflow.ID)
+	}
+	if err := review.ValidateDossier(&dossier); err != nil {
+		return s.cancelWorkspaceWorkflow(ctx, workflow.ID)
+	}
+	if dossier.Project.ID != workflow.ProjectID || dossier.MR.IID != *workflow.MRIID {
+		return s.cancelWorkflow(ctx, workflow.ID)
 	}
 	if _, err := s.currentControl(ctx, project.ID, *workflow.MRIID, record.Generation, dossier.DiffVersion.HeadSHA); err != nil {
 		if IsPermanentJob(err) {
@@ -106,21 +169,65 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 		}
 		return err
 	}
-	if storedHash := strings.TrimSpace(dossier.Metadata["config_hash"]); storedHash != "" {
-		docs, err := s.repoDocs(ctx, token, project.ID, dossier.MR.TargetBranch)
-		if err != nil {
+	if !validPublicationPolicy(&dossier) {
+		if !dossier.WorkspaceProvenanceValid() {
+			return s.cancelWorkspaceWorkflow(ctx, workflow.ID)
+		}
+		return s.cancelWorkflow(ctx, workflow.ID)
+	}
+	mr, _, err := s.collectFilterInputs(ctx, project, token, *workflow.MRIID, dossier.DiffVersion.HeadSHA)
+	if err != nil {
+		if IsPermanentJob(err) {
+			return s.cancelWorkflow(ctx, workflow.ID)
+		}
+		return err
+	}
+	version, err := s.gitlab.LatestMRVersion(ctx, token, project.ID, *workflow.MRIID)
+	if err != nil {
+		return err
+	}
+	if version == nil || dossier.MR.TargetBranch != mr.TargetBranch ||
+		dossier.DiffVersion.BaseSHA == "" || dossier.DiffVersion.StartSHA == "" ||
+		!strings.EqualFold(dossier.DiffVersion.BaseSHA, version.BaseSHA) ||
+		!strings.EqualFold(dossier.DiffVersion.StartSHA, version.StartSHA) ||
+		!strings.EqualFold(dossier.DiffVersion.HeadSHA, version.HeadSHA) {
+		return s.cancelWorkflow(ctx, workflow.ID)
+	}
+	docs, err := s.repoDocs(ctx, token, project.ID, mr.TargetBranch)
+	if err != nil {
+		return err
+	}
+	currentConfig, err := resolveSecureReviewConfig(project, docs, s.reviewDefaults, s.profiles)
+	if err != nil {
+		return err
+	}
+	storedHash := strings.TrimSpace(dossier.Metadata["config_hash"])
+	if !slices.Equal(dossier.IgnorePolicy.Patterns, currentConfig.Settings.Ignore) ||
+		storedHash == "" || reviewConfigHash(currentConfig) != storedHash ||
+		dossier.Metadata["prompt_hash"] == "" || dossier.Metadata["prompt_hash"] != s.prompts.Hash {
+		// Policy freshness is mandatory even when the optional config hash is absent.
+		if err := s.cancelWorkflow(ctx, workflow.ID); err != nil {
 			return err
 		}
-		if reviewConfigHash(s.resolveConfig(project, docs)) != storedHash {
-			// The same hash comparison gates Publish; a resumed workflow built
-			// for an older configuration must not run or publish.
-			if err := s.cancelWorkflow(ctx, workflow.ID); err != nil {
-				return err
-			}
-			s.logger.Info("recovery skipped workflow with changed configuration",
-				"workflow_id", workflow.ID, "config_hash", storedHash)
-			return nil
-		}
+		s.logger.Info("recovery skipped workflow with changed configuration",
+			"workflow_id", workflow.ID, "config_hash", storedHash)
+		return nil
+	}
+	explicitValue := dossier.Metadata["profile_explicit"]
+	if explicitValue != "true" && explicitValue != "false" {
+		return s.cancelWorkflow(ctx, workflow.ID)
+	}
+	profileName, profileCfg := s.profileFor(project, dossier.Metadata["requested_profile"], currentConfig.Profile, mr.Labels, explicitValue == "true")
+	profile := review.Profile{Name: profileName, Config: profileCfg}
+	if workflow.Profile != profileName || dossier.Metadata["profile_hash"] == "" || dossier.Metadata["profile_hash"] != s.reviewProfileHash(profile) {
+		return s.cancelWorkflow(ctx, workflow.ID)
+	}
+	execution, err := s.resolveReviewExecution(ctx, project.ID, profile)
+	if err != nil {
+		return err
+	}
+	if !s.matchesReviewExecution(project.ID, dossier.Metadata["execution_identity"], execution.digest) {
+		return s.cancelWorkflow(ctx, workflow.ID)
 	}
 	headDir, cleanup, err := s.recoverRun(ctx, project, token, *workflow.MRIID, record.JobID, workflow.ID, dossier)
 	if err != nil {
@@ -129,24 +236,36 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 	if cleanup != nil {
 		defer cleanup()
 	}
-	profileName, profileCfg := s.profileFor(project, workflow.Profile, "", nil, true)
-	profile := review.Profile{Name: profileName, Config: profileCfg}
+	baseDir, workspaceIdentity, err := s.reviewBaseIdentity(ctx, project.ID, version.StartSHA)
+	if err != nil {
+		return err
+	}
+	if workspaceIdentity == "" || dossier.Metadata["workspace_identity"] != workspaceIdentity {
+		return s.cancelWorkflow(ctx, workflow.ID)
+	}
+	_, indexEligible, err := s.reviewIndexState(ctx, project.ID, version.StartSHA, currentConfig.Settings.Ignore)
+	if err != nil {
+		return err
+	}
+	if dossier.WorkspaceProvenance.MCPEligible && !indexEligible {
+		return s.cancelWorkspaceWorkflow(ctx, workflow.ID)
+	}
 	diffs := dossierDiffs(&dossier)
 	index := gitlab.BuildDiffIndex(dossier.DiffVersion, diffs)
 	resolved := dossier
 	resolved.HeadDir = headDir
-	resolved.BaseDir = s.workspace.Get(project.ID).BaseDir()
+	resolved.BaseDir = baseDir
 	executor, err := review.NewExecutor(review.ExecutorDeps{
 		Dossier:  &resolved,
 		Profile:  profile,
 		Graph:    review.GraphConfig{AllowedProviders: s.allowedProviders()},
-		Blocks:   s.blocks,
+		Blocks:   execution.blocks,
 		Clients:  s.clients,
 		Prompts:  s.prompts,
-		AgentRun: s.agentRun,
+		AgentRun: execution.agentRunner(s.agentRun),
 		Snapshot: engineSnapshot(s.engine),
-		Tools:    s.tools,
-		Skills:   s.skills,
+		Tools:    execution.tools,
+		Skills:   execution.skills,
 		Locate:   locateFunc(index),
 		Cost:     s.cost,
 	})
@@ -231,6 +350,7 @@ func (s *ReviewService) settleRecoveredSuperseded(ctx context.Context, projectID
 	s.settleReviewStatus(ctx, projectID, mrIID, generation, 0, head, profile, state, detail, noteID, reviewAwardNone)
 }
 
+// recoverRun requires the caller to hold the workspace read lock.
 func (s *ReviewService) recoverRun(ctx context.Context, project *store.Project, token string, mrIID int64, jobID, workflowID string, dossier review.Dossier) (string, func(), error) {
 	ws := s.workspace.Get(project.ID)
 	if dossier.HeadDir != "" && ws != nil && runDirOwned(ws, dossier.HeadDir) {
@@ -243,11 +363,7 @@ func (s *ReviewService) recoverRun(ctx context.Context, project *store.Project, 
 		case statErr == nil:
 			head, resolveErr := s.git.Resolve(ctx, dossier.HeadDir, "HEAD")
 			if resolveErr == nil && strings.EqualFold(head, dossier.DiffVersion.HeadSHA) {
-				unlock, err := ws.RLock(ctx)
-				if err != nil {
-					return "", nil, err
-				}
-				return dossier.HeadDir, unlock, nil
+				return dossier.HeadDir, nil, nil
 			}
 		case !errors.Is(statErr, os.ErrNotExist):
 			return "", nil, statErr
@@ -316,57 +432,141 @@ func (s *ReviewService) failureNoteEnabled(ctx context.Context, workflowID strin
 // PublishPending retries terminal workflows whose publication state is still
 // pending. It is safe to call at startup and after a crash.
 func (s *ReviewService) PublishPending(ctx context.Context) error {
-	if s.publisher == nil {
-		return nil
-	}
 	var errs []error
-	for round := 0; round < 3; round++ {
+	normalRounds := 0
+	for {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(append(errs, err)...)
+		}
 		pending, err := s.store.ListPendingPublications(ctx, 50)
 		if err != nil {
-			return err
+			return errors.Join(append(errs, err)...)
 		}
 		if len(pending) == 0 {
 			return errors.Join(errs...)
 		}
 		progress := false
+		normalRound := false
 		for _, item := range pending {
-			var err error
-			switch item.Status {
-			case string(dag.WorkflowFailed):
-				wantsNote, configErr := s.failureNoteEnabled(ctx, item.WorkflowID)
-				if configErr != nil {
-					errs = append(errs, configErr)
-					continue
-				}
-				if !wantsNote {
-					if skipErr := s.skipPublication(ctx, item.WorkflowID, failureNoteDisabledReason); skipErr != nil {
-						errs = append(errs, skipErr)
-						continue
-					}
-					progress = true
-					continue
-				}
-				err = s.publisher.PublishFailure(ctx, item.WorkflowID, reviewExecutionFailedReason)
-			case string(dag.WorkflowCompleted):
-				err = s.publisher.Publish(ctx, item.WorkflowID)
-			default:
-				continue
+			if err := ctx.Err(); err != nil {
+				return errors.Join(append(errs, err)...)
 			}
-			if err != nil {
-				if IsPermanentJob(err) {
-					progress = true
+			if item.Status != string(dag.WorkflowCancelled) {
+				if normalRounds >= 3 {
 					continue
 				}
+				normalRound = true
+			}
+			advanced, err := s.publishPendingItem(ctx, item)
+			if err != nil {
 				errs = append(errs, err)
 				continue
 			}
-			progress = true
+			progress = progress || advanced
+		}
+		if normalRound {
+			normalRounds++
+		}
+		if err := ctx.Err(); err != nil {
+			return errors.Join(append(errs, err)...)
 		}
 		if !progress {
 			break
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func (s *ReviewService) publishPendingItem(ctx context.Context, item store.PendingPublication) (bool, error) {
+	if item.Status == string(dag.WorkflowCancelled) {
+		ws := s.workspace.Get(item.ProjectID)
+		if ws == nil {
+			return false, errors.New("app: workspace is unavailable")
+		}
+		unlock, err := ws.RLock(ctx)
+		if err != nil {
+			return false, err
+		}
+		defer unlock()
+		wf, err := s.store.GetWorkflow(ctx, item.WorkflowID)
+		if errors.Is(err, store.ErrNotFound) {
+			return true, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if wf == nil || wf.ID != item.WorkflowID || wf.ProjectID != item.ProjectID || wf.Status != item.Status {
+			return false, nil
+		}
+		if err := s.skipPublication(ctx, item.WorkflowID, reviewCancelledReason); err != nil {
+			return false, err
+		}
+		record, err := s.store.GetWorkflowDossier(ctx, item.WorkflowID)
+		if errors.Is(err, store.ErrNotFound) {
+			return true, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return record != nil && record.PublicationState != store.WorkflowPublicationPending, nil
+	}
+	if s.publisher == nil {
+		return false, nil
+	}
+	unlock, err := s.publisher.lockWorkflow(ctx, item.WorkflowID)
+	if errors.Is(err, store.ErrNotFound) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
+	wf, err := s.store.GetWorkflow(ctx, item.WorkflowID)
+	if errors.Is(err, store.ErrNotFound) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if wf == nil || wf.ProjectID != item.ProjectID || wf.Status != item.Status {
+		return true, nil
+	}
+	switch item.Status {
+	case string(dag.WorkflowFailed):
+		record, recordErr := s.store.GetWorkflowDossier(ctx, item.WorkflowID)
+		if recordErr != nil {
+			return false, recordErr
+		}
+		var dossier review.Dossier
+		if json.Unmarshal(record.Data, &dossier) != nil || !validPublicationPolicy(&dossier) {
+			if skipErr := s.skipPublication(ctx, item.WorkflowID, publicationPolicyReason(&dossier)); skipErr != nil {
+				return false, skipErr
+			}
+			return true, nil
+		}
+		wantsNote, configErr := s.failureNoteEnabled(ctx, item.WorkflowID)
+		if configErr != nil {
+			return false, configErr
+		}
+		if !wantsNote {
+			if skipErr := s.skipPublication(ctx, item.WorkflowID, failureNoteDisabledReason); skipErr != nil {
+				return false, skipErr
+			}
+			return true, nil
+		}
+		err = s.publisher.publishFailureLocked(ctx, item.WorkflowID, reviewExecutionFailedReason)
+	case string(dag.WorkflowCompleted):
+		err = s.publisher.publishLocked(ctx, item.WorkflowID)
+	default:
+		return false, nil
+	}
+	if err != nil {
+		if IsPermanentJob(err) {
+			return true, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 func dossierDiffs(d *review.Dossier) []gitlab.FileDiff {
