@@ -15,6 +15,7 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/errclass"
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/jobs"
+	"github.com/LeXwDeX/tribunal/internal/llm"
 	"github.com/LeXwDeX/tribunal/internal/mcp"
 	"github.com/LeXwDeX/tribunal/internal/repo"
 	"github.com/LeXwDeX/tribunal/internal/review"
@@ -645,6 +646,23 @@ func (s *WorkspaceService) indexDegraded(projectID int64, err error) string {
 }
 
 func workspaceErrorClass(err error) string {
+	var upstream *llm.Error
+	if errors.As(err, &upstream) && upstream.Kind != llm.ErrCanceled {
+		switch upstream.Kind {
+		case llm.ErrAuth:
+			return "upstream_auth"
+		case llm.ErrRateLimited:
+			return "rate_limited"
+		case llm.ErrTransient:
+			return "network"
+		case llm.ErrBadRequest:
+			return "config"
+		case llm.ErrOverloaded, llm.ErrContextTooLong:
+			return string(upstream.Kind)
+		default:
+			return errclass.Internal
+		}
+	}
 	switch class := errclass.Of(err); class {
 	case errclass.Timeout, errclass.Canceled, errclass.Panic, errclass.Internal:
 		return class
@@ -714,7 +732,12 @@ func (s *WorkspaceService) saveWorkspace(ctx context.Context, ws store.Workspace
 }
 
 func (s *WorkspaceService) markWorkspaceError(ctx context.Context, projectID int64, cause error) {
-	s.logger.Warn("workspace operation failed", "project_id", projectID, "error_class", workspaceErrorClass(cause))
+	attrs := []any{"project_id", projectID, "error_class", workspaceErrorClass(cause)}
+	var upstream *llm.Error
+	if errors.As(cause, &upstream) && upstream.Status > 0 {
+		attrs = append(attrs, "upstream_status", upstream.Status)
+	}
+	s.logger.Warn("workspace operation failed", attrs...)
 	state, _ := s.store.GetWorkspace(ctx, projectID)
 	out := store.Workspace{ProjectID: projectID, State: "error", LastError: store.WorkspaceOperationFailed}
 	if state != nil {

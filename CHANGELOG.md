@@ -34,6 +34,7 @@ v1.2.0 尚未发布；冻结前的新改动仍记入下方 `[1.2.0]` 段，避�
 
 ### 修复
 
+- **Onboarding 排障信息**：工作区失败日志的 `error_class` 区分 `upstream_auth`（401/403）、`rate_limited`（429）、`network`、`config` 和上游过载/上下文超长，并在有 HTTP 响应时记录脱敏的 `upstream_status`；`last_error` 保持固定脱敏文案。`tribunalctl` 的全局、子命令和 action 均支持 `-h`/`--help`/`help` 并以 0 退出。ignore 阻断索引时控制台显示信息提示，不再当作最近错误。第 3 项（失败后重试入口的权限边界）仍待维护者拍板，未包含在本次改动中（[#132](https://github.com/LeXwDeX/Tribunal/issues/132)）。
 - **OAuth 未启用时的登录页**：新增公开接口 `GET /auth/status` 返回 `oauth_enabled`；未配置 OAuth 时控制台登录页隐藏登录按钮并提示管理员配置 `auth.oauth.client_id_env` 和 `auth.oauth.client_secret_env`，不再把 503 JSON 暴露给浏览器用户。浏览器导航的登录失败以 303 跳回控制台并显示固定错误码对应文案；已有会话时以一次性提示展示，不会静默丢弃。API 客户端仍收到原有 JSON 错误（`Accept` 明确拒绝 `text/html` 时也不跳转）；服务启动日志会说明 OAuth 是否启用及缺失的变量名，不打印变量值（[#131](https://github.com/LeXwDeX/Tribunal/issues/131)）。
 - **节点失败错误类别**：`pkg/dag` 支持可选的错误分类接口；LLM 鉴权失败、限流、沙箱拒绝和 panic 在节点失败事件里记录固定类别，panic 只记 `panic`，不记录 panic 值或原始错误文本（[#127](https://github.com/LeXwDeX/Tribunal/issues/127)）。
 - **Defer 有界**：任务连续因执行权争用被延后时记录首次争用时间；超过 15 分钟按失败结算，不再无限延长 `max_attempts`。新增迁移 `0019_job_defer_window`（只追加 `jobs.defer_since`，不可回退），完成、失败和替换任务时清空窗口（[#127](https://github.com/LeXwDeX/Tribunal/issues/127)）。

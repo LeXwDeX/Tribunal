@@ -1,6 +1,6 @@
 # 部署与运维（Docker / SQLite）
 
-本文对应 ARCH14：内嵌控制台的服务镜像、镜像内 `git` 与管理 CLI、许可证文件、SQLite 单实例、非 root 用户和可写数据目录。各版本做过哪些验证见[验证状态](#10-验证状态)。
+本文对应 ARCH14：内嵌控制台的服务镜像、镜像内 `git` 与管理 CLI、许可证文件、SQLite 单实例、非 root 用户和可写数据目录。各版本做过哪些验证见[验证状态](#11-验证状态)。
 
 交付前准备、升级/回退边界与真实验收记录见 [交付就绪与验收记录](delivery-readiness.md)。
 
@@ -935,7 +935,32 @@ docker run --rm --entrypoint stat tribunal:local -c '%u:%g %a' /app/data
 
 启动、readiness 和 Bearer 接口验证使用上面的[隔离 Compose 烟测](#docker-可用时的-compose-烟测)。该脚本需要 Docker daemon 和 Docker Compose v2，使用独立的临时项目和数据卷；仅检查脚本语法不算 Docker 实测。该烟测不验证真实 GitLab、OAuth、webhook 或评审执行，不能当作集成验收。
 
-## 10. 验证状态
+## 10. Onboarding 与索引排障
+
+### 失败类别
+
+工作区或 onboarding 失败时，`GET /api/v1/projects/{id}/workspace` 的 `last_error` 保持固定脱敏文案；服务日志 `workspace operation failed` 的 `error_class` 区分原因：
+
+| `error_class` | 含义 | 排查方向 |
+|---|---|---|
+| `upstream_auth` | 上游返回 401/403 | 检查模型 provider token、出口 IP 白名单和账号权限 |
+| `rate_limited` | 上游返回 429 | 检查配额和并发，按 `retry_after` 退避 |
+| `network` | 连接失败或传输中断 | 检查 DNS、代理、防火墙和 provider 地址 |
+| `config` | 上游拒绝请求（通常是 400） | 检查模型名、协议、参数和上下文长度 |
+| `overloaded` / `context_too_long` | 上游过载或上下文超长 | 降低并发或缩短输入 |
+| `canceled` / `timeout` / `internal` | 本地取消、超时或未知失败 | 检查任务取消、服务日志和数据库状态 |
+
+上游返回 HTTP 响应时，日志还记录 `upstream_status`。日志不记录响应体、URL、主机名、token 或原始错误文本，`last_error` 也不包含这些内容。
+
+```bash
+docker compose logs review | grep 'workspace operation failed'
+```
+
+### ignore 策略与索引
+
+项目 ignore 非空时，工作区索引会被有意阻断，接口返回 `index_status=degraded` 和 `last_error="index: blocked by ignore policy"`。控制台显示信息提示，不再把它当成索引故障。需要代码图谱索引时，先调整项目 ignore 配置，再执行重建索引；阻断本身是安全降级，不影响评审继续执行，详见 [ignore 安全边界](#ignore-安全边界)。
+
+## 11. 验证状态
 
 验证记录统一维护在 [交付就绪与验收记录](delivery-readiness.md)，本文不再重复：
 
