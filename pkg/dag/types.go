@@ -169,6 +169,12 @@ type Usage struct {
 }
 
 // NodeExecutor is implemented by the caller. Any returned error fails the node.
+// ErrorStatusProvider optionally exposes a sanitized upstream HTTP status for
+// durable node failure diagnostics. The engine records only 1-599.
+type ErrorStatusProvider interface {
+	ErrorStatus() int
+}
+
 type NodeExecutor interface {
 	Execute(ctx context.Context, in NodeInput) (NodeOutput, error)
 }
@@ -253,22 +259,23 @@ type Options struct {
 // NodeView is the projected read model of one node. Meta is a copy of the
 // workflow metadata for convenience; it is not node-specific configuration.
 type NodeView struct {
-	ID         string            `json:"id"`
-	Spec       NodeSpec          `json:"spec"`
-	Status     NodeStatus        `json:"status"`
-	Revision   int64             `json:"revision"`
-	AddedRev   int64             `json:"added_rev"`
-	Attempt    int               `json:"attempt"`
-	Meta       map[string]string `json:"meta,omitempty"`
-	Output     json.RawMessage   `json:"output,omitempty"`
-	Usage      Usage             `json:"usage"`
-	Provider   string            `json:"provider,omitempty"`
-	Model      string            `json:"model,omitempty"`
-	Error      string            `json:"error,omitempty"`
-	Reason     string            `json:"reason,omitempty"`
-	QueuedAt   time.Time         `json:"queued_at,omitempty"`
-	StartedAt  time.Time         `json:"started_at,omitempty"`
-	FinishedAt time.Time         `json:"finished_at,omitempty"`
+	ID          string            `json:"id"`
+	Spec        NodeSpec          `json:"spec"`
+	Status      NodeStatus        `json:"status"`
+	Revision    int64             `json:"revision"`
+	AddedRev    int64             `json:"added_rev"`
+	Attempt     int               `json:"attempt"`
+	Meta        map[string]string `json:"meta,omitempty"`
+	Output      json.RawMessage   `json:"output,omitempty"`
+	Usage       Usage             `json:"usage"`
+	Provider    string            `json:"provider,omitempty"`
+	Model       string            `json:"model,omitempty"`
+	Error       string            `json:"error,omitempty"`
+	Reason      string            `json:"reason,omitempty"`
+	ErrorStatus int               `json:"error_status,omitempty"`
+	QueuedAt    time.Time         `json:"queued_at,omitempty"`
+	StartedAt   time.Time         `json:"started_at,omitempty"`
+	FinishedAt  time.Time         `json:"finished_at,omitempty"`
 }
 
 // WorkflowView is the deterministic projection of a workflow's events.

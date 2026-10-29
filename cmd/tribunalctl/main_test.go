@@ -286,6 +286,50 @@ func TestHelpAndUsage(t *testing.T) {
 	}
 }
 
+func TestSubcommandHelp(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{"projects long", []string{"projects", "--help"}, []string{"Usage: tribunalctl", "register", "webhook"}},
+		{"projects short", []string{"projects", "-h"}, []string{"Usage: tribunalctl", "register", "webhook"}},
+		{"projects word", []string{"projects", "help"}, []string{"Usage: tribunalctl", "register", "webhook"}},
+		{"project get", []string{"projects", "get", "--help"}, []string{"Usage: tribunalctl projects get", "<project ID>"}},
+		{"project get after id", []string{"projects", "get", "42", "--help"}, []string{"Usage: tribunalctl projects get", "<project ID>"}},
+		{"users long", []string{"users", "--help"}, []string{"Usage: tribunalctl", "disable", "revoke"}},
+		{"user disable", []string{"users", "disable", "--help"}, []string{"Usage: tribunalctl users disable", "<user ID>"}},
+		{"grants", []string{"projects", "grants", "--help"}, []string{"Usage: tribunalctl projects grants", "list", "set", "delete"}},
+		{"webhook enable", []string{"projects", "webhook", "enable", "--help"}, []string{"Usage: tribunalctl projects webhook enable", "<project ID>"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// No token is configured: help must not require one.
+			_, stderr, err := runCtl(t, tc.args, nil, nil)
+			if !errors.Is(err, flag.ErrHelp) {
+				t.Fatalf("error = %v, want flag.ErrHelp", err)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(stderr, want) {
+					t.Errorf("stderr %q missing %q", stderr, want)
+				}
+			}
+		})
+	}
+}
+
+func TestHelpDoesNotMaskErrors(t *testing.T) {
+	for _, args := range [][]string{
+		{"--url", "http://example.com", "projects", "bogus", "--help"},
+		{"--url", "http://example.com", "projects", "get", "help"},
+	} {
+		_, _, err := runCtl(t, args, map[string]string{"REVIEW_ADMIN_TOKEN": "admin"}, nil)
+		if err == nil || errors.Is(err, flag.ErrHelp) {
+			t.Fatalf("%v: error = %v, want a non-help error", args, err)
+		}
+	}
+}
+
 func TestInvalidJSONResponse(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

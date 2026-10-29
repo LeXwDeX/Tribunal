@@ -62,7 +62,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 	global := flag.NewFlagSet("tribunalctl", flag.ContinueOnError)
 	global.SetOutput(stderr)
 	global.Usage = func() {
-		fmt.Fprintln(stderr, "Usage: tribunalctl [--url URL] [--api-token-env NAME] <projects|users> <action> [options]")
+		commandHelp.usage(stderr, "tribunalctl")
 		global.PrintDefaults()
 	}
 	global.StringVar(&g.serviceURL, "url", defaultURL, "service base URL")
@@ -70,6 +70,14 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 	global.DurationVar(&g.timeout, "timeout", defaultTimeout, "HTTP timeout")
 	if err := global.Parse(args); err != nil {
 		return err
+	}
+	if node, path, ok := helpRequest(commandHelp, global.Args()); ok {
+		if node == commandHelp {
+			global.Usage()
+		} else {
+			node.usage(stderr, path)
+		}
+		return flag.ErrHelp
 	}
 	if err := g.prepare(getenv, client); err != nil {
 		return err
@@ -88,6 +96,105 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 		global.Usage()
 		return fmt.Errorf("unknown subcommand %q", rest[0])
 	}
+}
+
+// helpNode describes one command level for -h, --help and help handling.
+type helpNode struct {
+	args     string
+	actions  []string
+	children map[string]*helpNode
+}
+
+func (n *helpNode) usage(w io.Writer, path string) {
+	if n.args != "" {
+		fmt.Fprintf(w, "Usage: %s %s\n", path, n.args)
+	} else {
+		fmt.Fprintf(w, "Usage: %s\n", path)
+	}
+	if len(n.actions) > 0 {
+		fmt.Fprintln(w, "Actions:", strings.Join(n.actions, ", "))
+	}
+}
+
+// helpRequest returns the command level targeted by -h, --help or help.
+// Unknown command words are not help so they still fail as before.
+func helpRequest(root *helpNode, args []string) (*helpNode, string, bool) {
+	node, path := root, "tribunalctl"
+	for _, arg := range args {
+		switch arg {
+		case "-h", "--help":
+			return node, path, true
+		case "help":
+			// A bare help word only acts as help where a subcommand is expected,
+			// so positional values such as "projects get help" keep failing.
+			if len(node.children) > 0 {
+				return node, path, true
+			}
+			continue
+		}
+		child, ok := node.children[arg]
+		if !ok {
+			if len(node.children) == 0 {
+				continue // leaf command: skip its positional arguments
+			}
+			return nil, "", false
+		}
+		node = child
+		path += " " + arg
+	}
+	return nil, "", false
+}
+
+var commandHelp = &helpNode{
+	args:    "[--url URL] [--api-token-env NAME] <projects|users> <action> [options]",
+	actions: []string{"projects", "users"},
+	children: map[string]*helpNode{
+		"projects": {
+			args:    "<action> [options]",
+			actions: []string{"register", "list", "get", "all", "grants", "residues", "webhook"},
+			children: map[string]*helpNode{
+				"register": {args: "--project ID --token-env NAME [--profile PROFILE] [--auto-webhook] [--settings JSON]"},
+				"list":     {},
+				"get":      {args: "<project ID>"},
+				"all":      {},
+				"grants": {
+					args:    "<action> [options]",
+					actions: []string{"list", "set", "delete"},
+					children: map[string]*helpNode{
+						"list":   {args: "<project ID>"},
+						"set":    {args: "<project ID> <user ID> <read|manage>"},
+						"delete": {args: "<project ID> <user ID>"},
+					},
+				},
+				"residues": {
+					args:    "<action> [options]",
+					actions: []string{"list (default)", "clean"},
+					children: map[string]*helpNode{
+						"clean": {args: "--yes"},
+					},
+				},
+				"webhook": {
+					args:    "<action> <project ID>",
+					actions: []string{"enable", "rebuild", "disable"},
+					children: map[string]*helpNode{
+						"enable":  {args: "<project ID>"},
+						"rebuild": {args: "<project ID>"},
+						"disable": {args: "<project ID>"},
+					},
+				},
+			},
+		},
+		"users": {
+			args:    "<action> [options]",
+			actions: []string{"list", "disable", "enable", "revoke"},
+			children: map[string]*helpNode{
+				"list":    {},
+				"disable": {args: "<user ID>"},
+				"enable":  {args: "<user ID>"},
+				"revoke":  {args: "<user ID>"},
+			},
+		},
+	},
 }
 
 func (g *globals) prepare(getenv func(string) string, client *http.Client) error {

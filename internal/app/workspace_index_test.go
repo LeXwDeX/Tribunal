@@ -13,6 +13,7 @@ import (
 
 	"github.com/LeXwDeX/tribunal/internal/agent"
 	"github.com/LeXwDeX/tribunal/internal/errclass"
+	"github.com/LeXwDeX/tribunal/internal/llm"
 	"github.com/LeXwDeX/tribunal/internal/mcp"
 	"github.com/LeXwDeX/tribunal/internal/repo"
 	"github.com/LeXwDeX/tribunal/internal/review"
@@ -344,6 +345,63 @@ func TestMarkWorkspaceErrorKeepsExistingCheckpoints(t *testing.T) {
 	}
 }
 
+func TestWorkspaceFailureLogsUpstreamClassAndStatus(t *testing.T) {
+	const raw = "https://gitlab.example/private?token=glpat-synthetic-secret"
+	cases := []struct {
+		name   string
+		cause  error
+		class  string
+		status float64
+	}{
+		{"auth", &llm.Error{Kind: llm.ErrAuth, Status: 403, Err: errors.New(raw)}, "upstream_auth", 403},
+		{"rate limited", &llm.Error{Kind: llm.ErrRateLimited, Status: 429, Err: errors.New(raw)}, "rate_limited", 429},
+		{"network", &llm.Error{Kind: llm.ErrTransient, Err: errors.New(raw)}, "network", 0},
+		{"config", &llm.Error{Kind: llm.ErrBadRequest, Status: 400, Err: errors.New(raw)}, "config", 400},
+		{"overloaded", &llm.Error{Kind: llm.ErrOverloaded, Status: 529}, "overloaded", 529},
+		{"context too long", &llm.Error{Kind: llm.ErrContextTooLong, Status: 413}, "context_too_long", 413},
+		{"wrapped auth", fmt.Errorf("%s: %w", raw, &llm.Error{Kind: llm.ErrAuth, Status: 403}), "upstream_auth", 403},
+		{"canceled", &llm.Error{Kind: llm.ErrCanceled, Err: context.Canceled}, "canceled", 0},
+		{"deadline", &llm.Error{Kind: llm.ErrCanceled, Err: context.DeadlineExceeded}, "timeout", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newReviewFixture(t, reviewTestHead)
+			service := unrestrictedIndexService(t, f)
+			var logs bytes.Buffer
+			service.logger = slog.New(slog.NewJSONHandler(&logs, nil))
+			service.markWorkspaceError(context.Background(), 42, tc.cause)
+
+			state, err := f.db.GetWorkspace(context.Background(), 42)
+			if err != nil {
+				t.Fatalf("GetWorkspace: %v", err)
+			}
+			if state.State != "error" || state.LastError != store.WorkspaceOperationFailed {
+				t.Fatalf("workspace = %+v, want error state with the fixed message", state)
+			}
+			var event map[string]any
+			if err := json.Unmarshal(logs.Bytes(), &event); err != nil {
+				t.Fatalf("one structured warning required: %q: %v", logs.String(), err)
+			}
+			if event["level"] != "WARN" || event["project_id"] != float64(42) || event["error_class"] != tc.class {
+				t.Errorf("warning = %v, want project 42 and class %q", event, tc.class)
+			}
+			status, ok := event["upstream_status"]
+			if tc.status == 0 {
+				if ok {
+					t.Errorf("warning recorded upstream_status=%v for a failure without an HTTP status", status)
+				}
+			} else if status != tc.status {
+				t.Errorf("upstream_status = %v, want %v", status, tc.status)
+			}
+			for _, secret := range []string{"glpat-", "gitlab.example", "/private"} {
+				if strings.Contains(logs.String(), secret) {
+					t.Errorf("warning leaked %q: %s", secret, logs.String())
+				}
+			}
+		})
+	}
+}
+
 func TestWorkspaceIndexCancellationStillReturnsError(t *testing.T) {
 	for _, mode := range []string{"onboard", "refresh"} {
 		t.Run(mode, func(t *testing.T) {
@@ -381,5 +439,47 @@ func TestWorkspaceIndexCancellationStillReturnsError(t *testing.T) {
 				t.Fatalf("canceled refresh lost previous index: %q", state.IndexSHA)
 			}
 		})
+	}
+}
+
+func TestOnboardingFailureLogsUpstreamClassAndStatus(t *testing.T) {
+	const raw = "https://gitlab.example/private?token=glpat-synthetic-secret"
+	f := newReviewFixture(t, reviewTestHead)
+	service := newOnboardingContextService(t, f, func(context.Context, agent.RunSpec) (*agent.RunResult, error) {
+		return nil, &llm.Error{Kind: llm.ErrAuth, Status: 403, Err: errors.New(raw)}
+	})
+	var logs bytes.Buffer
+	service.logger = slog.New(slog.NewJSONHandler(&logs, nil))
+
+	if err := service.Onboard(context.Background(), 42); err == nil {
+		t.Fatal("onboarding with an upstream auth failure succeeded")
+	}
+	var event map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var candidate map[string]any
+		if err := json.Unmarshal([]byte(line), &candidate); err != nil {
+			t.Fatalf("decode log %q: %v", line, err)
+		}
+		if candidate["msg"] == "workspace operation failed" {
+			event = candidate
+		}
+	}
+	if event == nil {
+		t.Fatalf("workspace failure was not logged: %s", logs.String())
+	}
+	if event["error_class"] != "upstream_auth" || event["upstream_status"] != float64(403) {
+		t.Errorf("warning = %v, want upstream_auth with status 403", event)
+	}
+	for _, secret := range []string{"glpat-", "gitlab.example", "/private"} {
+		if strings.Contains(logs.String(), secret) {
+			t.Errorf("warning leaked %q: %s", secret, logs.String())
+		}
+	}
+	state, err := f.db.GetWorkspace(context.Background(), 42)
+	if err != nil {
+		t.Fatalf("GetWorkspace: %v", err)
+	}
+	if state.State != "error" || state.LastError != store.WorkspaceOperationFailed {
+		t.Fatalf("workspace = %+v, want the fixed error state", state)
 	}
 }

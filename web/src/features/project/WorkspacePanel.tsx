@@ -265,7 +265,13 @@ export function WorkspacePanel({ projectId, canManage = false }: { projectId: nu
               <span>索引 sha <code>{ws.index_sha ? shortSha(ws.index_sha) : '—'}</code></span>
               <span>上下文 sha <code>{ws.context_sha ? shortSha(ws.context_sha) : '—'}</code></span>
             </div>
-            {ws.last_error ? <div className={`${styles.warning} ${page.tileAlert}`} role="alert">最近错误：{ws.last_error}</div> : null}
+            {ws.index_status === 'degraded' && ws.last_error === 'index: blocked by ignore policy' ? (
+              <div className={`${styles.notice} ${page.tileAlert}`} role="status">
+                已按 ignore 策略跳过索引，这是安全配置，不是故障。修改项目 ignore 配置后重建索引。
+              </div>
+            ) : ws.last_error ? (
+              <div className={`${styles.warning} ${page.tileAlert}`} role="alert">最近错误：{ws.last_error}</div>
+            ) : null}
           </>
         ) : null}
         <div className={page.tileFooter}>

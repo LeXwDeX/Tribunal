@@ -86,12 +86,13 @@ type NodeCompletedPayload struct {
 
 // NodeFailedPayload is the payload of node.failed.
 type NodeFailedPayload struct {
-	NodeID    string `json:"node_id"`
-	Attempt   int    `json:"attempt"`
-	Error     string `json:"error,omitempty"`
-	ErrorKind string `json:"error_kind,omitempty"`
-	Reason    string `json:"reason,omitempty"`
-	Usage     Usage  `json:"usage"`
+	NodeID      string `json:"node_id"`
+	Attempt     int    `json:"attempt"`
+	Error       string `json:"error,omitempty"`
+	ErrorKind   string `json:"error_kind,omitempty"`
+	ErrorStatus int    `json:"error_status,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+	Usage       Usage  `json:"usage"`
 }
 
 // NodeAbortedPayload is the payload of node.aborted.

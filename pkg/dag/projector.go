@@ -396,6 +396,7 @@ func applyNodeTerminal(wf *WorkflowView, ev Event, status NodeStatus) error {
 		view.Usage = payload.Usage
 		view.Error = payload.Error
 		view.Reason = payload.Reason
+		view.ErrorStatus = payload.ErrorStatus
 		if view.Reason == "" {
 			view.Reason = payload.ErrorKind
 		}
