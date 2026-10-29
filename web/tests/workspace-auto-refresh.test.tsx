@@ -88,6 +88,7 @@ describe('workspace auto refresh', () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     let workspaceCalls = 0
     let refreshCalls = 0
+    let historyCalls = 0
     let settled = false
     installFetch((url) => {
       if (url.endsWith('/workspace/refresh')) {
@@ -102,7 +103,10 @@ describe('workspace auto refresh', () => {
         return jsonResponse({ state: 'ready' })
       }
       if (url.includes('/context-docs/current')) return jsonResponse(settled ? refreshed : current)
-      if (url.includes('/context-docs')) return jsonResponse({ documents: [current] })
+      if (url.includes('/context-docs')) {
+        historyCalls += 1
+        return jsonResponse({ documents: [current] })
+      }
       return jsonResponse({})
     })
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
@@ -121,6 +125,13 @@ describe('workspace auto refresh', () => {
       await vi.advanceTimersByTimeAsync(2500)
     })
     await waitFor(() => expect(screen.getByText('# New current')).toBeInTheDocument())
+    expect(historyCalls).toBeGreaterThanOrEqual(2)
+
+    const callsAtReady = workspaceCalls
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000)
+    })
+    expect(workspaceCalls).toBe(callsAtReady)
   })
 
   it('reloads the current doc when the first request is still in flight', async () => {
