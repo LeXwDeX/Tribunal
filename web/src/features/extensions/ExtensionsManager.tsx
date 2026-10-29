@@ -508,7 +508,11 @@ function SkillsTab({
 }
 
 type BindingDraft = { mcp_tools: string[]; skills: string[] }
-type BindingDrafts = { baseline: Record<string, BindingDraft>; local: Record<string, BindingDraft> }
+type BindingDrafts = {
+  baseline: Record<string, BindingDraft>
+  local: Record<string, BindingDraft>
+  conflicts: Record<string, boolean>
+}
 type RestoreTarget = 'all' | string
 type RestorePhase = 'posting' | 'refreshing' | 'loaded' | 'failed'
 type RestoreOperation = { id: string; phase: RestorePhase; error?: unknown; uncertain?: boolean; stale?: boolean }
@@ -625,30 +629,61 @@ function bindingDrafts(items: BlockBinding[]): Record<string, BindingDraft> {
   return result
 }
 
-// Merge a server snapshot without discarding drafts. A block keeps its local
-// draft when it differs from the previous baseline; clean blocks follow the
-// server so pagination, refetches, and successful saves become visible.
-function mergeBindingDrafts(current: BindingDrafts, items: BlockBinding[]): BindingDrafts {
+// Merge a server snapshot without silently overwriting local edits. A block
+// whose local draft and remote value both changed keeps its draft but is marked
+// as a conflict until the admin explicitly accepts the new baseline. A complete
+// snapshot (all pages loaded) lets a missing block count as a remote deletion;
+// a partial snapshot must not be mistaken for one.
+function mergeBindingDrafts(
+  current: BindingDrafts,
+  items: BlockBinding[],
+  complete: boolean,
+): BindingDrafts {
   const server = bindingDrafts(items)
-  const dirty = (block: string) => !sameDraft(current.baseline[block] || emptyDraft, current.local[block] || emptyDraft)
   const baseline: Record<string, BindingDraft> = {}
   const local: Record<string, BindingDraft> = {}
-  for (const [block, value] of Object.entries(server)) {
-    baseline[block] = value
-    local[block] = dirty(block) ? cloneDraft(current.local[block] || emptyDraft) : value
-  }
-  for (const [block, value] of Object.entries(current.baseline)) {
-    if (server[block] || !dirty(block)) continue
-    baseline[block] = value
-    local[block] = cloneDraft(current.local[block] || emptyDraft)
-  }
-  for (const [block, value] of Object.entries(current.local)) {
-    if (server[block] || baseline[block] || !dirty(block)) continue
-    local[block] = cloneDraft(value)
-  }
-  return { baseline, local }
-}
+  const conflicts: Record<string, boolean> = {}
+  const blocks = new Set([
+    ...Object.keys(server),
+    ...Object.keys(current.baseline),
+    ...Object.keys(current.local),
+    ...Object.keys(current.conflicts),
+  ])
 
+  for (const block of blocks) {
+    const hasServer = Boolean(server[block])
+    const previousBaseline = current.baseline[block] || emptyDraft
+    const previousLocal = current.local[block] || emptyDraft
+    const wasConflict = Boolean(current.conflicts[block])
+
+    if (!hasServer && !complete) {
+      // A partial snapshot cannot prove that a block was deleted. Keep both
+      // sides of every block that was already known from the loaded pages.
+      if (current.baseline[block]) baseline[block] = cloneDraft(previousBaseline)
+      if (current.local[block]) local[block] = cloneDraft(previousLocal)
+      if (wasConflict) conflicts[block] = true
+      continue
+    }
+
+    const serverDraft = hasServer ? server[block] : emptyDraft
+    const sameAsLocal = sameDraft(serverDraft, previousLocal)
+    const dirty = !sameDraft(previousBaseline, previousLocal)
+    const remoteChanged = !sameDraft(previousBaseline, serverDraft)
+    const conflict = !sameAsLocal && (wasConflict || (dirty && remoteChanged))
+
+    baseline[block] = cloneDraft(serverDraft)
+    if (conflict) {
+      conflicts[block] = true
+      local[block] = cloneDraft(previousLocal)
+    } else if (dirty) {
+      local[block] = cloneDraft(previousLocal)
+    } else {
+      local[block] = cloneDraft(serverDraft)
+    }
+  }
+
+  return { baseline, local, conflicts }
+}
 function BindingsTab({
   canWrite, scope, projectId, bindingState, servers, skills, testResults, onSaved, refreshBindings,
 }: {
@@ -665,13 +700,15 @@ function BindingsTab({
   const toast = useToast()
   const queryClient = useQueryClient()
   const bindingSnapshot = JSON.stringify(bindingState.items)
+  const bindingsComplete = bindingState.isSuccess && !bindingState.hasNextPage
   const [drafts, setDrafts] = useState<BindingDrafts>(() => (
-    mergeBindingDrafts({ baseline: {}, local: {} }, bindingState.items)
+    mergeBindingDrafts({ baseline: {}, local: {}, conflicts: {} }, bindingState.items, bindingsComplete)
   ))
   // Tracks the snapshot that is already merged into the editable drafts.
   const [draftSnapshot, setDraftSnapshot] = useState(bindingSnapshot)
-  const appliedSnapshot = useRef(bindingSnapshot)
-  const { baseline, local } = drafts
+  const mergeKey = `${bindingSnapshot}|${bindingsComplete ? 'complete' : 'partial'}`
+  const appliedMerge = useRef(mergeKey)
+  const { baseline, local, conflicts } = drafts
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<unknown>(null)
   const [restoreTarget, setRestoreTarget] = useState<RestoreTarget | null>(null)
@@ -748,11 +785,11 @@ function BindingsTab({
   // drafts. The content key avoids merging the same page data repeatedly when
   // usePaginated rebuilds its items array.
   useLayoutEffect(() => {
-    if (appliedSnapshot.current === bindingSnapshot) return
-    appliedSnapshot.current = bindingSnapshot
-    setDrafts((current) => mergeBindingDrafts(current, bindingState.items))
+    if (appliedMerge.current === mergeKey) return
+    appliedMerge.current = mergeKey
+    setDrafts((current) => mergeBindingDrafts(current, bindingState.items, bindingsComplete))
     setDraftSnapshot(bindingSnapshot)
-  }, [bindingSnapshot, bindingState.items])
+  }, [mergeKey, bindingSnapshot, bindingState.items, bindingsComplete])
 
   // A loaded restore may outlive this component. Only release its lock after
   // the cached list is rendered into the drafts, so no stale grant is editable.
@@ -765,11 +802,17 @@ function BindingsTab({
     removeRestoreOperations(queryClient, restoreKey, loadedRestoreIds)
   }, [loadedRestoreIds, bindingState.isSuccess, bindingState.isFetching, bindingState.isError, draftSnapshot, bindingSnapshot, cachedBindingSnapshot, queryClient, restoreKey])
 
+  const conflictBlocks = useMemo(() => (
+    Object.keys(conflicts).filter((block) => conflicts[block])
+  ), [conflicts])
+  const hasConflicts = conflictBlocks.length > 0
+
   const rowNames = useMemo(() => {
     const names = [...blocks]
     for (const block of Object.keys(local)) if (!names.includes(block)) names.push(block)
+    for (const block of conflictBlocks) if (!names.includes(block)) names.push(block)
     return names
-  }, [local])
+  }, [local, conflictBlocks])
 
   const toolColumns = useMemo(() => {
     const set = new Set<string>()
@@ -787,6 +830,19 @@ function BindingsTab({
     for (const skill of skills) set.add(skill.name)
     return Array.from(set).sort()
   }, [bindingState.items, skills])
+
+  const discardConflict = (block: string) => {
+    setDrafts((current) => {
+      if (!current.conflicts[block]) return current
+      const nextConflicts = { ...current.conflicts }
+      delete nextConflicts[block]
+      return {
+        ...current,
+        conflicts: nextConflicts,
+        local: { ...current.local, [block]: cloneDraft(current.baseline[block] || emptyDraft) },
+      }
+    })
+  }
 
   const toggle = (block: string, group: 'mcp_tools' | 'skills', value: string) => {
     if (!canWrite || restoring) return
@@ -827,7 +883,7 @@ function BindingsTab({
   }
 
   const openRestore = (target: RestoreTarget) => {
-    if (!canRestore || dirty || saving || restoring) return
+    if (!canRestore || dirty || saving || restoring || hasConflicts) return
     setRestoreError(null)
     setRestoreTarget(target)
     void previewRestore(target)
@@ -918,12 +974,16 @@ function BindingsTab({
   }
 
   const save = async () => {
-    if (!canWrite || restoring) return
+    if (!canWrite || restoring || hasConflicts) return
     setSaving(true)
     setSaveError(null)
     const submitted = rowNames
       .filter((block) => !sameDraft(baseline[block] || emptyDraft, local[block] || emptyDraft))
-      .map((block) => ({ block, draft: cloneDraft(local[block] || emptyDraft) }))
+      .map((block) => ({
+        block,
+        draft: cloneDraft(local[block] || emptyDraft),
+        baseline: cloneDraft(baseline[block] || emptyDraft),
+      }))
     if (!submitted.length) {
       setSaving(false)
       toast.push('info', '没有需要保存的绑定变更。')
@@ -942,12 +1002,16 @@ function BindingsTab({
     } else {
       toast.push('success', '块绑定已保存。')
     }
-    // Only a fulfilled write advances that block's baseline. Failed blocks
-    // keep both the server baseline and the draft so a retry is possible.
+    // Only a fulfilled write advances that block's baseline, and only when the
+    // baseline has not moved underneath it. A remote refresh during the save
+    // must keep its newer baseline and any conflict instead of being overwritten
+    // by the snapshot that was current when the request started.
     setDrafts((current) => {
       let next = current.baseline
-      submitted.forEach(({ block, draft }, index) => {
+      submitted.forEach(({ block, draft, baseline: submittedBaseline }, index) => {
         if (results[index].status !== 'fulfilled') return
+        if (current.conflicts[block]) return
+        if (!sameDraft(current.baseline[block] || emptyDraft, submittedBaseline)) return
         if (next === current.baseline) next = { ...next }
         next[block] = draft
       })
@@ -989,7 +1053,27 @@ function BindingsTab({
               <span className={ext.restoreWarning} role="status">先保存绑定再恢复默认，未保存的更改会丢失。</span>
             ) : null}
           </div>
-          <Button variant="secondary" disabled={dirty || saving || restoring} onClick={() => openRestore('all')}>恢复全部默认</Button>
+          <Button variant="secondary" disabled={dirty || saving || restoring || hasConflicts} onClick={() => openRestore('all')}>恢复全部默认</Button>
+        </div>
+      ) : null}
+      {hasConflicts ? (
+        <div className={styles.warning}>
+          <div role="alert" tabIndex={0}>
+            检测到 {conflictBlocks.length} 个块同时存在本地修改和远端变化。保存和恢复默认已停用。
+            选择对应操作只会放弃该块的本地更改，其他块的草稿不受影响。
+          </div>
+          <div className={ext.conflictActions}>
+            {conflictBlocks.map((block) => (
+              <Button
+                key={block}
+                variant="secondary"
+                className={ui.smallButton}
+                onClick={() => discardConflict(block)}
+              >
+                放弃 {block} 的本地更改并使用最新绑定
+              </Button>
+            ))}
+          </div>
         </div>
       ) : null}
       {!toolColumns.length && !skillColumns.length ? (
@@ -1026,14 +1110,19 @@ function BindingsTab({
                   const row = local[block] || emptyDraft
                   return (
                     <tr key={block}>
-                      <th scope="row">{block}</th>
+                      <th scope="row">
+                        <div className={ext.nameCell}>
+                          <span>{block}</span>
+                          {conflicts[block] ? <Badge tone="warn" plain>冲突</Badge> : null}
+                        </div>
+                      </th>
                       {canRestore ? (
                         <td className="right">
                           {blocks.includes(block) ? (
                             <Button
                               variant="secondary"
                               className={ui.smallButton}
-                              disabled={dirty || saving || restoring}
+                              disabled={dirty || saving || restoring || hasConflicts}
                               onClick={() => openRestore(block)}
                               aria-label={`恢复 ${block} 的默认绑定`}
                             >
@@ -1086,7 +1175,7 @@ function BindingsTab({
       {saveError ? <ErrorState error={saveError} title="保存绑定失败" /> : null}
       {canWrite ? (
         <div className={styles.actionsRight}>
-          <Button variant="primary" onClick={() => { void save() }} loading={saving} disabled={restoring}>保存绑定</Button>
+          <Button variant="primary" onClick={() => { void save() }} loading={saving} disabled={restoring || hasConflicts}>保存绑定</Button>
         </div>
       ) : <span className="small muted">只读账号不能修改块绑定。</span>}
       {bindingState.hasNextPage ? <Button variant="secondary" onClick={bindingState.fetchNextPage} loading={bindingState.isFetchingNextPage}>加载更多绑定</Button> : null}

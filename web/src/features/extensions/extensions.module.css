@@ -21,6 +21,22 @@
   gap: 6px;
 }
 
+.conflictActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.conflictActions button {
+  height: auto;
+  min-height: 44px;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
 .detailRow td {
   background: var(--surface-2);
 }
