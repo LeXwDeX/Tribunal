@@ -1105,48 +1105,86 @@ func TestWarnUsernameBootstrapAdmins(t *testing.T) {
 	}
 }
 
+// runUntilReady starts the server from the config written by writeRunConfig,
+// optionally rewritten by edit, waits for /readyz and returns the startup log.
+func runUntilReady(t *testing.T, dir string, edit func(string) string) string {
+	t.Helper()
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := probe.Addr().(*net.TCPAddr).Port
+	_ = probe.Close()
+	path := writeRunConfig(t, dir, port)
+	if edit != nil {
+		source, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(edit(string(source))), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	logs := &bytes.Buffer{}
+	done := make(chan error, 1)
+	go func() {
+		done <- run(ctx, []string{"--config", path}, io.Discard, logs)
+	}()
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	deadline := time.Now().Add(5 * time.Second)
+	ready := false
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(base + "/readyz")
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				ready = true
+				break
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if !ready {
+		cancel()
+		t.Fatalf("server did not become ready: %v", <-done)
+	}
+	http.DefaultClient.CloseIdleConnections()
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	return logs.String()
+}
+
+// TestRunWarnsUsernameBootstrapAdminFromConfigFile covers the production
+// path: YAML loading and ${VAR} expansion feed the startup warning (#151).
+func TestRunWarnsUsernameBootstrapAdminFromConfigFile(t *testing.T) {
+	t.Setenv("TEST_BOOTSTRAP_ADMIN", "Alice")
+	out := runUntilReady(t, t.TempDir(), func(config string) string {
+		const placeholder = "# bootstrap_admins: []"
+		if !strings.Contains(config, placeholder) {
+			t.Fatalf("example config has no %q placeholder", placeholder)
+		}
+		return strings.Replace(config, placeholder, `bootstrap_admins: ["id:7", "${TEST_BOOTSTRAP_ADMIN}"]`, 1)
+	})
+	if strings.Count(out, "username entry is deprecated") != 1 {
+		t.Fatalf("want one deprecation warning, got: %s", out)
+	}
+	if !strings.Contains(out, "index=1") || !strings.Contains(out, "binding=none") {
+		t.Fatalf("warning lacks index or binding state: %s", out)
+	}
+	if strings.Contains(strings.ToLower(out), "alice") {
+		t.Fatalf("startup log leaks the username: %s", out)
+	}
+}
+
 func TestRunReportsUnverifiedMCPKeyOnce(t *testing.T) {
 	dir := t.TempDir()
 	key := base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
 	start := func() string {
 		t.Helper()
-		probe, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		port := probe.Addr().(*net.TCPAddr).Port
-		_ = probe.Close()
-		path := writeRunConfig(t, dir, port)
-		ctx, cancel := context.WithCancel(context.Background())
-		logs := &bytes.Buffer{}
-		done := make(chan error, 1)
-		go func() {
-			done <- run(ctx, []string{"--config", path}, io.Discard, logs)
-		}()
-		base := fmt.Sprintf("http://127.0.0.1:%d", port)
-		deadline := time.Now().Add(5 * time.Second)
-		ready := false
-		for time.Now().Before(deadline) {
-			resp, err := http.Get(base + "/readyz")
-			if err == nil {
-				_ = resp.Body.Close()
-				if resp.StatusCode == http.StatusOK {
-					ready = true
-					break
-				}
-			}
-			time.Sleep(25 * time.Millisecond)
-		}
-		if !ready {
-			cancel()
-			t.Fatalf("server did not become ready: %v", <-done)
-		}
-		http.DefaultClient.CloseIdleConnections()
-		cancel()
-		if err := <-done; err != nil {
-			t.Fatalf("run: %v", err)
-		}
-		return logs.String()
+		return runUntilReady(t, dir, nil)
 	}
 
 	first := start()
