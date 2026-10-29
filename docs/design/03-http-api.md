@@ -34,7 +34,7 @@
 | HTTP | code |
 |---|---|
 | 400 | `bad_request`、`validation_failed`（附 `details` 字段数组） |
-| 401 | `unauthenticated` |
+| 401 | `unauthenticated`（无 session cookie，或 Bearer 凭据无效）；`session_expired`（无 Authorization 且带 session cookie，但会话不可用） |
 | 403 | `forbidden` |
 | 404 | `not_found` |
 | 409 | `conflict`（如工作流已在运行、项目已注册） |

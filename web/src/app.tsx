@@ -63,7 +63,13 @@ export function App() {
   }, [meQuery.data])
 
   useEffect(() => {
-    const onUnauthorized = () => setSessionEnded('expired')
+    const onUnauthorized = (event: Event) => {
+      const code = (event as CustomEvent<{ code?: string }>).detail?.code
+      // After a successful /me, any 401 ends the session, including an
+      // expired cookie the browser already dropped. A first visit without a
+      // cookie stays on the login screen without an expiry notice.
+      if (meQuery.data || code === 'session_expired') setSessionEnded('expired')
+    }
     const onLogout = () => setSessionEnded('logout')
     window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized)
     window.addEventListener(LOGOUT_EVENT, onLogout)
@@ -71,7 +77,7 @@ export function App() {
       window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized)
       window.removeEventListener(LOGOUT_EVENT, onLogout)
     }
-  }, [])
+  }, [meQuery.data])
 
   if (meQuery.isPending || authStatusQuery.isPending) return <BootLoading />
 
