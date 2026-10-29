@@ -103,6 +103,29 @@ func (s *Server) handleAdminListProjects(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]any{"projects": items, "next_cursor": next})
 }
 
+// handleAdminRetryOnboarding enqueues a fresh onboarding job for a project.
+// It is a platform-admin operation: project manage grants are not involved.
+func (s *Server) handleAdminRetryOnboarding(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAccess(w, r) {
+		return
+	}
+	projectID, err := parseID(r.PathValue("id"))
+	if err != nil {
+		validationFailed(w, r, "id", "id must be a positive integer")
+		return
+	}
+	if s.workspace == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "internal", "workspace service is not configured", nil)
+		return
+	}
+	jobID, err := s.workspace.RetryOnboarding(r.Context(), projectID)
+	if err != nil {
+		s.writeServiceError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"job_id": jobID})
+}
+
 func (s *Server) handleAdminListGrants(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAccess(w, r) {
 		return

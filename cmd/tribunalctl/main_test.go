@@ -18,6 +18,8 @@ type capturedRequest struct {
 	method string
 	path   string
 	auth   string
+	cookie string
+	csrf   string
 	body   map[string]any
 }
 
@@ -27,6 +29,8 @@ func captureHandler(t *testing.T, status int, response string, captured *capture
 		captured.method = r.Method
 		captured.path = r.URL.Path
 		captured.auth = r.Header.Get("Authorization")
+		captured.cookie = r.Header.Get("Cookie")
+		captured.csrf = r.Header.Get("X-CSRF-Token")
 		if r.Body != nil {
 			data, _ := io.ReadAll(r.Body)
 			if len(data) > 0 {
@@ -297,6 +301,7 @@ func TestSubcommandHelp(t *testing.T) {
 		{"projects word", []string{"projects", "help"}, []string{"Usage: tribunalctl", "register", "webhook"}},
 		{"project get", []string{"projects", "get", "--help"}, []string{"Usage: tribunalctl projects get", "<project ID>"}},
 		{"project get after id", []string{"projects", "get", "42", "--help"}, []string{"Usage: tribunalctl projects get", "<project ID>"}},
+		{"retry onboarding", []string{"projects", "retry-onboarding", "--help"}, []string{"Usage: tribunalctl projects retry-onboarding", "<project ID>"}},
 		{"users long", []string{"users", "--help"}, []string{"Usage: tribunalctl", "disable", "revoke"}},
 		{"user disable", []string{"users", "disable", "--help"}, []string{"Usage: tribunalctl users disable", "<user ID>"}},
 		{"grants", []string{"projects", "grants", "--help"}, []string{"Usage: tribunalctl projects grants", "list", "set", "delete"}},
@@ -599,4 +604,45 @@ func TestProjectsResiduesCommands(t *testing.T) {
 			t.Fatal("unknown action accepted")
 		}
 	})
+}
+
+func TestRetryOnboardingCommand(t *testing.T) {
+	var captured capturedRequest
+	ts := httptest.NewServer(captureHandler(t, http.StatusAccepted,
+		`{"job_id":"job-retry"}`, &captured))
+	defer ts.Close()
+
+	stdout, _, err := runCtl(t, []string{
+		"--url", ts.URL, "projects", "retry-onboarding", "42",
+	}, map[string]string{"REVIEW_ADMIN_TOKEN": "admin"}, ts.Client())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if captured.method != http.MethodPost || captured.path != "/api/v1/admin/projects/42/onboarding/retry" {
+		t.Fatalf("request = %s %s", captured.method, captured.path)
+	}
+	if captured.auth != "Bearer admin" {
+		t.Fatalf("auth = %q", captured.auth)
+	}
+	if captured.cookie != "" || captured.csrf != "" {
+		t.Fatalf("project credentials sent: cookie=%q csrf=%q", captured.cookie, captured.csrf)
+	}
+	if !strings.Contains(stdout, "job-retry") {
+		t.Fatalf("stdout = %q", stdout)
+	}
+
+	if _, _, err := runCtl(t, []string{"--url", ts.URL, "projects", "retry-onboarding", "abc"},
+		map[string]string{"REVIEW_ADMIN_TOKEN": "admin"}, ts.Client()); err == nil {
+		t.Fatal("invalid project ID accepted")
+	}
+
+	var notFound capturedRequest
+	missing := httptest.NewServer(captureHandler(t, http.StatusNotFound,
+		`{"error":{"code":"not_found","message":"project not found"}}`, &notFound))
+	defer missing.Close()
+	_, _, err = runCtl(t, []string{"--url", missing.URL, "projects", "retry-onboarding", "99"},
+		map[string]string{"REVIEW_ADMIN_TOKEN": "admin"}, missing.Client())
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("missing project error = %v", err)
+	}
 }

@@ -48,6 +48,7 @@ type ReviewController interface {
 // WorkspaceService enqueues workspace refresh jobs.
 type WorkspaceService interface {
 	RefreshWorkspace(ctx context.Context, projectID int64, regenerateContext, reindex bool) (jobID string, err error)
+	RetryOnboarding(ctx context.Context, projectID int64) (jobID string, err error)
 }
 
 // ContextService saves manual context revisions and lock changes. It owns the

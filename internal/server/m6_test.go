@@ -458,9 +458,20 @@ type refreshCall struct {
 }
 
 type fakeWorkspace struct {
-	mu    sync.Mutex
-	calls []refreshCall
-	err   error
+	mu         sync.Mutex
+	calls      []refreshCall
+	retryCalls []int64
+	err        error
+}
+
+func (f *fakeWorkspace) RetryOnboarding(ctx context.Context, projectID int64) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.retryCalls = append(f.retryCalls, projectID)
+	if f.err != nil {
+		return "", f.err
+	}
+	return "job-onboard-retry", nil
 }
 
 func (f *fakeWorkspace) RefreshWorkspace(ctx context.Context, projectID int64, regenerateContext, reindex bool) (string, error) {

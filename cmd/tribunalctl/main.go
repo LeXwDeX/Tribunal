@@ -151,12 +151,13 @@ var commandHelp = &helpNode{
 	children: map[string]*helpNode{
 		"projects": {
 			args:    "<action> [options]",
-			actions: []string{"register", "list", "get", "all", "grants", "residues", "webhook"},
+			actions: []string{"register", "list", "get", "all", "retry-onboarding", "grants", "residues", "webhook"},
 			children: map[string]*helpNode{
-				"register": {args: "--project ID --token-env NAME [--profile PROFILE] [--auto-webhook] [--settings JSON]"},
-				"list":     {},
-				"get":      {args: "<project ID>"},
-				"all":      {},
+				"register":         {args: "--project ID --token-env NAME [--profile PROFILE] [--auto-webhook] [--settings JSON]"},
+				"list":             {},
+				"get":              {args: "<project ID>"},
+				"retry-onboarding": {args: "<project ID>"},
+				"all":              {},
 				"grants": {
 					args:    "<action> [options]",
 					actions: []string{"list", "set", "delete"},
@@ -268,6 +269,20 @@ func (g *globals) runProjects(ctx context.Context, args []string) error {
 			return errors.New("projects all takes no arguments")
 		}
 		return g.listAllProjects(ctx)
+	case "retry-onboarding":
+		if len(args) != 2 {
+			return errors.New("projects retry-onboarding requires exactly one project ID")
+		}
+		id, err := parsePositiveID(args[1], "project ID")
+		if err != nil {
+			return err
+		}
+		raw, err := g.request(ctx, http.MethodPost,
+			"/api/v1/admin/projects/"+strconv.FormatInt(id, 10)+"/onboarding/retry", nil)
+		if err != nil {
+			return err
+		}
+		return writeRaw(g.stdout, raw)
 	case "grants":
 		return g.runGrants(ctx, args[1:])
 	case "residues":

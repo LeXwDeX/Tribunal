@@ -269,6 +269,7 @@ func New(cfg Config) (*Server, error) {
 		mux.HandleFunc("GET "+prefix+"/projects", s.apiAuth(s.guard(policyPlatformAdmin, s.handleAdminListProjects)))
 		mux.HandleFunc("GET "+prefix+"/projects/residues", s.apiAuth(s.guard(policyPlatformAdmin, s.handleAdminListProjectResidues)))
 		mux.HandleFunc("POST "+prefix+"/projects/residues/cleanup", s.apiAuth(s.guard(policyPlatformAdmin, s.handleAdminCleanupProjectResidues)))
+		mux.HandleFunc("POST "+prefix+"/projects/{id}/onboarding/retry", s.apiAuth(s.guard(policyPlatformAdmin, s.handleAdminRetryOnboarding)))
 		mux.HandleFunc("GET "+prefix+"/projects/{id}/grants", s.apiAuth(s.guard(policyPlatformAdmin, s.handleAdminListGrants)))
 		mux.HandleFunc("PUT "+prefix+"/projects/{id}/grants/{user_id}", s.apiAuth(s.guard(policyPlatformAdmin, s.handleAdminSetGrant)))
 		mux.HandleFunc("DELETE "+prefix+"/projects/{id}/grants/{user_id}", s.apiAuth(s.guard(policyPlatformAdmin, s.handleAdminDeleteGrant)))

@@ -179,12 +179,13 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	lifecycle := runtime.Lifecycle()
 
 	dispatcher, err := app.NewDispatcher(app.DispatcherConfig{
-		Store:     db,
-		Workspace: runtime.WorkspaceManager(),
-		GitLab:    gitlabClient,
-		Cipher:    cipher,
-		Profiles:  cfg.Profiles,
-		Logger:    logger,
+		Store:      db,
+		Workspace:  runtime.WorkspaceManager(),
+		Onboarding: runtime.WorkspaceService(),
+		GitLab:     gitlabClient,
+		Cipher:     cipher,
+		Profiles:   cfg.Profiles,
+		Logger:     logger,
 	})
 	if err != nil {
 		return err
