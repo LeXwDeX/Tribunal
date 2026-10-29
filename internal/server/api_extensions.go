@@ -124,6 +124,40 @@ type BlockBindingInput struct {
 	Skills    []string
 }
 
+// RestoreDefaultsInput asks for a preview or an execution of the shipped
+// defaults. The service rebuilds the grants from the process configuration;
+// the request never carries grants.
+type RestoreDefaultsInput struct {
+	Blocks       []string
+	DryRun       bool
+	PreviewToken string
+}
+
+// RestoreGrant is one list of entries a restore adds or removes.
+type RestoreGrant struct {
+	MCPTools []string `json:"mcp_tools"`
+	Skills   []string `json:"skills"`
+}
+
+// RestoreDefaultsChange is one block's restore outcome. OwnershipChanged
+// reports a newly default-owned row or block snapshot; a pure grant ledger
+// update leaves it false.
+type RestoreDefaultsChange struct {
+	Block            string       `json:"block"`
+	Status           string       `json:"status"`
+	Reason           string       `json:"reason"`
+	Add              RestoreGrant `json:"add"`
+	Remove           RestoreGrant `json:"remove"`
+	OwnershipChanged bool         `json:"ownership_changed"`
+}
+
+// RestoreDefaultsResult is the preview and execution response.
+type RestoreDefaultsResult struct {
+	Changes         []RestoreDefaultsChange `json:"changes"`
+	PreviewToken    string                  `json:"preview_token"`
+	RestartRequired bool                    `json:"restart_required"`
+}
+
 // parseExtensionScope validates the shared scope/project_id selector. An
 // empty scope is allowed for list endpoints and means "all scopes".
 func parseExtensionScope(r *http.Request, required bool) (extensionScope, error) {
@@ -841,4 +875,45 @@ func (s *Server) handleUpsertBlockBinding(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, http.StatusOK, binding)
+}
+
+type restoreDefaultsRequest struct {
+	Blocks       []string `json:"blocks"`
+	DryRun       *bool    `json:"dry_run"`
+	PreviewToken string   `json:"preview_token"`
+}
+
+// handleRestoreDefaultBlockBindings previews or applies the defaults shipped
+// by the running process. Only a platform administrator may call it; the
+// request never supplies grants, so a client cannot restore its own values.
+func (s *Server) handleRestoreDefaultBlockBindings(w http.ResponseWriter, r *http.Request) {
+	if !s.requireExtensions(w, r) {
+		return
+	}
+	if !s.requirePlatformAdmin(w, r) {
+		return
+	}
+	var request restoreDefaultsRequest
+	if err := decodeJSON(w, r, adminBodyLimit, &request); err != nil {
+		decodeRequestError(w, r, err)
+		return
+	}
+	if request.DryRun == nil {
+		validationFailed(w, r, "dry_run", "dry_run is required")
+		return
+	}
+	if !*request.DryRun && strings.TrimSpace(request.PreviewToken) == "" {
+		validationFailed(w, r, "preview_token", "preview_token is required when dry_run is false")
+		return
+	}
+	result, err := s.extensions.RestoreDefaults(r.Context(), RestoreDefaultsInput{
+		Blocks:       request.Blocks,
+		DryRun:       *request.DryRun,
+		PreviewToken: request.PreviewToken,
+	})
+	if err != nil {
+		s.writeServiceError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }

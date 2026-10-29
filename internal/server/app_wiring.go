@@ -351,3 +351,39 @@ func blockBindingFromApp(binding app.BlockBinding) BlockBinding {
 		Skills:    binding.Skills,
 	}
 }
+
+func (a *AppExtensions) RestoreDefaults(ctx context.Context, in RestoreDefaultsInput) (*RestoreDefaultsResult, error) {
+	if err := a.ready(); err != nil {
+		return nil, err
+	}
+	result, err := a.service.RestoreDefaults(ctx, app.RestoreDefaultsRequest{
+		Blocks:       in.Blocks,
+		DryRun:       in.DryRun,
+		PreviewToken: in.PreviewToken,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := &RestoreDefaultsResult{
+		Changes:         make([]RestoreDefaultsChange, 0, len(result.Changes)),
+		PreviewToken:    result.PreviewToken,
+		RestartRequired: result.RestartRequired,
+	}
+	for _, change := range result.Changes {
+		out.Changes = append(out.Changes, RestoreDefaultsChange{
+			Block:  change.Block,
+			Status: change.Status,
+			Reason: change.Reason,
+			Add: RestoreGrant{
+				MCPTools: append([]string{}, change.Add.MCPTools...),
+				Skills:   append([]string{}, change.Add.Skills...),
+			},
+			Remove: RestoreGrant{
+				MCPTools: append([]string{}, change.Remove.MCPTools...),
+				Skills:   append([]string{}, change.Remove.Skills...),
+			},
+			OwnershipChanged: change.OwnershipChanged,
+		})
+	}
+	return out, nil
+}

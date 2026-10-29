@@ -1,11 +1,14 @@
-import { Fragment, useEffect, useId, useMemo, useState, type ReactNode } from 'react'
+import { Fragment, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   createMcpServer, deleteMcpServer, deleteSkill, importMcpServers, listBindings, listMcpServers,
-  listSkills, registerSkillDirectory, saveBinding, setSkillEnabled, testMcpServer, updateMcpServer, uploadSkill,
+  listSkills, registerSkillDirectory, restoreDefaultBindings, saveBinding, setSkillEnabled, testMcpServer,
+  updateMcpServer, uploadSkill,
 } from '../../api/api'
 import { ApiError, errorMessage } from '../../api/client'
-import type { BlockBinding, McpServer, McpTool, Project, Skill } from '../../api/types'
+import type {
+  BlockBinding, McpServer, McpTool, Project, RestoreDefaultsChange, RestoreDefaultsResult, Skill,
+} from '../../api/types'
 import { useCanWrite } from '../../components/RoleContext'
 import {
   Badge, Button, ConfirmDialog, Dialog, EmptyState, ErrorState, Field, LoadingState, Panel, Tabs, useToast,
@@ -480,6 +483,62 @@ function SkillsTab({
   )
 }
 
+type BindingDraft = { mcp_tools: string[]; skills: string[] }
+type BindingDrafts = { baseline: Record<string, BindingDraft>; local: Record<string, BindingDraft> }
+type RestoreTarget = 'all' | string
+
+const emptyDraft: BindingDraft = { mcp_tools: [], skills: [] }
+
+function sortedKey(values: string[]): string {
+  return values.slice().sort().join('\u0000')
+}
+
+function sameEntries(left: string[], right: string[]): boolean {
+  return left.length === right.length && sortedKey(left) === sortedKey(right)
+}
+
+function sameDraft(left: BindingDraft, right: BindingDraft): boolean {
+  return sameEntries(left.mcp_tools, right.mcp_tools) && sameEntries(left.skills, right.skills)
+}
+
+function cloneDraft(draft: BindingDraft): BindingDraft {
+  return { mcp_tools: [...draft.mcp_tools], skills: [...draft.skills] }
+}
+
+function bindingDrafts(items: BlockBinding[]): Record<string, BindingDraft> {
+  const result: Record<string, BindingDraft> = {}
+  for (const item of items) {
+    if (!result[item.block]) {
+      result[item.block] = { mcp_tools: [...(item.mcp_tools || [])], skills: [...(item.skills || [])] }
+    }
+  }
+  return result
+}
+
+// Merge a server snapshot without discarding drafts. A block keeps its local
+// draft when it differs from the previous baseline; clean blocks follow the
+// server so pagination, refetches, and successful saves become visible.
+function mergeBindingDrafts(current: BindingDrafts, items: BlockBinding[]): BindingDrafts {
+  const server = bindingDrafts(items)
+  const dirty = (block: string) => !sameDraft(current.baseline[block] || emptyDraft, current.local[block] || emptyDraft)
+  const baseline: Record<string, BindingDraft> = {}
+  const local: Record<string, BindingDraft> = {}
+  for (const [block, value] of Object.entries(server)) {
+    baseline[block] = value
+    local[block] = dirty(block) ? cloneDraft(current.local[block] || emptyDraft) : value
+  }
+  for (const [block, value] of Object.entries(current.baseline)) {
+    if (server[block] || !dirty(block)) continue
+    baseline[block] = value
+    local[block] = cloneDraft(current.local[block] || emptyDraft)
+  }
+  for (const [block, value] of Object.entries(current.local)) {
+    if (server[block] || baseline[block] || !dirty(block)) continue
+    local[block] = cloneDraft(value)
+  }
+  return { baseline, local }
+}
+
 function BindingsTab({
   canWrite, scope, projectId, bindingState, servers, skills, testResults, onSaved,
 }: {
@@ -493,23 +552,31 @@ function BindingsTab({
   onSaved: () => Promise<void> | void
 }) {
   const toast = useToast()
-  const [local, setLocal] = useState<Record<string, { mcp_tools: string[]; skills: string[] }>>({})
+  const bindingSnapshot = JSON.stringify(bindingState.items)
+  const [drafts, setDrafts] = useState<BindingDrafts>(() => (
+    mergeBindingDrafts({ baseline: {}, local: {} }, bindingState.items)
+  ))
+  const appliedSnapshot = useRef(bindingSnapshot)
+  const { baseline, local } = drafts
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<unknown>(null)
+  const [restoreTarget, setRestoreTarget] = useState<RestoreTarget | null>(null)
+  const [restorePreview, setRestorePreview] = useState<RestoreDefaultsResult | null>(null)
+  const [previewPending, setPreviewPending] = useState(false)
+  const [previewError, setPreviewError] = useState<unknown>(null)
+  const [restorePending, setRestorePending] = useState(false)
+  const [restoreError, setRestoreError] = useState<unknown>(null)
+  const [restoreConflict, setRestoreConflict] = useState(false)
+  const restoreRequest = useRef(0)
 
-  const initial = useMemo(() => {
-    const result: Record<string, { mcp_tools: string[]; skills: string[] }> = {}
-    for (const binding of bindingState.items) {
-      if (!result[binding.block]) {
-        result[binding.block] = { mcp_tools: [...(binding.mcp_tools || [])], skills: [...(binding.skills || [])] }
-      }
-    }
-    return result
-  }, [bindingState.items])
-
-  useEffect(() => {
-    setLocal(initial)
-  }, [initial])
+  // Merge each distinct server snapshot into the baseline while keeping dirty
+  // drafts. The content key avoids merging the same page data repeatedly when
+  // usePaginated rebuilds its items array.
+  useLayoutEffect(() => {
+    if (appliedSnapshot.current === bindingSnapshot) return
+    appliedSnapshot.current = bindingSnapshot
+    setDrafts((current) => mergeBindingDrafts(current, bindingState.items))
+  }, [bindingSnapshot, bindingState.items])
 
   const rowNames = useMemo(() => {
     const names = [...blocks]
@@ -536,43 +603,121 @@ function BindingsTab({
 
   const toggle = (block: string, group: 'mcp_tools' | 'skills', value: string) => {
     if (!canWrite) return
-    setLocal((current) => {
-      const existing = current[block] || { mcp_tools: [], skills: [] }
+    setDrafts((current) => {
+      const existing = current.local[block] || emptyDraft
       const values = new Set(existing[group])
       if (values.has(value)) values.delete(value)
       else values.add(value)
-      return { ...current, [block]: { ...existing, [group]: Array.from(values) } }
+      return {
+        ...current,
+        local: { ...current.local, [block]: { ...existing, [group]: Array.from(values) } },
+      }
     })
+  }
+
+  const canRestore = canWrite && scope === 'platform'
+  const dirty = useMemo(() => rowNames.some((block) => (
+    !sameDraft(baseline[block] || emptyDraft, local[block] || emptyDraft)
+  )), [rowNames, baseline, local])
+
+  const previewRestore = async (target: RestoreTarget) => {
+    const requestId = ++restoreRequest.current
+    setPreviewPending(true)
+    setRestorePreview(null)
+    setPreviewError(null)
+    setRestoreError(null)
+    setRestoreConflict(false)
+    try {
+      const result = await restoreDefaultBindings(
+        target === 'all' ? { dry_run: true } : { blocks: [target], dry_run: true },
+      )
+      if (restoreRequest.current === requestId) setRestorePreview(result)
+    } catch (error) {
+      if (restoreRequest.current === requestId) setPreviewError(error)
+    } finally {
+      if (restoreRequest.current === requestId) setPreviewPending(false)
+    }
+  }
+
+  const openRestore = (target: RestoreTarget) => {
+    if (!canRestore || dirty || saving) return
+    setRestoreError(null)
+    setRestoreTarget(target)
+    void previewRestore(target)
+  }
+
+  const closeRestore = () => {
+    if (restorePending) return
+    restoreRequest.current += 1
+    setRestoreTarget(null)
+    setRestorePreview(null)
+    setPreviewPending(false)
+    setPreviewError(null)
+    setRestoreError(null)
+    setRestoreConflict(false)
+  }
+
+  const confirmRestore = async () => {
+    if (!restoreTarget || !restorePreview || restoreConflict || restorePending) return
+    setRestorePending(true)
+    setRestoreError(null)
+    try {
+      const result = await restoreDefaultBindings(restoreTarget === 'all'
+        ? { dry_run: false, preview_token: restorePreview.preview_token }
+        : { blocks: [restoreTarget], dry_run: false, preview_token: restorePreview.preview_token })
+      toast.push('success', result.restart_required
+        ? '默认绑定已恢复，重启服务后生效。'
+        : '默认绑定已恢复。')
+      restoreRequest.current += 1
+      setRestoreTarget(null)
+      setRestorePreview(null)
+      await onSaved()
+    } catch (error) {
+      // A stale preview is never retried automatically: the admin decides
+      // when to preview the new state and confirm again.
+      if (error instanceof ApiError && error.status === 409) setRestoreConflict(true)
+      else setRestoreError(error)
+    } finally {
+      setRestorePending(false)
+    }
   }
 
   const save = async () => {
     if (!canWrite) return
     setSaving(true)
     setSaveError(null)
-    const changes = rowNames.filter((block) => {
-      const before = initial[block] || { mcp_tools: [], skills: [] }
-      const after = local[block] || { mcp_tools: [], skills: [] }
-      return before.mcp_tools.slice().sort().join('\u0000') !== after.mcp_tools.slice().sort().join('\u0000')
-        || before.skills.slice().sort().join('\u0000') !== after.skills.slice().sort().join('\u0000')
-    })
-    if (!changes.length) {
+    const submitted = rowNames
+      .filter((block) => !sameDraft(baseline[block] || emptyDraft, local[block] || emptyDraft))
+      .map((block) => ({ block, draft: cloneDraft(local[block] || emptyDraft) }))
+    if (!submitted.length) {
       setSaving(false)
       toast.push('info', '没有需要保存的绑定变更。')
       return
     }
-    const results = await Promise.allSettled(changes.map((block) => saveBinding(block, {
+    const results = await Promise.allSettled(submitted.map(({ block, draft }) => saveBinding(block, {
       scope,
       project_id: projectId,
-      mcp_tools: local[block]?.mcp_tools || [],
-      skills: local[block]?.skills || [],
+      mcp_tools: draft.mcp_tools,
+      skills: draft.skills,
     })))
     const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected')
     if (failures.length) {
       setSaveError(failures[0].reason)
-      toast.push('error', `部分绑定未保存（${failures.length}/${changes.length} 个请求失败）。`)
+      toast.push('error', `部分绑定未保存（${failures.length}/${submitted.length} 个请求失败）。`)
     } else {
       toast.push('success', '块绑定已保存。')
     }
+    // Only a fulfilled write advances that block's baseline. Failed blocks
+    // keep both the server baseline and the draft so a retry is possible.
+    setDrafts((current) => {
+      let next = current.baseline
+      submitted.forEach(({ block, draft }, index) => {
+        if (results[index].status !== 'fulfilled') return
+        if (next === current.baseline) next = { ...next }
+        next[block] = draft
+      })
+      return next === current.baseline ? current : { ...current, baseline: next }
+    })
     await onSaved()
     setSaving(false)
   }
@@ -581,10 +726,23 @@ function BindingsTab({
   if (bindingState.isError) return <Panel title="块绑定"><ErrorState error={bindingState.error} onRetry={bindingState.retry} /></Panel>
 
   return (
+    <>
     <Panel
       title="块绑定"
       aside={scope === 'platform' ? '平台默认绑定' : '项目覆盖绑定（未覆盖的块继承平台默认）'}
     >
+      {canRestore ? (
+        <div className={ext.restoreBar}>
+          <div className={ext.restoreText}>
+            <span className={ext.restoreTitle}>内置默认授权</span>
+            <span>恢复只处理平台级绑定。全部恢复由服务端选择全部可恢复块。</span>
+            {dirty ? (
+              <span className={ext.restoreWarning} role="status">先保存绑定再恢复默认，未保存的更改会丢失。</span>
+            ) : null}
+          </div>
+          <Button variant="secondary" disabled={dirty || saving} onClick={() => openRestore('all')}>恢复全部默认</Button>
+        </div>
+      ) : null}
       {!toolColumns.length && !skillColumns.length ? (
         <div className={styles.warning}>
           没有可绑定的工具或 Skill。先添加 MCP 服务器和 Skill，并运行 MCP 测试以发现工具；已保存的绑定名称也会显示为列。
@@ -596,16 +754,32 @@ function BindingsTab({
               <thead>
                 <tr>
                   <th scope="col" style={{ textAlign: 'left' }}>块</th>
+                  {canRestore ? <th scope="col" className="right">默认</th> : null}
                   {toolColumns.map((tool) => <th key={tool} scope="col">{tool}</th>)}
                   {skillColumns.map((skill) => <th key={`skill-${skill}`} scope="col">skill: {skill}</th>)}
                 </tr>
               </thead>
               <tbody>
                 {rowNames.map((block) => {
-                  const row = local[block] || { mcp_tools: [], skills: [] }
+                  const row = local[block] || emptyDraft
                   return (
                     <tr key={block}>
                       <th scope="row">{block}</th>
+                      {canRestore ? (
+                        <td className="right">
+                          {blocks.includes(block) ? (
+                            <Button
+                              variant="secondary"
+                              className={ui.smallButton}
+                              disabled={dirty || saving}
+                              onClick={() => openRestore(block)}
+                              aria-label={`恢复 ${block} 的默认绑定`}
+                            >
+                              恢复
+                            </Button>
+                          ) : null}
+                        </td>
+                      ) : null}
                       {toolColumns.map((tool) => {
                         const on = row.mcp_tools.includes(tool)
                         return (
@@ -656,6 +830,145 @@ function BindingsTab({
       ) : <span className="small muted">只读账号不能修改块绑定。</span>}
       {bindingState.hasNextPage ? <Button variant="secondary" onClick={bindingState.fetchNextPage} loading={bindingState.isFetchingNextPage}>加载更多绑定</Button> : null}
     </Panel>
+    {canRestore ? (
+      <RestoreDialog
+        target={restoreTarget}
+        preview={restorePreview}
+        previewPending={previewPending}
+        previewError={previewError}
+        pending={restorePending}
+        error={restoreError}
+        conflict={restoreConflict}
+        onClose={closeRestore}
+        onPreview={() => { if (restoreTarget) void previewRestore(restoreTarget) }}
+        onConfirm={() => { void confirmRestore() }}
+      />
+    ) : null}
+    </>
+  )
+}
+
+const restoreStatusLabels = {
+  change: { label: '将更改', tone: 'warn' as const },
+  unchanged: { label: '无需更改', tone: 'ok' as const },
+  skipped: { label: '已跳过', tone: 'neutral' as const },
+}
+
+function skipReason(reason: string): string {
+  if (reason === 'file_binding') return '该块在配置文件中显式声明，不会恢复。'
+  if (reason === 'no_registered_defaults') return '没有已登记的内置默认，保留现有绑定。'
+  return reason ? `跳过原因：${reason}` : '没有可恢复的内容。'
+}
+
+function RestoreEntries({ label, values }: { label: string; values: string[] }) {
+  if (!values.length) return null
+  return (
+    <div className={ext.restoreGroup}>
+      <h4 className={ext.restoreGroupTitle}>{label}</h4>
+      <ul className={ext.restoreList}>
+        {values.map((value) => <li key={value}><code>{value}</code></li>)}
+      </ul>
+    </div>
+  )
+}
+
+function RestoreChangeCard({ change: item }: { change: RestoreDefaultsChange }) {
+  const id = useId()
+  const status = restoreStatusLabels[item.status] || { label: item.status, tone: 'neutral' as const }
+  const added = item.add.skills.length + item.add.mcp_tools.length > 0
+  const removed = item.remove.skills.length + item.remove.mcp_tools.length > 0
+  const changed = item.status === 'change'
+  const ownershipOnly = changed && item.ownership_changed && !added && !removed
+  return (
+    <section className={ext.restoreBlock} aria-labelledby={id}>
+      <div className={ext.restoreBlockHeader}>
+        <h3 className={ext.restoreBlockTitle} id={id}>{item.block}</h3>
+        <Badge tone={status.tone}>{status.label}</Badge>
+      </div>
+      {item.status === 'skipped' ? <p className={ext.restoreReason}>{skipReason(item.reason)}</p> : null}
+      {item.status === 'unchanged' ? <p className={ext.restoreReason}>当前绑定已与内置默认一致。</p> : null}
+      {ownershipOnly ? (
+        <div className={ext.restoreOwnership}>
+          <Badge tone="info" plain>仅所有权变化</Badge>
+          <span>绑定内容不变，恢复后由默认扩展管理。</span>
+        </div>
+      ) : null}
+      {changed && item.ownership_changed && !ownershipOnly ? (
+        <p className={ext.restoreOwnershipNote}>恢复后由默认扩展管理。</p>
+      ) : null}
+      {changed ? (
+        <div className={ext.restoreGroups}>
+          <RestoreEntries label="新增 Skill" values={item.add.skills} />
+          <RestoreEntries label="新增 MCP 工具" values={item.add.mcp_tools} />
+          <RestoreEntries label="删除 Skill" values={item.remove.skills} />
+          <RestoreEntries label="删除 MCP 工具" values={item.remove.mcp_tools} />
+        </div>
+      ) : null}
+      {changed && !added && !removed && !item.ownership_changed ? (
+        <p className={ext.restoreReason}>绑定内容不变，将更新默认授权记录。</p>
+      ) : null}
+    </section>
+  )
+}
+
+function RestoreDialog({
+  target, preview, previewPending, previewError, pending, error, conflict, onClose, onPreview, onConfirm,
+}: {
+  target: RestoreTarget | null
+  preview: RestoreDefaultsResult | null
+  previewPending: boolean
+  previewError: unknown
+  pending: boolean
+  error: unknown
+  conflict: boolean
+  onClose: () => void
+  onPreview: () => void
+  onConfirm: () => void
+}) {
+  if (target === null) return null
+  const all = target === 'all'
+  const title = all ? '恢复全部默认绑定' : `恢复 ${target} 的默认绑定`
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title={title}
+      description={all
+        ? '先预览将新增和删除的平台授权。确认前不会写入；全部恢复范围由服务端决定。'
+        : '先预览将新增和删除的平台授权。确认前不会写入；仅处理平台级绑定。'}
+      wide
+      footer={(
+        <>
+          <Button variant="secondary" onClick={onClose} disabled={pending}>取消</Button>
+          {!previewPending && (conflict || !preview) ? (
+            <Button variant="secondary" onClick={onPreview} loading={previewPending}>重新预览</Button>
+          ) : null}
+          {preview && !conflict ? (
+            <Button variant="primary" onClick={onConfirm} loading={pending}>确认恢复</Button>
+          ) : null}
+        </>
+      )}
+    >
+      {previewPending ? <LoadingState label="正在预览默认绑定…" /> : null}
+      {conflict ? (
+        <div className={styles.warning} role="alert">预览已过期，绑定已变化。请重新预览后再确认。</div>
+      ) : null}
+      {previewError ? <ErrorState error={previewError} title="预览失败" /> : null}
+      {previewError ? <p className={ext.restoreHint}>预览失败时不会写入任何绑定。</p> : null}
+      {error ? <ErrorState error={error} title="恢复失败" /> : null}
+      {preview ? (
+        <>
+          <p className={ext.restoreHint}>
+            {all ? '服务端会检查全部可恢复块。' : '仅处理该块的平台级绑定。'}
+            确认前不会写入；新增和删除内容如下。
+          </p>
+          <div className={ext.restoreChanges}>
+            {preview.changes.map((item) => <RestoreChangeCard key={item.block} change={item} />)}
+          </div>
+          {preview.restart_required ? <p className={ext.restoreRestart}>恢复后需要重启服务才能生效。</p> : null}
+        </>
+      ) : null}
+    </Dialog>
   )
 }
 

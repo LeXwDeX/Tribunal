@@ -250,6 +250,7 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("PATCH /api/v1/skills/{id}", s.apiAuth(s.guard(policyPlatformAdmin, s.handleUpdateSkill)))
 	mux.HandleFunc("GET /api/v1/block-bindings", s.apiAuth(s.guard(policyAuthenticated, s.handleListBlockBindings)))
 	mux.HandleFunc("PUT /api/v1/block-bindings/{block}", s.apiAuth(s.guard(policyAuthenticated, s.handleUpsertBlockBinding)))
+	mux.HandleFunc("POST /api/v1/block-bindings/restore-defaults", s.apiAuth(s.guard(policyPlatformAdmin, s.handleRestoreDefaultBlockBindings)))
 	// System.
 	mux.HandleFunc("GET /api/v1/providers", s.apiAuth(s.guard(policyPlatformAdmin, s.handleListProviders)))
 	mux.HandleFunc("POST /api/v1/providers/{name}/test", s.apiAuth(s.guard(policyPlatformAdmin, s.handleTestProvider)))

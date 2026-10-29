@@ -211,7 +211,7 @@ docker compose exec -T review /app/tribunalctl projects grants list "$PROJECT_ID
 
 v1.2.0 开箱自带两项内置扩展，不需要额外配置：
 
-- Skill `code-review`：挂在 `code-review`、`review` 块上。
+- Skill `code-review`：v1.2.0 默认挂在 `code-review`、`review` 块上。当前未发布版本只默认挂到 `code-review` 块。
 - MCP 服务器 `codebase-memory`：只读的代码图谱工具，各项目的索引互相隔离。默认 ignore 非空时，评审中的 MCP 工具和全量图谱索引不执行，这是安全降级，不影响 PASS；详见 [ignore 安全边界](operations.md#ignore-安全边界)。
 
 **验证**：控制台「扩展」页里，两项都带「内置」标签。在 MCP 服务器一栏点「测试」，工具列表里应有 `search_graph`、`trace_path`、`get_code_snippet`，并且没有 `index_repository`、`delete_project`。MCP 详情和列表的配置返回 `config: {}` 是预期行为。
@@ -236,7 +236,9 @@ v1.2.0 开箱自带两项内置扩展，不需要额外配置：
 
 ## 8. 从 v1.0.0 升级
 
-从 v1.1.0 升级到 v1.2.0 时，改按 [运维 · 从 v1.1.0 升级到 v1.2.0](operations.md#从-v110-升级到-v120) 执行，重点是不可回退的迁移 `0016`/`0017`/`0018`、MCP 配置加密和 ignore 安全降级；不要套用下面的 v1.0.0 步骤。
+从 v1.1.0 升级到 v1.2.0 时，改按 [运维 · 从 v1.1.0 升级到 v1.2.0](operations.md#从-v110-升级到-v120) 执行，重点是不可回退的迁移 `0016`/`0017`/`0018`、MCP 配置加密和 ignore 安全降级；不要套用下面的 v1.0.0 步骤。升级前按运维第 7 节备份并核对实际挂载配置；镜像不会改写宿主 `config/server.docker.yaml` 或自定义 `server.yaml`。v1.2.0 不包含 #143 的默认授权收窄和恢复默认 API。
+
+升级到包含 #143 的后续版本时，另按 [默认扩展授权迁移](operations.md#默认扩展授权迁移) 处理：该版本会收窄默认授权并提供恢复默认 API。升级前备份并对照实际挂载文件、仓库内 `config/server.docker.yaml` 和 `config/server.example.yaml` 更新矩阵，保留管理员自定义项；修改后用 `docker compose up -d --force-recreate --wait --wait-timeout 120` 重启。未由文件 `blocks` 接管的块在扩展页核对实际授予；文件声明生效后以文件为准，块绑定 API 不返回该块的数据库行，不要为消除空行而重新保存。
 
 从 v1.0.0 升级时，严格按 [运维 · 从 v1.0.0 升级到 v1.1.0](operations.md#从-v100-升级到-v110) 执行，再按上一段完成 v1.2.0 的迁移；关键点：
 

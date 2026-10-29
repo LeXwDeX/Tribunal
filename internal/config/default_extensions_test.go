@@ -7,13 +7,16 @@ import (
 	"testing"
 )
 
-var wantDefaultSkills = []DefaultSkill{{Name: "code-review", Blocks: []string{"code-review", "review"}}}
+var wantDefaultSkills = []DefaultSkill{{Name: "code-review", Blocks: []string{"code-review"}}}
 
 func TestDefaultExtensionsShipCodeReviewSkill(t *testing.T) {
 	setRequiredEnv(t)
 	cfg := loadConfig(t, writeConfig(t, "config.yaml", validGitLab))
 	if !reflect.DeepEqual(cfg.DefaultExtensions.Skills, wantDefaultSkills) {
 		t.Fatalf("built-in default skills = %+v, want %+v", cfg.DefaultExtensions.Skills, wantDefaultSkills)
+	}
+	if len(cfg.DefaultExtensions.MCPServers) != 0 {
+		t.Fatalf("built-in defaults must not require a host MCP binary: %+v", cfg.DefaultExtensions.MCPServers)
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate() = %v", err)

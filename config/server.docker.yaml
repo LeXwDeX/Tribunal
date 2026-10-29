@@ -60,14 +60,14 @@ profiles:
 
 # Built-in platform extensions (see docs/design/06-config.md). The bundled
 # code-review skill is registered on first start, refreshed on upgrades and
-# mounted on the code-review and review blocks. It can be disabled in the
-# console but not deleted; disabling and unbinding survive restarts, and an
-# existing binding for a block is kept as is. Use `skills: []` to register no
+# mounted only on the code-review block. It can be disabled in the console but
+# not deleted; disabling and administrator changes survive restarts. Bindings
+# still managed by defaults follow upgrades. Use `skills: []` to register no
 # new defaults.
 default_extensions:
   skills:
     - name: code-review
-      blocks: [code-review, review]
+      blocks: [code-review]
   # Built-in code graph: codebase-memory-mcp 0.12.1 (MIT), bundled in the
   # Docker image. Its config follows the release on every start and it can be
   # disabled but not deleted. The wrapper keeps HOME, cache and runtime inside
@@ -107,4 +107,5 @@ default_extensions:
           - search_code
           - check_index_coverage
         review: *codebase_memory_read_tools
-        verify: [get_code_snippet]
+        verify: [get_code_snippet, search_graph, trace_path, search_code]
+        onboarding: [get_architecture, get_graph_schema]

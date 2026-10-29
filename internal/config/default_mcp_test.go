@@ -2,14 +2,47 @@ package config
 
 import (
 	"encoding/json"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 )
 
-// codebaseMemoryWriteTools change or delete indexes and must never be
-// granted by a shipped default.
-var codebaseMemoryWriteTools = []string{"index_repository", "delete_project", "ingest_traces", "manage_adr"}
+var codebaseMemoryReadTools = []string{
+	"list_projects",
+	"index_status",
+	"search_graph",
+	"trace_path",
+	"get_code_snippet",
+	"query_graph",
+	"get_graph_schema",
+	"get_file_outline",
+	"get_architecture",
+	"search_code",
+	"check_index_coverage",
+}
+
+// wantCodebaseMemoryTools is the complete shipped authorization matrix. The
+// review blocks get the read-only tool set, verify and onboarding get only the
+// tools their prompts need, and reasoning/synthesis get no graph tools.
+var wantCodebaseMemoryTools = map[string][]string{
+	"code-review": codebaseMemoryReadTools,
+	"review":      codebaseMemoryReadTools,
+	"verify":      {"get_code_snippet", "search_graph", "trace_path", "search_code"},
+	"onboarding":  {"get_architecture", "get_graph_schema"},
+}
+
+// codebaseMemoryForbiddenTools change or delete indexes and must never be
+// granted by a shipped default. The graph-overlay helpers are not part of the
+// shipped authorization matrix either.
+var codebaseMemoryForbiddenTools = []string{
+	"index_repository",
+	"delete_project",
+	"ingest_traces",
+	"manage_adr",
+	"detect_changes",
+	"compare_graphs",
+}
 
 func TestShippedConfigsEnableCodebaseMemoryByDefault(t *testing.T) {
 	for _, path := range []string{"../../config/server.example.yaml", dockerConfigPath} {
@@ -19,8 +52,8 @@ func TestShippedConfigsEnableCodebaseMemoryByDefault(t *testing.T) {
 			if err := cfg.Validate(); err != nil {
 				t.Fatalf("Validate = %v", err)
 			}
-			if len(cfg.DefaultExtensions.Skills) == 0 {
-				t.Fatal("the MCP default replaced the default skills instead of adding to them")
+			if !reflect.DeepEqual(cfg.DefaultExtensions.Skills, wantDefaultSkills) {
+				t.Errorf("default skills = %+v, want %+v", cfg.DefaultExtensions.Skills, wantDefaultSkills)
 			}
 			if len(cfg.DefaultExtensions.MCPServers) != 1 || cfg.DefaultExtensions.MCPServers[0].Name != "codebase-memory" {
 				t.Fatalf("default MCP servers = %+v, want codebase-memory", cfg.DefaultExtensions.MCPServers)
@@ -51,20 +84,24 @@ func TestShippedConfigsEnableCodebaseMemoryByDefault(t *testing.T) {
 				!slices.Contains(index, "index_repository") || !strings.Contains(strings.Join(index, " "), "{base_dir}") {
 				t.Errorf("index_command = %q, want the wrapper CLI indexing {base_dir}", index)
 			}
-			for _, block := range []string{"code-review", "review"} {
-				for _, want := range []string{"search_graph", "trace_path", "get_code_snippet"} {
-					if !slices.Contains(spec.Tools[block], want) {
-						t.Errorf("block %s tools = %q, missing %s", block, spec.Tools[block], want)
-					}
-				}
+			blocks := make([]string, 0, len(spec.Tools))
+			for block := range spec.Tools {
+				blocks = append(blocks, block)
 			}
-			if got := spec.Tools["verify"]; !slices.Equal(got, []string{"get_code_snippet"}) {
-				t.Errorf("verify tools = %q, want only get_code_snippet", got)
+			slices.Sort(blocks)
+			wantBlocks := []string{"code-review", "onboarding", "review", "verify"}
+			if !slices.Equal(blocks, wantBlocks) {
+				t.Errorf("authorized blocks = %q, want %q", blocks, wantBlocks)
+			}
+			for block, want := range wantCodebaseMemoryTools {
+				if got := spec.Tools[block]; !slices.Equal(got, want) {
+					t.Errorf("block %s tools = %q, want %q", block, got, want)
+				}
 			}
 			for block, tools := range spec.Tools {
 				for _, tool := range tools {
-					if slices.Contains(codebaseMemoryWriteTools, tool) {
-						t.Errorf("block %s grants write tool %s", block, tool)
+					if slices.Contains(codebaseMemoryForbiddenTools, tool) {
+						t.Errorf("block %s grants forbidden tool %s", block, tool)
 					}
 				}
 			}

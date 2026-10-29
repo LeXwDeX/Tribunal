@@ -274,6 +274,7 @@ Finding 始终返回 `annotation`：`""` 为未标注，`valid` 为有效，`inv
 | DELETE | `/api/v1/skills/{id}` | 删除；内置 Skill（`builtin: true`）返回 409，只能禁用 |
 | GET | `/api/v1/block-bindings` | `?scope=&project_id=&limit=&cursor=`，响应 `{bindings, next_cursor}` |
 | PUT | `/api/v1/block-bindings/{block}` | `{scope, project_id?, mcp_tools: [], skills: []}` |
+| POST | `/api/v1/block-bindings/restore-defaults` | 预览或恢复当前进程内置默认扩展对平台块绑定的授权；仅平台管理员 |
 
 权限边界：`scope=project` 的读取需要该项目 `read` grant；`scope=platform` 或省略 scope 的全局列表只允许平台管理员。创建、导入、更新、删除、测试和块绑定写入都要求平台管理员；项目 scope 写入还必须同时具备该项目 `manage`。项目 `manage` 本身不是宿主执行权限，不能写平台配置或绕过平台管理员。MCP 删除/更新/测试和 Skill 删除/启停按资源已存储的 scope 重新检查，不信任请求里的 scope。
 
@@ -284,6 +285,32 @@ Finding 始终返回 `annotation`：`""` 为未标注，`valid` 为有效，`inv
 Skill zip 上传字段为 `file`，另带 `scope`、可选 `project_id`；名称和描述由服务端从 `SKILL.md` 读取。目录登记请求为 `{scope, project_id?, dir}`。创建成功直接返回 Skill 对象。
 
 MCP、Skill、块绑定列表使用游标分页。Skill zip 上传已实现，请求体上限 8 MiB，归档内单文件上限 4 MiB、总解压上限 16 MiB、最多 512 个条目，`SKILL.md` 读取上限 64 KiB；目录登记同样受单文件和总量限制。
+
+#### 恢复内置默认授权
+
+`POST /api/v1/block-bindings/restore-defaults` 只允许平台管理员，和其他扩展写接口一样经过 cookie 会话的 CSRF 校验；Bearer 管理令牌不需要 CSRF。请求不携带授权列表，服务端只使用当前进程加载的 `default_extensions` 配置和存储中的内置资源身份计算恢复内容。
+
+预览请求：
+
+```json
+{"blocks": ["review"], "dry_run": true}
+```
+
+`blocks` 省略或为空数组表示全部六个可绑定块。执行请求必须显式传 `dry_run: false`，并携带预览返回的 `preview_token`：
+
+```json
+{"blocks": ["review"], "dry_run": false, "preview_token": "<preview_token>"}
+```
+
+响应固定包含 `changes`、`preview_token` 和 `restart_required`。`changes` 按块名排序，每个块的 `add` / `remove` 数组排序，`status` 为 `change`、`unchanged` 或 `skipped`。`skipped` 的 `reason` 为 `file_binding`（块在配置文件中显式声明，包括空块）或 `no_registered_defaults`（没有登记为 applied 且内置身份一致的可恢复默认）。只有 ledger 状态变化、绑定内容不变时仍返回 `change`。`ownership_changed` 表示恢复是否创建或改写平台绑定/块快照，使其转为由默认扩展管理；仅更新 grant ledger 时为 `false`。
+
+恢复只处理选中块中的平台级绑定。恢复范围是当前配置中登记为 applied、且存储行的 `builtin` 与默认名称一致的内置扩展。对每个选中块，先移除这些内置扩展在该块上的现有授权：内置 Skill 的同名条目和内置 MCP 的 `mcp__<server>__*` 条目；再按当前 `default_extensions` 对该块的声明补回默认授权。因此管理员手动加到未声明块（例如 `reasoner`、`synthesize`）的内置 Skill 或内置 MCP 工具也会被清除；其他服务器、自建 Skill 和未知授权保留。被移除授权的 ledger 记为已移除，后续配置重新授予该块时仍可自动跟随。目标块既没有平台行、也没有应授予的默认授权和 ledger 变化时，恢复不创建空行。
+
+自动升级与显式恢复对旧 ledger 明细缺失的处理不同。自动升级无法从明细证明某个 grant 加入过哪些 MCP 工具时，会保留授权和 applied 状态，下次启动重试，不会声称已移除；内置 Skill 的 grant 恒为该 Skill 自身名称，因此升级可按名称安全移除。显式恢复不依赖旧 grant 明细：它按当前配置中已登记为 applied、且存储 resource 的 `builtin` 与名称一致的内置扩展，清理目标块上的内置 Skill 名和内置 MCP 前缀，再按当前块声明重新授予，预览的 `add` / `remove` 会列出实际变化。恢复不修改内置资源、启用状态、项目级绑定或其他块的绑定。若选中块没有任何已登记且身份匹配的内置扩展，返回 `skipped`，不会清空现有授权。
+
+`preview_token` 是选中块、文件声明、平台绑定、相关 ledger、内置身份和启用状态，以及当前 `default_extensions` 对选中块的授权投影（默认名、种类、每块是否存在及具体 grants）的稳定指纹，不是认证凭据。另一个进程载入不同配置时旧 token 会失效。执行时在同一 SQLite 事务内重新读取并计算，指纹不一致返回 `409`，不覆盖新值。所有变更块和相关 ledger 在一个事务内原子写入；预览不写任何行。恢复后，相关块重新由默认扩展管理，后续升级会继续跟随默认授权的增加和删除。未被管理员改动的默认块在升级时自动跟随内置授权的增删；管理员改过的整块保持不变。移除整个默认扩展声明（例如 `default_extensions.skills: []`）不会删除已登记扩展或其绑定。
+
+**恢复后需要重启服务**才能让运行时重新读取平台绑定，因此 `restart_required` 始终为 `true`。
 
 ### 4.5 系统
 
