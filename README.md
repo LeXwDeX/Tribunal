@@ -39,7 +39,7 @@ docker compose exec -T review /app/tribunalctl projects all
 
 `/app/tribunalctl` 是当前镜像内的 CLI。旧镜像的 CLI 路径是 `/app/reviewctl`；新镜像保留指向 `/app/tribunalctl` 的 `/app/reviewctl` 兼容符号链接，旧编排脚本可继续调用。源码用户改用 `go run ./cmd/tribunalctl`。
 
-默认地址为 `http://localhost:8080`，端口仅绑定本机。默认支持 API/Bearer 管理，**浏览器登录需要另外启用 GitLab OAuth**：填写 `.env` 的 OAuth 变量及管理员用户名，取消 `config/server.docker.yaml` 中对应配置的注释，并配置 HTTPS 反向代理与 `TRIBUNAL_PUBLIC_URL`。修改 `.env` 后用 `docker compose up -d --force-recreate`，单纯 `restart` 不会更新容器环境变量。
+默认地址为 `http://localhost:8080`，端口仅绑定本机。默认支持 API/Bearer 管理，**浏览器登录需要另外启用 GitLab OAuth**：填写 `.env` 的 OAuth 变量及管理员 `id:<GitLab 用户 ID>`（写入 `GITLAB_ADMIN_USERNAME`），取消 `config/server.docker.yaml` 中对应配置的注释，并配置 HTTPS 反向代理与 `TRIBUNAL_PUBLIC_URL`。修改 `.env` 后用 `docker compose up -d --force-recreate`，单纯 `restart` 不会更新容器环境变量。
 
 停止使用 `docker compose down`，不要加 `-v`，否则会删除数据库和工作区。完整启动、项目注册、OAuth、备份及验证步骤见 [部署与运维](docs/operations.md)。
 
