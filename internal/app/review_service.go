@@ -32,6 +32,8 @@ const (
 	reviewSupersededReason      = "review superseded"
 	failureNoteDisabledReason   = "failure note disabled"
 	reviewExecutionFailedReason = "review execution failed"
+	invalidRepoConfigDetail     = "repository or stored ignore configuration is invalid"
+	invalidRepoConfigNote       = "评审未启动：`.gitlab-review.yml` 或已保存的 ignore 规则无效（无法解析或包含不支持的写法）。请修正后重新触发评审。"
 )
 
 // ReviewStore is the persistence surface needed by review orchestration.
@@ -363,6 +365,9 @@ func (s *ReviewService) RunCandidate(ctx context.Context, job *jobs.Job) error {
 	}
 	cfg, err := resolveSecureReviewConfig(project, docs, s.reviewDefaults, s.profiles)
 	if err != nil {
+		if errors.Is(err, ErrInvalidRepoConfig) {
+			s.noteInvalidRepoConfig(ctx, token, payload.ProjectID, payload.MRIID)
+		}
 		return PermanentJob(err)
 	}
 	if reason := reviewFilterReason(payload.Trigger, mr, project, cfg.Settings); reason != "" {
@@ -427,6 +432,18 @@ func (s *ReviewService) collectFilterInputs(ctx context.Context, project *store.
 }
 
 // RunReview executes one review.run job.
+// noteInvalidRepoConfig leaves a visible explanation on the MR. It is also
+// used by the candidate path so automatic webhooks do not fail silently.
+func (s *ReviewService) noteInvalidRepoConfig(ctx context.Context, token string, projectID, mrIID int64) {
+	if token == "" {
+		return
+	}
+	if _, err := s.gitlab.CreateMRNote(context.WithoutCancel(ctx), token, projectID, mrIID, invalidRepoConfigNote); err != nil {
+		s.logger.Warn("invalid repository config note failed",
+			"project_id", projectID, "mr_iid", mrIID, "error_class", errclass.Of(err))
+	}
+}
+
 func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error) {
 	var payload reviewRunPayload
 	if err := decodeReviewPayload(job.Payload, &payload); err != nil {
@@ -464,6 +481,10 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 		state, detail := reviewStatusFailed, reviewExecutionFailedReason
 		if errors.Is(err, ErrReviewSuperseded) || errors.Is(err, ErrMRClosed) {
 			state, detail = reviewStatusStale, "review is no longer current"
+		}
+		if errors.Is(err, ErrInvalidRepoConfig) {
+			detail = invalidRepoConfigDetail
+			s.noteInvalidRepoConfig(ctx, token, payload.ProjectID, payload.MRIID)
 		}
 		s.settleReviewStatus(ctx, payload.ProjectID, payload.MRIID, payload.Generation,
 			job.Attempts, payload.HeadSHA, payload.Profile, state, detail,

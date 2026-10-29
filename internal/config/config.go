@@ -261,6 +261,24 @@ type ProjectSettings struct {
 
 var envNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+// ValidateIgnorePatterns rejects ignore syntax the matcher cannot express.
+// Shared by platform config validation and project settings saves.
+func ValidateIgnorePatterns(patterns []string) error {
+	for i, raw := range patterns {
+		pattern := strings.TrimSpace(raw)
+		if pattern == "" {
+			continue
+		}
+		if strings.HasPrefix(pattern, "!") {
+			return fmt.Errorf("ignore pattern %d: negation (!) is not supported", i+1)
+		}
+		if strings.ContainsAny(pattern, "[]") {
+			return fmt.Errorf("ignore pattern %d: character classes are not supported", i+1)
+		}
+	}
+	return nil
+}
+
 type problems struct {
 	errs []error
 }
@@ -327,6 +345,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Storage.DSN == "" {
 		p.add("storage.dsn must not be empty")
+	}
+	if err := ValidateIgnorePatterns(c.ReviewDefaults.Ignore); err != nil {
+		p.add("review_defaults.ignore: %v", err)
 	}
 	if c.Storage.LLMCallRetention <= 0 {
 		p.add("storage.llm_call_retention must be positive")

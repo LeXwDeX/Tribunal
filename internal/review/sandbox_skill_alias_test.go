@@ -41,7 +41,7 @@ func TestManagedSkillRootsThroughSandbox(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := &Executor{deps: ExecutorDeps{Dossier: &Dossier{HeadDir: head, BaseDir: base, IgnorePolicy: &IgnorePolicy{Version: 1, Patterns: []string{}}}}}
+	e := &Executor{deps: ExecutorDeps{Dossier: &Dossier{HeadDir: head, BaseDir: base, IgnorePolicy: &IgnorePolicy{Version: IgnorePolicyVersion, Patterns: []string{}}}}}
 	sb, err := e.sandboxFor(binding.Roots())
 	if err != nil {
 		t.Fatal(err)

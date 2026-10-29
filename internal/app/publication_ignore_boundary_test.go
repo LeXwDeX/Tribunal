@@ -16,7 +16,10 @@ import (
 	"github.com/LeXwDeX/tribunal/pkg/dag"
 )
 
-type legacyPublicationStore struct{ ReviewStore }
+type legacyPublicationStore struct {
+	ReviewStore
+	patterns []string
+}
 
 func (s legacyPublicationStore) GetWorkflowDossier(ctx context.Context, id string) (*store.WorkflowDossier, error) {
 	record, err := s.ReviewStore.GetWorkflowDossier(ctx, id)
@@ -27,7 +30,7 @@ func (s legacyPublicationStore) GetWorkflowDossier(ctx context.Context, id strin
 	if err := json.Unmarshal(record.Data, &d); err != nil {
 		return nil, err
 	}
-	d.IgnorePolicy = nil
+	d.IgnorePolicy = &review.IgnorePolicy{Version: review.IgnorePolicyVersion - 1, Patterns: s.patterns}
 	record.Data, err = json.Marshal(d)
 	return record, err
 }
@@ -37,7 +40,7 @@ func TestLegacyPublicationCannotBeRetriedOrRepublished(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			f := newReviewFixture(t, reviewTestHead)
 			wf := reviewWithFailedNote(t, f, "legacy-publication")
-			f.publisher.store = legacyPublicationStore{f.db}
+			f.publisher.store = legacyPublicationStore{ReviewStore: f.db, patterns: []string{"private/**"}}
 			// Any GitLab call after the local policy check would panic.
 			f.publisher.gitlab = nil
 			var err error
@@ -72,7 +75,7 @@ func TestLegacyRepublishPreservesTerminalPublicationAndDossier(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			f.publisher.store = legacyPublicationStore{f.db}
+			f.publisher.store = legacyPublicationStore{ReviewStore: f.db, patterns: []string{"private/**"}}
 			f.publisher.gitlab = nil
 			if err := f.publisher.Republish(ctx, wf.ID); !errors.Is(err, ErrStalePublication) {
 				t.Fatalf("republish = %v", err)
@@ -215,8 +218,8 @@ func TestLegacyFailedPendingNeverPublishes(t *testing.T) {
 	if err := f.db.SetWorkflowPublicationState(context.Background(), wf.ID, store.WorkflowPublicationPending, ""); err != nil {
 		t.Fatal(err)
 	}
-	f.service.store = legacyPublicationStore{f.db}
-	f.publisher.store = legacyPublicationStore{f.db}
+	f.service.store = legacyPublicationStore{ReviewStore: f.db, patterns: []string{"private/**"}}
+	f.publisher.store = legacyPublicationStore{ReviewStore: f.db, patterns: []string{"private/**"}}
 	if err := f.service.PublishPending(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -238,5 +241,110 @@ func TestDossierDiffIndexKeepsBothRenameSidesOnly(t *testing.T) {
 	}
 	if _, ok := idx.Locate("excluded.go", 1, gitlab.SideNew); ok {
 		t.Fatal("excluded diff was indexed")
+	}
+}
+
+func TestPublisherRejectsNormalizedIgnoreFindings(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		pattern string
+		path    string
+	}{
+		{"root", "/private/**", "private/a.go"},
+		{"dot", "./private/**", "private/a.go"},
+		{"nested", "vendor/", "nested/vendor/a.go"},
+		{"glob", "a/**/vendor/", "a/x/vendor/a.go"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			f := newReviewFixture(t, reviewTestHead)
+			f.defaults.Ignore = []string{tc.pattern}
+			f.defaults.CommitStatus = true
+			f.service.reviewDefaults, f.publisher.reviewDefaults = f.defaults, f.defaults
+			f.engine = dag.NewEngine(ignoredSynthesisStore{f.db, func(r *review.SynthesisResult) {
+				r.Groups[0].Path = tc.path
+			}}, f.executors, f.executors, dag.Options{})
+			f.service.engine, f.publisher.engine = f.engine, f.engine
+			job := f.seedReview(t, "normalized-ignored-synthesis")
+
+			if err := f.service.RunReview(ctx, job); !errors.Is(err, ErrStalePublication) {
+				t.Fatalf("publish = %v, want stale rejection", err)
+			}
+			wf, err := f.db.GetWorkflowByJob(ctx, job.ID)
+			if err != nil || wf.PublicationState != store.WorkflowPublicationSkipped || !strings.Contains(wf.PublicationError, "ignored finding") {
+				t.Fatalf("workflow=%+v err=%v", wf, err)
+			}
+			if got := countPublicationEffects(f); got != (publicationEffects{}) {
+				t.Fatalf("ignored result reached GitLab: %+v", got)
+			}
+		})
+	}
+}
+
+func TestLegacyIgnorePolicyWithPatternsIsRejected(t *testing.T) {
+	d := testDossier(t, reviewTestHead)
+	d.IgnorePolicy = &review.IgnorePolicy{Version: review.IgnorePolicyVersion - 1, Patterns: []string{"private/**"}}
+	if reason := publicationPolicyReason(d); reason == "" {
+		t.Fatal("publication accepted a legacy ignore policy")
+	}
+	if d.WorkspaceProvenanceValid() {
+		t.Fatal("legacy ignore policy passed workspace provenance")
+	}
+}
+
+func TestRecoverLegacyIgnorePolicyDoesNotRun(t *testing.T) {
+	ctx := context.Background()
+	f := newReviewFixture(t, reviewTestHead)
+	job := f.seedRunFor(t, "legacy-recover", reviewTestHead, "mr_open")
+	id := createPendingReview(t, f, job.ID, jobGeneration(t, job))
+	record, err := f.db.GetWorkflowDossier(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var d review.Dossier
+	if err := json.Unmarshal(record.Data, &d); err != nil {
+		t.Fatal(err)
+	}
+	if d.IgnorePolicy == nil || d.IgnorePolicy.Patterns == nil {
+		t.Fatal("fixture has no ignore patterns to downgrade")
+	}
+	d.IgnorePolicy.Version = review.IgnorePolicyVersion - 1
+	data, err := review.MarshalDossier(&d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash, err := review.DossierHash(&d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation := record.Generation
+	record.Data = data
+	record.Hash = hash
+	if _, err := f.db.SaveWorkflowDossier(ctx, *record); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := f.db.GetWorkflowDossier(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Generation != generation {
+		t.Fatalf("dossier generation = %d, want %d", saved.Generation, generation)
+	}
+
+	if err := f.service.Recover(ctx); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	wf, err := f.db.GetWorkflow(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wf.Status != string(dag.WorkflowCancelled) {
+		t.Fatalf("workflow status = %q, want cancelled", wf.Status)
+	}
+	if wf.PublicationError != workspaceEvidenceReason {
+		t.Fatalf("legacy policy publication error = %q, want %q", wf.PublicationError, workspaceEvidenceReason)
+	}
+	if f.runner.count() != 0 {
+		t.Fatalf("legacy policy ran %d agents", f.runner.count())
 	}
 }

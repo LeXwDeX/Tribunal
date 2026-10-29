@@ -17,6 +17,10 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
+// ErrInvalidRepoConfig reports a target-branch .gitlab-review.yml that cannot
+// be applied safely. It is permanent until the file is fixed.
+var ErrInvalidRepoConfig = errors.New("invalid repository review configuration")
+
 // reviewInputs is the sanitized GitLab input for one review.
 type reviewInputs struct {
 	MR       *gitlab.MergeRequest
@@ -231,10 +235,16 @@ func resolveSecureReviewConfig(project *store.Project, docs review.RepoDocs, def
 	if err != nil {
 		return effectiveReviewConfig{}, errors.New("app: project settings cannot be read safely")
 	}
+	if err := review.ValidateIgnorePatterns(settings.Ignore); err != nil {
+		return effectiveReviewConfig{}, fmt.Errorf("%w: stored ignore policy: %v", ErrInvalidRepoConfig, err)
+	}
 	if settings.AllowRepoConfig && strings.TrimSpace(docs.GitLabReviewConfig) != "" {
 		var repo repoReviewConfig
 		if err := yaml.Unmarshal([]byte(docs.GitLabReviewConfig), &repo); err != nil {
-			return effectiveReviewConfig{}, errors.New("app: repository review configuration cannot be read safely")
+			return effectiveReviewConfig{}, fmt.Errorf("%w: .gitlab-review.yml cannot be parsed", ErrInvalidRepoConfig)
+		}
+		if err := review.ValidateIgnorePatterns(repo.Ignore); err != nil {
+			return effectiveReviewConfig{}, fmt.Errorf("%w: .gitlab-review.yml: %v", ErrInvalidRepoConfig, err)
 		}
 	}
 	return resolveReviewConfig(project, docs, defaults, profiles), nil

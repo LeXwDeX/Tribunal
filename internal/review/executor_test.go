@@ -23,7 +23,7 @@ func newTestExecutor(t *testing.T, deps ExecutorDeps) *Executor {
 		deps.Dossier = &dossier
 	}
 	if deps.Dossier.IgnorePolicy == nil {
-		deps.Dossier.IgnorePolicy = &IgnorePolicy{Version: 1, Patterns: []string{}}
+		deps.Dossier.IgnorePolicy = &IgnorePolicy{Version: IgnorePolicyVersion, Patterns: []string{}}
 	}
 	if deps.Profile.Name == "" {
 		deps.Profile = defaultProfile()

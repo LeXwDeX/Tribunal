@@ -697,7 +697,14 @@ func (p *Publisher) freshConfig(ctx context.Context, loaded *loadedReview) (effe
 		return effectiveReviewConfig{}, err
 	}
 	docs := review.RepoDocs{GitLabReviewConfig: configDoc, AGENTS: agents, CLAUDE: claude}
-	return resolveSecureReviewConfig(loaded.project, docs, p.reviewDefaults, p.profiles)
+	cfg, err := resolveSecureReviewConfig(loaded.project, docs, p.reviewDefaults, p.profiles)
+	if err != nil {
+		if errors.Is(err, ErrInvalidRepoConfig) {
+			return effectiveReviewConfig{}, PermanentJob(err)
+		}
+		return effectiveReviewConfig{}, err
+	}
+	return cfg, nil
 }
 
 func validPublicationPolicy(d *review.Dossier) bool {

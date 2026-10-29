@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/LeXwDeX/tribunal/internal/config"
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
 )
 
@@ -19,7 +20,7 @@ import (
 const DossierSchemaVersion = 1
 
 // IgnorePolicyVersion identifies the supported effective-ignore semantics.
-const IgnorePolicyVersion = 1
+const IgnorePolicyVersion = 2
 
 // WorkspaceProvenanceVersion identifies the workspace material checks.
 const WorkspaceProvenanceVersion = 1
@@ -204,28 +205,75 @@ func (m *IgnoreMatcher) MatchPath(clean string) bool {
 	return false
 }
 
+// ValidateIgnorePatterns rejects syntax the matcher cannot express. Saves must
+// return an error instead of silently dropping a rule that looks protective.
+func ValidateIgnorePatterns(patterns []string) error {
+	return config.ValidateIgnorePatterns(patterns)
+}
+
+// normalizeIgnorePattern accepts common gitignore spellings. A leading "/" or
+// "./" anchors the rule at the repository root. A trailing "/" matches a
+// directory: a bare directory name matches at any depth, while a rule that
+// already contains a path keeps its scope.
+func normalizeIgnorePattern(raw string) (string, bool) {
+	pattern := strings.TrimSpace(raw)
+	anchored := false
+	for strings.HasPrefix(pattern, "./") {
+		pattern = pattern[2:]
+		anchored = true
+	}
+	if strings.HasPrefix(pattern, "/") {
+		pattern = strings.TrimPrefix(pattern, "/")
+		anchored = true
+	}
+	if pattern == "" {
+		return "", false
+	}
+	if strings.HasSuffix(pattern, "/") {
+		pattern = strings.TrimSuffix(pattern, "/")
+		if pattern == "" {
+			return "", false
+		}
+		singleDir := !strings.Contains(pattern, "/")
+		pattern += "/**"
+		if singleDir && !anchored {
+			pattern = "**/" + pattern
+		}
+	}
+	return pattern, anchored
+}
+
 // IgnoreMatcher implements the same glob semantics as diff collection.
 type IgnoreMatcher struct {
 	patterns []*regexp.Regexp
 	basename []*regexp.Regexp
+	catchAll bool
 }
 
 func NewIgnoreMatcher(patterns []string) *IgnoreMatcher {
 	out := &IgnoreMatcher{}
 	for _, raw := range patterns {
 		pattern := strings.TrimSpace(raw)
-		if pattern == "" || strings.HasPrefix(pattern, "!") {
+		if pattern == "" {
 			continue
 		}
-		if strings.HasSuffix(pattern, "/") {
-			pattern += "**"
+		// Unsupported syntax must not become an unprotected path; match
+		// everything until an administrator fixes the saved policy.
+		if strings.HasPrefix(pattern, "!") || strings.ContainsAny(pattern, "[]") {
+			out.catchAll = true
+			continue
 		}
-		re, err := compileIgnoreGlob(pattern)
+		normalized, anchored := normalizeIgnorePattern(pattern)
+		if normalized == "" {
+			continue
+		}
+		re, err := compileIgnoreGlob(normalized)
 		if err != nil {
+			out.catchAll = true
 			continue
 		}
 		out.patterns = append(out.patterns, re)
-		if !strings.Contains(pattern, "/") {
+		if !anchored && !strings.Contains(normalized, "/") {
 			if re, err := compileIgnoreGlob("**/" + pattern); err == nil {
 				out.basename = append(out.basename, re)
 			}
@@ -237,6 +285,9 @@ func NewIgnoreMatcher(patterns []string) *IgnoreMatcher {
 func (m *IgnoreMatcher) Match(path string) bool {
 	if m == nil {
 		return false
+	}
+	if m.catchAll {
+		return true
 	}
 	for _, re := range m.patterns {
 		if re.MatchString(path) {

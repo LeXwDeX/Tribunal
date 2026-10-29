@@ -161,3 +161,19 @@ func TestParseSettingsErrorsDoNotLeakValues(t *testing.T) {
 		t.Fatalf("error leaked input: %v", err)
 	}
 }
+
+func TestParseSettingsRejectsUnsupportedIgnorePatterns(t *testing.T) {
+	for _, input := range []string{`{"ignore":["!keep"]}`, `{"ignore":["secret/[ab].go"]}`} {
+		_, err := ParseSettings(json.RawMessage(input), testProfiles())
+		if err == nil {
+			t.Fatalf("ParseSettings(%s) unexpectedly succeeded", input)
+		}
+		var appErr *Error
+		if !errors.As(err, &appErr) {
+			t.Fatalf("ParseSettings(%s) error = %T, want *Error", input, err)
+		}
+		if len(appErr.Details) != 1 || appErr.Details[0].Field != "settings.ignore[0]" {
+			t.Fatalf("ParseSettings(%s) details = %+v", input, appErr.Details)
+		}
+	}
+}

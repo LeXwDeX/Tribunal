@@ -47,8 +47,8 @@ func TestRecoverChecksIgnorePolicyWithoutConfigHash(t *testing.T) {
 			if !invalidConfig && err != nil {
 				t.Fatal(err)
 			}
-			if invalidConfig && err == nil {
-				t.Fatal("recovery accepted unreadable ignore configuration")
+			if invalidConfig && err != nil {
+				t.Fatalf("recovery did not settle unreadable ignore configuration: %v", err)
 			}
 			if f.runner.count() != 0 || f.git.addCalls != 0 || countPublicationEffects(f) != (publicationEffects{}) {
 				t.Fatalf("unsafe recovery: agent=%d worktrees=%d effects=%+v", f.runner.count(), f.git.addCalls, countPublicationEffects(f))
@@ -60,8 +60,26 @@ func TestRecoverChecksIgnorePolicyWithoutConfigHash(t *testing.T) {
 			if !invalidConfig && (wf.Status != "cancelled" || wf.PublicationState != store.WorkflowPublicationSkipped) {
 				t.Fatalf("changed policy left workflow active: %+v", wf)
 			}
-			if invalidConfig && wf.Status != "pending" {
-				t.Fatalf("configuration read failure lost recoverable workflow: %+v", wf)
+			if invalidConfig && wf.Status != "cancelled" {
+				t.Fatalf("configuration read failure left workflow active: %+v", wf)
+			}
+			if invalidConfig {
+				if wf.PublicationState != store.WorkflowPublicationSkipped || wf.PublicationError != invalidRepoConfigDetail {
+					t.Fatalf("configuration failure publication = %q/%q", wf.PublicationState, wf.PublicationError)
+				}
+				if f.gitlab.noteCount() != 1 {
+					t.Fatalf("configuration failure notes = %d, want one explanation", f.gitlab.noteCount())
+				}
+				if err := f.service.Recover(ctx); err != nil {
+					t.Fatalf("second Recover: %v", err)
+				}
+				if f.gitlab.noteCount() != 1 {
+					t.Fatalf("second Recover repeated the explanation: %d", f.gitlab.noteCount())
+				}
+				status, err := f.db.GetReviewStatus(ctx, 42, 7)
+				if err != nil || status.State != reviewStatusFailed || status.Detail != invalidRepoConfigDetail {
+					t.Fatalf("review status = %+v, %v", status, err)
+				}
 			}
 			after, err := f.db.GetWorkflowDossier(ctx, id)
 			if err != nil || after.Hash != hash || !bytes.Equal(after.Data, raw) {

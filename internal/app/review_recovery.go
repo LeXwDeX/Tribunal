@@ -199,6 +199,9 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 	}
 	currentConfig, err := resolveSecureReviewConfig(project, docs, s.reviewDefaults, s.profiles)
 	if err != nil {
+		if errors.Is(err, ErrInvalidRepoConfig) {
+			return s.cancelInvalidRepoConfig(ctx, &workflow, &dossier, record.Generation, token)
+		}
 		return err
 	}
 	storedHash := strings.TrimSpace(dossier.Metadata["config_hash"])

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/review"
 )
 
 // settingsOverride carries only the fields present in a registration request.
@@ -75,6 +76,16 @@ func ParseSettings(raw json.RawMessage, profiles map[string]config.ProfileConfig
 	requireNonEmpty("labels_include", override.LabelsInclude)
 	requireNonEmpty("labels_exclude", override.LabelsExclude)
 	requireNonEmpty("ignore", override.Ignore)
+	if override.Ignore != nil {
+		for i, pattern := range *override.Ignore {
+			if err := review.ValidateIgnorePatterns([]string{pattern}); err != nil {
+				details = append(details, Detail{
+					Field:   fmt.Sprintf("settings.ignore[%d]", i),
+					Message: err.Error(),
+				})
+			}
+		}
+	}
 	requireNonEmpty("custom_rules", override.CustomRules)
 
 	if override.Language != nil && strings.TrimSpace(*override.Language) == "" {

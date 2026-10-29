@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/jobs"
+	"github.com/LeXwDeX/tribunal/internal/review"
 	"github.com/LeXwDeX/tribunal/internal/secret"
 	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/pkg/dag"
@@ -272,6 +273,31 @@ func (s *ReviewService) cancelWorkflow(ctx context.Context, workflowID string) e
 		return err
 	}
 	return s.skipPublication(ctx, workflowID, reviewSupersededReason)
+}
+
+// cancelInvalidRepoConfig terminates a workflow whose repository configuration
+// cannot be applied. It keeps the durable terminal state and leaves a visible
+// explanation instead of reporting the review as superseded.
+func (s *ReviewService) cancelInvalidRepoConfig(ctx context.Context, workflow *store.Workflow, dossier *review.Dossier, generation int64, token string) error {
+	if err := s.engine.Cancel(ctx, workflow.ID, invalidRepoConfigDetail); err != nil && !errors.Is(err, dag.ErrNotFound) {
+		return err
+	}
+	if err := s.waitTerminal(ctx, workflow.ID); err != nil && !errors.Is(err, dag.ErrNotFound) {
+		return err
+	}
+	if err := s.skipPublication(ctx, workflow.ID, invalidRepoConfigDetail); err != nil {
+		return err
+	}
+	profile := strings.TrimSpace(dossier.Metadata["requested_profile"])
+	if profile == "" {
+		profile = "default"
+	}
+	mrIID := dossier.MR.IID
+	s.noteInvalidRepoConfig(ctx, token, workflow.ProjectID, mrIID)
+	s.settleReviewStatus(ctx, workflow.ProjectID, mrIID, generation, 0,
+		dossier.DiffVersion.HeadSHA, profile, reviewStatusFailed, invalidRepoConfigDetail,
+		s.workflowNoteID(ctx, workflow.ID), reviewAwardNone)
+	return nil
 }
 
 // skipPublication settles a pending publication without publishing. The CAS
