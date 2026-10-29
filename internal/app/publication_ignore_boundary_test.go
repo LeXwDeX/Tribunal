@@ -305,7 +305,10 @@ func TestRecoverLegacyIgnorePolicyDoesNotRun(t *testing.T) {
 	if err := json.Unmarshal(record.Data, &d); err != nil {
 		t.Fatal(err)
 	}
-	d.IgnorePolicy = &review.IgnorePolicy{Version: review.IgnorePolicyVersion - 1, Patterns: []string{"private/**"}}
+	if d.IgnorePolicy == nil || d.IgnorePolicy.Patterns == nil {
+		t.Fatal("fixture has no ignore patterns to downgrade")
+	}
+	d.IgnorePolicy.Version = review.IgnorePolicyVersion - 1
 	data, err := review.MarshalDossier(&d)
 	if err != nil {
 		t.Fatal(err)
@@ -314,10 +317,18 @@ func TestRecoverLegacyIgnorePolicyDoesNotRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.db.SaveWorkflowDossier(ctx, store.WorkflowDossier{
-		WorkflowID: id, JobID: record.JobID, Version: record.Version, Data: data, Hash: hash,
-	}); err != nil {
+	generation := record.Generation
+	record.Data = data
+	record.Hash = hash
+	if _, err := f.db.SaveWorkflowDossier(ctx, *record); err != nil {
 		t.Fatal(err)
+	}
+	saved, err := f.db.GetWorkflowDossier(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Generation != generation {
+		t.Fatalf("dossier generation = %d, want %d", saved.Generation, generation)
 	}
 
 	if err := f.service.Recover(ctx); err != nil {
@@ -329,6 +340,9 @@ func TestRecoverLegacyIgnorePolicyDoesNotRun(t *testing.T) {
 	}
 	if wf.Status != string(dag.WorkflowCancelled) {
 		t.Fatalf("workflow status = %q, want cancelled", wf.Status)
+	}
+	if wf.PublicationError != workspaceEvidenceReason {
+		t.Fatalf("legacy policy publication error = %q, want %q", wf.PublicationError, workspaceEvidenceReason)
 	}
 	if f.runner.count() != 0 {
 		t.Fatalf("legacy policy ran %d agents", f.runner.count())
