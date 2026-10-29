@@ -716,7 +716,7 @@ func (e *Executor) callAgent(ctx context.Context, in dag.NodeInput, opts agentOp
 	ctx = llm.WithCallMeta(ctx, llm.CallMeta{WorkflowID: in.WorkflowID, NodeID: in.Node.ID, Turn: 0})
 	result, err := e.runAgent(ctx, opts.Provider, spec, !opts.NoRetry)
 	if err == nil && result != nil && e.ignoredAgentOutput(result.Output) {
-		err = errors.New("review: ignored path in agent output")
+		err = fmt.Errorf("%w: review: ignored path in agent output", agent.ErrIgnoredPath)
 	}
 	if err != nil {
 		usage := dag.Usage{}

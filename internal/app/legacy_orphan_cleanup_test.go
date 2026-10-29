@@ -32,6 +32,16 @@ func TestRunCleanupSettlesExpiredLegacyOrphans(t *testing.T) {
 	}
 
 	save("legacy-old")
+	expiredJob, _, err := st.Enqueue(ctx, store.Job{Kind: "review.run", Key: "legacy-expired-live"})
+	if err != nil {
+		t.Fatalf("Enqueue expired live: %v", err)
+	}
+	if _, err := st.SaveWorkflowDossier(ctx, store.WorkflowDossier{
+		WorkflowID: "legacy-expired-live", ProjectID: 0, JobID: expiredJob,
+		Version: 1, Data: json.RawMessage(`{}`),
+	}); err != nil {
+		t.Fatalf("SaveWorkflowDossier legacy-expired-live: %v", err)
+	}
 	clock.Advance(6 * 24 * time.Hour)
 	save("legacy-fresh")
 	queued, _, err := st.Enqueue(ctx, store.Job{Kind: "review.run", Key: "legacy-live"})
@@ -65,6 +75,7 @@ func TestRunCleanupSettlesExpiredLegacyOrphans(t *testing.T) {
 		id, state string
 	}{
 		{"legacy-old", store.WorkflowPublicationSkipped},
+		{"legacy-expired-live", store.WorkflowPublicationPending},
 		{"legacy-fresh", store.WorkflowPublicationPending},
 		{"legacy-live", store.WorkflowPublicationPending},
 	} {
@@ -86,7 +97,7 @@ func TestRunCleanupSettlesExpiredLegacyOrphans(t *testing.T) {
 			t.Errorf("settled legacy orphan still protects %q", id)
 		}
 	}
-	for _, id := range []string{"legacy-fresh", "legacy-live", queued} {
+	for _, id := range []string{"legacy-fresh", "legacy-live", "legacy-expired-live", queued, expiredJob} {
 		if _, ok := protected[id]; !ok {
 			t.Errorf("protected refs missing live reservation %q", id)
 		}

@@ -2,8 +2,12 @@ package review
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/LeXwDeX/tribunal/internal/agent"
@@ -79,5 +83,29 @@ func TestClassifyErrorLeavesUnknownGeneric(t *testing.T) {
 	var classified interface{ ErrorClass() string }
 	if errors.As(err, &classified) {
 		t.Fatalf("unknown error gained class %q", classified.ErrorClass())
+	}
+}
+
+func TestExecuteClassifiesIgnoredModelOutput(t *testing.T) {
+	head := t.TempDir()
+	if err := os.WriteFile(filepath.Join(head, "private.txt"), []byte("CANARY\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d := validDossier(t)
+	d.HeadDir = head
+	d.IgnorePolicy = &IgnorePolicy{Version: IgnorePolicyVersion, Patterns: []string{"private.txt"}}
+	runner := func(_ context.Context, spec agent.RunSpec) (*agent.RunResult, error) {
+		decoded, err := spec.Submit.Decode(json.RawMessage(`{"summary":"ok","findings":[{"path":"private.txt","line":1,"severity":"P1","category":"correctness","title":"x","body":"x","evidence":"x","confidence":"high"}]}`))
+		return &agent.RunResult{Output: decoded}, err
+	}
+	e := newTestExecutor(t, ExecutorDeps{Dossier: d, AgentRun: runner})
+
+	_, err := e.Execute(context.Background(), codeReviewInput(t))
+	var classified *classifiedError
+	if !errors.As(err, &classified) || classified.ErrorClass() != sandboxDeniedClass {
+		t.Fatalf("error = %v, want a %s classification", err, sandboxDeniedClass)
+	}
+	if strings.Contains(err.Error(), "private.txt") {
+		t.Fatalf("error leaked an ignored path: %v", err)
 	}
 }

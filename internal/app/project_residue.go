@@ -187,12 +187,17 @@ func (s *ProjectService) inspectProjectResidues(ctx context.Context) ([]ProjectR
 			items = append(items, unknownProjectResidue(path))
 		case isRegisteredProject(registered, id):
 		default:
+			removable := managedWorkspaceEvidence(path)
+			reason := projectResidueUnregistered
+			if !removable {
+				reason = projectResidueUnknownOwner
+			}
 			items = append(items, ProjectResidue{
 				ProjectID: id,
 				Path:      path,
 				Kind:      ProjectResidueWorkspace,
-				Removable: true,
-				Reason:    projectResidueUnregistered,
+				Removable: removable,
+				Reason:    reason,
 			})
 		}
 	}
@@ -231,16 +236,52 @@ func (s *ProjectService) inspectManagedSkills(root string, registered map[int64]
 			items = append(items, unknownProjectResidue(path))
 		case isRegisteredProject(registered, id):
 		default:
+			// A directory name alone does not prove that the platform created
+			// it; keep skill containers for explicit operator handling.
 			items = append(items, ProjectResidue{
 				ProjectID: id,
 				Path:      path,
 				Kind:      ProjectResidueManagedSkills,
-				Removable: true,
-				Reason:    projectResidueUnregistered,
+				Removable: false,
+				Reason:    projectResidueUnknownOwner,
 			})
 		}
 	}
 	return items, nil
+}
+
+// managedWorkspaceEvidence proves that the platform created a project
+// directory. A bare mirror or a SHA-named context directory is written only by
+// the workspace manager; a numeric directory name alone is not enough.
+func managedWorkspaceEvidence(root string) bool {
+	mirror := filepath.Join(root, "mirror.git")
+	if info, err := os.Lstat(mirror); err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+		if _, err := os.Stat(filepath.Join(mirror, "HEAD")); err == nil {
+			return true
+		}
+	}
+	contexts := filepath.Join(root, "context")
+	if entries, err := os.ReadDir(contexts); err == nil {
+		for _, entry := range entries {
+			name := entry.Name()
+			if !entry.IsDir() || (len(name) != 40 && len(name) != 64) {
+				continue
+			}
+			if isHexName(name) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isHexName(value string) bool {
+	for _, c := range value {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+			return false
+		}
+	}
+	return value != ""
 }
 
 func (s *ProjectService) residueInspectionError(err error) error {

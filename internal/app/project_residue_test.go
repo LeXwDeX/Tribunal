@@ -42,6 +42,12 @@ func TestListProjectResiduesReportsOrphansWithoutDeleting(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if err := os.WriteFile(filepath.Join(orphanWorkspace, "HEAD"), []byte("ref: refs/heads/main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(active, "HEAD"), []byte("ref: refs/heads/main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	residues, err := service.ListProjectResidues(ctx)
 	if err != nil {
@@ -56,7 +62,7 @@ func TestListProjectResiduesReportsOrphansWithoutDeleting(t *testing.T) {
 		removable bool
 	}{
 		filepath.Join(root, "42"):                   {42, ProjectResidueWorkspace, true},
-		filepath.Join(root, "skills", "project-42"): {42, ProjectResidueManagedSkills, true},
+		filepath.Join(root, "skills", "project-42"): {42, ProjectResidueManagedSkills, false},
 		unknown: {0, ProjectResidueUnknown, false},
 	}
 	for _, residue := range residues {
@@ -93,23 +99,29 @@ func TestCleanupProjectResiduesKeepsUnknownOwnership(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if err := os.WriteFile(filepath.Join(orphanWorkspace, "HEAD"), []byte("ref: refs/heads/main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(active, "HEAD"), []byte("ref: refs/heads/main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	result, err := service.CleanupProjectResidues(ctx)
 	if err != nil {
 		t.Fatalf("CleanupProjectResidues: %v", err)
 	}
-	if len(result.Removed) != 2 || len(result.Kept) != 1 || len(result.Failed) != 0 {
-		t.Fatalf("result = %+v, want 2 removed, 1 kept, 0 failed", result)
+	if len(result.Removed) != 1 || len(result.Kept) != 2 || len(result.Failed) != 0 {
+		t.Fatalf("result = %+v, want 1 removed, 2 kept, 0 failed", result)
 	}
-	if result.Kept[0].Path != unknown || result.Kept[0].Removable {
-		t.Fatalf("kept = %+v", result.Kept)
+	if result.Removed[0].Path != filepath.Join(root, "42") {
+		t.Fatalf("removed = %+v", result.Removed)
 	}
-	for _, path := range []string{filepath.Join(root, "42"), filepath.Join(root, "skills", "project-42")} {
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Errorf("%s was not removed: %v", path, err)
+	for _, path := range []string{unknown, filepath.Join(root, "skills", "project-42")} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("unverified residue was removed: %s: %v", path, err)
 		}
 	}
-	for _, path := range []string{unknown, filepath.Join(root, "7"), platformSkills} {
+	for _, path := range []string{unknown, filepath.Join(root, "7"), platformSkills, filepath.Join(root, "skills", "project-42")} {
 		if _, err := os.Stat(path); err != nil {
 			t.Errorf("%s was removed: %v", path, err)
 		}
@@ -119,7 +131,7 @@ func TestCleanupProjectResiduesKeepsUnknownOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second CleanupProjectResidues: %v", err)
 	}
-	if len(again.Removed) != 0 || len(again.Kept) != 1 || len(again.Failed) != 0 {
+	if len(again.Removed) != 0 || len(again.Kept) != 2 || len(again.Failed) != 0 {
 		t.Fatalf("second result = %+v", again)
 	}
 }
@@ -152,5 +164,34 @@ func TestProjectResiduesLeaveSymlinksAlone(t *testing.T) {
 	}
 	if info, err := os.Lstat(filepath.Join(root, "42")); err != nil || info.Mode()&os.ModeSymlink == 0 {
 		t.Fatalf("symlink was changed: %v", err)
+	}
+}
+
+func TestListProjectResiduesKeepsUnverifiedWorkspace(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	service, st := newResidueTestService(t, root)
+	seedProject(t, st, newTestCipher(t), 7, "secret", "{}", "default")
+	manual := filepath.Join(root, "43", "manual-backup")
+	if err := os.MkdirAll(manual, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	residues, err := service.ListProjectResidues(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(residues) != 1 || residues[0].Path != filepath.Join(root, "43") || residues[0].Removable || residues[0].Reason != projectResidueUnknownOwner {
+		t.Fatalf("residues = %+v, want an unverified workspace residue", residues)
+	}
+	result, err := service.CleanupProjectResidues(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Removed) != 0 || len(result.Kept) != 1 {
+		t.Fatalf("cleanup = %+v, want the unverified directory kept", result)
+	}
+	if _, err := os.Stat(filepath.Join(root, "43")); err != nil {
+		t.Fatalf("manual directory was removed: %v", err)
 	}
 }
