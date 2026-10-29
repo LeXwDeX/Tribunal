@@ -106,7 +106,7 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
   if (!response.ok) {
     const apiError = await parseError(response)
     if (response.status === 401 && typeof window !== 'undefined') {
-      window.dispatchEvent(new Event(UNAUTHORIZED_EVENT))
+      window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT, { detail: { code: apiError.code } }))
     }
     throw apiError
   }

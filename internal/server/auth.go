@@ -698,7 +698,15 @@ func (s *Server) apiAuth(next http.HandlerFunc) http.HandlerFunc {
 		value, ok := s.authenticate(r)
 		if !ok {
 			w.Header().Set("WWW-Authenticate", "Bearer")
-			writeError(w, r, http.StatusUnauthorized, "unauthenticated", "authentication required", nil)
+			code, message := "unauthenticated", "authentication required"
+			// A session cookie proves the browser was logged in before; only
+			// then is the 401 an expiry instead of a first visit.
+			if strings.TrimSpace(r.Header.Get("Authorization")) == "" {
+				if _, err := r.Cookie(sessionCookieName); err == nil {
+					code, message = "session_expired", "session expired"
+				}
+			}
+			writeError(w, r, http.StatusUnauthorized, code, message, nil)
 			return
 		}
 		if !safeMethod(r.Method) && !value.bearer {

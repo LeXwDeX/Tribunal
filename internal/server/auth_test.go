@@ -551,6 +551,9 @@ func TestSessionExpiryBoundary(t *testing.T) {
 	if expired.status != http.StatusUnauthorized {
 		t.Fatalf("me at expiry = %d, body=%s", expired.status, expired.body)
 	}
+	if code := decodeMap(t, expired.body)["error"].(map[string]any)["code"]; code != "session_expired" {
+		t.Errorf("expired me code = %v", code)
+	}
 }
 
 func TestCallbackRotatesExistingSession(t *testing.T) {
@@ -658,6 +661,9 @@ func TestMeReturnsCSRFToken(t *testing.T) {
 	unauthenticated := env.request(client, http.MethodGet, "/api/v1/me", nil, nil)
 	if unauthenticated.status != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated me = %d", unauthenticated.status)
+	}
+	if code := decodeMap(t, unauthenticated.body)["error"].(map[string]any)["code"]; code != "unauthenticated" {
+		t.Errorf("unauthenticated me code = %v", code)
 	}
 
 	env.loginAs(client, "code-admin")
