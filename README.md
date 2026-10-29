@@ -295,7 +295,7 @@ go mod verify
 - `synthesize` 的预算/传输失败直接走确定性规则兜底，不重试；其他 agent 节点仍对 transport 错误重试。
 - 共识投票和 challenger 选择按配置的 endpoint + model 身份归一，同端点同模型的 provider 别名不增加独立票数。无法解析身份的多个 provider 共用同一个 unknown bucket：known 与 unknown 可各计一票，unknown 之间不增加独立票；metadata 缺失会限制挑战者独立性，不能据此声称跨模型确认。没有独立 challenger 时使用已声明的 fallback 并显式提示。`CodeRef` 反证在固定 head/base 快照中检查路径和行号，缺失快照或读取失败降为 `UNCERTAIN`。
 - 评审执行状态和 GitLab 发布状态分开保存：`publication_state` 为 `pending`、`published`、`skipped` 或 `failed`，失败原因有界脱敏保存。pending 在重启后恢复；stale、取消和关闭 failure note 记为 skipped；永久发布失败需手动 republish。`INCOMPLETE` 和 `BLOCKING` 都不会写成 commit status success。
-- Web 依赖为 `react-router-dom 7.18.4`、`vite 7.3.7`、`vitest 4.1.12` / `@vitest/coverage-v8 4.1.12`。Vitest 4 改用 AST 重映射 V8 覆盖率，阈值现为语句 33%、分支 28%、函数 27%、行 35%；升级前旧记录中的 41.86% 与当前数字不可直接比较。
+- Web 依赖为 `react-router-dom 7.18.4`、`vite 7.3.7`、`vitest 4.1.12` / `@vitest/coverage-v8 4.1.12`。Vitest 4 改用 AST 重映射 V8 覆盖率，阈值现为语句 74%、分支 72%、函数 71%、行 78%；升级前旧记录中的 41.86% 与当前数字不可直接比较。
 - 统计页项目筛选使用游标分页，每次加载 100 项，可继续加载或重试；使用 `usePaginated` 的分页列表的“重试加载更多”沿用失败请求的同一 cursor，首屏重试或“刷新”才从第一页重新加载。统计日期筛选把结束日映射到次日本地午夜，服务端按 `[from,to)` 计数。
 - 统计页、总览和项目详情均把 `stats.runs` 标为“运行次数”，并说明包含评审和 onboarding。`blocking_ratio` 的分母仍是全部 workflow，因此 onboarding 会稀释该比例，不应把它解释为仅评审的阻断比例。
 - 节点 provider/model 表示启动时选择的配置，不等于模型调用次数或响应实际模型标识；reasoner 自跳过和 agent synthesize 回退仍可能带归属。修复前历史节点的空归属不回填，因此旧时间窗的按 provider 节点统计仍不完整；逐次调用信息可查 `llm_calls`。
