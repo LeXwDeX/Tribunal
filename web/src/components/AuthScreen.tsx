@@ -3,17 +3,17 @@ import { BrandMark } from './Icons'
 import { Button, ButtonLink, ErrorState } from './ui'
 import styles from './AuthScreen.module.css'
 
-const authErrorMessages: Record<string, string> = {
-  oauth_disabled: '平台未启用 GitLab OAuth 登录，请联系管理员。',
-  oauth_denied: 'GitLab 登录被取消或拒绝。',
-  oauth_state: '登录状态已失效，请重试。',
-  oauth_forbidden: '该 GitLab 账号未被允许登录。',
-  oauth_failed: 'GitLab 登录失败，请重试。',
-}
+const authErrorMessages = new Map<string, string>([
+  ['oauth_disabled', '平台未启用 GitLab OAuth 登录，请联系管理员。'],
+  ['oauth_denied', 'GitLab 登录被取消或拒绝。'],
+  ['oauth_state', '登录状态已失效，请重试。'],
+  ['oauth_forbidden', '该 GitLab 账号未被允许登录。'],
+  ['oauth_failed', 'GitLab 登录失败，请重试。'],
+])
 
 export function authErrorMessage(search: string): string | undefined {
   const code = new URLSearchParams(search).get('auth_error')
-  return code ? authErrorMessages[code] ?? '登录未完成，请重试。' : undefined
+  return code ? authErrorMessages.get(code) ?? '登录未完成，请重试。' : undefined
 }
 
 export function AuthScreen({

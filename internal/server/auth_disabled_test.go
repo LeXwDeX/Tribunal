@@ -53,3 +53,24 @@ func TestBrowserCallbackErrorsRedirect(t *testing.T) {
 		}
 	}
 }
+
+func TestLoginKeepsJSONWhenHTMLIsExplicitlyRejected(t *testing.T) {
+	env := newAuthEnv(t)
+	env.disabledOAuth = true
+	env.restart()
+	resp := env.request(env.client(), http.MethodGet, "/auth/login", nil, map[string]string{
+		"Accept": "application/json, text/html;q=0",
+	})
+	if resp.status != http.StatusServiceUnavailable ||
+		!strings.Contains(resp.header.Get("Content-Type"), "application/json") ||
+		!strings.Contains(string(resp.body), "OAuth login is not configured") {
+		t.Fatalf("status=%d content-type=%q body=%s", resp.status, resp.header.Get("Content-Type"), resp.body)
+	}
+}
+
+func TestAuthEnabledTreatsBlankCredentialsAsDisabled(t *testing.T) {
+	svc := &authService{baseURL: "https://gitlab.example", clientID: "  ", clientSecret: "secret"}
+	if svc.enabled() {
+		t.Fatal("blank client ID must disable OAuth")
+	}
+}

@@ -4,7 +4,7 @@ import { QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
 import { App } from '../src/app'
 import { setCsrfToken } from '../src/api/client'
-import { createTestQueryClient, installFetch, jsonResponse } from './test-utils'
+import { adminMe, createTestQueryClient, installFetch, jsonResponse } from './test-utils'
 
 describe('authentication boundary', () => {
   afterEach(() => {
@@ -60,5 +60,38 @@ describe('authentication boundary', () => {
     )
     expect(await screen.findByText('登录状态已失效，请重试。')).toBeInTheDocument()
     expect(window.location.search).toBe('')
+  })
+
+  it('falls back for an unknown or inherited auth_error value', async () => {
+    window.history.replaceState(null, '', '/?auth_error=__proto__')
+    installFetch((url) => {
+      if (url.endsWith('/auth/status')) return jsonResponse({ oauth_enabled: true })
+      return jsonResponse({ error: { code: 'unauthenticated', message: 'login required' } }, 401)
+    })
+    render(
+      <QueryClientProvider client={createTestQueryClient()}>
+        <MemoryRouter initialEntries={['/']}>
+          <App />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+    expect(await screen.findByText('登录未完成，请重试。')).toBeInTheDocument()
+  })
+
+  it('shows the OAuth failure after returning to an existing session', async () => {
+    window.history.replaceState(null, '', '/?auth_error=oauth_denied')
+    installFetch((url) => {
+      if (url.endsWith('/api/v1/me')) return jsonResponse(adminMe)
+      if (url.endsWith('/auth/status')) return jsonResponse({ oauth_enabled: true })
+      return jsonResponse({ reviews: [] })
+    })
+    render(
+      <QueryClientProvider client={createTestQueryClient()}>
+        <MemoryRouter initialEntries={['/']}>
+          <App />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+    expect(await screen.findByText('GitLab 登录被取消或拒绝。')).toBeInTheDocument()
   })
 })

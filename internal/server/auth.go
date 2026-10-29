@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -135,7 +136,7 @@ func parseBootstrapAdmins(entries []string) (map[string]struct{}, map[int64]stru
 }
 
 func (a *authService) enabled() bool {
-	return a.clientID != "" && a.clientSecret != "" && a.baseURL != ""
+	return strings.TrimSpace(a.clientID) != "" && strings.TrimSpace(a.clientSecret) != "" && a.baseURL != ""
 }
 
 func (a *authService) redirectURI(r *http.Request) string {
@@ -245,8 +246,21 @@ func principalFrom(ctx context.Context) (principal, bool) {
 }
 
 // wantsHTML reports a browser navigation. API clients keep the JSON error.
+// text/html;q=0 explicitly rejects HTML and must not select the redirect.
 func wantsHTML(r *http.Request) bool {
-	return strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/html")
+	for _, part := range strings.Split(r.Header.Get("Accept"), ",") {
+		mediaType, params, err := mime.ParseMediaType(strings.TrimSpace(part))
+		if err != nil || mediaType != "text/html" {
+			continue
+		}
+		if q, ok := params["q"]; ok {
+			if value, err := strconv.ParseFloat(q, 64); err == nil && value == 0 {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 // authError redirects browser failures back to the console with a fixed code;

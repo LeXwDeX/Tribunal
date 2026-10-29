@@ -1,11 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { QueryClient, useQuery } from '@tanstack/react-query'
 import { Route, Routes } from 'react-router-dom'
 import { fetchAuthStatus, fetchMe } from './api/api'
 import { ApiError, LOGOUT_EVENT, UNAUTHORIZED_EVENT, setCsrfToken } from './api/client'
 import { AuthScreen, BootLoading, authErrorMessage } from './components/AuthScreen'
 import { AppShell } from './components/AppShell'
-import { ToastProvider } from './components/ui'
+import { ToastProvider, useToast } from './components/ui'
 import { OverviewPage } from './pages/OverviewPage'
 import { ReviewsPage } from './pages/ReviewsPage'
 import { ReviewDetailPage } from './pages/ReviewDetailPage'
@@ -29,11 +29,24 @@ export function createQueryClient() {
   })
 }
 
+function AuthErrorToast({ message, onShown }: { message: string; onShown: () => void }) {
+  const { push } = useToast()
+  const shown = useRef(false)
+  useEffect(() => {
+    if (shown.current) return
+    shown.current = true
+    push('error', message)
+    onShown()
+  }, [message, onShown, push])
+  return null
+}
+
 export function App() {
   const meQuery = useQuery({ queryKey: ['me'], queryFn: fetchMe })
   const authStatusQuery = useQuery({ queryKey: ['auth-status'], queryFn: fetchAuthStatus, staleTime: Infinity })
   const [sessionEnded, setSessionEnded] = useState<'expired' | 'logout' | null>(null)
-  const [authError] = useState(() => authErrorMessage(window.location.search))
+  const [authError, setAuthError] = useState(() => authErrorMessage(window.location.search))
+  const clearAuthError = useCallback(() => setAuthError(undefined), [])
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
@@ -81,6 +94,7 @@ export function App() {
 
   return (
     <ToastProvider>
+      {authError ? <AuthErrorToast message={authError} onShown={clearAuthError} /> : null}
       <Routes>
         <Route element={<AppShell me={meQuery.data} />}>
           <Route index element={<OverviewPage />} />
