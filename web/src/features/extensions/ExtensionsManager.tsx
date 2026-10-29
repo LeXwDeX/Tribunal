@@ -118,13 +118,13 @@ export function ExtensionsManager({
   // paused offline query or an inactive query resolves without fetching. Cancel
   // the old in-flight read, mark the cache stale, then fetch every loaded page
   // explicitly even without observers.
-  const refreshBindings = async () => {
+  const refreshBindings = async (): Promise<{ items: BlockBinding[]; complete: boolean }> => {
     const queryKey = ['block-bindings', scope, projectId] as const
     await queryClient.cancelQueries({ queryKey })
     await queryClient.invalidateQueries({ queryKey, refetchType: 'none' })
     const cached = queryClient.getQueryData<{ pages?: unknown[] }>(queryKey)
     const pages = Array.isArray(cached?.pages) && cached.pages.length ? cached.pages.length : 1
-    await queryClient.fetchInfiniteQuery({
+    const data = await queryClient.fetchInfiniteQuery({
       queryKey,
       queryFn: ({ pageParam }) => listBindings(scope, projectId, pageParam),
       initialPageParam: undefined as string | undefined,
@@ -133,6 +133,12 @@ export function ExtensionsManager({
       staleTime: 0,
       retry: false,
     })
+    const items: BlockBinding[] = []
+    for (const page of data.pages) {
+      if (Array.isArray(page?.bindings)) items.push(...page.bindings)
+    }
+    const lastPage = data.pages[data.pages.length - 1]
+    return { items, complete: Boolean(lastPage) && !lastPage.next_cursor }
   }
   const invalidateBindings = () => queryClient.invalidateQueries({ queryKey: ['block-bindings', scope, projectId] })
 
@@ -268,7 +274,6 @@ export function ExtensionsManager({
           servers={servers.items.filter((server) => server.enabled !== false)}
           skills={skills.items}
           testResults={testResults}
-          onSaved={invalidateBindings}
           refreshBindings={refreshBindings}
         />
       ) : null}
@@ -685,7 +690,7 @@ function mergeBindingDrafts(
   return { baseline, local, conflicts }
 }
 function BindingsTab({
-  canWrite, scope, projectId, bindingState, servers, skills, testResults, onSaved, refreshBindings,
+  canWrite, scope, projectId, bindingState, servers, skills, testResults, refreshBindings,
 }: {
   canWrite: boolean
   scope: 'platform' | 'project'
@@ -694,8 +699,7 @@ function BindingsTab({
   servers: McpServer[]
   skills: Skill[]
   testResults: Record<string, { tools?: McpTool[]; error?: string; pending?: boolean }>
-  onSaved: () => Promise<void> | void
-  refreshBindings: () => Promise<void>
+  refreshBindings: () => Promise<{ items: BlockBinding[]; complete: boolean }>
 }) {
   const toast = useToast()
   const queryClient = useQueryClient()
@@ -711,6 +715,8 @@ function BindingsTab({
   const { baseline, local, conflicts } = drafts
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<unknown>(null)
+  const [saveRefreshState, setSaveRefreshState] = useState<'idle' | 'pending' | 'failed'>('idle')
+  const [saveRefreshError, setSaveRefreshError] = useState<unknown>(null)
   const [restoreTarget, setRestoreTarget] = useState<RestoreTarget | null>(null)
   const [restorePreview, setRestorePreview] = useState<RestoreDefaultsResult | null>(null)
   const [previewPending, setPreviewPending] = useState(false)
@@ -973,10 +979,28 @@ function BindingsTab({
     void runRestoreRefresh([operationId])
   }
 
+  const refreshAfterSave = async () => {
+    setSaveRefreshState('pending')
+    try {
+      const refreshed = await refreshBindings()
+      const refreshedSnapshot = JSON.stringify(refreshed.items)
+      setDrafts((current) => mergeBindingDrafts(current, refreshed.items, refreshed.complete))
+      setDraftSnapshot(refreshedSnapshot)
+      appliedMerge.current = `${refreshedSnapshot}|${refreshed.complete ? 'complete' : 'partial'}`
+      setSaveRefreshError(null)
+      setSaveRefreshState('idle')
+    } catch (error) {
+      setSaveRefreshError(error)
+      setSaveRefreshState('failed')
+    }
+  }
+
   const save = async () => {
     if (!canWrite || restoring || hasConflicts) return
     setSaving(true)
     setSaveError(null)
+    setSaveRefreshError(null)
+    setSaveRefreshState('idle')
     const submitted = rowNames
       .filter((block) => !sameDraft(baseline[block] || emptyDraft, local[block] || emptyDraft))
       .map((block) => ({
@@ -1017,12 +1041,43 @@ function BindingsTab({
       })
       return next === current.baseline ? current : { ...current, baseline: next }
     })
-    await onSaved()
+    if (results.some((result) => result.status === 'fulfilled')) await refreshAfterSave()
     setSaving(false)
   }
 
   if (bindingState.isPending) return <Panel title="块绑定"><LoadingState /></Panel>
+  if (saveRefreshState === 'failed' && !bindingState.isError) {
+    return (
+      <Panel title="块绑定">
+        <ErrorState
+          error={saveRefreshError ?? bindingState.error}
+          title="绑定已保存，但读取最新绑定失败"
+          onRetry={() => { void refreshAfterSave() }}
+        />
+        <p className={ext.restoreHint} role="status">
+          保存请求已成功，不会重复提交。重新读取成功后才能继续编辑绑定。
+        </p>
+      </Panel>
+    )
+  }
   if (bindingState.isError) {
+    if (saveRefreshState !== 'idle') {
+      const pending = saveRefreshState === 'pending'
+      return (
+        <Panel title="块绑定">
+          <ErrorState
+            error={saveRefreshError ?? bindingState.error}
+            title={pending ? '正在重新读取最新绑定' : '绑定已保存，但读取最新绑定失败'}
+            onRetry={pending ? undefined : () => { void refreshAfterSave() }}
+          />
+          <p className={ext.restoreHint} role="status">
+            {pending
+              ? '正在读取保存后的最新绑定…'
+              : '保存请求已成功，不会重复提交。重新读取成功后才能继续编辑绑定。'}
+          </p>
+        </Panel>
+      )
+    }
     if (restoreView !== 'idle') {
       return (
         <Panel title="块绑定">

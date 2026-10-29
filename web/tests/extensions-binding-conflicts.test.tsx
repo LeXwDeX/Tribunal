@@ -270,3 +270,92 @@ describe('binding draft conflicts', () => {
     expect(skillButton('review', 'team-rules')).toHaveAttribute('aria-pressed', 'false')
   })
 })
+
+
+function setupPostSave({ resetAfterPut, failFirstGet }: { resetAfterPut?: boolean; failFirstGet?: boolean } = {}) {
+  let current = [binding({ block: 'review', skills: [] as string[] })]
+  let failNextGet = Boolean(failFirstGet)
+  const writes: Write[] = []
+  const handler = (url: string, init?: RequestInit) => {
+    const method = (init?.method || 'GET').toUpperCase()
+    const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : undefined
+    if (url.startsWith('/api/v1/block-bindings') && method === 'PUT' && body) {
+      writes.push({ url, method, body })
+      current = [binding({ block: 'review', skills: body.skills as string[] })]
+      if (resetAfterPut) current = [binding({ block: 'review', skills: [] })]
+      return jsonResponse(current[0])
+    }
+    if (url.startsWith('/api/v1/block-bindings')) {
+      if (failNextGet) {
+        failNextGet = false
+        return jsonResponse({ error: { code: 'internal', message: 'read failed' } }, 500)
+      }
+      return jsonResponse({ bindings: current })
+    }
+    if (url.startsWith('/api/v1/skills')) {
+      return jsonResponse({ skills: [
+        skill({ id: 'k-code', name: 'code-review' }),
+        skill({ id: 'k-team', name: 'team-rules' }),
+      ] })
+    }
+    if (url.startsWith('/api/v1/mcp-servers')) return jsonResponse({ servers: [] })
+    return jsonResponse({})
+  }
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false, staleTime: Infinity } },
+  })
+  queryClient.setQueryData(['block-bindings', 'platform', undefined], {
+    pages: [{ bindings: current }],
+    pageParams: [undefined],
+  })
+  queryClient.setQueryData(['skills', 'platform', undefined], {
+    pages: [{ skills: [skill({ id: 'k-code', name: 'code-review' }), skill({ id: 'k-team', name: 'team-rules' })] }],
+    pageParams: [undefined],
+  })
+  queryClient.setQueryData(['mcp-servers', 'platform', undefined], { pages: [{ servers: [] }], pageParams: [undefined] })
+  return { queryClient, handler, writes }
+}
+
+describe('saved binding read-back', () => {
+  it('applies an identical JSON read-back after save instead of trusting the old cache', async () => {
+    const state = setupPostSave({ resetAfterPut: true })
+    installFetch(state.handler)
+    const user = userEvent.setup()
+    renderWithProviders(
+      <ExtensionsManager scope="platform" tab="bindings" onTabChange={() => {}} />,
+      { queryClient: state.queryClient },
+    )
+
+    await user.click(await screen.findByRole('button', { name: 'review 使用 Skill code-review' }))
+    await user.click(screen.getByRole('button', { name: '保存绑定' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: '保存绑定' })).toBeEnabled())
+
+    expect(skillButton('review', 'code-review')).toHaveAttribute('aria-pressed', 'false')
+
+    await user.click(screen.getByRole('button', { name: 'review 使用 Skill team-rules' }))
+    await user.click(screen.getByRole('button', { name: '保存绑定' }))
+    await waitFor(() => expect(state.writes).toHaveLength(2))
+    expect(state.writes[1].body).toMatchObject({ skills: ['team-rules'] })
+  })
+
+  it('shows a read-back failure without claiming the save failed and retries only the read', async () => {
+    const state = setupPostSave({ failFirstGet: true })
+    installFetch(state.handler)
+    const user = userEvent.setup()
+    renderWithProviders(
+      <ExtensionsManager scope="platform" tab="bindings" onTabChange={() => {}} />,
+      { queryClient: state.queryClient },
+    )
+
+    await user.click(await screen.findByRole('button', { name: 'review 使用 Skill code-review' }))
+    await user.click(screen.getByRole('button', { name: '保存绑定' }))
+
+    expect(await screen.findByText('绑定已保存，但读取最新绑定失败')).toBeInTheDocument()
+    expect(screen.queryByText('保存绑定失败')).not.toBeInTheDocument()
+    expect(state.writes).toHaveLength(1)
+
+    await user.click(screen.getByRole('button', { name: '重试' }))
+    expect(await screen.findByRole('button', { name: 'review 使用 Skill code-review' })).toHaveAttribute('aria-pressed', 'true')
+    expect(state.writes).toHaveLength(1)
+  })
+})
