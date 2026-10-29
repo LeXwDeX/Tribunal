@@ -52,17 +52,20 @@ func (stubWebhookAcceptor) Handle(context.Context, app.WebhookRequest) (app.Webh
 }
 
 type authEnv struct {
-	t        *testing.T
-	server   *httptest.Server
-	gitlab   *httptest.Server
-	clock    *fakeClock
-	logs     *lockedBuffer
-	key      []byte
-	admins   []string
-	dsn      string
-	db       *sqlite.Store
-	sessions SessionStore
-	secure   bool
+	t      *testing.T
+	server *httptest.Server
+	gitlab *httptest.Server
+	clock  *fakeClock
+	logs   *lockedBuffer
+	key    []byte
+	admins []string
+	dsn    string
+	// disabledOAuth keeps the OAuth endpoint configured but removes the
+	// client credentials, matching a deployment that never supplied them.
+	disabledOAuth bool
+	db            *sqlite.Store
+	sessions      SessionStore
+	secure        bool
 }
 
 func newAuthEnv(t *testing.T) *authEnv {
@@ -97,14 +100,18 @@ func (e *authEnv) start() {
 	if sessions == nil {
 		sessions = e.db
 	}
+	clientID, clientSecret := testOAuthClientID, testOAuthClientSecret
+	if e.disabledOAuth {
+		clientID, clientSecret = "", ""
+	}
 	apiServer, err := New(Config{
 		AdminToken: testAdminToken,
 		Projects:   stubAdmin{},
 		Webhooks:   stubWebhookAcceptor{},
 		Auth: AuthConfig{
 			GitLabURL:       e.gitlab.URL,
-			ClientID:        testOAuthClientID,
-			ClientSecret:    testOAuthClientSecret,
+			ClientID:        clientID,
+			ClientSecret:    clientSecret,
 			RedirectURL:     testOAuthRedirectURL,
 			SessionKey:      e.key,
 			SessionTTL:      time.Hour,

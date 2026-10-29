@@ -3,9 +3,22 @@ import { BrandMark } from './Icons'
 import { Button, ButtonLink, ErrorState } from './ui'
 import styles from './AuthScreen.module.css'
 
+const authErrorMessages: Record<string, string> = {
+  oauth_disabled: '平台未启用 GitLab OAuth 登录，请联系管理员。',
+  oauth_denied: 'GitLab 登录被取消或拒绝。',
+  oauth_state: '登录状态已失效，请重试。',
+  oauth_forbidden: '该 GitLab 账号未被允许登录。',
+  oauth_failed: 'GitLab 登录失败，请重试。',
+}
+
+export function authErrorMessage(search: string): string | undefined {
+  const code = new URLSearchParams(search).get('auth_error')
+  return code ? authErrorMessages[code] ?? '登录未完成，请重试。' : undefined
+}
+
 export function AuthScreen({
-  notice, error, onRetry,
-}: { notice?: string; error?: unknown; onRetry?: () => void }) {
+  notice, error, onRetry, oauthEnabled = true,
+}: { notice?: string; error?: unknown; onRetry?: () => void; oauthEnabled?: boolean }) {
   return (
     <main className={styles.auth}>
       <div className={styles.authArt}>
@@ -34,10 +47,19 @@ export function AuthScreen({
           </div>
           {notice ? <p className={styles.notice} role="status">{notice}</p> : null}
           {error ? <ErrorState error={error} onRetry={onRetry} title="无法检查登录状态" /> : null}
-          <ButtonLink href={authLoginUrl} variant="primary" className={styles.loginButton}>
-            通过 GitLab 登录
-          </ButtonLink>
-          <span className={styles.footer}>需要 GitLab OAuth 会话。平台不会在此页面保存任何访问令牌。</span>
+          {oauthEnabled ? (
+            <>
+              <ButtonLink href={authLoginUrl} variant="primary" className={styles.loginButton}>
+                通过 GitLab 登录
+              </ButtonLink>
+              <span className={styles.footer}>需要 GitLab OAuth 会话。平台不会在此页面保存任何访问令牌。</span>
+            </>
+          ) : (
+            <p className={styles.notice} role="status">
+              平台尚未启用 GitLab OAuth 登录。请联系管理员配置 <code>auth.oauth.client_id_env</code> 和{' '}
+              <code>auth.oauth.client_secret_env</code>，然后刷新此页面。
+            </p>
+          )}
         </section>
       </div>
     </main>

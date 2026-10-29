@@ -91,7 +91,8 @@ Note Hook 先入队 `review.command`，由 worker 请求 GitLab 校验身份、M
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/auth/login` | 跳转 GitLab OAuth（scope：`read_user`） |
+| GET | `/auth/status` | 公开；`{oauth_enabled}`，供控制台决定是否显示登录按钮 |
+| GET | `/auth/login` | 跳转 GitLab OAuth（scope：`read_user`）；未启用时 API 客户端收到 503，浏览器跳回 `/?auth_error=oauth_disabled` |
 | GET | `/auth/callback` | 回调；创建或更新 `users`，写会话 |
 | POST | `/auth/logout` | 删除会话 |
 | GET | `/api/v1/me` | `{id, username, name, role, csrf_token}`；CSRF 由会话派生，不保存到 localStorage |
@@ -99,7 +100,7 @@ Note Hook 先入队 `review.command`，由 worker 请求 GitLab 校验身份、M
 | POST | `/api/v1/api-tokens` | `{name, expires_in_days}` → `{id, token}`，明文只返回这一次 |
 | DELETE | `/api/v1/api-tokens/{id}` | 吊销 |
 
-`api-tokens` 三个接口都要求浏览器会话；静态 bootstrap Bearer 和其他 bearer 客户端不能创建、列出或删除用户 token。新 token 的 `expires_in_days` 默认 90，范围 1–365；历史无过期时间的 token 可继续使用到撤销。普通用户只能管理自己的 token，不能停用账号或撤销他人凭据。`/api/v1/me` 只返回平台标签，不返回项目授权；项目访问角色由项目或评审响应中的 `access` 字段给出。
+浏览器导航请求（`Accept: text/html`）的登录和回调失败会以 303 跳回控制台，查询参数 `auth_error` 使用固定代码（`oauth_disabled`、`oauth_denied`、`oauth_state`、`oauth_forbidden`、`oauth_failed`）；API 客户端仍收到原有 JSON 错误。`api-tokens` 三个接口都要求浏览器会话；静态 bootstrap Bearer 和其他 bearer 客户端不能创建、列出或删除用户 token。新 token 的 `expires_in_days` 默认 90，范围 1–365；历史无过期时间的 token 可继续使用到撤销。普通用户只能管理自己的 token，不能停用账号或撤销他人凭据。`/api/v1/me` 只返回平台标签，不返回项目授权；项目访问角色由项目或评审响应中的 `access` 字段给出。
 
 ---
 

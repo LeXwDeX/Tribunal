@@ -212,6 +212,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	warnEphemeralSessionKey(logger)
+	logOAuthStatus(logger, cfg.Auth.OAuth)
 	extensionsAPI := server.NewAppExtensions(extensions)
 	apiServer, err := server.New(server.Config{
 		AdminToken: adminToken,
@@ -546,6 +547,26 @@ func warnUsernameBootstrapAdmins(ctx context.Context, logger *slog.Logger, entri
 
 // warnEphemeralSessionKey tells the operator that sessions persisted in
 // SQLite become unreachable after a restart without a pinned key.
+// logOAuthStatus reports whether browser login is usable. It names missing
+// variables but never prints their values.
+func logOAuthStatus(logger *slog.Logger, oauth config.OAuthConfig) {
+	if oauth.ClientIDEnv == "" && oauth.ClientSecretEnv == "" {
+		logger.Warn("OAuth login is disabled: auth.oauth.client_id_env and client_secret_env are not configured")
+		return
+	}
+	var missing []string
+	for _, name := range []string{oauth.ClientIDEnv, oauth.ClientSecretEnv} {
+		if strings.TrimSpace(os.Getenv(name)) == "" {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		logger.Warn("OAuth login is disabled: environment variable is empty", "variables", strings.Join(missing, ", "))
+		return
+	}
+	logger.Info("OAuth login is enabled", "client_id_env", oauth.ClientIDEnv)
+}
+
 func warnEphemeralSessionKey(logger *slog.Logger) {
 	if name, _ := sessionKeySource(); name == "" {
 		logger.Warn(tribunalSessionKeyEnv + " is not set; generated an ephemeral session key, so browser sessions will not survive restart")

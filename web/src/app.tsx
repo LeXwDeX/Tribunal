@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
 import { QueryClient, useQuery } from '@tanstack/react-query'
 import { Route, Routes } from 'react-router-dom'
-import { fetchMe } from './api/api'
+import { fetchAuthStatus, fetchMe } from './api/api'
 import { ApiError, LOGOUT_EVENT, UNAUTHORIZED_EVENT, setCsrfToken } from './api/client'
-import { AuthScreen, BootLoading } from './components/AuthScreen'
+import { AuthScreen, BootLoading, authErrorMessage } from './components/AuthScreen'
 import { AppShell } from './components/AppShell'
 import { ToastProvider } from './components/ui'
 import { OverviewPage } from './pages/OverviewPage'
@@ -31,7 +31,17 @@ export function createQueryClient() {
 
 export function App() {
   const meQuery = useQuery({ queryKey: ['me'], queryFn: fetchMe })
+  const authStatusQuery = useQuery({ queryKey: ['auth-status'], queryFn: fetchAuthStatus, staleTime: Infinity })
   const [sessionEnded, setSessionEnded] = useState<'expired' | 'logout' | null>(null)
+  const [authError] = useState(() => authErrorMessage(window.location.search))
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    if (!params.has('auth_error')) return
+    params.delete('auth_error')
+    const search = params.toString()
+    window.history.replaceState(null, '', `${window.location.pathname}${search ? `?${search}` : ''}${window.location.hash}`)
+  }, [])
 
   useEffect(() => {
     if (meQuery.data?.csrf_token) setCsrfToken(meQuery.data.csrf_token)
@@ -48,7 +58,7 @@ export function App() {
     }
   }, [])
 
-  if (meQuery.isPending) return <BootLoading />
+  if (meQuery.isPending || authStatusQuery.isPending) return <BootLoading />
 
   const unauthorizedError = meQuery.error instanceof ApiError && meQuery.error.status === 401
   if (sessionEnded || unauthorizedError || !meQuery.data) {
@@ -60,9 +70,10 @@ export function App() {
     return (
       <ToastProvider>
         <AuthScreen
-          notice={notice}
+          notice={authError ?? notice}
           error={!unauthorizedError && !sessionEnded ? meQuery.error : undefined}
           onRetry={() => { void meQuery.refetch() }}
+          oauthEnabled={authStatusQuery.data?.oauth_enabled}
         />
       </ToastProvider>
     )

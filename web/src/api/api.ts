@@ -1,6 +1,7 @@
 import { LOGOUT_EVENT, request, segment, streamUrl, withQuery } from './client'
 import type {
   AdminProject,
+  AuthStatus,
   AdminProjectPage,
   AdminUser,
   AdminUserPage,
@@ -51,6 +52,10 @@ import type {
 
 export async function fetchMe(): Promise<Me> {
   return request<Me>('/api/v1/me')
+}
+
+export async function fetchAuthStatus(): Promise<AuthStatus> {
+  return request<AuthStatus>('/auth/status')
 }
 
 export async function logout(): Promise<void> {

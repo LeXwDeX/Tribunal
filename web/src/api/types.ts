@@ -6,6 +6,10 @@ export type Role = 'admin' | 'viewer'
 export type ProjectAccess = 'read' | 'manage'
 export type PublicationState = 'pending' | 'published' | 'skipped' | 'failed'
 
+export interface AuthStatus {
+  oauth_enabled: boolean
+}
+
 export interface Me {
   id: number | string
   username: string

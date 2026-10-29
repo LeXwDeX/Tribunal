@@ -57,7 +57,7 @@ docker compose exec -T review /app/tribunalctl projects all
 
 ### 浏览器登录与项目注册
 
-OAuth 默认关闭，访问 `/auth/login` 得到 503 是预期行为，Bearer API 和 CLI 仍可使用。启用控制台登录时：
+OAuth 默认关闭：API 客户端访问 `/auth/login` 得到 503 是预期行为，控制台登录页会隐藏登录按钮并提示缺少配置；Bearer API 和 CLI 仍可使用。启用控制台登录时：
 
 1. 在 GitLab 创建 OAuth Application，scope 为 `read_user`，回调 URI 为 `<TRIBUNAL_PUBLIC_URL>/auth/callback`。
 2. 在 `.env` 设置 `GITLAB_OAUTH_CLIENT_ID`、`GITLAB_OAUTH_CLIENT_SECRET` 和 `GITLAB_ADMIN_USERNAME`。管理员值填写 `id:<GitLab 用户 ID>`，必须先向用户确认实际数字 ID 和授权；GitLab 用户名写法仍兼容但已弃用（见[用户名写法弃用与迁移](#bootstrap_admins-用户名写法弃用与迁移)）；留空不会给任何正常账号平台管理员标签。该标签只用于平台管理面，不授予项目业务数据访问，项目授权见下文。
@@ -491,7 +491,7 @@ docker inspect --format '{{.State.Health.Status}}' tribunal
 
 ## 5. OAuth（可选）
 
-默认不启用 OAuth，`/auth/login` 返回 503，Bearer 认证仍可用。`config/server.example.yaml` 中提供了注释模板；启用时取消 `oauth` 映射的三行注释（`oauth:`、`client_id_env:`、`client_secret_env:`），并导出对应环境变量。
+默认不启用 OAuth：API 客户端访问 `/auth/login` 返回 503，控制台登录页隐藏登录按钮并提示配置，Bearer 认证仍可用。`config/server.example.yaml` 中提供了注释模板；启用时取消 `oauth` 映射的三行注释（`oauth:`、`client_id_env:`、`client_secret_env:`），并导出对应环境变量。
 
 GitLab 侧：
 

@@ -10,6 +10,7 @@ describe('authentication boundary', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
     setCsrfToken(null)
+    window.history.replaceState(null, '', '/')
   })
 
   it('shows a GitLab login action on 401 and never invents a user', async () => {
@@ -26,5 +27,38 @@ describe('authentication boundary', () => {
     expect(screen.getAllByText('会话已过期，请重新登录。')).toHaveLength(1)
     expect(screen.queryByText('Alice')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '退出登录' })).not.toBeInTheDocument()
+  })
+
+  it('hides the login action when the server reports OAuth disabled', async () => {
+    installFetch((url) => {
+      if (url.endsWith('/auth/status')) return jsonResponse({ oauth_enabled: false })
+      return jsonResponse({ error: { code: 'unauthenticated', message: 'login required' } }, 401)
+    })
+    render(
+      <QueryClientProvider client={createTestQueryClient()}>
+        <MemoryRouter initialEntries={['/']}>
+          <App />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+    expect(await screen.findByText(/平台尚未启用 GitLab OAuth 登录/)).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: '通过 GitLab 登录' })).not.toBeInTheDocument()
+  })
+
+  it('shows a readable message for a failed browser login', async () => {
+    window.history.replaceState(null, '', '/?auth_error=oauth_state')
+    installFetch((url) => {
+      if (url.endsWith('/auth/status')) return jsonResponse({ oauth_enabled: true })
+      return jsonResponse({ error: { code: 'unauthenticated', message: 'login required' } }, 401)
+    })
+    render(
+      <QueryClientProvider client={createTestQueryClient()}>
+        <MemoryRouter initialEntries={['/']}>
+          <App />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+    expect(await screen.findByText('登录状态已失效，请重试。')).toBeInTheDocument()
+    expect(window.location.search).toBe('')
   })
 })

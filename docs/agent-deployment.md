@@ -119,7 +119,7 @@ docker compose exec -T review /app/tribunalctl projects all
 | `--check-config` 报 provider 或 profile 错误 | `LLM_PROTOCOL` 拼错，或 YAML 里删掉了必需的 profile provider |
 | 容器反复重启，日志提到 session key | 检查 `TRIBUNAL_SESSION_KEY` 是否为空或只有空白及其安全注入方式。已有部署须恢复原来保存的值；只有首次部署，或用户明确授权并接受所有现有浏览器会话失效的轮换，才生成新值 |
 | 构建时下载 codebase-memory-mcp 失败或校验和不符 | 网络无法访问 GitHub Releases。不要改 Dockerfile 里写死的 SHA-256；配置代理后重试 |
-| 访问 `/auth/login` 返回 503 | OAuth 还没启用，这是正常的，见第 4 步 |
+| `/auth/login` 返回 503 或控制台提示未启用 OAuth | OAuth 还没启用，这是正常的；控制台会隐藏登录按钮，见第 4 步 |
 
 ## 4. 启用浏览器登录（可选）
 
