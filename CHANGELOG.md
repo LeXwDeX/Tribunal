@@ -4,13 +4,33 @@
 
 ## Unreleased
 
-v1.2.0 的待发布内容见下一节；本节继续接收 v1.2.0 之后的改动。比较链接待 v1.2.0 发布后按实际 tag 补充。
+v1.2.0 尚未发布；冻结前的新改动仍记入下方 `[1.2.0]` 段，避免与待发布内容分叉。比较链接待打 tag 后按实际 tag 补充。
+
+## [1.2.0] - 2026-10-29
+
+> v1.2.0 尚未打 tag，也未发布 Release。本节的日期是版本说明的合并日，不是发布日；tag 和 Release 由维护者在 [#108](https://github.com/LeXwDeX/Tribunal/issues/108) 验收后决定。当前可核对的候选范围是 [v1.1.0...main](https://github.com/LeXwDeX/Tribunal/compare/v1.1.0...main)。打 tag 后补 `[1.2.0]: https://github.com/LeXwDeX/Tribunal/compare/v1.1.0...v1.2.0`，并回读确认链接可用。
 
 ### 升级前必读
 
+- **先做一致性备份，三个迁移都不可回退**：新增迁移 `0016_dossier_mr_title`、`0017_mcp_config_seal`、`0018_dossier_project`，都没有 down migration。`0016` 只对 `workflow_dossiers` 追加 `mr_title TEXT NOT NULL DEFAULT ''`，不改写已有行，也不回填旧评审。回退只能恢复升级前的数据快照，不能只换回 v1.1.0 镜像。升级前按 [SQLite 一致性备份与恢复](docs/operations.md#7-sqlite-一致性备份与恢复) 核对生效路径和实际挂载，停止服务后备份数据库、存在时的 WAL/SHM 及全部工作区，另存配置、镜像 digest 和 `REVIEW_MASTER_KEY`。只有默认配置和单一数据挂载符合第 7 节前提时才能复制整个 `/app/data`；自定义布局须分别备份。恢复到匹配布局的新空位置，不覆盖旧数据，不混入旧 WAL；旧版本读取新 schema 不受支持。步骤见 [从 v1.1.0 升级到 v1.2.0](docs/operations.md#从-v110-升级到-v120)。
+- **MCP 配置加密，迁移不可回退**：新增 `0017_mcp_config_seal`。启动时使用原 `REVIEW_MASTER_KEY`，在事务中加密所有已存 MCP 配置，清空旧明文列并写入密钥校验标记；错误密钥、损坏的 MCP 配置或写入失败会阻止启动。升级前做一致性备份；回退必须恢复升级前的快照，不能让旧程序读写已迁移的库。当前列清空不代表旧 WAL、空闲页、快照或备份中的明文已擦除。步骤及首次密钥校验边界见 [MCP 配置加密升级](docs/operations.md#mcp-配置加密升级v120)。
+- **dossier 归属迁移不可回退**：新增 `0018_dossier_project`，只按已关联 workflow 回填旧记录归属，未知孤儿保持未知；不改快照内容。升级前做一致性备份，回退须恢复升级前快照。详见 [dossier 归属迁移](docs/operations.md#dossier-归属迁移v120)。
 - **ignore 保护范围扩大**：有效 ignore 非空时，仓库读取和证据检查遵守同一规则；无法证明符合规则的 MCP 工具及全量图谱索引不再执行，无来源证明的历史上下文不再注入。默认 ignore 非空，因此默认图谱能力会降级；ignore 策略下 MCP 工具与全量图谱索引不执行，属于安全降级，不影响评审结论（不记 `tool_gaps`，PASS 不会因此变为 INCOMPLETE）；仅索引身份无法证明（且 ignore 为空）时，实际启用并绑定的工具仍记为覆盖缺口。管理员绑定、历史上下文和旧索引保留。缺少版本化策略的旧工作流不续跑或重发，需重新触发评审；详见 [ignore 安全边界](docs/operations.md#ignore-安全边界)。
-- **MCP 配置加密，迁移不可回退**：新增 `0017_mcp_config_seal`。启动时使用原 `REVIEW_MASTER_KEY`，在事务中加密所有已存 MCP 配置，清空旧明文列并写入密钥校验标记；错误密钥、损坏的 MCP 配置或写入失败会阻止启动。升级前做一致性备份；回退必须恢复升级前的快照，不能让旧程序读写已迁移的库。当前列清空不代表旧 WAL、空闲页、快照或备份中的明文已擦除。步骤及首次密钥校验边界见 [MCP 配置加密升级](docs/operations.md#mcp-配置加密升级unreleased)。
-- **dossier 归属迁移不可回退**：新增 `0018_dossier_project`，只按已关联 workflow 回填旧记录归属，未知孤儿保持未知；不改快照内容。升级前做一致性备份，回退须恢复升级前快照。详见[运维说明](docs/operations.md#dossier-归属迁移unreleased)。
+- **日志字段改名，影响检索和告警**：生产日志不再记录原始错误文本。原来的 `error` 字段（原始错误）改为 `error_class`（脱敏类别，如 `timeout`、`canceled`、`internal`、`mr_closed`）；任务结算日志（`review job settled without retry`、`workspace job settled without retry`）里原来的 `reason` 字段也改名为 `error_class`。依赖 `error` 或任务结算日志 `reason` 的日志检索、面板和告警需要调整。评审筛选、发布失败、扩展绑定跳过等业务 `reason` 字段仍然保留。新增 `scripts/logcheck`，`go test ./...` 会拒绝在 logger 调用里记录 `err` 或 `err.Error()`。
+- **数据目录独占锁**：服务启动时在 SQLite 文件所在目录对 `tribunal.lock` 加 `flock` 独占锁，第二个实例误用同一数据目录或数据卷时会记录带锁文件路径的错误日志并以退出码 1 退出。两个实例不能共用数据目录。锁随进程退出由内核释放，锁文件残留不代表仍被锁，不要手工删除。锁只在 Linux、macOS 和 BSD 上生效；Windows 等没有 `flock` 的平台只创建锁文件、不加锁，不在支持范围内。跨主机共享的 NFS 等网络文件系统不受保护，不要把数据目录放在网络文件系统上。
+- **`bootstrap_admins` 用户名写法弃用**：用户名条目仍可用，但启动时每个条目记一条弃用告警，含条目序号 `index` 和绑定状态 `binding=none` / `binding=unavailable` 或替代值 `replacement=id:<N>`，不含用户名。计划在 v2.0.0 移除。迁移步骤见 [部署与运维](docs/operations.md#bootstrap_admins-用户名写法弃用与迁移)。
+
+### 新增
+
+- **评审列表返回 MR 标题**：`GET /api/v1/reviews` 每项增加 `mr_title`，控制台的评审列表和总览显示标题。标题在保存评审 dossier 时写入新列 `workflow_dossiers.mr_title`（迁移 `0016_dossier_mr_title`，只追加列），列表按页一次批量读取，不请求 GitLab。升级前已有的评审没有该列的值，接口省略 `mr_title`，控制台继续显示 `!iid`（[#101](https://github.com/LeXwDeX/Tribunal/issues/101)）。
+
+### 变更
+
+- **Webhook 存储失败改返回 503**：查项目、写投递记录或入队失败时，`POST /webhooks/gitlab` 由 200 改为 503，响应体仍是 `{"ignored":"storage_error","request_id":...}`，日志带脱敏的失败类别。GitLab 不会自动重试失败的投递，但会在 hook 的「Recent events」里记为失败，可以用 Resend request 重发，同一事件 UUID 会被正常受理。GitLab 连续收到失败响应时可能自动停用 hook，需要关注 GitLab 端的 hook 状态。输入错误、未登记项目、重复投递等情况仍返回 200（[#99](https://github.com/LeXwDeX/Tribunal/issues/99)）。
+- **全局会话上限优先保留管理员**：全局 4096 个会话的兜底上限触发时，先淘汰非管理员的最旧会话，只有剩下的会话全部属于管理员时才淘汰管理员的最旧会话。角色按当前的 `bootstrap_admins` 判断：服务启动时会按配置刷新已存用户的角色，会话被使用时也会刷新，所以改了配置后，不需要用户重新登录。每个用户 10 个会话的上限不变，无需迁移（[#102](https://github.com/LeXwDeX/Tribunal/issues/102)）。
+- **CI 接入静态分析与漏洞扫描**：go job 新增固定版本的 `staticcheck` 和 `govulncheck`，并清理了现有告警。`go.mod` 增加 `toolchain go1.26.10`，本地开发和 CI 不再用 go1.26.0 构建（该版本有 31 个可达的标准库漏洞）；发布镜像本来就是 1.26.10，不受影响（[#106](https://github.com/LeXwDeX/Tribunal/issues/106)）。
+- **日志不再记录原始错误文本**：工作区、评审副作用、运行时恢复、清理、发布状态、bootstrap 管理员绑定和启动恢复等日志不再输出 `error`（原始错误），改为 `error_class` 脱敏类别并保留项目、MR、工作流等标识字段；任务「settled without retry」日志的 `reason` 字段也改为 `error_class`（如 `mr_closed`、`review_superseded`、`stale_publication`、`permanent_job`）。评审筛选、发布失败、扩展绑定跳过等业务 `reason` 字段保持不变。新增 `scripts/logcheck`，`go test ./...` 会拒绝在 logger 调用里记录 `err` 或 `err.Error()`（[#107](https://github.com/LeXwDeX/Tribunal/issues/107)）。
+- **启动时独占数据目录**：服务在打开 SQLite 之前对数据库所在目录的 `tribunal.lock`（默认容器配置下为 `/app/data/tribunal.lock`）加 `flock` 独占锁。第二个实例误用同一数据目录或数据卷时，记录带锁文件路径的错误日志并以退出码 1 退出，不再与第一个实例同时跑恢复、worker 或发布。v1.1.0 已知限制中「多个服务进程共用一个数据库时仍可能重复发布」改由启动锁防护；平台与网络文件系统限制见上方升级前必读（[#104](https://github.com/LeXwDeX/Tribunal/issues/104)）。
 
 ### 修复
 
@@ -40,29 +60,6 @@ v1.2.0 的待发布内容见下一节；本节继续接收 v1.2.0 之后的改�
 - **Docker 冒烟启动清理**：取得临时目录路径后，如果日志初始化失败或收到 SIGINT/SIGTERM，会尝试清理本次临时目录。无法取得目录路径时不会猜测删除位置，并提示可能有残留。清理失败时会告警，并保留原有错误或信号退出码。
 - **停机资源收尾**：停机超时后不再立即关闭数据库或释放数据目录锁；恢复任务、后台任务、worker 和已登记 HTTP 请求全部退出后，才关闭数据库并释放锁。仍有使用者时交给后台收尾，服务仍按现有停机时限返回；panic 路径同样等待这些使用者。
 
-## [1.2.0] - 待发布（合并后填写实际日期）
-
-> v1.2.0 尚未发布：本节属于待合并的文档改动，尚未打 tag，也未发布 Release。本节内容对应 `main` 上的候选范围，实际合并日期和 `v1.2.0` tag 都还不存在，因此标题不预填日期，也不提供指向未来 tag 的比较链接。当前可核对的候选范围是 [v1.1.0...main](https://github.com/LeXwDeX/Tribunal/compare/v1.1.0...main)。合并后把标题改为实际合并日期；打 tag 后再补 `[1.2.0]: https://github.com/LeXwDeX/Tribunal/compare/v1.1.0...v1.2.0`，并回读确认链接可用。
-
-### 升级前必读
-
-- **先做一致性备份，迁移不可回退**：新增迁移 `0016_dossier_mr_title`，只对 `workflow_dossiers` 追加 `mr_title TEXT NOT NULL DEFAULT ''`，不改写已有行，也不回填旧评审。迁移没有 down migration；回退只能恢复升级前的数据快照，不能只换回 v1.1.0 镜像。升级前按 [SQLite 一致性备份与恢复](docs/operations.md#7-sqlite-一致性备份与恢复) 核对生效路径和实际挂载，停止服务后备份数据库、存在时的 WAL/SHM 及全部工作区，另存配置、镜像 digest 和 `REVIEW_MASTER_KEY`。只有默认配置和单一数据挂载符合第 7 节前提时才能复制整个 `/app/data`；自定义布局须分别备份。恢复到匹配布局的新空位置，不覆盖旧数据，不混入旧 WAL；旧版本读取新 schema 不受支持。步骤见 [从 v1.1.0 升级到 v1.2.0](docs/operations.md#从-v110-升级到-v120)。
-- **日志字段改名，影响检索和告警**：生产日志不再记录原始错误文本。原来的 `error` 字段（原始错误）改为 `error_class`（脱敏类别，如 `timeout`、`canceled`、`internal`、`mr_closed`）；任务结算日志（`review job settled without retry`、`workspace job settled without retry`）里原来的 `reason` 字段也改名为 `error_class`。依赖 `error` 或任务结算日志 `reason` 的日志检索、面板和告警需要调整。评审筛选、发布失败、扩展绑定跳过等业务 `reason` 字段仍然保留。新增 `scripts/logcheck`，`go test ./...` 会拒绝在 logger 调用里记录 `err` 或 `err.Error()`。
-- **数据目录独占锁**：服务启动时在 SQLite 文件所在目录对 `tribunal.lock` 加 `flock` 独占锁，第二个实例误用同一数据目录或数据卷时会记录带锁文件路径的错误日志并以退出码 1 退出。两个实例不能共用数据目录。锁随进程退出由内核释放，锁文件残留不代表仍被锁，不要手工删除。锁只在 Linux、macOS 和 BSD 上生效；Windows 等没有 `flock` 的平台只创建锁文件、不加锁，不在支持范围内。跨主机共享的 NFS 等网络文件系统不受保护，不要把数据目录放在网络文件系统上。
-- **`bootstrap_admins` 用户名写法弃用**：用户名条目仍可用，但启动时每个条目记一条弃用告警，含条目序号 `index` 和绑定状态 `binding=none` / `binding=unavailable` 或替代值 `replacement=id:<N>`，不含用户名。计划在 v2.0.0 移除。迁移步骤见 [部署与运维](docs/operations.md#bootstrap_admins-用户名写法弃用与迁移)。
-
-### 新增
-
-- **评审列表返回 MR 标题**：`GET /api/v1/reviews` 每项增加 `mr_title`，控制台的评审列表和总览显示标题。标题在保存评审 dossier 时写入新列 `workflow_dossiers.mr_title`（迁移 `0016_dossier_mr_title`，只追加列），列表按页一次批量读取，不请求 GitLab。升级前已有的评审没有该列的值，接口省略 `mr_title`，控制台继续显示 `!iid`（[#101](https://github.com/LeXwDeX/Tribunal/issues/101)）。
-
-### 变更
-
-- **Webhook 存储失败改返回 503**：查项目、写投递记录或入队失败时，`POST /webhooks/gitlab` 由 200 改为 503，响应体仍是 `{"ignored":"storage_error","request_id":...}`，日志带脱敏的失败类别。GitLab 不会自动重试失败的投递，但会在 hook 的「Recent events」里记为失败，可以用 Resend request 重发，同一事件 UUID 会被正常受理。GitLab 连续收到失败响应时可能自动停用 hook，需要关注 GitLab 端的 hook 状态。输入错误、未登记项目、重复投递等情况仍返回 200（[#99](https://github.com/LeXwDeX/Tribunal/issues/99)）。
-- **全局会话上限优先保留管理员**：全局 4096 个会话的兜底上限触发时，先淘汰非管理员的最旧会话，只有剩下的会话全部属于管理员时才淘汰管理员的最旧会话。角色按当前的 `bootstrap_admins` 判断：服务启动时会按配置刷新已存用户的角色，会话被使用时也会刷新，所以改了配置后，不需要用户重新登录。每个用户 10 个会话的上限不变，无需迁移（[#102](https://github.com/LeXwDeX/Tribunal/issues/102)）。
-- **CI 接入静态分析与漏洞扫描**：go job 新增固定版本的 `staticcheck` 和 `govulncheck`，并清理了现有告警。`go.mod` 增加 `toolchain go1.26.10`，本地开发和 CI 不再用 go1.26.0 构建（该版本有 31 个可达的标准库漏洞）；发布镜像本来就是 1.26.10，不受影响（[#106](https://github.com/LeXwDeX/Tribunal/issues/106)）。
-- **日志不再记录原始错误文本**：工作区、评审副作用、运行时恢复、清理、发布状态、bootstrap 管理员绑定和启动恢复等日志不再输出 `error`（原始错误），改为 `error_class` 脱敏类别并保留项目、MR、工作流等标识字段；任务「settled without retry」日志的 `reason` 字段也改为 `error_class`（如 `mr_closed`、`review_superseded`、`stale_publication`、`permanent_job`）。评审筛选、发布失败、扩展绑定跳过等业务 `reason` 字段保持不变。新增 `scripts/logcheck`，`go test ./...` 会拒绝在 logger 调用里记录 `err` 或 `err.Error()`（[#107](https://github.com/LeXwDeX/Tribunal/issues/107)）。
-- **启动时独占数据目录**：服务在打开 SQLite 之前对数据库所在目录的 `tribunal.lock`（默认容器配置下为 `/app/data/tribunal.lock`）加 `flock` 独占锁。第二个实例误用同一数据目录或数据卷时，记录带锁文件路径的错误日志并以退出码 1 退出，不再与第一个实例同时跑恢复、worker 或发布。v1.1.0 已知限制中「多个服务进程共用一个数据库时仍可能重复发布」改由启动锁防护；平台与网络文件系统限制见上方升级前必读（[#104](https://github.com/LeXwDeX/Tribunal/issues/104)）。
-
 ### 弃用
 
 - **`bootstrap_admins` 用户名写法弃用**：`auth.bootstrap_admins` 里的 GitLab 用户名条目仍然可用，但启动时每个条目记一条弃用告警。告警含条目序号 `index` 和绑定状态 `binding=none` / `binding=unavailable` 或替代值 `replacement=id:<N>`，不含用户名。示例配置只保留 `id:` 写法。计划在下一个大版本（v2.0.0）移除用户名写法，迁移步骤见 [部署与运维](docs/operations.md#bootstrap_admins-用户名写法弃用与迁移)（[#103](https://github.com/LeXwDeX/Tribunal/issues/103)）。
@@ -76,9 +73,10 @@ v1.2.0 的待发布内容见下一节；本节继续接收 v1.2.0 之后的改�
 
 ### 验证范围
 
-- **未完成：CI**。截至 `main` `86c3a668`，GitHub Actions 的 go、web、docker 三个 job 因账户计费/额度限制没有启动，job 注解说明了原因。不能声称本版本的 CI 已通过。
+- **未完成：CI**。截至 `main` `96e8081`，GitHub Actions 的 go、web、docker 三个 job 因账户计费/额度限制没有启动，job 注解说明了原因。不能声称本版本的 CI 已通过。
 - **未完成：真实实例验收**。[#108](https://github.com/LeXwDeX/Tribunal/issues/108) 要求的 v1.1.x/v1.2.0 真实 GitLab 实例升级验收尚未执行，它是打 `v1.2.0` tag 的前置条件。v1.0.0 的 f143 结果不覆盖本版本。
-- **本地预检（引用交接记录，不是本次发布重新核验）**：`main` `86c3a668` 对应的 PR #112 合并前 head 在本地通过 `go build`、`go vet`、`scripts/logcheck`、staticcheck v0.8.2、govulncheck v1.9.0、`go mod verify`、licensecheck、licensebundle `-check`、`go test -race -timeout 40m ./...`，语句覆盖率 77.90%。来源与范围见 [PR #112 评论](https://github.com/LeXwDeX/Tribunal/pull/112#issuecomment-6432897860)；它不代表 CI 已启动，也不覆盖之后未提交的改动。详见 [交付就绪](docs/delivery-readiness.md#v120-验证状态)。
+- **本地预检（引用交接记录，不是本次发布重新核验）**：`main` `86c3a668` 对应的 PR #112 合并前 head 在本地通过 `go build`、`go vet`、`scripts/logcheck`、staticcheck v0.8.2、govulncheck v1.9.0、`go mod verify`、licensecheck、licensebundle `-check`、`go test -race -timeout 40m ./...`，语句覆盖率 77.90%；PR #128 合并前 head `eb1e277` 通过同样的全量检查（含前端 `npm ci`、`npm test -- --coverage`、`npm run build` 和 `web/dist` 一致性），语句覆盖率 79.07%。来源见 [PR #112 评论](https://github.com/LeXwDeX/Tribunal/pull/112#issuecomment-6432897860) 和 [PR #128 评论](https://github.com/LeXwDeX/Tribunal/pull/128)；它们不代表 CI 已启动，也不覆盖之后未提交的改动。详见 [交付就绪](docs/delivery-readiness.md#v120-验证状态)。
+- **部署核对（引用交接记录）**：2026-10-29 在 33.110 的临时目录按运维文档从零部署 `main` `96e8081`，`docker compose config --quiet`、`build`、`--check-config`、`up --wait` 通过；healthz/readyz 和控制台返回 200，未启用 OAuth 时 `/auth/login` 返回 503；容器以 uid 10001 运行，`/app/data` 为 0700，启动锁生效；内置 Skill 和 codebase-memory 已登记，MCP 配置 API 返回 `{}`，只暴露 13 个只读工具；`scripts/docker-smoke.sh` 通过且无残留。该部署不是 GitLab 升级验收，也不覆盖 [#108](https://github.com/LeXwDeX/Tribunal/issues/108) 的真实数据升级场景。
 
 ### 已知限制
 

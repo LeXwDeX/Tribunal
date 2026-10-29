@@ -4,7 +4,7 @@
 
 交付前准备、升级/回退边界与真实验收记录见 [交付就绪与验收记录](delivery-readiness.md)。
 
-> 当前已发布版本是 v1.1.0，验证状态见 [v1.1.x 验证状态](delivery-readiness.md#v110-验证状态)。v1.2.0 尚未发布，版本说明待合并，尚未打 tag；其验证状态见 [v1.2.0 验证状态](delivery-readiness.md#v120-验证状态)。从 v1.0.0 升级前必须先读 [从 v1.0.0 升级到 v1.1.0](#从-v100-升级到-v110)；从 v1.1.0 升级再读 [从 v1.1.0 升级到 v1.2.0](#从-v110-升级到-v120)。由 agent 代为部署时，使用 [Agent 部署指南](agent-deployment.md)。
+> 当前已发布版本是 v1.1.0，验证状态见 [v1.1.x 验证状态](delivery-readiness.md#v110-验证状态)。v1.2.0 尚未发布，版本说明已合并，尚未打 tag；其验证状态见 [v1.2.0 验证状态](delivery-readiness.md#v120-验证状态)。从 v1.0.0 升级前必须先读 [从 v1.0.0 升级到 v1.1.0](#从-v100-升级到-v110)；从 v1.1.0 升级再读 [从 v1.1.0 升级到 v1.2.0](#从-v110-升级到-v120)。由 agent 代为部署时，使用 [Agent 部署指南](agent-deployment.md)。
 
 ## Compose 快速部署（推荐）
 
@@ -684,7 +684,7 @@ curl -fsS http://127.0.0.1:18080/readyz
 
 迁移文件编译在二进制内，服务启动时自动执行；只应用尚未执行的版本，没有 down migration。升级前必须备份。
 
-### dossier 归属迁移（Unreleased）
+### dossier 归属迁移（v1.2.0）
 
 `0018_dossier_project` 为 dossier 增加内部项目归属。旧记录仅根据实际关联的 workflow 回填；没有关联 workflow 的旧孤儿保持未知归属，不从快照猜测。迁移不改写压缩快照内容。项目删除时清理本项目已知归属的孤儿；未知归属记录保留。
 
@@ -692,7 +692,7 @@ curl -fsS http://127.0.0.1:18080/readyz
 
 升级前按第 7 节做一致性备份。此迁移没有 down migration；回退须恢复升级前完整快照及匹配旧程序，不能只替换镜像。
 
-### MCP 配置加密升级（Unreleased）
+### MCP 配置加密升级（v1.2.0）
 
 1. 按[第 7 节](#7-sqlite-一致性备份与恢复)停止服务并做一致性备份。保存原主密钥、配置和镜像版本，不重新生成 `REVIEW_MASTER_KEY`。
 2. 新程序追加迁移 `0017_mcp_config_seal`。随后在启动 runtime、默认扩展和 HTTP 服务前，把平台、项目、停用及内置 MCP 配置一起加密到 `config_enc`，将旧 `config` 置为 `{}`，并写入加密的密钥校验标记。这些数据更新在同一事务中完成；失败则回滚，保留原配置，拒绝启动。结构迁移可能已经完成，不代表数据回填完成。
@@ -759,36 +759,50 @@ docker compose exec -T review /app/tribunalctl projects all
 
 ### 从 v1.1.0 升级到 v1.2.0
 
-**v1.2.0 尚未发布：版本说明属于待合并的文档改动，尚未打 tag，也未发布 Release。** 以下步骤以 `main` `86c3a668` 的代码为准；文档合并和打 tag 后需要重新核对镜像 digest。完整变更见 [CHANGELOG](../CHANGELOG.md) 的 `[1.2.0] - 待发布` 段，验证状态见 [v1.2.0 验证状态](delivery-readiness.md#v120-验证状态)。真实实例验收（[#108](https://github.com/LeXwDeX/Tribunal/issues/108)）尚未完成，发布前必须补齐。
+**v1.2.0 尚未发布：版本说明已合并，尚未打 tag，也未发布 Release。** 以下步骤以 `main` `96e8081` 的代码为准；打 tag 后需要重新核对镜像 digest。完整变更见 [CHANGELOG](../CHANGELOG.md) 的 `[1.2.0] - 2026-10-29` 段，验证状态见 [v1.2.0 验证状态](delivery-readiness.md#v120-验证状态)。真实实例验收（[#108](https://github.com/LeXwDeX/Tribunal/issues/108)）尚未完成，发布前必须补齐。
 
 先按第 8 节的通用步骤操作：记录当前镜像 tag/digest，核对生效路径和全部挂载，停止旧容器并备份数据库和所有工作区。本次升级有这些额外注意点：
 
-1. **迁移 `0016_dossier_mr_title` 只追加列，但仍然必须先备份。**
-   - 迁移对 `workflow_dossiers` 执行 `ALTER TABLE ... ADD COLUMN mr_title TEXT NOT NULL DEFAULT ''`，不改写已有行，不回填旧评审，也不改变既有索引。
-   - 没有 down migration。回退只能恢复升级前的全量快照，不能只换回 v1.1.0 镜像而保留已迁移数据库；旧版本读取新 schema 不受支持。
+1. **先做一致性备份，三个迁移都不可回退。**
+   - 本次新增 `0016_dossier_mr_title`、`0017_mcp_config_seal`、`0018_dossier_project`，都没有 down migration。回退只能恢复升级前的全量快照，不能只换回 v1.1.0 镜像而保留已迁移数据库；旧版本读取新 schema 不受支持。
    - 升级前按[第 7 节](#7-sqlite-一致性备份与恢复)停止服务，备份生效数据库、可能存在的 `-wal`/`-shm` 和所有工作区；只有符合默认配置与挂载前提时才能复制整个 `/app/data`。运行中只复制数据库文件会漏掉 WAL，不是一致备份。
    - 另存实际配置、镜像 digest 和 `REVIEW_MASTER_KEY`。恢复使用匹配布局的新空卷或空目录，不把快照覆盖到旧数据，也不混入旧 WAL。
+2. **迁移 `0016_dossier_mr_title` 只追加列，但仍然要先备份。**
+   - 迁移对 `workflow_dossiers` 执行 `ALTER TABLE ... ADD COLUMN mr_title TEXT NOT NULL DEFAULT ''`，不改写已有行，不回填旧评审，也不改变既有索引。
    - 升级后已有评审的标题为空：列表接口省略 `mr_title`，控制台继续显示 `!iid`。这是预期行为，不需要回填，也无法从旧数据恢复标题。
-2. **日志字段改名，检索和告警要同步调整。**
+3. **迁移 `0017_mcp_config_seal` 会加密已存 MCP 配置。**
+   - 启动时使用原 `REVIEW_MASTER_KEY`，在事务中把平台、项目、停用及内置 MCP 配置加密到 `config_enc`，清空旧明文列并写入密钥校验标记；错误密钥、损坏的 MCP 配置或写入失败会阻止启动。结构迁移完成不代表数据回填完成。
+   - 不能更换主密钥。首次回填的密钥校验、启动失败处理和回退边界见 [MCP 配置加密升级](#mcp-配置加密升级v120)。
+   - 升级后 API 不再提供可读回的 MCP 配置，响应统一为 `config: {}`；仅改名或启停时省略 `config`。旧程序可能把 `{}` 当作配置或重新写入明文，不能只替换镜像回退。
+   - 迁移只清空当前逻辑列，不保证历史 WAL、SQLite 空闲页、文件系统快照或备份中的明文已擦除。
+4. **迁移 `0018_dossier_project` 回填 dossier 项目归属。**
+   - 旧记录仅根据实际关联的 workflow 回填；没有关联的旧孤儿保持未知归属，不从快照猜测，也不改压缩快照内容。
+   - 升级前按第 7 节做一致性备份；此迁移没有 down migration，回退须恢复升级前完整快照及匹配旧程序。运行时的孤儿清理行为见 [dossier 归属迁移](#dossier-归属迁移v120)。
+5. **ignore 保护范围扩大。**
+   - 有效 ignore 非空时，仓库读取和证据检查遵守同一规则；无法证明符合规则的 MCP 工具及全量图谱索引不再执行，无来源证明的历史上下文不再注入。
+   - 默认 ignore 非空，因此默认图谱能力会降级。这是安全降级：不记 `tool_gaps`，不会把 PASS 改为 INCOMPLETE。仅有索引身份无法证明且 ignore 为空时，实际启用并绑定的工具仍记为覆盖缺口。
+   - 管理员绑定、历史上下文和旧索引保留。缺少版本化策略的旧工作流不续跑或重发，需要重新触发评审。详见 [ignore 安全边界](#ignore-安全边界)。
+6. **日志字段改名，检索和告警要同步调整。**
    - 生产日志不再输出原始错误文本，原 `error` 字段改为 `error_class`（脱敏类别，例如 `timeout`、`canceled`、`internal`、`mr_closed`）。
    - 任务结算日志 `review job settled without retry`、`workspace job settled without retry` 的 `reason` 字段也改名为 `error_class`，值为 `mr_closed`、`review_superseded`、`stale_publication`、`permanent_job` 等。
    - 评审筛选、发布失败、扩展绑定跳过等业务 `reason` 字段仍然存在。不要把所有 `reason` 检索都直接替换成 `error_class`。
    - `scripts/logcheck` 随 `go test ./...` 运行；本地修改代码后先跑它，避免在 logger 调用里记录 `err` 或 `err.Error()`。
-3. **启动锁：两个实例不能共用数据目录。**
+7. **启动锁：两个实例不能共用数据目录。**
    - 新版本在打开 SQLite 前对数据库所在目录的 `tribunal.lock` 加 `flock` 独占锁（默认容器配置下为 `/app/data/tribunal.lock`）。锁被占用时，服务记录带锁文件路径的错误日志并以退出码 1 退出，不会打开数据库。
    - 同一数据目录只能有一个进程；同一宿主机上多个容器共用同一卷可以互斥，但跨主机的 NFS 等网络文件系统不受保护。
    - 锁随进程退出由内核释放，崩溃后无需清理；`tribunal.lock` 文件残留是正常的，不要手工删除。锁的限制见[镜像内容与边界](#1-镜像内容与边界)。
-4. **`bootstrap_admins` 用户名写法已弃用。**
+8. **`bootstrap_admins` 用户名写法已弃用。**
    - 用户名条目仍可用，但启动时每个条目记一条 `WARN`，含 `index` 及绑定状态或替代值，不含用户名；已绑定时给出 `replacement=id:<N>`。
    - 计划和注意点见 [用户名写法弃用与迁移](#bootstrap_admins-用户名写法弃用与迁移)。计划在 v2.0.0 移除；在此之前改用 `id:<GitLab 用户 ID>`。
    - `id:` 写法不受影响，也不需要在升级时重新绑定。
-5. **Webhook 存储失败改返回 503。** 查项目、写投递记录或入队失败时，`POST /webhooks/gitlab` 返回 503，不再返回 200 加 `ignored: storage_error`。GitLab 会把这次投递记为失败；连续失败可能自动停用 hook，升级后要检查 GitLab 端的 hook 状态。已停用的 hook 需要重新启用，失败投递可以用 Resend request 重发。
-6. **全局会话上限优先保留管理员。** 全局 4096 个会话的兜底上限触发时，先淘汰非管理员的最旧会话。角色按当前 `bootstrap_admins` 刷新，改配置并重启后不需要用户重新登录。每用户 10 个会话的上限不变，无需迁移。
-7. **升级后检查。**
-   - `docker compose logs` 中不应出现迁移失败、`data directory is locked by another Tribunal instance` 或 `bootstrap_admins` 未预期的弃用告警。
-   - `/readyz` 返回 200；已有项目可正常读取，已有评审列表可打开，旧评审显示 `!iid` 而不是报错。
-   - 触发一次新评审，确认列表能显示 `mr_title`，日志检索使用 `error_class` 仍能命中。
-   - v1.2.0 尚未完成真实实例验收；在 #108 完成前不要把本次升级当作发布验收。
+9. **Webhook 存储失败改返回 503。** 查项目、写投递记录或入队失败时，`POST /webhooks/gitlab` 返回 503，不再返回 200 加 `ignored: storage_error`。GitLab 会把这次投递记为失败；连续失败可能自动停用 hook，升级后要检查 GitLab 端的 hook 状态。已停用的 hook 需要重新启用，失败投递可以用 Resend request 重发。
+10. **全局会话上限优先保留管理员。** 全局 4096 个会话的兜底上限触发时，先淘汰非管理员的最旧会话。角色按当前 `bootstrap_admins` 刷新，改配置并重启后不需要用户重新登录。每用户 10 个会话的上限不变，无需迁移。
+11. **升级后检查。**
+    - `docker compose logs` 中不应出现迁移失败、`data directory is locked by another Tribunal instance`、MCP 密钥校验失败或 `bootstrap_admins` 未预期的弃用告警。
+    - `/readyz` 返回 200；已有项目可正常读取，已有评审列表可打开，旧评审显示 `!iid` 而不是报错。
+    - MCP 服务器列表和详情返回 `config: {}`；内置 `codebase-memory` 仍在，默认 ignore 下评审不再因 MCP 工具记为覆盖缺口。
+    - 触发一次新评审，确认列表能显示 `mr_title`，日志检索使用 `error_class` 仍能命中；被 ignore 的路径不出现在评论中。
+    - v1.2.0 尚未完成真实实例验收；在 #108 完成前不要把本次升级当作发布验收。
 
 ## 9. 无外部凭据的本地烟测
 

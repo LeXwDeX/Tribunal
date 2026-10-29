@@ -2,7 +2,7 @@
 
 这份指南写给代替用户部署和接入 Tribunal 的 agent，按顺序执行即可。每一步都写明做什么、怎么验证、失败时查哪里。概念说明和完整参数见 [部署与运维](operations.md) 与 [配置设计](design/06-config.md)，本文不重复。
 
-适用版本：v1.1.0，Docker Compose 单实例加 SQLite。从 v1.0.0 升级时，先按 [升级流程](#8-从-v100-升级) 执行，不要直接走全新部署的步骤。
+适用版本：v1.2.0（尚未发布，打 tag 前以 `main` 为准），Docker Compose 单实例加 SQLite。从旧版本升级时，先按 [升级流程](#8-从-v100-升级) 执行，不要直接走全新部署的步骤。
 
 ## 0. 安全约束（每一步都要遵守）
 
@@ -209,12 +209,12 @@ docker compose exec -T review /app/tribunalctl projects grants list "$PROJECT_ID
 
 ## 7. 内置扩展与自定义接入
 
-v1.1.0 开箱自带两项内置扩展，不需要额外配置：
+v1.2.0 开箱自带两项内置扩展，不需要额外配置：
 
 - Skill `code-review`：挂在 `code-review`、`review` 块上。
-- MCP 服务器 `codebase-memory`：只读的代码图谱工具，各项目的索引互相隔离。
+- MCP 服务器 `codebase-memory`：只读的代码图谱工具，各项目的索引互相隔离。默认 ignore 非空时，评审中的 MCP 工具和全量图谱索引不执行，这是安全降级，不影响 PASS；详见 [ignore 安全边界](operations.md#ignore-安全边界)。
 
-**验证**：控制台「扩展」页里，两项都带「内置」标签。在 MCP 服务器一栏点「测试」，工具列表里应有 `search_graph`、`trace_path`、`get_code_snippet`，并且没有 `index_repository`、`delete_project`。
+**验证**：控制台「扩展」页里，两项都带「内置」标签。在 MCP 服务器一栏点「测试」，工具列表里应有 `search_graph`、`trace_path`、`get_code_snippet`，并且没有 `index_repository`、`delete_project`。MCP 详情和列表的配置返回 `config: {}` 是预期行为。
 
 - **不想用内置项**：在控制台禁用即可，重启和升级后保持禁用。内置项不能删除。
 - **新部署不登记内置项**：配置里写 `default_extensions.skills: []`，MCP 同理，见 [默认扩展](design/06-config.md#默认扩展default_extensions)。
@@ -236,7 +236,9 @@ v1.1.0 开箱自带两项内置扩展，不需要额外配置：
 
 ## 8. 从 v1.0.0 升级
 
-严格按 [运维 · 从 v1.0.0 升级到 v1.1.0](operations.md#从-v100-升级到-v110) 执行，关键点：
+从 v1.1.0 升级到 v1.2.0 时，改按 [运维 · 从 v1.1.0 升级到 v1.2.0](operations.md#从-v110-升级到-v120) 执行，重点是不可回退的迁移 `0016`/`0017`/`0018`、MCP 配置加密和 ignore 安全降级；不要套用下面的 v1.0.0 步骤。
+
+从 v1.0.0 升级时，严格按 [运维 · 从 v1.0.0 升级到 v1.1.0](operations.md#从-v100-升级到-v110) 执行，再按上一段完成 v1.2.0 的迁移；关键点：
 
 1. 记下当前镜像和提交，按[运维第 7 节](operations.md#7-sqlite-一致性备份与恢复)核对生效的 `storage.dsn`、`workspace.root`、配置合并和环境展开、服务器进程实际工作目录、数据库及工作区文件和全部持久化挂载（含嵌套与覆盖）。无法确定时停止并排查；不要输出秘密。
 2. 用 `docker compose stop review` 停服并保留容器；拷贝前不能执行 `docker compose down`。按运维第 7 节停止其他写入进程，完整备份并核验数据库、存在时的 WAL/SHM 和所有工作区，另行安全备份 `.env`、配置和密钥。只有默认路径及单卷等该节前提全部满足，才能使用默认例子；自定义布局须按该节逐项完整备份，并在恢复时使用匹配布局的新空位置。必须完成该节全部校验与隔离要求，不得因本摘要跳过；备份和恢复期间不要启动旧服务。

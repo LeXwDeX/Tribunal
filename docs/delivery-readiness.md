@@ -1,6 +1,6 @@
 # 交付就绪、升级/回退与验收记录
 
-> 本文先列出 Unreleased 的本地修复验证，再分三部分记录版本与交付状态：
+> 本文先列出 v1.2.0 候选批次（[#128](https://github.com/LeXwDeX/Tribunal/pull/128)）的本地修复验证，再分三部分记录版本与交付状态：
 >
 > 1. [v1.2.0（待发布）验证状态](#v120-验证状态)：v1.2.0 实际做过哪些验证、还有哪些没做。
 > 2. 升级、授权、验收矩阵与回退计划：与版本无关的操作模板，从[首次升级前记录](#首次升级前记录模板)到[放行与归档](#放行与归档)。
@@ -8,16 +8,16 @@
 >
 > 本文不复制完整日志，也不把测试实例结果扩大为生产验收。
 
-## Unreleased 本地修复验证
+## v1.2.0 候选批次本地修复验证（PR #128）
 
 - 2026-10-28，在 `main` `e7c59ab` 加本地未提交改动的工作区，MCP 配置加密、旧库回填、错误密钥拒绝、事务回滚和项目坏字段容错已通过 `go test -race -count=1 -timeout=15m ./internal/secret ./internal/store/sqlite ./internal/app ./internal/server ./cmd/server`；`go build ./...`、`go vet ./...` 通过。此前无密钥创建/导入及明文存储回归已实测失败，修复后通过。
-- 本批新增 `0017_mcp_config_seal`，API 响应统一隐藏完整配置。升级前备份、原主密钥、回退及历史明文残留边界见 [MCP 配置加密升级](operations.md#mcp-配置加密升级unreleased)。
+- 本批新增 `0017_mcp_config_seal`，API 响应统一隐藏完整配置。升级前备份、原主密钥、回退及历史明文残留边界见 [MCP 配置加密升级](operations.md#mcp-配置加密升级v120)。
 - 补充通过真实临时 SQLite、app service 和 HTTP handler 的 MCP 生命周期集成测试，以及 `go test -race -count=1 -timeout=10m ./scripts`。前端 `npm test -- --coverage` 通过 40 个文件、288 项测试，语句覆盖率 74.68%；`npm run build` 已刷新 `web/dist`，随后 `go build ./...` 通过。
 - 扩展页使用本地静态产物和合成 API，在 1440/390 宽度、亮/暗主题下检查：页面无横向滚动，窄屏表格在自身容器滚动；改名与停用的请求只含 `name`、`enabled`，未回写隐藏的 `config`。从桌面切换到窄屏时，原导航焦点触发了 `aria-hidden` 警告；本批未修改共享导航，也未完成全站无障碍检查。
 - 2026-10-28，审查 1–20 项已分别完成本地修复及独立终审。项目删除的旧状态任务跨登记、取消恢复最多处理 150 条，以及上下文生成复用错误索引等复审发现，均补充失败回归后修复。此处的逐项通过不代替最终跨模块终审。
 - 最终本地 Go 检查：`go test -race -count=1 -timeout=40m -coverprofile=<临时文件> ./...` 全部通过；`coveragecheck -min 70` 为 **79.05%（20503/25936）**。`go build ./...`、`go vet ./...`、Staticcheck v0.8.2、`go mod verify`、licensecheck 和 licensebundle `-check` 通过。govulncheck v1.9.0 报告 `No vulnerabilities found`；该扫描使用公共漏洞库，不是离线扫描或不存在所有安全问题的证明。
 - 上下文及 token 页面使用独立 Chrome 155 headless 和本地合成 API 验证。1440/390 宽度、亮/暗主题下均无页面横向溢出；保存上下文的实际请求不含旧 `locked` 值，保留并发管理员锁定。token 请求关闭重开仍防重，迟到明文不回填；停止等待及卸载的 abort 不承诺服务端回滚。隔离前端构建与当前 `web/dist` 字节一致；前述 288 项测试及覆盖率仍通过。部分操作采用 DOM 事件，不是完整无障碍审计。
-- 本批还新增 `0018_dossier_project`，将可信项目归属独立存入 dossier；历史未知孤儿保守保留。取消后 pending 的发布状态仅在本地收敛，不调用 GitLab。升级与保留边界见 [dossier 归属迁移](operations.md#dossier-归属迁移unreleased)。
+- 本批还新增 `0018_dossier_project`，将可信项目归属独立存入 dossier；历史未知孤儿保守保留。取消后 pending 的发布状态仅在本地收敛，不调用 GitLab。升级与保留边界见 [dossier 归属迁移](operations.md#dossier-归属迁移v120)。
 - 最终跨模块独立终审为 **PASS**，覆盖来源隔离、密封与启动迁移、重试与队列、删除与清理、取消恢复、摘要对账及 UI 的直接交互。复审提出的配置解析失败文档不一致已修正。此结论不证明代码不存在其他未知缺陷。
 - 最终逻辑对抗复核提出慢请求的授权跨登记窗口；已补充真实临时 SQLite、HTTP handler 和 Delete/Register 回归，并在四个 dispatch 入口的项目锁内重新校验当前授权。修复后重新执行上述全仓 race、覆盖率、build、vet 和 Staticcheck，检查通过；补丁独立终审 **PASS**，针对该反例的逻辑复核为 **CLEAN**。其他在途写请求及复核后撤权的边界见[项目授权](operations.md#项目授权用户停用和凭据撤销)，不承诺全站即时撤销。
 - **部署验收仍未完成**：本机没有 Docker CLI，未运行实际 Compose/镜像冒烟；未使用真实 GitLab、模型、凭据或生产数据库，也未提交或触发本候选的 CI。以上是本地工作区证据，不是发布放行。
@@ -26,11 +26,11 @@
 
 ## v1.2.0（待发布）验证状态
 
-v1.2.0 尚未发布：版本说明属于待合并的文档改动，尚未打 tag，也未发布 Release。变更清单见 [CHANGELOG](../CHANGELOG.md) 的 `[1.2.0] - 待发布` 段；候选范围可用 [v1.1.0...main](https://github.com/LeXwDeX/Tribunal/compare/v1.1.0...main) 核对。本节以 `main` `86c3a668` 为发布候选基线，另列后续工作区的本地检查；发布前必须补齐未完成项。
+v1.2.0 尚未发布：版本说明已合并到 `main`，尚未打 tag，也未发布 Release。变更清单见 [CHANGELOG](../CHANGELOG.md) 的 `[1.2.0] - 2026-10-29` 段；候选范围可用 [v1.1.0...main](https://github.com/LeXwDeX/Tribunal/compare/v1.1.0...main) 核对。本节以 `main` `96e8081` 为发布候选基线，另列后续工作区的本地检查；发布前必须补齐未完成项。
 
 **未完成，不能声称通过**
 
-- [ ] **GitHub Actions**：截至 `main` `86c3a668`，CI 有 workflow run 记录，但 go、web、docker 三个 job 因账户计费/额度限制没有启动，job 注解说明了原因。v1.2.0 期间的 PR 在 CI job 未启动时按交接约定用本地全量检查放行，并把结果评论到 PR；本文件不逐 PR 重述，[PR #112 评论](https://github.com/LeXwDeX/Tribunal/pull/112#issuecomment-6432897860) 是一个已核实的例子。没有成功执行的 CI job 结果，不能把本地预检当作 CI 结果。
+- [ ] **GitHub Actions**：截至 `main` `96e8081`，CI 有 workflow run 记录，但 go、web、docker 三个 job 因账户计费/额度限制没有启动，job 注解说明了原因。v1.2.0 期间的 PR 在 CI job 未启动时按交接约定用本地全量检查放行，并把结果评论到 PR；本文件不逐 PR 重述，[PR #112 评论](https://github.com/LeXwDeX/Tribunal/pull/112#issuecomment-6432897860) 是一个已核实的例子。没有成功执行的 CI job 结果，不能把本地预检当作 CI 结果。
 - [ ] **真实 GitLab 实例验收**：[#108](https://github.com/LeXwDeX/Tribunal/issues/108) 要求的 v1.1.x/v1.2.0 真实实例升级验收尚未执行。这是给 `v1.2.0` 打 tag 的前置条件；v1.0.0 的 f143 结果不覆盖本版本，见[历史验收记录](#v100-历史验收记录f143仅供追溯)。
 
 **历史本地预检（引用 PR #112 交接记录）**
@@ -42,7 +42,9 @@ v1.2.0 尚未发布：版本说明属于待合并的文档改动，尚未打 tag
 
 - 在 `main` `86c3a668` 加未提交改动的工作区，2026-10-27 复跑 `go test -race -count=1 -timeout=150s -run '^TestRepositoryLogsUseErrorClass$' -v ./scripts/logcheck` 并通过。这是一次针对日志检查的本地测试，不代表工作区完整验证或发布验收。
 - 2026-10-28 针对停机资源收尾改动（`cmd/server/main.go`、`cmd/server/main_test.go`、`internal/app/runtime.go`、`internal/app/runtime_test.go`）运行 `go build ./...`、`go vet ./...`、staticcheck v0.8.2、govulncheck v1.9.0、`go test -race -timeout=40m ./...`，语句覆盖率 78.20%（18976/24266），并通过 `go mod verify`、licensecheck、licensebundle `-check` 和 `git diff --check`。独立 review 为 PASS，对抗推演确认 panic 路径的 handler/worker 屏障闭合。该结果只覆盖当前未提交工作区，不代表 CI 或真实实例验收；govulncheck 在本机读取了公共 Go 漏洞库元信息，不是离线扫描。
-- [#120](https://github.com/LeXwDeX/Tribunal/issues/120) 要求覆盖率不下降；尚未用可比的前后测量证明覆盖率严格不下降。PR #112 的 77.90% 不证明后续工作区的覆盖率达到 70% 或没有下降。
+- 2026-10-28 在 PR #128 合并前 head `eb1e277` 运行 AGENTS.md 规定的全量检查，全部通过：`npm ci`、`npm test -- --coverage`、`npm run build`、`web/dist` 一致性、`go build ./...`、`go vet ./...`、staticcheck v0.8.2、govulncheck v1.9.0、`go test -race -timeout=40m ./...`、`coveragecheck` **79.07%**、`go mod verify`、licensecheck、licensebundle `-check`。GitHub Actions 未启动；该结果是本地预检，不是 CI 结果。来源见 [PR #128 评论](https://github.com/LeXwDeX/Tribunal/pull/128)。
+- 2026-10-29 在 33.110 的临时目录按运维文档从零部署 `main` `96e8081`：`docker compose config --quiet`、`build`、`--check-config`、`up --wait` 通过；healthz/readyz 和控制台返回 200，未启用 OAuth 时 `/auth/login` 返回 503；容器以 uid 10001 运行，`/app/data` 为 0700，启动锁生效；内置 Skill 和 codebase-memory 已登记，MCP 配置 API 返回 `{}`，只暴露 13 个只读工具；`scripts/docker-smoke.sh` 通过且无残留。核对后已拆除该临时部署，不影响 `tribunal-regress` 和 `/opt/tribunal-test`。这是全新部署核对，不是 [#108](https://github.com/LeXwDeX/Tribunal/issues/108) 要求的真实数据升级验收。
+- [#120](https://github.com/LeXwDeX/Tribunal/issues/120) 要求覆盖率不下降；尚未用可比的前后测量证明覆盖率严格不下降。PR #112 的 77.90% 和 PR #128 的 79.07% 不是同一候选上的前后对比，不证明后续工作区的覆盖率没有下降。
 
 **v1.2.0 改动的自动化覆盖（测试代码存在；实际运行结果见上述记录）**
 
@@ -55,7 +57,11 @@ v1.2.0 尚未发布：版本说明属于待合并的文档改动，尚未打 tag
 
 **升级边界**
 
-- 迁移 `0016` 只对 `workflow_dossiers` 追加 `mr_title TEXT NOT NULL DEFAULT ''`，不改写已有行，不回填旧评审；迁移没有 down migration。升级前必须做一致性备份，回退只能恢复该备份，不能只回退镜像。完整边界见[迁移与回退边界](#迁移与回退边界)，操作步骤见 [从 v1.1.0 升级到 v1.2.0](operations.md#从-v110-升级到-v120)。
+- 迁移 `0016` 只对 `workflow_dossiers` 追加 `mr_title TEXT NOT NULL DEFAULT ''`，不改写已有行，不回填旧评审；迁移没有 down migration。升级前必须做一致性备份，回退只能恢复该备份，不能只回退镜像。
+- 迁移 `0017_mcp_config_seal` 在启动时把已存 MCP 配置加密到新列并清空旧明文列；错误密钥、损坏配置或写入失败会阻止启动。回退只能恢复升级前快照；当前列清空不保证历史 WAL、空闲页、快照或备份中的明文已擦除。详见 [MCP 配置加密升级](operations.md#mcp-配置加密升级v120)。
+- 迁移 `0018_dossier_project` 只按已关联 workflow 回填 dossier 项目归属，未知孤儿保持未知，不改快照内容。回退须恢复升级前快照。详见 [dossier 归属迁移](operations.md#dossier-归属迁移v120)。
+- 完整边界见[迁移与回退边界](#迁移与回退边界)，操作步骤见 [从 v1.1.0 升级到 v1.2.0](operations.md#从-v110-升级到-v120)。
+- ignore 保护范围扩大：默认 ignore 非空时，MCP 工具和全量图谱索引不执行，属于安全降级，不记 `tool_gaps`，也不改变 PASS。缺少版本化策略的旧工作流不续跑或重发。详见 [ignore 安全边界](operations.md#ignore-安全边界)。
 - 启动锁要求同一服务实例独占数据目录；平台和网络文件系统限制见 [部署与运维](operations.md#1-镜像内容与边界)。
 - 日志 `error` 和任务结算日志的 `reason` 已改名为 `error_class`；按旧字段配置的检索和告警需要调整。
 
@@ -98,16 +104,16 @@ v1.2.0 尚未发布：版本说明属于待合并的文档改动，尚未打 tag
 
 ## 迁移与回退边界
 
-- 迁移实现：`internal/store/sqlite/sqlite.go` 的 `migrate()`；当前工作区迁移文件为 `0001`、`0003`–`0018`，共 17 个（没有 `0002`），其中 `0017`、`0018` 属于 Unreleased。确认迁移结果时按已知版本集合核对，不把最大版本号当数量。
+- 迁移实现：`internal/store/sqlite/sqlite.go` 的 `migrate()`；当前工作区迁移文件为 `0001`、`0003`–`0018`，共 17 个（没有 `0002`），其中 `0017`、`0018` 属于 v1.2.0。确认迁移结果时按已知版本集合核对，不把最大版本号当数量。
 - 每个未应用迁移单独开事务；没有 down migration。启动时只跳过 `schema_migrations` 已记录的版本；数据库中已记录、但不在当前嵌入文件列表的高版本会被忽略而不报错。
 - `migration_rollback_test` 只覆盖 `0004` 单文件在“建表完成、记录版本前”失败时的事务回滚及之后重试；不覆盖整批升级失败、跨版本回滚或降级。
 - `0007` 给 `users` 增加 `disabled`，并新建空的 `project_grants`；升级不会给任何用户创建 grant。
 - `0008` 增加 `publication_error`；`0009` 增加 webhook 状态/事件/错误，并把已有 `hook_id` 的行标为 `unknown`；`0010` 增加 deferred review candidate 序号；`0011` 增加状态 note 与逐 note 表情的持久化表；`0012` 增加 webhook 归属和时间戳，已有 `hook_id` 的行视为本服务所有。
 - v1.1.0 新增 `0013_admin_bindings`、`0014_extension_defaults`、`0015_secret_migration`；启动时还会把已存项目凭据改写为新的加密格式，v1.0.0 读不了新格式。升级步骤见 [从 v1.0.0 升级到 v1.1.0](operations.md#从-v100-升级到-v110)。
 - v1.2.0 新增 `0016_dossier_mr_title`，只对 `workflow_dossiers` 执行 `ALTER TABLE ... ADD COLUMN mr_title TEXT NOT NULL DEFAULT ''`。它不改写已有行，不回填旧评审，也不改变既有索引；升级前保存的 dossier 标题为空。
-- Unreleased 新增 `0017_mcp_config_seal`，追加 MCP 密文列和密钥校验表。启动时的数据回填另开事务，失败保留旧配置；成功后旧程序不再能读取这些配置。当前列清空不保证历史磁盘页、WAL 或备份中的明文已擦除。
-- Unreleased 新增 `0018_dossier_project`，只根据已关联 workflow 回填 dossier 项目归属，不改压缩快照内容。无关联证明的历史孤儿保持未知，不猜测删除。两项迁移均没有 down migration。
-- 旧二进制可能打开已被新版本迁移的 schema，但它没有新权限逻辑，也读不了新格式密文，不能据此把“能启动”当作可安全回退。`0016` 之后旧二进制读取新 schema 不受支持；回退只能恢复升级前的一致性备份。
+- v1.2.0 新增 `0017_mcp_config_seal`，追加 MCP 密文列和密钥校验表。启动时的数据回填另开事务，失败保留旧配置；成功后旧程序不再能读取这些配置。当前列清空不保证历史磁盘页、WAL 或备份中的明文已擦除。
+- v1.2.0 新增 `0018_dossier_project`，只根据已关联 workflow 回填 dossier 项目归属，不改压缩快照内容。无关联证明的历史孤儿保持未知，不猜测删除。两项迁移均没有 down migration。
+- 旧二进制可能打开已被新版本迁移的 schema，但它没有新权限逻辑，也读不了新格式密文，不能据此把“能启动”当作可安全回退。v1.2.0 迁移之后旧二进制读取新 schema 不受支持；回退只能恢复升级前的一致性备份。
 - v1.2.0 升级前的一致性备份：核对生效的 `storage.dsn`、`workspace.root` 和全部实际挂载；停止旧服务后备份数据库、可能存在的 `-wal`/`-shm` 和所有工作区，并另存配置、镜像 digest 与 `REVIEW_MASTER_KEY`。只有符合默认路径和挂载前提时才能复制整个 `/app/data`；自定义路径、分离卷或额外/重叠挂载须按实际布局分别备份。运行中只复制数据库文件不是一致备份。恢复到匹配布局的新空位置，不覆盖旧数据、不混入旧 WAL，否则数据库与工作区可能来自不同时间点。操作步骤见 [SQLite 一致性备份与恢复](operations.md#7-sqlite-一致性备份与恢复)。
 
 ## 首次升级前记录（模板）
@@ -147,7 +153,7 @@ Tribunal 升级注意：镜像 tag 改为 `tribunal:*`；CLI 使用 `/app/tribun
 
 1. 完成前置记录和备份校验，确认旧镜像与备份均可恢复。
 2. 隔离入口，停止旧服务，保存升级前全量快照。
-3. 复制快照到隔离环境，启动新镜像；阻断外联，观察迁移、worker、recover 和 cleanup。确认迁移记录为 15 个已知版本（1、3–16），不把最大版本号当数量。
+3. 复制快照到隔离环境，启动新镜像；阻断外联，观察迁移、worker、recover 和 cleanup。确认迁移记录为 17 个已知版本（1、3–18），并核对 `0017_mcp_config_seal` 和 `0018_dossier_project`，不把最大版本号当数量。
 4. 隔离验证通过且已获部署授权后，在目标测试数据卷启动新镜像；等待 `/readyz` 200，检查日志和迁移错误。
 5. 先完成阶段 A 管理面检查，再执行阶段 B 授权；授权完成前不向普通用户开放业务入口。
 6. 按验收矩阵逐项记录；任何跨项目访问、误 PASS、数据损坏或迁移失败都触发回退评估。
