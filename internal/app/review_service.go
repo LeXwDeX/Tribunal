@@ -365,6 +365,9 @@ func (s *ReviewService) RunCandidate(ctx context.Context, job *jobs.Job) error {
 	}
 	cfg, err := resolveSecureReviewConfig(project, docs, s.reviewDefaults, s.profiles)
 	if err != nil {
+		if errors.Is(err, ErrInvalidRepoConfig) {
+			s.noteInvalidRepoConfig(ctx, token, payload.ProjectID, payload.MRIID)
+		}
 		return PermanentJob(err)
 	}
 	if reason := reviewFilterReason(payload.Trigger, mr, project, cfg.Settings); reason != "" {
@@ -429,6 +432,18 @@ func (s *ReviewService) collectFilterInputs(ctx context.Context, project *store.
 }
 
 // RunReview executes one review.run job.
+// noteInvalidRepoConfig leaves a visible explanation on the MR. It is also
+// used by the candidate path so automatic webhooks do not fail silently.
+func (s *ReviewService) noteInvalidRepoConfig(ctx context.Context, token string, projectID, mrIID int64) {
+	if token == "" {
+		return
+	}
+	if _, err := s.gitlab.CreateMRNote(context.WithoutCancel(ctx), token, projectID, mrIID, invalidRepoConfigNote); err != nil {
+		s.logger.Warn("invalid repository config note failed",
+			"project_id", projectID, "mr_iid", mrIID, "error_class", errclass.Of(err))
+	}
+}
+
 func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error) {
 	var payload reviewRunPayload
 	if err := decodeReviewPayload(job.Payload, &payload); err != nil {
@@ -469,12 +484,7 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 		}
 		if errors.Is(err, ErrInvalidRepoConfig) {
 			detail = invalidRepoConfigDetail
-			if token != "" {
-				if _, noteErr := s.gitlab.CreateMRNote(context.WithoutCancel(ctx), token, payload.ProjectID, payload.MRIID, invalidRepoConfigNote); noteErr != nil {
-					s.logger.Warn("invalid repository config note failed",
-						"project_id", payload.ProjectID, "mr_iid", payload.MRIID, "error_class", errclass.Of(noteErr))
-				}
-			}
+			s.noteInvalidRepoConfig(ctx, token, payload.ProjectID, payload.MRIID)
 		}
 		s.settleReviewStatus(ctx, payload.ProjectID, payload.MRIID, payload.Generation,
 			job.Attempts, payload.HeadSHA, payload.Profile, state, detail,

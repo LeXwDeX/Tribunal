@@ -710,3 +710,15 @@ func TestUsernameBootstrapAdmins(t *testing.T) {
 		t.Fatalf("id-only entries = %v, want none", got)
 	}
 }
+
+func TestValidateRejectsUnsupportedIgnorePatterns(t *testing.T) {
+	setRequiredEnv(t)
+	path := writeConfig(t, "config.yaml", validGitLab+`review_defaults:
+  ignore: ["!keep"]
+`)
+	cfg := loadConfig(t, path)
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "review_defaults.ignore") {
+		t.Fatalf("Validate() = %v, want review_defaults.ignore error", err)
+	}
+}

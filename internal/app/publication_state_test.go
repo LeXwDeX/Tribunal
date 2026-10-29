@@ -818,3 +818,24 @@ func TestRepublishFailedWorkflowRejectsChangedConfig(t *testing.T) {
 		t.Fatalf("changed-config republish wrote %d failure notes", len(f.gitlab.notes))
 	}
 }
+
+func TestRepublishInvalidRepoConfigFailsPermanently(t *testing.T) {
+	f := newReviewFixture(t, reviewTestHead)
+	workflow := reviewWithFailedNote(t, f, "job-invalid-config-publish")
+	f.gitlab.docs[".gitlab-review.yml"] = "ignore: [\n"
+
+	err := f.publisher.Republish(context.Background(), workflow.ID)
+	if err == nil || !IsPermanentJob(err) || !errors.Is(err, ErrInvalidRepoConfig) {
+		t.Fatalf("Republish error = %v, want a permanent ErrInvalidRepoConfig", err)
+	}
+	updated, err := f.db.GetWorkflow(context.Background(), workflow.ID)
+	if err != nil {
+		t.Fatalf("GetWorkflow: %v", err)
+	}
+	if updated.PublicationState != store.WorkflowPublicationFailed {
+		t.Fatalf("publication state = %q, want failed", updated.PublicationState)
+	}
+	if err := f.publisher.Republish(context.Background(), workflow.ID); err == nil {
+		t.Fatal("a second republish retried an invalid configuration")
+	}
+}

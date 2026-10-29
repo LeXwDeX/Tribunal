@@ -47,8 +47,8 @@ func TestRecoverChecksIgnorePolicyWithoutConfigHash(t *testing.T) {
 			if !invalidConfig && err != nil {
 				t.Fatal(err)
 			}
-			if invalidConfig && err == nil {
-				t.Fatal("recovery accepted unreadable ignore configuration")
+			if invalidConfig && err != nil {
+				t.Fatalf("recovery did not settle unreadable ignore configuration: %v", err)
 			}
 			if f.runner.count() != 0 || f.git.addCalls != 0 || countPublicationEffects(f) != (publicationEffects{}) {
 				t.Fatalf("unsafe recovery: agent=%d worktrees=%d effects=%+v", f.runner.count(), f.git.addCalls, countPublicationEffects(f))
@@ -60,8 +60,8 @@ func TestRecoverChecksIgnorePolicyWithoutConfigHash(t *testing.T) {
 			if !invalidConfig && (wf.Status != "cancelled" || wf.PublicationState != store.WorkflowPublicationSkipped) {
 				t.Fatalf("changed policy left workflow active: %+v", wf)
 			}
-			if invalidConfig && wf.Status != "pending" {
-				t.Fatalf("configuration read failure lost recoverable workflow: %+v", wf)
+			if invalidConfig && wf.Status != "cancelled" {
+				t.Fatalf("configuration read failure left workflow active: %+v", wf)
 			}
 			after, err := f.db.GetWorkflowDossier(ctx, id)
 			if err != nil || after.Hash != hash || !bytes.Equal(after.Data, raw) {

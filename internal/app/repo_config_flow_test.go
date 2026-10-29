@@ -503,8 +503,8 @@ func TestRepoConfigInvalidYAMLFailsClosed(t *testing.T) {
 	if job := f.activateCandidate(t, candidate); job != nil {
 		t.Fatalf("invalid repository config queued review: %+v", job)
 	}
-	if f.gitlab.noteCount() != 0 || f.runner.count() != 0 {
-		t.Fatal("invalid repository config ran or published a review")
+	if f.gitlab.noteCount() != 1 || f.runner.count() != 0 {
+		t.Fatalf("invalid repository config: notes=%d runs=%d", f.gitlab.noteCount(), f.runner.count())
 	}
 }
 

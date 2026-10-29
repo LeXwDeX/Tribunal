@@ -19,6 +19,10 @@ func TestIgnoreMatcherNormalizesGitignoreForms(t *testing.T) {
 		{"secret/", "nested/secret/a.go", true},
 		{"a/**/vendor/", "a/vendor/x.go", true},
 		{"a/**/vendor/", "a/b/vendor/x.go", true},
+		{"a/**/vendor/", "x/a/vendor/x.go", false},
+		{"/private", "nested/private/a.go", false},
+		{"/vendor/", "nested/vendor/a.go", false},
+		{"vendor/", "nested/vendor/a.go", true},
 		{"*.lock", "nested/a.lock", true},
 	}
 	for _, tc := range tests {

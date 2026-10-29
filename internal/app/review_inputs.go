@@ -235,6 +235,9 @@ func resolveSecureReviewConfig(project *store.Project, docs review.RepoDocs, def
 	if err != nil {
 		return effectiveReviewConfig{}, errors.New("app: project settings cannot be read safely")
 	}
+	if err := review.ValidateIgnorePatterns(settings.Ignore); err != nil {
+		return effectiveReviewConfig{}, fmt.Errorf("%w: stored ignore policy: %v", ErrInvalidRepoConfig, err)
+	}
 	if settings.AllowRepoConfig && strings.TrimSpace(docs.GitLabReviewConfig) != "" {
 		var repo repoReviewConfig
 		if err := yaml.Unmarshal([]byte(docs.GitLabReviewConfig), &repo); err != nil {

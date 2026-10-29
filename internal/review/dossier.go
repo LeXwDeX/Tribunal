@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/LeXwDeX/tribunal/internal/config"
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
 )
 
@@ -207,36 +208,39 @@ func (m *IgnoreMatcher) MatchPath(clean string) bool {
 // ValidateIgnorePatterns rejects syntax the matcher cannot express. Saves must
 // return an error instead of silently dropping a rule that looks protective.
 func ValidateIgnorePatterns(patterns []string) error {
-	for i, raw := range patterns {
-		pattern := strings.TrimSpace(raw)
-		if pattern == "" {
-			continue
-		}
-		if strings.HasPrefix(pattern, "!") {
-			return fmt.Errorf("ignore pattern %d: negation (!) is not supported", i+1)
-		}
-		if strings.ContainsAny(pattern, "[]") {
-			return fmt.Errorf("ignore pattern %d: character classes are not supported", i+1)
-		}
-	}
-	return nil
+	return config.ValidateIgnorePatterns(patterns)
 }
 
-// normalizeIgnorePattern accepts common gitignore spellings: a leading "/" or
-// "./" anchors at the repository root, and a trailing "/" matches a directory
-// at any depth.
-func normalizeIgnorePattern(raw string) string {
+// normalizeIgnorePattern accepts common gitignore spellings. A leading "/" or
+// "./" anchors the rule at the repository root. A trailing "/" matches a
+// directory: a bare directory name matches at any depth, while a rule that
+// already contains a path keeps its scope.
+func normalizeIgnorePattern(raw string) (string, bool) {
 	pattern := strings.TrimSpace(raw)
+	anchored := false
 	for strings.HasPrefix(pattern, "./") {
 		pattern = pattern[2:]
+		anchored = true
 	}
-	for strings.HasPrefix(pattern, "/") {
-		pattern = pattern[1:]
+	if strings.HasPrefix(pattern, "/") {
+		pattern = strings.TrimPrefix(pattern, "/")
+		anchored = true
+	}
+	if pattern == "" {
+		return "", false
 	}
 	if strings.HasSuffix(pattern, "/") {
-		pattern = "**/" + strings.TrimSuffix(pattern, "/") + "/**"
+		pattern = strings.TrimSuffix(pattern, "/")
+		if pattern == "" {
+			return "", false
+		}
+		singleDir := !strings.Contains(pattern, "/")
+		pattern += "/**"
+		if singleDir && !anchored {
+			pattern = "**/" + pattern
+		}
 	}
-	return pattern
+	return pattern, anchored
 }
 
 // IgnoreMatcher implements the same glob semantics as diff collection.
@@ -259,17 +263,17 @@ func NewIgnoreMatcher(patterns []string) *IgnoreMatcher {
 			out.catchAll = true
 			continue
 		}
-		pattern = normalizeIgnorePattern(pattern)
-		if pattern == "" {
+		normalized, anchored := normalizeIgnorePattern(pattern)
+		if normalized == "" {
 			continue
 		}
-		re, err := compileIgnoreGlob(pattern)
+		re, err := compileIgnoreGlob(normalized)
 		if err != nil {
 			out.catchAll = true
 			continue
 		}
 		out.patterns = append(out.patterns, re)
-		if !strings.Contains(pattern, "/") {
+		if !anchored && !strings.Contains(normalized, "/") {
 			if re, err := compileIgnoreGlob("**/" + pattern); err == nil {
 				out.basename = append(out.basename, re)
 			}
