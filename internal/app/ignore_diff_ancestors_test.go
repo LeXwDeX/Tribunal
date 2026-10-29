@@ -90,3 +90,33 @@ func TestIgnoreUnicodeDiffNeverEntersDossier(t *testing.T) {
 		}
 	}
 }
+
+func TestIgnoreDiffCoversNormalizedForms(t *testing.T) {
+	tests := []struct {
+		pattern string
+		path    string
+		ignored bool
+	}{
+		{"/private/**", "private/a.go", true},
+		{"/private/**", "nested/private/a.go", false},
+		{"./private/**", "private/a.go", true},
+		{"vendor/", "nested/vendor/a.go", true},
+		{"a/**/vendor/", "a/x/vendor/a.go", true},
+		{"a/**/vendor/", "x/a/vendor/a.go", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.pattern+":"+tc.path, func(t *testing.T) {
+			files, ignored, _, warnings := buildReviewFiles(
+				[]gitlab.FileDiff{{NewPath: tc.path, Diff: "+x\n"}}, []string{tc.pattern}, 10, 100)
+			if len(warnings) != 0 {
+				t.Fatalf("warnings = %v", warnings)
+			}
+			if got := len(ignored) == 1 && len(files) == 0; got != tc.ignored {
+				t.Fatalf("ignored = %v, want %v (files=%+v ignored=%v)", got, tc.ignored, files, ignored)
+			}
+			if !tc.ignored && (len(files) != 1 || files[0].Path != tc.path) {
+				t.Fatalf("allowed path was filtered: files=%+v ignored=%v", files, ignored)
+			}
+		})
+	}
+}

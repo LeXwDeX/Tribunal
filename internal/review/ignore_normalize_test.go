@@ -85,18 +85,31 @@ func TestDossierIgnoresPathNormalizesCommonForms(t *testing.T) {
 }
 
 func TestSandboxReadDeniesNormalizedIgnoreForms(t *testing.T) {
-	for _, pattern := range []string{"/private/**", "./private/**", "private/"} {
-		t.Run(pattern, func(t *testing.T) {
+	tests := []struct {
+		pattern string
+		path    string
+		denied  bool
+	}{
+		{"/private/**", "private/a.go", true},
+		{"./private/**", "private/a.go", true},
+		{"private/", "private/a.go", true},
+		{"private/", "nested/private/a.go", true},
+		{"a/**/vendor/", "a/x/vendor/a.go", true},
+		{"a/**/vendor/", "x/a/vendor/a.go", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.pattern+":"+tc.path, func(t *testing.T) {
 			head := t.TempDir()
-			if err := os.MkdirAll(filepath.Join(head, "private"), 0700); err != nil {
+			full := filepath.Join(head, filepath.FromSlash(tc.path))
+			if err := os.MkdirAll(filepath.Dir(full), 0700); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(head, "private", "a.go"), []byte("CANARY\n"), 0600); err != nil {
+			if err := os.WriteFile(full, []byte("CANARY\n"), 0600); err != nil {
 				t.Fatal(err)
 			}
 			e := &Executor{deps: ExecutorDeps{Dossier: &Dossier{
 				HeadDir:      head,
-				IgnorePolicy: &IgnorePolicy{Version: IgnorePolicyVersion, Patterns: []string{pattern}},
+				IgnorePolicy: &IgnorePolicy{Version: IgnorePolicyVersion, Patterns: []string{tc.pattern}},
 			}}}
 			sb, err := e.sandboxFor(nil)
 			if err != nil {
@@ -104,8 +117,9 @@ func TestSandboxReadDeniesNormalizedIgnoreForms(t *testing.T) {
 			}
 			defer sb.Close()
 			root := sb.RootNames()[0]
-			if err := sb.ValidateLineRange(root, "private/a.go", 1, 1); err == nil {
-				t.Fatalf("sandbox read allowed for %q", pattern)
+			err = sb.ValidateLineRange(root, tc.path, 1, 1)
+			if (err != nil) != tc.denied {
+				t.Fatalf("ValidateLineRange(%q) = %v, denied=%v", tc.path, err, tc.denied)
 			}
 		})
 	}

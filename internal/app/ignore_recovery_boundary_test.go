@@ -76,6 +76,10 @@ func TestRecoverChecksIgnorePolicyWithoutConfigHash(t *testing.T) {
 				if f.gitlab.noteCount() != 1 {
 					t.Fatalf("second Recover repeated the explanation: %d", f.gitlab.noteCount())
 				}
+				status, err := f.db.GetReviewStatus(ctx, 42, 7)
+				if err != nil || status.State != reviewStatusFailed || status.Detail != invalidRepoConfigDetail {
+					t.Fatalf("review status = %+v, %v", status, err)
+				}
 			}
 			after, err := f.db.GetWorkflowDossier(ctx, id)
 			if err != nil || after.Hash != hash || !bytes.Equal(after.Data, raw) {
