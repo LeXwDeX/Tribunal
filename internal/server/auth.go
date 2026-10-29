@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -135,7 +136,7 @@ func parseBootstrapAdmins(entries []string) (map[string]struct{}, map[int64]stru
 }
 
 func (a *authService) enabled() bool {
-	return a.clientID != "" && a.clientSecret != "" && a.baseURL != ""
+	return strings.TrimSpace(a.clientID) != "" && strings.TrimSpace(a.clientSecret) != "" && a.baseURL != ""
 }
 
 func (a *authService) redirectURI(r *http.Request) string {
@@ -244,14 +245,47 @@ func principalFrom(ctx context.Context) (principal, bool) {
 	return value, ok
 }
 
+// wantsHTML reports a browser navigation. API clients keep the JSON error.
+// text/html;q=0 explicitly rejects HTML and must not select the redirect.
+func wantsHTML(r *http.Request) bool {
+	for _, part := range strings.Split(r.Header.Get("Accept"), ",") {
+		mediaType, params, err := mime.ParseMediaType(strings.TrimSpace(part))
+		if err != nil || mediaType != "text/html" {
+			continue
+		}
+		if q, ok := params["q"]; ok {
+			if value, err := strconv.ParseFloat(q, 64); err == nil && value == 0 {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// authError redirects browser failures back to the console with a fixed code;
+// API clients receive the existing JSON error.
+func authError(w http.ResponseWriter, r *http.Request, status int, code, message, redirectCode string) {
+	if wantsHTML(r) {
+		http.Redirect(w, r, "/?auth_error="+url.QueryEscape(redirectCode), http.StatusSeeOther)
+		return
+	}
+	writeError(w, r, status, code, message, nil)
+}
+
+func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]any{"oauth_enabled": s.auth.enabled()})
+}
+
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if !s.auth.enabled() {
-		writeError(w, r, http.StatusServiceUnavailable, "internal", "OAuth login is not configured", nil)
+		authError(w, r, http.StatusServiceUnavailable, "internal", "OAuth login is not configured", "oauth_disabled")
 		return
 	}
 	state, err := s.auth.issueState()
 	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "internal", "internal error", nil)
+		authError(w, r, http.StatusInternalServerError, "internal", "internal error", "oauth_failed")
 		return
 	}
 	query := url.Values{
@@ -276,12 +310,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	if !s.auth.enabled() {
-		writeError(w, r, http.StatusServiceUnavailable, "internal", "OAuth login is not configured", nil)
+		authError(w, r, http.StatusServiceUnavailable, "internal", "OAuth login is not configured", "oauth_disabled")
 		return
 	}
 	query := r.URL.Query()
 	if query.Get("error") != "" {
-		writeError(w, r, http.StatusBadRequest, "bad_request", "GitLab login was not completed", nil)
+		authError(w, r, http.StatusBadRequest, "bad_request", "GitLab login was not completed", "oauth_denied")
 		return
 	}
 	state := query.Get("state")
@@ -289,19 +323,19 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	stateCookie, cookieErr := r.Cookie(stateCookieName)
 	if state == "" || code == "" || cookieErr != nil ||
 		!constantTimeEqualStrings(stateCookie.Value, state) || !s.auth.validState(state) {
-		writeError(w, r, http.StatusBadRequest, "bad_request", "invalid or expired login state", nil)
+		authError(w, r, http.StatusBadRequest, "bad_request", "invalid or expired login state", "oauth_state")
 		return
 	}
 	s.clearStateCookie(w)
 
 	accessToken, err := s.exchangeCode(r.Context(), code, s.auth.redirectURI(r))
 	if err != nil {
-		writeError(w, r, http.StatusUnauthorized, "unauthenticated", "GitLab authentication failed", nil)
+		authError(w, r, http.StatusUnauthorized, "unauthenticated", "GitLab authentication failed", "oauth_failed")
 		return
 	}
 	user, err := s.fetchUser(r.Context(), accessToken)
 	if err != nil {
-		writeError(w, r, http.StatusUnauthorized, "unauthenticated", "GitLab authentication failed", nil)
+		authError(w, r, http.StatusUnauthorized, "unauthenticated", "GitLab authentication failed", "oauth_failed")
 		return
 	}
 	user.Role = s.roleFor(r.Context(), user)
@@ -309,7 +343,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	// Rotate any existing session before issuing the new one. A failed delete
 	// aborts login: issuing a second cookie would leave a live old session.
 	if err := s.deleteSession(r.Context(), r); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "internal", "internal error", nil)
+		authError(w, r, http.StatusInternalServerError, "internal", "internal error", "oauth_failed")
 		return
 	}
 	entry, err := s.createSession(r.Context(), user)
@@ -317,10 +351,10 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, store.ErrNotFound) {
 			// A disabled or removed account cannot log in. The response does not
 			// distinguish the two cases.
-			writeError(w, r, http.StatusForbidden, "forbidden", "account is not allowed to sign in", nil)
+			authError(w, r, http.StatusForbidden, "forbidden", "account is not allowed to sign in", "oauth_forbidden")
 			return
 		}
-		writeError(w, r, http.StatusInternalServerError, "internal", "internal error", nil)
+		authError(w, r, http.StatusInternalServerError, "internal", "internal error", "oauth_failed")
 		return
 	}
 	s.setSessionCookie(w, s.auth.sealSession(entry.id))
