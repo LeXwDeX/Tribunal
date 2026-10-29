@@ -289,7 +289,7 @@ describe('restore default block bindings', () => {
     await waitFor(() => expect(confirm).toHaveAttribute('aria-busy', 'true'))
     expect(within(dialog).getByRole('button', { name: '取消' })).toBeDisabled()
     expect(finish).toBeDefined()
-    finish?.(jsonResponse({ error: { code: 'internal', message: 'boom' } }, 500))
+    finish?.(jsonResponse({ error: { code: 'bad_request', message: 'boom' } }, 400))
 
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('恢复失败')
     expect(within(dialog).getByRole('button', { name: '确认恢复' })).toBeEnabled()

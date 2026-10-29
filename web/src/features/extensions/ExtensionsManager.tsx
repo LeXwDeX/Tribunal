@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import {
   createMcpServer, deleteMcpServer, deleteSkill, importMcpServers, listBindings, listMcpServers,
   listSkills, registerSkillDirectory, restoreDefaultBindings, saveBinding, setSkillEnabled, testMcpServer,
@@ -114,6 +114,26 @@ export function ExtensionsManager({
 
   const invalidateServers = () => queryClient.invalidateQueries({ queryKey: ['mcp-servers', scope, projectId] })
   const invalidateSkills = () => queryClient.invalidateQueries({ queryKey: ['skills', scope, projectId] })
+  // Restore must not treat an invalidation promise as a completed read: a
+  // paused offline query or an inactive query resolves without fetching. Cancel
+  // the old in-flight read, mark the cache stale, then fetch every loaded page
+  // explicitly even without observers.
+  const refreshBindings = async () => {
+    const queryKey = ['block-bindings', scope, projectId] as const
+    await queryClient.cancelQueries({ queryKey })
+    await queryClient.invalidateQueries({ queryKey, refetchType: 'none' })
+    const cached = queryClient.getQueryData<{ pages?: unknown[] }>(queryKey)
+    const pages = Array.isArray(cached?.pages) && cached.pages.length ? cached.pages.length : 1
+    await queryClient.fetchInfiniteQuery({
+      queryKey,
+      queryFn: ({ pageParam }) => listBindings(scope, projectId, pageParam),
+      initialPageParam: undefined as string | undefined,
+      getNextPageParam: (lastPage) => lastPage?.next_cursor || undefined,
+      pages,
+      staleTime: 0,
+      retry: false,
+    })
+  }
   const invalidateBindings = () => queryClient.invalidateQueries({ queryKey: ['block-bindings', scope, projectId] })
 
   const runTest = async (server: McpServer) => {
@@ -249,6 +269,7 @@ export function ExtensionsManager({
           skills={skills.items}
           testResults={testResults}
           onSaved={invalidateBindings}
+          refreshBindings={refreshBindings}
         />
       ) : null}
       </div>
@@ -489,6 +510,92 @@ function SkillsTab({
 type BindingDraft = { mcp_tools: string[]; skills: string[] }
 type BindingDrafts = { baseline: Record<string, BindingDraft>; local: Record<string, BindingDraft> }
 type RestoreTarget = 'all' | string
+type RestorePhase = 'posting' | 'refreshing' | 'loaded' | 'failed'
+type RestoreOperation = { id: string; phase: RestorePhase; error?: unknown; uncertain?: boolean; stale?: boolean }
+type RestoreRegistry = { operations: Record<string, RestoreOperation> }
+type RestoreView = 'idle' | 'posting' | 'refreshing' | 'loaded' | 'failed'
+
+// Restore survives BindingsTab remounts: the operation lives in the QueryClient
+// cache, keyed by scope, until the refreshed snapshot is merged by a mounted tab.
+const restoreRegistryKey = (scope: 'platform' | 'project', projectId?: number) => (
+  ['block-bindings-restore', scope, projectId] as const
+)
+
+let restoreSequence = 0
+function nextRestoreOperationId(): string {
+  restoreSequence += 1
+  return `${Date.now()}-${restoreSequence}`
+}
+
+function updateRestoreOperations(
+  queryClient: QueryClient,
+  key: readonly unknown[],
+  update: (operations: Record<string, RestoreOperation>) => Record<string, RestoreOperation>,
+) {
+  queryClient.setQueryData<RestoreRegistry>(key, (current) => ({
+    operations: update({ ...(current?.operations || {}) }),
+  }))
+}
+
+function addRestoreOperation(queryClient: QueryClient, key: readonly unknown[], id: string) {
+  updateRestoreOperations(queryClient, key, (operations) => ({
+    ...operations,
+    [id]: { id, phase: 'posting' },
+  }))
+}
+
+function setRestorePhase(
+  queryClient: QueryClient,
+  key: readonly unknown[],
+  ids: string[],
+  phase: RestorePhase,
+  options: { error?: unknown; uncertain?: boolean; stale?: boolean } = {},
+) {
+  updateRestoreOperations(queryClient, key, (operations) => {
+    for (const id of ids) {
+      const previous = operations[id]
+      if (!previous) continue
+      const next: RestoreOperation = { id, phase }
+      if (previous.uncertain || options.uncertain) next.uncertain = true
+      if (previous.stale || options.stale) next.stale = true
+      if (phase === 'failed') next.error = options.error
+      operations[id] = next
+    }
+    return operations
+  })
+}
+
+// A lost, timed-out, aborted, undecodable or gateway response does not prove
+// the restore was rejected: the server may have committed it before the
+// response was lost.
+function isUncertainRestoreError(error: unknown): boolean {
+  if (error instanceof ApiError) {
+    return error.status === 0 || error.status === 408 || error.status >= 500
+  }
+  return true
+}
+
+function removeRestoreOperations(queryClient: QueryClient, key: readonly unknown[], ids: string[]) {
+  updateRestoreOperations(queryClient, key, (operations) => {
+    for (const id of ids) delete operations[id]
+    return operations
+  })
+}
+
+function bindingsFromCache(
+  queryClient: QueryClient,
+  scope: 'platform' | 'project',
+  projectId?: number,
+): BlockBinding[] {
+  const data = queryClient.getQueryData<{ pages?: Array<{ bindings?: BlockBinding[] }> }>(
+    ['block-bindings', scope, projectId],
+  )
+  const items: BlockBinding[] = []
+  for (const page of data?.pages || []) {
+    if (Array.isArray(page?.bindings)) items.push(...page.bindings)
+  }
+  return items
+}
 
 const emptyDraft: BindingDraft = { mcp_tools: [], skills: [] }
 
@@ -543,7 +650,7 @@ function mergeBindingDrafts(current: BindingDrafts, items: BlockBinding[]): Bind
 }
 
 function BindingsTab({
-  canWrite, scope, projectId, bindingState, servers, skills, testResults, onSaved,
+  canWrite, scope, projectId, bindingState, servers, skills, testResults, onSaved, refreshBindings,
 }: {
   canWrite: boolean
   scope: 'platform' | 'project'
@@ -553,12 +660,16 @@ function BindingsTab({
   skills: Skill[]
   testResults: Record<string, { tools?: McpTool[]; error?: string; pending?: boolean }>
   onSaved: () => Promise<void> | void
+  refreshBindings: () => Promise<void>
 }) {
   const toast = useToast()
+  const queryClient = useQueryClient()
   const bindingSnapshot = JSON.stringify(bindingState.items)
   const [drafts, setDrafts] = useState<BindingDrafts>(() => (
     mergeBindingDrafts({ baseline: {}, local: {} }, bindingState.items)
   ))
+  // Tracks the snapshot that is already merged into the editable drafts.
+  const [draftSnapshot, setDraftSnapshot] = useState(bindingSnapshot)
   const appliedSnapshot = useRef(bindingSnapshot)
   const { baseline, local } = drafts
   const [saving, setSaving] = useState(false)
@@ -567,10 +678,71 @@ function BindingsTab({
   const [restorePreview, setRestorePreview] = useState<RestoreDefaultsResult | null>(null)
   const [previewPending, setPreviewPending] = useState(false)
   const [previewError, setPreviewError] = useState<unknown>(null)
-  const [restorePending, setRestorePending] = useState(false)
   const [restoreError, setRestoreError] = useState<unknown>(null)
   const [restoreConflict, setRestoreConflict] = useState(false)
   const restoreRequest = useRef(0)
+  const restoreKey = restoreRegistryKey(scope, projectId)
+  const restoreQuery = useQuery<RestoreRegistry>({
+    queryKey: restoreKey,
+    queryFn: () => Promise.resolve({ operations: {} }),
+    enabled: false,
+    gcTime: Infinity,
+  })
+  const restoreOps = Object.values(restoreQuery.data?.operations || {})
+  const restorePending = restoreOps.some((operation) => operation.phase === 'posting')
+  const restoring = restoreOps.length > 0
+  const restoreFailed = restoreOps.find((operation) => operation.phase === 'failed')
+  const restoreRefreshing = restoreOps.some((operation) => operation.phase === 'refreshing')
+  const restoreLoaded = restoreOps.some((operation) => operation.phase === 'loaded')
+  const restoreUncertain = restoreOps.some((operation) => operation.uncertain)
+  const restoreStale = restoreOps.some((operation) => operation.stale)
+  const restoreView: RestoreView = restoreRefreshing
+    ? 'refreshing'
+    : restoreFailed
+      ? 'failed'
+      : restoreLoaded
+        ? 'loaded'
+        : restorePending
+          ? 'posting'
+          : 'idle'
+  const restoreReadFailed = restoreView === 'failed' || restoreView === 'loaded'
+  const restoreTitle = restoreReadFailed
+    ? restoreStale
+      ? '预览已过期，读取绑定失败'
+      : restoreUncertain
+        ? '恢复结果不确定，读取绑定失败'
+        : '恢复已完成，但读取绑定失败'
+    : restoreView === 'posting'
+      ? '正在恢复默认授权'
+      : restoreStale
+        ? '预览已过期，正在重新读取绑定'
+        : restoreUncertain
+          ? '恢复结果不确定，正在重新读取绑定'
+          : '恢复已完成，正在重新读取绑定'
+  const restoreHint = restoreReadFailed
+    ? restoreStale
+      ? '预览已过期，不会重复提交恢复。重新读取成功后才能继续编辑绑定。'
+      : restoreUncertain
+        ? '服务器可能已提交恢复，不会重复提交。请核对实际绑定；重新读取成功后才能继续编辑绑定。'
+        : '恢复请求已成功，不会重复提交。重新读取成功后才能继续编辑绑定。'
+    : restoreUncertain
+      ? '服务器可能已提交恢复，不会重复提交。请核对实际绑定；重新读取成功后才能继续编辑绑定。'
+      : '恢复请求不会重复提交；重新读取成功后才能继续编辑绑定。'
+  const restoreStatusText = restoreView === 'failed'
+    ? restoreStale
+      ? '预览已过期，读取绑定失败。重新读取成功后才能继续编辑绑定。'
+      : restoreUncertain
+        ? '恢复结果不确定，读取绑定失败。重新读取成功后才能继续编辑绑定。'
+        : '恢复已完成，但读取绑定失败。重新读取成功后才能继续编辑绑定。'
+    : restoreView === 'posting'
+      ? '正在恢复默认授权…'
+      : restoreView === 'loaded'
+        ? restoreStale
+          ? '正在应用最新绑定…'
+          : restoreUncertain ? '正在应用服务器绑定…' : '正在应用新的绑定…'
+        : restoreStale
+          ? '预览已过期，正在读取最新绑定…'
+          : restoreUncertain ? '恢复结果不确定，正在读取服务器绑定…' : '默认绑定已恢复，正在读取新的绑定…'
 
   // Merge each distinct server snapshot into the baseline while keeping dirty
   // drafts. The content key avoids merging the same page data repeatedly when
@@ -579,7 +751,19 @@ function BindingsTab({
     if (appliedSnapshot.current === bindingSnapshot) return
     appliedSnapshot.current = bindingSnapshot
     setDrafts((current) => mergeBindingDrafts(current, bindingState.items))
+    setDraftSnapshot(bindingSnapshot)
   }, [bindingSnapshot, bindingState.items])
+
+  // A loaded restore may outlive this component. Only release its lock after
+  // the cached list is rendered into the drafts, so no stale grant is editable.
+  const loadedRestoreIds = restoreOps.filter((operation) => operation.phase === 'loaded').map((operation) => operation.id)
+  const cachedBindingSnapshot = JSON.stringify(bindingsFromCache(queryClient, scope, projectId))
+  useLayoutEffect(() => {
+    if (!loadedRestoreIds.length) return
+    if (!bindingState.isSuccess || bindingState.isFetching || bindingState.isError) return
+    if (draftSnapshot !== bindingSnapshot || bindingSnapshot !== cachedBindingSnapshot) return
+    removeRestoreOperations(queryClient, restoreKey, loadedRestoreIds)
+  }, [loadedRestoreIds, bindingState.isSuccess, bindingState.isFetching, bindingState.isError, draftSnapshot, bindingSnapshot, cachedBindingSnapshot, queryClient, restoreKey])
 
   const rowNames = useMemo(() => {
     const names = [...blocks]
@@ -605,7 +789,7 @@ function BindingsTab({
   }, [bindingState.items, skills])
 
   const toggle = (block: string, group: 'mcp_tools' | 'skills', value: string) => {
-    if (!canWrite) return
+    if (!canWrite || restoring) return
     setDrafts((current) => {
       const existing = current.local[block] || emptyDraft
       const values = new Set(existing[group])
@@ -643,7 +827,7 @@ function BindingsTab({
   }
 
   const openRestore = (target: RestoreTarget) => {
-    if (!canRestore || dirty || saving) return
+    if (!canRestore || dirty || saving || restoring) return
     setRestoreError(null)
     setRestoreTarget(target)
     void previewRestore(target)
@@ -660,33 +844,81 @@ function BindingsTab({
     setRestoreConflict(false)
   }
 
-  const confirmRestore = async () => {
-    if (!restoreTarget || !restorePreview || restoreConflict || restorePending) return
-    setRestorePending(true)
-    setRestoreError(null)
+  const runRestoreRefresh = async (ids: string[]) => {
+    if (!ids.length) return
+    // Only refetch the list: never repeat the write when its outcome is
+    // uncertain or the read failed. Operations live in the shared registry, so
+    // an unmounted instance cannot drop this lock.
+    setRestorePhase(queryClient, restoreKey, ids, 'refreshing')
     try {
-      const result = await restoreDefaultBindings(restoreTarget === 'all'
-        ? { dry_run: false, preview_token: restorePreview.preview_token }
-        : { blocks: [restoreTarget], dry_run: false, preview_token: restorePreview.preview_token })
-      toast.push('success', result.restart_required
-        ? '默认绑定已恢复，重启服务后生效。'
-        : '默认绑定已恢复。')
-      restoreRequest.current += 1
-      setRestoreTarget(null)
-      setRestorePreview(null)
-      await onSaved()
+      await refreshBindings()
+      setRestorePhase(queryClient, restoreKey, ids, 'loaded')
     } catch (error) {
-      // A stale preview is never retried automatically: the admin decides
-      // when to preview the new state and confirm again.
-      if (error instanceof ApiError && error.status === 409) setRestoreConflict(true)
-      else setRestoreError(error)
-    } finally {
-      setRestorePending(false)
+      setRestorePhase(queryClient, restoreKey, ids, 'failed', { error })
     }
   }
 
+  const retryRestoreReads = () => {
+    const ids = restoreOps
+      .filter((operation) => operation.phase === 'failed' || operation.phase === 'loaded')
+      .map((operation) => operation.id)
+    if (ids.length) void runRestoreRefresh(ids)
+  }
+
+  const confirmRestore = async () => {
+    if (!restoreTarget || !restorePreview || restoreConflict || restoring) return
+    const operationId = nextRestoreOperationId()
+    addRestoreOperation(queryClient, restoreKey, operationId)
+    setRestoreError(null)
+    let result: RestoreDefaultsResult
+    try {
+      const response: unknown = await restoreDefaultBindings(restoreTarget === 'all'
+        ? { dry_run: false, preview_token: restorePreview.preview_token }
+        : { blocks: [restoreTarget], dry_run: false, preview_token: restorePreview.preview_token })
+      // A proxy can replace JSON with HTML, a 204, or null after the server has
+      // already applied the restore. Validate inside the try so this follows
+      // the uncertain-read path instead of showing success or hanging.
+      if (!response || typeof response !== 'object'
+        || typeof (response as { restart_required?: unknown }).restart_required !== 'boolean') {
+        throw new Error('恢复响应格式无效。')
+      }
+      result = response as RestoreDefaultsResult
+    } catch (error) {
+      if (isUncertainRestoreError(error)) {
+        // The write may have reached the server. Keep the lock, close the
+        // dialog, and read the server state instead of letting the admin edit
+        // the old matrix or submit the restore again.
+        setRestorePhase(queryClient, restoreKey, [operationId], 'refreshing', { uncertain: true })
+        restoreRequest.current += 1
+        setRestoreTarget(null)
+        setRestorePreview(null)
+        void runRestoreRefresh([operationId])
+        return
+      }
+      if (error instanceof ApiError && error.status === 409) {
+        // The preview no longer describes the server. The write did not
+        // happen, but its old snapshot must not be editable until V2 is read.
+        setRestorePhase(queryClient, restoreKey, [operationId], 'refreshing', { stale: true })
+        setRestoreConflict(true)
+        void runRestoreRefresh([operationId])
+        return
+      }
+      removeRestoreOperations(queryClient, restoreKey, [operationId])
+      setRestoreError(error)
+      return
+    }
+    toast.push('success', result.restart_required
+      ? '默认绑定已恢复，重启服务后生效。'
+      : '默认绑定已恢复。')
+    restoreRequest.current += 1
+    setRestoreTarget(null)
+    setRestorePreview(null)
+    setRestorePhase(queryClient, restoreKey, [operationId], 'refreshing')
+    void runRestoreRefresh([operationId])
+  }
+
   const save = async () => {
-    if (!canWrite) return
+    if (!canWrite || restoring) return
     setSaving(true)
     setSaveError(null)
     const submitted = rowNames
@@ -726,7 +958,21 @@ function BindingsTab({
   }
 
   if (bindingState.isPending) return <Panel title="块绑定"><LoadingState /></Panel>
-  if (bindingState.isError) return <Panel title="块绑定"><ErrorState error={bindingState.error} onRetry={bindingState.retry} /></Panel>
+  if (bindingState.isError) {
+    if (restoreView !== 'idle') {
+      return (
+        <Panel title="块绑定">
+          <ErrorState
+            error={restoreFailed?.error ?? bindingState.error}
+            title={restoreTitle}
+            onRetry={restoreReadFailed ? retryRestoreReads : undefined}
+          />
+          <p className={ext.restoreHint} role="status">{restoreHint}</p>
+        </Panel>
+      )
+    }
+    return <Panel title="块绑定"><ErrorState error={bindingState.error} onRetry={bindingState.retry} /></Panel>
+  }
 
   return (
     <>
@@ -743,7 +989,7 @@ function BindingsTab({
               <span className={ext.restoreWarning} role="status">先保存绑定再恢复默认，未保存的更改会丢失。</span>
             ) : null}
           </div>
-          <Button variant="secondary" disabled={dirty || saving} onClick={() => openRestore('all')}>恢复全部默认</Button>
+          <Button variant="secondary" disabled={dirty || saving || restoring} onClick={() => openRestore('all')}>恢复全部默认</Button>
         </div>
       ) : null}
       {!toolColumns.length && !skillColumns.length ? (
@@ -751,6 +997,19 @@ function BindingsTab({
           没有可绑定的工具或 Skill。先添加 MCP 服务器和 Skill，并运行 MCP 测试以发现工具；已保存的绑定名称也会显示为列。
         </div>
       ) : null}
+      {restoreView !== 'idle' ? (
+        <div className={ext.restoreBar}>
+          <div className={ext.restoreText}>
+            <span role="status">{restoreStatusText}</span>
+            {restoreUncertain ? (
+              <span>服务器可能已提交恢复；请核对实际绑定。</span>
+            ) : null}
+          </div>
+          {restoreView === 'failed' ? (
+            <Button variant="secondary" onClick={retryRestoreReads}>重新读取</Button>
+          ) : null}
+        </div>
+      ) : (
       <>
           <div className={styles.matrixWrap}>
             <table className={styles.matrix}>
@@ -774,7 +1033,7 @@ function BindingsTab({
                             <Button
                               variant="secondary"
                               className={ui.smallButton}
-                              disabled={dirty || saving}
+                              disabled={dirty || saving || restoring}
                               onClick={() => openRestore(block)}
                               aria-label={`恢复 ${block} 的默认绑定`}
                             >
@@ -792,7 +1051,7 @@ function BindingsTab({
                               className={[styles.matrixCell, on ? styles.matrixCellOn : ''].filter(Boolean).join(' ')}
                               aria-pressed={on}
                               aria-label={`${block} 使用 ${tool}`}
-                              disabled={!canWrite}
+                              disabled={!canWrite || restoring}
                               onClick={() => toggle(block, 'mcp_tools', tool)}
                             >
                               {on ? '✓' : ''}
@@ -809,7 +1068,7 @@ function BindingsTab({
                               className={[styles.matrixCell, on ? styles.matrixCellOn : ''].filter(Boolean).join(' ')}
                               aria-pressed={on}
                               aria-label={`${block} 使用 Skill ${skill}`}
-                              disabled={!canWrite}
+                              disabled={!canWrite || restoring}
                               onClick={() => toggle(block, 'skills', skill)}
                             >
                               {on ? '✓' : ''}
@@ -824,14 +1083,15 @@ function BindingsTab({
             </table>
           </div>
           <span className={styles.matrixNote}>工具名使用 `mcp__server__tool` 形式。测试 MCP 成功后，发现的工具会出现在列中。</span>
-      </>
       {saveError ? <ErrorState error={saveError} title="保存绑定失败" /> : null}
       {canWrite ? (
         <div className={styles.actionsRight}>
-          <Button variant="primary" onClick={() => { void save() }} loading={saving}>保存绑定</Button>
+          <Button variant="primary" onClick={() => { void save() }} loading={saving} disabled={restoring}>保存绑定</Button>
         </div>
       ) : <span className="small muted">只读账号不能修改块绑定。</span>}
       {bindingState.hasNextPage ? <Button variant="secondary" onClick={bindingState.fetchNextPage} loading={bindingState.isFetchingNextPage}>加载更多绑定</Button> : null}
+      </>
+      )}
     </Panel>
     {canRestore ? (
       <RestoreDialog
@@ -842,6 +1102,7 @@ function BindingsTab({
         pending={restorePending}
         error={restoreError}
         conflict={restoreConflict}
+        readPending={restoreView === 'refreshing' || restoreView === 'loaded'}
         onClose={closeRestore}
         onPreview={() => { if (restoreTarget) void previewRestore(restoreTarget) }}
         onConfirm={() => { void confirmRestore() }}
@@ -915,7 +1176,7 @@ function RestoreChangeCard({ change: item }: { change: RestoreDefaultsChange }) 
 }
 
 function RestoreDialog({
-  target, preview, previewPending, previewError, pending, error, conflict, onClose, onPreview, onConfirm,
+  target, preview, previewPending, previewError, pending, error, conflict, readPending, onClose, onPreview, onConfirm,
 }: {
   target: RestoreTarget | null
   preview: RestoreDefaultsResult | null
@@ -924,6 +1185,7 @@ function RestoreDialog({
   pending: boolean
   error: unknown
   conflict: boolean
+  readPending: boolean
   onClose: () => void
   onPreview: () => void
   onConfirm: () => void
@@ -944,15 +1206,18 @@ function RestoreDialog({
         <>
           <Button variant="secondary" onClick={onClose} disabled={pending}>取消</Button>
           {!previewPending && (conflict || !preview) ? (
-            <Button variant="secondary" onClick={onPreview} loading={previewPending}>重新预览</Button>
+            <Button variant="secondary" onClick={onPreview} loading={previewPending} disabled={readPending}>重新预览</Button>
           ) : null}
           {preview && !conflict ? (
-            <Button variant="primary" onClick={onConfirm} loading={pending}>确认恢复</Button>
+            <Button variant="primary" onClick={onConfirm} loading={pending} disabled={readPending}>确认恢复</Button>
           ) : null}
         </>
       )}
     >
       {previewPending ? <LoadingState label="正在预览默认绑定…" /> : null}
+      {readPending ? (
+        <p className={ext.restoreHint} role="status">正在读取最新绑定，完成后才能重新预览或确认。</p>
+      ) : null}
       {conflict ? (
         <div className={styles.warning} role="alert">预览已过期，绑定已变化。请重新预览后再确认。</div>
       ) : null}
