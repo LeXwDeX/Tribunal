@@ -237,7 +237,10 @@ export function ExtensionsManager({
       ) : null}
 
       {projectEnabled && tab === 'bindings' ? (
+        // Drafts belong to one scope: a cached project switch must remount
+        // instead of merging project A's draft into project B's baseline.
         <BindingsTab
+          key={`${scope}-${projectId ?? ''}`}
           canWrite={canWrite}
           scope={scope}
           projectId={projectId}
