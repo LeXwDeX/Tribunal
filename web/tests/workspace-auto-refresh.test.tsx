@@ -302,7 +302,8 @@ describe('workspace auto refresh', () => {
         workspace48Calls += 1
         return jsonResponse({ state: 'ready' })
       }
-      if (path.startsWith('/api/v1/projects/48/context-docs')) return jsonResponse({ documents: [current] })
+      if (path === '/api/v1/projects/48/context-docs/current') return jsonResponse(current)
+      if (path === '/api/v1/projects/48/context-docs') return jsonResponse({ documents: [current] })
       return jsonResponse({})
     })
     const queryClient = new QueryClient({
@@ -329,6 +330,58 @@ describe('workspace auto refresh', () => {
       await vi.advanceTimersByTimeAsync(2500)
     })
     await waitFor(() => expect(screen.getByText('# New current')).toBeInTheDocument())
+  })
+
+  it('stops tracking and reloads docs when the tracking window expires', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    let workspaceCalls = 0
+    let currentCalls = 0
+    let historyCalls = 0
+    installFetch((url) => {
+      if (url.endsWith('/workspace/refresh')) return jsonResponse({ job_id: 'j6' }, 202)
+      if (url.endsWith('/workspace')) {
+        workspaceCalls += 1
+        return jsonResponse({ state: 'ready', last_refresh_at: 't1', updated_at: 'u1' })
+      }
+      if (url.includes('/context-docs/current')) {
+        currentCalls += 1
+        return jsonResponse(current)
+      }
+      if (url.includes('/context-docs')) {
+        historyCalls += 1
+        return jsonResponse({ documents: [current] })
+      }
+      return jsonResponse({})
+    })
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false, staleTime: 30_000 } },
+    })
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+    const first = renderWithProviders(<WorkspacePanel projectId={49} canManage />, { queryClient })
+    expect(await screen.findByText('# Current')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '刷新工作区' }))
+    await waitFor(() => expect(workspaceCalls).toBeGreaterThanOrEqual(2))
+
+    const currentBeforeExpiry = currentCalls
+    const historyBeforeExpiry = historyCalls
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1000)
+    })
+    await waitFor(() => expect(currentCalls).toBeGreaterThan(currentBeforeExpiry))
+    await waitFor(() => expect(historyCalls).toBeGreaterThan(historyBeforeExpiry))
+
+    const callsAfterExpiry = workspaceCalls
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000)
+    })
+    expect(workspaceCalls).toBe(callsAfterExpiry)
+
+    first.unmount()
+    renderWithProviders(<WorkspacePanel projectId={49} canManage />, { queryClient })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000)
+    })
+    expect(workspaceCalls).toBe(callsAfterExpiry)
   })
 
   it('reloads the current doc when the first request is still in flight', async () => {
