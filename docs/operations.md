@@ -964,7 +964,7 @@ onboarding 失败达到最大尝试次数后，用平台管理员 CLI 创建新�
 tribunalctl projects retry-onboarding <项目 ID>
 ```
 
-该命令调用 `POST /api/v1/admin/projects/{id}/onboarding/retry`，需要 `auth.bootstrap_token_env` 指向的平台管理员 token；不需要项目 `manage` 授权或浏览器会话，项目侧 `POST /api/v1/projects/{id}/workspace/refresh` 的权限不变。命令返回 `{"job_id":...}`，工作区状态会重新进入 `onboarding`。每次重试创建新任务并保留原失败记录；重复执行会创建多个任务，执行前先确认当前状态。
+该命令调用 `POST /api/v1/admin/projects/{id}/onboarding/retry`，需要 `auth.bootstrap_token_env` 指向的平台管理员 token；不需要项目 `manage` 授权或浏览器会话，项目侧 `POST /api/v1/projects/{id}/workspace/refresh` 的权限不变。命令返回 `{"job_id":...}`，工作区状态会重新进入 `onboarding`。任务仍在 queued 时重复执行会返回同一个任务；任务开始执行或失败后可再次创建。旧失败记录保留，执行前先确认当前状态。
 
 ### ignore 策略与索引
 

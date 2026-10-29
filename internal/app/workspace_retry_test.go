@@ -17,10 +17,15 @@ func TestRetryOnboardingAdvancesWorkspaceFromError(t *testing.T) {
 		t.Fatalf("SaveWorkspace: %v", err)
 	}
 	service := unrestrictedIndexService(t, f)
-	if _, err := service.RetryOnboarding(context.Background(), 42); err != nil {
+	jobID, err := service.RetryOnboarding(context.Background(), 42)
+	if err != nil {
 		t.Fatalf("RetryOnboarding: %v", err)
 	}
-	if err := service.Onboard(context.Background(), 42); err != nil {
+	job, err := f.db.GetJob(context.Background(), jobID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if err := service.Handle(context.Background(), job); err != nil {
 		t.Fatalf("consume retry job: %v", err)
 	}
 	state, err := f.db.GetWorkspace(context.Background(), 42)
