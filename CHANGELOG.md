@@ -87,7 +87,7 @@ v1.2.0 尚未发布；冻结前的新改动仍记入下方 `[1.2.0]` 段，避�
 ### 验证范围
 
 - **未完成：CI**。截至 `main` `96e8081`，GitHub Actions 的 go、web、docker 三个 job 因账户计费/额度限制没有启动，job 注解说明了原因。不能声称本版本的 CI 已通过。
-- **未完成：真实实例验收**。[#108](https://github.com/LeXwDeX/Tribunal/issues/108) 要求的 v1.1.x/v1.2.0 真实 GitLab 实例升级验收尚未执行，它是打 `v1.2.0` tag 的前置条件。v1.0.0 的 f143 结果不覆盖本版本。
+- **真实实例验收已完成，GitHub Actions 仍未通过**。[#108](https://github.com/LeXwDeX/Tribunal/issues/108) 已于 2026-10-29 在 33.110 隔离实例执行：v1.0.0 → v1.1.0 → `a113e08` 原地升级、真实评审、停机续跑、Webhook、503 重发、MCP 调用与多项目隔离均通过；`bootstrap_admins` 用户名告警未复现，另开 [#151](https://github.com/LeXwDeX/Tribunal/issues/151)。详见[交付就绪](docs/delivery-readiness.md#v120-验证状态)。GitHub Actions 的 go/web/docker job 仍未启动，不能声称 CI 已通过。
 - **本地预检（引用交接记录，不是本次发布重新核验）**：`main` `86c3a668` 对应的 PR #112 合并前 head 在本地通过 `go build`、`go vet`、`scripts/logcheck`、staticcheck v0.8.2、govulncheck v1.9.0、`go mod verify`、licensecheck、licensebundle `-check`、`go test -race -timeout 40m ./...`，语句覆盖率 77.90%；PR #128 合并前 head `eb1e277` 通过同样的全量检查（含前端 `npm ci`、`npm test -- --coverage`、`npm run build` 和 `web/dist` 一致性），语句覆盖率 79.07%。来源见 [PR #112 评论](https://github.com/LeXwDeX/Tribunal/pull/112#issuecomment-6432897860) 和 [PR #128 评论](https://github.com/LeXwDeX/Tribunal/pull/128)；它们不代表 CI 已启动，也不覆盖之后未提交的改动。详见 [交付就绪](docs/delivery-readiness.md#v120-验证状态)。
 - **部署核对（引用交接记录）**：2026-10-29 在 33.110 的临时目录按运维文档从零部署 `main` `96e8081`，`docker compose config --quiet`、`build`、`--check-config`、`up --wait` 通过；healthz/readyz 和控制台返回 200，未启用 OAuth 时 `/auth/login` 返回 503；容器以 uid 10001 运行，`/app/data` 为 0700，启动锁生效；内置 Skill 和 codebase-memory 已登记，MCP 配置 API 返回 `{}`，只暴露 13 个只读工具；`scripts/docker-smoke.sh` 通过且无残留。该部署不是 GitLab 升级验收，也不覆盖 [#108](https://github.com/LeXwDeX/Tribunal/issues/108) 的真实数据升级场景。
 

@@ -28,7 +28,7 @@
 
 v1.2.0 尚未发布：版本说明已合并到 `main`，尚未打 tag，也未发布 Release。变更清单见 [CHANGELOG](../CHANGELOG.md) 的 `[1.2.0] - 2026-10-29` 段；候选范围可用 [v1.1.0...main](https://github.com/LeXwDeX/Tribunal/compare/v1.1.0...main) 核对。本节最初以 `main` `96e8081` 为发布候选基线，真实实例升级验收在 `main` `a113e08` 上执行；另列后续工作区的本地检查。发布前必须补齐未完成项。
 
-**未完成，不能声称通过**
+**状态汇总（GitHub Actions 仍未通过）**
 
 - [ ] **GitHub Actions**：截至 `main` `96e8081`，CI 有 workflow run 记录，但 go、web、docker 三个 job 因账户计费/额度限制没有启动，job 注解说明了原因。v1.2.0 期间的 PR 在 CI job 未启动时按交接约定用本地全量检查放行，并把结果评论到 PR；本文件不逐 PR 重述，[PR #112 评论](https://github.com/LeXwDeX/Tribunal/pull/112#issuecomment-6432897860) 是一个已核实的例子。没有成功执行的 CI job 结果，不能把本地预检当作 CI 结果。
 - [x] **真实 GitLab 实例验收**：[#108](https://github.com/LeXwDeX/Tribunal/issues/108) 已于 2026-10-29 在 `main` `a113e08` 上执行；剩余 5 项已处理，其中 4 项通过，`bootstrap_admins` 弃用告警未复现并另开 [#151](https://github.com/LeXwDeX/Tribunal/issues/151)。详见[真实实例升级验收（#108）](#v120-真实实例升级验收)。GitHub Actions 仍未成功执行，不能把本项勾选当作 CI 通过；v1.0.0 的 f143 结果不覆盖本版本，见[历史验收记录](#v100-历史验收记录f143仅供追溯)。
