@@ -232,7 +232,7 @@ tribunalctl projects residues
 tribunalctl projects residues clean --yes
 ```
 
-检查命令列出可归属到未登记项目的 `<workspace>/<项目ID>` 和 `skills/project-<项目ID>`，不修改文件。只有存在项目 ID 匹配的受管标记 `.tribunal-managed` 的项目目录才标记 `removable`；标记只在服务首次创建项目根时写入，旧目录不会因普通访问自动获得标记。需要清理旧目录时，先人工确认归属，再手工创建内容为 `tribunal-workspace-v1 <项目ID>` 的普通文件。`skills/project-<id>` 容器、符号链接、非规范名称和无法归属的条目只报告、不删除。清理命令必须带 `--yes`，服务端还要求 `confirm: true`。`failed` 只含脱敏错误类别。清理前后仍应按本节完成备份和归属确认。
+检查命令列出可归属到未登记项目的 `<workspace>/<项目ID>` 和 `skills/project-<项目ID>`，不修改文件。只有存在项目 ID 匹配的受管标记 `.tribunal-managed` 的项目目录才标记 `removable`；标记只在服务通过工作区管理器首次创建项目根时写入；某些创建路径（例如先由 Git 镜像创建根）也可能没有标记，同样按未知归属保留。旧目录不会因普通访问自动获得标记。需要清理旧目录时，先人工确认归属，再手工创建内容为 `tribunal-workspace-v1 <项目ID>` 的普通文件。`skills/project-<id>` 容器、符号链接、非规范名称和无法归属的条目只报告、不删除。清理命令必须带 `--yes`，服务端还要求 `confirm: true`。`failed` 只含脱敏错误类别。清理前后仍应按本节完成备份和归属确认。
 
 遇到删除错误或结果不确定时，不要直接重试登记或删除，也不要让服务自动接管残留。先停止服务，按实际配置确认数据库和 `workspace.root` 的位置、挂载与项目 ID，并做一致性备份。核对数据库中的登记状态、GitLab webhook 状态，以及该项目的工作区和 `skills/project-<项目ID>` 目标；空目录、普通文件和符号链接也可能阻止重新登记。由有权人员确认每个残留的归属和内容，再按组织的受控流程处理；不能确认归属时保留并升级处理。不要批量或盲目删除路径。确认相关目标均已安全处理后，才重新启动并按需重新登记。
 
