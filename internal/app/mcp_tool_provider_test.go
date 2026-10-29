@@ -74,3 +74,16 @@ func TestMCPToolProviderFullSetHasNoGap(t *testing.T) {
 		t.Fatalf("Tools = %d, %v; want the full set without error", len(tools), err)
 	}
 }
+
+// The MCP runtime parser trims allowlist entries, so a stored tool name with
+// trailing whitespace still reaches and resolves the advertised tool.
+func TestMCPToolProviderTrimsTrailingSpaceFromBoundToolName(t *testing.T) {
+	provider := newGraphProvider(t, "mcp__graph__search_graph ")
+	tools, err := provider.Tools(context.Background(), "code-review")
+	if err != nil || len(tools) != 1 {
+		t.Fatalf("Tools = %d, %v; want the trimmed tool", len(tools), err)
+	}
+	if got := tools[0].Def().Name; got != "mcp__graph__search_graph" {
+		t.Fatalf("tool name = %q, want the canonical name", got)
+	}
+}

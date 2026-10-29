@@ -204,6 +204,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		Workspace: runtime.WorkspaceManager(),
 		DeniedEnv: app.DeniedEnvNames(cfg),
 		Logger:    logger,
+		Platform:  cfg,
 	})
 	if err != nil {
 		return err

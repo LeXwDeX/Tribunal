@@ -483,7 +483,7 @@ data/workspaces/<project_id>/
 3. 小型合成 fixture（4 个 `.go` 文件和 `go.mod`，最终 20 nodes / 29 edges）可用同一项目身份增量更新：首次 fast index 约 1.72s / 25 MiB，unchanged 约 0.95s / 15.9 MiB，新增 `Difference` 符号后约 1.2s / 26.6 MiB。没有真实大型仓库、生产规模或 Linux 运行数据，因此大仓库耗时和内存仍未解决；不得把合成 fixture 当作生产基准。
 4. 探针运行时没有 GitLab、模型 provider 或 OAuth 凭据，未建立真实应用端到端链路。
 
-**默认内置（Issue #44）**：Docker 镜像按 `TARGETARCH` 打包 0.12.1 的 `-portable` 静态链接发布包（glibc 版本需要 `GLIBC_2.38`，bookworm 不满足），SHA-256 写死在 Dockerfile 中，两个架构的 SLSA provenance 于 2026-10-26 用 `gh attestation verify` 核对；不运行上游 `install`。wrapper 安装为 `/usr/local/bin/tribunal-codebase-memory-mcp`，保留 `crc-codebase-memory-mcp` 兼容链接。示例配置和 Docker 配置登记内置平台 stdio 服务器 `codebase-memory`（`--tool-profile=analysis`），`code-review`、`review` 获得只读图谱工具，`verify` 只获得 `get_code_snippet`，onboarding 用 CLI 为 `base/` 建索引。二进制缺失或启动失败时，评审节点不带 MCP 工具继续执行并记录 `tool_gaps`，汇总给出告警，PASS 降为 INCOMPLETE；建索引失败只记录工作区 `last_error`。Docker smoke 覆盖版本、wrapper、CLI 隔离建索引，以及控制台测试接口只列出只读工具。停用方式、版本升级和降级细节见 [内置 codebase-memory-mcp](docs/design/06-config.md#内置-codebase-memory-mcp)。
+**默认内置（Issue #44）**：Docker 镜像按 `TARGETARCH` 打包 0.12.1 的 `-portable` 静态链接发布包（glibc 版本需要 `GLIBC_2.38`，bookworm 不满足），SHA-256 写死在 Dockerfile 中，两个架构的 SLSA provenance 于 2026-10-26 用 `gh attestation verify` 核对；不运行上游 `install`。wrapper 安装为 `/usr/local/bin/tribunal-codebase-memory-mcp`，保留 `crc-codebase-memory-mcp` 兼容链接。示例配置和 Docker 配置登记内置平台 stdio 服务器 `codebase-memory`（`--tool-profile=analysis`）：`code-review`、`review` 各获得 11 项只读图谱工具，`verify` 获得 `get_code_snippet`、`search_graph`、`trace_path`、`search_code`，`onboarding` 获得 `get_architecture`、`get_graph_schema`；`reasoner`、`synthesize` 不默认授权。onboarding 用 CLI 为 `base/` 建索引。二进制缺失或启动失败时，评审节点不带 MCP 工具继续执行并记录 `tool_gaps`，汇总给出告警，PASS 降为 INCOMPLETE；建索引失败只记录工作区 `last_error`。Docker smoke 覆盖版本、wrapper、CLI 隔离建索引，以及控制台测试接口只列出只读工具。停用方式、版本升级和降级细节见 [内置 codebase-memory-mcp](docs/design/06-config.md#内置-codebase-memory-mcp)。
 
 后续 Linux/amd64 容器探针（2026-10-25，0.12.1）复现了仅按 `HOME` 隔离时的 cache 冲突。使用上述脚本后，两个项目并发初始化、列工具和调用 `list_projects` 均成功；每个会话只列出自己固定 `base/` 路径的一个索引项目，`delete_project` 均被拒绝。此结果验证部署隔离与调用层拒绝，不替代完整评审链路、大型仓库性能或操作系统级文件隔离验收。
 
@@ -496,7 +496,7 @@ data/workspaces/<project_id>/
 - **来源**：平台级（如 security-review、各语言的编码规范）加项目级（工作区 `skills/`）。仓库自带的 `.claude/skills` 默认不读取，可按项目开启（只读目标分支版本）。
 - **按块挂载**：例如 review 的 standards 通道挂项目编码规范，安全相关的块挂 security-review。
 - **脚本**：首版只支持**指令类 skill，不执行其中的任何脚本**。
-- **默认 Skill**：平台内置 `code-review`（改编自 mattpocock/skills，MIT，上游 commit `3da8c01`），首次启动登记为平台级 Skill，并挂到 `code-review` 和 `review` 块。它只补充方法论：Standards / Spec 双轴、Fowler 坏味道基线，以及「仓库标准优先于基线」「坏味道一律是判断项」两条规则；fixed point 取 MR 的 base/target SHA，spec 取 MR 描述和其中引用的 issue。块合约（`prompts/review.standards.md`、`review.intent.md`、`code-review.md`）仍定义角色、通道和 `submit_result` 输出，两者不重复注入同一指令。内置 Skill 标记为 `builtin`，可禁用、不可删除，每次启动随平台版本更新文件但保留启用状态；默认块绑定只执行一次，管理员解绑后不恢复，升级不覆盖自定义绑定；机制与配置见 [默认扩展](docs/design/06-config.md#默认扩展default_extensions)。
+- **默认 Skill**：平台内置 `code-review`（改编自 mattpocock/skills，MIT，上游 commit `3da8c01`），首次启动登记为平台级 Skill，只挂到 `code-review` 块。它只补充方法论：Standards / Spec 双轴、Fowler 坏味道基线，以及「仓库标准优先于基线」「坏味道一律是判断项」两条规则；fixed point 取 MR 的 base/target SHA，spec 取 MR 描述和其中引用的 issue。块合约（`prompts/review.standards.md`、`review.intent.md`、`code-review.md`）仍定义角色、通道和 `submit_result` 输出，两者不重复注入同一指令。内置 Skill 标记为 `builtin`，可禁用、不可删除，每次启动随平台版本更新文件但保留启用状态；默认机制管理的块绑定随升级更新，管理员解绑后不自动恢复，升级不覆盖自定义绑定；机制与配置见 [默认扩展](docs/design/06-config.md#默认扩展default_extensions)。
 
 ### 8.6 agent 可用工具汇总
 

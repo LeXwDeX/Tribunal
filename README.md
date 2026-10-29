@@ -225,14 +225,14 @@ UUID 在项目内去重，去重记录和入队在同一事务中提交。同一
 
 ## 默认扩展
 
-新部署首次启动时会自动登记内置的平台级 Skill `code-review`，并挂到 `code-review` 和 `review` 评审块。它改编自 [mattpocock/skills 的 code-review](https://www.skills.sh/mattpocock/skills/code-review)（MIT，出处见 `internal/skill/builtin/code-review/NOTICE.md`），提供 Standards / Spec 双轴评审方法和代码坏味道基线，改成了无需交互的版本。
+新部署首次启动时会自动登记内置的平台级 Skill `code-review`，并只挂到 `code-review` 评审块。它改编自 [mattpocock/skills 的 code-review](https://www.skills.sh/mattpocock/skills/code-review)（MIT，出处见 `internal/skill/builtin/code-review/NOTICE.md`），提供 Standards / Spec 双轴评审方法和代码坏味道基线，改成了无需交互的版本。
 
 - 控制台「扩展 → Skill」中，内置项带「内置」标签，可以禁用或重新启用，但不能删除（API 返回 409）。禁用后不再加载，仍引用它的块会跳过它；重启和升级都保留禁用状态。
 - 平台升级后，下次启动会把已登记副本的文件和描述更新为新版本附带的内容，启用状态不变。
 - 在「块绑定」中把它从某个块移除后，重启不会恢复；升级也不会改写管理员改过的绑定。
 - 配置 `default_extensions.skills: []` 可以让新部署不登记默认 Skill。详见 [默认扩展配置](docs/design/06-config.md#默认扩展default_extensions)。
 
-Docker 镜像还内置校验过的 [codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp) 0.12.1（MIT）代码图谱服务和隔离 wrapper `/usr/local/bin/tribunal-codebase-memory-mcp`。示例配置和 `config/server.docker.yaml` 会登记内置平台 MCP 服务器 `codebase-memory`（只读 analysis 工具面），并为 `code-review`、`review`、`verify` 块授权只读图谱工具；注册项目后 onboarding 用 CLI 为 `base/` 建索引，每个项目的索引只在自己的工作区内可见。
+Docker 镜像还内置校验过的 [codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp) 0.12.1（MIT）代码图谱服务和隔离 wrapper `/usr/local/bin/tribunal-codebase-memory-mcp`。示例配置和 `config/server.docker.yaml` 会登记内置平台 MCP 服务器 `codebase-memory`（只读 analysis 工具面）：`code-review` 和 `review` 各授权 11 项只读图谱工具，`verify` 授权 `get_code_snippet`、`search_graph`、`trace_path`、`search_code`，`onboarding` 授权 `get_architecture`、`get_graph_schema`，`reasoner` 和 `synthesize` 不默认授权；注册项目后 onboarding 用 CLI 为 `base/` 建索引，每个项目的索引只在自己的工作区内可见。
 
 - 控制台「扩展 → MCP 服务器」中它带「内置」标签，可以测试、停用和重新启用，不能编辑或删除（API 返回 409）。重启和升级都保留停用状态。
 - 平台升级后，下次启动会把它的配置和默认工具白名单更新为新版本附带的内容；启用状态和管理员改过的块绑定不变。

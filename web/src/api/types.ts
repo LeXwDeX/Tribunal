@@ -374,6 +374,28 @@ export interface BlockBinding {
   skills: string[]
 }
 
+export interface RestoreDefaultsGrant {
+  mcp_tools: string[]
+  skills: string[]
+}
+
+// One block's preview or execution outcome. Reason is file_binding or
+// no_registered_defaults for skipped blocks and empty otherwise.
+export interface RestoreDefaultsChange {
+  block: string
+  status: 'change' | 'unchanged' | 'skipped'
+  reason: string
+  add: RestoreDefaultsGrant
+  remove: RestoreDefaultsGrant
+  ownership_changed: boolean
+}
+
+export interface RestoreDefaultsResult {
+  changes: RestoreDefaultsChange[]
+  preview_token: string
+  restart_required: boolean
+}
+
 export interface ProviderStats24h {
   calls?: number
   errors?: number

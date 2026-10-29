@@ -39,6 +39,7 @@ import type {
   ProjectWebhookState,
   Provider,
   ProviderTestResult,
+  RestoreDefaultsResult,
   ReviewDetail,
   ReviewGraph,
   ReviewNodeDetail,
@@ -309,6 +310,17 @@ export async function listBindings(scope: string, projectId?: number | string, c
 
 export async function saveBinding(block: string, input: { scope: 'platform' | 'project'; project_id?: number; mcp_tools: string[]; skills: string[] }): Promise<BlockBinding> {
   return request<BlockBinding>(`/api/v1/block-bindings/${segment(block)}`, { method: 'PUT', body: input })
+}
+
+export interface RestoreDefaultBindingsInput {
+  // Omit blocks for a full restore: the server selects every bindable block.
+  blocks?: string[]
+  dry_run: boolean
+  preview_token?: string
+}
+
+export async function restoreDefaultBindings(input: RestoreDefaultBindingsInput): Promise<RestoreDefaultsResult> {
+  return request<RestoreDefaultsResult>('/api/v1/block-bindings/restore-defaults', { method: 'POST', body: input })
 }
 
 // System -------------------------------------------------------------------

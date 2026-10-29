@@ -369,7 +369,7 @@ fi
 | `/usr/local/bin/crc-codebase-memory-mcp` | 指向 wrapper 的旧名兼容链接 |
 | `/licenses/codebase-memory-mcp/` | 上游 `LICENSE` 与 `THIRD_PARTY_NOTICES.md` |
 
-镜像不运行上游 `install`，不写任何 agent 配置或 hooks。示例配置和 `config/server.docker.yaml` 的 `default_extensions` 在首次启动时登记平台级 stdio 服务器 `codebase-memory`（`--tool-profile=analysis`），并为 `code-review`、`review` 授权只读图谱工具、为 `verify` 授权 `get_code_snippet`。有效 ignore 为空时，项目 onboarding 和刷新可用 CLI 为固定的 `base/` 建索引；非空时按下节停用这些执行路径。每个项目的 `HOME`、`CBM_CACHE_DIR`、`CBM_RUNTIME_DIR` 都在该项目工作区内，项目之间查不到彼此的索引；auto_index、watcher 和 UI 均关闭。规则详见 [默认扩展](design/06-config.md#默认扩展default_extensions) 和 [内置 codebase-memory-mcp](design/06-config.md#内置-codebase-memory-mcp)。
+镜像不运行上游 `install`，不写任何 agent 配置或 hooks。示例配置和 `config/server.docker.yaml` 的 `default_extensions` 在首次启动时登记平台级 stdio 服务器 `codebase-memory`（`--tool-profile=analysis`），并为 `code-review`、`review` 各授权 11 项只读图谱工具，为 `verify` 授权 `get_code_snippet`、`search_graph`、`trace_path`、`search_code`，为 `onboarding` 授权 `get_architecture`、`get_graph_schema`；`reasoner`、`synthesize` 不默认授权。有效 ignore 为空时，项目 onboarding 和刷新可用 CLI 为固定的 `base/` 建索引；非空时按下节停用这些执行路径。每个项目的 `HOME`、`CBM_CACHE_DIR`、`CBM_RUNTIME_DIR` 都在该项目工作区内，项目之间查不到彼此的索引；auto_index、watcher 和 UI 均关闭。规则详见 [默认扩展](design/06-config.md#默认扩展default_extensions) 和 [内置 codebase-memory-mcp](design/06-config.md#内置-codebase-memory-mcp)。
 
 ### ignore 安全边界
 
@@ -721,9 +721,10 @@ v1.2.0 共四个迁移：`0016_dossier_mr_title`、`0017_mcp_config_seal`、`001
 升级步骤：
 
 1. 记录当前镜像 tag/digest。
-2. 按第 7 节核对生效路径与全部挂载，停止旧服务并备份、核验数据库和所有工作区，另存配置和秘密。只有符合默认布局前提时才能使用 [Compose](#compose-停机备份)或[独立容器](#单独-docker-run-停机备份)示例；在启动新镜像前保持旧服务停止。
+2. 按第 7 节核对生效路径与全部挂载，停止旧服务并备份、核验数据库和所有工作区，另存实际挂载配置、秘密和镜像 digest。只有符合默认布局前提时才能使用 [Compose](#compose-停机备份)或[独立容器](#单独-docker-run-停机备份)示例；在启动新镜像前保持旧服务停止。镜像升级不会改写宿主机配置文件：Compose 默认挂载宿主机 `config/server.docker.yaml`，自定义部署也可能挂载旧的 `server.yaml`。升级到包含 #143 的后续版本时，另按 [默认扩展授权迁移](#默认扩展授权迁移) 核对并更新 `default_extensions`，保留管理员自定义项。
 3. 隔离验证并获得部署授权后，拉取并启动新镜像，继续使用原来的全部数据挂载、同一 `REVIEW_MASTER_KEY` 和真实配置。
 4. 等待 `/readyz` 返回 200，检查日志和关键功能。
+5. 在控制台“扩展 → 块绑定”核对实际授予是否与生效配置一致；管理员改过或解绑的绑定保留，控制台以实际绑定为准。文件声明生效后，块绑定 API 不返回它的数据库行；控制台可能显示为空绑定，不要为消除空行而重新保存。修改配置或绑定后用 `docker compose up -d --force-recreate --wait --wait-timeout 120` 重启再核对。
 
 回滚步骤：
 
@@ -734,7 +735,8 @@ v1.2.0 共四个迁移：`0016_dossier_mr_title`、`0017_mcp_config_seal`、`001
 
 注意事项：
 
-- 内置扩展随平台升级：新镜像附带的 codebase-memory-mcp 配置（版本、参数）在下次启动时写入已登记的内置服务器，启用状态保持不变；默认工具白名单在块绑定仍是默认机制写入的样子时同步更新，管理员改过的绑定和 YAML `blocks` 中声明的块不动。首次启动后才在 YAML `blocks` 中声明的块：数据库里该块若仍是默认机制写入的绑定，启动时删除并以 YAML 为准（日志 `file configuration replaces default block binding`）；管理员改过的仍以数据库为准。内置 Skill 刷新失败（例如修改了 `workspace.root`）只记 Warn 日志 `built-in skill refresh failed`，不阻断启动。已有部署若在数据库或 `mcp.config` 中自建了同名 `codebase-memory` 服务器，服务不会接管它，也不会绑定它的工具。
+- 内置扩展随平台升级：新镜像附带的 codebase-memory-mcp 配置（版本、参数）在下次启动时写入已登记的内置服务器，启用状态保持不变；默认工具白名单在块绑定仍是默认机制写入的样子时同步更新，管理员改过的绑定和 YAML `blocks` 中声明的块不动。首次启动后才在 YAML `blocks` 中声明的块：升级到 v1.2.0 时，数据库里该块若仍等于 `block:<block>` 快照，启动时删除并以 YAML 为准（日志 `file configuration replaces default block binding`）；管理员改过的绑定仍以数据库为准。升级到包含 #143 的后续版本时，还需要行内每个条目都能由 `extension_defaults` 中 `applied` 的默认 grant detail 证明；行含自建授权或 detail 缺失/无法解析时保留该行，数据库绑定继续覆盖 YAML。内置 Skill 刷新失败（例如修改了 `workspace.root`）只记 Warn 日志 `built-in skill refresh failed`，不阻断启动。已有部署若在数据库或 `mcp.config` 中自建了同名 `codebase-memory` 服务器，服务不会接管它，也不会绑定它的工具。
+- **文件绑定与旧配置（仅适用于包含 #143 的后续版本）**：数据库平台绑定按块覆盖文件 `blocks`。只有行内容等于 `block:<block>` 快照、且每个条目都能由 `extension_defaults` 中 `applied` 的默认 grant detail 认领时，默认机制才释放该行；行上有自建授权或台账不可证明时，文件块不生效。旧配置中的 `default_extensions` 会继续生效，授权矩阵不会自动收窄。核对和迁移步骤见 [默认扩展授权迁移](#默认扩展授权迁移)。
 - 升级内置的 codebase-memory-mcp 版本时，按 [内置 codebase-memory-mcp](design/06-config.md#内置-codebase-memory-mcp) 同时更新 Dockerfile 版本与 SHA-256、`third_party/codebase-memory-mcp/` 和许可证清单，并重新跑 Docker smoke。
 - 镜像 tag 改为 `tribunal:*`；旧镜像的仓库名是 `crc-review`，升级时重新构建或改 tag。Compose 项目名 `crc-review`、旧数据卷 `crc-review_data` 和 `crc-data` 刻意不改名；默认布局可继续挂载原卷，自定义布局还须保留全部实际数据挂载。
 - 管理 CLI 改用 `tribunalctl`；旧镜像路径 `/app/reviewctl` 以兼容符号链接保留。源码用户改用 `go run ./cmd/tribunalctl`。
@@ -743,6 +745,54 @@ v1.2.0 共四个迁移：`0016_dossier_mr_title`、`0017_mcp_config_seal`、`001
 - 不要更换 `REVIEW_MASTER_KEY`，否则已保存的项目凭据无法解密。
 - 生产环境使用不可变 tag 或 digest，保留旧镜像以便回滚。
 - 升级窗口内不要同时运行两个容器指向同一个 SQLite 数据卷。
+
+### 默认扩展授权迁移
+
+本节仅适用于升级到包含 #143 的后续版本（v1.2.0 之后的 Unreleased）。v1.2.0 不包含默认授权收窄、恢复默认 API 或本节步骤。本节处理升级后默认授权收窄，以及文件 `blocks` 与数据库平台块绑定不一致的情况。先核对事实：
+
+- 镜像升级不会改写宿主机挂载的配置文件。Compose 默认把宿主机 `config/server.docker.yaml` 挂到容器内；自定义部署也可能挂载旧的 `server.yaml`。旧文件中的 `default_extensions` 会继续生效，旧授权不会自动收窄。
+- 启动时先应用默认扩展，再加载平台扩展。数据库中的平台块绑定按块覆盖文件 `blocks`（`loadStoredPlatformExtensions`），文件声明不会自动覆盖已有平台行。
+- 默认机制只释放能证明纯默认的平台行（`purelyDefaultOwned`）：行内容必须等于 `block:<block>` 快照，且行内每个 MCP 工具和 Skill 都能由 `extension_defaults` 中 `applied` 的默认 grant detail 认领。行上有自建授权，或任一 grant detail 缺失、无法解析，数据库行保留，文件 `blocks` 不生效。
+- 恢复默认只移除已登记内置扩展在选中块上的授权；自建扩展授权、项目级绑定和启用状态保留。它不会删除平台行，也不修改文件 `blocks`。没有删除块绑定的 API。
+- 文件声明某块后，恢复默认对该块返回 `skipped(file_binding)`，所以迁移时不能一边保留文件声明一边恢复。文件声明生效后，块绑定 API 不返回它的数据库行；控制台可能显示为空绑定，不要把空绑定保存回数据库。
+
+#### 升级前核对配置
+
+1. 按第 7 节停止服务并备份数据库、WAL/SHM、全部工作区、实际挂载配置、`REVIEW_MASTER_KEY` 和镜像 digest。备份期间保持服务停止。
+2. 核对实际挂载的配置文件及其来源。Compose 默认读取宿主机 `config/server.docker.yaml`；自定义部署可能是 `server.yaml`。使用实际挂载的文件，不要只看仓库示例。
+3. 对照实际配置、仓库内 `config/server.docker.yaml` 和 `config/server.example.yaml` 的 `default_extensions`，按需更新工具矩阵。保留管理员添加的 MCP 服务器、Skill 和自定义授权项；不要用示例整段覆盖生产配置。
+4. 若继续使用顶层 `blocks` 声明块，确认文件内容是完整绑定。文件声明会跳过该块的默认授权，所以文件里必须同时写出需要的默认工具和要保留的自建授权。MCP 工具名带 `mcp__<server>__<tool>` 前缀。
+5. 启动新镜像后，在控制台“扩展 → 块绑定”的平台范围核对：未由文件 `blocks` 接管、且未被管理员改过的块应与生效配置的矩阵一致；管理员改过或解绑的绑定保留，控制台以实际绑定为准。文件声明块由配置文件直接提供，块绑定 API 不返回它的数据库行，控制台可能显示为空绑定，不能把空行当作失败，也不要保存空绑定。修改配置或绑定后执行 `docker compose up -d --force-recreate --wait --wait-timeout 120`，再核对一次。`restart` 不会加载新的容器环境变量。
+
+#### 从数据库绑定迁移到文件声明
+
+只有需要让文件 `blocks` 接管某个块时执行本节。只想让新默认生效、继续由控制台管理绑定时，不写文件 `blocks`，直接按需调整绑定或执行恢复默认并重启。
+
+前置条件：已完成上面的备份和配置核对；能访问平台管理员账号；不要直接修改或删除数据库中的绑定行。
+
+1. **在独立草稿中准备文件声明。** 在仓库外或不受服务读取的副本中，为每个要迁移的块写出完整目标绑定，包含要保留的自建授权和该块需要的默认授权。先不要写入实际挂载配置，避免文件声明提前生效。示例：
+
+   ```yaml
+   blocks:
+     review:
+       mcp_tools:
+         - mcp__codebase-memory__get_code_snippet
+         - mcp__team__lookup
+       skills:
+         - code-review
+   ```
+
+   上例中 `mcp__team__lookup` 是管理员自建授权，必须在第 3 步从数据库绑定清除前先写入这份草稿，否则会丢失。示例只列出一个默认工具，实际草稿要写全该块需要的全部默认授权；文件声明不会与默认授权合并。
+
+2. **临时移除生效中的文件声明并重启。** 如果当前生效配置已经声明该块，恢复默认会返回 `skipped(file_binding)`。从实际挂载配置中临时移除该块（或移除整个 `blocks` 条目），执行 `docker compose up -d --force-recreate --wait --wait-timeout 120`。草稿保持不生效；此步骤只影响文件声明，数据库绑定不变。
+
+3. **清除数据库绑定中的自建授权。** 在控制台“扩展 → 块绑定”选择平台范围，取消勾选该块的自建 MCP 工具和 Skill，保存。也可以对 `PUT /api/v1/block-bindings/{block}` 提交完整 `mcp_tools` 和 `skills` 数组。不要用 SQL 删除行或改 `extension_defaults` 台账；没有删除绑定的 API，清除授权就是保存去掉这些条目的完整绑定。
+
+4. **对该块执行恢复默认。** 在“块绑定”里点该块的“恢复默认”，先看预览再确认。恢复只处理平台级绑定，会移除已登记内置扩展在该块的授权，保留自建扩展授权，并重建默认授权台账。移除项应只涉及已登记的内置扩展（当前为 `codebase-memory` 和内置 Skill）；如果预览要移除其他服务器或 Skill 的授权，停止操作，核对台账和绑定来源。`restart_required` 为 true 是预期。
+
+5. **启用草稿中的文件声明并重启。** 把第 1 步草稿中的完整 `blocks` 条目写入实际挂载配置，执行 `docker compose up -d --force-recreate --wait --wait-timeout 120`。启动日志应出现 `file configuration replaces default block binding`，表示纯默认行已释放，文件绑定生效。
+
+6. **核对结果。** 文件声明生效后，块绑定 API 不返回它的数据库行；控制台可能显示为空绑定，这是预期。其他块仍按默认或管理员绑定。若没有释放日志、恢复预览显示 `skipped`、或无法确认 `extension_defaults` 台账完整，停止操作并核对备份、实际配置和数据库，不要手工删除数据库行。
 
 ### 从 v1.0.0 升级到 v1.1.0
 
@@ -778,7 +828,7 @@ docker compose exec -T review /app/tribunalctl projects all
 1. **先做一致性备份，四个迁移都不可回退。**
    - 本次新增 `0016_dossier_mr_title`、`0017_mcp_config_seal`、`0018_dossier_project`、`0019_job_defer_window`，都没有 down migration。回退只能恢复升级前的全量快照，不能只换回 v1.1.0 镜像而保留已迁移数据库；旧版本读取新 schema 不受支持。
    - 升级前按[第 7 节](#7-sqlite-一致性备份与恢复)停止服务，备份生效数据库、可能存在的 `-wal`/`-shm` 和所有工作区；只有符合默认配置与挂载前提时才能复制整个 `/app/data`。运行中只复制数据库文件会漏掉 WAL，不是一致备份。
-   - 另存实际配置、镜像 digest 和 `REVIEW_MASTER_KEY`。恢复使用匹配布局的新空卷或空目录，不把快照覆盖到旧数据，也不混入旧 WAL。
+   - 另存实际挂载配置、镜像 digest 和 `REVIEW_MASTER_KEY`。镜像升级不会改写宿主机配置文件；使用与 v1.2.0 匹配的实际挂载配置。恢复使用匹配布局的新空卷或空目录，不把快照覆盖到旧数据，也不混入旧 WAL。
 2. **迁移 `0016_dossier_mr_title` 只追加列，但仍然要先备份。**
    - 迁移对 `workflow_dossiers` 执行 `ALTER TABLE ... ADD COLUMN mr_title TEXT NOT NULL DEFAULT ''`，不改写已有行，不回填旧评审，也不改变既有索引。
    - 升级后已有评审的标题为空：列表接口省略 `mr_title`，控制台继续显示 `!iid`。这是预期行为，不需要回填，也无法从旧数据恢复标题。

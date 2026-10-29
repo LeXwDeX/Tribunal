@@ -16,8 +16,10 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/LeXwDeX/tribunal/internal/config"
 	"github.com/LeXwDeX/tribunal/internal/llm"
 	"github.com/LeXwDeX/tribunal/internal/mcp"
 	"github.com/LeXwDeX/tribunal/internal/review"
@@ -149,6 +151,10 @@ type ExtensionServiceConfig struct {
 	DeniedEnv []string
 	Logger    *slog.Logger
 	Now       func() time.Time
+	// Platform is the configuration this process loaded. RestoreDefaults uses
+	// it to rebuild the shipped defaults; it never re-reads the configuration
+	// files.
+	Platform *config.Config
 }
 
 // ExtensionService persists MCP servers, skills and block bindings, tests MCP
@@ -163,6 +169,12 @@ type ExtensionService struct {
 	logger     *slog.Logger
 	now        func() time.Time
 	newMCPTest func(mcp.Options) (mcpTestSession, error)
+
+	platform    *config.Config
+	restoreOnce sync.Once
+	restoreSet  []ExtensionDefault
+	restoreFile map[string]config.BlockBinding
+	restoreErr  error
 }
 
 type mcpTestSession interface {
@@ -196,6 +208,7 @@ func NewExtensionService(cfg ExtensionServiceConfig) (*ExtensionService, error) 
 		deniedEnv:  append([]string(nil), cfg.DeniedEnv...),
 		logger:     logger,
 		now:        now,
+		platform:   cfg.Platform,
 		newMCPTest: func(opts mcp.Options) (mcpTestSession, error) { return mcp.New(opts) },
 	}, nil
 }

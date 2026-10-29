@@ -200,7 +200,7 @@ type ProfileConfig struct {
 default_extensions:
   skills:
     - name: code-review            # 内置 Skill，随二进制分发（internal/skill/builtin/）
-      blocks: [code-review, review]
+      blocks: [code-review]
 ```
 
 示例配置和 Docker 配置还声明内置 MCP 服务器（内置默认值中没有它，因为非容器主机不一定装了二进制）：
@@ -220,8 +220,26 @@ default_extensions:
         code-review: &read_tools [list_projects, index_status, search_graph, trace_path, get_code_snippet,
           query_graph, get_graph_schema, get_file_outline, get_architecture, search_code, check_index_coverage]
         review: *read_tools
-        verify:      [get_code_snippet]
+        verify:      [get_code_snippet, search_graph, trace_path, search_code]
+        onboarding:  [get_architecture, get_graph_schema]
 ```
+
+#### 默认授权矩阵
+
+两份随仓库分发的 YAML 使用同一矩阵。默认只授予只读工具：
+
+| 块 | 默认 MCP 工具 | 职责理由 |
+|---|---|---|
+| `code-review` | 11 项只读工具（见下） | 单次双轴评审需要跨文件定位定义、调用链和既有实现，以验证 diff 内外的判断。 |
+| `review` | 与 `code-review` 相同 | `review.standards` 和 `review.intent` 单轴通道同样需要只读图谱证据，避免只凭 diff 猜测上下文。 |
+| `verify` | `get_code_snippet`、`search_graph`、`trace_path`、`search_code` | 核对一条 finding 只需读取片段、查找定义与调用链、搜索用法；不授予探索或架构概览工具。 |
+| `onboarding` | `get_architecture`、`get_graph_schema` | 建立项目画像需要架构概览和图 schema；逐点检索、覆盖检查留给评审块。 |
+| `reasoner` | 无 | 只审查设计声明和已有材料，不直接检索代码图谱。 |
+| `synthesize` | 无 | 只消费结构化 finding 和 challenge 结果，不直接检索。 |
+
+11 项只读工具：`list_projects`、`index_status`、`search_graph`、`trace_path`、`get_code_snippet`、`query_graph`、`get_graph_schema`、`get_file_outline`、`get_architecture`、`search_code`、`check_index_coverage`。默认授权不得包含 `index_repository`、`delete_project`、`ingest_traces`、`manage_adr` 等写工具，也不包含 `detect_changes`、`compare_graphs`。
+
+`code-review` Skill 默认只绑定 `code-review` 块；`review` 的两个单轴通道由各自 prompt 约束。管理员仍可按需把 Skill 或工具绑定到其他可绑定块。`reasoner` 和 `synthesize` 仍是合法的可绑定目标，只是没有默认授权。
 
 - `skills[].name` 必须是内置 Skill，`blocks` 只能取 `code-review`、`review`、`reasoner`、`verify`、`synthesize`、`onboarding`；同名不能重复。校验失败与其他配置错误一起报告。
 - 内置文件复制到 `<workspace.root>/skills/platform/<id>/skill`，行上 `builtin` 列记录内置名。API 以 `builtin: true` 返回，控制台显示「内置」标签。
@@ -232,11 +250,37 @@ default_extensions:
   - `<kind>:<name>`：已登记，或因已有管理员自建的同名平台扩展而跳过（不覆盖，也不绑定）。
   - `<kind>:<name>@<block>`：已授权到该块，或跳过。配置文件 `blocks` 已声明该块、或数据库中该块的平台绑定已被管理员修改时跳过，升级不会改写自定义绑定。
   - `block:<block>`：默认机制最后写入的绑定。只要该行未被改动，后续版本新增的内置扩展（例如 MCP）可以继续合并进来。绑定行与对应的 ledger 记录在同一事务中写入，中途失败不会让该块被误判为管理员已修改。
-  - 默认机制写入某块之后，又在配置文件 `blocks` 中声明了该块：若数据库中该块的平台绑定仍等于 `block:<block>` 快照，启动时删除这行（记一次 Info 日志，快照改记为跳过），以 YAML 为准；管理员改过的绑定仍以数据库为准。即使 `default_extensions` 已清空也会执行这一步。
+  - 默认机制写入某块之后，又在配置文件 `blocks` 中声明了该块：只有数据库中该块的平台绑定仍等于 `block:<block>` 快照，且行内每个 MCP 工具和 Skill 都能由 `extension_defaults` 中 `applied` 的默认 grant detail 证明时，启动时才删除这行（记一次 Info 日志，快照改记为跳过），以 YAML 为准。行含自建授权、或 grant detail 缺失/无法解析时保留该行，数据库绑定继续覆盖 YAML。管理员改过的绑定仍以数据库为准。即使 `default_extensions` 已清空也会执行这一步。
   - 已授权的 `<kind>:<name>@<block>` 在 detail 中记录当时授予的条目。后续版本改变授权内容（例如更新 MCP 工具白名单）时，只要该块绑定仍等于 `block:<block>` 快照，就用新授权替换旧授权的条目；管理员改过的绑定保持不变。
-- 管理员从某个块解绑后，重启不会恢复。
+- **升级与恢复边界**：自动升级只刷新已登记的内置扩展，不覆盖管理员改过或解绑的绑定，保留管理员自建的同名扩展。显式恢复只处理选定块上台账记录为已登记的内置扩展：移除这些内置扩展在该块的授权并重新应用当前默认，因此会重置该块上被管理员改过或解绑的内置授权；管理员自建扩展的授权和项目级绑定保留。
+- **文件显式声明优先**：配置文件 `blocks` 显式声明某个块时，该块的默认授权跳过；数据库平台行释放后，以文件为准。释放条件见[文件声明与数据库绑定](#文件声明与数据库绑定)。即使 `default_extensions` 已清空，这条规则也不变。
+- **禁用状态不变**：内置 Skill 和 MCP 服务器的启用、停用状态由管理员决定；升级、重启和内置配置同步都不改变该状态。
+- **生效时机**：修改配置文件中的 `default_extensions` 或数据库中的扩展、绑定后，需要重启服务才生效；运行中的进程继续使用启动时读取的扩展和绑定。管理员从某个块解绑后，重启不会恢复。
 - `skills: []` 只是不再登记新的默认项，不删除已登记的扩展和绑定。
 - 登记或更新失败（例如工作区不可写）会让启动失败；登记失败不写台账，下次启动重试。
+
+#### 文件声明与数据库绑定
+
+顶层 `blocks` 是文件声明的块绑定，`default_extensions` 只是内置扩展的默认授权声明，两者不是同一层。启动时先执行默认扩展，再加载平台扩展；数据库中的平台块绑定按块覆盖文件 `blocks`（`internal/app/adapters.go` 的 `loadStoredPlatformExtensions`）。因此，文件声明只有在数据库没有对应平台行时才直接生效。
+
+配置文件声明某块后，默认机制会在启动时尝试释放它此前写入的平台行（`releaseFileBlocks`）。释放条件是 `purelyDefaultOwned` 能证明整行纯默认：
+
+- 行内容等于 `block:<block>` 快照；
+- 行内每个 MCP 工具和 Skill 都能由 `extension_defaults` 中 `applied` 的默认 grant detail 认领。
+
+行上存在管理员自建授权，或任一 grant detail 缺失、无法解析，证明失败，数据库行保留并继续覆盖文件 `blocks`。快照相等不等于纯默认：快照记录的是默认机制最后一次写入的整行，可能已经包含当时行上的自建授权，例如执行恢复默认后保留的自建授权。
+
+恢复默认只移除已登记内置扩展在选中块上的授权，保留自建扩展授权、项目级绑定和启用状态，也不修改文件 `blocks`。文件已声明该块时，恢复返回 `skipped`；有效值需看数据库行是否释放，不能把“跳过恢复”当作文件绑定已经生效。文件声明生效后，块绑定 API 不返回它的数据库行；控制台仍列出该块，但平台绑定显示为空，不要把空绑定保存回数据库。
+
+从数据库绑定迁移到文件声明时，按 [默认扩展授权迁移](../operations.md#默认扩展授权迁移) 操作。关键限制：
+
+1. 先备份数据库、工作区和实际挂载配置。
+2. 在独立草稿中准备顶层 `blocks` 的完整绑定，先不要写入实际挂载配置；文件声明是完整绑定，必须同时写入该块需要的默认授权和要保留的自建授权。
+3. 若当前生效配置已声明该块，先临时移除声明并重启；否则恢复默认会被 `file_binding` 跳过。草稿保持不启用。
+4. 在控制台“扩展 → 块绑定”的平台范围清除该块的自建授权并保存，或对 `PUT /api/v1/block-bindings/{block}` 提交完整绑定。不要删除数据库行。
+5. 对该块执行恢复默认，使行和 ledger 重新由默认机制接管。
+6. 把草稿中的完整声明写入实际挂载配置并重启，确认日志 `file configuration replaces default block binding`。
+7. 账本缺失、无法证明纯默认或行仍未释放时停止核对，不要手工删除数据库行。
 
 ---
 

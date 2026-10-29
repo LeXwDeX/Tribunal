@@ -4,7 +4,12 @@
 
 ## Unreleased
 
-v1.2.0 尚未发布；冻结前的新改动仍记入下方 `[1.2.0]` 段，避免与待发布内容分叉。比较链接待打 tag 后按实际 tag 补充。
+v1.2.0 尚未打 tag；本段记录尚未发布的新改动，`[1.2.0]` 段保持不变。比较链接待打 tag 后按实际 tag 补充。
+
+### 变更
+
+- **默认扩展授权收窄**：内置 `code-review` Skill 只绑定 `code-review` 块。示例配置和 Docker 配置中的 codebase-memory 默认授权改为：`verify` 只授予 `get_code_snippet`、`search_graph`、`trace_path`、`search_code`，`onboarding` 只授予 `get_architecture`、`get_graph_schema`；`code-review` 和 `review` 保留 11 个只读工具；`reasoner` 和 `synthesize` 没有默认图谱授权。默认不授予写工具、`detect_changes` 或 `compare_graphs`。升级保留管理员改过的绑定和解绑结果；数据库平台行按块优先于文件 `blocks`，只有内容等于 `block:<block>` 快照且每个条目都能由默认授权台账证明的行才释放。行上有自建授权或台账不可证明时文件块不生效，迁移步骤见 [默认扩展授权迁移](docs/operations.md#默认扩展授权迁移)。镜像升级不会改写宿主机挂载的配置文件，旧 `default_extensions` 会继续生效；升级前要备份并对照实际挂载配置、`config/server.docker.yaml` 和 `config/server.example.yaml` 核对矩阵，保留管理员自定义项。内置扩展的启用状态不变；配置或绑定变更需用 `--force-recreate` 重启生效（[#143](https://github.com/LeXwDeX/Tribunal/issues/143)）。
+- **恢复默认块绑定**：平台管理员可以预览并恢复单个块或全部块的内置扩展授权。确认后保留自建扩展授权、项目级绑定和内置扩展启用状态；恢复会移除选中块上已登记内置扩展的授权，文件声明块返回 `skipped`，不删除平台行，也没有删除绑定 API。块绑定的远端变更与本地草稿冲突时，控制台会暂停保存并要求处理冲突。恢复结果在重启服务后生效（[#143](https://github.com/LeXwDeX/Tribunal/issues/143)）。
 
 ## [1.2.0] - 2026-10-29
 

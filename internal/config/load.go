@@ -74,7 +74,7 @@ blocks: {}
 default_extensions:
   skills:
     - name: code-review
-      blocks: [code-review, review]
+      blocks: [code-review]
 review_defaults:
   language: "zh-CN"
   skip_draft: true

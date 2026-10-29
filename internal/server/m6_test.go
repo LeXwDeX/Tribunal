@@ -526,6 +526,12 @@ type fakeExtensions struct {
 	err      error
 }
 
+func (f *fakeExtensions) RestoreDefaults(ctx context.Context, in RestoreDefaultsInput) (*RestoreDefaultsResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return &RestoreDefaultsResult{Changes: []RestoreDefaultsChange{}, RestartRequired: true}, f.err
+}
+
 func (f *fakeExtensions) ListMCPServers(ctx context.Context, scope string, projectID *int64) ([]MCPServer, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

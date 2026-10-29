@@ -2,6 +2,8 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
+	"path/filepath"
 	"testing"
 
 	"github.com/LeXwDeX/tribunal/internal/store"
@@ -187,4 +189,86 @@ func TestBuiltinMarkerAndSkillUpdates(t *testing.T) {
 	if err != nil || read.Builtin != "codebase-memory" {
 		t.Fatalf("GetMCPServer = %+v, %v", read, err)
 	}
+}
+
+// A failure on a later row rolls back the whole restore, including rows
+// written earlier in the same transaction.
+func TestRestoreDefaultBlockBindingsRollsBackAllRows(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "review.db")
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+	if _, err := raw.ExecContext(ctx, `CREATE TRIGGER fail_verify BEFORE INSERT ON block_bindings
+		WHEN NEW.block = 'verify' BEGIN SELECT RAISE(ABORT, 'injected block failure'); END`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	plan := func(DefaultRestoreState) (DefaultRestorePlan, error) {
+		return DefaultRestorePlan{
+			Bindings: []store.BlockBinding{
+				{Scope: store.ScopePlatform, Block: "review", Skills: []string{"code-review"}},
+				{Scope: store.ScopePlatform, Block: "verify", Skills: []string{"code-review"}},
+			},
+			Ledger: []store.ExtensionDefault{
+				{Key: "block:review", Outcome: store.ExtensionDefaultApplied, Detail: `{"mcp_tools":[],"skills":["code-review"]}`},
+				{Key: "block:verify", Outcome: store.ExtensionDefaultApplied, Detail: `{"mcp_tools":[],"skills":["code-review"]}`},
+			},
+		}, nil
+	}
+	if _, err := s.RestoreDefaultBlockBindings(ctx, plan); err == nil {
+		t.Fatal("injected failure was swallowed")
+	}
+	if rows, _ := s.ListBlockBindings(ctx, store.ScopePlatform, nil); len(rows) != 0 {
+		t.Fatalf("bindings survived rollback: %+v", rows)
+	}
+	if rows, _ := s.ListExtensionDefaults(ctx); len(rows) != 0 {
+		t.Fatalf("ledger survived rollback: %+v", rows)
+	}
+}
+
+func TestReadDefaultRestoreStateReturnsWholeSnapshot(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t, newFakeClock())
+	write := func(skill string) store.BlockBinding {
+		binding := store.BlockBinding{Scope: store.ScopePlatform, Block: "review", Skills: []string{skill}}
+		detail := `{"mcp_tools":[],"skills":["` + skill + `"]}`
+		if err := s.SetDefaultBlockBinding(ctx, "review", &binding,
+			store.ExtensionDefault{Key: "block:review", Outcome: store.ExtensionDefaultApplied, Detail: detail},
+			store.ExtensionDefault{Key: "skill:" + skill + "@review", Outcome: store.ExtensionDefaultApplied, Detail: detail},
+		); err != nil {
+			t.Fatalf("SetDefaultBlockBinding(%s): %v", skill, err)
+		}
+		return binding
+	}
+	check := func(skill string) {
+		t.Helper()
+		state, err := s.ReadDefaultRestoreState(ctx)
+		if err != nil {
+			t.Fatalf("ReadDefaultRestoreState: %v", err)
+		}
+		if len(state.Bindings) != 1 || len(state.Bindings[0].Skills) != 1 || state.Bindings[0].Skills[0] != skill {
+			t.Fatalf("bindings = %+v, want %s", state.Bindings, skill)
+		}
+		var snapshot store.ExtensionDefault
+		for _, row := range state.Ledger {
+			if row.Key == "block:review" {
+				snapshot = row
+			}
+		}
+		if snapshot.Outcome != store.ExtensionDefaultApplied || snapshot.Detail != `{"mcp_tools":[],"skills":["`+skill+`"]}` {
+			t.Fatalf("snapshot = %+v, want the same write as the row", snapshot)
+		}
+	}
+	write("a")
+	check("a")
+	write("b")
+	check("b")
 }

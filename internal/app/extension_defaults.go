@@ -49,8 +49,8 @@ type ExtensionDefault struct {
 
 // DefaultGrant is what one default adds to a platform block binding.
 type DefaultGrant struct {
-	MCPTools []string
-	Skills   []string
+	MCPTools []string `json:"mcp_tools"`
+	Skills   []string `json:"skills"`
 }
 
 const (
@@ -58,6 +58,10 @@ const (
 	reasonNotRegistered   = "the default extension was not registered"
 	reasonFileBinding     = "the block is bound in the configuration file"
 	reasonCustomBinding   = "the block binding was changed by an administrator"
+	// reasonGrantRemoved records a default grant the running release no
+	// longer ships. The row is handled once, but a later release that ships
+	// the grant again may reapply it.
+	reasonGrantRemoved = "the default no longer grants the block"
 )
 
 // ApplyExtensionDefaults registers and binds platform defaults. Every
@@ -178,20 +182,25 @@ func (s *defaultSeeder) apply(ctx context.Context, d ExtensionDefault) error {
 		if done, ok := s.ledger[grantKey]; ok {
 			// A release may change what a default grants. An applied grant
 			// follows it while the block row is still default-owned; the
-			// entries of the previous grant are replaced.
-			if done.Outcome != store.ExtensionDefaultApplied || !registered || done.Detail == want {
-				continue
-			}
-			merged, _, err := s.grant(ctx, block, d.Bindings[block], decodeDefaultGrant(done.Detail))
-			if err != nil {
-				return err
-			}
-			if merged != nil {
-				if err := s.commitGrant(ctx, *merged, grantKey, want); err != nil {
+			// entries of the previous grant are replaced. A grant a previous
+			// release dropped is treated as new when the running release
+			// ships it again.
+			reapplied := done.Outcome == store.ExtensionDefaultSkipped && done.Detail == reasonGrantRemoved
+			if !reapplied {
+				if done.Outcome != store.ExtensionDefaultApplied || !registered || done.Detail == want {
+					continue
+				}
+				merged, _, err := s.grant(ctx, block, d.Bindings[block], decodeDefaultGrant(done.Detail))
+				if err != nil {
 					return err
 				}
+				if merged != nil {
+					if err := s.commitGrant(ctx, *merged, grantKey, want); err != nil {
+						return err
+					}
+				}
+				continue
 			}
-			continue
 		}
 		if !registered {
 			if err := s.record(ctx, grantKey, store.ExtensionDefaultSkipped, reasonNotRegistered); err != nil {
@@ -214,7 +223,120 @@ func (s *defaultSeeder) apply(ctx context.Context, d ExtensionDefault) error {
 			return err
 		}
 	}
+	return s.dropStaleGrants(ctx, d)
+}
+
+// dropStaleGrants removes the entries of grants the running release no longer
+// declares for a default that is still shipped. Removing the whole default
+// declaration is not a removal: the ledger and the registered resources stay
+// as they are.
+func (s *defaultSeeder) dropStaleGrants(ctx context.Context, d ExtensionDefault) error {
+	prefix := d.Kind + ":" + d.Name + "@"
+	keys := make([]string, 0)
+	for key, row := range s.ledger {
+		if !strings.HasPrefix(key, prefix) || row.Outcome != store.ExtensionDefaultApplied {
+			continue
+		}
+		if _, kept := d.Bindings[strings.TrimPrefix(key, prefix)]; kept {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		block := strings.TrimPrefix(key, prefix)
+		if err := s.dropGrant(ctx, d, block, key, s.ledger[key]); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// dropGrant removes the entries one applied grant added. It only rewrites a
+// row that is still exactly what the defaults last wrote. A Skill's own name
+// can be removed without a recorded grant; unknown MCP grants stay in place.
+func (s *defaultSeeder) dropGrant(ctx context.Context, d ExtensionDefault, block, grantKey string, row store.ExtensionDefault) error {
+	if _, ok := s.fileBlocks[block]; ok {
+		return s.record(ctx, grantKey, store.ExtensionDefaultSkipped, reasonFileBinding)
+	}
+	current, err := s.platformBinding(ctx, block)
+	if err != nil {
+		return err
+	}
+	if current == nil {
+		return s.record(ctx, grantKey, store.ExtensionDefaultSkipped, reasonGrantRemoved)
+	}
+	snapshot, owned := s.ledger[blockSnapshotKey(block)]
+	if !owned || !sameDefaultBinding(*current, snapshot.Detail) {
+		return s.record(ctx, grantKey, store.ExtensionDefaultSkipped, reasonCustomBinding)
+	}
+	builtin, err := s.builtinIdentity(ctx, d.Kind, d.Name)
+	if err != nil {
+		return err
+	}
+	if !builtin {
+		return s.record(ctx, grantKey, store.ExtensionDefaultSkipped, reasonCustomBinding)
+	}
+	previous, proven := parseDefaultGrant(row.Detail)
+	switch d.Kind {
+	case "skill":
+		// SkillDefaults always grants the Skill's own name. That name is
+		// provable even when the detail was not recorded, so the entry can be
+		// removed without guessing.
+		previous.MCPTools = nil
+		previous.Skills = appendMissing(previous.Skills, []string{d.Name})
+	case "mcp":
+		if !proven || len(previous.MCPTools) == 0 {
+			// MCP tool names cannot be reconstructed from the server name.
+			// Keep the ledger applied so a future release can retry.
+			s.logger.Warn("default mcp grant detail cannot prove its entries; keeping them",
+				"name", d.Name, "block", block)
+			return nil
+		}
+		previous.Skills = nil
+	default:
+		if !proven {
+			s.logger.Warn("default grant detail is missing; keeping its entries",
+				"kind", d.Kind, "name", d.Name, "block", block)
+			return nil
+		}
+	}
+	merged := store.BlockBinding{
+		Scope:    store.ScopePlatform,
+		Block:    block,
+		MCPTools: withoutValues(current.MCPTools, previous.MCPTools),
+		Skills:   withoutValues(current.Skills, previous.Skills),
+	}
+	return s.commitGrantOutcome(ctx, merged, grantKey, store.ExtensionDefaultSkipped, reasonGrantRemoved)
+}
+
+// builtinIdentity confirms, from the stored rows rather than the ledger, that
+// the managed resource still belongs to this shipped default. A same-name
+// resource the administrator created has an empty marker and is never removed.
+func (s *defaultSeeder) builtinIdentity(ctx context.Context, kind, name string) (bool, error) {
+	switch kind {
+	case "skill":
+		rows, err := s.st.ListSkills(ctx, store.ScopePlatform, nil)
+		if err != nil {
+			return false, fmt.Errorf("app: load platform skills: %w", err)
+		}
+		for _, row := range rows {
+			if row.Name == name {
+				return row.Builtin == name, nil
+			}
+		}
+	case "mcp":
+		rows, err := s.st.ListMCPServers(ctx, store.ScopePlatform, nil)
+		if err != nil {
+			return false, fmt.Errorf("app: load platform MCP servers: %w", err)
+		}
+		for _, row := range rows {
+			if row.Name == name {
+				return row.Builtin == name, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 // encodeDefaultGrant is the ledger detail of an applied grant: the entries it
@@ -233,11 +355,18 @@ func encodeDefaultGrant(grant DefaultGrant) (string, error) {
 // decodeDefaultGrant reads an applied grant's detail. Grants recorded before
 // details were kept decode as empty, so an upgrade only adds entries.
 func decodeDefaultGrant(detail string) DefaultGrant {
+	grant, _ := parseDefaultGrant(detail)
+	return grant
+}
+
+// parseDefaultGrant reports whether the detail proves which entries the grant
+// added. An empty or malformed detail proves nothing.
+func parseDefaultGrant(detail string) (DefaultGrant, bool) {
 	var snapshot defaultBindingSnapshot
 	if json.Unmarshal([]byte(detail), &snapshot) != nil {
-		return DefaultGrant{}
+		return DefaultGrant{}, false
 	}
-	return DefaultGrant(snapshot)
+	return DefaultGrant(snapshot), true
 }
 
 // grant merges one default grant into a default-owned platform binding,
@@ -276,13 +405,17 @@ func (s *defaultSeeder) grant(ctx context.Context, block string, grant, previous
 // leaves a default-written row that a later start takes for an
 // administrator's change.
 func (s *defaultSeeder) commitGrant(ctx context.Context, merged store.BlockBinding, grantKey, want string) error {
-	detail, err := encodeDefaultBinding(merged)
+	return s.commitGrantOutcome(ctx, merged, grantKey, store.ExtensionDefaultApplied, want)
+}
+
+func (s *defaultSeeder) commitGrantOutcome(ctx context.Context, merged store.BlockBinding, grantKey, outcome, detail string) error {
+	snapshot, err := encodeDefaultBinding(merged)
 	if err != nil {
 		return err
 	}
 	rows := []store.ExtensionDefault{
-		{Key: blockSnapshotKey(merged.Block), Outcome: store.ExtensionDefaultApplied, Detail: detail},
-		{Key: grantKey, Outcome: store.ExtensionDefaultApplied, Detail: want},
+		{Key: blockSnapshotKey(merged.Block), Outcome: store.ExtensionDefaultApplied, Detail: snapshot},
+		{Key: grantKey, Outcome: outcome, Detail: detail},
 	}
 	if err := s.st.SetDefaultBlockBinding(ctx, merged.Block, &merged, rows...); err != nil {
 		return fmt.Errorf("app: write default block binding %q: %w", merged.Block, err)
@@ -311,7 +444,7 @@ func (s *defaultSeeder) releaseFileBlocks(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if current == nil || !sameDefaultBinding(*current, s.ledger[blockSnapshotKey(block)].Detail) {
+		if current == nil || !s.purelyDefaultOwned(block, *current, s.ledger[blockSnapshotKey(block)].Detail) {
 			continue
 		}
 		row := store.ExtensionDefault{Key: blockSnapshotKey(block), Outcome: store.ExtensionDefaultSkipped, Detail: reasonFileBinding}
@@ -322,6 +455,44 @@ func (s *defaultSeeder) releaseFileBlocks(ctx context.Context) error {
 		s.logger.Info("file configuration replaces default block binding", "block", block)
 	}
 	return nil
+}
+
+// purelyDefaultOwned reports whether the row still matches the last default
+// snapshot and every entry is claimed by an applied grant with a readable
+// detail. A row that also carries an administrator's grant, or whose grant
+// details are missing, is not proven pure and must not be deleted as a whole.
+func (s *defaultSeeder) purelyDefaultOwned(block string, current store.BlockBinding, snapshot string) bool {
+	if !sameDefaultBinding(current, snapshot) {
+		return false
+	}
+	tools := make(map[string]bool)
+	skills := make(map[string]bool)
+	for key, row := range s.ledger {
+		if row.Outcome != store.ExtensionDefaultApplied || !strings.HasSuffix(key, "@"+block) {
+			continue
+		}
+		grant, proven := parseDefaultGrant(row.Detail)
+		if !proven {
+			return false
+		}
+		for _, tool := range grant.MCPTools {
+			tools[tool] = true
+		}
+		for _, skill := range grant.Skills {
+			skills[skill] = true
+		}
+	}
+	for _, tool := range current.MCPTools {
+		if !tools[tool] {
+			return false
+		}
+	}
+	for _, skill := range current.Skills {
+		if !skills[skill] {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *defaultSeeder) platformBinding(ctx context.Context, block string) (*store.BlockBinding, error) {
@@ -624,6 +795,7 @@ func seedDefaultExtensions(ctx context.Context, cfg *config.Config, st *sqlite.S
 		DeniedEnv: deniedEnvNames(cfg),
 		Logger:    logger,
 		Now:       now,
+		Platform:  cfg,
 	})
 	if err != nil {
 		return err
