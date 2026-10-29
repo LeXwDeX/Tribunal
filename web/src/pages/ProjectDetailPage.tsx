@@ -184,12 +184,8 @@ export function ProjectDetailPage() {
               {data.access ? <> · {data.access === 'manage' ? '可管理' : '只读'}</> : null} · 生成的上下文与索引只保存在平台内部
             </>
           }
-          actions={
-            <>
-              {gitlabUrl ? <ButtonLink href={gitlabUrl} target="_blank" rel="noopener noreferrer">在 GitLab 中打开</ButtonLink> : null}
-              {data.enabled ? <Badge tone="ok">已启用</Badge> : <Badge tone="neutral">已停用</Badge>}
-            </>
-          }
+          meta={data.enabled ? <Badge tone="ok">已启用</Badge> : <Badge tone="neutral">已停用</Badge>}
+          actions={gitlabUrl ? <ButtonLink href={gitlabUrl} target="_blank" rel="noopener noreferrer">在 GitLab 中打开</ButtonLink> : undefined}
         />
 
         <Tabs

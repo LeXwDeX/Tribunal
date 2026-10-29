@@ -174,11 +174,16 @@ export function Segmented({
   )
 }
 
-export function PageHeader({ title, description, actions }: { title: ReactNode; description?: ReactNode; actions?: ReactNode }) {
+export function PageHeader({
+  title, description, actions, meta,
+}: { title: ReactNode; description?: ReactNode; actions?: ReactNode; meta?: ReactNode }) {
   return (
     <header className={styles.pageHeader}>
       <div className={styles.pageHeaderText}>
-        <h1 className={styles.pageTitle}>{title}</h1>
+        <div className={styles.pageTitleRow}>
+          <h1 className={styles.pageTitle}>{title}</h1>
+          {meta ? <div className={styles.pageMeta}>{meta}</div> : null}
+        </div>
         {description ? <p className={styles.pageDescription}>{description}</p> : null}
       </div>
       {actions ? <div className={styles.headerActions}>{actions}</div> : null}
