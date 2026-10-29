@@ -27,7 +27,7 @@ const WORKSPACE_POLL_MS = 2000
 const WORKSPACE_TRACK_MS = 5 * 60 * 1000
 
 // Survives panel unmounts (tab switches); the worker may still be queued.
-type PendingWorkspaceJob = { baseRefreshAt?: string; until: number }
+type PendingWorkspaceJob = { baseRefreshAt?: string; baseUpdatedAt?: string; until: number }
 const pendingWorkspaceJobs = new Map<number, PendingWorkspaceJob>()
 
 export function WorkspacePanel({ projectId, canManage = false }: { projectId: number; canManage?: boolean }) {
@@ -46,6 +46,7 @@ export function WorkspacePanel({ projectId, canManage = false }: { projectId: nu
   const pendingJob = pendingWorkspaceJobs.get(projectId)
   const [trackingJob, setTrackingJob] = useState(() => Boolean(pendingJob && pendingJob.until > Date.now()))
   const submittedRefreshAt = useRef(pendingJob?.baseRefreshAt)
+  const submittedUpdatedAt = useRef(pendingJob?.baseUpdatedAt)
   const trackingTimeout = useRef<number | undefined>(undefined)
 
   const workspace = useQuery({
@@ -90,8 +91,13 @@ export function WorkspacePanel({ projectId, canManage = false }: { projectId: nu
       trackingTimeout.current = undefined
     }
     submittedRefreshAt.current = workspace.data?.last_refresh_at
+    submittedUpdatedAt.current = workspace.data?.updated_at
     const until = Date.now() + WORKSPACE_TRACK_MS
-    pendingWorkspaceJobs.set(projectId, { baseRefreshAt: submittedRefreshAt.current, until })
+    pendingWorkspaceJobs.set(projectId, {
+      baseRefreshAt: submittedRefreshAt.current,
+      baseUpdatedAt: submittedUpdatedAt.current,
+      until,
+    })
     setTrackingJob(true)
     scheduleTrackingTimeout(until)
   }
@@ -106,26 +112,30 @@ export function WorkspacePanel({ projectId, canManage = false }: { projectId: nu
       pendingWorkspaceJobs.delete(projectId)
       setTrackingJob(false)
       submittedRefreshAt.current = undefined
+      submittedUpdatedAt.current = undefined
       return
     }
     submittedRefreshAt.current = pending.baseRefreshAt
+    submittedUpdatedAt.current = pending.baseUpdatedAt
     setTrackingJob(true)
     scheduleTrackingTimeout(pending.until)
   }, [projectId, scheduleTrackingTimeout])
 
   const workspaceState = workspace.data?.state
   const lastRefreshAt = workspace.data?.last_refresh_at
+  const workspaceUpdatedAt = workspace.data?.updated_at
   useEffect(() => {
-    const refreshChanged = lastRefreshAt !== submittedRefreshAt.current
-    const failed = workspaceState === 'error'
     const terminal = workspaceState ? !ACTIVE_WORKSPACE_STATES.has(workspaceState) : false
-    // While tracking, an old "ready" is not completion; wait for the refresh
-    // timestamp to move or for a terminal error.
-    const settled = trackingJob ? refreshChanged || failed : terminal
+    const refreshChanged = Boolean(lastRefreshAt) && lastRefreshAt !== submittedRefreshAt.current
+    const failedNew = workspaceState === 'error' && workspaceUpdatedAt !== submittedUpdatedAt.current
+    // While tracking, an old "ready" or the previous error is not completion.
+    // Require a terminal state plus a refresh timestamp or update stamp that
+    // changed since the POST.
+    const settled = trackingJob ? terminal && (refreshChanged || failedNew) : terminal
     if (!settled) return
     stopTracking()
     void reloadContextDocs()
-  }, [workspaceState, lastRefreshAt, trackingJob, stopTracking, reloadContextDocs])
+  }, [workspaceState, lastRefreshAt, workspaceUpdatedAt, trackingJob, stopTracking, reloadContextDocs])
   const current = useQuery({
     queryKey: ['project', projectId, 'context-doc-current', kind],
     queryFn: () => getCurrentContextDoc(projectId, kind),
