@@ -814,7 +814,7 @@ docker compose exec -T review /app/tribunalctl projects all
     - `/readyz` 返回 200；已有项目可正常读取，已有评审列表可打开，旧评审显示 `!iid` 而不是报错。
     - MCP 服务器列表和详情返回 `config: {}`；内置 `codebase-memory` 仍在，默认 ignore 下评审不再因 MCP 工具记为覆盖缺口。
     - 触发一次新评审，确认列表能显示 `mr_title`，日志检索使用 `error_class` 仍能命中；被 ignore 的路径不出现在评论中。
-    - v1.2.0 尚未完成真实实例验收；在 #108 完成前不要把本次升级当作发布验收。
+    - 真实实例验收已在 33.110 隔离实例执行并通过（4 项通过、1 项另开 [#151](https://github.com/LeXwDeX/Tribunal/issues/151)）；实例验收不等于 GitHub Actions 通过，也不等于发布放行，发布前仍由维护者核对[验证状态](delivery-readiness.md#v120-验证状态)。
 
 ## 9. 无外部凭据的本地烟测
 

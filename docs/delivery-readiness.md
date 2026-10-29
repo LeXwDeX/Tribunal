@@ -46,16 +46,16 @@ v1.2.0 尚未发布：版本说明已合并到 `main`，尚未打 tag，也未�
 - 旧评审显示 `!iid`：v1.0.0/v1.1.0 产生的 dossier `mr_title=''`，控制台显示 `!1`；升级后的新评审 `mr_title='feat: add withdraw'`，列表显示标题（#101）。
 - codebase-memory-mcp 实际调用：临时将验收实例 `review_defaults.ignore` 置空并重建索引，再用测试用项目 `custom_rules` 引导评审先调用图谱工具；按 `message.parts[].type == "tool_call"` 统计，项目 1335 实际调用 `list_projects`、`get_architecture`，项目 1336 调用 `list_projects`、`get_architecture`、`search_graph`。引导只用于验收，不改变产品默认行为。
 - 多项目 MCP 隔离：注册第二个项目 1336 并跑真实评审；按 workflow 分别统计请求和响应，1335 的 workflow 中 `tribunal-acceptance-108` 出现 6 次、`tribunal-acceptance-108b` 出现 0 次；1336 中 `108b` 出现 5 次、`108` 出现 0 次。
-- OAuth 登录；容器重启后会话保留。
+- OAuth 登录；容器重启后会话保留；另用 v1.1.0 会话跨版本升级到 `a113e08`，同一浏览器 cookie 访问 `/api/v1/me` 仍返回 200。
 - 升级后真实评审：MR !2 结论 `PASS`，MR !1、MR !3 结论 `BLOCKING`，均已发布到 GitLab。
 - 停机续跑：评审运行中对容器发 SIGKILL，重启后 workflow 完成并发布（MR !3、MR !1）。
 - Webhook 面板：停用、启用、外部删除后重建，GitLab 端 hook 状态与面板一致。
 - 存储故障：SQLite 被独占锁定期间 webhook 返回 503，GitLab Recent events 记录失败；Resend 后返回 200 并被受理（#99）。
 - 启动锁：同一数据卷启动第二个实例，以退出码 1 拒绝启动，第一个实例健康（#104）。
 - 日志：故障日志使用 `error_class`，检查时段内没有 `error` 字段、token 或密码（#107）。
-- 内置 `code-review` Skill：MR !3 的 LLM 调用均加载了该 Skill。
+- 内置 `code-review` Skill：MR !3 的 LLM 调用均加载了该 Skill；4 条 findings 为 P1 concurrency、P2 logic、P1 concurrency、P1 standards，全部发布，汇总与明细一致，baseline smell 没有被单独升级为 BLOCKING。
 - MR 标题：新评审的 dossier 都有 `mr_title`，列表显示标题（#101 新评审部分）。
-- v2 控制台：在真实数据下检查 1440 和 390 宽度、亮色和暗色，页面没有横向滚动。
+- v2 控制台：在真实数据下检查 1440 和 390 宽度、亮色和暗色；总览、评审、项目工作区、扩展、模型与档位、统计与反馈、系统页面均无横向滚动（390 下逐页 `scrollWidth=390`）。
 
 未覆盖或未复现：
 
