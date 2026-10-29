@@ -75,7 +75,7 @@ func TestIgnorePolicyAgentToolsAndMCP(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dossier := validDossier(t)
 			dossier.HeadDir = head
-			dossier.IgnorePolicy = &IgnorePolicy{Version: 1, Patterns: tc.patterns}
+			dossier.IgnorePolicy = &IgnorePolicy{Version: IgnorePolicyVersion, Patterns: tc.patterns}
 			provider := &countIgnoreTools{}
 			blocks := map[string]config.BlockBinding{}
 			if tc.bound {
@@ -120,7 +120,7 @@ func TestIgnorePolicyAgentToolsAndMCP(t *testing.T) {
 }
 
 func TestIgnorePolicyLegacyExecutorRejectsBeforeAgentAndMCP(t *testing.T) {
-	for _, policy := range []*IgnorePolicy{nil, {Version: 2, Patterns: []string{}}, {Version: 1}} {
+	for _, policy := range []*IgnorePolicy{nil, {Version: IgnorePolicyVersion + 1, Patterns: []string{}}, {Version: IgnorePolicyVersion - 1}} {
 		d := validDossier(t)
 		provider := &countIgnoreTools{}
 		calls := 0

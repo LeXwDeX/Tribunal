@@ -22,7 +22,7 @@ func runReviewWorkflow(t *testing.T, profile Profile, maxNodes int, maxTokens in
 	profile.Config.Budget.MaxNodes = maxNodes
 	profile.Config.Budget.MaxTokens = maxTokens
 	dossier := validDossier(t)
-	dossier.IgnorePolicy = &IgnorePolicy{Version: 1, Patterns: []string{}}
+	dossier.IgnorePolicy = &IgnorePolicy{Version: IgnorePolicyVersion, Patterns: []string{}}
 	graphCfg := GraphConfig{AllowedProviders: []string{"local", "claude"}}
 	spec, err := BuildGraph(profile, dossier, graphCfg)
 	if err != nil {

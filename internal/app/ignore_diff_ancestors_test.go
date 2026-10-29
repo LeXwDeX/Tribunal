@@ -13,7 +13,7 @@ import (
 )
 
 func TestIgnoreDiffChecksDirectoryAncestors(t *testing.T) {
-	for _, pattern := range []string{"private", "private/"} {
+	for _, pattern := range []string{"private", "private/", "/private/**", "./private/**"} {
 		t.Run(pattern, func(t *testing.T) {
 			diffs := []gitlab.FileDiff{
 				{OldPath: "private/a.go", NewPath: "private/a.go", Diff: "+CANARY_PRIVATE\n"},

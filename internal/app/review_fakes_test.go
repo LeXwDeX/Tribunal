@@ -544,7 +544,7 @@ func mustJSONBody(t *testing.T, value any) json.RawMessage {
 func testDossier(t *testing.T, head string) *review.Dossier {
 	t.Helper()
 	dossier, err := review.BuildDossier(review.DossierInput{
-		IgnorePolicy:        &review.IgnorePolicy{Version: 1, Patterns: append([]string{}, testDefaults().Ignore...)},
+		IgnorePolicy:        &review.IgnorePolicy{Version: review.IgnorePolicyVersion, Patterns: append([]string{}, testDefaults().Ignore...)},
 		WorkspaceProvenance: &review.WorkspaceProvenance{Version: review.WorkspaceProvenanceVersion, TargetSHA: strings.Repeat("2", 40)},
 		Project:             review.ProjectRef{ID: 42, Path: "group/repo"},
 		MR: review.MRMeta{

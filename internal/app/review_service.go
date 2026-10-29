@@ -32,6 +32,8 @@ const (
 	reviewSupersededReason      = "review superseded"
 	failureNoteDisabledReason   = "failure note disabled"
 	reviewExecutionFailedReason = "review execution failed"
+	invalidRepoConfigDetail     = "repository review configuration is invalid"
+	invalidRepoConfigNote       = "评审未启动：`.gitlab-review.yml` 无法解析或不支持其中的 ignore 规则。请修正后重新触发评审。"
 )
 
 // ReviewStore is the persistence surface needed by review orchestration.
@@ -464,6 +466,15 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 		state, detail := reviewStatusFailed, reviewExecutionFailedReason
 		if errors.Is(err, ErrReviewSuperseded) || errors.Is(err, ErrMRClosed) {
 			state, detail = reviewStatusStale, "review is no longer current"
+		}
+		if errors.Is(err, ErrInvalidRepoConfig) {
+			detail = invalidRepoConfigDetail
+			if token != "" {
+				if _, noteErr := s.gitlab.CreateMRNote(context.WithoutCancel(ctx), token, payload.ProjectID, payload.MRIID, invalidRepoConfigNote); noteErr != nil {
+					s.logger.Warn("invalid repository config note failed",
+						"project_id", payload.ProjectID, "mr_iid", payload.MRIID, "error_class", errclass.Of(noteErr))
+				}
+			}
 		}
 		s.settleReviewStatus(ctx, payload.ProjectID, payload.MRIID, payload.Generation,
 			job.Attempts, payload.HeadSHA, payload.Profile, state, detail,

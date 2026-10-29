@@ -19,7 +19,7 @@ import (
 const DossierSchemaVersion = 1
 
 // IgnorePolicyVersion identifies the supported effective-ignore semantics.
-const IgnorePolicyVersion = 1
+const IgnorePolicyVersion = 2
 
 // WorkspaceProvenanceVersion identifies the workspace material checks.
 const WorkspaceProvenanceVersion = 1
@@ -204,24 +204,68 @@ func (m *IgnoreMatcher) MatchPath(clean string) bool {
 	return false
 }
 
+// ValidateIgnorePatterns rejects syntax the matcher cannot express. Saves must
+// return an error instead of silently dropping a rule that looks protective.
+func ValidateIgnorePatterns(patterns []string) error {
+	for i, raw := range patterns {
+		pattern := strings.TrimSpace(raw)
+		if pattern == "" {
+			continue
+		}
+		if strings.HasPrefix(pattern, "!") {
+			return fmt.Errorf("ignore pattern %d: negation (!) is not supported", i+1)
+		}
+		if strings.ContainsAny(pattern, "[]") {
+			return fmt.Errorf("ignore pattern %d: character classes are not supported", i+1)
+		}
+	}
+	return nil
+}
+
+// normalizeIgnorePattern accepts common gitignore spellings: a leading "/" or
+// "./" anchors at the repository root, and a trailing "/" matches a directory
+// at any depth.
+func normalizeIgnorePattern(raw string) string {
+	pattern := strings.TrimSpace(raw)
+	for strings.HasPrefix(pattern, "./") {
+		pattern = pattern[2:]
+	}
+	for strings.HasPrefix(pattern, "/") {
+		pattern = pattern[1:]
+	}
+	if strings.HasSuffix(pattern, "/") {
+		pattern = "**/" + strings.TrimSuffix(pattern, "/") + "/**"
+	}
+	return pattern
+}
+
 // IgnoreMatcher implements the same glob semantics as diff collection.
 type IgnoreMatcher struct {
 	patterns []*regexp.Regexp
 	basename []*regexp.Regexp
+	catchAll bool
 }
 
 func NewIgnoreMatcher(patterns []string) *IgnoreMatcher {
 	out := &IgnoreMatcher{}
 	for _, raw := range patterns {
 		pattern := strings.TrimSpace(raw)
-		if pattern == "" || strings.HasPrefix(pattern, "!") {
+		if pattern == "" {
 			continue
 		}
-		if strings.HasSuffix(pattern, "/") {
-			pattern += "**"
+		// Unsupported syntax must not become an unprotected path; match
+		// everything until an administrator fixes the saved policy.
+		if strings.HasPrefix(pattern, "!") || strings.ContainsAny(pattern, "[]") {
+			out.catchAll = true
+			continue
+		}
+		pattern = normalizeIgnorePattern(pattern)
+		if pattern == "" {
+			continue
 		}
 		re, err := compileIgnoreGlob(pattern)
 		if err != nil {
+			out.catchAll = true
 			continue
 		}
 		out.patterns = append(out.patterns, re)
@@ -237,6 +281,9 @@ func NewIgnoreMatcher(patterns []string) *IgnoreMatcher {
 func (m *IgnoreMatcher) Match(path string) bool {
 	if m == nil {
 		return false
+	}
+	if m.catchAll {
+		return true
 	}
 	for _, re := range m.patterns {
 		if re.MatchString(path) {
