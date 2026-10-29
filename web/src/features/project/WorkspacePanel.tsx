@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   getCurrentContextDoc, getWorkspace, listContextDocs, refreshWorkspace, saveCurrentContextDoc, setContextDocLock,
@@ -22,6 +22,14 @@ const docKinds: Array<{ key: DocKind; label: string }> = [
   { key: 'claude', label: 'CLAUDE' },
 ]
 
+const ACTIVE_WORKSPACE_STATES = new Set(['new', 'refreshing', 'onboarding'])
+const WORKSPACE_POLL_MS = 2000
+const WORKSPACE_TRACK_MS = 5 * 60 * 1000
+
+// Survives panel unmounts (tab switches); the worker may still be queued.
+type PendingWorkspaceJob = { baseRefreshAt?: string; baseUpdatedAt?: string; until: number }
+const pendingWorkspaceJobs = new Map<number, PendingWorkspaceJob>()
+
 export function WorkspacePanel({ projectId, canManage = false }: { projectId: number; canManage?: boolean }) {
   const canWrite = canManage
   const toast = useToast()
@@ -35,11 +43,99 @@ export function WorkspacePanel({ projectId, canManage = false }: { projectId: nu
   const [lockPending, setLockPending] = useState(false)
   const [refreshAction, setRefreshAction] = useState<RefreshAction | null>(null)
   const [refreshError, setRefreshError] = useState<unknown>(null)
+  const pendingJob = pendingWorkspaceJobs.get(projectId)
+  const [trackingJob, setTrackingJob] = useState(() => Boolean(pendingJob && pendingJob.until > Date.now()))
+  const submittedRefreshAt = useRef(pendingJob?.baseRefreshAt)
+  const submittedUpdatedAt = useRef(pendingJob?.baseUpdatedAt)
+  const trackingTimeout = useRef<number | undefined>(undefined)
 
   const workspace = useQuery({
     queryKey: ['project', projectId, 'workspace'],
     queryFn: () => getWorkspace(projectId),
+    refetchInterval: (query) => {
+      const state = query.state.data?.state
+      return trackingJob || (state && ACTIVE_WORKSPACE_STATES.has(state)) ? WORKSPACE_POLL_MS : false
+    },
   })
+
+  const reloadContextDocs = useCallback(async () => {
+    for (const key of ['context-doc-current', 'context-docs']) {
+      await queryClient.cancelQueries({ queryKey: ['project', projectId, key] })
+      await queryClient.invalidateQueries({ queryKey: ['project', projectId, key] })
+    }
+  }, [queryClient, projectId])
+
+  const stopTracking = useCallback(() => {
+    if (trackingTimeout.current !== undefined) {
+      window.clearTimeout(trackingTimeout.current)
+      trackingTimeout.current = undefined
+    }
+    pendingWorkspaceJobs.delete(projectId)
+    setTrackingJob(false)
+  }, [projectId])
+
+  const scheduleTrackingTimeout = useCallback((until: number) => {
+    if (trackingTimeout.current !== undefined) window.clearTimeout(trackingTimeout.current)
+    trackingTimeout.current = window.setTimeout(() => {
+      pendingWorkspaceJobs.delete(projectId)
+      setTrackingJob(false)
+      void reloadContextDocs()
+    }, Math.max(0, until - Date.now()))
+  }, [projectId, reloadContextDocs])
+
+  // The worker may not have written "refreshing" yet when the POST returns.
+  // Keep polling for a bounded window so a fast old "ready" cannot stop the refresh.
+  const startTracking = () => {
+    if (trackingTimeout.current !== undefined) {
+      window.clearTimeout(trackingTimeout.current)
+      trackingTimeout.current = undefined
+    }
+    submittedRefreshAt.current = workspace.data?.last_refresh_at
+    submittedUpdatedAt.current = workspace.data?.updated_at
+    const until = Date.now() + WORKSPACE_TRACK_MS
+    pendingWorkspaceJobs.set(projectId, {
+      baseRefreshAt: submittedRefreshAt.current,
+      baseUpdatedAt: submittedUpdatedAt.current,
+      until,
+    })
+    setTrackingJob(true)
+    scheduleTrackingTimeout(until)
+  }
+
+  useEffect(() => () => {
+    if (trackingTimeout.current !== undefined) window.clearTimeout(trackingTimeout.current)
+  }, [])
+
+  useEffect(() => {
+    const pending = pendingWorkspaceJobs.get(projectId)
+    if (!pending || pending.until <= Date.now()) {
+      pendingWorkspaceJobs.delete(projectId)
+      setTrackingJob(false)
+      submittedRefreshAt.current = undefined
+      submittedUpdatedAt.current = undefined
+      return
+    }
+    submittedRefreshAt.current = pending.baseRefreshAt
+    submittedUpdatedAt.current = pending.baseUpdatedAt
+    setTrackingJob(true)
+    scheduleTrackingTimeout(pending.until)
+  }, [projectId, scheduleTrackingTimeout])
+
+  const workspaceState = workspace.data?.state
+  const lastRefreshAt = workspace.data?.last_refresh_at
+  const workspaceUpdatedAt = workspace.data?.updated_at
+  useEffect(() => {
+    const terminal = workspaceState ? !ACTIVE_WORKSPACE_STATES.has(workspaceState) : false
+    const refreshChanged = Boolean(lastRefreshAt) && lastRefreshAt !== submittedRefreshAt.current
+    const failedNew = workspaceState === 'error' && workspaceUpdatedAt !== submittedUpdatedAt.current
+    // While tracking, an old "ready" or the previous error is not completion.
+    // Require a terminal state plus a refresh timestamp or update stamp that
+    // changed since the POST.
+    const settled = trackingJob ? terminal && (refreshChanged || failedNew) : terminal
+    if (!settled) return
+    stopTracking()
+    void reloadContextDocs()
+  }, [workspaceState, lastRefreshAt, workspaceUpdatedAt, trackingJob, stopTracking, reloadContextDocs])
   const current = useQuery({
     queryKey: ['project', projectId, 'context-doc-current', kind],
     queryFn: () => getCurrentContextDoc(projectId, kind),
@@ -86,6 +182,7 @@ export function WorkspacePanel({ projectId, canManage = false }: { projectId: nu
         regenerate_context: action === 'regenerate' || undefined,
       })
       toast.push('success', response.job_id ? `已创建任务 ${response.job_id}。` : '已提交工作区任务。')
+      startTracking()
       await queryClient.invalidateQueries({ queryKey: ['project', projectId, 'workspace'] })
       await queryClient.invalidateQueries({ queryKey: ['project', projectId, 'context-docs'] })
     } catch (error) {
