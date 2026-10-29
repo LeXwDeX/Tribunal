@@ -97,7 +97,7 @@ func newWiringEnv(t *testing.T) *wiringEnv {
 	if err != nil {
 		t.Fatalf("secret.New: %v", err)
 	}
-	if err := db.ConfigureMCPSecrets(ctx, cipher); err != nil {
+	if _, err := db.ConfigureMCPSecrets(ctx, cipher); err != nil {
 		t.Fatalf("ConfigureMCPSecrets: %v", err)
 	}
 	seedWiringProject(t, db, cipher)

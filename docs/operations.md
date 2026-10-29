@@ -225,6 +225,15 @@ fi
 
 项目删除先安全检查本地目标、关闭项目 MCP 会话，再删除数据库登记和本地文件。数据库操作返回错误时，文件清理不会开始；该错误不证明数据库一定回滚。数据库提交后若文件清理失败，接口返回错误并说明登记已删除但本地清理未完成。GitLab webhook 删除是有界的尽力操作，不与数据库和文件系统原子提交。
 
+服务提供只读检查和显式清理：
+
+```bash
+tribunalctl projects residues
+tribunalctl projects residues clean --yes
+```
+
+检查命令列出可归属到未登记项目的 `<workspace>/<项目ID>` 和 `skills/project-<项目ID>`，不修改文件。只有存在项目 ID 匹配的受管标记 `.tribunal-managed` 的项目目录才标记 `removable`；标记只在服务通过工作区管理器首次创建项目根时写入；某些创建路径（例如先由 Git 镜像创建根）也可能没有标记，同样按未知归属保留。旧目录不会因普通访问自动获得标记。需要清理旧目录时，先人工确认归属，再手工创建内容为 `tribunal-workspace-v1 <项目ID>` 的普通文件。`skills/project-<id>` 容器、符号链接、非规范名称和无法归属的条目只报告、不删除。清理命令必须带 `--yes`，服务端还要求 `confirm: true`。`failed` 只含脱敏错误类别。清理前后仍应按本节完成备份和归属确认。
+
 遇到删除错误或结果不确定时，不要直接重试登记或删除，也不要让服务自动接管残留。先停止服务，按实际配置确认数据库和 `workspace.root` 的位置、挂载与项目 ID，并做一致性备份。核对数据库中的登记状态、GitLab webhook 状态，以及该项目的工作区和 `skills/project-<项目ID>` 目标；空目录、普通文件和符号链接也可能阻止重新登记。由有权人员确认每个残留的归属和内容，再按组织的受控流程处理；不能确认归属时保留并升级处理。不要批量或盲目删除路径。确认相关目标均已安全处理后，才重新启动并按需重新登记。
 
 状态、反应、候选评审和发布任务在项目锁内复核原任务或工作流；删除后同 ID 的新登记不会继承这些旧任务。锁保护只适用于共享同一工作区管理器的单个受管运行时，也不保证其他进程、宿主机上的外部修改或后台 MCP 进程遵守相同锁。
@@ -392,7 +401,7 @@ fi
 - **内置标识**：它带「内置」标签，只能停用或启用。名称和配置随平台版本走，不能在控制台编辑；删除、改名、改配置或用导入覆盖都返回 409。
 - **禁用**：在「扩展」页点「停用」，或 `PUT /api/v1/mcp-servers/{id}` 设置 `"enabled": false`，然后重启服务。重启和升级都保持停用。
 - **故障表现**：二进制缺失或无法启动时评审照常完成，但没有图谱工具；评审结论里出现 `MCP tools unavailable` 告警，原本会 PASS 的评审显示为 INCOMPLETE。非取消的建索引失败不阻断 onboarding 或刷新；其他必要步骤及状态保存成功时工作区最终为 `ready`，`last_error` 为固定消息 `index: code graph indexing failed`，刷新保留旧 `index_sha`。ignore 阻断索引时 `index_status` 为 `degraded`；其他情况下比较已存的 SHA，不代表当前索引健康。
-- **排查信息**：索引失败告警 `code graph index failed; continuing without it` 和一般工作区失败告警 `workspace operation failed` 含 `project_id` 与 `error_class`；类别限于 `timeout`、`canceled`、`panic`、`internal`，其他类别归为 `internal`。这些日志和工作区 API 不提供原始原因；按项目 ID 在受控环境中检查索引配置、可执行文件和运行环境。旧数据库和备份可能仍含错误原文，读取接口不会清除它们；应限制数据库和备份访问，回退旧版可能重新暴露原文。
+- **排查信息**：索引失败告警 `code graph index failed; continuing without it` 和一般工作区失败告警 `workspace operation failed` 含 `project_id` 与 `error_class`；类别限于 `timeout`、`canceled`、`panic`、`internal`，其他类别归为 `internal`。 节点失败事件优先使用执行器提供的固定类别（如 `auth`、`rate_limited`、`sandbox_denied`、`panic`），没有分类时仍是 `executor_error`、`timeout` 或 `expand_failed`；`panic` 不记录 panic 值。这些日志和工作区 API 不提供原始原因；按项目 ID 在受控环境中检查索引配置、可执行文件和运行环境。旧数据库和备份可能仍含错误原文，读取接口不会清除它们；应限制数据库和备份访问，回退旧版可能重新暴露原文。
 
 ## 2. 构建
 
@@ -686,9 +695,9 @@ curl -fsS http://127.0.0.1:18080/readyz
 
 ### dossier 归属迁移（v1.2.0）
 
-`0018_dossier_project` 为 dossier 增加内部项目归属。旧记录仅根据实际关联的 workflow 回填；没有关联 workflow 的旧孤儿保持未知归属，不从快照猜测。迁移不改写压缩快照内容。项目删除时清理本项目已知归属的孤儿；未知归属记录保留。
+v1.2.0 共四个迁移：`0016_dossier_mr_title`、`0017_mcp_config_seal`、`0018_dossier_project`、`0019_job_defer_window`，都没有 down migration。`0018_dossier_project` 为 dossier 增加内部项目归属。旧记录仅根据实际关联的 workflow 回填；没有关联 workflow 的旧孤儿保持未知归属，不从快照猜测。迁移不改写压缩快照内容。项目删除时清理本项目已知归属的孤儿；未知归属记录保留。
 
-运行时启动和定期工作区清理会在项目锁内，将无 workflow、归属已知且任务终结或已被保留策略移除的 reservation 标记为 skipped，保留快照供审计。排队或运行中的任务继续保留 reservation 以供重试。未知归属或没有任务 ID 的记录不会按此规则自动收敛。
+运行时启动和定期工作区清理会在项目锁内，将无 workflow、归属已知且任务终结或已被保留策略移除的 reservation 标记为 skipped，保留快照供审计。排队或运行中的任务继续保留 reservation 以供重试。未知归属或没有任务 ID 的记录不会按已知归属规则收敛。运行清理会在超过 `storage.job_retention`、没有活跃 workflow/job 且没有其他 pending dossier 引用时，把 `project_id=0` 的记录结算为 skipped，保留审计行；未到保留期或仍有引用的记录保留。
 
 升级前按第 7 节做一致性备份。此迁移没有 down migration；回退须恢复升级前完整快照及匹配旧程序，不能只替换镜像。
 
@@ -697,8 +706,9 @@ curl -fsS http://127.0.0.1:18080/readyz
 1. 按[第 7 节](#7-sqlite-一致性备份与恢复)停止服务并做一致性备份。保存原主密钥、配置和镜像版本，不重新生成 `REVIEW_MASTER_KEY`。
 2. 新程序追加迁移 `0017_mcp_config_seal`。随后在启动 runtime、默认扩展和 HTTP 服务前，把平台、项目、停用及内置 MCP 配置一起加密到 `config_enc`，将旧 `config` 置为 `{}`，并写入加密的密钥校验标记。这些数据更新在同一事务中完成；失败则回滚，保留原配置，拒绝启动。结构迁移可能已经完成，不代表数据回填完成。
 3. 首次回填用现有项目密文验证主密钥。至少一个允许格式的非空字段认证成功即可确认密钥，其余损坏的项目字段保持原样，仍由原有项目迁移逻辑隔离；存在项目密文但没有任何字段能认证时拒绝启动。没有历史密文的新库或仅有旧 MCP 明文的库，无法验证操作者首次提供的 key 是否正确，首次成功配置的 key 将成为后续校验依据。已有 MCP 密文或校验标记必须能认证。
+   首次密封时如果没有可验证的项目或 MCP 密文，启动日志会记录 `MCP master key has no verification evidence`（只含环境变量名，不含密钥值）。看到该告警时应立即核对并保存部署密钥；首次成功密封后，该密钥成为后续校验依据。
 4. 启动失败时，先在受控环境核对原密钥和备份，不删除数据库、密文或迁移标记来强行启动。同 key 重启可重复验证；完成后发现明文、缺失密文或损坏配置会拒绝启动，运行中的存储读取也不会回退到明文。
-5. 升级后 API 不再提供可读回的 MCP 配置，响应统一为 `config: {}`。仅改名或启停时省略 `config`；替换配置使用原始完整模板。默认扩展刷新仍保留停用状态和管理员改过的绑定。
+5. 升级后 API 不再提供可读回的 MCP 配置，响应统一为 `config: {}`。仅改名或启停时省略 `config`；替换配置使用原始完整模板。管理员更新时，`****` 占位符在存储层事务内与当前配置合并，并发更新不会把对方刚写入的密钥回滚成占位符。默认扩展刷新仍保留停用状态和管理员改过的绑定。
 
 回退只能用升级前的一致性备份和匹配的旧程序。旧程序可能把 `{}` 当作配置，或重新写入明文；不能仅替换镜像后继续使用已迁移数据库。即使后续启动步骤失败，已提交的 MCP 加密事务也不会自动撤销。
 
@@ -763,8 +773,8 @@ docker compose exec -T review /app/tribunalctl projects all
 
 先按第 8 节的通用步骤操作：记录当前镜像 tag/digest，核对生效路径和全部挂载，停止旧容器并备份数据库和所有工作区。本次升级有这些额外注意点：
 
-1. **先做一致性备份，三个迁移都不可回退。**
-   - 本次新增 `0016_dossier_mr_title`、`0017_mcp_config_seal`、`0018_dossier_project`，都没有 down migration。回退只能恢复升级前的全量快照，不能只换回 v1.1.0 镜像而保留已迁移数据库；旧版本读取新 schema 不受支持。
+1. **先做一致性备份，四个迁移都不可回退。**
+   - 本次新增 `0016_dossier_mr_title`、`0017_mcp_config_seal`、`0018_dossier_project`、`0019_job_defer_window`，都没有 down migration。回退只能恢复升级前的全量快照，不能只换回 v1.1.0 镜像而保留已迁移数据库；旧版本读取新 schema 不受支持。
    - 升级前按[第 7 节](#7-sqlite-一致性备份与恢复)停止服务，备份生效数据库、可能存在的 `-wal`/`-shm` 和所有工作区；只有符合默认配置与挂载前提时才能复制整个 `/app/data`。运行中只复制数据库文件会漏掉 WAL，不是一致备份。
    - 另存实际配置、镜像 digest 和 `REVIEW_MASTER_KEY`。恢复使用匹配布局的新空卷或空目录，不把快照覆盖到旧数据，也不混入旧 WAL。
 2. **迁移 `0016_dossier_mr_title` 只追加列，但仍然要先备份。**
@@ -778,6 +788,8 @@ docker compose exec -T review /app/tribunalctl projects all
 4. **迁移 `0018_dossier_project` 回填 dossier 项目归属。**
    - 旧记录仅根据实际关联的 workflow 回填；没有关联的旧孤儿保持未知归属，不从快照猜测，也不改压缩快照内容。
    - 升级前按第 7 节做一致性备份；此迁移没有 down migration，回退须恢复升级前完整快照及匹配旧程序。运行时的孤儿清理行为见 [dossier 归属迁移](#dossier-归属迁移v120)。
+
+本次还新增 `0019_job_defer_window`，只给 `jobs` 追加 `defer_since TEXT`。任务连续因执行权争用被延后超过固定的 15 分钟窗口时按失败结算，`last_error` 为 `execution deferral window exceeded`，不再无限延长；旧行保持 NULL 兼容。该窗口不是配置项。该迁移同样没有 down migration，回退须恢复升级前快照。
 5. **ignore 保护范围扩大。**
    - 有效 ignore 非空时，仓库读取和证据检查遵守同一规则；无法证明符合规则的 MCP 工具及全量图谱索引不再执行，无来源证明的历史上下文不再注入。
    - 默认 ignore 非空，因此默认图谱能力会降级。这是安全降级：不记 `tool_gaps`，不会把 PASS 改为 INCOMPLETE。仅有索引身份无法证明且 ignore 为空时，实际启用并绑定的工具仍记为覆盖缺口。

@@ -368,18 +368,20 @@ func (s *ExtensionService) UpdateMCPServer(ctx context.Context, id string, updat
 		}
 		update.Name = &name
 	}
+	var mergeConfig func(submitted, current json.RawMessage) json.RawMessage
 	if update.Config != nil {
-		if err := guardMaskedConfig(update.Config); err != nil {
+		// Validate against the read config, but let the store merge with the
+		// value read inside its transaction so a concurrent key update wins.
+		if err := s.validateMCPConfig(restoreMaskedMCPConfig(update.Config, current.Config)); err != nil {
 			return nil, err
 		}
-		if err := s.validateMCPConfig(update.Config); err != nil {
-			return nil, err
-		}
+		mergeConfig = restoreMaskedMCPConfig
 	}
 	row, err := s.store.UpdateMCPServer(ctx, id, store.MCPServerUpdate{
-		Name:    update.Name,
-		Config:  update.Config,
-		Enabled: update.Enabled,
+		Name:        update.Name,
+		Config:      update.Config,
+		MergeConfig: mergeConfig,
+		Enabled:     update.Enabled,
 	})
 	if err != nil {
 		return nil, extensionStoreError(err)
@@ -1103,9 +1105,49 @@ func (s *ExtensionService) validateMCPConfig(raw json.RawMessage) error {
 	return nil
 }
 
+// restoreMaskedMCPConfig merges a submitted config over the stored one: a
+// masked value keeps the stored secret, and a masked key with no stored
+// counterpart is dropped rather than written back.
+func restoreMaskedMCPConfig(submitted, current json.RawMessage) json.RawMessage {
+	var nextObject map[string]any
+	if err := json.Unmarshal(submitted, &nextObject); err != nil {
+		return submitted
+	}
+	var currentObject map[string]any
+	_ = json.Unmarshal(current, &currentObject)
+	if env, ok := nextObject["env"].(map[string]any); ok {
+		stored, _ := currentObject["env"].(map[string]any)
+		restoreMCPMap(env, stored, func(string) bool { return true })
+	}
+	if headers, ok := nextObject["headers"].(map[string]any); ok {
+		stored, _ := currentObject["headers"].(map[string]any)
+		restoreMCPMap(headers, stored, extensionSensitiveKeyRE.MatchString)
+	}
+	restored, err := json.Marshal(nextObject)
+	if err != nil {
+		return submitted
+	}
+	return restored
+}
+
+func restoreMCPMap(next, stored map[string]any, sensitive func(string) bool) {
+	for key, value := range next {
+		if value != maskedExtensionSecret || !sensitive(key) {
+			continue
+		}
+		if stored != nil {
+			if original, ok := stored[key]; ok {
+				next[key] = original
+				continue
+			}
+		}
+		delete(next, key)
+	}
+}
+
 // guardMaskedConfig refuses to persist the display placeholder the admin API
-// writes on read. The server restores stored secrets before calling this
-// service; the guard is a second line of defence.
+// writes on read. Updates restore stored secrets before saving; create and
+// import keep the guard as a second line of defence.
 func guardMaskedConfig(raw json.RawMessage) error {
 	var object map[string]any
 	if json.Unmarshal(raw, &object) != nil {

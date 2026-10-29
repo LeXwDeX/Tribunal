@@ -196,3 +196,54 @@ func (s *Server) writeAccessError(w http.ResponseWriter, r *http.Request, err er
 		"request_id", requestID(r.Context()), "path", r.URL.Path)
 	writeError(w, r, http.StatusInternalServerError, "internal", "internal error", nil)
 }
+
+// handleAdminListProjectResidues is read-only. It reports paths below the
+// configured workspace root that may belong to unregistered projects.
+func (s *Server) handleAdminListProjectResidues(w http.ResponseWriter, r *http.Request) {
+	if s.residues == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "internal", "project residue service is not configured", nil)
+		return
+	}
+	residues, err := s.residues.ListProjectResidues(r.Context())
+	if err != nil {
+		s.writeServiceError(w, r, err)
+		return
+	}
+	if residues == nil {
+		residues = []app.ProjectResidue{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"residues": residues})
+}
+
+// handleAdminCleanupProjectResidues requires an explicit confirm flag in
+// addition to the CLI's own flag. Unknown ownership is kept and reported.
+func (s *Server) handleAdminCleanupProjectResidues(w http.ResponseWriter, r *http.Request) {
+	if s.residues == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "internal", "project residue service is not configured", nil)
+		return
+	}
+	var request struct {
+		Confirm bool `json:"confirm"`
+	}
+	if err := decodeJSON(w, r, adminBodyLimit, &request); err != nil {
+		decodeRequestError(w, r, err)
+		return
+	}
+	if !request.Confirm {
+		validationFailed(w, r, "confirm", "confirm must be true")
+		return
+	}
+	result, err := s.residues.CleanupProjectResidues(r.Context())
+	if err != nil {
+		s.writeServiceError(w, r, err)
+		return
+	}
+	if result == nil {
+		result = &app.ProjectResidueCleanup{
+			Removed: []app.ProjectResidue{},
+			Kept:    []app.ProjectResidue{},
+			Failed:  []app.ProjectResidueFailure{},
+		}
+	}
+	writeJSON(w, http.StatusOK, result)
+}

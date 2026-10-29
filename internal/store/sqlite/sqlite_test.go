@@ -46,7 +46,7 @@ func openTestStore(t *testing.T, clock *fakeClock) *Store {
 		t.Fatalf("Open: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
-	if err := s.ConfigureMCPSecrets(context.Background(), sealTestCipher(t, 1)); err != nil {
+	if _, err := s.ConfigureMCPSecrets(context.Background(), sealTestCipher(t, 1)); err != nil {
 		t.Fatalf("ConfigureMCPSecrets: %v", err)
 	}
 	return s

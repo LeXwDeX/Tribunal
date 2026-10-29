@@ -554,6 +554,7 @@ func (e *Engine) runNode(runCtx context.Context, handle *runHandle, wfID, nodeID
 		if timedOut {
 			reason = "timeout"
 		}
+		reason = errorReason(execErr, reason)
 		if err := e.commitNodeFailureUsage(runCtx, wfID, nodeID, view.Attempt, reason, "node execution failed", out.Usage); err != nil {
 			handle.setErr(err)
 		}
@@ -569,11 +570,45 @@ func executeSafely(ctx context.Context, exec NodeExecutor, in NodeInput) (out No
 		return NodeOutput{}, err
 	}
 	defer func() {
-		if recovered := recover(); recovered != nil {
-			err = fmt.Errorf("executor panic: %v", recovered)
+		if recover() != nil {
+			err = panicError{}
 		}
 	}()
 	return exec.Execute(ctx, in)
+}
+
+// panicError is the fixed failure class for a recovered executor panic. It
+// deliberately keeps no panic value: the value may contain payload or secrets.
+type panicError struct{}
+
+func (panicError) Error() string      { return "executor panic" }
+func (panicError) ErrorClass() string { return "panic" }
+
+// errorReason prefers the error's optional fixed class over the engine's
+// generic reason. An invalid or empty class leaves the fallback unchanged.
+func errorReason(err error, fallback string) string {
+	var classified ErrorClassifier
+	if errors.As(err, &classified) {
+		if class := classified.ErrorClass(); validErrorClass(class) {
+			return class
+		}
+	}
+	return fallback
+}
+
+// validErrorClass matches the sanitized class format used by errclass:
+// [a-z][a-z0-9_]{0,31}.
+func validErrorClass(class string) bool {
+	if len(class) == 0 || len(class) > 32 || class[0] < 'a' || class[0] > 'z' {
+		return false
+	}
+	for i := 1; i < len(class); i++ {
+		c := class[i]
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 // nodeMetadata asks an executor for optional attribution. Metadata is

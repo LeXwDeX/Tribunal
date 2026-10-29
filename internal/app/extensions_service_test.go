@@ -733,3 +733,67 @@ func testSkillArchiveFiles(t *testing.T, files map[string]string) []byte {
 	}
 	return buffer.Bytes()
 }
+
+func TestExtensionServiceUpdateMCPServerRestoresMaskedConfig(t *testing.T) {
+	ctx := context.Background()
+	service, _ := newExtensionFixture(t)
+	for _, tc := range []struct {
+		name, before, update string
+		check                func(t *testing.T, config map[string]any)
+	}{
+		{
+			name:   "stdio env",
+			before: `{"command":"original","env":{"API_KEY":"old-key"}}`,
+			update: `{"command":"next","env":{"API_KEY":"****","DROP":"****"}}`,
+			check: func(t *testing.T, config map[string]any) {
+				t.Helper()
+				env, _ := config["env"].(map[string]any)
+				if config["command"] != "next" || env["API_KEY"] != "old-key" {
+					t.Fatalf("masked env value not restored: %v", config)
+				}
+				if _, ok := env["DROP"]; ok {
+					t.Fatalf("masked key without a stored value was persisted: %v", env)
+				}
+			},
+		},
+		{
+			name:   "http headers",
+			before: `{"url":"https://example.invalid/mcp","headers":{"Authorization":"Bearer old","X-Trace":"keep"}}`,
+			update: `{"url":"https://example.invalid/next","headers":{"Authorization":"****","X-Trace":"****","DROP":"****"}}`,
+			check: func(t *testing.T, config map[string]any) {
+				t.Helper()
+				headers, _ := config["headers"].(map[string]any)
+				if config["url"] != "https://example.invalid/next" ||
+					headers["Authorization"] != "Bearer old" || headers["X-Trace"] != "****" {
+					t.Fatalf("masked header value not restored: %v", config)
+				}
+				if _, ok := headers["X-API-Key"]; ok {
+					t.Fatalf("masked header without a stored value was persisted: %v", headers)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			created, err := service.CreateMCPServer(ctx, MCPServerInput{
+				Scope:   "platform",
+				Name:    "masked-" + strings.ReplaceAll(tc.name, " ", "-"),
+				Enabled: true,
+				Config:  json.RawMessage(tc.before),
+			})
+			if err != nil {
+				t.Fatalf("CreateMCPServer: %v", err)
+			}
+			updated, err := service.UpdateMCPServer(ctx, created.ID, MCPServerUpdate{
+				Config: json.RawMessage(tc.update),
+			})
+			if err != nil {
+				t.Fatalf("UpdateMCPServer with masked placeholders: %v", err)
+			}
+			var config map[string]any
+			if err := json.Unmarshal(updated.Config, &config); err != nil {
+				t.Fatalf("decode updated config: %v", err)
+			}
+			tc.check(t, config)
+		})
+	}
+}

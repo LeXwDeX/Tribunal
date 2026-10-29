@@ -350,7 +350,14 @@ func (s *Store) UpdateMCPServer(ctx context.Context, id string, update store.MCP
 		current.Name = name
 	}
 	if update.Config != nil {
-		current.Config = append(json.RawMessage(nil), update.Config...)
+		next := update.Config
+		if update.MergeConfig != nil {
+			next = update.MergeConfig(update.Config, current.Config)
+		}
+		if !validJSONObject(next) {
+			return nil, errors.New("sqlite: mcp server config must be a JSON object")
+		}
+		current.Config = append(json.RawMessage(nil), next...)
 	}
 	if update.Enabled != nil {
 		current.Enabled = *update.Enabled

@@ -34,6 +34,11 @@ const (
 		"&_pragma=synchronous(NORMAL)"
 )
 
+// MaxDeferWindow bounds how long repeated ownership contention may defer one
+// job. Once the first deferral is older than this window, Defer fails the job
+// instead of extending its attempt budget again.
+const MaxDeferWindow = 15 * time.Minute
+
 // Store is a SQLite-backed store. One connection serializes all reads and
 // writes; this is sufficient for the single-process M0 deployment.
 type Store struct {
@@ -308,7 +313,7 @@ func enqueueTx(ctx context.Context, tx *sql.Tx, j *store.Job, replaceQueued bool
 			// MaxAttempts is the absolute ceiling for the record, so grant the
 			// replacement payload its bounded budget after the current attempt.
 			res, err := tx.ExecContext(ctx, `UPDATE jobs
-				SET payload = ?, max_attempts = attempts + ?, run_after = ?,
+				SET payload = ?, max_attempts = attempts + ?, defer_since = NULL, run_after = ?,
 				    lease_owner = NULL, lease_until = NULL, last_error = NULL, updated_at = ?
 				WHERE id = ? AND state = ?`,
 				string(j.Payload), j.MaxAttempts, formatTime(j.RunAfter), formatTime(j.UpdatedAt),
@@ -458,7 +463,7 @@ func recoverTx(ctx context.Context, tx *sql.Tx, now time.Time) (int, error) {
 	// A stale running job with a queued successor must not block or overwrite
 	// the successor.
 	res, err := tx.ExecContext(ctx, `UPDATE jobs
-		SET state = ?, lease_owner = NULL, lease_until = NULL,
+		SET state = ?, lease_owner = NULL, lease_until = NULL, defer_since = NULL,
 		    last_error = 'superseded by queued job', updated_at = ?
 		WHERE state = ? AND (lease_until IS NULL OR lease_until < ?)
 		  AND "key" IS NOT NULL
@@ -471,7 +476,7 @@ func recoverTx(ctx context.Context, tx *sql.Tx, now time.Time) (int, error) {
 	count += int(n)
 
 	res, err = tx.ExecContext(ctx, `UPDATE jobs
-		SET state = ?, lease_owner = NULL, lease_until = NULL,
+		SET state = ?, lease_owner = NULL, lease_until = NULL, defer_since = NULL,
 		    last_error = 'lease expired after maximum attempts', updated_at = ?
 		WHERE state = ? AND (lease_until IS NULL OR lease_until < ?)
 		  AND attempts >= max_attempts`,
@@ -484,7 +489,7 @@ func recoverTx(ctx context.Context, tx *sql.Tx, now time.Time) (int, error) {
 
 	res, err = tx.ExecContext(ctx, `UPDATE jobs
 		SET state = ?, run_after = ?, lease_owner = NULL, lease_until = NULL,
-		    last_error = 'lease expired; retry scheduled', updated_at = ?
+		    defer_since = NULL, last_error = 'lease expired; retry scheduled', updated_at = ?
 		WHERE state = ? AND (lease_until IS NULL OR lease_until < ?)`,
 		store.JobQueued, nowText, nowText, store.JobRunning, nowText)
 	if err != nil {
@@ -543,7 +548,8 @@ func (s *Store) Heartbeat(ctx context.Context, j store.Job, lease time.Duration)
 func (s *Store) Complete(ctx context.Context, j store.Job) error {
 	now := s.now().UTC()
 	res, err := s.db.ExecContext(ctx, `UPDATE jobs
-		SET state = ?, lease_owner = NULL, lease_until = NULL, last_error = NULL, updated_at = ?
+		SET state = ?, lease_owner = NULL, lease_until = NULL, defer_since = NULL,
+		    last_error = NULL, updated_at = ?
 		WHERE id = ? AND state = ? AND lease_owner = ? AND attempts = ?
 		  AND lease_until IS NOT NULL AND lease_until >= ?`,
 		store.JobDone, formatTime(now),
@@ -609,7 +615,7 @@ func (s *Store) Fail(ctx context.Context, j store.Job, cause error, retryAt *tim
 
 	res, err := tx.ExecContext(ctx, `UPDATE jobs
 		SET state = ?, run_after = ?, lease_owner = NULL, lease_until = NULL,
-		    last_error = ?, updated_at = ?
+		    defer_since = NULL, last_error = ?, updated_at = ?
 		WHERE id = ? AND state = ? AND lease_owner = ? AND attempts = ?
 		  AND lease_until IS NOT NULL AND lease_until >= ?`,
 		state, formatTime(runAfter), lastError, formatTime(now),
@@ -629,18 +635,35 @@ func (s *Store) Fail(ctx context.Context, j store.Job, cause error, retryAt *tim
 }
 
 // Defer releases a contended lease while preserving both the retry budget and
-// the monotonic attempt fence used to reject stale owners.
+// the monotonic attempt fence used to reject stale owners. The first deferral
+// time is retained: once the job has been deferred for longer than
+// MaxDeferWindow, it fails instead of extending its attempt budget again.
 func (s *Store) Defer(ctx context.Context, j store.Job, retryAt time.Time) error {
 	now := s.now().UTC()
+	cutoff := formatTime(now.Add(-MaxDeferWindow))
 	res, err := s.db.ExecContext(ctx, `UPDATE jobs
-		SET state = CASE WHEN "key" IS NOT NULL AND EXISTS (
-		    SELECT 1 FROM jobs q WHERE q."key" = jobs."key" AND q.state = ?
-		) THEN ? ELSE ? END,
-		max_attempts = max_attempts + 1, run_after = ?, lease_owner = NULL,
-		lease_until = NULL, last_error = 'execution deferred', updated_at = ?
+		SET state = CASE
+		    WHEN "key" IS NOT NULL AND EXISTS (
+		        SELECT 1 FROM jobs q WHERE q."key" = jobs."key" AND q.state = ?
+		    ) THEN ?
+		    WHEN defer_since IS NOT NULL AND defer_since <= ? THEN ?
+		    ELSE ? END,
+		max_attempts = max_attempts + CASE
+		    WHEN defer_since IS NOT NULL AND defer_since <= ? THEN 0
+		    ELSE 1 END,
+		defer_since = COALESCE(defer_since, ?),
+		run_after = ?, lease_owner = NULL, lease_until = NULL,
+		last_error = CASE
+		    WHEN "key" IS NOT NULL AND EXISTS (
+		        SELECT 1 FROM jobs q WHERE q."key" = jobs."key" AND q.state = ?
+		    ) THEN 'superseded by queued job'
+		    WHEN defer_since IS NOT NULL AND defer_since <= ? THEN 'execution deferral window exceeded'
+		    ELSE 'execution deferred' END,
+		updated_at = ?
 		WHERE id = ? AND state = ? AND lease_owner = ? AND attempts = ?
 		  AND lease_until IS NOT NULL AND lease_until >= ?`,
-		store.JobQueued, store.JobCancelled, store.JobQueued, formatTime(retryAt.UTC()), formatTime(now),
+		store.JobQueued, store.JobCancelled, cutoff, store.JobFailed, store.JobQueued,
+		cutoff, formatTime(now), formatTime(retryAt.UTC()), store.JobQueued, cutoff, formatTime(now),
 		j.ID, store.JobRunning, j.LeaseOwner, j.Attempts, formatTime(now))
 	if err != nil {
 		return fmt.Errorf("sqlite: defer job: %w", err)

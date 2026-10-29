@@ -143,9 +143,11 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return errors.New("initialize secrets: invalid master key")
 	}
-	if err := db.ConfigureMCPSecrets(ctx, cipher); err != nil {
+	unverifiedMCPKey, err := db.ConfigureMCPSecrets(ctx, cipher)
+	if err != nil {
 		return errors.New("migrate MCP secrets: storage update failed")
 	}
+	logUnverifiedMCPKey(logger, unverifiedMCPKey, cfg.Secrets.MasterKeyEnv)
 	// Bind legacy ciphertexts to their project and field before any service
 	// reads them; services only open the sealed format.
 	migrated, err := app.MigrateProjectSecrets(ctx, db, cipher, logger)
@@ -214,6 +216,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	apiServer, err := server.New(server.Config{
 		AdminToken: adminToken,
 		Projects:   runtime.Projects(),
+		Residues:   runtime.Projects(),
 		Webhooks:   runtime.Webhooks(),
 		Database:   db,
 		Worker:     lifecycle,
@@ -603,6 +606,17 @@ func readHeaderTimeout(readTimeout time.Duration) time.Duration {
 		return maximum
 	}
 	return readTimeout
+}
+
+// logUnverifiedMCPKey warns when startup creates the MCP key verifier without
+// any stored ciphertext to authenticate the configured key. It never logs the
+// key value.
+func logUnverifiedMCPKey(logger *slog.Logger, unverified bool, keyEnv string) {
+	if !unverified {
+		return
+	}
+	logger.Warn("MCP master key has no verification evidence; sealing with an unverified master key",
+		"key_env", keyEnv)
 }
 
 func decodeMasterKey(envName string) ([]byte, error) {

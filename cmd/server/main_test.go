@@ -341,7 +341,7 @@ func TestRunRejectsWrongMCPKeyAndReleasesResources(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.ConfigureMCPSecrets(ctx, cipher); err != nil {
+	if _, err := db.ConfigureMCPSecrets(ctx, cipher); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.CreateMCPServer(ctx, store.MCPServer{Scope: store.ScopePlatform, Name: "synthetic", Config: json.RawMessage(`{"secret":"canary-startup"}`)}); err != nil {
@@ -366,7 +366,7 @@ func TestRunRejectsWrongMCPKeyAndReleasesResources(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	if err := db.ConfigureMCPSecrets(ctx, cipher); err != nil {
+	if _, err := db.ConfigureMCPSecrets(ctx, cipher); err != nil {
 		t.Fatalf("original key after rejected start: %v", err)
 	}
 }
@@ -1102,5 +1102,62 @@ func TestWarnUsernameBootstrapAdmins(t *testing.T) {
 	warnUsernameBootstrapAdmins(context.Background(), logger, []string{"id:7", "ID: 8"}, lookup)
 	if logs.Len() != 0 {
 		t.Fatalf("id-only entries warned: %q", logs.String())
+	}
+}
+
+func TestRunReportsUnverifiedMCPKeyOnce(t *testing.T) {
+	dir := t.TempDir()
+	key := base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
+	start := func() string {
+		t.Helper()
+		probe, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		port := probe.Addr().(*net.TCPAddr).Port
+		_ = probe.Close()
+		path := writeRunConfig(t, dir, port)
+		ctx, cancel := context.WithCancel(context.Background())
+		logs := &bytes.Buffer{}
+		done := make(chan error, 1)
+		go func() {
+			done <- run(ctx, []string{"--config", path}, io.Discard, logs)
+		}()
+		base := fmt.Sprintf("http://127.0.0.1:%d", port)
+		deadline := time.Now().Add(5 * time.Second)
+		ready := false
+		for time.Now().Before(deadline) {
+			resp, err := http.Get(base + "/readyz")
+			if err == nil {
+				_ = resp.Body.Close()
+				if resp.StatusCode == http.StatusOK {
+					ready = true
+					break
+				}
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+		if !ready {
+			cancel()
+			t.Fatalf("server did not become ready: %v", <-done)
+		}
+		http.DefaultClient.CloseIdleConnections()
+		cancel()
+		if err := <-done; err != nil {
+			t.Fatalf("run: %v", err)
+		}
+		return logs.String()
+	}
+
+	first := start()
+	if strings.Count(first, "unverified master key") != 1 {
+		t.Fatalf("first start did not warn exactly once: %s", first)
+	}
+	if strings.Contains(first, key) {
+		t.Fatalf("startup log contains the master key: %s", first)
+	}
+	second := start()
+	if strings.Contains(second, "unverified master key") {
+		t.Fatalf("verified start still warned: %s", second)
 	}
 }

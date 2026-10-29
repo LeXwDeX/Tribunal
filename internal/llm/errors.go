@@ -83,6 +83,15 @@ func (e *Error) Retryable() bool {
 	}
 }
 
+// ErrorCode exposes the sanitized provider failure kind to errclass. It never
+// returns error text or upstream response data.
+func (e *Error) ErrorCode() string {
+	if e == nil {
+		return ""
+	}
+	return string(e.Kind)
+}
+
 func canceledError(err error) *Error {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return &Error{Kind: ErrCanceled, Err: context.DeadlineExceeded, cause: err}

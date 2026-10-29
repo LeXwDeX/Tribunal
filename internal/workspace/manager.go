@@ -165,6 +165,14 @@ func (w *Workspace) LockMirror(ctx context.Context) (func(), error) {
 	return w.mirrorLock.Lock(ctx)
 }
 
+// ManagedMarker identifies a directory created by this workspace manager.
+const ManagedMarker = ".tribunal-managed"
+
+// ManagedMarkerValue returns the marker body bound to one project ID.
+func ManagedMarkerValue(projectID int64) string {
+	return fmt.Sprintf("tribunal-workspace-v1 %d", projectID)
+}
+
 // MirrorDir is the fixed bare mirror path for this project.
 func (w *Workspace) MirrorDir() string { return filepath.Join(w.Root, "mirror.git") }
 
@@ -443,15 +451,72 @@ func (w *Workspace) cleanupRun(ctx context.Context, wfID, dir string) error {
 // ensureDir creates the project root plus the named path components with 0700
 // permissions. Every existing component must be a real directory; symlinked
 // components are rejected instead of followed.
+// writeManagedMarker records project ownership on the workspace root. Residue
+// cleanup deletes only directories carrying this marker for the same project.
+func (w *Workspace) writeManagedMarker() error {
+	marker := filepath.Join(w.Root, ManagedMarker)
+	file, err := os.OpenFile(marker, os.O_WRONLY|os.O_CREATE|os.O_EXCL, fileMode)
+	if errors.Is(err, fs.ErrExist) {
+		return w.verifyManagedMarker()
+	}
+	if err != nil {
+		return fmt.Errorf("workspace: write managed marker: %w", err)
+	}
+	_, writeErr := file.WriteString(ManagedMarkerValue(w.ProjectID) + "\n")
+	closeErr := file.Close()
+	if writeErr != nil {
+		return fmt.Errorf("workspace: write managed marker: %w", writeErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("workspace: close managed marker: %w", closeErr)
+	}
+	return nil
+}
+
+func (w *Workspace) verifyManagedMarker() error {
+	marker := filepath.Join(w.Root, ManagedMarker)
+	info, err := os.Lstat(marker)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return ErrUnsafePath
+	}
+	data, err := os.ReadFile(marker)
+	if err != nil || strings.TrimSpace(string(data)) != ManagedMarkerValue(w.ProjectID) {
+		return ErrUnsafePath
+	}
+	return nil
+}
+
+// checkManagedMarker accepts legacy directories without a marker, but refuses
+// one that belongs to a different project or cannot be read safely.
+func (w *Workspace) checkManagedMarker() error {
+	if _, err := os.Lstat(filepath.Join(w.Root, ManagedMarker)); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return w.verifyManagedMarker()
+}
+
 func (w *Workspace) ensureDir(parts ...string) (string, error) {
 	if w == nil || w.ProjectID <= 0 || !filepath.IsAbs(w.Root) {
 		return "", ErrUnsafePath
 	}
-	if err := os.MkdirAll(w.Root, dirMode); err != nil {
-		return "", fmt.Errorf("workspace: create project root: %w", err)
+	created := false
+	if _, err := os.Lstat(w.Root); errors.Is(err, fs.ErrNotExist) {
+		if err := os.MkdirAll(w.Root, dirMode); err != nil {
+			return "", fmt.Errorf("workspace: create project root: %w", err)
+		}
+		created = true
+	} else if err != nil {
+		return "", fmt.Errorf("workspace: inspect project root: %w", err)
 	}
 	path := w.Root
 	if err := requireDir(path); err != nil {
+		return "", err
+	}
+	if created {
+		if err := w.writeManagedMarker(); err != nil {
+			return "", err
+		}
+	} else if err := w.checkManagedMarker(); err != nil {
 		return "", err
 	}
 	for _, part := range parts {

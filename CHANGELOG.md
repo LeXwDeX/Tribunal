@@ -34,6 +34,12 @@ v1.2.0 尚未发布；冻结前的新改动仍记入下方 `[1.2.0]` 段，避�
 
 ### 修复
 
+- **节点失败错误类别**：`pkg/dag` 支持可选的错误分类接口；LLM 鉴权失败、限流、沙箱拒绝和 panic 在节点失败事件里记录固定类别，panic 只记 `panic`，不记录 panic 值或原始错误文本（[#127](https://github.com/LeXwDeX/Tribunal/issues/127)）。
+- **Defer 有界**：任务连续因执行权争用被延后时记录首次争用时间；超过 15 分钟按失败结算，不再无限延长 `max_attempts`。新增迁移 `0019_job_defer_window`（只追加 `jobs.defer_since`，不可回退），完成、失败和替换任务时清空窗口（[#127](https://github.com/LeXwDeX/Tribunal/issues/127)）。
+- **项目残留运维出口**：新增 `tribunalctl projects residues` 只读检查和 `tribunalctl projects residues clean --yes` 清理命令。只清理能证明属于未登记项目的规范目录，符号链接、非规范名称和未知归属保留并报告；服务端同时要求 `confirm: true`（[#127](https://github.com/LeXwDeX/Tribunal/issues/127)）。
+- **0018 存量孤儿清理**：`project_id=0` 且无 workflow/job 引用的 dossier 按 `storage.job_retention` 结算为 skipped，保留审计行；未到保留期或仍有引用的记录保留（[#127](https://github.com/LeXwDeX/Tribunal/issues/127)）。
+- **MCP 配置合并竞态**：`****` 占位符恢复移到存储层事务内，用事务中读取的当前配置合并；并发管理员更新不会把对方刚写入的密钥回滚成占位符（[#127](https://github.com/LeXwDeX/Tribunal/issues/127)）。
+- **首次密封提示**：数据库中没有可验证的项目或 MCP 密文时，启动日志记录一条 Warn，说明当前主密钥未经验证；只含环境变量名，不含密钥值（[#127](https://github.com/LeXwDeX/Tribunal/issues/127)）。
 - **ignore 规则规范化**：`/secret/**`、`./secret/**` 去掉前导 `/`、`./`；`vendor/` 匹配任意层级目录；`!` 否定和 `[...]` 字符类在保存项目设置时返回 400，平台配置在配置检查时拒绝，不再静默失效。旧配置中的不支持写法会让评审以配置错误永久失败；底层匹配器按“全部忽略”兜底。`IgnorePolicyVersion` 升到 2，旧策略的未完成工作流不会续跑，需要重新触发评审。规则说明见 [ignore 安全边界](docs/operations.md#ignore-安全边界)。
 - **非法 `.gitlab-review.yml` 永久失败**：解析失败或包含不支持的 ignore 写法时，评审不重试，并在 MR 中发布一条说明评论；修正文件后重新触发。启动恢复会终结对应工作流，不会按重试上限反复执行；修正后重新触发评审。
 - **工作区状态自动刷新**：工作区处于 `new`、`refreshing` 或 `onboarding` 时每 2 秒轮询状态。提交刷新任务后最多跟踪 5 分钟，按 `last_refresh_at` 变化或 `error` 判定任务结束，避免任务尚未开始或两次轮询之间完成时的旧 `ready` 影响结果；完成后取消未完成的文档请求并重新拉取当前上下文文档和历史列表，不再需要手动刷新页面（[#130](https://github.com/LeXwDeX/Tribunal/issues/130)）。

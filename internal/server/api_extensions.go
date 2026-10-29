@@ -17,16 +17,14 @@ import (
 )
 
 const (
-	maskedSecret   = "****"
 	skillUploadMax = 8 << 20
 	skillFileMax   = 64 << 10
 )
 
 var (
-	mcpNameRE      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
-	blockNameRE    = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
-	skillNameRE    = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
-	sensitiveKeyRE = regexp.MustCompile(`(?i)(authorization|token|secret|password|api[-_]?key|cookie|credential)`)
+	mcpNameRE   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+	blockNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+	skillNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 )
 
 // MCPServer is one stored Claude Code mcpServers entry. Handlers hide Config
@@ -332,9 +330,6 @@ func (s *Server) handleUpdateMCPServer(w http.ResponseWriter, r *http.Request) {
 			validationFailed(w, r, "config", err.Error())
 			return
 		}
-		// Masked placeholders are display-only. Restore the stored value (or
-		// drop the key) so a masked placeholder is never persisted.
-		update.Config = restoreMaskedMCPConfig(request.Config, current.Config)
 	}
 	server, err := s.extensions.UpdateMCPServer(r.Context(), id, update)
 	if err != nil {
@@ -468,46 +463,6 @@ func validateMCPConfigObject(raw json.RawMessage) error {
 func maskMCPServer(server MCPServer) MCPServer {
 	server.Config = json.RawMessage(`{}`)
 	return server
-}
-
-// restoreMaskedMCPConfig merges a submitted config over the stored one: a
-// masked value keeps the stored secret, and a masked key with no stored
-// counterpart is dropped rather than written back.
-func restoreMaskedMCPConfig(next, current json.RawMessage) json.RawMessage {
-	var nextObject map[string]any
-	if err := json.Unmarshal(next, &nextObject); err != nil {
-		return next
-	}
-	var currentObject map[string]any
-	_ = json.Unmarshal(current, &currentObject)
-	if env, ok := nextObject["env"].(map[string]any); ok {
-		stored, _ := currentObject["env"].(map[string]any)
-		restoreMCPMap(env, stored, func(string) bool { return true })
-	}
-	if headers, ok := nextObject["headers"].(map[string]any); ok {
-		stored, _ := currentObject["headers"].(map[string]any)
-		restoreMCPMap(headers, stored, sensitiveKeyRE.MatchString)
-	}
-	restored, err := json.Marshal(nextObject)
-	if err != nil {
-		return next
-	}
-	return restored
-}
-
-func restoreMCPMap(next, stored map[string]any, sensitive func(string) bool) {
-	for key, value := range next {
-		if value != maskedSecret || !sensitive(key) {
-			continue
-		}
-		if stored != nil {
-			if original, ok := stored[key]; ok {
-				next[key] = original
-				continue
-			}
-		}
-		delete(next, key)
-	}
 }
 
 func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {

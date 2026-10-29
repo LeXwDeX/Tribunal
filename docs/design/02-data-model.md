@@ -142,6 +142,7 @@ CREATE TABLE jobs (
   lease_owner TEXT,
   lease_until TEXT,
   last_error  TEXT,
+  defer_since TEXT,                 -- 0019: first deferral; 15m window
   created_at  TEXT    NOT NULL,
   updated_at  TEXT    NOT NULL
 );

@@ -367,9 +367,9 @@ func (e *Executor) Execute(ctx context.Context, in dag.NodeInput) (dag.NodeOutpu
 	if err != nil {
 		usage := knownUsage(err)
 		if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
-			return dag.NodeOutput{Usage: usage}, fmt.Errorf("review: node %s: %w", in.Node.ID, ctxErr)
+			return dag.NodeOutput{Usage: usage}, classifyError(fmt.Errorf("review: node %s: %w", in.Node.ID, ctxErr))
 		}
-		return dag.NodeOutput{Usage: usage}, fmt.Errorf("review: node %s (%s): %w", in.Node.ID, in.Node.Kind, err)
+		return dag.NodeOutput{Usage: usage}, classifyError(fmt.Errorf("review: node %s (%s): %w", in.Node.ID, in.Node.Kind, err))
 	}
 	if len(out.Data) == 0 || !json.Valid(out.Data) {
 		return dag.NodeOutput{}, fmt.Errorf("review: node %s produced invalid JSON", in.Node.ID)
@@ -716,7 +716,7 @@ func (e *Executor) callAgent(ctx context.Context, in dag.NodeInput, opts agentOp
 	ctx = llm.WithCallMeta(ctx, llm.CallMeta{WorkflowID: in.WorkflowID, NodeID: in.Node.ID, Turn: 0})
 	result, err := e.runAgent(ctx, opts.Provider, spec, !opts.NoRetry)
 	if err == nil && result != nil && e.ignoredAgentOutput(result.Output) {
-		err = errors.New("review: ignored path in agent output")
+		err = fmt.Errorf("%w: review: ignored path in agent output", agent.ErrIgnoredPath)
 	}
 	if err != nil {
 		usage := dag.Usage{}

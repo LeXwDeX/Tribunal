@@ -52,21 +52,21 @@ func TestMCPConfigSealEmptyAndRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "db")
 	c := sealTestCipher(t, 1)
 	s := sealTestOpen(t, path)
-	if err := s.ConfigureMCPSecrets(ctx, c); err != nil {
+	if _, err := s.ConfigureMCPSecrets(ctx, c); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
 	s = sealTestOpen(t, path)
-	if err := s.ConfigureMCPSecrets(ctx, c); err != nil {
+	if _, err := s.ConfigureMCPSecrets(ctx, c); err != nil {
 		t.Fatal(err)
 	}
 	var before []byte
 	if err := s.db.QueryRow(`SELECT verifier FROM mcp_config_seal`).Scan(&before); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ConfigureMCPSecrets(ctx, sealTestCipher(t, 2)); err == nil {
+	if _, err := s.ConfigureMCPSecrets(ctx, sealTestCipher(t, 2)); err == nil {
 		t.Fatal("wrong key accepted")
 	}
 	var after []byte
@@ -93,14 +93,14 @@ func TestMCPConfigSealMigration(t *testing.T) {
 	sealTestServer(t, s, "project/a", "project", 10, `{"token":"canary-two"}`, 1, "")
 	sealTestServer(t, s, "project/b", "project", 11, `{"token":"canary-three"}`, 0, "builtin")
 	sealTestExec(t, s, `INSERT INTO block_bindings (scope,project_id,block,mcp_tools) VALUES ('platform',0,'review','["platform/a"]')`)
-	if err := s.ConfigureMCPSecrets(ctx, sealTestCipher(t, 2)); err == nil || strings.Contains(err.Error(), "canary") {
+	if _, err := s.ConfigureMCPSecrets(ctx, sealTestCipher(t, 2)); err == nil || strings.Contains(err.Error(), "canary") {
 		t.Fatalf("wrong key error: %v", err)
 	}
 	var raw string
 	if err := s.db.QueryRow(`SELECT config FROM mcp_servers WHERE id = 'platform/a'`).Scan(&raw); err != nil || raw != `{"token":"canary-one"}` {
 		t.Fatalf("original changed: %q %v", raw, err)
 	}
-	if err := s.ConfigureMCPSecrets(ctx, c); err != nil {
+	if _, err := s.ConfigureMCPSecrets(ctx, c); err != nil {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
@@ -144,11 +144,11 @@ func TestMCPConfigSealMigration(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM block_bindings WHERE mcp_tools='["platform/a"]'`).Scan(&count); err != nil || count != 1 {
 		t.Fatal("binding changed", err)
 	}
-	if err := s.ConfigureMCPSecrets(ctx, c); err != nil {
+	if _, err := s.ConfigureMCPSecrets(ctx, c); err != nil {
 		t.Fatal(err)
 	}
 	sealTestServer(t, s, "late", "platform", nil, `{"token":"canary-late"}`, 1, "")
-	if err := s.ConfigureMCPSecrets(ctx, c); err == nil || strings.Contains(err.Error(), "canary") {
+	if _, err := s.ConfigureMCPSecrets(ctx, c); err == nil || strings.Contains(err.Error(), "canary") {
 		t.Fatalf("late plaintext accepted: %v", err)
 	}
 }
@@ -170,7 +170,7 @@ func TestMCPConfigSealRollback(t *testing.T) {
 			case "corrupt":
 				sealTestExec(t, s, `UPDATE mcp_servers SET config='{}', config_enc=X'001122' WHERE id='b'`)
 			}
-			err := s.ConfigureMCPSecrets(ctx, c)
+			_, err := s.ConfigureMCPSecrets(ctx, c)
 			if err == nil || strings.Contains(err.Error(), "canary") {
 				t.Fatalf("failure not sanitized: %v", err)
 			}
@@ -193,7 +193,7 @@ func TestMCPConfigSealRollback(t *testing.T) {
 				t.Fatal(err)
 			}
 			s = sealTestOpen(t, path)
-			if err := s.ConfigureMCPSecrets(ctx, c); err != nil {
+			if _, err := s.ConfigureMCPSecrets(ctx, c); err != nil {
 				t.Fatalf("retry: %v", err)
 			}
 		})
@@ -214,7 +214,7 @@ func TestMCPConfigSealPre17UpgradeFailureAndRetry(t *testing.T) {
 	}
 	s = sealTestOpen(t, path)
 	c := sealTestCipher(t, 1)
-	if err := s.ConfigureMCPSecrets(ctx, c); err == nil || strings.Contains(err.Error(), "canary") {
+	if _, err := s.ConfigureMCPSecrets(ctx, c); err == nil || strings.Contains(err.Error(), "canary") {
 		t.Fatalf("upgrade failure: %v", err)
 	}
 	var raw string
@@ -227,7 +227,7 @@ func TestMCPConfigSealPre17UpgradeFailureAndRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	s = sealTestOpen(t, path)
-	if err := s.ConfigureMCPSecrets(ctx, c); err != nil {
+	if _, err := s.ConfigureMCPSecrets(ctx, c); err != nil {
 		t.Fatalf("upgrade retry: %v", err)
 	}
 	if err := s.db.QueryRow(`SELECT config, config_enc FROM mcp_servers WHERE id='old'`).Scan(&raw, &enc); err != nil || raw != "{}" || len(enc) == 0 || strings.Contains(string(enc), "canary") {
@@ -268,14 +268,14 @@ func TestMCPConfigSealProjectKeyEvidence(t *testing.T) {
 				sealTestExec(t, s, `INSERT INTO secret_migration (id, completed_at) VALUES (1, 'now')`)
 			}
 			sealTestServer(t, s, "a", "platform", nil, `{"secret":"canary"}`, 1, "")
-			if err := s.ConfigureMCPSecrets(ctx, sealTestCipher(t, 2)); err == nil || strings.Contains(err.Error(), "canary") {
+			if _, err := s.ConfigureMCPSecrets(ctx, sealTestCipher(t, 2)); err == nil || strings.Contains(err.Error(), "canary") {
 				t.Fatalf("wrong key accepted or leaked: %v", err)
 			}
 			var raw string
 			if err := s.db.QueryRow(`SELECT config FROM mcp_servers WHERE id='a'`).Scan(&raw); err != nil || raw != `{"secret":"canary"}` {
 				t.Fatalf("plaintext changed: %v", err)
 			}
-			err = s.ConfigureMCPSecrets(ctx, c)
+			_, err = s.ConfigureMCPSecrets(ctx, c)
 			if mode == "legacy" || mode == "webhook" {
 				if err != nil {
 					t.Fatal(err)
@@ -326,7 +326,7 @@ func TestMCPConfigSealProjectKeyEvidenceWithDamagedFields(t *testing.T) {
 				sealTestExec(t, s, `INSERT INTO secret_migration (id, completed_at) VALUES (1, 'now')`)
 			}
 			sealTestServer(t, s, "server", "platform", nil, `{"secret":"mcp-canary"}`, 1, "")
-			if err := s.ConfigureMCPSecrets(ctx, sealTestCipher(t, 2)); err == nil || strings.Contains(err.Error(), "canary") {
+			if _, err := s.ConfigureMCPSecrets(ctx, sealTestCipher(t, 2)); err == nil || strings.Contains(err.Error(), "canary") {
 				t.Fatalf("wrong key: %v", err)
 			}
 			var raw string
@@ -334,7 +334,7 @@ func TestMCPConfigSealProjectKeyEvidenceWithDamagedFields(t *testing.T) {
 			if err := s.db.QueryRow(`SELECT config,config_enc FROM mcp_servers WHERE id='server'`).Scan(&raw, &encrypted); err != nil || raw != `{"secret":"mcp-canary"}` || encrypted != nil {
 				t.Fatalf("wrong key changed MCP configuration: %v", err)
 			}
-			if err := s.ConfigureMCPSecrets(ctx, c); err != nil {
+			if _, err := s.ConfigureMCPSecrets(ctx, c); err != nil {
 				t.Fatalf("valid key with damaged field: %v", err)
 			}
 			if err := s.db.QueryRow(`SELECT config,config_enc FROM mcp_servers WHERE id='server'`).Scan(&raw, &encrypted); err != nil || raw != "{}" || len(encrypted) == 0 {
@@ -368,7 +368,7 @@ func TestMCPConfigSealProjectScanErrorAfterKeyEvidence(t *testing.T) {
 	sealTestServer(t, s, "server", "platform", nil, `{"secret":"mcp-canary"}`, 1, "")
 	sealTestExec(t, s, `CREATE TEMP TABLE projects (id, token_enc, webhook_secret_enc)`)
 	sealTestExec(t, s, `INSERT INTO projects VALUES (10, ?, X''), ('invalid-id', X'', X'')`, token)
-	if err := s.ConfigureMCPSecrets(ctx, c); err == nil || strings.Contains(err.Error(), "canary") {
+	if _, err := s.ConfigureMCPSecrets(ctx, c); err == nil || strings.Contains(err.Error(), "canary") {
 		t.Fatalf("scan error ignored or leaked: %v", err)
 	}
 	var raw string
@@ -396,13 +396,43 @@ func TestMCPConfigSealIdentityTampering(t *testing.T) {
 				sealTestProject(t, s, id, token)
 			}
 			sealTestServer(t, s, "server", "project", 10, `{"secret":"canary"}`, 1, "")
-			if err := s.ConfigureMCPSecrets(ctx, c); err != nil {
+			if _, err := s.ConfigureMCPSecrets(ctx, c); err != nil {
 				t.Fatal(err)
 			}
 			sealTestExec(t, s, change.sql)
-			if err := s.ConfigureMCPSecrets(ctx, c); err == nil || strings.Contains(err.Error(), "canary") {
+			if _, err := s.ConfigureMCPSecrets(ctx, c); err == nil || strings.Contains(err.Error(), "canary") {
 				t.Fatalf("tampering accepted: %v", err)
 			}
 		})
+	}
+}
+
+func TestMCPConfigSealReportsUnverifiedKey(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "db")
+	s := sealTestOpen(t, path)
+	c := sealTestCipher(t, 1)
+	unverified, err := s.ConfigureMCPSecrets(ctx, c)
+	if err != nil || !unverified {
+		t.Fatalf("first seal = %v, %v; want an unverified key", unverified, err)
+	}
+	unverified, err = s.ConfigureMCPSecrets(ctx, c)
+	if err != nil || unverified {
+		t.Fatalf("restart = %v, %v; want a verified key", unverified, err)
+	}
+}
+
+func TestMCPConfigSealReportsVerifiedProjectCiphertext(t *testing.T) {
+	ctx := context.Background()
+	s := sealTestOpen(t, filepath.Join(t.TempDir(), "db"))
+	c := sealTestCipher(t, 1)
+	token, err := c.Seal([]byte("synthetic-token"), secret.TokenAAD(10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealTestProject(t, s, 10, token)
+	unverified, err := s.ConfigureMCPSecrets(ctx, c)
+	if err != nil || unverified {
+		t.Fatalf("project ciphertext = %v, %v; want a verified key", unverified, err)
 	}
 }
