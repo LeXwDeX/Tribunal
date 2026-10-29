@@ -31,7 +31,7 @@ v1.2.0 尚未发布：版本说明已合并到 `main`，尚未打 tag，也未�
 **未完成，不能声称通过**
 
 - [ ] **GitHub Actions**：截至 `main` `96e8081`，CI 有 workflow run 记录，但 go、web、docker 三个 job 因账户计费/额度限制没有启动，job 注解说明了原因。v1.2.0 期间的 PR 在 CI job 未启动时按交接约定用本地全量检查放行，并把结果评论到 PR；本文件不逐 PR 重述，[PR #112 评论](https://github.com/LeXwDeX/Tribunal/pull/112#issuecomment-6432897860) 是一个已核实的例子。没有成功执行的 CI job 结果，不能把本地预检当作 CI 结果。
-- [ ] **真实 GitLab 实例验收**：[#108](https://github.com/LeXwDeX/Tribunal/issues/108) 已于 2026-10-29 在 `main` `a113e08` 上执行，大部分验收项通过，仍有 5 项未覆盖或未复现，见[真实实例升级验收（#108）](#v120-真实实例升级验收)。未覆盖项处理完之前不能标记通过；这是给 `v1.2.0` 打 tag 的前置条件。v1.0.0 的 f143 结果不覆盖本版本，见[历史验收记录](#v100-历史验收记录f143仅供追溯)。
+- [x] **真实 GitLab 实例验收**：[#108](https://github.com/LeXwDeX/Tribunal/issues/108) 已于 2026-10-29 在 `main` `a113e08` 上执行；剩余 5 项已处理，其中 4 项通过，`bootstrap_admins` 弃用告警未复现并另开 [#151](https://github.com/LeXwDeX/Tribunal/issues/151)。详见[真实实例升级验收（#108）](#v120-真实实例升级验收)。GitHub Actions 仍未成功执行，不能把本项勾选当作 CI 通过；v1.0.0 的 f143 结果不覆盖本版本，见[历史验收记录](#v100-历史验收记录f143仅供追溯)。
 
 <a id="v120-真实实例升级验收"></a>
 
@@ -42,6 +42,10 @@ v1.2.0 尚未发布：版本说明已合并到 `main`，尚未打 tag，也未�
 已通过：
 
 - 升级：镜像从已有数据卷原地升级到 `a113e08`，`0019_job_defer_window` 已应用，项目、dossier 和发布记录保留，healthz/readyz 200。数据卷升级前的 schema 已含 `0016`，所以实际验证的是 `0017`–`0019` 的升级。
+- v1.0.0 数据卷原地升级：在 33.110 新建隔离实例 `tribunal-acceptance-108`，从 `v1.0.0` tag 构建并启动，注册项目 1335、跑真实评审并发布；升级到 `v1.1.0` 后日志显示 `stored secrets migrated projects:1`，`0013`–`0015` 已应用，项目仍可 clone、评审、发布；再升级到 `a113e08`，`0016`–`0019` 已应用。
+- 旧评审显示 `!iid`：v1.0.0/v1.1.0 产生的 dossier `mr_title=''`，控制台显示 `!1`；升级后的新评审 `mr_title='feat: add withdraw'`，列表显示标题（#101）。
+- codebase-memory-mcp 实际调用：临时将验收实例 `review_defaults.ignore` 置空并重建索引后，新评审的 6 次 LLM 调用均出现 `mcp__codebase-memory__*` 工具（`search_graph`、`trace_path`、`get_architecture` 等）。
+- 多项目 MCP 隔离：注册第二个项目 1336 并跑真实评审；1336 的 9 次调用中只出现本项目路径，1335 的 6 次调用中未出现 1336，`list_projects` 只返回当前项目。
 - OAuth 登录；容器重启后会话保留。
 - 升级后真实评审：MR !2 结论 `PASS`，MR !1、MR !3 结论 `BLOCKING`，均已发布到 GitLab。
 - 停机续跑：评审运行中对容器发 SIGKILL，重启后 workflow 完成并发布（MR !3、MR !1）。
@@ -55,11 +59,7 @@ v1.2.0 尚未发布：版本说明已合并到 `main`，尚未打 tag，也未�
 
 未覆盖或未复现：
 
-- [ ] v1.0.0 数据卷原地升级：环境里没有 v1.0.0 数据卷，`0013`–`0015` 密文迁移未在真实实例上验证。
-- [ ] codebase-memory-mcp 被模型实际调用：升级后的评审没有 MCP 调用。测试项目工作区报 `index: blocked by ignore policy`，按 [ignore 安全边界](operations.md#ignore-安全边界) 降级。
-- [ ] codebase-memory-mcp 只能看到本项目索引：环境只有 1 个项目，多项目隔离未验证。
-- [ ] 旧评审显示 `!iid`（#101 旧评审部分）：数据卷里没有标题为空的旧 dossier；只有前端组件测试覆盖。
-- [ ] 用户名写法的 `bootstrap_admins` 弃用告警（#103）：临时改为用户名写法并重启两次，没有观察到告警；`cmd/server` 单测通过。生产路径和单测结果不一致，原因待排查。
+- [ ] 用户名写法的 `bootstrap_admins` 弃用告警（#103）：临时改为用户名写法并重启，配置挂载和日志级别均正常，仍未观察到告警；`cmd/server` 单测通过。真实配置加载路径与单测结果不一致，已另开 [#151](https://github.com/LeXwDeX/Tribunal/issues/151) 跟踪。按 #108 的 Acceptance，该项记录失败并另开 Issue，不阻塞其余验收结论。
 
 **历史本地预检（引用 PR #112 交接记录）**
 
