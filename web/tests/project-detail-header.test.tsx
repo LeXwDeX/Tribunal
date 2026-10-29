@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { screen } from '@testing-library/react'
+import { screen, within } from '@testing-library/react'
 import { Route, Routes } from 'react-router-dom'
 import { ProjectDetailPage } from '../src/pages/ProjectDetailPage'
 import { project } from './fixtures'
@@ -27,8 +27,12 @@ describe('project detail header layout', () => {
 
     const heading = await screen.findByRole('heading', { level: 1, name: /group\/backend/ })
     const titleGroup = heading.parentElement!
+    const header = heading.closest('header')!
     expect(titleGroup).toHaveTextContent('已启用')
     expect(titleGroup).not.toHaveTextContent('在 GitLab 中打开')
+    expect(within(header).getByRole('link', { name: '在 GitLab 中打开' })).toHaveAttribute(
+      'href', 'https://gitlab.example.com/group/backend',
+    )
   })
 
   it('keeps horizontal tab scrolling without a vertical scrollbar', () => {
