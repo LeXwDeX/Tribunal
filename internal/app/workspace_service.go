@@ -202,6 +202,25 @@ func (s *WorkspaceService) EnqueueOnboard(ctx context.Context, projectID int64) 
 	})
 }
 
+// RetryOnboarding schedules a fresh onboarding job after a terminal failure.
+// The unique key keeps the failed record intact while allowing another failure
+// to be recorded without violating the active-key index.
+func (s *WorkspaceService) RetryOnboarding(ctx context.Context, projectID int64) (string, error) {
+	if s.queue == nil {
+		return "", errors.New("app: job queue is not configured")
+	}
+	unlock, err := s.lockEnqueueProject(ctx, projectID)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+	key := fmt.Sprintf("workspace.onboard:%d:retry:%d", projectID, s.now().UnixNano())
+	return enqueueJob(ctx, s.queue, "workspace.onboard", key, map[string]any{
+		"project_id": projectID,
+		"trigger":    "manual_retry",
+	})
+}
+
 // EnqueueRefresh schedules one workspace refresh job.
 func (s *WorkspaceService) EnqueueRefresh(ctx context.Context, projectID int64, ref, branch, after string) (string, error) {
 	if s.queue == nil {

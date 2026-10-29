@@ -34,22 +34,24 @@ type DispatchGitLab interface {
 // Dispatcher implements the admin review and workspace actions. It only
 // enqueues durable jobs; execution stays with the registered job handlers.
 type Dispatcher struct {
-	store     DispatchStore
-	workspace *workspace.Manager
-	gitlab    DispatchGitLab
-	cipher    *secret.Cipher
-	profiles  map[string]config.ProfileConfig
-	logger    *slog.Logger
+	store      DispatchStore
+	workspace  *workspace.Manager
+	onboarding *WorkspaceService
+	gitlab     DispatchGitLab
+	cipher     *secret.Cipher
+	profiles   map[string]config.ProfileConfig
+	logger     *slog.Logger
 }
 
 // DispatcherConfig configures Dispatcher.
 type DispatcherConfig struct {
-	Store     DispatchStore
-	Workspace *workspace.Manager
-	GitLab    DispatchGitLab
-	Cipher    *secret.Cipher
-	Profiles  map[string]config.ProfileConfig
-	Logger    *slog.Logger
+	Store      DispatchStore
+	Workspace  *workspace.Manager
+	Onboarding *WorkspaceService
+	GitLab     DispatchGitLab
+	Cipher     *secret.Cipher
+	Profiles   map[string]config.ProfileConfig
+	Logger     *slog.Logger
 }
 
 type dispatchAuthorizationKey struct{}
@@ -82,12 +84,13 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	return &Dispatcher{
-		store:     cfg.Store,
-		workspace: cfg.Workspace,
-		gitlab:    cfg.GitLab,
-		cipher:    cfg.Cipher,
-		profiles:  cfg.Profiles,
-		logger:    logger,
+		store:      cfg.Store,
+		workspace:  cfg.Workspace,
+		onboarding: cfg.Onboarding,
+		gitlab:     cfg.GitLab,
+		cipher:     cfg.Cipher,
+		profiles:   cfg.Profiles,
+		logger:     logger,
 	}, nil
 }
 
@@ -208,6 +211,15 @@ func (d *Dispatcher) RepublishReview(ctx context.Context, workflowID string) (st
 		return "", d.storeError(err)
 	}
 	return jobID, nil
+}
+
+// RetryOnboarding delegates to the workspace service so the admin CLI and
+// internal callers share one retry path.
+func (d *Dispatcher) RetryOnboarding(ctx context.Context, projectID int64) (string, error) {
+	if d.onboarding == nil {
+		return "", internalError()
+	}
+	return d.onboarding.RetryOnboarding(ctx, projectID)
 }
 
 // RefreshWorkspace enqueues workspace.refresh for the project default branch.

@@ -956,6 +956,16 @@ docker run --rm --entrypoint stat tribunal:local -c '%u:%g %a' /app/data
 docker compose logs review | grep 'workspace operation failed'
 ```
 
+### 重试 onboarding
+
+onboarding 失败达到最大尝试次数后，用平台管理员 CLI 创建新的 onboarding 任务：
+
+```bash
+tribunalctl projects retry-onboarding <项目 ID>
+```
+
+该命令调用 `POST /api/v1/admin/projects/{id}/onboarding/retry`，需要 `auth.bootstrap_token_env` 指向的平台管理员 token；不需要项目 `manage` 授权或浏览器会话，项目侧 `POST /api/v1/projects/{id}/workspace/refresh` 的权限不变。命令返回 `{"job_id":...}`，工作区状态会重新进入 `onboarding`。每次重试创建新任务并保留原失败记录；重复执行会创建多个任务，执行前先确认当前状态。
+
 ### ignore 策略与索引
 
 项目 ignore 非空时，工作区索引会被有意阻断，接口返回 `index_status=degraded` 和 `last_error="index: blocked by ignore policy"`。控制台显示信息提示，不再把它当成索引故障。需要代码图谱索引时，先调整项目 ignore 配置，再执行重建索引；阻断本身是安全降级，不影响评审继续执行，详见 [ignore 安全边界](#ignore-安全边界)。
