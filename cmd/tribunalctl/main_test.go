@@ -18,6 +18,8 @@ type capturedRequest struct {
 	method string
 	path   string
 	auth   string
+	cookie string
+	csrf   string
 	body   map[string]any
 }
 
@@ -27,6 +29,8 @@ func captureHandler(t *testing.T, status int, response string, captured *capture
 		captured.method = r.Method
 		captured.path = r.URL.Path
 		captured.auth = r.Header.Get("Authorization")
+		captured.cookie = r.Header.Get("Cookie")
+		captured.csrf = r.Header.Get("X-CSRF-Token")
 		if r.Body != nil {
 			data, _ := io.ReadAll(r.Body)
 			if len(data) > 0 {
@@ -619,6 +623,9 @@ func TestRetryOnboardingCommand(t *testing.T) {
 	}
 	if captured.auth != "Bearer admin" {
 		t.Fatalf("auth = %q", captured.auth)
+	}
+	if captured.cookie != "" || captured.csrf != "" {
+		t.Fatalf("project credentials sent: cookie=%q csrf=%q", captured.cookie, captured.csrf)
 	}
 	if !strings.Contains(stdout, "job-retry") {
 		t.Fatalf("stdout = %q", stdout)
