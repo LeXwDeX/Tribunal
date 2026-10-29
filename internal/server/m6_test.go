@@ -743,7 +743,7 @@ func newM6Env(t *testing.T, opts m6Options) *m6Env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.ConfigureMCPSecrets(context.Background(), cipher); err != nil {
+	if _, err := st.ConfigureMCPSecrets(context.Background(), cipher); err != nil {
 		t.Fatal(err)
 	}
 	view := opts.store

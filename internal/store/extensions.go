@@ -33,9 +33,13 @@ type MCPServer struct {
 // MCPServerUpdate replaces only the fields that are set. A nil field keeps
 // the stored value.
 type MCPServerUpdate struct {
-	Name    *string
-	Config  json.RawMessage
-	Enabled *bool
+	Name   *string
+	Config json.RawMessage
+	// MergeConfig, when set, combines the submitted config with the value read
+	// inside the update transaction. It closes the gap between a caller that
+	// restored secret placeholders from an earlier read and a concurrent write.
+	MergeConfig func(submitted, current json.RawMessage) json.RawMessage
+	Enabled     *bool
 }
 
 // MCPServerImport is one named entry of an atomic mcpServers import.

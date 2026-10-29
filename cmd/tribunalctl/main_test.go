@@ -492,3 +492,67 @@ func TestAdminCommandValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestProjectsResiduesCommands(t *testing.T) {
+	t.Run("list", func(t *testing.T) {
+		var captured capturedRequest
+		ts := httptest.NewServer(captureHandler(t, http.StatusOK,
+			`{"residues":[{"project_id":42,"path":"/data/workspaces/42","kind":"workspace","removable":true}]}`, &captured))
+		defer ts.Close()
+		stdout, _, err := runCtl(t, []string{"--url", ts.URL, "projects", "residues"},
+			map[string]string{"REVIEW_ADMIN_TOKEN": "admin"}, ts.Client())
+		if err != nil {
+			t.Fatalf("run: %v", err)
+		}
+		if captured.method != http.MethodGet || captured.path != "/api/v1/admin/projects/residues" {
+			t.Fatalf("request = %s %s", captured.method, captured.path)
+		}
+		if !strings.Contains(stdout, `"project_id": 42`) {
+			t.Fatalf("stdout = %s", stdout)
+		}
+	})
+
+	t.Run("clean requires yes", func(t *testing.T) {
+		var hits atomic.Int32
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hits.Add(1)
+		}))
+		defer ts.Close()
+		_, _, err := runCtl(t, []string{"--url", ts.URL, "projects", "residues", "clean"},
+			map[string]string{"REVIEW_ADMIN_TOKEN": "admin"}, ts.Client())
+		if err == nil || !strings.Contains(err.Error(), "--yes") {
+			t.Fatalf("error = %v", err)
+		}
+		if hits.Load() != 0 {
+			t.Fatal("cleanup request was sent without --yes")
+		}
+	})
+
+	t.Run("clean", func(t *testing.T) {
+		var captured capturedRequest
+		ts := httptest.NewServer(captureHandler(t, http.StatusOK,
+			`{"removed":[{"project_id":42,"path":"/data/workspaces/42","kind":"workspace","removable":true}],"kept":[],"failed":[]}`, &captured))
+		defer ts.Close()
+		stdout, _, err := runCtl(t, []string{"--url", ts.URL, "projects", "residues", "clean", "--yes"},
+			map[string]string{"REVIEW_ADMIN_TOKEN": "admin"}, ts.Client())
+		if err != nil {
+			t.Fatalf("run: %v", err)
+		}
+		if captured.method != http.MethodPost || captured.path != "/api/v1/admin/projects/residues/cleanup" {
+			t.Fatalf("request = %s %s", captured.method, captured.path)
+		}
+		if captured.body["confirm"] != true {
+			t.Fatalf("body = %v", captured.body)
+		}
+		if !strings.Contains(stdout, `"removed"`) {
+			t.Fatalf("stdout = %s", stdout)
+		}
+	})
+
+	t.Run("unknown action", func(t *testing.T) {
+		if _, _, err := runCtl(t, []string{"--url", "http://example.com", "projects", "residues", "bogus"},
+			map[string]string{"REVIEW_ADMIN_TOKEN": "admin"}, nil); err == nil {
+			t.Fatal("unknown action accepted")
+		}
+	})
+}

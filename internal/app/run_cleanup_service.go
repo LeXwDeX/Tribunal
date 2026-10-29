@@ -19,6 +19,13 @@ import (
 
 const defaultRunCleanupInterval = time.Hour
 
+// legacyOrphanSettler is optional so test doubles and stores that predate
+// legacy dossier settlement keep running the directory sweep. SQLite
+// implements it.
+type legacyOrphanSettler interface {
+	SettleLegacyOrphanDossiers(ctx context.Context, before time.Time) (int64, error)
+}
+
 // RunCleanupStore is the persistence subset needed to find safe deletions.
 type RunCleanupStore interface {
 	ListWorkspaceProjectIDs(ctx context.Context) ([]int64, error)
@@ -40,20 +47,26 @@ type RunCleanupConfig struct {
 	Workspace *workspace.Manager
 	Git       RunCleanupGit
 	After     time.Duration
-	Now       func() time.Time
-	Logger    *slog.Logger
+	// DossierRetention is the age after which an unreferenced project_id=0
+	// dossier is settled. Zero reuses After. Production wires the storage
+	// job retention here because a reservation cannot be retried once its
+	// job audit row is gone.
+	DossierRetention time.Duration
+	Now              func() time.Time
+	Logger           *slog.Logger
 }
 
 // RunCleanupService removes stale run worktrees and orphaned context version
 // directories that no persisted work references and that this process did not
 // register.
 type RunCleanupService struct {
-	store     RunCleanupStore
-	workspace *workspace.Manager
-	git       RunCleanupGit
-	after     time.Duration
-	now       func() time.Time
-	logger    *slog.Logger
+	store            RunCleanupStore
+	workspace        *workspace.Manager
+	git              RunCleanupGit
+	after            time.Duration
+	dossierRetention time.Duration
+	now              func() time.Time
+	logger           *slog.Logger
 }
 
 // NewRunCleanupService validates the policy and builds the service.
@@ -70,6 +83,13 @@ func NewRunCleanupService(cfg RunCleanupConfig) (*RunCleanupService, error) {
 	if cfg.After <= 0 {
 		return nil, errors.New("app: run cleanup age must be positive")
 	}
+	if cfg.DossierRetention < 0 {
+		return nil, errors.New("app: dossier retention must not be negative")
+	}
+	dossierRetention := cfg.DossierRetention
+	if dossierRetention == 0 {
+		dossierRetention = cfg.After
+	}
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -79,12 +99,13 @@ func NewRunCleanupService(cfg RunCleanupConfig) (*RunCleanupService, error) {
 		now = time.Now
 	}
 	return &RunCleanupService{
-		store:     cfg.Store,
-		workspace: cfg.Workspace,
-		git:       cfg.Git,
-		after:     cfg.After,
-		now:       now,
-		logger:    logger,
+		store:            cfg.Store,
+		workspace:        cfg.Workspace,
+		git:              cfg.Git,
+		after:            cfg.After,
+		dossierRetention: dossierRetention,
+		now:              now,
+		logger:           logger,
 	}, nil
 }
 
@@ -107,22 +128,31 @@ func (s *RunCleanupService) Start(ctx context.Context, interval time.Duration) {
 	}
 }
 
-// RunOnce deletes expired runs and unprotected context versions. Query
-// failures fail closed: no directory is touched when either protection query
-// fails. One project or directory error does not stop the remaining work, and
-// errors are joined at the end.
+// RunOnce settles expired project_id=0 dossiers, then deletes expired runs
+// and unprotected context versions. Query failures fail closed: no directory
+// is touched when either protection query fails. One project or directory
+// error does not stop the remaining work, and errors are joined at the end.
 func (s *RunCleanupService) RunOnce(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	projectIDs, err := s.store.ListWorkspaceProjectIDs(ctx)
-	if err != nil {
-		return fmt.Errorf("run cleanup: list workspaces: %w", err)
-	}
-	cutoff := s.now().UTC().Add(-s.after)
-
 	var (
 		errs            []error
+		settledDossiers int64
+	)
+	if settler, ok := s.store.(legacyOrphanSettler); ok {
+		settled, err := settler.SettleLegacyOrphanDossiers(ctx, s.now().UTC().Add(-s.dossierRetention))
+		settledDossiers = settled
+		if err != nil {
+			errs = append(errs, fmt.Errorf("run cleanup: settle legacy orphan dossiers: %w", err))
+		}
+	}
+	projectIDs, err := s.store.ListWorkspaceProjectIDs(ctx)
+	if err != nil {
+		return errors.Join(append(errs, fmt.Errorf("run cleanup: list workspaces: %w", err))...)
+	}
+	cutoff := s.now().UTC().Add(-s.after)
+	var (
 		removedRuns     int
 		removedContexts int
 	)
@@ -188,6 +218,7 @@ func (s *RunCleanupService) RunOnce(ctx context.Context) error {
 		}
 	}
 	s.logger.Info("run cleanup finished",
+		"settled_dossiers", settledDossiers,
 		"removed_runs", removedRuns,
 		"removed_contexts", removedContexts,
 		"errors", len(errs))

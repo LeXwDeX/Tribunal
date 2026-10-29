@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,6 +23,9 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
 	"github.com/LeXwDeX/tribunal/internal/workspace"
 )
+
+// maskedSecret is the display-only value the admin API returns for secrets.
+const maskedSecret = "****"
 
 func multipartBody(t *testing.T, fields map[string]string, fileField, fileName string, fileData []byte) ([]byte, string) {
 	t.Helper()
@@ -107,7 +111,7 @@ func TestMCPServersMaskSecretsOnRead(t *testing.T) {
 	}
 }
 
-func TestMCPUpdateRestoresMaskedPlaceholders(t *testing.T) {
+func TestMCPUpdatePassesMaskedPlaceholdersToService(t *testing.T) {
 	env := newM6Env(t, m6Options{})
 	seedMCPServer(env)
 	client := env.loginAs("code-admin")
@@ -123,23 +127,8 @@ func TestMCPUpdateRestoresMaskedPlaceholders(t *testing.T) {
 	if len(env.extensions.updated) != 1 {
 		t.Fatalf("updates = %v", env.extensions.updated)
 	}
-	var sent map[string]any
-	if err := json.Unmarshal(env.extensions.updated[0].Config, &sent); err != nil {
-		t.Fatalf("decode saved config: %v", err)
-	}
-	envValues, _ := sent["env"].(map[string]any)
-	if envValues["API_KEY"] != "super-secret" {
-		t.Fatalf("masked env value was persisted: %v", sent["env"])
-	}
-	headers, _ := sent["headers"].(map[string]any)
-	if headers["Authorization"] != "Bearer tok" {
-		t.Fatalf("masked header value was persisted: %v", sent["headers"])
-	}
-	if headers["X-Trace"] != "next" {
-		t.Fatalf("headers = %v", sent["headers"])
-	}
-	if strings.Contains(string(env.extensions.updated[0].Config), maskedSecret) {
-		t.Fatalf("placeholder persisted: %s", env.extensions.updated[0].Config)
+	if !strings.Contains(string(env.extensions.updated[0].Config), maskedSecret) {
+		t.Fatalf("handler restored the placeholder outside the service transaction: %s", env.extensions.updated[0].Config)
 	}
 }
 
@@ -333,7 +322,7 @@ func newExtensionPaginationServer(t *testing.T) (*sqlite.Store, *Server) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.ConfigureMCPSecrets(context.Background(), cipher); err != nil {
+	if _, err := st.ConfigureMCPSecrets(context.Background(), cipher); err != nil {
 		t.Fatal(err)
 	}
 	service, err := app.NewExtensionService(app.ExtensionServiceConfig{
@@ -535,5 +524,124 @@ func TestExtensionListPagination(t *testing.T) {
 		"/api/v1/mcp-servers?scope=platform&cursor=not-a-cursor")
 	if code != http.StatusBadRequest || !strings.Contains(text, "invalid cursor") {
 		t.Fatalf("invalid mcp cursor = %d %s", code, text)
+	}
+}
+
+// mcpReadGate blocks the first MCPServer read after capturing it, so a second
+// request can replace the stored key before the first request writes.
+type mcpReadGate struct {
+	mu      sync.Mutex
+	blocked bool
+	entered chan struct{}
+	release chan struct{}
+}
+
+type gatedExtensions struct {
+	ExtensionService
+	gate *mcpReadGate
+}
+
+func (g *gatedExtensions) GetMCPServer(ctx context.Context, id string) (*MCPServer, error) {
+	g.gate.mu.Lock()
+	if g.gate.blocked {
+		g.gate.mu.Unlock()
+		return g.ExtensionService.GetMCPServer(ctx, id)
+	}
+	g.gate.blocked = true
+	g.gate.mu.Unlock()
+
+	current, err := g.ExtensionService.GetMCPServer(ctx, id)
+	close(g.gate.entered)
+	<-g.gate.release
+	return current, err
+}
+
+func TestMCPUpdateMaskedPlaceholderKeepsConcurrentKey(t *testing.T) {
+	ctx := context.Background()
+	st, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "concurrent.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	cipher, err := secret.New([]byte("0123456789abcdef0123456789abcdef"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.ConfigureMCPSecrets(ctx, cipher); err != nil {
+		t.Fatalf("ConfigureMCPSecrets: %v", err)
+	}
+	service, err := app.NewExtensionService(app.ExtensionServiceConfig{
+		Store: st, Workspace: workspace.NewManager(t.TempDir(), nil),
+	})
+	if err != nil {
+		t.Fatalf("NewExtensionService: %v", err)
+	}
+	gate := &mcpReadGate{entered: make(chan struct{}), release: make(chan struct{})}
+	srv := &Server{
+		extensions: &gatedExtensions{ExtensionService: NewAppExtensions(service), gate: gate},
+		logger:     newTestLogger(io.Discard),
+	}
+	created, err := st.CreateMCPServer(ctx, store.MCPServer{
+		Scope: "platform", Name: "concurrent", Enabled: true,
+		Config: json.RawMessage(`{"command":"original","env":{"API_KEY":"old-key"}}`),
+	})
+	if err != nil {
+		t.Fatalf("CreateMCPServer: %v", err)
+	}
+
+	type result struct {
+		code int
+		body []byte
+	}
+	update := func(payload map[string]any) result {
+		data, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/mcp-servers/"+created.ID, bytes.NewReader(data))
+		req.SetPathValue("id", created.ID)
+		req = req.WithContext(context.WithValue(req.Context(), principalKey,
+			principal{user: sessionUser{ID: 7, Username: "alice", Role: roleAdmin}}))
+		rec := httptest.NewRecorder()
+		srv.handleUpdateMCPServer(rec, req)
+		return result{code: rec.Code, body: rec.Body.Bytes()}
+	}
+
+	// Request B reads the old config, then waits. Request A stores a new key
+	// before B resumes and submits the display placeholder.
+	blocked := make(chan result, 1)
+	go func() {
+		blocked <- update(map[string]any{
+			"config": map[string]any{"command": "from-b", "env": map[string]any{"API_KEY": maskedSecret}},
+		})
+	}()
+	select {
+	case <-gate.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("blocked update did not read the stored config")
+	}
+	fresh := update(map[string]any{
+		"config": map[string]any{"command": "from-a", "env": map[string]any{"API_KEY": "new-key"}},
+	})
+	if fresh.code != http.StatusOK {
+		t.Fatalf("fresh update status = %d body=%s", fresh.code, fresh.body)
+	}
+	close(gate.release)
+	merged := <-blocked
+	if merged.code != http.StatusOK {
+		t.Fatalf("masked update status = %d body=%s", merged.code, merged.body)
+	}
+
+	stored, err := st.GetMCPServer(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetMCPServer: %v", err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(stored.Config, &config); err != nil {
+		t.Fatalf("decode stored config: %v", err)
+	}
+	env, _ := config["env"].(map[string]any)
+	if config["command"] != "from-b" || env["API_KEY"] != "new-key" {
+		t.Fatalf("masked update did not merge with the latest config: %v", config)
 	}
 }

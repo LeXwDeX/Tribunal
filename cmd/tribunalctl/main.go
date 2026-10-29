@@ -163,6 +163,8 @@ func (g *globals) runProjects(ctx context.Context, args []string) error {
 		return g.listAllProjects(ctx)
 	case "grants":
 		return g.runGrants(ctx, args[1:])
+	case "residues":
+		return g.runProjectResidues(ctx, args[1:])
 	case "webhook":
 		return g.projectWebhook(ctx, args[1:])
 	default:
@@ -198,6 +200,41 @@ func (g *globals) projectWebhook(ctx context.Context, args []string) error {
 		return err
 	}
 	return writeRaw(g.stdout, raw)
+}
+
+// runProjectResidues lists leftover local project data, or removes the part
+// that provably belongs to an unregistered project after an explicit --yes.
+func (g *globals) runProjectResidues(ctx context.Context, args []string) error {
+	if len(args) == 0 {
+		raw, err := g.request(ctx, http.MethodGet, "/api/v1/admin/projects/residues", nil)
+		if err != nil {
+			return err
+		}
+		return writeRaw(g.stdout, raw)
+	}
+	switch args[0] {
+	case "clean":
+		fs := flag.NewFlagSet("tribunalctl projects residues clean", flag.ContinueOnError)
+		fs.SetOutput(g.stderr)
+		yes := fs.Bool("yes", false, "remove residue that belongs to an unregistered project")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if fs.NArg() > 0 {
+			return errors.New("projects residues clean takes no positional arguments")
+		}
+		if !*yes {
+			return errors.New("projects residues clean requires --yes")
+		}
+		raw, err := g.request(ctx, http.MethodPost,
+			"/api/v1/admin/projects/residues/cleanup", map[string]any{"confirm": true})
+		if err != nil {
+			return err
+		}
+		return writeRaw(g.stdout, raw)
+	default:
+		return fmt.Errorf("unknown projects residues action %q", args[0])
+	}
 }
 
 func (g *globals) runUsers(ctx context.Context, args []string) error {

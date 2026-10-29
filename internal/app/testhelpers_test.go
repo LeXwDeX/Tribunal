@@ -82,7 +82,7 @@ func openTestStorePath(t *testing.T) (*sqlite.Store, string) {
 		t.Fatalf("sqlite.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	if err := st.ConfigureMCPSecrets(context.Background(), newTestCipher(t)); err != nil {
+	if _, err := st.ConfigureMCPSecrets(context.Background(), newTestCipher(t)); err != nil {
 		t.Fatalf("ConfigureMCPSecrets: %v", err)
 	}
 	return st, path

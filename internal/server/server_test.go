@@ -217,7 +217,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	if err != nil {
 		t.Fatalf("secret.New: %v", err)
 	}
-	if err := st.ConfigureMCPSecrets(context.Background(), cipher); err != nil {
+	if _, err := st.ConfigureMCPSecrets(context.Background(), cipher); err != nil {
 		t.Fatalf("ConfigureMCPSecrets: %v", err)
 	}
 	api := defaultStubGitLab()

@@ -173,6 +173,15 @@ type NodeExecutor interface {
 	Execute(ctx context.Context, in NodeInput) (NodeOutput, error)
 }
 
+// ErrorClassifier is an optional interface for executor errors. The engine
+// uses a valid class as the durable failure Reason instead of the generic
+// executor_error, so operators can distinguish causes such as auth,
+// rate_limited, or panic. ErrorClass must return a short lower-case
+// identifier ([a-z][a-z0-9_]{0,31}); any other value is ignored.
+type ErrorClassifier interface {
+	ErrorClass() string
+}
+
 // NodeMetadata is the provider and model selected for one node. The engine
 // records it on node.started before Execute runs.
 type NodeMetadata struct {

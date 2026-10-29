@@ -45,6 +45,13 @@ type AdminService interface {
 	Delete(ctx context.Context, id int64) error
 }
 
+// ProjectResidueService inspects and removes local files left by unregistered
+// projects. It is optional; the routes answer 503 when unwired.
+type ProjectResidueService interface {
+	ListProjectResidues(ctx context.Context) ([]app.ProjectResidue, error)
+	CleanupProjectResidues(ctx context.Context) (*app.ProjectResidueCleanup, error)
+}
+
 // WebhookAcceptor accepts one authenticated delivery.
 type WebhookAcceptor interface {
 	Handle(ctx context.Context, req app.WebhookRequest) (app.WebhookResult, error)
@@ -65,6 +72,7 @@ type WorkerState interface {
 type Config struct {
 	AdminToken string
 	Projects   AdminService
+	Residues   ProjectResidueService
 	Webhooks   WebhookAcceptor
 	Database   Pinger
 	Worker     WorkerState
@@ -90,6 +98,7 @@ type Config struct {
 type Server struct {
 	adminToken string
 	projects   AdminService
+	residues   ProjectResidueService
 	webhooks   WebhookAcceptor
 	database   Pinger
 	worker     WorkerState
@@ -158,6 +167,7 @@ func New(cfg Config) (*Server, error) {
 	s := &Server{
 		adminToken: cfg.AdminToken,
 		projects:   cfg.Projects,
+		residues:   cfg.Residues,
 		webhooks:   cfg.Webhooks,
 		database:   cfg.Database,
 		worker:     cfg.Worker,
@@ -256,6 +266,8 @@ func New(cfg Config) (*Server, error) {
 		mux.HandleFunc("PATCH "+prefix+"/users/{id}", s.apiAuth(s.guard(policyPlatformAdmin, s.handleAdminSetUserDisabled)))
 		mux.HandleFunc("DELETE "+prefix+"/users/{id}/credentials", s.apiAuth(s.guard(policyPlatformAdmin, s.handleAdminRevokeCredentials)))
 		mux.HandleFunc("GET "+prefix+"/projects", s.apiAuth(s.guard(policyPlatformAdmin, s.handleAdminListProjects)))
+		mux.HandleFunc("GET "+prefix+"/projects/residues", s.apiAuth(s.guard(policyPlatformAdmin, s.handleAdminListProjectResidues)))
+		mux.HandleFunc("POST "+prefix+"/projects/residues/cleanup", s.apiAuth(s.guard(policyPlatformAdmin, s.handleAdminCleanupProjectResidues)))
 		mux.HandleFunc("GET "+prefix+"/projects/{id}/grants", s.apiAuth(s.guard(policyPlatformAdmin, s.handleAdminListGrants)))
 		mux.HandleFunc("PUT "+prefix+"/projects/{id}/grants/{user_id}", s.apiAuth(s.guard(policyPlatformAdmin, s.handleAdminSetGrant)))
 		mux.HandleFunc("DELETE "+prefix+"/projects/{id}/grants/{user_id}", s.apiAuth(s.guard(policyPlatformAdmin, s.handleAdminDeleteGrant)))

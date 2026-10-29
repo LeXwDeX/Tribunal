@@ -348,6 +348,8 @@ Provider 返回 `name`、`protocol`、`base_url`、`model`、`max_concurrency`�
 | PATCH | `/api/v1/admin/users/{id}` | `{disabled: bool}`；`disabled=true` 时在同一事务撤销该用户全部会话和 API token；启用不恢复旧凭据 |
 | DELETE | `/api/v1/admin/users/{id}/credentials` | 只撤销全部会话和 API token，不禁用账号；`204` |
 | GET | `/api/v1/admin/projects` | `?limit=&cursor=` → 全部已登记项目的管理视图 `{projects:[{id, path_with_namespace}], next_cursor}`；不含业务摘要 |
+| GET | `/api/v1/admin/projects/residues` | 平台管理员：只读列出可归属到未登记项目的残留（项目 ID、路径、类型、是否可清理），不修改文件 |
+| POST | `/api/v1/admin/projects/residues/cleanup` | 平台管理员：`{confirm:true}` 清理归属明确的残留；未知归属保留并报告 |
 | GET | `/api/v1/admin/projects/{id}/grants` | `?limit=&cursor=` → `{grants:[{project_id, user_id, role, username?}], next_cursor}` |
 | PUT | `/api/v1/admin/projects/{id}/grants/{user_id}` | `{role: "read"|"manage"}`，返回保存后的 grant |
 | DELETE | `/api/v1/admin/projects/{id}/grants/{user_id}` | 删除一个 grant；`204` |

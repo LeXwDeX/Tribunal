@@ -2,7 +2,9 @@ package sqlite
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"time"
 )
 
 // ListWorkspaceProjectIDs returns the projects that have a registered
@@ -49,6 +51,46 @@ func (s *Store) SettleOrphanDossiers(ctx context.Context, projectID int64) error
 		return fmt.Errorf("sqlite: settle orphan dossiers: %w", err)
 	}
 	return nil
+}
+
+// SettleLegacyOrphanDossiers settles project_id=0 reservations left by the
+// 0018 backfill. Those rows have no known project, so the per-project sweep
+// never reached them and their pending state protected the matching run
+// directory forever. A row is eligible only after the retention cutoff and
+// only when no live workflow, job or other pending dossier still names either
+// of its run directory IDs. The dossier itself is kept for audit.
+func (s *Store) SettleLegacyOrphanDossiers(ctx context.Context, before time.Time) (int64, error) {
+	if before.IsZero() {
+		return 0, errors.New("sqlite: legacy orphan cutoff is required")
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE workflow_dossiers
+		SET publication_state = 'skipped', publication_error = 'review job no longer active', updated_at = ?
+		WHERE project_id = 0 AND publication_state = 'pending' AND updated_at < ?
+		  AND NOT EXISTS (SELECT 1 FROM workflows w WHERE w.id = workflow_dossiers.workflow_id)
+		  AND NOT EXISTS (
+		    SELECT 1 FROM workflow_dossiers other
+		    WHERE other.workflow_id != workflow_dossiers.workflow_id
+		      AND other.publication_state = 'pending'
+		      AND (other.workflow_id = workflow_dossiers.job_id
+		           OR other.job_id = workflow_dossiers.workflow_id
+		           OR other.job_id = workflow_dossiers.job_id))
+		  AND NOT EXISTS (
+		    SELECT 1 FROM jobs j
+		    WHERE j.state IN ('queued', 'running')
+		      AND (j.id = workflow_dossiers.workflow_id OR j.id = workflow_dossiers.job_id))
+		  AND NOT EXISTS (
+		    SELECT 1 FROM workflows active
+		    WHERE active.status IN ('pending', 'running')
+		      AND (active.id = workflow_dossiers.workflow_id OR active.id = workflow_dossiers.job_id))`,
+		formatTime(s.now().UTC()), formatTime(before.UTC()))
+	if err != nil {
+		return 0, fmt.Errorf("sqlite: settle legacy orphan dossiers: %w", err)
+	}
+	settled, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("sqlite: settle legacy orphan dossiers: %w", err)
+	}
+	return settled, nil
 }
 
 // ProtectedRunRefs returns every run directory name that periodic cleanup

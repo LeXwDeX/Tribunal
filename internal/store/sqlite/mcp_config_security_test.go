@@ -52,7 +52,7 @@ func TestMCPImportRequiresEncryptionKey(t *testing.T) {
 func TestMCPConfigEncryptedCRUDAndTampering(t *testing.T) {
 	ctx := context.Background()
 	s := sealTestOpen(t, filepath.Join(t.TempDir(), "db"))
-	if err := s.ConfigureMCPSecrets(ctx, sealTestCipher(t, 1)); err != nil {
+	if _, err := s.ConfigureMCPSecrets(ctx, sealTestCipher(t, 1)); err != nil {
 		t.Fatal(err)
 	}
 	first, err := s.CreateMCPServer(ctx, store.MCPServer{Scope: store.ScopePlatform, Name: "first", Config: json.RawMessage(`{"token":"canary-first"}`)})
@@ -97,7 +97,7 @@ func TestMCPConfigRejectsUnsealedAndUpdateWithoutKey(t *testing.T) {
 		t.Run(mutation, func(t *testing.T) {
 			s := sealTestOpen(t, filepath.Join(t.TempDir(), "db"))
 			cipher := sealTestCipher(t, 1)
-			if err := s.ConfigureMCPSecrets(ctx, cipher); err != nil {
+			if _, err := s.ConfigureMCPSecrets(ctx, cipher); err != nil {
 				t.Fatal(err)
 			}
 			row, err := s.CreateMCPServer(ctx, store.MCPServer{Scope: store.ScopePlatform, Name: "test", Config: json.RawMessage(`{"secret":"canary"}`)})
@@ -112,14 +112,14 @@ func TestMCPConfigRejectsUnsealedAndUpdateWithoutKey(t *testing.T) {
 	}
 	path := filepath.Join(t.TempDir(), "db")
 	s := sealTestOpen(t, path)
-	if err := s.ConfigureMCPSecrets(ctx, sealTestCipher(t, 1)); err != nil {
+	if _, err := s.ConfigureMCPSecrets(ctx, sealTestCipher(t, 1)); err != nil {
 		t.Fatal(err)
 	}
 	row, err := s.CreateMCPServer(ctx, store.MCPServer{Scope: store.ScopePlatform, Name: "test", Config: json.RawMessage(`{}`)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ConfigureMCPSecrets(ctx, sealTestCipher(t, 2)); err == nil {
+	if _, err := s.ConfigureMCPSecrets(ctx, sealTestCipher(t, 2)); err == nil {
 		t.Fatal("wrong key accepted")
 	}
 	enabled := true
@@ -138,7 +138,7 @@ func TestMCPConfigRejectsUnsealedAndUpdateWithoutKey(t *testing.T) {
 func TestMCPImportSQLFailureRollsBackAndHidesError(t *testing.T) {
 	ctx := context.Background()
 	s := sealTestOpen(t, filepath.Join(t.TempDir(), "db"))
-	if err := s.ConfigureMCPSecrets(ctx, sealTestCipher(t, 1)); err != nil {
+	if _, err := s.ConfigureMCPSecrets(ctx, sealTestCipher(t, 1)); err != nil {
 		t.Fatal(err)
 	}
 	sealTestExec(t, s, `CREATE TRIGGER reject_mcp BEFORE INSERT ON mcp_servers WHEN NEW.name='second' BEGIN SELECT RAISE(ABORT,'canary-trigger'); END`)
@@ -155,7 +155,7 @@ func TestMCPImportSQLFailureRollsBackAndHidesError(t *testing.T) {
 func TestMCPUpdateSQLFailureRollsBackAndHidesError(t *testing.T) {
 	ctx := context.Background()
 	s := sealTestOpen(t, filepath.Join(t.TempDir(), "db"))
-	if err := s.ConfigureMCPSecrets(ctx, sealTestCipher(t, 1)); err != nil {
+	if _, err := s.ConfigureMCPSecrets(ctx, sealTestCipher(t, 1)); err != nil {
 		t.Fatal(err)
 	}
 	row, err := s.CreateMCPServer(ctx, store.MCPServer{Scope: store.ScopePlatform, Name: "one", Config: json.RawMessage(`{"secret":"original"}`)})

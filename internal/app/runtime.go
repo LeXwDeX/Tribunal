@@ -367,12 +367,13 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		return nil, err
 	}
 	runCleanup, err := NewRunCleanupService(RunCleanupConfig{
-		Store:     deps.Store,
-		Workspace: workspaceManager,
-		Git:       gitBackend,
-		After:     cfg.Workspace.RunCleanupAfter,
-		Logger:    logger,
-		Now:       now,
+		Store:            deps.Store,
+		Workspace:        workspaceManager,
+		Git:              gitBackend,
+		After:            cfg.Workspace.RunCleanupAfter,
+		DossierRetention: cfg.Storage.JobRetention,
+		Logger:           logger,
+		Now:              now,
 	})
 	if err != nil {
 		if ownedMCP {

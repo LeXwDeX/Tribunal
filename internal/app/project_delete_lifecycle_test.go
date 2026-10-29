@@ -27,7 +27,7 @@ func openLifecycleStore(t *testing.T) *sqlite.Store {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	if err := st.ConfigureMCPSecrets(context.Background(), newTestCipher(t)); err != nil {
+	if _, err := st.ConfigureMCPSecrets(context.Background(), newTestCipher(t)); err != nil {
 		t.Fatal(err)
 	}
 	return st
