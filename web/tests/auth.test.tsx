@@ -25,9 +25,22 @@ describe('authentication boundary', () => {
     )
     const login = await screen.findByRole('link', { name: '通过 GitLab 登录' })
     expect(login).toHaveAttribute('href', '/auth/login')
-    expect(screen.getAllByText('会话已过期，请重新登录。')).toHaveLength(1)
+    expect(screen.queryByText('会话已过期，请重新登录。')).not.toBeInTheDocument()
     expect(screen.queryByText('Alice')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '退出登录' })).not.toBeInTheDocument()
+  })
+
+  it('shows the expiry notice only when the server reports an expired session', async () => {
+    installFetch(() => jsonResponse({ error: { code: 'session_expired', message: 'session expired' } }, 401))
+    render(
+      <QueryClientProvider client={createTestQueryClient()}>
+        <MemoryRouter initialEntries={['/']}>
+          <App />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+    expect(await screen.findByRole('link', { name: '通过 GitLab 登录' })).toBeInTheDocument()
+    expect(screen.getAllByText('会话已过期，请重新登录。')).toHaveLength(1)
   })
 
   it('hides the login action when the server reports OAuth disabled', async () => {

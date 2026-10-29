@@ -75,11 +75,13 @@ export function App() {
 
   if (meQuery.isPending || authStatusQuery.isPending) return <BootLoading />
 
-  const unauthorizedError = meQuery.error instanceof ApiError && meQuery.error.status === 401
+  const meError = meQuery.error
+  const unauthorizedError = meError instanceof ApiError && meError.status === 401
+  const sessionExpired = meError instanceof ApiError && meError.status === 401 && meError.code === 'session_expired'
   if (sessionEnded || unauthorizedError || !meQuery.data) {
     const notice = sessionEnded === 'logout'
       ? '已退出登录。'
-      : sessionEnded === 'expired' || unauthorizedError
+      : sessionEnded === 'expired' || sessionExpired
         ? '会话已过期，请重新登录。'
         : undefined
     return (

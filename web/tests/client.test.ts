@@ -39,15 +39,25 @@ describe('API client', () => {
     expect(readHeaders.get('X-CSRF-Token')).toBeNull()
   })
 
-  it('turns an error envelope into ApiError and dispatches unauthorized', async () => {
+  it('turns an error envelope into ApiError and dispatches unauthorized for an expired session', async () => {
     const events: Event[] = []
     const listener = (event: Event) => events.push(event)
     window.addEventListener(UNAUTHORIZED_EVENT, listener)
-    fetchMock.mockResolvedValue(jsonResponse({ error: { code: 'forbidden', message: 'no access', request_id: 'req-1' } }, 401))
+    fetchMock.mockResolvedValue(jsonResponse({ error: { code: 'session_expired', message: 'session expired', request_id: 'req-1' } }, 401))
     await expect(request('/api/v1/me')).rejects.toMatchObject({
-      name: 'ApiError', status: 401, code: 'forbidden', message: 'no access', requestId: 'req-1',
+      name: 'ApiError', status: 401, code: 'session_expired', message: 'session expired', requestId: 'req-1',
     })
     expect(events).toHaveLength(1)
+    window.removeEventListener(UNAUTHORIZED_EVENT, listener)
+  })
+
+  it('does not dispatch unauthorized when the browser never logged in', async () => {
+    const events: Event[] = []
+    const listener = (event: Event) => events.push(event)
+    window.addEventListener(UNAUTHORIZED_EVENT, listener)
+    fetchMock.mockResolvedValue(jsonResponse({ error: { code: 'unauthenticated', message: 'login required' } }, 401))
+    await expect(request('/api/v1/me')).rejects.toMatchObject({ status: 401, code: 'unauthenticated' })
+    expect(events).toHaveLength(0)
     window.removeEventListener(UNAUTHORIZED_EVENT, listener)
   })
 

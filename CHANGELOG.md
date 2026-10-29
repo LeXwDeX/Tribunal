@@ -34,6 +34,7 @@ v1.2.0 尚未发布；冻结前的新改动仍记入下方 `[1.2.0]` 段，避�
 
 ### 修复
 
+- **未登录不提示会话过期**：服务端 401 区分无 session cookie（`unauthenticated`）和已有会话失效（`session_expired`）；前端只在 `session_expired` 或登录后的请求返回 401 时显示“会话已过期，请重新登录。”，首次访问只显示登录按钮（[#153](https://github.com/LeXwDeX/Tribunal/issues/153)）。
 - **Onboarding 排障信息**：工作区失败日志的 `error_class` 区分 `upstream_auth`（401/403）、`rate_limited`（429）、`network`、`config` 和上游过载/上下文超长，并在有 HTTP 响应时记录脱敏的 `upstream_status`；`last_error` 保持固定脱敏文案。`tribunalctl` 的全局、子命令和 action 均支持 `-h`/`--help` 并以 0 退出；裸 `help` 只在期待子命令的位置生效，叶子命令的位置参数仍按原规则校验。ignore 阻断索引时控制台显示信息提示，不再当作最近错误。（[#132](https://github.com/LeXwDeX/Tribunal/issues/132)）。
 - **Onboarding 重试入口**：新增 `tribunalctl projects retry-onboarding <项目 ID>` 和平台管理员端点 `POST /api/v1/admin/projects/{id}/onboarding/retry`。重试走管理 CLI 和平台管理员权限，不需要项目 `manage` 授权或浏览器会话；项目侧 `workspace/refresh` 的 HTTP 权限不变。任务仍为 queued 时重复执行复用同一任务；任务执行或失败后可再次创建，旧失败记录保留（[#132](https://github.com/LeXwDeX/Tribunal/issues/132)）。
 - **OAuth 未启用时的登录页**：新增公开接口 `GET /auth/status` 返回 `oauth_enabled`；未配置 OAuth 时控制台登录页隐藏登录按钮并提示管理员配置 `auth.oauth.client_id_env` 和 `auth.oauth.client_secret_env`，不再把 503 JSON 暴露给浏览器用户。浏览器导航的登录失败以 303 跳回控制台并显示固定错误码对应文案；已有会话时以一次性提示展示，不会静默丢弃。API 客户端仍收到原有 JSON 错误（`Accept` 明确拒绝 `text/html` 时也不跳转）；服务启动日志会说明 OAuth 是否启用及缺失的变量名，不打印变量值（[#131](https://github.com/LeXwDeX/Tribunal/issues/131)）。
