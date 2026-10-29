@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   getCurrentContextDoc, getWorkspace, listContextDocs, refreshWorkspace, saveCurrentContextDoc, setContextDocLock,
@@ -22,6 +22,9 @@ const docKinds: Array<{ key: DocKind; label: string }> = [
   { key: 'claude', label: 'CLAUDE' },
 ]
 
+const ACTIVE_WORKSPACE_STATES = new Set(['new', 'refreshing', 'onboarding'])
+const WORKSPACE_POLL_MS = 2000
+
 export function WorkspacePanel({ projectId, canManage = false }: { projectId: number; canManage?: boolean }) {
   const canWrite = canManage
   const toast = useToast()
@@ -39,7 +42,22 @@ export function WorkspacePanel({ projectId, canManage = false }: { projectId: nu
   const workspace = useQuery({
     queryKey: ['project', projectId, 'workspace'],
     queryFn: () => getWorkspace(projectId),
+    refetchInterval: (query) => {
+      const state = query.state.data?.state
+      return state && ACTIVE_WORKSPACE_STATES.has(state) ? WORKSPACE_POLL_MS : false
+    },
   })
+  const previousWorkspaceState = useRef<string | undefined>(undefined)
+  useEffect(() => {
+    const previous = previousWorkspaceState.current
+    const currentState = workspace.data?.state
+    previousWorkspaceState.current = currentState
+    const wasActive = previous ? ACTIVE_WORKSPACE_STATES.has(previous) : false
+    const isActive = currentState ? ACTIVE_WORKSPACE_STATES.has(currentState) : false
+    if (!wasActive || isActive || !currentState) return
+    void queryClient.invalidateQueries({ queryKey: ['project', projectId, 'context-doc-current'] })
+    void queryClient.invalidateQueries({ queryKey: ['project', projectId, 'context-docs'] })
+  }, [workspace.data?.state, projectId, queryClient])
   const current = useQuery({
     queryKey: ['project', projectId, 'context-doc-current', kind],
     queryFn: () => getCurrentContextDoc(projectId, kind),
