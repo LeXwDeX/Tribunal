@@ -26,6 +26,14 @@ func newResidueTestService(t *testing.T, root string) (*ProjectService, *sqlite.
 	return service, st
 }
 
+
+func writeWorkspaceMarker(t *testing.T, root string, id int64) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(root, ".tribunal-managed"), []byte(workspace.ManagedMarkerValue(id)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestListProjectResiduesReportsOrphansWithoutDeleting(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -48,6 +56,7 @@ func TestListProjectResiduesReportsOrphansWithoutDeleting(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(active, "HEAD"), []byte("ref: refs/heads/main\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	writeWorkspaceMarker(t, filepath.Join(root, "42"), 42)
 
 	residues, err := service.ListProjectResidues(ctx)
 	if err != nil {
@@ -105,6 +114,7 @@ func TestCleanupProjectResiduesKeepsUnknownOwnership(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(active, "HEAD"), []byte("ref: refs/heads/main\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	writeWorkspaceMarker(t, filepath.Join(root, "42"), 42)
 
 	result, err := service.CleanupProjectResidues(ctx)
 	if err != nil {
@@ -193,5 +203,65 @@ func TestListProjectResiduesKeepsUnverifiedWorkspace(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "43")); err != nil {
 		t.Fatalf("manual directory was removed: %v", err)
+	}
+}
+
+func TestListProjectResiduesKeepsFakeMirrorWithoutMarker(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	service, _ := newResidueTestService(t, root)
+	mirror := filepath.Join(root, "44", "mirror.git")
+	if err := os.MkdirAll(mirror, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mirror, "HEAD"), []byte("ref: refs/heads/main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	residues, err := service.ListProjectResidues(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(residues) != 1 || residues[0].Removable || residues[0].Reason != projectResidueUnknownOwner {
+		t.Fatalf("residues = %+v, want a kept fake mirror", residues)
+	}
+}
+
+func TestListProjectResiduesKeepsWrongOrSymlinkedMarker(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		marker func(t *testing.T, root string)
+	}{
+		{"wrong-id", func(t *testing.T, root string) {
+			if err := os.WriteFile(filepath.Join(root, ".tribunal-managed"), []byte(workspace.ManagedMarkerValue(7)+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"symlink", func(t *testing.T, root string) {
+			target := filepath.Join(t.TempDir(), "marker")
+			if err := os.WriteFile(target, []byte(workspace.ManagedMarkerValue(45)+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, filepath.Join(root, ".tribunal-managed")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			root := t.TempDir()
+			service, _ := newResidueTestService(t, root)
+			dir := filepath.Join(root, "45")
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			tc.marker(t, dir)
+			residues, err := service.ListProjectResidues(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(residues) != 1 || residues[0].Removable {
+				t.Fatalf("residues = %+v, want ownership_unproven", residues)
+			}
+		})
 	}
 }

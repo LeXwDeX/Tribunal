@@ -165,6 +165,14 @@ func (w *Workspace) LockMirror(ctx context.Context) (func(), error) {
 	return w.mirrorLock.Lock(ctx)
 }
 
+// ManagedMarker identifies a directory created by this workspace manager.
+const ManagedMarker = ".tribunal-managed"
+
+// ManagedMarkerValue returns the marker body bound to one project ID.
+func ManagedMarkerValue(projectID int64) string {
+	return fmt.Sprintf("tribunal-workspace-v1 %d", projectID)
+}
+
 // MirrorDir is the fixed bare mirror path for this project.
 func (w *Workspace) MirrorDir() string { return filepath.Join(w.Root, "mirror.git") }
 
@@ -443,6 +451,23 @@ func (w *Workspace) cleanupRun(ctx context.Context, wfID, dir string) error {
 // ensureDir creates the project root plus the named path components with 0700
 // permissions. Every existing component must be a real directory; symlinked
 // components are rejected instead of followed.
+// writeManagedMarker records project ownership on the workspace root. Residue
+// cleanup deletes only directories carrying this marker for the same project.
+func (w *Workspace) writeManagedMarker() error {
+	marker := filepath.Join(w.Root, ManagedMarker)
+	if info, err := os.Lstat(marker); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return ErrUnsafePath
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("workspace: inspect managed marker: %w", err)
+	}
+	if err := os.WriteFile(marker, []byte(ManagedMarkerValue(w.ProjectID)+"\n"), fileMode); err != nil {
+		return fmt.Errorf("workspace: write managed marker: %w", err)
+	}
+	return nil
+}
+
 func (w *Workspace) ensureDir(parts ...string) (string, error) {
 	if w == nil || w.ProjectID <= 0 || !filepath.IsAbs(w.Root) {
 		return "", ErrUnsafePath
@@ -452,6 +477,9 @@ func (w *Workspace) ensureDir(parts ...string) (string, error) {
 	}
 	path := w.Root
 	if err := requireDir(path); err != nil {
+		return "", err
+	}
+	if err := w.writeManagedMarker(); err != nil {
 		return "", err
 	}
 	for _, part := range parts {

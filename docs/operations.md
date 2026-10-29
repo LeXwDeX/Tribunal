@@ -232,7 +232,7 @@ tribunalctl projects residues
 tribunalctl projects residues clean --yes
 ```
 
-检查命令列出可归属到未登记项目的 `<workspace>/<项目ID>` 和 `skills/project-<项目ID>`，不修改文件。只有存在平台创建证据（如 bare `mirror.git/HEAD` 或 SHA 命名的 context 目录）的项目目录才标记 `removable`；`skills/project-<id>` 容器、符号链接、非规范名称和无法归属的条目只报告、不删除。清理命令必须带 `--yes`，服务端还要求 `confirm: true`。`failed` 只含脱敏错误类别。清理前后仍应按本节完成备份和归属确认。
+检查命令列出可归属到未登记项目的 `<workspace>/<项目ID>` 和 `skills/project-<项目ID>`，不修改文件。只有存在项目 ID 匹配的受管标记 `.tribunal-managed` 的项目目录才标记 `removable`；`skills/project-<id>` 容器、符号链接、非规范名称和无法归属的条目只报告、不删除。清理命令必须带 `--yes`，服务端还要求 `confirm: true`。`failed` 只含脱敏错误类别。清理前后仍应按本节完成备份和归属确认。
 
 遇到删除错误或结果不确定时，不要直接重试登记或删除，也不要让服务自动接管残留。先停止服务，按实际配置确认数据库和 `workspace.root` 的位置、挂载与项目 ID，并做一致性备份。核对数据库中的登记状态、GitLab webhook 状态，以及该项目的工作区和 `skills/project-<项目ID>` 目标；空目录、普通文件和符号链接也可能阻止重新登记。由有权人员确认每个残留的归属和内容，再按组织的受控流程处理；不能确认归属时保留并升级处理。不要批量或盲目删除路径。确认相关目标均已安全处理后，才重新启动并按需重新登记。
 
@@ -773,8 +773,8 @@ docker compose exec -T review /app/tribunalctl projects all
 
 先按第 8 节的通用步骤操作：记录当前镜像 tag/digest，核对生效路径和全部挂载，停止旧容器并备份数据库和所有工作区。本次升级有这些额外注意点：
 
-1. **先做一致性备份，三个迁移都不可回退。**
-   - 本次新增 `0016_dossier_mr_title`、`0017_mcp_config_seal`、`0018_dossier_project`，都没有 down migration。回退只能恢复升级前的全量快照，不能只换回 v1.1.0 镜像而保留已迁移数据库；旧版本读取新 schema 不受支持。
+1. **先做一致性备份，四个迁移都不可回退。**
+   - 本次新增 `0016_dossier_mr_title`、`0017_mcp_config_seal`、`0018_dossier_project`、`0019_job_defer_window`，都没有 down migration。回退只能恢复升级前的全量快照，不能只换回 v1.1.0 镜像而保留已迁移数据库；旧版本读取新 schema 不受支持。
    - 升级前按[第 7 节](#7-sqlite-一致性备份与恢复)停止服务，备份生效数据库、可能存在的 `-wal`/`-shm` 和所有工作区；只有符合默认配置与挂载前提时才能复制整个 `/app/data`。运行中只复制数据库文件会漏掉 WAL，不是一致备份。
    - 另存实际配置、镜像 digest 和 `REVIEW_MASTER_KEY`。恢复使用匹配布局的新空卷或空目录，不把快照覆盖到旧数据，也不混入旧 WAL。
 2. **迁移 `0016_dossier_mr_title` 只追加列，但仍然要先备份。**

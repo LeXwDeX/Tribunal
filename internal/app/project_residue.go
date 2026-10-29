@@ -12,6 +12,7 @@ import (
 
 	"github.com/LeXwDeX/tribunal/internal/errclass"
 	"github.com/LeXwDeX/tribunal/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/workspace"
 )
 
 // Project residue kinds. The workspace root and the managed skills root use
@@ -187,7 +188,7 @@ func (s *ProjectService) inspectProjectResidues(ctx context.Context) ([]ProjectR
 			items = append(items, unknownProjectResidue(path))
 		case isRegisteredProject(registered, id):
 		default:
-			removable := managedWorkspaceEvidence(path)
+			removable := managedWorkspaceEvidence(path, id)
 			reason := projectResidueUnregistered
 			if !removable {
 				reason = projectResidueUnknownOwner
@@ -250,38 +251,20 @@ func (s *ProjectService) inspectManagedSkills(root string, registered map[int64]
 	return items, nil
 }
 
-// managedWorkspaceEvidence proves that the platform created a project
-// directory. A bare mirror or a SHA-named context directory is written only by
-// the workspace manager; a numeric directory name alone is not enough.
-func managedWorkspaceEvidence(root string) bool {
-	mirror := filepath.Join(root, "mirror.git")
-	if info, err := os.Lstat(mirror); err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
-		if _, err := os.Stat(filepath.Join(mirror, "HEAD")); err == nil {
-			return true
-		}
+// managedWorkspaceEvidence requires the marker written by the workspace
+// manager for this exact project. Directory names and repository shapes are
+// not ownership evidence.
+func managedWorkspaceEvidence(root string, projectID int64) bool {
+	marker := filepath.Join(root, workspace.ManagedMarker)
+	info, err := os.Lstat(marker)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return false
 	}
-	contexts := filepath.Join(root, "context")
-	if entries, err := os.ReadDir(contexts); err == nil {
-		for _, entry := range entries {
-			name := entry.Name()
-			if !entry.IsDir() || (len(name) != 40 && len(name) != 64) {
-				continue
-			}
-			if isHexName(name) {
-				return true
-			}
-		}
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		return false
 	}
-	return false
-}
-
-func isHexName(value string) bool {
-	for _, c := range value {
-		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
-			return false
-		}
-	}
-	return value != ""
+	return strings.TrimSpace(string(data)) == workspace.ManagedMarkerValue(projectID)
 }
 
 func (s *ProjectService) residueInspectionError(err error) error {
