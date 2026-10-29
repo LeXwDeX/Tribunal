@@ -24,6 +24,7 @@ const docKinds: Array<{ key: DocKind; label: string }> = [
 
 const ACTIVE_WORKSPACE_STATES = new Set(['new', 'refreshing', 'onboarding'])
 const WORKSPACE_POLL_MS = 2000
+const WORKSPACE_TRACK_MS = 5 * 60 * 1000
 
 export function WorkspacePanel({ projectId, canManage = false }: { projectId: number; canManage?: boolean }) {
   const canWrite = canManage
@@ -38,26 +39,44 @@ export function WorkspacePanel({ projectId, canManage = false }: { projectId: nu
   const [lockPending, setLockPending] = useState(false)
   const [refreshAction, setRefreshAction] = useState<RefreshAction | null>(null)
   const [refreshError, setRefreshError] = useState<unknown>(null)
+  const [trackingJob, setTrackingJob] = useState(false)
+  const trackingTimeout = useRef<number | undefined>(undefined)
+
+  const clearTrackingTimeout = () => {
+    if (trackingTimeout.current !== undefined) {
+      window.clearTimeout(trackingTimeout.current)
+      trackingTimeout.current = undefined
+    }
+  }
+  // The worker may not have written "refreshing" yet when the POST returns.
+  // Keep polling for a bounded window so a fast old "ready" cannot stop the refresh.
+  const startTracking = () => {
+    clearTrackingTimeout()
+    setTrackingJob(true)
+    trackingTimeout.current = window.setTimeout(() => setTrackingJob(false), WORKSPACE_TRACK_MS)
+  }
+  useEffect(() => () => clearTrackingTimeout(), [])
 
   const workspace = useQuery({
     queryKey: ['project', projectId, 'workspace'],
     queryFn: () => getWorkspace(projectId),
     refetchInterval: (query) => {
       const state = query.state.data?.state
-      return state && ACTIVE_WORKSPACE_STATES.has(state) ? WORKSPACE_POLL_MS : false
+      return trackingJob || (state && ACTIVE_WORKSPACE_STATES.has(state)) ? WORKSPACE_POLL_MS : false
     },
   })
-  const previousWorkspaceState = useRef<string | undefined>(undefined)
+  const workspaceState = workspace.data?.state
   useEffect(() => {
-    const previous = previousWorkspaceState.current
-    const currentState = workspace.data?.state
-    previousWorkspaceState.current = currentState
-    const wasActive = previous ? ACTIVE_WORKSPACE_STATES.has(previous) : false
-    const isActive = currentState ? ACTIVE_WORKSPACE_STATES.has(currentState) : false
-    if (!wasActive || isActive || !currentState) return
-    void queryClient.invalidateQueries({ queryKey: ['project', projectId, 'context-doc-current'] })
-    void queryClient.invalidateQueries({ queryKey: ['project', projectId, 'context-docs'] })
-  }, [workspace.data?.state, projectId, queryClient])
+    if (!workspaceState || ACTIVE_WORKSPACE_STATES.has(workspaceState)) return
+    clearTrackingTimeout()
+    setTrackingJob(false)
+    void (async () => {
+      for (const key of ['context-doc-current', 'context-docs']) {
+        await queryClient.cancelQueries({ queryKey: ['project', projectId, key] })
+        await queryClient.invalidateQueries({ queryKey: ['project', projectId, key] })
+      }
+    })()
+  }, [workspaceState, projectId, queryClient])
   const current = useQuery({
     queryKey: ['project', projectId, 'context-doc-current', kind],
     queryFn: () => getCurrentContextDoc(projectId, kind),
@@ -104,6 +123,7 @@ export function WorkspacePanel({ projectId, canManage = false }: { projectId: nu
         regenerate_context: action === 'regenerate' || undefined,
       })
       toast.push('success', response.job_id ? `已创建任务 ${response.job_id}。` : '已提交工作区任务。')
+      startTracking()
       await queryClient.invalidateQueries({ queryKey: ['project', projectId, 'workspace'] })
       await queryClient.invalidateQueries({ queryKey: ['project', projectId, 'context-docs'] })
     } catch (error) {
