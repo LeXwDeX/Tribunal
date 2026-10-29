@@ -31,7 +31,7 @@ v1.2.0 尚未发布：版本说明已合并到 `main`，尚未打 tag，也未�
 **状态汇总（GitHub Actions 仍未通过）**
 
 - [ ] **GitHub Actions**：截至 `main` `96e8081`，CI 有 workflow run 记录，但 go、web、docker 三个 job 因账户计费/额度限制没有启动，job 注解说明了原因。v1.2.0 期间的 PR 在 CI job 未启动时按交接约定用本地全量检查放行，并把结果评论到 PR；本文件不逐 PR 重述，[PR #112 评论](https://github.com/LeXwDeX/Tribunal/pull/112#issuecomment-6432897860) 是一个已核实的例子。没有成功执行的 CI job 结果，不能把本地预检当作 CI 结果。
-- [x] **真实 GitLab 实例验收**：[#108](https://github.com/LeXwDeX/Tribunal/issues/108) 已于 2026-10-29 在 `main` `a113e08` 上执行；剩余 5 项已处理，其中 4 项通过，`bootstrap_admins` 弃用告警未复现并另开 [#151](https://github.com/LeXwDeX/Tribunal/issues/151)。详见[真实实例升级验收（#108）](#v120-真实实例升级验收)。GitHub Actions 仍未成功执行，不能把本项勾选当作 CI 通过；v1.0.0 的 f143 结果不覆盖本版本，见[历史验收记录](#v100-历史验收记录f143仅供追溯)。
+- [x] **真实 GitLab 实例验收**：[#108](https://github.com/LeXwDeX/Tribunal/issues/108) 已于 2026-10-29 在 `main` `a113e08` 上执行；剩余 5 项全部通过；其中 `bootstrap_admins` 弃用告警首轮未复现，经 [#151](https://github.com/LeXwDeX/Tribunal/issues/151) 排查后在真实实例复现。详见[真实实例升级验收（#108）](#v120-真实实例升级验收)。GitHub Actions 仍未成功执行，不能把本项勾选当作 CI 通过；v1.0.0 的 f143 结果不覆盖本版本，见[历史验收记录](#v100-历史验收记录f143仅供追溯)。
 
 <a id="v120-真实实例升级验收"></a>
 
@@ -56,10 +56,7 @@ v1.2.0 尚未发布：版本说明已合并到 `main`，尚未打 tag，也未�
 - 内置 `code-review` Skill：MR !3 的 LLM 调用均加载了该 Skill；4 条 findings 为 P1 concurrency、P2 logic、P1 concurrency、P1 standards，全部发布，汇总与明细一致，baseline smell 没有被单独升级为 BLOCKING。
 - MR 标题：新评审的 dossier 都有 `mr_title`，列表显示标题（#101 新评审部分）。
 - v2 控制台：在真实数据下检查 1440 和 390 宽度、亮色和暗色；总览、评审、项目工作区、扩展、模型与档位、统计与反馈、系统页面均无横向滚动（390 下逐页 `scrollWidth=390`）。
-
-未覆盖或未复现：
-
-- [ ] 用户名写法的 `bootstrap_admins` 弃用告警（#103）：临时改为用户名写法并重启，配置挂载和日志级别均正常，仍未观察到告警；`cmd/server` 单测通过。真实配置加载路径与单测结果不一致，已另开 [#151](https://github.com/LeXwDeX/Tribunal/issues/151) 跟踪。按 #108 的 Acceptance，该项记录失败并另开 Issue，不阻塞其余验收结论。
+- 用户名写法的 `bootstrap_admins` 弃用告警（#103）：首轮两次尝试未观察到告警，另开 [#151](https://github.com/LeXwDeX/Tribunal/issues/151)。排查发现：按配置备份文件的修改时间，两次尝试中用户名写法只在宿主机文件里保留 10–30 秒，现存容器均在配置恢复为 `id:` 写法之后创建，验证窗口没有覆盖任何一次启动。2026-10-29 在 `tribunal-regress`（镜像 `a113e08`）把配置改为 `bootstrap_admins: ["suntao"]` 后执行 `docker compose up -d --force-recreate`，新容器启动日志在 `storage opened` 之后出现 `auth.bootstrap_admins username entry is deprecated ...`，带 `index=0`、`binding=none`，不含用户名；随后恢复原配置。`cmd/server` 新增从 YAML 加载并展开 `${VAR}` 的启动回归测试。
 
 **历史本地预检（引用 PR #112 交接记录）**
 
