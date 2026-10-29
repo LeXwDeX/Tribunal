@@ -1,3 +1,4 @@
+import { StrictMode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import { QueryClientProvider } from '@tanstack/react-query'
@@ -86,12 +87,15 @@ describe('authentication boundary', () => {
       return jsonResponse({ reviews: [] })
     })
     render(
-      <QueryClientProvider client={createTestQueryClient()}>
-        <MemoryRouter initialEntries={['/']}>
-          <App />
-        </MemoryRouter>
-      </QueryClientProvider>,
+      <StrictMode>
+        <QueryClientProvider client={createTestQueryClient()}>
+          <MemoryRouter initialEntries={['/']}>
+            <App />
+          </MemoryRouter>
+        </QueryClientProvider>
+      </StrictMode>,
     )
-    expect(await screen.findByText('GitLab 登录被取消或拒绝。')).toBeInTheDocument()
+    expect(await screen.findAllByText('GitLab 登录被取消或拒绝。')).toHaveLength(1)
+    expect(window.location.search).toBe('')
   })
 })

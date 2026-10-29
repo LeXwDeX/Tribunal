@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { QueryClient, useQuery } from '@tanstack/react-query'
 import { Route, Routes } from 'react-router-dom'
 import { fetchAuthStatus, fetchMe } from './api/api'
@@ -31,12 +31,14 @@ export function createQueryClient() {
 
 function AuthErrorToast({ message, onShown }: { message: string; onShown: () => void }) {
   const { push } = useToast()
-  const shown = useRef(false)
   useEffect(() => {
-    if (shown.current) return
-    shown.current = true
-    push('error', message)
-    onShown()
+    // A zero-delay timer survives StrictMode's simulated unmount: the first
+    // timer is cleared, the second pushes once after the remount.
+    const timer = window.setTimeout(() => {
+      push('error', message)
+      onShown()
+    }, 0)
+    return () => window.clearTimeout(timer)
   }, [message, onShown, push])
   return null
 }
