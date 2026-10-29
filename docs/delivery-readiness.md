@@ -44,8 +44,8 @@ v1.2.0 尚未发布：版本说明已合并到 `main`，尚未打 tag，也未�
 - 升级：镜像从已有数据卷原地升级到 `a113e08`，`0019_job_defer_window` 已应用，项目、dossier 和发布记录保留，healthz/readyz 200。数据卷升级前的 schema 已含 `0016`，所以实际验证的是 `0017`–`0019` 的升级。
 - v1.0.0 数据卷原地升级：在 33.110 新建隔离实例 `tribunal-acceptance-108`，从 `v1.0.0` tag 构建并启动，注册项目 1335、跑真实评审并发布；升级到 `v1.1.0` 后日志显示 `stored secrets migrated projects:1`，`0013`–`0015` 已应用，项目仍可 clone、评审、发布；再升级到 `a113e08`，`0016`–`0019` 已应用。
 - 旧评审显示 `!iid`：v1.0.0/v1.1.0 产生的 dossier `mr_title=''`，控制台显示 `!1`；升级后的新评审 `mr_title='feat: add withdraw'`，列表显示标题（#101）。
-- codebase-memory-mcp 实际调用：临时将验收实例 `review_defaults.ignore` 置空并重建索引后，新评审的 6 次 LLM 调用均出现 `mcp__codebase-memory__*` 工具（`search_graph`、`trace_path`、`get_architecture` 等）。
-- 多项目 MCP 隔离：注册第二个项目 1336 并跑真实评审；1336 的 9 次调用中只出现本项目路径，1335 的 6 次调用中未出现 1336，`list_projects` 只返回当前项目。
+- codebase-memory-mcp 实际调用：临时将验收实例 `review_defaults.ignore` 置空并重建索引，再用测试用项目 `custom_rules` 引导评审先调用图谱工具；按 `message.parts[].type == "tool_call"` 统计，项目 1335 实际调用 `list_projects`、`get_architecture`，项目 1336 调用 `list_projects`、`get_architecture`、`search_graph`。引导只用于验收，不改变产品默认行为。
+- 多项目 MCP 隔离：注册第二个项目 1336 并跑真实评审；按 workflow 分别统计请求和响应，1335 的 workflow 中 `tribunal-acceptance-108` 出现 6 次、`tribunal-acceptance-108b` 出现 0 次；1336 中 `108b` 出现 5 次、`108` 出现 0 次。
 - OAuth 登录；容器重启后会话保留。
 - 升级后真实评审：MR !2 结论 `PASS`，MR !1、MR !3 结论 `BLOCKING`，均已发布到 GitLab。
 - 停机续跑：评审运行中对容器发 SIGKILL，重启后 workflow 完成并发布（MR !3、MR !1）。
