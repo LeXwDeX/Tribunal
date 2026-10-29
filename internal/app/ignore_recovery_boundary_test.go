@@ -63,6 +63,20 @@ func TestRecoverChecksIgnorePolicyWithoutConfigHash(t *testing.T) {
 			if invalidConfig && wf.Status != "cancelled" {
 				t.Fatalf("configuration read failure left workflow active: %+v", wf)
 			}
+			if invalidConfig {
+				if wf.PublicationState != store.WorkflowPublicationSkipped || wf.PublicationError != invalidRepoConfigDetail {
+					t.Fatalf("configuration failure publication = %q/%q", wf.PublicationState, wf.PublicationError)
+				}
+				if f.gitlab.noteCount() != 1 {
+					t.Fatalf("configuration failure notes = %d, want one explanation", f.gitlab.noteCount())
+				}
+				if err := f.service.Recover(ctx); err != nil {
+					t.Fatalf("second Recover: %v", err)
+				}
+				if f.gitlab.noteCount() != 1 {
+					t.Fatalf("second Recover repeated the explanation: %d", f.gitlab.noteCount())
+				}
+			}
 			after, err := f.db.GetWorkflowDossier(ctx, id)
 			if err != nil || after.Hash != hash || !bytes.Equal(after.Data, raw) {
 				t.Fatalf("recovery rewrote dossier: %v", err)

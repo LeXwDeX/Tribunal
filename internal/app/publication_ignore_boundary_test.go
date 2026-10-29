@@ -240,3 +240,38 @@ func TestDossierDiffIndexKeepsBothRenameSidesOnly(t *testing.T) {
 		t.Fatal("excluded diff was indexed")
 	}
 }
+
+func TestPublisherRejectsRootAnchoredIgnoreFinding(t *testing.T) {
+	ctx := context.Background()
+	f := newReviewFixture(t, reviewTestHead)
+	f.defaults.Ignore = []string{"/private/**"}
+	f.defaults.CommitStatus = true
+	f.service.reviewDefaults, f.publisher.reviewDefaults = f.defaults, f.defaults
+	f.engine = dag.NewEngine(ignoredSynthesisStore{f.db, func(r *review.SynthesisResult) {
+		r.Groups[0].Path = "private/a.go"
+	}}, f.executors, f.executors, dag.Options{})
+	f.service.engine, f.publisher.engine = f.engine, f.engine
+	job := f.seedReview(t, "root-anchored-ignored-synthesis")
+
+	if err := f.service.RunReview(ctx, job); !errors.Is(err, ErrStalePublication) {
+		t.Fatalf("publish = %v, want stale rejection", err)
+	}
+	wf, err := f.db.GetWorkflowByJob(ctx, job.ID)
+	if err != nil || wf.PublicationState != store.WorkflowPublicationSkipped || !strings.Contains(wf.PublicationError, "ignored finding") {
+		t.Fatalf("workflow=%+v err=%v", wf, err)
+	}
+	if got := countPublicationEffects(f); got != (publicationEffects{}) {
+		t.Fatalf("ignored result reached GitLab: %+v", got)
+	}
+}
+
+func TestLegacyIgnorePolicyWithPatternsIsRejected(t *testing.T) {
+	d := testDossier(t, reviewTestHead)
+	d.IgnorePolicy = &review.IgnorePolicy{Version: review.IgnorePolicyVersion - 1, Patterns: []string{"private/**"}}
+	if reason := publicationPolicyReason(d); reason == "" {
+		t.Fatal("publication accepted a legacy ignore policy")
+	}
+	if d.WorkspaceProvenanceValid() {
+		t.Fatal("legacy ignore policy passed workspace provenance")
+	}
+}

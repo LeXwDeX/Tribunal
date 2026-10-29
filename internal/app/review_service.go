@@ -32,8 +32,8 @@ const (
 	reviewSupersededReason      = "review superseded"
 	failureNoteDisabledReason   = "failure note disabled"
 	reviewExecutionFailedReason = "review execution failed"
-	invalidRepoConfigDetail     = "repository review configuration is invalid"
-	invalidRepoConfigNote       = "评审未启动：`.gitlab-review.yml` 无法解析或不支持其中的 ignore 规则。请修正后重新触发评审。"
+	invalidRepoConfigDetail     = "repository or stored ignore configuration is invalid"
+	invalidRepoConfigNote       = "评审未启动：`.gitlab-review.yml` 或已保存的 ignore 规则无效（无法解析或包含不支持的写法）。请修正后重新触发评审。"
 )
 
 // ReviewStore is the persistence surface needed by review orchestration.

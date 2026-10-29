@@ -838,4 +838,15 @@ func TestRepublishInvalidRepoConfigFailsPermanently(t *testing.T) {
 	if err := f.publisher.Republish(context.Background(), workflow.ID); err == nil {
 		t.Fatal("a second republish retried an invalid configuration")
 	}
+	notesBefore := f.gitlab.noteCount()
+	if err := f.service.PublishPending(context.Background()); err != nil {
+		t.Fatalf("PublishPending: %v", err)
+	}
+	again, err := f.db.GetWorkflow(context.Background(), workflow.ID)
+	if err != nil || again.PublicationState != store.WorkflowPublicationFailed {
+		t.Fatalf("pending publication retried a failed config: %+v, %v", again, err)
+	}
+	if f.gitlab.noteCount() != notesBefore {
+		t.Fatal("pending publication created another note")
+	}
 }
