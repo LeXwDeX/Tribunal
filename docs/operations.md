@@ -945,7 +945,7 @@ docker run --rm --entrypoint stat tribunal:local -c '%u:%g %a' /app/data
 |---|---|---|
 | `upstream_auth` | 上游返回 401/403 | 检查模型 provider token、出口 IP 白名单和账号权限 |
 | `rate_limited` | 上游返回 429 | 检查配额和并发，按 `retry_after` 退避 |
-| `network` | 连接失败或传输中断 | 检查 DNS、代理、防火墙和 provider 地址 |
+| `network` | 连接失败、传输中断或上游临时错误（含可重试的 5xx） | 检查 DNS、代理、防火墙和 provider 地址，必要时重试 |
 | `config` | 上游拒绝请求（通常是 400） | 检查模型名、协议、参数和上下文长度 |
 | `overloaded` / `context_too_long` | 上游过载或上下文超长 | 降低并发或缩短输入 |
 | `canceled` / `timeout` / `internal` | 本地取消、超时或未知失败 | 检查任务取消、服务日志和数据库状态 |

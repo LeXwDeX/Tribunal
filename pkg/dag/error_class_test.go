@@ -9,31 +9,34 @@ import (
 )
 
 type classedTestError struct {
-	class string
-	text  string
+	class  string
+	status int
+	text   string
 }
 
 func (e classedTestError) Error() string      { return e.text }
 func (e classedTestError) ErrorClass() string { return e.class }
+func (e classedTestError) ErrorStatus() int   { return e.status }
 
 func TestNodeFailureReasonUsesErrorClass(t *testing.T) {
 	const canary = "classified-error-private-canary"
 	cases := []struct {
-		name  string
-		class string
-		want  string
+		name   string
+		class  string
+		status int
+		want   string
 	}{
-		{name: "auth", class: "auth", want: "auth"},
-		{name: "rate limited", class: "rate_limited", want: "rate_limited"},
+		{name: "auth", class: "auth", status: 403, want: "auth"},
+		{name: "rate limited", class: "rate_limited", status: 429, want: "rate_limited"},
 		{name: "empty", class: "", want: "executor_error"},
-		{name: "invalid", class: "Auth Failure", want: "executor_error"},
+		{name: "invalid", class: "Auth Failure", status: 500, want: "executor_error"},
 		{name: "too long", class: strings.Repeat("a", 33), want: "executor_error"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			store := NewMemoryEventStore()
 			engine := NewEngine(store, funcExecutor(func(context.Context, NodeInput) (NodeOutput, error) {
-				return NodeOutput{}, classedTestError{class: tc.class, text: canary}
+				return NodeOutput{}, classedTestError{class: tc.class, status: tc.status, text: canary}
 			}), nil, Options{})
 			wfID, err := engine.Create(context.Background(), GraphSpec{Nodes: []NodeSpec{{ID: "a", Kind: "x", Required: true}}}, nil)
 			if err != nil {
@@ -47,15 +50,15 @@ func TestNodeFailureReasonUsesErrorClass(t *testing.T) {
 				t.Fatal(err)
 			}
 			node := wf.Nodes["a"]
-			if node.Status != NodeFailed || node.Reason != tc.want {
-				t.Fatalf("node = %+v, want failed reason %q", node, tc.want)
+			if node.Status != NodeFailed || node.Reason != tc.want || node.ErrorStatus != tc.status {
+				t.Fatalf("node = %+v, want failed reason %q and status %d", node, tc.want, tc.status)
 			}
 			if strings.Contains(node.Error, canary) {
 				t.Fatalf("node error leaked: %q", node.Error)
 			}
 			payload := nodeFailedPayload(t, store, wfID)
-			if payload.Reason != tc.want || payload.ErrorKind != tc.want {
-				t.Fatalf("failure payload = %+v, want reason %q", payload, tc.want)
+			if payload.Reason != tc.want || payload.ErrorKind != tc.want || payload.ErrorStatus != tc.status {
+				t.Fatalf("failure payload = %+v, want reason %q and status %d", payload, tc.want, tc.status)
 			}
 			if strings.Contains(payload.Error, canary) {
 				t.Fatalf("failure payload leaked: %+v", payload)

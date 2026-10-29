@@ -441,3 +441,45 @@ func TestWorkspaceIndexCancellationStillReturnsError(t *testing.T) {
 		})
 	}
 }
+
+func TestOnboardingFailureLogsUpstreamClassAndStatus(t *testing.T) {
+	const raw = "https://gitlab.example/private?token=glpat-synthetic-secret"
+	f := newReviewFixture(t, reviewTestHead)
+	service := newOnboardingContextService(t, f, func(context.Context, agent.RunSpec) (*agent.RunResult, error) {
+		return nil, &llm.Error{Kind: llm.ErrAuth, Status: 403, Err: errors.New(raw)}
+	})
+	var logs bytes.Buffer
+	service.logger = slog.New(slog.NewJSONHandler(&logs, nil))
+
+	if err := service.Onboard(context.Background(), 42); err == nil {
+		t.Fatal("onboarding with an upstream auth failure succeeded")
+	}
+	var event map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var candidate map[string]any
+		if err := json.Unmarshal([]byte(line), &candidate); err != nil {
+			t.Fatalf("decode log %q: %v", line, err)
+		}
+		if candidate["msg"] == "workspace operation failed" {
+			event = candidate
+		}
+	}
+	if event == nil {
+		t.Fatalf("workspace failure was not logged: %s", logs.String())
+	}
+	if event["error_class"] != "upstream_auth" || event["upstream_status"] != float64(403) {
+		t.Errorf("warning = %v, want upstream_auth with status 403", event)
+	}
+	for _, secret := range []string{"glpat-", "gitlab.example", "/private"} {
+		if strings.Contains(logs.String(), secret) {
+			t.Errorf("warning leaked %q: %s", secret, logs.String())
+		}
+	}
+	state, err := f.db.GetWorkspace(context.Background(), 42)
+	if err != nil {
+		t.Fatalf("GetWorkspace: %v", err)
+	}
+	if state.State != "error" || state.LastError != store.WorkspaceOperationFailed {
+		t.Fatalf("workspace = %+v, want the fixed error state", state)
+	}
+}

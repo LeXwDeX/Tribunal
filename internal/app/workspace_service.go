@@ -564,7 +564,7 @@ func (s *WorkspaceService) generateContext(ctx context.Context, project *store.P
 	}
 	node, ok := snapshot.Nodes["onboarding"]
 	if !ok || node.Status != dag.NodeCompleted {
-		return errors.New("app: onboarding workflow did not complete")
+		return &onboardingFailure{class: onboardingErrorClass(node.Reason), status: node.ErrorStatus}
 	}
 	var out review.OnboardingOut
 	if err := json.Unmarshal(node.Output, &out); err != nil {
@@ -645,6 +645,32 @@ func (s *WorkspaceService) indexDegraded(projectID int64, err error) string {
 	return store.WorkspaceIndexFailed
 }
 
+// onboardingFailure carries the sanitized failure class and upstream status
+// from the DAG node that failed, without retaining its error text.
+type onboardingFailure struct {
+	class  string
+	status int
+}
+
+func (e *onboardingFailure) Error() string     { return "app: onboarding workflow did not complete" }
+func (e *onboardingFailure) ErrorCode() string { return e.class }
+func (e *onboardingFailure) ErrorStatus() int  { return e.status }
+
+func onboardingErrorClass(reason string) string {
+	switch reason {
+	case "auth":
+		return "upstream_auth"
+	case "transient":
+		return "network"
+	case "bad_request":
+		return "config"
+	case "rate_limited", "overloaded", "context_too_long", "timeout", "canceled", "panic":
+		return reason
+	default:
+		return errclass.Internal
+	}
+}
+
 func workspaceErrorClass(err error) string {
 	var upstream *llm.Error
 	if errors.As(err, &upstream) && upstream.Kind != llm.ErrCanceled {
@@ -665,6 +691,8 @@ func workspaceErrorClass(err error) string {
 	}
 	switch class := errclass.Of(err); class {
 	case errclass.Timeout, errclass.Canceled, errclass.Panic, errclass.Internal:
+		return class
+	case "upstream_auth", "rate_limited", "network", "config", "overloaded", "context_too_long":
 		return class
 	default:
 		return errclass.Internal
@@ -733,9 +761,11 @@ func (s *WorkspaceService) saveWorkspace(ctx context.Context, ws store.Workspace
 
 func (s *WorkspaceService) markWorkspaceError(ctx context.Context, projectID int64, cause error) {
 	attrs := []any{"project_id", projectID, "error_class", workspaceErrorClass(cause)}
-	var upstream *llm.Error
-	if errors.As(cause, &upstream) && upstream.Status > 0 {
-		attrs = append(attrs, "upstream_status", upstream.Status)
+	var statused interface{ ErrorStatus() int }
+	if errors.As(cause, &statused) {
+		if status := statused.ErrorStatus(); status > 0 {
+			attrs = append(attrs, "upstream_status", status)
+		}
 	}
 	s.logger.Warn("workspace operation failed", attrs...)
 	state, _ := s.store.GetWorkspace(ctx, projectID)

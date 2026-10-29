@@ -555,7 +555,7 @@ func (e *Engine) runNode(runCtx context.Context, handle *runHandle, wfID, nodeID
 			reason = "timeout"
 		}
 		reason = errorReason(execErr, reason)
-		if err := e.commitNodeFailureUsage(runCtx, wfID, nodeID, view.Attempt, reason, "node execution failed", out.Usage); err != nil {
+		if err := e.commitNodeFailureUsage(runCtx, wfID, nodeID, view.Attempt, reason, errorStatus(execErr), "node execution failed", out.Usage); err != nil {
 			handle.setErr(err)
 		}
 		return
@@ -586,6 +586,20 @@ func (panicError) ErrorClass() string { return "panic" }
 
 // errorReason prefers the error's optional fixed class over the engine's
 // generic reason. An invalid or empty class leaves the fallback unchanged.
+// errorStatus returns a sanitized upstream status for the durable failure
+// event. Values outside the HTTP range are ignored.
+func errorStatus(err error) int {
+	var statused ErrorStatusProvider
+	if !errors.As(err, &statused) {
+		return 0
+	}
+	status := statused.ErrorStatus()
+	if status <= 0 || status > 599 {
+		return 0
+	}
+	return status
+}
+
 func errorReason(err error, fallback string) string {
 	var classified ErrorClassifier
 	if errors.As(err, &classified) {
@@ -666,13 +680,13 @@ func (e *Engine) commitNodeStarted(ctx context.Context, wfID, nodeID string, att
 }
 
 func (e *Engine) commitNodeFailure(ctx context.Context, wfID, nodeID string, attempt int, reason, message string) error {
-	return e.commitNodeFailureUsage(ctx, wfID, nodeID, attempt, reason, message, Usage{})
+	return e.commitNodeFailureUsage(ctx, wfID, nodeID, attempt, reason, 0, message, Usage{})
 }
 
 // commitNodeFailureUsage persists a failed attempt together with any usage the
 // executor already knows. Retries and recovery therefore see the spend even
 // though the node did not complete.
-func (e *Engine) commitNodeFailureUsage(ctx context.Context, wfID, nodeID string, attempt int, reason, message string, usage Usage) error {
+func (e *Engine) commitNodeFailureUsage(ctx context.Context, wfID, nodeID string, attempt int, reason string, status int, message string, usage Usage) error {
 	if ctx.Err() != nil {
 		return nil
 	}
@@ -696,12 +710,13 @@ func (e *Engine) commitNodeFailureUsage(ctx context.Context, wfID, nodeID string
 			return err
 		}
 		ev, err := makeEvent(EventNodeFailed, NodeFailedPayload{
-			NodeID:    nodeID,
-			Attempt:   attempt,
-			Error:     message,
-			ErrorKind: reason,
-			Reason:    reason,
-			Usage:     usage,
+			NodeID:      nodeID,
+			Attempt:     attempt,
+			Error:       message,
+			ErrorKind:   reason,
+			ErrorStatus: status,
+			Reason:      reason,
+			Usage:       usage,
 		}, e.clock())
 		if err != nil {
 			return err

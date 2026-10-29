@@ -92,6 +92,15 @@ func (e *Error) ErrorCode() string {
 	return string(e.Kind)
 }
 
+// ErrorStatus exposes the sanitized upstream HTTP status to DAG failure
+// diagnostics. It never includes response data.
+func (e *Error) ErrorStatus() int {
+	if e == nil {
+		return 0
+	}
+	return e.Status
+}
+
 func canceledError(err error) *Error {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return &Error{Kind: ErrCanceled, Err: context.DeadlineExceeded, cause: err}
