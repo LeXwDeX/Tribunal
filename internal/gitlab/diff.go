@@ -24,9 +24,14 @@ type indexedFile struct {
 
 // DiffIndex maps (path, line, side) to a GitLab discussion position. Only
 // lines inside a hunk are indexed; anything else must degrade to the summary.
+// Paths are canonical per side: an old path answers only SideOld and a new
+// path only SideNew. Cross-side rename aliases are unsafe because omitted
+// diffs disappear before BuildDiffIndex, so an alias could route a comment to
+// a different file. A nil entry records a withheld path and fails closed.
 type DiffIndex struct {
-	version Version
-	files   map[string]*indexedFile
+	version  Version
+	oldFiles map[string]*indexedFile
+	newFiles map[string]*indexedFile
 }
 
 var hunkHeaderRE = regexp.MustCompile(`^@@ -([0-9]+)(,([0-9]+))? \+([0-9]+)(,([0-9]+))? @@`)
@@ -35,31 +40,36 @@ var hunkHeaderRE = regexp.MustCompile(`^@@ -([0-9]+)(,([0-9]+))? \+([0-9]+)(,([0
 // oversized, or malformed diffs are skipped so a bad file cannot produce a
 // position GitLab rejects or a panic.
 func BuildDiffIndex(version Version, diffs []FileDiff) *DiffIndex {
-	index := &DiffIndex{version: version, files: make(map[string]*indexedFile)}
+	index := &DiffIndex{
+		version:  version,
+		oldFiles: make(map[string]*indexedFile),
+		newFiles: make(map[string]*indexedFile),
+	}
 	if !validSHA(version.BaseSHA) || !validSHA(version.StartSHA) || !validSHA(version.HeadSHA) {
 		return index
 	}
 	for _, diff := range diffs {
-		if diff.Collapsed || diff.TooLarge {
+		oldPath, newPath := diffPaths(diff)
+		if validateRepoPath(oldPath) != nil || validateRepoPath(newPath) != nil {
 			continue
 		}
-		indexed, ok := buildFileIndex(diff)
-		if !ok {
-			continue
+		var file *indexedFile
+		if !diff.Collapsed && !diff.TooLarge {
+			file, _ = buildFileIndex(diff)
 		}
-		if _, exists := index.files[indexed.oldPath]; !exists {
-			index.files[indexed.oldPath] = indexed
+		// Duplicate canonical paths keep the first diff, matching the previous
+		// first-wins behavior. A nil entry is a withheld path.
+		if _, exists := index.oldFiles[oldPath]; !exists {
+			index.oldFiles[oldPath] = file
 		}
-		if indexed.newPath != indexed.oldPath {
-			if _, exists := index.files[indexed.newPath]; !exists {
-				index.files[indexed.newPath] = indexed
-			}
+		if _, exists := index.newFiles[newPath]; !exists {
+			index.newFiles[newPath] = file
 		}
 	}
 	return index
 }
 
-func buildFileIndex(diff FileDiff) (*indexedFile, bool) {
+func diffPaths(diff FileDiff) (string, string) {
 	oldPath, newPath := diff.OldPath, diff.NewPath
 	if oldPath == "" {
 		oldPath = newPath
@@ -67,6 +77,11 @@ func buildFileIndex(diff FileDiff) (*indexedFile, bool) {
 	if newPath == "" {
 		newPath = oldPath
 	}
+	return oldPath, newPath
+}
+
+func buildFileIndex(diff FileDiff) (*indexedFile, bool) {
+	oldPath, newPath := diffPaths(diff)
 	if validateRepoPath(oldPath) != nil || validateRepoPath(newPath) != nil || diff.Diff == "" {
 		return nil, false
 	}
@@ -83,6 +98,7 @@ func buildFileIndex(diff FileDiff) (*indexedFile, bool) {
 	lines := strings.Split(diff.Diff, "\n")
 	var (
 		inHunk               bool
+		seenHunk             bool
 		oldLine, newLine     int
 		oldRemain, newRemain int
 	)
@@ -122,6 +138,9 @@ func buildFileIndex(diff FileDiff) (*indexedFile, bool) {
 			}
 			continue
 		}
+		if line == "" || strings.HasPrefix(line, `\`) {
+			continue
+		}
 		if strings.HasPrefix(line, "@@") {
 			match := hunkHeaderRE.FindStringSubmatch(line)
 			if match == nil {
@@ -149,12 +168,35 @@ func buildFileIndex(diff FileDiff) (*indexedFile, bool) {
 			oldLine, newLine = int(oldStart), int(newStart)
 			oldRemain, newRemain = int(oldCount), int(newCount)
 			inHunk = oldRemain > 0 || newRemain > 0
+			seenHunk = true
+			continue
 		}
+		// Metadata and file headers are legal only before the first hunk.
+		// After a hunk completes, +++/--- lines are overlong content and a
+		// single-file FileDiff must not produce a position for them.
+		if !seenHunk && isDiffMetadataLine(line) {
+			continue
+		}
+		return nil, false
 	}
 	if inHunk {
 		return nil, false
 	}
 	return file, true
+}
+
+func isDiffMetadataLine(line string) bool {
+	for _, prefix := range []string{
+		"diff --git ", "index ", "new file mode ", "deleted file mode ",
+		"old mode ", "new mode ", "similarity index ", "dissimilarity index ",
+		"rename from ", "rename to ", "copy from ", "copy to ",
+		"--- ", "+++ ", "Binary files ", "GIT binary patch",
+	} {
+		if strings.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func parseIndexNumber(value string) (int64, bool) {
@@ -194,21 +236,26 @@ func (d *DiffIndex) Locate(path string, line int, side Side) (Position, bool) {
 	if !validSHA(d.version.BaseSHA) || !validSHA(d.version.StartSHA) || !validSHA(d.version.HeadSHA) {
 		return Position{}, false
 	}
-	file := d.files[path]
-	if file == nil {
-		return Position{}, false
-	}
-	var ref diffLine
-	var ok bool
+	var (
+		file *indexedFile
+		ref  diffLine
+		ok   bool
+	)
 	switch side {
 	case SideNew:
-		ref, ok = file.byNew[line]
+		file = d.newFiles[path]
+		if file != nil {
+			ref, ok = file.byNew[line]
+		}
 	case SideOld:
-		ref, ok = file.byOld[line]
+		file = d.oldFiles[path]
+		if file != nil {
+			ref, ok = file.byOld[line]
+		}
 	default:
 		return Position{}, false
 	}
-	if !ok {
+	if file == nil || !ok {
 		return Position{}, false
 	}
 	return Position{
