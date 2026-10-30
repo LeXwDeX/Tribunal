@@ -1294,19 +1294,42 @@ func reviewTaskLayoutFor(kind string, d *Dossier, params reviewNodeParams) (revi
 	diffRunes := utf8.RuneCountInString(diffText)
 	headerRunes := utf8.RuneCountInString(headerText)
 	remaining := MaxTaskRunes - headerRunes
-	if diffRunes > remaining {
-		warnings = appendUnique(warnings, fmt.Sprintf(
-			"review diff exceeds the %d-rune task budget remaining after the task header", remaining))
-		for i := range spans {
-			spans[i].end += headerRunes
-		}
-		return reviewTaskLayout{task: headerText + diffText, spans: spans, warnings: warnings}, true
+	if remaining < 0 {
+		remaining = 0
 	}
+	marker := reviewContextTruncatedMarker
+	markerRunes := utf8.RuneCountInString(marker)
 	contextBudget := remaining - diffRunes
+	diffBudget := remaining
+	if contextRunes > contextBudget {
+		// The context needs a notice, so reserve its full length in the task
+		// that BuildPrompt keeps. The diff yields first, and a clipped diff
+		// drops its coverage span.
+		diffBudget = remaining - markerRunes
+		if diffBudget < 0 {
+			diffBudget = 0
+		}
+	}
+	if diffRunes > diffBudget {
+		warnings = appendUnique(warnings, fmt.Sprintf(
+			"review diff exceeds the %d-rune task budget remaining after the task header; it was clipped to keep the context truncation notice", remaining))
+		diffText = truncateRunes(diffText, diffBudget)
+		diffRunes = utf8.RuneCountInString(diffText)
+		kept := spans[:0]
+		for _, span := range spans {
+			if span.end <= diffRunes {
+				kept = append(kept, span)
+			}
+		}
+		spans = kept
+	}
+	contextBudget = remaining - diffRunes
+	if contextBudget < 0 {
+		contextBudget = 0
+	}
 	contentBudget := contextRunes
 	if contextRunes > contextBudget {
-		marker := reviewContextTruncatedMarker
-		contentBudget = contextBudget - utf8.RuneCountInString(marker)
+		contentBudget = contextBudget - markerRunes
 		if contentBudget < 0 {
 			contentBudget = 0
 		}

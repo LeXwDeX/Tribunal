@@ -10,6 +10,7 @@ import (
 
 	"github.com/LeXwDeX/tribunal/internal/agent"
 	"github.com/LeXwDeX/tribunal/pkg/dag"
+	"github.com/LeXwDeX/tribunal/prompts"
 )
 
 const promptBudgetDiff = "@@ -1,2 +1,2 @@\n package main\n-var audit = 0\n+var audit = 1\n"
@@ -593,6 +594,111 @@ func TestSecondSynthesisBoundsLongExtensionCoverageGap(t *testing.T) {
 	}
 }
 
+func promptBudgetContextText(d *Dossier) string {
+	var b strings.Builder
+	b.WriteString(summaryDescriptionForPrompt(d))
+	b.WriteString(summaryMetaForPrompt(d))
+	b.WriteString(summaryPipelineForPrompt(d))
+	b.WriteString(summaryIssuesForPrompt(d))
+	return b.String()
+}
+
+// TestPromptBudgetReservesContextNoticeAtTaskEdge covers header plus diff
+// leaving no room or less than the marker's length. The final BuildPrompt user
+// text must still carry the complete notice, and a clipped diff must lose its
+// coverage span instead of being reported as fully reviewed.
+func TestPromptBudgetReservesContextNoticeAtTaskEdge(t *testing.T) {
+	bundle, err := prompts.Load("")
+	if err != nil {
+		t.Fatalf("load prompts: %v", err)
+	}
+	diff := "@@ -1 +1 @@\n-a\n+b\n"
+	for _, kind := range []string{KindCodeReview, KindReviewStd, KindReviewInt} {
+		role, ok := roleForKind(kind)
+		if !ok {
+			t.Fatalf("no role for %s", kind)
+		}
+		for _, gap := range []struct {
+			name  string
+			runes int
+		}{
+			{"zero remaining", 0},
+			{"below marker", 5},
+		} {
+			t.Run(kind+"/"+gap.name, func(t *testing.T) {
+				d := promptBudgetDossier(t, "short description", diff, "a.go", "b.go")
+				baseParams := promptBudgetParams(kind, []string{"a.go", "b.go"}, "focus")
+				probe, ok := reviewTaskLayoutFor(kind, d, baseParams)
+				if !ok {
+					t.Fatalf("no task layout for %s", kind)
+				}
+				probeDiff, _ := renderDiffsWithSpans(d, baseParams.Files)
+				headerRunes := utf8.RuneCountInString(probe.task) -
+					utf8.RuneCountInString(probeDiff) -
+					utf8.RuneCountInString(promptBudgetContextText(d))
+				if headerRunes <= 0 {
+					t.Fatalf("probe header length = %d", headerRunes)
+				}
+				baseDiff, _ := renderDiffsWithSpans(d, baseParams.Files)
+				padding := MaxTaskRunes - gap.runes - headerRunes - utf8.RuneCountInString(baseDiff)
+				const dummy = "m"
+				dummyBlock := fmt.Sprintf("### %s\n\n（该文件不在材料包中）\n\n", dummy)
+				overhead := utf8.RuneCountInString(dummyBlock) - 1
+				if padding <= overhead {
+					t.Fatalf("padding %d does not fit a missing-file header", padding)
+				}
+				files := []string{"a.go", strings.Repeat(dummy, padding-overhead), "b.go"}
+				params := promptBudgetParams(kind, files, "focus")
+				diffText, _ := renderDiffsWithSpans(d, files)
+				if got, want := utf8.RuneCountInString(diffText), MaxTaskRunes-gap.runes-headerRunes; got != want {
+					t.Fatalf("test diff section = %d runes, want %d", got, want)
+				}
+				layout, ok := reviewTaskLayoutFor(kind, d, params)
+				if !ok {
+					t.Fatalf("no task layout for %s", kind)
+				}
+				built, err := BuildPrompt(PromptInput{
+					Bundle: bundle, Role: role, Task: layout.task, Nonce: promptCoverageNonce,
+				})
+				if err != nil {
+					t.Fatalf("build prompt: %v", err)
+				}
+				if !strings.Contains(built.User, reviewContextTruncatedMarker) {
+					t.Fatalf("built prompt lost the complete context truncation notice; task=%d runes",
+						utf8.RuneCountInString(layout.task))
+				}
+				if runes := utf8.RuneCountInString(layout.task); runes > MaxTaskRunes {
+					t.Fatalf("task = %d runes, limit %d", runes, MaxTaskRunes)
+				}
+				var kept []string
+				for _, span := range layout.spans {
+					kept = append(kept, span.path)
+				}
+				if strings.Join(kept, ",") != "a.go" {
+					t.Fatalf("retained diff spans = %v, want only the unclipped a.go", kept)
+				}
+				if !strings.Contains(built.User, diff) {
+					t.Fatal("built prompt lost the unclipped a.go diff")
+				}
+				if !warningsContain(layout.warnings, "review context was truncated") {
+					t.Fatalf("warnings do not disclose the omitted context: %v", layout.warnings)
+				}
+				if !warningsContain(layout.warnings, "MR description was not included") {
+					t.Fatalf("warnings do not disclose the omitted description: %v", layout.warnings)
+				}
+				if !warningsContain(layout.warnings, "review diff exceeds") {
+					t.Fatalf("warnings do not disclose the clipped diff: %v", layout.warnings)
+				}
+				executor := newTestExecutor(t, ExecutorDeps{Dossier: d})
+				gaps, _ := executor.builtPromptDiffGaps(d, kind, params, nil)
+				if !strings.Contains(strings.Join(gaps, "\n"), "b.go") {
+					t.Fatalf("clipped b.go still counts as covered: %v", gaps)
+				}
+			})
+		}
+	}
+}
+
 func TestPromptBudgetLongPathHeadersCannotExceedTaskLimit(t *testing.T) {
 	const fileCount = MaxFindings
 	shortDiff := "@@ -1 +1 @@\n-a\n+b\n"
@@ -625,6 +731,9 @@ func TestPromptBudgetLongPathHeadersCannotExceedTaskLimit(t *testing.T) {
 	params := promptBudgetParams(KindReviewStd, files, "focus")
 	run := runPromptBudgetReview(t, KindReviewStd, d, params)
 
+	if !strings.Contains(run.prompt, reviewContextTruncatedMarker) {
+		t.Fatal("prompt drops the context truncation notice when the diff alone exceeds the budget")
+	}
 	if count := strings.Count(run.prompt, fakeBlock); count != 1 {
 		t.Fatalf("prompt contains %d copies of the tail block, want only the early copy", count)
 	}
@@ -633,6 +742,15 @@ func TestPromptBudgetLongPathHeadersCannotExceedTaskLimit(t *testing.T) {
 		t.Fatal("test setup lost the fake tail block")
 	}
 	gathered := promptBudgetGather(t, d, run.wf)
+	if !warningsContain(gathered.Warnings, "review diff exceeds") {
+		t.Fatalf("warnings do not disclose the clipped diff: %v", gathered.Warnings)
+	}
+	if !warningsContain(gathered.Warnings, "review context was truncated") {
+		t.Fatalf("warnings do not disclose the omitted context: %v", gathered.Warnings)
+	}
+	if !warningsContain(gathered.Warnings, "MR description was not included") {
+		t.Fatalf("warnings do not disclose the omitted description: %v", gathered.Warnings)
+	}
 	signal, ok := unresolvedOfKind(gathered.Unresolved, UnresolvedEvidence)
 	if !ok {
 		t.Fatalf("long path headers did not produce a coverage gap: %+v", gathered.Unresolved)
