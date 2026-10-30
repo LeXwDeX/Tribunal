@@ -1,0 +1,134 @@
+package sqlite
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/LeXwDeX/tribunal/internal/store"
+)
+
+func TestAuditReviewGenerationAttemptFence(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		oldAttempts      int
+		oldState         string
+		wantNewAttempts  int
+		wantRunningWrite bool
+	}{
+		{name: "completed_attempt_1", oldAttempts: 1, oldState: "complete", wantNewAttempts: 1, wantRunningWrite: true},
+		{name: "completed_attempt_2", oldAttempts: 2, oldState: "complete", wantNewAttempts: 1},
+		{name: "running_attempt_2_successor", oldAttempts: 2, oldState: "running", wantNewAttempts: 1},
+		{name: "queued_attempt_2_replacement", oldAttempts: 2, oldState: "queued", wantNewAttempts: 3, wantRunningWrite: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			s := openTestStore(t, newFakeClock())
+			mustProject(t, s, 42)
+			first, err := s.EnqueueReviewLatest(ctx, store.ReviewCommand{
+				ProjectID: 42, MRIID: 7, HeadSHA: reviewHead("a"),
+				Payload: json.RawMessage(`{"trigger":"mr_open","profile":"default"}`),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeStatus := func(job *store.Job, state string) (bool, error) {
+				t.Helper()
+				var p struct {
+					ProjectID  int64  `json:"project_id"`
+					MRIID      int64  `json:"mr_iid"`
+					Generation int64  `json:"generation"`
+					HeadSHA    string `json:"head_sha"`
+					Profile    string `json:"profile"`
+				}
+				if err := json.Unmarshal(job.Payload, &p); err != nil {
+					t.Fatal(err)
+				}
+				return s.SetReviewStatus(ctx, store.ReviewStatusGoal{
+					ProjectID: p.ProjectID, MRIID: p.MRIID, Generation: p.Generation,
+					Attempt: job.Attempts, HeadSHA: p.HeadSHA, Profile: p.Profile, State: state,
+				})
+			}
+			var old *store.Job
+			for attempt := 1; attempt <= tc.oldAttempts; attempt++ {
+				old, err = s.Claim(ctx, "audit-old", []string{reviewRunKind}, time.Hour)
+				if err != nil || old == nil || old.ID != first.JobID || old.Attempts != attempt {
+					t.Fatalf("old claim %d: %+v, %v", attempt, old, err)
+				}
+				if written, err := writeStatus(old, store.ReviewStatusRunning); err != nil || !written {
+					t.Fatalf("old running status %d: written=%t err=%v", attempt, written, err)
+				}
+				if attempt < tc.oldAttempts {
+					if err := s.Fail(ctx, *old, errors.New("synthetic retryable error"), nil); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if tc.oldState == "complete" {
+				if written, err := writeStatus(old, store.ReviewStatusPass); err != nil || !written {
+					t.Fatalf("old terminal status: written=%t err=%v", written, err)
+				}
+				if err := s.Complete(ctx, *old); err != nil {
+					t.Fatal(err)
+				}
+			} else if tc.oldState == "queued" {
+				if err := s.Fail(ctx, *old, errors.New("synthetic retryable error"), nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			second, err := s.EnqueueReviewLatest(ctx, store.ReviewCommand{
+				ProjectID: 42, MRIID: 7, HeadSHA: reviewHead("b"),
+				Payload: json.RawMessage(`{"trigger":"mr_update","profile":"default"}`),
+			})
+			if err != nil || second.Generation != first.Generation+1 {
+				t.Fatalf("enqueue successor: %+v, %v", second, err)
+			}
+			if (second.JobID == first.JobID) != (tc.oldState == "queued") {
+				t.Fatalf("unexpected successor job identity for old state %s", tc.oldState)
+			}
+			queued := mustReviewStatus(t, s, 42, 7)
+			if queued.Generation != second.Generation || queued.State != store.ReviewStatusQueued || queued.Attempt != tc.oldAttempts {
+				t.Fatalf("new generation queued status: %+v", queued)
+			}
+			if tc.oldState == "running" {
+				blocked, err := s.Claim(ctx, "audit-new", []string{reviewRunKind}, time.Hour)
+				if err != nil || blocked != nil {
+					t.Fatalf("successor while prior job running: %+v, %v", blocked, err)
+				}
+				if err := s.Complete(ctx, *old); err != nil {
+					t.Fatal(err)
+				}
+			}
+			newJob, err := s.Claim(ctx, "audit-new", []string{reviewRunKind}, time.Hour)
+			if err != nil || newJob == nil || newJob.ID != second.JobID || newJob.Attempts != tc.wantNewAttempts {
+				t.Fatalf("successor claim: %+v, %v", newJob, err)
+			}
+			written, err := writeStatus(newJob, store.ReviewStatusRunning)
+			if err != nil || written != tc.wantRunningWrite {
+				t.Fatalf("successor running: written=%t err=%v", written, err)
+			}
+			current := mustReviewStatus(t, s, 42, 7)
+			if !tc.wantRunningWrite {
+				if current.State != store.ReviewStatusQueued || current.Attempt != tc.oldAttempts || current.Version != queued.Version {
+					t.Fatalf("rejected running changed status: %+v", current)
+				}
+				terminal, err := writeStatus(newJob, store.ReviewStatusPass)
+				if err != nil || terminal {
+					t.Fatalf("successor terminal: written=%t err=%v", terminal, err)
+				}
+				current = mustReviewStatus(t, s, 42, 7)
+				if current.State != store.ReviewStatusQueued || current.Version != queued.Version {
+					t.Fatalf("rejected terminal changed status: %+v", current)
+				}
+				t.Logf("old attempt=%d new job attempt=%d queued attempt=%d running written=%t terminal written=%t final=%s", tc.oldAttempts, newJob.Attempts, queued.Attempt, written, terminal, current.State)
+			} else {
+				if current.State != store.ReviewStatusRunning || current.Attempt != newJob.Attempts {
+					t.Fatalf("accepted running status: %+v", current)
+				}
+				t.Logf("old attempt=%d new job attempt=%d queued attempt=%d running written=%t final=%s", tc.oldAttempts, newJob.Attempts, queued.Attempt, written, current.State)
+			}
+		})
+	}
+}

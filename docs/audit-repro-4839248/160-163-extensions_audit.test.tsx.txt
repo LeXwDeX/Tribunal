@@ -1,0 +1,147 @@
+import React from 'react'
+import { afterEach, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { QueryClientProvider } from '@tanstack/react-query'
+import { BrowserRouter } from 'react-router-dom'
+import { App, createQueryClient } from '../src/app'
+import { setCsrfToken } from '../src/api/client'
+
+const projects = [
+  { id: 42, path_with_namespace: 'audit/project-a', enabled: true, access: 'manage', default_branch: 'main', profile: 'default', settings: {} },
+  { id: 43, path_with_namespace: 'audit/project-b', enabled: true, access: 'manage', default_branch: 'main', profile: 'default', settings: {} },
+]
+const skill = (name: string) => ({ id: `skill-${name}`, name, description: 'synthetic', scope: 'project', project_id: 42, enabled: true })
+const binding = (block: string) => ({ scope: 'project', project_id: 42, block, mcp_tools: [] as string[], skills: [] as string[] })
+const originalReview = { ...binding('review'), mcp_tools: ['mcp__legacy__scan'], skills: ['legacy-skill'] }
+const firstPage = Array.from({ length: 50 }, (_, i) => binding(`a${String(i).padStart(2, '0')}`))
+const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
+
+function setup(mode: 'route' | 'pagination') {
+  let review = structuredClone(originalReview)
+  const requests: Array<{ method: string; path: string; query: Record<string, string>; body?: any }> = []
+  const unknown: string[] = []
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(String(input), 'http://localhost')
+    const method = (init?.method || 'GET').toUpperCase()
+    const body = init?.body ? JSON.parse(String(init.body)) : undefined
+    requests.push({ method, path: url.pathname, query: Object.fromEntries(url.searchParams), ...(body ? { body } : {}) })
+    if (url.origin !== 'http://localhost') throw new Error(`external request refused: ${url.origin}`)
+    if (method === 'GET' && url.pathname === '/api/v1/me') return json({ id: 1, username: 'audit', name: 'Audit', role: 'admin', csrf_token: 'synthetic-csrf' })
+    if (method === 'GET' && url.pathname === '/auth/status') return json({ oauth_enabled: false })
+    if (method === 'GET' && url.pathname === '/api/v1/projects') return json({ projects, next_cursor: '' })
+    if (method === 'GET' && /^\/api\/v1\/projects\/(42|43)$/.test(url.pathname)) return json(projects.find((p) => p.id === Number(url.pathname.split('/').pop())))
+    if (method === 'GET' && url.pathname === '/api/v1/reviews') return json({ reviews: [], next_cursor: '' })
+    if (method === 'GET' && url.pathname === '/api/v1/stats') return json({})
+    if (method === 'GET' && url.pathname === '/api/v1/mcp-servers') return json({ servers: [], next_cursor: '' })
+    if (method === 'GET' && url.pathname === '/api/v1/skills') return json({ skills: mode === 'route' ? [] : [skill('legacy-skill'), skill('new-skill')], next_cursor: '' })
+    if (method === 'GET' && url.pathname === '/api/v1/block-bindings') {
+      if (mode === 'route') return json({ bindings: [], next_cursor: '' })
+      if (url.searchParams.get('scope') !== 'project' || url.searchParams.get('project_id') !== '42') throw new Error('unexpected binding scope')
+      if (url.searchParams.get('cursor') === 'synthetic-page-2') return json({ bindings: [review], next_cursor: '' })
+      if (url.searchParams.has('cursor')) throw new Error('unexpected binding cursor')
+      return json({ bindings: firstPage, next_cursor: 'synthetic-page-2' })
+    }
+    if (method === 'POST' && url.pathname === '/api/v1/mcp-servers') return json({ id: 'synthetic-created', ...body, enabled: true }, 201)
+    if (method === 'PUT' && url.pathname === '/api/v1/block-bindings/review' && mode === 'pagination') {
+      review = { block: 'review', ...body }
+      return json(review)
+    }
+    unknown.push(`${method} ${url.pathname}`)
+    return json({ error: { code: 'unmocked', message: 'Unexpected mock API request' } }, 500)
+  }))
+  const queryClient = createQueryClient()
+  return { requests, unknown, queryClient, getReview: () => review }
+}
+
+function launch(state: ReturnType<typeof setup>, route: string) {
+  window.history.replaceState(null, '', route)
+  return render(<QueryClientProvider client={state.queryClient}><BrowserRouter><App /></BrowserRouter></QueryClientProvider>)
+}
+
+afterEach(() => {
+  cleanup()
+  vi.unstubAllGlobals()
+  setCsrfToken(null)
+})
+
+it('follows UI routes, fills A, then uses history to jump to cached B with the same dialog', async () => {
+  const state = setup('route')
+  const user = userEvent.setup()
+  launch(state, '/projects/43/extensions')
+  await screen.findByRole('heading', { name: 'audit/project-b' })
+  await screen.findByRole('button', { name: '新增 MCP 服务器' })
+  expect(state.queryClient.getQueryData(['project', 43])).toMatchObject({ id: 43 })
+  await user.click(document.querySelector('main a[href="/projects"]') as HTMLElement)
+  await user.click(await screen.findByRole('link', { name: 'audit/project-a' }))
+  await screen.findByRole('heading', { name: 'audit/project-a' })
+  await user.click(screen.getByRole('tab', { name: '扩展绑定' }))
+  await user.click(await screen.findByRole('button', { name: '新增 MCP 服务器' }))
+  const dialog = await screen.findByRole('dialog', { name: '新增 MCP 服务器' })
+  await user.type(within(dialog).getByLabelText('名称'), 'audit-from-a')
+  fireEvent.change(within(dialog).getByLabelText('配置 JSON'), { target: { value: '{"command":"/bin/true","args":["synthetic"]}' } })
+  expect(window.location.pathname).toBe('/projects/42/extensions')
+  expect(state.queryClient.getQueryData(['project', 42])).toMatchObject({ id: 42 })
+  const readsBefore = state.requests.filter((r) => r.method === 'GET' && r.path === '/api/v1/projects/43').length
+  window.history.go(-3)
+  await waitFor(() => expect(window.location.pathname).toBe('/projects/43/extensions'))
+  await waitFor(() => expect(document.querySelector('main h1')).toHaveTextContent('audit/project-b'))
+  const dialogAfter = screen.getByRole('dialog', { name: '新增 MCP 服务器' })
+  expect(within(dialogAfter).getByLabelText('名称')).toHaveValue('audit-from-a')
+  expect(within(dialogAfter).getByLabelText('配置 JSON')).toHaveValue('{"command":"/bin/true","args":["synthetic"]}')
+  const readsAfter = state.requests.filter((r) => r.method === 'GET' && r.path === '/api/v1/projects/43').length
+  expect(readsBefore).toBe(1)
+  expect(readsAfter).toBe(readsBefore)
+  await user.click(within(dialogAfter).getByRole('button', { name: '添加' }))
+  await waitFor(() => expect(state.requests.some((r) => r.method === 'POST' && r.path === '/api/v1/mcp-servers')).toBe(true))
+  const post = state.requests.find((r) => r.method === 'POST' && r.path === '/api/v1/mcp-servers')
+  expect(post?.body).toEqual({ scope: 'project', project_id: 43, name: 'audit-from-a', config: { command: '/bin/true', args: ['synthetic'] } })
+  expect(state.unknown).toEqual([])
+  console.log('ROUTE_FLOW', JSON.stringify({ visits: ['/projects/43/extensions', '/projects', '/projects/42', '/projects/42/extensions'], historyGo: -3, finalPath: window.location.pathname, projectBReads: { before: readsBefore, after: readsAfter }, dialogName: 'audit-from-a', post }))
+})
+
+it('a single history back from the A extension tab unmounts the dialog', async () => {
+  const state = setup('route')
+  const user = userEvent.setup()
+  launch(state, '/projects/43/extensions')
+  await screen.findByRole('button', { name: '新增 MCP 服务器' })
+  await user.click(document.querySelector('main a[href="/projects"]') as HTMLElement)
+  await user.click(await screen.findByRole('link', { name: 'audit/project-a' }))
+  await screen.findByRole('heading', { name: 'audit/project-a' })
+  await user.click(screen.getByRole('tab', { name: '扩展绑定' }))
+  await user.click(await screen.findByRole('button', { name: '新增 MCP 服务器' }))
+  expect(screen.getByRole('dialog', { name: '新增 MCP 服务器' })).toBeInTheDocument()
+  window.history.back()
+  await waitFor(() => expect(window.location.pathname).toBe('/projects/42'))
+  await waitFor(() => expect(screen.queryByRole('dialog', { name: '新增 MCP 服务器' })).not.toBeInTheDocument())
+  expect(state.requests.filter((r) => r.method === 'POST')).toEqual([])
+  console.log('ROUTE_ONE_STEP_CONTROL', JSON.stringify({ finalPath: window.location.pathname, dialogOpen: false, posts: 0 }))
+})
+
+it.each([false, true])('saves review with second page loaded = %s', async (loadSecond) => {
+  const state = setup('pagination')
+  const user = userEvent.setup()
+  launch(state, '/projects/42/extensions')
+  await screen.findByRole('heading', { name: 'audit/project-a' })
+  await user.click(await screen.findByRole('tab', { name: '块绑定' }))
+  await screen.findByRole('button', { name: '加载更多绑定' })
+  const oldSkill = await screen.findByRole('button', { name: 'review 使用 Skill legacy-skill' })
+  if (loadSecond) {
+    await user.click(screen.getByRole('button', { name: '加载更多绑定' }))
+    await waitFor(() => expect(oldSkill).toHaveAttribute('aria-pressed', 'true'))
+  } else {
+    expect(oldSkill).toHaveAttribute('aria-pressed', 'false')
+    expect(screen.queryByRole('button', { name: 'review 使用 mcp__legacy__scan' })).not.toBeInTheDocument()
+  }
+  const reads = state.requests.filter((r) => r.method === 'GET' && r.path === '/api/v1/block-bindings').map((r) => r.query.cursor || null)
+  expect(reads).toEqual(loadSecond ? [null, 'synthetic-page-2'] : [null])
+  await user.click(screen.getByRole('button', { name: 'review 使用 Skill new-skill' }))
+  await user.click(screen.getByRole('button', { name: '保存绑定' }))
+  await waitFor(() => expect(state.requests.some((r) => r.method === 'PUT' && r.path === '/api/v1/block-bindings/review')).toBe(true))
+  const put = state.requests.find((r) => r.method === 'PUT' && r.path === '/api/v1/block-bindings/review')
+  expect(put?.body).toEqual(loadSecond
+    ? { scope: 'project', project_id: 42, mcp_tools: ['mcp__legacy__scan'], skills: ['legacy-skill', 'new-skill'] }
+    : { scope: 'project', project_id: 42, mcp_tools: [], skills: ['new-skill'] })
+  expect(state.unknown).toEqual([])
+  console.log('PAGINATION_FLOW', JSON.stringify({ loadSecond, firstPageCount: firstPage.length, readsBeforeSave: reads, originalReview, put, mockReviewAfterPut: state.getReview() }))
+})

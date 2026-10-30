@@ -1,0 +1,240 @@
+package review
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"sync/atomic"
+	"testing"
+
+	"github.com/LeXwDeX/tribunal/internal/agent"
+	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/llm"
+	"github.com/LeXwDeX/tribunal/pkg/dag"
+)
+
+const auditAnthropicFirst = `{"id":"audit1","type":"message","role":"assistant","model":"fake","content":[{"type":"text","text":"draft"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":3,"cache_read_input_tokens":2,"output_tokens_details":{"thinking_tokens":4}}}`
+const auditAnthropicSecond = `{"id":"audit2","type":"message","role":"assistant","model":"fake","content":[{"type":"tool_use","id":"call2","name":"submit_result","input":{"overview":"audit","architecture":"audit","modules":[],"conventions":[],"build_and_test":[],"risk_hotspots":[],"review_focus":[]}}],"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}`
+const auditChat = `{"id":"audit-chat","object":"chat.completion","model":"fake","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":15,"completion_tokens":5,"total_tokens":20,"prompt_tokens_details":{"cached_tokens":2,"cache_write_tokens":3},"completion_tokens_details":{"reasoning_tokens":4}}}`
+const auditResponses = `{"id":"audit-responses","object":"response","status":"completed","model":"fake","output":[{"type":"message","id":"m1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok","annotations":[]}]}],"usage":{"input_tokens":15,"output_tokens":5,"total_tokens":20,"input_tokens_details":{"cached_tokens":2,"cache_write_tokens":3},"output_tokens_details":{"reasoning_tokens":4}}}`
+
+type auditTransport struct {
+	bodies []string
+	calls  atomic.Int64
+}
+
+func (tr *auditTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Host != "audit.invalid" {
+		return nil, fmt.Errorf("unexpected host %q", req.URL.Host)
+	}
+	call := int(tr.calls.Add(1))
+	if call > len(tr.bodies) {
+		return nil, errors.New("unexpected extra request")
+	}
+	return &http.Response{
+		StatusCode: 200,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(tr.bodies[call-1])),
+		Request:    req,
+	}, nil
+}
+
+func auditClient(t *testing.T, protocol string, bodies ...string) (llm.Client, *auditTransport) {
+	t.Helper()
+	t.Setenv("AUDIT_ONLY_KEY", "fake-key")
+	transport := &auditTransport{bodies: bodies}
+	registry, err := llm.NewRegistry(map[string]config.ProviderConfig{
+		"fake": {Protocol: protocol, BaseURL: "https://audit.invalid", Model: "fake", APIKeyEnv: "AUDIT_ONLY_KEY", MaxTokens: 128},
+	}, llm.WithHTTPClient(&http.Client{Transport: transport}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := registry.Client("fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client, transport
+}
+
+func auditRequest() *llm.Request {
+	return &llm.Request{Messages: []llm.Message{{Role: llm.RoleUser, Parts: []llm.Part{{Type: llm.PartText, Text: "audit"}}}}}
+}
+
+type auditNormalizedClient struct{ llm.Client }
+
+func (c auditNormalizedClient) Generate(ctx context.Context, req *llm.Request) (*llm.Response, error) {
+	response, err := c.Client.Generate(ctx, req)
+	if response != nil {
+		copy := *response
+		copy.Usage.InputTokens += copy.Usage.CacheReadTokens + copy.Usage.CacheWriteTokens
+		return &copy, err
+	}
+	return response, err
+}
+
+func TestAuditAdapterComparison(t *testing.T) {
+	for _, tc := range []struct {
+		protocol string
+		body     string
+		input    int64
+	}{
+		{"anthropic", auditAnthropicFirst, 10},
+		{"openai-chat", auditChat, 15},
+		{"openai-responses", auditResponses, 15},
+	} {
+		t.Run(tc.protocol, func(t *testing.T) {
+			client, transport := auditClient(t, tc.protocol, tc.body)
+			resp, err := client.Generate(context.Background(), auditRequest())
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := (llm.Usage{InputTokens: tc.input, OutputTokens: 5, CacheReadTokens: 2, CacheWriteTokens: 3, ReasoningTokens: 4})
+			if resp.Usage != want || transport.calls.Load() != 1 {
+				t.Fatalf("usage=%+v requests=%d, want %+v and 1 request", resp.Usage, transport.calls.Load(), want)
+			}
+			t.Logf("synthetic %s: usage=%+v, budget input+output=%d", tc.protocol, resp.Usage, resp.Usage.InputTokens+resp.Usage.OutputTokens)
+		})
+	}
+}
+
+func TestAuditAnthropicAgentBudget(t *testing.T) {
+	for _, normalized := range []bool{false, true} {
+		name := "current"
+		if normalized {
+			name = "test_only_normalized_input"
+		}
+		t.Run(name, func(t *testing.T) {
+			client, transport := auditClient(t, "anthropic", auditAnthropicFirst, auditAnthropicSecond)
+			if normalized {
+				client = auditNormalizedClient{client}
+			}
+			wf := dag.WorkflowView{Spec: dag.GraphSpec{Budget: dag.Budget{MaxTokens: 18}}}
+			executor := newTestExecutor(t, ExecutorDeps{Snapshot: func(context.Context, string) (dag.WorkflowView, error) { return wf, nil }})
+			hook := executor.budgetHook("audit")
+			var seen []llm.Usage
+			result, err := agent.Run(context.Background(), agent.RunSpec{
+				Client: client, Prompt: "audit", MaxTurns: 2,
+				Submit: agent.SubmitSpec{Decode: func(raw json.RawMessage) (any, error) { return string(raw), nil }},
+				BeforeTurn: func(ctx context.Context, usage llm.Usage) error {
+					seen = append(seen, usage)
+					return hook(ctx, usage)
+				},
+			})
+			if len(seen) != 2 || result == nil {
+				t.Fatalf("seen=%+v result=%+v err=%v", seen, result, err)
+			}
+			if normalized {
+				if !errors.Is(err, errTokenBudgetExhausted) || transport.calls.Load() != 1 || seen[1].InputTokens+seen[1].OutputTokens != 20 || result.Turns != 1 {
+					t.Fatalf("err=%v requests=%d seen=%+v result=%+v", err, transport.calls.Load(), seen, result)
+				}
+			} else if err != nil || transport.calls.Load() != 2 || seen[1].InputTokens+seen[1].OutputTokens != 15 || result.Turns != 2 {
+				t.Fatalf("err=%v requests=%d seen=%+v result=%+v", err, transport.calls.Load(), seen, result)
+			}
+			t.Logf("limit=18 synthetic first usage=%+v checked=%d requests=%d turns=%d err=%v", seen[1], seen[1].InputTokens+seen[1].OutputTokens, transport.calls.Load(), result.Turns, err)
+		})
+	}
+}
+
+type auditDAGExecutor struct {
+	client llm.Client
+	review *Executor
+}
+
+type auditClientProvider struct{ client llm.Client }
+
+func (p auditClientProvider) Client(name string) (llm.Client, error) {
+	if name != "fake" {
+		return nil, fmt.Errorf("unexpected provider %q", name)
+	}
+	return p.client, nil
+}
+
+func TestAuditAnthropicReviewExecutorBudget(t *testing.T) {
+	for _, normalized := range []bool{false, true} {
+		name := "current"
+		if normalized {
+			name = "test_only_normalized_input"
+		}
+		t.Run(name, func(t *testing.T) {
+			client, transport := auditClient(t, "anthropic", auditAnthropicFirst, auditAnthropicSecond)
+			if normalized {
+				client = auditNormalizedClient{client}
+			}
+			wf := dag.WorkflowView{Spec: dag.GraphSpec{Budget: dag.Budget{MaxTokens: 18}}}
+			executor := newTestExecutor(t, ExecutorDeps{
+				Profile: onboardingProfile(),
+				Clients: auditClientProvider{client: client},
+				Snapshot: func(context.Context, string) (dag.WorkflowView, error) { return wf, nil },
+			})
+			params, err := json.Marshal(onboardingParams{Provider: "fake"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, err := executor.Execute(context.Background(), dag.NodeInput{
+				WorkflowID: "audit", Node: dag.NodeSpec{ID: "onboarding", Kind: KindOnboarding, Params: params},
+			})
+			if normalized {
+				if !errors.Is(err, errTokenBudgetExhausted) || transport.calls.Load() != 1 || out.Usage.InputTokens+out.Usage.OutputTokens != 20 {
+					t.Fatalf("err=%v requests=%d output=%+v", err, transport.calls.Load(), out)
+				}
+			} else if err != nil || transport.calls.Load() != 2 || out.Usage.InputTokens != 11 || out.Usage.OutputTokens != 6 || out.Usage.CacheReadTokens != 2 || out.Usage.CacheWriteTokens != 3 {
+				t.Fatalf("err=%v requests=%d output=%+v", err, transport.calls.Load(), out)
+			}
+			t.Logf("limit=18 review executor requests=%d output usage=%+v err=%v", transport.calls.Load(), out.Usage, err)
+		})
+	}
+}
+
+func (e auditDAGExecutor) Execute(ctx context.Context, in dag.NodeInput) (dag.NodeOutput, error) {
+	resp, err := e.client.Generate(ctx, auditRequest())
+	if err != nil {
+		return dag.NodeOutput{}, err
+	}
+	return dag.NodeOutput{Data: json.RawMessage(`{}`), Usage: e.review.dagUsage("fake", resp.Usage)}, nil
+}
+
+func TestAuditAnthropicDAGSchedulerBudget(t *testing.T) {
+	for _, normalized := range []bool{false, true} {
+		name := "current"
+		if normalized {
+			name = "test_only_normalized_input"
+		}
+		t.Run(name, func(t *testing.T) {
+			client, transport := auditClient(t, "anthropic", auditAnthropicFirst, auditAnthropicSecond)
+			if normalized {
+				client = auditNormalizedClient{client}
+			}
+			executor := newTestExecutor(t, ExecutorDeps{})
+			engine := dag.NewEngine(dag.NewMemoryEventStore(), auditDAGExecutor{client: client, review: executor}, nil, dag.Options{MaxConcurrentNodes: 1})
+			workflowID, err := engine.Create(context.Background(), dag.GraphSpec{
+				Nodes: []dag.NodeSpec{
+					{ID: "a", Kind: "audit", Required: true},
+					{ID: "b", Kind: "audit", Required: true, DependsOn: []string{"a"}},
+				}, Budget: dag.Budget{MaxTokens: 18},
+			}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := engine.Run(context.Background(), workflowID); err != nil {
+				t.Fatal(err)
+			}
+			wf, err := engine.Snapshot(context.Background(), workflowID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			a, b := wf.Nodes["a"], wf.Nodes["b"]
+			if normalized {
+				if a.Usage.InputTokens+a.Usage.OutputTokens != 20 || transport.calls.Load() != 1 || b.Status != dag.NodeFailed || b.Reason != "budget_exhausted" {
+					t.Fatalf("a=%+v b=%+v requests=%d", a, b, transport.calls.Load())
+				}
+			} else if a.Usage.InputTokens+a.Usage.OutputTokens != 15 || transport.calls.Load() != 2 || b.Status != dag.NodeCompleted {
+				t.Fatalf("a=%+v b=%+v requests=%d", a, b, transport.calls.Load())
+			}
+			t.Logf("limit=18 first node usage=%+v checked=%d second_node=%s reason=%s requests=%d", a.Usage, a.Usage.InputTokens+a.Usage.OutputTokens, b.Status, b.Reason, transport.calls.Load())
+		})
+	}
+}

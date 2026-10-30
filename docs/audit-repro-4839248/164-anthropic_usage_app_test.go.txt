@@ -1,0 +1,29 @@
+package app
+
+import (
+	"testing"
+
+	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/llm"
+)
+
+func TestAuditCostUsesInputAndOutputOnly(t *testing.T) {
+	cost := newCostFunc(map[string]config.ProviderConfig{
+		"fake": {Price: &config.PriceConfig{InputPerMTok: 2, OutputPerMTok: 4}},
+	})
+	usage := llm.Usage{InputTokens: 10, OutputTokens: 5, CacheReadTokens: 2, CacheWriteTokens: 3, ReasoningTokens: 4}
+	current := cost("fake", usage)
+	withoutDetails := usage
+	withoutDetails.CacheReadTokens = 0
+	withoutDetails.CacheWriteTokens = 0
+	withoutDetails.ReasoningTokens = 0
+	if current != 40 || cost("fake", withoutDetails) != 40 {
+		t.Fatalf("current=%d without details=%d", current, cost("fake", withoutDetails))
+	}
+	flatRateCounterfactual := usage
+	flatRateCounterfactual.InputTokens += usage.CacheReadTokens + usage.CacheWriteTokens
+	if got := cost("fake", flatRateCounterfactual); got != 50 {
+		t.Fatalf("flat-rate counterfactual=%d, want 50", got)
+	}
+	t.Logf("synthetic prices input=$2/M output=$4/M: current=%d micro-dollars; flat-rate inclusive-input counterfactual=%d micro-dollars; this is not an invoice", current, cost("fake", flatRateCounterfactual))
+}

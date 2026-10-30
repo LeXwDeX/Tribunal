@@ -1,0 +1,33 @@
+package gitlab
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestAuditObservedDiffIndexRenameCollision(t *testing.T) {
+	v := Version{ID: 7, BaseSHA: strings.Repeat("1", 40), StartSHA: strings.Repeat("2", 40), HeadSHA: strings.Repeat("3", 40)}
+	diffs := []FileDiff{
+		{OldPath: "b.go", NewPath: "c.go", RenamedFile: true, Diff: "@@ -1 +1 @@\n-b old\n+c new\n"},
+		{OldPath: "a.go", NewPath: "b.go", RenamedFile: true, Diff: "@@ -1 +1 @@\n-a old\n+b new\n"},
+	}
+	idx := BuildDiffIndex(v, diffs)
+	got, ok := idx.Locate("b.go", 1, SideNew)
+	want := Position{BaseSHA: v.BaseSHA, StartSHA: v.StartSHA, HeadSHA: v.HeadSHA, OldPath: "a.go", NewPath: "b.go", NewLine: 1}
+	wrong := Position{BaseSHA: v.BaseSHA, StartSHA: v.StartSHA, HeadSHA: v.HeadSHA, OldPath: "b.go", NewPath: "c.go", NewLine: 1}
+	t.Logf("new-side b.go:1 got=%+v ok=%v; expected=%+v", got, ok, want)
+	if !ok || got != wrong {
+		t.Fatalf("unexpected observed result: got=%+v ok=%v", got, ok)
+	}
+	old, oldOK := idx.Locate("b.go", 1, SideOld)
+	t.Logf("old-side b.go:1 got=%+v ok=%v", old, oldOK)
+	if !oldOK || old.OldPath != "b.go" || old.NewPath != "c.go" || old.OldLine != 1 {
+		t.Fatalf("old-side result=%+v ok=%v", old, oldOK)
+	}
+	diffs[0].Diff = "@@ -3 +3 @@\n-b old\n+c new\n"
+	pos, ok := BuildDiffIndex(v, diffs).Locate("b.go", 1, SideNew)
+	t.Logf("if first rename has no new line 1: got=%+v ok=%v; expected a.go -> b.go new line 1", pos, ok)
+	if ok {
+		t.Fatalf("expected observed false negative, got %+v", pos)
+	}
+}

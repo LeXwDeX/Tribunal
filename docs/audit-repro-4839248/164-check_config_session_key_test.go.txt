@@ -1,0 +1,291 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/base64"
+	"encoding/json"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strconv"
+	"strings"
+	"testing"
+
+	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/secret"
+	"github.com/LeXwDeX/tribunal/internal/store/migrations"
+)
+
+const auditOldMCPConfig = `{"command":"/bin/false"}`
+
+type auditState struct {
+	versions                            []int
+	columns                             [4]int
+	mcpMarker, projectMarker            int
+	defaultSkill, ledger                 int
+	legacyConfig, defaultConfig          string
+	legacyEnc, defaultEnc, projectToken []byte
+}
+
+func auditCreateLegacy(t *testing.T, path string, cipher *secret.Cipher, defaultConfig string, projectMigrationComplete bool) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := fs.ReadDir(migrations.FS, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".sql") {
+			continue
+		}
+		version, err := strconv.Atoi(name[:4])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if version > 15 {
+			continue
+		}
+		body, err := migrations.FS.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tx, err := db.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(string(body)); err != nil {
+			t.Fatalf("apply legacy migration %s: %v", name, err)
+		}
+		if _, err := tx.Exec(`INSERT INTO schema_migrations VALUES (?, ?, ?)`, version, name, "2026-01-01T00:00:00.000000000Z"); err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var token []byte
+	if projectMigrationComplete {
+		token, err = cipher.Seal([]byte("synthetic-project-token"), secret.TokenAAD(42))
+	} else {
+		token, err = cipher.Encrypt([]byte("synthetic-project-token"))
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO projects (id,path_with_namespace,web_url,default_branch,token_enc,webhook_secret_enc,created_at,updated_at) VALUES (42,'synthetic/project','http://invalid.local/project','main',?,X'','2026-01-01T00:00:00.000000000Z','2026-01-01T00:00:00.000000000Z')`, token); err != nil {
+		t.Fatal(err)
+	}
+	if projectMigrationComplete {
+		if _, err := db.Exec(`INSERT INTO secret_migration (id,completed_at) VALUES (1,'2026-01-01T00:00:00.000000000Z')`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, row := range []struct{ id, name, builtin, config string }{
+		{"synthetic-old", "legacy-server", "", auditOldMCPConfig},
+		{"synthetic-default", "codebase-memory", "codebase-memory", defaultConfig},
+	} {
+		if _, err := db.Exec(`INSERT INTO mcp_servers (id,scope,project_id,name,config,enabled,builtin,created_at,updated_at) VALUES (?,'platform',NULL,?,?,0,?,'2026-01-01T00:00:00.000000000Z','2026-01-01T00:00:00.000000000Z')`, row.id, row.name, row.config, row.builtin); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO extension_defaults (key,outcome,detail,applied_at) VALUES ('mcp:codebase-memory','applied','','2026-01-01T00:00:00.000000000Z')`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func auditReadState(t *testing.T, path string) auditState {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var integrity string
+	if err := db.QueryRow(`PRAGMA integrity_check`).Scan(&integrity); err != nil || integrity != "ok" {
+		t.Fatalf("fixture integrity check: %q %v", integrity, err)
+	}
+	var s auditState
+	rows, err := db.Query(`SELECT version FROM schema_migrations ORDER BY version`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var version int
+		if err := rows.Scan(&version); err != nil {
+			t.Fatal(err)
+		}
+		s.versions = append(s.versions, version)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	count := func(query string) int {
+		var n int
+		if err := db.QueryRow(query).Scan(&n); err != nil {
+			t.Fatalf("count query failed: %v", err)
+		}
+		return n
+	}
+	for i, q := range []string{
+		`SELECT COUNT(*) FROM pragma_table_info('workflow_dossiers') WHERE name='mr_title'`,
+		`SELECT COUNT(*) FROM pragma_table_info('mcp_servers') WHERE name='config_enc'`,
+		`SELECT COUNT(*) FROM pragma_table_info('workflow_dossiers') WHERE name='project_id'`,
+		`SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name='defer_since'`,
+	} {
+		s.columns[i] = count(q)
+	}
+	if count(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='mcp_config_seal'`) == 1 {
+		s.mcpMarker = count(`SELECT COUNT(*) FROM mcp_config_seal`)
+	}
+	s.projectMarker = count(`SELECT COUNT(*) FROM secret_migration`)
+	s.defaultSkill = count(`SELECT COUNT(*) FROM skills WHERE name='code-review' AND builtin='code-review'`)
+	s.ledger = count(`SELECT COUNT(*) FROM extension_defaults`)
+	if err := db.QueryRow(`SELECT token_enc FROM projects WHERE id=42`).Scan(&s.projectToken); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range []struct {
+		id     string
+		config *string
+		enc    *[]byte
+	}{
+		{"synthetic-old", &s.legacyConfig, &s.legacyEnc},
+		{"synthetic-default", &s.defaultConfig, &s.defaultEnc},
+	} {
+		query := `SELECT config FROM mcp_servers WHERE id=?`
+		if s.columns[1] == 1 {
+			query = `SELECT config,config_enc FROM mcp_servers WHERE id=?`
+			if err := db.QueryRow(query, row.id).Scan(row.config, row.enc); err != nil {
+				t.Fatal(err)
+			}
+		} else if err := db.QueryRow(query, row.id).Scan(row.config); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return s
+}
+
+func TestAuditInvalidSessionKeyAfterCommittedMigrations(t *testing.T) {
+	tests := []struct {
+		name, current, legacy, errorText string
+		projectMigrationComplete bool
+		staleDefault bool
+	}{
+		{"invalid current", "not-base64!!!", "", "auth: TRIBUNAL_SESSION_KEY must be base64 of at least 32 bytes", true, true},
+		{"short current", base64.StdEncoding.EncodeToString([]byte("short")), "", "auth: TRIBUNAL_SESSION_KEY must be base64 of at least 32 bytes", true, true},
+		{"whitespace current", "  ", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{3}, 32)), "auth: TRIBUNAL_SESSION_KEY must not be whitespace only", true, true},
+		{"invalid legacy", "", "not-base64!!!", "auth: CRC_SESSION_KEY must be base64 of at least 32 bytes", true, true},
+		{"invalid current with pending project migration", "not-base64!!!", "", "auth: TRIBUNAL_SESSION_KEY must be base64 of at least 32 bytes", false, true},
+		{"invalid current with matching default", "not-base64!!!", "", "auth: TRIBUNAL_SESSION_KEY must be base64 of at least 32 bytes", true, false},
+	}
+	wantBefore := []int{1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
+	wantAfter := []int{1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			configPath := writeRunConfig(t, dir, 1)
+			t.Setenv("TRIBUNAL_SESSION_KEY", tc.current)
+			t.Setenv("CRC_SESSION_KEY", tc.legacy)
+			cipher, err := secret.New([]byte("0123456789abcdef0123456789abcdef"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defaultConfig := auditOldMCPConfig
+			if !tc.staleDefault {
+				cfg, err := config.Load(configPath)
+				if err != nil || len(cfg.DefaultExtensions.MCPServers) != 1 {
+					t.Fatal("could not load synthetic default config")
+				}
+				raw, err := cfg.DefaultExtensions.MCPServers[0].ConfigJSON()
+				if err != nil {
+					t.Fatal(err)
+				}
+				defaultConfig = string(raw)
+			}
+			dbPath := filepath.Join(dir, "review.db")
+			auditCreateLegacy(t, dbPath, cipher, defaultConfig, tc.projectMigrationComplete)
+			before := auditReadState(t, dbPath)
+			if !reflect.DeepEqual(before.versions, wantBefore) || before.columns != [4]int{} || before.legacyConfig != auditOldMCPConfig || before.defaultConfig != defaultConfig || secret.IsSealed(before.projectToken) != tc.projectMigrationComplete || (before.projectMarker == 1) != tc.projectMigrationComplete {
+				t.Fatal("invalid legacy fixture")
+			}
+			fileBefore, err := os.ReadFile(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			if err := run(context.Background(), []string{"--config", configPath, "--check-config"}, &stdout, &stderr); err != nil || stdout.String() != "configuration OK\n" {
+				t.Fatalf("check-config: stdout=%q error=%v", stdout.String(), err)
+			}
+			fileAfter, err := os.ReadFile(dbPath)
+			if err != nil || sha256.Sum256(fileBefore) != sha256.Sum256(fileAfter) || !reflect.DeepEqual(before, auditReadState(t, dbPath)) {
+				t.Fatal("check-config changed the fixture database")
+			}
+			stdout.Reset()
+			stderr.Reset()
+			err = run(context.Background(), []string{"--config", configPath}, &stdout, &stderr)
+			if err == nil || err.Error() != tc.errorText {
+				t.Fatalf("startup error=%v, want %q", err, tc.errorText)
+			}
+			after := auditReadState(t, dbPath)
+			if !reflect.DeepEqual(after.versions, wantAfter) || after.columns != [4]int{1, 1, 1, 1} {
+				t.Fatalf("migrations=%v columns=%v", after.versions, after.columns)
+			}
+			if after.mcpMarker != 1 || after.projectMarker != 1 || after.defaultSkill != 1 || after.ledger <= before.ledger {
+				t.Fatalf("markers: MCP=%d project=%d default skill=%d ledger=%d->%d", after.mcpMarker, after.projectMarker, after.defaultSkill, before.ledger, after.ledger)
+			}
+			if after.legacyConfig != "{}" || after.defaultConfig != "{}" || len(after.legacyEnc) == 0 || len(after.defaultEnc) == 0 || !secret.IsSealed(after.projectToken) {
+				t.Fatal("expected committed encryption changes")
+			}
+			for _, row := range []struct {
+				id string
+				ciphertext []byte
+			}{
+				{"synthetic-old", after.legacyEnc},
+				{"synthetic-default", after.defaultEnc},
+			} {
+				aad, err := secret.MCPConfigAAD("platform", nil, row.id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				plain, err := cipher.Open(row.ciphertext, aad)
+				if err != nil {
+					t.Fatalf("decrypt synthetic row %s: %v", row.id, err)
+				}
+				if row.id == "synthetic-old" && string(plain) != auditOldMCPConfig {
+					t.Fatal("legacy MCP config changed before sealing")
+				}
+				if row.id == "synthetic-default" {
+					var config map[string]any
+					if err := json.Unmarshal(plain, &config); err != nil || config["command"] != "/usr/local/bin/tribunal-codebase-memory-mcp" {
+						t.Fatal("default MCP was not refreshed and sealed")
+					}
+				}
+			}
+			plain, err := cipher.Open(after.projectToken, secret.TokenAAD(42))
+			if err != nil || string(plain) != "synthetic-project-token" {
+				t.Fatal("project token was not readable as sealed")
+			}
+			if bytes.Equal(before.projectToken, after.projectToken) != tc.projectMigrationComplete {
+				t.Fatal("project token changed unexpectedly")
+			}
+			if strings.Contains(stderr.String(), "built-in MCP server updated") != tc.staleDefault {
+				t.Fatal("default MCP refresh log does not match fixture")
+			}
+			t.Logf("check-config=OK and DB unchanged; startup error=%s; schema_migrations=%v -> %v; columns 0016-0019 present; integrity=ok; MCP marker committed; legacy MCP and default MCP sealed; built-in skill installed; project migration initially complete=%v; stale default refreshed=%v", tc.errorText, before.versions, after.versions, tc.projectMigrationComplete, tc.staleDefault)
+		})
+	}
+}

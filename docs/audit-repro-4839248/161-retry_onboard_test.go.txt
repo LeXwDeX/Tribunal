@@ -1,0 +1,116 @@
+package app
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/LeXwDeX/tribunal/internal/store"
+)
+
+func TestAuditRetryOnboardAcrossRegistration(t *testing.T) {
+	ctx := context.Background()
+	r := newLifecycleRuntime(t)
+	var normalID string
+	for attempt := 1; attempt <= 3; attempt++ {
+		job, err := r.store.Claim(ctx, "audit-old", []string{"workspace.onboard"}, time.Minute)
+		if err != nil || job == nil {
+			t.Fatalf("claim original attempt %d: job=%+v err=%v", attempt, job, err)
+		}
+		if job.Key != "workspace.onboard:42" || job.Attempts != attempt {
+			t.Fatalf("unexpected original job: %+v", job)
+		}
+		if normalID == "" {
+			normalID = job.ID
+		} else if job.ID != normalID {
+			t.Fatalf("original job ID changed on retry")
+		}
+		if err := r.store.Fail(ctx, *job, errors.New("synthetic failure"), nil); err != nil {
+			t.Fatalf("fail original attempt: %v", err)
+		}
+	}
+	failed, err := r.store.GetJob(ctx, normalID)
+	if err != nil || failed.State != store.JobFailed {
+		t.Fatalf("original job after failures: %+v, %v", failed, err)
+	}
+	if _, err := r.store.SaveWorkspace(ctx, store.Workspace{ProjectID: 42, State: "error", LastError: store.WorkspaceOperationFailed}); err != nil {
+		t.Fatal(err)
+	}
+	retryID, err := r.workspaces.RetryOnboarding(ctx, 42)
+	if err != nil {
+		t.Fatalf("RetryOnboarding: %v", err)
+	}
+	retry, err := r.store.GetJob(ctx, retryID)
+	if err != nil || retry.Key != "workspace.onboard:42:retry" || retry.State != store.JobQueued {
+		t.Fatalf("retry before deletion: %+v, %v", retry, err)
+	}
+	t.Logf("before deletion: original=%s attempt=%d retry=%s key=%s", failed.State, failed.Attempts, retry.State, retry.Key)
+
+	if err := r.Projects().Delete(ctx, 42); err != nil {
+		t.Fatalf("project service Delete: %v", err)
+	}
+	if _, err := r.store.GetProject(ctx, 42); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("deleted project lookup: %v", err)
+	}
+	if _, err := r.store.GetJob(ctx, normalID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("original job lookup after deletion: %v", err)
+	}
+	retry, err = r.store.GetJob(ctx, retryID)
+	if err != nil || retry.State != store.JobQueued {
+		t.Fatalf("retry after deletion: %+v, %v", retry, err)
+	}
+	if _, err := r.store.DeleteTerminalJobsBefore(ctx, time.Now().Add(24*time.Hour)); err != nil {
+		t.Fatalf("retention: %v", err)
+	}
+	if _, err := r.store.GetJob(ctx, retryID); err != nil {
+		t.Fatalf("retention removed queued retry: %v", err)
+	}
+	t.Logf("after deletion and terminal retention: project=missing original=missing retry=%s key=%s", retry.State, retry.Key)
+
+	registration, err := r.Projects().Register(ctx, RegisterInput{Project: "42", AccessToken: "synthetic-token"})
+	if err != nil {
+		t.Fatalf("re-register with fake GitLab: %v", err)
+	}
+	newJob, err := r.store.GetJob(ctx, registration.JobID)
+	if err != nil || newJob.Key != "workspace.onboard:42" || newJob.State != store.JobQueued || registration.JobID == retryID {
+		t.Fatalf("new registration job: %+v, %v", newJob, err)
+	}
+	claimed, err := r.store.Claim(ctx, "audit-new", []string{"workspace.onboard"}, time.Minute)
+	if err != nil || claimed == nil || claimed.ID != retryID || claimed.Attempts != 1 {
+		t.Fatalf("claim old retry after re-registration: %+v, %v", claimed, err)
+	}
+	before, err := r.store.GetWorkspace(ctx, 42)
+	if err != nil || before.State != "new" {
+		t.Fatalf("new workspace before handling: %+v, %v", before, err)
+	}
+	r.workspaces.git = newFakeGitOps(sha40)
+	r.workspaces.gitlab = newReviewGitLab(sha40)
+	r.workspaces.profiles["onboarding"] = onboardingContextProfile()
+	r.workspaces.reviewDefaults = testDefaults()
+	r.workspaces.reviewDefaults.Ignore = nil
+	r.workspaces.agentRun = onboardingIndexRunner
+	r.workspaces.clients = nil
+	r.workspaces.mcpFactory = nil
+	r.workspaces.tools = nil
+	r.workspaces.skills = nil
+	if err := r.workspaces.Handle(ctx, claimed); err != nil {
+		t.Fatalf("handle old retry with fakes: %v", err)
+	}
+	after, err := r.store.GetWorkspace(ctx, 42)
+	if err != nil || after.State != "ready" || after.BaseSHA != sha40 {
+		t.Fatalf("new workspace after old retry: %+v, %v", after, err)
+	}
+	if err := r.store.Complete(ctx, *claimed); err != nil {
+		t.Fatalf("complete old retry: %v", err)
+	}
+	retry, err = r.store.GetJob(ctx, retryID)
+	if err != nil || retry.State != store.JobDone {
+		t.Fatalf("old retry after completion: %+v, %v", retry, err)
+	}
+	newJob, err = r.store.GetJob(ctx, registration.JobID)
+	if err != nil || newJob.State != store.JobQueued {
+		t.Fatalf("new registration job after old retry: %+v, %v", newJob, err)
+	}
+	t.Logf("after re-registration: old retry claimed attempt=%d and completed; new workspace=%s; new registration job=%s", claimed.Attempts, after.State, newJob.State)
+}

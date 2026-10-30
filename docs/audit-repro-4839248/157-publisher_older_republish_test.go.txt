@@ -1,0 +1,291 @@
+package app
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/LeXwDeX/tribunal/internal/agent"
+	"github.com/LeXwDeX/tribunal/internal/gitlab"
+	"github.com/LeXwDeX/tribunal/internal/review"
+	"github.com/LeXwDeX/tribunal/internal/store"
+)
+
+type auditActorKey struct{}
+
+type auditWrite struct {
+	actor, kind, sha, body string
+	noteID                 int64
+	status                 gitlab.CommitStatus
+}
+
+type auditGitLab struct {
+	*reviewGitLab
+	arrived chan struct{}
+	release chan struct{}
+	mu      sync.Mutex
+	writes  []auditWrite
+}
+
+func (g *auditGitLab) GetMergeRequest(ctx context.Context, token string, projectID, iid int64) (*gitlab.MergeRequest, error) {
+	if ctx.Value(auditActorKey{}) == "A" {
+		close(g.arrived)
+		select {
+		case <-g.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return g.reviewGitLab.GetMergeRequest(ctx, token, projectID, iid)
+}
+
+func (g *auditGitLab) CreateMRNote(ctx context.Context, token string, projectID, iid int64, body string) (*gitlab.Note, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	note, err := g.reviewGitLab.CreateMRNote(ctx, token, projectID, iid, body)
+	if err == nil && strings.HasPrefix(body, review.SummaryMarkerPrefix) {
+		g.writes = append(g.writes, auditWrite{actor: fmt.Sprint(ctx.Value(auditActorKey{})), kind: "summary-create", noteID: note.ID, body: body})
+	}
+	return note, err
+}
+
+func (g *auditGitLab) UpdateMRNote(ctx context.Context, token string, projectID, iid, noteID int64, body string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	err := g.reviewGitLab.UpdateMRNote(ctx, token, projectID, iid, noteID, body)
+	if err == nil && strings.HasPrefix(body, review.SummaryMarkerPrefix) {
+		g.writes = append(g.writes, auditWrite{actor: fmt.Sprint(ctx.Value(auditActorKey{})), kind: "summary-update", noteID: noteID, body: body})
+	}
+	return err
+}
+
+func (g *auditGitLab) SetCommitStatus(ctx context.Context, token string, projectID int64, sha string, status gitlab.CommitStatus) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	err := g.reviewGitLab.SetCommitStatus(ctx, token, projectID, sha, status)
+	if err == nil {
+		g.writes = append(g.writes, auditWrite{actor: fmt.Sprint(ctx.Value(auditActorKey{})), kind: "commit-status", sha: sha, status: status})
+	}
+	return err
+}
+
+func (g *auditGitLab) snapshot() []auditWrite {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]auditWrite(nil), g.writes...)
+}
+
+func TestAuditOlderRepublishAfterNewerGeneration(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	f := newReviewFixture(t, reviewTestHead)
+	f.defaults.CommitStatus = true
+	f.service.reviewDefaults = f.defaults
+	f.publisher.reviewDefaults = f.defaults
+	f.publisher.publicURL = "https://console.invalid"
+	profile := f.profiles["default"]
+	profile.Challenge.Only = []string{"info"}
+	f.profiles["default"] = profile
+
+	seed := f.seedReview(t, "A")
+	aRun, err := f.db.Claim(ctx, "worker-A-run", []string{"review.run"}, time.Minute)
+	if err != nil || aRun == nil || aRun.ID != seed.ID {
+		t.Fatalf("claim A review.run: job=%v err=%v", aRun, err)
+	}
+	if err := f.service.RunReview(ctx, aRun); err != nil {
+		t.Fatalf("run A: %v", err)
+	}
+	if err := f.db.Complete(ctx, *aRun); err != nil {
+		t.Fatalf("complete A job: %v", err)
+	}
+	a, err := f.db.GetWorkflowByJob(ctx, aRun.ID)
+	if err != nil || a.Verdict != review.VerdictPass || a.PublicationState != store.WorkflowPublicationPublished {
+		t.Fatalf("A initial workflow=%+v err=%v", a, err)
+	}
+	aDossier, err := f.db.GetWorkflowDossier(ctx, a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	run := f.runner.Run
+	f.service.agentRun = func(ctx context.Context, spec agent.RunSpec) (*agent.RunResult, error) {
+		result, err := run(ctx, spec)
+		if err != nil {
+			return nil, err
+		}
+		if out, ok := result.Output.(*review.CodeReviewOut); ok && len(out.Findings) > 0 {
+			out.Findings[0].Severity = review.SeverityP1
+		}
+		return result, nil
+	}
+	g := &auditGitLab{reviewGitLab: f.gitlab, arrived: make(chan struct{}), release: make(chan struct{})}
+	f.publisher.gitlab = g
+	dispatcher, err := NewDispatcher(DispatcherConfig{
+		Store: f.db, Workspace: f.manager, GitLab: f.gitlab,
+		Cipher: f.publisher.cipher, Profiles: f.profiles,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	publishID, err := dispatcher.RepublishReview(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("enqueue A republish: %v", err)
+	}
+	aPublish, err := f.db.Claim(ctx, "worker-A-publish", []string{"review.publish"}, time.Minute)
+	if err != nil || aPublish == nil || aPublish.ID != publishID {
+		t.Fatalf("claim A review.publish: job=%v err=%v", aPublish, err)
+	}
+
+	var aErr error
+	aDone := make(chan struct{})
+	var release sync.Once
+	go func() {
+		aCtx := context.WithValue(ctx, auditActorKey{}, "A")
+		aErr = f.service.RepublishReview(aCtx, aPublish)
+		close(aDone)
+	}()
+	defer func() {
+		cancel()
+		release.Do(func() { close(g.release) })
+		<-aDone
+	}()
+	select {
+	case <-g.arrived:
+	case <-aDone:
+		t.Fatalf("A exited before the post-control barrier: %v", aErr)
+	case <-ctx.Done():
+		t.Fatalf("A did not reach post-control barrier: %v", ctx.Err())
+	}
+	control, err := f.db.GetReviewControl(ctx, 42, 7)
+	if err != nil || control.Generation != aDossier.Generation || control.Cancelled {
+		t.Fatalf("control at A barrier=%+v, A generation=%d, err=%v", control, aDossier.Generation, err)
+	}
+	t.Logf("A passed controlMatches: workflow=%s generation=%d control=%d head=%s; blocked on freshConfig.GetMergeRequest", a.ID, aDossier.Generation, control.Generation, control.HeadSHA)
+
+	bJobID, err := dispatcher.StartReview(ctx, 42, 7, "default", true)
+	if err != nil {
+		t.Fatalf("enqueue B: %v", err)
+	}
+	bRun, err := f.db.Claim(ctx, "worker-B-run", []string{"review.run"}, time.Minute)
+	if err != nil || bRun == nil || bRun.ID != bJobID {
+		t.Fatalf("claim B while A publish is running: job=%v err=%v", bRun, err)
+	}
+	t.Logf("concurrent job keys: A=%s B=%s", aPublish.Key, bRun.Key)
+	bCtx := context.WithValue(ctx, auditActorKey{}, "B")
+	if err := f.service.RunReview(bCtx, bRun); err != nil {
+		t.Fatalf("run B while A blocked: %v", err)
+	}
+	if err := f.db.Complete(ctx, *bRun); err != nil {
+		t.Fatalf("complete B job: %v", err)
+	}
+	b, err := f.db.GetWorkflowByJob(ctx, bRun.ID)
+	if err != nil || b.ID == a.ID || b.Verdict != review.VerdictBlocking || b.PublicationState != store.WorkflowPublicationPublished {
+		t.Fatalf("B workflow=%+v err=%v", b, err)
+	}
+	bDossier, err := f.db.GetWorkflowDossier(ctx, b.ID)
+	if err != nil || bDossier.Generation <= aDossier.Generation {
+		t.Fatalf("B dossier=%+v A generation=%d err=%v", bDossier, aDossier.Generation, err)
+	}
+	control, err = f.db.GetReviewControl(ctx, 42, 7)
+	if err != nil || control.Generation != bDossier.Generation || control.HeadSHA != f.head || control.Cancelled {
+		t.Fatalf("control after B=%+v err=%v", control, err)
+	}
+	before, err := f.db.GetPublication(ctx, 42, 7, summaryPublishKind, summaryPublicationKey)
+	if err != nil || before.WorkflowID != b.ID || before.Fingerprint != bDossier.Hash {
+		t.Fatalf("summary record before releasing A=%+v err=%v", before, err)
+	}
+	t.Logf("B completed first: workflow=%s generation=%d verdict=%s publication=%s; summary row workflow=B", b.ID, bDossier.Generation, b.Verdict, b.PublicationState)
+
+	release.Do(func() { close(g.release) })
+	select {
+	case <-aDone:
+	case <-ctx.Done():
+		t.Fatalf("A failed to complete after release: %v", ctx.Err())
+	}
+	if aErr != nil {
+		t.Fatalf("A republish: %v", aErr)
+	}
+	if err := f.db.Complete(ctx, *aPublish); err != nil {
+		t.Fatalf("complete A publish job: %v", err)
+	}
+
+	writes := g.snapshot()
+	if len(writes) != 4 {
+		t.Fatalf("writes=%+v, want B summary/status followed by A summary/status", writes)
+	}
+	for i, want := range []struct{ actor, kind string }{{"B", "summary-update"}, {"B", "commit-status"}, {"A", "summary-update"}, {"A", "commit-status"}} {
+		if writes[i].actor != want.actor || writes[i].kind != want.kind {
+			t.Fatalf("write[%d]=%+v, want %+v", i, writes[i], want)
+		}
+	}
+	if writes[0].noteID != writes[2].noteID || !strings.Contains(writes[0].body, "BLOCKING") || !strings.Contains(writes[0].body, b.ID) || !strings.Contains(writes[2].body, "PASS") || !strings.Contains(writes[2].body, a.ID) {
+		t.Fatalf("summary writes do not show the expected verdicts/IDs: B=%q A=%q", writes[0].body, writes[2].body)
+	}
+	if writes[1].sha != f.head || writes[3].sha != f.head || writes[1].status.Name != "ai-review" || writes[3].status.Name != "ai-review" || writes[1].status.State != "failed" || writes[3].status.State != "success" || !strings.Contains(writes[1].status.TargetURL, b.ID) || !strings.Contains(writes[3].status.TargetURL, a.ID) {
+		t.Fatalf("status writes: B=%+v A=%+v", writes[1], writes[3])
+	}
+	for i, w := range writes {
+		if w.kind == "summary-update" {
+			verdict := "PASS"
+			if strings.Contains(w.body, "BLOCKING") {
+				verdict = "BLOCKING"
+			}
+			t.Logf("write[%d] %s %s note=%d verdict=%s body_hash=%s", i+1, w.actor, w.kind, w.noteID, verdict, bodyHash(w.body))
+		} else {
+			t.Logf("write[%d] %s %s sha=%s name=%s state=%s target=%s description=%q", i+1, w.actor, w.kind, w.sha, w.status.Name, w.status.State, w.status.TargetURL, w.status.Description)
+		}
+	}
+
+	summary, err := f.db.GetPublication(ctx, 42, 7, summaryPublishKind, summaryPublicationKey)
+	if err != nil || summary.WorkflowID != a.ID || summary.Fingerprint != aDossier.Hash || summary.BodyHash != bodyHash(writes[2].body) || summary.GitlabID != fmt.Sprint(writes[2].noteID) {
+		t.Fatalf("final summary record=%+v err=%v", summary, err)
+	}
+	f.gitlab.mu.Lock()
+	var finalNote *gitlab.Note
+	for i := range f.gitlab.notes {
+		if f.gitlab.notes[i].ID == writes[2].noteID {
+			copy := f.gitlab.notes[i]
+			finalNote = &copy
+		}
+	}
+	statusCount := len(f.gitlab.statuses)
+	f.gitlab.mu.Unlock()
+	if finalNote == nil || finalNote.Body != writes[2].body || statusCount != 3 {
+		t.Fatalf("final fake note=%+v, status count including initial A=%d", finalNote, statusCount)
+	}
+	for _, item := range []struct{ state, workflow string }{{"failed", b.ID}, {"success", a.ID}} {
+		p, err := f.db.GetPublication(ctx, 42, 7, statusPublishKind, commitStatusPublishKey(f.head, item.state))
+		if err != nil || p.WorkflowID != item.workflow {
+			t.Fatalf("status row for %s=%+v err=%v", item.state, p, err)
+		}
+		t.Logf("final status row: key=%s workflow=%s gitlab_id=%s", p.PublishKey, p.WorkflowID, p.GitlabID)
+	}
+	for _, wf := range []*store.Workflow{a, b} {
+		current, err := f.db.GetWorkflow(ctx, wf.ID)
+		if err != nil || current.PublicationState != store.WorkflowPublicationPublished {
+			t.Fatalf("final workflow=%+v err=%v", current, err)
+		}
+		t.Logf("final workflow: id=%s verdict=%s publication=%s", current.ID, current.Verdict, current.PublicationState)
+	}
+	t.Logf("final control generation=%d; summary row workflow=%s note=%s fingerprint=%s body_hash=%s; fake note=PASS", control.Generation, summary.WorkflowID, summary.GitlabID, summary.Fingerprint, summary.BodyHash)
+
+	if err := f.publisher.Publish(ctx, a.ID); !errors.Is(err, ErrStalePublication) {
+		t.Fatalf("new attempt after B generation: %v, want ErrStalePublication", err)
+	}
+	if len(g.snapshot()) != len(writes) {
+		t.Fatal("stale new attempt made a GitLab write")
+	}
+	after, err := f.db.GetWorkflow(ctx, a.ID)
+	if err != nil || after.PublicationState != store.WorkflowPublicationPublished {
+		t.Fatalf("A state after rejected attempt=%+v err=%v", after, err)
+	}
+	afterSummary, err := f.db.GetPublication(ctx, 42, 7, summaryPublishKind, summaryPublicationKey)
+	if err != nil || afterSummary.WorkflowID != a.ID || afterSummary.BodyHash != summary.BodyHash {
+		t.Fatalf("summary after rejected attempt=%+v err=%v", afterSummary, err)
+	}
+	t.Log("control check: a new A publish attempt is rejected as stale with no additional writes; A remains published and summary row remains A")
+}

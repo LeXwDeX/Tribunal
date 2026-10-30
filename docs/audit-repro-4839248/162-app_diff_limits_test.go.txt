@@ -1,0 +1,214 @@
+package app
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/LeXwDeX/tribunal/internal/gitlab"
+	"github.com/LeXwDeX/tribunal/internal/review"
+)
+
+func auditVersion() gitlab.Version {
+	return gitlab.Version{ID: 7, BaseSHA: strings.Repeat("1", 40), StartSHA: strings.Repeat("2", 40), HeadSHA: strings.Repeat("3", 40)}
+}
+
+func auditRenameDossier(t *testing.T) *review.Dossier {
+	t.Helper()
+	diffs := []gitlab.FileDiff{
+		{OldPath: "b.go", NewPath: "c.go", RenamedFile: true, Diff: "@@ -1 +1 @@\n-b old\n+c new\n"},
+		{OldPath: "a.go", NewPath: "b.go", RenamedFile: true, Diff: "@@ -1 +1 @@\n-a old\n+b new\n"},
+	}
+	return auditDossierFromDiffs(t, diffs)
+}
+
+func auditDossierFromDiffs(t *testing.T, diffs []gitlab.FileDiff) *review.Dossier {
+	t.Helper()
+	files, ignored, summary, warnings := buildReviewFiles(diffs, nil, 10, 100)
+	if len(files) != 2 || len(ignored) != 0 || summary.Truncated || len(warnings) != 0 {
+		t.Fatalf("files=%+v ignored=%v summary=%+v warnings=%v", files, ignored, summary, warnings)
+	}
+	dossier, err := review.BuildDossier(review.DossierInput{
+		Project: review.ProjectRef{ID: 42, Path: "g/p"},
+		MR: review.MRMeta{IID: 7, Title: "rename chain", SourceBranch: "feature", TargetBranch: "main"},
+		DiffVersion: auditVersion(), DiffSummary: summary, Files: files,
+	})
+	if err != nil {
+		t.Fatalf("BuildDossier: %v", err)
+	}
+	return dossier
+}
+
+func TestAuditObservedRealGitRenameChain(t *testing.T) {
+	root := filepath.Join(os.Getenv("HOME"), "rename")
+	indexFile := filepath.Join(t.TempDir(), "index")
+	env := append(os.Environ(), "GIT_DIR="+filepath.Join(root, "objectdb"), "GIT_INDEX_FILE="+indexFile)
+	run := func(worktree string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Env = append(append([]string(nil), env...), "GIT_WORK_TREE="+filepath.Join(root, worktree))
+		cmd.Dir = filepath.Join(root, worktree)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+		return string(out)
+	}
+	run("old", "add", "-A")
+	old := strings.TrimSpace(run("old", "write-tree"))
+	run("old", "read-tree", "--empty")
+	run("new", "add", "-A")
+	newTree := strings.TrimSpace(run("new", "write-tree"))
+	patch := run("new", "-c", "color.ui=false", "diff", "--no-ext-diff", "--no-textconv", "-B", "-M", "-O", filepath.Join(root, "order.txt"), old, newTree)
+	t.Logf("local git diff -B -M -O:\n%s", patch)
+	var diffs []gitlab.FileDiff
+	for _, section := range strings.Split(patch, "diff --git ")[1:] {
+		var oldPath, newPath string
+		for _, line := range strings.Split(section, "\n") {
+			if strings.HasPrefix(line, "rename from ") {
+				oldPath = strings.TrimPrefix(line, "rename from ")
+			}
+			if strings.HasPrefix(line, "rename to ") {
+				newPath = strings.TrimPrefix(line, "rename to ")
+			}
+		}
+		hunk := strings.Index(section, "@@ ")
+		if oldPath == "" || newPath == "" || hunk < 0 {
+			t.Fatalf("expected a rename with hunk: %s", section)
+		}
+		diffs = append(diffs, gitlab.FileDiff{OldPath: oldPath, NewPath: newPath, RenamedFile: true, Diff: section[hunk:]})
+	}
+	if len(diffs) != 2 || diffs[0].OldPath != "b.go" || diffs[0].NewPath != "c.go" || diffs[1].OldPath != "a.go" || diffs[1].NewPath != "b.go" {
+		t.Fatalf("unexpected git rename ordering: %+v", diffs)
+	}
+	dossier := auditDossierFromDiffs(t, diffs)
+	position, ok := gitlab.BuildDiffIndex(dossier.DiffVersion, dossierDiffs(dossier)).Locate("b.go", 1, gitlab.SideNew)
+	t.Logf("actual git hunks through dossier: got=%+v ok=%v; expected old=a.go new=b.go new_line=1", position, ok)
+	if !ok || position.OldPath != "b.go" || position.NewPath != "c.go" || position.OldLine != 0 || position.NewLine != 1 {
+		t.Fatalf("unexpected observed position: %+v ok=%v", position, ok)
+	}
+}
+
+func TestAuditObservedDossierRenameCollision(t *testing.T) {
+	dossier := auditRenameDossier(t)
+	diffs := dossierDiffs(dossier)
+	if dossier.Files[0].Path != "c.go" || dossier.Files[0].OldPath != "b.go" ||
+		dossier.Files[1].Path != "b.go" || dossier.Files[1].OldPath != "a.go" ||
+		diffs[0].OldPath != "b.go" || diffs[0].NewPath != "c.go" ||
+		diffs[1].OldPath != "a.go" || diffs[1].NewPath != "b.go" {
+		t.Fatalf("unexpected dossier/diff ordering: files=%+v diffs=%+v", dossier.Files, diffs)
+	}
+	index := gitlab.BuildDiffIndex(dossier.DiffVersion, diffs)
+	got, ok := index.Locate("b.go", 1, gitlab.SideNew)
+	want := gitlab.Position{BaseSHA: dossier.DiffVersion.BaseSHA, StartSHA: dossier.DiffVersion.StartSHA, HeadSHA: dossier.DiffVersion.HeadSHA, OldPath: "a.go", NewPath: "b.go", NewLine: 1}
+	t.Logf("dossier paths: (%s -> %s), (%s -> %s)", diffs[0].OldPath, diffs[0].NewPath, diffs[1].OldPath, diffs[1].NewPath)
+	t.Logf("Locate(b.go, 1, new): got=%+v ok=%v; expected=%+v", got, ok, want)
+	if !ok || got.OldPath != "b.go" || got.NewPath != "c.go" || got.NewLine != 1 || got.OldLine != 0 {
+		t.Fatalf("unexpected observed position: %+v ok=%v", got, ok)
+	}
+	if !locateFunc(index)("b.go", 1, review.SideNew) {
+		t.Fatal("executor locator did not accept the wrong position")
+	}
+	groups := markPositions([]review.Group{{Path: "b.go", Line: 1, Side: review.SideNew}}, index)
+	t.Logf("executor locator=true; publisher PositionOK=%v", groups[0].PositionOK)
+	if !groups[0].PositionOK {
+		t.Fatal("publisher did not mark the wrong position as available")
+	}
+}
+
+func TestAuditExpectedDossierRenameTarget(t *testing.T) {
+	dossier := auditRenameDossier(t)
+	got, ok := gitlab.BuildDiffIndex(dossier.DiffVersion, dossierDiffs(dossier)).Locate("b.go", 1, gitlab.SideNew)
+	want := gitlab.Position{BaseSHA: dossier.DiffVersion.BaseSHA, StartSHA: dossier.DiffVersion.StartSHA, HeadSHA: dossier.DiffVersion.HeadSHA, OldPath: "a.go", NewPath: "b.go", NewLine: 1}
+	if !ok || got != want {
+		t.Fatalf("got=%+v ok=%v; expected=%+v", got, ok, want)
+	}
+}
+
+func TestAuditObservedFirstFileOverLimit(t *testing.T) {
+	large := gitlab.FileDiff{OldPath: "large.go", NewPath: "large.go", Diff: "@@ -0,0 +1,3 @@\n+one\n+two\n+three\n"}
+	files, _, summary, warnings := buildReviewFiles([]gitlab.FileDiff{large}, nil, 10, 2)
+	t.Logf("limit=2, first file has 3 additions: files=%+v summary=%+v warnings=%v", files, summary, warnings)
+	if len(files) != 1 || summary.Additions != 3 || summary.Truncated || len(summary.Omitted) != 0 || len(warnings) != 0 {
+		t.Fatalf("unexpected observed result: files=%+v summary=%+v warnings=%v", files, summary, warnings)
+	}
+	small := gitlab.FileDiff{OldPath: "small.go", NewPath: "small.go", Diff: "@@ -0,0 +1 @@\n+one\n"}
+	files, _, summary, warnings = buildReviewFiles([]gitlab.FileDiff{small, large}, nil, 10, 2)
+	t.Logf("same oversized file after one addition: files=%+v summary=%+v warnings=%v", files, summary, warnings)
+	if len(files) != 1 || files[0].Path != "small.go" || !summary.Truncated || len(summary.Omitted) != 1 || summary.Omitted[0].Reason != "max_diff_lines" {
+		t.Fatalf("unexpected later-file result: files=%+v summary=%+v warnings=%v", files, summary, warnings)
+	}
+}
+
+func TestAuditExpectedFirstFileLimit(t *testing.T) {
+	large := gitlab.FileDiff{OldPath: "large.go", NewPath: "large.go", Diff: "@@ -0,0 +1,3 @@\n+one\n+two\n+three\n"}
+	files, _, summary, warnings := buildReviewFiles([]gitlab.FileDiff{large}, nil, 10, 2)
+	if len(files) != 0 || !summary.Truncated || len(summary.Omitted) != 1 || summary.Omitted[0].Reason != "max_diff_lines" {
+		t.Fatalf("if limit is strict, expected omission; got files=%+v summary=%+v warnings=%v", files, summary, warnings)
+	}
+}
+
+func auditRealGitDiff(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "old.txt"), []byte("anchor\n--before\nordinary old\nfinish\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "new.txt"), []byte("anchor\n++after\nordinary new\nfinish\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "-c", "color.ui=false", "diff", "--no-index", "--no-ext-diff", "--no-textconv", "--", "old.txt", "new.txt")
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 1 {
+		t.Fatalf("git diff exit=%v output=%s", err, out)
+	}
+	diff := string(out)
+	for _, line := range []string{"\n--- a/old.txt\n", "\n+++ b/new.txt\n", "\n---before\n", "\n+++after\n"} {
+		if !strings.Contains(diff, line) {
+			t.Fatalf("git diff missing %q:\n%s", line, diff)
+		}
+	}
+	return diff
+}
+
+func TestAuditObservedGitDiffContentPrefixes(t *testing.T) {
+	diff := auditRealGitDiff(t)
+	t.Logf("actual local git diff:\n%s", diff)
+	hunk := diff[strings.Index(diff, "@@ "):]
+	for _, text := range []string{diff, hunk} {
+		added, deleted := countDiffLines(text)
+		t.Logf("countDiffLines (headers=%v): got additions=%d deletions=%d; expected 2,2", text == diff, added, deleted)
+		if added != 1 || deleted != 1 {
+			t.Fatalf("unexpected observed counts %d,%d", added, deleted)
+		}
+	}
+	headerAdded, headerDeleted := countDiffLines("--- a/old.txt\n+++ b/new.txt\n")
+	if headerAdded != 0 || headerDeleted != 0 {
+		t.Fatalf("file headers counted as changes: %d,%d", headerAdded, headerDeleted)
+	}
+	index := gitlab.BuildDiffIndex(auditVersion(), []gitlab.FileDiff{{OldPath: "old.txt", NewPath: "new.txt", Diff: diff}})
+	newPos, newOK := index.Locate("new.txt", 2, gitlab.SideNew)
+	oldPos, oldOK := index.Locate("old.txt", 2, gitlab.SideOld)
+	t.Logf("diff index: new line 2=%+v ok=%v; old line 2=%+v ok=%v", newPos, newOK, oldPos, oldOK)
+	if !newOK || newPos.NewLine != 2 || newPos.OldLine != 0 || !oldOK || oldPos.OldLine != 2 || oldPos.NewLine != 0 {
+		t.Fatal("hunk content was not indexed as added/deleted lines")
+	}
+	small := gitlab.FileDiff{OldPath: "first.txt", NewPath: "first.txt", Diff: "@@ -0,0 +1 @@\n+one\n"}
+	files, _, summary, warnings := buildReviewFiles([]gitlab.FileDiff{small, {OldPath: "old.txt", NewPath: "new.txt", Diff: hunk}}, nil, 10, 3)
+	t.Logf("limit=3, first diff has 1 addition, second has 2 additions and 2 deletions: files=%+v summary=%+v warnings=%v", files, summary, warnings)
+	if len(files) != 2 || summary.Additions != 2 || summary.Deletions != 1 || summary.Truncated || len(summary.Omitted) != 0 || len(warnings) != 0 {
+		t.Fatalf("unexpected observed limit result: files=%+v summary=%+v warnings=%v", files, summary, warnings)
+	}
+}
+
+func TestAuditExpectedGitDiffContentCounts(t *testing.T) {
+	diff := auditRealGitDiff(t)
+	hunk := diff[strings.Index(diff, "@@ "):]
+	added, deleted := countDiffLines(hunk)
+	if added != 2 || deleted != 2 {
+		t.Fatalf("hunk actual additions=%d deletions=%d; expected 2,2:\n%s", added, deleted, hunk)
+	}
+}

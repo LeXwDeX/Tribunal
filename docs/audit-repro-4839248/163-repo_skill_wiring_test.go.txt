@@ -1,0 +1,128 @@
+package app
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/LeXwDeX/tribunal/internal/review"
+	"github.com/LeXwDeX/tribunal/internal/skill"
+	"github.com/LeXwDeX/tribunal/internal/store"
+)
+
+func TestAuditRepoSkillRuntimeWiring(t *testing.T) {
+	for _, registered := range []bool{false, true} {
+		name := "platform-snapshot"
+		if registered {
+			name = "project-loader-rebuilt"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			f := newReviewFixture(t, reviewTestHead)
+			cfg := identityConfig(f)
+			cfg.ReviewDefaults.Ignore = []string{}
+			id := int64(42)
+			base := f.manager.Get(id).BaseDir()
+			repoSkills := filepath.Join(base, ".claude", "skills")
+			dir := filepath.Join(repoSkills, "audit-unique-repo-skill")
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			body := "---\nname: audit-unique-repo-skill\ndescription: unique repository audit skill\n---\nREPO_SKILL_AUDIT_BODY\n"
+			if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			runtime := identityRuntime(t, f, cfg)
+			raw := json.RawMessage(`{"allow_repo_skills":true}`)
+			if _, err := runtime.projects.Update(ctx, id, UpdateProjectInput{Settings: &raw}); err != nil {
+				t.Fatalf("save project settings: %v", err)
+			}
+			saved, err := f.db.GetProject(ctx, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			effective, err := resolveSecureReviewConfig(saved, review.RepoDocs{}, cfg.ReviewDefaults, cfg.Profiles)
+			if err != nil || !effective.Settings.AllowRepoSkills || len(effective.Settings.Ignore) != 0 {
+				t.Fatalf("effective project settings = %+v, %v", effective.Settings, err)
+			}
+
+			direct, err := skill.New(skill.Options{RepoSkillsDir: repoSkills})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := direct.Catalogue(); len(got) != 1 || got[0].Name != "audit-unique-repo-skill" {
+				t.Fatalf("direct catalogue = %+v, warnings = %v", got, direct.Warnings())
+			}
+			directBinding, err := direct.Bind([]string{"audit-unique-repo-skill"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := directBinding.Tool().Call(ctx, json.RawMessage(`{"name":"audit-unique-repo-skill"}`))
+			if err != nil || !strings.Contains(result.Content, "REPO_SKILL_AUDIT_BODY") {
+				t.Fatalf("direct load_skill = %q, %v", result.Content, err)
+			}
+
+			if registered {
+				other := filepath.Join(t.TempDir(), "container", "registered-project-skill")
+				if err := os.MkdirAll(other, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(other, "SKILL.md"), []byte("---\nname: registered-project-skill\ndescription: independent project skill\n---\nbody\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := f.db.CreateSkill(ctx, store.Skill{Scope: store.ScopeProject, ProjectID: &id, Name: "registered-project-skill", Description: "independent project skill", Dir: other, Enabled: true}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			extensions, err := NewExtensionService(ExtensionServiceConfig{Store: f.db, Workspace: runtime.workspace})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := extensions.UpsertBlockBinding(ctx, BlockBindingInput{Scope: store.ScopeProject, ProjectID: &id, Block: "code-review", Skills: []string{"audit-unique-repo-skill"}}); err != nil {
+				t.Fatal(err)
+			}
+			func() {
+				unlock, err := runtime.workspace.Get(id).RLock(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer unlock()
+				set, err := runtime.projectExts.ForProject(ctx, id)
+				if err != nil {
+					t.Fatalf("ForProject: %v", err)
+				}
+				if (set.loader != nil) != registered {
+					t.Fatalf("unexpected project loader = %v, registered = %v", set.loader, registered)
+				}
+				if registered {
+					binding, err := set.skills.BindSkills(ctx, []string{"registered-project-skill"})
+					if err != nil || len(binding.Skills) != 1 || binding.Skills[0].Name != "registered-project-skill" {
+						t.Fatalf("registered project skill missing: %+v, %v", binding, err)
+					}
+				}
+				projectCtx := context.WithValue(ctx, projectIDContextKey{}, id)
+				_, err = runtime.skillBinder.BindSkills(projectCtx, []string{projectSkillStubBase + "code-review"})
+				if !errors.Is(err, skill.ErrUnknownSkill) {
+					t.Fatalf("project-aware binding error = %v, want unknown skill", err)
+				}
+				_, err = runtime.reviews.resolveReviewExecution(ctx, id, review.Profile{Name: "default", Config: f.profiles["default"]})
+				if !errors.Is(err, skill.ErrUnknownSkill) {
+					t.Fatalf("review execution identity error = %v, want unknown skill", err)
+				}
+			}()
+			job := f.seedReview(t, "audit-repo-skill")
+			err = runtime.reviews.Handle(ctx, job)
+			if !errors.Is(err, skill.ErrUnknownSkill) {
+				t.Fatalf("review worker error = %v, want unknown skill", err)
+			}
+			if calls := f.runner.count(); calls != 0 {
+				t.Fatalf("fake agent was called %d times", calls)
+			}
+			t.Logf("saved opt-in=true; ignore empty; direct catalogue and body available; %s review worker error: %v; fake agent calls=0", name, err)
+		})
+	}
+}
