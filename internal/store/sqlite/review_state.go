@@ -506,13 +506,16 @@ func canonicalReplayJob(raw []byte, command bool) bool {
 
 // loadCommandReplayDossiersTx uses only a workflow-bound, fingerprint-matched
 // review snapshot. A dossier proves a run, never a cancel. Orphan reservations,
-// damaged snapshots, and conflicting job mappings cannot prove an identity.
+// damaged snapshots, and conflicting job mappings cannot prove an identity. A
+// replaced job must have a newer generation bounded by its MR's control.
 func loadCommandReplayDossiersTx(ctx context.Context, tx *sql.Tx, states map[commandReplayNoteKey]*commandReplayNoteState) error {
 	rows, err := tx.QueryContext(ctx, `SELECT w.project_id, w.mr_iid, COALESCE(w.head_sha, ''),
-		COALESCE(w.fingerprint, ''), COALESCE(d.job_id, ''), d.hash, d.data,
-		COALESCE(j.id, ''), COALESCE(j.kind, ''), COALESCE(j."key", ''), COALESCE(j.payload, '')
+		COALESCE(w.fingerprint, ''), COALESCE(d.job_id, ''), d.generation, d.hash, d.data,
+		COALESCE(j.id, ''), COALESCE(j.kind, ''), COALESCE(j."key", ''), COALESCE(j.payload, ''),
+		COALESCE(j.attempts, 0), COALESCE(c.generation, 0), COALESCE(c.head_sha, ''), COALESCE(c.cancelled, 0)
 		FROM workflows w JOIN workflow_dossiers d ON d.workflow_id = w.id
 		LEFT JOIN jobs j ON j.id = d.job_id
+		LEFT JOIN review_controls c ON c.project_id = w.project_id AND c.mr_iid = w.mr_iid
 		WHERE w.kind = 'review' AND w.trigger = 'command'
 		  AND w.project_id > 0 AND w.mr_iid > 0 AND d.project_id = w.project_id
 		  AND d.generation > 0 AND d.version = 1`)
@@ -521,11 +524,12 @@ func loadCommandReplayDossiersTx(ctx context.Context, tx *sql.Tx, states map[com
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var projectID, mrIID int64
-		var head, fingerprint, jobID, hash, linkedID, linkedKind, linkedKey string
+		var projectID, mrIID, generation, controlGeneration int64
+		var linkedAttempts, controlCancelled int
+		var head, fingerprint, jobID, hash, linkedID, linkedKind, linkedKey, controlHead string
 		var compressed, linkedPayload []byte
-		if err := rows.Scan(&projectID, &mrIID, &head, &fingerprint, &jobID, &hash, &compressed,
-			&linkedID, &linkedKind, &linkedKey, &linkedPayload); err != nil {
+		if err := rows.Scan(&projectID, &mrIID, &head, &fingerprint, &jobID, &generation, &hash, &compressed,
+			&linkedID, &linkedKind, &linkedKey, &linkedPayload, &linkedAttempts, &controlGeneration, &controlHead, &controlCancelled); err != nil {
 			return fmt.Errorf("sqlite: scan legacy command dossier: %w", err)
 		}
 		data, err := decompressDossier(compressed)
@@ -568,10 +572,36 @@ func loadCommandReplayDossiersTx(ctx context.Context, tx *sql.Tx, states map[com
 			continue
 		}
 		if linkedID != "" {
-			var payload commandReplayJobPayload
+			fields, valid := replayObject(linkedPayload)
+			var payload struct {
+				commandReplayJobPayload
+				Generation int64  `json:"generation"`
+				HeadSHA    string `json:"head_sha"`
+			}
+			for key := range fields {
+				if (strings.EqualFold(key, "generation") && key != "generation") ||
+					(strings.EqualFold(key, "head_sha") && key != "head_sha") ||
+					(strings.EqualFold(key, "note_id") && key != "note_id") {
+					valid = false
+				}
+			}
 			if linkedKind != reviewRunKind || linkedKey != "review:"+strconv.FormatInt(projectID, 10)+":"+strconv.FormatInt(mrIID, 10) ||
-				!canonicalReplayJob(linkedPayload, false) || json.Unmarshal(linkedPayload, &payload) != nil || payload.ProjectID != projectID || payload.MRIID != mrIID ||
-				payload.NoteID != noteID || payload.Trigger != "command" {
+				!valid || fields["project_id"] == nil || fields["mr_iid"] == nil ||
+				json.Unmarshal(linkedPayload, &payload) != nil || payload.ProjectID != projectID || payload.MRIID != mrIID {
+				continue
+			}
+			if fields["generation"] != nil && payload.Generation > generation {
+				// A retry can be replaced in place before its old mapping is detached.
+				if linkedAttempts <= 0 || payload.Generation > controlGeneration || fields["head_sha"] == nil ||
+					!reviewHeadRE.MatchString(payload.HeadSHA) || fields["trigger"] == nil || payload.Trigger == "" ||
+					(payload.Generation == controlGeneration && (controlCancelled != 0 || !strings.EqualFold(payload.HeadSHA, controlHead))) ||
+					payload.NoteID < 0 || (fields["note_id"] == nil && payload.NoteID != 0) ||
+					(payload.Trigger == "command" && (fields["note_id"] == nil || payload.NoteID <= 0)) {
+					continue
+				}
+			} else if fields["note_id"] == nil || fields["trigger"] == nil || payload.NoteID != noteID || payload.Trigger != "command" ||
+				(fields["generation"] != nil && payload.Generation != generation) ||
+				(fields["head_sha"] != nil && !strings.EqualFold(payload.HeadSHA, head)) {
 				continue
 			}
 		}

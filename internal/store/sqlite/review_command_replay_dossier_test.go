@@ -173,6 +173,101 @@ func TestCommandReplayDossierProofAndIsolation(t *testing.T) {
 	}
 }
 
+func TestCommandReplayDossierLinkedJobGenerationProvenance(t *testing.T) {
+	head := reviewHead("a")
+	otherHead := reviewHead("b")
+	run := func(project, mr, note, generation int64, trigger, jobHead string) string {
+		return fmt.Sprintf(`{"project_id":%d,"mr_iid":%d,"note_id":%d,"generation":%d,"head_sha":%q,"trigger":%q}`,
+			project, mr, note, generation, jobHead, trigger)
+	}
+	tests := []struct {
+		name, kind, key, payload string
+		controlGeneration        int64
+		noControl, noAttempts    bool
+		controlRunning           bool
+		want                     bool
+	}{
+		{name: "same generation and identity", payload: run(42, 7, 555, 1, "command", head), want: true},
+		{name: "legacy identity without generation", payload: `{"project_id":42,"mr_iid":7,"note_id":555,"trigger":"command"}`, want: true},
+		{name: "later command", payload: run(42, 7, 556, 2, "command", head), want: true},
+		{name: "later command same note", payload: run(42, 7, 555, 2, "command", head), want: true},
+		{name: "later manual", payload: fmt.Sprintf(`{"project_id":42,"mr_iid":7,"generation":2,"head_sha":%q,"trigger":"manual"}`, otherHead), want: true},
+		{name: "replacement at current control", payload: run(42, 7, 556, 2, "command", head), controlGeneration: 2, controlRunning: true, want: true},
+		{name: "replacement conflicts with current head", payload: run(42, 7, 556, 2, "command", otherHead), controlGeneration: 2, controlRunning: true},
+		{name: "replacement conflicts with current cancel", payload: run(42, 7, 556, 2, "command", head), controlGeneration: 2},
+		{name: "same generation different note", payload: run(42, 7, 556, 1, "command", head)},
+		{name: "same generation different trigger", payload: run(42, 7, 555, 1, "manual", head)},
+		{name: "same generation different head", payload: run(42, 7, 555, 1, "command", otherHead)},
+		{name: "earlier generation", payload: run(42, 7, 556, 0, "command", head)},
+		{name: "earlier generation same identity", payload: run(42, 7, 555, 0, "command", head)},
+		{name: "missing generation", payload: `{"project_id":42,"mr_iid":7,"note_id":556,"trigger":"command"}`},
+		{name: "future generation beyond control", payload: run(42, 7, 556, 4, "command", head)},
+		{name: "missing control", payload: run(42, 7, 556, 2, "command", head), noControl: true},
+		{name: "never attempted", payload: run(42, 7, 556, 2, "command", head), noAttempts: true},
+		{name: "different project", payload: run(43, 7, 556, 2, "command", head)},
+		{name: "different MR", payload: run(42, 8, 556, 2, "command", head)},
+		{name: "different kind", kind: "review.cancel", payload: run(42, 7, 556, 2, "command", head)},
+		{name: "different key", key: "review:42:8", payload: run(42, 7, 556, 2, "command", head)},
+		{name: "missing head", payload: `{"project_id":42,"mr_iid":7,"note_id":556,"generation":2,"trigger":"command"}`},
+		{name: "invalid head", payload: run(42, 7, 556, 2, "command", "bad")},
+		{name: "missing trigger", payload: fmt.Sprintf(`{"project_id":42,"mr_iid":7,"note_id":556,"generation":2,"head_sha":%q}`, head)},
+		{name: "empty trigger", payload: run(42, 7, 556, 2, "", head)},
+		{name: "command without note", payload: fmt.Sprintf(`{"project_id":42,"mr_iid":7,"generation":2,"head_sha":%q,"trigger":"command"}`, head)},
+		{name: "negative note on manual", payload: run(42, 7, -1, 2, "manual", head)},
+		{name: "aliased note on manual", payload: fmt.Sprintf(`{"project_id":42,"mr_iid":7,"NOTE_ID":556,"generation":2,"head_sha":%q,"trigger":"manual"}`, head)},
+		{name: "aliased zero note on manual", payload: fmt.Sprintf(`{"project_id":42,"mr_iid":7,"NOTE_ID":0,"generation":2,"head_sha":%q,"trigger":"manual"}`, head)},
+		{name: "invalid generation type", payload: fmt.Sprintf(`{"project_id":42,"mr_iid":7,"note_id":556,"generation":"2","head_sha":%q,"trigger":"command"}`, head)},
+		{name: "ambiguous generation", payload: fmt.Sprintf(`{"project_id":42,"mr_iid":7,"note_id":556,"generation":1,"GENERATION":2,"head_sha":%q,"trigger":"command"}`, head)},
+		{name: "aliased generation", payload: fmt.Sprintf(`{"project_id":42,"mr_iid":7,"note_id":556,"GENERATION":2,"head_sha":%q,"trigger":"command"}`, head)},
+		{name: "aliased generation same identity", payload: fmt.Sprintf(`{"project_id":42,"mr_iid":7,"note_id":555,"GENERATION":1,"head_sha":%q,"trigger":"command"}`, head)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			_, db := openLegacyCommandReplayDB(t)
+			insertLegacyReplayProject(t, db, 42)
+			if !tt.noControl {
+				generation := tt.controlGeneration
+				if generation == 0 {
+					generation = 3
+				}
+				insertLegacyReplayControl(t, db, 42, 7, generation, head, !tt.controlRunning)
+			}
+			insertLegacyDossierProof(t, db, legacyDossierProof{
+				workflowID: "workflow", jobID: "linked", kind: "review", workflowTrigger: "command",
+				workflowProject: 42, dossierProject: 42, mrIID: 7, generation: 1, version: 1, schema: 1,
+				dossierProjectID: 42, dossierMRIID: 7, dossierTrigger: "command", noteID: "555", head: head,
+			})
+			kind, key := tt.kind, tt.key
+			if kind == "" {
+				kind = "review.run"
+			}
+			if key == "" {
+				key = "review:42:7"
+			}
+			insertLegacyReplayJob(t, db, "linked", kind, key, tt.payload, "queued")
+			if tt.noAttempts {
+				if _, err := db.Exec(`UPDATE jobs SET attempts = 0 WHERE id = 'linked'`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			tx, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback()
+			states := make(map[commandReplayNoteKey]*commandReplayNoteState)
+			if err := loadCommandReplayDossiersTx(ctx, tx, states); err != nil {
+				t.Fatal(err)
+			}
+			state := states[commandReplayNoteKey{42, 7, 555}]
+			if got := state != nil && state.proven("run", false); got != tt.want {
+				t.Errorf("original dossier proof = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCommandReplayDossierBackfillRollsBackAndRetries(t *testing.T) {
 	ctx := context.Background()
 	_, legacy := openLegacyCommandReplayDB(t)
