@@ -338,7 +338,9 @@ func (e *Executor) executeGather(ctx context.Context, in dag.NodeInput) (dag.Nod
 	if err != nil {
 		return dag.NodeOutput{}, err
 	}
-	signals = append(signals, e.coverageUnresolved(wf)...)
+	coverageSignals, coverageWarnings := e.coverageUnresolved(wf)
+	signals = append(signals, coverageSignals...)
+	warnings = mergeWarnings(warnings, coverageWarnings)
 	scope := e.incrementalFiles()
 	if scope != nil {
 		filtered := make([]Proposal, 0, len(proposals))

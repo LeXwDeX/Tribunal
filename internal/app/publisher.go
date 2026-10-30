@@ -267,7 +267,12 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 	if hasConfig && configHash != "" && configHash != reviewConfigHash(cfg) {
 		return p.stale(ctx, workflowID, "configuration changed")
 	}
-	if hasPrompt && promptHash != "" && p.promptsHash != "" && promptHash != p.promptsHash {
+	if !hasPrompt || promptHash == "" {
+		// Old workflows predate the prompt identity. Publishing them could
+		// apply a review produced by an obsolete task layout.
+		return p.stale(ctx, workflowID, "prompt bundle identity unavailable")
+	}
+	if p.promptsHash != "" && promptHash != p.promptsHash {
 		return p.stale(ctx, workflowID, "prompt bundle changed")
 	}
 
@@ -518,7 +523,12 @@ func (p *Publisher) publishFailure(ctx context.Context, workflowID, reason strin
 	if hasConfig && configHash != "" && configHash != reviewConfigHash(cfg) {
 		return p.stale(ctx, workflowID, "configuration changed")
 	}
-	if hasPrompt && promptHash != "" && p.promptsHash != "" && promptHash != p.promptsHash {
+	if !hasPrompt || promptHash == "" {
+		// Old workflows predate the prompt identity. Publishing them could
+		// apply a review produced by an obsolete task layout.
+		return p.stale(ctx, workflowID, "prompt bundle identity unavailable")
+	}
+	if p.promptsHash != "" && promptHash != p.promptsHash {
 		return p.stale(ctx, workflowID, "prompt bundle changed")
 	}
 	version, err := p.gitlab.LatestMRVersion(ctx, loaded.token, loaded.project.ID, loaded.mrIID)

@@ -12,13 +12,18 @@ import (
 // coverageUnresolved turns material and prompt truncation into hard evidence
 // gaps. The app layer owns collection and sets DiffSummary.Truncated for
 // capacity, too-large, or collapsed diffs. Prompt truncation is deterministic
-// here. Neither code nor agent synthesis can clear these signals.
-func (e *Executor) coverageUnresolved(wf dag.WorkflowView) []UnresolvedSignal {
+// here: every review node is rebuilt through BuildPrompt with an explicit diff
+// budget, so a diff that the real prompt omits or cuts is a gap even when the
+// raw diff was rendered. Both code and agent synthesis cannot clear these
+// signals. A truncated MR description or a bounded context section is
+// disclosed as a warning; the budget keeps the diff complete.
+func (e *Executor) coverageUnresolved(wf dag.WorkflowView) ([]UnresolvedSignal, []string) {
 	if e == nil || e.deps.Dossier == nil {
-		return nil
+		return nil, nil
 	}
 	d := e.deps.Dossier
 	var signals []UnresolvedSignal
+	var warnings []string
 	if message := collectionCoverageGap(d); message != "" {
 		signals = append(signals, UnresolvedSignal{
 			Node: "coverage", Kind: UnresolvedEvidence, Message: message,
@@ -47,7 +52,11 @@ func (e *Executor) coverageUnresolved(wf dag.WorkflowView) []UnresolvedSignal {
 		if err != nil {
 			continue
 		}
-		for _, gap := range promptDiffGaps(d, params.Files) {
+		gaps, locallyGapped := promptDiffGaps(d, params.Files)
+		builtGaps, builtWarnings := e.builtPromptDiffGaps(d, node.Spec.Kind, params, locallyGapped)
+		gaps = append(gaps, builtGaps...)
+		warnings = mergeWarnings(warnings, builtWarnings)
+		for _, gap := range gaps {
 			signals = append(signals, UnresolvedSignal{
 				Node: node.ID, Kind: UnresolvedEvidence, Message: gap,
 			})
@@ -66,7 +75,7 @@ func (e *Executor) coverageUnresolved(wf dag.WorkflowView) []UnresolvedSignal {
 			})
 		}
 	}
-	return signals
+	return signals, warnings
 }
 
 // completedPlan returns the planner's declared file assignment. Without a
@@ -174,35 +183,40 @@ func boundedPathList(paths []string, max int) string {
 	return out
 }
 
-// promptDiffGaps mirrors renderDiffs coverage: a missing file, a per-file
+// promptDiffGaps mirrors renderDiffsWithSpans coverage: a missing file, a per-file
 // truncation, an empty diff, or a package total truncation means the model did
-// not see the full changed scope. Ignore rules are not gaps.
-func promptDiffGaps(d *Dossier, files []string) []string {
+// not see the full changed scope. Ignore rules are not gaps. The returned set
+// names files already reported, so the built-prompt check can skip them.
+func promptDiffGaps(d *Dossier, files []string) ([]string, map[string]struct{}) {
 	if d == nil || len(files) == 0 {
-		return nil
+		return nil, nil
 	}
 	byPath := make(map[string]FileChange, len(d.Files))
 	for _, file := range d.Files {
 		byPath[file.Path] = file
 	}
 	var gaps []string
+	gapped := make(map[string]struct{})
 	total := 0
 	for i, filePath := range files {
 		file, ok := byPath[filePath]
 		if !ok {
 			gaps = append(gaps, fmt.Sprintf(
 				"file %s is not in the materials snapshot; it was not reviewed", filePath))
+			gapped[filePath] = struct{}{}
 			continue
 		}
 		diff := file.Diff
 		if utf8.RuneCountInString(diff) > maxFileDiffRunes {
 			gaps = append(gaps, fmt.Sprintf(
 				"diff for %s was truncated at %d characters before review", filePath, maxFileDiffRunes))
+			gapped[filePath] = struct{}{}
 		}
 		diff = truncateRunes(diff, maxFileDiffRunes)
 		if strings.TrimSpace(diff) == "" {
 			gaps = append(gaps, fmt.Sprintf(
 				"file %s has no diff content in the materials snapshot; it was not reviewed", filePath))
+			gapped[filePath] = struct{}{}
 			continue
 		}
 		if total+len(diff) > maxTaskFileRunes {
@@ -210,9 +224,76 @@ func promptDiffGaps(d *Dossier, files []string) []string {
 			gaps = append(gaps, fmt.Sprintf(
 				"package diff reached the %d-byte prompt limit at %s; %d file(s) were omitted: %s",
 				maxTaskFileRunes, filePath, len(omitted), boundedPathList(omitted, 20)))
+			for _, path := range omitted {
+				gapped[path] = struct{}{}
+			}
 			break
 		}
 		total += len(diff)
 	}
-	return gaps
+	return gaps, gapped
+}
+
+// promptCoverageNonce makes the rebuilt prompt deterministic. BuildPrompt
+// returns the same nonce, so neutralization is reproduced exactly.
+const promptCoverageNonce = "prompt_coverage_nonce"
+
+// builtPromptDiffGaps rebuilds the node task and judges coverage from where the
+// renderer placed each diff block, not from a search over untrusted text. A
+// block counts only when its recorded end lies inside the task that survives
+// MaxTaskRunes truncation. The whole user prompt is also checked against the
+// deterministic rebuild, so a change in prompt framing fails closed. Files
+// already reported by promptDiffGaps are skipped to avoid duplicate signals.
+func (e *Executor) builtPromptDiffGaps(d *Dossier, kind string, params reviewNodeParams, locallyGapped map[string]struct{}) ([]string, []string) {
+	if d == nil || len(params.Files) == 0 {
+		return nil, nil
+	}
+	role, ok := roleForKind(kind)
+	if !ok {
+		return nil, nil
+	}
+	layout, ok := reviewTaskLayoutFor(kind, d, params)
+	if !ok {
+		return nil, nil
+	}
+	built, err := BuildPrompt(PromptInput{
+		Bundle: e.prompts, Role: role, Task: layout.task, Nonce: promptCoverageNonce,
+	})
+	if err != nil {
+		return []string{fmt.Sprintf("could not verify the built review prompt: %v", err)}, nil
+	}
+	if built.User != renderTaskSection(layout.task, built.Nonce) {
+		return []string{"could not verify the built review prompt: deterministic rebuild differs"}, nil
+	}
+	visible := utf8.RuneCountInString(layout.task)
+	if visible > MaxTaskRunes {
+		visible = MaxTaskRunes
+	}
+	covered := make(map[string]struct{}, len(layout.spans))
+	for _, span := range layout.spans {
+		if span.end <= visible {
+			covered[span.path] = struct{}{}
+		}
+	}
+	var missing []string
+	reported := make(map[string]struct{}, len(params.Files))
+	for _, filePath := range params.Files {
+		if _, ok := locallyGapped[filePath]; ok {
+			continue
+		}
+		if _, ok := covered[filePath]; ok {
+			continue
+		}
+		if _, ok := reported[filePath]; ok {
+			continue
+		}
+		reported[filePath] = struct{}{}
+		missing = append(missing, filePath)
+	}
+	if len(missing) == 0 {
+		return nil, layout.warnings
+	}
+	return []string{fmt.Sprintf(
+		"built prompt did not include the complete diff for %d of %d file(s): %s",
+		len(missing), len(params.Files), boundedPathList(missing, 8))}, layout.warnings
 }

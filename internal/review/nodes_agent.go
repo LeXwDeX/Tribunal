@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/LeXwDeX/tribunal/internal/agent"
 	"github.com/LeXwDeX/tribunal/internal/llm"
@@ -18,6 +19,11 @@ const (
 	maxFileDiffRunes = 16000
 	maxTaskFileRunes = 120000
 )
+
+// descriptionTruncatedMarker heads the bounded description when the MR
+// description exceeds MaxDescriptionRunes. The review result also discloses
+// the truncation as a warning.
+const descriptionTruncatedMarker = "MR 描述已截断"
 
 func roleForKind(kind string) (string, bool) {
 	switch kind {
@@ -777,7 +783,55 @@ func (e *Executor) synthesisGroups(ctx context.Context, in dag.NodeInput, params
 	}
 	merged = append(merged, extensionGroups...)
 	warnings = mergeWarnings(warnings, extensionWarnings)
+	extensionSignals, extensionCoverageWarnings := e.extensionCoverageUnresolved(wf)
+	extensionSignals, err = normalizeUnresolved(extensionSignals)
+	if err != nil {
+		return nil, 0, nil, nil, err
+	}
+	unresolved = mergeUnresolved(unresolved, extensionSignals)
+	warnings = mergeWarnings(warnings, extensionCoverageWarnings)
 	return merged, extendsUsed, unresolved, warnings, nil
+}
+
+// extensionCoverageUnresolved checks the real prompt of completed extension
+// review nodes. They are created after gather, so the gather-time coverage
+// check cannot see them; synthesize.2 must do it before it can settle PASS.
+func (e *Executor) extensionCoverageUnresolved(wf dag.WorkflowView) ([]UnresolvedSignal, []string) {
+	if e == nil || e.deps.Dossier == nil {
+		return nil, nil
+	}
+	order := append([]string(nil), wf.Order...)
+	if len(order) == 0 {
+		for id := range wf.Nodes {
+			order = append(order, id)
+		}
+		sort.Strings(order)
+	}
+	var signals []UnresolvedSignal
+	var warnings []string
+	for _, id := range order {
+		node, ok := wf.Nodes[id]
+		if !ok || !strings.HasPrefix(node.ID, "rv.ext.") {
+			continue
+		}
+		if node.Spec.Kind != KindCodeReview || node.Status != dag.NodeCompleted {
+			continue
+		}
+		params, err := decodeParams[reviewNodeParams](node.Spec.Params)
+		if err != nil {
+			continue
+		}
+		gaps, locallyGapped := promptDiffGaps(e.deps.Dossier, params.Files)
+		builtGaps, builtWarnings := e.builtPromptDiffGaps(e.deps.Dossier, node.Spec.Kind, params, locallyGapped)
+		gaps = append(gaps, builtGaps...)
+		for _, gap := range gaps {
+			signals = append(signals, UnresolvedSignal{
+				Node: node.ID, Kind: UnresolvedEvidence, Message: gap,
+			})
+		}
+		warnings = mergeWarnings(warnings, builtWarnings)
+	}
+	return signals, warnings
 }
 
 // extensionReviewGroups folds findings from extend review nodes into the
@@ -1144,28 +1198,194 @@ func planTask(d *Dossier, params planParams) string {
 }
 
 func reviewTask(d *Dossier, params reviewNodeParams) string {
-	var b strings.Builder
-	b.WriteString(summaryForPrompt(d))
-	b.WriteString("\n## 本包任务\n\n")
-	b.WriteString(fmt.Sprintf("包：%s\n\n重点：%s\n\n", params.Package, params.Focus))
-	b.WriteString(fmt.Sprintf("文件数：%d\n\n", len(params.Files)))
-	b.WriteString(renderDiffs(d, params.Files))
-	return b.String()
+	layout, _ := reviewTaskLayoutFor(KindCodeReview, d, params)
+	return layout.task
 }
 
 func reviewChannelTask(d *Dossier, params reviewNodeParams, kind string) string {
-	var b strings.Builder
-	b.WriteString(summaryForPrompt(d))
-	b.WriteString("\n## 评审通道\n\n")
-	switch kind {
-	case KindReviewStd:
-		b.WriteString("通道：review.standards（项目标准与工程规范）\n\n")
-	case KindReviewInt:
-		b.WriteString("通道：review.intent（改动意图与 MR / issue 的一致性）\n\n")
+	layout, _ := reviewTaskLayoutFor(kind, d, params)
+	return layout.task
+}
+
+// diffSpan locates one complete rendered diff block in a task. Offsets are
+// rune offsets in the whole task, so they survive the same rune-based
+// MaxTaskRunes truncation BuildPrompt applies.
+type diffSpan struct {
+	path string
+	end  int
+}
+
+// reviewTaskLayout is a review task plus the exact location of every complete
+// file diff block. Coverage uses the positions instead of searching the prompt:
+// untrusted text can repeat a block and must not count as the rendered one.
+type reviewTaskLayout struct {
+	task     string
+	spans    []diffSpan
+	warnings []string
+}
+
+type contextSection struct {
+	name string
+	end  int
+}
+
+const (
+	maxReviewPackageRunes        = 200
+	maxReviewFocusRunes          = 4000
+	reviewContextTruncatedMarker = "\n[评审上下文已截断：以下内容不完整，其余未提供]\n"
+)
+
+// reviewTaskLayoutFor puts the task header and the diff first so optional MR
+// context cannot push them out, then appends the context within its own budget
+// with a visible truncation marker.
+func reviewTaskLayoutFor(kind string, d *Dossier, params reviewNodeParams) (reviewTaskLayout, bool) {
+	var header strings.Builder
+	var warnings []string
+	packageName := truncateRunes(params.Package, maxReviewPackageRunes)
+	if packageName != params.Package {
+		warnings = appendUnique(warnings, "package name was truncated before review")
 	}
-	b.WriteString(fmt.Sprintf("包：%s\n\n重点：%s\n\n", params.Package, params.Focus))
-	b.WriteString(renderDiffs(d, params.Files))
-	return b.String()
+	focus := truncateRunes(params.Focus, maxReviewFocusRunes)
+	if focus != params.Focus {
+		warnings = appendUnique(warnings, "package focus was truncated before review")
+	}
+	switch kind {
+	case KindCodeReview:
+		header.WriteString("\n## 本包任务\n\n")
+	case KindReviewStd, KindReviewInt:
+		header.WriteString("\n## 评审通道\n\n")
+		switch kind {
+		case KindReviewStd:
+			header.WriteString("通道：review.standards（项目标准与工程规范）\n\n")
+		case KindReviewInt:
+			header.WriteString("通道：review.intent（改动意图与 MR / issue 的一致性）\n\n")
+		}
+	default:
+		return reviewTaskLayout{}, false
+	}
+	header.WriteString(fmt.Sprintf("包：%s\n\n重点：%s\n\n", packageName, focus))
+	if kind == KindCodeReview {
+		header.WriteString(fmt.Sprintf("文件数：%d\n\n", len(params.Files)))
+	}
+	headerText := header.String()
+
+	var context strings.Builder
+	contextRunes := 0
+	var sections []contextSection
+	addContext := func(name, value string) {
+		if value == "" {
+			return
+		}
+		context.WriteString(value)
+		contextRunes += utf8.RuneCountInString(value)
+		sections = append(sections, contextSection{name: name, end: contextRunes})
+	}
+	if d == nil {
+		addContext("MR metadata", "## MR\n\n（材料不可用）\n")
+	} else {
+		addContext("MR description", summaryDescriptionForPrompt(d))
+		addContext("MR metadata", summaryMetaForPrompt(d))
+		addContext("pipeline context", summaryPipelineForPrompt(d))
+		addContext("issue context", summaryIssuesForPrompt(d))
+	}
+	contextText := context.String()
+
+	diffText, spans := renderDiffsWithSpans(d, params.Files)
+	diffRunes := utf8.RuneCountInString(diffText)
+	headerRunes := utf8.RuneCountInString(headerText)
+	remaining := MaxTaskRunes - headerRunes
+	if remaining < 0 {
+		remaining = 0
+	}
+	marker := reviewContextTruncatedMarker
+	markerRunes := utf8.RuneCountInString(marker)
+	contextBudget := remaining - diffRunes
+	diffBudget := remaining
+	if contextRunes > contextBudget {
+		// The context needs a notice, so reserve its full length in the task
+		// that BuildPrompt keeps. The diff yields first, and a clipped diff
+		// drops its coverage span.
+		diffBudget = remaining - markerRunes
+		if diffBudget < 0 {
+			diffBudget = 0
+		}
+	}
+	if diffRunes > diffBudget {
+		warnings = appendUnique(warnings, fmt.Sprintf(
+			"review diff exceeds the %d-rune task budget remaining after the task header; it was clipped to keep the context truncation notice", remaining))
+		diffText = truncateRunes(diffText, diffBudget)
+		diffRunes = utf8.RuneCountInString(diffText)
+		kept := spans[:0]
+		for _, span := range spans {
+			if span.end <= diffRunes {
+				kept = append(kept, span)
+			}
+		}
+		spans = kept
+	}
+	contextBudget = remaining - diffRunes
+	if contextBudget < 0 {
+		contextBudget = 0
+	}
+	contentBudget := contextRunes
+	if contextRunes > contextBudget {
+		contentBudget = contextBudget - markerRunes
+		if contentBudget < 0 {
+			contentBudget = 0
+		}
+		contextText = marker + truncateRunes(contextText, contentBudget)
+		warnings = appendUnique(warnings, fmt.Sprintf(
+			"review context was truncated in the prompt; not fully included: %s",
+			contextSectionNames(sections, contentBudget)))
+	}
+	if warning, ok := reviewDescriptionWarning(d, sections, contentBudget); ok {
+		warnings = append(warnings, warning)
+	}
+	for i := range spans {
+		spans[i].end += headerRunes
+	}
+	return reviewTaskLayout{task: headerText + diffText + contextText, spans: spans, warnings: warnings}, true
+}
+
+func contextSectionNames(sections []contextSection, budget int) string {
+	var names []string
+	for _, section := range sections {
+		if section.end > budget {
+			names = append(names, section.name)
+		}
+	}
+	if len(names) == 0 {
+		return "all context"
+	}
+	return strings.Join(names, ", ")
+}
+
+func reviewDescriptionWarning(d *Dossier, sections []contextSection, contentBudget int) (string, bool) {
+	if d == nil || d.MR.Description == "" {
+		return "", false
+	}
+	descriptionEnd := 0
+	for _, section := range sections {
+		if section.name == "MR description" {
+			descriptionEnd = section.end
+			break
+		}
+	}
+	if descriptionEnd == 0 {
+		return "", false
+	}
+	if descriptionEnd > contentBudget {
+		if contentBudget <= 0 {
+			return "MR description was not included in the review prompt; the context budget was exhausted", true
+		}
+		return "MR description context was truncated in the review prompt", true
+	}
+	if total := utf8.RuneCountInString(d.MR.Description); total > MaxDescriptionRunes {
+		return fmt.Sprintf(
+			"MR description was truncated to %d runes before review; %d runes were omitted from the prompt",
+			MaxDescriptionRunes, total-MaxDescriptionRunes), true
+	}
+	return "", false
 }
 
 func reviewGateTask(d *Dossier, params gateParams, channels []ReviewOut) string {
@@ -1298,6 +1518,11 @@ func summaryForPrompt(d *Dossier) string {
 	if d == nil {
 		return "## MR\n\n（材料不可用）\n"
 	}
+	return summaryMetaForPrompt(d) + summaryDescriptionForPrompt(d) +
+		summaryPipelineForPrompt(d) + summaryIssuesForPrompt(d)
+}
+
+func summaryMetaForPrompt(d *Dossier) string {
 	var b strings.Builder
 	b.WriteString("## MR\n\n")
 	b.WriteString(fmt.Sprintf("- 标题：%s\n", d.MR.Title))
@@ -1309,63 +1534,105 @@ func summaryForPrompt(d *Dossier) string {
 		b.WriteString(fmt.Sprintf("- 作者：%s\n", d.MR.Author))
 	}
 	b.WriteString(fmt.Sprintf("- 变更文件：%d，+%d/-%d\n", len(d.Files), d.DiffSummary.Additions, d.DiffSummary.Deletions))
-	if d.MR.Description != "" {
-		b.WriteString("\n### 描述\n\n")
-		b.WriteString(d.MR.Description)
-		b.WriteString("\n")
+	return b.String()
+}
+
+func summaryDescriptionForPrompt(d *Dossier) string {
+	if d.MR.Description == "" {
+		return ""
 	}
-	if d.Pipeline != nil {
-		b.WriteString(fmt.Sprintf("\n### Pipeline\n\n最新 pipeline：%s（%s）\n", d.Pipeline.Status, d.Pipeline.Ref))
-		for _, job := range d.Pipeline.FailedJobs {
-			b.WriteString(fmt.Sprintf("- %s：%s", job.Name, job.Status))
-			if job.FailureReason != "" {
-				b.WriteString("（" + job.FailureReason + "）")
-			}
-			b.WriteByte('\n')
-		}
+	return "\n### 描述\n\n" + renderDescription(d.MR.Description) + "\n"
+}
+
+func summaryPipelineForPrompt(d *Dossier) string {
+	if d.Pipeline == nil {
+		return ""
 	}
-	if len(d.Issues) > 0 {
-		b.WriteString("\n### 关闭的 issue\n\n")
-		for _, issue := range d.Issues {
-			b.WriteString(fmt.Sprintf("- #%d %s\n", issue.IID, issue.Title))
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("\n### Pipeline\n\n最新 pipeline：%s（%s）\n", d.Pipeline.Status, d.Pipeline.Ref))
+	for _, job := range d.Pipeline.FailedJobs {
+		b.WriteString(fmt.Sprintf("- %s：%s", job.Name, job.Status))
+		if job.FailureReason != "" {
+			b.WriteString("（" + job.FailureReason + "）")
 		}
+		b.WriteByte('\n')
 	}
 	return b.String()
 }
 
-func renderDiffs(d *Dossier, files []string) string {
+func summaryIssuesForPrompt(d *Dossier) string {
+	if len(d.Issues) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n### 关闭的 issue\n\n")
+	for _, issue := range d.Issues {
+		b.WriteString(fmt.Sprintf("- #%d %s\n", issue.IID, issue.Title))
+	}
+	return b.String()
+}
+
+func renderDescription(description string) string {
+	count := utf8.RuneCountInString(description)
+	if count <= MaxDescriptionRunes {
+		return description
+	}
+	return fmt.Sprintf("[%s：原始长度 %d 个字符，仅保留前 %d 个字符，其余内容未提供]\n\n%s",
+		descriptionTruncatedMarker, count, MaxDescriptionRunes, truncateRunes(description, MaxDescriptionRunes))
+}
+
+func fileDiffHeader(file FileChange) string {
+	return fmt.Sprintf("### %s（%s，+%d/-%d）\n\n", file.Path, file.Status, file.Additions, file.Deletions)
+}
+
+func renderDiffFence(diff string) string {
+	var b strings.Builder
+	b.WriteString("```diff\n")
+	b.WriteString(diff)
+	if !strings.HasSuffix(diff, "\n") {
+		b.WriteByte('\n')
+	}
+	b.WriteString("```\n\n")
+	return b.String()
+}
+
+// renderDiffsWithSpans renders the diff section and records each complete
+// block's rune range in that section.
+func renderDiffsWithSpans(d *Dossier, files []string) (string, []diffSpan) {
 	if d == nil || len(files) == 0 {
-		return "（没有文件内容）\n"
+		return "（没有文件内容）\n", nil
 	}
 	byPath := make(map[string]FileChange, len(d.Files))
 	for _, file := range d.Files {
 		byPath[file.Path] = file
 	}
 	var b strings.Builder
+	offset := 0
+	write := func(value string) {
+		b.WriteString(value)
+		offset += utf8.RuneCountInString(value)
+	}
 	total := 0
+	var spans []diffSpan
 	for _, filePath := range files {
 		file, ok := byPath[filePath]
 		if !ok {
-			b.WriteString(fmt.Sprintf("### %s\n\n（该文件不在材料包中）\n\n", filePath))
+			write(fmt.Sprintf("### %s\n\n（该文件不在材料包中）\n\n", filePath))
 			continue
 		}
-		b.WriteString(fmt.Sprintf("### %s（%s，+%d/-%d）\n\n", file.Path, file.Status, file.Additions, file.Deletions))
+		write(fileDiffHeader(file))
 		diff := truncateRunes(file.Diff, maxFileDiffRunes)
 		if strings.TrimSpace(diff) == "" {
-			b.WriteString("（没有 diff 内容）\n\n")
+			write("（没有 diff 内容）\n\n")
 			continue
 		}
 		if total+len(diff) > maxTaskFileRunes {
-			b.WriteString("（diff 已按总长度截断）\n\n")
+			write("（diff 已按总长度截断）\n\n")
 			break
 		}
 		total += len(diff)
-		b.WriteString("```diff\n")
-		b.WriteString(diff)
-		if !strings.HasSuffix(diff, "\n") {
-			b.WriteByte('\n')
-		}
-		b.WriteString("```\n\n")
+		write(renderDiffFence(diff))
+		spans = append(spans, diffSpan{path: filePath, end: offset})
 	}
-	return b.String()
+	return b.String(), spans
 }
