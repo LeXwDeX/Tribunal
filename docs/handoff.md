@@ -42,8 +42,8 @@
 
 - `main`：`4839248`（#143 已合并）之后加上本交接的 PR（#165）。没有进行中的分支或 PR。
 - **v1.2.0 仍未打 tag、未发 Release**，由维护者处理。CHANGELOG 有 `[1.2.0] - 2026-10-29` 版本段。#143 已在 main 上：如果 tag 打在 `4839248` 或之后，#143 的 CHANGELOG 条目应归入 `[1.2.0]`；如果打在 `e2b3628`，留在 `Unreleased`。动 CHANGELOG 前先确认 tag 的位置。
-- 远端有一批已合并的旧分支可以删（`chore/v1.2.0-release-119`、`docs/readiness-108`、`fix/bootstrap-warning-151`、`fix/108-acceptance-docs`、`fix/153-auth-expiry-notice`、`fix/ignore-policy-126`、`fix/oauth-disabled-ui-131`、`fix/onboarding-diagnostics-132`、`fix/onboarding-retry-132`、`fix/project-detail-badge-129`、`fix/reliability-gaps-127`、`fix/workspace-auto-refresh-130`、`feat/143-default-extension-bindings`、`docs/handoff-repro`）。之前批量删除被权限分类器拦下，需要用户执行或放行。
-- `chore/azure-ci-migration-138`（#138）在旧机器上有一个未提交的工作树，**新机器上拿不到那些改动**；#138 要从远端分支的现状重新评估。
+- **基线就是 `origin/main`**。2026-10-30 交接时远端只有 `main`（本交接的 `docs/handoff-repro` 分支合并后删除），没有其他分支、没有打开的 PR；旧机器的工作树和本地分支都已清理。新机器 clone 后直接从 `main` 开分支。
+- #138（Azure CI 迁移）**没有任何已提交的工作**：旧工作树只是停在一个旧的 main 提交上，没有独有提交、没有未提交改动，已删除。#138 从零开始。
 
 ## 4. 待办 Issue（全部未开始）
 
@@ -120,7 +120,7 @@
 | #146 | 首页总览布局与文案：「需要处理」含义不清、统计卡片文字被截断（可与 #163 的总览空态一起看） |
 | #147 | 工作区页：「重建索引」「重新生成上下文」收进手动操作折叠区，并说明自动触发机制 |
 | #142 | 支持并文档化配置多个 LLM Provider（Docker 部署） |
-| #138 | 开发 CI 迁移到 Azure Pipelines（见第 3 节，旧工作树的改动拿不到） |
+| #138 | 开发 CI 迁移到 Azure Pipelines（没有已有工作，从零开始） |
 | #123 | 自托管 runner 的 cgo 与 Docker 环境 |
 | #109 | 路线图待决事项汇总，只记录，不排期 |
 
