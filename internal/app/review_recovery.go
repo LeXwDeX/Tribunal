@@ -253,8 +253,7 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 	if dossier.WorkspaceProvenance.MCPEligible && !indexEligible {
 		return s.cancelWorkspaceWorkflow(ctx, workflow.ID)
 	}
-	diffs := dossierDiffs(&dossier)
-	index := gitlab.BuildDiffIndex(dossier.DiffVersion, diffs)
+	index := dossierDiffIndex(dossier.DiffVersion, &dossier)
 	resolved := dossier
 	resolved.HeadDir = headDir
 	resolved.BaseDir = baseDir
@@ -585,10 +584,32 @@ func dossierDiffs(d *review.Dossier) []gitlab.FileDiff {
 			diff.NewFile = true
 		case "deleted":
 			diff.DeletedFile = true
-		case "renamed":
+		case "renamed", "copied":
 			diff.RenamedFile = true
 		}
 		out = append(out, diff)
 	}
 	return out
+}
+
+func dossierDiffIndex(version gitlab.Version, d *review.Dossier) *gitlab.DiffIndex {
+	index := gitlab.BuildDiffIndex(version, dossierDiffs(d))
+	paths := append([]string(nil), d.Ignored...)
+	for _, omitted := range d.DiffSummary.Omitted {
+		paths = append(paths, omitted.Path)
+	}
+	unknown := d.DiffSummary.Truncated || len(d.DiffSummary.Omitted) > 0 || len(d.Ignored) > 0
+	for _, file := range d.Files {
+		if file.OldPath == "" && (file.Status == "renamed" || file.Status == "copied") {
+			unknown = true
+		}
+	}
+	if unknown {
+		// A missing old or omitted path could alias any included file.
+		for _, file := range d.Files {
+			paths = append(paths, file.Path, file.OldPath)
+		}
+	}
+	index.WithholdPaths(paths)
+	return index
 }

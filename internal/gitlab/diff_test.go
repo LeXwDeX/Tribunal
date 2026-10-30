@@ -93,14 +93,26 @@ func TestDiffIndexRenameUsesBothPaths(t *testing.T) {
 		RenamedFile: true,
 		Diff:        "@@ -1 +1 @@\n-before\n+after\n",
 	}})
-	for _, path := range []string{"old.go", "new.go"} {
-		pos, ok := index.Locate(path, 1, SideNew)
+	for _, tc := range []struct {
+		path string
+		side Side
+	}{
+		{path: "old.go", side: SideOld},
+		{path: "new.go", side: SideNew},
+	} {
+		pos, ok := index.Locate(tc.path, 1, tc.side)
 		if !ok {
-			t.Fatalf("rename path %q was not indexed", path)
+			t.Fatalf("rename path %q side %s was not indexed", tc.path, tc.side)
 		}
 		if pos.OldPath != "old.go" || pos.NewPath != "new.go" {
 			t.Fatalf("position paths = %+v", pos)
 		}
+	}
+	if _, ok := index.Locate("old.go", 1, SideNew); ok {
+		t.Fatal("old rename path answered from the new side")
+	}
+	if _, ok := index.Locate("new.go", 1, SideOld); ok {
+		t.Fatal("new rename path answered from the old side")
 	}
 }
 

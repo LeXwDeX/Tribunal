@@ -816,11 +816,11 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 		}
 	}
 
-	diffIndex := gitlab.BuildDiffIndex(gitlab.Version{
+	diffIndex := dossierDiffIndex(gitlab.Version{
 		BaseSHA:  dossier.DiffVersion.BaseSHA,
 		StartSHA: dossier.DiffVersion.StartSHA,
 		HeadSHA:  dossier.DiffVersion.HeadSHA,
-	}, dossierDiffs(dossier))
+	}, dossier)
 	executor, err := review.NewExecutor(review.ExecutorDeps{
 		Dossier:  dossier,
 		Profile:  profile,

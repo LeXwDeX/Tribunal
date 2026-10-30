@@ -54,7 +54,7 @@ const MaxFileBytes = 256 << 10
 // build prompts from these files. It is code-owned and cannot be overridden.
 // Bump it whenever task rendering changes, so workflows created with the old
 // identity are not resumed, retried, or published.
-const TaskRenderVersion = "2"
+const TaskRenderVersion = "3"
 
 var versionRE = regexp.MustCompile(`^<!-- v([0-9A-Za-z._-]+) -->$`)
 

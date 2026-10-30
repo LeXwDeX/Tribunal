@@ -272,7 +272,7 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 		// apply a review produced by an obsolete task layout.
 		return p.stale(ctx, workflowID, "prompt bundle identity unavailable")
 	}
-	if p.promptsHash != "" && promptHash != p.promptsHash {
+	if p.promptsHash == "" || promptHash != p.promptsHash {
 		return p.stale(ctx, workflowID, "prompt bundle changed")
 	}
 
@@ -286,7 +286,7 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 	if loaded.dossier.DiffVersion.BaseSHA != "" && !strings.EqualFold(version.BaseSHA, loaded.dossier.DiffVersion.BaseSHA) {
 		return p.stale(ctx, workflowID, "merge request base changed")
 	}
-	index := gitlab.BuildDiffIndex(*version, dossierDiffs(loaded.dossier))
+	index := dossierDiffIndex(*version, loaded.dossier)
 
 	snapshot, err := p.engine.Snapshot(ctx, workflowID)
 	if err != nil {
@@ -319,6 +319,16 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 		}
 	}
 	groups := markPositions(result.Groups, index)
+	warnings := append(append([]string(nil), result.Warnings...), cfg.Warnings...)
+	for i := range groups {
+		groups[i].PublishKey = review.GroupPublishKey(loaded.dossier, groups[i])
+	}
+	for _, group := range groups {
+		if group.Published() && index.AmbiguousPath(group.Path) {
+			warnings = append(warnings, "部分问题的路径可能对应多个变更、被忽略或省略的变更，文件归属存在歧义，已保留在摘要中。")
+			break
+		}
+	}
 	if err := p.store.ReplaceFindings(ctx, workflowID, findingsForStore(workflowID, groups)); err != nil {
 		return err
 	}
@@ -337,7 +347,7 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 			Duration:             workflowDuration(loaded.workflow),
 			DetailURL:            p.detailURL(workflowID),
 			ShowModelAttribution: cfg.Settings.ShowModelAttribution,
-			Warnings:             append(append([]string(nil), result.Warnings...), cfg.Warnings...),
+			Warnings:             warnings,
 		})
 	}
 	body, err := render()
@@ -372,7 +382,7 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 			fallback = true
 			continue
 		}
-		position, ok := index.Locate(group.Path, group.Line, diffSide(group.Side))
+		position, ok := index.LocateUnambiguous(group.Path, group.Line, diffSide(group.Side))
 		if !ok {
 			groups[i].PositionOK = false
 			fallback = true
@@ -528,7 +538,7 @@ func (p *Publisher) publishFailure(ctx context.Context, workflowID, reason strin
 		// apply a review produced by an obsolete task layout.
 		return p.stale(ctx, workflowID, "prompt bundle identity unavailable")
 	}
-	if p.promptsHash != "" && promptHash != p.promptsHash {
+	if p.promptsHash == "" || promptHash != p.promptsHash {
 		return p.stale(ctx, workflowID, "prompt bundle changed")
 	}
 	version, err := p.gitlab.LatestMRVersion(ctx, loaded.token, loaded.project.ID, loaded.mrIID)
@@ -648,6 +658,12 @@ func (p *Publisher) lockReviewMR(ctx context.Context, workflowID string) (func()
 
 // publishStandaloneSummaryLocked requires the project workspace read lock.
 func (p *Publisher) publishStandaloneSummaryLocked(ctx context.Context, projectID, mrIID, generation int64, head, token, fingerprint, body string) error {
+	return p.publishStandaloneReviewLocked(ctx, projectID, mrIID, generation, head, token, fingerprint, body, nil)
+}
+
+// publishStandaloneReviewLocked keeps the summary and optional status under
+// the same MR lock and generation/head checks as normal publication.
+func (p *Publisher) publishStandaloneReviewLocked(ctx context.Context, projectID, mrIID, generation int64, head, token, fingerprint, body string, status *gitlab.CommitStatus) error {
 	unlock, err := p.lockMR(ctx, projectID, mrIID)
 	if err != nil {
 		return err
@@ -666,8 +682,13 @@ func (p *Publisher) publishStandaloneSummaryLocked(ctx context.Context, projectI
 		}
 		return nil
 	}
-	_, err = p.upsertSummary(ctx, projectID, mrIID, token, fingerprint, body, "", recheck)
-	return err
+	if _, err = p.upsertSummary(ctx, projectID, mrIID, token, fingerprint, body, "", recheck); err != nil {
+		return err
+	}
+	if status != nil {
+		return p.setCommitStatus(ctx, token, projectID, head, *status, recheck)
+	}
+	return nil
 }
 
 func (p *Publisher) load(ctx context.Context, workflowID string) (*loadedReview, error) {
@@ -1050,7 +1071,7 @@ func markPositions(groups []review.Group, index *gitlab.DiffIndex) []review.Grou
 		group := &out[i]
 		group.PositionOK = false
 		if group.Line > 0 && group.Path != "" && index != nil {
-			_, ok := index.Locate(group.Path, group.Line, diffSide(group.Side))
+			_, ok := index.LocateUnambiguous(group.Path, group.Line, diffSide(group.Side))
 			group.PositionOK = ok
 		}
 		if group.PublishKey == "" && group.Path != "" && group.Title != "" {

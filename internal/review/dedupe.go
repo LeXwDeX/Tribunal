@@ -155,6 +155,7 @@ type GatherInput struct {
 	WorkflowID string
 	Proposals  []Proposal
 	Dropped    []DroppedFinding
+	Dossier    *Dossier
 	// Unresolved carries review-level signals that no finding explains, such
 	// as a BLOCKING gate with no accepted finding.
 	Unresolved []UnresolvedSignal
@@ -328,6 +329,12 @@ func gather(in GatherInput, opts GatherOptions, scope map[string]struct{}) (Gath
 	for _, proposal := range in.Proposals {
 		derived = append(derived, proposalUnresolved(proposal)...)
 	}
+	for _, finding := range findings {
+		if unprovenFindingPath(in.Dossier, finding.Path) {
+			derived = append(derived, ambiguousProvenanceSignal())
+			break
+		}
+	}
 	unresolved, err := normalizeUnresolved(append(derived, in.Unresolved...))
 	if err != nil {
 		return GatherResult{}, err
@@ -342,7 +349,7 @@ func gather(in GatherInput, opts GatherOptions, scope map[string]struct{}) (Gath
 			kept = append(kept, finding)
 		}
 	}
-	groups := Dedupe(kept)
+	groups := dedupe(kept, in.Dossier)
 
 	result := GatherResult{Groups: groups, Dropped: dropped, Unresolved: unresolved}
 	budgetWarning := false
@@ -421,10 +428,8 @@ func prepareFindings(in GatherInput, scope map[string]struct{}) ([]Finding, map[
 			return nil, nil, invalid(fmt.Sprintf("proposals[%d].attempt", p), "must be zero or positive")
 		}
 		for i, contractFinding := range proposal.Findings {
-			if scope != nil {
-				if _, ok := scope[contractFinding.Path]; !ok {
-					continue
-				}
+			if !findingInScope(contractFinding.Path, Side(contractFinding.Side), scope, in.Dossier) {
+				continue
 			}
 			if err := contractFinding.Validate(); err != nil {
 				return nil, nil, wrapField(fmt.Sprintf("proposals[%d].findings[%d]", p, i), err)
@@ -454,7 +459,7 @@ func prepareFindings(in GatherInput, scope map[string]struct{}) ([]Finding, map[
 				Evidence:   contractFinding.Evidence,
 				Confidence: contractFinding.Confidence,
 			}
-			finding.PublishKey = PublishKeyFor(finding.Path, finding.Title, snippetFor(finding))
+			finding.PublishKey = FindingPublishKey(in.Dossier, finding.Path, finding.Side, finding.Title, snippetFor(finding), finding.ID)
 			findings = append(findings, finding)
 			ref := Ref{Node: proposal.Node, Index: i}
 			if _, exists := byRef[ref]; exists {
@@ -493,14 +498,53 @@ func prepareDropped(in GatherInput, byRef map[Ref]Finding) ([]Finding, error) {
 	return out, nil
 }
 
-// Dedupe merges findings by path, category, and line proximity. Findings
-// without a line merge only when their normalized titles match.
+// Dedupe merges findings by side-specific path, category, and line proximity.
+// Without a file snapshot, cross-side identity cannot be established.
 func Dedupe(findings []Finding) []Group {
+	return dedupe(findings, nil)
+}
+
+func dedupe(findings []Finding, dossier *Dossier) []Group {
+	type sidePath struct {
+		path string
+		side Side
+	}
+	type match struct {
+		file  string
+		count int
+	}
+	cache := make(map[sidePath]match)
+	ambiguousCache := make(map[string]bool)
+	var files []FileChange
+	if dossier != nil {
+		files = dossier.Files
+	}
+	resolve := func(path string, side Side) (string, int) {
+		key := sidePath{path, normalizedSide(side)}
+		value, ok := cache[key]
+		if !ok {
+			value.file, value.count = matchingFile(files, path, side)
+			cache[key] = value
+		}
+		return value.file, value.count
+	}
+	ambiguous := func(path string) bool {
+		value, ok := ambiguousCache[path]
+		if !ok {
+			value = ambiguousFindingPath(dossier, path)
+			ambiguousCache[path] = value
+		}
+		return value
+	}
 	groups := make([]Group, 0, len(findings))
 	for _, finding := range findings {
+		if ambiguous(finding.Path) {
+			groups = append(groups, newGroup(finding))
+			continue
+		}
 		merged := false
 		for i := range groups {
-			if canMerge(groups[i], finding) {
+			if canMerge(groups[i], finding, resolve, ambiguous) {
 				mergeInto(&groups[i], finding)
 				merged = true
 				break
@@ -511,13 +555,28 @@ func Dedupe(findings []Finding) []Group {
 		}
 	}
 	for i := range groups {
-		groups[i].PublishKey = PublishKeyFor(groups[i].Path, groups[i].Title, snippetFor(Finding{Evidence: groups[i].Evidence, Body: groups[i].Body}))
+		groups[i].PublishKey = GroupPublishKey(dossier, groups[i])
 	}
 	return groups
 }
 
-func canMerge(group Group, finding Finding) bool {
-	if group.Path != finding.Path || group.Category != finding.Category {
+func canMerge(group Group, finding Finding, resolve func(string, Side) (string, int), ambiguous func(string) bool) bool {
+	if group.Category != finding.Category {
+		return false
+	}
+	if ambiguous(group.Path) || ambiguous(finding.Path) {
+		return false
+	}
+	groupFile, groupMatches := resolve(group.Path, group.Side)
+	findingFile, findingMatches := resolve(finding.Path, finding.Side)
+	if groupMatches > 1 || findingMatches > 1 {
+		return false
+	}
+	if groupMatches == 1 && findingMatches == 1 {
+		if groupFile != findingFile {
+			return false
+		}
+	} else if groupMatches != findingMatches || group.Path != finding.Path || normalizedSide(group.Side) != normalizedSide(finding.Side) {
 		return false
 	}
 	if group.Line == 0 || finding.Line == 0 {
@@ -525,6 +584,152 @@ func canMerge(group Group, finding Finding) bool {
 	}
 	difference := group.Line - finding.Line
 	return difference >= -3 && difference <= 3
+}
+
+func normalizedSide(side Side) Side {
+	if side == SideOld {
+		return SideOld
+	}
+	return SideNew
+}
+
+// matchingFile resolves a side-specific path to the dossier's new-side file
+// identity. Multiple matches cannot establish which changed file was meant.
+func matchingFile(files []FileChange, path string, side Side) (string, int) {
+	if path == "" {
+		return "", 0
+	}
+	var filePath string
+	count := 0
+	for _, file := range files {
+		if fileSidePath(file, side) == path {
+			filePath = file.Path
+			count++
+		}
+	}
+	return filePath, count
+}
+
+func ambiguousFindingPath(dossier *Dossier, path string) bool {
+	return (dossier != nil && path != "" && len(dossier.Ignored) > 0) || unprovenFindingPath(dossier, path)
+}
+
+func unprovenFindingPath(dossier *Dossier, path string) bool {
+	if dossier == nil || path == "" {
+		return false
+	}
+	if dossier.DiffSummary.Truncated || len(dossier.DiffSummary.Omitted) > 0 {
+		return true
+	}
+	for _, file := range dossier.Files {
+		if file.OldPath == "" && (file.Status == "renamed" || file.Status == "copied") {
+			return true
+		}
+	}
+	oldFile, oldCount := matchingFile(dossier.Files, path, SideOld)
+	newFile, newCount := matchingFile(dossier.Files, path, SideNew)
+	return oldCount > 1 || newCount > 1 || (oldCount == 1 && newCount == 1 && oldFile != newFile)
+}
+
+func ambiguousProvenanceSignal() UnresolvedSignal {
+	return UnresolvedSignal{Node: "provenance", Kind: UnresolvedEvidence, Message: "finding path may refer to multiple or omitted changed files; file attribution is unproven"}
+}
+
+func groupProvenanceSignals(dossier *Dossier, groups []Group) []UnresolvedSignal {
+	for _, group := range groups {
+		if unprovenFindingPath(dossier, group.Path) {
+			return []UnresolvedSignal{ambiguousProvenanceSignal()}
+		}
+		for _, source := range group.Sources {
+			if unprovenFindingPath(dossier, source.Path) {
+				return []UnresolvedSignal{ambiguousProvenanceSignal()}
+			}
+		}
+	}
+	return nil
+}
+
+func findingInScope(path string, side Side, scope map[string]struct{}, dossier *Dossier) bool {
+	if scope == nil {
+		return true
+	}
+	var files []FileChange
+	if dossier != nil {
+		files = dossier.Files
+	}
+	ambiguous := ambiguousFindingPath(dossier, path)
+	matched := false
+	unknownOldInScope := false
+	for _, file := range files {
+		if file.OldPath == "" && (file.Status == "renamed" || file.Status == "copied") {
+			if _, ok := scope[file.Path]; ok && path != "" {
+				unknownOldInScope = true
+			}
+		}
+		if path != "" && (path == fileSidePath(file, side) || (ambiguous && (path == fileSidePath(file, SideOld) || path == fileSidePath(file, SideNew)))) {
+			matched = true
+			if _, ok := scope[file.Path]; ok {
+				return true
+			}
+		}
+	}
+	if unknownOldInScope {
+		return true
+	}
+	if matched {
+		return false
+	}
+	_, ok := scope[path]
+	return ok
+}
+
+func fileSidePath(file FileChange, side Side) string {
+	if normalizedSide(side) == SideOld {
+		if file.Status == "added" || file.Status == "new" {
+			return ""
+		}
+		if file.OldPath != "" {
+			return file.OldPath
+		}
+		if file.Status == "renamed" || file.Status == "copied" {
+			return ""
+		}
+	} else if file.Status == "deleted" {
+		return ""
+	}
+	return file.Path
+}
+
+// FindingPublishKey uses the same file identity as dedupe. Unresolved old
+// paths stay distinct from new paths unless the snapshot proves equivalence.
+// Multiple candidates use the stable finding or group ID to avoid collisions.
+func FindingPublishKey(dossier *Dossier, path string, side Side, title, snippet, id string) string {
+	var files []FileChange
+	if dossier != nil {
+		files = dossier.Files
+	}
+	if ambiguousFindingPath(dossier, path) {
+		path = "ambiguous\x00" + string(normalizedSide(side)) + "\x00" + path + "\x00" + id
+	} else {
+		filePath, count := matchingFile(files, path, side)
+		if count == 1 {
+			path = filePath
+		} else if path != "" && normalizedSide(side) == SideOld {
+			path = "old\x00" + path
+		} else if path != "" && len(files) > 0 {
+			path = "new\x00" + path
+		}
+	}
+	return PublishKeyFor(path, title, snippet)
+}
+
+// GroupPublishKey preserves the first source identity for ambiguous groups.
+func GroupPublishKey(dossier *Dossier, group Group) string {
+	id := group.ID
+	if len(group.Sources) > 0 && group.Sources[0].ID != "" {
+		id = group.Sources[0].ID
+	}
+	return FindingPublishKey(dossier, group.Path, group.Side, group.Title, snippetFor(Finding{Evidence: group.Evidence, Body: group.Body}), id)
 }
 
 func newGroup(finding Finding) Group {
