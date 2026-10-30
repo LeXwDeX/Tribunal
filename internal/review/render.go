@@ -15,6 +15,7 @@ const FindingMarkerPrefix = "<!-- gitlab-ce-review:finding"
 
 var markerFingerprintRE = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
 var publishKeyRE = regexp.MustCompile(`^pk_[0-9a-f]{32}$`)
+var wwwAutolinkRE = regexp.MustCompile(`(?i)www\.`)
 
 const (
 	summaryItemBodyRunes       = 2000
@@ -70,6 +71,7 @@ func RenderSummary(in SummaryInput) (string, error) {
 	}
 
 	counts := map[Severity]int{SeverityP0: 0, SeverityP1: 0, SeverityP2: 0, SeverityInfo: 0}
+	positioned := make([]Group, 0)
 	marked := make([]Group, 0)
 	unpositioned := make([]Group, 0)
 	for _, group := range in.Groups {
@@ -86,7 +88,9 @@ func RenderSummary(in SummaryInput) (string, error) {
 		}
 		if !group.PositionOK {
 			unpositioned = append(unpositioned, group)
+			continue
 		}
+		positioned = append(positioned, group)
 	}
 
 	var b strings.Builder
@@ -95,23 +99,46 @@ func RenderSummary(in SummaryInput) (string, error) {
 	b.WriteString("### AI 评审：")
 	b.WriteString(verdictLabel(in.Verdict))
 	b.WriteString("\n\n")
+	if line := severityCountLine(counts); line != "" {
+		b.WriteString(line)
+		b.WriteString("\n\n")
+	}
 	if summary != "" {
 		b.WriteString(renderMarkdown(summary, MaxSummaryRunes))
 		b.WriteString("\n\n")
 	}
-	if line := severityCountLine(counts); line != "" {
-		b.WriteString(line)
-		b.WriteByte('\n')
+	if len(positioned) > 0 {
+		fmt.Fprintf(&b, "\n### 行内问题（%d）\n\n", len(positioned))
+		for _, group := range positioned {
+			b.WriteString("- **[")
+			b.WriteString(string(group.EffectiveSeverity()))
+			b.WriteString("]** ")
+			b.WriteString(escapeOneLine(group.Title, MaxTitleRunes))
+			if group.Path != "" {
+				b.WriteString(" · ")
+				b.WriteString(inlineCode(group.Path))
+				if group.Line > 0 {
+					fmt.Fprintf(&b, ":%d", group.Line)
+				}
+			}
+			b.WriteByte('\n')
+		}
 	}
 	if len(unpositioned) > 0 {
 		fmt.Fprintf(&b, "\n### 无法定位到行的问题（%d）\n\n", len(unpositioned))
-		for _, group := range unpositioned {
+		for i, group := range unpositioned {
+			if i > 0 {
+				b.WriteByte('\n')
+			}
 			b.WriteString(renderSummaryItem(group, false))
 		}
 	}
 	if len(marked) > 0 {
 		fmt.Fprintf(&b, "\n### 存疑条目（%d）\n\n", len(marked))
-		for _, group := range marked {
+		for i, group := range marked {
+			if i > 0 {
+				b.WriteByte('\n')
+			}
 			b.WriteString(renderSummaryItem(group, true))
 		}
 	}
@@ -180,19 +207,18 @@ func renderSummaryItem(group Group, marked bool) string {
 		display += "?"
 	}
 	var b strings.Builder
-	b.WriteString("**[")
+	b.WriteString("#### [")
 	b.WriteString(display)
 	b.WriteString("] ")
 	b.WriteString(escapeOneLine(group.Title, MaxTitleRunes))
-	b.WriteString("**")
+	b.WriteString("\n\n")
 	if group.Path != "" {
-		b.WriteString(" · ")
 		b.WriteString(inlineCode(group.Path))
 		if group.Line > 0 {
 			fmt.Fprintf(&b, ":%d", group.Line)
 		}
+		b.WriteString("\n\n")
 	}
-	b.WriteString("\n\n")
 	if marked {
 		reason := "挑战结果：UNCERTAIN"
 		if group.Challenge != nil && group.Challenge.Reason != "" {
@@ -212,6 +238,14 @@ func renderSummaryItem(group Group, marked bool) string {
 	if suggestion := renderSuggestion(group.Suggestion, summaryItemSuggestionRunes); suggestion != "" {
 		b.WriteString(suggestion)
 		b.WriteString("\n\n")
+	}
+	// A marked finding that cannot be attached inline is published only here,
+	// so its evidence must travel with the summary item. Positioned marked
+	// findings keep evidence in the inline discussion only.
+	if marked && !group.PositionOK && strings.TrimSpace(group.Evidence) != "" {
+		b.WriteString("<details><summary>证据</summary>\n\n")
+		b.WriteString(codeFence(group.Evidence))
+		b.WriteString("\n\n</details>\n\n")
 	}
 	return strings.TrimRight(b.String(), "\n") + "\n"
 }
@@ -246,20 +280,14 @@ func RenderFinding(group Group, opts FindingRenderOptions) (string, error) {
 		return "", invalid("publish_key", "must be a stable pk_ key")
 	}
 	severity := group.EffectiveSeverity()
-	display := string(severity)
-	if group.Decision.Action == ActionMark {
-		display += "?"
-	}
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s key=%s -->\n", FindingMarkerPrefix, key)
+	b.WriteString("**[")
+	b.WriteString(string(severity))
 	if group.Decision.Action == ActionMark {
-		b.WriteString("**[存疑] ")
-	} else {
-		b.WriteString("**")
+		b.WriteString(" · 存疑")
 	}
-	b.WriteString("[")
-	b.WriteString(display)
 	b.WriteString("] ")
 	b.WriteString(escapeOneLine(group.Title, MaxTitleRunes))
 	b.WriteString("**\n")
@@ -267,6 +295,11 @@ func RenderFinding(group Group, opts FindingRenderOptions) (string, error) {
 	if body := renderMarkdown(group.Body, MaxBodyRunes); body != "" {
 		b.WriteString("\n")
 		b.WriteString(body)
+		b.WriteByte('\n')
+	}
+	if group.Decision.Action == ActionMark && strings.TrimSpace(group.Decision.Reason) != "" {
+		b.WriteString("\n**存疑原因**：")
+		b.WriteString(escapeOneLine(group.Decision.Reason, 500))
 		b.WriteByte('\n')
 	}
 	if suggestion := renderSuggestion(group.Suggestion, MaxSuggestionRunes); suggestion != "" {
@@ -279,11 +312,6 @@ func RenderFinding(group Group, opts FindingRenderOptions) (string, error) {
 		b.WriteString("\n<details><summary>证据</summary>\n\n")
 		b.WriteString(codeFence(group.Evidence))
 		b.WriteString("\n\n</details>\n")
-	}
-	if group.Decision.Action == ActionMark {
-		b.WriteString("\n**标记**：")
-		b.WriteString(escapeOneLine(group.Decision.Reason, 500))
-		b.WriteByte('\n')
 	}
 	if opts.ShowModelAttribution {
 		if attribution := modelAttribution(group); attribution != "" {
@@ -328,16 +356,36 @@ func escapeOneLine(value string, max int) string {
 	return escapeText(oneLine(value, max), max)
 }
 
+// escapeText escapes untrusted single-line text for a Markdown note. Backslashes
+// are doubled before the reference and URL introducers are escaped, so a
+// model-supplied backslash cannot cancel the protection. GitLab renders these
+// escapes as the original characters without auto-linking mentions, references
+// or URLs. Markdown escaping happens before HTML escaping so generated
+// character references are not escaped again.
 func escapeText(value string, max int) string {
 	value = strings.ReplaceAll(value, "\r\n", "\n")
 	value = truncateRunes(value, max)
+	value = strings.NewReplacer(
+		`\`, `\\`,
+		`@`, `\@`,
+		`#`, `\#`,
+		`!`, `\!`,
+		`:`, `\:`,
+		`$`, `\$`,
+		`%`, `\%`,
+		`~`, `\~`,
+	).Replace(value)
+	// Only the dot that starts GFM's www autolink needs protection. Escaping
+	// every dot would change ordinary file names in raw Markdown.
+	value = wwwAutolinkRE.ReplaceAllStringFunc(value, func(match string) string {
+		return match[:len(match)-1] + `\.`
+	})
 	value = html.EscapeString(value)
-	replacer := strings.NewReplacer(
+	return strings.NewReplacer(
 		"[", "&#91;",
 		"]", "&#93;",
 		"`", "&#96;",
-	)
-	return replacer.Replace(value)
+	).Replace(value)
 }
 
 // renderMarkdown preserves structured Markdown (paragraphs, lists, headings,
