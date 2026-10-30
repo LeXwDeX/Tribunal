@@ -344,7 +344,7 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 	if err != nil {
 		return PermanentJob(fmt.Errorf("render summary: %w", err))
 	}
-	summaryID, err := p.upsertSummary(ctx, loaded.project.ID, loaded.mrIID, loaded.token, loaded.record.Hash, body, workflowID, recheck)
+	_, err = p.upsertSummary(ctx, loaded.project.ID, loaded.mrIID, loaded.token, loaded.record.Hash, body, workflowID, recheck)
 	if err != nil {
 		return err
 	}
@@ -409,7 +409,7 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 		}
 		updated, err := render()
 		if err == nil && updated != body {
-			if _, err := p.updateSummary(ctx, loaded.token, loaded.project.ID, loaded.mrIID, summaryID, updated, workflowID, loaded.record.Hash, recheck); err != nil {
+			if _, err := p.upsertSummary(ctx, loaded.project.ID, loaded.mrIID, loaded.token, loaded.record.Hash, updated, workflowID, recheck); err != nil {
 				return err
 			}
 		}
@@ -825,28 +825,37 @@ func (p *Publisher) stale(ctx context.Context, workflowID, reason string) error 
 }
 
 // upsertSummary finds or creates the summary note. The marker scan recovers a
-// note whose publication row was lost in a crash. recheck runs before every
-// remote summary attempt; a control change can still race an in-flight request.
+// note after a lost publication row or a deleted bound note. recheck runs before
+// every remote summary attempt; a control change can still race an in-flight request.
 func (p *Publisher) upsertSummary(ctx context.Context, projectID, mrIID int64, token, fingerprint, body, workflowID string, recheck func() error) (int64, error) {
 	if err := recheck(); err != nil {
 		return 0, err
 	}
+	var missingID int64
+	var missingErr error
 	if workflowID != "" {
 		existing, err := p.store.GetPublication(ctx, projectID, mrIID, summaryPublishKind, summaryPublicationKey)
 		switch {
 		case err == nil:
 			if id, parseErr := strconv.ParseInt(existing.GitlabID, 10, 64); parseErr == nil && id > 0 {
-				if err := p.updateSummaryNote(ctx, token, projectID, mrIID, id, body, recheck); err != nil {
+				notFound, err := p.updateSummaryNote(ctx, token, projectID, mrIID, id, body, recheck)
+				if err != nil && (!notFound || IsPermanentJob(err)) {
 					return 0, err
 				}
-				if _, err := p.store.UpsertPublication(ctx, store.Publication{
-					ProjectID: projectID, MRIID: mrIID, Kind: summaryPublishKind,
-					PublishKey: summaryPublicationKey, GitlabID: existing.GitlabID,
-					WorkflowID: workflowID, Fingerprint: fingerprint, BodyHash: bodyHash(body),
-				}); err != nil {
+				if err == nil {
+					if _, err := p.store.UpsertPublication(ctx, store.Publication{
+						ProjectID: projectID, MRIID: mrIID, Kind: summaryPublishKind,
+						PublishKey: summaryPublicationKey, GitlabID: existing.GitlabID,
+						WorkflowID: workflowID, Fingerprint: fingerprint, BodyHash: bodyHash(body),
+					}); err != nil {
+						return 0, err
+					}
+					return id, nil
+				}
+				missingID, missingErr = id, err
+				if err := recheck(); err != nil {
 					return 0, err
 				}
-				return id, nil
 			}
 		case !errors.Is(err, store.ErrNotFound):
 			return 0, err
@@ -866,6 +875,15 @@ func (p *Publisher) upsertSummary(ctx context.Context, projectID, mrIID int64, t
 		if err != nil {
 			return 0, err
 		}
+		if err := recheck(); err != nil {
+			return 0, err
+		}
+		// A visible note may be inaccessible to update rather than deleted.
+		for _, note := range notes {
+			if missingID > 0 && note.ID == missingID {
+				return 0, missingErr
+			}
+		}
 		for _, note := range notes {
 			if note.AuthorID != user.ID || !strings.HasPrefix(note.Body, review.SummaryMarkerPrefix) {
 				continue
@@ -874,7 +892,7 @@ func (p *Publisher) upsertSummary(ctx context.Context, projectID, mrIID int64, t
 				return 0, errors.New("app: summary note has invalid ID")
 			}
 			if note.Body != body {
-				if err := p.updateSummaryNote(ctx, token, projectID, mrIID, note.ID, body, recheck); err != nil {
+				if _, err := p.updateSummaryNote(ctx, token, projectID, mrIID, note.ID, body, recheck); err != nil {
 					return 0, err
 				}
 			}
@@ -922,27 +940,18 @@ func (p *Publisher) upsertSummary(ctx context.Context, projectID, mrIID int64, t
 	return id, nil
 }
 
-func (p *Publisher) updateSummary(ctx context.Context, token string, projectID, mrIID, noteID int64, body, workflowID, fingerprint string, recheck func() error) (int64, error) {
-	if err := p.updateSummaryNote(ctx, token, projectID, mrIID, noteID, body, recheck); err != nil {
-		return 0, err
-	}
-	if _, err := p.store.UpsertPublication(ctx, store.Publication{
-		ProjectID: projectID, MRIID: mrIID, Kind: summaryPublishKind,
-		PublishKey: summaryPublicationKey, GitlabID: strconv.FormatInt(noteID, 10),
-		WorkflowID: workflowID, Fingerprint: fingerprint, BodyHash: bodyHash(body),
-	}); err != nil {
-		return 0, err
-	}
-	return noteID, nil
-}
-
-func (p *Publisher) updateSummaryNote(ctx context.Context, token string, projectID, mrIID, noteID int64, body string, recheck func() error) error {
-	return p.retry(ctx, func() error {
+// The bool identifies a 404 from the note update, not from the recheck.
+func (p *Publisher) updateSummaryNote(ctx context.Context, token string, projectID, mrIID, noteID int64, body string, recheck func() error) (bool, error) {
+	var notFound bool
+	err := p.retry(ctx, func() error {
 		if err := recheck(); err != nil {
 			return err
 		}
-		return p.gitlab.UpdateMRNote(ctx, token, projectID, mrIID, noteID, body)
+		err := p.gitlab.UpdateMRNote(ctx, token, projectID, mrIID, noteID, body)
+		notFound = gitlab.IsNotFound(err)
+		return err
 	})
+	return notFound, err
 }
 
 func (p *Publisher) createDiscussion(ctx context.Context, token string, projectID, mrIID int64, body string, position gitlab.Position) (*gitlab.Discussion, error) {
