@@ -562,6 +562,73 @@ func TestCommandReplayBackfillDoesNotSuppressCancelAfterNewerRun(t *testing.T) {
 	}
 }
 
+func TestCommandReplayBackfillRequiresReviewKeyKindMatch(t *testing.T) {
+	ctx := context.Background()
+	path, legacy := openLegacyCommandReplayDB(t)
+	head := reviewHead("a")
+	insertLegacyReplayProject(t, legacy, 42)
+	insertLegacyReplayControl(t, legacy, 42, 7, 2, head, false)
+	// A review.run row keyed as a cancel must not prove a run. The prior
+	// per-kind key lookup could not match this malformed row.
+	insertLegacyReplayJob(t, legacy, "mismatched-review-kind", "review.run",
+		"review.cancel:42:7", legacyReviewPayload(42, 7, 910, 1, head), "done")
+	insertLegacyReplayJob(t, legacy, "queued-run-910", "review.command",
+		"review.command:42:910", legacyCommandPayload(42, 7, 910, "run"), "queued")
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(ctx, path, WithClock(newFakeClock().Now))
+	if err != nil {
+		t.Fatalf("open migrated db: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if got := commandReplayIdentityRows(t, s, 42, 7, 910, "run"); got != 0 {
+		t.Fatal("review.run row with a cancel key was accepted as run proof")
+	}
+	result, err := s.EnqueueReviewLatest(ctx, commandReplay(42, 7, 910, "run", head))
+	if err != nil || result.Duplicate || result.Generation != 3 {
+		t.Fatalf("queued run = %+v, %v", result, err)
+	}
+}
+
+func TestCommandReplayBackfillRequiresCommandKeyPayloadMatch(t *testing.T) {
+	ctx := context.Background()
+	path, legacy := openLegacyCommandReplayDB(t)
+	head := reviewHead("c")
+	insertLegacyReplayProject(t, legacy, 42)
+	insertLegacyReplayControl(t, legacy, 42, 7, 2, head, true)
+	// Candidate A's key is reused by a terminal row whose payload names
+	// candidate B with an opposite kind. It must not add a spurious known kind
+	// to B.
+	insertLegacyReplayJob(t, legacy, "candidate-a", "review.command",
+		"review.command:42:911", legacyCommandPayload(42, 8, 911, "run"), "queued")
+	insertLegacyReplayJob(t, legacy, "mismatched-command-payload", "review.command",
+		"review.command:42:911", legacyCommandPayload(42, 7, 912, "run"), "done")
+	insertLegacyReplayReaction(t, legacy, 42, 7, 912, 2)
+	insertLegacyReplayJob(t, legacy, "candidate-b", "review.command",
+		"review.command:42:912", legacyCommandPayload(42, 7, 912, "cancel"), "queued")
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(ctx, path, WithClock(newFakeClock().Now))
+	if err != nil {
+		t.Fatalf("open migrated db: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if got := rowCount(t, s, `SELECT COUNT(*) FROM review_command_replays`); got != 1 {
+		t.Fatalf("backfilled identities = %d, want the proven cancel only", got)
+	}
+	if got := commandReplayIdentityRows(t, s, 42, 7, 912, "cancel"); got != 1 {
+		t.Fatal("mismatched command key/payload added a spurious known kind to another candidate")
+	}
+	result, err := s.EnqueueReviewLatest(ctx, commandReplay(42, 7, 912, "cancel", ""))
+	if err != nil || !result.Duplicate || result.Generation != 0 {
+		t.Fatalf("proven cancel replay = %+v, %v", result, err)
+	}
+}
+
 func TestCommandReplayBackfillHandlesNullJobKeys(t *testing.T) {
 	ctx := context.Background()
 	path, legacy := openLegacyCommandReplayDB(t)

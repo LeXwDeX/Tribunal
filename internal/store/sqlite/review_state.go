@@ -303,6 +303,12 @@ func (st *commandReplayNoteState) proven(kind string) bool {
 	return controlKind == kind
 }
 
+type commandReplayReviewKey struct {
+	kind      string
+	projectID int64
+	mrIID     int64
+}
+
 type commandReplayJobPayload struct {
 	ProjectID int64  `json:"project_id"`
 	MRIID     int64  `json:"mr_iid"`
@@ -354,9 +360,6 @@ func backfillReviewCommandReplays(ctx context.Context, db *sql.DB, now time.Time
 			return fmt.Errorf("sqlite: commit command replay backfill: %w", err)
 		}
 		return nil
-	}
-	if err := loadCommandReplayKindsTx(ctx, tx, states); err != nil {
-		return err
 	}
 	if err := loadCommandReplayEvidenceTx(ctx, tx, states); err != nil {
 		return err
@@ -429,65 +432,26 @@ func commandReplayJobKey(projectID, noteID int64) string {
 	return "review.command:" + strconv.FormatInt(projectID, 10) + ":" + strconv.FormatInt(noteID, 10)
 }
 
-// loadCommandReplayKindsTx adds every retained command kind for candidate
-// notes, including terminal jobs that will not be replayed. It queries only
-// the candidates' command keys in bounded batches, so unrelated command
-// history is never materialized. This prevents a reaction from the opposite
-// kind from proving a queued command.
-func loadCommandReplayKindsTx(ctx context.Context, tx *sql.Tx, states map[commandReplayNoteKey]*commandReplayNoteState) error {
-	keys := make([]string, 0, len(states))
-	for noteKey := range states {
-		keys = append(keys, commandReplayJobKey(noteKey.projectID, noteKey.noteID))
-	}
-	for start := 0; start < len(keys); start += commandReplayBackfillBatch {
-		end := start + commandReplayBackfillBatch
-		if end > len(keys) {
-			end = len(keys)
-		}
-		batch := keys[start:end]
-		rows, err := tx.QueryContext(ctx, `SELECT payload FROM jobs
-			WHERE kind = 'review.command' AND "key" IN (`+sqlPlaceholders(len(batch))+`)`,
-			stringArgs(batch)...)
-		if err != nil {
-			return fmt.Errorf("sqlite: list retained command jobs: %w", err)
-		}
-		for rows.Next() {
-			var raw []byte
-			if err := rows.Scan(&raw); err != nil {
-				rows.Close()
-				return fmt.Errorf("sqlite: scan retained command job: %w", err)
-			}
-			var payload commandReplayJobPayload
-			if err := json.Unmarshal(raw, &payload); err != nil {
-				continue
-			}
-			kind := strings.ToLower(strings.TrimSpace(payload.Command))
-			noteKey := commandReplayNoteKey{payload.ProjectID, payload.MRIID, payload.NoteID}
-			state := states[noteKey]
-			if state == nil || (kind != "run" && kind != "cancel") {
-				continue
-			}
-			state.kinds[kind] = true
-		}
-		if err := rows.Close(); err != nil {
-			return fmt.Errorf("sqlite: close retained command jobs: %w", err)
-		}
-		if err := rows.Err(); err != nil {
-			return fmt.Errorf("sqlite: iterate retained command jobs: %w", err)
-		}
-	}
-	return nil
-}
-
-// loadCommandReplayEvidenceTx loads reaction, control, and review-job evidence
-// only for the candidate merge requests, so old installations do not
-// materialize unrelated reaction or job history.
+// loadCommandReplayEvidenceTx loads every retained command kind for candidate
+// keys plus reaction, control, and review-job evidence. Command and review
+// jobs are read in one streaming scan and filtered by the candidate key sets
+// before unmarshalling, so startup cost does not multiply by candidate MR
+// count. Reactions and controls still use their primary-key lookups.
 func loadCommandReplayEvidenceTx(ctx context.Context, tx *sql.Tx, states map[commandReplayNoteKey]*commandReplayNoteState) error {
+	commandKeys := make(map[string]bool, len(states))
+	reviewKeys := make(map[string]commandReplayReviewKey, len(states))
 	groups := make(map[[2]int64][]commandReplayNoteKey)
 	for key := range states {
+		commandKeys[commandReplayJobKey(key.projectID, key.noteID)] = true
+		reviewKeys["review:"+strconv.FormatInt(key.projectID, 10)+":"+strconv.FormatInt(key.mrIID, 10)] = commandReplayReviewKey{"run", key.projectID, key.mrIID}
+		reviewKeys["review.cancel:"+strconv.FormatInt(key.projectID, 10)+":"+strconv.FormatInt(key.mrIID, 10)] = commandReplayReviewKey{"cancel", key.projectID, key.mrIID}
 		groupKey := [2]int64{key.projectID, key.mrIID}
 		groups[groupKey] = append(groups[groupKey], key)
 	}
+	if err := loadCommandReplayJobEvidenceTx(ctx, tx, states, commandKeys, reviewKeys); err != nil {
+		return err
+	}
+
 	for groupKey, notes := range groups {
 		projectID, mrIID := groupKey[0], groupKey[1]
 		byNote := make(map[int64]*commandReplayNoteState, len(notes))
@@ -550,50 +514,82 @@ func loadCommandReplayEvidenceTx(ctx context.Context, tx *sql.Tx, states map[com
 		default:
 			return fmt.Errorf("sqlite: read legacy review control: %w", err)
 		}
+	}
+	return nil
+}
 
-		for _, evidence := range []struct {
-			kind      string
-			jobKind   string
-			keyPrefix string
-		}{
-			{"run", reviewRunKind, "review:"},
-			{"cancel", reviewCancelKind, "review.cancel:"},
-		} {
-			key := evidence.keyPrefix + strconv.FormatInt(projectID, 10) + ":" + strconv.FormatInt(mrIID, 10)
-			rows, err := tx.QueryContext(ctx, `SELECT id, payload FROM jobs
-				WHERE kind = ? AND "key" = ?`, evidence.jobKind, key)
-			if err != nil {
-				return fmt.Errorf("sqlite: list legacy review jobs: %w", err)
-			}
-			for rows.Next() {
-				var jobID string
-				var raw []byte
-				if err := rows.Scan(&jobID, &raw); err != nil {
-					rows.Close()
-					return fmt.Errorf("sqlite: scan legacy review job: %w", err)
-				}
-				var payload commandReplayJobPayload
-				if err := json.Unmarshal(raw, &payload); err != nil {
-					continue
-				}
-				if payload.ProjectID != projectID || payload.MRIID != mrIID ||
-					payload.NoteID <= 0 || payload.Trigger != "command" {
-					continue
-				}
-				state := byNote[payload.NoteID]
-				if state == nil {
-					continue
-				}
-				state.kinds[evidence.kind] = true
-				state.reviewIDs[evidence.kind] = jobID
-			}
-			if err := rows.Close(); err != nil {
-				return fmt.Errorf("sqlite: close legacy review jobs: %w", err)
-			}
-			if err := rows.Err(); err != nil {
-				return fmt.Errorf("sqlite: iterate legacy review jobs: %w", err)
-			}
+// loadCommandReplayJobEvidenceTx performs one streaming scan over retained
+// command, run, and cancel jobs. Candidate-key filtering happens before JSON
+// parsing so unrelated history costs only a row read.
+func loadCommandReplayJobEvidenceTx(ctx context.Context, tx *sql.Tx, states map[commandReplayNoteKey]*commandReplayNoteState, commandKeys map[string]bool, reviewKeys map[string]commandReplayReviewKey) error {
+	rows, err := tx.QueryContext(ctx, `SELECT id, kind, COALESCE("key", ''), payload FROM jobs
+		WHERE kind IN ('review.command', 'review.run', 'review.cancel')`)
+	if err != nil {
+		return fmt.Errorf("sqlite: list legacy review jobs: %w", err)
+	}
+	for rows.Next() {
+		var jobID, kind, key string
+		var raw []byte
+		if err := rows.Scan(&jobID, &kind, &key, &raw); err != nil {
+			rows.Close()
+			return fmt.Errorf("sqlite: scan legacy review job: %w", err)
 		}
+		switch kind {
+		case "review.command":
+			if !commandKeys[key] {
+				continue
+			}
+			var payload commandReplayJobPayload
+			if err := json.Unmarshal(raw, &payload); err != nil {
+				continue
+			}
+			commandKind := strings.ToLower(strings.TrimSpace(payload.Command))
+			if commandKind != "run" && commandKind != "cancel" {
+				continue
+			}
+			// The row key must describe the payload's own command identity.
+			if key != commandReplayJobKey(payload.ProjectID, payload.NoteID) {
+				continue
+			}
+			noteKey := commandReplayNoteKey{payload.ProjectID, payload.MRIID, payload.NoteID}
+			if state := states[noteKey]; state != nil {
+				state.kinds[commandKind] = true
+			}
+		case reviewRunKind, reviewCancelKind:
+			evidence, ok := reviewKeys[key]
+			if !ok {
+				continue
+			}
+			evidenceKind := "run"
+			if kind == reviewCancelKind {
+				evidenceKind = "cancel"
+			}
+			// The row kind and the key prefix must agree. A malformed row
+			// keyed with the opposite kind is not direct acceptance proof.
+			if evidence.kind != evidenceKind {
+				continue
+			}
+			var payload commandReplayJobPayload
+			if err := json.Unmarshal(raw, &payload); err != nil {
+				continue
+			}
+			if payload.ProjectID != evidence.projectID || payload.MRIID != evidence.mrIID ||
+				payload.NoteID <= 0 || payload.Trigger != "command" {
+				continue
+			}
+			state := states[commandReplayNoteKey{evidence.projectID, evidence.mrIID, payload.NoteID}]
+			if state == nil {
+				continue
+			}
+			state.kinds[evidenceKind] = true
+			state.reviewIDs[evidenceKind] = jobID
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("sqlite: close legacy review jobs: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("sqlite: iterate legacy review jobs: %w", err)
 	}
 	return nil
 }
