@@ -63,11 +63,19 @@ type ReviewCandidateActivation struct {
 //
 // HeadSHA is required for run and must be empty for cancel. Cancel preserves
 // the previously recorded head so publication can still detect a stale MR.
+//
+// NoteID and Command are the source-note identity for an authenticated review
+// command ("run" or "cancel"). When both are set, the store records the
+// identity in the same transaction that enqueues the job. A replay of the same
+// (ProjectID, MRIID, NoteID, Command) returns Duplicate and changes nothing.
+// Producers without a source note leave them zero and keep the old behavior.
 type ReviewCommand struct {
 	ProjectID   int64
 	MRIID       int64
 	HeadSHA     string
 	Cancel      bool
+	NoteID      int64
+	Command     string
 	Payload     json.RawMessage
 	MaxAttempts int
 }

@@ -132,7 +132,7 @@ func (s *Store) RecordReviewDelivery(ctx context.Context, d store.Delivery, comm
 
 	result := store.ReviewEnqueueResult{}
 	if command != nil {
-		jobID, generation, err := s.enqueueReviewTx(ctx, tx, *command, now)
+		jobID, generation, duplicate, err := s.enqueueReviewTx(ctx, tx, *command, now)
 		if err != nil {
 			return store.ReviewEnqueueResult{}, err
 		}
@@ -142,6 +142,7 @@ func (s *Store) RecordReviewDelivery(ctx context.Context, d store.Delivery, comm
 		}
 		result.JobID = jobID
 		result.Generation = generation
+		result.Duplicate = duplicate
 	}
 	if err := tx.Commit(); err != nil {
 		return store.ReviewEnqueueResult{}, fmt.Errorf("sqlite: commit review delivery: %w", err)
@@ -153,6 +154,11 @@ func (s *Store) RecordReviewDelivery(ctx context.Context, d store.Delivery, comm
 // without a webhook delivery. A queued job with the same key is replaced with
 // the newest payload; a running job is never modified, and its attempt fence
 // stays monotonic. The generation is assigned in the same transaction.
+//
+// An authenticated command with a source note (ReviewCommand.NoteID and
+// Command) is also recorded by identity in that transaction. A replay of the
+// same identity returns the original job ID with Duplicate=true and changes
+// neither the control nor the queue.
 func (s *Store) EnqueueReviewLatest(ctx context.Context, command store.ReviewCommand) (store.ReviewEnqueueResult, error) {
 	now := s.now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -161,51 +167,65 @@ func (s *Store) EnqueueReviewLatest(ctx context.Context, command store.ReviewCom
 	}
 	defer tx.Rollback()
 
-	jobID, generation, err := s.enqueueReviewTx(ctx, tx, command, now)
+	jobID, generation, duplicate, err := s.enqueueReviewTx(ctx, tx, command, now)
 	if err != nil {
 		return store.ReviewEnqueueResult{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return store.ReviewEnqueueResult{}, fmt.Errorf("sqlite: commit review enqueue: %w", err)
 	}
-	return store.ReviewEnqueueResult{JobID: jobID, Generation: generation}, nil
+	return store.ReviewEnqueueResult{JobID: jobID, Generation: generation, Duplicate: duplicate}, nil
 }
 
 // enqueueReviewTx validates the command, increments review_controls, builds the
 // job payload with the assigned generation, and enqueues it. All writes share
-// the caller's transaction.
-func (s *Store) enqueueReviewTx(ctx context.Context, tx *sql.Tx, command store.ReviewCommand, now time.Time) (string, int64, error) {
+// the caller's transaction. A duplicate command identity returns the original
+// job ID with generation zero and writes nothing.
+func (s *Store) enqueueReviewTx(ctx context.Context, tx *sql.Tx, command store.ReviewCommand, now time.Time) (string, int64, bool, error) {
 	if command.ProjectID <= 0 {
-		return "", 0, errors.New("sqlite: review command project id is required")
+		return "", 0, false, errors.New("sqlite: review command project id is required")
 	}
 	if command.MRIID <= 0 {
-		return "", 0, errors.New("sqlite: review command mr iid is required")
+		return "", 0, false, errors.New("sqlite: review command mr iid is required")
 	}
 	head, err := normalizeReviewHead(command.HeadSHA, command.Cancel)
 	if err != nil {
-		return "", 0, err
+		return "", 0, false, err
 	}
 	if err := requireProjectTx(ctx, tx, command.ProjectID); err != nil {
-		return "", 0, err
+		return "", 0, false, err
+	}
+	identity, replay, err := commandReplayIdentity(command)
+	if err != nil {
+		return "", 0, false, err
+	}
+	if replay {
+		jobID, duplicate, err := reserveCommandReplayTx(ctx, tx, command, identity, now)
+		if err != nil {
+			return "", 0, false, err
+		}
+		if duplicate {
+			return jobID, 0, true, nil
+		}
 	}
 
 	generation, err := bumpReviewControlTx(ctx, tx, command, head, now)
 	if err != nil {
-		return "", 0, err
+		return "", 0, false, err
 	}
 	control, err := getReviewControlTx(ctx, tx, command.ProjectID, command.MRIID)
 	if err != nil {
-		return "", 0, err
+		return "", 0, false, err
 	}
 	if err := s.recordReviewSideEffectsTx(ctx, tx, command, control, generation, now); err != nil {
-		return "", 0, err
+		return "", 0, false, err
 	}
 	if command.MaxAttempts == 0 {
 		command.MaxAttempts = defaultReviewMaxAttempts
 	}
 	payload, err := reviewJobPayload(command, head, generation)
 	if err != nil {
-		return "", 0, err
+		return "", 0, false, err
 	}
 	kind, key := reviewJobKindKey(command)
 	job := store.Job{
@@ -215,13 +235,473 @@ func (s *Store) enqueueReviewTx(ctx context.Context, tx *sql.Tx, command store.R
 		MaxAttempts: command.MaxAttempts,
 	}
 	if err := s.prepareJob(&job, now); err != nil {
-		return "", 0, err
+		return "", 0, false, err
 	}
 	jobID, _, err := enqueueTx(ctx, tx, &job, true)
 	if err != nil {
-		return "", 0, err
+		return "", 0, false, err
 	}
-	return jobID, generation, nil
+	if replay {
+		if err := attachCommandReplayTx(ctx, tx, command, identity, jobID); err != nil {
+			return "", 0, false, err
+		}
+	}
+	return jobID, generation, false, nil
+}
+
+const commandReplayBackfillBatch = 500
+
+// commandReplayNoteKey is one source note on one merge request.
+type commandReplayNoteKey struct {
+	projectID int64
+	mrIID     int64
+	noteID    int64
+}
+
+// commandReplayNoteState accumulates every retained kind that can be
+// attributed to one source note before the one-time backfill decides.
+type commandReplayNoteState struct {
+	kinds              map[string]bool   // all retained command kinds and review evidence
+	candidates         map[string]bool   // runnable/failed command kinds
+	reviewIDs          map[string]string // kind -> downstream review job ID
+	hasReaction        bool
+	reactionGeneration int64
+	hasControl         bool
+	controlGeneration  int64
+	cancelled          bool
+}
+
+func newCommandReplayNoteState() *commandReplayNoteState {
+	return &commandReplayNoteState{
+		kinds:      make(map[string]bool),
+		candidates: make(map[string]bool),
+		reviewIDs:  make(map[string]string),
+	}
+}
+
+// proven reports whether the enqueue of this kind committed before 0020.
+// Kind-specific review evidence is direct proof. A reaction only proves some
+// command from the note, so it is usable only when the note has exactly one
+// known kind and the reaction cannot belong to a different current intent.
+func (st *commandReplayNoteState) proven(kind string) bool {
+	if _, ok := st.reviewIDs[kind]; ok {
+		return true
+	}
+	if !st.hasReaction || len(st.kinds) != 1 || !st.kinds[kind] {
+		return false
+	}
+	// An older reaction may belong to an unrelated, pruned command of the
+	// opposite kind. Only a reaction at the current control generation, with a
+	// matching control intent, proves this exact kind.
+	if !st.hasControl || st.reactionGeneration != st.controlGeneration {
+		return false
+	}
+	controlKind := "run"
+	if st.cancelled {
+		controlKind = "cancel"
+	}
+	return controlKind == kind
+}
+
+type commandReplayJobPayload struct {
+	ProjectID int64  `json:"project_id"`
+	MRIID     int64  `json:"mr_iid"`
+	NoteID    int64  `json:"note_id"`
+	Trigger   string `json:"trigger"`
+	Command   string `json:"command"`
+}
+
+// backfillReviewCommandReplays backfills command identities for jobs accepted
+// before migration 0020. It runs once, guarded by a marker row written in the
+// same transaction. A review.command job is not by itself proof that its
+// enqueue committed: the worker may have stopped before calling the store.
+//
+// Only runnable (queued/running) or failed command jobs are candidates. All
+// retained command states and kind-specific review.run/review.cancel jobs are
+// counted as known kinds, so a reaction shared with a terminal command of the
+// other kind can never prove the candidate. A reaction is used only when the
+// note has one known kind, at the current control generation, with a control
+// intent that matches the candidate kind.
+// Ambiguous or pruned history is left unbackfilled instead of inventing a kind.
+func backfillReviewCommandReplays(ctx context.Context, db *sql.DB, now time.Time) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("sqlite: begin command replay backfill: %w", err)
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `INSERT INTO review_command_replay_backfill
+		(id, completed_at) VALUES (1, ?) ON CONFLICT (id) DO NOTHING`, formatTime(now))
+	if err != nil {
+		return fmt.Errorf("sqlite: reserve command replay backfill: %w", err)
+	}
+	inserted, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("sqlite: reserve command replay backfill: %w", err)
+	}
+	if inserted == 0 {
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("sqlite: commit command replay backfill: %w", err)
+		}
+		return nil
+	}
+
+	states, err := listCommandReplayCandidatesTx(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if len(states) == 0 {
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("sqlite: commit command replay backfill: %w", err)
+		}
+		return nil
+	}
+	if err := loadCommandReplayKindsTx(ctx, tx, states); err != nil {
+		return err
+	}
+	if err := loadCommandReplayEvidenceTx(ctx, tx, states); err != nil {
+		return err
+	}
+	for noteKey, state := range states {
+		for kind := range state.candidates {
+			if !state.proven(kind) {
+				continue
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO review_command_replays
+				(project_id, mr_iid, note_id, command, job_id, created_at)
+				VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (project_id, mr_iid, note_id, command) DO NOTHING`,
+				noteKey.projectID, noteKey.mrIID, noteKey.noteID, kind, state.reviewIDs[kind], formatTime(now)); err != nil {
+				return fmt.Errorf("sqlite: backfill command replay: %w", err)
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("sqlite: commit command replay backfill: %w", err)
+	}
+	return nil
+}
+
+// listCommandReplayCandidatesTx finds jobs that may still be replayed. It runs
+// first so an upgraded database without candidates never loads reactions or
+// review history.
+func listCommandReplayCandidatesTx(ctx context.Context, tx *sql.Tx) (map[commandReplayNoteKey]*commandReplayNoteState, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT COALESCE("key", ''), payload FROM jobs
+		WHERE kind = 'review.command' AND state IN ('queued', 'running', 'failed')`)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: list legacy command jobs: %w", err)
+	}
+	states := make(map[commandReplayNoteKey]*commandReplayNoteState)
+	for rows.Next() {
+		var key string
+		var raw []byte
+		if err := rows.Scan(&key, &raw); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("sqlite: scan legacy command job: %w", err)
+		}
+		var payload commandReplayJobPayload
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			continue
+		}
+		kind := strings.ToLower(strings.TrimSpace(payload.Command))
+		if payload.ProjectID <= 0 || payload.MRIID <= 0 || payload.NoteID <= 0 ||
+			(kind != "run" && kind != "cancel") {
+			continue
+		}
+		if key != commandReplayJobKey(payload.ProjectID, payload.NoteID) {
+			continue
+		}
+		noteKey := commandReplayNoteKey{payload.ProjectID, payload.MRIID, payload.NoteID}
+		if states[noteKey] == nil {
+			states[noteKey] = newCommandReplayNoteState()
+		}
+		states[noteKey].kinds[kind] = true
+		states[noteKey].candidates[kind] = true
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("sqlite: close legacy command jobs: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sqlite: iterate legacy command jobs: %w", err)
+	}
+	return states, nil
+}
+
+func commandReplayJobKey(projectID, noteID int64) string {
+	return "review.command:" + strconv.FormatInt(projectID, 10) + ":" + strconv.FormatInt(noteID, 10)
+}
+
+// loadCommandReplayKindsTx adds every retained command kind for candidate
+// notes, including terminal jobs that will not be replayed. It queries only
+// the candidates' command keys in bounded batches, so unrelated command
+// history is never materialized. This prevents a reaction from the opposite
+// kind from proving a queued command.
+func loadCommandReplayKindsTx(ctx context.Context, tx *sql.Tx, states map[commandReplayNoteKey]*commandReplayNoteState) error {
+	keys := make([]string, 0, len(states))
+	for noteKey := range states {
+		keys = append(keys, commandReplayJobKey(noteKey.projectID, noteKey.noteID))
+	}
+	for start := 0; start < len(keys); start += commandReplayBackfillBatch {
+		end := start + commandReplayBackfillBatch
+		if end > len(keys) {
+			end = len(keys)
+		}
+		batch := keys[start:end]
+		rows, err := tx.QueryContext(ctx, `SELECT payload FROM jobs
+			WHERE kind = 'review.command' AND "key" IN (`+sqlPlaceholders(len(batch))+`)`,
+			stringArgs(batch)...)
+		if err != nil {
+			return fmt.Errorf("sqlite: list retained command jobs: %w", err)
+		}
+		for rows.Next() {
+			var raw []byte
+			if err := rows.Scan(&raw); err != nil {
+				rows.Close()
+				return fmt.Errorf("sqlite: scan retained command job: %w", err)
+			}
+			var payload commandReplayJobPayload
+			if err := json.Unmarshal(raw, &payload); err != nil {
+				continue
+			}
+			kind := strings.ToLower(strings.TrimSpace(payload.Command))
+			noteKey := commandReplayNoteKey{payload.ProjectID, payload.MRIID, payload.NoteID}
+			state := states[noteKey]
+			if state == nil || (kind != "run" && kind != "cancel") {
+				continue
+			}
+			state.kinds[kind] = true
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("sqlite: close retained command jobs: %w", err)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("sqlite: iterate retained command jobs: %w", err)
+		}
+	}
+	return nil
+}
+
+// loadCommandReplayEvidenceTx loads reaction, control, and review-job evidence
+// only for the candidate merge requests, so old installations do not
+// materialize unrelated reaction or job history.
+func loadCommandReplayEvidenceTx(ctx context.Context, tx *sql.Tx, states map[commandReplayNoteKey]*commandReplayNoteState) error {
+	groups := make(map[[2]int64][]commandReplayNoteKey)
+	for key := range states {
+		groupKey := [2]int64{key.projectID, key.mrIID}
+		groups[groupKey] = append(groups[groupKey], key)
+	}
+	for groupKey, notes := range groups {
+		projectID, mrIID := groupKey[0], groupKey[1]
+		byNote := make(map[int64]*commandReplayNoteState, len(notes))
+		for _, noteKey := range notes {
+			byNote[noteKey.noteID] = states[noteKey]
+		}
+		noteIDs := make([]int64, 0, len(byNote))
+		for noteID := range byNote {
+			noteIDs = append(noteIDs, noteID)
+		}
+		for start := 0; start < len(noteIDs); start += commandReplayBackfillBatch {
+			end := start + commandReplayBackfillBatch
+			if end > len(noteIDs) {
+				end = len(noteIDs)
+			}
+			batch := noteIDs[start:end]
+			args := make([]any, 0, len(batch)+2)
+			args = append(args, projectID, mrIID)
+			for _, noteID := range batch {
+				args = append(args, noteID)
+			}
+			rows, err := tx.QueryContext(ctx, `SELECT note_id, generation FROM review_reactions
+				WHERE project_id = ? AND mr_iid = ? AND note_id IN (`+sqlPlaceholders(len(batch))+`)`,
+				args...)
+			if err != nil {
+				return fmt.Errorf("sqlite: list legacy review reactions: %w", err)
+			}
+			for rows.Next() {
+				var noteID, generation int64
+				if err := rows.Scan(&noteID, &generation); err != nil {
+					rows.Close()
+					return fmt.Errorf("sqlite: scan legacy review reaction: %w", err)
+				}
+				if state := byNote[noteID]; state != nil {
+					state.hasReaction = true
+					state.reactionGeneration = generation
+				}
+			}
+			if err := rows.Close(); err != nil {
+				return fmt.Errorf("sqlite: close legacy review reactions: %w", err)
+			}
+			if err := rows.Err(); err != nil {
+				return fmt.Errorf("sqlite: iterate legacy review reactions: %w", err)
+			}
+		}
+
+		var (
+			generation int64
+			cancelled  int
+		)
+		switch err := tx.QueryRowContext(ctx, `SELECT generation, cancelled FROM review_controls
+			WHERE project_id = ? AND mr_iid = ?`, projectID, mrIID).Scan(&generation, &cancelled); {
+		case err == nil:
+			for _, state := range byNote {
+				state.hasControl = true
+				state.controlGeneration = generation
+				state.cancelled = cancelled != 0
+			}
+		case errors.Is(err, sql.ErrNoRows):
+		default:
+			return fmt.Errorf("sqlite: read legacy review control: %w", err)
+		}
+
+		for _, evidence := range []struct {
+			kind      string
+			jobKind   string
+			keyPrefix string
+		}{
+			{"run", reviewRunKind, "review:"},
+			{"cancel", reviewCancelKind, "review.cancel:"},
+		} {
+			key := evidence.keyPrefix + strconv.FormatInt(projectID, 10) + ":" + strconv.FormatInt(mrIID, 10)
+			rows, err := tx.QueryContext(ctx, `SELECT id, payload FROM jobs
+				WHERE kind = ? AND "key" = ?`, evidence.jobKind, key)
+			if err != nil {
+				return fmt.Errorf("sqlite: list legacy review jobs: %w", err)
+			}
+			for rows.Next() {
+				var jobID string
+				var raw []byte
+				if err := rows.Scan(&jobID, &raw); err != nil {
+					rows.Close()
+					return fmt.Errorf("sqlite: scan legacy review job: %w", err)
+				}
+				var payload commandReplayJobPayload
+				if err := json.Unmarshal(raw, &payload); err != nil {
+					continue
+				}
+				if payload.ProjectID != projectID || payload.MRIID != mrIID ||
+					payload.NoteID <= 0 || payload.Trigger != "command" {
+					continue
+				}
+				state := byNote[payload.NoteID]
+				if state == nil {
+					continue
+				}
+				state.kinds[evidence.kind] = true
+				state.reviewIDs[evidence.kind] = jobID
+			}
+			if err := rows.Close(); err != nil {
+				return fmt.Errorf("sqlite: close legacy review jobs: %w", err)
+			}
+			if err := rows.Err(); err != nil {
+				return fmt.Errorf("sqlite: iterate legacy review jobs: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+// commandReplayIdentity normalizes the authenticated source-note identity.
+// Producers without any identity fields keep the old behavior. An explicit but
+// incomplete or mismatched identity is rejected instead of silently falling
+// back to a non-idempotent enqueue.
+func commandReplayIdentity(command store.ReviewCommand) (string, bool, error) {
+	if command.NoteID < 0 {
+		return "", false, errors.New("sqlite: review command note id must not be negative")
+	}
+	kind := strings.ToLower(strings.TrimSpace(command.Command))
+	hasNote := command.NoteID > 0
+	hasCommand := kind != ""
+	if !hasNote && !hasCommand {
+		return "", false, nil
+	}
+	if !hasNote || !hasCommand {
+		return "", false, errors.New("sqlite: review command identity requires both note id and command")
+	}
+	switch kind {
+	case "run":
+		if command.Cancel {
+			return "", false, errors.New("sqlite: review command kind run conflicts with cancel")
+		}
+	case "cancel":
+		if !command.Cancel {
+			return "", false, errors.New("sqlite: review command kind cancel requires cancel")
+		}
+	default:
+		return "", false, fmt.Errorf("sqlite: unknown review command kind %q", kind)
+	}
+	if err := validateCommandPayloadNoteID(command.Payload, command.NoteID); err != nil {
+		return "", false, err
+	}
+	return kind, true, nil
+}
+
+// validateCommandPayloadNoteID rejects an explicit command whose payload
+// names a different note. A producer without identity skips this check, so
+// webhook and manual paths with a payload note_id keep their old behavior.
+func validateCommandPayloadNoteID(raw json.RawMessage, noteID int64) error {
+	payload := bytes.TrimSpace(raw)
+	if len(payload) == 0 {
+		return nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return fmt.Errorf("sqlite: review command payload must be a JSON object: %w", err)
+	}
+	noteRaw, ok := fields["note_id"]
+	if !ok {
+		return nil
+	}
+	var payloadNoteID int64
+	if err := json.Unmarshal(noteRaw, &payloadNoteID); err != nil {
+		return errors.New("sqlite: review command payload note_id must be an integer")
+	}
+	if payloadNoteID != noteID {
+		return errors.New("sqlite: review command payload note_id does not match the identity")
+	}
+	return nil
+}
+
+// reserveCommandReplayTx claims one command identity in the caller's
+// transaction. It reports duplicate=true with the original job ID when the
+// identity already exists.
+func reserveCommandReplayTx(ctx context.Context, tx *sql.Tx, command store.ReviewCommand, identity string, now time.Time) (string, bool, error) {
+	res, err := tx.ExecContext(ctx, `INSERT INTO review_command_replays
+		(project_id, mr_iid, note_id, command, job_id, created_at)
+		VALUES (?, ?, ?, ?, '', ?)
+		ON CONFLICT (project_id, mr_iid, note_id, command) DO NOTHING`,
+		command.ProjectID, command.MRIID, command.NoteID, identity, formatTime(now))
+	if err != nil {
+		return "", false, fmt.Errorf("sqlite: reserve command replay: %w", err)
+	}
+	inserted, err := res.RowsAffected()
+	if err != nil {
+		return "", false, fmt.Errorf("sqlite: reserve command replay: %w", err)
+	}
+	if inserted == 1 {
+		return "", false, nil
+	}
+	var jobID string
+	if err := tx.QueryRowContext(ctx, `SELECT job_id FROM review_command_replays
+		WHERE project_id = ? AND mr_iid = ? AND note_id = ? AND command = ?`,
+		command.ProjectID, command.MRIID, command.NoteID, identity).Scan(&jobID); err != nil {
+		return "", false, fmt.Errorf("sqlite: read command replay: %w", err)
+	}
+	return jobID, true, nil
+}
+
+func attachCommandReplayTx(ctx context.Context, tx *sql.Tx, command store.ReviewCommand, identity, jobID string) error {
+	res, err := tx.ExecContext(ctx, `UPDATE review_command_replays SET job_id = ?
+		WHERE project_id = ? AND mr_iid = ? AND note_id = ? AND command = ?`,
+		jobID, command.ProjectID, command.MRIID, command.NoteID, identity)
+	if err != nil {
+		return fmt.Errorf("sqlite: attach command replay job: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("sqlite: attach command replay job: %w", err)
+	}
+	if n != 1 {
+		return fmt.Errorf("sqlite: command replay identity changed")
+	}
+	return nil
 }
 
 // reviewCommandSideEffects parses the fields the queue owns for side effects.

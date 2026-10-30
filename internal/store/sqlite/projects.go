@@ -330,6 +330,7 @@ func (s *Store) DeleteProject(ctx context.Context, id int64) error {
 		{`DELETE FROM webhook_deliveries WHERE project_id = ?`, []any{id}},
 		{`DELETE FROM block_bindings WHERE project_id = ?`, []any{id}},
 		{`DELETE FROM review_controls WHERE project_id = ?`, []any{id}},
+		{`DELETE FROM review_command_replays WHERE project_id = ?`, []any{id}},
 		{`DELETE FROM review_status WHERE project_id = ?`, []any{id}},
 		{`DELETE FROM review_reactions WHERE project_id = ?`, []any{id}},
 		{`DELETE FROM llm_calls WHERE workflow_id IN (` + workflowScope + `)`, []any{id}},

@@ -228,6 +228,8 @@ func (w *CommandWorker) Handle(ctx context.Context, job *jobs.Job) error {
 			ProjectID:   project.ID,
 			MRIID:       payload.MRIID,
 			Cancel:      true,
+			NoteID:      payload.NoteID,
+			Command:     payload.Command,
 			Payload:     mustJSON(commandPayload),
 			MaxAttempts: 3,
 		})
@@ -263,6 +265,8 @@ func (w *CommandWorker) Handle(ctx context.Context, job *jobs.Job) error {
 		ProjectID:   project.ID,
 		MRIID:       payload.MRIID,
 		HeadSHA:     strings.ToLower(strings.TrimSpace(mr.SHA)),
+		NoteID:      payload.NoteID,
+		Command:     payload.Command,
 		Payload:     mustJSON(runPayload),
 		MaxAttempts: 3,
 	})

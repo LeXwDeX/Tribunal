@@ -703,6 +703,41 @@ v1.2.0 共四个迁移：`0016_dossier_mr_title`、`0017_mcp_config_seal`、`001
 
 升级前按第 7 节做一致性备份。此迁移没有 down migration；回退须恢复升级前完整快照及匹配旧程序，不能只替换镜像。
 
+### 命令重放幂等迁移（后续版本）
+
+包含 #159 的后续版本新增迁移 `0020_review_command_replay`。v1.2.0 的四迁移列表不变。该迁移新建 `review_command_replays` 和一次性回填标记表 `review_command_replay_backfill`，不改写已有行。表按 `(project_id, mr_iid, note_id, command)` 记录已认证 `/review` 或 `/review cancel` 命令的任务身份，并在同一事务中与 generation/取消状态、排队任务和状态/表情副作用一起提交。
+
+启动时自动回填一次升级前的命令身份。只有可能被再次执行的 `review.command` job 才作为回填候选：
+
+- `queued`、`running`：可自动恢复并重放；
+- `failed`：终态，不会自动重试；只有在管理员手工重新入队或重放时才可能再次执行。
+
+回填时先查候选 job；没有候选时只写入回填标记，不加载 reaction 或 review 历史。候选 job 必须满足：payload 含正整数 `project_id`、`mr_iid`、`note_id`，`command` 为 `run` 或 `cancel`，且非空 job key 与 project/note 一致；NULL key 被忽略，不会阻止启动。满足后，还需要以下任一证明：
+
+- 同一 note 存在 kind-specific 的 `review.run`/`review.cancel` job：payload 含该 note、`trigger` 为 `command`，job key 与 payload 的 project/MR 一致；
+- 同一 note 在 `review_reactions` 有记录，并且该 note 的已知命令种类只有一个。已知种类来自所有保留的 `review.command` job 状态（含 `done`、`failed`）和上述 review 证据，不只看当前候选。reaction 的 generation 还必须等于 `review_controls` 的 generation，且 control 的最新意图（`cancelled`）与命令种类一致。更早 generation 的 reaction 一律不推断种类，即使该 note 当前只保留了候选这一种 command kind。control 缺失或不匹配时不使用 reaction-only 证明。
+
+回填和标记在同一事务中提交；失败会回滚并在下次启动重试。多个进程同时首次启动时由 SQLite 单写者串行化，重复回填不重复写入。回填只读旧 job，不改变已有队列、generation 或取消状态。
+
+身份记录中的 `job_id` 是已知的下游 `review.run`/`review.cancel` job ID。只有 reaction 证明时下游 job 已不可知，`job_id` 为空字符串；不要把它解释为 review job ID。
+
+限制和恢复动作：
+
+- 只有 `review.command` job、没有 reaction 或对应 review job 时，无法证明 enqueue 已提交，因此不回填。`queued`/`running` 命令仍可执行；`failed` 命令仍是终态，不会自动执行。
+- `review_reactions` 不记录命令种类。同一 note 存在两种已知命令种类（例如旧的 `done` run 加新的 queued cancel），且没有对应 kind 的 review job 时，两者都不回填。共享的 reaction 不会同时证明两种命令，也不会把未执行的 cancel 当作已接受。升级后 `queued`/`running` 命令仍按各自种类执行；`failed` 命令不会自动执行。
+- 如果 terminal `review.command` 和对应 `review.run`/`review.cancel` 都已被保留策略删除，只剩 reaction 或 control，无法安全恢复历史命令种类；该 note 不回填。更早 generation 的 reaction 可能属于已裁剪的相反种类命令，不能证明当前 queued 命令。此时旧 queued 命令在升级后重放仍可能推进 generation，或清除升级后更新的取消意图。若升级后仍需确保取消生效，在旧命令重放窗口过去后重新发送 `/review cancel`，确认状态为 cancelled；需要继续评审时再触发新的评审。新 note 会得到新的身份。
+- 回填不会从 `review_controls` 的 generation 或 `cancelled` 反推历史种类；它们只用于核对 reaction-only 证明是否对应当前意图。
+
+项目删除会在同一事务中删除该项目的身份记录，重新登记同 ID 项目后不会复用旧身份。该表没有指向 `projects` 的外键，清理依赖 `DeleteProject`，不要手工只删项目行。
+
+升级前按第 7 节做一致性备份。此迁移没有 down migration；回退须恢复升级前完整快照及匹配旧程序，不能只替换镜像。手工删除表或迁移记录不受支持。
+
+升级后的恢复操作由部署者执行，本文档不表示已经执行。旧命令可能在重新取消前运行、调用模型或发布评论；下列步骤只能恢复取消意图，不能保证这些副作用没有发生。如果不能接受这个风险，应在启动新服务前隔离外部调用并检查旧命令，完成处置后再恢复入口。
+
+1. 启动并确认服务 ready 后，检查是否还有 pending 的 `review.command` job。
+2. 对仍需取消的 MR，在旧命令重放窗口过去后重新发送 `/review cancel`。这会创建新的 note 和身份；在控制台确认状态为 cancelled。
+3. 仍需要评审时再重新触发评审。若旧命令再次清除取消状态，重复第 2 步并核对状态。
+
 ### MCP 配置加密升级（v1.2.0）
 
 1. 按[第 7 节](#7-sqlite-一致性备份与恢复)停止服务并做一致性备份。保存原主密钥、配置和镜像版本，不重新生成 `REVIEW_MASTER_KEY`。
@@ -857,6 +892,8 @@ docker compose exec -T review /app/tribunalctl projects all
    - 升级前按第 7 节做一致性备份；此迁移没有 down migration，回退须恢复升级前完整快照及匹配旧程序。运行时的孤儿清理行为见 [dossier 归属迁移](#dossier-归属迁移v120)。
 
 本次还新增 `0019_job_defer_window`，只给 `jobs` 追加 `defer_since TEXT`。任务连续因执行权争用被延后超过固定的 15 分钟窗口时按失败结算，`last_error` 为 `execution deferral window exceeded`，不再无限延长；旧行保持 NULL 兼容。该窗口不是配置项。该迁移同样没有 down migration，回退须恢复升级前快照。
+
+升级到包含 #159 的后续版本时还会应用 `0020_review_command_replay`。它新建身份表 `review_command_replays` 和一次性回填标记表 `review_command_replay_backfill`，用于按 `(project_id, mr_iid, note_id, command)` 去重已认证的 `/review` 和 `/review cancel` 任务，不改写已有行。启动时会尽力回填一次升级前已提交、仍可重放的 queued/running/failed 命令；只有 `review.command` job 的命令种类明确，并且有同一 note 的 reaction（generation 等于当前 control 且意图匹配）或带 `trigger=command` 的对应 `review.run`/`review.cancel` job 时才写入身份。只有 `review.command` job 而缺少上述证据、同一 note 的 run 与 cancel 无法区分、或 terminal job 已被保留策略删除时不回填；也不从 `review_controls` 反推种类。未回填的 queued/running 命令升级后仍按原行为执行；`failed` 仍保持终态，只有人工重放时才可能再次执行。该迁移没有 down migration，升级到包含它的版本同样要先做一致性备份，回退须恢复升级前快照；限制和恢复动作见 [命令重放幂等迁移](#命令重放幂等迁移后续版本)。
 5. **ignore 保护范围扩大。**
    - 有效 ignore 非空时，仓库读取和证据检查遵守同一规则；无法证明符合规则的 MCP 工具及全量图谱索引不再执行，无来源证明的历史上下文不再注入。
    - 默认 ignore 非空，因此默认图谱能力会降级。这是安全降级：不记 `tool_gaps`，不会把 PASS 改为 INCOMPLETE。仅有索引身份无法证明且 ignore 为空时，实际启用并绑定的工具仍记为覆盖缺口。

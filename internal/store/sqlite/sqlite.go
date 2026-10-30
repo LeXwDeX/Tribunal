@@ -92,6 +92,10 @@ func Open(ctx context.Context, dsn string, opts ...Option) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := backfillReviewCommandReplays(ctx, db, s.now().UTC()); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return s, nil
 }
 
