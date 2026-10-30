@@ -372,6 +372,8 @@ export interface BlockBinding {
   block: string
   mcp_tools: string[]
   skills: string[]
+  /** Optimistic concurrency token for a stored row. */
+  revision: string
 }
 
 export interface RestoreDefaultsGrant {

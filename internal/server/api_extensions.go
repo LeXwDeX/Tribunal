@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
 const (
@@ -113,6 +115,7 @@ type BlockBinding struct {
 	Block     string   `json:"block"`
 	MCPTools  []string `json:"mcp_tools"`
 	Skills    []string `json:"skills"`
+	Revision  string   `json:"revision"`
 }
 
 // BlockBindingInput upserts one binding.
@@ -827,10 +830,11 @@ func (s *Server) handleListBlockBindings(w http.ResponseWriter, r *http.Request)
 }
 
 type blockBindingRequest struct {
-	Scope     string   `json:"scope"`
-	ProjectID *int64   `json:"project_id,omitempty"`
-	MCPTools  []string `json:"mcp_tools"`
-	Skills    []string `json:"skills"`
+	Scope            string   `json:"scope"`
+	ProjectID        *int64   `json:"project_id,omitempty"`
+	MCPTools         []string `json:"mcp_tools"`
+	Skills           []string `json:"skills"`
+	ExpectedRevision *string  `json:"expected_revision"`
 }
 
 func (s *Server) handleUpsertBlockBinding(w http.ResponseWriter, r *http.Request) {
@@ -855,6 +859,14 @@ func (s *Server) handleUpsertBlockBinding(w http.ResponseWriter, r *http.Request
 	if !s.authorizeExtensionScope(w, r, scope, true) {
 		return
 	}
+	if request.ExpectedRevision == nil {
+		validationFailed(w, r, "expected_revision", "expected_revision is required")
+		return
+	}
+	if !store.ValidBlockBindingRevision(*request.ExpectedRevision) {
+		validationFailed(w, r, "expected_revision", "expected_revision must be absent or a lowercase SHA-256 revision")
+		return
+	}
 	tools := request.MCPTools
 	if tools == nil {
 		tools = []string{}
@@ -863,13 +875,13 @@ func (s *Server) handleUpsertBlockBinding(w http.ResponseWriter, r *http.Request
 	if skills == nil {
 		skills = []string{}
 	}
-	binding, err := s.extensions.UpsertBlockBinding(r.Context(), BlockBindingInput{
+	binding, err := s.extensions.ReplaceBlockBinding(r.Context(), BlockBindingInput{
 		Scope:     scope.scope,
 		ProjectID: scope.projectID,
 		Block:     block,
 		MCPTools:  tools,
 		Skills:    skills,
-	})
+	}, *request.ExpectedRevision)
 	if err != nil {
 		s.writeServiceError(w, r, err)
 		return

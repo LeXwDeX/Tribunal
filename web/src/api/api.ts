@@ -308,7 +308,9 @@ export async function listBindings(scope: string, projectId?: number | string, c
   return request<BindingPage>(withQuery('/api/v1/block-bindings', { scope, project_id: projectId, cursor }))
 }
 
-export async function saveBinding(block: string, input: { scope: 'platform' | 'project'; project_id?: number; mcp_tools: string[]; skills: string[] }): Promise<BlockBinding> {
+export async function saveBinding(block: string, input: {
+  scope: 'platform' | 'project'; project_id?: number; mcp_tools: string[]; skills: string[]; expected_revision: string
+}): Promise<BlockBinding> {
   return request<BlockBinding>(`/api/v1/block-bindings/${segment(block)}`, { method: 'PUT', body: input })
 }
 

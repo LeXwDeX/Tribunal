@@ -80,8 +80,16 @@ export function skill(overrides: Partial<Skill> = {}): Skill {
   return { id: 'k1', scope: 'platform', name: 'coding-standards', description: '标准', enabled: true, ...overrides }
 }
 
+// Revision tokens use the server's lowercase SHA-256 shape. Tests never need
+// real digests, only stable, distinguishable values.
+export function revisionToken(label: string): string {
+  let hex = ''
+  for (const char of label) hex += char.codePointAt(0)!.toString(16)
+  return hex.padEnd(64, '0').slice(0, 64)
+}
+
 export function binding(overrides: Partial<BlockBinding> = {}): BlockBinding {
-  return { scope: 'platform', block: 'review', mcp_tools: [], skills: [], ...overrides }
+  return { scope: 'platform', block: 'review', mcp_tools: [], skills: [], revision: revisionToken('review'), ...overrides }
 }
 
 export function contextDoc(overrides: Partial<ContextDoc> = {}): ContextDoc {

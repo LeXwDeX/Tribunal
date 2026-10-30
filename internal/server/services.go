@@ -132,7 +132,7 @@ type ExtensionService interface {
 
 	ListBlockBindings(ctx context.Context, scope string, projectID *int64) ([]BlockBinding, error)
 	ListBlockBindingsPage(ctx context.Context, scope string, projectID *int64, cursor string, limit int) ([]BlockBinding, string, error)
-	UpsertBlockBinding(ctx context.Context, in BlockBindingInput) (*BlockBinding, error)
+	ReplaceBlockBinding(ctx context.Context, in BlockBindingInput, expectedRevision string) (*BlockBinding, error)
 	RestoreDefaults(ctx context.Context, in RestoreDefaultsInput) (*RestoreDefaultsResult, error)
 }
 

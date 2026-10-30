@@ -11,6 +11,9 @@ import (
 var (
 	ErrNotFound = errors.New("store: not found")
 	ErrConflict = errors.New("store: conflict")
+	// ErrStaleRevision rejects a conditional block binding write whose expected
+	// revision no longer matches the stored row.
+	ErrStaleRevision = errors.New("store: stale revision")
 	// ErrBuiltinManaged rejects a write to a row managed by the platform release.
 	ErrBuiltinManaged = errors.New("store: built-in row is managed by the platform")
 	ErrLeaseLost      = errors.New("store: lease lost")

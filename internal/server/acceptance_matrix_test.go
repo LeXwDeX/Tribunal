@@ -40,6 +40,7 @@ func TestAcceptanceManageGrantCannotConfigureHostExtensions(t *testing.T) {
 		}},
 		"project block binding": {http.MethodPut, "/api/v1/block-bindings/review", map[string]any{
 			"scope": "project", "project_id": 43, "skills": []string{"go-review"},
+			"expected_revision": store.BlockBindingAbsentRevision,
 		}},
 	} {
 		t.Run(name, func(t *testing.T) {
