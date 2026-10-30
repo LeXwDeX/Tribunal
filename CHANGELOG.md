@@ -4,7 +4,7 @@
 
 ## Unreleased
 
-v1.2.0 尚未打 tag；本段记录尚未发布的新改动，`[1.2.0]` 段保持不变。比较链接待打 tag 后按实际 tag 补充。
+v1.2.0 尚未打 tag；本段记录尚未发布的新改动。`[1.2.0]` 段仅更正 Webhook 重发说明。比较链接待打 tag 后按实际 tag 补充。
 
 ### 变更
 
@@ -16,6 +16,10 @@ v1.2.0 尚未打 tag；本段记录尚未发布的新改动，`[1.2.0]` 段保�
 
 - **同一 MR 的发布串行**：同一 `(project_id, mr_iid)` 的总结评论（包括空评审和失败说明）与 commit status 写入按评审代次串行。每个写入点前重新校验 control 的 generation 和 head；新代次已接管或 MR head 已变化时走既有 stale 路径，旧代次不再覆盖新代次的总结评论或 commit status。不同 MR 仍可并行发布（[#157](https://github.com/LeXwDeX/Tribunal/issues/157)）。
 - **超长 MR 描述不再挤掉 diff**：评审任务先保留任务头和 diff，再为 MR 上下文单独预算。上下文超预算时在 prompt 中写入截断标记，并在评审结果的 warnings 中说明哪些上下文未完整包含；描述、pipeline、issue 不再能挤掉任务指令或 diff。MR 描述另有 8000 字符独立上限，截断时在 prompt 中标记。扩展评审节点的实际 prompt 也纳入二次汇总的覆盖检查。覆盖检查按生成任务时记录的 diff 区段位置逐文件核对（含中和后的内容），文件或包预算导致 diff 缺失或部分截断时记为未解决证据，汇总不能给出 PASS；提前出现的相同 diff 文本不视为覆盖。任务布局版本并入 prompt bundle hash，因此升级后旧的待恢复、待重试或待发布工作流会被判 stale；没有 `prompt_hash` 的旧工作流不再发布。短描述和完整 diff 的评审不受影响（[#158](https://github.com/LeXwDeX/Tribunal/issues/158)）。
+- **会话密钥预检**：`--check-config` 和实际启动都在准备存储前校验 session key；无效值不再通过配置检查，也不会先触发 SQLite 迁移。新旧环境变量的优先级不变；未配置时仍使用临时 key，实际启动会告警（#164）。
+- **摘要评论恢复**：已绑定的摘要评论更新返回 404 时，先查找本 bot 的摘要标记，再复用或新建评论并更新绑定。旧评论仍在列表中、身份或列表不可用时不新建；写入前仍复核已存代次及非空 head，但不能消除在途请求竞态（#164）。
+- **Webhook 请求体读取超时**：读取超时返回 `503 {"ignored":"request_timeout","request_id":...}`，不再假报 200。GitLab 可能因连续失败临时或永久停用 hook；不要假定失败投递会自动重试，运维恢复与版本限制见 [Webhook 失败与恢复](docs/operations.md#webhook-失败与恢复)（#164）。
+- **Anthropic 用量**：输入 token 现在包含未缓存输入、缓存读取和缓存创建各一次，预算随之使用完整输入；缓存字段仍是明细。成本按配置的单一输入费率估算，不是供应方精确账单，已保存的历史用量不回填（#164）。
 
 ## [1.2.0] - 2026-10-29
 
@@ -37,7 +41,7 @@ v1.2.0 尚未打 tag；本段记录尚未发布的新改动，`[1.2.0]` 段保�
 
 ### 变更
 
-- **Webhook 存储失败改返回 503**：查项目、写投递记录或入队失败时，`POST /webhooks/gitlab` 由 200 改为 503，响应体仍是 `{"ignored":"storage_error","request_id":...}`，日志带脱敏的失败类别。GitLab 不会自动重试失败的投递，但会在 hook 的「Recent events」里记为失败，可以用 Resend request 重发，同一事件 UUID 会被正常受理。GitLab 连续收到失败响应时可能自动停用 hook，需要关注 GitLab 端的 hook 状态。输入错误、未登记项目、重复投递等情况仍返回 200（[#99](https://github.com/LeXwDeX/Tribunal/issues/99)）。
+- **Webhook 存储失败改返回 503**：查项目、写投递记录或入队失败时，`POST /webhooks/gitlab` 由 200 改为 503，响应体仍是 `{"ignored":"storage_error","request_id":...}`，日志带脱敏的失败类别。不要假定失败的投递会自动重试；GitLab 收到 503 时会在 hook 的「Recent events」里记为失败。能否用 Resend request 手动重发及重发是否保留事件 UUID 取决于 GitLab 版本和实例配置；满足条件时同一事件 UUID 会被正常受理，详见 [Webhook 失败与恢复](docs/operations.md#webhook-失败与恢复)。GitLab 连续收到失败响应时可能自动停用 hook，需要关注 GitLab 端的 hook 状态。输入错误、未登记项目、重复投递等情况仍返回 200（[#99](https://github.com/LeXwDeX/Tribunal/issues/99)）。
 - **全局会话上限优先保留管理员**：全局 4096 个会话的兜底上限触发时，先淘汰非管理员的最旧会话，只有剩下的会话全部属于管理员时才淘汰管理员的最旧会话。角色按当前的 `bootstrap_admins` 判断：服务启动时会按配置刷新已存用户的角色，会话被使用时也会刷新，所以改了配置后，不需要用户重新登录。每个用户 10 个会话的上限不变，无需迁移（[#102](https://github.com/LeXwDeX/Tribunal/issues/102)）。
 - **CI 接入静态分析与漏洞扫描**：go job 新增固定版本的 `staticcheck` 和 `govulncheck`，并清理了现有告警。`go.mod` 增加 `toolchain go1.26.10`，本地开发和 CI 不再用 go1.26.0 构建（该版本有 31 个可达的标准库漏洞）；发布镜像本来就是 1.26.10，不受影响（[#106](https://github.com/LeXwDeX/Tribunal/issues/106)）。
 - **日志不再记录原始错误文本**：工作区、评审副作用、运行时恢复、清理、发布状态、bootstrap 管理员绑定和启动恢复等日志不再输出 `error`（原始错误），改为 `error_class` 脱敏类别并保留项目、MR、工作流等标识字段；任务「settled without retry」日志的 `reason` 字段也改为 `error_class`（如 `mr_closed`、`review_superseded`、`stale_publication`、`permanent_job`）。评审筛选、发布失败、扩展绑定跳过等业务 `reason` 字段保持不变。新增 `scripts/logcheck`，`go test ./...` 会拒绝在 logger 调用里记录 `err` 或 `err.Error()`（[#107](https://github.com/LeXwDeX/Tribunal/issues/107)）。
@@ -92,7 +96,7 @@ v1.2.0 尚未打 tag；本段记录尚未发布的新改动，`[1.2.0]` 段保�
 ### 已解决
 
 - v1.1.0 已知限制「评审列表接口不返回 MR 标题」：见上方新增条目（[#101](https://github.com/LeXwDeX/Tribunal/issues/101)）。
-- v1.1.0 已知限制「Webhook 存储失败返回 200」：改为返回 503，失败投递可在 GitLab 中重发（[#99](https://github.com/LeXwDeX/Tribunal/issues/99)）。
+- v1.1.0 已知限制「Webhook 存储失败返回 200」：改为返回 503；失败投递能否在 GitLab 中手动重发取决于版本和实例配置，见 [Webhook 失败与恢复](docs/operations.md#webhook-失败与恢复)（[#99](https://github.com/LeXwDeX/Tribunal/issues/99)）。
 - v1.1.0 已知限制「多个服务进程共用一个数据库时仍可能重复发布」：同一数据目录的第二个进程现在无法启动（[#104](https://github.com/LeXwDeX/Tribunal/issues/104)）。
 - v1.1.0 已知限制「全局会话上限淘汰不区分角色」：现在优先保留管理员会话（[#102](https://github.com/LeXwDeX/Tribunal/issues/102)）。
 

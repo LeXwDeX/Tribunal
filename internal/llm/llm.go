@@ -122,8 +122,9 @@ type Response struct {
 	RequestID  string     `json:"request_id,omitempty"`
 }
 
-// Usage reports token consumption. CacheWriteTokens is reported by providers
-// that expose cache writes separately.
+// Usage reports token consumption. InputTokens includes cache reads and writes;
+// the cache fields are details, not additional tokens. CacheWriteTokens is
+// reported by providers that expose cache writes separately.
 type Usage struct {
 	InputTokens      int64 `json:"input_tokens"`
 	OutputTokens     int64 `json:"output_tokens"`

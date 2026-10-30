@@ -234,6 +234,8 @@ func TestCheckConfig(t *testing.T) {
 	key := base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
 	t.Setenv("REVIEW_MASTER_KEY", key)
 	t.Setenv("REVIEW_ADMIN_TOKEN", "abcdefghijklmnopqrstuvwxyz012345")
+	t.Setenv("TRIBUNAL_SESSION_KEY", "")
+	t.Setenv("CRC_SESSION_KEY", "")
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
 	if err := run(context.Background(), []string{"--config", path, "--check-config"}, stdout, stderr); err != nil {
@@ -668,7 +670,7 @@ func TestDeprecatedEnvironmentWarnings(t *testing.T) {
 	})
 
 	t.Run("legacy session key only warns", func(t *testing.T) {
-		const sessionValue = "session-value-must-not-appear-0123456789"
+		sessionValue := base64.StdEncoding.EncodeToString([]byte("session-value-must-not-appear-0123456789"))
 		t.Setenv("TRIBUNAL_PUBLIC_URL", tribunalURL)
 		t.Setenv("CRC_PUBLIC_URL", "")
 		t.Setenv("TRIBUNAL_HTTP_PORT", tribunalPort)

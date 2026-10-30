@@ -106,6 +106,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	sessionKey, err := sessionKeyFromEnv()
+	if err != nil {
+		return err
+	}
 	if opts.checkConfig {
 		fmt.Fprintln(stdout, "configuration OK")
 		return nil
@@ -206,10 +210,6 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		Logger:    logger,
 		Platform:  cfg,
 	})
-	if err != nil {
-		return err
-	}
-	sessionKey, err := sessionKeyFromEnv()
 	if err != nil {
 		return err
 	}
