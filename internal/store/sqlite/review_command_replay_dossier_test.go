@@ -7,10 +7,13 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
 type legacyDossierProof struct {
@@ -162,10 +165,14 @@ func TestCommandReplayDossierProofAndIsolation(t *testing.T) {
 			t.Errorf("proven run %d/%d = %+v, %v", tc.mrIID, tc.noteID, result, err)
 		}
 	}
+	uncertain, err := s.EnqueueReviewLatest(ctx, commandReplay(42, 7, 555, "cancel", ""))
+	if !errors.Is(err, store.ErrLegacyCommandUncertain) || uncertain.Duplicate || uncertain.Generation != 0 {
+		t.Fatalf("unproven cancel = %+v, %v", uncertain, err)
+	}
 	for _, tc := range []struct {
 		projectID, mrIID, noteID int64
 		kind, head               string
-	}{{42, 7, 555, "cancel", ""}, {42, 8, 555, "run", head}, {43, 7, 555, "run", head}} {
+	}{{42, 8, 555, "run", head}, {43, 7, 555, "run", head}} {
 		result, err := s.EnqueueReviewLatest(ctx, commandReplay(tc.projectID, tc.mrIID, tc.noteID, tc.kind, tc.head))
 		if err != nil || result.Duplicate || result.Generation == 0 {
 			t.Errorf("unproven %d/%d/%d %s = %+v, %v", tc.projectID, tc.mrIID, tc.noteID, tc.kind, result, err)
@@ -261,7 +268,11 @@ func TestCommandReplayDossierLinkedJobGenerationProvenance(t *testing.T) {
 				t.Fatal(err)
 			}
 			state := states[commandReplayNoteKey{42, 7, 555}]
-			if got := state != nil && state.proven("run", false); got != tt.want {
+			got := false
+			if state != nil {
+				_, got = state.reviewIDs["run"]
+			}
+			if got != tt.want {
 				t.Errorf("original dossier proof = %v, want %v", got, tt.want)
 			}
 		})
@@ -394,7 +405,7 @@ func TestCommandReplayRejectsRoundedLegacyNoteIdentity(t *testing.T) {
 	})
 	insertLegacyReplayControl(t, legacy, 42, 9, 1, head, false)
 	insertLegacyReplayReaction(t, legacy, 42, 9, sourceNote, 1)
-	insertLegacyReplayJob(t, legacy, "exact-command", "review.command", commandReplayJobKey(42, sourceNote),
+	insertLegacyReplayJob(t, legacy, "exact-command", "review.command", fmt.Sprintf("review.command:42:%d", sourceNote),
 		legacyCommandPayload(42, 9, sourceNote, "run"), "queued")
 	if err := legacy.Close(); err != nil {
 		t.Fatal(err)
@@ -484,7 +495,7 @@ func TestCommandReplayRejectsReactionForRoundedHighNote(t *testing.T) {
 	// downstream payload was rounded. That reaction cannot prove a new,
 	// never-executed command for the latter note.
 	insertLegacyReplayReaction(t, legacy, 42, 7, roundedNote, 1)
-	insertLegacyReplayJob(t, legacy, "not-executed", "review.command", commandReplayJobKey(42, roundedNote),
+	insertLegacyReplayJob(t, legacy, "not-executed", "review.command", fmt.Sprintf("review.command:42:%d", roundedNote),
 		legacyCommandPayload(42, 7, roundedNote, "run"), "queued")
 	if err := legacy.Close(); err != nil {
 		t.Fatal(err)

@@ -135,6 +135,7 @@ func TestPrunedCommandAndRunDossierRedeliveryAfterUpgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := legacy.Exec(`DROP TABLE review_command_replays;
+		DROP TABLE review_command_quarantine;
 		DROP TABLE review_command_replay_backfill;
 		DELETE FROM schema_migrations WHERE version = 20`); err != nil {
 		t.Fatalf("model 0019: %v", err)
@@ -312,6 +313,7 @@ func TestReplacedRetryDossierRedeliveryAfterUpgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := legacy.Exec(`DROP TABLE review_command_replays;
+		DROP TABLE review_command_quarantine;
 		DROP TABLE review_command_replay_backfill;
 		DELETE FROM schema_migrations WHERE version = 20`); err != nil {
 		t.Fatalf("model 0019: %v", err)

@@ -12,11 +12,9 @@
 -- All proven note IDs must be below 2^53: older payloads converted JSON
 -- numbers through float64 and could round downstream jobs and reactions.
 -- Ambiguous JSON objects with repeated keys are not identity evidence.
--- Queued, running, or failed command jobs may also be proven by a reaction at
--- the current control generation, if their kind is the only known kind and
--- matches the control intent. Done or cancelled commands require kind-specific
--- proof: they may have been denied or stopped before enqueue.
--- A reaction alone or an older reaction does not prove a command identity.
+-- Reactions identify ambiguous notes, not accepted commands or command kinds.
+-- Identifiable legacy commands and reactions are quarantined separately;
+-- uncertainty is not evidence that a command was accepted or denied.
 --
 -- Rows have no foreign key to projects; DeleteProject removes them explicitly
 -- so a re-registered project cannot reuse a stale identity.
@@ -32,5 +30,16 @@ CREATE TABLE review_command_replays (
 
 CREATE TABLE review_command_replay_backfill (
   id           INTEGER PRIMARY KEY CHECK (id = 1),
-  completed_at TEXT    NOT NULL
+  completed_at TEXT    NOT NULL,
+  reaction_quarantine INTEGER NOT NULL CHECK (reaction_quarantine = 1)
+);
+
+CREATE TABLE review_command_quarantine (
+  project_id INTEGER NOT NULL,
+  mr_iid     INTEGER NOT NULL,
+  note_id    INTEGER NOT NULL,
+  command    TEXT    NOT NULL, -- run | cancel | '' (kind unknown)
+  reason     TEXT    NOT NULL,
+  created_at TEXT    NOT NULL,
+  PRIMARY KEY (project_id, mr_iid, note_id, command)
 );
