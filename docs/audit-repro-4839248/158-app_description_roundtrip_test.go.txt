@@ -1,0 +1,72 @@
+package app
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"log/slog"
+	"strings"
+	"testing"
+
+	"github.com/LeXwDeX/tribunal/internal/gitlab"
+	"github.com/LeXwDeX/tribunal/internal/review"
+	"github.com/LeXwDeX/tribunal/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
+)
+
+func TestAuditCollectedDescriptionAndDossierStoreRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	head := strings.Repeat("c", 40)
+	fake := newReviewGitLab(head)
+	fake.mr.Description = strings.Repeat("x", 200000)
+	diff := "@@ -1,2 +1,2 @@\n package main\n-var audit = 0\n+var audit = 1\n"
+	fake.diffs = []gitlab.FileDiff{{OldPath: "a.go", NewPath: "a.go", Diff: diff}}
+	service := &ReviewService{gitlab: fake, logger: slog.New(slog.DiscardHandler)}
+	project := &store.Project{ID: 42, PathWithNamespace: "group/project"}
+	inputs, err := service.collectInputs(ctx, project, "synthetic-placeholder", 7, head)
+	if err != nil {
+		t.Fatalf("collectInputs with in-memory fake: %v", err)
+	}
+	meta := mrMeta(inputs.MR)
+	if meta.Description != fake.mr.Description {
+		t.Fatal("MR description changed during collection or projection")
+	}
+	files, ignored, summary, warnings := buildReviewFiles(inputs.Diffs, nil, 10, 500)
+	if len(files) != 1 || files[0].Diff != diff || summary.Truncated || len(ignored) != 0 || len(warnings) != 0 {
+		t.Fatalf("diff collection changed the synthetic input: files=%+v summary=%+v warnings=%v", files, summary, warnings)
+	}
+	d, err := review.BuildDossier(review.DossierInput{
+		Project: review.ProjectRef{ID: project.ID, Path: project.PathWithNamespace}, MR: meta,
+		DiffVersion: *inputs.Version, DiffSummary: summary, Files: files,
+		IgnorePolicy: &review.IgnorePolicy{Version: review.IgnorePolicyVersion, Patterns: []string{}},
+	})
+	if err != nil {
+		t.Fatalf("BuildDossier: %v", err)
+	}
+	raw, err := review.MarshalDossier(d)
+	if err != nil || len(raw) > 1<<20 {
+		t.Fatalf("dossier JSON: bytes=%d err=%v", len(raw), err)
+	}
+	db, err := sqlite.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open in-memory SQLite: %v", err)
+	}
+	defer db.Close()
+	_, err = db.RegisterProject(ctx, store.Project{ID: 42, PathWithNamespace: "group/project", WebURL: "http://example.invalid/group/project",
+		DefaultBranch: "main", TokenEnc: []byte("synthetic"), WebhookSecretEnc: []byte("synthetic"), TokenScopes: []string{"api"}})
+	if err != nil {
+		t.Fatalf("register synthetic project in memory: %v", err)
+	}
+	if _, err := db.SaveWorkflowDossier(ctx, store.WorkflowDossier{WorkflowID: "wf-audit", ProjectID: 42, JobID: "job-audit", Version: review.DossierSchemaVersion, Data: raw}); err != nil {
+		t.Fatalf("save in-memory dossier: %v", err)
+	}
+	stored, err := db.GetWorkflowDossier(ctx, "wf-audit")
+	if err != nil || !bytes.Equal(stored.Data, raw) {
+		t.Fatalf("SQLite dossier round trip differs: %v", err)
+	}
+	var restored review.Dossier
+	if err := json.Unmarshal(stored.Data, &restored); err != nil || restored.MR.Description != fake.mr.Description || len(restored.Files) != 1 || restored.Files[0].Diff != diff {
+		t.Fatalf("restored dossier differs: %v", err)
+	}
+	t.Logf("in-memory fake -> collectInputs -> mrMeta -> BuildDossier -> SQLite save/read: description=%d bytes; diff=%d bytes; dossier=%d bytes; truncated=%v", len(restored.MR.Description), len(restored.Files[0].Diff), len(stored.Data), restored.DiffSummary.Truncated)
+}

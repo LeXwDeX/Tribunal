@@ -1,0 +1,102 @@
+package app
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/store"
+)
+
+func TestAuditReviewWorkerGenerationAttemptFence(t *testing.T) {
+	ctx := context.Background()
+	r := newLifecycleRuntime(t)
+	api := newReviewGitLab(sha40)
+	transient := errors.New("synthetic temporary upstream error")
+	api.mrErr = transient
+	r.reviews.gitlab = api
+	first, err := r.store.EnqueueReviewLatest(ctx, store.ReviewCommand{
+		ProjectID: 42, MRIID: 7, HeadSHA: sha40,
+		Payload: json.RawMessage(`{"trigger":"mr_open","profile":"default"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var old *store.Job
+	for attempt := 1; attempt <= 2; attempt++ {
+		old, err = r.store.Claim(ctx, "audit-old", []string{"review.run"}, time.Minute)
+		if err != nil || old == nil || old.ID != first.JobID || old.Attempts != attempt {
+			t.Fatalf("old claim %d: %+v, %v", attempt, old, err)
+		}
+		if err := r.reviews.RunReview(ctx, old); !errors.Is(err, transient) {
+			t.Fatalf("old handler attempt %d: %v", attempt, err)
+		}
+		status, err := r.store.GetReviewStatus(ctx, 42, 7)
+		if err != nil || status.Generation != first.Generation || status.State != store.ReviewStatusRunning || status.Attempt != attempt {
+			t.Fatalf("old running status %d: %+v, %v", attempt, status, err)
+		}
+		if attempt == 1 {
+			if err := r.store.Fail(ctx, *old, transient, nil); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	second, err := r.store.EnqueueReviewLatest(ctx, store.ReviewCommand{
+		ProjectID: 42, MRIID: 7, HeadSHA: sha40,
+		Payload: json.RawMessage(`{"trigger":"mr_update","profile":"default"}`),
+	})
+	if err != nil || second.Generation != first.Generation+1 || second.JobID == first.JobID {
+		t.Fatalf("successor enqueue: %+v, %v", second, err)
+	}
+	queued, err := r.store.GetReviewStatus(ctx, 42, 7)
+	if err != nil || queued.Generation != second.Generation || queued.State != store.ReviewStatusQueued || queued.Attempt != 2 {
+		t.Fatalf("successor queued: %+v, %v", queued, err)
+	}
+	if err := r.store.Fail(ctx, *old, transient, nil); err != nil {
+		t.Fatal(err)
+	}
+	oldStored, err := r.store.GetJob(ctx, old.ID)
+	if err != nil || oldStored.State != store.JobCancelled {
+		t.Fatalf("superseded old job: %+v, %v", oldStored, err)
+	}
+	newJob, err := r.store.Claim(ctx, "audit-new", []string{"review.run"}, time.Minute)
+	if err != nil || newJob == nil || newJob.ID != second.JobID || newJob.Attempts != 1 {
+		t.Fatalf("successor claim: %+v, %v", newJob, err)
+	}
+	api.mrErr = nil
+	r.reviews.git = newFakeGitOps(sha40)
+	r.reviews.extensions = nil
+	r.reviews.testIdentity = "synthetic"
+	r.reviews.profiles = map[string]config.ProfileConfig{"default": testReviewProfile()}
+	r.reviews.providerNames = []string{"fake"}
+	r.reviews.agentRun = (&fakeAgentRunner{}).Run
+	r.reviews.clients, r.reviews.tools, r.reviews.skills, r.reviews.blocks = nil, nil, nil, nil
+	r.reviews.reviewDefaults = testDefaults()
+	r.publisher.gitlab, r.publisher.profiles = api, r.reviews.profiles
+	r.publisher.reviewDefaults = r.reviews.reviewDefaults
+	if err := r.reviews.RunReview(ctx, newJob); err != nil {
+		t.Fatalf("successor handler with fakes: %v", err)
+	}
+	workflow, err := r.store.GetWorkflowByJob(ctx, newJob.ID)
+	if err != nil || workflow.Status != "completed" {
+		t.Fatalf("successor workflow: %+v, %v", workflow, err)
+	}
+	after, err := r.store.GetReviewStatus(ctx, 42, 7)
+	if err != nil || after.Generation != second.Generation || after.State != store.ReviewStatusQueued || after.Attempt != 2 || after.Version != queued.Version {
+		t.Fatalf("successor status after actual handler: %+v, %v", after, err)
+	}
+	if err := r.store.Complete(ctx, *newJob); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.reviews.ReconcileSideEffects(ctx); err != nil {
+		t.Fatalf("reconcile side effects: %v", err)
+	}
+	after, err = r.store.GetReviewStatus(ctx, 42, 7)
+	if err != nil || after.State != store.ReviewStatusQueued || after.Attempt != 2 || after.Version != queued.Version {
+		t.Fatalf("successor status after reconciliation: %+v, %v", after, err)
+	}
+	t.Logf("actual RunReview: old attempt=2 cancelled by successor; new attempt=%d workflow=%s; after reconciliation status generation=%d attempt=%d state=%s version unchanged", newJob.Attempts, workflow.Status, after.Generation, after.Attempt, after.State)
+}

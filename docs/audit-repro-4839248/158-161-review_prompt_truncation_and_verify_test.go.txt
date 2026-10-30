@@ -1,0 +1,285 @@
+package review
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"unicode/utf8"
+
+	"github.com/LeXwDeX/tribunal/internal/agent"
+	"github.com/LeXwDeX/tribunal/internal/gitlab"
+	"github.com/LeXwDeX/tribunal/pkg/dag"
+	"github.com/LeXwDeX/tribunal/prompts"
+)
+
+const auditDiff = "@@ -1,2 +1,2 @@\n package main\n-var audit = 0\n+var audit = 1\n"
+
+func auditDossier(t *testing.T, description string) *Dossier {
+	t.Helper()
+	d, err := BuildDossier(DossierInput{
+		Project: ProjectRef{ID: 42, Path: "group/project"},
+		MR: MRMeta{IID: 7, Title: "Change audit", Description: description,
+			SourceBranch: "feature/audit", TargetBranch: "main"},
+		DiffVersion: gitlab.Version{BaseSHA: testBaseSHA, StartSHA: testStartSHA, HeadSHA: testHeadSHA},
+		DiffSummary: DiffSummary{Total: 1, Files: 1, Additions: 1, Deletions: 1},
+		Files: []FileChange{{Path: "a.go", Status: "modified", Diff: auditDiff, Additions: 1, Deletions: 1}},
+		IgnorePolicy: &IgnorePolicy{Version: IgnorePolicyVersion, Patterns: []string{}},
+	})
+	if err != nil {
+		t.Fatalf("BuildDossier: %v", err)
+	}
+	return d
+}
+
+func auditWorkflow(t *testing.T, d *Dossier, profile Profile, codeOut CodeReviewOut) (dag.WorkflowView, dag.NodeSpec) {
+	t.Helper()
+	ctx := context.Background()
+	cfg := GraphConfig{AllowedProviders: []string{"local", "claude"}}
+	spec, err := BuildGraph(profile, d, cfg)
+	if err != nil {
+		t.Fatalf("BuildGraph: %v", err)
+	}
+	wf := dag.WorkflowView{ID: "wf-audit", Status: dag.WorkflowRunning, Spec: spec, Nodes: map[string]dag.NodeView{}}
+	for _, node := range spec.Nodes {
+		wf.Order = append(wf.Order, node.ID)
+		wf.Nodes[node.ID] = dag.NodeView{ID: node.ID, Spec: node, Status: dag.NodePending}
+	}
+	plan := PlanOut{Risk: "low", RiskReasons: []string{"small diff"},
+		Packages: []Package{{ID: "p1", Blocks: []string{BlockCodeReview}, Files: []string{"a.go"}, Focus: "review"}},
+		ChallengeOnly: []Severity{SeverityP0, SeverityP1}}
+	planRaw, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planNode := wf.Nodes[NodePlan]
+	planNode.Status, planNode.Attempt, planNode.Output = dag.NodeCompleted, 1, planRaw
+	wf.Nodes[NodePlan] = planNode
+	expanders, err := BuildExpanders(profile, d, cfg)
+	if err != nil {
+		t.Fatalf("BuildExpanders: %v", err)
+	}
+	ext, err := expanders[KindPlan].Expand(ctx, wf, planNode.Spec, planRaw)
+	if err != nil {
+		t.Fatalf("PlanExpander: %v", err)
+	}
+	if len(ext.Nodes) != 1 || ext.Nodes[0].Kind != KindCodeReview {
+		t.Fatalf("unexpected plan extension: %+v", ext.Nodes)
+	}
+	for _, patch := range ext.DepPatches {
+		for i := range wf.Spec.Nodes {
+			if wf.Spec.Nodes[i].ID == patch.Node {
+				wf.Spec.Nodes[i].DependsOn = append(wf.Spec.Nodes[i].DependsOn, patch.Add...)
+				view := wf.Nodes[patch.Node]
+				view.Spec = wf.Spec.Nodes[i]
+				wf.Nodes[patch.Node] = view
+			}
+		}
+	}
+	reviewNode := ext.Nodes[0]
+	wf.Spec.Nodes = append(wf.Spec.Nodes, reviewNode)
+	wf.Order = append(wf.Order, reviewNode.ID)
+	if err := codeOut.Validate(); err != nil {
+		t.Fatalf("code review output: %v", err)
+	}
+	codeRaw, err := json.Marshal(codeOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wf.Nodes[reviewNode.ID] = dag.NodeView{ID: reviewNode.ID, Spec: reviewNode, Status: dag.NodeCompleted, Attempt: 1, Output: codeRaw}
+	if err := dag.ValidateGraph(wf.Spec); err != nil {
+		t.Fatalf("expanded graph: %v", err)
+	}
+	return wf, reviewNode
+}
+
+func TestAuditPromptTruncationHidesCompleteDiffWithoutCoverageGap(t *testing.T) {
+	d := auditDossier(t, strings.Repeat("x", MaxTaskRunes))
+	dossierJSON, err := MarshalDossier(d)
+	if err != nil || len(dossierJSON) > 1<<20 {
+		t.Fatalf("serialized dossier does not fit the 1 MiB store ceiling: bytes=%d err=%v", len(dossierJSON), err)
+	}
+	var restored Dossier
+	if err := json.Unmarshal(dossierJSON, &restored); err != nil || restored.MR.Description != d.MR.Description || restored.Files[0].Diff != auditDiff {
+		t.Fatalf("serialized dossier did not preserve input: %v", err)
+	}
+	profile := defaultProfile()
+	clean := CodeReviewOut{Summary: "synthetic clean response", Findings: []FindingOut{}}
+	wf, node := auditWorkflow(t, d, profile, clean)
+	params, err := decodeParams[reviewNodeParams](node.Params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := reviewTask(d, params)
+	if !strings.Contains(task, auditDiff) || !strings.Contains(renderDiffs(d, params.Files), auditDiff) {
+		t.Fatal("the full small diff was not present before whole-task truncation")
+	}
+	if gaps := promptDiffGaps(d, params.Files); len(gaps) != 0 {
+		t.Fatalf("the complete diff unexpectedly has local rendering gaps: %+v", gaps)
+	}
+	bundle, err := prompts.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	build := func(value string) BuiltPrompt {
+		t.Helper()
+		built, err := BuildPrompt(PromptInput{Bundle: bundle, Role: prompts.CodeReview, Task: value, Nonce: "audit_nonce_123456"})
+		if err != nil {
+			t.Fatalf("BuildPrompt: %v", err)
+		}
+		return built
+	}
+	built := build(task)
+	if strings.Contains(built.User, "```diff") || strings.Contains(built.User, "var audit = 1") {
+		t.Fatal("the truncated BuildPrompt user text unexpectedly contains the diff")
+	}
+	short := *d
+	short.MR.Description = "short description"
+	if !strings.Contains(build(reviewTask(&short, params)).User, auditDiff) {
+		t.Fatal("short-description control did not include the full diff")
+	}
+	var actualPrompt string
+	executor := newTestExecutor(t, ExecutorDeps{
+		Dossier: d, Profile: profile,
+		Snapshot: func(context.Context, string) (dag.WorkflowView, error) { return wf, nil },
+		AgentRun: func(_ context.Context, spec agent.RunSpec) (*agent.RunResult, error) {
+			actualPrompt = spec.Prompt
+			raw, _ := json.Marshal(clean)
+			decoded, err := spec.Submit.Decode(raw)
+			if err != nil {
+				return nil, err
+			}
+			return &agent.RunResult{Output: decoded}, nil
+		},
+	})
+	response, err := executor.Execute(context.Background(), dag.NodeInput{WorkflowID: wf.ID, Node: node, Attempt: 1})
+	if err != nil {
+		t.Fatalf("execute code review with synthetic runner: %v", err)
+	}
+	if actualPrompt == "" || strings.Contains(actualPrompt, "```diff") || strings.Contains(actualPrompt, "var audit = 1") {
+		t.Fatal("actual RunSpec.Prompt missing or unexpectedly contains the diff")
+	}
+	reviewView := wf.Nodes[node.ID]
+	reviewView.Output = response.Data
+	wf.Nodes[node.ID] = reviewView
+	gaps := executor.coverageUnresolved(wf)
+	if len(gaps) != 0 {
+		t.Fatalf("coverageUnresolved unexpectedly detected a gap: %+v", gaps)
+	}
+	gathered := runEvidenceGather(t, executor, wf)
+	if len(gathered.Unresolved) != 0 {
+		t.Fatalf("gather unexpectedly detected an unresolved signal: %+v", gathered.Unresolved)
+	}
+	t.Logf("validated dossier and expanded graph; serialized dossier=%d bytes (<1 MiB); assigned file=a.go; description=%d runes; task=%d runes; MaxTaskRunes=%d", len(dossierJSON), utf8.RuneCountInString(d.MR.Description), utf8.RuneCountInString(task), MaxTaskRunes)
+	t.Logf("complete diff=%d bytes; pre-truncation=true; short-description control=true; BuildPrompt.User diff=false; intercepted RunSpec.Prompt diff=false; coverageUnresolved=%d; gather unresolved=%d", len(auditDiff), len(gaps), len(gathered.Unresolved))
+}
+
+func TestAuditExtendedVerifyOfExistingGroupIsNotApplied(t *testing.T) {
+	d := auditDossier(t, "short description")
+	head := t.TempDir()
+	if err := os.WriteFile(filepath.Join(head, "a.go"), []byte("package main\nvar audit = 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d.HeadDir = head
+	profile := defaultProfile()
+	profile.Config.Synthesize.Mode = "agent"
+	profile.Config.Synthesize.Provider = "claude"
+	profile.Config.Budget.MaxExtends = 1
+	proposal := finding("a.go", 2, SeverityP2, "synthetic existing finding")
+	codeOut := CodeReviewOut{Summary: "synthetic proposal", Findings: []FindingOut{proposal}}
+	wf, _ := auditWorkflow(t, d, profile, codeOut)
+	executor := newTestExecutor(t, ExecutorDeps{
+		Dossier: d, Profile: profile,
+		Snapshot: func(context.Context, string) (dag.WorkflowView, error) { return wf, nil },
+		Locate: func(string, int, Side) bool { return true },
+	})
+	gathered := runEvidenceGather(t, executor, wf)
+	gatherRaw, _ := json.Marshal(gathered)
+	gatherNode := wf.Nodes[NodeGather]
+	gatherNode.Status, gatherNode.Attempt, gatherNode.Output = dag.NodeCompleted, 1, gatherRaw
+	wf.Nodes[NodeGather] = gatherNode
+	adjudicated := runEvidenceAdjudicate(t, executor, wf, gathered)
+	if len(adjudicated.Groups) != 1 || adjudicated.Groups[0].Origin.Main || adjudicated.Groups[0].Decision == nil || adjudicated.Groups[0].Decision.Action != ActionPublish {
+		t.Fatalf("unexpected existing group: %+v", adjudicated.Groups)
+	}
+	group := adjudicated.Groups[0]
+	adjudicatedRaw, _ := json.Marshal(adjudicated)
+	adjudicateNode := wf.Nodes[NodeAdjudicate]
+	adjudicateNode.Status, adjudicateNode.Attempt, adjudicateNode.Output = dag.NodeCompleted, 1, adjudicatedRaw
+	wf.Nodes[NodeAdjudicate] = adjudicateNode
+	output := SynthesizeOut{Verdict: VerdictPass, Summary: "synthetic first synthesis", Decisions: []Decision{}, NewFindings: []FindingOut{},
+		ExtendRequests: []ExtendRequest{{Kind: "verify", FindingID: group.ID, Focus: "verify existing finding"}}}
+	if err := ValidateSynthesis(output, SynthesisContext{WorkflowID: wf.ID, NodeID: NodeSynth, Attempt: 1,
+		Groups: adjudicated.Groups, MaxExtends: 1, AllowedFiles: []string{"a.go"}}); err != nil {
+		t.Fatalf("existing group verify request is not valid: %v", err)
+	}
+	first := SynthesisResult{Verdict: output.Verdict, Summary: output.Summary, Groups: adjudicated.Groups, Output: output}
+	if err := first.Validate(); err != nil {
+		t.Fatalf("first synthesis: %v", err)
+	}
+	firstRaw, _ := json.Marshal(first)
+	synthNode := wf.Nodes[NodeSynth]
+	synthNode.Status, synthNode.Attempt, synthNode.Output = dag.NodeCompleted, 1, firstRaw
+	wf.Nodes[NodeSynth] = synthNode
+	expanders, err := BuildExpanders(profile, d, GraphConfig{AllowedProviders: []string{"local", "claude"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ext, err := expanders[KindSynthesize].Expand(context.Background(), wf, synthNode.Spec, firstRaw)
+	if err != nil {
+		t.Fatalf("SynthesizeExpander: %v", err)
+	}
+	var verifyNode, synth2 dag.NodeSpec
+	for _, node := range ext.Nodes {
+		wf.Spec.Nodes = append(wf.Spec.Nodes, node)
+		wf.Order = append(wf.Order, node.ID)
+		wf.Nodes[node.ID] = dag.NodeView{ID: node.ID, Spec: node, Status: dag.NodePending}
+		if node.Kind == KindVerify {
+			verifyNode = node
+		}
+		if node.ID == NodeSynth2 {
+			synth2 = node
+		}
+	}
+	if verifyNode.ID == "" || synth2.ID == "" {
+		t.Fatalf("expected verify and second synthesis: %+v", ext.Nodes)
+	}
+	if err := dag.ValidateGraph(wf.Spec); err != nil {
+		t.Fatalf("extended graph: %v", err)
+	}
+	ref := CodeRef{Path: "a.go", StartLine: 2, EndLine: 2, Root: "head", Note: "synthetic refutation location"}
+	if err := executor.validateCodeRef(ref); err != nil {
+		t.Fatalf("refutation location is not present in the fixed snapshot: %v", err)
+	}
+	verification := VerifyResult{GroupID: group.ID, Provider: "claude", Result: VerifyOut{Status: "REFUTED", Reason: "synthetic refutation", Evidence: []CodeRef{ref}}}
+	if err := verification.Validate(); err != nil {
+		t.Fatalf("verify output: %v", err)
+	}
+	verifyRaw, _ := json.Marshal(verification)
+	verifyView := wf.Nodes[verifyNode.ID]
+	verifyView.Status, verifyView.Attempt, verifyView.Output = dag.NodeCompleted, 1, verifyRaw
+	wf.Nodes[verifyNode.ID] = verifyView
+	wf.ExtendsUsed = 1
+	results, failed, err := collectVerifyResults(wf)
+	if err != nil || len(failed) != 0 || results[group.ID].Result.Status != "REFUTED" || results[group.ID].Node != verifyNode.ID {
+		t.Fatalf("extended verify was not collectable: results=%+v failed=%+v err=%v", results, failed, err)
+	}
+	params, err := decodeParams[synthesizeParams](synth2.Params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged, _, unresolved, warnings, err := executor.synthesisGroups(context.Background(), dag.NodeInput{WorkflowID: wf.ID, Node: synth2, Attempt: 1}, params)
+	if err != nil {
+		t.Fatalf("second synthesis groups: %v", err)
+	}
+	if len(merged) != 1 || merged[0].ID != group.ID || merged[0].Challenge != nil || merged[0].Decision == nil || merged[0].Decision.Action != ActionPublish {
+		t.Fatalf("unexpected second synthesis group: %+v", merged)
+	}
+	if strings.Contains(synthesizeTask(d, merged, params), "synthetic refutation") {
+		t.Fatal("second synthesis task unexpectedly contains the extended verify result")
+	}
+	t.Logf("valid existing-group request expanded to %s; completed verify=REFUTED with snapshot-valid a.go:2; collectVerifyResults sees it", verifyNode.ID)
+	t.Logf("second synthesis group=%s challenge=nil decision=%s; task contains refutation=false; unresolved=%d warnings=%d", group.ID, merged[0].Decision.Action, len(unresolved), len(warnings))
+}

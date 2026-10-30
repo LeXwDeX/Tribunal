@@ -1,0 +1,371 @@
+package app
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/jobs"
+	"github.com/LeXwDeX/tribunal/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
+	"github.com/LeXwDeX/tribunal/internal/workspace"
+	"github.com/LeXwDeX/tribunal/prompts"
+)
+
+type auditReplayClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *auditReplayClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *auditReplayClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
+type auditEnqueue struct {
+	cancel bool
+	result store.ReviewEnqueueResult
+}
+
+type auditCommandStore struct {
+	*sqlite.Store
+	results chan auditEnqueue
+}
+
+func (s *auditCommandStore) EnqueueReviewLatest(ctx context.Context, command store.ReviewCommand) (store.ReviewEnqueueResult, error) {
+	result, err := s.Store.EnqueueReviewLatest(ctx, command)
+	if err == nil {
+		s.results <- auditEnqueue{cancel: command.Cancel, result: result}
+	}
+	return result, err
+}
+
+type auditQueue struct {
+	*sqlite.Store
+	claims chan store.Job
+}
+
+func (q *auditQueue) Claim(ctx context.Context, owner string, kinds []string, lease time.Duration) (*store.Job, error) {
+	job, err := q.Store.Claim(ctx, owner, kinds, lease)
+	if job != nil && q.claims != nil {
+		q.claims <- *job
+	}
+	return job, err
+}
+
+type auditCrashRecord struct {
+	Job         store.Job
+	Result      store.ReviewEnqueueResult
+	Cancel      bool
+	Validations int
+}
+
+type auditCrashQueue struct {
+	*sqlite.Store
+	results <-chan auditEnqueue
+	api     *fakeGitLab
+}
+
+func (q *auditCrashQueue) Complete(_ context.Context, job store.Job) error {
+	enqueued := <-q.results
+	record, err := json.Marshal(auditCrashRecord{
+		Job: job, Result: enqueued.result, Cancel: enqueued.cancel,
+		Validations: q.api.callCount("CurrentUser"),
+	})
+	if err != nil {
+		os.Exit(87)
+	}
+	_, _ = fmt.Fprintf(os.Stdout, "AUDIT_CRASH=%s\n", record)
+	os.Exit(86)
+	return nil
+}
+
+func auditCrashChild(t *testing.T) {
+	t.Helper()
+	clock := &auditReplayClock{now: time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)}
+	db, err := sqlite.Open(context.Background(), os.Getenv("TRIBUNAL_AUDIT_DB"), sqlite.WithClock(clock.Now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := defaultFakeGitLab()
+	results := make(chan auditEnqueue, 1)
+	command, err := NewCommandWorker(CommandWorkerConfig{
+		Store: &auditCommandStore{Store: db, results: results}, Workspace: workspace.NewManager(t.TempDir(), nil),
+		GitLab: api, Cipher: newTestCipher(t), Profiles: testProfiles(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := jobs.NewWorker(&auditCrashQueue{Store: db, results: results, api: api}, jobs.WorkerConfig{
+		Handlers: map[string]jobs.Handler{"review.command": command.Handle},
+		Lease:    10 * time.Second, PollInterval: 10 * time.Millisecond, Now: clock.Now,
+	})
+	if err := w.Run(context.Background()); err != nil {
+		t.Fatalf("child worker: %v", err)
+	}
+	t.Fatal("child exited without hitting the crash point")
+}
+
+func auditRunWorker(t *testing.T, q jobs.Queue, clock *auditReplayClock, handlers map[string]jobs.Handler) func() {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	w := jobs.NewWorker(q, jobs.WorkerConfig{
+		Handlers: handlers, Lease: 10 * time.Second, PollInterval: 10 * time.Millisecond, Now: clock.Now,
+	})
+	go func() { done <- w.Run(ctx) }()
+	var once sync.Once
+	stop := func() {
+		once.Do(func() {
+			cancel()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Errorf("worker stopped with error: %v", err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Error("worker did not stop")
+			}
+		})
+	}
+	t.Cleanup(stop)
+	return stop
+}
+
+func auditWaitJob(t *testing.T, db *sqlite.Store, id, state string) *store.Job {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		job, err := db.GetJob(context.Background(), id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if job.State == state {
+			return job
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	job, _ := db.GetJob(context.Background(), id)
+	t.Fatalf("job %s never reached %s: %+v", id, state, job)
+	return nil
+}
+
+func auditReceive[T any](t *testing.T, ch <-chan T) T {
+	t.Helper()
+	select {
+	case value := <-ch:
+		return value
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for test event")
+		var zero T
+		return zero
+	}
+}
+
+func auditControl(t *testing.T, db *sqlite.Store, generation int64, cancelled bool) *store.ReviewControl {
+	t.Helper()
+	control, err := db.GetReviewControl(context.Background(), 42, 7)
+	if err != nil || control.Generation != generation || control.Cancelled != cancelled {
+		t.Fatalf("control = %+v, %v; want generation=%d cancelled=%v", control, err, generation, cancelled)
+	}
+	return control
+}
+
+func TestAuditReviewCommandReplayAfterCancel(t *testing.T) {
+	if os.Getenv("TRIBUNAL_AUDIT_CRASH_CHILD") == "1" {
+		auditCrashChild(t)
+		return
+	}
+	ctx := context.Background()
+	clock := &auditReplayClock{now: time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)}
+	path := filepath.Join(t.TempDir(), "replay.db")
+	db, err := sqlite.Open(ctx, path, sqlite.WithClock(clock.Now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	cipher := newTestCipher(t)
+	seedProject(t, db, cipher, 42, "whsec-test", "{}", "default")
+	api := defaultFakeGitLab()
+	results := make(chan auditEnqueue, 8)
+	bundle, err := prompts.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	services := func(db *sqlite.Store) (*WebhookService, *CommandWorker, *ReviewService) {
+		manager := workspace.NewManager(t.TempDir(), nil)
+		webhook, err := NewWebhookService(WebhookServiceConfig{
+			Store: db, Workspace: manager, Cipher: cipher, Profiles: testProfiles(), ReviewDefaults: testDefaults(), Now: clock.Now,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		command, err := NewCommandWorker(CommandWorkerConfig{
+			Store: &auditCommandStore{Store: db, results: results}, Workspace: manager, GitLab: api, Cipher: cipher, Profiles: testProfiles(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		reviewService, err := NewReviewService(ReviewServiceConfig{
+			Store: db, Workspace: manager, GitLab: newReviewGitLab(sha40), Cipher: cipher, Git: newFakeGitOps(sha40),
+			Profiles: testProfiles(), ReviewDefaults: testDefaults(), Prompts: bundle,
+			ProviderConfigs: map[string]config.ProviderConfig{}, ExecutionIdentity: "audit-fixture", Now: clock.Now,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return webhook, command, reviewService
+	}
+
+	webhook, command, _ := services(db)
+	runRequest := WebhookRequest{
+		Event: "Note Hook", Token: "whsec-test", UUID: "00000000-0000-4000-8000-000000000001",
+		Body: noteBody(42, 7, 555, 12, "alice", "/review"),
+	}
+	entry, err := webhook.Handle(ctx, runRequest)
+	if err != nil || !entry.Accepted || entry.JobID == "" {
+		t.Fatalf("run webhook = %+v, %v", entry, err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	childCtx, childCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer childCancel()
+	child := exec.CommandContext(childCtx, exe, "-test.run=^TestAuditReviewCommandReplayAfterCancel$", "-test.v")
+	child.Env = append(os.Environ(), "TRIBUNAL_AUDIT_CRASH_CHILD=1", "TRIBUNAL_AUDIT_DB="+path)
+	output, err := child.CombinedOutput()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 86 {
+		t.Fatalf("child did not exit at the crash point: %v output=%s", err, output)
+	}
+	var crash auditCrashRecord
+	foundCrash := false
+	for _, line := range bytes.Split(output, []byte("\n")) {
+		if raw, ok := bytes.CutPrefix(line, []byte("AUDIT_CRASH=")); ok {
+			if err := json.Unmarshal(raw, &crash); err != nil {
+				t.Fatal(err)
+			}
+			foundCrash = true
+		}
+	}
+	if !foundCrash || crash.Job.ID != entry.JobID || crash.Job.Attempts != 1 || crash.Cancel || crash.Validations != 1 {
+		t.Fatalf("invalid child crash evidence: %+v output=%s", crash, output)
+	}
+	t.Logf("child process: exited=%d inside queue.Complete before sqlite write; claimed_command=%s attempt=%d", exitErr.ExitCode(), crash.Job.ID, crash.Job.Attempts)
+	db, err = sqlite.Open(ctx, path, sqlite.WithClock(clock.Now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstRun := auditEnqueue{cancel: crash.Cancel, result: crash.Result}
+	firstControl := auditControl(t, db, 1, false)
+	firstCommand := auditWaitJob(t, db, entry.JobID, store.JobRunning)
+	firstReview := auditWaitJob(t, db, firstRun.result.JobID, store.JobQueued)
+	if firstCommand.Attempts != 1 || crash.Job.LeaseOwner != firstCommand.LeaseOwner ||
+		firstRun.cancel || firstRun.result.Generation != 1 || firstReview.Kind != "review.run" {
+		t.Fatalf("first attempt = crash %+v command %+v enqueue %+v review %+v", crash, firstCommand, firstRun, firstReview)
+	}
+	t.Logf("first: command id=%s key=%s attempt=%d state=%s owner=%s; review id=%s key=%s payload=%s; generation=%d cancelled=%v", firstCommand.ID, firstCommand.Key, firstCommand.Attempts, firstCommand.State, firstCommand.LeaseOwner, firstReview.ID, firstReview.Key, firstReview.Payload, firstControl.Generation, firstControl.Cancelled)
+
+	webhook, command, reviewService := services(db)
+	cancelEntry, err := webhook.Handle(ctx, WebhookRequest{
+		Event: "Note Hook", Token: "whsec-test", UUID: "00000000-0000-4000-8000-000000000002",
+		Body: noteBody(42, 7, 556, 12, "alice", "/review cancel"),
+	})
+	if err != nil || !cancelEntry.Accepted || cancelEntry.JobID == entry.JobID {
+		t.Fatalf("cancel webhook = %+v, %v", cancelEntry, err)
+	}
+	stop := auditRunWorker(t, db, clock, map[string]jobs.Handler{
+		"review.command": command.Handle, "review.cancel": reviewService.Handle,
+	})
+	cancelRun := auditReceive(t, results)
+	if !cancelRun.cancel || cancelRun.result.Generation != 2 {
+		t.Fatalf("cancel enqueue = %+v", cancelRun)
+	}
+	cancelCommand := auditWaitJob(t, db, cancelEntry.JobID, store.JobDone)
+	cancelJob := auditWaitJob(t, db, cancelRun.result.JobID, store.JobDone)
+	stop()
+	cancelControl := auditControl(t, db, 2, true)
+	status, err := db.GetReviewStatus(ctx, 42, 7)
+	if err != nil || status.Generation != 2 || status.State != store.ReviewStatusCancelled {
+		t.Fatalf("cancel status = %+v, %v", status, err)
+	}
+	if active, err := db.FindActiveReview(ctx, 42, 7); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expected no active review in this fixture: active=%+v err=%v", active, err)
+	}
+	stillRunning := auditWaitJob(t, db, entry.JobID, store.JobRunning)
+	if stillRunning.Attempts != 1 || cancelCommand.Attempts != 1 || cancelJob.Kind != "review.cancel" {
+		t.Fatalf("jobs after cancellation: old=%+v command=%+v cancel=%+v", stillRunning, cancelCommand, cancelJob)
+	}
+	t.Logf("cancel: command id=%s key=%s attempt=%d state=%s; cancel id=%s key=%s state=%s payload=%s; generation=%d cancelled=%v status=%s; original-command=%s/%s", cancelCommand.ID, cancelCommand.Key, cancelCommand.Attempts, cancelCommand.State, cancelJob.ID, cancelJob.Key, cancelJob.State, cancelJob.Payload, cancelControl.Generation, cancelControl.Cancelled, status.State, stillRunning.ID, stillRunning.State)
+
+	duplicate, err := webhook.Handle(ctx, runRequest)
+	if err != nil || duplicate.Accepted || duplicate.Ignored != "duplicate" {
+		t.Fatalf("duplicate webhook = %+v, %v", duplicate, err)
+	}
+	auditControl(t, db, 2, true)
+	t.Logf("same webhook UUID: accepted=%v ignored=%s returned_job_id=%q; generation=2 cancelled=true", duplicate.Accepted, duplicate.Ignored, duplicate.JobID)
+
+	clock.Advance(11 * time.Second)
+	stop = auditRunWorker(t, db, clock, nil)
+	recovered := auditWaitJob(t, db, entry.JobID, store.JobQueued)
+	stop()
+	if recovered.Attempts != 1 || recovered.LeaseOwner != "" {
+		t.Fatalf("recovered command = %+v", recovered)
+	}
+	t.Logf("recovery: command id=%s key=%s attempt=%d state=%s last_error=%q", recovered.ID, recovered.Key, recovered.Attempts, recovered.State, recovered.LastError)
+
+	replayQueue := &auditQueue{Store: db, claims: make(chan store.Job, 1)}
+	stop = auditRunWorker(t, replayQueue, clock, map[string]jobs.Handler{"review.command": command.Handle})
+	replayedClaim := auditReceive(t, replayQueue.claims)
+	replayedRun := auditReceive(t, results)
+	replayedCommand := auditWaitJob(t, db, entry.JobID, store.JobDone)
+	stop()
+	finalControl := auditControl(t, db, 3, false)
+	finalReview := auditWaitJob(t, db, replayedRun.result.JobID, store.JobQueued)
+	if replayedClaim.ID != entry.JobID || replayedClaim.Attempts != 2 || replayedClaim.LeaseOwner == firstCommand.LeaseOwner ||
+		string(replayedClaim.Payload) != string(firstCommand.Payload) || replayedCommand.Attempts != 2 ||
+		replayedRun.cancel || replayedRun.result.Generation != 3 || replayedRun.result.Duplicate || replayedRun.result.JobID != firstRun.result.JobID {
+		t.Fatalf("replay identity mismatch: claim=%+v command=%+v enqueue=%+v", replayedClaim, replayedCommand, replayedRun)
+	}
+	var finalPayload reviewRunPayload
+	if err := json.Unmarshal(finalReview.Payload, &finalPayload); err != nil || finalPayload.Generation != 3 || finalPayload.NoteID != 555 {
+		t.Fatalf("replayed review payload = %+v, %v", finalPayload, err)
+	}
+	status, err = db.GetReviewStatus(ctx, 42, 7)
+	if err != nil || status.Generation != 3 || status.State != store.ReviewStatusQueued {
+		t.Fatalf("replayed status = %+v, %v", status, err)
+	}
+	if _, err := reviewService.currentControl(ctx, 42, 7, 3, sha40); err != nil {
+		t.Fatalf("replayed generation fails current-control check: %v", err)
+	}
+	if api.callCount("CurrentUser") != 2 || api.callCount("GetMergeRequest") != 2 || api.callCount("GetMemberAccess") != 2 {
+		t.Fatalf("fake GitLab validation calls = %v", api.callList())
+	}
+	t.Logf("replay: command id=%s key=%s attempt=%d owner=%s final_state=%s; review id=%s key=%s state=%s payload=%s duplicate=%v; generation=%d cancelled=%v status=%s; current-control=PASS; fake-gitlab-validations=3 (child=1 parent=2)", replayedClaim.ID, replayedClaim.Key, replayedClaim.Attempts, replayedClaim.LeaseOwner, replayedCommand.State, finalReview.ID, finalReview.Key, finalReview.State, finalReview.Payload, replayedRun.result.Duplicate, finalControl.Generation, finalControl.Cancelled, status.State)
+	claimedReview, err := db.Claim(ctx, "audit-review-runner", []string{"review.run"}, 10*time.Second)
+	if err != nil || claimedReview == nil || claimedReview.ID != finalReview.ID || claimedReview.Attempts != 1 ||
+		string(claimedReview.Payload) != string(finalReview.Payload) {
+		t.Fatalf("claim replayed review = %+v, %v", claimedReview, err)
+	}
+	t.Logf("review claim: id=%s kind=%s key=%s attempt=%d state=%s generation=%d", claimedReview.ID, claimedReview.Kind, claimedReview.Key, claimedReview.Attempts, claimedReview.State, finalPayload.Generation)
+}

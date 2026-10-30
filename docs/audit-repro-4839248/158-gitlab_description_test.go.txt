@@ -1,0 +1,47 @@
+package gitlab
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"strings"
+	"testing"
+)
+
+type auditTransport func(*http.Request) (*http.Response, error)
+
+func (f auditTransport) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+func TestAuditSDKDescriptionSurvivesSyntheticResponse(t *testing.T) {
+	description := strings.Repeat("x", 200000)
+	payload, err := json.Marshal(map[string]any{
+		"iid": 7, "state": "opened", "target_project_id": 42,
+		"sha": strings.Repeat("c", 40), "title": "Change audit", "description": description,
+		"source_branch": "feature/audit", "target_branch": "main",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := New(Config{BaseURL: "http://example.invalid"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	client.http.Transport = auditTransport(func(req *http.Request) (*http.Response, error) {
+		calls++
+		if req.URL.Host != "example.invalid" || req.URL.Path != "/api/v4/projects/42/merge_requests/7" {
+			t.Fatalf("unexpected synthetic request: %s", req.URL)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(string(payload))), Request: req}, nil
+	})
+	mr, err := client.GetMergeRequest(context.Background(), "synthetic-placeholder", 42, 7)
+	if err != nil {
+		t.Fatalf("GetMergeRequest with synthetic transport: %v", err)
+	}
+	if calls != 1 || mr.Description != description {
+		t.Fatalf("description was altered or request count wrong: calls=%d length=%d", calls, len(mr.Description))
+	}
+	t.Logf("synthetic in-memory HTTP response -> SDK -> GetMergeRequest: %d ASCII description bytes preserved; requests=%d; no socket", len(mr.Description), calls)
+}
