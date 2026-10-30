@@ -69,6 +69,16 @@ func (g *uncertainSummaryGitLab) CreateMRNote(ctx context.Context, token string,
 	return note, nil
 }
 
+func seedSummaryControl(t *testing.T, f *reviewFixture) *store.ReviewControl {
+	t.Helper()
+	f.seedReview(t, "summary-control")
+	control, err := f.db.GetReviewControl(context.Background(), 42, 7)
+	if err != nil {
+		t.Fatalf("GetReviewControl: %v", err)
+	}
+	return control
+}
+
 func TestSummaryUncertainCreate(t *testing.T) {
 	for _, tc := range []struct {
 		mode    string
@@ -80,9 +90,10 @@ func TestSummaryUncertainCreate(t *testing.T) {
 	} {
 		t.Run(tc.mode, func(t *testing.T) {
 			f := newReviewFixture(t, reviewTestHead)
+			control := seedSummaryControl(t, f)
 			api := &uncertainSummaryGitLab{reviewGitLab: f.gitlab, mode: tc.mode}
 			f.publisher.gitlab, f.publisher.retries = api, 2
-			err := f.publisher.publishStandaloneSummaryLocked(context.Background(), 42, 7, "token", "hash", review.SummaryMarkerPrefix+"body")
+			err := f.publisher.publishStandaloneSummaryLocked(context.Background(), 42, 7, control.Generation, control.HeadSHA, "token", "hash", review.SummaryMarkerPrefix+"body")
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("error = %v, want error %v", err, tc.wantErr)
 			}
@@ -111,10 +122,11 @@ func TestSummaryIdentityAndRestart(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newReviewFixture(t, reviewTestHead)
+			control := seedSummaryControl(t, f)
 			f.gitlab.notes = []gitlab.Note{{ID: 80, AuthorID: 10, Body: review.SummaryMarkerPrefix + "other"}}
 			api := &uncertainSummaryGitLab{reviewGitLab: f.gitlab, identity: tc.identity, identityErr: tc.identityErr, missingUser: tc.missingUser}
 			f.publisher.gitlab = api
-			err := f.publisher.publishStandaloneSummaryLocked(context.Background(), 42, 7, "token", "new", review.SummaryMarkerPrefix+"new")
+			err := f.publisher.publishStandaloneSummaryLocked(context.Background(), 42, 7, control.Generation, control.HeadSHA, "token", "new", review.SummaryMarkerPrefix+"new")
 			if (err != nil) != tc.wantErr || f.gitlab.notes[0].Body != review.SummaryMarkerPrefix+"other" {
 				t.Fatalf("err=%v notes=%+v", err, f.gitlab.notes)
 			}
@@ -124,7 +136,7 @@ func TestSummaryIdentityAndRestart(t *testing.T) {
 			if !tc.wantErr {
 				// A fresh Publisher finds the bot's marker even for a new fingerprint.
 				p := &Publisher{store: f.db, gitlab: api, retries: 2}
-				if err := p.publishStandaloneSummaryLocked(context.Background(), 42, 7, "token", "another", review.SummaryMarkerPrefix+"updated"); err != nil {
+				if err := p.publishStandaloneSummaryLocked(context.Background(), 42, 7, control.Generation, control.HeadSHA, "token", "another", review.SummaryMarkerPrefix+"updated"); err != nil {
 					t.Fatal(err)
 				}
 				if api.posts != 1 || f.gitlab.notes[1].Body != review.SummaryMarkerPrefix+"updated" {
@@ -139,20 +151,22 @@ func TestSummaryCreateStopsOnPermanentStatusAndCancellation(t *testing.T) {
 	for _, mode := range []string{"400", "404"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newReviewFixture(t, reviewTestHead)
+			control := seedSummaryControl(t, f)
 			api := &uncertainSummaryGitLab{reviewGitLab: f.gitlab, mode: mode}
 			f.publisher.gitlab, f.publisher.retries = api, 3
-			err := f.publisher.publishStandaloneSummaryLocked(context.Background(), 42, 7, "token", "hash", review.SummaryMarkerPrefix+"body")
+			err := f.publisher.publishStandaloneSummaryLocked(context.Background(), 42, 7, control.Generation, control.HeadSHA, "token", "hash", review.SummaryMarkerPrefix+"body")
 			if err == nil || api.posts != 1 || api.scans != 1 {
 				t.Fatalf("err=%v posts=%d scans=%d", err, api.posts, api.scans)
 			}
 		})
 	}
 	f := newReviewFixture(t, reviewTestHead)
+	control := seedSummaryControl(t, f)
 	api := &uncertainSummaryGitLab{reviewGitLab: f.gitlab, mode: "not-saved"}
 	f.publisher.gitlab, f.publisher.retries = api, 3
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := f.publisher.publishStandaloneSummaryLocked(ctx, 42, 7, "token", "hash", review.SummaryMarkerPrefix+"body")
+	err := f.publisher.publishStandaloneSummaryLocked(ctx, 42, 7, control.Generation, control.HeadSHA, "token", "hash", review.SummaryMarkerPrefix+"body")
 	if !errors.Is(err, context.Canceled) || api.posts > 1 {
 		t.Fatalf("err=%v posts=%d", err, api.posts)
 	}
@@ -169,6 +183,7 @@ func (g *pagedSummaryGitLab) ListMRNotes(ctx context.Context, token string, proj
 
 func TestSummaryMarkerOnLaterGitLabPage(t *testing.T) {
 	f := newReviewFixture(t, reviewTestHead)
+	control := seedSummaryControl(t, f)
 	f.gitlab.notes = []gitlab.Note{{ID: 77, AuthorID: 9, Body: review.SummaryMarkerPrefix + "old"}}
 	pages := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -189,7 +204,7 @@ func TestSummaryMarkerOnLaterGitLabPage(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.publisher.gitlab = &pagedSummaryGitLab{reviewGitLab: f.gitlab, client: client}
-	if err := f.publisher.publishStandaloneSummaryLocked(context.Background(), 42, 7, "token", "hash", review.SummaryMarkerPrefix+"new"); err != nil {
+	if err := f.publisher.publishStandaloneSummaryLocked(context.Background(), 42, 7, control.Generation, control.HeadSHA, "token", "hash", review.SummaryMarkerPrefix+"new"); err != nil {
 		t.Fatal(err)
 	}
 	if pages != 2 || f.gitlab.summaryCreates != 0 || f.gitlab.notes[0].Body != review.SummaryMarkerPrefix+"new" {

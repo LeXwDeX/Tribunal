@@ -11,6 +11,10 @@ v1.2.0 尚未打 tag；本段记录尚未发布的新改动，`[1.2.0]` 段保�
 - **默认扩展授权收窄**：内置 `code-review` Skill 只绑定 `code-review` 块。示例配置和 Docker 配置中的 codebase-memory 默认授权改为：`verify` 只授予 `get_code_snippet`、`search_graph`、`trace_path`、`search_code`，`onboarding` 只授予 `get_architecture`、`get_graph_schema`；`code-review` 和 `review` 保留 11 个只读工具；`reasoner` 和 `synthesize` 没有默认图谱授权。默认不授予写工具、`detect_changes` 或 `compare_graphs`。升级保留管理员改过的绑定和解绑结果；数据库平台行按块优先于文件 `blocks`，只有内容等于 `block:<block>` 快照且每个条目都能由默认授权台账证明的行才释放。行上有自建授权或台账不可证明时文件块不生效，迁移步骤见 [默认扩展授权迁移](docs/operations.md#默认扩展授权迁移)。镜像升级不会改写宿主机挂载的配置文件，旧 `default_extensions` 会继续生效；升级前要备份并对照实际挂载配置、`config/server.docker.yaml` 和 `config/server.example.yaml` 核对矩阵，保留管理员自定义项。内置扩展的启用状态不变；配置或绑定变更需用 `--force-recreate` 重启生效（[#143](https://github.com/LeXwDeX/Tribunal/issues/143)）。
 - **恢复默认块绑定**：平台管理员可以预览并恢复单个块或全部块的内置扩展授权。确认后保留自建扩展授权、项目级绑定和内置扩展启用状态；恢复会移除选中块上已登记内置扩展的授权，文件声明块返回 `skipped`，不删除平台行，也没有删除绑定 API。块绑定的远端变更与本地草稿冲突时，控制台会暂停保存并要求处理冲突。恢复结果在重启服务后生效（[#143](https://github.com/LeXwDeX/Tribunal/issues/143)）。
 
+### 修复
+
+- **同一 MR 的发布串行**：同一 `(project_id, mr_iid)` 的总结评论（包括空评审和失败说明）与 commit status 写入按评审代次串行。每个写入点前重新校验 control 的 generation 和 head；新代次已接管或 MR head 已变化时走既有 stale 路径，旧代次不再覆盖新代次的总结评论或 commit status。不同 MR 仍可并行发布（[#157](https://github.com/LeXwDeX/Tribunal/issues/157)）。
+
 ## [1.2.0] - 2026-10-29
 
 > v1.2.0 尚未打 tag，也未发布 Release。本节的日期是版本说明的合并日，不是发布日；tag 和 Release 由维护者在 [#108](https://github.com/LeXwDeX/Tribunal/issues/108) 验收后决定。当前可核对的候选范围是 [v1.1.0...main](https://github.com/LeXwDeX/Tribunal/compare/v1.1.0...main)。打 tag 后补 `[1.2.0]: https://github.com/LeXwDeX/Tribunal/compare/v1.1.0...v1.2.0`，并回读确认链接可用。

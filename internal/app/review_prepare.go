@@ -292,11 +292,10 @@ func (s *ReviewService) publishEmptyWithNote(ctx context.Context, project *store
 	if err := recheck(); err != nil {
 		return err
 	}
-	// A push can still land between this recheck and the summary upsert below.
-	// That window is accepted: the summary marker keys the publication, so a
-	// late write is replaced by the next review instead of creating a second
-	// summary.
-	if err := s.publisher.publishStandaloneSummaryLocked(ctx, project.ID, control.MRIID, token, fingerprint, body); err != nil {
+	// The MR publication lock serializes writers, and the recheck inside
+	// publishStandaloneSummaryLocked runs before each summary attempt. A control
+	// change can still race an in-flight request.
+	if err := s.publisher.publishStandaloneSummaryLocked(ctx, project.ID, control.MRIID, control.Generation, inputs.Version.HeadSHA, token, fingerprint, body); err != nil {
 		state := reviewStatusFailed
 		reaction := reviewAwardFail
 		detail := "publication failed"

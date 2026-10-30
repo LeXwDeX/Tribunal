@@ -57,9 +57,13 @@ type Publisher struct {
 	// locks serializes publication of one workflow within this process so
 	// startup recovery and the worker cannot both create the same discussion.
 	locks workflowLocks
+	// mrLocks serializes publication of one merge request across workflow
+	// generations. Lock order is workspace RLock, MR lock, workflow lock.
+	mrLocks workflowLocks
 }
 
 // workflowLocks is a keyed mutex whose entries live only while held or awaited.
+// It guards both per-workflow and per-merge-request publication locks.
 type workflowLocks struct {
 	mu      sync.Mutex
 	entries map[string]*workflowLock
@@ -176,6 +180,11 @@ func (p *Publisher) Publish(ctx context.Context, workflowID string) error {
 
 // publishLocked requires the project workspace read lock.
 func (p *Publisher) publishLocked(ctx context.Context, workflowID string) error {
+	mrUnlock, err := p.lockReviewMR(ctx, workflowID)
+	if err != nil {
+		return err
+	}
+	defer mrUnlock()
 	unlock, err := p.locks.lock(ctx, workflowID)
 	if err != nil {
 		return err
@@ -242,6 +251,10 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 		return p.stale(ctx, workflowID, "workflow fingerprint changed")
 	}
 	if _, err := p.controlMatches(ctx, loaded); err != nil {
+		return err
+	}
+	recheck := func() error {
+		_, err := p.controlMatches(ctx, loaded)
 		return err
 	}
 	cfg, err := p.freshConfig(ctx, loaded)
@@ -326,7 +339,7 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 	if err != nil {
 		return PermanentJob(fmt.Errorf("render summary: %w", err))
 	}
-	summaryID, err := p.upsertSummary(ctx, loaded.project.ID, loaded.mrIID, loaded.token, loaded.record.Hash, body, workflowID)
+	summaryID, err := p.upsertSummary(ctx, loaded.project.ID, loaded.mrIID, loaded.token, loaded.record.Hash, body, workflowID, recheck)
 	if err != nil {
 		return err
 	}
@@ -391,7 +404,7 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 		}
 		updated, err := render()
 		if err == nil && updated != body {
-			if _, err := p.updateSummary(ctx, loaded.token, loaded.project.ID, loaded.mrIID, summaryID, updated, workflowID, loaded.record.Hash); err != nil {
+			if _, err := p.updateSummary(ctx, loaded.token, loaded.project.ID, loaded.mrIID, summaryID, updated, workflowID, loaded.record.Hash, recheck); err != nil {
 				return err
 			}
 		}
@@ -410,7 +423,7 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 			TargetURL:   p.detailURL(workflowID),
 			Description: statusDescription(result.Verdict, groups),
 		}
-		if err := p.setCommitStatus(ctx, loaded.token, loaded.project.ID, loaded.dossier.DiffVersion.HeadSHA, status); err != nil {
+		if err := p.setCommitStatus(ctx, loaded.token, loaded.project.ID, loaded.dossier.DiffVersion.HeadSHA, status, recheck); err != nil {
 			return err
 		}
 		if _, err := p.store.UpsertPublication(ctx, store.Publication{
@@ -442,6 +455,11 @@ func (p *Publisher) PublishFailure(ctx context.Context, workflowID, reason strin
 
 // publishFailureLocked requires the project workspace read lock.
 func (p *Publisher) publishFailureLocked(ctx context.Context, workflowID, reason string) error {
+	mrUnlock, err := p.lockReviewMR(ctx, workflowID)
+	if err != nil {
+		return err
+	}
+	defer mrUnlock()
 	unlock, err := p.locks.lock(ctx, workflowID)
 	if err != nil {
 		return err
@@ -486,6 +504,10 @@ func (p *Publisher) publishFailure(ctx context.Context, workflowID, reason strin
 	if _, err := p.controlMatches(ctx, loaded); err != nil {
 		return err
 	}
+	recheck := func() error {
+		_, err := p.controlMatches(ctx, loaded)
+		return err
+	}
 	cfg, err := p.freshConfig(ctx, loaded)
 	if err != nil {
 		return err
@@ -521,7 +543,7 @@ func (p *Publisher) publishFailure(ctx context.Context, workflowID, reason strin
 	if err != nil {
 		return PermanentJob(fmt.Errorf("render failure summary: %w", err))
 	}
-	if _, err := p.upsertSummary(ctx, loaded.project.ID, loaded.mrIID, loaded.token, loaded.record.Hash, body, workflowID); err != nil {
+	if _, err := p.upsertSummary(ctx, loaded.project.ID, loaded.mrIID, loaded.token, loaded.record.Hash, body, workflowID, recheck); err != nil {
 		return err
 	}
 	return p.store.SetWorkflowPublicationState(ctx, workflowID, store.WorkflowPublicationPublished, "")
@@ -592,9 +614,49 @@ func (p *Publisher) lockWorkflow(ctx context.Context, id string) (func(), error)
 	return unlock, nil
 }
 
+// lockMR serializes summary and commit-status writes for one merge request.
+// Callers hold the project workspace read lock before taking it.
+func (p *Publisher) lockMR(ctx context.Context, projectID, mrIID int64) (func(), error) {
+	return p.mrLocks.lock(ctx, fmt.Sprintf("%d:%d", projectID, mrIID))
+}
+
+// lockReviewMR resolves the workflow's merge request and takes its lock. It
+// keeps the lock order workspace RLock, MR lock, workflow lock.
+func (p *Publisher) lockReviewMR(ctx context.Context, workflowID string) (func(), error) {
+	wf, err := p.store.GetWorkflow(ctx, workflowID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, PermanentJob(fmt.Errorf("workflow is missing"))
+		}
+		return nil, err
+	}
+	if wf == nil || wf.ProjectID <= 0 || wf.MRIID == nil || *wf.MRIID <= 0 {
+		return nil, PermanentJob(fmt.Errorf("workflow is missing"))
+	}
+	return p.lockMR(ctx, wf.ProjectID, *wf.MRIID)
+}
+
 // publishStandaloneSummaryLocked requires the project workspace read lock.
-func (p *Publisher) publishStandaloneSummaryLocked(ctx context.Context, projectID, mrIID int64, token, fingerprint, body string) error {
-	_, err := p.upsertSummary(ctx, projectID, mrIID, token, fingerprint, body, "")
+func (p *Publisher) publishStandaloneSummaryLocked(ctx context.Context, projectID, mrIID, generation int64, head, token, fingerprint, body string) error {
+	unlock, err := p.lockMR(ctx, projectID, mrIID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	recheck := func() error {
+		control, err := p.store.GetReviewControl(ctx, projectID, mrIID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return PermanentJob(fmt.Errorf("%w: review control is missing", ErrStalePublication))
+			}
+			return err
+		}
+		if control.Cancelled || control.Generation != generation || !strings.EqualFold(control.HeadSHA, head) {
+			return PermanentJob(fmt.Errorf("%w: review generation changed", ErrStalePublication))
+		}
+		return nil
+	}
+	_, err = p.upsertSummary(ctx, projectID, mrIID, token, fingerprint, body, "", recheck)
 	return err
 }
 
@@ -753,14 +815,18 @@ func (p *Publisher) stale(ctx context.Context, workflowID, reason string) error 
 }
 
 // upsertSummary finds or creates the summary note. The marker scan recovers a
-// note whose publication row was lost in a crash.
-func (p *Publisher) upsertSummary(ctx context.Context, projectID, mrIID int64, token, fingerprint, body, workflowID string) (int64, error) {
+// note whose publication row was lost in a crash. recheck runs before every
+// remote summary attempt; a control change can still race an in-flight request.
+func (p *Publisher) upsertSummary(ctx context.Context, projectID, mrIID int64, token, fingerprint, body, workflowID string, recheck func() error) (int64, error) {
+	if err := recheck(); err != nil {
+		return 0, err
+	}
 	if workflowID != "" {
 		existing, err := p.store.GetPublication(ctx, projectID, mrIID, summaryPublishKind, summaryPublicationKey)
 		switch {
 		case err == nil:
 			if id, parseErr := strconv.ParseInt(existing.GitlabID, 10, 64); parseErr == nil && id > 0 {
-				if err := p.updateSummaryNote(ctx, token, projectID, mrIID, id, body); err != nil {
+				if err := p.updateSummaryNote(ctx, token, projectID, mrIID, id, body, recheck); err != nil {
 					return 0, err
 				}
 				if _, err := p.store.UpsertPublication(ctx, store.Publication{
@@ -798,7 +864,7 @@ func (p *Publisher) upsertSummary(ctx context.Context, projectID, mrIID int64, t
 				return 0, errors.New("app: summary note has invalid ID")
 			}
 			if note.Body != body {
-				if err := p.updateSummaryNote(ctx, token, projectID, mrIID, note.ID, body); err != nil {
+				if err := p.updateSummaryNote(ctx, token, projectID, mrIID, note.ID, body, recheck); err != nil {
 					return 0, err
 				}
 			}
@@ -807,6 +873,9 @@ func (p *Publisher) upsertSummary(ctx context.Context, projectID, mrIID int64, t
 		}
 		if id > 0 {
 			break
+		}
+		if err := recheck(); err != nil {
+			return 0, err
 		}
 		created, err := p.gitlab.CreateMRNote(ctx, token, projectID, mrIID, body)
 		if err == nil {
@@ -843,8 +912,8 @@ func (p *Publisher) upsertSummary(ctx context.Context, projectID, mrIID int64, t
 	return id, nil
 }
 
-func (p *Publisher) updateSummary(ctx context.Context, token string, projectID, mrIID, noteID int64, body, workflowID, fingerprint string) (int64, error) {
-	if err := p.updateSummaryNote(ctx, token, projectID, mrIID, noteID, body); err != nil {
+func (p *Publisher) updateSummary(ctx context.Context, token string, projectID, mrIID, noteID int64, body, workflowID, fingerprint string, recheck func() error) (int64, error) {
+	if err := p.updateSummaryNote(ctx, token, projectID, mrIID, noteID, body, recheck); err != nil {
 		return 0, err
 	}
 	if _, err := p.store.UpsertPublication(ctx, store.Publication{
@@ -857,8 +926,11 @@ func (p *Publisher) updateSummary(ctx context.Context, token string, projectID, 
 	return noteID, nil
 }
 
-func (p *Publisher) updateSummaryNote(ctx context.Context, token string, projectID, mrIID, noteID int64, body string) error {
+func (p *Publisher) updateSummaryNote(ctx context.Context, token string, projectID, mrIID, noteID int64, body string, recheck func() error) error {
 	return p.retry(ctx, func() error {
+		if err := recheck(); err != nil {
+			return err
+		}
 		return p.gitlab.UpdateMRNote(ctx, token, projectID, mrIID, noteID, body)
 	})
 }
@@ -883,8 +955,11 @@ func commitStatusPublishKey(sha, state string) string {
 	return "status:" + sha + ":" + state
 }
 
-func (p *Publisher) setCommitStatus(ctx context.Context, token string, projectID int64, sha string, status gitlab.CommitStatus) error {
+func (p *Publisher) setCommitStatus(ctx context.Context, token string, projectID int64, sha string, status gitlab.CommitStatus, recheck func() error) error {
 	return p.retry(ctx, func() error {
+		if err := recheck(); err != nil {
+			return err
+		}
 		return p.gitlab.SetCommitStatus(ctx, token, projectID, sha, status)
 	})
 }
@@ -897,7 +972,7 @@ func (p *Publisher) retry(ctx context.Context, fn func() error) error {
 			return nil
 		}
 		last = err
-		if gitlab.StatusOf(err) == 400 || gitlab.StatusOf(err) == 404 ||
+		if IsPermanentJob(err) || gitlab.StatusOf(err) == 400 || gitlab.StatusOf(err) == 404 ||
 			errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
 		}
