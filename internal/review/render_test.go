@@ -77,7 +77,7 @@ func TestRenderSummarySectionsAndMarker(t *testing.T) {
 	if strings.Count(out, "**P1** × 2 · **P2** × 1") != 1 {
 		t.Fatalf("severity count line rendered more than once:\n%s", out)
 	}
-	for _, want := range []string{"**P1** × 2 · **P2** × 1", "无法定位到行的问题（1）", "存疑条目（1）", "#### [P1] Unpositioned issue\n", "#### [P1?] Marked issue\n\n`internal/a.go`:10", "head 9f3c2a1", "profile deep", "2m14s", "详情"} {
+	for _, want := range []string{"**P1** × 2 · **P2** × 1", "无法定位到行的问题（1）", "存疑条目（1）", "#### [P1] Unpositioned issue\n", "#### [P1?] Marked issue\n\n`internal/a.go`:10", "head 9f3c2a<span></span>1", "profile deep", "2m14s", "详情"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in:\n%s", want, out)
 		}
@@ -168,8 +168,8 @@ func TestRenderEscapesHTMLCommentsAndLinks(t *testing.T) {
 	if strings.Count(out, "<!-- gitlab-ce-review:finding") != 1 {
 		t.Fatalf("finding marker count:\n%s", out)
 	}
-	if strings.Contains(out, "<!-- hidden") {
-		t.Fatalf("evidence comment marker was not neutralized:\n%s", out)
+	if !strings.Contains(out, "```\n</details><!-- hidden -->\n```") {
+		t.Fatalf("evidence was not preserved inside its code fence:\n%s", out)
 	}
 	if strings.Count(out, "<!-- gitlab-ce-review:summary") != 0 {
 		t.Fatalf("finding unexpectedly contains summary marker:\n%s", out)
@@ -193,7 +193,7 @@ func TestRenderSummaryEscapesMarkerAndLinks(t *testing.T) {
 	if strings.Contains(out, "](javascript:") || strings.Contains(out, "<b>") {
 		t.Fatalf("unsafe summary:\n%s", out)
 	}
-	if !strings.Contains(out, "#### [P2] Title &lt;\\!-- gitlab-ce-review\\:summary v1 --&gt;") {
+	if !strings.Contains(out, "#### [P2] Title &lt;\\!-- gitlab-ce-review\\:summary v1 --<span></span>&gt;") {
 		t.Fatalf("summary item heading is missing or unsafe:\n%s", out)
 	}
 	if !strings.Contains(out, "&lt;!-- gitlab-ce-review") {
@@ -232,7 +232,7 @@ func TestRenderFindingStableMarkerAndMarkedPrefix(t *testing.T) {
 		t.Fatalf("marked title:\n%s", markedOut)
 	}
 	bodyAt := strings.Index(markedOut, "Body text.")
-	reasonAt := strings.Index(markedOut, "**存疑原因**：needs &lt;runtime&gt; &#91;check&#93;")
+	reasonAt := strings.Index(markedOut, "**存疑原因**：needs &lt;runtime<span></span>&gt; &#91;check&#93;")
 	suggestionAt := strings.Index(markedOut, "**建议**：Try again.")
 	evidenceAt := strings.Index(markedOut, "<details><summary>证据</summary>")
 	attributionAt := strings.Index(markedOut, "claude/opus")
@@ -361,7 +361,7 @@ func TestRenderSummaryIncompleteAndBadFingerprint(t *testing.T) {
 	if warnAt < 0 || reasonAt < 0 || warnAt > reasonAt {
 		t.Fatalf("warnings and incomplete reason are missing or out of order:\n%s", out)
 	}
-	for _, want := range []string{"⚪ 评审未完成", "- provider &lt;slow&gt;", "- second warning", "provider timed out"} {
+	for _, want := range []string{"⚪ 评审未完成", "- provider &lt;slow<span></span>&gt;", "- second warning", "provider timed out"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in:\n%s", want, out)
 		}
@@ -685,7 +685,7 @@ func TestRenderOneLineGFMEscapesInSummaryAndFinding(t *testing.T) {
 	}
 }
 
-func TestRenderMarkedEvidenceFollowsPositionOK(t *testing.T) {
+func TestRenderMarkedEvidenceForAllPositions(t *testing.T) {
 	group := renderGroup("mark-evidence", ActionMark, SeverityP1, true, "Marked", "Body")
 	group.Evidence = "line\n```\n</details><!-- hidden -->"
 	in := SummaryInput{Verdict: VerdictBlocking, Summary: "Summary.", Groups: []Group{group}, Fingerprint: "abc"}
@@ -694,8 +694,8 @@ func TestRenderMarkedEvidenceFollowsPositionOK(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(positioned, "<details><summary>证据</summary>") {
-		t.Fatalf("positioned marked summary duplicated evidence:\n%s", positioned)
+	if strings.Count(positioned, "<details><summary>证据</summary>") != 1 {
+		t.Fatalf("positioned marked summary must retain evidence:\n%s", positioned)
 	}
 	inline, err := RenderFinding(group, FindingRenderOptions{})
 	if err != nil {
@@ -718,16 +718,12 @@ func TestRenderMarkedEvidenceFollowsPositionOK(t *testing.T) {
 		"Body",
 		"**建议**：Handle the error.\n\n<details><summary>证据</summary>",
 		"**标记原因**",
-		"````\nline\n```\n</details>&lt;!-- hidden -->\n````",
+		"````\nline\n```\n</details><!-- hidden -->\n````",
 	} {
 		if !strings.Contains(fallback, want) {
 			t.Fatalf("fallback is missing %q:\n%s", want, fallback)
 		}
 	}
-	if strings.Contains(fallback, "<!-- hidden") {
-		t.Fatalf("fallback evidence was not neutralized:\n%s", fallback)
-	}
-
 	in.Groups[0].Evidence = ""
 	empty, err := RenderSummary(in)
 	if err != nil {
