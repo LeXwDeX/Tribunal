@@ -3,16 +3,20 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
+	"github.com/LeXwDeX/tribunal/internal/review"
 	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/pkg/dag"
+	"github.com/LeXwDeX/tribunal/prompts"
 )
 
 // inlineGitLab delegates every call to the in-memory fake except discussion
@@ -204,5 +208,56 @@ func TestPublisherFallsBackToSummaryOnInlineRejection(t *testing.T) {
 	}
 	if findings[0].PositionOK == nil || *findings[0].PositionOK {
 		t.Fatalf("finding position_ok = %v, want false", findings[0].PositionOK)
+	}
+}
+
+func TestPublisherReusesConfirmedDiscussionButKeepsMarkedEvidence(t *testing.T) {
+	const evidence = "bad := 1"
+	key := review.PublishKeyFor("main.go", "Injected failing assignment", evidence)
+	previousBody, err := review.RenderFinding(review.Group{
+		Path: "main.go", Line: 2, Severity: review.SeverityP1, Title: "Injected failing assignment",
+		Body: "Confirmed finding.", Evidence: evidence, PublishKey: key, PositionOK: true,
+		Decision: &review.FindingDecision{Action: review.ActionPublish},
+	}, review.FindingRenderOptions{})
+	if err != nil || strings.Contains(previousBody, evidence) {
+		t.Fatalf("confirmed discussion unexpectedly includes evidence: %q, err = %v", previousBody, err)
+	}
+	f, _, workflow, _ := runDeepReview(t, "job-marked-reuse", func(f *reviewFixture, runner *scriptedAgentRunner) {
+		runner.fail[prompts.Verify] = errors.New("synthetic verifier failure")
+		runner.outputs[prompts.Synthesize] = &review.SynthesizeOut{
+			Verdict: review.VerdictBlocking, Summary: "uncertain finding",
+			Decisions: []review.Decision{}, NewFindings: []review.FindingOut{}, ExtendRequests: []review.ExtendRequest{},
+		}
+		f.gitlab.discussions = []gitlab.Discussion{{ID: "confirmed-discussion", Notes: []gitlab.Note{{Body: previousBody}}}}
+		_, err := f.db.UpsertPublication(context.Background(), store.Publication{
+			ProjectID: 42, MRIID: 7, Kind: discussionPublishKind, PublishKey: key,
+			GitlabID: "confirmed-discussion", WorkflowID: "previous-workflow", Fingerprint: "previous",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			if err := f.publisher.Publish(context.Background(), workflow.ID); err != nil {
+				t.Fatalf("retry Publish: %v", err)
+			}
+		}
+		if f.gitlab.discussionCreates != 0 || len(f.gitlab.discussions) != 1 || f.gitlab.discussions[0].Notes[0].Body != previousBody {
+			t.Fatalf("reused discussion was modified or duplicated: %+v", f.gitlab.discussions)
+		}
+		if len(f.gitlab.notes) != 1 || !strings.HasPrefix(f.gitlab.notes[0].Body, review.SummaryMarkerPrefix) ||
+			!strings.Contains(f.gitlab.notes[0].Body, "<details><summary>证据</summary>") || !strings.Contains(f.gitlab.notes[0].Body, evidence) {
+			t.Fatalf("marked evidence is absent from the summary: %+v", f.gitlab.notes)
+		}
+		finding, err := f.db.ListFindings(context.Background(), store.FindingFilter{WorkflowID: workflow.ID})
+		if err != nil || len(finding) != 1 || finding[0].PositionOK == nil || !*finding[0].PositionOK ||
+			finding[0].Decision != string(review.ActionMark) || finding[0].Evidence != evidence || finding[0].PublishKey != key {
+			t.Fatalf("positioned finding = %+v, err = %v", finding, err)
+		}
+		publication, err := f.db.GetPublication(context.Background(), 42, 7, discussionPublishKind, key)
+		if err != nil || publication.GitlabID != "confirmed-discussion" || publication.WorkflowID != "previous-workflow" {
+			t.Fatalf("existing publication changed: %+v, err = %v", publication, err)
+		}
 	}
 }
