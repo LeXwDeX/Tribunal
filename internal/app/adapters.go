@@ -194,7 +194,7 @@ func locateFunc(index *gitlab.DiffIndex) review.LocateFunc {
 		if side == review.SideOld {
 			mapped = gitlab.SideOld
 		}
-		_, ok := index.Locate(path, line, mapped)
+		_, ok := index.LocateUnambiguous(path, line, mapped)
 		return ok
 	}
 }

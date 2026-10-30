@@ -293,10 +293,13 @@ func (s *ReviewService) publishEmptyWithNote(ctx context.Context, project *store
 	if err := recheck(); err != nil {
 		return err
 	}
-	// The MR publication lock serializes writers, and the recheck inside
-	// publishStandaloneSummaryLocked runs before each summary attempt. A control
-	// change can still race an in-flight request.
-	if err := s.publisher.publishStandaloneSummaryLocked(ctx, project.ID, control.MRIID, control.Generation, inputs.Version.HeadSHA, token, fingerprint, body); err != nil {
+	var status *gitlab.CommitStatus
+	if summaryInput.Verdict == review.VerdictIncomplete && cfg.Settings.CommitStatus {
+		status = &gitlab.CommitStatus{State: "failed", Name: "ai-review", Description: statusDescription(review.VerdictIncomplete, nil)}
+	}
+	// Summary and status share the MR lock and recheck the generation and head
+	// before each request. A control change can still race an in-flight request.
+	if err := s.publisher.publishStandaloneReviewLocked(ctx, project.ID, control.MRIID, control.Generation, inputs.Version.HeadSHA, token, fingerprint, body, status); err != nil {
 		state := reviewStatusFailed
 		reaction := reviewAwardFail
 		detail := "publication failed"
@@ -376,6 +379,11 @@ func buildReviewFiles(diffs []gitlab.FileDiff, ignores []string, maxFiles, maxDi
 		}
 		if matcher.MatchPath(filePath) || matcher.MatchPath(strings.TrimSpace(diff.OldPath)) {
 			ignored = append(ignored, filePath)
+			continue
+		}
+		if diff.RenamedFile && (diff.OldPath == "" || diff.NewPath == "") {
+			omit(filePath, "missing_rename_path")
+			warnings = append(warnings, fmt.Sprintf("review coverage gap: rename paths are incomplete for %s", filePath))
 			continue
 		}
 		if maxFiles > 0 && len(files) >= maxFiles {

@@ -371,12 +371,12 @@ func TestRenameChainThroughDossierUsesNewSideTarget(t *testing.T) {
 	if got, ok := index.Locate("b.go", 1, gitlab.SideOld); !ok || got.OldPath != "b.go" || got.NewPath != "c.go" || got.OldLine != 1 {
 		t.Fatalf("old-side b.go = %+v, %v", got, ok)
 	}
-	if !locateFunc(index)("b.go", 1, review.SideNew) {
-		t.Fatal("executor locator rejected the new-side target")
+	if locateFunc(index)("b.go", 1, review.SideNew) {
+		t.Fatal("executor locator accepted a path shared by different changes")
 	}
 	groups := markPositions([]review.Group{{Path: "b.go", Line: 1, Side: review.SideNew}}, index)
-	if len(groups) != 1 || !groups[0].PositionOK {
-		t.Fatalf("publisher rejected the new-side target: %+v", groups)
+	if len(groups) != 1 || groups[0].PositionOK {
+		t.Fatalf("publisher accepted an ambiguous target: %+v", groups)
 	}
 }
 
