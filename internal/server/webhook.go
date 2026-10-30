@@ -12,14 +12,13 @@ import (
 )
 
 func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
-	// One deadline covers body reading and persistence. Reset it after the
-	// read so a keep-alive connection can serve its next request normally.
+	// One deadline covers body reading and persistence. Reset it only on
+	// success: failed requests close, and their final body drain must stay bounded.
 	deadline := time.Now().Add(webhookTimeout)
 	controller := http.NewResponseController(w)
 	_ = controller.SetReadDeadline(deadline)
 	r.Body = http.MaxBytesReader(w, r.Body, webhookBodyLimit)
 	body, err := io.ReadAll(r.Body)
-	_ = controller.SetReadDeadline(time.Time{})
 	if err != nil {
 		// The body was not fully received. Do not let net/http wait for the
 		// remainder on keep-alive; close after the bounded response.
@@ -30,13 +29,15 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			writeWebhookResponse(w, r, map[string]any{"ignored": "body_too_large"})
 			return
 		}
-		if !time.Now().Before(deadline) {
-			writeWebhookResponse(w, r, map[string]any{"ignored": "request_timeout"})
+		var timeoutErr interface{ Timeout() bool }
+		if errors.As(err, &timeoutErr) && timeoutErr.Timeout() {
+			writeWebhookStatus(w, r, http.StatusServiceUnavailable, map[string]any{"ignored": "request_timeout"})
 			return
 		}
 		writeWebhookResponse(w, r, map[string]any{"ignored": "bad_request"})
 		return
 	}
+	_ = controller.SetReadDeadline(time.Time{})
 
 	ctx, cancel := context.WithDeadline(r.Context(), deadline)
 	defer cancel()
@@ -47,9 +48,8 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		Body:  body,
 	})
 	if err != nil {
-		// The delivery was neither recorded nor enqueued. Answer 503 so GitLab
-		// marks it failed and an operator can resend it; the same event UUID is
-		// accepted then. Do not log the body or the raw error.
+		// The delivery was neither recorded nor enqueued. A 503 makes the
+		// failure visible when received; resend availability depends on GitLab.
 		s.logger.Warn("webhook processing failed",
 			"request_id", requestID(r.Context()),
 			"event", r.Header.Get("X-Gitlab-Event"),

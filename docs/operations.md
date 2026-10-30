@@ -39,6 +39,8 @@ chmod 600 .env
 
 `config/server.docker.yaml` 只读挂载到 `/app/config/server.yaml`。它绑定一个名为 `primary` 的 provider，`onboarding` 档位用其初始化仓库上下文，`default` 档位用同一个 provider 执行 `code-review` 和 challenge 核验；plan 和 synthesize 沿用代码模式，不默认启用多模型对抗。该示例配置的数据库与工作区分别使用 `/app/data/review.db` 和 `/app/data/workspaces`；实际路径以生效配置和挂载为准。其他参数沿用应用内置默认值。不要移除 `profiles.onboarding.agent.provider` 或 `profiles.default.challenge.provider`：前者会导致工作区初始化失败，后者会导致评审图构建失败，即使健康检查和 `--check-config` 通过。
 
+包含 #164 的版本将 Anthropic 未缓存输入、缓存读取和缓存创建各计入一次输入 token；缓存读写字段是明细，不应再加到总输入上。预算使用该总输入和输出，因此可能比旧版本更早耗尽。成本估算对全部输入使用配置的 `input_per_mtok`，对输出使用 `output_per_mtok`，不区分缓存费率，不等于供应方账单；未配置价格时估算为零，不代表没有费用。已保存的历史用量不会追溯回填；升级后恢复旧工作流时，其已记录节点的缓存用量仍可能少计，导致剩余预算被高估。若当前评审需要准确执行预算，应取消后在升级版本重新触发，并另行统计已产生的用量。等待旧工作流结束不会修正其已少计的用量或预算限制。
+
 ### 构建并启动
 
 ```bash
@@ -51,7 +53,7 @@ docker compose logs --tail=100 review
 docker compose exec -T review /app/tribunalctl projects all
 ```
 
-`config --quiet` 检查 Compose 结构和必填变量，避免普通 `config` 将展开后的秘密打印到终端。`--check-config` 检查应用配置，但不验证 session key、外部凭据、完整运行时或网络连接；session key 在实际启动时校验。`up --wait` 还会等待镜像中的 `/readyz` 健康检查；就绪只证明数据库与 worker 可用，不证明模型或 GitLab 可用。
+`config --quiet` 检查 Compose 结构和必填变量，避免普通 `config` 将展开后的秘密打印到终端。包含 #164 的版本在 `--check-config` 和实际启动时，均在准备存储前检查应用配置、主密钥、管理员 token 和 session key 的本地格式；无效 session key 不会先打开或迁移 SQLite。检查不会验证现有数据与主密钥是否匹配，也不验证外部凭据、完整运行时或网络连接。新旧 session key 的优先级不变；均未配置时会生成临时 key，`--check-config` 仍可通过，只有实际启动会输出临时 key 告警。`up --wait` 还会等待镜像中的 `/readyz` 健康检查；就绪只证明数据库与 worker 可用，不证明模型或 GitLab 可用。
 
 默认访问 `http://localhost:8080`。服务只向宿主机 `127.0.0.1` 发布端口；GitLab webhook 和远程浏览器需要第 6 节的 HTTPS 反向代理。容器内 `localhost` 指容器本身，不是宿主机或其他 GitLab 容器。内部 CA 需由部署方配置可信证书，不要关闭 TLS 校验。
 
@@ -221,6 +223,12 @@ fi
 
 只有确认 token 已清除、响应路径可清除且路径和文件身份与本次只读标记和打开的描述符一致后才删除；删除后还须确认原目录未改变、描述符所指文件的链接数为 0 且原路径不存在（包括悬空符号链接），才清除 `REGISTRATION_FILE` 并关闭描述符 9。标记未建立、描述符关闭或改变、路径被修改或文件被替换时拒绝删除，保留路径供安全核对。删除失败、删除后核验失败或文件不存在时返回失败并保留原路径和描述符，不要盲目重试。路径缺失时返回失败且不执行删除，应先安全查明路径。只读标记留在当前 shell 中；安全处理完成后，下一次注册使用新 shell。路径预检、删除、事后核验和清除变量并非原子操作，不保护不可信同 UID 进程或不受控目录；若删除后变量清理意外失败，命令返回失败并保留路径，需安全核对文件状态。注册或解析失败时不继续、不直接重试：请求可能已经提交，响应也可能部分写入。保留私有文件，通过受控渠道核对项目和 webhook 状态，再处理该文件；不要覆盖或删除其他文件。如果命令被信号中断，先尝试在当前 shell 清除 token；readonly 或其他原因导致无法确认清除时，结束受影响的 shell，并安全处理保留的私有响应。如果项目已注册但未收到完整的一次性 secret，须经用户授权后使用服务支持的 webhook 重建方式轮换，不能重新注册来取回原 secret。删除文件不保证从 SSD、快照或备份中物理擦除，因此私有目录应使用受控加密临时存储且不被备份或同步；若秘密可能泄露，也应按实际状态重建 webhook 以轮换它。
 
+### Webhook 失败与恢复
+
+包含 #164 的版本在请求体读取返回超时错误时回复 `503 {"ignored":"request_timeout","request_id":...}`，未读取完整的请求不会进入投递去重或入队；连接中断时 GitLab 未必收到响应。存储或入队失败仍返回 `503`，超大请求体和其他非超时读取错误仍返回 `200`。连续的 4xx/5xx 或连接失败可能使 GitLab 临时或永久停用 hook；触发条件、限制和功能开关随 GitLab 版本与实例配置而异，按该实例的 [GitLab webhook 文档](https://docs.gitlab.com/user/project/integrations/webhooks/#auto-disabled-webhooks)核对，不要依赖固定次数。
+
+运维应监控 GitLab 的 hook 状态及失败投递，先排除 Tribunal、网络或反向代理的故障，再检查 GitLab 的「Recent events」。在记录仍可用且版本支持时，有权限的人员可用「Resend Request」手动重发；若重发保留原有效 `X-Gitlab-Event-UUID`，此前没有去重记录，且认证和事件过滤均通过，则可再次入队。不要假定所有 GitLab 版本的重发都保留该字段。Recent events 有保留和重发条件限制，无法保证每次失败都可重发，也不代表 GitLab 一定自动重试。对不可重发或未投递的事件，核对 GitLab 与评审状态后按权限采取人工补救；hook 若仍停用，依该 GitLab 版本检查是否需要手动恢复。请求详情可能含 secret 和请求体，不要复制到日志或聊天。操作说明见 [GitLab 请求历史](https://docs.gitlab.com/user/project/integrations/webhooks/#inspect-request-and-response-details)。
+
 ### 项目删除后的残留核对
 
 项目删除先安全检查本地目标、关闭项目 MCP 会话，再删除数据库登记和本地文件。数据库操作返回错误时，文件清理不会开始；该错误不证明数据库一定回滚。数据库提交后若文件清理失败，接口返回错误并说明登记已删除但本地清理未完成。GitLab webhook 删除是有界的尽力操作，不与数据库和文件系统原子提交。
@@ -238,7 +246,7 @@ tribunalctl projects residues clean --yes
 
 状态、反应、候选评审和发布任务在项目锁内复核原任务或工作流；删除后同 ID 的新登记不会继承这些旧任务。锁保护只适用于共享同一工作区管理器的单个受管运行时，也不保证其他进程、宿主机上的外部修改或后台 MCP 进程遵守相同锁。
 
-摘要评论创建的响应丢失后，重试前会回读本 bot 的摘要标记；身份或回读不可用时停止创建，稍后可重试发布。回读与创建不是原子操作，不同工作流并发或 GitLab 列表延迟仍可能导致重复评论。系统不会自动删除已有重复评论；需要人工核对。
+摘要评论创建的响应丢失后，重试前会回读本 bot 的摘要标记；身份或回读不可用时停止创建，稍后可重试发布。包含 #164 的版本在已绑定评论更新返回 404 时也会回读：旧评论不在列表中时，复用本 bot 的其他摘要标记，找不到才新建并更新绑定；旧评论仍可见时保留错误，不新建。写入前复核已存代次及非空 head，但检查与在途请求不是原子操作。回读与创建不是原子操作，不同工作流并发或 GitLab 列表延迟仍可能导致重复评论。系统不会自动删除已有重复评论；需要人工核对。
 
 ### 项目授权、用户停用和凭据撤销
 
@@ -874,7 +882,7 @@ docker compose exec -T review /app/tribunalctl projects all
    - 用户名条目仍可用，但启动时每个条目记一条 `WARN`，含 `index` 及绑定状态或替代值，不含用户名；已绑定时给出 `replacement=id:<N>`。
    - 计划和注意点见 [用户名写法弃用与迁移](#bootstrap_admins-用户名写法弃用与迁移)。计划在 v2.0.0 移除；在此之前改用 `id:<GitLab 用户 ID>`。
    - `id:` 写法不受影响，也不需要在升级时重新绑定。
-9. **Webhook 存储失败改返回 503。** 查项目、写投递记录或入队失败时，`POST /webhooks/gitlab` 返回 503，不再返回 200 加 `ignored: storage_error`。GitLab 会把这次投递记为失败；连续失败可能自动停用 hook，升级后要检查 GitLab 端的 hook 状态。已停用的 hook 需要重新启用，失败投递可以用 Resend request 重发。
+9. **Webhook 存储失败改返回 503。** 查项目、写投递记录或入队失败时，`POST /webhooks/gitlab` 返回 503，不再返回 200 加 `ignored: storage_error`。GitLab 收到 503 时会把这次投递记为失败；连续失败可能自动停用 hook，升级后要检查 GitLab 端的 hook 状态。已停用的 hook 是否需要重新启用、失败投递能否用 Resend request 手动重发，取决于 GitLab 版本和实例配置，见 [Webhook 失败与恢复](#webhook-失败与恢复)。
 10. **全局会话上限优先保留管理员。** 全局 4096 个会话的兜底上限触发时，先淘汰非管理员的最旧会话。角色按当前 `bootstrap_admins` 刷新，改配置并重启后不需要用户重新登录。每用户 10 个会话的上限不变，无需迁移。
 11. **升级后检查。**
     - `docker compose logs` 中不应出现迁移失败、`data directory is locked by another Tribunal instance`、MCP 密钥校验失败或 `bootstrap_admins` 未预期的弃用告警。
