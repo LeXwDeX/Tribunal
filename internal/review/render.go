@@ -630,7 +630,9 @@ func escapeMarkdownText(value string) string {
 	var b strings.Builder
 	for i := 0; i < len(value); i++ {
 		b.WriteByte(value[i])
-		if value[i] == '~' && (i == 0 || value[i-1] != '~') && (i+1 == len(value) || value[i+1] != '~') {
+		// A trailing tilde in any run still starts a label; separate it from
+		// the following text. Strikethrough delimiters remain valid around it.
+		if value[i] == '~' && (i+1 == len(value) || value[i+1] != '~') {
 			b.WriteString("<span></span>")
 		}
 	}

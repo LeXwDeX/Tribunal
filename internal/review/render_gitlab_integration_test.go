@@ -68,6 +68,56 @@ func gitLabVisibleText(rendered string) string {
 	return text
 }
 
+func gitLabSandboxHasLabel(t *testing.T, name string) bool {
+	t.Helper()
+	if os.Getenv("TRIBUNAL_TEST_GITLAB_MARKDOWN") != "1" {
+		return false
+	}
+	cmd := exec.Command("glab", "api", "--hostname", "git.ycgame.com", "projects/suntao%2Ftribunal-sandbox/labels")
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("GitLab labels API: %v", err)
+	}
+	var labels []struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(output, &labels); err != nil {
+		t.Fatalf("decode GitLab labels response: %v", err)
+	}
+	for _, label := range labels {
+		if label.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func TestGitLabRenderedUnmatchedTildesDoNotLink(t *testing.T) {
+	if !gitLabSandboxHasLabel(t, "bug") {
+		t.Skip("sandbox label bug is required")
+	}
+	const literal = "Check ~~bug"
+	group := renderGroup("tilde", ActionPublish, SeverityP2, false, "Tilde finding", "~~strike~~")
+	group.Suggestion = literal
+	out, err := RenderSummary(SummaryInput{Verdict: VerdictBlocking, Summary: "Summary", Groups: []Group{group}, Fingerprint: "abc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered := gitLabRenderedHTML(t, out)
+	text, tags := scanGitLabHTML(rendered)
+	for _, tag := range tags {
+		if strings.Contains(tag, `data-reference-type="label"`) {
+			t.Errorf("unmatched tildes produced a label reference: %s", tag)
+		}
+	}
+	if !strings.Contains(text, literal) {
+		t.Errorf("unmatched tildes changed visible text %q:\n%s", literal, rendered)
+	}
+	if !strings.Contains(rendered, "strike</del>") {
+		t.Errorf("strikethrough was not preserved:\n%s", rendered)
+	}
+}
+
 func TestGitLabRenderedOneLineReferencesAndLiteralText(t *testing.T) {
 	const sha = "bcdffc81e2b63cb028f0e0cfc1475430e6fc1cbc"
 	const literal = sha + " suntao/tribunal-sandbox> @suntao #1 !1 $1 %r ~x &123 *x* _x_ <img>"

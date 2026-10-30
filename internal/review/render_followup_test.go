@@ -112,7 +112,13 @@ func TestRenderFollowupMarkdownReferencesAndUnsafeSpans(t *testing.T) {
 		{"%release ~bug", "%<span></span>release ~<span></span>bug"},
 		{"https://example.invalid www.example.invalid", "https:<span></span>//example.invalid www\\.example.invalid"},
 		{"namespace/project>", "namespace/project<span></span>&gt;"},
-		{"~~strike~~", "~~strike~~"},
+		{"Check ~~bug", "Check ~~<span></span>bug"},
+		{"x~~bug", "x~~<span></span>bug"},
+		{"Check ~~~bug", "Check ~~~<span></span>bug"},
+		{"Check ~~~~bug", "Check ~~~~<span></span>bug"},
+		{"Check ~~ bug", "Check ~~<span></span> bug"},
+		{"Check ~~bug~~", "Check ~~<span></span>bug~~<span></span>"},
+		{"~~strike~~", "~~<span></span>strike~~<span></span>"},
 	} {
 		if got := escapeMarkdownText(tc.input); got != tc.want {
 			t.Errorf("escapeMarkdownText(%q) = %q, want %q", tc.input, got, tc.want)
