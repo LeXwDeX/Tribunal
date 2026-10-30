@@ -118,8 +118,8 @@ func TestOpenAIChatToolRoundTrip(t *testing.T) {
 	if string(call.ToolCall.Input) != `{"path":"README.md"}` {
 		t.Fatalf("unexpected tool input: %s", call.ToolCall.Input)
 	}
-	if first.Usage.InputTokens != 10 || first.Usage.OutputTokens != 5 || first.Usage.CacheReadTokens != 2 {
-		t.Fatalf("unexpected usage: %+v", first.Usage)
+	if want := (Usage{InputTokens: 10, OutputTokens: 5, CacheReadTokens: 2, CacheWriteTokens: 1}); first.Usage != want {
+		t.Fatalf("usage = %+v, want %+v", first.Usage, want)
 	}
 	if first.RequestID != "chatcmpl-1" {
 		t.Fatalf("unexpected request id: %q", first.RequestID)
@@ -219,8 +219,8 @@ func TestOpenAIResponsesReasoningRoundTrip(t *testing.T) {
 	if call == nil || call.ToolCall.ID != "call_1" {
 		t.Fatalf("missing function call: %+v", first.Message)
 	}
-	if first.Usage.ReasoningTokens != 4 || first.Usage.CacheWriteTokens != 1 {
-		t.Fatalf("unexpected usage: %+v", first.Usage)
+	if want := (Usage{InputTokens: 10, OutputTokens: 5, CacheReadTokens: 2, CacheWriteTokens: 1, ReasoningTokens: 4}); first.Usage != want {
+		t.Fatalf("usage = %+v, want %+v", first.Usage, want)
 	}
 
 	second, err := client.Generate(context.Background(), &Request{
@@ -322,8 +322,8 @@ func TestAnthropicThinkingRoundTrip(t *testing.T) {
 	if call == nil || call.ToolCall.ID != "toolu_1" || call.ToolCall.Name != "read_file" {
 		t.Fatalf("missing tool use: %+v", first.Message)
 	}
-	if first.Usage.CacheReadTokens != 2 || first.Usage.CacheWriteTokens != 3 || first.Usage.ReasoningTokens != 4 {
-		t.Fatalf("unexpected usage: %+v", first.Usage)
+	if want := (Usage{InputTokens: 15, OutputTokens: 5, CacheReadTokens: 2, CacheWriteTokens: 3, ReasoningTokens: 4}); first.Usage != want {
+		t.Fatalf("usage = %+v, want %+v", first.Usage, want)
 	}
 
 	second, err := client.Generate(context.Background(), &Request{
@@ -344,6 +344,9 @@ func TestAnthropicThinkingRoundTrip(t *testing.T) {
 	}
 	if text := findPart(second.Message, PartText); text == nil || text.Text != "done" {
 		t.Fatalf("unexpected second response: %+v", second.Message)
+	}
+	if want := (Usage{InputTokens: 24, OutputTokens: 3, CacheReadTokens: 4}); second.Usage != want {
+		t.Fatalf("second usage = %+v, want %+v", second.Usage, want)
 	}
 
 	requests := recorder.requests()
