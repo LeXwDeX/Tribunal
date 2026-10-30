@@ -187,6 +187,52 @@ describe('binding revision conflicts', () => {
     expect(screen.getByRole('button', { name: 'review 使用 Skill remote-skill' })).toHaveAttribute('aria-pressed', 'false')
   })
 
+  it('counts a conflict and an error together without retrying or losing drafts', async () => {
+    let review = binding({ block: 'review', skills: ['legacy-skill'], revision: revisionToken('review-1') })
+    const reasoner = binding({ block: 'reasoner', skills: ['reasoner-skill'], revision: revisionToken('reasoner-1') })
+    const state = setup({
+      pages: {
+        '': () => ({ bindings: [review, reasoner], next_cursor: 'page-2' }),
+        'page-2': () => ({ bindings: [binding({ block: 'synthesize', revision: revisionToken('synthesize-1') })] }),
+      },
+      put: (block) => {
+        if (block === 'review') {
+          review = binding({ block: 'review', skills: ['remote-skill'], revision: revisionToken('review-2') })
+          return jsonResponse({ error: { code: 'conflict', message: 'stale revision' } }, 409)
+        }
+        return jsonResponse({ error: { code: 'internal', message: 'reasoner write failed' } }, 500)
+      },
+    })
+    const user = userEvent.setup()
+    renderBindings()
+
+    await user.click(await screen.findByRole('button', { name: '加载更多绑定' }))
+    await screen.findByRole('button', { name: 'reasoner 使用 Skill reasoner-skill' })
+    await user.click(screen.getByRole('button', { name: 'review 使用 Skill new-skill' }))
+    await user.click(screen.getByRole('button', { name: 'reasoner 使用 Skill new-skill' }))
+    await user.click(screen.getByRole('button', { name: '保存绑定' }))
+
+    await waitFor(() => expect(state.writes).toHaveLength(2))
+    // Both requests failed, so a conflict must not be omitted from the count.
+    expect(await screen.findByText('部分绑定未保存（2/2 个请求失败）。')).toBeInTheDocument()
+    // The non-conflict error detail stays visible.
+    expect(await screen.findByText('reasoner write failed')).toBeInTheDocument()
+    // The 409 refreshes every page and never retries a write.
+    await screen.findByText(/检测到 1 个块/)
+    expect(state.reads.slice(-2)).toEqual(['', 'page-2'])
+    expect(state.reads.filter((cursor) => cursor === '').length).toBeGreaterThanOrEqual(2)
+    expect(state.writes).toHaveLength(2)
+    // Only review conflicts; reasoner keeps its unsaved draft; review keeps its
+    // draft next to the remote value.
+    expect(screen.getAllByText('冲突')).toHaveLength(1)
+    expect(screen.getByRole('button', { name: 'review 使用 Skill legacy-skill' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('button', { name: 'review 使用 Skill new-skill' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('button', { name: 'review 使用 Skill remote-skill' })).toHaveAttribute('aria-pressed', 'false')
+    expect(screen.getByRole('button', { name: 'reasoner 使用 Skill reasoner-skill' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('button', { name: 'reasoner 使用 Skill new-skill' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('button', { name: '保存绑定' })).toBeDisabled()
+  })
+
   it('reloads every page when every submitted binding conflicts', async () => {
     let review = binding({ block: 'review', skills: ['legacy-skill'], revision: revisionToken('review-1') })
     let reasoner = binding({ block: 'reasoner', skills: ['reasoner-skill'], revision: revisionToken('reasoner-1') })

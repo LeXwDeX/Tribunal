@@ -1068,7 +1068,7 @@ function BindingsTab({
       const conflicted = failed.some((result) => result.reason instanceof ApiError && result.reason.status === 409)
       if (nonConflictFailures.length) {
         setSaveError(nonConflictFailures[0].reason)
-        toast.push('error', `部分绑定未保存（${nonConflictFailures.length}/${submitted.length} 个请求失败）。`)
+        toast.push('error', `部分绑定未保存（${failed.length}/${submitted.length} 个请求失败）。`)
       } else if (!conflicted) {
         toast.push('success', '块绑定已保存。')
       }
