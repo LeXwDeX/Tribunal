@@ -44,7 +44,7 @@ sequenceDiagram
 
 | # | 步骤 | 失败处理 |
 |---|---|---|
-| 1 | webhook 校验、去重、入队 | 认证失败 401；数据库失败 503（不写去重记录，可在 GitLab 重发）；其余异常记日志后返回 200 |
+| 1 | webhook 校验、去重、入队 | 认证失败 401；请求体读取超时或存储失败 503（不写去重记录）；其他输入异常等返回 200。重发和 hook 状态见[运维指南](../operations.md#webhook-失败与恢复) |
 | 2 | worker 领取 job | 租约 5 分钟，执行中每分钟续期 |
 | 3 | 取消旧工作流（F2；在采集和过滤后） | 过滤命中时不会到达此步 |
 | 4 | 拉取 MR 元数据：`GET /projects/:id/merge_requests/:iid` | MR 已关闭或合并 → job 完成，不评审 |
@@ -71,6 +71,8 @@ sequenceDiagram
 **F1-失败分支**：工作流 `failed` 时，若项目设置 `post_failure_note=true`（默认 true），发布或更新汇总评论为「⚪ 评审未完成：<原因>」，不写 commit status。
 
 模型循环在至少完成一轮后失败时，agent 会返回已发生的 partial usage。非 `synthesize` 节点仍只对 transport 错误重试；每次重试把上一次已知 partial usage 带入下一轮共享预算检查，最终节点 usage 也包含这些已知用量。上游未返回 usage 的请求仍无法精确计费，跨重试 token/成本只能按已知边界使用，不能当账单。`synthesize` 的预算中断或 transport 失败不重试，直接使用确定性规则兜底，并保留这次调用已知的 partial usage；兜底不是重试成功。
+
+Anthropic 的输入用量将未缓存、缓存读取和缓存创建各计一次，缓存字段仅作明细；执行器和调度器的 token 预算使用完整输入与输出。成本对全部输入使用配置的单一输入费率，不区分缓存价格，不是供应方精确账单；历史已保存用量不回填。
 
 ### 增量评审
 
@@ -156,7 +158,8 @@ M0 先把命令持久化为 `review.command`，以下 GitLab 校验由 worker �
 1. **fingerprint 校验**：重新检查当前 MR 的 head/base、有效配置哈希、prompt 版本和持久化评审代次。任一不一致则不发布，记录 stale 原因；不能只比对 `head_sha`。发布期间保持工作区读锁。
 2. **汇总评论**：
    1. 查 `publications(kind=summary)`；有 `gitlab_id` → `PUT .../notes/:note_id` 更新。
-   2. 没有记录 → 列出 MR 的 notes，找作者为本 bot 且正文首行含 `<!-- gitlab-ce-review:summary` 的评论；找到则更新并补记录，找不到则新建。
+   2. 没有记录，或更新绑定评论返回 404 → 确认本 bot 身份并列出 MR notes。404 的旧评论若仍在列表中，保留错误而不新建；否则找作者为本 bot 且正文以 `<!-- gitlab-ce-review:summary` 开头的评论，找到则复用或更新，找不到才新建，再写入绑定。身份或列表查询失败时停止恢复。
+   3. 正常摘要、失败摘要和行内降级后的摘要使用相同恢复路径；恢复写入和重试前复核已存代次及非空 head。检查与在途 GitLab 请求不原子，不能保证旧写入绝不会发生。
 3. **行内讨论**：对 `decision ∈ {publish, mark}` 且 `position_ok` 的 finding：
    1. 用 `publish_key` 查 `publications(kind=discussion)`；已存在（同一问题之前发过）→ 跳过，不重复评论。
    2. 否则 `POST .../discussions`，position 由 `DiffIndex.Locate` 生成；返回 400 → 降级进汇总的「无法定位」区块。
