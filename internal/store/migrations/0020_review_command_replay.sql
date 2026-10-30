@@ -5,13 +5,18 @@
 -- replayed job returns Duplicate without changing the control or the queue.
 --
 -- review_command_replay_backfill marks the one-time backfill of commands that
--- were accepted before this migration. Backfill candidates are queued,
--- running, or failed review.command jobs. A command is only backfilled when
--- its enqueue transaction left kind-specific review.run/review.cancel evidence
--- for the same note, or a reaction row at the current control generation can
--- prove the note's only known command kind with a matching control intent. An
--- older reaction may belong to a pruned command of the opposite kind and never
--- proves one. A review.command job alone may never have executed.
+-- were accepted before this migration. A valid kind-specific review.run or
+-- review.cancel job proves acceptance even if the command job was pruned.
+-- A fingerprint-bound review workflow and matching command-triggered dossier
+-- can also prove a run when both jobs were pruned; it cannot prove a cancel.
+-- All proven note IDs must be below 2^53: older payloads converted JSON
+-- numbers through float64 and could round downstream jobs and reactions.
+-- Ambiguous JSON objects with repeated keys are not identity evidence.
+-- Queued, running, or failed command jobs may also be proven by a reaction at
+-- the current control generation, if their kind is the only known kind and
+-- matches the control intent. Done or cancelled commands require kind-specific
+-- proof: they may have been denied or stopped before enqueue.
+-- A reaction alone or an older reaction does not prove a command identity.
 --
 -- Rows have no foreign key to projects; DeleteProject removes them explicitly
 -- so a re-registered project cannot reuse a stale identity.

@@ -705,28 +705,31 @@ v1.2.0 共四个迁移：`0016_dossier_mr_title`、`0017_mcp_config_seal`、`001
 
 ### 命令重放幂等迁移（后续版本）
 
-包含 #159 的后续版本新增迁移 `0020_review_command_replay`。v1.2.0 的四迁移列表不变。该迁移新建 `review_command_replays` 和一次性回填标记表 `review_command_replay_backfill`，不改写已有行。表按 `(project_id, mr_iid, note_id, command)` 记录已认证 `/review` 或 `/review cancel` 命令的任务身份，并在同一事务中与 generation/取消状态、排队任务和状态/表情副作用一起提交。
+包含 #159 的后续版本新增迁移 `0020_review_command_replay`。v1.2.0 的四迁移列表不变。`0020` 新建 `review_command_replays` 和一次性回填标记表 `review_command_replay_backfill`，不改写已有行。身份表按 `(project_id, mr_iid, note_id, command)` 记录已认证 `/review` 或 `/review cancel` 命令，并在同一事务中与 generation/取消状态、排队任务和状态/表情副作用一起提交。
 
-启动时自动回填一次升级前的命令身份。只有可能被再次执行的 `review.command` job 才作为回填候选：
+启动时自动回填一次有充分证据的旧命令身份。旧评论即使原 job 已终结或被裁剪，仍可能用新的或已过期的投递 UUID 重发。保留的 `review.command` job 按状态处理：
 
 - `queued`、`running`：可自动恢复并重放；
 - `failed`：终态，不会自动重试；只有在管理员手工重新入队或重放时才可能再次执行。
+- `done`、`cancelled`：终态。`done` 也可能表示被拒绝或忽略；`cancelled` 可能是已入队后租约过期、被后继任务替代，也可能在入队前终止。两者需要下游 job，或下述只能证明 run 的 workflow 与 dossier，才能证明已受理。
 
-回填时先查候选 job；没有候选时只写入回填标记，不加载 reaction 或 review 历史。候选 job 必须满足：payload 含正整数 `project_id`、`mr_iid`、`note_id`，`command` 为 `run` 或 `cancel`，且非空 job key 与 project/note 一致；NULL key 被忽略，不会阻止启动。满足后，还需要以下任一证明：
+回填流式扫描保留的 `review.command`、`review.run`、`review.cancel` job，以及匹配的 review workflow 和 dossier。以下任一证据可以证明受理：
 
-- 同一 note 存在 kind-specific 的 `review.run`/`review.cancel` job：payload 含该 note、`trigger` 为 `command`，job key 与 payload 的 project/MR 一致；
-- 同一 note 在 `review_reactions` 有记录，并且该 note 的已知命令种类只有一个。已知种类来自所有保留的 `review.command` job 状态（含 `done`、`failed`）和上述 review 证据，不只看当前候选。reaction 的 generation 还必须等于 `review_controls` 的 generation，且 control 的最新意图（`cancelled`）与命令种类一致。更早 generation 的 reaction 一律不推断种类，即使该 note 当前只保留了候选这一种 command kind。control 缺失或不匹配时不使用 reaction-only 证明。
+- 下游 `review.run`/`review.cancel` job 的 payload 含正整数 `project_id`、`mr_iid`、`note_id` 和 `trigger=command`，且 job key 与种类、project 和 MR 一致。该 job 直接证明对应种类的命令已受理，即使原 `review.command` job 已被裁剪；另一种命令不因此被证明。命令和下游 job 的 JSON 对象不能含重复或大小写歧义的键。下游 job 的 note ID 必须小于 `2^53`：旧入队代码经 float64 转换 JSON 数字，大值可能被舍入到另一条 note。
+- 已关联的 `review` workflow 和 dossier 均为 `trigger=command`，项目、MR 和 head 一致，dossier 有正整数 generation、版本和快照 schema 均为 1、规范的正整数 note ID（小于 `2^53`），且内容摘要与 workflow 指纹均匹配。这证明该 note 的 run 已受理，即使两个 job 均被裁剪或 dossier 的 job 映射已解除。孤儿 dossier、损坏或歧义快照、归属不明、指纹不匹配，以及仍存在但与快照冲突的关联 job 均不能证明；dossier 不能证明 cancel。摘要和指纹用于校验记录间的一致性，不防能修改数据库的攻击者伪造记录。
+- 仅对 `queued`、`running`、`failed` 的 `review.command`：payload 含正整数 `project_id`、`mr_iid`、`note_id`，`command` 为 `run` 或 `cancel`，job key 与 project/note 一致；同一 note 还须有 reaction，且已知命令种类只有一个。note ID 仍须小于 `2^53`：旧 worker 也可能按舍入后的下游 note ID 写 reaction。已知种类来自所有保留的命令 job、上述下游 job 和可证明的 dossier run。reaction 的 generation 必须等于 `review_controls` 的 generation，且 control 的最新意图（`cancelled`）与命令种类一致。更早的 reaction、缺失或不匹配的 control 都不用于证明。不会仅从 reaction 创建身份；`done`、`cancelled` 命令不能单靠 reaction 回填。NULL、错误或不匹配的 job key 被忽略，不阻止启动。
 
-回填和标记在同一事务中提交；失败会回滚并在下次启动重试。多个进程同时首次启动时由 SQLite 单写者串行化，重复回填不重复写入。回填只读旧 job，不改变已有队列、generation 或取消状态。
+回填和单个标记在同一事务中提交；失败会回滚并在下次启动重试。`0020` schema 迁移可能已提交，不能把它当成回填完成。多个进程同时首次启动时由 SQLite 单写者串行化，重复回填不重复写入。回填只读旧 job、workflow 和 dossier，不改变已有队列、generation 或取消状态。扫描不按 MR 重复读取 job，也不保留原始 payload；首次启动的耗时随保留 job 和符合筛选条件的历史 command workflow 数增长，逐条解压 dossier（单条上限 1 MiB），内存还随有效身份数增长；reaction 查询按 note 分批。已有回填标记后不会再次扫描，包括运行过未发布测试版本的数据库。
 
-身份记录中的 `job_id` 是已知的下游 `review.run`/`review.cancel` job ID。只有 reaction 证明时下游 job 已不可知，`job_id` 为空字符串；不要把它解释为 review job ID。
+身份记录中的 `job_id` 是已知的下游 `review.run`/`review.cancel` job ID，也可能是 dossier 保留的已裁剪 job ID。只有 reaction 证明或 dossier 映射已解除时，`job_id` 为空字符串；不要把空值解释为 review job ID。
 
 限制和恢复动作：
 
-- 只有 `review.command` job、没有 reaction 或对应 review job 时，无法证明 enqueue 已提交，因此不回填。`queued`/`running` 命令仍可执行；`failed` 命令仍是终态，不会自动执行。
-- `review_reactions` 不记录命令种类。同一 note 存在两种已知命令种类（例如旧的 `done` run 加新的 queued cancel），且没有对应 kind 的 review job 时，两者都不回填。共享的 reaction 不会同时证明两种命令，也不会把未执行的 cancel 当作已接受。升级后 `queued`/`running` 命令仍按各自种类执行；`failed` 命令不会自动执行。
-- 如果 terminal `review.command` 和对应 `review.run`/`review.cancel` 都已被保留策略删除，只剩 reaction 或 control，无法安全恢复历史命令种类；该 note 不回填。更早 generation 的 reaction 可能属于已裁剪的相反种类命令，不能证明当前 queued 命令。此时旧 queued 命令在升级后重放仍可能推进 generation，或清除升级后更新的取消意图。若升级后仍需确保取消生效，在旧命令重放窗口过去后重新发送 `/review cancel`，确认状态为 cancelled；需要继续评审时再触发新的评审。新 note 会得到新的身份。
+- 只有 `review.command` job、没有 reaction、对应 review job 或可信 workflow/dossier 时，无法证明 enqueue 已提交，因此不回填。`queued`/`running` 命令仍可执行；`failed` 命令仍是终态，不会自动执行。
+- `review_reactions` 不记录命令种类。同一 note 存在两种已知命令种类（例如旧的 `done` run 加新的 queued cancel），且没有该 kind 的 job 或 dossier 证明时，该 kind 不回填。共享的 reaction 不会同时证明两种命令，也不会把未执行的 cancel 当作已接受。升级后 `queued`/`running` 命令仍按各自种类执行；`failed` 命令不会自动执行。
+- 历史裁剪或队列替换后可能无法回填：如果对应下游 job 已删除或被替换，且没有满足上述条件的 workflow/dossier 或候选和 reaction，就不能证明该命令；`done`、`cancelled` 的命令也不单靠 reaction 推断。更早 generation 的 reaction 可能属于已裁剪的相反种类命令，不能证明当前 queued 命令。即使没有旧的 pending job，旧评论仍可通过新 UUID 或已过期的 UUID 再次投递，推进 generation 或清除较新的取消意图。限制 GitLab hook 的重发权限和旧事件重发，排空已有旧命令后用新评论重新发送 `/review cancel` 并确认 cancelled；之后若允许重发旧事件，风险会再次出现，需持续核对状态。
 - 回填不会从 `review_controls` 的 generation 或 `cancelled` 反推历史种类；它们只用于核对 reaction-only 证明是否对应当前意图。
+- 缺失或被替换的证据无法恢复，不会猜测。不要手工删除回填标记或覆盖在线数据库。
 
 项目删除会在同一事务中删除该项目的身份记录，重新登记同 ID 项目后不会复用旧身份。该表没有指向 `projects` 的外键，清理依赖 `DeleteProject`，不要手工只删项目行。
 
@@ -735,7 +738,7 @@ v1.2.0 共四个迁移：`0016_dossier_mr_title`、`0017_mcp_config_seal`、`001
 升级后的恢复操作由部署者执行，本文档不表示已经执行。旧命令可能在重新取消前运行、调用模型或发布评论；下列步骤只能恢复取消意图，不能保证这些副作用没有发生。如果不能接受这个风险，应在启动新服务前隔离外部调用并检查旧命令，完成处置后再恢复入口。
 
 1. 启动并确认服务 ready 后，检查是否还有 pending 的 `review.command` job。
-2. 对仍需取消的 MR，在旧命令重放窗口过去后重新发送 `/review cancel`。这会创建新的 note 和身份；在控制台确认状态为 cancelled。
+2. 限制旧事件重发并排空已有旧命令后，对仍需取消的 MR 重新发送 `/review cancel`。这会创建新的 note 和身份；在控制台确认状态为 cancelled。以后重发旧事件仍可能再次触发未回填的命令。
 3. 仍需要评审时再重新触发评审。若旧命令再次清除取消状态，重复第 2 步并核对状态。
 
 ### MCP 配置加密升级（v1.2.0）
@@ -893,7 +896,7 @@ docker compose exec -T review /app/tribunalctl projects all
 
 本次还新增 `0019_job_defer_window`，只给 `jobs` 追加 `defer_since TEXT`。任务连续因执行权争用被延后超过固定的 15 分钟窗口时按失败结算，`last_error` 为 `execution deferral window exceeded`，不再无限延长；旧行保持 NULL 兼容。该窗口不是配置项。该迁移同样没有 down migration，回退须恢复升级前快照。
 
-升级到包含 #159 的后续版本时还会应用 `0020_review_command_replay`。它新建身份表 `review_command_replays` 和一次性回填标记表 `review_command_replay_backfill`，用于按 `(project_id, mr_iid, note_id, command)` 去重已认证的 `/review` 和 `/review cancel` 任务，不改写已有行。启动时会尽力回填一次升级前已提交、仍可重放的 queued/running/failed 命令；只有 `review.command` job 的命令种类明确，并且有同一 note 的 reaction（generation 等于当前 control 且意图匹配）或带 `trigger=command` 的对应 `review.run`/`review.cancel` job 时才写入身份。只有 `review.command` job 而缺少上述证据、同一 note 的 run 与 cancel 无法区分、或 terminal job 已被保留策略删除时不回填；也不从 `review_controls` 反推种类。未回填的 queued/running 命令升级后仍按原行为执行；`failed` 仍保持终态，只有人工重放时才可能再次执行。该迁移没有 down migration，升级到包含它的版本同样要先做一致性备份，回退须恢复升级前快照；限制和恢复动作见 [命令重放幂等迁移](#命令重放幂等迁移后续版本)。
+升级到包含 #159 的后续版本时还会应用 `0020_review_command_replay`，新建身份表和回填标记表，不改写已有行。启动时尽力回填已提交的命令：保留的 `review.run`/`review.cancel` job 的种类、key、项目、MR、note 和 `trigger=command` 匹配时可直接证明受理，即使命令 job 已被裁剪；旧下游 note ID 大于等于 `2^53` 时可能被舍入，不用作证明。job 均已裁剪时，身份和指纹均匹配的 review workflow 与 dossier 也可证明 run，同样排除可能被舍入的 note ID。`queued`/`running`/`failed` 的命令 job 还可由当前 generation、意图和唯一已知种类均匹配的 reaction 证明；`done`/`cancelled` 命令需要对应下游 job 或可证明 run 的 workflow/dossier。未回填的 queued/running 命令仍按原行为执行；`failed` 保持终态。旧评论即使命令 job 已终结或历史被裁剪，仍可能通过新 UUID 或已过期 UUID 重发并影响取消状态。该迁移没有 down migration；升级前做一致性备份，回退须恢复升级前快照。限制和恢复动作见 [命令重放幂等迁移](#命令重放幂等迁移后续版本)。
 5. **ignore 保护范围扩大。**
    - 有效 ignore 非空时，仓库读取和证据检查遵守同一规则；无法证明符合规则的 MCP 工具及全量图谱索引不再执行，无来源证明的历史上下文不再注入。
    - 默认 ignore 非空，因此默认图谱能力会降级。这是安全降级：不记 `tool_gaps`，不会把 PASS 改为 INCOMPLETE。仅有索引身份无法证明且 ignore 为空时，实际启用并绑定的工具仍记为覆盖缺口。

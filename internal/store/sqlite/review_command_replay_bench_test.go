@@ -9,8 +9,8 @@ import (
 )
 
 // BenchmarkCommandReplayBackfillManyMRs measures one first-time backfill with
-// many candidate merge requests and unrelated retained review jobs. It is a
-// benchmark, not a regular test, so it has no timing threshold in CI.
+// many candidate merge requests, completed commands, downstream-only jobs,
+// and unrelated retained review jobs. It has no timing threshold in CI.
 func BenchmarkCommandReplayBackfillManyMRs(b *testing.B) {
 	ctx := context.Background()
 	s, err := Open(ctx, filepath.Join(b.TempDir(), "bench.db"), WithClock(newFakeClock().Now))
@@ -27,6 +27,8 @@ func BenchmarkCommandReplayBackfillManyMRs(b *testing.B) {
 	}
 
 	const candidates = 100
+	const completed = 2000
+	const downstreamOnly = 1000
 	const unrelated = 2000
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -48,10 +50,25 @@ func BenchmarkCommandReplayBackfillManyMRs(b *testing.B) {
 			fmt.Sprintf(`{"project_id":42,"mr_iid":%d,"note_id":%d,"command":"run","trigger":"command"}`, mrIID, noteID),
 			"queued")
 	}
+	for i := 0; i < completed; i++ {
+		mrIID := int64(10_000 + i)
+		noteID := int64(3_000_000 + i)
+		insert(fmt.Sprintf("completed-command-%d", i), "review.command",
+			fmt.Sprintf("review.command:42:%d", noteID),
+			fmt.Sprintf(`{"project_id":42,"mr_iid":%d,"note_id":%d,"command":"run"}`, mrIID, noteID), "done")
+		insert(fmt.Sprintf("completed-run-%d", i), "review.run", fmt.Sprintf("review:42:%d", mrIID),
+			fmt.Sprintf(`{"project_id":42,"mr_iid":%d,"note_id":%d,"trigger":"command"}`, mrIID, noteID), "done")
+	}
+	for i := 0; i < downstreamOnly; i++ {
+		mrIID := int64(20_000 + i)
+		noteID := int64(4_000_000 + i)
+		insert(fmt.Sprintf("downstream-only-%d", i), "review.run", fmt.Sprintf("review:42:%d", mrIID),
+			fmt.Sprintf(`{"project_id":42,"mr_iid":%d,"note_id":%d,"trigger":"command"}`, mrIID, noteID), "done")
+	}
 	for i := 0; i < unrelated; i++ {
 		mrIID := int64(100_000 + i)
 		noteID := int64(2_000_000 + i)
-		payload := fmt.Sprintf(`{"project_id":42,"mr_iid":%d,"note_id":%d,"trigger":"command"}`, mrIID, noteID)
+		payload := fmt.Sprintf(`{"project_id":42,"mr_iid":%d,"note_id":%d,"trigger":"mr_update"}`, mrIID, noteID)
 		insert(fmt.Sprintf("run-%d", i), "review.run", fmt.Sprintf("review:42:%d", mrIID), payload, "queued")
 		insert(fmt.Sprintf("cancel-%d", i), "review.cancel", fmt.Sprintf("review.cancel:42:%d", mrIID), payload, "queued")
 	}
@@ -73,5 +90,13 @@ func BenchmarkCommandReplayBackfillManyMRs(b *testing.B) {
 		if err := backfillReviewCommandReplays(ctx, s.db, time.Now()); err != nil {
 			b.Fatal(err)
 		}
+	}
+	b.StopTimer()
+	var identities int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM review_command_replays`).Scan(&identities); err != nil {
+		b.Fatal(err)
+	}
+	if identities != completed+downstreamOnly {
+		b.Fatalf("identities = %d, want %d", identities, completed+downstreamOnly)
 	}
 }

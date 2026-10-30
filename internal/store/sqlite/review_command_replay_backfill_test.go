@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"io/fs"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/internal/store/migrations"
@@ -153,15 +155,342 @@ func commandReplayIdentityRows(t *testing.T, s *Store, projectID, mrIID, noteID 
 		projectID, mrIID, noteID, kind)
 }
 
+func TestCommandReplayBackfillPrunedCommandWithRetainedRun(t *testing.T) {
+	ctx := context.Background()
+	path, legacy := openLegacyCommandReplayDB(t)
+	head := reviewHead("a")
+	insertLegacyReplayProject(t, legacy, 42)
+	insertLegacyReplayJob(t, legacy, "old-command", "review.command", "review.command:42:555",
+		legacyCommandPayload(42, 7, 555, "run"), "done")
+	insertLegacyReplayJob(t, legacy, "retained-run", "review.run", "review:42:7",
+		legacyReviewPayload(42, 7, 555, 1, head), "queued")
+	insertLegacyReplayJob(t, legacy, "cancel-command", "review.command", "review.command:42:556",
+		legacyCommandPayload(42, 7, 556, "cancel"), "done")
+	insertLegacyReplayJob(t, legacy, "retained-cancel", "review.cancel", "review.cancel:42:7",
+		legacyReviewPayload(42, 7, 556, 2, ""), "queued")
+	insertLegacyReplayControl(t, legacy, 42, 7, 2, head, true)
+	insertLegacyReplayReaction(t, legacy, 42, 7, 555, 1)
+	insertLegacyReplayReaction(t, legacy, 42, 7, 556, 2)
+	if _, err := legacy.Exec(`UPDATE review_reactions SET desired = 'none' WHERE project_id = 42 AND mr_iid = 7 AND note_id = 555`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(`INSERT INTO review_status (project_id, mr_iid, generation, head_sha, state, updated_at)
+		VALUES (42, 7, 2, ?, 'queued', ?)`, head, "2026-10-22T12:00:00.000000000Z"); err != nil {
+		t.Fatal(err)
+	}
+	// The production retention policy deletes terminal command jobs, while a
+	// queued downstream run and the later cancellation are retained.
+	legacyStore := &Store{db: legacy}
+	clock := newFakeClock()
+	clock.Advance(8 * 24 * time.Hour)
+	deleted, err := legacyStore.DeleteTerminalJobsBefore(ctx, clock.Now().Add(-7*24*time.Hour))
+	if err != nil || deleted != 2 {
+		t.Fatalf("prune terminal command jobs = %d, %v", deleted, err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(ctx, path, WithClock(clock.Now))
+	if err != nil {
+		t.Fatalf("upgrade legacy database: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	beforeRun, err := s.GetJob(ctx, "retained-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeStatus, err := s.GetReviewStatus(ctx, 42, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeReaction, err := s.GetReviewReaction(ctx, 42, 7, 555)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeCancelReaction, err := s.GetReviewReaction(ctx, 42, 7, 556)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobID, duplicate, err := s.RecordDelivery(ctx, store.Delivery{
+		ProjectID: 42, UUID: "fresh-after-retention", Event: "Note Hook", Outcome: store.DeliveryEnqueued,
+	}, &store.Job{Kind: "review.command", Key: "review.command:42:555",
+		Payload: json.RawMessage(legacyCommandPayload(42, 7, 555, "run"))})
+	if err != nil || duplicate {
+		t.Fatalf("fresh redelivery = %q duplicate=%v, %v", jobID, duplicate, err)
+	}
+	job, err := s.Claim(ctx, "redelivery", []string{"review.command"}, time.Minute)
+	if err != nil || job == nil || job.ID != jobID {
+		t.Fatalf("claim redelivery = %+v, %v", job, err)
+	}
+	result, err := s.EnqueueReviewLatest(ctx, commandReplay(42, 7, 555, "run", head))
+	if err != nil || !result.Duplicate || result.JobID != "retained-run" || result.Generation != 0 {
+		t.Errorf("redelivery = %+v, %v; want retained-run duplicate", result, err)
+	}
+	control, err := s.GetReviewControl(ctx, 42, 7)
+	if err != nil || control.Generation != 2 || !control.Cancelled || control.HeadSHA != head {
+		t.Errorf("redelivery changed cancelled control: %+v, %v", control, err)
+	}
+	afterRun, err := s.GetJob(ctx, "retained-run")
+	if err != nil || !reflect.DeepEqual(beforeRun, afterRun) {
+		t.Errorf("redelivery changed retained run: before=%+v after=%+v, %v", beforeRun, afterRun, err)
+	}
+	afterStatus, err := s.GetReviewStatus(ctx, 42, 7)
+	if err != nil || !reflect.DeepEqual(beforeStatus, afterStatus) {
+		t.Errorf("redelivery changed status: before=%+v after=%+v, %v", beforeStatus, afterStatus, err)
+	}
+	afterReaction, err := s.GetReviewReaction(ctx, 42, 7, 555)
+	if err != nil || !reflect.DeepEqual(beforeReaction, afterReaction) {
+		t.Errorf("redelivery changed reaction: before=%+v after=%+v, %v", beforeReaction, afterReaction, err)
+	}
+	afterCancelReaction, err := s.GetReviewReaction(ctx, 42, 7, 556)
+	if err != nil || !reflect.DeepEqual(beforeCancelReaction, afterCancelReaction) {
+		t.Errorf("redelivery changed cancel reaction: before=%+v after=%+v, %v", beforeCancelReaction, afterCancelReaction, err)
+	}
+}
+
+func TestCommandReplayBackfillDownstreamOnlyRequiresCanonicalIdentity(t *testing.T) {
+	ctx := context.Background()
+	path, legacy := openLegacyCommandReplayDB(t)
+	head := reviewHead("a")
+	insertLegacyReplayProject(t, legacy, 42)
+	insertLegacyReplayProject(t, legacy, 43)
+	insertLegacyReplayControl(t, legacy, 42, 7, 2, head, true)
+	insertLegacyReplayReaction(t, legacy, 42, 7, 801, 2)
+	insertLegacyReplayReaction(t, legacy, 42, 7, 899, 2)
+	insertLegacyReplayJob(t, legacy, "retained-run", "review.run", "review:42:7",
+		legacyReviewPayload(42, 7, 801, 1, head), "done")
+	// The run cannot prove the unexecuted opposite command, even when the
+	// reaction and current intent would otherwise make the cancel look likely.
+	insertLegacyReplayJob(t, legacy, "pending-cancel", "review.command", "review.command:42:801",
+		legacyCommandPayload(42, 7, 801, "cancel"), "queued")
+	insertLegacyReplayJob(t, legacy, "retained-cancel", "review.cancel", "review.cancel:42:8",
+		legacyReviewPayload(42, 8, 802, 1, ""), "done")
+	for _, tt := range []struct {
+		id, kind, key, payload string
+	}{
+		{"wrong-project", "review.run", "review:42:7", legacyReviewPayload(43, 7, 803, 1, head)},
+		{"wrong-mr", "review.run", "review:42:7", legacyReviewPayload(42, 8, 804, 1, head)},
+		{"wrong-prefix", "review.cancel", "review:42:7", legacyReviewPayload(42, 7, 805, 1, "")},
+		{"noncanonical-key", "review.run", "review:042:7", legacyReviewPayload(42, 7, 806, 1, head)},
+		{"wrong-trigger", "review.run", "review:42:7", `{"project_id":42,"mr_iid":7,"note_id":807,"trigger":"manual"}`},
+		{"missing-trigger", "review.run", "review:42:7", `{"project_id":42,"mr_iid":7,"note_id":808}`},
+		{"zero-note", "review.run", "review:42:7", legacyReviewPayload(42, 7, 0, 1, head)},
+		{"bad-note", "review.run", "review:42:7", `{"project_id":42,"mr_iid":7,"note_id":"809","trigger":"command"}`},
+		{"invalid-json", "review.run", "review:42:7", `{"project_id":42,`},
+	} {
+		insertLegacyReplayJob(t, legacy, tt.id, tt.kind, tt.key, tt.payload, "done")
+	}
+	insertLegacyReplayJobNullKey(t, legacy, "null-review-key", "review.run", legacyReviewPayload(42, 7, 810, 1, head), "done")
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(ctx, path, WithClock(newFakeClock().Now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if got := rowCount(t, s, `SELECT COUNT(*) FROM review_command_replays`); got != 2 {
+		t.Fatalf("identities = %d, want only the two canonical downstream jobs", got)
+	}
+	for _, tt := range []struct {
+		projectID, mrIID, noteID int64
+		kind, head, jobID        string
+	}{
+		{42, 7, 801, "run", head, "retained-run"},
+		{42, 8, 802, "cancel", "", "retained-cancel"},
+	} {
+		result, err := s.EnqueueReviewLatest(ctx, commandReplay(tt.projectID, tt.mrIID, tt.noteID, tt.kind, tt.head))
+		if err != nil || !result.Duplicate || result.Generation != 0 || result.JobID != tt.jobID {
+			t.Errorf("direct proof %d/%d/%d %s = %+v, %v", tt.projectID, tt.mrIID, tt.noteID, tt.kind, result, err)
+		}
+	}
+	for _, tt := range []struct {
+		projectID, mrIID, noteID int64
+		kind, head               string
+	}{
+		{42, 7, 801, "cancel", ""},
+		{42, 8, 801, "run", head},
+		{43, 7, 801, "run", head},
+		{42, 7, 899, "cancel", ""},
+	} {
+		result, err := s.EnqueueReviewLatest(ctx, commandReplay(tt.projectID, tt.mrIID, tt.noteID, tt.kind, tt.head))
+		if err != nil || result.Duplicate || result.Generation == 0 {
+			t.Errorf("unproven %d/%d/%d %s = %+v, %v", tt.projectID, tt.mrIID, tt.noteID, tt.kind, result, err)
+		}
+	}
+}
+
+func TestCommandReplayBackfillCompletedRunRedelivery(t *testing.T) {
+	ctx := context.Background()
+	path, legacy := openLegacyCommandReplayDB(t)
+	head := reviewHead("a")
+	insertLegacyReplayProject(t, legacy, 42)
+	// A completed command left its own review job, then a later note cancelled
+	// the MR before the upgrade. Both command jobs are terminal.
+	insertLegacyReplayJob(t, legacy, "completed-command", "review.command",
+		"review.command:42:555", legacyCommandPayload(42, 7, 555, "run"), "done")
+	insertLegacyReplayJob(t, legacy, "completed-run", "review.run",
+		"review:42:7", legacyReviewPayload(42, 7, 555, 1, head), "done")
+	insertLegacyReplayJob(t, legacy, "completed-cancel-command", "review.command",
+		"review.command:42:556", legacyCommandPayload(42, 7, 556, "cancel"), "done")
+	insertLegacyReplayJob(t, legacy, "cancel-job", "review.cancel",
+		"review.cancel:42:7", legacyReviewPayload(42, 7, 556, 2, ""), "queued")
+	insertLegacyReplayControl(t, legacy, 42, 7, 2, head, true)
+	insertLegacyReplayReaction(t, legacy, 42, 7, 555, 1)
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(ctx, path, WithClock(newFakeClock().Now))
+	if err != nil {
+		t.Fatalf("open migrated db: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	before, err := s.GetJob(ctx, "completed-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A fresh delivery UUID bypasses delivery deduplication. A terminal command
+	// key does not block a new command job for the same note.
+	jobID, duplicate, err := s.RecordDelivery(ctx, store.Delivery{
+		ProjectID: 42, UUID: "fresh-delivery", Event: "Note Hook", Outcome: store.DeliveryEnqueued,
+	}, &store.Job{Kind: "review.command", Key: "review.command:42:555",
+		Payload: json.RawMessage(legacyCommandPayload(42, 7, 555, "run"))})
+	if err != nil || duplicate || jobID == "completed-command" {
+		t.Fatalf("redelivery = %q duplicate=%v, %v", jobID, duplicate, err)
+	}
+	job, err := s.Claim(ctx, "redelivery", []string{"review.command"}, time.Minute)
+	if err != nil || job == nil || job.ID != jobID {
+		t.Fatalf("claim redelivery = %+v, %v", job, err)
+	}
+	var payload commandReplayJobPayload
+	if err := json.Unmarshal(job.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.EnqueueReviewLatest(ctx, commandReplay(payload.ProjectID, payload.MRIID, payload.NoteID, payload.Command, head))
+	if err != nil || !result.Duplicate || result.Generation != 0 || result.JobID != "completed-run" {
+		t.Errorf("accepted redelivery = %+v, %v; want duplicate of completed-run", result, err)
+	}
+	control, err := s.GetReviewControl(ctx, 42, 7)
+	if err != nil || control.Generation != 2 || !control.Cancelled || control.HeadSHA != head {
+		t.Errorf("redelivery changed cancelled control: %+v, %v", control, err)
+	}
+	after, err := s.GetJob(ctx, "completed-run")
+	if err != nil || after.State != before.State || string(after.Payload) != string(before.Payload) || !after.UpdatedAt.Equal(before.UpdatedAt) {
+		t.Errorf("redelivery changed completed run: before=%+v after=%+v, %v", before, after, err)
+	}
+	if got := rowCount(t, s, `SELECT COUNT(*) FROM jobs WHERE kind = 'review.run'`); got != 1 {
+		t.Errorf("redelivery left %d run jobs, want 1", got)
+	}
+}
+
+func TestCommandReplayBackfillCompletedRequiresDirectMatchingEvidence(t *testing.T) {
+	ctx := context.Background()
+	path, legacy := openLegacyCommandReplayDB(t)
+	head := reviewHead("a")
+	insertLegacyReplayProject(t, legacy, 42)
+	insertLegacyReplayProject(t, legacy, 43)
+	insertLegacyReplayControl(t, legacy, 42, 7, 2, head, true)
+	insertLegacyReplayControl(t, legacy, 42, 8, 2, head, false)
+	insertLegacyReplayControl(t, legacy, 43, 7, 1, head, false)
+
+	// A run and cancel from the same note are separate identities. The
+	// retained run proves only the run; the queued cancel never executed.
+	insertLegacyReplayJob(t, legacy, "done-run", "review.command", "review.command:42:601",
+		legacyCommandPayload(42, 7, 601, "run"), "done")
+	insertLegacyReplayJob(t, legacy, "queued-cancel", "review.command", "review.command:42:601",
+		legacyCommandPayload(42, 7, 601, "cancel"), "queued")
+	insertLegacyReplayJob(t, legacy, "proven-run", "review.run", "review:42:7",
+		legacyReviewPayload(42, 7, 601, 1, head), "done")
+	insertLegacyReplayReaction(t, legacy, 42, 7, 601, 2)
+
+	// A completed cancel has matching kind-specific proof, even though a
+	// later run is now the MR's current intent.
+	insertLegacyReplayJob(t, legacy, "done-cancel", "review.command", "review.command:42:602",
+		legacyCommandPayload(42, 8, 602, "cancel"), "done")
+	insertLegacyReplayJob(t, legacy, "proven-cancel", "review.cancel", "review.cancel:42:8",
+		legacyReviewPayload(42, 8, 602, 1, ""), "done")
+
+	// A done command can also mean denied or ignored. A reaction alone, even
+	// at the current generation, is not enough for a completed command.
+	insertLegacyReplayJob(t, legacy, "denied", "review.command", "review.command:42:603",
+		legacyCommandPayload(42, 7, 603, "cancel"), "done")
+	insertLegacyReplayReaction(t, legacy, 42, 7, 603, 2)
+	insertLegacyReplayJob(t, legacy, "unexecuted", "review.command", "review.command:42:604",
+		legacyCommandPayload(42, 7, 604, "run"), "queued")
+
+	// Neither a different project's evidence, a different trigger, nor a
+	// mismatched review key may prove a completed command.
+	insertLegacyReplayJob(t, legacy, "other-project", "review.command", "review.command:43:601",
+		legacyCommandPayload(43, 7, 601, "run"), "done")
+	insertLegacyReplayJob(t, legacy, "wrong-trigger", "review.command", "review.command:42:605",
+		legacyCommandPayload(42, 7, 605, "run"), "done")
+	insertLegacyReplayJob(t, legacy, "wrong-trigger-review", "review.run", "review:42:7",
+		`{"project_id":42,"mr_iid":7,"note_id":605,"trigger":"mr_update"}`, "done")
+	insertLegacyReplayJob(t, legacy, "wrong-key", "review.command", "review.command:42:606",
+		legacyCommandPayload(42, 7, 606, "run"), "done")
+	insertLegacyReplayJob(t, legacy, "wrong-key-review", "review.run", "review:42:8",
+		legacyReviewPayload(42, 7, 606, 1, head), "done")
+	// A lease can be cancelled after the enqueue committed when a successor
+	// exists. It, too, requires the kind-specific downstream job.
+	insertLegacyReplayJob(t, legacy, "cancelled-command", "review.command", "review.command:42:607",
+		legacyCommandPayload(42, 7, 607, "run"), "cancelled")
+	insertLegacyReplayJob(t, legacy, "cancelled-command-run", "review.run", "review:42:7",
+		legacyReviewPayload(42, 7, 607, 1, head), "done")
+	insertLegacyReplayJob(t, legacy, "cancelled-before-enqueue", "review.command", "review.command:42:608",
+		legacyCommandPayload(42, 7, 608, "cancel"), "cancelled")
+	insertLegacyReplayReaction(t, legacy, 42, 7, 608, 2)
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(ctx, path, WithClock(newFakeClock().Now))
+	if err != nil {
+		t.Fatalf("open migrated db: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	for _, tt := range []struct {
+		projectID, mrIID, noteID int64
+		kind, head, jobID        string
+	}{
+		{42, 7, 601, "run", head, "proven-run"},
+		{42, 8, 602, "cancel", "", "proven-cancel"},
+		{42, 7, 607, "run", head, "cancelled-command-run"},
+	} {
+		result, err := s.EnqueueReviewLatest(ctx, commandReplay(tt.projectID, tt.mrIID, tt.noteID, tt.kind, tt.head))
+		if err != nil || !result.Duplicate || result.JobID != tt.jobID || result.Generation != 0 {
+			t.Errorf("proven completed %d/%d/%d %s = %+v, %v", tt.projectID, tt.mrIID, tt.noteID, tt.kind, result, err)
+		}
+	}
+	for _, tt := range []struct {
+		projectID, mrIID, noteID int64
+		kind, head               string
+	}{
+		{42, 7, 601, "cancel", ""},
+		{42, 7, 603, "cancel", ""},
+		{42, 7, 604, "run", head},
+		{43, 7, 601, "run", head},
+		{42, 7, 605, "run", head},
+		{42, 7, 606, "run", head},
+		{42, 7, 608, "cancel", ""},
+	} {
+		result, err := s.EnqueueReviewLatest(ctx, commandReplay(tt.projectID, tt.mrIID, tt.noteID, tt.kind, tt.head))
+		if err != nil || result.Duplicate || result.Generation == 0 {
+			t.Errorf("unproven %d/%d/%d %s = %+v, %v", tt.projectID, tt.mrIID, tt.noteID, tt.kind, result, err)
+		}
+	}
+}
+
 func TestCommandReplayBackfillRestoresCommittedLegacyCommands(t *testing.T) {
 	ctx := context.Background()
 	path, legacy := openLegacyCommandReplayDB(t)
 	head := reviewHead("a")
 	insertLegacyReplayProject(t, legacy, 42)
 	insertLegacyReplayControl(t, legacy, 42, 7, 2, head, true)
-	// A run accepted before the upgrade, then superseded by /cancel. The
-	// reaction proves the run enqueue committed; the command payload carries
-	// the kind.
+	// A run accepted before the upgrade, then superseded by /cancel. Its
+	// retained run job proves the enqueue; the older reaction cannot.
 	insertLegacyReplayReaction(t, legacy, 42, 7, 555, 1)
 	insertLegacyReplayJob(t, legacy, "legacy-command-555", "review.command",
 		"review.command:42:555", legacyCommandPayload(42, 7, 555, "run"), "running")
@@ -274,7 +603,7 @@ func TestCommandReplayBackfillSkipsUnprovenLegacyState(t *testing.T) {
 		"review.command:42:602", `{"project_id":42,`, "running")
 	insertLegacyReplayJob(t, legacy, "mismatch-603", "review.command",
 		"review.command:99:603", legacyCommandPayload(42, 7, 603, "run"), "running")
-	// Terminal jobs are not replayable and are not backfilled.
+	// A completed job without matching run evidence is not proven by a reaction.
 	insertLegacyReplayReaction(t, legacy, 42, 7, 604, 1)
 	insertLegacyReplayJob(t, legacy, "terminal-604", "review.command",
 		"review.command:42:604", legacyCommandPayload(42, 7, 604, "run"), "done")
@@ -290,8 +619,8 @@ func TestCommandReplayBackfillSkipsUnprovenLegacyState(t *testing.T) {
 		"review.command:42:606", legacyCommandPayload(42, 7, 606, "run"), "queued")
 	insertLegacyReplayJob(t, legacy, "review-606", "review.run",
 		"review:42:7", `{"project_id":42,"mr_iid":7,"note_id":606,"trigger":"mr_update"}`, "done")
-	// A review job without its command job is not replayable; no identity is
-	// fabricated from it.
+	// A canonical command-triggered review job proves acceptance even when its
+	// original command job was pruned.
 	insertLegacyReplayJob(t, legacy, "review-607", "review.run",
 		"review:42:7", legacyReviewPayload(42, 7, 607, 1, head), "queued")
 	// A review job whose key does not match its payload project/MR is not
@@ -317,19 +646,23 @@ func TestCommandReplayBackfillSkipsUnprovenLegacyState(t *testing.T) {
 		t.Fatalf("open migrated db: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
-	if got := rowCount(t, s, `SELECT COUNT(*) FROM review_command_replays`); got != 1 {
-		t.Fatalf("backfilled identities = %d, want only the proven cancel", got)
+	if got := rowCount(t, s, `SELECT COUNT(*) FROM review_command_replays`); got != 2 {
+		t.Fatalf("backfilled identities = %d, want proven cancel and retained run", got)
 	}
 
-	for i, noteID := range []int64{601, 602, 603, 604, 606, 607, 609} {
+	for i, noteID := range []int64{601, 602, 603, 604, 606, 609} {
 		result, err := s.EnqueueReviewLatest(ctx, commandReplay(42, 7, noteID, "run", head))
 		if err != nil || result.Duplicate || result.Generation != int64(i+2) {
 			t.Fatalf("unproven note %d = %+v, %v", noteID, result, err)
 		}
 	}
+	retained, err := s.EnqueueReviewLatest(ctx, commandReplay(42, 7, 607, "run", head))
+	if err != nil || !retained.Duplicate || retained.JobID != "review-607" || retained.Generation != 0 {
+		t.Fatalf("retained run replay = %+v, %v", retained, err)
+	}
 	// Different command kind on the same note as the proven cancel is new.
 	runResult, err := s.EnqueueReviewLatest(ctx, commandReplay(42, 7, 605, "run", head))
-	if err != nil || runResult.Duplicate || runResult.Generation != 9 {
+	if err != nil || runResult.Duplicate || runResult.Generation != 8 {
 		t.Fatalf("new run on cancel note = %+v, %v", runResult, err)
 	}
 	cancelResult, err := s.EnqueueReviewLatest(ctx, commandReplay(42, 7, 605, "cancel", ""))
@@ -339,11 +672,11 @@ func TestCommandReplayBackfillSkipsUnprovenLegacyState(t *testing.T) {
 	// The ambiguous note is not narrowed by the shared reaction: both commands
 	// still run normally.
 	ambiguousRun, err := s.EnqueueReviewLatest(ctx, commandReplay(42, 7, 608, "run", head))
-	if err != nil || ambiguousRun.Duplicate || ambiguousRun.Generation != 10 {
+	if err != nil || ambiguousRun.Duplicate || ambiguousRun.Generation != 9 {
 		t.Fatalf("ambiguous run = %+v, %v", ambiguousRun, err)
 	}
 	ambiguousCancel, err := s.EnqueueReviewLatest(ctx, commandReplay(42, 7, 608, "cancel", ""))
-	if err != nil || ambiguousCancel.Duplicate || ambiguousCancel.Generation != 11 {
+	if err != nil || ambiguousCancel.Duplicate || ambiguousCancel.Generation != 10 {
 		t.Fatalf("ambiguous cancel = %+v, %v", ambiguousCancel, err)
 	}
 }
@@ -425,8 +758,8 @@ func TestCommandReplayBackfillIgnoresRetainedDownstreamOpposite(t *testing.T) {
 	if got := commandReplayIdentityRows(t, s, 42, 7, 904, "cancel"); got != 0 {
 		t.Fatal("unexecuted cancel was backfilled because a retained run used the same reaction")
 	}
-	if got := commandReplayIdentityRows(t, s, 42, 7, 904, "run"); got != 0 {
-		t.Fatal("run without a retained command job was backfilled")
+	if got := commandReplayIdentityRows(t, s, 42, 7, 904, "run"); got != 1 {
+		t.Fatal("retained run did not prove its own kind")
 	}
 }
 
@@ -696,6 +1029,19 @@ func TestCommandReplayBackfillNoopAfterMarker(t *testing.T) {
 	if got := rowCount(t, s, `SELECT COUNT(*) FROM review_command_replay_backfill`); got != 1 {
 		t.Fatalf("backfill markers = %d", got)
 	}
+	insertLegacyReplayJob(t, s.db, "later-run", "review.run", "review:42:7",
+		legacyReviewPayload(42, 7, 778, 1, head), "done")
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(ctx, path, WithClock(newFakeClock().Now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if got := commandReplayIdentityRows(t, reopened, 42, 7, 778, "run"); got != 0 {
+		t.Fatalf("later history was rescanned: identities=%d", got)
+	}
 }
 
 func TestCommandReplayBackfillConcurrentFirstRun(t *testing.T) {
@@ -706,7 +1052,17 @@ func TestCommandReplayBackfillConcurrentFirstRun(t *testing.T) {
 	insertLegacyReplayReaction(t, legacy, 42, 7, 702, 1)
 	insertLegacyReplayJob(t, legacy, "proven-702", "review.command",
 		"review.command:42:702", legacyCommandPayload(42, 7, 702, "run"), "running")
+	insertLegacyReplayJob(t, legacy, "completed-703", "review.command", "review.command:42:703",
+		legacyCommandPayload(42, 7, 703, "run"), "done")
+	insertLegacyReplayJob(t, legacy, "review-703", "review.run", "review:42:7",
+		legacyReviewPayload(42, 7, 703, 1, reviewHead("a")), "done")
+	insertLegacyReplayJob(t, legacy, "orphan-704", "review.cancel", "review.cancel:42:7",
+		legacyReviewPayload(42, 7, 704, 1, ""), "done")
 	applyCommandReplaySchema(t, legacy)
+	if _, err := legacy.Exec(`INSERT INTO review_command_replays VALUES (42, 7, 703, 'run', 'original-job', ?)`,
+		"2026-10-22T12:00:00.000000000Z"); err != nil {
+		t.Fatal(err)
+	}
 	if err := legacy.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -747,8 +1103,12 @@ func TestCommandReplayBackfillConcurrentFirstRun(t *testing.T) {
 	if got := rowCount(t, s, `SELECT COUNT(*) FROM review_command_replay_backfill`); got != 1 {
 		t.Fatalf("backfill markers = %d", got)
 	}
-	if got := rowCount(t, s, `SELECT COUNT(*) FROM review_command_replays`); got != 1 {
+	if got := rowCount(t, s, `SELECT COUNT(*) FROM review_command_replays`); got != 3 {
 		t.Fatalf("identities = %d", got)
+	}
+	result, err := s.EnqueueReviewLatest(ctx, commandReplay(42, 7, 703, "run", reviewHead("a")))
+	if err != nil || !result.Duplicate || result.JobID != "original-job" || result.Generation != 0 {
+		t.Fatalf("backfill changed existing identity: %+v, %v", result, err)
 	}
 }
 
@@ -768,8 +1128,15 @@ func TestCommandReplayBackfillRollbackRetry(t *testing.T) {
 	insertLegacyReplayReaction(t, legacy, 42, 7, 703, 1)
 	insertLegacyReplayJob(t, legacy, "proven-703", "review.command",
 		"review.command:42:703", legacyCommandPayload(42, 7, 703, "run"), "running")
+	insertLegacyReplayJob(t, legacy, "completed-704", "review.command",
+		"review.command:42:704", legacyCommandPayload(42, 7, 704, "run"), "done")
+	insertLegacyReplayJob(t, legacy, "review-704", "review.run",
+		"review:42:7", legacyReviewPayload(42, 7, 704, 1, reviewHead("a")), "done")
+	insertLegacyReplayJob(t, legacy, "orphan-705", "review.cancel",
+		"review.cancel:42:7", legacyReviewPayload(42, 7, 705, 1, ""), "done")
 	applyCommandReplaySchema(t, legacy)
 	if _, err := legacy.Exec(`CREATE TRIGGER block_replay_backfill BEFORE INSERT ON review_command_replays
+		WHEN (SELECT COUNT(*) FROM review_command_replays) > 0
 		BEGIN SELECT RAISE(ABORT, 'blocked'); END`); err != nil {
 		t.Fatal(err)
 	}
@@ -791,7 +1158,7 @@ func TestCommandReplayBackfillRollbackRetry(t *testing.T) {
 	if got := rawCount(`SELECT COUNT(*) FROM review_command_replay_backfill`); got != 1 {
 		t.Fatalf("marker after retry = %d", got)
 	}
-	if got := rawCount(`SELECT COUNT(*) FROM review_command_replays`); got != 1 {
+	if got := rawCount(`SELECT COUNT(*) FROM review_command_replays`); got != 3 {
 		t.Fatalf("identities after retry = %d", got)
 	}
 	if err := legacy.Close(); err != nil {
@@ -808,6 +1175,10 @@ func TestBackfilledCommandReplayFollowsProjectLifecycle(t *testing.T) {
 	insertLegacyReplayReaction(t, legacy, 42, 7, 801, 1)
 	insertLegacyReplayJob(t, legacy, "proven-801", "review.command",
 		"review.command:42:801", legacyCommandPayload(42, 7, 801, "run"), "running")
+	insertLegacyReplayJob(t, legacy, "completed-802", "review.command",
+		"review.command:42:802", legacyCommandPayload(42, 7, 802, "run"), "done")
+	insertLegacyReplayJob(t, legacy, "review-802", "review.run",
+		"review:42:7", legacyReviewPayload(42, 7, 802, 1, head), "done")
 	if err := legacy.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -816,7 +1187,7 @@ func TestBackfilledCommandReplayFollowsProjectLifecycle(t *testing.T) {
 		t.Fatalf("open migrated db: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
-	if got := rowCount(t, s, `SELECT COUNT(*) FROM review_command_replays WHERE project_id = 42`); got != 1 {
+	if got := rowCount(t, s, `SELECT COUNT(*) FROM review_command_replays WHERE project_id = 42`); got != 2 {
 		t.Fatalf("backfilled identities = %d", got)
 	}
 	if err := s.DeleteProject(ctx, 42); err != nil {
@@ -829,6 +1200,10 @@ func TestBackfilledCommandReplayFollowsProjectLifecycle(t *testing.T) {
 	result, err := s.EnqueueReviewLatest(ctx, commandReplay(42, 7, 801, "run", head))
 	if err != nil || result.Duplicate || result.Generation != 1 {
 		t.Fatalf("re-registered project replay = %+v, %v", result, err)
+	}
+	result, err = s.EnqueueReviewLatest(ctx, commandReplay(42, 7, 802, "run", head))
+	if err != nil || result.Duplicate || result.Generation != 2 {
+		t.Fatalf("re-registered completed command = %+v, %v", result, err)
 	}
 }
 
