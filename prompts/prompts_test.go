@@ -112,11 +112,13 @@ func TestPromptFilesContainNoSecrets(t *testing.T) {
 	}
 }
 
-// embeddedBundleHash pins the embedded prompt bundle. The hash is part of
-// every review fingerprint, so changing any prompt invalidates pending
+// embeddedBundleHash pins the embedded prompt bundle, including the
+// code-owned TaskRenderVersion. The hash is part of every review fingerprint,
+// so changing any prompt or task-render identity invalidates pending
 // publications and makes the next trigger review the MR again. Update this
-// value only together with a role version bump and a note in the change.
-const embeddedBundleHash = "1c2475c13fd8d3036eb440b6496252dddf58ac298dee03ad48ffb59890284664"
+// value only together with a role version bump or render-version bump. Also
+// note the change.
+const embeddedBundleHash = "1035ef3ce9e397fc1921a195512274a2ad63906bf843966e7dddcf9c8326131f"
 
 func TestEmbeddedBundleHashIsPinned(t *testing.T) {
 	bundle, err := Load("")
@@ -133,8 +135,8 @@ func TestPlatformRulesExplainGraphReflectsBase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := bundle.RoleVersion(PlatformRules); got != "3" {
-		t.Fatalf("platform rules version = %q, want 3", got)
+	if got := bundle.RoleVersion(PlatformRules); got != "4" {
+		t.Fatalf("platform rules version = %q, want 4", got)
 	}
 	rules, _ := bundle.Content(PlatformRules)
 	for _, want := range []string{"codebase-memory", "`base`", "worktree", "`read_file`", "`grep`"} {

@@ -436,7 +436,7 @@ review:
 
 `prompts/` 目录 embed 进二进制。部署时可设置 `prompts_dir` 指向外部目录，同名文件优先使用外部版本；每个 prompt 文件首行写版本号注释（如 `<!-- v3 -->`），版本号参与 fingerprint 计算。
 
-所选全部 prompt 的内容和版本合成一个 bundle hash，记录为 dossier 的 `prompt_hash`，并参与工作流 fingerprint。内置 bundle 的 hash 固定在 `prompts/prompts_test.go` 的 `embeddedBundleHash` 中：修改任何内置 prompt 都必须同时提升该文件的版本注释、更新这个常量，并在 PR 中写明。
+所选全部 prompt 的内容和版本，加上代码拥有的任务渲染版本（`prompts.TaskRenderVersion`，覆盖任务布局与覆盖语义），合成一个 bundle hash，记录为 dossier 的 `prompt_hash`，并参与工作流 fingerprint。任务渲染版本不能通过 `prompts_dir` 覆盖，因此外部 prompt 文件内容不变时，升级后的 hash 仍然变化。内置 bundle 的 hash 固定在 `prompts/prompts_test.go` 的 `embeddedBundleHash` 中：修改任何内置 prompt 或任务渲染语义都必须提升对应版本、更新这个常量，并在 PR 中写明。
 
 **图谱时效规则**：`_platform_rules.md`（v2 起）规定 codebase-memory 图谱只反映固定 `base/` 的目标分支版本；MR 改动过的文件和符号以 worktree 中 `read_file`、`grep` 的结果为准，图谱结果只作 base 侧线索，不能作为改动后的事实或 finding 的唯一证据。规则放在所有块共享的平台规则里，管理员把图谱工具绑定到其他块时同样生效。用 `prompts_dir` 覆盖 `_platform_rules.md` 的部署须自行保留这条规则。
 

@@ -50,16 +50,24 @@ var RoleFiles = []string{
 // binary, but an override is an external input and needs a hard limit.
 const MaxFileBytes = 256 << 10
 
+// TaskRenderVersion identifies the task layout and coverage semantics that
+// build prompts from these files. It is code-owned and cannot be overridden.
+// Bump it whenever task rendering changes, so workflows created with the old
+// identity are not resumed, retried, or published.
+const TaskRenderVersion = "2"
+
 var versionRE = regexp.MustCompile(`^<!-- v([0-9A-Za-z._-]+) -->$`)
 
 //go:embed *.md
 var embedded embed.FS
 
-// Bundle is one selected prompt set after optional overrides.
+// Bundle is one selected prompt set after optional overrides. Hash covers the
+// selected files and TaskRenderVersion, so an unchanged override cannot keep
+// an old task-render identity.
 type Bundle struct {
 	Files    map[string]string // role file name -> content
 	Versions map[string]string // role file name -> first-line version
-	Hash     string            // SHA-256 of the whole selected bundle
+	Hash     string            // SHA-256 of files plus the task-render version
 }
 
 // Load reads the embedded bundle and overlays regular files with matching
@@ -163,6 +171,7 @@ func promptVersion(content string) (string, error) {
 
 func bundleHash(files, versions map[string]string) string {
 	h := sha256.New()
+	fmt.Fprintf(h, "task-render\x00%s\x00", TaskRenderVersion)
 	names := make([]string, 0, len(files))
 	for name := range files {
 		names = append(names, name)
