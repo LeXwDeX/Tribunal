@@ -261,17 +261,18 @@ func (a *AppExtensions) ListBlockBindingsPage(ctx context.Context, scope string,
 	return out, next, nil
 }
 
-func (a *AppExtensions) UpsertBlockBinding(ctx context.Context, in BlockBindingInput) (*BlockBinding, error) {
+func (a *AppExtensions) ReplaceBlockBinding(ctx context.Context, in BlockBindingInput,
+	expectedRevision string) (*BlockBinding, error) {
 	if err := a.ready(); err != nil {
 		return nil, err
 	}
-	binding, err := a.service.UpsertBlockBinding(ctx, app.BlockBindingInput{
+	binding, err := a.service.ReplaceBlockBinding(ctx, app.BlockBindingInput{
 		Scope:     in.Scope,
 		ProjectID: in.ProjectID,
 		Block:     in.Block,
 		MCPTools:  in.MCPTools,
 		Skills:    in.Skills,
-	})
+	}, expectedRevision)
 	if err != nil {
 		return nil, err
 	}
@@ -349,6 +350,7 @@ func blockBindingFromApp(binding app.BlockBinding) BlockBinding {
 		Block:     binding.Block,
 		MCPTools:  binding.MCPTools,
 		Skills:    binding.Skills,
+		Revision:  binding.Revision,
 	}
 }
 

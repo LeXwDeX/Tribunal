@@ -326,7 +326,7 @@ describe('restore default block bindings', () => {
     expect(restoreBody(state.restoreCalls()[1]).dry_run).toBe(false)
   })
 
-  it('keeps a draft when the next bindings page arrives with new blocks and references', async () => {
+  it('accepts a draft only after the next bindings page arrives with new blocks and references', async () => {
     const state = setup({
       initialBindings: [binding({ block: 'review', skills: ['coding-standards'] })],
       nextCursor: 'page-2',
@@ -337,21 +337,22 @@ describe('restore default block bindings', () => {
     renderBindings()
 
     const reviewSkill = await screen.findByRole('button', { name: 'review 使用 Skill coding-standards' })
-    await user.click(reviewSkill)
-    expect(reviewSkill).toHaveAttribute('aria-pressed', 'false')
-    expect(screen.getByRole('button', { name: '恢复全部默认' })).toBeDisabled()
+    expect(reviewSkill).toBeDisabled()
+    expect(screen.getByText(/绑定列表尚未全部加载/)).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: '加载更多绑定' }))
     const nextPageSkill = await screen.findByRole('button', { name: 'reasoner 使用 Skill reasoner-standards' })
     expect(nextPageSkill).toHaveAttribute('aria-pressed', 'true')
-
+    await waitFor(() => expect(reviewSkill).toBeEnabled())
+    await user.click(reviewSkill)
     expect(reviewSkill).toHaveAttribute('aria-pressed', 'false')
+
     expect(screen.getByRole('button', { name: '恢复全部默认' })).toBeDisabled()
     expect(screen.getByRole('button', { name: '恢复 review 的默认绑定' })).toBeDisabled()
     expect(screen.getByText('先保存绑定再恢复默认，未保存的更改会丢失。')).toBeInTheDocument()
   })
 
-  it('keeps a draft edited while a page request is still in flight', async () => {
+  it('does not accept a draft while a page request is still in flight', async () => {
     let resolvePage: ((bindings: BlockBinding[]) => void) | undefined
     const page = new Promise<BlockBinding[]>((resolve) => { resolvePage = resolve })
     const state = setup({
@@ -365,11 +366,14 @@ describe('restore default block bindings', () => {
 
     const reviewSkill = await screen.findByRole('button', { name: 'review 使用 Skill coding-standards' })
     await user.click(screen.getByRole('button', { name: '加载更多绑定' }))
+    await waitFor(() => expect(reviewSkill).toBeDisabled())
     await user.click(reviewSkill)
-    expect(reviewSkill).toHaveAttribute('aria-pressed', 'false')
+    expect(reviewSkill).toHaveAttribute('aria-pressed', 'true')
 
     resolvePage?.([binding({ block: 'reasoner', skills: ['reasoner-standards'] })])
     await screen.findByRole('button', { name: 'reasoner 使用 Skill reasoner-standards' })
+    await waitFor(() => expect(reviewSkill).toBeEnabled())
+    await user.click(reviewSkill)
     expect(reviewSkill).toHaveAttribute('aria-pressed', 'false')
     expect(screen.getByRole('button', { name: '恢复全部默认' })).toBeDisabled()
   })

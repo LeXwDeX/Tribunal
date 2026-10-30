@@ -272,9 +272,15 @@ Finding 始终返回 `annotation`：`""` 为未标注，`valid` 为有效，`inv
 | POST | `/api/v1/skills` | multipart 上传 zip（含 `SKILL.md`），或 `{scope, dir}` 登记服务器上的目录 |
 | PATCH | `/api/v1/skills/{id}` | `{enabled: bool}` 启用或禁用；禁用后不加载，仍引用它的块绑定会跳过它 |
 | DELETE | `/api/v1/skills/{id}` | 删除；内置 Skill（`builtin: true`）返回 409，只能禁用 |
-| GET | `/api/v1/block-bindings` | `?scope=&project_id=&limit=&cursor=`，响应 `{bindings, next_cursor}` |
-| PUT | `/api/v1/block-bindings/{block}` | `{scope, project_id?, mcp_tools: [], skills: []}` |
+| GET | `/api/v1/block-bindings` | `?scope=&project_id=&limit=&cursor=`，响应 `{bindings, next_cursor}`；每个已有绑定带 `revision` |
+| PUT | `/api/v1/block-bindings/{block}` | `{scope, project_id?, mcp_tools: [], skills: [], expected_revision}`；`expected_revision` 必填 |
 | POST | `/api/v1/block-bindings/restore-defaults` | 预览或恢复当前进程内置默认扩展对平台块绑定的授权；仅平台管理员 |
+
+块绑定写入使用内容版本做乐观并发控制。`GET /api/v1/block-bindings` 返回的每个已有绑定都带 `revision`；它是 `scope`、项目 ID、`block`、`mcp_tools` 和 `skills` 的无歧义 SHA-256 摘要。`nil` 与 `[]` 等价，数组顺序和重复项参与计算。没有数据库行时使用字面值 `absent`；内容摘要不会等于该值。
+
+`PUT /api/v1/block-bindings/{block}` 必须带 `expected_revision`，直接使用完整列表（不是当前分页）中同一 `scope`、`project_id`、`block` 行的 `revision`；没有该行时用 `absent`。字段缺失、`null`、空字符串、大写或不完整摘要等格式错误返回 `400`。基线过期，或另一个客户端先创建该行，返回 `409`，请求不写入；成功响应返回新 `revision`。服务端不提供无版本写入的兼容路径。比较与写入在同一个 SQLite 事务内完成，所有块绑定写入与恢复默认通过该事务串行；项目范围还会先取得项目 workspace 读锁，与项目删除串行。内容相同时重复保存保持同一 `revision`（事件 ABA 不另记版本）。
+
+`scope=project` 的数据库行覆盖完整的项目级授权：没有行表示继承，保存空数组表示显式撤销该块的全部 MCP 工具和 Skill。平台 scope 没有数据库行时可能由配置文件 `blocks` 提供生效绑定；首次用 `absent` 保存平台空行会创建数据库覆盖，该块的文件声明不再生效。调用方必须先读取完整列表并确认这一影响，服务端不推断调用方是否只加载了部分页。
 
 权限边界：`scope=project` 的读取需要该项目 `read` grant；`scope=platform` 或省略 scope 的全局列表只允许平台管理员。创建、导入、更新、删除、测试和块绑定写入都要求平台管理员；项目 scope 写入还必须同时具备该项目 `manage`。项目 `manage` 本身不是宿主执行权限，不能写平台配置或绕过平台管理员。MCP 删除/更新/测试和 Skill 删除/启停按资源已存储的 scope 重新检查，不信任请求里的 scope。
 
@@ -309,6 +315,8 @@ MCP、Skill、块绑定列表使用游标分页。Skill zip 上传已实现，�
 自动升级与显式恢复对旧 ledger 明细缺失的处理不同。自动升级无法从明细证明某个 grant 加入过哪些 MCP 工具时，会保留授权和 applied 状态，下次启动重试，不会声称已移除；内置 Skill 的 grant 恒为该 Skill 自身名称，因此升级可按名称安全移除。显式恢复不依赖旧 grant 明细：它按当前配置中已登记为 applied、且存储 resource 的 `builtin` 与名称一致的内置扩展，清理目标块上的内置 Skill 名和内置 MCP 前缀，再按当前块声明重新授予，预览的 `add` / `remove` 会列出实际变化。恢复不修改内置资源、启用状态、项目级绑定或其他块的绑定。若选中块没有任何已登记且身份匹配的内置扩展，返回 `skipped`，不会清空现有授权。
 
 `preview_token` 是选中块、文件声明、平台绑定、相关 ledger、内置身份和启用状态，以及当前 `default_extensions` 对选中块的授权投影（默认名、种类、每块是否存在及具体 grants）的稳定指纹，不是认证凭据。另一个进程载入不同配置时旧 token 会失效。执行时在同一 SQLite 事务内重新读取并计算，指纹不一致返回 `409`，不覆盖新值。所有变更块和相关 ledger 在一个事务内原子写入；预览不写任何行。恢复后，相关块重新由默认扩展管理，后续升级会继续跟随默认授权的增加和删除。未被管理员改动的默认块在升级时自动跟随内置授权的增删；管理员改过的整块保持不变。移除整个默认扩展声明（例如 `default_extensions.skills: []`）不会删除已登记扩展或其绑定。
+
+执行恢复只在平台绑定的内容或存在性改变时更新相关块的 `revision`；仅更新 ledger 或没有变化时 `revision` 不变。预览后到执行前，其他写入若改变 `preview_token` 覆盖的输入（相关平台绑定、ledger、内置身份或启用状态等），执行返回 `409`。执行成功且绑定变化后，旧 `revision` 不能再用于 PUT，保存中的草稿必须重新读取。
 
 **恢复后需要重启服务**才能让运行时重新读取平台绑定，因此 `restart_required` 始终为 `true`。
 

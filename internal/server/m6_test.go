@@ -711,15 +711,50 @@ func (f *fakeExtensions) ListBlockBindingsPage(ctx context.Context, scope string
 	return bindings, "", err
 }
 
-func (f *fakeExtensions) UpsertBlockBinding(ctx context.Context, in BlockBindingInput) (*BlockBinding, error) {
+func (f *fakeExtensions) ReplaceBlockBinding(ctx context.Context, in BlockBindingInput,
+	expectedRevision string) (*BlockBinding, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.err != nil {
 		return nil, f.err
 	}
-	binding := BlockBinding(in)
-	f.bindings = append(f.bindings, binding)
+	current := store.BlockBindingAbsentRevision
+	index := -1
+	for i, binding := range f.bindings {
+		if binding.Scope == in.Scope && sameProject(binding.ProjectID, in.ProjectID) && binding.Block == in.Block {
+			index = i
+			current = binding.Revision
+			if current == "" {
+				current = store.BlockBindingRevision(binding.Scope, binding.ProjectID, binding.Block, binding.MCPTools, binding.Skills)
+			}
+			break
+		}
+	}
+	if current != expectedRevision {
+		return nil, store.ErrStaleRevision
+	}
+	binding := fakeBlockBinding(in)
+	if index >= 0 {
+		f.bindings[index] = binding
+	} else {
+		f.bindings = append(f.bindings, binding)
+	}
 	return &binding, nil
+}
+
+func fakeBlockBinding(in BlockBindingInput) BlockBinding {
+	return BlockBinding{
+		Scope: in.Scope, ProjectID: in.ProjectID, Block: in.Block,
+		MCPTools: in.MCPTools, Skills: in.Skills,
+		Revision: store.BlockBindingRevision(in.Scope, in.ProjectID, in.Block, in.MCPTools, in.Skills),
+	}
+}
+
+func sameProject(left, right *int64) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
 
 // ------------------------------------------------------------------ test env

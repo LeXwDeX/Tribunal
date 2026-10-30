@@ -122,23 +122,28 @@ export function ExtensionsManager({
     const queryKey = ['block-bindings', scope, projectId] as const
     await queryClient.cancelQueries({ queryKey })
     await queryClient.invalidateQueries({ queryKey, refetchType: 'none' })
-    const cached = queryClient.getQueryData<{ pages?: unknown[] }>(queryKey)
-    const pages = Array.isArray(cached?.pages) && cached.pages.length ? cached.pages.length : 1
+    // Read from the first page until the server stops returning a cursor. A
+    // fixed page count can leave new pages unread and let a save overwrite
+    // grants that were never displayed. The cap only stops a malformed,
+    // looping cursor; reaching it fails closed below.
     const data = await queryClient.fetchInfiniteQuery({
       queryKey,
       queryFn: ({ pageParam }) => listBindings(scope, projectId, pageParam),
       initialPageParam: undefined as string | undefined,
       getNextPageParam: (lastPage) => lastPage?.next_cursor || undefined,
-      pages,
+      pages: 1000,
       staleTime: 0,
       retry: false,
     })
     const items: BlockBinding[] = []
     for (const page of data.pages) {
-      if (Array.isArray(page?.bindings)) items.push(...page.bindings)
+      if (!Array.isArray(page?.bindings)) throw new Error('绑定分页响应格式无效。')
+      items.push(...page.bindings)
     }
     const lastPage = data.pages[data.pages.length - 1]
-    return { items, complete: Boolean(lastPage) && !lastPage.next_cursor }
+    const complete = Boolean(lastPage) && !lastPage.next_cursor
+    if (!complete) throw new Error('绑定列表未全部加载。')
+    return { items, complete }
   }
   const invalidateBindings = () => queryClient.invalidateQueries({ queryKey: ['block-bindings', scope, projectId] })
 
@@ -517,7 +522,18 @@ type BindingDrafts = {
   baseline: Record<string, BindingDraft>
   local: Record<string, BindingDraft>
   conflicts: Record<string, boolean>
+  revisions: Record<string, string>
 }
+type BindingSubmission = {
+  block: string
+  draft: BindingDraft
+  baseline: BindingDraft
+  baselineRevision: string | null
+}
+
+// A missing row is written with this sentinel. A row whose revision is lost or
+// malformed must never be mistaken for an absent row.
+const absentRevision = 'absent'
 type RestoreTarget = 'all' | string
 type RestorePhase = 'posting' | 'refreshing' | 'loaded' | 'failed'
 type RestoreOperation = { id: string; phase: RestorePhase; error?: unknown; uncertain?: boolean; stale?: boolean }
@@ -607,6 +623,7 @@ function bindingsFromCache(
 }
 
 const emptyDraft: BindingDraft = { mcp_tools: [], skills: [] }
+const emptyDrafts: BindingDrafts = { baseline: {}, local: {}, conflicts: {}, revisions: {} }
 
 function sortedKey(values: string[]): string {
   return values.slice().sort().join('\u0000')
@@ -624,12 +641,27 @@ function cloneDraft(draft: BindingDraft): BindingDraft {
   return { mcp_tools: [...draft.mcp_tools], skills: [...draft.skills] }
 }
 
+function validRevision(value: unknown): value is string {
+  // The API treats a revision as an opaque token. Only reject values that
+  // cannot identify a stored row: missing, empty, non-string, or the sentinel
+  // reserved for a row that does not exist.
+  return typeof value === 'string' && value.length > 0 && value !== absentRevision
+}
+
 function bindingDrafts(items: BlockBinding[]): Record<string, BindingDraft> {
   const result: Record<string, BindingDraft> = {}
   for (const item of items) {
     if (!result[item.block]) {
       result[item.block] = { mcp_tools: [...(item.mcp_tools || [])], skills: [...(item.skills || [])] }
     }
+  }
+  return result
+}
+
+function bindingRevisions(items: BlockBinding[]): Record<string, string> {
+  const result: Record<string, string> = {}
+  for (const item of items) {
+    if (validRevision(item.revision) && !result[item.block]) result[item.block] = item.revision
   }
   return result
 }
@@ -645,14 +677,17 @@ function mergeBindingDrafts(
   complete: boolean,
 ): BindingDrafts {
   const server = bindingDrafts(items)
+  const serverRevisions = bindingRevisions(items)
   const baseline: Record<string, BindingDraft> = {}
   const local: Record<string, BindingDraft> = {}
   const conflicts: Record<string, boolean> = {}
+  const revisions: Record<string, string> = {}
   const blocks = new Set([
     ...Object.keys(server),
     ...Object.keys(current.baseline),
     ...Object.keys(current.local),
     ...Object.keys(current.conflicts),
+    ...Object.keys(current.revisions),
   ])
 
   for (const block of blocks) {
@@ -667,27 +702,36 @@ function mergeBindingDrafts(
       if (current.baseline[block]) baseline[block] = cloneDraft(previousBaseline)
       if (current.local[block]) local[block] = cloneDraft(previousLocal)
       if (wasConflict) conflicts[block] = true
+      if (current.revisions[block]) revisions[block] = current.revisions[block]
       continue
     }
 
     const serverDraft = hasServer ? server[block] : emptyDraft
     const sameAsLocal = sameDraft(serverDraft, previousLocal)
     const dirty = !sameDraft(previousBaseline, previousLocal)
-    const remoteChanged = !sameDraft(previousBaseline, serverDraft)
+    // Revisions hash grant order and row existence, so a revision change can
+    // differ from the visible draft. Treat it as a remote change as well.
+    const revisionChanged = current.revisions[block] !== (hasServer ? serverRevisions[block] : undefined)
+    const remoteChanged = !sameDraft(previousBaseline, serverDraft) || revisionChanged
     const conflict = !sameAsLocal && (wasConflict || (dirty && remoteChanged))
 
     baseline[block] = cloneDraft(serverDraft)
+    // A complete snapshot that omits the block gives it no revision: a later
+    // save must claim the absent sentinel, not a stale token.
+    if (hasServer && serverRevisions[block]) revisions[block] = serverRevisions[block]
     if (conflict) {
       conflicts[block] = true
       local[block] = cloneDraft(previousLocal)
-    } else if (dirty) {
+    } else if (dirty && !sameAsLocal) {
       local[block] = cloneDraft(previousLocal)
     } else {
+      // Adopt the snapshot when the target already matches it, so a later
+      // edit keeps the server's grant order instead of the old local order.
       local[block] = cloneDraft(serverDraft)
     }
   }
 
-  return { baseline, local, conflicts }
+  return { baseline, local, conflicts, revisions }
 }
 function BindingsTab({
   canWrite, scope, projectId, bindingState, servers, skills, testResults, refreshBindings,
@@ -704,19 +748,27 @@ function BindingsTab({
   const toast = useToast()
   const queryClient = useQueryClient()
   const bindingSnapshot = JSON.stringify(bindingState.items)
-  const bindingsComplete = bindingState.isSuccess && !bindingState.hasNextPage
+  const invalidRevision = bindingState.items.some((item) => !validRevision(item.revision))
+  const bindingsComplete = bindingState.isSuccess && !bindingState.hasNextPage && !bindingState.isFetchingNextPage
   const [drafts, setDrafts] = useState<BindingDrafts>(() => (
-    mergeBindingDrafts({ baseline: {}, local: {}, conflicts: {} }, bindingState.items, bindingsComplete)
+    mergeBindingDrafts(emptyDrafts, bindingState.items, bindingsComplete)
   ))
   // Tracks the snapshot that is already merged into the editable drafts.
   const [draftSnapshot, setDraftSnapshot] = useState(bindingSnapshot)
   const mergeKey = `${bindingSnapshot}|${bindingsComplete ? 'complete' : 'partial'}`
   const appliedMerge = useRef(mergeKey)
-  const { baseline, local, conflicts } = drafts
+  const { baseline, local, conflicts, revisions } = drafts
+  const merged = draftSnapshot === bindingSnapshot
+  const bindingsReady = bindingsComplete && !bindingState.isFetching && merged && !invalidRevision
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<unknown>(null)
   const [saveRefreshState, setSaveRefreshState] = useState<'idle' | 'pending' | 'failed'>('idle')
   const [saveRefreshError, setSaveRefreshError] = useState<unknown>(null)
+  const [saveRefreshConflict, setSaveRefreshConflict] = useState(false)
+  const [pendingSave, setPendingSave] = useState<{
+    submitted: BindingSubmission[]
+    absentBlocks: string[]
+  } | null>(null)
   const [restoreTarget, setRestoreTarget] = useState<RestoreTarget | null>(null)
   const [restorePreview, setRestorePreview] = useState<RestoreDefaultsResult | null>(null)
   const [previewPending, setPreviewPending] = useState(false)
@@ -850,8 +902,10 @@ function BindingsTab({
     })
   }
 
+  const editable = canWrite && bindingsReady && !restoring && !saving && !hasConflicts && saveRefreshState === 'idle'
+
   const toggle = (block: string, group: 'mcp_tools' | 'skills', value: string) => {
-    if (!canWrite || restoring) return
+    if (!editable) return
     setDrafts((current) => {
       const existing = current.local[block] || emptyDraft
       const values = new Set(existing[group])
@@ -979,8 +1033,9 @@ function BindingsTab({
     void runRestoreRefresh([operationId])
   }
 
-  const refreshAfterSave = async () => {
+  const refreshAfterSave = async (reason: 'saved' | 'conflict' = 'saved') => {
     setSaveRefreshState('pending')
+    setSaveRefreshConflict(reason === 'conflict')
     try {
       const refreshed = await refreshBindings()
       const refreshedSnapshot = JSON.stringify(refreshed.items)
@@ -995,67 +1050,114 @@ function BindingsTab({
     }
   }
 
-  const save = async () => {
-    if (!canWrite || restoring || hasConflicts) return
+  const performSave = async (submitted: BindingSubmission[]) => {
     setSaving(true)
     setSaveError(null)
     setSaveRefreshError(null)
     setSaveRefreshState('idle')
+    try {
+      const results = await Promise.allSettled(submitted.map(({ block, draft, baselineRevision }) => saveBinding(block, {
+        scope,
+        project_id: projectId,
+        mcp_tools: draft.mcp_tools,
+        skills: draft.skills,
+        expected_revision: baselineRevision ?? absentRevision,
+      })))
+      const failed = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+      const nonConflictFailures = failed.filter((result) => !(result.reason instanceof ApiError && result.reason.status === 409))
+      const conflicted = failed.some((result) => result.reason instanceof ApiError && result.reason.status === 409)
+      if (nonConflictFailures.length) {
+        setSaveError(nonConflictFailures[0].reason)
+        toast.push('error', `部分绑定未保存（${nonConflictFailures.length}/${submitted.length} 个请求失败）。`)
+      } else if (!conflicted) {
+        toast.push('success', '块绑定已保存。')
+      }
+      // Only a fulfilled write advances that block's baseline, and only when
+      // both the baseline draft and its revision have not moved underneath it.
+      // A server response without a usable revision stays dirty until the
+      // following full read supplies one.
+      setDrafts((current) => {
+        let nextBaseline = current.baseline
+        let nextRevisions = current.revisions
+        let changed = false
+        submitted.forEach(({ block, draft, baseline: submittedBaseline, baselineRevision }, index) => {
+          const result = results[index]
+          if (result.status !== 'fulfilled') return
+          if (!validRevision(result.value?.revision)) return
+          if (current.conflicts[block]) return
+          if (!sameDraft(current.baseline[block] || emptyDraft, submittedBaseline)) return
+          if ((current.revisions[block] || null) !== baselineRevision) return
+          if (nextBaseline === current.baseline) nextBaseline = { ...nextBaseline }
+          if (nextRevisions === current.revisions) nextRevisions = { ...nextRevisions }
+          nextBaseline[block] = draft
+          nextRevisions[block] = result.value.revision
+          changed = true
+        })
+        return changed ? { ...current, baseline: nextBaseline, revisions: nextRevisions } : current
+      })
+      // A conflict is resolved only by re-reading from the first page. Never
+      // retry the rejected write automatically.
+      if (conflicted || results.some((result) => result.status === 'fulfilled')) {
+        await refreshAfterSave(conflicted ? 'conflict' : 'saved')
+      }
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const save = () => {
+    if (!editable || hasConflicts || saving) return
     const submitted = rowNames
       .filter((block) => !sameDraft(baseline[block] || emptyDraft, local[block] || emptyDraft))
       .map((block) => ({
         block,
         draft: cloneDraft(local[block] || emptyDraft),
         baseline: cloneDraft(baseline[block] || emptyDraft),
+        baselineRevision: revisions[block] || null,
       }))
     if (!submitted.length) {
-      setSaving(false)
       toast.push('info', '没有需要保存的绑定变更。')
       return
     }
-    const results = await Promise.allSettled(submitted.map(({ block, draft }) => saveBinding(block, {
-      scope,
-      project_id: projectId,
-      mcp_tools: draft.mcp_tools,
-      skills: draft.skills,
-    })))
-    const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected')
-    if (failures.length) {
-      setSaveError(failures[0].reason)
-      toast.push('error', `部分绑定未保存（${failures.length}/${submitted.length} 个请求失败）。`)
-    } else {
-      toast.push('success', '块绑定已保存。')
+    const absentBlocks = submitted.filter(({ baselineRevision }) => !baselineRevision).map(({ block }) => block)
+    if (absentBlocks.length) {
+      // A missing project row can inherit the platform grant, and a missing
+      // platform row can inherit configuration `blocks`. Creating a row is a
+      // full override, so require explicit acknowledgement first.
+      setPendingSave({ submitted, absentBlocks })
+      return
     }
-    // Only a fulfilled write advances that block's baseline, and only when the
-    // baseline has not moved underneath it. A remote refresh during the save
-    // must keep its newer baseline and any conflict instead of being overwritten
-    // by the snapshot that was current when the request started.
-    setDrafts((current) => {
-      let next = current.baseline
-      submitted.forEach(({ block, draft, baseline: submittedBaseline }, index) => {
-        if (results[index].status !== 'fulfilled') return
-        if (current.conflicts[block]) return
-        if (!sameDraft(current.baseline[block] || emptyDraft, submittedBaseline)) return
-        if (next === current.baseline) next = { ...next }
-        next[block] = draft
-      })
-      return next === current.baseline ? current : { ...current, baseline: next }
-    })
-    if (results.some((result) => result.status === 'fulfilled')) await refreshAfterSave()
-    setSaving(false)
+    void performSave(submitted)
   }
 
   if (bindingState.isPending) return <Panel title="块绑定"><LoadingState /></Panel>
+  if (bindingState.isFetchNextPageError && saveRefreshState === 'idle' && restoreView === 'idle') {
+    return (
+      <Panel title="块绑定">
+        <ErrorState
+          error={bindingState.error}
+          title="读取更多绑定失败"
+          onRetry={bindingState.retry}
+        />
+        <p className={ext.restoreHint} role="status">
+          绑定列表未全部加载，重新读取成功后才能编辑和保存。
+        </p>
+      </Panel>
+    )
+  }
   if (saveRefreshState === 'failed' && !bindingState.isError) {
+    const conflict = saveRefreshConflict
     return (
       <Panel title="块绑定">
         <ErrorState
           error={saveRefreshError ?? bindingState.error}
-          title="绑定已保存，但读取最新绑定失败"
-          onRetry={() => { void refreshAfterSave() }}
+          title={conflict ? '绑定版本已过期，读取最新绑定失败' : '绑定已保存，但读取最新绑定失败'}
+          onRetry={() => { void refreshAfterSave(conflict ? 'conflict' : 'saved') }}
         />
         <p className={ext.restoreHint} role="status">
-          保存请求已成功，不会重复提交。重新读取成功后才能继续编辑绑定。
+          {conflict
+            ? '保存请求未通过版本校验，不会自动重试。重新读取成功后才能继续编辑绑定。'
+            : '保存请求已成功，不会重复提交。重新读取成功后才能继续编辑绑定。'}
         </p>
       </Panel>
     )
@@ -1063,17 +1165,22 @@ function BindingsTab({
   if (bindingState.isError) {
     if (saveRefreshState !== 'idle') {
       const pending = saveRefreshState === 'pending'
+      const conflict = saveRefreshConflict
       return (
         <Panel title="块绑定">
           <ErrorState
             error={saveRefreshError ?? bindingState.error}
-            title={pending ? '正在重新读取最新绑定' : '绑定已保存，但读取最新绑定失败'}
-            onRetry={pending ? undefined : () => { void refreshAfterSave() }}
+            title={pending
+              ? '正在重新读取最新绑定'
+              : conflict ? '绑定版本已过期，读取最新绑定失败' : '绑定已保存，但读取最新绑定失败'}
+            onRetry={pending ? undefined : () => { void refreshAfterSave(conflict ? 'conflict' : 'saved') }}
           />
           <p className={ext.restoreHint} role="status">
             {pending
-              ? '正在读取保存后的最新绑定…'
-              : '保存请求已成功，不会重复提交。重新读取成功后才能继续编辑绑定。'}
+              ? conflict ? '正在读取最新绑定…' : '正在读取保存后的最新绑定…'
+              : conflict
+                ? '保存请求未通过版本校验，不会自动重试。重新读取成功后才能继续编辑绑定。'
+                : '保存请求已成功，不会重复提交。重新读取成功后才能继续编辑绑定。'}
           </p>
         </Panel>
       )
@@ -1091,6 +1198,20 @@ function BindingsTab({
       )
     }
     return <Panel title="块绑定"><ErrorState error={bindingState.error} onRetry={bindingState.retry} /></Panel>
+  }
+  if (invalidRevision) {
+    return (
+      <Panel title="块绑定">
+        <ErrorState
+          error={new Error('绑定版本信息缺失或格式错误，无法安全保存。')}
+          title="读取绑定版本失败"
+          onRetry={bindingState.retry}
+        />
+        <p className={ext.restoreHint} role="status">
+          重新读取成功后才能编辑和保存绑定。
+        </p>
+      </Panel>
+    )
   }
 
   return (
@@ -1134,6 +1255,20 @@ function BindingsTab({
       {!toolColumns.length && !skillColumns.length ? (
         <div className={styles.warning}>
           没有可绑定的工具或 Skill。先添加 MCP 服务器和 Skill，并运行 MCP 测试以发现工具；已保存的绑定名称也会显示为列。
+        </div>
+      ) : null}
+      {!bindingsReady ? (
+        <div className={styles.warning} role="status">
+          {bindingState.hasNextPage
+            ? '绑定列表尚未全部加载。加载全部绑定后才能编辑或保存，否则未加载页中的授权可能被覆盖。'
+            : '正在读取并合并完整的绑定列表，完成前不能编辑或保存。'}
+        </div>
+      ) : null}
+      {saveRefreshState === 'pending' ? (
+        <div className={ext.restoreBar}>
+          <div className={ext.restoreText}>
+            <span role="status">{saveRefreshConflict ? '正在读取最新绑定…' : '正在读取保存后的最新绑定…'}</span>
+          </div>
         </div>
       ) : null}
       {restoreView !== 'idle' ? (
@@ -1195,7 +1330,7 @@ function BindingsTab({
                               className={[styles.matrixCell, on ? styles.matrixCellOn : ''].filter(Boolean).join(' ')}
                               aria-pressed={on}
                               aria-label={`${block} 使用 ${tool}`}
-                              disabled={!canWrite || restoring}
+                              disabled={!editable}
                               onClick={() => toggle(block, 'mcp_tools', tool)}
                             >
                               {on ? '✓' : ''}
@@ -1212,7 +1347,7 @@ function BindingsTab({
                               className={[styles.matrixCell, on ? styles.matrixCellOn : ''].filter(Boolean).join(' ')}
                               aria-pressed={on}
                               aria-label={`${block} 使用 Skill ${skill}`}
-                              disabled={!canWrite || restoring}
+                              disabled={!editable}
                               onClick={() => toggle(block, 'skills', skill)}
                             >
                               {on ? '✓' : ''}
@@ -1230,13 +1365,28 @@ function BindingsTab({
       {saveError ? <ErrorState error={saveError} title="保存绑定失败" /> : null}
       {canWrite ? (
         <div className={styles.actionsRight}>
-          <Button variant="primary" onClick={() => { void save() }} loading={saving} disabled={restoring || hasConflicts}>保存绑定</Button>
+          <Button variant="primary" onClick={save} loading={saving} disabled={!editable}>保存绑定</Button>
         </div>
       ) : <span className="small muted">只读账号不能修改块绑定。</span>}
       {bindingState.hasNextPage ? <Button variant="secondary" onClick={bindingState.fetchNextPage} loading={bindingState.isFetchingNextPage}>加载更多绑定</Button> : null}
       </>
       )}
     </Panel>
+    <ConfirmDialog
+      open={Boolean(pendingSave)}
+      onClose={() => setPendingSave(null)}
+      onConfirm={() => {
+        if (!pendingSave) return
+        const submitted = pendingSave.submitted
+        setPendingSave(null)
+        void performSave(submitted)
+      }}
+      title="新建绑定会覆盖继承授权？"
+      description={pendingSave
+        ? `将新建 ${pendingSave.absentBlocks.join('、')} 的绑定。新建为完整覆盖；未选中的继承授权或配置文件授权不会保留。`
+        : ''}
+      confirmLabel="新建并保存"
+    />
     {canRestore ? (
       <RestoreDialog
         target={restoreTarget}

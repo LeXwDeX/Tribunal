@@ -272,9 +272,10 @@ func TestBlockBindingUpsert(t *testing.T) {
 	client := env.loginAs("code-admin")
 
 	response := client.json(http.MethodPut, "/api/v1/block-bindings/review", map[string]any{
-		"scope":     "platform",
-		"mcp_tools": []string{"mcp__github__search"},
-		"skills":    []string{"go-review"},
+		"scope":             "platform",
+		"mcp_tools":         []string{"mcp__github__search"},
+		"skills":            []string{"go-review"},
+		"expected_revision": store.BlockBindingAbsentRevision,
 	})
 	assertStatus(t, response, http.StatusOK)
 	body := env.decode(t, response)
@@ -296,17 +297,19 @@ func TestBlockBindingUpsert(t *testing.T) {
 	}
 
 	badBlock := client.json(http.MethodPut, "/api/v1/block-bindings/Review", map[string]any{
-		"scope": "platform",
+		"scope":             "platform",
+		"expected_revision": store.BlockBindingAbsentRevision,
 	})
 	assertStatus(t, badBlock, http.StatusBadRequest)
 
 	projectWithoutID := client.json(http.MethodPut, "/api/v1/block-bindings/verify", map[string]any{
-		"scope": "project",
+		"scope":             "project",
+		"expected_revision": store.BlockBindingAbsentRevision,
 	})
 	assertStatus(t, projectWithoutID, http.StatusBadRequest)
 
 	platformWithProject := client.json(http.MethodPut, "/api/v1/block-bindings/verify", map[string]any{
-		"scope": "platform", "project_id": 42,
+		"scope": "platform", "project_id": 42, "expected_revision": store.BlockBindingAbsentRevision,
 	})
 	assertStatus(t, platformWithProject, http.StatusBadRequest)
 }

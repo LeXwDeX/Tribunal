@@ -708,6 +708,7 @@ func scanBlockBinding(row rowScanner) (*store.BlockBinding, error) {
 	if binding.Skills == nil {
 		binding.Skills = []string{}
 	}
+	binding.Revision = store.BlockBindingRevision(binding.Scope, binding.ProjectID, binding.Block, binding.MCPTools, binding.Skills)
 	return &binding, nil
 }
 
@@ -796,9 +797,62 @@ func (s *Store) ListBlockBindingsPage(ctx context.Context, scope string, project
 	return bindings, next, nil
 }
 
-// UpsertBlockBinding creates or replaces one block binding.
+// UpsertBlockBinding creates or replaces one block binding without a revision
+// check. It is for trusted internal writers (default seeding, restore and
+// migrations); the HTTP layer must use UpsertBlockBindingIfRevision.
 func (s *Store) UpsertBlockBinding(ctx context.Context, binding store.BlockBinding) (*store.BlockBinding, error) {
 	return upsertBlockBinding(ctx, s.db, binding)
+}
+
+// UpsertBlockBindingIfRevision creates or replaces one block binding only when
+// the stored content still matches expectedRevision. The read and write share
+// one transaction, so a concurrent writer, restore or delete cannot slip
+// between the comparison and the upsert. A missing row matches
+// BlockBindingAbsentRevision.
+func (s *Store) UpsertBlockBindingIfRevision(ctx context.Context, binding store.BlockBinding,
+	expectedRevision string) (*store.BlockBinding, error) {
+	binding.Scope = strings.TrimSpace(binding.Scope)
+	binding.Block = strings.TrimSpace(binding.Block)
+	if err := store.ValidateExtensionScope(binding.Scope, binding.ProjectID, true); err != nil {
+		return nil, err
+	}
+	if binding.Block == "" {
+		return nil, errors.New("sqlite: block is required")
+	}
+	if !store.ValidBlockBindingRevision(expectedRevision) {
+		return nil, errors.New("sqlite: invalid expected block binding revision")
+	}
+	projectValue := int64(0)
+	if binding.ProjectID != nil {
+		projectValue = *binding.ProjectID
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: begin block binding write: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	currentRevision := store.BlockBindingAbsentRevision
+	current, err := scanBlockBinding(tx.QueryRowContext(ctx, `SELECT `+blockBindingColumns+` FROM block_bindings
+		WHERE scope = ? AND project_id = ? AND block = ?`,
+		binding.Scope, projectValue, binding.Block))
+	switch {
+	case err == nil:
+		currentRevision = current.Revision
+	case errors.Is(err, sql.ErrNoRows):
+	default:
+		return nil, fmt.Errorf("sqlite: read block binding: %w", err)
+	}
+	if expectedRevision != currentRevision {
+		return nil, fmt.Errorf("%w: block binding %s", store.ErrStaleRevision, binding.Block)
+	}
+	row, err := upsertBlockBinding(ctx, tx, binding)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("sqlite: commit block binding write: %w", err)
+	}
+	return row, nil
 }
 
 func upsertBlockBinding(ctx context.Context, db execer, binding store.BlockBinding) (*store.BlockBinding, error) {
@@ -839,6 +893,7 @@ func upsertBlockBinding(ctx context.Context, db execer, binding store.BlockBindi
 		}
 		return nil, fmt.Errorf("sqlite: upsert block binding: %w", err)
 	}
+	binding.Revision = store.BlockBindingRevision(binding.Scope, binding.ProjectID, binding.Block, binding.MCPTools, binding.Skills)
 	return &binding, nil
 }
 

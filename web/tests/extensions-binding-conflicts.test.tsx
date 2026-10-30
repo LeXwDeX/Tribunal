@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { QueryClient } from '@tanstack/react-query'
 import { ExtensionsManager } from '../src/features/extensions/ExtensionsManager'
 import type { BlockBinding, Skill } from '../src/api/types'
-import { binding, skill } from './fixtures'
+import { binding, revisionToken, skill } from './fixtures'
 import { installFetch, jsonResponse, renderWithProviders } from './test-utils'
 
 type ServerPage = { bindings: BlockBinding[]; next_cursor?: string }
@@ -223,6 +223,86 @@ describe('binding draft conflicts', () => {
     expect(state.writes.some((write) => write.url.endsWith('/review'))).toBe(false)
   })
 
+  it('conflicts when another client reorders grants at a new revision while the draft is dirty', async () => {
+    const state = setup({
+      bindings: [binding({
+        block: 'review',
+        skills: ['code-review', 'team-rules'],
+        revision: revisionToken('review-ordered-1'),
+      })],
+    })
+    renderBindings(state)
+    const user = userEvent.setup()
+
+    await user.click(await screen.findByRole('button', { name: 'review 使用 Skill another-skill' }))
+    state.setServer({
+      bindings: [binding({
+        block: 'review',
+        skills: ['team-rules', 'code-review'],
+        revision: revisionToken('review-ordered-2'),
+      })],
+    })
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('检测到 1 个块')
+    expect(screen.getByRole('button', { name: '保存绑定' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '放弃 review 的本地更改并使用最新绑定' })).toBeInTheDocument()
+    expect(skillButton('review', 'another-skill')).toHaveAttribute('aria-pressed', 'true')
+    expect(state.writes).toHaveLength(0)
+  })
+
+  it('adopts the remote grant order when the dirty target already matches it', async () => {
+    const state = setup({
+      bindings: [binding({
+        block: 'review',
+        skills: ['code-review', 'team-rules'],
+        revision: revisionToken('review-order-1'),
+      })],
+    })
+    renderBindings(state)
+    const user = userEvent.setup()
+
+    await user.click(await screen.findByRole('button', { name: 'review 使用 Skill another-skill' }))
+    await act(async () => {
+      state.setServer({
+        bindings: [binding({
+          block: 'review',
+          skills: ['team-rules', 'another-skill', 'code-review'],
+          revision: revisionToken('review-order-2'),
+        })],
+      })
+    })
+
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '保存绑定' })).toBeEnabled()
+
+    await user.click(screen.getByRole('button', { name: 'review 使用 Skill reasoner-rules' }))
+    await user.click(screen.getByRole('button', { name: '保存绑定' }))
+    await waitFor(() => expect(state.writes).toHaveLength(1))
+    expect(state.writes[0].body).toMatchObject({
+      skills: ['team-rules', 'another-skill', 'code-review', 'reasoner-rules'],
+    })
+  })
+
+  it('conflicts when another client creates an empty row at a new revision while the draft is dirty', async () => {
+    const state = setup({ bindings: [v1[1]] })
+    renderBindings(state)
+    const user = userEvent.setup()
+
+    await user.click(await screen.findByRole('button', { name: 'review 使用 Skill another-skill' }))
+    state.setServer({
+      bindings: [
+        binding({ block: 'review', skills: [], revision: revisionToken('review-created') }),
+        v1[1],
+      ],
+    })
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('检测到 1 个块')
+    expect(screen.getByRole('button', { name: '保存绑定' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '放弃 review 的本地更改并使用最新绑定' })).toBeInTheDocument()
+    expect(skillButton('review', 'another-skill')).toHaveAttribute('aria-pressed', 'true')
+    expect(state.writes).toHaveLength(0)
+  })
+
   it('does not conflict when the remote value already equals the local target', async () => {
     const state = setup({ bindings: v1 })
     renderBindings(state)
@@ -238,7 +318,7 @@ describe('binding draft conflicts', () => {
   })
 
   it('does not treat a block missing from a partial page as a deletion', async () => {
-    const state = setup({ bindings: [v1[0]], nextCursor: 'page-2' })
+    const state = setup({ bindings: v1 })
     renderBindings(state)
     const user = userEvent.setup()
 
@@ -249,6 +329,8 @@ describe('binding draft conflicts', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     expect(skillButton('review', 'team-rules')).toHaveAttribute('aria-pressed', 'true')
     expect(skillButton('reasoner', 'reasoner-extra')).toHaveAttribute('aria-pressed', 'true')
+    // A partial snapshot also locks edits until every page is read again.
+    expect(skillButton('reasoner', 'reasoner-extra')).toBeDisabled()
   })
 
   it('treats a missing block as a deletion conflict after every page is loaded', async () => {

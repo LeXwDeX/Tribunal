@@ -7,7 +7,7 @@ import { ExtensionsManager } from '../src/features/extensions/ExtensionsManager'
 import { ProjectDetailPage } from '../src/pages/ProjectDetailPage'
 import { setCsrfToken } from '../src/api/client'
 import type { BlockBinding } from '../src/api/types'
-import { binding, project, skill } from './fixtures'
+import { binding, project, revisionToken, skill } from './fixtures'
 import {
   createTestQueryClient, installFetch, jsonResponse, renderWithProviders,
 } from './test-utils'
@@ -103,8 +103,8 @@ describe('project detail extension bindings across cached projects', () => {
 
   it('shows project B grants and never submits project A drafts to B', async () => {
     const writes: Array<{ url: string; method: string; body?: unknown }> = []
-    const aBindings = [binding({ scope: 'project', project_id: 42, block: 'review', skills: ['shared'] })]
-    const bBindings = [binding({ scope: 'project', project_id: 43, block: 'review', skills: ['shared'] })]
+    const aBindings = [binding({ scope: 'project', project_id: 42, block: 'review', skills: ['shared'], revision: revisionToken('project-a') })]
+    const bBindings = [binding({ scope: 'project', project_id: 43, block: 'review', skills: ['shared'], revision: revisionToken('project-b') })]
 
     installFetch((url, init) => {
       const method = (init?.method || 'GET').toUpperCase()
@@ -172,7 +172,7 @@ describe('project detail extension bindings across cached projects', () => {
     expect(writes[0]).toMatchObject({
       url: '/api/v1/block-bindings/review',
       method: 'PUT',
-      body: { scope: 'project', project_id: 43, mcp_tools: [], skills: ['shared', 'b-only'] },
+      body: { scope: 'project', project_id: 43, mcp_tools: [], skills: ['shared', 'b-only'], expected_revision: revisionToken('project-b') },
     })
   })
 })

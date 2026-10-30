@@ -125,6 +125,7 @@ type BlockBinding struct {
 	Block     string   `json:"block"`
 	MCPTools  []string `json:"mcp_tools"`
 	Skills    []string `json:"skills"`
+	Revision  string   `json:"revision"`
 }
 
 // BlockBindingInput upserts one binding.
@@ -991,6 +992,41 @@ func (s *ExtensionService) UpsertBlockBinding(ctx context.Context, in BlockBindi
 	return &binding, nil
 }
 
+// ReplaceBlockBinding creates or replaces one binding only when the stored
+// content still matches expectedRevision. HTTP writes use this method; the
+// unconditional UpsertBlockBinding stays for trusted internal writers.
+func (s *ExtensionService) ReplaceBlockBinding(ctx context.Context, in BlockBindingInput,
+	expectedRevision string) (*BlockBinding, error) {
+	if !store.ValidBlockBindingRevision(expectedRevision) {
+		return nil, validationError("expected_revision must be absent or a lowercase SHA-256 revision",
+			Detail{Field: "expected_revision", Message: "must be absent or a lowercase SHA-256 revision"})
+	}
+	scope, projectID, err := extensionScope(in.Scope, in.ProjectID)
+	if err != nil {
+		return nil, err
+	}
+	unlock, err := s.lockScope(ctx, scope, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	row, err := s.store.UpsertBlockBindingIfRevision(ctx, store.BlockBinding{
+		Scope:     scope,
+		ProjectID: projectID,
+		Block:     strings.TrimSpace(in.Block),
+		MCPTools:  in.MCPTools,
+		Skills:    in.Skills,
+	}, expectedRevision)
+	if err != nil {
+		if errors.Is(err, store.ErrStaleRevision) {
+			return nil, conflictError("block binding changed since it was loaded; reload and retry")
+		}
+		return nil, extensionStoreError(err)
+	}
+	binding := blockBindingFromStore(*row)
+	return &binding, nil
+}
+
 // TestMCPServer starts a short-lived manager from the submitted configuration.
 // It never reuses the runtime manager: a project server can share a name with
 // a platform server and carry different configuration.
@@ -1235,8 +1271,9 @@ func blockBindingFromStore(row store.BlockBinding) BlockBinding {
 		Scope:     row.Scope,
 		ProjectID: row.ProjectID,
 		Block:     row.Block,
-		MCPTools:  append([]string(nil), row.MCPTools...),
-		Skills:    append([]string(nil), row.Skills...),
+		MCPTools:  append([]string{}, row.MCPTools...),
+		Skills:    append([]string{}, row.Skills...),
+		Revision:  row.Revision,
 	}
 }
 

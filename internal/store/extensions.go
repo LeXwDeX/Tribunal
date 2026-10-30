@@ -1,9 +1,13 @@
 package store
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -72,6 +76,65 @@ type BlockBinding struct {
 	Block     string   `json:"block"`
 	MCPTools  []string `json:"mcp_tools"`
 	Skills    []string `json:"skills"`
+	// Revision is the content digest of the binding; it is not stored.
+	Revision string `json:"revision"`
+}
+
+// BlockBindingAbsentRevision marks a conditional write that expects no stored
+// row. A content digest never equals this value.
+const BlockBindingAbsentRevision = "absent"
+
+// BlockBindingRevision returns a stable digest of the binding content. The
+// scope, project ID, block, MCP tools and skills cover the complete grant, so
+// changing any listed item invalidates the previous revision. Nil and empty
+// arrays have the same digest; array order and duplicates are preserved.
+func BlockBindingRevision(scope string, projectID *int64, block string, mcpTools, skills []string) string {
+	project := int64(0)
+	if projectID != nil {
+		project = *projectID
+	}
+	var b strings.Builder
+	b.WriteString("block-binding/v1\n")
+	writeRevisionPart(&b, strings.TrimSpace(scope))
+	writeRevisionPart(&b, strconv.FormatInt(project, 10))
+	writeRevisionPart(&b, strings.TrimSpace(block))
+	b.WriteString(strconv.Itoa(len(mcpTools)))
+	b.WriteByte('\n')
+	for _, tool := range mcpTools {
+		writeRevisionPart(&b, tool)
+	}
+	b.WriteString(strconv.Itoa(len(skills)))
+	b.WriteByte('\n')
+	for _, skill := range skills {
+		writeRevisionPart(&b, skill)
+	}
+	sum := sha256.Sum256([]byte(b.String()))
+	return hex.EncodeToString(sum[:])
+}
+
+// ValidBlockBindingRevision reports whether revision is the absent marker or a
+// digest this package produces. Values are case-sensitive.
+func ValidBlockBindingRevision(revision string) bool {
+	if revision == BlockBindingAbsentRevision {
+		return true
+	}
+	if len(revision) != sha256.Size*2 {
+		return false
+	}
+	for i := 0; i < len(revision); i++ {
+		c := revision[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func writeRevisionPart(b *strings.Builder, value string) {
+	b.WriteString(strconv.Itoa(len(value)))
+	b.WriteByte(':')
+	b.WriteString(value)
+	b.WriteByte('\n')
 }
 
 // ValidateExtensionScope checks the shared scope/project_id selector. An
