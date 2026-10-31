@@ -217,7 +217,7 @@ func TestRunSubmitValidationRetries(t *testing.T) {
 	}
 	for _, turn := range []int{1, 2} {
 		part := result.Transcript[turn*2].Parts[0]
-		if !part.ToolResult.IsError || !strings.Contains(part.ToolResult.Content, "answer is required") {
+		if !part.ToolResult.IsError || !strings.Contains(part.ToolResult.Content, "validation failed") {
 			t.Fatalf("turn %d feedback = %#v", turn, part.ToolResult)
 		}
 	}
@@ -368,7 +368,7 @@ func TestRunToolErrorBecomesResult(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	part := result.Transcript[2].Parts[0].ToolResult
-	if !part.IsError || !strings.Contains(part.Content, "boom") {
+	if !part.IsError || !strings.Contains(part.Content, "tool execution failed") || strings.Contains(part.Content, "boom") {
 		t.Fatalf("tool error result = %#v", part)
 	}
 }
@@ -431,7 +431,7 @@ func TestRunRejectsDuplicateCallIDs(t *testing.T) {
 			call("same", SubmitToolName, `{}`)),
 	}}
 	_, err := Run(context.Background(), testSpec(client, echoTool{name: "echo"}))
-	if err == nil || !strings.Contains(err.Error(), "duplicate tool call id") {
+	if !errors.Is(err, ErrUnsafeResponse) || strings.Contains(err.Error(), "same") {
 		t.Fatalf("error = %v", err)
 	}
 }
@@ -638,5 +638,17 @@ func TestRunReturnsUsageAfterTransportFailure(t *testing.T) {
 	}
 	if result.Turns != 1 {
 		t.Fatalf("turns = %d, want 1", result.Turns)
+	}
+}
+
+func TestRunRejectsDuplicateToolNamesWithoutEcho(t *testing.T) {
+	const name = "duplicate-name-canary"
+	client := &fakeClient{}
+	_, err := Run(context.Background(), testSpec(client,
+		echoTool{name: name},
+		echoTool{name: name},
+	))
+	if err == nil || strings.Contains(err.Error(), name) {
+		t.Fatalf("duplicate tool definition error = %v", err)
 	}
 }

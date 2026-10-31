@@ -57,8 +57,18 @@ func TestLLMCallAuditGzipBoundAndRetention(t *testing.T) {
 	if !bytes.HasPrefix(request, []byte{0x1f, 0x8b}) || !bytes.HasPrefix(response, []byte{0x1f, 0x8b}) {
 		t.Fatal("llm payload is not gzip encoded")
 	}
-	if bytes.Contains(request, []byte(apiKey)) || bytes.Contains(response, []byte(apiKey)) {
-		t.Fatal("llm payload stored a credential")
+	decodedRequest, err := decodeGzipJSON(request)
+	if err != nil {
+		t.Fatalf("decode request: %v", err)
+	}
+	decodedResponse, err := decodeGzipJSON(response)
+	if err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	for name, raw := range map[string][]byte{"request": decodedRequest, "response": decodedResponse} {
+		if bytes.Contains(raw, []byte(apiKey)) || bytes.Contains(raw, []byte(secret)) {
+			t.Fatalf("%s payload stored prompt text or a credential: %s", name, raw)
+		}
 	}
 
 	calls, next, err := st.ListLLMCalls(ctx, store.LLMCallFilter{WorkflowID: "wf-audit", IncludePayload: true})
@@ -73,12 +83,12 @@ func TestLLMCallAuditGzipBoundAndRetention(t *testing.T) {
 		calls[0].RequestID != "req-1" || calls[0].Turn != 2 {
 		t.Fatalf("call = %+v", calls[0])
 	}
-	var decoded llm.Request
+	var decoded llm.AuditRequest
 	if err := json.Unmarshal(calls[0].Request, &decoded); err != nil {
-		t.Fatalf("decode request: %v", err)
+		t.Fatalf("decode audit request: %v", err)
 	}
-	if decoded.Messages[0].Parts[0].Text != secret {
-		t.Fatalf("request message = %q", decoded.Messages[0].Parts[0].Text)
+	if decoded.Messages != 1 || decoded.TextParts != 1 {
+		t.Fatalf("audit request = %+v", decoded)
 	}
 	withoutPayload, _, err := st.ListLLMCalls(ctx, store.LLMCallFilter{WorkflowID: "wf-audit"})
 	if err != nil {
@@ -86,23 +96,6 @@ func TestLLMCallAuditGzipBoundAndRetention(t *testing.T) {
 	}
 	if len(withoutPayload) != 1 || len(withoutPayload[0].Request) != 0 || len(withoutPayload[0].Response) != 0 {
 		t.Fatalf("payload leaked without request: %+v", withoutPayload)
-	}
-
-	huge := llm.CallRecord{
-		Provider: "p", Model: "m",
-		Meta:     llm.CallMeta{WorkflowID: "wf-audit", NodeID: "node-2", Turn: 0},
-		Request:  &llm.Request{Messages: []llm.Message{{Role: llm.RoleUser, Parts: []llm.Part{{Type: llm.PartText, Text: strings.Repeat("x", maxLLMPayload+10)}}}}},
-		Duration: time.Second,
-	}
-	if err := st.RecordLLMCall(ctx, huge); err != nil {
-		t.Fatalf("RecordLLMCall huge: %v", err)
-	}
-	calls, _, err = st.ListLLMCalls(ctx, store.LLMCallFilter{WorkflowID: "wf-audit", NodeID: "node-2", IncludePayload: true})
-	if err != nil {
-		t.Fatalf("ListLLMCalls huge: %v", err)
-	}
-	if len(calls) != 1 || !bytes.Contains(calls[0].Request, []byte(`"truncated":true`)) {
-		t.Fatalf("large payload was not truncated: %+v", calls)
 	}
 
 	errorCall := llm.CallRecord{
@@ -122,8 +115,8 @@ func TestLLMCallAuditGzipBoundAndRetention(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClearLLMPayloads: %v", err)
 	}
-	if cleared != 2 {
-		t.Fatalf("cleared rows = %d, want 2", cleared)
+	if cleared != 1 {
+		t.Fatalf("cleared rows = %d, want 1", cleared)
 	}
 	calls, _, err = st.ListLLMCalls(ctx, store.LLMCallFilter{WorkflowID: "wf-audit", IncludePayload: true})
 	if err != nil {
@@ -688,5 +681,145 @@ func TestStatsAggregates(t *testing.T) {
 		model.P50LatencyMS == nil || *model.P50LatencyMS != 1000 ||
 		model.ErrorRate == nil || *model.ErrorRate != 0.5 {
 		t.Fatalf("model stats = %+v", model)
+	}
+}
+
+func TestLLMCallAuditMetadataWhitelist(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	st := openTestStore(t, clock)
+	const canary = "audit-canary-secret"
+	req := &llm.Request{
+		System: []llm.Block{{Text: canary}},
+		Messages: []llm.Message{
+			{Role: llm.RoleUser, Parts: []llm.Part{
+				{Type: llm.PartText, Text: canary},
+				{Type: llm.PartToolResult, ToolResult: &llm.ToolResult{CallID: "call-id-canary", Content: canary}},
+				{Type: llm.PartReasoning, Reasoning: &llm.Reasoning{Protocol: "x", Raw: json.RawMessage(`{"secret":"` + canary + `"}`), Summary: canary}},
+			}},
+			{Role: llm.RoleAssistant, Parts: []llm.Part{
+				{Type: llm.PartToolCall, ToolCall: &llm.ToolCall{ID: "call-id-canary", Name: "tool-name-canary", Input: json.RawMessage(`{"secret":"` + canary + `"}`)}},
+				{Type: llm.PartText, Text: canary, ToolResult: &llm.ToolResult{CallID: "call-id-canary", Content: canary}},
+			}},
+		},
+		Tools:      []llm.ToolDef{{Name: "tool-name-canary", Description: canary, InputSchema: json.RawMessage(`{"secret":"` + canary + `"}`)}},
+		ToolChoice: "submit_result",
+		MaxTokens:  128,
+	}
+	resp := &llm.Response{
+		Message: llm.Message{Role: llm.RoleAssistant, Parts: []llm.Part{
+			{Type: llm.PartText, Text: canary},
+			{Type: llm.PartToolCall, ToolCall: &llm.ToolCall{ID: "call-id-canary", Name: "tool-name-canary", Input: json.RawMessage(`{"secret":"` + canary + `"}`)}},
+			{Type: llm.PartToolResult, ToolResult: &llm.ToolResult{CallID: "call-id-canary", Content: canary}},
+			{Type: llm.PartReasoning, Reasoning: &llm.Reasoning{Protocol: "x", Raw: json.RawMessage(`{"secret":"` + canary + `"}`), Summary: canary}},
+		}},
+		StopReason: llm.StopEndTurn,
+		Usage:      llm.Usage{InputTokens: 7, OutputTokens: 5},
+		RequestID:  "request-id-canary",
+	}
+	call := llm.CallRecord{
+		Provider: "p", Protocol: "openai-chat", Model: "m",
+		Meta:     llm.CallMeta{WorkflowID: "wf-audit-whitelist", NodeID: "node-1", Turn: 1},
+		Request:  req,
+		Response: resp,
+	}
+	if err := st.RecordLLMCall(ctx, call); err != nil {
+		t.Fatalf("RecordLLMCall: %v", err)
+	}
+	var request, response []byte
+	if err := st.db.QueryRowContext(ctx,
+		`SELECT request, response FROM llm_calls WHERE workflow_id = ?`, "wf-audit-whitelist").
+		Scan(&request, &response); err != nil {
+		t.Fatalf("read payload: %v", err)
+	}
+	for name, raw := range map[string][]byte{"request": request, "response": response} {
+		decoded, err := decodeGzipJSON(raw)
+		if err != nil {
+			t.Fatalf("decode %s: %v", name, err)
+		}
+		for _, value := range []string{canary, "call-id-canary", "tool-name-canary", "request-id-canary"} {
+			if bytes.Contains(decoded, []byte(value)) {
+				t.Fatalf("%s payload contains %q: %s", name, value, decoded)
+			}
+		}
+	}
+	calls, _, err := st.ListLLMCalls(ctx, store.LLMCallFilter{WorkflowID: "wf-audit-whitelist", IncludePayload: true})
+	if err != nil || len(calls) != 1 {
+		t.Fatalf("ListLLMCalls: calls=%d err=%v", len(calls), err)
+	}
+	var auditReq llm.AuditRequest
+	if err := json.Unmarshal(calls[0].Request, &auditReq); err != nil {
+		t.Fatalf("decode audit request: %v", err)
+	}
+	if auditReq.Messages != 2 || auditReq.TextParts != 2 || auditReq.ToolCalls != 1 ||
+		auditReq.ToolResults != 2 || auditReq.ReasoningParts != 1 || auditReq.Tools != 1 ||
+		auditReq.MaxTokens != 128 {
+		t.Fatalf("audit request = %+v", auditReq)
+	}
+	var auditResp llm.AuditResponse
+	if err := json.Unmarshal(calls[0].Response, &auditResp); err != nil {
+		t.Fatalf("decode audit response: %v", err)
+	}
+	if auditResp.StopReason != string(llm.StopEndTurn) || auditResp.TextParts != 1 ||
+		auditResp.ToolCalls != 1 || auditResp.ToolResults != 1 || auditResp.ReasoningParts != 1 ||
+		auditResp.Usage.InputTokens != 7 || auditResp.Usage.OutputTokens != 5 {
+		t.Fatalf("audit response = %+v", auditResp)
+	}
+}
+
+func TestEncodeGzipJSONTruncatesLargePayload(t *testing.T) {
+	encoded, err := encodeGzipJSON(map[string]any{"blob": strings.Repeat("x", maxLLMPayload+10)})
+	if err != nil {
+		t.Fatalf("encodeGzipJSON: %v", err)
+	}
+	decoded, err := decodeGzipJSON(encoded)
+	if err != nil {
+		t.Fatalf("decodeGzipJSON: %v", err)
+	}
+	if !bytes.Contains(decoded, []byte(`"truncated":true`)) {
+		t.Fatalf("large payload was not truncated: %s", decoded)
+	}
+}
+
+func TestLLMCallAuditDoesNotPersistErrorText(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t, newFakeClock())
+	const canary = "provider-error-canary"
+	if err := st.RecordLLMCall(ctx, llm.CallRecord{
+		Provider: "p", Model: "m",
+		Meta: llm.CallMeta{WorkflowID: "wf-error-audit", NodeID: "node-1"},
+		Err: &llm.Error{
+			Kind:  llm.ErrTransient,
+			Usage: llm.Usage{InputTokens: 11, OutputTokens: 7},
+			Err:   errors.New("upstream failed with " + canary),
+		},
+	}); err != nil {
+		t.Fatalf("RecordLLMCall: %v", err)
+	}
+	var request, response []byte
+	var errorKind string
+	var inputTokens, outputTokens int64
+	if err := st.db.QueryRowContext(ctx,
+		`SELECT request, response, error_kind, input_tokens, output_tokens FROM llm_calls WHERE workflow_id = ?`, "wf-error-audit").
+		Scan(&request, &response, &errorKind, &inputTokens, &outputTokens); err != nil {
+		t.Fatalf("read error row: %v", err)
+	}
+	decoded, err := decodeGzipJSON(response)
+	if err != nil {
+		t.Fatalf("decode response audit: %v", err)
+	}
+	for _, value := range []string{canary, "upstream failed"} {
+		if bytes.Contains(request, []byte(value)) || bytes.Contains(decoded, []byte(value)) {
+			t.Fatalf("error call stored %q", value)
+		}
+	}
+	if len(request) != 0 {
+		t.Fatalf("error call stored a request payload: %q", request)
+	}
+	if strings.Contains(errorKind, canary) || errorKind != "transient" {
+		t.Fatalf("error kind = %q", errorKind)
+	}
+	if inputTokens != 11 || outputTokens != 7 {
+		t.Fatalf("failed attempt usage = %d/%d", inputTokens, outputTokens)
 	}
 }

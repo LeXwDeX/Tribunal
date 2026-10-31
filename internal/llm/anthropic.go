@@ -145,11 +145,7 @@ func anthropicMessages(messages []Message) ([]anthropic.MessageParam, error) {
 					}
 					blocks = append(blocks, block)
 				case PartToolCall:
-					input := part.ToolCall.Input
-					if len(input) == 0 {
-						input = json.RawMessage(`{}`)
-					}
-					blocks = append(blocks, anthropic.NewToolUseBlock(part.ToolCall.ID, input, part.ToolCall.Name))
+					blocks = append(blocks, anthropic.NewToolUseBlock(part.ToolCall.ID, part.ToolCall.Input, part.ToolCall.Name))
 				case PartToolResult:
 					return nil, badRequestf("messages[%d].parts[%d]: tool result is not valid in an assistant message", i, j)
 				}
@@ -208,7 +204,6 @@ func anthropicResponse(message *anthropic.Message, defaultModel string) (*Respon
 		return nil, &Error{Kind: ErrTransient, Err: errors.New("provider returned an empty response")}
 	}
 	out := Message{Role: RoleAssistant}
-	hasToolCall := false
 	for _, block := range message.Content {
 		switch block.Type {
 		case "text":
@@ -234,15 +229,10 @@ func anthropicResponse(message *anthropic.Message, defaultModel string) (*Respon
 				},
 			})
 		case "tool_use":
-			input := block.Input
-			if !json.Valid(input) {
-				input = json.RawMessage(`{}`)
-			}
 			out.Parts = append(out.Parts, Part{
 				Type:     PartToolCall,
-				ToolCall: &ToolCall{ID: block.ID, Name: block.Name, Input: input},
+				ToolCall: &ToolCall{ID: block.ID, Name: block.Name, Input: block.Input},
 			})
-			hasToolCall = true
 		}
 	}
 	stop := StopEndTurn
@@ -260,9 +250,7 @@ func anthropicResponse(message *anthropic.Message, defaultModel string) (*Respon
 	default:
 		stop = StopOther
 	}
-	if hasToolCall {
-		stop = StopToolUse
-	}
+	out, _ = SanitizeToolCalls(out, stop == StopToolUse)
 	model := string(message.Model)
 	if model == "" {
 		model = defaultModel

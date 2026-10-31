@@ -63,7 +63,7 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 			return nil, fmt.Errorf("agent: tool name %q is reserved", SubmitToolName)
 		}
 		if _, ok := tools[def.Name]; ok {
-			return nil, fmt.Errorf("agent: duplicate tool name %q", def.Name)
+			return nil, errors.New("agent: duplicate tool name")
 		}
 		if len(def.InputSchema) == 0 {
 			def.InputSchema = json.RawMessage(`{"type":"object"}`)
@@ -95,10 +95,10 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 	var usage llm.Usage
 	var turns int
 	submitFailures := 0
-	var lastSubmitErr error
 	askedForSubmit := false
 	partial := func(err error) (*RunResult, error) {
-		if turns == 0 {
+		if turns == 0 && usage.InputTokens == 0 && usage.OutputTokens == 0 &&
+			usage.CacheReadTokens == 0 && usage.CacheWriteTokens == 0 && usage.ReasoningTokens == 0 {
 			return nil, err
 		}
 		return &RunResult{
@@ -140,27 +140,36 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 			if errors.As(err, &failure) && failure.Kind == llm.ErrBadRequest {
 				// Some reasoning gateways reject every non-auto tool choice. Let
 				// the final prompt request submit_result without forcing the choice.
+				addErrorUsage(&usage, err)
 				fallback := *req
 				fallback.ToolChoice = ""
 				resp, err = spec.Client.Generate(callCtx, &fallback)
 			}
 		}
 		if err != nil {
+			addErrorUsage(&usage, err)
 			return partial(err)
 		}
 		if resp == nil {
 			return partial(errors.New("agent: model returned a nil response"))
 		}
+		turns = turn
+		addUsage(&usage, resp.Usage)
+		message, invalid := llm.SanitizeToolCalls(resp.Message, resp.StopReason == llm.StopToolUse)
+		messages = append(messages, message)
 		if err := ctx.Err(); err != nil {
 			return partial(err)
 		}
-		turns = turn
-		addUsage(&usage, resp.Usage)
-		messages = append(messages, resp.Message)
+		if resp.StopReason != llm.StopToolUse && resp.StopReason != llm.StopEndTurn {
+			return partial(ErrUnsafeResponse)
+		}
 
-		calls, err := responseToolCalls(resp.Message)
+		calls, err := responseToolCalls(message)
 		if err != nil {
 			return partial(err)
+		}
+		if invalid || (len(calls) > 0 && resp.StopReason != llm.StopToolUse) || (len(calls) == 0 && resp.StopReason == llm.StopToolUse) {
+			return partial(ErrUnsafeResponse)
 		}
 		if len(calls) == 0 {
 			if resp.StopReason == llm.StopEndTurn && !askedForSubmit && turn < maxTurns {
@@ -172,7 +181,7 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 				continue
 			}
 			if submitFailures > 0 {
-				return partial(fmt.Errorf("%w: %v", ErrInvalidSubmit, lastSubmitErr))
+				return partial(ErrInvalidSubmit)
 			}
 			return partial(ErrNoSubmit)
 		}
@@ -192,9 +201,8 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 				out, decodeErr := decodeSubmit(spec.Submit, call.Input)
 				if decodeErr != nil {
 					submitFailures++
-					lastSubmitErr = decodeErr
 					results = append(results, plainToolResult(call.ID,
-						"submit_result rejected: "+decodeErr.Error(), true))
+						"submit_result rejected: validation failed", true))
 					continue
 				}
 				submitted = true
@@ -211,18 +219,11 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 				continue
 			}
 
-			input := call.Input
-			if len(input) == 0 {
-				input = json.RawMessage(`{}`)
-			}
-			if !json.Valid(input) {
-				results = append(results, wrapToolResult(call.ID, call.Name,
-					Result{Content: "tool input is not valid JSON", IsError: true}, maxOutput))
-				continue
-			}
-			res, callErr := tool.Call(ctx, input)
+			res, callErr := tool.Call(ctx, call.Input)
 			if callErr != nil {
-				res = Result{Content: callErr.Error(), IsError: true}
+				// Tool errors may quote model-provided arguments. Return a stable
+				// category instead of echoing attacker-controlled input.
+				res = Result{Content: "tool execution failed", IsError: true}
 			}
 			results = append(results, wrapToolResult(call.ID, call.Name, res, maxOutput))
 			if err := ctx.Err(); err != nil {
@@ -240,12 +241,12 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 			}, nil
 		}
 		if submitFailures > maxSubmitRetries {
-			return partial(fmt.Errorf("%w: %v", ErrInvalidSubmit, lastSubmitErr))
+			return partial(ErrInvalidSubmit)
 		}
 	}
 
 	if submitFailures > 0 {
-		return partial(fmt.Errorf("%w: %v", ErrInvalidSubmit, lastSubmitErr))
+		return partial(ErrInvalidSubmit)
 	}
 	return partial(ErrNoSubmit)
 }
@@ -258,18 +259,25 @@ func addUsage(dst *llm.Usage, add llm.Usage) {
 	dst.ReasoningTokens += add.ReasoningTokens
 }
 
+func addErrorUsage(dst *llm.Usage, err error) {
+	var failure *llm.Error
+	if errors.As(err, &failure) {
+		addUsage(dst, failure.Usage)
+	}
+}
+
 func responseToolCalls(message llm.Message) ([]*llm.ToolCall, error) {
 	var calls []*llm.ToolCall
 	seen := make(map[string]bool)
-	for i, part := range message.Parts {
+	for _, part := range message.Parts {
 		if part.Type != llm.PartToolCall {
 			continue
 		}
 		if part.ToolCall == nil || part.ToolCall.ID == "" || part.ToolCall.Name == "" {
-			return nil, fmt.Errorf("agent: response part %d has an incomplete tool call", i)
+			return nil, fmt.Errorf("%w: incomplete tool call", ErrUnsafeResponse)
 		}
 		if seen[part.ToolCall.ID] {
-			return nil, fmt.Errorf("agent: duplicate tool call id %q", part.ToolCall.ID)
+			return nil, fmt.Errorf("%w: duplicate tool call id", ErrUnsafeResponse)
 		}
 		seen[part.ToolCall.ID] = true
 		calls = append(calls, part.ToolCall)
@@ -287,7 +295,7 @@ func decodeSubmit(spec SubmitSpec, raw json.RawMessage) (out any, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			out = nil
-			err = fmt.Errorf("decode panicked: %v", recovered)
+			err = errors.New("decode panicked")
 		}
 	}()
 	out, err = spec.Decode(raw)

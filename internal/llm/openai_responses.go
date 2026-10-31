@@ -110,11 +110,7 @@ func responsesInput(req *Request) (responses.ResponseInputParam, error) {
 						items = append(items, responses.ResponseInputItemParamOfMessage(part.Text, responses.EasyInputMessageRoleAssistant))
 					}
 				case PartToolCall:
-					input := part.ToolCall.Input
-					if len(input) == 0 {
-						input = json.RawMessage(`{}`)
-					}
-					items = append(items, responses.ResponseInputItemParamOfFunctionCall(string(input), part.ToolCall.ID, part.ToolCall.Name))
+					items = append(items, responses.ResponseInputItemParamOfFunctionCall(string(part.ToolCall.Input), part.ToolCall.ID, part.ToolCall.Name))
 				case PartReasoning:
 					var item responses.ResponseInputItemUnionParam
 					if len(part.Reasoning.Raw) > 0 {
@@ -192,11 +188,10 @@ func responsesResponse(generated *responses.Response, defaultModel string) (*Res
 	if generated == nil {
 		return nil, &Error{Kind: ErrTransient, Err: errors.New("provider returned an empty response")}
 	}
-	if generated.Status == responses.ResponseStatusFailed {
-		return nil, &Error{Kind: ErrTransient, Err: errors.New("provider reported a failed response")}
-	}
+	usage := responsesUsage(generated.Usage)
 	message := Message{Role: RoleAssistant}
 	refused := false
+	incompleteToolCall := false
 	for _, item := range generated.Output {
 		switch item.Type {
 		case "message":
@@ -221,13 +216,12 @@ func responsesResponse(generated *responses.Response, defaultModel string) (*Res
 			}
 		case "function_call":
 			fn := item.AsFunctionCall()
-			input := json.RawMessage(fn.Arguments)
-			if !json.Valid(input) {
-				input = json.RawMessage(`{}`)
+			if fn.Status != "" && fn.Status != responses.ResponseFunctionToolCallStatusCompleted {
+				incompleteToolCall = true
 			}
 			message.Parts = append(message.Parts, Part{
 				Type:     PartToolCall,
-				ToolCall: &ToolCall{ID: fn.CallID, Name: fn.Name, Input: input},
+				ToolCall: &ToolCall{ID: fn.CallID, Name: fn.Name, Input: json.RawMessage(fn.Arguments)},
 			})
 		case "reasoning":
 			raw := json.RawMessage(item.RawJSON())
@@ -242,7 +236,7 @@ func responsesResponse(generated *responses.Response, defaultModel string) (*Res
 			})
 		}
 	}
-	stop := StopEndTurn
+	stop := StopOther
 	hasToolCall := false
 	for _, part := range message.Parts {
 		if part.Type == PartToolCall {
@@ -250,14 +244,22 @@ func responsesResponse(generated *responses.Response, defaultModel string) (*Res
 			break
 		}
 	}
+	if generated.Status == responses.ResponseStatusFailed && !refused && !hasToolCall {
+		return nil, &Error{Kind: ErrTransient, Err: errors.New("provider reported a failed response"), Usage: usage}
+	}
 	switch {
-	case hasToolCall:
-		stop = StopToolUse
-	case refused:
+	case refused || (generated.Status == responses.ResponseStatusIncomplete && generated.IncompleteDetails.Reason == "content_filter"):
 		stop = StopRefusal
 	case generated.Status == responses.ResponseStatusIncomplete && generated.IncompleteDetails.Reason == "max_output_tokens":
 		stop = StopMaxTokens
+	case incompleteToolCall:
+		stop = StopOther
+	case generated.Status == responses.ResponseStatusCompleted && hasToolCall:
+		stop = StopToolUse
+	case generated.Status == responses.ResponseStatusCompleted:
+		stop = StopEndTurn
 	}
+	message, _ = SanitizeToolCalls(message, stop == StopToolUse)
 	model := string(generated.Model)
 	if model == "" {
 		model = defaultModel
@@ -265,15 +267,9 @@ func responsesResponse(generated *responses.Response, defaultModel string) (*Res
 	return &Response{
 		Message:    message,
 		StopReason: stop,
-		Usage: Usage{
-			InputTokens:      generated.Usage.InputTokens,
-			OutputTokens:     generated.Usage.OutputTokens,
-			CacheReadTokens:  generated.Usage.InputTokensDetails.CachedTokens,
-			CacheWriteTokens: generated.Usage.InputTokensDetails.CacheWriteTokens,
-			ReasoningTokens:  generated.Usage.OutputTokensDetails.ReasoningTokens,
-		},
-		Model:     model,
-		RequestID: generated.ID,
+		Usage:      usage,
+		Model:      model,
+		RequestID:  generated.ID,
 	}, nil
 }
 
@@ -289,4 +285,14 @@ func reasoningSummary(summary []responses.ResponseReasoningItemSummary) string {
 		b.WriteString(item.Text)
 	}
 	return b.String()
+}
+
+func responsesUsage(usage responses.ResponseUsage) Usage {
+	return Usage{
+		InputTokens:      usage.InputTokens,
+		OutputTokens:     usage.OutputTokens,
+		CacheReadTokens:  usage.InputTokensDetails.CachedTokens,
+		CacheWriteTokens: usage.InputTokensDetails.CacheWriteTokens,
+		ReasoningTokens:  usage.OutputTokensDetails.ReasoningTokens,
+	}
 }

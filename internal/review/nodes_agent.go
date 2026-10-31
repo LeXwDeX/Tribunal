@@ -427,21 +427,17 @@ func (e *Executor) executeSynthesize(ctx context.Context, in dag.NodeInput) (dag
 	if err != nil {
 		return dag.NodeOutput{}, err
 	}
-	var lastValidationErr error
 	submit := agent.SubmitSpec{
 		Schema: schema,
 		Decode: func(raw json.RawMessage) (any, error) {
 			out, decodeErr := DecodeStrict[*SynthesizeOut](raw)
 			if decodeErr != nil {
-				lastValidationErr = decodeErr
 				return nil, decodeErr
 			}
 			if validateErr := ValidateSynthesis(*out, synthCtx); validateErr != nil {
-				lastValidationErr = validateErr
 				return nil, validateErr
 			}
 			if validateErr := validateMainChallenges(out, groups, e.validateCodeRef); validateErr != nil {
-				lastValidationErr = validateErr
 				return nil, validateErr
 			}
 			return out, nil
@@ -478,9 +474,9 @@ func (e *Executor) executeSynthesize(ctx context.Context, in dag.NodeInput) (dag
 		if transportStopped {
 			warnings = appendUnique(warnings, "model synthesis transport failed; deterministic rules settlement used")
 		}
-		cause := lastValidationErr
-		if cause == nil {
-			cause = runErr
+		cause := runErr
+		if errors.Is(runErr, agent.ErrInvalidSubmit) {
+			cause = agent.ErrInvalidSubmit
 		}
 		fallback := BuildRulesFallback(groups, cause)
 		out := synthesizeOutFromFallback(fallback)
@@ -772,7 +768,7 @@ func (e *Executor) synthesisGroups(ctx context.Context, in dag.NodeInput, params
 			} else {
 				group.Challenge = &Challenge{Status: ChallengeFailed, Reason: "verification missing"}
 				group.Decision = &FindingDecision{Action: ActionDrop, Reason: "verification missing; the new finding is not published", Source: "rules"}
-				warnings = appendUnique(warnings, "new finding "+group.ID+" has no verify result")
+				warnings = appendUnique(warnings, "new finding "+group.ID+" has no verification result")
 			}
 		}
 		merged = append(merged, main...)

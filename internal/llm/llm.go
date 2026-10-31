@@ -7,6 +7,7 @@
 package llm
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/url"
@@ -47,6 +48,45 @@ type ToolCall struct {
 	ID    string          `json:"id"`
 	Name  string          `json:"name"`
 	Input json.RawMessage `json:"input"`
+}
+
+// SanitizeToolCalls clears every tool call's identity and payload when a call
+// is invalid or the stop reason does not permit tool execution. A rejected
+// batch never executes, and provider-controlled strings must not reach
+// transcripts, errors or audit payloads. Valid empty objects and valid empty
+// batches are preserved.
+func SanitizeToolCalls(message Message, allow bool) (Message, bool) {
+	invalid, hasCalls := false, false
+	seen := make(map[string]bool)
+	for _, part := range message.Parts {
+		if part.Type != PartToolCall {
+			continue
+		}
+		hasCalls = true
+		call := part.ToolCall
+		if call == nil {
+			invalid = true
+			continue
+		}
+		input := bytes.TrimSpace(call.Input)
+		if call.ID == "" || call.Name == "" || seen[call.ID] || len(input) == 0 || input[0] != '{' || !json.Valid(call.Input) {
+			invalid = true
+		}
+		seen[call.ID] = true
+	}
+	if !invalid && (allow || !hasCalls) {
+		return message, false
+	}
+	// A rejected batch never executes. Clear every identity and payload so
+	// provider-controlled strings cannot reach transcripts or error messages.
+	message.Parts = append([]Part(nil), message.Parts...)
+	for i := range message.Parts {
+		part := &message.Parts[i]
+		if part.Type == PartToolCall && part.ToolCall != nil {
+			part.ToolCall = &ToolCall{}
+		}
+	}
+	return message, invalid
 }
 
 // ToolResult is the result of running a tool.
@@ -263,8 +303,9 @@ func validateRequest(req *Request) *Error {
 				if part.ToolCall == nil || part.ToolCall.ID == "" || part.ToolCall.Name == "" {
 					return badRequestf("messages[%d].parts[%d]: tool call id and name are required", i, j)
 				}
-				if len(part.ToolCall.Input) > 0 && !json.Valid(part.ToolCall.Input) {
-					return badRequestf("messages[%d].parts[%d]: tool call input is not valid JSON", i, j)
+				input := bytes.TrimSpace(part.ToolCall.Input)
+				if len(input) == 0 || input[0] != '{' || !json.Valid(part.ToolCall.Input) {
+					return badRequestf("messages[%d].parts[%d]: tool call input must be a JSON object", i, j)
 				}
 			case PartToolResult:
 				if msg.Role != RoleUser && msg.Role != RoleTool {

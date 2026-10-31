@@ -1,12 +1,16 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/LeXwDeX/tribunal/internal/llm"
 	"github.com/LeXwDeX/tribunal/internal/store"
+	"github.com/LeXwDeX/tribunal/pkg/dag"
 )
 
 func TestListReviewsAppliesFiltersBeforePaging(t *testing.T) {
@@ -316,5 +320,75 @@ func TestReviewServiceErrorEnvelope(t *testing.T) {
 	}
 	if err := json.Unmarshal(response.body, &body); err != nil || body.Error.Code != "not_found" {
 		t.Fatalf("error = %s", response.body)
+	}
+}
+
+func TestReviewNodeCallsAuditPayloadIsMetadataOnly(t *testing.T) {
+	env := newM6Env(t, m6Options{})
+	env.ensureFixtureProject(42)
+	ctx := context.Background()
+	at := time.Now().UTC()
+	appendEvent := func(rev int64, typ string, payload any) int64 {
+		t.Helper()
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		next, err := env.sqlite.Append(ctx, "wf-audit-api", rev, dag.Event{Type: typ, Payload: raw, At: at})
+		if err != nil {
+			t.Fatalf("append %s: %v", typ, err)
+		}
+		return next
+	}
+	rev := appendEvent(0, dag.EventWorkflowCreated, dag.WorkflowCreatedPayload{
+		WorkflowID: "wf-audit-api",
+		Spec: dag.GraphSpec{
+			Nodes:  []dag.NodeSpec{{ID: "plan", Kind: "plan", Required: true}},
+			Budget: dag.Budget{MaxNodes: 5, MaxExtends: 1, MaxTokens: 1000},
+		},
+		Meta: map[string]string{
+			"project_id": "42", "kind": "review", "mr_iid": "7", "head_sha": "head",
+			"base_sha": "base", "fingerprint": "fp", "profile": "default", "trigger": "mr_open",
+		},
+	})
+	rev = appendEvent(rev, dag.EventWorkflowStarted, dag.WorkflowTerminalPayload{})
+	rev = appendEvent(rev, dag.EventNodeQueued, dag.NodeQueuedPayload{NodeID: "plan", Attempt: 1})
+	rev = appendEvent(rev, dag.EventNodeStarted, dag.NodeStartedPayload{NodeID: "plan", Attempt: 1, Provider: "p", Model: "m"})
+	appendEvent(rev, dag.EventNodeCompleted, dag.NodeCompletedPayload{NodeID: "plan", Attempt: 1, Usage: dag.Usage{InputTokens: 1, OutputTokens: 1}})
+
+	const canary = "api-audit-secret"
+	if err := env.sqlite.RecordLLMCall(ctx, llm.CallRecord{
+		Provider: "p", Model: "m",
+		Meta: llm.CallMeta{WorkflowID: "wf-audit-api", NodeID: "plan", Turn: 1},
+		Request: &llm.Request{Messages: []llm.Message{{
+			Role: llm.RoleUser,
+			Parts: []llm.Part{
+				{Type: llm.PartText, Text: canary},
+				{Type: llm.PartToolResult, ToolResult: &llm.ToolResult{CallID: "call-id-canary", Content: canary}},
+			},
+		}}},
+		Response: &llm.Response{
+			Message: llm.Message{Role: llm.RoleAssistant, Parts: []llm.Part{{Type: llm.PartText, Text: canary}}},
+			Usage:   llm.Usage{InputTokens: 2, OutputTokens: 3},
+		},
+	}); err != nil {
+		t.Fatalf("RecordLLMCall: %v", err)
+	}
+	client := env.businessClient()
+	response := client.request(http.MethodGet, "/api/v1/reviews/wf-audit-api/nodes/plan/calls?include_payload=true", nil, nil)
+	assertStatus(t, response, http.StatusOK)
+	for _, value := range []string{canary, "call-id-canary"} {
+		if strings.Contains(string(response.body), value) {
+			t.Fatalf("API leaked %q: %s", value, response.body)
+		}
+	}
+	call := env.decode(t, response)["calls"].([]any)[0].(map[string]any)
+	request := call["request"].(map[string]any)
+	if request["messages"] != float64(1) || request["text_parts"] != float64(1) || request["tool_results"] != float64(1) {
+		t.Fatalf("request metadata = %v", request)
+	}
+	responseMeta := call["response"].(map[string]any)
+	if responseMeta["usage"].(map[string]any)["input_tokens"] != float64(2) {
+		t.Fatalf("response metadata = %v", responseMeta)
 	}
 }

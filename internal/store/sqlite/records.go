@@ -25,8 +25,9 @@ const maxLLMPayload = 1 << 20
 // ---------------------------------------------------------------------------
 // LLM call audit
 
-// RecordLLMCall persists one provider attempt. Payloads are gzipped and
-// bounded; provider credentials never appear in llm.Request or CallRecord.
+// RecordLLMCall persists one provider attempt. Payloads are limited to the
+// allow-listed audit metadata, gzipped and bounded; prompts, tool arguments,
+// tool output, reasoning and errors are never stored.
 func (s *Store) RecordLLMCall(ctx context.Context, call llm.CallRecord) error {
 	if strings.TrimSpace(call.Meta.WorkflowID) == "" || strings.TrimSpace(call.Meta.NodeID) == "" {
 		return errors.New("sqlite: llm call workflow id and node id are required")
@@ -34,12 +35,24 @@ func (s *Store) RecordLLMCall(ctx context.Context, call llm.CallRecord) error {
 	if strings.TrimSpace(call.Provider) == "" || strings.TrimSpace(call.Model) == "" {
 		return errors.New("sqlite: llm call provider and model are required")
 	}
-	var requestValue, responseValue any
-	if call.Request != nil {
-		requestValue = call.Request
+	audit := call.Audit
+	if audit == nil {
+		audit = llm.NewCallAudit(call.Request, call.Response)
 	}
-	if call.Response != nil {
-		responseValue = call.Response
+	if audit.Response == nil {
+		var failure *llm.Error
+		if errors.As(call.Err, &failure) && !llm.UsageZero(failure.Usage) {
+			copy := *audit
+			copy.Response = &llm.AuditResponse{Usage: failure.Usage}
+			audit = &copy
+		}
+	}
+	var requestValue, responseValue any
+	if audit.Request != nil {
+		requestValue = audit.Request
+	}
+	if audit.Response != nil {
+		responseValue = audit.Response
 	}
 	request, err := encodeGzipJSON(requestValue)
 	if err != nil {
@@ -57,14 +70,22 @@ func (s *Store) RecordLLMCall(ctx context.Context, call llm.CallRecord) error {
 		stopReason   string
 		requestID    string
 	)
+	usage := llm.Usage{}
+	if audit.Response != nil {
+		usage = audit.Response.Usage
+		stopReason = audit.Response.StopReason
+	}
 	if call.Response != nil {
-		inputTokens = call.Response.Usage.InputTokens
-		outputTokens = call.Response.Usage.OutputTokens
-		cacheRead = call.Response.Usage.CacheReadTokens
-		cacheWrite = call.Response.Usage.CacheWriteTokens
-		stopReason = string(call.Response.StopReason)
+		if audit.Response == nil {
+			usage = call.Response.Usage
+			stopReason = string(call.Response.StopReason)
+		}
 		requestID = call.Response.RequestID
 	}
+	inputTokens = usage.InputTokens
+	outputTokens = usage.OutputTokens
+	cacheRead = usage.CacheReadTokens
+	cacheWrite = usage.CacheWriteTokens
 	id, err := newID()
 	if err != nil {
 		return err

@@ -33,6 +33,7 @@ type Error struct {
 	Kind       ErrKind       `json:"kind"`
 	Status     int           `json:"status,omitempty"`
 	RetryAfter time.Duration `json:"retry_after,omitempty"`
+	Usage      Usage         `json:"usage"`
 	Err        error         `json:"-"`
 	cause      error
 }

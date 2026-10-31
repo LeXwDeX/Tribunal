@@ -47,7 +47,7 @@ type Result struct {
 // SubmitSpec describes the structured final result.
 //
 // Decode must reject unknown fields and perform business validation when the
-// node requires it. Its error text is returned to the model.
+// node requires it. Validation feedback does not include the decoder's error.
 type SubmitSpec struct {
 	Schema json.RawMessage
 	Decode func(raw json.RawMessage) (any, error)
@@ -88,4 +88,12 @@ var (
 	// ErrInvalidSubmit reports submit_result validation failures that
 	// exhausted the retry budget (or the remaining turns).
 	ErrInvalidSubmit = errors.New("agent submit_result failed validation")
+	// ErrUnsafeResponse marks a model response that must not execute tools or
+	// become a deterministic success fallback.
+	ErrUnsafeResponse = unsafeResponseError{}
 )
+
+type unsafeResponseError struct{}
+
+func (unsafeResponseError) Error() string     { return "agent rejected unsafe model response" }
+func (unsafeResponseError) ErrorCode() string { return "unsafe_model_response" }
