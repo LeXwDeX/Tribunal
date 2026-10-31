@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { COLUMN_GAP, NODE_WIDTH, PADDING, layoutDag } from '../src/lib/dag'
+import { COLUMN_GAP, LANE_HEADER, NODE_HEIGHT, NODE_WIDTH, PADDING, ROW_GAP, layoutDag } from '../src/lib/dag'
+
+function previousCanvasHeight(rows: number): number {
+  return PADDING * 2 + LANE_HEADER + rows * NODE_HEIGHT + Math.max(0, rows - 1) * ROW_GAP
+}
 
 describe('layoutDag', () => {
   it('places a dependency chain in successive layers', () => {
@@ -21,6 +25,53 @@ describe('layoutDag', () => {
     expect(byId.get('b')?.x).toBe(PADDING + NODE_WIDTH + COLUMN_GAP)
     expect(layout.edges).toHaveLength(2)
     expect(layout.edges[0].path).toContain('M ')
+  })
+
+  it('adds about 5% canvas height for one row without moving the node horizontally', () => {
+    const layout = layoutDag([{ id: 'a', kind: 'x', status: 'completed' }], [])
+    const node = layout.nodes[0]
+
+    expect(node.x).toBe(PADDING)
+    expect(layout.paddingY).toBeGreaterThan(PADDING)
+    expect(node.y).toBe(layout.paddingY + LANE_HEADER)
+    expect(layout.height - (node.y + NODE_HEIGHT)).toBe(layout.paddingY)
+    expect(layout.height).toBeGreaterThanOrEqual(Math.round(previousCanvasHeight(1) * 1.04))
+    expect(layout.height).toBeLessThanOrEqual(Math.round(previousCanvasHeight(1) * 1.06))
+  })
+
+  it('keeps the row grid and gives a multi-row graph the same bottom clearance', () => {
+    const layout = layoutDag(
+      [
+        { id: 'a', kind: 'x', status: 'completed' },
+        { id: 'b', kind: 'x', status: 'completed' },
+        { id: 'c', kind: 'x', status: 'completed', depends_on: ['a', 'b'] },
+      ],
+      [],
+    )
+    const byId = new Map(layout.nodes.map((node) => [node.id, node]))
+
+    expect(byId.get('b')!.y - byId.get('a')!.y).toBe(NODE_HEIGHT + ROW_GAP)
+    expect(byId.get('a')!.x).toBe(PADDING)
+    expect(byId.get('c')!.x).toBe(PADDING + NODE_WIDTH + COLUMN_GAP)
+    expect(layout.height - (byId.get('b')!.y + NODE_HEIGHT)).toBe(layout.paddingY)
+    expect(layout.paddingY).toBeGreaterThanOrEqual(20)
+    expect(layout.height).toBeGreaterThanOrEqual(Math.round(previousCanvasHeight(2) * 1.04))
+    expect(layout.height).toBeLessThanOrEqual(Math.round(previousCanvasHeight(2) * 1.06))
+  })
+
+  it('keeps edge endpoints aligned with the shifted nodes', () => {
+    const layout = layoutDag(
+      [
+        { id: 'a', kind: 'x', status: 'completed' },
+        { id: 'b', kind: 'x', status: 'completed', depends_on: ['a'] },
+      ],
+      [],
+    )
+    const from = layout.nodes.find((node) => node.id === 'a')!
+    const to = layout.nodes.find((node) => node.id === 'b')!
+
+    expect(layout.edges[0].path).toContain(`M ${from.x + NODE_WIDTH} ${from.y + NODE_HEIGHT / 2}`)
+    expect(layout.edges[0].path).toContain(`${to.x} ${to.y + NODE_HEIGHT / 2}`)
   })
 
   it('puts disconnected components in the first layer and does not crash', () => {
@@ -77,5 +128,6 @@ describe('layoutDag', () => {
     expect(layout.nodes).toEqual([])
     expect(layout.edges).toEqual([])
     expect(layout.cycleNodes).toEqual([])
+    expect(layout.height).toBeGreaterThan(previousCanvasHeight(1))
   })
 })

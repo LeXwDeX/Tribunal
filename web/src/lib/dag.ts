@@ -5,6 +5,7 @@ export const NODE_HEIGHT = 64
 // Column pitch 220 and row pitch 84 match the v2 console prototype.
 export const COLUMN_GAP = 28
 export const ROW_GAP = 20
+// Horizontal inset. The vertical inset grows with the canvas height.
 export const PADDING = 16
 // Room above the first row for the lane headers.
 export const LANE_HEADER = 28
@@ -27,6 +28,7 @@ export interface DagLayout {
   edges: PositionedEdge[]
   width: number
   height: number
+  paddingY: number
   layerCount: number
   cycleNodes: string[]
   unknownEdges: number
@@ -132,17 +134,21 @@ export function layoutDag(inputNodes: GraphNode[], inputEdges: GraphEdge[]): Dag
   const positioned: PositionedNode[] = []
   let maxRows = 1
   const layerCount = maxLayer + 1
+  for (const ids of grouped.values()) maxRows = Math.max(maxRows, ids.length)
+  const baseHeight = PADDING * 2 + LANE_HEADER + maxRows * NODE_HEIGHT + Math.max(0, maxRows - 1) * ROW_GAP
+  // Split a 5% height increase, measured on the previous canvas height, between top and bottom.
+  const paddingY = PADDING + Math.round(baseHeight * 0.025)
+  const height = baseHeight + (paddingY - PADDING) * 2
   for (const node of nodes) {
     const layer = layers.get(node.id) ?? 0
     const ids = grouped.get(layer) || []
     const row = ids.indexOf(node.id)
-    maxRows = Math.max(maxRows, ids.length)
     positioned.push({
       ...node,
       layer,
       row,
       x: PADDING + layer * (NODE_WIDTH + COLUMN_GAP),
-      y: PADDING + LANE_HEADER + row * (NODE_HEIGHT + ROW_GAP),
+      y: paddingY + LANE_HEADER + row * (NODE_HEIGHT + ROW_GAP),
     })
   }
 
@@ -170,7 +176,8 @@ export function layoutDag(inputNodes: GraphNode[], inputEdges: GraphEdge[]): Dag
     nodes: positioned,
     edges,
     width: PADDING * 2 + layerCount * NODE_WIDTH + Math.max(0, layerCount - 1) * COLUMN_GAP,
-    height: PADDING * 2 + LANE_HEADER + maxRows * NODE_HEIGHT + Math.max(0, maxRows - 1) * ROW_GAP,
+    height,
+    paddingY,
     layerCount,
     cycleNodes,
     unknownEdges,
