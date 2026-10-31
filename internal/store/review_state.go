@@ -11,6 +11,10 @@ import (
 // can treat "a newer push won" as an expected outcome.
 var ErrSuperseded = errors.New("store: review superseded")
 
+// ErrLegacyCommandUncertain means a retained legacy command cannot be proven
+// accepted or unexecuted. A new source note is required to issue the command.
+var ErrLegacyCommandUncertain = errors.New("store: legacy command acceptance uncertain")
+
 // ReviewControl is the durable per-MR review intent. Generation increments on
 // every accepted review.run or review.cancel enqueue, including a replacement
 // of a queued job. A duplicate delivery never increments it.
@@ -63,11 +67,22 @@ type ReviewCandidateActivation struct {
 //
 // HeadSHA is required for run and must be empty for cancel. Cancel preserves
 // the previously recorded head so publication can still detect a stale MR.
+//
+// NoteID and Command are the source-note identity for an authenticated review
+// command ("run" or "cancel"). When both are set, the store records the
+// identity in the same transaction that enqueues the job. A replay of the same
+// (ProjectID, MRIID, NoteID, Command) returns Duplicate and changes nothing.
+// If a legacy command or reaction identifies the note but its kind lacks
+// independent acceptance proof, the command returns ErrLegacyCommandUncertain
+// and changes no review state or queue.
+// Producers without a source note leave them zero and keep the old behavior.
 type ReviewCommand struct {
 	ProjectID   int64
 	MRIID       int64
 	HeadSHA     string
 	Cancel      bool
+	NoteID      int64
+	Command     string
 	Payload     json.RawMessage
 	MaxAttempts int
 }

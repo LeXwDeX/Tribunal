@@ -26,6 +26,7 @@ const (
 	// reply scans and summary scans cannot match each other.
 	commandReplyMarkerPrefix = "<!-- gitlab-ce-review:command-reply"
 	permissionReplyText      = "需要 Developer（30）及以上权限才能使用 `/review` 命令。"
+	uncertainReplyText       = "本次未执行这条旧命令，也无法确认它此前是否已执行。请先核对当前评审状态；如仍需操作，请发布一条新的 `/review` 或 `/review cancel` 评论。"
 )
 
 // CommandGitLab is the subset of GitLab used to validate a command and publish
@@ -228,14 +229,12 @@ func (w *CommandWorker) Handle(ctx context.Context, job *jobs.Job) error {
 			ProjectID:   project.ID,
 			MRIID:       payload.MRIID,
 			Cancel:      true,
+			NoteID:      payload.NoteID,
+			Command:     payload.Command,
 			Payload:     mustJSON(commandPayload),
 			MaxAttempts: 3,
 		})
-		if err != nil {
-			return err
-		}
-		w.logAccepted(project.ID, payload, result.JobID, result.Duplicate)
-		return nil
+		return w.finishCommand(ctx, string(token), project, payload, replyAuthorID, result, err)
 	}
 
 	profile := payload.Profile
@@ -263,9 +262,19 @@ func (w *CommandWorker) Handle(ctx context.Context, job *jobs.Job) error {
 		ProjectID:   project.ID,
 		MRIID:       payload.MRIID,
 		HeadSHA:     strings.ToLower(strings.TrimSpace(mr.SHA)),
+		NoteID:      payload.NoteID,
+		Command:     payload.Command,
 		Payload:     mustJSON(runPayload),
 		MaxAttempts: 3,
 	})
+	return w.finishCommand(ctx, string(token), project, payload, replyAuthorID, result, err)
+}
+
+func (w *CommandWorker) finishCommand(ctx context.Context, token string, project *store.Project, payload commandPayload, replyAuthorID int64, result store.ReviewEnqueueResult, err error) error {
+	if errors.Is(err, store.ErrLegacyCommandUncertain) {
+		w.logger.Warn("legacy review command acceptance uncertain", "project_id", project.ID, "mr_iid", payload.MRIID, "note_id", payload.NoteID, "command", payload.Command)
+		return w.reply(ctx, token, project, payload, replyAuthorID, "uncertain", uncertainReplyText)
+	}
 	if err != nil {
 		return err
 	}

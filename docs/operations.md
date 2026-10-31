@@ -711,6 +711,53 @@ v1.2.0 共四个迁移：`0016_dossier_mr_title`、`0017_mcp_config_seal`、`001
 
 升级前按第 7 节做一致性备份。此迁移没有 down migration；回退须恢复升级前完整快照及匹配旧程序，不能只替换镜像。
 
+### 命令重放幂等迁移（后续版本）
+
+包含 #159 的后续版本新增迁移 `0020_review_command_replay`。v1.2.0 的四迁移列表不变。`0020` 新建已受理身份表 `review_command_replays`、不确定身份表 `review_command_quarantine` 和一次性回填标记表 `review_command_replay_backfill`，不改写已有行。身份按 `(project_id, mr_iid, note_id, command)` 区分；已认证的新命令与 generation、队列和状态/表情副作用在同一事务提交。
+
+启动时自动回填一次有充分证据的旧命令身份。旧评论即使原 job 已终结或被裁剪，仍可能用新的或已过期的投递 UUID 重发。保留的 `review.command` job 按状态处理：
+
+- `queued`、`running`：可自动恢复；有受理证明的重放保持幂等，无法证明的命令隔离而不自动执行。
+- `failed`：终态，不会自动重试；若以后重放，仍按受理证明或隔离处理。
+- `done`、`cancelled`：终态。`done` 也可能表示被拒绝或忽略；`cancelled` 可能是已入队后租约过期、被后继任务替代，也可能在入队前终止。所有状态都需要下游 job，或下述只能证明 run 的 workflow 与 dossier，才能证明已受理。
+
+回填流式扫描保留的 `review.command`、`review.run`、`review.cancel` job，以及匹配的 review workflow 和 dossier。以下任一证据可以证明受理：
+
+- 下游 `review.run`/`review.cancel` job 的 payload 含正整数 `project_id`、`mr_iid`、`note_id` 和 `trigger=command`，且 job key 与种类、project 和 MR 一致。该 job 直接证明对应种类的命令已受理，即使原 `review.command` job 已被裁剪；另一种命令不因此被证明。下游 job 的 JSON 对象不能含重复或大小写歧义的键。下游 job 的 note ID 必须小于 `2^53`：旧入队代码经 float64 转换 JSON 数字，大值可能被舍入到另一条 note。
+- 已关联的 `review` workflow 和 dossier 均为 `trigger=command`，项目、MR 和 head 一致，dossier 有正整数 generation、版本和快照 schema 均为 1、规范的正整数 note ID（小于 `2^53`），且内容摘要与 workflow 指纹均匹配。这证明该 note 的 run 已受理，即使两个 job 均被裁剪或 dossier 的 job 映射已解除。孤儿 dossier、损坏或歧义快照、归属不明、指纹不匹配，以及仍存在但与快照冲突的关联 job 均不能证明；dossier 不能证明 cancel。摘要和指纹用于校验记录间的一致性，不防能修改数据库的攻击者伪造记录。
+可解析的旧 `review.command` payload 若指向 run 或 cancel，但没有受理证明，则写入隔离表，原因固定为 `legacy_acceptance_unproven`。升级时每条具有正整数项目、MR 和 note 的 `review_reactions` 也会写入隔离表，`command` 为空字符串，原因是 `legacy_reaction_unproven`；包含 `none` 状态。它只标识可能的旧 note，不证明受理，也不推断命令种类。即使命令 job、reaction 和当前 control 的 generation 与意图一致，其他历史种类也可能已被裁剪，不能作为受理证明。
+
+隔离不是受理证明，也不等于命令已被拒绝：旧命令可能此前已执行，也可能从未执行。该 note 的另一种命令也可能有已裁剪历史，因此同一项目、MR 和 note 上没有独立受理证明的两种命令都会隔离；已有独立受理证明的种类仍作为重复命令处理。即使 job key 缺失、冲突，或 JSON 的第一个对象后有额外内容，只要 worker 可读到项目、MR、note 和种类，也会保守隔离该可能身份；这些内容仍不作为受理证明。隔离重放不改变 review generation、取消状态、review job、状态或表情。command job 自身仍按正常租约重试或结算。
+
+回填、隔离和单个标记在同一事务中提交；失败会回滚并在下次启动重试。`0020` schema 迁移可能已提交，不能把它当成回填完成。多个进程同时首次启动时由 SQLite 单写者串行化，重复回填不重复写入。扫描不按 MR 重复读取 job，也不保留原始 payload；首次启动的耗时随保留 reaction、job 和符合筛选条件的历史 command workflow 数增长，逐条解压 dossier（单条上限 1 MiB），内存还随有效 job/dossier 身份数增长。已有回填标记后不会再次扫描，所以升级后新评论的 reaction 不会因此被隔离。此前运行过旧的未发布 `0020` 测试版、缺少隔离表或 reaction 隔离标记列的数据库会拒绝启动；先保留该数据库供调查，再恢复本次升级前的完整一致性快照并重新升级，不要手工补表或删除标记。
+
+身份记录中的 `job_id` 是已知的下游 `review.run`/`review.cancel` job ID，也可能是 dossier 保留的已裁剪 job ID。dossier 映射已解除时，`job_id` 为空字符串；不要把空值解释为 review job ID。
+
+限制和恢复动作：
+
+- 没有对应 review job 或可信 workflow/dossier 时，reaction 和 `review.command` job 无法证明受理。可识别的旧命令会隔离，包括实际上从未执行的 queued/running 命令；不能把它记为重复或静默丢弃。`failed` 保持终态。
+- `review_reactions` 不记录命令种类。即使只有一种已知命令，或其 generation 与当前 control 一致，reaction 也不证明任何一种命令；独立证明的种类仍按重复处理。保守隔离可能拦截旧评论上从未执行的新命令（例如编辑评论后改变种类），需核对状态并另发新评论。
+- 隔离覆盖升级时可从旧命令 payload 或 reaction 识别的项目、MR 和 note。reaction 对大于等于 `2^53` 的旧 note 可能已有舍入；只隔离存储的精确整数，可能误隔离该整数且无法识别原始 note，不猜测相邻值。如果所有可归属的命令、reaction、下游 job 和 dossier 证据都已丢失，新 UUID 的旧事件与真正的新评论无法区分，仍可能推进 generation 或清除后来的取消。隔离也不能防止升级前的旧程序继续运行。停止所有旧实例，限制 GitLab hook 的旧事件重发权限，并核对相关 MR 状态；不要宣称所有历史重放都已安全。
+- 回填不会从 `review_controls` 的 generation 或 `cancelled` 反推历史种类或受理事实。
+- 缺失或被替换的证据无法恢复，不会猜测。不要手工删除回填标记或覆盖在线数据库。
+
+项目删除会在同一事务中删除该项目的受理和隔离身份，重新登记同 ID 项目后不会复用旧身份。这些表没有指向 `projects` 的外键，清理依赖 `DeleteProject`，不要手工只删项目行。
+
+升级前按第 7 节做一致性备份。此迁移没有 down migration；回退须恢复升级前完整快照及匹配旧程序，不能只替换镜像。手工删除表或迁移记录不受支持。
+
+升级与恢复操作由部署者执行，本文档不表示已经执行。升级前先停止全部旧实例和 worker，限制旧事件重发，按第 7 节备份。若无法接受无法识别的历史命令产生副作用，应在启动新服务前隔离外部调用并完成检查。
+
+1. 启动新版本并确认 ready。回填失败时检查非秘密的启动错误，不要手工删除隔离或回填记录。
+2. 在受控的只读数据库副本上查询隔离清单，限制结果访问；只查询身份和固定原因，不读取 job payload：
+
+   ```sql
+   SELECT project_id, mr_iid, note_id, command, reason, created_at
+   FROM review_command_quarantine ORDER BY project_id, mr_iid, note_id, command;
+   ```
+
+3. `command=''` 表示仅识别出 note，种类未知，不表示空命令。可运行的隔离命令经过原有权限校验后，会在 MR 留言说明本次未执行、旧执行结果未知，并提示使用新评论。发送失败会重试；若权限不足、项目/MR 不可用或 job 已终态，可能没有该留言，以上清单仍可供管理员核查，不能将无留言当成已处理。
+4. 核对每个 MR 的现有状态和历史。需要新的评审或取消时，由有权限的人发布新的 `/review` 或 `/review cancel` 评论，再确认状态。不要删除隔离记录来重放旧评论。对没有剩余可识别历史的旧事件持续限制重发；新评论不消除该风险。
+
 ### MCP 配置加密升级（v1.2.0）
 
 1. 按[第 7 节](#7-sqlite-一致性备份与恢复)停止服务并做一致性备份。保存原主密钥、配置和镜像版本，不重新生成 `REVIEW_MASTER_KEY`。
@@ -865,6 +912,8 @@ docker compose exec -T review /app/tribunalctl projects all
    - 升级前按第 7 节做一致性备份；此迁移没有 down migration，回退须恢复升级前完整快照及匹配旧程序。运行时的孤儿清理行为见 [dossier 归属迁移](#dossier-归属迁移v120)。
 
 本次还新增 `0019_job_defer_window`，只给 `jobs` 追加 `defer_since TEXT`。任务连续因执行权争用被延后超过固定的 15 分钟窗口时按失败结算，`last_error` 为 `execution deferral window exceeded`，不再无限延长；旧行保持 NULL 兼容。该窗口不是配置项。该迁移同样没有 down migration，回退须恢复升级前快照。
+
+升级到包含 #159 的后续版本时还会应用 `0020_review_command_replay`，新建受理身份、隔离和回填标记表，不改写已有行。启动时回填可证明的受理身份，同时隔离可识别但无法证明受理的旧命令。隔离命令不会自动执行；历史完全不可识别时，新 UUID 的旧事件仍可能被当成新命令。迁移没有 down migration；升级前停止旧实例并做一致性备份，回退须恢复升级前快照。证据规则、查询和恢复动作见 [命令重放幂等迁移](#命令重放幂等迁移后续版本)。
 5. **ignore 保护范围扩大。**
    - 有效 ignore 非空时，仓库读取和证据检查遵守同一规则；无法证明符合规则的 MCP 工具及全量图谱索引不再执行，无来源证明的历史上下文不再注入。
    - 默认 ignore 非空，因此默认图谱能力会降级。这是安全降级：不记 `tool_gaps`，不会把 PASS 改为 INCOMPLETE。仅有索引身份无法证明且 ignore 为空时，实际启用并绑定的工具仍记为覆盖缺口。

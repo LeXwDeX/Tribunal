@@ -132,7 +132,7 @@ func (s *Store) RecordReviewDelivery(ctx context.Context, d store.Delivery, comm
 
 	result := store.ReviewEnqueueResult{}
 	if command != nil {
-		jobID, generation, err := s.enqueueReviewTx(ctx, tx, *command, now)
+		jobID, generation, duplicate, err := s.enqueueReviewTx(ctx, tx, *command, now)
 		if err != nil {
 			return store.ReviewEnqueueResult{}, err
 		}
@@ -142,6 +142,7 @@ func (s *Store) RecordReviewDelivery(ctx context.Context, d store.Delivery, comm
 		}
 		result.JobID = jobID
 		result.Generation = generation
+		result.Duplicate = duplicate
 	}
 	if err := tx.Commit(); err != nil {
 		return store.ReviewEnqueueResult{}, fmt.Errorf("sqlite: commit review delivery: %w", err)
@@ -153,6 +154,11 @@ func (s *Store) RecordReviewDelivery(ctx context.Context, d store.Delivery, comm
 // without a webhook delivery. A queued job with the same key is replaced with
 // the newest payload; a running job is never modified, and its attempt fence
 // stays monotonic. The generation is assigned in the same transaction.
+//
+// An authenticated command with a source note (ReviewCommand.NoteID and
+// Command) is also recorded by identity in that transaction. A replay of the
+// same identity returns the original job ID with Duplicate=true and changes
+// neither the control nor the queue.
 func (s *Store) EnqueueReviewLatest(ctx context.Context, command store.ReviewCommand) (store.ReviewEnqueueResult, error) {
 	now := s.now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -161,51 +167,65 @@ func (s *Store) EnqueueReviewLatest(ctx context.Context, command store.ReviewCom
 	}
 	defer tx.Rollback()
 
-	jobID, generation, err := s.enqueueReviewTx(ctx, tx, command, now)
+	jobID, generation, duplicate, err := s.enqueueReviewTx(ctx, tx, command, now)
 	if err != nil {
 		return store.ReviewEnqueueResult{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return store.ReviewEnqueueResult{}, fmt.Errorf("sqlite: commit review enqueue: %w", err)
 	}
-	return store.ReviewEnqueueResult{JobID: jobID, Generation: generation}, nil
+	return store.ReviewEnqueueResult{JobID: jobID, Generation: generation, Duplicate: duplicate}, nil
 }
 
 // enqueueReviewTx validates the command, increments review_controls, builds the
 // job payload with the assigned generation, and enqueues it. All writes share
-// the caller's transaction.
-func (s *Store) enqueueReviewTx(ctx context.Context, tx *sql.Tx, command store.ReviewCommand, now time.Time) (string, int64, error) {
+// the caller's transaction. A duplicate command identity returns the original
+// job ID with generation zero and writes nothing.
+func (s *Store) enqueueReviewTx(ctx context.Context, tx *sql.Tx, command store.ReviewCommand, now time.Time) (string, int64, bool, error) {
 	if command.ProjectID <= 0 {
-		return "", 0, errors.New("sqlite: review command project id is required")
+		return "", 0, false, errors.New("sqlite: review command project id is required")
 	}
 	if command.MRIID <= 0 {
-		return "", 0, errors.New("sqlite: review command mr iid is required")
+		return "", 0, false, errors.New("sqlite: review command mr iid is required")
 	}
 	head, err := normalizeReviewHead(command.HeadSHA, command.Cancel)
 	if err != nil {
-		return "", 0, err
+		return "", 0, false, err
 	}
 	if err := requireProjectTx(ctx, tx, command.ProjectID); err != nil {
-		return "", 0, err
+		return "", 0, false, err
+	}
+	identity, replay, err := commandReplayIdentity(command)
+	if err != nil {
+		return "", 0, false, err
+	}
+	if replay {
+		jobID, duplicate, err := reserveCommandReplayTx(ctx, tx, command, identity, now)
+		if err != nil {
+			return "", 0, false, err
+		}
+		if duplicate {
+			return jobID, 0, true, nil
+		}
 	}
 
 	generation, err := bumpReviewControlTx(ctx, tx, command, head, now)
 	if err != nil {
-		return "", 0, err
+		return "", 0, false, err
 	}
 	control, err := getReviewControlTx(ctx, tx, command.ProjectID, command.MRIID)
 	if err != nil {
-		return "", 0, err
+		return "", 0, false, err
 	}
 	if err := s.recordReviewSideEffectsTx(ctx, tx, command, control, generation, now); err != nil {
-		return "", 0, err
+		return "", 0, false, err
 	}
 	if command.MaxAttempts == 0 {
 		command.MaxAttempts = defaultReviewMaxAttempts
 	}
 	payload, err := reviewJobPayload(command, head, generation)
 	if err != nil {
-		return "", 0, err
+		return "", 0, false, err
 	}
 	kind, key := reviewJobKindKey(command)
 	job := store.Job{
@@ -215,13 +235,460 @@ func (s *Store) enqueueReviewTx(ctx context.Context, tx *sql.Tx, command store.R
 		MaxAttempts: command.MaxAttempts,
 	}
 	if err := s.prepareJob(&job, now); err != nil {
-		return "", 0, err
+		return "", 0, false, err
 	}
 	jobID, _, err := enqueueTx(ctx, tx, &job, true)
 	if err != nil {
-		return "", 0, err
+		return "", 0, false, err
 	}
-	return jobID, generation, nil
+	if replay {
+		if err := attachCommandReplayTx(ctx, tx, command, identity, jobID); err != nil {
+			return "", 0, false, err
+		}
+	}
+	return jobID, generation, false, nil
+}
+
+// Legacy review payloads passed numbers through float64; their reactions
+// also used the rounded note ID, so 2^53 can identify a different note.
+const maxReplayExactNoteID = 1<<53 - 1
+
+// commandReplayNoteKey is one source note on one merge request.
+type commandReplayNoteKey struct {
+	projectID int64
+	mrIID     int64
+	noteID    int64
+}
+
+// commandReplayNoteState separates possible commands from proven enqueues.
+type commandReplayNoteState struct {
+	legacyCommands map[string]bool   // kind -> retained command payload
+	reviewIDs      map[string]string // kind -> proven downstream job ID, if known
+}
+
+func newCommandReplayNoteState() *commandReplayNoteState {
+	return &commandReplayNoteState{
+		legacyCommands: make(map[string]bool),
+		reviewIDs:      make(map[string]string),
+	}
+}
+
+type commandReplayJobPayload struct {
+	ProjectID int64  `json:"project_id"`
+	MRIID     int64  `json:"mr_iid"`
+	NoteID    int64  `json:"note_id"`
+	Trigger   string `json:"trigger"`
+	Command   string `json:"command"`
+}
+
+// backfillReviewCommandReplays backfills identities for commands accepted
+// before migration 0020. The marker and identities commit together. A command
+// job alone does not prove enqueue; a matching downstream job or a bound
+// command-triggered review dossier does, even if both jobs have been pruned.
+//
+// Reactions and retained command jobs cannot establish which command was
+// accepted. Both identify ambiguous notes that must be quarantined instead.
+func backfillReviewCommandReplays(ctx context.Context, db *sql.DB, now time.Time) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("sqlite: begin command replay backfill: %w", err)
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `INSERT INTO review_command_replay_backfill
+		(id, completed_at, reaction_quarantine) VALUES (1, ?, 1) ON CONFLICT (id) DO NOTHING`, formatTime(now))
+	if err != nil {
+		return fmt.Errorf("sqlite: reserve command replay backfill: %w", err)
+	}
+	inserted, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("sqlite: reserve command replay backfill: %w", err)
+	}
+	// An earlier unpublished 0020 may have the marker but not this table.
+	var schemaCheck int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM review_command_quarantine WHERE 0`).Scan(&schemaCheck); err != nil {
+		return fmt.Errorf("sqlite: verify legacy command quarantine schema: %w", err)
+	}
+	if inserted == 0 {
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("sqlite: commit command replay backfill: %w", err)
+		}
+		return nil
+	}
+	// Reactions can contain a rounded legacy ID, so quarantine only the stored
+	// identity and never use it as acceptance or command-kind evidence.
+	if _, err := tx.ExecContext(ctx, `INSERT INTO review_command_quarantine
+		(project_id, mr_iid, note_id, command, reason, created_at)
+		SELECT project_id, mr_iid, note_id, '', 'legacy_reaction_unproven', ? FROM review_reactions
+		WHERE project_id > 0 AND mr_iid > 0 AND note_id > 0
+		ON CONFLICT (project_id, mr_iid, note_id, command) DO NOTHING`, formatTime(now)); err != nil {
+		return fmt.Errorf("sqlite: quarantine legacy reactions: %w", err)
+	}
+
+	states, err := listCommandReplayCandidatesTx(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if err := loadCommandReplayDossiersTx(ctx, tx, states); err != nil {
+		return err
+	}
+	for noteKey, state := range states {
+		for kind, jobID := range state.reviewIDs {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO review_command_replays
+				(project_id, mr_iid, note_id, command, job_id, created_at)
+				VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (project_id, mr_iid, note_id, command) DO NOTHING`,
+				noteKey.projectID, noteKey.mrIID, noteKey.noteID, kind, jobID, formatTime(now)); err != nil {
+				return fmt.Errorf("sqlite: backfill command replay: %w", err)
+			}
+		}
+		for kind := range state.legacyCommands {
+			if _, proven := state.reviewIDs[kind]; proven {
+				continue
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO review_command_quarantine
+				(project_id, mr_iid, note_id, command, reason, created_at)
+				VALUES (?, ?, ?, ?, 'legacy_acceptance_unproven', ?)
+				ON CONFLICT (project_id, mr_iid, note_id, command) DO NOTHING`,
+				noteKey.projectID, noteKey.mrIID, noteKey.noteID, kind, formatTime(now)); err != nil {
+				return fmt.Errorf("sqlite: quarantine legacy command: %w", err)
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("sqlite: commit command replay backfill: %w", err)
+	}
+	return nil
+}
+
+// listCommandReplayCandidatesTx streams each retained job once. Valid
+// downstream jobs prove their own kind, including when the command was pruned.
+// Only compact identity state is retained; raw payloads are not accumulated.
+func listCommandReplayCandidatesTx(ctx context.Context, tx *sql.Tx) (map[commandReplayNoteKey]*commandReplayNoteState, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT id, kind, COALESCE("key", ''), payload FROM jobs
+		WHERE kind IN ('review.command', 'review.run', 'review.cancel')`)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: list legacy review jobs: %w", err)
+	}
+	states := make(map[commandReplayNoteKey]*commandReplayNoteState)
+	for rows.Next() {
+		var jobID, jobKind, key string
+		var raw []byte
+		if err := rows.Scan(&jobID, &jobKind, &key, &raw); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("sqlite: scan legacy review job: %w", err)
+		}
+		// Match the worker's first-object decoding even when the key or JSON is
+		// inconsistent. This is a possible identity, not acceptance proof.
+		if jobKind == "review.command" {
+			var possible commandReplayJobPayload
+			if json.NewDecoder(bytes.NewReader(raw)).Decode(&possible) == nil &&
+				possible.ProjectID > 0 && possible.MRIID > 0 && possible.NoteID > 0 &&
+				(possible.Command == "run" || possible.Command == "cancel") {
+				key := commandReplayNoteKey{possible.ProjectID, possible.MRIID, possible.NoteID}
+				if states[key] == nil {
+					states[key] = newCommandReplayNoteState()
+				}
+				states[key].legacyCommands[possible.Command] = true
+			}
+			continue
+		}
+		var payload commandReplayJobPayload
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			continue
+		}
+		if payload.ProjectID <= 0 || payload.MRIID <= 0 || payload.NoteID <= 0 {
+			continue
+		}
+		noteKey := commandReplayNoteKey{payload.ProjectID, payload.MRIID, payload.NoteID}
+		if payload.NoteID > maxReplayExactNoteID {
+			continue
+		}
+		kind, prefix := "run", "review:"
+		if jobKind == reviewCancelKind {
+			kind, prefix = "cancel", "review.cancel:"
+		}
+		expectedKey := prefix + strconv.FormatInt(payload.ProjectID, 10) + ":" + strconv.FormatInt(payload.MRIID, 10)
+		if key != expectedKey || payload.Trigger != "command" {
+			continue
+		}
+		if !canonicalReplayJob(raw) {
+			continue
+		}
+		if states[noteKey] == nil {
+			states[noteKey] = newCommandReplayNoteState()
+		}
+		states[noteKey].reviewIDs[kind] = jobID
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("sqlite: close legacy review jobs: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sqlite: iterate legacy review jobs: %w", err)
+	}
+	return states, nil
+}
+
+// replayObject rejects ambiguous duplicate keys in provenance objects.
+func replayObject(raw []byte) (map[string]json.RawMessage, bool) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return nil, false
+	}
+	fields := make(map[string]json.RawMessage)
+	seen := make(map[string]bool)
+	for decoder.More() {
+		token, err := decoder.Token()
+		key, ok := token.(string)
+		folded := strings.ToLower(key)
+		if err != nil || !ok || seen[folded] {
+			return nil, false
+		}
+		seen[folded] = true
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, false
+		}
+		fields[key] = value
+	}
+	_, err = decoder.Token()
+	return fields, err == nil
+}
+
+func canonicalReplayJob(raw []byte) bool {
+	fields, valid := replayObject(raw)
+	if !valid || fields["project_id"] == nil || fields["mr_iid"] == nil || fields["note_id"] == nil {
+		return false
+	}
+	return fields["trigger"] != nil
+}
+
+// loadCommandReplayDossiersTx uses only a workflow-bound, fingerprint-matched
+// review snapshot. A dossier proves a run, never a cancel. Orphan reservations,
+// damaged snapshots, and conflicting job mappings cannot prove an identity. A
+// replaced job must have a newer generation bounded by its MR's control.
+func loadCommandReplayDossiersTx(ctx context.Context, tx *sql.Tx, states map[commandReplayNoteKey]*commandReplayNoteState) error {
+	rows, err := tx.QueryContext(ctx, `SELECT w.project_id, w.mr_iid, COALESCE(w.head_sha, ''),
+		COALESCE(w.fingerprint, ''), COALESCE(d.job_id, ''), d.generation, d.hash, d.data,
+		COALESCE(j.id, ''), COALESCE(j.kind, ''), COALESCE(j."key", ''), COALESCE(j.payload, ''),
+		COALESCE(j.attempts, 0), COALESCE(c.generation, 0), COALESCE(c.head_sha, ''), COALESCE(c.cancelled, 0)
+		FROM workflows w JOIN workflow_dossiers d ON d.workflow_id = w.id
+		LEFT JOIN jobs j ON j.id = d.job_id
+		LEFT JOIN review_controls c ON c.project_id = w.project_id AND c.mr_iid = w.mr_iid
+		WHERE w.kind = 'review' AND w.trigger = 'command'
+		  AND w.project_id > 0 AND w.mr_iid > 0 AND d.project_id = w.project_id
+		  AND d.generation > 0 AND d.version = 1`)
+	if err != nil {
+		return fmt.Errorf("sqlite: list legacy command dossiers: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var projectID, mrIID, generation, controlGeneration int64
+		var linkedAttempts, controlCancelled int
+		var head, fingerprint, jobID, hash, linkedID, linkedKind, linkedKey, controlHead string
+		var compressed, linkedPayload []byte
+		if err := rows.Scan(&projectID, &mrIID, &head, &fingerprint, &jobID, &generation, &hash, &compressed,
+			&linkedID, &linkedKind, &linkedKey, &linkedPayload, &linkedAttempts, &controlGeneration, &controlHead, &controlCancelled); err != nil {
+			return fmt.Errorf("sqlite: scan legacy command dossier: %w", err)
+		}
+		data, err := decompressDossier(compressed)
+		if err != nil {
+			continue
+		}
+		snapshot, valid := replayObject(data)
+		if !valid {
+			continue
+		}
+		project, projectOK := replayObject(snapshot["project"])
+		mr, mrOK := replayObject(snapshot["mr"])
+		diff, diffOK := replayObject(snapshot["diff_version"])
+		_, metadataOK := replayObject(snapshot["metadata"])
+		var schema int
+		var dossierProjectID, dossierMRIID int64
+		var dossierHead string
+		var metadata map[string]string
+		if !projectOK || !mrOK || !diffOK || !metadataOK ||
+			json.Unmarshal(snapshot["schema_version"], &schema) != nil || schema != 1 ||
+			json.Unmarshal(project["id"], &dossierProjectID) != nil || json.Unmarshal(mr["iid"], &dossierMRIID) != nil ||
+			json.Unmarshal(diff["HeadSHA"], &dossierHead) != nil || json.Unmarshal(snapshot["metadata"], &metadata) != nil ||
+			dossierProjectID != projectID || dossierMRIID != mrIID || !reviewHeadRE.MatchString(head) ||
+			!strings.EqualFold(dossierHead, head) || metadata["trigger"] != "command" ||
+			metadata["config_hash"] == "" || metadata["prompt_hash"] == "" {
+			continue
+		}
+		noteID, err := strconv.ParseInt(metadata["note_id"], 10, 64)
+		if err != nil || noteID <= 0 || noteID > maxReplayExactNoteID || strconv.FormatInt(noteID, 10) != metadata["note_id"] {
+			continue
+		}
+		digest := sha256.Sum256(data)
+		if hex.EncodeToString(digest[:]) != hash {
+			continue
+		}
+		// The workflow fingerprint was made from the dossier hash and the two
+		// hashes in its metadata when the review workflow was created.
+		bound := sha256.Sum256([]byte(hash + "\n" + metadata["config_hash"] + "\n" + metadata["prompt_hash"]))
+		if hex.EncodeToString(bound[:]) != fingerprint {
+			continue
+		}
+		if linkedID != "" {
+			fields, valid := replayObject(linkedPayload)
+			var payload struct {
+				commandReplayJobPayload
+				Generation int64  `json:"generation"`
+				HeadSHA    string `json:"head_sha"`
+			}
+			for key := range fields {
+				if (strings.EqualFold(key, "generation") && key != "generation") ||
+					(strings.EqualFold(key, "head_sha") && key != "head_sha") ||
+					(strings.EqualFold(key, "note_id") && key != "note_id") {
+					valid = false
+				}
+			}
+			if linkedKind != reviewRunKind || linkedKey != "review:"+strconv.FormatInt(projectID, 10)+":"+strconv.FormatInt(mrIID, 10) ||
+				!valid || fields["project_id"] == nil || fields["mr_iid"] == nil ||
+				json.Unmarshal(linkedPayload, &payload) != nil || payload.ProjectID != projectID || payload.MRIID != mrIID {
+				continue
+			}
+			if fields["generation"] != nil && payload.Generation > generation {
+				// A retry can be replaced in place before its old mapping is detached.
+				if linkedAttempts <= 0 || payload.Generation > controlGeneration || fields["head_sha"] == nil ||
+					!reviewHeadRE.MatchString(payload.HeadSHA) || fields["trigger"] == nil || payload.Trigger == "" ||
+					(payload.Generation == controlGeneration && (controlCancelled != 0 || !strings.EqualFold(payload.HeadSHA, controlHead))) ||
+					payload.NoteID < 0 || (fields["note_id"] == nil && payload.NoteID != 0) ||
+					(payload.Trigger == "command" && (fields["note_id"] == nil || payload.NoteID <= 0)) {
+					continue
+				}
+			} else if fields["note_id"] == nil || fields["trigger"] == nil || payload.NoteID != noteID || payload.Trigger != "command" ||
+				(fields["generation"] != nil && payload.Generation != generation) ||
+				(fields["head_sha"] != nil && !strings.EqualFold(payload.HeadSHA, head)) {
+				continue
+			}
+		}
+		key := commandReplayNoteKey{projectID, mrIID, noteID}
+		if states[key] == nil {
+			states[key] = newCommandReplayNoteState()
+		}
+		state := states[key]
+		if _, exists := state.reviewIDs["run"]; !exists {
+			state.reviewIDs["run"] = jobID
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("sqlite: iterate legacy command dossiers: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("sqlite: close legacy command dossiers: %w", err)
+	}
+	return nil
+}
+
+// commandReplayIdentity normalizes the authenticated source-note identity.
+// Producers without any identity fields keep the old behavior. An explicit but
+// incomplete or mismatched identity is rejected instead of silently falling
+// back to a non-idempotent enqueue.
+func commandReplayIdentity(command store.ReviewCommand) (string, bool, error) {
+	if command.NoteID < 0 {
+		return "", false, errors.New("sqlite: review command note id must not be negative")
+	}
+	kind := strings.ToLower(strings.TrimSpace(command.Command))
+	hasNote := command.NoteID > 0
+	hasCommand := kind != ""
+	if !hasNote && !hasCommand {
+		return "", false, nil
+	}
+	if !hasNote || !hasCommand {
+		return "", false, errors.New("sqlite: review command identity requires both note id and command")
+	}
+	switch kind {
+	case "run":
+		if command.Cancel {
+			return "", false, errors.New("sqlite: review command kind run conflicts with cancel")
+		}
+	case "cancel":
+		if !command.Cancel {
+			return "", false, errors.New("sqlite: review command kind cancel requires cancel")
+		}
+	default:
+		return "", false, fmt.Errorf("sqlite: unknown review command kind %q", kind)
+	}
+	if err := validateCommandPayloadNoteID(command.Payload, command.NoteID); err != nil {
+		return "", false, err
+	}
+	return kind, true, nil
+}
+
+// validateCommandPayloadNoteID rejects an explicit command whose payload
+// names a different note. A producer without identity skips this check, so
+// webhook and manual paths with a payload note_id keep their old behavior.
+func validateCommandPayloadNoteID(raw json.RawMessage, noteID int64) error {
+	payload := bytes.TrimSpace(raw)
+	if len(payload) == 0 {
+		return nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return fmt.Errorf("sqlite: review command payload must be a JSON object: %w", err)
+	}
+	noteRaw, ok := fields["note_id"]
+	if !ok {
+		return nil
+	}
+	var payloadNoteID int64
+	if err := json.Unmarshal(noteRaw, &payloadNoteID); err != nil {
+		return errors.New("sqlite: review command payload note_id must be an integer")
+	}
+	if payloadNoteID != noteID {
+		return errors.New("sqlite: review command payload note_id does not match the identity")
+	}
+	return nil
+}
+
+// reserveCommandReplayTx claims one command identity in the caller's
+// transaction. An unproven legacy identity must not be reserved as accepted.
+func reserveCommandReplayTx(ctx context.Context, tx *sql.Tx, command store.ReviewCommand, identity string, now time.Time) (string, bool, error) {
+	res, err := tx.ExecContext(ctx, `INSERT INTO review_command_replays
+		(project_id, mr_iid, note_id, command, job_id, created_at)
+		SELECT ?, ?, ?, ?, '', ? WHERE NOT EXISTS (SELECT 1 FROM review_command_quarantine
+			WHERE project_id = ? AND mr_iid = ? AND note_id = ?)
+		ON CONFLICT (project_id, mr_iid, note_id, command) DO NOTHING`,
+		command.ProjectID, command.MRIID, command.NoteID, identity, formatTime(now),
+		command.ProjectID, command.MRIID, command.NoteID)
+	if err != nil {
+		return "", false, fmt.Errorf("sqlite: reserve command replay: %w", err)
+	}
+	inserted, err := res.RowsAffected()
+	if err != nil {
+		return "", false, fmt.Errorf("sqlite: reserve command replay: %w", err)
+	}
+	if inserted == 1 {
+		return "", false, nil
+	}
+	var jobID string
+	if err := tx.QueryRowContext(ctx, `SELECT job_id FROM review_command_replays
+		WHERE project_id = ? AND mr_iid = ? AND note_id = ? AND command = ?`,
+		command.ProjectID, command.MRIID, command.NoteID, identity).Scan(&jobID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", false, store.ErrLegacyCommandUncertain
+		}
+		return "", false, fmt.Errorf("sqlite: read command replay: %w", err)
+	}
+	return jobID, true, nil
+}
+
+func attachCommandReplayTx(ctx context.Context, tx *sql.Tx, command store.ReviewCommand, identity, jobID string) error {
+	res, err := tx.ExecContext(ctx, `UPDATE review_command_replays SET job_id = ?
+		WHERE project_id = ? AND mr_iid = ? AND note_id = ? AND command = ?`,
+		jobID, command.ProjectID, command.MRIID, command.NoteID, identity)
+	if err != nil {
+		return fmt.Errorf("sqlite: attach command replay job: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("sqlite: attach command replay job: %w", err)
+	}
+	if n != 1 {
+		return fmt.Errorf("sqlite: command replay identity changed")
+	}
+	return nil
 }
 
 // reviewCommandSideEffects parses the fields the queue owns for side effects.
@@ -316,11 +783,18 @@ func reviewJobKindKey(command store.ReviewCommand) (string, string) {
 func reviewJobPayload(command store.ReviewCommand, head string, generation int64) (json.RawMessage, error) {
 	fields := make(map[string]any)
 	if raw := bytes.TrimSpace(command.Payload); len(raw) > 0 {
-		if err := json.Unmarshal(raw, &fields); err != nil {
+		// Keep JSON numbers exact. Note IDs are int64 and can exceed 2^53,
+		// where the default float64 conversion could target another note.
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.UseNumber()
+		if err := decoder.Decode(&fields); err != nil {
 			return nil, fmt.Errorf("sqlite: review payload must be a JSON object: %w", err)
 		}
 		if fields == nil {
 			fields = make(map[string]any)
+		}
+		if _, err := decoder.Token(); err != io.EOF {
+			return nil, errors.New("sqlite: review payload must be a single JSON object")
 		}
 	}
 	if _, ok := fields["generation"]; ok {

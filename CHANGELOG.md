@@ -14,8 +14,10 @@ v1.2.0 尚未打 tag；本段记录尚未发布的新改动。`[1.2.0]` 段仅�
 
 ### 修复
 
+- **保留大评论 ID 精度**：新入队的评审和取消任务不再将 JSON 中的大整数评论 ID 舍入。升级前已被舍入的任务数据无法自动恢复（[#159](https://github.com/LeXwDeX/Tribunal/issues/159)）。
 - **同一 MR 的发布串行**：同一 `(project_id, mr_iid)` 的总结评论（包括空评审和失败说明）与 commit status 写入按评审代次串行。每个写入点前重新校验 control 的 generation 和 head；新代次已接管或 MR head 已变化时走既有 stale 路径，旧代次不再覆盖新代次的总结评论或 commit status。不同 MR 仍可并行发布（[#157](https://github.com/LeXwDeX/Tribunal/issues/157)）。
 - **超长 MR 描述不再挤掉 diff**：评审任务先保留任务头和 diff，再为 MR 上下文单独预算。上下文超预算时在 prompt 中写入截断标记，并在评审结果的 warnings 中说明哪些上下文未完整包含；描述、pipeline、issue 不再能挤掉任务指令或 diff。MR 描述另有 8000 字符独立上限，截断时在 prompt 中标记。扩展评审节点的实际 prompt 也纳入二次汇总的覆盖检查。覆盖检查按生成任务时记录的 diff 区段位置逐文件核对（含中和后的内容），文件或包预算导致 diff 缺失或部分截断时记为未解决证据，汇总不能给出 PASS；提前出现的相同 diff 文本不视为覆盖。任务布局版本并入 prompt bundle hash，因此升级后旧的待恢复、待重试或待发布工作流会被判 stale；没有 `prompt_hash` 的旧工作流不再发布。短描述和完整 diff 的评审不受影响（[#158](https://github.com/LeXwDeX/Tribunal/issues/158)）。
+- **`/review` 命令重放保护**：已认证的 `/review` 和 `/review cancel` 按 `(项目, MR, 来源评论, 命令)` 幂等。首次入队与身份记录在同一事务提交，已证明受理的重放不改变 generation、取消状态、队列或状态/表情。升级时一次性回填可由匹配下游 job 或符合条件的 workflow/dossier 证明受理的旧命令；reaction 不证明受理或命令种类。旧命令 payload 或仅存 reaction 标识的旧 note 若缺乏独立受理证明，会保守隔离，而非当成重复命令或自动执行；这也可能拦截旧评论上从未执行的命令。有权限的作者会收到提示，核对当前状态后可用新评论发出新命令；管理员可查询隔离记录。旧下游数据可能舍入大于等于 `2^53` 的 note ID，可能导致隔离误报或漏报；所有可识别历史和证明丢失时，新 UUID 重发仍可能被当成新命令。须限制旧事件重发并核对状态。新增迁移 `0020_review_command_replay`，没有 down migration；回退须恢复升级前快照。证据规则、隔离查询和升级步骤见 [命令重放幂等迁移](docs/operations.md#命令重放幂等迁移后续版本)（[#159](https://github.com/LeXwDeX/Tribunal/issues/159)）。
 - **会话密钥预检**：`--check-config` 和实际启动都在准备存储前校验 session key；无效值不再通过配置检查，也不会先触发 SQLite 迁移。新旧环境变量的优先级不变；未配置时仍使用临时 key，实际启动会告警（#164）。
 - **摘要评论恢复**：已绑定的摘要评论更新返回 404 时，先查找本 bot 的摘要标记，再复用或新建评论并更新绑定。旧评论仍在列表中、身份或列表不可用时不新建；写入前仍复核已存代次及非空 head，但不能消除在途请求竞态（#164）。
 - **Webhook 请求体读取超时**：读取超时返回 `503 {"ignored":"request_timeout","request_id":...}`，不再假报 200。GitLab 可能因连续失败临时或永久停用 hook；不要假定失败投递会自动重试，运维恢复与版本限制见 [Webhook 失败与恢复](docs/operations.md#webhook-失败与恢复)（#164）。
