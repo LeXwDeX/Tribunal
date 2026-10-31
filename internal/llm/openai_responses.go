@@ -188,13 +188,22 @@ func responsesResponse(generated *responses.Response, defaultModel string) (*Res
 	if generated == nil {
 		return nil, &Error{Kind: ErrTransient, Err: errors.New("provider returned an empty response")}
 	}
-	usage := responsesUsage(generated.Usage)
+	usage, usageComplete := responsesUsage(generated.Usage, generated.RawJSON())
 	message := Message{Role: RoleAssistant}
 	refused := false
-	incompleteToolCall := false
+	incompleteItem := false
+	if malformedWireList(generated.JSON.Output.Raw(), len(generated.Output), generated.RawJSON() != "") {
+		message.Parts = append(message.Parts, Part{Type: PartToolCall, ToolCall: &ToolCall{}})
+	}
 	for _, item := range generated.Output {
 		switch item.Type {
 		case "message":
+			if item.Status != "" && item.Status != "completed" {
+				incompleteItem = true
+			}
+			if malformedWireList(item.JSON.Content.Raw(), len(item.Content), item.RawJSON() != "") {
+				message.Parts = append(message.Parts, Part{Type: PartToolCall, ToolCall: &ToolCall{}})
+			}
 			var text strings.Builder
 			for _, content := range item.Content {
 				switch content.Type {
@@ -209,6 +218,8 @@ func responsesResponse(generated *responses.Response, defaultModel string) (*Res
 						text.WriteString("\n")
 					}
 					text.WriteString(content.Refusal)
+				default:
+					message.Parts = append(message.Parts, Part{Type: PartToolCall, ToolCall: &ToolCall{}})
 				}
 			}
 			if text.Len() > 0 {
@@ -217,13 +228,26 @@ func responsesResponse(generated *responses.Response, defaultModel string) (*Res
 		case "function_call":
 			fn := item.AsFunctionCall()
 			if fn.Status != "" && fn.Status != responses.ResponseFunctionToolCallStatusCompleted {
-				incompleteToolCall = true
+				incompleteItem = true
+			}
+			caller := fn.JSON.Caller.Raw()
+			async := fn.JSON.Async.Raw()
+			namespace := fn.JSON.Namespace.Raw()
+			if !wireString(fn.JSON.CallID.Raw()) || !wireString(fn.JSON.Name.Raw()) || !wireString(fn.JSON.Arguments.Raw()) ||
+				(caller != "" && caller != "null" && fn.Caller.Type != "direct") ||
+				(async != "" && async != "null" && async != "false") ||
+				(namespace != "" && namespace != "null" && (!wireString(namespace) || fn.Namespace != "")) {
+				message.Parts = append(message.Parts, Part{Type: PartToolCall, ToolCall: &ToolCall{}})
+				continue
 			}
 			message.Parts = append(message.Parts, Part{
 				Type:     PartToolCall,
 				ToolCall: &ToolCall{ID: fn.CallID, Name: fn.Name, Input: json.RawMessage(fn.Arguments)},
 			})
 		case "reasoning":
+			if item.Status != "" && item.Status != "completed" {
+				incompleteItem = true
+			}
 			raw := json.RawMessage(item.RawJSON())
 			summary := reasoningSummary(item.Summary)
 			message.Parts = append(message.Parts, Part{
@@ -234,6 +258,9 @@ func responsesResponse(generated *responses.Response, defaultModel string) (*Res
 					Summary:  summary,
 				},
 			})
+		default:
+			// No other output item type was requested or can be replayed here.
+			message.Parts = append(message.Parts, Part{Type: PartToolCall, ToolCall: &ToolCall{}})
 		}
 	}
 	stop := StopOther
@@ -244,15 +271,38 @@ func responsesResponse(generated *responses.Response, defaultModel string) (*Res
 			break
 		}
 	}
-	if generated.Status == responses.ResponseStatusFailed && !refused && !hasToolCall {
-		return nil, &Error{Kind: ErrTransient, Err: errors.New("provider reported a failed response"), Usage: usage}
+	if generated.Status == responses.ResponseStatusFailed {
+		code := generated.Error.Code
+		unknownFailure := code != responses.ResponseErrorCodeServerError && code != responses.ResponseErrorCodeRateLimitExceeded
+		rawType := generated.Error.JSON.Type.Raw()
+		errorType := generated.Error.Type
+		conflictingType := rawType != "" && rawType != "null" && (!wireString(rawType) ||
+			(errorType != "" && errorType != string(code) && !(code == responses.ResponseErrorCodeRateLimitExceeded && errorType == "rate_limit_error")))
+		misalignment := generated.Error.JSON.Misalignment.Raw()
+		if hasToolCall || incompleteItem || refused || unknownFailure || conflictingType || !usageComplete || (misalignment != "" && misalignment != "null") {
+			auditStop := StopReason("")
+			if refused {
+				auditStop = StopRefusal
+			} else if hasToolCall {
+				auditStop = StopOther
+			}
+			return nil, &Error{Kind: ErrUnsafeResponse, Err: errors.New("provider reported an unsafe failed response"), Usage: usage, responseObserved: true, auditStop: auditStop}
+		}
+		kind := ErrTransient
+		if code == responses.ResponseErrorCodeRateLimitExceeded {
+			kind = ErrRateLimited
+		}
+		return nil, &Error{Kind: kind, Err: errors.New("provider reported a failed response"), Usage: usage, responseObserved: true}
+	}
+	if !usageComplete {
+		return nil, &Error{Kind: ErrUnsafeResponse, Err: errors.New("provider returned invalid token usage"), Usage: usage, responseObserved: true}
 	}
 	switch {
 	case refused || (generated.Status == responses.ResponseStatusIncomplete && generated.IncompleteDetails.Reason == "content_filter"):
 		stop = StopRefusal
 	case generated.Status == responses.ResponseStatusIncomplete && generated.IncompleteDetails.Reason == "max_output_tokens":
 		stop = StopMaxTokens
-	case incompleteToolCall:
+	case incompleteItem:
 		stop = StopOther
 	case generated.Status == responses.ResponseStatusCompleted && hasToolCall:
 		stop = StopToolUse
@@ -287,12 +337,16 @@ func reasoningSummary(summary []responses.ResponseReasoningItemSummary) string {
 	return b.String()
 }
 
-func responsesUsage(usage responses.ResponseUsage) Usage {
-	return Usage{
+func responsesUsage(usage responses.ResponseUsage, responseRaw string) (Usage, bool) {
+	if raw := usage.RawJSON(); raw != "" || responseRaw != "" {
+		return wireUsageFromResponse(responseRaw, raw, responsesUsageFields)
+	}
+	converted := Usage{
 		InputTokens:      usage.InputTokens,
 		OutputTokens:     usage.OutputTokens,
 		CacheReadTokens:  usage.InputTokensDetails.CachedTokens,
 		CacheWriteTokens: usage.InputTokensDetails.CacheWriteTokens,
 		ReasoningTokens:  usage.OutputTokensDetails.ReasoningTokens,
 	}
+	return converted, ValidUsage(converted)
 }

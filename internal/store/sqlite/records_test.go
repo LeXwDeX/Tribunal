@@ -80,7 +80,7 @@ func TestLLMCallAuditGzipBoundAndRetention(t *testing.T) {
 	}
 	if calls[0].InputTokens != 7 || calls[0].OutputTokens != 5 || calls[0].CacheRead != 2 ||
 		calls[0].CacheWrite != 1 || calls[0].LatencyMS != 1500 || calls[0].StopReason != "end_turn" ||
-		calls[0].RequestID != "req-1" || calls[0].Turn != 2 {
+		calls[0].RequestID != "" || calls[0].Turn != 2 {
 		t.Fatalf("call = %+v", calls[0])
 	}
 	var decoded llm.AuditRequest

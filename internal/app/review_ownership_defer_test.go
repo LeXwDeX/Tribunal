@@ -23,14 +23,15 @@ func TestRecoveryOwnershipDefersQueueWithoutSpendingBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	block := make(chan struct{})
-	runner := &fakeAgentRunner{block: block, started: make(chan struct{})}
+	runner := &fakeAgentRunner{}
+	runner.setBlock(block, make(chan struct{}))
 	f.service.agentRun = runner.Run
 	recoverCtx, stopRecovery := context.WithCancel(ctx)
 	recovered := make(chan error, 1)
 	go func() { recovered <- f.service.Recover(recoverCtx) }()
 	t.Cleanup(stopRecovery)
 	select {
-	case <-runner.started:
+	case <-runner.startedSignal():
 	case <-time.After(5 * time.Second):
 		t.Fatal("recovery did not acquire ownership")
 	}

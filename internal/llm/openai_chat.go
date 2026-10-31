@@ -177,11 +177,15 @@ func chatToolChoice(choice string) openai.ChatCompletionToolChoiceOptionUnionPar
 
 func chatResponse(completion *openai.ChatCompletion, defaultModel string) (*Response, error) {
 	usage := Usage{}
+	usageComplete := true
 	if completion != nil {
-		usage = chatUsage(completion.Usage)
+		usage, usageComplete = chatUsage(completion.Usage, completion.RawJSON())
 	}
 	if completion == nil || len(completion.Choices) == 0 {
-		return nil, &Error{Kind: ErrTransient, Err: errors.New("provider returned no choices"), Usage: usage}
+		return nil, &Error{Kind: ErrTransient, Err: errors.New("provider returned no choices"), Usage: usage, responseObserved: completion != nil}
+	}
+	if !usageComplete {
+		return nil, &Error{Kind: ErrUnsafeResponse, Err: errors.New("provider returned invalid token usage"), Usage: usage, responseObserved: true}
 	}
 	choice := completion.Choices[0]
 	message := Message{Role: RoleAssistant}
@@ -191,6 +195,14 @@ func chatResponse(completion *openai.ChatCompletion, defaultModel string) (*Resp
 	if choice.Message.Refusal != "" {
 		message.Parts = append(message.Parts, Part{Type: PartText, Text: choice.Message.Refusal})
 	}
+	// The SDK can silently discard a malformed tool_calls value. Keep an
+	// invalid call marker rather than treating the turn as ordinary text.
+	if malformedWireList(choice.Message.JSON.ToolCalls.Raw(), len(choice.Message.ToolCalls), false) {
+		message.Parts = append(message.Parts, Part{Type: PartToolCall, ToolCall: &ToolCall{}})
+	}
+	if raw := choice.Message.JSON.FunctionCall.Raw(); raw != "" && raw != "null" {
+		message.Parts = append(message.Parts, Part{Type: PartToolCall, ToolCall: &ToolCall{}})
+	}
 	for _, call := range choice.Message.ToolCalls {
 		if call.Type != "function" {
 			// An unknown or missing type cannot be executed. Keep an invalid
@@ -199,6 +211,10 @@ func chatResponse(completion *openai.ChatCompletion, defaultModel string) (*Resp
 			continue
 		}
 		fn := call.AsFunction()
+		if !wireString(fn.JSON.ID.Raw()) || !wireString(fn.Function.JSON.Name.Raw()) || !wireString(fn.Function.JSON.Arguments.Raw()) {
+			message.Parts = append(message.Parts, Part{Type: PartToolCall, ToolCall: &ToolCall{}})
+			continue
+		}
 		message.Parts = append(message.Parts, Part{
 			Type: PartToolCall,
 			ToolCall: &ToolCall{
@@ -236,12 +252,16 @@ func chatResponse(completion *openai.ChatCompletion, defaultModel string) (*Resp
 	}, nil
 }
 
-func chatUsage(usage openai.CompletionUsage) Usage {
-	return Usage{
+func chatUsage(usage openai.CompletionUsage, responseRaw string) (Usage, bool) {
+	if raw := usage.RawJSON(); raw != "" || responseRaw != "" {
+		return wireUsageFromResponse(responseRaw, raw, chatUsageFields)
+	}
+	converted := Usage{
 		InputTokens:      usage.PromptTokens,
 		OutputTokens:     usage.CompletionTokens,
 		CacheReadTokens:  usage.PromptTokensDetails.CachedTokens,
 		CacheWriteTokens: usage.PromptTokensDetails.CacheWriteTokens,
 		ReasoningTokens:  usage.CompletionTokensDetails.ReasoningTokens,
 	}
+	return converted, ValidUsage(converted)
 }

@@ -171,6 +171,7 @@ CREATE TABLE workflows (
   tokens_in    INTEGER NOT NULL DEFAULT 0,
   tokens_out   INTEGER NOT NULL DEFAULT 0,
   cost_micros  INTEGER NOT NULL DEFAULT 0,
+  usage_incomplete INTEGER NOT NULL DEFAULT 0, -- 0024：检测到用量不完整
   created_at   TEXT    NOT NULL,
   started_at   TEXT,
   finished_at  TEXT
@@ -197,6 +198,7 @@ CREATE TABLE workflow_nodes (
   tokens_in   INTEGER NOT NULL DEFAULT 0,
   tokens_out  INTEGER NOT NULL DEFAULT 0,
   cost_micros INTEGER NOT NULL DEFAULT 0,
+  usage_incomplete INTEGER NOT NULL DEFAULT 0, -- 0024：检测到用量不完整
   added_rev   INTEGER NOT NULL DEFAULT 0, -- 由哪次 graph_rev 加入（fan_out / extend）
   queued_at   TEXT,
   started_at  TEXT,
@@ -266,8 +268,8 @@ CREATE TABLE llm_calls (
   turn          INTEGER NOT NULL,
   provider      TEXT    NOT NULL,
   model         TEXT    NOT NULL,
-  request       BLOB,                 -- gzip(JSON)，保留期可配置
-  response      BLOB,                 -- gzip(JSON)
+  request       BLOB,                 -- gzip(JSON)，新行为带版本的安全元数据
+  response      BLOB,                 -- gzip(JSON)，新行为带版本的安全元数据
   input_tokens  INTEGER NOT NULL DEFAULT 0,
   output_tokens INTEGER NOT NULL DEFAULT 0,
   cache_read    INTEGER NOT NULL DEFAULT 0,
@@ -275,7 +277,7 @@ CREATE TABLE llm_calls (
   latency_ms    INTEGER NOT NULL,
   stop_reason   TEXT,
   error_kind    TEXT,
-  request_id    TEXT,
+  request_id    TEXT,                 -- 新行不写；历史值保留但调用列表不返回
   created_at    TEXT    NOT NULL
 );
 CREATE INDEX llm_calls_node ON llm_calls (workflow_id, node_id, turn);
@@ -357,6 +359,12 @@ CREATE TABLE api_tokens (
 
 > `0016_dossier_mr_title.sql` 为 `workflow_dossiers` 增加 `mr_title`（默认空字符串）。保存 dossier 时从 `mr.title` 去掉首尾空白后写入，供评审列表按页批量读取标题。迁移前保存的 dossier 不回填，保持空值。
 
+> `0024_workflow_usage_incomplete.sql` 只给 `workflows` 和 `workflow_nodes` 各追加 `usage_incomplete INTEGER NOT NULL DEFAULT 0`，无 down migration。旧行不回填：默认 false 只表示没有检测到缺失，不能证明历史用量完整。新事件可能携带该字段，旧二进制的严格解码可能失败；不能仅替换镜像降级。其他未发布分支的 `0020`–`0023` 当前源码检查未重建这两张表，未来合并时仍须重新核验迁移顺序和作用。
+
+新 `llm_calls` 的 `request`、`response` 若存在，各自的 JSON 对象都带 `"_format":"audit_metadata_v1"`，只存结构计数、请求选项、固定停止原因和用量，不存 prompt、工具参数/输出、推理内容、上游原始 ID 或错误原文。每次尝试有独立本地 `id`。对 agent 调用，记录器按非法调用批次、停止原因或拒绝预分类 `unsafe_model_response`；这只影响审计统计，不改变请求重试和 agent 拒绝策略，也不是节点最终状态。
+
+本次升级不删除或迁移历史审计，原有保留策略仍生效。没有 `_format` 的历史数据可能是完整 `llm.Request`/`Response`，也可能是旧版未标记的安全元数据或截断摘要；例如 request 的 `messages` 分别可能是数组或数字，不能仅因无标记就认定类型。部分或空 payload 可能无法判别。旧 payload 仍可能含敏感内容，只有项目 `manage` 可读取；详情见 [HTTP API](03-http-api.md#42-评审工作流)。
+
 ---
 
 ## 3. 事件 payload
@@ -374,17 +382,18 @@ CREATE TABLE api_tokens (
 | `dag.node.registered` | `{node_id}`（随 created / extended 批量写入） |
 | `dag.node.queued` | `{node_id, attempt}` |
 | `dag.node.started` | `{node_id, attempt, provider?, model?}` |
-| `dag.node.completed` | `{node_id, attempt, output, usage}` |
-| `dag.node.failed` | `{node_id, attempt, error, error_kind}` |
-| `dag.node.aborted` | `{node_id, attempt, reason}` |
-| `dag.node.skipped` | `{node_id, reason}`（`condition_false` \| `deps_skipped` \| `workflow_cancelled`） |
+| `dag.node.completed` | `{node_id, attempt, output?, usage, usage_incomplete?}` |
+| `dag.node.failed` | `{node_id, attempt, error?, error_kind?, error_status?, reason?, usage, usage_incomplete?}` |
+| `dag.node.aborted` | `{node_id, attempt, reason?, usage_incomplete?}` |
+| `dag.node.skipped` | `{node_id, attempt?, reason?, usage?, usage_incomplete?}` |
 | `dag.node.cancelled` | `{node_id, reason}`（被 extend 替换） |
-| `dag.node.restarted` | `{node_id, next_attempt}`（崩溃恢复） |
+| `dag.node.restarted` | `{node_id, attempt?, next_attempt?, reason?, usage_incomplete?}`（崩溃恢复） |
 
 规则：
 
 - 写事件和更新读模型（`workflows`、`workflow_nodes`）在**同一个数据库事务**里完成。
 - `events.seq` 即写入后的 `graph_rev`；`Append` 时带 `expectRev`，不一致返回 `ErrStaleRevision`。
+- 取消工作流时，仍在运行的节点写入 `usage_incomplete=true`；其在途用量可能丢失，已终态的数据不重新计入。旧的 `node.aborted` 事件缺少该字段时仍可回放，但 `false` 不证明历史用量完整。
 - 迟到的节点结果（attempt 不等于当前 attempt）直接丢弃，并记 debug 日志。
 
 ---

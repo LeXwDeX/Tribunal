@@ -47,13 +47,14 @@ type publicationsSummary struct {
 }
 
 type reviewNode struct {
-	ID         string   `json:"id"`
-	Kind       string   `json:"kind"`
-	Status     string   `json:"status"`
-	DependsOn  []string `json:"depends_on,omitempty"`
-	Provider   string   `json:"provider,omitempty"`
-	Attempt    int      `json:"attempt"`
-	DurationMS *int64   `json:"duration_ms,omitempty"`
+	ID              string   `json:"id"`
+	Kind            string   `json:"kind"`
+	Status          string   `json:"status"`
+	DependsOn       []string `json:"depends_on,omitempty"`
+	Provider        string   `json:"provider,omitempty"`
+	Attempt         int      `json:"attempt"`
+	DurationMS      *int64   `json:"duration_ms,omitempty"`
+	UsageIncomplete bool     `json:"usage_incomplete"`
 }
 
 type reviewDetail struct {
@@ -327,13 +328,14 @@ func reviewNodes(nodes []store.WorkflowNode) []reviewNode {
 	out := make([]reviewNode, 0, len(nodes))
 	for _, node := range nodes {
 		out = append(out, reviewNode{
-			ID:         node.ID,
-			Kind:       node.Kind,
-			Status:     node.Status,
-			DependsOn:  node.DependsOn,
-			Provider:   node.Provider,
-			Attempt:    node.Attempt,
-			DurationMS: nodeDuration(node),
+			ID:              node.ID,
+			Kind:            node.Kind,
+			Status:          node.Status,
+			DependsOn:       node.DependsOn,
+			Provider:        node.Provider,
+			Attempt:         node.Attempt,
+			DurationMS:      nodeDuration(node),
+			UsageIncomplete: node.UsageIncomplete,
 		})
 	}
 	return out

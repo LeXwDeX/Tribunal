@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -49,10 +50,24 @@ func (s *Store) RecordLLMCall(ctx context.Context, call llm.CallRecord) error {
 	}
 	var requestValue, responseValue any
 	if audit.Request != nil {
-		requestValue = audit.Request
+		value := *audit.Request
+		value.Format = llm.AuditMetadataFormat
+		if value.Reasoning != nil {
+			reasoning := *value.Reasoning
+			switch reasoning.Effort {
+			case "", "low", "medium", "high":
+			default:
+				reasoning.Effort = ""
+			}
+			value.Reasoning = &reasoning
+		}
+		requestValue = value
 	}
 	if audit.Response != nil {
-		responseValue = audit.Response
+		value := *audit.Response
+		value.Format = llm.AuditMetadataFormat
+		value.StopReason = llm.SafeAuditStopReason(llm.StopReason(value.StopReason))
+		responseValue = value
 	}
 	request, err := encodeGzipJSON(requestValue)
 	if err != nil {
@@ -68,19 +83,17 @@ func (s *Store) RecordLLMCall(ctx context.Context, call llm.CallRecord) error {
 		cacheRead    int64
 		cacheWrite   int64
 		stopReason   string
-		requestID    string
 	)
 	usage := llm.Usage{}
 	if audit.Response != nil {
 		usage = audit.Response.Usage
-		stopReason = audit.Response.StopReason
+		stopReason = llm.SafeAuditStopReason(llm.StopReason(audit.Response.StopReason))
 	}
 	if call.Response != nil {
 		if audit.Response == nil {
 			usage = call.Response.Usage
-			stopReason = string(call.Response.StopReason)
+			stopReason = llm.SafeAuditStopReason(call.Response.StopReason)
 		}
-		requestID = call.Response.RequestID
 	}
 	inputTokens = usage.InputTokens
 	outputTokens = usage.OutputTokens
@@ -98,7 +111,7 @@ func (s *Store) RecordLLMCall(ctx context.Context, call llm.CallRecord) error {
 		id, call.Meta.WorkflowID, call.Meta.NodeID, call.Meta.Turn,
 		call.Provider, call.Model, request, response, inputTokens, outputTokens,
 		cacheRead, cacheWrite, call.Duration.Milliseconds(), nullString(stopReason),
-		nullString(llmErrorKind(call.Err)), nullString(requestID),
+		nullString(llmErrorKind(call.Err)), nil,
 		formatTime(s.now().UTC()))
 	if err != nil {
 		return fmt.Errorf("sqlite: record llm call: %w", err)
@@ -117,8 +130,12 @@ func llmErrorKind(err error) string {
 		return ""
 	}
 	var classified *llm.Error
-	if errors.As(err, &classified) {
-		return string(classified.Kind)
+	if errors.As(err, &classified) && classified != nil {
+		switch classified.Kind {
+		case llm.ErrRateLimited, llm.ErrOverloaded, llm.ErrContextTooLong, llm.ErrAuth,
+			llm.ErrBadRequest, llm.ErrUnsafeResponse, llm.ErrTransient, llm.ErrCanceled:
+			return string(classified.Kind)
+		}
 	}
 	return "error"
 }
@@ -198,7 +215,7 @@ func (s *Store) ListLLMCalls(ctx context.Context, filter store.LLMCallFilter) ([
 	}
 	query := `SELECT id, workflow_id, node_id, turn, provider, model, ` + payload + `,
 		input_tokens, output_tokens, cache_read, cache_write, latency_ms,
-		stop_reason, error_kind, request_id, created_at
+		stop_reason, error_kind, created_at
 		FROM llm_calls WHERE ` + strings.Join(where, " AND ") + `
 		ORDER BY created_at DESC, id DESC LIMIT ?`
 	args = append(args, limit+1)
@@ -215,13 +232,12 @@ func (s *Store) ListLLMCalls(ctx context.Context, filter store.LLMCallFilter) ([
 			response   []byte
 			stopReason sql.NullString
 			errorKind  sql.NullString
-			requestID  sql.NullString
 			createdAt  string
 		)
 		if err := rows.Scan(&call.ID, &call.WorkflowID, &call.NodeID, &call.Turn,
 			&call.Provider, &call.Model, &request, &response, &call.InputTokens,
 			&call.OutputTokens, &call.CacheRead, &call.CacheWrite, &call.LatencyMS,
-			&stopReason, &errorKind, &requestID, &createdAt); err != nil {
+			&stopReason, &errorKind, &createdAt); err != nil {
 			return nil, "", fmt.Errorf("sqlite: scan llm call: %w", err)
 		}
 		if filter.IncludePayload {
@@ -234,7 +250,6 @@ func (s *Store) ListLLMCalls(ctx context.Context, filter store.LLMCallFilter) ([
 		}
 		call.StopReason = stopReason.String
 		call.ErrorKind = errorKind.String
-		call.RequestID = requestID.String
 		if call.CreatedAt, err = parseTime(createdAt); err != nil {
 			return nil, "", err
 		}
@@ -1200,14 +1215,27 @@ func groupAccumulatorFor(groups map[string]*groupAccumulator, key string) *group
 
 func (g *groupAccumulator) add(day string, cost int64, duration *float64) {
 	g.runs++
-	g.costMicros += cost
+	g.costMicros = saturatingAddInt64(g.costMicros, cost)
 	bucket := dayBucket(g.days, day)
 	bucket.runs++
-	bucket.costMicros += cost
+	bucket.costMicros = saturatingAddInt64(bucket.costMicros, cost)
 	if duration != nil {
 		g.durations = append(g.durations, *duration)
 		bucket.durations = append(bucket.durations, *duration)
 	}
+}
+
+// saturatingAddInt64 clamps an aggregate to the int64 range. Persisted usage
+// values can legitimately approach the limits, so a plain += or SQL SUM would
+// wrap negative or fail the whole stats request.
+func saturatingAddInt64(a, b int64) int64 {
+	if b > 0 && a > math.MaxInt64-b {
+		return math.MaxInt64
+	}
+	if b < 0 && a < math.MinInt64-b {
+		return math.MinInt64
+	}
+	return a + b
 }
 
 func durationSummary(values []float64) (int64, *float64, *float64) {
@@ -1343,10 +1371,10 @@ func (s *Store) Stats(ctx context.Context, filter store.StatsFilter) (store.Stat
 		}
 		day := createdAt.UTC().Format("2006-01-02")
 		stats.Runs++
-		stats.CostMicros += cost
+		stats.CostMicros = saturatingAddInt64(stats.CostMicros, cost)
 		topBucket := dayBucket(topDays, day)
 		topBucket.runs++
-		topBucket.costMicros += cost
+		topBucket.costMicros = saturatingAddInt64(topBucket.costMicros, cost)
 		index, ok := projectIndex[projectID]
 		if !ok {
 			index = len(stats.ByProject)
@@ -1354,10 +1382,10 @@ func (s *Store) Stats(ctx context.Context, filter store.StatsFilter) (store.Stat
 			stats.ByProject = append(stats.ByProject, store.ProjectStats{ProjectID: projectID})
 		}
 		stats.ByProject[index].Runs++
-		stats.ByProject[index].CostMicros += cost
+		stats.ByProject[index].CostMicros = saturatingAddInt64(stats.ByProject[index].CostMicros, cost)
 		projectBucket := dayBucket(projectDaysFor(projectDays, projectID), day)
 		projectBucket.runs++
-		projectBucket.costMicros += cost
+		projectBucket.costMicros = saturatingAddInt64(projectBucket.costMicros, cost)
 		if verdict.String == "BLOCKING" {
 			stats.Blocking++
 			stats.ByProject[index].Blocking++
@@ -1509,79 +1537,78 @@ func (s *Store) Stats(ctx context.Context, filter store.StatsFilter) (store.Stat
 	stats.QualityByProvider = quality
 
 	modelIndex := make(map[string]int)
+	latencies := make(map[string][]float64)
+	latencyTotals := make(map[string]float64)
+	// Aggregate in Go: SQLite SUM fails with "integer overflow" when two
+	// legitimate rows hold values whose sum is outside int64.
 	modelRows, err := s.db.QueryContext(ctx, `SELECT
-		c.provider, c.model, COUNT(*),
-		COALESCE(SUM(CASE WHEN c.error_kind IS NULL OR c.error_kind = '' THEN 0 ELSE 1 END), 0),
-		COALESCE(SUM(c.input_tokens), 0), COALESCE(SUM(c.output_tokens), 0),
-		COALESCE(AVG(c.latency_ms), 0)
+		c.provider, c.model, c.error_kind, c.input_tokens, c.output_tokens, c.latency_ms
 		FROM llm_calls c JOIN workflows w ON w.id = c.workflow_id `+where+`
-		GROUP BY c.provider, c.model ORDER BY c.provider, c.model`, args...)
+		ORDER BY c.provider, c.model`, args...)
 	if err != nil {
 		return stats, fmt.Errorf("sqlite: stats llm calls: %w", err)
 	}
 	for modelRows.Next() {
 		var (
-			entry      store.ModelStats
-			avgLatency float64
+			provider  string
+			model     string
+			errorKind sql.NullString
+			input     int64
+			output    int64
+			latencyMS int64
 		)
-		if err := modelRows.Scan(&entry.Provider, &entry.Model, &entry.Calls,
-			&entry.Errors, &entry.InputTokens, &entry.OutputTokens, &avgLatency); err != nil {
+		if err := modelRows.Scan(&provider, &model, &errorKind, &input, &output, &latencyMS); err != nil {
 			modelRows.Close()
 			return stats, fmt.Errorf("sqlite: scan stats llm call: %w", err)
 		}
-		entry.AvgLatencyMS = &avgLatency
-		modelIndex[entry.Provider+"\x00"+entry.Model] = len(stats.ByModel)
-		stats.ByModel = append(stats.ByModel, entry)
+		key := provider + "\x00" + model
+		index, ok := modelIndex[key]
+		if !ok {
+			index = len(stats.ByModel)
+			modelIndex[key] = index
+			stats.ByModel = append(stats.ByModel, store.ModelStats{Provider: provider, Model: model})
+		}
+		entry := &stats.ByModel[index]
+		entry.Calls++
+		if errorKind.String != "" {
+			entry.Errors++
+		}
+		entry.InputTokens = saturatingAddInt64(entry.InputTokens, input)
+		entry.OutputTokens = saturatingAddInt64(entry.OutputTokens, output)
+		latencies[key] = append(latencies[key], float64(latencyMS))
+		latencyTotals[key] += float64(latencyMS)
 	}
 	if err := modelRows.Err(); err != nil {
 		modelRows.Close()
 		return stats, fmt.Errorf("sqlite: iterate stats llm calls: %w", err)
 	}
 	modelRows.Close()
-
-	latencyRows, err := s.db.QueryContext(ctx, `SELECT c.provider, c.model, c.latency_ms
-		FROM llm_calls c JOIN workflows w ON w.id = c.workflow_id `+where+`
-		ORDER BY c.provider, c.model, c.latency_ms`, args...)
-	if err != nil {
-		return stats, fmt.Errorf("sqlite: stats latencies: %w", err)
-	}
-	latencies := make(map[string][]float64)
-	for latencyRows.Next() {
-		var (
-			provider string
-			model    string
-			latency  float64
-		)
-		if err := latencyRows.Scan(&provider, &model, &latency); err != nil {
-			latencyRows.Close()
-			return stats, fmt.Errorf("sqlite: scan latency: %w", err)
-		}
-		key := provider + "\x00" + model
-		latencies[key] = append(latencies[key], latency)
-	}
-	if err := latencyRows.Err(); err != nil {
-		latencyRows.Close()
-		return stats, fmt.Errorf("sqlite: iterate latencies: %w", err)
-	}
-	latencyRows.Close()
 	for i := range stats.ByModel {
 		entry := &stats.ByModel[i]
+		key := entry.Provider + "\x00" + entry.Model
 		if entry.Calls > 0 {
 			rate := float64(entry.Errors) / float64(entry.Calls)
 			entry.ErrorRate = &rate
+			avg := latencyTotals[key] / float64(entry.Calls)
+			entry.AvgLatencyMS = &avg
 		}
-		if values := latencies[entry.Provider+"\x00"+entry.Model]; len(values) > 0 {
+		if values := latencies[key]; len(values) > 0 {
 			p50 := percentile(values, 50)
 			entry.P50LatencyMS = &p50
 		}
 	}
 
-	costRows, err := s.db.QueryContext(ctx, `SELECT
-		n.provider, n.model, COALESCE(SUM(n.cost_micros), 0)
-		FROM workflow_nodes n JOIN workflows w ON w.id = n.workflow_id `+where+`
-		AND n.provider IS NOT NULL AND n.provider <> ''
+	costWhere := where
+	if costWhere == "" {
+		costWhere = "WHERE "
+	} else {
+		costWhere += " AND "
+	}
+	costRows, err := s.db.QueryContext(ctx, `SELECT n.provider, n.model, n.cost_micros
+		FROM workflow_nodes n JOIN workflows w ON w.id = n.workflow_id `+costWhere+`
+		n.provider IS NOT NULL AND n.provider <> ''
 		AND n.model IS NOT NULL AND n.model <> ''
-		GROUP BY n.provider, n.model`, args...)
+		ORDER BY n.provider, n.model`, args...)
 	if err != nil {
 		return stats, fmt.Errorf("sqlite: stats model costs: %w", err)
 	}
@@ -1602,7 +1629,7 @@ func (s *Store) Stats(ctx context.Context, filter store.StatsFilter) (store.Stat
 			modelIndex[key] = index
 			stats.ByModel = append(stats.ByModel, store.ModelStats{Provider: provider, Model: model})
 		}
-		stats.ByModel[index].CostMicros += cost
+		stats.ByModel[index].CostMicros = saturatingAddInt64(stats.ByModel[index].CostMicros, cost)
 	}
 	if err := costRows.Err(); err != nil {
 		costRows.Close()

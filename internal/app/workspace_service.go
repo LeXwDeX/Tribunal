@@ -683,7 +683,7 @@ func onboardingErrorClass(reason string) string {
 		return "network"
 	case "bad_request":
 		return "config"
-	case "rate_limited", "overloaded", "context_too_long", "timeout", "canceled", "panic":
+	case "rate_limited", "overloaded", "context_too_long", "timeout", "canceled", "panic", "unsafe_model_response":
 		return reason
 	default:
 		return errclass.Internal
@@ -702,7 +702,7 @@ func workspaceErrorClass(err error) string {
 			return "network"
 		case llm.ErrBadRequest:
 			return "config"
-		case llm.ErrOverloaded, llm.ErrContextTooLong:
+		case llm.ErrOverloaded, llm.ErrContextTooLong, "unsafe_model_response":
 			return string(upstream.Kind)
 		default:
 			return errclass.Internal
@@ -711,7 +711,7 @@ func workspaceErrorClass(err error) string {
 	switch class := errclass.Of(err); class {
 	case errclass.Timeout, errclass.Canceled, errclass.Panic, errclass.Internal:
 		return class
-	case "upstream_auth", "rate_limited", "network", "config", "overloaded", "context_too_long":
+	case "upstream_auth", "rate_limited", "network", "config", "overloaded", "context_too_long", "unsafe_model_response":
 		return class
 	default:
 		return errclass.Internal

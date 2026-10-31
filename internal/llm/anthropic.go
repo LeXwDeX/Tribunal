@@ -204,6 +204,9 @@ func anthropicResponse(message *anthropic.Message, defaultModel string) (*Respon
 		return nil, &Error{Kind: ErrTransient, Err: errors.New("provider returned an empty response")}
 	}
 	out := Message{Role: RoleAssistant}
+	if malformedWireList(message.JSON.Content.Raw(), len(message.Content), message.RawJSON() != "") {
+		out.Parts = append(out.Parts, Part{Type: PartToolCall, ToolCall: &ToolCall{}})
+	}
 	for _, block := range message.Content {
 		switch block.Type {
 		case "text":
@@ -229,10 +232,22 @@ func anthropicResponse(message *anthropic.Message, defaultModel string) (*Respon
 				},
 			})
 		case "tool_use":
+			tool := block.AsToolUse()
+			caller := tool.JSON.Caller.Raw()
+			toolset := tool.JSON.ToolsetName.Raw()
+			if (block.RawJSON() != "" && (!wireString(block.JSON.ID.Raw()) || !wireString(block.JSON.Name.Raw()))) ||
+				(caller != "" && caller != "null" && tool.Caller.Type != "direct") ||
+				(toolset != "" && toolset != "null" && (!wireString(toolset) || tool.ToolsetName != "")) {
+				out.Parts = append(out.Parts, Part{Type: PartToolCall, ToolCall: &ToolCall{}})
+				continue
+			}
 			out.Parts = append(out.Parts, Part{
 				Type:     PartToolCall,
 				ToolCall: &ToolCall{ID: block.ID, Name: block.Name, Input: block.Input},
 			})
+		default:
+			// No other content block type was requested or can be replayed here.
+			out.Parts = append(out.Parts, Part{Type: PartToolCall, ToolCall: &ToolCall{}})
 		}
 	}
 	stop := StopEndTurn
@@ -255,18 +270,32 @@ func anthropicResponse(message *anthropic.Message, defaultModel string) (*Respon
 	if model == "" {
 		model = defaultModel
 	}
+	rawUsage, usageComplete := anthropicUsage(message.Usage, message.RawJSON())
+	// Anthropic reports uncached input, cache reads and cache creation separately.
+	usage := AddUsage(rawUsage, Usage{InputTokens: rawUsage.CacheReadTokens})
+	usage = AddUsage(usage, Usage{InputTokens: rawUsage.CacheWriteTokens})
+	if !usageComplete {
+		return nil, &Error{Kind: ErrUnsafeResponse, Err: errors.New("provider returned invalid token usage"), Usage: usage, responseObserved: true}
+	}
 	return &Response{
 		Message:    out,
 		StopReason: stop,
-		Usage: Usage{
-			// Anthropic reports uncached input, cache reads and cache creation separately.
-			InputTokens:      message.Usage.InputTokens + message.Usage.CacheReadInputTokens + message.Usage.CacheCreationInputTokens,
-			OutputTokens:     message.Usage.OutputTokens,
-			CacheReadTokens:  message.Usage.CacheReadInputTokens,
-			CacheWriteTokens: message.Usage.CacheCreationInputTokens,
-			ReasoningTokens:  message.Usage.OutputTokensDetails.ThinkingTokens,
-		},
-		Model:     model,
-		RequestID: message.ID,
+		Usage:      usage,
+		Model:      model,
+		RequestID:  message.ID,
 	}, nil
+}
+
+func anthropicUsage(usage anthropic.Usage, responseRaw string) (Usage, bool) {
+	if raw := usage.RawJSON(); raw != "" || responseRaw != "" {
+		return wireUsageFromResponse(responseRaw, raw, anthropicUsageFields)
+	}
+	converted := Usage{
+		InputTokens:      usage.InputTokens,
+		OutputTokens:     usage.OutputTokens,
+		CacheReadTokens:  usage.CacheReadInputTokens,
+		CacheWriteTokens: usage.CacheCreationInputTokens,
+		ReasoningTokens:  usage.OutputTokensDetails.ThinkingTokens,
+	}
+	return converted, ValidUsage(converted)
 }

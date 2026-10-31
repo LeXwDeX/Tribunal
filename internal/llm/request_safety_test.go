@@ -32,7 +32,7 @@ func TestRejectInvalidToolCallHistoryBeforeHTTP(t *testing.T) {
 
 const chatEmptyChoices = `{"id":"empty","object":"chat.completion","created":1,"model":"test","choices":[],"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}}`
 
-const responsesFailed = `{"id":"failed","object":"response","created_at":1,"model":"test","status":"failed","output":[],"usage":{"input_tokens":11,"output_tokens":7}}`
+const responsesFailed = `{"id":"failed","object":"response","created_at":1,"model":"test","status":"failed","error":{"code":"server_error","message":"temporary"},"output":[],"usage":{"input_tokens":11,"output_tokens":7}}`
 
 const responsesOK = `{"id":"ok","object":"response","created_at":1,"model":"test","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":1,"output_tokens":1}}`
 

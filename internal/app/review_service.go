@@ -516,6 +516,14 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 
 	cfg, err := resolveSecureReviewConfig(project, inputs.RepoDocs, s.reviewDefaults, s.profiles)
 	if err != nil {
+		// A retrigger of the same head is a new generation. The previous
+		// success status must not stay green when this generation cannot run.
+		if errors.Is(err, ErrInvalidRepoConfig) {
+			publishErr := s.publishPreWorkflowFailure(ctx, project, token, control, payload)
+			if preWorkflowPublishRetryable(publishErr) {
+				return fmt.Errorf("app: publish pre-workflow failure: %w", publishErr)
+			}
+		}
 		return PermanentJob(err)
 	}
 	filtered := func() bool {
@@ -875,7 +883,7 @@ func (s *ReviewService) settleReviewSnapshot(ctx context.Context, payload review
 		s.setReviewStatus(ctx, payload.ProjectID, payload.MRIID, payload.Generation, attempts,
 			payload.HeadSHA, payload.Profile, reviewStatusPublishing, "")
 		var publishErr error
-		if cfg.Settings.PostFailureNote {
+		if cfg.Settings.PostFailureNote || cfg.Settings.CommitStatus {
 			publishErr = s.publishFailure(ctx, wfID, snapshot)
 		} else {
 			publishErr = s.skipPublication(ctx, wfID, failureNoteDisabledReason)

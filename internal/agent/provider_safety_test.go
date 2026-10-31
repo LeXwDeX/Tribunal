@@ -250,7 +250,7 @@ func TestResponsesFailedStatusWithRefusalDoesNotRetry(t *testing.T) {
 	raw, _ = json.Marshal(body)
 	client, count, records, _ := safetyClient(t, "openai-responses", raw)
 	result, tools, submits, err := safetyRun(client)
-	assertSafetyFailure(t, result, err, tools, submits, count, *records, llm.StopRefusal)
+	assertFailedProviderCall(t, result, err, tools, submits, count, *records, llm.StopRefusal)
 }
 
 func TestResponsesFailedStatusWithToolDoesNotRetry(t *testing.T) {
@@ -264,7 +264,36 @@ func TestResponsesFailedStatusWithToolDoesNotRetry(t *testing.T) {
 	raw, _ = json.Marshal(body)
 	client, count, records, _ := safetyClient(t, "openai-responses", raw)
 	result, tools, submits, err := safetyRun(client)
-	assertSafetyFailure(t, result, err, tools, submits, count, *records, llm.StopOther)
+	assertFailedProviderCall(t, result, err, tools, submits, count, *records, llm.StopOther)
+}
+
+func assertFailedProviderCall(t *testing.T, result *RunResult, err error, tools, submits int, count *atomic.Int32, records []llm.CallRecord, stop ...llm.StopReason) {
+	t.Helper()
+	var failure *llm.Error
+	if !errors.Is(err, ErrUnsafeResponse) || !errors.As(err, &failure) || failure.Kind != llm.ErrUnsafeResponse || failure.Retryable() || tools != 0 || submits != 0 {
+		t.Fatalf("failed provider call accepted: err=%v tools=%d submits=%d", err, tools, submits)
+	}
+	if failure.ErrorCode() != "unsafe_model_response" {
+		t.Fatalf("failed provider call has the wrong safety class: %s", failure.ErrorCode())
+	}
+	if count.Load() != 1 || len(records) != 1 || records[0].Audit == nil || records[0].Audit.Response == nil {
+		t.Fatalf("failed provider call retried or lost its audit: requests=%d records=%+v", count.Load(), records)
+	}
+	if len(stop) > 0 && (records[0].Response == nil || records[0].Response.StopReason != stop[0] || records[0].Audit.Response.StopReason != string(stop[0])) {
+		t.Fatalf("failed provider call lost its safe stop reason: records=%+v", records)
+	}
+	if result == nil || result.Turns != 1 || result.Usage.InputTokens != 11 || result.Usage.OutputTokens != 7 || records[0].Audit.Response.Usage != result.Usage {
+		t.Fatalf("partial usage lost: result=%+v audit=%+v", result, records[0].Audit.Response)
+	}
+	for _, value := range []any{records, result.Transcript} {
+		raw, marshalErr := json.Marshal(value)
+		if marshalErr != nil || strings.Contains(string(raw), safetySecret) || strings.Contains(string(raw), "safety-key-canary") {
+			t.Fatalf("failed provider call leaked data or is not serializable: %v", marshalErr)
+		}
+	}
+	if strings.Contains(err.Error(), safetySecret) || strings.Contains(err.Error(), "safety-key-canary") {
+		t.Fatal("error leaked parameters or key")
+	}
 }
 
 func TestProviderSafetyBlockedStops(t *testing.T) {
@@ -589,6 +618,7 @@ func TestProviderSafetyResponsesFailedRetryUsageAccumulates(t *testing.T) {
 		t.Fatal(err)
 	}
 	body["status"] = "failed"
+	body["error"] = map[string]any{"code": "server_error"}
 	failed, _ = json.Marshal(body)
 	ok := safetyResponse(t, "openai-responses", "", false, []safetyCall{{"s1", SubmitToolName, `{}`, false}}, false)
 	client, count, records, _ := safetyClient(t, "openai-responses", failed, ok)
@@ -614,6 +644,7 @@ func TestProviderSafetyResponsesRetryExhaustionKeepsUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 	body["status"] = "failed"
+	body["error"] = map[string]any{"code": "server_error"}
 	failed, _ = json.Marshal(body)
 	replies := make([][]byte, 5)
 	for i := range replies {

@@ -422,33 +422,15 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 		if result.Verdict == review.VerdictPass {
 			state = "success"
 		}
-		status := gitlab.CommitStatus{
-			State:       state,
-			Name:        "ai-review",
-			TargetURL:   p.detailURL(workflowID),
-			Description: statusDescription(result.Verdict, groups),
-		}
-		if err := p.setCommitStatus(ctx, loaded.token, loaded.project.ID, loaded.dossier.DiffVersion.HeadSHA, status, recheck); err != nil {
-			return err
-		}
-		if _, err := p.store.UpsertPublication(ctx, store.Publication{
-			ProjectID:   loaded.project.ID,
-			MRIID:       loaded.mrIID,
-			Kind:        statusPublishKind,
-			PublishKey:  commitStatusPublishKey(loaded.dossier.DiffVersion.HeadSHA, state),
-			GitlabID:    status.Name,
-			WorkflowID:  workflowID,
-			Fingerprint: loaded.record.Hash,
-		}); err != nil {
+		if err := p.publishCommitStatus(ctx, loaded, state, statusDescription(result.Verdict, groups), recheck); err != nil {
 			return err
 		}
 	}
 	return p.store.SetWorkflowPublicationState(ctx, workflowID, store.WorkflowPublicationPublished, "")
 }
 
-// PublishFailure publishes the incomplete-review summary. It never writes a
-// commit status or findings. Publication state follows the same retry rules as
-// a normal publication.
+// PublishFailure publishes the enabled failure status and incomplete summary.
+// Publication state follows the same retry rules as a normal publication.
 func (p *Publisher) PublishFailure(ctx context.Context, workflowID, reason string) error {
 	unlock, err := p.lockWorkflow(ctx, workflowID)
 	if err != nil {
@@ -540,6 +522,17 @@ func (p *Publisher) publishFailure(ctx context.Context, workflowID, reason strin
 	}
 	if loaded.dossier.DiffVersion.BaseSHA != "" && !strings.EqualFold(version.BaseSHA, loaded.dossier.DiffVersion.BaseSHA) {
 		return p.stale(ctx, workflowID, "merge request base changed")
+	}
+	if cfg.Settings.CommitStatus {
+		if err := p.publishCommitStatus(ctx, loaded, "failed", statusDescription(review.VerdictIncomplete, nil), recheck); err != nil {
+			return err
+		}
+	}
+	if !cfg.Settings.PostFailureNote {
+		if !cfg.Settings.CommitStatus {
+			return p.store.SetWorkflowPublicationStateIfPending(ctx, workflowID, failureNoteDisabledReason)
+		}
+		return p.store.SetWorkflowPublicationState(ctx, workflowID, store.WorkflowPublicationPublished, "")
 	}
 	body, err := review.RenderSummary(review.SummaryInput{
 		Verdict:          review.VerdictIncomplete,
@@ -972,6 +965,22 @@ func (p *Publisher) createDiscussion(ctx context.Context, token string, projectI
 // idempotency key. internal/server parses this format for the admin detail.
 func commitStatusPublishKey(sha, state string) string {
 	return "status:" + sha + ":" + state
+}
+
+func (p *Publisher) publishCommitStatus(ctx context.Context, loaded *loadedReview, state, description string, recheck func() error) error {
+	status := gitlab.CommitStatus{
+		State: state, Name: "ai-review", TargetURL: p.detailURL(loaded.workflow.ID), Description: description,
+	}
+	sha := loaded.dossier.DiffVersion.HeadSHA
+	if err := p.setCommitStatus(ctx, loaded.token, loaded.project.ID, sha, status, recheck); err != nil {
+		return err
+	}
+	_, err := p.store.UpsertPublication(ctx, store.Publication{
+		ProjectID: loaded.project.ID, MRIID: loaded.mrIID, Kind: statusPublishKind,
+		PublishKey: commitStatusPublishKey(sha, state), GitlabID: status.Name,
+		WorkflowID: loaded.workflow.ID, Fingerprint: loaded.record.Hash,
+	})
+	return err
 }
 
 func (p *Publisher) setCommitStatus(ctx context.Context, token string, projectID int64, sha string, status gitlab.CommitStatus, recheck func() error) error {

@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"math"
 	"net/url"
 	"strings"
 )
@@ -89,6 +90,19 @@ func SanitizeToolCalls(message Message, allow bool) (Message, bool) {
 	return message, invalid
 }
 
+// SDKs may coerce a non-string JSON value into a Go string.
+func wireString(raw string) bool {
+	return len(raw) > 0 && raw[0] == '"'
+}
+
+func malformedWireList(raw string, decodedCount int, required bool) bool {
+	if raw == "" || raw == "null" {
+		return required
+	}
+	var entries []json.RawMessage
+	return raw[0] != '[' || json.Unmarshal([]byte(raw), &entries) != nil || len(entries) != decodedCount
+}
+
 // ToolResult is the result of running a tool.
 type ToolResult struct {
 	CallID  string `json:"call_id"`
@@ -164,13 +178,59 @@ type Response struct {
 
 // Usage reports token consumption. InputTokens includes cache reads and writes;
 // the cache fields are details, not additional tokens. CacheWriteTokens is
-// reported by providers that expose cache writes separately.
+// reported by providers that expose cache writes separately. Incomplete marks
+// detected invalid or unrepresentable counts; false does not prove completeness.
 type Usage struct {
 	InputTokens      int64 `json:"input_tokens"`
 	OutputTokens     int64 `json:"output_tokens"`
 	CacheReadTokens  int64 `json:"cache_read_tokens"`
 	CacheWriteTokens int64 `json:"cache_write_tokens"`
 	ReasoningTokens  int64 `json:"reasoning_tokens"`
+	Incomplete       bool  `json:"-"`
+}
+
+// ValidUsage rejects invalid provider counts before they can affect a budget.
+func ValidUsage(u Usage) bool {
+	return u.InputTokens >= 0 && u.OutputTokens >= 0 && u.CacheReadTokens >= 0 && u.CacheWriteTokens >= 0 && u.ReasoningTokens >= 0
+}
+
+// AddUsage preserves nonnegative known usage and saturates on overflow.
+func AddUsage(a, b Usage) Usage {
+	incomplete := a.Incomplete || b.Incomplete
+	add := func(x, y int64) int64 {
+		if x < 0 {
+			incomplete = true
+			x = 0
+		}
+		if y < 0 {
+			incomplete = true
+			y = 0
+		}
+		if x > math.MaxInt64-y {
+			incomplete = true
+			return math.MaxInt64
+		}
+		return x + y
+	}
+	out := Usage{InputTokens: add(a.InputTokens, b.InputTokens), OutputTokens: add(a.OutputTokens, b.OutputTokens),
+		CacheReadTokens: add(a.CacheReadTokens, b.CacheReadTokens), CacheWriteTokens: add(a.CacheWriteTokens, b.CacheWriteTokens),
+		ReasoningTokens: add(a.ReasoningTokens, b.ReasoningTokens)}
+	out.Incomplete = incomplete || out.InputTokens > math.MaxInt64-out.OutputTokens
+	return out
+}
+
+// MaxUsage combines overlapping reports without counting the same tokens twice.
+func MaxUsage(a, b Usage) Usage {
+	a = AddUsage(Usage{}, a)
+	b = AddUsage(Usage{}, b)
+	return AddUsage(Usage{}, Usage{
+		InputTokens:      max(a.InputTokens, b.InputTokens),
+		OutputTokens:     max(a.OutputTokens, b.OutputTokens),
+		CacheReadTokens:  max(a.CacheReadTokens, b.CacheReadTokens),
+		CacheWriteTokens: max(a.CacheWriteTokens, b.CacheWriteTokens),
+		ReasoningTokens:  max(a.ReasoningTokens, b.ReasoningTokens),
+		Incomplete:       a.Incomplete || b.Incomplete,
+	})
 }
 
 // Client is the single interface used by the agent loop.

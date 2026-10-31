@@ -32,13 +32,16 @@ type Workflow struct {
 	PublicationState string `json:"publication_state,omitempty"`
 	// PublicationError is a bounded, sanitized reason. It is never a raw
 	// upstream error.
-	PublicationError string     `json:"publication_error,omitempty"`
-	TokensIn         int64      `json:"tokens_in"`
-	TokensOut        int64      `json:"tokens_out"`
-	CostMicros       int64      `json:"cost_micros"`
-	CreatedAt        time.Time  `json:"created_at"`
-	StartedAt        *time.Time `json:"started_at,omitempty"`
-	FinishedAt       *time.Time `json:"finished_at,omitempty"`
+	PublicationError string `json:"publication_error,omitempty"`
+	TokensIn         int64  `json:"tokens_in"`
+	TokensOut        int64  `json:"tokens_out"`
+	CostMicros       int64  `json:"cost_micros"`
+	// UsageIncomplete reports a detected missing usage result. False does not
+	// prove that old events or providers reported every token.
+	UsageIncomplete bool       `json:"usage_incomplete"`
+	CreatedAt       time.Time  `json:"created_at"`
+	StartedAt       *time.Time `json:"started_at,omitempty"`
+	FinishedAt      *time.Time `json:"finished_at,omitempty"`
 }
 
 // WorkflowFilter narrows ListWorkflows. Zero values do not filter. Since is an
@@ -78,10 +81,13 @@ type WorkflowNode struct {
 	TokensIn   int64           `json:"tokens_in"`
 	TokensOut  int64           `json:"tokens_out"`
 	CostMicros int64           `json:"cost_micros"`
-	AddedRev   int64           `json:"added_rev"`
-	QueuedAt   *time.Time      `json:"queued_at,omitempty"`
-	StartedAt  *time.Time      `json:"started_at,omitempty"`
-	FinishedAt *time.Time      `json:"finished_at,omitempty"`
+	// UsageIncomplete reports a detected missing usage result. False does not
+	// prove that old events or providers reported every token.
+	UsageIncomplete bool       `json:"usage_incomplete"`
+	AddedRev        int64      `json:"added_rev"`
+	QueuedAt        *time.Time `json:"queued_at,omitempty"`
+	StartedAt       *time.Time `json:"started_at,omitempty"`
+	FinishedAt      *time.Time `json:"finished_at,omitempty"`
 }
 
 // Publication records one object published to GitLab. The unique key

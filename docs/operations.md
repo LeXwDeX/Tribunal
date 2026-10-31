@@ -703,6 +703,14 @@ curl -fsS http://127.0.0.1:18080/readyz
 
 迁移文件编译在二进制内，服务启动时自动执行；只应用尚未执行的版本，没有 down migration。升级前必须备份。
 
+### 用量完整性与审计升级（Unreleased）
+
+`0024_workflow_usage_incomplete.sql` 只向 `workflows` 和 `workflow_nodes` 追加非空 `usage_incomplete` 列，默认 false；无 down migration。历史行不回填，false 只能表示没有检测到缺失，不能证明历史账单或预算用量完整。新事件可带此字段；旧二进制可能因严格解码拒绝这些事件。升级前按第 7 节做一致性备份并核验数据库、工作区、配置和匹配镜像；不要只换回旧镜像。回退时先备份当前状态、核对事件与目标版本兼容性，并按第 7 节在隔离环境验证匹配的升级前快照和镜像；恢复旧快照会丢失之后的新本地数据，须另外核对 GitLab 等外部副作用。其他未发布分支的 `0020`–`0023` 当前源码检查未重建上述两张表，未来合并前仍须重新核验迁移编号、顺序及实际影响，不能据此承诺兼容回退。
+
+新的 LLM 审计只写安全结构计数、用量及固定状态，不写 prompt、模型输出、工具参数/输出、推理内容、错误原文或上游响应 ID。调用列表使用本地 `id`；新旧行的顶层 `request_id` 不再对任何调用方返回。`include_payload=true` 仍要求项目 manage：历史 payload 不删除、不迁移，可能包含明文 prompt、输出和上游 ID。数据库、WAL、快照与备份也可能保有历史原文，限制访问并按组织的保留与密钥事件流程处理；不要将历史内容复制到日志、聊天或工单，也不要为升级擅自删除历史行。回退旧二进制可能再次暴露历史字段。
+
+新 payload 的 request、response 分别有 `_format=audit_metadata_v1`；未标记历史 payload 可能是完整旧请求/响应、旧元数据或截断摘要，甚至无法判别。升级依赖该接口的脚本以格式标记和字段类型分支处理，保留 unknown 分支，不得把新元数据的数字 `messages` 当成旧消息数组。详见[节点调用审计格式](design/03-http-api.md#节点调用审计格式)。
+
 ### dossier 归属迁移（v1.2.0）
 
 v1.2.0 共四个迁移：`0016_dossier_mr_title`、`0017_mcp_config_seal`、`0018_dossier_project`、`0019_job_defer_window`，都没有 down migration。`0018_dossier_project` 为 dossier 增加内部项目归属。旧记录仅根据实际关联的 workflow 回填；没有关联 workflow 的旧孤儿保持未知归属，不从快照猜测。迁移不改写压缩快照内容。项目删除时清理本项目已知归属的孤儿；未知归属记录保留。

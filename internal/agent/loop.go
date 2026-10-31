@@ -97,7 +97,7 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 	submitFailures := 0
 	askedForSubmit := false
 	partial := func(err error) (*RunResult, error) {
-		if turns == 0 && usage.InputTokens == 0 && usage.OutputTokens == 0 &&
+		if turns == 0 && !usage.Incomplete && usage.InputTokens == 0 && usage.OutputTokens == 0 &&
 			usage.CacheReadTokens == 0 && usage.CacheWriteTokens == 0 && usage.ReasoningTokens == 0 {
 			return nil, err
 		}
@@ -112,12 +112,6 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 		if err := ctx.Err(); err != nil {
 			return partial(err)
 		}
-		if spec.BeforeTurn != nil {
-			if err := spec.BeforeTurn(ctx, usage); err != nil {
-				return partial(err)
-			}
-		}
-
 		req := &llm.Request{
 			System:      spec.System,
 			Messages:    append([]llm.Message(nil), messages...),
@@ -134,27 +128,62 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 		meta.Turn = turn
 		callCtx := llm.WithCallMeta(ctx, meta)
 
-		resp, err := spec.Client.Generate(callCtx, req)
+		generate := func(req *llm.Request) (*llm.Response, error) {
+			if err := callCtx.Err(); err != nil {
+				return nil, err
+			}
+			var guard func(context.Context, llm.Usage) error
+			if spec.BeforeTurn != nil {
+				guard = func(ctx context.Context, attempted llm.Usage) error {
+					return spec.BeforeTurn(ctx, llm.AddUsage(usage, attempted))
+				}
+			}
+			resp, err := llm.GenerateGuarded(callCtx, spec.Client, req, guard)
+			if resp != nil || llm.HasObservedResponse(err) {
+				turns = turn
+			}
+			used, valid := llm.ErrorUsage(err)
+			if resp != nil {
+				valid = valid && llm.ValidUsage(resp.Usage)
+				used = llm.MaxUsage(used, resp.Usage)
+			}
+			usage = llm.AddUsage(usage, used)
+			if !valid {
+				if errors.Is(err, ErrUnsafeResponse) || llm.IsUnsafeResponse(err) {
+					return nil, err
+				}
+				return nil, &llm.Error{Kind: llm.ErrUnsafeResponse, Err: errors.New("provider returned invalid token usage")}
+			}
+			return resp, err
+		}
+		resp, err := generate(req)
 		if err != nil && req.ToolChoice == SubmitToolName {
 			var failure *llm.Error
-			if errors.As(err, &failure) && failure.Kind == llm.ErrBadRequest {
+			var guardErr *llm.AttemptGuardError
+			if !errors.As(err, &guardErr) && !errors.Is(err, ErrUnsafeResponse) && !llm.IsUnsafeResponse(err) &&
+				!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) &&
+				errors.As(err, &failure) && failure.Kind == llm.ErrBadRequest {
 				// Some reasoning gateways reject every non-auto tool choice. Let
 				// the final prompt request submit_result without forcing the choice.
-				addErrorUsage(&usage, err)
 				fallback := *req
 				fallback.ToolChoice = ""
-				resp, err = spec.Client.Generate(callCtx, &fallback)
+				resp, err = generate(&fallback)
+				var stopped *llm.AttemptGuardError
+				if errors.As(err, &stopped) && stopped.Previous == nil {
+					previous := *failure
+					err = &llm.AttemptGuardError{Err: err, Usage: stopped.Usage, Previous: &previous}
+				}
 			}
 		}
 		if err != nil {
-			addErrorUsage(&usage, err)
+			if errors.Is(err, ErrUnsafeResponse) || llm.IsUnsafeResponse(err) {
+				return partial(&unsafeProviderError{err: err})
+			}
 			return partial(err)
 		}
 		if resp == nil {
 			return partial(errors.New("agent: model returned a nil response"))
 		}
-		turns = turn
-		addUsage(&usage, resp.Usage)
 		message, invalid := llm.SanitizeToolCalls(resp.Message, resp.StopReason == llm.StopToolUse)
 		messages = append(messages, message)
 		if err := ctx.Err(); err != nil {
@@ -202,7 +231,7 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 				if decodeErr != nil {
 					submitFailures++
 					results = append(results, plainToolResult(call.ID,
-						"submit_result rejected: validation failed", true))
+						"submit_result rejected: validation failed; "+validationFeedback(decodeErr), true))
 					continue
 				}
 				submitted = true
@@ -213,19 +242,24 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 
 			tool, ok := tools[call.Name]
 			if !ok {
-				results = append(results, wrapToolResult(call.ID, call.Name,
-					Result{Content: unknownToolMessage(call.Name, toolDefs), IsError: true},
+				results = append(results, wrapToolResult(call.ID, "tool",
+					Result{Content: "unknown tool; choose a tool from the available definitions", IsError: true},
 					maxOutput))
 				continue
 			}
 
 			res, callErr := tool.Call(ctx, call.Input)
 			if callErr != nil {
-				// Tool errors may quote model-provided arguments. Return a stable
-				// category instead of echoing attacker-controlled input.
-				res = Result{Content: "tool execution failed", IsError: true}
+				res = Result{Content: "tool execution failed; " + validationFeedback(builtinFeedback(tool, callErr)), IsError: true}
+			} else if res.IsError {
+				// MCP errors can carry secrets even when the Go error is nil.
+				res = Result{Content: "tool execution failed; check the tool schema and access rules", IsError: true}
 			}
-			results = append(results, wrapToolResult(call.ID, call.Name, res, maxOutput))
+			name := call.Name
+			if res.IsError {
+				name = "tool"
+			}
+			results = append(results, wrapToolResult(call.ID, name, res, maxOutput))
 			if err := ctx.Err(); err != nil {
 				return partial(err)
 			}
@@ -251,20 +285,10 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 	return partial(ErrNoSubmit)
 }
 
-func addUsage(dst *llm.Usage, add llm.Usage) {
-	dst.InputTokens += add.InputTokens
-	dst.OutputTokens += add.OutputTokens
-	dst.CacheReadTokens += add.CacheReadTokens
-	dst.CacheWriteTokens += add.CacheWriteTokens
-	dst.ReasoningTokens += add.ReasoningTokens
-}
+type unsafeProviderError struct{ err error }
 
-func addErrorUsage(dst *llm.Usage, err error) {
-	var failure *llm.Error
-	if errors.As(err, &failure) {
-		addUsage(dst, failure.Usage)
-	}
-}
+func (e *unsafeProviderError) Error() string   { return ErrUnsafeResponse.Error() }
+func (e *unsafeProviderError) Unwrap() []error { return []error{ErrUnsafeResponse, e.err} }
 
 func responseToolCalls(message llm.Message) ([]*llm.ToolCall, error) {
 	var calls []*llm.ToolCall
@@ -303,14 +327,6 @@ func decodeSubmit(spec SubmitSpec, raw json.RawMessage) (out any, err error) {
 		return nil, err
 	}
 	return out, nil
-}
-
-func unknownToolMessage(name string, defs []llm.ToolDef) string {
-	available := make([]string, 0, len(defs))
-	for _, def := range defs {
-		available = append(available, def.Name)
-	}
-	return fmt.Sprintf("unknown tool %q; available tools: %s", name, strings.Join(available, ", "))
 }
 
 func plainToolResult(callID, content string, isError bool) llm.Part {

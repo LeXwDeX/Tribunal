@@ -14,7 +14,9 @@ v1.2.0 尚未打 tag；本段记录尚未发布的新改动。`[1.2.0]` 段仅�
 
 ### 修复
 
-- **模型工具调用安全边界**：截断、拒绝或尚未完成的模型响应不再执行工具或接受 `submit_result`；缺失、非对象或格式错误的工具参数不再伪装成 `{}`。同一轮只要存在非法调用就拒绝整批，并保留已知用量。新写入的 LLM 请求和响应审计只保存安全元数据（消息和 Part 计数、工具数量、usage、stop reason 等），不包含提示词等自由文本、工具参数、工具输出、推理内容或错误文本；历史审计不变。工具执行错误和提交校验失败反馈改为固定文案，避免回显参数；模型可按原有上限重试。合法的空对象、多工具调用及推理内容回传保持支持（[#178](https://github.com/LeXwDeX/Tribunal/issues/178)）。
+- **模型工具调用安全边界**：截断、拒绝或尚未完成的模型响应不再执行工具或接受 `submit_result`；缺失、非对象或格式错误的工具参数不再伪装成 `{}`。同一轮只要存在非法调用就拒绝整批，并保留已知用量。工具执行错误和提交校验失败反馈改为固定文案，避免回显参数；模型可按原有上限重试。合法的空对象、多工具调用及推理内容回传保持支持（[#178](https://github.com/LeXwDeX/Tribunal/issues/178)）。
+- **LLM 审计安全与格式**：新请求和响应只写安全元数据，不写提示词、自由文本、工具参数/输出、推理内容、错误原文及上游响应 ID；每个非空 payload 有 `_format=audit_metadata_v1`。agent 因不安全响应拒绝的调用在审计统计中记为 `unsafe_model_response`，不改变重试策略。调用列表使用本地 `id`，不再返回新旧行顶层 `request_id`。历史行不删除、不迁移；manage 用户读取历史 payload 仍可能看到敏感内容。未标记历史 payload 可能是原始消息、早期元数据或截断摘要，客户端须分别处理并保留 unknown 分支；详见[审计格式](docs/design/03-http-api.md#节点调用审计格式)。
+- **用量完整性标记**：新增迁移 `0024_workflow_usage_incomplete`，仅为 workflow 和节点追加标记列；无 down migration。工作流和节点 API 暴露 `usage_incomplete`，历史 false 只表示未发现缺失，不证明历史用量完整。新事件可能使旧二进制严格解码失败；升级前备份并核对回退兼容性，不支持只替换镜像降级。其他未发布分支的 `0020`–`0023` 未来合并时须重新核验迁移顺序及对这些表的影响，详见[运维说明](docs/operations.md#用量完整性与审计升级unreleased)。
 - **同一 MR 的发布串行**：同一 `(project_id, mr_iid)` 的总结评论（包括空评审和失败说明）与 commit status 写入按评审代次串行。每个写入点前重新校验 control 的 generation 和 head；新代次已接管或 MR head 已变化时走既有 stale 路径，旧代次不再覆盖新代次的总结评论或 commit status。不同 MR 仍可并行发布（[#157](https://github.com/LeXwDeX/Tribunal/issues/157)）。
 - **超长 MR 描述不再挤掉 diff**：评审任务先保留任务头和 diff，再为 MR 上下文单独预算。上下文超预算时在 prompt 中写入截断标记，并在评审结果的 warnings 中说明哪些上下文未完整包含；描述、pipeline、issue 不再能挤掉任务指令或 diff。MR 描述另有 8000 字符独立上限，截断时在 prompt 中标记。扩展评审节点的实际 prompt 也纳入二次汇总的覆盖检查。覆盖检查按生成任务时记录的 diff 区段位置逐文件核对（含中和后的内容），文件或包预算导致 diff 缺失或部分截断时记为未解决证据，汇总不能给出 PASS；提前出现的相同 diff 文本不视为覆盖。任务布局版本并入 prompt bundle hash，因此升级后旧的待恢复、待重试或待发布工作流会被判 stale；没有 `prompt_hash` 的旧工作流不再发布。短描述和完整 diff 的评审不受影响（[#158](https://github.com/LeXwDeX/Tribunal/issues/158)）。
 - **会话密钥预检**：`--check-config` 和实际启动都在准备存储前校验 session key；无效值不再通过配置检查，也不会先触发 SQLite 迁移。新旧环境变量的优先级不变；未配置时仍使用临时 key，实际启动会告警（#164）。

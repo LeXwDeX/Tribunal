@@ -373,7 +373,7 @@ func (e *Executor) executeGather(ctx context.Context, in dag.NodeInput) (dag.Nod
 	}
 	budgetExhausted := false
 	if max := wf.Spec.Budget.MaxTokens; max > 0 {
-		used := wf.Usage.InputTokens + wf.Usage.OutputTokens
+		used := wf.Usage.TotalTokens()
 		budgetExhausted = used >= max
 	}
 	gathered, err := gather(GatherInput{
