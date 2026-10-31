@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -676,8 +677,40 @@ func (s *ProjectService) Update(ctx context.Context, id int64, in UpdateProjectI
 		}
 		update.Settings = canonical
 	}
-	project, err := s.store.UpdateProject(ctx, id, update)
+	ws := s.workspaces.Get(id)
+	unlock, err := ws.LifecycleRLock(ctx)
 	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	var project *store.Project
+	write := func(ctx context.Context) error {
+		var err error
+		project, err = s.store.UpdateProject(ctx, id, update)
+		return err
+	}
+	err = ws.ChangeOutboundIf(ctx, func(ctx context.Context) (bool, error) {
+		var err error
+		project, err = s.store.GetProject(ctx, id)
+		if err != nil {
+			return false, err
+		}
+		if update.Profile != nil && *update.Profile != project.Profile ||
+			update.Enabled != nil && *update.Enabled != project.Enabled {
+			return true, nil
+		}
+		if in.Settings != nil {
+			current, err := ParseSettings(project.Settings, s.profiles)
+			if err != nil || !bytes.Equal(current, update.Settings) {
+				return true, nil
+			}
+		}
+		return false, nil
+	}, write)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
 		if errors.Is(err, store.ErrNotFound) {
 			return nil, notFoundError("project not registered")
 		}
@@ -966,22 +999,34 @@ func (s *ProjectService) Delete(ctx context.Context, id int64) error {
 	if id <= 0 {
 		return validationError("invalid project id", Detail{Field: "id", Message: "must be positive"})
 	}
-	// Serialize with enable/disable/register so deletion cannot race a hook
-	// that is being provisioned and leave it unaccounted for at GitLab.
+	ws := s.workspaces.Get(id)
+	// Drain before taking locks held by reviews, then fence new sends before
+	// deletion without acquiring a content lock inside the gate callback. The
+	// drain is bounded by ChangeOutbound; lifecycle and content waits stay
+	// under the caller's context.
+	if err := ws.ChangeOutbound(ctx, func(context.Context) error { return nil }); err != nil {
+		return err
+	}
+	// Serialize with enable/disable/register only after the per-project drain.
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// Lock order: lifecycle first, content second.
-	unlockLifecycle, err := s.workspaces.Get(id).LifecycleLock(ctx)
+	// Lock order: lifecycle first, content second, then the outbound gate.
+	unlockLifecycle, err := ws.LifecycleLock(ctx)
 	if err != nil {
 		return err
 	}
 	defer unlockLifecycle()
-	unlock, err := s.workspaces.Get(id).Lock(ctx)
+	unlock, err := ws.Lock(ctx)
 	if err != nil {
 		return err
 	}
 	defer unlock()
+	return ws.ChangeOutbound(ctx, func(ctx context.Context) error {
+		return s.deleteProjectLocked(ctx, id)
+	})
+}
 
+func (s *ProjectService) deleteProjectLocked(ctx context.Context, id int64) error {
 	project, err := s.store.GetProject(ctx, id)
 	missing := errors.Is(err, store.ErrNotFound)
 	if err != nil && !missing {
@@ -1026,6 +1071,9 @@ func (s *ProjectService) Delete(ctx context.Context, id int64) error {
 		return err
 	}
 	if err := s.store.DeleteProject(ctx, id); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
 		if errors.Is(err, store.ErrNotFound) {
 			return notFoundError("project not registered")
 		}

@@ -65,11 +65,66 @@ statuses:
 		}
 	}
 	if ctx.Err() == nil {
+		if err := s.recoverRepositorySkillOutcomes(ctx); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if ctx.Err() == nil {
 		if err := s.ReconcileSideEffects(ctx); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// A crash after skipping publication can leave its status or reaction unwritten.
+func (s *ReviewService) recoverRepositorySkillOutcomes(ctx context.Context) error {
+	if s.publisher == nil {
+		return nil
+	}
+	var errs []error
+	cursor := ""
+	for {
+		workflows, next, err := s.store.ListWorkflows(ctx, store.WorkflowFilter{
+			Kind: "review", PublicationState: store.WorkflowPublicationSkipped,
+		}, cursor, 50)
+		if err != nil {
+			return errors.Join(append(errs, err)...)
+		}
+		for _, wf := range workflows {
+			if !workflowTerminal(wf.Status) || wf.MRIID == nil {
+				continue
+			}
+			record, err := s.store.GetWorkflowDossier(ctx, wf.ID)
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			if record == nil || review.DossierHasSupportedRepositorySkillCapability(record.Data) {
+				continue
+			}
+			lockedCtx, unlock, err := s.publisher.lockWorkflow(ctx, wf.ID)
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			_, _, err = s.publisher.rejectRepositorySkillPublication(lockedCtx, s.store, wf.ID)
+			unlock()
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
+				errs = append(errs, err)
+			}
+		}
+		if next == "" || next == cursor {
+			return errors.Join(errs...)
+		}
+		cursor = next
+	}
 }
 
 func (s *ReviewService) settleOrphanDossiers(ctx context.Context) error {
@@ -119,6 +174,10 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 		return err
 	}
 	defer unlock()
+	ctx, err = bindOutbound(ctx, ws)
+	if err != nil {
+		return err
+	}
 	current, err := s.store.GetWorkflow(ctx, workflow.ID)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil
@@ -149,6 +208,9 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 		return nil
 	}
 	defer s.executors.Release(ownershipKey)
+	if !review.DossierHasSupportedRepositorySkillCapability(record.Data) {
+		return s.cancelRepositorySkillWorkflow(ctx, workflow.ID)
+	}
 	var dossier review.Dossier
 	if err := json.Unmarshal(record.Data, &dossier); err != nil {
 		return s.cancelWorkspaceWorkflow(ctx, workflow.ID)
@@ -225,10 +287,24 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 	if workflow.Profile != profileName || dossier.Metadata["profile_hash"] == "" || dossier.Metadata["profile_hash"] != s.reviewProfileHash(profile) {
 		return s.cancelWorkflow(ctx, workflow.ID)
 	}
-	execution, err := s.resolveReviewExecution(ctx, project.ID, profile)
+	if dossier.RepositorySkillProvenance != nil && dossier.RepositorySkillProvenance.Mode == "repository" {
+		lister, _ := s.store.(repositorySkillGrantLister)
+		if err := repositorySkillProvenanceCurrent(ctx, lister, project, s.reviewDefaults, &dossier, dossier.RepositorySkillProvenance); err != nil {
+			return s.cancelRepositorySkillWorkflow(ctx, workflow.ID)
+		}
+	}
+	repositoryDeny, err := repositorySkillDenyFromEvidence(dossier.IgnorePolicy.Patterns, dossier.RepositorySkillExcluded)
 	if err != nil {
+		return s.cancelRepositorySkillWorkflow(ctx, workflow.ID)
+	}
+	execution, err := s.resolveReviewExecution(ctx, project, token, profile, dossier.MR.TargetBranch, repositoryDeny)
+	if err != nil {
+		if dossier.RepositorySkillProvenance != nil && dossier.RepositorySkillProvenance.Mode == "repository" {
+			return s.cancelRepositorySkillWorkflow(ctx, workflow.ID)
+		}
 		return err
 	}
+	defer execution.cleanupRepositorySkills()
 	if !s.matchesReviewExecution(project.ID, dossier.Metadata["execution_identity"], execution.digest) {
 		return s.cancelWorkflow(ctx, workflow.ID)
 	}
@@ -259,18 +335,20 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 	resolved.HeadDir = headDir
 	resolved.BaseDir = baseDir
 	executor, err := review.NewExecutor(review.ExecutorDeps{
-		Dossier:  &resolved,
-		Profile:  profile,
-		Graph:    review.GraphConfig{AllowedProviders: s.allowedProviders()},
-		Blocks:   execution.blocks,
-		Clients:  s.clients,
-		Prompts:  s.prompts,
-		AgentRun: execution.agentRunner(s.agentRun),
-		Snapshot: engineSnapshot(s.engine),
-		Tools:    execution.tools,
-		Skills:   execution.skills,
-		Locate:   locateFunc(index),
-		Cost:     s.cost,
+		Dossier:                  &resolved,
+		Profile:                  profile,
+		Graph:                    review.GraphConfig{AllowedProviders: s.allowedProviders()},
+		Blocks:                   execution.blocks,
+		Clients:                  s.clients,
+		Prompts:                  s.prompts,
+		AgentRun:                 execution.agentRunner(s.agentRun),
+		Snapshot:                 engineSnapshot(s.engine),
+		Tools:                    execution.tools,
+		Skills:                   execution.skills,
+		Locate:                   locateFunc(index),
+		Cost:                     s.cost,
+		Outbound:                 outboundSender(ws),
+		RepositorySkillsVerified: execution.repositorySkillsVerified(),
 	})
 	if err != nil {
 		return err
@@ -282,6 +360,9 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 		dossier.DiffVersion.HeadSHA, profileName, reviewStatusRunning, "")
 	superseded, err := s.runWithControl(ctx, project.ID, *workflow.MRIID, workflow.ID, record.Generation, dossier.DiffVersion.HeadSHA)
 	if err != nil {
+		return err
+	}
+	if err := sendOutbound(ctx, ws, func(context.Context) error { return nil }); err != nil {
 		return err
 	}
 	if superseded {
@@ -299,6 +380,9 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 		s.setReviewStatus(ctx, project.ID, *workflow.MRIID, record.Generation, 0,
 			dossier.DiffVersion.HeadSHA, profileName, reviewStatusPublishing, "")
 		if err := s.publish(ctx, workflow.ID); err != nil {
+			if errors.Is(err, workspace.ErrOutboundInvalidated) || errors.Is(err, errDiscussionUnknown) {
+				return err
+			}
 			state := reviewStatusFailed
 			reaction := reviewAwardFail
 			detail := "publication failed"
@@ -436,42 +520,51 @@ func (s *ReviewService) failureNoteEnabled(ctx context.Context, workflowID strin
 // pending. It is safe to call at startup and after a crash.
 func (s *ReviewService) PublishPending(ctx context.Context) error {
 	var errs []error
-	normalRounds := 0
-	for {
-		if err := ctx.Err(); err != nil {
-			return errors.Join(append(errs, err)...)
-		}
-		pending, err := s.store.ListPendingPublications(ctx, 50)
-		if err != nil {
-			return errors.Join(append(errs, err)...)
-		}
-		if len(pending) == 0 {
-			return errors.Join(errs...)
-		}
+	// Workflow creation order is immutable, even when a pending row is retried.
+	for round := 0; round < 3; round++ {
 		progress := false
-		normalRound := false
-		for _, item := range pending {
-			if err := ctx.Err(); err != nil {
-				return errors.Join(append(errs, err)...)
-			}
-			if item.Status != string(dag.WorkflowCancelled) {
-				if normalRounds >= 3 {
-					continue
+		for _, status := range []string{string(dag.WorkflowCancelled), string(dag.WorkflowFailed), string(dag.WorkflowCompleted)} {
+			cursor := ""
+			for {
+				if err := ctx.Err(); err != nil {
+					return errors.Join(append(errs, err)...)
 				}
-				normalRound = true
+				workflows, next, err := s.store.ListWorkflows(ctx, store.WorkflowFilter{
+					Status: status, PublicationState: store.WorkflowPublicationPending,
+				}, cursor, 50)
+				if err != nil {
+					return errors.Join(append(errs, err)...)
+				}
+				for _, workflow := range workflows {
+					if err := ctx.Err(); err != nil {
+						return errors.Join(append(errs, err)...)
+					}
+					dossier, err := s.store.GetWorkflowDossier(ctx, workflow.ID)
+					if errors.Is(err, store.ErrNotFound) {
+						continue
+					}
+					if err != nil {
+						errs = append(errs, err)
+						continue
+					}
+					item := store.PendingPublication{WorkflowID: workflow.ID, JobID: dossier.JobID,
+						ProjectID: workflow.ProjectID, HeadSHA: workflow.HeadSHA,
+						Generation: dossier.Generation, Status: workflow.Status, UpdatedAt: dossier.UpdatedAt}
+					if workflow.MRIID != nil {
+						item.MRIID = *workflow.MRIID
+					}
+					advanced, err := s.publishPendingItem(ctx, item)
+					if err != nil {
+						errs = append(errs, err)
+					} else if advanced {
+						progress = true
+					}
+				}
+				if next == "" || next == cursor {
+					break
+				}
+				cursor = next
 			}
-			advanced, err := s.publishPendingItem(ctx, item)
-			if err != nil {
-				errs = append(errs, err)
-				continue
-			}
-			progress = progress || advanced
-		}
-		if normalRound {
-			normalRounds++
-		}
-		if err := ctx.Err(); err != nil {
-			return errors.Join(append(errs, err)...)
 		}
 		if !progress {
 			break
@@ -501,6 +594,13 @@ func (s *ReviewService) publishPendingItem(ctx context.Context, item store.Pendi
 		if wf == nil || wf.ID != item.WorkflowID || wf.ProjectID != item.ProjectID || wf.Status != item.Status {
 			return false, nil
 		}
+		if s.publisher != nil {
+			if rejected, unknown, err := s.publisher.rejectRepositorySkillPublication(ctx, s.store, item.WorkflowID); err != nil {
+				return false, err
+			} else if rejected {
+				return !unknown, nil
+			}
+		}
 		if err := s.skipPublication(ctx, item.WorkflowID, reviewCancelledReason); err != nil {
 			return false, err
 		}
@@ -516,7 +616,7 @@ func (s *ReviewService) publishPendingItem(ctx context.Context, item store.Pendi
 	if s.publisher == nil {
 		return false, nil
 	}
-	unlock, err := s.publisher.lockWorkflow(ctx, item.WorkflowID)
+	ctx, unlock, err := s.publisher.lockWorkflow(ctx, item.WorkflowID)
 	if errors.Is(err, store.ErrNotFound) {
 		return true, nil
 	}
@@ -531,7 +631,16 @@ func (s *ReviewService) publishPendingItem(ctx context.Context, item store.Pendi
 	if err != nil {
 		return false, err
 	}
-	if wf == nil || wf.ProjectID != item.ProjectID || wf.Status != item.Status {
+	if wf == nil || wf.ProjectID != item.ProjectID || wf.Status != item.Status || wf.PublicationState != store.WorkflowPublicationPending {
+		return true, nil
+	}
+	if rejected, unknown, err := s.publisher.rejectRepositorySkillPublication(ctx, s.store, item.WorkflowID); rejected || err != nil {
+		if err != nil {
+			return false, err
+		}
+		if unknown {
+			return false, errDiscussionUnknown
+		}
 		return true, nil
 	}
 	switch item.Status {
@@ -539,6 +648,16 @@ func (s *ReviewService) publishPendingItem(ctx context.Context, item store.Pendi
 		record, recordErr := s.store.GetWorkflowDossier(ctx, item.WorkflowID)
 		if recordErr != nil {
 			return false, recordErr
+		}
+		if !review.DossierHasNoRepositorySkillCapability(record.Data) {
+			rejected, unknown, err := s.publisher.rejectRepositorySkillPublication(ctx, s.store, item.WorkflowID)
+			if err != nil {
+				return false, err
+			}
+			if unknown {
+				return false, errDiscussionUnknown
+			}
+			return rejected, nil
 		}
 		var dossier review.Dossier
 		if json.Unmarshal(record.Data, &dossier) != nil || !validPublicationPolicy(&dossier) {
@@ -559,17 +678,132 @@ func (s *ReviewService) publishPendingItem(ctx context.Context, item store.Pendi
 		}
 		err = s.publisher.publishFailureLocked(ctx, item.WorkflowID, reviewExecutionFailedReason)
 	case string(dag.WorkflowCompleted):
+		if _, _, err := s.startRepublishStatus(ctx, item.WorkflowID); err != nil {
+			return false, err
+		}
 		err = s.publisher.publishLocked(ctx, item.WorkflowID)
 	default:
 		return false, nil
 	}
 	if err != nil {
-		if IsPermanentJob(err) {
+		if IsPermanentJob(err) && !errors.Is(err, errDiscussionUnknown) {
+			if item.Status == string(dag.WorkflowCompleted) {
+				if settleErr := s.settlePendingCompleted(ctx, item); settleErr != nil {
+					return false, settleErr
+				}
+			}
 			return true, nil
 		}
 		return false, err
 	}
+	if item.Status == string(dag.WorkflowCompleted) {
+		if err := s.settlePendingCompleted(ctx, item); err != nil {
+			return false, err
+		}
+	}
 	return true, nil
+}
+
+// A pending completed workflow can finish publication without running its job
+// again. Preserve the generation fence when settling its status and reaction.
+func (s *ReviewService) settlePendingCompleted(ctx context.Context, item store.PendingPublication) error {
+	unlock, err := s.lockPublicationOutcome(ctx, item.WorkflowID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	wf, err := s.store.GetWorkflow(ctx, item.WorkflowID)
+	if err != nil {
+		return err
+	}
+	record, err := s.store.GetWorkflowDossier(ctx, item.WorkflowID)
+	if err != nil {
+		return err
+	}
+	if wf == nil || wf.ProjectID != item.ProjectID || wf.MRIID == nil || *wf.MRIID != item.MRIID ||
+		wf.Status != string(dag.WorkflowCompleted) || record == nil || record.Generation != item.Generation {
+		return nil
+	}
+	latest, err := s.store.LatestReviewWorkflow(ctx, item.ProjectID, item.MRIID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if latest == nil || latest.ID != wf.ID {
+		return nil
+	}
+	control, err := s.store.GetReviewControl(ctx, item.ProjectID, item.MRIID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if control.Cancelled || control.Generation != item.Generation || !strings.EqualFold(control.HeadSHA, item.HeadSHA) {
+		return nil
+	}
+	var dossier review.Dossier
+	if err := json.Unmarshal(record.Data, &dossier); err != nil {
+		if errors.Is(err, review.ErrInvalidDossier) && record.PublicationState == store.WorkflowPublicationSkipped {
+			return nil
+		}
+		return fmt.Errorf("app: decode publication dossier: %w", err)
+	}
+	if !strings.EqualFold(dossier.DiffVersion.HeadSHA, item.HeadSHA) {
+		return nil
+	}
+	state, reaction, detail := completedPublicationStatus(wf.Verdict, record.PublicationState)
+	if state == "" {
+		return nil
+	}
+	current, err := s.store.GetReviewStatus(ctx, item.ProjectID, item.MRIID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	attempt := 0
+	alreadySettled := current != nil && current.Generation == item.Generation && current.State == state && current.Detail == detail
+	if current != nil && !alreadySettled && current.Generation == item.Generation && terminalReviewStatus(current.State) {
+		attempt = current.Attempt + 1
+	}
+	if !alreadySettled {
+		written, err := s.store.SetReviewStatus(ctx, store.ReviewStatusGoal{
+			ProjectID: item.ProjectID, MRIID: item.MRIID, Generation: item.Generation,
+			Attempt: attempt, HeadSHA: item.HeadSHA, Profile: wf.Profile, State: state, Detail: detail,
+		})
+		if errors.Is(err, store.ErrSuperseded) || (err == nil && !written) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if noteID := dossierNoteID(dossier); noteID > 0 {
+		_, err = s.store.SetReviewReaction(ctx, store.ReviewReactionGoal{
+			ProjectID: item.ProjectID, MRIID: item.MRIID, NoteID: noteID,
+			Generation: item.Generation, Desired: reaction,
+		})
+		if !errors.Is(err, store.ErrSuperseded) {
+			return err
+		}
+	}
+	return nil
+}
+
+// The caller holds the workspace read lock. Share the publisher's lock order so
+// a republish cannot change the stored outcome while status is being settled.
+func (s *ReviewService) lockPublicationOutcome(ctx context.Context, workflowID string) (func(), error) {
+	mrUnlock, err := s.publisher.lockReviewMR(ctx, workflowID)
+	if err != nil {
+		return nil, err
+	}
+	unlock, err := s.publisher.locks.lock(ctx, workflowID)
+	if err != nil {
+		mrUnlock()
+		return nil, err
+	}
+	return func() { unlock(); mrUnlock() }, nil
 }
 
 func dossierDiffs(d *review.Dossier) []gitlab.FileDiff {

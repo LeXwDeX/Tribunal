@@ -97,6 +97,7 @@ func TestPublisherPartialFailureDoesNotRepeatSideEffects(t *testing.T) {
 		statusErr     error
 		// after the failed attempt
 		failed publicationEffects
+		reason string
 		// settle drives the follow-up attempt and returns the expected state.
 		settle func(*testing.T, *reviewFixture, string) string
 		final  publicationEffects
@@ -118,12 +119,13 @@ func TestPublisherPartialFailureDoesNotRepeatSideEffects(t *testing.T) {
 			discussionErr: unavailable,
 			failed:        publicationEffects{summaries: 1, discussions: 0, statuses: 0},
 			settle: func(t *testing.T, f *reviewFixture, id string) string {
-				if err := f.publisher.Republish(context.Background(), id); err != nil {
-					t.Fatalf("Republish: %v", err)
+				if err := f.publisher.Republish(context.Background(), id); !errors.Is(err, errDiscussionUnknown) {
+					t.Fatalf("Republish error = %v, want an unknown outcome", err)
 				}
-				return store.WorkflowPublicationPublished
+				return store.WorkflowPublicationPending
 			},
-			final: publicationEffects{summaries: 1, discussions: 1, statuses: 1},
+			reason: publicationUnknownReason,
+			final:  publicationEffects{summaries: 1, discussions: 0, statuses: 0},
 		},
 		{
 			name:      "status failure then restart recovery",
@@ -167,8 +169,12 @@ func TestPublisherPartialFailureDoesNotRepeatSideEffects(t *testing.T) {
 			if err != nil {
 				t.Fatalf("GetWorkflowByJob: %v", err)
 			}
+			reason := tc.reason
+			if reason == "" {
+				reason = publicationRetryReason
+			}
 			if workflow.PublicationState != store.WorkflowPublicationPending ||
-				workflow.PublicationError != publicationRetryReason {
+				workflow.PublicationError != reason {
 				t.Fatalf("partial failure publication = %q/%q, want pending", workflow.PublicationState, workflow.PublicationError)
 			}
 			if got := countPublicationEffects(f); got != tc.failed {

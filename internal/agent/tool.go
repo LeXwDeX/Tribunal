@@ -67,6 +67,9 @@ type RunSpec struct {
 	MaxTokens     int
 	Temperature   *float64
 	Reasoning     *llm.ReasoningOpts
+	// Outbound wraps each model and tool call in the execution's policy lease.
+	// Nil is for callers without project-bound repository material.
+	Outbound func(context.Context, func(context.Context) error) error
 	// BeforeTurn runs before every model request with the usage already
 	// consumed by this run. A non-nil error stops the loop without another
 	// Generate call.

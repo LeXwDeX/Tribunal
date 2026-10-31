@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -61,6 +62,10 @@ type ReviewStore interface {
 	GetPublication(ctx context.Context, projectID, mrIID int64, kind, publishKey string) (*store.Publication, error)
 	ListPublications(ctx context.Context, workflowID string) ([]store.Publication, error)
 	UpsertPublication(ctx context.Context, p store.Publication) (*store.Publication, error)
+	ReserveDiscussionIntent(ctx context.Context, projectID, mrIID int64, key string) (bool, string, error)
+	ConfirmDiscussionIntent(ctx context.Context, projectID, mrIID int64, key, gitlabID string) error
+	RejectDiscussionIntent(ctx context.Context, projectID, mrIID int64, key string) error
+	HasUnknownDiscussionIntent(ctx context.Context, projectID, mrIID int64) (bool, error)
 	ReplaceFindings(ctx context.Context, workflowID string, findings []store.Finding) error
 	ListFindings(ctx context.Context, filter store.FindingFilter) ([]store.Finding, error)
 	HasPublishedSevereFinding(ctx context.Context, projectID, mrIID int64) (bool, error)
@@ -467,6 +472,10 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 		return err
 	}
 	defer unlock()
+	ctx, err = bindOutbound(ctx, ws)
+	if err != nil {
+		return err
+	}
 	if err := consumerJobExists(ctx, s.store, job, "review.run", payload.ProjectID); err != nil {
 		return err
 	}
@@ -502,13 +511,31 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 		return jobs.ErrDeferred
 	}
 	defer s.executors.Release(job.ID)
-	// The generation fence passed and this handler owns the workflow.
-	s.setReviewStatus(ctx, project.ID, control.MRIID, payload.Generation, job.Attempts,
-		payload.HeadSHA, payload.Profile, reviewStatusRunning, "")
 	workflow, storedDossier, resumable, err := s.resumableWorkflow(ctx, job.ID, payload.Generation, payload.HeadSHA)
 	if err != nil {
 		return err
 	}
+	if workflow != nil && storedDossier != nil {
+		if !review.DossierHasSupportedRepositorySkillCapability(storedDossier.Data) {
+			var err error
+			if resumable {
+				err = s.cancelRepositorySkillWorkflow(ctx, workflow.ID)
+			} else {
+				if s.publisher != nil {
+					_, _, err = s.publisher.rejectRepositorySkillPublication(ctx, s.store, workflow.ID)
+				} else {
+					err = s.skipPublication(ctx, workflow.ID, repositorySkillEvidenceReason)
+				}
+			}
+			if err != nil {
+				return err
+			}
+			return nil
+		}
+	}
+	// The generation fence passed and this handler owns the workflow.
+	s.setReviewStatus(ctx, project.ID, control.MRIID, payload.Generation, job.Attempts,
+		payload.HeadSHA, payload.Profile, reviewStatusRunning, "")
 	inputs, err := s.collectInputs(ctx, project, token, control.MRIID, payload.HeadSHA)
 	if err != nil {
 		return err
@@ -544,10 +571,48 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 	profileName, profileCfg := s.profileFor(project, payload.Profile, cfg.Profile, inputs.MR.Labels, profileExplicit(payload))
 	profile := review.Profile{Name: profileName, Config: profileCfg}
 	profileHash := s.reviewProfileHash(profile)
-	execution, err := s.resolveReviewExecution(ctx, project.ID, profile)
+	if workflow != nil && storedDossier != nil {
+		var stored review.Dossier
+		if json.Unmarshal(storedDossier.Data, &stored) == nil && stored.RepositorySkillProvenance != nil && stored.RepositorySkillProvenance.Mode == "repository" {
+			lister, _ := s.store.(repositorySkillGrantLister)
+			if err := repositorySkillProvenanceCurrent(ctx, lister, project, s.reviewDefaults, &stored, stored.RepositorySkillProvenance); err != nil {
+				return s.cancelRepositorySkillWorkflow(ctx, workflow.ID)
+			}
+		}
+	}
+	// Always recompute the deny set from the current review diff before
+	// deciding whether an old workflow can continue. Stored evidence is only
+	// proof for a pinned recovery; a rebuilt execution (for example after
+	// allow_repo_skills is enabled) must not inherit an empty or stale set.
+	var repositoryDeny func(string) bool
+	var repositoryExcluded []string
+	if cfg.Settings.AllowRepoSkills {
+		ignored := ignoredReviewPaths(inputs.Diffs, cfg.Settings.Ignore)
+		denied, _, err := repositorySkillDenyPaths(&review.Dossier{
+			Ignored:      ignored,
+			IgnorePolicy: &review.IgnorePolicy{Version: review.IgnorePolicyVersion, Patterns: append([]string{}, cfg.Settings.Ignore...)},
+		}, inputs.Diffs)
+		if err != nil {
+			return PermanentJob(errors.New("repository skill filter is unavailable"))
+		}
+		repositoryExcluded = make([]string, 0, len(denied))
+		for name := range denied {
+			repositoryExcluded = append(repositoryExcluded, name)
+		}
+		sort.Strings(repositoryExcluded)
+		repositoryDeny, err = repositorySkillDenyFromEvidence(cfg.Settings.Ignore, repositoryExcluded)
+		if err != nil {
+			return PermanentJob(errors.New("repository skill filter is unavailable"))
+		}
+	}
+	execution, err := s.resolveReviewExecution(ctx, project, token, profile, inputs.MR.TargetBranch, repositoryDeny)
 	if err != nil {
+		if workflow != nil && storedDossier != nil && review.DossierUsesRepositorySkills(storedDossier.Data) {
+			return s.cancelRepositorySkillWorkflow(ctx, workflow.ID)
+		}
 		return err
 	}
+	defer execution.cleanupRepositorySkills()
 	var head, baseDir, workspaceIdentity, indexSHA string
 	var indexEligible bool
 	var cleanup func()
@@ -714,20 +779,22 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 				StartSHA: inputs.Version.StartSHA,
 				HeadSHA:  inputs.Version.HeadSHA,
 			},
-			DiffSummary:         summary,
-			Files:               files,
-			Ignored:             ignored,
-			IgnorePolicy:        &review.IgnorePolicy{Version: review.IgnorePolicyVersion, Patterns: append([]string{}, cfg.Settings.Ignore...)},
-			WorkspaceProvenance: provenance,
-			Pipeline:            inputs.Pipeline,
-			Issues:              inputs.Issues,
-			RepoDocs:            filterRepoDocs(inputs.RepoDocs, cfg.Settings.Ignore),
-			ContextDocs:         contextDoc,
-			Language:            cfg.Settings.Language,
-			CustomRules:         cfg.Settings.CustomRules,
-			Incremental:         incremental,
-			HeadDir:             head,
-			BaseDir:             baseDir,
+			DiffSummary:               summary,
+			Files:                     files,
+			Ignored:                   ignored,
+			IgnorePolicy:              &review.IgnorePolicy{Version: review.IgnorePolicyVersion, Patterns: append([]string{}, cfg.Settings.Ignore...)},
+			WorkspaceProvenance:       provenance,
+			RepositorySkillProvenance: execution.repository,
+			RepositorySkillExcluded:   repositoryExcluded,
+			Pipeline:                  inputs.Pipeline,
+			Issues:                    inputs.Issues,
+			RepoDocs:                  filterRepoDocs(inputs.RepoDocs, cfg.Settings.Ignore),
+			ContextDocs:               contextDoc,
+			Language:                  cfg.Settings.Language,
+			CustomRules:               cfg.Settings.CustomRules,
+			Incremental:               incremental,
+			HeadDir:                   head,
+			BaseDir:                   baseDir,
 			Metadata: map[string]string{
 				"trigger":            trigger,
 				"base_sha":           inputs.Version.BaseSHA,
@@ -822,18 +889,20 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 		HeadSHA:  dossier.DiffVersion.HeadSHA,
 	}, dossierDiffs(dossier))
 	executor, err := review.NewExecutor(review.ExecutorDeps{
-		Dossier:  dossier,
-		Profile:  profile,
-		Graph:    graphCfg,
-		Blocks:   execution.blocks,
-		Clients:  s.clients,
-		Prompts:  s.prompts,
-		AgentRun: execution.agentRunner(s.agentRun),
-		Snapshot: engineSnapshot(s.engine),
-		Tools:    execution.tools,
-		Skills:   execution.skills,
-		Locate:   locateFunc(diffIndex),
-		Cost:     s.cost,
+		Dossier:                  dossier,
+		Profile:                  profile,
+		Graph:                    graphCfg,
+		Blocks:                   execution.blocks,
+		Clients:                  s.clients,
+		Prompts:                  s.prompts,
+		AgentRun:                 execution.agentRunner(s.agentRun),
+		Snapshot:                 engineSnapshot(s.engine),
+		Tools:                    execution.tools,
+		Skills:                   execution.skills,
+		Locate:                   locateFunc(diffIndex),
+		Cost:                     s.cost,
+		Outbound:                 outboundSender(ws),
+		RepositorySkillsVerified: execution.repositorySkillsVerified(),
 	})
 	if err != nil {
 		return PermanentJob(fmt.Errorf("build review executor: %w", err))
@@ -844,6 +913,9 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 	superseded, runErr := s.runWithControl(ctx, project.ID, control.MRIID, wfID, payload.Generation, payload.HeadSHA)
 	if runErr != nil {
 		return runErr
+	}
+	if err := sendOutbound(ctx, ws, func(context.Context) error { return nil }); err != nil {
+		return err
 	}
 	if superseded {
 		s.logger.Info("review superseded while running", "workflow_id", wfID)
@@ -864,7 +936,9 @@ func (s *ReviewService) settleReviewSnapshot(ctx context.Context, payload review
 		s.setReviewStatus(ctx, payload.ProjectID, payload.MRIID, payload.Generation, attempts,
 			payload.HeadSHA, payload.Profile, reviewStatusPublishing, "")
 		if err := s.publish(ctx, wfID); err != nil {
-			s.settlePublishFailure(ctx, payload, attempts, err)
+			if !errors.Is(err, workspace.ErrOutboundInvalidated) && !errors.Is(err, errDiscussionUnknown) {
+				s.settlePublishFailure(ctx, payload, attempts, err)
+			}
 			return err
 		}
 		state, reaction := reviewStatusForVerdict(s.workflowVerdict(ctx, wfID))

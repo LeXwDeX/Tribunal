@@ -87,6 +87,9 @@ const (
 	// WorkflowPublicationFailed is a terminal publication failure. It stays
 	// separate from workflow execution and needs an explicit republish.
 	WorkflowPublicationFailed = "failed"
+	// WorkflowPublicationUnknownReason explains why an unresolved discussion
+	// must stay pending even when its workflow becomes stale or is cancelled.
+	WorkflowPublicationUnknownReason = "discussion outcome unknown"
 )
 
 // WorkflowDossier is the sanitized input snapshot needed to resume or publish

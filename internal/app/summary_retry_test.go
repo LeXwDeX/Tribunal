@@ -135,7 +135,7 @@ func TestSummaryIdentityAndRestart(t *testing.T) {
 			}
 			if !tc.wantErr {
 				// A fresh Publisher finds the bot's marker even for a new fingerprint.
-				p := &Publisher{store: f.db, gitlab: api, retries: 2}
+				p := &Publisher{store: f.db, workspace: f.manager, gitlab: api, retries: 2}
 				if err := p.publishStandaloneSummaryLocked(context.Background(), 42, 7, control.Generation, control.HeadSHA, "token", "another", review.SummaryMarkerPrefix+"updated"); err != nil {
 					t.Fatal(err)
 				}

@@ -54,9 +54,7 @@ function useScopeQuery(enabled: boolean, scope: string, projectId?: number) {
   )
 }
 
-export function ExtensionsManager({
-  scope, projectId, tab, onTabChange, projects = [], canManage = false, placeholder, notice,
-}: {
+type ExtensionsManagerProps = {
   scope: 'platform' | 'project'
   projectId?: number
   tab: string
@@ -67,7 +65,16 @@ export function ExtensionsManager({
   placeholder?: ReactNode
   // Shown at the top of the tab panel in every state, e.g. a failed project refresh.
   notice?: ReactNode
-}) {
+}
+
+export function ExtensionsManager(props: ExtensionsManagerProps) {
+  const [addOpen, setAddOpen] = useState(false)
+  return <ScopedExtensionsManager key={`${props.scope}-${props.projectId ?? ''}`} {...props} addOpen={addOpen} setAddOpen={setAddOpen} />
+}
+
+function ScopedExtensionsManager({
+  scope, projectId, tab, onTabChange, projects = [], canManage = false, placeholder, notice, addOpen, setAddOpen,
+}: ExtensionsManagerProps & { addOpen: boolean; setAddOpen: (open: boolean) => void }) {
   const platformAdmin = useCanWrite()
   // Every extension write changes host execution security, so the server
   // requires the platform admin role. Project scope additionally requires the
@@ -76,7 +83,6 @@ export function ExtensionsManager({
   const toast = useToast()
   const queryClient = useQueryClient()
   const [testResults, setTestResults] = useState<Record<string, { tools?: McpTool[]; error?: string; pending?: boolean }>>({})
-  const [addOpen, setAddOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
   const [editServer, setEditServer] = useState<McpServer | null>(null)
   const [deleteServer, setDeleteServer] = useState<McpServer | null>(null)
@@ -286,11 +292,11 @@ export function ExtensionsManager({
 
       {canWrite ? (
         <>
-          <AddMcpDialog open={addOpen} scope={scope} projectId={projectId} onClose={() => setAddOpen(false)} onSaved={() => { setAddOpen(false); void invalidateServers() }} />
-          <ImportMcpDialog open={importOpen} scope={scope} projectId={projectId} onClose={() => setImportOpen(false)} onSaved={() => { setImportOpen(false); void invalidateServers() }} />
-          <EditMcpDialog server={editServer} onClose={() => setEditServer(null)} onSaved={() => { setEditServer(null); void invalidateServers() }} />
-          <UploadSkillDialog open={uploadOpen} scope={scope} projectId={projectId} onClose={() => setUploadOpen(false)} onSaved={() => { setUploadOpen(false); void invalidateSkills() }} />
-          <DirectorySkillDialog open={directoryOpen} scope={scope} projectId={projectId} onClose={() => setDirectoryOpen(false)} onSaved={() => { setDirectoryOpen(false); void invalidateSkills() }} />
+          {addOpen ? <AddMcpDialog key={`${scope}-${projectId ?? ''}`} open scope={scope} projectId={projectId} onClose={() => setAddOpen(false)} onSaved={() => { void invalidateServers() }} /> : null}
+          {importOpen ? <ImportMcpDialog open scope={scope} projectId={projectId} onClose={() => setImportOpen(false)} onSaved={() => { void invalidateServers() }} /> : null}
+          {editServer ? <EditMcpDialog server={editServer} onClose={() => setEditServer(null)} onSaved={() => { void invalidateServers() }} /> : null}
+          {uploadOpen ? <UploadSkillDialog open scope={scope} projectId={projectId} onClose={() => setUploadOpen(false)} onSaved={() => { void invalidateSkills() }} /> : null}
+          {directoryOpen ? <DirectorySkillDialog open scope={scope} projectId={projectId} onClose={() => setDirectoryOpen(false)} onSaved={() => { void invalidateSkills() }} /> : null}
         </>
       ) : null}
 
@@ -1534,7 +1540,31 @@ function RestoreDialog({
   )
 }
 
+function useDialogRequest(scope: string, projectId: number | undefined, action: string) {
+  const toast = useToast()
+  const mounted = useRef(false)
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false }
+  }, [])
+  const reportFailure = (error: unknown, setError: (value: unknown) => void) => {
+    const uncertain = !(error instanceof ApiError) || error.status === 0 || error.status === 408 || error.status >= 500
+    const safeError = error instanceof ApiError && error.status === 403
+      ? new ApiError(403, 'forbidden', '当前账号没有执行此操作的权限。')
+      : new Error(uncertain
+        ? `${error instanceof ApiError && error.status === 0 ? '无法连接服务器。' : '请求未能确认。'}结果可能不确定，请先检查状态再重试。`
+        : '请检查输入后重试。')
+    if (mounted.current) {
+      setError(safeError)
+    } else {
+      toast.push('error', `${scope === 'project' ? `项目 #${projectId}` : '平台级'}${action}失败：${safeError.message}`)
+    }
+  }
+  return { mounted, reportFailure }
+}
+
 function AddMcpDialog({ open, scope, projectId, onClose, onSaved }: { open: boolean; scope: 'platform' | 'project'; projectId?: number; onClose: () => void; onSaved: () => void }) {
+  const { mounted, reportFailure } = useDialogRequest(scope, projectId, '新增 MCP 服务器')
   const nameId = useId()
   const configId = useId()
   const [name, setName] = useState('')
@@ -1559,8 +1589,8 @@ function AddMcpDialog({ open, scope, projectId, onClose, onSaved }: { open: bool
     try {
       config = parseJsonObject(configText, '配置')
       setFieldError('')
-    } catch (caught) {
-      setFieldError(caught instanceof Error ? caught.message : '配置 JSON 无效。')
+    } catch {
+      setFieldError('配置 JSON 无效或不是对象。')
       return
     }
     setPending(true)
@@ -1568,10 +1598,11 @@ function AddMcpDialog({ open, scope, projectId, onClose, onSaved }: { open: bool
     try {
       await createMcpServer({ scope, project_id: projectId, name: name.trim(), config })
       onSaved()
+      if (mounted.current) onClose()
     } catch (caught) {
-      setError(caught)
+      reportFailure(caught, setError)
     } finally {
-      setPending(false)
+      if (mounted.current) setPending(false)
     }
   }
 
@@ -1589,18 +1620,19 @@ function AddMcpDialog({ open, scope, projectId, onClose, onSaved }: { open: bool
         </>
       )}
     >
-      {error ? <ErrorState error={error} /> : null}
+      {error ? <ErrorState error={error} title="新增 MCP 服务器失败" /> : null}
       <Field label="名称" htmlFor={nameId} error={fieldError} hint="用于工具名 mcp__名称__工具 和绑定。">
-        <input id={nameId} className="input" value={name} onChange={(event) => setName(event.target.value)} autoComplete="off" aria-invalid={Boolean(fieldError)} />
+        <input id={nameId} className="input" value={name} onChange={(event) => setName(event.target.value)} autoComplete="off" aria-invalid={Boolean(fieldError)} disabled={pending} />
       </Field>
       <Field label="配置 JSON" htmlFor={configId} hint='例如 {"command":"...","args":["..."]} 或 {"url":"https://..."}'>
-        <textarea id={configId} className="textarea textareaCode" rows={9} value={configText} onChange={(event) => setConfigText(event.target.value)} spellCheck={false} />
+        <textarea id={configId} className="textarea textareaCode" rows={9} value={configText} onChange={(event) => setConfigText(event.target.value)} spellCheck={false} disabled={pending} />
       </Field>
     </Dialog>
   )
 }
 
 function ImportMcpDialog({ open, scope, projectId, onClose, onSaved }: { open: boolean; scope: 'platform' | 'project'; projectId?: number; onClose: () => void; onSaved: () => void }) {
+  const { mounted, reportFailure } = useDialogRequest(scope, projectId, '导入 MCP 配置')
   const id = useId()
   const [text, setText] = useState('{\n  "mcpServers": {}\n}')
   const [pending, setPending] = useState(false)
@@ -1625,8 +1657,8 @@ function ImportMcpDialog({ open, scope, projectId, onClose, onSaved }: { open: b
         return
       }
       setParseError('')
-    } catch (caught) {
-      setParseError(caught instanceof Error ? caught.message : 'JSON 无效。')
+    } catch {
+      setParseError('导入内容 JSON 无效或不是对象。')
       return
     }
     setPending(true)
@@ -1634,10 +1666,11 @@ function ImportMcpDialog({ open, scope, projectId, onClose, onSaved }: { open: b
     try {
       await importMcpServers(scope, projectId, parsed)
       onSaved()
+      if (mounted.current) onClose()
     } catch (caught) {
-      setError(caught)
+      reportFailure(caught, setError)
     } finally {
-      setPending(false)
+      if (mounted.current) setPending(false)
     }
   }
 
@@ -1646,7 +1679,7 @@ function ImportMcpDialog({ open, scope, projectId, onClose, onSaved }: { open: b
       open={open}
       onClose={onClose}
       title="导入 MCP 配置"
-      description={`粘贴 .mcp.json 中的 mcpServers 对象，导入到${scope === 'platform' ? '平台级' : '当前项目'}。服务端会逐个校验并探测工具；失败项会返回错误。`}
+      description={`粘贴 .mcp.json 中的 mcpServers 对象，导入到${scope === 'platform' ? '平台级' : '当前项目'}。服务端会逐个校验并探测工具；失败时显示提示，不回显配置。`}
       wide
       footer={(
         <>
@@ -1655,15 +1688,16 @@ function ImportMcpDialog({ open, scope, projectId, onClose, onSaved }: { open: b
         </>
       )}
     >
-      {error ? <ErrorState error={error} /> : null}
+      {error ? <ErrorState error={error} title="导入 MCP 配置失败" /> : null}
       <Field label="mcpServers JSON" htmlFor={id} error={parseError}>
-        <textarea id={id} className="textarea textareaCode" rows={12} value={text} onChange={(event) => setText(event.target.value)} spellCheck={false} />
+        <textarea id={id} className="textarea textareaCode" rows={12} value={text} onChange={(event) => setText(event.target.value)} spellCheck={false} disabled={pending} />
       </Field>
     </Dialog>
   )
 }
 
 function EditMcpDialog({ server, onClose, onSaved }: { server: McpServer | null; onClose: () => void; onSaved: () => void }) {
+  const { mounted, reportFailure } = useDialogRequest(server?.scope || 'platform', server?.project_id, '编辑 MCP 服务器')
   const nameId = useId()
   const [name, setName] = useState('')
   const [enabled, setEnabled] = useState(true)
@@ -1692,8 +1726,8 @@ function EditMcpDialog({ server, onClose, onSaved }: { server: McpServer | null;
     if (replaceConfig) {
       try {
         config = parseJsonObject(configText, '替换配置')
-      } catch (caught) {
-        setFieldError(caught instanceof Error ? caught.message : '配置 JSON 无效。')
+      } catch {
+        setFieldError('替换配置 JSON 无效或不是对象。')
         return
       }
     }
@@ -1705,10 +1739,11 @@ function EditMcpDialog({ server, onClose, onSaved }: { server: McpServer | null;
       // are never submitted back as if they were secrets.
       await updateMcpServer(server.id, { name: name.trim(), enabled, ...(config ? { config } : {}) })
       onSaved()
+      if (mounted.current) onClose()
     } catch (caught) {
-      setError(caught)
+      reportFailure(caught, setError)
     } finally {
-      setPending(false)
+      if (mounted.current) setPending(false)
     }
   }
 
@@ -1726,13 +1761,13 @@ function EditMcpDialog({ server, onClose, onSaved }: { server: McpServer | null;
         </>
       )}
     >
-      {error ? <ErrorState error={error} /> : null}
+      {error ? <ErrorState error={error} title="编辑 MCP 服务器失败" /> : null}
       <div className="formGrid">
         <Field label="名称" htmlFor={nameId} error={fieldError}>
-          <input id={nameId} className="input" value={name} onChange={(event) => setName(event.target.value)} aria-invalid={Boolean(fieldError)} />
+          <input id={nameId} className="input" value={name} onChange={(event) => setName(event.target.value)} aria-invalid={Boolean(fieldError)} disabled={pending} />
         </Field>
         <Field label="启用" htmlFor="mcp-edit-enabled">
-          <select id="mcp-edit-enabled" className="select" value={enabled ? 'true' : 'false'} onChange={(event) => setEnabled(event.target.value === 'true')}>
+          <select id="mcp-edit-enabled" className="select" value={enabled ? 'true' : 'false'} onChange={(event) => setEnabled(event.target.value === 'true')} disabled={pending}>
             <option value="true">启用</option>
             <option value="false">停用</option>
           </select>
@@ -1745,7 +1780,7 @@ function EditMcpDialog({ server, onClose, onSaved }: { server: McpServer | null;
         </details>
       ) : null}
       <label className="checkboxRow">
-        <input type="checkbox" checked={replaceConfig} onChange={(event) => {
+        <input type="checkbox" checked={replaceConfig} disabled={pending} onChange={(event) => {
           setReplaceConfig(event.target.checked)
           setConfigText('')
           setFieldError('')
@@ -1758,7 +1793,7 @@ function EditMcpDialog({ server, onClose, onSaved }: { server: McpServer | null;
             替换会覆盖已有配置。脱敏的 env/header 值不会保留；如配置需要密钥，请重新填写完整值，且不要粘贴脱敏占位符。
           </div>
           <Field label="新的配置 JSON" htmlFor="mcp-replace-config" hint="从空白开始填写完整配置。">
-            <textarea id="mcp-replace-config" className="textarea textareaCode" rows={9} value={configText} onChange={(event) => setConfigText(event.target.value)} spellCheck={false} />
+            <textarea id="mcp-replace-config" className="textarea textareaCode" rows={9} value={configText} onChange={(event) => setConfigText(event.target.value)} spellCheck={false} disabled={pending} />
           </Field>
         </>
       ) : null}
@@ -1767,6 +1802,7 @@ function EditMcpDialog({ server, onClose, onSaved }: { server: McpServer | null;
 }
 
 function UploadSkillDialog({ open, scope, projectId, onClose, onSaved }: { open: boolean; scope: 'platform' | 'project'; projectId?: number; onClose: () => void; onSaved: () => void }) {
+  const { mounted, reportFailure } = useDialogRequest(scope, projectId, '上传 Skill')
   const id = useId()
   const [file, setFile] = useState<File | null>(null)
   const [pending, setPending] = useState(false)
@@ -1790,10 +1826,11 @@ function UploadSkillDialog({ open, scope, projectId, onClose, onSaved }: { open:
     try {
       await uploadSkill({ scope, project_id: projectId, file })
       onSaved()
+      if (mounted.current) onClose()
     } catch (caught) {
-      setError(caught)
+      reportFailure(caught, setError)
     } finally {
-      setPending(false)
+      if (mounted.current) setPending(false)
     }
   }
 
@@ -1810,15 +1847,16 @@ function UploadSkillDialog({ open, scope, projectId, onClose, onSaved }: { open:
         </>
       )}
     >
-      {error ? <ErrorState error={error} /> : null}
+      {error ? <ErrorState error={error} title="上传 Skill 失败" /> : null}
       <Field label="Skill zip" htmlFor={id} error={fieldError} hint="只接受 .zip。">
-        <input id={id} className="input" type="file" accept=".zip,application/zip" onChange={(event) => setFile(event.target.files?.[0] || null)} />
+        <input id={id} className="input" type="file" accept=".zip,application/zip" onChange={(event) => setFile(event.target.files?.[0] || null)} disabled={pending} />
       </Field>
     </Dialog>
   )
 }
 
 function DirectorySkillDialog({ open, scope, projectId, onClose, onSaved }: { open: boolean; scope: 'platform' | 'project'; projectId?: number; onClose: () => void; onSaved: () => void }) {
+  const { mounted, reportFailure } = useDialogRequest(scope, projectId, '登记 Skill 目录')
   const id = useId()
   const [dir, setDir] = useState('')
   const [pending, setPending] = useState(false)
@@ -1841,10 +1879,11 @@ function DirectorySkillDialog({ open, scope, projectId, onClose, onSaved }: { op
     try {
       await registerSkillDirectory({ scope, project_id: projectId, dir: dir.trim() })
       onSaved()
+      if (mounted.current) onClose()
     } catch (caught) {
-      setError(caught)
+      reportFailure(caught, setError)
     } finally {
-      setPending(false)
+      if (mounted.current) setPending(false)
     }
   }
 
@@ -1861,9 +1900,9 @@ function DirectorySkillDialog({ open, scope, projectId, onClose, onSaved }: { op
         </>
       )}
     >
-      {error ? <ErrorState error={error} /> : null}
+      {error ? <ErrorState error={error} title="登记 Skill 目录失败" /> : null}
       <Field label="目录路径" htmlFor={id} error={fieldError}>
-        <input id={id} className="input mono" value={dir} onChange={(event) => setDir(event.target.value)} placeholder="/srv/review/skills/my-skill" aria-invalid={Boolean(fieldError)} />
+        <input id={id} className="input mono" value={dir} onChange={(event) => setDir(event.target.value)} placeholder="/srv/review/skills/my-skill" aria-invalid={Boolean(fieldError)} disabled={pending} />
       </Field>
     </Dialog>
   )

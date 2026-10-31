@@ -337,51 +337,59 @@ func compileIgnoreGlob(pattern string) (*regexp.Regexp, error) {
 // rejects secret-looking JSON keys as a second line of defense, but it does
 // not inspect free-form document text.
 type Dossier struct {
-	SchemaVersion       int                  `json:"schema_version"`
-	Project             ProjectRef           `json:"project"`
-	MR                  MRMeta               `json:"mr"`
-	DiffVersion         gitlab.Version       `json:"diff_version"`
-	DiffSummary         DiffSummary          `json:"diff_summary"`
-	Files               []FileChange         `json:"files"`
-	Ignored             []string             `json:"ignored,omitempty"`
-	IgnorePolicy        *IgnorePolicy        `json:"ignore_policy,omitempty"`
-	WorkspaceProvenance *WorkspaceProvenance `json:"workspace_provenance,omitempty"`
-	Pipeline            *PipelineSummary     `json:"pipeline,omitempty"`
-	Issues              []IssueRef           `json:"issues,omitempty"`
-	RepoDocs            RepoDocs             `json:"repo_docs,omitempty"`
-	ContextDocs         string               `json:"context_docs,omitempty"`
-	Language            string               `json:"language,omitempty"`
-	CustomRules         []string             `json:"custom_rules,omitempty"`
-	Incremental         *IncrementalRange    `json:"incremental,omitempty"`
-	PriorFindings       []FindingOut         `json:"prior_findings,omitempty"`
-	HeadDir             string               `json:"head_dir,omitempty"`
-	BaseDir             string               `json:"base_dir,omitempty"`
-	Metadata            map[string]string    `json:"metadata,omitempty"`
-	GeneratedAt         time.Time            `json:"generated_at"`
+	SchemaVersion             int                        `json:"schema_version"`
+	Project                   ProjectRef                 `json:"project"`
+	MR                        MRMeta                     `json:"mr"`
+	DiffVersion               gitlab.Version             `json:"diff_version"`
+	DiffSummary               DiffSummary                `json:"diff_summary"`
+	Files                     []FileChange               `json:"files"`
+	Ignored                   []string                   `json:"ignored,omitempty"`
+	IgnorePolicy              *IgnorePolicy              `json:"ignore_policy,omitempty"`
+	WorkspaceProvenance       *WorkspaceProvenance       `json:"workspace_provenance,omitempty"`
+	RepositorySkillProvenance *RepositorySkillProvenance `json:"repository_skill_provenance,omitempty"`
+	// RepositorySkillExcluded preserves the exact deny set used for the
+	// filtered repository Skill snapshot, including both sides of ignored
+	// renames and ignored ancestors. Recovery and publication reuse it instead
+	// of reconstructing paths from the reduced file list.
+	RepositorySkillExcluded []string          `json:"repository_skill_excluded,omitempty"`
+	Pipeline                *PipelineSummary  `json:"pipeline,omitempty"`
+	Issues                  []IssueRef        `json:"issues,omitempty"`
+	RepoDocs                RepoDocs          `json:"repo_docs,omitempty"`
+	ContextDocs             string            `json:"context_docs,omitempty"`
+	Language                string            `json:"language,omitempty"`
+	CustomRules             []string          `json:"custom_rules,omitempty"`
+	Incremental             *IncrementalRange `json:"incremental,omitempty"`
+	PriorFindings           []FindingOut      `json:"prior_findings,omitempty"`
+	HeadDir                 string            `json:"head_dir,omitempty"`
+	BaseDir                 string            `json:"base_dir,omitempty"`
+	Metadata                map[string]string `json:"metadata,omitempty"`
+	GeneratedAt             time.Time         `json:"generated_at"`
 }
 
 // DossierInput is the explicit, already-sanitized input to BuildDossier.
 type DossierInput struct {
-	Project             ProjectRef
-	MR                  MRMeta
-	DiffVersion         gitlab.Version
-	DiffSummary         DiffSummary
-	Files               []FileChange
-	Ignored             []string
-	IgnorePolicy        *IgnorePolicy
-	WorkspaceProvenance *WorkspaceProvenance
-	Pipeline            *PipelineSummary
-	Issues              []IssueRef
-	RepoDocs            RepoDocs
-	ContextDocs         string
-	Language            string
-	CustomRules         []string
-	Incremental         *IncrementalRange
-	PriorFindings       []FindingOut
-	HeadDir             string
-	BaseDir             string
-	Metadata            map[string]string
-	GeneratedAt         time.Time
+	Project                   ProjectRef
+	MR                        MRMeta
+	DiffVersion               gitlab.Version
+	DiffSummary               DiffSummary
+	Files                     []FileChange
+	Ignored                   []string
+	IgnorePolicy              *IgnorePolicy
+	WorkspaceProvenance       *WorkspaceProvenance
+	RepositorySkillProvenance *RepositorySkillProvenance
+	RepositorySkillExcluded   []string
+	Pipeline                  *PipelineSummary
+	Issues                    []IssueRef
+	RepoDocs                  RepoDocs
+	ContextDocs               string
+	Language                  string
+	CustomRules               []string
+	Incremental               *IncrementalRange
+	PriorFindings             []FindingOut
+	HeadDir                   string
+	BaseDir                   string
+	Metadata                  map[string]string
+	GeneratedAt               time.Time
 }
 
 // BuildDossier validates and snapshots explicit inputs. It performs no I/O
@@ -418,6 +426,7 @@ func BuildDossier(in DossierInput) (*Dossier, error) {
 		GeneratedAt:   generatedAt,
 	}
 	d.MR.Labels = append([]string(nil), in.MR.Labels...)
+	d.RepositorySkillExcluded = append([]string(nil), in.RepositorySkillExcluded...)
 	if in.IgnorePolicy != nil {
 		policy := *in.IgnorePolicy
 		if in.IgnorePolicy.Patterns != nil {
@@ -428,6 +437,16 @@ func BuildDossier(in DossierInput) (*Dossier, error) {
 	if in.WorkspaceProvenance != nil {
 		provenance := *in.WorkspaceProvenance
 		d.WorkspaceProvenance = &provenance
+	}
+	if in.RepositorySkillProvenance != nil {
+		provenance := *in.RepositorySkillProvenance
+		if provenance.GrantRevisions != nil {
+			provenance.GrantRevisions = make(map[string]string, len(in.RepositorySkillProvenance.GrantRevisions))
+			for block, revision := range in.RepositorySkillProvenance.GrantRevisions {
+				provenance.GrantRevisions[block] = revision
+			}
+		}
+		d.RepositorySkillProvenance = &provenance
 	}
 	if in.Pipeline != nil {
 		pipeline := *in.Pipeline
@@ -491,6 +510,14 @@ func ValidateDossier(d *Dossier) error {
 	if strings.TrimSpace(d.MR.TargetBranch) == "" {
 		return dossierErr("mr.target_branch", "must not be empty")
 	}
+	if p := d.RepositorySkillProvenance; p != nil {
+		if err := p.validate(); err != nil {
+			return err
+		}
+		if p.Mode == "repository" && p.TargetBranch != d.MR.TargetBranch {
+			return dossierErr("repository_skill_provenance", "target branch does not match the merge request")
+		}
+	}
 	if !validObjectID(d.DiffVersion.HeadSHA) {
 		return dossierErr("diff_version.head_sha", "must be a 40 or 64 character object ID")
 	}
@@ -529,6 +556,14 @@ func ValidateDossier(d *Dossier) error {
 	}
 	for i, ignored := range d.Ignored {
 		if err := checkRepoPath(fmt.Sprintf("ignored[%d]", i), ignored, true); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidDossier, err)
+		}
+	}
+	if len(d.RepositorySkillExcluded) > 100000 {
+		return dossierErr("repository_skill_excluded", "too many entries")
+	}
+	for i, excluded := range d.RepositorySkillExcluded {
+		if err := checkRepoPath(fmt.Sprintf("repository_skill_excluded[%d]", i), excluded, true); err != nil {
 			return fmt.Errorf("%w: %v", ErrInvalidDossier, err)
 		}
 	}

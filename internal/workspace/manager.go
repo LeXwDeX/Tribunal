@@ -124,6 +124,7 @@ type Workspace struct {
 	lock       *ctxRWMutex
 	lifecycle  *ctxRWMutex
 	mirrorLock *ctxRWMutex
+	outbound   outboundGate
 
 	runsMu sync.Mutex
 	runs   map[string]string

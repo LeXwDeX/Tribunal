@@ -107,6 +107,10 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 			Transcript: append([]llm.Message(nil), messages...),
 		}, err
 	}
+	send := spec.Outbound
+	if send == nil {
+		send = func(ctx context.Context, call func(context.Context) error) error { return call(ctx) }
+	}
 
 	for turn := 1; turn <= maxTurns; turn++ {
 		if err := ctx.Err(); err != nil {
@@ -134,7 +138,15 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 		meta.Turn = turn
 		callCtx := llm.WithCallMeta(ctx, meta)
 
-		resp, err := spec.Client.Generate(callCtx, req)
+		var resp *llm.Response
+		var err error
+		generate := func(request *llm.Request) error {
+			return send(callCtx, func(ctx context.Context) error {
+				resp, err = spec.Client.Generate(ctx, request)
+				return err
+			})
+		}
+		err = generate(req)
 		if err != nil && req.ToolChoice == SubmitToolName {
 			var failure *llm.Error
 			if errors.As(err, &failure) && failure.Kind == llm.ErrBadRequest {
@@ -142,7 +154,7 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 				// the final prompt request submit_result without forcing the choice.
 				fallback := *req
 				fallback.ToolChoice = ""
-				resp, err = spec.Client.Generate(callCtx, &fallback)
+				err = generate(&fallback)
 			}
 		}
 		if err != nil {
@@ -220,7 +232,15 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 					Result{Content: "tool input is not valid JSON", IsError: true}, maxOutput))
 				continue
 			}
-			res, callErr := tool.Call(ctx, input)
+			var res Result
+			var callErr error
+			gateErr := send(ctx, func(ctx context.Context) error {
+				res, callErr = tool.Call(ctx, input)
+				return nil
+			})
+			if gateErr != nil {
+				return partial(gateErr)
+			}
 			if callErr != nil {
 				res = Result{Content: callErr.Error(), IsError: true}
 			}

@@ -18,19 +18,22 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/config"
 	"github.com/LeXwDeX/tribunal/internal/mcp"
 	"github.com/LeXwDeX/tribunal/internal/review"
+	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
 type reviewExecution struct {
-	blocks     map[string]config.BlockBinding
-	tools      review.ToolProvider
-	skills     review.SkillProvider
-	digest     []byte
-	skillRoots map[string]string
+	blocks            map[string]config.BlockBinding
+	tools             review.ToolProvider
+	skills            review.SkillProvider
+	digest            []byte
+	skillRoots        map[string]string
+	repository        *review.RepositorySkillProvenance
+	repositoryCleanup func()
 }
 
 // resolveReviewExecution requires the project workspace lock. It pins the
 // resolver set for identity and execution without contacting an MCP server.
-func (s *ReviewService) resolveReviewExecution(ctx context.Context, projectID int64, profile review.Profile) (*reviewExecution, error) {
+func (s *ReviewService) resolveReviewExecution(ctx context.Context, project *store.Project, token string, profile review.Profile, targetBranch string, deny func(string) bool) (*reviewExecution, error) {
 	activeBlocks, err := reviewExecutionSkillBlocks(profile, s.allowedProviders())
 	if err != nil {
 		return nil, PermanentJob(fmt.Errorf("build review graph: %w", err))
@@ -39,7 +42,7 @@ func (s *ReviewService) resolveReviewExecution(ctx context.Context, projectID in
 	var mcpConfig *mcp.Config
 	var deniedEnv []string
 	if s.extensions != nil {
-		set, err := s.extensions.ForProject(ctx, projectID)
+		set, err := s.extensions.ForProject(ctx, project.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -52,8 +55,20 @@ func (s *ReviewService) resolveReviewExecution(ctx context.Context, projectID in
 			deniedEnv = append([]string(nil), s.extensions.deniedEnv...)
 		}
 	}
+	repository, err := s.resolveRepositorySkillRuntime(ctx, project, token, targetBranch, deny, execution.blocks, execution.skills)
+	if err != nil {
+		return nil, err
+	}
+	execution.blocks, execution.skills = repository.blocks, repository.skills
+	execution.repository, execution.repositoryCleanup = repository.provenance, repository.cleanup
+	resolved := false
+	defer func() {
+		if !resolved {
+			execution.cleanupRepositorySkills()
+		}
+	}()
 	var skillIdentity = make(map[string]any)
-	if s.extensions != nil {
+	if s.extensions != nil || execution.repositorySkillsVerified() {
 		for block, binding := range execution.blocks {
 			if !activeBlocks[block] || len(binding.Skills) == 0 {
 				continue
@@ -88,19 +103,30 @@ func (s *ReviewService) resolveReviewExecution(ctx context.Context, projectID in
 			}{bound.Skills, files}
 		}
 	}
+	var repositoryIdentity json.RawMessage
+	if execution.repositorySkillsVerified() {
+		repositoryIdentity, err = json.Marshal(execution.repository)
+		if err != nil {
+			return nil, errors.New("app: execution identity unavailable")
+		}
+	}
+	// Repository is appended last and omitted for none so an existing workflow
+	// with explicit none keeps its stored execution identity.
 	data, err := json.Marshal(struct {
-		Providers json.RawMessage
-		Blocks    map[string]config.BlockBinding
-		MCP       *mcp.Config
-		DeniedEnv []string
-		Skills    map[string]any
-		Synthetic string
-	}{s.providerConfig, execution.blocks, mcpConfig, deniedEnv, skillIdentity, s.testIdentity})
+		Providers  json.RawMessage
+		Blocks     map[string]config.BlockBinding
+		MCP        *mcp.Config
+		DeniedEnv  []string
+		Skills     map[string]any
+		Synthetic  string
+		Repository json.RawMessage `json:",omitempty"`
+	}{s.providerConfig, execution.blocks, mcpConfig, deniedEnv, skillIdentity, s.testIdentity, repositoryIdentity})
 	if err != nil {
 		return nil, errors.New("app: execution identity unavailable")
 	}
 	sum := sha256.Sum256(data)
 	execution.digest = sum[:]
+	resolved = true
 	return execution, nil
 }
 

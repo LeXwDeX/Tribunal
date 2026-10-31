@@ -208,7 +208,11 @@ func TestResolverRejectsMissingSkillsOnlyForPossibleGraphBlocks(t *testing.T) {
 			}
 			r := identityRuntime(t, f, identityConfig(f))
 			consumerReadLock(t, r.workspace, id)
-			_, err := r.reviews.resolveReviewExecution(context.Background(), id, review.Profile{Name: tc.name, Config: tc.profile})
+			project, err := f.db.GetProject(context.Background(), id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = r.reviews.resolveReviewExecution(context.Background(), project, "", review.Profile{Name: tc.name, Config: tc.profile}, "main", nil)
 			if tc.active && !errors.Is(err, skill.ErrUnknownSkill) {
 				t.Fatalf("active skill error = %v", err)
 			}
@@ -411,7 +415,11 @@ func TestResolvedExecutionPinsProjectBindings(t *testing.T) {
 	r := identityRuntime(t, f, cfg)
 	consumerReadLock(t, r.workspace, id)
 	profile := review.Profile{Name: "default", Config: f.profiles["default"]}
-	execution, err := r.reviews.resolveReviewExecution(ctx, id, profile)
+	project, err := f.db.GetProject(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution, err := r.reviews.resolveReviewExecution(ctx, project, "", profile, "main", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -432,7 +440,7 @@ func TestResolvedExecutionPinsProjectBindings(t *testing.T) {
 	if len(actual.Skills) != 1 || actual.Skills[0].Name != "skill-a" {
 		t.Fatalf("executor changed resolved set: %+v", actual.Skills)
 	}
-	newExecution, err := r.reviews.resolveReviewExecution(ctx, id, profile)
+	newExecution, err := r.reviews.resolveReviewExecution(ctx, project, "", profile, "main", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

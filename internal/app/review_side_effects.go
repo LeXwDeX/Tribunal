@@ -16,6 +16,7 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/review"
 	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
+	"github.com/LeXwDeX/tribunal/internal/workspace"
 	"github.com/LeXwDeX/tribunal/pkg/dag"
 )
 
@@ -139,6 +140,10 @@ func (s *ReviewService) RunStatusJob(ctx context.Context, job *jobs.Job) error {
 		return err
 	}
 	defer unlock()
+	ctx, err = bindOutbound(ctx, ws)
+	if err != nil {
+		return err
+	}
 	if err := consumerJobExists(ctx, s.store, job, "review.status", payload.ProjectID); err != nil {
 		return err
 	}
@@ -185,8 +190,13 @@ func (s *ReviewService) RunStatusJob(ctx context.Context, job *jobs.Job) error {
 	case reviewStatusQueued, reviewStatusRunning, reviewStatusPublishing:
 		update.EstimateMinutes = s.estimateReviewMinutes(ctx, row.ProjectID, row.Profile)
 	}
-	noteID, hash, err := s.status.writeStatus(ctx, project.ID, row.MRIID, token, update)
+	reporter := *s.status
+	reporter.outbound = outboundSender(ws)
+	noteID, hash, err := reporter.writeStatus(ctx, project.ID, row.MRIID, token, update)
 	if err != nil {
+		if errors.Is(err, workspace.ErrOutboundInvalidated) {
+			return err
+		}
 		if reviewSideEffectRetryable(err) {
 			return err
 		}
@@ -223,6 +233,10 @@ func (s *ReviewService) RunReactionJob(ctx context.Context, job *jobs.Job) error
 		return err
 	}
 	defer unlock()
+	ctx, err = bindOutbound(ctx, ws)
+	if err != nil {
+		return err
+	}
 	if err := consumerJobExists(ctx, s.store, job, "review.reaction", payload.ProjectID); err != nil {
 		return err
 	}
@@ -258,8 +272,13 @@ func (s *ReviewService) RunReactionJob(ctx context.Context, job *jobs.Job) error
 	if s.status == nil {
 		return errors.New("app: status reporter is not configured")
 	}
-	err = s.status.applyReaction(ctx, project.ID, row.MRIID, token, row.NoteID, row.Desired)
+	reporter := *s.status
+	reporter.outbound = outboundSender(ws)
+	err = reporter.applyReaction(ctx, project.ID, row.MRIID, token, row.NoteID, row.Desired)
 	if err != nil {
+		if errors.Is(err, workspace.ErrOutboundInvalidated) {
+			return err
+		}
 		if errors.Is(err, errReactionNoteGone) {
 			return s.markReactionApplied(ctx, row, "note not found")
 		}
@@ -404,10 +423,7 @@ func (s *ReviewService) reconcileProjectSideEffects(ctx context.Context, project
 			errs = append(errs, err)
 			continue
 		}
-		if _, err := s.store.SetReviewReaction(ctx, store.ReviewReactionGoal{
-			ProjectID: row.ProjectID, MRIID: row.MRIID, NoteID: row.NoteID,
-			Generation: row.Generation, Desired: store.ReviewReactionNone,
-		}); err != nil {
+		if err := s.reconcileStaleEyes(ctx, row); err != nil && !errors.Is(err, store.ErrSuperseded) {
 			errs = append(errs, err)
 		}
 	}
@@ -439,50 +455,8 @@ func (s *ReviewService) reconcileProjectSideEffects(ctx context.Context, project
 		// status failed would contradict a publication that already exists.
 		// Recover its terminal state when the generation still matches.
 		if wf, err := s.store.LatestReviewWorkflow(ctx, row.ProjectID, row.MRIID); err == nil {
-			record, dossierErr := s.store.GetWorkflowDossier(ctx, wf.ID)
-			if dossierErr != nil {
-				if !errors.Is(dossierErr, store.ErrNotFound) {
-					errs = append(errs, dossierErr)
-				}
-				continue
-			}
-			var dossier review.Dossier
-			if err := json.Unmarshal(record.Data, &dossier); err != nil {
-				errs = append(errs, fmt.Errorf("app: decode recovery dossier: %w", err))
-				continue
-			}
-			if record.Generation != row.Generation ||
-				!strings.EqualFold(dossier.DiffVersion.HeadSHA, row.HeadSHA) {
-				continue
-			}
-			var state, detail string
-			var reaction string
-			switch wf.Status {
-			case string(dag.WorkflowCompleted):
-				state, reaction = reviewStatusForVerdict(wf.Verdict)
-			case string(dag.WorkflowFailed):
-				state, reaction = reviewStatusFailed, reviewAwardFail
-			case string(dag.WorkflowCancelled):
-				state, reaction = reviewStatusCancelled, reviewAwardNone
-			default:
-				continue
-			}
-			if _, err := s.store.SetReviewStatus(ctx, store.ReviewStatusGoal{
-				ProjectID: row.ProjectID, MRIID: row.MRIID, Generation: row.Generation,
-				Attempt: row.Attempt, HeadSHA: row.HeadSHA, Profile: row.Profile,
-				State: state, Detail: detail,
-			}); err != nil && !errors.Is(err, store.ErrSuperseded) {
+			if err := s.reconcileTerminalReview(ctx, row, wf.ID); err != nil && !errors.Is(err, store.ErrSuperseded) {
 				errs = append(errs, err)
-				continue
-			}
-			noteID := dossierNoteID(dossier)
-			if noteID > 0 {
-				if _, err := s.store.SetReviewReaction(ctx, store.ReviewReactionGoal{
-					ProjectID: row.ProjectID, MRIID: row.MRIID, NoteID: noteID,
-					Generation: row.Generation, Desired: reaction,
-				}); err != nil && !errors.Is(err, store.ErrSuperseded) {
-					errs = append(errs, err)
-				}
 			}
 			continue
 		} else if !errors.Is(err, store.ErrNotFound) {
@@ -537,6 +511,142 @@ func (s *ReviewService) reconcileProjectSideEffects(ctx context.Context, project
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func (s *ReviewService) reconcileStaleEyes(ctx context.Context, row store.ReviewReaction) error {
+	wf, err := s.store.LatestReviewWorkflow(ctx, row.ProjectID, row.MRIID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	if wf != nil && s.publisher != nil {
+		unlock, err := s.lockPublicationOutcome(ctx, wf.ID)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+	}
+	current, err := s.store.GetReviewReaction(ctx, row.ProjectID, row.MRIID, row.NoteID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if current.Generation != row.Generation || current.Version != row.Version || current.Desired != reviewAwardEyes {
+		return nil
+	}
+	status, err := s.store.GetReviewStatus(ctx, row.ProjectID, row.MRIID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	if wf != nil && status != nil && status.Generation == row.Generation && terminalReviewStatus(status.State) {
+		if err := s.reconcileTerminalReviewLocked(ctx, *status, wf.ID); err != nil {
+			return err
+		}
+		current, err = s.store.GetReviewReaction(ctx, row.ProjectID, row.MRIID, row.NoteID)
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if current.Generation != row.Generation || current.Version != row.Version || current.Desired != reviewAwardEyes {
+			return nil
+		}
+	}
+	_, err = s.store.SetReviewReaction(ctx, store.ReviewReactionGoal{
+		ProjectID: row.ProjectID, MRIID: row.MRIID, NoteID: row.NoteID,
+		Generation: row.Generation, Desired: store.ReviewReactionNone,
+	})
+	return err
+}
+
+func (s *ReviewService) reconcileTerminalReview(ctx context.Context, row store.ReviewStatus, workflowID string) error {
+	if s.publisher != nil {
+		unlock, err := s.lockPublicationOutcome(ctx, workflowID)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+	}
+	return s.reconcileTerminalReviewLocked(ctx, row, workflowID)
+}
+
+func (s *ReviewService) reconcileTerminalReviewLocked(ctx context.Context, row store.ReviewStatus, workflowID string) error {
+	current, err := s.store.GetReviewStatus(ctx, row.ProjectID, row.MRIID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if current.Version != row.Version || current.Generation != row.Generation || current.State != row.State {
+		return nil
+	}
+	wf, err := s.store.LatestReviewWorkflow(ctx, row.ProjectID, row.MRIID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if wf == nil || wf.ID != workflowID {
+		return nil
+	}
+	record, err := s.store.GetWorkflowDossier(ctx, workflowID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var dossier review.Dossier
+	if err := json.Unmarshal(record.Data, &dossier); err != nil {
+		return fmt.Errorf("app: decode recovery dossier: %w", err)
+	}
+	if record.Generation != row.Generation || !strings.EqualFold(dossier.DiffVersion.HeadSHA, row.HeadSHA) {
+		return nil
+	}
+	if wf.Status == string(dag.WorkflowCompleted) && record.PublicationState == store.WorkflowPublicationPending {
+		if row.State != reviewStatusPublishing {
+			_, err := s.store.SetReviewStatus(ctx, store.ReviewStatusGoal{
+				ProjectID: row.ProjectID, MRIID: row.MRIID, Generation: row.Generation,
+				Attempt: row.Attempt, HeadSHA: row.HeadSHA, Profile: row.Profile, State: reviewStatusPublishing,
+			})
+			return err
+		}
+		return nil
+	}
+	var state, detail, reaction string
+	switch wf.Status {
+	case string(dag.WorkflowCompleted):
+		state, reaction, detail = completedPublicationStatus(wf.Verdict, record.PublicationState)
+		if state == "" {
+			return nil
+		}
+	case string(dag.WorkflowFailed):
+		state, reaction = reviewStatusFailed, reviewAwardFail
+	case string(dag.WorkflowCancelled):
+		state, reaction = reviewStatusCancelled, reviewAwardNone
+	default:
+		return nil
+	}
+	if row.State != state || row.Detail != detail {
+		written, err := s.store.SetReviewStatus(ctx, store.ReviewStatusGoal{
+			ProjectID: row.ProjectID, MRIID: row.MRIID, Generation: row.Generation,
+			Attempt: row.Attempt, HeadSHA: row.HeadSHA, Profile: row.Profile, State: state, Detail: detail,
+		})
+		if err != nil || !written {
+			return err
+		}
+	}
+	if noteID := dossierNoteID(dossier); noteID > 0 {
+		_, err = s.store.SetReviewReaction(ctx, store.ReviewReactionGoal{
+			ProjectID: row.ProjectID, MRIID: row.MRIID, NoteID: noteID,
+			Generation: row.Generation, Desired: reaction,
+		})
+	}
+	return err
 }
 
 func (s *ReviewService) enqueueReviewSideEffectJob(ctx context.Context, kind, key string, payload any) error {
@@ -594,4 +704,24 @@ func reviewStatusForVerdict(verdict string) (string, string) {
 	default:
 		return reviewStatusIncomplete, reviewAwardFail
 	}
+}
+
+func completedPublicationStatus(verdict, publicationState string) (state, reaction, detail string) {
+	switch publicationState {
+	case store.WorkflowPublicationPublished:
+		state, reaction = reviewStatusForVerdict(verdict)
+	case store.WorkflowPublicationSkipped:
+		state, reaction, detail = reviewStatusStale, reviewAwardNone, "review is no longer current"
+	case store.WorkflowPublicationFailed:
+		state, reaction, detail = reviewStatusFailed, reviewAwardFail, "publication failed"
+	}
+	return state, reaction, detail
+}
+
+func terminalReviewStatus(state string) bool {
+	switch state {
+	case reviewStatusPass, reviewStatusBlocking, reviewStatusIncomplete, reviewStatusFailed, reviewStatusCancelled, reviewStatusStale:
+		return true
+	}
+	return false
 }

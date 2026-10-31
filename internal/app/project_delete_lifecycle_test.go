@@ -319,6 +319,83 @@ func TestLifecycleRuntimeDeleteWaitsForWorkspace(t *testing.T) {
 	}
 }
 
+// legacyLockWait is the removed internal lock deadline. Regression tests must
+// outlive it to detect a return of the caller-context override.
+const legacyLockWait = 5 * time.Second
+
+// waitLockWriter waits until a pending writer has queued on a
+// writer-preferring lock. Every new reader then waits, so a short probe fails
+// instead of acquiring the lock.
+func waitLockWriter(t *testing.T, ctx context.Context, probe func(context.Context) (func(), error)) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		probeCtx, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
+		unlock, err := probe(probeCtx)
+		cancel()
+		if err != nil {
+			return
+		}
+		unlock()
+		if time.Now().After(deadline) {
+			t.Fatal("pending operation did not queue for the workspace lock")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func waitContentWriter(t *testing.T, ctx context.Context, ws *workspace.Workspace) {
+	t.Helper()
+	waitLockWriter(t, ctx, ws.RLock)
+}
+
+// Delete waits for the content lock under the caller's context. Only the
+// outbound drain is bounded, so this test outlives the old internal 5 s lock
+// deadline to catch a regression.
+func TestProjectDeleteContentLockWaitUsesCallerContext(t *testing.T) {
+	ctx := context.Background()
+	st, cipher, root := openLifecycleStore(t), newTestCipher(t), t.TempDir()
+	seedProject(t, st, cipher, 42, "secret", "", "default")
+	canary := filepath.Join(root, "42", "canary")
+	writeProjectCanary(t, canary)
+	service := newWorkspaceProjectService(t, st, defaultFakeGitLab(), cipher, root)
+	ws := service.workspaces.Get(42)
+	unlock, err := ws.RLock(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	defer func() {
+		if !released {
+			unlock()
+		}
+	}()
+	done := make(chan error, 1)
+	go func() { done <- service.Delete(ctx, 42) }()
+	waitContentWriter(t, ctx, ws)
+	select {
+	case err := <-done:
+		t.Fatalf("Delete returned while a review held the content lock: %v", err)
+	case <-time.After(legacyLockWait + 500*time.Millisecond):
+	}
+	released = true
+	unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Delete after the content lock was released: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Delete did not resume after the content lock was released")
+	}
+	if _, err := os.Lstat(canary); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("workspace was not removed: %v", err)
+	}
+	if _, err := st.GetProject(ctx, 42); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("project still registered: %v", err)
+	}
+}
+
 func TestLifecycleRuntimeRegisterWaitsForWorkspace(t *testing.T) {
 	runtime := newLifecycleRuntime(t)
 	if err := runtime.Projects().Delete(context.Background(), 42); err != nil {

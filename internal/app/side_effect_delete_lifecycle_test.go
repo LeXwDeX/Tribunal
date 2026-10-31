@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/workspace"
 )
 
 type sideEffectJobBarrier struct {
@@ -69,7 +70,7 @@ func TestLifecycleSideEffectAndCandidateHoldLockThroughJobRead(t *testing.T) {
 				t.Fatalf("delete overtook job: %v", err)
 			}
 			close(b.release)
-			if err := <-done; err != nil {
+			if err := <-done; err != nil && (kind == "review.candidate" || !errors.Is(err, workspace.ErrOutboundInvalidated)) {
 				t.Fatal(err)
 			}
 			if err := <-deleted; err != nil {

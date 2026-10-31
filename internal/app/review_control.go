@@ -130,7 +130,7 @@ func (s *ReviewService) RepublishReview(ctx context.Context, job *jobs.Job) erro
 	if s.publisher == nil {
 		return errors.New("app: review publisher is not configured")
 	}
-	unlock, err := s.publisher.lockWorkflow(ctx, payload.WorkflowID)
+	ctx, unlock, err := s.publisher.lockWorkflow(ctx, payload.WorkflowID)
 	if errors.Is(err, store.ErrNotFound) {
 		return PermanentJob(fmt.Errorf("workflow is missing"))
 	}
@@ -149,7 +149,100 @@ func (s *ReviewService) RepublishReview(ctx context.Context, job *jobs.Job) erro
 	if stored == nil || stored.ID != job.ID || stored.Kind != "review.publish" || job.Kind != "review.publish" || json.Unmarshal(stored.Payload, &original) != nil || original.WorkflowID != payload.WorkflowID {
 		return PermanentJob(fmt.Errorf("consumer job identity changed"))
 	}
-	return s.publisher.republishLocked(ctx, payload.WorkflowID)
+	if rejected, unknown, err := s.publisher.rejectRepositorySkillPublication(ctx, s.store, payload.WorkflowID); rejected || err != nil {
+		return repositorySkillPublicationError(unknown, err)
+	}
+	item, track, err := s.startRepublishStatus(ctx, payload.WorkflowID)
+	if err != nil {
+		return err
+	}
+	publishErr := s.publisher.republishLocked(ctx, payload.WorkflowID)
+	if track {
+		return errors.Join(publishErr, s.settlePendingCompleted(ctx, item))
+	}
+	return publishErr
+}
+
+// startRepublishStatus makes a manual retry recoverable if it stops after the
+// publication state is saved but before the status and reaction are settled.
+func (s *ReviewService) startRepublishStatus(ctx context.Context, workflowID string) (store.PendingPublication, bool, error) {
+	var item store.PendingPublication
+	wf, err := s.store.GetWorkflow(ctx, workflowID)
+	if err != nil {
+		return item, false, err
+	}
+	if wf == nil || wf.Kind != "review" || wf.Status != string(dag.WorkflowCompleted) || wf.MRIID == nil || *wf.MRIID <= 0 {
+		return item, false, nil
+	}
+	unlock, err := s.lockPublicationOutcome(ctx, workflowID)
+	if err != nil {
+		return item, false, err
+	}
+	defer unlock()
+	record, err := s.store.GetWorkflowDossier(ctx, workflowID)
+	if err != nil {
+		return item, false, err
+	}
+	var dossier review.Dossier
+	if record == nil || json.Unmarshal(record.Data, &dossier) != nil {
+		return item, false, nil
+	}
+	if record.Generation <= 0 || wf.HeadSHA == "" || dossier.DiffVersion.HeadSHA == "" {
+		return item, false, nil
+	}
+	latest, err := s.store.LatestReviewWorkflow(ctx, wf.ProjectID, *wf.MRIID)
+	if errors.Is(err, store.ErrNotFound) {
+		return item, false, nil
+	}
+	if err != nil {
+		return item, false, err
+	}
+	control, err := s.store.GetReviewControl(ctx, wf.ProjectID, *wf.MRIID)
+	if errors.Is(err, store.ErrNotFound) {
+		return item, false, nil
+	}
+	if err != nil {
+		return item, false, err
+	}
+	if latest == nil || latest.ID != wf.ID || control.Cancelled || control.Generation != record.Generation ||
+		!strings.EqualFold(control.HeadSHA, dossier.DiffVersion.HeadSHA) || !strings.EqualFold(wf.HeadSHA, dossier.DiffVersion.HeadSHA) {
+		return item, false, nil
+	}
+	current, err := s.store.GetReviewStatus(ctx, wf.ProjectID, *wf.MRIID)
+	if errors.Is(err, store.ErrNotFound) {
+		return item, false, nil
+	}
+	if err != nil {
+		return item, false, err
+	}
+	if current.Generation != record.Generation || !strings.EqualFold(current.HeadSHA, dossier.DiffVersion.HeadSHA) {
+		return item, false, nil
+	}
+	attempt := current.Attempt
+	if terminalReviewStatus(current.State) {
+		attempt++
+	}
+	written, err := s.store.SetReviewStatus(ctx, store.ReviewStatusGoal{
+		ProjectID: wf.ProjectID, MRIID: *wf.MRIID, Generation: record.Generation,
+		Attempt: attempt, HeadSHA: wf.HeadSHA, Profile: wf.Profile, State: reviewStatusPublishing,
+	})
+	if errors.Is(err, store.ErrSuperseded) || (err == nil && !written) {
+		return item, false, nil
+	}
+	if err != nil {
+		return item, false, err
+	}
+	if noteID := dossierNoteID(dossier); noteID > 0 {
+		if _, err := s.store.SetReviewReaction(ctx, store.ReviewReactionGoal{
+			ProjectID: wf.ProjectID, MRIID: *wf.MRIID, NoteID: noteID,
+			Generation: record.Generation, Desired: reviewAwardEyes,
+		}); err != nil && !errors.Is(err, store.ErrSuperseded) {
+			return item, false, err
+		}
+	}
+	item = store.PendingPublication{WorkflowID: wf.ID, ProjectID: wf.ProjectID, MRIID: *wf.MRIID,
+		HeadSHA: wf.HeadSHA, Generation: record.Generation, Status: wf.Status}
+	return item, true, nil
 }
 
 func (s *ReviewService) projectToken(ctx context.Context, projectID int64) (*store.Project, string, error) {

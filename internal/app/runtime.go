@@ -221,6 +221,7 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		Store:          deps.Store,
 		Workspace:      workspaceManager,
 		GitLab:         deps.GitLab,
+		Git:            gitBackend,
 		Cipher:         deps.Cipher,
 		Engine:         engine,
 		ReviewDefaults: cfg.ReviewDefaults,

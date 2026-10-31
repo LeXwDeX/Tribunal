@@ -1,6 +1,6 @@
-import { useMemo, useState, type ReactNode } from 'react'
+import { useMemo, useState, useSyncExternalStore, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getStats, listProjects, listProviders, listReviews } from '../api/api'
 import type { Project, Provider, ReviewSummary, Stats } from '../api/types'
 import { useCanWrite } from '../components/RoleContext'
@@ -198,6 +198,7 @@ function StageTrack({ stage }: { stage: number }) {
 export function OverviewPage() {
   const canRegister = useCanWrite()
   const toast = useToast()
+  const queryClient = useQueryClient()
   const now = useNow(1000)
   const [triggerOpen, setTriggerOpen] = useState(false)
   const [range] = useState(() => {
@@ -275,10 +276,26 @@ export function OverviewPage() {
     || pendingPublications.error || (providersEnabled ? providersPage.error : null)
   const hasIssuesError = projectsPage.isError || failedRuns.isError || failedPublications.isError
     || pendingPublications.isError || (providersEnabled && providersPage.isError)
-  const issuesPending = projectsPage.isPending || failedRuns.isPending || failedPublications.isPending
-    || pendingPublications.isPending || (providersEnabled && providersPage.isPending)
+  // Cached queries paused offline are neither pending nor fetching.
+  const pausedIssues = useSyncExternalStore(
+    queryClient.getQueryCache().subscribe,
+    () => [
+      ['projects', 'overview'],
+      ['reviews', 'overview', 'failed'],
+      ['reviews', 'overview', 'publication-failed'],
+      ['reviews', 'overview', 'publication-pending'],
+      ...(providersEnabled ? [['providers', 'overview']] : []),
+    ].some((key) => queryClient.getQueryState(key)?.fetchStatus === 'paused'),
+    () => false,
+  )
+  const issuesPending = pausedIssues || projectsPage.isPending || projectsPage.isFetching || failedRuns.isPending || failedRuns.isFetching
+    || failedPublications.isPending || failedPublications.isFetching || pendingPublications.isPending || pendingPublications.isFetching
+    || (providersEnabled && (providersPage.isPending || providersPage.isFetching))
   const reviewAlertsFetching = failedRuns.isFetchingNextPage || failedPublications.isFetchingNextPage || pendingPublications.isFetchingNextPage
+  const reviewAlertsBlocked = pausedIssues || [failedRuns, failedPublications, pendingPublications]
+    .some((source) => source.isFetching || source.isRefetchError)
   const hasMoreReviewAlerts = failedRuns.hasNextPage || failedPublications.hasNextPage || pendingPublications.hasNextPage
+  const hasMoreIssues = projectsPage.hasNextPage || hasMoreReviewAlerts || (providersEnabled && providersPage.hasNextPage)
   const loadMoreReviewAlerts = () => {
     if (failedRuns.hasNextPage) failedRuns.fetchNextPage()
     if (failedPublications.hasNextPage) failedPublications.fetchNextPage()
@@ -368,22 +385,20 @@ export function OverviewPage() {
                 <ErrorState
                   error={issuesError}
                   onRetry={() => {
-                    projectsPage.retry()
-                    failedRuns.retry()
-                    failedPublications.retry()
-                    pendingPublications.retry()
-                    if (providersEnabled) providersPage.retry()
+                    for (const source of [projectsPage, failedRuns, failedPublications, pendingPublications, ...(providersEnabled ? [providersPage] : [])]) {
+                      if (source.isError && !source.isFetching && !pausedIssues) source.retry()
+                    }
                   }}
                   title="异常检查未完整加载"
                 />
               </div>
             ) : null}
-            {alerts.length === 0 && !issuesPending ? (
+            {alerts.length === 0 && !issuesPending && !hasIssuesError && !hasMoreIssues ? (
               <div className={overview.state}>
-                <EmptyState title="暂无需要处理的异常" description="检查了 token 过期、工作区状态、停用项目、provider 错误、评审执行失败和发布失败。" />
+                <EmptyState title="暂无需要处理的异常" description={`检查了 token 过期、工作区状态、停用项目${providersEnabled ? '、provider 错误' : ''}、评审执行失败和发布失败。`} />
               </div>
             ) : null}
-            {issuesPending ? <div className={overview.state}><LoadingState /></div> : null}
+            {issuesPending ? <div className={overview.state}><LoadingState label={pausedIssues ? '等待网络连接以继续异常检查…' : undefined} /></div> : null}
             {alerts.map((alert) => (
               <div key={alert.id} className={overview.alert}>
                 <Badge tone={alert.tone}>{alert.label}</Badge>
@@ -393,13 +408,16 @@ export function OverviewPage() {
                 </div>
               </div>
             ))}
-            {projectsPage.hasNextPage || hasMoreReviewAlerts ? (
+            {hasMoreIssues ? (
               <div className={overview.panelFooter}>
                 {projectsPage.hasNextPage ? (
-                  <Button variant="secondary" className={ui.smallButton} onClick={projectsPage.fetchNextPage} loading={projectsPage.isFetchingNextPage}>加载更多项目以继续检查</Button>
+                  <Button variant="secondary" className={ui.smallButton} onClick={projectsPage.fetchNextPage} loading={projectsPage.isFetchingNextPage} disabled={pausedIssues || projectsPage.isFetching || projectsPage.isRefetchError}>加载更多项目以继续检查</Button>
                 ) : null}
                 {hasMoreReviewAlerts ? (
-                  <Button variant="secondary" className={ui.smallButton} onClick={loadMoreReviewAlerts} loading={reviewAlertsFetching}>加载更多告警数据</Button>
+                  <Button variant="secondary" className={ui.smallButton} onClick={loadMoreReviewAlerts} loading={reviewAlertsFetching} disabled={reviewAlertsBlocked}>加载更多告警数据</Button>
+                ) : null}
+                {providersEnabled && providersPage.hasNextPage ? (
+                  <Button variant="secondary" className={ui.smallButton} onClick={providersPage.fetchNextPage} loading={providersPage.isFetchingNextPage} disabled={pausedIssues || providersPage.isFetching || providersPage.isRefetchError}>加载更多 Provider 以继续检查</Button>
                 ) : null}
               </div>
             ) : null}

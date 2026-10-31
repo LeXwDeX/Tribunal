@@ -327,6 +327,7 @@ func (s *Store) DeleteProject(ctx context.Context, id int64) error {
 	}{
 		{`DELETE FROM feedback WHERE project_id = ?`, []any{id}},
 		{`DELETE FROM publications WHERE project_id = ?`, []any{id}},
+		{`UPDATE discussion_intents SET verification_required = 1 WHERE project_id = ?`, []any{id}},
 		{`DELETE FROM webhook_deliveries WHERE project_id = ?`, []any{id}},
 		{`DELETE FROM block_bindings WHERE project_id = ?`, []any{id}},
 		{`DELETE FROM review_controls WHERE project_id = ?`, []any{id}},

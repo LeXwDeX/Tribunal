@@ -82,7 +82,7 @@ describe('extensions page project refresh failure', () => {
 
   it('keeps the selector usable and offers a retry when a cached project list fails to refresh', async () => {
     const queryClient = createTestQueryClient()
-    queryClient.setQueryData(['projects', 'extensions'], { projects: [project({ access: 'manage' }), project({ id: 43, path_with_namespace: 'group/frontend' })] })
+    queryClient.setQueryData(['projects', 'extensions'], { pages: [{ projects: [project({ access: 'manage' }), project({ id: 43, path_with_namespace: 'group/frontend' })] }], pageParams: [undefined] })
     installFetch(extensionRoutes(() => jsonResponse({ error: { code: 'internal', message: 'boom' } }, 500)))
     renderWithProviders(<ExtensionsPage />, { route: '/extensions', queryClient })
     await userEvent.click(screen.getByRole('button', { name: '项目级' }))

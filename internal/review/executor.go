@@ -129,6 +129,10 @@ type ExecutorDeps struct {
 	Backoff        time.Duration
 	Sleep          func(context.Context, time.Duration) error
 	Cost           CostFunc
+	Outbound       func(context.Context, func(context.Context) error) error
+	// RepositorySkillsVerified is set only after the app layer revalidated the
+	// stored repository grants and the filtered snapshot for this execution.
+	RepositorySkillsVerified bool
 }
 
 var (
@@ -157,6 +161,13 @@ func NewExecutor(deps ExecutorDeps) (*Executor, error) {
 	profile, err := ValidateProfile(deps.Profile)
 	if err != nil {
 		return nil, err
+	}
+	if deps.RepositorySkillsVerified {
+		if deps.Dossier == nil || deps.Dossier.RepositorySkillProvenance == nil ||
+			deps.Dossier.RepositorySkillProvenance.Mode != "repository" ||
+			deps.Dossier.RepositorySkillProvenance.validate() != nil {
+			return nil, errors.New("review: repository skill provenance is unavailable")
+		}
 	}
 	if deps.Prompts.Files == nil {
 		loaded, err := prompts.Load("")
@@ -543,6 +554,13 @@ func (e *Executor) projectBackground() string {
 	return b.String()
 }
 
+func (e *Executor) repositorySkillsVerified() bool {
+	return e.deps.RepositorySkillsVerified && e.deps.Dossier != nil &&
+		e.deps.Dossier.RepositorySkillProvenance != nil &&
+		e.deps.Dossier.RepositorySkillProvenance.Mode == "repository" &&
+		e.deps.Dossier.RepositorySkillProvenance.validate() == nil
+}
+
 func (e *Executor) blockBinding(block string) config.BlockBinding {
 	if block == "" || e.deps.Blocks == nil {
 		return config.BlockBinding{}
@@ -603,6 +621,15 @@ func (e *Executor) callAgent(ctx context.Context, in dag.NodeInput, opts agentOp
 		return nil, errors.New("review: workspace material identity unavailable; rerun review")
 	}
 	binding := e.blockBinding(opts.Block)
+	// Repository skills require provenance for this exact execution. The app
+	// layer sets RepositorySkillsVerified only after revalidating grants and
+	// the filtered snapshot; block bindings never grant them by themselves.
+	repositoryVerified := e.repositorySkillsVerified()
+	for _, name := range binding.Skills {
+		if strings.HasPrefix(strings.TrimSpace(name), "repo:") && !repositoryVerified {
+			return nil, errors.New("review: repository skills are disabled")
+		}
+	}
 	var skills []Skill
 	tools := append([]agent.Tool(nil), opts.ExtraTools...)
 	var skillRoots []string
@@ -610,6 +637,11 @@ func (e *Executor) callAgent(ctx context.Context, in dag.NodeInput, opts agentOp
 		skillBinding, err := e.deps.Skills.BindSkills(ctx, binding.Skills)
 		if err != nil {
 			return nil, fmt.Errorf("review: bind skills: %w", err)
+		}
+		for _, item := range skillBinding.Skills {
+			if strings.HasPrefix(strings.TrimSpace(item.Name), "repo:") && !repositoryVerified {
+				return nil, errors.New("review: repository skills are disabled")
+			}
 		}
 		if err := e.checkSkillRoots(skillBinding); err != nil {
 			return nil, err
@@ -712,6 +744,7 @@ func (e *Executor) callAgent(ctx context.Context, in dag.NodeInput, opts agentOp
 		Tools:      tools,
 		Submit:     opts.Submit,
 		BeforeTurn: opts.BeforeTurn,
+		Outbound:   e.deps.Outbound,
 	}
 	ctx = llm.WithCallMeta(ctx, llm.CallMeta{WorkflowID: in.WorkflowID, NodeID: in.Node.ID, Turn: 0})
 	result, err := e.runAgent(ctx, opts.Provider, spec, !opts.NoRetry)

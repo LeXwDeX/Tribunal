@@ -1,6 +1,8 @@
 package skill
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -154,8 +156,71 @@ func TestRepoSkillsAreOptIn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(l.Catalogue()) != 1 || l.Catalogue()[0].Name != "repo-skill" {
+	if len(l.Catalogue()) != 1 || l.Catalogue()[0].Name != "repo:repo-skill" {
 		t.Fatalf("opt-in catalogue = %+v", l.Catalogue())
+	}
+}
+
+func TestRepositorySkillsRequireSourceQualifiedBindings(t *testing.T) {
+	platform, project, repo := t.TempDir(), t.TempDir(), t.TempDir()
+	writeSkillFile(t, platform, "shared", "shared", "platform", "platform body")
+	writeSkillFile(t, project, "shared", "shared", "project", "project body")
+	writeSkillFile(t, repo, "shared", "shared", "repository", "repository body")
+	writeSkillFile(t, repo, "only-repo", "only-repo", "repository only", "repo only body")
+	l, err := New(Options{PlatformDirs: []string{platform}, ProjectDir: project, RepoSkillsDir: repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.Bind([]string{"only-repo"}); !errors.Is(err, ErrUnknownSkill) {
+		t.Fatalf("unqualified repository-only binding: %v", err)
+	}
+	bound, err := l.Bind([]string{"shared", "repo:shared", "repo:only-repo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{"shared": "project body", "repo:shared": "repository body", "repo:only-repo": "repo only body"} {
+		content, _, err := bound.load(name, 20000)
+		if err != nil || !strings.Contains(content, want) {
+			t.Errorf("load %q = %q, %v; want %q", name, content, err, want)
+		}
+	}
+	repoOnly, err := l.Bind([]string{"repo:shared"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repoOnly.Tool().Call(context.Background(), json.RawMessage(`{"name":"shared"}`)); !errors.Is(err, ErrUnknownSkill) {
+		t.Fatalf("unbound platform skill exposed by repository binding: %v", err)
+	}
+	result, err := repoOnly.Tool().Call(context.Background(), json.RawMessage(`{"name":"repo:shared"}`))
+	if err != nil || !strings.Contains(result.Content, "repository body") || strings.Contains(result.Content, "project body") {
+		t.Fatalf("qualified tool call = %q, %v", result.Content, err)
+	}
+}
+
+func TestRepositorySkillsRejectDuplicateManifestNames(t *testing.T) {
+	repo := t.TempDir()
+	writeSkillFile(t, repo, "first", "collision", "first", "first body")
+	writeSkillFile(t, repo, "second", "collision", "second", "second body")
+	if _, err := New(Options{RepoSkillsDir: repo}); err == nil {
+		t.Fatal("ambiguous repository skill name was accepted")
+	}
+}
+
+func TestRepositoryCatalogueUsesOnlyProvidedFilteredManifests(t *testing.T) {
+	files := map[string][]byte{
+		"allowed/SKILL.md":      []byte("---\nname: allowed\ndescription: visible\n---\nvisible body\n"),
+		"allowed/private.txt":   []byte("not metadata"),
+		"hidden/attachment.txt": []byte("ignored manifest is absent"),
+		"nested/deep/SKILL.md":  []byte("---\nname: nested\ndescription: not a direct child\n---\n"),
+		"invalid/SKILL.md":      []byte("---\nname: INVALID\ndescription: invalid\n---\n"),
+	}
+	items, err := RepositoryCatalogue(files)
+	if err != nil || len(items) != 1 || items[0].Name != "repo:allowed" || items[0].Description != "visible" {
+		t.Fatalf("repository catalogue = %+v, %v", items, err)
+	}
+	files["duplicate/SKILL.md"] = []byte("---\nname: allowed\ndescription: collision\n---\n")
+	if _, err := RepositoryCatalogue(files); err == nil {
+		t.Fatal("duplicate repository names accepted")
 	}
 }
 

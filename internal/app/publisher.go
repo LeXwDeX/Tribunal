@@ -35,16 +35,20 @@ const (
 
 	// publicationRetryReason is the fixed reason for a retryable publication
 	// failure. Raw upstream text never reaches storage.
-	publicationRetryReason = "retry pending"
+	publicationRetryReason   = "retry pending"
+	publicationUnknownReason = store.WorkflowPublicationUnknownReason
 	// publicationFailedReason is the generic terminal reason.
 	publicationFailedReason = "publication is not possible"
 )
+
+var errDiscussionUnknown = errors.New("app: discussion outcome unknown")
 
 // Publisher implements F7: fingerprint-checked, idempotent publication.
 type Publisher struct {
 	store          ReviewStore
 	workspace      *workspace.Manager
 	gitlab         GitLabClient
+	git            GitOps
 	cipher         *secret.Cipher
 	engine         *dag.Engine
 	reviewDefaults config.ProjectSettings
@@ -112,6 +116,7 @@ type PublisherConfig struct {
 	Store          ReviewStore
 	Workspace      *workspace.Manager
 	GitLab         GitLabClient
+	Git            GitOps
 	Cipher         *secret.Cipher
 	Engine         *dag.Engine
 	ReviewDefaults config.ProjectSettings
@@ -144,6 +149,7 @@ func NewPublisher(cfg PublisherConfig) (*Publisher, error) {
 		store:          cfg.Store,
 		workspace:      cfg.Workspace,
 		gitlab:         cfg.GitLab,
+		git:            cfg.Git,
 		cipher:         cfg.Cipher,
 		engine:         cfg.Engine,
 		reviewDefaults: cfg.ReviewDefaults,
@@ -170,7 +176,7 @@ type loadedReview struct {
 // Every other failure keeps publication state independent from the completed
 // workflow: retryable failures stay pending, permanent failures become failed.
 func (p *Publisher) Publish(ctx context.Context, workflowID string) error {
-	unlock, err := p.lockWorkflow(ctx, workflowID)
+	ctx, unlock, err := p.lockWorkflow(ctx, workflowID)
 	if err != nil {
 		return err
 	}
@@ -190,10 +196,26 @@ func (p *Publisher) publishLocked(ctx context.Context, workflowID string) error 
 		return err
 	}
 	defer unlock()
+	if rejected, unknown, err := p.rejectRepositorySkillPublicationLocked(ctx, p.store, workflowID); rejected || err != nil {
+		return repositorySkillPublicationError(unknown, err)
+	}
 	err = p.publish(ctx, workflowID)
 	if err == nil {
 		return nil
 	}
+	// A revoked outbound lease stays the visible cause of a cancelled send.
+	// Do not replace it with a later provenance-policy rejection.
+	if errors.Is(err, workspace.ErrOutboundInvalidated) {
+		return err
+	}
+	if errors.Is(err, ErrStalePublication) || errors.Is(err, errDiscussionUnknown) {
+		if rejected, unknown, settleErr := p.rejectRepositorySkillPublicationLocked(ctx, p.store, workflowID); rejected {
+			return repositorySkillPublicationError(unknown, settleErr)
+		} else if settleErr != nil {
+			return errors.Join(err, settleErr)
+		}
+	}
+	err = p.preserveUnknown(ctx, workflowID, err)
 	if errors.Is(err, ErrStalePublication) {
 		// stale() already stored the skipped state and reason.
 		return err
@@ -208,7 +230,9 @@ func (p *Publisher) publishLocked(ctx context.Context, workflowID string) error 
 // error stays in logs only.
 func (p *Publisher) recordPublicationFailure(ctx context.Context, workflowID string, cause error) error {
 	state, reason := store.WorkflowPublicationPending, publicationRetryReason
-	if IsPermanentJob(cause) {
+	if errors.Is(cause, errDiscussionUnknown) {
+		reason = publicationUnknownReason
+	} else if IsPermanentJob(cause) {
 		state = store.WorkflowPublicationFailed
 		reason = publicationFailedReason
 		if errors.Is(cause, ErrMRClosed) {
@@ -378,27 +402,68 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 			fallback = true
 			continue
 		}
-		discussion, err := p.createDiscussion(ctx, loaded.token, loaded.project.ID, loaded.mrIID, findingBody, position)
+		if err := recheck(); err != nil {
+			return err
+		}
+		var created bool
+		var discussionID string
+		knownBodyHash := ""
+		err = sendOutbound(ctx, p.workspace.Get(loaded.project.ID), func(callCtx context.Context) error {
+			var err error
+			created, discussionID, err = p.store.ReserveDiscussionIntent(callCtx, loaded.project.ID, loaded.mrIID, key)
+			if err != nil {
+				return err
+			}
+			if created {
+				discussionID, err = p.createDiscussion(callCtx, loaded.token, loaded.project.ID, loaded.mrIID, key, findingBody, position)
+				return err
+			}
+			if discussionID == "" {
+				discussionID, err = p.recoverDiscussion(callCtx, loaded.token, loaded.project.ID, loaded.mrIID, key)
+				if err != nil {
+					return errors.Join(errDiscussionUnknown, err)
+				}
+				writeCtx, cancel := context.WithTimeout(context.WithoutCancel(callCtx), 4*time.Second)
+				defer cancel()
+				if err := p.store.ConfirmDiscussionIntent(writeCtx, loaded.project.ID, loaded.mrIID, key, discussionID); err != nil {
+					return errors.Join(errDiscussionUnknown, err)
+				}
+			}
+			return nil
+		})
 		if err != nil {
-			if gitlab.StatusOf(err) == 400 {
-				groups[i].PositionOK = false
-				fallback = true
-				continue
+			if created {
+				if gitlab.StatusOf(err) == 400 && !errors.Is(err, errDiscussionUnknown) &&
+					!errors.Is(err, workspace.ErrOutboundInvalidated) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+					if err := p.store.RejectDiscussionIntent(ctx, loaded.project.ID, loaded.mrIID, key); err != nil {
+						return errors.Join(errDiscussionUnknown, err)
+					}
+					groups[i].PositionOK = false
+					fallback = true
+					continue
+				}
+				return errors.Join(errDiscussionUnknown, err)
 			}
 			return err
 		}
-		if discussion == nil || discussion.ID == "" {
-			return errors.New("app: GitLab returned an empty discussion")
+		if created {
+			knownBodyHash = bodyHash(findingBody)
 		}
-		if _, err := p.store.UpsertPublication(ctx, store.Publication{
-			ProjectID:   loaded.project.ID,
-			MRIID:       loaded.mrIID,
-			Kind:        discussionPublishKind,
-			PublishKey:  key,
-			GitlabID:    discussion.ID,
-			WorkflowID:  workflowID,
-			Fingerprint: loaded.record.Hash,
-			BodyHash:    bodyHash(findingBody),
+		if err := sendOutbound(ctx, p.workspace.Get(loaded.project.ID), func(callCtx context.Context) error {
+			if _, err := p.controlMatches(callCtx, loaded); err != nil {
+				return err
+			}
+			_, err := p.store.UpsertPublication(callCtx, store.Publication{
+				ProjectID:   loaded.project.ID,
+				MRIID:       loaded.mrIID,
+				Kind:        discussionPublishKind,
+				PublishKey:  key,
+				GitlabID:    discussionID,
+				WorkflowID:  workflowID,
+				Fingerprint: loaded.record.Hash,
+				BodyHash:    knownBodyHash,
+			})
+			return err
 		}); err != nil {
 			return err
 		}
@@ -443,14 +508,19 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 			return err
 		}
 	}
-	return p.store.SetWorkflowPublicationState(ctx, workflowID, store.WorkflowPublicationPublished, "")
+	return sendOutbound(ctx, p.workspace.Get(loaded.project.ID), func(callCtx context.Context) error {
+		if _, err := p.controlMatches(callCtx, loaded); err != nil {
+			return err
+		}
+		return p.store.SetWorkflowPublicationState(callCtx, workflowID, store.WorkflowPublicationPublished, "")
+	})
 }
 
 // PublishFailure publishes the incomplete-review summary. It never writes a
 // commit status or findings. Publication state follows the same retry rules as
 // a normal publication.
 func (p *Publisher) PublishFailure(ctx context.Context, workflowID, reason string) error {
-	unlock, err := p.lockWorkflow(ctx, workflowID)
+	ctx, unlock, err := p.lockWorkflow(ctx, workflowID)
 	if err != nil {
 		return err
 	}
@@ -470,10 +540,24 @@ func (p *Publisher) publishFailureLocked(ctx context.Context, workflowID, reason
 		return err
 	}
 	defer unlock()
+	if rejected, unknown, err := p.rejectRepositorySkillPublicationLocked(ctx, p.store, workflowID); rejected || err != nil {
+		return repositorySkillPublicationError(unknown, err)
+	}
 	err = p.publishFailure(ctx, workflowID, reason)
 	if err == nil {
 		return nil
 	}
+	if errors.Is(err, workspace.ErrOutboundInvalidated) {
+		return err
+	}
+	if errors.Is(err, ErrStalePublication) || errors.Is(err, errDiscussionUnknown) {
+		if rejected, unknown, settleErr := p.rejectRepositorySkillPublicationLocked(ctx, p.store, workflowID); rejected {
+			return repositorySkillPublicationError(unknown, settleErr)
+		} else if settleErr != nil {
+			return errors.Join(err, settleErr)
+		}
+	}
+	err = p.preserveUnknown(ctx, workflowID, err)
 	if errors.Is(err, ErrStalePublication) {
 		return err
 	}
@@ -564,7 +648,7 @@ func (p *Publisher) publishFailure(ctx context.Context, workflowID, reason strin
 // summary, never a normal review result. The stale and generation fences stay
 // inside Publish and PublishFailure.
 func (p *Publisher) Republish(ctx context.Context, workflowID string) error {
-	unlock, err := p.lockWorkflow(ctx, workflowID)
+	ctx, unlock, err := p.lockWorkflow(ctx, workflowID)
 	if err != nil {
 		return err
 	}
@@ -574,7 +658,18 @@ func (p *Publisher) Republish(ctx context.Context, workflowID string) error {
 
 // republishLocked requires the project workspace read lock.
 func (p *Publisher) republishLocked(ctx context.Context, workflowID string) error {
+	if rejected, unknown, err := p.rejectRepositorySkillPublication(ctx, p.store, workflowID); rejected || err != nil {
+		return repositorySkillPublicationError(unknown, err)
+	}
 	if err := p.checkPublicationPolicy(ctx, workflowID); err != nil {
+		if errors.Is(err, workspace.ErrOutboundInvalidated) {
+			return err
+		}
+		if rejected, unknown, settleErr := p.rejectRepositorySkillPublication(ctx, p.store, workflowID); rejected {
+			return repositorySkillPublicationError(unknown, settleErr)
+		} else if settleErr != nil {
+			return errors.Join(err, settleErr)
+		}
 		return err
 	}
 	loaded, err := p.load(ctx, workflowID)
@@ -597,31 +692,36 @@ func (p *Publisher) republishLocked(ctx context.Context, workflowID string) erro
 }
 
 // lockWorkflow uses the durable workflow ID to fence a deleted registration.
-func (p *Publisher) lockWorkflow(ctx context.Context, id string) (func(), error) {
+func (p *Publisher) lockWorkflow(ctx context.Context, id string) (context.Context, func(), error) {
 	wf, err := p.store.GetWorkflow(ctx, id)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if wf == nil || wf.ProjectID <= 0 {
-		return nil, PermanentJob(fmt.Errorf("workflow is missing"))
+		return nil, nil, PermanentJob(fmt.Errorf("workflow is missing"))
 	}
 	ws := p.workspace.Get(wf.ProjectID)
 	if ws == nil {
-		return nil, PermanentJob(fmt.Errorf("workspace is unavailable"))
+		return nil, nil, PermanentJob(fmt.Errorf("workspace is unavailable"))
 	}
 	unlock, err := ws.RLock(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	ctx, err = bindOutbound(ctx, ws)
+	if err != nil {
+		unlock()
+		return nil, nil, err
 	}
 	current, err := p.store.GetWorkflow(ctx, id)
 	if err != nil || current == nil || current.ID != id || current.ProjectID != wf.ProjectID {
 		unlock()
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		return nil, PermanentJob(fmt.Errorf("workflow is missing"))
+		return nil, nil, PermanentJob(fmt.Errorf("workflow is missing"))
 	}
-	return unlock, nil
+	return ctx, unlock, nil
 }
 
 // lockMR serializes summary and commit-status writes for one merge request.
@@ -648,6 +748,10 @@ func (p *Publisher) lockReviewMR(ctx context.Context, workflowID string) (func()
 
 // publishStandaloneSummaryLocked requires the project workspace read lock.
 func (p *Publisher) publishStandaloneSummaryLocked(ctx context.Context, projectID, mrIID, generation int64, head, token, fingerprint, body string) error {
+	ctx, err := bindOutbound(ctx, p.workspace.Get(projectID))
+	if err != nil {
+		return err
+	}
 	unlock, err := p.lockMR(ctx, projectID, mrIID)
 	if err != nil {
 		return err
@@ -790,6 +894,9 @@ func publicationPolicyReason(d *review.Dossier) string {
 	if !d.WorkspaceProvenanceValid() {
 		return workspaceEvidenceReason
 	}
+	if !d.RepositorySkillCapabilitySupported() {
+		return repositorySkillEvidenceReason
+	}
 	return ""
 }
 
@@ -797,6 +904,9 @@ func (p *Publisher) checkPublicationPolicy(ctx context.Context, workflowID strin
 	record, err := p.store.GetWorkflowDossier(ctx, workflowID)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return err
+	}
+	if err == nil && record != nil && !review.DossierHasSupportedRepositorySkillCapability(record.Data) {
+		return p.stale(ctx, workflowID, repositorySkillEvidenceReason)
 	}
 	var dossier review.Dossier
 	if err == nil && record != nil && json.Unmarshal(record.Data, &dossier) == nil && validPublicationPolicy(&dossier) {
@@ -816,7 +926,30 @@ func (p *Publisher) rawDoc(ctx context.Context, token string, projectID int64, p
 	return string(data), nil
 }
 
+// preserveUnknown prevents later policy or GitLab errors from turning an
+// unresolved remote effect into a false terminal publication outcome.
+func (p *Publisher) preserveUnknown(ctx context.Context, workflowID string, cause error) error {
+	wf, err := p.store.GetWorkflow(ctx, workflowID)
+	if err != nil || wf == nil || wf.MRIID == nil {
+		return errors.Join(cause, err)
+	}
+	unknown, err := p.store.HasUnknownDiscussionIntent(ctx, wf.ProjectID, *wf.MRIID)
+	if err != nil {
+		return errors.Join(cause, errDiscussionUnknown, err)
+	}
+	if unknown {
+		if errors.Is(cause, workspace.ErrOutboundInvalidated) || errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
+			return errors.Join(errDiscussionUnknown, cause)
+		}
+		return errDiscussionUnknown
+	}
+	return cause
+}
+
 func (p *Publisher) stale(ctx context.Context, workflowID, reason string) error {
+	if err := p.preserveUnknown(ctx, workflowID, nil); err != nil {
+		return err
+	}
 	if err := p.store.SetWorkflowPublicationStateIfPending(ctx, workflowID, "stale: "+reason); err != nil {
 		return err
 	}
@@ -887,7 +1020,12 @@ func (p *Publisher) upsertSummary(ctx context.Context, projectID, mrIID int64, t
 		if err := recheck(); err != nil {
 			return 0, err
 		}
-		created, err := p.gitlab.CreateMRNote(ctx, token, projectID, mrIID, body)
+		var created *gitlab.Note
+		err = sendOutbound(ctx, p.workspace.Get(projectID), func(ctx context.Context) error {
+			var err error
+			created, err = p.gitlab.CreateMRNote(ctx, token, projectID, mrIID, body)
+			return err
+		})
 		if err == nil {
 			if created == nil || created.ID <= 0 {
 				return 0, errors.New("app: summary creation returned no valid note")
@@ -896,7 +1034,7 @@ func (p *Publisher) upsertSummary(ctx context.Context, projectID, mrIID int64, t
 			break
 		}
 		last = err
-		if gitlab.StatusOf(err) == 400 || gitlab.StatusOf(err) == 404 ||
+		if gitlab.StatusOf(err) == 400 || gitlab.StatusOf(err) == 404 || errors.Is(err, workspace.ErrOutboundInvalidated) ||
 			errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return 0, err
 		}
@@ -941,21 +1079,56 @@ func (p *Publisher) updateSummaryNote(ctx context.Context, token string, project
 		if err := recheck(); err != nil {
 			return err
 		}
-		return p.gitlab.UpdateMRNote(ctx, token, projectID, mrIID, noteID, body)
+		return sendOutbound(ctx, p.workspace.Get(projectID), func(ctx context.Context) error {
+			return p.gitlab.UpdateMRNote(ctx, token, projectID, mrIID, noteID, body)
+		})
 	})
 }
 
-func (p *Publisher) createDiscussion(ctx context.Context, token string, projectID, mrIID int64, body string, position gitlab.Position) (*gitlab.Discussion, error) {
-	var discussion *gitlab.Discussion
-	err := p.retry(ctx, func() error {
-		created, err := p.gitlab.CreateDiscussion(ctx, token, projectID, mrIID, gitlab.NewDiscussion{Body: body, Position: &position})
-		if err != nil {
-			return err
+// createDiscussion is called only while the intent's outbound lease is held.
+func (p *Publisher) createDiscussion(ctx context.Context, token string, projectID, mrIID int64, key, body string, position gitlab.Position) (string, error) {
+	created, err := p.gitlab.CreateDiscussion(ctx, token, projectID, mrIID, gitlab.NewDiscussion{Body: body, Position: &position})
+	if err != nil {
+		return "", err
+	}
+	if created == nil || strings.TrimSpace(created.ID) == "" {
+		return "", errDiscussionUnknown
+	}
+	// Record the remote fact while the outbound lease and workspace lock
+	// still prevent policy changes and project deletion from passing it.
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 4*time.Second)
+	defer cancel()
+	if err := p.store.ConfirmDiscussionIntent(writeCtx, projectID, mrIID, key, created.ID); err != nil {
+		return "", errors.Join(errDiscussionUnknown, err)
+	}
+	return created.ID, nil
+}
+
+func (p *Publisher) recoverDiscussion(ctx context.Context, token string, projectID, mrIID int64, key string) (string, error) {
+	user, err := p.gitlab.CurrentUser(ctx, token)
+	if err != nil || user == nil || user.ID <= 0 {
+		return "", errors.Join(errDiscussionUnknown, err)
+	}
+	discussions, err := p.gitlab.ListDiscussions(ctx, token, projectID, mrIID)
+	if err != nil {
+		return "", errors.Join(errDiscussionUnknown, err)
+	}
+	marker := fmt.Sprintf("%s key=%s -->", review.FindingMarkerPrefix, key)
+	id := ""
+	for _, discussion := range discussions {
+		if len(discussion.Notes) == 0 || discussion.Notes[0].System || discussion.Notes[0].AuthorID != user.ID ||
+			strings.SplitN(discussion.Notes[0].Body, "\n", 2)[0] != marker {
+			continue
 		}
-		discussion = created
-		return nil
-	})
-	return discussion, err
+		if id != "" || strings.TrimSpace(discussion.ID) == "" || discussion.Notes[0].ID <= 0 {
+			return "", errDiscussionUnknown
+		}
+		id = discussion.ID
+	}
+	if id == "" {
+		return "", errDiscussionUnknown
+	}
+	return id, nil
 }
 
 // commitStatusPublishKey records the effective state with the SHA. GitLab
@@ -970,7 +1143,9 @@ func (p *Publisher) setCommitStatus(ctx context.Context, token string, projectID
 		if err := recheck(); err != nil {
 			return err
 		}
-		return p.gitlab.SetCommitStatus(ctx, token, projectID, sha, status)
+		return sendOutbound(ctx, p.workspace.Get(projectID), func(ctx context.Context) error {
+			return p.gitlab.SetCommitStatus(ctx, token, projectID, sha, status)
+		})
 	})
 }
 
@@ -982,7 +1157,7 @@ func (p *Publisher) retry(ctx context.Context, fn func() error) error {
 			return nil
 		}
 		last = err
-		if IsPermanentJob(err) || gitlab.StatusOf(err) == 400 || gitlab.StatusOf(err) == 404 ||
+		if IsPermanentJob(err) || gitlab.StatusOf(err) == 400 || gitlab.StatusOf(err) == 404 || errors.Is(err, workspace.ErrOutboundInvalidated) ||
 			errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
 		}

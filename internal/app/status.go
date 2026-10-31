@@ -13,6 +13,7 @@ import (
 
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/workspace"
 )
 
 const (
@@ -74,8 +75,9 @@ type reviewStatusUpdate struct {
 // returns upstream errors so a job can retry; callers that must not fail a
 // review log the error instead.
 type statusReporter struct {
-	gitlab statusGitLab
-	logger *slog.Logger
+	gitlab   statusGitLab
+	logger   *slog.Logger
+	outbound func(context.Context, func(context.Context) error) error
 }
 
 func newStatusReporter(api statusGitLab, logger *slog.Logger) *statusReporter {
@@ -86,6 +88,13 @@ func newStatusReporter(api statusGitLab, logger *slog.Logger) *statusReporter {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	return &statusReporter{gitlab: api, logger: logger}
+}
+
+func (r *statusReporter) send(ctx context.Context, call func(context.Context) error) error {
+	if r.outbound == nil {
+		return call(ctx)
+	}
+	return r.outbound(ctx, call)
 }
 
 // writeStatus creates or updates the single marker note and returns the note
@@ -125,9 +134,14 @@ func (r *statusReporter) writeStatus(ctx context.Context, projectID, mrIID int64
 		if !statusMayRegress(note.Body, update.State) {
 			return note.ID, hash, nil
 		}
-		err := r.gitlab.UpdateMRNote(ctx, token, projectID, mrIID, note.ID, body)
+		err := r.send(ctx, func(ctx context.Context) error {
+			return r.gitlab.UpdateMRNote(ctx, token, projectID, mrIID, note.ID, body)
+		})
 		if err == nil {
 			return note.ID, hash, nil
+		}
+		if errors.Is(err, workspace.ErrOutboundInvalidated) {
+			return 0, "", err
 		}
 		if !gitlab.IsNotFound(err) {
 			return 0, "", fmt.Errorf("app: status note update: %w", err)
@@ -135,7 +149,12 @@ func (r *statusReporter) writeStatus(ctx context.Context, projectID, mrIID int64
 		// The note was deleted between list and update. Recreate it below.
 		break
 	}
-	created, err := r.gitlab.CreateMRNote(ctx, token, projectID, mrIID, body)
+	var created *gitlab.Note
+	err = r.send(ctx, func(ctx context.Context) error {
+		var err error
+		created, err = r.gitlab.CreateMRNote(ctx, token, projectID, mrIID, body)
+		return err
+	})
 	if err != nil {
 		return 0, "", fmt.Errorf("app: status note creation: %w", err)
 	}
@@ -180,7 +199,12 @@ func (r *statusReporter) applyReaction(ctx context.Context, projectID, mrIID int
 		if !remove[award.Name] {
 			continue
 		}
-		if err := r.gitlab.DeleteNoteAward(ctx, token, projectID, mrIID, noteID, award.ID); err != nil {
+		if err := r.send(ctx, func(ctx context.Context) error {
+			return r.gitlab.DeleteNoteAward(ctx, token, projectID, mrIID, noteID, award.ID)
+		}); err != nil {
+			if errors.Is(err, workspace.ErrOutboundInvalidated) {
+				return err
+			}
 			if gitlab.IsNotFound(err) {
 				continue
 			}
@@ -190,7 +214,13 @@ func (r *statusReporter) applyReaction(ctx context.Context, projectID, mrIID int
 	if desired == reviewAwardNone || haveDesired {
 		return nil
 	}
-	if _, err := r.gitlab.AddNoteAward(ctx, token, projectID, mrIID, noteID, desired); err != nil {
+	if err := r.send(ctx, func(ctx context.Context) error {
+		_, err := r.gitlab.AddNoteAward(ctx, token, projectID, mrIID, noteID, desired)
+		return err
+	}); err != nil {
+		if errors.Is(err, workspace.ErrOutboundInvalidated) {
+			return err
+		}
 		// A concurrent retry may have added it already.
 		if gitlab.StatusOf(err) == 409 {
 			return nil

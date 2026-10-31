@@ -1,12 +1,13 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
 import { listProjects } from '../api/api'
+import type { Project } from '../api/types'
 import { ExtensionsManager } from '../features/extensions/ExtensionsManager'
 import { useCanWrite } from '../components/RoleContext'
 import {
-  EmptyState, ErrorState, LoadingState, PageHeader, Segmented, Toolbar, ToolbarField,
+  Button, EmptyState, ErrorState, LoadingState, PageHeader, Segmented, Toolbar, ToolbarField,
 } from '../components/ui'
+import { useLoadMoreFocus, usePaginated } from '../lib/hooks'
 import ui from '../styles/ui.module.css'
 
 const validTabs = ['mcp', 'skills', 'bindings']
@@ -21,24 +22,26 @@ export function ExtensionsPage() {
   const [scope, setScope] = useState<'platform' | 'project'>(isAdmin ? 'platform' : 'project')
   const [projectId, setProjectId] = useState('')
 
-  const projects = useQuery({ queryKey: ['projects', 'extensions'], queryFn: () => listProjects({ limit: 100 }) })
+  const projects = usePaginated<Project>(['projects', 'extensions'], (cursor) => listProjects({ limit: 100 }, cursor), 'projects')
+  const projectFocus = useLoadMoreFocus(projects.hasNextPage)
 
   useEffect(() => {
-    if (scope !== 'project' || projectId || !projects.data?.projects?.length) return
-    setProjectId(String(projects.data.projects[0].id))
-  }, [scope, projectId, projects.data])
+    if (scope !== 'project' || projectId || !projects.items.length) return
+    setProjectId(String(projects.items[0].id))
+  }, [scope, projectId, projects.items])
 
-  const projectOptions = useMemo(() => projects.data?.projects || [], [projects.data])
+  const projectOptions = projects.items
 
   // Project-scope states render under the tabs so the toolbar and tabs never move.
   let projectPlaceholder: ReactNode
-  if (projects.isError && projectOptions.length === 0) projectPlaceholder = <ErrorState error={projects.error} onRetry={() => { void projects.refetch() }} title="项目列表加载失败" />
+  if (projects.isError && projectOptions.length === 0) projectPlaceholder = <ErrorState error={projects.error} onRetry={projects.retry} title="项目列表加载失败" />
   else if (projects.isPending) projectPlaceholder = <LoadingState label="正在读取项目…" />
+  else if (projectOptions.length === 0 && projects.hasNextPage) projectPlaceholder = <EmptyState title="尚未加载到项目" description="继续加载更多项目。" />
   else if (projectOptions.length === 0) projectPlaceholder = <EmptyState title="还没有项目" description="先注册项目，再维护项目级扩展。" />
   else projectPlaceholder = <EmptyState title="请选择项目" description="项目级 MCP、Skill 和块绑定需要指定项目。" />
   // A failed refresh keeps the cached projects selectable but must stay retryable.
   const projectNotice = scope === 'project' && projects.isError && projectOptions.length > 0
-    ? <ErrorState error={projects.error} onRetry={() => { void projects.refetch() }} title="项目列表刷新失败" />
+    ? <ErrorState error={projects.error} onRetry={projects.retry} title={projects.isFetchNextPageError ? '更多项目加载失败' : '项目列表刷新失败'} />
     : null
 
   return (
@@ -61,6 +64,7 @@ export function ExtensionsPage() {
           {/* The project selector stays mounted in platform scope so the toolbar keeps its size. */}
           <ToolbarField label="项目">
             <select
+              ref={projectFocus.selectRef}
               className="select"
               name="project_id"
               value={projectId}
@@ -73,6 +77,11 @@ export function ExtensionsPage() {
               {projectOptions.map((project) => <option key={project.id} value={project.id}>{project.path_with_namespace}</option>)}
             </select>
           </ToolbarField>
+          {scope === 'project' && projects.hasNextPage ? (
+            <Button variant="secondary" onClick={projects.fetchNextPage} loading={projects.isFetchingNextPage} onFocus={projectFocus.onFocus} onBlur={projectFocus.onBlur}>
+              {projects.isFetchNextPageError ? '重试加载更多项目' : '加载更多项目'}
+            </Button>
+          ) : null}
         </Toolbar>
 
         <ExtensionsManager

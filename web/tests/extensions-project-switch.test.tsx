@@ -33,6 +33,97 @@ function seedManagerCache(
   queryClient.setQueryData(['mcp-servers', 'project', projectId], { pages: [{ servers: [] }], pageParams: [undefined] })
 }
 
+describe('MCP creation across cached projects', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    setCsrfToken(null)
+  })
+
+  it('does not carry an open project A draft into a project B write', async () => {
+    const writes: unknown[] = []
+    installFetch((url, init) => {
+      if (url.startsWith('/api/v1/mcp-servers') && init?.method === 'POST') {
+        writes.push(JSON.parse(String(init.body)))
+        return jsonResponse({})
+      }
+      if (url.startsWith('/api/v1/mcp-servers')) return jsonResponse({ servers: [] })
+      if (url.startsWith('/api/v1/skills')) return jsonResponse({ skills: [] })
+      if (url.startsWith('/api/v1/block-bindings')) return jsonResponse({ bindings: [] })
+      return jsonResponse({})
+    })
+    const queryClient = createTestQueryClient()
+    seedManagerCache(queryClient, 42, [])
+    seedManagerCache(queryClient, 43, [])
+    let switchProject: (id: number) => void = () => {}
+    function Harness() {
+      const [projectId, setProjectId] = useState(42)
+      switchProject = setProjectId
+      return <ExtensionsManager scope="project" projectId={projectId} canManage tab="mcp" onTabChange={() => {}} />
+    }
+
+    const user = userEvent.setup()
+    renderWithProviders(<Harness />, { queryClient })
+    await user.click(await screen.findByRole('button', { name: '新增 MCP 服务器' }))
+    await user.type(screen.getByRole('textbox', { name: '名称' }), 'project-a-secret')
+    await user.clear(screen.getByRole('textbox', { name: '配置 JSON' }))
+    await user.type(screen.getByRole('textbox', { name: '配置 JSON' }), '{{"url":"https://a.example"}')
+
+    act(() => switchProject(43))
+    expect(screen.getByRole('textbox', { name: '名称' })).toHaveValue('')
+    expect(screen.getByRole('textbox', { name: '配置 JSON' })).toHaveValue('{}')
+    setCsrfToken('csrf-switch')
+    await user.click(screen.getByRole('button', { name: '添加' }))
+    expect(writes).toHaveLength(0)
+
+    await user.type(screen.getByRole('textbox', { name: '名称' }), 'project-b-server')
+    await user.click(screen.getByRole('button', { name: '添加' }))
+    await waitFor(() => expect(writes).toEqual([{ scope: 'project', project_id: 43, name: 'project-b-server', config: {} }]))
+  })
+
+  it('does not close a project B draft when a pending project A write finishes', async () => {
+    let resolveA: (response: Response) => void = () => {}
+    const pending = new Promise<Response>((resolve) => { resolveA = resolve })
+    const writes: Array<{ project_id: number; name: string }> = []
+    installFetch((url, init) => {
+      if (url.startsWith('/api/v1/mcp-servers') && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as { project_id: number; name: string }
+        writes.push(body)
+        return body.project_id === 42 ? pending : jsonResponse({})
+      }
+      if (url.startsWith('/api/v1/mcp-servers')) return jsonResponse({ servers: [] })
+      if (url.startsWith('/api/v1/skills')) return jsonResponse({ skills: [] })
+      if (url.startsWith('/api/v1/block-bindings')) return jsonResponse({ bindings: [] })
+      return jsonResponse({})
+    })
+    const queryClient = createTestQueryClient()
+    seedManagerCache(queryClient, 42, [])
+    seedManagerCache(queryClient, 43, [])
+    let switchProject: (id: number) => void = () => {}
+    function Harness() {
+      const [projectId, setProjectId] = useState(42)
+      switchProject = setProjectId
+      return <ExtensionsManager scope="project" projectId={projectId} canManage tab="mcp" onTabChange={() => {}} />
+    }
+    const user = userEvent.setup()
+    setCsrfToken('csrf-switch')
+    renderWithProviders(<Harness />, { queryClient })
+    await user.click(await screen.findByRole('button', { name: '新增 MCP 服务器' }))
+    await user.type(screen.getByRole('textbox', { name: '名称' }), 'project-a-server')
+    await user.click(screen.getByRole('button', { name: '添加' }))
+    await waitFor(() => expect(writes).toHaveLength(1))
+
+    act(() => switchProject(43))
+    await user.type(screen.getByRole('textbox', { name: '名称' }), 'project-b-draft')
+    await act(async () => { resolveA(jsonResponse({})) })
+    expect(screen.getByRole('textbox', { name: '名称' })).toHaveValue('project-b-draft')
+    await user.click(screen.getByRole('button', { name: '添加' }))
+    await waitFor(() => expect(writes).toMatchObject([
+      { project_id: 42, name: 'project-a-server' },
+      { project_id: 43, name: 'project-b-draft' },
+    ]))
+  })
+})
+
 describe('bindings reset when the extension scope changes', () => {
   afterEach(() => {
     vi.unstubAllGlobals()

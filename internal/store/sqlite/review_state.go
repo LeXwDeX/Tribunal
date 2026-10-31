@@ -576,8 +576,8 @@ func (s *Store) GetWorkflowByJob(ctx context.Context, jobID string) (*store.Work
 // DetachWorkflowJob clears the job -> workflow mapping of one dossier so a
 // retried job can store a fresh dossier after its configuration or prompt
 // bundle changed. The workflow and dossier stay for audit. A pending
-// publication is marked skipped so stale inputs are never published. The
-// update is atomic: concurrent detaches return ErrNotFound for the loser.
+// publication is marked skipped unless a discussion outcome is still unknown.
+// The update is atomic: concurrent detaches return ErrNotFound for the loser.
 func (s *Store) DetachWorkflowJob(ctx context.Context, workflowID, jobID string) error {
 	workflowID = strings.TrimSpace(workflowID)
 	jobID = strings.TrimSpace(jobID)
@@ -586,12 +586,13 @@ func (s *Store) DetachWorkflowJob(ctx context.Context, workflowID, jobID string)
 	}
 	res, err := s.db.ExecContext(ctx, `UPDATE workflow_dossiers
 		SET job_id = NULL,
-		    publication_state = CASE WHEN publication_state = ? THEN ? ELSE publication_state END,
-		    publication_error = CASE WHEN publication_state = ? THEN ? ELSE publication_error END,
+		    publication_state = CASE WHEN publication_state = ? AND NOT `+unknownDiscussionForDossier+` THEN ? ELSE publication_state END,
+		    publication_error = CASE WHEN publication_state = ? THEN
+		      CASE WHEN `+unknownDiscussionForDossier+` THEN ? ELSE ? END ELSE publication_error END,
 		    updated_at = ?
 		WHERE workflow_id = ? AND job_id = ?`,
 		store.WorkflowPublicationPending, store.WorkflowPublicationSkipped,
-		store.WorkflowPublicationPending, "review superseded by a newer review",
+		store.WorkflowPublicationPending, store.WorkflowPublicationUnknownReason, "review superseded by a newer review",
 		formatTime(s.now().UTC()), workflowID, jobID)
 	if err != nil {
 		return fmt.Errorf("sqlite: detach workflow job: %w", err)
@@ -905,13 +906,14 @@ func (s *Store) SetWorkflowPublicationState(ctx context.Context, workflowID, sta
 
 // SetWorkflowPublicationStateIfPending settles a still-pending publication.
 // It never overwrites published, skipped, or failed state, so cancellation and
-// publishing cannot race into one another.
+// publishing cannot race into one another. An unknown discussion stays pending.
 func (s *Store) SetWorkflowPublicationStateIfPending(ctx context.Context, workflowID, reason string) error {
 	reason = normalizePublicationError(store.WorkflowPublicationSkipped, reason)
 	res, err := s.db.ExecContext(ctx, `UPDATE workflow_dossiers
-		SET publication_state = ?, publication_error = ?, updated_at = ?
+		SET publication_state = CASE WHEN `+unknownDiscussionForDossier+` THEN ? ELSE ? END,
+		    publication_error = CASE WHEN `+unknownDiscussionForDossier+` THEN ? ELSE ? END, updated_at = ?
 		WHERE workflow_id = ? AND publication_state = ?`,
-		store.WorkflowPublicationSkipped, reason, formatTime(s.now().UTC()),
+		store.WorkflowPublicationPending, store.WorkflowPublicationSkipped, store.WorkflowPublicationUnknownReason, reason, formatTime(s.now().UTC()),
 		workflowID, store.WorkflowPublicationPending)
 	if err != nil {
 		return fmt.Errorf("sqlite: settle pending publication: %w", err)
