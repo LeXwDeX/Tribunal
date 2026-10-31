@@ -24,6 +24,7 @@
 | 模型协议：`openai-chat`、`openai-responses` 或 `anthropic` | `LLM_PROTOCOL` | 是 |
 | 模型 API 地址 | `LLM_BASE_URL`；OpenAI 兼容接口一般带 `/v1`，Anthropic 用 API 根地址 | 是 |
 | 模型 ID 和 API key | `LLM_MODEL`、`LLM_API_KEY` | 是 |
+| 第二个 provider 的协议、地址、模型 ID 和 API key（可选） | `LLM_SECONDARY_PROTOCOL`、`LLM_SECONDARY_BASE_URL`、`LLM_SECONDARY_MODEL`、`LLM_SECONDARY_API_KEY`；仅在用户要求第二个模型时索取 | 否 |
 | 服务对外地址 | `TRIBUNAL_PUBLIC_URL`；要让 GitLab 回调 Webhook 或启用 OAuth，就必须是 GitLab 和浏览器都能访问的 HTTPS 地址 | 本机试用可用默认值 |
 | 宿主机端口 | `TRIBUNAL_HTTP_PORT`，默认 8080 | 否 |
 | 是否启用浏览器登录（OAuth） | 决定是否执行第 4 步 | 否 |
@@ -89,7 +90,24 @@ docker compose config --quiet && echo compose-ok
 
 失败时，报错会指出缺哪个必填变量（`... is required`）。另外检查宿主机 shell 里有没有导出同名旧值：已导出的变量优先于 `.env`。
 
-**模型配置**：`config/server.docker.yaml` 只定义了一个 provider，名为 `primary`，onboarding、评审和挑战核验都用它。要配置多个模型或多模型对抗，参照 [配置设计 · 平台配置文件](design/06-config.md#1-平台配置文件) 修改这个文件。不要删除 `profiles.onboarding.agent.provider` 和 `profiles.default.challenge.provider`。
+### 多 Provider 配置
+
+默认只有 `primary`，由 `LLM_*` 提供；`config/server.docker.yaml` 中的 `secondary` 保持注释。Compose 的 `environment` 已允许四个 `LLM_SECONDARY_*` 变量，空值不影响 primary-only 部署。`.env` 只用于 Compose 插值，不是自动注入；不要让用户在聊天或命令中提供 API key。
+
+用户要求第二个 provider 时，按以下顺序执行。完整参数和回退说明见 [运维 · 多 Provider 配置](operations.md#多-provider-配置)。
+
+1. 向用户取得第二个 provider 的协议、API 根地址、模型 ID 和费用授权。协议使用 `openai-chat`、`openai-responses` 或 `anthropic`；Anthropic 的地址不带 `/v1`，OpenAI 兼容地址通常带 `/v1`。密钥由用户或受控密钥管理器直接写入权限为 `600` 的 `.env`，对应 `LLM_SECONDARY_API_KEY`；不要复制真实值到终端、聊天或示例。
+2. 在 `.env` 填入 `LLM_SECONDARY_PROTOCOL`、`LLM_SECONDARY_BASE_URL`、`LLM_SECONDARY_MODEL` 和 `LLM_SECONDARY_API_KEY`。四个值互相独立，不能从 primary 的 `LLM_*` 推导。
+3. 在 `config/server.docker.yaml` 取消 `providers.secondary` 整段注释；`api_key_env` 保持 `LLM_SECONDARY_API_KEY`，不要改成密钥值。保留 `profiles.onboarding.agent.provider: primary`，不要把 onboarding 切到 secondary。
+4. 在 `profiles.default` 中按策略引用 secondary。例如 challenge 改为 `secondary`，propose 保持 primary；或同时取消第二个 propose 条目的注释。`verify` 跟随 challenge，`gather` 和 `adjudicate` 不能配置模型。`plan`、`synthesize` 只有在 `mode: agent` 时才调用模型。若 `plan.mode: agent`，package 的非空 `provider` 会覆盖该 package 的所有 propose 条目；同一 package 可能变成同一模型重复调用，不能保证多模型独立。
+5. 若这是已有部署，先在控制台评审列表核对未完成（运行中或排队）评审和待发布结果。需要旧评审完成时先等待；否则接受未终态工作流可能在重启恢复时因配置、档位或执行身份不匹配被取消。待发布结果是否继续由发布时校验决定，不能假定会自动跳过或一定发布；无法确认时先等待并核对。首次部署没有旧任务，可直接进行下一步。
+6. 构建并启动：按[第 3 节](#3-构建并启动)执行 `docker compose build` 和 `--check-config`。首次部署再用 `docker compose up -d --wait`；已有部署用 `docker compose up -d --force-recreate --wait --wait-timeout 120` 让新环境变量生效。缺少 secondary key 时会指出 `providers.secondary.api_key_env`，不要输出密钥排查。`--check-config` 不验证网络、密钥有效性和工具兼容性。
+7. 启动后用平台管理员打开控制台「模型与档位」，确认两个 provider 都出现。逐个测试会发送真实最小请求并产生费用，必须先取得用户授权；测试成功只证明协议、地址、密钥和模型 ID 基本可用，不证明工具调用、长上下文或完整评审兼容。完整评审要在测试 MR 上另行触发并另获授权。
+8. 第三个 provider 需要自行写配置，并在 `compose.override.yaml` 的 `services.review.environment` 显式透传其变量；仅写入 `.env` 时容器看不到。配置中引用的协议、地址、模型和 key 变量要逐一列出，不能只传 key。示例见 [运维 · 多 Provider 配置](operations.md#多-provider-配置) 第 8 步。
+
+**回退**：先按步骤 5 核对未完成评审和待发布结果，再检查所有 `profiles.*` 的 `plan.provider`、`propose[].provider`、`reasoner.provider`、`challenge.provider`、`challenge.fallback`、`synthesize.provider` 和 `agent.provider`，包括 `default`、`onboarding` 和自定义档位。把所有 secondary 引用替换为 primary，或删除不再需要的可选字段/条目；保留 `profiles.onboarding.agent.provider`；`challenge.provider` 必须是已配置别名或 `cross`，`cross` 时必须保留合法的 `challenge.fallback`，且 fallback 不能指向 secondary；每个评审档位至少保留一个 `propose` 条目。确认没有引用后，重新注释 `providers.secondary`，从 `.env` 移除四个变量，先执行 `docker compose config --quiet` 和 `docker compose run --rm --no-deps review --config /app/config/server.yaml --check-config`，两项通过后才执行 `docker compose up -d --force-recreate --wait --wait-timeout 120`。引用不存在的 provider 会导致启动失败；`config --quiet` 不验证应用配置语义，`--check-config` 不验证评审图、网络或模型兼容性。
+
+不要删除 `profiles.onboarding.agent.provider` 和 `profiles.default.challenge.provider`。
 
 ## 3. 构建并启动
 
@@ -117,6 +135,8 @@ docker compose exec -T review /app/tribunalctl projects all
 | 现象 | 原因与处理 |
 |---|---|
 | `--check-config` 报 provider 或 profile 错误 | `LLM_PROTOCOL` 拼错，或 YAML 里删掉了必需的 profile provider |
+| `--check-config` 报 `providers.secondary.api_key_env` | 已取消 `secondary` 注释，但 `.env` 或容器环境里没有 `LLM_SECONDARY_API_KEY`；设置真实值并确认 Compose 透传，不要打印密钥 |
+| secondary 已配置但控制台没有显示 | 配置未取消注释、容器未重建，或新增变量未加入 Compose allowlist；配置文件改动需重启进程，环境变量改动需 `--force-recreate` |
 | 容器反复重启，日志提到 session key | 检查 `TRIBUNAL_SESSION_KEY` 是否为空或只有空白及其安全注入方式。已有部署须恢复原来保存的值；只有首次部署，或用户明确授权并接受所有现有浏览器会话失效的轮换，才生成新值 |
 | 构建时下载 codebase-memory-mcp 失败或校验和不符 | 网络无法访问 GitHub Releases。不要改 Dockerfile 里写死的 SHA-256；配置代理后重试 |
 | `/auth/login` 返回 503 或控制台提示未启用 OAuth | OAuth 还没启用，这是正常的；控制台会隐藏登录按钮，见第 4 步 |
@@ -130,7 +150,7 @@ docker compose exec -T review /app/tribunalctl projects all
    - Redirect URI 填 `<TRIBUNAL_PUBLIC_URL>/auth/callback`。
 2. 先向用户确认实际 GitLab 数字用户 ID 和本次平台管理员授权，再在 `.env` 里设置 `GITLAB_OAUTH_CLIENT_ID`、`GITLAB_OAUTH_CLIENT_SECRET`，以及 `GITLAB_ADMIN_USERNAME=id:<管理员 GitLab 用户 ID>`。用户 ID 可以用 `GET <GITLAB_URL>/api/v4/users?username=<name>` 查到。
 3. 在 `config/server.docker.yaml` 里取消 `oauth:`、`client_id_env:`、`client_secret_env:` 和 `bootstrap_admins:` 这几行的注释。
-4. 重建容器。`restart` 不会读入新的环境变量，所以要用：
+4. 重建容器。`restart` 会重新读取已挂载的配置，但不会读入新的环境变量；本步骤修改了 `.env`，所以要用：
 
 ```bash
 docker compose up -d --force-recreate --wait --wait-timeout 120
@@ -251,6 +271,7 @@ v1.2.0 开箱自带两项内置扩展，不需要额外配置：
 ## 9. 交付给用户时要报告的内容
 
 - 访问地址、是否已启用 OAuth、管理员是谁（写用户 ID，不写 token）。
+- 已配置的 provider 别名、各自协议和模型 ID，以及档位引用；不写 API key。逐个连通性测试是否已获授权、执行了哪些、结果如何；明确说明测试成功不等于完整评审兼容，完整评审是否实测。
 - 已接入的项目 ID、Webhook 方式（自动或手动）和当前状态，以及已授权的用户和角色。
 - 跑过哪些验证命令，结果如何。哪些没有验证，比如第 5 步的 `/review` 实测，要明确说出来。
 - 提醒用户：妥善保存 `REVIEW_MASTER_KEY`，设置定期备份（[第 7 节](operations.md#7-sqlite-一致性备份与恢复)），以及从 GitLab 组移除成员时，要在 Tribunal 里同步删除对应的项目权限。

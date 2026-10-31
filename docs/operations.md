@@ -37,7 +37,7 @@ chmod 600 .env
 
 `.env` 值包含 `$` 或 `#` 时使用单引号。不要把真实密钥写进 YAML、提交到仓库或放进 Docker build args。Compose 从 `.env` 做变量替换，再通过 `environment` 允许列表传入容器，不会把整个 `.env` 挂载或注入。宿主机已导出的同名变量优先于 `.env`；部署前检查是否有旧值，但不要把秘密输出到日志。环境变量仍对 Docker 管理员可见。
 
-`config/server.docker.yaml` 只读挂载到 `/app/config/server.yaml`。它绑定一个名为 `primary` 的 provider，`onboarding` 档位用其初始化仓库上下文，`default` 档位用同一个 provider 执行 `code-review` 和 challenge 核验；plan 和 synthesize 沿用代码模式，不默认启用多模型对抗。该示例配置的数据库与工作区分别使用 `/app/data/review.db` 和 `/app/data/workspaces`；实际路径以生效配置和挂载为准。其他参数沿用应用内置默认值。不要移除 `profiles.onboarding.agent.provider` 或 `profiles.default.challenge.provider`：前者会导致工作区初始化失败，后者会导致评审图构建失败，即使健康检查和 `--check-config` 通过。
+`config/server.docker.yaml` 只读挂载到 `/app/config/server.yaml`。它默认只绑定一个名为 `primary` 的 provider，`onboarding` 档位用其初始化仓库上下文，`default` 档位用同一个 provider 执行 `code-review` 和 challenge 核验；plan 和 synthesize 沿用代码模式，不默认启用多模型对抗。需要第二个 provider 时，按[多 Provider 配置](#多-provider-配置)操作；secondary 模板默认保持注释，不影响 primary-only 部署。该示例配置的数据库与工作区分别使用 `/app/data/review.db` 和 `/app/data/workspaces`；实际路径以生效配置和挂载为准。其他参数沿用应用内置默认值。不要移除 `profiles.onboarding.agent.provider` 或 `profiles.default.challenge.provider`：前者会导致工作区初始化失败，后者会导致评审图构建失败，即使健康检查和 `--check-config` 通过。
 
 包含 #164 的版本将 Anthropic 未缓存输入、缓存读取和缓存创建各计入一次输入 token；缓存读写字段是明细，不应再加到总输入上。预算使用该总输入和输出，因此可能比旧版本更早耗尽。成本估算对全部输入使用配置的 `input_per_mtok`，对输出使用 `output_per_mtok`，不区分缓存费率，不等于供应方账单；未配置价格时估算为零，不代表没有费用。已保存的历史用量不会追溯回填；升级后恢复旧工作流时，其已记录节点的缓存用量仍可能少计，导致剩余预算被高估。若当前评审需要准确执行预算，应取消后在升级版本重新触发，并另行统计已产生的用量。等待旧工作流结束不会修正其已少计的用量或预算限制。
 
@@ -56,6 +56,93 @@ docker compose exec -T review /app/tribunalctl projects all
 `config --quiet` 检查 Compose 结构和必填变量，避免普通 `config` 将展开后的秘密打印到终端。包含 #164 的版本在 `--check-config` 和实际启动时，均在准备存储前检查应用配置、主密钥、管理员 token 和 session key 的本地格式；无效 session key 不会先打开或迁移 SQLite。检查不会验证现有数据与主密钥是否匹配，也不验证外部凭据、完整运行时或网络连接。新旧 session key 的优先级不变；均未配置时会生成临时 key，`--check-config` 仍可通过，只有实际启动会输出临时 key 告警。`up --wait` 还会等待镜像中的 `/readyz` 健康检查；就绪只证明数据库与 worker 可用，不证明模型或 GitLab 可用。
 
 默认访问 `http://localhost:8080`。服务只向宿主机 `127.0.0.1` 发布端口；GitLab webhook 和远程浏览器需要第 6 节的 HTTPS 反向代理。容器内 `localhost` 指容器本身，不是宿主机或其他 GitLab 容器。内部 CA 需由部署方配置可信证书，不要关闭 TLS 校验。
+
+### 多 Provider 配置
+
+首次部署可先完成上一节的[构建与启动](#构建并启动)，确认 primary-only 部署正常。已有部署不要先执行启动或重启命令；重建容器前，先按本节第 4 步核对未完成评审和待发布结果。默认部署只有一个 `primary` provider：`profiles.onboarding.agent.provider`、`profiles.default.propose[0].provider` 和 `profiles.default.challenge.provider` 都指向它。primary 的名称和变量保持不变，已有部署不需要迁移。
+
+需要第二个模型时，按以下步骤操作。示例只展示格式；`LLM_SECONDARY_MODEL` 和 `LLM_SECONDARY_API_KEY` 的尖括号内容必须替换为真实值，协议和地址按用户实际供应方填写。不要复制真实密钥：
+
+1. 在 `.env` 中设置四个独立变量。它们不由 primary 的 `LLM_*` 推导：
+
+   ```dotenv
+   LLM_SECONDARY_PROTOCOL=anthropic
+   LLM_SECONDARY_BASE_URL=https://api.anthropic.com
+   LLM_SECONDARY_MODEL=<second-model-id>
+   LLM_SECONDARY_API_KEY=<set-by-secret-manager>
+   ```
+
+   `LLM_SECONDARY_BASE_URL` 要匹配协议：Anthropic 使用 API 根地址（不带 `/v1`），OpenAI 兼容协议通常包含 `/v1`。`compose.yaml` 的 `environment` 已包含这四个名字，启用 secondary 时不需要额外 override。真实密钥应由用户或受控密钥管理器写入权限为 `600` 的 `.env`，或通过部署环境的密钥注入提供；不要写进 YAML、Compose 文件、命令行参数、聊天、Issue 或日志。示例中的尖括号内容不是可用值。
+
+2. 在 `config/server.docker.yaml` 中取消 `providers.secondary` 整段的注释。保留 `api_key_env: LLM_SECONDARY_API_KEY`；该字段只写变量名。默认模板已包含 `max_concurrency: 4` 和示例值 `max_tokens: 16000`；Anthropic 协议需要 `max_tokens`。无论选择哪个协议，都要按实际模型和供应方允许的输出上限调整该值。
+
+3. 在同一个文件的 `profiles.default` 中引用 secondary。下面只列出相关字段，不要用它替换整个 `profiles`。是否同时增加第二个 propose 条目由评审策略决定：
+
+   ```yaml
+   profiles:
+     onboarding:
+       agent:
+         provider: primary       # 保留：工作区初始化继续使用 primary
+     default:
+       propose:
+         - block: code-review
+           provider: primary
+         # 可选：取消注释，增加第二个提出方；成本和节点数会增加
+         # - block: code-review
+         #   provider: secondary
+       challenge:
+         provider: secondary     # 挑战和 verify 使用 secondary
+   ```
+
+   `verify` 没有单独的 provider 字段，它使用 challenge 选出的 provider。`gather` 和 `adjudicate` 是代码节点，不能配置模型。`plan` 和 `synthesize` 只有在 `mode: agent` 时才调用模型；默认的 `mode: code` 不会使用 provider。
+
+   固定 `challenge.provider` 会对每个 finding 使用同一个模型。若某个 finding 的提出方也使用该 provider，verify 会标记 same-model，不能当作独立确认；要按 finding 选择未被提出方使用的 provider，使用 `cross` 并配置 `fallback`。`cross` 不是调用失败后的自动故障切换，`fallback` 只在找不到独立候选时使用。
+
+   `plan.mode: agent` 时，规划模型可以给 package 指定 provider，但该值只能从 `propose` 出现的 provider 中选择。要让 agent plan 在包级别使用 secondary，必须同时启用第二个 propose 条目。注意：package 的 `provider` 非空时会覆盖该 package 的每个 propose 条目；若 propose 同时有 primary 和 secondary，同一 package 的多个提出节点会全部使用 package 的 provider，实际是同一模型重复调用，不能保证多模型独立。
+
+4. 启动前检查未完成评审和待发布结果。新增 provider（即使没有被任何档位引用）会改变评审执行配置；重启后恢复扫描会对未终态工作流重新检查配置、档位和执行身份，不匹配时会取消而不是续跑。待发布结果由发布时校验决定是否继续，不能假定会自动跳过或一定发布。需要旧评审完成时，先等它结束；否则接受取消，之后重新触发。对待发布结果按当前发布状态核对处理；已发布或失败的评审不会被改写。处理完这些结果前，不要执行第 6 步的重建。
+
+5. 校验 Compose 插值和必填变量。不要使用不带 `--quiet` 的 `docker compose config`，它会把展开后的密钥打印到终端：
+
+   ```bash
+   docker compose config --quiet
+   ```
+
+   再在容器内校验应用配置：
+
+   ```bash
+   docker compose run --rm --no-deps review --config /app/config/server.yaml --check-config
+   ```
+
+   `config --quiet` 只检查 Compose 结构、插值和必填变量，不读取 provider/profile 的业务语义。`--check-config` 检查 provider 协议、地址、`api_key_env` 是否存在、档位引用和主密钥格式，但不验证密钥是否有效、网络是否可达、模型是否支持工具调用，也不验证现有数据库与主密钥是否匹配。两项都通过不等于评审能运行。
+
+6. 重建容器。`restart` 不会更新容器环境变量；若配置文件已在容器内可见（例如只读绑定挂载），重启的应用进程会重新读取该文件。它不能替代 `.env` 或 Compose 层配置变更，使用：
+
+   ```bash
+   docker compose up -d --force-recreate --wait --wait-timeout 120
+   ```
+
+   `--wait` 只等待 `/readyz`，该检查只证明数据库和 worker 可用，不证明 provider 可访问。
+
+7. 用平台管理员打开控制台「模型与档位」，确认 `primary` 和 `secondary` 都出现在列表中，并核对档位引用。逐个测试会向对应 provider 发送一条最小真实请求，产生费用；执行前先取得用户授权。测试成功只证明协议、地址、密钥和模型 ID 基本可用，不证明工具调用、长上下文、推理参数或完整评审兼容。完整评审需要在测试 MR 上另行触发，也会产生费用。
+
+8. 第三个 provider 需要自行写配置，并在 `compose.override.yaml` 中显式透传其变量。Compose 的 `environment` 是显式 allowlist，`.env` 只用于插值，不会自动把新变量注入容器。配置中每引用一个新的 `${...}` 变量，都要在这里逐一列出；只透传 API key 而漏掉协议、地址或模型，会让容器内对应值为空并导致启动失败：
+
+   ```yaml
+   services:
+     review:
+       environment:
+         MY_PROVIDER_PROTOCOL: "${MY_PROVIDER_PROTOCOL:?MY_PROVIDER_PROTOCOL is required}"
+         MY_PROVIDER_BASE_URL: "${MY_PROVIDER_BASE_URL:?MY_PROVIDER_BASE_URL is required}"
+         MY_PROVIDER_MODEL: "${MY_PROVIDER_MODEL:?MY_PROVIDER_MODEL is required}"
+         MY_PROVIDER_API_KEY: "${MY_PROVIDER_API_KEY:?MY_PROVIDER_API_KEY is required}"
+   ```
+
+   对应配置写成 `protocol: "${MY_PROVIDER_PROTOCOL}"`、`base_url: "${MY_PROVIDER_BASE_URL}"`、`model: "${MY_PROVIDER_MODEL}"`、`api_key_env: MY_PROVIDER_API_KEY`；不要写密钥值。若复用容器中已有的变量（例如 `LLM_*`），则不需要重复透传。新增变量后同样执行 `docker compose config --quiet`，再重建容器。
+
+**回退**：先按第 4 步核对未完成评审和待发布结果，然后检查所有档位中对 secondary 的引用。逐个检查 `profiles.*` 的这些字段：`plan.provider`、`propose[].provider`、`reasoner.provider`、`challenge.provider`、`challenge.fallback`、`synthesize.provider` 和 `agent.provider`，包括 `default`、`onboarding` 及自定义档位。把每个 `secondary` 替换为 `primary`，或删除不再需要的可选字段/条目；`challenge.provider` 必须是已配置别名或 `cross`，`cross` 时保留合法的 `challenge.fallback`，且 fallback 不能指向 secondary；保留 `profiles.onboarding.agent.provider`，每个评审档位至少保留一个 `propose` 条目。确认没有引用后再重新注释 `providers.secondary`，并从 `.env` 移除四个变量。然后执行 `docker compose config --quiet` 和 `docker compose run --rm --no-deps review --config /app/config/server.yaml --check-config`；两项通过后才执行 `docker compose up -d --force-recreate --wait --wait-timeout 120`。引用不存在的 provider 会让启动失败；`config --quiet` 不验证应用配置语义，`--check-config` 不验证评审图、网络或模型兼容性。不要删除数据卷。回退也会改变评审执行配置或档位；未终态工作流在恢复时可能因校验不匹配被取消。待发布结果是否继续以发布校验为准。若 secondary 暂时不可用，可以只把上述所有引用切回 primary 并重建，保留 secondary 的注释配置，供后续恢复。
+
+关联说明：[配置设计 · 多 Provider 与档位引用](design/06-config.md#多-provider-与档位引用)；首次部署的完整顺序见 [Agent 部署指南](agent-deployment.md#多-provider-配置)。
 
 ### 浏览器登录与项目注册
 
@@ -327,7 +414,7 @@ fi
 
 单独停服使用 `docker compose stop review`。`docker compose down` 会删除容器但保留命名卷，不适用于需要从旧容器复制数据的备份；**不要执行 `down -v`**，它会删除数据库和工作区。默认项目名仍为 `crc-review`，数据卷仍为 `crc-review_data`；这是刻意保留的兼容身份，改名会创建新卷并让现有数据不可见。若用 `-p` 更换项目名，也会使用另一数据卷。不要同时启动多个实例共享同一卷。
 
-修改 `.env` 或配置后使用 `docker compose up -d --force-recreate --wait --wait-timeout 120`。`restart` 不会加载新的容器环境变量。升级程序需重新构建镜像，并按第 8 节先备份；不支持只回退镜像却保留升级后的数据库。
+修改 `.env` 或配置后使用 `docker compose up -d --force-recreate --wait --wait-timeout 120`。`restart` 不会加载新的容器环境变量；已挂载的配置文件会在进程重启后重新读取，但不能替代环境变量或 Compose 层配置变更。升级程序需重新构建镜像，并按第 8 节先备份；不支持只回退镜像却保留升级后的数据库。
 
 停机一致性备份前先核对实际路径和挂载，默认布局的命令见 [Compose 停机备份](#compose-停机备份)，自定义布局见第 7 节前提。备份命令不会重新启动旧服务；另行安全备份 `.env` 和实际配置。恢复时使用匹配布局的新空位置、匹配的镜像版本与主密钥，详见第 7 节；不要把旧 WAL 混进恢复数据。下文 `docker run` 示例使用独立容器名，不能与 Compose 实例同时占用同一端口或数据库。
 
@@ -473,7 +560,7 @@ docker inspect --format '{{.State.Health.Status}}' tribunal
 注意：
 
 - 必须覆盖默认 `--config`。镜像内的 `server.example.yaml` 只用于烟测，不是生产配置，也没有 `providers` 和 `propose`，不能执行真实评审。
-- 启用模型 provider 时，还要传入配置中 `api_key_env` 指定的变量，例如 `-e LLM_API_KEY`。复用 `server.docker.yaml` 时还需 `-e TRIBUNAL_PUBLIC_URL -e GITLAB_URL -e LLM_PROTOCOL -e LLM_BASE_URL -e LLM_MODEL`；这些值都需先在宿主机环境中设置。不要仅传入三个平台秘密就把它当作完整评审部署。
+- 启用模型 provider 时，还要传入配置中 `api_key_env` 指定的变量，例如 `-e LLM_API_KEY`。复用 `server.docker.yaml` 时还需 `-e TRIBUNAL_PUBLIC_URL -e GITLAB_URL -e LLM_PROTOCOL -e LLM_BASE_URL -e LLM_MODEL`；这些值都需先在宿主机环境中设置。启用其注释的 `secondary` provider 后，还要按实际使用的变量名传入 `LLM_SECONDARY_PROTOCOL`、`LLM_SECONDARY_BASE_URL`、`LLM_SECONDARY_MODEL` 和 `LLM_SECONDARY_API_KEY`；第三个 provider 同理，传入其 `api_key_env` 和模板变量。不要仅传入三个平台秘密就把它当作完整评审部署。
 - 此示例按默认数据路径挂载 `/app/data`；自定义 `storage.dsn` 或 `workspace.root` 时还须持久化相应路径和挂载。删除数据卷会丢失其中的数据库或工作区；没有数据库备份时已保存的项目凭据无法恢复。
 - 命名卷为空时会继承镜像内 `/app/data` 的属主 `10001:10001`。绑定挂载宿主机目录时，先修正属主：
   ```bash
@@ -693,7 +780,7 @@ docker logs tribunal-restored
 curl -fsS http://127.0.0.1:18080/readyz
 ```
 
-恢复时使用与快照匹配的主密钥。启用 OAuth 或模型 provider 时，还要传入原容器使用的对应环境变量。一次性复制容器以 root 修正属主；服务容器仍以 `10001:10001` 运行。
+恢复时使用与快照匹配的主密钥。启用 OAuth 或模型 provider 时，还要传入原容器使用的对应环境变量，包括已启用 secondary provider 时的四个 `LLM_SECONDARY_*` 变量；配置变更同样可能让恢复中的旧工作流被取消。一次性复制容器以 root 修正属主；服务容器仍以 `10001:10001` 运行。
 
 在线备份替代方案：使用宿主机或临时工具执行 SQLite `.backup` / `VACUUM INTO`，并对备份库运行 `PRAGMA integrity_check;`。这只能保证数据库快照一致；生效的 `workspace.root` 及各挂载中的工作区仍需单独备份，二者不保证同一事务时刻。不要把“在线数据库备份”描述成数据库与工作区的原子备份。
 
@@ -785,7 +872,7 @@ v1.2.0 共四个迁移：`0016_dossier_mr_title`、`0017_mcp_config_seal`、`001
 2. 核对实际挂载的配置文件及其来源。Compose 默认读取宿主机 `config/server.docker.yaml`；自定义部署可能是 `server.yaml`。使用实际挂载的文件，不要只看仓库示例。
 3. 对照实际配置、仓库内 `config/server.docker.yaml` 和 `config/server.example.yaml` 的 `default_extensions`，按需更新工具矩阵。保留管理员添加的 MCP 服务器、Skill 和自定义授权项；不要用示例整段覆盖生产配置。
 4. 若继续使用顶层 `blocks` 声明块，确认文件内容是完整绑定。文件声明会跳过该块的默认授权，所以文件里必须同时写出需要的默认工具和要保留的自建授权。MCP 工具名带 `mcp__<server>__<tool>` 前缀。
-5. 启动新镜像后，在控制台“扩展 → 块绑定”的平台范围核对：未由文件 `blocks` 接管、且未被管理员改过的块应与生效配置的矩阵一致；管理员改过或解绑的绑定保留，控制台以实际绑定为准。文件声明块由配置文件直接提供，块绑定 API 不返回它的数据库行，控制台可能显示为空绑定，不能把空行当作失败，也不要保存空绑定。修改配置或绑定后执行 `docker compose up -d --force-recreate --wait --wait-timeout 120`，再核对一次。`restart` 不会加载新的容器环境变量。
+5. 启动新镜像后，在控制台“扩展 → 块绑定”的平台范围核对：未由文件 `blocks` 接管、且未被管理员改过的块应与生效配置的矩阵一致；管理员改过或解绑的绑定保留，控制台以实际绑定为准。文件声明块由配置文件直接提供，块绑定 API 不返回它的数据库行，控制台可能显示为空绑定，不能把空行当作失败，也不要保存空绑定。修改配置或绑定后执行 `docker compose up -d --force-recreate --wait --wait-timeout 120`，再核对一次。`restart` 不会加载新的容器环境变量；已挂载的配置文件会重新读取，但不能替代环境变量或 Compose 层配置变更。
 
 #### 从数据库绑定迁移到文件声明
 
