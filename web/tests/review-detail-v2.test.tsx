@@ -8,7 +8,7 @@ import { ReviewDetailPage } from '../src/pages/ReviewDetailPage'
 import { ExecutionGraph } from '../src/features/review/ExecutionGraph'
 import { NodeDrawer } from '../src/features/review/NodeDrawer'
 import { findingFunnel, laneLabel, verdictCardState } from '../src/features/review/reviewView'
-import { COLUMN_GAP, NODE_HEIGHT, NODE_WIDTH, ROW_GAP } from '../src/lib/dag'
+import { COLUMN_GAP, NODE_HEIGHT, NODE_WIDTH, ROW_GAP, layoutDag } from '../src/lib/dag'
 import review$ from '../src/features/review/review.module.css'
 import { finding, review } from './fixtures'
 import { createTestQueryClient, installFetch, jsonResponse, renderWithProviders } from './test-utils'
@@ -237,6 +237,10 @@ describe('execution graph', () => {
     const { container } = render(<ExecutionGraph nodes={graphNodes} edges={[]} onSelect={() => {}} />)
     const lanes = Array.from(container.querySelectorAll(`.${review$.graphLane}`)).map((item) => item.textContent)
     expect(lanes).toEqual(['01 规划', '02 提出', '03 挑战', '04 裁决', '05'])
+    const paddingY = layoutDag(graphNodes, []).paddingY
+    for (const lane of Array.from(container.querySelectorAll<HTMLElement>(`.${review$.graphLane}`))) {
+      expect(lane.style.top).toBe(`${paddingY}px`)
+    }
   })
 
   it('keeps nodes keyboard focusable and highlights their edges on hover and focus', async () => {
