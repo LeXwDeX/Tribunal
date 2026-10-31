@@ -909,8 +909,7 @@ func seedWorkflowNoteID(t *testing.T, f *reviewFixture, workflowID string, noteI
 func TestReviewCancelSettlesRunningWorkflow(t *testing.T) {
 	f := newReviewFixture(t, reviewTestHead)
 	f.service.status = testStatusReporter(f.gitlab)
-	f.runner.block = make(chan struct{})
-	f.runner.started = make(chan struct{})
+	f.runner.setBlock(make(chan struct{}), make(chan struct{}))
 	runJob := f.seedReview(t, "job-running-cancel")
 	wfID := createPendingReview(t, f, "job-running-cancel", jobGeneration(t, runJob))
 	seedWorkflowNoteID(t, f, wfID, 555)
@@ -934,7 +933,7 @@ func TestReviewCancelSettlesRunningWorkflow(t *testing.T) {
 	runDone := make(chan error, 1)
 	go func() { runDone <- f.engine.Run(context.Background(), wfID) }()
 	select {
-	case <-f.runner.started:
+	case <-f.runner.startedSignal():
 	case <-time.After(2 * time.Second):
 		t.Fatal("review did not start")
 	}

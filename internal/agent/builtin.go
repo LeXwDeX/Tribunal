@@ -78,25 +78,25 @@ func (t readFileTool) Call(ctx context.Context, raw json.RawMessage) (Result, er
 		return Result{}, err
 	}
 	if strings.TrimSpace(in.Path) == "" {
-		return Result{}, errors.New("path is required")
+		return Result{}, inputFeedback("path", "required", errors.New("path is required"))
 	}
 	start := in.StartLine
 	if start == 0 {
 		start = 1
 	}
 	if start < 1 {
-		return Result{}, errors.New("start_line must be at least 1")
+		return Result{}, inputFeedback("start_line", "range", errors.New("start_line must be at least 1"))
 	}
 	if in.EndLine < 0 {
-		return Result{}, errors.New("end_line must not be negative")
+		return Result{}, inputFeedback("end_line", "range", errors.New("end_line must not be negative"))
 	}
 	if in.EndLine > 0 && in.EndLine < start {
-		return Result{}, errors.New("end_line must be greater than or equal to start_line")
+		return Result{}, inputFeedback("end_line", "range", errors.New("end_line must be greater than or equal to start_line"))
 	}
 
 	file, clean, err := t.sb.open(in.Root, in.Path)
 	if err != nil {
-		return Result{}, err
+		return Result{}, sandboxFeedback("path", err)
 	}
 	defer file.Close()
 
@@ -105,10 +105,10 @@ func (t readFileTool) Call(ctx context.Context, raw json.RawMessage) (Result, er
 		return Result{}, err
 	}
 	if bytes.IndexByte(data, 0) >= 0 {
-		return Result{}, fmt.Errorf("%s is a binary file", clean)
+		return Result{}, inputFeedback("path", "format", fmt.Errorf("%s is a binary file", clean))
 	}
 	if !utf8.Valid(data) {
-		return Result{}, fmt.Errorf("%s is not valid UTF-8 text", clean)
+		return Result{}, inputFeedback("path", "format", fmt.Errorf("%s is not valid UTF-8 text", clean))
 	}
 
 	lines := splitLines(data)
@@ -186,33 +186,33 @@ func (t grepTool) Call(ctx context.Context, raw json.RawMessage) (Result, error)
 		return Result{}, err
 	}
 	if in.Pattern == "" {
-		return Result{}, errors.New("pattern is required")
+		return Result{}, inputFeedback("pattern", "required", errors.New("pattern is required"))
 	}
 	if len(in.Pattern) > maxRegexpLen {
-		return Result{}, fmt.Errorf("pattern exceeds %d bytes", maxRegexpLen)
+		return Result{}, inputFeedback("pattern", "range", fmt.Errorf("pattern exceeds %d bytes", maxRegexpLen))
 	}
 	re, err := regexp.Compile(in.Pattern)
 	if err != nil {
-		return Result{}, fmt.Errorf("invalid regular expression: %w", err)
+		return Result{}, inputFeedback("pattern", "format", fmt.Errorf("invalid regular expression: %w", err))
 	}
 	limit := in.MaxResults
 	if limit == 0 {
 		limit = 100
 	}
 	if limit < 1 || limit > maxMatches {
-		return Result{}, fmt.Errorf("max_results must be between 1 and %d", maxMatches)
+		return Result{}, inputFeedback("max_results", "range", fmt.Errorf("max_results must be between 1 and %d", maxMatches))
 	}
 	var glob *globPattern
 	if in.Glob != "" {
 		glob, err = compileGlob(in.Glob)
 		if err != nil {
-			return Result{}, err
+			return Result{}, inputFeedback("glob", "format", err)
 		}
 	}
 
 	root, _, clean, err := t.sb.resolve(in.Root, in.Path)
 	if err != nil {
-		return Result{}, err
+		return Result{}, sandboxFeedback("path", err)
 	}
 	info, err := root.Stat(filepathFromSlash(clean))
 	if err != nil {
@@ -370,18 +370,22 @@ func (t globTool) Call(ctx context.Context, raw json.RawMessage) (Result, error)
 	}
 	pattern, err := compileGlob(in.Pattern)
 	if err != nil {
-		return Result{}, err
+		category := "format"
+		if in.Pattern == "" {
+			category = "required"
+		}
+		return Result{}, inputFeedback("pattern", category, err)
 	}
 	limit := in.MaxResults
 	if limit == 0 {
 		limit = 200
 	}
 	if limit < 1 || limit > maxGlobResults {
-		return Result{}, fmt.Errorf("max_results must be between 1 and %d", maxGlobResults)
+		return Result{}, inputFeedback("max_results", "range", fmt.Errorf("max_results must be between 1 and %d", maxGlobResults))
 	}
 	root, _, _, err := t.sb.resolve(in.Root, ".")
 	if err != nil {
-		return Result{}, err
+		return Result{}, sandboxFeedback("root", err)
 	}
 
 	var results []string
@@ -518,7 +522,7 @@ func (t listDirTool) Call(ctx context.Context, raw json.RawMessage) (Result, err
 	}
 	root, _, clean, err := t.sb.resolve(in.Root, in.Path)
 	if err != nil {
-		return Result{}, err
+		return Result{}, sandboxFeedback("path", err)
 	}
 	dir, err := root.Open(filepathFromSlash(clean))
 	if err != nil {
@@ -575,6 +579,63 @@ func def(sb *Sandbox, name, description, schema string) llm.ToolDef {
 	return llm.ToolDef{Name: name, Description: description, InputSchema: json.RawMessage(schema)}
 }
 
+type inputFeedbackError struct {
+	err             error
+	field, category string
+}
+
+func (e *inputFeedbackError) Error() string { return e.err.Error() }
+func (e *inputFeedbackError) Unwrap() error { return e.err }
+func (e *inputFeedbackError) AgentValidationFeedback() (string, string) {
+	return e.field, e.category
+}
+
+func inputFeedback(field, category string, err error) error {
+	return &inputFeedbackError{err: err, field: field, category: category}
+}
+
+func sandboxFeedback(field string, err error) error {
+	category := "unavailable"
+	switch {
+	case errors.Is(err, ErrUnknownRoot):
+		field, category = "root", "root"
+	case errors.Is(err, ErrUnsafePath):
+		category = "unsafe_path"
+	case errors.Is(err, ErrIgnoredPath):
+		category = "ignored"
+	}
+	return inputFeedback(field, category, err)
+}
+
+// shortcut: only fixed git validation errors are classified; use typed errors when git.go can change.
+func builtinFeedback(tool Tool, err error) (out error) {
+	out = err
+	defer func() {
+		if recover() != nil {
+			out = err
+		}
+	}()
+	switch tool.(type) {
+	case gitLogTool, gitBlameTool:
+		if errors.Is(err, ErrUnknownRoot) || errors.Is(err, ErrUnsafePath) || errors.Is(err, ErrIgnoredPath) {
+			return sandboxFeedback("path", err)
+		}
+		switch err.Error() {
+		case "path is required":
+			return inputFeedback("path", "required", err)
+		case "max must be between 1 and 100":
+			return inputFeedback("max", "range", err)
+		case "line range must satisfy 1 <= start_line <= end_line":
+			return inputFeedback("end_line", "line_range", err)
+		case fmt.Sprintf("line range exceeds %d lines", maxGitBlameLines):
+			return inputFeedback("end_line", "line_limit", err)
+		case "agent: path does not exist":
+			return inputFeedback("path", "unavailable", err)
+		}
+	}
+	return out
+}
+
 func decodeInput(raw json.RawMessage, out any) error {
 	if len(raw) == 0 {
 		raw = json.RawMessage(`{}`)
@@ -582,7 +643,11 @@ func decodeInput(raw json.RawMessage, out any) error {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(out); err != nil {
-		return fmt.Errorf("invalid input: %w", err)
+		var typeErr *json.UnmarshalTypeError
+		if errors.As(err, &typeErr) {
+			return inputFeedback(typeErr.Field, "type", fmt.Errorf("invalid input: %w", err))
+		}
+		return inputFeedback("", "schema", fmt.Errorf("invalid input: %w", err))
 	}
 	var extra any
 	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {

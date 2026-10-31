@@ -3,6 +3,7 @@ package dag
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"time"
 )
 
@@ -367,11 +368,16 @@ func applyNodeCompleted(wf *WorkflowView, ev Event) error {
 		return fmt.Errorf("dag: node %q output is not valid JSON", id)
 	}
 	view.Output = rawCopy(payload.Output)
-	view.Usage = payload.Usage
+	usage, invalid := sanitizeUsage(payload.Usage)
+	view.Usage = usage
+	view.UsageIncomplete = view.UsageIncomplete || payload.UsageIncomplete || invalid
+	wf.UsageIncomplete = wf.UsageIncomplete || view.UsageIncomplete
 	view.Error = ""
 	view.Reason = ""
 	finishNode(wf, *view, NodeCompleted, ev)
-	wf.Usage.add(payload.Usage)
+	if wf.Usage.add(view.Usage) {
+		wf.UsageIncomplete = true
+	}
 	return nil
 }
 
@@ -393,7 +399,10 @@ func applyNodeTerminal(wf *WorkflowView, ev Event, status NodeStatus) error {
 		if err := nodeTransition(view.Status, NodeFailed); err != nil {
 			return err
 		}
-		view.Usage = payload.Usage
+		usage, invalid := sanitizeUsage(payload.Usage)
+		view.Usage = usage
+		view.UsageIncomplete = view.UsageIncomplete || payload.UsageIncomplete || invalid
+		wf.UsageIncomplete = wf.UsageIncomplete || view.UsageIncomplete
 		view.Error = payload.Error
 		view.Reason = payload.Reason
 		view.ErrorStatus = payload.ErrorStatus
@@ -401,7 +410,9 @@ func applyNodeTerminal(wf *WorkflowView, ev Event, status NodeStatus) error {
 			view.Reason = payload.ErrorKind
 		}
 		finishNode(wf, *view, NodeFailed, ev)
-		wf.Usage.add(payload.Usage)
+		if wf.Usage.add(view.Usage) {
+			wf.UsageIncomplete = true
+		}
 		return nil
 	case EventNodeAborted:
 		payload, err := decodePayload[NodeAbortedPayload](ev)
@@ -416,6 +427,8 @@ func applyNodeTerminal(wf *WorkflowView, ev Event, status NodeStatus) error {
 			return err
 		}
 		view.Reason = payload.Reason
+		view.UsageIncomplete = view.UsageIncomplete || payload.UsageIncomplete
+		wf.UsageIncomplete = wf.UsageIncomplete || view.UsageIncomplete
 		finishNode(wf, *view, NodeAborted, ev)
 		return nil
 	default:
@@ -437,6 +450,16 @@ func applyNodeTerminal(wf *WorkflowView, ev Event, status NodeStatus) error {
 			return err
 		}
 		view.Reason = payload.Reason
+		view.UsageIncomplete = view.UsageIncomplete || payload.UsageIncomplete
+		if payload.Usage != nil {
+			usage, invalid := sanitizeUsage(*payload.Usage)
+			view.Usage = usage
+			view.UsageIncomplete = view.UsageIncomplete || invalid
+			if wf.Usage.add(usage) {
+				wf.UsageIncomplete = true
+			}
+		}
+		wf.UsageIncomplete = wf.UsageIncomplete || view.UsageIncomplete
 		finishNode(wf, *view, status, ev)
 		return nil
 	}
@@ -475,6 +498,7 @@ func applyNodeRestarted(wf *WorkflowView, ev Event) error {
 	view.Attempt++
 	view.Output = nil
 	view.Usage = Usage{}
+	view.UsageIncomplete = view.UsageIncomplete || payload.UsageIncomplete
 	view.Provider = ""
 	view.Model = ""
 	view.Error = ""
@@ -483,6 +507,7 @@ func applyNodeRestarted(wf *WorkflowView, ev Event) error {
 	view.FinishedAt = time.Time{}
 	view.Revision = ev.Seq
 	wf.Nodes[id] = view
+	wf.UsageIncomplete = wf.UsageIncomplete || payload.UsageIncomplete
 	wf.Revision = ev.Seq
 	return nil
 }
@@ -534,15 +559,67 @@ func cloneSpecs(in []NodeSpec) []NodeSpec {
 	return out
 }
 
-func (u *Usage) add(other Usage) {
-	u.InputTokens += other.InputTokens
-	u.OutputTokens += other.OutputTokens
-	u.CostMicros += other.CostMicros
-	u.CacheReadTokens += other.CacheReadTokens
-	u.CacheWriteTokens += other.CacheWriteTokens
-	u.ReasoningTokens += other.ReasoningTokens
+// sanitizeUsage clamps invalid negative counters to zero. It reports that the
+// usage cannot be accounted exactly, either because a counter was negative or
+// because input plus output tokens overflowed an int64.
+func sanitizeUsage(in Usage) (Usage, bool) {
+	incomplete := clampNegative(&in)
+	return in, incomplete || usageOverflows(in)
 }
 
+func clampNegative(u *Usage) bool {
+	incomplete := false
+	for _, counter := range []*int64{&u.InputTokens, &u.OutputTokens, &u.CostMicros, &u.CacheReadTokens, &u.CacheWriteTokens, &u.ReasoningTokens} {
+		if *counter < 0 {
+			*counter = 0
+			incomplete = true
+		}
+	}
+	return incomplete
+}
+
+// usageOverflows reports whether input plus output tokens exceed int64. Callers
+// must pass non-negative counters.
+func usageOverflows(u Usage) bool {
+	return u.InputTokens > math.MaxInt64-u.OutputTokens
+}
+
+// add saturates every counter at MaxInt64 and ignores negative counters. It
+// reports whether any counter was invalid or saturated, so callers can mark the
+// workflow usage incomplete instead of reporting an exact number.
+func (u *Usage) add(other Usage) bool {
+	other, incomplete := sanitizeUsage(other)
+	if clampNegative(u) {
+		incomplete = true
+	}
+	addCounter := func(dst *int64, value int64) {
+		if *dst > math.MaxInt64-value {
+			*dst = math.MaxInt64
+			incomplete = true
+			return
+		}
+		*dst += value
+	}
+	addCounter(&u.InputTokens, other.InputTokens)
+	addCounter(&u.OutputTokens, other.OutputTokens)
+	addCounter(&u.CostMicros, other.CostMicros)
+	addCounter(&u.CacheReadTokens, other.CacheReadTokens)
+	addCounter(&u.CacheWriteTokens, other.CacheWriteTokens)
+	addCounter(&u.ReasoningTokens, other.ReasoningTokens)
+	if usageOverflows(*u) {
+		incomplete = true
+	}
+	return incomplete
+}
+
+// totalTokens returns a saturated total. Invalid negative counters fail closed
+// so a budget check cannot reopen.
 func (u Usage) totalTokens() int64 {
+	if u.InputTokens < 0 || u.OutputTokens < 0 || usageOverflows(u) {
+		return math.MaxInt64
+	}
 	return u.InputTokens + u.OutputTokens
 }
+
+// TotalTokens returns the saturated token total for callers outside pkg/dag.
+func (u Usage) TotalTokens() int64 { return u.totalTokens() }

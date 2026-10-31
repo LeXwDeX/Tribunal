@@ -74,10 +74,15 @@ var errTokenBudget = errors.New("dag: token budget exhausted")
 type runHandle struct {
 	mu          sync.Mutex
 	cancel      context.CancelFunc
-	nodeCancels map[string]context.CancelCauseFunc
+	nodeCancels map[string]nodeCancel
 	active      map[string]bool
 	wake        chan struct{}
 	err         error
+}
+
+type nodeCancel struct {
+	attempt int
+	cancel  context.CancelCauseFunc
 }
 
 func (h *runHandle) setErr(err error) {
@@ -112,12 +117,12 @@ func (h *runHandle) stop() {
 	}
 }
 
-func (h *runHandle) setNodeCancel(id string, cancel context.CancelCauseFunc) {
+func (h *runHandle) setNodeCancel(id string, attempt int, cancel context.CancelCauseFunc) {
 	h.mu.Lock()
 	if h.nodeCancels == nil {
-		h.nodeCancels = make(map[string]context.CancelCauseFunc)
+		h.nodeCancels = make(map[string]nodeCancel)
 	}
-	h.nodeCancels[id] = cancel
+	h.nodeCancels[id] = nodeCancel{attempt: attempt, cancel: cancel}
 	h.mu.Unlock()
 }
 
@@ -127,23 +132,25 @@ func (h *runHandle) clearNodeCancel(id string) {
 	h.mu.Unlock()
 }
 
-// cancelTokenBudgetNodes stops running nodes that consume model tokens. The
-// workflow and token-free settlement nodes keep running.
-func (h *runHandle) cancelTokenBudgetNodes(wf WorkflowView) {
+// cancelTokenBudgetNodes returns the attempts whose workers will settle them.
+func (h *runHandle) cancelTokenBudgetNodes(wf WorkflowView) map[string]int {
 	h.mu.Lock()
 	cancels := make([]context.CancelCauseFunc, 0, len(h.nodeCancels))
+	owned := make(map[string]int)
 	for id, view := range wf.Nodes {
 		if view.Status != NodeRunning || view.Spec.TokenFree {
 			continue
 		}
-		if cancel := h.nodeCancels[id]; cancel != nil {
-			cancels = append(cancels, cancel)
+		if node, ok := h.nodeCancels[id]; ok && node.attempt == view.Attempt {
+			owned[id] = node.attempt
+			cancels = append(cancels, node.cancel)
 		}
 	}
 	h.mu.Unlock()
 	for _, cancel := range cancels {
 		cancel(errTokenBudget)
 	}
+	return owned
 }
 
 // NewEngine builds an engine. A nil store or executor is reported by the calls
@@ -288,10 +295,8 @@ func (e *Engine) cancelDurable(ctx context.Context, wfID, reason string) error {
 			view := wf.Nodes[id]
 			switch view.Status {
 			case NodeRunning:
-				ev, err := makeEvent(EventNodeAborted, map[string]any{
-					"node_id": id,
-					"attempt": view.Attempt,
-					"reason":  reason,
+				ev, err := makeEvent(EventNodeAborted, NodeAbortedPayload{
+					NodeID: id, Attempt: view.Attempt, Reason: reason, UsageIncomplete: true,
 				}, now)
 				if err != nil {
 					return err
@@ -373,10 +378,11 @@ func (e *Engine) recoverOne(ctx context.Context, wfID string) error {
 			}
 			nextAttempt := view.Attempt + 1
 			ev, err := makeEvent(EventNodeRestarted, NodeRestartedPayload{
-				NodeID:      id,
-				Attempt:     nextAttempt,
-				NextAttempt: nextAttempt,
-				Reason:      "recovered",
+				NodeID:          id,
+				Attempt:         nextAttempt,
+				NextAttempt:     nextAttempt,
+				Reason:          "recovered",
+				UsageIncomplete: true,
 			}, now)
 			if err != nil {
 				return err
@@ -426,7 +432,7 @@ func (e *Engine) registerRun(wfID string) (*runHandle, error) {
 	}
 	handle := &runHandle{
 		active:      make(map[string]bool),
-		nodeCancels: make(map[string]context.CancelCauseFunc),
+		nodeCancels: make(map[string]nodeCancel),
 		wake:        make(chan struct{}, 1),
 	}
 	e.runs[wfID] = handle

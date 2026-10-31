@@ -110,16 +110,12 @@ func chatMessages(req *Request) ([]openai.ChatCompletionMessageParamUnion, error
 				if part.Type != PartToolCall || part.ToolCall == nil {
 					continue
 				}
-				input := part.ToolCall.Input
-				if len(input) == 0 {
-					input = json.RawMessage(`{}`)
-				}
 				calls = append(calls, openai.ChatCompletionMessageToolCallUnionParam{
 					OfFunction: &openai.ChatCompletionMessageFunctionToolCallParam{
 						ID: part.ToolCall.ID,
 						Function: openai.ChatCompletionMessageFunctionToolCallFunctionParam{
 							Name:      part.ToolCall.Name,
-							Arguments: string(input),
+							Arguments: string(part.ToolCall.Input),
 						},
 					},
 				})
@@ -180,8 +176,16 @@ func chatToolChoice(choice string) openai.ChatCompletionToolChoiceOptionUnionPar
 }
 
 func chatResponse(completion *openai.ChatCompletion, defaultModel string) (*Response, error) {
+	usage := Usage{}
+	usageComplete := true
+	if completion != nil {
+		usage, usageComplete = chatUsage(completion.Usage, completion.RawJSON())
+	}
 	if completion == nil || len(completion.Choices) == 0 {
-		return nil, &Error{Kind: ErrTransient, Err: errors.New("provider returned no choices")}
+		return nil, &Error{Kind: ErrTransient, Err: errors.New("provider returned no choices"), Usage: usage, responseObserved: completion != nil}
+	}
+	if !usageComplete {
+		return nil, &Error{Kind: ErrUnsafeResponse, Err: errors.New("provider returned invalid token usage"), Usage: usage, responseObserved: true}
 	}
 	choice := completion.Choices[0]
 	message := Message{Role: RoleAssistant}
@@ -191,26 +195,39 @@ func chatResponse(completion *openai.ChatCompletion, defaultModel string) (*Resp
 	if choice.Message.Refusal != "" {
 		message.Parts = append(message.Parts, Part{Type: PartText, Text: choice.Message.Refusal})
 	}
+	// The SDK can silently discard a malformed tool_calls value. Keep an
+	// invalid call marker rather than treating the turn as ordinary text.
+	if malformedWireList(choice.Message.JSON.ToolCalls.Raw(), len(choice.Message.ToolCalls), false) {
+		message.Parts = append(message.Parts, Part{Type: PartToolCall, ToolCall: &ToolCall{}})
+	}
+	if raw := choice.Message.JSON.FunctionCall.Raw(); raw != "" && raw != "null" {
+		message.Parts = append(message.Parts, Part{Type: PartToolCall, ToolCall: &ToolCall{}})
+	}
 	for _, call := range choice.Message.ToolCalls {
 		if call.Type != "function" {
+			// An unknown or missing type cannot be executed. Keep an invalid
+			// marker so the whole batch fails closed instead of dropping it.
+			message.Parts = append(message.Parts, Part{Type: PartToolCall, ToolCall: &ToolCall{}})
 			continue
 		}
 		fn := call.AsFunction()
-		input := json.RawMessage(fn.Function.Arguments)
-		if !json.Valid(input) {
-			input = json.RawMessage(`{}`)
+		if !wireString(fn.JSON.ID.Raw()) || !wireString(fn.Function.JSON.Name.Raw()) || !wireString(fn.Function.JSON.Arguments.Raw()) {
+			message.Parts = append(message.Parts, Part{Type: PartToolCall, ToolCall: &ToolCall{}})
+			continue
 		}
 		message.Parts = append(message.Parts, Part{
 			Type: PartToolCall,
 			ToolCall: &ToolCall{
 				ID:    fn.ID,
 				Name:  fn.Function.Name,
-				Input: input,
+				Input: json.RawMessage(fn.Function.Arguments),
 			},
 		})
 	}
-	stop := StopEndTurn
+	stop := StopOther
 	switch choice.FinishReason {
+	case "stop":
+		stop = StopEndTurn
 	case "tool_calls", "function_call":
 		stop = StopToolUse
 	case "length":
@@ -218,6 +235,10 @@ func chatResponse(completion *openai.ChatCompletion, defaultModel string) (*Resp
 	case "content_filter":
 		stop = StopRefusal
 	}
+	if choice.Message.Refusal != "" {
+		stop = StopRefusal
+	}
+	message, _ = SanitizeToolCalls(message, stop == StopToolUse)
 	model := completion.Model
 	if model == "" {
 		model = defaultModel
@@ -225,14 +246,22 @@ func chatResponse(completion *openai.ChatCompletion, defaultModel string) (*Resp
 	return &Response{
 		Message:    message,
 		StopReason: stop,
-		Usage: Usage{
-			InputTokens:      completion.Usage.PromptTokens,
-			OutputTokens:     completion.Usage.CompletionTokens,
-			CacheReadTokens:  completion.Usage.PromptTokensDetails.CachedTokens,
-			CacheWriteTokens: completion.Usage.PromptTokensDetails.CacheWriteTokens,
-			ReasoningTokens:  completion.Usage.CompletionTokensDetails.ReasoningTokens,
-		},
-		Model:     model,
-		RequestID: completion.ID,
+		Usage:      usage,
+		Model:      model,
+		RequestID:  completion.ID,
 	}, nil
+}
+
+func chatUsage(usage openai.CompletionUsage, responseRaw string) (Usage, bool) {
+	if raw := usage.RawJSON(); raw != "" || responseRaw != "" {
+		return wireUsageFromResponse(responseRaw, raw, chatUsageFields)
+	}
+	converted := Usage{
+		InputTokens:      usage.PromptTokens,
+		OutputTokens:     usage.CompletionTokens,
+		CacheReadTokens:  usage.PromptTokensDetails.CachedTokens,
+		CacheWriteTokens: usage.PromptTokensDetails.CacheWriteTokens,
+		ReasoningTokens:  usage.CompletionTokensDetails.ReasoningTokens,
+	}
+	return converted, ValidUsage(converted)
 }

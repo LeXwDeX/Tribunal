@@ -311,12 +311,11 @@ func TestReviewRejectsSkillChangeDuringAgent(t *testing.T) {
 	identityRuntime(t, f, cfg)
 	job := f.seedReview(t, "job-skill-live-change")
 	block := make(chan struct{})
-	f.runner.block = block
-	f.runner.started = make(chan struct{})
+	f.runner.setBlock(block, make(chan struct{}))
 	done := make(chan error, 1)
 	go func() { done <- f.service.Handle(context.Background(), job) }()
 	select {
-	case <-f.runner.started:
+	case <-f.runner.startedSignal():
 	case <-time.After(5 * time.Second):
 		t.Fatal("agent did not start")
 	}

@@ -136,6 +136,12 @@ func TestRuntimeMCPFailurePreventsCleanPass(t *testing.T) {
 				return agent.Run(ctx, spec)
 			}})
 			out, err := executor.Execute(context.Background(), codeReviewInput(t))
+			if tc.name == "invalid arguments" {
+				if !errors.Is(err, agent.ErrUnsafeResponse) || model.turn != 1 || len(out.Data) != 0 {
+					t.Fatalf("invalid arguments should fail closed: error=%v turns=%d output=%s", err, model.turn, out.Data)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}

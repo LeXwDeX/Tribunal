@@ -72,8 +72,9 @@ const (
 
 // ValidationError identifies the failing contract field.
 type ValidationError struct {
-	Field   string
-	Message string
+	Field    string
+	Message  string
+	category string
 }
 
 func (e *ValidationError) Error() string {
@@ -83,8 +84,38 @@ func (e *ValidationError) Error() string {
 	return e.Field + ": " + e.Message
 }
 
+// AgentValidationFeedback returns a field and a code, never the error text.
+// The agent applies its own field and category allowlists before using them.
+func (e *ValidationError) AgentValidationFeedback() (string, string) {
+	return e.Field, e.category
+}
+
 func invalid(field, format string, args ...any) error {
-	return &ValidationError{Field: field, Message: fmt.Sprintf(format, args...)}
+	category := "value"
+	switch {
+	case strings.HasPrefix(format, "is required"), strings.HasPrefix(format, "must not be empty"):
+		category = "required"
+	case format == "must not be null":
+		category = "null"
+	case strings.Contains(format, "not authorized"):
+		category = "not_authorized"
+	case strings.HasPrefix(format, "PASS is forbidden"):
+		category = "verdict"
+	case strings.HasPrefix(format, "judge group "):
+		category = "decision"
+	case strings.HasPrefix(format, "duplicate "):
+		category = "duplicate"
+	case strings.HasPrefix(format, "does not map"), strings.HasPrefix(format, "ref does not exist"):
+		category = "reference"
+	case strings.HasPrefix(format, "must contain"), strings.HasPrefix(format, "must be at most"),
+		strings.HasPrefix(format, "must be at least"), strings.HasPrefix(format, "exceeds "),
+		strings.HasPrefix(format, "must be between"), format == "must be positive", format == "must be zero or positive":
+		category = "range"
+	case strings.HasPrefix(format, "must match"), strings.HasPrefix(format, "must be a clean"),
+		strings.HasPrefix(format, "must be repository-relative"), strings.HasPrefix(format, "contains control"):
+		category = "format"
+	}
+	return &ValidationError{Field: field, Message: fmt.Sprintf(format, args...), category: category}
 }
 
 // FindingOut is one proposer finding.
@@ -974,7 +1005,7 @@ func wrapField(prefix string, err error) error {
 		} else {
 			field = prefix
 		}
-		return &ValidationError{Field: field, Message: validErr.Message}
+		return &ValidationError{Field: field, Message: validErr.Message, category: validErr.category}
 	}
 	return &ValidationError{Field: prefix, Message: err.Error()}
 }

@@ -113,8 +113,11 @@ func TestIgnoredFindingNeverReachesGitLab(t *testing.T) {
 	if err != nil || snapshot.Status != dag.WorkflowFailed || snapshot.Usage.InputTokens != 42 || snapshot.Usage.OutputTokens != 9 {
 		t.Fatalf("workflow status=%s usage=%+v err=%v", snapshot.Status, snapshot.Usage, err)
 	}
-	if got := countPublicationEffects(f); got != (publicationEffects{}) {
+	if got := countPublicationEffects(f); got != (publicationEffects{statuses: 1}) {
 		t.Fatalf("ignored output was published: %+v", got)
+	}
+	if status := f.gitlab.statuses[0]; status.State != "failed" || strings.Contains(status.Description, "CANARY_") {
+		t.Fatalf("unsafe failure status: %+v", status)
 	}
 	for _, note := range f.gitlab.notes {
 		if strings.Contains(note.Body, "CANARY_") {

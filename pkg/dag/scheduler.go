@@ -70,8 +70,8 @@ func (e *Engine) Run(ctx context.Context, wfID string) error {
 		}
 
 		if wf.Spec.Budget.MaxTokens > 0 && wf.Usage.totalTokens() >= wf.Spec.Budget.MaxTokens {
-			handle.cancelTokenBudgetNodes(wf)
-			events := tokenBudgetEvents(wf, now)
+			owned := handle.cancelTokenBudgetNodes(wf)
+			events := tokenBudgetEvents(wf, now, owned)
 			if len(events) > 0 {
 				if err := e.appendBatch(runCtx, wfID, wf.Revision, events); err != nil {
 					if errors.Is(err, ErrStaleRevision) {
@@ -328,37 +328,34 @@ func cascadeStatus(wf WorkflowView, spec NodeSpec) (string, bool) {
 	return "", false
 }
 
-func tokenBudgetEvents(wf WorkflowView, now time.Time) []Event {
+func tokenBudgetEvents(wf WorkflowView, now time.Time, owned map[string]int) []Event {
 	var events []Event
 	for _, id := range wf.Order {
 		view := wf.Nodes[id]
-		if view.Status.Terminal() || view.Spec.TokenFree {
+		attempt, hasOwner := owned[id]
+		if view.Status.Terminal() || view.Spec.TokenFree || (view.Status == NodeRunning && hasOwner && attempt == view.Attempt) {
 			continue
 		}
-		var (
-			ev  Event
-			err error
-		)
-		if view.Spec.Required {
-			ev, err = makeEvent(EventNodeFailed, NodeFailedPayload{
-				NodeID:    id,
-				Attempt:   view.Attempt,
-				Error:     "workflow token budget exhausted",
-				ErrorKind: "budget_exhausted",
-				Reason:    "budget_exhausted",
-			}, now)
-		} else {
-			ev, err = makeEvent(EventNodeSkipped, NodeSkippedPayload{
-				NodeID:  id,
-				Attempt: view.Attempt,
-				Reason:  "budget_exhausted",
-			}, now)
-		}
+		ev, err := tokenBudgetEvent(view, Usage{}, view.Status == NodeRunning, now)
 		if err == nil {
 			events = append(events, ev)
 		}
 	}
 	return events
+}
+
+func tokenBudgetEvent(view NodeView, usage Usage, incomplete bool, now time.Time) (Event, error) {
+	if view.Spec.Required {
+		return makeEvent(EventNodeFailed, NodeFailedPayload{
+			NodeID: view.ID, Attempt: view.Attempt, Error: "workflow token budget exhausted",
+			ErrorKind: "budget_exhausted", Reason: "budget_exhausted", Usage: usage, UsageIncomplete: incomplete,
+		}, now)
+	}
+	payload := NodeSkippedPayload{NodeID: view.ID, Attempt: view.Attempt, Reason: "budget_exhausted", UsageIncomplete: incomplete}
+	if usage != (Usage{}) {
+		payload.Usage = &usage
+	}
+	return makeEvent(EventNodeSkipped, payload, now)
 }
 
 func allTerminal(wf WorkflowView) bool {
@@ -520,9 +517,11 @@ func (e *Engine) runNode(runCtx context.Context, handle *runHandle, wfID, nodeID
 		return
 	}
 	nodeCtx, nodeCancel := context.WithCancelCause(runCtx)
-	handle.setNodeCancel(nodeID, nodeCancel)
+	handle.setNodeCancel(nodeID, view.Attempt, nodeCancel)
 	defer handle.clearNodeCancel(nodeID)
 	defer nodeCancel(nil)
+	execCtx, execCancel := context.WithTimeout(nodeCtx, remaining)
+	defer execCancel()
 
 	input := buildNodeInput(wf, view.Spec, view.Attempt)
 	started, err := e.commitNodeStarted(runCtx, wfID, nodeID, view.Attempt, nodeMetadata(e.exec, input))
@@ -535,27 +534,33 @@ func (e *Engine) runNode(runCtx context.Context, handle *runHandle, wfID, nodeID
 	if !started {
 		return
 	}
-	execCtx, execCancel := context.WithTimeout(nodeCtx, remaining)
 	out, execErr := executeSafely(execCtx, e.exec, input)
 	timedOut := errors.Is(execCtx.Err(), context.DeadlineExceeded) || errors.Is(execErr, context.DeadlineExceeded)
+	if deadline, ok := execCtx.Deadline(); ok && !time.Now().Before(deadline) {
+		timedOut = true
+	}
 	execCancel()
-	release()
+	// Keep the permit until this attempt's usage is committed. Otherwise a
+	// queued node can start from the old usage snapshot and send a request
+	// past the budget. The deferred release owns every exit path.
 
 	if errors.Is(context.Cause(nodeCtx), errTokenBudget) {
-		// The scheduler owns the durable budget event for this node.
+		if err := e.commitNodeFailureUsage(runCtx, wfID, nodeID, view.Attempt, "budget_exhausted", 0, "workflow token budget exhausted", out.Usage, out.UsageIncomplete); err != nil {
+			handle.setErr(err)
+		}
 		return
 	}
 	if runCtx.Err() != nil {
 		// Cancel or the caller owns the durable abort/skip path.
 		return
 	}
-	if execErr != nil {
+	if execErr != nil || timedOut {
 		reason := "executor_error"
 		if timedOut {
 			reason = "timeout"
 		}
 		reason = errorReason(execErr, reason)
-		if err := e.commitNodeFailureUsage(runCtx, wfID, nodeID, view.Attempt, reason, errorStatus(execErr), "node execution failed", out.Usage); err != nil {
+		if err := e.commitNodeFailureUsage(runCtx, wfID, nodeID, view.Attempt, reason, errorStatus(execErr), "node execution failed", out.Usage, out.UsageIncomplete); err != nil {
 			handle.setErr(err)
 		}
 		return
@@ -568,6 +573,9 @@ func (e *Engine) runNode(runCtx context.Context, handle *runHandle, wfID, nodeID
 func executeSafely(ctx context.Context, exec NodeExecutor, in NodeInput) (out NodeOutput, err error) {
 	if err := ctx.Err(); err != nil {
 		return NodeOutput{}, err
+	}
+	if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+		return NodeOutput{}, context.DeadlineExceeded
 	}
 	defer func() {
 		if recover() != nil {
@@ -655,6 +663,9 @@ func (e *Engine) commitNodeStarted(ctx context.Context, wfID, nodeID string, att
 		if !ok || view.Attempt != attempt || view.Status != NodeQueued {
 			return false, nil
 		}
+		if !view.Spec.TokenFree && wf.Spec.Budget.MaxTokens > 0 && wf.Usage.totalTokens() >= wf.Spec.Budget.MaxTokens {
+			return false, nil
+		}
 		if err := retry.observe(wf.Revision); err != nil {
 			return false, err
 		}
@@ -680,16 +691,18 @@ func (e *Engine) commitNodeStarted(ctx context.Context, wfID, nodeID string, att
 }
 
 func (e *Engine) commitNodeFailure(ctx context.Context, wfID, nodeID string, attempt int, reason, message string) error {
-	return e.commitNodeFailureUsage(ctx, wfID, nodeID, attempt, reason, 0, message, Usage{})
+	return e.commitNodeFailureUsage(ctx, wfID, nodeID, attempt, reason, 0, message, Usage{}, false)
 }
 
 // commitNodeFailureUsage persists a failed attempt together with any usage the
 // executor already knows. Retries and recovery therefore see the spend even
 // though the node did not complete.
-func (e *Engine) commitNodeFailureUsage(ctx context.Context, wfID, nodeID string, attempt int, reason string, status int, message string, usage Usage) error {
+func (e *Engine) commitNodeFailureUsage(ctx context.Context, wfID, nodeID string, attempt int, reason string, status int, message string, usage Usage, incomplete bool) error {
 	if ctx.Err() != nil {
 		return nil
 	}
+	usage, invalid := sanitizeUsage(usage)
+	incomplete = incomplete || invalid
 	var retry staleRetry
 	for {
 		if ctx.Err() != nil {
@@ -709,15 +722,15 @@ func (e *Engine) commitNodeFailureUsage(ctx context.Context, wfID, nodeID string
 		if err := retry.observe(wf.Revision); err != nil {
 			return err
 		}
-		ev, err := makeEvent(EventNodeFailed, NodeFailedPayload{
-			NodeID:      nodeID,
-			Attempt:     attempt,
-			Error:       message,
-			ErrorKind:   reason,
-			ErrorStatus: status,
-			Reason:      reason,
-			Usage:       usage,
-		}, e.clock())
+		var ev Event
+		if !view.Spec.TokenFree && view.Status == NodeRunning && (reason == "budget_exhausted" || (wf.Spec.Budget.MaxTokens > 0 && wf.Usage.totalTokens() >= wf.Spec.Budget.MaxTokens)) {
+			ev, err = tokenBudgetEvent(view, usage, incomplete, e.clock())
+		} else {
+			ev, err = makeEvent(EventNodeFailed, NodeFailedPayload{
+				NodeID: nodeID, Attempt: attempt, Error: message, ErrorKind: reason,
+				ErrorStatus: status, Reason: reason, Usage: usage, UsageIncomplete: incomplete,
+			}, e.clock())
+		}
 		if err != nil {
 			return err
 		}
@@ -780,8 +793,11 @@ func (e *Engine) commitNodeSuccess(ctx context.Context, wfID, nodeID string, spe
 	if ctx.Err() != nil {
 		return nil
 	}
+	usage, usageIncomplete := sanitizeUsage(out.Usage)
+	out.Usage = usage
+	usageIncomplete = usageIncomplete || out.UsageIncomplete
 	if len(out.Data) > 0 && !json.Valid(out.Data) {
-		return e.commitNodeFailure(ctx, wfID, nodeID, attempt, "invalid_output", "executor returned invalid JSON")
+		return e.commitNodeFailureUsage(ctx, wfID, nodeID, attempt, "invalid_output", 0, "executor returned invalid JSON", out.Usage, usageIncomplete)
 	}
 	var (
 		extension *Extension
@@ -797,6 +813,13 @@ func (e *Engine) commitNodeSuccess(ctx context.Context, wfID, nodeID string, spe
 		}
 		if wf.Terminal() {
 			return nil
+		}
+		view, ok := wf.Nodes[nodeID]
+		if !ok || view.Attempt != attempt || view.Status != NodeRunning {
+			return nil
+		}
+		if !view.Spec.TokenFree && wf.Spec.Budget.MaxTokens > 0 && wf.Usage.totalTokens() >= wf.Spec.Budget.MaxTokens {
+			return e.commitNodeFailureUsage(ctx, wfID, nodeID, attempt, "budget_exhausted", 0, "workflow token budget exhausted", out.Usage, usageIncomplete)
 		}
 		if e.exp == nil {
 			expandErr = errors.New("dag: node expands but no Expander is configured")
@@ -835,12 +858,21 @@ func (e *Engine) commitNodeSuccess(ctx context.Context, wfID, nodeID string, spe
 		if err := retry.observe(wf.Revision); err != nil {
 			return err
 		}
-		if expandErr != nil {
-			return e.commitNodeFailure(ctx, wfID, nodeID, attempt, "expand_failed", "node expansion failed")
-		}
-		events, err := e.resultEvents(wf, nodeID, spec, attempt, out, extension)
-		if err != nil {
-			return e.commitNodeFailure(ctx, wfID, nodeID, attempt, "expand_failed", "node expansion failed")
+		var events []Event
+		if !view.Spec.TokenFree && wf.Spec.Budget.MaxTokens > 0 && wf.Usage.totalTokens() >= wf.Spec.Budget.MaxTokens {
+			ev, eventErr := tokenBudgetEvent(view, out.Usage, usageIncomplete, e.clock())
+			if eventErr != nil {
+				return eventErr
+			}
+			events = []Event{ev}
+		} else {
+			if expandErr != nil {
+				return e.commitNodeFailureUsage(ctx, wfID, nodeID, attempt, "expand_failed", 0, "node expansion failed", out.Usage, usageIncomplete)
+			}
+			events, err = e.resultEvents(wf, nodeID, spec, attempt, out, usageIncomplete, extension)
+			if err != nil {
+				return e.commitNodeFailureUsage(ctx, wfID, nodeID, attempt, "expand_failed", 0, "node expansion failed", out.Usage, usageIncomplete)
+			}
 		}
 		if _, err := e.store.Append(ctx, wfID, wf.Revision, events...); err != nil {
 			if errors.Is(err, ErrStaleRevision) {
@@ -857,13 +889,14 @@ func (e *Engine) commitNodeSuccess(ctx context.Context, wfID, nodeID string, spe
 	}
 }
 
-func (e *Engine) resultEvents(wf WorkflowView, nodeID string, spec NodeSpec, attempt int, out NodeOutput, ext *Extension) ([]Event, error) {
+func (e *Engine) resultEvents(wf WorkflowView, nodeID string, spec NodeSpec, attempt int, out NodeOutput, usageIncomplete bool, ext *Extension) ([]Event, error) {
 	now := e.clock()
 	completed, err := makeEvent(EventNodeCompleted, NodeCompletedPayload{
-		NodeID:  nodeID,
-		Attempt: attempt,
-		Output:  rawCopy(out.Data),
-		Usage:   out.Usage,
+		NodeID:          nodeID,
+		Attempt:         attempt,
+		Output:          rawCopy(out.Data),
+		Usage:           out.Usage,
+		UsageIncomplete: usageIncomplete,
 	}, now)
 	if err != nil {
 		return nil, err

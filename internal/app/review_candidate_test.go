@@ -451,8 +451,7 @@ func TestCandidateTransientFailureRetriesActivationOnce(t *testing.T) {
 func TestActivatedCandidateQueuesBehindRunningReview(t *testing.T) {
 	f := newReviewFixture(t, reviewTestHead)
 	block := make(chan struct{})
-	f.runner.block = block
-	f.runner.started = make(chan struct{})
+	f.runner.setBlock(block, make(chan struct{}))
 	f.seedReview(t, "manual-review")
 	claimed, err := f.db.Claim(context.Background(), "manual", []string{"review.run"}, time.Minute)
 	if err != nil || claimed == nil {
@@ -461,7 +460,7 @@ func TestActivatedCandidateQueuesBehindRunningReview(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- f.runQueuedReview(t, claimed) }()
 	select {
-	case <-f.runner.started:
+	case <-f.runner.startedSignal():
 	case <-time.After(5 * time.Second):
 		t.Fatal("manual review did not start")
 	}

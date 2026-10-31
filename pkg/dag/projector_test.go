@@ -75,6 +75,23 @@ func TestProjectCreatedAndStarted(t *testing.T) {
 	}
 }
 
+func TestProjectRestartUsageIncompleteStaysSticky(t *testing.T) {
+	events := seq([]Event{
+		created(t, node("a")),
+		mustEv(t, EventNodeStarted, NodeStartedPayload{NodeID: "a", Attempt: 1}, testNow),
+		mustEv(t, EventNodeRestarted, NodeRestartedPayload{NodeID: "a", Attempt: 2, NextAttempt: 2, UsageIncomplete: true}, testNow),
+		mustEv(t, EventNodeStarted, NodeStartedPayload{NodeID: "a", Attempt: 2}, testNow),
+		mustEv(t, EventNodeCompleted, NodeCompletedPayload{NodeID: "a", Attempt: 2, Output: json.RawMessage(`{"ok":true}`), Usage: Usage{InputTokens: 2}}, testNow),
+	})
+	wf, err := Project(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !wf.UsageIncomplete || !wf.Nodes["a"].UsageIncomplete {
+		t.Fatalf("incomplete marker was cleared after recovery: workflow=%t node=%t", wf.UsageIncomplete, wf.Nodes["a"].UsageIncomplete)
+	}
+}
+
 func TestProjectNodeTransitionPairMatrix(t *testing.T) {
 	types := map[NodeStatus]string{
 		NodeQueued:    EventNodeQueued,
