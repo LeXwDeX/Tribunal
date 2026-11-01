@@ -191,6 +191,12 @@ func renderSummaryItem(group Group, marked bool) string {
 		if group.Line > 0 {
 			fmt.Fprintf(&b, ":%d", group.Line)
 		}
+		switch group.Side {
+		case SideOld:
+			b.WriteString("（旧侧）")
+		case SideNew:
+			b.WriteString("（新侧）")
+		}
 	}
 	b.WriteString("\n\n")
 	if marked {
