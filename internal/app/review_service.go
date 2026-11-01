@@ -337,6 +337,10 @@ func (s *ReviewService) RunCandidate(ctx context.Context, job *jobs.Job) error {
 		return err
 	}
 	defer unlock()
+	ctx, err = bindOutbound(ctx, ws)
+	if err != nil {
+		return err
+	}
 	if err := consumerJobExists(ctx, s.store, job, "review.candidate", payload.ProjectID); err != nil {
 		return err
 	}
@@ -443,7 +447,10 @@ func (s *ReviewService) noteInvalidRepoConfig(ctx context.Context, token string,
 	if token == "" {
 		return
 	}
-	if _, err := s.gitlab.CreateMRNote(context.WithoutCancel(ctx), token, projectID, mrIID, invalidRepoConfigNote); err != nil {
+	if err := sendOutbound(ctx, s.workspace.Get(projectID), func(callCtx context.Context) error {
+		_, err := s.gitlab.CreateMRNote(callCtx, token, projectID, mrIID, invalidRepoConfigNote)
+		return err
+	}); err != nil {
 		s.logger.Warn("invalid repository config note failed",
 			"project_id", projectID, "mr_iid", mrIID, "error_class", errclass.Of(err))
 	}
