@@ -39,7 +39,56 @@ describe('workspace v2 layout', () => {
     expect(within(tiles).getByText('最近刷新')).toBeInTheDocument()
     expect(screen.getByText('9999999')).toBeInTheDocument()
     expect(screen.getByText('8888888')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '刷新工作区' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '重建索引' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '重新生成上下文' })).not.toBeInTheDocument()
+    expect(screen.getByText(/符合项目目标分支配置的推送/)).toBeInTheDocument()
+    expect(screen.getByText(/自动刷新会尝试重建索引/)).toBeInTheDocument()
+    expect(screen.getByText(/手动刷新只刷新工作区，不会重建索引或按新鲜度规则生成上下文/)).toBeInTheDocument()
+    const manual = screen.getByRole('button', { name: '手动操作' })
+    expect(manual).toHaveAttribute('aria-expanded', 'false')
+    await userEvent.setup().click(manual)
+    expect(manual).toHaveAttribute('aria-expanded', 'true')
     expect(screen.getByRole('button', { name: '重新生成上下文' })).toBeInTheDocument()
+  })
+
+  it('submits each manual action with its existing API options', async () => {
+    const bodies: unknown[] = []
+    installFetch((url, init) => {
+      if (url.endsWith('/workspace/refresh')) {
+        bodies.push(JSON.parse(String(init?.body)))
+        return jsonResponse({ job_id: 'job' })
+      }
+      return routes([])(url)
+    })
+    const user = userEvent.setup()
+    renderWithProviders(<WorkspacePanel projectId={42} canManage />)
+    await screen.findByText('# Current')
+    await user.click(screen.getByRole('button', { name: '刷新工作区' }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    await user.click(screen.getByRole('button', { name: '手动操作' }))
+    await user.click(screen.getByRole('button', { name: '重建索引' }))
+    await waitFor(() => expect(bodies).toHaveLength(2))
+    await user.click(screen.getByRole('button', { name: '重新生成上下文' }))
+    await waitFor(() => expect(bodies).toHaveLength(3))
+    expect(bodies).toEqual([{}, { reindex: true }, { regenerate_context: true }])
+    expect(screen.getByText(/可能产生费用/)).toBeInTheDocument()
+  })
+
+  it('warns about the locked AGENTS document even when viewing CLAUDE', async () => {
+    installFetch((url) => {
+      if (url.includes('/context-docs/current')) {
+        const kind = new URL(url, 'http://x').searchParams.get('kind')
+        return jsonResponse({ ...current, locked: kind === 'agents' })
+      }
+      return routes([])(url)
+    })
+    const user = userEvent.setup()
+    renderWithProviders(<WorkspacePanel projectId={42} canManage />)
+    await screen.findByText('# Current')
+    await user.click(screen.getByRole('button', { name: 'CLAUDE' }))
+    await user.click(screen.getByRole('button', { name: '手动操作' }))
+    expect(await screen.findByText(/AGENTS 当前已锁定，重新生成上下文会跳过生成/)).toBeInTheDocument()
   })
 
   it('switches document kind and opens an older version read-only from the version list', async () => {
