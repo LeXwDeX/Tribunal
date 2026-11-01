@@ -122,6 +122,111 @@ func TestRenameFollowupDistinctSideFindingsSurvivePublication(t *testing.T) {
 	}
 }
 
+func TestLegacyOldSidePublicationDoesNotHideNewSide(t *testing.T) {
+	ctx := context.Background()
+	f := newReviewFixture(t, reviewTestHead)
+	legacyJob := f.seedReview(t, "legacy")
+	if err := f.service.Handle(ctx, legacyJob); err != nil {
+		t.Fatal(err)
+	}
+	legacyWorkflow, err := f.db.GetWorkflowByJob(ctx, legacyJob.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyKey := review.PublishKeyFor("new.go", "same issue", "same evidence")
+	legacyFinding := store.Finding{ID: "legacy-old", WorkflowID: legacyWorkflow.ID, OriginNode: "legacy", Severity: "P2", Category: "correctness", Path: "old.go", Side: "old", Title: "same issue", Body: "body", Evidence: "same evidence", PublishKey: legacyKey}
+	if err := f.db.ReplaceFindings(ctx, legacyWorkflow.ID, []store.Finding{legacyFinding}); err != nil {
+		t.Fatal(err)
+	}
+	legacyDiscussion, err := f.gitlab.CreateDiscussion(ctx, "token", 42, 7, gitlab.NewDiscussion{Body: "legacy old side"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := f.db.UpsertPublication(ctx, store.Publication{ProjectID: 42, MRIID: 7, Kind: discussionPublishKind, PublishKey: legacyKey, GitlabID: legacyDiscussion.ID, WorkflowID: legacyWorkflow.ID, Fingerprint: "legacy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f.gitlab.diffs = []gitlab.FileDiff{renameDiff("old.go", "new.go", "@@ -1 +1 @@\n-old\n+new\n")}
+	run := f.runner.Run
+	f.service.agentRun = func(ctx context.Context, spec agent.RunSpec) (*agent.RunResult, error) {
+		result, err := run(ctx, spec)
+		if err == nil {
+			out := result.Output.(*review.CodeReviewOut)
+			old := out.Findings[0]
+			old.Path, old.Side, old.Line = "old.go", "old", 1
+			old.Title, old.Evidence = "same issue", "same evidence"
+			newSide := old
+			newSide.Path, newSide.Side = "new.go", "new"
+			out.Findings = []review.FindingOut{old, newSide}
+		}
+		return result, err
+	}
+	job := f.seedReview(t, "current")
+	before := f.gitlab.discussionCreates
+	if err := f.service.Handle(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	wf, err := f.db.GetWorkflowByJob(ctx, job.ID)
+	if err != nil || wf.ID == legacyWorkflow.ID {
+		t.Fatalf("current workflow = %+v err=%v", wf, err)
+	}
+	if got := f.gitlab.discussionCreates - before; got != 2 {
+		t.Fatalf("created %d current discussions, want 2 without reusing legacy old-side discussion", got)
+	}
+	findings, err := f.db.ListFindings(ctx, store.FindingFilter{WorkflowID: wf.ID})
+	if err != nil || len(findings) != 2 {
+		t.Fatalf("findings=%+v err=%v", findings, err)
+	}
+	publications, err := f.db.ListPublications(ctx, wf.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byKey := map[string]store.Publication{}
+	for _, publication := range publications {
+		if publication.Kind == discussionPublishKind {
+			byKey[publication.PublishKey] = publication
+		}
+	}
+	if len(byKey) != 2 {
+		t.Fatalf("current discussion publications = %+v", byKey)
+	}
+	service := newFeedbackService(t, f, f.git, f.manager)
+	project, err := f.db.GetProject(ctx, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, finding := range findings {
+		publication, ok := byKey[finding.PublishKey]
+		if !ok || publication.WorkflowID != wf.ID || publication.GitlabID == legacy.GitlabID || publication.PublishKey == legacyKey {
+			t.Fatalf("finding %s has incorrect publication: %+v", finding.ID, publication)
+		}
+		note := feedbackDiscussionNote(t, f, publication)
+		f.gitlab.awards[note.ID] = []gitlab.Award{{ID: note.ID, Name: "thumbsup", UserID: 5}}
+		service.collectDiscussion(ctx, "token", project, publication, *wf, f.gitlab.mr, 7)
+		rows := feedbackRowsFor(t, f, publication.ID)
+		if len(rows) != 1 || rows[0].FindingID != finding.ID {
+			t.Fatalf("feedback for %s = %+v", finding.ID, rows)
+		}
+	}
+	if findings[0].PublishKey == findings[1].PublishKey || byKey[findings[0].PublishKey].GitlabID == byKey[findings[1].PublishKey].GitlabID {
+		t.Fatalf("current sides share a publication: %+v", findings)
+	}
+	storedLegacy, err := f.db.GetPublication(ctx, 42, 7, discussionPublishKind, legacyKey)
+	if err != nil || storedLegacy.ID != legacy.ID || storedLegacy.GitlabID != legacyDiscussion.ID || storedLegacy.WorkflowID != legacyWorkflow.ID {
+		t.Fatalf("legacy publication changed: %+v err=%v", storedLegacy, err)
+	}
+	legacyNote := feedbackDiscussionNote(t, f, *legacy)
+	f.gitlab.awards[legacyNote.ID] = []gitlab.Award{{ID: legacyNote.ID, Name: "thumbsup", UserID: 5}}
+	service.collectDiscussion(ctx, "token", project, *legacy, *legacyWorkflow, f.gitlab.mr, 7)
+	if rows := feedbackRowsFor(t, f, legacy.ID); len(rows) != 1 || rows[0].FindingID != legacyFinding.ID {
+		t.Fatalf("legacy feedback = %+v", rows)
+	}
+	if err := f.publisher.Publish(ctx, wf.ID); err != nil || f.gitlab.discussionCreates-before != 2 {
+		t.Fatalf("retry created duplicate discussions: count=%d err=%v", f.gitlab.discussionCreates-before, err)
+	}
+}
+
 func TestRenameFollowupEmptyIncompleteSetsFailedCommitStatus(t *testing.T) {
 	f := newReviewFixture(t, reviewTestHead)
 	f.defaults.CommitStatus = true

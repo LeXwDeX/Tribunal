@@ -499,7 +499,7 @@ func prepareDropped(in GatherInput, byRef map[Ref]Finding) ([]Finding, error) {
 }
 
 // Dedupe merges findings by side-specific path, category, and line proximity.
-// Without a file snapshot, cross-side identity cannot be established.
+// File identity alone cannot establish cross-side line identity.
 func Dedupe(findings []Finding) []Group {
 	return dedupe(findings, nil)
 }
@@ -561,7 +561,7 @@ func dedupe(findings []Finding, dossier *Dossier) []Group {
 }
 
 func canMerge(group Group, finding Finding, resolve func(string, Side) (string, int), ambiguous func(string) bool) bool {
-	if group.Category != finding.Category {
+	if group.Category != finding.Category || normalizedSide(group.Side) != normalizedSide(finding.Side) {
 		return false
 	}
 	if ambiguous(group.Path) || ambiguous(finding.Path) {
@@ -576,7 +576,7 @@ func canMerge(group Group, finding Finding, resolve func(string, Side) (string, 
 		if groupFile != findingFile {
 			return false
 		}
-	} else if groupMatches != findingMatches || group.Path != finding.Path || normalizedSide(group.Side) != normalizedSide(finding.Side) {
+	} else if groupMatches != findingMatches || group.Path != finding.Path {
 		return false
 	}
 	if group.Line == 0 || finding.Line == 0 {
@@ -700,8 +700,7 @@ func fileSidePath(file FileChange, side Side) string {
 	return file.Path
 }
 
-// FindingPublishKey uses the same file identity as dedupe. Unresolved old
-// paths stay distinct from new paths unless the snapshot proves equivalence.
+// FindingPublishKey uses the same side-specific file identity as dedupe.
 // Multiple candidates use the stable finding or group ID to avoid collisions.
 func FindingPublishKey(dossier *Dossier, path string, side Side, title, snippet, id string) string {
 	var files []FileChange
@@ -714,13 +713,17 @@ func FindingPublishKey(dossier *Dossier, path string, side Side, title, snippet,
 		filePath, count := matchingFile(files, path, side)
 		if count == 1 {
 			path = filePath
-		} else if path != "" && normalizedSide(side) == SideOld {
-			path = "old\x00" + path
 		} else if path != "" && len(files) > 0 {
-			path = "new\x00" + path
+			if normalizedSide(side) != SideOld {
+				path = "new\x00" + path
+			}
+		}
+		if normalizedSide(side) == SideOld {
+			path = "old\x00" + path
 		}
 	}
-	return PublishKeyFor(path, title, snippet)
+	// Legacy keys did not identify the side, so neither side may safely reuse one.
+	return PublishKeyFor("side-v2\x00"+string(normalizedSide(side))+"\x00"+path, title, snippet)
 }
 
 // GroupPublishKey preserves the first source identity for ambiguous groups.

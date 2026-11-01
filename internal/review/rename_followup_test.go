@@ -3,6 +3,7 @@ package review
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -80,7 +81,122 @@ func TestRenameFollowupDedupeUsesActualChangedFile(t *testing.T) {
 	}
 }
 
-func TestRenameFollowupUnambiguousRenameStillDedupesAcrossSides(t *testing.T) {
+func TestDedupeSeparatesUnmappedDiffSides(t *testing.T) {
+	for _, status := range []string{"renamed", "modified"} {
+		for _, incremental := range []bool{false, true} {
+			t.Run(status+"/incremental="+fmt.Sprint(incremental), func(t *testing.T) {
+				oldPath := "old.go"
+				if status == "modified" {
+					oldPath = "new.go"
+				}
+				d := validDossier(t)
+				d.Files = []FileChange{{Path: "new.go", OldPath: oldPath, Status: status, Diff: "@@ -50,1 +50,51 @@\n" + strings.Repeat("+inserted\n", 50) + " context\n"}}
+				old := outFinding(oldPath, 100, SeverityP2, "same issue", "same evidence")
+				old.Side = "old"
+				newSide := old
+				newSide.Path, newSide.Side = "new.go", "new"
+				in := GatherInput{WorkflowID: "wf", Dossier: d, Proposals: []Proposal{
+					{Node: "old", Provider: "a", Findings: []FindingOut{old}},
+					{Node: "new", Provider: "b", Findings: []FindingOut{newSide}},
+				}}
+				var scope map[string]struct{}
+				if incremental {
+					scope = map[string]struct{}{"new.go": {}}
+				}
+				got, err := gather(in, GatherOptions{MinVotes: 2}, scope)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(got.Groups) != 2 {
+					t.Fatalf("groups = %+v; cross-side lines are not proven equivalent", got.Groups)
+				}
+				for _, group := range got.Groups {
+					if len(group.Sources) != 1 || group.Votes != 1 || group.Consensus || group.PublishKey != group.Sources[0].PublishKey {
+						t.Fatalf("cross-side finding lost or gained consensus: %+v", got.Groups)
+					}
+				}
+				if got.Groups[0].PublishKey == got.Groups[1].PublishKey {
+					t.Fatalf("distinct groups share a publication key: %+v", got.Groups)
+				}
+			})
+		}
+	}
+}
+
+func TestDedupeSameSideStillSharesVotes(t *testing.T) {
+	for _, side := range []string{"old", "new", ""} {
+		for _, lines := range [][2]int{{100, 100}, {100, 103}, {0, 0}} {
+			t.Run(fmt.Sprintf("side=%s/lines=%v", side, lines), func(t *testing.T) {
+				d := validDossier(t)
+				d.Files = []FileChange{{Path: "new.go", OldPath: "old.go", Status: "renamed"}}
+				path := "new.go"
+				if side == "old" {
+					path = "old.go"
+				}
+				first := outFinding(path, lines[0], SeverityP2, "same issue", "same evidence")
+				first.Side = side
+				second := first
+				second.Line = lines[1]
+				result, err := Gather(GatherInput{WorkflowID: "wf", Dossier: d, Proposals: []Proposal{
+					{Node: "a", Provider: "a", Findings: []FindingOut{first}},
+					{Node: "b", Provider: "b", Findings: []FindingOut{second}},
+				}}, GatherOptions{MinVotes: 2})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(result.Groups) != 1 || len(result.Groups[0].Sources) != 2 || result.Groups[0].Votes != 2 || !result.Groups[0].Consensus {
+					t.Fatalf("same-side findings did not merge: %+v", result.Groups)
+				}
+			})
+		}
+	}
+}
+
+func TestDedupeSeparatesCrossSideLineZeroAndNearby(t *testing.T) {
+	for _, lines := range [][2]int{{0, 0}, {100, 103}, {100, 150}} {
+		for _, reverse := range []bool{false, true} {
+			t.Run(fmt.Sprintf("lines=%v/reverse=%v", lines, reverse), func(t *testing.T) {
+				d := validDossier(t)
+				d.Files = []FileChange{{Path: "new.go", OldPath: "old.go", Status: "renamed"}}
+				old := outFinding("old.go", lines[0], SeverityP2, "same issue", "same evidence")
+				old.Side = "old"
+				newSide := old
+				newSide.Path, newSide.Side, newSide.Line = "new.go", "new", lines[1]
+				if reverse {
+					old, newSide = newSide, old
+				}
+				result, err := Gather(GatherInput{WorkflowID: "wf", Dossier: d, Proposals: []Proposal{
+					{Node: "a", Provider: "a", Findings: []FindingOut{old}},
+					{Node: "b", Provider: "b", Findings: []FindingOut{newSide}},
+				}}, GatherOptions{MinVotes: 2})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(result.Groups) != 2 || result.Groups[0].Votes != 1 || result.Groups[1].Votes != 1 || result.Groups[0].Consensus || result.Groups[1].Consensus || result.Groups[0].PublishKey == result.Groups[1].PublishKey {
+					t.Fatalf("unmapped sides shared votes or publication key: %+v", result.Groups)
+				}
+			})
+		}
+	}
+}
+
+func TestFindingPublishKeysUseVersionedSideNamespace(t *testing.T) {
+	d := validDossier(t)
+	d.Files = []FileChange{{Path: "new.go", OldPath: "old.go", Status: "renamed"}}
+	old := FindingPublishKey(d, "old.go", SideOld, "same issue", "same evidence", "old-id")
+	newSide := FindingPublishKey(d, "new.go", SideNew, "same issue", "same evidence", "new-id")
+	legacy := PublishKeyFor("new.go", "same issue", "same evidence")
+	previousOld := PublishKeyFor("old\x00new.go", "same issue", "same evidence")
+	if old == newSide || old == legacy || newSide == legacy || old == previousOld || newSide == previousOld {
+		t.Fatalf("side or legacy key collision: old=%s new=%s legacy=%s previous-old=%s", old, newSide, legacy, previousOld)
+	}
+	if old != FindingPublishKey(d, "old.go", SideOld, "same issue", "same evidence", "other-id") ||
+		newSide != FindingPublishKey(d, "new.go", "", "same issue", "same evidence", "other-id") {
+		t.Fatal("unambiguous keys must be stable and empty side must default to new")
+	}
+}
+
+func TestRenameFollowupUnambiguousRenameKeepsSidesSeparate(t *testing.T) {
 	d := renameChainDossier(t)
 	d.Files = d.Files[:1]
 	old := finding("b.go", 1, SeverityP2, "same issue")
@@ -91,8 +207,8 @@ func TestRenameFollowupUnambiguousRenameStillDedupesAcrossSides(t *testing.T) {
 	a.Provider, b.Provider = "one", "two"
 	wf := evidenceWorkflow(a, b)
 	got := runEvidenceGather(t, evidenceExecutorWithDossier(t, wf, d), wf)
-	if len(got.Groups) != 1 || len(got.Groups[0].Sources) != 2 || got.Groups[0].Votes != 2 {
-		t.Fatalf("same unambiguous rename did not merge across sides: %+v", got.Groups)
+	if len(got.Groups) != 2 || got.Groups[0].Votes != 1 || got.Groups[1].Votes != 1 || got.Groups[0].PublishKey == got.Groups[1].PublishKey {
+		t.Fatalf("unmapped rename sides shared votes or publication key: %+v", got.Groups)
 	}
 }
 
@@ -114,7 +230,7 @@ func TestRenameFollowupDuplicateOldPathsCannotShareVotesOrKeys(t *testing.T) {
 	}
 }
 
-func TestRenameFollowupUnchangedFileStillDedupesAcrossSides(t *testing.T) {
+func TestRenameFollowupModifiedFileKeepsSidesSeparate(t *testing.T) {
 	d := validDossier(t)
 	d.Files = []FileChange{{Path: "a.go", OldPath: "a.go", Status: "modified"}}
 	old := finding("a.go", 5, SeverityP2, "same issue")
@@ -126,11 +242,11 @@ func TestRenameFollowupUnchangedFileStillDedupesAcrossSides(t *testing.T) {
 	a.Provider, b.Provider = "one", "two"
 	wf := evidenceWorkflow(a, b)
 	got := runEvidenceGather(t, evidenceExecutorWithDossier(t, wf, d), wf)
-	if len(got.Groups) != 1 || len(got.Groups[0].Sources) != 2 || got.Groups[0].Votes != 2 {
-		t.Fatalf("same modified file did not merge across sides: %+v", got.Groups)
+	if len(got.Groups) != 2 || got.Groups[0].Votes != 1 || got.Groups[1].Votes != 1 || got.Groups[0].PublishKey == got.Groups[1].PublishKey {
+		t.Fatalf("unmapped modified file sides shared votes or publication key: %+v", got.Groups)
 	}
-	if got.Groups[0].PublishKey != PublishKeyFor("a.go", old.Title, old.Evidence) {
-		t.Fatalf("unchanged file lost its existing publication key: %q", got.Groups[0].PublishKey)
+	if got.Groups[1].PublishKey == PublishKeyFor("a.go", newSide.Title, newSide.Evidence) {
+		t.Fatalf("new side reused a legacy publication key: %q", got.Groups[1].PublishKey)
 	}
 }
 
