@@ -29,7 +29,7 @@ function routeOverview(overrides: {
 }
 
 function alertPanel() {
-  const title = screen.getByRole('heading', { name: '需要处理' })
+  const title = screen.getByRole('heading', { name: '告警' })
   const panel = title.closest('section')
   if (!panel) throw new Error('alerts panel missing')
   return panel
@@ -66,14 +66,14 @@ describe('overview publication alerts', () => {
     })
     renderWithProviders(<OverviewPage />, { route: '/' })
 
-    await screen.findByRole('heading', { name: '需要处理' })
+    await screen.findByRole('heading', { name: '告警' })
     const panel = alertPanel()
     await waitFor(() => expect(within(panel).getAllByText('发布失败')).toHaveLength(2))
     expect(within(panel).queryByText('评审失败')).not.toBeInTheDocument()
     expect(await within(panel).findByText('发布重试中')).toBeInTheDocument()
     expect(within(panel).getByText(/pending retry/)).toBeInTheDocument()
     expect(within(panel).getByText(/retry pending/)).toBeInTheDocument()
-    expect(within(panel).queryByText(/执行失败/)).not.toBeInTheDocument()
+    expect(within(panel).getByText(/pending retry/)).not.toHaveTextContent('执行失败')
     expect(within(panel).getByText(/merge request is not available/)).toBeInTheDocument()
     expect(within(panel).queryByText(/pending normal/)).not.toBeInTheDocument()
     expect(within(panel).getAllByText(/run failure/)).toHaveLength(1)

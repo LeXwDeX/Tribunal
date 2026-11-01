@@ -1,13 +1,18 @@
-.split {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 340px;
-  gap: 20px;
-  align-items: start;
+.metrics > div > span:last-child {
+  white-space: normal;
+  overflow: visible;
+  align-items: flex-start;
 }
 
 .metricNoteText {
-  overflow: hidden;
-  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.compactState {
+  margin: 0;
+  padding: 12px 18px;
+  color: var(--muted-strong);
+  font-size: 13px;
 }
 
 .liveList {
@@ -149,12 +154,6 @@
 
 .state {
   padding: 16px 18px;
-}
-
-@media (max-width: 1100px) {
-  .split {
-    grid-template-columns: minmax(0, 1fr);
-  }
 }
 
 @media (max-width: 900px) {
