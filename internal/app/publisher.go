@@ -388,12 +388,12 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 						conflict = true
 					}
 				}
-				if !conflict {
-					body, renderErr := review.RenderFinding(*group, review.FindingRenderOptions{ShowModelAttribution: cfg.Settings.ShowModelAttribution})
-					if renderErr != nil || publication.BodyHash == "" || publication.BodyHash != bodyHash(body) {
-						group.PositionOK = false
-						contentMismatch = true
-					}
+			}
+			if err == nil && publication.GitlabID != "" && !conflict {
+				body, renderErr := review.RenderFinding(*group, review.FindingRenderOptions{ShowModelAttribution: cfg.Settings.ShowModelAttribution})
+				if renderErr != nil || publication.BodyHash == "" || publication.BodyHash != bodyHash(body) {
+					group.PositionOK = false
+					contentMismatch = true
 				}
 			}
 		}
@@ -478,7 +478,6 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 		}
 		var created bool
 		var discussionID string
-		knownBodyHash := ""
 		err = sendOutbound(ctx, p.workspace.Get(loaded.project.ID), func(callCtx context.Context) error {
 			var err error
 			created, discussionID, err = p.store.ReserveDiscussionIntent(callCtx, loaded.project.ID, loaded.mrIID, key)
@@ -517,8 +516,15 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 			}
 			return err
 		}
-		if created {
-			knownBodyHash = bodyHash(findingBody)
+		if !created {
+			// Intents prove a remote ID, not the workflow or content that sent it.
+			groups[i].PositionOK = false
+			fallback = true
+			if !contentMismatch {
+				warnings = append(warnings, "部分问题的历史讨论内容与当前内容不同或无法确认，当前问题已保留在摘要中，未修改历史讨论。")
+				contentMismatch = true
+			}
+			continue
 		}
 		if err := sendOutbound(ctx, p.workspace.Get(loaded.project.ID), func(callCtx context.Context) error {
 			if _, err := p.controlMatches(callCtx, loaded); err != nil {
@@ -532,7 +538,7 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 				GitlabID:    discussionID,
 				WorkflowID:  workflowID,
 				Fingerprint: loaded.record.Hash,
-				BodyHash:    knownBodyHash,
+				BodyHash:    bodyHash(findingBody),
 			})
 			return err
 		}); err != nil {
@@ -544,7 +550,10 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 			return err
 		}
 		updated, err := render()
-		if err == nil && updated != body {
+		if err != nil {
+			return PermanentJob(fmt.Errorf("render summary: %w", err))
+		}
+		if updated != body {
 			if _, err := p.upsertSummary(ctx, loaded.project.ID, loaded.mrIID, loaded.token, loaded.record.Hash, updated, workflowID, recheck); err != nil {
 				return err
 			}
