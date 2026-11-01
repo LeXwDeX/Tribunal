@@ -323,6 +323,56 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 	for i := range groups {
 		groups[i].PublishKey = review.GroupPublishKey(loaded.dossier, groups[i])
 	}
+	keyCounts := make(map[string]int, len(groups))
+	for _, group := range groups {
+		keyCounts[group.PublishKey]++
+	}
+	collision := false
+	for i := range groups {
+		group := &groups[i]
+		if !group.Published() || !group.PositionOK {
+			continue
+		}
+		conflict := keyCounts[group.PublishKey] > 1
+		if !conflict {
+			publication, err := p.store.GetPublication(ctx, loaded.project.ID, loaded.mrIID, discussionPublishKind, group.PublishKey)
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
+				return err
+			}
+			if err == nil && publication.GitlabID != "" && publication.WorkflowID != workflowID {
+				conflict = true
+				if publication.WorkflowID != "" {
+					previous, err := p.store.ListFindings(ctx, store.FindingFilter{WorkflowID: publication.WorkflowID})
+					if err != nil {
+						return err
+					}
+					matches := 0
+					for _, finding := range previous {
+						if finding.PublishKey == group.PublishKey {
+							matches++
+							previousSide := review.Side(finding.Side)
+							validPreviousSide := previousSide == "" || previousSide == review.SideNew || previousSide == review.SideOld
+							validCurrentSide := group.Side == "" || group.Side == review.SideNew || group.Side == review.SideOld
+							if finding.Path != "" && finding.Path == group.Path && validPreviousSide && validCurrentSide && diffSide(previousSide) == diffSide(group.Side) && finding.Category == group.Category && finding.Line != nil && *finding.Line > 0 && group.Line > 0 {
+								delta := *finding.Line - group.Line
+								conflict = delta < -3 || delta > 3
+							}
+						}
+					}
+					if matches != 1 {
+						conflict = true
+					}
+				}
+			}
+		}
+		if conflict {
+			group.PositionOK = false
+			collision = true
+		}
+	}
+	if collision {
+		warnings = append(warnings, "部分问题的发布标识冲突，已保留在摘要中，未创建行内讨论。")
+	}
 	for _, group := range groups {
 		if group.Published() && index.AmbiguousPath(group.Path) {
 			warnings = append(warnings, "部分问题的路径可能对应多个变更、被忽略或省略的变更，文件归属存在歧义，已保留在摘要中。")
