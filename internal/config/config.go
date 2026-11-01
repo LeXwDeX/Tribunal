@@ -399,6 +399,9 @@ func (c *Config) Validate() error {
 			p.add("%s.protocol %q is not supported", field, provider.Protocol)
 		}
 		validateURL(&p, field+".base_url", provider.BaseURL, false)
+		if strings.TrimSpace(provider.Model) == "" {
+			p.add("%s.model must not be empty", field)
+		}
 		if provider.MaxConcurrency <= 0 {
 			p.add("%s.max_concurrency must be positive", field)
 		}

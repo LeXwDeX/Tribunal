@@ -183,7 +183,7 @@ type ProfileConfig struct {
 
 ### 启动校验（`Config.Validate()`）
 
-- 每个 provider 的 `protocol` 合法，`api_key_env` 对应的环境变量存在且非空。
+- 每个 provider 的 `protocol` 合法，`model` 非空且不全为空白，`api_key_env` 对应的环境变量存在且非空；`base_url` 可为空，非空时校验地址格式。
 - profile 中引用的 provider 都存在；`challenge.provider` 为 `cross` 时必须提供 `fallback`。
 - `on_uncertain` 为 `judge` 时，`synthesize.mode` 必须是 `agent`。
 - `budget.max_nodes` ≤ 100；`max_extends` ≤ 2。
@@ -196,7 +196,7 @@ type ProfileConfig struct {
 
 `providers` 的键是 provider 别名。每个别名绑定一个 `protocol`、`base_url`、`model` 和一个 `api_key_env`；`api_key_env` 只保存**变量名**，密钥值由部署环境注入，不写进 YAML、命令、日志或接口响应。同一个供应方的两个模型需要两个别名，例如 `primary` 和 `secondary`，即使二者共用 `base_url` 和密钥变量：一个别名只有一个 `model`。
 
-Docker Compose 默认只启用 `primary`。`config/server.docker.yaml` 另有一个注释掉的 `secondary` 示例，四个值分别来自 `LLM_SECONDARY_PROTOCOL`、`LLM_SECONDARY_BASE_URL`、`LLM_SECONDARY_MODEL` 和 `LLM_SECONDARY_API_KEY`。`compose.yaml` 的 `environment` 已允许这四个变量，但 `.env` 只用于 Compose 插值，不会自动注入容器；未列在 `environment` 中的变量容器看不到。若新增第三个 provider 并使用新变量名，须在 `compose.override.yaml` 的 `services.review.environment` 中逐一透传它引用的 `protocol`、`base_url`、`model` 和 `api_key_env` 变量；只透传 key 会让其他值为空并导致启动失败。复用容器已有变量时不需要重复透传。
+Docker Compose 默认只启用 `primary`。`config/server.docker.yaml` 另有一个注释掉的 `secondary` 示例，四个值分别来自 `LLM_SECONDARY_PROTOCOL`、`LLM_SECONDARY_BASE_URL`、`LLM_SECONDARY_MODEL` 和 `LLM_SECONDARY_API_KEY`。`compose.yaml` 的 `environment` 已允许这四个变量，但 `.env` 只用于 Compose 插值，不会自动注入容器；未列在 `environment` 中的变量容器看不到。若新增第三个 provider 并使用新变量名，须在 `compose.override.yaml` 的 `services.review.environment` 中逐一透传它引用的变量；只透传 key 会使未透传的 protocol 和 model 为空，导致启动失败。`base_url` 可为空以使用协议适配器默认地址；复用容器已有变量时不需要重复透传。
 
 可引用模型的字段：
 
@@ -204,18 +204,20 @@ Docker Compose 默认只启用 `primary`。`config/server.docker.yaml` 另有一
 |---|---|---|
 | `profiles.<name>.propose[].provider` | 评审档位 | 每个条目按 package 生成提出节点；同一 block 可写多条以并行调用多个模型。 |
 | `profiles.<name>.challenge.provider` | 评审档位 | 挑战与扩展 verify 使用的 provider；`verify` 没有独立字段。`cross` 只用于这个字段。 |
-| `profiles.<name>.reasoner.provider` | 配置了 `reasoner` 且 `when` 不是 `never` | |
+| `profiles.<name>.reasoner.provider` | 配置了 `reasoner` 且 `when` 不是 `never` | 即使 `when: never`，非空 provider 引用也必须存在。 |
 | `profiles.<name>.plan.provider` | `plan.mode: agent` | `plan.mode: code` 是确定性节点，不调用模型。 |
 | `profiles.<name>.synthesize.provider` | `synthesize.mode: agent` | `mode: code` 不调用模型。 |
 | `profiles.onboarding.agent.provider` | onboarding | 工作区初始化使用；添加第二 provider 时保留 primary。 |
 
-`gather` 和 `adjudicate` 是代码节点，没有 provider 字段；给它们写 provider 会被未知字段校验拒绝。`verify` 使用 challenge 选出的 provider：`challenge.provider` 为固定别名时使用该别名；为 `cross` 时由 gather 为每个 finding 选择未被提出方使用过的 provider，`challenge.fallback` 只在找不到独立候选时使用，**不是模型调用失败后的自动故障切换**。固定别名与提出方相同时，verify 仍会执行，但会按同一模型标记，不能当作独立确认。
+`gather` 和 `adjudicate` 是代码节点，没有 provider 字段；给它们写 provider 会被未知字段校验拒绝。普通 `verify` 使用 challenge 选出的 provider：固定别名使用该别名；`cross` 由 gather 按 endpoint 和 model 身份选择未被提出方使用的候选，找不到时使用 `challenge.fallback`，**不是模型调用失败后的自动故障切换**。同一身份或身份未知不能证明跨模型独立，不同别名也不保证实际模型独立。
+
+`synthesize` 发起的扩展不同：扩展 `verify` 在 `cross` 时直接使用 `challenge.fallback`，不会重新为 finding 选择独立候选；其 same-model 标记只比较 provider 别名，不能证明跨模型独立。扩展 `review` 优先使用首个带 provider 的 `code-review` propose，其次首个带 provider 的 propose；都没有时依次回退到 challenge fallback、首个 propose provider、synthesize provider。扩展后的 `synthesize.2` 继承原 synthesize provider。
 
 多模型 propose 会让每个 package 的每个条目各运行一次，成本和节点数随之增加，受 `budget.max_nodes` 与 fan-out 限制。`plan.mode: agent` 时，规划模型可以给 package 指定 `provider`，但该值只能取 `propose` 中出现的 provider；它不会自动使用 `plan.provider` 或 `challenge.provider`。package 的 `provider` 非空时会覆盖该 package 的**每个** propose 条目：若 propose 配置了多个模型，同一 package 的提出节点会全部使用 package 的 provider，实际是同一模型重复调用，不能保证多模型独立。
 
 平台管理员可在控制台「模型与档位」查看配置中的全部 provider 和档位。该页面只读，界面不显示密钥值。逐个 provider 的连通性测试发送一条最小真实请求，会产生费用，需事先取得用户授权；成功只代表协议、地址、密钥和模型 ID 基本可用，不证明工具调用、长上下文、推理参数或完整业务流程兼容。
 
-修改 provider 或档位需要重启服务，当前进程不热加载配置；`docker compose restart` 会重新读取已挂载的配置文件，但不会加载新的容器环境变量。新增 provider（即使没有被任何档位引用）会改变评审执行配置；启动恢复会对未终态工作流重新检查配置、档位和执行身份，不匹配时取消，而不是续跑。待发布结果是否继续发布由发布时校验决定，不能假定会自动跳过或一定发布。修改前应核对并等待或处理未完成和待发布结果；已发布或失败的评审不会被改写，被取消的评审需要重新触发。移除已配置的 provider 前，检查所有 `profiles.*` 的 `plan.provider`、`propose[].provider`、`reasoner.provider`、`challenge.provider`、`challenge.fallback`、`synthesize.provider` 和 `agent.provider`；任何对已移除 provider 的残留引用都会使配置校验失败；不要清空必需的 propose、challenge 或 onboarding 字段。完整操作步骤见 [多 Provider 配置](../operations.md#多-provider-配置) 和 [Agent 部署指南](../agent-deployment.md#多-provider-配置)。
+修改 provider 或档位需要重启服务，当前进程不热加载配置；`docker compose restart` 会重新读取已挂载的配置文件，但不会加载新的容器环境变量。新增 provider（即使没有被任何档位引用）会改变评审执行配置；启动恢复会对未终态工作流重新检查配置、档位和执行身份，不匹配时取消，而不是续跑。待发布结果是否继续发布由发布时校验决定，不能假定会自动跳过或一定发布。修改前应核对并等待或处理未完成和待发布结果；已发布或失败的评审不会被改写，被取消的评审需要重新触发。移除已配置的 provider 前，检查所有 `profiles.*` 的 `plan.provider`、`propose[].provider`、`reasoner.provider`、`challenge.provider`、`challenge.fallback`、`synthesize.provider` 和 `agent.provider`；即使 `reasoner.when: never` 也要清理其非空引用。任何对已移除 provider 的残留引用都会使配置校验失败；不要清空必需的 propose、challenge 或 onboarding 字段。完整操作步骤见 [多 Provider 配置](../operations.md#多-provider-配置) 和 [Agent 部署指南](../agent-deployment.md#多-provider-配置)。
 
 ### 默认扩展（`default_extensions`）
 

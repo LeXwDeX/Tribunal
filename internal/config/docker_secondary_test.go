@@ -196,6 +196,37 @@ func TestDockerConfigSecondaryMissingKey(t *testing.T) {
 	}
 }
 
+func TestDockerConfigSecondaryRequiresModel(t *testing.T) {
+	for _, model := range []string{"", "   "} {
+		t.Run("model="+model, func(t *testing.T) {
+			setDockerConfigEnv(t)
+			setSecondaryExampleEnv(t)
+			t.Setenv("LLM_SECONDARY_MODEL", model)
+			body := enableSecondaryExample(t, readDockerTemplate(t))
+			cfg := loadConfig(t, writeConfig(t, "server.docker.yaml", body))
+			err := cfg.Validate()
+			requireErrorContains(t, err, "providers.secondary.model")
+			requireErrorNotContains(t, err, "test-provider-key", "test-secondary-key")
+		})
+	}
+}
+
+func TestDockerConfigSecondaryAllowsDefaultBaseURL(t *testing.T) {
+	for _, protocol := range []string{"openai-chat", "openai-responses", "anthropic"} {
+		t.Run(protocol, func(t *testing.T) {
+			setDockerConfigEnv(t)
+			setSecondaryExampleEnv(t)
+			t.Setenv("LLM_SECONDARY_PROTOCOL", protocol)
+			t.Setenv("LLM_SECONDARY_BASE_URL", "")
+			body := enableSecondaryExample(t, readDockerTemplate(t))
+			cfg := loadConfig(t, writeConfig(t, "server.docker.yaml", body))
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("Validate: %v", err)
+			}
+		})
+	}
+}
+
 func TestComposeSecondaryEnvForwardedAsOptional(t *testing.T) {
 	data, err := os.ReadFile(composePath)
 	if err != nil {

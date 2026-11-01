@@ -72,7 +72,7 @@ docker compose exec -T review /app/tribunalctl projects all
    LLM_SECONDARY_API_KEY=<set-by-secret-manager>
    ```
 
-   `LLM_SECONDARY_BASE_URL` 要匹配协议：Anthropic 使用 API 根地址（不带 `/v1`），OpenAI 兼容协议通常包含 `/v1`。`compose.yaml` 的 `environment` 已包含这四个名字，启用 secondary 时不需要额外 override。真实密钥应由用户或受控密钥管理器写入权限为 `600` 的 `.env`，或通过部署环境的密钥注入提供；不要写进 YAML、Compose 文件、命令行参数、聊天、Issue 或日志。示例中的尖括号内容不是可用值。
+   `LLM_SECONDARY_MODEL` 必须非空且不全为空白。`LLM_SECONDARY_BASE_URL` 可留空以使用适配器默认地址；填写时要匹配协议：Anthropic 使用 API 根地址（不带 `/v1`），OpenAI 兼容协议通常包含 `/v1`。`compose.yaml` 的 `environment` 已包含这四个名字，启用 secondary 时不需要额外 override。真实密钥应由用户或受控密钥管理器写入权限为 `600` 的 `.env`，或通过部署环境的密钥注入提供；不要写进 YAML、Compose 文件、命令行参数、聊天、Issue 或日志。示例中的尖括号内容不是可用值。
 
 2. 在 `config/server.docker.yaml` 中取消 `providers.secondary` 整段的注释。保留 `api_key_env: LLM_SECONDARY_API_KEY`；该字段只写变量名。默认模板已包含 `max_concurrency: 4` 和示例值 `max_tokens: 16000`；Anthropic 协议需要 `max_tokens`。无论选择哪个协议，都要按实际模型和供应方允许的输出上限调整该值。
 
@@ -96,7 +96,7 @@ docker compose exec -T review /app/tribunalctl projects all
 
    `verify` 没有单独的 provider 字段，它使用 challenge 选出的 provider。`gather` 和 `adjudicate` 是代码节点，不能配置模型。`plan` 和 `synthesize` 只有在 `mode: agent` 时才调用模型；默认的 `mode: code` 不会使用 provider。
 
-   固定 `challenge.provider` 会对每个 finding 使用同一个模型。若某个 finding 的提出方也使用该 provider，verify 会标记 same-model，不能当作独立确认；要按 finding 选择未被提出方使用的 provider，使用 `cross` 并配置 `fallback`。`cross` 不是调用失败后的自动故障切换，`fallback` 只在找不到独立候选时使用。
+   固定 `challenge.provider` 会对每个 finding 使用同一个 provider。普通 verify 使用 `cross` 时按 endpoint 和 model 身份为 finding 选择未被提出方使用的候选；没有候选时使用 `fallback`，不是调用失败后的自动故障切换。synthesize 发起的扩展 verify 在 `cross` 时直接使用 fallback，不重新选择独立候选，其 same-model 标记只比较别名。不同别名也不保证实际模型独立；同一身份或身份未知不能证明跨模型独立。扩展 review 优先使用首个带 provider 的 `code-review` propose，其次首个带 provider 的 propose；详见[配置设计](design/06-config.md#多-provider-与档位引用)。
 
    `plan.mode: agent` 时，规划模型可以给 package 指定 provider，但该值只能从 `propose` 出现的 provider 中选择。要让 agent plan 在包级别使用 secondary，必须同时启用第二个 propose 条目。注意：package 的 `provider` 非空时会覆盖该 package 的每个 propose 条目；若 propose 同时有 primary 和 secondary，同一 package 的多个提出节点会全部使用 package 的 provider，实际是同一模型重复调用，不能保证多模型独立。
 
@@ -114,7 +114,7 @@ docker compose exec -T review /app/tribunalctl projects all
    docker compose run --rm --no-deps review --config /app/config/server.yaml --check-config
    ```
 
-   `config --quiet` 只检查 Compose 结构、插值和必填变量，不读取 provider/profile 的业务语义。`--check-config` 检查 provider 协议、地址、`api_key_env` 是否存在、档位引用和主密钥格式，但不验证密钥是否有效、网络是否可达、模型是否支持工具调用，也不验证现有数据库与主密钥是否匹配。两项都通过不等于评审能运行。
+   `config --quiet` 只检查 Compose 结构、插值和必填变量，不读取 provider/profile 的业务语义。`--check-config` 检查 provider 协议、非空 model、非空地址的格式、`api_key_env` 是否存在、档位引用和主密钥格式；不构建评审图，也不验证密钥是否有效、网络是否可达、模型是否支持工具调用或现有数据库与主密钥是否匹配。两项都通过不等于评审能运行。
 
 6. 重建容器。`restart` 不会更新容器环境变量；若配置文件已在容器内可见（例如只读绑定挂载），重启的应用进程会重新读取该文件。它不能替代 `.env` 或 Compose 层配置变更，使用：
 

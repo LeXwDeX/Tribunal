@@ -97,11 +97,11 @@ docker compose config --quiet && echo compose-ok
 用户要求第二个 provider 时，按以下顺序执行。完整参数和回退说明见 [运维 · 多 Provider 配置](operations.md#多-provider-配置)。
 
 1. 向用户取得第二个 provider 的协议、API 根地址、模型 ID 和费用授权。协议使用 `openai-chat`、`openai-responses` 或 `anthropic`；Anthropic 的地址不带 `/v1`，OpenAI 兼容地址通常带 `/v1`。密钥由用户或受控密钥管理器直接写入权限为 `600` 的 `.env`，对应 `LLM_SECONDARY_API_KEY`；不要复制真实值到终端、聊天或示例。
-2. 在 `.env` 填入 `LLM_SECONDARY_PROTOCOL`、`LLM_SECONDARY_BASE_URL`、`LLM_SECONDARY_MODEL` 和 `LLM_SECONDARY_API_KEY`。四个值互相独立，不能从 primary 的 `LLM_*` 推导。
+2. 在 `.env` 填入 `LLM_SECONDARY_PROTOCOL`、`LLM_SECONDARY_MODEL` 和 `LLM_SECONDARY_API_KEY`；`LLM_SECONDARY_BASE_URL` 可留空以使用适配器默认地址。四个变量不从 primary 的 `LLM_*` 推导。
 3. 在 `config/server.docker.yaml` 取消 `providers.secondary` 整段注释；`api_key_env` 保持 `LLM_SECONDARY_API_KEY`，不要改成密钥值。保留 `profiles.onboarding.agent.provider: primary`，不要把 onboarding 切到 secondary。
-4. 在 `profiles.default` 中按策略引用 secondary。例如 challenge 改为 `secondary`，propose 保持 primary；或同时取消第二个 propose 条目的注释。`verify` 跟随 challenge，`gather` 和 `adjudicate` 不能配置模型。`plan`、`synthesize` 只有在 `mode: agent` 时才调用模型。若 `plan.mode: agent`，package 的非空 `provider` 会覆盖该 package 的所有 propose 条目；同一 package 可能变成同一模型重复调用，不能保证多模型独立。
+4. 在 `profiles.default` 中按策略引用 secondary。例如 challenge 改为 `secondary`，propose 保持 primary；或同时取消第二个 propose 条目的注释。`gather` 和 `adjudicate` 不能配置模型。普通 verify 的 `cross` 按模型身份选择候选，找不到才用 fallback；synthesize 扩展 verify 的 `cross` 则直接使用 fallback。不同别名不保证实际模型独立，扩展 verify 的 same-model 标记只比较别名。扩展 review 的 provider 选择见[配置设计](design/06-config.md#多-provider-与档位引用)。`plan`、`synthesize` 只有在 `mode: agent` 时才调用模型。若 `plan.mode: agent`，package 的非空 `provider` 会覆盖该 package 的所有 propose 条目；同一 package 可能变成同一模型重复调用，不能保证多模型独立。
 5. 若这是已有部署，先在控制台评审列表核对未完成（运行中或排队）评审和待发布结果。需要旧评审完成时先等待；否则接受未终态工作流可能在重启恢复时因配置、档位或执行身份不匹配被取消。待发布结果是否继续由发布时校验决定，不能假定会自动跳过或一定发布；无法确认时先等待并核对。首次部署没有旧任务，可直接进行下一步。
-6. 构建并启动：按[第 3 节](#3-构建并启动)执行 `docker compose build` 和 `--check-config`。首次部署再用 `docker compose up -d --wait`；已有部署用 `docker compose up -d --force-recreate --wait --wait-timeout 120` 让新环境变量生效。缺少 secondary key 时会指出 `providers.secondary.api_key_env`，不要输出密钥排查。`--check-config` 不验证网络、密钥有效性和工具兼容性。
+6. 构建并启动：按[第 3 节](#3-构建并启动)执行 `docker compose build` 和 `--check-config`。首次部署再用 `docker compose up -d --wait`；已有部署用 `docker compose up -d --force-recreate --wait --wait-timeout 120` 让新环境变量生效。缺少 secondary key 时会指出 `providers.secondary.api_key_env`，model 为空时会指出 `providers.secondary.model`；不要输出密钥排查。`--check-config` 不验证评审图、网络、密钥有效性和工具兼容性。
 7. 启动后用平台管理员打开控制台「模型与档位」，确认两个 provider 都出现。逐个测试会发送真实最小请求并产生费用，必须先取得用户授权；测试成功只证明协议、地址、密钥和模型 ID 基本可用，不证明工具调用、长上下文或完整评审兼容。完整评审要在测试 MR 上另行触发并另获授权。
 8. 第三个 provider 需要自行写配置，并在 `compose.override.yaml` 的 `services.review.environment` 显式透传其变量；仅写入 `.env` 时容器看不到。配置中引用的协议、地址、模型和 key 变量要逐一列出，不能只传 key。示例见 [运维 · 多 Provider 配置](operations.md#多-provider-配置) 第 8 步。
 
