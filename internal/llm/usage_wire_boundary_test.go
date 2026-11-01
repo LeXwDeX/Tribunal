@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
 	"testing"
 
 	anthropic "github.com/anthropics/anthropic-sdk-go"
@@ -104,6 +105,36 @@ func TestUsageWireResponsesFailedUnsafeUsage(t *testing.T) {
 	if resp != nil || !IsUnsafeResponse(err) || calls.Load() != 1 || !valid || usage != (Usage{InputTokens: 5, Incomplete: true}) {
 		t.Fatalf("resp=%+v err=%v usage=%+v valid=%t calls=%d", resp, err, usage, valid, calls.Load())
 	}
+}
+
+func TestChatEmptyChoicesInvalidUsageDoesNotRetry(t *testing.T) {
+	response := `{"id":"secret-canary","object":"chat.completion","created":1,"model":"test","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":-0.5}}`
+	client, calls := usageClient(t, "openai-chat", response, chatOK)
+	resp, err := client.Generate(context.Background(), simpleRequest())
+	usage, valid := ErrorUsage(err)
+	if resp != nil || !IsUnsafeResponse(err) || calls.Load() != 1 || !valid || usage != (Usage{InputTokens: 5, Incomplete: true}) || !HasObservedResponse(err) {
+		t.Fatalf("resp=%+v err=%v usage=%+v valid=%t calls=%d observed=%t", resp, err, usage, valid, calls.Load(), HasObservedResponse(err))
+	}
+	if strings.Contains(err.Error(), "secret-canary") || strings.Contains(err.Error(), "-0.5") {
+		t.Fatalf("error contains provider response data: %v", err)
+	}
+}
+
+func TestChatEmptyChoicesMissingUsageStillRetries(t *testing.T) {
+	response := `{"id":"x","object":"chat.completion","created":1,"model":"test","choices":[],"usage":{"prompt_tokens":5}}`
+	client, calls := usageClient(t, "openai-chat", response, chatOK)
+	resp, err := client.Generate(context.Background(), simpleRequest())
+	if err != nil || resp == nil || calls.Load() != 2 || resp.Usage != (Usage{InputTokens: 6, OutputTokens: 1, Incomplete: true}) {
+		t.Fatalf("resp=%+v err=%v calls=%d", resp, err, calls.Load())
+	}
+}
+
+func TestChatNilCompletionRemainsTransient(t *testing.T) {
+	resp, err := chatResponse(nil, "test")
+	if resp != nil || err == nil || IsUnsafeResponse(err) || HasObservedResponse(err) {
+		t.Fatalf("resp=%+v err=%v observed=%t", resp, err, HasObservedResponse(err))
+	}
+	requireKind(t, err, ErrTransient)
 }
 
 func TestUsageWireKeepsValidIntegers(t *testing.T) {

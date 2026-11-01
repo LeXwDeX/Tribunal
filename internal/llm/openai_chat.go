@@ -181,11 +181,11 @@ func chatResponse(completion *openai.ChatCompletion, defaultModel string) (*Resp
 	if completion != nil {
 		usage, usageComplete = chatUsage(completion.Usage, completion.RawJSON())
 	}
-	if completion == nil || len(completion.Choices) == 0 {
-		return nil, &Error{Kind: ErrTransient, Err: errors.New("provider returned no choices"), Usage: usage, responseObserved: completion != nil}
-	}
 	if !usageComplete {
 		return nil, &Error{Kind: ErrUnsafeResponse, Err: errors.New("provider returned invalid token usage"), Usage: usage, responseObserved: true}
+	}
+	if completion == nil || len(completion.Choices) == 0 {
+		return nil, &Error{Kind: ErrTransient, Err: errors.New("provider returned no choices"), Usage: usage, responseObserved: completion != nil}
 	}
 	choice := completion.Choices[0]
 	message := Message{Role: RoleAssistant}
