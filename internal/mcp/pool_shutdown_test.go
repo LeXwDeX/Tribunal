@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -10,6 +11,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -40,7 +42,35 @@ func (fn testRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error)
 	return fn(req)
 }
 
-func connectedMemorySession(t *testing.T) (*sdk.ClientSession, *sdk.ServerSession, context.CancelFunc) {
+type closedPipeTransport struct{ sdk.Transport }
+
+func (transport closedPipeTransport) Connect(ctx context.Context) (sdk.Connection, error) {
+	conn, err := transport.Transport.Connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &closedPipeConnection{Connection: conn}, nil
+}
+
+type closedPipeConnection struct {
+	sdk.Connection
+	closing atomic.Bool
+}
+
+func (conn *closedPipeConnection) Read(ctx context.Context) (jsonrpc.Message, error) {
+	msg, err := conn.Connection.Read(ctx)
+	if (errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe)) && conn.closing.Load() {
+		return nil, io.ErrClosedPipe
+	}
+	return msg, err
+}
+
+func (conn *closedPipeConnection) Close() error {
+	conn.closing.Store(true)
+	return conn.Connection.Close()
+}
+
+func connectedMemorySession(t *testing.T, forceClosedPipe bool) (*sdk.ClientSession, *sdk.ServerSession, context.CancelFunc) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	serverTransport, clientTransport := sdk.NewInMemoryTransports()
@@ -51,7 +81,11 @@ func connectedMemorySession(t *testing.T) (*sdk.ClientSession, *sdk.ServerSessio
 		t.Fatalf("server Connect: %v", err)
 	}
 	client := sdk.NewClient(&sdk.Implementation{Name: "test-client", Version: "1"}, nil)
-	session, err := client.Connect(ctx, clientTransport, nil)
+	var transport sdk.Transport = clientTransport
+	if forceClosedPipe {
+		transport = closedPipeTransport{Transport: transport}
+	}
+	session, err := client.Connect(ctx, transport, nil)
 	if err != nil {
 		cancel()
 		_ = serverSession.Close()
@@ -61,8 +95,22 @@ func connectedMemorySession(t *testing.T) (*sdk.ClientSession, *sdk.ServerSessio
 }
 
 func TestServerEntryCloseWaitsForReady(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		forceClosedPipe bool
+	}{
+		{name: "in-memory"},
+		{name: "closed-pipe-on-close", forceClosedPipe: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testServerEntryCloseWaitsForReady(t, tc.forceClosedPipe)
+		})
+	}
+}
+
+func testServerEntryCloseWaitsForReady(t *testing.T, forceClosedPipe bool) {
 	synctest.Test(t, func(t *testing.T) {
-		session, serverSession, cancel := connectedMemorySession(t)
+		session, serverSession, cancel := connectedMemorySession(t, forceClosedPipe)
 		defer cancel()
 		defer serverSession.Close()
 		defer session.Close()
@@ -80,6 +128,11 @@ func TestServerEntryCloseWaitsForReady(t *testing.T) {
 		synctest.Wait()
 		time.Sleep(6 * time.Second)
 		synctest.Wait()
+		select {
+		case err := <-sessionDone:
+			t.Errorf("session closed before entry was ready: %v", err)
+		default:
+		}
 		select {
 		case <-closed:
 			t.Error("entry.close returned before ready")
@@ -107,7 +160,9 @@ func TestServerEntryCloseWaitsForReady(t *testing.T) {
 		}
 		select {
 		case err := <-sessionDone:
-			if err != nil {
+			// The SDK may return the local net.Pipe read error on Close; Close's
+			// result above still reports transport close failures separately.
+			if (err != nil && !errors.Is(err, io.ErrClosedPipe)) || (forceClosedPipe && !errors.Is(err, io.ErrClosedPipe)) {
 				t.Errorf("session.Wait: %v", err)
 			}
 		default:
@@ -128,7 +183,7 @@ func TestServerEntryCloseWaitsForReady(t *testing.T) {
 
 func TestManagerCloseWaitsForPublishedSession(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		session, serverSession, cancelSession := connectedMemorySession(t)
+		session, serverSession, cancelSession := connectedMemorySession(t, false)
 		defer cancelSession()
 		defer serverSession.Close()
 		defer session.Close()
