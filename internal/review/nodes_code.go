@@ -342,16 +342,20 @@ func (e *Executor) executeGather(ctx context.Context, in dag.NodeInput) (dag.Nod
 	signals = append(signals, coverageSignals...)
 	warnings = mergeWarnings(warnings, coverageWarnings)
 	scope := e.incrementalFiles()
+	dossier := e.deps.Dossier
 	if scope != nil {
 		filtered := make([]Proposal, 0, len(proposals))
 		allowed := make(map[Ref]struct{})
+		removed := false
 		// Keep each original slice so gate refs and finding IDs retain their indices.
 		for _, proposal := range proposals {
 			matched := false
 			for i, finding := range proposal.Findings {
-				if _, ok := scope[finding.Path]; ok {
+				if findingInScope(finding.Path, Side(finding.Side), scope, dossier) {
 					matched = true
 					allowed[Ref{Node: proposal.Node, Index: i}] = struct{}{}
+				} else {
+					removed = true
 				}
 			}
 			if !matched {
@@ -359,7 +363,7 @@ func (e *Executor) executeGather(ctx context.Context, in dag.NodeInput) (dag.Nod
 			}
 			filtered = append(filtered, proposal)
 		}
-		if len(filtered) != len(proposals) {
+		if removed {
 			warnings = appendUnique(warnings, "incremental review: findings outside the incremental file set were ignored")
 		}
 		proposals = filtered
@@ -380,6 +384,7 @@ func (e *Executor) executeGather(ctx context.Context, in dag.NodeInput) (dag.Nod
 		WorkflowID: in.WorkflowID,
 		Proposals:  proposals,
 		Dropped:    dropped,
+		Dossier:    dossier,
 		Unresolved: signals,
 	}, GatherOptions{
 		ChallengeOnly:     params.ChallengeOnly,

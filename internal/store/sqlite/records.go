@@ -887,7 +887,7 @@ func scanFeedback(row rowScanner) (*store.Feedback, error) {
 
 // UpsertFeedback records a signal idempotently. A nil GitLab user is anonymous
 // and is matched with IS NULL, because SQLite unique indexes treat NULLs as
-// distinct.
+// distinct. A refresh without an attribution does not erase an earlier one.
 func (s *Store) UpsertFeedback(ctx context.Context, f store.Feedback) (*store.Feedback, error) {
 	if f.ProjectID <= 0 || f.MRIID <= 0 {
 		return nil, errors.New("sqlite: feedback project id and mr iid are required")
@@ -920,7 +920,7 @@ func (s *Store) UpsertFeedback(ctx context.Context, f store.Feedback) (*store.Fe
 	switch {
 	case err == nil:
 		if _, err := tx.ExecContext(ctx, `UPDATE feedback
-			SET finding_id = ?, observed_at = ? WHERE id = ?`,
+			SET finding_id = COALESCE(?, finding_id), observed_at = ? WHERE id = ?`,
 			nullString(f.FindingID), formatTime(f.ObservedAt), existingID); err != nil {
 			return nil, fmt.Errorf("sqlite: update feedback: %w", err)
 		}

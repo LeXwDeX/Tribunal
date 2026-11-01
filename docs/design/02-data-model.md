@@ -297,7 +297,7 @@ CREATE TABLE feedback (
 
 > `observed_at` 是最近一次采集到该 signal 的时间，不是不可变的创建时间。重复采集同一 `(publication_id, signal, gitlab_user_id)` 会更新该列，因此 `stats.feedback` 按 `project_id` 和 `observed_at` 的 `[from, to)` 计数时，统计的是最近观察时间落入窗口的信号，而不是首次看到这些信号的时间。空范围返回 `total=0`、`by_signal={}` 的已知零值；旧响应缺少 `feedback` 字段才表示不可用。该计数只是原始反馈，不是模型准确率；人工结论另存于 `findings.annotation`。
 >
-> `finding_id` 是归因到具体 finding 的唯一依据；只有 publication 能解析出同一 workflow/project/MR 下已持久化 finding 时才写入。汇总评论的 award 和无法解析的 discussion award 保持为空。`stats.feedback.by_provider` 按 `{provider, role, total, by_signal}` 返回：`proposer` 使用 `findings.origin_provider`，`challenger` 使用 `findings.challenge_node` 对应节点的 provider；只统计 `finding_id` 能精确连接 `findings.id` 的 discussion 反馈，summary/unlinked 不计入这组归因，但仍计入 `total`/`by_signal`。同一 signal 可以同时出现在两个角色中，因此这些是归因计数，不是准确率或误杀率，也不能把两个角色相加当作反馈总数。
+> `finding_id` 是归因到具体 finding 的唯一依据；只有 publication 在同一 workflow/project/MR 下唯一匹配到已持久化 finding 时才写入新归属。汇总评论的 award 不关联 finding；discussion 找不到匹配或 publication 身份不一致时，新 award 记录也不关联 finding。finding 查询出错或匹配多个 finding 时跳过该 discussion 本轮采集并告警，不写入新的无归属反馈。重复采集时，空 `finding_id` 不会清除已有非空归属；非空值可以更新归属。保留的历史归属不证明对应 finding 仍存在或仍可唯一匹配。`stats.feedback.by_provider` 按 `{provider, role, total, by_signal}` 返回：`proposer` 使用 `findings.origin_provider`，`challenger` 使用 `findings.challenge_node` 对应节点的 provider；只统计 `finding_id` 能精确连接 `findings.id` 的 discussion 反馈，summary/unlinked 不计入这组归因，但仍计入 `total`/`by_signal`。同一 signal 可以同时出现在两个角色中，因此这些是归因计数，不是准确率或误杀率，也不能把两个角色相加当作反馈总数。
 
 ```sql
 CREATE TABLE users (
