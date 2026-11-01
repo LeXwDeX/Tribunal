@@ -44,6 +44,7 @@ export function WorkspacePanel({ projectId, canManage = false }: { projectId: nu
   const [refreshAction, setRefreshAction] = useState<RefreshAction | null>(null)
   const [refreshError, setRefreshError] = useState<unknown>(null)
   const [manualChoice, setManualChoice] = useState<boolean | null>(null)
+  const manualButton = useRef<HTMLButtonElement>(null)
   const pendingJob = pendingWorkspaceJobs.get(projectId)
   const [trackingJob, setTrackingJob] = useState(() => Boolean(pendingJob && pendingJob.until > Date.now()))
   const submittedRefreshAt = useRef(pendingJob?.baseRefreshAt)
@@ -178,8 +179,9 @@ export function WorkspacePanel({ projectId, canManage = false }: { projectId: nu
     await queryClient.invalidateQueries({ queryKey: ['project', projectId, 'context-docs', kind] })
   }
 
-  const refresh = async (action: RefreshAction) => {
+  const refresh = async (action: RefreshAction, button: HTMLButtonElement) => {
     if (!canWrite) return
+    if (document.activeElement === button) manualButton.current?.focus()
     setRefreshAction(action)
     setRefreshError(null)
     try {
@@ -280,23 +282,23 @@ export function WorkspacePanel({ projectId, canManage = false }: { projectId: nu
         ) : null}
         <div className={page.tileFooter}>
           {canWrite ? (
-            <Button variant="secondary" className={ui.smallButton} onClick={() => { void refresh('refresh') }} loading={refreshAction === 'refresh'} disabled={Boolean(refreshAction)}>刷新工作区</Button>
+            <Button variant="secondary" className={ui.smallButton} onClick={(event) => { void refresh('refresh', event.currentTarget) }} loading={refreshAction === 'refresh'} disabled={Boolean(refreshAction)}>刷新工作区</Button>
           ) : <span className="small muted">只读账号可以查看工作区状态，不能触发刷新或修改上下文。</span>}
           <span className={page.hint}>收到并接受符合项目目标分支配置的推送 Webhook 后会排队刷新。自动刷新会尝试重建索引，并按上下文新鲜度规则决定是否生成上下文。手动刷新只刷新工作区，不会重建索引或按新鲜度规则生成上下文。</span>
         </div>
         {canWrite || indexBlocked ? (
           <div className={page.manualOperations}>
-            <Button variant="secondary" className={ui.smallButton} aria-expanded={manualOpen} onClick={() => setManualChoice(!manualOpen)}>手动操作</Button>
+            <Button ref={manualButton} variant="secondary" className={ui.smallButton} aria-expanded={manualOpen} onClick={() => setManualChoice(!manualOpen)}>手动操作</Button>
             {manualOpen ? (
               <>
                 {indexBlocked ? <div id={`workspace-index-blocked-${projectId}`} className={styles.notice} role="status">已按 ignore 策略跳过索引，这是安全配置，不是故障。修改项目 ignore 配置后重建索引。</div> : null}
                 {canWrite ? (
                   <>
                     <div className={page.manualActions}>
-                      <Button variant="secondary" className={ui.smallButton} onClick={() => { void refresh('reindex') }} loading={refreshAction === 'reindex'} disabled={Boolean(refreshAction)} aria-describedby={indexBlocked ? `workspace-index-blocked-${projectId}` : undefined}>重建索引</Button>
-                      <Button variant="secondary" className={ui.smallButton} onClick={() => { void refresh('regenerate') }} loading={refreshAction === 'regenerate'} disabled={Boolean(refreshAction)}>重新生成上下文</Button>
+                      <Button variant="secondary" className={ui.smallButton} onClick={(event) => { void refresh('reindex', event.currentTarget) }} loading={refreshAction === 'reindex'} disabled={Boolean(refreshAction)} aria-describedby={indexBlocked ? `workspace-index-blocked-${projectId}` : undefined}>重建索引</Button>
+                      <Button variant="secondary" className={ui.smallButton} onClick={(event) => { void refresh('regenerate', event.currentTarget) }} loading={refreshAction === 'regenerate'} disabled={Boolean(refreshAction)}>重新生成上下文</Button>
                     </div>
-                    {agentsCurrent.data?.locked ? <p className={page.hint}>AGENTS 当前已锁定，重新生成上下文会跳过生成；解锁后才能重新生成。</p> : null}
+                    {agentsCurrent.data?.locked ? <p className={page.hint}>AGENTS 当前已锁定。执行时若 AGENTS 仍锁定，新版本会保存但不会生效，当前文档保持不变。</p> : null}
                     <p className={page.hint}>重新生成上下文会调用模型，可能产生费用。</p>
                   </>
                 ) : null}

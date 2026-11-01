@@ -405,7 +405,7 @@ func (s *WorkspaceService) refreshWithOptions(ctx context.Context, projectID int
 	}
 	regenerate := s.shouldRefreshContext(ctx, projectID, oldBase, newBase, state)
 	if options.RegenerateContext != nil {
-		regenerate = *options.RegenerateContext && !contextDocLocked(ctx, s.store, projectID)
+		regenerate = *options.RegenerateContext
 	}
 	contextAfter := state.ContextSHA
 	if regenerate {
@@ -421,7 +421,11 @@ func (s *WorkspaceService) refreshWithOptions(ctx context.Context, projectID int
 		} else {
 			// A locked current revision keeps the workspace on its own base; a
 			// successful generation only moves it when the store activated it.
-			contextAfter = s.activeContextBase(ctx, projectID, newBase)
+			contextAfter, err = s.activeContextBase(ctx, projectID, state.ContextSHA)
+			if err != nil {
+				s.markWorkspaceError(ctx, projectID, err)
+				return err
+			}
 			_ = ws.SetContextStale(contextAfter, contextAfter != newBase)
 		}
 	}
@@ -437,20 +441,23 @@ func (s *WorkspaceService) refreshWithOptions(ctx context.Context, projectID int
 	return nil
 }
 
-func contextDocLocked(ctx context.Context, st ReviewStore, projectID int64) bool {
-	current, err := st.GetCurrentContextDoc(ctx, projectID, "agents")
-	return err == nil && current.Locked
+// activeContextBase returns the base of the store's active agents revision.
+// The fallback preserves the previous checkpoint if no document exists.
+func (s *WorkspaceService) activeContextBase(ctx context.Context, projectID int64, fallback string) (string, error) {
+	current, err := s.store.GetCurrentContextDoc(ctx, projectID, "agents")
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return "", &contextReadFailure{cause: err}
+	}
+	if err == nil && current != nil && current.BaseSHA != "" {
+		return current.BaseSHA, nil
+	}
+	return fallback, nil
 }
 
-// activeContextBase returns the base of the store's active agents revision.
-// The fallback applies before the first document exists.
-func (s *WorkspaceService) activeContextBase(ctx context.Context, projectID int64, fallback string) string {
-	current, err := s.store.GetCurrentContextDoc(ctx, projectID, "agents")
-	if err == nil && current != nil && current.BaseSHA != "" {
-		return current.BaseSHA
-	}
-	return fallback
-}
+type contextReadFailure struct{ cause error }
+
+func (e *contextReadFailure) Error() string { return "app: current context read failed" }
+func (e *contextReadFailure) Unwrap() error { return e.cause }
 
 func (s *WorkspaceService) onboardLocked(ctx context.Context, project *store.Project, token string, fetchBase bool) error {
 	ws := s.workspace.Get(project.ID)
@@ -520,12 +527,17 @@ func (s *WorkspaceService) onboardLocked(ctx context.Context, project *store.Pro
 			indexSHA = state.IndexSHA
 		}
 	}
+	contextSHA, err := s.activeContextBase(ctx, project.ID, state.ContextSHA)
+	if err != nil {
+		s.markWorkspaceError(ctx, project.ID, err)
+		return err
+	}
 	s.saveWorkspace(ctx, store.Workspace{
 		ProjectID:  project.ID,
 		State:      "ready",
 		BaseSHA:    base,
 		IndexSHA:   indexSHA,
-		ContextSHA: s.activeContextBase(ctx, project.ID, base),
+		ContextSHA: contextSHA,
 		LastError:  indexErr,
 	})
 	return nil
@@ -619,11 +631,11 @@ func (s *WorkspaceService) generateContext(ctx context.Context, project *store.P
 }
 
 func (s *WorkspaceService) shouldRefreshContext(ctx context.Context, projectID int64, oldBase, newBase string, state *store.Workspace) bool {
+	if current, err := s.store.GetCurrentContextDoc(ctx, projectID, "agents"); err == nil && current != nil && current.Locked {
+		return false
+	}
 	if oldBase == "" || newBase == "" || strings.EqualFold(oldBase, newBase) {
 		return oldBase == ""
-	}
-	if current, err := s.store.GetCurrentContextDoc(ctx, projectID, "agents"); err == nil && current.Locked {
-		return false
 	}
 	if s.contextRefresh.MaxAge > 0 {
 		if state == nil || state.LastRefreshAt == nil || s.now().Sub(*state.LastRefreshAt) >= s.contextRefresh.MaxAge {
