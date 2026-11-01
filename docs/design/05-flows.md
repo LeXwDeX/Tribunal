@@ -161,7 +161,7 @@ M0 先把命令持久化为 `review.command`，以下 GitLab 校验由 worker �
    2. 没有记录，或更新绑定评论返回 404 → 确认本 bot 身份并列出 MR notes。404 的旧评论若仍在列表中，保留错误而不新建；否则找作者为本 bot 且正文以 `<!-- gitlab-ce-review:summary` 开头的评论，找到则复用或更新，找不到才新建，再写入绑定。身份或列表查询失败时停止恢复。
    3. 正常摘要、失败摘要和行内降级后的摘要使用相同恢复路径；恢复写入和重试前复核已存代次及非空 head。检查与在途 GitLab 请求不原子，不能保证旧写入绝不会发生。
 3. **行内讨论**：对 `decision ∈ {publish, mark}` 且 `position_ok` 的 finding：
-   1. 用 `publish_key` 查 `publications(kind=discussion)`；已存在（同一问题之前发过）→ 跳过，不重复评论。存疑条目的证据始终在汇总中保留，旧讨论即使没有证据也不影响查看。
+   1. 用 `publish_key` 查 `publications(kind=discussion)`；同一工作流已发布则跳过。跨工作流复用时，还要求历史记录唯一匹配，且两条问题的侧别、非空侧别路径、类别一致，行号均为正数且相距不超过 3 行。空侧别按新侧处理；未知侧别、缺失路径或其他无法证明的情况不复用，当前问题留在摘要并提示发布标识冲突。同一工作流内的多个问题共用发布键时也留在摘要。历史正文哈希缺失或与当前渲染正文不同时，当前问题留在摘要并提示历史讨论未更新。哈希不能验证 GitLab 端的外部修改。复用的讨论仍归原工作流，反馈不会自动归因到新工作流。存疑条目的证据始终在汇总中保留，即使复用没有证据的旧行内讨论也可查看。历史讨论和记录不删除。
    2. 否则 `POST .../discussions`，position 由 `DiffIndex.Locate` 生成；返回 400 → 降级进汇总的「无法定位」区块。
    3. 写 `publications`。
 4. **commit status**（项目开启时）：`POST /projects/:id/statuses/:head_sha`，`name=ai-review`，只有 PASS 写 `success`，BLOCKING 和 INCOMPLETE 写 `failed`，`target_url` 指向控制台评审详情，`description` ≤ 140 字符。调用成功后以 `publish_key=status:<head_sha>:<state>` 记录 `publications`；旧格式 `status:<head_sha>` 没有状态，评审详情视为未知，不根据 verdict 推断。commit status 的 failed 是评审结论，不是发布失败。
@@ -190,7 +190,7 @@ M0 先把命令持久化为 `review.command`，以下 GitLab 校验由 worker �
    - finding 行落在删除或替换旧行的 hunk 内，或文件被删除 → `resolved_changed`。
    - 文件未变、纯重命名或 finding 行未被 hunk 覆盖 → `resolved_unchanged`。
    - binary、无法映射到旧路径的 rename 或其他不可比较改动，或 old-side、缺行、MR/head 获取失败、diff 失败 → 不写 signal，留待下一轮重试。
-4. 写入 `feedback`；discussion 先按 publication 的 `publish_key` 在同一 workflow/project/MR 中定位已持久化 finding，写入其精确 `finding_id`；无法唯一定位时保留原始 signal，但 `finding_id` 为空，不猜测归因。`UpsertFeedback` 按 publication、signal 和 GitLab 用户匹配，匿名信号使用 `IS NULL` 匹配，重复采集保持幂等，但会用本次采集时间更新 `observed_at`。因此统计窗口按最近一次观察时间计算，不是首次创建时间。
+4. 写入 `feedback`；discussion 先按 publication 的 `publish_key` 在同一 workflow/project/MR 中定位已持久化 finding，唯一匹配时写入其精确 `finding_id`。finding 查询失败或匹配多个 finding 时，该讨论本轮不采集，记录告警并等待下次重试；不写入无归属 signal，也不猜测归属。没有匹配或 publication 身份不一致时，仍保存 award 原始 signal，但新记录的 `finding_id` 为空；resolve 缺少可用 finding 时不写 signal。`UpsertFeedback` 按 publication、signal 和 GitLab 用户匹配，匿名信号使用 `IS NULL` 匹配；重复采集时，空 `finding_id` 不覆盖已有非空归属，非空归属可更新原值。成功写入会用本次采集时间更新 `observed_at`，因此统计窗口按最近一次观察时间计算，不是首次创建时间。
 5. 控制台统计页展示 `stats.feedback` 的 `total`、`by_signal` 和 `by_provider` 原始计数，按项目和 `observed_at` 的 `[from, to)` 筛选（结束日映射到次日本地午夜）；空范围显示已知为零，旧响应缺少 `feedback` 字段时显示不可用。`by_provider` 每项为 `{provider, role, total, by_signal}`：`proposer` 取 `findings.origin_provider`，`challenger` 取 `challenge_node` 节点的 provider；只统计 `feedback.finding_id` 能精确连接 `findings.id` 且 publication 一致的 discussion；summary/unlinked 不计入 `by_provider`，但仍计入原始 `total`/`by_signal`。同一 signal 可同时计入两个角色。
 
 原始反馈不自动判断 finding 是否有效。管理员在评审详情展开 finding，选择有效、无效、未确定或清除后显式保存；标注接口记录认证用户名与服务端时间，viewer 只能读取。`ReplaceFindings` 在重新发布时保留同一 ID 的人工字段，不接受 producer 覆盖。标注更正不触发重新发布，也不改变 verdict。

@@ -211,11 +211,11 @@ func TestPublisherFallsBackToSummaryOnInlineRejection(t *testing.T) {
 	}
 }
 
-func TestPublisherReusesConfirmedDiscussionButKeepsMarkedEvidence(t *testing.T) {
+func TestPublisherKeepsMarkedEvidenceWhenHistoricalFindingIsMissing(t *testing.T) {
 	const evidence = "bad := 1"
-	key := review.PublishKeyFor("main.go", "Injected failing assignment", evidence)
+	key := review.FindingPublishKey(testDossier(t, reviewTestHead), "main.go", review.SideNew, "Injected failing assignment", evidence, "historical")
 	previousBody, err := review.RenderFinding(review.Group{
-		Path: "main.go", Line: 2, Severity: review.SeverityP1, Title: "Injected failing assignment",
+		Path: "main.go", Line: 2, Side: review.SideNew, Severity: review.SeverityP1, Title: "Injected failing assignment",
 		Body: "Confirmed finding.", Evidence: evidence, PublishKey: key, PositionOK: true,
 		Decision: &review.FindingDecision{Action: review.ActionPublish},
 	}, review.FindingRenderOptions{})
@@ -244,16 +244,16 @@ func TestPublisherReusesConfirmedDiscussionButKeepsMarkedEvidence(t *testing.T) 
 			}
 		}
 		if f.gitlab.discussionCreates != 0 || len(f.gitlab.discussions) != 1 || f.gitlab.discussions[0].Notes[0].Body != previousBody {
-			t.Fatalf("reused discussion was modified or duplicated: %+v", f.gitlab.discussions)
+			t.Fatalf("historical discussion was modified or reused without a matching finding: %+v", f.gitlab.discussions)
 		}
 		if len(f.gitlab.notes) != 1 || !strings.HasPrefix(f.gitlab.notes[0].Body, review.SummaryMarkerPrefix) ||
 			!strings.Contains(f.gitlab.notes[0].Body, "<details><summary>证据</summary>") || !strings.Contains(f.gitlab.notes[0].Body, evidence) {
 			t.Fatalf("marked evidence is absent from the summary: %+v", f.gitlab.notes)
 		}
 		finding, err := f.db.ListFindings(context.Background(), store.FindingFilter{WorkflowID: workflow.ID})
-		if err != nil || len(finding) != 1 || finding[0].PositionOK == nil || !*finding[0].PositionOK ||
+		if err != nil || len(finding) != 1 || finding[0].PositionOK == nil || *finding[0].PositionOK ||
 			finding[0].Decision != string(review.ActionMark) || finding[0].Evidence != evidence || finding[0].PublishKey != key {
-			t.Fatalf("positioned finding = %+v, err = %v", finding, err)
+			t.Fatalf("historical finding was incorrectly reused = %+v, err = %v", finding, err)
 		}
 		publication, err := f.db.GetPublication(context.Background(), 42, 7, discussionPublishKind, key)
 		if err != nil || publication.GitlabID != "confirmed-discussion" || publication.WorkflowID != "previous-workflow" {
