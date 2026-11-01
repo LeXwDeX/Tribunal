@@ -179,6 +179,20 @@ func TestSandboxIgnoreNestedRootUnderIgnoredDirectory(t *testing.T) {
 }
 
 func TestSandboxIgnoreGitLogStrictAndCompatibility(t *testing.T) {
+	strictLine := regexp.MustCompile(`^[0-9a-f]{40} [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})$`)
+	for _, tc := range []struct {
+		line string
+		want bool
+	}{
+		{strings.Repeat("a", 40) + " 2026-11-01T05:47:53Z", true},
+		{strings.Repeat("a", 40) + " 2026-11-01T05:47:53+05:30", true},
+		{strings.Repeat("a", 40) + " 2026-11-01T05:47:53-04:00", true},
+		{strings.Repeat("a", 40) + " 2026-11-01T05:47:53Z CANARY_SUBJECT", false},
+	} {
+		if got := strictLine.MatchString(tc.line); got != tc.want {
+			t.Errorf("strict line %q: got %t, want %t", tc.line, got, tc.want)
+		}
+	}
 	head := ignoreTestRepo(t)
 	for _, args := range [][]string{{"notes", "add", "-m", "CANARY_NOTE"}, {"config", "log.showNotes", "true"}} {
 		cmd := exec.Command("git", append([]string{"-C", head}, args...)...)
@@ -222,7 +236,7 @@ func TestSandboxIgnoreGitLogStrictAndCompatibility(t *testing.T) {
 				}
 				if !tc.wantSubject {
 					for _, line := range strings.Split(res.Content, "\n") {
-						if !regexp.MustCompile(`^[0-9a-f]{40} [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:[0-9]{2}$`).MatchString(line) {
+						if !strictLine.MatchString(line) {
 							t.Fatalf("strict log = %q", res.Content)
 						}
 					}
