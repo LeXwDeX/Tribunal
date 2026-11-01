@@ -92,8 +92,14 @@ func TestHistoricalDiscussionContentReuse(t *testing.T) {
 					if tc.severity != "" && !strings.Contains(summary, "[P1]") {
 						t.Fatalf("missing current severity: %s", summary)
 					}
-				} else if strings.Contains(summary, "bad assignment") || strings.Contains(summary, "历史讨论内容") {
-					t.Fatalf("unchanged finding not reused: %s", summary)
+				} else {
+					if strings.Contains(summary, "历史讨论内容") {
+						t.Fatalf("unchanged finding was treated as changed content: %s", summary)
+					}
+					if !strings.Contains(summary, "### 行内问题（1）") ||
+						!strings.Contains(summary, "- **[P2]** bad assignment · `main.go`:2") {
+						t.Fatalf("inline issue index is missing: %s", summary)
+					}
 				}
 				stored, err := f.db.GetPublication(ctx, 42, 7, discussionPublishKind, oldPublication.PublishKey)
 				if err != nil || stored.ID != oldPublication.ID || stored.WorkflowID != oldWorkflow.ID || stored.GitlabID != oldPublication.GitlabID || stored.BodyHash != oldPublication.BodyHash {
