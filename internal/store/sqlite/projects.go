@@ -341,10 +341,10 @@ func (s *Store) DeleteProject(ctx context.Context, id int64) error {
 			SELECT 'review.publish:' || id FROM workflows WHERE project_id = ?
 		)`, []any{id}},
 		{`DELETE FROM jobs
-		  WHERE "key" = ? OR "key" LIKE ? OR "key" LIKE ? OR "key" LIKE ?
+		  WHERE "key" = ? OR "key" = ? OR "key" LIKE ? OR "key" LIKE ? OR "key" LIKE ?
 		     OR "key" = ? OR "key" LIKE ?
 		     OR "key" LIKE ? OR "key" LIKE ? OR "key" LIKE ?`,
-			[]any{fmt.Sprintf("workspace.onboard:%d", id),
+			[]any{fmt.Sprintf("workspace.onboard:%d", id), fmt.Sprintf("workspace.onboard:%d:retry", id),
 				fmt.Sprintf("review:%d:%%", id), fmt.Sprintf("review.cancel:%d:%%", id),
 				fmt.Sprintf("review.command:%d:%%", id),
 				fmt.Sprintf("ws:%d", id), fmt.Sprintf("ws:%d:%%", id),

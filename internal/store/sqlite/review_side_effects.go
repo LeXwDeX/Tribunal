@@ -154,7 +154,7 @@ func (s *Store) setReviewStatusTx(ctx context.Context, tx *sql.Tx, goal store.Re
 		}
 	}
 	attempt := goal.Attempt
-	if found && attempt == 0 {
+	if found && goal.Generation == existing.Generation && attempt == 0 {
 		attempt = existing.Attempt
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO review_status
