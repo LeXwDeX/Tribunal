@@ -271,7 +271,8 @@ func anthropicResponse(message *anthropic.Message, defaultModel string) (*Respon
 		Message:    out,
 		StopReason: stop,
 		Usage: Usage{
-			InputTokens:      message.Usage.InputTokens,
+			// Anthropic reports uncached input, cache reads and cache creation separately.
+			InputTokens:      message.Usage.InputTokens + message.Usage.CacheReadInputTokens + message.Usage.CacheCreationInputTokens,
 			OutputTokens:     message.Usage.OutputTokens,
 			CacheReadTokens:  message.Usage.CacheReadInputTokens,
 			CacheWriteTokens: message.Usage.CacheCreationInputTokens,

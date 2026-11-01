@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/google/uuid"
@@ -838,6 +839,13 @@ func TestRequestIDHeader(t *testing.T) {
 func TestWebhookSlowBodyBounded(t *testing.T) {
 	env := newTestEnv(t)
 	defer env.close()
+	created := env.register("42", testProjectTok, false, nil)
+	if created.status != http.StatusCreated {
+		t.Fatalf("register: %d %s", created.status, created.body)
+	}
+	webhookSecret := decodeMap(t, created.body)["webhook_secret"].(string)
+	eventUUID := uuid.NewString()
+	const partialBody = `{"secret":"slow-body-secret"`
 	addr := strings.TrimPrefix(env.server.URL, "http://")
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -849,14 +857,15 @@ func TestWebhookSlowBodyBounded(t *testing.T) {
 	}
 	requestHead := fmt.Sprintf(
 		"POST /webhooks/gitlab HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\n"+
-			"Content-Length: 100000\r\nX-Gitlab-Event: Push Hook\r\nX-Gitlab-Token: slow-token\r\n"+
-			"X-Gitlab-Event-UUID: %s\r\n\r\n{",
-		addr, uuid.NewString())
+			"Content-Length: 100000\r\nX-Gitlab-Event: Merge Request Hook\r\nX-Gitlab-Token: %s\r\n"+
+			"X-Gitlab-Event-UUID: %s\r\n\r\n%s",
+		addr, webhookSecret, eventUUID, partialBody)
 	if _, err := io.WriteString(conn, requestHead); err != nil {
 		t.Fatalf("write partial body: %v", err)
 	}
 	start := time.Now()
-	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodPost})
+	reader := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(reader, &http.Request{Method: http.MethodPost})
 	if err != nil {
 		t.Fatalf("read response: %v", err)
 	}
@@ -869,7 +878,7 @@ func TestWebhookSlowBodyBounded(t *testing.T) {
 	if elapsed > 3*time.Second {
 		t.Fatalf("slow body response exceeded bound: %v", elapsed)
 	}
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, body=%s", resp.StatusCode, data)
 	}
 	body := decodeMap(t, data)
@@ -879,6 +888,126 @@ func TestWebhookSlowBodyBounded(t *testing.T) {
 	if body["accepted"] != nil {
 		t.Fatalf("slow body was accepted: %s", data)
 	}
+	if body["request_id"] == "" || body["request_id"] != resp.Header.Get("X-Request-ID") {
+		t.Fatalf("request id mismatch: body=%v header=%q", body["request_id"], resp.Header.Get("X-Request-ID"))
+	}
+	if !resp.Close {
+		t.Fatal("slow body response did not close the connection")
+	}
+	if _, err := reader.ReadByte(); !errors.Is(err, io.EOF) {
+		t.Fatalf("slow body connection remained open: %v", err)
+	}
+	for _, sensitive := range []string{webhookSecret, partialBody, "slow-body-secret"} {
+		if strings.Contains(string(data), sensitive) || strings.Contains(env.logs.String(), sensitive) {
+			t.Fatalf("sensitive request data appeared in response or logs")
+		}
+	}
+
+	// A manual resend with the same UUID must not be treated as a duplicate.
+	resend := env.request(http.MethodPost, "/webhooks/gitlab", "", mrHTTPBody(42, 7, "open", ""), map[string]string{
+		"Content-Type":        "application/json",
+		"X-Gitlab-Event":      "Merge Request Hook",
+		"X-Gitlab-Token":      webhookSecret,
+		"X-Gitlab-Event-UUID": eventUUID,
+	})
+	if resend.status != http.StatusOK || decodeMap(t, resend.body)["accepted"] != true {
+		t.Fatalf("manual resend = %d %s", resend.status, resend.body)
+	}
+}
+
+func TestWebhookBodyReadFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		reader      io.Reader
+		wantStatus  int
+		wantIgnored string
+	}{
+		{"non_timeout", iotest.ErrReader(errors.New("read-error-secret")), http.StatusOK, "bad_request"},
+		{"network_non_timeout", iotest.ErrReader(&net.OpError{Op: "read", Err: errors.New("read-error-secret")}), http.StatusOK, "bad_request"},
+		{"timeout", iotest.ErrReader(fmt.Errorf("read-error-secret: %w", context.DeadlineExceeded)), http.StatusServiceUnavailable, "request_timeout"},
+		{"late_non_timeout", delayedWebhookReadError{}, http.StatusOK, "bad_request"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := &lockedBuffer{}
+			s := &Server{webhooks: panicWebhook{}, logger: newTestLogger(logs)}
+			body := io.MultiReader(strings.NewReader("partial-body-secret"), tc.reader)
+			req := httptest.NewRequest(http.MethodPost, "/webhooks/gitlab", body)
+			req.Header.Set("X-Gitlab-Token", "webhook-token-secret")
+			recorder := httptest.NewRecorder()
+			s.handleWebhook(recorder, req)
+			resp := recorder.Result()
+			defer resp.Body.Close()
+			data, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != tc.wantStatus || decodeMap(t, data)["ignored"] != tc.wantIgnored {
+				t.Fatalf("response = %d %s", resp.StatusCode, data)
+			}
+			if !req.Close || resp.Header.Get("Connection") != "close" {
+				t.Fatal("incomplete request did not close the connection")
+			}
+			for _, sensitive := range []string{"partial-body-secret", "read-error-secret", "webhook-token-secret"} {
+				if strings.Contains(string(data), sensitive) || strings.Contains(logs.String(), sensitive) {
+					t.Fatal("sensitive request data appeared in response or logs")
+				}
+			}
+		})
+	}
+}
+
+func TestWebhookHTTP2BodyTimeout(t *testing.T) {
+	logs := &lockedBuffer{}
+	s, err := New(Config{
+		AdminToken: testAdminToken,
+		Projects:   stubAdmin{},
+		Webhooks:   panicWebhook{},
+		Logger:     newTestLogger(logs),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewUnstartedServer(s.Handler())
+	ts.EnableHTTP2 = true
+	ts.StartTLS()
+	defer ts.Close()
+
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	defer writer.Close()
+	go func() { _, _ = io.WriteString(writer, `{"secret":"http2-body-secret"`) }()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ts.URL+"/webhooks/gitlab", reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.ContentLength = 100000
+	req.Header.Set("X-Gitlab-Token", "http2-token-secret")
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.ProtoMajor != 2 || resp.StatusCode != http.StatusServiceUnavailable || decodeMap(t, data)["ignored"] != "request_timeout" {
+		t.Fatalf("response = %s %d %s", resp.Proto, resp.StatusCode, data)
+	}
+	for _, sensitive := range []string{"http2-body-secret", "http2-token-secret"} {
+		if strings.Contains(string(data), sensitive) || strings.Contains(logs.String(), sensitive) {
+			t.Fatal("sensitive request data appeared in response or logs")
+		}
+	}
+}
+
+type delayedWebhookReadError struct{}
+
+func (delayedWebhookReadError) Read([]byte) (int, error) {
+	time.Sleep(webhookTimeout + 25*time.Millisecond)
+	return 0, errors.New("read-error-secret")
 }
 
 func TestWebhookPanicReturnsIgnored200(t *testing.T) {

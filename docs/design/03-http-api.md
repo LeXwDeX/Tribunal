@@ -68,7 +68,7 @@ Web 控制台的“重试加载更多”复用失败请求的同一 cursor，不
 4. `X-Gitlab-Event-UUID` 缺失或非法时忽略；同一项目内已存在于 `webhook_deliveries` → `200 {"ignored":"duplicate"}`。
 5. 按事件类型过滤（见下表），命中则入队，返回 `200 {"accepted":true,"job_id":"…"}`；否则 `200 {"ignored":"<reason>"}`。
 
-**除了认证失败（401）和数据库失败（503），一律返回 200**，避免 GitLab 因连续失败自动禁用 hook。输入错误、未登记项目、重复投递等重发也不会成功的情况都返回 200。整个处理要求在 1 秒内完成，不做任何 GitLab 或 LLM 调用。
+认证失败返回 401；请求体读取返回超时错误时返回 `503 {"ignored":"request_timeout","request_id":...}`，未读取完整的请求不会写投递记录或入队。存储处理失败返回 `503 {"ignored":"storage_error","request_id":...}`。请求体超限和其他非超时读取错误分别返回 `200 {"ignored":"body_too_large",...}` 和 `200 {"ignored":"bad_request",...}`；输入错误、未登记项目、重复投递等也返回 200。处理超时预算为 900 毫秒，不做任何 GitLab 或 LLM 调用；读取失败时保留读取期限并要求关闭连接，客户端断连时响应未必送达。
 
 | 事件 | 条件 | 入队 |
 |---|---|---|
@@ -81,7 +81,7 @@ Web 控制台的“重试加载更多”复用失败请求的同一 cursor，不
 
 `review.run` 的 job key：`review:<project_id>:<mr_iid>`。去重记录与入队在同一事务中提交，新 webhook 就地替换同 key、同 kind 的 queued 内容；running 内容不变，允许保留一个 queued 后继。取消任务使用独立 key `review.cancel:<project_id>:<mr_iid>`。工作流取消由评审处理器负责（见 05-flows.md F2）；webhook handler 本身不执行评审。
 
-Note Hook 先入队 `review.command`，由 worker 请求 GitLab 校验身份、MR 状态和权限后入队 run/cancel；这样 webhook handler 不等待网络调用。通过校验的 run 命令使用最新参数替换已有 queued run，保留 `full`、`profile` 和最新 `head_sha`；不覆盖 running 任务。`/review help` 和权限不足由 worker 各回复一条 GitLab note；回复正文以 `<!-- gitlab-ce-review:command-reply note=<note_id>` 隐藏 marker 开头，按源 note 幂等，重试时更新同一条回复。受理 run/cancel 时，入队事务记录源 note 的 eyes，终态由状态 worker 协调；help/拒绝不添加表情。Webhook 自身仍无网络调用，也会忽略机器人自己发出的 command-reply note。数据库失败返回 `503 {"ignored":"storage_error"}`，不会写入去重记录或假报 accepted。GitLab 不自动重试，但会在 hook 的「Recent events」里把这次投递记为失败，运维可用 Resend request 重发，同一事件 UUID 会被正常受理；连续失败可能触发 GitLab 自动停用 hook。
+Note Hook 先入队 `review.command`，由 worker 请求 GitLab 校验身份、MR 状态和权限后入队 run/cancel；这样 webhook handler 不等待网络调用。通过校验的 run 命令使用最新参数替换已有 queued run，保留 `full`、`profile` 和最新 `head_sha`；不覆盖 running 任务。`/review help` 和权限不足由 worker 各回复一条 GitLab note；回复正文以 `<!-- gitlab-ce-review:command-reply note=<note_id>` 隐藏 marker 开头，按源 note 幂等，重试时更新同一条回复。受理 run/cancel 时，入队事务记录源 note 的 eyes，终态由状态 worker 协调；help/拒绝不添加表情。Webhook 自身仍无网络调用，也会忽略机器人自己发出的 command-reply note。数据库失败返回 `503 {"ignored":"storage_error"}`，不会写入去重记录或假报 accepted。不得假定 GitLab 自动重试；记录仍可用且版本支持时可在「Recent events」手动重发。如果重发保留原有效事件 UUID、此前没有去重记录且认证和过滤通过，则可再次入队。连续失败可能使 hook 临时或永久停用，条件随版本和功能开关而异，见 [Webhook 失败与恢复](../operations.md#webhook-失败与恢复)。
 
 自动触发（`mr_open` / `mr_update`）在 worker 合并配置后做最终 Draft、标签和目标分支过滤。`allow_repo_config=true` 时，Draft 检查不在 webhook 做，避免 webhook 调用 GitLab；标签仍可先用项目设置快速过滤，仓库配置只能追加排除；目标分支条件不被仓库配置覆盖。手动命令不受这些自动过滤限制。
 
@@ -348,6 +348,8 @@ MCP、Skill、块绑定列表使用游标分页。Skill zip 上传已实现，�
 | `by_block` | `{block, runs, cost_micros, duration_samples, avg_duration_ms, p95_duration_ms, trend}`；按节点 `kind` 分组，包括没有 provider 的代码节点 |
 
 provider/块的 `runs` 是当前保存的已启动节点行数，每行只计一次，不是 LLM 调用次数，也不是重试次数。运行中、完成和失败节点只要保留 `started_at` 都可计入；从未启动的排队或跳过节点不计入。节点字段只反映最新一次尝试，不包含完整重试历史。总体/项目成本取 workflow 的持久化成本，provider/块成本取节点成本，不因多轮 LLM 调用重复累加。
+
+Anthropic 的输入 token 将未缓存输入、缓存读取和缓存创建各计一次；内部缓存读写字段是总输入的明细，不能再次相加。评审与节点的 `usage` 仍只含 `tokens_in`、`tokens_out` 和 `cost_micros`。评审 token 预算使用归一化后的输入和输出。成本使用配置的输入、输出单价，不按缓存读写分别计价，是估算而非供应方账单；未配置价格时估算为零。已保存的历史用量不会追溯回填。
 
 耗时仅计入 `started_at`、`finished_at` 都存在且间隔非负的记录；总体/项目使用工作流耗时，provider/块使用节点耗时。`duration_samples` 是有效配对数，无样本时平均/P95 均为 `null`；P95 取排序后第 `ceil(0.95 * 样本数)` 个值。所有 `trend` 均为稀疏序列，只返回有记录的日，不补零。数组按项目 ID、provider/块名称、日期升序返回，已统计的空数组为 `[]`。旧响应缺少新增字段时，界面显示不可用而不是零。
 
