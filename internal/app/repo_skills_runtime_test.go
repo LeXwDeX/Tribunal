@@ -238,6 +238,73 @@ func TestRepositorySkillRuntimeRecoveryRevalidatesGrant(t *testing.T) {
 	}
 }
 
+func TestRepositorySkillFailedPublicationRecovery(t *testing.T) {
+	for _, enabled := range []bool{true, false} {
+		name := "disabled"
+		if enabled {
+			name = "enabled"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			f, grant := repositoryRuntimeFixture(t, "")
+			f.defaults.PostFailureNote = enabled
+			f.service.reviewDefaults = f.defaults
+			f.publisher.reviewDefaults = f.defaults
+			f.service.agentRun = func(context.Context, agent.RunSpec) (*agent.RunResult, error) {
+				return nil, agent.ErrNoSubmit
+			}
+			if enabled {
+				f.gitlab.noteErr = errors.New("transient note failure")
+			}
+			job := f.seedReview(t, "repository-failed-note-"+name)
+			err := f.service.RunReview(ctx, job)
+			if enabled && (err == nil || IsPermanentJob(err)) || !enabled && err != nil {
+				t.Fatalf("RunReview = %v", err)
+			}
+			workflow, err := f.db.GetWorkflowByJob(ctx, job.ID)
+			if err != nil || workflow.Status != "failed" {
+				t.Fatalf("failed workflow = %+v, %v", workflow, err)
+			}
+			record, err := f.db.GetWorkflowDossier(ctx, workflow.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var dossier review.Dossier
+			if err := json.Unmarshal(record.Data, &dossier); err != nil {
+				t.Fatal(err)
+			}
+			provenance := dossier.RepositorySkillProvenance
+			if provenance == nil || provenance.Mode != "repository" || provenance.TargetSHA != f.head || provenance.GrantRevisions["code-review"] != grant.Revision {
+				t.Fatalf("repository provenance = %+v", provenance)
+			}
+			if enabled && workflow.PublicationState != store.WorkflowPublicationPending {
+				t.Fatalf("publication after transient failure = %q", workflow.PublicationState)
+			}
+			if !enabled {
+				// Simulate a crash before the disabled-note skip is persisted.
+				if err := f.db.SetWorkflowPublicationState(ctx, workflow.ID, store.WorkflowPublicationPending, ""); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f.gitlab.noteErr = nil
+			if err := f.service.PublishPending(ctx); err != nil {
+				t.Fatalf("PublishPending: %v", err)
+			}
+			workflow, err = f.db.GetWorkflow(ctx, workflow.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if enabled {
+				if workflow.PublicationState != store.WorkflowPublicationPublished || workflow.PublicationError != "" || len(f.gitlab.notes) != 1 || !strings.Contains(f.gitlab.notes[0].Body, "评审未完成") {
+					t.Fatalf("recovered publication = %+v, notes = %+v", workflow, f.gitlab.notes)
+				}
+			} else if workflow.PublicationState != store.WorkflowPublicationSkipped || workflow.PublicationError != "failure note disabled" || f.gitlab.noteCount() != 0 {
+				t.Fatalf("disabled publication = %+v, notes = %d", workflow, f.gitlab.noteCount())
+			}
+		})
+	}
+}
+
 func TestRepositorySkillPublicationRevalidatesTargetAndSnapshot(t *testing.T) {
 	for _, change := range []string{"manual-target", "manual-snapshot", "pending-target"} {
 		t.Run(change, func(t *testing.T) {

@@ -657,7 +657,9 @@ func (s *ReviewService) publishPendingItem(ctx context.Context, item store.Pendi
 			if unknown {
 				return false, errDiscussionUnknown
 			}
-			return rejected, nil
+			if rejected {
+				return true, nil
+			}
 		}
 		var dossier review.Dossier
 		if json.Unmarshal(record.Data, &dossier) != nil || !validPublicationPolicy(&dossier) {
