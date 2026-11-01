@@ -328,6 +328,7 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 		keyCounts[group.PublishKey]++
 	}
 	collision := false
+	contentMismatch := false
 	for i := range groups {
 		group := &groups[i]
 		if !group.Published() || !group.PositionOK {
@@ -363,6 +364,13 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 						conflict = true
 					}
 				}
+				if !conflict {
+					body, renderErr := review.RenderFinding(*group, review.FindingRenderOptions{ShowModelAttribution: cfg.Settings.ShowModelAttribution})
+					if renderErr != nil || publication.BodyHash == "" || publication.BodyHash != bodyHash(body) {
+						group.PositionOK = false
+						contentMismatch = true
+					}
+				}
 			}
 		}
 		if conflict {
@@ -372,6 +380,9 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 	}
 	if collision {
 		warnings = append(warnings, "部分问题的发布标识冲突，已保留在摘要中，未创建行内讨论。")
+	}
+	if contentMismatch {
+		warnings = append(warnings, "部分问题的历史讨论内容与当前内容不同或无法确认，当前问题已保留在摘要中，未修改历史讨论。")
 	}
 	for _, group := range groups {
 		if group.Published() && index.AmbiguousPath(group.Path) {
