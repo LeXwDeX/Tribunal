@@ -226,7 +226,8 @@ func TestSetReviewStatusFencesGenerationHeadAndTerminalState(t *testing.T) {
 
 func TestReviewStatusAppliedVersionIsFenced(t *testing.T) {
 	ctx := context.Background()
-	s := openTestStore(t, newFakeClock())
+	clock := newFakeClock()
+	s := openTestStore(t, clock)
 	mustProject(t, s, 42)
 	head := reviewHead("a")
 	result, err := s.EnqueueReviewLatest(ctx, store.ReviewCommand{
@@ -265,6 +266,72 @@ func TestReviewStatusAppliedVersionIsFenced(t *testing.T) {
 	}
 	if again := mustReviewStatus(t, s, 42, 7); again.NoteID != 901 || again.BodyHash != "body-hash" {
 		t.Fatalf("idempotent applied write cleared metadata: %+v", again)
+	}
+	clock.Advance(time.Hour)
+	if err := s.MarkReviewStatusApplied(ctx, 42, 7, int64(running.Version), 902, "new-hash", ""); err != nil {
+		t.Fatal(err)
+	}
+	if refreshed := mustReviewStatus(t, s, 42, 7); refreshed.NoteID != 902 || refreshed.BodyHash != "new-hash" || !refreshed.UpdatedAt.Equal(status.UpdatedAt) {
+		t.Fatalf("same-version receipt was not refreshed without changing lifecycle time: %+v", refreshed)
+	}
+}
+
+func TestReviewStatusAttemptDoesNotCarryIntoNewGeneration(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t, newFakeClock())
+	mustProject(t, s, 42)
+	head := reviewHead("a")
+	first, err := s.EnqueueReviewLatest(ctx, store.ReviewCommand{ProjectID: 42, MRIID: 7, HeadSHA: head})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := s.SetReviewStatus(ctx, store.ReviewStatusGoal{ProjectID: 42, MRIID: 7, Generation: first.Generation, Attempt: 3, HeadSHA: head, State: store.ReviewStatusPass}); err != nil || !ok {
+		t.Fatalf("first: %v %v", ok, err)
+	}
+	second, err := s.EnqueueReviewLatest(ctx, store.ReviewCommand{ProjectID: 42, MRIID: 7, HeadSHA: head})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := mustReviewStatus(t, s, 42, 7)
+	if row.Attempt != 0 {
+		t.Fatalf("new generation attempt = %d, want 0", row.Attempt)
+	}
+	if ok, err := s.SetReviewStatus(ctx, store.ReviewStatusGoal{ProjectID: 42, MRIID: 7, Generation: second.Generation, Attempt: 1, HeadSHA: head, State: store.ReviewStatusRunning}); err != nil || !ok {
+		t.Fatalf("new generation attempt 1: %v %v", ok, err)
+	}
+}
+
+func TestProjectReactionPagesIncludeMultipleNotesOnSameMR(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	s := openTestStore(t, clock)
+	mustProject(t, s, 42)
+	r, err := s.EnqueueReviewLatest(ctx, store.ReviewCommand{ProjectID: 42, MRIID: 7, HeadSHA: reviewHead("a")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for note := int64(1); note <= 101; note++ {
+		if ok, err := s.SetReviewReaction(ctx, store.ReviewReactionGoal{ProjectID: 42, MRIID: 7, NoteID: note, Generation: r.Generation, Desired: store.ReviewReactionEyes}); err != nil || !ok {
+			t.Fatalf("note %d: %v %v", note, ok, err)
+		}
+	}
+	for _, load := range []func(int64, int64) ([]store.ReviewReaction, error){
+		func(mr, note int64) ([]store.ReviewReaction, error) {
+			return s.ListProjectPendingReviewReactions(ctx, 42, mr, note)
+		},
+		func(mr, note int64) ([]store.ReviewReaction, error) {
+			return s.ListProjectReviewReactionsByDesired(ctx, 42, store.ReviewReactionEyes, clock.Now().Add(time.Hour), mr, note)
+		},
+	} {
+		first, err := load(0, 0)
+		if err != nil || len(first) != 100 {
+			t.Fatalf("first page: %d %v", len(first), err)
+		}
+		last := first[len(first)-1]
+		second, err := load(last.MRIID, last.NoteID)
+		if err != nil || len(second) != 1 || second[0].NoteID != 101 {
+			t.Fatalf("second page: %+v %v", second, err)
+		}
 	}
 }
 

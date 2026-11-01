@@ -154,7 +154,7 @@ func (s *Store) setReviewStatusTx(ctx context.Context, tx *sql.Tx, goal store.Re
 		}
 	}
 	attempt := goal.Attempt
-	if found && attempt == 0 {
+	if found && goal.Generation == existing.Generation && attempt == 0 {
 		attempt = existing.Attempt
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO review_status
@@ -476,10 +476,9 @@ func (s *Store) MarkReviewStatusApplied(ctx context.Context, projectID, mrIID in
 		SET applied_version = version,
 		    note_id = COALESCE(NULLIF(?, 0), note_id),
 		    body_hash = COALESCE(NULLIF(?, ''), body_hash),
-		    last_error = ?, updated_at = ?
-		WHERE project_id = ? AND mr_iid = ? AND version = ? AND applied_version < ?`,
-		noteID, bodyHash, lastError, formatTime(s.now().UTC()),
-		projectID, mrIID, version, version)
+		    last_error = ?
+		WHERE project_id = ? AND mr_iid = ? AND version = ?`,
+		noteID, bodyHash, lastError, projectID, mrIID, version)
 	if err != nil {
 		return fmt.Errorf("sqlite: mark review status applied: %w", err)
 	}
@@ -556,6 +555,14 @@ func (s *Store) ListPendingReviewStatuses(ctx context.Context) ([]store.ReviewSt
 		WHERE applied_version < version ORDER BY updated_at, project_id, mr_iid LIMIT ?`, maxReviewSideEffectList)
 }
 
+// ListReviewStatusesForVerification returns a bounded page of pending or
+// successfully applied statuses. Terminal errors remain settled.
+func (s *Store) ListReviewStatusesForVerification(ctx context.Context, projectID, afterMRIID int64) ([]store.ReviewStatus, error) {
+	return s.listReviewStatuses(ctx, `SELECT `+reviewStatusColumns+` FROM review_status
+		WHERE project_id = ? AND mr_iid > ? AND (applied_version < version OR last_error = '')
+		ORDER BY mr_iid LIMIT ?`, projectID, afterMRIID, maxReviewSideEffectList)
+}
+
 // ListReviewStatusesByState returns bounded rows in the given states, oldest
 // first, for reconciliation.
 func (s *Store) ListReviewStatusesByState(ctx context.Context, states []string, updatedBefore time.Time) ([]store.ReviewStatus, error) {
@@ -575,6 +582,27 @@ func (s *Store) ListReviewStatusesByState(ctx context.Context, states []string, 
 	return s.listReviewStatuses(ctx, `SELECT `+reviewStatusColumns+` FROM review_status
 		WHERE state IN (`+strings.Join(placeholders, ", ")+`)
 		  AND updated_at < ? ORDER BY updated_at, project_id, mr_iid LIMIT ?`, args...)
+}
+
+// ListProjectReviewStatusesByState pages recovery candidates by MR, including
+// rows that remain active and therefore cannot yet be settled.
+func (s *Store) ListProjectReviewStatusesByState(ctx context.Context, projectID int64, states []string, updatedBefore time.Time, afterMR int64) ([]store.ReviewStatus, error) {
+	if len(states) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(states))
+	args := []any{projectID, afterMR}
+	for i, state := range states {
+		if !validReviewStatusState(state) {
+			return nil, fmt.Errorf("sqlite: invalid review status state %q", state)
+		}
+		placeholders[i] = "?"
+		args = append(args, state)
+	}
+	args = append(args, formatTime(updatedBefore), maxReviewSideEffectList)
+	return s.listReviewStatuses(ctx, `SELECT `+reviewStatusColumns+` FROM review_status
+		WHERE project_id = ? AND mr_iid > ? AND state IN (`+strings.Join(placeholders, ", ")+`)
+		AND updated_at < ? ORDER BY mr_iid LIMIT ?`, args...)
 }
 
 func (s *Store) listReviewStatuses(ctx context.Context, query string, args ...any) ([]store.ReviewStatus, error) {
@@ -614,6 +642,21 @@ func (s *Store) ListReviewReactionsByDesired(ctx context.Context, desired string
 		WHERE desired = ? AND updated_at < ?
 		ORDER BY updated_at, project_id, mr_iid, note_id LIMIT ?`,
 		desired, formatTime(updatedBefore), maxReviewSideEffectList)
+}
+
+func (s *Store) ListProjectPendingReviewReactions(ctx context.Context, projectID, afterMR, afterNote int64) ([]store.ReviewReaction, error) {
+	return s.listReviewReactions(ctx, `SELECT `+reviewReactionColumns+` FROM review_reactions
+		WHERE project_id = ? AND (mr_iid > ? OR (mr_iid = ? AND note_id > ?)) AND applied_version < version
+		ORDER BY mr_iid, note_id LIMIT ?`, projectID, afterMR, afterMR, afterNote, maxReviewSideEffectList)
+}
+
+func (s *Store) ListProjectReviewReactionsByDesired(ctx context.Context, projectID int64, desired string, updatedBefore time.Time, afterMR, afterNote int64) ([]store.ReviewReaction, error) {
+	if !validReviewReaction(desired) {
+		return nil, fmt.Errorf("sqlite: invalid review reaction %q", desired)
+	}
+	return s.listReviewReactions(ctx, `SELECT `+reviewReactionColumns+` FROM review_reactions
+		WHERE project_id = ? AND (mr_iid > ? OR (mr_iid = ? AND note_id > ?)) AND desired = ? AND updated_at < ?
+		ORDER BY mr_iid, note_id LIMIT ?`, projectID, afterMR, afterMR, afterNote, desired, formatTime(updatedBefore), maxReviewSideEffectList)
 }
 
 func (s *Store) listReviewReactions(ctx context.Context, query string, args ...any) ([]store.ReviewReaction, error) {
