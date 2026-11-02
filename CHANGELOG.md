@@ -8,7 +8,7 @@ v1.2.0 尚未打 tag；本段记录尚未发布的新改动。`[1.2.0]` 段仅�
 
 ### 变更
 
-- **可访问性修正**：暗色主题的强调色对比度从 4.1:1 提升到 5.0:1；执行图节点按钮的可访问名称加入可见的 provider 和重试次数。亮色主题和 390 宽度页面检查通过（[#195](https://github.com/LeXwDeX/Tribunal/issues/195)）。
+- **可访问性修正**：暗色主题的强调色对比度从 4.1:1 提升到 5.0:1；执行图节点按钮的可访问名称直接取自可见文本，其中包含 provider 和重试次数，不再因附加标签与可见文字不一致。亮色主题和 390 宽度页面检查通过（[#195](https://github.com/LeXwDeX/Tribunal/issues/195)）。
 - **CI 失败日志证据**：verify 节点读取失败 job 的有限日志片段，每个评审最多 3 个 job，单个日志最多 64 KiB，渲染到 prompt 时每个 job 保留头尾各约 2 KiB；片段会截断并脱敏常见 token、私钥、URL 凭据和 CI 变量。读取失败时评审继续，不伪造证据；成功和允许失败的 job 不拉取。非空 ignore policy 下不保存日志片段（默认 ignore 非空，因此默认不注入），避免日志绕过 ignore 边界。日志片段会改变 dossier 内容和发布指纹（[#192](https://github.com/LeXwDeX/Tribunal/issues/192)）。
 - **总览告警与统计说明**：总览按统计、告警、运行中和最近评审排列，空状态更紧凑；告警标题旁列出检查范围，统计说明明确裁决口径和 provider 价格配置要求，零成本不能证明已配置价格（[#146](https://github.com/LeXwDeX/Tribunal/issues/146)）。
 - **仓库 Skill 授权与运行时**：新增不可回退迁移 `0021_repository_skill_authorizations`，建立独立授权表；追加不可回退迁移 `0023_repository_skill_snapshot_sha256`，非空授权同时记录管理员核对的完整目标 commit SHA 和过滤后 Skill 快照的 SHA-256。快照按相对 `.claude/skills` 的路径字节排序，逐文件包含路径长度、路径、内容长度和内容；空文件、二进制和名称变更都参与计算，错误信息不输出文件内容。授权写入必须重新发现同一目标 commit 的过滤结果并核对调用者提供的目标 SHA 与快照 hash；ignore 放宽、内容或名称变化会返回冲突且不覆盖旧记录。已有块绑定不会自动转成仓库 Skill 授权；目标分支更新不会使旧授权覆盖新 commit。`0021` 迁移保留的非空授权没有快照 hash，不能用于执行；管理员仍可读取并撤销，须重新发现后授权。仓库 Skill 的发现和授权接口已经注册，评审运行时只接受当前目标分支 tip 等于授权 commit、且过滤快照 hash 一致的授权；分支移动、快照变化或授权撤销都会 fail closed，需重新授权后才能执行或重发。项目设置“允许仓库内 Skill”开启但没有任何非空授权时不会加载仓库 Skill。升级前备份与未发布草案的兼容限制见[仓库 Skill 授权迁移](docs/operations.md#仓库-skill-授权迁移unreleased)（[#163](https://github.com/LeXwDeX/Tribunal/issues/163)）。
