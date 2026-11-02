@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type FocusEvent } from 'react'
 import { useInfiniteQuery } from '@tanstack/react-query'
 import type { Page } from '../api/types'
 
@@ -72,6 +72,24 @@ export function usePaginated<T>(
     isFetching: query.isFetching,
     isRefetchError: query.isRefetchError,
     isFetchNextPageError: query.isFetchNextPageError,
+  }
+}
+
+export function useLoadMoreFocus(hasNextPage: boolean) {
+  const selectRef = useRef<HTMLSelectElement>(null)
+  const hadFocus = useRef(false)
+  useLayoutEffect(() => {
+    if (hasNextPage || !hadFocus.current) return
+    hadFocus.current = false
+    if (document.activeElement !== document.body) return
+    const select = selectRef.current
+    if (select && !select.disabled) select.focus()
+    else select?.closest('[role="toolbar"]')?.querySelector<HTMLElement>('button:not(:disabled)')?.focus()
+  }, [hasNextPage])
+  return {
+    selectRef,
+    onFocus: () => { hadFocus.current = true },
+    onBlur: (event: FocusEvent<HTMLButtonElement>) => { if (event.relatedTarget) hadFocus.current = false },
   }
 }
 
