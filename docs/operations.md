@@ -1232,12 +1232,14 @@ tribunalctl projects retry-onboarding <项目 ID>
 
 ### 准备
 
-- `TRIBUNAL_URL`：实例地址。
+- `TRIBUNAL_URL`：实例地址，必须以 `http://` 或 `https://` 开头，不能带查询、片段或 userinfo。
 - `TRIBUNAL_ADMIN_TOKEN`：用于注册项目和授予项目权限。
 - `TRIBUNAL_USER_TOKEN`：用于触发评审和读取结果；该用户必须对项目有 `manage` 权限。
-- `GITLAB_TOKEN`：仅注册尚未登记的项目时需要。
-- `PROJECTS`、`MR_IIDS`：空格分隔、顺序对应。
-- 可选：`USER_ID`（默认 `59`）、`POLL_INTERVAL`（默认 `5` 秒）、`TIMEOUT`（默认 `900` 秒）。
+- `GITLAB_TOKEN`：仅注册尚未登记的项目时需要；注册请求体经权限 600 的临时文件传给 curl，不进进程参数。
+- `PROJECTS`、`MR_IIDS`：单行、空格分隔、顺序对应；MR IID 必须是正整数，项目/MR 对不能重复。
+- 可选：`GRANT_MANAGE`（默认 `0`）、`USER_ID`、`POLL_INTERVAL`（默认 `5` 秒）、`TIMEOUT`（默认 `900` 秒，仅轮询阶段）、`HTTP_TIMEOUT`（默认 `30` 秒）、`HTTP_RETRIES`（默认 `3` 次，仅 GET）。
+- `GRANT_MANAGE=1` 时脚本给 `USER_ID` 授予每个项目的 `manage`。`USER_ID` 未设置时从 `TRIBUNAL_USER_TOKEN` 的 `/api/v1/me` 解析；解析结果必须是正整数，失败需显式设置。不能用 admin token 解析，bootstrap token 没有用户 ID。默认不修改任何授权；如果 token 用户已有 `manage`，不需要开启。
+- 脚本用 stdin 把 bearer token 传给 curl，不放进进程参数；未登记项目的注册体经权限 600 的临时文件传递，注册时 `auto_webhook` 固定为 `false`，需要 webhook 时另行配置。不要在有不可信用户的共享主机上运行，也不要开启 `bash -x`；xtrace 会展开 token 变量。
 
 ### 运行
 
@@ -1248,14 +1250,26 @@ PROJECTS="group/project-a group/project-b" MR_IIDS="1 2" \
 bash scripts/loadtest.sh > loadtest.csv
 ```
 
-脚本把每次评审的 `project_id,mr_iid,status,verdict,duration_ms,tokens_in,tokens_out,cost_micros` 写到 stdout，并在 stderr 输出 `reviews/failed/p50/p95/tokens/cost` 汇总。`cost_micros` 依赖 provider 的 `price` 配置；未配置时始终为 0。
+脚本在触发前读取每个 MR 的现有评审 ID 作为基线，触发后只统计基线之外的最新评审，避免同一秒旧评审或时钟偏差被计入。`duration_ms` 是执行耗时（workflow 开始执行到完成），不包含 workflow 创建后等待 worker 的入口排队；provider 限流发生在执行内，会计入。
+
+stdout 是 CSV：`project_id,mr_iid,status,verdict,duration_ms,tokens_in,tokens_out,cost_micros`。stderr 汇总：
+
+```text
+reviews=... completed=... failed=... cancelled=... triggers_failed=... failure_rate=...% p50_ms=... p95_ms=... wall_s=... reviews_per_sec=... tokens_in=... tokens_out=... cost_micros=...
+```
+
+`failure_rate` 只统计已触发评审中的 `failed` 和 `cancelled`；触发失败单独看 `triggers_failed`。`wall_s` 从脚本开始（注册、授权、基线之前）到结束，`reviews_per_sec` 使用同一墙钟。`p50` 对偶数样本取较低的中位数，`p95` 使用 nearest-rank 上取整。有 `failed`、`cancelled` 或触发失败时脚本返回 1，并保留已收集的部分结果。`cost_micros` 依赖 provider 的 `price` 配置；未配置时始终为 0。
+
+脚本自测：`bash scripts/loadtest_test.sh`，使用本地 mock API 覆盖正常、重试、取消、失败、重复输入、基线、授权目标用户、项目列表失败和触发失败；需要 Python 3。CI 的 `go` job 会运行该测试。
 
 ### 结果解读
 
-- 延迟是 workflow 创建到完成的墙钟时间，包含排队和 provider 限流。
+- 延迟是 workflow 开始执行到完成的耗时；入口排队不在 `duration_ms` 内，需要结合 `wall_s` 和触发时间判断。
 - 真实 10 项目、每个 MR 840 行 diff 的一次观测：10/10 完成，p50 22.2 秒，p95 27.2 秒，输入 627,034 tokens，输出 32,927 tokens，成本约 $0.2055（占位价格）。
-- 前 6 个评审立即启动，其余等待 `providers.<name>.max_concurrency`；没有观察到 SQLite 锁错误、工作区锁错误或任务丢失。
+- 示例配置的 provider 并发为 4，前 4 个评审立即启动，其余等待 `providers.<name>.max_concurrency`；没有观察到 SQLite 锁错误、工作区锁错误或任务丢失。
 - 这是一次环境观测，不是容量承诺；provider、diff 大小、网络和 GitLab 限流都会改变结果。
+- SQLite 锁等待与工作区锁等待没有单独指标；当前只能通过错误和耗时观察。
+- 2026-11-02 用复审后的脚本重试 5 项目时，5 个触发均返回 `gitlab_rejected`（GitLab 401）；项目 token 失效，脚本按预期返回 1 并列出失败项。修复项目 token 后需重跑；mock 测试不能替代真实环境结论。
 
 ## 12. 验证状态
 
