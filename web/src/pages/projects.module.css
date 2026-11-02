@@ -98,6 +98,14 @@
   font-size: 20px;
 }
 
+.overviewCards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+  align-items: start;
+  gap: 16px;
+  min-width: 0;
+}
+
 /* 工作区状态四格 */
 .statusTiles {
   display: grid;
