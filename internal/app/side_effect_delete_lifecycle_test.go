@@ -136,8 +136,8 @@ type reconcileListBarrier struct {
 	barrier *enqueueBarrier
 }
 
-func (s *reconcileListBarrier) ListPendingReviewStatuses(ctx context.Context) ([]store.ReviewStatus, error) {
-	rows, err := s.ReviewStore.ListPendingReviewStatuses(ctx)
+func (s *reconcileListBarrier) ListReviewStatusesForVerification(ctx context.Context, projectID, afterMRIID int64) ([]store.ReviewStatus, error) {
+	rows, err := s.ReviewStore.ListReviewStatusesForVerification(ctx, projectID, afterMRIID)
 	if err == nil {
 		err = s.barrier.wait(ctx)
 	}

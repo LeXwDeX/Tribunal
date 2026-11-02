@@ -167,11 +167,11 @@ type stateListStore struct {
 	reactions []store.ReviewReaction
 }
 
-func (s *stateListStore) ListReviewStatusesByState(context.Context, []string, time.Time) ([]store.ReviewStatus, error) {
+func (s *stateListStore) ListProjectReviewStatusesByState(context.Context, int64, []string, time.Time, int64) ([]store.ReviewStatus, error) {
 	return append([]store.ReviewStatus(nil), s.statuses...), nil
 }
 
-func (s *stateListStore) ListReviewReactionsByDesired(context.Context, string, time.Time) ([]store.ReviewReaction, error) {
+func (s *stateListStore) ListProjectReviewReactionsByDesired(context.Context, int64, string, time.Time, int64, int64) ([]store.ReviewReaction, error) {
 	return append([]store.ReviewReaction(nil), s.reactions...), nil
 }
 

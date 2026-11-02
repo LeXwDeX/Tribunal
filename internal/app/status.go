@@ -78,6 +78,7 @@ type statusReporter struct {
 	gitlab   statusGitLab
 	logger   *slog.Logger
 	outbound func(context.Context, func(context.Context) error) error
+	durable  bool
 }
 
 func newStatusReporter(api statusGitLab, logger *slog.Logger) *statusReporter {
@@ -131,8 +132,8 @@ func (r *statusReporter) writeStatus(ctx context.Context, projectID, mrIID int64
 		}
 		// A queued acknowledgement may race a worker that already started the
 		// review. Never move a visible status backwards.
-		if !statusMayRegress(note.Body, update.State) {
-			return note.ID, hash, nil
+		if !r.durable && !statusMayRegress(note.Body, update.State) {
+			return note.ID, sha256Hex(note.Body), nil
 		}
 		err := r.send(ctx, func(ctx context.Context) error {
 			return r.gitlab.UpdateMRNote(ctx, token, projectID, mrIID, note.ID, body)
