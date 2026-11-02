@@ -243,10 +243,14 @@ describe('execution graph', () => {
     }
   })
 
-  it('includes the visible provider and attempt in the node accessible name', () => {
+  it('uses all visible node text as the accessible name', () => {
     render(<ExecutionGraph nodes={[{ id: 'retry', kind: 'verify', status: 'running', attempt: 2, provider: 'primary' }]} edges={[]} onSelect={() => {}} />)
-    const node = screen.getByRole('button', { name: /retry.*第 2 次.*primary/ })
-    expect(node).not.toHaveAttribute('aria-label')
+    expect(screen.getByRole('button', { name: /retry/ })).toHaveAccessibleName('retry 运行中 verify 第 2 次 · primary')
+  })
+
+  it('includes the provider placeholder in the accessible name', () => {
+    render(<ExecutionGraph nodes={[{ id: 'plain', kind: 'plan', status: 'pending', attempt: 1, provider: '' }]} edges={[]} onSelect={() => {}} />)
+    expect(screen.getByRole('button', { name: /plain/ })).toHaveAccessibleName('plain 排队中 plan —')
   })
 
   it('keeps nodes keyboard focusable and highlights their edges on hover and focus', async () => {
