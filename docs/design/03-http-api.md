@@ -194,11 +194,12 @@ POST /api/v1/projects
   "profile": "deep",
   "trigger": "mr_update",
   "status": "completed",
+  "usage_incomplete": false,
   "verdict": "BLOCKING",
   "access": "manage",
   "publication_state": "published",
   "nodes": [
-    { "id": "plan", "kind": "plan", "status": "completed", "provider": "claude", "duration_ms": 8120 },
+    { "id": "plan", "kind": "plan", "status": "completed", "provider": "claude", "duration_ms": 8120, "usage_incomplete": false },
     { "id": "review.std.p1", "kind": "review.standards", "status": "completed", "provider": "claude" },
     { "id": "verify.f7", "kind": "verify", "status": "completed", "provider": "gpt" }
   ],
@@ -235,6 +236,25 @@ SSE 事件（`event:` 字段）：`node`（`{id, status, attempt}`）、`finding
 `GET /api/v1/reviews` 的 `publication_state` 只接受 `pending`、`published`、`skipped`、`failed`，其他值返回 `400`；筛选在分页前应用。`publication_state` 独立于 `status`，取值为 `pending`、`published`、`skipped`、`failed`。`pending` 表示评审执行已结束但 GitLab 发布尚未完成，可在重启或手动重试后继续；`published` 表示汇总评论/失败摘要已成功写入；`skipped` 表示 stale（head、配置或 prompt 变化）、取消/被新代次替换，或关闭 failure note，不会自动重发；`failed` 是永久发布失败，需要手动 republish。`publication_error` 是有界、脱敏的失败或跳过原因，不含上游响应正文或凭据。发布状态与 GitLab commit status 不同：BLOCKING 的 `commit_status=failed` 是评审结论，不是发布失败；只有 PASS 会写 success，INCOMPLETE 也不会写 success。没有 dossier 的工作流和旧数据不返回 `publication_state`；界面把缺失值显示为“不表示发布成功”，不能当作 published。
 
 图响应为 `{nodes, edges}`。节点包含 `id`、`kind`、`status`、`depends_on`，以及可选的 `provider`、`attempt`；边为 `{from, to}`。节点 ID 允许点号，必须作为完整路径参数编码，不能按点号拆分。节点详情直接返回对象，不增加 `node` 包装层。
+
+工作流详情和列表每项的顶层，以及详情/列表/图中的每个节点和节点详情，都有布尔值 `usage_incomplete`。`true` 表示检测到用量缺失或无法精确表示；`false` 只表示未检测到，特别是迁移前的历史行默认 false，不能证明用量完整。它不嵌入 `usage`。迁移与回退限制见[数据模型](02-data-model.md)及[运维说明](../operations.md#用量完整性与审计升级unreleased)。
+
+#### 节点调用审计格式
+
+`GET /api/v1/reviews/{wf_id}/nodes/{node_id}/calls` 返回 `{calls, next_cursor}`。项目 `read` 可读不带 payload 的列表；`include_payload=true` 需要项目 `manage`。默认不返回 `request`、`response`。所有调用方均不再收到顶层 `request_id`，包括历史行；使用本地 `id` 关联调用。正在执行的 provider 接口仍可使用其响应 ID，但它不写入新的审计行。
+
+启用 `include_payload=true` 时，存在的 `request` 和 `response` 分别是 JSON 对象。新记录各自带 `"_format":"audit_metadata_v1"`，例如：
+
+```json
+{
+  "request": {"_format":"audit_metadata_v1", "messages":1, "text_parts":1, "tool_calls":0, "tool_results":0, "reasoning_parts":0},
+  "response": {"_format":"audit_metadata_v1", "stop_reason":"end_turn", "usage":{"input_tokens":11,"output_tokens":7,"cache_read_tokens":0,"cache_write_tokens":0,"reasoning_tokens":0}, "text_parts":1, "tool_calls":0, "tool_results":0, "reasoning_parts":0}
+}
+```
+
+新记录只包含结构计数、允许的请求选项、固定 stop reason 和 usage，不含 prompt、响应正文、工具参数/输出、推理内容、上游 ID 或错误原文。响应可因请求失败而缺失；只返回已知用量的响应也有格式标记。记录器按 agent 的停止原因和调用批次检查预分类 `error_kind=unsafe_model_response`，计入错误，但不改变实际拒绝和重试策略，也不代表节点最终状态。
+
+**兼容契约：**没有 `_format` 的历史 payload 按存储原样返回；它可能是旧 `llm.Request`/`Response`（其中 request 的 `messages` 是数组），也可能是早期未标记的元数据（`messages` 是数字）或截断摘要。历史响应、部分 payload 或缺失 payload 有时无法单独判别，客户端应保留 unknown 分支，不得把未标记数据一律解析为某一种格式。版本和请求、响应应分别判断；同一列表可能混合各类历史和新格式。不能按旧类型把新 `messages` 当数组；未知未来版本也不应猜测。`include_payload` 可能读取含 prompt、响应正文或上游 ID 的历史数据，管理权限不等于已脱敏，禁止把它们写入普通日志。历史数据库和备份未被清洗。
 
 Finding 始终返回 `annotation`：`""` 为未标注，`valid` 为有效，`invalid` 为无效，`uncertain` 为未确定。非空时附 `annotated_by`（认证用户名）和 `annotated_at`（服务端 RFC 3339 时间）。标注 PUT 仅接收 `{"annotation":"valid"}` 这样的单字段请求；缺失、`null`、非法值、未知字段或非法 JSON 返回 `400`，不属于所选 workflow 的 finding 返回 `404`。只有项目 `read` 的账号写入、其他项目或无项目 grant 返回 403/404；浏览器会话缺少 CSRF 返回 `403`。发送空字符串可清除结论及操作者/时间。支持更正，采用最后一次成功写入；不改变 finding 处置、发布或 workflow verdict。相同 ID 的重新发布保留标注，其他 workflow 不继承标注。
 

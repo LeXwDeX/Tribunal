@@ -234,7 +234,12 @@ func (s *FeedbackService) collectDiscussion(ctx context.Context, token string, p
 	// of the published finding.
 	publisherNote := notes[0]
 	findingID := ""
-	if finding := s.publicationFinding(ctx, workflow, publication); finding != nil {
+	finding, err := s.publicationFinding(ctx, workflow, publication)
+	if err != nil {
+		s.logger.Warn("feedback finding lookup failed or is ambiguous", "publication_id", publication.ID)
+		return
+	}
+	if finding != nil {
 		findingID = finding.ID
 	}
 	resolved := false
@@ -266,23 +271,27 @@ func (s *FeedbackService) collectDiscussion(ctx context.Context, token string, p
 // publicationFinding resolves the exact persisted finding a discussion
 // publication announced. The workflow, project and merge request must all
 // agree, so a publish key reused by another review cannot steal a signal.
-func (s *FeedbackService) publicationFinding(ctx context.Context, workflow store.Workflow, publication store.Publication) *store.Finding {
+func (s *FeedbackService) publicationFinding(ctx context.Context, workflow store.Workflow, publication store.Publication) (*store.Finding, error) {
 	if publication.PublishKey == "" || publication.WorkflowID != workflow.ID {
-		return nil
+		return nil, nil
 	}
 	if publication.ProjectID != workflow.ProjectID || workflow.MRIID == nil || publication.MRIID != *workflow.MRIID {
-		return nil
+		return nil, nil
 	}
 	findings, err := s.store.ListFindings(ctx, store.FindingFilter{WorkflowID: workflow.ID})
 	if err != nil {
-		return nil
+		return nil, err
 	}
+	var matched *store.Finding
 	for i := range findings {
 		if findings[i].PublishKey == publication.PublishKey {
-			return &findings[i]
+			if matched != nil {
+				return nil, errors.New("ambiguous publication finding")
+			}
+			matched = &findings[i]
 		}
 	}
-	return nil
+	return matched, nil
 }
 
 func (s *FeedbackService) collectNoteAwards(ctx context.Context, token string, publication store.Publication, noteID int64, findingID string) {
@@ -347,8 +356,8 @@ func (s *FeedbackService) resolveSignal(ctx context.Context, token string, proje
 	if repo.ValidateSHA(workflow.HeadSHA) != nil || repo.ValidateSHA(mr.SHA) != nil {
 		return ""
 	}
-	finding := s.publicationFinding(ctx, workflow, publication)
-	if finding == nil || finding.Path == "" || finding.Line == nil || *finding.Line <= 0 {
+	finding, err := s.publicationFinding(ctx, workflow, publication)
+	if err != nil || finding == nil || finding.Path == "" || finding.Line == nil || *finding.Line <= 0 {
 		return ""
 	}
 	// Old-side lines belong to the base revision, which is not the published

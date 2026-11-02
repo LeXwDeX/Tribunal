@@ -347,15 +347,16 @@ func writeWorkflowTx(ctx context.Context, tx *sql.Tx, wfID string, wf dag.Workfl
 		_, err := tx.ExecContext(ctx, `INSERT INTO workflows
 			(id, kind, project_id, mr_iid, head_sha, base_sha, fingerprint, profile,
 			 trigger, triggered_by, status, graph_rev, extends_used, verdict,
-			 cancel_reason, error, tokens_in, tokens_out, cost_micros, created_at,
-			 started_at, finished_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 cancel_reason, error, tokens_in, tokens_out, cost_micros,
+			 usage_incomplete, created_at, started_at, finished_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			wfID, meta.kind, meta.projectID, nullableInt(meta.mrIID),
 			nullString(meta.headSHA), nullString(meta.baseSHA),
 			nullString(meta.fingerprint), nullString(meta.profile),
 			meta.trigger, nullableInt(meta.triggeredBy), string(wf.Status), wf.Revision,
 			wf.ExtendsUsed, nullString(wf.CancelReason), nullString(wf.Error),
 			wf.Usage.InputTokens, wf.Usage.OutputTokens, wf.Usage.CostMicros,
+			boolInt(wf.UsageIncomplete),
 			formatTime(wf.CreatedAt), nullableTime(nonZeroTime(wf.StartedAt)),
 			nullableTime(nonZeroTime(wf.FinishedAt)))
 		if err != nil {
@@ -369,11 +370,13 @@ func writeWorkflowTx(ctx context.Context, tx *sql.Tx, wfID string, wf dag.Workfl
 
 	res, err := tx.ExecContext(ctx, `UPDATE workflows SET
 		status = ?, graph_rev = ?, extends_used = ?, cancel_reason = ?, error = ?,
-		tokens_in = ?, tokens_out = ?, cost_micros = ?, started_at = ?, finished_at = ?
+		tokens_in = ?, tokens_out = ?, cost_micros = ?, usage_incomplete = ?,
+		started_at = ?, finished_at = ?
 		WHERE id = ?`,
 		string(wf.Status), wf.Revision, wf.ExtendsUsed, nullString(wf.CancelReason),
 		nullString(wf.Error), wf.Usage.InputTokens, wf.Usage.OutputTokens,
-		wf.Usage.CostMicros, nullableTime(nonZeroTime(wf.StartedAt)),
+		wf.Usage.CostMicros, boolInt(wf.UsageIncomplete),
+		nullableTime(nonZeroTime(wf.StartedAt)),
 		nullableTime(nonZeroTime(wf.FinishedAt)), wfID)
 	if err != nil {
 		return fmt.Errorf("sqlite: update workflow: %w", err)
@@ -407,8 +410,8 @@ func writeWorkflowNodesTx(ctx context.Context, tx *sql.Tx, wfID string, wf dag.W
 		_, err = tx.ExecContext(ctx, `INSERT INTO workflow_nodes
 			(workflow_id, id, kind, status, required, depends_on, params, attempt,
 			 provider, model, output, error, tokens_in, tokens_out, cost_micros,
-			 added_rev, queued_at, started_at, finished_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 usage_incomplete, added_rev, queued_at, started_at, finished_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT (workflow_id, id) DO UPDATE SET
 				kind = excluded.kind,
 				status = excluded.status,
@@ -423,6 +426,7 @@ func writeWorkflowNodesTx(ctx context.Context, tx *sql.Tx, wfID string, wf dag.W
 				tokens_in = excluded.tokens_in,
 				tokens_out = excluded.tokens_out,
 				cost_micros = excluded.cost_micros,
+				usage_incomplete = excluded.usage_incomplete,
 				added_rev = excluded.added_rev,
 				queued_at = excluded.queued_at,
 				started_at = excluded.started_at,
@@ -431,7 +435,7 @@ func writeWorkflowNodesTx(ctx context.Context, tx *sql.Tx, wfID string, wf dag.W
 			string(deps), string(params), view.Attempt,
 			nullString(view.Provider), nullString(view.Model), nullableJSON(view.Output),
 			nullString(reason), view.Usage.InputTokens, view.Usage.OutputTokens,
-			view.Usage.CostMicros, view.AddedRev,
+			view.Usage.CostMicros, boolInt(view.UsageIncomplete), view.AddedRev,
 			nullableTime(nonZeroTime(view.QueuedAt)), nullableTime(nonZeroTime(view.StartedAt)),
 			nullableTime(nonZeroTime(view.FinishedAt)))
 		if err != nil {
@@ -470,7 +474,7 @@ const workflowColumns = `id, kind, project_id, mr_iid, head_sha, base_sha, finge
 		WHERE d.workflow_id = workflows.id), ''),
 	COALESCE((SELECT d.publication_error FROM workflow_dossiers d
 		WHERE d.workflow_id = workflows.id), ''),
-	tokens_in, tokens_out, cost_micros, created_at,
+	tokens_in, tokens_out, cost_micros, usage_incomplete, created_at,
 	started_at, finished_at`
 
 func scanWorkflow(row rowScanner) (*store.Workflow, error) {
@@ -487,6 +491,7 @@ func scanWorkflow(row rowScanner) (*store.Workflow, error) {
 		errText    sql.NullString
 		pubState   sql.NullString
 		pubError   sql.NullString
+		incomplete int
 		createdAt  string
 		startedAt  sql.NullString
 		finishedAt sql.NullString
@@ -494,7 +499,8 @@ func scanWorkflow(row rowScanner) (*store.Workflow, error) {
 	if err := row.Scan(&wf.ID, &wf.Kind, &wf.ProjectID, &mrIID, &headSHA, &baseSHA,
 		&fingerpr, &profile, &wf.Trigger, &triggerBy, &wf.Status, &wf.GraphRev,
 		&wf.ExtendsUsed, &verdict, &cancel, &errText, &pubState, &pubError,
-		&wf.TokensIn, &wf.TokensOut, &wf.CostMicros, &createdAt, &startedAt, &finishedAt); err != nil {
+		&wf.TokensIn, &wf.TokensOut, &wf.CostMicros, &incomplete, &createdAt,
+		&startedAt, &finishedAt); err != nil {
 		return nil, err
 	}
 	if mrIID.Valid {
@@ -514,6 +520,7 @@ func scanWorkflow(row rowScanner) (*store.Workflow, error) {
 	wf.Error = errText.String
 	wf.PublicationState = pubState.String
 	wf.PublicationError = pubError.String
+	wf.UsageIncomplete = incomplete != 0
 	var err error
 	if wf.CreatedAt, err = parseTime(createdAt); err != nil {
 		return nil, err
@@ -697,7 +704,7 @@ func (s *Store) ListWorkflows(ctx context.Context, filter store.WorkflowFilter, 
 
 const workflowNodeColumns = `workflow_id, id, kind, status, required, depends_on,
 	params, attempt, provider, model, output, error, tokens_in, tokens_out,
-	cost_micros, added_rev, queued_at, started_at, finished_at`
+	cost_micros, usage_incomplete, added_rev, queued_at, started_at, finished_at`
 
 func scanWorkflowNode(row rowScanner) (*store.WorkflowNode, error) {
 	var (
@@ -709,17 +716,19 @@ func scanWorkflowNode(row rowScanner) (*store.WorkflowNode, error) {
 		model      sql.NullString
 		output     sql.NullString
 		errText    sql.NullString
+		incomplete int
 		queuedAt   sql.NullString
 		startedAt  sql.NullString
 		finishedAt sql.NullString
 	)
 	if err := row.Scan(&node.WorkflowID, &node.ID, &node.Kind, &node.Status, &required,
 		&dependsOn, &params, &node.Attempt, &provider, &model, &output, &errText,
-		&node.TokensIn, &node.TokensOut, &node.CostMicros, &node.AddedRev,
+		&node.TokensIn, &node.TokensOut, &node.CostMicros, &incomplete, &node.AddedRev,
 		&queuedAt, &startedAt, &finishedAt); err != nil {
 		return nil, err
 	}
 	node.Required = required != 0
+	node.UsageIncomplete = incomplete != 0
 	if dependsOn == "" {
 		dependsOn = "[]"
 	}
@@ -788,7 +797,7 @@ func (s *Store) GetWorkflowNodes(ctx context.Context, workflowID string) ([]stor
 // node's identity, state, dependencies and timing.
 const workflowNodeSummaryColumns = `workflow_id, id, kind, status, required, depends_on,
 	'{}', attempt, provider, model, NULL, error, tokens_in, tokens_out,
-	cost_micros, added_rev, queued_at, started_at, finished_at`
+	cost_micros, usage_incomplete, added_rev, queued_at, started_at, finished_at`
 
 // ListWorkflowNodesByWorkflow loads the nodes of several workflows in one
 // query, keyed by workflow ID and in the same order as GetWorkflowNodes.

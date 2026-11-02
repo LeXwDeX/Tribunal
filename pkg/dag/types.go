@@ -152,10 +152,13 @@ type NodeInput struct {
 	Meta       map[string]string
 }
 
-// NodeOutput is a successful node result.
+// NodeOutput carries known usage on both success and failure. UsageIncomplete
+// reports detected missing or unrepresentable usage, even when Usage is zero;
+// false does not prove that the provider reported every token.
 type NodeOutput struct {
-	Data  json.RawMessage
-	Usage Usage
+	Data            json.RawMessage
+	Usage           Usage
+	UsageIncomplete bool
 }
 
 // Usage accounts for node work.
@@ -168,13 +171,17 @@ type Usage struct {
 	ReasoningTokens  int64 `json:"reasoning_tokens,omitempty"`
 }
 
-// NodeExecutor is implemented by the caller. Any returned error fails the node.
 // ErrorStatusProvider optionally exposes a sanitized upstream HTTP status for
 // durable node failure diagnostics. The engine records only 1-599.
 type ErrorStatusProvider interface {
 	ErrorStatus() int
 }
 
+// NodeExecutor is implemented by the caller. A returned error normally fails
+// the node; budget exhaustion can instead skip an optional node.
+// Execute should return promptly after cancellation. The engine waits for
+// Execute before Run returns and releases its concurrency permit, so a
+// non-cooperative executor can delay Run and the caller's cleanup.
 type NodeExecutor interface {
 	Execute(ctx context.Context, in NodeInput) (NodeOutput, error)
 }
@@ -258,43 +265,49 @@ type Options struct {
 
 // NodeView is the projected read model of one node. Meta is a copy of the
 // workflow metadata for convenience; it is not node-specific configuration.
+// UsageIncomplete marks a detected missing result; its absence does not prove
+// that an old event or an upstream provider reported every token.
 type NodeView struct {
-	ID          string            `json:"id"`
-	Spec        NodeSpec          `json:"spec"`
-	Status      NodeStatus        `json:"status"`
-	Revision    int64             `json:"revision"`
-	AddedRev    int64             `json:"added_rev"`
-	Attempt     int               `json:"attempt"`
-	Meta        map[string]string `json:"meta,omitempty"`
-	Output      json.RawMessage   `json:"output,omitempty"`
-	Usage       Usage             `json:"usage"`
-	Provider    string            `json:"provider,omitempty"`
-	Model       string            `json:"model,omitempty"`
-	Error       string            `json:"error,omitempty"`
-	Reason      string            `json:"reason,omitempty"`
-	ErrorStatus int               `json:"error_status,omitempty"`
-	QueuedAt    time.Time         `json:"queued_at,omitempty"`
-	StartedAt   time.Time         `json:"started_at,omitempty"`
-	FinishedAt  time.Time         `json:"finished_at,omitempty"`
+	ID              string            `json:"id"`
+	Spec            NodeSpec          `json:"spec"`
+	Status          NodeStatus        `json:"status"`
+	Revision        int64             `json:"revision"`
+	AddedRev        int64             `json:"added_rev"`
+	Attempt         int               `json:"attempt"`
+	Meta            map[string]string `json:"meta,omitempty"`
+	Output          json.RawMessage   `json:"output,omitempty"`
+	Usage           Usage             `json:"usage"`
+	UsageIncomplete bool              `json:"usage_incomplete,omitempty"`
+	Provider        string            `json:"provider,omitempty"`
+	Model           string            `json:"model,omitempty"`
+	Error           string            `json:"error,omitempty"`
+	Reason          string            `json:"reason,omitempty"`
+	ErrorStatus     int               `json:"error_status,omitempty"`
+	QueuedAt        time.Time         `json:"queued_at,omitempty"`
+	StartedAt       time.Time         `json:"started_at,omitempty"`
+	FinishedAt      time.Time         `json:"finished_at,omitempty"`
 }
 
 // WorkflowView is the deterministic projection of a workflow's events.
+// UsageIncomplete marks detected missing usage, including a recovered attempt.
+// Its absence does not prove that old events or providers reported every token.
 type WorkflowView struct {
-	ID           string              `json:"id"`
-	Status       WorkflowStatus      `json:"status"`
-	Revision     int64               `json:"revision"`
-	Spec         GraphSpec           `json:"spec"`
-	Meta         map[string]string   `json:"meta,omitempty"`
-	Nodes        map[string]NodeView `json:"nodes"`
-	Order        []string            `json:"order"`
-	ExtendsUsed  int                 `json:"extends_used"`
-	Usage        Usage               `json:"usage"`
-	CreatedAt    time.Time           `json:"created_at"`
-	StartedAt    time.Time           `json:"started_at,omitempty"`
-	FinishedAt   time.Time           `json:"finished_at,omitempty"`
-	Deadline     time.Time           `json:"deadline,omitempty"`
-	Error        string              `json:"error,omitempty"`
-	CancelReason string              `json:"cancel_reason,omitempty"`
+	ID              string              `json:"id"`
+	Status          WorkflowStatus      `json:"status"`
+	Revision        int64               `json:"revision"`
+	Spec            GraphSpec           `json:"spec"`
+	Meta            map[string]string   `json:"meta,omitempty"`
+	Nodes           map[string]NodeView `json:"nodes"`
+	Order           []string            `json:"order"`
+	ExtendsUsed     int                 `json:"extends_used"`
+	Usage           Usage               `json:"usage"`
+	UsageIncomplete bool                `json:"usage_incomplete,omitempty"`
+	CreatedAt       time.Time           `json:"created_at"`
+	StartedAt       time.Time           `json:"started_at,omitempty"`
+	FinishedAt      time.Time           `json:"finished_at,omitempty"`
+	Deadline        time.Time           `json:"deadline,omitempty"`
+	Error           string              `json:"error,omitempty"`
+	CancelReason    string              `json:"cancel_reason,omitempty"`
 }
 
 // Terminal reports whether the workflow can no longer change.

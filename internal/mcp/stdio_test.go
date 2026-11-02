@@ -18,6 +18,7 @@ func TestStdioHelperProcess(t *testing.T) {
 	if os.Getenv("MCP_STDIO_HELPER") != "1" {
 		t.Skip("helper process")
 	}
+	isolateGoHelperCoverage(t)
 	server := testServer()
 	if err := server.Run(context.Background(), &sdk.StdioTransport{}); err != nil && !errors.Is(err, context.Canceled) {
 		// stderr is discarded by the manager; keep this diagnostic local.
@@ -34,7 +35,7 @@ func newStdioManager(t *testing.T, review XReviewConfig, denied []string) (*Mana
 	workspace := t.TempDir()
 	cfg := ServerConfig{
 		Command: exe,
-		Args:    []string{"-test.run=^TestStdioHelperProcess$"},
+		Args:    goTestHelperArgs(t, "TestStdioHelperProcess"),
 		Env:     map[string]string{"MCP_STDIO_HELPER": "1"},
 		XReview: review,
 	}
@@ -55,6 +56,8 @@ func newStdioManager(t *testing.T, review XReviewConfig, denied []string) (*Mana
 }
 
 func TestStdioAllowlistEnvironmentAndLifecycle(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	t.Setenv("GOCOVERDIR", "must-not-be-inherited")
 	t.Setenv("MCP_STDIO_ALLOWED", "allowed-value")
 	t.Setenv("MCP_STDIO_PARENT_SECRET", "parent-secret-value")
 	t.Setenv("GITLAB_TOKEN", "gitlab-secret-value")
@@ -107,7 +110,7 @@ func TestStdioAllowlistEnvironmentAndLifecycle(t *testing.T) {
 	if values["MCP_STDIO_HELPER"] != "1" || values["MCP_STDIO_ALLOWED"] != "allowed-value" {
 		t.Fatalf("explicit/allowed env missing: %+v", values)
 	}
-	for _, name := range []string{"MCP_STDIO_PARENT_SECRET", "GITLAB_TOKEN"} {
+	for _, name := range []string{"MCP_STDIO_PARENT_SECRET", "GITLAB_TOKEN", "TMPDIR", "GOCOVERDIR"} {
 		if _, ok := values[name]; ok {
 			t.Fatalf("restricted env %s reached the child", name)
 		}
@@ -295,7 +298,7 @@ func TestStdioProjectOverridesPlatform(t *testing.T) {
 		Project: Config{MCPServers: map[string]ServerConfig{
 			"local": {
 				Command: exe,
-				Args:    []string{"-test.run=^TestStdioHelperProcess$"},
+				Args:    goTestHelperArgs(t, "TestStdioHelperProcess"),
 				Env:     map[string]string{"MCP_STDIO_HELPER": "1"},
 			},
 		}},

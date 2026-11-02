@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/LeXwDeX/tribunal/internal/errclass"
 	"github.com/LeXwDeX/tribunal/internal/jobs"
 	"github.com/LeXwDeX/tribunal/internal/review"
 	"github.com/LeXwDeX/tribunal/internal/secret"
@@ -401,6 +402,31 @@ func (s *ReviewService) publishFailure(ctx context.Context, workflowID string, s
 		return errors.New("app: review publisher is not configured")
 	}
 	return s.publisher.publishFailureLocked(ctx, workflowID, failureReason(snapshot))
+}
+
+// publishPreWorkflowFailure replaces a previous generation's success status
+// when repository configuration fails before a workflow exists. The persisted
+// settings decide the switch; when they cannot be read, the target is not
+// safely known and the configuration error stays the visible block.
+func (s *ReviewService) publishPreWorkflowFailure(ctx context.Context, project *store.Project, token string, control *store.ReviewControl, payload reviewRunPayload) error {
+	settings, err := ResolveSettings(project.Settings, s.reviewDefaults)
+	if err != nil || !settings.CommitStatus || s.publisher == nil {
+		return nil
+	}
+	if err := s.publisher.PublishPreWorkflowFailure(ctx, project.ID, control.MRIID, payload.Generation, payload.HeadSHA, token); err != nil {
+		s.logger.Warn("pre-workflow failure status failed",
+			"project_id", project.ID, "mr_iid", control.MRIID, "error_class", errclass.Of(err))
+		return err
+	}
+	return nil
+}
+
+// preWorkflowPublishRetryable separates a transient status write from a
+// terminal one. The configuration failure stays permanent, but a transient
+// publication failure must leave the job retryable so an old green status is
+// eventually replaced.
+func preWorkflowPublishRetryable(err error) bool {
+	return err != nil && !IsPermanentJob(err) && reviewSideEffectRetryable(err)
 }
 
 // failureReason returns a safe, bounded reason for a published failure note.
