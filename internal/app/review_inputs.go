@@ -24,18 +24,22 @@ const maxPipelineJobTraces = 3
 const redactedJobTraceValue = "[REDACTED]"
 
 var (
+	jobTracePEMRE           = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`)
 	jobTracePrivateTokenRE  = regexp.MustCompile(`(?i)(PRIVATE-TOKEN\s*:\s*)(?:"[^"]*"|'[^']*'|\S+)`)
 	jobTraceAuthRE          = regexp.MustCompile(`(?i)(Authorization\s*:\s*(?:Bearer|Basic|Token)\s+)(?:"[^"]*"|'[^']*'|\S+)`)
-	jobTraceFlagRE          = regexp.MustCompile(`(?i)(--(?:password|token)\s+)(?:"[^"]*"|'[^']*'|\S+)`)
-	jobTraceURLCredsRE      = regexp.MustCompile(`://[^/\s:@]+:[^/\s@]+@`)
+	jobTraceFlagRE          = regexp.MustCompile(`(?i)((?:-u|--user|--password|--token)\s+)(?:"[^"]*"|'[^']*'|\S+)`)
+	jobTraceURLCredsRE      = regexp.MustCompile(`://[^/\s:@]*:[^/\s@]+@`)
 	jobTraceCIVarRE         = regexp.MustCompile(`(?m)\b(CI_JOB_TOKEN\s*=\s*)(?:"[^"]*"|'[^']*'|\S+)`)
-	jobTraceGenericSecretRE = regexp.MustCompile(`(?i)\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|ACCESS[_-]?KEY)[A-Z0-9_]*\s*[:=]\s*)(?:"[^"]*"|'[^']*'|\S+)`)
+	jobTraceGenericSecretRE = regexp.MustCompile(`(?i)\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_KEY|JWT|API[_-]?KEY|ACCESS[_-]?KEY)[A-Z0-9_]*\s*[:=]\s*)(?:"[^"]*"|'[^']*'|\S+)`)
+	jobTraceJSONSecretDQRE  = regexp.MustCompile(`(?i)("[A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_KEY|JWT|API[_-]?KEY|ACCESS[_-]?KEY)[A-Z0-9_]*"\s*:\s*)(?:"[^"]*"|[^,}\s]+)`)
+	jobTraceJSONSecretSQRE  = regexp.MustCompile(`(?i)('[A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_KEY|JWT|API[_-]?KEY|ACCESS[_-]?KEY)[A-Z0-9_]*'\s*:\s*)(?:'[^']*'|[^,}\s]+)`)
 )
 
 // sanitizeJobTrace removes credential-looking values before logs reach a
 // prompt. The patterns are deliberately narrow; they do not make arbitrary
 // log text safe or trusted.
 func sanitizeJobTrace(trace string) string {
+	trace = jobTracePEMRE.ReplaceAllString(trace, redactedJobTraceValue)
 	trace = statusTokenRE.ReplaceAllString(trace, redactedJobTraceValue)
 	trace = jobTracePrivateTokenRE.ReplaceAllString(trace, "${1}"+redactedJobTraceValue)
 	trace = jobTraceAuthRE.ReplaceAllString(trace, "${1}"+redactedJobTraceValue)
@@ -43,6 +47,8 @@ func sanitizeJobTrace(trace string) string {
 	trace = jobTraceURLCredsRE.ReplaceAllString(trace, "://"+redactedJobTraceValue+"@")
 	trace = jobTraceCIVarRE.ReplaceAllString(trace, "${1}"+redactedJobTraceValue)
 	trace = jobTraceGenericSecretRE.ReplaceAllString(trace, "${1}"+redactedJobTraceValue)
+	trace = jobTraceJSONSecretDQRE.ReplaceAllString(trace, "${1}"+redactedJobTraceValue)
+	trace = jobTraceJSONSecretSQRE.ReplaceAllString(trace, "${1}"+redactedJobTraceValue)
 	return trace
 }
 

@@ -1617,16 +1617,20 @@ func truncatePromptBytes(value string, max int) string {
 	return value[:end]
 }
 
-// oneLinePromptValue keeps repository-controlled labels from opening new
-// prompt sections or injecting control characters.
-func oneLinePromptValue(value string, max int) string {
+// oneLinePromptText keeps repository-controlled text from opening new prompt
+// sections or injecting control characters.
+func oneLinePromptText(value string) string {
 	value = strings.Map(func(r rune) rune {
 		if r < 0x20 || r == 0x7f {
 			return ' '
 		}
 		return r
 	}, value)
-	value = strings.Join(strings.Fields(value), " ")
+	return strings.Join(strings.Fields(value), " ")
+}
+
+func oneLinePromptValue(value string, max int) string {
+	value = oneLinePromptText(value)
 	if len(value) > max {
 		value = truncatePromptBytes(value, max) + "…"
 	}

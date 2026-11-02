@@ -100,6 +100,46 @@ func TestVerifyTaskSanitizesJobName(t *testing.T) {
 	}
 }
 
+func TestBuildDossierDropsJobTraceUnderIgnorePolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		ignore []string
+		want   string
+	}{
+		{name: "ignored", ignore: []string{"internal/secret/**"}, want: ""},
+		{name: "empty", ignore: []string{}, want: "panic at main.go:3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, err := BuildDossier(DossierInput{
+				Project: ProjectRef{ID: 42, Path: "group/project"},
+				MR: MRMeta{
+					IID:          7,
+					Title:        "Add parser",
+					SourceBranch: "feature/parser",
+					TargetBranch: "main",
+				},
+				DiffVersion:         gitlab.Version{BaseSHA: testBaseSHA, StartSHA: testStartSHA, HeadSHA: testHeadSHA},
+				WorkspaceProvenance: &WorkspaceProvenance{Version: WorkspaceProvenanceVersion, TargetSHA: testStartSHA, IndexSHA: testStartSHA, MCPEligible: true},
+				GeneratedAt:         time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC),
+				Files:               []FileChange{},
+				IgnorePolicy:        &IgnorePolicy{Version: IgnorePolicyVersion, Patterns: tc.ignore},
+				Pipeline: &PipelineSummary{
+					Status: "failed",
+					FailedJobs: []JobSummary{{
+						ID: 9, Name: "unit", Status: "failed", Trace: "panic at main.go:3",
+					}},
+				},
+			})
+			if err != nil {
+				t.Fatalf("BuildDossier: %v", err)
+			}
+			if got := d.Pipeline.FailedJobs[0].Trace; got != tc.want {
+				t.Fatalf("trace = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestBuildDossierKeepsJobTrace(t *testing.T) {
 	d, err := BuildDossier(DossierInput{
 		Project: ProjectRef{ID: 42, Path: "group/project"},

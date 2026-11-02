@@ -129,6 +129,13 @@ func TestSanitizeJobTraceRedactsSecrets(t *testing.T) {
 		"MY_API_KEY=api-key-value",
 		"Authorization: Basic basic-value",
 		"deploy --token flag-token",
+		"CI_JOB_JWT=jwt-value",
+		"SSH_PRIVATE_KEY=-----BEGIN OPENSSH PRIVATE KEY-----",
+		"pem-body-value",
+		"-----END OPENSSH PRIVATE KEY-----",
+		"curl -u deploy:hunter2 https://example.com",
+		"redis://:redis-pass@cache:6379",
+		`{"private_token":"json-token-value"}`,
 		"normal line stays",
 	}, "\n")
 
@@ -136,12 +143,13 @@ func TestSanitizeJobTraceRedactsSecrets(t *testing.T) {
 	for _, secret := range []string{
 		"glpat-abcdef123456", "private-value", "bearer-value", "user:pass", "job-token-value", "gitlab-token-value",
 		"glrt-runner-token", "db-pass", "aws-secret", "api-key-value", "basic-value", "flag-token",
+		"jwt-value", "pem-body-value", "deploy:hunter2", "redis-pass", "json-token-value",
 	} {
 		if strings.Contains(got, secret) {
 			t.Fatalf("sanitized trace still contains %q:\n%s", secret, got)
 		}
 	}
-	if strings.Count(got, "[REDACTED]") < 12 {
+	if strings.Count(got, "[REDACTED]") < 17 {
 		t.Fatalf("sanitized trace misses redaction markers:\n%s", got)
 	}
 	if !strings.Contains(got, "normal line stays") {

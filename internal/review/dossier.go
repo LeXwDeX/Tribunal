@@ -454,6 +454,13 @@ func BuildDossier(in DossierInput) (*Dossier, error) {
 	if in.Pipeline != nil {
 		pipeline := *in.Pipeline
 		pipeline.FailedJobs = append([]JobSummary(nil), in.Pipeline.FailedJobs...)
+		// A job can print any file, including ignored paths. Without a
+		// path-level proof the trace cannot cross the ignore boundary.
+		if in.IgnorePolicy != nil && len(in.IgnorePolicy.Patterns) > 0 {
+			for i := range pipeline.FailedJobs {
+				pipeline.FailedJobs[i].Trace = ""
+			}
+		}
 		d.Pipeline = &pipeline
 	}
 	if in.Incremental != nil {
