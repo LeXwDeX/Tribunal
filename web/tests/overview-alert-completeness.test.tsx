@@ -24,7 +24,7 @@ function page(source: Source, items: unknown[] = [], next?: string) {
 }
 
 function alertPanel() {
-  const panel = screen.getByRole('heading', { name: '需要处理' }).closest('section')
+  const panel = screen.getByRole('heading', { name: '告警' }).closest('section')
   if (!panel) throw new Error('alerts panel missing')
   return within(panel)
 }
@@ -57,9 +57,9 @@ describe('overview alert completeness', () => {
       renderWithProviders(<OverviewPage />)
       const panel = alertPanel()
       expect(await panel.findByRole('alert')).toHaveTextContent('异常检查未完整加载')
-      expect(panel.queryByText('暂无需要处理的异常')).not.toBeInTheDocument()
+      expect(panel.queryByText('无异常')).not.toBeInTheDocument()
       await user.click(panel.getByRole('button', { name: '重试' }))
-      expect(await panel.findByText('暂无需要处理的异常')).toBeInTheDocument()
+      expect(await panel.findByText('无异常')).toBeInTheDocument()
       expect(attempts).toBe(2)
     },
   )
@@ -74,9 +74,9 @@ describe('overview alert completeness', () => {
     renderWithProviders(<OverviewPage />)
     const panel = alertPanel()
     expect(panel.getByRole('status')).toHaveTextContent('加载中')
-    expect(panel.queryByText('暂无需要处理的异常')).not.toBeInTheDocument()
+    expect(panel.queryByText('无异常')).not.toBeInTheDocument()
     resolveProjects(page('projects'))
-    expect(await panel.findByText('暂无需要处理的异常')).toBeInTheDocument()
+    expect(await panel.findByText('无异常')).toBeInTheDocument()
   })
 
   it('does not show a clean result while a background refresh is unresolved', async () => {
@@ -93,12 +93,12 @@ describe('overview alert completeness', () => {
     })
     const { queryClient } = renderWithProviders(<OverviewPage />)
     const panel = alertPanel()
-    await panel.findByText('暂无需要处理的异常')
+    await panel.findByText('无异常')
     act(() => { void queryClient.invalidateQueries({ queryKey: ['projects', 'overview'] }) })
-    await waitFor(() => expect(panel.queryByText('暂无需要处理的异常')).not.toBeInTheDocument())
+    await waitFor(() => expect(panel.queryByText('无异常')).not.toBeInTheDocument())
     expect(panel.getByRole('status')).toHaveTextContent('加载中')
     resolveRefresh(page('projects'))
-    expect(await panel.findByText('暂无需要处理的异常')).toBeInTheDocument()
+    expect(await panel.findByText('无异常')).toBeInTheDocument()
   })
 
   it.each([
@@ -111,15 +111,15 @@ describe('overview alert completeness', () => {
     installFetch((raw) => defaultResponse(new URL(raw, 'http://localhost')))
     const { queryClient } = renderWithProviders(<OverviewPage />)
     const panel = alertPanel()
-    await panel.findByText('暂无需要处理的异常')
+    await panel.findByText('无异常')
     act(() => {
       onlineManager.setOnline(false)
       void queryClient.invalidateQueries({ queryKey: key })
     })
-    await waitFor(() => expect(panel.queryByText('暂无需要处理的异常')).not.toBeInTheDocument())
+    await waitFor(() => expect(panel.queryByText('无异常')).not.toBeInTheDocument())
     expect(panel.getByRole('status')).toHaveTextContent('等待网络连接')
     act(() => onlineManager.setOnline(true))
-    expect(await panel.findByText('暂无需要处理的异常')).toBeInTheDocument()
+    expect(await panel.findByText('无异常')).toBeInTheDocument()
   })
 
   it('retains alerts from successful sources while another source fails', async () => {
@@ -133,7 +133,7 @@ describe('overview alert completeness', () => {
     const panel = alertPanel()
     expect(await panel.findByRole('alert')).toHaveTextContent('异常检查未完整加载')
     expect(await panel.findByText(/group\/disabled/)).toBeInTheDocument()
-    expect(panel.queryByText('暂无需要处理的异常')).not.toBeInTheDocument()
+    expect(panel.queryByText('无异常')).not.toBeInTheDocument()
   })
 
   it.each([
@@ -166,13 +166,13 @@ describe('overview alert completeness', () => {
     expect(load).toBeDisabled()
     expect(nextPages).toBe(0)
     expect(panel.getByRole('alert')).toHaveTextContent('异常检查未完整加载')
-    expect(panel.queryByText('暂无需要处理的异常')).not.toBeInTheDocument()
+    expect(panel.queryByText('无异常')).not.toBeInTheDocument()
     await user.click(panel.getByRole('button', { name: '重试' }))
     await waitFor(() => expect(panel.queryByRole('alert')).not.toBeInTheDocument())
     expect(refreshes).toBe(3)
     await user.click(panel.getByRole('button', { name: button }))
     await waitFor(() => expect(nextPages).toBe(1))
-    expect(await panel.findByText('暂无需要处理的异常')).toBeInTheDocument()
+    expect(await panel.findByText('无异常')).toBeInTheDocument()
   })
 
   it.each([
@@ -203,7 +203,7 @@ describe('overview alert completeness', () => {
     await user.click(load)
     expect(load).toBeDisabled()
     expect(nextPages).toBe(0)
-    expect(panel.queryByText('暂无需要处理的异常')).not.toBeInTheDocument()
+    expect(panel.queryByText('无异常')).not.toBeInTheDocument()
     await act(async () => { resolveRefresh(page(source, [], 'next')) })
     await waitFor(() => expect(load).toBeEnabled())
   })
@@ -233,17 +233,17 @@ describe('overview alert completeness', () => {
     renderWithProviders(<OverviewPage />)
     const panel = alertPanel()
     const load = await panel.findByRole('button', { name: button })
-    expect(panel.queryByText('暂无需要处理的异常')).not.toBeInTheDocument()
+    expect(panel.queryByText('无异常')).not.toBeInTheDocument()
     await user.click(load)
     await waitFor(() => expect(panel.getByRole('button', { name: button })).toBeDisabled())
-    expect(panel.queryByText('暂无需要处理的异常')).not.toBeInTheDocument()
+    expect(panel.queryByText('无异常')).not.toBeInTheDocument()
     resolveLater(jsonResponse({ error: { message: 'later page failed' } }, 500))
     expect(await panel.findByRole('alert')).toHaveTextContent('异常检查未完整加载')
-    expect(panel.queryByText('暂无需要处理的异常')).not.toBeInTheDocument()
+    expect(panel.queryByText('无异常')).not.toBeInTheDocument()
     await user.click(panel.getByRole('button', { name: '重试' }))
     expect(await panel.findByText(text)).toBeInTheDocument()
     expect(laterAttempts).toBe(2)
-    expect(panel.queryByText('暂无需要处理的异常')).not.toBeInTheDocument()
+    expect(panel.queryByText('无异常')).not.toBeInTheDocument()
   })
 
   it('shows a clean result for a viewer without requesting admin-only providers', async () => {
@@ -254,7 +254,7 @@ describe('overview alert completeness', () => {
     })
     renderWithProviders(<OverviewPage />, { me: viewerMe })
     const panel = alertPanel()
-    expect(await panel.findByText('暂无需要处理的异常')).toBeInTheDocument()
+    expect(await panel.findByText('无异常')).toBeInTheDocument()
     expect(panel.queryByText(/provider 错误/)).not.toBeInTheDocument()
     expect(requests.some((raw) => new URL(raw, 'http://localhost').pathname === '/api/v1/providers')).toBe(false)
   })

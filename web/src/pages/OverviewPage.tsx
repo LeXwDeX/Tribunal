@@ -155,7 +155,7 @@ function MetricStrip({ stats, loading, error, onRetry }: { stats?: Stats; loadin
   const avg = statNumber(stats, 'avg_duration_ms')
   const p95 = statNumber(stats, 'p95_duration_ms')
   return (
-    <section aria-label="近 7 天指标" className={ui.metricStrip}>
+    <section aria-label="近 7 天指标" className={classNames(ui.metricStrip, overview.metrics)}>
       <Metric
         label="运行次数"
         value={runs === null ? '不可用' : runs}
@@ -165,15 +165,15 @@ function MetricStrip({ stats, loading, error, onRetry }: { stats?: Stats; loadin
           </TrendNote>
         )}
       />
-      <Metric label="BLOCKING 比例" value={formatRatio(blockingRatio)} note="按已结束评审计" />
-      <Metric label="已发布问题" value={published === null ? '不可用' : published} note="GitLab 已发布条目" />
-      <Metric label="规则丢弃比例" value={formatRatio(overturned)} note="规则 drop 占比，不是模型准确率" />
+      <Metric label="BLOCKING 比例" value={formatRatio(blockingRatio)} note="BLOCKING 工作流数 / 所有工作流数" />
+      <Metric label="发布类问题" value={published === null ? '不可用' : published} note="裁决为 publish 或 mark 的问题数，不代表实际发布成功" />
+      <Metric label="规则丢弃比例" value={formatRatio(overturned)} note="drop 问题数 / 有裁决的问题数，不是模型准确率" />
       <Metric
         label="成本"
         value={cost === null ? '不可用' : formatCost(cost)}
-        note={<TrendNote points={trendPoints(stats, 'cost_micros')} color="var(--warn-dot)">按日趋势</TrendNote>}
+        note={<TrendNote points={trendPoints(stats, 'cost_micros')} color="var(--warn-dot)"><span title="接口无法区分未配置价格和实际零成本">需在 provider 配置 price 才统计成本；无法区分未配置价格和实际零成本</span></TrendNote>}
       />
-      <Metric label="耗时 平均 / P95" value={avg === null ? '不可用' : formatMs(avg)} note={`P95 ${formatMs(p95)}`} />
+      <Metric label="耗时 平均 / P95" value={avg === null ? '不可用' : formatMs(avg)} note={`有有效起止时间的工作流 · P95 ${formatMs(p95)}`} />
     </section>
   )
 }
@@ -288,6 +288,11 @@ export function OverviewPage() {
     ].some((key) => queryClient.getQueryState(key)?.fetchStatus === 'paused'),
     () => false,
   )
+  const pausedRunning = useSyncExternalStore(
+    queryClient.getQueryCache().subscribe,
+    () => queryClient.getQueryState(['reviews', 'overview', 'running'])?.fetchStatus === 'paused',
+    () => false,
+  )
   const issuesPending = pausedIssues || projectsPage.isPending || projectsPage.isFetching || failedRuns.isPending || failedRuns.isFetching
     || failedPublications.isPending || failedPublications.isFetching || pendingPublications.isPending || pendingPublications.isFetching
     || (providersEnabled && (providersPage.isPending || providersPage.isFetching))
@@ -319,7 +324,7 @@ export function OverviewPage() {
           title="总览"
           description={
             <>
-              7 天统计 · {projectsPage.isPending ? '正在读取项目…' : `${projectsPage.items.length}${projectsPage.hasNextPage ? '+' : ''} 个已注册项目`} · {running.isPending ? '正在读取运行状态…' : `${runningCount} 个评审正在运行`}
+              7 天统计 · {projectsPage.isPending ? '正在读取项目…' : `${projectsPage.items.length}${projectsPage.hasNextPage ? '+' : ''} 个已注册项目`} · {running.isPending ? '正在读取运行状态…' : `已加载 ${runningCount}${running.hasNextPage ? '+' : ''} 个运行中的评审`}
             </>
           }
           actions={canRegister || canTrigger ? (
@@ -339,47 +344,7 @@ export function OverviewPage() {
           onRetry={() => { void stats.refetch() }}
         />
 
-        <div className={overview.split}>
-          <Panel
-            flush
-            title="运行中"
-            aside={<span>{runningCount}{running.hasNextPage ? '+' : ''} 个 · 每 10 秒刷新</span>}
-          >
-            {running.isPending ? <div className={overview.state}><LoadingState /></div> : null}
-            {running.isError ? <div className={overview.state}><ErrorState error={running.error} onRetry={running.retry} /></div> : null}
-            {running.isSuccess && running.items.length === 0 ? (
-              <div className={overview.state}><EmptyState title="当前没有运行中的评审" description="新的 webhook 或手动触发会出现在这里。" /></div>
-            ) : null}
-            {running.items.length ? (
-              <ul className={overview.liveList}>
-                {running.items.map((review) => {
-                  const stage = deriveReviewStage(review.nodes)
-                  const title = review.mr_title || `!${review.mr_iid}`
-                  return (
-                    <li key={review.id} className={overview.liveItem}>
-                      <div className={overview.primary}>
-                        <Link className={overview.liveTitle} to={`/reviews/${encodeURIComponent(review.id)}`} title={title}>{title}</Link>
-                        <span className={overview.meta}>
-                          <span className={overview.mrRef}>!{review.mr_iid}</span>
-                          <span className="mono">{review.project_path || projectNames.get(review.project_id) || `项目 ${review.project_id}`}</span>
-                          <span aria-hidden="true">·</span>
-                          <Badge plain>{review.profile || '默认档位'}</Badge>
-                        </span>
-                      </div>
-                      <span className={overview.elapsed}>已用时 {elapsedSince(review.created_at, now)}</span>
-                      {stage === null ? null : <StageTrack stage={stage} />}
-                    </li>
-                  )
-                })}
-              </ul>
-            ) : null}
-            <div className={overview.panelFooter}>
-              {running.hasNextPage ? <Button variant="secondary" className={ui.smallButton} onClick={running.fetchNextPage} loading={running.isFetchingNextPage}>加载更多运行中评审</Button> : null}
-              <ButtonLink to="/reviews" className={ui.smallButton}>查看全部评审</ButtonLink>
-            </div>
-          </Panel>
-
-          <Panel flush title="需要处理" aside={alerts.length ? `${alerts.length} 项` : undefined}>
+          <Panel flush title="告警" aside={<><span>检查范围：token 过期、工作区异常、停用项目{providersEnabled ? '、provider 错误' : ''}、评审执行失败和发布失败</span>{alerts.length ? <span>{alerts.length}{hasMoreIssues ? '+' : ''} 项</span> : null}</>}>
             {hasIssuesError ? (
               <div className={overview.state}>
                 <ErrorState
@@ -394,9 +359,7 @@ export function OverviewPage() {
               </div>
             ) : null}
             {alerts.length === 0 && !issuesPending && !hasIssuesError && !hasMoreIssues ? (
-              <div className={overview.state}>
-                <EmptyState title="暂无需要处理的异常" description={`检查了 token 过期、工作区状态、停用项目${providersEnabled ? '、provider 错误' : ''}、评审执行失败和发布失败。`} />
-              </div>
+              <p className={overview.compactState}>无异常</p>
             ) : null}
             {issuesPending ? <div className={overview.state}><LoadingState label={pausedIssues ? '等待网络连接以继续异常检查…' : undefined} /></div> : null}
             {alerts.map((alert) => (
@@ -422,7 +385,48 @@ export function OverviewPage() {
               </div>
             ) : null}
           </Panel>
-        </div>
+
+          <Panel
+            flush
+            title="运行中"
+            aside={<span>已加载 {runningCount}{running.hasNextPage ? '+' : ''} 个 · 每 10 秒刷新</span>}
+          >
+            {running.isPending || running.isFetching || pausedRunning ? <div className={overview.state}><LoadingState label={pausedRunning ? '等待网络连接以读取运行状态…' : undefined} /></div> : null}
+            {running.isError ? <div className={overview.state}><ErrorState error={running.error} onRetry={running.retry} /></div> : null}
+            {running.isSuccess && !running.isFetching && !pausedRunning && !running.hasNextPage && running.items.length === 0 ? (
+              <p className={overview.compactState}>当前没有运行中的评审</p>
+            ) : null}
+            {running.isSuccess && !running.isFetching && !pausedRunning && running.hasNextPage && running.items.length === 0 ? (
+              <p className={overview.compactState}>还有未加载的运行中评审数据。</p>
+            ) : null}
+            {running.items.length ? (
+              <ul className={overview.liveList}>
+                {running.items.map((review) => {
+                  const stage = deriveReviewStage(review.nodes)
+                  const title = review.mr_title || `!${review.mr_iid}`
+                  return (
+                    <li key={review.id} className={overview.liveItem}>
+                      <div className={overview.primary}>
+                        <Link className={overview.liveTitle} to={`/reviews/${encodeURIComponent(review.id)}`} title={title}>{title}</Link>
+                        <span className={overview.meta}>
+                          <span className={overview.mrRef}>!{review.mr_iid}</span>
+                          <span className="mono">{review.project_path || projectNames.get(review.project_id) || `项目 ${review.project_id}`}</span>
+                          <span aria-hidden="true">·</span>
+                          <Badge plain>{review.profile || '默认档位'}</Badge>
+                        </span>
+                      </div>
+                      <span className={overview.elapsed}>已用时 {elapsedSince(review.created_at, now)}</span>
+                      {stage === null ? null : <StageTrack stage={stage} />}
+                    </li>
+                  )
+                })}
+              </ul>
+            ) : null}
+            <div className={overview.panelFooter}>
+              {running.hasNextPage ? <Button variant="secondary" className={ui.smallButton} onClick={running.fetchNextPage} loading={running.isFetchingNextPage} disabled={running.isFetching || pausedRunning || running.isRefetchError}>加载更多运行中评审</Button> : null}
+              <ButtonLink to="/reviews" className={ui.smallButton}>查看全部评审</ButtonLink>
+            </div>
+          </Panel>
 
         <Panel
           flush
