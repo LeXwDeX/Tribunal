@@ -26,8 +26,7 @@ Tribunal is a multi-agent code review service for GitLab CE merge requests: a Go
 | `prompts/` | Embedded block prompts and platform rules |
 | `web/` | React 19 console; `web/dist` is the committed build embedded into the binary |
 | `config/` | `server.example.yaml` and `server.docker.yaml` (mounted by Compose) |
-| `scripts/` | Coverage and license checks, license bundle, Docker smoke, MCP wrapper |
-| `prototype/v2/` | Visual prototype and `IMPLEMENT.md` mapping for the v2 console |
+| `scripts/` | Coverage, license, and log checks; load test; license bundle; Docker smoke; codebase-memory wrapper |
 | `third_party/` | License and version records for bundled executables |
 
 ## Commands
@@ -67,6 +66,50 @@ Only dispatch trusted branch code to a self-hosted runner: untrusted code can pe
 - Keep Go statement coverage at or above 70%. Coverage and license checks run in CI.
 - Web coverage thresholds live in `web/vite.config.ts`; run `npm test -- --coverage` in `web/`.
 
+## Development review workflow
+
+Every behavior change and every user-visible document change goes through these
+stages before merge, unless the reduced chain below applies. CI green is
+necessary but not sufficient; a PR that skips a stage is not ready.
+
+1. **Independent review** — a `review` subagent reads the real diff, callers,
+   tests, and evidence. Give it the Issue, the diff range, and the evidence; do
+   not give it the author's conclusion.
+2. **Three-way review** — run the development review subagents `reasoner`,
+   `verify`, and `review` in parallel on the same diff. `reasoner` stress-tests
+   logic, boundaries, races, and failure paths; `verify` reruns the scoped checks
+   and reports PASS/FAIL/BLOCKED; `review` checks requirements, compatibility,
+   and the evidence chain. These are development subagents, distinct from the
+   product's review blocks with the same names.
+3. **Adversarial review** — run several independent reviewers with distinct
+   lenses (for example security/secrets, concurrency/correctness,
+   accessibility/regression, documentation/claims). The goal is to find
+   collective blind spots, not to repeat the first review.
+4. **Adjudication and evidence check** — the main agent deduplicates findings,
+   classifies P1/P2/P3, and re-checks every material claim against source or a
+   reproducible command. P1 is blocking; P2/P3 are non-blocking unless
+   explicitly marked blocking with a reason. A subagent finding is a lead, not
+   a fact; do not forward it without this check.
+5. **Fix and re-review** — fix confirmed findings with a regression test that
+   fails before the fix. A blocking finding needs a new independent review of
+   the fix; never self-approve a blocking change.
+6. **Structured report** — publish a report on the Issue or PR with an overall
+   status, one unit per finding, the author's reply, and the reviewer's reply to
+   that reply. Mark each unit resolved, accepted, or blocking. Disclose
+   unverified items and environment blockers; never present mock, partial, or
+   CI-only results as real evidence.
+
+A documentation-only PR may use a reduced chain: independent review plus
+evidence check, and it still publishes a short report (on the Issue, the PR, or
+both). A documentation finding is verified with links, formatting, or fact
+checks instead of a regression test; a blocking documentation finding still
+needs a new independent review of the fix. It still must not fabricate
+verification.
+
+If a stage cannot run because a credential, environment, an external service, or
+the required agent capability is missing, name the missing stage and why. Do not
+replace it with CI alone.
+
 ## Backend conventions
 
 - Dependencies point downward: `server` → `app` → `review` / `agent` / `llm` / `gitlab` / `store`. `pkg/dag` must not import Tribunal packages.
@@ -89,7 +132,7 @@ Only dispatch trusted branch code to a self-hosted runner: untrusted code can pe
 
 ## Delivery
 
-- One goal maps to one Issue (Why / Scope / Approach / Acceptance) and one PR. Every commit carries an `Issue: #N` trailer. Squash-merge only after CI is green, then confirm the Issue closed.
+- One goal maps to one Issue (Why / Scope / Approach / Acceptance) and one PR. Every commit carries an `Issue: #N` trailer. Squash-merge only after CI is green and the review workflow above is complete, then confirm the Issue closed.
 - Before merging, bring the branch up to date with the latest `main` and wait for CI to pass on the new head. A green run on an outdated base does not count: two PRs can each pass alone and still break `main` together.
 - Do not create branches to host screenshots or other assets. Attach UI screenshots to the Issue through the GitHub web UI; if that is not possible, describe the checks in the PR instead.
 - Add user-visible changes to the `Unreleased` or upcoming version section of `CHANGELOG.md`.

@@ -1,21 +1,21 @@
 # Tribunal 交接（2026-11-02）
 
 > 这是给下一位 agent（或换机器后的自己）的唯一入口。新机器 `git clone` 之后只读这一份就能开工。
-> 仓库是私有的，这里记录了内网地址和沙箱信息，但不含任何密钥或 token。
+> 仓库是公开的，这里记录了内网地址和沙箱信息，但不含任何密钥或 token。
 
 ## 0. 启动提示词（在新机器上直接粘贴）
 
 ```text
 这是 Tribunal 仓库。先读 AGENTS.md，再完整读 docs/handoff.md，按其中第 1 节准备环境、第 2 节的工作方式执行。
 先看第 4 节剩余 Issue；没有明确新指令时，不要重做第 3 节已合并的 Issue。
-每个 Issue 走 TDD → 本地检查 → PR → 最新 head 的 GitHub Actions 通过 → squash 合并。
+每个 Issue 走 TDD → 本地检查 → 按 AGENTS.md 的 Development review workflow 完成审查（docs-only 用缩减链）→ PR → 最新 head 的 GitHub Actions 通过 → squash 合并。
 全部自动推进，不要逐步问我；只有权限被拦或需要我本人操作（打 tag、发 Release、放行被拦的命令）时才停下来说明。
 结束时更新 docs/handoff.md（通过 PR 入库），让下一次只读它就能继续。
 ```
 
 ## 1. 新机器环境准备
 
-1. **克隆**：`gh repo clone LeXwDeX/Tribunal && cd Tribunal`。当前 `main` 至少包含 `14273ba`（#207）和本交接的 PR。
+1. **克隆**：`gh repo clone LeXwDeX/Tribunal && cd Tribunal`。当前 `main` 为 `c279814`；本交接 PR #213 待合并。
 2. **工具**：Go（`go.mod` 的 toolchain 是 1.26.10）、Node + npm（`web/`）、Bash、Python 3、能跑 `-race` 的 C 编译器、`gh`（已登录、对仓库有写权限）。本机可以没有 Docker；没有 Docker 时 Compose/冒烟必须记为未验证。
 3. **SpecGit**：仓库要求每个提交带 `Issue: #N` trailer，并由 SpecGit 的本地 checkpoint 把关。`.specgit.yaml` 和 SpecGit Skill 是本地文件，不在仓库里，新 clone 要重新接入：
    - 安装共享 CLI（见 <https://github.com/LeXwDeX/SpecGit/blob/main/docs/agent-install.md>），确认 `specgit --human --version` ≥ 2.17.1。
@@ -29,8 +29,8 @@
 ## 2. 工作方式（用户的长期授权与要求）
 
 - **全部自动推进，不要再问**。自行决策，推进到合并。交付物是干净的 main、清晰的 Issue 计划和这份交接文档。
-- **PR 创建与 squash 合并已获长期授权**，不用等用户批准。前提：同步最新 main 后的 head 在 GitHub Actions 上 `go`/`web`/`docker` 全部通过。不包括：仓库设置、分支保护、打 tag、发 Release。
-- **合并门槛是当前 head 的 CI**，不是旧 head、不是本地单次运行、也不是 PR 的 `mergeStateStatus` 缓存。
+- **PR 创建与 squash 合并已获长期授权**，不用等用户批准。前提：同步最新 main 后的 head 在 GitHub Actions 上 `go`/`web`/`docker` 全部通过，并完成 AGENTS.md 的 Development review workflow。不包括：仓库设置、分支保护、打 tag、发 Release。
+- **合并门槛是当前 head 的 CI 加审查流程**，不是旧 head、不是本地单次运行、也不是 PR 的 `mergeStateStatus` 缓存。
 - **PR 逐个合并的已知成本**：每个 PR 都改 `CHANGELOG.md`，因此每次合并后其余打开的 PR 会变成 `DIRTY/CONFLICTING`。处理方式固定：
   1. 在各 worktree `git merge origin/main`（不要 force-push）；
   2. `CHANGELOG.md` 保留双方条目、去重、修复粘连 bullet；
@@ -39,16 +39,17 @@
 - **Docker**：本机没有 Docker 时，`docker compose config` 与 `scripts/docker-smoke.sh` 记为未验证；CI 的 docker job 通过可以作为合并依据，但不能写成“本机 Docker 已验证”。
 - **TDD**：先写失败测试，再实现，再跑受影响测试集；修 bug 必须带修复前会失败的回归测试。
 - **不要用 `--no-verify`**。commit/push 的 SpecGit guard 必须真实通过；被拒时修 checkpoint 或 trailer，不要跳过。
-- **子 agent 分工**：大范围搜索、读长日志用便宜模型；规格已定的实现交给 implementer；设计、复审、最终验收由主会话做。子 agent 结论要抽查。
+- **子 agent 分工**：大范围搜索、读长日志用便宜模型；规格已定的实现交给 implementer；设计、复审、最终验收由主会话做。正式审查按 AGENTS.md 的独立审核、3 方会审、对抗审核执行；子 agent 结论只是线索，必须逐条复核证据。
 - 权限分类器拦下的命令不要绕过，记下来交给用户放行。
 
 ## 3. 当前状态
 
-- `main`：`28fd1b4`（#209 已合并），包含本次交接 PR；#210 的压测脚本复审修复在独立 PR 中。
+- `main`：`c279814`（#211 已合并）；本交接 PR #213 基于此。
 - 2026-10-30 审查列出的 P1/P2 与后续发现的 Issue 均已处理：#157、#158、#159、#160、#161、#162、#163、#164、#175、#176、#177、#178、#179、#180、#181、#182、#183、#184、#185、#186、#187。另有更早的 #140、#141、#142、#143、#144、#145、#146、#147、#170、#172、#174 同期合并。
-- 2026-11-02 新增：PR #197（#196，镜像内 codebase-memory 验证）、#198（#192，verify 读取 CI 失败 job 日志）、#200（#199，交接文档）、#201（#195，暗色对比度）、#203（#202，成本函数修复）、#204（#194，压测脚本）、#205（#195，可访问名称）、#207/#209（交接文档）已合并；Issue #196、#192、#199、#202、#194、#206、#208 已关闭。
+- 2026-11-02 新增：PR #197（#196，镜像内 codebase-memory 验证）、#198（#192，verify 读取 CI 失败 job 日志）、#200（#199，交接文档）、#201（#195，暗色对比度）、#203（#202，成本函数修复）、#204（#194，压测脚本）、#205（#195，可访问名称）、#207/#209（交接文档）、#211（#210，压测脚本复审修复）已合并；#213（#212，审查流程前缀指令）待合并；Issue #196、#192、#199、#202、#194、#206、#208、#210 已关闭，#212 随 #213 关闭。
 - #194 并发压测已实测：10 个项目并发 10/10 完成、0 失败，p50 22.24s、p95 27.23s；瓶颈是 provider `max_concurrency: 4` 排队。压测脚本随 PR #204 合并（`dc8fcde`），Issue #194 已关闭。
-- #204 合并后按约定补做代码审核、3 方会审和对抗审核，发现压测脚本 P1：`read` 在无换行输入上触发 `set -e` 退出、缺少吞吐、`duration_ms` 文档口径、默认授权用户 59、轮询瞬时 HTTP 失败直接退出。修复随 Issue #210 的 PR 提交；新增本地 mock 端到端测试，覆盖汇总、重试、取消、基线、默认不授权、admin 列表失败、grant 失败与授权目标用户，并接入 CI。
+- #204 合并后按约定补做代码审核、3 方会审和对抗审核，发现压测脚本 P1：`read` 在无换行输入上触发 `set -e` 退出、缺少吞吐、`duration_ms` 文档口径、默认授权用户 59、轮询瞬时 HTTP 失败直接退出。修复随 PR #211 合并（`c279814`）；新增本地 mock 端到端测试，覆盖汇总、重试、取消、基线、默认不授权、admin 列表失败、grant 失败与授权目标用户，并接入 CI。
+- 5 项目真实复测在修复 GitLab 项目 token 后通过：5/5 完成、0 失败，p50 27.4s、p95 31.9s，wall 58s，输入 348,429、输出 20,008 tokens，成本 116,085 micros。项目访问令牌 2026-12-03 到期，到期前需轮换。
 - #195 自动化验收完成：33.110 总览页亮/暗 Lighthouse Accessibility 100；390/1440 宽度无横向滚动；键盘抽查通过。执行图 `label-content-name-mismatch` 由 PR #205 合并（`95e9e08`）修复，新镜像上 axe 0 违规；截图已生成但 GitHub 未登录，无法附到 Issue。
 - **v1.2.0 仍未打 tag、未发 Release**，由维护者处理。CHANGELOG 有 `[1.2.0] - 2026-10-29` 版本段。
 - 迁移序号已用：`0020`（#159）、`0021`–`0023`（#180）、`0024`（#179），均已合并。无 down migration；升级/回退必须按 `docs/operations.md` 备份并整体恢复，不能只换镜像。
@@ -59,10 +60,11 @@
 |---|---|---|
 | #199 | 已关闭 | 交接文档已由 PR #200 合并；本次更新随本 PR 再入。 |
 | #193 | 待设计 | 允许执行内置 Skill 脚本（仅内置范围）。`ARCH.md` 仍写“首版不执行脚本”，内置 `code-review` 也没有脚本；实现前必须先确定脚本协议、清单和沙箱边界。当前没有具体脚本需求，暂不实施。 |
-| #194 | 已关闭 | 10 项目并发已实测通过；`scripts/loadtest.sh` 随 PR #204 合并。复审发现脚本 P1，修复随 #210 提交。SQLite/工作区锁等待未单独采集。 |
-| #210 | 修复中 | 压测脚本复审修复：汇总退出、吞吐、授权默认为零、HTTP 重试、基线 ID、统计与文档；`GRANT_MANAGE=1` 时从用户 token 的 `/me` 解析授权用户；执行图测试改为断言完整可访问名称。 |
+| #194 | 已关闭 | 10 项目并发已实测通过；`scripts/loadtest.sh` 随 PR #204 合并。复审发现脚本 P1，修复随 PR #211 合并（`c279814`）。SQLite/工作区锁等待未单独采集。 |
+| #210 | 已关闭 | 压测脚本复审修复随 PR #211 合并（`c279814`）：汇总退出、吞吐、授权默认为零、HTTP 重试、基线 ID、统计与文档；`GRANT_MANAGE=1` 时从用户 token 的 `/me` 解析授权用户；执行图测试改为断言完整可访问名称。 |
+| #212 | 随 PR #213 | 在 `AGENTS.md` 固化审查流程并删除过期 `prototype/v2` 条目；合并后关闭。 |
 | #195 | 验收完成，截图待附 | 自动化审计、键盘抽查、390/1440 检查完成；`label-content-name-mismatch` 由 PR #205 合并修复，新镜像 axe 0 违规。截图在 `$TMPDIR/opencode/a11y-195/`，需 GitHub 登录后附到 Issue。 |
-| #138 | 暂不实施 | 内容是把开发 CI 迁移到 Azure Pipelines 并删除 `.github/workflows`。当前 GitHub Actions 的 hosted runner 已可用且是合并门槛；执行 #138 会删除现行 CI。除非维护者明确要求迁移，否则保持现状。 |
+| #138 | 已关闭（not planned） | 内容是把开发 CI 迁移到 Azure Pipelines 并删除 `.github/workflows`。当前 GitHub Actions 的 hosted runner 已可用且是合并门槛；除非维护者明确要求迁移，否则保持现状。 |
 | #123 | 暂不实施 | 针对自托管 runner 的 `CGO_ENABLED` 与 Docker CLI 缺口。当前 hosted runner 已包含两者并通过；没有自托管 runner 的实际运行证据前，不改成假通过，也不重复排期。 |
 | #109 | 已拆分 | #192、#194、#196 已完成；剩余 #193、#195（截图待附）。Postgres 与 Q18 上游改造已记为不做。 |
 
@@ -75,7 +77,7 @@
 3. 实现修复；跑受影响包 `go test -race -timeout 40m ./internal/<pkg>/...`；改了前端就 `cd web && npm ci --offline && npm test -- --coverage && npm run build`，并提交 `web/dist`。
 4. 提交带 `Issue: #N` trailer；用户可见的变化写进 CHANGELOG 的 `Unreleased`。
 5. 同步最新 main，推送后等当前 head 的 GitHub Actions `go`/`web`/`docker` 全部 success。
-6. 独立复审（只给代码和 Issue，不给结论），没有新的 P1 才继续。
+6. 按 AGENTS.md 的 Development review workflow 完成独立审核、3 方会审、对抗审核、裁决与证据检查（docs-only 用缩减链）；没有新的 P1 才继续。
 7. `specgit pr` → `specgit pr --ready`；PR 正文写修复、回归测试、验证结果和未验证项。
 8. `gh pr merge --squash --match-head-commit <已验证 head>`，回读 Issue 已关闭，`specgit pr --status` 记为已交付。
 
@@ -109,7 +111,7 @@
 - 仓库 Skill 的发现接口不感知具体 MR 的 ignored rename；授权快照与运行时完整 deny 集合不一致时会 fail closed，需要重新授权。
 - UI 的 1440/390、亮/暗主题检查已补真实后端（33.110）的总览、评审详情、统计和系统页；仍不是物理设备与触屏验证。
 - #194 的单次 10 项目并发结果是环境观测，不是容量承诺；SQLite 锁等待没有单独指标，后续高并发需补 WAL/锁统计。
-- 2026-11-02 用 #210 脚本复测 5 项目时，5 个触发均返回 `gitlab_rejected`（GitLab 401）；项目 token 失效，真实 5 项目运行未完成。脚本按预期返回 1 并列出失败项；修复项目 token 后需重跑。mock 端到端测试不能替代真实结论。
+- 2026-11-02 用 #210 脚本复测 5 项目时先遇到 `gitlab_rejected`（GitLab 401）：注册时使用的个人 PAT 已撤销。改用项目访问令牌并轮换 Tribunal 项目 token 后，5 项目通过（5/5，0 失败，p50 27.4s、p95 31.9s，wall 58s，348,429/20,008 tokens，116,085 micros）。项目令牌 2026-12-03 到期，到期前需轮换。
 - #195 的截图尚未附到 Issue；GitHub 未登录，上传需要用户完成。
 - GitLab 临时 PAT（id 219）与 Tribunal 临时用户 token 已在验收后撤销；33.110 的 `.env` 与 admin token 仍保留，未轮换。
 - 一次浏览器验证的进程诊断曾把疑似 GitHub 令牌写入会话工具输出；用户确认该令牌早已撤销。仍未复核所有会话记录/备份的访问范围，后续不要再输出进程列表或环境变量。
@@ -127,3 +129,4 @@
 - 前端只用 CSS Modules 和 `web/src/styles/tokens.css`，用 `web/src/components/ui.tsx` 的共享组件；每次 web 改动都重建并提交 `web/dist`。
 - 交接文档本身也走 Issue + PR 入库，不要放在 `.git/info/exclude` 里的本地文件。
 - 合并后回读 Issue 与 PR 状态；CI 通知/评论不等于合并完成。
+- 合并门槛是当前 head 的 CI 加上 AGENTS.md 的 Development review workflow；CI 绿只是必要条件。

@@ -1269,7 +1269,7 @@ reviews=... completed=... failed=... cancelled=... triggers_failed=... failure_r
 - 示例配置的 provider 并发为 4，前 4 个评审立即启动，其余等待 `providers.<name>.max_concurrency`；没有观察到 SQLite 锁错误、工作区锁错误或任务丢失。
 - 这是一次环境观测，不是容量承诺；provider、diff 大小、网络和 GitLab 限流都会改变结果。
 - SQLite 锁等待与工作区锁等待没有单独指标；当前只能通过错误和耗时观察。
-- 2026-11-02 用复审后的脚本重试 5 项目时，5 个触发均返回 `gitlab_rejected`（GitLab 401）；项目 token 失效，脚本按预期返回 1 并列出失败项。修复项目 token 后需重跑；mock 测试不能替代真实环境结论。
+- 2026-11-02 用复审后的脚本跑 5 项目：修复 GitLab 项目 token 后 5/5 完成、0 失败，p50 27.4 秒，p95 31.9 秒，wall 58 秒，输入 348,429 tokens，输出 20,008 tokens，成本 116,085 micros。首次运行时项目 token 失效返回 `gitlab_rejected`（GitLab 401），脚本按预期返回 1 并列出失败项；mock 测试不能替代真实环境结论。
 
 ## 12. 验证状态
 
