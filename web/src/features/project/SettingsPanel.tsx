@@ -96,6 +96,12 @@ export function SettingsPanel({ project }: { project: Project }) {
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [deletePending, setDeletePending] = useState(false)
   const [deleteError, setDeleteError] = useState<unknown>(null)
+  const mounted = useRef(false)
+
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false; validateRef.current += 1 }
+  }, [])
 
   const profiles = useQuery({
     queryKey: ['profiles', 'project-settings'],
@@ -236,13 +242,16 @@ export function SettingsPanel({ project }: { project: Project }) {
     setRotateError(null)
     try {
       await rotateProjectToken(project.id, token.trim())
-      if (validateRef.current !== requestId) return
+      const refresh = Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['project', project.id] }),
+        queryClient.invalidateQueries({ queryKey: ['projects'] }),
+      ])
+      if (validateRef.current !== requestId) { await refresh; return }
       setToken('')
       setRotateValidation(null)
       setRotateOpen(false)
       toast.push('success', '仅更新平台保存的访问 Key；未在 GitLab 创建或撤销 Token，也不会自动触发评审或初始化。')
-      await queryClient.invalidateQueries({ queryKey: ['project', project.id] })
-      await queryClient.invalidateQueries({ queryKey: ['projects'] })
+      await refresh
     } catch (error) {
       if (validateRef.current !== requestId) return
       setRotateError(error)
@@ -260,7 +269,7 @@ export function SettingsPanel({ project }: { project: Project }) {
       setDeleteOpen(false)
       toast.push('success', '项目已注销。')
       await queryClient.invalidateQueries({ queryKey: ['projects'] })
-      navigate('/projects', { replace: true })
+      if (mounted.current) navigate('/projects', { replace: true })
     } catch (error) {
       setDeleteError(error)
     } finally {
@@ -504,4 +513,3 @@ export function SettingsPanel({ project }: { project: Project }) {
 function projectsAside(project: Project) {
   return <span>项目 ID {project.id} · 最后更新 {project.updated_at ? formatDate(project.updated_at) : '—'}</span>
 }
-

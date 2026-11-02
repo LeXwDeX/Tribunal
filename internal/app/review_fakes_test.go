@@ -466,6 +466,7 @@ func newReviewFixture(t *testing.T, head string) *reviewFixture {
 		Store:          db,
 		Workspace:      manager,
 		GitLab:         api,
+		Git:            git,
 		Cipher:         cipher,
 		Engine:         engine,
 		ReviewDefaults: defaults,
@@ -560,9 +561,10 @@ func mustJSONBody(t *testing.T, value any) json.RawMessage {
 func testDossier(t *testing.T, head string) *review.Dossier {
 	t.Helper()
 	dossier, err := review.BuildDossier(review.DossierInput{
-		IgnorePolicy:        &review.IgnorePolicy{Version: review.IgnorePolicyVersion, Patterns: append([]string{}, testDefaults().Ignore...)},
-		WorkspaceProvenance: &review.WorkspaceProvenance{Version: review.WorkspaceProvenanceVersion, TargetSHA: strings.Repeat("2", 40)},
-		Project:             review.ProjectRef{ID: 42, Path: "group/repo"},
+		IgnorePolicy:              &review.IgnorePolicy{Version: review.IgnorePolicyVersion, Patterns: append([]string{}, testDefaults().Ignore...)},
+		WorkspaceProvenance:       &review.WorkspaceProvenance{Version: review.WorkspaceProvenanceVersion, TargetSHA: strings.Repeat("2", 40)},
+		RepositorySkillProvenance: &review.RepositorySkillProvenance{Version: review.RepositorySkillProvenanceVersion, Mode: "none"},
+		Project:                   review.ProjectRef{ID: 42, Path: "group/repo"},
 		MR: review.MRMeta{
 			IID:          7,
 			Title:        "Add feature",
@@ -676,7 +678,11 @@ func testExecutionIdentity(t *testing.T, f *reviewFixture) string {
 		t.Fatal(err)
 	}
 	defer unlock()
-	execution, err := f.service.resolveReviewExecution(context.Background(), 42, review.Profile{Name: "default", Config: f.profiles["default"]})
+	project, err := f.db.GetProject(context.Background(), 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution, err := f.service.resolveReviewExecution(context.Background(), project, "", review.Profile{Name: "default", Config: f.profiles["default"]}, "main", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

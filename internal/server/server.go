@@ -274,6 +274,11 @@ func New(cfg Config) (*Server, error) {
 		mux.HandleFunc("GET "+prefix+"/projects/{id}/grants", s.apiAuth(s.guard(policyPlatformAdmin, s.handleAdminListGrants)))
 		mux.HandleFunc("PUT "+prefix+"/projects/{id}/grants/{user_id}", s.apiAuth(s.guard(policyPlatformAdmin, s.handleAdminSetGrant)))
 		mux.HandleFunc("DELETE "+prefix+"/projects/{id}/grants/{user_id}", s.apiAuth(s.guard(policyPlatformAdmin, s.handleAdminDeleteGrant)))
+		// Repository skill handlers verify platform admin and project manage
+		// access themselves because the target branch is a query parameter.
+		mux.HandleFunc("GET "+prefix+"/projects/{id}/repository-skills", s.apiAuth(s.handleDiscoverRepositorySkills))
+		mux.HandleFunc("GET "+prefix+"/projects/{id}/repository-skill-authorizations", s.apiAuth(s.handleGetRepositorySkillAuthorization))
+		mux.HandleFunc("PUT "+prefix+"/projects/{id}/repository-skill-authorizations", s.apiAuth(s.handleReplaceRepositorySkillAuthorization))
 	}
 	mux.HandleFunc("/api/", s.apiAuth(s.handleAPINotFound))
 	mux.HandleFunc("/api/v1", s.apiAuth(s.handleAPINotFound))

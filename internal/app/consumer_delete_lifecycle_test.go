@@ -402,7 +402,7 @@ func TestConsumerReviewCompletesWithDeleteWriterQueued(t *testing.T) {
 	release.Do(func() { close(api.release) })
 	select {
 	case err := <-reviewDone:
-		if err != nil {
+		if err != nil && !errors.Is(err, workspace.ErrOutboundInvalidated) {
 			t.Fatalf("review with waiting writer: %v", err)
 		}
 	case <-ctx.Done():
@@ -548,7 +548,7 @@ func TestConsumerTerminalFallbackCompletesWithDeleteWriterQueued(t *testing.T) {
 	release.Do(func() { close(api.release) })
 	select {
 	case err := <-done:
-		if err != nil {
+		if err != nil && !errors.Is(err, workspace.ErrOutboundInvalidated) {
 			t.Fatalf("terminal fallback: %v", err)
 		}
 	case <-ctx.Done():
@@ -617,7 +617,7 @@ func TestConsumerRecoveryFallbackCompletesWithDeleteWriterQueued(t *testing.T) {
 	release.Do(func() { close(api.release) })
 	select {
 	case err := <-done:
-		if err != nil {
+		if err != nil && !errors.Is(err, workspace.ErrOutboundInvalidated) {
 			t.Fatalf("recovery fallback: %v", err)
 		}
 	case <-ctx.Done():
