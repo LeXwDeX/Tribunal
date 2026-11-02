@@ -3,7 +3,11 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"testing"
@@ -12,6 +16,96 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/agent"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+func goTestHelperArgs(t *testing.T, name string) []string {
+	t.Helper()
+	args := []string{"-test.run=^" + name + "$"}
+	if testing.CoverMode() != "" {
+		args = append(args, "-test.gocoverdir="+t.TempDir())
+	}
+	return args
+}
+
+func isolateGoHelperCoverage(t *testing.T) {
+	t.Helper()
+	if testing.CoverMode() == "" {
+		return
+	}
+	coverFlag := flag.Lookup("test.gocoverdir")
+	if coverFlag == nil || coverFlag.Value.String() == "" {
+		t.Fatal("test.gocoverdir is required for the covered helper")
+	}
+	// Overlapping helper processes must not write coverage to the same directory.
+	processDir, err := os.MkdirTemp(coverFlag.Value.String(), "process-")
+	if err != nil {
+		t.Fatalf("create helper coverage directory: %v", err)
+	}
+	if err := flag.Set("test.gocoverdir", processDir); err != nil {
+		t.Fatalf("set helper coverage directory: %v", err)
+	}
+}
+
+func TestGoHelperExitStatus(t *testing.T) {
+	switch os.Getenv("MCP_TEST_HELPER_EXIT") {
+	case "success":
+		isolateGoHelperCoverage(t)
+		return
+	case "exit7":
+		isolateGoHelperCoverage(t)
+		os.Exit(7)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := goTestHelperArgs(t, "TestGoHelperExitStatus")
+	if testing.CoverMode() == "" {
+		if len(args) != 1 {
+			t.Fatalf("non-coverage helper args = %v", args)
+		}
+	} else if len(args) != 2 || !strings.HasPrefix(args[1], "-test.gocoverdir=") {
+		t.Fatalf("coverage helper args = %v", args)
+	}
+	run := func(mode string) error {
+		cmd := exec.Command(exe, args...)
+		cmd.Env = []string{"MCP_TEST_HELPER_EXIT=" + mode}
+		output, err := cmd.CombinedOutput()
+		if mode == "success" && err == nil {
+			return nil
+		}
+		var exitErr *exec.ExitError
+		if mode == "exit7" && errors.As(err, &exitErr) && exitErr.ExitCode() == 7 {
+			return nil
+		}
+		return fmt.Errorf("helper %s exit = %v; output: %s", mode, err, output)
+	}
+	results := make(chan error, 3)
+	for range cap(results) {
+		go func() { results <- run("success") }()
+	}
+	for range cap(results) {
+		if err := <-results; err != nil {
+			t.Error(err)
+		}
+	}
+	for _, mode := range []string{"exit7", "success"} {
+		if err := run(mode); err != nil {
+			t.Error(err)
+		}
+	}
+	if testing.CoverMode() != "" {
+		coverDir := strings.TrimPrefix(args[1], "-test.gocoverdir=")
+		dirs, err := os.ReadDir(coverDir)
+		if err != nil || len(dirs) != 5 {
+			t.Fatalf("helper coverage directories = %v, %v; want 5", dirs, err)
+		}
+		for _, dir := range dirs {
+			if !dir.IsDir() {
+				t.Fatalf("helper coverage path %q is not a directory", dir.Name())
+			}
+		}
+	}
+}
 
 func testServer() *sdk.Server {
 	server := sdk.NewServer(&sdk.Implementation{Name: "test-mcp", Version: "1.0.0"}, nil)

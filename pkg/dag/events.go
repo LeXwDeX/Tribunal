@@ -78,43 +78,49 @@ type NodeStartedPayload struct {
 
 // NodeCompletedPayload is the payload of node.completed.
 type NodeCompletedPayload struct {
-	NodeID  string          `json:"node_id"`
-	Attempt int             `json:"attempt"`
-	Output  json.RawMessage `json:"output,omitempty"`
-	Usage   Usage           `json:"usage"`
+	NodeID          string          `json:"node_id"`
+	Attempt         int             `json:"attempt"`
+	Output          json.RawMessage `json:"output,omitempty"`
+	Usage           Usage           `json:"usage"`
+	UsageIncomplete bool            `json:"usage_incomplete,omitempty"`
 }
 
 // NodeFailedPayload is the payload of node.failed.
 type NodeFailedPayload struct {
-	NodeID      string `json:"node_id"`
-	Attempt     int    `json:"attempt"`
-	Error       string `json:"error,omitempty"`
-	ErrorKind   string `json:"error_kind,omitempty"`
-	ErrorStatus int    `json:"error_status,omitempty"`
-	Reason      string `json:"reason,omitempty"`
-	Usage       Usage  `json:"usage"`
+	NodeID          string `json:"node_id"`
+	Attempt         int    `json:"attempt"`
+	Error           string `json:"error,omitempty"`
+	ErrorKind       string `json:"error_kind,omitempty"`
+	ErrorStatus     int    `json:"error_status,omitempty"`
+	Reason          string `json:"reason,omitempty"`
+	Usage           Usage  `json:"usage"`
+	UsageIncomplete bool   `json:"usage_incomplete,omitempty"`
 }
 
 // NodeAbortedPayload is the payload of node.aborted.
 type NodeAbortedPayload struct {
-	NodeID  string `json:"node_id"`
-	Attempt int    `json:"attempt"`
-	Reason  string `json:"reason,omitempty"`
+	NodeID          string `json:"node_id"`
+	Attempt         int    `json:"attempt"`
+	Reason          string `json:"reason,omitempty"`
+	UsageIncomplete bool   `json:"usage_incomplete,omitempty"`
 }
 
 // NodeSkippedPayload is the payload of node.skipped.
 type NodeSkippedPayload struct {
-	NodeID  string `json:"node_id"`
-	Attempt int    `json:"attempt,omitempty"`
-	Reason  string `json:"reason,omitempty"`
+	NodeID          string `json:"node_id"`
+	Attempt         int    `json:"attempt,omitempty"`
+	Reason          string `json:"reason,omitempty"`
+	Usage           *Usage `json:"usage,omitempty"`
+	UsageIncomplete bool   `json:"usage_incomplete,omitempty"`
 }
 
 // NodeRestartedPayload is the payload of node.restarted.
 type NodeRestartedPayload struct {
-	NodeID      string `json:"node_id"`
-	Attempt     int    `json:"attempt,omitempty"`
-	NextAttempt int    `json:"next_attempt,omitempty"`
-	Reason      string `json:"reason,omitempty"`
+	NodeID          string `json:"node_id"`
+	Attempt         int    `json:"attempt,omitempty"`
+	NextAttempt     int    `json:"next_attempt,omitempty"`
+	Reason          string `json:"reason,omitempty"`
+	UsageIncomplete bool   `json:"usage_incomplete,omitempty"`
 }
 
 // NodeRegisteredPayload is the compatibility payload of node.registered.
