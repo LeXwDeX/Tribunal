@@ -243,6 +243,11 @@ describe('execution graph', () => {
     }
   })
 
+  it('includes the visible provider and attempt in the node accessible name', () => {
+    render(<ExecutionGraph nodes={[{ id: 'retry', kind: 'verify', status: 'running', attempt: 2, provider: 'primary' }]} edges={[]} onSelect={() => {}} />)
+    expect(screen.getByRole('button', { name: /节点 retry.*第 2 次.*primary/ })).toBeInTheDocument()
+  })
+
   it('keeps nodes keyboard focusable and highlights their edges on hover and focus', async () => {
     const onSelect = vi.fn()
     const { container } = render(<ExecutionGraph nodes={graphNodes} edges={[]} onSelect={onSelect} />)
