@@ -1,5 +1,5 @@
 // Package skill loads Claude-compatible instruction skills from explicitly
-// configured platform, project and optional target-base directories.
+// configured platform, project and optional repository snapshot directories.
 //
 // Only name and description are exposed until the model calls load_skill.
 // Bodies and attached resources are read lazily, confined to each skill
@@ -49,6 +49,13 @@ var (
 	skillNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 )
 
+// ValidRepositoryName identifies names that are distinct from legacy skill
+// names. It only checks syntax and does not grant access to the name.
+func ValidRepositoryName(name string) bool {
+	value, ok := strings.CutPrefix(name, "repo:")
+	return ok && skillNameRE.MatchString(value) && !strings.Contains(value, "__")
+}
+
 // Skill is one catalogue entry. It deliberately omits the body and path.
 type Skill struct {
 	Name        string `json:"name"`
@@ -56,8 +63,10 @@ type Skill struct {
 }
 
 // Options configures a Loader. PlatformDirs are scanned in order, then
-// RepoSkillsDir (an optional target-base .claude/skills directory), then
-// ProjectDir. A later source overrides a skill with the same name.
+// RepoSkillsDir, then ProjectDir. Project skills override platform skills.
+// Repository skills are named repo:<name> and cannot override either source.
+// RepoSkillsDir must be an already verified, ignore-filtered snapshot; this
+// loader does not authenticate its source or authorize any block binding.
 type Options struct {
 	PlatformDirs   []string
 	ProjectDir     string
@@ -158,7 +167,13 @@ func (l *Loader) scanSource(dir string, source int) error {
 			l.warn("%s %q: %s", sourceLabel(source), name, err)
 			continue
 		}
+		if source == 1 {
+			skill.name = "repo:" + skill.name
+		}
 		if previous, ok := l.skills[skill.name]; ok {
+			if source == 1 && previous.source == 1 {
+				return fmt.Errorf("%w: duplicate repository skill name", ErrInvalidSkill)
+			}
 			l.warn("skill %q from %s overrides %s", skill.name, sourceLabel(source), sourceLabel(previous.source))
 		}
 		l.skills[skill.name] = skill
@@ -273,6 +288,34 @@ func (l *Loader) Catalogue() []Skill {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// RepositoryCatalogue reads metadata only from an already verified and
+// ignore-filtered snapshot. It does not authorize a block or verify the
+// snapshot's project, target branch or provenance.
+func RepositoryCatalogue(files map[string][]byte) ([]Skill, error) {
+	items := make(map[string]Skill)
+	for path, data := range files {
+		dir, file, ok := strings.Cut(path, "/")
+		if !ok || dir == "" || file != "SKILL.md" || strings.Contains(path, "\\") || !safeResourcePath(path) || len(data) > maxSkillFileBytes {
+			continue
+		}
+		fm, _, err := parseSkill(data)
+		if err != nil {
+			continue
+		}
+		name := "repo:" + fm.Name
+		if _, exists := items[name]; exists {
+			return nil, fmt.Errorf("%w: duplicate repository skill name", ErrInvalidSkill)
+		}
+		items[name] = Skill{Name: name, Description: fm.Description}
+	}
+	out := make([]Skill, 0, len(items))
+	for _, item := range items {
+		out = append(out, item)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
 }
 
 // Warnings returns skipped-skill diagnostics in scan order.

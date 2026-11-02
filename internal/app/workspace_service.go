@@ -311,6 +311,10 @@ func (s *WorkspaceService) onboard(ctx context.Context, projectID int64, job *jo
 		return err
 	}
 	defer unlock()
+	ctx, err = bindOutbound(ctx, ws)
+	if err != nil {
+		return err
+	}
 	if job != nil {
 		if err := consumerJobExists(ctx, s.store, job, "workspace.onboard", projectID); err != nil {
 			return err
@@ -343,6 +347,10 @@ func (s *WorkspaceService) refreshWithOptions(ctx context.Context, projectID int
 		return err
 	}
 	defer unlock()
+	ctx, err = bindOutbound(ctx, ws)
+	if err != nil {
+		return err
+	}
 	if job != nil {
 		if err := consumerJobExists(ctx, s.store, job, "workspace.refresh", projectID); err != nil {
 			return err
@@ -379,7 +387,7 @@ func (s *WorkspaceService) refreshWithOptions(ctx context.Context, projectID int
 	} else if reindex && s.mcpFactory != nil {
 		count, err := s.runIndex(ctx, projectID, ws.BaseDir())
 		switch {
-		case err != nil && ctx.Err() != nil:
+		case err != nil && (ctx.Err() != nil || errors.Is(err, workspace.ErrOutboundInvalidated)):
 			s.markWorkspaceError(ctx, projectID, err)
 			return err
 		case err != nil:
@@ -402,9 +410,8 @@ func (s *WorkspaceService) refreshWithOptions(ctx context.Context, projectID int
 	contextAfter := state.ContextSHA
 	if regenerate {
 		if err := s.generateContext(ctx, project, ws, newBase, docs, cfg, indexEligible && indexErr == ""); err != nil {
-			if errors.Is(err, ErrContextProjection) {
-				// The database owns the active revision; a failed disk projection
-				// must not be reported as a successful refresh.
+			if errors.Is(err, ErrContextProjection) || errors.Is(err, workspace.ErrOutboundInvalidated) {
+				// A stale policy or failed projection cannot report a successful refresh.
 				s.markWorkspaceError(ctx, projectID, err)
 				return err
 			}
@@ -488,7 +495,7 @@ func (s *WorkspaceService) onboardLocked(ctx context.Context, project *store.Pro
 	} else if s.mcpFactory != nil {
 		count, err := s.runIndex(ctx, project.ID, ws.BaseDir())
 		switch {
-		case err != nil && ctx.Err() != nil:
+		case err != nil && (ctx.Err() != nil || errors.Is(err, workspace.ErrOutboundInvalidated)):
 			s.markWorkspaceError(ctx, project.ID, err)
 			return err
 		case err != nil:
@@ -557,6 +564,7 @@ func (s *WorkspaceService) generateContext(ctx context.Context, project *store.P
 		Snapshot: engineSnapshot(s.engine),
 		Tools:    s.tools,
 		Skills:   s.skills,
+		Outbound: outboundSender(ws),
 	})
 	if err != nil {
 		return PermanentJob(fmt.Errorf("build onboarding executor: %w", err))
@@ -575,6 +583,9 @@ func (s *WorkspaceService) generateContext(ctx context.Context, project *store.P
 	s.executors.Register(wfID, executor)
 	defer s.executors.Unregister(wfID)
 	if err := s.engine.Run(ctx, wfID); err != nil {
+		return err
+	}
+	if err := sendOutbound(ctx, ws, func(context.Context) error { return nil }); err != nil {
 		return err
 	}
 	snapshot, err := s.engine.Snapshot(ctx, wfID)
@@ -731,7 +742,13 @@ func (s *WorkspaceService) runIndex(ctx context.Context, projectID int64, baseDi
 	}
 	// The manager is owned by the runtime and shared with review tools; do not
 	// close it here.
-	return manager.RunIndex(ctx, baseDir)
+	var count int
+	err = sendOutbound(ctx, s.workspace.Get(projectID), func(ctx context.Context) error {
+		var err error
+		count, err = manager.RunIndex(ctx, baseDir)
+		return err
+	})
+	return count, err
 }
 
 func (s *WorkspaceService) projectToken(ctx context.Context, projectID int64) (*store.Project, string, error) {
