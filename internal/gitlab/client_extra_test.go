@@ -488,6 +488,74 @@ func TestExtraMethodsHonorCancellationWithoutLeakingTokens(t *testing.T) {
 	}
 }
 
+func TestGetJobTraceReadsShortTrace(t *testing.T) {
+	const token = "glpat-extra"
+	client := newExtraClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v4/projects/42/jobs/7/trace" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.Header.Get("PRIVATE-TOKEN"); got != token {
+			t.Errorf("PRIVATE-TOKEN = %q", got)
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, "build failed at main.go:12\n")
+	})
+
+	trace, err := client.GetJobTrace(context.Background(), token, 42, 7)
+	if err != nil {
+		t.Fatalf("GetJobTrace: %v", err)
+	}
+	if trace != "build failed at main.go:12\n" {
+		t.Fatalf("trace = %q", trace)
+	}
+}
+
+func TestGetJobTraceTruncatesLongTrace(t *testing.T) {
+	long := strings.Repeat("a", maxJobTraceBytes) + "after-limit"
+	client := newExtraClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v4/projects/42/jobs/7/trace" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, long)
+	})
+
+	trace, err := client.GetJobTrace(context.Background(), "token", 42, 7)
+	if err != nil {
+		t.Fatalf("GetJobTrace: %v", err)
+	}
+	if strings.Contains(trace, "after-limit") {
+		t.Fatal("trace kept bytes past the 64 KiB limit")
+	}
+	if !strings.HasPrefix(trace, strings.Repeat("a", maxJobTraceBytes)) {
+		t.Fatal("trace does not keep the first 64 KiB")
+	}
+	if !strings.HasSuffix(trace, jobTraceTruncatedMarker) {
+		t.Fatalf("trace has no truncation marker: %q", trace)
+	}
+}
+
+func TestGetJobTraceNotFound(t *testing.T) {
+	client := newExtraClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v4/projects/42/jobs/7/trace" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		http.NotFound(w, r)
+	})
+
+	_, err := client.GetJobTrace(context.Background(), "token", 42, 7)
+	if !IsNotFound(err) {
+		t.Fatalf("error = %v, want not found", err)
+	}
+	if !strings.Contains(err.Error(), "get_job_trace") {
+		t.Fatalf("error = %v, want the get_job_trace operation", err)
+	}
+}
+
 func TestExtraMethodsRejectMissingTokenAndInvalidIDs(t *testing.T) {
 	var requests atomic.Int32
 	client := newExtraClient(t, func(w http.ResponseWriter, r *http.Request) {
@@ -500,6 +568,8 @@ func TestExtraMethodsRejectMissingTokenAndInvalidIDs(t *testing.T) {
 		func() error { _, err := client.LatestMRVersion(ctx, "token", 42, 0); return err },
 		func() error { _, err := client.ListMRPipelines(ctx, "token", 42, -1); return err },
 		func() error { _, err := client.ListPipelineJobs(ctx, "token", 42, 0); return err },
+		func() error { _, err := client.GetJobTrace(ctx, "token", 0, 7); return err },
+		func() error { _, err := client.GetJobTrace(ctx, "token", 42, 0); return err },
 		func() error { _, err := client.ListClosingIssues(ctx, "token", 0, 7); return err },
 		func() error { _, err := client.ListMRNotes(ctx, "token", 42, 0); return err },
 		func() error { _, err := client.CreateMRNote(ctx, "token", 42, 7, " "); return err },

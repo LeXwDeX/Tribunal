@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/LeXwDeX/tribunal/internal/config"
@@ -16,6 +17,33 @@ import (
 	"github.com/LeXwDeX/tribunal/pkg/dag"
 	"go.yaml.in/yaml/v3"
 )
+
+// maxPipelineJobTraces bounds trace downloads per review.
+const maxPipelineJobTraces = 3
+
+const redactedJobTraceValue = "[REDACTED]"
+
+var (
+	jobTraceTokenRE         = regexp.MustCompile(`glpat-[A-Za-z0-9_-]+`)
+	jobTracePrivateTokenRE  = regexp.MustCompile(`(?i)(PRIVATE-TOKEN\s*:\s*)\S+`)
+	jobTraceBearerRE        = regexp.MustCompile(`(?i)(Authorization\s*:\s*Bearer\s+)\S+`)
+	jobTraceURLCredsRE      = regexp.MustCompile(`://[^/\s:@]+:[^/\s@]+@`)
+	jobTraceCIVarRE         = regexp.MustCompile(`(?m)\b(CI_JOB_TOKEN\s*=\s*)\S+`)
+	jobTraceGenericSecretRE = regexp.MustCompile(`(?i)\b((?:[A-Z0-9_]*TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|ACCESS[_-]?KEY)\s*[:=]\s*)\S+`)
+)
+
+// sanitizeJobTrace removes credential-looking values before logs reach a
+// prompt. The patterns are deliberately narrow; they do not make arbitrary
+// log text safe or trusted.
+func sanitizeJobTrace(trace string) string {
+	trace = jobTraceTokenRE.ReplaceAllString(trace, redactedJobTraceValue)
+	trace = jobTracePrivateTokenRE.ReplaceAllString(trace, "${1}"+redactedJobTraceValue)
+	trace = jobTraceBearerRE.ReplaceAllString(trace, "${1}"+redactedJobTraceValue)
+	trace = jobTraceURLCredsRE.ReplaceAllString(trace, "://"+redactedJobTraceValue+"@")
+	trace = jobTraceCIVarRE.ReplaceAllString(trace, "${1}"+redactedJobTraceValue)
+	trace = jobTraceGenericSecretRE.ReplaceAllString(trace, "${1}"+redactedJobTraceValue)
+	return trace
+}
 
 // ErrInvalidRepoConfig reports a target-branch .gitlab-review.yml that cannot
 // be applied safely. It is permanent until the file is fixed.
@@ -130,17 +158,30 @@ func (s *ReviewService) collectPipeline(ctx context.Context, token string, proje
 		s.logger.Warn("pipeline jobs lookup failed", "project_id", projectID, "pipeline_id", latest.ID)
 		return summary
 	}
+	traced := 0
 	for _, job := range jobs {
 		if job.Status != "failed" || job.AllowFailure {
 			continue
 		}
-		summary.FailedJobs = append(summary.FailedJobs, review.JobSummary{
+		item := review.JobSummary{
+			ID:            job.ID,
 			Name:          job.Name,
 			Stage:         job.Stage,
 			Status:        job.Status,
 			FailureReason: job.FailureReason,
 			WebURL:        job.WebURL,
-		})
+		}
+		if traced < maxPipelineJobTraces && job.ID > 0 {
+			traced++
+			trace, err := s.gitlab.GetJobTrace(ctx, token, projectID, job.ID)
+			if err != nil {
+				// Keep raw log text and upstream errors out of application logs.
+				s.logger.Warn("job trace lookup failed", "project_id", projectID, "pipeline_id", latest.ID, "job_id", job.ID)
+			} else {
+				item.Trace = sanitizeJobTrace(trace)
+			}
+		}
+		summary.FailedJobs = append(summary.FailedJobs, item)
 	}
 	return summary
 }

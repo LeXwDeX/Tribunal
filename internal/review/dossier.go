@@ -90,13 +90,16 @@ type DiffSummary struct {
 	Omitted []OmittedFile `json:"omitted,omitempty"`
 }
 
-// JobSummary is one failed CI job shown to the planner.
+// JobSummary is one failed CI job shown to the planner. Trace is a sanitized,
+// truncated log excerpt and may be empty.
 type JobSummary struct {
+	ID            int64  `json:"id,omitempty"`
 	Name          string `json:"name"`
 	Stage         string `json:"stage,omitempty"`
 	Status        string `json:"status"`
 	FailureReason string `json:"failure_reason,omitempty"`
 	WebURL        string `json:"web_url,omitempty"`
+	Trace         string `json:"trace,omitempty"`
 }
 
 // PipelineSummary is the latest pipeline projection.
