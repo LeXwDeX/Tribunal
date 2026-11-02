@@ -15,7 +15,7 @@
 
 ## 1. 新机器环境准备
 
-1. **克隆**：`gh repo clone LeXwDeX/Tribunal && cd Tribunal`。当前 `main` 至少包含 `44e2d4b`（#203）和本交接的 PR；另有打开的 #204（压测脚本）与 #205（执行图可访问名称）。
+1. **克隆**：`gh repo clone LeXwDeX/Tribunal && cd Tribunal`。当前 `main` 至少包含 `14273ba`（#207）和本交接的 PR。
 2. **工具**：Go（`go.mod` 的 toolchain 是 1.26.10）、Node + npm（`web/`）、Bash、Python 3、能跑 `-race` 的 C 编译器、`gh`（已登录、对仓库有写权限）。本机可以没有 Docker；没有 Docker 时 Compose/冒烟必须记为未验证。
 3. **SpecGit**：仓库要求每个提交带 `Issue: #N` trailer，并由 SpecGit 的本地 checkpoint 把关。`.specgit.yaml` 和 SpecGit Skill 是本地文件，不在仓库里，新 clone 要重新接入：
    - 安装共享 CLI（见 <https://github.com/LeXwDeX/SpecGit/blob/main/docs/agent-install.md>），确认 `specgit --human --version` ≥ 2.17.1。
@@ -47,8 +47,8 @@
 - `main`：`44e2d4b`（#203 已合并），包含本次交接 PR。
 - 2026-10-30 审查列出的 P1/P2 与后续发现的 Issue 均已处理：#157、#158、#159、#160、#161、#162、#163、#164、#175、#176、#177、#178、#179、#180、#181、#182、#183、#184、#185、#186、#187。另有更早的 #140、#141、#142、#143、#144、#145、#146、#147、#170、#172、#174 同期合并。
 - 2026-11-02 新增：PR #197（#196，镜像内 codebase-memory 验证）、#198（#192，verify 读取 CI 失败 job 日志）、#200（#199，交接文档）、#201（#195，暗色对比度）、#203（#202，成本函数修复）已合并；Issue #196、#192、#199、#202 已关闭。
-- #194 并发压测已实测：10 个项目并发 10/10 完成、0 失败，p50 22.24s、p95 27.23s；瓶颈是 provider `max_concurrency: 4` 排队。压测脚本 PR #204 打开中。
-- #195 自动化验收完成：33.110 总览页亮/暗 Lighthouse Accessibility 100；390/1440 宽度无横向滚动；键盘抽查通过。执行图 `label-content-name-mismatch` 由 PR #205 修复；截图已生成但 GitHub 未登录，无法附到 Issue。
+- #194 并发压测已实测：10 个项目并发 10/10 完成、0 失败，p50 22.24s、p95 27.23s；瓶颈是 provider `max_concurrency: 4` 排队。压测脚本随 PR #204 合并（`dc8fcde`），Issue #194 已关闭；SQLite 锁等待未单独采集。
+- #195 自动化验收完成：33.110 总览页亮/暗 Lighthouse Accessibility 100；390/1440 宽度无横向滚动；键盘抽查通过。执行图 `label-content-name-mismatch` 由 PR #205 合并（`95e9e08`）修复，新镜像上 axe 0 违规；截图已生成但 GitHub 未登录，无法附到 Issue。
 - **v1.2.0 仍未打 tag、未发 Release**，由维护者处理。CHANGELOG 有 `[1.2.0] - 2026-10-29` 版本段。
 - 迁移序号已用：`0020`（#159）、`0021`–`0023`（#180）、`0024`（#179），均已合并。无 down migration；升级/回退必须按 `docs/operations.md` 备份并整体恢复，不能只换镜像。
 
@@ -58,11 +58,11 @@
 |---|---|---|
 | #199 | 已关闭 | 交接文档已由 PR #200 合并；本次更新随本 PR 再入。 |
 | #193 | 待设计 | 允许执行内置 Skill 脚本（仅内置范围）。`ARCH.md` 仍写“首版不执行脚本”，内置 `code-review` 也没有脚本；实现前必须先确定脚本协议、清单和沙箱边界。当前没有具体脚本需求，暂不实施。 |
-| #194 | 压测完成，脚本待合 | 10 项目并发已实测通过；`scripts/loadtest.sh` 由 PR #204 提交，等 CI 与合并。 |
-| #195 | 验收完成，截图待附 | 自动化审计、键盘抽查、390/1440 检查完成；`label-content-name-mismatch` 由 PR #205 修复。截图在 `$TMPDIR/opencode/a11y-195/`，需 GitHub 登录后附到 Issue。 |
+| #194 | 已关闭 | 10 项目并发已实测通过；`scripts/loadtest.sh` 随 PR #204 合并。SQLite/工作区锁等待未单独采集，已作为已知限制记录。 |
+| #195 | 验收完成，截图待附 | 自动化审计、键盘抽查、390/1440 检查完成；`label-content-name-mismatch` 由 PR #205 合并修复，新镜像 axe 0 违规。截图在 `$TMPDIR/opencode/a11y-195/`，需 GitHub 登录后附到 Issue。 |
 | #138 | 暂不实施 | 内容是把开发 CI 迁移到 Azure Pipelines 并删除 `.github/workflows`。当前 GitHub Actions 的 hosted runner 已可用且是合并门槛；执行 #138 会删除现行 CI。除非维护者明确要求迁移，否则保持现状。 |
 | #123 | 暂不实施 | 针对自托管 runner 的 `CGO_ENABLED` 与 Docker CLI 缺口。当前 hosted runner 已包含两者并通过；没有自托管 runner 的实际运行证据前，不改成假通过，也不重复排期。 |
-| #109 | 已拆分 | #192、#196 已完成；剩余 #193、#194、#195。Postgres 与 Q18 上游改造已记为不做。 |
+| #109 | 已拆分 | #192、#194、#196 已完成；剩余 #193、#195（截图待附）。Postgres 与 Q18 上游改造已记为不做。 |
 
 审查中另有未开 Issue 的条件性风险，保留在 #109 的记录里，不按缺陷处理。
 
