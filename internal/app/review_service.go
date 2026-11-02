@@ -229,6 +229,7 @@ func NewReviewService(cfg ReviewServiceConfig) (*ReviewService, error) {
 		prompts:        cfg.Prompts,
 		clients:        cfg.Clients,
 		agentRun:       cfg.AgentRun,
+		cost:           cfg.Cost,
 		tools:          cfg.Tools,
 		skills:         cfg.Skills,
 		providerNames:  cfg.AllowedProviders,

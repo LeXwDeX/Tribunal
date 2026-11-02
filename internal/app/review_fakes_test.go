@@ -516,6 +516,7 @@ func newReviewFixture(t *testing.T, head string) *reviewFixture {
 		Prompts:           bundle,
 		AgentRun:          runner.Run,
 		Publisher:         publisher,
+		Cost:              func(string, llm.Usage) int64 { return 1 },
 		AllowedProviders:  []string{"fake"},
 		ProviderConfigs:   map[string]config.ProviderConfig{"fake": {Model: "fixture"}},
 		ExecutionIdentity: "review-fixture-v1",

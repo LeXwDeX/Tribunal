@@ -1341,3 +1341,10 @@ func TestPublishEmptyRejectsIncompleteInputs(t *testing.T) {
 }
 
 var _ = dag.WorkflowCancelled
+
+func TestNewReviewServiceKeepsCostFunc(t *testing.T) {
+	f := newReviewFixture(t, reviewTestHead)
+	if f.service.cost == nil {
+		t.Fatal("NewReviewService dropped the cost function")
+	}
+}
