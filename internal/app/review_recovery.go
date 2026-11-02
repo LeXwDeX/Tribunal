@@ -103,7 +103,8 @@ func (s *ReviewService) recoverRepositorySkillOutcomes(ctx context.Context) erro
 				errs = append(errs, err)
 				continue
 			}
-			if record == nil || review.DossierHasSupportedRepositorySkillCapability(record.Data) {
+			if record == nil || (record.PublicationError != repositorySkillEvidenceReason &&
+				(wf.Status == string(dag.WorkflowCompleted) || review.DossierHasSupportedRepositorySkillCapability(record.Data))) {
 				continue
 			}
 			lockedCtx, unlock, err := s.publisher.lockWorkflow(ctx, wf.ID)
@@ -114,7 +115,7 @@ func (s *ReviewService) recoverRepositorySkillOutcomes(ctx context.Context) erro
 				errs = append(errs, err)
 				continue
 			}
-			_, _, err = s.publisher.rejectRepositorySkillPublication(lockedCtx, s.store, wf.ID)
+			err = s.recoverRepositorySkillOutcomeLocked(lockedCtx, wf.ID)
 			unlock()
 			if err != nil && !errors.Is(err, store.ErrNotFound) {
 				errs = append(errs, err)
@@ -125,6 +126,35 @@ func (s *ReviewService) recoverRepositorySkillOutcomes(ctx context.Context) erro
 		}
 		cursor = next
 	}
+}
+
+// Recheck the durable reason under the publication locks before settling.
+func (s *ReviewService) recoverRepositorySkillOutcomeLocked(ctx context.Context, id string) error {
+	mrUnlock, err := s.publisher.lockReviewMR(ctx, id)
+	if err != nil {
+		return err
+	}
+	defer mrUnlock()
+	unlock, err := s.publisher.locks.lock(ctx, id)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	wf, err := s.store.GetWorkflow(ctx, id)
+	if err != nil || wf == nil {
+		return err
+	}
+	record, err := s.store.GetWorkflowDossier(ctx, id)
+	if err != nil || record == nil {
+		return err
+	}
+	if !workflowTerminal(wf.Status) || wf.MRIID == nil || record.PublicationState != store.WorkflowPublicationSkipped ||
+		(record.PublicationError != repositorySkillEvidenceReason &&
+			(wf.Status == string(dag.WorkflowCompleted) || review.DossierHasSupportedRepositorySkillCapability(record.Data))) {
+		return nil
+	}
+	_, _, err = s.publisher.rejectRepositorySkillPublicationLocked(ctx, s.store, id)
+	return err
 }
 
 func (s *ReviewService) settleOrphanDossiers(ctx context.Context) error {
@@ -402,7 +432,7 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 		s.setReviewStatus(ctx, project.ID, *workflow.MRIID, record.Generation, 0,
 			dossier.DiffVersion.HeadSHA, profileName, reviewStatusPublishing, "")
 		var publishErr error
-		if cfg.Settings.PostFailureNote {
+		if cfg.Settings.PostFailureNote || cfg.Settings.CommitStatus {
 			publishErr = s.publishFailure(ctx, workflow.ID, snapshot)
 		} else {
 			publishErr = s.skipPublication(ctx, workflow.ID, failureNoteDisabledReason)
@@ -489,10 +519,10 @@ func runDirOwned(ws *workspace.Workspace, dir string) bool {
 	return true
 }
 
-// failureNoteEnabled reads the persisted configuration snapshot for a failed
-// workflow. It avoids publishing a failure note that the project disabled when
-// the process died between the workflow failure and its publication state.
-func (s *ReviewService) failureNoteEnabled(ctx context.Context, workflowID string) (bool, error) {
+// failurePublicationEnabled reads the persisted configuration snapshot for a
+// failed workflow. It reports whether any failure output is enabled, so a
+// retry does not skip a commit status when only the failure note is disabled.
+func (s *ReviewService) failurePublicationEnabled(ctx context.Context, workflowID string) (bool, error) {
 	workflow, err := s.store.GetWorkflow(ctx, workflowID)
 	if err != nil {
 		return false, err
@@ -512,7 +542,8 @@ func (s *ReviewService) failureNoteEnabled(ctx context.Context, workflowID strin
 	if projectRow == nil {
 		return false, fmt.Errorf("project %d is missing", workflow.ProjectID)
 	}
-	return s.resolveConfig(projectRow, dossier.RepoDocs).Settings.PostFailureNote, nil
+	settings := s.resolveConfig(projectRow, dossier.RepoDocs).Settings
+	return settings.PostFailureNote || settings.CommitStatus, nil
 }
 
 // PublishPending retries terminal workflows whose publication state is still
@@ -667,11 +698,11 @@ func (s *ReviewService) publishPendingItem(ctx context.Context, item store.Pendi
 			}
 			return true, nil
 		}
-		wantsNote, configErr := s.failureNoteEnabled(ctx, item.WorkflowID)
+		wantsPublication, configErr := s.failurePublicationEnabled(ctx, item.WorkflowID)
 		if configErr != nil {
 			return false, configErr
 		}
-		if !wantsNote {
+		if !wantsPublication {
 			if skipErr := s.skipPublication(ctx, item.WorkflowID, failureNoteDisabledReason); skipErr != nil {
 				return false, skipErr
 			}

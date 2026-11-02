@@ -67,7 +67,7 @@ func (c *blockedTurnClient) Generate(ctx context.Context, _ *llm.Request) (*llm.
 		return &llm.Response{Message: llm.Message{Role: llm.RoleAssistant, Parts: []llm.Part{{Type: llm.PartText, Text: "continue"}}}, StopReason: llm.StopEndTurn}, nil
 	}
 	c.wait(ctx)
-	return &llm.Response{Message: llm.Message{Role: llm.RoleAssistant, Parts: []llm.Part{{Type: llm.PartToolCall, ToolCall: &llm.ToolCall{ID: "submit", Name: "submit_result", Input: json.RawMessage(`{"summary":"ok","findings":[]}`)}}}}}, nil
+	return &llm.Response{Message: llm.Message{Role: llm.RoleAssistant, Parts: []llm.Part{{Type: llm.PartToolCall, ToolCall: &llm.ToolCall{ID: "submit", Name: "submit_result", Input: json.RawMessage(`{"summary":"ok","findings":[]}`)}}}}, StopReason: llm.StopToolUse}, nil
 }
 
 func TestPolicyChangeCancelsRealSecondGenerate(t *testing.T) {
@@ -193,7 +193,7 @@ func (c *mcpCallingClient) Info() llm.ProviderInfo {
 }
 func (c *mcpCallingClient) Generate(context.Context, *llm.Request) (*llm.Response, error) {
 	c.calls.Add(1)
-	return &llm.Response{Message: llm.Message{Role: llm.RoleAssistant, Parts: []llm.Part{{Type: llm.PartToolCall, ToolCall: &llm.ToolCall{ID: "mcp", Name: "mcp__remote__search", Input: json.RawMessage(`{"query":"repository-derived"}`)}}}}}, nil
+	return &llm.Response{Message: llm.Message{Role: llm.RoleAssistant, Parts: []llm.Part{{Type: llm.PartToolCall, ToolCall: &llm.ToolCall{ID: "mcp", Name: "mcp__remote__search", Input: json.RawMessage(`{"query":"repository-derived"}`)}}}}, StopReason: llm.StopToolUse}, nil
 }
 
 func TestPolicyChangeCancelsActualMCPCallTool(t *testing.T) {

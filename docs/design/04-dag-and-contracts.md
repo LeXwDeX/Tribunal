@@ -150,7 +150,8 @@ runNode(n):
   ctx, cancel := context.WithTimeout(wfCtx, n.Timeout - 已排队时长)
   out, err := executor.Execute(ctx, input(n))
   if 当前 attempt != attempt 或工作流已终态: 丢弃结果; return
-  if err:  emit node.failed  (ctx 被工作流取消时 emit node.aborted)
+  if token 预算已耗尽: 按 required / optional 写 budget_exhausted，保留可得用量
+  else if err 或结果到达时节点期限已到: emit node.failed，保留可得用量
   else:
     if n.Expands:
       extension := expander.Expand(...)
@@ -161,6 +162,8 @@ runNode(n):
 ```
 
 所有 `emit` 都走 `EventStore.Append(expectRev)`；遇到 `ErrStaleRevision` 时重新读取快照后再判断是否还需要写。内部提交看到 revision 前进时继续重试，不因兄弟节点正常提交耗尽固定重试次数；同一 revision 连续 4 次冲突则返回错误。重试保留 attempt 栅栏，不重新执行 executor 或 expander；非版本冲突的持久化错误返回 `Run`，不能静默丢失完成结果。调用方取消仍可终止重试，持久化取消另有 10 秒写入上限；公开 `Extend(expectRev)` 的调用方版本约束不变。
+
+节点期限已到时，即使执行器无错误返回，也不提交结果或展开。错误有有效分类时保留该分类，否则使用 `timeout`；预算已耗尽时仍优先记录预算取消。失败和预算取消会保留该次返回的可得用量及 `usage_incomplete` 标志。超时、预算或工作流取消只会取消 context，不能强杀不协作的 Go 执行器。`Run` 在返回前同步等待已启动执行器退出，以保护工作区；执行器不退出时可能无限等待。工作流取消时立即持久化终态，并为当时仍在运行的节点标记 `usage_incomplete`（包括 `TokenFree` 节点）；已完成节点的用量保持不变，未启动节点不因取消而标记。迟到结果不会改写终态，其具体用量不能恢复。进程中断不持久化取消，恢复运行中的 attempt 时标记工作流用量不完整。
 
 finalize 若在重读时发现新节点，返回主循环继续调度，而不是把未终态工作流当作成功结束。该路径与默认并发 8 下的 deep 流程均有回归测试。
 
@@ -411,6 +414,8 @@ for g in groups:
 最终完成条件由代码执行：`review` 通道 `evidence_status=insufficient`、review gate 为 BLOCKING 且没有 accepted finding、材料或提示词覆盖缺口、完成 plan 后非 generated 的 included 文件未被分配等上游信号会合并进 `unresolved`。只要存在 unresolved，最终 verdict 就是 INCOMPLETE，summary 列出具体缺口；模型不能通过 `PASS` 或空 findings 清除这些信号。code 和 agent synthesis 使用同一规则。
 
 extend：`extend_requests` 非空且预算允许时，引擎追加对应节点和一个新的 `synthesize.2`（依赖这些新节点），原 `synthesize` 的输出作为 `synthesize.2` 的输入之一。`synthesize.2` 不允许再次 extend。
+
+第二次汇总将本轮完成的扩展 verify 结果用于对应的已有问题。有效代码证据支持的 `REFUTED` 结果按规则保留为 drop，模型不能重新发布；未请求重验的已有有效反证也保留。重验失败或缺失时保留先前仍有效的反证，并记录 warning；没有有效先前反证时按 `on_uncertain` 处理。完成的 `UNCERTAIN` 结果替代先前挑战并按 `on_uncertain` 处理，先前结果仍保存在工作流历史中。
 
 ---
 
