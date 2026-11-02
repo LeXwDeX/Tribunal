@@ -7,8 +7,10 @@
 package llm
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"math"
 	"net/url"
 	"strings"
 )
@@ -47,6 +49,58 @@ type ToolCall struct {
 	ID    string          `json:"id"`
 	Name  string          `json:"name"`
 	Input json.RawMessage `json:"input"`
+}
+
+// SanitizeToolCalls clears every tool call's identity and payload when a call
+// is invalid or the stop reason does not permit tool execution. A rejected
+// batch never executes, and provider-controlled strings must not reach
+// transcripts, errors or audit payloads. Valid empty objects and valid empty
+// batches are preserved.
+func SanitizeToolCalls(message Message, allow bool) (Message, bool) {
+	invalid, hasCalls := false, false
+	seen := make(map[string]bool)
+	for _, part := range message.Parts {
+		if part.Type != PartToolCall {
+			continue
+		}
+		hasCalls = true
+		call := part.ToolCall
+		if call == nil {
+			invalid = true
+			continue
+		}
+		input := bytes.TrimSpace(call.Input)
+		if call.ID == "" || call.Name == "" || seen[call.ID] || len(input) == 0 || input[0] != '{' || !json.Valid(call.Input) {
+			invalid = true
+		}
+		seen[call.ID] = true
+	}
+	if !invalid && (allow || !hasCalls) {
+		return message, false
+	}
+	// A rejected batch never executes. Clear every identity and payload so
+	// provider-controlled strings cannot reach transcripts or error messages.
+	message.Parts = append([]Part(nil), message.Parts...)
+	for i := range message.Parts {
+		part := &message.Parts[i]
+		if part.Type == PartToolCall && part.ToolCall != nil {
+			part.ToolCall = &ToolCall{}
+		}
+	}
+	return message, invalid
+}
+
+// SDKs may coerce a non-string JSON value into a Go string.
+func wireString(raw string) bool {
+	return len(raw) > 0 && raw[0] == '"'
+}
+
+func malformedWireList(raw string, decodedCount int, required bool) bool {
+	if raw == "" || raw == "null" {
+		return required
+	}
+	var entries []json.RawMessage
+	return raw[0] != '[' || json.Unmarshal([]byte(raw), &entries) != nil || len(entries) != decodedCount
 }
 
 // ToolResult is the result of running a tool.
@@ -124,13 +178,59 @@ type Response struct {
 
 // Usage reports token consumption. InputTokens includes cache reads and writes;
 // the cache fields are details, not additional tokens. CacheWriteTokens is
-// reported by providers that expose cache writes separately.
+// reported by providers that expose cache writes separately. Incomplete marks
+// detected invalid or unrepresentable counts; false does not prove completeness.
 type Usage struct {
 	InputTokens      int64 `json:"input_tokens"`
 	OutputTokens     int64 `json:"output_tokens"`
 	CacheReadTokens  int64 `json:"cache_read_tokens"`
 	CacheWriteTokens int64 `json:"cache_write_tokens"`
 	ReasoningTokens  int64 `json:"reasoning_tokens"`
+	Incomplete       bool  `json:"-"`
+}
+
+// ValidUsage rejects invalid provider counts before they can affect a budget.
+func ValidUsage(u Usage) bool {
+	return u.InputTokens >= 0 && u.OutputTokens >= 0 && u.CacheReadTokens >= 0 && u.CacheWriteTokens >= 0 && u.ReasoningTokens >= 0
+}
+
+// AddUsage preserves nonnegative known usage and saturates on overflow.
+func AddUsage(a, b Usage) Usage {
+	incomplete := a.Incomplete || b.Incomplete
+	add := func(x, y int64) int64 {
+		if x < 0 {
+			incomplete = true
+			x = 0
+		}
+		if y < 0 {
+			incomplete = true
+			y = 0
+		}
+		if x > math.MaxInt64-y {
+			incomplete = true
+			return math.MaxInt64
+		}
+		return x + y
+	}
+	out := Usage{InputTokens: add(a.InputTokens, b.InputTokens), OutputTokens: add(a.OutputTokens, b.OutputTokens),
+		CacheReadTokens: add(a.CacheReadTokens, b.CacheReadTokens), CacheWriteTokens: add(a.CacheWriteTokens, b.CacheWriteTokens),
+		ReasoningTokens: add(a.ReasoningTokens, b.ReasoningTokens)}
+	out.Incomplete = incomplete || out.InputTokens > math.MaxInt64-out.OutputTokens
+	return out
+}
+
+// MaxUsage combines overlapping reports without counting the same tokens twice.
+func MaxUsage(a, b Usage) Usage {
+	a = AddUsage(Usage{}, a)
+	b = AddUsage(Usage{}, b)
+	return AddUsage(Usage{}, Usage{
+		InputTokens:      max(a.InputTokens, b.InputTokens),
+		OutputTokens:     max(a.OutputTokens, b.OutputTokens),
+		CacheReadTokens:  max(a.CacheReadTokens, b.CacheReadTokens),
+		CacheWriteTokens: max(a.CacheWriteTokens, b.CacheWriteTokens),
+		ReasoningTokens:  max(a.ReasoningTokens, b.ReasoningTokens),
+		Incomplete:       a.Incomplete || b.Incomplete,
+	})
 }
 
 // Client is the single interface used by the agent loop.
@@ -263,8 +363,9 @@ func validateRequest(req *Request) *Error {
 				if part.ToolCall == nil || part.ToolCall.ID == "" || part.ToolCall.Name == "" {
 					return badRequestf("messages[%d].parts[%d]: tool call id and name are required", i, j)
 				}
-				if len(part.ToolCall.Input) > 0 && !json.Valid(part.ToolCall.Input) {
-					return badRequestf("messages[%d].parts[%d]: tool call input is not valid JSON", i, j)
+				input := bytes.TrimSpace(part.ToolCall.Input)
+				if len(input) == 0 || input[0] != '{' || !json.Valid(part.ToolCall.Input) {
+					return badRequestf("messages[%d].parts[%d]: tool call input must be a JSON object", i, j)
 				}
 			case PartToolResult:
 				if msg.Role != RoleUser && msg.Role != RoleTool {

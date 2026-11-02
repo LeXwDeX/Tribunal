@@ -363,15 +363,16 @@ type fakeAgentRunner struct {
 func (f *fakeAgentRunner) Run(ctx context.Context, _ agent.RunSpec) (*agent.RunResult, error) {
 	f.mu.Lock()
 	f.calls++
-	f.mu.Unlock()
-	if f.started != nil {
-		f.startOne.Do(func() { close(f.started) })
+	started, block := f.started, f.block
+	if started != nil {
+		f.startOne.Do(func() { close(started) })
 	}
-	if f.block != nil {
+	f.mu.Unlock()
+	if block != nil {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-f.block:
+		case <-block:
 		}
 	}
 	return &agent.RunResult{
@@ -391,6 +392,21 @@ func (f *fakeAgentRunner) Run(ctx context.Context, _ agent.RunSpec) (*agent.RunR
 		},
 		Usage: llm.Usage{InputTokens: 10, OutputTokens: 5},
 	}, nil
+}
+
+// setBlock replaces the start signal and block gate atomically. The run signal
+// has one-shot semantics, so a new signal resets its Once before publication.
+func (f *fakeAgentRunner) setBlock(block <-chan struct{}, started chan struct{}) {
+	f.mu.Lock()
+	f.block, f.started = block, started
+	f.startOne = sync.Once{}
+	f.mu.Unlock()
+}
+
+func (f *fakeAgentRunner) startedSignal() <-chan struct{} {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.started
 }
 
 func (f *fakeAgentRunner) count() int {
