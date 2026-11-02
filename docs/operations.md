@@ -1226,7 +1226,38 @@ tribunalctl projects retry-onboarding <项目 ID>
 
 项目 ignore 非空时，工作区索引会被有意阻断，接口返回 `index_status=degraded` 和 `last_error="index: blocked by ignore policy"`。控制台显示信息提示，不再把它当成索引故障。需要代码图谱索引时，先调整项目 ignore 配置，再执行重建索引；阻断本身是安全降级，不影响评审继续执行，详见 [ignore 安全边界](#ignore-安全边界)。
 
-## 11. 验证状态
+## 11. 并发压测
+
+`scripts/loadtest.sh` 对已部署实例做可重复的并发触发与统计。脚本不创建 GitLab 项目或 MR；先为每个项目准备一个开放 MR。
+
+### 准备
+
+- `TRIBUNAL_URL`：实例地址。
+- `TRIBUNAL_ADMIN_TOKEN`：用于注册项目和授予项目权限。
+- `TRIBUNAL_USER_TOKEN`：用于触发评审和读取结果；该用户必须对项目有 `manage` 权限。
+- `GITLAB_TOKEN`：仅注册尚未登记的项目时需要。
+- `PROJECTS`、`MR_IIDS`：空格分隔、顺序对应。
+- 可选：`USER_ID`（默认 `59`）、`POLL_INTERVAL`（默认 `5` 秒）、`TIMEOUT`（默认 `900` 秒）。
+
+### 运行
+
+```bash
+TRIBUNAL_URL=http://127.0.0.1:8080 \
+TRIBUNAL_ADMIN_TOKEN=... TRIBUNAL_USER_TOKEN=... \
+PROJECTS="group/project-a group/project-b" MR_IIDS="1 2" \
+bash scripts/loadtest.sh > loadtest.csv
+```
+
+脚本把每次评审的 `project_id,mr_iid,status,verdict,duration_ms,tokens_in,tokens_out,cost_micros` 写到 stdout，并在 stderr 输出 `reviews/failed/p50/p95/tokens/cost` 汇总。`cost_micros` 依赖 provider 的 `price` 配置；未配置时始终为 0。
+
+### 结果解读
+
+- 延迟是 workflow 创建到完成的墙钟时间，包含排队和 provider 限流。
+- 真实 10 项目、每个 MR 840 行 diff 的一次观测：10/10 完成，p50 22.2 秒，p95 27.2 秒，输入 627,034 tokens，输出 32,927 tokens，成本约 $0.2055（占位价格）。
+- 前 6 个评审立即启动，其余等待 `providers.<name>.max_concurrency`；没有观察到 SQLite 锁错误、工作区锁错误或任务丢失。
+- 这是一次环境观测，不是容量承诺；provider、diff 大小、网络和 GitLab 限流都会改变结果。
+
+## 12. 验证状态
 
 验证记录统一维护在 [交付就绪与验收记录](delivery-readiness.md)，本文不再重复：
 
