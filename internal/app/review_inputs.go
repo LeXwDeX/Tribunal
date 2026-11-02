@@ -23,16 +23,19 @@ const maxPipelineJobTraces = 3
 
 const redactedJobTraceValue = "[REDACTED]"
 
+const jobTraceSecretKey = `[A-Z0-9_.-]*(?:TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_KEY|JWT|CREDENTIAL|AUTHORIZATION|BEARER|API[_-]?KEY|ACCESS[_-]?KEY)[A-Z0-9_.-]*`
+
 var (
 	jobTracePEMRE           = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`)
 	jobTracePrivateTokenRE  = regexp.MustCompile(`(?i)(PRIVATE-TOKEN\s*:\s*)(?:"[^"]*"|'[^']*'|\S+)`)
 	jobTraceAuthRE          = regexp.MustCompile(`(?i)(Authorization\s*:\s*(?:Bearer|Basic|Token)\s+)(?:"[^"]*"|'[^']*'|\S+)`)
-	jobTraceFlagRE          = regexp.MustCompile(`(?i)((?:-u|--user|--password|--token)\s+)(?:"[^"]*"|'[^']*'|\S+)`)
+	jobTraceFlagRE          = regexp.MustCompile(`(?i)((?:--user|--password|--token)(?:=|\s+))(?:"[^"]*"|'[^']*'|\S+)`)
+	jobTraceShortUserRE     = regexp.MustCompile(`(?i)(-u\s*)(?:"[^"]*"|'[^']*'|[^\s:]+:[^\s]+)`)
 	jobTraceURLCredsRE      = regexp.MustCompile(`://[^/\s:@]*:[^/\s@]+@`)
 	jobTraceCIVarRE         = regexp.MustCompile(`(?m)\b(CI_JOB_TOKEN\s*=\s*)(?:"[^"]*"|'[^']*'|\S+)`)
-	jobTraceGenericSecretRE = regexp.MustCompile(`(?i)\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_KEY|JWT|API[_-]?KEY|ACCESS[_-]?KEY)[A-Z0-9_]*\s*[:=]\s*)(?:"[^"]*"|'[^']*'|\S+)`)
-	jobTraceJSONSecretDQRE  = regexp.MustCompile(`(?i)("[A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_KEY|JWT|API[_-]?KEY|ACCESS[_-]?KEY)[A-Z0-9_]*"\s*:\s*)(?:"[^"]*"|[^,}\s]+)`)
-	jobTraceJSONSecretSQRE  = regexp.MustCompile(`(?i)('[A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_KEY|JWT|API[_-]?KEY|ACCESS[_-]?KEY)[A-Z0-9_]*'\s*:\s*)(?:'[^']*'|[^,}\s]+)`)
+	jobTraceGenericSecretRE = regexp.MustCompile(`(?i)\b(` + jobTraceSecretKey + `\s*[:=]\s*)(?:"[^"]*"|'[^']*'|\S+)`)
+	jobTraceJSONSecretDQRE  = regexp.MustCompile(`(?i)("` + jobTraceSecretKey + `"\s*:\s*)(?:"[^"]*"|[^,}\s]+)`)
+	jobTraceJSONSecretSQRE  = regexp.MustCompile(`(?i)('` + jobTraceSecretKey + `'\s*:\s*)(?:'[^']*'|[^,}\s]+)`)
 )
 
 // sanitizeJobTrace removes credential-looking values before logs reach a
@@ -44,6 +47,7 @@ func sanitizeJobTrace(trace string) string {
 	trace = jobTracePrivateTokenRE.ReplaceAllString(trace, "${1}"+redactedJobTraceValue)
 	trace = jobTraceAuthRE.ReplaceAllString(trace, "${1}"+redactedJobTraceValue)
 	trace = jobTraceFlagRE.ReplaceAllString(trace, "${1}"+redactedJobTraceValue)
+	trace = jobTraceShortUserRE.ReplaceAllString(trace, "${1}"+redactedJobTraceValue)
 	trace = jobTraceURLCredsRE.ReplaceAllString(trace, "://"+redactedJobTraceValue+"@")
 	trace = jobTraceCIVarRE.ReplaceAllString(trace, "${1}"+redactedJobTraceValue)
 	trace = jobTraceGenericSecretRE.ReplaceAllString(trace, "${1}"+redactedJobTraceValue)
@@ -160,11 +164,9 @@ func (s *ReviewService) collectPipeline(ctx context.Context, token string, proje
 	if latest.Status != "failed" {
 		return summary
 	}
-	// Never attach logs from another commit: a newer head may not have a
-	// pipeline yet while an older failed pipeline is still the latest one.
-	if !strings.EqualFold(strings.TrimSpace(latest.SHA), strings.TrimSpace(headSHA)) {
-		return summary
-	}
+	// Never attach logs from another commit, but keep the failed job list:
+	// a newer head may not have a pipeline yet.
+	traceAllowed := strings.EqualFold(strings.TrimSpace(latest.SHA), strings.TrimSpace(headSHA))
 	jobs, err := s.gitlab.ListPipelineJobs(ctx, token, projectID, latest.ID)
 	if err != nil {
 		s.logger.Warn("pipeline jobs lookup failed", "project_id", projectID, "pipeline_id", latest.ID)
@@ -183,7 +185,7 @@ func (s *ReviewService) collectPipeline(ctx context.Context, token string, proje
 			FailureReason: job.FailureReason,
 			WebURL:        job.WebURL,
 		}
-		if traced < maxPipelineJobTraces && job.ID > 0 {
+		if traceAllowed && traced < maxPipelineJobTraces && job.ID > 0 {
 			traced++
 			trace, err := s.gitlab.GetJobTrace(ctx, token, projectID, job.ID)
 			if err != nil {

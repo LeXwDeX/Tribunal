@@ -107,8 +107,11 @@ func TestCollectPipelineSkipsTraceForDifferentHead(t *testing.T) {
 	f.gitlab.mu.Unlock()
 
 	summary := f.service.collectPipeline(context.Background(), "token", 42, 7, reviewTestHead)
-	if summary == nil || len(summary.FailedJobs) != 0 {
-		t.Fatalf("summary = %+v, want no jobs for another commit", summary)
+	if summary == nil || len(summary.FailedJobs) != 1 {
+		t.Fatalf("summary = %+v, want one failed job for another commit", summary)
+	}
+	if summary.FailedJobs[0].Trace != "" {
+		t.Fatalf("trace = %q, want empty for another commit", summary.FailedJobs[0].Trace)
 	}
 	if got := f.gitlab.traceCallIDs(); len(got) != 0 {
 		t.Fatalf("trace calls = %v, want none for another commit", got)
@@ -134,8 +137,15 @@ func TestSanitizeJobTraceRedactsSecrets(t *testing.T) {
 		"pem-body-value",
 		"-----END OPENSSH PRIVATE KEY-----",
 		"curl -u deploy:hunter2 https://example.com",
+		"curl --user=deploy:hunter3 https://example.com",
+		"curl -udeploy:hunter4 https://example.com",
 		"redis://:redis-pass@cache:6379",
 		`{"private_token":"json-token-value"}`,
+		`{"authorization":"Bearer json-auth-value"}`,
+		`{"client-secret":"json-secret-value"}`,
+		`{"access-token":"json-access-value"}`,
+		`{"x-api-key":"json-api-key"}`,
+		`{"auth.token":"json-dot-token"}`,
 		"normal line stays",
 	}, "\n")
 
@@ -143,13 +153,14 @@ func TestSanitizeJobTraceRedactsSecrets(t *testing.T) {
 	for _, secret := range []string{
 		"glpat-abcdef123456", "private-value", "bearer-value", "user:pass", "job-token-value", "gitlab-token-value",
 		"glrt-runner-token", "db-pass", "aws-secret", "api-key-value", "basic-value", "flag-token",
-		"jwt-value", "pem-body-value", "deploy:hunter2", "redis-pass", "json-token-value",
+		"jwt-value", "pem-body-value", "deploy:hunter2", "deploy:hunter3", "deploy:hunter4", "redis-pass",
+		"json-token-value", "json-auth-value", "json-secret-value", "json-access-value", "json-api-key", "json-dot-token",
 	} {
 		if strings.Contains(got, secret) {
 			t.Fatalf("sanitized trace still contains %q:\n%s", secret, got)
 		}
 	}
-	if strings.Count(got, "[REDACTED]") < 17 {
+	if strings.Count(got, "[REDACTED]") < 24 {
 		t.Fatalf("sanitized trace misses redaction markers:\n%s", got)
 	}
 	if !strings.Contains(got, "normal line stays") {
