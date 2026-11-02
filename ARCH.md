@@ -332,7 +332,7 @@ pending ─→ queued ─→ running ─→ completed
 ### 6.5 Fingerprint 与取消
 
 - fingerprint = `head_sha` + `base_sha` + 项目配置哈希 + prompt 版本。
-- MR 有新 push：旧工作流 → `cancelled`，运行中的节点 → `aborted`，正在进行的 LLM 请求通过 context 取消。
+- MR 有新 push：旧工作流 → `cancelled`，运行中的节点 → `aborted`，正在进行的 LLM 请求通过 context 取消。取消持久化时，运行中节点的最终用量尚不可知，节点和工作流标记 `usage_incomplete`；迟到结果不会修改终态，已丢失的具体用量不能恢复。
 - 发布前比对 fingerprint，见 I7。
 
 ### 6.6 失败语义
@@ -340,7 +340,7 @@ pending ─→ queued ─→ running ─→ completed
 - `required` 节点失败 → 下游级联为不可满足 → 工作流 `failed`。此时在 MR 上发布一条简短的「评审未完成」说明（是否发布可配置）。
 - 可选节点失败 → 下游照常运行，对应输入用占位文本。
 - 依赖全部为 `skipped` 的节点级联 `skipped`。
-- 超时没有人工裁决环节：硬超时加预算上限，超时后按 required / optional 语义处理。
+- 超时没有人工裁决环节：节点到期后取消其 context；执行器返回时不得把超时结果当作成功或展开，按 required / optional 语义处理并记录可得用量。context 取消不能强杀不协作的 Go 执行器；`Run` 为保护工作区会同步等待执行器退出，因此可能无限等待，不保证在截止时间内返回。
 
 ### 6.7 恢复
 
@@ -349,7 +349,7 @@ pending ─→ queued ─→ running ─→ completed
 - 服务重启后，`running` 和 `queued` 的节点直接重新执行。LLM 调用无副作用，重跑是安全的。
 - 进程停机或 job 丢失租约只中断本进程的执行（`dag.ErrInterrupted`），不写入 durable 取消；只有用户取消、被新版本取代、超过截止时间才把工作流写成 `cancelled`。
 - 发布阶段另有幂等保护：汇总评论按隐藏标记就地更新；行内讨论按项目/MR 内的 `publish_key` 去重。该键包含路径、规范化标题和代码片段，不是语义相似度判断。2026-10-25 用户确认按此边界验收：显式重跑时模型换标题可能再次发布同一问题；本版不增加跨次问题语义去重。
-- 评审执行状态与发布状态分开恢复：`publication_state=pending` 的终态工作流在启动后重试；failed execution 在 `post_failure_note=true` 时发布未完成摘要，关闭时记为 skipped；取消或 superseded 记为 skipped；自动恢复不会覆盖 published/failed（手动 republish 是显式例外）。失败原因有界脱敏保存，永久发布失败需要手动 republish。
+- 评审执行状态与发布状态分开恢复：`publication_state=pending` 的终态工作流在启动后重试；failed execution 在启用 `commit_status` 时先发布 failed 状态，并在 `post_failure_note=true` 时发布未完成摘要；两者都关闭时记为 skipped。取消或 superseded 记为 skipped；自动恢复不会覆盖 published/failed（手动 republish 是显式例外）。失败原因有界脱敏保存，永久发布失败需要手动 republish。
 
 ### 6.8 预算
 
@@ -360,7 +360,7 @@ pending ─→ queued ─→ running ─→ completed
 | 每个工作流的 token 上限 / 金额上限 / 时长上限 | 项目配置 |
 | 超出预算时 | 降级为拓扑 A，或者只挑战 P0/P1 |
 
-`max_tokens` 是 workflow 共享预算，按 `input_tokens + output_tokens` 计算。cache read/write 和 reasoning 在 usage 中分别表示，但不额外加入预算，避免与 input/output 重复计数。调度器和节点执行器在每次模型请求前检查已提交用量加当前 attempt 已知的 partial usage；并发节点不预留额度，已发出的请求可能在检查后完成并造成有界超支，因此这是尽力上限，不是精确账单。transport 重试的已知 usage 计入下一次 attempt 的预算检查和最终节点用量；预算不足时保留已有结果，按 required / optional 和确定性规则兜底，不能无提示地给出 PASS。
+`max_tokens` 是 workflow 共享预算，按 `input_tokens + output_tokens` 计算。cache read/write 和 reasoning 在 usage 中分别表示，但不额外加入预算，避免与 input/output 重复计数。调度器和节点执行器在每次模型请求前检查已提交用量加当前 attempt 已知的 partial usage；并发节点不预留额度，已发出的请求可能在检查后完成并造成超支，因此这是尽力上限，不是精确账单。transport 重试的已知 usage 计入下一次 attempt 的预算检查和最终节点用量；预算不足时保留已有结果，按 required / optional 和确定性规则兜底，不能无提示地给出 PASS。`usage_incomplete` 标记检测到的缺失或无法精确表示的用量；为 false 不证明历史用量完整。
 
 ---
 
@@ -524,7 +524,7 @@ data/workspaces/<project_id>/
 | `events` | 事件日志（只追加） |
 | `findings` | 统一 finding、挑战结果、裁决记录 |
 | `publications` | 已发布到 GitLab 的评论和讨论 ID，用于幂等更新 |
-| `llm_calls` | 每次模型调用的 prompt 摘要或完整内容、模型版本、原始输出、用量（保留期可配置） |
+| `llm_calls` | 每次模型尝试的本地 ID、模型版本、用量、停止原因及安全结构计数（保留期可配置）；新记录不保存 prompt、原始输出或上游 ID |
 | `feedback` | 来自 GitLab 的反馈信号（见 §12） |
 | `users`、`sessions`、`api_tokens`、`project_grants` | 本地用户、会话/API token、停用状态与每项目 read/manage 授权 |
 | `workflow_dossiers` | 脱敏材料快照、评审代次，以及独立于执行的 publication 状态和脱敏失败原因 |
@@ -610,7 +610,7 @@ blocks:                     # 按块授权 MCP 工具、挂载 Skill
 
 ## 12. 可观测性与反馈闭环
 
-- 每个工作流可完整回放：事件日志、每次 LLM 调用的输入输出、模型版本、用量。
+- 工作流可根据事件日志检查状态和结果。新 LLM 审计只保留模型、用量及结构计数，不能用它完整回放输入输出；历史 payload 可能包含敏感内容。
 - 指标：工作流耗时、节点失败率、各 provider 的延迟、错误率和 token 用量、每个 MR 的成本。
 - **反馈信号**：从 GitLab 收集发布者评论的 👍/👎（award emoji），以及讨论 resolve 后对应行是否改动。这些信号仅供参考，不自动判定问题有效性。
 - **原始计数**：`stats.feedback` 提供 `total`、`by_signal` 和按 `{provider, role, total, by_signal}` 的归因。归因只统计能按持久化 `feedback.finding_id` 精确关联 finding、且 publication 一致的 discussion；提出方取 `findings.origin_provider`，挑战方取 `challenge_node` 的 provider；汇总/未关联反馈不计入 provider 归因，但仍计入原始总数；同一 signal 可同时进入两个角色。讨论 award 只取发布者首条 note，不取 thread reply。
