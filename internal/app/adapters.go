@@ -38,6 +38,7 @@ type GitLabClient interface {
 	ListMRDiffs(ctx context.Context, token string, projectID, iid int64) ([]gitlab.FileDiff, error)
 	ListMRPipelines(ctx context.Context, token string, projectID, iid int64) ([]gitlab.Pipeline, error)
 	ListPipelineJobs(ctx context.Context, token string, projectID, pipelineID int64) ([]gitlab.Job, error)
+	GetJobTrace(ctx context.Context, token string, projectID, jobID int64) (string, error)
 	ListClosingIssues(ctx context.Context, token string, projectID, iid int64) ([]gitlab.Issue, error)
 	GetRawFile(ctx context.Context, token string, projectID int64, path, ref string) ([]byte, error)
 	ListMRNotes(ctx context.Context, token string, projectID, iid int64) ([]gitlab.Note, error)

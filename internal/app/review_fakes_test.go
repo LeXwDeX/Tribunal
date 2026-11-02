@@ -53,6 +53,12 @@ type reviewGitLab struct {
 	statusNoteErr error
 	currentUser   *gitlab.User
 
+	pipelines     []gitlab.Pipeline
+	jobs          []gitlab.Job
+	jobTraces     map[int64]string
+	jobTraceErrs  map[int64]error
+	jobTraceCalls []int64
+
 	summaryCreates    int
 	summaryUpdates    int
 	discussionCreates int
@@ -132,11 +138,31 @@ func (f *reviewGitLab) ListMRDiffs(context.Context, string, int64, int64) ([]git
 }
 
 func (f *reviewGitLab) ListMRPipelines(context.Context, string, int64, int64) ([]gitlab.Pipeline, error) {
-	return nil, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]gitlab.Pipeline(nil), f.pipelines...), nil
 }
 
 func (f *reviewGitLab) ListPipelineJobs(context.Context, string, int64, int64) ([]gitlab.Job, error) {
-	return nil, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]gitlab.Job(nil), f.jobs...), nil
+}
+
+func (f *reviewGitLab) GetJobTrace(_ context.Context, _ string, _, jobID int64) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.jobTraceCalls = append(f.jobTraceCalls, jobID)
+	if err, ok := f.jobTraceErrs[jobID]; ok {
+		return "", err
+	}
+	return f.jobTraces[jobID], nil
+}
+
+func (f *reviewGitLab) traceCallIDs() []int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]int64(nil), f.jobTraceCalls...)
 }
 
 func (f *reviewGitLab) ListClosingIssues(context.Context, string, int64, int64) ([]gitlab.Issue, error) {

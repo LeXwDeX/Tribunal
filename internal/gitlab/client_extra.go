@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"strings"
 	"unicode/utf8"
@@ -17,6 +18,11 @@ const (
 	defaultStatus  = "ai-review"
 	maxDescription = 140
 	maxAwardName   = 100
+
+	// maxJobTraceBytes caps one job log. The SDK downloads the whole trace, so
+	// the cap limits what the review reads and forwards, not network use.
+	maxJobTraceBytes        = 64 << 10
+	jobTraceTruncatedMarker = "\n[日志已截断：仅保留前 64 KiB]"
 )
 
 func positiveIDs(ids ...int64) bool {
@@ -312,6 +318,48 @@ func (c *Client) ListPipelineJobs(ctx context.Context, token string, projectID, 
 		})
 	}
 	return out, nil
+}
+
+// GetJobTrace reads the log of one job. The returned text is capped at 64 KiB.
+// Log text is never logged or wrapped in an error.
+func (c *Client) GetJobTrace(ctx context.Context, token string, projectID, jobID int64) (string, error) {
+	if !positiveIDs(projectID, jobID) {
+		return "", errors.New("gitlab: invalid project or job ID")
+	}
+	reqCtx, client, done, err := c.prepare(ctx, token)
+	if err != nil {
+		return "", err
+	}
+	defer done()
+
+	reader, resp, err := client.Jobs.GetTraceFile(projectID, jobID, sdk.WithContext(reqCtx))
+	if err != nil {
+		return "", mapError(reqCtx, "get_job_trace", resp, err)
+	}
+	if reader == nil {
+		return "", &Error{Op: "get_job_trace"}
+	}
+	raw, err := io.ReadAll(io.LimitReader(reader, maxJobTraceBytes+1))
+	if err != nil {
+		return "", mapError(reqCtx, "get_job_trace", resp, err)
+	}
+	trace := string(raw)
+	if len(raw) > maxJobTraceBytes {
+		trace = truncateJobTrace(trace) + jobTraceTruncatedMarker
+	}
+	return trace, nil
+}
+
+// truncateJobTrace cuts at maxJobTraceBytes without splitting a UTF-8 rune.
+func truncateJobTrace(value string) string {
+	if len(value) <= maxJobTraceBytes {
+		return value
+	}
+	end := maxJobTraceBytes
+	for end > 0 && !utf8.RuneStart(value[end]) {
+		end--
+	}
+	return value[:end]
 }
 
 // ListClosingIssues returns issues that merge will close.
