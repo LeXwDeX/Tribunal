@@ -15,7 +15,7 @@
 
 ## 1. 新机器环境准备
 
-1. **克隆**：`gh repo clone LeXwDeX/Tribunal && cd Tribunal`。当前 `main` 至少包含 `d693d49`（#186）和本交接的 PR。
+1. **克隆**：`gh repo clone LeXwDeX/Tribunal && cd Tribunal`。当前 `main` 至少包含 `6e2a786`（#198）和本交接的 PR。
 2. **工具**：Go（`go.mod` 的 toolchain 是 1.26.10）、Node + npm（`web/`）、Bash、Python 3、能跑 `-race` 的 C 编译器、`gh`（已登录、对仓库有写权限）。本机可以没有 Docker；没有 Docker 时 Compose/冒烟必须记为未验证。
 3. **SpecGit**：仓库要求每个提交带 `Issue: #N` trailer，并由 SpecGit 的本地 checkpoint 把关。`.specgit.yaml` 和 SpecGit Skill 是本地文件，不在仓库里，新 clone 要重新接入：
    - 安装共享 CLI（见 <https://github.com/LeXwDeX/SpecGit/blob/main/docs/agent-install.md>），确认 `specgit --human --version` ≥ 2.17.1。
@@ -24,7 +24,7 @@
    - 常用：`specgit issue <编号> --branch <分支>` 认领 Issue 并建 checkpoint；`specgit pr` 建草稿 PR；`specgit pr --ready`；合并后 `specgit pr --status` 把 checkpoint 记为已交付。
    - 踩过的坑：主检出里残留旧分支的 checkpoint 时，`specgit issue` 会报 `prepared_blocked`，按提示用独立 worktree（`git worktree add -b <分支> ../tribunal-<N> main`，进去先 `specgit init --config-file <主检出的 .specgit.yaml 绝对路径> --manual-observe`）。`--reviewed-candidates` 的 digest 要用带 `--body-file` 的 `--inspect` 重新取，否则报 `concurrent_edit`。`--body-file` 不要用 `/tmp`（符号链接会被判 `unsafe_path`），用 `$TMPDIR/opencode/` 下的真实路径。
 4. **CI**：GitHub Actions 的 hosted runner 已可用，`go`/`web`/`docker` 三个 job 会实际运行。合并前必须在**最新 main 同步后的 head** 上等这三项全部 success；旧 head 的通过结果不算。查看用 `gh run list` / `gh pr view <N> --json statusCheckRollup`，不要只依赖 PR 页面缓存。
-5. **33.110**：历史过渡环境，本次 SSH 不可用（`Connection timed out during banner exchange`），不参与准备或合并门禁。CI 只用真实 GitHub Actions；若维护者恢复该环境，只能作为额外证据，见第 6 节。
+5. **33.110**：已恢复可用，提供真实的 Docker 与 GitLab 部署验证环境（`tribunal-smoke-1102`，端口 18500）。它仍不参与 CI 合并门禁；CI 只用真实 GitHub Actions，33.110 只作为额外证据，见第 6 节。
 
 ## 2. 工作方式（用户的长期授权与要求）
 
@@ -44,9 +44,9 @@
 
 ## 3. 当前状态
 
-- `main`：`d693d49`（#186 已合并），包含本次交接 PR。
+- `main`：`6e2a786`（#198 已合并），包含本次交接 PR。
 - 2026-10-30 审查列出的 P1/P2 与后续发现的 Issue 均已处理：#157、#158、#159、#160、#161、#162、#163、#164、#175、#176、#177、#178、#179、#180、#181、#182、#183、#184、#185、#186、#187。另有更早的 #140、#141、#142、#143、#144、#145、#146、#147、#170、#172、#174 同期合并。
-- 本轮新增的 #182（跨代评审状态评论收敛）已随 PR #187 合并；它依赖的 #181 attempt 修复已先合并，重叠实现只保留一份。
+- 2026-11-02 新增：PR #197（#196，镜像内 codebase-memory 验证）与 PR #198（#192，verify 读取 CI 失败 job 日志）已合并；Issue #196、#192 已关闭。
 - **v1.2.0 仍未打 tag、未发 Release**，由维护者处理。CHANGELOG 有 `[1.2.0] - 2026-10-29` 版本段。
 - 迁移序号已用：`0020`（#159）、`0021`–`0023`（#180）、`0024`（#179），均已合并。无 down migration；升级/回退必须按 `docs/operations.md` 备份并整体恢复，不能只换镜像。
 
@@ -54,10 +54,13 @@
 
 | Issue | 状态 | 说明 |
 |---|---|---|
-| #188 | 本交接 | 更新交接文档，随本 PR 关闭。 |
+| #199 | 本交接 | 更新交接文档，随本 PR 关闭。 |
+| #193 | 待设计 | 允许执行内置 Skill 脚本（仅内置范围）。`ARCH.md` 仍写“首版不执行脚本”，内置 `code-review` 也没有脚本；实现前必须先确定脚本协议、清单和沙箱边界。 |
+| #194 | 待实施 | 单实例 5–10 项目并发压测。需要真实 GitLab 项目与可观测指标；不要用单元测试代替。 |
+| #195 | 待实施 | WCAG 2.1 AA 验收与 UI 自测。需要 1440/390、亮/暗、键盘、对比度和截图；`web/node_modules` 已可用。 |
 | #138 | 暂不实施 | 内容是把开发 CI 迁移到 Azure Pipelines 并删除 `.github/workflows`。当前 GitHub Actions 的 hosted runner 已可用且是合并门槛；执行 #138 会删除现行 CI。除非维护者明确要求迁移，否则保持现状。 |
 | #123 | 暂不实施 | 针对自托管 runner 的 `CGO_ENABLED` 与 Docker CLI 缺口。当前 hosted runner 已包含两者并通过；没有自托管 runner 的实际运行证据前，不改成假通过，也不重复排期。 |
-| #109 | 跟踪 | 路线图待决事项汇总，只记录，不排期。需要维护者提供优先级后再拆 Issue。 |
+| #109 | 已拆分 | #192、#196 已完成；剩余 #193、#194、#195。Postgres 与 Q18 上游改造已记为不做。 |
 
 审查中另有未开 Issue 的条件性风险，保留在 #109 的记录里，不按缺陷处理。
 
@@ -78,9 +81,10 @@
 - 每个 push 和 PR 触发 `go`、`web`、`docker` 三个 job；合并前要求当前 head 三项全绿。
 - 工作流在 `.github/workflows/ci.yml`，只读权限，不发布。
 
-**33.110（历史环境，不用于 CI）**
-- 2026-10-30 交接时曾用 `/DATA/AppData/tribunal-ci` 的 `tribunal-ci:runner` 作为 GitHub Actions 不可用期间的过渡 CI。该 SSH 本次不可用（`Connection timed out during banner exchange`）。
-- 从现在起合并门禁只用真实 GitHub Actions，不再要求 33.110 或本地全量检查。若维护者恢复该环境，可把它当作额外证据，但必须单独声明，不能替代当前 head 的 GitHub Actions。
+**33.110（已验证环境，不用于 CI）**
+- SSH 已恢复。2026-11-02 使用 `/DATA/AppData/tribunal-smoke-1102`（端口 18500，镜像 `tribunal:smoke-1102`，commit `9c3b4e2`）完成真实部署验证。
+- 验证内容：容器内 `codebase-memory-mcp` 0.12.1；MCP 测试返回 13 个只读工具；真实 MR !2 评审 PASS 并更新 summary note 101831。非空 ignore policy 下评审不注入 MCP 工具，属预期安全降级。
+- 合并门禁仍只用真实 GitHub Actions；33.110 结果只作为额外证据，不能替代当前 head 的 GitHub Actions。
 - 历史用法：`bash /tmp/client.sh [rev]`；结果在 `/DATA/AppData/tribunal-ci/runs/<时间-sha>/summary.txt`，末行 `RESULT PASS/FAIL`。
 
 **GitLab 沙箱**：[suntao/tribunal-sandbox](https://git.ycgame.com/suntao/tribunal-sandbox)（id 1334）。MR !1 有故意埋的 bug，MR !2 是干净改动，MR !3 是 #108 验收用的。project access token id 213（token 本身不在仓库里）。
@@ -94,7 +98,9 @@
 ## 7. 未验证项与风险
 
 - 本机没有 Docker：所有 PR 的 `docker compose config` 与 `scripts/docker-smoke.sh` 未在本地运行。GitHub Actions 的 docker job 是合并门禁并已实际通过，但它不等同于本机 Docker 验证。
-- 真实 GitLab、真实模型 provider 上游、MCP 远端都未联调。评审发布、讨论恢复、仓库 Skill 授权、跨代状态收敛的远端时序未在真实服务上复现。
+- 真实 GitLab 与真实模型 provider 已在 33.110 完成一次端到端评审（MR !2，deepseek-flash，summary note 101831），但讨论恢复、仓库 Skill 授权、跨代状态收敛的远端时序仍未在真实服务上复现。
+- MCP 工具在 33.110 的测试接口可用（13 个只读工具）；评审因非空 ignore policy 未注入 MCP，这是安全降级。无 ignore policy 的真实评审尚未验证。
+- #192 的 CI 日志脱敏是启发式，不能保证覆盖任意 secret；非空 ignore policy 下 trace 不会进入 dossier。`TaskRenderVersion` 已升至 4，旧工作流的 `prompt_hash` 会失效，恢复时需重新触发评审。
 - 真实 GitLab 对“取消后迟到写入”的请求排序没有验证；#182 的收敛承诺只在 `docs/operations.md` 列出的条件（服务持续运行、失败可重试、权限有效、远程操作最终结束）下成立。
 - 仓库 Skill 的发现接口不感知具体 MR 的 ignored rename；授权快照与运行时完整 deny 集合不一致时会 fail closed，需要重新授权。
 - UI 的 1440/390、亮/暗主题检查大部分使用模拟 API 的 Chrome 检查，不是真实后端；物理设备与触屏未验证。
@@ -107,7 +113,7 @@
 
 - 一个目标对应一个 Issue 和一个 PR，每个提交带 `Issue: #N` trailer，squash 合并。
 - `go test` 统一加 `-timeout 40m`；日志里禁止出现原始 `err`，用 `errclass`。
-- 改 prompt 要 bump 版本注释并更新 `embeddedBundleHash`。
+- 改 prompt 要 bump 版本注释并更新 `embeddedBundleHash`；任务布局或覆盖语义变化还要升 `prompts.TaskRenderVersion`（#192 后为 `4`）。
 - 迁移只能追加，没有 down 迁移；不要在已发布迁移上改 SQL。
 - 默认扩展可禁用不可删除，升级时刷新，但不能覆盖管理员改过的绑定。
 - 前端只用 CSS Modules 和 `web/src/styles/tokens.css`，用 `web/src/components/ui.tsx` 的共享组件；每次 web 改动都重建并提交 `web/dist`。
