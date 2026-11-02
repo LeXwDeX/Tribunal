@@ -67,6 +67,42 @@ Only dispatch trusted branch code to a self-hosted runner: untrusted code can pe
 - Keep Go statement coverage at or above 70%. Coverage and license checks run in CI.
 - Web coverage thresholds live in `web/vite.config.ts`; run `npm test -- --coverage` in `web/`.
 
+## Development review workflow
+
+Every behavior change and every user-visible document change goes through these
+stages before merge. CI green is necessary but not sufficient; a PR that skips a
+stage is not ready.
+
+1. **Independent review** — a `review` subagent reads the real diff, callers,
+   tests, and evidence. Give it the Issue, the diff range, and the evidence; do
+   not give it the author's conclusion.
+2. **Three-way review** — run `reasoner`, `verify`, and `review` in parallel on
+   the same diff. `reasoner` stress-tests logic, boundaries, races, and failure
+   paths; `verify` reruns the scoped checks and reports PASS/FAIL/BLOCKED;
+   `review` checks requirements, compatibility, and the evidence chain.
+3. **Adversarial review** — run several independent reviewers with distinct
+   lenses (for example security/secrets, concurrency/correctness,
+   accessibility/regression, documentation/claims). The goal is to find
+   collective blind spots, not to repeat the first review.
+4. **Adjudication and evidence check** — the main agent deduplicates findings,
+   classifies P1/P2/P3, and re-checks every material claim against source or a
+   reproducible command. A subagent finding is a lead, not a fact; do not
+   forward it without this check.
+5. **Fix and re-review** — fix confirmed findings with a regression test that
+   fails before the fix. A blocking finding needs a new independent review of
+   the fix; never self-approve a blocking change.
+6. **Structured report** — publish a report on the Issue or PR with an overall
+   status, one unit per finding, the author's reply, and the reviewer's reply to
+   that reply. Mark each unit resolved, accepted, or blocking. Disclose
+   unverified items and environment blockers; never present mock, partial, or
+   CI-only results as real evidence.
+
+A documentation-only PR may use a reduced chain: independent review plus
+evidence check. It still must not fabricate verification.
+
+If a stage cannot run because a credential, environment, or external service is
+missing, name the missing stage and why. Do not replace it with CI alone.
+
 ## Backend conventions
 
 - Dependencies point downward: `server` → `app` → `review` / `agent` / `llm` / `gitlab` / `store`. `pkg/dag` must not import Tribunal packages.
