@@ -26,8 +26,7 @@ Tribunal is a multi-agent code review service for GitLab CE merge requests: a Go
 | `prompts/` | Embedded block prompts and platform rules |
 | `web/` | React 19 console; `web/dist` is the committed build embedded into the binary |
 | `config/` | `server.example.yaml` and `server.docker.yaml` (mounted by Compose) |
-| `scripts/` | Coverage and license checks, license bundle, Docker smoke, MCP wrapper |
-| `prototype/v2/` | Visual prototype and `IMPLEMENT.md` mapping for the v2 console |
+| `scripts/` | Coverage, license, log and load tests; license bundle; Docker smoke; codebase-memory wrapper |
 | `third_party/` | License and version records for bundled executables |
 
 ## Commands
@@ -125,7 +124,7 @@ missing, name the missing stage and why. Do not replace it with CI alone.
 
 ## Delivery
 
-- One goal maps to one Issue (Why / Scope / Approach / Acceptance) and one PR. Every commit carries an `Issue: #N` trailer. Squash-merge only after CI is green, then confirm the Issue closed.
+- One goal maps to one Issue (Why / Scope / Approach / Acceptance) and one PR. Every commit carries an `Issue: #N` trailer. Squash-merge only after CI is green and the review workflow above is complete, then confirm the Issue closed.
 - Before merging, bring the branch up to date with the latest `main` and wait for CI to pass on the new head. A green run on an outdated base does not count: two PRs can each pass alone and still break `main` together.
 - Do not create branches to host screenshots or other assets. Attach UI screenshots to the Issue through the GitHub web UI; if that is not possible, describe the checks in the PR instead.
 - Add user-visible changes to the `Unreleased` or upcoming version section of `CHANGELOG.md`.
