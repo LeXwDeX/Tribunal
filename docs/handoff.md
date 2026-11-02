@@ -15,7 +15,7 @@
 
 ## 1. 新机器环境准备
 
-1. **克隆**：`gh repo clone LeXwDeX/Tribunal && cd Tribunal`。当前 `main` 至少包含 `6e2a786`（#198）和本交接的 PR。
+1. **克隆**：`gh repo clone LeXwDeX/Tribunal && cd Tribunal`。当前 `main` 至少包含 `44e2d4b`（#203）和本交接的 PR；另有打开的 #204（压测脚本）与 #205（执行图可访问名称）。
 2. **工具**：Go（`go.mod` 的 toolchain 是 1.26.10）、Node + npm（`web/`）、Bash、Python 3、能跑 `-race` 的 C 编译器、`gh`（已登录、对仓库有写权限）。本机可以没有 Docker；没有 Docker 时 Compose/冒烟必须记为未验证。
 3. **SpecGit**：仓库要求每个提交带 `Issue: #N` trailer，并由 SpecGit 的本地 checkpoint 把关。`.specgit.yaml` 和 SpecGit Skill 是本地文件，不在仓库里，新 clone 要重新接入：
    - 安装共享 CLI（见 <https://github.com/LeXwDeX/SpecGit/blob/main/docs/agent-install.md>），确认 `specgit --human --version` ≥ 2.17.1。
@@ -44,9 +44,11 @@
 
 ## 3. 当前状态
 
-- `main`：`6e2a786`（#198 已合并），包含本次交接 PR。
+- `main`：`44e2d4b`（#203 已合并），包含本次交接 PR。
 - 2026-10-30 审查列出的 P1/P2 与后续发现的 Issue 均已处理：#157、#158、#159、#160、#161、#162、#163、#164、#175、#176、#177、#178、#179、#180、#181、#182、#183、#184、#185、#186、#187。另有更早的 #140、#141、#142、#143、#144、#145、#146、#147、#170、#172、#174 同期合并。
-- 2026-11-02 新增：PR #197（#196，镜像内 codebase-memory 验证）与 PR #198（#192，verify 读取 CI 失败 job 日志）已合并；Issue #196、#192 已关闭。
+- 2026-11-02 新增：PR #197（#196，镜像内 codebase-memory 验证）、#198（#192，verify 读取 CI 失败 job 日志）、#200（#199，交接文档）、#201（#195，暗色对比度）、#203（#202，成本函数修复）已合并；Issue #196、#192、#199、#202 已关闭。
+- #194 并发压测已实测：10 个项目并发 10/10 完成、0 失败，p50 22.24s、p95 27.23s；瓶颈是 provider `max_concurrency: 4` 排队。压测脚本 PR #204 打开中。
+- #195 自动化验收完成：33.110 总览页亮/暗 Lighthouse Accessibility 100；390/1440 宽度无横向滚动；键盘抽查通过。执行图 `label-content-name-mismatch` 由 PR #205 修复；截图已生成但 GitHub 未登录，无法附到 Issue。
 - **v1.2.0 仍未打 tag、未发 Release**，由维护者处理。CHANGELOG 有 `[1.2.0] - 2026-10-29` 版本段。
 - 迁移序号已用：`0020`（#159）、`0021`–`0023`（#180）、`0024`（#179），均已合并。无 down migration；升级/回退必须按 `docs/operations.md` 备份并整体恢复，不能只换镜像。
 
@@ -54,10 +56,10 @@
 
 | Issue | 状态 | 说明 |
 |---|---|---|
-| #199 | 本交接 | 更新交接文档，随本 PR 关闭。 |
-| #193 | 待设计 | 允许执行内置 Skill 脚本（仅内置范围）。`ARCH.md` 仍写“首版不执行脚本”，内置 `code-review` 也没有脚本；实现前必须先确定脚本协议、清单和沙箱边界。 |
-| #194 | 待实施 | 单实例 5–10 项目并发压测。需要真实 GitLab 项目与可观测指标；不要用单元测试代替。 |
-| #195 | 待实施 | WCAG 2.1 AA 验收与 UI 自测。需要 1440/390、亮/暗、键盘、对比度和截图；`web/node_modules` 已可用。 |
+| #199 | 已关闭 | 交接文档已由 PR #200 合并；本次更新随本 PR 再入。 |
+| #193 | 待设计 | 允许执行内置 Skill 脚本（仅内置范围）。`ARCH.md` 仍写“首版不执行脚本”，内置 `code-review` 也没有脚本；实现前必须先确定脚本协议、清单和沙箱边界。当前没有具体脚本需求，暂不实施。 |
+| #194 | 压测完成，脚本待合 | 10 项目并发已实测通过；`scripts/loadtest.sh` 由 PR #204 提交，等 CI 与合并。 |
+| #195 | 验收完成，截图待附 | 自动化审计、键盘抽查、390/1440 检查完成；`label-content-name-mismatch` 由 PR #205 修复。截图在 `$TMPDIR/opencode/a11y-195/`，需 GitHub 登录后附到 Issue。 |
 | #138 | 暂不实施 | 内容是把开发 CI 迁移到 Azure Pipelines 并删除 `.github/workflows`。当前 GitHub Actions 的 hosted runner 已可用且是合并门槛；执行 #138 会删除现行 CI。除非维护者明确要求迁移，否则保持现状。 |
 | #123 | 暂不实施 | 针对自托管 runner 的 `CGO_ENABLED` 与 Docker CLI 缺口。当前 hosted runner 已包含两者并通过；没有自托管 runner 的实际运行证据前，不改成假通过，也不重复排期。 |
 | #109 | 已拆分 | #192、#196 已完成；剩余 #193、#194、#195。Postgres 与 Q18 上游改造已记为不做。 |
@@ -82,7 +84,7 @@
 - 工作流在 `.github/workflows/ci.yml`，只读权限，不发布。
 
 **33.110（已验证环境，不用于 CI）**
-- SSH 已恢复。2026-11-02 使用 `/DATA/AppData/tribunal-smoke-1102`（端口 18500，镜像 `tribunal:smoke-1102`，commit `9c3b4e2`）完成真实部署验证。
+- SSH 已恢复。2026-11-02 使用 `/DATA/AppData/tribunal-smoke-1102`（端口 18500，镜像 `tribunal:smoke-1102-44e2d4b`，commit `44e2d4b`）完成真实部署验证；回退备份在 `.env.pre-44e2d4b`。
 - 验证内容：容器内 `codebase-memory-mcp` 0.12.1；MCP 测试返回 13 个只读工具；真实 MR !2 评审 PASS 并更新 summary note 101831。非空 ignore policy 下评审不注入 MCP 工具，属预期安全降级。
 - 合并门禁仍只用真实 GitHub Actions；33.110 结果只作为额外证据，不能替代当前 head 的 GitHub Actions。
 - 历史用法：`bash /tmp/client.sh [rev]`；结果在 `/DATA/AppData/tribunal-ci/runs/<时间-sha>/summary.txt`，末行 `RESULT PASS/FAIL`。
@@ -103,7 +105,10 @@
 - #192 的 CI 日志脱敏是启发式，不能保证覆盖任意 secret；非空 ignore policy 下 trace 不会进入 dossier。`TaskRenderVersion` 已升至 4，旧工作流的 `prompt_hash` 会失效，恢复时需重新触发评审。
 - 真实 GitLab 对“取消后迟到写入”的请求排序没有验证；#182 的收敛承诺只在 `docs/operations.md` 列出的条件（服务持续运行、失败可重试、权限有效、远程操作最终结束）下成立。
 - 仓库 Skill 的发现接口不感知具体 MR 的 ignored rename；授权快照与运行时完整 deny 集合不一致时会 fail closed，需要重新授权。
-- UI 的 1440/390、亮/暗主题检查大部分使用模拟 API 的 Chrome 检查，不是真实后端；物理设备与触屏未验证。
+- UI 的 1440/390、亮/暗主题检查已补真实后端（33.110）的总览、评审详情、统计和系统页；仍不是物理设备与触屏验证。
+- #194 的单次 10 项目并发结果是环境观测，不是容量承诺；SQLite 锁等待没有单独指标，后续高并发需补 WAL/锁统计。
+- #195 的截图尚未附到 Issue；GitHub 未登录，上传需要用户完成。
+- GitLab 临时 PAT（id 219）与 Tribunal 临时用户 token 已在验收后撤销；33.110 的 `.env` 与 admin token 仍保留，未轮换。
 - 一次浏览器验证的进程诊断曾把疑似 GitHub 令牌写入会话工具输出；用户确认该令牌早已撤销。仍未复核所有会话记录/备份的访问范围，后续不要再输出进程列表或环境变量。
 - `web` 构建存在既有的 >500 kB chunk 警告；没有引入代码分割。
 
