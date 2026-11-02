@@ -126,6 +126,7 @@ function ProjectExtensionsPanel({ project }: { project: Project }) {
   const [subTab, setSubTab] = useState('mcp')
   return (
     <ExtensionsManager
+      key={project.id}
       scope="project"
       projectId={project.id}
       canManage={project.access === 'manage'}
@@ -199,7 +200,7 @@ export function ProjectDetailPage() {
         <div id={`project-tabpanel-${tab}`} role="tabpanel" aria-labelledby={`project-tab-${tab}`}>
           {tab === 'overview' ? <ProjectOverview project={data} /> : null}
           {tab === 'workspace' ? <WorkspacePanel key={data.id} projectId={data.id} canManage={data.access === 'manage'} /> : null}
-          {tab === 'settings' ? <SettingsPanel project={data} /> : null}
+          {tab === 'settings' ? <SettingsPanel key={data.id} project={data} /> : null}
           {tab === 'extensions' ? <ProjectExtensionsPanel project={data} /> : null}
         </div>
       </div>
