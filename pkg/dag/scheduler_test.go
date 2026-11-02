@@ -255,7 +255,7 @@ func TestTokenBudgetEventsOptional(t *testing.T) {
 		Nodes: map[string]NodeView{"a": {ID: "a", Spec: node("a"), Status: NodeCompleted}, "b": {ID: "b", Spec: NodeSpec{ID: "b", Kind: "x"}, Status: NodePending}},
 		Order: []string{"a", "b"},
 	}
-	events := tokenBudgetEvents(wf, testNow)
+	events := tokenBudgetEvents(wf, testNow, nil)
 	if len(events) != 1 || events[0].Type != EventNodeSkipped {
 		t.Fatalf("events: %v", events)
 	}
@@ -297,7 +297,7 @@ func TestTokenBudgetEventsSkipTokenFreeNodes(t *testing.T) {
 		},
 		Order: []string{"a", "b"},
 	}
-	if events := tokenBudgetEvents(wf, testNow); len(events) != 0 {
+	if events := tokenBudgetEvents(wf, testNow, nil); len(events) != 0 {
 		t.Fatalf("token-free node received budget events: %v", events)
 	}
 }
@@ -423,7 +423,7 @@ func TestEngineQueuedNodeDoesNotStartAfterBudgetExhaustion(t *testing.T) {
 	}
 	handle := &runHandle{
 		active:      map[string]bool{"b": true},
-		nodeCancels: map[string]context.CancelCauseFunc{},
+		nodeCancels: map[string]nodeCancel{},
 		wake:        make(chan struct{}, 1),
 	}
 	engine.runNode(context.Background(), handle, wfID, "b")
