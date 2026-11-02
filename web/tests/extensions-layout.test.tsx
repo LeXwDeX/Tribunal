@@ -15,8 +15,7 @@ function extensionRoutes(projects: () => Response | Promise<Response>) {
   }
 }
 
-// The toolbar must hold exactly the scope switch and the project selector in
-// every state; status messages render in the tab panel below the tabs.
+// Project status messages render in the tab panel below the tabs.
 function expectStableLayout() {
   const toolbar = screen.getByRole('toolbar', { name: '扩展作用域与项目' })
   expect(within(toolbar).getByRole('group', { name: '扩展作用域' })).toBeInTheDocument()
@@ -30,24 +29,29 @@ function expectStableLayout() {
 describe('extensions page layout', () => {
   afterEach(() => vi.unstubAllGlobals())
 
-  it('switches scope with a segmented control and keeps the selector mounted', async () => {
-    installFetch(extensionRoutes(() => jsonResponse({ projects: [project({ access: 'manage' })] })))
+  it('shows the project selector only in project scope', async () => {
+    installFetch(extensionRoutes(() => jsonResponse({ projects: [project({ access: 'manage' }), project({ id: 43, path_with_namespace: 'group/frontend' })] })))
     renderWithProviders(<ExtensionsPage />, { route: '/extensions' })
 
     const platform = screen.getByRole('button', { name: '平台级' })
     expect(platform).toHaveAttribute('aria-pressed', 'true')
-    expect(screen.getByRole('combobox', { name: '扩展作用域项目' })).toBeDisabled()
-    expectStableLayout()
+    const toolbar = screen.getByRole('toolbar', { name: '扩展作用域与项目' })
+    expect(within(toolbar).queryByRole('combobox', { name: '扩展作用域项目' })).not.toBeInTheDocument()
+    expect(within(toolbar).queryByText('项目', { exact: true })).not.toBeInTheDocument()
 
     await userEvent.click(screen.getByRole('button', { name: '项目级' }))
     expect(screen.getByRole('button', { name: '项目级' })).toHaveAttribute('aria-pressed', 'true')
     expect(await screen.findByText(/项目级 · group\/backend/)).toBeInTheDocument()
-    expect(screen.getByRole('combobox', { name: '扩展作用域项目' })).toBeEnabled()
+    const selector = screen.getByRole('combobox', { name: '扩展作用域项目' })
+    expect(selector).toBeEnabled()
+    expect(selector).toHaveValue('42')
+    await userEvent.selectOptions(selector, '43')
+    expect(await screen.findByText(/项目级 · group\/frontend/)).toBeInTheDocument()
     expectStableLayout()
 
     await userEvent.click(platform)
-    expect(screen.getByRole('combobox', { name: '扩展作用域项目' })).toBeDisabled()
-    expectStableLayout()
+    expect(within(toolbar).queryByRole('combobox', { name: '扩展作用域项目' })).not.toBeInTheDocument()
+    expect(within(toolbar).queryByText('项目', { exact: true })).not.toBeInTheDocument()
   })
 
   it('shows the project loading state under the tabs', async () => {
