@@ -65,6 +65,9 @@ func (p *Publisher) rejectRepositorySkillPublicationLocked(ctx context.Context, 
 	if err != nil {
 		return false, false, err
 	}
+	if record != nil && record.PublicationState == store.WorkflowPublicationSkipped && record.PublicationError == repositorySkillEvidenceReason {
+		return p.rejectRepositorySkillPublicationLockedNow(ctx, st, id)
+	}
 	if record == nil || review.DossierHasNoRepositorySkillCapability(record.Data) {
 		return false, false, nil
 	}
@@ -186,8 +189,11 @@ func settleRepositorySkillOutcome(ctx context.Context, st ReviewStore, wf *store
 		state, reaction = reviewStatusFailed, reviewAwardFail
 	case string(dag.WorkflowCancelled):
 		state, reaction = reviewStatusCancelled, reviewAwardNone
-		if wf.CancelReason == repositorySkillEvidenceReason {
+		switch wf.CancelReason {
+		case repositorySkillEvidenceReason:
 			state, detail = reviewStatusStale, repositorySkillEvidenceReason
+		case "superseded":
+			state, detail = reviewStatusStale, "review is no longer current"
 		}
 	case string(dag.WorkflowCompleted):
 		if unknown {

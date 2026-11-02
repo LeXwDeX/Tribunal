@@ -521,3 +521,89 @@ func TestRequestJSONTags(t *testing.T) {
 		t.Fatalf("unexpected JSON: %s", raw)
 	}
 }
+
+func TestRegistryRetryRateLimitDeadlinePreservesUsage(t *testing.T) {
+	t.Setenv("TEST_KEY", "secret-value")
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(chatEmptyChoices))
+	}))
+	defer server.Close()
+	cfg := chatConfig(server.URL+"/v1", "TEST_KEY")
+	cfg.RPM = 1 // one token per minute; the retry cannot acquire another token.
+	var records []CallRecord
+	client := mustClient(t, "chat", cfg,
+		WithRecorder(RecorderFunc(func(_ context.Context, call CallRecord) { records = append(records, call) })),
+		WithRetryBaseDelay(time.Millisecond))
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err := client.Generate(ctx, simpleRequest())
+	failure := requireKind(t, err, ErrCanceled)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v, want deadline exceeded", err)
+	}
+	if failure.Usage.InputTokens != 11 || failure.Usage.OutputTokens != 7 {
+		t.Fatalf("canceled retry lost usage: %+v", failure.Usage)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("canceled rate-limit wait reached the provider: calls=%d", calls.Load())
+	}
+	if len(records) != 1 || records[0].Audit == nil || records[0].Audit.Response == nil ||
+		records[0].Audit.Response.Usage.InputTokens != 11 {
+		t.Fatalf("canceled wait fabricated an audit attempt: %+v", records)
+	}
+}
+
+func TestRegistryRetrySemaphoreCancelPreservesUsage(t *testing.T) {
+	t.Setenv("TEST_KEY", "secret-value")
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(chatEmptyChoices))
+	}))
+	defer server.Close()
+	var records []CallRecord
+	firstRecorded := make(chan struct{}, 1)
+	client := mustClient(t, "chat", chatConfig(server.URL+"/v1", "TEST_KEY"),
+		WithRecorder(RecorderFunc(func(_ context.Context, call CallRecord) {
+			records = append(records, call)
+			if len(records) == 1 {
+				firstRecorded <- struct{}{}
+			}
+		})),
+		WithRetryBaseDelay(100*time.Millisecond))
+	pc, ok := client.(*providerClient)
+	if !ok {
+		t.Fatalf("client type = %T", client)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.Generate(ctx, simpleRequest())
+		done <- err
+	}()
+	<-firstRecorded
+	// Hold the only concurrency slot while the retry backoff expires.
+	pc.sem <- struct{}{}
+	defer func() { <-pc.sem }()
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+	err := <-done
+	failure := requireKind(t, err, ErrCanceled)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context canceled", err)
+	}
+	if failure.Usage.InputTokens != 11 || failure.Usage.OutputTokens != 7 {
+		t.Fatalf("canceled retry lost usage: %+v", failure.Usage)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("canceled semaphore wait reached the provider: calls=%d", calls.Load())
+	}
+	if len(records) != 1 || records[0].Audit == nil || records[0].Audit.Response == nil ||
+		records[0].Audit.Response.Usage.InputTokens != 11 {
+		t.Fatalf("canceled wait fabricated an audit attempt: %+v", records)
+	}
+}
