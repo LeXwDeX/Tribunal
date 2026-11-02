@@ -103,7 +103,8 @@ func (s *ReviewService) recoverRepositorySkillOutcomes(ctx context.Context) erro
 				errs = append(errs, err)
 				continue
 			}
-			if record == nil || review.DossierHasSupportedRepositorySkillCapability(record.Data) {
+			if record == nil || (record.PublicationError != repositorySkillEvidenceReason &&
+				(wf.Status == string(dag.WorkflowCompleted) || review.DossierHasSupportedRepositorySkillCapability(record.Data))) {
 				continue
 			}
 			lockedCtx, unlock, err := s.publisher.lockWorkflow(ctx, wf.ID)
@@ -114,7 +115,7 @@ func (s *ReviewService) recoverRepositorySkillOutcomes(ctx context.Context) erro
 				errs = append(errs, err)
 				continue
 			}
-			_, _, err = s.publisher.rejectRepositorySkillPublication(lockedCtx, s.store, wf.ID)
+			err = s.recoverRepositorySkillOutcomeLocked(lockedCtx, wf.ID)
 			unlock()
 			if err != nil && !errors.Is(err, store.ErrNotFound) {
 				errs = append(errs, err)
@@ -125,6 +126,35 @@ func (s *ReviewService) recoverRepositorySkillOutcomes(ctx context.Context) erro
 		}
 		cursor = next
 	}
+}
+
+// Recheck the durable reason under the publication locks before settling.
+func (s *ReviewService) recoverRepositorySkillOutcomeLocked(ctx context.Context, id string) error {
+	mrUnlock, err := s.publisher.lockReviewMR(ctx, id)
+	if err != nil {
+		return err
+	}
+	defer mrUnlock()
+	unlock, err := s.publisher.locks.lock(ctx, id)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	wf, err := s.store.GetWorkflow(ctx, id)
+	if err != nil || wf == nil {
+		return err
+	}
+	record, err := s.store.GetWorkflowDossier(ctx, id)
+	if err != nil || record == nil {
+		return err
+	}
+	if !workflowTerminal(wf.Status) || wf.MRIID == nil || record.PublicationState != store.WorkflowPublicationSkipped ||
+		(record.PublicationError != repositorySkillEvidenceReason &&
+			(wf.Status == string(dag.WorkflowCompleted) || review.DossierHasSupportedRepositorySkillCapability(record.Data))) {
+		return nil
+	}
+	_, _, err = s.publisher.rejectRepositorySkillPublicationLocked(ctx, s.store, id)
+	return err
 }
 
 func (s *ReviewService) settleOrphanDossiers(ctx context.Context) error {
