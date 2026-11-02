@@ -415,6 +415,8 @@ for g in groups:
 
 extend：`extend_requests` 非空且预算允许时，引擎追加对应节点和一个新的 `synthesize.2`（依赖这些新节点），原 `synthesize` 的输出作为 `synthesize.2` 的输入之一。`synthesize.2` 不允许再次 extend。
 
+第二次汇总将本轮完成的扩展 verify 结果用于对应的已有问题。有效代码证据支持的 `REFUTED` 结果按规则保留为 drop，模型不能重新发布；未请求重验的已有有效反证也保留。重验失败或缺失时保留先前仍有效的反证，并记录 warning；没有有效先前反证时按 `on_uncertain` 处理。完成的 `UNCERTAIN` 结果替代先前挑战并按 `on_uncertain` 处理，先前结果仍保存在工作流历史中。
+
 ---
 
 ## 8. prompt 组装
