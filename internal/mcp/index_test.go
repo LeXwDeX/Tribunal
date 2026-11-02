@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -13,6 +14,7 @@ func TestIndexHelperProcess(t *testing.T) {
 	if os.Getenv("MCP_INDEX_HELPER") != "1" {
 		t.Skip("helper process")
 	}
+	isolateGoHelperCoverage(t)
 	out := os.Getenv("MCP_INDEX_OUT")
 	if out == "" {
 		t.Fatal("MCP_INDEX_OUT is required")
@@ -41,6 +43,8 @@ func TestIndexHelperProcess(t *testing.T) {
 }
 
 func TestRunIndexUsesArgvRestrictedEnvironment(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	t.Setenv("GOCOVERDIR", "must-not-be-inherited")
 	t.Setenv("MCP_INDEX_PARENT_SECRET", "parent-secret-value")
 	exe, err := os.Executable()
 	if err != nil {
@@ -49,6 +53,9 @@ func TestRunIndexUsesArgvRestrictedEnvironment(t *testing.T) {
 	workspace := t.TempDir()
 	baseDir := t.TempDir()
 	out := filepath.Join(t.TempDir(), "index-result.json")
+	helperArgs := goTestHelperArgs(t, "TestIndexHelperProcess")
+	indexArgs := append([]string{exe}, helperArgs...)
+	indexArgs = append(indexArgs, "--", "{base_dir}", "{workspace}")
 	cfg := ServerConfig{
 		Command: exe,
 		Env: map[string]string{
@@ -57,13 +64,7 @@ func TestRunIndexUsesArgvRestrictedEnvironment(t *testing.T) {
 		},
 		XReview: XReviewConfig{
 			EnvAllowlist: []string{"MCP_INDEX_PARENT_SECRET"},
-			IndexCommand: []string{
-				exe,
-				"-test.run=^TestIndexHelperProcess$",
-				"--",
-				"{base_dir}",
-				"{workspace}",
-			},
+			IndexCommand: indexArgs,
 		},
 	}
 	m, err := New(Options{
@@ -108,11 +109,21 @@ func TestRunIndexUsesArgvRestrictedEnvironment(t *testing.T) {
 	if !strings.Contains(joined, workspace) {
 		t.Fatalf("workspace was not substituted: %v", result.Args)
 	}
+	wantArgs := append([]string{exe}, helperArgs...)
+	wantArgs = append(wantArgs, "--", baseDir, workspace)
+	if !slices.Equal(result.Args, wantArgs) {
+		t.Fatalf("index args = %v, want %v", result.Args, wantArgs)
+	}
 	if result.Env["MCP_INDEX_HELPER"] != "1" || result.Env["MCP_INDEX_OUT"] != out {
 		t.Fatalf("explicit index env missing: %+v", result.Env)
 	}
 	if _, ok := result.Env["MCP_INDEX_PARENT_SECRET"]; ok {
 		t.Fatal("parent secret was inherited by the index command")
+	}
+	for _, name := range []string{"TMPDIR", "GOCOVERDIR"} {
+		if _, ok := result.Env[name]; ok {
+			t.Fatalf("%s was inherited by the index command", name)
+		}
 	}
 	if !strings.HasPrefix(result.Env["HOME"], workspace) {
 		t.Fatalf("index HOME = %q, want below %q", result.Env["HOME"], workspace)
@@ -136,6 +147,23 @@ func TestRunIndexWithNoConfiguredCommand(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("RunIndex count = %d, want 0", count)
+	}
+}
+
+func TestRunIndexOrdinaryCommandHasNoGoTestFlags(t *testing.T) {
+	m, err := New(Options{
+		Workspace: t.TempDir(),
+		Project: Config{MCPServers: map[string]ServerConfig{
+			"local": {Command: "/usr/bin/env", XReview: XReviewConfig{IndexCommand: []string{"/usr/bin/env"}}},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	count, err := m.RunIndex(context.Background(), t.TempDir())
+	if err != nil || count != 1 {
+		t.Fatalf("RunIndex ordinary command = %d, %v; want 1, nil", count, err)
 	}
 }
 

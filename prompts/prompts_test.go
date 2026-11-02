@@ -118,7 +118,7 @@ func TestPromptFilesContainNoSecrets(t *testing.T) {
 // publications and makes the next trigger review the MR again. Update this
 // value only together with a role version bump or render-version bump. Also
 // note the change.
-const embeddedBundleHash = "1035ef3ce9e397fc1921a195512274a2ad63906bf843966e7dddcf9c8326131f"
+const embeddedBundleHash = "4779cae97c59e843f0aba841a8c7aba800efdc58e05edd1a6548954509cb15c9"
 
 func TestEmbeddedBundleHashIsPinned(t *testing.T) {
 	bundle, err := Load("")

@@ -31,12 +31,24 @@ var ErrUnknownNodeKind = errors.New("review: unknown node kind")
 // overshoot the limit; the next request is always blocked.
 var errTokenBudgetExhausted = errors.New("review: workflow token budget exhausted")
 
+// unsafeUsageError reports token usage that cannot be bounded safely. It is
+// sanitized: it carries no counts, provider payload, or request data.
+func unsafeUsageError() error {
+	return &llm.Error{Kind: llm.ErrUnsafeResponse, Err: errors.New("provider returned unknown token usage")}
+}
+
 // usageError carries usage known from a failed agent run to the node executor.
 // The DAG failure event persists it so retries and recovery see the spend.
 type usageError struct {
-	usage dag.Usage
-	err   error
+	usage      dag.Usage
+	incomplete bool
+	err        error
 }
+
+type unsafeAgentError struct{ err error }
+
+func (e *unsafeAgentError) Error() string   { return "review: unsafe model response" }
+func (e *unsafeAgentError) Unwrap() []error { return []error{agent.ErrUnsafeResponse, e.err} }
 
 func (e *usageError) Error() string {
 	if e == nil || e.err == nil {
@@ -58,6 +70,11 @@ func knownUsage(err error) dag.Usage {
 		return usageErr.usage
 	}
 	return dag.Usage{}
+}
+
+func knownUsageIncomplete(err error) bool {
+	var usageErr *usageError
+	return errors.As(err, &usageErr) && usageErr != nil && usageErr.incomplete
 }
 
 // ClientProvider resolves a configured llm.Client by provider name.
@@ -366,13 +383,14 @@ func (e *Executor) Execute(ctx context.Context, in dag.NodeInput) (dag.NodeOutpu
 	}
 	if err != nil {
 		usage := knownUsage(err)
+		incomplete := knownUsageIncomplete(err)
 		if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
-			return dag.NodeOutput{Usage: usage}, classifyError(fmt.Errorf("review: node %s: %w", in.Node.ID, ctxErr))
+			return dag.NodeOutput{Usage: usage, UsageIncomplete: incomplete}, classifyError(fmt.Errorf("review: node %s: %w", in.Node.ID, ctxErr))
 		}
-		return dag.NodeOutput{Usage: usage}, classifyError(fmt.Errorf("review: node %s (%s): %w", in.Node.ID, in.Node.Kind, err))
+		return dag.NodeOutput{Usage: usage, UsageIncomplete: incomplete}, classifyError(fmt.Errorf("review: node %s (%s): %w", in.Node.ID, in.Node.Kind, err))
 	}
 	if len(out.Data) == 0 || !json.Valid(out.Data) {
-		return dag.NodeOutput{}, fmt.Errorf("review: node %s produced invalid JSON", in.Node.ID)
+		return dag.NodeOutput{Usage: out.Usage, UsageIncomplete: out.UsageIncomplete}, fmt.Errorf("review: node %s produced invalid JSON", in.Node.ID)
 	}
 	return out, nil
 }
@@ -426,25 +444,39 @@ func (e *Executor) runAgent(ctx context.Context, provider string, spec agent.Run
 		attemptSpec := spec
 		if beforeTurn != nil {
 			attemptSpec.BeforeTurn = func(ctx context.Context, used llm.Usage) error {
-				total := used
-				total.InputTokens += carry.InputTokens
-				total.OutputTokens += carry.OutputTokens
-				total.CacheReadTokens += carry.CacheReadTokens
-				total.CacheWriteTokens += carry.CacheWriteTokens
-				total.ReasoningTokens += carry.ReasoningTokens
+				total := llm.AddUsage(carry, used)
+				if total.Incomplete || !llm.ValidUsage(total) {
+					return unsafeUsageError()
+				}
 				return beforeTurn(ctx, total)
 			}
 		}
 		result, err := e.runner(ctx, attemptSpec)
+		used, valid := llm.ErrorUsage(err)
 		if result != nil {
+			valid = valid && llm.ValidUsage(result.Usage)
+			result.Usage = llm.MaxUsage(result.Usage, used)
 			carry = addLLMUsage(carry, result.Usage)
 			result.Usage = carry
+		} else if err != nil {
+			carry = addLLMUsage(carry, used)
+		}
+		if !valid && !errors.Is(err, agent.ErrUnsafeResponse) && !llm.IsUnsafeResponse(err) {
+			err = &llm.Error{Kind: llm.ErrUnsafeResponse, Err: errors.New("provider returned invalid token usage")}
 		}
 		if err == nil {
 			return result, nil
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return carryRunResult(result, carry), ctxErr
+		}
+		if errors.Is(err, agent.ErrUnsafeResponse) || llm.IsUnsafeResponse(err) {
+			err = &unsafeAgentError{err: err}
+		}
+		var guard *llm.AttemptGuardError
+		var previous *llm.Error
+		if lastErr != nil && errors.As(err, &guard) && guard.Previous == nil && errors.As(lastErr, &previous) {
+			err = &llm.AttemptGuardError{Err: err, Usage: guard.Usage, Previous: previous}
 		}
 		lastErr = err
 		if !retry || !retryableTransport(err) || attempt == e.maxAttempts {
@@ -459,7 +491,7 @@ func (e *Executor) runAgent(ctx context.Context, provider string, spec agent.Run
 
 func carryRunResult(result *agent.RunResult, usage llm.Usage) *agent.RunResult {
 	if result == nil {
-		if usage.InputTokens == 0 && usage.OutputTokens == 0 &&
+		if !usage.Incomplete && usage.InputTokens == 0 && usage.OutputTokens == 0 &&
 			usage.CacheReadTokens == 0 && usage.CacheWriteTokens == 0 && usage.ReasoningTokens == 0 {
 			return nil
 		}
@@ -470,15 +502,17 @@ func carryRunResult(result *agent.RunResult, usage llm.Usage) *agent.RunResult {
 }
 
 func addLLMUsage(dst, add llm.Usage) llm.Usage {
-	dst.InputTokens += add.InputTokens
-	dst.OutputTokens += add.OutputTokens
-	dst.CacheReadTokens += add.CacheReadTokens
-	dst.CacheWriteTokens += add.CacheWriteTokens
-	dst.ReasoningTokens += add.ReasoningTokens
-	return dst
+	return llm.AddUsage(dst, add)
 }
 
 func retryableTransport(err error) bool {
+	if errors.Is(err, agent.ErrUnsafeResponse) || llm.IsUnsafeResponse(err) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var guard *llm.AttemptGuardError
+	if errors.As(err, &guard) {
+		return false
+	}
 	var llmErr *llm.Error
 	if errors.As(err, &llmErr) {
 		return llmErr.Retryable()
@@ -498,6 +532,23 @@ func (e *Executor) dagUsage(provider string, usage llm.Usage) dag.Usage {
 		out.CostMicros = e.deps.Cost(provider, usage)
 	}
 	return out
+}
+
+func (e *Executor) marshalAgentOutput(value any, provider string, usage llm.Usage) (dag.NodeOutput, error) {
+	dagUsage := e.dagUsage(provider, usage)
+	out, err := marshalNodeOutput(value, dagUsage)
+	if err != nil {
+		return dag.NodeOutput{}, &usageError{usage: dagUsage, incomplete: usage.Incomplete, err: err}
+	}
+	out.UsageIncomplete = usage.Incomplete
+	return out, nil
+}
+
+func (e *Executor) agentOutputError(provider string, result *agent.RunResult, err error) (dag.NodeOutput, error) {
+	if result == nil {
+		return dag.NodeOutput{}, err
+	}
+	return dag.NodeOutput{}, &usageError{usage: e.dagUsage(provider, result.Usage), incomplete: result.Usage.Incomplete, err: err}
 }
 
 func (e *Executor) projectBackground() string {
@@ -720,12 +771,14 @@ func (e *Executor) callAgent(ctx context.Context, in dag.NodeInput, opts agentOp
 	}
 	if err != nil {
 		usage := dag.Usage{}
+		incomplete := false
 		if result != nil {
 			usage = e.dagUsage(opts.Provider, result.Usage)
+			incomplete = result.Usage.Incomplete
 		}
-		if usage.InputTokens > 0 || usage.OutputTokens > 0 || usage.CostMicros > 0 ||
+		if incomplete || usage.InputTokens > 0 || usage.OutputTokens > 0 || usage.CostMicros > 0 ||
 			usage.CacheReadTokens > 0 || usage.CacheWriteTokens > 0 || usage.ReasoningTokens > 0 {
-			return result, &usageError{usage: usage, err: err}
+			return result, &usageError{usage: usage, incomplete: incomplete, err: err}
 		}
 	}
 	return result, err
@@ -834,15 +887,26 @@ func pathsOverlap(a, b string) bool {
 // before every turn; a request already in flight may complete and overshoot.
 func (e *Executor) budgetHook(workflowID string) func(context.Context, llm.Usage) error {
 	return func(ctx context.Context, usage llm.Usage) error {
+		if usage.Incomplete || !llm.ValidUsage(usage) {
+			return unsafeUsageError()
+		}
 		base, max, err := e.tokenBudget(ctx, workflowID)
 		if err != nil {
 			return err
 		}
-		if max > 0 && base+usage.InputTokens+usage.OutputTokens >= max {
+		if max > 0 && sumTokens(base, usage.InputTokens, usage.OutputTokens) >= max {
 			return errTokenBudgetExhausted
 		}
 		return nil
 	}
+}
+
+func sumTokens(counts ...int64) int64 {
+	var total llm.Usage
+	for _, count := range counts {
+		total = llm.AddUsage(total, llm.Usage{InputTokens: count})
+	}
+	return total.InputTokens
 }
 
 func (e *Executor) sandboxFor(skillRoots []string) (*agent.Sandbox, error) {

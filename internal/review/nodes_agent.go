@@ -90,9 +90,9 @@ func (e *Executor) executePlanAgent(ctx context.Context, in dag.NodeInput, param
 	}
 	out, ok := result.Output.(*PlanOut)
 	if !ok || out == nil {
-		return dag.NodeOutput{}, errors.New("review: plan decoder returned an unexpected type")
+		return e.agentOutputError(params.Provider, result, errors.New("review: plan decoder returned an unexpected type"))
 	}
-	return marshalNodeOutput(out, e.dagUsage(params.Provider, result.Usage))
+	return e.marshalAgentOutput(out, params.Provider, result.Usage)
 }
 
 func (e *Executor) executeCodeReview(ctx context.Context, in dag.NodeInput) (dag.NodeOutput, error) {
@@ -128,10 +128,10 @@ func (e *Executor) executeCodeReview(ctx context.Context, in dag.NodeInput) (dag
 	}
 	out, ok := result.Output.(*CodeReviewOut)
 	if !ok || out == nil {
-		return dag.NodeOutput{}, errors.New("review: code-review decoder returned an unexpected type")
+		return e.agentOutputError(params.Provider, result, errors.New("review: code-review decoder returned an unexpected type"))
 	}
 	out.ToolGaps = gaps
-	return marshalNodeOutput(out, e.dagUsage(params.Provider, result.Usage))
+	return e.marshalAgentOutput(out, params.Provider, result.Usage)
 }
 
 func (e *Executor) executeReviewChannel(ctx context.Context, in dag.NodeInput) (dag.NodeOutput, error) {
@@ -172,10 +172,10 @@ func (e *Executor) executeReviewChannel(ctx context.Context, in dag.NodeInput) (
 	}
 	out, ok := result.Output.(*ReviewOut)
 	if !ok || out == nil {
-		return dag.NodeOutput{}, errors.New("review: review channel decoder returned an unexpected type")
+		return e.agentOutputError(params.Provider, result, errors.New("review: review channel decoder returned an unexpected type"))
 	}
 	out.ToolGaps = gaps
-	return marshalNodeOutput(out, e.dagUsage(params.Provider, result.Usage))
+	return e.marshalAgentOutput(out, params.Provider, result.Usage)
 }
 
 func (e *Executor) executeReviewGate(ctx context.Context, in dag.NodeInput) (dag.NodeOutput, error) {
@@ -242,9 +242,9 @@ func (e *Executor) executeReviewGate(ctx context.Context, in dag.NodeInput) (dag
 	}
 	out, ok := result.Output.(*ReviewGateOut)
 	if !ok || out == nil {
-		return dag.NodeOutput{}, errors.New("review: gate decoder returned an unexpected type")
+		return e.agentOutputError(provider, result, errors.New("review: gate decoder returned an unexpected type"))
 	}
-	return marshalNodeOutput(out, e.dagUsage(provider, result.Usage))
+	return e.marshalAgentOutput(out, provider, result.Usage)
 }
 
 func (e *Executor) executeReasoner(ctx context.Context, in dag.NodeInput) (dag.NodeOutput, error) {
@@ -289,9 +289,9 @@ func (e *Executor) executeReasoner(ctx context.Context, in dag.NodeInput) (dag.N
 	}
 	out, ok := result.Output.(*ReasonerOut)
 	if !ok || out == nil {
-		return dag.NodeOutput{}, errors.New("review: reasoner decoder returned an unexpected type")
+		return e.agentOutputError(provider, result, errors.New("review: reasoner decoder returned an unexpected type"))
 	}
-	return marshalNodeOutput(out, e.dagUsage(provider, result.Usage))
+	return e.marshalAgentOutput(out, provider, result.Usage)
 }
 
 func (e *Executor) executeVerify(ctx context.Context, in dag.NodeInput) (dag.NodeOutput, error) {
@@ -332,7 +332,7 @@ func (e *Executor) executeVerify(ctx context.Context, in dag.NodeInput) (dag.Nod
 	}
 	out, ok := result.Output.(*VerifyOut)
 	if !ok || out == nil {
-		return dag.NodeOutput{}, errors.New("review: verify decoder returned an unexpected type")
+		return e.agentOutputError(params.Provider, result, errors.New("review: verify decoder returned an unexpected type"))
 	}
 	envelope := VerifyResult{
 		GroupID:   params.GroupID,
@@ -343,9 +343,9 @@ func (e *Executor) executeVerify(ctx context.Context, in dag.NodeInput) (dag.Nod
 		ToolGaps:  gaps,
 	}
 	if err := envelope.Validate(); err != nil {
-		return dag.NodeOutput{}, err
+		return e.agentOutputError(params.Provider, result, err)
 	}
-	return marshalNodeOutput(envelope, e.dagUsage(params.Provider, result.Usage))
+	return e.marshalAgentOutput(envelope, params.Provider, result.Usage)
 }
 
 func (e *Executor) executeSynthesize(ctx context.Context, in dag.NodeInput) (dag.NodeOutput, error) {
@@ -357,6 +357,7 @@ func (e *Executor) executeSynthesize(ctx context.Context, in dag.NodeInput) (dag
 	if err != nil {
 		return dag.NodeOutput{}, err
 	}
+	unresolved = mergeUnresolved(unresolved, groupProvenanceSignals(e.deps.Dossier, groups))
 	toolGaps, err := e.toolGapSignals(ctx, in.WorkflowID)
 	if err != nil {
 		return dag.NodeOutput{}, err
@@ -427,21 +428,17 @@ func (e *Executor) executeSynthesize(ctx context.Context, in dag.NodeInput) (dag
 	if err != nil {
 		return dag.NodeOutput{}, err
 	}
-	var lastValidationErr error
 	submit := agent.SubmitSpec{
 		Schema: schema,
 		Decode: func(raw json.RawMessage) (any, error) {
 			out, decodeErr := DecodeStrict[*SynthesizeOut](raw)
 			if decodeErr != nil {
-				lastValidationErr = decodeErr
 				return nil, decodeErr
 			}
 			if validateErr := ValidateSynthesis(*out, synthCtx); validateErr != nil {
-				lastValidationErr = validateErr
 				return nil, validateErr
 			}
 			if validateErr := validateMainChallenges(out, groups, e.validateCodeRef); validateErr != nil {
-				lastValidationErr = validateErr
 				return nil, validateErr
 			}
 			return out, nil
@@ -456,37 +453,56 @@ func (e *Executor) executeSynthesize(ctx context.Context, in dag.NodeInput) (dag
 		BlockTools: false,
 		NoRetry:    true,
 		BeforeTurn: func(ctx context.Context, usage llm.Usage) error {
+			if usage.Incomplete || !llm.ValidUsage(usage) {
+				return unsafeUsageError()
+			}
 			base, max, err := e.tokenBudget(ctx, in.WorkflowID)
 			if err != nil {
 				return err
 			}
-			if max > 0 && base+usage.InputTokens+usage.OutputTokens >= max {
+			if max > 0 && sumTokens(base, usage.InputTokens, usage.OutputTokens) >= max {
 				return errSynthesisBudgetExhausted
 			}
 			return nil
 		},
 	})
 	if runErr != nil {
+		if errors.Is(runErr, agent.ErrUnsafeResponse) || llm.IsUnsafeResponse(runErr) ||
+			errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
+			return dag.NodeOutput{}, runErr
+		}
 		budgetStopped := errors.Is(runErr, errSynthesisBudgetExhausted)
 		transportStopped := retryableTransport(runErr)
 		if !budgetStopped && !transportStopped && !errors.Is(runErr, agent.ErrInvalidSubmit) && !errors.Is(runErr, agent.ErrNoSubmit) {
 			return dag.NodeOutput{}, runErr
 		}
+		var resultUsage llm.Usage
+		if result != nil {
+			resultUsage = result.Usage
+		}
+		current, budgetErr := e.tokenBudgetWithUsage(ctx, in.WorkflowID, resultUsage)
+		if budgetErr != nil {
+			return dag.NodeOutput{}, &usageError{usage: e.dagUsage(provider, resultUsage), incomplete: resultUsage.Incomplete, err: budgetErr}
+		}
+		exhausted = exhausted || current
 		if budgetStopped {
 			warnings = appendUnique(warnings, "token budget exhausted during model synthesis; deterministic rules settlement used")
+		}
+		if exhausted && !budgetStopped {
+			warnings = appendUnique(warnings, "budget exhausted: some findings were not verified")
 		}
 		if transportStopped {
 			warnings = appendUnique(warnings, "model synthesis transport failed; deterministic rules settlement used")
 		}
-		cause := lastValidationErr
-		if cause == nil {
-			cause = runErr
+		cause := runErr
+		if errors.Is(runErr, agent.ErrInvalidSubmit) {
+			cause = agent.ErrInvalidSubmit
 		}
 		fallback := BuildRulesFallback(groups, cause)
 		out := synthesizeOutFromFallback(fallback)
 		mergedWarnings := mergeWarnings(warnings, fallback.Warnings)
 		if err := validatePublishedMainGroups(fallback.Groups, e.validateCodeRef); err != nil {
-			return dag.NodeOutput{}, err
+			return e.agentOutputError(provider, result, err)
 		}
 		final := SynthesisResult{
 			Verdict:  fallback.Verdict,
@@ -499,35 +515,42 @@ func (e *Executor) executeSynthesize(ctx context.Context, in dag.NodeInput) (dag
 		applyUnresolved(&final, unresolved)
 		applyBudgetGap(&final, exhausted || budgetStopped)
 		applyToolGaps(&final, toolGaps)
-		usage := dag.Usage{}
-		if result != nil {
-			usage = e.dagUsage(provider, result.Usage)
-		}
 		if err := final.Validate(); err != nil {
-			return dag.NodeOutput{}, err
+			return e.agentOutputError(provider, result, err)
 		}
-		return marshalNodeOutput(final, usage)
+		return e.marshalAgentOutput(final, provider, resultUsage)
+	}
+	if result == nil {
+		return dag.NodeOutput{}, errors.New("review: synthesize returned no result")
+	}
+	current, budgetErr := e.tokenBudgetWithUsage(ctx, in.WorkflowID, result.Usage)
+	if budgetErr != nil {
+		return dag.NodeOutput{}, &usageError{usage: e.dagUsage(provider, result.Usage), incomplete: result.Usage.Incomplete, err: budgetErr}
+	}
+	exhausted = exhausted || current
+	if current {
+		warnings = appendUnique(warnings, "budget exhausted: some findings were not verified")
 	}
 	out, ok := result.Output.(*SynthesizeOut)
 	if !ok || out == nil {
-		return dag.NodeOutput{}, errors.New("review: synthesize decoder returned an unexpected type")
+		return e.agentOutputError(provider, result, errors.New("review: synthesize decoder returned an unexpected type"))
 	}
 	applied := ApplySynthesisDecisions(groups, *out)
 	if !isSecondSynthesis(in.Node.ID) && len(out.NewFindings) > 0 {
-		applied = append(applied, newFindingGroups(in.WorkflowID, in.Node.ID, in.Attempt, out.NewFindings)...)
+		applied = append(applied, newFindingGroups(in.WorkflowID, in.Node.ID, in.Attempt, out.NewFindings, e.deps.Dossier)...)
 		warnings = appendUnique(warnings, "new findings await verification and were not published")
 	}
 	if !isSecondSynthesis(in.Node.ID) && len(out.ExtendRequests) > 0 {
 		fits, err := e.extensionFits(ctx, in.WorkflowID, len(out.ExtendRequests))
 		if err != nil {
-			return dag.NodeOutput{}, err
+			return e.agentOutputError(provider, result, err)
 		}
 		if !fits {
 			warnings = appendUnique(warnings, "max_nodes limit reached: extension requests were not scheduled")
 		}
 	}
 	if err := validatePublishedMainGroups(applied, e.validateCodeRef); err != nil {
-		return dag.NodeOutput{}, err
+		return e.agentOutputError(provider, result, err)
 	}
 	final := SynthesisResult{
 		Verdict:  out.Verdict,
@@ -536,13 +559,13 @@ func (e *Executor) executeSynthesize(ctx context.Context, in dag.NodeInput) (dag
 		Warnings: warnings,
 		Output:   *out,
 	}
-	applyUnresolved(&final, unresolved)
+	applyUnresolved(&final, mergeUnresolved(unresolved, groupProvenanceSignals(e.deps.Dossier, applied)))
 	applyBudgetGap(&final, exhausted)
 	applyToolGaps(&final, toolGaps)
 	if err := final.Validate(); err != nil {
-		return dag.NodeOutput{}, err
+		return e.agentOutputError(provider, result, err)
 	}
-	return marshalNodeOutput(final, e.dagUsage(provider, result.Usage))
+	return e.marshalAgentOutput(final, provider, result.Usage)
 }
 
 // applyBudgetGap prevents an exhausted budget from producing a clean PASS
@@ -596,9 +619,9 @@ func (e *Executor) executeOnboarding(ctx context.Context, in dag.NodeInput) (dag
 	}
 	out, ok := result.Output.(*OnboardingOut)
 	if !ok || out == nil {
-		return dag.NodeOutput{}, errors.New("review: onboarding decoder returned an unexpected type")
+		return e.agentOutputError(provider, result, errors.New("review: onboarding decoder returned an unexpected type"))
 	}
-	return marshalNodeOutput(out, e.dagUsage(provider, result.Usage))
+	return e.marshalAgentOutput(out, provider, result.Usage)
 }
 
 func (e *Executor) reviewProvider() string {
@@ -659,7 +682,22 @@ func (e *Executor) tokenBudget(ctx context.Context, workflowID string) (int64, i
 	if err != nil {
 		return 0, 0, err
 	}
-	return wf.Usage.InputTokens + wf.Usage.OutputTokens, wf.Spec.Budget.MaxTokens, nil
+	if !llm.ValidUsage(llm.Usage{InputTokens: wf.Usage.InputTokens, OutputTokens: wf.Usage.OutputTokens,
+		CacheReadTokens: wf.Usage.CacheReadTokens, CacheWriteTokens: wf.Usage.CacheWriteTokens, ReasoningTokens: wf.Usage.ReasoningTokens}) {
+		return 0, 0, errors.New("review: invalid workflow token usage")
+	}
+	if wf.UsageIncomplete && wf.Spec.Budget.MaxTokens > 0 {
+		return 0, 0, unsafeUsageError()
+	}
+	return sumTokens(wf.Usage.InputTokens, wf.Usage.OutputTokens), wf.Spec.Budget.MaxTokens, nil
+}
+
+func (e *Executor) tokenBudgetWithUsage(ctx context.Context, workflowID string, usage llm.Usage) (bool, error) {
+	base, max, err := e.tokenBudget(ctx, workflowID)
+	if err != nil {
+		return false, err
+	}
+	return max > 0 && sumTokens(base, usage.InputTokens, usage.OutputTokens) >= max, nil
 }
 
 // tokenBudgetExhausted reports whether the workflow has consumed its token
@@ -772,12 +810,12 @@ func (e *Executor) synthesisGroups(ctx context.Context, in dag.NodeInput, params
 			} else {
 				group.Challenge = &Challenge{Status: ChallengeFailed, Reason: "verification missing"}
 				group.Decision = &FindingDecision{Action: ActionDrop, Reason: "verification missing; the new finding is not published", Source: "rules"}
-				warnings = appendUnique(warnings, "new finding "+group.ID+" has no verify result")
+				warnings = appendUnique(warnings, "new finding "+group.ID+" has no verification result")
 			}
 		}
 		merged = append(merged, main...)
 	}
-	extensionGroups, extensionWarnings, err := extensionReviewGroups(wf, merged)
+	extensionGroups, extensionWarnings, err := extensionReviewGroups(wf, merged, e.deps.Dossier)
 	if err != nil {
 		return nil, 0, nil, nil, err
 	}
@@ -837,7 +875,7 @@ func (e *Executor) extensionCoverageUnresolved(wf dag.WorkflowView) ([]Unresolve
 // extensionReviewGroups folds findings from extend review nodes into the
 // second synthesis. Extension review nodes are proposers, not challengers;
 // their findings are marked uncertain rather than published silently.
-func extensionReviewGroups(wf dag.WorkflowView, existing []Group) ([]Group, []string, error) {
+func extensionReviewGroups(wf dag.WorkflowView, existing []Group, dossier *Dossier) ([]Group, []string, error) {
 	knownNodes := make(map[string]struct{}, len(existing))
 	for _, group := range existing {
 		for _, source := range group.Sources {
@@ -878,7 +916,7 @@ func extensionReviewGroups(wf dag.WorkflowView, existing []Group) ([]Group, []st
 			if side == "" {
 				side = SideNew
 			}
-			publishKey := PublishKeyFor(finding.Path, finding.Title, finding.Evidence)
+			publishKey := FindingPublishKey(dossier, finding.Path, side, finding.Title, finding.Evidence, id)
 			source := Finding{
 				ID: id, Origin: Origin{Node: node.ID, Index: i, Attempt: node.Attempt, Provider: nodeProvider(node)},
 				Severity: finding.Severity, Category: finding.Category, Path: finding.Path, Line: finding.Line,
@@ -964,7 +1002,7 @@ func mainFindingDecision(group Group, policy OnUncertain, validators ...Evidence
 	}
 }
 
-func newFindingGroups(workflowID, nodeID string, attempt int, findings []FindingOut) []Group {
+func newFindingGroups(workflowID, nodeID string, attempt int, findings []FindingOut, dossier *Dossier) []Group {
 	groups := make([]Group, 0, len(findings))
 	for i, finding := range findings {
 		id := StableFindingID(workflowID, nodeID, attempt, i)
@@ -987,7 +1025,7 @@ func newFindingGroups(workflowID, nodeID string, attempt int, findings []Finding
 			Evidence:   finding.Evidence,
 			Confidence: finding.Confidence,
 		}
-		source.PublishKey = PublishKeyFor(source.Path, source.Title, snippetFor(source))
+		source.PublishKey = FindingPublishKey(dossier, source.Path, source.Side, source.Title, snippetFor(source), source.ID)
 		groups = append(groups, Group{
 			ID:         id,
 			Origin:     source.Origin,
@@ -1267,6 +1305,7 @@ func reviewTaskLayoutFor(kind string, d *Dossier, params reviewNodeParams) (revi
 	if kind == KindCodeReview {
 		header.WriteString(fmt.Sprintf("文件数：%d\n\n", len(params.Files)))
 	}
+	header.WriteString("finding 的 side=old 使用 old 路径，side=new 使用 new 路径；未列出时两侧使用文件标题路径。\n\n")
 	headerText := header.String()
 
 	var context strings.Builder
@@ -1582,7 +1621,22 @@ func renderDescription(description string) string {
 }
 
 func fileDiffHeader(file FileChange) string {
-	return fmt.Sprintf("### %s（%s，+%d/-%d）\n\n", file.Path, file.Status, file.Additions, file.Deletions)
+	header := fmt.Sprintf("### %s（%s，+%d/-%d）\n\n", file.Path, file.Status, file.Additions, file.Deletions)
+	switch {
+	case file.Status == "added" || file.Status == "new":
+		header += fmt.Sprintf("- old: 不存在\n- new: %s\n\n", file.Path)
+	case file.Status == "deleted":
+		oldPath := file.OldPath
+		if oldPath == "" {
+			oldPath = file.Path
+		}
+		header += fmt.Sprintf("- old: %s\n- new: 不存在\n\n", oldPath)
+	case file.OldPath == "" && (file.Status == "renamed" || file.Status == "copied"):
+		header += fmt.Sprintf("- old: 未知\n- new: %s\n\n", file.Path)
+	case file.OldPath != "" && file.OldPath != file.Path:
+		header += fmt.Sprintf("- old: %s\n- new: %s\n\n", file.OldPath, file.Path)
+	}
+	return header
 }
 
 func renderDiffFence(diff string) string {

@@ -18,7 +18,8 @@ var (
 )
 
 // LLMCall is one audited provider attempt. Request and Response are
-// decompressed JSON only when IncludePayload was requested.
+// decompressed JSON only when IncludePayload was requested. New metadata has
+// _format=audit_metadata_v1; historical payloads are returned unchanged.
 type LLMCall struct {
 	ID           string          `json:"id"`
 	WorkflowID   string          `json:"workflow_id"`
@@ -35,7 +36,7 @@ type LLMCall struct {
 	LatencyMS    int64           `json:"latency_ms"`
 	StopReason   string          `json:"stop_reason,omitempty"`
 	ErrorKind    string          `json:"error_kind,omitempty"`
-	RequestID    string          `json:"request_id,omitempty"`
+	RequestID    string          `json:"-"` // Never expose upstream IDs, including historical ones.
 	CreatedAt    time.Time       `json:"created_at"`
 }
 
