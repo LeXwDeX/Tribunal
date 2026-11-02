@@ -10,6 +10,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/config"
@@ -80,13 +81,16 @@ type ReviewStore interface {
 	SetReviewStatus(ctx context.Context, goal store.ReviewStatusGoal) (bool, error)
 	GetReviewStatus(ctx context.Context, projectID, mrIID int64) (*store.ReviewStatus, error)
 	MarkReviewStatusApplied(ctx context.Context, projectID, mrIID int64, version, noteID int64, bodyHash, lastError string) error
-	ListPendingReviewStatuses(ctx context.Context) ([]store.ReviewStatus, error)
+	ListReviewStatusesForVerification(ctx context.Context, projectID, afterMRIID int64) ([]store.ReviewStatus, error)
 	ListReviewStatusesByState(ctx context.Context, states []string, updatedBefore time.Time) ([]store.ReviewStatus, error)
 	SetReviewReaction(ctx context.Context, goal store.ReviewReactionGoal) (bool, error)
 	GetReviewReaction(ctx context.Context, projectID, mrIID, noteID int64) (*store.ReviewReaction, error)
 	MarkReviewReactionApplied(ctx context.Context, projectID, mrIID, noteID int64, version int64, lastError string) error
 	ListPendingReviewReactions(ctx context.Context) ([]store.ReviewReaction, error)
 	ListReviewReactionsByDesired(ctx context.Context, desired string, updatedBefore time.Time) ([]store.ReviewReaction, error)
+	ListProjectPendingReviewReactions(ctx context.Context, projectID, afterMR, afterNote int64) ([]store.ReviewReaction, error)
+	ListProjectReviewReactionsByDesired(ctx context.Context, projectID int64, desired string, updatedBefore time.Time, afterMR, afterNote int64) ([]store.ReviewReaction, error)
+	ListProjectReviewStatusesByState(ctx context.Context, projectID int64, states []string, updatedBefore time.Time, afterMR int64) ([]store.ReviewStatus, error)
 	ClearOlderReviewReactions(ctx context.Context, projectID, mrIID, generation int64) ([]int64, error)
 	ClearReviewReactionsForGeneration(ctx context.Context, projectID, mrIID, generation int64) ([]int64, error)
 	HasActiveReviewJob(ctx context.Context, projectID, mrIID int64) (bool, error)
@@ -97,33 +101,40 @@ type ReviewStore interface {
 // ReviewService implements F1/F2: MR review orchestration. It owns workflow
 // creation, execution, and the decision to publish.
 type ReviewService struct {
-	store          ReviewStore
-	gitlab         GitLabClient
-	cipher         *secret.Cipher
-	workspace      *workspace.Manager
-	git            GitOps
-	engine         *dag.Engine
-	executors      *executorRegistry
-	profiles       map[string]config.ProfileConfig
-	blocks         map[string]config.BlockBinding
-	reviewDefaults config.ProjectSettings
-	prompts        prompts.Bundle
-	clients        review.ClientProvider
-	agentRun       review.AgentRunner
-	tools          review.ToolProvider
-	skills         review.SkillProvider
-	providerNames  []string
-	providerConfig json.RawMessage
-	extensions     *ProjectExtensionResolver
-	testIdentity   string
-	cost           review.CostFunc
-	publisher      *Publisher
-	publicURL      string
-	status         *statusReporter
-	logger         *slog.Logger
-	now            func() time.Time
-	cancelPoll     time.Duration
-	cancelWait     time.Duration
+	store             ReviewStore
+	gitlab            GitLabClient
+	cipher            *secret.Cipher
+	workspace         *workspace.Manager
+	git               GitOps
+	engine            *dag.Engine
+	executors         *executorRegistry
+	profiles          map[string]config.ProfileConfig
+	blocks            map[string]config.BlockBinding
+	reviewDefaults    config.ProjectSettings
+	prompts           prompts.Bundle
+	clients           review.ClientProvider
+	agentRun          review.AgentRunner
+	tools             review.ToolProvider
+	skills            review.SkillProvider
+	providerNames     []string
+	providerConfig    json.RawMessage
+	extensions        *ProjectExtensionResolver
+	testIdentity      string
+	cost              review.CostFunc
+	publisher         *Publisher
+	publicURL         string
+	status            *statusReporter
+	statusLocks       workflowLocks
+	statusScanLocks   workflowLocks
+	statusScanMu      sync.Mutex
+	statusScanCursor  map[int64]int64
+	reconcileLocks    workflowLocks
+	reconcileCursorMu sync.Mutex
+	reconcileCursor   map[string]sideEffectCursor
+	logger            *slog.Logger
+	now               func() time.Time
+	cancelPoll        time.Duration
+	cancelWait        time.Duration
 }
 
 // ReviewServiceConfig configures ReviewService.

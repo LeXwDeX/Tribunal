@@ -140,6 +140,14 @@ func (s *ReviewService) RunStatusJob(ctx context.Context, job *jobs.Job) error {
 		return err
 	}
 	defer unlock()
+	statusUnlock, err := s.statusLocks.lock(ctx, itoa(payload.ProjectID)+":"+itoa(payload.MRIID))
+	if err != nil {
+		return err
+	}
+	defer statusUnlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	ctx, err = bindOutbound(ctx, ws)
 	if err != nil {
 		return err
@@ -154,7 +162,7 @@ func (s *ReviewService) RunStatusJob(ctx context.Context, job *jobs.Job) error {
 		}
 		return err
 	}
-	if row.AppliedVersion >= row.Version {
+	if row.AppliedVersion >= row.Version && row.LastError != "" {
 		return nil
 	}
 	project, token, err := s.projectToken(ctx, row.ProjectID)
@@ -192,6 +200,7 @@ func (s *ReviewService) RunStatusJob(ctx context.Context, job *jobs.Job) error {
 	}
 	reporter := *s.status
 	reporter.outbound = outboundSender(ws)
+	reporter.durable = true
 	noteID, hash, err := reporter.writeStatus(ctx, project.ID, row.MRIID, token, update)
 	if err != nil {
 		if errors.Is(err, workspace.ErrOutboundInvalidated) {
@@ -368,24 +377,20 @@ func (s *ReviewService) ReconcileSideEffects(ctx context.Context) error {
 }
 
 func (s *ReviewService) reconcileProjectSideEffects(ctx context.Context, projectID int64) error {
+	unlock, err := s.reconcileLocks.lock(ctx, itoa(projectID))
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	var errs []error
 	now := s.now().UTC()
-
-	statuses, err := s.store.ListPendingReviewStatuses(ctx)
-	if err != nil {
+	if err := s.enqueueStatusVerification(ctx, projectID); err != nil {
 		errs = append(errs, err)
 	}
-	for _, row := range statuses {
-		if row.ProjectID != projectID {
-			continue
-		}
-		if err := s.enqueueReviewSideEffectJob(ctx, "review.status", "review.status:"+itoa(row.ProjectID)+":"+itoa(row.MRIID), map[string]any{
-			"project_id": row.ProjectID, "mr_iid": row.MRIID,
-		}); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	reactions, err := s.store.ListPendingReviewReactions(ctx)
+
+	reactions, err := sideEffectPage(s, projectID, "pending-reaction", func(c sideEffectCursor) ([]store.ReviewReaction, error) {
+		return s.store.ListProjectPendingReviewReactions(ctx, projectID, c.mr, c.note)
+	}, func(r store.ReviewReaction) sideEffectCursor { return sideEffectCursor{r.MRIID, r.NoteID} })
 	if err != nil {
 		errs = append(errs, err)
 	}
@@ -401,7 +406,9 @@ func (s *ReviewService) reconcileProjectSideEffects(ctx context.Context, project
 		}
 	}
 
-	staleEyes, err := s.store.ListReviewReactionsByDesired(ctx, reviewAwardEyes, now.Add(-15*time.Minute))
+	staleEyes, err := sideEffectPage(s, projectID, "stale-eyes", func(c sideEffectCursor) ([]store.ReviewReaction, error) {
+		return s.store.ListProjectReviewReactionsByDesired(ctx, projectID, reviewAwardEyes, now.Add(-15*time.Minute), c.mr, c.note)
+	}, func(r store.ReviewReaction) sideEffectCursor { return sideEffectCursor{r.MRIID, r.NoteID} })
 	if err != nil {
 		errs = append(errs, err)
 	}
@@ -428,8 +435,9 @@ func (s *ReviewService) reconcileProjectSideEffects(ctx context.Context, project
 		}
 	}
 
-	unfinished, err := s.store.ListReviewStatusesByState(ctx,
-		[]string{reviewStatusRunning, reviewStatusPublishing}, now.Add(-2*time.Hour))
+	unfinished, err := sideEffectPage(s, projectID, "unfinished", func(c sideEffectCursor) ([]store.ReviewStatus, error) {
+		return s.store.ListProjectReviewStatusesByState(ctx, projectID, []string{reviewStatusRunning, reviewStatusPublishing}, now.Add(-2*time.Hour), c.mr)
+	}, func(r store.ReviewStatus) sideEffectCursor { return sideEffectCursor{mr: r.MRIID} })
 	if err != nil {
 		errs = append(errs, err)
 	}
@@ -472,7 +480,9 @@ func (s *ReviewService) reconcileProjectSideEffects(ctx context.Context, project
 		}
 	}
 
-	queued, err := s.store.ListReviewStatusesByState(ctx, []string{reviewStatusQueued}, now.Add(time.Second))
+	queued, err := sideEffectPage(s, projectID, "queued", func(c sideEffectCursor) ([]store.ReviewStatus, error) {
+		return s.store.ListProjectReviewStatusesByState(ctx, projectID, []string{reviewStatusQueued}, now.Add(time.Second), c.mr)
+	}, func(r store.ReviewStatus) sideEffectCursor { return sideEffectCursor{mr: r.MRIID} })
 	if err != nil {
 		errs = append(errs, err)
 	}
@@ -510,6 +520,81 @@ func (s *ReviewService) reconcileProjectSideEffects(ctx context.Context, project
 			errs = append(errs, err)
 		}
 	}
+	return errors.Join(errs...)
+}
+
+type sideEffectCursor struct{ mr, note int64 }
+
+// The caller serializes scans per project. Keyset pages also advance past
+// rows that remain active or fail, so they cannot starve later MRs.
+func sideEffectPage[T any](s *ReviewService, projectID int64, kind string, load func(sideEffectCursor) ([]T, error), position func(T) sideEffectCursor) ([]T, error) {
+	const pageSize = 100
+	key := itoa(projectID) + ":" + kind
+	s.reconcileCursorMu.Lock()
+	after := s.reconcileCursor[key]
+	s.reconcileCursorMu.Unlock()
+	rows, err := load(after)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 && after != (sideEffectCursor{}) {
+		rows, err = load(sideEffectCursor{})
+		if err != nil {
+			return nil, err
+		}
+	}
+	s.reconcileCursorMu.Lock()
+	if s.reconcileCursor == nil {
+		s.reconcileCursor = make(map[string]sideEffectCursor)
+	}
+	if len(rows) < pageSize {
+		s.reconcileCursor[key] = sideEffectCursor{}
+	} else {
+		s.reconcileCursor[key] = position(rows[len(rows)-1])
+	}
+	s.reconcileCursorMu.Unlock()
+	return rows, nil
+}
+
+// Scan in MR order and wrap at the end so a busy or failing row cannot starve
+// later rows. The cursor is deliberately volatile: restart begins another pass.
+func (s *ReviewService) enqueueStatusVerification(ctx context.Context, projectID int64) error {
+	unlock, err := s.statusScanLocks.lock(ctx, itoa(projectID))
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	s.statusScanMu.Lock()
+	after := s.statusScanCursor[projectID]
+	s.statusScanMu.Unlock()
+	rows, err := s.store.ListReviewStatusesForVerification(ctx, projectID, after)
+	if err != nil {
+		return err
+	}
+	if len(rows) == 0 && after != 0 {
+		rows, err = s.store.ListReviewStatusesForVerification(ctx, projectID, 0)
+		if err != nil {
+			return err
+		}
+	}
+	var errs []error
+	for _, row := range rows {
+		if err := s.enqueueReviewSideEffectJob(ctx, "review.status", "review.status:"+itoa(row.ProjectID)+":"+itoa(row.MRIID), map[string]any{
+			"project_id": row.ProjectID, "mr_iid": row.MRIID,
+		}); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	s.statusScanMu.Lock()
+	if s.statusScanCursor == nil {
+		s.statusScanCursor = make(map[int64]int64)
+	}
+	if len(rows) < 100 {
+		s.statusScanCursor[projectID] = 0
+	} else {
+		s.statusScanCursor[projectID] = rows[len(rows)-1].MRIID
+	}
+	s.statusScanMu.Unlock()
 	return errors.Join(errs...)
 }
 
