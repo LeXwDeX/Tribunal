@@ -69,8 +69,8 @@ Only dispatch trusted branch code to a self-hosted runner: untrusted code can pe
 ## Development review workflow
 
 Every behavior change and every user-visible document change goes through these
-stages before merge. CI green is necessary but not sufficient; a PR that skips a
-stage is not ready.
+stages before merge, unless the reduced chain below applies. CI green is
+necessary but not sufficient; a PR that skips a stage is not ready.
 
 1. **Independent review** — a `review` subagent reads the real diff, callers,
    tests, and evidence. Give it the Issue, the diff range, and the evidence; do

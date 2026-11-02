@@ -8,14 +8,14 @@
 ```text
 这是 Tribunal 仓库。先读 AGENTS.md，再完整读 docs/handoff.md，按其中第 1 节准备环境、第 2 节的工作方式执行。
 先看第 4 节剩余 Issue；没有明确新指令时，不要重做第 3 节已合并的 Issue。
-每个 Issue 走 TDD → 本地检查 → 按 AGENTS.md 的 Development review workflow 完成审查 → PR → 最新 head 的 GitHub Actions 通过 → squash 合并。
+每个 Issue 走 TDD → 本地检查 → 按 AGENTS.md 的 Development review workflow 完成审查（docs-only 用缩减链）→ PR → 最新 head 的 GitHub Actions 通过 → squash 合并。
 全部自动推进，不要逐步问我；只有权限被拦或需要我本人操作（打 tag、发 Release、放行被拦的命令）时才停下来说明。
 结束时更新 docs/handoff.md（通过 PR 入库），让下一次只读它就能继续。
 ```
 
 ## 1. 新机器环境准备
 
-1. **克隆**：`gh repo clone LeXwDeX/Tribunal && cd Tribunal`。当前 `main` 至少包含 `14273ba`（#207）和本交接的 PR。
+1. **克隆**：`gh repo clone LeXwDeX/Tribunal && cd Tribunal`。当前 `main` 为 `c279814`；本交接 PR #213 待合并。
 2. **工具**：Go（`go.mod` 的 toolchain 是 1.26.10）、Node + npm（`web/`）、Bash、Python 3、能跑 `-race` 的 C 编译器、`gh`（已登录、对仓库有写权限）。本机可以没有 Docker；没有 Docker 时 Compose/冒烟必须记为未验证。
 3. **SpecGit**：仓库要求每个提交带 `Issue: #N` trailer，并由 SpecGit 的本地 checkpoint 把关。`.specgit.yaml` 和 SpecGit Skill 是本地文件，不在仓库里，新 clone 要重新接入：
    - 安装共享 CLI（见 <https://github.com/LeXwDeX/SpecGit/blob/main/docs/agent-install.md>），确认 `specgit --human --version` ≥ 2.17.1。
@@ -64,7 +64,7 @@
 | #210 | 已关闭 | 压测脚本复审修复随 PR #211 合并（`c279814`）：汇总退出、吞吐、授权默认为零、HTTP 重试、基线 ID、统计与文档；`GRANT_MANAGE=1` 时从用户 token 的 `/me` 解析授权用户；执行图测试改为断言完整可访问名称。 |
 | #212 | 随 PR #213 | 在 `AGENTS.md` 固化审查流程并删除过期 `prototype/v2` 条目；合并后关闭。 |
 | #195 | 验收完成，截图待附 | 自动化审计、键盘抽查、390/1440 检查完成；`label-content-name-mismatch` 由 PR #205 合并修复，新镜像 axe 0 违规。截图在 `$TMPDIR/opencode/a11y-195/`，需 GitHub 登录后附到 Issue。 |
-| #138 | 暂不实施 | 内容是把开发 CI 迁移到 Azure Pipelines 并删除 `.github/workflows`。当前 GitHub Actions 的 hosted runner 已可用且是合并门槛；执行 #138 会删除现行 CI。除非维护者明确要求迁移，否则保持现状。 |
+| #138 | 已关闭（not planned） | 内容是把开发 CI 迁移到 Azure Pipelines 并删除 `.github/workflows`。当前 GitHub Actions 的 hosted runner 已可用且是合并门槛；除非维护者明确要求迁移，否则保持现状。 |
 | #123 | 暂不实施 | 针对自托管 runner 的 `CGO_ENABLED` 与 Docker CLI 缺口。当前 hosted runner 已包含两者并通过；没有自托管 runner 的实际运行证据前，不改成假通过，也不重复排期。 |
 | #109 | 已拆分 | #192、#194、#196 已完成；剩余 #193、#195（截图待附）。Postgres 与 Q18 上游改造已记为不做。 |
 
@@ -77,7 +77,7 @@
 3. 实现修复；跑受影响包 `go test -race -timeout 40m ./internal/<pkg>/...`；改了前端就 `cd web && npm ci --offline && npm test -- --coverage && npm run build`，并提交 `web/dist`。
 4. 提交带 `Issue: #N` trailer；用户可见的变化写进 CHANGELOG 的 `Unreleased`。
 5. 同步最新 main，推送后等当前 head 的 GitHub Actions `go`/`web`/`docker` 全部 success。
-6. 按 AGENTS.md 的 Development review workflow 完成独立审核、3 方会审、对抗审核、裁决与证据检查；没有新的 P1 才继续。
+6. 按 AGENTS.md 的 Development review workflow 完成独立审核、3 方会审、对抗审核、裁决与证据检查（docs-only 用缩减链）；没有新的 P1 才继续。
 7. `specgit pr` → `specgit pr --ready`；PR 正文写修复、回归测试、验证结果和未验证项。
 8. `gh pr merge --squash --match-head-commit <已验证 head>`，回读 Issue 已关闭，`specgit pr --status` 记为已交付。
 
