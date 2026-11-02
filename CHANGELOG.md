@@ -8,6 +8,7 @@ v1.2.0 尚未打 tag；本段记录尚未发布的新改动。`[1.2.0]` 段仅�
 
 ### 变更
 
+- **并发压测脚本**：新增 `scripts/loadtest.sh`，对已部署实例并发触发评审，并汇总完成率、p50/p95 耗时、tokens 与成本；只触发评审，不创建 GitLab 项目或 MR。脚本按项目与 MR 配对轮询，支持项目列表分页，并为每个 HTTP 请求设置超时。需要平台管理员 token 和项目所属用户 token，运行说明见[并发压测](docs/operations.md#并发压测)（[#194](https://github.com/LeXwDeX/Tribunal/issues/194)）。
 - **可访问性修正**：暗色主题的强调色对比度从 4.1:1 提升到 5.0:1；执行图节点按钮的可访问名称直接取自可见文本，其中包含 provider 和重试次数，不再因附加标签与可见文字不一致。亮色主题和 390 宽度页面检查通过（[#195](https://github.com/LeXwDeX/Tribunal/issues/195)）。
 - **CI 失败日志证据**：verify 节点读取失败 job 的有限日志片段，每个评审最多 3 个 job，单个日志最多 64 KiB，渲染到 prompt 时每个 job 保留头尾各约 2 KiB；片段会截断并脱敏常见 token、私钥、URL 凭据和 CI 变量。读取失败时评审继续，不伪造证据；成功和允许失败的 job 不拉取。非空 ignore policy 下不保存日志片段（默认 ignore 非空，因此默认不注入），避免日志绕过 ignore 边界。日志片段会改变 dossier 内容和发布指纹（[#192](https://github.com/LeXwDeX/Tribunal/issues/192)）。
 - **总览告警与统计说明**：总览按统计、告警、运行中和最近评审排列，空状态更紧凑；告警标题旁列出检查范围，统计说明明确裁决口径和 provider 价格配置要求，零成本不能证明已配置价格（[#146](https://github.com/LeXwDeX/Tribunal/issues/146)）。
