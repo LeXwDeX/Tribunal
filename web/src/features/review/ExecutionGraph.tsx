@@ -56,8 +56,6 @@ export function ExecutionGraph({
           {layout.nodes.map((node) => {
             const selected = node.id === selectedId
             const status = labelForStatus(node.status)
-            const attempt = typeof node.attempt === 'number' && node.attempt > 1 ? `第 ${node.attempt} 次` : ''
-            const provider = node.provider || '—'
             return (
               <button
                 key={node.id}
@@ -71,7 +69,6 @@ export function ExecutionGraph({
                 onFocus={() => setHotId(node.id)}
                 onBlur={() => setHotId(null)}
                 aria-pressed={selected}
-                aria-label={`节点 ${node.id}，类型 ${node.kind}，状态 ${status}${attempt ? `，${attempt}` : ''}，provider ${provider}`}
                 title={node.id}
               >
                 <span className={styles.nodeHead}>
