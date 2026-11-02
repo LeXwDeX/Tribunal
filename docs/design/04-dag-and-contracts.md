@@ -150,7 +150,8 @@ runNode(n):
   ctx, cancel := context.WithTimeout(wfCtx, n.Timeout - 已排队时长)
   out, err := executor.Execute(ctx, input(n))
   if 当前 attempt != attempt 或工作流已终态: 丢弃结果; return
-  if err:  emit node.failed  (ctx 被工作流取消时 emit node.aborted)
+  if token 预算已耗尽: 按 required / optional 写 budget_exhausted，保留可得用量
+  else if err 或结果到达时节点期限已到: emit node.failed，保留可得用量
   else:
     if n.Expands:
       extension := expander.Expand(...)
@@ -161,6 +162,8 @@ runNode(n):
 ```
 
 所有 `emit` 都走 `EventStore.Append(expectRev)`；遇到 `ErrStaleRevision` 时重新读取快照后再判断是否还需要写。内部提交看到 revision 前进时继续重试，不因兄弟节点正常提交耗尽固定重试次数；同一 revision 连续 4 次冲突则返回错误。重试保留 attempt 栅栏，不重新执行 executor 或 expander；非版本冲突的持久化错误返回 `Run`，不能静默丢失完成结果。调用方取消仍可终止重试，持久化取消另有 10 秒写入上限；公开 `Extend(expectRev)` 的调用方版本约束不变。
+
+节点期限已到时，即使执行器无错误返回，也不提交结果或展开。错误有有效分类时保留该分类，否则使用 `timeout`；预算已耗尽时仍优先记录预算取消。失败和预算取消会保留该次返回的可得用量及 `usage_incomplete` 标志。超时、预算或工作流取消只会取消 context，不能强杀不协作的 Go 执行器。`Run` 在返回前同步等待已启动执行器退出，以保护工作区；执行器不退出时可能无限等待。工作流取消时立即持久化终态，并为当时仍在运行的节点标记 `usage_incomplete`（包括 `TokenFree` 节点）；已完成节点的用量保持不变，未启动节点不因取消而标记。迟到结果不会改写终态，其具体用量不能恢复。进程中断不持久化取消，恢复运行中的 attempt 时标记工作流用量不完整。
 
 finalize 若在重读时发现新节点，返回主循环继续调度，而不是把未终态工作流当作成功结束。该路径与默认并发 8 下的 deep 流程均有回归测试。
 
@@ -446,13 +449,19 @@ user                本节点任务：MR 摘要、包内文件列表与 diff、f
 <!-- gitlab-ce-review:summary v1 fp=9f3c2a1:7be0… -->
 ### AI 评审：🔴 BLOCKING
 
+**P1** × 2 · **P2** × 1
+
 <synthesize.summary，1–3 句：结论与主要理由，不复述各条问题>
 
-**P1** × 2 · **P2** × 3
+### 行内问题（1）
 
-### 无法定位到行的问题（2）
+- **[P1]** 标题 · `path/to/file.go`:18
 
-**[P2] 标题** · `path/to/file.go`:42
+### 无法定位到行的问题（1）
+
+#### [P2] 标题
+
+`path/to/file.go`:42
 
 一段话：先写触发条件，再写影响。
 
@@ -460,7 +469,9 @@ user                本节点任务：MR 摘要、包内文件列表与 diff、f
 
 ### 存疑条目（1）
 
-**[P1?] 标题** · `path/to/file.go`:9
+#### [P1?] 标题
+
+`path/to/file.go`:9
 
 **标记原因**：挑战结果：UNCERTAIN
 
@@ -470,11 +481,15 @@ user                本节点任务：MR 摘要、包内文件列表与 diff、f
 ````
 
 - 首行隐藏标记用于找到并就地更新这条评论（见 05-flows.md F7）。
-- 级别计数只列非零项，排成一行；没有已发布问题时不输出计数行。
-- 写法规则在 `_platform_rules.md` 的 Reporting bar 与 Comment style：只报本次 MR 引入、作者会修的离散问题；`body` 为一段话，先写触发条件再写影响，代码不超过 3 行；`suggestion` 是一句话或替换被评论行的 GitLab `suggestion` 块。渲染器保留 Markdown 结构，仅中和原始 HTML、链接语法和隐藏 marker；代码围栏不会被转义成 HTML 实体。
+- 级别计数紧随结论，只列非零项；没有已发布问题时不输出计数行。
+- 行内问题的索引只列级别、标题和位置，不重复正文、建议与证据。存疑条目单独列出，不在行内问题索引中重复。
+- 写法规则在 `_platform_rules.md` 的 Reporting bar 与 Comment style：只报本次 MR 引入、作者会修的离散问题；`body` 为一段话，先写触发条件再写影响，代码不超过 3 行；`suggestion` 是一句话或替换被评论行的 GitLab `suggestion` 块。渲染器保留 Markdown 的标题、列表和代码内容，中和代码外的原始 HTML 与链接语法；代码中的 HTML 注释按字面显示。为防止列表提前结束围栏，缩进围栏会移到顶层，因此原列表可能分成两段。
+- 标题、提示、裁决原因和多行正文中的 GitLab 提及、引用（包括 commit SHA、项目引用）及自动链接按字面显示；代码块和行内代码按代码显示。路径中的有效空格不折叠。反引号围栏的 info 不得包含反引号，闭合围栏最多缩进三格；未闭合围栏在字段末尾闭合，不遮住后续条目。
 - 汇总条目正文最多 2000 字符、建议最多 1000 字符；超限时明确追加“内容已截断”，不再静默截到半句。完整正文仍在评审详情中。
+- 存疑条目在汇总中保留折叠证据；可定位的存疑条目在行内讨论中也保留证据。这样即使复用的旧讨论属于已确认条目，证据仍可见，不需要创建或修改讨论。首行标记保持不变；汇总恢复只认首行，代码块内的标记文本不参与匹配。
 - PASS 用 🟢，评审未完成用 ⚪ 并说明原因。
 - 是否标注模型来源由项目设置 `show_model_attribution` 决定（默认关闭）。
+- 评论使用 GitLab 支持的标题、列表与代码块；评论不支持自动目录，见 [GitLab Flavored Markdown](https://docs.gitlab.com/user/markdown/)。
 
 
 ### 9.2 行内讨论
@@ -492,4 +507,4 @@ user                本节点任务：MR 摘要、包内文件列表与 diff、f
 - `suggestion` 以围栏开头（如 GitLab `suggestion` 块）时原样输出，不加“建议”标签。
 - 证据只在存疑条目中以折叠的 `<details>` 保留；已确认条目的证据仍存在评审详情中。
 
-存疑条目（`mark`）在标题前加 `[存疑]`。
+存疑条目（`mark`）的标题使用 `[P1 · 存疑]` 这样的单一标记；非空裁决原因在正文后显示，证据仍可展开查看。

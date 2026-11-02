@@ -687,6 +687,79 @@ func TestCommandWorkerDuplicateEnqueueIsSuccess(t *testing.T) {
 	}
 }
 
+func TestCommandWorkerReplayedCommandAfterCancelKeepsCancellation(t *testing.T) {
+	ctx := context.Background()
+	db := openTestStore(t)
+	cipher := newTestCipher(t)
+	seedProject(t, db, cipher, 42, "whsec", "{}", "default")
+	api := defaultFakeGitLab()
+	rec := &recordingCommandStore{CommandStore: db}
+	worker, err := NewCommandWorker(CommandWorkerConfig{
+		Store:     rec,
+		GitLab:    api,
+		Cipher:    cipher,
+		Profiles:  testProfiles(),
+		Workspace: workspace.NewManager(t.TempDir(), nil),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runPayload := defaultCommandPayload(commandRun)
+	runPayload.NoteID = 555
+	runJob := persistedCommandJob(t, db, runPayload)
+	if err := worker.Handle(ctx, runJob); err != nil {
+		t.Fatalf("run command: %v", err)
+	}
+	cancelPayload := defaultCommandPayload(commandCancel)
+	cancelPayload.NoteID = 556
+	cancelJob := persistedCommandJob(t, db, cancelPayload)
+	if err := worker.Handle(ctx, cancelJob); err != nil {
+		t.Fatalf("cancel command: %v", err)
+	}
+	rec.mu.Lock()
+	if len(rec.ids) != 2 || len(rec.dup) != 2 || rec.dup[0] || rec.dup[1] {
+		t.Fatalf("first enqueues = ids %v dup %v", rec.ids, rec.dup)
+	}
+	runID := rec.ids[0]
+	rec.mu.Unlock()
+	firstRun, err := db.GetJob(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The worker replays the original command job after its review was
+	// superseded by /cancel. The replay must not reset the cancellation.
+	if err := worker.Handle(ctx, runJob); err != nil {
+		t.Fatalf("replayed run command: %v", err)
+	}
+	rec.mu.Lock()
+	if len(rec.ids) != 3 || rec.ids[2] != runID || !rec.dup[2] {
+		t.Fatalf("replay enqueue = ids %v dup %v", rec.ids, rec.dup)
+	}
+	rec.mu.Unlock()
+
+	control, err := db.GetReviewControl(ctx, 42, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if control.Generation != 2 || !control.Cancelled || control.HeadSHA != sha40 {
+		t.Fatalf("control after replay = %+v", control)
+	}
+	replayedRun, err := db.GetJob(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayedRun.State != firstRun.State || string(replayedRun.Payload) != string(firstRun.Payload) ||
+		!replayedRun.UpdatedAt.Equal(firstRun.UpdatedAt) {
+		t.Fatalf("replay changed the queued review: before=%+v after=%+v", firstRun, replayedRun)
+	}
+	status, err := db.GetReviewStatus(ctx, 42, 7)
+	if err != nil || status.Generation != 2 {
+		t.Fatalf("status after replay = %+v, %v", status, err)
+	}
+}
+
 func TestCommandWorkerErrorsDoNotLeakToken(t *testing.T) {
 	fakeStore := openFakeStore(t, newTestCipher(t))
 	api := defaultFakeGitLab()

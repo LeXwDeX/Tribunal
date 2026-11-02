@@ -9,6 +9,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/config"
@@ -42,8 +43,9 @@ func CallMetaFromContext(ctx context.Context) CallMeta {
 	return meta
 }
 
-// CallRecord is one provider attempt. Request and Response are not copied;
-// the recorder must not mutate them.
+// CallRecord is one provider attempt. Audit contains counts and protocol
+// metadata, never prompts, tool arguments, tool output, reasoning or errors.
+// Registry records omit Request and retain only safe Response metadata.
 type CallRecord struct {
 	Provider string
 	Protocol string
@@ -52,8 +54,114 @@ type CallRecord struct {
 	Attempt  int
 	Request  *Request
 	Response *Response
+	Audit    *CallAudit
 	Err      error
 	Duration time.Duration
+}
+
+// CallAudit is the allow-listed metadata persisted for one provider attempt.
+type CallAudit struct {
+	Request  *AuditRequest  `json:"request,omitempty"`
+	Response *AuditResponse `json:"response,omitempty"`
+}
+
+// AuditRequest counts request structure without storing free text, tool
+// definitions, tool choices or payloads. Mixed parts contribute to each field
+// count, which keeps the shape without persisting any value.
+type AuditRequest struct {
+	Format         string         `json:"_format"`
+	Messages       int            `json:"messages"`
+	TextParts      int            `json:"text_parts"`
+	ToolCalls      int            `json:"tool_calls"`
+	ToolResults    int            `json:"tool_results"`
+	ReasoningParts int            `json:"reasoning_parts"`
+	Tools          int            `json:"tools,omitempty"`
+	MaxTokens      int            `json:"max_tokens,omitempty"`
+	Temperature    *float64       `json:"temperature,omitempty"`
+	Reasoning      *ReasoningOpts `json:"reasoning,omitempty"`
+}
+
+// AuditResponse counts response structure and keeps usage and stop metadata.
+// Provider-controlled model text is not stored.
+type AuditResponse struct {
+	Format         string `json:"_format"`
+	StopReason     string `json:"stop_reason,omitempty"`
+	Usage          Usage  `json:"usage"`
+	TextParts      int    `json:"text_parts"`
+	ToolCalls      int    `json:"tool_calls"`
+	ToolResults    int    `json:"tool_results"`
+	ReasoningParts int    `json:"reasoning_parts"`
+}
+
+// AuditMetadataFormat distinguishes the new metadata from historical payloads.
+const AuditMetadataFormat = "audit_metadata_v1"
+
+// SafeAuditStopReason maps provider-controlled values to a fixed vocabulary.
+func SafeAuditStopReason(reason StopReason) string {
+	switch reason {
+	case "", StopEndTurn, StopToolUse, StopMaxTokens, StopRefusal, StopOther:
+		return string(reason)
+	default:
+		return string(StopOther)
+	}
+}
+
+// NewCallAudit builds the persistence-safe audit payload. Tool choice is a
+// tool name and is therefore omitted even though the live request needs it.
+func NewCallAudit(req *Request, resp *Response) *CallAudit {
+	audit := &CallAudit{}
+	if req != nil {
+		out := &AuditRequest{
+			Format:    AuditMetadataFormat,
+			Messages:  len(req.Messages),
+			Tools:     len(req.Tools),
+			MaxTokens: req.MaxTokens,
+		}
+		if req.Temperature != nil {
+			value := *req.Temperature
+			out.Temperature = &value
+		}
+		if req.Reasoning != nil {
+			value := *req.Reasoning
+			switch value.Effort {
+			case "", "low", "medium", "high":
+			default:
+				value.Effort = ""
+			}
+			out.Reasoning = &value
+		}
+		for _, msg := range req.Messages {
+			countAuditParts(msg.Parts, &out.TextParts, &out.ToolCalls, &out.ToolResults, &out.ReasoningParts)
+		}
+		audit.Request = out
+	}
+	if resp != nil {
+		out := &AuditResponse{
+			Format:     AuditMetadataFormat,
+			StopReason: SafeAuditStopReason(resp.StopReason),
+			Usage:      resp.Usage,
+		}
+		countAuditParts(resp.Message.Parts, &out.TextParts, &out.ToolCalls, &out.ToolResults, &out.ReasoningParts)
+		audit.Response = out
+	}
+	return audit
+}
+
+func countAuditParts(parts []Part, text, calls, results, reasoning *int) {
+	for _, part := range parts {
+		if part.Text != "" {
+			*text = *text + 1
+		}
+		if part.ToolCall != nil {
+			*calls = *calls + 1
+		}
+		if part.ToolResult != nil {
+			*results = *results + 1
+		}
+		if part.Reasoning != nil {
+			*reasoning = *reasoning + 1
+		}
+	}
 }
 
 // Recorder persists or logs call records. The store implementation is owned
@@ -236,35 +344,157 @@ type providerClient struct {
 	baseDelay time.Duration
 }
 
+type attemptGuardKey struct{}
+type attemptGuard struct {
+	mu        sync.Mutex
+	skipFirst bool
+	check     func(context.Context, Usage) error
+}
+
+// GenerateGuarded checks custom clients once, and registry clients immediately
+// before each provider attempt. The callback receives this Generate's usage.
+// Opaque clients must guard their own internal attempts and honor cancellation.
+func GenerateGuarded(ctx context.Context, client Client, req *Request, check func(context.Context, Usage) error) (*Response, error) {
+	if check == nil {
+		return client.Generate(ctx, req)
+	}
+	_, native := client.(*providerClient)
+	if !native {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		guardErr := check(ctx, Usage{})
+		if err := ctx.Err(); err != nil {
+			if guardErr != nil {
+				return nil, &AttemptGuardError{Err: errors.Join(err, guardErr)}
+			}
+			return nil, err
+		}
+		if guardErr != nil {
+			return nil, &AttemptGuardError{Err: guardErr}
+		}
+	}
+	g := &attemptGuard{check: check, skipFirst: !native}
+	return client.Generate(context.WithValue(ctx, attemptGuardKey{}, g), req)
+}
+
+func checkAttempt(ctx context.Context, usage Usage) error {
+	g, _ := ctx.Value(attemptGuardKey{}).(*attemptGuard)
+	if g == nil {
+		return nil
+	}
+	g.mu.Lock()
+	skip := g.skipFirst
+	g.skipFirst = false
+	g.mu.Unlock()
+	if skip {
+		return nil
+	}
+	return g.check(ctx, usage)
+}
+
 // Info implements Client.
 func (c *providerClient) Info() ProviderInfo { return c.info }
 
-// Generate implements Client.
+// Generate implements Client. Usage from failed retry attempts is retained in
+// the successful response or in the final error, without counting an attempt
+// twice.
 func (c *providerClient) Generate(ctx context.Context, req *Request) (*Response, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, canceledError(err)
 	}
+	var usage Usage
+	var previous *Error
+	var observed bool
 	for attempt := 0; ; attempt++ {
 		if err := c.acquire(ctx); err != nil {
-			return nil, canceledError(err)
+			canceled := canceledError(err)
+			canceled.Usage = usage
+			canceled.responseObserved = observed
+			return nil, canceled
+		}
+		if err := ctx.Err(); err != nil {
+			c.release()
+			canceled := canceledError(err)
+			canceled.Usage = usage
+			canceled.responseObserved = observed
+			return nil, canceled
+		}
+		guardErr := checkAttempt(ctx, usage)
+		if err := ctx.Err(); err != nil {
+			c.release()
+			canceled := canceledError(err)
+			canceled.Usage = usage
+			canceled.responseObserved = observed
+			if guardErr != nil {
+				return nil, &AttemptGuardError{Err: errors.Join(canceled, guardErr), Usage: usage, Previous: previous, responseObserved: observed}
+			}
+			return nil, canceled
+		}
+		if guardErr != nil {
+			c.release()
+			return nil, &AttemptGuardError{Err: guardErr, Usage: usage, Previous: previous, responseObserved: observed}
 		}
 		started := time.Now()
 		resp, err := c.adapter.Generate(ctx, req)
 		c.release()
 		elapsed := time.Since(started)
+		if resp == nil && err == nil {
+			err = &Error{Kind: ErrTransient, Err: errors.New("provider returned an empty response")}
+		}
+		attemptObserved := resp != nil || HasObservedResponse(err)
+		observed = observed || attemptObserved
 		var failure *Error
 		if err != nil {
-			failure = asError(err)
+			copy := *asError(err)
+			failure = &copy
+			if IsUnsafeResponse(err) && failure.Kind != ErrUnsafeResponse {
+				failure.Kind = ErrUnsafeResponse
+				failure.Err = errors.New("provider reported an unsafe response")
+				failure.cause = err
+			}
 		}
+		attemptUsage, valid := ErrorUsage(err)
+		if resp != nil {
+			valid = valid && ValidUsage(resp.Usage)
+			attemptUsage = MaxUsage(attemptUsage, resp.Usage)
+		}
+		attemptUsage = AddUsage(Usage{}, attemptUsage)
+		if resp != nil {
+			copy := *resp
+			copy.Usage = attemptUsage
+			resp = &copy
+		}
+		if !valid && (failure == nil || failure.Kind != ErrUnsafeResponse) {
+			failure = &Error{Kind: ErrUnsafeResponse, Err: errors.New("provider returned invalid token usage")}
+			err = failure
+		}
+		if failure != nil {
+			failure.Usage = attemptUsage
+			failure.responseObserved = attemptObserved
+		}
+		usage = AddUsage(usage, attemptUsage)
 		c.record(ctx, attempt, req, resp, failureOrNil(failure), elapsed)
 		if err == nil {
+			if resp != nil {
+				copy := *resp
+				copy.Usage = usage
+				resp = &copy
+			}
 			return resp, nil
 		}
 		if !failure.Retryable() || attempt >= maxRetries {
-			return nil, failure
+			final := *failure
+			final.Usage = usage
+			final.responseObserved = observed
+			return nil, &final
 		}
+		previous = failure
 		if !wait(ctx, c.backoff(attempt, failure)) {
-			return nil, canceledError(ctx.Err())
+			canceled := canceledError(ctx.Err())
+			canceled.Usage = usage
+			canceled.responseObserved = observed
+			return nil, canceled
 		}
 	}
 }
@@ -344,18 +574,74 @@ func (c *providerClient) record(ctx context.Context, attempt int, req *Request, 
 	if c.recorder == nil {
 		return
 	}
+	var safeResp *Response
+	if resp != nil {
+		safeResp = &Response{
+			StopReason: StopReason(SafeAuditStopReason(resp.StopReason)),
+			Usage:      resp.Usage,
+		}
+	}
+	audit := NewCallAudit(req, resp)
+	if resp == nil {
+		var failure *Error
+		if errors.As(err, &failure) && failure != nil {
+			if failure.auditStop == StopRefusal || failure.auditStop == StopOther {
+				safeResp = &Response{StopReason: failure.auditStop, Usage: failure.Usage}
+				audit.Response = &AuditResponse{Format: AuditMetadataFormat, StopReason: string(failure.auditStop), Usage: failure.Usage}
+			} else if !usageZero(failure.Usage) {
+				audit.Response = &AuditResponse{Format: AuditMetadataFormat, Usage: failure.Usage}
+			}
+		}
+	}
+	// Only agent calls set Turn. This mirrors the agent's batch/stop checks
+	// without changing the response or provider retry policy.
+	if err == nil && resp != nil && CallMetaFromContext(ctx).Turn > 0 {
+		_, invalid := SanitizeToolCalls(resp.Message, resp.StopReason == StopToolUse)
+		calls := 0
+		for _, part := range resp.Message.Parts {
+			if part.Type == PartToolCall {
+				calls++
+			}
+		}
+		if invalid || (resp.StopReason != StopToolUse && resp.StopReason != StopEndTurn) ||
+			(calls > 0) != (resp.StopReason == StopToolUse) {
+			err = &Error{Kind: ErrUnsafeResponse, Usage: resp.Usage}
+		}
+	}
+	if err != nil {
+		var failure *Error
+		if errors.As(err, &failure) && failure != nil {
+			kind := failure.Kind
+			switch kind {
+			case ErrRateLimited, ErrOverloaded, ErrContextTooLong, ErrAuth, ErrBadRequest, ErrUnsafeResponse, ErrTransient, ErrCanceled:
+			default:
+				kind = "error"
+			}
+			err = &Error{Kind: kind, Status: failure.Status, RetryAfter: failure.RetryAfter, Usage: failure.Usage}
+		} else {
+			err = &Error{Kind: "error"}
+		}
+	}
 	c.recorder.RecordCall(ctx, CallRecord{
 		Provider: c.info.Name,
 		Protocol: c.info.Protocol,
 		Model:    c.info.Model,
 		Meta:     CallMetaFromContext(ctx),
 		Attempt:  attempt,
-		Request:  req,
-		Response: resp,
+		Response: safeResp,
+		Audit:    audit,
 		Err:      err,
 		Duration: elapsed,
 	})
 }
+
+func usageZero(usage Usage) bool {
+	return usage.InputTokens == 0 && usage.OutputTokens == 0 &&
+		usage.CacheReadTokens == 0 && usage.CacheWriteTokens == 0 && usage.ReasoningTokens == 0
+}
+
+// UsageZero reports whether no token category was used.
+func UsageZero(usage Usage) bool { return usageZero(usage) }
 
 // asError classifies any adapter error. Adapters normally return *Error.
 func asError(err error) *Error {
