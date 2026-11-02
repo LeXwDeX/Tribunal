@@ -23,7 +23,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 mode = os.environ.get("MOCK_MODE", "normal")
 port = int(sys.argv[1])
-state = {"baseline": {}, "triggered": set(), "grants": 0, "get_after_trigger": 0}
+state = {"baseline": {}, "triggered": set(), "grants": 0, "last_grant_user": 0, "get_after_trigger": 0}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -39,11 +39,15 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
+        auth = self.headers.get("Authorization", "")
+        is_user = auth.endswith(" user")
         if self.path == "/__stats":
-            return self.send_json(200, {"grants": state["grants"]})
+            return self.send_json(200, {"grants": state["grants"], "last_grant_user": state["last_grant_user"]})
         if self.path == "/api/v1/me":
-            return self.send_json(200, {"id": 59})
+            return self.send_json(200, {"id": 59 if is_user else 0})
         if self.path.startswith("/api/v1/admin/projects"):
+            if mode == "admin_fail":
+                return self.send_json(500, {"error": "boom"})
             return self.send_json(200, {
                 "projects": [
                     {"id": 1, "path_with_namespace": "g/a"},
@@ -77,7 +81,7 @@ class Handler(BaseHTTPRequestHandler):
             state["get_after_trigger"] += 1
             if mode == "retry" and state["get_after_trigger"] == 1:
                 return self.send_json(503, {"error": "busy"})
-            status = "cancelled" if mode == "cancelled" else "completed"
+            status = "cancelled" if mode == "cancelled" else ("failed" if mode == "failed" else "completed")
             now = datetime.now(timezone.utc)
             new_created = now.isoformat().replace("+00:00", "Z")
             old_created = (now + timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
@@ -119,7 +123,13 @@ class Handler(BaseHTTPRequestHandler):
         return self.send_json(202, {})
 
     def do_PUT(self):
+        if mode == "grant_fail":
+            return self.send_json(500, {"error": "boom"})
         state["grants"] += 1
+        try:
+            state["last_grant_user"] = int(self.path.rstrip("/").split("/")[-1])
+        except ValueError:
+            state["last_grant_user"] = 0
         return self.send_json(200, {})
 
 
@@ -167,7 +177,7 @@ check() {
 # 1. normal: two projects complete, summary and throughput must be present.
 start_server normal
 run_script "$tmp/out1" "$tmp/err1" \
-  TRIBUNAL_URL="$base" TRIBUNAL_ADMIN_TOKEN=x TRIBUNAL_USER_TOKEN=y \
+  TRIBUNAL_URL="$base" TRIBUNAL_ADMIN_TOKEN=admin TRIBUNAL_USER_TOKEN=user \
   PROJECTS="g/a g/b" MR_IIDS="1 1"
 check "normal exit 0" '[ "$code" -eq 0 ]' "exit=$code stderr=$(cat "$tmp/err1")"
 check "normal summary" 'grep -q "reviews=2 completed=2 failed=0 cancelled=0" "$tmp/err1"' "$(cat "$tmp/err1")"
@@ -179,7 +189,7 @@ stop_server
 # 2. retry: first poll after trigger gets 503, then succeeds.
 start_server retry
 run_script "$tmp/out2" "$tmp/err2" \
-  TRIBUNAL_URL="$base" TRIBUNAL_ADMIN_TOKEN=x TRIBUNAL_USER_TOKEN=y \
+  TRIBUNAL_URL="$base" TRIBUNAL_ADMIN_TOKEN=admin TRIBUNAL_USER_TOKEN=user \
   PROJECTS="g/a" MR_IIDS="1" HTTP_RETRIES=2 POLL_INTERVAL=1
 check "retry exit 0" '[ "$code" -eq 0 ]' "exit=$code stderr=$(cat "$tmp/err2")"
 check "retry summary" 'grep -q "completed=1" "$tmp/err2"' "$(cat "$tmp/err2")"
@@ -188,7 +198,7 @@ stop_server
 # 3. cancelled: separate counter and non-zero exit.
 start_server cancelled
 run_script "$tmp/out3" "$tmp/err3" \
-  TRIBUNAL_URL="$base" TRIBUNAL_ADMIN_TOKEN=x TRIBUNAL_USER_TOKEN=y \
+  TRIBUNAL_URL="$base" TRIBUNAL_ADMIN_TOKEN=admin TRIBUNAL_USER_TOKEN=user \
   PROJECTS="g/a" MR_IIDS="1"
 check "cancelled exit 1" '[ "$code" -eq 1 ]' "exit=$code stderr=$(cat "$tmp/err3")"
 check "cancelled counter" 'grep -q "cancelled=1" "$tmp/err3"' "$(cat "$tmp/err3")"
@@ -198,7 +208,7 @@ stop_server
 # 4. duplicate project/MR pair is rejected before triggering.
 start_server normal
 run_script "$tmp/out4" "$tmp/err4" \
-  TRIBUNAL_URL="$base" TRIBUNAL_ADMIN_TOKEN=x TRIBUNAL_USER_TOKEN=y \
+  TRIBUNAL_URL="$base" TRIBUNAL_ADMIN_TOKEN=admin TRIBUNAL_USER_TOKEN=user \
   PROJECTS="g/a g/a" MR_IIDS="1 1"
 check "duplicate exit 1" '[ "$code" -eq 1 ]' "exit=$code"
 check "duplicate message" 'grep -qi "duplicate" "$tmp/err4"' "$(cat "$tmp/err4")"
@@ -207,7 +217,7 @@ stop_server
 # 5. baseline: an older completed review with the same second must be ignored.
 start_server baseline
 run_script "$tmp/out5" "$tmp/err5" \
-  TRIBUNAL_URL="$base" TRIBUNAL_ADMIN_TOKEN=x TRIBUNAL_USER_TOKEN=y \
+  TRIBUNAL_URL="$base" TRIBUNAL_ADMIN_TOKEN=admin TRIBUNAL_USER_TOKEN=user \
   PROJECTS="g/a" MR_IIDS="1"
 check "baseline exit 0" '[ "$code" -eq 0 ]' "exit=$code stderr=$(cat "$tmp/err5")"
 check "baseline ignores old review" 'grep -q "tokens_in=100 " "$tmp/err5"' "$(cat "$tmp/err5")"
@@ -216,19 +226,48 @@ stop_server
 # 6. explicit GRANT_MANAGE grants the resolved user once.
 start_server normal
 run_script "$tmp/out6" "$tmp/err6" \
-  TRIBUNAL_URL="$base" TRIBUNAL_ADMIN_TOKEN=x TRIBUNAL_USER_TOKEN=y \
+  TRIBUNAL_URL="$base" TRIBUNAL_ADMIN_TOKEN=admin TRIBUNAL_USER_TOKEN=user \
   PROJECTS="g/a" MR_IIDS="1" GRANT_MANAGE=1
 check "grant exit 0" '[ "$code" -eq 0 ]' "exit=$code stderr=$(cat "$tmp/err6")"
 check "grant count" '[ "$(curl -fsS "$base/__stats" | jq -r .grants)" -eq 1 ]' "grants=$(curl -fsS "$base/__stats")"
+check "grant resolves user token identity" '[ "$(curl -fsS "$base/__stats" | jq -r .last_grant_user)" -eq 59 ]' "stats=$(curl -fsS "$base/__stats")"
 stop_server
 
 # 7. trigger failure is reported once, without interleaved curl output.
 start_server trigger_fail
 run_script "$tmp/out7" "$tmp/err7" \
-  TRIBUNAL_URL="$base" TRIBUNAL_ADMIN_TOKEN=x TRIBUNAL_USER_TOKEN=y \
+  TRIBUNAL_URL="$base" TRIBUNAL_ADMIN_TOKEN=admin TRIBUNAL_USER_TOKEN=user \
   PROJECTS="g/a" MR_IIDS="1"
 check "trigger failure exit 1" '[ "$code" -eq 1 ]' "exit=$code"
 check "trigger failure message" 'grep -q "trigger g/a !1 failed" "$tmp/err7"' "$(cat "$tmp/err7")"
+stop_server
+
+# 8. failed status is counted separately from cancelled and returns non-zero.
+start_server failed
+run_script "$tmp/out8" "$tmp/err8" \
+  TRIBUNAL_URL="$base" TRIBUNAL_ADMIN_TOKEN=admin TRIBUNAL_USER_TOKEN=user \
+  PROJECTS="g/a" MR_IIDS="1"
+check "failed exit 1" '[ "$code" -eq 1 ]' "exit=$code stderr=$(cat "$tmp/err8")"
+check "failed counter" 'grep -q "failed=1" "$tmp/err8"' "$(cat "$tmp/err8")"
+check "failed not cancelled" 'grep -q "cancelled=0" "$tmp/err8"' "$(cat "$tmp/err8")"
+stop_server
+
+# 9. admin project listing failure is fatal and is not mistaken for a missing project.
+start_server admin_fail
+run_script "$tmp/out9" "$tmp/err9" \
+  TRIBUNAL_URL="$base" TRIBUNAL_ADMIN_TOKEN=admin TRIBUNAL_USER_TOKEN=user \
+  PROJECTS="g/a" MR_IIDS="1"
+check "admin failure exit 1" '[ "$code" -eq 1 ]' "exit=$code"
+check "admin failure message" 'grep -q "cannot list projects" "$tmp/err9"' "$(cat "$tmp/err9")"
+stop_server
+
+# 10. grant failure is fatal and names the project.
+start_server grant_fail
+run_script "$tmp/out10" "$tmp/err10" \
+  TRIBUNAL_URL="$base" TRIBUNAL_ADMIN_TOKEN=admin TRIBUNAL_USER_TOKEN=user \
+  PROJECTS="g/a" MR_IIDS="1" GRANT_MANAGE=1
+check "grant failure exit 1" '[ "$code" -eq 1 ]' "exit=$code"
+check "grant failure message" 'grep -q "cannot grant" "$tmp/err10"' "$(cat "$tmp/err10")"
 stop_server
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

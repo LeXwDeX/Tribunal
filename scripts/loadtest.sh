@@ -67,7 +67,7 @@ read -r -a mr_list <<<"$MR_IIDS"
 [ "${#project_list[@]}" -gt 0 ] || die "PROJECTS must contain at least one project"
 [ "${#project_list[@]}" -eq "${#mr_list[@]}" ] || die "PROJECTS and MR_IIDS must have the same number of entries"
 for iid in "${mr_list[@]}"; do
-  case "$iid" in ''|*[!0-9]*) die "MR_IIDS must contain positive integers" ;; esac
+  positive_int "$iid" || die "MR_IIDS must contain positive integers"
 done
 
 pairs=""
@@ -80,12 +80,18 @@ duplicates=$(printf '%s' "$pairs" | sort | uniq -d)
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-api_once() { # method path token [body]
+api_once() { # method path token [body-or-@file]
   local method=$1 path=$2 token=$3 body=${4:-}
   if [ -n "$body" ]; then
-    printf 'Authorization: Bearer %s\n' "$token" | curl -q -fsS --globoff \
-      --connect-timeout 5 --max-time "$HTTP_TIMEOUT" -X "$method" "$base$path" \
-      -H @- -H "Content-Type: application/json" --data-binary "$body"
+    if [ "${body#@}" != "$body" ]; then
+      printf 'Authorization: Bearer %s\n' "$token" | curl -q -fsS --globoff \
+        --connect-timeout 5 --max-time "$HTTP_TIMEOUT" -X "$method" "$base$path" \
+        -H @- -H "Content-Type: application/json" --data-binary "@${body#@}"
+    else
+      printf 'Authorization: Bearer %s\n' "$token" | curl -q -fsS --globoff \
+        --connect-timeout 5 --max-time "$HTTP_TIMEOUT" -X "$method" "$base$path" \
+        -H @- -H "Content-Type: application/json" --data-binary "$body"
+    fi
   else
     printf 'Authorization: Bearer %s\n' "$token" | curl -q -fsS --globoff \
       --connect-timeout 5 --max-time "$HTTP_TIMEOUT" -X "$method" "$base$path" -H @-
@@ -95,10 +101,10 @@ api_once() { # method path token [body]
 api_get() { # path token
   local path=$1 token=$2 attempt=1 status=0
   while [ "$attempt" -le "$HTTP_RETRIES" ]; do
-    if api_once GET "$path" "$token" >"$tmp/response"; then
+    api_once GET "$path" "$token" >"$tmp/response" && {
       cat "$tmp/response"
       return 0
-    fi
+    }
     status=$?
     if [ "$attempt" -lt "$HTTP_RETRIES" ]; then
       sleep 1
@@ -128,25 +134,26 @@ find_project_id() {
 }
 
 register_project() {
-  local path=$1 id payload
+  local path=$1 id
   id=$(find_project_id "$path") || die "cannot list projects for $path"
   if [ -n "$id" ]; then
     printf '%s' "$id"
     return
   fi
   [ -n "${GITLAB_TOKEN:-}" ] || die "project $path is not registered and GITLAB_TOKEN is not set"
-  payload=$(jq -n --arg path "$path" --arg token "$GITLAB_TOKEN" \
-    '{project:$path, token:$token, auto_webhook:false}')
-  api_once POST "/api/v1/projects" "$TRIBUNAL_ADMIN_TOKEN" "$payload" | jq -r '.project.id'
+  GITLAB_TOKEN="$GITLAB_TOKEN" jq -n --arg path "$path" \
+    '{project:$path, token:$ENV.GITLAB_TOKEN, auto_webhook:false}' >"$tmp/body"
+  chmod 600 "$tmp/body"
+  api_once POST "/api/v1/projects" "$TRIBUNAL_ADMIN_TOKEN" "@$tmp/body" | jq -r '.project.id'
 }
 
 if [ -z "$USER_ID" ] && [ "$GRANT_MANAGE" = "1" ]; then
-  me=$(api_get "/api/v1/me" "$TRIBUNAL_ADMIN_TOKEN") || die "cannot resolve USER_ID; set USER_ID explicitly"
+  me=$(api_get "/api/v1/me" "$TRIBUNAL_USER_TOKEN") || die "cannot resolve USER_ID from TRIBUNAL_USER_TOKEN; set USER_ID explicitly"
   USER_ID=$(jq -r '.id // empty' <<<"$me")
-  [ -n "$USER_ID" ] || die "cannot resolve USER_ID; set USER_ID explicitly"
+  positive_int "$USER_ID" || die "cannot resolve a positive USER_ID from TRIBUNAL_USER_TOKEN; set USER_ID explicitly"
 fi
 if [ -n "$USER_ID" ]; then
-  case "$USER_ID" in ''|*[!0-9]*) die "USER_ID must be a positive integer" ;; esac
+  positive_int "$USER_ID" || die "USER_ID must be a positive integer"
 fi
 
 project_ids=()
@@ -160,8 +167,11 @@ done
 if [ "$GRANT_MANAGE" = "1" ]; then
   [ -n "$USER_ID" ] || die "GRANT_MANAGE=1 requires USER_ID"
   for id in "${project_ids[@]}"; do
-    api_once PUT "/api/v1/admin/projects/$id/grants/$USER_ID" "$TRIBUNAL_ADMIN_TOKEN" \
-      '{"role":"manage"}' >/dev/null
+    if ! api_once PUT "/api/v1/admin/projects/$id/grants/$USER_ID" "$TRIBUNAL_ADMIN_TOKEN" \
+      '{"role":"manage"}' >/dev/null 2>"$tmp/grant-$id.err"; then
+      detail=$(head -c 200 "$tmp/grant-$id.err" 2>/dev/null | tr '\n' ' ')
+      die "cannot grant manage on project $id: ${detail:-curl error}"
+    fi
   done
 fi
 
@@ -229,7 +239,11 @@ while :; do
       [.reviews[]? | select(.id as $id | ($baseline | index($id)) == null)]
       | max_by(.created_at) // empty
       | [.project_id,.mr_iid,.status,(.verdict // ""),(.duration_ms // 0),
-         .tokens_in,.tokens_out,.cost_micros] | @tsv' <<<"$page")
+         .tokens_in,.tokens_out,.cost_micros] | @tsv' <<<"$page") || {
+      print_rows
+      printf 'invalid polling response for %s\n' "${project_list[$idx]}" >&2
+      exit 1
+    }
     if [ -n "$row" ]; then
       printf '%s\n' "$row" >>"$tmp/rows.tsv"
       status=$(printf '%s' "$row" | awk -F'\t' '{print $3}')
@@ -264,8 +278,7 @@ count=$(awk -F'\t' 'NF{n++} END{print n+0}' "$tmp/rows.tsv")
 completed=$(awk -F'\t' 'NF && $3 == "completed"{n++} END{print n+0}' "$tmp/rows.tsv")
 failed=$(awk -F'\t' 'NF && $3 == "failed"{n++} END{print n+0}' "$tmp/rows.tsv")
 cancelled=$(awk -F'\t' 'NF && $3 == "cancelled"{n++} END{print n+0}' "$tmp/rows.tsv")
-incomplete=$((count - completed - failed - cancelled))
-failure_rate=$(awk -v bad="$((failed + cancelled + incomplete))" -v n="$count" \
+failure_rate=$(awk -v bad="$((failed + cancelled))" -v n="$count" \
   'BEGIN{ if (n == 0) print "0.0"; else printf "%.1f", bad * 100 / n }')
 
 durations=$(awk -F'\t' 'NF && $3 == "completed" && $5 + 0 > 0 {print $5}' "$tmp/rows.tsv" | sort -n)
@@ -286,13 +299,12 @@ wall_s=$((finished_epoch - started_epoch))
 [ "$wall_s" -gt 0 ] || wall_s=1
 reviews_per_sec=$(awk -v n="$count" -v s="$wall_s" 'BEGIN{ printf "%.2f", n / s }')
 
-printf 'reviews=%d completed=%d failed=%d cancelled=%d incomplete=%d failure_rate=%s%% p50_ms=%s p95_ms=%s wall_s=%d reviews_per_sec=%s tokens_in=%d tokens_out=%d cost_micros=%d\n' \
-  "$count" "$completed" "$failed" "$cancelled" "$incomplete" "$failure_rate" \
+printf 'reviews=%d completed=%d failed=%d cancelled=%d triggers_failed=%d failure_rate=%s%% p50_ms=%s p95_ms=%s wall_s=%d reviews_per_sec=%s tokens_in=%d tokens_out=%d cost_micros=%d\n' \
+  "$count" "$completed" "$failed" "$cancelled" "$failed_triggers" "$failure_rate" \
   "$p50" "$p95" "$wall_s" "$reviews_per_sec" "$tokens_in" "$tokens_out" "$cost_micros" >&2
 
 status_code=0
 [ "$failed_triggers" -eq 0 ] || status_code=1
-[ "$incomplete" -eq 0 ] || status_code=1
 [ "$failed" -eq 0 ] || status_code=1
 [ "$cancelled" -eq 0 ] || status_code=1
 exit "$status_code"

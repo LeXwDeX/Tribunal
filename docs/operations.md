@@ -1233,12 +1233,12 @@ tribunalctl projects retry-onboarding <项目 ID>
 ### 准备
 
 - `TRIBUNAL_URL`：实例地址，必须以 `http://` 或 `https://` 开头，不能带查询、片段或 userinfo。
-- `TRIBUNAL_ADMIN_TOKEN`：用于注册项目、授权和解析用户。
+- `TRIBUNAL_ADMIN_TOKEN`：用于注册项目和授予项目权限。
 - `TRIBUNAL_USER_TOKEN`：用于触发评审和读取结果；该用户必须对项目有 `manage` 权限。
-- `GITLAB_TOKEN`：仅注册尚未登记的项目时需要。
+- `GITLAB_TOKEN`：仅注册尚未登记的项目时需要；注册请求体经权限 600 的临时文件传给 curl，不进进程参数。
 - `PROJECTS`、`MR_IIDS`：单行、空格分隔、顺序对应；MR IID 必须是正整数，项目/MR 对不能重复。
-- 可选：`GRANT_MANAGE`（默认 `0`）、`USER_ID`、`POLL_INTERVAL`（默认 `5` 秒）、`TIMEOUT`（默认 `900` 秒）、`HTTP_TIMEOUT`（默认 `30` 秒）、`HTTP_RETRIES`（默认 `3` 次，仅 GET）。
-- `GRANT_MANAGE=1` 时脚本给 `USER_ID` 授予每个项目的 `manage`。`USER_ID` 未设置时从 `/api/v1/me` 解析；解析失败需显式设置。默认不修改任何授权；如果 token 用户已有 `manage`，不需要开启。
+- 可选：`GRANT_MANAGE`（默认 `0`）、`USER_ID`、`POLL_INTERVAL`（默认 `5` 秒）、`TIMEOUT`（默认 `900` 秒，仅轮询阶段）、`HTTP_TIMEOUT`（默认 `30` 秒）、`HTTP_RETRIES`（默认 `3` 次，仅 GET）。
+- `GRANT_MANAGE=1` 时脚本给 `USER_ID` 授予每个项目的 `manage`。`USER_ID` 未设置时从 `TRIBUNAL_USER_TOKEN` 的 `/api/v1/me` 解析；解析结果必须是正整数，失败需显式设置。不能用 admin token 解析，bootstrap token 没有用户 ID。默认不修改任何授权；如果 token 用户已有 `manage`，不需要开启。
 - 脚本用 stdin 把 bearer token 传给 curl，不放进进程参数；不要在有不可信用户的共享主机上运行。
 
 ### 运行
@@ -1255,12 +1255,12 @@ bash scripts/loadtest.sh > loadtest.csv
 stdout 是 CSV：`project_id,mr_iid,status,verdict,duration_ms,tokens_in,tokens_out,cost_micros`。stderr 汇总：
 
 ```text
-reviews=... completed=... failed=... cancelled=... incomplete=... failure_rate=...% p50_ms=... p95_ms=... wall_s=... reviews_per_sec=... tokens_in=... tokens_out=... cost_micros=...
+reviews=... completed=... failed=... cancelled=... triggers_failed=... failure_rate=...% p50_ms=... p95_ms=... wall_s=... reviews_per_sec=... tokens_in=... tokens_out=... cost_micros=...
 ```
 
-有 `failed`、`cancelled`、`incomplete` 或触发失败时脚本返回 1，并保留已收集的部分结果。`cost_micros` 依赖 provider 的 `price` 配置；未配置时始终为 0。
+`failure_rate` 只统计已触发评审中的 `failed` 和 `cancelled`；触发失败单独看 `triggers_failed`。`wall_s` 从脚本开始（注册、授权、基线之前）到结束，`reviews_per_sec` 使用同一墙钟。有 `failed`、`cancelled` 或触发失败时脚本返回 1，并保留已收集的部分结果。`cost_micros` 依赖 provider 的 `price` 配置；未配置时始终为 0。
 
-脚本自测：`bash scripts/loadtest_test.sh`，使用本地 mock API 覆盖正常、重试、取消、重复输入、基线和授权；需要 Python 3。
+脚本自测：`bash scripts/loadtest_test.sh`，使用本地 mock API 覆盖正常、重试、取消、失败、重复输入、基线、授权目标用户、项目列表失败和触发失败；需要 Python 3。
 
 ### 结果解读
 
