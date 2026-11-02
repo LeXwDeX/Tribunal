@@ -20,12 +20,11 @@ func TestRecoverAndRunReviewShareExecutorOwnership(t *testing.T) {
 	runDir := filepath.Join(f.manager.Get(42).Root, "runs", job.ID)
 
 	block := make(chan struct{})
-	f.runner.block = block
-	f.runner.started = make(chan struct{})
+	f.runner.setBlock(block, make(chan struct{}))
 	recoverDone := make(chan error, 1)
 	go func() { recoverDone <- f.service.Recover(ctx) }()
 	select {
-	case <-f.runner.started:
+	case <-f.runner.startedSignal():
 	case <-time.After(5 * time.Second):
 		t.Fatal("recovery did not start the review")
 	}
@@ -65,12 +64,11 @@ func TestConcurrentRunReviewSameJobHasOneOwner(t *testing.T) {
 	job := f.seedRunFor(t, "job-concurrent", reviewTestHead, "mr_open")
 
 	block := make(chan struct{})
-	f.runner.block = block
-	f.runner.started = make(chan struct{})
+	f.runner.setBlock(block, make(chan struct{}))
 	firstDone := make(chan error, 1)
 	go func() { firstDone <- f.service.Handle(ctx, job) }()
 	select {
-	case <-f.runner.started:
+	case <-f.runner.startedSignal():
 	case <-time.After(5 * time.Second):
 		t.Fatal("first handler did not start the review")
 	}

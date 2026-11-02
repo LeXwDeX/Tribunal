@@ -15,14 +15,13 @@ import (
 // agent call is running (a worker shutdown), and returns the workflow ID.
 func interruptReview(t *testing.T, f *reviewFixture, job *jobs.Job) string {
 	t.Helper()
-	f.runner.block = make(chan struct{})
-	f.runner.started = make(chan struct{})
+	f.runner.setBlock(make(chan struct{}), make(chan struct{}))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- f.service.Handle(ctx, job) }()
 	select {
-	case <-f.runner.started:
+	case <-f.runner.startedSignal():
 	case <-time.After(5 * time.Second):
 		t.Fatal("review did not start")
 	}
@@ -51,7 +50,7 @@ func interruptReview(t *testing.T, f *reviewFixture, job *jobs.Job) string {
 		t.Fatalf("interrupted review published %d notes", got)
 	}
 	// The restarted process runs without the blocking agent.
-	f.runner.block = nil
+	f.runner.setBlock(nil, nil)
 	return workflow.ID
 }
 
