@@ -1022,7 +1022,7 @@ docker compose exec -T review /app/tribunalctl projects all
 
 ### 从 v1.1.0 升级到 v1.2.0
 
-**v1.2.0 尚未发布：版本说明已合并，尚未打 tag，也未发布 Release。** 以下步骤以 `main` `96e8081` 的代码为准；打 tag 后需要重新核对镜像 digest。完整变更见 [CHANGELOG](../CHANGELOG.md) 的 `[1.2.0] - 2026-10-29` 段，验证状态见 [v1.2.0 验证状态](delivery-readiness.md#v120-验证状态)。真实实例验收（[#108](https://github.com/LeXwDeX/Tribunal/issues/108)）已于 2026-10-29 在 33.110 隔离实例执行并通过（`bootstrap_admins` 告警经 [#151](https://github.com/LeXwDeX/Tribunal/issues/151) 排查后复现）；GitHub Actions 仍未成功执行，tag 发布前由维护者核对[验证状态](delivery-readiness.md#v120-验证状态)。
+**v1.2.0 尚未发布：版本说明已合并，尚未打 tag，也未发布 Release。** 以下步骤以 `main` `96e8081` 的代码为准；打 tag 后需要重新核对镜像 digest。完整变更见 [CHANGELOG](../CHANGELOG.md) 的 `[1.2.0] - 2026-10-29` 段，验证状态见 [v1.2.0 验证状态](delivery-readiness.md#v120-验证状态)。真实实例验收（[#108](https://github.com/LeXwDeX/Tribunal/issues/108)）已于 2026-10-29 在 33.110 隔离实例执行并通过（`bootstrap_admins` 告警经 [#151](https://github.com/LeXwDeX/Tribunal/issues/151) 排查后复现）；GitHub Actions 已在后续 PR 与 `main` 上实际运行并通过，但发布前仍由维护者核对[验证状态](delivery-readiness.md#v120-验证状态)。
 
 先按第 8 节的通用步骤操作：记录当前镜像 tag/digest，核对生效路径和全部挂载，停止旧容器并备份数据库和所有工作区。本次升级有这些额外注意点：
 

@@ -55,9 +55,9 @@ bash scripts/docker-smoke.sh
 
 CI runs the same `go`, `web` and `docker` jobs on every PR and on `main`.
 
-If hosted runners are blocked by billing, a user with repository write access can run additional CI evidence on a self-hosted runner after this workflow is merged into the default branch: `gh workflow run ci.yml --ref <trusted-branch> -f self_hosted=true`. This manual run alone does not guarantee a PR required check will pass. Push and PR runs remain on hosted runners.
+CI runs on GitHub Actions hosted runners for every push and pull request. A repository writer may request additional evidence on a self-hosted runner with `gh workflow run ci.yml --ref <trusted-branch> -f self_hosted=true`, but that manual run is supplementary: it does not replace the hosted push/PR checks and does not guarantee a required check will pass.
 
-Only dispatch trusted branch code: untrusted code can persistently compromise a self-hosted machine. This is an operational requirement, not a security boundary enforced automatically by GitHub or this workflow. Anyone who can modify a workflow can request a self-hosted runner; runner access controls may restrict whether it executes. The generic `self-hosted`, `Linux`, `X64` labels can match any runner with those labels, not a specific machine. Verify runner isolation and its Docker, Docker Compose, Go, Node, Bash, Python 3 and race-enabled C compiler prerequisites before use.
+Only dispatch trusted branch code to a self-hosted runner: untrusted code can persistently compromise that machine. This is an operational requirement, not a security boundary enforced automatically by GitHub or this workflow. Anyone who can modify a workflow can request a self-hosted runner; runner access controls may restrict whether it executes. The generic `self-hosted`, `Linux`, `X64` labels can match any runner with those labels, not a specific machine. Verify runner isolation and its Docker, Docker Compose, Go, Node, Bash, Python 3 and race-enabled C compiler prerequisites before use.
 
 ## Test-driven development
 
