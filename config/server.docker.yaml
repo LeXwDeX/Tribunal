@@ -46,6 +46,18 @@ providers:
     model: "${LLM_MODEL}"
     api_key_env: LLM_API_KEY
     max_concurrency: 4
+  # Optional second provider, off by default. Uncomment this block, then enable
+  # it in the profile below. LLM_SECONDARY_* are independent of the primary
+  # LLM_* names. This example uses the Anthropic Messages API: base_url is the
+  # API root without /v1, and max_tokens is required. For openai-chat or
+  # openai-responses, set the matching protocol and include /v1 in base_url.
+  # secondary:
+  #   protocol: "${LLM_SECONDARY_PROTOCOL}"
+  #   base_url: "${LLM_SECONDARY_BASE_URL}"
+  #   model: "${LLM_SECONDARY_MODEL}"
+  #   api_key_env: LLM_SECONDARY_API_KEY
+  #   max_concurrency: 4
+  #   max_tokens: 16000
 
 profiles:
   onboarding:
@@ -55,7 +67,13 @@ profiles:
     propose:
       - block: code-review
         provider: primary
+      # Optional second proposer. Uncomment these lines after enabling
+      # providers.secondary above.
+      # - block: code-review
+      #   provider: secondary
     challenge:
+      # Replace primary with secondary to challenge a different model after
+      # enabling providers.secondary above.
       provider: primary
 
 # Built-in platform extensions (see docs/design/06-config.md). The bundled
