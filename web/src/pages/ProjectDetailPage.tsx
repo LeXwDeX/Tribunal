@@ -71,17 +71,7 @@ function ProjectOverview({ project }: { project: Project }) {
         ) : null}
       </section>
 
-      <div className={styles.split}>
-        <div className={styles.mainColumn}>
-          <Panel title="最近评审" aside={<Link to={`/reviews?project_id=${project.id}`}>查看全部</Link>}>
-            {reviews.isPending ? <LoadingState /> : null}
-            {reviews.isError ? <ErrorState error={reviews.error} onRetry={reviews.retry} /> : null}
-            {reviews.isSuccess && reviews.items.length === 0 ? <EmptyState title="这个项目还没有评审记录" description="打开 MR 或手动触发一次评审。" /> : null}
-            {reviews.items.length ? <ReviewTable reviews={reviews.items} projectNames={projectNames} /> : null}
-            {reviews.hasNextPage ? <Button variant="secondary" onClick={reviews.fetchNextPage} loading={reviews.isFetchingNextPage}>加载更多评审</Button> : null}
-          </Panel>
-        </div>
-        <div className={styles.sideColumn}>
+      <div className={page.overviewCards}>
           <Panel title="基本信息">
             <dl className={ui.definitionGrid}>
               <div><dt>项目 ID</dt><dd className="tabular">{project.id}</dd></div>
@@ -116,8 +106,14 @@ function ProjectOverview({ project }: { project: Project }) {
             {project.workspace?.last_error ? <span className={styles.resultError}>{project.workspace.last_error}</span> : null}
             <Link to={`/projects/${project.id}/workspace`} className={styles.listMeta}>查看完整工作区与上下文 →</Link>
           </Panel>
-        </div>
       </div>
+      <Panel title="最近评审" aside={<Link to={`/reviews?project_id=${project.id}`}>查看全部</Link>}>
+        {reviews.isPending ? <LoadingState /> : null}
+        {reviews.isError ? <ErrorState error={reviews.error} onRetry={reviews.retry} /> : null}
+        {reviews.isSuccess && reviews.items.length === 0 ? <EmptyState title="这个项目还没有评审记录" description="打开 MR 或手动触发一次评审。" /> : null}
+        {reviews.items.length ? <ReviewTable reviews={reviews.items} projectNames={projectNames} /> : null}
+        {reviews.hasNextPage ? <Button variant="secondary" onClick={reviews.fetchNextPage} loading={reviews.isFetchingNextPage}>加载更多评审</Button> : null}
+      </Panel>
     </div>
   )
 }
