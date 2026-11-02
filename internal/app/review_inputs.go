@@ -24,21 +24,22 @@ const maxPipelineJobTraces = 3
 const redactedJobTraceValue = "[REDACTED]"
 
 var (
-	jobTraceTokenRE         = regexp.MustCompile(`glpat-[A-Za-z0-9_-]+`)
-	jobTracePrivateTokenRE  = regexp.MustCompile(`(?i)(PRIVATE-TOKEN\s*:\s*)\S+`)
-	jobTraceBearerRE        = regexp.MustCompile(`(?i)(Authorization\s*:\s*Bearer\s+)\S+`)
+	jobTracePrivateTokenRE  = regexp.MustCompile(`(?i)(PRIVATE-TOKEN\s*:\s*)(?:"[^"]*"|'[^']*'|\S+)`)
+	jobTraceAuthRE          = regexp.MustCompile(`(?i)(Authorization\s*:\s*(?:Bearer|Basic|Token)\s+)(?:"[^"]*"|'[^']*'|\S+)`)
+	jobTraceFlagRE          = regexp.MustCompile(`(?i)(--(?:password|token)\s+)(?:"[^"]*"|'[^']*'|\S+)`)
 	jobTraceURLCredsRE      = regexp.MustCompile(`://[^/\s:@]+:[^/\s@]+@`)
-	jobTraceCIVarRE         = regexp.MustCompile(`(?m)\b(CI_JOB_TOKEN\s*=\s*)\S+`)
-	jobTraceGenericSecretRE = regexp.MustCompile(`(?i)\b((?:[A-Z0-9_]*TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|ACCESS[_-]?KEY)\s*[:=]\s*)\S+`)
+	jobTraceCIVarRE         = regexp.MustCompile(`(?m)\b(CI_JOB_TOKEN\s*=\s*)(?:"[^"]*"|'[^']*'|\S+)`)
+	jobTraceGenericSecretRE = regexp.MustCompile(`(?i)\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|ACCESS[_-]?KEY)[A-Z0-9_]*\s*[:=]\s*)(?:"[^"]*"|'[^']*'|\S+)`)
 )
 
 // sanitizeJobTrace removes credential-looking values before logs reach a
 // prompt. The patterns are deliberately narrow; they do not make arbitrary
 // log text safe or trusted.
 func sanitizeJobTrace(trace string) string {
-	trace = jobTraceTokenRE.ReplaceAllString(trace, redactedJobTraceValue)
+	trace = statusTokenRE.ReplaceAllString(trace, redactedJobTraceValue)
 	trace = jobTracePrivateTokenRE.ReplaceAllString(trace, "${1}"+redactedJobTraceValue)
-	trace = jobTraceBearerRE.ReplaceAllString(trace, "${1}"+redactedJobTraceValue)
+	trace = jobTraceAuthRE.ReplaceAllString(trace, "${1}"+redactedJobTraceValue)
+	trace = jobTraceFlagRE.ReplaceAllString(trace, "${1}"+redactedJobTraceValue)
 	trace = jobTraceURLCredsRE.ReplaceAllString(trace, "://"+redactedJobTraceValue+"@")
 	trace = jobTraceCIVarRE.ReplaceAllString(trace, "${1}"+redactedJobTraceValue)
 	trace = jobTraceGenericSecretRE.ReplaceAllString(trace, "${1}"+redactedJobTraceValue)
@@ -92,7 +93,7 @@ func (s *ReviewService) collectInputs(ctx context.Context, project *store.Projec
 		return nil, err
 	}
 	inputs := &reviewInputs{MR: mr, Version: version, Diffs: diffs}
-	inputs.Pipeline = s.collectPipeline(ctx, token, project.ID, mrIID)
+	inputs.Pipeline = s.collectPipeline(ctx, token, project.ID, mrIID, head)
 	inputs.Issues = s.collectIssues(ctx, token, project.ID, mrIID)
 	docs, err := s.repoDocs(ctx, token, project.ID, mr.TargetBranch)
 	if err != nil {
@@ -128,7 +129,7 @@ func mrState(mr *gitlab.MergeRequest) string {
 	return mr.State
 }
 
-func (s *ReviewService) collectPipeline(ctx context.Context, token string, projectID, mrIID int64) *review.PipelineSummary {
+func (s *ReviewService) collectPipeline(ctx context.Context, token string, projectID, mrIID int64, headSHA string) *review.PipelineSummary {
 	pipelines, err := s.gitlab.ListMRPipelines(ctx, token, projectID, mrIID)
 	if err != nil {
 		s.logger.Warn("pipeline lookup failed", "project_id", projectID, "mr_iid", mrIID)
@@ -151,6 +152,11 @@ func (s *ReviewService) collectPipeline(ctx context.Context, token string, proje
 		WebURL: latest.WebURL,
 	}
 	if latest.Status != "failed" {
+		return summary
+	}
+	// Never attach logs from another commit: a newer head may not have a
+	// pipeline yet while an older failed pipeline is still the latest one.
+	if !strings.EqualFold(strings.TrimSpace(latest.SHA), strings.TrimSpace(headSHA)) {
 		return summary
 	}
 	jobs, err := s.gitlab.ListPipelineJobs(ctx, token, projectID, latest.ID)

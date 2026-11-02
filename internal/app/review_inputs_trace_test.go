@@ -15,7 +15,7 @@ import (
 func TestCollectPipelineFetchesOnlyFailedJobTraces(t *testing.T) {
 	f := newReviewFixture(t, reviewTestHead)
 	f.gitlab.mu.Lock()
-	f.gitlab.pipelines = []gitlab.Pipeline{{ID: 10, Status: "failed", Ref: "feat"}}
+	f.gitlab.pipelines = []gitlab.Pipeline{{ID: 10, Status: "failed", Ref: "feat", SHA: reviewTestHead}}
 	f.gitlab.jobs = []gitlab.Job{
 		{ID: 1, Name: "unit", Stage: "test", Status: "failed", FailureReason: "script_failure"},
 		{ID: 2, Name: "lint", Stage: "test", Status: "success"},
@@ -24,7 +24,7 @@ func TestCollectPipelineFetchesOnlyFailedJobTraces(t *testing.T) {
 	f.gitlab.jobTraces = map[int64]string{1: "panic at main.go:3"}
 	f.gitlab.mu.Unlock()
 
-	summary := f.service.collectPipeline(context.Background(), "token", 42, 7)
+	summary := f.service.collectPipeline(context.Background(), "token", 42, 7, reviewTestHead)
 	if summary == nil || len(summary.FailedJobs) != 1 {
 		t.Fatalf("summary = %+v, want one failed job", summary)
 	}
@@ -46,12 +46,12 @@ func TestCollectPipelineLimitsJobTracesToThree(t *testing.T) {
 		traces[id] = fmt.Sprintf("trace-%d", id)
 	}
 	f.gitlab.mu.Lock()
-	f.gitlab.pipelines = []gitlab.Pipeline{{ID: 10, Status: "failed"}}
+	f.gitlab.pipelines = []gitlab.Pipeline{{ID: 10, Status: "failed", SHA: reviewTestHead}}
 	f.gitlab.jobs = jobs
 	f.gitlab.jobTraces = traces
 	f.gitlab.mu.Unlock()
 
-	summary := f.service.collectPipeline(context.Background(), "token", 42, 7)
+	summary := f.service.collectPipeline(context.Background(), "token", 42, 7, reviewTestHead)
 	if summary == nil || len(summary.FailedJobs) != 5 {
 		t.Fatalf("summary = %+v, want all five failed jobs", summary)
 	}
@@ -73,7 +73,7 @@ func TestCollectPipelineContinuesWhenTraceReadFails(t *testing.T) {
 	var logs bytes.Buffer
 	f.service.logger = slog.New(slog.NewTextHandler(&logs, nil))
 	f.gitlab.mu.Lock()
-	f.gitlab.pipelines = []gitlab.Pipeline{{ID: 10, Status: "failed"}}
+	f.gitlab.pipelines = []gitlab.Pipeline{{ID: 10, Status: "failed", SHA: reviewTestHead}}
 	f.gitlab.jobs = []gitlab.Job{
 		{ID: 1, Name: "unit", Status: "failed"},
 		{ID: 2, Name: "integration", Status: "failed"},
@@ -82,7 +82,7 @@ func TestCollectPipelineContinuesWhenTraceReadFails(t *testing.T) {
 	f.gitlab.jobTraceErrs = map[int64]error{1: errors.New("upstream secret body")}
 	f.gitlab.mu.Unlock()
 
-	summary := f.service.collectPipeline(context.Background(), "token", 42, 7)
+	summary := f.service.collectPipeline(context.Background(), "token", 42, 7, reviewTestHead)
 	if summary == nil || len(summary.FailedJobs) != 2 {
 		t.Fatalf("summary = %+v, want both failed jobs", summary)
 	}
@@ -98,6 +98,23 @@ func TestCollectPipelineContinuesWhenTraceReadFails(t *testing.T) {
 	}
 }
 
+func TestCollectPipelineSkipsTraceForDifferentHead(t *testing.T) {
+	f := newReviewFixture(t, reviewTestHead)
+	f.gitlab.mu.Lock()
+	f.gitlab.pipelines = []gitlab.Pipeline{{ID: 10, Status: "failed", SHA: strings.Repeat("a", 40)}}
+	f.gitlab.jobs = []gitlab.Job{{ID: 1, Name: "unit", Status: "failed"}}
+	f.gitlab.jobTraces = map[int64]string{1: "stale trace"}
+	f.gitlab.mu.Unlock()
+
+	summary := f.service.collectPipeline(context.Background(), "token", 42, 7, reviewTestHead)
+	if summary == nil || len(summary.FailedJobs) != 0 {
+		t.Fatalf("summary = %+v, want no jobs for another commit", summary)
+	}
+	if got := f.gitlab.traceCallIDs(); len(got) != 0 {
+		t.Fatalf("trace calls = %v, want none for another commit", got)
+	}
+}
+
 func TestSanitizeJobTraceRedactsSecrets(t *testing.T) {
 	raw := strings.Join([]string{
 		"token glpat-abcdef123456 used",
@@ -106,19 +123,25 @@ func TestSanitizeJobTraceRedactsSecrets(t *testing.T) {
 		"remote https://user:pass@gitlab.example.com/group/repo.git",
 		"CI_JOB_TOKEN=job-token-value",
 		"GITLAB_TOKEN=gitlab-token-value",
-		"password=db-pass",
+		"glrt-runner-token",
+		"DB_PASSWORD=db-pass",
+		"AWS_SECRET_ACCESS_KEY=aws-secret",
+		"MY_API_KEY=api-key-value",
+		"Authorization: Basic basic-value",
+		"deploy --token flag-token",
 		"normal line stays",
 	}, "\n")
 
 	got := sanitizeJobTrace(raw)
 	for _, secret := range []string{
-		"glpat-abcdef123456", "private-value", "bearer-value", "user:pass", "job-token-value", "gitlab-token-value", "db-pass",
+		"glpat-abcdef123456", "private-value", "bearer-value", "user:pass", "job-token-value", "gitlab-token-value",
+		"glrt-runner-token", "db-pass", "aws-secret", "api-key-value", "basic-value", "flag-token",
 	} {
 		if strings.Contains(got, secret) {
 			t.Fatalf("sanitized trace still contains %q:\n%s", secret, got)
 		}
 	}
-	if strings.Count(got, "[REDACTED]") < 7 {
+	if strings.Count(got, "[REDACTED]") < 12 {
 		t.Fatalf("sanitized trace misses redaction markers:\n%s", got)
 	}
 	if !strings.Contains(got, "normal line stays") {

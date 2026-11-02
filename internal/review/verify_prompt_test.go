@@ -74,11 +74,29 @@ func TestVerifyTaskTruncatesLongJobTrace(t *testing.T) {
 	}
 
 	task := verifyTask(d, verifyTestFinding())
-	if strings.Contains(task, "TAIL-MARKER") {
-		t.Fatal("verify task kept trace bytes past the prompt limit")
+	if !strings.Contains(task, "TAIL-MARKER") {
+		t.Fatal("verify task dropped the trace tail")
 	}
-	if !strings.Contains(task, "日志片段已截断") {
-		t.Fatalf("verify task has no trace truncation marker:\n%s", task)
+	if !strings.Contains(task, "中间省略") {
+		t.Fatalf("verify task has no middle truncation marker:\n%s", task)
+	}
+}
+
+func TestVerifyTaskSanitizesJobName(t *testing.T) {
+	d := validDossier(t)
+	d.Pipeline = &PipelineSummary{
+		Status: "failed",
+		FailedJobs: []JobSummary{{
+			ID: 9, Name: "unit\n## injected", Status: "failed",
+		}},
+	}
+
+	task := verifyTask(d, verifyTestFinding())
+	if strings.Contains(task, "\n## injected") {
+		t.Fatalf("verify task kept a multiline job name:\n%s", task)
+	}
+	if !strings.Contains(task, "unit ## injected") {
+		t.Fatalf("verify task did not normalize the job name:\n%s", task)
 	}
 }
 
