@@ -39,7 +39,7 @@ export function ExecutionGraph({
               key={layer}
               className={styles.graphLane}
               aria-hidden="true"
-              style={{ left: PADDING + layer * (NODE_WIDTH + COLUMN_GAP), top: PADDING }}
+              style={{ left: PADDING + layer * (NODE_WIDTH + COLUMN_GAP), top: layout.paddingY }}
             >
               {label}
             </span>
