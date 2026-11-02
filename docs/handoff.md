@@ -24,7 +24,7 @@
    - 常用：`specgit issue <编号> --branch <分支>` 认领 Issue 并建 checkpoint；`specgit pr` 建草稿 PR；`specgit pr --ready`；合并后 `specgit pr --status` 把 checkpoint 记为已交付。
    - 踩过的坑：主检出里残留旧分支的 checkpoint 时，`specgit issue` 会报 `prepared_blocked`，按提示用独立 worktree（`git worktree add -b <分支> ../tribunal-<N> main`，进去先 `specgit init --config-file <主检出的 .specgit.yaml 绝对路径> --manual-observe`）。`--reviewed-candidates` 的 digest 要用带 `--body-file` 的 `--inspect` 重新取，否则报 `concurrent_edit`。`--body-file` 不要用 `/tmp`（符号链接会被判 `unsafe_path`），用 `$TMPDIR/opencode/` 下的真实路径。
 4. **CI**：GitHub Actions 的 hosted runner 已可用，`go`/`web`/`docker` 三个 job 会实际运行。合并前必须在**最新 main 同步后的 head** 上等这三项全部 success；旧 head 的通过结果不算。查看用 `gh run list` / `gh pr view <N> --json statusCheckRollup`，不要只依赖 PR 页面缓存。
-5. **33.110**：本次交接期间 SSH 不可用（`Connection timed out during banner exchange`），不要再把它当成本地 CI 的必经路径。若恢复，`scp root@192.168.33.110:/DATA/AppData/tribunal-ci/client.sh /tmp/` 后 `bash /tmp/client.sh [rev]`；细节见第 6 节。
+5. **33.110**：历史过渡环境，本次 SSH 不可用（`Connection timed out during banner exchange`），不参与准备或合并门禁。CI 只用真实 GitHub Actions；若维护者恢复该环境，只能作为额外证据，见第 6 节。
 
 ## 2. 工作方式（用户的长期授权与要求）
 
@@ -78,11 +78,10 @@
 - 每个 push 和 PR 触发 `go`、`web`、`docker` 三个 job；合并前要求当前 head 三项全绿。
 - 工作流在 `.github/workflows/ci.yml`，只读权限，不发布。
 
-**33.110（本次不可用）**
-- 位置 `/DATA/AppData/tribunal-ci`；镜像 `tribunal-ci:runner`，缓存卷 `tribunal-ci_go`、`tribunal-ci_gobuild`、`tribunal-ci_npm`。
-- 用法：在仓库根目录 `bash /tmp/client.sh [rev]`。它把提交打成 git bundle 送过去（仓库私有，runner 不存 GitHub 凭据），推送临时 ref `tribunal-ci-run` 退出时删除，有残留就手动删。
-- 覆盖 ci.yml 的 web、go（`-race`，覆盖率 ≥ 70%）和 docker 冒烟三个 job；结果在 `/DATA/AppData/tribunal-ci/runs/<时间-sha>/summary.txt`，末行 `RESULT PASS/FAIL`。
-- 恢复后先验证 SSH 与 Docker，再决定是否重新作为本地 CI；不要假设它可用。
+**33.110（历史环境，不用于 CI）**
+- 2026-10-30 交接时曾用 `/DATA/AppData/tribunal-ci` 的 `tribunal-ci:runner` 作为 GitHub Actions 不可用期间的过渡 CI。该 SSH 本次不可用（`Connection timed out during banner exchange`）。
+- 从现在起合并门禁只用真实 GitHub Actions，不再要求 33.110 或本地全量检查。若维护者恢复该环境，可把它当作额外证据，但必须单独声明，不能替代当前 head 的 GitHub Actions。
+- 历史用法：`bash /tmp/client.sh [rev]`；结果在 `/DATA/AppData/tribunal-ci/runs/<时间-sha>/summary.txt`，末行 `RESULT PASS/FAIL`。
 
 **GitLab 沙箱**：[suntao/tribunal-sandbox](https://git.ycgame.com/suntao/tribunal-sandbox)（id 1334）。MR !1 有故意埋的 bug，MR !2 是干净改动，MR !3 是 #108 验收用的。project access token id 213（token 本身不在仓库里）。
 
@@ -94,7 +93,7 @@
 
 ## 7. 未验证项与风险
 
-- 本机没有 Docker：所有 PR 的 `docker compose config` 与 `scripts/docker-smoke.sh` 未在本地运行；GitHub Actions 的 docker job 通过只证明 CI 环境。
+- 本机没有 Docker：所有 PR 的 `docker compose config` 与 `scripts/docker-smoke.sh` 未在本地运行。GitHub Actions 的 docker job 是合并门禁并已实际通过，但它不等同于本机 Docker 验证。
 - 真实 GitLab、真实模型 provider 上游、MCP 远端都未联调。评审发布、讨论恢复、仓库 Skill 授权、跨代状态收敛的远端时序未在真实服务上复现。
 - 真实 GitLab 对“取消后迟到写入”的请求排序没有验证；#182 的收敛承诺只在 `docs/operations.md` 列出的条件（服务持续运行、失败可重试、权限有效、远程操作最终结束）下成立。
 - 仓库 Skill 的发现接口不感知具体 MR 的 ignored rename；授权快照与运行时完整 deny 集合不一致时会 fail closed，需要重新授权。
