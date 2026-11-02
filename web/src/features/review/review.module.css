@@ -383,8 +383,10 @@
   min-width: 720px;
 }
 
-.findingsTable td {
-  vertical-align: top;
+/* Global table rules are emitted after this module, so keep the extra tbody
+   specificity; the shared .dataTable styles must not change. */
+.findingsTable tbody td {
+  vertical-align: middle;
 }
 
 .sevCell {
