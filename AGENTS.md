@@ -100,8 +100,9 @@ stage is not ready.
    CI-only results as real evidence.
 
 A documentation-only PR may use a reduced chain: independent review plus
-evidence check. A documentation finding is verified with links, formatting, or
-fact checks instead of a regression test; a blocking documentation finding still
+evidence check, and it still publishes a short report (on the Issue, the PR, or
+both). A documentation finding is verified with links, formatting, or fact
+checks instead of a regression test; a blocking documentation finding still
 needs a new independent review of the fix. It still must not fabricate
 verification.
 
