@@ -41,6 +41,12 @@ services:
       LLM_MODEL: "${LLM_MODEL:?LLM_MODEL is required}"
       LLM_API_KEY: "${LLM_API_KEY:?LLM_API_KEY is required}"
       LLM_PROTOCOL: "${LLM_PROTOCOL:-openai-chat}"
+      # Optional second provider. Empty defaults keep primary-only deployments
+      # unchanged; the secondary block stays commented in server.docker.yaml.
+      LLM_SECONDARY_PROTOCOL: "${LLM_SECONDARY_PROTOCOL:-}"
+      LLM_SECONDARY_BASE_URL: "${LLM_SECONDARY_BASE_URL:-}"
+      LLM_SECONDARY_MODEL: "${LLM_SECONDARY_MODEL:-}"
+      LLM_SECONDARY_API_KEY: "${LLM_SECONDARY_API_KEY:-}"
       GITLAB_OAUTH_CLIENT_ID: "${GITLAB_OAUTH_CLIENT_ID:-}"
       GITLAB_OAUTH_CLIENT_SECRET: "${GITLAB_OAUTH_CLIENT_SECRET:-}"
       GITLAB_ADMIN_USERNAME: "${GITLAB_ADMIN_USERNAME:-}"
