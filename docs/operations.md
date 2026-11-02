@@ -1239,7 +1239,7 @@ tribunalctl projects retry-onboarding <项目 ID>
 - `PROJECTS`、`MR_IIDS`：单行、空格分隔、顺序对应；MR IID 必须是正整数，项目/MR 对不能重复。
 - 可选：`GRANT_MANAGE`（默认 `0`）、`USER_ID`、`POLL_INTERVAL`（默认 `5` 秒）、`TIMEOUT`（默认 `900` 秒，仅轮询阶段）、`HTTP_TIMEOUT`（默认 `30` 秒）、`HTTP_RETRIES`（默认 `3` 次，仅 GET）。
 - `GRANT_MANAGE=1` 时脚本给 `USER_ID` 授予每个项目的 `manage`。`USER_ID` 未设置时从 `TRIBUNAL_USER_TOKEN` 的 `/api/v1/me` 解析；解析结果必须是正整数，失败需显式设置。不能用 admin token 解析，bootstrap token 没有用户 ID。默认不修改任何授权；如果 token 用户已有 `manage`，不需要开启。
-- 脚本用 stdin 把 bearer token 传给 curl，不放进进程参数；不要在有不可信用户的共享主机上运行。
+- 脚本用 stdin 把 bearer token 传给 curl，不放进进程参数；未登记项目的注册体经权限 600 的临时文件传递，注册时 `auto_webhook` 固定为 `false`，需要 webhook 时另行配置。不要在有不可信用户的共享主机上运行，也不要开启 `bash -x`；xtrace 会展开 token 变量。
 
 ### 运行
 
@@ -1258,9 +1258,9 @@ stdout 是 CSV：`project_id,mr_iid,status,verdict,duration_ms,tokens_in,tokens_
 reviews=... completed=... failed=... cancelled=... triggers_failed=... failure_rate=...% p50_ms=... p95_ms=... wall_s=... reviews_per_sec=... tokens_in=... tokens_out=... cost_micros=...
 ```
 
-`failure_rate` 只统计已触发评审中的 `failed` 和 `cancelled`；触发失败单独看 `triggers_failed`。`wall_s` 从脚本开始（注册、授权、基线之前）到结束，`reviews_per_sec` 使用同一墙钟。有 `failed`、`cancelled` 或触发失败时脚本返回 1，并保留已收集的部分结果。`cost_micros` 依赖 provider 的 `price` 配置；未配置时始终为 0。
+`failure_rate` 只统计已触发评审中的 `failed` 和 `cancelled`；触发失败单独看 `triggers_failed`。`wall_s` 从脚本开始（注册、授权、基线之前）到结束，`reviews_per_sec` 使用同一墙钟。`p50` 对偶数样本取较低的中位数，`p95` 使用 nearest-rank 上取整。有 `failed`、`cancelled` 或触发失败时脚本返回 1，并保留已收集的部分结果。`cost_micros` 依赖 provider 的 `price` 配置；未配置时始终为 0。
 
-脚本自测：`bash scripts/loadtest_test.sh`，使用本地 mock API 覆盖正常、重试、取消、失败、重复输入、基线、授权目标用户、项目列表失败和触发失败；需要 Python 3。
+脚本自测：`bash scripts/loadtest_test.sh`，使用本地 mock API 覆盖正常、重试、取消、失败、重复输入、基线、授权目标用户、项目列表失败和触发失败；需要 Python 3。CI 的 `go` job 会运行该测试。
 
 ### 结果解读
 

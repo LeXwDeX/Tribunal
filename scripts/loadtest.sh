@@ -54,6 +54,9 @@ positive_int "$HTTP_RETRIES" || die "HTTP_RETRIES must be a positive integer"
 case "$GRANT_MANAGE" in 0|1) ;; *) die "GRANT_MANAGE must be 0 or 1" ;; esac
 
 base="${TRIBUNAL_URL%/}"
+while [ "${base%/}" != "$base" ]; do
+  base="${base%/}"
+done
 case "$base" in
   http://*|https://*) ;;
   *) die "TRIBUNAL_URL must start with http:// or https://" ;;
@@ -123,6 +126,7 @@ find_project_id() {
       url="$url&cursor=$(printf '%s' "$cursor" | jq -sRr @uri)"
     fi
     page=$(api_get "$url" "$TRIBUNAL_ADMIN_TOKEN") || return 1
+    jq -e '.projects | type == "array"' >/dev/null <<<"$page" || die "admin project list returned an unexpected response"
     id=$(jq -r --arg path "$path" 'first(.projects[]? | select(.path_with_namespace == $path) | .id) // empty' <<<"$page")
     if [ -n "$id" ]; then
       printf '%s' "$id"
@@ -156,6 +160,7 @@ if [ -n "$USER_ID" ]; then
   positive_int "$USER_ID" || die "USER_ID must be a positive integer"
 fi
 
+started_epoch=$(date +%s)
 project_ids=()
 for path in "${project_list[@]}"; do
   id=$(register_project "$path") || exit 1
@@ -175,7 +180,6 @@ if [ "$GRANT_MANAGE" = "1" ]; then
   done
 fi
 
-started_epoch=$(date +%s)
 for i in "${!project_ids[@]}"; do
   baseline=$(api_get "/api/v1/reviews?project_id=${project_ids[$i]}&mr_iid=${mr_list[$i]}&limit=100" \
     "$TRIBUNAL_USER_TOKEN") || die "cannot read baseline reviews for ${project_list[$i]}"
@@ -206,7 +210,10 @@ done <<<"$pids"
 if [ -n "$trigger_errors" ]; then
   printf '%s' "$trigger_errors" >&2
 fi
-[ -n "$triggered" ] || die "all review triggers failed"
+[ -n "$triggered" ] || {
+  printf 'triggers_failed=%d\n' "$failed_triggers" >&2
+  die "all review triggers failed"
+}
 
 print_rows() {
   if [ ! -s "$tmp/rows.tsv" ]; then

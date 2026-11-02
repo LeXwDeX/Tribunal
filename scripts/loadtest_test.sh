@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016  # check() evaluates expressions; single quotes are intentional
 # End-to-end tests for scripts/loadtest.sh against a local mock Tribunal API.
 # Usage: bash scripts/loadtest_test.sh
 set -euo pipefail
@@ -156,13 +157,15 @@ stop_server() {
 run_script() {
   local out=$1 err=$2; shift 2
   set +e
-  env TIMEOUT="${TEST_TIMEOUT:-15}" POLL_INTERVAL="${TEST_POLL_INTERVAL:-1}" \
+  env -u GRANT_MANAGE -u USER_ID -u HTTP_RETRIES -u HTTP_TIMEOUT \
+    TIMEOUT="${TEST_TIMEOUT:-15}" POLL_INTERVAL="${TEST_POLL_INTERVAL:-1}" \
     "$@" bash "$script" >"$out" 2>"$err"
   code=$?
   set -e
   return 0
 }
 
+# shellcheck disable=SC2016  # expressions are evaluated by check, not by the caller
 check() {
   local name=$1 condition=$2 detail=$3
   if eval "$condition"; then
