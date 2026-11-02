@@ -17,6 +17,7 @@
 #   USER_ID               user to grant manage on each project (default 59)
 #   POLL_INTERVAL         seconds between polls (default 5)
 #   TIMEOUT               total seconds before giving up (default 900)
+#   HTTP_TIMEOUT          seconds per HTTP request (default 30)
 #
 # Output: CSV rows on stdout, a summary on stderr. Secrets are never printed.
 set -euo pipefail
@@ -29,6 +30,7 @@ set -euo pipefail
 : "${USER_ID:=59}"
 : "${POLL_INTERVAL:=5}"
 : "${TIMEOUT:=900}"
+: "${HTTP_TIMEOUT:=30}"
 
 for bin in curl jq awk sort; do
   command -v "$bin" >/dev/null 2>&1 || { echo "missing $bin" >&2; exit 1; }
@@ -45,20 +47,32 @@ base="${TRIBUNAL_URL%/}"
 api() {
   local method=$1 path=$2 token=$3 body=${4:-}
   if [ -n "$body" ]; then
-    curl -fsS -X "$method" "$base$path" \
+    curl -fsS --connect-timeout 5 --max-time "$HTTP_TIMEOUT" -X "$method" "$base$path" \
       -H "Authorization: Bearer $token" \
       -H "Content-Type: application/json" \
       --data-binary "$body"
   else
-    curl -fsS -X "$method" "$base$path" -H "Authorization: Bearer $token"
+    curl -fsS --connect-timeout 5 --max-time "$HTTP_TIMEOUT" -X "$method" "$base$path" \
+      -H "Authorization: Bearer $token"
   fi
 }
 
 find_project_id() {
-  local path=$1
-  api GET "/api/v1/admin/projects?limit=100" "$TRIBUNAL_ADMIN_TOKEN" |
-    jq -r --arg path "$path" '.projects[]? | select(.path_with_namespace == $path) | .id' |
-    head -n1
+  local path=$1 cursor="" page id url
+  while :; do
+    url="/api/v1/admin/projects?limit=100"
+    if [ -n "$cursor" ]; then
+      url="$url&cursor=$(printf '%s' "$cursor" | jq -sRr @uri)"
+    fi
+    page=$(api GET "$url" "$TRIBUNAL_ADMIN_TOKEN")
+    id=$(jq -r --arg path "$path" '.projects[]? | select(.path_with_namespace == $path) | .id' <<<"$page" | head -n1)
+    if [ -n "$id" ]; then
+      printf '%s' "$id"
+      return
+    fi
+    cursor=$(jq -r '.next_cursor // empty' <<<"$page")
+    [ -z "$cursor" ] && return
+  done
 }
 
 register_project() {
@@ -112,18 +126,20 @@ fi
 deadline=$((SECONDS + TIMEOUT))
 rows=""
 while :; do
-  page=$(api GET "/api/v1/reviews?limit=100" "$TRIBUNAL_USER_TOKEN")
-  rows=$(jq -r --argjson ids "$(printf '%s\n' "${project_ids[@]}" | jq -R 'tonumber' | jq -s .)" \
-    --argjson iids "$(printf '%s\n' "${mr_list[@]}" | jq -R . | jq -s 'map(tonumber)')" \
-    --arg start "$triggered_at" \
-    '[.reviews[]? | select((.project_id as $p | $ids | index($p)) != null)
-      | select((.mr_iid as $m | $iids | index($m)) != null)
-      | select((.created_at[0:19]) >= $start)]
-     | group_by([.project_id,.mr_iid]) | map(max_by(.created_at))
-     | .[] | [.project_id,.mr_iid,.status,(.verdict // ""),(.duration_ms // 0),
-               .tokens_in,.tokens_out,.cost_micros] | @csv' <<<"$page")
-  pending=$(printf '%s\n' "$rows" | awk -F, 'NF && $3 !~ /"(completed|failed|cancelled)"/ {n++} END {print n+0}')
-  found=$(printf '%s\n' "$rows" | awk -F, 'NF {n++} END {print n+0}')
+  rows=""
+  for i in "${!project_ids[@]}"; do
+    page=$(api GET "/api/v1/reviews?project_id=${project_ids[$i]}&mr_iid=${mr_list[$i]}&limit=100" "$TRIBUNAL_USER_TOKEN")
+    row=$(jq -r --arg start "$triggered_at" '
+      [.reviews[]? | select((.created_at[0:19]) >= $start)]
+      | max_by(.created_at) // empty
+      | [.project_id,.mr_iid,.status,(.verdict // ""),(.duration_ms // 0),
+         .tokens_in,.tokens_out,.cost_micros] | @csv' <<<"$page")
+    if [ -n "$row" ]; then
+      rows+="$row"$'\n'
+    fi
+  done
+  pending=$(printf '%s' "$rows" | awk -F, 'NF && $3 !~ /"(completed|failed|cancelled)"/ {n++} END {print n+0}')
+  found=$(printf '%s' "$rows" | awk -F, 'NF {n++} END {print n+0}')
   if [ "$found" -ge "${#project_ids[@]}" ] && [ "$pending" -eq 0 ]; then
     break
   fi
@@ -136,17 +152,19 @@ while :; do
 done
 
 echo "project_id,mr_iid,status,verdict,duration_ms,tokens_in,tokens_out,cost_micros"
-printf '%s\n' "$rows"
+printf '%s' "$rows"
 
-count=$(printf '%s\n' "$rows" | awk -F, 'NF {n++} END {print n+0}')
+count=$(printf '%s' "$rows" | awk -F, 'NF {n++} END {print n+0}')
 if [ "$count" -eq 0 ]; then
   echo "no reviews matched the requested projects" >&2
   exit 1
 fi
-failed=$(printf '%s\n' "$rows" | awk -F, 'NF {s=$3; gsub(/"/,"",s); if (s != "completed") n++} END {print n+0}')
-durations=$(printf '%s\n' "$rows" | awk -F, 'NF {d=$5; gsub(/"/,"",d); print d}' | sort -n)
+failed=$(printf '%s' "$rows" | awk -F, 'NF {s=$3; gsub(/"/,"",s); if (s != "completed") n++} END {print n+0}')
+durations=$(printf '%s' "$rows" | awk -F, 'NF {d=$5; gsub(/"/,"",d); print d}' | sort -n)
 p50=$(printf '%s\n' "$durations" | sed -n "$(( (count + 1) / 2 ))p")
 p95=$(printf '%s\n' "$durations" | sed -n "$(( (count * 95 + 99) / 100 ))p")
-totals=$(printf '%s\n' "$rows" | awk -F, 'NF {tin+=$6; tout+=$7; cost+=$8} END {printf "%d %d %d", tin, tout, cost}')
+read -r tokens_in tokens_out cost_micros < <(
+  printf '%s\n' "$rows" | awk -F, 'NF {tin+=$6; tout+=$7; cost+=$8} END {printf "%d %d %d", tin, tout, cost}'
+)
 printf 'reviews=%d failed=%d p50_ms=%s p95_ms=%s tokens_in=%s tokens_out=%s cost_micros=%s\n' \
-  "$count" "$failed" "$p50" "$p95" $totals >&2
+  "$count" "$failed" "$p50" "$p95" "$tokens_in" "$tokens_out" "$cost_micros" >&2
