@@ -28,9 +28,9 @@ const jobTraceSecretKey = `[A-Z0-9_.-]*(?:TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_K
 var (
 	jobTracePEMRE           = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`)
 	jobTracePrivateTokenRE  = regexp.MustCompile(`(?i)(PRIVATE-TOKEN\s*:\s*)(?:"[^"]*"|'[^']*'|\S+)`)
-	jobTraceAuthRE          = regexp.MustCompile(`(?i)(Authorization\s*:\s*(?:Bearer|Basic|Token)\s+)(?:"[^"]*"|'[^']*'|\S+)`)
+	jobTraceAuthRE          = regexp.MustCompile(`(?i)(Authorization\s*:\s*)(?:"[^"]*"|'[^']*'|[^\r\n]+)`)
 	jobTraceFlagRE          = regexp.MustCompile(`(?i)((?:--user|--password|--token)(?:=|\s+))(?:"[^"]*"|'[^']*'|\S+)`)
-	jobTraceShortUserRE     = regexp.MustCompile(`(?i)(-u\s*)(?:"[^"]*"|'[^']*'|[^\s:]+:[^\s]+)`)
+	jobTraceShortUserRE     = regexp.MustCompile(`(?i)(-u\s*)(?:"[^"]*"|'[^']*'|[^\s:]+:[^\s]*|:[^\s]+|\$[A-Za-z_][A-Za-z0-9_]*|[A-Za-z0-9_-]{16,})`)
 	jobTraceURLCredsRE      = regexp.MustCompile(`://[^/\s:@]*:[^/\s@]+@`)
 	jobTraceCIVarRE         = regexp.MustCompile(`(?m)\b(CI_JOB_TOKEN\s*=\s*)(?:"[^"]*"|'[^']*'|\S+)`)
 	jobTraceGenericSecretRE = regexp.MustCompile(`(?i)\b(` + jobTraceSecretKey + `\s*[:=]\s*)(?:"[^"]*"|'[^']*'|\S+)`)

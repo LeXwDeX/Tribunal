@@ -139,6 +139,12 @@ func TestSanitizeJobTraceRedactsSecrets(t *testing.T) {
 		"curl -u deploy:hunter2 https://example.com",
 		"curl --user=deploy:hunter3 https://example.com",
 		"curl -udeploy:hunter4 https://example.com",
+		"curl -u $DEPLOY_TOKEN https://example.com",
+		"curl -u user: https://example.com",
+		"curl -u :pass https://example.com",
+		"Authorization: OAuth oauth-value",
+		"Authorization: JWT auth-jwt-value",
+		"git diff -u a.go",
 		"redis://:redis-pass@cache:6379",
 		`{"private_token":"json-token-value"}`,
 		`{"authorization":"Bearer json-auth-value"}`,
@@ -155,15 +161,19 @@ func TestSanitizeJobTraceRedactsSecrets(t *testing.T) {
 		"glrt-runner-token", "db-pass", "aws-secret", "api-key-value", "basic-value", "flag-token",
 		"jwt-value", "pem-body-value", "deploy:hunter2", "deploy:hunter3", "deploy:hunter4", "redis-pass",
 		"json-token-value", "json-auth-value", "json-secret-value", "json-access-value", "json-api-key", "json-dot-token",
+		"DEPLOY_TOKEN", "user:", ":pass", "oauth-value", "auth-jwt-value",
 	} {
 		if strings.Contains(got, secret) {
 			t.Fatalf("sanitized trace still contains %q:\n%s", secret, got)
 		}
 	}
-	if strings.Count(got, "[REDACTED]") < 24 {
+	if strings.Count(got, "[REDACTED]") < 29 {
 		t.Fatalf("sanitized trace misses redaction markers:\n%s", got)
 	}
 	if !strings.Contains(got, "normal line stays") {
 		t.Fatalf("sanitized trace dropped ordinary content:\n%s", got)
+	}
+	if !strings.Contains(got, "git diff -u a.go") {
+		t.Fatalf("sanitized trace over-redacted a plain -u argument:\n%s", got)
 	}
 }
