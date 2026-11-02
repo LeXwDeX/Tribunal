@@ -19,6 +19,7 @@ v1.2.0 尚未打 tag；本段记录尚未发布的新改动。`[1.2.0]` 段仅�
 
 ### 修复
 
+- **Findings 表格对齐**：评审详情页的级别、标题与路径、证据链和人工四列按同一行中线垂直对齐；长标题继续换行，降级级别和展开内容仍限制在表格滚动容器内，其他页面的表格样式不变（[#140](https://github.com/LeXwDeX/Tribunal/issues/140)）。
 - **扩展作用域项目选择**：平台级扩展不再显示项目标签和选择框；项目级扩展仍可选择项目（[#144](https://github.com/LeXwDeX/Tribunal/issues/144)）。
 - **评审状态与重试一致性**：删除项目时清理该项目的 onboarding 重试任务，避免重新登记后执行旧任务；新的评审 generation 不再继承上一代的 attempt。第二次汇总会采用已有问题的扩展核验结果，并阻止有效反证被模型输出覆盖（[#161](https://github.com/LeXwDeX/Tribunal/issues/161)）。
 - **仓库 Skill 来源证明**：新评审记录受管 `repo:` Skill 能力、目标分支、目标 commit、授权版本和过滤快照 hash；该标记不证明管理员配置的其他 Skill 目录的实际内容来源。缺少来源记录、记录格式未知或记录了不受支持的仓库 Skill 能力的历史工作流不会续跑或重发；普通旧评审也可能受影响，需重新触发评审。旧 dossier、节点结果、findings 和人工标注保留。仅凭当前 `allow_repo_skills` 值或旧版本号不能推断历史来源。仓库 Skill 运行时和接口已启用，但恢复与发布仍会重新校验授权和快照（[#163](https://github.com/LeXwDeX/Tribunal/issues/163)）。
