@@ -428,18 +428,33 @@ func (e *Executor) executeSynthesize(ctx context.Context, in dag.NodeInput) (dag
 	if err != nil {
 		return dag.NodeOutput{}, err
 	}
+	var lastValidationErr error
 	submit := agent.SubmitSpec{
 		Schema: schema,
 		Decode: func(raw json.RawMessage) (any, error) {
 			out, decodeErr := DecodeStrict[*SynthesizeOut](raw)
 			if decodeErr != nil {
+				// Decode errors can echo provider input; fallback must not.
+				lastValidationErr = agent.ErrInvalidSubmit
 				return nil, decodeErr
 			}
 			if validateErr := ValidateSynthesis(*out, synthCtx); validateErr != nil {
+				lastValidationErr = validateErr
 				return nil, validateErr
 			}
 			if validateErr := validateMainChallenges(out, groups, e.validateCodeRef); validateErr != nil {
+				lastValidationErr = validateErr
 				return nil, validateErr
+			}
+			if isSecondSynthesis(in.Node.ID) {
+				for _, decision := range out.Decisions {
+					for _, group := range groups {
+						if group.ID == decision.FindingID && group.Challenge != nil && group.Challenge.Status == ChallengeRefuted && group.Decision != nil && group.Decision.Action == ActionDrop && publishingAction(Action(decision.Action)) && ValidCodeEvidence(group.Challenge.Evidence, e.validateCodeRef) {
+							lastValidationErr = invalid("decisions", "cannot publish group %s with a valid rule refutation", group.ID)
+							return nil, lastValidationErr
+						}
+					}
+				}
 			}
 			return out, nil
 		},
@@ -494,9 +509,12 @@ func (e *Executor) executeSynthesize(ctx context.Context, in dag.NodeInput) (dag
 		if transportStopped {
 			warnings = appendUnique(warnings, "model synthesis transport failed; deterministic rules settlement used")
 		}
-		cause := runErr
-		if errors.Is(runErr, agent.ErrInvalidSubmit) {
-			cause = agent.ErrInvalidSubmit
+		cause := lastValidationErr
+		if cause == nil {
+			cause = runErr
+			if errors.Is(runErr, agent.ErrInvalidSubmit) {
+				cause = agent.ErrInvalidSubmit
+			}
 		}
 		fallback := BuildRulesFallback(groups, cause)
 		out := synthesizeOutFromFallback(fallback)
@@ -758,6 +776,7 @@ func (e *Executor) synthesisGroups(ctx context.Context, in dag.NodeInput, params
 	if err != nil {
 		return nil, 0, nil, nil, err
 	}
+	warnings = mergeWarnings(warnings, previous.Warnings)
 	unresolved := mergeUnresolved(adjudicated.Unresolved, previous.Unresolved)
 	byID := make(map[string]Group, len(groups)+len(previous.Groups))
 	for _, group := range groups {
@@ -778,8 +797,67 @@ func (e *Executor) synthesisGroups(ctx context.Context, in dag.NodeInput, params
 	merged := make([]Group, 0, len(groups)+len(main))
 	for _, group := range groups {
 		if override, ok := byID[group.ID]; ok {
+			if group.Decision != nil && group.Decision.Action == ActionDrop && group.Challenge != nil && group.Challenge.Status == ChallengeRefuted && ValidCodeEvidence(group.Challenge.Evidence, e.validateCodeRef) {
+				override.Challenge = group.Challenge
+				override.Decision = group.Decision
+			}
 			merged = append(merged, override)
 		}
+	}
+	// Completed extended checks supersede the earlier round; failed checks do
+	// not erase a valid earlier refutation. Same-round checks retain priority.
+	extended := dag.WorkflowView{Nodes: map[string]dag.NodeView{}}
+	for _, id := range in.Node.DependsOn {
+		if node, ok := wf.Nodes[id]; ok && node.Spec.Kind == KindVerify {
+			extended.Nodes[id] = node
+			extended.Order = append(extended.Order, id)
+		}
+	}
+	extResults, extFailed, err := collectVerifyResults(extended)
+	if err != nil {
+		return nil, 0, nil, nil, err
+	}
+	requested := make(map[string]bool)
+	for _, request := range previous.Output.ExtendRequests {
+		if request.Kind == "verify" && request.FindingID != "" {
+			requested[request.FindingID] = true
+		}
+	}
+	for i := range merged {
+		group := &merged[i]
+		if !requested[group.ID] {
+			continue
+		}
+		if result, ok := extResults[group.ID]; ok {
+			group.Challenge = &Challenge{Status: verifyStatus(result.Result.Status), Node: result.Node, Provider: result.Provider, Model: result.Model, Reason: result.Result.Reason, Evidence: append([]CodeRef(nil), result.Result.Evidence...), SuggestedSeverity: result.Result.SuggestedSeverity, SameModel: result.SameModel}
+		} else {
+			reason := extFailed[group.ID]
+			if reason == "" {
+				reason = "verify result missing"
+			}
+			warning := "verify failed or missing for group " + group.ID + ": " + reason
+			if group.Challenge != nil && group.Challenge.Status == ChallengeRefuted && ValidCodeEvidence(group.Challenge.Evidence, e.validateCodeRef) {
+				warnings = appendUnique(warnings, warning+"; prior valid refutation retained")
+				group.Decision = &FindingDecision{Action: ActionDrop, Reason: "prior challenge refuted with a code location; re-verification failed or missing", Source: "rules"}
+				continue
+			}
+			group.Challenge = &Challenge{Status: ChallengeFailed, Reason: reason}
+			warnings = appendUnique(warnings, warning)
+		}
+		// A gather-stage drop remains final, even if a later check confirms it.
+		gatherDropped := false
+		for _, original := range groups {
+			if original.ID == group.ID && original.Decision != nil && original.Decision.Action == ActionDrop && original.Decision.Source == "review.gate" {
+				group.Decision = original.Decision
+				gatherDropped = true
+				break
+			}
+		}
+		if gatherDropped {
+			continue
+		}
+		action, reason := adjudicateChallenge(group, OnUncertain(params.OnUncertain), e.validateCodeRef)
+		group.Decision = &FindingDecision{Action: action, Reason: reason, Source: "rules"}
 	}
 	if len(main) > 0 {
 		results, failed, err := collectVerifyResults(wf)
