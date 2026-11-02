@@ -331,6 +331,7 @@ providers:
   p:
     protocol: openai-responses
     base_url: "https://api.example.com/v1"
+    model: example-model
     api_key_env: CFG_TEST_PROVIDER_KEY
 `)
 	cfg := loadConfig(t, path)
