@@ -96,6 +96,126 @@ func TestProvenanceRecoverySettlesVisibleOutcome(t *testing.T) {
 	}
 }
 
+func TestProvenanceRecoveryPreservesSupersededReason(t *testing.T) {
+	for _, origin := range []string{"legacy", "unknown", "repository"} {
+		t.Run(origin, func(t *testing.T) {
+			ctx := context.Background()
+			f := newReviewFixture(t, reviewTestHead)
+			id := repositorySkillWorkflow(t, f, origin)
+			seedProvenanceOutcome(t, f, id, reviewStatusRunning)
+			if err := f.service.cancelWorkflow(ctx, id); err != nil {
+				t.Fatal(err)
+			}
+			before := countPublicationEffects(f)
+			if err := f.service.Recover(ctx); err != nil {
+				t.Fatal(err)
+			}
+			wf, err := f.db.GetWorkflow(ctx, id)
+			if err != nil || wf.Status != "cancelled" || wf.CancelReason != "superseded" ||
+				wf.PublicationState != store.WorkflowPublicationSkipped || wf.PublicationError != reviewSupersededReason {
+				t.Fatalf("durable reasons changed: %+v, %v", wf, err)
+			}
+			status, err := f.db.GetReviewStatus(ctx, 42, 7)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reaction, err := f.db.GetReviewReaction(ctx, 42, 7, 555)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if origin == "repository" {
+				// A supported dossier with an ordinary skip is outside provenance recovery.
+				if status.State != reviewStatusRunning || reaction.Desired != reviewAwardEyes {
+					t.Fatalf("ordinary skip was settled: status=%+v reaction=%+v", status, reaction)
+				}
+			} else if status.State != reviewStatusStale || status.Detail != "review is no longer current" || reaction.Desired != reviewAwardNone {
+				t.Fatalf("superseded outcome = %+v / %+v", status, reaction)
+			}
+			if countPublicationEffects(f) != before {
+				t.Fatal("recovery published a cancelled workflow")
+			}
+		})
+	}
+}
+
+func TestProvenanceRecoveryKeepsCancellationReasonsDistinct(t *testing.T) {
+	for _, tc := range []struct {
+		name, cancelReason, publicationReason, state, detail string
+	}{
+		{"user", "user_cancelled", reviewCancelledReason, reviewStatusCancelled, ""},
+		{"evidence", repositorySkillEvidenceReason, repositorySkillEvidenceReason, reviewStatusStale, repositorySkillEvidenceReason},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			f := newReviewFixture(t, reviewTestHead)
+			id := repositorySkillWorkflow(t, f, "legacy")
+			seedProvenanceOutcome(t, f, id, reviewStatusRunning)
+			if err := f.engine.Cancel(ctx, id, tc.cancelReason); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.service.skipPublication(ctx, id, tc.publicationReason); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.service.Recover(ctx); err != nil {
+				t.Fatal(err)
+			}
+			wf, err := f.db.GetWorkflow(ctx, id)
+			if err != nil || wf.CancelReason != tc.cancelReason || wf.PublicationError != tc.publicationReason {
+				t.Fatalf("durable reasons changed: %+v, %v", wf, err)
+			}
+			status, err := f.db.GetReviewStatus(ctx, 42, 7)
+			if err != nil || status.State != tc.state || status.Detail != tc.detail {
+				t.Fatalf("outcome = %+v, %v", status, err)
+			}
+			reaction, err := f.db.GetReviewReaction(ctx, 42, 7, 555)
+			if err != nil || reaction.Desired != reviewAwardNone {
+				t.Fatalf("reaction = %+v, %v", reaction, err)
+			}
+		})
+	}
+}
+
+func TestProvenanceSupersededRecoveryDoesNotOverwriteNewControl(t *testing.T) {
+	for _, cancel := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cancel=%t", cancel), func(t *testing.T) {
+			ctx := context.Background()
+			f := newReviewFixture(t, reviewTestHead)
+			id := repositorySkillWorkflow(t, f, "legacy")
+			seedProvenanceOutcome(t, f, id, reviewStatusRunning)
+			if err := f.service.cancelWorkflow(ctx, id); err != nil {
+				t.Fatal(err)
+			}
+			command := store.ReviewCommand{ProjectID: 42, MRIID: 7, Cancel: cancel, Payload: json.RawMessage(`{"trigger":"command","note_id":555}`)}
+			if !cancel {
+				command.HeadSHA = strings.Repeat("c", 40)
+			}
+			newer, err := f.db.EnqueueReviewLatest(ctx, command)
+			if err != nil {
+				t.Fatal(err)
+			}
+			status, err := f.db.GetReviewStatus(ctx, 42, 7)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reaction, err := f.db.GetReviewReaction(ctx, 42, 7, 555)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := f.service.Recover(ctx); err != nil {
+				t.Fatal(err)
+			}
+			afterStatus, err := f.db.GetReviewStatus(ctx, 42, 7)
+			if err != nil || afterStatus.Generation != newer.Generation || afterStatus.Version != status.Version || afterStatus.State != status.State {
+				t.Fatalf("newer status changed: before=%+v after=%+v err=%v", status, afterStatus, err)
+			}
+			afterReaction, err := f.db.GetReviewReaction(ctx, 42, 7, 555)
+			if err != nil || afterReaction.Generation != reaction.Generation || afterReaction.Version != reaction.Version || afterReaction.Desired != reaction.Desired {
+				t.Fatalf("newer reaction changed: before=%+v after=%+v err=%v", reaction, afterReaction, err)
+			}
+		})
+	}
+}
+
 func TestProvenanceRetryKeepsTerminalExecutionOutcome(t *testing.T) {
 	for _, execution := range []string{"failed", "cancelled"} {
 		t.Run(execution, func(t *testing.T) {
@@ -262,6 +382,149 @@ func TestProvenanceRestartRepairsOutcomeAfterCrash(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestRepositorySkillSupportedMarkerRestartAfterSkip(t *testing.T) {
+	for _, crashReaction := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reaction=%t", crashReaction), func(t *testing.T) {
+			ctx := context.Background()
+			f := newReviewFixture(t, reviewTestHead)
+			id := completeRepositorySkillWorkflow(t, f, "repository")
+			seedProvenanceOutcome(t, f, id, reviewStatusPublishing)
+			before := countPublicationEffects(f)
+			f.service.store = provenanceOutcomeCrashStore{ReviewStore: f.db, crashReaction: crashReaction}
+			if err := f.service.PublishPending(ctx); !errors.Is(err, errProvenanceStatusCrash) {
+				t.Fatalf("injected crash = %v", err)
+			}
+			wf, err := f.db.GetWorkflow(ctx, id)
+			if err != nil || wf.PublicationState != store.WorkflowPublicationSkipped || wf.PublicationError != repositorySkillEvidenceReason {
+				t.Fatalf("durable skip = %+v, %v", wf, err)
+			}
+			f.service.store = f.db
+			if err := f.service.Recover(ctx); err != nil {
+				t.Fatal(err)
+			}
+			assertProvenanceOutcome(t, f, id, "completed", store.WorkflowPublicationSkipped, reviewStatusStale, reviewAwardNone, repositorySkillEvidenceReason)
+			if countPublicationEffects(f) != before {
+				t.Fatal("recovery published rejected review")
+			}
+		})
+	}
+}
+
+func TestRepositorySkillSkippedRecoveryRespectsReasonAndGeneration(t *testing.T) {
+	for _, newer := range []bool{false, true} {
+		t.Run(fmt.Sprintf("newer=%t", newer), func(t *testing.T) {
+			ctx := context.Background()
+			f := newReviewFixture(t, reviewTestHead)
+			id := completeRepositorySkillWorkflow(t, f, "repository")
+			seedProvenanceOutcome(t, f, id, reviewStatusPublishing)
+			reason := "publication intentionally skipped"
+			if newer {
+				reason = repositorySkillEvidenceReason
+			}
+			if err := f.db.SetWorkflowPublicationStateIfPending(ctx, id, reason); err != nil {
+				t.Fatal(err)
+			}
+			if newer {
+				if _, err := f.db.EnqueueReviewLatest(ctx, store.ReviewCommand{ProjectID: 42, MRIID: 7, HeadSHA: f.head, Payload: json.RawMessage(`{"trigger":"command","note_id":555}`)}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			status, err := f.db.GetReviewStatus(ctx, 42, 7)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reaction, err := f.db.GetReviewReaction(ctx, 42, 7, 555)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := countPublicationEffects(f)
+			if err := f.service.Recover(ctx); err != nil {
+				t.Fatal(err)
+			}
+			afterStatus, err := f.db.GetReviewStatus(ctx, 42, 7)
+			if err != nil || afterStatus.Generation != status.Generation || afterStatus.State != status.State || afterStatus.Detail != status.Detail {
+				t.Fatalf("status changed: before=%+v after=%+v err=%v", status, afterStatus, err)
+			}
+			afterReaction, err := f.db.GetReviewReaction(ctx, 42, 7, 555)
+			if err != nil || afterReaction.Generation != reaction.Generation || afterReaction.Desired != reaction.Desired {
+				t.Fatalf("reaction changed: before=%+v after=%+v err=%v", reaction, afterReaction, err)
+			}
+			if countPublicationEffects(f) != before {
+				t.Fatal("recovery published skipped review")
+			}
+		})
+	}
+}
+
+func TestRepositorySkillSkippedRecoveryUsesDurableReason(t *testing.T) {
+	for _, unknown := range []bool{false, true} {
+		t.Run(fmt.Sprintf("unknown=%t", unknown), func(t *testing.T) {
+			ctx := context.Background()
+			f := newReviewFixture(t, reviewTestHead)
+			id := completeRepositorySkillWorkflow(t, f, "repository")
+			seedProvenanceOutcome(t, f, id, reviewStatusPublishing)
+			f.service.store = provenanceOutcomeCrashStore{ReviewStore: f.db}
+			if err := f.service.PublishPending(ctx); !errors.Is(err, errProvenanceStatusCrash) {
+				t.Fatalf("injected crash = %v", err)
+			}
+			f.service.store = f.db
+			record, err := f.db.GetWorkflowDossier(ctx, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var data map[string]json.RawMessage
+			if err := json.Unmarshal(record.Data, &data); err != nil {
+				t.Fatal(err)
+			}
+			data["repository_skill_provenance"] = json.RawMessage(`{"version":1,"mode":"none"}`)
+			record.Data, err = json.Marshal(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			record.Hash = ""
+			if _, err := f.db.SaveWorkflowDossier(ctx, *record); err != nil {
+				t.Fatal(err)
+			}
+			if unknown {
+				if created, _, err := f.db.ReserveDiscussionIntent(ctx, 42, 7, "unknown"); err != nil || !created {
+					t.Fatalf("reserve = %v, %v", created, err)
+				}
+			}
+			before := countPublicationEffects(f)
+			if err := f.service.Recover(ctx); err != nil {
+				t.Fatal(err)
+			}
+			detail := repositorySkillEvidenceReason
+			if unknown {
+				detail = store.WorkflowPublicationUnknownReason
+			}
+			assertProvenanceOutcome(t, f, id, "completed", store.WorkflowPublicationSkipped, reviewStatusStale, reviewAwardNone, detail)
+			if unknown {
+				if present, err := f.db.HasUnknownDiscussionIntent(ctx, 42, 7); err != nil || !present {
+					t.Fatalf("unknown intent = %v, %v", present, err)
+				}
+			}
+			if countPublicationEffects(f) != before {
+				t.Fatal("recovery published rejected review")
+			}
+		})
+	}
+}
+
+func TestRepositorySkillLegacyOrdinarySkipDoesNotBecomeStale(t *testing.T) {
+	ctx := context.Background()
+	f := newReviewFixture(t, reviewTestHead)
+	id := completeRepositorySkillWorkflow(t, f, "legacy")
+	seedProvenanceOutcome(t, f, id, reviewStatusPublishing)
+	if err := f.db.SetWorkflowPublicationStateIfPending(ctx, id, "publication intentionally skipped"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	assertProvenanceOutcome(t, f, id, "completed", store.WorkflowPublicationSkipped, reviewStatusPublishing, reviewAwardEyes, "")
 }
 
 func TestProvenanceRestartAfterCancellationBeforeSkip(t *testing.T) {
