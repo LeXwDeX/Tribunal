@@ -107,6 +107,10 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 			Transcript: append([]llm.Message(nil), messages...),
 		}, err
 	}
+	send := spec.Outbound
+	if send == nil {
+		send = func(ctx context.Context, call func(context.Context) error) error { return call(ctx) }
+	}
 
 	for turn := 1; turn <= maxTurns; turn++ {
 		if err := ctx.Err(); err != nil {
@@ -128,33 +132,41 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 		meta.Turn = turn
 		callCtx := llm.WithCallMeta(ctx, meta)
 
-		generate := func(req *llm.Request) (*llm.Response, error) {
+		generate := func(request *llm.Request) (*llm.Response, error) {
 			if err := callCtx.Err(); err != nil {
 				return nil, err
 			}
 			var guard func(context.Context, llm.Usage) error
 			if spec.BeforeTurn != nil {
-				guard = func(ctx context.Context, attempted llm.Usage) error {
-					return spec.BeforeTurn(ctx, llm.AddUsage(usage, attempted))
+				guard = func(guardCtx context.Context, attempted llm.Usage) error {
+					return spec.BeforeTurn(guardCtx, llm.AddUsage(usage, attempted))
 				}
 			}
-			resp, err := llm.GenerateGuarded(callCtx, spec.Client, req, guard)
-			if resp != nil || llm.HasObservedResponse(err) {
+			var resp *llm.Response
+			var callErr error
+			gateErr := send(callCtx, func(sendCtx context.Context) error {
+				resp, callErr = llm.GenerateGuarded(sendCtx, spec.Client, request, guard)
+				return callErr
+			})
+			if resp != nil || llm.HasObservedResponse(callErr) {
 				turns = turn
 			}
-			used, valid := llm.ErrorUsage(err)
+			used, valid := llm.ErrorUsage(callErr)
 			if resp != nil {
 				valid = valid && llm.ValidUsage(resp.Usage)
 				used = llm.MaxUsage(used, resp.Usage)
 			}
 			usage = llm.AddUsage(usage, used)
 			if !valid {
-				if errors.Is(err, ErrUnsafeResponse) || llm.IsUnsafeResponse(err) {
-					return nil, err
+				if errors.Is(callErr, ErrUnsafeResponse) || llm.IsUnsafeResponse(callErr) {
+					return nil, callErr
 				}
 				return nil, &llm.Error{Kind: llm.ErrUnsafeResponse, Err: errors.New("provider returned invalid token usage")}
 			}
-			return resp, err
+			if gateErr != nil {
+				return resp, gateErr
+			}
+			return resp, callErr
 		}
 		resp, err := generate(req)
 		if err != nil && req.ToolChoice == SubmitToolName {
@@ -248,7 +260,21 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 				continue
 			}
 
-			res, callErr := tool.Call(ctx, call.Input)
+			input := call.Input
+			if !json.Valid(input) {
+				results = append(results, wrapToolResult(call.ID, call.Name,
+					Result{Content: "tool input is not valid JSON", IsError: true}, maxOutput))
+				continue
+			}
+			var res Result
+			var callErr error
+			gateErr := send(ctx, func(ctx context.Context) error {
+				res, callErr = tool.Call(ctx, input)
+				return nil
+			})
+			if gateErr != nil {
+				return partial(gateErr)
+			}
 			if callErr != nil {
 				res = Result{Content: "tool execution failed; " + validationFeedback(builtinFeedback(tool, callErr)), IsError: true}
 			} else if res.IsError {

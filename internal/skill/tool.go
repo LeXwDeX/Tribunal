@@ -109,11 +109,15 @@ func (b *Binding) load(name string, max int) (string, bool, error) {
 		return "", false, fmt.Errorf("skill %q is unavailable", name)
 	}
 	fm, body, err := parseSkill(data)
-	if err != nil || fm.Name != name {
+	expected := name
+	if entry.source == 1 {
+		expected = strings.TrimPrefix(expected, "repo:")
+	}
+	if err != nil || fm.Name != expected {
 		return "", false, fmt.Errorf("skill %q is unavailable", name)
 	}
 	resources, resourcesTruncated := listResources(root)
-	return renderSkill(fm.Name, fm.Description, body, resources, resourcesTruncated, max)
+	return renderSkill(name, fm.Description, body, resources, resourcesTruncated, max)
 }
 
 func listResources(root *os.Root) ([]string, bool) {
