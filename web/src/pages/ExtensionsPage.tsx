@@ -61,8 +61,7 @@ export function ExtensionsPage() {
               if (next === 'platform') setProjectId('')
             }}
           />
-          {/* The project selector stays mounted in platform scope so the toolbar keeps its size. */}
-          <ToolbarField label="项目">
+          {scope === 'project' ? <ToolbarField label="项目">
             <select
               ref={projectFocus.selectRef}
               className="select"
@@ -70,13 +69,13 @@ export function ExtensionsPage() {
               value={projectId}
               onChange={(event) => setProjectId(event.target.value)}
               aria-label="扩展作用域项目"
-              disabled={scope !== 'project' || projectOptions.length === 0}
+              disabled={projectOptions.length === 0}
             >
               {/* Project scope auto-selects the first project, so the placeholder is not selectable then. */}
-              <option value="" disabled={scope === 'project' && projectOptions.length > 0}>{scope === 'platform' ? '平台级无需选择项目' : '选择项目'}</option>
+              <option value="" disabled={projectOptions.length > 0}>选择项目</option>
               {projectOptions.map((project) => <option key={project.id} value={project.id}>{project.path_with_namespace}</option>)}
             </select>
-          </ToolbarField>
+          </ToolbarField> : null}
           {scope === 'project' && projects.hasNextPage ? (
             <Button variant="secondary" onClick={projects.fetchNextPage} loading={projects.isFetchingNextPage} onFocus={projectFocus.onFocus} onBlur={projectFocus.onBlur}>
               {projects.isFetchNextPageError ? '重试加载更多项目' : '加载更多项目'}
