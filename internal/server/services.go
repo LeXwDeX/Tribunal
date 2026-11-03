@@ -117,15 +117,11 @@ type ExtensionService interface {
 	ListMCPServers(ctx context.Context, scope string, projectID *int64) ([]MCPServer, error)
 	ListMCPServersPage(ctx context.Context, scope string, projectID *int64, cursor string, limit int) ([]MCPServer, string, error)
 	GetMCPServer(ctx context.Context, id string) (*MCPServer, error)
-	CreateMCPServer(ctx context.Context, in MCPServerInput) (*MCPServer, error)
 	UpdateMCPServer(ctx context.Context, id string, in MCPServerUpdate) (*MCPServer, error)
 	DeleteMCPServer(ctx context.Context, id string) error
-	ImportMCPServers(ctx context.Context, in MCPImportInput) ([]MCPServer, error)
 
 	ListSkills(ctx context.Context, scope string, projectID *int64) ([]Skill, error)
 	ListSkillsPage(ctx context.Context, scope string, projectID *int64, cursor string, limit int) ([]Skill, string, error)
-	UploadSkill(ctx context.Context, in SkillUpload) (*Skill, error)
-	RegisterSkillDir(ctx context.Context, in SkillDirInput) (*Skill, error)
 	DeleteSkill(ctx context.Context, id string) error
 	GetSkill(ctx context.Context, id string) (*Skill, error)
 	SetSkillEnabled(ctx context.Context, id string, enabled bool) (*Skill, error)

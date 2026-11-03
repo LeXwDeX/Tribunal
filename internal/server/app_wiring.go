@@ -76,24 +76,6 @@ func (a *AppExtensions) GetMCPServer(ctx context.Context, id string) (*MCPServer
 	return &out, nil
 }
 
-func (a *AppExtensions) CreateMCPServer(ctx context.Context, in MCPServerInput) (*MCPServer, error) {
-	if err := a.ready(); err != nil {
-		return nil, err
-	}
-	server, err := a.service.CreateMCPServer(ctx, app.MCPServerInput{
-		Scope:     in.Scope,
-		ProjectID: in.ProjectID,
-		Name:      in.Name,
-		Config:    in.Config,
-		Enabled:   in.Enabled,
-	})
-	if err != nil {
-		return nil, err
-	}
-	out := mcpServerFromApp(*server)
-	return &out, nil
-}
-
 func (a *AppExtensions) UpdateMCPServer(ctx context.Context, id string, in MCPServerUpdate) (*MCPServer, error) {
 	if err := a.ready(); err != nil {
 		return nil, err
@@ -115,25 +97,6 @@ func (a *AppExtensions) DeleteMCPServer(ctx context.Context, id string) error {
 		return err
 	}
 	return a.service.DeleteMCPServer(ctx, id)
-}
-
-func (a *AppExtensions) ImportMCPServers(ctx context.Context, in MCPImportInput) ([]MCPServer, error) {
-	if err := a.ready(); err != nil {
-		return nil, err
-	}
-	servers, err := a.service.ImportMCPServers(ctx, app.MCPImportInput{
-		Scope:     in.Scope,
-		ProjectID: in.ProjectID,
-		Servers:   in.Servers,
-	})
-	if err != nil {
-		return nil, err
-	}
-	out := make([]MCPServer, 0, len(servers))
-	for _, server := range servers {
-		out = append(out, mcpServerFromApp(server))
-	}
-	return out, nil
 }
 
 func (a *AppExtensions) ListSkills(ctx context.Context, scope string, projectID *int64) ([]Skill, error) {
@@ -164,40 +127,6 @@ func (a *AppExtensions) ListSkillsPage(ctx context.Context, scope string, projec
 		out = append(out, skillFromApp(skill))
 	}
 	return out, next, nil
-}
-
-func (a *AppExtensions) UploadSkill(ctx context.Context, in SkillUpload) (*Skill, error) {
-	if err := a.ready(); err != nil {
-		return nil, err
-	}
-	skill, err := a.service.UploadSkill(ctx, app.SkillUpload{
-		Scope:       in.Scope,
-		ProjectID:   in.ProjectID,
-		Name:        in.Name,
-		Description: in.Description,
-		Data:        in.Data,
-	})
-	if err != nil {
-		return nil, err
-	}
-	out := skillFromApp(*skill)
-	return &out, nil
-}
-
-func (a *AppExtensions) RegisterSkillDir(ctx context.Context, in SkillDirInput) (*Skill, error) {
-	if err := a.ready(); err != nil {
-		return nil, err
-	}
-	skill, err := a.service.RegisterSkillDir(ctx, app.SkillDirInput{
-		Scope:     in.Scope,
-		ProjectID: in.ProjectID,
-		Dir:       in.Dir,
-	})
-	if err != nil {
-		return nil, err
-	}
-	out := skillFromApp(*skill)
-	return &out, nil
 }
 
 func (a *AppExtensions) DeleteSkill(ctx context.Context, id string) error {

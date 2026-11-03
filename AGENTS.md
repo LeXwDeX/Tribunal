@@ -1,3 +1,4 @@
+# Tribunal Agent and Contributor Guide
 
 This file is the single instruction file for every coding agent and contributor working in this repository. There is no `CLAUDE.md`; tools that look for one should read this file. It is also the project's secondary-development guide for an open-source fork.
 
@@ -164,7 +165,7 @@ If a stage cannot run because a credential, environment, an external service, or
 
 - Read this file, then `docs/handoff.md` in the primary checkout if it exists, and the open Issues before starting work. Do not redo completed Issues.
 - Prefer a subagent or a bounded task for long-running monitoring. Do not use `sleep` or a foreground `--watch` to wait for CI. After starting a PR, continue independent work or report progress and end the turn only when a background callback is configured and verified to wake the session. If no such callback exists or it is unreliable, use a monitored subagent with an explicit timeout, or report the limitation instead of silently waiting.
-- Use SpecGit as required by the repository. Do not commit with `--no-verify`. If a checkpoint belongs to another branch, use a separate worktree and initialize it from the main declaration instead of overwriting the checkpoint.
+- Use SpecGit as required by the repository. Do not commit with `--no-verify`. If a checkpoint belongs to another branch, use a separate worktree and initialize it from the main declaration instead of overwriting the checkpoint. External contributors without SpecGit use a normal topic branch and PR with the `Issue: #N` trailer; the local checkpoint is a maintainer convenience, not a contribution requirement.
 - Respect permission prompts. Do not bypass a denied command, a protected branch or a credential boundary. Stop and ask when the next action needs human authorization or a secret.
 - A subagent's finding is a lead, not a fact. Verify it against source or a reproducible command before reporting or acting on it.
 - Keep the final report short: what changed, what was verified, what was not verified, and the remaining risk.

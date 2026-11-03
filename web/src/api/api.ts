@@ -248,16 +248,6 @@ export async function listMcpServers(scope: string, projectId?: number | string,
   return request<McpServerPage>(withQuery('/api/v1/mcp-servers', { scope, project_id: projectId, cursor }))
 }
 
-export interface McpInput {
-  scope: 'platform' | 'project'
-  project_id?: number
-  name: string
-  config: Record<string, unknown>
-}
-
-export async function createMcpServer(input: McpInput): Promise<McpServer> {
-  return request<McpServer>('/api/v1/mcp-servers', { method: 'POST', body: input })
-}
 
 export async function updateMcpServer(id: string, input: { name?: string; config?: Record<string, unknown>; enabled?: boolean }): Promise<McpServer> {
   return request<McpServer>(`/api/v1/mcp-servers/${segment(id)}`, { method: 'PUT', body: input })
@@ -271,30 +261,11 @@ export async function testMcpServer(id: string): Promise<{ tools?: McpTool[]; er
   return request<{ tools?: McpTool[]; error?: string }>(`/api/v1/mcp-servers/${segment(id)}/test`, { method: 'POST' })
 }
 
-export async function importMcpServers(scope: string, projectId: number | undefined, config: Record<string, unknown>): Promise<unknown> {
-  // The document specifies the pasted body as the import payload; scope is
-  // selected via query parameters.
-  return request<unknown>(withQuery('/api/v1/mcp-servers/import', { scope, project_id: projectId }), {
-    method: 'POST',
-    body: config,
-  })
-}
 
 export async function listSkills(scope: string, projectId?: number | string, cursor?: string): Promise<SkillPage> {
   return request<SkillPage>(withQuery('/api/v1/skills', { scope, project_id: projectId, cursor }))
 }
 
-export async function registerSkillDirectory(input: { scope: 'platform' | 'project'; project_id?: number; dir: string }): Promise<Skill> {
-  return request<Skill>('/api/v1/skills', { method: 'POST', body: input })
-}
-
-export async function uploadSkill(input: { scope: 'platform' | 'project'; project_id?: number; file: File }): Promise<Skill> {
-  const form = new FormData()
-  form.set('scope', input.scope)
-  if (input.project_id) form.set('project_id', String(input.project_id))
-  form.set('file', input.file)
-  return request<Skill>('/api/v1/skills', { method: 'POST', body: form })
-}
 
 export async function setSkillEnabled(id: string, enabled: boolean): Promise<Skill> {
   return request<Skill>(`/api/v1/skills/${segment(id)}`, { method: 'PATCH', body: { enabled } })

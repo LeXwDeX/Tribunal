@@ -25,3 +25,10 @@ Icon[\r]
 .fseventsd
 .DocumentRevisions-V100
 .TemporaryItems
+
+# Local agent and runtime state
+.opencode/
+.agents/
+.claude/
+.serena/
+.specgit.yaml

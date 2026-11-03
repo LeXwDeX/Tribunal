@@ -51,19 +51,19 @@ on a desktop, but must also be able to operate the console at 390px width.
 
 ## Brand Commitments
 
-Use the user-approved Tribunal name and the existing Chinese console labels. The
-local v2 prototype defines the visual reference; the v2 restyle changed visuals and
-layout only, not the console behavior or review flow.
+Use the user-approved Tribunal name and the existing Chinese console labels. Visual
+references are kept in the internal design record; they are not published. The v2
+restyle changed visuals and layout only, not the console behavior or review flow.
 
 ## Evidence on Hand
 
 - [Architecture and scope](ARCH.md).
 - [HTTP API](docs/design/03-http-api.md).
 - [Web console](docs/design/07-web-console.md).
-- Local, gitignored `prototype/v2/index.html` is the current v2 visual reference;
-  `prototype/v2/IMPLEMENT.md` maps it to the console code. The older
-  `prototype/*.dc.html` screens are the v1 reference only. Example metrics and
-  project names in both are illustrative, not live data.
+- The console implementation and its design notes live in `web/` and
+  `docs/design/07-web-console.md`. Visual references are kept locally and are not
+  part of the public repository; example metrics and project names are illustrative,
+  not live data.
 
 ## Product Principles
 
