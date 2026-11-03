@@ -95,7 +95,7 @@ func gitLabSandboxHasLabel(t *testing.T, name string) bool {
 	}
 	host, project := os.Getenv("TRIBUNAL_TEST_GITLAB_HOST"), os.Getenv("TRIBUNAL_TEST_GITLAB_PROJECT")
 	if host == "" || project == "" {
-		return false
+		t.Skip("set TRIBUNAL_TEST_GITLAB_HOST and TRIBUNAL_TEST_GITLAB_PROJECT for the labels API")
 	}
 	cmd := exec.Command("glab", "api", "--hostname", host, "projects/"+url.PathEscape(project)+"/labels")
 	output, err := cmd.Output()
@@ -144,7 +144,7 @@ func TestGitLabRenderedUnmatchedTildesDoNotLink(t *testing.T) {
 
 func TestGitLabRenderedOneLineReferencesAndLiteralText(t *testing.T) {
 	const sha = "bcdffc81e2b63cb028f0e0cfc1475430e6fc1cbc"
-	const literal = sha + " group/project> @suntao #1 !1 $1 %r ~x &123 *x* _x_ <img>"
+	literal := sha + " " + gitLabTestProject(t) + "> @suntao #1 !1 $1 %r ~x &123 *x* _x_ <img>"
 	group := renderGroup("reference", ActionMark, SeverityP1, false, literal, "Body")
 	group.Decision.Reason = literal
 	out, err := RenderSummary(SummaryInput{Verdict: VerdictBlocking, Summary: "Summary", Groups: []Group{group}, Warnings: []string{literal}, Fingerprint: "abc", HeadSHA: sha, Profile: sha})
@@ -172,7 +172,7 @@ func TestGitLabRenderedOneLineReferencesAndLiteralText(t *testing.T) {
 
 func TestGitLabRenderedInlineReferencesAndURLs(t *testing.T) {
 	const sha = "bcdffc81e2b63cb028f0e0cfc1475430e6fc1cbc"
-	const title = "bcdffc8 group/project> \\@suntao"
+	title := "bcdffc8 " + gitLabTestProject(t) + "> \\@suntao"
 	const reason = sha + " https://example.invalid www.example.invalid person@example.invalid &123"
 	group := renderGroup("inline-reference", ActionMark, SeverityP1, true, title, "Body")
 	group.Decision.Reason = reason
@@ -214,7 +214,7 @@ func TestGitLabRenderedFooterTokensDoNotAutolink(t *testing.T) {
 }
 
 func TestGitLabRenderedMarkdownReferencesRemainLiteral(t *testing.T) {
-	const literal = "bcdffc81e2b63cb028f0e0cfc1475430e6fc1cbc group/project> @suntao #1 !1 $1 %release ~bug &123 https://example.invalid www.example.invalid person@example.invalid"
+	literal := "bcdffc81e2b63cb028f0e0cfc1475430e6fc1cbc " + gitLabTestProject(t) + "> @suntao #1 !1 $1 %release ~bug &123 https://example.invalid www.example.invalid person@example.invalid"
 	group := renderGroup("markdown-reference", ActionPublish, SeverityP2, false, "Markdown finding", "- **Body** "+literal+"\n- ~~Another item~~")
 	group.Suggestion = "Suggestion " + literal
 	out, err := RenderSummary(SummaryInput{Verdict: VerdictBlocking, Summary: "**Overview** " + literal, Groups: []Group{group}, Fingerprint: "abc"})

@@ -41,15 +41,15 @@ v1.2.0 尚未发布：版本说明已合并到 `main`，尚未打 tag，也未�
 
 **真实实例升级验收（[#108](https://github.com/LeXwDeX/Tribunal/issues/108)，2026-10-29，`main` `a113e08`）**
 
-环境是隔离真实实例上的隔离回归实例，连接测试用 GitLab 实例和测试项目，不是生产环境。升级前做了一致性备份并保留到验收结束。逐项证据（时间、workflow ID、hook ID、GitLab event ID）见 [#108 评论](https://github.com/LeXwDeX/Tribunal/issues/108)，本文不重复。
+环境是隔离真实实例上的回归实例，连接测试用 GitLab 实例和测试项目，不是生产环境。升级前做了一致性备份并保留到验收结束。逐项证据（时间、workflow ID、hook ID、GitLab event ID）见 [#108 评论](https://github.com/LeXwDeX/Tribunal/issues/108)，本文不重复。
 
 已通过：
 
 - 升级：镜像从已有数据卷原地升级到 `a113e08`，`0019_job_defer_window` 已应用，项目、dossier 和发布记录保留，healthz/readyz 200。数据卷升级前的 schema 已含 `0016`，所以实际验证的是 `0017`–`0019` 的升级。
-- v1.0.0 数据卷原地升级：在隔离真实实例新建隔离验收实例，从 `v1.0.0` tag 构建并启动，注册项目 1335、跑真实评审并发布；升级到 `v1.1.0` 后日志显示 `stored secrets migrated projects:1`，`0013`–`0015` 已应用，项目仍可 clone、评审、发布；再升级到 `a113e08`，`0016`–`0019` 已应用。
+- v1.0.0 数据卷原地升级：在隔离真实实例新建验收实例，从 `v1.0.0` tag 构建并启动，注册第一个测试项目、跑真实评审并发布；升级到 `v1.1.0` 后日志显示 `stored secrets migrated projects:1`，`0013`–`0015` 已应用，项目仍可 clone、评审、发布；再升级到 `a113e08`，`0016`–`0019` 已应用。
 - 旧评审显示 `!iid`：v1.0.0/v1.1.0 产生的 dossier `mr_title=''`，控制台显示 `!1`；升级后的新评审 `mr_title='feat: add withdraw'`，列表显示标题（#101）。
-- codebase-memory-mcp 实际调用：临时将验收实例 `review_defaults.ignore` 置空并重建索引，再用测试用项目 `custom_rules` 引导评审先调用图谱工具；按 `message.parts[].type == "tool_call"` 统计，项目 1335 实际调用 `list_projects`、`get_architecture`，项目 1336 调用 `list_projects`、`get_architecture`、`search_graph`。引导只用于验收，不改变产品默认行为。
-- 多项目 MCP 隔离：注册第二个项目 1336 并跑真实评审；按 workflow 分别统计请求和响应：项目 1335 的 workflow 中只出现项目 1335 的标识 6 次、项目 1336 的标识 0 次；项目 1336 的 workflow 中只出现项目 1336 的标识 5 次、项目 1335 的标识 0 次。
+- codebase-memory-mcp 实际调用：临时将验收实例 `review_defaults.ignore` 置空并重建索引，再用测试用项目 `custom_rules` 引导评审先调用图谱工具；按 `message.parts[].type == "tool_call"` 统计，第一个测试项目实际调用 `list_projects`、`get_architecture`，第二个测试项目调用 `list_projects`、`get_architecture`、`search_graph`。引导只用于验收，不改变产品默认行为。
+- 多项目 MCP 隔离：注册第二个测试项目并跑真实评审；按 workflow 分别统计请求和响应：第一个测试项目的 workflow 中只出现第一个项目的标识 6 次、第二个项目的标识 0 次；第二个测试项目的 workflow 中只出现第二个项目的标识 5 次、第一个项目的标识 0 次。
 - OAuth 登录；容器重启后会话保留；另用 v1.1.0 会话跨版本升级到 `a113e08`，同一浏览器 cookie 访问 `/api/v1/me` 仍返回 200。
 - 升级后真实评审：MR !2 结论 `PASS`，MR !1、MR !3 结论 `BLOCKING`，均已发布到 GitLab。
 - 停机续跑：评审运行中对容器发 SIGKILL，重启后 workflow 完成并发布（MR !3、MR !1）。
@@ -60,7 +60,7 @@ v1.2.0 尚未发布：版本说明已合并到 `main`，尚未打 tag，也未�
 - 内置 `code-review` Skill：MR !3 的 LLM 调用均加载了该 Skill；4 条 findings 为 P1 concurrency、P2 logic、P1 concurrency、P1 standards，全部发布，汇总与明细一致，baseline smell 没有被单独升级为 BLOCKING。
 - MR 标题：新评审的 dossier 都有 `mr_title`，列表显示标题（#101 新评审部分）。
 - v2 控制台：在真实数据下检查 1440 和 390 宽度、亮色和暗色；总览、评审、项目工作区、扩展、模型与档位、统计与反馈、系统页面均无横向滚动（390 下逐页 `scrollWidth=390`）。
-- 用户名写法的 `bootstrap_admins` 弃用告警（#103）：首轮两次尝试未观察到告警，另开 [#151](https://github.com/LeXwDeX/Tribunal/issues/151)。排查发现：按配置备份文件的修改时间，两次尝试中用户名写法只在宿主机文件里保留 10–30 秒，现存容器均在配置恢复为 `id:` 写法之后创建，验证窗口没有覆盖任何一次启动。2026-10-29 在隔离回归实例（镜像 `a113e08`）把配置改为 `bootstrap_admins: ["suntao"]` 后执行 `docker compose up -d --force-recreate`，新容器启动日志在 `storage opened` 之后出现 `auth.bootstrap_admins username entry is deprecated ...`，带 `index=0`、`binding=none`，不含用户名；随后恢复原配置。`cmd/server` 新增从 YAML 加载并展开 `${VAR}` 的启动回归测试。
+- 用户名写法的 `bootstrap_admins` 弃用告警（#103）：首轮两次尝试未观察到告警，另开 [#151](https://github.com/LeXwDeX/Tribunal/issues/151)。排查发现：按配置备份文件的修改时间，两次尝试中用户名写法只在宿主机文件里保留 10–30 秒，现存容器均在配置恢复为 `id:` 写法之后创建，验证窗口没有覆盖任何一次启动。2026-10-29 在隔离回归实例（镜像 `a113e08`）把配置改为用户名写法（`bootstrap_admins: ["<gitlab-username>"]`）后执行 `docker compose up -d --force-recreate`，新容器启动日志在 `storage opened` 之后出现 `auth.bootstrap_admins username entry is deprecated ...`，带 `index=0`、`binding=none`，不含用户名；随后恢复原配置。`cmd/server` 新增从 YAML 加载并展开 `${VAR}` 的启动回归测试。
 
 
 **2026-11-03 补充升级（`a113e08` → `2621c44`，`0020`–`0024` 与 #143）**
@@ -312,7 +312,7 @@ docker compose exec -T review /app/tribunalctl projects all
 - 目标：v1 M0–M6，对应 PR #30。
 - 已验证运行时候选/源码快照 `f143e7a7835e1e99345b1df9b289bb499e3c67416598d30e6184a558374eb0ac`（402 文件）的检查通过：`go build ./...`、`go vet ./...`、`go test -race -count=1 ./...`；语句覆盖率 77.09%（17665/22916）；`go mod verify`、65 个模块的 `licensecheck`、许可证 bundle `-check`；Web 27 个测试文件、160 个测试及 `npm run build`；Responses race 20 次通过，`dist` 未变。更早的 `27c9b1c`（77.11%）仅历史。
 - 实际镜像 `crc-v1-acceptance:candidate-f143e7a`（ID `sha256:1a20aa96065a24986990de94d0e2e6466df04a379ed2e6b50f076271ff52574e`）构建并通过配置检查；该 tag 是历史验收标识，刻意保留。
-- 旧快照的本地 review ACCEPT 不覆盖新的 Responses header。较早的独立代码评审未发现 code blocker，但因缺少 f143 运行时 manifest 与 `12a62d1` 文档 manifest/source-equivalence 而记为 evidence BLOCKING；该缺口已关闭。最终独立 review（`ses_fe5e8e8d28a2Mm41JlrHzyCxwp`）对 `12a62d1` 文档树给出 code/documentation PASS、0 blockers；`12a62d1` 相对 f143 只有 6 个 Markdown 文档不同，运行时输入未变。
+- 旧快照的本地 review ACCEPT 不覆盖新的 Responses header。较早的独立代码评审未发现 code blocker，但因缺少 f143 运行时 manifest 与 `12a62d1` 文档 manifest/source-equivalence 而记为 evidence BLOCKING；该缺口已关闭。最终独立 review 对 `12a62d1` 文档树给出 code/documentation PASS、0 blockers；`12a62d1` 相对 f143 只有 6 个 Markdown 文档不同，运行时输入未变。
 - 连续两次实际无诊断代理 full deep 均为 0 call errors、0 failed nodes；MCP 成功/调用分别为 10/10 和 10/11（第二次一次模型工具错误已纠正），不能声称所有工具调用成功。两次均 BLOCKING/published；BLOCKING 是合成授权回归的预期结论，不是验收失败。实际镜像、离线恢复和在线替换均 PASS。
 
 ### PR #30 回读
@@ -322,11 +322,11 @@ docker compose exec -T review /app/tribunalctl projects all
 
 ### 隔离测试实例结果
 
-- 管理面：bootstrap 可访问 admin 路由（200），项目业务路由返回 404；viewer 仅见项目 1332，跨项目 1331 的项目/评审/SSE/统计均 404，admin users 403。
-- OAuth/项目授权：管理员用户 199 对项目 1331 有 `manage`，viewer 用户 200 对项目 1332 有 `read`；CSRF 缺失返回 403、有效 token 返回 200；跨项目读取返回 404；viewer 写操作返回 403；既有两个 OAuth 会话跨升级保留。
+- 管理面：bootstrap 可访问 admin 路由（200），项目业务路由返回 404；viewer 仅见第一个测试项目，跨第二个测试项目的项目/评审/SSE/统计均 404，admin users 403。
+- OAuth/项目授权：管理员用户对第一个测试项目有 `manage`，viewer 用户对第二个测试项目有 `read`；CSRF 缺失返回 403、有效 token 返回 200；跨项目读取返回 404；viewer 写操作返回 403；既有两个 OAuth 会话跨升级保留。
 - SSE/撤权：撤 grant 后已有 SSE 在 1986ms 内关闭；撤权后读取 404，恢复 grant 后读取 200。
 - Webhook：真实启用并发幂等；停用、重新启用和重建都保留外部同 URL hook；归属只按持久化的自有 hook ID 判断，不做 URL 匹配。
-- GitLab：真实 Note Hook、状态 note 与表情反应、commit status，以及应用新增行（added line）行内评论发布成功。最终回读显示 `ai-review` status 52895/52896 在 `bae78e9980348c621cc0e1132e21b1656d44f212` 上为 failed；命令源 note 100746/100748 为 x、无 eyes，summary 100734 与 status note 100733 各一条。不同随机运行的 finding 集合和行内 diff key 可能不同，不能据此声称所有运行只有一条行内评论；幂等重放/重复发布结果以 PR #30 记录为准。
+- GitLab：真实 Note Hook、状态 note 与表情反应、commit status，以及应用新增行（added line）行内评论发布成功。最终回读显示 `ai-review` status 在当时目标 head 上为 failed；命令源 note 为 x、无 eyes，summary 与 status note 各一条。不同随机运行的 finding 集合和行内 diff key 可能不同，不能据此声称所有运行只有一条行内评论；幂等重放/重复发布结果以 PR #30 记录为准。
 - 离线恢复与在线升级：应用了当时的全部迁移（1、3–12，共 11 个）；SQLite integrity、用户/授权/会话/任务/工作流/工作区保留。
 - Deep：两次均使用 `deepseek-flash` 与 `gpt-6-astra`，两家 provider 均实际调用 MCP，完成 plan/fan-out/cross-verify/synthesis。
 - Responses header：adapter 每次 Generate 发送请求级随机不透明 `X-Session-Id`，仅 Responses，无新配置/依赖/400 重试。它是网关兼容措施，不是 OpenAI 标准、会话认证或幂等保证；已部署网关内部根因未证实，缓存/握手成本可能存在。
@@ -344,7 +344,7 @@ docker compose exec -T review /app/tribunalctl projects all
 | 仅管理面 | 已覆盖 |
 | 跨项目 | 已覆盖 |
 | 只读边界 | viewer 写操作返回 403 |
-| 管理授权 | 管理员用户 199/manage 项目 1331 |
+| 管理授权 | 管理员用户 manage 第一个测试项目 |
 | 宿主配置 |  |
 | 会话/Token |  |
 | CSRF | 已覆盖 |
