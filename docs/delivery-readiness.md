@@ -63,9 +63,9 @@ v1.2.0 尚未发布：版本说明已合并到 `main`，尚未打 tag，也未�
 - 用户名写法的 `bootstrap_admins` 弃用告警（#103）：首轮两次尝试未观察到告警，另开 [#151](https://github.com/LeXwDeX/Tribunal/issues/151)。排查发现：按配置备份文件的修改时间，两次尝试中用户名写法只在宿主机文件里保留 10–30 秒，现存容器均在配置恢复为 `id:` 写法之后创建，验证窗口没有覆盖任何一次启动。2026-10-29 在 `tribunal-regress`（镜像 `a113e08`）把配置改为 `bootstrap_admins: ["suntao"]` 后执行 `docker compose up -d --force-recreate`，新容器启动日志在 `storage opened` 之后出现 `auth.bootstrap_admins username entry is deprecated ...`，带 `index=0`、`binding=none`，不含用户名；随后恢复原配置。`cmd/server` 新增从 YAML 加载并展开 `${VAR}` 的启动回归测试。
 
 
-**2026-11-03 补充升级（`a113e08` → 当前 `main`，`0020`–`0024` 与 #143）**
+**2026-11-03 补充升级（`a113e08` → `2621c44`，`0020`–`0024` 与 #143）**
 
-在隔离真实实例的旧数据卷上升级。升级前备份数据库、WAL/SHM、全部工作区、挂载配置和密钥。
+在隔离真实实例的旧数据卷上升级，部署镜像标识为 `tribunal:v1.2.0-2621c44`。升级前备份数据库、WAL/SHM、全部工作区、挂载配置和密钥。
 
 - 迁移：23 个已知版本，最大 `0024`；healthz/readyz 200，数据库和 worker ready。
 - 内置扩展：`code-review` Skill 和 `codebase-memory` MCP 都保持启用；MCP 测试返回 13 个只读工具。
