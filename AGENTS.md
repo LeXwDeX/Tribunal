@@ -50,7 +50,7 @@ The full Go test suite requires Bash and a real Python 3 interpreter for the reg
 
 ```bash
 # Web first: go build embeds web/dist.
-cd web && npm ci && npm test && npm run build && cd ..
+cd web && npm ci && npm test -- --coverage && npm run build && cd ..
 
 go build ./...
 go vet ./...
@@ -118,7 +118,7 @@ Only dispatch trusted branch code to a self-hosted runner: untrusted code can pe
 - **Layers.** Cover the lowest useful layer first: pure functions and package tests, then HTTP wiring and authorization, then component tests, then Docker smoke. Add an end-to-end test only when the behavior cannot be proven below it.
 - **Determinism.** Tests must not depend on real network access, real credentials, wall-clock races, fixed ports or shared mutable state. Use fakes, temporary directories, fake clocks and injected clients. A test that binds a fixed port or relies on a real external service belongs in an explicitly gated acceptance suite, not the default unit suite.
 - **Concurrency.** Run race-enabled tests for code that touches goroutines, stores, workspaces, jobs or publication. Use `-race` and the repository timeout; do not weaken the timeout to hide a hang.
-- **Coverage.** Keep Go statement coverage at or above 70%; web thresholds live in `web/vite.config.ts`. Coverage is a floor, not a target: do not add assertion-free tests or duplicate paths only to raise the number.
+- **Coverage.** Keep Go statement coverage at or above 70%; web thresholds live in `web/vite.config.ts`; run `npm test -- --coverage` in `web/`. Coverage is a floor, not a target: do not add assertion-free tests or duplicate paths only to raise the number.
 - **Flakiness.** If a check fails intermittently, rerun once, record the failing test and the run, and open an Issue if it recurs. Do not mark a flaky test as passed, skip it silently, or weaken an assertion. A green rerun is evidence only when the same commit is identified.
 - **Isolation from environments.** Do not hardcode internal hosts, ports, tokens, project IDs or deployment paths in tests or documentation examples. Use environment variables, fixtures or placeholders. Real-deployment acceptance is separate from CI and must be labeled as such.
 - **Real environments and credentials.** Real-deployment, Docker, real GitLab and real LLM API tests require the user to provide the test server, Docker daemon, GitLab project and LLM API key/endpoint. Do not assume they exist, do not reuse production credentials, and do not silently replace a missing environment with mocks. If the environment or credential is missing, report the check as BLOCKED, name what is missing, and continue only with local or CI checks. Ask the user for the environment when the Issue's acceptance criteria require it.
@@ -162,7 +162,7 @@ If a stage cannot run because a credential, environment, an external service, or
 ## 11. Agent workflow
 
 - Read this file, then `docs/handoff.md`, before starting work. Do not redo completed Issues.
-- Prefer a subagent or a bounded task for long-running monitoring. Do not use `sleep` or a foreground `--watch` to wait for CI. After starting a PR, continue independent work or report progress and end the turn; a background callback wakes the session when the result is ready. If the configured callback is unreliable, use a monitored subagent with an explicit timeout rather than silently waiting.
+- Prefer a subagent or a bounded task for long-running monitoring. Do not use `sleep` or a foreground `--watch` to wait for CI. After starting a PR, continue independent work or report progress and end the turn only when a background callback is configured and verified to wake the session. If no such callback exists or it is unreliable, use a monitored subagent with an explicit timeout, or report the limitation instead of silently waiting.
 - Use SpecGit as required by the repository. Do not commit with `--no-verify`. If a checkpoint belongs to another branch, use a separate worktree and initialize it from the main declaration instead of overwriting the checkpoint.
 - Respect permission prompts. Do not bypass a denied command, a protected branch or a credential boundary. Stop and ask when the next action needs human authorization or a secret.
 - A subagent's finding is a lead, not a fact. Verify it against source or a reproducible command before reporting or acting on it.
