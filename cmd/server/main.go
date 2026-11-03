@@ -245,6 +245,24 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		Tokens:     db,
 		Access:     db,
 		Platform:   cfg,
+		LockStats: func() server.LockStats {
+			dbStats := db.DBStats()
+			wsStats := runtime.WorkspaceManager().LockStats()
+			return server.LockStats{
+				SQLite: server.SQLiteLockStats{
+					WaitCount:          dbStats.WaitCount,
+					WaitDurationMS:     dbStats.WaitDuration.Milliseconds(),
+					MaxOpenConnections: dbStats.MaxOpenConnections,
+					InUse:              dbStats.InUse,
+					Idle:               dbStats.Idle,
+				},
+				Workspace: server.WorkspaceLockStats{
+					WaitCount:      wsStats.WaitCount,
+					WaitDurationMS: wsStats.WaitDuration.Milliseconds(),
+					MaxWaitMS:      wsStats.MaxWait.Milliseconds(),
+				},
+			}
+		},
 	})
 	if err != nil {
 		return err

@@ -90,6 +90,7 @@ type Config struct {
 	Sessions   SessionStore
 	Access     AccessStore
 	Platform   *config.Config
+	LockStats  func() LockStats
 	StreamPoll time.Duration
 	Now        func() time.Time
 }
@@ -120,6 +121,7 @@ type Server struct {
 	tokens     TokenStore
 	access     AccessStore
 	platform   *config.Config
+	lockStats  func() LockStats
 	streamPoll time.Duration
 	now        func() time.Time
 
@@ -187,6 +189,7 @@ func New(cfg Config) (*Server, error) {
 		tokens:     cfg.Tokens,
 		access:     cfg.Access,
 		platform:   cfg.Platform,
+		lockStats:  cfg.LockStats,
 		streamPoll: cfg.StreamPoll,
 		now:        cfg.Now,
 		shutdown:   make(chan struct{}),
@@ -256,6 +259,7 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("POST /api/v1/providers/{name}/test", s.apiAuth(s.guard(policyPlatformAdmin, s.handleTestProvider)))
 	mux.HandleFunc("GET /api/v1/profiles", s.apiAuth(s.guard(policyPlatformAdmin, s.handleListProfiles)))
 	mux.HandleFunc("GET /api/v1/stats", s.apiAuth(s.handleStats))
+	mux.HandleFunc("GET /api/v1/system/lock-stats", s.apiAuth(s.guard(policyPlatformAdmin, s.handleLockStats)))
 	mux.HandleFunc("GET /api/v1/settings", s.apiAuth(s.guard(policyPlatformAdmin, s.handleSettings)))
 	// API tokens (browser self-service; CSRF still applies).
 	mux.HandleFunc("GET /api/v1/api-tokens", s.apiAuth(s.guard(policyAuthenticated, s.handleListAPITokens)))

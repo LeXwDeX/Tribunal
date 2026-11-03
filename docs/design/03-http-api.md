@@ -348,6 +348,7 @@ MCP、Skill、块绑定列表使用游标分页。
 | POST | `/api/v1/providers/{name}/test` | 发一条最小请求验证连通性和模型名 |
 | GET | `/api/v1/profiles` | 评审档位定义（来自配置文件，只读） |
 | GET | `/api/v1/stats` | `?from=&to=&project_id=`：运行次数（含 onboarding）、耗时、成本、项目/provider/块统计与 UTC 日趋势、finding 处置分布、人工质量指标、按模型调用与反馈原始计数；`to` 为排他上界 |
+| GET | `/api/v1/system/lock-stats` | 平台管理员：SQLite 连接等待（`wait_count`、`wait_duration_ms` 为累计值；`max_open_connections`、`in_use`、`idle` 为当前连接池值）与工作区锁等待（`wait_count`、`wait_duration_ms` 为累计值，`max_wait_ms` 为进程启动以来单次最长等待）；单连接下连接等待是 SQL 串行化的代理，不是 driver busy 重试计数 |
 | GET | `/api/v1/settings` | 平台配置的只读视图（脱敏） |
 
 首版 provider 和 profile 以配置文件为准，API 只读；改动需修改配置并重启服务。当前进程不处理 `SIGHUP` 热加载。`/providers`、`/profiles` 和 `/settings` 仅平台管理员可访问。

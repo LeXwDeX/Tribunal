@@ -88,6 +88,30 @@ func (m *Manager) Root() string {
 	return m.root
 }
 
+// LockStats aggregates content, lifecycle and mirror lock waits across every
+// workspace this manager has created.
+func (m *Manager) LockStats() LockStats {
+	if m == nil {
+		return LockStats{}
+	}
+	m.mu.Lock()
+	workspaces := make([]*Workspace, 0, len(m.byID))
+	for _, w := range m.byID {
+		workspaces = append(workspaces, w)
+	}
+	m.mu.Unlock()
+	var total LockStats
+	for _, w := range workspaces {
+		stats := w.LockStats()
+		total.WaitCount += stats.WaitCount
+		total.WaitDuration += stats.WaitDuration
+		if stats.MaxWait > total.MaxWait {
+			total.MaxWait = stats.MaxWait
+		}
+	}
+	return total
+}
+
 // Get returns the shared workspace for a positive GitLab project ID. It
 // performs no I/O; directories are created by the operations that need them.
 func (m *Manager) Get(pid int64) *Workspace {
@@ -140,6 +164,23 @@ func (w *Workspace) Lock(ctx context.Context) (func(), error) {
 // The returned function must be called exactly once.
 func (w *Workspace) RLock(ctx context.Context) (func(), error) {
 	return w.lock.RLock(ctx)
+}
+
+// LockStats aggregates this workspace's content, lifecycle and mirror locks.
+func (w *Workspace) LockStats() LockStats {
+	if w == nil {
+		return LockStats{}
+	}
+	stats := w.lock.LockStats()
+	for _, lock := range []*ctxRWMutex{w.lifecycle, w.mirrorLock} {
+		next := lock.LockStats()
+		stats.WaitCount += next.WaitCount
+		stats.WaitDuration += next.WaitDuration
+		if next.MaxWait > stats.MaxWait {
+			stats.MaxWait = next.MaxWait
+		}
+	}
+	return stats
 }
 
 // LifecycleLock takes the project lifecycle write lock held by project

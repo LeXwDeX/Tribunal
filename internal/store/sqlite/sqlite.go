@@ -113,6 +113,29 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// DBStats reports database/sql pool waits. One connection is configured at
+// open, so every query serializes on it; a wait is time queued for that
+// connection. The driver's busy handler retries are internal and not counted.
+type DBStats struct {
+	WaitCount          int64
+	WaitDuration       time.Duration
+	MaxOpenConnections int
+	InUse              int
+	Idle               int
+}
+
+// DBStats returns cumulative pool waits plus current pool values.
+func (s *Store) DBStats() DBStats {
+	stats := s.db.Stats()
+	return DBStats{
+		WaitCount:          stats.WaitCount,
+		WaitDuration:       stats.WaitDuration,
+		MaxOpenConnections: stats.MaxOpenConnections,
+		InUse:              stats.InUse,
+		Idle:               stats.Idle,
+	}
+}
+
 // Ping checks that the database is reachable.
 func (s *Store) Ping(ctx context.Context) error {
 	return s.db.PingContext(ctx)

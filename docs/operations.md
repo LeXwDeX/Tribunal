@@ -1255,10 +1255,12 @@ bash scripts/loadtest.sh > loadtest.csv
 stdout 是 CSV：`project_id,mr_iid,status,verdict,duration_ms,tokens_in,tokens_out,cost_micros`。stderr 汇总：
 
 ```text
-reviews=... completed=... failed=... cancelled=... triggers_failed=... failure_rate=...% p50_ms=... p95_ms=... wall_s=... reviews_per_sec=... tokens_in=... tokens_out=... cost_micros=...
+reviews=... completed=... failed=... cancelled=... triggers_failed=... failure_rate=...% p50_ms=... p95_ms=... wall_s=... reviews_per_sec=... tokens_in=... tokens_out=... cost_micros=... sqlite_wait_count=... sqlite_wait_ms=... workspace_wait_count=... workspace_wait_ms=... workspace_max_wait_ms=...
 ```
 
 `failure_rate` 只统计已触发评审中的 `failed` 和 `cancelled`；触发失败单独看 `triggers_failed`。`wall_s` 从脚本开始（注册、授权、基线之前）到结束，`reviews_per_sec` 使用同一墙钟。`p50` 对偶数样本取较低的中位数，`p95` 使用 nearest-rank 上取整。有 `failed`、`cancelled` 或触发失败时脚本返回 1，并保留已收集的部分结果。`cost_micros` 依赖 provider 的 `price` 配置；未配置时始终为 0。
+
+`sqlite_wait_*` 来自 `GET /api/v1/system/lock-stats`：存储层只开一个 SQLite 连接，所有 SQL 串行使用该连接；`wait_count` 和 `wait_duration_ms` 是进程启动以来排队等待连接的累计值，`max_open_connections`、`in_use`、`idle` 是当前连接池值。`workspace_wait_count` 和 `workspace_wait_ms` 是项目内容锁、生命周期锁和 mirror 锁的累计等待，`workspace_max_wait_ms` 是进程启动以来单次最长等待。计数是累计值，不是单次压测的增量；可在压测前后各取一次，用 count/duration 差值得到本次压测的等待。本服务单进程使用时，driver 的 busy handler 在正常路径不会触发；如果有其它进程直接持有同一个 SQLite 文件，仍可能出现 driver 等待，本指标不统计这类重试。因此它是 SQL 串行化等待的代理，不是 busy 重试次数。旧服务端没有该端点时，汇总字段显示 `n/a`，压测结果和退出码不受影响。
 
 脚本自测：`bash scripts/loadtest_test.sh`，使用本地 mock API 覆盖正常、重试、取消、失败、重复输入、基线、授权目标用户、项目列表失败和触发失败；需要 Python 3。CI 的 `go` job 会运行该测试。
 
@@ -1268,7 +1270,7 @@ reviews=... completed=... failed=... cancelled=... triggers_failed=... failure_r
 - 真实 10 项目、每个 MR 840 行 diff 的一次观测：10/10 完成，p50 22.2 秒，p95 27.2 秒，输入 627,034 tokens，输出 32,927 tokens，成本约 $0.2055（占位价格）。
 - 示例配置的 provider 并发为 4，前 4 个评审立即启动，其余等待 `providers.<name>.max_concurrency`；没有观察到 SQLite 锁错误、工作区锁错误或任务丢失。
 - 这是一次环境观测，不是容量承诺；provider、diff 大小、网络和 GitLab 限流都会改变结果。
-- SQLite 锁等待与工作区锁等待没有单独指标；当前只能通过错误和耗时观察。
+- SQLite 与工作区锁等待已由 `GET /api/v1/system/lock-stats` 提供累计指标；上述观测发生时尚未采集。
 - 2026-11-02 用复审后的脚本跑 5 项目：修复 GitLab 项目 token 后 5/5 完成、0 失败，p50 27.4 秒，p95 31.9 秒，wall 58 秒，输入 348,429 tokens，输出 20,008 tokens，成本 116,085 micros。首次运行时项目 token 失效返回 `gitlab_rejected`（GitLab 401），脚本按预期返回 1 并列出失败项；mock 测试不能替代真实环境结论。
 
 ## 12. 验证状态
