@@ -3,6 +3,7 @@ package review
 import (
 	"encoding/json"
 	"html"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -10,12 +11,31 @@ import (
 )
 
 // These opt-in tests send synthetic notes only to GitLab's Markdown renderer.
+func gitLabTestHost(t *testing.T) string {
+	t.Helper()
+	host := os.Getenv("TRIBUNAL_TEST_GITLAB_HOST")
+	if host == "" {
+		t.Skip("set TRIBUNAL_TEST_GITLAB_HOST to the GitLab host")
+	}
+	return host
+}
+
+func gitLabTestProject(t *testing.T) string {
+	t.Helper()
+	project := os.Getenv("TRIBUNAL_TEST_GITLAB_PROJECT")
+	if project == "" {
+		t.Skip("set TRIBUNAL_TEST_GITLAB_PROJECT to a GitLab project path")
+	}
+	return project
+}
+
 func gitLabRenderedHTML(t *testing.T, markdown string) string {
 	t.Helper()
 	if os.Getenv("TRIBUNAL_TEST_GITLAB_MARKDOWN") != "1" {
 		t.Skip("set TRIBUNAL_TEST_GITLAB_MARKDOWN=1 for the GitLab Markdown API")
 	}
-	cmd := exec.Command("glab", "api", "--hostname", "git.ycgame.com", "markdown", "-X", "POST", "-F", "gfm=true", "-f", "project=suntao/tribunal-sandbox", "-f", "text="+markdown)
+	host, project := gitLabTestHost(t), gitLabTestProject(t)
+	cmd := exec.Command("glab", "api", "--hostname", host, "markdown", "-X", "POST", "-F", "gfm=true", "-f", "project="+project, "-f", "text="+markdown)
 	output, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("GitLab Markdown API: %v", err)
@@ -73,7 +93,11 @@ func gitLabSandboxHasLabel(t *testing.T, name string) bool {
 	if os.Getenv("TRIBUNAL_TEST_GITLAB_MARKDOWN") != "1" {
 		return false
 	}
-	cmd := exec.Command("glab", "api", "--hostname", "git.ycgame.com", "projects/suntao%2Ftribunal-sandbox/labels")
+	host, project := os.Getenv("TRIBUNAL_TEST_GITLAB_HOST"), os.Getenv("TRIBUNAL_TEST_GITLAB_PROJECT")
+	if host == "" || project == "" {
+		return false
+	}
+	cmd := exec.Command("glab", "api", "--hostname", host, "projects/"+url.PathEscape(project)+"/labels")
 	output, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("GitLab labels API: %v", err)
@@ -120,7 +144,7 @@ func TestGitLabRenderedUnmatchedTildesDoNotLink(t *testing.T) {
 
 func TestGitLabRenderedOneLineReferencesAndLiteralText(t *testing.T) {
 	const sha = "bcdffc81e2b63cb028f0e0cfc1475430e6fc1cbc"
-	const literal = sha + " suntao/tribunal-sandbox> @suntao #1 !1 $1 %r ~x &123 *x* _x_ <img>"
+	const literal = sha + " group/project> @suntao #1 !1 $1 %r ~x &123 *x* _x_ <img>"
 	group := renderGroup("reference", ActionMark, SeverityP1, false, literal, "Body")
 	group.Decision.Reason = literal
 	out, err := RenderSummary(SummaryInput{Verdict: VerdictBlocking, Summary: "Summary", Groups: []Group{group}, Warnings: []string{literal}, Fingerprint: "abc", HeadSHA: sha, Profile: sha})
@@ -148,7 +172,7 @@ func TestGitLabRenderedOneLineReferencesAndLiteralText(t *testing.T) {
 
 func TestGitLabRenderedInlineReferencesAndURLs(t *testing.T) {
 	const sha = "bcdffc81e2b63cb028f0e0cfc1475430e6fc1cbc"
-	const title = "bcdffc8 suntao/tribunal-sandbox> \\@suntao"
+	const title = "bcdffc8 group/project> \\@suntao"
 	const reason = sha + " https://example.invalid www.example.invalid person@example.invalid &123"
 	group := renderGroup("inline-reference", ActionMark, SeverityP1, true, title, "Body")
 	group.Decision.Reason = reason
@@ -190,7 +214,7 @@ func TestGitLabRenderedFooterTokensDoNotAutolink(t *testing.T) {
 }
 
 func TestGitLabRenderedMarkdownReferencesRemainLiteral(t *testing.T) {
-	const literal = "bcdffc81e2b63cb028f0e0cfc1475430e6fc1cbc suntao/tribunal-sandbox> @suntao #1 !1 $1 %release ~bug &123 https://example.invalid www.example.invalid person@example.invalid"
+	const literal = "bcdffc81e2b63cb028f0e0cfc1475430e6fc1cbc group/project> @suntao #1 !1 $1 %release ~bug &123 https://example.invalid www.example.invalid person@example.invalid"
 	group := renderGroup("markdown-reference", ActionPublish, SeverityP2, false, "Markdown finding", "- **Body** "+literal+"\n- ~~Another item~~")
 	group.Suggestion = "Suggestion " + literal
 	out, err := RenderSummary(SummaryInput{Verdict: VerdictBlocking, Summary: "**Overview** " + literal, Groups: []Group{group}, Fingerprint: "abc"})

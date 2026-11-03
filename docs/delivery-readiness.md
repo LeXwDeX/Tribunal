@@ -41,15 +41,15 @@ v1.2.0 尚未发布：版本说明已合并到 `main`，尚未打 tag，也未�
 
 **真实实例升级验收（[#108](https://github.com/LeXwDeX/Tribunal/issues/108)，2026-10-29，`main` `a113e08`）**
 
-环境是 33.110 的隔离回归实例 `tribunal-regress`，连接测试用 GitLab 实例和测试项目，不是生产环境。升级前做了一致性备份并保留到验收结束。逐项证据（时间、workflow ID、hook ID、GitLab event ID）见 [#108 评论](https://github.com/LeXwDeX/Tribunal/issues/108)，本文不重复。
+环境是隔离真实实例上的隔离回归实例，连接测试用 GitLab 实例和测试项目，不是生产环境。升级前做了一致性备份并保留到验收结束。逐项证据（时间、workflow ID、hook ID、GitLab event ID）见 [#108 评论](https://github.com/LeXwDeX/Tribunal/issues/108)，本文不重复。
 
 已通过：
 
 - 升级：镜像从已有数据卷原地升级到 `a113e08`，`0019_job_defer_window` 已应用，项目、dossier 和发布记录保留，healthz/readyz 200。数据卷升级前的 schema 已含 `0016`，所以实际验证的是 `0017`–`0019` 的升级。
-- v1.0.0 数据卷原地升级：在 33.110 新建隔离实例 `tribunal-acceptance-108`，从 `v1.0.0` tag 构建并启动，注册项目 1335、跑真实评审并发布；升级到 `v1.1.0` 后日志显示 `stored secrets migrated projects:1`，`0013`–`0015` 已应用，项目仍可 clone、评审、发布；再升级到 `a113e08`，`0016`–`0019` 已应用。
+- v1.0.0 数据卷原地升级：在隔离真实实例新建隔离验收实例，从 `v1.0.0` tag 构建并启动，注册项目 1335、跑真实评审并发布；升级到 `v1.1.0` 后日志显示 `stored secrets migrated projects:1`，`0013`–`0015` 已应用，项目仍可 clone、评审、发布；再升级到 `a113e08`，`0016`–`0019` 已应用。
 - 旧评审显示 `!iid`：v1.0.0/v1.1.0 产生的 dossier `mr_title=''`，控制台显示 `!1`；升级后的新评审 `mr_title='feat: add withdraw'`，列表显示标题（#101）。
 - codebase-memory-mcp 实际调用：临时将验收实例 `review_defaults.ignore` 置空并重建索引，再用测试用项目 `custom_rules` 引导评审先调用图谱工具；按 `message.parts[].type == "tool_call"` 统计，项目 1335 实际调用 `list_projects`、`get_architecture`，项目 1336 调用 `list_projects`、`get_architecture`、`search_graph`。引导只用于验收，不改变产品默认行为。
-- 多项目 MCP 隔离：注册第二个项目 1336 并跑真实评审；按 workflow 分别统计请求和响应，1335 的 workflow 中 `tribunal-acceptance-108` 出现 6 次、`tribunal-acceptance-108b` 出现 0 次；1336 中 `108b` 出现 5 次、`108` 出现 0 次。
+- 多项目 MCP 隔离：注册第二个项目 1336 并跑真实评审；按 workflow 分别统计请求和响应：项目 1335 的 workflow 中只出现项目 1335 的标识 6 次、项目 1336 的标识 0 次；项目 1336 的 workflow 中只出现项目 1336 的标识 5 次、项目 1335 的标识 0 次。
 - OAuth 登录；容器重启后会话保留；另用 v1.1.0 会话跨版本升级到 `a113e08`，同一浏览器 cookie 访问 `/api/v1/me` 仍返回 200。
 - 升级后真实评审：MR !2 结论 `PASS`，MR !1、MR !3 结论 `BLOCKING`，均已发布到 GitLab。
 - 停机续跑：评审运行中对容器发 SIGKILL，重启后 workflow 完成并发布（MR !3、MR !1）。
@@ -60,7 +60,7 @@ v1.2.0 尚未发布：版本说明已合并到 `main`，尚未打 tag，也未�
 - 内置 `code-review` Skill：MR !3 的 LLM 调用均加载了该 Skill；4 条 findings 为 P1 concurrency、P2 logic、P1 concurrency、P1 standards，全部发布，汇总与明细一致，baseline smell 没有被单独升级为 BLOCKING。
 - MR 标题：新评审的 dossier 都有 `mr_title`，列表显示标题（#101 新评审部分）。
 - v2 控制台：在真实数据下检查 1440 和 390 宽度、亮色和暗色；总览、评审、项目工作区、扩展、模型与档位、统计与反馈、系统页面均无横向滚动（390 下逐页 `scrollWidth=390`）。
-- 用户名写法的 `bootstrap_admins` 弃用告警（#103）：首轮两次尝试未观察到告警，另开 [#151](https://github.com/LeXwDeX/Tribunal/issues/151)。排查发现：按配置备份文件的修改时间，两次尝试中用户名写法只在宿主机文件里保留 10–30 秒，现存容器均在配置恢复为 `id:` 写法之后创建，验证窗口没有覆盖任何一次启动。2026-10-29 在 `tribunal-regress`（镜像 `a113e08`）把配置改为 `bootstrap_admins: ["suntao"]` 后执行 `docker compose up -d --force-recreate`，新容器启动日志在 `storage opened` 之后出现 `auth.bootstrap_admins username entry is deprecated ...`，带 `index=0`、`binding=none`，不含用户名；随后恢复原配置。`cmd/server` 新增从 YAML 加载并展开 `${VAR}` 的启动回归测试。
+- 用户名写法的 `bootstrap_admins` 弃用告警（#103）：首轮两次尝试未观察到告警，另开 [#151](https://github.com/LeXwDeX/Tribunal/issues/151)。排查发现：按配置备份文件的修改时间，两次尝试中用户名写法只在宿主机文件里保留 10–30 秒，现存容器均在配置恢复为 `id:` 写法之后创建，验证窗口没有覆盖任何一次启动。2026-10-29 在隔离回归实例（镜像 `a113e08`）把配置改为 `bootstrap_admins: ["suntao"]` 后执行 `docker compose up -d --force-recreate`，新容器启动日志在 `storage opened` 之后出现 `auth.bootstrap_admins username entry is deprecated ...`，带 `index=0`、`binding=none`，不含用户名；随后恢复原配置。`cmd/server` 新增从 YAML 加载并展开 `${VAR}` 的启动回归测试。
 
 
 **2026-11-03 补充升级（`a113e08` → `2621c44`，`0020`–`0024` 与 #143）**
@@ -84,7 +84,7 @@ v1.2.0 尚未发布：版本说明已合并到 `main`，尚未打 tag，也未�
 - 在 `main` `86c3a668` 加未提交改动的工作区，2026-10-27 复跑 `go test -race -count=1 -timeout=150s -run '^TestRepositoryLogsUseErrorClass$' -v ./scripts/logcheck` 并通过。这是一次针对日志检查的本地测试，不代表工作区完整验证或发布验收。
 - 2026-10-28 针对停机资源收尾改动（`cmd/server/main.go`、`cmd/server/main_test.go`、`internal/app/runtime.go`、`internal/app/runtime_test.go`）运行 `go build ./...`、`go vet ./...`、staticcheck v0.8.2、govulncheck v1.9.0、`go test -race -timeout=40m ./...`，语句覆盖率 78.20%（18976/24266），并通过 `go mod verify`、licensecheck、licensebundle `-check` 和 `git diff --check`。独立 review 为 PASS，对抗推演确认 panic 路径的 handler/worker 屏障闭合。该结果只覆盖当前未提交工作区，不代表 CI 或真实实例验收；govulncheck 在本机读取了公共 Go 漏洞库元信息，不是离线扫描。
 - 2026-10-28 在 PR #128 合并前 head `eb1e277` 运行 AGENTS.md 规定的全量检查，全部通过：`npm ci`、`npm test -- --coverage`、`npm run build`、`web/dist` 一致性、`go build ./...`、`go vet ./...`、staticcheck v0.8.2、govulncheck v1.9.0、`go test -race -timeout=40m ./...`、`coveragecheck` **79.07%**、`go mod verify`、licensecheck、licensebundle `-check`。GitHub Actions 未启动；该结果是本地预检，不是 CI 结果。来源见 [PR #128 评论](https://github.com/LeXwDeX/Tribunal/pull/128)。
-- 2026-10-29 在 33.110 的临时目录按运维文档从零部署 `main` `96e8081`：`docker compose config --quiet`、`build`、`--check-config`、`up --wait` 通过；healthz/readyz 和控制台返回 200，未启用 OAuth 时 `/auth/login` 返回 503；容器以 uid 10001 运行，`/app/data` 为 0700，启动锁生效；内置 Skill 和 codebase-memory 已登记，MCP 配置 API 返回 `{}`，只暴露 13 个只读工具；`scripts/docker-smoke.sh` 通过且无残留。核对后已拆除该临时部署，不影响 `tribunal-regress` 和 `/opt/tribunal-test`。这是全新部署核对，不是 [#108](https://github.com/LeXwDeX/Tribunal/issues/108) 要求的真实数据升级验收。
+- 2026-10-29 在隔离真实实例的临时目录按运维文档从零部署 `main` `96e8081`：`docker compose config --quiet`、`build`、`--check-config`、`up --wait` 通过；healthz/readyz 和控制台返回 200，未启用 OAuth 时 `/auth/login` 返回 503；容器以 uid 10001 运行，`/app/data` 为 0700，启动锁生效；内置 Skill 和 codebase-memory 已登记，MCP 配置 API 返回 `{}`，只暴露 13 个只读工具；`scripts/docker-smoke.sh` 通过且无残留。核对后已拆除该临时部署，不影响隔离回归实例和另一个测试实例。这是全新部署核对，不是 [#108](https://github.com/LeXwDeX/Tribunal/issues/108) 要求的真实数据升级验收。
 - [#120](https://github.com/LeXwDeX/Tribunal/issues/120) 要求覆盖率不下降；尚未用可比的前后测量证明覆盖率严格不下降。PR #112 的 77.90% 和 PR #128 的 79.07% 不是同一候选上的前后对比，不证明后续工作区的覆盖率没有下降。
 
 **v1.2.0 改动的自动化覆盖（测试代码存在；实际运行结果见上述记录）**
