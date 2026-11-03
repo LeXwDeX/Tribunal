@@ -231,7 +231,7 @@ docker compose exec -T review /app/tribunalctl projects grants list "$PROJECT_ID
 
 v1.2.0 开箱自带两项内置扩展，不需要额外配置：
 
-- Skill `code-review`：v1.2.0 默认挂在 `code-review`、`review` 块上。当前未发布版本只默认挂到 `code-review` 块。
+- Skill `code-review`：v1.2.0 默认挂在 `code-review`、`review` 块上。包含 #143 的后续版本（当前 `main`）把 code-review Skill 默认挂载收窄到 `code-review` 块，并按新矩阵调整 `verify`/`onboarding` 的默认 MCP 授权。
 - MCP 服务器 `codebase-memory`：只读的代码图谱工具，各项目的索引互相隔离。默认 ignore 非空时，评审中的 MCP 工具和全量图谱索引不执行，这是安全降级，不影响 PASS；详见 [ignore 安全边界](operations.md#ignore-安全边界)。
 
 **验证**：控制台「扩展」页里，两项都带「内置」标签。在 MCP 服务器一栏点「测试」，工具列表里应有 `search_graph`、`trace_path`、`get_code_snippet`，并且没有 `index_repository`、`delete_project`。MCP 详情和列表的配置返回 `config: {}` 是预期行为。

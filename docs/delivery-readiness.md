@@ -26,11 +26,13 @@
 
 ## v1.2.0（待发布）验证状态
 
-v1.2.0 尚未发布：版本说明已合并到 `main`，尚未打 tag，也未发布 Release。变更清单见 [CHANGELOG](../CHANGELOG.md) 的 `[1.2.0] - 2026-10-29` 段；候选范围可用 [v1.1.0...main](https://github.com/LeXwDeX/Tribunal/compare/v1.1.0...main) 核对。本节最初以 `main` `96e8081` 为发布候选基线，真实实例升级验收在 `main` `a113e08` 上执行；另列后续工作区的本地检查。发布前必须补齐未完成项。
+v1.2.0 尚未发布：版本说明已合并到 `main`，尚未打 tag，也未发布 Release。变更清单见 [CHANGELOG](../CHANGELOG.md) 的 `[1.2.0] - 2026-10-29` 段；候选范围可用 [v1.1.0...a113e08](https://github.com/LeXwDeX/Tribunal/compare/v1.1.0...a113e08) 核对；`main` 上后续的迁移 `0020`–`0024` 与 #143 默认授权收窄不属于 v1.2.0。本节最初以 `main` `96e8081` 为发布候选基线，真实实例升级验收在 `main` `a113e08` 上执行；另列后续工作区的本地检查。发布前必须补齐未完成项。
 
-**状态汇总（GitHub Actions 已通过）**
+**状态汇总（候选 `a113e08` 的 GitHub Actions 未通过；当前 `main 8527e59` 已通过）**
 
-- [x] **GitHub Actions**：CI 使用 GitHub Actions hosted runner，`go`、`web`、`docker` 三个 job 已实际运行并通过。可核实的 run：`main` `d693d49` 的 push run [41397019128](https://github.com/LeXwDeX/Tribunal/actions/runs/41397019128)；PR #189 head `bcb8b20` 的 [41397129875](https://github.com/LeXwDeX/Tribunal/actions/runs/41397129875) 与 [41397162475](https://github.com/LeXwDeX/Tribunal/actions/runs/41397162475)；PR #179、#180、#181 的当前 head 也各有 push/PR 两套全绿检查。合并门禁是当前 head 的三项全绿，旧 head 与本地预检都不替代它。
+- [ ] **候选 `a113e08` 的 GitHub Actions 未通过**：run [40832017198](https://github.com/LeXwDeX/Tribunal/actions/runs/40832017198) 的 `go`、`web`、`docker` 三个 job 均为 failure；不能用当前 `main` 或其他 PR 的绿检查回填候选。
+- [x] **当前 `main 8527e59` 的 GitHub Actions 已通过**：push run [41547838777](https://github.com/LeXwDeX/Tribunal/actions/runs/41547838777) 的 `go`、`web`、`docker` 全部 success。它只证明 `main` 的当前 head，不证明候选 `a113e08`。
+- [x] **后续 PR 的检查**：PR #189、#179、#180、#181 的 head 各自有全绿检查；这些是历史 PR 证据，不替代候选的 CI。
 - [x] **真实 GitLab 实例验收**：[#108](https://github.com/LeXwDeX/Tribunal/issues/108) 已于 2026-10-29 在 `main` `a113e08` 上执行；剩余 5 项全部通过；其中 `bootstrap_admins` 弃用告警首轮未复现，经 [#151](https://github.com/LeXwDeX/Tribunal/issues/151) 排查后在真实实例复现。详见[真实实例升级验收（#108）](#v120-真实实例升级验收)。真实实例验收与 GitHub Actions 是独立证据；v1.0.0 的 f143 结果不覆盖本版本，见[历史验收记录](#v100-历史验收记录f143仅供追溯)。
 
 <a id="v120-真实实例升级验收"></a>
@@ -129,7 +131,7 @@ v1.2.0 尚未发布：版本说明已合并到 `main`，尚未打 tag，也未�
 
 ## 迁移与回退边界
 
-- 迁移实现：`internal/store/sqlite/sqlite.go` 的 `migrate()`；当前工作区迁移文件为 `0001`、`0003`–`0020`，共 19 个（没有 `0002`）。其中 `0016`–`0019` 属于 v1.2.0，`0020` 属于包含 #159 的后续版本；v1.2.0 升级基线仍为 `0001`、`0003`–`0019`，共 18 个。确认迁移结果时按已知版本集合核对，不把最大版本号当数量。
+- 迁移实现：`internal/store/sqlite/sqlite.go` 的 `migrate()`；当前工作区迁移文件为 `0001`、`0003`–`0024`，共 23 个（没有 `0002`）。其中 `0016`–`0019` 属于 v1.2.0，`0020` 属于包含 #159 的后续版本，`0021`–`0024` 属于后续版本；v1.2.0 升级基线仍为 `0001`、`0003`–`0019`，共 18 个。确认迁移结果时按已知版本集合核对，不把最大版本号当数量。
 - 每个未应用迁移单独开事务；没有 down migration。启动时只跳过 `schema_migrations` 已记录的版本；数据库中已记录、但不在当前嵌入文件列表的高版本会被忽略而不报错。
 - `migration_rollback_test` 只覆盖 `0004` 单文件在“建表完成、记录版本前”失败时的事务回滚及之后重试；不覆盖整批升级失败、跨版本回滚或降级。
 - `0007` 给 `users` 增加 `disabled`，并新建空的 `project_grants`；升级不会给任何用户创建 grant。
