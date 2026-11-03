@@ -91,7 +91,7 @@ func gitLabVisibleText(rendered string) string {
 func gitLabSandboxHasLabel(t *testing.T, name string) bool {
 	t.Helper()
 	if os.Getenv("TRIBUNAL_TEST_GITLAB_MARKDOWN") != "1" {
-		return false
+		t.Skip("set TRIBUNAL_TEST_GITLAB_MARKDOWN=1 for the GitLab labels API")
 	}
 	host, project := os.Getenv("TRIBUNAL_TEST_GITLAB_HOST"), os.Getenv("TRIBUNAL_TEST_GITLAB_PROJECT")
 	if host == "" || project == "" {
@@ -144,7 +144,11 @@ func TestGitLabRenderedUnmatchedTildesDoNotLink(t *testing.T) {
 
 func TestGitLabRenderedOneLineReferencesAndLiteralText(t *testing.T) {
 	const sha = "bcdffc81e2b63cb028f0e0cfc1475430e6fc1cbc"
-	literal := sha + " " + gitLabTestProject(t) + "> @suntao #1 !1 $1 %r ~x &123 *x* _x_ <img>"
+	project := gitLabTestProject(t)
+	if len([]rune(project)) > 30 {
+		t.Skip("project path is too long for the title fixture")
+	}
+	literal := sha + " " + project + "> @suntao #1 !1 $1 %r ~x &123 *x* _x_ <img>"
 	group := renderGroup("reference", ActionMark, SeverityP1, false, literal, "Body")
 	group.Decision.Reason = literal
 	out, err := RenderSummary(SummaryInput{Verdict: VerdictBlocking, Summary: "Summary", Groups: []Group{group}, Warnings: []string{literal}, Fingerprint: "abc", HeadSHA: sha, Profile: sha})
@@ -172,7 +176,11 @@ func TestGitLabRenderedOneLineReferencesAndLiteralText(t *testing.T) {
 
 func TestGitLabRenderedInlineReferencesAndURLs(t *testing.T) {
 	const sha = "bcdffc81e2b63cb028f0e0cfc1475430e6fc1cbc"
-	title := "bcdffc8 " + gitLabTestProject(t) + "> \\@suntao"
+	project := gitLabTestProject(t)
+	if len([]rune(project)) > 30 {
+		t.Skip("project path is too long for the title fixture")
+	}
+	title := "bcdffc8 " + project + "> \\@suntao"
 	const reason = sha + " https://example.invalid www.example.invalid person@example.invalid &123"
 	group := renderGroup("inline-reference", ActionMark, SeverityP1, true, title, "Body")
 	group.Decision.Reason = reason

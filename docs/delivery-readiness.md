@@ -322,7 +322,7 @@ docker compose exec -T review /app/tribunalctl projects all
 
 ### 隔离测试实例结果
 
-- 管理面：bootstrap 可访问 admin 路由（200），项目业务路由返回 404；viewer 仅见第一个测试项目，跨第二个测试项目的项目/评审/SSE/统计均 404，admin users 403。
+- 管理面：bootstrap 可访问 admin 路由（200），项目业务路由返回 404；viewer 仅见第二个测试项目，跨第一个测试项目的项目/评审/SSE/统计均 404，admin users 403。
 - OAuth/项目授权：管理员用户对第一个测试项目有 `manage`，viewer 用户对第二个测试项目有 `read`；CSRF 缺失返回 403、有效 token 返回 200；跨项目读取返回 404；viewer 写操作返回 403；既有两个 OAuth 会话跨升级保留。
 - SSE/撤权：撤 grant 后已有 SSE 在 1986ms 内关闭；撤权后读取 404，恢复 grant 后读取 200。
 - Webhook：真实启用并发幂等；停用、重新启用和重建都保留外部同 URL hook；归属只按持久化的自有 hook ID 判断，不做 URL 匹配。
