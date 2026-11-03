@@ -6,7 +6,7 @@ GitLab CE MR 多 agent 自动评审服务
 
 当前 M0–M6 功能已有本地实现，覆盖项目注册与 webhook、三种 LLM 协议、agent 工具循环、DAG 与持久化、主 agent 编排/对抗核验/裁决、GitLab 发布、工作区、MCP/Skill、OAuth 持久会话、项目 `read`/`manage` 授权与 CSRF、管理 API、React 控制台、API token、统计、反馈采集、人工标注与许可证清单。
 
-当前最新发布版本是 **v1.1.0**，待发布版本是 **v1.2.0**；变更和升级必读见 [CHANGELOG](CHANGELOG.md)。v1.2.0 尚未打 tag；真实实例升级验收在 `a113e08` 完成。该基线的 CI 在 attempt 1 因账户额度未启动，attempt 2 因旧测试 `TestSandboxIgnoreGitLogStrictAndCompatibility` 失败；修复在 `0fe72b5`，但该提交还包含 #143 等后续版本改动，不能直接作为 v1.2.0 候选。发布前需从 `a113e08` cherry-pick 该测试修复并重跑 CI，或由维护者明确扩大 v1.2.0 范围。完整验证状态见 [v1.2.0（待发布）验证状态](docs/delivery-readiness.md#v120-验证状态)。
+当前最新发布版本是 **v1.1.0**，待发布版本是 **v1.2.0**；变更和升级必读见 [CHANGELOG](CHANGELOG.md)。v1.2.0 尚未打 tag；范围已扩大到当前 `main`，包含 #143 与迁移 `0020`–`0024`。真实实例升级验收基线是 `a113e08`，覆盖迁移 `0016`–`0019`；`0020`–`0024` 与 #143 尚未在真实实例升级验收。CI 以最终 tag commit 的 GitHub Actions 结果为准。完整验证状态见 [v1.2.0（待发布）验证状态](docs/delivery-readiness.md#v120-验证状态)。
 
 部署时：人工部署看 [部署与运维](docs/operations.md)，由 agent 代为部署和接入时用 [Agent 部署指南](docs/agent-deployment.md)。
 

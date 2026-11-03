@@ -26,15 +26,15 @@
 
 ## v1.2.0（待发布）验证状态
 
-v1.2.0 尚未发布：版本说明已合并到 `main`，尚未打 tag，也未发布 Release。变更清单见 [CHANGELOG](../CHANGELOG.md) 的 `[1.2.0] - 2026-10-29` 段；原始候选范围可用 [v1.1.0...a113e08](https://github.com/LeXwDeX/Tribunal/compare/v1.1.0...a113e08) 核对；`a113e08` 也是真实实例升级验收基线。`main` 上后续的迁移 `0020`–`0024` 与 #143 默认授权收窄不属于 v1.2.0。本节最初以 `main` `96e8081` 为发布候选基线，真实实例升级验收在 `main` `a113e08` 上执行；另列后续工作区的本地检查。发布前必须补齐未完成项。
+v1.2.0 尚未发布：版本说明已合并到 `main`，尚未打 tag，也未发布 Release。变更清单见 [CHANGELOG](../CHANGELOG.md) 的 `[1.2.0] - 2026-10-29` 段；范围已扩大到当前 `main`，候选范围可用 [v1.1.0...main](https://github.com/LeXwDeX/Tribunal/compare/v1.1.0...main) 核对，包含 #143 与迁移 `0020`–`0024`。真实实例升级验收基线是 `a113e08`，覆盖迁移 `0016`–`0019`；`0020`–`0024` 与 #143 尚未在真实实例升级验收。本节最初以 `main` `96e8081` 为发布候选基线，另列后续工作区的本地检查。发布前必须补齐未完成项。
 
-**状态汇总（`a113e08` 的 CI 未通过；修复提交 `0fe72b5` 与当前 `main` 的 CI 全绿，但修复提交夹带后续版本改动）**
+**状态汇总（真实实例验收只覆盖 `a113e08`/`0016`–`0019`；CI 以最终 tag commit 的 head 为准）**
 
-- [ ] **验收基线 `a113e08` 的 GitHub Actions 未通过**：run [40832017198](https://github.com/LeXwDeX/Tribunal/actions/runs/40832017198) 的 attempt 1 因账户额度未启动，`go`、`web`、`docker` 均为 failure；attempt 2 中 `go` 因旧测试 `TestSandboxIgnoreGitLogStrictAndCompatibility` 失败（strict git log 输出 UTC `Z`，旧正则只接受时区偏移），`web`、`docker` success。
+- [x] **已核实的 CI 历史**：`0fe72b5` 和 `c7a3dde` 的 push run `go`、`web`、`docker` 全部 success（`c7a3dde` 为 run [41553674842](https://github.com/LeXwDeX/Tribunal/actions/runs/41553674842)）；`5371df6`（#217 合并后）的 run 在本文件修改时仍在运行。发布时以最终 tag commit 的当前 head 为准。
 - [x] **修复提交 `0fe72b5` 的 GitHub Actions 已通过**：`go`、`web`、`docker` 全部 success；该修复把日期正则改为允许 `Z` 和时区偏移（#172）。
-- [x] **当前 `main c7a3dde` 的 GitHub Actions 已通过**：push run [41553674842](https://github.com/LeXwDeX/Tribunal/actions/runs/41553674842)（`run_attempt=2`）三项 success。
-- [ ] **不能直接用 `0fe72b5` 回填 v1.2.0**：`a113e08..0fe72b5` 包含 #143（`4839248`）等后续版本改动，整体作为候选会扩大 v1.2.0 范围。发布前需从 `a113e08` cherry-pick 测试修复并重跑 CI，或由维护者明确扩大 v1.2.0 范围。
-- [x] **真实 GitLab 实例验收**：[#108](https://github.com/LeXwDeX/Tribunal/issues/108) 已于 2026-10-29 在 `main` `a113e08` 上执行；剩余 5 项全部通过；其中 `bootstrap_admins` 弃用告警首轮未复现，经 [#151](https://github.com/LeXwDeX/Tribunal/issues/151) 排查后在真实实例复现。详见[真实实例升级验收（#108）](#v120-真实实例升级验收)。真实实例验收与 GitHub Actions 是独立证据；v1.0.0 的 f143 结果不覆盖本版本，见[历史验收记录](#v100-历史验收记录f143仅供追溯)。
+- [x] **验收基线 `a113e08` 的 CI 历史**：attempt 1 因账户额度未启动；attempt 2 的 `go` 因旧测试 `TestSandboxIgnoreGitLogStrictAndCompatibility` 失败，`web`、`docker` success。该失败已由 `0fe72b5` 修复，不再是当前阻塞。
+- [ ] **真实实例升级验收只覆盖 `a113e08`/`0016`–`0019`**：`0020`–`0024` 与 #143 尚未在真实实例升级验收；发布前需补做，或由维护者明确接受该缺口。
+- [x] **真实 GitLab 实例验收（历史）**：[#108](https://github.com/LeXwDeX/Tribunal/issues/108) 已于 2026-10-29 在 `main` `a113e08` 上执行；剩余 5 项全部通过；其中 `bootstrap_admins` 弃用告警首轮未复现，经 [#151](https://github.com/LeXwDeX/Tribunal/issues/151) 排查后在真实实例复现。详见[真实实例升级验收（#108）](#v120-真实实例升级验收)。真实实例验收与 GitHub Actions 是独立证据；v1.0.0 的 f143 结果不覆盖本版本，见[历史验收记录](#v100-历史验收记录f143仅供追溯)。
 
 <a id="v120-真实实例升级验收"></a>
 
@@ -132,7 +132,7 @@ v1.2.0 尚未发布：版本说明已合并到 `main`，尚未打 tag，也未�
 
 ## 迁移与回退边界
 
-- 迁移实现：`internal/store/sqlite/sqlite.go` 的 `migrate()`；当前工作区迁移文件为 `0001`、`0003`–`0024`，共 23 个（没有 `0002`）。其中 `0016`–`0019` 属于 v1.2.0，`0020` 属于包含 #159 的后续版本，`0021`–`0024` 属于后续版本；v1.2.0 升级基线仍为 `0001`、`0003`–`0019`，共 18 个。确认迁移结果时按已知版本集合核对，不把最大版本号当数量。
+- 迁移实现：`internal/store/sqlite/sqlite.go` 的 `migrate()`；当前工作区迁移文件为 `0001`、`0003`–`0024`，共 23 个（没有 `0002`）。其中 `0016`–`0024` 均属于 v1.2.0；v1.2.0 升级基线为 `0001`、`0003`–`0024`，共 23 个。确认迁移结果时按已知版本集合核对，不把最大版本号当数量。
 - 每个未应用迁移单独开事务；没有 down migration。启动时只跳过 `schema_migrations` 已记录的版本；数据库中已记录、但不在当前嵌入文件列表的高版本会被忽略而不报错。
 - `migration_rollback_test` 只覆盖 `0004` 单文件在“建表完成、记录版本前”失败时的事务回滚及之后重试；不覆盖整批升级失败、跨版本回滚或降级。
 - `0007` 给 `users` 增加 `disabled`，并新建空的 `project_grants`；升级不会给任何用户创建 grant。
@@ -140,8 +140,12 @@ v1.2.0 尚未发布：版本说明已合并到 `main`，尚未打 tag，也未�
 - v1.1.0 新增 `0013_admin_bindings`、`0014_extension_defaults`、`0015_secret_migration`；启动时还会把已存项目凭据改写为新的加密格式，v1.0.0 读不了新格式。升级步骤见 [从 v1.0.0 升级到 v1.1.0](operations.md#从-v100-升级到-v110)。
 - v1.2.0 新增 `0016_dossier_mr_title`，只对 `workflow_dossiers` 执行 `ALTER TABLE ... ADD COLUMN mr_title TEXT NOT NULL DEFAULT ''`。它不改写已有行，不回填旧评审，也不改变既有索引；升级前保存的 dossier 标题为空。
 - v1.2.0 新增 `0017_mcp_config_seal`，追加 MCP 密文列和密钥校验表。启动时的数据回填另开事务，失败保留旧配置；成功后旧程序不再能读取这些配置。当前列清空不保证历史磁盘页、WAL 或备份中的明文已擦除。
-- v1.2.0 新增 `0018_dossier_project`，只根据已关联 workflow 回填 dossier 项目归属，不改压缩快照内容。无关联证明的历史孤儿保持未知，不猜测删除。两项迁移均没有 down migration。
-- 包含 #159 的后续版本只新增 `0020_review_command_replay`。启动时在独立事务回填可证明的旧命令，隔离由旧命令 payload 或 reaction 标识但无法证明的旧 note，并与唯一回填标记一起提交；reaction 不证明受理或命令种类，保守隔离可能拦截实际上从未执行的命令。schema 迁移完成不代表回填完成。没有可识别历史的旧命令，以及 reaction 中已舍入的大 note ID，仍可能在新 UUID 重发时漏过隔离；操作和回退限制见[命令重放幂等迁移](operations.md#命令重放幂等迁移后续版本)。
+- v1.2.0 新增 `0018_dossier_project`，只根据已关联 workflow 回填 dossier 项目归属，不改压缩快照内容。无关联证明的历史孤儿保持未知，不猜测删除。
+- v1.2.0 新增 `0019_job_defer_window`，只追加 `jobs.defer_since`；连续执行权争用超过 15 分钟按失败结算，旧行保持 NULL 兼容。
+- v1.2.0 新增 `0020_review_command_replay`。启动时在独立事务回填可证明的旧命令，隔离由旧命令 payload 或 reaction 标识但无法证明的旧 note，并与唯一回填标记一起提交；reaction 不证明受理或命令种类，保守隔离可能拦截实际上从未执行的命令。schema 迁移完成不代表回填完成。没有可识别历史的旧命令，以及 reaction 中已舍入的大 note ID，仍可能在新 UUID 重发时漏过隔离；操作和回退限制见[命令重放幂等迁移](operations.md#命令重放幂等迁移v120)。
+- v1.2.0 新增 `0021_repository_skill_authorizations`、`0022_discussion_intents` 和 `0023_repository_skill_snapshot_sha256`：分别建立仓库 Skill 授权表、讨论意图表和授权快照 hash。仓库 Skill 在执行前复核目标 tip 和过滤快照 hash，不一致时 fail closed；讨论意图在发送前以局部 `FULL` 同步写入。
+- v1.2.0 新增 `0024_workflow_usage_incomplete`，只追加 `usage_incomplete` 标记；历史 false 只表示未检测到缺失，不证明用量完整，旧二进制可能因严格解码拒绝新事件。
+- 以上迁移均没有 down migration。
 - 旧二进制可能打开已被新版本迁移的 schema，但它没有新权限逻辑，也读不了新格式密文，不能据此把“能启动”当作可安全回退。v1.2.0 迁移之后旧二进制读取新 schema 不受支持；回退只能恢复升级前的一致性备份。
 - v1.2.0 升级前的一致性备份：核对生效的 `storage.dsn`、`workspace.root` 和全部实际挂载；停止旧服务后备份数据库、可能存在的 `-wal`/`-shm` 和所有工作区，并另存配置、镜像 digest 与 `REVIEW_MASTER_KEY`。只有符合默认路径和挂载前提时才能复制整个 `/app/data`；自定义路径、分离卷或额外/重叠挂载须按实际布局分别备份。运行中只复制数据库文件不是一致备份。恢复到匹配布局的新空位置，不覆盖旧数据、不混入旧 WAL，否则数据库与工作区可能来自不同时间点。操作步骤见 [SQLite 一致性备份与恢复](operations.md#7-sqlite-一致性备份与恢复)。
 
@@ -182,7 +186,7 @@ Tribunal 升级注意：镜像 tag 改为 `tribunal:*`；CLI 使用 `/app/tribun
 
 1. 完成前置记录和备份校验，确认旧镜像与备份均可恢复。
 2. 隔离入口，停止旧服务，保存升级前全量快照。
-3. 复制快照到隔离环境，启动新镜像；阻断外联，观察迁移、worker、recover 和 cleanup。按 v1.2.0 升级基线确认迁移记录为 18 个已知版本（`0001`、`0003`–`0019`；不含后续版本的 `0020`），并核对 `0017_mcp_config_seal` 和 `0018_dossier_project`，不把最大版本号当数量。
+3. 复制快照到隔离环境，启动新镜像；阻断外联，观察迁移、worker、recover 和 cleanup。按 v1.2.0 升级基线确认迁移记录为 23 个已知版本（`0001`、`0003`–`0024`），并核对 `0017_mcp_config_seal`、`0018_dossier_project` 和 `0020`–`0024`，不把最大版本号当数量。
 4. 隔离验证通过且已获部署授权后，在目标测试数据卷启动新镜像；等待 `/readyz` 200，检查日志和迁移错误。
 5. 先完成阶段 A 管理面检查，再执行阶段 B 授权；授权完成前不向普通用户开放业务入口。
 6. 按验收矩阵逐项记录；任何跨项目访问、误 PASS、数据损坏或迁移失败都触发回退评估。
@@ -214,7 +218,7 @@ docker compose exec -T review /app/tribunalctl projects all
 
 ## 真实验收矩阵
 
-使用 2 个用户、2 个项目，建议记为 U1/U2、P1/P2。本矩阵是每次升级都要用的模板；v1.1.x 和 v1.2.0 均尚无真实实例结果。v1.0.0（f143）测试实例的结果见 [v1.0.0 历史验收矩阵结果](#v100-验收矩阵结果)。隔离外部调用会产生真实模型用量，需事先获得授权。「自动化覆盖」列是用 fake store、fake GitLab 和 fake provider 跑的本地回归测试（`internal/server`、`internal/app`），只证明代码路径的语义，不替代真实实例验收。
+使用 2 个用户、2 个项目，建议记为 U1/U2、P1/P2。本矩阵是每次升级都要用的模板；完整 2 用户／2 项目矩阵在 v1.1.x 尚无逐项结果，v1.2.0 的 #108 验收只覆盖 `a113e08`/`0016`–`0019`，`0020`–`0024` 和 #143 仍待补做。v1.0.0（f143）测试实例的结果见 [v1.0.0 历史验收矩阵结果](#v100-验收矩阵结果)。隔离外部调用会产生真实模型用量，需事先获得授权。「自动化覆盖」列是用 fake store、fake GitLab 和 fake provider 跑的本地回归测试（`internal/server`、`internal/app`），只证明代码路径的语义，不替代真实实例验收。
 
 | 场景 | 操作 | 预期 | 自动化覆盖 |
 |---|---|---|---|
