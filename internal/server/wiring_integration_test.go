@@ -391,24 +391,18 @@ func TestWiringWorkspaceRefreshEnqueuesJob(t *testing.T) {
 	}
 }
 
-func TestWiringMCPCRUDRoundtrip(t *testing.T) {
+func TestWiringMCPLegacyCRUDRoundtrip(t *testing.T) {
 	env := newWiringEnv(t)
 	client := env.bearer()
 
-	created := client.json(http.MethodPost, "/api/v1/mcp-servers", map[string]any{
-		"scope": "platform",
-		"name":  "github",
-		"config": map[string]any{
-			"command": "npx",
-			"env":     map[string]any{"API_KEY": "super-secret"},
-		},
+	created, err := env.db.CreateMCPServer(context.Background(), store.MCPServer{
+		Scope: "platform", Name: "github", Enabled: true,
+		Config: json.RawMessage(`{"command":"npx","env":{"API_KEY":"super-secret"}}`),
 	})
-	assertStatus(t, created, http.StatusCreated)
-	createdBody := decodeMap(t, created.body)
-	id, _ := createdBody["id"].(string)
-	if id == "" {
-		t.Fatalf("created server has no id: %s", created.body)
+	if err != nil {
+		t.Fatal(err)
 	}
+	id := created.ID
 	rows, err := env.db.ListMCPServers(context.Background(), "platform", nil)
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("stored servers = %+v, %v", rows, err)

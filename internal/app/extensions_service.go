@@ -51,7 +51,7 @@ type MCPServer struct {
 	Config    json.RawMessage `json:"config"`
 	Enabled   bool            `json:"enabled"`
 	// Builtin marks a server shipped with the platform. Its config follows
-	// the release; it can be disabled but not renamed, edited or deleted.
+	// the release; it cannot be disabled, renamed, edited or deleted.
 	Builtin   bool      `json:"builtin"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -95,8 +95,7 @@ type Skill struct {
 	Description string `json:"description"`
 	Dir         string `json:"dir,omitempty"`
 	Enabled     bool   `json:"enabled"`
-	// Builtin marks a skill shipped with the platform. It can be disabled
-	// but not deleted.
+	// Builtin marks a skill shipped with the platform; it cannot be disabled or deleted.
 	Builtin   bool      `json:"builtin"`
 	CreatedAt time.Time `json:"created_at"`
 }
@@ -372,7 +371,8 @@ func (s *ExtensionService) UpdateMCPServer(ctx context.Context, id string, updat
 	}
 	defer unlock()
 	if current.Builtin != "" &&
-		(update.Config != nil || (update.Name != nil && strings.TrimSpace(*update.Name) != current.Name)) {
+		(update.Config != nil || (update.Name != nil && strings.TrimSpace(*update.Name) != current.Name) ||
+			(update.Enabled != nil && !*update.Enabled)) {
 		return nil, conflictError(errBuiltinMCPServerManaged)
 	}
 	if update.Name != nil {
@@ -405,7 +405,7 @@ func (s *ExtensionService) UpdateMCPServer(ctx context.Context, id string, updat
 }
 
 // DeleteMCPServer removes one server.
-// Built-in servers cannot be deleted; they are disabled instead.
+// Built-in servers cannot be deleted.
 func (s *ExtensionService) DeleteMCPServer(ctx context.Context, id string) error {
 	current, unlock, err := s.lockMCPServer(ctx, id)
 	if err != nil {
@@ -413,7 +413,7 @@ func (s *ExtensionService) DeleteMCPServer(ctx context.Context, id string) error
 	}
 	defer unlock()
 	if current.Builtin != "" {
-		return conflictError("built-in MCP servers cannot be deleted; disable them instead")
+		return conflictError("built-in MCP servers cannot be deleted")
 	}
 	if err := s.store.DeleteMCPServer(ctx, id); err != nil {
 		return extensionStoreError(err)
@@ -605,7 +605,7 @@ func (s *ExtensionService) persistSkillDir(ctx context.Context, scope string, pr
 
 // DeleteSkill removes one skill row and its managed directory. Directories
 // outside the managed root (legacy rows) are left untouched. Built-in skills
-// cannot be deleted; they are disabled instead.
+// cannot be deleted.
 func (s *ExtensionService) DeleteSkill(ctx context.Context, id string) error {
 	row, unlock, err := s.lockSkill(ctx, id)
 	if err != nil {
@@ -613,7 +613,7 @@ func (s *ExtensionService) DeleteSkill(ctx context.Context, id string) error {
 	}
 	defer unlock()
 	if row.Builtin != "" {
-		return conflictError("built-in skills cannot be deleted; disable them instead")
+		return conflictError("built-in skills cannot be deleted")
 	}
 	if err := s.store.DeleteSkill(ctx, id); err != nil {
 		return extensionStoreError(err)
@@ -639,11 +639,14 @@ func (s *ExtensionService) GetSkill(ctx context.Context, id string) (*Skill, err
 // SetSkillEnabled enables or disables one skill. A disabled skill is not
 // loaded, and blocks that still name it run without it.
 func (s *ExtensionService) SetSkillEnabled(ctx context.Context, id string, enabled bool) (*Skill, error) {
-	_, unlock, err := s.lockSkill(ctx, id)
+	current, unlock, err := s.lockSkill(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 	defer unlock()
+	if current.Builtin != "" && !enabled {
+		return nil, conflictError("built-in skills cannot be disabled")
+	}
 	if err := s.store.SetSkillEnabled(ctx, id, enabled); err != nil {
 		return nil, extensionStoreError(err)
 	}
@@ -1250,7 +1253,7 @@ func mcpServerFromStore(row store.MCPServer) MCPServer {
 }
 
 // errBuiltinMCPServerManaged rejects changes the release owns.
-const errBuiltinMCPServerManaged = "built-in MCP servers follow the platform release; only enabled can change"
+const errBuiltinMCPServerManaged = "built-in MCP server configuration follows the platform release and servers cannot be disabled"
 
 func skillFromStore(row store.Skill) Skill {
 	return Skill{

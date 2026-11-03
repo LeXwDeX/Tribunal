@@ -200,28 +200,22 @@ func TestExtensionScopeAuthorization(t *testing.T) {
 		})
 	}
 
-	// Host execution configuration is admin-only and additionally needs
-	// manage on the project. Read grants cannot create project extensions.
-	bobCreate := bob.json(http.MethodPost, "/api/v1/mcp-servers", map[string]any{
-		"scope": "project", "project_id": 43, "name": "server",
-		"config": map[string]any{"command": "npx"},
-	})
+	// Updates still require the platform admin role and project manage grant.
+	project42, project43 := int64(42), int64(43)
+	env.extensions.servers = []MCPServer{
+		{ID: "platform", Scope: "platform", Name: "platform", Enabled: true},
+		{ID: "project42", Scope: "project", ProjectID: &project42, Name: "project42", Enabled: true},
+		{ID: "project43", Scope: "project", ProjectID: &project43, Name: "project43", Enabled: true},
+	}
+	bobCreate := bob.json(http.MethodPut, "/api/v1/mcp-servers/project43", map[string]any{"enabled": false})
 	assertStatus(t, bobCreate, http.StatusForbidden)
-	bobPlatform := bob.json(http.MethodPost, "/api/v1/mcp-servers", map[string]any{
-		"scope": "platform", "name": "server", "config": map[string]any{"command": "npx"},
-	})
+	bobPlatform := bob.json(http.MethodPut, "/api/v1/mcp-servers/platform", map[string]any{"enabled": false})
 	assertStatus(t, bobPlatform, http.StatusForbidden)
 
 	// Alice is a platform admin but still needs the manage grant.
-	aliceCreate := alice.json(http.MethodPost, "/api/v1/mcp-servers", map[string]any{
-		"scope": "project", "project_id": 42, "name": "server",
-		"config": map[string]any{"command": "npx"},
-	})
-	assertStatus(t, aliceCreate, http.StatusCreated)
-	aliceOther := alice.json(http.MethodPost, "/api/v1/mcp-servers", map[string]any{
-		"scope": "project", "project_id": 43, "name": "other",
-		"config": map[string]any{"command": "npx"},
-	})
+	aliceCreate := alice.json(http.MethodPut, "/api/v1/mcp-servers/project42", map[string]any{"enabled": false})
+	assertStatus(t, aliceCreate, http.StatusOK)
+	aliceOther := alice.json(http.MethodPut, "/api/v1/mcp-servers/project43", map[string]any{"enabled": false})
 	assertStatus(t, aliceOther, http.StatusNotFound)
 }
 

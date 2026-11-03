@@ -1,9 +1,8 @@
 import { Fragment, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import {
-  createMcpServer, deleteMcpServer, deleteSkill, importMcpServers, listBindings, listMcpServers,
-  listSkills, registerSkillDirectory, restoreDefaultBindings, saveBinding, setSkillEnabled, testMcpServer,
-  updateMcpServer, uploadSkill,
+  deleteMcpServer, deleteSkill, listBindings, listMcpServers, listSkills, restoreDefaultBindings,
+  saveBinding, setSkillEnabled, testMcpServer, updateMcpServer,
 } from '../../api/api'
 import { ApiError, errorMessage } from '../../api/client'
 import type {
@@ -68,13 +67,12 @@ type ExtensionsManagerProps = {
 }
 
 export function ExtensionsManager(props: ExtensionsManagerProps) {
-  const [addOpen, setAddOpen] = useState(false)
-  return <ScopedExtensionsManager key={`${props.scope}-${props.projectId ?? ''}`} {...props} addOpen={addOpen} setAddOpen={setAddOpen} />
+  return <ScopedExtensionsManager key={`${props.scope}-${props.projectId ?? ''}`} {...props} />
 }
 
 function ScopedExtensionsManager({
-  scope, projectId, tab, onTabChange, projects = [], canManage = false, placeholder, notice, addOpen, setAddOpen,
-}: ExtensionsManagerProps & { addOpen: boolean; setAddOpen: (open: boolean) => void }) {
+  scope, projectId, tab, onTabChange, projects = [], canManage = false, placeholder, notice,
+}: ExtensionsManagerProps) {
   const platformAdmin = useCanWrite()
   // Every extension write changes host execution security, so the server
   // requires the platform admin role. Project scope additionally requires the
@@ -83,13 +81,10 @@ function ScopedExtensionsManager({
   const toast = useToast()
   const queryClient = useQueryClient()
   const [testResults, setTestResults] = useState<Record<string, { tools?: McpTool[]; error?: string; pending?: boolean }>>({})
-  const [importOpen, setImportOpen] = useState(false)
   const [editServer, setEditServer] = useState<McpServer | null>(null)
   const [deleteServer, setDeleteServer] = useState<McpServer | null>(null)
   const [deletePending, setDeletePending] = useState(false)
   const [deleteError, setDeleteError] = useState<unknown>(null)
-  const [uploadOpen, setUploadOpen] = useState(false)
-  const [directoryOpen, setDirectoryOpen] = useState(false)
   const [deleteSkillTarget, setDeleteSkillTarget] = useState<Skill | null>(null)
   const [skillDeletePending, setSkillDeletePending] = useState(false)
   const [skillDeleteError, setSkillDeleteError] = useState<unknown>(null)
@@ -206,16 +201,6 @@ function ScopedExtensionsManager({
     }
   }
 
-  const toggleServer = async (target: McpServer) => {
-    try {
-      await updateMcpServer(target.id, { enabled: !target.enabled })
-      toast.push('success', target.enabled ? 'MCP 服务器已停用，重启服务后生效。' : 'MCP 服务器已启用，重启服务后生效。')
-      await invalidateServers()
-    } catch (error) {
-      toast.push('error', errorMessage(error))
-    }
-  }
-
   const toggleSkill = async (target: Skill) => {
     try {
       await setSkillEnabled(target.id, !target.enabled)
@@ -248,15 +233,11 @@ function ScopedExtensionsManager({
         <McpTab
           canWrite={canWrite}
           scope={scope}
-          projectId={projectId}
           projectName={projectName}
           servers={servers}
           testResults={testResults}
           onTest={runTest}
-          onAdd={() => setAddOpen(true)}
-          onImport={() => setImportOpen(true)}
           onEdit={setEditServer}
-          onToggle={toggleServer}
           onDelete={setDeleteServer}
         />
       ) : null}
@@ -266,8 +247,6 @@ function ScopedExtensionsManager({
           canWrite={canWrite}
           skills={skills}
           bindings={bindings.items}
-          onUpload={() => setUploadOpen(true)}
-          onDirectory={() => setDirectoryOpen(true)}
           onToggle={toggleSkill}
           onDelete={setDeleteSkillTarget}
         />
@@ -290,15 +269,7 @@ function ScopedExtensionsManager({
       ) : null}
       </div>
 
-      {canWrite ? (
-        <>
-          {addOpen ? <AddMcpDialog key={`${scope}-${projectId ?? ''}`} open scope={scope} projectId={projectId} onClose={() => setAddOpen(false)} onSaved={() => { void invalidateServers() }} /> : null}
-          {importOpen ? <ImportMcpDialog open scope={scope} projectId={projectId} onClose={() => setImportOpen(false)} onSaved={() => { void invalidateServers() }} /> : null}
-          {editServer ? <EditMcpDialog server={editServer} onClose={() => setEditServer(null)} onSaved={() => { void invalidateServers() }} /> : null}
-          {uploadOpen ? <UploadSkillDialog open scope={scope} projectId={projectId} onClose={() => setUploadOpen(false)} onSaved={() => { void invalidateSkills() }} /> : null}
-          {directoryOpen ? <DirectorySkillDialog open scope={scope} projectId={projectId} onClose={() => setDirectoryOpen(false)} onSaved={() => { void invalidateSkills() }} /> : null}
-        </>
-      ) : null}
+      {canWrite && editServer ? <EditMcpDialog server={editServer} onClose={() => setEditServer(null)} onSaved={() => { void invalidateServers() }} /> : null}
 
       <ConfirmDialog
         open={Boolean(deleteServer)}
@@ -325,19 +296,15 @@ function ScopedExtensionsManager({
 }
 
 function McpTab({
-  canWrite, scope, projectName, servers, testResults, onTest, onAdd, onImport, onEdit, onToggle, onDelete,
+  canWrite, scope, projectName, servers, testResults, onTest, onEdit, onDelete,
 }: {
   canWrite: boolean
   scope: string
-  projectId?: number
   projectName: string
   servers: ReturnType<typeof useScopeQuery>
   testResults: Record<string, { tools?: McpTool[]; error?: string; pending?: boolean }>
   onTest: (server: McpServer) => void
-  onAdd: () => void
-  onImport: () => void
   onEdit: (server: McpServer) => void
-  onToggle: (server: McpServer) => void
   onDelete: (server: McpServer) => void
 }) {
   return (
@@ -345,16 +312,10 @@ function McpTab({
       title="MCP 服务器"
       aside={scope === 'platform' ? '平台级' : `项目级 · ${projectName}`}
     >
-      {canWrite ? (
-        <div className={styles.actionsRight}>
-          <Button variant="secondary" onClick={onImport}>粘贴 Claude Code 配置导入</Button>
-          <Button variant="primary" onClick={onAdd}>新增 MCP 服务器</Button>
-        </div>
-      ) : null}
       {servers.isPending ? <LoadingState /> : null}
       {servers.isError ? <ErrorState error={servers.error} onRetry={servers.retry} /> : null}
       {servers.isSuccess && servers.items.length === 0 ? (
-        <EmptyState title="还没有 MCP 服务器" description="可新增 stdio 或 HTTP MCP 服务器，或粘贴 Claude Code 的 mcpServers 配置。" />
+        <EmptyState title="还没有 MCP 服务器" description="内置 MCP 服务器由平台管理。" />
       ) : null}
       {servers.items.length ? (
         <div className="tableWrap">
@@ -395,16 +356,12 @@ function McpTab({
                         <td className="right">
                           <div className={ext.rowActions}>
                             <Button variant="secondary" className={ui.smallButton} onClick={() => onTest(server)} loading={result?.pending}>测试并列出工具</Button>
-                            {server.builtin ? (
-                              // Built-in servers follow the platform release: they can
-                              // only be switched off and on.
-                              <Button variant="secondary" className={ui.smallButton} onClick={() => onToggle(server)}>{server.enabled ? '停用' : '启用'}</Button>
-                            ) : (
+                            {!server.builtin ? (
                               <>
                                 <Button variant="secondary" className={ui.smallButton} onClick={() => onEdit(server)}>编辑</Button>
                                 <Button variant="danger" className={ui.smallButton} onClick={() => onDelete(server)}>删除</Button>
                               </>
-                            )}
+                            ) : null}
                           </div>
                         </td>
                       ) : null}
@@ -449,13 +406,11 @@ function McpTab({
 }
 
 function SkillsTab({
-  canWrite, skills, bindings, onUpload, onDirectory, onToggle, onDelete,
+  canWrite, skills, bindings, onToggle, onDelete,
 }: {
   canWrite: boolean
   skills: ReturnType<typeof usePaginated<Skill>>
   bindings: BlockBinding[]
-  onUpload: () => void
-  onDirectory: () => void
   onToggle: (skill: Skill) => void
   onDelete: (skill: Skill) => void
 }) {
@@ -473,16 +428,10 @@ function SkillsTab({
 
   return (
     <Panel title="Skill" aside="首版只支持指令类 Skill，其中的脚本不会被执行。">
-      {canWrite ? (
-        <div className={styles.actionsRight}>
-          <Button variant="secondary" onClick={onDirectory}>登记服务器目录</Button>
-          <Button variant="primary" onClick={onUpload}>上传 Skill（zip）</Button>
-        </div>
-      ) : null}
       {skills.isPending ? <LoadingState /> : null}
       {skills.isError ? <ErrorState error={skills.error} onRetry={skills.retry} /> : null}
-      {skills.isSuccess && skills.items.length === 0 ? <EmptyState title="还没有 Skill" description="上传包含 SKILL.md 的 zip，或登记服务器上的目录。" /> : null}
-      {skills.items.length || (canWrite && skills.isSuccess) ? (
+      {skills.isSuccess && skills.items.length === 0 ? <EmptyState title="还没有 Skill" description="内置 Skill 由平台管理。" /> : null}
+      {skills.items.length ? (
         <div className={ext.skillCards}>
           {skills.items.map((skill) => (
             <article key={skill.id} className={ext.skillCard}>
@@ -500,22 +449,15 @@ function SkillsTab({
               </dl>
               <div className={ext.skillActions}>
                 <Badge tone={skill.enabled ? 'ok' : 'neutral'}>{skill.enabled ? '启用' : '已禁用'}</Badge>
-                {canWrite ? (
+                {canWrite && !skill.builtin ? (
                   <span className={ext.rowActions} style={{ marginLeft: 'auto' }}>
                     <Button variant="secondary" className={ui.smallButton} onClick={() => onToggle(skill)}>{skill.enabled ? '禁用' : '启用'}</Button>
-                    {/* Built-in skills ship with the platform: disable them instead. */}
-                    {skill.builtin ? null : <Button variant="secondary" className={ui.smallButton} onClick={() => onDelete(skill)}>删除</Button>}
+                    <Button variant="secondary" className={ui.smallButton} onClick={() => onDelete(skill)}>删除</Button>
                   </span>
                 ) : null}
               </div>
             </article>
           ))}
-          {canWrite ? (
-            <button type="button" className={ext.uploadCard} onClick={onUpload}>
-              <span className={ext.uploadPlus} aria-hidden="true">+</span>
-              上传 Skill zip
-            </button>
-          ) : null}
         </div>
       ) : null}
       {skills.hasNextPage ? <Button variant="secondary" onClick={skills.fetchNextPage} loading={skills.isFetchingNextPage}>加载更多 Skill</Button> : null}
@@ -1563,139 +1505,6 @@ function useDialogRequest(scope: string, projectId: number | undefined, action: 
   return { mounted, reportFailure }
 }
 
-function AddMcpDialog({ open, scope, projectId, onClose, onSaved }: { open: boolean; scope: 'platform' | 'project'; projectId?: number; onClose: () => void; onSaved: () => void }) {
-  const { mounted, reportFailure } = useDialogRequest(scope, projectId, '新增 MCP 服务器')
-  const nameId = useId()
-  const configId = useId()
-  const [name, setName] = useState('')
-  const [configText, setConfigText] = useState('{}')
-  const [pending, setPending] = useState(false)
-  const [error, setError] = useState<unknown>(null)
-  const [fieldError, setFieldError] = useState('')
-
-  useEffect(() => {
-    if (!open) {
-      setName('')
-      setConfigText('{}')
-      setError(null)
-      setFieldError('')
-      setPending(false)
-    }
-  }, [open])
-
-  const submit = async () => {
-    if (!name.trim()) { setFieldError('请输入名称。'); return }
-    let config: Record<string, unknown>
-    try {
-      config = parseJsonObject(configText, '配置')
-      setFieldError('')
-    } catch {
-      setFieldError('配置 JSON 无效或不是对象。')
-      return
-    }
-    setPending(true)
-    setError(null)
-    try {
-      await createMcpServer({ scope, project_id: projectId, name: name.trim(), config })
-      onSaved()
-      if (mounted.current) onClose()
-    } catch (caught) {
-      reportFailure(caught, setError)
-    } finally {
-      if (mounted.current) setPending(false)
-    }
-  }
-
-  return (
-    <Dialog
-      open={open}
-      onClose={onClose}
-      title="新增 MCP 服务器"
-      description="config 是单个 Claude Code mcpServers 条目。敏感 env 或 header 值不会回显。"
-      wide
-      footer={(
-        <>
-          <Button variant="secondary" onClick={onClose} disabled={pending}>取消</Button>
-          <Button variant="primary" onClick={() => { void submit() }} loading={pending}>添加</Button>
-        </>
-      )}
-    >
-      {error ? <ErrorState error={error} title="新增 MCP 服务器失败" /> : null}
-      <Field label="名称" htmlFor={nameId} error={fieldError} hint="用于工具名 mcp__名称__工具 和绑定。">
-        <input id={nameId} className="input" value={name} onChange={(event) => setName(event.target.value)} autoComplete="off" aria-invalid={Boolean(fieldError)} disabled={pending} />
-      </Field>
-      <Field label="配置 JSON" htmlFor={configId} hint='例如 {"command":"...","args":["..."]} 或 {"url":"https://..."}'>
-        <textarea id={configId} className="textarea textareaCode" rows={9} value={configText} onChange={(event) => setConfigText(event.target.value)} spellCheck={false} disabled={pending} />
-      </Field>
-    </Dialog>
-  )
-}
-
-function ImportMcpDialog({ open, scope, projectId, onClose, onSaved }: { open: boolean; scope: 'platform' | 'project'; projectId?: number; onClose: () => void; onSaved: () => void }) {
-  const { mounted, reportFailure } = useDialogRequest(scope, projectId, '导入 MCP 配置')
-  const id = useId()
-  const [text, setText] = useState('{\n  "mcpServers": {}\n}')
-  const [pending, setPending] = useState(false)
-  const [error, setError] = useState<unknown>(null)
-  const [parseError, setParseError] = useState('')
-
-  useEffect(() => {
-    if (!open) {
-      setText('{\n  "mcpServers": {}\n}')
-      setPending(false)
-      setError(null)
-      setParseError('')
-    }
-  }, [open])
-
-  const submit = async () => {
-    let parsed: Record<string, unknown>
-    try {
-      parsed = parseJsonObject(text, '导入内容')
-      if (!parsed.mcpServers || typeof parsed.mcpServers !== 'object' || Array.isArray(parsed.mcpServers)) {
-        setParseError('导入内容必须包含 mcpServers 对象。')
-        return
-      }
-      setParseError('')
-    } catch {
-      setParseError('导入内容 JSON 无效或不是对象。')
-      return
-    }
-    setPending(true)
-    setError(null)
-    try {
-      await importMcpServers(scope, projectId, parsed)
-      onSaved()
-      if (mounted.current) onClose()
-    } catch (caught) {
-      reportFailure(caught, setError)
-    } finally {
-      if (mounted.current) setPending(false)
-    }
-  }
-
-  return (
-    <Dialog
-      open={open}
-      onClose={onClose}
-      title="导入 MCP 配置"
-      description={`粘贴 .mcp.json 中的 mcpServers 对象，导入到${scope === 'platform' ? '平台级' : '当前项目'}。服务端会逐个校验并探测工具；失败时显示提示，不回显配置。`}
-      wide
-      footer={(
-        <>
-          <Button variant="secondary" onClick={onClose} disabled={pending}>取消</Button>
-          <Button variant="primary" onClick={() => { void submit() }} loading={pending}>校验并导入</Button>
-        </>
-      )}
-    >
-      {error ? <ErrorState error={error} title="导入 MCP 配置失败" /> : null}
-      <Field label="mcpServers JSON" htmlFor={id} error={parseError}>
-        <textarea id={id} className="textarea textareaCode" rows={12} value={text} onChange={(event) => setText(event.target.value)} spellCheck={false} disabled={pending} />
-      </Field>
-    </Dialog>
-  )
-}
-
 function EditMcpDialog({ server, onClose, onSaved }: { server: McpServer | null; onClose: () => void; onSaved: () => void }) {
   const { mounted, reportFailure } = useDialogRequest(server?.scope || 'platform', server?.project_id, '编辑 MCP 服务器')
   const nameId = useId()
@@ -1797,113 +1606,6 @@ function EditMcpDialog({ server, onClose, onSaved }: { server: McpServer | null;
           </Field>
         </>
       ) : null}
-    </Dialog>
-  )
-}
-
-function UploadSkillDialog({ open, scope, projectId, onClose, onSaved }: { open: boolean; scope: 'platform' | 'project'; projectId?: number; onClose: () => void; onSaved: () => void }) {
-  const { mounted, reportFailure } = useDialogRequest(scope, projectId, '上传 Skill')
-  const id = useId()
-  const [file, setFile] = useState<File | null>(null)
-  const [pending, setPending] = useState(false)
-  const [error, setError] = useState<unknown>(null)
-  const [fieldError, setFieldError] = useState('')
-
-  useEffect(() => {
-    if (!open) {
-      setFile(null)
-      setPending(false)
-      setError(null)
-      setFieldError('')
-    }
-  }, [open])
-
-  const submit = async () => {
-    if (!file) { setFieldError('请选择 zip 文件。'); return }
-    if (!file.name.toLowerCase().endsWith('.zip')) { setFieldError('文件扩展名必须是 .zip。'); return }
-    setPending(true)
-    setError(null)
-    try {
-      await uploadSkill({ scope, project_id: projectId, file })
-      onSaved()
-      if (mounted.current) onClose()
-    } catch (caught) {
-      reportFailure(caught, setError)
-    } finally {
-      if (mounted.current) setPending(false)
-    }
-  }
-
-  return (
-    <Dialog
-      open={open}
-      onClose={onClose}
-      title="上传 Skill"
-      description="zip 根目录或子目录需包含 SKILL.md。服务端会读取名称和描述；其中的脚本不会被执行。"
-      footer={(
-        <>
-          <Button variant="secondary" onClick={onClose} disabled={pending}>取消</Button>
-          <Button variant="primary" onClick={() => { void submit() }} loading={pending}>上传</Button>
-        </>
-      )}
-    >
-      {error ? <ErrorState error={error} title="上传 Skill 失败" /> : null}
-      <Field label="Skill zip" htmlFor={id} error={fieldError} hint="只接受 .zip。">
-        <input id={id} className="input" type="file" accept=".zip,application/zip" onChange={(event) => setFile(event.target.files?.[0] || null)} disabled={pending} />
-      </Field>
-    </Dialog>
-  )
-}
-
-function DirectorySkillDialog({ open, scope, projectId, onClose, onSaved }: { open: boolean; scope: 'platform' | 'project'; projectId?: number; onClose: () => void; onSaved: () => void }) {
-  const { mounted, reportFailure } = useDialogRequest(scope, projectId, '登记 Skill 目录')
-  const id = useId()
-  const [dir, setDir] = useState('')
-  const [pending, setPending] = useState(false)
-  const [error, setError] = useState<unknown>(null)
-  const [fieldError, setFieldError] = useState('')
-
-  useEffect(() => {
-    if (!open) {
-      setDir('')
-      setPending(false)
-      setError(null)
-      setFieldError('')
-    }
-  }, [open])
-
-  const submit = async () => {
-    if (!dir.trim()) { setFieldError('请输入服务器目录路径。'); return }
-    setPending(true)
-    setError(null)
-    try {
-      await registerSkillDirectory({ scope, project_id: projectId, dir: dir.trim() })
-      onSaved()
-      if (mounted.current) onClose()
-    } catch (caught) {
-      reportFailure(caught, setError)
-    } finally {
-      if (mounted.current) setPending(false)
-    }
-  }
-
-  return (
-    <Dialog
-      open={open}
-      onClose={onClose}
-      title="登记 Skill 目录"
-      description="目录位于服务端文件系统，必须包含 SKILL.md。"
-      footer={(
-        <>
-          <Button variant="secondary" onClick={onClose} disabled={pending}>取消</Button>
-          <Button variant="primary" onClick={() => { void submit() }} loading={pending}>登记</Button>
-        </>
-      )}
-    >
-      {error ? <ErrorState error={error} title="登记 Skill 目录失败" /> : null}
-      <Field label="目录路径" htmlFor={id} error={fieldError}>
-        <input id={id} className="input mono" value={dir} onChange={(event) => setDir(event.target.value)} placeholder="/srv/review/skills/my-skill" aria-invalid={Boolean(fieldError)} disabled={pending} />
-      </Field>
     </Dialog>
   )
 }

@@ -3,7 +3,7 @@ import { act, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { ExtensionsPage } from '../src/pages/ExtensionsPage'
 import { ReviewsPage } from '../src/pages/ReviewsPage'
-import { project } from './fixtures'
+import { mcpServer, project } from './fixtures'
 import { installFetch, jsonResponse, renderWithProviders } from './test-utils'
 
 const firstPage = Array.from({ length: 100 }, (_, index) => project({
@@ -18,7 +18,10 @@ function otherRoutes(url: string) {
   const path = new URL(url, 'http://localhost').pathname
   if (path === '/api/v1/reviews') return jsonResponse({ reviews: [] })
   if (path === '/api/v1/profiles') return jsonResponse({ profiles: [] })
-  if (path === '/api/v1/mcp-servers') return jsonResponse({ servers: [] })
+  if (path === '/api/v1/mcp-servers') {
+    const projectId = new URL(url, 'http://localhost').searchParams.get('project_id')
+    return jsonResponse({ servers: projectId ? [mcpServer({ id: `s-${projectId}`, name: `server-${projectId}` })] : [] })
+  }
   if (path === '/api/v1/skills') return jsonResponse({ skills: [] })
   if (path === '/api/v1/block-bindings') return jsonResponse({ bindings: [] })
   return jsonResponse({})
@@ -53,7 +56,7 @@ describe.each([
     const selector = screen.getByRole('combobox', { name: label })
     await within(selector).findByRole('option', { name: 'group/project-100' })
     expect(within(selector).queryByRole('option', { name: 'group/manage-later' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: page === 'extensions' ? '新增 MCP 服务器' : '手动触发评审' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: page === 'extensions' ? '编辑' : '手动触发评审' })).not.toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: '加载更多项目' }))
     await waitFor(() => expect(screen.getByRole('button', { name: '加载更多项目' })).toBeDisabled())
@@ -66,9 +69,11 @@ describe.each([
     await user.selectOptions(selector, '101')
 
     if (page === 'extensions') {
-      expect(await screen.findByRole('button', { name: '新增 MCP 服务器' })).toBeInTheDocument()
+      await screen.findByText('server-101')
+      expect(screen.getByRole('button', { name: '编辑' })).toBeInTheDocument()
       await user.selectOptions(selector, '102')
-      expect(screen.queryByRole('button', { name: '新增 MCP 服务器' })).not.toBeInTheDocument()
+      await screen.findByText('server-102')
+      expect(screen.queryByRole('button', { name: '编辑' })).not.toBeInTheDocument()
     } else {
       await waitFor(() => expect(reviewRequests.some((url) => new URL(url, 'http://localhost').searchParams.get('project_id') === '101')).toBe(true))
       await user.click(screen.getByRole('button', { name: '手动触发评审' }))

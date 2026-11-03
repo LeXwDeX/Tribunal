@@ -16,9 +16,9 @@ function routes(writes: Array<{ url: string; init?: RequestInit }>) {
       writes.push({ url, init })
       const body = JSON.parse(String(init?.body)) as { enabled: boolean }
       enabled = body.enabled
-      return jsonResponse({ ...builtinSkill, enabled })
+      return jsonResponse({ ...customSkill, enabled })
     }
-    if (url.startsWith('/api/v1/skills')) return jsonResponse({ skills: [{ ...builtinSkill, enabled }, customSkill] })
+    if (url.startsWith('/api/v1/skills')) return jsonResponse({ skills: [builtinSkill, { ...customSkill, enabled }] })
     if (url.startsWith('/api/v1/block-bindings')) return jsonResponse({ bindings: [] })
     return jsonResponse({ servers: [] })
   }
@@ -27,7 +27,7 @@ function routes(writes: Array<{ url: string; init?: RequestInit }>) {
 describe('built-in skills in the extensions console', () => {
   afterEach(() => vi.unstubAllGlobals())
 
-  it('marks built-in skills, hides their delete action and toggles them', async () => {
+  it('marks built-in skills, locks their actions, and toggles custom skills', async () => {
     const writes: Array<{ url: string; init?: RequestInit }> = []
     installFetch(routes(writes))
     renderWithProviders(<ExtensionsManager scope="platform" tab="skills" onTabChange={() => {}} />)
@@ -39,14 +39,19 @@ describe('built-in skills in the extensions console', () => {
     expect(within(customRow).queryByText('内置')).not.toBeInTheDocument()
     expect(within(customRow).getByRole('button', { name: '删除' })).toBeInTheDocument()
     expect(within(builtinRow).getByText('启用')).toBeInTheDocument()
+    expect(within(builtinRow).queryByRole('button', { name: '禁用' })).not.toBeInTheDocument()
+    expect(within(builtinRow).queryByRole('button', { name: '启用' })).not.toBeInTheDocument()
 
-    await userEvent.click(within(builtinRow).getByRole('button', { name: '禁用' }))
+    await userEvent.click(within(customRow).getByRole('button', { name: '禁用' }))
     await waitFor(() => expect(writes).toHaveLength(1))
-    expect(writes[0].url).toBe('/api/v1/skills/k-builtin')
+    expect(writes[0].url).toBe('/api/v1/skills/k-team')
     expect(writes[0].init?.method).toBe('PATCH')
     expect(JSON.parse(String(writes[0].init?.body))).toEqual({ enabled: false })
-    expect(await within(builtinRow).findByText('已禁用')).toBeInTheDocument()
-    expect(within(builtinRow).getByRole('button', { name: '启用' })).toBeInTheDocument()
+    expect(await within(customRow).findByText('已禁用')).toBeInTheDocument()
+    await userEvent.click(within(customRow).getByRole('button', { name: '启用' }))
+    await waitFor(() => expect(writes).toHaveLength(2))
+    expect(JSON.parse(String(writes[1].init?.body))).toEqual({ enabled: true })
+    expect(await within(customRow).findByText('启用')).toBeInTheDocument()
   })
 
   it('shows the marker but no actions to a viewer', async () => {

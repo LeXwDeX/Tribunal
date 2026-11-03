@@ -10,7 +10,6 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -156,7 +155,7 @@ func TestMCPServerTestUsesUnmaskedConfig(t *testing.T) {
 	}
 }
 
-func TestMCPImportDocument(t *testing.T) {
+func TestMCPImportDisabled(t *testing.T) {
 	env := newM6Env(t, m6Options{})
 	env.grant(7, 42, store.ProjectAccessManage)
 	client := env.loginAs("code-admin")
@@ -164,109 +163,27 @@ func TestMCPImportDocument(t *testing.T) {
 	body := []byte(`{"mcpServers":{"alpha":{"command":"npx"},"beta":{"url":"https://mcp.example.com"}}}`)
 	response := client.request(http.MethodPost, "/api/v1/mcp-servers/import?scope=project&project_id=42", body,
 		map[string]string{"Content-Type": "application/json"})
-	assertStatus(t, response, http.StatusCreated)
-	servers := env.decode(t, response)["servers"].([]any)
-	if len(servers) != 2 {
-		t.Fatalf("imported = %v", servers)
-	}
-	if len(env.extensions.imports) != 1 {
-		t.Fatalf("imports = %v", env.extensions.imports)
-	}
-	imported := env.extensions.imports[0]
-	if imported.Scope != "project" || imported.ProjectID == nil || *imported.ProjectID != 42 {
-		t.Fatalf("import scope = %+v", imported)
-	}
-	if string(imported.Servers["alpha"]) != `{"command":"npx"}` {
-		t.Fatalf("imported config = %s", imported.Servers["alpha"])
-	}
+	assertStatus(t, response, http.StatusForbidden)
 
 	missingProject := client.request(http.MethodPost, "/api/v1/mcp-servers/import?scope=project", body,
 		map[string]string{"Content-Type": "application/json"})
-	assertStatus(t, missingProject, http.StatusBadRequest)
+	assertStatus(t, missingProject, http.StatusForbidden)
 
 	wrapper := []byte(`{"servers":{"alpha":{"command":"npx"}}}`)
 	rejected := client.request(http.MethodPost, "/api/v1/mcp-servers/import?scope=platform", wrapper,
 		map[string]string{"Content-Type": "application/json"})
-	assertStatus(t, rejected, http.StatusBadRequest)
+	assertStatus(t, rejected, http.StatusForbidden)
 
 	badConfig := []byte(`{"mcpServers":{"alpha":[]}}`)
 	bad := client.request(http.MethodPost, "/api/v1/mcp-servers/import?scope=platform", badConfig,
 		map[string]string{"Content-Type": "application/json"})
-	assertStatus(t, bad, http.StatusBadRequest)
+	assertStatus(t, bad, http.StatusForbidden)
+	if len(env.extensions.imports) != 0 {
+		t.Fatalf("imports = %v", env.extensions.imports)
+	}
 }
 
-func TestSkillUploadValidation(t *testing.T) {
-	env := newM6Env(t, m6Options{})
-	env.grant(7, 42, store.ProjectAccessManage)
-	client := env.loginAs("code-admin")
-
-	noFile, contentType := multipartBody(t, map[string]string{"scope": "platform"}, "file", "x.zip", nil)
-	missing := client.request(http.MethodPost, "/api/v1/skills", noFile, map[string]string{"Content-Type": contentType})
-	assertStatus(t, missing, http.StatusBadRequest)
-
-	notZip, contentType := multipartBody(t, map[string]string{"scope": "platform"}, "file", "x.zip", []byte("not a zip"))
-	invalid := client.request(http.MethodPost, "/api/v1/skills", notZip, map[string]string{"Content-Type": contentType})
-	assertStatus(t, invalid, http.StatusBadRequest)
-
-	noManifest, contentType := multipartBody(t, map[string]string{"scope": "platform"}, "file", "x.zip",
-		skillZip(t, "hello", false))
-	missingManifest := client.request(http.MethodPost, "/api/v1/skills", noManifest, map[string]string{"Content-Type": contentType})
-	assertStatus(t, missingManifest, http.StatusBadRequest)
-
-	archive, contentType := multipartBody(t, map[string]string{"scope": "platform"}, "file", "x.zip",
-		skillZip(t, testSkillManifest, true))
-	created := client.request(http.MethodPost, "/api/v1/skills", archive, map[string]string{"Content-Type": contentType})
-	assertStatus(t, created, http.StatusCreated)
-	body := env.decode(t, created)
-	if body["name"] != "go-review" || body["description"] != "Review Go changes" {
-		t.Fatalf("skill = %v", body)
-	}
-	if len(env.extensions.uploads) != 1 || env.extensions.uploads[0].Name != "go-review" ||
-		len(env.extensions.uploads[0].Data) == 0 {
-		t.Fatalf("uploads = %+v", env.extensions.uploads)
-	}
-
-	projectArchive, contentType := multipartBody(t, map[string]string{"scope": "project", "project_id": "42"},
-		"file", "x.zip", skillZip(t, testSkillManifest, true))
-	projectCreated := client.request(http.MethodPost, "/api/v1/skills", projectArchive,
-		map[string]string{"Content-Type": contentType})
-	assertStatus(t, projectCreated, http.StatusCreated)
-	if env.extensions.uploads[1].ProjectID == nil || *env.extensions.uploads[1].ProjectID != 42 {
-		t.Fatalf("project upload = %+v", env.extensions.uploads[1])
-	}
-
-	missingScope, contentType := multipartBody(t, map[string]string{}, "file", "x.zip", skillZip(t, testSkillManifest, true))
-	noScope := client.request(http.MethodPost, "/api/v1/skills", missingScope, map[string]string{"Content-Type": contentType})
-	assertStatus(t, noScope, http.StatusBadRequest)
-}
-
-func TestSkillDirectoryRegistration(t *testing.T) {
-	env := newM6Env(t, m6Options{})
-	client := env.loginAs("code-admin")
-
-	relative := client.json(http.MethodPost, "/api/v1/skills",
-		map[string]any{"scope": "platform", "dir": "skills/go"})
-	assertStatus(t, relative, http.StatusBadRequest)
-
-	dir := t.TempDir()
-	empty := client.json(http.MethodPost, "/api/v1/skills",
-		map[string]any{"scope": "platform", "dir": dir})
-	assertStatus(t, empty, http.StatusBadRequest)
-
-	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(testSkillManifest), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	created := client.json(http.MethodPost, "/api/v1/skills",
-		map[string]any{"scope": "platform", "dir": dir})
-	assertStatus(t, created, http.StatusCreated)
-	if len(env.extensions.dirs) != 1 || env.extensions.dirs[0].Dir != dir {
-		t.Fatalf("registered dirs = %+v", env.extensions.dirs)
-	}
-
-	deleted := client.request(http.MethodDelete, "/api/v1/skills/skill-dir", nil, nil)
-	assertStatus(t, deleted, http.StatusNoContent)
-}
-
+// These legacy handlers are not routed, but retain their parser coverage.
 func TestBlockBindingUpsert(t *testing.T) {
 	env := newM6Env(t, m6Options{})
 	client := env.loginAs("code-admin")

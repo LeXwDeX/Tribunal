@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestMCPServerValidationRejectsUnknownFieldsWithoutLeaking(t *testing.T) {
+func TestMCPServerCreationDisabledWithoutLeaking(t *testing.T) {
 	env := newWiringEnv(t)
 	client := env.bearer()
 
@@ -19,7 +19,7 @@ func TestMCPServerValidationRejectsUnknownFieldsWithoutLeaking(t *testing.T) {
 			"bogus":   "super-secret",
 		},
 	})
-	assertStatus(t, created, http.StatusBadRequest)
+	assertStatus(t, created, http.StatusForbidden)
 	if strings.Contains(string(created.body), "super-secret") {
 		t.Fatalf("response leaked a config value: %s", created.body)
 	}
@@ -34,7 +34,7 @@ func TestMCPServerValidationRejectsUnknownFieldsWithoutLeaking(t *testing.T) {
 	imported := client.request(http.MethodPost, "/api/v1/mcp-servers/import?scope=platform",
 		[]byte(`{"mcpServers":{"good":{"command":"npx"},"bad":{"command":"npx","bogus":"super-secret"}}}`),
 		map[string]string{"Content-Type": "application/json"})
-	assertStatus(t, imported, http.StatusBadRequest)
+	assertStatus(t, imported, http.StatusForbidden)
 	if strings.Contains(string(imported.body), "super-secret") {
 		t.Fatalf("response leaked a config value: %s", imported.body)
 	}

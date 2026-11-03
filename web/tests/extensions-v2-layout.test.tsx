@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { screen, within } from '@testing-library/react'
-import userEvent from '@testing-library/user-event'
 import { ExtensionsManager } from '../src/features/extensions/ExtensionsManager'
 import { mcpServer, skill } from './fixtures'
 import { installFetch, jsonResponse, renderWithProviders, viewerMe } from './test-utils'
@@ -46,15 +45,13 @@ describe('extensions v2 layout', () => {
     expect(await screen.findByRole('tab', { name: 'MCP 服务器 2' })).toBeInTheDocument()
   })
 
-  it('renders skills as cards with an upload card for writers only', async () => {
+  it('renders skills as cards without an upload card for writers', async () => {
     installFetch(routes())
-    const user = userEvent.setup()
     renderWithProviders(<ExtensionsManager scope="platform" tab="skills" onTabChange={() => {}} />)
 
     const card = (await screen.findByText('sec-checklist')).closest('article') as HTMLElement
     expect(within(card).getByText('平台级')).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: /上传 Skill zip/ }))
-    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /上传 Skill zip/ })).not.toBeInTheDocument()
   })
 
   it('hides the upload card from viewers', async () => {

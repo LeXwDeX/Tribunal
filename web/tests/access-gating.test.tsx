@@ -11,7 +11,7 @@ import { ProjectsPage } from '../src/pages/ProjectsPage'
 import { ReviewDetailPage } from '../src/pages/ReviewDetailPage'
 import { OverviewPage } from '../src/pages/OverviewPage'
 import { ReviewsPage } from '../src/pages/ReviewsPage'
-import { finding, project, review } from './fixtures'
+import { finding, mcpServer, project, review } from './fixtures'
 import { adminMe, installFetch, jsonResponse, renderWithProviders, viewerMe } from './test-utils'
 
 class FakeEventSource {
@@ -75,28 +75,29 @@ describe('project access gates write controls', () => {
   })
 
   it('requires both platform admin and the project manage grant for project extension writes', async () => {
-    installFetch(emptyExtensions)
+    installFetch((url) => url.startsWith('/api/v1/mcp-servers')
+      ? jsonResponse({ servers: [mcpServer({ name: 'custom-server' })] }) : emptyExtensions(url))
     const viewerView = renderWithProviders(
       <ExtensionsManager scope="project" projectId={42} canManage tab="mcp" onTabChange={() => {}} />,
       { me: viewerMe },
     )
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'MCP 服务器' })).toBeInTheDocument())
-    expect(screen.queryByRole('button', { name: '新增 MCP 服务器' })).not.toBeInTheDocument()
+    await screen.findByText('custom-server')
+    expect(screen.queryByRole('button', { name: '编辑' })).not.toBeInTheDocument()
     viewerView.unmount()
 
     const noGrant = renderWithProviders(
       <ExtensionsManager scope="project" projectId={42} canManage={false} tab="mcp" onTabChange={() => {}} />,
       { me: adminMe },
     )
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'MCP 服务器' })).toBeInTheDocument())
-    expect(screen.queryByRole('button', { name: '新增 MCP 服务器' })).not.toBeInTheDocument()
+    await screen.findByText('custom-server')
+    expect(screen.queryByRole('button', { name: '编辑' })).not.toBeInTheDocument()
     noGrant.unmount()
 
     renderWithProviders(
       <ExtensionsManager scope="project" projectId={42} canManage tab="mcp" onTabChange={() => {}} />,
       { me: adminMe },
     )
-    expect(await screen.findByRole('button', { name: '新增 MCP 服务器' })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: '编辑' })).toBeInTheDocument()
   })
 
   it('opens project scope by default for a viewer and never queries platform extensions', async () => {
@@ -114,13 +115,14 @@ describe('project access gates write controls', () => {
   })
 
   it('keeps platform-scope extensions admin-only', async () => {
-    installFetch(emptyExtensions)
+    installFetch((url) => url.startsWith('/api/v1/mcp-servers')
+      ? jsonResponse({ servers: [mcpServer({ name: 'custom-server' })] }) : emptyExtensions(url))
     renderWithProviders(
       <ExtensionsManager scope="platform" tab="mcp" onTabChange={() => {}} />,
       { me: viewerMe },
     )
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'MCP 服务器' })).toBeInTheDocument())
-    expect(screen.queryByRole('button', { name: '新增 MCP 服务器' })).not.toBeInTheDocument()
+    await screen.findByText('custom-server')
+    expect(screen.queryByRole('button', { name: '编辑' })).not.toBeInTheDocument()
   })
 
   it('gates project enablement switches on each project access', async () => {

@@ -13,8 +13,8 @@ import (
 
 // MCPDefaults turns the configured built-in MCP servers into extension
 // defaults. Install creates an enabled platform row marked built-in; Sync
-// rewrites its config whenever the release ships a different one and keeps
-// the enabled state. A server of the same name that the administrator owns,
+// enables it and rewrites its config whenever the release ships a different one.
+// A server of the same name that the administrator owns,
 // stored or in mcp.config, is never replaced or bound.
 func (s *ExtensionService) MCPDefaults(specs []config.DefaultMCPServer, fileMCP mcp.Config) ([]ExtensionDefault, error) {
 	out := make([]ExtensionDefault, 0, len(specs))
@@ -64,6 +64,12 @@ func (s *ExtensionService) MCPDefaults(specs []config.DefaultMCPServer, fileMCP 
 				row, err := s.platformMCPServerNamed(ctx, name)
 				if err != nil || row == nil || row.Builtin != name {
 					return err
+				}
+				if !row.Enabled {
+					enabled := true
+					if _, err := s.store.UpdateMCPServer(ctx, row.ID, store.MCPServerUpdate{Enabled: &enabled}); err != nil {
+						return err
+					}
 				}
 				have, err := canonicalJSON(row.Config)
 				if err == nil && bytes.Equal(have, want) {

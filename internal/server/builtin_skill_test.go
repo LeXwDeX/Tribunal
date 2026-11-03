@@ -10,8 +10,7 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/config"
 )
 
-// Built-in skills are listed with a marker, can be disabled and enabled, and
-// cannot be deleted.
+// Built-in skills are listed with a marker and cannot be disabled or deleted.
 func TestBuiltinSkillToggleAndDeleteGuard(t *testing.T) {
 	env := newWiringEnv(t)
 	defaults, err := env.backend.service.SkillDefaults([]config.DefaultSkill{{Name: "code-review", Blocks: []string{"review"}}})
@@ -36,9 +35,12 @@ func TestBuiltinSkillToggleAndDeleteGuard(t *testing.T) {
 	id := listed["id"].(string)
 
 	disabled := client.json(http.MethodPatch, "/api/v1/skills/"+id, map[string]any{"enabled": false})
-	assertStatus(t, disabled, http.StatusOK)
-	if body := decodeMap(t, disabled.body); body["enabled"] != false || body["builtin"] != true {
-		t.Fatalf("disabled skill = %v", body)
+	assertStatus(t, disabled, http.StatusConflict)
+	if got, err := env.db.GetSkill(context.Background(), id); err != nil || !got.Enabled {
+		t.Fatalf("skill after rejected update = %+v, %v", got, err)
+	}
+	if err := env.db.SetSkillEnabled(context.Background(), id, false); err != nil {
+		t.Fatal(err)
 	}
 	enabled := client.json(http.MethodPatch, "/api/v1/skills/"+id, map[string]any{"enabled": true})
 	assertStatus(t, enabled, http.StatusOK)
