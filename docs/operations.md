@@ -503,8 +503,8 @@ fi
 ### 图谱管理与排查
 
 - **查看和测试**：控制台「扩展」页列出 `codebase-memory`；「测试并列出工具」返回的列表不含 `index_repository`、`delete_project`、`ingest_traces`、`manage_adr`。
-- **内置标识**：它带「内置」标签，只能停用或启用。名称和配置随平台版本走，不能在控制台编辑；删除、改名、改配置或用导入覆盖都返回 409。
-- **禁用**：在「扩展」页点「停用」，或 `PUT /api/v1/mcp-servers/{id}` 设置 `"enabled": false`，然后重启服务。重启和升级都保持停用。
+- **内置标识**：它带「内置」标签，始终启用，不能停用或删除。名称和配置随平台版本走，不能在控制台编辑；禁用、删除、改名、改配置都返回 409。
+- **禁用**：已有自定义 MCP 可在编辑窗口把「启用」改为「停用」，或 `PUT /api/v1/mcp-servers/{id}` 设置 `"enabled": false`，然后重启服务。重启和升级都保持停用。内置 `codebase-memory` 始终启用，停用请求返回 409；启动同步会把历史停用状态恢复为启用。
 - **故障表现**：二进制缺失或无法启动时评审照常完成，但没有图谱工具；评审结论里出现 `MCP tools unavailable` 告警，原本会 PASS 的评审显示为 INCOMPLETE。非取消的建索引失败不阻断 onboarding 或刷新；其他必要步骤及状态保存成功时工作区最终为 `ready`，`last_error` 为固定消息 `index: code graph indexing failed`，刷新保留旧 `index_sha`。ignore 阻断索引时 `index_status` 为 `degraded`；其他情况下比较已存的 SHA，不代表当前索引健康。
 - **验证记录**：2026-11-02 在 Docker 部署环境用 `9c3b4e2` 镜像验证：容器内 `codebase-memory-mcp --version` 为 `0.12.1`；`POST /api/v1/mcp-servers/{id}/test` 返回 13 个只读工具；真实 MR 评审完成并发布 summary。该项目使用非空 ignore policy，因此评审未注入 MCP 工具，符合上文的预期安全降级。
 - **排查信息**：索引失败告警 `code graph index failed; continuing without it` 和一般工作区失败告警 `workspace operation failed` 含 `project_id` 与 `error_class`；工作区/onboarding 类别包括 `upstream_auth`、`rate_limited`、`network`、`config`、`overloaded`、`context_too_long`、`timeout`、`canceled`、`panic`、`internal`；未知类别归为 `internal`，上游有 HTTP 响应时另带脱敏的 `upstream_status`，完整排查表见第 10 节。 节点失败事件优先使用执行器提供的固定类别（如 `auth`、`rate_limited`、`sandbox_denied`、`panic`），没有分类时仍是 `executor_error`、`timeout` 或 `expand_failed`；`panic` 不记录 panic 值。这些日志和工作区 API 不提供原始原因；按项目 ID 在受控环境中检查索引配置、可执行文件和运行环境。旧数据库和备份可能仍含错误原文，读取接口不会清除它们；应限制数据库和备份访问，回退旧版可能重新暴露原文。
@@ -897,7 +897,7 @@ v1.2.0 新增迁移 `0020_review_command_replay`。`0020` 新建已受理身份�
 3. 首次回填用现有项目密文验证主密钥。至少一个允许格式的非空字段认证成功即可确认密钥，其余损坏的项目字段保持原样，仍由原有项目迁移逻辑隔离；存在项目密文但没有任何字段能认证时拒绝启动。没有历史密文的新库或仅有旧 MCP 明文的库，无法验证操作者首次提供的 key 是否正确，首次成功配置的 key 将成为后续校验依据。已有 MCP 密文或校验标记必须能认证。
    首次密封时如果没有可验证的项目或 MCP 密文，启动日志会记录 `MCP master key has no verification evidence`（只含环境变量名，不含密钥值）。看到该告警时应立即核对并保存部署密钥；首次成功密封后，该密钥成为后续校验依据。
 4. 启动失败时，先在受控环境核对原密钥和备份，不删除数据库、密文或迁移标记来强行启动。同 key 重启可重复验证；完成后发现明文、缺失密文或损坏配置会拒绝启动，运行中的存储读取也不会回退到明文。
-5. 升级后 API 不再提供可读回的 MCP 配置，响应统一为 `config: {}`。仅改名或启停时省略 `config`；替换配置使用原始完整模板。管理员更新时，`****` 占位符在存储层事务内与当前配置合并，并发更新不会把对方刚写入的密钥回滚成占位符。默认扩展刷新仍保留停用状态和管理员改过的绑定。
+5. 升级后 API 不再提供可读回的 MCP 配置，响应统一为 `config: {}`。仅改名或启停时省略 `config`；替换配置使用原始完整模板。管理员更新时，`****` 占位符在存储层事务内与当前配置合并，并发更新不会把对方刚写入的密钥回滚成占位符。默认扩展刷新会保持内置项启用，并保留管理员改过的绑定。
 
 回退只能用升级前的一致性备份和匹配的旧程序。旧程序可能把 `{}` 当作配置，或重新写入明文；不能仅替换镜像后继续使用已迁移数据库。即使后续启动步骤失败，已提交的 MCP 加密事务也不会自动撤销。
 
@@ -922,7 +922,7 @@ v1.2.0 新增迁移 `0020_review_command_replay`。`0020` 新建已受理身份�
 
 注意事项：
 
-- 内置扩展随平台升级：新镜像附带的 codebase-memory-mcp 配置（版本、参数）在下次启动时写入已登记的内置服务器，启用状态保持不变；默认工具白名单在块绑定仍是默认机制写入的样子时同步更新，管理员改过的绑定和 YAML `blocks` 中声明的块不动。首次启动后才在 YAML `blocks` 中声明的块：升级到 v1.2.0 时，数据库里该块若仍等于 `block:<block>` 快照，启动时删除并以 YAML 为准（日志 `file configuration replaces default block binding`）；管理员改过的绑定仍以数据库为准。v1.2.0 还需要行内每个条目都能由 `extension_defaults` 中 `applied` 的默认 grant detail 证明；行含自建授权或 detail 缺失/无法解析时保留该行，数据库绑定继续覆盖 YAML。内置 Skill 刷新失败（例如修改了 `workspace.root`）只记 Warn 日志 `built-in skill refresh failed`，不阻断启动。已有部署若在数据库或 `mcp.config` 中自建了同名 `codebase-memory` 服务器，服务不会接管它，也不会绑定它的工具。
+- 内置扩展随平台升级：新镜像附带的 codebase-memory-mcp 配置（版本、参数）在下次启动时写入已登记的内置服务器，并把内置项恢复为启用；默认工具白名单在块绑定仍是默认机制写入的样子时同步更新，管理员改过的绑定和 YAML `blocks` 中声明的块不动。首次启动后才在 YAML `blocks` 中声明的块：升级到 v1.2.0 时，数据库里该块若仍等于 `block:<block>` 快照，启动时删除并以 YAML 为准（日志 `file configuration replaces default block binding`）；管理员改过的绑定仍以数据库为准。v1.2.0 还需要行内每个条目都能由 `extension_defaults` 中 `applied` 的默认 grant detail 证明；行含自建授权或 detail 缺失/无法解析时保留该行，数据库绑定继续覆盖 YAML。内置 Skill 刷新失败（例如修改了 `workspace.root`）只记 Warn 日志 `built-in skill refresh failed`，不阻断启动。已有部署若在数据库或 `mcp.config` 中自建了同名 `codebase-memory` 服务器，服务不会接管它，也不会绑定它的工具。
 - **文件绑定与旧配置（v1.2.0）**：数据库平台绑定按块覆盖文件 `blocks`。只有行内容等于 `block:<block>` 快照、且每个条目都能由 `extension_defaults` 中 `applied` 的默认 grant detail 认领时，默认机制才释放该行；行上有自建授权或台账不可证明时，文件块不生效。旧配置中的 `default_extensions` 会继续生效，授权矩阵不会自动收窄。核对和迁移步骤见 [默认扩展授权迁移](#默认扩展授权迁移)。
 - 升级内置的 codebase-memory-mcp 版本时，按 [内置 codebase-memory-mcp](design/06-config.md#内置-codebase-memory-mcp) 同时更新 Dockerfile 版本与 SHA-256、`third_party/codebase-memory-mcp/` 和许可证清单，并重新跑 Docker smoke。
 - 镜像 tag 改为 `tribunal:*`；旧镜像的仓库名是 `crc-review`，升级时重新构建或改 tag。Compose 项目名 `crc-review`、旧数据卷 `crc-review_data` 和 `crc-data` 刻意不改名；默认布局可继续挂载原卷，自定义布局还须保留全部实际数据挂载。
@@ -955,7 +955,7 @@ v1.2.0 起，所有 `PUT /api/v1/block-bindings/{block}` 必须带 `expected_rev
 - 镜像升级不会改写宿主机挂载的配置文件。Compose 默认把宿主机 `config/server.docker.yaml` 挂到容器内；自定义部署也可能挂载旧的 `server.yaml`。旧文件中的 `default_extensions` 会继续生效，旧授权不会自动收窄。
 - 启动时先应用默认扩展，再加载平台扩展。数据库中的平台块绑定按块覆盖文件 `blocks`（`loadStoredPlatformExtensions`），文件声明不会自动覆盖已有平台行。
 - 默认机制只释放能证明纯默认的平台行（`purelyDefaultOwned`）：行内容必须等于 `block:<block>` 快照，且行内每个 MCP 工具和 Skill 都能由 `extension_defaults` 中 `applied` 的默认 grant detail 认领。行上有自建授权，或任一 grant detail 缺失、无法解析，数据库行保留，文件 `blocks` 不生效。
-- 恢复默认只移除已登记内置扩展在选中块上的授权；自建扩展授权、项目级绑定和启用状态保留。它不会删除平台行，也不修改文件 `blocks`。没有删除块绑定的 API。
+- 恢复默认只移除已登记内置扩展在选中块上的授权；自建扩展授权、项目级绑定保留，恢复默认本身不改变启用状态。它不会删除平台行，也不修改文件 `blocks`。没有删除块绑定的 API。
 - 文件声明某块后，恢复默认对该块返回 `skipped(file_binding)`，所以迁移时不能一边保留文件声明一边恢复。文件声明生效后，块绑定 API 不返回它的数据库行；控制台可能显示为空绑定，不要把空绑定保存回数据库。
 
 #### 升级前核对配置

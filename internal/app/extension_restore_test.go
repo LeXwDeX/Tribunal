@@ -216,13 +216,13 @@ func TestRestoreDefaultsKeepsSameNameCustomResource(t *testing.T) {
 }
 
 // A disabled built-in keeps its enabled state but still supplies the default
-// grant. Disabling it after the preview invalidates the token.
+// grant. Enabling it after the preview invalidates the token.
 func TestRestoreDefaultsIncludesDisabledBuiltin(t *testing.T) {
 	ctx := context.Background()
 	service, st := newRestoreFixture(t, restoreConfig(defaultCodeReview, nil))
 	applySkillDefaults(t, service, st, nil, defaultCodeReview)
 	rows, _ := st.ListSkills(ctx, "platform", nil)
-	if _, err := service.SetSkillEnabled(ctx, rows[0].ID, false); err != nil {
+	if err := st.SetSkillEnabled(ctx, rows[0].ID, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := service.UpsertBlockBinding(ctx, BlockBindingInput{
@@ -398,12 +398,12 @@ func TestRestoreDefaultsKeepsSameNameCustomMCP(t *testing.T) {
 }
 
 // Restore works while a built-in is disabled and never enables it.
-func TestRestoreDefaultsKeepsDisabledBuiltinDisabled(t *testing.T) {
+func TestRestoreDefaultsDoesNotEnableDisabledBuiltin(t *testing.T) {
 	ctx := context.Background()
 	service, st := newRestoreFixture(t, restoreConfig(defaultCodeReview, nil))
 	applySkillDefaults(t, service, st, nil, defaultCodeReview)
 	rows, _ := st.ListSkills(ctx, "platform", nil)
-	if _, err := service.SetSkillEnabled(ctx, rows[0].ID, false); err != nil {
+	if err := st.SetSkillEnabled(ctx, rows[0].ID, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := service.UpsertBlockBinding(ctx, BlockBindingInput{

@@ -284,14 +284,14 @@ Finding 始终返回 `annotation`：`""` 为未标注，`valid` 为有效，`inv
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/v1/mcp-servers` | `?scope=&project_id=&limit=&cursor=`，响应 `{servers, next_cursor}` |
-| POST | `/api/v1/mcp-servers` | `{scope, project_id?, name, config}`；`config` 为单个 Claude Code `mcpServers` 条目 |
-| PUT / DELETE | `/api/v1/mcp-servers/{id}` | 修改 / 删除；内置服务器（`builtin: true`）只能修改 `enabled`，改名、改配置和删除返回 409 |
+| POST | `/api/v1/mcp-servers` | 已关闭；返回 403 `custom_mcp_creation_disabled` |
+| PUT / DELETE | `/api/v1/mcp-servers/{id}` | 修改 / 删除已有自定义服务器；内置服务器（`builtin: true`）禁用、改名、改配置和删除均返回 409 |
 | POST | `/api/v1/mcp-servers/{id}/test` | 启动并列出工具：`{tools:[{name, description}]}` |
-| POST | `/api/v1/mcp-servers/import` | 粘贴整份 `{"mcpServers": {...}}` 批量导入，整体在一个事务内完成，任一条失败则全部不写入；与内置服务器同名时返回 409 |
+| POST | `/api/v1/mcp-servers/import` | 已关闭；返回 403 `custom_mcp_creation_disabled` |
 | GET | `/api/v1/skills` | `?scope=&project_id=&limit=&cursor=`，响应 `{skills, next_cursor}` |
-| POST | `/api/v1/skills` | multipart 上传 zip（含 `SKILL.md`），或 `{scope, dir}` 登记服务器上的目录 |
-| PATCH | `/api/v1/skills/{id}` | `{enabled: bool}` 启用或禁用；禁用后不加载，仍引用它的块绑定会跳过它 |
-| DELETE | `/api/v1/skills/{id}` | 删除；内置 Skill（`builtin: true`）返回 409，只能禁用 |
+| POST | `/api/v1/skills` | 已关闭；上传 zip 和目录登记都返回 403 `custom_skill_creation_disabled` |
+| PATCH | `/api/v1/skills/{id}` | `{enabled: bool}` 启用或禁用已有自定义 Skill；内置 Skill 禁用返回 409 |
+| DELETE | `/api/v1/skills/{id}` | 删除已有自定义 Skill；内置 Skill（`builtin: true`）返回 409 |
 | GET | `/api/v1/block-bindings` | `?scope=&project_id=&limit=&cursor=`，响应 `{bindings, next_cursor}`；每个已有绑定带 `revision` |
 | PUT | `/api/v1/block-bindings/{block}` | `{scope, project_id?, mcp_tools: [], skills: [], expected_revision}`；`expected_revision` 必填 |
 | POST | `/api/v1/block-bindings/restore-defaults` | 预览或恢复当前进程内置默认扩展对平台块绑定的授权；仅平台管理员 |
@@ -302,15 +302,15 @@ Finding 始终返回 `annotation`：`""` 为未标注，`valid` 为有效，`inv
 
 `scope=project` 的数据库行覆盖完整的项目级授权：没有行表示继承，保存空数组表示显式撤销该块的全部 MCP 工具和 Skill。平台 scope 没有数据库行时可能由配置文件 `blocks` 提供生效绑定；首次用 `absent` 保存平台空行会创建数据库覆盖，该块的文件声明不再生效。调用方必须先读取完整列表并确认这一影响，服务端不推断调用方是否只加载了部分页。
 
-权限边界：`scope=project` 的读取需要该项目 `read` grant；`scope=platform` 或省略 scope 的全局列表只允许平台管理员。创建、导入、更新、删除、测试和块绑定写入都要求平台管理员；项目 scope 写入还必须同时具备该项目 `manage`。项目 `manage` 本身不是宿主执行权限，不能写平台配置或绕过平台管理员。MCP 删除/更新/测试和 Skill 删除/启停按资源已存储的 scope 重新检查，不信任请求里的 scope。
+权限边界：`scope=project` 的读取需要该项目 `read` grant；`scope=platform` 或省略 scope 的全局列表只允许平台管理员。创建和导入已关闭，认证后直接返回 403，不再执行 scope 授权；更新、删除、测试和块绑定写入仍要求平台管理员；项目 scope 写入还必须同时具备该项目 `manage`。项目 `manage` 本身不是宿主执行权限，不能写平台配置或绕过平台管理员。MCP 删除/更新/测试和 Skill 删除/启停按资源已存储的 scope 重新检查，不信任请求里的 scope。
 
-导入 MCP 时，查询参数指定 `scope`、`project_id`，body 直接使用 `{"mcpServers": {...}}`，不增加包装层。项目作用域必须有有效的项目 ID。MCP 更新允许只传 `name` 或 `enabled`；省略 `config` 会保留原配置，传入 `config` 则完整替换配置。列表、创建、更新和导入响应的 `config` 统一为 `{}`，任何角色都不能通过这些接口读回配置；不要把响应中的空对象当作原配置再次提交。旧客户端提交 env 值或敏感 header 的 `****` 时仍恢复已存值，没有对应旧值的占位项会移除；新客户端替换配置应提交完整原始模板。保存时对配置做严格语义校验：未知字段、非法值、越界字段和尾随 JSON 都返回 `400`；`${NAME}` 引用按模板加密保存，不在保存阶段展开环境变量，也不把解析值写入数据库。运行或测试时才展开。
+导入 MCP 和创建自定义 MCP 已关闭，相关请求返回 403。已有自定义 MCP 仍可更新：允许只传 `name` 或 `enabled`；省略 `config` 会保留原配置，传入 `config` 则完整替换配置。列表、更新响应的 `config` 统一为 `{}`，任何角色都不能通过这些接口读回配置；不要把响应中的空对象当作原配置再次提交。旧客户端提交 env 值或敏感 header 的 `****` 时仍恢复已存值，没有对应旧值的占位项会移除；新客户端替换配置应提交完整原始模板。保存时对配置做严格语义校验：未知字段、非法值、越界字段和尾随 JSON 都返回 `400`；`${NAME}` 引用按模板加密保存，不在保存阶段展开环境变量，也不把解析值写入数据库。运行或测试时才展开。
 
 项目级扩展解析使用按项目构建的合并配置：每个项目都有独立的 MCP manager，空绑定表示显式撤销该块的平台工具，不回退到平台工具；项目合并配置读取或构建失败会中止本次解析（返回错误），不会静默降级为仅平台配置。账号和扩展的数据库变更仍受进程内缓存影响，通常需要重启服务；当前没有可靠的跨进程缓存失效。
 
-Skill zip 上传字段为 `file`，另带 `scope`、可选 `project_id`；名称和描述由服务端从 `SKILL.md` 读取。目录登记请求为 `{scope, project_id?, dir}`。创建成功直接返回 Skill 对象。
+Skill zip 上传和目录登记已关闭，`POST /api/v1/skills` 返回 403。已有 Skill 仍可按 ID 删除或启停；内置 Skill 始终启用，禁用返回 409。
 
-MCP、Skill、块绑定列表使用游标分页。Skill zip 上传已实现，请求体上限 8 MiB，归档内单文件上限 4 MiB、总解压上限 16 MiB、最多 512 个条目，`SKILL.md` 读取上限 64 KiB；目录登记同样受单文件和总量限制。
+MCP、Skill、块绑定列表使用游标分页。
 
 #### 恢复内置默认授权
 

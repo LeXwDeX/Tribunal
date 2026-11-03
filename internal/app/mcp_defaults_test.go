@@ -111,29 +111,32 @@ func TestMCPDefaultsRegisterBuiltinServerAndBindTools(t *testing.T) {
 	}
 }
 
-func TestMCPDefaultsUpgradeConfigAndKeepDisabledState(t *testing.T) {
+func TestMCPDefaultsUpgradeConfigAndEnableServer(t *testing.T) {
 	ctx := context.Background()
 	service, st := newExtensionFixture(t)
 	applyMCPDefaults(t, service, st, nil, mcp.Config{}, graphDefault(analysisArgs))
 	server := platformMCPServer(t, st, "codebase-memory")
 	disabled := false
-	if _, err := service.UpdateMCPServer(ctx, server.ID, MCPServerUpdate{Enabled: &disabled}); err != nil {
+	if _, err := st.UpdateMCPServer(ctx, server.ID, store.MCPServerUpdate{Enabled: &disabled}); err != nil {
 		t.Fatalf("disable built-in server: %v", err)
 	}
 
 	applyMCPDefaults(t, service, st, nil, mcp.Config{}, graphDefault(analysisArgs))
-	if got := platformMCPServer(t, st, "codebase-memory"); got.Enabled {
-		t.Fatal("a restart re-enabled the server the administrator disabled")
+	if got := platformMCPServer(t, st, "codebase-memory"); !got.Enabled {
+		t.Fatal("restart did not enable the built-in server")
 	}
 
+	if _, err := st.UpdateMCPServer(ctx, server.ID, store.MCPServerUpdate{Enabled: &disabled}); err != nil {
+		t.Fatal(err)
+	}
 	upgraded := []string{"--tool-profile=analysis", "--new-flag"}
 	applyMCPDefaults(t, service, st, nil, mcp.Config{}, graphDefault(upgraded))
 	got := platformMCPServer(t, st, "codebase-memory")
 	if args := storedArgs(t, got); !slices.Equal(args, upgraded) {
 		t.Fatalf("upgrade kept the old config: args %q", args)
 	}
-	if got.Enabled {
-		t.Fatal("upgrade re-enabled the disabled built-in server")
+	if !got.Enabled {
+		t.Fatal("upgrade did not enable the built-in server")
 	}
 }
 
@@ -198,7 +201,7 @@ func TestMCPDefaultsLeaveAdministratorServersAlone(t *testing.T) {
 	}
 }
 
-func TestBuiltinMCPServerAllowsOnlyEnableChanges(t *testing.T) {
+func TestBuiltinMCPServerGuardsManagedFields(t *testing.T) {
 	ctx := context.Background()
 	service, st := newExtensionFixture(t)
 	applyMCPDefaults(t, service, st, nil, mcp.Config{}, graphDefault(analysisArgs))
@@ -222,12 +225,16 @@ func TestBuiltinMCPServerAllowsOnlyEnableChanges(t *testing.T) {
 	}
 	same := "codebase-memory"
 	disabled := false
-	updated, err := service.UpdateMCPServer(ctx, server.ID, MCPServerUpdate{Name: &same, Enabled: &disabled})
-	if err != nil || updated.Enabled || !updated.Builtin {
-		t.Fatalf("disable = %+v, %v; want a disabled built-in server", updated, err)
+	if _, err := service.UpdateMCPServer(ctx, server.ID, MCPServerUpdate{Name: &same, Enabled: &disabled}); !errors.As(err, &appErr) || appErr.Code != "conflict" {
+		t.Fatalf("disable = %v; want conflict", err)
 	}
-	if got := platformMCPServer(t, st, "codebase-memory"); got == nil || got.Enabled {
+	if got := platformMCPServer(t, st, "codebase-memory"); got == nil || !got.Enabled {
 		t.Fatalf("stored server = %+v", got)
+	}
+	enabled := true
+	updated, err := service.UpdateMCPServer(ctx, server.ID, MCPServerUpdate{Name: &same, Enabled: &enabled})
+	if err != nil || !updated.Enabled || !updated.Builtin {
+		t.Fatalf("enable = %+v, %v", updated, err)
 	}
 }
 
@@ -292,7 +299,7 @@ func TestMCPToolProviderSkipsUnconfiguredServers(t *testing.T) {
 	}
 }
 
-func TestRuntimeServesBuiltinMCPServerUntilDisabled(t *testing.T) {
+func TestRuntimeEnablesAndServesBuiltinMCPServerAfterRestart(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
 	cipher := newTestCipher(t)
@@ -331,7 +338,7 @@ func TestRuntimeServesBuiltinMCPServerUntilDisabled(t *testing.T) {
 	}
 	runtime = start()
 	t.Cleanup(func() { _ = runtime.Close() })
-	if runtime.MCPManager().HasServer("codebase-memory") {
-		t.Fatal("restart re-enabled the built-in MCP server the administrator disabled")
+	if !runtime.MCPManager().HasServer("codebase-memory") {
+		t.Fatal("restart did not enable the built-in MCP server")
 	}
 }

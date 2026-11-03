@@ -82,8 +82,8 @@ const (
 //
 // Unbinding a default therefore survives restarts, and upgrades never rewrite
 // a customised binding. The built-in row itself is refreshed by Sync on every
-// start; its enabled state belongs to the administrator. A failed install is
-// not recorded and is retried on the next start.
+// start and is kept enabled. A failed install is not recorded and is retried
+// on the next start.
 func ApplyExtensionDefaults(ctx context.Context, st *sqlite.Store, fileBlocks map[string]config.BlockBinding,
 	defaults []ExtensionDefault, logger *slog.Logger) error {
 	if len(defaults) == 0 && len(fileBlocks) == 0 {
@@ -569,8 +569,8 @@ func appendMissing(values, add []string) []string {
 // SkillDefaults turns the configured bundled skills into extension defaults.
 // Install copies the embedded skill into the managed platform skills root, so
 // the row is listed and loaded like an uploaded skill; it is marked built-in,
-// can be disabled and cannot be deleted. Sync refreshes the installed files
-// and description when the release ships different content.
+// cannot be disabled or deleted. Sync enables the row and refreshes the
+// installed files and description when the release ships different content.
 func (s *ExtensionService) SkillDefaults(specs []config.DefaultSkill) ([]ExtensionDefault, error) {
 	out := make([]ExtensionDefault, 0, len(specs))
 	for _, spec := range specs {
@@ -601,6 +601,11 @@ func (s *ExtensionService) SkillDefaults(specs []config.DefaultSkill) ([]Extensi
 				row, err := s.platformSkillNamed(ctx, name)
 				if err != nil || row == nil || row.Builtin != name {
 					return err
+				}
+				if !row.Enabled {
+					if err := s.store.SetSkillEnabled(ctx, row.ID, true); err != nil {
+						return err
+					}
 				}
 				// A refresh failure, such as a row left outside the managed
 				// root after workspace.root moved, must not stop the service.
@@ -781,7 +786,42 @@ func copyEmbeddedSkill(files fs.FS, dst string) error {
 
 // seedDefaultExtensions applies the configured defaults before the runtime
 // reads stored platform extensions, so the first start already uses them.
+// reenableBuiltinExtensions restores the enabled state independently of the
+// default configuration, so a deployment that removed the entry still keeps
+// its shipped extension enabled.
+func reenableBuiltinExtensions(ctx context.Context, st *sqlite.Store) error {
+	skills, err := st.ListSkills(ctx, store.ScopePlatform, nil)
+	if err != nil {
+		return fmt.Errorf("app: list built-in skills: %w", err)
+	}
+	for _, row := range skills {
+		if row.Builtin == "" || row.Enabled {
+			continue
+		}
+		if err := st.SetSkillEnabled(ctx, row.ID, true); err != nil {
+			return fmt.Errorf("app: enable built-in skill %q: %w", row.Name, err)
+		}
+	}
+	servers, err := st.ListMCPServers(ctx, store.ScopePlatform, nil)
+	if err != nil {
+		return fmt.Errorf("app: list built-in MCP servers: %w", err)
+	}
+	for _, row := range servers {
+		if row.Builtin == "" || row.Enabled {
+			continue
+		}
+		enabled := true
+		if _, err := st.UpdateMCPServer(ctx, row.ID, store.MCPServerUpdate{Enabled: &enabled}); err != nil {
+			return fmt.Errorf("app: enable built-in MCP server %q: %w", row.Name, err)
+		}
+	}
+	return nil
+}
+
 func seedDefaultExtensions(ctx context.Context, cfg *config.Config, st *sqlite.Store, manager *workspace.Manager, logger *slog.Logger, now func() time.Time) error {
+	if err := reenableBuiltinExtensions(ctx, st); err != nil {
+		return err
+	}
 	if len(cfg.DefaultExtensions.Skills) == 0 && len(cfg.DefaultExtensions.MCPServers) == 0 {
 		// Still release default-owned rows of blocks the file now declares.
 		if err := ApplyExtensionDefaults(ctx, st, cfg.Blocks, nil, logger); err != nil {

@@ -79,6 +79,7 @@ v1.2.0 尚未发布：版本说明已合并到 `main`，尚未打 tag，也未�
 - 迁移文件 `0016_dossier_mr_title` 只追加列；接口层测试覆盖旧评审省略 `mr_title`、新 dossier 写入标题。
 - 日志字段：`scripts/logcheck` 扫描非测试代码，禁止 logger 调用记录 `err` 或 `err.Error()`。
 - 数据目录锁：独占锁在释放前阻止第二个持有者；启动时锁冲突以退出码 1 拒绝启动。
+- 内置扩展始终启用和启动恢复：禁用请求返回 409；清空 `default_extensions` 后启动仍恢复历史禁用行。
 - `bootstrap_admins` 用户名写法：启动告警含序号，已绑定时给出 `replacement=id:<N>`，未绑定或读取失败时给出 `binding=none` 或 `binding=unavailable`，不含用户名；`id:` 写法不产生此告警。
 - 会话淘汰保留管理员；webhook 存储失败返回 503。
 - 这些测试只证明代码路径的语义，不替代真实实例验收；上述后续工作区检查只覆盖所运行的测试，不代表本节所有测试或当前发布候选已完整验证。

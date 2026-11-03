@@ -236,9 +236,9 @@ v1.2.0 开箱自带两项内置扩展，不需要额外配置：
 
 **验证**：控制台「扩展」页里，两项都带「内置」标签。在 MCP 服务器一栏点「测试」，工具列表里应有 `search_graph`、`trace_path`、`get_code_snippet`，并且没有 `index_repository`、`delete_project`。MCP 详情和列表的配置返回 `config: {}` 是预期行为。
 
-- **不想用内置项**：在控制台禁用即可，重启和升级后保持禁用。内置项不能删除。
+- **内置项**：始终启用，不能禁用或删除；启动时会恢复历史禁用状态。要让新部署不登记内置项，使用下一条配置。
 - **新部署不登记内置项**：配置里写 `default_extensions.skills: []`，MCP 同理，见 [默认扩展](design/06-config.md#默认扩展default_extensions)。
-- **接入自己的 MCP**：控制台「扩展 → MCP 服务器」支持直接粘贴 Claude Code 格式的 `mcpServers` JSON。然后在「块绑定」里给需要的块授权只读工具。配置里的秘密不要直接写进 JSON，按下面三步把它传进容器：
+- **已有自定义 MCP**：控制台不再支持新增或导入 MCP；已有项可在编辑窗口更新配置。配置里的秘密不要直接写进 JSON，按下面三步把它传进容器：
   1. 在 `.env` 里加上变量，比如 `MY_MCP_TOKEN=...`。
   2. 在仓库根目录新建 `compose.override.yaml`，把变量加进容器环境。Compose 会自动加载这个文件。文件里只写变量映射，不写值：
 
@@ -251,7 +251,7 @@ v1.2.0 开箱自带两项内置扩展，不需要额外配置：
 
      `compose.yaml` 只会把 `environment` 里列出的变量传进容器，所以光写在 `.env` 里，服务读不到。
   3. 在 MCP 配置里写成 `${MY_MCP_TOKEN}` 模板。如果子进程也要读这个变量，把变量名加进 `x-review.env_allowlist`。然后用 `docker compose config --quiet` 检查，再执行 `docker compose up -d --force-recreate --wait` 重建容器。`env_allowlist` 只决定子进程能继承哪些变量，不能把变量带进容器。
-- **接入自己的 Skill**：上传 zip，或登记服务器上的目录，格式兼容 Claude Code Skill；Skill 里的脚本不会被执行。
+- **扩展范围**：自定义 Skill/MCP 的创建入口已关闭：控制台不显示上传、目录登记、新增 MCP 或导入 MCP，后端对相应创建请求返回 403。控制台只保留内置 `code-review` Skill 和 `codebase-memory` MCP；两者始终启用，禁用请求返回 409。配置文件 `default_extensions` 和 `mcp.config` 仍是部署者特权入口，可另行登记扩展。已有自定义 MCP 可测试、编辑、删除和启停；已有自定义 Skill 可启停和删除。Skill 里的脚本不会被执行。
 - 数据库里的扩展改动按进程缓存生效，改完通常要重启：`docker compose up -d --force-recreate --wait`。
 
 ## 8. 从 v1.0.0 升级

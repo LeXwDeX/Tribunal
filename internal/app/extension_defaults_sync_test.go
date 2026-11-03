@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"log/slog"
 	"path/filepath"
 	"reflect"
@@ -183,6 +184,13 @@ func TestRuntimeStartsWhenBuiltinSkillRefreshFails(t *testing.T) {
 		t.Fatalf("first NewRuntime: %v", err)
 	}
 	_ = first.Close()
+	rows, err := st.ListSkills(ctx, store.ScopePlatform, nil)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("ListSkills = %+v, %v", rows, err)
+	}
+	if err := st.SetSkillEnabled(ctx, rows[0].ID, false); err != nil {
+		t.Fatal(err)
+	}
 
 	cfg.Workspace.Root = t.TempDir()
 	runtime, err := NewRuntime(ctx, cfg, deps)
@@ -190,7 +198,45 @@ func TestRuntimeStartsWhenBuiltinSkillRefreshFails(t *testing.T) {
 		t.Fatalf("NewRuntime after workspace.root changed: %v", err)
 	}
 	t.Cleanup(func() { _ = runtime.Close() })
+	if row, err := st.GetSkill(ctx, rows[0].ID); err != nil || !row.Enabled {
+		t.Fatalf("skill not enabled before refresh failure: %+v, %v", row, err)
+	}
 	if !strings.Contains(logs.String(), "level=WARN") || !strings.Contains(logs.String(), "built-in skill refresh failed") {
 		t.Fatalf("refresh failure not logged as a warning:\n%s", logs.String())
+	}
+}
+
+// Shipped extensions stay enabled even when the deployment no longer lists
+// them in default_extensions.
+func TestSeedDefaultExtensionsReenablesBuiltinsWithoutDefaults(t *testing.T) {
+	ctx := context.Background()
+	service, st := newExtensionFixture(t)
+	applySkillDefaults(t, service, st, nil, defaultCodeReview)
+	skills, err := service.ListSkills(ctx, store.ScopePlatform, nil)
+	if err != nil || len(skills) != 1 {
+		t.Fatalf("ListSkills = %+v, %v", skills, err)
+	}
+	if err := st.SetSkillEnabled(ctx, skills[0].ID, false); err != nil {
+		t.Fatal(err)
+	}
+	server, err := st.CreateMCPServer(ctx, store.MCPServer{
+		Scope: store.ScopePlatform, Name: "codebase-memory", Config: json.RawMessage(`{"command":"true"}`),
+		Enabled: false, Builtin: "codebase-memory",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{Workspace: config.WorkspaceConfig{Root: t.TempDir()}}
+	if err := seedDefaultExtensions(ctx, cfg, st, workspace.NewManager(cfg.Workspace.Root, nil), nil, time.Now); err != nil {
+		t.Fatalf("seedDefaultExtensions: %v", err)
+	}
+	got, err := st.GetSkill(ctx, skills[0].ID)
+	if err != nil || !got.Enabled {
+		t.Fatalf("built-in skill enabled = %+v, %v", got, err)
+	}
+	gotServer, err := st.GetMCPServer(ctx, server.ID)
+	if err != nil || !gotServer.Enabled {
+		t.Fatalf("built-in MCP server enabled = %+v, %v", gotServer, err)
 	}
 }

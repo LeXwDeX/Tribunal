@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"reflect"
 	"testing"
@@ -17,13 +18,16 @@ func TestMCPServerRoutesDoNotRevealExistenceToViewer(t *testing.T) {
 	env := newWiringEnv(t)
 	admin := env.business()
 	ids := map[string]string{}
-	for scope, body := range map[string]map[string]any{
-		"platform": {"scope": "platform", "name": "platform-tools", "config": map[string]any{"command": "npx"}},
-		"project":  {"scope": "project", "project_id": 42, "name": "project-tools", "config": map[string]any{"command": "npx"}},
+	projectID := int64(42)
+	for scope, row := range map[string]store.MCPServer{
+		"platform": {Scope: "platform", Name: "platform-tools", Config: json.RawMessage(`{"command":"npx"}`), Enabled: true},
+		"project":  {Scope: "project", ProjectID: &projectID, Name: "project-tools", Config: json.RawMessage(`{"command":"npx"}`), Enabled: true},
 	} {
-		created := admin.json(http.MethodPost, "/api/v1/mcp-servers", body)
-		assertStatus(t, created, http.StatusCreated)
-		ids[scope] = decodeMap(t, created.body)["id"].(string)
+		created, err := env.db.CreateMCPServer(context.Background(), row)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids[scope] = created.ID
 	}
 	viewer := env.loginAs("code-viewer")
 	if err := env.db.SetProjectGrant(context.Background(), 42, 8, store.ProjectAccessManage); err != nil {

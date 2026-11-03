@@ -1,26 +1,14 @@
 package server
 
 import (
-	"archive/zip"
-	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
 	"net/http"
-	"os"
-	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/store"
-)
-
-const (
-	skillUploadMax = 8 << 20
-	skillFileMax   = 64 << 10
 )
 
 var (
@@ -38,8 +26,8 @@ type MCPServer struct {
 	Name      string          `json:"name"`
 	Config    json.RawMessage `json:"config"`
 	Enabled   bool            `json:"enabled"`
-	// Builtin marks a server shipped with the platform: it can be disabled
-	// but not renamed, reconfigured or deleted.
+	// Builtin marks a server shipped with the platform that cannot be disabled,
+	// renamed, reconfigured or deleted.
 	Builtin   bool      `json:"builtin"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -85,8 +73,7 @@ type Skill struct {
 	Description string `json:"description"`
 	Dir         string `json:"dir,omitempty"`
 	Enabled     bool   `json:"enabled"`
-	// Builtin marks a skill shipped with the platform: it can be disabled
-	// but not deleted.
+	// Builtin marks a skill shipped with the platform that cannot be disabled or deleted.
 	Builtin   bool      `json:"builtin"`
 	CreatedAt time.Time `json:"created_at"`
 }
@@ -266,56 +253,8 @@ func (s *Server) handleListMCPServers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"servers": out, "next_cursor": next})
 }
 
-type mcpServerRequest struct {
-	Scope     string          `json:"scope"`
-	ProjectID *int64          `json:"project_id,omitempty"`
-	Name      string          `json:"name"`
-	Config    json.RawMessage `json:"config"`
-	Enabled   *bool           `json:"enabled,omitempty"`
-}
-
 func (s *Server) handleCreateMCPServer(w http.ResponseWriter, r *http.Request) {
-	if !s.requireExtensions(w, r) {
-		return
-	}
-	var request mcpServerRequest
-	if err := decodeJSON(w, r, adminBodyLimit, &request); err != nil {
-		decodeRequestError(w, r, err)
-		return
-	}
-	scope, err := validateExtensionScope(strings.TrimSpace(request.Scope), request.ProjectID, true)
-	if err != nil {
-		validationFailed(w, r, "scope", err.Error())
-		return
-	}
-	if !s.authorizeExtensionScope(w, r, scope, true) {
-		return
-	}
-	name := strings.TrimSpace(request.Name)
-	if !mcpNameRE.MatchString(name) {
-		validationFailed(w, r, "name", "name must match "+mcpNameRE.String())
-		return
-	}
-	if err := validateMCPConfigObject(request.Config); err != nil {
-		validationFailed(w, r, "config", err.Error())
-		return
-	}
-	enabled := true
-	if request.Enabled != nil {
-		enabled = *request.Enabled
-	}
-	server, err := s.extensions.CreateMCPServer(r.Context(), MCPServerInput{
-		Scope:     scope.scope,
-		ProjectID: scope.projectID,
-		Name:      name,
-		Config:    request.Config,
-		Enabled:   enabled,
-	})
-	if err != nil {
-		s.writeServiceError(w, r, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, maskMCPServer(*server))
+	writeError(w, r, http.StatusForbidden, "custom_mcp_creation_disabled", "custom MCP server creation is disabled", nil)
 }
 
 type mcpServerUpdateRequest struct {
@@ -400,54 +339,7 @@ func (s *Server) handleDeleteMCPServer(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleImportMCPServers(w http.ResponseWriter, r *http.Request) {
-	if !s.requireExtensions(w, r) {
-		return
-	}
-	scope, err := parseExtensionScope(r, true)
-	if err != nil {
-		validationFailed(w, r, "scope", err.Error())
-		return
-	}
-	if !s.authorizeExtensionScope(w, r, scope, true) {
-		return
-	}
-	// The body is the pasted document itself: {"mcpServers": {...}}. Unknown
-	// top-level fields are rejected so no wrapper layer sneaks in.
-	var document struct {
-		MCPServers map[string]json.RawMessage `json:"mcpServers"`
-	}
-	if err := decodeJSON(w, r, adminBodyLimit, &document); err != nil {
-		decodeRequestError(w, r, err)
-		return
-	}
-	if len(document.MCPServers) == 0 {
-		validationFailed(w, r, "mcpServers", "mcpServers must contain at least one server")
-		return
-	}
-	for name, config := range document.MCPServers {
-		if !mcpNameRE.MatchString(name) {
-			validationFailed(w, r, "mcpServers", fmt.Sprintf("invalid server name %q", name))
-			return
-		}
-		if err := validateMCPConfigObject(config); err != nil {
-			validationFailed(w, r, "mcpServers."+name, err.Error())
-			return
-		}
-	}
-	servers, err := s.extensions.ImportMCPServers(r.Context(), MCPImportInput{
-		Scope:     scope.scope,
-		ProjectID: scope.projectID,
-		Servers:   document.MCPServers,
-	})
-	if err != nil {
-		s.writeServiceError(w, r, err)
-		return
-	}
-	out := make([]MCPServer, 0, len(servers))
-	for _, server := range servers {
-		out = append(out, maskMCPServer(server))
-	}
-	writeJSON(w, http.StatusCreated, map[string]any{"servers": out})
+	writeError(w, r, http.StatusForbidden, "custom_mcp_creation_disabled", "custom MCP server creation is disabled", nil)
 }
 
 func (s *Server) handleTestMCPServer(w http.ResponseWriter, r *http.Request) {
@@ -531,131 +423,9 @@ func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"skills": skills, "next_cursor": next})
 }
 
-// handleUploadSkillOrRegisterDirectory dispatches the two documented shapes
-// of POST /api/v1/skills: multipart archive upload and JSON directory
-// registration.
+// handleUploadSkillOrRegisterDirectory closes both custom skill creation paths.
 func (s *Server) handleUploadSkillOrRegisterDirectory(w http.ResponseWriter, r *http.Request) {
-	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
-		s.handleUploadSkill(w, r)
-		return
-	}
-	s.handleRegisterSkillDirectory(w, r)
-}
-
-func (s *Server) handleUploadSkill(w http.ResponseWriter, r *http.Request) {
-	if !s.requireExtensions(w, r) {
-		return
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, skillUploadMax)
-	if err := r.ParseMultipartForm(skillUploadMax); err != nil {
-		badRequest(w, r, "invalid multipart upload")
-		return
-	}
-	if r.MultipartForm != nil {
-		defer r.MultipartForm.RemoveAll()
-	}
-	scope, err := validateExtensionScope(strings.TrimSpace(r.FormValue("scope")),
-		parseFormInt64(r.FormValue("project_id")), true)
-	if err != nil {
-		validationFailed(w, r, "scope", err.Error())
-		return
-	}
-	if !s.authorizeExtensionScope(w, r, scope, true) {
-		return
-	}
-	file, _, err := r.FormFile("file")
-	if err != nil {
-		validationFailed(w, r, "file", "a zip file is required in the file field")
-		return
-	}
-	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, skillUploadMax+1))
-	if err != nil || len(data) > skillUploadMax {
-		badRequest(w, r, "skill archive is too large")
-		return
-	}
-	name, description, err := parseSkillArchive(data)
-	if err != nil {
-		validationFailed(w, r, "file", err.Error())
-		return
-	}
-	skill, err := s.extensions.UploadSkill(r.Context(), SkillUpload{
-		Scope:       scope.scope,
-		ProjectID:   scope.projectID,
-		Name:        name,
-		Description: description,
-		Data:        data,
-	})
-	if err != nil {
-		s.writeServiceError(w, r, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, skill)
-}
-
-// parseFormInt64 interprets an empty form value as nil and rejects malformed
-// values by returning nil as well; scope validation then reports the missing
-// project.
-func parseFormInt64(raw string) *int64 {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return nil
-	}
-	value, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil || value <= 0 {
-		return nil
-	}
-	return &value
-}
-
-type skillDirectoryRequest struct {
-	Scope     string `json:"scope"`
-	ProjectID *int64 `json:"project_id,omitempty"`
-	Dir       string `json:"dir"`
-}
-
-func (s *Server) handleRegisterSkillDirectory(w http.ResponseWriter, r *http.Request) {
-	if !s.requireExtensions(w, r) {
-		return
-	}
-	var request skillDirectoryRequest
-	if err := decodeJSON(w, r, adminBodyLimit, &request); err != nil {
-		decodeRequestError(w, r, err)
-		return
-	}
-	scope, err := validateExtensionScope(strings.TrimSpace(request.Scope), request.ProjectID, true)
-	if err != nil {
-		validationFailed(w, r, "scope", err.Error())
-		return
-	}
-	if !s.authorizeExtensionScope(w, r, scope, true) {
-		return
-	}
-	dir := strings.TrimSpace(request.Dir)
-	if dir == "" || !filepath.IsAbs(dir) {
-		validationFailed(w, r, "dir", "dir must be an absolute server path")
-		return
-	}
-	info, err := os.Stat(dir)
-	if err != nil || !info.IsDir() {
-		validationFailed(w, r, "dir", "dir must be an existing directory")
-		return
-	}
-	manifest, err := os.Stat(filepath.Join(dir, "SKILL.md"))
-	if err != nil || !manifest.Mode().IsRegular() {
-		validationFailed(w, r, "dir", "dir must contain a regular SKILL.md")
-		return
-	}
-	skill, err := s.extensions.RegisterSkillDir(r.Context(), SkillDirInput{
-		Scope:     scope.scope,
-		ProjectID: scope.projectID,
-		Dir:       dir,
-	})
-	if err != nil {
-		s.writeServiceError(w, r, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, skill)
+	writeError(w, r, http.StatusForbidden, "custom_skill_creation_disabled", "custom skill creation is disabled", nil)
 }
 
 func (s *Server) handleDeleteSkill(w http.ResponseWriter, r *http.Request) {
@@ -691,8 +461,7 @@ type skillUpdateRequest struct {
 	Enabled *bool `json:"enabled,omitempty"`
 }
 
-// handleUpdateSkill enables or disables one skill. It is the only way to
-// switch off a built-in skill, which cannot be deleted.
+// handleUpdateSkill enables or disables one skill.
 func (s *Server) handleUpdateSkill(w http.ResponseWriter, r *http.Request) {
 	if !s.requireExtensions(w, r) {
 		return
@@ -725,79 +494,6 @@ func (s *Server) handleUpdateSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, skill)
-}
-
-// parseSkillArchive validates the uploaded zip and reads name/description from
-// SKILL.md. The archive is never extracted to disk.
-func parseSkillArchive(data []byte) (string, string, error) {
-	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
-	if err != nil {
-		return "", "", errors.New("file must be a valid zip archive")
-	}
-	var manifest *zip.File
-	for _, file := range reader.File {
-		if file.FileInfo().IsDir() || filepath.Base(file.Name) != "SKILL.md" {
-			continue
-		}
-		if manifest == nil || strings.Count(file.Name, "/") < strings.Count(manifest.Name, "/") {
-			manifest = file
-		}
-	}
-	if manifest == nil {
-		return "", "", errors.New("archive must contain SKILL.md")
-	}
-	stream, err := manifest.Open()
-	if err != nil {
-		return "", "", errors.New("SKILL.md could not be read")
-	}
-	defer stream.Close()
-	raw, err := io.ReadAll(io.LimitReader(stream, skillFileMax+1))
-	if err != nil || len(raw) > skillFileMax {
-		return "", "", errors.New("SKILL.md is too large")
-	}
-	return parseSkillManifest(raw)
-}
-
-// parseSkillManifest reads the small YAML frontmatter subset SKILL.md uses.
-// Only the name and description scalars are needed; the rest is ignored.
-func parseSkillManifest(raw []byte) (string, string, error) {
-	text := strings.TrimPrefix(string(raw), "\ufeff")
-	text = strings.ReplaceAll(text, "\r\n", "\n")
-	lines := strings.Split(text, "\n")
-	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
-		return "", "", errors.New("SKILL.md must start with a frontmatter block")
-	}
-	name, description := "", ""
-	closed := false
-	for _, line := range lines[1:] {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "---" {
-			closed = true
-			break
-		}
-		key, value, ok := strings.Cut(trimmed, ":")
-		if !ok {
-			continue
-		}
-		value = strings.TrimSpace(value)
-		value = strings.Trim(value, `"'`)
-		switch strings.TrimSpace(key) {
-		case "name":
-			name = value
-		case "description":
-			description = value
-		}
-	}
-	if !closed {
-		return "", "", errors.New("SKILL.md frontmatter is not closed")
-	}
-	if !skillNameRE.MatchString(name) || strings.Contains(name, "__") {
-		return "", "", errors.New("SKILL.md name must match " + skillNameRE.String())
-	}
-	if description == "" || len(description) > 4096 || strings.ContainsRune(description, 0) {
-		return "", "", errors.New("SKILL.md description is required and must be at most 4096 bytes")
-	}
-	return name, description, nil
 }
 
 func (s *Server) handleListBlockBindings(w http.ResponseWriter, r *http.Request) {

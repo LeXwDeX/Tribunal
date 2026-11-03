@@ -7,7 +7,7 @@ import { ExtensionsManager } from '../src/features/extensions/ExtensionsManager'
 import { ProjectDetailPage } from '../src/pages/ProjectDetailPage'
 import { setCsrfToken } from '../src/api/client'
 import type { BlockBinding } from '../src/api/types'
-import { binding, project, revisionToken, skill } from './fixtures'
+import { binding, mcpServer, project, revisionToken, skill } from './fixtures'
 import {
   createTestQueryClient, installFetch, jsonResponse, renderWithProviders,
 } from './test-utils'
@@ -33,20 +33,23 @@ function seedManagerCache(
   queryClient.setQueryData(['mcp-servers', 'project', projectId], { pages: [{ servers: [] }], pageParams: [undefined] })
 }
 
-describe('MCP creation across cached projects', () => {
+describe('MCP editing across cached projects', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
     setCsrfToken(null)
   })
 
   it('does not carry an open project A draft into a project B write', async () => {
-    const writes: unknown[] = []
+    const writes: Array<{ url: string; body: unknown }> = []
     installFetch((url, init) => {
-      if (url.startsWith('/api/v1/mcp-servers') && init?.method === 'POST') {
-        writes.push(JSON.parse(String(init.body)))
+      if (url.startsWith('/api/v1/mcp-servers') && init?.method === 'PUT') {
+        writes.push({ url, body: JSON.parse(String(init.body)) })
         return jsonResponse({})
       }
-      if (url.startsWith('/api/v1/mcp-servers')) return jsonResponse({ servers: [] })
+      if (url.startsWith('/api/v1/mcp-servers')) {
+        const id = Number(new URL(url, 'http://localhost').searchParams.get('project_id'))
+        return jsonResponse({ servers: [mcpServer({ id: `s-${id}`, name: `server-${id}`, scope: 'project', project_id: id })] })
+      }
       if (url.startsWith('/api/v1/skills')) return jsonResponse({ skills: [] })
       if (url.startsWith('/api/v1/block-bindings')) return jsonResponse({ bindings: [] })
       return jsonResponse({})
@@ -54,6 +57,7 @@ describe('MCP creation across cached projects', () => {
     const queryClient = createTestQueryClient()
     seedManagerCache(queryClient, 42, [])
     seedManagerCache(queryClient, 43, [])
+    for (const id of [42, 43]) queryClient.setQueryData(['mcp-servers', 'project', id], { pages: [{ servers: [mcpServer({ id: `s-${id}`, name: `server-${id}` })] }], pageParams: [undefined] })
     let switchProject: (id: number) => void = () => {}
     function Harness() {
       const [projectId, setProjectId] = useState(42)
@@ -63,34 +67,33 @@ describe('MCP creation across cached projects', () => {
 
     const user = userEvent.setup()
     renderWithProviders(<Harness />, { queryClient })
-    await user.click(await screen.findByRole('button', { name: '新增 MCP 服务器' }))
+    await user.click(await screen.findByRole('button', { name: '编辑' }))
+    await user.clear(screen.getByRole('textbox', { name: '名称' }))
     await user.type(screen.getByRole('textbox', { name: '名称' }), 'project-a-secret')
-    await user.clear(screen.getByRole('textbox', { name: '配置 JSON' }))
-    await user.type(screen.getByRole('textbox', { name: '配置 JSON' }), '{{"url":"https://a.example"}')
 
     act(() => switchProject(43))
-    expect(screen.getByRole('textbox', { name: '名称' })).toHaveValue('')
-    expect(screen.getByRole('textbox', { name: '配置 JSON' })).toHaveValue('{}')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    await user.click(await screen.findByRole('button', { name: '编辑' }))
+    expect(screen.getByRole('textbox', { name: '名称' })).toHaveValue('server-43')
     setCsrfToken('csrf-switch')
-    await user.click(screen.getByRole('button', { name: '添加' }))
-    expect(writes).toHaveLength(0)
-
-    await user.type(screen.getByRole('textbox', { name: '名称' }), 'project-b-server')
-    await user.click(screen.getByRole('button', { name: '添加' }))
-    await waitFor(() => expect(writes).toEqual([{ scope: 'project', project_id: 43, name: 'project-b-server', config: {} }]))
+    await user.click(screen.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(writes).toEqual([{ url: '/api/v1/mcp-servers/s-43', body: { name: 'server-43', enabled: true } }]))
   })
 
   it('does not close a project B draft when a pending project A write finishes', async () => {
     let resolveA: (response: Response) => void = () => {}
     const pending = new Promise<Response>((resolve) => { resolveA = resolve })
-    const writes: Array<{ project_id: number; name: string }> = []
+    const writes: Array<{ url: string; name: string }> = []
     installFetch((url, init) => {
-      if (url.startsWith('/api/v1/mcp-servers') && init?.method === 'POST') {
-        const body = JSON.parse(String(init.body)) as { project_id: number; name: string }
-        writes.push(body)
-        return body.project_id === 42 ? pending : jsonResponse({})
+      if (url.startsWith('/api/v1/mcp-servers') && init?.method === 'PUT') {
+        const body = JSON.parse(String(init.body)) as { name: string }
+        writes.push({ url, name: body.name })
+        return url.endsWith('/s-42') ? pending : jsonResponse({})
       }
-      if (url.startsWith('/api/v1/mcp-servers')) return jsonResponse({ servers: [] })
+      if (url.startsWith('/api/v1/mcp-servers')) {
+        const id = Number(new URL(url, 'http://localhost').searchParams.get('project_id'))
+        return jsonResponse({ servers: [mcpServer({ id: `s-${id}`, name: `server-${id}`, scope: 'project', project_id: id })] })
+      }
       if (url.startsWith('/api/v1/skills')) return jsonResponse({ skills: [] })
       if (url.startsWith('/api/v1/block-bindings')) return jsonResponse({ bindings: [] })
       return jsonResponse({})
@@ -98,6 +101,7 @@ describe('MCP creation across cached projects', () => {
     const queryClient = createTestQueryClient()
     seedManagerCache(queryClient, 42, [])
     seedManagerCache(queryClient, 43, [])
+    for (const id of [42, 43]) queryClient.setQueryData(['mcp-servers', 'project', id], { pages: [{ servers: [mcpServer({ id: `s-${id}`, name: `server-${id}` })] }], pageParams: [undefined] })
     let switchProject: (id: number) => void = () => {}
     function Harness() {
       const [projectId, setProjectId] = useState(42)
@@ -107,19 +111,22 @@ describe('MCP creation across cached projects', () => {
     const user = userEvent.setup()
     setCsrfToken('csrf-switch')
     renderWithProviders(<Harness />, { queryClient })
-    await user.click(await screen.findByRole('button', { name: '新增 MCP 服务器' }))
+    await user.click(await screen.findByRole('button', { name: '编辑' }))
+    await user.clear(screen.getByRole('textbox', { name: '名称' }))
     await user.type(screen.getByRole('textbox', { name: '名称' }), 'project-a-server')
-    await user.click(screen.getByRole('button', { name: '添加' }))
+    await user.click(screen.getByRole('button', { name: '保存' }))
     await waitFor(() => expect(writes).toHaveLength(1))
 
     act(() => switchProject(43))
+    await user.click(await screen.findByRole('button', { name: '编辑' }))
+    await user.clear(screen.getByRole('textbox', { name: '名称' }))
     await user.type(screen.getByRole('textbox', { name: '名称' }), 'project-b-draft')
     await act(async () => { resolveA(jsonResponse({})) })
     expect(screen.getByRole('textbox', { name: '名称' })).toHaveValue('project-b-draft')
-    await user.click(screen.getByRole('button', { name: '添加' }))
+    await user.click(screen.getByRole('button', { name: '保存' }))
     await waitFor(() => expect(writes).toMatchObject([
-      { project_id: 42, name: 'project-a-server' },
-      { project_id: 43, name: 'project-b-draft' },
+      { url: '/api/v1/mcp-servers/s-42', name: 'project-a-server' },
+      { url: '/api/v1/mcp-servers/s-43', name: 'project-b-draft' },
     ]))
   })
 })

@@ -48,7 +48,7 @@ func TestDroppedSkillGrantWithoutDetailIsRemovedByName(t *testing.T) {
 	applySkillDefaults(t, service, st, nil, skills)
 	applyMCPDefaults(t, service, st, nil, mcp.Config{}, servers)
 	rows, _ := st.ListSkills(ctx, "platform", nil)
-	if _, err := service.SetSkillEnabled(ctx, rows[0].ID, false); err != nil {
+	if err := st.SetSkillEnabled(ctx, rows[0].ID, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -90,8 +90,8 @@ func TestDroppedSkillGrantWithoutDetailIsRemovedByName(t *testing.T) {
 		t.Fatalf("restart changed the removed marker: %+v", row)
 	}
 	skillsAfter, _ := st.ListSkills(ctx, "platform", nil)
-	if len(skillsAfter) != 1 || skillsAfter[0].Enabled {
-		t.Fatalf("upgrade changed the disabled skill: %+v", skillsAfter)
+	if len(skillsAfter) != 1 || !skillsAfter[0].Enabled {
+		t.Fatalf("upgrade did not enable the builtin skill: %+v", skillsAfter)
 	}
 }
 

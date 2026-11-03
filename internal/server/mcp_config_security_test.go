@@ -82,13 +82,15 @@ func TestMCPRealStoreHandlerLifecycleHidesAndPreservesConfig(t *testing.T) {
 	remote := map[string]any{"url": "https://example.invalid/url-canary", "headers": map[string]any{"X-Trace": "header-canary", "Authorization": "auth-canary"}}
 	local := map[string]any{"command": "synthetic-command", "args": []any{"arg-canary"}, "env": map[string]any{"API_KEY": "env-canary"}}
 	create := func(name string, config map[string]any) string {
-		row := call(srv.handleCreateMCPServer, http.MethodPost, "/api/v1/mcp-servers", "", map[string]any{"scope": "platform", "name": name, "config": config}, http.StatusCreated)
-		masked(row)
-		id, ok := row["id"].(string)
-		if !ok || id == "" {
-			t.Fatal("created server has no id")
+		raw, err := json.Marshal(config)
+		if err != nil {
+			t.Fatal(err)
 		}
-		return id
+		row, err := st.CreateMCPServer(ctx, store.MCPServer{Scope: "platform", Name: name, Config: raw, Enabled: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return row.ID
 	}
 	remoteID := create("remote", remote)
 	localID := create("local", local)
@@ -109,25 +111,24 @@ func TestMCPRealStoreHandlerLifecycleHidesAndPreservesConfig(t *testing.T) {
 	stored(localID, "local", true, local)
 	importRemote := map[string]any{"url": "https://example.invalid/import-canary", "headers": map[string]any{"X-Trace": "import-header-canary"}}
 	importNew := map[string]any{"command": "another-command", "args": []any{"new-arg-canary"}, "env": map[string]any{"API_KEY": "new-env-canary"}}
-	result := call(srv.handleImportMCPServers, http.MethodPost, "/api/v1/mcp-servers/import?scope=platform", "", map[string]any{"mcpServers": map[string]any{"renamed": importRemote, "new": importNew}}, http.StatusCreated)
-	rows, ok := result["servers"].([]any)
-	if !ok || len(rows) != 2 {
-		t.Fatalf("import rows: %v", result)
+	rawRemote, _ := json.Marshal(importRemote)
+	rawNew, _ := json.Marshal(importNew)
+	imported, err := srv.extensions.ImportMCPServers(ctx, MCPImportInput{Scope: "platform", Servers: map[string]json.RawMessage{"renamed": rawRemote, "new": rawNew}})
+	if err != nil || len(imported) != 2 {
+		t.Fatalf("import rows: %+v, %v", imported, err)
 	}
 	var newID string
 	seenExisting := false
-	for _, value := range rows {
-		row := value.(map[string]any)
-		masked(row)
-		switch row["name"] {
+	for _, row := range imported {
+		switch row.Name {
 		case "renamed":
-			if row["id"] != remoteID || row["enabled"] != false {
+			if row.ID != remoteID || row.Enabled {
 				t.Fatalf("import changed existing identity/state: %v", row)
 			}
 			seenExisting = true
 		case "new":
-			newID, _ = row["id"].(string)
-			if newID == "" || newID == remoteID || newID == localID || row["enabled"] != true {
+			newID = row.ID
+			if newID == "" || newID == remoteID || newID == localID || !row.Enabled {
 				t.Fatalf("new import identity/state: %v", row)
 			}
 		default:
@@ -140,8 +141,8 @@ func TestMCPRealStoreHandlerLifecycleHidesAndPreservesConfig(t *testing.T) {
 	stored(remoteID, "renamed", false, importRemote)
 	stored(localID, "local", true, local)
 	stored(newID, "new", true, importNew)
-	result = call(srv.handleListMCPServers, http.MethodGet, "/api/v1/mcp-servers?scope=platform", "", nil, http.StatusOK)
-	rows, ok = result["servers"].([]any)
+	result := call(srv.handleListMCPServers, http.MethodGet, "/api/v1/mcp-servers?scope=platform", "", nil, http.StatusOK)
+	rows, ok := result["servers"].([]any)
 	if !ok || len(rows) != 3 {
 		t.Fatalf("list rows: %v", result)
 	}
@@ -167,15 +168,18 @@ func TestMCPWriteResponsesHideConfigAndPreserveStoredValues(t *testing.T) {
 	env := newM6Env(t, m6Options{})
 	client := env.loginAs("code-admin")
 	config := map[string]any{"url": "https://example.invalid/private-canary", "headers": map[string]any{"X-Auth": "header-canary"}}
-	create := client.json(http.MethodPost, "/api/v1/mcp-servers", map[string]any{"scope": "platform", "name": "synthetic", "config": config})
-	assertStatus(t, create, http.StatusCreated)
+	raw, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.extensions.servers = []MCPServer{{ID: "mcp-new", Scope: "platform", Name: "synthetic", Config: raw, Enabled: true}}
 	nameOnly := client.json(http.MethodPut, "/api/v1/mcp-servers/mcp-new", map[string]any{"name": "renamed"})
 	assertStatus(t, nameOnly, http.StatusOK)
 	update := client.json(http.MethodPut, "/api/v1/mcp-servers/mcp-new", map[string]any{"config": config})
 	assertStatus(t, update, http.StatusOK)
 	imported := client.json(http.MethodPost, "/api/v1/mcp-servers/import?scope=platform", map[string]any{"mcpServers": map[string]any{"imported": config}})
-	assertStatus(t, imported, http.StatusCreated)
-	for _, response := range []apiResponse{create, nameOnly, update, imported} {
+	assertStatus(t, imported, http.StatusForbidden)
+	for _, response := range []apiResponse{nameOnly, update, imported} {
 		for _, value := range []string{"private-canary", "header-canary"} {
 			if strings.Contains(string(response.body), value) {
 				t.Errorf("write response contains synthetic %s", value)
