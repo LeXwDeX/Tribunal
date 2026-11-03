@@ -1,3 +1,4 @@
+# Tribunal Agent and Contributor Guide
 
 This file is the single instruction file for every coding agent and contributor working in this repository. There is no `CLAUDE.md`; tools that look for one should read this file. It is also the project's secondary-development guide for an open-source fork.
 
@@ -77,7 +78,7 @@ Only dispatch trusted branch code to a self-hosted runner: untrusted code can pe
 
 - **License and provenance.** The project is MIT licensed. By contributing, you agree to license your contribution under the same terms. Keep copyright notices and `LICENSE` intact. Do not copy code, assets or prompts from another project unless the license is compatible and the provenance is recorded. Bundled executables and third-party assets need a version and license record under `third_party/` and a regenerated license bundle.
 - **Issue first.** One goal maps to one Issue with Why / Scope / Approach / Acceptance, and one PR. Small typo or dependency-bot fixes may skip the Issue only when repository policy allows it.
-- **Branches and commits.** Do not push directly to `main`. Use a topic branch, keep commits focused, and include an `Issue: #N` trailer in every commit. Never use `--no-verify`; when a guard rejects a commit, fix the checkpoint or trailer instead of bypassing it.
+- **Branches and commits.** Do not push directly to `main`. Use a topic branch, keep commits focused, and include an `Issue: #N` trailer in every commit. External contributors do not need the local SpecGit checkpoint; the `Issue: #N` trailer and a normal PR are sufficient. Never use `--no-verify`; when a guard rejects a commit, fix the checkpoint or trailer instead of bypassing it.
 - **Merge policy.** Squash-merge only after the current head passes CI and the review workflow in section 8 is complete. Bring the branch up to date with the latest `main` first; a green run on an outdated base does not count.
 - **Compatibility.** Prefer additive changes. Do not break existing HTTP clients, configuration files, stored data or event consumers without an Issue that documents the migration and deprecation plan. Keep old fields readable for at least one minor release unless the change is security-critical.
 - **Deprecation.** Document the replacement, the first release that warns, and the planned removal release. Do not remove a public field or endpoint silently.
@@ -142,6 +143,11 @@ A documentation-only PR may use a reduced chain: independent review plus evidenc
 
 If a stage cannot run because a credential, environment, an external service, or the required agent capability is missing, name the missing stage and why. Do not replace it with CI alone.
 
+When the named subagents are unavailable, the same checks may be performed manually
+by separate reviewers: one independent code review, one logic and boundary pass,
+one scoped test run, and one adversarial pass. Record who performed each check and
+the evidence; CI alone is not a substitute.
+
 ## 9. Acceptance and release
 
 - **Issue acceptance.** Every Issue has testable acceptance criteria. A PR description maps each criterion to a check, a command result, or an explicitly accepted gap.
@@ -164,10 +170,13 @@ If a stage cannot run because a credential, environment, an external service, or
 
 - Read this file, then `docs/handoff.md` in the primary checkout if it exists, and the open Issues before starting work. Do not redo completed Issues.
 - Prefer a subagent or a bounded task for long-running monitoring. Do not use `sleep` or a foreground `--watch` to wait for CI. After starting a PR, continue independent work or report progress and end the turn only when a background callback is configured and verified to wake the session. If no such callback exists or it is unreliable, use a monitored subagent with an explicit timeout, or report the limitation instead of silently waiting.
-- Use SpecGit as required by the repository. Do not commit with `--no-verify`. If a checkpoint belongs to another branch, use a separate worktree and initialize it from the main declaration instead of overwriting the checkpoint.
+- Use SpecGit as required by the repository. Do not commit with `--no-verify`. If a checkpoint belongs to another branch, use a separate worktree and initialize it from the main declaration instead of overwriting the checkpoint. External contributors without SpecGit use a normal topic branch and PR with the `Issue: #N` trailer; the local checkpoint is a maintainer convenience, not a contribution requirement.
 - Respect permission prompts. Do not bypass a denied command, a protected branch or a credential boundary. Stop and ask when the next action needs human authorization or a secret.
 - A subagent's finding is a lead, not a fact. Verify it against source or a reproducible command before reporting or acting on it.
 - Keep the final report short: what changed, what was verified, what was not verified, and the remaining risk.
+
+The SpecGit section below describes the maintainer's local checkpoint setup. External
+contributors can ignore it and use a normal topic branch and PR.
 
 <!-- specgit:project:v2:start -->
 ## SpecGit 2

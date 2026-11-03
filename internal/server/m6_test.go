@@ -519,9 +519,6 @@ type fakeExtensions struct {
 	bindings []BlockBinding
 	updated  []MCPServerUpdate
 	lastID   string
-	imports  []MCPImportInput
-	uploads  []SkillUpload
-	dirs     []SkillDirInput
 	deleted  []string
 	err      error
 }
@@ -566,18 +563,6 @@ func (f *fakeExtensions) GetMCPServer(ctx context.Context, id string) (*MCPServe
 	return nil, store.ErrNotFound
 }
 
-func (f *fakeExtensions) CreateMCPServer(ctx context.Context, in MCPServerInput) (*MCPServer, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.err != nil {
-		return nil, f.err
-	}
-	server := MCPServer{ID: "mcp-new", Scope: in.Scope, ProjectID: in.ProjectID,
-		Name: in.Name, Config: in.Config, Enabled: in.Enabled}
-	f.servers = append(f.servers, server)
-	return &server, nil
-}
-
 func (f *fakeExtensions) UpdateMCPServer(ctx context.Context, id string, in MCPServerUpdate) (*MCPServer, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -609,28 +594,6 @@ func (f *fakeExtensions) DeleteMCPServer(ctx context.Context, id string) error {
 	return f.err
 }
 
-func (f *fakeExtensions) ImportMCPServers(ctx context.Context, in MCPImportInput) ([]MCPServer, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.imports = append(f.imports, in)
-	if f.err != nil {
-		return nil, f.err
-	}
-	names := make([]string, 0, len(in.Servers))
-	for name := range in.Servers {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	out := make([]MCPServer, 0, len(names))
-	for _, name := range names {
-		server := MCPServer{ID: "mcp-" + name, Scope: in.Scope, ProjectID: in.ProjectID,
-			Name: name, Config: in.Servers[name], Enabled: true}
-		f.servers = append(f.servers, server)
-		out = append(out, server)
-	}
-	return out, nil
-}
-
 func (f *fakeExtensions) ListSkills(ctx context.Context, scope string, projectID *int64) ([]Skill, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -640,32 +603,6 @@ func (f *fakeExtensions) ListSkills(ctx context.Context, scope string, projectID
 func (f *fakeExtensions) ListSkillsPage(ctx context.Context, scope string, projectID *int64, cursor string, limit int) ([]Skill, string, error) {
 	skills, err := f.ListSkills(ctx, scope, projectID)
 	return skills, "", err
-}
-
-func (f *fakeExtensions) UploadSkill(ctx context.Context, in SkillUpload) (*Skill, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.uploads = append(f.uploads, in)
-	if f.err != nil {
-		return nil, f.err
-	}
-	skill := Skill{ID: "skill-upload", Scope: in.Scope, ProjectID: in.ProjectID,
-		Name: in.Name, Description: in.Description, Enabled: true}
-	f.skills = append(f.skills, skill)
-	return &skill, nil
-}
-
-func (f *fakeExtensions) RegisterSkillDir(ctx context.Context, in SkillDirInput) (*Skill, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.dirs = append(f.dirs, in)
-	if f.err != nil {
-		return nil, f.err
-	}
-	skill := Skill{ID: "skill-dir", Scope: in.Scope, ProjectID: in.ProjectID,
-		Name: "dir-skill", Description: "registered", Dir: in.Dir, Enabled: true}
-	f.skills = append(f.skills, skill)
-	return &skill, nil
 }
 
 func (f *fakeExtensions) DeleteSkill(ctx context.Context, id string) error {

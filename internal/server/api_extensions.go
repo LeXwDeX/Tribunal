@@ -39,28 +39,12 @@ type MCPTool struct {
 	Description string `json:"description,omitempty"`
 }
 
-// MCPServerInput creates one server. Config is a single mcpServers entry.
-type MCPServerInput struct {
-	Scope     string
-	ProjectID *int64
-	Name      string
-	Config    json.RawMessage
-	Enabled   bool
-}
-
 // MCPServerUpdate replaces only the provided fields. Config, when set,
 // replaces the whole server object.
 type MCPServerUpdate struct {
 	Name    *string
 	Config  json.RawMessage
 	Enabled *bool
-}
-
-// MCPImportInput is one pasted {"mcpServers": {...}} document.
-type MCPImportInput struct {
-	Scope     string
-	ProjectID *int64
-	Servers   map[string]json.RawMessage
 }
 
 // Skill is one registered skill. Dir is the managed server-side directory
@@ -76,23 +60,6 @@ type Skill struct {
 	// Builtin marks a skill shipped with the platform that cannot be disabled or deleted.
 	Builtin   bool      `json:"builtin"`
 	CreatedAt time.Time `json:"created_at"`
-}
-
-// SkillUpload carries the validated archive and manifest fields. Data is the
-// original zip; the service decides where to store it.
-type SkillUpload struct {
-	Scope       string
-	ProjectID   *int64
-	Name        string
-	Description string
-	Data        []byte
-}
-
-// SkillDirInput registers an existing server-side directory.
-type SkillDirInput struct {
-	Scope     string
-	ProjectID *int64
-	Dir       string
 }
 
 // BlockBinding grants MCP tools and skills to one review block.
