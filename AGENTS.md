@@ -149,19 +149,19 @@ If a stage cannot run because a credential, environment, an external service, or
 - **Real-deployment acceptance.** When an Issue requires it, use an isolated deployment with a backup, verify the expected migration set and health endpoints, exercise a real review and the changed feature, and confirm rollback is possible. Do not write host names, ports, tokens or internal paths into public documents; describe them as environment-specific.
 - **Release.** Maintainers update `CHANGELOG.md` and `docs/delivery-readiness.md`, then tag `vX.Y.Z` and publish the GitHub Release. Agents do not tag or publish unless explicitly authorized. A release note must distinguish verified scope from remaining gaps.
 - **Rollback.** There are no down migrations. A rollback restores the pre-upgrade snapshot and a matching binary; replacing only the image is not supported. Document the backup boundary before an irreversible migration.
-- **Post-merge.** Read back the PR and Issue state, confirm the Issue is closed, update the local `docs/handoff.md` when the state changes, and remove temporary worktrees.
+- **Post-merge.** Read back the PR and Issue state, confirm the Issue is closed, update `docs/handoff.md` in the primary checkout when the state changes, and remove temporary worktrees.
 
 ## 10. Operations and handoff
 
 - The image does not rewrite a host-mounted configuration file. Upgrades must compare the mounted file with the shipped example and decide which values to keep.
 - Back up the database, any `-wal`/`-shm` files, all workspaces, configuration, image digest and encryption key before an irreversible upgrade. A running-file copy is not a consistent backup.
 - Do not run two containers against the same SQLite data directory. Use the lock and health endpoints as the first checks.
-- `docs/handoff.md` is a local, untracked handoff note for the next agent on the same machine. It is ignored by `.gitignore`, never committed and never updated through a PR. It states the current state, the next actions, known gaps and environment-specific notes, but never secrets. When it is missing, rebuild it from the open Issues, recent PRs, `CHANGELOG.md` and `docs/delivery-readiness.md`.
+- `docs/handoff.md` is a local, untracked handoff note for the next agent on the same machine. It lives only in the primary checkout, not in a temporary worktree, because ignored files are per worktree and are lost when the worktree is removed. It is ignored by `.gitignore`, never committed and never updated through a PR. It states the current state, the next actions, known gaps and environment-specific notes, but never secrets. When it is missing, rebuild the state from the open Issues, recent PRs, `CHANGELOG.md` and `docs/delivery-readiness.md`, and ask the user for the environment-specific notes, which no tracked source holds.
 - Public, durable state lives in Issues, PRs, `CHANGELOG.md` and `docs/delivery-readiness.md`. Keep internal host names, credentials and private deployment details out of every tracked file. The repository is public.
 
 ## 11. Agent workflow
 
-- Read this file, then the local `docs/handoff.md` if it exists, and the open Issues before starting work. Do not redo completed Issues.
+- Read this file, then `docs/handoff.md` in the primary checkout if it exists, and the open Issues before starting work. Do not redo completed Issues.
 - Prefer a subagent or a bounded task for long-running monitoring. Do not use `sleep` or a foreground `--watch` to wait for CI. After starting a PR, continue independent work or report progress and end the turn only when a background callback is configured and verified to wake the session. If no such callback exists or it is unreliable, use a monitored subagent with an explicit timeout, or report the limitation instead of silently waiting.
 - Use SpecGit as required by the repository. Do not commit with `--no-verify`. If a checkpoint belongs to another branch, use a separate worktree and initialize it from the main declaration instead of overwriting the checkpoint.
 - Respect permission prompts. Do not bypass a denied command, a protected branch or a credential boundary. Stop and ask when the next action needs human authorization or a secret.
