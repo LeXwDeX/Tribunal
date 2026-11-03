@@ -6,7 +6,7 @@ GitLab CE MR 多 agent 自动评审服务
 
 当前 M0–M6 功能已有本地实现，覆盖项目注册与 webhook、三种 LLM 协议、agent 工具循环、DAG 与持久化、主 agent 编排/对抗核验/裁决、GitLab 发布、工作区、MCP/Skill、OAuth 持久会话、项目 `read`/`manage` 授权与 CSRF、管理 API、React 控制台、API token、统计、反馈采集、人工标注与许可证清单。
 
-当前版本是 **v1.1.0**，变更和升级必读见 [CHANGELOG](CHANGELOG.md)。v1.1.0 通过了 CI，包括 Compose 冒烟测试，但没有在真实 GitLab 实例上验收；具体做过哪些验证、还缺哪些，见 [当前版本（v1.1.x）验证状态](docs/delivery-readiness.md#当前版本v11x验证状态)。
+当前最新发布版本是 **v1.1.0**，待发布版本是 **v1.2.0**；变更和升级必读见 [CHANGELOG](CHANGELOG.md)。v1.2.0 尚未打 tag，已通过 CI 和 33.110 隔离实例升级验收；具体做过哪些验证、还缺哪些，见 [v1.2.0（待发布）验证状态](docs/delivery-readiness.md#v120-验证状态)。
 
 部署时：人工部署看 [部署与运维](docs/operations.md)，由 agent 代为部署和接入时用 [Agent 部署指南](docs/agent-deployment.md)。
 
@@ -256,7 +256,7 @@ go mod verify
 
 `go build` 依赖 `web/dist`，因此在全新检出上必须先执行前端构建。完整 Go 测试需要 Bash 和真实的 Python 3（注册文档测试会执行 Python 3）；`go test -race` 还需要启用 cgo 和可用的 C 编译器。自托管 runner 必须在运行前确认这些前提。生产二进制和部署运行不依赖 Python 3；上面的人工注册文档示例单独需要宿主机 Python 3。测试使用临时 SQLite 数据库和本地 HTTP 假 GitLab，覆盖注册、加密、认证、事件过滤、并发去重、租约恢复、旧 attempt 拒绝、CLI、工作流、发布、工作区、扩展和控制台静态资源。
 
-各版本做过哪些验证见 [交付就绪与验收记录](docs/delivery-readiness.md)：当前版本看 [当前版本（v1.1.x）验证状态](docs/delivery-readiness.md#当前版本v11x验证状态)，v1.0.0 的 f143 隔离实例验收看 [v1.0.0 历史验收记录](docs/delivery-readiness.md#v100-历史验收记录f143仅供追溯)。
+各版本做过哪些验证见 [交付就绪与验收记录](docs/delivery-readiness.md)：待发布版本看 [v1.2.0（待发布）验证状态](docs/delivery-readiness.md#v120-验证状态)，已发布版本看 [v1.1.x 验证状态](docs/delivery-readiness.md#当前版本v11x验证状态)，v1.0.0 的 f143 隔离实例验收看 [v1.0.0 历史验收记录](docs/delivery-readiness.md#v100-历史验收记录f143仅供追溯)。
 
 ## 主体已实现 / 范围外 / 已知限制
 
@@ -274,7 +274,7 @@ go mod verify
 
 **范围外 / 不构成发布门槛**
 
-生产规模、负载和计费、物理设备/完整 WCAG、Postgres、其他协议/provider、每个 MCP HTTP backend 的具体实现不在当前范围，不作为发布条件。
+生产规模、负载和计费、物理设备与真实屏幕阅读器、Postgres、其他协议/provider、每个 MCP HTTP backend 的具体实现不在当前范围，不作为发布条件。WCAG 2.1 AA 已完成自动化审计和人工抽查（#195），但不等于物理设备或真实屏幕阅读器验收。
 
 **已知限制**
 
