@@ -519,9 +519,6 @@ type fakeExtensions struct {
 	bindings []BlockBinding
 	updated  []MCPServerUpdate
 	lastID   string
-	imports  []MCPImportInput
-	uploads  []SkillUpload
-	dirs     []SkillDirInput
 	deleted  []string
 	err      error
 }

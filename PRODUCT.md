@@ -2,7 +2,7 @@
 
 <!-- impeccable:product-schema 1 -->
 
-This record summarizes the existing ARCH.md, docs/design, and local prototype.
+This record summarizes the existing ARCH.md, docs/design, and console code.
 It is not evidence that a feature is implemented or deployed. No new product
 interview was completed during autonomous execution; inferred context is marked.
 
@@ -61,9 +61,8 @@ restyle changed visuals and layout only, not the console behavior or review flow
 - [HTTP API](docs/design/03-http-api.md).
 - [Web console](docs/design/07-web-console.md).
 - The console implementation and its design notes live in `web/` and
-  `docs/design/07-web-console.md`. Visual references are kept locally and are not
-  part of the public repository; example metrics and project names are illustrative,
-  not live data.
+  `docs/design/07-web-console.md`. No separate visual reference is published;
+  example metrics and project names are illustrative, not live data.
 
 ## Product Principles
 

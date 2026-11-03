@@ -47,9 +47,9 @@ func TestAcceptanceManageGrantCannotConfigureHostExtensions(t *testing.T) {
 			assertStatus(t, bob.json(tc.method, tc.path, tc.body), http.StatusForbidden)
 		})
 	}
-	if len(env.extensions.servers) != 0 || len(env.extensions.dirs) != 0 || len(env.extensions.bindings) != 0 {
-		t.Fatalf("manage-only user changed extensions: servers=%d dirs=%d bindings=%d",
-			len(env.extensions.servers), len(env.extensions.dirs), len(env.extensions.bindings))
+	if len(env.extensions.servers) != 0 || len(env.extensions.bindings) != 0 {
+		t.Fatalf("manage-only user changed extensions: servers=%d bindings=%d",
+			len(env.extensions.servers), len(env.extensions.bindings))
 	}
 
 	// The manage grant still allows reading the project's own extensions.

@@ -27,8 +27,8 @@ Icon[\r]
 .TemporaryItems
 
 # Local agent and runtime state
-.opencode/
-.agents/
-.claude/
-.serena/
-.specgit.yaml
+/.opencode/
+/.serena/
+/.specgit.yaml
+/.agents/skills/specgit-native/
+/.claude/skills/specgit-native/

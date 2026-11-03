@@ -114,7 +114,11 @@ func TestMCPRealStoreHandlerLifecycleHidesAndPreservesConfig(t *testing.T) {
 	importNew := map[string]any{"command": "another-command", "args": []any{"new-arg-canary"}, "env": map[string]any{"API_KEY": "new-env-canary"}}
 	rawRemote, _ := json.Marshal(importRemote)
 	rawNew, _ := json.Marshal(importNew)
-	imported, err := srv.extensions.(*AppExtensions).service.ImportMCPServers(ctx, app.MCPImportInput{Scope: "platform", Servers: map[string]json.RawMessage{"renamed": rawRemote, "new": rawNew}})
+	extensions, ok := srv.extensions.(*AppExtensions)
+	if !ok {
+		t.Fatalf("extensions service = %T", srv.extensions)
+	}
+	imported, err := extensions.service.ImportMCPServers(ctx, app.MCPImportInput{Scope: "platform", Servers: map[string]json.RawMessage{"renamed": rawRemote, "new": rawNew}})
 	if err != nil || len(imported) != 2 {
 		t.Fatalf("import rows: %+v, %v", imported, err)
 	}

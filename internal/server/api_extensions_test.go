@@ -178,9 +178,6 @@ func TestMCPImportDisabled(t *testing.T) {
 	bad := client.request(http.MethodPost, "/api/v1/mcp-servers/import?scope=platform", badConfig,
 		map[string]string{"Content-Type": "application/json"})
 	assertStatus(t, bad, http.StatusForbidden)
-	if len(env.extensions.imports) != 0 {
-		t.Fatalf("imports = %v", env.extensions.imports)
-	}
 }
 
 // These legacy handlers are not routed, but retain their parser coverage.

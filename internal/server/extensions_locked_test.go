@@ -31,7 +31,7 @@ func TestCustomExtensionCreationIsForbidden(t *testing.T) {
 			}
 		})
 	}
-	if len(env.extensions.servers) != 0 || len(env.extensions.imports) != 0 || len(env.extensions.uploads) != 0 || len(env.extensions.dirs) != 0 {
+	if len(env.extensions.servers) != 0 {
 		t.Fatal("creation reached the extension service")
 	}
 }
