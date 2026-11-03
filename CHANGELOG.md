@@ -52,7 +52,7 @@ v1.2.0 尚未打 tag；本段记录尚未发布的新改动。`[1.2.0]` 段仅�
 
 ## [1.2.0] - 2026-10-29
 
-> v1.2.0 尚未打 tag，也未发布 Release。本节的日期是版本说明的合并日，不是发布日；tag 和 Release 由维护者在 [#108](https://github.com/LeXwDeX/Tribunal/issues/108) 验收后决定。当前可核对的候选范围是 [v1.1.0...a113e08](https://github.com/LeXwDeX/Tribunal/compare/v1.1.0...a113e08)；`main` 上后续的迁移 `0020`–`0024` 和 #143 默认授权收窄不属于 v1.2.0。打 tag 后补 `[1.2.0]: https://github.com/LeXwDeX/Tribunal/compare/v1.1.0...v1.2.0`，并回读确认链接可用。
+> v1.2.0 尚未打 tag，也未发布 Release。本节的日期是版本说明的合并日，不是发布日；tag 和 Release 由维护者在 [#108](https://github.com/LeXwDeX/Tribunal/issues/108) 验收后决定。当前可核对的候选范围是 [v1.1.0...0fe72b5](https://github.com/LeXwDeX/Tribunal/compare/v1.1.0...0fe72b5)；`a113e08` 是真实实例验收基线，不是最终发布 commit；`main` 上后续的迁移 `0020`–`0024` 和 #143 默认授权收窄不属于 v1.2.0。最终发布 commit 必须包含 `0fe72b5`（旧测试失败修复）。打 tag 后补 `[1.2.0]: https://github.com/LeXwDeX/Tribunal/compare/v1.1.0...v1.2.0`，并回读确认链接可用。
 
 ### 升级前必读
 

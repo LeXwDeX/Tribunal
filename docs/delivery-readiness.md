@@ -26,13 +26,13 @@
 
 ## v1.2.0（待发布）验证状态
 
-v1.2.0 尚未发布：版本说明已合并到 `main`，尚未打 tag，也未发布 Release。变更清单见 [CHANGELOG](../CHANGELOG.md) 的 `[1.2.0] - 2026-10-29` 段；候选范围可用 [v1.1.0...a113e08](https://github.com/LeXwDeX/Tribunal/compare/v1.1.0...a113e08) 核对；`main` 上后续的迁移 `0020`–`0024` 与 #143 默认授权收窄不属于 v1.2.0。本节最初以 `main` `96e8081` 为发布候选基线，真实实例升级验收在 `main` `a113e08` 上执行；另列后续工作区的本地检查。发布前必须补齐未完成项。
+v1.2.0 尚未发布：版本说明已合并到 `main`，尚未打 tag，也未发布 Release。变更清单见 [CHANGELOG](../CHANGELOG.md) 的 `[1.2.0] - 2026-10-29` 段；候选范围可用 [v1.1.0...0fe72b5](https://github.com/LeXwDeX/Tribunal/compare/v1.1.0...0fe72b5) 核对；`a113e08` 是真实实例升级验收基线，不是最终发布 commit；`main` 上后续的迁移 `0020`–`0024` 与 #143 默认授权收窄不属于 v1.2.0。本节最初以 `main` `96e8081` 为发布候选基线，真实实例升级验收在 `main` `a113e08` 上执行；另列后续工作区的本地检查。发布前必须补齐未完成项。
 
-**状态汇总（候选 `a113e08` 的 GitHub Actions 未通过；当前 `main 8527e59` 已通过）**
+**状态汇总（验收基线 `a113e08` 的 CI 失败已由 `0fe72b5` 修复；`0fe72b5` 与当前 `main c7a3dde` 的 CI 全绿）**
 
-- [ ] **候选 `a113e08` 的 GitHub Actions 未通过**：run [40832017198](https://github.com/LeXwDeX/Tribunal/actions/runs/40832017198) 的 `go`、`web`、`docker` 三个 job 均为 failure；不能用当前 `main` 或其他 PR 的绿检查回填候选。
-- [x] **当前 `main 8527e59` 的 GitHub Actions 已通过**：push run [41547838777](https://github.com/LeXwDeX/Tribunal/actions/runs/41547838777) 的 `go`、`web`、`docker` 全部 success。它只证明 `main` 的当前 head，不证明候选 `a113e08`。
-- [x] **后续 PR 的检查**：PR #189、#179、#180、#181 的 head 各自有全绿检查；这些是历史 PR 证据，不替代候选的 CI。
+- [ ] **验收基线 `a113e08` 的 GitHub Actions 未通过**：run [40832017198](https://github.com/LeXwDeX/Tribunal/actions/runs/40832017198) 的 `go`、`web`、`docker` 三个 job 均为 failure。根因是旧测试 `TestSandboxIgnoreGitLogStrictAndCompatibility` 只接受带时区偏移的 strict git log 日期，而 CI 输出为 UTC `Z`。
+- [x] **修复提交 `0fe72b5` 的 GitHub Actions 已通过**：`go`、`web`、`docker` 全部 success；该修复把日期正则改为允许 `Z` 和时区偏移（#172）。
+- [x] **当前 `main c7a3dde` 的 GitHub Actions 已通过**：push run [41553674842](https://github.com/LeXwDeX/Tribunal/actions/runs/41553674842)（`run_attempt=2`）三项 success。最终发布 commit 必须包含 `0fe72b5`；不能用旧的验收基线回填。
 - [x] **真实 GitLab 实例验收**：[#108](https://github.com/LeXwDeX/Tribunal/issues/108) 已于 2026-10-29 在 `main` `a113e08` 上执行；剩余 5 项全部通过；其中 `bootstrap_admins` 弃用告警首轮未复现，经 [#151](https://github.com/LeXwDeX/Tribunal/issues/151) 排查后在真实实例复现。详见[真实实例升级验收（#108）](#v120-真实实例升级验收)。真实实例验收与 GitHub Actions 是独立证据；v1.0.0 的 f143 结果不覆盖本版本，见[历史验收记录](#v100-历史验收记录f143仅供追溯)。
 
 <a id="v120-真实实例升级验收"></a>

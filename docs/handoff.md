@@ -51,7 +51,7 @@
 - #204 合并后按约定补做代码审核、3 方会审和对抗审核，发现压测脚本 P1：`read` 在无换行输入上触发 `set -e` 退出、缺少吞吐、`duration_ms` 文档口径、默认授权用户 59、轮询瞬时 HTTP 失败直接退出。修复随 PR #211 合并（`c279814`）；新增本地 mock 端到端测试，覆盖汇总、重试、取消、基线、默认不授权、admin 列表失败、grant 失败与授权目标用户，并接入 CI。
 - 5 项目真实复测在修复 GitLab 项目 token 后通过：5/5 完成、0 失败，p50 27.4s、p95 31.9s，wall 58s，输入 348,429、输出 20,008 tokens，成本 116,085 micros。项目访问令牌 2026-12-03 到期，到期前需轮换。
 - #195 自动化验收完成：33.110 总览页亮/暗 Lighthouse Accessibility 100；390/1440 宽度无横向滚动；键盘抽查通过。执行图 `label-content-name-mismatch` 由 PR #205 合并（`95e9e08`）修复，新镜像上 axe 0 违规；截图已生成但 GitHub 未登录，无法附到 Issue。
-- **v1.2.0 仍未打 tag、未发 Release**，由维护者处理。候选是 `a113e08`（18 个迁移）；该候选的 GitHub Actions 未通过，当前 `main 8527e59` 的 CI 已通过。CHANGELOG 有 `[1.2.0] - 2026-10-29` 版本段。
+- **v1.2.0 仍未打 tag、未发 Release**，由维护者处理。真实实例验收基线是 `a113e08`（18 个迁移）；该基线的 CI 因旧测试 `TestSandboxIgnoreGitLogStrictAndCompatibility` 失败，修复在 `0fe72b5`（#172）；`0fe72b5` 与当前 `main c7a3dde` 的 CI 全绿。最终发布 commit 必须包含 `0fe72b5`。CHANGELOG 有 `[1.2.0] - 2026-10-29` 版本段。
 - 迁移序号已用：`0020`（#159）、`0021`–`0023`（#180）、`0024`（#179），均已合并，但 `0020`–`0024` 不属于 v1.2.0 候选。无 down migration；升级/回退必须按 `docs/operations.md` 备份并整体恢复，不能只换镜像。
 
 ## 4. 剩余 Issue
