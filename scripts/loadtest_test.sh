@@ -44,6 +44,11 @@ class Handler(BaseHTTPRequestHandler):
         is_user = auth.endswith(" user")
         if self.path == "/__stats":
             return self.send_json(200, {"grants": state["grants"], "last_grant_user": state["last_grant_user"]})
+        if self.path == "/api/v1/system/lock-stats":
+            return self.send_json(200, {
+                "sqlite": {"wait_count": 3, "wait_duration_ms": 12, "max_open_connections": 1, "in_use": 0, "idle": 1},
+                "workspace": {"wait_count": 2, "wait_duration_ms": 8, "max_wait_ms": 5},
+            })
         if self.path == "/api/v1/me":
             return self.send_json(200, {"id": 59 if is_user else 0})
         if self.path.startswith("/api/v1/admin/projects"):
@@ -185,6 +190,7 @@ run_script "$tmp/out1" "$tmp/err1" \
 check "normal exit 0" '[ "$code" -eq 0 ]' "exit=$code stderr=$(cat "$tmp/err1")"
 check "normal summary" 'grep -q "reviews=2 completed=2 failed=0 cancelled=0" "$tmp/err1"' "$(cat "$tmp/err1")"
 check "normal throughput" 'grep -q "reviews_per_sec=" "$tmp/err1"' "$(cat "$tmp/err1")"
+check "normal lock waits" 'grep -q "sqlite_wait_count=3 sqlite_wait_ms=12 workspace_wait_count=2 workspace_wait_ms=8 workspace_max_wait_ms=5" "$tmp/err1"' "$(cat "$tmp/err1")"
 check "normal csv" '[ "$(wc -l < "$tmp/out1")" -eq 3 ]' "lines=$(wc -l < "$tmp/out1")"
 check "no grant by default" '[ "$(curl -fsS "$base/__stats" | jq -r .grants)" -eq 0 ]' "grants=$(curl -fsS "$base/__stats")"
 stop_server

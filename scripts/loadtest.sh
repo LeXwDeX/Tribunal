@@ -301,14 +301,22 @@ fi
 totals=$(awk -F'\t' 'NF {tin+=$6; tout+=$7; cost+=$8} END{printf "%d %d %d", tin, tout, cost}' "$tmp/rows.tsv")
 read -r tokens_in tokens_out cost_micros <<<"$totals"
 
+lock_stats=$(api_get "/api/v1/system/lock-stats" "$TRIBUNAL_ADMIN_TOKEN") || die "cannot read lock statistics"
+sqlite_wait_count=$(jq -r '.sqlite.wait_count // 0' <<<"$lock_stats")
+sqlite_wait_ms=$(jq -r '.sqlite.wait_duration_ms // 0' <<<"$lock_stats")
+workspace_wait_count=$(jq -r '.workspace.wait_count // 0' <<<"$lock_stats")
+workspace_wait_ms=$(jq -r '.workspace.wait_duration_ms // 0' <<<"$lock_stats")
+workspace_max_wait_ms=$(jq -r '.workspace.max_wait_ms // 0' <<<"$lock_stats")
+
 finished_epoch=$(date +%s)
 wall_s=$((finished_epoch - started_epoch))
 [ "$wall_s" -gt 0 ] || wall_s=1
 reviews_per_sec=$(awk -v n="$count" -v s="$wall_s" 'BEGIN{ printf "%.2f", n / s }')
 
-printf 'reviews=%d completed=%d failed=%d cancelled=%d triggers_failed=%d failure_rate=%s%% p50_ms=%s p95_ms=%s wall_s=%d reviews_per_sec=%s tokens_in=%d tokens_out=%d cost_micros=%d\n' \
+printf 'reviews=%d completed=%d failed=%d cancelled=%d triggers_failed=%d failure_rate=%s%% p50_ms=%s p95_ms=%s wall_s=%d reviews_per_sec=%s tokens_in=%d tokens_out=%d cost_micros=%d sqlite_wait_count=%d sqlite_wait_ms=%d workspace_wait_count=%d workspace_wait_ms=%d workspace_max_wait_ms=%d\n' \
   "$count" "$completed" "$failed" "$cancelled" "$failed_triggers" "$failure_rate" \
-  "$p50" "$p95" "$wall_s" "$reviews_per_sec" "$tokens_in" "$tokens_out" "$cost_micros" >&2
+  "$p50" "$p95" "$wall_s" "$reviews_per_sec" "$tokens_in" "$tokens_out" "$cost_micros" \
+  "$sqlite_wait_count" "$sqlite_wait_ms" "$workspace_wait_count" "$workspace_wait_ms" "$workspace_max_wait_ms" >&2
 
 status_code=0
 [ "$failed_triggers" -eq 0 ] || status_code=1

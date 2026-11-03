@@ -1255,10 +1255,12 @@ bash scripts/loadtest.sh > loadtest.csv
 stdout 是 CSV：`project_id,mr_iid,status,verdict,duration_ms,tokens_in,tokens_out,cost_micros`。stderr 汇总：
 
 ```text
-reviews=... completed=... failed=... cancelled=... triggers_failed=... failure_rate=...% p50_ms=... p95_ms=... wall_s=... reviews_per_sec=... tokens_in=... tokens_out=... cost_micros=...
+reviews=... completed=... failed=... cancelled=... triggers_failed=... failure_rate=...% p50_ms=... p95_ms=... wall_s=... reviews_per_sec=... tokens_in=... tokens_out=... cost_micros=... sqlite_wait_count=... sqlite_wait_ms=... workspace_wait_count=... workspace_wait_ms=... workspace_max_wait_ms=...
 ```
 
 `failure_rate` 只统计已触发评审中的 `failed` 和 `cancelled`；触发失败单独看 `triggers_failed`。`wall_s` 从脚本开始（注册、授权、基线之前）到结束，`reviews_per_sec` 使用同一墙钟。`p50` 对偶数样本取较低的中位数，`p95` 使用 nearest-rank 上取整。有 `failed`、`cancelled` 或触发失败时脚本返回 1，并保留已收集的部分结果。`cost_micros` 依赖 provider 的 `price` 配置；未配置时始终为 0。
+
+`sqlite_wait_*` 来自 `GET /api/v1/system/lock-stats`：存储层只开一个 SQLite 连接，等待连接次数和累计等待毫秒数就是写事务串行的可观测代理。`workspace_wait_*` 是项目内容锁、生命周期锁和 mirror 锁的累计等待，`workspace_max_wait_ms` 是单次最长等待。计数从进程启动开始累计，不是单次压测的增量；要得到本次压测的等待，需要在压测前后各取一次并相减。
 
 脚本自测：`bash scripts/loadtest_test.sh`，使用本地 mock API 覆盖正常、重试、取消、失败、重复输入、基线、授权目标用户、项目列表失败和触发失败；需要 Python 3。CI 的 `go` job 会运行该测试。
 
