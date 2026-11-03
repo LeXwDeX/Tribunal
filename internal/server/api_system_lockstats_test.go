@@ -76,3 +76,18 @@ func TestHandleLockStatsUnavailable(t *testing.T) {
 		t.Fatalf("error code = %q, want internal", got.Error.Code)
 	}
 }
+
+func TestLockStatsRouteAuthorization(t *testing.T) {
+	env := newTestEnv(t)
+	defer env.close()
+
+	anonymous := env.request(http.MethodGet, "/api/v1/system/lock-stats", "", nil, nil)
+	if anonymous.status != http.StatusUnauthorized {
+		t.Fatalf("anonymous status = %d, want 401", anonymous.status)
+	}
+
+	allowed := env.request(http.MethodGet, "/api/v1/system/lock-stats", env.adminToken, nil, nil)
+	if allowed.status == http.StatusUnauthorized || allowed.status == http.StatusForbidden {
+		t.Fatalf("admin status = %d, want authorization to pass; body=%s", allowed.status, allowed.body)
+	}
+}

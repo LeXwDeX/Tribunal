@@ -302,7 +302,13 @@ totals=$(awk -F'\t' 'NF {tin+=$6; tout+=$7; cost+=$8} END{printf "%d %d %d", tin
 read -r tokens_in tokens_out cost_micros <<<"$totals"
 
 lock_stats=$(api_get "/api/v1/system/lock-stats" "$TRIBUNAL_ADMIN_TOKEN" 2>/dev/null) || lock_stats=""
-if [ -n "$lock_stats" ] && jq -e '.sqlite.wait_count != null and .workspace.wait_count != null' >/dev/null 2>&1 <<<"$lock_stats"; then
+if [ -n "$lock_stats" ] && jq -e '
+  (.sqlite.wait_count | type == "number") and
+  (.sqlite.wait_duration_ms | type == "number") and
+  (.workspace.wait_count | type == "number") and
+  (.workspace.wait_duration_ms | type == "number") and
+  (.workspace.max_wait_ms | type == "number")
+' >/dev/null 2>&1 <<<"$lock_stats"; then
   sqlite_wait_count=$(jq -r '.sqlite.wait_count' <<<"$lock_stats")
   sqlite_wait_ms=$(jq -r '.sqlite.wait_duration_ms' <<<"$lock_stats")
   workspace_wait_count=$(jq -r '.workspace.wait_count' <<<"$lock_stats")
