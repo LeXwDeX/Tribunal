@@ -4,7 +4,7 @@
 
 ## [1.2.0] - 2026-10-29
 
-> v1.2.0 尚未打 tag，也未发布 Release。本节的日期是版本说明的合并日，不是发布日；tag 和 Release 由维护者在 [#108](https://github.com/LeXwDeX/Tribunal/issues/108) 验收后决定。范围已扩大到当前 `main`，候选范围是 [v1.1.0...main](https://github.com/LeXwDeX/Tribunal/compare/v1.1.0...main)，包含 #143 与迁移 `0020`–`0024`；本节合并了原 `Unreleased` 条目。真实实例升级验收已覆盖 `0016`–`0024` 与 #143；最近一次从 `a113e08` 升级到 `2621c44`，完整 2 用户／2 项目矩阵和升级后新真实评审仍未做。打 tag 后补 `[1.2.0]: https://github.com/LeXwDeX/Tribunal/compare/v1.1.0...v1.2.0`，并回读确认链接可用。
+> v1.2.0 尚未打 tag，也未发布 Release。本节的日期是版本说明的合并日，不是发布日；tag 和 Release 由维护者在 [#108](https://github.com/LeXwDeX/Tribunal/issues/108) 验收后决定。范围已扩大到当前 `main`，候选范围是 [v1.1.0...main](https://github.com/LeXwDeX/Tribunal/compare/v1.1.0...main)，包含 #143 与迁移 `0020`–`0024`；本节合并了原 `Unreleased` 条目。真实实例升级已验证 `0016`–`0024` 的应用、健康检查、内置扩展和 #143 授权迁移（最近一次 `a113e08` → `2621c44`）；`0020`/`0022` 带历史数据回填、完整 2 用户／2 项目矩阵和升级后新真实评审仍未做。打 tag 后补 `[1.2.0]: https://github.com/LeXwDeX/Tribunal/compare/v1.1.0...v1.2.0`，并回读确认链接可用。
 
 ### 升级前必读
 
@@ -123,7 +123,7 @@
 ### 验证范围
 
 - **历史状态（`96e8081`）**：截至 `main` `96e8081`，GitHub Actions 的 go、web、docker 三个 job 因账户计费/额度限制没有启动，job 注解说明了原因。这是当时的历史记录，不能代表后续候选。
-- **真实实例验收已完成；当前范围已扩大**。[#108](https://github.com/LeXwDeX/Tribunal/issues/108) 已于 2026-10-29 在隔离真实实例执行：v1.0.0 → v1.1.0 → `a113e08` 原地升级、真实评审、停机续跑、Webhook、503 重发、MCP 调用与多项目隔离均通过；`bootstrap_admins` 用户名告警首轮未复现，经 [#151](https://github.com/LeXwDeX/Tribunal/issues/151) 排查为验证窗口未覆盖启动，已在真实实例复现告警。详见[交付就绪](docs/delivery-readiness.md#v120-验证状态)。这次真实实例验收覆盖 `a113e08` 的 `0016`–`0019`；后续已补做从 `a113e08` 到 `2621c44` 的升级，覆盖 `0020`–`0024` 与 #143，详见[交付就绪](docs/delivery-readiness.md#v120-真实实例升级验收)。CI 以最终 tag commit 的 GitHub Actions 结果为准。
+- **真实实例验收已完成；当前范围已扩大**。[#108](https://github.com/LeXwDeX/Tribunal/issues/108) 已于 2026-10-29 在隔离真实实例执行：v1.0.0 → v1.1.0 → `a113e08` 原地升级、真实评审、停机续跑、Webhook、503 重发、MCP 调用与多项目隔离均通过；`bootstrap_admins` 用户名告警首轮未复现，经 [#151](https://github.com/LeXwDeX/Tribunal/issues/151) 排查为验证窗口未覆盖启动，已在真实实例复现告警。详见[交付就绪](docs/delivery-readiness.md#v120-验证状态)。这次真实实例验收覆盖 `a113e08` 的 `0016`–`0019`；后续已补做从 `a113e08` 到 `2621c44` 的升级，应用 `0020`–`0024` 并验证 #143 授权迁移；`0020`/`0022` 带历史数据回填、完整 2×2 矩阵和升级后新真实评审仍未验证，详见[交付就绪](docs/delivery-readiness.md#v120-真实实例升级验收-20261103)。CI 以最终 tag commit 的 GitHub Actions 结果为准。
 - **本地预检（引用交接记录，不是本次发布重新核验）**：`main` `86c3a668` 对应的 PR #112 合并前 head 在本地通过 `go build`、`go vet`、`scripts/logcheck`、staticcheck v0.8.2、govulncheck v1.9.0、`go mod verify`、licensecheck、licensebundle `-check`、`go test -race -timeout 40m ./...`，语句覆盖率 77.90%；PR #128 合并前 head `eb1e277` 通过同样的全量检查（含前端 `npm ci`、`npm test -- --coverage`、`npm run build` 和 `web/dist` 一致性），语句覆盖率 79.07%。来源见 [PR #112 评论](https://github.com/LeXwDeX/Tribunal/pull/112#issuecomment-6432897860) 和 [PR #128 评论](https://github.com/LeXwDeX/Tribunal/pull/128)；它们不代表 CI 已启动，也不覆盖之后未提交的改动。详见 [交付就绪](docs/delivery-readiness.md#v120-验证状态)。
 - **部署核对（引用交接记录）**：2026-10-29 在隔离真实实例的临时目录按运维文档从零部署 `main` `96e8081`，`docker compose config --quiet`、`build`、`--check-config`、`up --wait` 通过；healthz/readyz 和控制台返回 200，未启用 OAuth 时 `/auth/login` 返回 503；容器以 uid 10001 运行，`/app/data` 为 0700，启动锁生效；内置 Skill 和 codebase-memory 已登记，MCP 配置 API 返回 `{}`，只暴露 13 个只读工具；`scripts/docker-smoke.sh` 通过且无残留。该部署不是 GitLab 升级验收，也不覆盖 [#108](https://github.com/LeXwDeX/Tribunal/issues/108) 的真实数据升级场景。
 
