@@ -1023,7 +1023,7 @@ docker compose exec -T review /app/tribunalctl projects all
 
 ### 从 v1.1.0 升级到 v1.2.0
 
-**v1.2.0 尚未发布：版本说明已合并，尚未打 tag，也未发布 Release。** 以下步骤以当前 `main` 的代码为准；打 tag 后需要重新核对镜像 digest。完整变更见 [CHANGELOG](../CHANGELOG.md) 的 `[1.2.0] - 2026-10-29` 段，验证状态见 [v1.2.0 验证状态](delivery-readiness.md#v120-验证状态)。真实实例验收（[#108](https://github.com/LeXwDeX/Tribunal/issues/108)）已于 2026-10-29 在隔离实例执行并通过，覆盖 `a113e08` 的迁移 `0016`–`0019`；后续已补做从 `a113e08` 到当前 `main` 的升级，覆盖 `0020`–`0024` 与 #143，详见[交付就绪](delivery-readiness.md#v120-真实实例升级验收)。GitHub Actions 以当前 head 的 run 结果为准；发布前仍由维护者核对[验证状态](delivery-readiness.md#v120-验证状态)。
+**v1.2.0 尚未发布：版本说明已合并，尚未打 tag，也未发布 Release。** 以下步骤以当前 `main` 的代码为准；打 tag 后需要重新核对镜像 digest。完整变更见 [CHANGELOG](../CHANGELOG.md) 的 `[1.2.0] - 2026-10-29` 段，验证状态见 [v1.2.0 验证状态](delivery-readiness.md#v120-验证状态)。真实实例验收（[#108](https://github.com/LeXwDeX/Tribunal/issues/108)）已于 2026-10-29 在隔离实例执行并通过，覆盖 `a113e08` 的迁移 `0016`–`0019`；后续已补做从 `a113e08` 到 `2621c44` 的升级，应用 `0020`–`0024` 并验证 #143 授权迁移；`0020`/`0022` 带历史数据回填、完整 2×2 矩阵和升级后新真实评审仍未验证，详见[交付就绪](delivery-readiness.md#v120-真实实例升级验收-20261103)。GitHub Actions 以当前 head 的 run 结果为准；发布前仍由维护者核对[验证状态](delivery-readiness.md#v120-验证状态)。
 
 先按第 8 节的通用步骤操作：记录当前镜像 tag/digest，核对生效路径和全部挂载，停止旧容器并备份数据库和所有工作区。本次升级有这些额外注意点：
 
@@ -1070,7 +1070,7 @@ v1.2.0 还会应用 `0020_review_command_replay`，新建受理身份、隔离�
     - `/readyz` 返回 200；已有项目可正常读取，已有评审列表可打开，旧评审显示 `!iid` 而不是报错。
     - MCP 服务器列表和详情返回 `config: {}`；内置 `codebase-memory` 仍在，默认 ignore 下评审不再因 MCP 工具记为覆盖缺口。
     - 触发一次新评审，确认列表能显示 `mr_title`，日志检索使用 `error_class` 仍能命中；被 ignore 的路径不出现在评论中。
-    - 真实实例验收已在隔离实例执行并通过：较早一次覆盖 `a113e08` 的 `0016`–`0019`，后续升级覆盖 `0020`–`0024` 与 #143。实例验收不等于 GitHub Actions 通过，也不等于发布放行，发布前仍由维护者核对[验证状态](delivery-readiness.md#v120-验证状态)。
+    - 真实实例升级已在隔离实例执行：较早一次覆盖 `a113e08` 的 `0016`–`0019`，后续升级应用 `0020`–`0024` 并验证 #143 授权迁移；`0020`/`0022` 带历史数据回填、完整 2×2 矩阵和升级后新真实评审仍未验证。实例验收不等于 GitHub Actions 通过，也不等于发布放行，发布前仍由维护者核对[验证状态](delivery-readiness.md#v120-验证状态)。
 
 ## 9. 无外部凭据的本地烟测
 
