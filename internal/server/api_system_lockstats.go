@@ -10,7 +10,8 @@ type LockStats struct {
 }
 
 // SQLiteLockStats reports database/sql connection-pool waits. The store opens
-// one connection, so a wait is time queued behind the single writer.
+// one connection, so a wait is time queued behind it for any SQL statement,
+// not a driver busy-handler retry.
 type SQLiteLockStats struct {
 	WaitCount          int64 `json:"wait_count"`
 	WaitDurationMS     int64 `json:"wait_duration_ms"`

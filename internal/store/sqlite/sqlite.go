@@ -113,9 +113,9 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-// DBStats reports database/sql pool waits. With one connection configured at
-// open, a wait is time spent queued behind the single SQLite connection, which
-// is the observable proxy for a busy write lock.
+// DBStats reports database/sql pool waits. One connection is configured at
+// open, so every query serializes on it; a wait is time queued for that
+// connection. The driver's busy handler retries are internal and not counted.
 type DBStats struct {
 	WaitCount          int64
 	WaitDuration       time.Duration
@@ -124,7 +124,7 @@ type DBStats struct {
 	Idle               int
 }
 
-// DBStats returns current pool counters.
+// DBStats returns cumulative pool waits plus current pool values.
 func (s *Store) DBStats() DBStats {
 	stats := s.db.Stats()
 	return DBStats{

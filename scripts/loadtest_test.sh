@@ -45,6 +45,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/__stats":
             return self.send_json(200, {"grants": state["grants"], "last_grant_user": state["last_grant_user"]})
         if self.path == "/api/v1/system/lock-stats":
+            if mode == "lockstats_fail":
+                return self.send_json(404, {"error": "not found"})
             return self.send_json(200, {
                 "sqlite": {"wait_count": 3, "wait_duration_ms": 12, "max_open_connections": 1, "in_use": 0, "idle": 1},
                 "workspace": {"wait_count": 2, "wait_duration_ms": 8, "max_wait_ms": 5},
@@ -261,7 +263,17 @@ check "failed counter" 'grep -q "failed=1" "$tmp/err8"' "$(cat "$tmp/err8")"
 check "failed not cancelled" 'grep -q "cancelled=0" "$tmp/err8"' "$(cat "$tmp/err8")"
 stop_server
 
-# 9. admin project listing failure is fatal and is not mistaken for a missing project.
+# 9. A server without the lock-stats endpoint still prints the review summary.
+start_server lockstats_fail
+run_script "$tmp/out9b" "$tmp/err9b" \
+  TRIBUNAL_URL="$base" TRIBUNAL_ADMIN_TOKEN=admin TRIBUNAL_USER_TOKEN=user \
+  PROJECTS="g/a" MR_IIDS="1"
+check "lock stats unavailable exit 0" '[ "$code" -eq 0 ]' "exit=$code stderr=$(cat "$tmp/err9b")"
+check "lock stats unavailable summary" 'grep -q "reviews=1 completed=1" "$tmp/err9b"' "$(cat "$tmp/err9b")"
+check "lock stats unavailable fields" 'grep -q "sqlite_wait_count=n/a sqlite_wait_ms=n/a workspace_wait_count=n/a workspace_wait_ms=n/a workspace_max_wait_ms=n/a" "$tmp/err9b"' "$(cat "$tmp/err9b")"
+stop_server
+
+# 10. admin project listing failure is fatal and is not mistaken for a missing project.
 start_server admin_fail
 run_script "$tmp/out9" "$tmp/err9" \
   TRIBUNAL_URL="$base" TRIBUNAL_ADMIN_TOKEN=admin TRIBUNAL_USER_TOKEN=user \

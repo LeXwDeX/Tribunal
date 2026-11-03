@@ -15,6 +15,7 @@ func TestStatsReportsConnectionWait(t *testing.T) {
 	}
 	defer s.Close()
 
+	before := s.DBStats()
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		t.Fatalf("Conn: %v", err)
@@ -24,7 +25,7 @@ func TestStatsReportsConnectionWait(t *testing.T) {
 		var n int
 		done <- s.db.QueryRowContext(ctx, "SELECT 1").Scan(&n)
 	}()
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 	if err := conn.Close(); err != nil {
 		t.Fatalf("close held connection: %v", err)
 	}
@@ -38,11 +39,11 @@ func TestStatsReportsConnectionWait(t *testing.T) {
 	}
 
 	stats := s.DBStats()
-	if stats.WaitCount < 1 {
-		t.Fatalf("WaitCount = %d, want at least 1", stats.WaitCount)
+	if stats.WaitCount <= before.WaitCount {
+		t.Fatalf("WaitCount = %d, want more than baseline %d", stats.WaitCount, before.WaitCount)
 	}
-	if stats.WaitDuration <= 0 {
-		t.Fatalf("WaitDuration = %s, want a positive duration", stats.WaitDuration)
+	if stats.WaitDuration <= before.WaitDuration {
+		t.Fatalf("WaitDuration = %s, want more than baseline %s", stats.WaitDuration, before.WaitDuration)
 	}
 	if stats.MaxOpenConnections != 1 {
 		t.Fatalf("MaxOpenConnections = %d, want 1", stats.MaxOpenConnections)
