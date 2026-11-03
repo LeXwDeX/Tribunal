@@ -1,6 +1,6 @@
 # 部署与运维（Docker / SQLite）
 
-本文对应 ARCH14：内嵌控制台的服务镜像、镜像内 `git` 与管理 CLI、许可证文件、SQLite 单实例、非 root 用户和可写数据目录。各版本做过哪些验证见[验证状态](#11-验证状态)。
+本文对应 ARCH14：内嵌控制台的服务镜像、镜像内 `git` 与管理 CLI、许可证文件、SQLite 单实例、非 root 用户和可写数据目录。各版本做过哪些验证见[验证状态](#12-验证状态)。
 
 交付前准备、升级/回退边界与真实验收记录见 [交付就绪与验收记录](delivery-readiness.md)。
 
@@ -801,7 +801,7 @@ curl -fsS http://127.0.0.1:18080/readyz
 
 迁移文件编译在二进制内，服务启动时自动执行；只应用尚未执行的版本，没有 down migration。升级前必须备份。
 
-### 行内讨论意图迁移（Unreleased）
+### 行内讨论意图迁移（v1.2.0）
 
 `0022_discussion_intents` 在发送行内讨论前保存项目、MR、发布键和未知状态。它不保存 token 或讨论正文，也不把未知意图当作已发布记录。取得有效创建响应后保存远端 ID；如果响应丢失，只能用当前 token 的机器人身份在对应项目和 MR 中找到唯一的首条匹配标记来确认。没有匹配、列表错误、多个匹配或身份不可用都不能证明远端没有收到请求；工作流保持待处理，重启、自动重试和手动重发均不会绕过此限制。明确收到未取消的 GitLab HTTP 400 时，按原有行为回退到总结评论。已保存的实际发现和证据不因未知结果而清除。
 
@@ -815,7 +815,7 @@ curl -fsS http://127.0.0.1:18080/readyz
 
 意图预留在项目外发门禁放行后执行，并在独占连接上临时使用 `synchronous=FULL`；确认提交并恢复该连接原设置后才允许发送。门禁在放行前拒绝旧令牌时不会产生新意图，后续可用新令牌重试。放行并预留后发生崩溃或无法确认发送结果时，仍保留未知意图。非 WAL 或内存数据库不允许发送行内讨论。其余写入仍使用现有默认 `synchronous=NORMAL`。SQLite 的同步保障依赖操作系统、文件系统和存储设备正确执行同步；硬件故障、错误的同步实现、损坏的数据库或旧快照恢复仍可能丢失记录。无法保证这些情况绝不重复，必须隔离并核对远端。
 
-### 仓库 Skill 授权迁移（Unreleased）
+### 仓库 Skill 授权迁移（v1.2.0）
 
 `0021_repository_skill_authorizations` 新建独立授权表，不转换旧的块绑定。`0023_repository_skill_snapshot_sha256` 追加 `snapshot_sha256 TEXT NOT NULL DEFAULT ''`，两个迁移都不可回退。非空授权保存项目、目标分支、块、管理员核对的完整目标 commit SHA 和过滤后仓库 Skill 快照的 SHA-256；空授权清空两个 SHA。快照按相对 `.claude/skills` 的路径字节排序，逐文件依次计算路径长度、路径、内容长度和内容，长度为无符号 64 位大端序；空文件、二进制和名称变更都参与计算，错误信息不输出文件内容。存储写入使用版本比较，撤销也会产生新版本，过期写入不会覆盖已保存的撤销。授权写入重新发现同一目标 commit，并核对调用者明确提供的目标 SHA 和快照 hash；ignore 放宽、文件内容或名称变化时返回冲突且不修改记录。读取时无法证明目标 SHA 的授权会被拒绝；执行或应用时还要求非空授权带有格式有效的快照 hash，缺失或格式无效时拒绝。该 hash 由授权写入基于重新发现的结果核对，不能据此推断数据库外写入或完整端到端快照校验已经完成。评审运行时在执行前重新拉取目标分支 tip，要求它与授权记录的目标 SHA 相等，且当前过滤快照的 SHA-256 与授权记录一致；分支移动、快照变化或无法验证时 fail closed 并需要重新授权。目标分支变更不会自动授权新 commit。
 
@@ -827,7 +827,7 @@ curl -fsS http://127.0.0.1:18080/readyz
 
 若测试环境曾运行过未发布的旧版 `0021` 草案，已有迁移标记会阻止新版结构自动应用。不要删除迁移标记或直接改表强行启动。先停服备份，再恢复执行草案前的完整快照；若需保留草案数据，须另行设计并验证迁移。
 
-### 用量完整性与审计升级（Unreleased）
+### 用量完整性与审计升级（v1.2.0）
 
 `0024_workflow_usage_incomplete.sql` 只向 `workflows` 和 `workflow_nodes` 追加非空 `usage_incomplete` 列，默认 false；无 down migration。历史行不回填，false 只能表示没有检测到缺失，不能证明历史账单或预算用量完整。新事件可带此字段；旧二进制可能因严格解码拒绝这些事件。升级前按第 7 节做一致性备份并核验数据库、工作区、配置和匹配镜像；不要只换回旧镜像。回退时先备份当前状态、核对事件与目标版本兼容性，并按第 7 节在隔离环境验证匹配的升级前快照和镜像；恢复旧快照会丢失之后的新本地数据，须另外核对 GitLab 等外部副作用。`0020` 已在 `cf29656` 合并，`0021`–`0023` 随 PR #180 合并；当前源码检查未发现这些迁移重建上述两张表，升级前仍须重新核验迁移编号、顺序及实际影响，不能据此承诺兼容回退。
 
@@ -837,15 +837,15 @@ curl -fsS http://127.0.0.1:18080/readyz
 
 ### dossier 归属迁移（v1.2.0）
 
-v1.2.0 共四个迁移：`0016_dossier_mr_title`、`0017_mcp_config_seal`、`0018_dossier_project`、`0019_job_defer_window`，都没有 down migration。`0018_dossier_project` 为 dossier 增加内部项目归属。旧记录仅根据实际关联的 workflow 回填；没有关联 workflow 的旧孤儿保持未知归属，不从快照猜测。迁移不改写压缩快照内容。项目删除时清理本项目已知归属的孤儿；未知归属记录保留。
+v1.2.0 共九个迁移：`0016_dossier_mr_title`、`0017_mcp_config_seal`、`0018_dossier_project`、`0019_job_defer_window`、`0020_review_command_replay`、`0021_repository_skill_authorizations`、`0022_discussion_intents`、`0023_repository_skill_snapshot_sha256`、`0024_workflow_usage_incomplete`，都没有 down migration。`0018_dossier_project` 为 dossier 增加内部项目归属。旧记录仅根据实际关联的 workflow 回填；没有关联 workflow 的旧孤儿保持未知归属，不从快照猜测。迁移不改写压缩快照内容。项目删除时清理本项目已知归属的孤儿；未知归属记录保留。
 
 运行时启动和定期工作区清理会在项目锁内，将无 workflow、归属已知且任务终结或已被保留策略移除的 reservation 标记为 skipped，保留快照供审计。排队或运行中的任务继续保留 reservation 以供重试。未知归属或没有任务 ID 的记录不会按已知归属规则收敛。运行清理会在超过 `storage.job_retention`、没有活跃 workflow/job 且没有其他 pending dossier 引用时，把 `project_id=0` 的记录结算为 skipped，保留审计行；未到保留期或仍有引用的记录保留。
 
 升级前按第 7 节做一致性备份。此迁移没有 down migration；回退须恢复升级前完整快照及匹配旧程序，不能只替换镜像。
 
-### 命令重放幂等迁移（后续版本）
+### 命令重放幂等迁移（v1.2.0）
 
-包含 #159 的后续版本新增迁移 `0020_review_command_replay`。v1.2.0 的四迁移列表不变。`0020` 新建已受理身份表 `review_command_replays`、不确定身份表 `review_command_quarantine` 和一次性回填标记表 `review_command_replay_backfill`，不改写已有行。身份按 `(project_id, mr_iid, note_id, command)` 区分；已认证的新命令与 generation、队列和状态/表情副作用在同一事务提交。
+v1.2.0 新增迁移 `0020_review_command_replay`。`0020` 新建已受理身份表 `review_command_replays`、不确定身份表 `review_command_quarantine` 和一次性回填标记表 `review_command_replay_backfill`，不改写已有行。身份按 `(project_id, mr_iid, note_id, command)` 区分；已认证的新命令与 generation、队列和状态/表情副作用在同一事务提交。
 
 启动时自动回填一次有充分证据的旧命令身份。旧评论即使原 job 已终结或被裁剪，仍可能用新的或已过期的投递 UUID 重发。保留的 `review.command` job 按状态处理：
 
@@ -908,10 +908,10 @@ v1.2.0 共四个迁移：`0016_dossier_mr_title`、`0017_mcp_config_seal`、`001
 升级步骤：
 
 1. 记录当前镜像 tag/digest。
-2. 按第 7 节核对生效路径与全部挂载，停止旧服务并备份、核验数据库和所有工作区，另存实际挂载配置、秘密和镜像 digest。只有符合默认布局前提时才能使用 [Compose](#compose-停机备份)或[独立容器](#单独-docker-run-停机备份)示例；在启动新镜像前保持旧服务停止。镜像升级不会改写宿主机配置文件：Compose 默认挂载宿主机 `config/server.docker.yaml`，自定义部署也可能挂载旧的 `server.yaml`。升级到包含 #143 的后续版本时，另按 [默认扩展授权迁移](#默认扩展授权迁移) 核对并更新 `default_extensions`，保留管理员自定义项。
+2. 按第 7 节核对生效路径与全部挂载，停止旧服务并备份、核验数据库和所有工作区，另存实际挂载配置、秘密和镜像 digest。只有符合默认布局前提时才能使用 [Compose](#compose-停机备份)或[独立容器](#单独-docker-run-停机备份)示例；在启动新镜像前保持旧服务停止。镜像升级不会改写宿主机配置文件：Compose 默认挂载宿主机 `config/server.docker.yaml`，自定义部署也可能挂载旧的 `server.yaml`。升级到 v1.2.0 时，另按 [默认扩展授权迁移](#默认扩展授权迁移) 核对并更新 `default_extensions`，保留管理员自定义项。
 3. 隔离验证并获得部署授权后，拉取并启动新镜像，继续使用原来的全部数据挂载、同一 `REVIEW_MASTER_KEY` 和真实配置。
 4. 等待 `/readyz` 返回 200，检查日志和关键功能。
-5. 在控制台“扩展 → 块绑定”核对实际授予是否与生效配置一致；管理员改过或解绑的绑定保留，控制台以实际绑定为准。文件声明生效后，块绑定 API 不返回它的数据库行；控制台可能显示为空绑定，不要为消除空行而重新保存。包含 #160 的版本起，保存前先刷新控制台并加载完整列表，PUT 必须带 `expected_revision`；脚本按 [块绑定写入版本校验迁移](#块绑定写入版本校验迁移unreleased) 更新。修改配置或绑定后用 `docker compose up -d --force-recreate --wait --wait-timeout 120` 重启再核对。
+5. 在控制台“扩展 → 块绑定”核对实际授予是否与生效配置一致；管理员改过或解绑的绑定保留，控制台以实际绑定为准。文件声明生效后，块绑定 API 不返回它的数据库行；控制台可能显示为空绑定，不要为消除空行而重新保存。包含 #160 的版本起，保存前先刷新控制台并加载完整列表，PUT 必须带 `expected_revision`；脚本按 [块绑定写入版本校验迁移](#块绑定写入版本校验迁移v120) 更新。修改配置或绑定后用 `docker compose up -d --force-recreate --wait --wait-timeout 120` 重启再核对。
 
 回滚步骤：
 
@@ -922,8 +922,8 @@ v1.2.0 共四个迁移：`0016_dossier_mr_title`、`0017_mcp_config_seal`、`001
 
 注意事项：
 
-- 内置扩展随平台升级：新镜像附带的 codebase-memory-mcp 配置（版本、参数）在下次启动时写入已登记的内置服务器，启用状态保持不变；默认工具白名单在块绑定仍是默认机制写入的样子时同步更新，管理员改过的绑定和 YAML `blocks` 中声明的块不动。首次启动后才在 YAML `blocks` 中声明的块：升级到 v1.2.0 时，数据库里该块若仍等于 `block:<block>` 快照，启动时删除并以 YAML 为准（日志 `file configuration replaces default block binding`）；管理员改过的绑定仍以数据库为准。升级到包含 #143 的后续版本时，还需要行内每个条目都能由 `extension_defaults` 中 `applied` 的默认 grant detail 证明；行含自建授权或 detail 缺失/无法解析时保留该行，数据库绑定继续覆盖 YAML。内置 Skill 刷新失败（例如修改了 `workspace.root`）只记 Warn 日志 `built-in skill refresh failed`，不阻断启动。已有部署若在数据库或 `mcp.config` 中自建了同名 `codebase-memory` 服务器，服务不会接管它，也不会绑定它的工具。
-- **文件绑定与旧配置（仅适用于包含 #143 的后续版本）**：数据库平台绑定按块覆盖文件 `blocks`。只有行内容等于 `block:<block>` 快照、且每个条目都能由 `extension_defaults` 中 `applied` 的默认 grant detail 认领时，默认机制才释放该行；行上有自建授权或台账不可证明时，文件块不生效。旧配置中的 `default_extensions` 会继续生效，授权矩阵不会自动收窄。核对和迁移步骤见 [默认扩展授权迁移](#默认扩展授权迁移)。
+- 内置扩展随平台升级：新镜像附带的 codebase-memory-mcp 配置（版本、参数）在下次启动时写入已登记的内置服务器，启用状态保持不变；默认工具白名单在块绑定仍是默认机制写入的样子时同步更新，管理员改过的绑定和 YAML `blocks` 中声明的块不动。首次启动后才在 YAML `blocks` 中声明的块：升级到 v1.2.0 时，数据库里该块若仍等于 `block:<block>` 快照，启动时删除并以 YAML 为准（日志 `file configuration replaces default block binding`）；管理员改过的绑定仍以数据库为准。v1.2.0 还需要行内每个条目都能由 `extension_defaults` 中 `applied` 的默认 grant detail 证明；行含自建授权或 detail 缺失/无法解析时保留该行，数据库绑定继续覆盖 YAML。内置 Skill 刷新失败（例如修改了 `workspace.root`）只记 Warn 日志 `built-in skill refresh failed`，不阻断启动。已有部署若在数据库或 `mcp.config` 中自建了同名 `codebase-memory` 服务器，服务不会接管它，也不会绑定它的工具。
+- **文件绑定与旧配置（v1.2.0）**：数据库平台绑定按块覆盖文件 `blocks`。只有行内容等于 `block:<block>` 快照、且每个条目都能由 `extension_defaults` 中 `applied` 的默认 grant detail 认领时，默认机制才释放该行；行上有自建授权或台账不可证明时，文件块不生效。旧配置中的 `default_extensions` 会继续生效，授权矩阵不会自动收窄。核对和迁移步骤见 [默认扩展授权迁移](#默认扩展授权迁移)。
 - 升级内置的 codebase-memory-mcp 版本时，按 [内置 codebase-memory-mcp](design/06-config.md#内置-codebase-memory-mcp) 同时更新 Dockerfile 版本与 SHA-256、`third_party/codebase-memory-mcp/` 和许可证清单，并重新跑 Docker smoke。
 - 镜像 tag 改为 `tribunal:*`；旧镜像的仓库名是 `crc-review`，升级时重新构建或改 tag。Compose 项目名 `crc-review`、旧数据卷 `crc-review_data` 和 `crc-data` 刻意不改名；默认布局可继续挂载原卷，自定义布局还须保留全部实际数据挂载。
 - 管理 CLI 改用 `tribunalctl`；旧镜像路径 `/app/reviewctl` 以兼容符号链接保留。源码用户改用 `go run ./cmd/tribunalctl`。
@@ -933,9 +933,9 @@ v1.2.0 共四个迁移：`0016_dossier_mr_title`、`0017_mcp_config_seal`、`001
 - 生产环境使用不可变 tag 或 digest，保留旧镜像以便回滚。
 - 升级窗口内不要同时运行两个容器指向同一个 SQLite 数据卷。
 
-### 块绑定写入版本校验迁移（Unreleased）
+### 块绑定写入版本校验迁移（v1.2.0）
 
-包含 #160 的版本起，所有 `PUT /api/v1/block-bindings/{block}` 必须带 `expected_revision`。这是破坏性 API 变更，后端没有关闭校验的开关。升级时必须同时更新控制台和调用脚本，不能只替换服务端镜像。
+v1.2.0 起，所有 `PUT /api/v1/block-bindings/{block}` 必须带 `expected_revision`。这是破坏性 API 变更，后端没有关闭校验的开关。升级时必须同时更新控制台和调用脚本，不能只替换服务端镜像。
 
 1. 先升级服务端和前端到同一版本，再强制刷新浏览器控制台（或清除缓存）。旧控制台可能在浏览器中继续运行，保存时收到 `400`；刷新后重新打开“扩展 → 块绑定”。
 2. 对每个要写的 `scope` / `project_id`，先 `GET /api/v1/block-bindings?scope=...&project_id=...&limit=...` 读取完整列表，不能只读第一页。取同一行（`scope`、`project_id`、`block` 都匹配）的 `revision`；没有该行时用字面值 `absent`。
@@ -950,7 +950,7 @@ v1.2.0 共四个迁移：`0016_dossier_mr_title`、`0017_mcp_config_seal`、`001
 
 ### 默认扩展授权迁移
 
-本节仅适用于升级到包含 #143 的后续版本（v1.2.0 之后的 Unreleased）。v1.2.0 不包含默认授权收窄、恢复默认 API 或本节步骤。本节处理升级后默认授权收窄，以及文件 `blocks` 与数据库平台块绑定不一致的情况。先核对事实：
+本节适用于 v1.2.0 及之后的版本。本节处理默认授权收窄、恢复默认 API，以及文件 `blocks` 与数据库平台块绑定不一致的情况。先核对事实：
 
 - 镜像升级不会改写宿主机挂载的配置文件。Compose 默认把宿主机 `config/server.docker.yaml` 挂到容器内；自定义部署也可能挂载旧的 `server.yaml`。旧文件中的 `default_extensions` 会继续生效，旧授权不会自动收窄。
 - 启动时先应用默认扩展，再加载平台扩展。数据库中的平台块绑定按块覆盖文件 `blocks`（`loadStoredPlatformExtensions`），文件声明不会自动覆盖已有平台行。
@@ -1023,12 +1023,12 @@ docker compose exec -T review /app/tribunalctl projects all
 
 ### 从 v1.1.0 升级到 v1.2.0
 
-**v1.2.0 尚未发布：版本说明已合并，尚未打 tag，也未发布 Release。** 以下步骤以 `main` `96e8081` 的代码为准；打 tag 后需要重新核对镜像 digest。完整变更见 [CHANGELOG](../CHANGELOG.md) 的 `[1.2.0] - 2026-10-29` 段，验证状态见 [v1.2.0 验证状态](delivery-readiness.md#v120-验证状态)。真实实例验收（[#108](https://github.com/LeXwDeX/Tribunal/issues/108)）已于 2026-10-29 在 33.110 隔离实例执行并通过（`bootstrap_admins` 告警经 [#151](https://github.com/LeXwDeX/Tribunal/issues/151) 排查后复现）；GitHub Actions 已在后续 PR 与 `main` 上实际运行并通过，但发布前仍由维护者核对[验证状态](delivery-readiness.md#v120-验证状态)。
+**v1.2.0 尚未发布：版本说明已合并，尚未打 tag，也未发布 Release。** 以下步骤以当前 `main` 的代码为准；打 tag 后需要重新核对镜像 digest。完整变更见 [CHANGELOG](../CHANGELOG.md) 的 `[1.2.0] - 2026-10-29` 段，验证状态见 [v1.2.0 验证状态](delivery-readiness.md#v120-验证状态)。真实实例验收（[#108](https://github.com/LeXwDeX/Tribunal/issues/108)）已于 2026-10-29 在 33.110 隔离实例执行并通过，覆盖 `a113e08` 的迁移 `0016`–`0019`；`0020`–`0024` 和 #143 尚未在真实实例升级验收，发布前需补做或明确接受。GitHub Actions 以当前 head 的 run 结果为准；发布前仍由维护者核对[验证状态](delivery-readiness.md#v120-验证状态)。
 
 先按第 8 节的通用步骤操作：记录当前镜像 tag/digest，核对生效路径和全部挂载，停止旧容器并备份数据库和所有工作区。本次升级有这些额外注意点：
 
-1. **先做一致性备份，四个迁移都不可回退。**
-   - 本次新增 `0016_dossier_mr_title`、`0017_mcp_config_seal`、`0018_dossier_project`、`0019_job_defer_window`，都没有 down migration。回退只能恢复升级前的全量快照，不能只换回 v1.1.0 镜像而保留已迁移数据库；旧版本读取新 schema 不受支持。
+1. **先做一致性备份，九个迁移都不可回退。**
+   - 本次新增 `0016_dossier_mr_title`、`0017_mcp_config_seal`、`0018_dossier_project`、`0019_job_defer_window`、`0020_review_command_replay`、`0021_repository_skill_authorizations`、`0022_discussion_intents`、`0023_repository_skill_snapshot_sha256`、`0024_workflow_usage_incomplete`，都没有 down migration。回退只能恢复升级前的全量快照，不能只换回 v1.1.0 镜像而保留已迁移数据库；旧版本读取新 schema 不受支持。
    - 升级前按[第 7 节](#7-sqlite-一致性备份与恢复)停止服务，备份生效数据库、可能存在的 `-wal`/`-shm` 和所有工作区；只有符合默认配置与挂载前提时才能复制整个 `/app/data`。运行中只复制数据库文件会漏掉 WAL，不是一致备份。
    - 另存实际挂载配置、镜像 digest 和 `REVIEW_MASTER_KEY`。镜像升级不会改写宿主机配置文件；使用与 v1.2.0 匹配的实际挂载配置。恢复使用匹配布局的新空卷或空目录，不把快照覆盖到旧数据，也不混入旧 WAL。
 2. **迁移 `0016_dossier_mr_title` 只追加列，但仍然要先备份。**
@@ -1043,9 +1043,9 @@ docker compose exec -T review /app/tribunalctl projects all
    - 旧记录仅根据实际关联的 workflow 回填；没有关联的旧孤儿保持未知归属，不从快照猜测，也不改压缩快照内容。
    - 升级前按第 7 节做一致性备份；此迁移没有 down migration，回退须恢复升级前完整快照及匹配旧程序。运行时的孤儿清理行为见 [dossier 归属迁移](#dossier-归属迁移v120)。
 
-本次还新增 `0019_job_defer_window`，只给 `jobs` 追加 `defer_since TEXT`。任务连续因执行权争用被延后超过固定的 15 分钟窗口时按失败结算，`last_error` 为 `execution deferral window exceeded`，不再无限延长；旧行保持 NULL 兼容。该窗口不是配置项。该迁移同样没有 down migration，回退须恢复升级前快照。
+`0019_job_defer_window` 只给 `jobs` 追加 `defer_since TEXT`。任务连续因执行权争用被延后超过固定的 15 分钟窗口时按失败结算，`last_error` 为 `execution deferral window exceeded`，不再无限延长；旧行保持 NULL 兼容。该窗口不是配置项。该迁移同样没有 down migration，回退须恢复升级前快照。
 
-升级到包含 #159 的后续版本时还会应用 `0020_review_command_replay`，新建受理身份、隔离和回填标记表，不改写已有行。启动时回填可证明的受理身份，同时隔离可识别但无法证明受理的旧命令。隔离命令不会自动执行；历史完全不可识别时，新 UUID 的旧事件仍可能被当成新命令。迁移没有 down migration；升级前停止旧实例并做一致性备份，回退须恢复升级前快照。证据规则、查询和恢复动作见 [命令重放幂等迁移](#命令重放幂等迁移后续版本)。
+v1.2.0 还会应用 `0020_review_command_replay`，新建受理身份、隔离和回填标记表，不改写已有行。启动时回填可证明的受理身份，同时隔离可识别但无法证明受理的旧命令。隔离命令不会自动执行；历史完全不可识别时，新 UUID 的旧事件仍可能被当成新命令。迁移没有 down migration；升级前停止旧实例并做一致性备份，回退须恢复升级前快照。证据规则、查询和恢复动作见 [命令重放幂等迁移](#命令重放幂等迁移v120)。
 5. **ignore 保护范围扩大。**
    - 有效 ignore 非空时，仓库读取和证据检查遵守同一规则；无法证明符合规则的 MCP 工具及全量图谱索引不再执行，无来源证明的历史上下文不再注入。
    - 默认 ignore 非空，因此默认图谱能力会降级。这是安全降级：不记 `tool_gaps`，不会把 PASS 改为 INCOMPLETE。仅有索引身份无法证明且 ignore 为空时，实际启用并绑定的工具仍记为覆盖缺口。
@@ -1070,7 +1070,7 @@ docker compose exec -T review /app/tribunalctl projects all
     - `/readyz` 返回 200；已有项目可正常读取，已有评审列表可打开，旧评审显示 `!iid` 而不是报错。
     - MCP 服务器列表和详情返回 `config: {}`；内置 `codebase-memory` 仍在，默认 ignore 下评审不再因 MCP 工具记为覆盖缺口。
     - 触发一次新评审，确认列表能显示 `mr_title`，日志检索使用 `error_class` 仍能命中；被 ignore 的路径不出现在评论中。
-    - 真实实例验收已在 33.110 隔离实例执行并通过（`bootstrap_admins` 告警经 [#151](https://github.com/LeXwDeX/Tribunal/issues/151) 排查后复现）；实例验收不等于 GitHub Actions 通过，也不等于发布放行，发布前仍由维护者核对[验证状态](delivery-readiness.md#v120-验证状态)。
+    - 真实实例验收已在 33.110 隔离实例执行并通过，覆盖 `a113e08` 的 `0016`–`0019`；`0020`–`0024` 与 #143 尚未在真实实例升级验收。实例验收不等于 GitHub Actions 通过，也不等于发布放行，发布前仍由维护者核对[验证状态](delivery-readiness.md#v120-验证状态)。
 
 ## 9. 无外部凭据的本地烟测
 

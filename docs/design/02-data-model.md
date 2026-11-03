@@ -359,7 +359,7 @@ CREATE TABLE api_tokens (
 
 > `0016_dossier_mr_title.sql` 为 `workflow_dossiers` 增加 `mr_title`（默认空字符串）。保存 dossier 时从 `mr.title` 去掉首尾空白后写入，供评审列表按页批量读取标题。迁移前保存的 dossier 不回填，保持空值。
 
-> `0024_workflow_usage_incomplete.sql` 只给 `workflows` 和 `workflow_nodes` 各追加 `usage_incomplete INTEGER NOT NULL DEFAULT 0`，无 down migration。旧行不回填：默认 false 只表示没有检测到缺失，不能证明历史用量完整。新事件可能携带该字段，旧二进制的严格解码可能失败；不能仅替换镜像降级。`0020` 已在 `cf29656` 合并，`0021`–`0023` 尚待 PR #180 合并；当前源码检查未发现这些迁移重建这两张表，集成时仍须重新核验迁移顺序和作用。
+> `0024_workflow_usage_incomplete.sql` 只给 `workflows` 和 `workflow_nodes` 各追加 `usage_incomplete INTEGER NOT NULL DEFAULT 0`，无 down migration。旧行不回填：默认 false 只表示没有检测到缺失，不能证明历史用量完整。新事件可能携带该字段，旧二进制的严格解码可能失败；不能仅替换镜像降级。`0020` 已在 `cf29656` 合并，`0021`–`0023` 已随 PR #180 合并；当前源码检查未发现这些迁移重建这两张表，集成时仍须重新核验迁移顺序和作用。
 
 新 `llm_calls` 的 `request`、`response` 若存在，各自的 JSON 对象都带 `"_format":"audit_metadata_v1"`，只存结构计数、请求选项、固定停止原因和用量，不存 prompt、工具参数/输出、推理内容、上游原始 ID 或错误原文。每次尝试有独立本地 `id`。对 agent 调用，记录器按非法调用批次、停止原因或拒绝预分类 `unsafe_model_response`；这只影响审计统计，不改变请求重试和 agent 拒绝策略，也不是节点最终状态。
 

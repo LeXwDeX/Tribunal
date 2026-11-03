@@ -237,7 +237,7 @@ SSE 事件（`event:` 字段）：`node`（`{id, status, attempt}`）、`finding
 
 图响应为 `{nodes, edges}`。节点包含 `id`、`kind`、`status`、`depends_on`，以及可选的 `provider`、`attempt`；边为 `{from, to}`。节点 ID 允许点号，必须作为完整路径参数编码，不能按点号拆分。节点详情直接返回对象，不增加 `node` 包装层。
 
-工作流详情和列表每项的顶层，以及详情/列表/图中的每个节点和节点详情，都有布尔值 `usage_incomplete`。`true` 表示检测到用量缺失或无法精确表示；`false` 只表示未检测到，特别是迁移前的历史行默认 false，不能证明用量完整。它不嵌入 `usage`。迁移与回退限制见[数据模型](02-data-model.md)及[运维说明](../operations.md#用量完整性与审计升级unreleased)。
+工作流详情和列表每项的顶层，以及详情/列表/图中的每个节点和节点详情，都有布尔值 `usage_incomplete`。`true` 表示检测到用量缺失或无法精确表示；`false` 只表示未检测到，特别是迁移前的历史行默认 false，不能证明用量完整。它不嵌入 `usage`。迁移与回退限制见[数据模型](02-data-model.md)及[运维说明](../operations.md#用量完整性与审计升级v120)。
 
 #### 节点调用审计格式
 
