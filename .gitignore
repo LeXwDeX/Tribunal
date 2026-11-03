@@ -12,6 +12,7 @@
 /web/coverage/
 /artifacts/delivery/
 /.serena/
+/docs/handoff.md
 
 # macOS
 .DS_Store
