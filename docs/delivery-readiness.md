@@ -26,14 +26,14 @@
 
 ## v1.2.0（待发布）验证状态
 
-v1.2.0 尚未发布：版本说明已合并到 `main`，尚未打 tag，也未发布 Release。变更清单见 [CHANGELOG](../CHANGELOG.md) 的 `[1.2.0] - 2026-10-29` 段；范围已扩大到当前 `main`，候选范围可用 [v1.1.0...main](https://github.com/LeXwDeX/Tribunal/compare/v1.1.0...main) 核对，包含 #143 与迁移 `0020`–`0024`。真实实例升级验收已覆盖迁移 `0016`–`0024` 和 #143；最近一次从 `a113e08` 升级到当前 `main`，详见[真实实例升级验收](#v120-真实实例升级验收)。本节最初以 `main` `96e8081` 为发布候选基线，另列后续工作区的本地检查。发布前必须补齐未完成项。
+v1.2.0 尚未发布：版本说明已合并到 `main`，尚未打 tag，也未发布 Release。变更清单见 [CHANGELOG](../CHANGELOG.md) 的 `[1.2.0] - 2026-10-29` 段；范围已扩大到当前 `main`，候选范围可用 [v1.1.0...main](https://github.com/LeXwDeX/Tribunal/compare/v1.1.0...main) 核对，包含 #143 与迁移 `0020`–`0024`。真实实例升级验收已覆盖迁移 `0016`–`0024` 和 #143；最近一次从 `a113e08` 升级到 `2621c44`，详见[真实实例升级验收](#v120-真实实例升级验收-20261103)。本节最初以 `main` `96e8081` 为发布候选基线，另列后续工作区的本地检查。发布前必须补齐未完成项。
 
 **状态汇总（真实实例升级已覆盖 `0016`–`0024` 与 #143；完整 2 用户／2 项目矩阵和升级后的新真实评审仍未做；CI 以最终 tag commit 的 head 为准）**
 
-- [x] **已核实的 CI 历史**：`0fe72b5` 和 `c7a3dde` 的 push run `go`、`web`、`docker` 全部 success（`c7a3dde` 为 run [41553674842](https://github.com/LeXwDeX/Tribunal/actions/runs/41553674842)）；`5371df6`（#217 合并后）的 run 在本文件修改时仍在运行。发布时以最终 tag commit 的当前 head 为准。
+- [x] **已核实的 CI 历史**：`0fe72b5` 和 `c7a3dde` 的 push run `go`、`web`、`docker` 全部 success（`c7a3dde` 为 run [41553674842](https://github.com/LeXwDeX/Tribunal/actions/runs/41553674842)）；`5371df6`（#217 合并后）的 run [41560091921](https://github.com/LeXwDeX/Tribunal/actions/runs/41560091921) 已 success。发布时以最终 tag commit 的当前 head 为准。
 - [x] **修复提交 `0fe72b5` 的 GitHub Actions 已通过**：`go`、`web`、`docker` 全部 success；该修复把日期正则改为允许 `Z` 和时区偏移（#172）。
 - [x] **验收基线 `a113e08` 的 CI 历史**：attempt 1 因账户额度未启动；attempt 2 的 `go` 因旧测试 `TestSandboxIgnoreGitLogStrictAndCompatibility` 失败，`web`、`docker` success。该失败已由 `0fe72b5` 修复，不再是当前阻塞。
-- [x] **真实实例升级验收已覆盖 `0020`–`0024` 与 #143**：从 `a113e08`（18 个迁移，最大 `0019`）升级到当前 `main`，迁移 23 个，healthz/readyz 200；内置扩展启用，MCP 测试 13 个只读工具；#143 的默认授权迁移和二次重启幂等通过。
+- [x] **真实实例升级验收已覆盖 `0020`–`0024` 与 #143**：从 `a113e08`（18 个迁移，最大 `0019`）升级到 `2621c44`，迁移 23 个，healthz/readyz 200；内置扩展启用，MCP 测试 13 个只读工具；#143 的默认授权迁移和二次重启幂等通过。
 - [ ] **完整 2 用户／2 项目验收矩阵和新真实评审未做**：本次只验证升级、迁移、扩展和绑定，没有触发新的真实评审；已有真实评审证据来自 `a113e08`。
 - [x] **真实 GitLab 实例验收（历史）**：[#108](https://github.com/LeXwDeX/Tribunal/issues/108) 已于 2026-10-29 在 `main` `a113e08` 上执行；剩余 5 项全部通过；其中 `bootstrap_admins` 弃用告警首轮未复现，经 [#151](https://github.com/LeXwDeX/Tribunal/issues/151) 排查后在真实实例复现。详见[真实实例升级验收（#108）](#v120-真实实例升级验收)。真实实例验收与 GitHub Actions 是独立证据；v1.0.0 的 f143 结果不覆盖本版本，见[历史验收记录](#v100-历史验收记录f143仅供追溯)。
 
@@ -62,6 +62,8 @@ v1.2.0 尚未发布：版本说明已合并到 `main`，尚未打 tag，也未�
 - v2 控制台：在真实数据下检查 1440 和 390 宽度、亮色和暗色；总览、评审、项目工作区、扩展、模型与档位、统计与反馈、系统页面均无横向滚动（390 下逐页 `scrollWidth=390`）。
 - 用户名写法的 `bootstrap_admins` 弃用告警（#103）：首轮两次尝试未观察到告警，另开 [#151](https://github.com/LeXwDeX/Tribunal/issues/151)。排查发现：按配置备份文件的修改时间，两次尝试中用户名写法只在宿主机文件里保留 10–30 秒，现存容器均在配置恢复为 `id:` 写法之后创建，验证窗口没有覆盖任何一次启动。2026-10-29 在隔离回归实例（镜像 `a113e08`）把配置改为用户名写法（`bootstrap_admins: ["<gitlab-username>"]`）后执行 `docker compose up -d --force-recreate`，新容器启动日志在 `storage opened` 之后出现 `auth.bootstrap_admins username entry is deprecated ...`，带 `index=0`、`binding=none`，不含用户名；随后恢复原配置。`cmd/server` 新增从 YAML 加载并展开 `${VAR}` 的启动回归测试。
 
+
+<a id="v120-真实实例升级验收-20261103"></a>
 
 **2026-11-03 补充升级（`a113e08` → `2621c44`，`0020`–`0024` 与 #143）**
 
