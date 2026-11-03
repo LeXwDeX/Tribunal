@@ -28,7 +28,7 @@ Icon[\r]
 
 # Local agent and runtime state
 /.opencode/
-/.serena/
 /.specgit.yaml
 /.agents/skills/specgit-native/
 /.claude/skills/specgit-native/
+/.claude/worktrees/
