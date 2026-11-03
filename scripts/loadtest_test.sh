@@ -47,6 +47,17 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/v1/system/lock-stats":
             if mode == "lockstats_fail":
                 return self.send_json(404, {"error": "not found"})
+            if mode == "lockstats_malformed":
+                return self.send_json(200, {"sqlite": {"wait_count": 1}, "workspace": {"wait_count": 2}})
+            if mode == "lockstats_multi":
+                payload = {"sqlite": {"wait_count": 3, "wait_duration_ms": 12}, "workspace": {"wait_count": 2, "wait_duration_ms": 8, "max_wait_ms": 5}}
+                data = (json.dumps({}) + "\n" + json.dumps(payload)).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
             return self.send_json(200, {
                 "sqlite": {"wait_count": 3, "wait_duration_ms": 12, "max_open_connections": 1, "in_use": 0, "idle": 1},
                 "workspace": {"wait_count": 2, "wait_duration_ms": 8, "max_wait_ms": 5},
@@ -272,6 +283,17 @@ check "lock stats unavailable exit 0" '[ "$code" -eq 0 ]' "exit=$code stderr=$(c
 check "lock stats unavailable summary" 'grep -q "reviews=1 completed=1" "$tmp/err9b"' "$(cat "$tmp/err9b")"
 check "lock stats unavailable fields" 'grep -q "sqlite_wait_count=n/a sqlite_wait_ms=n/a workspace_wait_count=n/a workspace_wait_ms=n/a workspace_max_wait_ms=n/a" "$tmp/err9b"' "$(cat "$tmp/err9b")"
 stop_server
+
+# 9b. Malformed lock-stats responses degrade to n/a.
+for malformed_mode in lockstats_malformed lockstats_multi; do
+  start_server "$malformed_mode"
+  run_script "$tmp/out-$malformed_mode" "$tmp/err-$malformed_mode" \
+    TRIBUNAL_URL="$base" TRIBUNAL_ADMIN_TOKEN=admin TRIBUNAL_USER_TOKEN=user \
+    PROJECTS="g/a" MR_IIDS="1"
+  check "$malformed_mode exit 0" '[ "$code" -eq 0 ]' "exit=$code stderr=$(cat "$tmp/err-$malformed_mode")"
+  check "$malformed_mode n/a" 'grep -q "sqlite_wait_count=n/a" "$tmp/err-$malformed_mode"' "$(cat "$tmp/err-$malformed_mode")"
+  stop_server
+done
 
 # 10. admin project listing failure is fatal and is not mistaken for a missing project.
 start_server admin_fail

@@ -87,7 +87,7 @@ func TestLockStatsRouteAuthorization(t *testing.T) {
 	}
 
 	allowed := env.request(http.MethodGet, "/api/v1/system/lock-stats", env.adminToken, nil, nil)
-	if allowed.status == http.StatusUnauthorized || allowed.status == http.StatusForbidden {
-		t.Fatalf("admin status = %d, want authorization to pass; body=%s", allowed.status, allowed.body)
+	if allowed.status != http.StatusServiceUnavailable {
+		t.Fatalf("admin status = %d, want 503 from the unwired provider; body=%s", allowed.status, allowed.body)
 	}
 }
