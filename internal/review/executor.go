@@ -449,6 +449,7 @@ func (e *Executor) runAgent(ctx context.Context, provider string, spec agent.Run
 		return nil, errors.New("review: submit schema is required")
 	}
 	beforeTurn := spec.BeforeTurn
+	budgetRemaining := spec.BudgetRemaining
 	var carry llm.Usage
 	var lastErr error
 	for attempt := 1; attempt <= e.maxAttempts; attempt++ {
@@ -460,6 +461,11 @@ func (e *Executor) runAgent(ctx context.Context, provider string, spec agent.Run
 					return unsafeUsageError()
 				}
 				return beforeTurn(ctx, total)
+			}
+		}
+		if budgetRemaining != nil {
+			attemptSpec.BudgetRemaining = func(ctx context.Context, used llm.Usage) (int64, bool) {
+				return budgetRemaining(ctx, llm.AddUsage(carry, used))
 			}
 		}
 		result, err := e.runner(ctx, attemptSpec)
@@ -800,6 +806,11 @@ func (e *Executor) callAgent(ctx context.Context, in dag.NodeInput, opts agentOp
 		BeforeTurn: opts.BeforeTurn,
 		Outbound:   e.deps.Outbound,
 	}
+	if opts.BeforeTurn != nil {
+		// Budgeted nodes also let the loop ask for submit_result before the
+		// workflow token budget runs out (#260).
+		spec.BudgetRemaining = e.budgetRemaining(in.WorkflowID)
+	}
 	ctx = llm.WithCallMeta(ctx, llm.CallMeta{WorkflowID: in.WorkflowID, NodeID: in.Node.ID, Turn: 0})
 	result, err := e.runAgent(ctx, opts.Provider, spec, !opts.NoRetry)
 	if err == nil && result != nil && e.ignoredAgentOutput(result.Output) {
@@ -934,6 +945,19 @@ func (e *Executor) budgetHook(workflowID string) func(context.Context, llm.Usage
 			return errTokenBudgetExhausted
 		}
 		return nil
+	}
+}
+
+// budgetRemaining reports the workflow token budget left after usage. It
+// reports no budget when none is set or the budget cannot be read; the
+// BeforeTurn hook surfaces those errors.
+func (e *Executor) budgetRemaining(workflowID string) func(context.Context, llm.Usage) (int64, bool) {
+	return func(ctx context.Context, usage llm.Usage) (int64, bool) {
+		base, max, err := e.tokenBudget(ctx, workflowID)
+		if err != nil || max <= 0 {
+			return 0, false
+		}
+		return max - sumTokens(base, usage.InputTokens, usage.OutputTokens), true
 	}
 }
 

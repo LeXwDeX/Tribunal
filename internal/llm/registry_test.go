@@ -607,3 +607,12 @@ func TestRegistryRetrySemaphoreCancelPreservesUsage(t *testing.T) {
 		t.Fatalf("canceled wait fabricated an audit attempt: %+v", records)
 	}
 }
+
+func TestRegistryReportsConfiguredContextWindow(t *testing.T) {
+	t.Setenv("TEST_KEY", "k")
+	cfg := chatConfig("http://127.0.0.1:1/v1", "TEST_KEY")
+	cfg.ContextWindow = 128000
+	if got := mustClient(t, "chat", cfg).Info().ContextWindow; got != 128000 {
+		t.Fatalf("context window = %d, want 128000", got)
+	}
+}

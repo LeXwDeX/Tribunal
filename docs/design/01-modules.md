@@ -431,6 +431,8 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error)
 3. 模型没有调用 `submit_result` 就结束（`end_turn`）：追加一条提示「必须调用 submit_result 提交结果」，补问 1 次；仍然没有则返回 `ErrNoSubmit`。
 4. 达到 `MaxTurns`：最后一轮不设置 `ToolChoice`（不发送函数级或 `required` 的选择，部分 thinking 模式网关会以 400 拒绝），只在本次请求末尾追加一条一次性用户提示，要求立即调用 `submit_result`；该提示不写入 transcript。最后一轮只执行 `submit_result`，其他工具调用回填「未执行」的错误结果；模型仍未提交则返回 `ErrNoSubmit`。若 ctx 有截止时间，且剩余时间低于保留量（本次运行观测到的最慢一轮的 2 倍，且不少于开始时剩余时间的 1/8），之后每次请求都提前追加同一条提示。Anthropic adapter 会把纯文本 user 消息并入紧邻的前一条 user 消息（工具结果仍在最前）。
 5. 工具输出超出上限时截断，并在末尾注明 `[truncated: N chars omitted]`。
+6. 上下文压缩：provider 配置了 `context_window` 时，每轮按上一次响应的输入与输出 token 加新回填工具结果的字节数 / 4 估算下一次请求的输入。估算达到窗口的 85% 时，保留初始任务和最近 3 轮工具结果，把更早的工具结果内容替换为「已省略」占位；工具调用、call ID 配对和 `IsError` 不变，不额外调用 LLM。压缩直接作用于 transcript，`RunResult.Transcript` 记录的是压缩后发给模型的内容。压缩后仍不低于 85% 时，每次请求都追加规则 4 的提交提示。未配置 `context_window` 时不压缩。
+7. 预算临近：带预算钩子的节点同时提供 `BudgetRemaining`（工作流 `max_tokens` 减去已用量，跨重试累计）。剩余量低于本次运行最大单轮用量（输入 + 输出）的 2 倍时，每次请求都追加规则 4 的提交提示。
 
 内置只读工具（`builtin.go`）：
 

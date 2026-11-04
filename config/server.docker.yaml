@@ -46,6 +46,9 @@ providers:
     model: "${LLM_MODEL}"
     api_key_env: LLM_API_KEY
     max_concurrency: 4
+    # Optional model context size in tokens. Agent nodes compact older tool
+    # output at 85% of it. Leave unset (0) to disable compaction.
+    # context_window: 128000
   # Optional second provider, off by default. Uncomment this block, then enable
   # it in the profile below. LLM_SECONDARY_* are independent of the primary
   # LLM_* names. This example uses the Anthropic Messages API: base_url is the

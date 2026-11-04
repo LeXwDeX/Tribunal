@@ -128,17 +128,20 @@ type EngineConfig struct {
 
 // ProviderConfig describes one LLM provider. Providers are optional in M0.
 type ProviderConfig struct {
-	Protocol       string           `yaml:"protocol" json:"protocol"`
-	BaseURL        string           `yaml:"base_url" json:"base_url"`
-	Model          string           `yaml:"model" json:"model"`
-	APIKeyEnv      string           `yaml:"api_key_env" json:"api_key_env"`
-	MaxConcurrency int              `yaml:"max_concurrency" json:"max_concurrency"`
-	RPM            int              `yaml:"rpm" json:"rpm"`
-	MaxTokens      int              `yaml:"max_tokens" json:"max_tokens"`
-	Temperature    *float64         `yaml:"temperature" json:"temperature"`
-	Thinking       *ThinkingConfig  `yaml:"thinking" json:"thinking"`
-	Reasoning      *ReasoningConfig `yaml:"reasoning" json:"reasoning"`
-	Price          *PriceConfig     `yaml:"price" json:"price"`
+	Protocol       string `yaml:"protocol" json:"protocol"`
+	BaseURL        string `yaml:"base_url" json:"base_url"`
+	Model          string `yaml:"model" json:"model"`
+	APIKeyEnv      string `yaml:"api_key_env" json:"api_key_env"`
+	MaxConcurrency int    `yaml:"max_concurrency" json:"max_concurrency"`
+	RPM            int    `yaml:"rpm" json:"rpm"`
+	MaxTokens      int    `yaml:"max_tokens" json:"max_tokens"`
+	// ContextWindow is the model's context size in tokens. Zero disables
+	// agent context compaction.
+	ContextWindow int              `yaml:"context_window" json:"context_window"`
+	Temperature   *float64         `yaml:"temperature" json:"temperature"`
+	Thinking      *ThinkingConfig  `yaml:"thinking" json:"thinking"`
+	Reasoning     *ReasoningConfig `yaml:"reasoning" json:"reasoning"`
+	Price         *PriceConfig     `yaml:"price" json:"price"`
 }
 
 // ThinkingConfig carries provider-specific reasoning token settings.
@@ -404,6 +407,9 @@ func (c *Config) Validate() error {
 		}
 		if provider.MaxConcurrency <= 0 {
 			p.add("%s.max_concurrency must be positive", field)
+		}
+		if provider.ContextWindow < 0 {
+			p.add("%s.context_window must not be negative", field)
 		}
 		if provider.APIKeyEnv == "" {
 			p.add("%s.api_key_env must be set", field)

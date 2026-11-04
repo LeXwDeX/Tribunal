@@ -57,6 +57,10 @@ docker compose exec -T review /app/tribunalctl projects all
 
 默认访问 `http://localhost:8080`。服务只向宿主机 `127.0.0.1` 发布端口；GitLab webhook 和远程浏览器需要第 6 节的 HTTPS 反向代理。容器内 `localhost` 指容器本身，不是宿主机或其他 GitLab 容器。内部 CA 需由部署方配置可信证书，不要关闭 TLS 校验。
 
+### 上下文窗口与压缩
+
+`providers.<name>.context_window` 可选，填写模型的上下文 token 数（按供应方文档，不要估大）。配置后，agent 节点的估算输入达到窗口的 85% 时，会把较早的工具输出替换为「已省略」占位，只保留最近 3 轮完整输出；压缩后仍接近上限时，模型会被要求立即提交结果。不填或填 0 时不压缩，行为与之前一致。该值不能为负，启动时校验。修改挂载的配置文件后需要重启服务生效。
+
 ### 多 Provider 配置
 
 首次部署可先完成上一节的[构建与启动](#构建并启动)，确认 primary-only 部署正常。已有部署不要先执行启动或重启命令；重建容器前，先按本节第 4 步核对未完成评审和待发布结果。默认部署只有一个 `primary` provider：`profiles.onboarding.agent.provider`、`profiles.default.propose[0].provider` 和 `profiles.default.challenge.provider` 都指向它。primary 的名称和变量保持不变，已有部署不需要迁移。

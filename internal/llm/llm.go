@@ -245,6 +245,8 @@ type ProviderInfo struct {
 	Protocol string `json:"protocol"`
 	Model    string `json:"model"`
 	BaseURL  string `json:"base_url"`
+	// ContextWindow is the configured context size in tokens; zero is unknown.
+	ContextWindow int `json:"context_window,omitempty"`
 }
 
 // ModelIdentity returns a stable identity for votes and challenger selection.

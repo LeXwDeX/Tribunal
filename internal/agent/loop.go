@@ -24,6 +24,10 @@ const mustSubmitPrompt = "You must call the " + SubmitToolName +
 const finalTurnPrompt = "Turns or time are nearly exhausted. Call the " + SubmitToolName +
 	" tool now with your best result from the evidence gathered so far. Do not call any other tool."
 
+// compactedToolResult replaces older tool outputs when the context nears the
+// model's window. Call IDs and tool calls are kept, so pairing stays valid.
+const compactedToolResult = "[earlier tool output omitted to fit the context window; call the tool again if you still need it]"
+
 var nonceFallback atomic.Uint64
 
 // Run executes the tool loop until a valid submit_result or an error.
@@ -143,6 +147,27 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 			longestTurn = elapsed
 		}
 	}
+	// contextTokens estimates the next request's input: the last response's
+	// input and output tokens plus the tool results added since.
+	contextWindow := int64(spec.Client.Info().ContextWindow)
+	contextLimit := contextWindow * compactThresholdPercent / 100
+	var contextTokens, largestTurnTokens int64
+	// nearContextLimit compacts older tool outputs once the estimate reaches
+	// the limit and reports whether the context is still at or above it.
+	nearContextLimit := func() bool {
+		if contextWindow <= 0 || contextTokens < contextLimit {
+			return false
+		}
+		contextTokens -= compactToolResults(messages, compactKeepToolTurns)
+		return contextTokens >= contextLimit
+	}
+	nearBudget := func() bool {
+		if spec.BudgetRemaining == nil || largestTurnTokens == 0 {
+			return false
+		}
+		remaining, ok := spec.BudgetRemaining(ctx, usage)
+		return ok && remaining < finalTurnReserve*largestTurnTokens
+	}
 
 	for turn := 1; turn <= maxTurns; turn++ {
 		if err := ctx.Err(); err != nil {
@@ -150,6 +175,7 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 		}
 		turnStarted := now()
 		lastTurn := turn == maxTurns
+		nearLimit := nearContextLimit()
 		req := &llm.Request{
 			System:      spec.System,
 			Messages:    append([]llm.Message(nil), messages...),
@@ -158,7 +184,7 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 			Temperature: spec.Temperature,
 			Reasoning:   spec.Reasoning,
 		}
-		if lastTurn || nearDeadline() {
+		if lastTurn || nearLimit || nearDeadline() || nearBudget() {
 			req.Messages = append(req.Messages, llm.Message{
 				Role:  llm.RoleUser,
 				Parts: []llm.Part{{Type: llm.PartText, Text: finalTurnPrompt}},
@@ -214,6 +240,10 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 		}
 		if resp == nil {
 			return partial(errors.New("agent: model returned a nil response"))
+		}
+		if turnTokens := resp.Usage.InputTokens + resp.Usage.OutputTokens; turnTokens > 0 {
+			contextTokens = turnTokens
+			largestTurnTokens = max(largestTurnTokens, turnTokens)
 		}
 		message, invalid := llm.SanitizeToolCalls(resp.Message, resp.StopReason == llm.StopToolUse)
 		messages = append(messages, message)
@@ -319,6 +349,7 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 		}
 
 		messages = append(messages, llm.Message{Role: llm.RoleTool, Parts: results})
+		contextTokens += toolResultTokens(results)
 		recordTurn(turnStarted)
 		if submitted {
 			return &RunResult{
@@ -381,6 +412,58 @@ func decodeSubmit(spec SubmitSpec, raw json.RawMessage) (out any, err error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// estimatedBytesPerToken converts text size to a conservative token estimate.
+const estimatedBytesPerToken = 4
+
+func toolResultTokens(parts []llm.Part) int64 {
+	var n int64
+	for _, part := range parts {
+		if part.ToolResult != nil {
+			n += int64(len(part.ToolResult.Content))
+		}
+	}
+	return n / estimatedBytesPerToken
+}
+
+// compactToolResults replaces the content of tool results older than the
+// last keep tool messages with compactedToolResult and returns the estimated
+// tokens saved. Parts are copied, so earlier request snapshots keep their
+// original content.
+func compactToolResults(messages []llm.Message, keep int) int64 {
+	toolMessages := 0
+	for _, msg := range messages {
+		if msg.Role == llm.RoleTool {
+			toolMessages++
+		}
+	}
+	var saved int64
+	for i := range messages {
+		if toolMessages <= keep {
+			break
+		}
+		if messages[i].Role != llm.RoleTool {
+			continue
+		}
+		toolMessages--
+		parts := append([]llm.Part(nil), messages[i].Parts...)
+		changed := false
+		for j, part := range parts {
+			if part.ToolResult == nil || len(part.ToolResult.Content) <= len(compactedToolResult) {
+				continue
+			}
+			result := *part.ToolResult
+			saved += int64(len(result.Content) - len(compactedToolResult))
+			result.Content = compactedToolResult
+			parts[j].ToolResult = &result
+			changed = true
+		}
+		if changed {
+			messages[i].Parts = parts
+		}
+	}
+	return saved / estimatedBytesPerToken
 }
 
 func plainToolResult(callID, content string, isError bool) llm.Part {

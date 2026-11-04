@@ -286,7 +286,7 @@ func newProviderClient(name string, cfg config.ProviderConfig, httpClient *http.
 	if apiKey == "" {
 		return nil, fmt.Errorf("llm: provider %q: environment variable %s is not set", name, cfg.APIKeyEnv)
 	}
-	info := ProviderInfo{Name: name, Protocol: cfg.Protocol, Model: cfg.Model, BaseURL: cfg.BaseURL}
+	info := ProviderInfo{Name: name, Protocol: cfg.Protocol, Model: cfg.Model, BaseURL: cfg.BaseURL, ContextWindow: cfg.ContextWindow}
 	adapter, err := newAdapter(info, cfg, apiKey, httpClient)
 	if err != nil {
 		return nil, fmt.Errorf("llm: provider %q: %w", name, err)
