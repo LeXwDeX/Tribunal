@@ -49,6 +49,10 @@ func (c *thinkingGatewayClient) Generate(_ context.Context, req *llm.Request) (*
 	}}}}, nil
 }
 
+// The fake gateway takes no time and its input does not grow, so this test
+// proves only the tool_choice and turn-limit behavior. In production the node
+// timeout, token budget or context window can still end a run first; the loop
+// then relies on its deadline-based submit prompt (agent package tests).
 func TestOnboardingSubmitsOnFinalTurnBehindThinkingGateway(t *testing.T) {
 	submit, err := json.Marshal(OnboardingOut{
 		Overview:     "overview",

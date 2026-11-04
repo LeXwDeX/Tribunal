@@ -669,3 +669,91 @@ func TestRunRejectsDuplicateToolNamesWithoutEcho(t *testing.T) {
 		t.Fatalf("duplicate tool definition error = %v", err)
 	}
 }
+
+// steppingClient advances a fake clock on every request and submits only
+// after the final-turn prompt.
+type steppingClient struct {
+	mu    sync.Mutex
+	clock time.Time
+	step  time.Duration
+	reqs  []*llm.Request
+}
+
+func (c *steppingClient) Info() llm.ProviderInfo { return llm.ProviderInfo{Name: "stepping"} }
+
+func (c *steppingClient) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.clock
+}
+
+func (c *steppingClient) Generate(_ context.Context, req *llm.Request) (*llm.Response, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.clock = c.clock.Add(c.step)
+	c.reqs = append(c.reqs, req)
+	last := req.Messages[len(req.Messages)-1]
+	if last.Role == llm.RoleUser && len(last.Parts) == 1 && last.Parts[0].Text == finalTurnPrompt {
+		return toolResponse(llm.StopToolUse, call("s", SubmitToolName, `{}`)), nil
+	}
+	return toolResponse(llm.StopToolUse, call(fmt.Sprintf("c%d", len(c.reqs)), "echo", `{}`)), nil
+}
+
+func TestRunAsksForSubmitBeforeContextDeadline(t *testing.T) {
+	start := time.Now()
+	client := &steppingClient{clock: start, step: time.Minute}
+	ctx, cancel := context.WithDeadline(context.Background(), start.Add(5*time.Minute))
+	defer cancel()
+	spec := testSpec(client, echoTool{name: "echo"})
+	spec.MaxTurns = 30
+	spec.Now = client.now
+	result, err := Run(ctx, spec)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// Each turn takes one minute. After four turns one minute remains, which
+	// is less than the reserve of two slowest turns, so turn 5 asks for submit.
+	if result.Turns != 5 || len(client.reqs) != 5 {
+		t.Fatalf("turns = %d, requests = %d, want 5", result.Turns, len(client.reqs))
+	}
+	for i, req := range client.reqs[:4] {
+		if last := req.Messages[len(req.Messages)-1]; last.Role == llm.RoleUser && len(last.Parts) == 1 && last.Parts[0].Text == finalTurnPrompt {
+			t.Fatalf("request %d asked for submit with time to spare", i+1)
+		}
+	}
+}
+
+func TestRunWithoutDeadlineWaitsForLastTurn(t *testing.T) {
+	client := &steppingClient{clock: time.Now(), step: time.Hour}
+	spec := testSpec(client, echoTool{name: "echo"})
+	spec.MaxTurns = 3
+	spec.Now = client.now
+	result, err := Run(context.Background(), spec)
+	if err != nil || result.Turns != 3 {
+		t.Fatalf("result=%+v err=%v, want submit on turn 3", result, err)
+	}
+}
+
+func TestRunFinalTurnDoesNotExecuteOtherTools(t *testing.T) {
+	executed := 0
+	client := &fakeClient{replies: []*llm.Response{
+		toolResponse(llm.StopToolUse, call("c1", "echo", `{}`)),
+		toolResponse(llm.StopToolUse, call("c2", "echo", `{}`), call("s1", SubmitToolName, `{}`)),
+	}}
+	spec := testSpec(client, echoTool{name: "echo", fn: func(context.Context, json.RawMessage) (Result, error) {
+		executed++
+		return Result{Content: "ok"}, nil
+	}})
+	spec.MaxTurns = 2
+	result, err := Run(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if executed != 1 {
+		t.Fatalf("echo executed %d times, want only the non-final call", executed)
+	}
+	final := result.Transcript[len(result.Transcript)-1].Parts
+	if !final[0].ToolResult.IsError || !strings.Contains(final[0].ToolResult.Content, "not executed") || final[1].ToolResult.IsError {
+		t.Fatalf("final results = %+v", final)
+	}
+}
