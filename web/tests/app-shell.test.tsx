@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
 import { AppShell } from '../src/components/AppShell'
@@ -68,6 +68,24 @@ describe('AppShell navigation', () => {
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled())
     await screen.findByRole('link', { name: '评审' })
     expect(screen.queryByText(/个运行中/)).not.toBeInTheDocument()
+  })
+})
+
+describe('AppShell scroll reset', () => {
+  afterEach(() => {
+    cleanup()
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  it('scrolls to the top when the route changes', async () => {
+    installFetch(() => jsonResponse({ reviews: [] }))
+    const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
+    renderShell()
+    expect(scrollTo).toHaveBeenCalledWith(0, 0)
+    scrollTo.mockClear()
+    fireEvent.click(screen.getByRole('link', { name: '项目' }))
+    await vi.waitFor(() => expect(scrollTo).toHaveBeenCalledWith(0, 0))
   })
 })
 

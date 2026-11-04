@@ -13,20 +13,20 @@
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  gap: 18px;
-  padding: 16px 12px;
+  gap: var(--space-xl);
+  padding: var(--space-lg) var(--space-md);
   background: var(--nav);
   color: var(--nav-text);
   border-right: 1px solid var(--nav-border);
   overflow-y: auto;
-  z-index: 30;
+  z-index: var(--z-mobile-bar);
 }
 
 .brand {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 4px 8px;
+  gap: var(--space-sm);
+  padding: var(--space-2xs) var(--space-sm);
   color: var(--nav-strong);
   text-decoration: none;
 }
@@ -36,43 +36,43 @@
 .brandText {
   display: flex;
   flex-direction: column;
-  line-height: 1.2;
+  line-height: var(--lh-tight);
 }
 
-.brandName { color: var(--nav-strong); font-size: 15px; font-weight: 650; letter-spacing: 0.01em; }
-.brandSub { color: var(--nav-muted); font-size: 11.5px; }
+.brandName { color: var(--nav-strong); font-size: var(--fs-h4); font-weight: var(--fw-bold); letter-spacing: 0.01em; }
+.brandSub { color: var(--nav-muted); font-size: var(--fs-caption); }
 
 .navItems {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: var(--space-px);
 }
 
 .navSection {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: var(--space-px);
 }
 
 .navGroup {
-  padding: 12px 10px 6px;
+  padding: var(--space-md) 10px var(--space-xs);
   color: var(--nav-muted);
-  font-size: 11px;
+  font-size: var(--fs-micro);
   letter-spacing: 0.06em;
 }
 
-.navSection:first-child .navGroup { padding-top: 4px; }
+.navSection:first-child .navGroup { padding-top: var(--space-2xs); }
 
 .navItem {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-sm);
   height: 34px;
   padding: 0 10px;
   box-sizing: border-box;
   border-radius: var(--radius-sm);
   color: var(--nav-text);
-  font-size: 13.5px;
+  font-size: var(--fs-body-sm);
   text-decoration: none;
 }
 
@@ -87,7 +87,7 @@
 .navItemActive {
   background: var(--nav-active);
   color: var(--nav-strong);
-  font-weight: 500;
+  font-weight: var(--fw-medium);
   box-shadow: inset 2px 0 0 var(--accent);
 }
 
@@ -98,13 +98,13 @@
   justify-content: center;
   min-width: 20px;
   height: 18px;
-  padding: 0 6px;
+  padding: 0 var(--space-xs);
   box-sizing: border-box;
   border-radius: 9px;
   background: var(--nav-accent-tint);
   color: var(--nav-accent-fg);
-  font-size: 11px;
-  font-weight: 500;
+  font-size: var(--fs-micro);
+  font-weight: var(--fw-medium);
   font-variant-numeric: tabular-nums;
 }
 
@@ -113,16 +113,16 @@
 .sessionArea {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding-top: 12px;
+  gap: var(--space-xs);
+  padding-top: var(--space-md);
   border-top: 1px solid var(--nav-border);
 }
 
 .sessionRow {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 4px 8px;
+  gap: var(--space-sm);
+  padding: var(--space-2xs) var(--space-sm);
   min-width: 0;
 }
 
@@ -136,7 +136,7 @@
 .sessionName {
   color: var(--nav-strong);
   font-size: 13px;
-  font-weight: 500;
+  font-weight: var(--fw-medium);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -144,7 +144,7 @@
 
 .sessionRole {
   color: var(--nav-muted);
-  font-size: 11.5px;
+  font-size: var(--fs-caption);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -152,7 +152,7 @@
 
 .navActions {
   display: flex;
-  gap: 4px;
+  gap: var(--space-2xs);
 }
 
 .navAction {
@@ -160,14 +160,14 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: var(--space-xs);
   height: 30px;
-  padding: 0 8px;
+  padding: 0 var(--space-sm);
   border: 1px solid var(--nav-border);
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--nav-text);
-  font-size: 12px;
+  font-size: var(--fs-meta);
   white-space: nowrap;
 }
 
@@ -183,8 +183,8 @@
   border-radius: 50%;
   background: linear-gradient(135deg, var(--avatar-from), var(--avatar-to));
   color: var(--nav-strong);
-  font-size: 12px;
-  font-weight: 600;
+  font-size: var(--fs-meta);
+  font-weight: var(--fw-semibold);
 }
 
 .main {
@@ -198,13 +198,13 @@
 .topbar {
   position: sticky;
   top: 0;
-  z-index: 20;
+  z-index: var(--z-topbar);
   height: var(--topbar-h);
   flex: none;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 0 24px;
+  gap: var(--space-md);
+  padding: 0 var(--space-2xl);
   box-sizing: border-box;
   background: color-mix(in srgb, var(--bg) 86%, transparent);
   backdrop-filter: blur(10px);
@@ -214,7 +214,7 @@
 .crumbs {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-xs);
   min-width: 0;
   overflow: hidden;
   color: var(--muted);
@@ -230,7 +230,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--text);
-  font-weight: 500;
+  font-weight: var(--fw-medium);
 }
 
 .sep { color: var(--border-strong); }
@@ -244,8 +244,8 @@
   align-items: center;
   gap: 9px;
   color: var(--nav-strong);
-  font-weight: 650;
-  font-size: 15px;
+  font-weight: var(--fw-bold);
+  font-size: var(--fs-h4);
 }
 
 .mobileBrand:hover { color: var(--nav-strong); text-decoration: none; }
@@ -265,7 +265,7 @@
     width: 272px;
     transform: translateX(-100%);
     transition: transform 160ms ease-out;
-    z-index: 40;
+    z-index: var(--z-nav);
   }
 
   /* The shadow would bleed past the viewport edge while the nav is closed. */
@@ -284,12 +284,12 @@
   .mobileBar {
     position: sticky;
     top: 0;
-    z-index: 30;
+    z-index: var(--z-mobile-bar);
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: var(--space-sm);
     height: 52px;
-    padding: 0 12px 0 4px;
+    padding: 0 var(--space-md) 0 var(--space-2xs);
     background: var(--nav);
     color: var(--nav-strong);
   }
@@ -297,7 +297,7 @@
   .topbar {
     position: static;
     height: 48px;
-    padding: 0 16px;
+    padding: 0 var(--space-lg);
     backdrop-filter: none;
   }
 
@@ -305,7 +305,7 @@
     display: block;
     position: fixed;
     inset: 0;
-    z-index: 39;
+    z-index: var(--z-nav-backdrop);
     border: 0;
     padding: 0;
     background: var(--overlay);

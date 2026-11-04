@@ -140,6 +140,7 @@ export function SevCounts({ summary }: { summary?: FindingsSummary }) {
         const count = bySeverity[key] ?? 0
         return (
           <span key={key} title={key} role="img" aria-label={`${key} ${count}`} className={count === 0 ? styles.zero : undefined}>
+            {/* stylecheck-allow-inline: data-driven count color */}
             <i style={{ background: count === 0 ? 'var(--border)' : color }} />
             {count}
           </span>

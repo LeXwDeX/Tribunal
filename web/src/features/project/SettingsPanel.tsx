@@ -382,7 +382,7 @@ export function SettingsPanel({ project }: { project: Project }) {
 
           <details className={ui.disclosure}>
             <summary>高级 JSON（profile_by_label 等）</summary>
-            <div className={ui.stack} style={{ marginTop: 8 }}>
+            <div className={ui.stackTop}>
               <label className="srOnly" htmlFor="settings-json">项目设置 JSON</label>
               <textarea id="settings-json" className="textarea textareaCode" rows={12} value={jsonText} onChange={(event) => setJsonText(event.target.value)} spellCheck={false} />
               {jsonError ? <span className={styles.resultError}>{jsonError}</span> : null}
