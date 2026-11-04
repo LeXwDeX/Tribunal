@@ -116,6 +116,7 @@ func (s *Server) handleRegisterProject(w http.ResponseWriter, r *http.Request) {
 		Profile:     request.Profile,
 		AutoWebhook: request.AutoWebhook,
 		Settings:    request.Settings,
+		OwnerUserID: max(currentUserID(r), 0),
 	})
 	if err != nil {
 		writeAppError(w, r, err)

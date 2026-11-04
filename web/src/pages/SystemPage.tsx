@@ -357,7 +357,7 @@ function AdminGrantsPanel() {
       <Panel flush title="项目授权" aside={selectedProject ? selectedProject.path_with_namespace : '未选择项目'}>
         <PanelBody className={insights.grantForm}>
           <div className={styles.notice}>
-            管理员也不会自动获得项目业务数据；请在这里为账号授予 read 或 manage。项目列表来自管理面，不需要管理员自身拥有 grant。
+            除注册人自动获得所注册项目的 manage 外，管理员不会自动获得项目业务数据；请在这里为账号授予 read 或 manage。项目列表来自管理面，不需要管理员自身拥有 grant。
           </div>
           <div className={insights.grantPicker}>
             <label className={insights.field}>

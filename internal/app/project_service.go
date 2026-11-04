@@ -31,6 +31,9 @@ import (
 // ProjectStore is the persistence surface needed by ProjectService.
 type ProjectStore interface {
 	RegisterProject(ctx context.Context, project store.Project) (string, error)
+	// RegisterProjectWithOwner also grants ownerUserID manage access in the
+	// same transaction.
+	RegisterProjectWithOwner(ctx context.Context, project store.Project, ownerUserID int64) (string, error)
 	GetProject(ctx context.Context, id int64) (*store.Project, error)
 	ListProjects(ctx context.Context) ([]store.Project, error)
 	ListProjectsFiltered(ctx context.Context, filter store.ProjectFilter) ([]store.Project, error)
@@ -48,6 +51,9 @@ type RegisterInput struct {
 	Profile     string
 	AutoWebhook bool
 	Settings    json.RawMessage
+	// OwnerUserID is the registering user. A positive ID receives a manage
+	// grant atomically with the project; 0 (the bootstrap bearer) writes none.
+	OwnerUserID int64
 }
 
 // ValidateProjectInput is a read-only repository connection check.
@@ -212,6 +218,10 @@ func NewProjectService(cfg ProjectServiceConfig) (*ProjectService, error) {
 	}, nil
 }
 
+// projectAlreadyRegisteredMessage is returned only on the platform-admin
+// registration route, so the hint never reveals existence to other callers.
+const projectAlreadyRegisteredMessage = "project is already registered; if it is not in your project list, grant yourself access on the System page"
+
 // Register validates the project token and scopes, optionally creates a
 // webhook, then atomically stores the project and onboarding job.
 func (s *ProjectService) Register(ctx context.Context, in RegisterInput) (*Registration, error) {
@@ -291,7 +301,7 @@ func (s *ProjectService) Register(ctx context.Context, in RegisterInput) (*Regis
 	defer unlock()
 
 	if _, err := s.store.GetProject(ctx, project.ID); err == nil {
-		return nil, conflictError("project is already registered")
+		return nil, conflictError(projectAlreadyRegisteredMessage)
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return nil, internalError()
 	}
@@ -345,7 +355,12 @@ func (s *ProjectService) Register(ctx context.Context, in RegisterInput) (*Regis
 		Settings:          canonicalSettings,
 		Enabled:           true,
 	}
-	jobID, err := s.store.RegisterProject(ctx, stored)
+	var jobID string
+	if in.OwnerUserID > 0 {
+		jobID, err = s.store.RegisterProjectWithOwner(ctx, stored, in.OwnerUserID)
+	} else {
+		jobID, err = s.store.RegisterProject(ctx, stored)
+	}
 	if err != nil {
 		if hookID != nil {
 			if delErr := s.gitlab.DeleteProjectHook(context.WithoutCancel(ctx), in.AccessToken, project.ID, *hookID); delErr != nil {
@@ -354,7 +369,7 @@ func (s *ProjectService) Register(ctx context.Context, in RegisterInput) (*Regis
 			}
 		}
 		if errors.Is(err, store.ErrConflict) {
-			return nil, conflictError("project is already registered")
+			return nil, conflictError(projectAlreadyRegisteredMessage)
 		}
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, err
