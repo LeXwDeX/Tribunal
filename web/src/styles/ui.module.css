@@ -232,7 +232,7 @@
 }
 
 .sevCounts .zero {
-  color: var(--border-strong);
+  color: var(--muted);
 }
 
 .panel {
