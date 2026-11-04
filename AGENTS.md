@@ -178,9 +178,13 @@ the evidence; CI alone is not a substitute.
 
 ### Agent test account
 
-- On the development/test environment, an agent creates and uses its own dedicated test account (asking a maintainer when creating it needs privileges the agent does not have) to sign in and monitor deployments, jobs, reviews and publication results. This is a Tribunal console account and, when acceptance requires it, a dedicated identity on the test GitLab.
-- Never reuse a human maintainer's account or any production account. Grant only the permissions monitoring needs.
-- Keep its credentials only on that environment's host side, in the environment's own untracked env file with mode 0600. `docs/handoff.md` may name the account and where its credentials live, but never holds the secret itself. Never put credentials in a tracked file, a PR, an Issue or a log.
+- The console has no local accounts; browser login is GitLab OAuth only (`/auth/login`, `/auth/callback`). On the development/test environment, the agent test account is therefore a dedicated user on the test GitLab that signs in to the test instance through OAuth to monitor deployments, jobs, reviews and publication results. Ask a GitLab administrator to create it when the agent lacks the privilege.
+- The test instance uses its own GitLab OAuth application: callback URI is the test instance's `/auth/callback`, scope `read_user`. Never reuse the production OAuth application.
+- The static bootstrap bearer token is for platform administration only (for example registering projects and setting project grants through the admin API). It is user ID 0 and never holds a project grant, so project-level APIs return 404 for it.
+- Project-level APIs (for example rotating a project token or manually triggering a review) need an API token created by a signed-in user, and that user needs the project grant they require (manage for those two). API tokens can only be created from a browser session, through the console or `POST /api/v1/api-tokens`.
+- Grant the test account only the permissions monitoring needs: a read grant by default, and manage only when the task needs token rotation or a manual review trigger. Never reuse a human maintainer's account (except as below) or any production account.
+- Keep the details of the fixed test repository used for acceptance, and the test tokens, only on the test host, in an untracked env file with mode 0600, and refer to them by variable name; never print their values. `docs/handoff.md` may name the account and where its credentials live, but never holds a secret. Never put credentials in a tracked file, a PR, an Issue or a log.
+- Exception to the human-account rule: if no dedicated GitLab user can be obtained, a maintainer's own GitLab account with the fixed test repository may stand in temporarily, with the maintainer's consent. List it as a known gap in the delivery report and replace it once a dedicated user exists.
 - Do not create such accounts in production.
 
 ## 11. Agent workflow
