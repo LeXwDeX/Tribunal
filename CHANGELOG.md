@@ -43,6 +43,7 @@
 
 ### 修复
 
+- **传输重试后保留轮次耗时观测**：agent 节点因可重试的传输错误重试时，新尝试沿用此前观测到的最慢一轮耗时；剩余时间不足时，重试的第一次请求就要求模型提交结果，不再从头探索直到超时。重试次数、退避和错误分类不变（[#261](https://github.com/LeXwDeX/Tribunal/issues/261)）。
 - **onboarding 在 thinking mode 网关下不再因强制 `tool_choice` 失败**：agent 循环最后一轮不再发送 `tool_choice=submit_result`，改为在该次请求末尾追加一条一次性提示（不写入 transcript），要求立即调用 `submit_result`；原先 400 后改用 auto 重试的兜底请求没有任何提交提示，模型继续调用其他工具，循环到顶返回「agent finished without submit_result」。节点剩余时间低于保留量（已观测最慢一轮的 2 倍，且不少于开始时剩余时间的 1/8）时提前发出同一提示；最后一轮只执行 `submit_result`。`workspace.onboard` 的轮次上限由 30 提高到 90，评审、规划、核验、综合等其他节点仍为 30。提高上限不保证完成，时间、token 和上下文预算仍可能先到期。`submit_result` 的 schema、校验、重试和错误分类不变（[#255](https://github.com/LeXwDeX/Tribunal/issues/255)）。
 - **兼容要求角色严格交替的 OpenAI 兼容网关**：`openai-chat` adapter 现在把相邻的纯文本 user 消息合并为一条（与 `anthropic` adapter 一致），#255 的最后一轮提示不再在 `MaxTurns=1` 或补问之后产生 `user → user`。provider 新增可选字段 `strict_role_alternation`（默认 `false`，仅 `openai-chat` 生效）：开启后，紧跟 tool 结果的提示改为附加在最后一条 tool 消息末尾、不可信数据包裹之外，并标明来自系统，请求中不再出现 `tool → user`。默认关闭时，没有相邻 user 文本的请求形状不变；`openai-responses` 与 `anthropic` 忽略该字段。修改该字段会改变评审执行配置，需重启；见 [严格角色交替](docs/design/06-config.md#严格角色交替strict_role_alternation)（[#262](https://github.com/LeXwDeX/Tribunal/issues/262)）。
 - **项目校验结果与详情卡片的字段排版**：只读校验结果和项目详情等「字段 / 值」列表改为每行一个标签和一个值。标签列按内容收缩、最多占 40% 宽度，值列可收缩并自动换行；长身份字符串、长项目路径和多个 scope 不再把列撑宽、溢出面板，也不再因为相邻字段换行留下大段空白。窄屏仍是标签在上、值在下的单列布局。只影响控制台样式（[#251](https://github.com/LeXwDeX/Tribunal/issues/251)）。

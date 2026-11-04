@@ -94,6 +94,10 @@ type RunSpec struct {
 	// BudgetRemaining reports the tokens left in the caller's budget after
 	// the usage this run has consumed, and whether a budget applies.
 	BudgetRemaining func(context.Context, llm.Usage) (int64, bool)
+	// TurnEstimate seeds the slowest-turn estimate, for example with the
+	// LongestTurn of a failed earlier attempt, so a retry near the deadline
+	// asks for submit_result from its first request.
+	TurnEstimate time.Duration
 	// Now is the clock used to measure turns against the context deadline.
 	// It must share the deadline's time source; nil uses time.Now.
 	Now func() time.Time
@@ -107,6 +111,8 @@ type RunResult struct {
 	Usage      llm.Usage
 	Turns      int
 	Transcript []llm.Message
+	// LongestTurn is the slowest completed turn, including TurnEstimate.
+	LongestTurn time.Duration
 }
 
 var (
