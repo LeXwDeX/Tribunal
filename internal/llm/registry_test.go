@@ -678,3 +678,16 @@ func TestRegistryReportsForcedToolChoice(t *testing.T) {
 		t.Fatal("explicit supported must be reported")
 	}
 }
+
+func TestCallAuditMarksForcedToolChoiceWithoutTheName(t *testing.T) {
+	for choice, want := range map[string]bool{"": false, "auto": false, "none": false, "required": true, "submit_result": true} {
+		audit := NewCallAudit(&Request{ToolChoice: choice}, nil)
+		if audit.Request.ForcedToolChoice != want {
+			t.Errorf("tool choice %q: forced = %t, want %t", choice, audit.Request.ForcedToolChoice, want)
+		}
+		raw, _ := json.Marshal(audit.Request)
+		if choice == "submit_result" && strings.Contains(string(raw), choice) {
+			t.Fatalf("audit stored the tool name: %s", raw)
+		}
+	}
+}

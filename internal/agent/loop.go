@@ -280,14 +280,18 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 			var guardErr *llm.AttemptGuardError
 			if !errors.As(err, &guardErr) && !errors.Is(err, ErrUnsafeResponse) && !llm.IsUnsafeResponse(err) &&
 				!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) &&
-				errors.As(err, &failure) && failure.Kind == llm.ErrBadRequest {
-				// The provider rejected the forced choice: remember it and send
-				// the same request with auto, which already carries the prompt.
-				rejectedForcedChoice.Store(forcedChoiceKey(info), struct{}{})
+				errors.As(err, &failure) && failure.Kind == llm.ErrBadRequest && llm.HasObservedResponse(err) {
+				// The provider answered the forced choice with a bad request:
+				// send the same request with auto, which already carries the
+				// prompt. Only a successful fallback proves the forced choice
+				// was the problem, so only then is the provider remembered.
 				forceSubmit = false
 				fallback := *req
 				fallback.ToolChoice = ""
 				resp, err = generate(&fallback)
+				if err == nil {
+					rejectedForcedChoice.Store(forcedChoiceKey(info), struct{}{})
+				}
 				var stopped *llm.AttemptGuardError
 				if errors.As(err, &stopped) && stopped.Previous == nil {
 					previous := *failure

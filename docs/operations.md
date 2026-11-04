@@ -65,7 +65,7 @@ docker compose exec -T review /app/tribunalctl projects all
 
 ### 最后一轮强制提交（forced_tool_choice）
 
-`providers.<name>.forced_tool_choice` 可选，取值 `auto`（默认）、`supported`、`unsupported`。agent 节点最后一轮会要求模型调用 `submit_result`：支持强制选择的 provider 会同时收到 `tool_choice=submit_result`，不支持的只收到提示。`auto` 只对未开启 thinking 的 Anthropic 协议强制；OpenAI 兼容协议无法可靠探测，默认不强制。DeepSeek 等 thinking 模式网关会以 400 拒绝强制选择，保持默认即可。若声明了 `supported` 但网关仍返回 400，本进程会记住该 provider 并改用提示，重启后才会再次尝试。给已有 provider 设置该值会改变评审执行身份，处理方式同[多 Provider 配置](#多-provider-配置)第 4 步。
+`providers.<name>.forced_tool_choice` 可选，取值 `auto`（默认）、`supported`、`unsupported`。agent 节点最后一轮会要求模型调用 `submit_result`：支持强制选择的 provider 会同时收到 `tool_choice=submit_result`，不支持的只收到提示。`auto` 只对未开启 thinking 的 Anthropic 协议强制；OpenAI 兼容协议无法可靠探测，默认不强制。DeepSeek 等 thinking 模式网关会以 400 拒绝强制选择，保持默认即可。若声明了 `supported` 但网关以 400 拒绝强制选择、改用提示重发后成功，本进程会记住该 provider，之后只发提示，重启后才会再次尝试；与强制选择无关的 400（重发同样失败）不会被记住。不要在开启 thinking 的 Anthropic provider 上声明 `supported`：强制轮会关闭 thinking，工具循环中途切换 thinking 可能被拒绝。是否强制可在 LLM 调用审计的请求元数据 `forced_tool_choice` 中看到（不记录工具名）。给已有 provider 设置该值会改变评审执行身份，处理方式同[多 Provider 配置](#多-provider-配置)第 4 步。
 
 ### 多 Provider 配置
 

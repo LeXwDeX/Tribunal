@@ -97,6 +97,9 @@ type AuditRequest struct {
 	// fixed enum values and counts, never text.
 	SubmitPrompt         string `json:"submit_prompt,omitempty"`
 	CompactedToolResults int    `json:"compacted_tool_results,omitempty"`
+	// ForcedToolChoice marks a request that forced a tool choice; the tool
+	// name itself is not stored.
+	ForcedToolChoice bool `json:"forced_tool_choice,omitempty"`
 }
 
 // AuditResponse counts response structure and keeps usage and stop metadata.
@@ -153,10 +156,11 @@ func NewCallAudit(req *Request, resp *Response) *CallAudit {
 	audit := &CallAudit{}
 	if req != nil {
 		out := &AuditRequest{
-			Format:    AuditMetadataFormat,
-			Messages:  len(req.Messages),
-			Tools:     len(req.Tools),
-			MaxTokens: req.MaxTokens,
+			Format:           AuditMetadataFormat,
+			Messages:         len(req.Messages),
+			Tools:            len(req.Tools),
+			MaxTokens:        req.MaxTokens,
+			ForcedToolChoice: req.ToolChoice != "" && req.ToolChoice != "auto" && req.ToolChoice != "none",
 		}
 		if req.Temperature != nil {
 			value := *req.Temperature
