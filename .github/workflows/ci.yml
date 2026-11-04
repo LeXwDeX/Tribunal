@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   go:
-    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.self_hosted && fromJSON('["self-hosted", "Linux", "X64"]') || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event_name == 'workflow_dispatch' && inputs.self_hosted || github.event_name == 'push' && github.ref == 'refs/heads/main' || github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "Linux", "X64", "azure-f16"]') || 'ubuntu-latest' }}
     env:
       CGO_ENABLED: "1"
     steps:
@@ -62,7 +62,7 @@ jobs:
         run: go run ./scripts/licensecheck -min 1
 
   docker:
-    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.self_hosted && fromJSON('["self-hosted", "Linux", "X64"]') || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -71,7 +71,7 @@ jobs:
         run: bash scripts/docker-smoke.sh
 
   web:
-    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.self_hosted && fromJSON('["self-hosted", "Linux", "X64"]') || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: web
