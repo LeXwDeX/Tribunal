@@ -13,9 +13,14 @@ describe('web style checks', () => {
     expect(diagnostics.filter((d) => d.rule === 'color-literal')).toHaveLength(0)
   })
 
-  it('rejects scale literals for font-size and spacing', () => {
+  it('rejects every scale literal in a shorthand declaration', () => {
     const diagnostics = scanCss('.x { font-size: 14px; padding: 16px 20px; gap: 8px; }', 'x.module.css')
-    expect(diagnostics.filter((d) => d.rule === 'scale-literal')).toHaveLength(3)
+    expect(diagnostics.filter((d) => d.rule === 'scale-literal')).toHaveLength(4)
+  })
+
+  it('ignores id selectors and comments', () => {
+    const diagnostics = scanCss('#abc { display: block; } /* color: #fff */', 'x.module.css')
+    expect(diagnostics).toHaveLength(0)
   })
 
   it('accepts off-scale literals while the migration continues', () => {
@@ -33,5 +38,10 @@ describe('web style checks', () => {
   it('ignores dynamic style props', () => {
     const diagnostics = scanTsx('<div style={position} />', 'x.tsx')
     expect(diagnostics).toHaveLength(0)
+  })
+
+  it('rejects literal colors in JSX attributes', () => {
+    const diagnostics = scanTsx('<svg><rect fill="#fff" stroke="currentColor" /></svg>', 'x.tsx')
+    expect(diagnostics.filter((d) => d.rule === 'color-literal')).toHaveLength(1)
   })
 })

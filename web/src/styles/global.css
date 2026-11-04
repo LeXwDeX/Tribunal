@@ -127,7 +127,7 @@ code, .mono {
   width: 1px;
   height: 1px;
   padding: 0;
-  margin: -var(--space-px);
+  margin: calc(-1 * var(--space-px));
   overflow: hidden;
   clip: rect(0 0 0 0);
   white-space: nowrap;
@@ -140,7 +140,7 @@ code, .mono {
   min-width: 0;
   overflow-x: auto;
   overscroll-behavior-inline: contain;
-  margin: 0 -var(--space-px);
+  margin: 0 calc(-1 * var(--space-px));
 }
 
 /* Shared table base for every data table. */

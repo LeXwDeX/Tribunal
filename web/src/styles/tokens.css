@@ -63,6 +63,8 @@
   --accent-ring: rgba(47, 91, 234, 0.35);
   --link: #2349c8;
   --on-accent: #ffffff;
+  --brand: #2f62e0;
+  --on-brand: #ffffff;
   --nav-strong: #ffffff;
   --nav-tint: rgba(255, 255, 255, 0.02);
   --on-accent-highlight: rgba(255, 255, 255, 0.12);

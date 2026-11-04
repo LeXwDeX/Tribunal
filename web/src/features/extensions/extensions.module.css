@@ -21,6 +21,14 @@
   gap: var(--space-xs);
 }
 
+.rowActionsEnd {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-xs);
+  margin-left: auto;
+}
+
 .conflictActions {
   display: flex;
   flex-wrap: wrap;

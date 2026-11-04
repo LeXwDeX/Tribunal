@@ -45,6 +45,18 @@
   min-width: 0;
 }
 
+.stackTop {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  min-width: 0;
+  margin-top: var(--space-sm);
+}
+
+.contents {
+  display: contents;
+}
+
 .button {
   display: inline-flex;
   align-items: center;
