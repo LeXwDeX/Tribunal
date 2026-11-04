@@ -4,6 +4,7 @@ import { disableWebhook, enableWebhook, rebuildWebhook } from '../../api/api'
 import type { Project, ProjectWebhookState } from '../../api/types'
 import { Badge, Button, ConfirmDialog, ErrorState, Panel, useToast } from '../../components/ui'
 import { formatDate, labelForWebhookState, webhookTone } from '../../lib/format'
+import { webhookFailureHint, webhookStoredErrorHint } from '../../lib/diagnostics'
 import ui from '../../styles/ui.module.css'
 import styles from '../../pages/pages.module.css'
 
@@ -160,6 +161,7 @@ export function WebhookPanel({ project }: { project: Project }) {
         </span>
         {view.updatedAt ? <span className="small muted">最近更新：{formatDate(view.updatedAt)}</span> : null}
         {view.error ? <span className={styles.resultError}>{view.error}</span> : null}
+        {view.error && webhookStoredErrorHint(view.error) ? <span className={styles.resultError}>{webhookStoredErrorHint(view.error)}</span> : null}
 
         {canWrite ? (
           <>
@@ -185,7 +187,7 @@ export function WebhookPanel({ project }: { project: Project }) {
                 <Button variant="secondary" onClick={() => openDialog('rebuild')} disabled={busy}>重建 webhook</Button>
               ) : null}
             </div>
-            {enableError ? <ErrorState error={enableError} title="启用 Webhook 失败" /> : null}
+            {enableError ? <ErrorState error={enableError} title="启用 Webhook 失败" hint={webhookFailureHint(enableError)} /> : null}
             <span className="small muted">
               启用会在 GitLab 创建或复用本服务记录的 hook；同 URL 的手动 hook 不会被接管或删除。保存项目设置、校验或更新访问 Key 都不会修改 Webhook。
             </span>

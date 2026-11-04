@@ -158,6 +158,12 @@ export interface ProjectValidation {
   token_scopes: string[]
   token_expires_at?: string
   git_head: string
+  warnings?: ProjectWarning[]
+}
+
+export interface ProjectWarning {
+  code: string
+  message: string
 }
 
 export interface PatchProject {

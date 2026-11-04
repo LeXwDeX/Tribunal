@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -73,6 +74,34 @@ type ProjectValidation struct {
 	TokenScopes       []string
 	TokenExpiresAt    *time.Time
 	GitHead           string
+	Warnings          []ProjectWarning
+}
+
+// ProjectWarning is a non-blocking, fixed-text notice about a project token.
+type ProjectWarning struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+// WarningWebhookRequiresMaintainer reports a token that can read the
+// repository but cannot manage project webhooks.
+const WarningWebhookRequiresMaintainer = "webhook_requires_maintainer"
+
+// TokenRotation is the result of replacing a project token.
+type TokenRotation struct {
+	Project  *store.Project
+	Warnings []ProjectWarning
+}
+
+// tokenRoleWarnings returns the warnings for a project access level.
+func tokenRoleWarnings(access int) []ProjectWarning {
+	if access >= maintainerAccessLevel {
+		return nil
+	}
+	return []ProjectWarning{{
+		Code:    WarningWebhookRequiresMaintainer,
+		Message: "the token role is below Maintainer: reviews work, but enabling the webhook automatically requires Maintainer; use a Maintainer token or add the webhook in GitLab manually",
+	}}
 }
 
 // Registration is the successful registration response. WebhookSecret is set
@@ -133,6 +162,7 @@ var ErrProjectValidationUnavailable = errors.New("app: project validation is not
 const (
 	defaultValidationTimeout = 30 * time.Second
 	reporterAccessLevel      = 20
+	maintainerAccessLevel    = 40
 )
 
 // managedWebhookEvents is the configured event set for service-created hooks.
@@ -330,7 +360,7 @@ func (s *ProjectService) Register(ctx context.Context, in RegisterInput) (*Regis
 				return nil, err
 			}
 			s.logger.Warn("GitLab webhook creation failed", "project_id", project.ID, "status", gitlab.StatusOf(err))
-			return nil, upstreamError(gitlab.StatusOf(err))
+			return nil, webhookUpstreamError(gitlab.StatusOf(err))
 		}
 		hookID = &created
 		webhookState = store.WebhookStateEnabled
@@ -465,6 +495,7 @@ func (s *ProjectService) Validate(ctx context.Context, in ValidateProjectInput) 
 		TokenScopes:       append([]string(nil), info.Scopes...),
 		TokenExpiresAt:    info.ExpiresAt,
 		GitHead:           strings.ToLower(head),
+		Warnings:          tokenRoleWarnings(access),
 	}, nil
 }
 
@@ -736,7 +767,7 @@ func (s *ProjectService) Update(ctx context.Context, id int64, in UpdateProjectI
 }
 
 // RotateToken revalidates access and scopes, then re-encrypts the new token.
-func (s *ProjectService) RotateToken(ctx context.Context, id int64, token string) (*store.Project, error) {
+func (s *ProjectService) RotateToken(ctx context.Context, id int64, token string) (*TokenRotation, error) {
 	if id <= 0 {
 		return nil, validationError("invalid project id", Detail{Field: "id", Message: "must be positive"})
 	}
@@ -756,6 +787,29 @@ func (s *ProjectService) RotateToken(ctx context.Context, id int64, token string
 	}
 	if project.ID != id {
 		return nil, upstreamError(0)
+	}
+	user, err := s.gitlab.CurrentUser(ctx, token)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+		s.logger.Warn("GitLab user lookup failed during token rotation", "project_id", id, "status", gitlab.StatusOf(err))
+		return nil, upstreamError(gitlab.StatusOf(err))
+	}
+	if user == nil || user.ID <= 0 {
+		return nil, upstreamError(0)
+	}
+	access, err := s.gitlab.GetMemberAccess(ctx, token, id, user.ID)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+		s.logger.Warn("GitLab member lookup failed during token rotation", "project_id", id, "status", gitlab.StatusOf(err))
+		return nil, upstreamError(gitlab.StatusOf(err))
+	}
+	if access < reporterAccessLevel {
+		return nil, validationError("access level is insufficient",
+			Detail{Field: "access_level", Message: "Reporter or higher is required"})
 	}
 	info, err := s.gitlab.GetTokenInfo(ctx, token)
 	if err != nil {
@@ -783,7 +837,11 @@ func (s *ProjectService) RotateToken(ctx context.Context, id int64, token string
 		s.logger.Warn("project token persistence failed", "project_id", id)
 		return nil, internalError()
 	}
-	return s.Get(ctx, id)
+	saved, err := s.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return &TokenRotation{Project: saved, Warnings: tokenRoleWarnings(access)}, nil
 }
 
 // CreateWebhook explicitly enables the managed GitLab webhook. Repeated calls
@@ -972,9 +1030,28 @@ func (s *ProjectService) failWebhook(ctx context.Context, project *store.Project
 	if status > 0 {
 		message = fmt.Sprintf("GitLab webhook %s failed (status %d)", operation, status)
 	}
+	switch status {
+	case http.StatusUnauthorized:
+		message += ": project token rejected"
+	case http.StatusForbidden:
+		message += ": Maintainer role required"
+	}
 	s.markWebhookFailed(ctx, project, message)
 	s.logger.Warn("GitLab webhook provisioning failed", "project_id", project.ID, "operation", operation, "status", status)
-	return upstreamError(status)
+	return webhookUpstreamError(status)
+}
+
+// webhookUpstreamError adds the actionable cause for the two statuses a token
+// problem produces; the error code stays gitlab_rejected for compatibility.
+func webhookUpstreamError(status int) error {
+	err := upstreamError(status)
+	switch status {
+	case http.StatusUnauthorized:
+		err.Details = []Detail{{Field: "token", Message: "the project token is invalid, expired or revoked; replace it"}}
+	case http.StatusForbidden:
+		err.Details = []Detail{{Field: "access_level", Message: "managing project webhooks requires the Maintainer role; use a Maintainer token or add the webhook in GitLab manually"}}
+	}
+	return err
 }
 
 // markWebhookFailed is best-effort: the original provisioning error is the

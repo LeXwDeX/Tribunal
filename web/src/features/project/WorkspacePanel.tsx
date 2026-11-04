@@ -10,6 +10,7 @@ import {
 } from '../../components/ui'
 import { usePaginated } from '../../lib/hooks'
 import { formatDate, labelForSource, labelForStatus, shortSha } from '../../lib/format'
+import { describeWorkspaceError } from '../../lib/diagnostics'
 import ui from '../../styles/ui.module.css'
 import styles from '../../pages/pages.module.css'
 import page from '../../pages/projects.module.css'
@@ -276,7 +277,7 @@ export function WorkspacePanel({ projectId, canManage = false }: { projectId: nu
               <span>上下文 sha <code>{ws.context_sha ? shortSha(ws.context_sha) : '—'}</code></span>
             </div>
             {!indexBlocked && ws.last_error ? (
-              <div className={`${styles.warning} ${page.tileAlert}`} role="alert">最近错误：{ws.last_error}</div>
+              <div className={`${styles.warning} ${page.tileAlert}`} role="alert">最近错误：{describeWorkspaceError(ws.last_error)}</div>
             ) : null}
           </>
         ) : null}

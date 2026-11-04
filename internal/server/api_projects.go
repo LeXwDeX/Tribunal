@@ -53,15 +53,16 @@ type validateProjectRequest struct {
 }
 
 type validateProjectResponse struct {
-	ProjectID         int64      `json:"project_id"`
-	PathWithNamespace string     `json:"path_with_namespace"`
-	WebURL            string     `json:"web_url"`
-	DefaultBranch     string     `json:"default_branch"`
-	Username          string     `json:"username"`
-	AccessLevel       int        `json:"access_level"`
-	TokenScopes       []string   `json:"token_scopes"`
-	TokenExpiresAt    *time.Time `json:"token_expires_at,omitempty"`
-	GitHead           string     `json:"git_head"`
+	ProjectID         int64                `json:"project_id"`
+	PathWithNamespace string               `json:"path_with_namespace"`
+	WebURL            string               `json:"web_url"`
+	DefaultBranch     string               `json:"default_branch"`
+	Username          string               `json:"username"`
+	AccessLevel       int                  `json:"access_level"`
+	TokenScopes       []string             `json:"token_scopes"`
+	Warnings          []app.ProjectWarning `json:"warnings"`
+	TokenExpiresAt    *time.Time           `json:"token_expires_at,omitempty"`
+	GitHead           string               `json:"git_head"`
 }
 
 type updateProjectRequest struct {
@@ -163,7 +164,21 @@ func (s *Server) handleValidateProject(w http.ResponseWriter, r *http.Request) {
 		TokenScopes:       scopes,
 		TokenExpiresAt:    result.TokenExpiresAt,
 		GitHead:           result.GitHead,
+		Warnings:          warningsOrEmpty(result.Warnings),
 	})
+}
+
+// rotateProjectTokenResponse is the project plus additive token warnings.
+type rotateProjectTokenResponse struct {
+	*store.Project
+	Warnings []app.ProjectWarning `json:"warnings"`
+}
+
+func warningsOrEmpty(warnings []app.ProjectWarning) []app.ProjectWarning {
+	if warnings == nil {
+		return []app.ProjectWarning{}
+	}
+	return warnings
 }
 
 func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
@@ -380,12 +395,12 @@ func (s *Server) handleRotateProjectToken(w http.ResponseWriter, r *http.Request
 		decodeRequestError(w, r, err)
 		return
 	}
-	project, err := s.projects.RotateToken(r.Context(), id, request.Token)
+	rotation, err := s.projects.RotateToken(r.Context(), id, request.Token)
 	if err != nil {
 		writeAppError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, project)
+	writeJSON(w, http.StatusOK, rotateProjectTokenResponse{Project: rotation.Project, Warnings: warningsOrEmpty(rotation.Warnings)})
 }
 
 func (s *Server) handleCreateProjectWebhook(w http.ResponseWriter, r *http.Request) {
