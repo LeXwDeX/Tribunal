@@ -34,6 +34,12 @@ const (
 	// finalTurnFloorDivisor sets the minimum reserve to this fraction of the
 	// time left when the run started.
 	finalTurnFloorDivisor = 8
+	// compactThresholdPercent is the share of the context window at which
+	// older tool outputs are compacted.
+	compactThresholdPercent = 85
+	// compactKeepToolTurns is how many of the latest tool turns keep their
+	// full output during compaction.
+	compactKeepToolTurns = 3
 	// minToolOutputChars keeps the untrusted-data wrapper and its truncation
 	// marker inside a tiny configured output limit.
 	minToolOutputChars = 256
@@ -85,13 +91,17 @@ type RunSpec struct {
 	// consumed by this run. A non-nil error stops the loop without another
 	// Generate call.
 	BeforeTurn func(context.Context, llm.Usage) error
+	// BudgetRemaining reports the tokens left in the caller's budget after
+	// the usage this run has consumed, and whether a budget applies.
+	BudgetRemaining func(context.Context, llm.Usage) (int64, bool)
 	// Now is the clock used to measure turns against the context deadline.
 	// It must share the deadline's time source; nil uses time.Now.
 	Now func() time.Time
 }
 
 // RunResult is the accepted output and the conversation that produced it.
-// Transcript excludes System and stores provider messages unchanged.
+// Transcript excludes System and stores the messages as last sent: provider
+// messages are unchanged except tool outputs replaced by context compaction.
 type RunResult struct {
 	Output     any
 	Usage      llm.Usage
