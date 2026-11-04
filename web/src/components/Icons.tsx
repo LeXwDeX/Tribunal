@@ -100,8 +100,8 @@ export function Icon({ name, size = 18, ...props }: { name: IconName; size?: num
 export function BrandMark({ size = 28 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 28 28" aria-hidden="true" focusable="false">
-      <rect x="1" y="1" width="26" height="26" rx="7" fill="#2F62E0" />
-      <path d="M8.5 14.5l3.5 3.5 7.5-8" stroke="#FFFFFF" strokeWidth="2.4" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+      <rect x="1" y="1" width="26" height="26" rx="7" fill="var(--brand)" />
+      <path d="M8.5 14.5l3.5 3.5 7.5-8" stroke="var(--on-brand)" strokeWidth="2.4" fill="none" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   )
 }

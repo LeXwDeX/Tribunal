@@ -287,7 +287,7 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
           </div>
           <details className={ui.disclosure}>
             <summary>高级设置：档位、分支与 Draft</summary>
-            <div className={ui.stack} style={{ marginTop: 8 }}>
+            <div className={ui.stackTop}>
               <div className="formGrid">
                 <Field label="评审档位" htmlFor={profileId} hint="从平台配置档位中选择，或输入已有档位名。">
                   <input id={profileId} className="input" list="profile-options" value={profile} onChange={(event) => setProfile(event.target.value)} autoComplete="off" disabled={pending} />
@@ -299,7 +299,7 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
                   <input id={branchesId} className="input" value={branches} onChange={(event) => setBranches(event.target.value)} placeholder="main, release/*" autoComplete="off" disabled={pending} />
                 </Field>
               </div>
-              <div className={styles.filterChips} style={{ flexDirection: 'column', alignItems: 'flex-start' }}>
+              <div className={styles.filterChipsColumn}>
                 <label className="checkboxRow">
                   <input type="checkbox" checked={skipDraft} onChange={(event) => setSkipDraft(event.target.checked)} disabled={pending} />
                   <span>跳过 Draft MR</span>

@@ -21,7 +21,7 @@ function ParamsSection({ value }: { value: unknown }) {
       {entries && entries.length ? (
         <dl className={`${ui.definitionGrid} ${styles.usageGrid}`}>
           {entries.map(([key, item]) => (
-            <div key={key} style={{ display: 'contents' }}>
+            <div key={key} className={ui.contents}>
               <dt className="mono">{key}</dt>
               <dd>
                 {typeof item === 'string' || typeof item === 'number' || typeof item === 'boolean'

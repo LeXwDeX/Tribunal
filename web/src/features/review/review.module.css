@@ -6,13 +6,13 @@
   flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px 20px;
+  gap: var(--space-md) var(--space-xl);
 }
 
 .reviewHeading {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-sm);
   min-width: 0;
   flex: 1 1 520px;
 }
@@ -26,15 +26,15 @@
 
 .reviewTitle {
   margin: 0;
-  font-size: 21px;
-  font-weight: 650;
+  font-size: var(--fs-h2);
+  font-weight: var(--fw-bold);
   line-height: 1.3;
   letter-spacing: -0.01em;
   overflow-wrap: anywhere;
 }
 
 .mrRef {
-  margin-right: 8px;
+  margin-right: var(--space-sm);
   font: 500 15px var(--font-mono);
   color: var(--muted-strong);
 }
@@ -43,7 +43,7 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px 18px;
+  gap: var(--space-xs) 18px;
   color: var(--muted);
   font-size: 13px;
 }
@@ -51,26 +51,26 @@
 .reviewMeta > span {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-xs);
   min-width: 0;
 }
 
 .reviewMeta code {
-  font-size: 12.5px;
+  font-size: var(--fs-label);
 }
 
 .headerActions {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--space-sm);
 }
 
 .streamStatus {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px 14px;
-  font-size: 12px;
+  gap: var(--space-sm) 14px;
+  font-size: var(--fs-meta);
   color: var(--muted);
 }
 
@@ -93,9 +93,9 @@
 .verdictCard {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 20px;
+  gap: var(--space-xl);
   align-items: center;
-  padding: 18px 20px;
+  padding: 18px var(--space-xl);
   border-radius: var(--radius-md);
   border: 1px solid color-mix(in srgb, var(--danger-dot) 30%, var(--border));
   background: linear-gradient(90deg, var(--danger-bg), var(--surface) 62%);
@@ -121,12 +121,12 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding-right: 20px;
+  padding-right: var(--space-xl);
   border-right: 1px solid var(--border);
 }
 
 .verdictMark span {
-  font-size: 11.5px;
+  font-size: var(--fs-caption);
   color: var(--muted);
   letter-spacing: 0.06em;
 }
@@ -146,15 +146,15 @@
 .verdictReason {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-xs);
   min-width: 0;
-  font-size: 13.5px;
+  font-size: var(--fs-body-sm);
   overflow-wrap: anywhere;
 }
 
 .verdictAlert {
   color: var(--danger-fg);
-  font-weight: 500;
+  font-weight: var(--fw-medium);
 }
 
 .verdictCard[data-verdict="CANCELLED"] .verdictAlert { color: var(--warn-fg); }
@@ -163,14 +163,14 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
-  font-size: 12.5px;
+  gap: var(--space-xs);
+  font-size: var(--fs-label);
   color: var(--muted);
 }
 
 .funnel b {
   color: var(--text);
-  font-weight: 600;
+  font-weight: var(--fw-semibold);
   font-variant-numeric: tabular-nums;
 }
 
@@ -188,7 +188,7 @@
 }
 
 .verdictStats span.statLabel {
-  font-size: 11.5px;
+  font-size: var(--fs-caption);
   color: var(--muted);
 }
 
@@ -214,7 +214,7 @@
 
 .graphLane {
   position: absolute;
-  font-size: 11.5px;
+  font-size: var(--fs-caption);
   color: var(--muted);
   letter-spacing: 0.06em;
   white-space: nowrap;
@@ -244,7 +244,7 @@
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  padding: 9px 12px;
+  padding: 9px var(--space-md);
   border: 1px solid var(--border);
   border-radius: 9px;
   background: var(--surface);
@@ -289,7 +289,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 6px;
+  gap: var(--space-xs);
   min-width: 0;
 }
 
@@ -303,7 +303,7 @@
 
 .nodeStatus {
   flex: none;
-  font-size: 11px;
+  font-size: var(--fs-micro);
   color: var(--muted);
 }
 
@@ -314,9 +314,9 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 6px;
+  gap: var(--space-xs);
   min-width: 0;
-  font-size: 11.5px;
+  font-size: var(--fs-caption);
   color: var(--muted);
   white-space: nowrap;
 }
@@ -327,10 +327,10 @@
 }
 
 .nodeKind {
-  padding: 1px 6px;
+  padding: var(--space-px) var(--space-xs);
   border-radius: 4px;
   background: var(--surface-3);
-  font-size: 11px;
+  font-size: var(--fs-micro);
   max-width: 50%;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -338,14 +338,14 @@
 
 .nodeAttempt {
   color: var(--warn-fg);
-  font-weight: 500;
+  font-weight: var(--fw-medium);
 }
 
 .graphHint {
   margin: 0;
   padding: 10px 18px;
   border-top: 1px solid var(--border);
-  font-size: 12px;
+  font-size: var(--fs-meta);
   color: var(--muted);
 }
 
@@ -353,7 +353,7 @@
 .split {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 340px;
-  gap: 20px;
+  gap: var(--space-xl);
   align-items: start;
 }
 
@@ -361,7 +361,7 @@
 .sideColumn {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: var(--space-xl);
   min-width: 0;
 }
 
@@ -370,7 +370,7 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-sm);
 }
 
 .findingFilters select {
@@ -395,7 +395,7 @@
 
 .sevOriginal {
   display: block;
-  margin-top: 4px;
+  margin-top: var(--space-2xs);
   font: 12px var(--font-mono);
   color: var(--muted);
   text-decoration: line-through;
@@ -415,7 +415,7 @@
   background: none;
   color: var(--text);
   font: inherit;
-  font-weight: 500;
+  font-weight: var(--fw-medium);
   text-align: left;
   cursor: pointer;
   overflow-wrap: anywhere;
@@ -424,7 +424,7 @@
 .titleButton {
   display: inline-flex;
   align-items: flex-start;
-  gap: 4px;
+  gap: var(--space-2xs);
 }
 
 .titleButton:hover .titleText { color: var(--link); }
@@ -454,7 +454,7 @@
   display: inline-flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-2xs);
 }
 
 .step {
@@ -462,7 +462,7 @@
   border-radius: 4px;
   background: var(--surface-3);
   color: var(--muted-strong);
-  font-size: 11.5px;
+  font-size: var(--fs-caption);
   white-space: nowrap;
 }
 
@@ -473,11 +473,11 @@
 
 .to {
   color: var(--border-strong);
-  font-size: 11px;
+  font-size: var(--fs-micro);
 }
 
 .annotationCell {
-  font-size: 12.5px;
+  font-size: var(--fs-label);
   color: var(--muted);
   white-space: nowrap;
 }
@@ -490,8 +490,8 @@
 .findingDetail {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 300px;
-  gap: 20px;
-  padding: 18px 18px 20px 58px;
+  gap: var(--space-xl);
+  padding: 18px 18px var(--space-xl) 58px;
 }
 
 .detailMain {
@@ -504,20 +504,20 @@
 .detailSection {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-xs);
   min-width: 0;
 }
 
 .detailSection h4 {
   margin: 0;
-  font-size: 12px;
-  font-weight: 500;
+  font-size: var(--fs-meta);
+  font-weight: var(--fw-medium);
   color: var(--muted-strong);
 }
 
 .detailSection p {
   margin: 0;
-  font-size: 13.5px;
+  font-size: var(--fs-body-sm);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -538,7 +538,7 @@
 
 .tlItem {
   position: relative;
-  padding: 0 0 16px 22px;
+  padding: 0 0 var(--space-lg) 22px;
   font-size: 13px;
   overflow-wrap: anywhere;
 }
@@ -575,8 +575,8 @@
 .dotText { background: var(--text); }
 
 .who {
-  margin-left: 4px;
-  font-size: 12px;
+  margin-left: var(--space-2xs);
+  font-size: var(--fs-meta);
   color: var(--muted);
 }
 
@@ -586,15 +586,15 @@
 }
 
 .extraFields {
-  font-size: 12.5px;
+  font-size: var(--fs-label);
 }
 
 .annotationPanel {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-sm);
   align-self: start;
-  padding: 12px;
+  padding: var(--space-md);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--surface);
@@ -602,14 +602,14 @@
 
 .annotationPanel h4 {
   margin: 0;
-  font-size: 12.5px;
-  font-weight: 500;
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
   color: var(--muted-strong);
 }
 
 .annotationIntro {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--fs-meta);
   color: var(--muted);
 }
 
@@ -617,8 +617,8 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
-  font-size: 12px;
+  gap: var(--space-xs);
+  font-size: var(--fs-meta);
 }
 
 .annotationOptions {
@@ -634,7 +634,7 @@
 .loadMore {
   display: flex;
   justify-content: center;
-  padding: 12px;
+  padding: var(--space-md);
   border-top: 1px solid var(--border);
 }
 
@@ -647,9 +647,9 @@
 .publicationGrid > div {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-2xs);
   min-width: 0;
-  padding: 12px 18px;
+  padding: var(--space-md) 18px;
   border-bottom: 1px solid var(--border);
 }
 
@@ -657,25 +657,25 @@
 .publicationGrid > div.publicationWide { grid-column: 1 / -1; border-right: 0; }
 
 .publicationLabel {
-  font-size: 12px;
+  font-size: var(--fs-meta);
   color: var(--muted);
 }
 
 .publicationValue {
-  font-size: 13.5px;
-  font-weight: 500;
+  font-size: var(--fs-body-sm);
+  font-weight: var(--fw-medium);
   overflow-wrap: anywhere;
 }
 
 .publicationHint {
-  font-size: 12px;
+  font-size: var(--fs-meta);
   color: var(--muted);
   overflow-wrap: anywhere;
 }
 
 .publicationAlert {
-  margin: 12px 18px;
-  padding: 10px 12px;
+  margin: var(--space-md) 18px;
+  padding: 10px var(--space-md);
   border-radius: var(--radius-sm);
   background: var(--warn-bg);
   color: var(--warn-fg);
@@ -683,10 +683,10 @@
   overflow-wrap: anywhere;
 }
 
-.publicationAlert p { margin: 4px 0 0; }
+.publicationAlert p { margin: var(--space-2xs) 0 0; }
 
 .publicationEmpty {
-  padding: 4px 0;
+  padding: var(--space-2xs) 0;
 }
 
 .usageGrid {
@@ -698,15 +698,15 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px 10px;
-  font-size: 12px;
+  gap: var(--space-xs) 10px;
+  font-size: var(--fs-meta);
   color: var(--muted);
 }
 
 .drawerSection {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-sm);
   min-width: 0;
 }
 
@@ -714,13 +714,13 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--space-sm);
 }
 
 .sectionLabel {
   margin: 0;
-  font-size: 12.5px;
-  font-weight: 500;
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
   color: var(--muted-strong);
 }
 
@@ -736,7 +736,7 @@
 }
 
 .nodeError {
-  padding: 10px 12px;
+  padding: 10px var(--space-md);
   border-radius: var(--radius-sm);
   background: var(--danger-bg);
   color: var(--danger-fg);
@@ -744,7 +744,7 @@
 }
 
 .nodeError pre {
-  margin: 6px 0 0;
+  margin: var(--space-xs) 0 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font: 12px var(--font-mono);
@@ -766,9 +766,9 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px 14px;
+  gap: var(--space-xs) 14px;
   padding: 10px 14px;
-  font-size: 12.5px;
+  font-size: var(--fs-label);
   cursor: pointer;
   list-style: none;
 }
@@ -782,11 +782,11 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 0 14px 12px;
+  padding: 0 14px var(--space-md);
 }
 
 .callBody .codeBlockSmall {
-  font-size: 11.5px;
+  font-size: var(--fs-caption);
   max-height: 280px;
 }
 

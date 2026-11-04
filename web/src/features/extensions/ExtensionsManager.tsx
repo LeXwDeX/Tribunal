@@ -376,7 +376,7 @@ function McpTab({
                               {result.tools.length ? (
                                 <details className={ui.disclosure}>
                                   <summary>测试成功：{result.tools.length} 个工具</summary>
-                                  <ul className={styles.list} style={{ marginTop: 6 }}>
+                                  <ul className={styles.toolsList}>
                                     {result.tools.map((tool) => (
                                       <li key={tool.name} className={styles.listItem}>
                                         <div className={styles.listMain}>
@@ -450,7 +450,7 @@ function SkillsTab({
               <div className={ext.skillActions}>
                 <Badge tone={skill.enabled ? 'ok' : 'neutral'}>{skill.enabled ? '启用' : '已禁用'}</Badge>
                 {canWrite && !skill.builtin ? (
-                  <span className={ext.rowActions} style={{ marginLeft: 'auto' }}>
+                  <span className={ext.rowActionsEnd}>
                     <Button variant="secondary" className={ui.smallButton} onClick={() => onToggle(skill)}>{skill.enabled ? '禁用' : '启用'}</Button>
                     <Button variant="secondary" className={ui.smallButton} onClick={() => onDelete(skill)}>删除</Button>
                   </span>
@@ -1237,7 +1237,7 @@ function BindingsTab({
             <table className={styles.matrix}>
               <thead>
                 <tr>
-                  <th scope="col" style={{ textAlign: 'left' }}>块</th>
+                  <th scope="col">块</th>
                   {canRestore ? <th scope="col" className="right">默认</th> : null}
                   {toolColumns.map((tool) => <th key={tool} scope="col">{tool}</th>)}
                   {skillColumns.map((skill) => <th key={`skill-${skill}`} scope="col">skill: {skill}</th>)}

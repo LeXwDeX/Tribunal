@@ -91,6 +91,8 @@ jobs:
       - name: Check license bundle
         working-directory: ${{ github.workspace }}
         run: go run ./scripts/licensebundle -check
+      - name: Check styles
+        run: npm run check:styles
       - name: Build
         run: npm run build
       - name: Check committed web build

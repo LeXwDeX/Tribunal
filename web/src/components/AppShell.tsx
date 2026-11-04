@@ -149,6 +149,9 @@ export function AppShell({ me }: { me: Me }) {
 
   useEffect(() => {
     setMenuOpen(false)
+    // Client-side navigation keeps the previous scroll offset; a shorter page
+    // would clamp it and move the whole layout. Start every page at the top.
+    window.scrollTo(0, 0)
   }, [location.pathname])
 
   useEffect(() => {
