@@ -139,6 +139,10 @@ type ProviderConfig struct {
 	Thinking       *ThinkingConfig  `yaml:"thinking" json:"thinking"`
 	Reasoning      *ReasoningConfig `yaml:"reasoning" json:"reasoning"`
 	Price          *PriceConfig     `yaml:"price" json:"price"`
+	// StrictRoleAlternation folds a text prompt that follows tool results
+	// into the last tool message for openai-chat gateways that reject a
+	// tool -> user sequence (#262). It is ignored by other protocols.
+	StrictRoleAlternation bool `yaml:"strict_role_alternation" json:"strict_role_alternation,omitempty"`
 }
 
 // ThinkingConfig carries provider-specific reasoning token settings.

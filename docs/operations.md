@@ -142,6 +142,8 @@ docker compose exec -T review /app/tribunalctl projects all
 
 **回退**：先按第 4 步核对未完成评审和待发布结果，然后检查所有档位中对 secondary 的引用。逐个检查 `profiles.*` 的这些字段：`plan.provider`、`propose[].provider`、`reasoner.provider`、`challenge.provider`、`challenge.fallback`、`synthesize.provider` 和 `agent.provider`，包括 `default`、`onboarding` 及自定义档位。把每个 `secondary` 替换为 `primary`，或删除不再需要的可选字段/条目；`challenge.provider` 必须是已配置别名或 `cross`，`cross` 时保留合法的 `challenge.fallback`，且 fallback 不能指向 secondary；保留 `profiles.onboarding.agent.provider`，每个评审档位至少保留一个 `propose` 条目。确认没有引用后再重新注释 `providers.secondary`，并从 `.env` 移除四个变量。然后执行 `docker compose config --quiet` 和 `docker compose run --rm --no-deps review --config /app/config/server.yaml --check-config`；两项通过后才执行 `docker compose up -d --force-recreate --wait --wait-timeout 120`。引用不存在的 provider 会让启动失败；`config --quiet` 不验证应用配置语义，`--check-config` 不验证评审图、网络或模型兼容性。不要删除数据卷。回退也会改变评审执行配置或档位；未终态工作流在恢复时可能因校验不匹配被取消。待发布结果是否继续以发布校验为准。若 secondary 暂时不可用，可以只把上述所有引用切回 primary 并重建，保留 secondary 的注释配置，供后续恢复。
 
+**OpenAI 兼容网关因角色顺序返回 400**：`openai-chat` provider 的节点失败，且网关错误提示角色必须交替（例如 vLLM 部分聊天模板的「roles must alternate」）时，在该 provider 下设置 `strict_role_alternation: true` 并重启。开启后，最后一轮的提交提示附加在最后一条 tool 消息末尾，不再单独作为 user 消息发送。OpenAI 官方 API 不需要开启；修改会改变评审执行配置，重启前按第 4 步处理未完成评审。说明见 [严格角色交替](design/06-config.md#严格角色交替strict_role_alternation)。
+
 关联说明：[配置设计 · 多 Provider 与档位引用](design/06-config.md#多-provider-与档位引用)；首次部署的完整顺序见 [Agent 部署指南](agent-deployment.md#多-provider-配置)。
 
 ### 浏览器登录与项目注册

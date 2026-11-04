@@ -279,7 +279,12 @@ func normalizeEndpoint(raw string) string {
 
 // resolveRequest applies provider defaults without mutating the caller request.
 func resolveRequest(cfg providerDefaults, req *Request) resolvedRequest {
-	out := resolvedRequest(cfg)
+	out := resolvedRequest{
+		maxTokens:    cfg.maxTokens,
+		temperature:  cfg.temperature,
+		effort:       cfg.effort,
+		budgetTokens: cfg.budgetTokens,
+	}
 	if req.MaxTokens > 0 {
 		out.maxTokens = req.MaxTokens
 	}
@@ -303,6 +308,8 @@ type providerDefaults struct {
 	temperature  *float64
 	effort       string
 	budgetTokens int
+	// strictRoleAlternation is honoured by the openai-chat adapter only.
+	strictRoleAlternation bool
 }
 
 type resolvedRequest struct {
