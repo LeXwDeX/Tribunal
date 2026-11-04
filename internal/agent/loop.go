@@ -107,15 +107,17 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 	var turns int
 	submitFailures := 0
 	askedForSubmit := false
+	longestTurn := max(spec.TurnEstimate, 0)
 	partial := func(err error) (*RunResult, error) {
 		if turns == 0 && !usage.Incomplete && usage.InputTokens == 0 && usage.OutputTokens == 0 &&
 			usage.CacheReadTokens == 0 && usage.CacheWriteTokens == 0 && usage.ReasoningTokens == 0 {
 			return nil, err
 		}
 		return &RunResult{
-			Usage:      usage,
-			Turns:      turns,
-			Transcript: append([]llm.Message(nil), messages...),
+			Usage:       usage,
+			Turns:       turns,
+			Transcript:  append([]llm.Message(nil), messages...),
+			LongestTurn: longestTurn,
 		}, err
 	}
 	send := spec.Outbound
@@ -126,7 +128,6 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 	if now == nil {
 		now = time.Now
 	}
-	var longestTurn time.Duration
 	// The submit turn is often slower than exploration turns, so the reserve
 	// never drops below a fixed share of the time the run started with.
 	var reserveFloor time.Duration
@@ -386,10 +387,11 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 		recordTurn(turnStarted)
 		if submitted {
 			return &RunResult{
-				Output:     output,
-				Usage:      usage,
-				Turns:      turns,
-				Transcript: append([]llm.Message(nil), messages...),
+				Output:      output,
+				Usage:       usage,
+				Turns:       turns,
+				Transcript:  append([]llm.Message(nil), messages...),
+				LongestTurn: longestTurn,
 			}, nil
 		}
 		if submitFailures > maxSubmitRetries {

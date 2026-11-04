@@ -450,6 +450,9 @@ func (e *Executor) runAgent(ctx context.Context, provider string, spec agent.Run
 	}
 	beforeTurn := spec.BeforeTurn
 	budgetRemaining := spec.BudgetRemaining
+	// turnEstimate carries the slowest observed turn into retries, so a
+	// retry near the node deadline asks for submit_result at once (#261).
+	turnEstimate := spec.TurnEstimate
 	var carry llm.Usage
 	var lastErr error
 	for attempt := 1; attempt <= e.maxAttempts; attempt++ {
@@ -468,7 +471,11 @@ func (e *Executor) runAgent(ctx context.Context, provider string, spec agent.Run
 				return budgetRemaining(ctx, llm.AddUsage(carry, used))
 			}
 		}
+		attemptSpec.TurnEstimate = turnEstimate
 		result, err := e.runner(ctx, attemptSpec)
+		if result != nil {
+			turnEstimate = max(turnEstimate, result.LongestTurn)
+		}
 		used, valid := llm.ErrorUsage(err)
 		if result != nil {
 			valid = valid && llm.ValidUsage(result.Usage)
