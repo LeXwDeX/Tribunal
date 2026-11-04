@@ -406,7 +406,7 @@ type RunSpec struct {
 	Prompt        string
 	Tools         []Tool
 	Submit        SubmitSpec
-	MaxTurns      int // 默认 30
+	MaxTurns      int // 默认 30；onboarding 节点传 90
 	MaxToolOutput int // 单次工具输出字符上限，默认 20000
 	Temperature   *float64
 	Reasoning     *llm.ReasoningOpts
@@ -429,7 +429,7 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error)
 1. 每轮调用 `Generate`；模型调用工具就执行并回填结果；工具名不存在时回填错误结果，不中断。
 2. 模型调用 `submit_result`：`Decode` 成功即结束；失败则把错误作为 `IsError` 的工具结果回给模型，最多重试 2 次。
 3. 模型没有调用 `submit_result` 就结束（`end_turn`）：追加一条提示「必须调用 submit_result 提交结果」，补问 1 次；仍然没有则返回 `ErrNoSubmit`。
-4. 达到 `MaxTurns`：最后一轮把 `ToolChoice` 设为 `submit_result` 强制提交。
+4. 达到 `MaxTurns`：最后一轮不设置 `ToolChoice`（不发送函数级或 `required` 的选择，部分 thinking 模式网关会以 400 拒绝），只在本次请求末尾追加一条一次性用户提示，要求立即调用 `submit_result`；该提示不写入 transcript。最后一轮只执行 `submit_result`，其他工具调用回填「未执行」的错误结果；模型仍未提交则返回 `ErrNoSubmit`。若 ctx 有截止时间，且剩余时间低于保留量（本次运行观测到的最慢一轮的 2 倍，且不少于开始时剩余时间的 1/8），之后每次请求都提前追加同一条提示。Anthropic adapter 会把纯文本 user 消息并入紧邻的前一条 user 消息（工具结果仍在最前）。
 5. 工具输出超出上限时截断，并在末尾注明 `[truncated: N chars omitted]`。
 
 内置只读工具（`builtin.go`）：

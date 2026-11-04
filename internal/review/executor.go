@@ -630,6 +630,8 @@ type agentOptions struct {
 	Builtins   bool
 	BlockTools bool
 	NoRetry    bool
+	// MaxTurns bounds model requests; zero keeps agent.DefaultMaxTurns.
+	MaxTurns   int
 	BeforeTurn func(context.Context, llm.Usage) error
 	// ToolGaps, when set, receives MCP binding and runtime availability failures.
 	// The node then runs without those tools instead of failing.
@@ -794,6 +796,7 @@ func (e *Executor) callAgent(ctx context.Context, in dag.NodeInput, opts agentOp
 		Prompt:     built.User,
 		Tools:      tools,
 		Submit:     opts.Submit,
+		MaxTurns:   opts.MaxTurns,
 		BeforeTurn: opts.BeforeTurn,
 		Outbound:   e.deps.Outbound,
 	}

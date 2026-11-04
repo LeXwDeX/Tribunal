@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/llm"
 )
@@ -26,6 +27,13 @@ const (
 	// maxSubmitRetries is the number of attempts after the first invalid
 	// submit_result that still receive feedback from the model.
 	maxSubmitRetries = 2
+	// finalTurnReserve is how many of the slowest observed turns must still
+	// fit before the context deadline; below that the loop asks for
+	// submit_result on every request.
+	finalTurnReserve = 2
+	// finalTurnFloorDivisor sets the minimum reserve to this fraction of the
+	// time left when the run started.
+	finalTurnFloorDivisor = 8
 	// minToolOutputChars keeps the untrusted-data wrapper and its truncation
 	// marker inside a tiny configured output limit.
 	minToolOutputChars = 256
@@ -77,6 +85,9 @@ type RunSpec struct {
 	// consumed by this run. A non-nil error stops the loop without another
 	// Generate call.
 	BeforeTurn func(context.Context, llm.Usage) error
+	// Now is the clock used to measure turns against the context deadline.
+	// It must share the deadline's time source; nil uses time.Now.
+	Now func() time.Time
 }
 
 // RunResult is the accepted output and the conversation that produced it.

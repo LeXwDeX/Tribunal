@@ -163,26 +163,6 @@ func TestTurnObservationBeforeRequestAndUnobservedFailure(t *testing.T) {
 			t.Fatalf("err=%v result=%+v", err, result)
 		}
 	})
-	t.Run("fallback guard after unobserved failure", func(t *testing.T) {
-		failure := &llm.Error{Kind: llm.ErrBadRequest, Usage: llm.Usage{InputTokens: 5}}
-		client := &fakeClient{errs: []error{failure}}
-		spec := testSpec(client)
-		spec.MaxTurns = 1
-		checks := 0
-		spec.BeforeTurn = func(context.Context, llm.Usage) error {
-			checks++
-			if checks == 2 {
-				return blocked
-			}
-			return nil
-		}
-		result, err := Run(context.Background(), spec)
-		var classified *llm.Error
-		if !errors.Is(err, blocked) || !errors.As(err, &classified) || classified.Kind != llm.ErrBadRequest ||
-			result == nil || result.Turns != 0 || result.Usage.InputTokens != 5 || len(client.requests()) != 1 {
-			t.Fatalf("err=%v result=%+v calls=%d", err, result, len(client.requests()))
-		}
-	})
 	t.Run("guard before second request", func(t *testing.T) {
 		first := toolResponse(llm.StopToolUse, call("tool", "echo", `{}`))
 		client := &fakeClient{replies: []*llm.Response{first}}
@@ -213,64 +193,21 @@ func TestTurnObservationInvalidUsageStillCountsResponse(t *testing.T) {
 	}
 }
 
-type cancelAfterTurnClient struct {
-	llm.Client
-	cancel context.CancelFunc
-}
-
-func (c cancelAfterTurnClient) Generate(ctx context.Context, req *llm.Request) (*llm.Response, error) {
-	resp, err := c.Client.Generate(ctx, req)
-	c.cancel()
-	return resp, err
-}
-
-func TestTurnObservationForcedChoiceFallback(t *testing.T) {
-	for _, mode := range []string{"success", "guard", "cancel"} {
-		t.Run(mode, func(t *testing.T) {
-			var calls atomic.Int32
-			good := safetyResponse(t, "openai-responses", "", false, []safetyCall{{"submit", SubmitToolName, `{}`, false}}, false)
-			client := turnHTTPClient(t, func(w http.ResponseWriter, _ *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				if calls.Add(1) == 1 {
-					w.WriteHeader(http.StatusBadRequest)
-					_, _ = w.Write([]byte(`{"error":{"message":"secret-canary","type":"invalid_request_error"}}`))
-					return
-				}
-				_, _ = w.Write(good)
-			})
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			if mode == "cancel" {
-				client = cancelAfterTurnClient{Client: client, cancel: cancel}
-			}
-			spec := testSpec(client)
-			spec.MaxTurns = 1
-			blocked := errors.New("budget exhausted")
-			checks := 0
-			spec.BeforeTurn = func(context.Context, llm.Usage) error {
-				checks++
-				if mode == "guard" && checks == 2 {
-					return blocked
-				}
-				return nil
-			}
-			result, err := Run(ctx, spec)
-			wantCalls := int32(1)
-			if mode == "success" {
-				wantCalls = 2
-			}
-			if calls.Load() != wantCalls || result == nil || result.Turns != 1 ||
-				(mode == "success" && err != nil) || (mode == "guard" && !errors.Is(err, blocked)) ||
-				(mode == "cancel" && !errors.Is(err, context.Canceled)) {
-				t.Fatalf("err=%v result=%+v calls=%d checks=%d", err, result, calls.Load(), checks)
-			}
-			if mode == "guard" {
-				var failure *llm.Error
-				if !errors.As(err, &failure) || failure.Kind != llm.ErrBadRequest || strings.Contains(err.Error(), "secret-canary") {
-					t.Fatalf("guard lost safe original classification: %v", err)
-				}
-			}
-		})
+func TestTurnObservationFinalTurnBadRequest(t *testing.T) {
+	var calls atomic.Int32
+	client := turnHTTPClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"secret-canary","type":"invalid_request_error"}}`))
+	})
+	spec := testSpec(client)
+	spec.MaxTurns = 1
+	result, err := Run(context.Background(), spec)
+	var failure *llm.Error
+	if calls.Load() != 1 || result == nil || result.Turns != 1 || !errors.As(err, &failure) ||
+		failure.Kind != llm.ErrBadRequest || strings.Contains(err.Error(), "secret-canary") {
+		t.Fatalf("err=%v result=%+v calls=%d", err, result, calls.Load())
 	}
 }
 

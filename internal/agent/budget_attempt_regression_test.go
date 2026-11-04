@@ -217,45 +217,7 @@ func TestBudgetAttemptZeroUsageRetry(t *testing.T) {
 	}
 }
 
-func TestBudgetAttemptForcedChoiceFallback(t *testing.T) {
-	for _, spent := range []int64{0, 5} {
-		t.Run(map[int64]string{0: "zero", 5: "exhausted"}[spent], func(t *testing.T) {
-			response := toolResponse(llm.StopToolUse, call("s", SubmitToolName, `{}`))
-			response.Usage.InputTokens = 1
-			client := &fakeClient{errs: []error{&llm.Error{Kind: llm.ErrBadRequest, Usage: llm.Usage{InputTokens: spent}}}, replies: []*llm.Response{nil, response}}
-			spec := testSpec(client)
-			spec.MaxTurns = 1
-			blocked := errors.New("budget")
-			var seen []llm.Usage
-			spec.BeforeTurn = func(_ context.Context, u llm.Usage) error {
-				seen = append(seen, u)
-				if u.InputTokens >= 5 {
-					return blocked
-				}
-				return nil
-			}
-			result, err := Run(context.Background(), spec)
-			wantCalls := 2
-			if spent > 0 {
-				wantCalls = 1
-			}
-			if len(client.requests()) != wantCalls || errors.Is(err, blocked) != (spent > 0) || len(seen) != 2 || seen[1].InputTokens != spent {
-				t.Fatalf("err=%v calls=%d seen=%+v", err, len(client.requests()), seen)
-			}
-			if spent > 0 {
-				var failure *llm.Error
-				if !errors.As(err, &failure) || failure.Kind != llm.ErrBadRequest {
-					t.Fatalf("guard lost original failure classification: %v", err)
-				}
-			}
-			if result == nil || result.Usage.InputTokens != spent+int64(wantCalls-1) {
-				t.Fatalf("result=%+v", result)
-			}
-		})
-	}
-}
-
-func TestBudgetAttemptSafetyOrCancellationCannotTriggerChoiceFallback(t *testing.T) {
+func TestBudgetAttemptFinalTurnFailureIsNotRetried(t *testing.T) {
 	for _, blocker := range []error{ErrUnsafeResponse, context.Canceled, &llm.Error{Kind: llm.ErrUnsafeResponse}} {
 		client := &fakeClient{errs: []error{errors.Join(&llm.Error{Kind: llm.ErrBadRequest, Usage: llm.Usage{InputTokens: 5}}, blocker)}, replies: []*llm.Response{nil, toolResponse(llm.StopToolUse, call("s", SubmitToolName, `{}`))}}
 		spec := testSpec(client)

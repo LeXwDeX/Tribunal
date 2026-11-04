@@ -38,8 +38,9 @@ func (a *anthropicAdapter) Generate(ctx context.Context, req *Request) (*Respons
 	}
 	thinking := effective.budgetTokens > 0
 	if thinking && forcedToolChoice(req.ToolChoice) {
-		// Extended thinking is incompatible with forced tool use. Keep the
-		// forced choice so the final submit round stays reliable.
+		// Extended thinking is incompatible with forced tool use, so a caller
+		// that forces a tool gets thinking disabled. The agent loop no longer
+		// forces submit_result on its final turn (#255).
 		thinking = false
 	}
 	if thinking && effective.budgetTokens < 1024 {
@@ -124,9 +125,16 @@ func anthropicMessages(messages []Message) ([]anthropic.MessageParam, error) {
 					return nil, badRequestf("messages[%d]: part is not valid in a %s message", i, msg.Role)
 				}
 			}
-			if len(blocks) > 0 {
-				out = append(out, anthropic.NewUserMessage(blocks...))
+			if len(blocks) == 0 {
+				continue
 			}
+			// Merge a text-only user turn into the preceding user turn so
+			// strict gateways never see two consecutive user messages.
+			if n := len(out); n > 0 && out[n-1].Role == anthropic.MessageParamRoleUser && !hasToolResult(msg.Parts) {
+				out[n-1].Content = append(out[n-1].Content, blocks...)
+				continue
+			}
+			out = append(out, anthropic.NewUserMessage(blocks...))
 		case RoleAssistant:
 			var blocks []anthropic.ContentBlockParamUnion
 			for j, part := range msg.Parts {
@@ -156,6 +164,15 @@ func anthropicMessages(messages []Message) ([]anthropic.MessageParam, error) {
 		}
 	}
 	return out, nil
+}
+
+func hasToolResult(parts []Part) bool {
+	for _, part := range parts {
+		if part.Type == PartToolResult {
+			return true
+		}
+	}
+	return false
 }
 
 func anthropicTools(tools []ToolDef) ([]anthropic.ToolUnionParam, error) {

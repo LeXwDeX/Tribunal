@@ -17,6 +17,13 @@ import (
 const mustSubmitPrompt = "You must call the " + SubmitToolName +
 	" tool to finish. Do not end the turn with prose."
 
+// finalTurnPrompt is sent with the last request of a run, and with every
+// request once the context deadline leaves too little time for more
+// exploration. It is never stored in the transcript. The loop does not force
+// tool_choice because reasoning gateways reject every non-auto choice (#255).
+const finalTurnPrompt = "Turns or time are nearly exhausted. Call the " + SubmitToolName +
+	" tool now with your best result from the evidence gathered so far. Do not call any other tool."
+
 var nonceFallback atomic.Uint64
 
 // Run executes the tool loop until a valid submit_result or an error.
@@ -111,11 +118,38 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 	if send == nil {
 		send = func(ctx context.Context, call func(context.Context) error) error { return call(ctx) }
 	}
+	now := spec.Now
+	if now == nil {
+		now = time.Now
+	}
+	var longestTurn time.Duration
+	// The submit turn is often slower than exploration turns, so the reserve
+	// never drops below a fixed share of the time the run started with.
+	var reserveFloor time.Duration
+	if deadline, ok := ctx.Deadline(); ok {
+		reserveFloor = deadline.Sub(now()) / finalTurnFloorDivisor
+	}
+	// nearDeadline reports whether the remaining time is below the reserve:
+	// finalTurnReserve of the slowest turn seen so far, or the floor.
+	nearDeadline := func() bool {
+		deadline, ok := ctx.Deadline()
+		if !ok || longestTurn == 0 {
+			return false
+		}
+		return deadline.Sub(now()) < max(finalTurnReserve*longestTurn, reserveFloor)
+	}
+	recordTurn := func(started time.Time) {
+		if elapsed := now().Sub(started); elapsed > longestTurn {
+			longestTurn = elapsed
+		}
+	}
 
 	for turn := 1; turn <= maxTurns; turn++ {
 		if err := ctx.Err(); err != nil {
 			return partial(err)
 		}
+		turnStarted := now()
+		lastTurn := turn == maxTurns
 		req := &llm.Request{
 			System:      spec.System,
 			Messages:    append([]llm.Message(nil), messages...),
@@ -124,8 +158,11 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 			Temperature: spec.Temperature,
 			Reasoning:   spec.Reasoning,
 		}
-		if turn == maxTurns {
-			req.ToolChoice = SubmitToolName
+		if lastTurn || nearDeadline() {
+			req.Messages = append(req.Messages, llm.Message{
+				Role:  llm.RoleUser,
+				Parts: []llm.Part{{Type: llm.PartText, Text: finalTurnPrompt}},
+			})
 		}
 
 		meta := llm.CallMetaFromContext(ctx)
@@ -169,24 +206,6 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 			return resp, callErr
 		}
 		resp, err := generate(req)
-		if err != nil && req.ToolChoice == SubmitToolName {
-			var failure *llm.Error
-			var guardErr *llm.AttemptGuardError
-			if !errors.As(err, &guardErr) && !errors.Is(err, ErrUnsafeResponse) && !llm.IsUnsafeResponse(err) &&
-				!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) &&
-				errors.As(err, &failure) && failure.Kind == llm.ErrBadRequest {
-				// Some reasoning gateways reject every non-auto tool choice. Let
-				// the final prompt request submit_result without forcing the choice.
-				fallback := *req
-				fallback.ToolChoice = ""
-				resp, err = generate(&fallback)
-				var stopped *llm.AttemptGuardError
-				if errors.As(err, &stopped) && stopped.Previous == nil {
-					previous := *failure
-					err = &llm.AttemptGuardError{Err: err, Usage: stopped.Usage, Previous: &previous}
-				}
-			}
-		}
 		if err != nil {
 			if errors.Is(err, ErrUnsafeResponse) || llm.IsUnsafeResponse(err) {
 				return partial(&unsafeProviderError{err: err})
@@ -219,6 +238,7 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 					Parts: []llm.Part{{Type: llm.PartText, Text: mustSubmitPrompt}},
 				})
 				askedForSubmit = true
+				recordTurn(turnStarted)
 				continue
 			}
 			if submitFailures > 0 {
@@ -249,6 +269,13 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 				submitted = true
 				output = out
 				results = append(results, plainToolResult(call.ID, "submit_result accepted", false))
+				continue
+			}
+
+			if lastTurn {
+				// No later request can read this result.
+				results = append(results, plainToolResult(call.ID,
+					"final turn: only "+SubmitToolName+" is executed; this call was not executed.", true))
 				continue
 			}
 
@@ -292,6 +319,7 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 		}
 
 		messages = append(messages, llm.Message{Role: llm.RoleTool, Parts: results})
+		recordTurn(turnStarted)
 		if submitted {
 			return &RunResult{
 				Output:     output,
