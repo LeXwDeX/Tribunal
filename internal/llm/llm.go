@@ -172,8 +172,12 @@ type Response struct {
 	Message    Message    `json:"message"`
 	StopReason StopReason `json:"stop_reason"`
 	Usage      Usage      `json:"usage"`
-	Model      string     `json:"model,omitempty"`
-	RequestID  string     `json:"request_id,omitempty"`
+	// AttemptUsage is the successful attempt's usage when Usage also counts
+	// failed retries; zero when no retry was counted. It sizes the context;
+	// Usage stays the budget figure.
+	AttemptUsage Usage  `json:"-"`
+	Model        string `json:"model,omitempty"`
+	RequestID    string `json:"request_id,omitempty"`
 }
 
 // Usage reports token consumption. InputTokens includes cache reads and writes;

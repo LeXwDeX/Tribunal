@@ -228,3 +228,42 @@ func TestRunWithoutContextWindowNeverCompacts(t *testing.T) {
 		}
 	}
 }
+
+// retryUsageClient reports a retried call: Usage counts a failed attempt as
+// well, AttemptUsage only the successful one.
+type retryUsageClient struct{ reqs []*llm.Request }
+
+func (c *retryUsageClient) Info() llm.ProviderInfo {
+	return llm.ProviderInfo{Name: "retry", ContextWindow: 10000}
+}
+
+func (c *retryUsageClient) Generate(_ context.Context, req *llm.Request) (*llm.Response, error) {
+	c.reqs = append(c.reqs, req)
+	var resp *llm.Response
+	if hasSubmitPrompt(req) {
+		resp = toolResponse(llm.StopToolUse, call("s", SubmitToolName, `{}`))
+	} else {
+		resp = toolResponse(llm.StopToolUse, call(fmt.Sprintf("c%d", len(c.reqs)), "big", `{}`))
+	}
+	resp.Usage = llm.Usage{InputTokens: 9000, OutputTokens: 10}
+	resp.AttemptUsage = llm.Usage{InputTokens: 4500, OutputTokens: 5}
+	return resp, nil
+}
+
+func TestRunSizesContextFromTheSuccessfulAttempt(t *testing.T) {
+	client := &retryUsageClient{}
+	spec := testSpec(client, bigTool(10))
+	spec.MaxTurns = 3
+	result, err := Run(context.Background(), spec)
+	if err != nil || result.Turns != 3 {
+		t.Fatalf("err=%v, want submit on the last turn", err)
+	}
+	for i, req := range client.reqs[:2] {
+		if hasSubmitPrompt(req) {
+			t.Fatalf("request %d asked for submit: retry usage was taken as context size", i+1)
+		}
+	}
+	if result.Usage.InputTokens != 27000 {
+		t.Fatalf("budget usage = %d, want the aggregate 27000", result.Usage.InputTokens)
+	}
+}

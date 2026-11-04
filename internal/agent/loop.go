@@ -267,10 +267,16 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 		if resp == nil {
 			return partial(errors.New("agent: model returned a nil response"))
 		}
-		if turnTokens := resp.Usage.InputTokens + resp.Usage.OutputTokens; turnTokens > 0 {
-			contextTokens = turnTokens
-			largestTurnTokens = max(largestTurnTokens, turnTokens)
+		// Size the context from the successful attempt; resp.Usage may also
+		// count failed retries and stays the budget figure.
+		sized := resp.AttemptUsage
+		if llm.UsageZero(sized) {
+			sized = resp.Usage
 		}
+		if contextSize := sized.InputTokens + sized.OutputTokens; contextSize > 0 {
+			contextTokens = contextSize
+		}
+		largestTurnTokens = max(largestTurnTokens, resp.Usage.InputTokens+resp.Usage.OutputTokens)
 		message, invalid := llm.SanitizeToolCalls(resp.Message, resp.StopReason == llm.StopToolUse)
 		messages = append(messages, message)
 		if err := ctx.Err(); err != nil {

@@ -505,6 +505,7 @@ func (c *providerClient) Generate(ctx context.Context, req *Request) (*Response,
 			if resp != nil {
 				copy := *resp
 				copy.Usage = usage
+				copy.AttemptUsage = attemptUsage
 				resp = &copy
 			}
 			return resp, nil
