@@ -469,7 +469,6 @@
 .stepOk { background: var(--ok-bg); color: var(--ok-fg); }
 .stepBad { background: var(--danger-bg); color: var(--danger-fg); }
 .stepMeh { background: var(--warn-bg); color: var(--warn-fg); }
-.stepInfo { background: var(--info-bg); color: var(--info-fg); }
 
 .to {
   color: var(--border-strong);

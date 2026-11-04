@@ -57,10 +57,6 @@
   gap: 2px;
 }
 
-.listTitle {
-  font-weight: var(--fw-medium);
-  overflow-wrap: anywhere;
-}
 
 .listMeta {
   font-size: var(--fs-meta);
@@ -96,11 +92,6 @@
   align-items: center;
 }
 
-.filterChips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-xs);
-}
 
 .filterChipsColumn {
   display: flex;
@@ -260,9 +251,6 @@
   background: var(--accent-soft);
 }
 
-.nodeFail {
-  border-color: var(--danger-fg);
-}
 
 .nodeId {
   width: 100%;
@@ -305,14 +293,7 @@
   min-width: 980px;
 }
 
-.findingTitle {
-  min-width: 220px;
-}
 
-.bodyCell {
-  padding: var(--space-md) var(--space-lg) var(--space-lg);
-  background: var(--surface-2);
-}
 
 .findingBody {
   display: flex;
@@ -378,27 +359,8 @@
   gap: var(--space-sm);
 }
 
-.drawerSectionTitle {
-  font-size: 13px;
-  font-weight: 700;
-}
 
-.callRow {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 10px var(--space-md);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-xs);
-  font-size: var(--fs-meta);
-}
 
-.callHeader {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2xs) var(--space-md);
-  font-variant-numeric: tabular-nums;
-}
 
 .callDetails {
   border-top: 1px solid var(--border);
@@ -413,11 +375,6 @@
   align-items: center;
 }
 
-.detailsStack {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-xs);
-}
 
 .publicationGrid {
   display: flex;
@@ -440,19 +397,7 @@
 .publicationLabel { color: var(--muted); font-size: var(--fs-meta); }
 .publicationValue { font-weight: var(--fw-medium); overflow-wrap: anywhere; }
 
-.workspaceActions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-sm);
-}
 
-.docHeader {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-md);
-}
 
 .docMeta {
   display: flex;
@@ -462,19 +407,7 @@
   font-size: var(--fs-meta);
 }
 
-.docEditor {
-  min-height: 300px;
-  font-family: var(--font-mono);
-  font-size: var(--fs-label);
-  line-height: var(--lh-relaxed);
-}
 
-.docActions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-sm);
-  justify-content: flex-end;
-}
 
 .historyItem {
   min-height: var(--control-h);
@@ -493,14 +426,7 @@
 }
 
 .historyItem:hover { background: var(--surface-2); }
-.historyItemActive { border-color: var(--accent); background: var(--accent-soft); }
 
-.historyTop {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-xs);
-}
 
 .projectTitleMono {
   font-family: var(--font-mono);
@@ -546,15 +472,6 @@
   font-size: var(--fs-meta);
 }
 
-.commandLine {
-  display: block;
-  padding: var(--space-sm) 10px;
-  background: var(--surface-2);
-  border-radius: 6px;
-  font-family: var(--font-mono);
-  font-size: var(--fs-meta);
-  overflow-wrap: anywhere;
-}
 
 .cardActions {
   display: flex;
@@ -563,9 +480,6 @@
   margin-top: auto;
 }
 
-.cardActionsEnd {
-  justify-content: flex-end;
-}
 
 .testResult {
   font-size: var(--fs-meta);
@@ -703,10 +617,6 @@
   color: var(--muted-strong);
 }
 
-.configBlock {
-  max-height: 300px;
-  overflow: auto;
-}
 
 .statGrid {
   display: flex;
@@ -714,10 +624,6 @@
   gap: var(--space-md);
 }
 
-.statPanel {
-  flex: 1 1 300px;
-  min-width: 0;
-}
 
 .statsJson {
   max-height: 380px;
@@ -741,11 +647,6 @@
   line-height: 1.6;
 }
 
-.divider {
-  height: 1px;
-  background: var(--border);
-  margin: 2px 0;
-}
 
 .actionsRight {
   display: flex;
@@ -780,15 +681,6 @@
   overflow: auto;
 }
 
-.nodePre {
-  margin: 0;
-  padding: var(--space-md);
-  background: var(--code-bg);
-  color: var(--code-fg);
-  border-radius: var(--radius-sm);
-  max-height: 280px;
-  overflow: auto;
-}
 
 .notFound {
   display: flex;

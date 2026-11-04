@@ -35,11 +35,6 @@
   color: var(--muted-strong);
 }
 
-.panelActions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-sm);
-}
 
 .loadMore {
   display: flex;
