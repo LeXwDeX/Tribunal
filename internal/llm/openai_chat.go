@@ -34,7 +34,7 @@ func (a *openAIChatAdapter) Generate(ctx context.Context, req *Request) (*Respon
 		return nil, err
 	}
 	effective := resolveRequest(a.cfg, req)
-	messages, err := chatMessages(req)
+	messages, err := chatMessages(req, a.cfg.strictRoleAlternation)
 	if err != nil {
 		return nil, err
 	}
@@ -68,7 +68,35 @@ func (a *openAIChatAdapter) Generate(ctx context.Context, req *Request) (*Respon
 	return chatResponse(completion, a.info.Model)
 }
 
-func chatMessages(req *Request) ([]openai.ChatCompletionMessageParamUnion, error) {
+// strictSystemNoticeHeader labels a prompt folded into a tool message so the
+// model can tell it apart from the tool output it follows.
+const strictSystemNoticeHeader = "System notice (from Tribunal, not tool output):"
+
+// appendChatUserText adds system-authored user text without producing two
+// adjacent user messages, which strict gateways and chat templates reject
+// (#262). With strictRoleAlternation it also avoids a tool -> user sequence by
+// appending the text, labelled as a system notice, after the full content of
+// the last tool message, outside any untrusted-data envelope inside it.
+func appendChatUserText(messages []openai.ChatCompletionMessageParamUnion, text string, strictRoleAlternation bool) []openai.ChatCompletionMessageParamUnion {
+	if n := len(messages); n > 0 {
+		last := messages[n-1]
+		if last.OfUser != nil && last.OfUser.Content.OfString.Valid() {
+			merged := *last.OfUser
+			merged.Content.OfString = openai.String(merged.Content.OfString.Value + "\n\n" + text)
+			messages[n-1] = openai.ChatCompletionMessageParamUnion{OfUser: &merged}
+			return messages
+		}
+		if strictRoleAlternation && last.OfTool != nil && last.OfTool.Content.OfString.Valid() {
+			folded := *last.OfTool
+			folded.Content.OfString = openai.String(folded.Content.OfString.Value + "\n\n" + strictSystemNoticeHeader + "\n" + text)
+			messages[n-1] = openai.ChatCompletionMessageParamUnion{OfTool: &folded}
+			return messages
+		}
+	}
+	return append(messages, openai.UserMessage(text))
+}
+
+func chatMessages(req *Request, strictRoleAlternation bool) ([]openai.ChatCompletionMessageParamUnion, error) {
 	messages := make([]openai.ChatCompletionMessageParamUnion, 0, len(req.Messages)+1)
 	if text := joinBlocks(req.System); text != "" {
 		messages = append(messages, openai.SystemMessage(text))
@@ -86,10 +114,10 @@ func chatMessages(req *Request) ([]openai.ChatCompletionMessageParamUnion, error
 					results = append(results, openai.ToolMessage(part.ToolResult.Content, part.ToolResult.CallID))
 				}
 			}
-			if text := partsText(msg.Parts); text != "" {
-				results = append(results, openai.UserMessage(text))
-			}
 			messages = append(messages, results...)
+			if text := partsText(msg.Parts); text != "" {
+				messages = appendChatUserText(messages, text, strictRoleAlternation)
+			}
 		case RoleTool:
 			for _, part := range msg.Parts {
 				if part.Type == PartToolResult && part.ToolResult != nil {

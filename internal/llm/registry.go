@@ -739,8 +739,9 @@ func guardedHTTPClient(base *http.Client) (*http.Client, error) {
 
 func newAdapter(info ProviderInfo, cfg config.ProviderConfig, apiKey string, httpClient *http.Client) (adapter, error) {
 	defaults := providerDefaults{
-		maxTokens:   cfg.MaxTokens,
-		temperature: cfg.Temperature,
+		maxTokens:             cfg.MaxTokens,
+		temperature:           cfg.Temperature,
+		strictRoleAlternation: cfg.StrictRoleAlternation,
 	}
 	if cfg.Thinking != nil {
 		defaults.budgetTokens = cfg.Thinking.BudgetTokens

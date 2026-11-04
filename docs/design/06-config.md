@@ -83,6 +83,7 @@ providers:
     api_key_env: LOCAL_LLM_KEY
     max_concurrency: 8
     temperature: 0.2
+    strict_role_alternation: false  # 仅 openai-chat；网关要求角色严格交替时设为 true，见下文
 
 profiles:
   default:
@@ -168,6 +169,7 @@ type ProviderConfig struct {
 	Thinking       *ThinkingConfig `yaml:"thinking"`
 	Reasoning      *ReasoningConfig `yaml:"reasoning"`
 	Price          *PriceConfig    `yaml:"price"`
+	StrictRoleAlternation bool `yaml:"strict_role_alternation"` // 仅 openai-chat，默认 false
 }
 
 type ProfileConfig struct {
@@ -220,6 +222,17 @@ Docker Compose 默认只启用 `primary`。`config/server.docker.yaml` 另有一
 平台管理员可在控制台「模型与档位」查看配置中的全部 provider 和档位。该页面只读，界面不显示密钥值。逐个 provider 的连通性测试发送一条最小真实请求，会产生费用，需事先取得用户授权；成功只代表协议、地址、密钥和模型 ID 基本可用，不证明工具调用、长上下文、推理参数或完整业务流程兼容。
 
 修改 provider 或档位需要重启服务，当前进程不热加载配置；`docker compose restart` 会重新读取已挂载的配置文件，但不会加载新的容器环境变量。新增 provider（即使没有被任何档位引用）会改变评审执行配置；启动恢复会对未终态工作流重新检查配置、档位和执行身份，不匹配时取消，而不是续跑。待发布结果是否继续发布由发布时校验决定，不能假定会自动跳过或一定发布。修改前应核对并等待或处理未完成和待发布结果；已发布或失败的评审不会被改写，被取消的评审需要重新触发。移除已配置的 provider 前，检查所有 `profiles.*` 的 `plan.provider`、`propose[].provider`、`reasoner.provider`、`challenge.provider`、`challenge.fallback`、`synthesize.provider` 和 `agent.provider`；即使 `reasoner.when: never` 也要清理其非空引用。任何对已移除 provider 的残留引用都会使配置校验失败；不要清空必需的 propose、challenge 或 onboarding 字段。完整操作步骤见 [多 Provider 配置](../operations.md#多-provider-配置) 和 [Agent 部署指南](../agent-deployment.md#多-provider-配置)。
+
+### 严格角色交替（`strict_role_alternation`）
+
+agent 循环在最后一轮、或节点剩余时间不足时，会在请求末尾追加一条一次性的提交提示（不写入 transcript，见 [#255](https://github.com/LeXwDeX/Tribunal/issues/255)）。`openai-chat` 协议下，这条提示前面通常是 tool 结果，个别情况下是另一条 user 文本。
+
+- **相邻的 user 文本始终合并**：`openai-chat` adapter 把相邻的纯文本 user 消息合并为一条，以空行分隔，与 `anthropic` adapter 的规则一致。这一条不受开关控制。
+- **`strict_role_alternation: true`**：紧跟在 tool 结果之后的 user 文本不再单独发送，而是追加到最后一条 tool 消息内容的末尾，前面加 `System notice (from Tribunal, not tool output):` 标记。追加位置在整段 tool 输出之后，也就是在 agent 的不可信数据包裹（`<tool_output …>…</tool_output …>`）之外。请求中因此不再出现 `tool → user` 序列。
+
+默认值是 `false`，请求形状与之前相同。只有当 `openai-chat` 网关或其聊天模板因角色顺序返回 400（例如 vLLM 部分模板报「roles must alternate」，或拒绝 tool 之后接 user）时才开启。OpenAI 官方 API 接受默认形状，不需要开启。开启后，模型看到的提示位于 tool 消息中，个别模型对这种位置的服从度可能低于独立 user 消息；开启后应在测试 MR 上验证一次完整评审。
+
+`anthropic` 和 `openai-responses` 协议忽略这个字段。`anthropic` adapter 已把提示和 tool 结果合并在同一个 user 轮次中；`openai-responses` 使用独立的 input item 列表，不要求角色交替。修改该字段会改变评审执行配置，需要重启服务，未终态工作流在恢复时会因执行身份不匹配被取消，处理方式同上一节。
 
 ### 默认扩展（`default_extensions`）
 

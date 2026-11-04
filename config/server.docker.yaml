@@ -50,6 +50,9 @@ providers:
     # and any thinking budget. Agent nodes compact older tool output at 85%
     # of it. Leave unset (0) to disable compaction.
     # context_window: 128000
+    # openai-chat only: set to true when the gateway or its chat template
+    # rejects a tool -> user message sequence ("roles must alternate").
+    # strict_role_alternation: true
   # Optional second provider, off by default. Uncomment this block, then enable
   # it in the profile below. LLM_SECONDARY_* are independent of the primary
   # LLM_* names. This example uses the Anthropic Messages API: base_url is the
