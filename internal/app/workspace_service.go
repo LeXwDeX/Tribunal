@@ -477,7 +477,7 @@ func (s *WorkspaceService) onboardLocked(ctx context.Context, project *store.Pro
 
 	_, ok := s.profiles["onboarding"]
 	if !ok {
-		err := PermanentJob(fmt.Errorf("onboarding profile is not configured"))
+		err := PermanentJob(errOnboardingProfileMissing)
 		s.markWorkspaceError(ctx, project.ID, err)
 		return err
 	}
@@ -546,7 +546,7 @@ func (s *WorkspaceService) onboardLocked(ctx context.Context, project *store.Pro
 func (s *WorkspaceService) generateContext(ctx context.Context, project *store.Project, ws *workspace.Workspace, baseSHA string, docs review.RepoDocs, cfg effectiveReviewConfig, indexEligible bool) error {
 	profileCfg, ok := s.profiles["onboarding"]
 	if !ok || profileCfg.Agent == nil || strings.TrimSpace(profileCfg.Agent.Provider) == "" {
-		return PermanentJob(fmt.Errorf("onboarding profile is not configured"))
+		return PermanentJob(errOnboardingProfileMissing)
 	}
 	dossier := &review.Dossier{
 		Project:             review.ProjectRef{ID: project.ID, Path: project.PathWithNamespace, WebURL: project.WebURL},
@@ -808,16 +808,14 @@ func (s *WorkspaceService) saveWorkspace(ctx context.Context, ws store.Workspace
 }
 
 func (s *WorkspaceService) markWorkspaceError(ctx context.Context, projectID int64, cause error) {
-	attrs := []any{"project_id", projectID, "error_class", workspaceErrorClass(cause)}
-	var statused interface{ ErrorStatus() int }
-	if errors.As(cause, &statused) {
-		if status := statused.ErrorStatus(); status > 0 {
-			attrs = append(attrs, "upstream_status", status)
-		}
+	failure := classifyWorkspaceFailure(cause)
+	attrs := []any{"project_id", projectID, "error_class", failure.class}
+	if failure.status > 0 {
+		attrs = append(attrs, "upstream_status", failure.status)
 	}
 	s.logger.Warn("workspace operation failed", attrs...)
 	state, _ := s.store.GetWorkspace(ctx, projectID)
-	out := store.Workspace{ProjectID: projectID, State: "error", LastError: store.WorkspaceOperationFailed}
+	out := store.Workspace{ProjectID: projectID, State: "error", LastError: failure.message}
 	if state != nil {
 		out.BaseSHA = state.BaseSHA
 		out.IndexSHA = state.IndexSHA

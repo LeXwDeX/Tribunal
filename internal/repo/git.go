@@ -13,7 +13,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"net/url"
 	"os"
@@ -52,7 +51,20 @@ type Git struct {
 type Error struct {
 	Op       string
 	ExitCode int
+	// Reason is one of the fixed Reason* values derived from a bounded scan
+	// of stderr, or empty when the failure is not recognized. It never holds
+	// stderr text.
+	Reason string
 }
+
+// Fixed git failure reasons. Only these values ever appear in Error.Reason.
+const (
+	ReasonAuth               = "auth"
+	ReasonForbidden          = "forbidden"
+	ReasonRepositoryNotFound = "repository_not_found"
+	ReasonRefNotFound        = "ref_not_found"
+	ReasonNetwork            = "network"
+)
 
 func (e *Error) Error() string {
 	if e == nil {
@@ -61,10 +73,88 @@ func (e *Error) Error() string {
 	if e.Op == "" {
 		return "repo: git failed"
 	}
+	var parts []string
 	if e.ExitCode > 0 {
-		return fmt.Sprintf("repo: %s failed (exit %d)", e.Op, e.ExitCode)
+		parts = append(parts, fmt.Sprintf("exit %d", e.ExitCode))
+	}
+	if e.Reason != "" {
+		parts = append(parts, e.Reason)
+	}
+	if len(parts) > 0 {
+		return fmt.Sprintf("repo: %s failed (%s)", e.Op, strings.Join(parts, ", "))
 	}
 	return fmt.Sprintf("repo: %s failed", e.Op)
+}
+
+// ReasonOf returns the fixed failure reason of a git error, or "".
+func ReasonOf(err error) string {
+	var ge *Error
+	if errors.As(err, &ge) {
+		return ge.Reason
+	}
+	return ""
+}
+
+// maxStderrScan bounds how much stderr is buffered for classification.
+const maxStderrScan = 16 << 10
+
+// stderrScan keeps at most maxStderrScan bytes of stderr in memory. The
+// buffer is only classified and then dropped; it is never returned or logged.
+type stderrScan struct{ buf []byte }
+
+func (s *stderrScan) Write(p []byte) (int, error) {
+	if room := maxStderrScan - len(s.buf); room > 0 {
+		if len(p) > room {
+			s.buf = append(s.buf, p[:room]...)
+		} else {
+			s.buf = append(s.buf, p...)
+		}
+	}
+	return len(p), nil
+}
+
+// gitStderrMarkers map stable English git and GitLab messages to a reason.
+// Order matters: a specific marker wins over a generic one.
+var gitStderrMarkers = []struct {
+	marker string
+	reason string
+}{
+	{"couldn't find remote ref", ReasonRefNotFound},
+	{"returned error: 401", ReasonAuth},
+	{"authentication failed", ReasonAuth},
+	{"http basic: access denied", ReasonAuth},
+	{"could not read username", ReasonAuth},
+	{"could not read password", ReasonAuth},
+	{"returned error: 403", ReasonForbidden},
+	{"not allowed to download code", ReasonForbidden},
+	{"returned error: 404", ReasonRepositoryNotFound},
+	{"' not found", ReasonRepositoryNotFound},
+	{"could not resolve host", ReasonNetwork},
+	{"failed to connect", ReasonNetwork},
+	{"connection refused", ReasonNetwork},
+	{"connection reset", ReasonNetwork},
+	{"connection timed out", ReasonNetwork},
+	{"operation timed out", ReasonNetwork},
+	{"rpc failed", ReasonNetwork},
+	{"early eof", ReasonNetwork},
+	{"ssl", ReasonNetwork},
+	{"tls", ReasonNetwork},
+	{"returned error: 5", ReasonNetwork},
+}
+
+// classifyGitStderr reduces stderr to a fixed reason. Messages are matched
+// case-insensitively; a non-English locale simply yields "".
+func classifyGitStderr(stderr []byte) string {
+	text := strings.ToLower(string(stderr))
+	if strings.TrimSpace(text) == "" {
+		return ""
+	}
+	for _, item := range gitStderrMarkers {
+		if strings.Contains(text, item.marker) {
+			return item.reason
+		}
+	}
+	return ""
 }
 
 var (
@@ -248,7 +338,8 @@ func (g *Git) runWithWaitDelay(ctx context.Context, op, dir string, a Auth, wait
 	cmd.WaitDelay = waitDelay
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
-	cmd.Stderr = io.Discard
+	var stderr stderrScan
+	cmd.Stderr = &stderr
 
 	runErr := cmd.Run()
 	if ctxErr := ctx.Err(); ctxErr != nil {
@@ -259,7 +350,7 @@ func (g *Git) runWithWaitDelay(ctx context.Context, op, dir string, a Auth, wait
 	}
 	var exitErr *exec.ExitError
 	if errors.As(runErr, &exitErr) {
-		return nil, &Error{Op: op, ExitCode: exitErr.ExitCode()}
+		return nil, &Error{Op: op, ExitCode: exitErr.ExitCode(), Reason: classifyGitStderr(stderr.buf)}
 	}
 	return nil, fmt.Errorf("repo: %s: %w", op, runErr)
 }

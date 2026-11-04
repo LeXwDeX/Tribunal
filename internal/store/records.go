@@ -49,11 +49,68 @@ type LLMCallFilter struct {
 	IncludePayload bool
 }
 
-// Workspace error messages contain no underlying error text.
+// Workspace error messages contain no underlying error text. Every stored
+// workspace error is one of these fixed values.
 const (
 	WorkspaceOperationFailed = "workspace operation failed"
 	WorkspaceIndexFailed     = "index: code graph indexing failed"
+
+	WorkspaceGitLabTokenRejected  = "gitlab: project token rejected (401)"
+	WorkspaceGitLabForbidden      = "gitlab: access denied (403)"
+	WorkspaceGitLabNotFound       = "gitlab: project or file not found (404)"
+	WorkspaceGitLabRateLimited    = "gitlab: rate limited (429)"
+	WorkspaceGitLabUnavailable    = "gitlab: unavailable"
+	WorkspaceGitLabRejected       = "gitlab: request rejected"
+	WorkspaceGitLabProjectChanged = "gitlab: project identity changed"
+
+	WorkspaceGitAuthFailed         = "git: authentication failed"
+	WorkspaceGitForbidden          = "git: access denied"
+	WorkspaceGitRepositoryNotFound = "git: repository not found"
+	WorkspaceGitBranchNotFound     = "git: branch not found"
+	WorkspaceGitNetwork            = "git: network error"
+	WorkspaceGitFailed             = "git: operation failed"
+
+	WorkspaceTimedOut = "workspace: operation timed out"
+	WorkspaceCanceled = "workspace: operation canceled"
+
+	WorkspaceOnboardingUnconfigured = "onboarding: profile not configured"
+	WorkspaceModelAuthFailed        = "onboarding: model provider rejected credentials"
+	WorkspaceModelRateLimited       = "onboarding: model provider rate limited"
+	WorkspaceModelUnavailable       = "onboarding: model provider unavailable"
+	WorkspaceModelTimedOut          = "onboarding: model call timed out"
+	WorkspaceModelFailed            = "onboarding: model call failed"
 )
+
+var workspaceFailureMessages = map[string]bool{
+	WorkspaceOperationFailed:        true,
+	WorkspaceGitLabTokenRejected:    true,
+	WorkspaceGitLabForbidden:        true,
+	WorkspaceGitLabNotFound:         true,
+	WorkspaceGitLabRateLimited:      true,
+	WorkspaceGitLabUnavailable:      true,
+	WorkspaceGitLabRejected:         true,
+	WorkspaceGitLabProjectChanged:   true,
+	WorkspaceGitAuthFailed:          true,
+	WorkspaceGitForbidden:           true,
+	WorkspaceGitRepositoryNotFound:  true,
+	WorkspaceGitBranchNotFound:      true,
+	WorkspaceGitNetwork:             true,
+	WorkspaceGitFailed:              true,
+	WorkspaceTimedOut:               true,
+	WorkspaceCanceled:               true,
+	WorkspaceOnboardingUnconfigured: true,
+	WorkspaceModelAuthFailed:        true,
+	WorkspaceModelRateLimited:       true,
+	WorkspaceModelUnavailable:       true,
+	WorkspaceModelTimedOut:          true,
+	WorkspaceModelFailed:            true,
+}
+
+// IsWorkspaceFailureMessage reports whether message is one of the fixed
+// workspace operation failure values (index messages are not included).
+func IsWorkspaceFailureMessage(message string) bool {
+	return workspaceFailureMessages[message]
+}
 
 // Workspace is the project workspace state row.
 type Workspace struct {

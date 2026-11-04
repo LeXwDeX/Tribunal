@@ -111,6 +111,10 @@ func TestWorkspaceLastErrorIsSafeAtEveryReadEndpoint(t *testing.T) {
 		{"prefix in error state", "error", sql.NullString{String: "index: " + sensitive, Valid: true}, "workspace operation failed"},
 		{"prefix in refreshing state", "refreshing", sql.NullString{String: "index: " + sensitive, Valid: true}, "workspace operation failed"},
 		{"wrong case prefix", "ready", sql.NullString{String: "Index: " + sensitive, Valid: true}, "workspace operation failed"},
+		{"classified token failure", "error", sql.NullString{String: store.WorkspaceGitLabTokenRejected, Valid: true}, store.WorkspaceGitLabTokenRejected},
+		{"classified branch failure", "error", sql.NullString{String: store.WorkspaceGitBranchNotFound, Valid: true}, store.WorkspaceGitBranchNotFound},
+		{"classified model failure", "error", sql.NullString{String: store.WorkspaceModelAuthFailed, Valid: true}, store.WorkspaceModelAuthFailed},
+		{"classified prefix with suffix", "error", sql.NullString{String: store.WorkspaceGitLabForbidden + " " + sensitive, Valid: true}, "workspace operation failed"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
