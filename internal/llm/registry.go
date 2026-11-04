@@ -112,6 +112,10 @@ type AuditResponse struct {
 	ToolCalls      int    `json:"tool_calls"`
 	ToolResults    int    `json:"tool_results"`
 	ReasoningParts int    `json:"reasoning_parts"`
+	// InvalidToolCall is the fixed category of the first rejected tool call
+	// and InvalidToolInputBytes the length of its input (#269).
+	InvalidToolCall       string `json:"invalid_tool_call,omitempty"`
+	InvalidToolInputBytes int    `json:"invalid_tool_input_bytes,omitempty"`
 }
 
 // AuditMetadataFormat distinguishes the new metadata from historical payloads.
@@ -187,6 +191,8 @@ func NewCallAudit(req *Request, resp *Response) *CallAudit {
 			Usage:      resp.Usage,
 		}
 		countAuditParts(resp.Message.Parts, &out.TextParts, &out.ToolCalls, &out.ToolResults, &out.ReasoningParts)
+		sanitized, _ := SanitizeToolCalls(resp.Message, resp.StopReason == StopToolUse)
+		out.InvalidToolCall, out.InvalidToolInputBytes = ToolCallIssue(sanitized)
 		audit.Response = out
 	}
 	return audit

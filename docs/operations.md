@@ -61,7 +61,9 @@ docker compose exec -T review /app/tribunalctl projects all
 
 `providers.<name>.context_window` 可选，填写可用于输入的 token 数：按供应方文档的上下文窗口，减去 `max_tokens` 和思考预算等输出预留（部分网关按「输入 + 最大输出」校验窗口）。不要估大，也不要小于实际需要，否则会过早压缩并要求提交。配置后，agent 节点的估算输入达到该值的 85% 时，会把较早的成功工具输出替换为「已省略」占位，只保留最近 3 轮完整输出；压缩后仍接近上限时，模型会被要求立即提交结果，本轮不再执行其他工具。压缩依赖 provider 返回 token 用量。不填或填 0 时不压缩，请求与之前一致，已有评审的执行身份也不变。反过来，给已有 provider 加上或修改 `context_window` 会改变评审执行身份：重启后恢复扫描会取消未终态的评审，处理方式同[多 Provider 配置](#多-provider-配置)第 4 步，修改前先等进行中的评审结束。该值不能为负，启动时校验。修改挂载的配置文件后需要重启服务生效。
 
-是否发生压缩或提前要求提交，可在 LLM 调用审计的请求元数据中看到：`submit_prompt` 记录原因（`last_turn`、`context`、`deadline`、`budget`），`compacted_tool_results` 记录本次运行累计压缩的工具结果数。onboarding 在工作流 token 预算剩余不足最近最大单轮用量的 2 倍时也会提前要求提交；其他节点的预算耗尽处理不变。
+是否发生压缩或提前要求提交，可在 LLM 调用审计的请求元数据中看到：`submit_prompt` 记录原因（`last_turn`、`context`、`deadline`、`budget`），`compacted_tool_results` 记录本次运行累计压缩的工具结果数。onboarding 在工作流 token 预算剩余不足最近最大单轮用量（输入 + 输出）的 4 倍时也会提前要求提交，多出的两倍留给最多两次重提交；该阈值只按已观测用量计算，不受 `providers.<name>.max_tokens` 影响。其他节点的预算耗尽处理不变。
+
+提交提示轮若模型返回的工具调用参数或标识不合法（`invalid_json`、`not_object`、`empty_input`、`non_string_field`、`empty_id`、`empty_name`、`duplicate_id`；`unsupported_item`、`malformed_list` 等协议异常不恢复，同批中只要有一个协议异常就不恢复；恢复轮沿用原提示原因，只执行 `submit_result`），循环会丢弃该调用，追加一条只含类别名和严格 JSON 转义要求的固定反馈，让模型重新提交，每次运行最多两次。排查时看响应元数据：`invalid_tool_call` 是首个不合法调用（优先于 `rejected_batch`、`unexpected_stop`）的固定类别，`invalid_tool_input_bytes` 是其参数字节数；`invalid_tool_call` 缺省表示没有被拒绝的调用；`invalid_tool_input_bytes` 为 0 或参数无法读取时也会省略；均不含工具名和参数。被拒绝那次调用的审计行 `error_kind` 仍为 `unsafe_model_response`，但若随后重提交成功，运行本身成功；恢复两次后仍不合法、普通轮、最后一轮或非 tool_use 的 stop reason 下的不合法调用则以 `unsafe_model_response` 结束运行。`unexpected_stop` 表示非 tool_use 的 stop reason 下返回了工具调用。
 
 ### 最后一轮强制提交（forced_tool_choice）
 

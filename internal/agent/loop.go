@@ -24,11 +24,71 @@ const mustSubmitPrompt = "You must call the " + SubmitToolName +
 // exploration. It is never stored in the transcript. The loop does not force
 // tool_choice because reasoning gateways reject every non-auto choice (#255).
 const finalTurnPrompt = "This run is nearly out of turns, time, token budget or context. Call the " + SubmitToolName +
-	" tool now with your best result from the evidence gathered so far. Do not call any other tool."
+	" tool now with your best result from the evidence gathered so far. Do not call any other tool. " + strictJSONHint
+
+// strictJSONHint targets the corruption seen on reasoning gateways (#269):
+// a double quote left unescaped inside a long string value.
+const strictJSONHint = "Write the arguments as strict JSON: escape every double quote inside a string as \\\" " +
+	"(or use 「」 instead), and escape backslashes and line breaks."
 
 // compactedToolResult replaces older tool outputs when the context nears the
 // model's window. Call IDs and tool calls are kept, so pairing stays valid.
 const compactedToolResult = "[earlier tool output omitted to fit the context window]"
+
+// invalidToolCallFeedback answers a rejected prompted submit turn (#269).
+// It names only the fixed rejection category, never provider text.
+func invalidToolCallFeedback(kind string) string {
+	return "Your previous tool call was rejected and not executed (" + kind + "). Call the " + SubmitToolName +
+		" tool once more, with its arguments as one complete, valid JSON object. Do not call any other tool. " + strictJSONHint
+}
+
+// recoverableToolCall reports whether a rejection category is a corrupted
+// call the model can resend. Unsupported items and malformed lists are
+// protocol violations and still fail closed.
+func recoverableToolCall(kind string) bool {
+	switch kind {
+	case llm.ToolCallInvalidJSON, llm.ToolCallNotObject, llm.ToolCallEmptyInput, llm.ToolCallNonString,
+		llm.ToolCallEmptyID, llm.ToolCallEmptyName, llm.ToolCallDuplicateID:
+		return true
+	}
+	return false
+}
+
+// recoverableBatch reports whether every rejected call of a sanitized
+// message is recoverable, so a later protocol violation is never masked by
+// an earlier corrupted call.
+func recoverableBatch(message llm.Message) bool {
+	found := false
+	for _, part := range message.Parts {
+		if part.Type != llm.PartToolCall || part.ToolCall == nil {
+			continue
+		}
+		switch kind := part.ToolCall.Invalid; {
+		case kind == llm.ToolCallRejectedBatch:
+		case recoverableToolCall(kind):
+			found = true
+		default:
+			return false
+		}
+	}
+	return found
+}
+
+// rejectedTurnText keeps only the text of a rejected turn. Its calls are
+// dropped, and so is its reasoning: a Responses reasoning item must be
+// followed by its call, and Anthropic forbids altering the latest assistant
+// turn's thinking. It reports false when no text remains, so the turn is left
+// out of the transcript.
+func rejectedTurnText(message llm.Message) (llm.Message, bool) {
+	var parts []llm.Part
+	for _, part := range message.Parts {
+		if part.Type == llm.PartText && part.Text != "" {
+			parts = append(parts, part)
+		}
+	}
+	message.Parts = parts
+	return message, len(parts) > 0
+}
 
 var nonceFallback atomic.Uint64
 
@@ -117,6 +177,9 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 	var turns int
 	submitFailures := 0
 	askedForSubmit := false
+	invalidRecoveries := 0
+	// resubmitReason carries the prompted reason into the resubmit turn.
+	resubmitReason := ""
 	longestTurn := max(spec.TurnEstimate, 0)
 	partial := func(err error) (*RunResult, error) {
 		if turns == 0 && !usage.Incomplete && usage.InputTokens == 0 && usage.OutputTokens == 0 &&
@@ -190,7 +253,7 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 			return false
 		}
 		remaining, ok := spec.BudgetRemaining(ctx, usage)
-		return ok && remaining < finalTurnReserve*largestTurnTokens
+		return ok && remaining < budgetReserveTurns*largestTurnTokens
 	}
 
 	for turn := 1; turn <= maxTurns; turn++ {
@@ -202,7 +265,11 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 		nearLimit := nearContextLimit()
 		// Past the context limit another tool result could overflow the
 		// window, so the turn behaves like the last one.
-		submitOnly := lastTurn || nearLimit
+		resubmit := resubmitReason
+		resubmitReason = ""
+		// The resubmit turn stays submit-only even if its own reason lapsed,
+		// for example once the rejected output left the context estimate.
+		submitOnly := lastTurn || nearLimit || resubmit != ""
 		req := &llm.Request{
 			System:      spec.System,
 			Messages:    append([]llm.Message(nil), messages...),
@@ -221,6 +288,8 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 			reason = llm.SubmitPromptDeadline
 		case nearBudget():
 			reason = llm.SubmitPromptBudget
+		case resubmit != "":
+			reason = resubmit
 		}
 		if lastTurn && forceSubmit {
 			// The prompt stays as well, in case the forced choice is rejected.
@@ -327,6 +396,32 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 		}
 		if resp.StopReason != llm.StopToolUse && resp.StopReason != llm.StopEndTurn {
 			return partial(ErrUnsafeResponse)
+		}
+		// A reasoning gateway can corrupt the large arguments of a prompted
+		// submit (#269). Nothing ran, so up to maxInvalidRecoveries times per
+		// run, with a turn left, the cleared calls are dropped and the model
+		// is told the fixed category.
+		kind, _ := llm.ToolCallIssue(message)
+		if invalid && recoverableBatch(message) && resp.StopReason == llm.StopToolUse && reason != "" && !lastTurn && invalidRecoveries < maxInvalidRecoveries {
+			invalidRecoveries++
+			resubmitReason = reason
+			messages = messages[:len(messages)-1]
+			feedback := llm.Message{
+				Role:  llm.RoleUser,
+				Parts: []llm.Part{{Type: llm.PartText, Text: invalidToolCallFeedback(kind)}},
+			}
+			// The rejected calls and reasoning are not replayed; size the
+			// context from the request plus what is replayed.
+			if sized.InputTokens > 0 {
+				contextTokens = sized.InputTokens + textTokens(feedback.Parts)
+			}
+			if kept, ok := rejectedTurnText(message); ok {
+				messages = append(messages, kept)
+				contextTokens += textTokens(kept.Parts)
+			}
+			messages = append(messages, feedback)
+			recordTurn(turnStarted)
+			continue
 		}
 
 		calls, err := responseToolCalls(message)
@@ -497,6 +592,15 @@ const (
 	addedBytesPerToken = 3
 	freedBytesPerToken = 4
 )
+
+// textTokens estimates the tokens of text parts, like toolResultTokens.
+func textTokens(parts []llm.Part) int64 {
+	var n int64
+	for _, part := range parts {
+		n += int64(len(part.Text))
+	}
+	return n / addedBytesPerToken
+}
 
 func toolResultTokens(parts []llm.Part) int64 {
 	var n int64

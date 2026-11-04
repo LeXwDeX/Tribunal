@@ -195,10 +195,10 @@ func TestRunAsksForSubmitWhenBudgetNearlySpent(t *testing.T) {
 	client := &windowClient{usage: 1000}
 	spec := testSpec(client, bigTool(10))
 	spec.BudgetRemaining = func(_ context.Context, used llm.Usage) (int64, bool) {
-		return 3500 - used.InputTokens - used.OutputTokens, true
+		return 5500 - used.InputTokens - used.OutputTokens, true
 	}
 	result, err := Run(context.Background(), spec)
-	// After two turns 1480 tokens remain, less than two 1010-token turns.
+	// After two turns 3480 tokens remain, less than four 1010-token turns.
 	if err != nil || result == nil || result.Turns != 3 {
 		t.Fatalf("err=%v, want submit on turn 3", err)
 	}
