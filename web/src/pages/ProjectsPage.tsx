@@ -6,7 +6,7 @@ import { ApiError, errorMessage } from '../api/client'
 import type { Project, ProjectRegistration, ProjectValidation } from '../api/types'
 import { useCanWrite } from '../components/RoleContext'
 import {
-  Badge, Button, Dialog, EmptyState, ErrorState, ExternalLink, Field, LoadingState, PageHeader, Panel, PanelBody, RelativeTime, Segmented, StatusBadge,
+  Badge, Button, ButtonLink, Dialog, EmptyState, ErrorState, ExternalLink, Field, LoadingState, PageHeader, Panel, PanelBody, RelativeTime, Segmented, StatusBadge,
   Switch, Toolbar, VerdictBadge, useToast,
 } from '../components/ui'
 import { usePaginated } from '../lib/hooks'
@@ -14,6 +14,12 @@ import { formatDate, labelForStatus, labelForWebhookState, webhookTone } from '.
 import ui from '../styles/ui.module.css'
 import styles from './pages.module.css'
 import page from './projects.module.css'
+
+// The server returns this conflict only on the platform-admin registration
+// route, so the hint never reveals project existence to other users.
+function isAlreadyRegistered(error: unknown): boolean {
+  return error instanceof ApiError && error.code === 'conflict' && error.message.startsWith('project is already registered')
+}
 
 function tokenExpiry(project: Project): { label: string; tone: 'ok' | 'warn' | 'danger' | 'neutral' } {
   if (!project.token_expires_at) return { label: '未提供', tone: 'neutral' }
@@ -239,6 +245,14 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
           </ol>
           {validationError ? <ErrorState error={validationError} title="校验失败" /> : null}
           {error ? <ErrorState error={error} title="保存并初始化失败" /> : null}
+          {isAlreadyRegistered(error) ? (
+            <div className={styles.notice} role="status">
+              <div className={ui.stack}>
+                <span className="small">该项目已注册。若项目列表中看不到它，说明你还没有该项目的访问授权，可在「系统」页的项目授权中为自己授予 manage。</span>
+                <ButtonLink to="/system" onClick={close}>前往系统页授权</ButtonLink>
+              </div>
+            </div>
+          ) : null}
           {validation ? (
             <>
               <div className={page.resultOk} role="status">

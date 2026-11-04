@@ -231,6 +231,46 @@ describe('project registration', () => {
   })
 })
 
+describe('already registered conflict (#277)', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('points the admin to the System page to grant access', async () => {
+    installFetch(baseRoutes({
+      register: () => jsonResponse({ error: {
+        code: 'conflict',
+        message: 'project is already registered; if it is not in your project list, grant yourself access on the System page',
+      } }, 409),
+    }))
+    const user = await openRegisterDialog()
+    await user.type(screen.getByLabelText('仓库地址或项目 ID'), repositoryUrl)
+    await user.type(screen.getByLabelText('访问 Key'), accessToken)
+    await user.click(screen.getByRole('button', { name: '校验连接' }))
+    await screen.findByText('校验通过，尚未保存')
+    await user.click(screen.getByRole('button', { name: '保存并初始化' }))
+
+    expect(await screen.findByText(/该项目已注册。若项目列表中看不到它/)).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '前往系统页授权' })).toHaveAttribute('href', '/system')
+  })
+
+  it('shows no grant hint for other conflicts', async () => {
+    installFetch(baseRoutes({
+      register: () => jsonResponse({ error: {
+        code: 'conflict',
+        message: 'local project data remains; manual cleanup is required before registration',
+      } }, 409),
+    }))
+    const user = await openRegisterDialog()
+    await user.type(screen.getByLabelText('仓库地址或项目 ID'), repositoryUrl)
+    await user.type(screen.getByLabelText('访问 Key'), accessToken)
+    await user.click(screen.getByRole('button', { name: '校验连接' }))
+    await screen.findByText('校验通过，尚未保存')
+    await user.click(screen.getByRole('button', { name: '保存并初始化' }))
+
+    expect(await screen.findByText('保存并初始化失败')).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: '前往系统页授权' })).not.toBeInTheDocument()
+  })
+})
+
 describe('project validation result layout (#251)', () => {
   afterEach(() => vi.unstubAllGlobals())
 

@@ -729,6 +729,16 @@ func (s *Store) CancelByKey(ctx context.Context, key string) (int, error) {
 // onboarding job. Duplicate project registration is a conflict and never
 // overwrites the existing row.
 func (s *Store) RegisterProject(ctx context.Context, p store.Project) (string, error) {
+	return s.RegisterProjectWithOwner(ctx, p, 0)
+}
+
+// RegisterProjectWithOwner is RegisterProject plus a manage grant for
+// ownerUserID in the same transaction. An owner of 0 writes no grant. A
+// missing owner is ErrNotFound and rolls back the whole registration.
+func (s *Store) RegisterProjectWithOwner(ctx context.Context, p store.Project, ownerUserID int64) (string, error) {
+	if ownerUserID < 0 {
+		return "", errors.New("sqlite: owner user id must not be negative")
+	}
 	if p.ID <= 0 {
 		return "", errors.New("sqlite: project id is required")
 	}
@@ -824,6 +834,19 @@ func (s *Store) RegisterProject(ctx context.Context, p store.Project) (string, e
 			return "", fmt.Errorf("%w: workspace for project %d already exists", store.ErrConflict, p.ID)
 		}
 		return "", fmt.Errorf("sqlite: insert workspace: %w", err)
+	}
+	if ownerUserID > 0 {
+		var one int
+		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM users WHERE id = ?`, ownerUserID).Scan(&one); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return "", fmt.Errorf("%w: user %d", store.ErrNotFound, ownerUserID)
+			}
+			return "", fmt.Errorf("sqlite: check owner: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO project_grants (project_id, user_id, role)
+			VALUES (?, ?, ?)`, p.ID, ownerUserID, store.ProjectAccessManage); err != nil {
+			return "", fmt.Errorf("sqlite: insert owner grant: %w", err)
+		}
 	}
 
 	job := store.Job{
