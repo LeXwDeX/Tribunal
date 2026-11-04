@@ -68,11 +68,11 @@ docker compose config --quiet
 bash scripts/docker-smoke.sh
 ```
 
-Run scoped checks while developing; run the full sequence before delivery when the environment supports it. CI runs the same `go`, `web` and `docker` jobs on every PR and on `main`.
+Run scoped checks while developing; run the full sequence before delivery when the environment supports it.
 
-GitHub Actions runs `ci.yml` on every push and pull request. The `web` and `docker` jobs use hosted runners. The `go` job uses a labeled self-hosted runner for trusted events (pushes to `main`, pull requests from branches of this repository, and a manual dispatch with `self_hosted=true`) and a hosted runner otherwise, including pull requests from forks. A repository writer may request a manual run with `gh workflow run ci.yml --ref <trusted-branch> -f self_hosted=true`; it is supplementary evidence and does not replace the push/PR checks.
+GitHub Actions runs `ci.yml` on every push and pull request. The `web` and `docker` jobs use hosted runners. The `go` job uses a labeled self-hosted runner for trusted events (pushes to `main`, pull requests from branches of this repository, and a manual dispatch with `self_hosted=true`) and a hosted runner otherwise, including pushes to other branches and pull requests from forks. A repository writer may request a manual run with `gh workflow run ci.yml --ref <trusted-branch> -f self_hosted=true`; it is supplementary evidence and does not replace the push/PR checks.
 
-Only dispatch trusted branch code to a self-hosted runner: untrusted code can persistently compromise that machine. This is an operational requirement, not a security boundary enforced automatically by GitHub or this workflow. Anyone who can modify a workflow can request a self-hosted runner; runner access controls may restrict whether it executes. Runner labels select any runner that carries them, not a specific machine. Verify runner isolation and its Docker, Docker Compose, Go, Node, Bash, Python 3 and race-enabled C compiler prerequisites before use.
+Only dispatch trusted branch code to a self-hosted runner: untrusted code can persistently compromise that machine. Pull requests from branches of this repository run the `go` job on it automatically, so push only trusted code to branches of this repository; untrusted contributions come from forks. This is an operational requirement, not a security boundary enforced automatically by GitHub or this workflow. Anyone who can modify a workflow can request a self-hosted runner; runner access controls may restrict whether it executes. Runner labels select any runner that carries them, not a specific machine. Verify runner isolation and its Docker, Docker Compose, Go, Node, Bash, Python 3 and race-enabled C compiler prerequisites before use.
 
 ### Self-hosted CI
 
@@ -80,9 +80,9 @@ Maintainers may run a self-hosted CI outside GitHub Actions on the development/t
 
 - **Location.** It lives only under this project's deployment directory on the development/test environment, as the `<project-deployment-dir>/ci/` subdirectory. The Dockerfile, the run and client scripts, the README, `inbox/` and `runs/` all stay there. Image and cache-volume names use the project prefix. Do not create a sibling directory next to the project directory or anywhere else outside it.
 - **Usage.** The client sends the revision under test as a git bundle to `inbox/`. Each run writes `runs/<time>-<sha>/summary.txt`, whose last line is `RESULT PASS` or `RESULT FAIL`, with per-job logs in the same directory. A full run takes several minutes; run the client in the background.
-- **Coverage.** It runs the same `go`, `web` and `docker` jobs as `ci.yml`. A PASS means all three passed for that exact commit.
+- **Coverage.** It runs the same steps as the `go`, `web` and `docker` jobs in `ci.yml` and must be kept in sync with that file. A PASS means all three passed for that exact commit.
 - **Trust and isolation.** Submit only trusted branch code. The runner stores no GitHub credentials. It must not touch other services, containers, images, volumes or directories on the same host; tear-down removes only the runner's own resources.
-- **Merge gate.** A maintainer may designate a `RESULT PASS` on the self-hosted CI, for the PR head after it is brought up to date with the latest `main`, as the merge gate in place of or in addition to the GitHub Actions checks. Until a maintainer does so, the GitHub Actions checks remain the gate. The designation is recorded outside tracked files, for example in the maintainer's instructions or `docs/handoff.md`.
+- **Merge gate.** A maintainer may designate a `RESULT PASS` on the self-hosted CI, for the PR head after it is brought up to date with the latest `main`, as the merge gate in place of or in addition to the GitHub Actions checks. Until a maintainer does so, the GitHub Actions checks remain the gate. A PR merged on this gate states so in the PR, with the tested commit SHA and the `RESULT PASS` summary line, without host names or paths.
 
 ## 4. Open-source contribution rules
 
@@ -140,7 +140,7 @@ Maintainers may run a self-hosted CI outside GitHub Actions on the development/t
 
 ## 8. Development review workflow
 
-Every behavior change and every user-visible document change goes through these stages before merge, unless the reduced chain below applies. CI green is necessary but not sufficient; a PR that skips a stage is not ready.
+Every behavior change and every user-visible document change goes through these stages before merge, unless the reduced chain below applies. The designated CI gate (section 3) passing is necessary but not sufficient; a PR that skips a stage is not ready.
 
 1. **Independent review** — a `review` subagent reads the real diff, callers, tests, and evidence. Give it the Issue, the diff range, and the evidence; do not give it the author's conclusion.
 2. **Three-way review** — run the development review subagents `reasoner`, `verify`, and `review` in parallel on the same diff. `reasoner` stress-tests logic, boundaries, races, and failure paths; `verify` reruns the scoped checks and reports PASS/FAIL/BLOCKED; `review` checks requirements, compatibility, and the evidence chain. These are development subagents, distinct from the product's review blocks with the same names.
@@ -178,9 +178,9 @@ the evidence; CI alone is not a substitute.
 
 ### Agent test account
 
-- On the development/test environment, an agent creates and uses its own dedicated test account to sign in and monitor deployments, jobs, reviews and publication results. This is a Tribunal console account and, when acceptance requires it, a dedicated identity on the test GitLab.
+- On the development/test environment, an agent creates and uses its own dedicated test account (asking a maintainer when creating it needs privileges the agent does not have) to sign in and monitor deployments, jobs, reviews and publication results. This is a Tribunal console account and, when acceptance requires it, a dedicated identity on the test GitLab.
 - Never reuse a human maintainer's account or any production account. Grant only the permissions monitoring needs.
-- Keep its credentials only on that environment's host side, for example in the environment's own untracked `.env` file or the environment-local, untracked handoff note. Never put them in a tracked file, a PR, an Issue or a log.
+- Keep its credentials only on that environment's host side, in the environment's own untracked env file with mode 0600. `docs/handoff.md` may name the account and where its credentials live, but never holds the secret itself. Never put credentials in a tracked file, a PR, an Issue or a log.
 - Do not create such accounts in production.
 
 ## 11. Agent workflow
