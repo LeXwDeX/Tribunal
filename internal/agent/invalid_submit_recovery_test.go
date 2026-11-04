@@ -255,3 +255,62 @@ func TestRunFailsClosedOnProtocolViolationOnPromptedTurn(t *testing.T) {
 		}
 	}
 }
+
+func TestRunFailsClosedOnMixedBatchWithProtocolViolation(t *testing.T) {
+	// A recoverable call first must not mask a later protocol violation.
+	mixed := &llm.Response{StopReason: llm.StopToolUse, Message: llm.Message{Role: llm.RoleAssistant, Parts: []llm.Part{
+		{Type: llm.PartToolCall, ToolCall: call("bad", SubmitToolName, corruptSubmitInput)},
+		{Type: llm.PartToolCall, ToolCall: &llm.ToolCall{Invalid: llm.ToolCallUnsupported}},
+	}}}
+	client := &promptedInvalidClient{prompted: []*llm.Response{mixed, toolResponse(llm.StopToolUse, call("ok", SubmitToolName, `{"done":true}`))}}
+	if _, err := Run(context.Background(), budgetSpec(client)); !errors.Is(err, ErrUnsafeResponse) {
+		t.Fatalf("err = %v, want unsafe", err)
+	}
+}
+
+// scriptedClient returns replies in order with their own usage.
+type scriptedClient struct {
+	window  int
+	replies []*llm.Response
+	reqs    []*llm.Request
+}
+
+func (c *scriptedClient) Info() llm.ProviderInfo {
+	return llm.ProviderInfo{Name: "scripted", ContextWindow: c.window}
+}
+
+func (c *scriptedClient) Generate(_ context.Context, req *llm.Request) (*llm.Response, error) {
+	c.reqs = append(c.reqs, req)
+	resp := c.replies[0]
+	c.replies = c.replies[1:]
+	return resp, nil
+}
+
+func TestRunResubmitTurnKeepsSubmitOnly(t *testing.T) {
+	// The resubmit turn keeps the prompt and executes only submit_result,
+	// even when the context estimate drops below the limit after recovery.
+	withUsage := func(resp *llm.Response, in, out int64) *llm.Response {
+		resp.Usage = llm.Usage{InputTokens: in, OutputTokens: out}
+		return resp
+	}
+	executed := 0
+	tool := echoTool{name: "echo", fn: func(context.Context, json.RawMessage) (Result, error) {
+		executed++
+		return Result{Content: "ok"}, nil
+	}}
+	client := &scriptedClient{window: 100000, replies: []*llm.Response{
+		withUsage(toolResponse(llm.StopToolUse, call("e1", "echo", `{}`)), 90000, 10),
+		withUsage(toolResponse(llm.StopToolUse, call("bad", SubmitToolName, corruptSubmitInput)), 1000, 90000),
+		withUsage(toolResponse(llm.StopToolUse, call("e2", "echo", `{}`)), 1000, 10),
+		withUsage(toolResponse(llm.StopToolUse, call("ok", SubmitToolName, `{"done":true}`)), 1000, 10),
+	}}
+	if _, err := Run(context.Background(), testSpec(client, tool)); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !hasSubmitPrompt(client.reqs[2]) {
+		t.Fatal("the resubmit turn must keep the submit prompt")
+	}
+	if executed != 1 {
+		t.Fatalf("echo executed %d times, want only the first exploration call", executed)
+	}
+}

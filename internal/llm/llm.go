@@ -79,9 +79,10 @@ func invalidToolCall(kind string) Part {
 	return Part{Type: PartToolCall, ToolCall: &ToolCall{Invalid: kind}}
 }
 
-// toolUseProblem picks the marker category for a rejected wire call.
-func toolUseProblem(nonString bool) string {
-	if nonString {
+// toolUseProblem picks the marker category for a rejected wire call. A
+// protocol violation wins over a non-string field, so it is never recovered.
+func toolUseProblem(nonString, unsupported bool) string {
+	if nonString && !unsupported {
 		return ToolCallNonString
 	}
 	return ToolCallUnsupported

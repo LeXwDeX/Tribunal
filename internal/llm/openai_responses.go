@@ -233,11 +233,12 @@ func responsesResponse(generated *responses.Response, defaultModel string) (*Res
 			caller := fn.JSON.Caller.Raw()
 			async := fn.JSON.Async.Raw()
 			namespace := fn.JSON.Namespace.Raw()
-			if !wireString(fn.JSON.CallID.Raw()) || !wireString(fn.JSON.Name.Raw()) || !wireString(fn.JSON.Arguments.Raw()) ||
-				(caller != "" && caller != "null" && fn.Caller.Type != "direct") ||
+			nonString := !wireString(fn.JSON.CallID.Raw()) || !wireString(fn.JSON.Name.Raw()) || !wireString(fn.JSON.Arguments.Raw())
+			unsupported := (caller != "" && caller != "null" && fn.Caller.Type != "direct") ||
 				(async != "" && async != "null" && async != "false") ||
-				(namespace != "" && namespace != "null" && (!wireString(namespace) || fn.Namespace != "")) {
-				message.Parts = append(message.Parts, invalidToolCall(toolUseProblem(!wireString(fn.JSON.CallID.Raw()) || !wireString(fn.JSON.Name.Raw()) || !wireString(fn.JSON.Arguments.Raw()))))
+				(namespace != "" && namespace != "null" && (!wireString(namespace) || fn.Namespace != ""))
+			if nonString || unsupported {
+				message.Parts = append(message.Parts, invalidToolCall(toolUseProblem(nonString, unsupported)))
 				continue
 			}
 			message.Parts = append(message.Parts, Part{

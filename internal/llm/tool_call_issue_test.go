@@ -225,3 +225,17 @@ func TestResponsesToolCallIssueCategories(t *testing.T) {
 		})
 	}
 }
+
+func TestProtocolViolationWinsOverNonStringCategory(t *testing.T) {
+	anthropicBody := `{"id":"m","type":"message","role":"assistant","model":"test","stop_reason":"tool_use","content":[{"type":"tool_use","id":7,"name":"t","input":{},"caller":{"type":"code_execution_20250825","tool_id":"x"}}],"usage":{"input_tokens":5,"output_tokens":5}}`
+	responsesBody := `{"id":"r","object":"response","created_at":1,"model":"test","status":"completed","output":[{"type":"function_call","id":"fc","call_id":7,"name":"t","arguments":"{}","status":"completed","async":true}],"usage":{"input_tokens":5,"output_tokens":5}}`
+	for protocol, body := range map[string]string{"anthropic": anthropicBody, "openai-responses": responsesBody} {
+		resp, err := protocolIssueClient(t, protocol, body).Generate(context.Background(), simpleRequest())
+		if err != nil {
+			t.Fatalf("%s: Generate: %v", protocol, err)
+		}
+		if kind, _ := ToolCallIssue(resp.Message); kind != ToolCallUnsupported {
+			t.Fatalf("%s: issue = %q, want %q", protocol, kind, ToolCallUnsupported)
+		}
+	}
+}

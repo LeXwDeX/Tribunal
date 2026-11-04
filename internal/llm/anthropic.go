@@ -253,10 +253,11 @@ func anthropicResponse(message *anthropic.Message, defaultModel string) (*Respon
 			tool := block.AsToolUse()
 			caller := tool.JSON.Caller.Raw()
 			toolset := tool.JSON.ToolsetName.Raw()
-			if (block.RawJSON() != "" && (!wireString(block.JSON.ID.Raw()) || !wireString(block.JSON.Name.Raw()))) ||
-				(caller != "" && caller != "null" && tool.Caller.Type != "direct") ||
-				(toolset != "" && toolset != "null" && (!wireString(toolset) || tool.ToolsetName != "")) {
-				out.Parts = append(out.Parts, invalidToolCall(toolUseProblem(block.RawJSON() != "" && (!wireString(block.JSON.ID.Raw()) || !wireString(block.JSON.Name.Raw())))))
+			nonString := block.RawJSON() != "" && (!wireString(block.JSON.ID.Raw()) || !wireString(block.JSON.Name.Raw()))
+			unsupported := (caller != "" && caller != "null" && tool.Caller.Type != "direct") ||
+				(toolset != "" && toolset != "null" && (!wireString(toolset) || tool.ToolsetName != ""))
+			if nonString || unsupported {
+				out.Parts = append(out.Parts, invalidToolCall(toolUseProblem(nonString, unsupported)))
 				continue
 			}
 			out.Parts = append(out.Parts, Part{

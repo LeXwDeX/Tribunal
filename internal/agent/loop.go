@@ -49,6 +49,26 @@ func recoverableToolCall(kind string) bool {
 	return false
 }
 
+// recoverableBatch reports whether every rejected call of a sanitized
+// message is recoverable, so a later protocol violation is never masked by
+// an earlier corrupted call.
+func recoverableBatch(message llm.Message) bool {
+	found := false
+	for _, part := range message.Parts {
+		if part.Type != llm.PartToolCall || part.ToolCall == nil {
+			continue
+		}
+		switch kind := part.ToolCall.Invalid; {
+		case kind == llm.ToolCallRejectedBatch:
+		case recoverableToolCall(kind):
+			found = true
+		default:
+			return false
+		}
+	}
+	return found
+}
+
 // rejectedTurnText keeps only the text of a rejected turn. Its calls are
 // dropped, and so is its reasoning: a Responses reasoning item must be
 // followed by its call, and Anthropic forbids altering the latest assistant
@@ -153,6 +173,8 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 	submitFailures := 0
 	askedForSubmit := false
 	invalidRecovered := false
+	// resubmitReason carries the prompted reason into the resubmit turn.
+	resubmitReason := ""
 	longestTurn := max(spec.TurnEstimate, 0)
 	partial := func(err error) (*RunResult, error) {
 		if turns == 0 && !usage.Incomplete && usage.InputTokens == 0 && usage.OutputTokens == 0 &&
@@ -238,7 +260,11 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 		nearLimit := nearContextLimit()
 		// Past the context limit another tool result could overflow the
 		// window, so the turn behaves like the last one.
-		submitOnly := lastTurn || nearLimit
+		resubmit := resubmitReason
+		resubmitReason = ""
+		// The resubmit turn stays submit-only even if its own reason lapsed,
+		// for example once the rejected output left the context estimate.
+		submitOnly := lastTurn || nearLimit || resubmit != ""
 		req := &llm.Request{
 			System:      spec.System,
 			Messages:    append([]llm.Message(nil), messages...),
@@ -257,6 +283,8 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 			reason = llm.SubmitPromptDeadline
 		case nearBudget():
 			reason = llm.SubmitPromptBudget
+		case resubmit != "":
+			reason = resubmit
 		}
 		if lastTurn && forceSubmit {
 			// The prompt stays as well, in case the forced choice is rejected.
@@ -367,11 +395,10 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 		// A reasoning gateway can corrupt the large arguments of a prompted
 		// submit (#269). Nothing ran, so once per run, with a turn left, the
 		// cleared calls are dropped and the model is told the fixed category.
-		// The resubmit turn recomputes its reason; if none applies it is an
-		// ordinary turn, and a second invalid call still fails closed.
 		kind, _ := llm.ToolCallIssue(message)
-		if invalid && recoverableToolCall(kind) && resp.StopReason == llm.StopToolUse && reason != "" && !lastTurn && !invalidRecovered {
+		if invalid && recoverableBatch(message) && resp.StopReason == llm.StopToolUse && reason != "" && !lastTurn && !invalidRecovered {
 			invalidRecovered = true
+			resubmitReason = reason
 			messages = messages[:len(messages)-1]
 			if kept, ok := rejectedTurnText(message); ok {
 				messages = append(messages, kept)
