@@ -68,3 +68,31 @@ func TestRegisterProjectWithNegativeOwnerIsRejected(t *testing.T) {
 		t.Fatal("negative owner accepted")
 	}
 }
+
+func TestReregisterWithOwnerAfterDeleteGrantsManage(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t, newFakeClock())
+	mustAccessUser(t, s, 7, "alice", "admin")
+	mustAccessUser(t, s, 8, "bob", "viewer")
+	if _, err := s.RegisterProjectWithOwner(ctx, ownerTestProject(42), 7); err != nil {
+		t.Fatalf("first register: %v", err)
+	}
+	if err := s.SetProjectGrant(ctx, 42, 8, store.ProjectAccessRead); err != nil {
+		t.Fatalf("SetProjectGrant: %v", err)
+	}
+	if err := s.DeleteProject(ctx, 42); err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
+	if n := rowCount(t, s, `SELECT COUNT(*) FROM project_grants WHERE project_id = 42`); n != 0 {
+		t.Fatalf("grants after delete = %d, want 0", n)
+	}
+	if _, err := s.RegisterProjectWithOwner(ctx, ownerTestProject(42), 7); err != nil {
+		t.Fatalf("re-register: %v", err)
+	}
+	if role, err := s.GetProjectAccess(ctx, 7, 42); err != nil || role != store.ProjectAccessManage {
+		t.Fatalf("owner role after re-register = %q, %v", role, err)
+	}
+	if _, err := s.GetProjectAccess(ctx, 8, 42); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("old viewer grant reappeared: %v", err)
+	}
+}

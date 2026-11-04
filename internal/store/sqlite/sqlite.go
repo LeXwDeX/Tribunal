@@ -844,7 +844,9 @@ func (s *Store) RegisterProjectWithOwner(ctx context.Context, p store.Project, o
 			return "", fmt.Errorf("sqlite: check owner: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO project_grants (project_id, user_id, role)
-			VALUES (?, ?, ?)`, p.ID, ownerUserID, store.ProjectAccessManage); err != nil {
+			VALUES (?, ?, ?)
+			ON CONFLICT (project_id, user_id) DO UPDATE SET role = excluded.role`,
+			p.ID, ownerUserID, store.ProjectAccessManage); err != nil {
 			return "", fmt.Errorf("sqlite: insert owner grant: %w", err)
 		}
 	}

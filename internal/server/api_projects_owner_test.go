@@ -93,3 +93,51 @@ func TestRegisterProjectConflictHintIsAdminOnly(t *testing.T) {
 		t.Fatalf("viewer register = %d %s", denied.status, denied.body)
 	}
 }
+
+// Deleting a project and registering it again must leave the new registrant
+// with manage access and the project visible, as for a first registration.
+func TestReregisterAfterDeleteGrantsRegistrantManage(t *testing.T) {
+	for name, firstBySession := range map[string]bool{"first by session": true, "first by bearer": false} {
+		t.Run(name, func(t *testing.T) {
+			api := defaultStubGitLab()
+			env := newM6Env(t, m6Options{adminFactory: func(st *sqlite.Store) AdminService {
+				return testProjectService(t, st, api, t.TempDir())
+			}})
+			ctx := context.Background()
+			admin := env.loginAs("code-admin") // GitLab user 7
+			body := map[string]any{"project": "42", "token": testProjectTok}
+			first := env.bearerClient()
+			if firstBySession {
+				first = admin
+			}
+			if got := first.json(http.MethodPost, "/api/v1/projects", body); got.status != http.StatusCreated {
+				t.Fatalf("first register = %d %s", got.status, got.body)
+			}
+			if !firstBySession {
+				if err := env.sqlite.SetProjectGrant(ctx, 42, 7, store.ProjectAccessManage); err != nil {
+					t.Fatalf("SetProjectGrant: %v", err)
+				}
+			}
+			if got := admin.request(http.MethodDelete, "/api/v1/projects/42", nil, nil); got.status != http.StatusNoContent {
+				t.Fatalf("delete = %d %s", got.status, got.body)
+			}
+			if _, err := env.sqlite.GetProjectAccess(ctx, 7, 42); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("grant survived project deletion: %v", err)
+			}
+
+			again := admin.json(http.MethodPost, "/api/v1/projects", body)
+			if again.status != http.StatusCreated {
+				t.Fatalf("re-register = %d %s", again.status, again.body)
+			}
+			role, err := env.sqlite.GetProjectAccess(ctx, 7, 42)
+			if err != nil || role != store.ProjectAccessManage {
+				t.Fatalf("re-registrant grant = %q, %v; want manage", role, err)
+			}
+			list := admin.request(http.MethodGet, "/api/v1/projects", nil, nil)
+			projects, _ := env.decode(t, list)["projects"].([]any)
+			if list.status != http.StatusOK || len(projects) != 1 {
+				t.Fatalf("list after re-register = %d %s", list.status, list.body)
+			}
+		})
+	}
+}
