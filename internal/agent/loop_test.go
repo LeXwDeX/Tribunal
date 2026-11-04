@@ -677,6 +677,8 @@ type steppingClient struct {
 	clock time.Time
 	step  time.Duration
 	reqs  []*llm.Request
+	// ignore is how many submit prompts the model ignores before submitting.
+	ignore int
 }
 
 func (c *steppingClient) Info() llm.ProviderInfo { return llm.ProviderInfo{Name: "stepping"} }
@@ -694,7 +696,10 @@ func (c *steppingClient) Generate(_ context.Context, req *llm.Request) (*llm.Res
 	c.reqs = append(c.reqs, req)
 	last := req.Messages[len(req.Messages)-1]
 	if last.Role == llm.RoleUser && len(last.Parts) == 1 && last.Parts[0].Text == finalTurnPrompt {
-		return toolResponse(llm.StopToolUse, call("s", SubmitToolName, `{}`)), nil
+		if c.ignore == 0 {
+			return toolResponse(llm.StopToolUse, call("s", SubmitToolName, `{}`)), nil
+		}
+		c.ignore--
 	}
 	return toolResponse(llm.StopToolUse, call(fmt.Sprintf("c%d", len(c.reqs)), "echo", `{}`)), nil
 }
@@ -711,8 +716,8 @@ func TestRunAsksForSubmitBeforeContextDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	// Each turn takes one minute. After four turns one minute remains, which
-	// is less than the reserve of two slowest turns, so turn 5 asks for submit.
+	// Each turn takes one minute. Turn 5 starts with one minute left, below
+	// the reserve of two slowest turns (two minutes left is not below it).
 	if result.Turns != 5 || len(client.reqs) != 5 {
 		t.Fatalf("turns = %d, requests = %d, want 5", result.Turns, len(client.reqs))
 	}
@@ -729,8 +734,8 @@ func TestRunWithoutDeadlineWaitsForLastTurn(t *testing.T) {
 	spec.MaxTurns = 3
 	spec.Now = client.now
 	result, err := Run(context.Background(), spec)
-	if err != nil || result.Turns != 3 {
-		t.Fatalf("result=%+v err=%v, want submit on turn 3", result, err)
+	if err != nil || result == nil || result.Turns != 3 {
+		t.Fatalf("err=%v, want submit on turn 3", err)
 	}
 }
 
@@ -755,5 +760,61 @@ func TestRunFinalTurnDoesNotExecuteOtherTools(t *testing.T) {
 	final := result.Transcript[len(result.Transcript)-1].Parts
 	if !final[0].ToolResult.IsError || !strings.Contains(final[0].ToolResult.Content, "not executed") || final[1].ToolResult.IsError {
 		t.Fatalf("final results = %+v", final)
+	}
+}
+
+func hasSubmitPrompt(req *llm.Request) bool {
+	last := req.Messages[len(req.Messages)-1]
+	return last.Role == llm.RoleUser && len(last.Parts) == 1 && last.Parts[0].Text == finalTurnPrompt
+}
+
+func TestRunDeadlineReserveHasFloor(t *testing.T) {
+	start := time.Now()
+	client := &steppingClient{clock: start, step: time.Second}
+	ctx, cancel := context.WithDeadline(context.Background(), start.Add(80*time.Second))
+	defer cancel()
+	spec := testSpec(client, echoTool{name: "echo"})
+	spec.MaxTurns = 90
+	spec.Now = client.now
+	result, err := Run(ctx, spec)
+	// Turns take one second, but the reserve floor is 80s/8 = 10s: turn 72
+	// starts with 9s left and is the first one below it.
+	if err != nil || result == nil || result.Turns != 72 {
+		turns := 0
+		if result != nil {
+			turns = result.Turns
+		}
+		t.Fatalf("turns = %d err=%v, want submit on turn 72", turns, err)
+	}
+}
+
+func TestRunKeepsAskingForSubmitNearDeadline(t *testing.T) {
+	start := time.Now()
+	client := &steppingClient{clock: start, step: time.Minute, ignore: 1}
+	ctx, cancel := context.WithDeadline(context.Background(), start.Add(10*time.Minute))
+	defer cancel()
+	spec := testSpec(client, echoTool{name: "echo"})
+	spec.MaxTurns = 30
+	spec.Now = client.now
+	result, err := Run(ctx, spec)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// Turn 10 starts with one minute left, the first below the two-minute
+	// reserve. The model ignores that prompt and submits on turn 11.
+	if result.Turns != 11 {
+		t.Fatalf("turns = %d, want 11", result.Turns)
+	}
+	for i, req := range client.reqs {
+		if want := i >= 9; hasSubmitPrompt(req) != want {
+			t.Fatalf("request %d submit prompt = %t, want %t", i+1, !want, want)
+		}
+	}
+	for _, msg := range result.Transcript {
+		for _, part := range msg.Parts {
+			if part.Text == finalTurnPrompt {
+				t.Fatal("submit prompt leaked into the transcript")
+			}
+		}
 	}
 }

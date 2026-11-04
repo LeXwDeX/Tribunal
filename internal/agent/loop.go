@@ -21,7 +21,7 @@ const mustSubmitPrompt = "You must call the " + SubmitToolName +
 // request once the context deadline leaves too little time for more
 // exploration. It is never stored in the transcript. The loop does not force
 // tool_choice because reasoning gateways reject every non-auto choice (#255).
-const finalTurnPrompt = "This is the final turn. Call the " + SubmitToolName +
+const finalTurnPrompt = "Turns or time are nearly exhausted. Call the " + SubmitToolName +
 	" tool now with your best result from the evidence gathered so far. Do not call any other tool."
 
 var nonceFallback atomic.Uint64
@@ -123,11 +123,25 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 		now = time.Now
 	}
 	var longestTurn time.Duration
-	// nearDeadline reports whether the remaining time fits fewer than
-	// finalTurnReserve of the slowest turn seen so far.
+	// The submit turn is often slower than exploration turns, so the reserve
+	// never drops below a fixed share of the time the run started with.
+	var reserveFloor time.Duration
+	if deadline, ok := ctx.Deadline(); ok {
+		reserveFloor = deadline.Sub(now()) / finalTurnFloorDivisor
+	}
+	// nearDeadline reports whether the remaining time is below the reserve:
+	// finalTurnReserve of the slowest turn seen so far, or the floor.
 	nearDeadline := func() bool {
 		deadline, ok := ctx.Deadline()
-		return ok && longestTurn > 0 && deadline.Sub(now()) < finalTurnReserve*longestTurn
+		if !ok || longestTurn == 0 {
+			return false
+		}
+		return deadline.Sub(now()) < max(finalTurnReserve*longestTurn, reserveFloor)
+	}
+	recordTurn := func(started time.Time) {
+		if elapsed := now().Sub(started); elapsed > longestTurn {
+			longestTurn = elapsed
+		}
 	}
 
 	for turn := 1; turn <= maxTurns; turn++ {
@@ -224,6 +238,7 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 					Parts: []llm.Part{{Type: llm.PartText, Text: mustSubmitPrompt}},
 				})
 				askedForSubmit = true
+				recordTurn(turnStarted)
 				continue
 			}
 			if submitFailures > 0 {
@@ -304,9 +319,7 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 		}
 
 		messages = append(messages, llm.Message{Role: llm.RoleTool, Parts: results})
-		if elapsed := now().Sub(turnStarted); elapsed > longestTurn {
-			longestTurn = elapsed
-		}
+		recordTurn(turnStarted)
 		if submitted {
 			return &RunResult{
 				Output:     output,
