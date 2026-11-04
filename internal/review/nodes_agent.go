@@ -636,7 +636,10 @@ func (e *Executor) executeOnboarding(ctx context.Context, in dag.NodeInput) (dag
 		Builtins:   true,
 		BlockTools: true,
 		MaxTurns:   onboardingMaxTurns,
-		BeforeTurn: e.budgetHook(in.WorkflowID),
+		// Onboarding has no deterministic fallback; a partial overview from
+		// the evidence so far is better than a failed workspace.
+		BudgetSubmitPrompt: true,
+		BeforeTurn:         e.budgetHook(in.WorkflowID),
 	})
 	if err != nil {
 		return dag.NodeOutput{}, err

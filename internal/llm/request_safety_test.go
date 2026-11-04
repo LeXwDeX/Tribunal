@@ -124,3 +124,14 @@ func TestResponsesFailedUsageRetainedWhenRetriesExhaust(t *testing.T) {
 		t.Fatalf("usage = %+v, want every attempt", failure.Usage)
 	}
 }
+
+func TestRetriedResponseReportsSuccessfulAttemptUsage(t *testing.T) {
+	client, _ := usageClient(t, "openai-responses", responsesFailed, responsesOK)
+	resp, err := client.Generate(context.Background(), simpleRequest())
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if resp.AttemptUsage.InputTokens != 1 || resp.AttemptUsage.OutputTokens != 1 {
+		t.Fatalf("attempt usage = %+v, want only the successful attempt", resp.AttemptUsage)
+	}
+}

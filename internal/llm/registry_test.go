@@ -607,3 +607,40 @@ func TestRegistryRetrySemaphoreCancelPreservesUsage(t *testing.T) {
 		t.Fatalf("canceled wait fabricated an audit attempt: %+v", records)
 	}
 }
+
+func TestRegistryReportsConfiguredContextWindow(t *testing.T) {
+	t.Setenv("TEST_KEY", "k")
+	cfg := chatConfig("http://127.0.0.1:1/v1", "TEST_KEY")
+	cfg.ContextWindow = 128000
+	if got := mustClient(t, "chat", cfg).Info().ContextWindow; got != 128000 {
+		t.Fatalf("context window = %d, want 128000", got)
+	}
+}
+
+func TestRegistryAuditsSubmitPromptAndCompaction(t *testing.T) {
+	t.Setenv("TEST_KEY", "k")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","object":"chat.completion","created":1,"model":"test","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer server.Close()
+	var records []CallRecord
+	client := mustClient(t, "chat", chatConfig(server.URL+"/v1", "TEST_KEY"),
+		WithRecorder(RecorderFunc(func(_ context.Context, call CallRecord) { records = append(records, call) })))
+	for _, reason := range []string{SubmitPromptContext, "free text"} {
+		ctx := WithCallMeta(context.Background(), CallMeta{WorkflowID: "w", NodeID: "n", Turn: 2, SubmitPrompt: reason, CompactedToolResults: 3})
+		if _, err := client.Generate(ctx, simpleRequest()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(records) != 2 {
+		t.Fatalf("records = %d", len(records))
+	}
+	first, second := records[0].Audit.Request, records[1].Audit.Request
+	if first.SubmitPrompt != SubmitPromptContext || first.CompactedToolResults != 3 {
+		t.Fatalf("audit = %+v", first)
+	}
+	if second.SubmitPrompt != "" {
+		t.Fatalf("unknown submit prompt reason recorded: %q", second.SubmitPrompt)
+	}
+}
