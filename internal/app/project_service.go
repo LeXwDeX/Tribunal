@@ -1049,7 +1049,7 @@ func webhookUpstreamError(status int) error {
 	case http.StatusUnauthorized:
 		err.Details = []Detail{{Field: "token", Message: "the project token is invalid, expired or revoked; replace it"}}
 	case http.StatusForbidden:
-		err.Details = []Detail{{Field: "access_level", Message: "managing project webhooks requires the Maintainer role; use a Maintainer token or add the webhook in GitLab manually"}}
+		err.Details = []Detail{{Field: "access_level", Message: "managing project webhooks requires the Maintainer role; use a Maintainer token or have a Maintainer manage the webhook in GitLab"}}
 	}
 	return err
 }

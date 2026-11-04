@@ -98,19 +98,22 @@ func ReasonOf(err error) string {
 // maxStderrScan bounds how much stderr is buffered for classification.
 const maxStderrScan = 16 << 10
 
-// stderrScan keeps at most maxStderrScan bytes of stderr in memory. The
-// buffer is only classified and then dropped; it is never returned or logged.
+// stderrScan keeps the last maxStderrScan bytes of stderr in memory, where
+// git prints its fatal line. The buffer is only classified and then dropped;
+// it is never returned or logged.
 type stderrScan struct{ buf []byte }
 
 func (s *stderrScan) Write(p []byte) (int, error) {
-	if room := maxStderrScan - len(s.buf); room > 0 {
-		if len(p) > room {
-			s.buf = append(s.buf, p[:room]...)
-		} else {
-			s.buf = append(s.buf, p...)
-		}
+	n := len(p)
+	if len(p) >= maxStderrScan {
+		s.buf = append(s.buf[:0], p[len(p)-maxStderrScan:]...)
+		return n, nil
 	}
-	return len(p), nil
+	if overflow := len(s.buf) + len(p) - maxStderrScan; overflow > 0 {
+		s.buf = append(s.buf[:0], s.buf[overflow:]...)
+	}
+	s.buf = append(s.buf, p...)
+	return n, nil
 }
 
 // gitStderrMarkers map stable English git and GitLab messages to a reason.
@@ -137,8 +140,11 @@ var gitStderrMarkers = []struct {
 	{"operation timed out", ReasonNetwork},
 	{"rpc failed", ReasonNetwork},
 	{"early eof", ReasonNetwork},
-	{"ssl", ReasonNetwork},
-	{"tls", ReasonNetwork},
+	{"ssl certificate", ReasonNetwork},
+	{"ssl_connect", ReasonNetwork},
+	{"ssl_error", ReasonNetwork},
+	{"gnutls", ReasonNetwork},
+	{"tls handshake", ReasonNetwork},
 	{"returned error: 5", ReasonNetwork},
 }
 

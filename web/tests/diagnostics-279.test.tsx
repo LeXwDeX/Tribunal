@@ -15,7 +15,7 @@ function webhookPanel() {
 
 function routes(initial = project(), webhook?: () => Response, validate?: () => Response) {
   return (url: string, init?: RequestInit) => {
-    if (url.endsWith('/webhook') && webhook) return webhook()
+    if ((url.endsWith('/webhook') || url.endsWith('/webhook/rebuild')) && webhook) return webhook()
     if (url === '/api/v1/projects/validate' && validate) return validate()
     if (url.startsWith('/api/v1/projects/42')) return jsonResponse(initial)
     if (url.startsWith('/api/v1/projects')) return jsonResponse({ projects: [initial] })
@@ -30,6 +30,7 @@ describe('workspace and token diagnostics (#279)', () => {
   it('maps fixed workspace failures to actionable hints and keeps the code', () => {
     expect(describeWorkspaceError('gitlab: project token rejected (401)')).toMatch(/Key 无效、已过期或已撤销.*gitlab: project token rejected \(401\)/)
     expect(describeWorkspaceError('gitlab: access denied (403)')).toMatch(/Reporter/)
+    expect(describeWorkspaceError('gitlab: access denied (403)')).not.toMatch(/read_api/)
     expect(describeWorkspaceError('git: branch not found')).toMatch(/分支不存在/)
     expect(describeWorkspaceError('git: network error')).toMatch(/网络/)
     expect(describeWorkspaceError('onboarding: model provider rejected credentials')).toMatch(/模型服务拒绝了凭据/)
@@ -59,6 +60,20 @@ describe('workspace and token diagnostics (#279)', () => {
     await userEvent.setup().click(webhookPanel().getByRole('button', { name: '启用 GitLab Activity' }))
     const alert = await webhookPanel().findByRole('alert')
     expect(alert).toHaveTextContent('Key 无效、已过期或已撤销')
+  })
+
+  it('explains a forbidden rebuild inside its confirmation dialog', async () => {
+    const enabled = project({ hook_id: 99, webhook_state: 'enabled', webhook_managed_by: 'crc' })
+    installFetch(routes(enabled, () => jsonResponse({ error: {
+      code: 'gitlab_rejected', message: 'GitLab rejected the request (status 403)',
+      details: [{ field: 'access_level', message: 'managing project webhooks requires the Maintainer role' }],
+    } }, 422)))
+    renderWithProviders(<SettingsPanel project={enabled} />)
+    const user = userEvent.setup()
+    await user.click(webhookPanel().getByRole('button', { name: '重建 webhook' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('button', { name: '重建 webhook' }))
+    expect(await within(dialog).findByText(/需要 Maintainer 角色/)).toBeInTheDocument()
   })
 
   it('explains a stored webhook failure caused by a missing Maintainer role', async () => {

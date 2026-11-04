@@ -121,12 +121,29 @@ func TestClassifyGitStderr(t *testing.T) {
 		"fatal: unable to access 'https://host/': Failed to connect to host port 443":                                                                             ReasonNetwork,
 		"error: RPC failed; curl 56 Recv failure: Connection reset by peer":                                                                                       ReasonNetwork,
 		"fatal: unable to access 'https://host/': SSL certificate problem: unable to get local issuer":                                                            ReasonNetwork,
-		"fatal: something else entirely":                                                                                                                          "",
-		"":                                                                                                                                                        "",
+		"fatal: unable to access 'https://host/infra/openssl.git/': The requested URL returned error: 400":                                                        "",
+		"fatal: unable to access 'https://gitlab-tls.example/x.git/': The requested URL returned error: 301":                                                      "",
+		"fatal: unable to access 'https://host/openssl.git/': gnutls_handshake() failed: An unexpected TLS packet":                                                ReasonNetwork,
+		"fatal: unable to access 'https://host/x.git/': OpenSSL SSL_connect: SSL_ERROR_SYSCALL in connection":                                                     ReasonNetwork,
+		"fatal: something else entirely": "",
+		"":                               "",
 	}
 	for stderr, want := range cases {
 		if got := classifyGitStderr([]byte(stderr)); got != want {
 			t.Errorf("classifyGitStderr(%q) = %q, want %q", stderr, got, want)
 		}
+	}
+}
+
+func TestStderrScanKeepsTheTail(t *testing.T) {
+	var scan stderrScan
+	noise := strings.Repeat("remote: warning line\n", maxStderrScan/10)
+	scan.Write([]byte(noise))
+	scan.Write([]byte("fatal: couldn't find remote ref refs/heads/master\n"))
+	if len(scan.buf) > maxStderrScan {
+		t.Fatalf("buffer grew to %d bytes", len(scan.buf))
+	}
+	if got := classifyGitStderr(scan.buf); got != ReasonRefNotFound {
+		t.Fatalf("classify after noise = %q, want %q", got, ReasonRefNotFound)
 	}
 }

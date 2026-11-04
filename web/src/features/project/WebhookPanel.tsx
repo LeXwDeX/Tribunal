@@ -205,6 +205,7 @@ export function WebhookPanel({ project }: { project: Project }) {
         danger={false}
         pending={pending === 'rebuild'}
         error={dialog === 'rebuild' ? dialogError : null}
+        errorHint={dialog === 'rebuild' ? webhookFailureHint(dialogError) : null}
       />
 
       <ConfirmDialog
@@ -217,6 +218,7 @@ export function WebhookPanel({ project }: { project: Project }) {
         danger
         pending={pending === 'disable'}
         error={dialog === 'disable' ? dialogError : null}
+        errorHint={dialog === 'disable' ? webhookFailureHint(dialogError) : null}
       />
     </Panel>
   )

@@ -512,7 +512,7 @@ export function Drawer({ open, onClose, title, description, children, footer }: 
 }
 
 export function ConfirmDialog({
-  open, onClose, onConfirm, title, description, confirmLabel = '确认', pending, error, danger = true,
+  open, onClose, onConfirm, title, description, confirmLabel = '确认', pending, error, errorHint, danger = true,
 }: {
   open: boolean
   onClose: () => void
@@ -522,6 +522,7 @@ export function ConfirmDialog({
   confirmLabel?: string
   pending?: boolean
   error?: unknown
+  errorHint?: string | null
   danger?: boolean
 }) {
   return (
@@ -537,7 +538,7 @@ export function ConfirmDialog({
         </>
       )}
     >
-      {error ? <ErrorState error={error} title="操作失败" /> : null}
+      {error ? <ErrorState error={error} title="操作失败" hint={errorHint} /> : null}
     </Dialog>
   )
 }

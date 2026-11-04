@@ -6,7 +6,7 @@ import type { ProjectWarning } from '../api/types'
 const WORKSPACE_HINTS: Record<string, string> = {
   'workspace operation failed': '工作区操作失败，请查看服务日志中的 error_class 与 upstream_status',
   'gitlab: project token rejected (401)': 'GitLab 拒绝了项目访问 Key：Key 无效、已过期或已撤销，请在项目设置中更新访问 Key',
-  'gitlab: access denied (403)': 'GitLab 拒绝访问项目：访问 Key 需要 Reporter 及以上角色，以及 api（或 read_api）和 read_repository scope',
+  'gitlab: access denied (403)': 'GitLab 拒绝访问项目：访问 Key 需要 Reporter 及以上角色，以及 api 和 read_repository scope',
   'gitlab: project or file not found (404)': 'GitLab 找不到项目：项目可能已删除或移动，或访问 Key 无权查看',
   'gitlab: rate limited (429)': 'GitLab 限流，请稍后重试',
   'gitlab: unavailable': '无法连接 GitLab，或 GitLab 返回服务器错误，请稍后重试',
@@ -35,7 +35,7 @@ export function describeWorkspaceError(message: string): string {
 
 export const MAINTAINER_WARNING = '该 Key 的项目角色低于 Maintainer：评审可以正常运行，但自动启用 Webhook 需要 Maintainer。请改用 Maintainer 角色的 Key，或在 GitLab 中手动添加 Webhook。'
 const TOKEN_REJECTED_HINT = 'GitLab 拒绝了访问 Key（401）：Key 无效、已过期或已撤销，请先更新访问 Key。'
-const MAINTAINER_REQUIRED_HINT = 'GitLab 拒绝管理 Webhook（403）：需要 Maintainer 角色。请改用 Maintainer 角色的访问 Key，或在 GitLab 中手动添加 Webhook。'
+const MAINTAINER_REQUIRED_HINT = 'GitLab 拒绝管理 Webhook（403）：需要 Maintainer 角色。请改用 Maintainer 角色的访问 Key，或由 Maintainer 在 GitLab 中手动管理 Webhook。'
 
 export function tokenWarningText(warnings: ProjectWarning[] | undefined): string | null {
   return warnings?.some((warning) => warning.code === 'webhook_requires_maintainer') ? MAINTAINER_WARNING : null

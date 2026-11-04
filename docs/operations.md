@@ -1236,7 +1236,7 @@ docker run --rm --entrypoint stat tribunal:local -c '%u:%g %a' /app/data
 | `last_error` | 含义 | 处理 |
 |---|---|---|
 | `gitlab: project token rejected (401)` | GitLab 拒绝已保存的项目 token（无效、过期或已撤销） | 在项目设置「更新访问 Key」换新 token |
-| `gitlab: access denied (403)` | token 角色或 scope 不足以访问项目 API | 需要 Reporter 及以上角色，scope 含 `api`（或 `read_api`）和 `read_repository` |
+| `gitlab: access denied (403)` | token 角色或 scope 不足以访问项目 API | 需要 Reporter 及以上角色，scope 含 `api` 和 `read_repository` |
 | `gitlab: project or file not found (404)` | 项目已删除或迁移，或 token 看不到该项目 | 核对项目是否存在、token 是否属于该项目 |
 | `gitlab: rate limited (429)` | GitLab 限流 | 稍后重试 |
 | `gitlab: unavailable` | 传输失败或 GitLab 返回 5xx | 检查到 GitLab 的网络和 GitLab 状态后重试 |
