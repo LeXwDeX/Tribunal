@@ -587,3 +587,25 @@ func TestProjectDeleteRemovesSymlinkedProjectDirLinkOnly(t *testing.T) {
 		t.Errorf("outside content was removed: %v", err)
 	}
 }
+
+// A registrant grant that cannot be written rolls the registration back and
+// removes the webhook created for it.
+func TestRegisterOwnerGrantFailureCompensatesWebhook(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	api := defaultFakeGitLab()
+	service := newProjectService(t, st, api, newTestCipher(t), "https://review.example.com")
+	_, err := service.Register(ctx, RegisterInput{
+		Project: "42", AccessToken: "glpat-project", AutoWebhook: true, OwnerUserID: 999,
+	})
+	var appErr *Error
+	if !errors.As(err, &appErr) || appErr.Code != "internal" || appErr.Compensate {
+		t.Fatalf("error = %#v, want internal without compensation failure", err)
+	}
+	if len(api.deletedHooks) != 1 || api.deletedHooks[0] != 99 {
+		t.Fatalf("deleted hooks = %v", api.deletedHooks)
+	}
+	if _, err := st.GetProject(ctx, 42); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("project persisted after owner failure: %v", err)
+	}
+}

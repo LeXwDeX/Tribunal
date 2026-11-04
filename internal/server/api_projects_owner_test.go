@@ -81,6 +81,11 @@ func TestRegisterProjectConflictHintIsAdminOnly(t *testing.T) {
 	if duplicate.status != http.StatusConflict {
 		t.Fatalf("duplicate = %d %s", duplicate.status, duplicate.body)
 	}
+	// The console matches this prefix to show its localized hint.
+	message, _ := env.decode(t, duplicate)["error"].(map[string]any)["message"].(string)
+	if !strings.HasPrefix(message, "project is already registered") {
+		t.Fatalf("duplicate message prefix changed: %q", message)
+	}
 	if !strings.Contains(string(duplicate.body), "System page") {
 		t.Fatalf("duplicate message lacks the grant hint: %s", duplicate.body)
 	}
@@ -139,5 +144,29 @@ func TestReregisterAfterDeleteGrantsRegistrantManage(t *testing.T) {
 				t.Fatalf("list after re-register = %d %s", list.status, list.body)
 			}
 		})
+	}
+}
+
+// A user-owned API token registers on behalf of its owner.
+func TestRegisterProjectByUserAPITokenGrantsOwnerManage(t *testing.T) {
+	api := defaultStubGitLab()
+	env := newM6Env(t, m6Options{adminFactory: func(st *sqlite.Store) AdminService {
+		return testProjectService(t, st, api, t.TempDir())
+	}})
+	session := env.loginAs("code-admin") // GitLab user 7
+	created := session.json(http.MethodPost, "/api/v1/api-tokens", map[string]any{"name": "register"})
+	if created.status != http.StatusCreated {
+		t.Fatalf("create token = %d %s", created.status, created.body)
+	}
+	plain, _ := env.decode(t, created)["token"].(string)
+	token := &m6Client{t: t, base: env.server.URL, client: &http.Client{}, bearer: plain}
+	if got := token.json(http.MethodPost, "/api/v1/projects", map[string]any{
+		"project": "42", "token": testProjectTok,
+	}); got.status != http.StatusCreated {
+		t.Fatalf("register = %d %s", got.status, got.body)
+	}
+	role, err := env.sqlite.GetProjectAccess(context.Background(), 7, 42)
+	if err != nil || role != store.ProjectAccessManage {
+		t.Fatalf("token owner grant = %q, %v; want manage", role, err)
 	}
 }

@@ -250,6 +250,8 @@ describe('already registered conflict (#277)', () => {
 
     expect(await screen.findByText(/该项目已注册。若项目列表中看不到它/)).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '前往系统页授权' })).toHaveAttribute('href', '/system')
+    expect(screen.queryByText('保存并初始化失败')).not.toBeInTheDocument()
+    expect(screen.queryByText(/grant yourself access/)).not.toBeInTheDocument()
   })
 
   it('shows no grant hint for other conflicts', async () => {

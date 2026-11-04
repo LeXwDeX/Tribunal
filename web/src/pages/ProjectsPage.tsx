@@ -244,15 +244,13 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
             <li className={validation ? `${page.step} ${page.stepOn}` : page.step} aria-current={validation ? 'step' : undefined}><b>2</b>保存并初始化</li>
           </ol>
           {validationError ? <ErrorState error={validationError} title="校验失败" /> : null}
-          {error ? <ErrorState error={error} title="保存并初始化失败" /> : null}
           {isAlreadyRegistered(error) ? (
-            <div className={styles.notice} role="status">
-              <div className={ui.stack}>
-                <span className="small">该项目已注册。若项目列表中看不到它，说明你还没有该项目的访问授权，可在「系统」页的项目授权中为自己授予 manage。</span>
-                <ButtonLink to="/system" onClick={close}>前往系统页授权</ButtonLink>
-              </div>
+            <div className={ui.errorBox} role="alert">
+              <strong>项目已注册</strong>
+              <span>该项目已注册。若项目列表中看不到它，说明你还没有该项目的访问授权，可在「系统」页的项目授权中为自己授予 manage。</span>
+              <ButtonLink to="/system" className={ui.smallButton} onClick={close}>前往系统页授权</ButtonLink>
             </div>
-          ) : null}
+          ) : error ? <ErrorState error={error} title="保存并初始化失败" /> : null}
           {validation ? (
             <>
               <div className={page.resultOk} role="status">
