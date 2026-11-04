@@ -400,18 +400,20 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 			invalidRecovered = true
 			resubmitReason = reason
 			messages = messages[:len(messages)-1]
-			if kept, ok := rejectedTurnText(message); ok {
-				messages = append(messages, kept)
-			}
-			// The rejected output is not replayed; size the context from the
-			// request alone so it cannot trigger compaction.
-			if sized.InputTokens > 0 {
-				contextTokens = sized.InputTokens
-			}
-			messages = append(messages, llm.Message{
+			feedback := llm.Message{
 				Role:  llm.RoleUser,
 				Parts: []llm.Part{{Type: llm.PartText, Text: invalidToolCallFeedback(kind)}},
-			})
+			}
+			// The rejected calls and reasoning are not replayed; size the
+			// context from the request plus what is replayed.
+			if sized.InputTokens > 0 {
+				contextTokens = sized.InputTokens + textTokens(feedback.Parts)
+			}
+			if kept, ok := rejectedTurnText(message); ok {
+				messages = append(messages, kept)
+				contextTokens += textTokens(kept.Parts)
+			}
+			messages = append(messages, feedback)
 			recordTurn(turnStarted)
 			continue
 		}
@@ -584,6 +586,15 @@ const (
 	addedBytesPerToken = 3
 	freedBytesPerToken = 4
 )
+
+// textTokens estimates the tokens of text parts, like toolResultTokens.
+func textTokens(parts []llm.Part) int64 {
+	var n int64
+	for _, part := range parts {
+		n += int64(len(part.Text))
+	}
+	return n / addedBytesPerToken
+}
 
 func toolResultTokens(parts []llm.Part) int64 {
 	var n int64

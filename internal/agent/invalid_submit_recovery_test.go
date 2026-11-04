@@ -314,3 +314,29 @@ func TestRunResubmitTurnKeepsSubmitOnly(t *testing.T) {
 		t.Fatalf("echo executed %d times, want only the first exploration call", executed)
 	}
 }
+
+func TestRunRecoveryCountsRetainedTextInContext(t *testing.T) {
+	// Retained assistant text is replayed, so it still counts toward the
+	// context estimate and can trigger compaction on the resubmit turn.
+	invalid := toolResponse(llm.StopToolUse, call("bad", SubmitToolName, corruptSubmitInput))
+	invalid.Message.Parts = append([]llm.Part{{Type: llm.PartText, Text: strings.Repeat("d", 75000)}}, invalid.Message.Parts...)
+	invalid.Usage = llm.Usage{InputTokens: 80000, OutputTokens: 30000}
+	client := &promptedInvalidClient{window: 100000, prompted: []*llm.Response{
+		invalid,
+		toolResponse(llm.StopToolUse, call("ok", SubmitToolName, `{"done":true}`)),
+	}}
+	if _, err := Run(context.Background(), budgetSpec(client)); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	compacted := false
+	for _, msg := range client.reqs[len(client.reqs)-1].Messages {
+		for _, part := range msg.Parts {
+			if part.ToolResult != nil && part.ToolResult.Content == compactedToolResult {
+				compacted = true
+			}
+		}
+	}
+	if !compacted {
+		t.Fatal("80k input plus a 25k-token retained draft must compact before the resubmit")
+	}
+}
