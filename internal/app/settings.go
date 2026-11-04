@@ -132,7 +132,7 @@ func ParseSettings(raw json.RawMessage, profiles map[string]config.ProfileConfig
 				})
 				continue
 			}
-			if _, ok := profiles[profile]; !ok {
+			if !isReviewProfile(profiles, profile) {
 				details = append(details, Detail{
 					Field:   "settings.profile_by_label." + label,
 					Message: "profile is not defined",
@@ -262,6 +262,17 @@ func appendUnique(base, extra []string) []string {
 		}
 	}
 	return result
+}
+
+// isReviewProfile reports whether name is the single configured review
+// profile. Onboarding is not a review profile, and profiles removed from the
+// configuration are no longer selectable.
+func isReviewProfile(profiles map[string]config.ProfileConfig, name string) bool {
+	if name != config.ReviewProfile {
+		return false
+	}
+	_, ok := profiles[name]
+	return ok
 }
 
 // ProfileForLabels returns the first label-mapped profile, else fallback.

@@ -41,6 +41,7 @@ cmd/
 internal/
   config/
     config.go                    配置结构体、默认值、Validate()
+    review_profile.go            评审档位归一化：移除旧档位、迁移或忽略旧字段并产生启动告警
     load.go                      YAML 读取、${ENV} 展开、多文件合并
   server/
     server.go                    http.Server、路由、中间件（request id、日志、recover）
@@ -104,8 +105,9 @@ internal/
     dossier.go                   材料包构建
     blocks.go                    块定义与展开（profile → GraphSpec）
     executor.go                  dag.NodeExecutor 实现：按节点 kind 分派
-    nodes_agent.go               agent 类节点：plan、code-review、review.*、reasoner、verify、synthesize、onboarding
-    nodes_code.go                代码类节点：gather、adjudicate
+    nodes_agent.go               agent 类节点：code-review、reasoner、verify、onboarding（并保留历史工作流的 agent plan、review.*、synthesize 解码）
+    nodes_code.go                代码类节点：plan（分包）、gather、adjudicate、synthesize
+    lanes.go                     评审流：explore、review、validate 节点，ExploreOut / ValidateOut 契约，把 plan 展开为四路并行评审
     contracts.go                 各节点输出结构体与 JSON Schema
     adjudicate.go                裁决不变量 I1–I7
     dedupe.go                    finding 去重合并
@@ -129,8 +131,8 @@ pkg/
     events.go                    事件定义与序列化
     projector.go                 事件 → 读模型
 prompts/
-  main.plan.md  main.synthesize.md  code-review.md  review.standards.md  review.intent.md
-  review.gate.md  reasoner.md  verify.md  onboarding.md  _platform_rules.md
+  explore.md  code-review.md  review.md  reasoner.md  validate.md  verify.md  onboarding.md  _platform_rules.md
+  main.plan.md  main.synthesize.md  review.standards.md  review.intent.md  review.gate.md   # 仅历史工作流使用
 web/                             Web 控制台（M6，见 07-web-console.md）
 ```
 

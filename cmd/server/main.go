@@ -98,6 +98,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	warnDeprecatedEnv(logger)
+	warnConfig(logger, cfg.Warnings)
 	key, err := decodeMasterKey(cfg.Secrets.MasterKeyEnv)
 	if err != nil {
 		return err
@@ -523,6 +524,14 @@ func shutdownHTTPServer(srv *http.Server, timeout time.Duration, logger *slog.Lo
 		return fmt.Errorf("close HTTP server: %w", err)
 	}
 	return nil
+}
+
+// warnConfig logs each configuration item Load ignored or migrated, such as
+// a removed review profile. The messages name fields, never values.
+func warnConfig(logger *slog.Logger, warnings []string) {
+	for _, warning := range warnings {
+		logger.Warn("configuration was migrated or ignored: " + warning)
+	}
 }
 
 // warnDeprecatedEnv tells the operator once per startup which legacy

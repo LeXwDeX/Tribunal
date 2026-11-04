@@ -59,11 +59,22 @@ engine:
   default_node_timeout: 10m
 
 profiles:
+  # The only review profile: explore, then code-review (with the code-review
+  # skill), review, reasoner and validate in parallel, then adjudication and
+  # the report. provider is the default model of every node; explore, lanes.*
+  # and challenge (the per-finding refutation) can name another provider.
   default:
-    plan: { mode: code, package_tokens: 60000 }
-    on_uncertain: mark
-    synthesize: { mode: code }
-    budget: { max_nodes: 30, max_extends: 0, deadline: 20m, max_tokens: 1500000 }
+    # Name a provider defined under providers, for example primary.
+    # provider: primary
+    # explore: { provider: primary }
+    # lanes:
+    #   code_review: { provider: primary }
+    #   review: { provider: primary }
+    #   reasoner: { provider: primary }
+    #   validate: { provider: primary }
+    # challenge: { provider: primary }
+    plan: { package_tokens: 60000 }
+    budget: { max_nodes: 30, deadline: 30m, max_tokens: 1500000 }
 
 review_defaults:
   language: zh-CN
@@ -118,5 +129,7 @@ default_extensions:
           - search_code
           - check_index_coverage
         review: *codebase_memory_read_tools
-        verify: [get_code_snippet, search_graph, trace_path, search_code]
+        explore: *codebase_memory_read_tools
+        validate: &codebase_memory_verify_tools [get_code_snippet, search_graph, trace_path, search_code]
+        verify: *codebase_memory_verify_tools
         onboarding: [get_architecture, get_graph_schema]

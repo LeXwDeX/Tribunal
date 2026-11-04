@@ -55,17 +55,10 @@ providers: {}
 profiles:
   default:
     plan:
-      mode: code
       package_tokens: 60000
-    propose:
-      - block: code-review
-    on_uncertain: mark
-    synthesize:
-      mode: code
     budget:
       max_nodes: 30
-      max_extends: 0
-      deadline: 20m
+      deadline: 30m
       max_tokens: 1500000
 mcp: {}
 skills:
@@ -109,7 +102,7 @@ synthesize:
 budget:
   max_nodes: 30
   max_extends: 0
-  deadline: 20m
+  deadline: 30m
   max_tokens: 1500000
 `
 
@@ -163,6 +156,7 @@ func Load(paths ...string) (*Config, error) {
 	if err := decodeStrict(root, cfg); err != nil {
 		return nil, err
 	}
+	cfg.Warnings = normalizeProfiles(cfg)
 	return cfg, nil
 }
 

@@ -1201,3 +1201,26 @@ func TestRunReportsUnverifiedMCPKeyOnce(t *testing.T) {
 		t.Fatalf("verified start still warned: %s", second)
 	}
 }
+
+func TestWarnConfigLogsEachMigratedProfileField(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "server.yaml")
+	body := "gitlab:\n  url: https://gitlab.example.test\nprofiles:\n  deep:\n    plan: { mode: agent }\n  default:\n    propose:\n      - { block: code-review }\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("legacy profiles must not fail Load: %v", err)
+	}
+	var logs bytes.Buffer
+	warnConfig(slog.New(slog.NewTextHandler(&logs, nil)), cfg.Warnings)
+	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("want one warning per item, got %q", logs.String())
+	}
+	for i, want := range []string{"profiles.deep was removed", "profiles.default.propose[0] is deprecated"} {
+		if !strings.Contains(lines[i], "level=WARN") || !strings.Contains(lines[i], want) {
+			t.Fatalf("line %d = %q, want WARN with %q", i, lines[i], want)
+		}
+	}
+}

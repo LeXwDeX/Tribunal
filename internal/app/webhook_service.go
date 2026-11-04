@@ -420,8 +420,8 @@ func (s *WebhookService) newReviewJob(project *store.Project, settings config.Pr
 		return nil, "branch_filtered"
 	}
 	profile := ProfileForLabels(labels, project.Profile, settings)
-	if _, ok := s.profiles[profile]; !ok {
-		profile = "default"
+	if !isReviewProfile(s.profiles, profile) {
+		profile = config.ReviewProfile
 	}
 	if settings.AllowRepoConfig {
 		// The effective target-branch configuration can reject the event. A
@@ -553,7 +553,7 @@ func parseCommand(note, defaultProfile string, profiles map[string]config.Profil
 		case "help":
 			return commandHelp, "", false, false, ""
 		default:
-			if _, ok := profiles[fields[1]]; ok {
+			if isReviewProfile(profiles, fields[1]) {
 				return commandRun, fields[1], false, true, ""
 			}
 			return "", "", false, false, "unknown_profile"

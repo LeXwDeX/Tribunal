@@ -70,13 +70,13 @@ func TestProjectWriteEndpoints(t *testing.T) {
 	env.grant(8, 42, store.ProjectAccessRead)
 
 	updated := client.json(http.MethodPatch, "/api/v1/projects/42", map[string]any{
-		"profile": "deep", "settings": map[string]any{"skip_draft": true}, "enabled": false,
+		"profile": "default", "settings": map[string]any{"skip_draft": true}, "enabled": false,
 	})
 	if updated.status != http.StatusOK {
 		t.Fatalf("patch = %d %s", updated.status, updated.body)
 	}
 	project := env.decode(t, updated)
-	if project["profile"] != "deep" || project["enabled"] != false {
+	if project["profile"] != "default" || project["enabled"] != false {
 		t.Fatalf("patched project = %v", project)
 	}
 
@@ -98,6 +98,7 @@ func TestProjectWriteEndpoints(t *testing.T) {
 
 	for _, body := range []map[string]any{
 		{"profile": "missing"},
+		{"profile": "deep"}, // configured in the map but not a review profile
 		{"bogus": true},
 		{},
 		{"settings": "nope"},

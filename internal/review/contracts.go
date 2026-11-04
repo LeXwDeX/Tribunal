@@ -1060,6 +1060,8 @@ const (
 	ContractVerify          = "verify"
 	ContractSynthesize      = "synthesize"
 	ContractOnboarding      = "onboarding"
+	ContractExplore         = "explore"
+	ContractValidate        = "validate"
 )
 
 type contractExample struct {
@@ -1078,6 +1080,8 @@ func contractExamples() map[string]contractExample {
 		ContractVerify:          {func() Validator { return &VerifyOut{} }},
 		ContractSynthesize:      {func() Validator { return &SynthesizeOut{} }},
 		ContractOnboarding:      {func() Validator { return &OnboardingOut{} }},
+		ContractExplore:         {func() Validator { return &ExploreOut{} }},
+		ContractValidate:        {func() Validator { return &ValidateOut{} }},
 	}
 }
 
@@ -1106,6 +1110,10 @@ func DecodeContract(kind string, raw []byte) (any, error) {
 		return DecodeStrict[*SynthesizeOut](raw)
 	case ContractOnboarding:
 		return DecodeStrict[*OnboardingOut](raw)
+	case ContractExplore:
+		return DecodeStrict[*ExploreOut](raw)
+	case ContractValidate:
+		return DecodeStrict[*ValidateOut](raw)
 	default:
 		_ = example
 		return nil, fmt.Errorf("unknown contract kind %q", kind)

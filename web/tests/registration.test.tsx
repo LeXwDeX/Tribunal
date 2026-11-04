@@ -126,7 +126,7 @@ describe('project registration', () => {
     expect(webhookCalls).toEqual([])
   })
 
-  it('sends edited profile, branches and draft settings without webhook fields', async () => {
+  it('sends the single review profile, edited branches and draft settings without webhook fields', async () => {
     const registerBodies: Array<Record<string, unknown>> = []
     installFetch((url, init) => {
       if (url === '/api/v1/projects' && init?.method === 'POST') {
@@ -138,9 +138,7 @@ describe('project registration', () => {
     const user = await openRegisterDialog()
     await user.type(screen.getByLabelText('仓库地址或项目 ID'), repositoryUrl)
     await user.type(screen.getByLabelText('访问 Key'), accessToken)
-    const profile = screen.getByLabelText('评审档位')
-    await user.clear(profile)
-    await user.type(profile, 'strict')
+    expect(screen.queryByLabelText('评审档位')).not.toBeInTheDocument()
     await user.type(screen.getByLabelText('目标分支'), 'main, release/*')
     await user.click(screen.getByLabelText('跳过 Draft MR'))
     await user.click(screen.getByRole('button', { name: '校验连接' }))
@@ -150,7 +148,7 @@ describe('project registration', () => {
     expect(registerBodies).toEqual([{
       project: repositoryUrl,
       token: accessToken,
-      profile: 'strict',
+      profile: 'default',
       settings: { skip_draft: false, target_branches: ['main', 'release/*'] },
     }])
   })

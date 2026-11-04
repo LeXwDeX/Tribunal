@@ -105,7 +105,7 @@ describe('models layout', () => {
         return jsonResponse({ providers: [{ name: 'claude', protocol: 'anthropic', stats_24h: { calls: 1284, p50_latency_ms: 2100 } }] })
       }
       if (url.startsWith('/api/v1/profiles')) {
-        return jsonResponse({ profiles: [{ name: 'standard', config: { budget: { max_cost_usd: 3 }, propose: [{ block: 'code-review', provider: 'claude' }] } }] })
+        return jsonResponse({ profiles: [{ name: 'default', config: { budget: { max_cost_usd: 3 }, provider: 'claude' } }] })
       }
       return jsonResponse({})
     })
@@ -115,10 +115,10 @@ describe('models layout', () => {
     const items = within(stats).getAllByRole('listitem').map((item) => item.textContent)
     expect(items).toEqual(['24h 调用1,284', '错误率不可用', 'P50 延迟2s'])
 
-    const heading = await screen.findByRole('heading', { name: /standard/ })
+    const heading = await screen.findByRole('heading', { name: /default/ })
     const panel = heading.closest('section') as HTMLElement
     expect(within(panel).getByText('预算 max_cost_usd: 3')).toBeInTheDocument()
-    expect(within(panel).getByRole('list', { name: 'standard 拓扑步骤' })).toBeInTheDocument()
+    expect(within(panel).getByRole('list', { name: 'default 拓扑步骤' })).toBeInTheDocument()
   })
 
   it('keeps the permission error for non-admins', async () => {

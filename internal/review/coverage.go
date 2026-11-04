@@ -44,7 +44,7 @@ func (e *Executor) coverageUnresolved(wf dag.WorkflowView) ([]UnresolvedSignal, 
 			continue
 		}
 		switch node.Spec.Kind {
-		case KindCodeReview, KindReviewStd, KindReviewInt:
+		case KindCodeReview, KindReviewStd, KindReviewInt, KindReview:
 		default:
 			continue
 		}

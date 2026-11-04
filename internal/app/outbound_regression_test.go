@@ -178,11 +178,11 @@ func TestGatePublicationRetrySettlesCompletedReview(t *testing.T) {
 	}
 }
 
-func TestGateProfileChangeCancelsProvider(t *testing.T) {
+// Only the default review profile exists, so a project's effective settings
+// are what can change under an in-flight provider call; a non-default profile
+// name is rejected before the gate and must not cancel it.
+func TestGateSettingsChangeCancelsProvider(t *testing.T) {
 	f := newPolicyGateFixture(t)
-	other := testReviewProfile()
-	other.Propose[0].Provider = "other-provider"
-	f.f.profiles["other"] = other
 	block := newBlockedOutbound(t)
 	f.f.service.clients = staticProviderClients{"fake": &blockedTurnClient{blockedOutbound: block}}
 	f.f.service.agentRun = nil
@@ -191,20 +191,29 @@ func TestGateProfileChangeCancelsProvider(t *testing.T) {
 	go func() { done <- f.f.service.RunReview(context.Background(), job) }()
 	t.Cleanup(func() { block.unblock(); <-done })
 	awaitOutbound(t, block.entered, "provider")
-	profile := "other"
+	other := "other"
+	if _, err := f.projects.Update(context.Background(), 42, UpdateProjectInput{Profile: &other}); err == nil {
+		t.Error("non-default profile accepted")
+	}
+	select {
+	case <-block.cancelled:
+		t.Error("rejected profile update cancelled provider")
+	default:
+	}
+	settings := json.RawMessage(`{"ignore":["other/**"],"allow_repo_skills":true}`)
 	writeDone := make(chan error, 1)
 	go func() {
-		_, err := f.projects.Update(context.Background(), 42, UpdateProjectInput{Profile: &profile})
+		_, err := f.projects.Update(context.Background(), 42, UpdateProjectInput{Settings: &settings})
 		writeDone <- err
 	}()
 	select {
 	case <-block.cancelled:
 	case err := <-writeDone:
-		t.Errorf("profile changed without canceling provider: %v", err)
+		t.Errorf("settings changed without canceling provider: %v", err)
 		block.unblock()
 		return
 	case <-time.After(2 * time.Second):
-		t.Error("profile update stalled")
+		t.Error("settings update stalled")
 		block.unblock()
 		return
 	}

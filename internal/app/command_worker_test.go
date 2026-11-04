@@ -93,7 +93,7 @@ func TestCommandWorkerReplacesQueuedLatestPayload(t *testing.T) {
 	}
 	deep := defaultCommandPayload("run")
 	deep.Full = false
-	deep.Profile = "deep"
+	deep.Profile = "deep" // legacy name from a queued command; must resolve to default
 	deep.NoteID = 1002
 	api.mr.SHA = latestSHA
 	if err := worker.Handle(ctx, persistedCommandJob(t, db, deep)); err != nil {
@@ -120,7 +120,7 @@ func TestCommandWorkerReplacesQueuedLatestPayload(t *testing.T) {
 	if err := json.Unmarshal(claimed.Payload, &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload["head_sha"] != latestSHA || payload["profile"] != "deep" || payload["full"] != false {
+	if payload["head_sha"] != latestSHA || payload["profile"] != "default" || payload["full"] != false {
 		t.Fatalf("latest payload was not applied: %s", claimed.Payload)
 	}
 	if err := db.Complete(ctx, *claimed); err != nil {
@@ -644,7 +644,7 @@ func TestCommandWorkerDisabledProject(t *testing.T) {
 	}
 }
 
-func TestCommandWorkerUnknownProfileFallsBack(t *testing.T) {
+func TestCommandWorkerNonDefaultProfileFallsBackToDefault(t *testing.T) {
 	fakeStore := openFakeStore(t, newTestCipher(t))
 	fakeStore.project.Profile = "deep"
 	api := defaultFakeGitLab()
@@ -662,8 +662,8 @@ func TestCommandWorkerUnknownProfileFallsBack(t *testing.T) {
 	if err := json.Unmarshal(jobs[0].Payload, &body); err != nil {
 		t.Fatal(err)
 	}
-	if body["profile"] != "deep" {
-		t.Fatalf("profile = %v", body["profile"])
+	if body["profile"] != "default" {
+		t.Fatalf("profile = %v, want default", body["profile"])
 	}
 }
 

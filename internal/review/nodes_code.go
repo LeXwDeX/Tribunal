@@ -439,14 +439,28 @@ func (e *Executor) collectProposals(wf dag.WorkflowView) ([]Proposal, []DroppedF
 		}
 		provider := nodeProvider(node)
 		model := node.Model
+		lanes := isLanesFlow(e.profile.Config)
 		switch node.Spec.Kind {
-		case KindCodeReview, KindReviewStd, KindReviewInt, KindReasoner, KindReviewGate:
+		case KindCodeReview, KindReviewStd, KindReviewInt, KindReasoner, KindReviewGate, KindReview, KindValidate:
+		case KindExplore:
+			if node.Status == dag.NodeFailed || node.Status == dag.NodeAborted || node.Status == dag.NodeSkipped {
+				warnings = appendUnique(warnings, fmt.Sprintf("node %s (%s) was %s; the lanes ran without the exploration digest", node.ID, node.Spec.Kind, node.Status))
+			}
+			continue
 		default:
 			continue
 		}
 		if node.Status != dag.NodeCompleted {
 			if node.Status == dag.NodeFailed || node.Status == dag.NodeAborted || node.Status == dag.NodeSkipped {
 				warnings = appendUnique(warnings, fmt.Sprintf("node %s (%s) was %s and its findings are unavailable", node.ID, node.Spec.Kind, node.Status))
+				// A missing lane makes a lanes-flow review incomplete: the
+				// other lanes still publish, but the verdict cannot be PASS.
+				if lanes && isLaneKind(node.Spec.Kind) {
+					signals = append(signals, UnresolvedSignal{
+						Node: node.ID, Kind: UnresolvedEvidence,
+						Message: fmt.Sprintf("lane %s (%s) did not complete: %s", node.ID, node.Spec.Kind, node.Status),
+					})
+				}
 			}
 			continue
 		}
@@ -457,7 +471,7 @@ func (e *Executor) collectProposals(wf dag.WorkflowView) ([]Proposal, []DroppedF
 				return nil, nil, nil, nil, fmt.Errorf("review: decode %s: %w", node.ID, err)
 			}
 			proposals = append(proposals, ProposalFromCodeReview(node.ID, provider, model, node.Attempt, *out))
-		case KindReviewStd, KindReviewInt:
+		case KindReviewStd, KindReviewInt, KindReview:
 			out, err := DecodeStrict[*ReviewOut](node.Output)
 			if err != nil {
 				return nil, nil, nil, nil, fmt.Errorf("review: decode %s: %w", node.ID, err)
@@ -473,6 +487,15 @@ func (e *Executor) collectProposals(wf dag.WorkflowView) ([]Proposal, []DroppedF
 				return nil, nil, nil, nil, fmt.Errorf("review: decode %s: %w", node.ID, err)
 			}
 			proposals = append(proposals, ProposalFromReasoner(node.ID, provider, model, node.Attempt, *out))
+		case KindValidate:
+			out, err := DecodeStrict[*ValidateOut](node.Output)
+			if err != nil {
+				return nil, nil, nil, nil, fmt.Errorf("review: decode %s: %w", node.ID, err)
+			}
+			proposals = append(proposals, ProposalFromValidate(node.ID, provider, model, node.Attempt, *out))
+			laneSignals, laneWarnings := validateSignals(node.ID, *out)
+			signals = append(signals, laneSignals...)
+			warnings = mergeWarnings(warnings, laneWarnings)
 		case KindReviewGate:
 			out, err := DecodeStrict[*ReviewGateOut](node.Output)
 			if err != nil {

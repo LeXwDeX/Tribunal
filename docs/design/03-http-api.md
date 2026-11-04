@@ -114,7 +114,7 @@ Note Hook 先入队 `review.command`，由 worker 请求 GitLab 校验身份、M
 | POST | `/api/v1/projects/validate` | 平台管理员只读连接校验：`{project, token}`；不保存项目或凭据 |
 | POST | `/api/v1/projects` | 平台管理员注册项目 |
 | GET | `/api/v1/projects/{id}` | 项目 `read`：详情（含工作区状态、最近评审和 `access`） |
-| PATCH | `/api/v1/projects/{id}` | 项目 `manage`：修改 `profile`、`settings`、`enabled` |
+| PATCH | `/api/v1/projects/{id}` | 项目 `manage`：修改 `profile`（只接受 `default`，其他值返回 400 `unknown profile`）、`settings`、`enabled` |
 | PUT | `/api/v1/projects/{id}/token` | 项目 `manage`：轮换 token：`{token}` |
 | POST | `/api/v1/projects/{id}/webhook` | 项目 `manage`：显式启用 GitLab webhook；只复用仍存在的已记录 `hook_id`，沿用已存 secret |
 | POST | `/api/v1/projects/{id}/webhook/rebuild` | 项目 `manage`：轮换 secret 并重建 GitLab webhook；只复用仍存在的已记录 `hook_id`，没有可复用 hook 时创建 |
@@ -171,7 +171,7 @@ POST /api/v1/projects
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/v1/reviews` | 列表：`?project_id=&mr_iid=&status=&verdict=&publication_state=&profile=&trigger=&since=&limit=&cursor=`；所有筛选和项目授权过滤在服务端分页前应用；每项附 `nodes` 与 `findings_summary` |
-| POST | `/api/v1/projects/{id}/merge_requests/{iid}/reviews` | 项目 `manage` 手动触发：`{profile?, full?}` → `202 {job_id}` |
+| POST | `/api/v1/projects/{id}/merge_requests/{iid}/reviews` | 项目 `manage` 手动触发：`{profile?, full?}` → `202 {job_id}`；评审档位只有 `default`，控制台不再提供选择，`profile` 省略或不是评审档位时按项目档位、再按 `default` 处理 |
 | GET | `/api/v1/reviews/{wf_id}` | 工作流详情：基本信息 + `access` + 节点 + finding 统计 + 发布状态 |
 | GET | `/api/v1/reviews/{wf_id}/graph` | 节点和边，供 DAG 视图渲染 |
 | GET | `/api/v1/reviews/{wf_id}/findings` | finding 列表：`?decision=&severity=&limit=&cursor=`；severity 按非空 `final_severity` 筛选，未裁决时回退原始 `severity`，与界面和汇总一致 |
@@ -191,7 +191,7 @@ POST /api/v1/projects
   "mr_iid": 318,
   "mr_title": "feat: 支持批量导入",
   "head_sha": "9f3c2a1…",
-  "profile": "deep",
+  "profile": "default",
   "trigger": "mr_update",
   "status": "completed",
   "usage_incomplete": false,
@@ -346,7 +346,7 @@ MCP、Skill、块绑定列表使用游标分页。
 |---|---|---|
 | GET | `/api/v1/providers` | provider 列表（**不含** API key）及近 24 小时调用统计 |
 | POST | `/api/v1/providers/{name}/test` | 发一条最小请求验证连通性和模型名 |
-| GET | `/api/v1/profiles` | 评审档位定义（来自配置文件，只读） |
+| GET | `/api/v1/profiles` | 档位定义（来自配置文件，只读）；含评审档位 `default` 和 `onboarding`，后者不是评审档位 |
 | GET | `/api/v1/stats` | `?from=&to=&project_id=`：运行次数（含 onboarding）、耗时、成本、项目/provider/块统计与 UTC 日趋势、finding 处置分布、人工质量指标、按模型调用与反馈原始计数；`to` 为排他上界 |
 | GET | `/api/v1/system/lock-stats` | 平台管理员：SQLite 连接等待（`wait_count`、`wait_duration_ms` 为累计值；`max_open_connections`、`in_use`、`idle` 为当前连接池值）与工作区锁等待（`wait_count`、`wait_duration_ms` 为累计值，`max_wait_ms` 为进程启动以来单次最长等待）；单连接下连接等待是 SQL 串行化的代理，不是 driver busy 重试计数 |
 | GET | `/api/v1/settings` | 平台配置的只读视图（脱敏） |
@@ -433,9 +433,9 @@ Provider 返回 `name`、`protocol`、`base_url`、`model`、`max_concurrency`�
 
 | 命令 | 作用 |
 |---|---|
-| `/review` | 用项目默认 profile 重新评审（增量） |
+| `/review` | 重新评审（增量），使用 `default` 评审档位 |
 | `/review full` | 全量评审 |
-| `/review <profile>` | 指定档位，如 `/review deep` |
+| `/review default` | 显式指定 `default`（唯一的评审档位）；其他名称不被接受，命令被忽略 |
 | `/review cancel` | 取消正在运行的评审 |
 | `/review help` | 回复命令说明 |
 

@@ -4,7 +4,7 @@ GitLab CE MR 多 agent 自动评审服务
 
 基于 Go 的 GitLab CE MR 自动评审服务，使用 MIT 协议。
 
-当前 M0–M6 功能已有本地实现，覆盖项目注册与 webhook、三种 LLM 协议、agent 工具循环、DAG 与持久化、主 agent 编排/对抗核验/裁决、GitLab 发布、工作区、MCP/Skill、OAuth 持久会话、项目 `read`/`manage` 授权与 CSRF、管理 API、React 控制台、API token、统计、反馈采集、人工标注与许可证清单。
+当前 M0–M6 功能已有本地实现，覆盖项目注册与 webhook、三种 LLM 协议、agent 工具循环、DAG 与持久化、只读探索与四路并行评审/对抗核验/裁决、GitLab 发布、工作区、MCP/Skill、OAuth 持久会话、项目 `read`/`manage` 授权与 CSRF、管理 API、React 控制台、API token、统计、反馈采集、人工标注与许可证清单。
 
 当前最新发布版本是 **v1.1.0**，待发布版本是 **v1.2.0**；变更和升级必读见 [CHANGELOG](CHANGELOG.md)。v1.2.0 尚未打 tag；范围已扩大到当前 `main`，包含 #143 与迁移 `0020`–`0024`。真实实例升级已验证迁移 `0016`–`0024` 的应用、健康检查、内置扩展和 #143 授权迁移；最新一次从 `a113e08` 升级到 `2621c44`。`0020`/`0022` 的带历史数据回填、完整 2 用户／2 项目矩阵和升级后新真实评审仍未验证；详见交付就绪文档。CI 以最终 tag commit 的 GitHub Actions 结果为准。完整验证状态见 [v1.2.0（待发布）验证状态](docs/delivery-readiness.md#v120-验证状态)。
 
@@ -206,7 +206,7 @@ tribunalctl users list
 |---|---|
 | MR open / reopen / update（带 oldrev） | 入队 `review.run`；Draft/标签/目标分支在 hook 或 worker 合并仓库配置后过滤 |
 | MR close / merge | 入队 `review.cancel` |
-| MR 评论 `/review`、`/review full`、`/review <profile>`、`/review cancel` | 先入队 `review.command`，worker 检查机器人身份、MR 状态和 Developer 以上权限，再入队目标任务 |
+| MR 评论 `/review`、`/review full`、`/review default`、`/review cancel` | 先入队 `review.command`，worker 检查机器人身份、MR 状态和 Developer 以上权限，再入队目标任务 |
 | 目标分支 push | 入队 `workspace.refresh`；分支删除不入队 |
 | 项目注册 | 原子写入项目、初始工作区和 `workspace.onboard` 任务 |
 | API 重新发布 | 入队 `review.publish` |
@@ -232,7 +232,7 @@ UUID 在项目内去重，去重记录和入队在同一事务中提交。同一
 - 在「块绑定」中把它从某个块移除后，重启不会恢复；升级也不会改写管理员改过的绑定。
 - 配置 `default_extensions.skills: []` 可以让新部署不登记默认 Skill。详见 [默认扩展配置](docs/design/06-config.md#默认扩展default_extensions)。
 
-Docker 镜像还内置校验过的 [codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp) 0.12.1（MIT）代码图谱服务和隔离 wrapper `/usr/local/bin/tribunal-codebase-memory-mcp`。示例配置和 `config/server.docker.yaml` 会登记内置平台 MCP 服务器 `codebase-memory`（只读 analysis 工具面）：`code-review` 和 `review` 各授权 11 项只读图谱工具，`verify` 授权 `get_code_snippet`、`search_graph`、`trace_path`、`search_code`，`onboarding` 授权 `get_architecture`、`get_graph_schema`，`reasoner` 和 `synthesize` 不默认授权；注册项目后 onboarding 用 CLI 为 `base/` 建索引，每个项目的索引只在自己的工作区内可见。
+Docker 镜像还内置校验过的 [codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp) 0.12.1（MIT）代码图谱服务和隔离 wrapper `/usr/local/bin/tribunal-codebase-memory-mcp`。示例配置和 `config/server.docker.yaml` 会登记内置平台 MCP 服务器 `codebase-memory`（只读 analysis 工具面）：`explore`、`code-review` 和 `review` 各授权 11 项只读图谱工具，`validate` 和 `verify` 各授权 `get_code_snippet`、`search_graph`、`trace_path`、`search_code`，`onboarding` 授权 `get_architecture`、`get_graph_schema`，`reasoner` 和 `synthesize` 不默认授权；注册项目后 onboarding 用 CLI 为 `base/` 建索引，每个项目的索引只在自己的工作区内可见。
 
 - 控制台「扩展 → MCP 服务器」中它带「内置」标签，可以测试，但始终启用，不能停用、编辑或删除（API 返回 409）。自定义 MCP 的新增和导入入口已关闭。
 - 平台升级后，下次启动会把它的配置和默认工具白名单更新为新版本附带的内容，并保持启用；管理员改过的块绑定不变。
@@ -264,7 +264,7 @@ go mod verify
 
 - 项目注册、token 校验/加密、webhook 去重与持久化任务队列。
 - OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 三种协议；agent 工具循环。
-- DAG 引擎、评审块、主 agent 编排、verify/裁决、结果发布与 republish。
+- DAG 引擎、评审块、固定评审流程（explore、四路并行评审、verify 反证、裁决）、结果发布与 republish。
 - 工作区 onboarding/刷新、上下文文档、MCP/Skill 与项目级绑定。
 - OAuth 持久会话、CSRF、平台 admin/viewer 标签、项目 `read`/`manage` 授权、用户停用与凭据撤销、API token（默认 90 天、最长 365 天）、管理 API、React 控制台、反馈收集。
 - 总体/项目/provider/块的运行次数、成本、平均/P95 耗时、样本数及 UTC 日趋势。项目统计工作流，provider/块统计已启动节点，界面可展开每日明细；不把节点重试或多轮调用当作额外运行。筛选与分桶均以 workflow 创建时间为准，详见 [统计 API 口径](docs/design/03-http-api.md#45-系统)。
@@ -292,8 +292,8 @@ go mod verify
 - 人工标注仅保留最新结论，采用最后一次成功写入，不提供历史审计或并发编辑冲突提示；清除时一并清空操作者和时间。质量指标按 workflow 创建时间筛选，但使用当前标注，因此旧时间窗的结果可随更正变化。去重后的 finding 每行只归给保存的提出方，挑战方按同一 workflow 的 `challenge_node` 关联；缺失 provider 的角色不计入该角色统计。样本可能存在人工选择偏差，不代表模型总体效果；标注不改变发布结果或 verdict。
 - 覆盖缺口是硬完成条件：`DiffSummary.files` 只表示进入材料快照的文件数，不是已评审数；`omitted` 是容量截断或 GitLab 未提供 diff 等原因，`ignored` 是用户规则排除，两者不同。存在 omitted、评审节点实际遇到的提示词截断、完成 plan 后未分配的非 generated included 文件或上游证据不足时，最终结论为 `INCOMPLETE`；全部 omitted 不建 workflow，只发布 `INCOMPLETE` 摘要，列出 omitted 总数、原因计数和最多 4 条路径，其余只计数；正常 dossier 保留完整的 omitted 列表。全部被 ignore 时发布「无需评审」。
 - workflow token 预算是共享上限，按 `input_tokens + output_tokens` 计算；cache read/write 和 reasoning 在 usage 中分别表示，但不额外相加，避免与输入/输出重复计数。每次模型请求前检查已提交用量加当前 attempt 已知 partial usage；并发或已发出的请求仍可能在检查后完成并产生有界超支，不能当精确账单。失败重试的已知 usage 计入下一次尝试的预算和最终节点用量；预算不足保留已有结果，按 required/optional 和确定性兜底处理，不无提示 PASS。
-- `synthesize` 的预算/传输失败直接走确定性规则兜底，不重试；其他 agent 节点仍对 transport 错误重试。
-- 共识投票和 challenger 选择按配置的 endpoint + model 身份归一，同端点同模型的 provider 别名不增加独立票数。无法解析身份的多个 provider 共用同一个 unknown bucket：known 与 unknown 可各计一票，unknown 之间不增加独立票；metadata 缺失会限制挑战者独立性，不能据此声称跨模型确认。没有独立 challenger 时使用已声明的 fallback 并显式提示。`CodeRef` 反证在固定 head/base 快照中检查路径和行号，缺失快照或读取失败降为 `UNCERTAIN`。
+- agent 节点对 transport 错误重试；汇报由代码节点完成，不调用模型。
+- 同模型判断按配置的 endpoint + model 身份归一：同端点同模型的 provider 别名视为同一模型，身份无法解析时也按同模型处理；metadata 缺失会限制挑战者独立性，不能据此声称跨模型确认。`CodeRef` 反证在固定 head/base 快照中检查路径和行号，缺失快照或读取失败降为 `UNCERTAIN`。
 - 评审执行状态和 GitLab 发布状态分开保存：`publication_state` 为 `pending`、`published`、`skipped` 或 `failed`，失败原因有界脱敏保存。pending 在重启后恢复；stale、取消和关闭 failure note 记为 skipped；永久发布失败需手动 republish。`INCOMPLETE` 和 `BLOCKING` 都不会写成 commit status success。
 - Web 依赖为 `react-router-dom 7.18.4`、`vite 7.3.7`、`vitest 4.1.12` / `@vitest/coverage-v8 4.1.12`。Vitest 4 改用 AST 重映射 V8 覆盖率，阈值现为语句 74%、分支 72%、函数 71%、行 78%；升级前旧记录中的 41.86% 与当前数字不可直接比较。
 - 统计页项目筛选使用游标分页，每次加载 100 项，可继续加载或重试；使用 `usePaginated` 的分页列表的“重试加载更多”沿用失败请求的同一 cursor，首屏重试或“刷新”才从第一页重新加载。统计日期筛选把结束日映射到次日本地午夜，服务端按 `[from,to)` 计数。

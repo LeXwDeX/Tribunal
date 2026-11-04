@@ -18,7 +18,7 @@ import ui from '../../styles/ui.module.css'
 import styles from '../../pages/pages.module.css'
 import ext from './extensions.module.css'
 
-const blocks = ['code-review', 'review', 'reasoner', 'verify', 'synthesize', 'onboarding']
+const blocks = ['explore', 'code-review', 'review', 'reasoner', 'validate', 'verify', 'synthesize', 'onboarding']
 const tabs = [
   { key: 'mcp', label: 'MCP 服务器', panelId: 'tabpanel-mcp' },
   { key: 'skills', label: 'Skill', panelId: 'tabpanel-skills' },

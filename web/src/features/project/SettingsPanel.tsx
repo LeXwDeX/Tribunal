@@ -2,7 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  listProfiles, rotateProjectToken, unregisterProject, updateProject, validateProjectConnection,
+  rotateProjectToken, unregisterProject, updateProject, validateProjectConnection,
 } from '../../api/api'
 import { ApiError, errorMessage } from '../../api/client'
 import type { Project, ProjectValidation } from '../../api/types'
@@ -79,9 +79,7 @@ export function SettingsPanel({ project }: { project: Project }) {
   const toast = useToast()
   const queryClient = useQueryClient()
   const navigate = useNavigate()
-  const profileId = useId()
   const [draft, setDraft] = useState<SettingsDraft>({ ...(project.settings || {}) })
-  const [profile, setProfile] = useState(project.profile || 'default')
   const [jsonText, setJsonText] = useState(() => JSON.stringify(project.settings || {}, null, 2))
   const [jsonError, setJsonError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
@@ -104,15 +102,8 @@ export function SettingsPanel({ project }: { project: Project }) {
     return () => { mounted.current = false; validateRef.current += 1 }
   }, [])
 
-  const profiles = useQuery({
-    queryKey: ['profiles', 'project-settings'],
-    queryFn: () => listProfiles(),
-    enabled: canWrite && isAdmin,
-  })
-
   useEffect(() => {
     setDraft({ ...(project.settings || {}) })
-    setProfile(project.profile || 'default')
     setJsonText(JSON.stringify(project.settings || {}, null, 2))
     setJsonError(null)
     setSaveError(null)
@@ -151,10 +142,6 @@ export function SettingsPanel({ project }: { project: Project }) {
 
   const save = async () => {
     if (!canWrite) return
-    if (!profile.trim()) {
-      setSaveError(new Error('档位不能为空。'))
-      return
-    }
     for (const key of ['max_files', 'max_diff_lines']) {
       const value = draft[key]
       if (value !== undefined && (!Number.isInteger(value) || (value as number) <= 0)) {
@@ -165,7 +152,7 @@ export function SettingsPanel({ project }: { project: Project }) {
     setSaving(true)
     setSaveError(null)
     try {
-      await updateProject(project.id, { profile: profile.trim(), settings: draft })
+      await updateProject(project.id, { settings: draft })
       toast.push('success', '项目设置已保存。')
       await queryClient.invalidateQueries({ queryKey: ['project', project.id] })
       await queryClient.invalidateQueries({ queryKey: ['projects'] })
@@ -301,7 +288,6 @@ export function SettingsPanel({ project }: { project: Project }) {
       <div className={styles.split}>
         <Panel title="项目设置（只读）" className={styles.mainColumn}>
           <dl className={ui.definitionGrid}>
-            <div><dt>档位</dt><dd>{project.profile || '—'}</dd></div>
             <div><dt>启用</dt><dd>{project.enabled ? '启用' : '停用'}</dd></div>
             <div><dt>评审语言</dt><dd>{String(project.settings?.language || '继承平台默认')}</dd></div>
             <div><dt>跳过 Draft</dt><dd>{project.settings?.skip_draft === undefined ? '继承平台默认' : project.settings.skip_draft ? '启用' : '禁用'}</dd></div>
@@ -330,18 +316,6 @@ export function SettingsPanel({ project }: { project: Project }) {
           aside={projectsAside(project)}
         >
           <div className="formGrid">
-            <Field
-              label="评审档位"
-              htmlFor={profileId}
-              hint={isAdmin ? '来自平台配置；此处可改项目默认档位。' : '当前项目档位。普通项目管理员不读取全局档位列表；输入值由服务端校验。'}
-            >
-              <input id={profileId} className="input" list={isAdmin ? 'project-profile-options' : undefined} value={profile} onChange={(event) => setProfile(event.target.value)} />
-              {isAdmin ? (
-                <datalist id="project-profile-options">
-                  {(profiles.data?.profiles || []).map((item) => <option key={item.name} value={item.name} />)}
-                </datalist>
-              ) : null}
-            </Field>
             <Field label="评审语言" htmlFor="setting-language" hint="留空时继承平台默认。">
               <select id="setting-language" className="select" value={typeof draft.language === 'string' ? draft.language : ''} onChange={(event) => updateDraft('language', event.target.value)}>
                 <option value="">继承平台默认</option>

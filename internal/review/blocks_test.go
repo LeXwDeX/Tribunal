@@ -160,9 +160,18 @@ func TestBuildGraphDockerProfiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("default BuildGraph: %v", err)
 	}
-	for _, id := range []string{NodePlan, NodeGather, NodeAdjudicate, NodeSynth} {
+	for _, id := range []string{NodeExplore, NodePlan, NodeGather, NodeAdjudicate, NodeSynth} {
 		if _, ok := nodeByID(defaultSpec, id); !ok {
 			t.Fatalf("default graph missing node %q", id)
+		}
+	}
+	if cfg.Profiles["default"].Flow != FlowLanes || defaultSpec.Budget.Deadline != 30*time.Minute {
+		t.Fatalf("shipped default profile must use the lanes flow with a 30m deadline: flow=%q deadline=%v",
+			cfg.Profiles["default"].Flow, defaultSpec.Budget.Deadline)
+	}
+	for _, block := range []string{"explore", "validate"} {
+		if len(cfg.DefaultExtensions.MCPServers) == 0 || len(cfg.DefaultExtensions.MCPServers[0].Tools[block]) == 0 {
+			t.Fatalf("built-in codebase-memory grants no read-only tools to %s", block)
 		}
 	}
 

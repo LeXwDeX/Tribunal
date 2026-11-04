@@ -23,11 +23,14 @@ var codebaseMemoryReadTools = []string{
 }
 
 // wantCodebaseMemoryTools is the complete shipped authorization matrix. The
-// review blocks get the read-only tool set, verify and onboarding get only the
-// tools their prompts need, and reasoning/synthesis get no graph tools.
+// review and explore blocks get the read-only tool set, validate, verify and
+// onboarding get only the tools their prompts need, and reasoning/synthesis
+// get no graph tools.
 var wantCodebaseMemoryTools = map[string][]string{
 	"code-review": codebaseMemoryReadTools,
 	"review":      codebaseMemoryReadTools,
+	"explore":     codebaseMemoryReadTools,
+	"validate":    {"get_code_snippet", "search_graph", "trace_path", "search_code"},
 	"verify":      {"get_code_snippet", "search_graph", "trace_path", "search_code"},
 	"onboarding":  {"get_architecture", "get_graph_schema"},
 }
@@ -89,7 +92,7 @@ func TestShippedConfigsEnableCodebaseMemoryByDefault(t *testing.T) {
 				blocks = append(blocks, block)
 			}
 			slices.Sort(blocks)
-			wantBlocks := []string{"code-review", "onboarding", "review", "verify"}
+			wantBlocks := []string{"code-review", "explore", "onboarding", "review", "validate", "verify"}
 			if !slices.Equal(blocks, wantBlocks) {
 				t.Errorf("authorized blocks = %q, want %q", blocks, wantBlocks)
 			}

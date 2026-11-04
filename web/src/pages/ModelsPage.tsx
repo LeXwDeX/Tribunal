@@ -95,48 +95,31 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 
 interface Step { stage: string; what: string; who: string }
 
+const REVIEW_PROFILE = 'default'
+
 // Profile fields without omitempty arrive as "" when unset; treat blank strings as absent.
 function text(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value : undefined
 }
 
+// The single review profile has a fixed topology; only providers vary.
+// Fields arrive normalized from the server; blank strings mean unset.
 function profileSteps(config?: ProfileConfig): Step[] {
   if (!config) return []
-  const steps: Step[] = []
-  const plan = asRecord(config.plan)
-  if (plan) {
-    steps.push({ stage: '规划', what: text(plan.mode) ? `mode=${text(plan.mode)}` : '规划配置', who: text(plan.provider) ?? '代码' })
-  }
-  const propose = Array.isArray(config.propose) ? config.propose : []
-  for (const entry of propose) {
-    const item = asRecord(entry)
-    if (!item) continue
-    steps.push({
-      stage: '提出',
-      what: text(item.block) ?? '提出方',
-      who: text(item.provider) ?? '未配置 provider',
-    })
-  }
-  const reasoner = asRecord(config.reasoner)
-  if (reasoner) {
-    steps.push({ stage: '推理', what: text(reasoner.when) ? `when=${text(reasoner.when)}` : 'reasoner', who: text(reasoner.provider) ?? '未配置 provider' })
-  }
-  const challenge = asRecord(config.challenge)
-  if (challenge) {
-    const only = Array.isArray(challenge.only) ? challenge.only.map(String).join(', ') : ''
-    const provider = text(challenge.provider)
-    const fallback = text(challenge.fallback)
-    steps.push({
-      stage: '挑战',
-      what: only ? `仅 ${only}` : '挑战方',
-      who: provider ? `${provider}${fallback ? `（fallback ${fallback}）` : ''}` : '未配置 provider',
-    })
-  }
-  const synthesize = asRecord(config.synthesize)
-  if (synthesize) {
-    steps.push({ stage: '汇总', what: text(synthesize.mode) ? `mode=${text(synthesize.mode)}` : '汇总配置', who: text(synthesize.provider) ?? '代码' })
-  }
-  return steps
+  const base = text(config.provider)
+  const lanes = asRecord(config.lanes)
+  const who = (value: unknown) => text(value) ?? base ?? '未配置 provider'
+  const lane = (name: string) => who(asRecord(lanes?.[name])?.provider)
+  return [
+    { stage: '探索', what: 'explore（只读探索）', who: who(asRecord(config.explore)?.provider) },
+    { stage: '提出', what: 'code-review（挂载 code-review Skill）', who: lane('code_review') },
+    { stage: '提出', what: 'review（独立终审）', who: lane('review') },
+    { stage: '提出', what: 'reasoner（逻辑推演）', who: lane('reasoner') },
+    { stage: '提出', what: 'validate（pipeline 与代码证据验证）', who: lane('validate') },
+    { stage: '挑战', what: 'verify（逐条反证 P0/P1）', who: who(asRecord(config.challenge)?.provider) },
+    { stage: '裁决', what: 'adjudicate', who: '代码' },
+    { stage: '汇报', what: 'synthesize', who: '代码' },
+  ]
 }
 
 function budgetLabel(budget?: Record<string, unknown>): string | undefined {
@@ -165,9 +148,8 @@ function ProfilePanel({ profile }: { profile: Profile }) {
       aside={budget ? <span className={styles.budget}>{budget}</span> : undefined}
     >
       <div className={styles.profileMeta}>
-        <span>on_uncertain：{config?.on_uncertain || '不可用'}</span>
-        <span>consensus：{config?.consensus ? '已配置' : '未配置'}</span>
-        <span>agent：{config?.agent ? '已配置' : '未配置'}</span>
+        <span>默认 provider：{text(config?.provider) ?? '未配置'}</span>
+        <span>探索 → 四路并行 → 裁决 → 汇报</span>
       </div>
       {steps.length ? (
         <ol className={styles.profileSteps} aria-label={`${profile.name} 拓扑步骤`}>
@@ -202,6 +184,10 @@ export function ModelsPage() {
     (cursor) => listProfiles(cursor),
     'profiles',
   )
+  // Tribunal has one review profile; onboarding is listed apart.
+  const reviewProfiles = profiles.items.filter((profile) => profile.name === REVIEW_PROFILE)
+  const onboarding = profiles.items.find((profile) => profile.name === 'onboarding')
+  const onboardingProvider = text(asRecord(onboarding?.config?.agent)?.provider)
 
   return (
     <main className={ui.page}>
@@ -238,8 +224,9 @@ export function ModelsPage() {
           </div>
           {profiles.isPending ? <LoadingState /> : null}
           {profiles.isError ? <ErrorState error={profiles.error} onRetry={profiles.retry} /> : null}
-          {profiles.isSuccess && profiles.items.length === 0 ? <EmptyState title="平台还没有评审档位配置" /> : null}
-          {profiles.items.map((profile) => <ProfilePanel key={profile.name} profile={profile} />)}
+          {profiles.isSuccess && !reviewProfiles.length ? <EmptyState title="平台还没有评审档位配置" /> : null}
+          {reviewProfiles.map((profile) => <ProfilePanel key={profile.name} profile={profile} />)}
+          {onboardingProvider ? <span className="small muted">项目接入（onboarding，不是评审档位）使用 provider：{onboardingProvider}</span> : null}
           {profiles.hasNextPage ? (
             <div className={styles.loadMore}>
               <Button variant="secondary" onClick={profiles.fetchNextPage} loading={profiles.isFetchingNextPage}>加载更多档位</Button>

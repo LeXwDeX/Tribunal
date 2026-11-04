@@ -272,8 +272,20 @@ func (e *Executor) selectedNodeProvider(in dag.NodeInput) string {
 			return ""
 		}
 		return params.Provider
-	case KindCodeReview, KindReviewStd, KindReviewInt:
+	case KindCodeReview, KindReviewStd, KindReviewInt, KindReview:
 		params, err := decodeParams[reviewNodeParams](in.Node.Params)
+		if err != nil {
+			return ""
+		}
+		return params.Provider
+	case KindExplore:
+		params, err := decodeParams[exploreParams](in.Node.Params)
+		if err != nil {
+			return ""
+		}
+		return params.Provider
+	case KindValidate:
+		params, err := decodeParams[validateParams](in.Node.Params)
 		if err != nil {
 			return ""
 		}
@@ -379,6 +391,12 @@ func (e *Executor) Execute(ctx context.Context, in dag.NodeInput) (dag.NodeOutpu
 		out, err = e.executeReviewGate(ctx, in)
 	case KindReasoner:
 		out, err = e.executeReasoner(ctx, in)
+	case KindExplore:
+		out, err = e.executeExplore(ctx, in)
+	case KindReview:
+		out, err = e.executeReviewLane(ctx, in)
+	case KindValidate:
+		out, err = e.executeValidate(ctx, in)
 	case KindVerify:
 		out, err = e.executeVerify(ctx, in)
 	case KindSynthesize:

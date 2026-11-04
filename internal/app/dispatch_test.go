@@ -63,7 +63,7 @@ func TestDispatcherStartReviewEnqueuesRun(t *testing.T) {
 		"mr_iid":           float64(7),
 		"head_sha":         sha40,
 		"generation":       float64(1),
-		"profile":          "deep",
+		"profile":          "default", // "deep" is not a review profile
 		"profile_explicit": true,
 		"trigger":          "manual",
 		"full":             true,
@@ -100,7 +100,7 @@ func TestDispatcherStartReviewEnqueuesRun(t *testing.T) {
 	}
 }
 
-func TestDispatcherImplicitProfileFollowsRepoDefault(t *testing.T) {
+func TestDispatcherImplicitProfileIgnoresRepoNonDefaultProfile(t *testing.T) {
 	ctx := context.Background()
 	f := newReviewFixture(t, reviewTestHead)
 	f.profiles["deep"] = testReviewProfile()
@@ -131,12 +131,12 @@ func TestDispatcherImplicitProfileFollowsRepoDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if workflow.Profile != "deep" {
-		t.Fatalf("implicit profile = %q, want repo default deep", workflow.Profile)
+	if workflow.Profile != "default" {
+		t.Fatalf("implicit profile = %q, want default (repo profile deep is not a review profile)", workflow.Profile)
 	}
 }
 
-func TestDispatcherExplicitProfileWinsOverRepoDefault(t *testing.T) {
+func TestDispatcherExplicitProfileWinsOverRepoNonDefaultProfile(t *testing.T) {
 	ctx := context.Background()
 	f := newReviewFixture(t, reviewTestHead)
 	f.profiles["deep"] = testReviewProfile()

@@ -37,7 +37,7 @@ chmod 600 .env
 
 `.env` 值包含 `$` 或 `#` 时使用单引号。不要把真实密钥写进 YAML、提交到仓库或放进 Docker build args。Compose 从 `.env` 做变量替换，再通过 `environment` 允许列表传入容器，不会把整个 `.env` 挂载或注入。宿主机已导出的同名变量优先于 `.env`；部署前检查是否有旧值，但不要把秘密输出到日志。环境变量仍对 Docker 管理员可见。
 
-`config/server.docker.yaml` 只读挂载到 `/app/config/server.yaml`。它默认只绑定一个名为 `primary` 的 provider，`onboarding` 档位用其初始化仓库上下文，`default` 档位用同一个 provider 执行 `code-review` 和 challenge 核验；plan 和 synthesize 沿用代码模式，不默认启用多模型对抗。需要第二个 provider 时，按[多 Provider 配置](#多-provider-配置)操作；secondary 模板默认保持注释，不影响 primary-only 部署。该示例配置的数据库与工作区分别使用 `/app/data/review.db` 和 `/app/data/workspaces`；实际路径以生效配置和挂载为准。其他参数沿用应用内置默认值。不要移除 `profiles.onboarding.agent.provider` 或 `profiles.default.challenge.provider`：前者会导致工作区初始化失败，后者会导致评审图构建失败，即使健康检查和 `--check-config` 通过。
+`config/server.docker.yaml` 只读挂载到 `/app/config/server.yaml`。它默认只绑定一个名为 `primary` 的 provider，`onboarding` 档位用其初始化仓库上下文，唯一的评审档位 `default` 用同一个 provider 运行全部评审节点（`explore`、`code-review`、`review`、`reasoner`、`validate` 和逐条反证 `verify`）；plan 和 synthesize 是代码节点，不默认启用多模型对抗。需要第二个 provider 时，按[多 Provider 配置](#多-provider-配置)操作；secondary 模板默认保持注释，不影响 primary-only 部署。该示例配置的数据库与工作区分别使用 `/app/data/review.db` 和 `/app/data/workspaces`；实际路径以生效配置和挂载为准。其他参数沿用应用内置默认值。不要移除 `profiles.onboarding.agent.provider` 或 `profiles.default.provider`：前者会导致工作区初始化失败，后者会让 `default` 档位没有 provider 可用而无法评审，即使健康检查和 `--check-config` 通过。
 
 包含 #164 的版本将 Anthropic 未缓存输入、缓存读取和缓存创建各计入一次输入 token；缓存读写字段是明细，不应再加到总输入上。预算使用该总输入和输出，因此可能比旧版本更早耗尽。成本估算对全部输入使用配置的 `input_per_mtok`，对输出使用 `output_per_mtok`，不区分缓存费率，不等于供应方账单；未配置价格时估算为零，不代表没有费用。已保存的历史用量不会追溯回填；升级后恢复旧工作流时，其已记录节点的缓存用量仍可能少计，导致剩余预算被高估。若当前评审需要准确执行预算，应取消后在升级版本重新触发，并另行统计已产生的用量。等待旧工作流结束不会修正其已少计的用量或预算限制。
 
@@ -71,7 +71,7 @@ docker compose exec -T review /app/tribunalctl projects all
 
 ### 多 Provider 配置
 
-首次部署可先完成上一节的[构建与启动](#构建并启动)，确认 primary-only 部署正常。已有部署不要先执行启动或重启命令；重建容器前，先按本节第 4 步核对未完成评审和待发布结果。默认部署只有一个 `primary` provider：`profiles.onboarding.agent.provider`、`profiles.default.propose[0].provider` 和 `profiles.default.challenge.provider` 都指向它。primary 的名称和变量保持不变，已有部署不需要迁移。
+首次部署可先完成上一节的[构建与启动](#构建并启动)，确认 primary-only 部署正常。已有部署不要先执行启动或重启命令；重建容器前，先按本节第 4 步核对未完成评审和待发布结果。默认部署只有一个 `primary` provider：`profiles.onboarding.agent.provider` 和 `profiles.default.provider` 都指向它。primary 的名称和变量保持不变，已有部署不需要迁移。
 
 需要第二个模型时，按以下步骤操作。示例只展示格式；`LLM_SECONDARY_MODEL` 和 `LLM_SECONDARY_API_KEY` 的尖括号内容必须替换为真实值，协议和地址按用户实际供应方填写。不要复制真实密钥：
 
@@ -88,7 +88,7 @@ docker compose exec -T review /app/tribunalctl projects all
 
 2. 在 `config/server.docker.yaml` 中取消 `providers.secondary` 整段的注释。保留 `api_key_env: LLM_SECONDARY_API_KEY`；该字段只写变量名。默认模板已包含 `max_concurrency: 4` 和示例值 `max_tokens: 16000`；Anthropic 协议需要 `max_tokens`。无论选择哪个协议，都要按实际模型和供应方允许的输出上限调整该值。
 
-3. 在同一个文件的 `profiles.default` 中引用 secondary。下面只列出相关字段，不要用它替换整个 `profiles`。是否同时增加第二个 propose 条目由评审策略决定：
+3. 在同一个文件的 `profiles.default` 中引用 secondary。下面只列出相关字段，不要用它替换整个 `profiles`。是否让某些节点使用 secondary 由评审策略决定：
 
    ```yaml
    profiles:
@@ -96,21 +96,17 @@ docker compose exec -T review /app/tribunalctl projects all
        agent:
          provider: primary       # 保留：工作区初始化继续使用 primary
      default:
-       propose:
-         - block: code-review
-           provider: primary
-         # 可选：取消注释，增加第二个提出方；成本和节点数会增加
-         # - block: code-review
-         #   provider: secondary
+       provider: primary         # 默认：所有评审节点使用 primary
+       # 可选：取消注释，让指定节点使用 secondary；成本会随之变化
+       # lanes:
+       #   review: { provider: secondary }
        challenge:
-         provider: secondary     # 挑战和 verify 使用 secondary
+         provider: secondary     # 逐条反证（verify）使用 secondary
    ```
 
-   `verify` 没有单独的 provider 字段，它使用 challenge 选出的 provider。`gather` 和 `adjudicate` 是代码节点，不能配置模型。`plan` 和 `synthesize` 只有在 `mode: agent` 时才调用模型；默认的 `mode: code` 不会使用 provider。
+   可单独指定 provider 的节点是 `explore`、四路评审（`lanes.code_review`、`lanes.review`、`lanes.reasoner`、`lanes.validate`）和逐条反证（`challenge`）；未指定的节点使用 `provider`。`verify` 没有单独字段，它使用 `challenge.provider`。`plan`、`gather`、`adjudicate` 和 `synthesize` 是代码节点，不能配置模型。每个字段只填一个别名；不再有 `propose` 列表、`cross` 和 `plan.mode: agent`。
 
-   固定 `challenge.provider` 会对每个 finding 使用同一个 provider。普通 verify 使用 `cross` 时按 endpoint 和 model 身份为 finding 选择未被提出方使用的候选；没有候选时使用 `fallback`，不是调用失败后的自动故障切换。synthesize 发起的扩展 verify 在 `cross` 时直接使用 fallback，不重新选择独立候选，其 same-model 标记只比较别名。不同别名也不保证实际模型独立；同一身份或身份未知不能证明跨模型独立。扩展 review 优先使用首个带 provider 的 `code-review` propose，其次首个带 provider 的 propose；详见[配置设计](design/06-config.md#多-provider-与档位引用)。
-
-   `plan.mode: agent` 时，规划模型可以给 package 指定 provider，但该值只能从 `propose` 出现的 provider 中选择。要让 agent plan 在包级别使用 secondary，必须同时启用第二个 propose 条目。注意：package 的 `provider` 非空时会覆盖该 package 的每个 propose 条目；若 propose 同时有 primary 和 secondary，同一 package 的多个提出节点会全部使用 package 的 provider，实际是同一模型重复调用，不能保证多模型独立。
+   挑战者与提出方按 endpoint 和 model 身份归一后相同、或身份无法解析时，该条挑战被标记为同模型，不能证明跨模型独立；不同别名也不保证实际模型独立。详见[配置设计](design/06-config.md#多-provider-与档位引用)。
 
 4. 启动前检查未完成评审和待发布结果。新增 provider（即使没有被任何档位引用）会改变评审执行配置；重启后恢复扫描会对未终态工作流重新检查配置、档位和执行身份，不匹配时会取消而不是续跑。待发布结果由发布时校验决定是否继续，不能假定会自动跳过或一定发布。需要旧评审完成时，先等它结束；否则接受取消，之后重新触发。对待发布结果按当前发布状态核对处理；已发布或失败的评审不会被改写。处理完这些结果前，不要执行第 6 步的重建。
 
@@ -152,7 +148,7 @@ docker compose exec -T review /app/tribunalctl projects all
 
    对应配置写成 `protocol: "${MY_PROVIDER_PROTOCOL}"`、`base_url: "${MY_PROVIDER_BASE_URL}"`、`model: "${MY_PROVIDER_MODEL}"`、`api_key_env: MY_PROVIDER_API_KEY`；不要写密钥值。若复用容器中已有的变量（例如 `LLM_*`），则不需要重复透传。新增变量后同样执行 `docker compose config --quiet`，再重建容器。
 
-**回退**：先按第 4 步核对未完成评审和待发布结果，然后检查所有档位中对 secondary 的引用。逐个检查 `profiles.*` 的这些字段：`plan.provider`、`propose[].provider`、`reasoner.provider`、`challenge.provider`、`challenge.fallback`、`synthesize.provider` 和 `agent.provider`，包括 `default`、`onboarding` 及自定义档位。把每个 `secondary` 替换为 `primary`，或删除不再需要的可选字段/条目；`challenge.provider` 必须是已配置别名或 `cross`，`cross` 时保留合法的 `challenge.fallback`，且 fallback 不能指向 secondary；保留 `profiles.onboarding.agent.provider`，每个评审档位至少保留一个 `propose` 条目。确认没有引用后再重新注释 `providers.secondary`，并从 `.env` 移除四个变量。然后执行 `docker compose config --quiet` 和 `docker compose run --rm --no-deps review --config /app/config/server.yaml --check-config`；两项通过后才执行 `docker compose up -d --force-recreate --wait --wait-timeout 120`。引用不存在的 provider 会让启动失败；`config --quiet` 不验证应用配置语义，`--check-config` 不验证评审图、网络或模型兼容性。不要删除数据卷。回退也会改变评审执行配置或档位；未终态工作流在恢复时可能因校验不匹配被取消。待发布结果是否继续以发布校验为准。若 secondary 暂时不可用，可以只把上述所有引用切回 primary 并重建，保留 secondary 的注释配置，供后续恢复。
+**回退**：先按第 4 步核对未完成评审和待发布结果，然后检查所有档位中对 secondary 的引用。逐个检查 `profiles.default` 的 `provider`、`explore.provider`、`lanes.*.provider`、`challenge.provider`，以及 `profiles.onboarding.agent.provider`；若配置里还留有旧字段（`propose[].provider`、`reasoner.provider`、`challenge.fallback`），也一并清理。把每个 `secondary` 替换为 `primary`，或删除不再需要的可选字段；保留 `profiles.onboarding.agent.provider`，`profiles.default.provider` 必须保留一个已配置别名。确认没有引用后再重新注释 `providers.secondary`，并从 `.env` 移除四个变量。然后执行 `docker compose config --quiet` 和 `docker compose run --rm --no-deps review --config /app/config/server.yaml --check-config`；两项通过后才执行 `docker compose up -d --force-recreate --wait --wait-timeout 120`。引用不存在的 provider 会让启动失败；`config --quiet` 不验证应用配置语义，`--check-config` 不验证评审图、网络或模型兼容性。不要删除数据卷。回退也会改变评审执行配置或档位；未终态工作流在恢复时可能因校验不匹配被取消。待发布结果是否继续以发布校验为准。若 secondary 暂时不可用，可以只把上述所有引用切回 primary 并重建，保留 secondary 的注释配置，供后续恢复。
 
 **OpenAI 兼容网关因角色顺序返回 400**：`openai-chat` provider 的节点失败，且网关错误提示角色必须交替（例如 vLLM 部分聊天模板的「roles must alternate」）时，在该 provider 下设置 `strict_role_alternation: true` 并重启。开启后，最后一轮的提交提示附加在最后一条 tool 消息末尾，不再单独作为 user 消息发送。OpenAI 官方 API 不需要开启；修改会改变评审执行配置，重启前按第 4 步处理未完成评审。说明见 [严格角色交替](design/06-config.md#严格角色交替strict_role_alternation)。
 
@@ -508,7 +504,7 @@ fi
 | `/usr/local/bin/crc-codebase-memory-mcp` | 指向 wrapper 的旧名兼容链接 |
 | `/licenses/codebase-memory-mcp/` | 上游 `LICENSE` 与 `THIRD_PARTY_NOTICES.md` |
 
-镜像不运行上游 `install`，不写任何 agent 配置或 hooks。示例配置和 `config/server.docker.yaml` 的 `default_extensions` 在首次启动时登记平台级 stdio 服务器 `codebase-memory`（`--tool-profile=analysis`），并为 `code-review`、`review` 各授权 11 项只读图谱工具，为 `verify` 授权 `get_code_snippet`、`search_graph`、`trace_path`、`search_code`，为 `onboarding` 授权 `get_architecture`、`get_graph_schema`；`reasoner`、`synthesize` 不默认授权。有效 ignore 为空时，项目 onboarding 和刷新可用 CLI 为固定的 `base/` 建索引；非空时按下节停用这些执行路径。每个项目的 `HOME`、`CBM_CACHE_DIR`、`CBM_RUNTIME_DIR` 都在该项目工作区内，项目之间查不到彼此的索引；auto_index、watcher 和 UI 均关闭。规则详见 [默认扩展](design/06-config.md#默认扩展default_extensions) 和 [内置 codebase-memory-mcp](design/06-config.md#内置-codebase-memory-mcp)。
+镜像不运行上游 `install`，不写任何 agent 配置或 hooks。示例配置和 `config/server.docker.yaml` 的 `default_extensions` 在首次启动时登记平台级 stdio 服务器 `codebase-memory`（`--tool-profile=analysis`），并为 `explore`、`code-review`、`review` 各授权 11 项只读图谱工具，为 `validate` 和 `verify` 各授权 `get_code_snippet`、`search_graph`、`trace_path`、`search_code`，为 `onboarding` 授权 `get_architecture`、`get_graph_schema`；`reasoner`、`synthesize` 不默认授权。有效 ignore 为空时，项目 onboarding 和刷新可用 CLI 为固定的 `base/` 建索引；非空时按下节停用这些执行路径。每个项目的 `HOME`、`CBM_CACHE_DIR`、`CBM_RUNTIME_DIR` 都在该项目工作区内，项目之间查不到彼此的索引；auto_index、watcher 和 UI 均关闭。规则详见 [默认扩展](design/06-config.md#默认扩展default_extensions) 和 [内置 codebase-memory-mcp](design/06-config.md#内置-codebase-memory-mcp)。
 
 ### ignore 安全边界
 
@@ -606,7 +602,7 @@ docker inspect --format '{{.State.Health.Status}}' tribunal
 
 注意：
 
-- 必须覆盖默认 `--config`。镜像内的 `server.example.yaml` 只用于烟测，不是生产配置，也没有 `providers` 和 `propose`，不能执行真实评审。
+- 必须覆盖默认 `--config`。镜像内的 `server.example.yaml` 只用于烟测，不是生产配置，也没有 `providers` 和 `profiles.default.provider`，不能执行真实评审。
 - 启用模型 provider 时，还要传入配置中 `api_key_env` 指定的变量，例如 `-e LLM_API_KEY`。复用 `server.docker.yaml` 时还需 `-e TRIBUNAL_PUBLIC_URL -e GITLAB_URL -e LLM_PROTOCOL -e LLM_BASE_URL -e LLM_MODEL`；这些值都需先在宿主机环境中设置。启用其注释的 `secondary` provider 后，还要按实际使用的变量名传入 `LLM_SECONDARY_PROTOCOL`、`LLM_SECONDARY_BASE_URL`、`LLM_SECONDARY_MODEL` 和 `LLM_SECONDARY_API_KEY`；第三个 provider 同理，传入其 `api_key_env` 和模板变量。不要仅传入三个平台秘密就把它当作完整评审部署。
 - 此示例按默认数据路径挂载 `/app/data`；自定义 `storage.dsn` 或 `workspace.root` 时还须持久化相应路径和挂载。删除数据卷会丢失其中的数据库或工作区；没有数据库备份时已保存的项目凭据无法恢复。
 - 命名卷为空时会继承镜像内 `/app/data` 的属主 `10001:10001`。绑定挂载宿主机目录时，先修正属主：
@@ -1031,6 +1027,30 @@ v1.2.0 起，所有 `PUT /api/v1/block-bindings/{block}` 必须带 `expected_rev
 5. **启用草稿中的文件声明并重启。** 把第 1 步草稿中的完整 `blocks` 条目写入实际挂载配置，执行 `docker compose up -d --force-recreate --wait --wait-timeout 120`。启动日志应出现 `file configuration replaces default block binding`，表示纯默认行已释放，文件绑定生效。
 
 6. **核对结果。** 文件声明生效后，块绑定 API 不返回它的数据库行；控制台可能显示为空绑定，这是预期。其他块仍按默认或管理员绑定。若没有释放日志、恢复预览显示 `skipped`、或无法确认 `extension_defaults` 台账完整，停止操作并核对备份、实际配置和数据库，不要手工删除数据库行。
+
+### 单一评审档位升级
+
+**这是行为变更。** Tribunal 现在只有一个评审档位 `default`：`explore` 只读探索 → 四路并行评审（`code-review`、`review`、`reasoner`、`validate`）→ 裁决（`gather` → `verify.N` 反证 P0/P1 → `adjudicate`）→ 报告（`synthesize`，代码渲染）。没有档位选择，也没有可配置的旧图回退；`onboarding` 档位仍存在，只用于项目接入。
+
+影响：
+
+- **成本预期更高。** 每次评审运行的 LLM agent 节点从原来的一两个增加到多个（`explore`、每个包的 `code-review` 与 `review`、`reasoner`、`validate`，另有每条 P0/P1 的 `verify`）。具体增幅以后另行测量，此处不给出数字；升级后按实际用量核对 `budget.max_tokens`。`budget.deadline` 默认从 20m 改为 30m。
+- **工作流身份变化。** 提示词新增 `explore.md`、`review.md`、`validate.md`，`_platform_rules.md` 升到 v5，`TaskRenderVersion` 由 4 改为 5。升级前创建的未终态工作流在新版本下不会续跑、重试或发布；升级前按[多 Provider 配置](#多-provider-配置)第 4 步核对未完成评审和待发布结果，需要时等待其结束或接受取消后重新触发。
+- **验证通道不运行测试。** `validate` 只读 GitLab pipeline 状态、失败 job 日志片段和代码；没有 pipeline 或日志不足时报告「验证通道 BLOCKED：<原因>」告警，不降为 INCOMPLETE。
+- **任一路评审失败会使结论为 INCOMPLETE。** 其他各路的 findings 仍会发布。
+
+配置迁移：`config.Load` 不会因旧配置失败，但旧字段会被迁移或忽略，每项在启动日志产生一行 WARN `configuration was migrated or ignored: <字段…>`，只含字段名，不含值。逐项处理表见[配置设计 · 评审档位](design/06-config.md#评审档位profiles)。
+
+升级操作：
+
+1. 先按第 8 节的通用步骤备份并记录当前镜像、实际挂载配置。
+2. 把 `profiles.default` 改成新字段：`propose` 改为 `provider` 与 `lanes.code_review` / `lanes.review`，`reasoner.provider` 改为 `lanes.reasoner.provider`，`challenge.provider: cross` 改为明确的 `challenge.provider`，不再写 `plan.mode`、`plan.provider`、`consensus`、`on_uncertain`、`synthesize`、`budget.max_extends`。
+3. 删除 `default`、`onboarding` 以外的档位，并清理引用它们的位置：项目的档位（用 `PATCH /api/v1/projects/{id}` 改为 `default`）、`settings.profile_by_label`、仓库 `.gitlab-review.yml` 的 `profile` 和评论命令。这些位置遗留的旧档位名在评审时按 `default` 处理，但保存时只接受 `default`（项目注册或更新为其他档位返回 400 `unknown profile`，`profile_by_label` 的值不是 `default` 被拒绝，`/review <名称>` 的名称不是 `default` 时命令被忽略）。`onboarding` 在这些位置都不被接受。
+4. 运行 `--check-config` 并启动，检查启动日志**没有** `configuration was migrated or ignored` 告警。每条告警的字段名指出需要手工清理的配置；迁移得到的 provider 仍会被校验，错误会指向新字段，例如 `profiles.default.lanes.reasoner.provider`。
+5. 在控制台「模型与档位」确认只出现 `default` 评审档位及固定的八步拓扑，`onboarding` 单独显示为「项目接入」；项目注册、项目设置和手动触发对话框不再有档位选择，项目列表没有档位列。
+6. 在测试 MR 上触发一次完整评审并核对结果、用量和耗时；会产生模型费用，需事先取得授权。
+
+**回退**：没有开关。回到旧评审图只能回退发布——恢复升级前的镜像（二进制）和备份的配置，步骤同第 8 节「回滚步骤」。本次变更没有新增数据库迁移；回退前仍按第 8 节核对未完成评审和待发布结果。
 
 ### 从 v1.0.0 升级到 v1.1.0
 

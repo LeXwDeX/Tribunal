@@ -99,7 +99,7 @@ M0 先把命令持久化为 `review.command`，以下 GitLab 校验由 worker �
 2. 忽略：作者是项目 bot 用户；MR 已关闭或合并。
 3. 校验权限：`GET /projects/:id/members/all/:user_id`，`access_level < 30` → worker 回复一条「需要 Developer 及以上权限」说明，丢弃命令，不创建评审任务。
 4. 解析命令（03-http-api.md §6）：
-   - `/review`、`/review full`、`/review <profile>` → 入队 `review.run`（trigger=`command`，带 `full`、`profile`、`triggered_by`）。
+   - `/review`、`/review full`、`/review default` → 入队 `review.run`（trigger=`command`，带 `full`、`profile`、`triggered_by`）。
    - `/review cancel` → 入队 `review.cancel`。
    - `/review help` → worker 回复可用命令和档位说明，不创建评审任务。
 5. 两类回复都使用 worker 自己的隐藏 per-note marker（`command-reply note=<source_note_id>`），按源 note 查找并更新已有回复，因此任务重试不会重复创建。受理 run/cancel 时，入队事务在源 note 上设置 eyes；任务进入终态后，状态 worker 将自有 reaction 协调为完成/失败标记或清除。help/拒绝不添加表情；webhook 自身不添加 emoji，也不做网络调用。机器人评论和 command-reply note 不会再次触发。

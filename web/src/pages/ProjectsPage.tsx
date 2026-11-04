@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { listProfiles, listProjects, registerProject, updateProject, validateProjectConnection } from '../api/api'
+import { listProjects, registerProject, updateProject, validateProjectConnection } from '../api/api'
 import { ApiError, errorMessage } from '../api/client'
 import type { Project, ProjectRegistration, ProjectValidation } from '../api/types'
 import { useCanWrite } from '../components/RoleContext'
@@ -74,12 +74,10 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
   const queryClient = useQueryClient()
   const projectId = useId()
   const tokenId = useId()
-  const profileId = useId()
   const branchesId = useId()
   const requestRef = useRef(0)
   const [project, setProject] = useState('')
   const [token, setToken] = useState('')
-  const [profile, setProfile] = useState('default')
   const [skipDraft, setSkipDraft] = useState(true)
   const [branches, setBranches] = useState('')
   const [validating, setValidating] = useState(false)
@@ -91,18 +89,11 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
   const [result, setResult] = useState<ProjectRegistration | null>(null)
   const pending = validating || saving
 
-  const profiles = useQuery({
-    queryKey: ['profiles', 'register'],
-    queryFn: () => listProfiles(),
-    enabled: open,
-  })
-
   useEffect(() => {
     if (!open) {
       requestRef.current += 1
       setProject('')
       setToken('')
-      setProfile('default')
       setSkipDraft(true)
       setBranches('')
       setValidating(false)
@@ -182,7 +173,7 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
       const registration = await registerProject({
         project: project.trim(),
         token: token.trim(),
-        profile: profile.trim() || 'default',
+        profile: 'default',
         settings,
       })
       setResult(registration)
@@ -225,7 +216,6 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
             <div><dt>项目</dt><dd className="mono">{result.project?.path_with_namespace || project}</dd></div>
             <div><dt>项目 ID</dt><dd className="tabular">{result.project?.id ?? '—'}</dd></div>
             <div><dt>默认分支</dt><dd className="mono">{result.project?.default_branch || '—'}</dd></div>
-            <div><dt>档位</dt><dd>{result.project?.profile || '—'}</dd></div>
             <div><dt>token scope</dt><dd className="mono">{result.project?.token_scopes?.join(', ') || '—'}</dd></div>
             <div><dt>token 过期</dt><dd>{result.project?.token_expires_at ? formatDate(result.project.token_expires_at) : '未提供'}</dd></div>
             <div><dt>初始化任务</dt><dd className="mono">{result.job_id || '—'}</dd></div>
@@ -302,15 +292,9 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
             </Field>
           </div>
           <details className={ui.disclosure}>
-            <summary>高级设置：档位、分支与 Draft</summary>
+            <summary>高级设置：分支与 Draft</summary>
             <div className={ui.stackTop}>
               <div className="formGrid">
-                <Field label="评审档位" htmlFor={profileId} hint="从平台配置档位中选择，或输入已有档位名。">
-                  <input id={profileId} className="input" list="profile-options" value={profile} onChange={(event) => setProfile(event.target.value)} autoComplete="off" disabled={pending} />
-                  <datalist id="profile-options">
-                    {(profiles.data?.profiles || []).map((item) => <option key={item.name} value={item.name} />)}
-                  </datalist>
-                </Field>
                 <Field label="目标分支" htmlFor={branchesId} hint="逗号分隔；留空沿用平台默认分支设置。">
                   <input id={branchesId} className="input" value={branches} onChange={(event) => setBranches(event.target.value)} placeholder="main, release/*" autoComplete="off" disabled={pending} />
                 </Field>
@@ -321,11 +305,10 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
                   <span>跳过 Draft MR</span>
                 </label>
               </div>
-              {profiles.isError ? <span className="small muted">档位列表加载失败，仍可输入档位名。</span> : null}
             </div>
           </details>
           <div className={page.costNotice}>
-            保存并初始化会登记项目、加密保存访问 Key、按档位入队后台拉取与上下文生成，并可能在初始化或评审时产生模型费用；不创建或修改 Webhook，Webhook 在项目设置中单独配置。所有操作都不会修改仓库代码。
+            保存并初始化会登记项目、加密保存访问 Key、入队后台拉取与上下文生成，并可能在初始化或评审时产生模型费用；不创建或修改 Webhook，Webhook 在项目设置中单独配置。所有操作都不会修改仓库代码。
           </div>
         </>
       )}
@@ -422,7 +405,6 @@ export function ProjectsPage() {
                 <thead>
                   <tr>
                     <th scope="col">项目</th>
-                    <th scope="col">档位</th>
                     <th scope="col">工作区</th>
                     <th scope="col">最近评审</th>
                     <th scope="col">Key 过期</th>
@@ -453,7 +435,6 @@ export function ProjectsPage() {
                             <span className={styles.tableMeta}>ID {project.id}{project.default_branch ? ` · 默认分支 ${project.default_branch}` : ''}</span>
                           </div>
                         </td>
-                        <td>{project.profile ? <Badge plain>{project.profile}</Badge> : '—'}</td>
                         <td>{workspaceState ? <StatusBadge status={workspaceState} label={labelForStatus(workspaceState)} /> : <span className="muted">未提供</span>}</td>
                         <td>
                           {lastReview ? (

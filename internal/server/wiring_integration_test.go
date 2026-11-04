@@ -277,7 +277,7 @@ func TestWiringReviewTriggerEnqueuesRun(t *testing.T) {
 	client := env.business()
 
 	response := client.json(http.MethodPost, "/api/v1/projects/42/merge_requests/7/reviews", map[string]any{
-		"profile": "deep", "full": true,
+		"profile": "deep", "full": true, // non-default name resolves to default
 	})
 	assertStatus(t, response, http.StatusAccepted)
 	body := decodeMap(t, response.body)
@@ -301,7 +301,7 @@ func TestWiringReviewTriggerEnqueuesRun(t *testing.T) {
 		"mr_iid":     float64(7),
 		"head_sha":   wiringHead,
 		"generation": float64(1),
-		"profile":    "deep",
+		"profile":    "default",
 		"trigger":    "manual",
 		"full":       true,
 	}

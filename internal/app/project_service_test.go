@@ -400,6 +400,13 @@ func TestRegisterSettingsOverrideKeepsDefaults(t *testing.T) {
 		Project:     "42",
 		AccessToken: "token-long-enough",
 		Settings:    json.RawMessage(`{"ignore":["custom/**"],"profile_by_label":{"deep-review":"deep"}}`),
+	}); err == nil {
+		t.Fatal("profile_by_label naming a non-default profile was accepted")
+	}
+	if _, err := service.Register(context.Background(), RegisterInput{
+		Project:     "42",
+		AccessToken: "token-long-enough",
+		Settings:    json.RawMessage(`{"ignore":["custom/**"],"profile_by_label":{"deep-review":"default"}}`),
 	}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -417,7 +424,7 @@ func TestRegisterSettingsOverrideKeepsDefaults(t *testing.T) {
 	if len(resolved.Ignore) != 2 || resolved.Ignore[0] != "**/*.lock" || resolved.Ignore[1] != "custom/**" {
 		t.Errorf("resolved ignore = %v", resolved.Ignore)
 	}
-	if resolved.ProfileByLabel["deep-review"] != "deep" {
+	if resolved.ProfileByLabel["deep-review"] != "default" {
 		t.Errorf("profile_by_label = %v", resolved.ProfileByLabel)
 	}
 	if !resolved.SkipDraft || resolved.MaxFiles != 200 {
