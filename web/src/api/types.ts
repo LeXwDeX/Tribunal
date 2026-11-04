@@ -414,7 +414,6 @@ export interface Provider {
   max_concurrency?: number
   rpm?: number
   max_tokens?: number
-  api_key_env?: string
   stats_24h?: ProviderStats24h
   calls_24h?: number
   errors_24h?: number
