@@ -1,8 +1,7 @@
 package app
 
-// These tests invert the observed assertions in
-// docs/audit-repro-4839248/162-app_diff_limits_test.go.txt. Git fixtures use
-// t.TempDir instead of a HOME directory fixture.
+// These tests cover diff line limits, including the first file and count
+// boundaries. Git fixtures use t.TempDir instead of a HOME directory fixture.
 
 import (
 	"os"
