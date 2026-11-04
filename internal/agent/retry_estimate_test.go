@@ -40,3 +40,15 @@ func TestRunReportsLongestTurnOnFailure(t *testing.T) {
 		t.Fatalf("longest turn = %s, want 3s", result.LongestTurn)
 	}
 }
+
+func TestRunInheritedEstimateWithoutDeadlineDoesNotPrompt(t *testing.T) {
+	client := &steppingClient{clock: time.Now(), step: time.Second}
+	spec := testSpec(client, echoTool{name: "echo"})
+	spec.Now = client.now
+	spec.TurnEstimate = time.Hour
+	spec.MaxTurns = 3
+	result, err := Run(context.Background(), spec)
+	if err != nil || result.Turns != 3 || hasSubmitPrompt(client.reqs[0]) || hasSubmitPrompt(client.reqs[1]) {
+		t.Fatalf("err=%v, want the prompt only on the last turn without a deadline", err)
+	}
+}
