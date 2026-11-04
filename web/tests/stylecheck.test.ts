@@ -49,10 +49,11 @@ describe('web style checks', () => {
     }
   })
 
-  it('rejects static styles behind type assertions', () => {
+  it('rejects static styles behind type assertions and non-null wrappers', () => {
     for (const code of [
       '<div style={{ top: 1 } as const} />',
       '<div style={{ top: 1 } satisfies object} />',
+      '<div style={{ top: 1 }!} />',
     ]) {
       const diagnostics = scanTsx(code, 'x.tsx')
       expect(diagnostics.filter((d) => d.rule === 'inline-style')).toHaveLength(1)
@@ -80,6 +81,8 @@ describe('web style checks', () => {
       "<svg><rect fill={('#fff')} /></svg>",
       "<svg><rect fill={active ? '#fff' : '#000'} /></svg>",
       '<div style={{ boxShadow: `${offset}px 0 #fff` }} />',
+      '<div style={{ boxShadow: `#fff ${offset}px 0` }} />',
+      '<div style={{ boxShadow: `${first} #fff ${second}` }} />',
     ]) {
       const diagnostics = scanTsx(code, 'x.tsx')
       expect(diagnostics.filter((d) => d.rule === 'color-literal').length).toBeGreaterThan(0)
