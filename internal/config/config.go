@@ -136,8 +136,9 @@ type ProviderConfig struct {
 	RPM            int    `yaml:"rpm" json:"rpm"`
 	MaxTokens      int    `yaml:"max_tokens" json:"max_tokens"`
 	// ContextWindow is the model's context size in tokens. Zero disables
-	// agent context compaction.
-	ContextWindow int              `yaml:"context_window" json:"context_window"`
+	// agent context compaction. omitempty keeps existing review execution
+	// identities (which hash this struct) unchanged when it is unset.
+	ContextWindow int              `yaml:"context_window" json:"context_window,omitempty"`
 	Temperature   *float64         `yaml:"temperature" json:"temperature"`
 	Thinking      *ThinkingConfig  `yaml:"thinking" json:"thinking"`
 	Reasoning     *ReasoningConfig `yaml:"reasoning" json:"reasoning"`

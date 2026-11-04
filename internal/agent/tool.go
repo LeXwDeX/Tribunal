@@ -40,6 +40,9 @@ const (
 	// compactKeepToolTurns is how many of the latest tool turns keep their
 	// full output during compaction.
 	compactKeepToolTurns = 3
+	// compactHardPercent is the share of the window at which compaction
+	// keeps fewer recent tool turns, down to none.
+	compactHardPercent = 95
 	// minToolOutputChars keeps the untrusted-data wrapper and its truncation
 	// marker inside a tiny configured output limit.
 	minToolOutputChars = 256
@@ -100,7 +103,8 @@ type RunSpec struct {
 }
 
 // RunResult is the accepted output and the conversation that produced it.
-// Transcript excludes System and stores provider messages unchanged.
+// Transcript excludes System and stores the messages as last sent: provider
+// messages are unchanged except tool outputs replaced by context compaction.
 type RunResult struct {
 	Output     any
 	Usage      llm.Usage

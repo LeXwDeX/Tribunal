@@ -59,3 +59,34 @@ func TestUnbudgetedWorkflowReportsNoBudget(t *testing.T) {
 		t.Fatal("a workflow without max_tokens must report no budget")
 	}
 }
+
+func TestOnlyOnboardingGetsBudgetSubmitPrompt(t *testing.T) {
+	profile := defaultProfile()
+	profile.Config.Synthesize.Mode = "agent"
+	profile.Config.Synthesize.Provider = "claude"
+	dossier := validDossier(t)
+	spec, err := BuildGraph(profile, dossier, GraphConfig{AllowedProviders: []string{"local", "claude"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adjudicated, _ := json.Marshal(AdjudicateOut{Groups: []Group{}})
+	wf := dag.WorkflowView{ID: "wf", Spec: spec, Nodes: map[string]dag.NodeView{
+		NodeAdjudicate: {ID: NodeAdjudicate, Spec: mustNode(t, spec, NodeAdjudicate), Status: dag.NodeCompleted, Output: adjudicated},
+		NodeSynth:      {ID: NodeSynth, Spec: mustNode(t, spec, NodeSynth), Status: dag.NodeRunning},
+	}, Order: []string{NodeAdjudicate, NodeSynth}}
+	called := false
+	synth := newTestExecutor(t, ExecutorDeps{Dossier: dossier, Profile: profile, Snapshot: func(context.Context, string) (dag.WorkflowView, error) { return wf, nil }, AgentRun: func(_ context.Context, spec agent.RunSpec) (*agent.RunResult, error) {
+		called = true
+		if spec.BeforeTurn == nil {
+			t.Fatal("synthesize lost its budget hook")
+		}
+		if spec.BudgetRemaining != nil {
+			t.Fatal("synthesize must keep its budget-exhausted fallback, not an early submit prompt")
+		}
+		return nil, &llm.Error{Kind: llm.ErrBadRequest}
+	}})
+	_, _ = synth.Execute(context.Background(), dag.NodeInput{WorkflowID: wf.ID, Node: mustNode(t, spec, NodeSynth)})
+	if !called {
+		t.Fatal("synthesize agent did not run")
+	}
+}

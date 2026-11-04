@@ -636,6 +636,9 @@ type agentOptions struct {
 	Builtins   bool
 	BlockTools bool
 	NoRetry    bool
+	// BudgetSubmitPrompt asks for submit_result when the workflow token
+	// budget is nearly spent instead of failing at the budget.
+	BudgetSubmitPrompt bool
 	// MaxTurns bounds model requests; zero keeps agent.DefaultMaxTurns.
 	MaxTurns   int
 	BeforeTurn func(context.Context, llm.Usage) error
@@ -806,9 +809,10 @@ func (e *Executor) callAgent(ctx context.Context, in dag.NodeInput, opts agentOp
 		BeforeTurn: opts.BeforeTurn,
 		Outbound:   e.deps.Outbound,
 	}
-	if opts.BeforeTurn != nil {
-		// Budgeted nodes also let the loop ask for submit_result before the
-		// workflow token budget runs out (#260).
+	if opts.BudgetSubmitPrompt && opts.BeforeTurn != nil {
+		// Let the loop ask for submit_result before the workflow token budget
+		// runs out (#260). Other nodes keep their budget-exhausted fallbacks
+		// and warnings.
 		spec.BudgetRemaining = e.budgetRemaining(in.WorkflowID)
 	}
 	ctx = llm.WithCallMeta(ctx, llm.CallMeta{WorkflowID: in.WorkflowID, NodeID: in.Node.ID, Turn: 0})

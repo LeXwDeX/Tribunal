@@ -21,12 +21,12 @@ const mustSubmitPrompt = "You must call the " + SubmitToolName +
 // request once the context deadline leaves too little time for more
 // exploration. It is never stored in the transcript. The loop does not force
 // tool_choice because reasoning gateways reject every non-auto choice (#255).
-const finalTurnPrompt = "Turns or time are nearly exhausted. Call the " + SubmitToolName +
+const finalTurnPrompt = "This run is nearly out of turns, time, token budget or context. Call the " + SubmitToolName +
 	" tool now with your best result from the evidence gathered so far. Do not call any other tool."
 
 // compactedToolResult replaces older tool outputs when the context nears the
 // model's window. Call IDs and tool calls are kept, so pairing stays valid.
-const compactedToolResult = "[earlier tool output omitted to fit the context window; call the tool again if you still need it]"
+const compactedToolResult = "[earlier tool output omitted to fit the context window]"
 
 var nonceFallback atomic.Uint64
 
@@ -151,14 +151,24 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 	// input and output tokens plus the tool results added since.
 	contextWindow := int64(spec.Client.Info().ContextWindow)
 	contextLimit := contextWindow * compactThresholdPercent / 100
+	contextHardLimit := contextWindow * compactHardPercent / 100
 	var contextTokens, largestTurnTokens int64
+	compacted := 0
 	// nearContextLimit compacts older tool outputs once the estimate reaches
 	// the limit and reports whether the context is still at or above it.
+	// When the kept turns alone approach the window, fewer turns are kept.
 	nearContextLimit := func() bool {
 		if contextWindow <= 0 || contextTokens < contextLimit {
 			return false
 		}
-		contextTokens -= compactToolResults(messages, compactKeepToolTurns)
+		for keep := compactKeepToolTurns; keep >= 0; keep-- {
+			saved, n := compactToolResults(messages, keep)
+			contextTokens -= saved
+			compacted += n
+			if contextTokens < contextHardLimit {
+				break
+			}
+		}
 		return contextTokens >= contextLimit
 	}
 	nearBudget := func() bool {
@@ -176,6 +186,9 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 		turnStarted := now()
 		lastTurn := turn == maxTurns
 		nearLimit := nearContextLimit()
+		// Past the context limit another tool result could overflow the
+		// window, so the turn behaves like the last one.
+		submitOnly := lastTurn || nearLimit
 		req := &llm.Request{
 			System:      spec.System,
 			Messages:    append([]llm.Message(nil), messages...),
@@ -184,7 +197,18 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 			Temperature: spec.Temperature,
 			Reasoning:   spec.Reasoning,
 		}
-		if lastTurn || nearLimit || nearDeadline() || nearBudget() {
+		reason := ""
+		switch {
+		case lastTurn:
+			reason = llm.SubmitPromptLastTurn
+		case nearLimit:
+			reason = llm.SubmitPromptContext
+		case nearDeadline():
+			reason = llm.SubmitPromptDeadline
+		case nearBudget():
+			reason = llm.SubmitPromptBudget
+		}
+		if reason != "" {
 			req.Messages = append(req.Messages, llm.Message{
 				Role:  llm.RoleUser,
 				Parts: []llm.Part{{Type: llm.PartText, Text: finalTurnPrompt}},
@@ -193,6 +217,8 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 
 		meta := llm.CallMetaFromContext(ctx)
 		meta.Turn = turn
+		meta.SubmitPrompt = reason
+		meta.CompactedToolResults = compacted
 		callCtx := llm.WithCallMeta(ctx, meta)
 
 		generate := func(request *llm.Request) (*llm.Response, error) {
@@ -302,10 +328,11 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 				continue
 			}
 
-			if lastTurn {
-				// No later request can read this result.
+			if submitOnly {
+				// No later request can read this result, or it could overflow
+				// the context window.
 				results = append(results, plainToolResult(call.ID,
-					"final turn: only "+SubmitToolName+" is executed; this call was not executed.", true))
+					"only "+SubmitToolName+" is executed now; this call was not executed.", true))
 				continue
 			}
 
@@ -414,8 +441,12 @@ func decodeSubmit(spec SubmitSpec, raw json.RawMessage) (out any, err error) {
 	return out, nil
 }
 
-// estimatedBytesPerToken converts text size to a conservative token estimate.
-const estimatedBytesPerToken = 4
+// Token estimates err toward a fuller context: added text counts one token
+// per three bytes (close to CJK and code), freed text one per four bytes.
+const (
+	addedBytesPerToken = 3
+	freedBytesPerToken = 4
+)
 
 func toolResultTokens(parts []llm.Part) int64 {
 	var n int64
@@ -424,14 +455,15 @@ func toolResultTokens(parts []llm.Part) int64 {
 			n += int64(len(part.ToolResult.Content))
 		}
 	}
-	return n / estimatedBytesPerToken
+	return n / addedBytesPerToken
 }
 
-// compactToolResults replaces the content of tool results older than the
-// last keep tool messages with compactedToolResult and returns the estimated
-// tokens saved. Parts are copied, so earlier request snapshots keep their
-// original content.
-func compactToolResults(messages []llm.Message, keep int) int64 {
+// compactToolResults replaces the content of successful tool results older
+// than the last keep tool messages with compactedToolResult. It returns the
+// estimated tokens saved and the number of results replaced. Error results
+// stay, so submit_result validation feedback survives. Parts are copied, so
+// earlier request snapshots keep their original content.
+func compactToolResults(messages []llm.Message, keep int) (int64, int) {
 	toolMessages := 0
 	for _, msg := range messages {
 		if msg.Role == llm.RoleTool {
@@ -439,6 +471,7 @@ func compactToolResults(messages []llm.Message, keep int) int64 {
 		}
 	}
 	var saved int64
+	replaced := 0
 	for i := range messages {
 		if toolMessages <= keep {
 			break
@@ -450,7 +483,7 @@ func compactToolResults(messages []llm.Message, keep int) int64 {
 		parts := append([]llm.Part(nil), messages[i].Parts...)
 		changed := false
 		for j, part := range parts {
-			if part.ToolResult == nil || len(part.ToolResult.Content) <= len(compactedToolResult) {
+			if part.ToolResult == nil || part.ToolResult.IsError || len(part.ToolResult.Content) <= len(compactedToolResult) {
 				continue
 			}
 			result := *part.ToolResult
@@ -458,12 +491,13 @@ func compactToolResults(messages []llm.Message, keep int) int64 {
 			result.Content = compactedToolResult
 			parts[j].ToolResult = &result
 			changed = true
+			replaced++
 		}
 		if changed {
 			messages[i].Parts = parts
 		}
 	}
-	return saved / estimatedBytesPerToken
+	return saved / freedBytesPerToken, replaced
 }
 
 func plainToolResult(callID, content string, isError bool) llm.Part {

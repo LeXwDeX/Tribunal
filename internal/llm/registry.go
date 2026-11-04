@@ -28,7 +28,21 @@ type CallMeta struct {
 	WorkflowID string `json:"workflow_id,omitempty"`
 	NodeID     string `json:"node_id,omitempty"`
 	Turn       int    `json:"turn"`
+	// SubmitPrompt is why the agent loop asked for submit_result on this
+	// request (one of the SubmitPrompt* values), or empty.
+	SubmitPrompt string `json:"submit_prompt,omitempty"`
+	// CompactedToolResults counts tool outputs the run has replaced by
+	// context compaction so far.
+	CompactedToolResults int `json:"compacted_tool_results,omitempty"`
 }
+
+// Reasons recorded in CallMeta.SubmitPrompt and the request audit.
+const (
+	SubmitPromptLastTurn = "last_turn"
+	SubmitPromptContext  = "context"
+	SubmitPromptDeadline = "deadline"
+	SubmitPromptBudget   = "budget"
+)
 
 type callMetaKey struct{}
 
@@ -79,6 +93,10 @@ type AuditRequest struct {
 	MaxTokens      int            `json:"max_tokens,omitempty"`
 	Temperature    *float64       `json:"temperature,omitempty"`
 	Reasoning      *ReasoningOpts `json:"reasoning,omitempty"`
+	// SubmitPrompt and CompactedToolResults come from CallMeta; they are
+	// fixed enum values and counts, never text.
+	SubmitPrompt         string `json:"submit_prompt,omitempty"`
+	CompactedToolResults int    `json:"compacted_tool_results,omitempty"`
 }
 
 // AuditResponse counts response structure and keeps usage and stop metadata.
@@ -108,6 +126,14 @@ func SafeAuditStopReason(reason StopReason) string {
 
 // NewCallAudit builds the persistence-safe audit payload. Tool choice is a
 // tool name and is therefore omitted even though the live request needs it.
+func safeSubmitPrompt(reason string) string {
+	switch reason {
+	case SubmitPromptLastTurn, SubmitPromptContext, SubmitPromptDeadline, SubmitPromptBudget:
+		return reason
+	}
+	return ""
+}
+
 func NewCallAudit(req *Request, resp *Response) *CallAudit {
 	audit := &CallAudit{}
 	if req != nil {
@@ -582,6 +608,13 @@ func (c *providerClient) record(ctx context.Context, attempt int, req *Request, 
 		}
 	}
 	audit := NewCallAudit(req, resp)
+	if audit.Request != nil {
+		meta := CallMetaFromContext(ctx)
+		audit.Request.SubmitPrompt = safeSubmitPrompt(meta.SubmitPrompt)
+		if meta.CompactedToolResults > 0 {
+			audit.Request.CompactedToolResults = meta.CompactedToolResults
+		}
+	}
 	if resp == nil {
 		var failure *Error
 		if errors.As(err, &failure) && failure != nil {

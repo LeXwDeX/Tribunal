@@ -19,6 +19,8 @@ type windowClient struct {
 	usage     int64 // fixed InputTokens when positive
 	reqs      []*llm.Request
 	maxTokens int64
+	calls     int // tool calls per turn; default 1
+	ignore    int // submit prompts to ignore before submitting
 }
 
 func (c *windowClient) Info() llm.ProviderInfo {
@@ -55,11 +57,18 @@ func (c *windowClient) Generate(_ context.Context, req *llm.Request) (*llm.Respo
 	}
 	usage := llm.Usage{InputTokens: tokens, OutputTokens: 10}
 	if hasSubmitPrompt(req) {
-		resp := toolResponse(llm.StopToolUse, call("s", SubmitToolName, `{}`))
-		resp.Usage = usage
-		return resp, nil
+		if c.ignore == 0 {
+			resp := toolResponse(llm.StopToolUse, call("s", SubmitToolName, `{}`))
+			resp.Usage = usage
+			return resp, nil
+		}
+		c.ignore--
 	}
-	resp := toolResponse(llm.StopToolUse, call(fmt.Sprintf("c%d", len(c.reqs)), "big", `{}`))
+	var calls []*llm.ToolCall
+	for i := 0; i < max(c.calls, 1); i++ {
+		calls = append(calls, call(fmt.Sprintf("c%d-%d", len(c.reqs), i), "big", `{}`))
+	}
+	resp := toolResponse(llm.StopToolUse, calls...)
 	resp.Usage = usage
 	return resp, nil
 }
@@ -101,6 +110,71 @@ func TestRunCompactsContextNearWindow(t *testing.T) {
 	}
 	if omitted == 0 {
 		t.Fatal("no tool output was compacted")
+	}
+	if result.Transcript[0].Parts[0].Text != spec.Prompt {
+		t.Fatal("the task prompt was compacted")
+	}
+	kept := 0
+	for i := len(result.Transcript) - 1; i >= 0 && kept < compactKeepToolTurns; i-- {
+		msg := result.Transcript[i]
+		if msg.Role != llm.RoleTool {
+			continue
+		}
+		kept++
+		if msg.Parts[0].ToolResult.Content == compactedToolResult {
+			t.Fatalf("recent tool turn %d was compacted", kept)
+		}
+	}
+}
+
+func TestRunCompactsRecentTurnsWhenTheyFillTheWindow(t *testing.T) {
+	// Four parallel 8000-byte outputs per turn: three kept turns alone are
+	// larger than the window.
+	client := &windowClient{window: 20000, calls: 4}
+	spec := testSpec(client, bigTool(8000))
+	spec.MaxTurns = 30
+	result, err := Run(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Run: %v (largest request %d tokens, window %d)", err, client.maxTokens, client.window)
+	}
+	if client.maxTokens > int64(client.window) {
+		t.Fatalf("largest request = %d tokens, window %d", client.maxTokens, client.window)
+	}
+	if result.Output == nil {
+		t.Fatal("no submit_result")
+	}
+}
+
+func TestRunDoesNotExecuteToolsPastTheContextLimit(t *testing.T) {
+	executed := 0
+	client := &windowClient{window: 10000, ignore: 1}
+	spec := testSpec(client, echoTool{name: "big", fn: func(context.Context, json.RawMessage) (Result, error) {
+		executed++
+		return Result{Content: "small"}, nil
+	}})
+	spec.Prompt = strings.Repeat("p", 36000)
+	result, err := Run(context.Background(), spec)
+	if err != nil || result == nil || result.Turns != 3 {
+		t.Fatalf("err=%v, want submit on turn 3", err)
+	}
+	// Turn 1 runs the tool; turn 2 is past the limit, so its call is refused.
+	if executed != 1 {
+		t.Fatalf("tool executed %d times, want 1", executed)
+	}
+}
+
+func TestCompactionKeepsErrorResults(t *testing.T) {
+	long := strings.Repeat("e", 500)
+	messages := []llm.Message{{Role: llm.RoleUser, Parts: []llm.Part{{Type: llm.PartText, Text: "task"}}}}
+	for i := 0; i < 2; i++ {
+		messages = append(messages,
+			assistant(call(fmt.Sprintf("c%d", i), "big", `{}`)),
+			llm.Message{Role: llm.RoleTool, Parts: []llm.Part{{Type: llm.PartToolResult,
+				ToolResult: &llm.ToolResult{CallID: fmt.Sprintf("c%d", i), Content: long, IsError: i == 0}}}})
+	}
+	_, replaced := compactToolResults(messages, 0)
+	if replaced != 1 || messages[2].Parts[0].ToolResult.Content != long || messages[4].Parts[0].ToolResult.Content != compactedToolResult {
+		t.Fatalf("replaced=%d; error result must stay and success result must be compacted", replaced)
 	}
 }
 

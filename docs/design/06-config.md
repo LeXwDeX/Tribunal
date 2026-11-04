@@ -67,7 +67,7 @@ providers:
     max_concurrency: 4
     rpm: 50
     max_tokens: 16000
-    context_window: 200000          # 可选；模型上下文 token 数，agent 用量达 85% 时压缩旧工具输出，0 或不填则不压缩
+    context_window: 176000          # 可选；可用于输入的 token 数（窗口减去 max_tokens 与思考预算），agent 用量达 85% 时压缩旧工具输出，0 或不填则不压缩
     thinking: { budget_tokens: 8000 }
     price: { input_per_mtok: 0, output_per_mtok: 0 }   # USD / 百万 token；用于估算，按实际填写
   gpt:
