@@ -400,7 +400,7 @@ func validateWarnings(out ValidateOut) []string {
 // must be explained by a P0 or P1 finding of that node that is still in
 // scope; otherwise the review-level FAIL would vanish and the verdict could
 // pass. A finding refuted later by verify.N is code evidence against the FAIL.
-func validateFailSignals(wf dag.WorkflowView, proposals []Proposal) []UnresolvedSignal {
+func validateFailSignals(wf dag.WorkflowView, proposals []Proposal, scope map[string]struct{}, dossier *Dossier) []UnresolvedSignal {
 	var signals []UnresolvedSignal
 	for _, id := range wf.Order {
 		node, ok := wf.Nodes[id]
@@ -417,7 +417,8 @@ func validateFailSignals(wf dag.WorkflowView, proposals []Proposal) []Unresolved
 				continue
 			}
 			for _, finding := range proposal.Findings {
-				if finding.Severity == SeverityP0 || finding.Severity == SeverityP1 {
+				blocking := finding.Severity == SeverityP0 || finding.Severity == SeverityP1
+				if blocking && findingInScope(finding.Path, Side(finding.Side), scope, dossier) {
 					explained = true
 				}
 			}

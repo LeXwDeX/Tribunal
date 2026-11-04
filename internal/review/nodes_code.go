@@ -377,7 +377,7 @@ func (e *Executor) executeGather(ctx context.Context, in dag.NodeInput) (dag.Nod
 	}
 	// After incremental filtering: a FAIL validation needs a blocking finding
 	// that is still in scope.
-	signals = append(signals, validateFailSignals(wf, proposals)...)
+	signals = append(signals, validateFailSignals(wf, proposals, scope, dossier)...)
 	budgetExhausted := false
 	if max := wf.Spec.Budget.MaxTokens; max > 0 {
 		used := wf.Usage.TotalTokens()

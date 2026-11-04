@@ -621,6 +621,10 @@ func TestLanesValidateFailNeedsABlockingFindingInScope(t *testing.T) {
 			incremental: &IncrementalRange{Files: []string{"a.go"}}, wantSignal: true},
 		{name: "P1 finding without a path in an incremental review", validate: failing(finding("", 0, SeverityP1, "pipeline")),
 			incremental: &IncrementalRange{Files: []string{"a.go"}}, wantSignal: true},
+		{name: "out-of-scope P1 beside an in-scope P2", validate: failing(finding("b.go", 9, SeverityP1, "elsewhere"), finding("a.go", 9, SeverityP2, "minor")),
+			incremental: &IncrementalRange{Files: []string{"a.go"}}, wantSignal: true},
+		{name: "in-scope P1 beside an out-of-scope P2", validate: failing(finding("a.go", 9, SeverityP1, "broken"), finding("b.go", 9, SeverityP2, "elsewhere")),
+			incremental: &IncrementalRange{Files: []string{"a.go"}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
