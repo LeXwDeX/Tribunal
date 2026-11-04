@@ -141,10 +141,16 @@ var gitStderrMarkers = []struct {
 	{"rpc failed", ReasonNetwork},
 	{"early eof", ReasonNetwork},
 	{"ssl certificate", ReasonNetwork},
+	{"certificate verification failed", ReasonNetwork},
+	{"certificate verify failed", ReasonNetwork},
+	{"ssl routines", ReasonNetwork},
 	{"ssl_connect", ReasonNetwork},
 	{"ssl_error", ReasonNetwork},
-	{"gnutls", ReasonNetwork},
-	{"tls handshake", ReasonNetwork},
+	{"ssl: no alternative", ReasonNetwork},
+	{"gnutls_handshake", ReasonNetwork},
+	{"gnutls_recv", ReasonNetwork},
+	{"schannel:", ReasonNetwork},
+	{"tls connect error", ReasonNetwork},
 	{"returned error: 5", ReasonNetwork},
 }
 

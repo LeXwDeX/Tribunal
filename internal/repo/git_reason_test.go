@@ -125,6 +125,13 @@ func TestClassifyGitStderr(t *testing.T) {
 		"fatal: unable to access 'https://gitlab-tls.example/x.git/': The requested URL returned error: 301":                                                      "",
 		"fatal: unable to access 'https://host/openssl.git/': gnutls_handshake() failed: An unexpected TLS packet":                                                ReasonNetwork,
 		"fatal: unable to access 'https://host/x.git/': OpenSSL SSL_connect: SSL_ERROR_SYSCALL in connection":                                                     ReasonNetwork,
+		"fatal: unable to access 'https://h/gnutls/gnutls.git/': The requested URL returned error: 400":                                                           "",
+		"fatal: unable to access 'https://h/x.git/': server certificate verification failed. CAfile: /etc/ssl/certs/ca-certificates.crt CRLfile: none":            ReasonNetwork,
+		"fatal: unable to access 'https://h/x.git/': error:0A000086:SSL routines::certificate verify failed":                                                      ReasonNetwork,
+		"fatal: unable to access 'https://h/x.git/': schannel: next InitializeSecurityContext failed":                                                             ReasonNetwork,
+		"fatal: unable to access 'https://h/x.git/': TLS connect error: error:0A000126:SSL routines::unexpected eof while reading":                                ReasonNetwork,
+		"fatal: unable to access 'https://h/x.git/': SSL: no alternative certificate subject name matches target host name 'h'":                                   ReasonNetwork,
+		"fatal: unable to access 'https://h/x.git/': gnutls_recv: error (-110)":                                                                                   ReasonNetwork,
 		"fatal: something else entirely": "",
 		"":                               "",
 	}
