@@ -63,7 +63,7 @@ docker compose exec -T review /app/tribunalctl projects all
 
 是否发生压缩或提前要求提交，可在 LLM 调用审计的请求元数据中看到：`submit_prompt` 记录原因（`last_turn`、`context`、`deadline`、`budget`），`compacted_tool_results` 记录本次运行累计压缩的工具结果数。onboarding 在工作流 token 预算剩余不足最近最大单轮用量（输入 + 输出）的 3 倍时也会提前要求提交，多出的一倍留给一次重提交；该阈值只按已观测用量计算，不受 `providers.<name>.max_tokens` 影响。其他节点的预算耗尽处理不变。
 
-提交提示轮若模型返回的工具调用参数或标识不合法（参数或标识不合法：`invalid_json`、`not_object`、`empty_input`、`non_string_field`、`empty_id`、`empty_name`、`duplicate_id`；`unsupported_item`、`malformed_list` 等协议异常不恢复，同批中只要有一个协议异常就不恢复；恢复轮沿用原提示原因，只执行 `submit_result`），循环会丢弃该调用，追加一条只含类别名的固定反馈，让模型再提交一次，每次运行仅一次。排查时看响应元数据：`invalid_tool_call` 是首个不合法调用（优先于 `rejected_batch`、`unexpected_stop`）的固定类别，`invalid_tool_input_bytes` 是其参数字节数；`invalid_tool_call` 缺省表示没有被拒绝的调用；`invalid_tool_input_bytes` 为 0 或参数无法读取时也会省略；均不含工具名和参数。被拒绝那次调用的审计行 `error_kind` 仍为 `unsafe_model_response`，但若随后重提交成功，运行本身成功；第二次不合法、普通轮、最后一轮或非 tool_use 的 stop reason 下的不合法调用则以 `unsafe_model_response` 结束运行。`unexpected_stop` 表示非 tool_use 的 stop reason 下返回了工具调用。
+提交提示轮若模型返回的工具调用参数或标识不合法（`invalid_json`、`not_object`、`empty_input`、`non_string_field`、`empty_id`、`empty_name`、`duplicate_id`；`unsupported_item`、`malformed_list` 等协议异常不恢复，同批中只要有一个协议异常就不恢复；恢复轮沿用原提示原因，只执行 `submit_result`），循环会丢弃该调用，追加一条只含类别名的固定反馈，让模型再提交一次，每次运行仅一次。排查时看响应元数据：`invalid_tool_call` 是首个不合法调用（优先于 `rejected_batch`、`unexpected_stop`）的固定类别，`invalid_tool_input_bytes` 是其参数字节数；`invalid_tool_call` 缺省表示没有被拒绝的调用；`invalid_tool_input_bytes` 为 0 或参数无法读取时也会省略；均不含工具名和参数。被拒绝那次调用的审计行 `error_kind` 仍为 `unsafe_model_response`，但若随后重提交成功，运行本身成功；第二次不合法、普通轮、最后一轮或非 tool_use 的 stop reason 下的不合法调用则以 `unsafe_model_response` 结束运行。`unexpected_stop` 表示非 tool_use 的 stop reason 下返回了工具调用。
 
 ### 最后一轮强制提交（forced_tool_choice）
 
