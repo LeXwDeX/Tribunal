@@ -17,6 +17,12 @@ import (
 const mustSubmitPrompt = "You must call the " + SubmitToolName +
 	" tool to finish. Do not end the turn with prose."
 
+// finalTurnPrompt is sent only with the last request of a run and is never
+// stored in the transcript. The loop does not force tool_choice because
+// reasoning gateways reject every non-auto choice (#255).
+const finalTurnPrompt = "This is the final turn. Call the " + SubmitToolName +
+	" tool now with your best result from the evidence gathered so far. Do not call any other tool."
+
 var nonceFallback atomic.Uint64
 
 // Run executes the tool loop until a valid submit_result or an error.
@@ -125,7 +131,10 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 			Reasoning:   spec.Reasoning,
 		}
 		if turn == maxTurns {
-			req.ToolChoice = SubmitToolName
+			req.Messages = append(req.Messages, llm.Message{
+				Role:  llm.RoleUser,
+				Parts: []llm.Part{{Type: llm.PartText, Text: finalTurnPrompt}},
+			})
 		}
 
 		meta := llm.CallMetaFromContext(ctx)
@@ -169,24 +178,6 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 			return resp, callErr
 		}
 		resp, err := generate(req)
-		if err != nil && req.ToolChoice == SubmitToolName {
-			var failure *llm.Error
-			var guardErr *llm.AttemptGuardError
-			if !errors.As(err, &guardErr) && !errors.Is(err, ErrUnsafeResponse) && !llm.IsUnsafeResponse(err) &&
-				!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) &&
-				errors.As(err, &failure) && failure.Kind == llm.ErrBadRequest {
-				// Some reasoning gateways reject every non-auto tool choice. Let
-				// the final prompt request submit_result without forcing the choice.
-				fallback := *req
-				fallback.ToolChoice = ""
-				resp, err = generate(&fallback)
-				var stopped *llm.AttemptGuardError
-				if errors.As(err, &stopped) && stopped.Previous == nil {
-					previous := *failure
-					err = &llm.AttemptGuardError{Err: err, Usage: stopped.Usage, Previous: &previous}
-				}
-			}
-		}
 		if err != nil {
 			if errors.Is(err, ErrUnsafeResponse) || llm.IsUnsafeResponse(err) {
 				return partial(&unsafeProviderError{err: err})

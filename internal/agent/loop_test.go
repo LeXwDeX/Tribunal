@@ -258,7 +258,7 @@ func TestRunAsksForSubmitOnce(t *testing.T) {
 	}
 }
 
-func TestRunForcesSubmitOnLastTurn(t *testing.T) {
+func TestRunPromptsSubmitOnLastTurnWithoutForcingToolChoice(t *testing.T) {
 	client := &fakeClient{replies: []*llm.Response{
 		toolResponse(llm.StopToolUse, call("c1", "echo", `{}`)),
 		toolResponse(llm.StopToolUse, call("s1", SubmitToolName, `{"ok":true}`)),
@@ -273,12 +273,34 @@ func TestRunForcesSubmitOnLastTurn(t *testing.T) {
 		t.Fatalf("turns = %d", result.Turns)
 	}
 	reqs := client.requests()
-	if reqs[1].ToolChoice != SubmitToolName {
-		t.Fatalf("tool choice = %q, want %q", reqs[1].ToolChoice, SubmitToolName)
+	for i, req := range reqs {
+		if req.ToolChoice != "" {
+			t.Fatalf("request %d tool choice = %q, want auto", i+1, req.ToolChoice)
+		}
+	}
+	lastText := func(req *llm.Request) string {
+		msg := req.Messages[len(req.Messages)-1]
+		if msg.Role != llm.RoleUser || len(msg.Parts) != 1 {
+			return ""
+		}
+		return msg.Parts[0].Text
+	}
+	if lastText(reqs[0]) == finalTurnPrompt {
+		t.Fatal("final-turn prompt was sent before the final turn")
+	}
+	if lastText(reqs[1]) != finalTurnPrompt || reqs[1].Messages[len(reqs[1].Messages)-2].Role != llm.RoleTool {
+		t.Fatalf("final request does not end with the one-shot submit prompt: %+v", reqs[1].Messages)
+	}
+	for _, msg := range result.Transcript {
+		for _, part := range msg.Parts {
+			if part.Text == finalTurnPrompt {
+				t.Fatal("final-turn prompt leaked into the transcript")
+			}
+		}
 	}
 }
 
-func TestRunFallsBackWhenForcedSubmitIsRejected(t *testing.T) {
+func TestRunFinalTurnBadRequestIsSentOnce(t *testing.T) {
 	client := &fakeClient{replies: []*llm.Response{
 		nil,
 		toolResponse(llm.StopToolUse, call("s1", SubmitToolName, `{"ok":true}`)),
@@ -287,19 +309,14 @@ func TestRunFallsBackWhenForcedSubmitIsRejected(t *testing.T) {
 	}}
 	spec := testSpec(client)
 	spec.MaxTurns = 1
-	result, err := Run(context.Background(), spec)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if result.Turns != 1 {
-		t.Fatalf("turns = %d, want 1", result.Turns)
+	_, err := Run(context.Background(), spec)
+	var failure *llm.Error
+	if !errors.As(err, &failure) || failure.Kind != llm.ErrBadRequest {
+		t.Fatalf("error = %v, want the classified bad request", err)
 	}
 	requests := client.requests()
-	if len(requests) != 2 {
-		t.Fatalf("requests = %d, want forced request plus fallback", len(requests))
-	}
-	if requests[0].ToolChoice != SubmitToolName || requests[1].ToolChoice != "" {
-		t.Fatalf("tool choices = %q, %q", requests[0].ToolChoice, requests[1].ToolChoice)
+	if len(requests) != 1 || requests[0].ToolChoice != "" {
+		t.Fatalf("requests = %d, want one auto tool-choice request", len(requests))
 	}
 }
 

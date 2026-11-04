@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"errors"
-	"math"
 	"testing"
 
 	"github.com/LeXwDeX/tribunal/internal/llm"
@@ -18,33 +17,6 @@ func TestUsageIncompleteCustomClientNegativeRetainsKnownUsage(t *testing.T) {
 	result, err := Run(context.Background(), testSpec(client, echoTool{name: "echo"}))
 	if !errors.Is(err, ErrUnsafeResponse) || result == nil || result.Turns != 2 || result.Usage != (llm.Usage{InputTokens: 5, OutputTokens: 2, Incomplete: true}) || len(client.requests()) != 2 {
 		t.Fatalf("result=%+v err=%v calls=%d", result, err, len(client.requests()))
-	}
-}
-
-func TestUsageIncompleteForcedFallbackAndGuard(t *testing.T) {
-	for _, guard := range []bool{false, true} {
-		t.Run(map[bool]string{false: "success", true: "guard"}[guard], func(t *testing.T) {
-			final := toolResponse(llm.StopToolUse, call("s", SubmitToolName, `{}`))
-			final.Usage.InputTokens = 2
-			client := &fakeClient{errs: []error{&llm.Error{Kind: llm.ErrBadRequest, Usage: llm.Usage{InputTokens: math.MaxInt64 - 1, Incomplete: true}}}, replies: []*llm.Response{nil, final}}
-			spec := testSpec(client)
-			spec.MaxTurns = 1
-			stopped := errors.New("stop")
-			spec.BeforeTurn = func(_ context.Context, usage llm.Usage) error {
-				if guard && usage.Incomplete {
-					return stopped
-				}
-				return nil
-			}
-			result, err := Run(context.Background(), spec)
-			want, calls := int64(math.MaxInt64), 2
-			if guard {
-				want, calls = math.MaxInt64-1, 1
-			}
-			if errors.Is(err, stopped) != guard || (!guard && err != nil) || result == nil || result.Usage.InputTokens != want || !result.Usage.Incomplete || len(client.requests()) != calls {
-				t.Fatalf("result=%+v err=%v calls=%d", result, err, len(client.requests()))
-			}
-		})
 	}
 }
 
