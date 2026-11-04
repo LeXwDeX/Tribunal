@@ -32,9 +32,12 @@ const (
 	// submit_result on every request.
 	finalTurnReserve = 2
 	// budgetReserveTurns is how many of the largest observed turns must
-	// still fit in the token budget. It covers the prompted submit turn, one
-	// resubmit after a rejected tool call (#269) and the growth of the input.
-	budgetReserveTurns = 3
+	// still fit in the token budget. It covers the prompted submit turn, the
+	// resubmits after rejected tool calls (#269) and the growth of the input.
+	budgetReserveTurns = 4
+	// maxInvalidRecoveries is how many prompted submit turns with corrupted
+	// tool calls are answered with feedback before the run fails closed.
+	maxInvalidRecoveries = 2
 	// finalTurnFloorDivisor sets the minimum reserve to this fraction of the
 	// time left when the run started.
 	finalTurnFloorDivisor = 8

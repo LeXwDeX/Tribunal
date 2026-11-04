@@ -24,7 +24,12 @@ const mustSubmitPrompt = "You must call the " + SubmitToolName +
 // exploration. It is never stored in the transcript. The loop does not force
 // tool_choice because reasoning gateways reject every non-auto choice (#255).
 const finalTurnPrompt = "This run is nearly out of turns, time, token budget or context. Call the " + SubmitToolName +
-	" tool now with your best result from the evidence gathered so far. Do not call any other tool."
+	" tool now with your best result from the evidence gathered so far. Do not call any other tool. " + strictJSONHint
+
+// strictJSONHint targets the corruption seen on reasoning gateways (#269):
+// a double quote left unescaped inside a long string value.
+const strictJSONHint = "Write the arguments as strict JSON: escape every double quote inside a string as \\\" " +
+	"(or use 「」 instead), and escape backslashes and line breaks."
 
 // compactedToolResult replaces older tool outputs when the context nears the
 // model's window. Call IDs and tool calls are kept, so pairing stays valid.
@@ -34,7 +39,7 @@ const compactedToolResult = "[earlier tool output omitted to fit the context win
 // It names only the fixed rejection category, never provider text.
 func invalidToolCallFeedback(kind string) string {
 	return "Your previous tool call was rejected and not executed (" + kind + "). Call the " + SubmitToolName +
-		" tool once more, with its arguments as one complete, valid JSON object. Do not call any other tool."
+		" tool once more, with its arguments as one complete, valid JSON object. Do not call any other tool. " + strictJSONHint
 }
 
 // recoverableToolCall reports whether a rejection category is a corrupted
@@ -172,7 +177,7 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 	var turns int
 	submitFailures := 0
 	askedForSubmit := false
-	invalidRecovered := false
+	invalidRecoveries := 0
 	// resubmitReason carries the prompted reason into the resubmit turn.
 	resubmitReason := ""
 	longestTurn := max(spec.TurnEstimate, 0)
@@ -393,11 +398,12 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 			return partial(ErrUnsafeResponse)
 		}
 		// A reasoning gateway can corrupt the large arguments of a prompted
-		// submit (#269). Nothing ran, so once per run, with a turn left, the
-		// cleared calls are dropped and the model is told the fixed category.
+		// submit (#269). Nothing ran, so up to maxInvalidRecoveries times per
+		// run, with a turn left, the cleared calls are dropped and the model
+		// is told the fixed category.
 		kind, _ := llm.ToolCallIssue(message)
-		if invalid && recoverableBatch(message) && resp.StopReason == llm.StopToolUse && reason != "" && !lastTurn && !invalidRecovered {
-			invalidRecovered = true
+		if invalid && recoverableBatch(message) && resp.StopReason == llm.StopToolUse && reason != "" && !lastTurn && invalidRecoveries < maxInvalidRecoveries {
+			invalidRecoveries++
 			resubmitReason = reason
 			messages = messages[:len(messages)-1]
 			feedback := llm.Message{

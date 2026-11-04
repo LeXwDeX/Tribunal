@@ -45,7 +45,7 @@ func budgetSpec(client llm.Client) RunSpec {
 	spec := testSpec(client, echoTool{name: "echo"})
 	spec.MaxTurns = 20
 	spec.BudgetRemaining = func(_ context.Context, used llm.Usage) (int64, bool) {
-		return 4500 - used.InputTokens - used.OutputTokens, true
+		return 5500 - used.InputTokens - used.OutputTokens, true
 	}
 	return spec
 }
@@ -92,14 +92,29 @@ func TestRunRecoversFromInvalidCallOnBudgetSubmitTurn(t *testing.T) {
 	}
 }
 
-func TestRunFailsClosedOnSecondInvalidPromptedCall(t *testing.T) {
+func TestRunRecoversFromSecondInvalidPromptedCall(t *testing.T) {
+	// A thinking gateway can corrupt the resubmit too (#269): two
+	// recoveries are allowed.
 	client := &promptedInvalidClient{prompted: []*llm.Response{
 		toolResponse(llm.StopToolUse, call("bad1", SubmitToolName, corruptSubmitInput)),
 		toolResponse(llm.StopToolUse, call("bad2", SubmitToolName, corruptSubmitInput)),
+		toolResponse(llm.StopToolUse, call("ok", SubmitToolName, `{"done":true}`)),
+	}}
+	result, err := Run(context.Background(), budgetSpec(client))
+	if err != nil || result.Turns != 5 {
+		t.Fatalf("err=%v, want a submit on turn 5 after two recoveries", err)
+	}
+}
+
+func TestRunFailsClosedOnceRecoveriesAreSpent(t *testing.T) {
+	client := &promptedInvalidClient{prompted: []*llm.Response{
+		toolResponse(llm.StopToolUse, call("bad1", SubmitToolName, corruptSubmitInput)),
+		toolResponse(llm.StopToolUse, call("bad2", SubmitToolName, corruptSubmitInput)),
+		toolResponse(llm.StopToolUse, call("bad3", SubmitToolName, corruptSubmitInput)),
 	}}
 	_, err := Run(context.Background(), budgetSpec(client))
 	if !errors.Is(err, ErrUnsafeResponse) {
-		t.Fatalf("err = %v, want unsafe after the single recovery is spent", err)
+		t.Fatalf("err = %v, want unsafe after the recoveries are spent", err)
 	}
 }
 
@@ -338,5 +353,44 @@ func TestRunRecoveryCountsRetainedTextInContext(t *testing.T) {
 	}
 	if !compacted {
 		t.Fatal("80k input plus a 25k-token retained draft must compact before the resubmit")
+	}
+}
+
+func TestRunBudgetReserveLeavesRoomForTwoResubmits(t *testing.T) {
+	const budget = 5500
+	client := &promptedInvalidClient{prompted: []*llm.Response{
+		toolResponse(llm.StopToolUse, call("bad1", SubmitToolName, corruptSubmitInput)),
+		toolResponse(llm.StopToolUse, call("bad2", SubmitToolName, corruptSubmitInput)),
+		toolResponse(llm.StopToolUse, call("ok", SubmitToolName, `{"done":true}`)),
+	}}
+	spec := testSpec(client, echoTool{name: "echo"})
+	spec.MaxTurns = 20
+	spec.BudgetRemaining = func(_ context.Context, used llm.Usage) (int64, bool) {
+		return budget - used.InputTokens - used.OutputTokens, true
+	}
+	spec.BeforeTurn = func(_ context.Context, used llm.Usage) error {
+		if used.InputTokens+used.OutputTokens >= budget {
+			return errors.New("budget exhausted")
+		}
+		return nil
+	}
+	result, err := Run(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if spent := result.Usage.InputTokens + result.Usage.OutputTokens; spent > budget {
+		t.Fatalf("spent %d of %d: the submit prompt must start early enough for two resubmits", spent, budget)
+	}
+}
+
+func TestSubmitPromptsAskForStrictJSONQuoting(t *testing.T) {
+	// The observed corruption is an unescaped double quote inside a string.
+	for name, text := range map[string]string{
+		"prompt":   finalTurnPrompt,
+		"feedback": invalidToolCallFeedback(llm.ToolCallInvalidJSON),
+	} {
+		if !strings.Contains(text, `\"`) || !strings.Contains(text, "「」") {
+			t.Fatalf("%s must ask to escape quotes inside strings: %q", name, text)
+		}
 	}
 }
