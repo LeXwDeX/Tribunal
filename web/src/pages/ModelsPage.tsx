@@ -95,12 +95,17 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 
 interface Step { stage: string; what: string; who: string }
 
+// Profile fields without omitempty arrive as "" when unset; treat blank strings as absent.
+function text(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value : undefined
+}
+
 function profileSteps(config?: ProfileConfig): Step[] {
   if (!config) return []
   const steps: Step[] = []
   const plan = asRecord(config.plan)
   if (plan) {
-    steps.push({ stage: '规划', what: typeof plan.mode === 'string' ? `mode=${plan.mode}` : '规划配置', who: typeof plan.provider === 'string' ? plan.provider : '代码' })
+    steps.push({ stage: '规划', what: text(plan.mode) ? `mode=${text(plan.mode)}` : '规划配置', who: text(plan.provider) ?? '代码' })
   }
   const propose = Array.isArray(config.propose) ? config.propose : []
   for (const entry of propose) {
@@ -108,28 +113,28 @@ function profileSteps(config?: ProfileConfig): Step[] {
     if (!item) continue
     steps.push({
       stage: '提出',
-      what: typeof item.block === 'string' ? item.block : '提出方',
-      who: typeof item.provider === 'string' ? item.provider : '未配置 provider',
+      what: text(item.block) ?? '提出方',
+      who: text(item.provider) ?? '未配置 provider',
     })
   }
   const reasoner = asRecord(config.reasoner)
   if (reasoner) {
-    steps.push({ stage: '推理', what: typeof reasoner.when === 'string' ? `when=${reasoner.when}` : 'reasoner', who: typeof reasoner.provider === 'string' ? reasoner.provider : '未配置 provider' })
+    steps.push({ stage: '推理', what: text(reasoner.when) ? `when=${text(reasoner.when)}` : 'reasoner', who: text(reasoner.provider) ?? '未配置 provider' })
   }
   const challenge = asRecord(config.challenge)
   if (challenge) {
     const only = Array.isArray(challenge.only) ? challenge.only.map(String).join(', ') : ''
+    const provider = text(challenge.provider)
+    const fallback = text(challenge.fallback)
     steps.push({
       stage: '挑战',
       what: only ? `仅 ${only}` : '挑战方',
-      who: typeof challenge.provider === 'string'
-        ? `${challenge.provider}${typeof challenge.fallback === 'string' ? `（fallback ${challenge.fallback}）` : ''}`
-        : '未配置 provider',
+      who: provider ? `${provider}${fallback ? `（fallback ${fallback}）` : ''}` : '未配置 provider',
     })
   }
   const synthesize = asRecord(config.synthesize)
   if (synthesize) {
-    steps.push({ stage: '汇总', what: typeof synthesize.mode === 'string' ? `mode=${synthesize.mode}` : '汇总配置', who: typeof synthesize.provider === 'string' ? synthesize.provider : '代码' })
+    steps.push({ stage: '汇总', what: text(synthesize.mode) ? `mode=${text(synthesize.mode)}` : '汇总配置', who: text(synthesize.provider) ?? '代码' })
   }
   return steps
 }
