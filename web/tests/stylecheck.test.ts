@@ -40,9 +40,23 @@ describe('web style checks', () => {
     }
   })
 
-  it('allows token-only style objects', () => {
-    const diagnostics = scanTsx("<div style={{ color: 'var(--text)' }} />", 'x.tsx')
-    expect(diagnostics).toHaveLength(0)
+  it('allows token-only style objects in both string literal forms', () => {
+    for (const code of [
+      "<div style={{ color: 'var(--text)' }} />",
+      '<div style={{ color: `var(--text)` }} />',
+    ]) {
+      expect(scanTsx(code, 'x.tsx')).toHaveLength(0)
+    }
+  })
+
+  it('rejects static styles behind type assertions', () => {
+    for (const code of [
+      '<div style={{ top: 1 } as const} />',
+      '<div style={{ top: 1 } satisfies object} />',
+    ]) {
+      const diagnostics = scanTsx(code, 'x.tsx')
+      expect(diagnostics.filter((d) => d.rule === 'inline-style')).toHaveLength(1)
+    }
   })
 
   it('allows a data-driven style object', () => {
@@ -55,16 +69,30 @@ describe('web style checks', () => {
     expect(diagnostics).toHaveLength(0)
   })
 
-  it('rejects literal colors in JSX attributes and expression trees', () => {
+  it('rejects literal colors in direct JSX attributes', () => {
+    const diagnostics = scanTsx('<svg><rect fill="#fff" stroke="currentColor" /></svg>', 'x.tsx')
+    expect(diagnostics.filter((d) => d.rule === 'color-literal')).toHaveLength(1)
+  })
+
+  it('rejects literal colors in JSX expression trees', () => {
     for (const code of [
-      '<svg><rect fill="#fff" /><rect fill={\'#000\'} stroke="currentColor" /></svg>',
+      '<svg><rect fill={\'#000\'} /></svg>',
       "<svg><rect fill={('#fff')} /></svg>",
       "<svg><rect fill={active ? '#fff' : '#000'} /></svg>",
+      '<div style={{ boxShadow: `${offset}px 0 #fff` }} />',
+    ]) {
+      const diagnostics = scanTsx(code, 'x.tsx')
+      expect(diagnostics.filter((d) => d.rule === 'color-literal').length).toBeGreaterThan(0)
+    }
+  })
+
+  it('rejects literal colors in style objects and their branches', () => {
+    for (const code of [
       "<div style = {{ color: '#fff' }} />",
       "<div style={active ? { color: '#fff' } : { color: '#000' }} />",
     ]) {
       const diagnostics = scanTsx(code, 'x.tsx')
-      expect(diagnostics.filter((d) => d.rule === 'color-literal')).not.toHaveLength(0)
+      expect(diagnostics.filter((d) => d.rule === 'color-literal').length).toBeGreaterThan(0)
     }
   })
 

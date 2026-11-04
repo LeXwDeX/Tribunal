@@ -72,7 +72,8 @@ export function scanCss(text, file) {
 }
 
 function isTokenValue(node) {
-  return ts.isStringLiteral(node) && /^var\(--[\w-]+\)$/.test(node.text)
+  return (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node))
+    && /^var\(--[\w-]+\)$/.test(node.text)
 }
 
 function isStaticValue(node) {
@@ -81,7 +82,9 @@ function isStaticValue(node) {
   if (ts.isNumericLiteral(node) || ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return true
   if (node.kind === ts.SyntaxKind.TrueKeyword || node.kind === ts.SyntaxKind.FalseKeyword) return true
   if (ts.isPrefixUnaryExpression(node)) return isStaticValue(node.operand)
-  if (ts.isParenthesizedExpression(node)) return isStaticValue(node.expression)
+  if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isSatisfiesExpression(node) || ts.isNonNullExpression(node)) {
+    return isStaticValue(node.expression)
+  }
   if (ts.isObjectLiteralExpression(node)) {
     return node.properties.length > 0 && node.properties.every((property) =>
       ts.isPropertyAssignment(property) && isStaticValue(property.initializer))
@@ -94,7 +97,9 @@ function isStaticValue(node) {
 function isTokenOnly(node) {
   if (!node) return false
   if (isTokenValue(node)) return true
-  if (ts.isParenthesizedExpression(node)) return isTokenOnly(node.expression)
+  if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isSatisfiesExpression(node) || ts.isNonNullExpression(node)) {
+    return isTokenOnly(node.expression)
+  }
   if (ts.isConditionalExpression(node)) return isTokenOnly(node.whenTrue) && isTokenOnly(node.whenFalse)
   if (ts.isObjectLiteralExpression(node)) {
     return node.properties.length > 0 && node.properties.every((property) =>
@@ -114,7 +119,10 @@ export function scanTsx(text, file) {
 
   const collectColors = (node) => {
     if (!node) return
-    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) || node.kind === ts.SyntaxKind.TemplateHead) {
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)
+      || node.kind === ts.SyntaxKind.TemplateHead
+      || node.kind === ts.SyntaxKind.TemplateMiddle
+      || node.kind === ts.SyntaxKind.TemplateTail) {
       if (colorInText(node.text)) {
         diagnostics.push({
           file,
@@ -129,21 +137,26 @@ export function scanTsx(text, file) {
   }
 
   const visit = (node) => {
-    if (ts.isJsxAttribute(node) && node.initializer && ts.isJsxExpression(node.initializer)) {
-      const expression = node.initializer.expression
+    if (ts.isJsxAttribute(node) && node.initializer) {
+      const initializer = node.initializer
       if (node.name.text === 'style') {
-        collectColors(expression)
-        if (isStaticValue(expression) && !isTokenOnly(expression)) {
-          diagnostics.push({
-            file,
-            line: lineOfNode(node),
-            rule: 'inline-style',
-            severity: 'error',
-            message: '静态内联 style；请放进 CSS Module；只有由数据计算的值可以保留',
-          })
+        if (ts.isJsxExpression(initializer) && initializer.expression) {
+          collectColors(initializer.expression)
+          if (isStaticValue(initializer.expression) && !isTokenOnly(initializer.expression)) {
+            diagnostics.push({
+              file,
+              line: lineOfNode(node),
+              rule: 'inline-style',
+              severity: 'error',
+              message: '静态内联 style；请放进 CSS Module；只有由数据计算的值可以保留',
+            })
+          }
+        } else if (ts.isStringLiteral(initializer)) {
+          collectColors(initializer)
         }
       } else if (['fill', 'stroke', 'color', 'bgcolor'].includes(node.name.text)) {
-        collectColors(expression)
+        if (ts.isJsxExpression(initializer) && initializer.expression) collectColors(initializer.expression)
+        else if (ts.isStringLiteral(initializer)) collectColors(initializer)
       }
     }
     ts.forEachChild(node, visit)
