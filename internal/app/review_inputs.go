@@ -338,7 +338,7 @@ func resolveReviewConfig(project *store.Project, docs review.RepoDocs, defaults 
 		}
 	}
 	if strings.TrimSpace(repo.Profile) != "" {
-		if _, ok := profiles[repo.Profile]; ok {
+		if isReviewProfile(profiles, repo.Profile) {
 			out.Profile = repo.Profile
 		} else {
 			out.Warnings = append(out.Warnings, "repository profile is not configured and was ignored")
@@ -496,8 +496,8 @@ func (s *ReviewService) profileFor(project *store.Project, requested, repoProfil
 			continue
 		}
 		seen[name] = struct{}{}
-		if cfg, ok := s.profiles[name]; ok {
-			return name, cfg
+		if isReviewProfile(s.profiles, name) {
+			return name, s.profiles[name]
 		}
 	}
 	return "custom", config.ProfileConfig{}

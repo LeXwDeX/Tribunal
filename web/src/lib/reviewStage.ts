@@ -5,8 +5,8 @@ export const REVIEW_STAGES = ['规划', '提出', '挑战', '裁决', '发布'] 
 // Node kinds equal block names (internal/review/blocks.go). Blocks without a
 // lane, such as gather or onboarding, do not move the track.
 function stageForKind(kind: string): number | null {
-  if (kind === 'plan' || kind === 'reasoner') return 0
-  if (kind === 'code-review' || kind === 'review' || kind.startsWith('review.')) return 1
+  if (kind === 'explore' || kind === 'plan') return 0
+  if (kind === 'code-review' || kind === 'review' || kind.startsWith('review.') || kind === 'reasoner' || kind === 'validate') return 1
   if (kind === 'verify') return 2
   if (kind === 'adjudicate' || kind === 'synthesize') return 3
   if (kind === 'publish' || kind.startsWith('publish.')) return 4

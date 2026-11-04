@@ -34,7 +34,6 @@ func TestParseSettingsRequiresStrictObject(t *testing.T) {
 		`{"unknown":true}`,
 		`{"max_files":0}`,
 		`{"target_branches":["["]}`,
-		`{"profile_by_label":{"label":"missing"}}`,
 		`{"labels_include":[""]}`,
 		`{} {}`,
 	}
@@ -42,6 +41,10 @@ func TestParseSettingsRequiresStrictObject(t *testing.T) {
 		if _, err := ParseSettings(json.RawMessage(input), testProfiles()); err == nil {
 			t.Errorf("ParseSettings(%s) unexpectedly succeeded", input)
 		}
+	}
+	if raw, err := ParseSettings(json.RawMessage(`{"profile_by_label":{"gone":"missing","boot":"onboarding","ok":"default"}}`), testProfiles()); err != nil ||
+		string(raw) != `{"profile_by_label":{"ok":"default"}}` {
+		t.Errorf("mappings to removed profiles must be dropped: %s, %v", raw, err)
 	}
 	if raw, err := ParseSettings(nil, testProfiles()); err != nil || string(raw) != `{}` {
 		t.Errorf("empty settings = %s, %v", raw, err)

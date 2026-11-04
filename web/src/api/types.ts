@@ -439,6 +439,9 @@ export interface ProviderTestResult {
 }
 
 export interface ProfileConfig {
+  flow?: string
+  explore?: Record<string, unknown>
+  lanes?: Record<string, unknown>
   plan?: Record<string, unknown>
   propose?: Array<Record<string, unknown>>
   reasoner?: Record<string, unknown>

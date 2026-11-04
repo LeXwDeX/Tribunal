@@ -262,7 +262,7 @@ func TestRepoConfigReadsTargetBranchOnly(t *testing.T) {
 	}
 }
 
-func TestRepoProfileAppliesToAutomaticTrigger(t *testing.T) {
+func TestRepoNonDefaultProfileFallsBackOnAutomaticTrigger(t *testing.T) {
 	f := newReviewFixture(t, reviewTestHead)
 	f.profiles["deep"] = testReviewProfile()
 	f.setRepoConfig(t, "version: 1\nprofile: deep\n")
@@ -271,8 +271,8 @@ func TestRepoProfileAppliesToAutomaticTrigger(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if workflow.Profile != "deep" {
-		t.Fatalf("workflow profile = %q, want repo profile deep", workflow.Profile)
+	if workflow.Profile != "default" {
+		t.Fatalf("workflow profile = %q, want default (repo profile deep is not a review profile)", workflow.Profile)
 	}
 }
 
@@ -358,7 +358,7 @@ func (f *reviewFixture) runCommandWebhook(t *testing.T, note string) *store.Job 
 	return claimed
 }
 
-func TestBareCommandFollowsRepoProfile(t *testing.T) {
+func TestBareCommandIgnoresRepoNonDefaultProfile(t *testing.T) {
 	f := newReviewFixture(t, reviewTestHead)
 	f.profiles["deep"] = testReviewProfile()
 	f.setRepoConfig(t, "version: 1\nprofile: deep\n")
@@ -370,8 +370,8 @@ func TestBareCommandFollowsRepoProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if workflow.Profile != "deep" {
-		t.Fatalf("bare command profile = %q, want repo profile deep", workflow.Profile)
+	if workflow.Profile != "default" {
+		t.Fatalf("bare command profile = %q, want default (repo profile deep is not a review profile)", workflow.Profile)
 	}
 }
 

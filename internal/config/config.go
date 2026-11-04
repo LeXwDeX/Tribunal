@@ -36,6 +36,11 @@ type Config struct {
 
 	// DefaultExtensions are platform extensions registered once on first start.
 	DefaultExtensions DefaultExtensionsConfig `yaml:"default_extensions" json:"default_extensions"`
+
+	// Warnings lists configuration that Load ignored or migrated, for example
+	// removed review profiles or legacy profile fields. They are logged once
+	// at startup and never contain configuration values other than names.
+	Warnings []string `yaml:"-" json:"-"`
 }
 
 // ServerConfig controls the HTTP listener.
@@ -171,6 +176,13 @@ type PriceConfig struct {
 
 // ProfileConfig describes a review profile.
 type ProfileConfig struct {
+	// Flow is code-owned: Load sets "lanes" on the single review profile
+	// (NormalizeReviewProfile). It cannot be configured.
+	Flow string `yaml:"-" json:"flow,omitempty"`
+	// Provider is the default provider of every node of the review profile.
+	Provider    string           `yaml:"provider" json:"provider,omitempty"`
+	Explore     *ExploreConfig   `yaml:"explore" json:"explore,omitempty"`
+	Lanes       *LanesConfig     `yaml:"lanes" json:"lanes,omitempty"`
 	Plan        PlanConfig       `yaml:"plan" json:"plan"`
 	Propose     []ProposeConfig  `yaml:"propose" json:"propose"`
 	Reasoner    *ReasonerConfig  `yaml:"reasoner" json:"reasoner"`
@@ -180,6 +192,26 @@ type ProfileConfig struct {
 	Synthesize  SynthesizeConfig `yaml:"synthesize" json:"synthesize"`
 	Budget      BudgetConfig     `yaml:"budget" json:"budget"`
 	Agent       *AgentConfig     `yaml:"agent" json:"agent"`
+}
+
+// ExploreConfig selects the provider of the read-only explore node. An empty
+// provider falls back to the profile provider.
+type ExploreConfig struct {
+	Provider string `yaml:"provider" json:"provider"`
+}
+
+// LanesConfig selects the providers of the four parallel review lanes.
+type LanesConfig struct {
+	CodeReview LaneConfig `yaml:"code_review" json:"code_review"`
+	Review     LaneConfig `yaml:"review" json:"review"`
+	Reasoner   LaneConfig `yaml:"reasoner" json:"reasoner"`
+	Validate   LaneConfig `yaml:"validate" json:"validate"`
+}
+
+// LaneConfig binds one lane to a provider. An empty provider falls back to
+// the profile provider.
+type LaneConfig struct {
+	Provider string `yaml:"provider" json:"provider"`
 }
 
 // PlanConfig selects the planning mode and optional provider.
@@ -464,8 +496,22 @@ func validateProfile(p *problems, providers map[string]ProviderConfig, field str
 	}
 
 	checkProvider(field+".plan.provider", profile.Plan.Provider)
-	for i, propose := range profile.Propose {
-		checkProvider(fmt.Sprintf("%s.propose[%d].provider", field, i), propose.Provider)
+	checkProvider(field+".provider", profile.Provider)
+	if profile.Explore != nil {
+		checkProvider(field+".explore.provider", profile.Explore.Provider)
+	}
+	if profile.Lanes != nil {
+		checkProvider(field+".lanes.code_review.provider", profile.Lanes.CodeReview.Provider)
+		checkProvider(field+".lanes.review.provider", profile.Lanes.Review.Provider)
+		checkProvider(field+".lanes.reasoner.provider", profile.Lanes.Reasoner.Provider)
+		checkProvider(field+".lanes.validate.provider", profile.Lanes.Validate.Provider)
+	}
+	// The review profile's propose entry is derived from lanes.code_review,
+	// which is checked above; report the configured field only.
+	if profile.Flow != ReviewFlow {
+		for i, propose := range profile.Propose {
+			checkProvider(fmt.Sprintf("%s.propose[%d].provider", field, i), propose.Provider)
+		}
 	}
 	if profile.Reasoner != nil {
 		checkProvider(field+".reasoner.provider", profile.Reasoner.Provider)

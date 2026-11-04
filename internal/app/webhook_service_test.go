@@ -277,9 +277,9 @@ func TestWebhookMergeRequestDecisions(t *testing.T) {
 			patchAttr(b, "iid", 0)
 			patchMR(b, "iid", 0)
 		}, ignored: "bad_request"},
-		{name: "label profile", settings: `{"profile_by_label":{"deep-review":"deep"}}`, mutate: func(b map[string]any) {
+		{name: "label naming a non-default profile falls back", settings: `{"profile_by_label":{"deep-review":"deep"}}`, mutate: func(b map[string]any) {
 			patchAttr(b, "labels", []string{"deep-review"})
-		}, accepted: true, kind: "review.candidate", key: "review.candidate:42:7", profile: "deep", full: true},
+		}, accepted: true, kind: "review.candidate", key: "review.candidate:42:7", profile: "default", full: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -431,7 +431,8 @@ func TestWebhookNoteCommands(t *testing.T) {
 	}{
 		{name: "review", note: "/review", accepted: true, command: "run", profile: "default", explicit: boolPtr(false)},
 		{name: "review full", note: "/review full", accepted: true, command: "run", profile: "default", explicit: boolPtr(false), full: true},
-		{name: "review profile", note: "/review deep", accepted: true, command: "run", profile: "deep", explicit: boolPtr(true)},
+		{name: "review default profile", note: "/review default", accepted: true, command: "run", profile: "default", explicit: boolPtr(true)},
+		{name: "review non-default profile", note: "/review deep", ignored: "unknown_profile"},
 		{name: "cancel", note: "/review cancel", accepted: true, command: "cancel"},
 		{name: "help", note: "/review help", accepted: true, command: "help"},
 		{name: "unknown args", note: "/review full extra", ignored: "unknown_command"},

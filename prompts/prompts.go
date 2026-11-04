@@ -30,6 +30,9 @@ const (
 	Reasoner        = "reasoner.md"
 	Verify          = "verify.md"
 	Onboarding      = "onboarding.md"
+	Explore         = "explore.md"
+	Review          = "review.md"
+	Validate        = "validate.md"
 )
 
 // RoleFiles is the complete selected bundle, in stable hash order.
@@ -44,6 +47,9 @@ var RoleFiles = []string{
 	Reasoner,
 	Verify,
 	Onboarding,
+	Explore,
+	Review,
+	Validate,
 }
 
 // MaxFileBytes bounds an override file. Embedded files are reviewed with the
@@ -54,7 +60,7 @@ const MaxFileBytes = 256 << 10
 // build prompts from these files. It is code-owned and cannot be overridden.
 // Bump it whenever task rendering changes, so workflows created with the old
 // identity are not resumed, retried, or published.
-const TaskRenderVersion = "4"
+const TaskRenderVersion = "5"
 
 var versionRE = regexp.MustCompile(`^<!-- v([0-9A-Za-z._-]+) -->$`)
 

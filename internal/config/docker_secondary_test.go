@@ -45,8 +45,8 @@ func readDockerTemplate(t *testing.T) string {
 }
 
 // enableSecondaryExample applies the documented opt-in steps to the real
-// template: uncomment providers.secondary, add its propose entry, and switch
-// the challenger to secondary.
+// template: uncomment providers.secondary, move the review lane to it, and
+// switch the challenger to secondary.
 func enableSecondaryExample(t *testing.T, body string) string {
 	t.Helper()
 	replacements := []struct{ old, new string }{
@@ -57,14 +57,8 @@ func enableSecondaryExample(t *testing.T, body string) string {
 		{"  #   api_key_env: LLM_SECONDARY_API_KEY\n", "    api_key_env: LLM_SECONDARY_API_KEY\n"},
 		{"  #   max_concurrency: 4\n", "    max_concurrency: 4\n"},
 		{"  #   max_tokens: 16000\n", "    max_tokens: 16000\n"},
-		{
-			"      - block: code-review\n        provider: primary\n",
-			"      - block: code-review\n        provider: primary\n      - block: code-review\n        provider: secondary\n",
-		},
-		{
-			"    challenge:\n      # Replace primary with secondary to challenge a different model after\n      # enabling providers.secondary above.\n      provider: primary\n",
-			"    challenge:\n      provider: secondary\n",
-		},
+		{"    # lanes:\n    #   review: { provider: secondary }\n", "    lanes:\n      review: { provider: secondary }\n"},
+		{"    # challenge: { provider: secondary }\n", "    challenge: { provider: secondary }\n"},
 	}
 	for _, replacement := range replacements {
 		if !strings.Contains(body, replacement.old) {
@@ -90,11 +84,14 @@ func TestDockerConfigSecondaryDisabledByDefault(t *testing.T) {
 		t.Fatal("providers.secondary must stay commented out by default")
 	}
 	profile := cfg.Profiles["default"]
-	if len(profile.Propose) != 1 || profile.Propose[0].Provider != "primary" {
-		t.Errorf("default propose = %+v, want only primary", profile.Propose)
+	if lanes := laneProviders(profile); lanes != "primary,primary,primary,primary,primary" {
+		t.Errorf("default explore and lanes = %s, want all primary", lanes)
 	}
 	if profile.Challenge.Provider != "primary" {
 		t.Errorf("default challenge.provider = %q, want primary", profile.Challenge.Provider)
+	}
+	if len(cfg.Warnings) != 0 {
+		t.Errorf("shipped config must load without migration warnings: %v", cfg.Warnings)
 	}
 	if onboarding := cfg.Profiles["onboarding"]; onboarding.Agent == nil || onboarding.Agent.Provider != "primary" {
 		t.Errorf("onboarding agent = %+v, want primary", onboarding.Agent)
@@ -109,8 +106,8 @@ func TestDockerConfigSecondaryDisabledByDefault(t *testing.T) {
 		"  #   api_key_env: LLM_SECONDARY_API_KEY",
 		"  #   max_concurrency: 4",
 		"  #   max_tokens: 16000",
-		"      # - block: code-review",
-		"      #   provider: secondary",
+		"    #   review: { provider: secondary }",
+		"    # challenge: { provider: secondary }",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("%s lost secondary template line %q", dockerConfigPath, want)
@@ -155,10 +152,8 @@ func TestDockerConfigSecondaryExampleEnabled(t *testing.T) {
 	}
 
 	profile := cfg.Profiles["default"]
-	if len(profile.Propose) != 2 ||
-		profile.Propose[0].Block != "code-review" || profile.Propose[0].Provider != "primary" ||
-		profile.Propose[1].Block != "code-review" || profile.Propose[1].Provider != "secondary" {
-		t.Errorf("default propose = %+v, want primary and secondary", profile.Propose)
+	if lanes := laneProviders(profile); lanes != "primary,primary,secondary,primary,primary" {
+		t.Errorf("default explore,code_review,review,reasoner,validate = %s, want the review lane on secondary", lanes)
 	}
 	if profile.Challenge.Provider != "secondary" {
 		t.Errorf("default challenge.provider = %q, want secondary", profile.Challenge.Provider)
@@ -291,36 +286,20 @@ func removeSecondaryProviderBlock(t *testing.T, body string) string {
 	return strings.Replace(body, block, "", 1)
 }
 
-const defaultProposeWithSecondary = "      - block: code-review\n" +
-	"        provider: primary\n" +
-	"      - block: code-review\n" +
-	"        provider: secondary\n"
-
-func removeSecondaryDefaultPropose(t *testing.T, body string) string {
-	t.Helper()
-	if !strings.Contains(body, defaultProposeWithSecondary) {
-		t.Fatal("docker config lost the enabled secondary propose entry")
+// laneProviders lists explore, code_review, review, reasoner and validate.
+func laneProviders(profile ProfileConfig) string {
+	if profile.Explore == nil || profile.Lanes == nil {
+		return "missing"
 	}
-	return strings.Replace(body, defaultProposeWithSecondary, "      - block: code-review\n        provider: primary\n", 1)
+	return strings.Join([]string{
+		profile.Explore.Provider, profile.Lanes.CodeReview.Provider, profile.Lanes.Review.Provider,
+		profile.Lanes.Reasoner.Provider, profile.Lanes.Validate.Provider,
+	}, ",")
 }
 
-func setChallenge(t *testing.T, body, provider, fallback string) string {
-	t.Helper()
-	old := "    challenge:\n      provider: secondary\n"
-	if !strings.Contains(body, old) {
-		t.Fatal("docker config lost the enabled secondary challenge")
-	}
-	replacement := "    challenge:\n      provider: " + provider + "\n"
-	if fallback != "" {
-		replacement += "      fallback: " + fallback + "\n"
-	}
-	return strings.Replace(body, old, replacement, 1)
-}
-
-// addResidualSecondaryReferences spreads secondary references across the
-// default profile, a second profile, and onboarding so removing the provider
-// must fail until every reference is cleaned up.
-func addResidualSecondaryReferences(t *testing.T, body string) string {
+// addLegacySecondaryReferences writes an earlier release's profile shape: a
+// second review profile and legacy default-profile fields, all on secondary.
+func addLegacySecondaryReferences(t *testing.T, body string) string {
 	t.Helper()
 	replacements := []struct{ old, new string }{
 		{
@@ -328,12 +307,8 @@ func addResidualSecondaryReferences(t *testing.T, body string) string {
 			"profiles:\n  deep:\n    propose:\n      - block: code-review\n        provider: secondary\n    challenge:\n      provider: primary\n      fallback: secondary\n  onboarding:\n    agent:\n      provider: secondary\n",
 		},
 		{
-			"  default:\n    propose:\n",
-			"  default:\n    plan:\n      provider: secondary\n    reasoner:\n      provider: secondary\n      when: never\n    propose:\n",
-		},
-		{
-			"    challenge:\n      provider: secondary\n",
-			"    synthesize:\n      provider: secondary\n    agent:\n      provider: secondary\n    challenge:\n      provider: primary\n      fallback: secondary\n",
+			"  default:\n    provider: primary\n",
+			"  default:\n    provider: primary\n    plan:\n      mode: agent\n      provider: secondary\n    reasoner:\n      provider: secondary\n      when: auto\n    synthesize:\n      mode: agent\n      provider: secondary\n    agent:\n      provider: secondary\n",
 		},
 	}
 	for _, replacement := range replacements {
@@ -345,71 +320,69 @@ func addResidualSecondaryReferences(t *testing.T, body string) string {
 	return body
 }
 
-func TestDockerConfigSecondaryCrossChallengeValid(t *testing.T) {
+func TestDockerConfigLegacyCrossChallengeMigrates(t *testing.T) {
 	setDockerConfigEnv(t)
 	setSecondaryExampleEnv(t)
-	body := setChallenge(t, enableSecondaryExample(t, readDockerTemplate(t)), "cross", "secondary")
+	body := enableSecondaryExample(t, readDockerTemplate(t))
+	body = strings.Replace(body, "    challenge: { provider: secondary }\n", "    challenge: { provider: cross, fallback: secondary }\n", 1)
 
 	cfg := loadConfig(t, writeConfig(t, "server.docker.yaml", body))
 	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate(cross challenge with secondary fallback) = %v", err)
+		t.Fatalf("Validate(legacy cross challenge) = %v", err)
 	}
-	profile := cfg.Profiles["default"]
-	if profile.Challenge.Provider != "cross" || profile.Challenge.Fallback != "secondary" {
-		t.Errorf("challenge = %+v, want cross challenge with secondary fallback", profile.Challenge)
+	if got := cfg.Profiles["default"].Challenge; got.Provider != "secondary" || got.Fallback != "" {
+		t.Errorf("challenge = %+v, want the fallback as the challenge provider", got)
 	}
-	if len(profile.Propose) != 2 ||
-		profile.Propose[0].Provider != "primary" || profile.Propose[1].Provider != "secondary" {
-		t.Errorf("propose = %+v, want primary and secondary", profile.Propose)
-	}
+	requireWarning(t, cfg.Warnings, "challenge.provider cross")
 }
 
-func TestDockerConfigSecondaryResidualFallbackRejected(t *testing.T) {
+func TestDockerConfigSecondaryResidualChallengeRejected(t *testing.T) {
 	setDockerConfigEnv(t)
 	setSecondaryExampleEnv(t)
 	body := enableSecondaryExample(t, readDockerTemplate(t))
 	body = removeSecondaryProviderBlock(t, body)
-	body = removeSecondaryDefaultPropose(t, body)
-	body = setChallenge(t, body, "primary", "secondary")
+	body = strings.Replace(body, "      review: { provider: secondary }\n", "      review: { provider: primary }\n", 1)
 
 	cfg := loadConfig(t, writeConfig(t, "server.docker.yaml", body))
 	err := cfg.Validate()
-	requireErrorContains(t, err, `profiles.default.challenge.fallback "secondary" is not defined`)
-	requireErrorNotContains(t, err,
-		"test-secondary-key", "test-provider-key",
-		"profiles.default.plan", "profiles.default.propose", "profiles.default.synthesize",
-		"profiles.default.agent", "profiles.onboarding",
-	)
+	requireErrorContains(t, err, `profiles.default.challenge.provider "secondary" is not defined`)
+	requireErrorNotContains(t, err, "test-secondary-key", "test-provider-key", "profiles.default.lanes", "profiles.onboarding")
 }
 
-func TestDockerConfigSecondaryResidualReferencesAcrossProfilesRejected(t *testing.T) {
+func TestDockerConfigLegacyProfilesLoadWithWarnings(t *testing.T) {
 	setDockerConfigEnv(t)
 	setSecondaryExampleEnv(t)
-	body := addResidualSecondaryReferences(t, enableSecondaryExample(t, readDockerTemplate(t)))
+	body := addLegacySecondaryReferences(t, enableSecondaryExample(t, readDockerTemplate(t)))
 	body = removeSecondaryProviderBlock(t, body)
 
 	cfg := loadConfig(t, writeConfig(t, "server.docker.yaml", body))
 	err := cfg.Validate()
+	// Migrated provider choices are still checked; ignored flow choices and
+	// the removed profile are not.
 	requireErrorContains(t, err,
-		`profiles.default.plan.provider "secondary" is not defined`,
-		`profiles.default.reasoner.provider "secondary" is not defined`,
-		`profiles.default.propose[1].provider "secondary" is not defined`,
-		`profiles.default.synthesize.provider "secondary" is not defined`,
-		`profiles.default.agent.provider "secondary" is not defined`,
-		`profiles.default.challenge.fallback "secondary" is not defined`,
-		`profiles.deep.propose[0].provider "secondary" is not defined`,
-		`profiles.deep.challenge.fallback "secondary" is not defined`,
+		`profiles.default.lanes.review.provider "secondary" is not defined`,
+		`profiles.default.lanes.reasoner.provider "secondary" is not defined`,
+		`profiles.default.challenge.provider "secondary" is not defined`,
 		`profiles.onboarding.agent.provider "secondary" is not defined`,
 	)
-	requireErrorNotContains(t, err, "test-secondary-key", "test-provider-key")
+	requireErrorNotContains(t, err, "test-secondary-key", "test-provider-key",
+		"profiles.deep", "profiles.default.plan", "profiles.default.synthesize", "profiles.default.agent")
+	for _, want := range []string{
+		"profiles.deep was removed", "profiles.default.plan.mode was ignored", "profiles.default.plan.provider was ignored",
+		"profiles.default.reasoner is deprecated", "profiles.default.synthesize was ignored", "profiles.default.agent was ignored",
+	} {
+		requireWarning(t, cfg.Warnings, want)
+	}
+	if _, ok := cfg.Profiles["deep"]; ok {
+		t.Error("a removed review profile must not stay selectable")
+	}
 }
 
-func TestDockerConfigSecondaryAllReferencesRemovedThenValid(t *testing.T) {
+func TestDockerConfigLegacyReferencesRemovedThenValid(t *testing.T) {
 	setDockerConfigEnv(t)
 	setSecondaryExampleEnv(t)
-	body := addResidualSecondaryReferences(t, enableSecondaryExample(t, readDockerTemplate(t)))
+	body := addLegacySecondaryReferences(t, enableSecondaryExample(t, readDockerTemplate(t)))
 	body = removeSecondaryProviderBlock(t, body)
-	body = removeSecondaryDefaultPropose(t, body)
 	body = strings.ReplaceAll(body, "provider: secondary", "provider: primary")
 	body = strings.ReplaceAll(body, "      fallback: secondary\n", "")
 
@@ -417,27 +390,26 @@ func TestDockerConfigSecondaryAllReferencesRemovedThenValid(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate(primary-only after cleanup) = %v", err)
 	}
-	if len(cfg.Providers) != 1 {
-		t.Fatalf("providers = %v, want only primary", cfg.Providers)
-	}
 	profile := cfg.Profiles["default"]
-	if profile.Plan.Provider != "primary" ||
-		profile.Reasoner == nil || profile.Reasoner.Provider != "primary" ||
-		profile.Synthesize.Provider != "primary" ||
-		profile.Agent == nil || profile.Agent.Provider != "primary" ||
-		profile.Challenge.Provider != "primary" || profile.Challenge.Fallback != "" {
-		t.Errorf("default profile still carries secondary references: %+v", profile)
+	if profile.Flow != ReviewFlow || profile.Plan.Mode != "code" || profile.Plan.Provider != "" ||
+		profile.Reasoner != nil || profile.Synthesize.Mode != "code" || profile.Synthesize.Provider != "" ||
+		profile.Agent != nil || len(profile.Propose) != 1 {
+		t.Errorf("default profile keeps legacy flow choices: %+v", profile)
 	}
-	if len(profile.Propose) != 1 || profile.Propose[0].Provider != "primary" {
-		t.Errorf("default propose = %+v, want only primary", profile.Propose)
+	if lanes := laneProviders(profile); lanes != "primary,primary,primary,primary,primary" {
+		t.Errorf("lanes = %s", lanes)
 	}
-	deep := cfg.Profiles["deep"]
-	if len(deep.Propose) != 1 || deep.Propose[0].Provider != "primary" ||
-		deep.Challenge.Provider != "primary" || deep.Challenge.Fallback != "" {
-		t.Errorf("deep profile still carries secondary references: %+v", deep)
-	}
-	onboarding := cfg.Profiles["onboarding"]
-	if onboarding.Agent == nil || onboarding.Agent.Provider != "primary" {
+	if onboarding := cfg.Profiles["onboarding"]; onboarding.Agent == nil || onboarding.Agent.Provider != "primary" {
 		t.Errorf("onboarding agent = %+v, want primary", onboarding.Agent)
 	}
+}
+
+func requireWarning(t *testing.T, warnings []string, want string) {
+	t.Helper()
+	for _, warning := range warnings {
+		if strings.Contains(warning, want) {
+			return
+		}
+	}
+	t.Errorf("warnings %q do not mention %q", warnings, want)
 }

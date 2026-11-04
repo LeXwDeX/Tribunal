@@ -28,6 +28,15 @@ const (
 	BlockAdjudicate      = "adjudicate"
 	BlockSynthesize      = "synthesize"
 	BlockOnboarding      = "onboarding"
+	BlockExplore         = "explore"
+	BlockReview          = "review"
+	BlockValidate        = "validate"
+)
+
+// Review flows selected by profile.flow.
+const (
+	FlowLegacy = "legacy"
+	FlowLanes  = "lanes"
 )
 
 // Node kinds are identical to block names; node IDs add package/sequence
@@ -44,6 +53,9 @@ const (
 	KindAdjudicate = BlockAdjudicate
 	KindSynthesize = BlockSynthesize
 	KindOnboarding = BlockOnboarding
+	KindExplore    = BlockExplore
+	KindReview     = BlockReview
+	KindValidate   = BlockValidate
 )
 
 // Node ID prefixes from docs/design/04-dag-and-contracts.md.
@@ -54,10 +66,13 @@ const (
 	NodeSynth      = "synthesize"
 	NodeSynth2     = "synthesize.2"
 	NodeReasoner   = "reasoner"
+	NodeExplore    = "explore"
+	NodeValidate   = "validate"
 )
 
 const (
 	DefaultPlanTimeout       = 5 * time.Minute
+	DefaultExploreTimeout    = 5 * time.Minute
 	DefaultReviewTimeout     = 10 * time.Minute
 	DefaultGatherTimeout     = 2 * time.Minute
 	DefaultAdjudicateTimeout = 2 * time.Minute
@@ -125,6 +140,9 @@ var blockTable = []Block{
 	{Name: BlockAdjudicate, Kind: KindAdjudicate, Required: true, Contract: ""},
 	{Name: BlockSynthesize, Kind: KindSynthesize, Required: true, ReadOnlyTools: true, Contract: ContractSynthesize},
 	{Name: BlockOnboarding, Kind: KindOnboarding, Required: true, ReadOnlyTools: true, Contract: ContractOnboarding},
+	{Name: BlockExplore, Kind: KindExplore, Required: false, ReadOnlyTools: true, Contract: ContractExplore},
+	{Name: BlockReview, Kind: KindReview, Required: false, ReadOnlyTools: true, Contract: ContractReview},
+	{Name: BlockValidate, Kind: KindValidate, Required: false, ReadOnlyTools: true, Contract: ContractValidate},
 }
 
 // Blocks returns the documented block table in stable order.
@@ -202,6 +220,7 @@ func BuildGraph(profile Profile, d *Dossier, cfg GraphConfig) (dag.GraphSpec, er
 	if err != nil {
 		return dag.GraphSpec{}, err
 	}
+	lanes := isLanesFlow(normalized.Config)
 	planParamsValue := planParams{
 		Mode:          normalized.Config.Plan.Mode,
 		Provider:      normalized.Config.Plan.Provider,
@@ -212,6 +231,31 @@ func BuildGraph(profile Profile, d *Dossier, cfg GraphConfig) (dag.GraphSpec, er
 		AllowReasoner: normalized.Config.Reasoner != nil && normalized.Config.Reasoner.When != "never",
 		ReasonerWhen:  reasonerWhen(normalized.Config),
 	}
+	var planDeps []string
+	if lanes {
+		planParamsValue.AllowReasoner = false
+		planParamsValue.ReasonerWhen = ""
+		planParamsValue.Flow = FlowLanes
+		planParamsValue.Lanes = &laneProviders{
+			Review:   normalized.Config.Lanes.Review.Provider,
+			Reasoner: normalized.Config.Lanes.Reasoner.Provider,
+			Validate: normalized.Config.Lanes.Validate.Provider,
+		}
+		exploreRaw, err := encodeParams(exploreParams{Provider: normalized.Config.Explore.Provider})
+		if err != nil {
+			return dag.GraphSpec{}, err
+		}
+		// explore is optional: when it fails the lanes still run without the
+		// exploration digest (dag does not cascade an optional failure).
+		nodes = append(nodes, dag.NodeSpec{
+			ID:       NodeExplore,
+			Kind:     KindExplore,
+			Required: false,
+			Timeout:  DefaultExploreTimeout,
+			Params:   exploreRaw,
+		})
+		planDeps = []string{NodeExplore}
+	}
 	planRaw, err := encodeParams(planParamsValue)
 	if err != nil {
 		return dag.GraphSpec{}, err
@@ -219,6 +263,7 @@ func BuildGraph(profile Profile, d *Dossier, cfg GraphConfig) (dag.GraphSpec, er
 	nodes = append(nodes, dag.NodeSpec{
 		ID:        NodePlan,
 		Kind:      KindPlan,
+		DependsOn: planDeps,
 		Required:  true,
 		Expands:   true,
 		Timeout:   DefaultPlanTimeout,
@@ -226,7 +271,7 @@ func BuildGraph(profile Profile, d *Dossier, cfg GraphConfig) (dag.GraphSpec, er
 		TokenFree: normalized.Config.Plan.Mode == "code",
 	})
 
-	if normalized.Config.Reasoner != nil && normalized.Config.Reasoner.When != "never" {
+	if !lanes && normalized.Config.Reasoner != nil && normalized.Config.Reasoner.When != "never" {
 		reasonerRaw, err := encodeParams(reasonerParams{Provider: normalized.Config.Reasoner.Provider, When: normalized.Config.Reasoner.When})
 		if err != nil {
 			return dag.GraphSpec{}, err
@@ -357,9 +402,14 @@ func ValidateProfile(profile Profile) (Profile, error) {
 			if !allowedBlocks[propose.Block] {
 				return Profile{}, &ProfileError{Field: fmt.Sprintf("propose[%d].block", i), Problem: `must be code-review or review`}
 			}
-			if strings.TrimSpace(propose.Provider) == "" {
+			// The lanes flow derives propose from the profile provider and
+			// reports a missing one under that name (validateFlow).
+			if strings.TrimSpace(propose.Provider) == "" && cfg.Flow != FlowLanes {
 				return Profile{}, &ProfileError{Field: fmt.Sprintf("propose[%d].provider", i), Problem: "must not be empty"}
 			}
+		}
+		if err := validateFlow(cfg); err != nil {
+			return Profile{}, err
 		}
 		if cfg.Plan.Mode == "agent" && strings.TrimSpace(cfg.Plan.Provider) == "" {
 			return Profile{}, &ProfileError{Field: "plan.provider", Problem: "is required for agent planning"}
@@ -456,6 +506,22 @@ func ValidateProfileProviders(profile Profile, allowed []string) error {
 	cfg := profile.Config
 	if err := check("plan.provider", cfg.Plan.Provider); err != nil {
 		return err
+	}
+	if cfg.Explore != nil {
+		if err := check("explore.provider", cfg.Explore.Provider); err != nil {
+			return err
+		}
+	}
+	if cfg.Lanes != nil {
+		for field, provider := range map[string]string{
+			"lanes.review.provider":   cfg.Lanes.Review.Provider,
+			"lanes.reasoner.provider": cfg.Lanes.Reasoner.Provider,
+			"lanes.validate.provider": cfg.Lanes.Validate.Provider,
+		} {
+			if err := check(field, provider); err != nil {
+				return err
+			}
+		}
 	}
 	for i, propose := range cfg.Propose {
 		if err := check(fmt.Sprintf("propose[%d].provider", i), propose.Provider); err != nil {
@@ -581,6 +647,14 @@ func gatherAllowedProviders(cfg config.ProfileConfig) []string {
 	}
 	add(cfg.Synthesize.Provider)
 	add(cfg.Plan.Provider)
+	if cfg.Explore != nil {
+		add(cfg.Explore.Provider)
+	}
+	if cfg.Lanes != nil {
+		add(cfg.Lanes.Review.Provider)
+		add(cfg.Lanes.Reasoner.Provider)
+		add(cfg.Lanes.Validate.Provider)
+	}
 	return out
 }
 
@@ -639,6 +713,26 @@ type planParams struct {
 	ChallengeOnly []Severity   `json:"challenge_only"`
 	AllowReasoner bool         `json:"allow_reasoner"`
 	ReasonerWhen  string       `json:"reasoner_when,omitempty"`
+	// Flow and Lanes are set only for the lanes flow, so legacy plan params
+	// and their persisted workflows keep their exact encoding.
+	Flow  string         `json:"flow,omitempty"`
+	Lanes *laneProviders `json:"lanes,omitempty"`
+}
+
+// laneProviders are the resolved lane providers of a lanes-flow plan.
+type laneProviders struct {
+	Review   string `json:"review"`
+	Reasoner string `json:"reasoner"`
+	Validate string `json:"validate"`
+}
+
+type exploreParams struct {
+	Provider string `json:"provider"`
+}
+
+type validateParams struct {
+	Provider    string `json:"provider"`
+	Exploration string `json:"exploration,omitempty"`
 }
 
 type proposeRef struct {
@@ -652,6 +746,9 @@ type reviewNodeParams struct {
 	Files    []string `json:"files"`
 	Focus    string   `json:"focus"`
 	Provider string   `json:"provider"`
+	// Exploration is the bounded explore digest (lanes flow). It lives in the
+	// params so the task layout stays a pure function of params and dossier.
+	Exploration string `json:"exploration,omitempty"`
 }
 
 type channelRef struct {
@@ -668,6 +765,10 @@ type gateParams struct {
 type reasonerParams struct {
 	Provider string `json:"provider"`
 	When     string `json:"when"`
+	// Tools and Exploration are set only for the lanes-flow reasoner lane:
+	// it receives the explore digest and the reasoner block bindings.
+	Tools       bool   `json:"tools,omitempty"`
+	Exploration string `json:"exploration,omitempty"`
 }
 
 type gatherParams struct {
@@ -770,6 +871,11 @@ func validateFanOut(profile Profile, cfg GraphConfig) error {
 		perPackage++
 	}
 	upper := profile.Config.Plan.MaxPackages * perPackage
+	if isLanesFlow(profile.Config) {
+		// One review lane per package plus the MR-wide reasoner and validate.
+		perPackage++
+		upper = profile.Config.Plan.MaxPackages*perPackage + 2
+	}
 	if perPackage == 0 {
 		return nil
 	}
@@ -915,6 +1021,9 @@ func (p PlanExpander) Expand(ctx context.Context, wf dag.WorkflowView, from dag.
 	}
 	if err := ValidatePlan(*plan, policy); err != nil {
 		return dag.Extension{}, fmt.Errorf("%w: plan policy: %v", ErrExtensionRejected, err)
+	}
+	if params.Flow == FlowLanes {
+		return p.expandLanes(wf, from, params, plan)
 	}
 	nodes := make([]dag.NodeSpec, 0)
 	proposerIDs := make([]string, 0)

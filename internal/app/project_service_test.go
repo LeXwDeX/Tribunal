@@ -225,7 +225,6 @@ func TestRegisterValidation(t *testing.T) {
 		{name: "unknown settings", input: RegisterInput{Project: "42", AccessToken: "t", Settings: json.RawMessage(`{"bogus":true}`)}, info: validInfo, wantCode: "validation_failed"},
 		{name: "settings not object", input: RegisterInput{Project: "42", AccessToken: "t", Settings: json.RawMessage(`[]`)}, info: validInfo, wantCode: "validation_failed"},
 		{name: "bad glob", input: RegisterInput{Project: "42", AccessToken: "t", Settings: json.RawMessage(`{"target_branches":["["]}`)}, info: validInfo, wantCode: "validation_failed"},
-		{name: "bad label profile", input: RegisterInput{Project: "42", AccessToken: "t", Settings: json.RawMessage(`{"profile_by_label":{"deep-review":"missing"}}`)}, info: validInfo, wantCode: "validation_failed"},
 		{name: "auto without public url", input: RegisterInput{Project: "42", AccessToken: "t", AutoWebhook: true}, info: validInfo, wantCode: "validation_failed"},
 		{name: "expired", input: RegisterInput{Project: "42", AccessToken: "t"}, info: &gitlab.TokenInfo{Scopes: []string{"api", "read_repository"}, Active: true, ExpiresAt: &expired}, wantCode: "validation_failed"},
 		{name: "inactive", input: RegisterInput{Project: "42", AccessToken: "t"}, info: &gitlab.TokenInfo{Scopes: []string{"api", "read_repository"}, Active: false}, wantCode: "validation_failed"},
@@ -396,10 +395,12 @@ func TestRegisterSettingsOverrideKeepsDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A mapping to a removed profile is dropped instead of failing the save:
+	// stored settings from an earlier release must stay editable.
 	if _, err := service.Register(context.Background(), RegisterInput{
 		Project:     "42",
 		AccessToken: "token-long-enough",
-		Settings:    json.RawMessage(`{"ignore":["custom/**"],"profile_by_label":{"deep-review":"deep"}}`),
+		Settings:    json.RawMessage(`{"ignore":["custom/**"],"profile_by_label":{"deep-review":"deep","onboard":"onboarding","sec":"default"}}`),
 	}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -417,8 +418,8 @@ func TestRegisterSettingsOverrideKeepsDefaults(t *testing.T) {
 	if len(resolved.Ignore) != 2 || resolved.Ignore[0] != "**/*.lock" || resolved.Ignore[1] != "custom/**" {
 		t.Errorf("resolved ignore = %v", resolved.Ignore)
 	}
-	if resolved.ProfileByLabel["deep-review"] != "deep" {
-		t.Errorf("profile_by_label = %v", resolved.ProfileByLabel)
+	if len(resolved.ProfileByLabel) != 1 || resolved.ProfileByLabel["sec"] != "default" {
+		t.Errorf("profile_by_label = %v, want only the default mapping", resolved.ProfileByLabel)
 	}
 	if !resolved.SkipDraft || resolved.MaxFiles != 200 {
 		t.Errorf("defaults were not preserved: %+v", resolved)

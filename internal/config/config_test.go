@@ -110,12 +110,18 @@ profiles:
 		"secrets.master_key_env", "REVIEW_MASTER_KEY", "base64",
 		"auth.bootstrap_token_env", "REVIEW_ADMIN_TOKEN", "at least 32 bytes",
 		"providers.alpha.api_key_env", providerEnv,
-		"missing-plan", "missing-propose", "missing-reasoner", "missing-fallback",
-		"missing-synth", "missing-agent",
-		"profiles.default.on_uncertain", "profiles.default.budget.max_nodes",
-		"profiles.default.budget.max_extends",
+		// Provider choices of legacy fields are migrated and still checked.
+		`profiles.default.lanes.code_review.provider "missing-propose"`,
+		`profiles.default.lanes.reasoner.provider "missing-reasoner"`,
+		`profiles.default.challenge.provider "missing-fallback"`,
+		"profiles.default.budget.max_nodes",
 	)
-	requireErrorNotContains(t, err, masterValue, tokenValue)
+	// Fixed flow choices are ignored with a warning, never a startup error.
+	requireErrorNotContains(t, err, masterValue, tokenValue,
+		"missing-plan", "missing-synth", "missing-agent", "on_uncertain", "max_extends")
+	for _, want := range []string{"plan.mode", "plan.provider", "synthesize", "agent", "on_uncertain", "budget.max_extends", "challenge.provider cross"} {
+		requireWarning(t, cfg.Warnings, want)
+	}
 }
 
 func TestValidateBootstrapTokenLength(t *testing.T) {
@@ -392,12 +398,13 @@ profiles:
 	t.Setenv("CFG_TEST_PROVIDER_KEY", "x")
 	cfg := loadConfig(t, path)
 	err := cfg.Validate()
-	requireErrorContains(t, err,
-		"missing-plan", "missing-propose", "missing-reasoner", "missing-fallback", "missing-synth")
-	requireErrorNotContains(t, err, "profiles.default.agent")
+	requireErrorContains(t, err, "missing-reasoner")
+	// A propose entry without a block names no lane and is ignored.
+	requireErrorNotContains(t, err, "missing-propose", "missing-plan", "missing-synth", "missing-fallback", "profiles.default.agent")
+	requireWarning(t, cfg.Warnings, "propose[0] () was ignored")
 }
 
-func TestValidateChallengeCrossRequiresFallback(t *testing.T) {
+func TestLegacyCrossChallengeWithoutFallbackUsesProfileProvider(t *testing.T) {
 	setRequiredEnv(t)
 	path := writeConfig(t, "config.yaml", validGitLab+`
 profiles:
@@ -406,10 +413,16 @@ profiles:
       provider: cross
 `)
 	cfg := loadConfig(t, path)
-	requireErrorContains(t, cfg.Validate(), "profiles.default.challenge.fallback")
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() = %v", err)
+	}
+	if got := cfg.Profiles["default"].Challenge.Provider; got != "" {
+		t.Errorf("challenge.provider = %q, want the (empty) profile provider", got)
+	}
+	requireWarning(t, cfg.Warnings, "challenge.provider cross")
 }
 
-func TestValidateJudgeRequiresAgentSynthesize(t *testing.T) {
+func TestLegacyJudgeAndAgentSynthesisAreIgnored(t *testing.T) {
 	setRequiredEnv(t)
 	for _, mode := range []string{"code", "agent"} {
 		t.Run(mode, func(t *testing.T) {
@@ -421,14 +434,14 @@ profiles:
       mode: `+mode+`
 `)
 			cfg := loadConfig(t, path)
-			err := cfg.Validate()
-			if mode == "agent" {
-				if err != nil {
-					t.Fatalf("Validate() = %v", err)
-				}
-			} else {
-				requireErrorContains(t, err, "profiles.default.on_uncertain", "agent")
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("Validate() = %v", err)
 			}
+			profile := cfg.Profiles["default"]
+			if profile.OnUncertain != "mark" || profile.Synthesize.Mode != "code" {
+				t.Errorf("profile = %+v, want the fixed mark/code report", profile)
+			}
+			requireWarning(t, cfg.Warnings, "on_uncertain was ignored")
 		})
 	}
 }

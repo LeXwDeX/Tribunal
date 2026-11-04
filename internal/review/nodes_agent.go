@@ -45,6 +45,12 @@ func roleForKind(kind string) (string, bool) {
 		return prompts.Synthesize, true
 	case KindOnboarding:
 		return prompts.Onboarding, true
+	case KindExplore:
+		return prompts.Explore, true
+	case KindReview:
+		return prompts.Review, true
+	case KindValidate:
+		return prompts.Validate, true
 	default:
 		return "", false
 	}
@@ -276,14 +282,21 @@ func (e *Executor) executeReasoner(ctx context.Context, in dag.NodeInput) (dag.N
 			return DecodeStrict[*ReasonerOut](raw)
 		},
 	}
-	result, err := e.callAgent(ctx, in, agentOptions{
+	opts := agentOptions{
 		Role:       role,
 		Provider:   provider,
 		Submit:     submit,
-		Task:       reasonerTask(e.deps.Dossier),
+		Task:       reasonerTask(e.deps.Dossier) + explorationSection(params.Exploration),
 		Builtins:   true,
 		BeforeTurn: e.budgetHook(in.WorkflowID),
-	})
+	}
+	var gaps []string
+	if params.Tools {
+		// The lanes-flow reasoner lane gets its own block bindings; the
+		// legacy reasoner keeps running without block tools.
+		opts.Block, opts.BlockTools, opts.ToolGaps = BlockReasoner, true, &gaps
+	}
+	result, err := e.callAgent(ctx, in, opts)
 	if err != nil {
 		return dag.NodeOutput{}, err
 	}
@@ -291,6 +304,7 @@ func (e *Executor) executeReasoner(ctx context.Context, in dag.NodeInput) (dag.N
 	if !ok || out == nil {
 		return e.agentOutputError(provider, result, errors.New("review: reasoner decoder returned an unexpected type"))
 	}
+	out.ToolGaps = gaps
 	return e.marshalAgentOutput(out, provider, result.Usage)
 }
 
@@ -1377,6 +1391,9 @@ func reviewTaskLayoutFor(kind string, d *Dossier, params reviewNodeParams) (revi
 	switch kind {
 	case KindCodeReview:
 		header.WriteString("\n## 本包任务\n\n")
+	case KindReview:
+		header.WriteString("\n## 独立终审\n\n")
+		header.WriteString("通道：review（对照 MR 目标、真实 diff 与验证证据的独立终审）\n\n")
 	case KindReviewStd, KindReviewInt:
 		header.WriteString("\n## 评审通道\n\n")
 		switch kind {
@@ -1414,6 +1431,7 @@ func reviewTaskLayoutFor(kind string, d *Dossier, params reviewNodeParams) (revi
 		addContext("pipeline context", summaryPipelineForPrompt(d))
 		addContext("issue context", summaryIssuesForPrompt(d))
 	}
+	addContext("exploration", explorationSection(params.Exploration))
 	contextText := context.String()
 
 	diffText, spans := renderDiffsWithSpans(d, params.Files)

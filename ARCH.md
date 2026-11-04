@@ -12,7 +12,7 @@
 
 - 通过**项目级 Token** 授权，既能被 GitLab webhook 回调触发，也能主动触发评审，并把结果回写到 MR。
 - 服务拥有 clone 项目代码的权限，评审时不只看 diff，也能读取完整仓库上下文。
-- 评审由一个**主 agent 单入口**统一编排：主 agent 派发多种评审模式，经过跨模型或同模型的**对抗性核验**后，回到主 agent 评估，最终输出结论到 MR。
+- 评审只有一个固定流程（`default` 档位）：先只读探索，再由 code-review、review、reasoner、validate 四路并行评审，经过跨模型或同模型的**对抗性核验**和规则裁决后，由代码渲染报告并输出结论到 MR。Tribunal 不运行测试或仓库脚本。
 - 编排层以 **DAG 引擎**为唯一执行架构。当前 `pkg/dag` 按本设计独立实现，用户已于 2026-10-23 确认接受该实现用于本地验收，不要求移植；未来如移植，授权确认见 §13。
 - 每个项目有一个常驻**工作区**：模型可以预先生成 AGENTS.md / CLAUDE.md 等项目上下文，并通过 **MCP 和 Skill** 接入外部能力（如 codebase-memory-mcp 的代码地图检索）。这些内容只在平台内部使用（见 §8）。
 
@@ -35,19 +35,19 @@
 | D4 | 模型只用 API Key 计费方式，不支持订阅登录 | 已定 |
 | D5 | 支持三种协议：OpenAI Chat Completions、OpenAI Responses、Anthropic Messages | 已定 |
 | D6 | 能用官方 SDK 就用官方 SDK（`openai-go/v3`、`anthropic-sdk-go`、GitLab `client-go`） | 已定 |
-| D7 | 评审模式：`reasoner`、`review`、`verify`、`code-review`（传统） | 已定 |
-| D8 | 支持跨模型和同模型的对抗性审核 | 已定 |
-| D9 | 主 agent 单入口 → 多模式评审 → 回到主 agent 评估 → 输出结论到 MR | 已定 |
+| D7 | 评审只有一个档位 `default`：`explore` 只读探索 → 四路并行评审（`code-review`、`review`、`reasoner`、`validate`）→ `verify` 逐条反证 P0/P1 → 代码裁决与汇报；没有档位选择，也没有可配置的旧图回退 | 已定 |
+| D8 | 支持跨模型和同模型的对抗性审核：挑战者 provider 可独立于提出方配置，同模型反证会被标注 | 已定 |
+| D9 | 探索 → 四路并行评审 → 逐条反证 → 规则裁决 → 代码汇报 → 输出结论到 MR；评估与汇报由代码完成，不再经过模型汇总 | 已定 |
 | D10 | 参考 OpenCode-GraphAgent 的 DAG 引擎；当前 `pkg/dag` 为独立实现，用户已确认按本地实现验收，不要求移植。未来移植仍需先完成授权确认（§13） | 已定 |
 | D11 | `verify` 在 MR 场景下定位为**挑战者**：对单条 finding 做只读反证，不跑测试 | 建议默认 |
-| D12 | 驱动方式：规划 → 执行 → 汇总，允许有限轮补派（extend），不用自由工具循环 | 建议默认 |
+| D12 | 驱动方式：探索 → 规划 → 执行 → 裁决 → 汇报；评审图固定，报告阶段不补派节点，不用自由工具循环 | 建议默认 |
 | D13 | 部署形态：单个二进制，默认 SQLite、可选 Postgres，提供 Docker 镜像，任务队列在进程内 | 建议默认 |
-| D14 | 评审图由**块模板**生成，主 agent 只输出受限的规划参数，不手写整张图 | 建议默认 |
+| D14 | 评审图由**块模板**生成，分包由代码完成，模型不规划也不手写整张图 | 建议默认 |
 | D15 | 采用项目工作区，允许模型生成 AGENTS.md / CLAUDE.md 等上下文文档；**生成内容只存平台内部，不提交到仓库** | 已定 |
 | D16 | 支持 MCP 接入（配置格式兼容 Claude Code），首个接入 codebase-memory-mcp 用于代码地图检索；Docker 镜像默认内置并启用（§8.4） | 已定 |
 | D17 | 支持 Skill 接入（格式兼容 Claude Code Skill） | 已定 |
 | D18 | Web 控制台：SPA（Vite + React + TypeScript）embed 进二进制；用 GitLab OAuth 登录，平台角色分 admin / viewer，项目业务数据另由本地 read / manage grant 控制 | 建议默认 |
-| D19 | DAG 节点分 agent 节点和代码节点（如 gather、adjudicate）两类，对引擎透明 | 建议默认 |
+| D19 | DAG 节点分 agent 节点和代码节点（如 plan、gather、adjudicate、synthesize）两类，对引擎透明 | 建议默认 |
 
 ---
 
@@ -63,15 +63,16 @@ GitLab webhook / 评论命令 / 手动 API
 └───────────────────────────────────────────────────────────────────┘
         ▼
 ┌─[DAG 工作流 · 每个 (MR, head_sha) 一个]──────────────────────────┐
-│ plan(主 agent) ──fan_out──┬─ code-review      (provider A)       │
-│                           ├─ review:standards ┐                  │
-│                           ├─ review:intent    ┘─ review 裁决     │
-│                           └─ reasoner (可选)                     │
+│ explore(只读探索，可选)                                          │
+│   └─ plan(代码分包) ──fan_out──┬─ code-review  (每包，含 Skill)  │
+│                                ├─ review       (每包)            │
+│                                ├─ reasoner     (每个 MR)         │
+│                                └─ validate     (每个 MR)         │
 │                                   │                              │
-│              adversarial：verify 跨模型逐条反证                  │
-│                                   │                              │
-│        synthesize(主 agent)：逐条采纳/反驳 → 结论                 │
-│           └─ 可申请 extend 补派节点（有上限）                     │
+│        gather：归一化、去重                                       │
+│          └─ verify.N：逐条反证 P0/P1                              │
+│        adjudicate：规则裁决                                       │
+│        synthesize(代码)：渲染报告                                 │
 └───────────────────────────────────────────────────────────────────┘
         ▼
 ┌─[发布阶段 · 纯代码]──────────────────────────────────────────────┐
@@ -140,13 +141,13 @@ web/                   Web 控制台（M6）
 | 来源 | 条件 | 说明 |
 |---|---|---|
 | Merge Request Hook | `open`、`reopen`；`update` 且带 `oldrev`（表示有新 push） | 主路径 |
-| Note Hook | 评论 `/review`、`/review <profile>` | 手动重跑或切换评审档位 |
+| Note Hook | 评论 `/review`、`/review full`、`/review default` | 手动重跑；评审档位只有 `default` |
 | 过滤 | Draft 状态、标签、目标分支 | 由项目配置决定 |
 | 手动 API | 服务自身的 REST 接口 | CI job 或运维调用 |
 | Push Hook | 目标分支有新 push | 刷新项目工作区（见 §8.1），不触发评审 |
 
 - webhook handler 只做三件事：校验 `X-Gitlab-Token`、入队、返回 200。GitLab 有 webhook 超时限制，连续失败还会自动禁用 hook。
-- **投递去重**：按 GitLab event UUID 去重；显式新命令可对相同 head/profile 创建新代次。同一个 MR 有新 push 时，旧工作流转为 `cancelled`，旧结果作废。发布去重边界见 §6.7。
+- **投递去重**：按 GitLab event UUID 去重；显式新命令可对相同 head 创建新代次。同一个 MR 有新 push 时，旧工作流转为 `cancelled`，旧结果作废。发布去重边界见 §6.7。
 - **增量评审**：记录上次已评审的 `head_sha`，默认只评审新增变更，`/review full` 强制全量。
 
 ### 4.3 取 diff 与代码
@@ -168,41 +169,41 @@ web/                   Web 控制台（M6）
 
 ## 5. 评审编排
 
-### 5.1 主 agent 单入口
+### 5.1 固定评审流程
 
-主 agent 在 DAG 中占两个节点：
+评审图由代码生成，模型不规划图，也没有模型汇总节点。流程分五段：
 
-1. **plan**：读取材料包摘要（文件列表、变更统计、pipeline 状态、MR 描述），判断风险，输出受限的规划参数：
-   ```json
-   { "packages": [ { "id": "...", "block": "code-review|review|reasoner", "files": ["..."], "provider": "..." } ],
-     "challenge": { "only": ["P0", "P1"] } }
-   ```
-   这些参数由代码严格校验：块类型、provider 必须在项目允许列表内，文件必须属于本次变更，总节点数受预算限制。
-2. **synthesize**：接收所有子节点的结构化结果（**只接收结论，不接收子 agent 的完整对话**），逐条采纳或反驳，给出最终 findings 和汇总文案。模型合同仍为 PASS/BLOCKING；代码可在存在未解决证据或覆盖缺口时把最终 SynthesisResult 覆盖为 INCOMPLETE。最多可申请 1 次 `extend` 补派节点（例如对争议条目追加反证）。
+1. **explore**（可选，只读 agent 节点，超时 5 分钟）：只读探索本次 MR 的定义、调用方、配置和测试，输出已验证事实（附证据）、推断和未知项，不报告缺陷。其结论被渲染成不超过 6000 字符的摘要，写入每路评审节点的 params，作为待核实的线索而非证据交给它们；explore 未成功完成时四路评审不带摘要运行，报告给出告警。
+2. **plan**（代码节点，不调用模型，依赖 explore）：按文件把变更切成若干包（每包估算 token 不超过 `plan.package_tokens`，包数不超过 `plan.max_packages`），代码校验包的 ID、文件必须属于本次变更、总节点数受预算限制。
+3. **四路并行评审**：每个包一个 `code-review` 节点（挂载内置 code-review Skill）和一个 `review` 节点，每个 MR 一个 `reasoner` 节点和一个 `validate` 节点。四路都是可选节点，其中一路失败不影响其他路，缺失的一路使结论降为 INCOMPLETE（§5.5）。
+4. **裁决**：`gather` 归一化并去重各路 findings，`verify.N` 对每条 P0/P1 做只读反证，`adjudicate` 按规则裁决。
+5. **汇报**：`synthesize` 是代码节点，直接渲染报告，不再调用模型。
 
-`brain.md` 的「严肃决策、风险取舍」定位可以作为 synthesize 阶段 prompt 的基础。
+各节点的 ID、契约和展开细节见 [docs/design/04-dag-and-contracts.md](docs/design/04-dag-and-contracts.md)。模型配置只决定每个节点用哪个 provider，见 [配置](docs/design/06-config.md)。
 
-### 5.2 四种评审模式（MR 版契约）
+### 5.2 评审节点（MR 版契约）
 
 现有 agent 定义（`agents_multi-orchestration/agents/*.md`）是为开发流水线写的，在 MR 场景需要改写输入和输出：
 
-| 模式 | 原定位 | MR 场景的改写 |
+| 节点 | 原定位 | MR 场景的改写 |
 |---|---|---|
-| `code-review` | 无（新写） | diff 加少量上下文，一次调用，输出带行号的 findings。轻量、高覆盖，作为默认 |
-| `review` | 独立终审，需要验证证据，输出 PASS/BLOCKING | `spec_goal` 取自 MR 标题、描述和关联 issue；验证证据取自 **GitLab pipeline 和 job 状态**；保留 PASS/BLOCKING 和 P0/P1/P2（review/review.gate 子输出合同）；最终 SynthesisResult 可由代码覆盖为 INCOMPLETE；去掉 `reflow_target`、`ready_for_patcher` 等开发流水线字段。可展开为 standards 和 intent 两条独立通道，再加裁决 |
-| `reasoner` | 审方案和设计文档，不审 diff | 输入改为 MR 描述、关联 issue、本次改动的设计文档（`*.md`、ADR），检查「声称要做的事在逻辑上是否成立、漏了哪些边界」 |
-| `verify` | 运行测试并诊断 | 改为**挑战者**：对单条 finding 只读反证，输出 CONFIRMED / REFUTED / UNCERTAIN，并且必须引用代码证据。读取 CI 日志诊断失败原因作为后续可选能力 |
+| `explore` | 探索（只读） | 只读收集事实，减少四路评审的不确定性；输出事实、推断和未知项，不给 PASS/BLOCKING |
+| `code-review` | 无（新写） | diff 加少量上下文，一次调用，输出带行号的 findings。轻量、高覆盖，挂载内置 code-review Skill |
+| `review` | 独立终审，需要验证证据，输出 PASS/BLOCKING | `spec_goal` 取自 MR 标题、描述和关联 issue；验证证据取自 **GitLab pipeline 和 job 状态**；保留 PASS/BLOCKING、`evidence_status` 和 P0/P1/P2；去掉 `reflow_target`、`ready_for_patcher` 等开发流水线字段。只缺少或未跑完 pipeline 本身不算「证据不足」 |
+| `reasoner` | 审方案和设计文档，不审 diff | 输入改为 MR 描述、关联 issue、本次改动的设计文档（`*.md`、ADR），检查「声称要做的事在逻辑上是否成立、漏了哪些边界」；严重级别 critical / notable / informational |
+| `validate` | 对应 opencode 的 `verify` 角色：运行测试并诊断 | **Tribunal 不运行测试或仓库脚本。** 证据只有两类：GitLab pipeline 状态与失败 job 日志片段（`source=pipeline`），以及只读读码（`source=code`）。输出 PASS / FAIL / BLOCKED 和逐项检查；没有 pipeline、pipeline 未结束或日志不足时为 BLOCKED，不作为证据缺口，没有 CI 的项目仍可 PASS |
+| `verify` | 运行测试并诊断 | 改为**挑战者**：对单条 finding 只读反证，输出 CONFIRMED / REFUTED / UNCERTAIN，并且必须引用代码证据 |
 
 评审 agent 的工具由三部分组成：内置**只读工具**（`read_file`、`grep`、`glob`、`list_dir`、`git_log`、`git_blame`，范围限定在 worktree 和 `base/` 内，有输出长度上限）；按块授权的 **MCP 工具**（如 codebase-memory-mcp 的图谱检索）；按块挂载的 **Skill**。详见 §8。
 
 ### 5.3 统一 finding 模型
 
-各模式的严重级别不同（review：P0/P1/P2；reasoner：Critical/Notable/Informational；verify：CONFIRMED/REFUTED/UNCERTAIN），内部统一为：
+各节点的严重级别不同（code-review / review / validate：P0/P1/P2；reasoner：Critical/Notable/Informational，归一化为 P1/P2/info；verify：CONFIRMED/REFUTED/UNCERTAIN），内部统一为：
 
 ```go
 type Finding struct {
     ID         string
-    Origin     NodeRef   // 产生它的节点；主 agent 自提的为 origin=main
+    Origin     NodeRef   // 产生它的节点
     Severity   Severity  // P0 | P1 | P2 | Info
     Category   string    // correctness | security | compat | logic | maintainability ...
     Path       string
@@ -211,23 +212,17 @@ type Finding struct {
     Evidence   string    // 引用的代码或依据
     Confidence string    // high | medium | low
     Challenge  *ChallengeResult // verify 的反证结果
-    Decision   *Decision        // synthesize 的采纳或反驳记录
+    Decision   *Decision        // adjudicate 的处置记录
 }
 ```
 
-各模式的原生字段（`verdict`、`evidence_status`、`result_type` 等）保留在节点输出里，供主 agent 参考。
+各节点的原生字段（`verdict`、`evidence_status`、`result_type`、`status` 等）保留在节点输出里。
 
 ### 5.4 对抗性核验
 
-**角色**：Proposer（code-review / review / reasoner）提出问题 → Challenger（verify）逐条反证 → Judge 在双方不一致时裁决。Judge 优先用确定性规则，LLM 裁决作为兜底。
+**角色**：Proposer（code-review / review / reasoner / validate）提出问题 → Challenger（verify）逐条反证 → 规则裁决。裁决全部由确定性规则完成，没有 LLM 裁决。
 
-**拓扑**：
-
-| 拓扑 | 流程 | 用途 |
-|---|---|---|
-| A. 提出加反证 | 1 个 proposer，每条 finding 交给 1 个 challenger | `default` 档 |
-| B. 多方独立加交叉 | N 个模型独立评审，合并去重；多方都提出的直接保留，单方提出的交给其他模型反证 | `deep` 档 |
-| C. 辩论 | proposer 和 challenger 来回 1 到 2 轮，再由 judge 裁决 | 仅用于 P0/P1 争议条目，预留接口 |
+**拓扑**：提出加反证。每条 P0/P1 finding 交给 1 个 challenger；P2 和 info 不挑战，直接进入裁决。
 
 **同模型对抗的独立性要求**（否则对抗只是走形式）：
 
@@ -235,9 +230,9 @@ type Finding struct {
 2. 信息不对称：challenger 只看到结论、位置和相关代码，看不到 proposer 的推理过程、置信度和模型身份。
 3. 立场相反：proposer 被要求「找出问题」，challenger 被要求「假设它是误报，去找证据推翻」。
 4. 采样差异：temperature 不同，或者给出的上下文顺序和范围不同。
-5. 拓扑 B 投票时，同模型的票按权重打折（默认 0.5）。投票和 challenger 选择按配置的规范化 endpoint + model 身份归一：同端点同模型的 provider 别名视为同一模型，不增加独立票，也不能作为跨模型确认。无法解析身份的多个 provider 共用同一个 unknown bucket：known 与 unknown 可各计一票，unknown 之间不增加独立票；metadata 缺失会限制挑战者独立性，不能据此声称跨模型确认。没有独立 challenger 时使用已声明的 fallback 并显式提示。
+5. 同模型判断按配置的规范化 endpoint + model 身份归一：同端点同模型的 provider 别名视为同一模型，不能作为跨模型确认。无法解析身份时按同模型处理；metadata 缺失会限制挑战者独立性，不能据此声称跨模型确认。
 
-**跨模型**：challenger 可配置为 `cross`。实现按 allowed providers 顺序选择第一个已知、且未被来源使用的 endpoint + model 身份；任一来源身份未知时会跳过候选，只能使用 fallback 并标记同模型。反证比从头发现容易，challenger 可以用较便宜的模型，但 P0/P1 条目建议用强模型反证。
+**跨模型**：challenger 的 provider 由 `profiles.default.challenge.provider` 指定（为空则用默认 `provider`），可以与提出方不同；不支持 `cross` 自动选择，也不做调用失败后的自动故障切换。反证比从头发现容易，challenger 可以用较便宜的模型，但 P0/P1 条目建议用强模型反证。
 
 **默认裁决规则**：
 
@@ -246,8 +241,8 @@ type Finding struct {
 | 提出 | CONFIRMED | 发布 |
 | 提出 | REFUTED（带代码证据） | 丢弃，记录在运行日志里 |
 | 提出 | REFUTED（无证据） | 视为 UNCERTAIN |
-| 提出 | UNCERTAIN | 按项目策略：`drop` / `mark`（标「存疑」后发布）/ `judge` |
-| 多方都提出（拓扑 B） | 无需反证 | 发布 |
+| 提出 | UNCERTAIN | `mark`（标「存疑」后发布） |
+| 提出（P2 / info） | 不挑战 | 发布 |
 
 **去重**：先按「文件、行号区间重叠、类别」做规则合并，可选再用 LLM 做语义合并。
 
@@ -258,14 +253,14 @@ type Finding struct {
 | I1 | 每个节点的输出必须通过 `output_schema` 校验。缺失时补问 1 次，仍失败则节点 `failed` |
 | I2 | finding 的行号必须落在 diff 的行集合内，否则去掉行号，降级进汇总 |
 | I3 | REFUTED 必须引用代码位置作为证据；生产裁决还要求在固定 head/base 快照中路径存在且行号范围有效，缺失快照或读取失败按 UNCERTAIN 处理 |
-| I4 | 子节点已 CONFIRMED 的 P0/P1，synthesize 要丢弃或降级，必须给出逐条反驳及理由，否则结算失败；当前实现用 `decision.finding_id` + `reason`（见 docs/design/04） |
-| I5 | synthesize 自提的 finding 标记为 `origin=main`，同样要经过 verify 反证 |
+| I4 | 模型汇总丢弃或降级已 CONFIRMED 的 P0/P1 时，必须给出逐条反驳及理由，否则结算失败（`decision.finding_id` + `reason`）。当前评审图的汇报由代码完成，不产生模型汇总；I4、I5 只约束历史工作流中的 agent 汇总 |
+| I5 | 模型汇总自提的 finding 标记为 `origin=main`，同样要经过 verify 反证（同上，仅历史工作流） |
 | I6 | 最终结论一致性：存在已确认的 P0/P1 时，不得给出 PASS |
 | I7 | 结论绑定 fingerprint（见 §6.5）。发布前 fingerprint 不一致，结果作废 |
 
-完成条件（不能由 synthesize 清除）：
+完成条件（由代码判定，不能被模型清除）：
 
-- 上游 `review` 通道声明 `evidence_status=insufficient`、review gate 为 BLOCKING 却没有 accepted finding、材料采集/提示词截断或完成 plan 后非 generated included 文件未被任何评审节点覆盖时，最终结论为 INCOMPLETE。INCOMPLETE 必须携带具体未解决信号，不能同时写成 PASS 或 commit status success。
+- 上游 `review` 通道声明 `evidence_status=insufficient`、`review` 为 BLOCKING 或 `validate` 为 FAIL 却没有仍在评审范围内的 P0/P1 finding、任一路评审（`code-review`、`review`、`reasoner`、`validate`）没有完成、材料采集/提示词截断或完成 plan 后非 generated included 文件未被任何评审节点覆盖时，最终结论为 INCOMPLETE；其他各路的 findings 照常发布。`validate` 为 BLOCKED（例如项目没有 CI）只在报告中给出告警，不属于未解决信号。INCOMPLETE 必须携带具体未解决信号，不能同时写成 PASS 或 commit status success。
 - `DiffSummary.files` 是进入材料快照的文件数，不是已评审数；`omitted` 记录容量截断、`too_large`、`collapsed` 等采集缺口，用户配置的 `ignored` 路径单独记录，不属于缺口。所有文件都被 ignore 时发布「无需评审」；全部变更文件都 omitted 时不创建空 workflow，只发布 INCOMPLETE 摘要，列出 omitted 总数、原因计数和最多 4 条路径，其余只计数；正常 dossier 保留完整的 omitted 列表。历史记录不得补造不存在的 dossier。
 
 I4 的「逐条反驳」规则参考 GraphAgent 的 accept 结算规则（裁决为 ACCEPT 时不得自带 required_actions；每条 required_actions 必须逐条反驳）；当前没有复制上游代码。
@@ -279,18 +274,20 @@ I4 的「逐条反驳」规则参考 GraphAgent 的 accept 结算规则（裁决
 ### 6.1 数据模型
 
 - **节点**：一次子 agent 调用，或一段纯代码逻辑（如 `gather` 汇聚去重、`adjudicate` 规则裁决）。两类对引擎透明，都实现同一个执行器接口。字段：`id`、`kind`、`depends_on`、`required`、`input_mapping`（形如 `a.output.findings`）、`condition`、`params`、`timeout`、`expands`。节点种类、图模板和契约见 [docs/design/04-dag-and-contracts.md](docs/design/04-dag-and-contracts.md)。
-- **块（Block）**：可复用的子图模板，由编译器展开成节点。共定义 6 种块（5 种用于 MR 评审，1 种用于工作区）：
+- **块（Block）**：可复用的子图模板，由编译器展开成节点。共定义 8 种块（7 种用于 MR 评审，1 种用于工作区）：
 
 | 块 | 展开结果 |
 |---|---|
-| `code-review` | 1 个节点 |
-| `review` | standards 通道 + intent 通道 + 1 个裁决节点 |
-| `reasoner` | 1 个节点（默认可选） |
+| `explore` | 1 个可选节点（每个 MR 一个） |
+| `code-review` | 每个包 1 个可选节点 |
+| `review` | 每个包 1 个可选节点 |
+| `reasoner` | 1 个可选节点（每个 MR 一个，始终运行） |
+| `validate` | 1 个可选节点（每个 MR 一个） |
 | `adversarial` | 针对上游每条待挑战的 finding 生成 verify 节点（运行时扇出），再加 1 个汇聚节点 |
-| `synthesize` | 主 agent 的最终裁决节点 |
+| `synthesize` | 代码节点，渲染最终报告 |
 | `onboarding` | 1 个节点，生成项目上下文文档。只用于工作区的 onboarding 和刷新，不参与 MR 评审 |
 
-- **fan_out**：plan 节点输出的 `packages[]` 在运行时展开成并行节点。评审是只读的，不需要原引擎里「证明 write_set 互不相交」的检查。
+- **fan_out**：plan 节点输出的 `packages[]` 在运行时展开成并行节点：每包一个 `code-review` 和一个 `review`，另有每个 MR 一个 `reasoner` 和一个 `validate`，扇出上限为 `plan.max_packages × 2 + 2 ≤ max_fan_out`（默认 36）。评审是只读的，不需要原引擎里「证明 write_set 互不相交」的检查。
 - **图校验**：所有图在执行前都要经过唯一的严格校验入口：未知字段报错、检测环、检查 `input_mapping` 引用存在、检查块和 provider 在允许列表内、检查节点总数不超预算。
 
 ### 6.2 状态机
@@ -338,7 +335,7 @@ pending ─→ queued ─→ running ─→ completed
 ### 6.6 失败语义
 
 - `required` 节点失败 → 下游级联为不可满足 → 工作流 `failed`。此时在 MR 上发布一条简短的「评审未完成」说明（是否发布可配置）。
-- 可选节点失败 → 下游照常运行，对应输入用占位文本。
+- 可选节点失败 → 下游照常运行，对应输入用占位文本。四路评审节点和 `explore` 都是可选节点：`explore` 失败时四路评审不带探索摘要运行；任一路评审失败、被取消或被跳过，其他路照常发布，结论为 INCOMPLETE。
 - 依赖全部为 `skipped` 的节点级联 `skipped`。
 - 超时没有人工裁决环节：节点到期后取消其 context；执行器返回时不得把超时结果当作成功或展开，按 required / optional 语义处理并记录可得用量。context 取消不能强杀不协作的 Go 执行器；`Run` 为保护工作区会同步等待执行器退出，因此可能无限等待，不保证在截止时间内返回。
 
@@ -356,9 +353,9 @@ pending ─→ queued ─→ running ─→ completed
 | 项 | 默认值（建议） |
 |---|---|
 | 每个工作流的节点总数 | 30 |
-| extend 次数 | 1 |
-| 每个工作流的 token 上限 / 金额上限 / 时长上限 | 项目配置 |
-| 超出预算时 | 降级为拓扑 A，或者只挑战 P0/P1 |
+| extend 次数 | 0（评审图不在汇报阶段扩展） |
+| 每个工作流的 token 上限 / 时长上限 | `profiles.default.budget`（`deadline` 默认 30m，`max_tokens` 默认 1500000） |
+| 超出预算时 | 不再展开 verify，待挑战条目标记为未核验并在报告中注明；终止未完成的非 `TokenFree` 节点（见 04 §5.5） |
 
 `max_tokens` 是 workflow 共享预算，按 `input_tokens + output_tokens` 计算。cache read/write 和 reasoning 在 usage 中分别表示，但不额外加入预算，避免与 input/output 重复计数。调度器和节点执行器在每次模型请求前检查已提交用量加当前 attempt 已知的 partial usage；并发节点不预留额度，已发出的请求可能在检查后完成并造成超支，因此这是尽力上限，不是精确账单。transport 重试的已知 usage 计入下一次 attempt 的预算检查和最终节点用量；预算不足时保留已有结果，按 required / optional 和确定性规则兜底，不能无提示地给出 PASS。`usage_incomplete` 标记检测到的缺失或无法精确表示的用量；为 false 不证明历史用量完整。
 
@@ -483,7 +480,7 @@ data/workspaces/<project_id>/
 3. 小型合成 fixture（4 个 `.go` 文件和 `go.mod`，最终 20 nodes / 29 edges）可用同一项目身份增量更新：首次 fast index 约 1.72s / 25 MiB，unchanged 约 0.95s / 15.9 MiB，新增 `Difference` 符号后约 1.2s / 26.6 MiB。没有真实大型仓库、生产规模或 Linux 运行数据，因此大仓库耗时和内存仍未解决；不得把合成 fixture 当作生产基准。
 4. 探针运行时没有 GitLab、模型 provider 或 OAuth 凭据，未建立真实应用端到端链路。
 
-**默认内置（Issue #44）**：Docker 镜像按 `TARGETARCH` 打包 0.12.1 的 `-portable` 静态链接发布包（glibc 版本需要 `GLIBC_2.38`，bookworm 不满足），SHA-256 写死在 Dockerfile 中，两个架构的 SLSA provenance 于 2026-10-26 用 `gh attestation verify` 核对；不运行上游 `install`。wrapper 安装为 `/usr/local/bin/tribunal-codebase-memory-mcp`，保留 `crc-codebase-memory-mcp` 兼容链接。示例配置和 Docker 配置登记内置平台 stdio 服务器 `codebase-memory`（`--tool-profile=analysis`）：`code-review`、`review` 各获得 11 项只读图谱工具，`verify` 获得 `get_code_snippet`、`search_graph`、`trace_path`、`search_code`，`onboarding` 获得 `get_architecture`、`get_graph_schema`；`reasoner`、`synthesize` 不默认授权。onboarding 用 CLI 为 `base/` 建索引。二进制缺失或启动失败时，评审节点不带 MCP 工具继续执行并记录 `tool_gaps`，汇总给出告警，PASS 降为 INCOMPLETE；建索引失败只记录工作区 `last_error`。Docker smoke 覆盖版本、wrapper、CLI 隔离建索引，以及控制台测试接口只列出只读工具。停用方式、版本升级和降级细节见 [内置 codebase-memory-mcp](docs/design/06-config.md#内置-codebase-memory-mcp)。
+**默认内置（Issue #44）**：Docker 镜像按 `TARGETARCH` 打包 0.12.1 的 `-portable` 静态链接发布包（glibc 版本需要 `GLIBC_2.38`，bookworm 不满足），SHA-256 写死在 Dockerfile 中，两个架构的 SLSA provenance 于 2026-10-26 用 `gh attestation verify` 核对；不运行上游 `install`。wrapper 安装为 `/usr/local/bin/tribunal-codebase-memory-mcp`，保留 `crc-codebase-memory-mcp` 兼容链接。示例配置和 Docker 配置登记内置平台 stdio 服务器 `codebase-memory`（`--tool-profile=analysis`）：`explore`、`code-review`、`review` 各获得 11 项只读图谱工具，`validate` 和 `verify` 各获得 `get_code_snippet`、`search_graph`、`trace_path`、`search_code`，`onboarding` 获得 `get_architecture`、`get_graph_schema`；`reasoner`、`synthesize` 不默认授权。onboarding 用 CLI 为 `base/` 建索引。二进制缺失或启动失败时，评审节点不带 MCP 工具继续执行并记录 `tool_gaps`，汇总给出告警，PASS 降为 INCOMPLETE；建索引失败只记录工作区 `last_error`。Docker smoke 覆盖版本、wrapper、CLI 隔离建索引，以及控制台测试接口只列出只读工具。停用方式、版本升级和降级细节见 [内置 codebase-memory-mcp](docs/design/06-config.md#内置-codebase-memory-mcp)。
 
 后续 Linux/amd64 容器探针（2026-10-25，0.12.1）复现了仅按 `HOME` 隔离时的 cache 冲突。使用上述脚本后，两个项目并发初始化、列工具和调用 `list_projects` 均成功；每个会话只列出自己固定 `base/` 路径的一个索引项目，`delete_project` 均被拒绝。此结果验证部署隔离与调用层拒绝，不替代完整评审链路、大型仓库性能或操作系统级文件隔离验收。
 
@@ -494,7 +491,7 @@ data/workspaces/<project_id>/
 - **格式**：兼容 Claude Code Skill，目录内含 `SKILL.md`（frontmatter 包含 `name`、`description`）和附属资源文件。
 - **按需加载**：system prompt 只列出 skill 名称和描述；agent 调用 `load_skill` 时才返回正文；附属文件通过只读工具读取，范围限定在该 skill 目录内。
 - **来源**：平台级（如 security-review、各语言的编码规范）加项目级（工作区 `skills/`）。仓库自带的 `.claude/skills` 默认不读取，可按项目开启（只读目标分支版本）。
-- **按块挂载**：例如 review 的 standards 通道挂项目编码规范，安全相关的块挂 security-review。
+- **按块挂载**：例如 `review` 块挂项目编码规范，安全相关的块挂 security-review。
 - **脚本**：首版只支持**指令类 skill，不执行其中的任何脚本**。
 - **默认 Skill**：平台内置 `code-review`（改编自 mattpocock/skills，MIT，上游 commit `3da8c01`），首次启动登记为平台级 Skill，只挂到 `code-review` 块。它只补充方法论：Standards / Spec 双轴、Fowler 坏味道基线，以及「仓库标准优先于基线」「坏味道一律是判断项」两条规则；fixed point 取 MR 的 base/target SHA，spec 取 MR 描述和其中引用的 issue。块合约（`prompts/review.standards.md`、`review.intent.md`、`code-review.md`）仍定义角色、通道和 `submit_result` 输出，两者不重复注入同一指令。内置 Skill 标记为 `builtin`，可禁用、不可删除，每次启动随平台版本更新文件但保留启用状态；默认机制管理的块绑定随升级更新，管理员解绑后不自动恢复，升级不覆盖自定义绑定；机制与配置见 [默认扩展](docs/design/06-config.md#默认扩展default_extensions)。
 
@@ -560,31 +557,29 @@ providers:
   local:  { protocol: openai-chat,      base_url: "http://vllm:8000/v1", model: "...", max_concurrency: 4 }
 
 profiles:
-  default:
-    propose:   [{ block: code-review, provider: local }]
-    challenge: { provider: claude, only: [P0, P1] }
-    on_uncertain: mark       # drop | mark | judge
-  deep:
-    main: { provider: claude }
-    propose:
-      - { block: review,   provider: claude }
-      - { block: review,   provider: gpt }
-      - { block: reasoner, provider: claude }
-    consensus: { min_votes: 2, same_model_weight: 0.5 }
-    challenge: { provider: cross }
-    judge:     { provider: gpt, max_rounds: 1 }
+  default:                  # 唯一的评审档位
+    provider: claude        # 所有节点的默认 provider
+    lanes:                  # 可选：四路评审各自的 provider；explore、challenge 同理
+      code_review: { provider: local }
+    challenge: { provider: gpt }
+    plan:   { package_tokens: 60000, max_packages: 6 }
+    budget: { max_nodes: 30, deadline: 30m, max_tokens: 1500000 }
+  onboarding:
+    agent: { provider: claude }
 
 blocks:                     # 按块授权 MCP 工具、挂载 Skill
   review:
     mcp_tools: [mcp__codebase-memory__search_graph, mcp__codebase-memory__trace_path, mcp__codebase-memory__get_code_snippet]
     skills:    [coding-standards]
+  validate:
+    mcp_tools: [mcp__codebase-memory__get_code_snippet]
   verify:
     mcp_tools: [mcp__codebase-memory__get_code_snippet]
 ```
 
 ### 10.2 仓库内配置 `.gitlab-review.yml`（可选）
 
-由项目方放在仓库根目录，用于覆盖项目级设置：默认 profile、忽略路径、评审语言、严格度、自定义规则、触发过滤（Draft、标签、目标分支）。只读取**目标分支**上的版本，防止 MR 作者通过修改配置绕过评审。
+由项目方放在仓库根目录，用于覆盖项目级设置：评审档位（只能是 `default`）、忽略路径、评审语言、严格度、自定义规则、触发过滤（Draft、标签、目标分支）。只读取**目标分支**上的版本，防止 MR 作者通过修改配置绕过评审。
 
 ---
 
@@ -690,11 +685,11 @@ blocks:                     # 按块授权 MCP 工具、挂载 Skill
 | Q2 | 项目接入方式：管理员手工登记，还是项目方自助（服务用项目 token 自动创建 webhook）？ | 首版手工登记加 CLI，自助注册放到 M6 |
 | Q3 | 是否需要 Web 管理界面？ | 首版用 CLI 和管理 API，界面放到 M6 |
 | Q4 | `verify` 是否就定位为挑战者（D11）？读取 CI 日志诊断是否需要？ | 挑战者为主，CI 诊断作为后续可选 |
-| Q5 | 默认拓扑用 A 还是 B？ | `default` 档用 A，`deep` 档用 B |
+| Q5 | 默认拓扑用 A 还是 B？ | 只用 A（提出加反证）；评审档位只有 `default` |
 | Q6 | UNCERTAIN 条目的默认处理？ | `mark`（标「存疑」后发布） |
 | Q7 | 评论中是否标注模型来源（如「由 X 提出，经 Y 核验」）？ | 默认不标注，可配置开启 |
-| Q8 | 主 agent 能否自提 finding？ | 可以，但须遵守 I5 |
-| Q9 | 主 agent 和子 agent 的模型：配置写死，还是主 agent 从允许列表中自选？ | 配置给出允许列表，主 agent 在列表内选择 |
+| Q8 | 模型能否自提 finding？ | 评审图没有模型汇总节点，不再自提 |
+| Q9 | 各节点的模型：配置写死，还是模型自选？ | 配置写死：`profiles.default` 的 `provider` 与各节点覆盖项，模型不自选 |
 | Q10 | BLOCKING 是否默认写 commit status 卡合并？ | 默认关闭，按项目开启 |
 | Q11 | 规模预期（项目数、日均 MR 数）？ | 影响 §14 是否需要多实例，待提供 |
 | Q12 | reasoner 的输入是否只用 MR 描述和关联 issue，还是重点审改动的设计文档？ | 两者都给，设计文档优先 |

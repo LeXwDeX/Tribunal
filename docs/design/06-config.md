@@ -8,7 +8,7 @@
 
 默认路径 `config/server.yaml`，可用 `--config` 指定，也可以传多个文件按顺序合并。字符串中的 `${ENV_NAME}` 在加载时展开；密钥类字段**只接受** `*_env` 形式，不允许明文写在文件里。
 
-当前最小启动示例见 [`config/server.example.yaml`](../../config/server.example.yaml)，但它没有 `providers` 和 `profiles.*.propose`，只能启动服务、注册项目和跑路由，**不能执行真实评审**；要跑评审必须先补齐 provider、profile 的 `propose` / `challenge` 等配置。OAuth 可选：不配置时 `/auth/login` 返回 503，Bearer 仍可用。当前存储只实现 SQLite，配置 `postgres` 会在启动时明确报错。管理 API 使用 `auth.bootstrap_token_env`（默认 `REVIEW_ADMIN_TOKEN`，至少 32 字节），该静态 Bearer 仅用于平台管理面；浏览器登录、用户级 API token 和本地项目 `read`/`manage` 授权已实现。多文件加载递归合并映射、替换数组，拒绝未知字段、重复键和多文档 YAML；环境变量在解析后的字符串上展开，避免改变 YAML 结构。
+当前最小启动示例见 [`config/server.example.yaml`](../../config/server.example.yaml)，但它没有 `providers`，也没有 `profiles.default.provider`，只能启动服务、注册项目和跑路由，**不能执行真实评审**；要跑评审必须先补齐 `providers` 并让 `profiles.default.provider`（或 `lanes.*` / `challenge.provider`）引用其中一个别名。OAuth 可选：不配置时 `/auth/login` 返回 503，Bearer 仍可用。当前存储只实现 SQLite，配置 `postgres` 会在启动时明确报错。管理 API 使用 `auth.bootstrap_token_env`（默认 `REVIEW_ADMIN_TOKEN`，至少 32 字节），该静态 Bearer 仅用于平台管理面；浏览器登录、用户级 API token 和本地项目 `read`/`manage` 授权已实现。多文件加载递归合并映射、替换数组，拒绝未知字段、重复键和多文档 YAML；环境变量在解析后的字符串上展开，避免改变 YAML 结构。
 
 ```yaml
 server:
@@ -87,25 +87,17 @@ providers:
     strict_role_alternation: false  # 仅 openai-chat；网关要求角色严格交替时设为 true，见下文
 
 profiles:
-  default:
-    plan:       { mode: code, package_tokens: 60000 }
-    propose:    [{ block: code-review, provider: local }]
-    challenge:  { provider: claude, only: [P0, P1] }
-    on_uncertain: mark              # drop | mark | judge
-    synthesize: { mode: code }
-    budget:     { max_nodes: 30, max_extends: 0, deadline: 20m, max_tokens: 1500000 }
-  deep:
-    plan:       { mode: agent, provider: claude, max_packages: 6 }
-    propose:
-      - { block: review,      provider: claude }
-      - { block: review,      provider: gpt }
-      - { block: code-review, provider: local }
-    reasoner:   { provider: claude, when: auto }   # auto | always | never
-    consensus:  { min_votes: 2, same_model_weight: 0.5 }
-    challenge:  { provider: cross, fallback: gpt, only: [P0, P1, P2] }
-    on_uncertain: judge
-    synthesize: { mode: agent, provider: claude }
-    budget:     { max_nodes: 30, max_extends: 1, deadline: 40m, max_tokens: 4000000 }
+  default:                          # 唯一的评审档位，字段见下文「评审档位」
+    provider: claude                # 所有节点的默认 provider
+    explore:  { provider: claude }  # 可选：覆盖 explore 节点
+    lanes:                          # 可选：覆盖四路评审各自的 provider
+      code_review: { provider: local }
+      review:      { provider: claude }
+      reasoner:    { provider: claude }
+      validate:    { provider: gpt }
+    challenge: { provider: gpt }    # 可选：覆盖逐条反证（verify）
+    plan:      { package_tokens: 60000, max_packages: 6 }
+    budget:    { max_nodes: 30, deadline: 30m, max_tokens: 1500000 }
   onboarding:
     agent:      { provider: claude }
 
@@ -119,6 +111,10 @@ blocks:                             # 平台级默认绑定；项目可覆盖
   review:
     mcp_tools: [mcp__codebase-memory__search_graph, mcp__codebase-memory__trace_path, mcp__codebase-memory__get_code_snippet]
     skills: [coding-standards]
+  explore:
+    mcp_tools: [mcp__codebase-memory__search_graph, mcp__codebase-memory__get_code_snippet]
+  validate:
+    mcp_tools: [mcp__codebase-memory__get_code_snippet]
   verify:
     mcp_tools: [mcp__codebase-memory__get_code_snippet]
   onboarding:
@@ -175,28 +171,81 @@ type ProviderConfig struct {
 }
 
 type ProfileConfig struct {
-	Plan        PlanConfig        `yaml:"plan"`
-	Propose     []ProposeConfig   `yaml:"propose"`
-	Reasoner    *ReasonerConfig   `yaml:"reasoner"`
-	Consensus   *ConsensusConfig  `yaml:"consensus"`
-	Challenge   ChallengeConfig   `yaml:"challenge"`
-	OnUncertain string            `yaml:"on_uncertain"`
-	Synthesize  SynthesizeConfig  `yaml:"synthesize"`
-	Budget      BudgetConfig      `yaml:"budget"`
-	Agent       *AgentConfig      `yaml:"agent"` // 仅 onboarding
+	Provider string         `yaml:"provider"` // 评审档位：所有节点的默认 provider
+	Explore  *ExploreConfig `yaml:"explore"`  // { provider }
+	Lanes    *LanesConfig   `yaml:"lanes"`    // code_review / review / reasoner / validate，各 { provider }
+	Plan     PlanConfig     `yaml:"plan"`     // package_tokens、max_packages
+	Challenge ChallengeConfig `yaml:"challenge"` // provider
+	Budget   BudgetConfig   `yaml:"budget"`
+	Agent    *AgentConfig   `yaml:"agent"`    // 仅 onboarding
+	// 另有 Propose、Reasoner、Consensus、OnUncertain、Synthesize 等旧字段：
+	// 仍可解码，由加载器迁移或忽略，见「评审档位」。
 }
 ```
 
 ### 启动校验（`Config.Validate()`）
 
 - 每个 provider 的 `protocol` 合法，`model` 非空且不全为空白，`api_key_env` 对应的环境变量存在且非空；`base_url` 可为空，非空时校验地址格式。
-- profile 中引用的 provider 都存在；`challenge.provider` 为 `cross` 时必须提供 `fallback`。
-- `on_uncertain` 为 `judge` 时，`synthesize.mode` 必须是 `agent`。
-- `budget.max_nodes` ≤ 100；`max_extends` ≤ 2。
+- profile 中引用的 provider 都存在：`provider`、`explore.provider`、`lanes.*.provider`、`challenge.provider` 和 onboarding 的 `agent.provider`。留空表示沿用 `provider`，不做检查。
+- `budget.max_nodes` 在 1 到 100 之间，`budget.deadline` 为正。
 - `blocks` 中的 `mcp_tools` 名称格式为 `mcp__<server>__<tool>`，且 server 在 MCP 配置中存在（工具是否存在在启动后探测，不存在只告警）。
 - `secrets.master_key_env` 解码后必须为 32 字节。
 
 校验失败直接退出，并逐条打印错误。
+
+### 评审档位（`profiles`）
+
+Tribunal 只有一个评审档位 `default`，评审图固定：`explore` → 四路并行评审（`code-review`、`review`、`reasoner`、`validate`）→ 裁决（`gather` → `verify.N` 反证 P0/P1 → `adjudicate`）→ 汇报（`synthesize`，代码渲染）。节点和契约见 [04 DAG 引擎与节点契约](04-dag-and-contracts.md)。`onboarding` 档位仍存在，只驱动项目接入，不是评审档位。没有可配置的旧图回退，也没有档位选择。
+
+`profiles.default` 的字段：
+
+| 字段 | 说明 |
+|---|---|
+| `provider` | 所有节点的默认 provider。留空时依次取 `lanes.code_review.provider`、`challenge.provider`；仍为空则无法执行真实评审 |
+| `explore.provider` | 可选，覆盖 `explore` 节点；留空取 `provider` |
+| `lanes.code_review.provider`、`lanes.review.provider`、`lanes.reasoner.provider`、`lanes.validate.provider` | 可选，分别覆盖四路评审；留空取 `provider` |
+| `challenge.provider` | 可选，覆盖逐条反证（`verify`）；留空取 `provider` |
+| `plan.package_tokens`、`plan.max_packages` | 分包上限：每包估算 token（默认 60000）和最大包数（默认 6，受下述上界限制） |
+| `budget.max_nodes`、`budget.deadline`、`budget.max_tokens` | 节点总数（默认 30）、总时长（默认 30m）、token 上限（默认 1500000） |
+
+其余行为由代码固定，不可配置：plan 为 code 模式（不调用模型），P0/P1 逐条挑战，挑战结果不确定的条目标记为「存疑」后发布，报告由代码生成，评审图不在汇报阶段扩展。
+
+`Load` 会把 `plan.max_packages` 降到上界 `min(17, (budget.max_nodes − 9) / 2)`（至少 1）：配置值高于上界时降到上界，并在启动日志产生一行 WARN；未配置且上界低于默认值 6 时静默降到上界。此外 `budget.deadline` 低于 30m 时启动日志也会提示（探索、四路评审和逐条反证可能来不及完成）。
+
+评审执行时（构建评审图）还会检查扇出上限：`plan.max_packages × 2 + 2 ≤ max_fan_out`（`max_fan_out` 默认 36），超出时拒绝该配置。每个包生成 `code-review` 和 `review` 各一个节点，`reasoner` 和 `validate` 每个 MR 各一个。
+
+#### 旧配置的兼容处理
+
+`config.Load` 不会因下列旧配置失败。每一项都在启动日志中产生一行 WARN，格式为 `configuration was migrated or ignored: <字段…>`，只含字段名，不含配置值。
+
+| 旧配置 | 处理 |
+|---|---|
+| `default` 和 `onboarding` 以外的档位（如 `deep`） | 整个档位被移除 |
+| `propose` 中第一个 `code-review` 条目 | 迁移为 `lanes.code_review.provider` |
+| `propose` 中第一个 `review` 条目 | 迁移为 `lanes.review.provider` |
+| `propose` 的其他条目 | 忽略（每路只运行一次） |
+| `reasoner.provider` | 迁移为 `lanes.reasoner.provider`；`reasoner.when` 单独告警「was ignored」并忽略（reasoner 一路始终运行） |
+| `challenge.provider: cross` | 改用 `challenge.fallback` 作为 `challenge.provider`；没有 `challenge.fallback` 时告警，由档位 `provider` 担任挑战者 |
+| `challenge.fallback`（非 `cross` 时） | 忽略 |
+| `challenge.only`（不等于 `P0, P1` 时） | 忽略（P0/P1 始终被挑战） |
+| `plan.mode`（非 `code`）、`plan.provider` | 忽略 |
+| `consensus` | 忽略 |
+| `on_uncertain`（非 `mark`） | 忽略 |
+| `synthesize.mode`（非 `code`）、`synthesize.provider` | 忽略 |
+| `budget.max_extends`（非 0） | 忽略 |
+| `agent`（写在 `default` 下） | 忽略（只属于 `onboarding`） |
+
+迁移时，同一字段上显式写的新字段优先于从旧字段迁移来的值；此时旧字段的告警为「`<旧字段>` is deprecated and was ignored: `<新字段>` is set」。迁移得到的 provider 仍会被校验，错误信息指向新字段，例如 `profiles.default.lanes.reasoner.provider "x" is not defined`。
+
+评审档位既没有 `provider` 也没有 `lanes.code_review.provider` 时，构建评审图失败，字段为 `provider`（「is required: set profiles.default.provider or lanes.code_review.provider」）。配置校验不再报告由此派生的 `propose[0].provider`。
+
+引用已移除档位的其他位置的处理：
+
+- 项目已保存的档位、`.gitlab-review.yml` 的 `profile`、标签映射：评审时按 `default` 处理（仓库配置中无法识别的 `profile` 被忽略，并在汇总里提示一次）。
+- 会被拒绝的情形：注册或更新项目时 `profile` 不是 `default`（HTTP 400，`unknown profile`）；评论命令 `/review <名称>` 的名称不是 `default`（命令被忽略，webhook 记为 `unknown_profile`）。`onboarding` 在上述所有位置都不被接受为评审档位。
+- 会被丢弃的情形：保存 `settings.profile_by_label` 时，值不是 `default` 的映射（包括 `onboarding` 和已移除的档位）被丢弃而不是以 400 拒绝，因此遗留的旧设置仍可编辑；已存储的旧值在评审时仍按 `default` 处理。
+
+升级操作见 [部署与运维 · 单一评审档位](../operations.md#单一评审档位升级)。
 
 ### 多 Provider 与档位引用
 
@@ -208,22 +257,19 @@ Docker Compose 默认只启用 `primary`。`config/server.docker.yaml` 另有一
 
 | 字段 | 使用模型的条件 | 说明 |
 |---|---|---|
-| `profiles.<name>.propose[].provider` | 评审档位 | 每个条目按 package 生成提出节点；同一 block 可写多条以并行调用多个模型。 |
-| `profiles.<name>.challenge.provider` | 评审档位 | 挑战与扩展 verify 使用的 provider；`verify` 没有独立字段。`cross` 只用于这个字段。 |
-| `profiles.<name>.reasoner.provider` | 配置了 `reasoner` 且 `when` 不是 `never` | 即使 `when: never`，非空 provider 引用也必须存在。 |
-| `profiles.<name>.plan.provider` | `plan.mode: agent` | `plan.mode: code` 是确定性节点，不调用模型。 |
-| `profiles.<name>.synthesize.provider` | `synthesize.mode: agent` | `mode: code` 不调用模型。 |
+| `profiles.default.provider` | 评审 | 所有评审节点的默认 provider。 |
+| `profiles.default.explore.provider` | 评审（可选） | 覆盖 `explore` 节点。 |
+| `profiles.default.lanes.{code_review,review,reasoner,validate}.provider` | 评审（可选） | 分别覆盖四路评审；每个包的 `code-review` 与 `review` 节点各用对应字段。 |
+| `profiles.default.challenge.provider` | 评审（可选） | 逐条反证 `verify` 使用的 provider；`verify` 没有独立字段。 |
 | `profiles.onboarding.agent.provider` | onboarding | 工作区初始化使用；添加第二 provider 时保留 primary。 |
 
-`gather` 和 `adjudicate` 是代码节点，没有 provider 字段；给它们写 provider 会被未知字段校验拒绝。普通 `verify` 使用 challenge 选出的 provider：固定别名使用该别名；`cross` 由 gather 按 endpoint 和 model 身份选择未被提出方使用的候选，找不到时使用 `challenge.fallback`，**不是模型调用失败后的自动故障切换**。同一身份或身份未知不能证明跨模型独立，不同别名也不保证实际模型独立。
+`plan`、`gather`、`adjudicate` 和 `synthesize` 是代码节点，不调用模型，也没有 provider 字段；旧配置中的 `plan.provider`、`synthesize.provider` 会被忽略并在启动日志中提示。`verify` 使用 `challenge.provider`；挑战者与提出方按 endpoint 和 model 身份归一后相同，或身份无法解析时，该条挑战被标记为同模型，不能证明跨模型独立，不同别名也不保证实际模型独立。不再支持 `cross`，也没有自动选择独立候选或调用失败后的自动故障切换。
 
-`synthesize` 发起的扩展不同：扩展 `verify` 在 `cross` 时直接使用 `challenge.fallback`，不会重新为 finding 选择独立候选；其 same-model 标记只比较 provider 别名，不能证明跨模型独立。扩展 `review` 优先使用首个带 provider 的 `code-review` propose，其次首个带 provider 的 propose；都没有时依次回退到 challenge fallback、首个 propose provider、synthesize provider。扩展后的 `synthesize.2` 继承原 synthesize provider。
+每个 MR 至少运行 `explore`、每个包的 `code-review` 和 `review`、`reasoner`、`validate` 这些 agent 节点，另有每条 P0/P1 finding 一个 `verify` 节点。因此一次评审调用模型的次数多于此前每次一两个 agent 节点的评审，token 成本预期更高；具体数字以后另行测量，此处不给出估计。节点数受 `budget.max_nodes` 与 fan-out 限制约束。
 
-多模型 propose 会让每个 package 的每个条目各运行一次，成本和节点数随之增加，受 `budget.max_nodes` 与 fan-out 限制。`plan.mode: agent` 时，规划模型可以给 package 指定 `provider`，但该值只能取 `propose` 中出现的 provider；它不会自动使用 `plan.provider` 或 `challenge.provider`。package 的 `provider` 非空时会覆盖该 package 的**每个** propose 条目：若 propose 配置了多个模型，同一 package 的提出节点会全部使用 package 的 provider，实际是同一模型重复调用，不能保证多模型独立。
+平台管理员可在控制台「模型与档位」查看配置中的全部 provider 和评审档位。页面只把 `default` 显示为「评审档位」，并按固定的八步拓扑列出各步骤的 provider：探索（`explore`）、提出（`code-review`、`review`、`reasoner`、`validate`）、挑战（`verify`）、裁决（`adjudicate`）、汇报（`synthesize`）；`onboarding` 单独标为「项目接入」，不是评审档位。该页面只读，界面不显示密钥值。逐个 provider 的连通性测试发送一条最小真实请求，会产生费用，需事先取得用户授权；成功只代表协议、地址、密钥和模型 ID 基本可用，不证明工具调用、长上下文、推理参数或完整业务流程兼容。
 
-平台管理员可在控制台「模型与档位」查看配置中的全部 provider 和档位。该页面只读，界面不显示密钥值。逐个 provider 的连通性测试发送一条最小真实请求，会产生费用，需事先取得用户授权；成功只代表协议、地址、密钥和模型 ID 基本可用，不证明工具调用、长上下文、推理参数或完整业务流程兼容。
-
-修改 provider 或档位需要重启服务，当前进程不热加载配置；`docker compose restart` 会重新读取已挂载的配置文件，但不会加载新的容器环境变量。新增 provider（即使没有被任何档位引用）会改变评审执行配置；启动恢复会对未终态工作流重新检查配置、档位和执行身份，不匹配时取消，而不是续跑。待发布结果是否继续发布由发布时校验决定，不能假定会自动跳过或一定发布。修改前应核对并等待或处理未完成和待发布结果；已发布或失败的评审不会被改写，被取消的评审需要重新触发。移除已配置的 provider 前，检查所有 `profiles.*` 的 `plan.provider`、`propose[].provider`、`reasoner.provider`、`challenge.provider`、`challenge.fallback`、`synthesize.provider` 和 `agent.provider`；即使 `reasoner.when: never` 也要清理其非空引用。任何对已移除 provider 的残留引用都会使配置校验失败；不要清空必需的 propose、challenge 或 onboarding 字段。完整操作步骤见 [多 Provider 配置](../operations.md#多-provider-配置) 和 [Agent 部署指南](../agent-deployment.md#多-provider-配置)。
+修改 provider 或档位需要重启服务，当前进程不热加载配置；`docker compose restart` 会重新读取已挂载的配置文件，但不会加载新的容器环境变量。新增 provider（即使没有被任何档位引用）会改变评审执行配置；启动恢复会对未终态工作流重新检查配置、档位和执行身份，不匹配时取消，而不是续跑。待发布结果是否继续发布由发布时校验决定，不能假定会自动跳过或一定发布。修改前应核对并等待或处理未完成和待发布结果；已发布或失败的评审不会被改写，被取消的评审需要重新触发。移除已配置的 provider 前，检查 `profiles.default` 的 `provider`、`explore.provider`、`lanes.*.provider`、`challenge.provider`，以及 `profiles.onboarding.agent.provider`；仍留在配置里的旧字段（`propose[].provider`、`reasoner.provider`、`challenge.fallback`）也一并清理：被保留或迁移的 provider 字段才会被校验，被忽略的旧字段先被丢弃，不参与校验，但仍应清理以免告警。对已移除 provider 的残留引用若出现在被保留或迁移的字段上，会使配置校验失败；不要清空 onboarding 的 `agent.provider`，`profiles.default` 也必须至少能解析出一个 provider。完整操作步骤见 [多 Provider 配置](../operations.md#多-provider-配置) 和 [Agent 部署指南](../agent-deployment.md#多-provider-配置)。
 
 ### 严格角色交替（`strict_role_alternation`）
 
@@ -264,7 +310,9 @@ default_extensions:
         code-review: &read_tools [list_projects, index_status, search_graph, trace_path, get_code_snippet,
           query_graph, get_graph_schema, get_file_outline, get_architecture, search_code, check_index_coverage]
         review: *read_tools
-        verify:      [get_code_snippet, search_graph, trace_path, search_code]
+        explore: *read_tools
+        validate: &verify_tools [get_code_snippet, search_graph, trace_path, search_code]
+        verify: *verify_tools
         onboarding:  [get_architecture, get_graph_schema]
 ```
 
@@ -275,17 +323,19 @@ default_extensions:
 | 块 | 默认 MCP 工具 | 职责理由 |
 |---|---|---|
 | `code-review` | 11 项只读工具（见下） | 单次双轴评审需要跨文件定位定义、调用链和既有实现，以验证 diff 内外的判断。 |
-| `review` | 与 `code-review` 相同 | `review.standards` 和 `review.intent` 单轴通道同样需要只读图谱证据，避免只凭 diff 猜测上下文。 |
+| `review` | 与 `code-review` 相同 | `rv.<pkg>` 终审通道同样需要只读图谱证据，避免只凭 diff 猜测上下文。 |
+| `explore` | 与 `code-review` 相同（11 项） | 只读探索要查定义、调用方、配置和测试，需要完整的只读检索面。 |
+| `validate` | `get_code_snippet`、`search_graph`、`trace_path`、`search_code` | 验证通道读代码与测试，对照 pipeline 证据；不授予探索或架构概览工具。 |
 | `verify` | `get_code_snippet`、`search_graph`、`trace_path`、`search_code` | 核对一条 finding 只需读取片段、查找定义与调用链、搜索用法；不授予探索或架构概览工具。 |
 | `onboarding` | `get_architecture`、`get_graph_schema` | 建立项目画像需要架构概览和图 schema；逐点检索、覆盖检查留给评审块。 |
-| `reasoner` | 无 | 只审查设计声明和已有材料，不直接检索代码图谱。 |
+| `reasoner` | 无 | 只审查设计声明和已有材料，不直接检索代码图谱；管理员可按需绑定。 |
 | `synthesize` | 无 | 只消费结构化 finding 和 challenge 结果，不直接检索。 |
 
 11 项只读工具：`list_projects`、`index_status`、`search_graph`、`trace_path`、`get_code_snippet`、`query_graph`、`get_graph_schema`、`get_file_outline`、`get_architecture`、`search_code`、`check_index_coverage`。默认授权不得包含 `index_repository`、`delete_project`、`ingest_traces`、`manage_adr` 等写工具，也不包含 `detect_changes`、`compare_graphs`。
 
-`code-review` Skill 默认只绑定 `code-review` 块；`review` 的两个单轴通道由各自 prompt 约束。管理员仍可按需把 Skill 或工具绑定到其他可绑定块。`reasoner` 和 `synthesize` 仍是合法的可绑定目标，只是没有默认授权。
+`code-review` Skill 默认只绑定 `code-review` 块。管理员仍可按需把 Skill 或工具绑定到其他可绑定块。可绑定块共八个：`explore`、`code-review`、`review`、`reasoner`、`validate`、`verify`、`synthesize`、`onboarding`；`reasoner` 和 `synthesize` 是合法的可绑定目标，只是没有默认授权。
 
-- `skills[].name` 必须是内置 Skill，`blocks` 只能取 `code-review`、`review`、`reasoner`、`verify`、`synthesize`、`onboarding`；同名不能重复。校验失败与其他配置错误一起报告。
+- `skills[].name` 必须是内置 Skill，`blocks` 只能取 `explore`、`code-review`、`review`、`reasoner`、`validate`、`verify`、`synthesize`、`onboarding`；同名不能重复。校验失败与其他配置错误一起报告。
 - 内置文件复制到 `<workspace.root>/skills/platform/<id>/skill`，行上 `builtin` 列记录内置名。API 以 `builtin: true` 返回，控制台显示「内置」标签。
 - **始终启用**：内置 Skill 不能用 `PATCH /api/v1/skills/{id}` 或控制台禁用；禁用请求返回 409，删除也返回 409。重启和升级都保持启用，启动同步会把历史禁用状态恢复为启用。
 - **随平台升级**：每次启动比较嵌入文件和已登记副本，不同就原地替换目录内容（多余的旧文件一并删除），并更新描述；行 ID、路径和已启用状态在刷新期间保持不变。刷新失败（例如修改 `workspace.root` 后已登记目录不在受管 Skill 根目录下）只记 Warn 日志，服务照常启动；已登记副本保持原样，能否加载与普通 Skill 相同。
@@ -376,7 +426,7 @@ default_extensions:
 - **镜像**：Dockerfile 固定 `CODEBASE_MEMORY_MCP_VERSION=0.12.1`，按 `TARGETARCH`（amd64/arm64）下载上游 `-portable` 静态链接发布包，并用写死在 Dockerfile 中的 SHA-256 校验。非 portable 的 glibc 版本需要 `GLIBC_2.38`，bookworm 运行镜像只有 2.36，不能使用。镜像只复制二进制和许可证文本，不运行上游 `install`（它会写 agent 配置和 hooks）。二进制在 `/usr/local/bin/codebase-memory-mcp`，wrapper 在 `/usr/local/bin/tribunal-codebase-memory-mcp`，许可证在 `/licenses/codebase-memory-mcp/`；均属 root，服务以 UID 10001 运行。
 - **默认登记**：示例配置和 Docker 配置通过 `default_extensions.mcp_servers` 登记内置平台服务器 `codebase-memory`，规则见 [默认扩展](#默认扩展default_extensions)。
 - **隔离**：项目 MCP 管理器以项目工作区为 cwd 和 `HOME` 根，wrapper 把 `CBM_CACHE_DIR`、`CBM_RUNTIME_DIR` 放在该 `HOME` 下，因此每个项目使用自己的索引和 daemon，查不到其他项目的索引；不使用账号级 daemon。`auto_index`、`auto_watch`、`watcher_enabled`、`ui_enabled` 都被关闭，不启动 CBM Lens UI。
-- **降级**：二进制缺失或 MCP 启动、列工具失败时，评审节点不带 MCP 工具继续执行，并在节点输出中记录代码生成的 `tool_gaps`。只有部分绑定工具可用时（服务器未公布某个工具，或工具带写入注解被跳过），可用工具照常提供，每个缺失工具各记一条 `tool_gaps`；汇总把它们写入告警，原本的 PASS 改为 INCOMPLETE，原有 BLOCKING 结论保持不变。建索引失败不阻断 onboarding 或刷新，工作区记录 `last_error`，刷新时继续使用上一次索引。已有自定义服务器停用后，绑定中引用它的工具直接不提供，不算降级。
+- **降级**：二进制缺失或 MCP 启动、列工具失败时，评审节点不带 MCP 工具继续执行，并在节点输出中记录代码生成的 `tool_gaps`。只有部分绑定工具可用时（服务器未公布某个工具，或工具带写入注解被跳过），可用工具照常提供，每个缺失工具各记一条 `tool_gaps`；汇总把它们写入告警，原本的 PASS 改为 INCOMPLETE，原有 BLOCKING 结论保持不变。`explore`、`validate` 和 `reasoner` 节点与 `code-review`、`review` 一样记录 `tool_gaps`，所以任一路绑定工具缺失都会使评审不会得到干净的 PASS。建索引失败不阻断 onboarding 或刷新，工作区记录 `last_error`，刷新时继续使用上一次索引。已有自定义服务器停用后，绑定中引用它的工具直接不提供，不算降级。
 - **停用**：已有自定义 MCP 可在编辑窗口把「启用」改为「停用」，或调用 `PUT /api/v1/mcp-servers/{id}` 设置 `enabled: false`，重启后生效；重启和升级都保持停用。内置 `codebase-memory` 始终启用，停用请求返回 409，启动同步会恢复启用。要让新部署不登记内置服务器，把配置中的 `mcp_servers` 设为 `[]`。
 - **升级版本**：同时修改 Dockerfile 中的版本和两个 SHA-256（取自上游 release 资产和 `checksums.txt`）、`third_party/codebase-memory-mcp/VERSION` 和 `LICENSE`，用 `gh attestation verify <archive> -R DeusData/codebase-memory-mcp` 核对 SLSA provenance，再运行 `go run ./scripts/licensebundle`、`go test ./scripts/...` 和 Docker smoke。新版本须重新确认 analysis profile 不含写入工具。已部署实例在新镜像首次启动时同步内置服务器的配置和默认工具白名单，见上文规则。
 
@@ -399,7 +449,7 @@ default_extensions:
   "show_model_attribution": false,
   "allow_repo_config": true,
   "allow_repo_skills": false,
-  "profile_by_label": { "deep-review": "deep" },
+  "profile_by_label": { "release": "default" },
   "custom_rules": [
     "金额计算必须使用 decimal 类型",
     "对外 API 的错误码不得变更"
@@ -408,7 +458,7 @@ default_extensions:
 ```
 
 - 未设置的字段取平台 `review_defaults`。
-- `profile_by_label`：MR 带指定标签时使用对应档位。
+- `profile_by_label`：MR 带指定标签时使用对应档位。评审档位只有 `default`，值只能写 `default`，其他值的映射保存时被丢弃（不报错）；已保存的旧值（指向已移除的档位）在评审时按 `default` 处理。
 - `custom_rules` 作为项目规则注入 prompt 的项目背景段。
 - `ignore` 与平台默认值**合并**，不是替换。
 
@@ -435,7 +485,7 @@ review:
   labels_exclude: ["wip"]
 ```
 
-允许覆盖的字段（白名单）：`language`、`profile`（必须是平台已有的档位）、`ignore`（只能追加）、`rules`（追加到 `custom_rules`）、`review.skip_draft`、`review.labels_exclude`。
+允许覆盖的字段（白名单）：`language`、`profile`（只能是 `default`；其他名称被忽略并在汇总中提示一次）、`ignore`（只能追加）、`rules`（追加到 `custom_rules`）、`review.skip_draft`、`review.labels_exclude`。
 
 **不允许**覆盖：provider、预算、commit_status、MCP 和 Skill 绑定。非白名单字段忽略并在汇总中提示一次。
 

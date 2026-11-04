@@ -231,6 +231,8 @@ type Rebut struct {
 type ReasonerOut struct {
 	ResultType string            `json:"result_type" jsonschema:"enum=CLEAN,enum=FINDINGS,enum=INSUFFICIENT_SUBJECT"`
 	Findings   []ReasonerFinding `json:"findings" jsonschema:"maxItems=200"`
+	// ToolGaps is code-owned; only the lanes-flow reasoner binds tools.
+	ToolGaps []string `json:"tool_gaps,omitempty" jsonschema:"-"`
 }
 
 // ReasonerFinding keeps the reasoner's native severity names.
@@ -1060,6 +1062,8 @@ const (
 	ContractVerify          = "verify"
 	ContractSynthesize      = "synthesize"
 	ContractOnboarding      = "onboarding"
+	ContractExplore         = "explore"
+	ContractValidate        = "validate"
 )
 
 type contractExample struct {
@@ -1078,6 +1082,8 @@ func contractExamples() map[string]contractExample {
 		ContractVerify:          {func() Validator { return &VerifyOut{} }},
 		ContractSynthesize:      {func() Validator { return &SynthesizeOut{} }},
 		ContractOnboarding:      {func() Validator { return &OnboardingOut{} }},
+		ContractExplore:         {func() Validator { return &ExploreOut{} }},
+		ContractValidate:        {func() Validator { return &ValidateOut{} }},
 	}
 }
 
@@ -1106,6 +1112,10 @@ func DecodeContract(kind string, raw []byte) (any, error) {
 		return DecodeStrict[*SynthesizeOut](raw)
 	case ContractOnboarding:
 		return DecodeStrict[*OnboardingOut](raw)
+	case ContractExplore:
+		return DecodeStrict[*ExploreOut](raw)
+	case ContractValidate:
+		return DecodeStrict[*ValidateOut](raw)
 	default:
 		_ = example
 		return nil, fmt.Errorf("unknown contract kind %q", kind)

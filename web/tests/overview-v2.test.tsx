@@ -21,7 +21,7 @@ describe('deriveReviewStage', () => {
       node('review.a', 'code-review', 'completed'),
       node('verify.f1', 'verify', 'running'),
     ])).toBe(2)
-    expect(deriveReviewStage([node('reasoner', 'reasoner', 'completed')])).toBe(1)
+    expect(deriveReviewStage([node('reasoner', 'reasoner', 'completed')])).toBe(2)
     expect(deriveReviewStage([node('review.gate', 'review.gate', 'completed')])).toBe(2)
     expect(deriveReviewStage([node('verify.f1', 'verify', 'completed')])).toBe(3)
   })

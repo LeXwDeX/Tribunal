@@ -99,15 +99,15 @@ docker compose config --quiet && echo compose-ok
 1. 向用户取得第二个 provider 的协议、API 根地址、模型 ID 和费用授权。协议使用 `openai-chat`、`openai-responses` 或 `anthropic`；Anthropic 的地址不带 `/v1`，OpenAI 兼容地址通常带 `/v1`。密钥由用户或受控密钥管理器直接写入权限为 `600` 的 `.env`，对应 `LLM_SECONDARY_API_KEY`；不要复制真实值到终端、聊天或示例。
 2. 在 `.env` 填入 `LLM_SECONDARY_PROTOCOL`、`LLM_SECONDARY_MODEL` 和 `LLM_SECONDARY_API_KEY`；`LLM_SECONDARY_BASE_URL` 可留空以使用适配器默认地址。四个变量不从 primary 的 `LLM_*` 推导。
 3. 在 `config/server.docker.yaml` 取消 `providers.secondary` 整段注释；`api_key_env` 保持 `LLM_SECONDARY_API_KEY`，不要改成密钥值。保留 `profiles.onboarding.agent.provider: primary`，不要把 onboarding 切到 secondary。
-4. 在 `profiles.default` 中按策略引用 secondary。例如 challenge 改为 `secondary`，propose 保持 primary；或同时取消第二个 propose 条目的注释。`gather` 和 `adjudicate` 不能配置模型。普通 verify 的 `cross` 按模型身份选择候选，找不到才用 fallback；synthesize 扩展 verify 的 `cross` 则直接使用 fallback。不同别名不保证实际模型独立，扩展 verify 的 same-model 标记只比较别名。扩展 review 的 provider 选择见[配置设计](design/06-config.md#多-provider-与档位引用)。`plan`、`synthesize` 只有在 `mode: agent` 时才调用模型。若 `plan.mode: agent`，package 的非空 `provider` 会覆盖该 package 的所有 propose 条目；同一 package 可能变成同一模型重复调用，不能保证多模型独立。
+4. 在 `profiles.default` 中按策略引用 secondary。例如 `challenge.provider` 改为 `secondary`，`provider` 保持 primary；或用 `lanes.review`、`lanes.reasoner`、`lanes.validate`、`lanes.code_review`、`explore` 的 `provider` 让对应节点使用 secondary，未指定的节点使用 `provider`。`plan`、`gather`、`adjudicate` 和 `synthesize` 是代码节点，不能配置模型；已不再有 `propose` 列表、`cross` 和 `plan.mode: agent`。挑战者与提出方身份相同或无法解析时该条挑战被标为同模型，不同别名也不保证实际模型独立，详见[配置设计](design/06-config.md#多-provider-与档位引用)。
 5. 若这是已有部署，先在控制台评审列表核对未完成（运行中或排队）评审和待发布结果。需要旧评审完成时先等待；否则接受未终态工作流可能在重启恢复时因配置、档位或执行身份不匹配被取消。待发布结果是否继续由发布时校验决定，不能假定会自动跳过或一定发布；无法确认时先等待并核对。首次部署没有旧任务，可直接进行下一步。
 6. 构建并启动：按[第 3 节](#3-构建并启动)执行 `docker compose build` 和 `--check-config`。首次部署再用 `docker compose up -d --wait`；已有部署用 `docker compose up -d --force-recreate --wait --wait-timeout 120` 让新环境变量生效。缺少 secondary key 时会指出 `providers.secondary.api_key_env`，model 为空时会指出 `providers.secondary.model`；不要输出密钥排查。`--check-config` 不验证评审图、网络、密钥有效性和工具兼容性。
 7. 启动后用平台管理员打开控制台「模型与档位」，确认两个 provider 都出现。逐个测试会发送真实最小请求并产生费用，必须先取得用户授权；测试成功只证明协议、地址、密钥和模型 ID 基本可用，不证明工具调用、长上下文或完整评审兼容。完整评审要在测试 MR 上另行触发并另获授权。
 8. 第三个 provider 需要自行写配置，并在 `compose.override.yaml` 的 `services.review.environment` 显式透传其变量；仅写入 `.env` 时容器看不到。配置中引用的协议、地址、模型和 key 变量要逐一列出，不能只传 key。示例见 [运维 · 多 Provider 配置](operations.md#多-provider-配置) 第 8 步。
 
-**回退**：先按步骤 5 核对未完成评审和待发布结果，再检查所有 `profiles.*` 的 `plan.provider`、`propose[].provider`、`reasoner.provider`、`challenge.provider`、`challenge.fallback`、`synthesize.provider` 和 `agent.provider`，包括 `default`、`onboarding` 和自定义档位。把所有 secondary 引用替换为 primary，或删除不再需要的可选字段/条目；保留 `profiles.onboarding.agent.provider`；`challenge.provider` 必须是已配置别名或 `cross`，`cross` 时必须保留合法的 `challenge.fallback`，且 fallback 不能指向 secondary；每个评审档位至少保留一个 `propose` 条目。确认没有引用后，重新注释 `providers.secondary`，从 `.env` 移除四个变量，先执行 `docker compose config --quiet` 和 `docker compose run --rm --no-deps review --config /app/config/server.yaml --check-config`，两项通过后才执行 `docker compose up -d --force-recreate --wait --wait-timeout 120`。引用不存在的 provider 会导致启动失败；`config --quiet` 不验证应用配置语义，`--check-config` 不验证评审图、网络或模型兼容性。
+**回退**：先按步骤 5 核对未完成评审和待发布结果，再检查 `profiles.default` 的 `provider`、`explore.provider`、`lanes.*.provider`、`challenge.provider` 和 `profiles.onboarding.agent.provider`；配置里若还留有旧字段（`propose[].provider`、`reasoner.provider`、`challenge.fallback`）也一并清理。把所有 secondary 引用替换为 primary，或删除不再需要的可选字段；保留 `profiles.onboarding.agent.provider`，`profiles.default.provider` 必须保留一个已配置别名。确认没有引用后，重新注释 `providers.secondary`，从 `.env` 移除四个变量，先执行 `docker compose config --quiet` 和 `docker compose run --rm --no-deps review --config /app/config/server.yaml --check-config`，两项通过后才执行 `docker compose up -d --force-recreate --wait --wait-timeout 120`。被保留或迁移的 provider 字段引用不存在的 provider 会让启动失败；被忽略的旧字段先被丢弃，不参与校验（仍应清理以免告警）；`config --quiet` 不验证应用配置语义，`--check-config` 不验证评审图、网络或模型兼容性。
 
-不要删除 `profiles.onboarding.agent.provider` 和 `profiles.default.challenge.provider`。
+不要删除 `profiles.onboarding.agent.provider` 和 `profiles.default.provider`。
 
 ## 3. 构建并启动
 
@@ -271,7 +271,7 @@ v1.2.0 开箱自带两项内置扩展，不需要额外配置：
 ## 9. 交付给用户时要报告的内容
 
 - 访问地址、是否已启用 OAuth、管理员是谁（写用户 ID，不写 token）。
-- 已配置的 provider 别名、各自协议和模型 ID，以及档位引用；不写 API key。逐个连通性测试是否已获授权、执行了哪些、结果如何；明确说明测试成功不等于完整评审兼容，完整评审是否实测。
+- 已配置的 provider 别名、各自协议和模型 ID，以及 `default` 评审档位与 onboarding 的 provider 引用；不写 API key。逐个连通性测试是否已获授权、执行了哪些、结果如何；明确说明测试成功不等于完整评审兼容，完整评审是否实测。
 - 已接入的项目 ID、Webhook 方式（自动或手动）和当前状态，以及已授权的用户和角色。
 - 跑过哪些验证命令，结果如何。哪些没有验证，比如第 5 步的 `/review` 实测，要明确说出来。
 - 提醒用户：妥善保存 `REVIEW_MASTER_KEY`，设置定期备份（[第 7 节](operations.md#7-sqlite-一致性备份与恢复)），以及从 GitLab 组移除成员时，要在 Tribunal 里同步删除对应的项目权限。

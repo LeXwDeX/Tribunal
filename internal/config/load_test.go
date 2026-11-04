@@ -54,7 +54,7 @@ func TestLoadDefaults(t *testing.T) {
 		t.Errorf("default profile = %+v", profile)
 	}
 	if profile.Budget.MaxNodes != 30 || profile.Budget.MaxExtends != 0 ||
-		profile.Budget.Deadline != 20*time.Minute || profile.Budget.MaxTokens != 1500000 {
+		profile.Budget.Deadline != 30*time.Minute || profile.Budget.MaxTokens != 1500000 {
 		t.Errorf("default budget = %+v", profile.Budget)
 	}
 	if len(profile.Propose) != 1 || profile.Propose[0].Block != "code-review" || profile.Propose[0].Provider != "" {
@@ -86,12 +86,14 @@ review_defaults:
   ignore: ["base-only"]
 profiles:
   default:
-    challenge:
-      only: [P0]
+    lanes:
+      review: { provider: base-review }
+      reasoner: { provider: base-reasoner }
+    plan:
+      package_tokens: 123
   deep:
     plan:
       mode: code
-      package_tokens: 123
 `)
 	override := writeConfig(t, "override.yaml", `
 server:
@@ -102,8 +104,8 @@ review_defaults:
   ignore: ["one", "two"]
 profiles:
   default:
-    challenge:
-      only: [P1, P2]
+    lanes:
+      reasoner: { provider: override-reasoner }
   deep:
     plan:
       mode: agent
@@ -127,18 +129,17 @@ profiles:
 		t.Errorf("arrays must replace, got %v", got)
 	}
 	defaultProfile := cfg.Profiles["default"]
-	if defaultProfile.Plan.PackageTokens != 60000 {
-		t.Errorf("default profile lost defaults: %+v", defaultProfile)
+	if defaultProfile.Plan.PackageTokens != 123 || defaultProfile.Budget.MaxNodes != 30 || defaultProfile.Budget.Deadline != 30*time.Minute {
+		t.Errorf("default profile lost merged values or defaults: %+v", defaultProfile)
 	}
-	if got := defaultProfile.Challenge.Only; len(got) != 2 || got[0] != "P1" || got[1] != "P2" {
-		t.Errorf("nested arrays must replace, got %v", got)
+	if lanes := defaultProfile.Lanes; lanes == nil || lanes.Review.Provider != "base-review" || lanes.Reasoner.Provider != "override-reasoner" {
+		t.Errorf("map merge did not preserve nested values: %+v", lanes)
 	}
-	deep := cfg.Profiles["deep"]
-	if deep.Plan.Mode != "agent" || deep.Plan.PackageTokens != 123 {
-		t.Errorf("map merge did not preserve nested values: %+v", deep.Plan)
+	if _, ok := cfg.Profiles["deep"]; ok {
+		t.Error("a second review profile must be removed after merging")
 	}
-	if deep.Budget.MaxNodes != 30 || deep.Budget.Deadline != 20*time.Minute {
-		t.Errorf("profile defaults not applied: %+v", deep.Budget)
+	if len(cfg.Warnings) != 1 || !strings.Contains(cfg.Warnings[0], "profiles.deep was removed") {
+		t.Errorf("warnings = %q", cfg.Warnings)
 	}
 }
 

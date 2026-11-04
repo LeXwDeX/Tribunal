@@ -101,14 +101,8 @@ func writeSecondaryDockerConfig(t *testing.T) string {
 		{"  #   api_key_env: LLM_SECONDARY_API_KEY\n", "    api_key_env: LLM_SECONDARY_API_KEY\n"},
 		{"  #   max_concurrency: 4\n", "    max_concurrency: 4\n"},
 		{"  #   max_tokens: 16000\n", "    max_tokens: 16000\n"},
-		{
-			"      - block: code-review\n        provider: primary\n",
-			"      - block: code-review\n        provider: primary\n      - block: code-review\n        provider: secondary\n",
-		},
-		{
-			"    challenge:\n      # Replace primary with secondary to challenge a different model after\n      # enabling providers.secondary above.\n      provider: primary\n",
-			"    challenge:\n      provider: secondary\n",
-		},
+		{"    # lanes:\n    #   review: { provider: secondary }\n", "    lanes:\n      review: { provider: secondary }\n"},
+		{"    # challenge: { provider: secondary }\n", "    challenge: { provider: secondary }\n"},
 	}
 	for _, replacement := range replacements {
 		if !strings.Contains(body, replacement.old) {

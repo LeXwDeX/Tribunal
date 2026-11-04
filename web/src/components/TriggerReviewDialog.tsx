@@ -1,7 +1,5 @@
 import { useEffect, useId, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { listProfiles, triggerReview } from '../api/api'
-import { errorMessage } from '../api/client'
+import { triggerReview } from '../api/api'
 import type { Project } from '../api/types'
 import { Button, Dialog, ErrorState, Field } from './ui'
 
@@ -18,22 +16,17 @@ export function TriggerReviewDialog({
 }) {
   const projectId = useId()
   const iid = useId()
-  const profile = useId()
   const [selectedProject, setSelectedProject] = useState(String(presetProjectId ?? ''))
   const [mrIid, setMrIid] = useState(String(presetIid ?? ''))
-  const [selectedProfile, setSelectedProfile] = useState('')
   const [full, setFull] = useState(false)
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<unknown>(null)
   const [fieldErrors, setFieldErrors] = useState<{ project?: string; iid?: string }>({})
 
-  const profiles = useQuery({ queryKey: ['profiles'], queryFn: () => listProfiles(), enabled: open })
-
   useEffect(() => {
     if (!open) return
     setSelectedProject(String(presetProjectId ?? ''))
     setMrIid(String(presetIid ?? ''))
-    setSelectedProfile('')
     setFull(false)
     setError(null)
     setFieldErrors({})
@@ -50,10 +43,7 @@ export function TriggerReviewDialog({
     setPending(true)
     setError(null)
     try {
-      const result = await triggerReview(selectedProject, parsedIid, {
-        profile: selectedProfile || undefined,
-        full,
-      })
+      const result = await triggerReview(selectedProject, parsedIid, { full })
       onTriggered(result?.job_id)
     } catch (caught) {
       setError(caught)
@@ -92,18 +82,11 @@ export function TriggerReviewDialog({
         <Field label="MR IID" htmlFor={iid} error={fieldErrors.iid}>
           <input id={iid} className="input" inputMode="numeric" value={mrIid} onChange={(event) => setMrIid(event.target.value)} placeholder="例如 318" aria-invalid={Boolean(fieldErrors.iid)} aria-describedby={fieldErrors.iid ? `${iid}-error` : undefined} />
         </Field>
-        <Field label="评审档位" htmlFor={profile} hint="留空时使用项目默认档位。">
-          <select id={profile} className="select" value={selectedProfile} onChange={(event) => setSelectedProfile(event.target.value)}>
-            <option value="">项目默认</option>
-            {(profiles.data?.profiles ?? []).map((item) => <option key={item.name} value={item.name}>{item.name}</option>)}
-          </select>
-        </Field>
       </div>
       <label className="checkboxRow">
         <input type="checkbox" checked={full} onChange={(event) => setFull(event.target.checked)} />
         <span>全量评审（full）</span>
       </label>
-      {profiles.isError ? <span className="small muted">档位列表加载失败：{errorMessage(profiles.error)}</span> : null}
     </Dialog>
   )
 }

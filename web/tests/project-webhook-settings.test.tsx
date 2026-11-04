@@ -289,7 +289,7 @@ describe('project webhook settings', () => {
 
     await user.click(screen.getByRole('button', { name: '保存设置' }))
     await waitFor(() => expect(patches).toHaveLength(1))
-    expect(Object.keys(patches[0]).sort()).toEqual(['profile', 'settings'])
+    expect(Object.keys(patches[0]).sort()).toEqual(['settings'])
     expect(calls).toEqual([])
   })
 })

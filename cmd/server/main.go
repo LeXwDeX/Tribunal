@@ -90,11 +90,14 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := cfg.Validate(); err != nil {
-		return err
-	}
 	logger, err := newLogger(stderr)
 	if err != nil {
+		return err
+	}
+	// Migration warnings come first: a validation error may name a field
+	// that a warning explains.
+	warnConfig(logger, cfg.Warnings)
+	if err := cfg.Validate(); err != nil {
 		return err
 	}
 	warnDeprecatedEnv(logger)
@@ -523,6 +526,14 @@ func shutdownHTTPServer(srv *http.Server, timeout time.Duration, logger *slog.Lo
 		return fmt.Errorf("close HTTP server: %w", err)
 	}
 	return nil
+}
+
+// warnConfig logs each configuration item Load ignored or migrated, such as
+// a removed review profile. The messages name fields, never values.
+func warnConfig(logger *slog.Logger, warnings []string) {
+	for _, warning := range warnings {
+		logger.Warn("configuration was migrated or ignored: " + warning)
+	}
 }
 
 // warnDeprecatedEnv tells the operator once per startup which legacy

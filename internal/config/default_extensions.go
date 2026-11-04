@@ -11,7 +11,7 @@ import (
 
 // BindableBlocks are the review blocks that accept MCP tool and skill
 // bindings.
-var BindableBlocks = []string{"code-review", "review", "reasoner", "verify", "synthesize", "onboarding"}
+var BindableBlocks = []string{"explore", "code-review", "review", "reasoner", "validate", "verify", "synthesize", "onboarding"}
 
 // DefaultExtensionsConfig lists platform extensions that Tribunal registers
 // and binds once, on the first start that sees them. Later starts never

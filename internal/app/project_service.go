@@ -266,7 +266,7 @@ func (s *ProjectService) Register(ctx context.Context, in RegisterInput) (*Regis
 	if profile == "" {
 		profile = "default"
 	}
-	if _, ok := s.profiles[profile]; !ok {
+	if !isReviewProfile(s.profiles, profile) {
 		return nil, validationError("unknown profile", Detail{Field: "profile", Message: "profile is not defined"})
 	}
 	canonicalSettings, err := ParseSettings(in.Settings, s.profiles)
@@ -711,7 +711,7 @@ func (s *ProjectService) Update(ctx context.Context, id int64, in UpdateProjectI
 	update := store.ProjectUpdate{Enabled: in.Enabled}
 	if in.Profile != nil {
 		profile := strings.TrimSpace(*in.Profile)
-		if _, ok := s.profiles[profile]; !ok {
+		if !isReviewProfile(s.profiles, profile) {
 			return nil, validationError("unknown profile", Detail{Field: "profile", Message: "profile is not defined"})
 		}
 		update.Profile = &profile

@@ -131,7 +131,8 @@ func (s *ReviewService) resolveReviewExecution(ctx context.Context, project *sto
 }
 
 // Initial graph nodes and their expanders determine which bindings can reach
-// callAgent. Reasoner and synthesis currently pass no block to callAgent.
+// callAgent. The legacy reasoner and synthesis pass no block to callAgent; the
+// lanes-flow reasoner lane does.
 func reviewExecutionSkillBlocks(profile review.Profile, providers []string) (map[string]bool, error) {
 	spec, err := review.BuildGraph(profile, &review.Dossier{}, review.GraphConfig{AllowedProviders: providers})
 	if err != nil {
@@ -142,6 +143,8 @@ func reviewExecutionSkillBlocks(profile review.Profile, providers []string) (map
 		switch node.Kind {
 		case review.KindOnboarding:
 			blocks[review.BlockOnboarding] = true
+		case review.KindExplore:
+			blocks[review.BlockExplore] = true
 		case review.KindCodeReview:
 			blocks[review.BlockCodeReview] = true
 		case review.KindReviewStd, review.KindReviewInt:
@@ -154,9 +157,17 @@ func reviewExecutionSkillBlocks(profile review.Profile, providers []string) (map
 					Propose []struct {
 						Block string `json:"block"`
 					} `json:"propose"`
+					Flow string `json:"flow"`
 				}
 				if err := json.Unmarshal(node.Params, &params); err != nil {
 					return nil, err
+				}
+				if params.Flow == review.FlowLanes {
+					// The lanes expansion adds the review, reasoner and validate
+					// lanes; each runs with its own block bindings.
+					blocks[review.BlockReview] = true
+					blocks[review.BlockReasoner] = true
+					blocks[review.BlockValidate] = true
 				}
 				for _, propose := range params.Propose {
 					switch propose.Block {

@@ -328,11 +328,11 @@ func (d *Dispatcher) resolveProfile(project *store.Project, requested string) st
 		if name == "" {
 			continue
 		}
-		if _, ok := d.profiles[name]; ok {
+		if isReviewProfile(d.profiles, name) {
 			return name
 		}
 	}
-	return "default"
+	return config.ReviewProfile
 }
 
 func (d *Dispatcher) storeError(err error) error {

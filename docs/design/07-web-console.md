@@ -85,11 +85,11 @@ web/
 
 ### 3.4 项目列表与注册
 
-列表列：项目路径、档位、工作区状态、最近评审、token 过期时间、启用开关。普通用户只看到自己有 grant 的项目；平台管理员可看到“注册项目”入口，后端仍要求平台管理员。
+列表列：项目路径、工作区状态、最近评审、token 过期时间、启用开关（评审档位只有 `default`，列表不再显示档位列）。普通用户只看到自己有 grant 的项目；平台管理员可看到“注册项目”入口，后端仍要求平台管理员。
 
 注册分两步：输入仓库完整网址、路径或 ID 和访问 Key，先执行只读「校验连接」，展示项目、身份、角色、scope、有效期和 Git HEAD，并明确「校验通过，尚未保存」。修改地址或 Key 后校验失效，保存按钮再次禁用。
 
-「保存并初始化」才登记项目、加密保存 Key 并入队后台初始化，可能产生模型费用。高级设置保留档位、分支、跳过 Draft 和自动 webhook；自动 webhook 默认关闭。Key 仅保存在对话框局部状态，不写入 URL、查询缓存或浏览器持久存储；关闭对话框会清除 Key 和校验结果。
+「保存并初始化」才登记项目、加密保存 Key 并入队后台初始化，可能产生模型费用。高级设置保留分支、跳过 Draft 和自动 webhook，没有档位选择（项目固定使用 `default`）；自动 webhook 默认关闭。Key 仅保存在对话框局部状态，不写入 URL、查询缓存或浏览器持久存储；关闭对话框会清除 Key 和校验结果。
 
 ### 3.5 项目详情
 
@@ -97,7 +97,7 @@ web/
 |---|---|---|
 | 概览 | 基本信息、最近评审、本项目统计 | `GET /projects/{id}`、`GET /stats?project_id=` |
 | 工作区与上下文 | 工作区状态、base sha、索引状态、最近刷新；操作：刷新、重建索引、重新生成上下文；上下文文档查看与编辑、锁定开关、历史版本 | `/workspace`、`/context-docs` |
-| 设置 | 项目 `manage` 可编辑项目设置、更新访问 Key、重建 webhook；`read` 只读。`POST /projects/validate` 仅平台管理员可用；项目 `manage` 保存 Key 时直接 `PUT .../token`，由后端校验凭据 | `PATCH /projects/{id}`、`POST /projects/validate`、`PUT .../token` |
+| 设置 | 项目 `manage` 可编辑项目设置（没有档位选择）、更新访问 Key、重建 webhook；`read` 只读。`POST /projects/validate` 仅平台管理员可用；项目 `manage` 保存 Key 时直接 `PUT .../token`，由后端校验凭据 | `PATCH /projects/{id}`、`POST /projects/validate`、`PUT .../token` |
 | 扩展绑定 | 项目 `read` 可查看项目级 MCP、Skill 和块绑定；写入宿主执行配置还需平台管理员，并同时具备项目 `manage` | `/mcp-servers`、`/skills`、`/block-bindings` |
 
 平台管理员更新访问 Key 时可先做只读校验，返回的项目 ID 必须与当前项目一致；项目 `manage` 不要求调用 validate 端点，直接保存时由服务端校验凭据。该操作只更新平台保存的凭据，不在 GitLab 创建或撤销 token，也不自动初始化或触发评审。
@@ -106,12 +106,13 @@ web/
 
 - **MCP 服务器**：列表（作用域、名称、命令、状态、工具数）；已有自定义服务器的编辑、删除、启停；「测试」按钮列出工具。新增和导入入口已关闭。
 - **Skill**：列表（作用域、名称、描述、来源目录）；已有自定义 Skill 的启停和删除。上传和目录登记入口已关闭；内置项始终启用。
-- **块绑定**：矩阵视图，行是块（code-review / review / reasoner / verify / synthesize / onboarding），列是可用的 MCP 工具和 Skill，勾选即绑定。项目 scope 的读取需要该项目 grant；任何写入都要求平台管理员，项目 scope 还要求 `manage`。
+- **块绑定**：矩阵视图，行是块（explore / code-review / review / reasoner / validate / verify / synthesize / onboarding），列是可用的 MCP 工具和 Skill，勾选即绑定。项目 scope 的读取需要该项目 grant；任何写入都要求平台管理员，项目 scope 还要求 `manage`。
 
 ### 3.7 模型与档位
 
 - Provider 卡片：协议、base_url、模型、并发和速率限制、近 24 小时调用数、错误率、P50 延迟；「测试连通性」。本页数据只允许平台管理员读取；其他用户打开会看到权限错误，不能据此推断平台没有配置。
-- 档位：只读展示 profile 定义（规划方式、提出方、挑战方、裁决策略、预算），用小型示意图画出拓扑 A / B。
+- 评审档位：只显示 `default`，标题为「评审档位」，按固定的八步拓扑列出各步骤及其 provider：探索（`explore`）、提出（`code-review`、`review`、`reasoner`、`validate`）、挑战（`verify`）、裁决（`adjudicate`）、汇报（`synthesize`），并展示预算。`onboarding` 单独标为「项目接入」，不是评审档位。
+- 手动触发评审的对话框也没有档位选择；评审详情的 DAG 阶段轨道中，`explore` 和 `plan` 归入「规划」，`code-review`、`review`、`reasoner` 和 `validate` 归入「提出」。「模型与档位」页的「项目接入」一行在 onboarding 没有配置 provider 时显示「未配置」。
 
 ### 3.8 统计与反馈
 

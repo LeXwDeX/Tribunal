@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"sort"
 	"strings"
 
 	"github.com/LeXwDeX/tribunal/internal/config"
@@ -238,11 +237,11 @@ func (w *CommandWorker) Handle(ctx context.Context, job *jobs.Job) error {
 	}
 
 	profile := payload.Profile
-	if _, ok := w.profiles[profile]; !ok {
+	if !isReviewProfile(w.profiles, profile) {
 		profile = project.Profile
 	}
-	if _, ok := w.profiles[profile]; !ok {
-		profile = "default"
+	if !isReviewProfile(w.profiles, profile) {
+		profile = config.ReviewProfile
 	}
 	explicit := true
 	if payload.ProfileExplicit != nil {
@@ -339,22 +338,16 @@ func isCommandReplyBody(body string) bool {
 }
 
 func helpReplyText(profiles map[string]config.ProfileConfig) string {
-	names := make([]string, 0, len(profiles))
-	for name := range profiles {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	available := "（无）"
-	if len(names) > 0 {
-		available = "`" + strings.Join(names, "`、`") + "`"
+	profile := "（未配置）"
+	if _, ok := profiles[config.ReviewProfile]; ok {
+		profile = "`" + config.ReviewProfile + "`（探索 → 四路并行评审 → 裁决 → 汇报）"
 	}
 	return "**可用命令**\n\n" +
-		"- `/review`：使用项目默认档位重新评审（增量）\n" +
+		"- `/review`：重新评审（增量）\n" +
 		"- `/review full`：全量评审\n" +
-		"- `/review <profile>`：指定档位，例如 `/review deep`\n" +
 		"- `/review cancel`：取消正在运行的评审\n" +
 		"- `/review help`：显示本说明\n\n" +
-		"可用档位（按名称排序）：" + available
+		"评审档位：" + profile
 }
 
 func (w *CommandWorker) logAccepted(projectID int64, payload commandPayload, jobID string, duplicate bool) {

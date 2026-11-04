@@ -20,7 +20,7 @@ func TestLoadSelectsAllRolesAndIsDeterministic(t *testing.T) {
 	if first.Hash != second.Hash || len(first.Hash) != 64 {
 		t.Fatalf("hash = %q, %q", first.Hash, second.Hash)
 	}
-	if len(RoleFiles) != 10 {
+	if len(RoleFiles) != 13 {
 		t.Fatalf("role count = %d", len(RoleFiles))
 	}
 	for _, name := range RoleFiles {
@@ -118,7 +118,7 @@ func TestPromptFilesContainNoSecrets(t *testing.T) {
 // publications and makes the next trigger review the MR again. Update this
 // value only together with a role version bump or render-version bump. Also
 // note the change.
-const embeddedBundleHash = "537e6eab0b60bbcfdfe1700846523a97c4881d8a40f8a990fd7867e13a4822fe"
+const embeddedBundleHash = "9abc0e9a707ad78a620d1bde190e1cdedb2b0484d940a58376c1564f210a98b0"
 
 func TestEmbeddedBundleHashIsPinned(t *testing.T) {
 	bundle, err := Load("")
@@ -135,8 +135,8 @@ func TestPlatformRulesExplainGraphReflectsBase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := bundle.RoleVersion(PlatformRules); got != "4" {
-		t.Fatalf("platform rules version = %q, want 4", got)
+	if got := bundle.RoleVersion(PlatformRules); got != "5" {
+		t.Fatalf("platform rules version = %q, want 5", got)
 	}
 	rules, _ := bundle.Content(PlatformRules)
 	for _, want := range []string{"codebase-memory", "`base`", "worktree", "`read_file`", "`grep`"} {

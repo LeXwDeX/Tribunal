@@ -152,12 +152,15 @@ func TestReviewExecutionSkillBlocksFollowGraphExpansions(t *testing.T) {
 	extended.Synthesize = config.SynthesizeConfig{Mode: "agent", Provider: "fake"}
 	extended.Budget.MaxExtends = 1
 	onboarding := config.ProfileConfig{Agent: &config.AgentConfig{Provider: "fake"}}
+	lanes := testReviewProfile()
+	lanes.Flow = review.FlowLanes
 	for _, tc := range []struct {
 		name string
 		cfg  config.ProfileConfig
 		want []string
 	}{
 		{"code", code, []string{"code-review", "verify"}},
+		{"lanes", lanes, []string{"explore", "code-review", "review", "reasoner", "validate", "verify"}},
 		{"reasoner", reasoned, []string{"code-review", "verify"}},
 		{"review", reviewOnly, []string{"review", "verify"}},
 		{"synthesis-extension", extended, []string{"review", "verify", "code-review"}},

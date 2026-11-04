@@ -113,7 +113,7 @@ CREATE TABLE skills (
 CREATE TABLE block_bindings (
   scope      TEXT    NOT NULL,        -- platform | project
   project_id INTEGER NOT NULL DEFAULT 0,
-  block      TEXT    NOT NULL,        -- code-review | review | reasoner | verify | synthesize | onboarding
+  block      TEXT    NOT NULL,        -- explore | code-review | review | reasoner | validate | verify | synthesize | onboarding
   mcp_tools  TEXT    NOT NULL DEFAULT '[]',
   skills     TEXT    NOT NULL DEFAULT '[]',
   PRIMARY KEY (scope, project_id, block)

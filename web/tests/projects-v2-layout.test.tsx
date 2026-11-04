@@ -47,7 +47,7 @@ describe('projects list v2 layout', () => {
     await waitFor(() => expect(listUrls.some((url) => url.includes('enabled=true'))).toBe(true))
   })
 
-  it('shows profile, last review verdict, key expiry days and access per row', async () => {
+  it('shows the last review verdict, key expiry days and access per row, without a profile column', async () => {
     installFetch((url) => {
       if (url.startsWith('/api/v1/projects')) {
         return jsonResponse({
@@ -66,7 +66,7 @@ describe('projects list v2 layout', () => {
     renderProjects()
 
     const row = (await screen.findByRole('link', { name: 'group/backend' })).closest('tr') as HTMLElement
-    expect(within(row).getByText('strict')).toBeInTheDocument()
+    expect(within(row).queryByText('strict')).not.toBeInTheDocument()
     expect(within(row).getByText('BLOCKING')).toBeInTheDocument()
     expect(within(row).getByRole('link', { name: /!318/ })).toBeInTheDocument()
     expect(within(row).getByText(/10 天后到期/)).toBeInTheDocument()
@@ -87,7 +87,7 @@ describe('projects list v2 layout', () => {
     const row = (await screen.findByRole('link', { name: 'group/backend' })).closest('tr') as HTMLElement
     await user.click(within(row).getByRole('switch', { name: '启用 group/backend' }))
     expect(screen.queryByTestId('location')).not.toBeInTheDocument()
-    await user.click(within(row).getByText('default'))
+    await user.click(within(row).getByText(/ID 42/))
     expect(await screen.findByTestId('location')).toHaveTextContent('/projects/42')
   })
 
