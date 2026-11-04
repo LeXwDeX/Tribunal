@@ -28,11 +28,21 @@ describe('web style checks', () => {
     expect(diagnostics.filter((d) => d.rule === 'scale-literal')).toHaveLength(0)
   })
 
-  it('rejects static inline styles', () => {
-    const diagnostics = scanTsx('<div style={{ top: 1 }} />', 'x.tsx')
-    expect(diagnostics).toHaveLength(1)
-    expect(diagnostics[0].severity).toBe('error')
-    expect(diagnostics[0].rule).toBe('inline-style')
+  it('rejects static inline styles, including string and literal-only conditional values', () => {
+    for (const code of [
+      '<div style={{ top: 1 }} />',
+      "<div style={{ textAlign: 'left' }} />",
+      '<div style={{ opacity: true ? 1 : 0 }} />',
+      '<div style={true ? { top: 1 } : { top: 2 }} />',
+    ]) {
+      const diagnostics = scanTsx(code, 'x.tsx')
+      expect(diagnostics.filter((d) => d.rule === 'inline-style' && d.severity === 'error')).toHaveLength(1)
+    }
+  })
+
+  it('allows token-only style objects', () => {
+    const diagnostics = scanTsx("<div style={{ color: 'var(--text)' }} />", 'x.tsx')
+    expect(diagnostics).toHaveLength(0)
   })
 
   it('allows a data-driven style object', () => {
@@ -45,9 +55,17 @@ describe('web style checks', () => {
     expect(diagnostics).toHaveLength(0)
   })
 
-  it('rejects literal colors in JSX attributes and expressions', () => {
-    const diagnostics = scanTsx('<svg><rect fill="#fff" /><rect fill={\'#000\'} stroke="currentColor" /></svg>', 'x.tsx')
-    expect(diagnostics.filter((d) => d.rule === 'color-literal')).toHaveLength(2)
+  it('rejects literal colors in JSX attributes and expression trees', () => {
+    for (const code of [
+      '<svg><rect fill="#fff" /><rect fill={\'#000\'} stroke="currentColor" /></svg>',
+      "<svg><rect fill={('#fff')} /></svg>",
+      "<svg><rect fill={active ? '#fff' : '#000'} /></svg>",
+      "<div style = {{ color: '#fff' }} />",
+      "<div style={active ? { color: '#fff' } : { color: '#000' }} />",
+    ]) {
+      const diagnostics = scanTsx(code, 'x.tsx')
+      expect(diagnostics.filter((d) => d.rule === 'color-literal')).not.toHaveLength(0)
+    }
   })
 
   it('rejects colors inside a data-driven style object', () => {
