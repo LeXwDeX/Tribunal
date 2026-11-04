@@ -18,6 +18,7 @@
 
 ### 新增
 
+- **agent 上下文压缩**：provider 新增可选 `context_window`（填可用于输入的 token 数）。agent 节点估算输入达到该值的 85% 时，把较早的成功工具输出替换为「已省略」占位，保留最近 3 轮完整输出和工具调用配对，不额外调用模型；仍接近上限时依次保留更少轮次。压缩后仍接近上限时提前要求模型提交结果，本轮不再执行其他工具。onboarding 另在工作流 token 预算剩余不足最近最大单轮用量的 2 倍时提前要求提交，其他节点的预算耗尽处理不变。LLM 调用审计新增 `submit_prompt` 与 `compacted_tool_results`。未配置 `context_window` 时不压缩，已有评审的执行身份不变（[#260](https://github.com/LeXwDeX/Tribunal/issues/260)）。
 - **锁等待指标**：新增 `GET /api/v1/system/lock-stats`（平台管理员），返回 SQLite 连接等待计数与耗时、连接池状态，以及工作区内容锁、生命周期锁和 mirror 锁的累计等待与单次最长等待。`scripts/loadtest.sh` 的 stderr 汇总追加 `sqlite_wait_*` 和 `workspace_wait_*` 字段。等待计数与耗时从进程启动累计，连接池的 `in_use`/`idle` 是当前值；不改变锁语义（[#235](https://github.com/LeXwDeX/Tribunal/issues/235)）。
 - **评审列表返回 MR 标题**：`GET /api/v1/reviews` 每项增加 `mr_title`，控制台的评审列表和总览显示标题。标题在保存评审 dossier 时写入新列 `workflow_dossiers.mr_title`（迁移 `0016_dossier_mr_title`，只追加列），列表按页一次批量读取，不请求 GitLab。升级前已有的评审没有该列的值，接口省略 `mr_title`，控制台继续显示 `!iid`（[#101](https://github.com/LeXwDeX/Tribunal/issues/101)）。
 

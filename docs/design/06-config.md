@@ -67,6 +67,7 @@ providers:
     max_concurrency: 4
     rpm: 50
     max_tokens: 16000
+    context_window: 176000          # 可选；可用于输入的 token 数（窗口减去 max_tokens 与思考预算），agent 用量达 85% 时压缩旧工具输出，0 或不填则不压缩
     thinking: { budget_tokens: 8000 }
     price: { input_per_mtok: 0, output_per_mtok: 0 }   # USD / 百万 token；用于估算，按实际填写
   gpt:
@@ -162,6 +163,7 @@ type ProviderConfig struct {
 	MaxConcurrency int             `yaml:"max_concurrency"`
 	RPM            int             `yaml:"rpm"`
 	MaxTokens      int             `yaml:"max_tokens"`
+	ContextWindow  int             `yaml:"context_window"` // 可选，不能为负；0 表示不压缩
 	Temperature    *float64        `yaml:"temperature"`
 	Thinking       *ThinkingConfig `yaml:"thinking"`
 	Reasoning      *ReasoningConfig `yaml:"reasoning"`

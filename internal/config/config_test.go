@@ -301,6 +301,17 @@ providers:
 			want: "CFG_TEST_PROVIDER_KEY",
 		},
 		{
+			name: "negative context window",
+			body: validGitLab + `
+providers:
+  p:
+    protocol: anthropic
+    api_key_env: CFG_TEST_PROVIDER_KEY
+    context_window: -1
+`,
+			want: "providers.p.context_window",
+		},
+		{
 			name: "negative concurrency",
 			body: validGitLab + `
 providers:
