@@ -159,3 +159,21 @@ func TestRunDoesNotFallBackOnOtherErrors(t *testing.T) {
 		t.Fatalf("err=%v requests=%d, want the transient error without a fallback", err, len(client.requests()))
 	}
 }
+
+func TestRunNeverForcesForUnsupportedProvider(t *testing.T) {
+	client := &fakeClient{replies: []*llm.Response{
+		toolResponse(llm.StopToolUse, call("c1", "echo", `{}`)),
+		toolResponse(llm.StopToolUse, call("c2", "echo", `{}`)),
+		toolResponse(llm.StopToolUse, call("s", SubmitToolName, `{}`)),
+	}}
+	spec := testSpec(client, echoTool{name: "echo"})
+	spec.MaxTurns = 3
+	if _, err := Run(context.Background(), spec); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for i, req := range client.requests() {
+		if req.ToolChoice != "" {
+			t.Fatalf("request %d tool choice = %q; a provider without forced support must only get auto", i+1, req.ToolChoice)
+		}
+	}
+}

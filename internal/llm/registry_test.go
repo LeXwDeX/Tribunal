@@ -660,6 +660,9 @@ func TestForcedToolChoiceResolution(t *testing.T) {
 		{"openai-chat supported", config.ProviderConfig{Protocol: "openai-chat", ForcedToolChoice: "supported"}, true},
 		{"anthropic unsupported", config.ProviderConfig{Protocol: "anthropic", ForcedToolChoice: "unsupported"}, false},
 		{"anthropic thinking supported", config.ProviderConfig{Protocol: "anthropic", Thinking: thinking, ForcedToolChoice: "supported"}, true},
+		{"openai-chat reasoning (DeepSeek thinking)", config.ProviderConfig{Protocol: "openai-chat", Reasoning: &config.ReasoningConfig{Effort: "high"}}, false},
+		{"openai-chat thinking", config.ProviderConfig{Protocol: "openai-chat", Thinking: thinking}, false},
+		{"openai-responses reasoning", config.ProviderConfig{Protocol: "openai-responses", Reasoning: &config.ReasoningConfig{Effort: "medium"}}, false},
 	} {
 		if got := forcedToolChoiceSupported(tc.cfg); got != tc.want {
 			t.Errorf("%s: forced tool choice = %t, want %t", tc.name, got, tc.want)
