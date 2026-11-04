@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { screen, waitFor } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { ProjectsPage } from '../src/pages/ProjectsPage'
 import { project } from './fixtures'
@@ -228,5 +228,39 @@ describe('project registration', () => {
     await user.click(registerButtons[0])
     expect(screen.getByLabelText('访问 Key')).toHaveValue('')
     expect(screen.queryByText('校验通过，尚未保存')).not.toBeInTheDocument()
+  })
+})
+
+describe('project validation result layout (#251)', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  // jsdom does not compute layout, so these assertions pin the CSS contract that
+  // prevents the regression; the rendered widths were checked in a browser.
+  it('lays out long identity and many scopes as label/value rows with a bounded label column', async () => {
+    const longIdentity = 'project_201_bot_7f3a9c2e1b4d6f8a0c2e4b6d8f0a1c3e5b7d9f1a'
+    const scopes = ['api', 'read_api', 'read_repository', 'write_repository', 'read_registry', 'write_registry', 'read_user', 'ai_features']
+    installFetch(baseRoutes({ validate: () => jsonResponse(validation({ username: longIdentity, token_scopes: scopes })) }))
+    const user = await openRegisterDialog()
+    await user.type(screen.getByLabelText('仓库地址或项目 ID'), repositoryUrl)
+    await user.type(screen.getByLabelText('访问 Key'), accessToken)
+    await user.click(screen.getByRole('button', { name: '校验连接' }))
+
+    const panel = (await screen.findByText('校验通过，尚未保存')).closest('[role="status"]') as HTMLElement
+    const identity = within(panel).getByText(longIdentity)
+    const grid = identity.closest('dl') as HTMLElement
+    const columns = getComputedStyle(grid).gridTemplateColumns
+    expect(columns, `label column must be capped, got "${columns}"`).toMatch(/^fit-content\(.+\)\s+minmax\(0(px)?,\s*1fr\)$/)
+
+    for (const label of ['项目', '当前身份', '所需 scope', '仓库 HEAD']) {
+      const term = within(grid).getByText(label, { selector: 'dt' })
+      const row = term.parentElement as HTMLElement
+      // Each dt/dd wrapper must not become a grid cell of its own.
+      expect(getComputedStyle(row).display, `${label} row wrapper`).toBe('contents')
+    }
+
+    const value = identity.closest('dd') as HTMLElement
+    expect(getComputedStyle(value).minWidth).toBe('0')
+    expect(getComputedStyle(value).overflowWrap).toBe('anywhere')
+    for (const scope of scopes) expect(within(grid).getByText(scope)).toBeInTheDocument()
   })
 })
