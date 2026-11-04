@@ -51,4 +51,28 @@ describe('models page challenge step (#273)', () => {
     expect(await stepWho('提出')).toContain('未配置 provider')
     expect(await stepWho('规划')).toContain('代码')
   })
+
+  it('treats blank mode, when and provider on plan, reasoner and synthesize steps as unconfigured', async () => {
+    renderProfile({
+      plan: { mode: '', provider: '' },
+      reasoner: { when: ' ', provider: '' },
+      synthesize: { mode: '', provider: '' },
+    })
+    const plan = await stepWho('规划')
+    expect(plan).toContain('规划配置')
+    expect(plan).not.toContain('mode=')
+    const reasoner = await stepWho('推理')
+    expect(reasoner).toContain('未配置 provider')
+    expect(reasoner).not.toContain('when=')
+    const synthesize = await stepWho('汇总')
+    expect(synthesize).toContain('汇总配置')
+    expect(synthesize).toContain('代码')
+    expect(synthesize).not.toContain('mode=')
+  })
+
+  it('keeps configured mode and provider on the synthesize step', async () => {
+    renderProfile({ challenge: { provider: 'primary', fallback: 'secondary' }, synthesize: { mode: 'llm', provider: 'primary' } })
+    expect(await stepWho('汇总')).toContain('mode=llm')
+    expect(await stepWho('汇总')).toContain('primary')
+  })
 })

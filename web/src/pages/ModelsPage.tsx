@@ -97,7 +97,7 @@ interface Step { stage: string; what: string; who: string }
 
 // Profile fields without omitempty arrive as "" when unset; treat blank strings as absent.
 function text(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+  return typeof value === 'string' && value.trim() ? value : undefined
 }
 
 function profileSteps(config?: ProfileConfig): Step[] {
