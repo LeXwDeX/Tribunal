@@ -11,6 +11,7 @@ import {
   Badge, Button, ConfirmDialog, Dialog, ErrorState, Field, LoadingState, Panel, Switch, useToast,
 } from '../../components/ui'
 import { formatDate, labelForWebhookState, webhookTone } from '../../lib/format'
+import { tokenWarningText } from '../../lib/diagnostics'
 import ui from '../../styles/ui.module.css'
 import styles from '../../pages/pages.module.css'
 import { WebhookPanel, webhookEventLabel, webhookManagedByLabel } from './WebhookPanel'
@@ -465,6 +466,9 @@ export function SettingsPanel({ project }: { project: Project }) {
             <div className={styles.notice} role="status">
               <strong>校验通过，尚未保存</strong>
             </div>
+            {tokenWarningText(rotateValidation.warnings) ? (
+              <div className={styles.warning} role="alert">{tokenWarningText(rotateValidation.warnings)}</div>
+            ) : null}
             <dl className={ui.definitionGrid}>
               <div><dt>项目</dt><dd className="mono">{rotateValidation.path_with_namespace}</dd></div>
               <div><dt>当前身份</dt><dd>{rotateValidation.username}</dd></div>

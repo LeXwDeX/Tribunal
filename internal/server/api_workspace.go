@@ -71,6 +71,11 @@ func workspaceLastError(workspace *store.Workspace) string {
 	if workspace.State == "ready" && strings.HasPrefix(workspace.LastError, "index: ") {
 		return store.WorkspaceIndexFailed
 	}
+	// Only the fixed, sanitized failure values pass through; anything else
+	// (including historical raw text) collapses to the generic message.
+	if store.IsWorkspaceFailureMessage(workspace.LastError) {
+		return workspace.LastError
+	}
 	return store.WorkspaceOperationFailed
 }
 

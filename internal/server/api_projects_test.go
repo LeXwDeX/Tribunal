@@ -118,6 +118,14 @@ func TestProjectWriteEndpoints(t *testing.T) {
 	if rotated.status != http.StatusOK {
 		t.Fatalf("rotate = %d %s", rotated.status, rotated.body)
 	}
+	rotatedBody := env.decode(t, rotated)
+	if rotatedBody["id"] != float64(42) || rotatedBody["path_with_namespace"] != "group/repo" {
+		t.Fatalf("rotate response lost project fields: %v", rotatedBody)
+	}
+	assertMaintainerWarning(t, rotatedBody)
+	if strings.Contains(string(rotated.body), "glpat-rotated") {
+		t.Fatalf("rotate response leaked the token: %s", rotated.body)
+	}
 	saved, err := env.sqlite.GetProject(ctx, 42)
 	if err != nil {
 		t.Fatalf("GetProject: %v", err)
@@ -276,6 +284,7 @@ func TestValidateProjectEndpoint(t *testing.T) {
 	if len(scopes) != 2 || scopes[0] != "api" || scopes[1] != "read_repository" {
 		t.Errorf("token_scopes = %v", body["token_scopes"])
 	}
+	assertMaintainerWarning(t, body)
 	if _, err := env.sqlite.GetProject(context.Background(), 42); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("validation persisted a project: %v", err)
 	}
@@ -588,5 +597,18 @@ func TestProjectWritePermissions(t *testing.T) {
 	}
 	if _, err := env.sqlite.GetProject(context.Background(), 42); err != nil {
 		t.Fatalf("viewer write changed the project: %v", err)
+	}
+}
+
+// assertMaintainerWarning checks the additive warning for a Developer token.
+func assertMaintainerWarning(t *testing.T, body map[string]any) {
+	t.Helper()
+	warnings, ok := body["warnings"].([]any)
+	if !ok || len(warnings) != 1 {
+		t.Fatalf("warnings = %v, want one maintainer warning", body["warnings"])
+	}
+	warning, _ := warnings[0].(map[string]any)
+	if warning["code"] != "webhook_requires_maintainer" || warning["message"] == "" {
+		t.Fatalf("warning = %v", warning)
 	}
 }

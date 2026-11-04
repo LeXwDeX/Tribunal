@@ -240,14 +240,15 @@ func (g failingWorkspaceGit) EnsureMirror(context.Context, string, string, repo.
 func TestWorkspaceFailuresPersistAndLogOnlyFixedData(t *testing.T) {
 	const raw = "/private/work tree/file\nglpat-synthetic-secret more failure details"
 	cases := []struct {
-		name  string
-		cause error
-		class string
+		name    string
+		cause   error
+		class   string
+		message string
 	}{
-		{"untrusted custom code", &Error{Code: "synth_secret", Message: raw}, "internal"},
-		{"timeout", fmt.Errorf("%s: %w", raw, context.DeadlineExceeded), "timeout"},
-		{"canceled error with active context", fmt.Errorf("%s: %w", raw, context.Canceled), "canceled"},
-		{"panic", fmt.Errorf("%s: %w", raw, errclass.ErrPanic), "panic"},
+		{"untrusted custom code", &Error{Code: "synth_secret", Message: raw}, "internal", store.WorkspaceOperationFailed},
+		{"timeout", fmt.Errorf("%s: %w", raw, context.DeadlineExceeded), "timeout", store.WorkspaceTimedOut},
+		{"canceled error with active context", fmt.Errorf("%s: %w", raw, context.Canceled), "canceled", store.WorkspaceCanceled},
+		{"panic", fmt.Errorf("%s: %w", raw, errclass.ErrPanic), "panic", store.WorkspaceOperationFailed},
 	}
 	for _, tc := range cases {
 		for _, mode := range []string{"onboard", "refresh"} {
@@ -288,7 +289,7 @@ func TestWorkspaceFailuresPersistAndLogOnlyFixedData(t *testing.T) {
 					if err != nil {
 						t.Fatalf("GetWorkspace: %v", err)
 					}
-					wantState, wantError := "error", "workspace operation failed"
+					wantState, wantError := "error", tc.message
 					if failure == "index" {
 						wantState, wantError = "ready", "index: code graph indexing failed"
 					}
@@ -348,20 +349,21 @@ func TestMarkWorkspaceErrorKeepsExistingCheckpoints(t *testing.T) {
 func TestWorkspaceFailureLogsUpstreamClassAndStatus(t *testing.T) {
 	const raw = "https://gitlab.example/private?token=glpat-synthetic-secret"
 	cases := []struct {
-		name   string
-		cause  error
-		class  string
-		status float64
+		name    string
+		cause   error
+		class   string
+		status  float64
+		message string
 	}{
-		{"auth", &llm.Error{Kind: llm.ErrAuth, Status: 403, Err: errors.New(raw)}, "upstream_auth", 403},
-		{"rate limited", &llm.Error{Kind: llm.ErrRateLimited, Status: 429, Err: errors.New(raw)}, "rate_limited", 429},
-		{"network", &llm.Error{Kind: llm.ErrTransient, Err: errors.New(raw)}, "network", 0},
-		{"config", &llm.Error{Kind: llm.ErrBadRequest, Status: 400, Err: errors.New(raw)}, "config", 400},
-		{"overloaded", &llm.Error{Kind: llm.ErrOverloaded, Status: 529}, "overloaded", 529},
-		{"context too long", &llm.Error{Kind: llm.ErrContextTooLong, Status: 413}, "context_too_long", 413},
-		{"wrapped auth", fmt.Errorf("%s: %w", raw, &llm.Error{Kind: llm.ErrAuth, Status: 403}), "upstream_auth", 403},
-		{"canceled", &llm.Error{Kind: llm.ErrCanceled, Err: context.Canceled}, "canceled", 0},
-		{"deadline", &llm.Error{Kind: llm.ErrCanceled, Err: context.DeadlineExceeded}, "timeout", 0},
+		{"auth", &llm.Error{Kind: llm.ErrAuth, Status: 403, Err: errors.New(raw)}, "upstream_auth", 403, store.WorkspaceModelAuthFailed},
+		{"rate limited", &llm.Error{Kind: llm.ErrRateLimited, Status: 429, Err: errors.New(raw)}, "rate_limited", 429, store.WorkspaceModelRateLimited},
+		{"network", &llm.Error{Kind: llm.ErrTransient, Err: errors.New(raw)}, "network", 0, store.WorkspaceModelUnavailable},
+		{"config", &llm.Error{Kind: llm.ErrBadRequest, Status: 400, Err: errors.New(raw)}, "config", 400, store.WorkspaceModelFailed},
+		{"overloaded", &llm.Error{Kind: llm.ErrOverloaded, Status: 529}, "overloaded", 529, store.WorkspaceModelUnavailable},
+		{"context too long", &llm.Error{Kind: llm.ErrContextTooLong, Status: 413}, "context_too_long", 413, store.WorkspaceModelFailed},
+		{"wrapped auth", fmt.Errorf("%s: %w", raw, &llm.Error{Kind: llm.ErrAuth, Status: 403}), "upstream_auth", 403, store.WorkspaceModelAuthFailed},
+		{"canceled", &llm.Error{Kind: llm.ErrCanceled, Err: context.Canceled}, "canceled", 0, store.WorkspaceCanceled},
+		{"deadline", &llm.Error{Kind: llm.ErrCanceled, Err: context.DeadlineExceeded}, "timeout", 0, store.WorkspaceTimedOut},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -375,8 +377,8 @@ func TestWorkspaceFailureLogsUpstreamClassAndStatus(t *testing.T) {
 			if err != nil {
 				t.Fatalf("GetWorkspace: %v", err)
 			}
-			if state.State != "error" || state.LastError != store.WorkspaceOperationFailed {
-				t.Fatalf("workspace = %+v, want error state with the fixed message", state)
+			if state.State != "error" || state.LastError != tc.message {
+				t.Fatalf("workspace = %+v, want error state with %q", state, tc.message)
 			}
 			var event map[string]any
 			if err := json.Unmarshal(logs.Bytes(), &event); err != nil {
@@ -479,7 +481,7 @@ func TestOnboardingFailureLogsUpstreamClassAndStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetWorkspace: %v", err)
 	}
-	if state.State != "error" || state.LastError != store.WorkspaceOperationFailed {
-		t.Fatalf("workspace = %+v, want the fixed error state", state)
+	if state.State != "error" || state.LastError != store.WorkspaceModelAuthFailed {
+		t.Fatalf("workspace = %+v, want the model credential error", state)
 	}
 }

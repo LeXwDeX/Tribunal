@@ -746,8 +746,8 @@ func (panicAdmin) Get(context.Context, int64) (*store.Project, error) {
 func (panicAdmin) Update(context.Context, int64, app.UpdateProjectInput) (*store.Project, error) {
 	return &store.Project{}, nil
 }
-func (panicAdmin) RotateToken(context.Context, int64, string) (*store.Project, error) {
-	return &store.Project{}, nil
+func (panicAdmin) RotateToken(context.Context, int64, string) (*app.TokenRotation, error) {
+	return &app.TokenRotation{Project: &store.Project{}}, nil
 }
 func (panicAdmin) CreateWebhook(context.Context, int64) (*app.WebhookRegistration, error) {
 	return &app.WebhookRegistration{}, nil
@@ -781,8 +781,8 @@ func (stubAdmin) Get(context.Context, int64) (*store.Project, error) {
 func (stubAdmin) Update(context.Context, int64, app.UpdateProjectInput) (*store.Project, error) {
 	return &store.Project{}, nil
 }
-func (stubAdmin) RotateToken(context.Context, int64, string) (*store.Project, error) {
-	return &store.Project{}, nil
+func (stubAdmin) RotateToken(context.Context, int64, string) (*app.TokenRotation, error) {
+	return &app.TokenRotation{Project: &store.Project{}}, nil
 }
 func (stubAdmin) CreateWebhook(context.Context, int64) (*app.WebhookRegistration, error) {
 	return &app.WebhookRegistration{}, nil

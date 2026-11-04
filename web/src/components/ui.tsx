@@ -274,12 +274,13 @@ export function LoadingState({ label = '加载中…' }: { label?: string }) {
   )
 }
 
-export function ErrorState({ error, onRetry, title = '加载失败' }: { error: unknown; onRetry?: () => void; title?: string }) {
+export function ErrorState({ error, onRetry, title = '加载失败', hint }: { error: unknown; onRetry?: () => void; title?: string; hint?: string | null }) {
   const forbidden = error instanceof ApiError && error.status === 403
   return (
     <div className={styles.errorBox} role="alert">
       <strong>{forbidden ? '没有访问权限' : title}</strong>
       <span>{forbidden ? '当前账号没有执行此操作的权限。' : errorMessage(error)}</span>
+      {hint && !forbidden ? <span>{hint}</span> : null}
       {onRetry && !forbidden ? <Button variant="secondary" className={styles.smallButton} onClick={onRetry}>重试</Button> : null}
     </div>
   )
@@ -511,7 +512,7 @@ export function Drawer({ open, onClose, title, description, children, footer }: 
 }
 
 export function ConfirmDialog({
-  open, onClose, onConfirm, title, description, confirmLabel = '确认', pending, error, danger = true,
+  open, onClose, onConfirm, title, description, confirmLabel = '确认', pending, error, errorHint, danger = true,
 }: {
   open: boolean
   onClose: () => void
@@ -521,6 +522,7 @@ export function ConfirmDialog({
   confirmLabel?: string
   pending?: boolean
   error?: unknown
+  errorHint?: string | null
   danger?: boolean
 }) {
   return (
@@ -536,7 +538,7 @@ export function ConfirmDialog({
         </>
       )}
     >
-      {error ? <ErrorState error={error} title="操作失败" /> : null}
+      {error ? <ErrorState error={error} title="操作失败" hint={errorHint} /> : null}
     </Dialog>
   )
 }

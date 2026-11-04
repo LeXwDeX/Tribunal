@@ -11,6 +11,7 @@ import {
 } from '../components/ui'
 import { usePaginated } from '../lib/hooks'
 import { formatDate, labelForStatus, labelForWebhookState, webhookTone } from '../lib/format'
+import { tokenWarningText } from '../lib/diagnostics'
 import ui from '../styles/ui.module.css'
 import styles from './pages.module.css'
 import page from './projects.module.css'
@@ -258,6 +259,9 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
                   <strong>校验通过，尚未保存</strong>
                   <span className="small">只读校验未登记项目、未保存 Key、未创建 Webhook、未入队、未调用模型，也未写仓库。</span>
                 </div>
+                {tokenWarningText(validation.warnings) ? (
+                  <div className={styles.warning} role="alert">{tokenWarningText(validation.warnings)}</div>
+                ) : null}
               <dl className={ui.definitionGrid}>
                 <div>
                   <dt>项目</dt>

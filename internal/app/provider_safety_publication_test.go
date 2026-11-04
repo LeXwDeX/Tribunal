@@ -400,7 +400,7 @@ func TestSafetyWorkspaceUnsafeResponseClass(t *testing.T) {
 	}
 	assertNoSecret(t, log.String())
 	ws, err := f.db.GetWorkspace(context.Background(), 42)
-	if err != nil || ws.LastError != store.WorkspaceOperationFailed {
+	if err != nil || ws.LastError != store.WorkspaceModelFailed {
 		t.Fatalf("workspace=%+v err=%v", ws, err)
 	}
 	assertNoSecret(t, ws.LastError)
@@ -423,7 +423,7 @@ func TestSafetyOnboardingFailureClassAndRedaction(t *testing.T) {
 	assertNoSecret(t, log.String())
 	assertNoSecret(t, err.Error())
 	ws, err := f.db.GetWorkspace(context.Background(), 42)
-	if err != nil || ws.LastError != store.WorkspaceOperationFailed {
+	if err != nil || ws.LastError != store.WorkspaceModelFailed {
 		t.Fatalf("workspace=%+v err=%v", ws, err)
 	}
 	assertNoSecret(t, ws.LastError)

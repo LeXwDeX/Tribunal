@@ -15,6 +15,7 @@ import {
   formatCost, formatDate, labelForWebhookState, safeExternalUrl, shortSha, webhookTone,
 } from '../lib/format'
 import { formatMs, formatRatio, statNumber } from '../lib/stats'
+import { describeWorkspaceError } from '../lib/diagnostics'
 import ui from '../styles/ui.module.css'
 import styles from './pages.module.css'
 import page from './projects.module.css'
@@ -103,7 +104,7 @@ function ProjectOverview({ project }: { project: Project }) {
               <div><dt>索引状态</dt><dd>{project.workspace?.index_status || '—'}</dd></div>
               <div><dt>最近刷新</dt><dd>{project.workspace?.last_refresh_at ? formatDate(project.workspace.last_refresh_at) : '—'}</dd></div>
             </dl>
-            {project.workspace?.last_error ? <span className={styles.resultError}>{project.workspace.last_error}</span> : null}
+            {project.workspace?.last_error ? <span className={styles.resultError}>{describeWorkspaceError(project.workspace.last_error)}</span> : null}
             <Link to={`/projects/${project.id}/workspace`} className={styles.listMeta}>查看完整工作区与上下文 →</Link>
           </Panel>
       </div>

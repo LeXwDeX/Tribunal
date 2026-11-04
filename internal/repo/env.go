@@ -64,6 +64,11 @@ func (g *Git) buildEnv(a Auth) ([]string, error) {
 		env[key] = value
 	}
 
+	// Failure classification reads stable English messages. LC_ALL would
+	// override LC_MESSAGES, so the message category is pinned explicitly.
+	delete(env, "LC_ALL")
+	env["LC_MESSAGES"] = "C"
+	env["LANGUAGE"] = "C"
 	env["GIT_CONFIG_NOSYSTEM"] = "1"
 	env["GIT_CONFIG_GLOBAL"] = os.DevNull
 	env["GIT_CONFIG_SYSTEM"] = os.DevNull

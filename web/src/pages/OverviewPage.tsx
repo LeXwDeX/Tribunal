@@ -12,6 +12,7 @@ import {
 import { elapsedSince, useNow, usePaginated } from '../lib/hooks'
 import { formatCost, readNumber } from '../lib/format'
 import { formatMs, formatRatio, statNumber } from '../lib/stats'
+import { describeWorkspaceError } from '../lib/diagnostics'
 import { REVIEW_STAGES, deriveReviewStage } from '../lib/reviewStage'
 import styles from './pages.module.css'
 import ui from '../styles/ui.module.css'
@@ -57,7 +58,7 @@ function buildAlerts(projects: Project[], providers: Provider[], reviewIssues: R
         id: `workspace-${project.id}`,
         tone: 'danger',
         label: '工作区',
-        text: `${project.path_with_namespace} 工作区异常${project.workspace?.last_error ? `：${project.workspace.last_error}` : '。'}`,
+        text: `${project.path_with_namespace} 工作区异常${project.workspace?.last_error ? `：${describeWorkspaceError(project.workspace.last_error)}` : '。'}`,
         href: `/projects/${project.id}/workspace`,
         action: '查看工作区',
       })

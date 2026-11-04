@@ -38,7 +38,7 @@ type AdminService interface {
 	ListFilteredPage(ctx context.Context, filter app.ProjectListFilter, cursor string, limit int) ([]store.Project, string, error)
 	Get(ctx context.Context, id int64) (*store.Project, error)
 	Update(ctx context.Context, id int64, in app.UpdateProjectInput) (*store.Project, error)
-	RotateToken(ctx context.Context, id int64, token string) (*store.Project, error)
+	RotateToken(ctx context.Context, id int64, token string) (*app.TokenRotation, error)
 	CreateWebhook(ctx context.Context, id int64) (*app.WebhookRegistration, error)
 	RebuildWebhook(ctx context.Context, id int64) (*app.WebhookRegistration, error)
 	DisableWebhook(ctx context.Context, id int64) (*store.Project, error)

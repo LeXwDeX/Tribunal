@@ -400,36 +400,36 @@ func currentProjectRemote(ctx context.Context, client GitLabClient, project *sto
 		return "", err
 	}
 	if current == nil || current.ID != project.ID {
-		return "", errors.New("app: project identity mismatch")
+		return "", errProjectIdentityChanged
 	}
 	ref, err := gitlab.ParseProjectRef(current.PathWithNamespace)
 	if err != nil || ref.ID != 0 || ref.Path != current.PathWithNamespace {
-		return "", errors.New("app: project path invalid")
+		return "", fmt.Errorf("app: project path invalid: %w", errProjectIdentityChanged)
 	}
 	old, err := url.Parse(project.WebURL)
 	if err != nil || strings.TrimSpace(project.WebURL) != project.WebURL || strings.ContainsAny(project.WebURL, " \\%#") || hasControlChar(project.WebURL) ||
 		old.Opaque != "" || old.Host == "" || old.Hostname() == "" || old.User != nil || old.RawQuery != "" || old.ForceQuery || old.Fragment != "" || (old.Scheme != "http" && old.Scheme != "https") {
-		return "", errors.New("app: project origin invalid")
+		return "", fmt.Errorf("app: project origin invalid: %w", errProjectIdentityChanged)
 	}
 	base := ""
 	if project.PathWithNamespace != "" {
 		suffix := "/" + project.PathWithNamespace
 		if !strings.HasSuffix(strings.TrimRight(old.Path, "/"), suffix) {
-			return "", errors.New("app: project origin invalid")
+			return "", fmt.Errorf("app: project origin invalid: %w", errProjectIdentityChanged)
 		}
 		base = strings.TrimSuffix(strings.TrimRight(old.Path, "/"), suffix)
 	}
 	origin, err := parseGitLabOrigin(old.Scheme + "://" + old.Host + base)
 	if err != nil || origin == nil {
-		return "", errors.New("app: project origin invalid")
+		return "", fmt.Errorf("app: project origin invalid: %w", errProjectIdentityChanged)
 	}
 	oldPath, err := origin.projectPath(project.WebURL, false)
 	if err != nil || (project.PathWithNamespace != "" && oldPath != project.PathWithNamespace) {
-		return "", errors.New("app: project origin invalid")
+		return "", fmt.Errorf("app: project origin invalid: %w", errProjectIdentityChanged)
 	}
 	webPath, err := origin.projectPath(current.WebURL, false)
 	if err != nil || webPath != current.PathWithNamespace {
-		return "", errors.New("app: project web URL invalid")
+		return "", fmt.Errorf("app: project web URL invalid: %w", errProjectIdentityChanged)
 	}
 	remote := current.HTTPURLToRepo
 	if remote == "" {
@@ -437,7 +437,7 @@ func currentProjectRemote(ctx context.Context, client GitLabClient, project *sto
 	}
 	clonePath, err := origin.projectPath(remote, true)
 	if err != nil || clonePath != current.PathWithNamespace {
-		return "", errors.New("app: project clone URL invalid")
+		return "", fmt.Errorf("app: project clone URL invalid: %w", errProjectIdentityChanged)
 	}
 	return remote, nil
 }

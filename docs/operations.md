@@ -256,7 +256,7 @@ else
 fi
 ```
 
-命令块先检查 token、响应路径和确认变量能否清除，并清除旧项目 ID；检查失败时不注册。注册后尝试清除当前 shell 的项目 token，只有确认清除后才输出项目 ID；清除失败则返回失败并提示结束受影响的 shell。此时注册可能已经成功，不要直接重试；安全核对项目和 webhook 状态。项目 ID 只证明响应中的 `project.id` 是正整数，不能证明 onboarding 任务已完成。检查和实际清理并非原子操作，信号中断也可能跳过清理。清除当前变量不会清除已继承 token 的子进程或其他副本。命令拒绝相对目录，核验目录属于当前用户且没有组或其他用户权限，并解析符号链接得到绝对路径；`mktemp` 在该目录创建唯一的 0600 文件。命令在当前 shell 保持文件描述符 9 打开，以防文件删除重建后复用 inode；描述符 9 已被占用时不注册。注册响应直接进入该文件，标准输出只显示经过正整数校验的项目 ID；确认提示和不含秘密的错误信息写入标准错误。保持同一个 shell 中的 `REGISTRATION_FILE`、只读的本次文件标记和描述符 9，直到本次文件安全处理完成；每次新的注册使用新 shell。目录及父路径必须始终受控；这些检查不能原子防护不可信同 UID 进程或不受控目录的替换。手动模式中的 `webhook_secret` 只返回一次；不要在终端、日志、聊天或命令行参数中输出它，也不要用 `cat` 查看响应。自动创建时在同一个注册命令的 `--profile default` 后添加 `--auto-webhook`，仍须使用并清理私有响应文件；项目 token 还需 Maintainer 权限，`TRIBUNAL_PUBLIC_URL` 必须可由 GitLab 访问。完整权限与 webhook 事件见 [README 注册项目](../README.md#注册项目)。
+命令块先检查 token、响应路径和确认变量能否清除，并清除旧项目 ID；检查失败时不注册。注册后尝试清除当前 shell 的项目 token，只有确认清除后才输出项目 ID；清除失败则返回失败并提示结束受影响的 shell。此时注册可能已经成功，不要直接重试；安全核对项目和 webhook 状态。项目 ID 只证明响应中的 `project.id` 是正整数，不能证明 onboarding 任务已完成。检查和实际清理并非原子操作，信号中断也可能跳过清理。清除当前变量不会清除已继承 token 的子进程或其他副本。命令拒绝相对目录，核验目录属于当前用户且没有组或其他用户权限，并解析符号链接得到绝对路径；`mktemp` 在该目录创建唯一的 0600 文件。命令在当前 shell 保持文件描述符 9 打开，以防文件删除重建后复用 inode；描述符 9 已被占用时不注册。注册响应直接进入该文件，标准输出只显示经过正整数校验的项目 ID；确认提示和不含秘密的错误信息写入标准错误。保持同一个 shell 中的 `REGISTRATION_FILE`、只读的本次文件标记和描述符 9，直到本次文件安全处理完成；每次新的注册使用新 shell。目录及父路径必须始终受控；这些检查不能原子防护不可信同 UID 进程或不受控目录的替换。手动模式中的 `webhook_secret` 只返回一次；不要在终端、日志、聊天或命令行参数中输出它，也不要用 `cat` 查看响应。自动创建时在同一个注册命令的 `--profile default` 后添加 `--auto-webhook`，仍须使用并清理私有响应文件；项目 token 还需 Maintainer 权限（低于 Maintainer 时，`POST /api/v1/projects/validate` 和 `PUT /api/v1/projects/{id}/token` 的响应 `warnings` 会返回 `webhook_requires_maintainer`；Webhook 操作被 GitLab 以 401/403 拒绝时仍返回 `gitlab_rejected` / 422，`details` 的 `field` 为 `token` 或 `access_level`），`TRIBUNAL_PUBLIC_URL` 必须可由 GitLab 访问。完整权限与 webhook 事件见 [README 注册项目](../README.md#注册项目)。
 
 手动配置时，在已验证 HTTPS 地址的 GitLab 项目 Webhooks 页面填写服务 URL、事件及 Secret token。仅在无录屏、无剪贴板历史或云同步、没有不可信进程的受控本地会话中，才可通过标准输入交给获批准的密钥管理器并自动填入 Secret token，不要将其发送到聊天或日志。例如在满足上述条件的 macOS 本地会话中，下列命令核对本次只读标记、路径和描述符 9，并从描述符读取该字段送入系统剪贴板，不输出到终端；若任何一步失败则停止：
 
@@ -543,7 +543,7 @@ fi
 - **禁用**：已有自定义 MCP 可在编辑窗口把「启用」改为「停用」，或 `PUT /api/v1/mcp-servers/{id}` 设置 `"enabled": false`，然后重启服务。重启和升级都保持停用。内置 `codebase-memory` 始终启用，停用请求返回 409；启动同步会把历史停用状态恢复为启用。
 - **故障表现**：二进制缺失或无法启动时评审照常完成，但没有图谱工具；评审结论里出现 `MCP tools unavailable` 告警，原本会 PASS 的评审显示为 INCOMPLETE。非取消的建索引失败不阻断 onboarding 或刷新；其他必要步骤及状态保存成功时工作区最终为 `ready`，`last_error` 为固定消息 `index: code graph indexing failed`，刷新保留旧 `index_sha`。ignore 阻断索引时 `index_status` 为 `degraded`；其他情况下比较已存的 SHA，不代表当前索引健康。
 - **验证记录**：2026-11-02 在 Docker 部署环境用 `9c3b4e2` 镜像验证：容器内 `codebase-memory-mcp --version` 为 `0.12.1`；`POST /api/v1/mcp-servers/{id}/test` 返回 13 个只读工具；真实 MR 评审完成并发布 summary。该项目使用非空 ignore policy，因此评审未注入 MCP 工具，符合上文的预期安全降级。
-- **排查信息**：索引失败告警 `code graph index failed; continuing without it` 和一般工作区失败告警 `workspace operation failed` 含 `project_id` 与 `error_class`；工作区/onboarding 类别包括 `upstream_auth`、`rate_limited`、`network`、`config`、`overloaded`、`context_too_long`、`timeout`、`canceled`、`panic`、`internal`；未知类别归为 `internal`，上游有 HTTP 响应时另带脱敏的 `upstream_status`，完整排查表见第 10 节。 节点失败事件优先使用执行器提供的固定类别（如 `auth`、`rate_limited`、`sandbox_denied`、`panic`），没有分类时仍是 `executor_error`、`timeout` 或 `expand_failed`；`panic` 不记录 panic 值。这些日志和工作区 API 不提供原始原因；按项目 ID 在受控环境中检查索引配置、可执行文件和运行环境。旧数据库和备份可能仍含错误原文，读取接口不会清除它们；应限制数据库和备份访问，回退旧版可能重新暴露原文。
+- **排查信息**：索引失败告警 `code graph index failed; continuing without it` 和一般工作区失败告警 `workspace operation failed` 含 `project_id` 与 `error_class`；工作区/onboarding 类别包括模型 provider 侧的 `upstream_auth`、`rate_limited`、`network`、`config`、`overloaded`、`context_too_long`，GitLab/git 侧的 `gitlab_auth`、`gitlab_forbidden`、`gitlab_not_found`、`gitlab_rate_limited`、`gitlab_unavailable`、`gitlab_rejected`、`gitlab_project_changed`、`git_auth`、`git_forbidden`、`git_repository_not_found`、`git_ref_not_found`、`git_network`、`git_failed`，以及 `timeout`、`canceled`、`panic`、`internal`；未知类别归为 `internal`，GitLab 或模型 provider 有 HTTP 响应时另带脱敏的 `upstream_status`，各类别含义和处理见第 10 节。 节点失败事件优先使用执行器提供的固定类别（如 `auth`、`rate_limited`、`sandbox_denied`、`panic`），没有分类时仍是 `executor_error`、`timeout` 或 `expand_failed`；`panic` 不记录 panic 值。这些日志和工作区 API 不提供原始原因；按项目 ID 在受控环境中检查索引配置、可执行文件和运行环境。旧数据库和备份可能仍含错误原文，读取接口不会清除它们；应限制数据库和备份访问，回退旧版可能重新暴露原文。
 
 ## 2. 构建
 
@@ -1231,18 +1231,57 @@ docker run --rm --entrypoint stat tribunal:local -c '%u:%g %a' /app/data
 
 ### 失败类别
 
-工作区或 onboarding 失败时，`GET /api/v1/projects/{id}/workspace` 的 `last_error` 保持固定脱敏文案；服务日志 `workspace operation failed` 的 `error_class` 区分原因：
+工作区或 onboarding 失败时，`GET /api/v1/projects/{id}/workspace`（以及项目详情和列表中的 `workspace` 摘要）的 `last_error` 只会是下表的固定脱敏值之一；库中保存的历史原始文本一律返回 `workspace operation failed`。控制台在错误码前显示中文提示。
+
+| `last_error` | 含义 | 处理 |
+|---|---|---|
+| `gitlab: project token rejected (401)` | GitLab 拒绝已保存的项目 token（无效、过期或已撤销） | 在项目设置「更新访问 Key」换新 token |
+| `gitlab: access denied (403)` | token 角色或 scope 不足以访问项目 API | 需要 Reporter 及以上角色，scope 含 `api` 和 `read_repository` |
+| `gitlab: project or file not found (404)` | 项目已删除或迁移，或 token 看不到该项目 | 核对项目是否存在、token 是否属于该项目 |
+| `gitlab: rate limited (429)` | GitLab 限流 | 稍后重试 |
+| `gitlab: unavailable` | 传输失败或 GitLab 返回 5xx | 检查到 GitLab 的网络和 GitLab 状态后重试 |
+| `gitlab: request rejected` | GitLab 返回其他 4xx | 检查项目配置和 token |
+| `gitlab: project identity changed` | GitLab 不再在登记的路径/URL 上返回登记的项目（已迁移或改名） | 重新登记项目 |
+| `git: authentication failed` / `git: access denied` | clone/fetch 认证失败或无权限 | 同 401/403，检查 token 和角色 |
+| `git: repository not found` | 仓库不存在或不可见 | 核对仓库地址和 token 可见范围 |
+| `git: branch not found` | 默认分支或推送的 ref 不存在 | 核对默认分支和 MR 源分支 |
+| `git: network error` | clone/fetch 网络失败 | 检查 DNS、代理、防火墙 |
+| `git: operation failed` | git 的其他失败 | 查看服务日志的 `error_class` 并检查仓库状态 |
+| `workspace: operation timed out` / `workspace: operation canceled` | 工作区操作超时或被取消 | 检查任务取消和负载后重试 |
+| `onboarding: profile not configured` | 服务配置里没有可用的 `onboarding` profile | 管理员在服务配置中补上 `onboarding` profile，重启后重试 onboarding |
+| `onboarding: model provider rejected credentials` | 模型 provider 拒绝凭据 | 检查 provider token、出口 IP 白名单和账号权限 |
+| `onboarding: model provider rate limited` | 模型 provider 限流 | 检查配额和并发后重试 |
+| `onboarding: model provider unavailable` | 网络失败或 provider 过载 | 检查 DNS、代理、防火墙和 provider 状态 |
+| `onboarding: model call timed out` | 模型调用超时 | 检查 provider 延迟和 profile 期限 |
+| `onboarding: model call failed` | 其他模型失败（含 `unsafe_model_response`、`context_too_long`、请求配置错误） | 检查模型名、协议、参数和上下文长度 |
+| `index: code graph indexing failed` | 代码图谱索引失败 | 见下文 ignore 策略与索引 |
+| `index: blocked by ignore policy` | 因 ignore 策略有意阻断索引 | 见下文 ignore 策略与索引 |
+| `workspace operation failed` | 未分类，或历史原始文本 | 用日志 `error_class` 定位 |
+
+git 类别由 clone/fetch 的 stderr 文本分类；stderr 不入库、不记日志。git 子进程的消息固定为 C locale（设置 `LC_MESSAGES=C`、`LANGUAGE=C`，移除 `LC_ALL`），使分类不受宿主语言影响。
+
+服务日志 `workspace operation failed` 含 `project_id`、`error_class`，GitLab 或模型 provider 返回 HTTP 状态时另有 `upstream_status`：
 
 | `error_class` | 含义 | 排查方向 |
 |---|---|---|
-| `upstream_auth` | 上游返回 401/403 | 检查模型 provider token、出口 IP 白名单和账号权限 |
-| `rate_limited` | 上游返回 429 | 检查配额和并发，按 `retry_after` 退避 |
-| `network` | 连接失败、传输中断或上游临时错误（含可重试的 5xx） | 检查 DNS、代理、防火墙和 provider 地址，必要时重试 |
-| `config` | 上游拒绝请求（通常是 400） | 检查模型名、协议、参数和上下文长度 |
-| `overloaded` / `context_too_long` | 上游过载或上下文超长 | 降低并发或缩短输入 |
+| `gitlab_auth` | GitLab 返回 401 | 更新项目 token |
+| `gitlab_forbidden` | GitLab 返回 403 | 检查 token 角色和 scope |
+| `gitlab_not_found` | GitLab 返回 404 | 核对项目是否存在、可见 |
+| `gitlab_rate_limited` | GitLab 返回 429 | 退避后重试 |
+| `gitlab_unavailable` | 传输失败或 GitLab 5xx | 检查网络和 GitLab 状态 |
+| `gitlab_rejected` | GitLab 返回其他 4xx | 检查项目配置和 token |
+| `gitlab_project_changed` | 项目路径/URL 与登记不符 | 重新登记项目 |
+| `git_auth` / `git_forbidden` | git 认证失败 / 无权限 | 检查 token 和角色 |
+| `git_repository_not_found` / `git_ref_not_found` | 仓库或分支/ref 不存在 | 核对仓库地址、默认分支 |
+| `git_network` / `git_failed` | git 网络失败 / 其他失败 | 检查网络和仓库状态 |
+| `upstream_auth` | 模型 provider 返回 401/403 | 检查 provider token、出口 IP 白名单和账号权限 |
+| `rate_limited` | 模型 provider 返回 429 | 检查配额和并发，按 `retry_after` 退避 |
+| `network` | 模型 provider 连接失败、传输中断或临时错误（含可重试的 5xx） | 检查 DNS、代理、防火墙和 provider 地址，必要时重试 |
+| `config` | 缺少 onboarding profile，或模型 provider 拒绝请求（通常是 400） | 检查 profile、模型名、协议、参数和上下文长度 |
+| `overloaded` / `context_too_long` | 模型 provider 过载或上下文超长 | 降低并发或缩短输入 |
 | `canceled` / `timeout` / `internal` | 本地取消、超时或未知失败 | 检查任务取消、服务日志和数据库状态 |
 
-上游返回 HTTP 响应时，日志还记录 `upstream_status`。日志不记录响应体、URL、主机名、token 或原始错误文本，`last_error` 也不包含这些内容。
+`upstream_auth`、`rate_limited`、`network`、`config`、`overloaded`、`context_too_long` 现在只指模型 provider；GitLab 的失败使用 `gitlab_*` 类别。此前 token 被撤销造成的 GitLab 401 记为 `internal` 且无 `upstream_status`，依赖旧分类的检索或告警需更新。日志不记录响应体、URL、主机名、token、stderr 或原始错误文本，`last_error` 也不包含这些内容。
 
 ```bash
 docker compose logs review | grep 'workspace operation failed'

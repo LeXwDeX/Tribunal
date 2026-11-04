@@ -215,7 +215,7 @@ func TestCreateWebhookFailureState(t *testing.T) {
 		t.Fatal(err)
 	}
 	if saved.WebhookState != store.WebhookStateFailed ||
-		saved.WebhookError != "GitLab webhook list failed (status 403)" {
+		saved.WebhookError != "GitLab webhook list failed (status 403): Maintainer role required" {
 		t.Fatalf("state = %q, error = %q", saved.WebhookState, saved.WebhookError)
 	}
 	if saved.HookID != nil {
@@ -264,7 +264,7 @@ func TestCreateWebhookUpdateFailureKeepsRecordedHook(t *testing.T) {
 	if saved.WebhookState != store.WebhookStateFailed || saved.HookID == nil || *saved.HookID != 99 {
 		t.Fatalf("state = %q, hook = %v", saved.WebhookState, saved.HookID)
 	}
-	if saved.WebhookError != "GitLab webhook update failed (status 403)" {
+	if saved.WebhookError != "GitLab webhook update failed (status 403): Maintainer role required" {
 		t.Fatalf("error = %q", saved.WebhookError)
 	}
 }
@@ -476,7 +476,7 @@ func TestDisableWebhookKeepsRecordedHookOnFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	if saved.WebhookState != store.WebhookStateFailed || saved.HookID == nil || *saved.HookID != 99 ||
-		saved.WebhookError != "GitLab webhook delete failed (status 403)" {
+		saved.WebhookError != "GitLab webhook delete failed (status 403): Maintainer role required" {
 		t.Fatalf("failed disable = %+v", saved)
 	}
 }

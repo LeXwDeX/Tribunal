@@ -86,7 +86,7 @@ func (a *adminFieldsAdmin) Update(context.Context, int64, app.UpdateProjectInput
 	return nil, errors.New("not used")
 }
 
-func (a *adminFieldsAdmin) RotateToken(context.Context, int64, string) (*store.Project, error) {
+func (a *adminFieldsAdmin) RotateToken(context.Context, int64, string) (*app.TokenRotation, error) {
 	return nil, errors.New("not used")
 }
 
