@@ -112,7 +112,7 @@ web/
 
 - Provider 卡片：协议、base_url、模型、并发和速率限制、近 24 小时调用数、错误率、P50 延迟；「测试连通性」。本页数据只允许平台管理员读取；其他用户打开会看到权限错误，不能据此推断平台没有配置。
 - 评审档位：只显示 `default`，标题为「评审档位」，按固定的八步拓扑列出各步骤及其 provider：探索（`explore`）、提出（`code-review`、`review`、`reasoner`、`validate`）、挑战（`verify`）、裁决（`adjudicate`）、汇报（`synthesize`），并展示预算。`onboarding` 单独标为「项目接入」，不是评审档位。
-- 手动触发评审的对话框也没有档位选择；评审详情的 DAG 阶段轨道中，`explore` 归入「规划」，`validate` 归入「提出」。
+- 手动触发评审的对话框也没有档位选择；评审详情的 DAG 阶段轨道中，`explore` 和 `plan` 归入「规划」，`code-review`、`review`、`reasoner` 和 `validate` 归入「提出」。「模型与档位」页的「项目接入」一行在 onboarding 没有配置 provider 时显示「未配置」。
 
 ### 3.8 统计与反馈
 

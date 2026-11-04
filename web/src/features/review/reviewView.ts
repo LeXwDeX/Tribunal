@@ -40,8 +40,8 @@ export function findingFunnel(findings: Finding[]): FindingFunnel {
 }
 
 const STAGES: Array<[string, (kind: string) => boolean]> = [
-  ['规划', (kind) => kind === 'explore' || kind === 'plan' || kind === 'reasoner'],
-  ['提出', (kind) => kind === 'code-review' || kind === 'review' || kind.startsWith('review.') || kind === 'validate'],
+  ['规划', (kind) => kind === 'explore' || kind === 'plan'],
+  ['提出', (kind) => kind === 'code-review' || kind === 'review' || kind.startsWith('review.') || kind === 'reasoner' || kind === 'validate'],
   ['挑战', (kind) => kind === 'verify'],
   ['裁决', (kind) => kind === 'adjudicate' || kind === 'synthesize'],
   ['发布', (kind) => kind === 'publish' || kind.startsWith('publish.') || kind === 'summary' || kind === 'discussion' || kind === 'commit_status'],

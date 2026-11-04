@@ -26,6 +26,7 @@ describe('single review profile in the console (#253)', () => {
     expect(stageForKind('explore')).toBe('规划')
     expect(stageForKind('validate')).toBe('提出')
     expect(stageForKind('review')).toBe('提出')
+    expect(stageForKind('reasoner')).toBe('提出')
     expect(deriveReviewStage([{ id: 'explore', kind: 'explore', status: 'completed' }])).toBe(1)
     expect(deriveReviewStage([{ id: 'validate', kind: 'validate', status: 'completed' }])).toBe(2)
   })

@@ -148,7 +148,7 @@ docker compose exec -T review /app/tribunalctl projects all
 
    对应配置写成 `protocol: "${MY_PROVIDER_PROTOCOL}"`、`base_url: "${MY_PROVIDER_BASE_URL}"`、`model: "${MY_PROVIDER_MODEL}"`、`api_key_env: MY_PROVIDER_API_KEY`；不要写密钥值。若复用容器中已有的变量（例如 `LLM_*`），则不需要重复透传。新增变量后同样执行 `docker compose config --quiet`，再重建容器。
 
-**回退**：先按第 4 步核对未完成评审和待发布结果，然后检查所有档位中对 secondary 的引用。逐个检查 `profiles.default` 的 `provider`、`explore.provider`、`lanes.*.provider`、`challenge.provider`，以及 `profiles.onboarding.agent.provider`；若配置里还留有旧字段（`propose[].provider`、`reasoner.provider`、`challenge.fallback`），也一并清理。把每个 `secondary` 替换为 `primary`，或删除不再需要的可选字段；保留 `profiles.onboarding.agent.provider`，`profiles.default.provider` 必须保留一个已配置别名。确认没有引用后再重新注释 `providers.secondary`，并从 `.env` 移除四个变量。然后执行 `docker compose config --quiet` 和 `docker compose run --rm --no-deps review --config /app/config/server.yaml --check-config`；两项通过后才执行 `docker compose up -d --force-recreate --wait --wait-timeout 120`。引用不存在的 provider 会让启动失败；`config --quiet` 不验证应用配置语义，`--check-config` 不验证评审图、网络或模型兼容性。不要删除数据卷。回退也会改变评审执行配置或档位；未终态工作流在恢复时可能因校验不匹配被取消。待发布结果是否继续以发布校验为准。若 secondary 暂时不可用，可以只把上述所有引用切回 primary 并重建，保留 secondary 的注释配置，供后续恢复。
+**回退**：先按第 4 步核对未完成评审和待发布结果，然后检查所有档位中对 secondary 的引用。逐个检查 `profiles.default` 的 `provider`、`explore.provider`、`lanes.*.provider`、`challenge.provider`，以及 `profiles.onboarding.agent.provider`；若配置里还留有旧字段（`propose[].provider`、`reasoner.provider`、`challenge.fallback`），也一并清理。把每个 `secondary` 替换为 `primary`，或删除不再需要的可选字段；保留 `profiles.onboarding.agent.provider`，`profiles.default.provider` 必须保留一个已配置别名。确认没有引用后再重新注释 `providers.secondary`，并从 `.env` 移除四个变量。然后执行 `docker compose config --quiet` 和 `docker compose run --rm --no-deps review --config /app/config/server.yaml --check-config`；两项通过后才执行 `docker compose up -d --force-recreate --wait --wait-timeout 120`。被保留或迁移的 provider 字段引用不存在的 provider 会让启动失败；被忽略的旧字段先被丢弃，不参与校验（仍应清理以免告警）；`config --quiet` 不验证应用配置语义，`--check-config` 不验证评审图、网络或模型兼容性。不要删除数据卷。回退也会改变评审执行配置或档位；未终态工作流在恢复时可能因校验不匹配被取消。待发布结果是否继续以发布校验为准。若 secondary 暂时不可用，可以只把上述所有引用切回 primary 并重建，保留 secondary 的注释配置，供后续恢复。
 
 **OpenAI 兼容网关因角色顺序返回 400**：`openai-chat` provider 的节点失败，且网关错误提示角色必须交替（例如 vLLM 部分聊天模板的「roles must alternate」）时，在该 provider 下设置 `strict_role_alternation: true` 并重启。开启后，最后一轮的提交提示附加在最后一条 tool 消息末尾，不再单独作为 user 消息发送。OpenAI 官方 API 不需要开启；修改会改变评审执行配置，重启前按第 4 步处理未完成评审。说明见 [严格角色交替](design/06-config.md#严格角色交替strict_role_alternation)。
 
@@ -537,7 +537,7 @@ fi
 - **查看和测试**：控制台「扩展」页列出 `codebase-memory`；「测试并列出工具」返回的列表不含 `index_repository`、`delete_project`、`ingest_traces`、`manage_adr`。
 - **内置标识**：它带「内置」标签，始终启用，不能停用或删除。名称和配置随平台版本走，不能在控制台编辑；禁用、删除、改名、改配置都返回 409。
 - **禁用**：已有自定义 MCP 可在编辑窗口把「启用」改为「停用」，或 `PUT /api/v1/mcp-servers/{id}` 设置 `"enabled": false`，然后重启服务。重启和升级都保持停用。内置 `codebase-memory` 始终启用，停用请求返回 409；启动同步会把历史停用状态恢复为启用。
-- **故障表现**：二进制缺失或无法启动时评审照常完成，但没有图谱工具；评审结论里出现 `MCP tools unavailable` 告警，原本会 PASS 的评审显示为 INCOMPLETE。非取消的建索引失败不阻断 onboarding 或刷新；其他必要步骤及状态保存成功时工作区最终为 `ready`，`last_error` 为固定消息 `index: code graph indexing failed`，刷新保留旧 `index_sha`。ignore 阻断索引时 `index_status` 为 `degraded`；其他情况下比较已存的 SHA，不代表当前索引健康。
+- **故障表现**：二进制缺失或无法启动时评审照常完成，但没有图谱工具；评审结论里出现 `MCP tools unavailable` 告警，原本会 PASS 的评审显示为 INCOMPLETE（`explore`、`code-review`、`review`、`reasoner`、`validate` 绑定的工具缺失都会记为 `tool_gaps`）。非取消的建索引失败不阻断 onboarding 或刷新；其他必要步骤及状态保存成功时工作区最终为 `ready`，`last_error` 为固定消息 `index: code graph indexing failed`，刷新保留旧 `index_sha`。ignore 阻断索引时 `index_status` 为 `degraded`；其他情况下比较已存的 SHA，不代表当前索引健康。
 - **验证记录**：2026-11-02 在 Docker 部署环境用 `9c3b4e2` 镜像验证：容器内 `codebase-memory-mcp --version` 为 `0.12.1`；`POST /api/v1/mcp-servers/{id}/test` 返回 13 个只读工具；真实 MR 评审完成并发布 summary。该项目使用非空 ignore policy，因此评审未注入 MCP 工具，符合上文的预期安全降级。
 - **排查信息**：索引失败告警 `code graph index failed; continuing without it` 和一般工作区失败告警 `workspace operation failed` 含 `project_id` 与 `error_class`；工作区/onboarding 类别包括模型 provider 侧的 `upstream_auth`、`rate_limited`、`network`、`config`、`overloaded`、`context_too_long`，GitLab/git 侧的 `gitlab_auth`、`gitlab_forbidden`、`gitlab_not_found`、`gitlab_rate_limited`、`gitlab_unavailable`、`gitlab_rejected`、`gitlab_project_changed`、`git_auth`、`git_forbidden`、`git_repository_not_found`、`git_ref_not_found`、`git_network`、`git_failed`，以及 `timeout`、`canceled`、`panic`、`internal`；未知类别归为 `internal`，GitLab 或模型 provider 有 HTTP 响应时另带脱敏的 `upstream_status`，各类别含义和处理见第 10 节。 节点失败事件优先使用执行器提供的固定类别（如 `auth`、`rate_limited`、`sandbox_denied`、`panic`），没有分类时仍是 `executor_error`、`timeout` 或 `expand_failed`；`panic` 不记录 panic 值。这些日志和工作区 API 不提供原始原因；按项目 ID 在受控环境中检查索引配置、可执行文件和运行环境。旧数据库和备份可能仍含错误原文，读取接口不会清除它们；应限制数据库和备份访问，回退旧版可能重新暴露原文。
 
@@ -1035,9 +1035,13 @@ v1.2.0 起，所有 `PUT /api/v1/block-bindings/{block}` 必须带 `expected_rev
 影响：
 
 - **成本预期更高。** 每次评审运行的 LLM agent 节点从原来的一两个增加到多个（`explore`、每个包的 `code-review` 与 `review`、`reasoner`、`validate`，另有每条 P0/P1 的 `verify`）。具体增幅以后另行测量，此处不给出数字；升级后按实际用量核对 `budget.max_tokens`。`budget.deadline` 默认从 20m 改为 30m。
-- **工作流身份变化。** 提示词新增 `explore.md`、`review.md`、`validate.md`，`_platform_rules.md` 升到 v5，`TaskRenderVersion` 由 4 改为 5。升级前创建的未终态工作流在新版本下不会续跑、重试或发布；升级前按[多 Provider 配置](#多-provider-配置)第 4 步核对未完成评审和待发布结果，需要时等待其结束或接受取消后重新触发。
-- **验证通道不运行测试。** `validate` 只读 GitLab pipeline 状态、失败 job 日志片段和代码；没有 pipeline 或日志不足时报告「验证通道 BLOCKED：<原因>」告警，不降为 INCOMPLETE。
+- **工作流身份变化。** 提示词新增 `explore.md`、`review.md`、`validate.md`，`_platform_rules.md` 升到 v5，`TaskRenderVersion` 由 4 改为 5。评审档位和提示词身份已变化，升级前创建的未终态工作流在启动恢复时被取消，不会在新版本下续跑、重试或发布；升级前按[多 Provider 配置](#多-provider-配置)第 4 步核对未完成评审和待发布结果，需要时等待其结束或接受取消后重新触发。
+- **已有的 `reasoner` 块绑定开始生效。** reasoner 一路现在以块 `reasoner` 运行，此前登记在该块上的 MCP 工具和 Skill 绑定会开始作用于它；升级前核对这些绑定。
+- **挂载的配置文件需要手工补充工具授权。** 镜像不会改写已挂载的配置文件。要让 `explore` 和 `validate` 使用 codebase-memory 工具，把这两个块加入 `default_extensions.mcp_servers[].tools`（见 `config/server.example.yaml`）；否则这两路只带内置的 `read_file` / `grep` 运行。
+- **MCP 绑定缺口会让评审不是干净的 PASS。** `explore`、`validate` 和 `reasoner` 与 `code-review`、`review` 一样在代码拥有的 `tool_gaps` 字段记录绑定工具缺失，原本的 PASS 改判 INCOMPLETE；已是 BLOCKING 的结论不变。
+- **验证通道不运行测试。** `validate` 只读 GitLab pipeline 状态、失败 job 日志片段和代码；没有 pipeline 或日志不足时报告「验证通道 BLOCKED：<原因>」告警，不降为 INCOMPLETE。`validate` 为 `FAIL` 时，增量过滤之后必须仍有该节点范围内的 P0/P1 finding 来解释，否则结论为 INCOMPLETE（而不是 PASS）；被 `verify.N` 反证的 P1 仍算作该 `FAIL` 的代码证据。
 - **任一路评审失败会使结论为 INCOMPLETE。** 其他各路的 findings 仍会发布。
+- **已知限制。** `explore` 是可选节点，但只在 token 预算在它开始前已耗尽时才会被跳过；此时 `plan` 也被跳过，工作流在没有结论的情况下结束。四路并行评审不预留 token 预算，有界超支随并行节点数增加。探索摘要（不超过 6000 字符）与 diff 共用任务预算。
 
 配置迁移：`config.Load` 不会因旧配置失败，但旧字段会被迁移或忽略，每项在启动日志产生一行 WARN `configuration was migrated or ignored: <字段…>`，只含字段名，不含值。逐项处理表见[配置设计 · 评审档位](design/06-config.md#评审档位profiles)。
 
@@ -1045,8 +1049,8 @@ v1.2.0 起，所有 `PUT /api/v1/block-bindings/{block}` 必须带 `expected_rev
 
 1. 先按第 8 节的通用步骤备份并记录当前镜像、实际挂载配置。
 2. 把 `profiles.default` 改成新字段：`propose` 改为 `provider` 与 `lanes.code_review` / `lanes.review`，`reasoner.provider` 改为 `lanes.reasoner.provider`，`challenge.provider: cross` 改为明确的 `challenge.provider`，不再写 `plan.mode`、`plan.provider`、`consensus`、`on_uncertain`、`synthesize`、`budget.max_extends`。
-3. 删除 `default`、`onboarding` 以外的档位，并清理引用它们的位置：项目的档位（用 `PATCH /api/v1/projects/{id}` 改为 `default`）、`settings.profile_by_label`、仓库 `.gitlab-review.yml` 的 `profile` 和评论命令。这些位置遗留的旧档位名在评审时按 `default` 处理，但保存时只接受 `default`（项目注册或更新为其他档位返回 400 `unknown profile`，`profile_by_label` 的值不是 `default` 被拒绝，`/review <名称>` 的名称不是 `default` 时命令被忽略）。`onboarding` 在这些位置都不被接受。
-4. 运行 `--check-config` 并启动，检查启动日志**没有** `configuration was migrated or ignored` 告警。每条告警的字段名指出需要手工清理的配置；迁移得到的 provider 仍会被校验，错误会指向新字段，例如 `profiles.default.lanes.reasoner.provider`。
+3. 删除 `default`、`onboarding` 以外的档位，并清理引用它们的位置：项目的档位（用 `PATCH /api/v1/projects/{id}` 改为 `default`）、`settings.profile_by_label`、仓库 `.gitlab-review.yml` 的 `profile` 和评论命令。这些位置遗留的旧档位名在评审时按 `default` 处理，但保存时只接受 `default`：项目注册或更新为其他档位返回 400 `unknown profile`，`/review <名称>` 的名称不是 `default` 时命令被忽略；保存 `settings.profile_by_label` 时，值不是 `default` 的映射（包括 `onboarding` 和已移除的档位）被丢弃而不是被拒绝，遗留设置仍可编辑。`onboarding` 在这些位置都不被接受为评审档位。
+4. 运行 `--check-config` 并启动，检查启动日志**没有** `configuration was migrated or ignored` 告警（迁移告警在配置校验之前输出，校验失败时同样可见）。`plan.max_packages` 高于 `min(17, (budget.max_nodes − 9) / 2)`（至少 1）时被降到该上界并告警，未配置而上界低于默认值 6 时静默降低；`budget.deadline` 低于 30m 时也会告警。评审档位既没有 `provider` 也没有 `lanes.code_review.provider` 时，评审图构建失败，字段为 `provider`。若要 `explore` / `validate` 使用 codebase-memory 工具，先按上面的说明补充 `default_extensions.mcp_servers[].tools`。每条告警的字段名指出需要手工清理的配置；迁移得到的 provider 仍会被校验，错误会指向新字段，例如 `profiles.default.lanes.reasoner.provider`。
 5. 在控制台「模型与档位」确认只出现 `default` 评审档位及固定的八步拓扑，`onboarding` 单独显示为「项目接入」；项目注册、项目设置和手动触发对话框不再有档位选择，项目列表没有档位列。
 6. 在测试 MR 上触发一次完整评审并核对结果、用量和耗时；会产生模型费用，需事先取得授权。
 

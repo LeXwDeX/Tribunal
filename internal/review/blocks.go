@@ -402,7 +402,9 @@ func ValidateProfile(profile Profile) (Profile, error) {
 			if !allowedBlocks[propose.Block] {
 				return Profile{}, &ProfileError{Field: fmt.Sprintf("propose[%d].block", i), Problem: `must be code-review or review`}
 			}
-			if strings.TrimSpace(propose.Provider) == "" {
+			// The lanes flow derives propose from the profile provider and
+			// reports a missing one under that name (validateFlow).
+			if strings.TrimSpace(propose.Provider) == "" && cfg.Flow != FlowLanes {
 				return Profile{}, &ProfileError{Field: fmt.Sprintf("propose[%d].provider", i), Problem: "must not be empty"}
 			}
 		}

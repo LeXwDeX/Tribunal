@@ -190,6 +190,7 @@ finalize 若在重读时发现新节点，返回主循环继续调度，而不�
 | 工作流取消 | 运行中节点 `aborted`，未开始节点 `skipped(workflow_cancelled)` |
 | 四路评审节点（`cr.*`、`rv.*`、`reasoner`、`validate`）失败、被取消或被跳过 | 它们都是可选节点，其余各路继续运行并照常发布各自的 findings。`gather` 为缺失的一路写入证据缺口「lane X did not complete」，最终结论为 `INCOMPLETE`，不会是 `PASS` |
 | `explore` 未成功完成 | 四路评审不带探索摘要运行；报告给出一条告警，不产生证据缺口 |
+| `explore` 被跳过 | 只会发生在 token 预算在它开始前已耗尽时；此时 `plan` 也被跳过，工作流在没有结论的情况下结束 |
 
 ### 5.5 预算校验
 
@@ -203,10 +204,10 @@ finalize 若在重读时发现新节点，返回主循环继续调度，而不�
 
 - `pkg/dag` 在预算耗尽时终止未完成的非 `TokenFree` 节点：required 节点写 `failed(budget_exhausted)`，optional 节点写 `skipped(budget_exhausted)`。
 - 标记为 `TokenFree` 的节点不会被引擎终止，仍会运行。当前构建把 `plan`（code 模式）、`gather`、`adjudicate`、`synthesize` 和 `synthesize.2` 标为 `TokenFree`；其他未完成节点按 required/optional 失败或跳过。
-- `gather` 在预算耗尽时不展开 verify，把待挑战组标记为 `skipped(budget_exhausted)`，并写入 warning；`adjudicate` 按 `on_uncertain` 处理这些组，汇总会注明部分条目未核验。
+- `gather` 在预算耗尽时不展开 verify，把待挑战组标记为 `skipped(budget_exhausted)`，并写入 warning；`adjudicate` 固定按 `mark` 处理这些组（标「存疑」后发布），汇总会注明部分条目未核验。
 - 引擎不会因为 plan 超出 token 预算而自动减少包或降级 plan。plan 仍按原包数展开，后续 LLM 节点按上面的规则失败或跳过。
 - agent 循环在至少完成一轮后失败会返回 partial usage。agent 节点只对 transport 错误重试，每次重试携带上一次已知 partial usage 参与下一轮预算检查，最终节点 usage 也包含这些已知用量；上游未返回 usage 的请求仍无法精确计费，因此跨重试 token/成本只能按已知边界使用，不能当账单。
-- workflow 的 `max_tokens` 是共享预算，按 `input_tokens + output_tokens` 计算。cache read/write 和 reasoning 在 usage 中分别表示，但不额外相加，避免与输入/输出重复计数。执行器在每次模型请求前检查已提交用量加当前 attempt 已知 partial usage；并发节点不预留额度，已发出的请求可能在检查后完成，因此允许有界超支，不是账单级硬上限。
+- workflow 的 `max_tokens` 是共享预算，按 `input_tokens + output_tokens` 计算。cache read/write 和 reasoning 在 usage 中分别表示，但不额外相加，避免与输入/输出重复计数。执行器在每次模型请求前检查已提交用量加当前 attempt 已知 partial usage；并发节点不预留额度，已发出的请求可能在检查后完成，因此允许有界超支，不是账单级硬上限；四路评审并行，超支幅度随并行节点数增加。探索摘要（不超过 6000 字符）与 diff 共用任务预算。
 
 ---
 
@@ -350,6 +351,8 @@ type Module struct {
 }
 ```
 
+`ExploreOut`、`ValidateOut` 和 `ReasonerOut` 与 `CodeReviewOut`、`ReviewOut` 一样带代码拥有的 `tool_gaps` 字段：节点的 MCP 绑定工具缺失或运行时不可用时由代码记录，不出现在提交给模型的 schema 里。任一评审节点（`explore`、`cr.*`、`rv.*`、`reasoner`、`validate`）记录了 `tool_gaps`，评审就不会得到干净的 `PASS`（原本的 `PASS` 改判 `INCOMPLETE`；已是 `BLOCKING` 的保持不变）。
+
 `ExploreOut` 的 `summary`、`facts`、`inferences`、`unknowns` 必须出现（可为空数组）。`facts[].path` 若填写，必须是合法的仓库相对路径。
 
 `ValidateOut` 的状态一致性由代码校验：
@@ -358,7 +361,7 @@ type Module struct {
 |---|---|
 | `PASS` | 不得有 `FAIL` 或 `BLOCKED` 检查，也不得有 P0/P1 finding |
 | `FAIL` | 至少一条 `FAIL` 检查或至少一个 finding |
-| `BLOCKED` | `block_reason` 必填 |
+| `BLOCKED` | `block_reason` 必填；不得包含 `FAIL` 检查（有 `FAIL` 检查时状态必须是 `FAIL`） |
 
 > 最终持久化和发布使用代码拥有的 `SynthesisResult`，它包含 `verdict`、`groups` 和 `unresolved`。上游证据/覆盖不足会把 `verdict` 覆盖为 `INCOMPLETE` 并携带具体信号。评审图不再有模型汇总节点，因此新评审不产生 `SynthesizeOut`、`ReviewGateOut` 或补派请求；这些契约只在解码历史工作流时保留。
 
@@ -370,7 +373,7 @@ type Module struct {
 | reasoner | critical / notable / informational | P1 / P2 / info |
 | review | `BLOCKING` 且没有 finding | 一个 `review_blocking` 未解决信号 |
 | review | `evidence_status=insufficient` | 一个 `evidence_gap` 未解决信号（只缺少或未跑完 pipeline 本身不算证据不足） |
-| validate | `FAIL` 且没有 finding | 一个 `review_blocking` 未解决信号 |
+| validate | `FAIL`，且增量过滤之后该节点没有仍在评审范围内的 P0/P1 finding | 一个 `review_blocking` 未解决信号，结论为 `INCOMPLETE`，不会是 `PASS`。该检查在 `gather` 中于增量过滤之后执行；后来被 `verify.N` 反证的 P1 仍算作代码证据，对应的 `FAIL` 视为已有解释 |
 | validate | `BLOCKED` | 报告告警「验证通道 BLOCKED：<原因>」；**不是**未解决信号，没有 CI 的项目可以 `PASS` |
 | validate | 检查结果 `PRE_EXISTING` | 与本次变更无关的既有失败，不产生 finding |
 | 任一路 | 节点失败、被取消或被跳过 | 一个 `evidence_gap` 未解决信号「lane X did not complete」，结论为 `INCOMPLETE` |
@@ -408,7 +411,7 @@ for g in groups:
 
 输入：`adjudicate` 的结果（每组：ID、严重级别、标题、正文、证据、挑战结果、decision）、MR 摘要、pipeline 摘要。**不输入**子 agent 对话。`synthesize` 是代码节点：直接渲染报告，不调用模型，也不追加节点。
 
-最终完成条件由代码执行：`review` 通道 `evidence_status=insufficient`、`review` 或 `validate` 为 BLOCKING/FAIL 却没有 finding、某一路评审没有完成、材料或提示词覆盖缺口、完成 plan 后非 generated 的 included 文件未被分配等上游信号会合并进 `unresolved`。只要存在 unresolved，最终 verdict 就是 INCOMPLETE，summary 列出具体缺口。存在最终 `publish` 的 P0/P1 时 verdict 为 BLOCKING（I6）。
+最终完成条件由代码执行：`review` 通道 `evidence_status=insufficient`、`review` 为 BLOCKING 却没有 finding、`validate` 为 FAIL 却没有仍在范围内的 P0/P1 finding、某一路评审没有完成、材料或提示词覆盖缺口、完成 plan 后非 generated 的 included 文件未被分配等上游信号会合并进 `unresolved`。只要存在 unresolved，最终 verdict 就是 INCOMPLETE，summary 列出具体缺口。存在最终 `publish` 的 P0/P1 时 verdict 为 BLOCKING（I6）。
 
 ---
 

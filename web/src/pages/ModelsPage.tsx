@@ -226,7 +226,7 @@ export function ModelsPage() {
           {profiles.isError ? <ErrorState error={profiles.error} onRetry={profiles.retry} /> : null}
           {profiles.isSuccess && !reviewProfiles.length ? <EmptyState title="平台还没有评审档位配置" /> : null}
           {reviewProfiles.map((profile) => <ProfilePanel key={profile.name} profile={profile} />)}
-          {onboardingProvider ? <span className="small muted">项目接入（onboarding，不是评审档位）使用 provider：{onboardingProvider}</span> : null}
+          {onboarding ? <span className="small muted">项目接入（onboarding，不是评审档位）使用 provider：{onboardingProvider ?? '未配置'}</span> : null}
           {profiles.hasNextPage ? (
             <div className={styles.loadMore}>
               <Button variant="secondary" onClick={profiles.fetchNextPage} loading={profiles.isFetchingNextPage}>加载更多档位</Button>

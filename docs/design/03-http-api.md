@@ -114,7 +114,7 @@ Note Hook 先入队 `review.command`，由 worker 请求 GitLab 校验身份、M
 | POST | `/api/v1/projects/validate` | 平台管理员只读连接校验：`{project, token}`；不保存项目或凭据 |
 | POST | `/api/v1/projects` | 平台管理员注册项目 |
 | GET | `/api/v1/projects/{id}` | 项目 `read`：详情（含工作区状态、最近评审和 `access`） |
-| PATCH | `/api/v1/projects/{id}` | 项目 `manage`：修改 `profile`（只接受 `default`，其他值返回 400 `unknown profile`）、`settings`、`enabled` |
+| PATCH | `/api/v1/projects/{id}` | 项目 `manage`：修改 `profile`（只接受 `default`，其他值返回 400 `unknown profile`）、`settings`（其中 `profile_by_label` 的值不是 `default` 的映射在保存时被丢弃，不报错）、`enabled` |
 | PUT | `/api/v1/projects/{id}/token` | 项目 `manage`：轮换 token：`{token}` |
 | POST | `/api/v1/projects/{id}/webhook` | 项目 `manage`：显式启用 GitLab webhook；只复用仍存在的已记录 `hook_id`，沿用已存 secret |
 | POST | `/api/v1/projects/{id}/webhook/rebuild` | 项目 `manage`：轮换 secret 并重建 GitLab webhook；只复用仍存在的已记录 `hook_id`，没有可复用 hook 时创建 |
@@ -199,8 +199,12 @@ POST /api/v1/projects
   "access": "manage",
   "publication_state": "published",
   "nodes": [
-    { "id": "plan", "kind": "plan", "status": "completed", "provider": "claude", "duration_ms": 8120, "usage_incomplete": false },
-    { "id": "review.std.p1", "kind": "review.standards", "status": "completed", "provider": "claude" },
+    { "id": "explore", "kind": "explore", "status": "completed", "provider": "claude", "duration_ms": 41200, "usage_incomplete": false },
+    { "id": "plan", "kind": "plan", "status": "completed", "duration_ms": 35, "usage_incomplete": false },
+    { "id": "cr.p1", "kind": "code-review", "status": "completed", "provider": "claude" },
+    { "id": "rv.p1", "kind": "review", "status": "completed", "provider": "claude" },
+    { "id": "reasoner", "kind": "reasoner", "status": "completed", "provider": "claude" },
+    { "id": "validate", "kind": "validate", "status": "completed", "provider": "claude" },
     { "id": "verify.f7", "kind": "verify", "status": "completed", "provider": "gpt" }
   ],
   "findings_summary": { "published": 4, "marked": 1, "dropped": 3, "by_severity": { "P0": 0, "P1": 2, "P2": 3 } },
@@ -222,8 +226,9 @@ SSE 事件（`event:` 字段）：`node`（`{id, status, attempt}`）、`finding
     {
       "id": "0192f0c1-…", "project_id": 42, "mr_iid": 318, "status": "running",
       "nodes": [
-        { "id": "plan", "kind": "plan", "status": "completed", "provider": "claude", "attempt": 1, "duration_ms": 8120 },
-        { "id": "review.std.p1", "kind": "review.standards", "status": "running", "depends_on": ["plan"], "attempt": 1 }
+        { "id": "plan", "kind": "plan", "status": "completed", "depends_on": ["explore"], "attempt": 1, "duration_ms": 35 },
+        { "id": "cr.p1", "kind": "code-review", "status": "running", "depends_on": ["plan"], "provider": "claude", "attempt": 1 },
+        { "id": "rv.p1", "kind": "review", "status": "running", "depends_on": ["plan"], "provider": "claude", "attempt": 1 }
       ],
       "findings_summary": { "published": 0, "marked": 0, "dropped": 0, "by_severity": { "P0": 0, "P1": 0, "P2": 0, "info": 0 } },
       "created_at": "…"

@@ -5,6 +5,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Tribunal has exactly one review profile and one onboarding profile.
@@ -17,6 +18,16 @@ const (
 	OnboardingProfile = "onboarding"
 	// ReviewFlow is the graph of the review profile.
 	ReviewFlow = "lanes"
+
+	// reviewMaxFanOut mirrors the graph's default max_fan_out; each package
+	// adds a code-review and a review lane, the MR adds reasoner and validate.
+	reviewMaxFanOut = 36
+	// reviewFixedNodes counts explore, plan, reasoner, validate, gather,
+	// adjudicate and synthesize, plus room for two verify challenges.
+	reviewFixedNodes   = 9
+	defaultMaxNodes    = 30
+	defaultMaxPackages = 6
+	recommendedTimeout = 30 * time.Minute
 )
 
 // normalizeProfiles keeps only the review and onboarding profiles and maps
@@ -71,30 +82,26 @@ func NormalizeReviewProfile(in ProfileConfig) (ProfileConfig, []string) {
 		switch {
 		case propose.Block == "code-review" && !codeReviewSeen:
 			codeReviewSeen = true
-			if lanes.CodeReview.Provider == "" {
-				lanes.CodeReview.Provider = propose.Provider
-			}
-			warn("propose[%d] is deprecated and was migrated to lanes.code_review.provider", i)
+			migrateProvider(&lanes.CodeReview, propose.Provider, fmt.Sprintf("propose[%d]", i), "lanes.code_review.provider", warn)
 		case propose.Block == "review" && !reviewSeen:
 			reviewSeen = true
-			if lanes.Review.Provider == "" {
-				lanes.Review.Provider = propose.Provider
-			}
-			warn("propose[%d] is deprecated and was migrated to lanes.review.provider", i)
+			migrateProvider(&lanes.Review, propose.Provider, fmt.Sprintf("propose[%d]", i), "lanes.review.provider", warn)
 		default:
 			warn("propose[%d] (%s) was ignored: each lane runs once", i, propose.Block)
 		}
 	}
 	if in.Reasoner != nil {
-		if lanes.Reasoner.Provider == "" {
-			lanes.Reasoner.Provider = in.Reasoner.Provider
-		}
-		warn("reasoner is deprecated and was migrated to lanes.reasoner.provider; the reasoner lane always runs, so reasoner.when is ignored")
+		migrateProvider(&lanes.Reasoner, in.Reasoner.Provider, "reasoner", "lanes.reasoner.provider", warn)
+		warn("reasoner.when was ignored: the reasoner lane always runs")
 	}
 	challenge := in.Challenge.Provider
 	if challenge == "cross" {
 		challenge = in.Challenge.Fallback
-		warn("challenge.provider cross is no longer supported; challenge.fallback is used as the challenge provider")
+		if challenge == "" {
+			warn("challenge.provider cross is no longer supported; with no challenge.fallback the profile provider challenges")
+		} else {
+			warn("challenge.provider cross is no longer supported; challenge.fallback is used as the challenge provider")
+		}
 	} else if in.Challenge.Fallback != "" {
 		warn("challenge.fallback was ignored")
 	}
@@ -129,7 +136,7 @@ func NormalizeReviewProfile(in ProfileConfig) (ProfileConfig, []string) {
 	if base == "" {
 		base = lanes.CodeReview.Provider
 	}
-	if base == "" && challenge != "cross" {
+	if base == "" {
 		base = challenge
 	}
 	for _, lane := range []*LaneConfig{&lanes.CodeReview, &lanes.Review, &lanes.Reasoner, &lanes.Validate} {
@@ -145,12 +152,24 @@ func NormalizeReviewProfile(in ProfileConfig) (ProfileConfig, []string) {
 	}
 	budget := in.Budget
 	budget.MaxExtends = 0
+	if budget.Deadline > 0 && budget.Deadline < recommendedTimeout {
+		warn("budget.deadline %s is below %s: explore, the four parallel lanes and the challenges may not finish in time", budget.Deadline, recommendedTimeout)
+	}
+	plan := PlanConfig{Mode: "code", PackageTokens: in.Plan.PackageTokens, MaxPackages: in.Plan.MaxPackages}
+	limit := maxReviewPackages(budget.MaxNodes)
+	if plan.MaxPackages == 0 && limit < defaultMaxPackages {
+		plan.MaxPackages = limit
+	}
+	if plan.MaxPackages > limit {
+		warn("plan.max_packages %d was lowered to %d: each package adds two lanes, so more packages exceed max_fan_out %d or budget.max_nodes", plan.MaxPackages, limit, reviewMaxFanOut)
+		plan.MaxPackages = limit
+	}
 	out := ProfileConfig{
 		Flow:        ReviewFlow,
 		Provider:    base,
 		Explore:     &explore,
 		Lanes:       &lanes,
-		Plan:        PlanConfig{Mode: "code", PackageTokens: in.Plan.PackageTokens, MaxPackages: in.Plan.MaxPackages},
+		Plan:        plan,
 		Propose:     []ProposeConfig{{Block: "code-review", Provider: lanes.CodeReview.Provider}},
 		Challenge:   ChallengeConfig{Provider: challenge},
 		OnUncertain: "mark",
@@ -158,4 +177,31 @@ func NormalizeReviewProfile(in ProfileConfig) (ProfileConfig, []string) {
 		Budget:      budget,
 	}
 	return out, warnings
+}
+
+// migrateProvider moves a legacy provider choice into lane unless the new
+// field is already set; the warning says which one applies.
+func migrateProvider(lane *LaneConfig, provider, legacy, field string, warn func(string, ...any)) {
+	if strings.TrimSpace(lane.Provider) != "" {
+		warn("%s is deprecated and was ignored: %s is set", legacy, field)
+		return
+	}
+	lane.Provider = provider
+	warn("%s is deprecated and was migrated to %s", legacy, field)
+}
+
+// maxReviewPackages is the largest package count whose lanes fit both the
+// fan-out bound and budget.max_nodes.
+func maxReviewPackages(maxNodes int) int {
+	if maxNodes <= 0 {
+		maxNodes = defaultMaxNodes
+	}
+	limit := (reviewMaxFanOut - 2) / 2
+	if byNodes := (maxNodes - reviewFixedNodes) / 2; byNodes < limit {
+		limit = byNodes
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	return limit
 }

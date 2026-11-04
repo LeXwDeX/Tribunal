@@ -90,15 +90,17 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := cfg.Validate(); err != nil {
-		return err
-	}
 	logger, err := newLogger(stderr)
 	if err != nil {
 		return err
 	}
-	warnDeprecatedEnv(logger)
+	// Migration warnings come first: a validation error may name a field
+	// that a warning explains.
 	warnConfig(logger, cfg.Warnings)
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	warnDeprecatedEnv(logger)
 	key, err := decodeMasterKey(cfg.Secrets.MasterKeyEnv)
 	if err != nil {
 		return err

@@ -375,6 +375,9 @@ func (e *Executor) executeGather(ctx context.Context, in dag.NodeInput) (dag.Nod
 		}
 		dropped = filteredDropped
 	}
+	// After incremental filtering: a FAIL validation needs a blocking finding
+	// that is still in scope.
+	signals = append(signals, validateFailSignals(wf, proposals)...)
 	budgetExhausted := false
 	if max := wf.Spec.Budget.MaxTokens; max > 0 {
 		used := wf.Usage.TotalTokens()
@@ -493,9 +496,7 @@ func (e *Executor) collectProposals(wf dag.WorkflowView) ([]Proposal, []DroppedF
 				return nil, nil, nil, nil, fmt.Errorf("review: decode %s: %w", node.ID, err)
 			}
 			proposals = append(proposals, ProposalFromValidate(node.ID, provider, model, node.Attempt, *out))
-			laneSignals, laneWarnings := validateSignals(node.ID, *out)
-			signals = append(signals, laneSignals...)
-			warnings = mergeWarnings(warnings, laneWarnings)
+			warnings = mergeWarnings(warnings, validateWarnings(*out))
 		case KindReviewGate:
 			out, err := DecodeStrict[*ReviewGateOut](node.Output)
 			if err != nil {

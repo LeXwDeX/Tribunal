@@ -506,8 +506,12 @@ func validateProfile(p *problems, providers map[string]ProviderConfig, field str
 		checkProvider(field+".lanes.reasoner.provider", profile.Lanes.Reasoner.Provider)
 		checkProvider(field+".lanes.validate.provider", profile.Lanes.Validate.Provider)
 	}
-	for i, propose := range profile.Propose {
-		checkProvider(fmt.Sprintf("%s.propose[%d].provider", field, i), propose.Provider)
+	// The review profile's propose entry is derived from lanes.code_review,
+	// which is checked above; report the configured field only.
+	if profile.Flow != ReviewFlow {
+		for i, propose := range profile.Propose {
+			checkProvider(fmt.Sprintf("%s.propose[%d].provider", field, i), propose.Provider)
+		}
 	}
 	if profile.Reasoner != nil {
 		checkProvider(field+".reasoner.provider", profile.Reasoner.Provider)

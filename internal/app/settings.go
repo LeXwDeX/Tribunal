@@ -133,10 +133,10 @@ func ParseSettings(raw json.RawMessage, profiles map[string]config.ProfileConfig
 				continue
 			}
 			if !isReviewProfile(profiles, profile) {
-				details = append(details, Detail{
-					Field:   "settings.profile_by_label." + label,
-					Message: "profile is not defined",
-				})
+				// Only the default review profile exists. A mapping to a
+				// removed profile, typically stored by an earlier release, is
+				// dropped so unrelated settings stay editable.
+				delete(*override.ProfileByLabel, label)
 			}
 		}
 	}

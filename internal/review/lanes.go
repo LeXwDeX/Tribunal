@@ -30,6 +30,9 @@ type ExploreOut struct {
 	Facts      []ExploreFact `json:"facts" jsonschema:"maxItems=30"`
 	Inferences []string      `json:"inferences" jsonschema:"maxItems=20"`
 	Unknowns   []string      `json:"unknowns" jsonschema:"maxItems=20"`
+	// ToolGaps is code-owned, as in CodeReviewOut: hidden from the submit
+	// schema and overwritten after decoding.
+	ToolGaps []string `json:"tool_gaps,omitempty" jsonschema:"-"`
 }
 
 // ExploreFact is one verified fact with its evidence.
@@ -91,6 +94,8 @@ type ValidateOut struct {
 	Findings    []FindingOut    `json:"findings" jsonschema:"maxItems=50"`
 	BlockReason string          `json:"block_reason,omitempty" jsonschema:"maxLength=1000"`
 	Summary     string          `json:"summary" jsonschema:"minLength=1,maxLength=3000"`
+	// ToolGaps is code-owned, as in CodeReviewOut.
+	ToolGaps []string `json:"tool_gaps,omitempty" jsonschema:"-"`
 }
 
 // ValidateCheck is one verification item and its evidence.
@@ -172,6 +177,9 @@ func (v ValidateOut) Validate() error {
 		if strings.TrimSpace(v.BlockReason) == "" {
 			return invalid("block_reason", "is required when status is BLOCKED")
 		}
+		if failed > 0 {
+			return invalid("status", "a FAIL check requires status FAIL")
+		}
 	}
 	return nil
 }
@@ -204,6 +212,9 @@ func validateFlow(cfg *config.ProfileConfig) error {
 		return &ProfileError{Field: "reasoner", Problem: "is the legacy reasoner; the lanes flow configures lanes.reasoner"}
 	}
 	fallback := cfg.Propose[0].Provider
+	if strings.TrimSpace(fallback) == "" {
+		return &ProfileError{Field: "provider", Problem: "is required: set profiles.default.provider or lanes.code_review.provider"}
+	}
 	explore := config.ExploreConfig{}
 	if cfg.Explore != nil {
 		explore = *cfg.Explore
@@ -376,19 +387,49 @@ func ProposalFromValidate(node, provider, model string, attempt int, out Validat
 	return Proposal{Node: node, Kind: ContractValidate, Provider: provider, Model: model, Attempt: attempt, Findings: out.Findings}
 }
 
-// validateSignals turns a validate status into gather signals. FAIL with no
-// finding is a review-level blocking; BLOCKED (for example no pipeline) is a
-// disclosed warning, not an evidence gap, so a project without CI can pass.
-func validateSignals(node string, out ValidateOut) ([]UnresolvedSignal, []string) {
-	switch out.Status {
-	case "FAIL":
-		if len(out.Findings) == 0 {
-			return []UnresolvedSignal{{Node: node, Kind: UnresolvedBlocking, Message: "validate lane reported FAIL with no findings"}}, nil
-		}
-	case "BLOCKED":
-		return nil, []string{"验证通道 BLOCKED：" + oneLine(out.BlockReason, maxUnresolvedMessage)}
+// validateWarnings discloses a BLOCKED validation (for example no pipeline).
+// It is a warning, not an evidence gap, so a project without CI can pass.
+func validateWarnings(out ValidateOut) []string {
+	if out.Status != "BLOCKED" {
+		return nil
 	}
-	return nil, nil
+	return []string{"验证通道 BLOCKED：" + oneLine(out.BlockReason, maxUnresolvedMessage)}
+}
+
+// validateFailSignals runs after incremental filtering. A FAIL validation
+// must be explained by a P0 or P1 finding of that node that is still in
+// scope; otherwise the review-level FAIL would vanish and the verdict could
+// pass. A finding refuted later by verify.N is code evidence against the FAIL.
+func validateFailSignals(wf dag.WorkflowView, proposals []Proposal) []UnresolvedSignal {
+	var signals []UnresolvedSignal
+	for _, id := range wf.Order {
+		node, ok := wf.Nodes[id]
+		if !ok || node.Spec.Kind != KindValidate || node.Status != dag.NodeCompleted {
+			continue
+		}
+		out, err := DecodeStrict[*ValidateOut](node.Output)
+		if err != nil || out.Status != "FAIL" {
+			continue
+		}
+		explained := false
+		for _, proposal := range proposals {
+			if proposal.Node != node.ID {
+				continue
+			}
+			for _, finding := range proposal.Findings {
+				if finding.Severity == SeverityP0 || finding.Severity == SeverityP1 {
+					explained = true
+				}
+			}
+		}
+		if !explained {
+			signals = append(signals, UnresolvedSignal{
+				Node: node.ID, Kind: UnresolvedBlocking,
+				Message: "validate lane reported FAIL without a P0/P1 finding in the review scope",
+			})
+		}
+	}
+	return signals
 }
 
 // laneKinds are the lanes whose absence makes a lanes-flow review incomplete.
@@ -433,6 +474,7 @@ func (e *Executor) executeExplore(ctx context.Context, in dag.NodeInput) (dag.No
 	if !ok || out == nil {
 		return e.agentOutputError(params.Provider, result, errors.New("review: explore decoder returned an unexpected type"))
 	}
+	out.ToolGaps = gaps
 	return e.marshalAgentOutput(out, params.Provider, result.Usage)
 }
 
@@ -506,6 +548,7 @@ func (e *Executor) executeValidate(ctx context.Context, in dag.NodeInput) (dag.N
 	if !ok || out == nil {
 		return e.agentOutputError(params.Provider, result, errors.New("review: validate decoder returned an unexpected type"))
 	}
+	out.ToolGaps = gaps
 	return e.marshalAgentOutput(out, params.Provider, result.Usage)
 }
 

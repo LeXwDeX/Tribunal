@@ -290,10 +290,10 @@ func (e *Executor) executeReasoner(ctx context.Context, in dag.NodeInput) (dag.N
 		Builtins:   true,
 		BeforeTurn: e.budgetHook(in.WorkflowID),
 	}
+	var gaps []string
 	if params.Tools {
 		// The lanes-flow reasoner lane gets its own block bindings; the
 		// legacy reasoner keeps running without block tools.
-		var gaps []string
 		opts.Block, opts.BlockTools, opts.ToolGaps = BlockReasoner, true, &gaps
 	}
 	result, err := e.callAgent(ctx, in, opts)
@@ -304,6 +304,7 @@ func (e *Executor) executeReasoner(ctx context.Context, in dag.NodeInput) (dag.N
 	if !ok || out == nil {
 		return e.agentOutputError(provider, result, errors.New("review: reasoner decoder returned an unexpected type"))
 	}
+	out.ToolGaps = gaps
 	return e.marshalAgentOutput(out, provider, result.Usage)
 }
 

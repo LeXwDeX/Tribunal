@@ -260,7 +260,7 @@ type Finding struct {
 
 完成条件（由代码判定，不能被模型清除）：
 
-- 上游 `review` 通道声明 `evidence_status=insufficient`、`review` 为 BLOCKING 或 `validate` 为 FAIL 却没有 finding、任一路评审（`code-review`、`review`、`reasoner`、`validate`）没有完成、材料采集/提示词截断或完成 plan 后非 generated included 文件未被任何评审节点覆盖时，最终结论为 INCOMPLETE；其他各路的 findings 照常发布。`validate` 为 BLOCKED（例如项目没有 CI）只在报告中给出告警，不属于未解决信号。INCOMPLETE 必须携带具体未解决信号，不能同时写成 PASS 或 commit status success。
+- 上游 `review` 通道声明 `evidence_status=insufficient`、`review` 为 BLOCKING 或 `validate` 为 FAIL 却没有仍在评审范围内的 P0/P1 finding、任一路评审（`code-review`、`review`、`reasoner`、`validate`）没有完成、材料采集/提示词截断或完成 plan 后非 generated included 文件未被任何评审节点覆盖时，最终结论为 INCOMPLETE；其他各路的 findings 照常发布。`validate` 为 BLOCKED（例如项目没有 CI）只在报告中给出告警，不属于未解决信号。INCOMPLETE 必须携带具体未解决信号，不能同时写成 PASS 或 commit status success。
 - `DiffSummary.files` 是进入材料快照的文件数，不是已评审数；`omitted` 记录容量截断、`too_large`、`collapsed` 等采集缺口，用户配置的 `ignored` 路径单独记录，不属于缺口。所有文件都被 ignore 时发布「无需评审」；全部变更文件都 omitted 时不创建空 workflow，只发布 INCOMPLETE 摘要，列出 omitted 总数、原因计数和最多 4 条路径，其余只计数；正常 dossier 保留完整的 omitted 列表。历史记录不得补造不存在的 dossier。
 
 I4 的「逐条反驳」规则参考 GraphAgent 的 accept 结算规则（裁决为 ACCEPT 时不得自带 required_actions；每条 required_actions 必须逐条反驳）；当前没有复制上游代码。

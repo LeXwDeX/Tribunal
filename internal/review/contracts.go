@@ -231,6 +231,8 @@ type Rebut struct {
 type ReasonerOut struct {
 	ResultType string            `json:"result_type" jsonschema:"enum=CLEAN,enum=FINDINGS,enum=INSUFFICIENT_SUBJECT"`
 	Findings   []ReasonerFinding `json:"findings" jsonschema:"maxItems=200"`
+	// ToolGaps is code-owned; only the lanes-flow reasoner binds tools.
+	ToolGaps []string `json:"tool_gaps,omitempty" jsonschema:"-"`
 }
 
 // ReasonerFinding keeps the reasoner's native severity names.

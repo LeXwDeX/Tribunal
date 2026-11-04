@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -304,6 +305,9 @@ func TestLanesProfileValidation(t *testing.T) {
 		{name: "unknown lane provider", mutate: func(p *Profile) {
 			p.Config.Lanes = &config.LanesConfig{Validate: config.LaneConfig{Provider: "nope"}}
 		}, want: "lanes.validate.provider"},
+		{name: "no provider", mutate: func(p *Profile) {
+			p.Config.Propose[0].Provider = ""
+		}, want: "provider: is required"},
 		{name: "unknown explore provider", mutate: func(p *Profile) {
 			p.Config.Explore = &config.ExploreConfig{Provider: "nope"}
 		}, want: "explore.provider"},
@@ -596,4 +600,165 @@ func hasUnresolved(signals []UnresolvedSignal, node, kind string) bool {
 		}
 	}
 	return false
+}
+
+func TestLanesValidateFailNeedsABlockingFindingInScope(t *testing.T) {
+	failing := func(findings ...FindingOut) ValidateOut {
+		return ValidateOut{
+			Status: "FAIL", Findings: append([]FindingOut{}, findings...), Summary: "unit job failed",
+			Checks: []ValidateCheck{{Name: "unit", Source: "pipeline", Result: "FAIL", Evidence: "job unit failed"}},
+		}
+	}
+	cases := []struct {
+		name        string
+		validate    ValidateOut
+		incremental *IncrementalRange
+		wantSignal  bool
+	}{
+		{name: "P1 finding in scope blocks through the finding", validate: failing(finding("a.go", 9, SeverityP1, "broken"))},
+		{name: "only a P2 finding", validate: failing(finding("a.go", 9, SeverityP2, "minor")), wantSignal: true},
+		{name: "P1 finding filtered out by the incremental scope", validate: failing(finding("b.go", 9, SeverityP1, "elsewhere")),
+			incremental: &IncrementalRange{Files: []string{"a.go"}}, wantSignal: true},
+		{name: "P1 finding without a path in an incremental review", validate: failing(finding("", 0, SeverityP1, "pipeline")),
+			incremental: &IncrementalRange{Files: []string{"a.go"}}, wantSignal: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			wf := lanesGatherWorkflow(t, tc.validate)
+			dossier := validDossier(t)
+			dossier.Incremental = tc.incremental
+			executor := newTestExecutor(t, ExecutorDeps{
+				Profile: lanesProfile(), Dossier: dossier,
+				Snapshot: func(context.Context, string) (dag.WorkflowView, error) { return wf, nil },
+				Locate:   func(string, int, Side) bool { return true },
+			})
+			gathered := runEvidenceGather(t, executor, wf)
+			if got := hasUnresolved(gathered.Unresolved, NodeValidate, UnresolvedBlocking); got != tc.wantSignal {
+				t.Fatalf("validate blocking signal = %v, want %v; unresolved=%+v", got, tc.wantSignal, gathered.Unresolved)
+			}
+		})
+	}
+}
+
+func TestValidateBlockedMustNotHideAFailingCheck(t *testing.T) {
+	raw, _ := json.Marshal(ValidateOut{
+		Status: "BLOCKED", BlockReason: "logs truncated", Findings: []FindingOut{}, Summary: "s",
+		Checks: []ValidateCheck{{Name: "unit", Source: "pipeline", Result: "FAIL", Evidence: "job unit failed"}},
+	})
+	if _, err := DecodeContract(ContractValidate, raw); err == nil {
+		t.Fatal("a FAIL check must make the status FAIL, not BLOCKED")
+	}
+}
+
+func TestLanesAgentNodesRecordToolGaps(t *testing.T) {
+	exploreRaw, _ := json.Marshal(validExploreOut())
+	validateRaw, _ := json.Marshal(passingValidate())
+	reasonerRaw, _ := json.Marshal(ReasonerOut{ResultType: "CLEAN", Findings: []ReasonerFinding{}})
+	outputs := map[string]json.RawMessage{KindExplore: exploreRaw, KindValidate: validateRaw, KindReasoner: reasonerRaw}
+	var current string
+	executor := newTestExecutor(t, ExecutorDeps{
+		Profile: lanesProfile(),
+		Dossier: validDossier(t),
+		Blocks: map[string]config.BlockBinding{
+			BlockExplore: {MCPTools: []string{"mcp__graph__search"}}, BlockValidate: {MCPTools: []string{"mcp__graph__search"}},
+			BlockReasoner: {MCPTools: []string{"mcp__graph__search"}},
+		},
+		Tools: failingTools{err: fmt.Errorf("graph server unavailable")},
+		AgentRun: func(_ context.Context, spec agent.RunSpec) (*agent.RunResult, error) {
+			decoded, err := spec.Submit.Decode(outputs[current])
+			if err != nil {
+				return nil, err
+			}
+			return &agent.RunResult{Output: decoded}, nil
+		},
+	})
+	raw := func(value any) json.RawMessage { out, _ := json.Marshal(value); return out }
+	for _, node := range []dag.NodeSpec{
+		{ID: NodeExplore, Kind: KindExplore, Params: raw(exploreParams{Provider: "local"})},
+		{ID: NodeValidate, Kind: KindValidate, Params: raw(validateParams{Provider: "local"})},
+		{ID: NodeReasoner, Kind: KindReasoner, Params: raw(reasonerParams{Provider: "local", When: "always", Tools: true})},
+	} {
+		current = node.Kind
+		out, err := executor.Execute(context.Background(), dag.NodeInput{WorkflowID: "wf", Node: node})
+		if err != nil {
+			t.Fatalf("Execute %s: %v", node.ID, err)
+		}
+		var gaps struct {
+			ToolGaps []string `json:"tool_gaps"`
+		}
+		if err := json.Unmarshal(out.Data, &gaps); err != nil || len(gaps.ToolGaps) == 0 {
+			t.Fatalf("%s output drops the MCP binding gap: %s", node.ID, out.Data)
+		}
+	}
+}
+
+// lanesRunner answers each lane by its role prompt; failRole makes that role
+// fail permanently.
+func lanesRunner(t *testing.T, failRole string, calls *sync.Map) AgentRunner {
+	t.Helper()
+	outputs := map[string]any{
+		"# Explore role":     validExploreOut(),
+		"# Code review role": CodeReviewOut{Summary: "cr", Findings: []FindingOut{}},
+		"# Review lane role": ReviewOut{Verdict: "PASS", EvidenceStatus: "sufficient", Findings: []FindingOut{}, EvidenceGaps: []string{}, Summary: "ok"},
+		"# Reasoner role":    ReasonerOut{ResultType: "CLEAN", Findings: []ReasonerFinding{}},
+		"# Validate lane role": ValidateOut{Status: "PASS", Findings: []FindingOut{}, Summary: "ok",
+			Checks: []ValidateCheck{{Name: "pipeline", Source: "pipeline", Result: "PASS", Evidence: "pipeline success"}}},
+	}
+	return func(_ context.Context, spec agent.RunSpec) (*agent.RunResult, error) {
+		var system strings.Builder
+		for _, block := range spec.System {
+			system.WriteString(block.Text)
+		}
+		for role, output := range outputs {
+			if !strings.Contains(system.String(), role) {
+				continue
+			}
+			calls.Store(role, true)
+			if role == failRole {
+				return nil, fmt.Errorf("%w: lane failed", agent.ErrUnsafeResponse)
+			}
+			raw, _ := json.Marshal(output)
+			decoded, err := spec.Submit.Decode(raw)
+			if err != nil {
+				return nil, err
+			}
+			return &agent.RunResult{Output: decoded, Usage: llm.Usage{InputTokens: 10, OutputTokens: 2}}, nil
+		}
+		t.Errorf("unexpected agent role in system prompt")
+		return nil, fmt.Errorf("unexpected role")
+	}
+}
+
+func TestLanesEngineExploreFailureStillRunsTheFourLanes(t *testing.T) {
+	var calls sync.Map
+	view := runReviewWorkflow(t, lanesProfile(), 30, 0, lanesRunner(t, "# Explore role", &calls))
+	if view.Nodes[NodeExplore].Status != dag.NodeFailed {
+		t.Fatalf("explore = %s, want failed", view.Nodes[NodeExplore].Status)
+	}
+	for _, id := range []string{NodePlan, "cr.p1", "rv.p1", NodeReasoner, NodeValidate, NodeGather, NodeAdjudicate, NodeSynth} {
+		if view.Nodes[id].Status != dag.NodeCompleted {
+			t.Fatalf("%s = %s, want completed after a failed explore", id, view.Nodes[id].Status)
+		}
+	}
+	result := decodeNodeOutput[SynthesisResult](t, view, NodeSynth)
+	if result.Verdict != VerdictPass || !containsSubstring(result.Warnings, NodeExplore) {
+		t.Fatalf("verdict = %s warnings = %v, want PASS with an explore warning", result.Verdict, result.Warnings)
+	}
+}
+
+func TestLanesEngineFailedLaneMakesTheReviewIncomplete(t *testing.T) {
+	var calls sync.Map
+	view := runReviewWorkflow(t, lanesProfile(), 30, 0, lanesRunner(t, "# Validate lane role", &calls))
+	if view.Nodes[NodeValidate].Status != dag.NodeFailed {
+		t.Fatalf("validate = %s, want failed", view.Nodes[NodeValidate].Status)
+	}
+	for _, role := range []string{"# Code review role", "# Review lane role", "# Reasoner role"} {
+		if _, ok := calls.Load(role); !ok {
+			t.Fatalf("lane %q did not run beside the failed lane", role)
+		}
+	}
+	result := decodeNodeOutput[SynthesisResult](t, view, NodeSynth)
+	if result.Verdict != VerdictIncomplete || !hasUnresolved(result.Unresolved, NodeValidate, UnresolvedEvidence) {
+		t.Fatalf("verdict = %s unresolved = %+v, want INCOMPLETE naming validate", result.Verdict, result.Unresolved)
+	}
 }
