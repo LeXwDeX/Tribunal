@@ -252,7 +252,7 @@ SSE 事件（`event:` 字段）：`node`（`{id, status, attempt}`）、`finding
 }
 ```
 
-agent 节点的 request 还可能带可选字段 `submit_prompt`（本次请求追加提交提示的原因：`last_turn`、`context`、`deadline`、`budget`）、`compacted_tool_results`（本次运行累计被上下文压缩的工具结果数）和 `forced_tool_choice`（本次请求强制了工具选择，不记录工具名）；缺省表示没有。新记录只包含结构计数、允许的请求选项、固定 stop reason 和 usage，不含 prompt、响应正文、工具参数/输出、推理内容、上游 ID 或错误原文。响应可因请求失败而缺失；只返回已知用量的响应也有格式标记。记录器按 agent 的停止原因和调用批次检查预分类 `error_kind=unsafe_model_response`，计入错误，但不改变实际拒绝和重试策略，也不代表节点最终状态。
+agent 节点的 request 还可能带可选字段 `submit_prompt`（本次请求追加提交提示的原因：`last_turn`、`context`、`deadline`、`budget`）、`compacted_tool_results`（本次运行累计被上下文压缩的工具结果数）和 `forced_tool_choice`（本次请求强制了工具选择，不记录工具名）；缺省表示没有。agent 节点的 response 在有工具调用被拒绝（清除、未执行）时还可能带 `invalid_tool_call`（首个被拒绝调用的固定类别：`missing_call`、`empty_id`、`empty_name`、`duplicate_id`、`empty_input`、`not_object`、`invalid_json`、`non_string_field`、`unsupported_item`、`malformed_list`、`unexpected_stop`、`rejected_batch`）和 `invalid_tool_input_bytes`（该调用参数的字节数），缺省表示没有被拒绝的调用，不记录工具名和参数。新记录只包含结构计数、允许的请求选项、固定 stop reason 和 usage，不含 prompt、响应正文、工具参数/输出、推理内容、上游 ID 或错误原文。响应可因请求失败而缺失；只返回已知用量的响应也有格式标记。记录器按 agent 的停止原因和调用批次检查预分类 `error_kind=unsafe_model_response`，计入错误，但不改变实际拒绝和重试策略，也不代表节点最终状态。
 
 **兼容契约：**没有 `_format` 的历史 payload 按存储原样返回；它可能是旧 `llm.Request`/`Response`（其中 request 的 `messages` 是数组），也可能是早期未标记的元数据（`messages` 是数字）或截断摘要。历史响应、部分 payload 或缺失 payload 有时无法单独判别，客户端应保留 unknown 分支，不得把未标记数据一律解析为某一种格式。版本和请求、响应应分别判断；同一列表可能混合各类历史和新格式。不能按旧类型把新 `messages` 当数组；未知未来版本也不应猜测。`include_payload` 可能读取含 prompt、响应正文或上游 ID 的历史数据，管理权限不等于已脱敏，禁止把它们写入普通日志。历史数据库和备份未被清洗。
 

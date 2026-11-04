@@ -16,9 +16,12 @@ import (
 type promptedInvalidClient struct {
 	reqs     []*llm.Request
 	prompted []*llm.Response
+	window   int
 }
 
-func (c *promptedInvalidClient) Info() llm.ProviderInfo { return llm.ProviderInfo{Name: "prompted"} }
+func (c *promptedInvalidClient) Info() llm.ProviderInfo {
+	return llm.ProviderInfo{Name: "prompted", ContextWindow: c.window}
+}
 
 func (c *promptedInvalidClient) Generate(_ context.Context, req *llm.Request) (*llm.Response, error) {
 	c.reqs = append(c.reqs, req)
@@ -30,7 +33,9 @@ func (c *promptedInvalidClient) Generate(_ context.Context, req *llm.Request) (*
 	}
 	resp := c.prompted[0]
 	c.prompted = c.prompted[1:]
-	resp.Usage = usage
+	if llm.UsageZero(resp.Usage) {
+		resp.Usage = usage
+	}
 	return resp, nil
 }
 
@@ -189,5 +194,50 @@ func TestRunBudgetReserveLeavesRoomForOneResubmit(t *testing.T) {
 	}
 	if spent := result.Usage.InputTokens + result.Usage.OutputTokens; spent > budget {
 		t.Fatalf("spent %d of %d: the submit prompt must start early enough for one resubmit", spent, budget)
+	}
+}
+
+func TestRunRecoveryDropsReasoningOfRejectedTurn(t *testing.T) {
+	// A Responses reasoning item must be followed by its function call; the
+	// call is dropped, so its reasoning must go too.
+	invalid := toolResponse(llm.StopToolUse, call("bad", SubmitToolName, corruptSubmitInput))
+	invalid.Message.Parts = append([]llm.Part{
+		{Type: llm.PartText, Text: "draft"},
+		{Type: llm.PartReasoning, Reasoning: &llm.Reasoning{Protocol: "openai-responses", Raw: json.RawMessage(`{"type":"reasoning","id":"rs_2","summary":[]}`)}},
+	}, invalid.Message.Parts...)
+	client := &promptedInvalidClient{prompted: []*llm.Response{
+		invalid,
+		toolResponse(llm.StopToolUse, call("ok", SubmitToolName, `{"done":true}`)),
+	}}
+	if _, err := Run(context.Background(), budgetSpec(client)); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, msg := range client.reqs[3].Messages {
+		for _, part := range msg.Parts {
+			if part.Type == llm.PartReasoning {
+				t.Fatal("reasoning of the rejected turn must not be replayed")
+			}
+		}
+	}
+}
+
+func TestRunRecoverySizesContextWithoutRejectedOutput(t *testing.T) {
+	// The rejected output is not replayed, so it must not count toward the
+	// context estimate and trigger compaction on the resubmit turn.
+	invalid := toolResponse(llm.StopToolUse, call("bad", SubmitToolName, corruptSubmitInput))
+	invalid.Usage = llm.Usage{InputTokens: 1000, OutputTokens: 90000}
+	client := &promptedInvalidClient{window: 100000, prompted: []*llm.Response{
+		invalid,
+		toolResponse(llm.StopToolUse, call("ok", SubmitToolName, `{"done":true}`)),
+	}}
+	if _, err := Run(context.Background(), budgetSpec(client)); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, msg := range client.reqs[len(client.reqs)-1].Messages {
+		for _, part := range msg.Parts {
+			if part.ToolResult != nil && part.ToolResult.Content == compactedToolResult {
+				t.Fatal("the resubmit turn must not compact because of the rejected output")
+			}
+		}
 	}
 }

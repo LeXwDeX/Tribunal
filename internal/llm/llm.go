@@ -70,6 +70,8 @@ const (
 	ToolCallUnsupported    = "unsupported_item"
 	ToolCallMalformedList  = "malformed_list"
 	ToolCallUnexpectedStop = "unexpected_stop"
+	// ToolCallRejectedBatch marks a valid call cleared with an invalid one.
+	ToolCallRejectedBatch = "rejected_batch"
 )
 
 // invalidToolCall is an adapter marker for a call that cannot be decoded.
@@ -148,6 +150,8 @@ func SanitizeToolCalls(message Message, allow bool) (Message, bool) {
 		cleared := &ToolCall{Invalid: ToolCallUnexpectedStop}
 		if problem, ok := problems[i]; ok {
 			cleared.Invalid = problem
+		} else if invalid {
+			cleared.Invalid = ToolCallRejectedBatch
 		}
 		if part.ToolCall != nil {
 			cleared.InputBytes = len(part.ToolCall.Input)
@@ -174,7 +178,7 @@ func ToolCallIssue(message Message) (string, int) {
 		case ToolCallMissing, ToolCallEmptyID, ToolCallEmptyName, ToolCallDuplicateID, ToolCallEmptyInput,
 			ToolCallNotObject, ToolCallInvalidJSON, ToolCallNonString, ToolCallUnsupported, ToolCallMalformedList:
 			return issue, part.ToolCall.InputBytes
-		case ToolCallUnexpectedStop:
+		case ToolCallUnexpectedStop, ToolCallRejectedBatch:
 		default:
 			// Only this package sets Invalid; keep the vocabulary fixed anyway.
 			return ToolCallUnsupported, part.ToolCall.InputBytes

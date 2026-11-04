@@ -37,20 +37,20 @@ func invalidToolCallFeedback(kind string) string {
 		" tool once more, with its arguments as one complete, valid JSON object. Do not call any other tool."
 }
 
-// withoutToolCalls drops the cleared calls of a rejected turn. It reports
-// false when no text remains, so the turn is left out of the transcript.
-func withoutToolCalls(message llm.Message) (llm.Message, bool) {
-	parts := make([]llm.Part, 0, len(message.Parts))
-	hasText := false
+// rejectedTurnText keeps only the text of a rejected turn. Its calls are
+// dropped, and so is its reasoning: a Responses reasoning item must be
+// followed by its call, and Anthropic forbids altering the latest assistant
+// turn's thinking. It reports false when no text remains, so the turn is left
+// out of the transcript.
+func rejectedTurnText(message llm.Message) (llm.Message, bool) {
+	var parts []llm.Part
 	for _, part := range message.Parts {
-		if part.Type == llm.PartToolCall {
-			continue
+		if part.Type == llm.PartText && part.Text != "" {
+			parts = append(parts, part)
 		}
-		hasText = hasText || (part.Type == llm.PartText && part.Text != "")
-		parts = append(parts, part)
 	}
 	message.Parts = parts
-	return message, hasText
+	return message, len(parts) > 0
 }
 
 var nonceFallback atomic.Uint64
@@ -355,12 +355,19 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 		// A reasoning gateway can corrupt the large arguments of a prompted
 		// submit (#269). Nothing ran, so once per run, with a turn left, the
 		// cleared calls are dropped and the model is told the fixed category.
+		// The resubmit turn recomputes its reason; if none applies it is an
+		// ordinary turn, and a second invalid call still fails closed.
 		if invalid && resp.StopReason == llm.StopToolUse && reason != "" && !lastTurn && !invalidRecovered {
 			invalidRecovered = true
 			kind, _ := llm.ToolCallIssue(message)
 			messages = messages[:len(messages)-1]
-			if kept, ok := withoutToolCalls(message); ok {
+			if kept, ok := rejectedTurnText(message); ok {
 				messages = append(messages, kept)
+			}
+			// The rejected output is not replayed; size the context from the
+			// request alone so it cannot trigger compaction.
+			if sized.InputTokens > 0 {
+				contextTokens = sized.InputTokens
 			}
 			messages = append(messages, llm.Message{
 				Role:  llm.RoleUser,

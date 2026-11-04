@@ -151,3 +151,17 @@ func TestAuditRecordsInvalidToolCallWithoutProviderText(t *testing.T) {
 		t.Fatalf("audit JSON = %s", data)
 	}
 }
+
+func TestSanitizeToolCallsMarksValidCallsOfRejectedBatch(t *testing.T) {
+	msg := Message{Role: RoleAssistant, Parts: []Part{
+		{Type: PartToolCall, ToolCall: &ToolCall{ID: "a", Name: "t", Input: json.RawMessage(`{}`)}},
+		{Type: PartToolCall, ToolCall: &ToolCall{ID: "b", Name: "t", Input: json.RawMessage(`{`)}},
+	}}
+	out, invalid := SanitizeToolCalls(msg, true)
+	if !invalid || out.Parts[0].ToolCall.Invalid != ToolCallRejectedBatch || out.Parts[1].ToolCall.Invalid != ToolCallInvalidJSON {
+		t.Fatalf("categories = %q, %q", out.Parts[0].ToolCall.Invalid, out.Parts[1].ToolCall.Invalid)
+	}
+	if kind, n := ToolCallIssue(out); kind != ToolCallInvalidJSON || n != 1 {
+		t.Fatalf("issue = %q/%d", kind, n)
+	}
+}
