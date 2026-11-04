@@ -25,6 +25,13 @@
   --accent-ring: rgba(47, 91, 234, 0.35);
   --link: #2349c8;
   --on-accent: #ffffff;
+  --nav-strong: #ffffff;
+  --nav-accent-fg: #b7c8ff;
+  --nav-accent-tint: rgba(97, 136, 255, 0.22);
+  --avatar-from: #6d86d3;
+  --avatar-to: #977bd7;
+  --on-danger-solid: #ffffff;
+  --knob: #ffffff;
 
   --ok-bg: #e8f6ee;
   --ok-fg: #146639;

@@ -5,7 +5,7 @@
   max-width: var(--page-max);
   min-width: 0;
   margin: 0 auto;
-  padding: 24px 28px 64px;
+  padding: 24px 24px 64px;
   box-sizing: border-box;
   animation: pageIn 180ms ease-out;
 }
@@ -203,7 +203,7 @@
   font: 600 11.5px/1 var(--font-mono);
 }
 
-.sevP0 { background: var(--danger-solid); color: #fff; }
+.sevP0 { background: var(--danger-solid); color: var(--on-danger-solid); }
 .sevP1 {
   background: var(--danger-bg);
   color: var(--danger-fg);
@@ -232,7 +232,7 @@
 }
 
 .sevCounts .zero {
-  color: var(--muted);
+  color: var(--border-strong);
 }
 
 .panel {
@@ -387,6 +387,7 @@
 
 .metricValue {
   font-size: 22px;
+  height: 33px;
   font-weight: 650;
   line-height: 1.2;
   letter-spacing: -0.01em;
@@ -868,7 +869,7 @@
   position: fixed;
   right: 20px;
   bottom: 20px;
-  z-index: 80;
+  z-index: 60;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -987,7 +988,7 @@
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: var(--surface);
+  background: var(--knob);
   transition: transform 140ms ease;
 }
 

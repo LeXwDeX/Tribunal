@@ -23,7 +23,7 @@
   gap: 10px;
 }
 
-.brandName { color: #fff; font-size: 16px; font-weight: 650; }
+.brandName { color: var(--nav-strong); font-size: 16px; font-weight: 650; }
 
 .artBody {
   display: flex;
@@ -33,7 +33,7 @@
 
 .tagline {
   max-width: 14em;
-  color: #fff;
+  color: var(--nav-strong);
   font-size: 30px;
   font-weight: 650;
   line-height: 1.25;
@@ -63,7 +63,7 @@
 
 .authFlow b {
   width: 22px;
-  color: #b7c8ff;
+  color: var(--nav-accent-fg);
   font: 600 12px var(--font-mono);
 }
 
