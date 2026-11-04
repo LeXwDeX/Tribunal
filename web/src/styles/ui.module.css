@@ -138,10 +138,6 @@
   font-size: var(--fs-label);
 }
 
-.fullWidth {
-  width: 100%;
-  grid-column: 1 / -1;
-}
 
 .spinner {
   width: 14px;
@@ -436,8 +432,6 @@
   font-weight: var(--fw-medium);
 }
 
-.trendUp { color: var(--ok-fg); }
-.trendDown { color: var(--danger-fg); }
 
 .field {
   display: flex;
@@ -609,13 +603,6 @@
   font-size: 13px;
 }
 
-.tableTools {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-md);
-  justify-content: space-between;
-}
 
 /* Toolbar: one aligned row of filters. Fixed to the control height so
    switching scope or filters never moves the content below it. */
@@ -928,12 +915,6 @@
   overflow: auto;
 }
 
-.userBlock {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-}
 
 .avatar {
   width: 32px;
@@ -948,11 +929,6 @@
   font-weight: 700;
 }
 
-.divider {
-  height: 1px;
-  background: var(--border);
-  width: 100%;
-}
 
 .definitionGrid {
   display: grid;
