@@ -1,13 +1,13 @@
 .notes {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 12px;
-  padding: 8px 18px;
+  gap: var(--space-2xs) var(--space-md);
+  padding: var(--space-sm) 18px;
   border-bottom: 1px solid var(--border);
 }
 
 .state {
-  padding: 16px 18px;
+  padding: var(--space-lg) 18px;
 }
 
 /* Six statuses do not fit a phone row; scroll them instead of wrapping labels. */

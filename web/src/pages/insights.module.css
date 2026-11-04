@@ -5,7 +5,7 @@
 .section {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-md);
   min-width: 0;
 }
 
@@ -14,31 +14,31 @@
   flex-wrap: wrap;
   align-items: baseline;
   justify-content: space-between;
-  gap: 8px 12px;
+  gap: var(--space-sm) var(--space-md);
 }
 
 .sectionTitle {
   margin: 0;
-  font-size: 14px;
-  font-weight: 600;
+  font-size: var(--fs-body);
+  font-weight: var(--fw-semibold);
 }
 
 .sectionAside {
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: var(--fs-label);
 }
 
 .subTitle {
-  margin: 4px 0 0;
-  font-size: 12.5px;
-  font-weight: 600;
+  margin: var(--space-2xs) 0 0;
+  font-size: var(--fs-label);
+  font-weight: var(--fw-semibold);
   color: var(--muted-strong);
 }
 
 .panelActions {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--space-sm);
 }
 
 .loadMore {
@@ -49,7 +49,7 @@
 .flushLoadMore {
   display: flex;
   justify-content: center;
-  padding: 12px;
+  padding: var(--space-md);
   border-top: 1px solid var(--border);
 }
 
@@ -57,7 +57,7 @@
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 8px;
+  gap: var(--space-sm);
 }
 
 .actionsCol {
@@ -81,11 +81,11 @@
 .cards {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr));
-  gap: 16px;
+  gap: var(--space-lg);
 }
 
 .providerCard {
-  gap: 12px;
+  gap: var(--space-md);
 }
 
 .providerHead {
@@ -93,12 +93,12 @@
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--space-sm);
 }
 
 .cardTitle {
   font-family: var(--font-mono);
-  font-weight: 600;
+  font-weight: var(--fw-semibold);
   font-size: 14.5px;
   overflow-wrap: anywhere;
 }
@@ -106,9 +106,9 @@
 .cardMeta {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 12px;
+  gap: var(--space-2xs) var(--space-md);
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: var(--fs-label);
   min-width: 0;
 }
 
@@ -123,7 +123,7 @@
   padding: 0;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 1px;
+  gap: var(--space-px);
   background: var(--border);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -132,7 +132,7 @@
 
 .cardStats li {
   background: var(--surface-2);
-  padding: 8px 10px;
+  padding: var(--space-sm) 10px;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -140,7 +140,7 @@
 }
 
 .cardStats span {
-  font-size: 11px;
+  font-size: var(--fs-micro);
   color: var(--muted);
 }
 
@@ -152,18 +152,18 @@
 .cardStats .statUnavailable {
   color: var(--muted);
   font-family: var(--font-sans);
-  font-weight: 500;
+  font-weight: var(--fw-medium);
 }
 
 .cardActions {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--space-sm);
   margin-top: auto;
 }
 
 .testResult {
-  font-size: 12px;
+  font-size: var(--fs-meta);
   color: var(--muted-strong);
   overflow-wrap: anywhere;
 }
@@ -178,9 +178,9 @@
 .profileMeta {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 14px;
+  gap: var(--space-2xs) 14px;
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: var(--fs-label);
 }
 
 .profileSteps {
@@ -190,14 +190,14 @@
   display: flex;
   flex-wrap: wrap;
   align-items: stretch;
-  gap: 8px 22px;
+  gap: var(--space-sm) 22px;
 }
 
 .profileStep {
   position: relative;
   min-width: 96px;
   max-width: 100%;
-  padding: 8px 10px;
+  padding: var(--space-sm) 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface-2);
@@ -217,13 +217,13 @@
   line-height: 1;
 }
 
-.profileStepN { font-size: 11px; color: var(--muted); }
-.profileStepWhat { font-size: 12.5px; font-weight: 500; overflow-wrap: anywhere; }
+.profileStepN { font-size: var(--fs-micro); color: var(--muted); }
+.profileStepWhat { font-size: var(--fs-label); font-weight: var(--fw-medium); overflow-wrap: anywhere; }
 .profileStepWho { font: 500 12px var(--font-mono); color: var(--link); overflow-wrap: anywhere; }
 
 .budget {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-meta);
   overflow-wrap: anywhere;
 }
 
@@ -234,7 +234,7 @@
   flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
-  gap: 8px;
+  gap: var(--space-sm);
   min-width: 0;
   margin-left: auto;
 }
@@ -281,7 +281,7 @@
 
 .chartAxis {
   display: flex;
-  margin-top: 4px;
+  margin-top: var(--space-2xs);
 }
 
 .chartAxis span {
@@ -298,14 +298,14 @@
   display: flex;
   flex-wrap: wrap;
   gap: 14px;
-  font-size: 12px;
+  font-size: var(--fs-meta);
   color: var(--muted);
 }
 
 .legend span {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-xs);
 }
 
 .legend i {
@@ -319,19 +319,19 @@
 .trendCaption {
   caption-side: top;
   text-align: left;
-  padding: 0 14px 8px;
+  padding: 0 14px var(--space-sm);
   color: var(--muted);
 }
 
 .trendCell {
-  padding: 12px;
+  padding: var(--space-md);
   background: var(--surface-2);
 }
 
 .ratio {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-2xs);
   min-width: 120px;
 }
 
@@ -361,7 +361,7 @@
 .signals {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px 8px;
+  gap: var(--space-xs) var(--space-sm);
 }
 
 /* --- 系统 --- */
@@ -381,7 +381,7 @@
 .field {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-xs);
   min-width: 0;
 }
 
@@ -389,21 +389,21 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 14px 18px 12px;
+  padding: 14px 18px var(--space-md);
   border-top: 1px solid var(--border);
 }
 
 .grantForm {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-md);
 }
 
 .formActions {
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 8px;
+  gap: var(--space-sm);
 }
 
 @media (max-width: 900px) {
@@ -423,7 +423,7 @@
   }
   .profileSteps {
     flex-direction: column;
-    gap: 8px;
+    gap: var(--space-sm);
   }
   .profileStep + .profileStep::before {
     content: none;

@@ -3,6 +3,44 @@
   --font-sans: "Inter", "PingFang SC", "Noto Sans SC", "Source Han Sans SC", "Microsoft YaHei", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
+  --fs-display: 30px;
+  --fs-h1: 22px;
+  --fs-h2: 21px;
+  --fs-h3: 17px;
+  --fs-h4: 15px;
+  --fs-body: 14px;
+  --fs-body-sm: 13.5px;
+  --fs-label: 12.5px;
+  --fs-meta: 12px;
+  --fs-caption: 11.5px;
+  --fs-micro: 11px;
+
+  --lh-tight: 1.2;
+  --lh-snug: 1.35;
+  --lh-normal: 1.5;
+  --lh-relaxed: 1.65;
+
+  --fw-regular: 400;
+  --fw-medium: 500;
+  --fw-semibold: 600;
+  --fw-bold: 650;
+
+  --ls-tight: -0.01em;
+  --ls-normal: 0;
+  --ls-wide: 0.04em;
+
+  --space-0: 0;
+  --space-px: 1px;
+  --space-2xs: 4px;
+  --space-xs: 6px;
+  --space-sm: 8px;
+  --space-md: 12px;
+  --space-lg: 16px;
+  --space-xl: 20px;
+  --space-2xl: 24px;
+  --space-3xl: 32px;
+  --space-4xl: 48px;
+
   --bg: #f4f5f8;
   --surface: #ffffff;
   --surface-2: #f8f9fb;
@@ -26,6 +64,8 @@
   --link: #2349c8;
   --on-accent: #ffffff;
   --nav-strong: #ffffff;
+  --nav-tint: rgba(255, 255, 255, 0.02);
+  --on-accent-highlight: rgba(255, 255, 255, 0.12);
   --nav-accent-fg: #b7c8ff;
   --nav-accent-tint: rgba(97, 136, 255, 0.22);
   --avatar-from: #6d86d3;
@@ -61,6 +101,19 @@
   --topbar-h: 56px;
   --nav-w: 236px;
   --page-max: 1320px;
+
+  --z-topbar: 20;
+  --z-mobile-bar: 30;
+  --z-nav-backdrop: 39;
+  --z-nav: 40;
+  --z-overlay: 50;
+  --z-modal: 51;
+  --z-drawer: 55;
+  --z-toast: 60;
+
+  --dur-fast: 120ms;
+  --dur-base: 180ms;
+  --dur-drawer: 200ms;
   --shadow-sm: 0 1px 2px rgba(15, 23, 41, 0.04), 0 1px 1px rgba(15, 23, 41, 0.03);
   --shadow-md: 0 8px 24px rgba(15, 23, 41, 0.08), 0 2px 6px rgba(15, 23, 41, 0.04);
   --shadow-modal: 0 24px 60px rgba(15, 23, 41, 0.24), 0 2px 8px rgba(15, 23, 41, 0.08);
