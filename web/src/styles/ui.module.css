@@ -988,7 +988,7 @@
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: var(--knob);
+  background: var(--surface);
   transition: transform 140ms ease;
 }
 
