@@ -124,6 +124,20 @@ func SafeAuditStopReason(reason StopReason) string {
 	}
 }
 
+// forcedToolChoiceSupported resolves providers.<name>.forced_tool_choice
+// (#259). auto forces only Anthropic without extended thinking: OpenAI
+// compatible gateways cannot be probed, and reasoning gateways reject a
+// forced choice with HTTP 400.
+func forcedToolChoiceSupported(cfg config.ProviderConfig) bool {
+	switch cfg.ForcedToolChoice {
+	case "supported":
+		return true
+	case "unsupported":
+		return false
+	}
+	return cfg.Protocol == "anthropic" && (cfg.Thinking == nil || cfg.Thinking.BudgetTokens <= 0)
+}
+
 // safeSubmitPrompt keeps only the known CallMeta.SubmitPrompt values.
 func safeSubmitPrompt(reason string) string {
 	switch reason {
@@ -313,7 +327,8 @@ func newProviderClient(name string, cfg config.ProviderConfig, httpClient *http.
 	if apiKey == "" {
 		return nil, fmt.Errorf("llm: provider %q: environment variable %s is not set", name, cfg.APIKeyEnv)
 	}
-	info := ProviderInfo{Name: name, Protocol: cfg.Protocol, Model: cfg.Model, BaseURL: cfg.BaseURL, ContextWindow: cfg.ContextWindow}
+	info := ProviderInfo{Name: name, Protocol: cfg.Protocol, Model: cfg.Model, BaseURL: cfg.BaseURL,
+		ContextWindow: cfg.ContextWindow, ForcedToolChoice: forcedToolChoiceSupported(cfg)}
 	adapter, err := newAdapter(info, cfg, apiKey, httpClient)
 	if err != nil {
 		return nil, fmt.Errorf("llm: provider %q: %w", name, err)

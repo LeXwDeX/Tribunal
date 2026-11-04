@@ -19,6 +19,10 @@ func TestProviderConfigJSONOmitsUnsetContextWindow(t *testing.T) {
 	if string(raw) != want {
 		t.Fatalf("provider identity JSON changed:\n got %s\nwant %s", raw, want)
 	}
+	raw, err = json.Marshal(ProviderConfig{ForcedToolChoice: "supported"})
+	if err != nil || !strings.Contains(string(raw), `"forced_tool_choice":"supported"`) {
+		t.Fatalf("configured forced tool choice must be part of the identity: %s err=%v", raw, err)
+	}
 	raw, err = json.Marshal(ProviderConfig{ContextWindow: 128000})
 	if err != nil || !strings.Contains(string(raw), `"context_window":128000`) {
 		t.Fatalf("configured context window must be part of the identity: %s err=%v", raw, err)

@@ -138,11 +138,15 @@ type ProviderConfig struct {
 	// ContextWindow is the model's context size in tokens. Zero disables
 	// agent context compaction. omitempty keeps existing review execution
 	// identities (which hash this struct) unchanged when it is unset.
-	ContextWindow int              `yaml:"context_window" json:"context_window,omitempty"`
-	Temperature   *float64         `yaml:"temperature" json:"temperature"`
-	Thinking      *ThinkingConfig  `yaml:"thinking" json:"thinking"`
-	Reasoning     *ReasoningConfig `yaml:"reasoning" json:"reasoning"`
-	Price         *PriceConfig     `yaml:"price" json:"price"`
+	ContextWindow int `yaml:"context_window" json:"context_window,omitempty"`
+	// ForcedToolChoice declares whether the provider accepts a forced
+	// tool_choice: auto (default), supported or unsupported (#259).
+	// omitempty keeps existing review execution identities unchanged.
+	ForcedToolChoice string           `yaml:"forced_tool_choice" json:"forced_tool_choice,omitempty"`
+	Temperature      *float64         `yaml:"temperature" json:"temperature"`
+	Thinking         *ThinkingConfig  `yaml:"thinking" json:"thinking"`
+	Reasoning        *ReasoningConfig `yaml:"reasoning" json:"reasoning"`
+	Price            *PriceConfig     `yaml:"price" json:"price"`
 	// StrictRoleAlternation folds a text prompt that follows tool results
 	// into the last tool message for openai-chat gateways that reject a
 	// tool -> user sequence (#262). It is ignored by other protocols.
@@ -415,6 +419,11 @@ func (c *Config) Validate() error {
 		}
 		if provider.ContextWindow < 0 {
 			p.add("%s.context_window must not be negative", field)
+		}
+		switch provider.ForcedToolChoice {
+		case "", "auto", "supported", "unsupported":
+		default:
+			p.add("%s.forced_tool_choice must be auto, supported or unsupported", field)
 		}
 		if provider.APIKeyEnv == "" {
 			p.add("%s.api_key_env must be set", field)

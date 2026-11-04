@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -29,6 +30,14 @@ const finalTurnPrompt = "This run is nearly out of turns, time, token budget or 
 const compactedToolResult = "[earlier tool output omitted to fit the context window]"
 
 var nonceFallback atomic.Uint64
+
+// rejectedForcedChoice remembers, for this process, providers that answered
+// a forced tool_choice with a bad request, so later runs use only the prompt.
+var rejectedForcedChoice sync.Map
+
+func forcedChoiceKey(info llm.ProviderInfo) string {
+	return info.Name + "\x00" + info.Model + "\x00" + info.BaseURL
+}
 
 // Run executes the tool loop until a valid submit_result or an error.
 //
@@ -150,7 +159,10 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 	}
 	// contextTokens estimates the next request's input: the last response's
 	// input and output tokens plus the tool results added since.
-	contextWindow := int64(spec.Client.Info().ContextWindow)
+	info := spec.Client.Info()
+	_, rejected := rejectedForcedChoice.Load(forcedChoiceKey(info))
+	forceSubmit := info.ForcedToolChoice && !rejected
+	contextWindow := int64(info.ContextWindow)
 	contextLimit := contextWindow * compactThresholdPercent / 100
 	var contextTokens, largestTurnTokens int64
 	compacted := 0
@@ -209,6 +221,10 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 		case nearBudget():
 			reason = llm.SubmitPromptBudget
 		}
+		if lastTurn && forceSubmit {
+			// The prompt stays as well, in case the forced choice is rejected.
+			req.ToolChoice = SubmitToolName
+		}
 		if reason != "" {
 			req.Messages = append(req.Messages, llm.Message{
 				Role:  llm.RoleUser,
@@ -259,6 +275,26 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 			return resp, callErr
 		}
 		resp, err := generate(req)
+		if err != nil && req.ToolChoice != "" {
+			var failure *llm.Error
+			var guardErr *llm.AttemptGuardError
+			if !errors.As(err, &guardErr) && !errors.Is(err, ErrUnsafeResponse) && !llm.IsUnsafeResponse(err) &&
+				!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) &&
+				errors.As(err, &failure) && failure.Kind == llm.ErrBadRequest {
+				// The provider rejected the forced choice: remember it and send
+				// the same request with auto, which already carries the prompt.
+				rejectedForcedChoice.Store(forcedChoiceKey(info), struct{}{})
+				forceSubmit = false
+				fallback := *req
+				fallback.ToolChoice = ""
+				resp, err = generate(&fallback)
+				var stopped *llm.AttemptGuardError
+				if errors.As(err, &stopped) && stopped.Previous == nil {
+					previous := *failure
+					err = &llm.AttemptGuardError{Err: err, Usage: stopped.Usage, Previous: &previous}
+				}
+			}
+		}
 		if err != nil {
 			if errors.Is(err, ErrUnsafeResponse) || llm.IsUnsafeResponse(err) {
 				return partial(&unsafeProviderError{err: err})

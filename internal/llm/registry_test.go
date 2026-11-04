@@ -644,3 +644,37 @@ func TestRegistryAuditsSubmitPromptAndCompaction(t *testing.T) {
 		t.Fatalf("unknown submit prompt reason recorded: %q", second.SubmitPrompt)
 	}
 }
+
+func TestForcedToolChoiceResolution(t *testing.T) {
+	thinking := &config.ThinkingConfig{BudgetTokens: 2048}
+	for _, tc := range []struct {
+		name string
+		cfg  config.ProviderConfig
+		want bool
+	}{
+		{"anthropic auto", config.ProviderConfig{Protocol: "anthropic"}, true},
+		{"anthropic thinking", config.ProviderConfig{Protocol: "anthropic", Thinking: thinking}, false},
+		{"anthropic zero budget", config.ProviderConfig{Protocol: "anthropic", Thinking: &config.ThinkingConfig{}}, true},
+		{"openai-chat auto", config.ProviderConfig{Protocol: "openai-chat"}, false},
+		{"openai-responses auto", config.ProviderConfig{Protocol: "openai-responses", ForcedToolChoice: "auto"}, false},
+		{"openai-chat supported", config.ProviderConfig{Protocol: "openai-chat", ForcedToolChoice: "supported"}, true},
+		{"anthropic unsupported", config.ProviderConfig{Protocol: "anthropic", ForcedToolChoice: "unsupported"}, false},
+		{"anthropic thinking supported", config.ProviderConfig{Protocol: "anthropic", Thinking: thinking, ForcedToolChoice: "supported"}, true},
+	} {
+		if got := forcedToolChoiceSupported(tc.cfg); got != tc.want {
+			t.Errorf("%s: forced tool choice = %t, want %t", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestRegistryReportsForcedToolChoice(t *testing.T) {
+	t.Setenv("TEST_KEY", "k")
+	cfg := chatConfig("http://127.0.0.1:1/v1", "TEST_KEY")
+	if mustClient(t, "chat", cfg).Info().ForcedToolChoice {
+		t.Fatal("openai-chat must not force by default")
+	}
+	cfg.ForcedToolChoice = "supported"
+	if !mustClient(t, "chat", cfg).Info().ForcedToolChoice {
+		t.Fatal("explicit supported must be reported")
+	}
+}
