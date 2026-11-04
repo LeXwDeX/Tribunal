@@ -151,12 +151,12 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 	// input and output tokens plus the tool results added since.
 	contextWindow := int64(spec.Client.Info().ContextWindow)
 	contextLimit := contextWindow * compactThresholdPercent / 100
-	contextHardLimit := contextWindow * compactHardPercent / 100
 	var contextTokens, largestTurnTokens int64
 	compacted := 0
 	// nearContextLimit compacts older tool outputs once the estimate reaches
 	// the limit and reports whether the context is still at or above it.
-	// When the kept turns alone approach the window, fewer turns are kept.
+	// While the estimate stays at or above the limit, fewer recent turns are
+	// kept, down to none, so the run can keep exploring when possible.
 	nearContextLimit := func() bool {
 		if contextWindow <= 0 || contextTokens < contextLimit {
 			return false
@@ -165,7 +165,7 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 			saved, n := compactToolResults(messages, keep)
 			contextTokens -= saved
 			compacted += n
-			if contextTokens < contextHardLimit {
+			if contextTokens < contextLimit {
 				break
 			}
 		}

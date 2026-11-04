@@ -172,9 +172,10 @@ type Response struct {
 	Message    Message    `json:"message"`
 	StopReason StopReason `json:"stop_reason"`
 	Usage      Usage      `json:"usage"`
-	// AttemptUsage is the successful attempt's usage when Usage also counts
-	// failed retries; zero when no retry was counted. It sizes the context;
-	// Usage stays the budget figure.
+	// AttemptUsage is the successful attempt's usage. The registry sets it on
+	// every success, while Usage also counts failed retries. It sizes the
+	// context; Usage stays the budget figure. Zero means unknown (for
+	// example a direct adapter call), and callers fall back to Usage.
 	AttemptUsage Usage  `json:"-"`
 	Model        string `json:"model,omitempty"`
 	RequestID    string `json:"request_id,omitempty"`

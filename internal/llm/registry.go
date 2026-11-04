@@ -124,8 +124,7 @@ func SafeAuditStopReason(reason StopReason) string {
 	}
 }
 
-// NewCallAudit builds the persistence-safe audit payload. Tool choice is a
-// tool name and is therefore omitted even though the live request needs it.
+// safeSubmitPrompt keeps only the known CallMeta.SubmitPrompt values.
 func safeSubmitPrompt(reason string) string {
 	switch reason {
 	case SubmitPromptLastTurn, SubmitPromptContext, SubmitPromptDeadline, SubmitPromptBudget:
@@ -134,6 +133,8 @@ func safeSubmitPrompt(reason string) string {
 	return ""
 }
 
+// NewCallAudit builds the persistence-safe audit payload. Tool choice is a
+// tool name and is therefore omitted even though the live request needs it.
 func NewCallAudit(req *Request, resp *Response) *CallAudit {
 	audit := &CallAudit{}
 	if req != nil {

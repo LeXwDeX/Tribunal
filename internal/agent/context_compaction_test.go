@@ -267,3 +267,22 @@ func TestRunSizesContextFromTheSuccessfulAttempt(t *testing.T) {
 		t.Fatalf("budget usage = %d, want the aggregate 27000", result.Usage.InputTokens)
 	}
 }
+
+func TestRunKeepsExploringWhenFewerRecentTurnsFit(t *testing.T) {
+	// A large task prompt leaves room for only about two full tool turns.
+	// After three turns, keeping three is over the limit but keeping two
+	// fits, so the run keeps exploring instead of being told to submit.
+	client := &windowClient{window: 20000}
+	spec := testSpec(client, bigTool(8000))
+	spec.Prompt = strings.Repeat("p", 44000)
+	spec.MaxTurns = 8
+	result, err := Run(context.Background(), spec)
+	if err != nil || result.Turns != 8 {
+		t.Fatalf("err=%v, want submit on the last turn", err)
+	}
+	for i, req := range client.reqs[:7] {
+		if hasSubmitPrompt(req) {
+			t.Fatalf("request %d asked for submit although fewer kept turns fit", i+1)
+		}
+	}
+}

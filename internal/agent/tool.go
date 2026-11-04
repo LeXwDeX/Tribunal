@@ -40,9 +40,6 @@ const (
 	// compactKeepToolTurns is how many of the latest tool turns keep their
 	// full output during compaction.
 	compactKeepToolTurns = 3
-	// compactHardPercent is the share of the window at which compaction
-	// keeps fewer recent tool turns, down to none.
-	compactHardPercent = 95
 	// minToolOutputChars keeps the untrusted-data wrapper and its truncation
 	// marker inside a tiny configured output limit.
 	minToolOutputChars = 256
