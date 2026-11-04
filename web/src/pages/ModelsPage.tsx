@@ -64,7 +64,6 @@ function ProviderCard({ provider, canWrite }: { provider: Provider; canWrite: bo
       <div className={styles.cardMeta}>
         <span>并发 {provider.max_concurrency !== undefined ? provider.max_concurrency : '不可用'} · {provider.rpm !== undefined ? provider.rpm : '不可用'} RPM</span>
         <span>base_url <code>{provider.base_url || '不可用'}</code></span>
-        <span>API key 环境变量 <code>{provider.api_key_env || '不可用'}</code></span>
       </div>
       {provider.last_error ? <span className={styles.resultError}>{provider.last_error}</span> : null}
       {canWrite ? (
@@ -139,7 +138,15 @@ function budgetLabel(budget?: Record<string, unknown>): string | undefined {
   if (!budget) return undefined
   const entries = Object.entries(budget)
   if (!entries.length) return undefined
-  return `预算 ${entries.map(([key, value]) => `${key}: ${typeof value === 'object' ? JSON.stringify(value) : String(value)}`).join(' · ')}`
+  return `预算 ${entries.map(([key, value]) => `${key}: ${budgetValue(key, value)}`).join(' · ')}`
+}
+
+// Go encodes time.Duration as integer nanoseconds; show deadlines as durations.
+function budgetValue(key: string, value: unknown): string {
+  if (key === 'deadline' && typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+    return formatDuration(value / 1_000_000)
+  }
+  return typeof value === 'object' ? JSON.stringify(value) : String(value)
 }
 
 function ProfilePanel({ profile }: { profile: Profile }) {
