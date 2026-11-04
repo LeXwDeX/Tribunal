@@ -241,3 +241,17 @@ func TestRunRecoverySizesContextWithoutRejectedOutput(t *testing.T) {
 		}
 	}
 }
+
+func TestRunFailsClosedOnProtocolViolationOnPromptedTurn(t *testing.T) {
+	// Unsupported items and malformed lists are protocol violations, not
+	// corrupted arguments, and are not recovered.
+	for _, kind := range []string{llm.ToolCallUnsupported, llm.ToolCallMalformedList} {
+		client := &promptedInvalidClient{prompted: []*llm.Response{
+			{Message: llm.Message{Role: llm.RoleAssistant, Parts: []llm.Part{{Type: llm.PartToolCall, ToolCall: &llm.ToolCall{Invalid: kind}}}}, StopReason: llm.StopToolUse},
+			toolResponse(llm.StopToolUse, call("ok", SubmitToolName, `{"done":true}`)),
+		}}
+		if _, err := Run(context.Background(), budgetSpec(client)); !errors.Is(err, ErrUnsafeResponse) {
+			t.Fatalf("%s: err = %v, want unsafe", kind, err)
+		}
+	}
+}

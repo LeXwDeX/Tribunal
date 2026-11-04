@@ -165,3 +165,63 @@ func TestSanitizeToolCallsMarksValidCallsOfRejectedBatch(t *testing.T) {
 		t.Fatalf("issue = %q/%d", kind, n)
 	}
 }
+
+func protocolIssueClient(t *testing.T, protocol, body string) Client {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("ISSUE_PROTOCOL_KEY", "key")
+	return mustClient(t, protocol, config.ProviderConfig{Protocol: protocol, Model: "test", BaseURL: server.URL, APIKeyEnv: "ISSUE_PROTOCOL_KEY", MaxTokens: 512})
+}
+
+func TestAnthropicToolCallIssueCategories(t *testing.T) {
+	wrap := func(content string) string {
+		return `{"id":"m","type":"message","role":"assistant","model":"test","stop_reason":"tool_use","content":` + content +
+			`,"usage":{"input_tokens":5,"output_tokens":5}}`
+	}
+	cases := []struct{ name, content, kind string }{
+		{"non-string id", `[{"type":"tool_use","id":7,"name":"t","input":{}}]`, ToolCallNonString},
+		{"indirect caller", `[{"type":"tool_use","id":"a","name":"t","input":{},"caller":{"type":"code_execution_20250825","tool_id":"x"}}]`, ToolCallUnsupported},
+		{"unknown block", `[{"type":"server_tool_use","id":"a","name":"t","input":{}}]`, ToolCallUnsupported},
+		{"malformed list", `{"type":"text"}`, ToolCallMalformedList},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := protocolIssueClient(t, "anthropic", wrap(tc.content)).Generate(context.Background(), simpleRequest())
+			if err != nil {
+				t.Fatalf("Generate: %v", err)
+			}
+			if kind, _ := ToolCallIssue(resp.Message); kind != tc.kind {
+				t.Fatalf("issue = %q, want %q", kind, tc.kind)
+			}
+		})
+	}
+}
+
+func TestResponsesToolCallIssueCategories(t *testing.T) {
+	wrap := func(output string) string {
+		return `{"id":"r","object":"response","created_at":1,"model":"test","status":"completed","output":` + output +
+			`,"usage":{"input_tokens":5,"output_tokens":5}}`
+	}
+	cases := []struct{ name, output, kind string }{
+		{"object arguments", `[{"type":"function_call","id":"fc","call_id":"a","name":"t","arguments":{"a":1},"status":"completed"}]`, ToolCallNonString},
+		{"async call", `[{"type":"function_call","id":"fc","call_id":"a","name":"t","arguments":"{}","status":"completed","async":true}]`, ToolCallUnsupported},
+		{"unknown item", `[{"type":"web_search_call","id":"w","status":"completed"}]`, ToolCallUnsupported},
+		{"malformed list", `{"type":"message"}`, ToolCallMalformedList},
+		{"truncated arguments", `[{"type":"function_call","id":"fc","call_id":"a","name":"t","arguments":"{\"a\":","status":"completed"}]`, ToolCallInvalidJSON},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := protocolIssueClient(t, "openai-responses", wrap(tc.output)).Generate(context.Background(), simpleRequest())
+			if err != nil {
+				t.Fatalf("Generate: %v", err)
+			}
+			if kind, _ := ToolCallIssue(resp.Message); kind != tc.kind {
+				t.Fatalf("issue = %q, want %q", kind, tc.kind)
+			}
+		})
+	}
+}

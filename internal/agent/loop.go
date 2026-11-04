@@ -37,6 +37,18 @@ func invalidToolCallFeedback(kind string) string {
 		" tool once more, with its arguments as one complete, valid JSON object. Do not call any other tool."
 }
 
+// recoverableToolCall reports whether a rejection category is a corrupted
+// call the model can resend. Unsupported items and malformed lists are
+// protocol violations and still fail closed.
+func recoverableToolCall(kind string) bool {
+	switch kind {
+	case llm.ToolCallInvalidJSON, llm.ToolCallNotObject, llm.ToolCallEmptyInput, llm.ToolCallNonString,
+		llm.ToolCallEmptyID, llm.ToolCallEmptyName, llm.ToolCallDuplicateID:
+		return true
+	}
+	return false
+}
+
 // rejectedTurnText keeps only the text of a rejected turn. Its calls are
 // dropped, and so is its reasoning: a Responses reasoning item must be
 // followed by its call, and Anthropic forbids altering the latest assistant
@@ -357,9 +369,9 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 		// cleared calls are dropped and the model is told the fixed category.
 		// The resubmit turn recomputes its reason; if none applies it is an
 		// ordinary turn, and a second invalid call still fails closed.
-		if invalid && resp.StopReason == llm.StopToolUse && reason != "" && !lastTurn && !invalidRecovered {
+		kind, _ := llm.ToolCallIssue(message)
+		if invalid && recoverableToolCall(kind) && resp.StopReason == llm.StopToolUse && reason != "" && !lastTurn && !invalidRecovered {
 			invalidRecovered = true
-			kind, _ := llm.ToolCallIssue(message)
 			messages = messages[:len(messages)-1]
 			if kept, ok := rejectedTurnText(message); ok {
 				messages = append(messages, kept)
