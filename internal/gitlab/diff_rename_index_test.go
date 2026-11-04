@@ -1,7 +1,7 @@
 package gitlab
 
-// These tests invert the observed assertions in
-// docs/audit-repro-4839248/162-gitlab_rename_index_test.go.txt.
+// These tests cover rename index handling for diffs that include both the old
+// and new path.
 
 import "testing"
 
