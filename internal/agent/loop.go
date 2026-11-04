@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -280,7 +281,8 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 			var guardErr *llm.AttemptGuardError
 			if !errors.As(err, &guardErr) && !errors.Is(err, ErrUnsafeResponse) && !llm.IsUnsafeResponse(err) &&
 				!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) &&
-				errors.As(err, &failure) && failure.Kind == llm.ErrBadRequest && llm.HasObservedResponse(err) {
+				errors.As(err, &failure) && failure.Kind == llm.ErrBadRequest && failure.Status == http.StatusBadRequest &&
+				llm.HasObservedResponse(err) {
 				// The provider answered the forced choice with a bad request:
 				// send the same request with auto, which already carries the
 				// prompt. Only a successful fallback proves the forced choice

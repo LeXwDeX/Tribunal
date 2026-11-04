@@ -67,6 +67,10 @@ func TestRunForcesSubmitWhenProviderSupportsIt(t *testing.T) {
 // (a forced function) with HTTP 400 and, unless alwaysReject, submits for
 // any other request.
 func forcedGatewayClient(t *testing.T, alwaysReject bool) (llm.Client, *atomic.Int32) {
+	return forcedGatewayClientStatus(t, alwaysReject, http.StatusBadRequest)
+}
+
+func forcedGatewayClientStatus(t *testing.T, alwaysReject bool, status int) (llm.Client, *atomic.Int32) {
 	t.Helper()
 	good := safetyResponse(t, "openai-responses", "", false, []safetyCall{{"submit", SubmitToolName, `{}`, false}}, false)
 	var forced atomic.Int32
@@ -78,7 +82,7 @@ func forcedGatewayClient(t *testing.T, alwaysReject bool) (llm.Client, *atomic.I
 			if isObject {
 				forced.Add(1)
 			}
-			w.WriteHeader(http.StatusBadRequest)
+			w.WriteHeader(status)
 			_, _ = w.Write([]byte(`{"error":{"message":"Thinking mode does not support this tool_choice","type":"invalid_request_error"}}`))
 			return
 		}
@@ -175,5 +179,19 @@ func TestRunNeverForcesForUnsupportedProvider(t *testing.T) {
 		if req.ToolChoice != "" {
 			t.Fatalf("request %d tool choice = %q; a provider without forced support must only get auto", i+1, req.ToolChoice)
 		}
+	}
+}
+
+func TestRunDoesNotFallBackOnOtherClientErrors(t *testing.T) {
+	client, forced := forcedGatewayClientStatus(t, false, http.StatusNotFound)
+	spec := testSpec(client)
+	spec.MaxTurns = 1
+	_, err := Run(context.Background(), spec)
+	var failure *llm.Error
+	if !errors.As(err, &failure) || failure.Status != http.StatusNotFound || forced.Load() != 1 {
+		t.Fatalf("err=%v forced=%d, want the 404 without a fallback", err, forced.Load())
+	}
+	if _, rejected := rejectedForcedChoice.Load(forcedChoiceKey(client.Info())); rejected {
+		t.Fatal("a 404 must not be remembered as a rejected forced choice")
 	}
 }
