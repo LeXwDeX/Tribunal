@@ -359,9 +359,31 @@ tribunalctl projects residues clean --yes
 
 ### 项目授权、用户停用和凭据撤销
 
-项目访问是 Tribunal 本地的 `project_grants`，不从 GitLab 组成员关系推导。`bootstrap_admins` 只决定平台管理标签；平台管理员读取或写入项目业务数据同样需要该项目授权。默认没有任何授权，`admin` 标签也不例外。入口检查中，无授权或项目不存在统一返回 404，只有 `read` 授权执行写操作返回 403。下述 dispatch 锁内复核不满足 manage 时统一返回 404，包括入口检查之后被降为 read 的请求。
+项目访问是 Tribunal 本地的 `project_grants`，不从 GitLab 组成员关系推导。`bootstrap_admins` 只决定平台管理标签；平台管理员读取或写入项目业务数据同样需要该项目授权。除下述注册人自动授权外，默认没有任何授权，`admin` 标签也不例外。入口检查中，无授权或项目不存在统一返回 404，只有 `read` 授权执行写操作返回 403。下述 dispatch 锁内复核不满足 manage 时统一返回 404，包括入口检查之后被降为 read 的请求。
 
 手动触发评审、刷新工作区、取消及重发评审会在项目生命周期锁内重新查询当前 manage grant 和用户启用状态，再访问项目凭据或入队。项目删除与重新登记使用同一锁；旧请求在删除后继续执行时，没有新 grant 则拒绝。复核时已有新 grant 的请求仍可继续。grant 或用户状态的独立变更不与此锁串行，复核之后的撤销不能保证阻止正在进行的请求；会话和 API token 仍按入口认证，不在此处再次核验。其他项目写接口（包括项目配置、webhook、上下文、扩展和问题标注）没有此项锁内授权保证，不能将此修复视为所有在途请求的即时撤销。
+
+**注册人自动授权**
+
+`POST /api/v1/projects` 仍只允许平台管理员调用。调用者是有用户 ID 的用户（浏览器会话，或用户创建的 API token）时，注册人自动获得该项目的 `manage` 授权；项目、工作区、onboarding 任务和这条授权在同一个 SQLite 事务内写入，授权写入失败则整体回滚，不会留下半注册状态。静态 bootstrap bearer token（用户 ID 0）注册时行为不变，不写任何授权，仍需按下文手动授权。
+
+项目已登记时返回 `409`，消息为 `project is already registered; if it is not in your project list, grant yourself access on the System page`：项目已存在，但不在你的项目列表中时，请到控制台“系统”页给自己授权。控制台注册弹窗会显示对应中文提示和“前往系统页授权”按钮。该路由仅平台管理员可调用，不向其他用户泄露项目是否存在。
+
+#### 存量项目补授权
+
+升级前已注册、但注册人没有授权的项目不会自动补授权。平台管理员任选以下方式补授权；目标用户须先通过 OAuth 登录一次，需要平台管理员凭据：
+
+```bash
+curl -fsS -X PUT \
+  -H "Authorization: Bearer $TRIBUNAL_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"role":"manage"}' \
+  "$TRIBUNAL_URL/api/v1/admin/projects/<项目ID>/grants/<用户ID>"
+```
+
+- `role` 取 `read` 或 `manage`，成功返回该授权。
+- 控制台“系统”页的项目授权可完成同样操作。
+- 也可使用下文的 `tribunalctl projects grants set <项目ID> <用户ID> manage`。
 
 **迁移已有部署并首次授权**
 
