@@ -53,6 +53,10 @@ providers:
     # openai-chat only: set to true when the gateway or its chat template
     # rejects a tool -> user message sequence ("roles must alternate").
     # strict_role_alternation: true
+    # Optional: auto (default) | supported | unsupported. Whether the last
+    # agent turn may force tool_choice=submit_result. auto forces only
+    # Anthropic without thinking; thinking gateways such as DeepSeek reject it.
+    # forced_tool_choice: auto
   # Optional second provider, off by default. Uncomment this block, then enable
   # it in the profile below. LLM_SECONDARY_* are independent of the primary
   # LLM_* names. This example uses the Anthropic Messages API: base_url is the

@@ -301,6 +301,17 @@ providers:
 			want: "CFG_TEST_PROVIDER_KEY",
 		},
 		{
+			name: "invalid forced tool choice",
+			body: validGitLab + `
+providers:
+  p:
+    protocol: anthropic
+    api_key_env: CFG_TEST_PROVIDER_KEY
+    forced_tool_choice: always
+`,
+			want: "providers.p.forced_tool_choice",
+		},
+		{
 			name: "negative context window",
 			body: validGitLab + `
 providers:

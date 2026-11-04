@@ -39,8 +39,9 @@ func (a *anthropicAdapter) Generate(ctx context.Context, req *Request) (*Respons
 	thinking := effective.budgetTokens > 0
 	if thinking && forcedToolChoice(req.ToolChoice) {
 		// Extended thinking is incompatible with forced tool use, so a caller
-		// that forces a tool gets thinking disabled. The agent loop no longer
-		// forces submit_result on its final turn (#255).
+		// that forces a tool gets thinking disabled. The agent loop forces
+		// submit_result only for providers that declare support (#259), and
+		// auto never does so for thinking providers.
 		thinking = false
 	}
 	if thinking && effective.budgetTokens < 1024 {

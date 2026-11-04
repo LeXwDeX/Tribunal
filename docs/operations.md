@@ -63,6 +63,10 @@ docker compose exec -T review /app/tribunalctl projects all
 
 是否发生压缩或提前要求提交，可在 LLM 调用审计的请求元数据中看到：`submit_prompt` 记录原因（`last_turn`、`context`、`deadline`、`budget`），`compacted_tool_results` 记录本次运行累计压缩的工具结果数。onboarding 在工作流 token 预算剩余不足最近最大单轮用量的 2 倍时也会提前要求提交；其他节点的预算耗尽处理不变。
 
+### 最后一轮强制提交（forced_tool_choice）
+
+`providers.<name>.forced_tool_choice` 可选，取值 `auto`（默认）、`supported`、`unsupported`。agent 节点最后一轮会要求模型调用 `submit_result`：支持强制选择的 provider 会同时收到 `tool_choice=submit_result`，不支持的只收到提示。`auto` 只对未开启 thinking 的 Anthropic 协议强制；OpenAI 兼容协议无法可靠探测，默认不强制。DeepSeek 等 thinking 模式网关会以 400 拒绝强制选择，保持默认即可。若声明了 `supported` 但网关以 HTTP 400 拒绝强制选择（其他 4xx 不回退）、改用提示重发后成功，本进程会记住该 provider，之后只发提示，重启后才会再次尝试；与强制选择无关的 400（重发同样失败）不会被记住。不要在开启 thinking 的 Anthropic provider 上声明 `supported`：强制轮会关闭 thinking，工具循环中途切换 thinking 可能被拒绝。是否强制可在 LLM 调用审计的请求元数据 `forced_tool_choice` 中看到（不记录工具名）。给已有 provider 设置该值会改变评审执行身份，处理方式同[多 Provider 配置](#多-provider-配置)第 4 步。
+
 ### 多 Provider 配置
 
 首次部署可先完成上一节的[构建与启动](#构建并启动)，确认 primary-only 部署正常。已有部署不要先执行启动或重启命令；重建容器前，先按本节第 4 步核对未完成评审和待发布结果。默认部署只有一个 `primary` provider：`profiles.onboarding.agent.provider`、`profiles.default.propose[0].provider` 和 `profiles.default.challenge.provider` 都指向它。primary 的名称和变量保持不变，已有部署不需要迁移。

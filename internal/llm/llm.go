@@ -252,6 +252,9 @@ type ProviderInfo struct {
 	BaseURL  string `json:"base_url"`
 	// ContextWindow is the configured context size in tokens; zero is unknown.
 	ContextWindow int `json:"context_window,omitempty"`
+	// ForcedToolChoice reports that the agent loop may force submit_result
+	// with tool_choice on the last turn (#259).
+	ForcedToolChoice bool `json:"forced_tool_choice,omitempty"`
 }
 
 // ModelIdentity returns a stable identity for votes and challenger selection.
