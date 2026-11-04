@@ -223,7 +223,7 @@ func anthropicResponse(message *anthropic.Message, defaultModel string) (*Respon
 	}
 	out := Message{Role: RoleAssistant}
 	if malformedWireList(message.JSON.Content.Raw(), len(message.Content), message.RawJSON() != "") {
-		out.Parts = append(out.Parts, Part{Type: PartToolCall, ToolCall: &ToolCall{}})
+		out.Parts = append(out.Parts, invalidToolCall(ToolCallMalformedList))
 	}
 	for _, block := range message.Content {
 		switch block.Type {
@@ -256,7 +256,7 @@ func anthropicResponse(message *anthropic.Message, defaultModel string) (*Respon
 			if (block.RawJSON() != "" && (!wireString(block.JSON.ID.Raw()) || !wireString(block.JSON.Name.Raw()))) ||
 				(caller != "" && caller != "null" && tool.Caller.Type != "direct") ||
 				(toolset != "" && toolset != "null" && (!wireString(toolset) || tool.ToolsetName != "")) {
-				out.Parts = append(out.Parts, Part{Type: PartToolCall, ToolCall: &ToolCall{}})
+				out.Parts = append(out.Parts, invalidToolCall(toolUseProblem(block.RawJSON() != "" && (!wireString(block.JSON.ID.Raw()) || !wireString(block.JSON.Name.Raw())))))
 				continue
 			}
 			out.Parts = append(out.Parts, Part{
@@ -265,7 +265,7 @@ func anthropicResponse(message *anthropic.Message, defaultModel string) (*Respon
 			})
 		default:
 			// No other content block type was requested or can be replayed here.
-			out.Parts = append(out.Parts, Part{Type: PartToolCall, ToolCall: &ToolCall{}})
+			out.Parts = append(out.Parts, invalidToolCall(ToolCallUnsupported))
 		}
 	}
 	stop := StopEndTurn

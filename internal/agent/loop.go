@@ -30,6 +30,29 @@ const finalTurnPrompt = "This run is nearly out of turns, time, token budget or 
 // model's window. Call IDs and tool calls are kept, so pairing stays valid.
 const compactedToolResult = "[earlier tool output omitted to fit the context window]"
 
+// invalidToolCallFeedback answers a rejected prompted submit turn (#269).
+// It names only the fixed rejection category, never provider text.
+func invalidToolCallFeedback(kind string) string {
+	return "Your previous tool call was rejected and not executed (" + kind + "). Call the " + SubmitToolName +
+		" tool once more, with its arguments as one complete, valid JSON object. Do not call any other tool."
+}
+
+// withoutToolCalls drops the cleared calls of a rejected turn. It reports
+// false when no text remains, so the turn is left out of the transcript.
+func withoutToolCalls(message llm.Message) (llm.Message, bool) {
+	parts := make([]llm.Part, 0, len(message.Parts))
+	hasText := false
+	for _, part := range message.Parts {
+		if part.Type == llm.PartToolCall {
+			continue
+		}
+		hasText = hasText || (part.Type == llm.PartText && part.Text != "")
+		parts = append(parts, part)
+	}
+	message.Parts = parts
+	return message, hasText
+}
+
 var nonceFallback atomic.Uint64
 
 // rejectedForcedChoice remembers, for this process, providers that answered
@@ -117,6 +140,7 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 	var turns int
 	submitFailures := 0
 	askedForSubmit := false
+	invalidRecovered := false
 	longestTurn := max(spec.TurnEstimate, 0)
 	partial := func(err error) (*RunResult, error) {
 		if turns == 0 && !usage.Incomplete && usage.InputTokens == 0 && usage.OutputTokens == 0 &&
@@ -190,7 +214,7 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 			return false
 		}
 		remaining, ok := spec.BudgetRemaining(ctx, usage)
-		return ok && remaining < finalTurnReserve*largestTurnTokens
+		return ok && remaining < budgetReserveTurns*largestTurnTokens
 	}
 
 	for turn := 1; turn <= maxTurns; turn++ {
@@ -327,6 +351,23 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 		}
 		if resp.StopReason != llm.StopToolUse && resp.StopReason != llm.StopEndTurn {
 			return partial(ErrUnsafeResponse)
+		}
+		// A reasoning gateway can corrupt the large arguments of a prompted
+		// submit (#269). Nothing ran, so once per run, with a turn left, the
+		// cleared calls are dropped and the model is told the fixed category.
+		if invalid && resp.StopReason == llm.StopToolUse && reason != "" && !lastTurn && !invalidRecovered {
+			invalidRecovered = true
+			kind, _ := llm.ToolCallIssue(message)
+			messages = messages[:len(messages)-1]
+			if kept, ok := withoutToolCalls(message); ok {
+				messages = append(messages, kept)
+			}
+			messages = append(messages, llm.Message{
+				Role:  llm.RoleUser,
+				Parts: []llm.Part{{Type: llm.PartText, Text: invalidToolCallFeedback(kind)}},
+			})
+			recordTurn(turnStarted)
+			continue
 		}
 
 		calls, err := responseToolCalls(message)

@@ -49,31 +49,90 @@ type ToolCall struct {
 	ID    string          `json:"id"`
 	Name  string          `json:"name"`
 	Input json.RawMessage `json:"input"`
+	// Invalid is a fixed rejection category set when the call was cleared,
+	// and InputBytes the length of the rejected input. Neither carries
+	// provider text, and neither is serialized.
+	Invalid    string `json:"-"`
+	InputBytes int    `json:"-"`
+}
+
+// Tool call rejection categories. They are a fixed vocabulary safe to audit
+// and to show the model.
+const (
+	ToolCallMissing        = "missing_call"
+	ToolCallEmptyID        = "empty_id"
+	ToolCallEmptyName      = "empty_name"
+	ToolCallDuplicateID    = "duplicate_id"
+	ToolCallEmptyInput     = "empty_input"
+	ToolCallNotObject      = "not_object"
+	ToolCallInvalidJSON    = "invalid_json"
+	ToolCallNonString      = "non_string_field"
+	ToolCallUnsupported    = "unsupported_item"
+	ToolCallMalformedList  = "malformed_list"
+	ToolCallUnexpectedStop = "unexpected_stop"
+)
+
+// invalidToolCall is an adapter marker for a call that cannot be decoded.
+func invalidToolCall(kind string) Part {
+	return Part{Type: PartToolCall, ToolCall: &ToolCall{Invalid: kind}}
+}
+
+// toolUseProblem picks the marker category for a rejected wire call.
+func toolUseProblem(nonString bool) string {
+	if nonString {
+		return ToolCallNonString
+	}
+	return ToolCallUnsupported
+}
+
+// toolCallProblem returns the rejection category of one call, or "".
+func toolCallProblem(call *ToolCall, seen map[string]bool) string {
+	if call == nil {
+		return ToolCallMissing
+	}
+	if call.Invalid != "" {
+		return call.Invalid
+	}
+	input := bytes.TrimSpace(call.Input)
+	switch {
+	case call.ID == "":
+		return ToolCallEmptyID
+	case call.Name == "":
+		return ToolCallEmptyName
+	case seen[call.ID]:
+		return ToolCallDuplicateID
+	case len(input) == 0:
+		return ToolCallEmptyInput
+	case input[0] != '{':
+		return ToolCallNotObject
+	case !json.Valid(call.Input):
+		return ToolCallInvalidJSON
+	}
+	return ""
 }
 
 // SanitizeToolCalls clears every tool call's identity and payload when a call
 // is invalid or the stop reason does not permit tool execution. A rejected
 // batch never executes, and provider-controlled strings must not reach
 // transcripts, errors or audit payloads. Valid empty objects and valid empty
-// batches are preserved.
+// batches are preserved. Cleared calls keep a fixed rejection category for
+// ToolCallIssue.
 func SanitizeToolCalls(message Message, allow bool) (Message, bool) {
 	invalid, hasCalls := false, false
 	seen := make(map[string]bool)
-	for _, part := range message.Parts {
+	problems := make(map[int]string)
+	for i, part := range message.Parts {
 		if part.Type != PartToolCall {
 			continue
 		}
 		hasCalls = true
-		call := part.ToolCall
-		if call == nil {
+		if problem := toolCallProblem(part.ToolCall, seen); problem != "" {
 			invalid = true
-			continue
+			problems[i] = problem
 		}
-		input := bytes.TrimSpace(call.Input)
-		if call.ID == "" || call.Name == "" || seen[call.ID] || len(input) == 0 || input[0] != '{' || !json.Valid(call.Input) {
-			invalid = true
+		if part.ToolCall != nil {
+			seen[part.ToolCall.ID] = true
 		}
-		seen[call.ID] = true
 	}
 	if !invalid && (allow || !hasCalls) {
 		return message, false
@@ -83,11 +142,48 @@ func SanitizeToolCalls(message Message, allow bool) (Message, bool) {
 	message.Parts = append([]Part(nil), message.Parts...)
 	for i := range message.Parts {
 		part := &message.Parts[i]
-		if part.Type == PartToolCall && part.ToolCall != nil {
-			part.ToolCall = &ToolCall{}
+		if part.Type != PartToolCall {
+			continue
 		}
+		cleared := &ToolCall{Invalid: ToolCallUnexpectedStop}
+		if problem, ok := problems[i]; ok {
+			cleared.Invalid = problem
+		}
+		if part.ToolCall != nil {
+			cleared.InputBytes = len(part.ToolCall.Input)
+			if part.ToolCall.Invalid != "" {
+				cleared.InputBytes = part.ToolCall.InputBytes
+			}
+		}
+		part.ToolCall = cleared
 	}
 	return message, invalid
+}
+
+// ToolCallIssue returns the category and input length of the first rejected
+// call in a sanitized message. Invalid calls take precedence over calls
+// cleared only because the stop reason forbade execution.
+func ToolCallIssue(message Message) (string, int) {
+	kind, size := "", 0
+	for _, part := range message.Parts {
+		if part.Type != PartToolCall || part.ToolCall == nil || part.ToolCall.Invalid == "" {
+			continue
+		}
+		issue := part.ToolCall.Invalid
+		switch issue {
+		case ToolCallMissing, ToolCallEmptyID, ToolCallEmptyName, ToolCallDuplicateID, ToolCallEmptyInput,
+			ToolCallNotObject, ToolCallInvalidJSON, ToolCallNonString, ToolCallUnsupported, ToolCallMalformedList:
+			return issue, part.ToolCall.InputBytes
+		case ToolCallUnexpectedStop:
+		default:
+			// Only this package sets Invalid; keep the vocabulary fixed anyway.
+			return ToolCallUnsupported, part.ToolCall.InputBytes
+		}
+		if kind == "" {
+			kind, size = issue, part.ToolCall.InputBytes
+		}
+	}
+	return kind, size
 }
 
 // SDKs may coerce a non-string JSON value into a Go string.

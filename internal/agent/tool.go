@@ -31,6 +31,10 @@ const (
 	// fit before the context deadline; below that the loop asks for
 	// submit_result on every request.
 	finalTurnReserve = 2
+	// budgetReserveTurns is how many of the largest observed turns must
+	// still fit in the token budget. It covers the prompted submit turn, one
+	// resubmit after a rejected tool call (#269) and the growth of the input.
+	budgetReserveTurns = 3
 	// finalTurnFloorDivisor sets the minimum reserve to this fraction of the
 	// time left when the run started.
 	finalTurnFloorDivisor = 8

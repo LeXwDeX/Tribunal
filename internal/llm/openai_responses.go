@@ -193,7 +193,7 @@ func responsesResponse(generated *responses.Response, defaultModel string) (*Res
 	refused := false
 	incompleteItem := false
 	if malformedWireList(generated.JSON.Output.Raw(), len(generated.Output), generated.RawJSON() != "") {
-		message.Parts = append(message.Parts, Part{Type: PartToolCall, ToolCall: &ToolCall{}})
+		message.Parts = append(message.Parts, invalidToolCall(ToolCallMalformedList))
 	}
 	for _, item := range generated.Output {
 		switch item.Type {
@@ -202,7 +202,7 @@ func responsesResponse(generated *responses.Response, defaultModel string) (*Res
 				incompleteItem = true
 			}
 			if malformedWireList(item.JSON.Content.Raw(), len(item.Content), item.RawJSON() != "") {
-				message.Parts = append(message.Parts, Part{Type: PartToolCall, ToolCall: &ToolCall{}})
+				message.Parts = append(message.Parts, invalidToolCall(ToolCallMalformedList))
 			}
 			var text strings.Builder
 			for _, content := range item.Content {
@@ -219,7 +219,7 @@ func responsesResponse(generated *responses.Response, defaultModel string) (*Res
 					}
 					text.WriteString(content.Refusal)
 				default:
-					message.Parts = append(message.Parts, Part{Type: PartToolCall, ToolCall: &ToolCall{}})
+					message.Parts = append(message.Parts, invalidToolCall(ToolCallUnsupported))
 				}
 			}
 			if text.Len() > 0 {
@@ -237,7 +237,7 @@ func responsesResponse(generated *responses.Response, defaultModel string) (*Res
 				(caller != "" && caller != "null" && fn.Caller.Type != "direct") ||
 				(async != "" && async != "null" && async != "false") ||
 				(namespace != "" && namespace != "null" && (!wireString(namespace) || fn.Namespace != "")) {
-				message.Parts = append(message.Parts, Part{Type: PartToolCall, ToolCall: &ToolCall{}})
+				message.Parts = append(message.Parts, invalidToolCall(toolUseProblem(!wireString(fn.JSON.CallID.Raw()) || !wireString(fn.JSON.Name.Raw()) || !wireString(fn.JSON.Arguments.Raw()))))
 				continue
 			}
 			message.Parts = append(message.Parts, Part{
@@ -260,7 +260,7 @@ func responsesResponse(generated *responses.Response, defaultModel string) (*Res
 			})
 		default:
 			// No other output item type was requested or can be replayed here.
-			message.Parts = append(message.Parts, Part{Type: PartToolCall, ToolCall: &ToolCall{}})
+			message.Parts = append(message.Parts, invalidToolCall(ToolCallUnsupported))
 		}
 	}
 	stop := StopOther

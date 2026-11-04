@@ -226,21 +226,21 @@ func chatResponse(completion *openai.ChatCompletion, defaultModel string) (*Resp
 	// The SDK can silently discard a malformed tool_calls value. Keep an
 	// invalid call marker rather than treating the turn as ordinary text.
 	if malformedWireList(choice.Message.JSON.ToolCalls.Raw(), len(choice.Message.ToolCalls), false) {
-		message.Parts = append(message.Parts, Part{Type: PartToolCall, ToolCall: &ToolCall{}})
+		message.Parts = append(message.Parts, invalidToolCall(ToolCallMalformedList))
 	}
 	if raw := choice.Message.JSON.FunctionCall.Raw(); raw != "" && raw != "null" {
-		message.Parts = append(message.Parts, Part{Type: PartToolCall, ToolCall: &ToolCall{}})
+		message.Parts = append(message.Parts, invalidToolCall(ToolCallUnsupported))
 	}
 	for _, call := range choice.Message.ToolCalls {
 		if call.Type != "function" {
 			// An unknown or missing type cannot be executed. Keep an invalid
 			// marker so the whole batch fails closed instead of dropping it.
-			message.Parts = append(message.Parts, Part{Type: PartToolCall, ToolCall: &ToolCall{}})
+			message.Parts = append(message.Parts, invalidToolCall(ToolCallUnsupported))
 			continue
 		}
 		fn := call.AsFunction()
 		if !wireString(fn.JSON.ID.Raw()) || !wireString(fn.Function.JSON.Name.Raw()) || !wireString(fn.Function.JSON.Arguments.Raw()) {
-			message.Parts = append(message.Parts, Part{Type: PartToolCall, ToolCall: &ToolCall{}})
+			message.Parts = append(message.Parts, invalidToolCall(ToolCallNonString))
 			continue
 		}
 		message.Parts = append(message.Parts, Part{
