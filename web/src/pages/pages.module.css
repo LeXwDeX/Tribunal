@@ -629,6 +629,10 @@
   white-space: nowrap;
 }
 
+.matrix thead th:first-child {
+  text-align: left;
+}
+
 .matrix tbody th {
   text-align: left;
   font-family: var(--font-mono);

@@ -70,16 +70,52 @@ export function scanCss(text, file) {
   return diagnostics
 }
 
+function styleObjects(text) {
+  const objects = []
+  const re = /style=\{\{/g
+  let match
+  while ((match = re.exec(text))) {
+    let index = match.index + match[0].length
+    let depth = 2
+    while (index < text.length && depth > 0) {
+      if (text[index] === '{') depth += 1
+      else if (text[index] === '}') depth -= 1
+      index += 1
+    }
+    objects.push({ start: match.index, end: index, body: text.slice(match.index, index), line: lineOf(text, match.index) })
+  }
+  return objects
+}
+
 export function scanTsx(text, file) {
   const diagnostics = []
-  for (const match of text.matchAll(INLINE_STYLE_RE)) {
-    diagnostics.push({
-      file,
-      line: lineOf(text, match.index),
-      rule: 'inline-style',
-      severity: 'warning',
-      message: '内联 style；只允许由数据计算的值，静态样式请放进 CSS Module',
-    })
+  const lines = text.split('\n')
+  for (const object of styleObjects(text)) {
+    for (const match of object.body.matchAll(COLOR_RE)) {
+      diagnostics.push({
+        file,
+        line: object.line,
+        rule: 'color-literal',
+        severity: 'error',
+        message: `内联 style 中的颜色字面值 ${match[0]}；请使用 tokens.css 中的颜色变量`,
+      })
+    }
+    const values = object.body
+      .replace(/^style=\{\{/, '')
+      .replace(/\}\}$/, '')
+      .replace(/var\(--[\w-]+\)/g, '')
+      .replace(/\b[a-zA-Z_$][\w$]*\s*:/g, '')
+      .replace(/[{}]/g, '')
+    const dynamic = /\$\{|[A-Za-z_$]/.test(values)
+    if (!dynamic) {
+      diagnostics.push({
+        file,
+        line: object.line,
+        rule: 'inline-style',
+        severity: 'error',
+        message: '静态内联 style；请放进 CSS Module；只有由数据计算的值可以保留',
+      })
+    }
   }
   for (const match of text.matchAll(JSX_COLOR_RE)) {
     diagnostics.push({
@@ -88,6 +124,16 @@ export function scanTsx(text, file) {
       rule: 'color-literal',
       severity: 'error',
       message: `JSX 颜色字面值 ${match[1]}；请使用 tokens.css 中的颜色变量`,
+    })
+  }
+  const expressionColor = /(?:fill|stroke|color|bgcolor)\s*=\s*\{\s*['"](#[0-9a-fA-F]{3,8}|rgba?\([^)]*\)|hsla?\([^)]*\))/g
+  for (const match of text.matchAll(expressionColor)) {
+    diagnostics.push({
+      file,
+      line: lineOf(text, match.index),
+      rule: 'color-literal',
+      severity: 'error',
+      message: `JSX 表达式颜色字面值 ${match[1]}；请使用 tokens.css 中的颜色变量`,
     })
   }
   return diagnostics

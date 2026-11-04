@@ -28,11 +28,16 @@ describe('web style checks', () => {
     expect(diagnostics.filter((d) => d.rule === 'scale-literal')).toHaveLength(0)
   })
 
-  it('warns about inline styles but does not fail the check', () => {
+  it('rejects static inline styles', () => {
     const diagnostics = scanTsx('<div style={{ top: 1 }} />', 'x.tsx')
     expect(diagnostics).toHaveLength(1)
-    expect(diagnostics[0].severity).toBe('warning')
+    expect(diagnostics[0].severity).toBe('error')
     expect(diagnostics[0].rule).toBe('inline-style')
+  })
+
+  it('allows a data-driven style object', () => {
+    const diagnostics = scanTsx('<div style={{ top: position }} />', 'x.tsx')
+    expect(diagnostics).toHaveLength(0)
   })
 
   it('ignores dynamic style props', () => {
@@ -40,8 +45,14 @@ describe('web style checks', () => {
     expect(diagnostics).toHaveLength(0)
   })
 
-  it('rejects literal colors in JSX attributes', () => {
-    const diagnostics = scanTsx('<svg><rect fill="#fff" stroke="currentColor" /></svg>', 'x.tsx')
+  it('rejects literal colors in JSX attributes and expressions', () => {
+    const diagnostics = scanTsx('<svg><rect fill="#fff" /><rect fill={\'#000\'} stroke="currentColor" /></svg>', 'x.tsx')
+    expect(diagnostics.filter((d) => d.rule === 'color-literal')).toHaveLength(2)
+  })
+
+  it('rejects colors inside a data-driven style object', () => {
+    const diagnostics = scanTsx('<div style={{ color: count === 0 ? \'#fff\' : color }} />', 'x.tsx')
     expect(diagnostics.filter((d) => d.rule === 'color-literal')).toHaveLength(1)
+    expect(diagnostics.filter((d) => d.rule === 'inline-style')).toHaveLength(0)
   })
 })

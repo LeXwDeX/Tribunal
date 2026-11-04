@@ -202,6 +202,7 @@ function QualityRate({ numerator, denominator }: { numerator: number; denominato
     <div className={insights.ratio}>
       <b className="tabular">{formatRatio(ratio)}</b>
       <span className={insights.ratioBar} aria-hidden="true">
+        {/* stylecheck-allow-inline: computed ratio width */}
         <i className={insights.ratioFill} style={{ width: `${Number((ratio * 100).toFixed(2))}%` }} />
       </span>
       <small>{formatNumber(numerator)} / {formatNumber(denominator)}</small>
