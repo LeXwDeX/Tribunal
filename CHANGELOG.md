@@ -23,6 +23,7 @@
 
 ### 变更
 
+- **控制台设计令牌对齐**：补全深色导航、实心块与头像的共享设计令牌，导航计数底色改用与现行主色一致的配色，头像渐变改为低饱和配色，指标值区固定高度以便对齐，Toast 层级回到规范值，卡片标题字重及页面与顶栏水平内边距统一。只影响控制台样式，不改变接口或评审行为；零计数和暗色开关旋钮保留原有的可读对比度（[#242](https://github.com/LeXwDeX/Tribunal/issues/242)）。
 - **Webhook 存储失败改返回 503**：查项目、写投递记录或入队失败时，`POST /webhooks/gitlab` 由 200 改为 503，响应体仍是 `{"ignored":"storage_error","request_id":...}`，日志带脱敏的失败类别。不要假定失败的投递会自动重试；GitLab 收到 503 时会在 hook 的「Recent events」里记为失败。能否用 Resend request 手动重发及重发是否保留事件 UUID 取决于 GitLab 版本和实例配置；满足条件时同一事件 UUID 会被正常受理，详见 [Webhook 失败与恢复](docs/operations.md#webhook-失败与恢复)。GitLab 连续收到失败响应时可能自动停用 hook，需要关注 GitLab 端的 hook 状态。输入错误、未登记项目、重复投递等情况仍返回 200（[#99](https://github.com/LeXwDeX/Tribunal/issues/99)）。
 - **全局会话上限优先保留管理员**：全局 4096 个会话的兜底上限触发时，先淘汰非管理员的最旧会话，只有剩下的会话全部属于管理员时才淘汰管理员的最旧会话。角色按当前的 `bootstrap_admins` 判断：服务启动时会按配置刷新已存用户的角色，会话被使用时也会刷新，所以改了配置后，不需要用户重新登录。每个用户 10 个会话的上限不变，无需迁移（[#102](https://github.com/LeXwDeX/Tribunal/issues/102)）。
 - **CI 接入静态分析与漏洞扫描**：go job 新增固定版本的 `staticcheck` 和 `govulncheck`，并清理了现有告警。`go.mod` 增加 `toolchain go1.26.10`，本地开发和 CI 不再用 go1.26.0 构建（该版本有 31 个可达的标准库漏洞）；发布镜像本来就是 1.26.10，不受影响（[#106](https://github.com/LeXwDeX/Tribunal/issues/106)）。
