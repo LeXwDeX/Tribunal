@@ -930,15 +930,25 @@
 }
 
 
+/* Label column shrinks to its content but never past 40%; values take the rest
+   and may shrink below their content. Wrapper divs around dt/dd pairs join the
+   parent grid so each pair forms one label/value row (#251). */
 .definitionGrid {
   display: grid;
-  grid-template-columns: max-content 1fr;
+  grid-template-columns: fit-content(40%) minmax(0, 1fr);
+  align-items: start;
   gap: 10px 18px;
   font-size: var(--fs-body-sm);
 }
 
+.definitionGrid > div {
+  display: contents;
+}
+
 .definitionGrid dt {
+  min-width: 0;
   color: var(--muted);
+  overflow-wrap: anywhere;
 }
 
 .definitionGrid dd {
@@ -1029,7 +1039,12 @@
     border-left: 0;
   }
   .definitionGrid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
+  }
+  /* One column: keep each dt/dd pair together as a single stacked item. */
+  .definitionGrid > div {
+    display: block;
+    min-width: 0;
   }
   .toastRegion {
     right: 12px;
