@@ -70,6 +70,7 @@
 }
 
 .resultOk {
+  align-self: flex-start;
   padding: var(--space-md) 14px;
   border-radius: var(--radius-sm);
   background: var(--ok-bg);
@@ -81,6 +82,7 @@
 }
 
 .resultOk dl {
+  align-content: start;
   color: var(--text);
 }
 

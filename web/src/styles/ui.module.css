@@ -937,6 +937,10 @@
   font-size: var(--fs-body-sm);
 }
 
+.definitionGrid > div {
+  min-width: 0;
+}
+
 .definitionGrid dt {
   color: var(--muted);
 }
