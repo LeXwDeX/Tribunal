@@ -48,9 +48,9 @@ describe('admin user and grant management', () => {
       if (parsed.pathname === '/api/v1/admin/users' && method === 'GET') {
         const cursor = parsed.searchParams.get('cursor')
         if (cursor === 'u2') {
-          return jsonResponse({ users: [{ id: 2, username: 'bob', name: 'Bob', disabled: true }], next_cursor: '' })
+          return jsonResponse({ users: [{ id: 2, username: 'bob', name: 'Bob', disabled: true, revision: 8 }], next_cursor: '' })
         }
-        return jsonResponse({ users: [{ id: 1, username: 'alice', name: 'Alice', disabled: false }], next_cursor: 'u2' })
+        return jsonResponse({ users: [{ id: 1, username: 'alice', name: 'Alice', disabled: false, revision: 7 }], next_cursor: 'u2' })
       }
       if (parsed.pathname === '/api/v1/admin/users/1' && method === 'PATCH') {
         writes.push({ url: parsed.pathname, method, body: JSON.parse(String(init?.body)) })
@@ -75,7 +75,7 @@ describe('admin user and grant management', () => {
     const disableDialog = await screen.findByRole('dialog', { name: '停用账号？' })
     await user.click(within(disableDialog).getByRole('button', { name: '停用' }))
     await waitFor(() => expect(writes).toContainEqual({
-      url: '/api/v1/admin/users/1', method: 'PATCH', body: { disabled: true },
+      url: '/api/v1/admin/users/1', method: 'PATCH', body: { disabled: true, revision: 7 },
     }))
 
     await user.click(screen.getAllByRole('button', { name: '撤销全部凭据' })[0])
@@ -84,6 +84,29 @@ describe('admin user and grant management', () => {
     await waitFor(() => expect(writes).toContainEqual({
       url: '/api/v1/admin/users/1/credentials', method: 'DELETE',
     }))
+  })
+
+  it('explains a stale revision after another admin updates the user', async () => {
+    const user = userEvent.setup()
+    installFetch((url, init) => {
+      const method = (init?.method || 'GET').toUpperCase()
+      const parsed = new URL(url, 'http://localhost')
+      if (parsed.pathname === '/api/v1/admin/users' && method === 'GET') {
+        return jsonResponse({ users: [{ id: 1, username: 'alice', name: 'Alice', disabled: false, revision: 7 }], next_cursor: '' })
+      }
+      if (parsed.pathname === '/api/v1/admin/users/1' && method === 'PATCH') {
+        return jsonResponse({ error: { code: 'stale_revision', message: 'user revision is stale' } }, 409)
+      }
+      if (url.startsWith('/api/v1/api-tokens')) return apiTokensEmpty()
+      return jsonResponse({})
+    })
+    renderWithProviders(<SystemPage />)
+    await user.click(await screen.findByRole('tab', { name: '用户与账号' }))
+    expect(await screen.findByText('alice')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '停用账号' }))
+    const dialog = await screen.findByRole('dialog', { name: '停用账号？' })
+    await user.click(within(dialog).getByRole('button', { name: '停用' }))
+    expect(await screen.findByText('用户信息已被其他管理员更新，请关闭对话框并刷新后重试。')).toBeInTheDocument()
   })
 
   it('picks projects from the admin list even without a grant and manages grants', async () => {
@@ -119,8 +142,8 @@ describe('admin user and grant management', () => {
       if (parsed.pathname === '/api/v1/admin/users' && method === 'GET') {
         return jsonResponse({
           users: [
-            { id: 1, username: 'alice', name: 'Alice', disabled: false },
-            { id: 2, username: 'bob', name: 'Bob', disabled: false },
+            { id: 1, username: 'alice', name: 'Alice', disabled: false, revision: 7 },
+            { id: 2, username: 'bob', name: 'Bob', disabled: false, revision: 8 },
           ],
           next_cursor: '',
         })
