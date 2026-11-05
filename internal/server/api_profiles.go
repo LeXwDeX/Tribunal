@@ -12,10 +12,11 @@ import (
 )
 
 type profileOverrideView struct {
-	Profile   string               `json:"profile"`
-	Overrides json.RawMessage      `json:"overrides"`
-	Revision  int64                `json:"revision"`
-	Effective config.ProfileConfig `json:"effective"`
+	Profile   string                `json:"profile"`
+	Overrides json.RawMessage       `json:"overrides"`
+	Revision  int64                 `json:"revision"`
+	Effective config.ProfileConfig  `json:"effective"`
+	Nodes     []app.ProfileNodeView `json:"nodes"`
 }
 
 func (s *Server) defaultProfile() (config.ProfileConfig, bool) {
@@ -44,6 +45,7 @@ func (s *Server) handleGetDefaultProfile(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, profileOverrideView{
 		Profile: "default", Overrides: body, Revision: revision,
 		Effective: app.ApplyProfileOverrides(profile, string(body)),
+		Nodes:     app.ResolveProfileNodes(profile, string(body)),
 	})
 }
 
@@ -77,6 +79,7 @@ func (s *Server) handlePutProfileOverrides(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, profileOverrideView{
 		Profile: "default", Overrides: []byte(overrides.OverridesJSON), Revision: overrides.Revision,
 		Effective: app.ApplyProfileOverrides(profile, overrides.OverridesJSON),
+		Nodes:     app.ResolveProfileNodes(profile, overrides.OverridesJSON),
 	})
 }
 
