@@ -226,3 +226,53 @@ func TestDropEvidenceRemovesCompactedReads(t *testing.T) {
 		t.Fatalf("dropped read still counted as reviewed: %v", got)
 	}
 }
+
+func TestDroppedDeliveredPageStillCounts(t *testing.T) {
+	long := "+" + strings.Repeat("x", maxDiffRunesPerCall*2)
+	source := NewChangeSource([]ChangeFile{{Path: "long.go", Status: "modified", Diff: "@@ -1 +1 @@\n" + long + "\n"}}, nil, nil)
+	sb := changeSandbox(t)
+	read := toolByName(t, BuiltinToolsWithChanges(sb, source), "read_diff")
+
+	first, err := invoke(t, read, `{"path":"long.go","from_line":1,"from_offset":0}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.EvidenceID == "" || !strings.Contains(first.Content, "next_offset") {
+		t.Fatalf("first page did not paginate: %+v", first)
+	}
+	source.Flush()
+	source.DropEvidence([]string{first.EvidenceID})
+	nextOffset := 0
+	for _, line := range strings.Split(first.Content, "\n") {
+		if strings.HasPrefix(line, "[read_diff] next_hunk:") {
+			var hunk, nextLine int
+			if _, err := fmt.Sscanf(line, "[read_diff] next_hunk: %d, next_line: %d, next_offset: %d", &hunk, &nextLine, &nextOffset); err != nil {
+				t.Fatalf("parse cursor %q: %v", line, err)
+			}
+		}
+	}
+	if nextOffset == 0 {
+		t.Fatal("first page did not provide next_offset")
+	}
+	for round := 0; round < 5; round++ {
+		rest, err := invoke(t, read, `{"path":"long.go","from_line":1,"from_offset":`+itoa(nextOffset)+`}`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(rest.Content, "next_hunk") {
+			break
+		}
+		for _, line := range strings.Split(rest.Content, "\n") {
+			if strings.HasPrefix(line, "[read_diff] next_hunk:") {
+				var hunk, nextLine int
+				if _, err := fmt.Sscanf(line, "[read_diff] next_hunk: %d, next_line: %d, next_offset: %d", &hunk, &nextLine, &nextOffset); err != nil {
+					t.Fatalf("parse cursor %q: %v", line, err)
+				}
+			}
+		}
+	}
+	source.Flush()
+	if got := source.DiffReads()["long.go"]; len(got) != 1 || got[0] != 1 {
+		t.Fatalf("delivered first page was lost after compaction: %v", got)
+	}
+}

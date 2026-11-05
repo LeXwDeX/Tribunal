@@ -38,7 +38,9 @@ type ChangeSource struct {
 	read            map[string]map[int]map[int]bool
 	parts           map[string]map[int]map[int][]readPart
 	pendingEvidence map[string][]pendingRead
+	delivered       map[string]bool
 	totals          map[string]map[int]int
+	lineTotals      map[string]map[int]map[int]int
 	complete        map[string]map[int]bool
 }
 
@@ -67,7 +69,9 @@ func NewChangeSource(files, all []ChangeFile, inline map[string]bool) *ChangeSou
 		read:            make(map[string]map[int]map[int]bool),
 		parts:           make(map[string]map[int]map[int][]readPart),
 		pendingEvidence: make(map[string][]pendingRead),
+		delivered:       make(map[string]bool),
 		totals:          make(map[string]map[int]int),
+		lineTotals:      make(map[string]map[int]map[int]int),
 		complete:        make(map[string]map[int]bool),
 	}
 }
@@ -80,16 +84,8 @@ func (c *ChangeSource) Flush() {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for _, reads := range c.pendingEvidence {
-		for _, read := range reads {
-			if c.read[read.path] == nil {
-				c.read[read.path] = make(map[int]map[int]bool)
-			}
-			if c.read[read.path][read.hunk] == nil {
-				c.read[read.path][read.hunk] = make(map[int]bool)
-			}
-			c.read[read.path][read.hunk][read.line] = true
-		}
+	for id := range c.pendingEvidence {
+		c.delivered[id] = true
 	}
 	c.pendingEvidence = make(map[string][]pendingRead)
 	c.recomputeCompleteLocked()
@@ -105,7 +101,9 @@ func (c *ChangeSource) DropEvidence(ids []string) {
 	}
 	drop := make(map[string]bool, len(ids))
 	for _, id := range ids {
-		drop[id] = true
+		if !c.delivered[id] {
+			drop[id] = true
+		}
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -135,6 +133,7 @@ func (c *ChangeSource) DropEvidence(ids []string) {
 			delete(c.parts, path)
 		}
 	}
+	c.recomputeCompleteLocked()
 }
 
 func (c *ChangeSource) Reset() {
@@ -146,24 +145,34 @@ func (c *ChangeSource) Reset() {
 	c.read = make(map[string]map[int]map[int]bool)
 	c.parts = make(map[string]map[int]map[int][]readPart)
 	c.pendingEvidence = make(map[string][]pendingRead)
+	c.delivered = make(map[string]bool)
 	c.totals = make(map[string]map[int]int)
+	c.lineTotals = make(map[string]map[int]map[int]int)
 	c.complete = make(map[string]map[int]bool)
 }
 
 func (c *ChangeSource) recomputeCompleteLocked() {
+	c.read = make(map[string]map[int]map[int]bool)
 	c.complete = make(map[string]map[int]bool)
 	for path, hunks := range c.totals {
 		for hunk, total := range hunks {
 			if total <= 0 {
 				continue
 			}
-			lines := c.read[path][hunk]
 			complete := true
 			for line := 1; line <= total; line++ {
-				if !lines[line] {
+				lineTotal := c.lineTotals[path][hunk][line]
+				if !c.lineCoveredLocked(path, hunk, line, lineTotal) {
 					complete = false
 					break
 				}
+				if c.read[path] == nil {
+					c.read[path] = make(map[int]map[int]bool)
+				}
+				if c.read[path][hunk] == nil {
+					c.read[path][hunk] = make(map[int]bool)
+				}
+				c.read[path][hunk][line] = true
 			}
 			if complete {
 				if c.complete[path] == nil {
@@ -474,12 +483,16 @@ func (c *ChangeSource) recordLinePart(id, path string, hunk, line, start, end, t
 		c.parts[path][hunk] = make(map[int][]readPart)
 	}
 	c.parts[path][hunk][line] = append(c.parts[path][hunk][line], readPart{id: id, start: start, end: end})
-	complete := c.lineCoveredLocked(path, hunk, line, total)
-	if complete {
-		c.pendingEvidence[id] = append(c.pendingEvidence[id], pendingRead{
-			path: path, hunk: hunk, line: line, start: start, end: end, total: total,
-		})
+	if c.lineTotals[path] == nil {
+		c.lineTotals[path] = make(map[int]map[int]int)
 	}
+	if c.lineTotals[path][hunk] == nil {
+		c.lineTotals[path][hunk] = make(map[int]int)
+	}
+	c.lineTotals[path][hunk][line] = total
+	c.pendingEvidence[id] = append(c.pendingEvidence[id], pendingRead{
+		path: path, hunk: hunk, line: line, start: start, end: end, total: total,
+	})
 	c.mu.Unlock()
 }
 
