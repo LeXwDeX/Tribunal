@@ -27,6 +27,7 @@
 
 ### 变更
 
+- **用户模型目录与运行时刷新**（[#289](https://github.com/LeXwDeX/Tribunal/issues/289)）：配置模型与数据库用户模型合并到运行时目录，用户模型无需重启即可被新工作流使用；单条坏记录隔离为 unavailable，不影响启动和其他模型。修改模型会重建 client 和信号量，旧 client 继续服务在途工作流，因此同一模型 ID 的实际并发会短时叠加新旧两份上限。用户模型的成本按保存的价格计算，MR 评论署名显示 display_name。
 - **全局只读**：平台管理员可显式为用户开启或关闭所有项目及评审的只读权限。新项目自动可见，项目管理仍需单独授权；禁用用户期间不可见，重新启用后保留设置。变更立即生效并写入平台审计日志。
 - **平台角色管理**：平台管理员可为已登录的 GitLab 用户授予或撤销管理员角色，并查看用户的项目授权；配置指定的管理员不能降级或禁用。角色变更在下一次请求生效。
 - **评审档位与图固定**：`profiles.default` 的配置收敛为 `provider`（所有节点默认）、`explore.provider`、`lanes.{code_review,review,reasoner,validate}.provider`、`challenge.provider`（逐条反证）、`plan.package_tokens` / `plan.max_packages` 和 `budget`；`provider` 为空时依次取 `lanes.code_review.provider`、`challenge.provider`。plan 固定为 code 模式，P0/P1 逐条挑战，不确定的挑战结果标记为「存疑」后发布，报告由代码生成，评审图不在汇报阶段扩展。`Load` 把 `plan.max_packages` 降到 `min(17, (budget.max_nodes − 9) / 2)`（至少 1），配置值高于上界时告警，未配置时静默降低；构建评审图时仍要求 `plan.max_packages × 2 + 2 ≤ max_fan_out`（默认 36），超出则拒绝。既没有 `provider` 也没有 `lanes.code_review.provider` 时构建评审图失败，字段为 `provider`。

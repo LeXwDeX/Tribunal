@@ -223,3 +223,25 @@ func TestCreateModelRollsBackWhenReadBackFails(t *testing.T) {
 		t.Fatalf("rollback left %d rows", got)
 	}
 }
+
+func TestListModelsIsolatesCorruptRecords(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t, newFakeClock())
+	if err := s.ConfigureModelSecrets(ctx, sealTestCipher(t, 1)); err != nil {
+		t.Fatal(err)
+	}
+	m, err := s.CreateModel(ctx, store.Model{DisplayName: "model", Protocol: "openai-chat", Model: "m", Params: store.ModelParams{MaxTokens: 1, MaxConcurrency: 1}, CreatedBy: 1}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE llm_models SET params_json='not-json' WHERE id=?`, m.ID); err != nil {
+		t.Fatal(err)
+	}
+	models, err := s.ListModels(ctx)
+	if err != nil || len(models) != 1 || !models[0].Unavailable {
+		t.Fatalf("corrupt list = %+v, %v", models, err)
+	}
+	if _, err := s.GetModel(ctx, m.ID); err == nil {
+		t.Fatal("corrupt model must not be readable")
+	}
+}

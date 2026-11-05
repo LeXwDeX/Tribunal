@@ -293,6 +293,7 @@ func WithRetryBaseDelay(delay time.Duration) RegistryOption {
 type Registry struct {
 	clients map[string]Client
 	infos   []ProviderInfo
+	models  map[string]CatalogModel
 }
 
 // NewRegistry builds clients for every configured provider. Credentials are
@@ -358,6 +359,17 @@ func (r *Registry) Infos() []ProviderInfo {
 }
 
 func newProviderClient(name string, cfg config.ProviderConfig, httpClient *http.Client, options registryOptions) (*providerClient, error) {
+	if strings.TrimSpace(cfg.APIKeyEnv) == "" {
+		return nil, fmt.Errorf("llm: provider %q: api_key_env is required", name)
+	}
+	apiKey := os.Getenv(cfg.APIKeyEnv)
+	if apiKey == "" {
+		return nil, fmt.Errorf("llm: provider %q: environment variable %s is not set", name, cfg.APIKeyEnv)
+	}
+	return newProviderClientWithKey(name, cfg, apiKey, httpClient, options)
+}
+
+func newProviderClientWithKey(name string, cfg config.ProviderConfig, apiKey string, httpClient *http.Client, options registryOptions) (*providerClient, error) {
 	if strings.TrimSpace(name) == "" {
 		return nil, errors.New("llm: provider name must not be empty")
 	}
@@ -366,13 +378,6 @@ func newProviderClient(name string, cfg config.ProviderConfig, httpClient *http.
 	}
 	if err := validateBaseURL(cfg.BaseURL); err != nil {
 		return nil, fmt.Errorf("llm: provider %q: %w", name, err)
-	}
-	if strings.TrimSpace(cfg.APIKeyEnv) == "" {
-		return nil, fmt.Errorf("llm: provider %q: api_key_env is required", name)
-	}
-	apiKey := os.Getenv(cfg.APIKeyEnv)
-	if apiKey == "" {
-		return nil, fmt.Errorf("llm: provider %q: environment variable %s is not set", name, cfg.APIKeyEnv)
 	}
 	info := ProviderInfo{Name: name, Protocol: cfg.Protocol, Model: cfg.Model, BaseURL: cfg.BaseURL,
 		ContextWindow: cfg.ContextWindow, ForcedToolChoice: forcedToolChoiceSupported(cfg)}
