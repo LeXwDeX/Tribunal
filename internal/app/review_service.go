@@ -17,6 +17,7 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/errclass"
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/jobs"
+	"github.com/LeXwDeX/tribunal/internal/llm"
 	"github.com/LeXwDeX/tribunal/internal/review"
 	"github.com/LeXwDeX/tribunal/internal/secret"
 	"github.com/LeXwDeX/tribunal/internal/store"
@@ -113,6 +114,7 @@ type ReviewService struct {
 	reviewDefaults    config.ProjectSettings
 	prompts           prompts.Bundle
 	clients           review.ClientProvider
+	catalog           *llm.Catalog
 	agentRun          review.AgentRunner
 	tools             review.ToolProvider
 	skills            review.SkillProvider
@@ -151,6 +153,7 @@ type ReviewServiceConfig struct {
 	ReviewDefaults    config.ProjectSettings
 	Prompts           prompts.Bundle
 	Clients           review.ClientProvider
+	Catalog           *llm.Catalog
 	AgentRun          review.AgentRunner
 	Tools             review.ToolProvider
 	Skills            review.SkillProvider
@@ -228,6 +231,7 @@ func NewReviewService(cfg ReviewServiceConfig) (*ReviewService, error) {
 		reviewDefaults: cfg.ReviewDefaults,
 		prompts:        cfg.Prompts,
 		clients:        cfg.Clients,
+		catalog:        cfg.Catalog,
 		agentRun:       cfg.AgentRun,
 		cost:           cfg.Cost,
 		tools:          cfg.Tools,
@@ -247,6 +251,13 @@ func NewReviewService(cfg ReviewServiceConfig) (*ReviewService, error) {
 }
 
 // Handle dispatches review jobs. Permanent failures are logged and settled.
+func (s *ReviewService) snapshotClients() review.ClientProvider {
+	if s.catalog != nil {
+		return s.catalog.Snapshot()
+	}
+	return s.clients
+}
+
 func (s *ReviewService) Handle(ctx context.Context, job *jobs.Job) error {
 	if job == nil {
 		return nil
@@ -920,7 +931,7 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 		Profile:                  profile,
 		Graph:                    graphCfg,
 		Blocks:                   execution.blocks,
-		Clients:                  s.clients,
+		Clients:                  s.snapshotClients(),
 		Prompts:                  s.prompts,
 		AgentRun:                 execution.agentRunner(s.agentRun),
 		Snapshot:                 engineSnapshot(s.engine),

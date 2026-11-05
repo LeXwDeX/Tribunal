@@ -354,7 +354,11 @@ func (s *ReviewService) cancelActive(ctx context.Context, projectID, mrIID, gene
 // and settles publication as skipped. A superseded review must never keep an
 // SSE stream waiting on a publication that will not happen.
 func (s *ReviewService) cancelWorkflow(ctx context.Context, workflowID string) error {
-	if err := s.engine.Cancel(ctx, workflowID, "superseded"); err != nil {
+	return s.cancelWorkflowWithReason(ctx, workflowID, "superseded")
+}
+
+func (s *ReviewService) cancelWorkflowWithReason(ctx context.Context, workflowID, reason string) error {
+	if err := s.engine.Cancel(ctx, workflowID, reason); err != nil {
 		if errors.Is(err, dag.ErrNotFound) {
 			return s.skipPublication(ctx, workflowID, reviewSupersededReason)
 		}

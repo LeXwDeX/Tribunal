@@ -336,7 +336,7 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 	}
 	defer execution.cleanupRepositorySkills()
 	if !s.matchesReviewExecution(project.ID, dossier.Metadata["execution_identity"], execution.digest) {
-		return s.cancelWorkflow(ctx, workflow.ID)
+		return s.cancelWorkflowWithReason(ctx, workflow.ID, "execution_identity_changed")
 	}
 	headDir, cleanup, err := s.recoverRun(ctx, project, token, *workflow.MRIID, record.JobID, workflow.ID, dossier)
 	if err != nil {
@@ -368,7 +368,7 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 		Profile:                  profile,
 		Graph:                    review.GraphConfig{AllowedProviders: s.allowedProviders()},
 		Blocks:                   execution.blocks,
-		Clients:                  s.clients,
+		Clients:                  s.snapshotClients(),
 		Prompts:                  s.prompts,
 		AgentRun:                 execution.agentRunner(s.agentRun),
 		Snapshot:                 engineSnapshot(s.engine),
