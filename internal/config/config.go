@@ -46,6 +46,12 @@ type Config struct {
 	// removed review profiles or legacy profile fields. They are logged once
 	// at startup and never contain configuration values other than names.
 	Warnings []string `yaml:"-" json:"-"`
+
+	// RawProfiles keeps the review profile as written, before
+	// NormalizeReviewProfile derived its providers. Stored overrides are merged
+	// into the raw profile and normalized once (#291, #334); Profiles holds the
+	// normalized result and is shared, so it is never mutated.
+	RawProfiles map[string]ProfileConfig `yaml:"-" json:"-"`
 }
 
 // LLMConfig controls outbound model connections.
@@ -208,6 +214,11 @@ type ProfileConfig struct {
 	Synthesize  SynthesizeConfig `yaml:"synthesize" json:"synthesize"`
 	Budget      BudgetConfig     `yaml:"budget" json:"budget"`
 	Agent       *AgentConfig     `yaml:"agent" json:"agent"`
+
+	// NodeParams are request parameter overrides per review node (#334),
+	// keyed by the Node* names. They come from stored profile overrides only,
+	// never from YAML, and are omitted from the profile hash when empty.
+	NodeParams map[string]NodeParams `yaml:"-" json:"node_params,omitempty"`
 }
 
 // ExploreConfig selects the provider of the read-only explore node. An empty
@@ -723,4 +734,18 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// RawProfile returns the profile as written, before normalization. Configs
+// built without Load (tests, embedders) have no raw copy; their Profiles entry
+// is returned instead.
+func (c *Config) RawProfile(name string) (ProfileConfig, bool) {
+	if c == nil {
+		return ProfileConfig{}, false
+	}
+	if raw, ok := c.RawProfiles[name]; ok {
+		return raw, true
+	}
+	profile, ok := c.Profiles[name]
+	return profile, ok
 }

@@ -1,42 +1,332 @@
 package app
 
 import (
+	"context"
+	"encoding/json"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/review"
+	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
-func TestResolveProfileNodesSources(t *testing.T) {
-	cfg := config.ProfileConfig{
-		Provider: "base",
-		Explore:  &config.ExploreConfig{Provider: "config-explore"},
-		Lanes: &config.LanesConfig{
-			CodeReview: config.LaneConfig{Provider: "config-code"},
-		},
-		Challenge: config.ChallengeConfig{Provider: "config-challenge"},
-	}
-	body := `{"default":{"model":"override-default"},"lanes":{"review":{"model":"override-review"}}}`
-	nodes := ResolveProfileNodes(cfg, body)
-	got := map[string][2]string{}
+func intPtr(v int) *int { return &v }
+
+// normalize mirrors what config.Load does with the review profile.
+func normalize(raw config.ProfileConfig) config.ProfileConfig {
+	out, _ := config.NormalizeReviewProfile(raw)
+	return out
+}
+
+func nodeByName(t *testing.T, nodes []ProfileNodeView, name string) ProfileNodeView {
+	t.Helper()
 	for _, node := range nodes {
-		got[node.Node] = [2]string{node.Model, node.Source}
+		if node.Node == name {
+			return node
+		}
 	}
-	if got["default"] != [2]string{"override-default", "override"} {
-		t.Fatalf("default = %v", got["default"])
+	t.Fatalf("no node %q in %+v", name, nodes)
+	return ProfileNodeView{}
+}
+
+// slotKeys are the seven configurable items by API node name.
+var slotNodes = []struct{ node, key, path string }{
+	{"default", "", "default"},
+	{"explore", config.NodeExplore, "explore"},
+	{"lanes.code_review", config.NodeCodeReview, "lanes.code_review"},
+	{"lanes.review", config.NodeReview, "lanes.review"},
+	{"lanes.reasoner", config.NodeReasoner, "lanes.reasoner"},
+	{"lanes.validate", config.NodeValidate, "lanes.validate"},
+	{"challenge", config.NodeChallenge, "challenge"},
+}
+
+// overrideBody builds {"<path>": {"model": id}} for a slot path.
+func overrideBody(path, id string) string {
+	node := `{"model":"` + id + `"}`
+	switch {
+	case strings.HasPrefix(path, "lanes."):
+		return `{"lanes":{"` + strings.TrimPrefix(path, "lanes.") + `":` + node + `}}`
 	}
-	if got["explore"] != [2]string{"config-explore", "config"} {
-		t.Fatalf("explore = %v", got["explore"])
+	return `{"` + path + `":` + node + `}`
+}
+
+// configuredNode returns a raw profile in which only the node itself names a
+// provider ("config" source).
+func configuredNode(key, model string) config.ProfileConfig {
+	raw := config.ProfileConfig{Challenge: config.ChallengeConfig{}}
+	switch key {
+	case "":
+		raw.Provider = model
+	case config.NodeExplore:
+		raw.Explore = &config.ExploreConfig{Provider: model}
+	case config.NodeCodeReview:
+		raw.Lanes = &config.LanesConfig{CodeReview: config.LaneConfig{Provider: model}}
+	case config.NodeReview:
+		raw.Lanes = &config.LanesConfig{Review: config.LaneConfig{Provider: model}}
+	case config.NodeReasoner:
+		raw.Lanes = &config.LanesConfig{Reasoner: config.LaneConfig{Provider: model}}
+	case config.NodeValidate:
+		raw.Lanes = &config.LanesConfig{Validate: config.LaneConfig{Provider: model}}
+	case config.NodeChallenge:
+		raw.Challenge.Provider = model
 	}
-	if got["lanes.code_review"] != [2]string{"config-code", "config"} {
-		t.Fatalf("code review = %v", got["lanes.code_review"])
+	return raw
+}
+
+// derivedOnly returns a raw profile with no profile provider and a source for
+// the derived fallback that is not the node itself: lanes.code_review, or
+// challenge for the code-review node.
+func derivedOnly(key string) (config.ProfileConfig, string) {
+	if key == config.NodeCodeReview {
+		return config.ProfileConfig{Challenge: config.ChallengeConfig{Provider: "from-challenge"}}, "from-challenge"
 	}
-	if got["lanes.review"] != [2]string{"override-review", "override"} {
-		t.Fatalf("review = %v", got["lanes.review"])
+	return config.ProfileConfig{Lanes: &config.LanesConfig{CodeReview: config.LaneConfig{Provider: "from-code-review"}}}, "from-code-review"
+}
+
+// Resolution order for the seven configurable items: node override, profile
+// default override, configured node provider, configured profile provider,
+// derived fallback (#291, #334). Every case also proves the value the review
+// executes with, not only the label.
+func TestResolveProfileSourcesTable(t *testing.T) {
+	for _, slot := range slotNodes {
+		t.Run(slot.node, func(t *testing.T) {
+			check := func(t *testing.T, raw config.ProfileConfig, body, wantModel, wantSource string) {
+				t.Helper()
+				resolved := ResolveProfile(raw, normalize(raw), body)
+				node := nodeByName(t, resolved.Nodes, slot.node)
+				if node.Model != catalogID(wantModel) || node.Source != wantSource {
+					t.Fatalf("%s = %s/%s, want %s/%s", slot.node, node.Model, node.Source, catalogID(wantModel), wantSource)
+				}
+				if executed := nodeModel(resolved.Effective, slot.key); executed != wantModel {
+					t.Fatalf("%s executes with %q, view says %q", slot.node, executed, wantModel)
+				}
+			}
+			t.Run("override", func(t *testing.T) {
+				raw := configuredNode(slot.key, "cfg-node")
+				raw.Provider = "cfg-default"
+				body := overrideBody(slot.path, "user:node")
+				check(t, raw, body, "user:node", "override")
+			})
+			t.Run("override_default", func(t *testing.T) {
+				if slot.key == "" {
+					t.Skip("the profile default has no default override above it")
+				}
+				raw := configuredNode(slot.key, "cfg-node")
+				raw.Provider = "cfg-default"
+				check(t, raw, `{"default":{"model":"user:def"}}`, "user:def", "override_default")
+			})
+			t.Run("config", func(t *testing.T) {
+				raw := configuredNode(slot.key, "cfg-node")
+				raw.Provider = "cfg-default"
+				if slot.key == "" {
+					raw = config.ProfileConfig{Provider: "cfg-node"}
+				}
+				check(t, raw, `{}`, "cfg-node", "config")
+			})
+			t.Run("config_default", func(t *testing.T) {
+				if slot.key == "" {
+					t.Skip("the profile default is the configured profile provider itself")
+				}
+				check(t, config.ProfileConfig{Provider: "cfg-default"}, `{}`, "cfg-default", "config_default")
+			})
+			t.Run("derived", func(t *testing.T) {
+				raw, from := derivedOnly(slot.key)
+				check(t, raw, `{}`, from, "derived")
+			})
+		})
 	}
-	if got["lanes.reasoner"] != [2]string{"base", "config_default"} {
-		t.Fatalf("reasoner = %v", got["lanes.reasoner"])
+}
+
+// A legacy propose entry still configures the code-review lane. The lane runs
+// from the propose entry normalization derives, so it is reported as configured
+// and the other lanes derive from it.
+func TestResolveProfileCodeReviewViaLegacyPropose(t *testing.T) {
+	raw := config.ProfileConfig{Propose: []config.ProposeConfig{{Block: "code-review", Provider: "legacy"}}}
+	resolved := ResolveProfile(raw, normalize(raw), `{}`)
+	codeReview := nodeByName(t, resolved.Nodes, "lanes.code_review")
+	if codeReview.Model != "config:legacy" || codeReview.Source != "config" {
+		t.Fatalf("code_review = %+v", codeReview)
 	}
-	if got["challenge"] != [2]string{"config-challenge", "config"} {
-		t.Fatalf("challenge = %v", got["challenge"])
+	if review := nodeByName(t, resolved.Nodes, "lanes.review"); review.Model != "config:legacy" || review.Source != "derived" {
+		t.Fatalf("review = %+v", review)
+	}
+	// An override of the lane wins over the legacy entry and changes Propose[0].
+	body := overrideBody("lanes.code_review", "user:new")
+	resolved = ResolveProfile(raw, normalize(raw), body)
+	if got := resolved.Effective.Propose[0].Provider; got != "user:new" {
+		t.Fatalf("Propose[0] = %q, want user:new", got)
+	}
+}
+
+// Regression for the #327 defect: overrides applied to the already normalized
+// profile left Propose[0] (the code-review lane) and every filled lane on the
+// configured provider, and the override was neither validated nor hashed.
+func TestOverridesChangeTheExecutedProviders(t *testing.T) {
+	raw := config.ProfileConfig{Provider: "fake"}
+	normalized := normalize(raw)
+	before := normalized
+	body := `{"default":{"model":"user:def"},"lanes":{"code_review":{"model":"user:new"}}}`
+	resolved := ResolveProfile(raw, normalized, body)
+	eff := resolved.Effective
+	if eff.Propose[0].Provider != "user:new" || eff.Lanes.CodeReview.Provider != "user:new" {
+		t.Fatalf("code-review lane runs %q, want user:new", eff.Propose[0].Provider)
+	}
+	for name, got := range map[string]string{
+		"provider": eff.Provider, "explore": eff.Explore.Provider, "review": eff.Lanes.Review.Provider,
+		"reasoner": eff.Lanes.Reasoner.Provider, "validate": eff.Lanes.Validate.Provider, "challenge": eff.Challenge.Provider,
+	} {
+		if got != "user:def" {
+			t.Errorf("%s runs %q, want user:def", name, got)
+		}
+	}
+	refs := review.ProfileProviderRefs(review.Profile{Name: "default", Config: eff})
+	if !reflect.DeepEqual(refs, []string{"user:def", "user:new"}) {
+		t.Fatalf("provider refs = %v, want the override models only", refs)
+	}
+	// "fake" is not allowed, so the old provider no longer passes unnoticed.
+	if err := review.ValidateProfileProviders(review.Profile{Name: "default", Config: eff}, []string{"fake"}); err == nil {
+		t.Fatal("override models were not validated against the allowed providers")
+	}
+	if err := review.ValidateProfileProviders(review.Profile{Name: "default", Config: eff}, []string{"user:def", "user:new"}); err != nil {
+		t.Fatalf("override models rejected: %v", err)
+	}
+	// The shared profiles are not mutated.
+	if !reflect.DeepEqual(normalized, before) || !reflect.DeepEqual(raw, config.ProfileConfig{Provider: "fake"}) {
+		t.Fatal("ResolveProfile mutated its inputs")
+	}
+}
+
+func TestResolveProfileWithoutOverridesIsTheNormalizedProfile(t *testing.T) {
+	raw := config.ProfileConfig{Provider: "fake"}
+	normalized := normalize(raw)
+	for _, body := range []string{``, `{}`, `{"default":{}}`, `{"explore":{"params":{}}}`, `not json`} {
+		if got := ResolveProfile(raw, normalized, body).Effective; !reflect.DeepEqual(got, normalized) {
+			t.Fatalf("body %q changed the profile: %+v", body, got)
+		}
+	}
+}
+
+func TestResolveProfileParams(t *testing.T) {
+	raw := config.ProfileConfig{Provider: "fake"}
+	body := `{"default":{"params":{"max_tokens":4000,"temperature":0.5}},
+		"explore":{"params":{"max_tokens":100,"reasoning":{"effort":"low"}}},
+		"challenge":{"params":{"thinking":{"budget_tokens":2048}}}}`
+	resolved := ResolveProfile(raw, normalize(raw), body)
+	params := resolved.Effective.NodeParams
+	explore := params[config.NodeExplore]
+	if *explore.MaxTokens != 100 || *explore.Temperature != 0.5 || explore.Reasoning.Effort != "low" || explore.Source != "override" {
+		t.Fatalf("explore params = %+v", explore)
+	}
+	review := params[config.NodeReview]
+	if *review.MaxTokens != 4000 || review.Reasoning != nil || review.Source != "override_default" {
+		t.Fatalf("review params = %+v", review)
+	}
+	challenge := params[config.NodeChallenge]
+	if challenge.Thinking.BudgetTokens != 2048 || *challenge.MaxTokens != 4000 || challenge.Source != "override" {
+		t.Fatalf("challenge params = %+v", challenge)
+	}
+	view := nodeByName(t, resolved.Nodes, "lanes.review")
+	if view.ParamSource != "override_default" || view.Params == nil || *view.Params.MaxTokens != 4000 || view.Override != nil {
+		t.Fatalf("review view = %+v", view)
+	}
+	if view := nodeByName(t, resolved.Nodes, "explore"); view.Override == nil || view.Override.Params == nil || view.ParamSource != "override" {
+		t.Fatalf("explore view = %+v", view)
+	}
+	// A params-only override keeps the configured model.
+	if view := nodeByName(t, resolved.Nodes, "explore"); view.Source != "config_default" || view.Model != "config:fake" {
+		t.Fatalf("explore model = %s/%s", view.Model, view.Source)
+	}
+}
+
+func TestValidateProfileOverrides(t *testing.T) {
+	known := func(id string) bool { return id == "user:ok" || id == "config:cfg" }
+	for _, tc := range []struct {
+		name, body string
+		fields     []string
+	}{
+		{"valid", `{"default":{"model":"user:ok","params":{"max_tokens":10,"temperature":2,"reasoning":{"effort":"high"},"thinking":{"budget_tokens":0}}},"lanes":{"review":{"model":"config:cfg"}}}`, nil},
+		{"unknown model names the field", `{"lanes":{"validate":{"model":"user:gone"}}}`, []string{"overrides.lanes.validate.model"}},
+		{"bad params", `{"explore":{"params":{"max_tokens":0,"temperature":3,"reasoning":{"effort":"extreme"},"thinking":{"budget_tokens":-1}}}}`,
+			[]string{"overrides.explore.params", "overrides.explore.params", "overrides.explore.params", "overrides.explore.params"}},
+		{"unknown param", `{"explore":{"params":{"context_window":10}}}`, []string{"overrides"}},
+		{"unknown node", `{"plan":{"model":"user:ok"}}`, []string{"overrides"}},
+		{"not an object", `[]`, []string{"overrides"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			details := ValidateProfileOverrides([]byte(tc.body), known)
+			var fields []string
+			for _, detail := range details {
+				fields = append(fields, detail.Field)
+			}
+			if !reflect.DeepEqual(fields, tc.fields) {
+				t.Fatalf("fields = %v (%+v), want %v", fields, details, tc.fields)
+			}
+		})
+	}
+}
+
+type fakeOverrideStore struct {
+	store.ProfileOverrideStore
+	body string
+}
+
+func (f fakeOverrideStore) GetProfileOverrides(context.Context, string) (*store.ProfileOverrides, error) {
+	return &store.ProfileOverrides{Profile: "default", OverridesJSON: f.body, Revision: 1}, nil
+}
+
+// profileFor feeds the executor: the override changes the graph's explore
+// provider and the providers the graph validates, and the hash follows.
+func TestProfileForAppliesOverridesToRawProfile(t *testing.T) {
+	f := newReviewFixture(t, reviewTestHead)
+	raw := config.ProfileConfig{Provider: "fake"}
+	f.service.rawProfiles = map[string]config.ProfileConfig{"default": raw}
+	f.service.profiles["default"] = normalize(raw)
+	f.service.overrides = fakeOverrideStore{body: `{"default":{"model":"user:def"},"lanes":{"code_review":{"model":"user:new"}}}`}
+	_, cfg := f.service.profileFor(context.Background(), &store.Project{Profile: "default"}, "", "", nil, false)
+	if cfg.Propose[0].Provider != "user:new" || cfg.Explore.Provider != "user:def" || cfg.Challenge.Provider != "user:def" {
+		t.Fatalf("profile = %+v", cfg)
+	}
+	if f.service.profiles["default"].Propose[0].Provider != "fake" {
+		t.Fatal("the shared profile was mutated")
+	}
+	profile := review.Profile{Name: "default", Config: cfg}
+	if _, err := review.BuildGraph(profile, testDossier(t, reviewTestHead), review.GraphConfig{AllowedProviders: []string{"fake"}}); err == nil {
+		t.Fatal("graph accepted providers outside the allowed list")
+	}
+	spec, err := review.BuildGraph(profile, testDossier(t, reviewTestHead), review.GraphConfig{AllowedProviders: []string{"user:def", "user:new"}})
+	if err != nil {
+		t.Fatalf("BuildGraph: %v", err)
+	}
+	for _, node := range spec.Nodes {
+		if node.Kind != review.KindExplore {
+			continue
+		}
+		var params struct{ Provider string }
+		if err := json.Unmarshal(node.Params, &params); err != nil || params.Provider != "user:def" {
+			t.Fatalf("explore node params = %s (%v)", node.Params, err)
+		}
+	}
+}
+
+// No override, no new bytes: node_params is omitted and the hash is unchanged,
+// while a parameter override changes it.
+func TestNodeParamsEnterTheProfileHashOnlyWhenSet(t *testing.T) {
+	f := newReviewFixture(t, reviewTestHead)
+	profile := review.Profile{Name: "default", Config: f.profiles["default"]}
+	base := f.service.reviewProfileHash(profile)
+	profile.Config.NodeParams = map[string]config.NodeParams{}
+	if got := f.service.reviewProfileHash(profile); got != base {
+		t.Fatal("an empty node_params map changed the hash")
+	}
+	profile.Config.NodeParams = map[string]config.NodeParams{config.NodeExplore: {MaxTokens: intPtr(10)}}
+	changed := f.service.reviewProfileHash(profile)
+	if changed == base {
+		t.Fatal("a parameter override did not change the hash")
+	}
+	profile.Config.NodeParams = map[string]config.NodeParams{config.NodeExplore: {MaxTokens: intPtr(10), Source: "override"}}
+	if f.service.reviewProfileHash(profile) != changed {
+		t.Fatal("the audit-only source changed the hash")
 	}
 }

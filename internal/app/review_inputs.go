@@ -532,7 +532,11 @@ func (s *ReviewService) profileFor(ctx context.Context, project *store.Project, 
 			cfg := s.profiles[name]
 			if s.overrides != nil {
 				if overrides, err := s.overrides.GetProfileOverrides(ctx, name); err == nil && overrides != nil {
-					cfg = applyProfileOverrides(cfg, parseProfileOverrides(overrides.OverridesJSON))
+					raw, ok := s.rawProfiles[name]
+					if !ok {
+						raw = cfg
+					}
+					cfg = ApplyProfileOverrides(raw, cfg, overrides.OverridesJSON)
 				}
 			}
 			return name, cfg

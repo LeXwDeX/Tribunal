@@ -723,6 +723,9 @@ type m6Options struct {
 	platform     *config.Config
 	streamPoll   time.Duration
 	noContexts   bool
+	// profileOverrides wires the sqlite store as the profile override store.
+	profileOverrides bool
+	models           *llm.Catalog
 }
 
 func newM6Env(t *testing.T, opts m6Options) *m6Env {
@@ -774,10 +777,15 @@ func newM6Env(t *testing.T, opts m6Options) *m6Env {
 	extensions := &fakeExtensions{}
 	mcp := &fakeMCP{}
 	llm := &fakeLLM{}
+	var profileOverrides store.ProfileOverrideStore
+	if opts.profileOverrides {
+		profileOverrides = st
+	}
 	apiServer, err := New(Config{
-		AdminToken: testAdminToken,
-		Projects:   admin,
-		Webhooks:   stubWebhookAcceptor{},
+		ProfileOverrides: profileOverrides,
+		AdminToken:       testAdminToken,
+		Projects:         admin,
+		Webhooks:         stubWebhookAcceptor{},
 		Auth: AuthConfig{
 			GitLabURL:       gitlab.URL,
 			ClientID:        testOAuthClientID,
@@ -799,6 +807,7 @@ func newM6Env(t *testing.T, opts m6Options) *m6Env {
 		LLM:        llm,
 		Tokens:     st,
 		Platform:   platform,
+		Models:     opts.models,
 		StreamPoll: streamPoll,
 		Logger:     newTestLogger(io.Discard),
 	})

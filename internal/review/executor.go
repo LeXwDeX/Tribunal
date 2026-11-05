@@ -892,7 +892,12 @@ func (e *Executor) callAgent(ctx context.Context, in dag.NodeInput, opts agentOp
 			return nil
 		}
 	}
-	ctx = llm.WithCallMeta(ctx, llm.CallMeta{WorkflowID: in.WorkflowID, NodeID: in.Node.ID, Turn: 0})
+	meta := llm.CallMeta{WorkflowID: in.WorkflowID, NodeID: in.Node.ID, Turn: 0, ModelID: auditModelID(opts.Provider)}
+	if params, ok := e.nodeParams(in.Node.Kind); ok {
+		applyNodeParams(&spec, params)
+		meta.ParamSource = params.Source
+	}
+	ctx = llm.WithCallMeta(ctx, meta)
 	result, err := e.runAgent(ctx, opts.Provider, spec, !opts.NoRetry)
 	if err == nil && result != nil && e.ignoredAgentOutput(result.Output) {
 		err = fmt.Errorf("%w: review: ignored path in agent output", agent.ErrIgnoredPath)
@@ -910,6 +915,60 @@ func (e *Executor) callAgent(ctx context.Context, in dag.NodeInput, opts agentOp
 		}
 	}
 	return result, err
+}
+
+// nodeKeys maps a node kind to its key in config.ProfileConfig.NodeParams.
+var nodeKeys = map[string]string{
+	KindExplore:    config.NodeExplore,
+	KindCodeReview: config.NodeCodeReview,
+	KindReview:     config.NodeReview,
+	KindReasoner:   config.NodeReasoner,
+	KindValidate:   config.NodeValidate,
+	KindVerify:     config.NodeChallenge,
+}
+
+// nodeParams returns the request parameter overrides of a node kind.
+func (e *Executor) nodeParams(kind string) (config.NodeParams, bool) {
+	key, ok := nodeKeys[kind]
+	if !ok {
+		return config.NodeParams{}, false
+	}
+	params, ok := e.profile.Config.NodeParams[key]
+	return params, ok && !params.IsZero()
+}
+
+// applyNodeParams sets the run's request values. The agent loop sends them
+// with every request and they win over the model's configured defaults.
+func applyNodeParams(spec *agent.RunSpec, params config.NodeParams) {
+	if params.MaxTokens != nil {
+		spec.MaxTokens = *params.MaxTokens
+	}
+	if params.Temperature != nil {
+		temperature := *params.Temperature
+		spec.Temperature = &temperature
+	}
+	reasoning := llm.ReasoningOpts{}
+	if params.Reasoning != nil {
+		reasoning.Effort = params.Reasoning.Effort
+	}
+	if params.Thinking != nil {
+		reasoning.BudgetTokens = params.Thinking.BudgetTokens
+	}
+	if reasoning != (llm.ReasoningOpts{}) {
+		spec.Reasoning = &reasoning
+	}
+}
+
+// auditModelID is the catalog ID recorded in the call audit for a provider
+// reference. Configured providers are config:<name> in the catalog.
+func auditModelID(provider string) string {
+	switch {
+	case provider == "":
+		return ""
+	case strings.HasPrefix(provider, "user:"), strings.HasPrefix(provider, "config:"):
+		return provider
+	}
+	return "config:" + provider
 }
 
 func (e *Executor) ignoredAgentOutput(output any) bool {

@@ -351,12 +351,29 @@ MCP、Skill、块绑定列表使用游标分页。
 |---|---|---|
 | GET | `/api/v1/providers` | provider 列表（**不含** API key）及近 24 小时调用统计；每项可含可选字段 `unavailable` 与 `unavailable_reason`（`egress_denied` / `dns_lookup_failed`），缺省表示配置 provider 可用。被出站策略拒绝的配置 provider 在启动时标记，进程仍正常启动 |
 | POST | `/api/v1/providers/{name}/test` | 发一条最小请求验证连通性和模型名；被出站策略拒绝时返回 `422 egress_denied`，日志只记录 provider ID 与错误类别 |
-| GET | `/api/v1/profiles` | 档位定义（来自配置文件，只读）；含评审档位 `default` 和 `onboarding`，后者不是评审档位 |
+| GET | `/api/v1/profiles` | 档位定义；含评审档位 `default` 和 `onboarding`，后者不是评审档位。`default` 的节点模型和参数是配置叠加已存覆盖后的生效值，与详情一致 |
+| GET | `/api/v1/profiles/default` | 平台管理员：`default` 档位详情，含 `overrides`（已存覆盖文档）、`revision`、`effective` 和逐节点 `nodes` |
+| PUT | `/api/v1/profiles/default/overrides` | 平台管理员：`{overrides, revision}` 整体替换覆盖文档；`revision` 不匹配返回 409 `stale_revision`；返回完整详情视图 |
+| DELETE | `/api/v1/profiles/default/overrides?revision=` | 平台管理员：清除全部覆盖，恢复为配置；返回完整详情视图 |
 | GET | `/api/v1/stats` | `?from=&to=&project_id=`：运行次数（含 onboarding）、耗时、成本、项目/provider/块统计与 UTC 日趋势、finding 处置分布、人工质量指标、按模型调用与反馈原始计数；`to` 为排他上界 |
 | GET | `/api/v1/system/lock-stats` | 平台管理员：SQLite 连接等待（`wait_count`、`wait_duration_ms` 为累计值；`max_open_connections`、`in_use`、`idle` 为当前连接池值）与工作区锁等待（`wait_count`、`wait_duration_ms` 为累计值，`max_wait_ms` 为进程启动以来单次最长等待）；单连接下连接等待是 SQL 串行化的代理，不是 driver busy 重试计数 |
 | GET | `/api/v1/settings` | 平台配置的只读视图（脱敏） |
 
-首版 provider 和 profile 以配置文件为准，API 只读；改动需修改配置并重启服务。当前进程不处理 `SIGHUP` 热加载。`/providers`、`/profiles` 和 `/settings` 仅平台管理员可访问。
+provider 和 profile 的基线以配置文件为准；改动配置需重启服务，当前进程不处理 `SIGHUP` 热加载。`default` 档位的节点模型和参数可经上面的 overrides 端点覆盖（见[配置设计 · 档位覆盖](06-config.md#档位覆盖节点模型与参数)），覆盖只作用于之后启动的工作流。`/providers`、`/profiles` 和 `/settings` 仅平台管理员可访问。
+
+覆盖文档的字段、白名单和解析顺序见配置设计。校验失败返回 400，`details` 的 `field` 指向出错路径：模型 ID 不存在或已删除为 `overrides.<节点>.model`（如 `overrides.default.model`），参数不合法或不在白名单内为 `overrides.<节点>.params`。
+
+`GET /api/v1/profiles/default` 的 `nodes` 按 `default`、`explore`、`lanes.code_review`、`lanes.review`、`lanes.reasoner`、`lanes.validate`、`challenge` 顺序给出七项，每项字段：
+
+| 字段 | 说明 |
+|---|---|
+| `model` | 生效模型的目录 ID（`config:<name>` 或 `user:<id>`） |
+| `source` | 生效模型的来源：`override`（本节点覆盖）、`override_default`（`default` 覆盖）、`config`（配置中本节点的 provider）、`config_default`（配置中档位的 provider）、`derived`（派生回退） |
+| `configured`、`configured_source` | 仅按配置文件得到的模型及其来源（`config`、`config_default` 或 `derived`） |
+| `override` | 本节点已存的覆盖，没有则缺省 |
+| `params`、`param_source` | 生效的参数覆盖（本节点覆盖逐字段叠加在 `default` 覆盖之上）及来源（`override` 或 `override_default`） |
+| `effective_params` | 模型自身参数叠加覆盖后，该节点实际作为请求值发送的 `max_tokens`、`temperature`、`reasoning`、`thinking` |
+| `vote_identity` | 由端点和模型名得到的投票身份；`vote_identity` 相同的节点在投票中算同一个模型 |
 
 `/stats` 按当前用户的项目授权在聚合和分页前过滤；指定 `project_id` 时还要求该项目 `read`。平台管理员也只会看到自己已获授权项目的业务统计，平台管理标签不扩大项目数据范围。
 
