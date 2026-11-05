@@ -1,12 +1,16 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/llm"
 	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
@@ -126,6 +130,47 @@ func TestProviderTestRequiresOKBoolean(t *testing.T) {
 
 	unknown := client.request(http.MethodPost, "/api/v1/providers/missing/test", nil, nil)
 	assertStatus(t, unknown, http.StatusNotFound)
+}
+
+func TestProviderTestEgressDenied(t *testing.T) {
+	env := newM6Env(t, m6Options{platform: systemPlatform()})
+	env.llm.err = &llm.Error{Kind: llm.ErrEgress, Err: llm.ErrEgressDenied}
+	response := env.loginAs("code-admin").request(http.MethodPost, "/api/v1/providers/claude/test", nil, nil)
+	assertStatus(t, response, http.StatusUnprocessableEntity)
+	if !strings.Contains(string(response.body), "egress_denied") {
+		t.Fatalf("missing egress_denied error: %s", response.body)
+	}
+}
+
+func TestProviderEgressLogContainsOnlyIDAndCategory(t *testing.T) {
+	var logs bytes.Buffer
+	const secretURL = "http://169.254.169.254/private-canary"
+	s := &Server{platform: systemPlatform(), llm: &fakeLLM{err: fmt.Errorf("request %s: %w", secretURL, llm.ErrEgressDenied)}, logger: newTestLogger(&logs)}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/providers/claude/test", nil)
+	req.SetPathValue("name", "claude")
+	w := httptest.NewRecorder()
+	s.logRequests(http.HandlerFunc(s.handleTestProvider)).ServeHTTP(w, req)
+	if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), "egress_denied") {
+		t.Fatalf("status %d body %s", w.Code, w.Body.String())
+	}
+	var entry map[string]any
+	decoder := json.NewDecoder(&logs)
+	if err := decoder.Decode(&entry); err != nil {
+		t.Fatal(err)
+	}
+	if entry["provider"] != "claude" || entry["error_class"] != "egress_denied" {
+		t.Fatalf("unexpected log fields: %v", entry)
+	}
+	for key := range entry {
+		switch key {
+		case "time", "level", "msg", "provider", "error_class":
+		default:
+			t.Fatalf("unexpected log attribute %q", key)
+		}
+	}
+	if strings.Contains(fmt.Sprint(entry), secretURL) || strings.Contains(fmt.Sprint(entry), "169.254.169.254") || strings.Contains(logs.String(), "169.254.169.254") || strings.Contains(w.Body.String(), "169.254.169.254") {
+		t.Fatal("destination appeared in log or response")
+	}
 }
 
 type ioError string

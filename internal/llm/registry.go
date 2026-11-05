@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"sort"
@@ -259,10 +261,16 @@ type registryOptions struct {
 	httpClient     *http.Client
 	recorder       Recorder
 	retryBaseDelay time.Duration
+	egress         config.EgressConfig
 }
 
-// WithHTTPClient injects the HTTP client used by all adapters. Callers may
-// pass a test client; redirects across origins are still rejected.
+// WithEgress configures the outbound IP policy for the registry.
+func WithEgress(cfg config.EgressConfig) RegistryOption {
+	return func(o *registryOptions) { o.egress = cfg }
+}
+
+// WithHTTPClient injects a trusted test client. A custom RoundTripper can
+// bypass the egress policy; production callers should not use this option.
 func WithHTTPClient(client *http.Client) RegistryOption {
 	return func(o *registryOptions) { o.httpClient = client }
 }
@@ -297,7 +305,7 @@ func NewRegistry(providers map[string]config.ProviderConfig, opts ...RegistryOpt
 			opt(&options)
 		}
 	}
-	httpClient, err := guardedHTTPClient(options.httpClient)
+	httpClient, err := newEgressHTTPClient(options.httpClient, options.egress)
 	if err != nil {
 		return nil, err
 	}
@@ -724,7 +732,7 @@ func (c *providerClient) record(ctx context.Context, attempt int, req *Request, 
 		if errors.As(err, &failure) && failure != nil {
 			kind := failure.Kind
 			switch kind {
-			case ErrRateLimited, ErrOverloaded, ErrContextTooLong, ErrAuth, ErrBadRequest, ErrUnsafeResponse, ErrTransient, ErrCanceled:
+			case ErrRateLimited, ErrOverloaded, ErrContextTooLong, ErrAuth, ErrBadRequest, ErrUnsafeResponse, ErrTransient, ErrCanceled, ErrEgress:
 			default:
 				kind = "error"
 			}
@@ -788,10 +796,59 @@ func originHost(u *url.URL) string {
 }
 
 func guardedHTTPClient(base *http.Client) (*http.Client, error) {
+	return guardedHTTPClientWithPolicy(base, egressPolicy{})
+}
+
+// NewEgressHTTPClient constructs the guarded client used for model requests.
+// It disables HTTP proxies and rejects redirects to a different origin.
+func NewEgressHTTPClient(cfg config.EgressConfig) (*http.Client, error) {
+	return newEgressHTTPClient(nil, cfg)
+}
+
+func newEgressHTTPClient(base *http.Client, cfg config.EgressConfig) (*http.Client, error) {
+	policy, err := newEgressPolicy(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if base == nil {
+		transport, ok := http.DefaultTransport.(*http.Transport)
+		if !ok {
+			return nil, errors.New("llm: default HTTP transport is not supported")
+		}
+		base = &http.Client{Transport: transport}
+	}
+	return guardedHTTPClientWithPolicy(base, policy)
+}
+
+func guardedHTTPClientWithPolicy(base *http.Client, policy egressPolicy) (*http.Client, error) {
 	if base == nil {
 		base = http.DefaultClient
 	}
 	clone := *base
+	transport := clone.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	if original, ok := transport.(*http.Transport); ok {
+		secureTransport := original.Clone()
+		secureTransport.Proxy = nil
+		dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second, Control: policy.control}
+		secureTransport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			host, _, err := net.SplitHostPort(address)
+			if err != nil {
+				return nil, ErrEgressDenied
+			}
+			if ip, err := netip.ParseAddr(host); err == nil {
+				if err := policy.check(ip); err != nil {
+					return nil, err
+				}
+			}
+			return dialer.DialContext(ctx, network, address)
+		}
+		secureTransport.DialTLS = nil
+		secureTransport.DialTLSContext = nil
+		clone.Transport = secureTransport
+	}
 	previous := clone.CheckRedirect
 	clone.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if previous != nil {

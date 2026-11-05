@@ -1126,6 +1126,9 @@ func (s *ExtensionService) TestProvider(ctx context.Context, name string) (Provi
 func providerTestError(err error) error {
 	var classified *llm.Error
 	if errors.As(err, &classified) {
+		if classified.Kind == llm.ErrEgress {
+			return &llm.Error{Kind: llm.ErrEgress, Err: llm.ErrEgressDenied}
+		}
 		return fmt.Errorf("provider test failed: %s", classified.Kind)
 	}
 	return errors.New("provider test failed")

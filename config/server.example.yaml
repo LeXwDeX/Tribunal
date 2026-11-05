@@ -58,6 +58,14 @@ engine:
   max_concurrent_nodes: 8
   default_node_timeout: 10m
 
+# Optional LLM outbound CIDRs. Explicit denies take priority over allows.
+# Link-local, unspecified, multicast and limited broadcast addresses are
+# denied by default; private and loopback addresses are allowed.
+# llm:
+#   egress:
+#     deny_cidrs: []
+#     allow_cidrs: []
+
 profiles:
   # The only review profile: explore, then code-review (with the code-review
   # skill), review, reasoner and validate in parallel, then adjudication and

@@ -1,11 +1,13 @@
 package server
 
 import (
+	"errors"
 	"net/http"
 	"sort"
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/llm"
 	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
@@ -141,6 +143,11 @@ func (s *Server) handleTestProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := s.llm.TestProvider(r.Context(), name)
 	if err != nil {
+		if errors.Is(err, llm.ErrEgressDenied) {
+			s.logger.Warn("provider connectivity test failed", "provider", name, "error_class", "egress_denied")
+			writeError(w, r, http.StatusUnprocessableEntity, "egress_denied", "provider destination denied", nil)
+			return
+		}
 		// The error text can contain a base URL or provider detail; log only
 		// the provider name and return a generic message with ok:false.
 		s.logger.Warn("provider connectivity test failed",

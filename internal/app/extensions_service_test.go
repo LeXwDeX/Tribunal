@@ -526,6 +526,28 @@ func TestExtensionServiceTestProvider(t *testing.T) {
 	}
 }
 
+func TestExtensionServiceProviderEgressDenied(t *testing.T) {
+	t.Setenv("EGRESS_SERVICE_KEY", "test")
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("denied provider reached upstream")
+	}))
+	t.Cleanup(upstream.Close)
+	registry, err := llm.NewRegistry(map[string]config.ProviderConfig{
+		"p": {Protocol: "openai-chat", BaseURL: upstream.URL, Model: "test", APIKeyEnv: "EGRESS_SERVICE_KEY"},
+	}, llm.WithEgress(config.EgressConfig{DenyCIDRs: []string{"127.0.0.0/8", "::1/128"}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewExtensionService(ExtensionServiceConfig{Store: openTestStore(t), Clients: registry, Workspace: workspace.NewManager(t.TempDir(), nil)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.TestProvider(context.Background(), "p")
+	if !errors.Is(err, llm.ErrEgressDenied) {
+		t.Fatalf("provider test must retain egress classification: %v", err)
+	}
+}
+
 func TestExtensionServiceValidation(t *testing.T) {
 	ctx := context.Background()
 	service, _ := newExtensionFixture(t)

@@ -149,7 +149,7 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 	}
 	clients := deps.LLM
 	if clients == nil {
-		registry, err := llm.NewRegistry(cfg.Providers, llm.WithRecorder(deps.Store))
+		registry, err := llm.NewRegistry(cfg.Providers, llm.WithRecorder(deps.Store), llm.WithEgress(cfg.LLM.Egress))
 		if err != nil {
 			return nil, fmt.Errorf("app: build LLM registry: %w", err)
 		}
