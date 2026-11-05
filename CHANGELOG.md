@@ -58,6 +58,12 @@
 - **空 diff 评审不再 PASS**（[#329](https://github.com/LeXwDeX/Tribunal/issues/329)）：空 diff 的 MR 返回 INCOMPLETE，摘要说明“没有可评审的变更”，启用 commit status 时写 failed；全部变更被 ignore 的既有 PASS 行为不变。控制台可见性由 [#331](https://github.com/LeXwDeX/Tribunal/issues/331) 跟踪。
 - **控制台**：「模型与档位」页只把 `default` 显示为「评审档位」，按固定的八步拓扑（探索、提出、挑战、裁决、汇报）列出各步骤的 provider，`onboarding` 单独标为「项目接入」；项目注册、项目设置和手动触发评审对话框不再有档位选择，项目列表不再有档位列。执行阶段轨道里 `explore` 和 `plan` 归入「规划」，`code-review`、`review`、`reasoner` 和 `validate` 归入「提出」；「项目接入」一行在 onboarding 没有 provider 时显示「未配置」。
 
+### 修复
+
+- **控制台新建的用户模型被档位覆盖引用后，评审不再整体失败**（[#327](https://github.com/LeXwDeX/Tribunal/issues/327)）：此前评审图校验用的 provider 白名单只在启动时计算一次；启动后创建的用户模型一旦被档位覆盖引用，每次评审都会在创建工作流前以 `review execution failed` 失败（永久性 `build review graph` 错误），重启后才恢复。现在每次评审都按当前模型目录校验，运行时新建或删除的模型无需重启即生效，已软删除的模型会被拒绝。
+- **新增或修改用户模型不再导致在途工作流被取消**（[#327](https://github.com/LeXwDeX/Tribunal/issues/327)，修正 [#299](https://github.com/LeXwDeX/Tribunal/issues/299) 的哈希约定）：`reviewProfileHash` 此前包含启动时已有的全部用户模型 ID，新增任一用户模型并重启就会改变所有在途工作流的档位哈希，恢复时被当作已被取代而取消。现在参与哈希的 provider 列表只含配置 provider 名称（无用户模型、无覆盖时与 v1.2.0 一致），`user_models` 只含档位实际引用的用户模型的非密钥设置（协议、base_url、model、参数、价格，不含凭据）。因此新增或修改未被引用的用户模型不影响在途评审；修改被引用模型的设置后，被中断的工作流在恢复时按失败即关闭取消（`cause=profile_hash_changed`），进程内正在运行的工作流仍沿用其启动时快照。**升级提示**：在用户模型已存在时由 v1.3.0 预发布版本启动的工作流带有旧哈希，升级后恢复时会被取消，需重新触发评审；v1.2.0 的工作流不受影响。
+- **评审永久失败时输出可定位的诊断日志**（[#327](https://github.com/LeXwDeX/Tribunal/issues/327)）：服务端记录 WARN `review run failed permanently`，含 `project_id`、`mr_iid`、`generation`、`error_class` 和 `stage`（`control`、`inputs`、`config`、`execution`、`prepare`、`graph`、`workflow` 之一）；不记录原始错误。
+
 ## [1.2.0] - 2026-10-29
 
 > v1.2.0 已发布（2026-11-05，tag `v1.2.0` 指向 `4e95f4f`，GitHub Release 为 Latest）。候选范围是 [v1.1.0...v1.2.0](https://github.com/LeXwDeX/Tribunal/compare/v1.1.0...v1.2.0)，包含 #143 与迁移 `0020`–`0024`；本节合并了原 `Unreleased` 条目。真实实例升级已验证 `0016`–`0024` 的应用、健康检查、内置扩展和 #143 授权迁移；`0020`/`0022` 带历史数据回填、完整 2 用户／2 项目矩阵和升级后新真实评审仍未做。
