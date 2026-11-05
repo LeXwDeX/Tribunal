@@ -275,6 +275,14 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 	projectSkills := &projectAwareSkillProvider{resolver: projectExts, base: skillProvider, blocks: blocks}
 	reviewBlocks := projectBindingStubs(blocks)
 	statusFeed := newStatusReporter(deps.GitLab, logger)
+	allowedProviders := providerNames(cfg.Providers)
+	if modelCatalog != nil {
+		for _, model := range modelCatalog.List() {
+			if strings.HasPrefix(model.ID, "user:") {
+				allowedProviders = append(allowedProviders, model.ID)
+			}
+		}
+	}
 	reviews, err := NewReviewService(ReviewServiceConfig{
 		Store:             deps.Store,
 		GitLab:            deps.GitLab,
@@ -295,7 +303,7 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		Cost:              costFunc(modelCatalog, cfg.Providers),
 		Publisher:         publisher,
 		Status:            statusFeed,
-		AllowedProviders:  providerNames(cfg.Providers),
+		AllowedProviders:  allowedProviders,
 		ProviderConfigs:   cloneProviderConfigs(cfg.Providers),
 		ProjectExtensions: projectExts,
 		PublicURL:         cfg.Server.PublicURL,
