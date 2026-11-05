@@ -32,3 +32,7 @@ Icon[\r]
 /.agents/skills/specgit-native/
 /.claude/skills/specgit-native/
 /.claude/worktrees/
+
+# SpecGit 与本地 Agent 生成的本地资产（不追踪）
+/.claude/settings.json
+/CLAUDE.md
