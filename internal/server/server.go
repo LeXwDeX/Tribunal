@@ -19,6 +19,7 @@ import (
 
 	"github.com/LeXwDeX/tribunal/internal/app"
 	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/llm"
 	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
@@ -79,20 +80,23 @@ type Config struct {
 	Auth       AuthConfig
 	Logger     *slog.Logger
 
-	Store      Store
-	Reviews    ReviewController
-	Workspace  WorkspaceService
-	Contexts   ContextService
-	Extensions ExtensionService
-	MCP        MCPTester
-	LLM        ProviderTester
-	Tokens     TokenStore
-	Sessions   SessionStore
-	Access     AccessStore
-	Platform   *config.Config
-	LockStats  func() LockStats
-	StreamPoll time.Duration
-	Now        func() time.Time
+	Store         Store
+	Reviews       ReviewController
+	Workspace     WorkspaceService
+	Contexts      ContextService
+	Extensions    ExtensionService
+	MCP           MCPTester
+	LLM           ProviderTester
+	Models        *llm.Catalog
+	ModelsStore   store.ModelStore
+	RefreshModels func(context.Context) error
+	Tokens        TokenStore
+	Sessions      SessionStore
+	Access        AccessStore
+	Platform      *config.Config
+	LockStats     func() LockStats
+	StreamPoll    time.Duration
+	Now           func() time.Time
 }
 
 // Server routes all HTTP requests.
@@ -111,19 +115,22 @@ type Server struct {
 	logger     *slog.Logger
 	handler    http.Handler
 
-	store      Store
-	reviews    ReviewController
-	workspace  WorkspaceService
-	contexts   ContextService
-	extensions ExtensionService
-	mcp        MCPTester
-	llm        ProviderTester
-	tokens     TokenStore
-	access     AccessStore
-	platform   *config.Config
-	lockStats  func() LockStats
-	streamPoll time.Duration
-	now        func() time.Time
+	store         Store
+	reviews       ReviewController
+	workspace     WorkspaceService
+	contexts      ContextService
+	extensions    ExtensionService
+	mcp           MCPTester
+	llm           ProviderTester
+	models        *llm.Catalog
+	modelsStore   store.ModelStore
+	refreshModels func(context.Context) error
+	tokens        TokenStore
+	access        AccessStore
+	platform      *config.Config
+	lockStats     func() LockStats
+	streamPoll    time.Duration
+	now           func() time.Time
 
 	// shutdown closes when the HTTP server starts shutting down. Long-lived
 	// responses watch it because Shutdown does not cancel active requests.
@@ -167,32 +174,35 @@ func New(cfg Config) (*Server, error) {
 		roles, _ = cfg.Tokens.(PlatformRoleStore)
 	}
 	s := &Server{
-		adminToken: cfg.AdminToken,
-		projects:   cfg.Projects,
-		residues:   cfg.Residues,
-		webhooks:   cfg.Webhooks,
-		database:   cfg.Database,
-		worker:     cfg.Worker,
-		auth:       auth,
-		sessions:   sessions,
-		bindings:   bindings,
-		roles:      roles,
-		web:        web,
-		logger:     logger,
-		store:      cfg.Store,
-		reviews:    cfg.Reviews,
-		workspace:  cfg.Workspace,
-		contexts:   cfg.Contexts,
-		extensions: cfg.Extensions,
-		mcp:        cfg.MCP,
-		llm:        cfg.LLM,
-		tokens:     cfg.Tokens,
-		access:     cfg.Access,
-		platform:   cfg.Platform,
-		lockStats:  cfg.LockStats,
-		streamPoll: cfg.StreamPoll,
-		now:        cfg.Now,
-		shutdown:   make(chan struct{}),
+		adminToken:    cfg.AdminToken,
+		projects:      cfg.Projects,
+		residues:      cfg.Residues,
+		webhooks:      cfg.Webhooks,
+		database:      cfg.Database,
+		worker:        cfg.Worker,
+		auth:          auth,
+		sessions:      sessions,
+		bindings:      bindings,
+		roles:         roles,
+		web:           web,
+		logger:        logger,
+		store:         cfg.Store,
+		reviews:       cfg.Reviews,
+		workspace:     cfg.Workspace,
+		contexts:      cfg.Contexts,
+		extensions:    cfg.Extensions,
+		mcp:           cfg.MCP,
+		llm:           cfg.LLM,
+		models:        cfg.Models,
+		modelsStore:   cfg.ModelsStore,
+		refreshModels: cfg.RefreshModels,
+		tokens:        cfg.Tokens,
+		access:        cfg.Access,
+		platform:      cfg.Platform,
+		lockStats:     cfg.LockStats,
+		streamPoll:    cfg.StreamPoll,
+		now:           cfg.Now,
+		shutdown:      make(chan struct{}),
 	}
 	if s.now == nil {
 		s.now = time.Now
@@ -257,6 +267,13 @@ func New(cfg Config) (*Server, error) {
 	// System.
 	mux.HandleFunc("GET /api/v1/providers", s.apiAuth(s.guard(policyPlatformAdmin, s.handleListProviders)))
 	mux.HandleFunc("POST /api/v1/providers/{name}/test", s.apiAuth(s.guard(policyPlatformAdmin, s.handleTestProvider)))
+	mux.HandleFunc("GET /api/v1/models", s.apiAuth(s.guard(policyPlatformAdmin, s.handleListModels)))
+	mux.HandleFunc("GET /api/v1/models/{id}", s.apiAuth(s.guard(policyPlatformAdmin, s.handleGetModel)))
+	mux.HandleFunc("POST /api/v1/models", s.apiAuth(s.guard(policyPlatformAdmin, s.handleCreateModel)))
+	mux.HandleFunc("PATCH /api/v1/models/{id}", s.apiAuth(s.guard(policyPlatformAdmin, s.handleUpdateModel)))
+	mux.HandleFunc("DELETE /api/v1/models/{id}", s.apiAuth(s.guard(policyPlatformAdmin, s.handleDeleteModel)))
+	mux.HandleFunc("POST /api/v1/models/{id}/test", s.apiAuth(s.guard(policyPlatformAdmin, s.handleTestModel)))
+	mux.HandleFunc("POST /api/v1/models:test", s.apiAuth(s.guard(policyPlatformAdmin, s.handleTestModelDraft)))
 	mux.HandleFunc("GET /api/v1/profiles", s.apiAuth(s.guard(policyPlatformAdmin, s.handleListProfiles)))
 	mux.HandleFunc("GET /api/v1/stats", s.apiAuth(s.handleStats))
 	mux.HandleFunc("GET /api/v1/system/lock-stats", s.apiAuth(s.guard(policyPlatformAdmin, s.handleLockStats)))

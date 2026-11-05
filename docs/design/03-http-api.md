@@ -419,6 +419,20 @@ Provider 返回 `name`、`protocol`、`base_url`、`model`、`max_concurrency`�
 | PUT | `/api/v1/admin/projects/{id}/grants/{user_id}` | `{role: "read"|"manage"}`，返回保存后的 grant |
 | DELETE | `/api/v1/admin/projects/{id}/grants/{user_id}` | 删除一个 grant；`204` |
 
+模型管理（平台管理员，见 #290）：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/v1/models` | 列出配置模型（`id=config:<name>`，只读）与用户模型（`id=user:<uuid>`）；不分页 |
+| GET | `/api/v1/models/{id}` | 详情 |
+| POST | `/api/v1/models` | 创建用户模型；`api_key` 只写不回显 |
+| PATCH | `/api/v1/models/{id}` | 修改，必须带 `revision`；`api_key` 省略表示不变，空串表示清除；配置模型返回 403 `read_only` |
+| DELETE | `/api/v1/models/{id}?revision=N` | 软删除；配置模型返回 403 `read_only` |
+| POST | `/api/v1/models/{id}/test` | 测试已保存模型；用户模型测试暂未实现 |
+| POST | `/api/v1/models:test` | 草稿测试；当前返回 501 |
+
+写操作成功后调用运行时刷新，响应 `effective: "new_workflows"`；审计日志使用 `event=platform_audit`，只记录操作者、目标、动作和字段名。
+
 授权角色只有 `read` 和 `manage`，默认没有 grant。`admin projects` 只用于选择授权对象，不返回项目业务数据；平台管理员要读取项目详情、评审、统计或 SSE，仍必须有对应 grant。停用用户不删除 `users` 行或 grant；重新启用后可以再次登录，但已撤销的会话和 token 不会恢复。撤销凭据不禁用账号，用户仍可通过 OAuth 重新登录。只有平台管理员可以跨用户停用、撤销或管理 grant；普通用户只能管理自己的 API token。
 
 ---
