@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/LeXwDeX/tribunal/internal/app"
 	"github.com/LeXwDeX/tribunal/internal/llm"
 	"github.com/LeXwDeX/tribunal/internal/store"
 )
@@ -57,6 +58,13 @@ func (s *Server) modelViews(r *http.Request) ([]modelView, error) {
 	views := make([]modelView, 0, len(models))
 	for _, model := range models {
 		view := s.modelView(model, aggregated[model.ID])
+		if s.profileOverrides != nil && strings.HasPrefix(model.ID, "user:") {
+			if refs, err := s.profileOverrides.ListProfileModelReferences(r.Context(), model.ID); err == nil {
+				for _, ref := range refs {
+					view.ReferencedBy = append(view.ReferencedBy, ref.Profile+"/"+ref.Node)
+				}
+			}
+		}
 		views = append(views, view)
 	}
 	sort.Slice(views, func(i, j int) bool { return views[i].ID < views[j].ID })
@@ -196,6 +204,16 @@ func (s *Server) handleDeleteModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.modelsStore.SoftDeleteModel(r.Context(), id, revision, currentUserID(r)); err != nil {
+		if errors.Is(err, store.ErrConflict) && s.profileOverrides != nil {
+			details := []app.Detail{}
+			if refs, refErr := s.profileOverrides.ListProfileModelReferences(r.Context(), id); refErr == nil {
+				for _, ref := range refs {
+					details = append(details, app.Detail{Field: "references", Message: ref.Profile + "/" + ref.Node})
+				}
+			}
+			writeError(w, r, http.StatusConflict, "referenced", "model is referenced", details)
+			return
+		}
 		s.writeModelError(w, r, err)
 		return
 	}

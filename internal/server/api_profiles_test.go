@@ -17,6 +17,7 @@ type fakeProfileOverrides struct {
 	body     string
 	revision int64
 	putErr   error
+	refs     []store.ProfileModelReference
 }
 
 func (f *fakeProfileOverrides) GetProfileOverrides(context.Context, string) (*store.ProfileOverrides, error) {
@@ -32,6 +33,9 @@ func (f *fakeProfileOverrides) PutProfileOverrides(_ context.Context, profile, b
 }
 func (f *fakeProfileOverrides) DeleteProfileOverrides(context.Context, string, int64) error {
 	return f.putErr
+}
+func (f *fakeProfileOverrides) ListProfileModelReferences(context.Context, string) ([]store.ProfileModelReference, error) {
+	return f.refs, nil
 }
 
 func newProfileServer(t *testing.T, overrides *fakeProfileOverrides) *Server {
