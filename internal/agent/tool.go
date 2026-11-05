@@ -66,6 +66,10 @@ type Result struct {
 	Content   string
 	IsError   bool
 	Truncated bool
+	// EvidenceID names the reads this result delivered. The loop drops the
+	// evidence when context compaction removes the result before the model
+	// sees it.
+	EvidenceID string
 }
 
 // SubmitSpec describes the structured final result.
@@ -98,6 +102,10 @@ type RunSpec struct {
 	// caller can discard per-conversation evidence that the new attempt will
 	// not see.
 	OnAttempt func()
+	// OnEvidenceDropped receives evidence IDs whose tool results were replaced
+	// by context compaction before the next request. Those reads must not
+	// count as reviewed.
+	OnEvidenceDropped func([]string)
 	// BeforeTurn runs before every model request with the usage already
 	// consumed by this run. A non-nil error stops the loop without another
 	// Generate call.

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unicode/utf8"
 
 	"github.com/LeXwDeX/tribunal/internal/llm"
@@ -33,51 +34,42 @@ type ChangeSource struct {
 	AllFiles []ChangeFile
 	Inline   map[string]bool
 
-	mu       sync.Mutex
-	read     map[string]map[int]map[int]bool
-	parts    map[string]map[int]map[int][][2]int
-	pending  map[string]map[int]map[int]bool
-	totals   map[string]map[int]int
-	complete map[string]map[int]bool
+	mu              sync.Mutex
+	read            map[string]map[int]map[int]bool
+	parts           map[string]map[int]map[int][]readPart
+	pendingEvidence map[string][]pendingRead
+	totals          map[string]map[int]int
+	complete        map[string]map[int]bool
+}
+
+type readPart struct {
+	id    string
+	start int
+	end   int
+}
+
+type pendingRead struct {
+	path  string
+	hunk  int
+	line  int
+	start int
+	end   int
+	total int
 }
 
 // NewChangeSource builds a change source. files are the current package;
 // all is the full MR file list used by list_changes with all=true.
 func NewChangeSource(files, all []ChangeFile, inline map[string]bool) *ChangeSource {
 	return &ChangeSource{
-		Files:    append([]ChangeFile(nil), files...),
-		AllFiles: append([]ChangeFile(nil), all...),
-		Inline:   inline,
-		read:     make(map[string]map[int]map[int]bool),
-		parts:    make(map[string]map[int]map[int][][2]int),
-		pending:  make(map[string]map[int]map[int]bool),
-		totals:   make(map[string]map[int]int),
-		complete: make(map[string]map[int]bool),
+		Files:           append([]ChangeFile(nil), files...),
+		AllFiles:        append([]ChangeFile(nil), all...),
+		Inline:          inline,
+		read:            make(map[string]map[int]map[int]bool),
+		parts:           make(map[string]map[int]map[int][]readPart),
+		pendingEvidence: make(map[string][]pendingRead),
+		totals:          make(map[string]map[int]int),
+		complete:        make(map[string]map[int]bool),
 	}
-}
-
-// RecordLine records one hunk line as read but not yet delivered to the
-// model. Flush commits pending reads only when the next model request starts.
-func (c *ChangeSource) RecordLine(path string, hunk, line int) {
-	if c == nil || hunk < 1 || line < 1 {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.pending == nil {
-		c.pending = make(map[string]map[int]map[int]bool)
-	}
-	byHunk := c.pending[path]
-	if byHunk == nil {
-		byHunk = make(map[int]map[int]bool)
-		c.pending[path] = byHunk
-	}
-	lines := byHunk[hunk]
-	if lines == nil {
-		lines = make(map[int]bool)
-		byHunk[hunk] = lines
-	}
-	lines[line] = true
 }
 
 // Flush commits reads that the next model request will see. Calling it after
@@ -88,25 +80,63 @@ func (c *ChangeSource) Flush() {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for path, hunks := range c.pending {
-		if c.read[path] == nil {
-			c.read[path] = make(map[int]map[int]bool)
-		}
-		for hunk, lines := range hunks {
-			if c.read[path][hunk] == nil {
-				c.read[path][hunk] = make(map[int]bool)
+	for _, reads := range c.pendingEvidence {
+		for _, read := range reads {
+			if c.read[read.path] == nil {
+				c.read[read.path] = make(map[int]map[int]bool)
 			}
-			for line := range lines {
-				c.read[path][hunk][line] = true
+			if c.read[read.path][read.hunk] == nil {
+				c.read[read.path][read.hunk] = make(map[int]bool)
 			}
+			c.read[read.path][read.hunk][read.line] = true
 		}
 	}
-	c.pending = make(map[string]map[int]map[int]bool)
+	c.pendingEvidence = make(map[string][]pendingRead)
 	c.recomputeCompleteLocked()
 }
 
 // Reset discards every read. A transport retry starts a fresh conversation,
 // so evidence from the failed attempt must not cover the next one.
+// DropEvidence removes reads whose tool output context compaction replaced
+// before the model saw them.
+func (c *ChangeSource) DropEvidence(ids []string) {
+	if c == nil || len(ids) == 0 {
+		return
+	}
+	drop := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		drop[id] = true
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, id := range ids {
+		delete(c.pendingEvidence, id)
+	}
+	for path, hunks := range c.parts {
+		for hunk, lines := range hunks {
+			for line, parts := range lines {
+				kept := parts[:0]
+				for _, part := range parts {
+					if !drop[part.id] {
+						kept = append(kept, part)
+					}
+				}
+				if len(kept) == 0 {
+					delete(lines, line)
+				} else {
+					lines[line] = kept
+				}
+			}
+			if len(lines) == 0 {
+				delete(hunks, hunk)
+			}
+		}
+		if len(hunks) == 0 {
+			delete(c.parts, path)
+		}
+	}
+}
+
 func (c *ChangeSource) Reset() {
 	if c == nil {
 		return
@@ -114,8 +144,8 @@ func (c *ChangeSource) Reset() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.read = make(map[string]map[int]map[int]bool)
-	c.parts = make(map[string]map[int]map[int][][2]int)
-	c.pending = make(map[string]map[int]map[int]bool)
+	c.parts = make(map[string]map[int]map[int][]readPart)
+	c.pendingEvidence = make(map[string][]pendingRead)
 	c.totals = make(map[string]map[int]int)
 	c.complete = make(map[string]map[int]bool)
 }
@@ -225,6 +255,8 @@ type readDiffInput struct {
 	FromOffset int    `json:"from_offset,omitempty"`
 }
 
+var readDiffSequence atomic.Int64
+
 const (
 	maxDiffHunksPerCall = 20
 	maxDiffLinesPerCall = 400
@@ -272,6 +304,7 @@ func (t readDiffTool) Call(_ context.Context, raw json.RawMessage) (Result, erro
 	if len(hunks) == 0 {
 		return Result{Content: fmt.Sprintf("%s has no diff hunks", file.Path)}, nil
 	}
+	evidenceID := fmt.Sprintf("read-%d", readDiffSequence.Add(1))
 	fromHunk := in.FromHunk
 	if fromHunk == 0 {
 		fromHunk = 1
@@ -369,7 +402,7 @@ func (t readDiffTool) Call(_ context.Context, raw json.RawMessage) (Result, erro
 				part := sliceRunes(line, offset, end)
 				b.WriteString(part)
 				runes += utf8.RuneCountInString(part)
-				t.changes.recordLinePart(file.Path, hunk, i+1, offset, end, lineRunes)
+				t.changes.recordLinePart(evidenceID, file.Path, hunk, i+1, offset, end, lineRunes)
 				nextHunk, nextLine, nextOffset = hunk, i+1, end
 				stopped = true
 				break
@@ -379,7 +412,7 @@ func (t readDiffTool) Call(_ context.Context, raw json.RawMessage) (Result, erro
 			b.WriteByte('\n')
 			runes += utf8.RuneCountInString(part) + 1
 			lines++
-			t.changes.recordLinePart(file.Path, hunk, i+1, offset, lineRunes, lineRunes)
+			t.changes.recordLinePart(evidenceID, file.Path, hunk, i+1, offset, lineRunes, lineRunes)
 		}
 		if stopped {
 			break
@@ -397,7 +430,7 @@ func (t readDiffTool) Call(_ context.Context, raw json.RawMessage) (Result, erro
 	} else {
 		b.WriteString("\n[read_diff] end of diff\n")
 	}
-	return Result{Content: strings.TrimSuffix(b.String(), "\n"), Truncated: stopped}, nil
+	return Result{Content: strings.TrimSuffix(b.String(), "\n"), Truncated: stopped, EvidenceID: evidenceID}, nil
 }
 
 func (c *ChangeSource) find(path string) (ChangeFile, bool) {
@@ -423,7 +456,7 @@ func (c *ChangeSource) setHunkTotal(path string, hunk, total int) {
 	c.totals[path][hunk] = total
 }
 
-func (c *ChangeSource) recordLinePart(path string, hunk, line, start, end, total int) {
+func (c *ChangeSource) recordLinePart(id, path string, hunk, line, start, end, total int) {
 	if start < 0 {
 		start = 0
 	}
@@ -435,29 +468,31 @@ func (c *ChangeSource) recordLinePart(path string, hunk, line, start, end, total
 	}
 	c.mu.Lock()
 	if c.parts[path] == nil {
-		c.parts[path] = make(map[int]map[int][][2]int)
+		c.parts[path] = make(map[int]map[int][]readPart)
 	}
 	if c.parts[path][hunk] == nil {
-		c.parts[path][hunk] = make(map[int][][2]int)
+		c.parts[path][hunk] = make(map[int][]readPart)
 	}
-	c.parts[path][hunk][line] = append(c.parts[path][hunk][line], [2]int{start, end})
+	c.parts[path][hunk][line] = append(c.parts[path][hunk][line], readPart{id: id, start: start, end: end})
 	complete := c.lineCoveredLocked(path, hunk, line, total)
-	c.mu.Unlock()
 	if complete {
-		c.RecordLine(path, hunk, line)
+		c.pendingEvidence[id] = append(c.pendingEvidence[id], pendingRead{
+			path: path, hunk: hunk, line: line, start: start, end: end, total: total,
+		})
 	}
+	c.mu.Unlock()
 }
 
 func (c *ChangeSource) lineCoveredLocked(path string, hunk, line, total int) bool {
-	intervals := append([][2]int(nil), c.parts[path][hunk][line]...)
-	sort.Slice(intervals, func(i, j int) bool { return intervals[i][0] < intervals[j][0] })
+	intervals := append([]readPart(nil), c.parts[path][hunk][line]...)
+	sort.Slice(intervals, func(i, j int) bool { return intervals[i].start < intervals[j].start })
 	covered := 0
 	for _, interval := range intervals {
-		if interval[0] > covered {
+		if interval.start > covered {
 			break
 		}
-		if interval[1] > covered {
-			covered = interval[1]
+		if interval.end > covered {
+			covered = interval.end
 		}
 	}
 	return covered >= total

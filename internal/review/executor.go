@@ -882,6 +882,7 @@ func (e *Executor) callAgent(ctx context.Context, in dag.NodeInput, opts agentOp
 	}
 	if opts.Changes != nil {
 		spec.OnAttempt = opts.Changes.Reset
+		spec.OnEvidenceDropped = opts.Changes.DropEvidence
 		previous := spec.BeforeTurn
 		spec.BeforeTurn = func(ctx context.Context, usage llm.Usage) error {
 			opts.Changes.Flush()

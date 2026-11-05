@@ -1443,7 +1443,11 @@ func reviewTaskLayoutFor(kind string, d *Dossier, params reviewNodeParams) (revi
 	if remaining < 0 {
 		remaining = 0
 	}
-	indexText, diffText, spans, inline := renderDiffsWithSpans(d, params.Files, remaining)
+	renderBudget := remaining - utf8.RuneCountInString(reviewContextTruncatedMarker)
+	if renderBudget < 0 {
+		renderBudget = 0
+	}
+	indexText, diffText, spans, inline := renderDiffsWithSpans(d, params.Files, renderBudget)
 	indexRunes := utf8.RuneCountInString(indexText)
 	diffRunes := utf8.RuneCountInString(diffText)
 	remaining -= indexRunes + diffRunes

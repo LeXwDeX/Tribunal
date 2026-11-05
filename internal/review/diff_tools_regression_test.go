@@ -129,7 +129,7 @@ func TestReviewTaskKeepsSixtyFileDiffIndexed(t *testing.T) {
 }
 
 func TestCoverageClearsAfterRealReadDiffCalls(t *testing.T) {
-	const fileCount = 20
+	const fileCount = 40
 	diff := "@@ -1 +1 @@\n+" + strings.Repeat("x", 9000)
 	files := make([]string, 0, fileCount)
 	changes := make([]agent.ChangeFile, 0, fileCount)
@@ -160,6 +160,12 @@ func TestCoverageClearsAfterRealReadDiffCalls(t *testing.T) {
 	if read == nil {
 		t.Fatal("read_diff is missing")
 	}
+	executor := newTestExecutor(t, ExecutorDeps{Dossier: d})
+	before, _ := executor.builtPromptDiffGaps(d, KindCodeReview, params, nil, nil)
+	if len(before) == 0 {
+		t.Fatal("test setup inlined every file, so the tool path was not exercised")
+	}
+	readCalls := 0
 	for _, file := range files {
 		if layout.inline[file] {
 			continue
@@ -168,10 +174,13 @@ func TestCoverageClearsAfterRealReadDiffCalls(t *testing.T) {
 		if _, err := read.Call(context.Background(), json.RawMessage(input)); err != nil {
 			t.Fatalf("read_diff %s: %v", file, err)
 		}
+		readCalls++
+	}
+	if readCalls == 0 {
+		t.Fatal("read_diff was never called")
 	}
 	source.Flush()
 	output := mustJSON(t, map[string]any{"diff_reads": source.DiffReads()})
-	executor := newTestExecutor(t, ExecutorDeps{Dossier: d})
 	gaps, _ := executor.builtPromptDiffGaps(d, KindCodeReview, params, nil, output)
 	if len(gaps) != 0 {
 		t.Fatalf("real read_diff evidence left coverage gaps: %v", gaps)

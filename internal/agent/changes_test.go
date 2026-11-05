@@ -207,3 +207,22 @@ func TestReadDiffPaginatesAnOversizedLine(t *testing.T) {
 	}
 	t.Fatal("oversized line did not finish within 10 pages")
 }
+
+func TestDropEvidenceRemovesCompactedReads(t *testing.T) {
+	diff := "@@ -1 +1 @@\n+one\n"
+	source := NewChangeSource([]ChangeFile{{Path: "a.go", Status: "modified", Diff: diff}}, nil, nil)
+	sb := changeSandbox(t)
+	read := toolByName(t, BuiltinToolsWithChanges(sb, source), "read_diff")
+	result, err := invoke(t, read, `{"path":"a.go"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.EvidenceID == "" {
+		t.Fatal("read_diff did not return an evidence id")
+	}
+	source.DropEvidence([]string{result.EvidenceID})
+	source.Flush()
+	if got := source.DiffReads(); len(got) != 0 {
+		t.Fatalf("dropped read still counted as reviewed: %v", got)
+	}
+}

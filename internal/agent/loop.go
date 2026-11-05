@@ -230,6 +230,7 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 	contextLimit := contextWindow * compactThresholdPercent / 100
 	var contextTokens, largestTurnTokens int64
 	compacted := 0
+	evidenceByCall := make(map[string]string)
 	// nearContextLimit compacts older tool outputs once the estimate reaches
 	// the limit and reports whether the context is still at or above it.
 	// While the estimate stays at or above the limit, fewer recent turns are
@@ -239,9 +240,20 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 			return false
 		}
 		for keep := compactKeepToolTurns; keep >= 0; keep-- {
-			saved, n := compactToolResults(messages, keep)
+			saved, n, dropped := compactToolResults(messages, keep)
 			contextTokens -= saved
 			compacted += n
+			if len(dropped) > 0 && spec.OnEvidenceDropped != nil {
+				ids := make([]string, 0, len(dropped))
+				for _, callID := range dropped {
+					if id := evidenceByCall[callID]; id != "" {
+						ids = append(ids, id)
+					}
+				}
+				if len(ids) > 0 {
+					spec.OnEvidenceDropped(ids)
+				}
+			}
 			if contextTokens < contextLimit {
 				break
 			}
@@ -512,6 +524,8 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 			name := call.Name
 			if res.IsError {
 				name = "tool"
+			} else if res.EvidenceID != "" {
+				evidenceByCall[call.ID] = res.EvidenceID
 			}
 			results = append(results, wrapToolResult(call.ID, name, res, maxOutput))
 			if err := ctx.Err(); err != nil {
@@ -617,7 +631,7 @@ func toolResultTokens(parts []llm.Part) int64 {
 // estimated tokens saved and the number of results replaced. Error results
 // stay, so submit_result validation feedback survives. Parts are copied, so
 // earlier request snapshots keep their original content.
-func compactToolResults(messages []llm.Message, keep int) (int64, int) {
+func compactToolResults(messages []llm.Message, keep int) (int64, int, []string) {
 	toolMessages := 0
 	for _, msg := range messages {
 		if msg.Role == llm.RoleTool {
@@ -626,6 +640,7 @@ func compactToolResults(messages []llm.Message, keep int) (int64, int) {
 	}
 	var saved int64
 	replaced := 0
+	var dropped []string
 	for i := range messages {
 		if toolMessages <= keep {
 			break
@@ -646,12 +661,13 @@ func compactToolResults(messages []llm.Message, keep int) (int64, int) {
 			parts[j].ToolResult = &result
 			changed = true
 			replaced++
+			dropped = append(dropped, result.CallID)
 		}
 		if changed {
 			messages[i].Parts = parts
 		}
 	}
-	return saved / freedBytesPerToken, replaced
+	return saved / freedBytesPerToken, replaced, dropped
 }
 
 func plainToolResult(callID, content string, isError bool) llm.Part {
