@@ -10,11 +10,10 @@ func TestProviderEffortValidationAndWarnings(t *testing.T) {
 providers:
   bad: {protocol: openai-chat, reasoning: {effort: invalid}}
 `)
-	cfg, err := Load(path)
-	if err == nil || !strings.Contains(err.Error(), "providers.bad.reasoning.effort") {
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "providers.bad.reasoning.effort") {
 		t.Fatalf("invalid effort load error = %v", err)
 	}
-	cfg = &Config{Providers: map[string]ProviderConfig{"bad": {Reasoning: &ReasoningConfig{Effort: "invalid"}}}}
+	cfg := &Config{Providers: map[string]ProviderConfig{"bad": {Reasoning: &ReasoningConfig{Effort: "invalid"}}}}
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "providers.bad.reasoning.effort") {
 		t.Fatalf("invalid effort validation error = %v", err)
 	}
@@ -24,11 +23,11 @@ providers:
   b: {protocol: openai-chat, thinking: {budget_tokens: 2048}}
   c: {protocol: openai-responses, thinking: {budget_tokens: 2048}}
 `)
-	cfg, err = Load(path)
+	warned, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, field := range []string{"providers.a.reasoning.effort", "providers.b.thinking.budget_tokens", "providers.c.thinking.budget_tokens"} {
-		requireWarning(t, cfg.Warnings, field)
+		requireWarning(t, warned.Warnings, field)
 	}
 }
