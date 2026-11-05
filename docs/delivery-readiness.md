@@ -89,18 +89,18 @@
 - 夹具：U1 为平台管理员，对 P1/P2 均有 manage；U2 为仅通过 OAuth 登录创建的 viewer。U2 初始对 P1 read、对 P2 无 grant，随后临时对 P2 manage。
 - 管理面：bootstrap 可列用户和管理项目；读取项目详情或评审 404；业务项目列表为空。
 - 跨项目：U2 读 P2 项目详情和评审均为 404；项目列表只出现 P1。
-- 只读边界：U2 对 P1 read 时，`POST /projects/{id}/webhook` 403；`include_payload=true` 403；平台级扩展列表 403；admin 用户列表 403。
-- manage 授权：U2 对 P2 manage 时，`GET /projects` 同时返回 P1 read 与 P2 manage；`PATCH /projects/{id}` 200；项目级扩展列表 200；`include_payload=true` 200。
-- 全局模式：U2 对 P2 无 grant 时开启 `global_read`，P1/P2 均可读，P2 写 403；关闭后 P2 恢复 404。
+- 只读边界：U2 对 P1 read 时，`POST /projects/{id}/webhook` 403；`include_payload=true` 403；P1 项目统计 200、P2 统计 404、bootstrap 统计 404；项目级扩展列表 200、平台级扩展 403；admin 用户列表 403。
+- manage 授权：U2 对 P2 manage 时，`GET /projects` 同时返回 P1 read 与 P2 manage；`PATCH /projects/{id}` 200；项目级扩展列表 200；`include_payload=true` 200；项目块绑定写入 403（宿主配置仍需平台管理员）。
+- 全局模式：U2 对 P2 无 grant 时开启 `global_read`，P1/P2 项目和评审均可读，P2 写 403；关闭后 P2 恢复 404。
 - 管理员：U2 提升为平台管理员后 admin 用户列表 200，但仍无 P2 grant（404）；降级回 viewer 后 admin 接口 403。
 - 宿主配置：U2 对 P2 manage 时创建平台 MCP server 403；撤销 manage 后恢复。
 - CSRF：U2 浏览器会话无 CSRF 的 PATCH 403，带 CSRF 200。
 - session/token：U2 用浏览器 session 和 API token 读取 P1 均为 200，`access` 一致。
-- 撤销/禁用：撤销 U2 的 P1 grant 后读取 404；重新授予 P1 read 后恢复；停用后 token 401；启用后旧 token 仍 401；重新 OAuth 登录后 grant 保留。
+- 撤销/禁用：撤销 U2 的 P1 grant 后读取 404；重新授予 P1 read 后恢复；停用后 token 401、旧浏览器 session `/me` 401；启用后旧 token 仍 401；重新 OAuth 登录后 grant 保留。
 - 停用期间登录：GitLab 登录完成后 callback 未建立会话，`/me` 401；启用后重登成功。
 - 凭据撤销：`DELETE /admin/users/{id}/credentials` 返回 204 后旧 token 401。
-- SSE：U2 打开 P1 评审流后撤销 P1 grant，流关闭。
-- 豁免：webhook 归属、部分发布失败、stale、INCOMPLETE 在本次真实矩阵中未逐项执行，仅由本地自动化测试覆盖。
+- SSE：U2 在评审运行中打开 P1 评审流，撤 P1 grant 后流关闭；关闭发生在撤权之后，撤权前流仍保持。
+- 豁免：webhook 归属、部分发布失败、stale、INCOMPLETE、升级会话（原浏览器 session 跨升级）在本次真实矩阵中未逐项执行；前四项仅由本地自动化测试覆盖。
 
 未执行：pending publication 夹具、错误 masterkey 启动、恢复默认后的 hash/digest 对比、运行中修改模型后重启取消。
 
