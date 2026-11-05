@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
+	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
 func TestEmptyDiffPublishesIncomplete(t *testing.T) {
@@ -29,6 +30,9 @@ func TestEmptyDiffPublishesIncomplete(t *testing.T) {
 	status, err := f.db.GetReviewStatus(context.Background(), 42, 7)
 	if err != nil || status.State != reviewStatusIncomplete {
 		t.Fatalf("review status = %+v, %v; want incomplete", status, err)
+	}
+	if status.Detail != store.StatusDetailEmptyDiff {
+		t.Fatalf("review status detail = %q, want %q", status.Detail, store.StatusDetailEmptyDiff)
 	}
 	if len(f.gitlab.statuses) != 1 || f.gitlab.statuses[0].State != "failed" {
 		t.Fatalf("statuses = %+v, want one failed status", f.gitlab.statuses)
@@ -56,6 +60,9 @@ func TestIgnoredOnlyDiffStillPasses(t *testing.T) {
 	}
 	if !strings.Contains(summary, "PASS") || !strings.Contains(summary, "无需评审") {
 		t.Fatalf("summary = %q, want ignored-only PASS", summary)
+	}
+	if status, err := f.db.GetReviewStatus(context.Background(), 42, 7); err != nil || status.Detail != store.StatusDetailNoReviewable {
+		t.Fatalf("review status = %+v, %v; want detail %q", status, err, store.StatusDetailNoReviewable)
 	}
 	if len(f.gitlab.statuses) != 0 {
 		t.Fatalf("statuses = %+v, want no commit status", f.gitlab.statuses)

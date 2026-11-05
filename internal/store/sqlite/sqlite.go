@@ -25,7 +25,7 @@ import (
 )
 
 const (
-	timeLayout       = "2006-01-02T15:04:05.000000000Z"
+	timeLayout       = store.CursorTimeLayout
 	onboardingKind   = "workspace.onboard"
 	defaultMaxRetry  = 3
 	pragmaParameters = "_pragma=busy_timeout(5000)" +

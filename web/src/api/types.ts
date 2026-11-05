@@ -34,7 +34,7 @@ export interface Page<T> {
 }
 
 export type ProjectPage = Page<Project> & { projects: Project[] }
-export type ReviewPage = Page<ReviewSummary> & { reviews: ReviewSummary[] }
+export type ReviewPage = Page<ReviewListItem> & { reviews: ReviewListItem[] }
 export type FindingPage = Page<Finding> & { findings: Finding[] }
 export type McpServerPage = Page<McpServer> & { servers: McpServer[] }
 export type SkillPage = Page<Skill> & { skills: Skill[] }
@@ -224,7 +224,26 @@ export interface Publications {
   [key: string]: unknown
 }
 
+// A review that settled without a workflow (empty diff, everything ignored).
+// It has no id and no graph page; `reason` is the persisted detail.
+export interface StatusOnlyReview {
+  kind: 'status_only'
+  project_id: number
+  mr_iid: number
+  head_sha?: string
+  verdict: string
+  reason: string
+  created_at: string
+}
+
+export type ReviewListItem = ReviewSummary | StatusOnlyReview
+
+export function isStatusOnly(item: ReviewListItem): item is StatusOnlyReview {
+  return item.kind === 'status_only'
+}
+
 export interface ReviewSummary {
+  kind?: 'review'
   id: string
   project_id: number
   project_path?: string

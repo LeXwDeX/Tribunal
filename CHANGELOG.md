@@ -39,6 +39,7 @@
 
 ### 变更
 
+- **评审列表包含未创建工作流的评审**（[#331](https://github.com/LeXwDeX/Tribunal/issues/331)）：`GET /api/v1/reviews` 现在也返回在创建工作流之前结束的评审（`kind: "status_only"`，原因为 `empty diff`、`no reviewable files` 或 `snapshot omitted files`，同时写入 GitLab 状态评论的 `详情：` 行）；工作流项保持已有的 `kind: "review"`，其余字段不变。控制台以不可点击行显示这类评审。`next_cursor` 可能是 `m1.` 开头的复合值，客户端须将 cursor 视为不透明字符串。
 - **用户管理页与全局视图**（[#297](https://github.com/LeXwDeX/Tribunal/issues/297)）：用户列表显示角色来源、全局模式与授权数；管理抽屉支持提升/降级管理员、开关全局模式、按用户增删项目授权；配置来源和自我降级被禁用。项目列表标记“只读（全局）”，评审页增加“全部评审/我的项目”切换，页头显示全局模式标识。
 - **评审档位节点覆盖界面**（[#293](https://github.com/LeXwDeX/Tribunal/issues/293)）：模型页的「评审档位」区块显示 7 个节点的生效模型和来源，管理员可在 Drawer 中选择模型或恢复为配置；unavailable 模型不可选，保存带 revision。参数覆盖表单与同模型提示尚未实现。
 - **模型管理界面**（[#292](https://github.com/LeXwDeX/Tribunal/issues/292)）：模型页改为 `/models` 数据源，支持配置模型只读展示与用户模型新增、编辑、删除、草稿测试；API key 三态且只存在抽屉局部状态；同名模型显示短 ID；被引用删除、revision 冲突和出站拒绝有专门提示。概览页健康状态改用 `/models`。
