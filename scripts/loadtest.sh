@@ -183,7 +183,7 @@ fi
 for i in "${!project_ids[@]}"; do
   baseline=$(api_get "/api/v1/reviews?project_id=${project_ids[$i]}&mr_iid=${mr_list[$i]}&limit=100" \
     "$TRIBUNAL_USER_TOKEN") || die "cannot read baseline reviews for ${project_list[$i]}"
-  jq -c '[.reviews[]?.id]' <<<"$baseline" >"$tmp/baseline-$i.json"
+  jq -c '[.reviews[]? | select(.kind != "status_only") | .id]' <<<"$baseline" >"$tmp/baseline-$i.json"
 done
 
 triggered=""
@@ -243,7 +243,7 @@ while :; do
       exit 1
     }
     row=$(jq -r --argjson baseline "$(cat "$tmp/baseline-$idx.json")" '
-      [.reviews[]? | select(.id as $id | ($baseline | index($id)) == null)]
+      [.reviews[]? | select(.kind != "status_only") | select(.id as $id | ($baseline | index($id)) == null)]
       | max_by(.created_at) // empty
       | [.project_id,.mr_iid,.status,(.verdict // ""),(.duration_ms // 0),
          .tokens_in,.tokens_out,.cost_micros] | @tsv' <<<"$page") || {

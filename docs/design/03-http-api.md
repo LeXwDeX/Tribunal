@@ -170,7 +170,7 @@ POST /api/v1/projects
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/v1/reviews` | 列表：`?project_id=&mr_iid=&status=&verdict=&publication_state=&profile=&trigger=&since=&limit=&cursor=`；所有筛选和项目授权过滤在服务端分页前应用；每项附 `nodes` 与 `findings_summary` |
+| GET | `/api/v1/reviews` | 列表：`?project_id=&mr_iid=&status=&verdict=&publication_state=&profile=&trigger=&since=&limit=&cursor=`；所有筛选和项目授权过滤在服务端分页前应用；每项带 `kind`：`review`（工作流）或 `status_only`（见下）；工作流项附 `nodes` 与 `findings_summary` |
 | POST | `/api/v1/projects/{id}/merge_requests/{iid}/reviews` | 项目 `manage` 手动触发：`{profile?, full?}` → `202 {job_id}`；评审档位只有 `default`，控制台不再提供选择，`profile` 省略或不是评审档位时按项目档位、再按 `default` 处理 |
 | GET | `/api/v1/reviews/{wf_id}` | 工作流详情：基本信息 + `access` + 节点 + finding 统计 + 发布状态 |
 | GET | `/api/v1/reviews/{wf_id}/graph` | 节点和边，供 DAG 视图渲染 |
@@ -237,6 +237,10 @@ SSE 事件（`event:` 字段）：`node`（`{id, status, attempt}`）、`finding
   "next_cursor": ""
 }
 ```
+
+**未创建工作流的评审（`kind: "status_only"`）**：评审在创建工作流之前结束时，列表仍会返回一项 `{kind: "status_only", project_id, mr_iid, head_sha, verdict, reason, created_at}`，`verdict` 为 `INCOMPLETE` 或 `PASS`。这类项没有 `id`，不能请求详情、graph 等 `/reviews/{wf_id}` 端点，控制台也不链接到图页面。工作流项保持已有的 `kind: "review"`，其余字段不变。`reason` 有三种持久化取值：`empty diff`（MR diff 为空，INCOMPLETE）、`no reviewable files`（变更文件全被 ignore 规则过滤，PASS）、`snapshot omitted files`（材料快照遗漏了变更文件，INCOMPLETE）；同一原因也写入评审状态详情，GitLab 状态评论中显示为 `详情：<reason>`。
+
+仅当同一项目、MR、head SHA 不存在评审工作流时才返回 status-only 项；`review_status` 每个 MR 只保留一行，因此仅当该 MR 当前评审状态就是这类结果时显示（后续运行会覆盖状态行；发布失败的此类运行不显示）。升级前写入的行详情为空，不显示。授权与工作流项相同（项目 read 授权、全局只读模式、`access=mine`）；筛选未授权的 `project_id` 返回 404。`verdict`、`project_id`、`mr_iid`、`since` 对两类项都生效；`status`、`publication_state`、`profile`、`trigger` 会排除 status-only 项。分页把两类项按时间从新到旧合并（时间相同时工作流在前）。`next_cursor` 可能是以 `m1.` 开头的复合值；客户端必须把 cursor 当作不透明字符串，不得解析或构造。旧的工作流 cursor 仍被接受。
 
 `GET /api/v1/reviews` 的 `publication_state` 只接受 `pending`、`published`、`skipped`、`failed`，其他值返回 `400`；筛选在分页前应用。`publication_state` 独立于 `status`，取值为 `pending`、`published`、`skipped`、`failed`。`pending` 表示评审执行已结束但 GitLab 发布尚未完成，可在重启或手动重试后继续；`published` 表示汇总评论/失败摘要已成功写入；`skipped` 表示 stale（head、配置或 prompt 变化）、取消/被新代次替换，或关闭 failure note，不会自动重发；`failed` 是永久发布失败，需要手动 republish。`publication_error` 是有界、脱敏的失败或跳过原因，不含上游响应正文或凭据。发布状态与 GitLab commit status 不同：BLOCKING 的 `commit_status=failed` 是评审结论，不是发布失败；只有 PASS 会写 success，INCOMPLETE 也不会写 success。没有 dossier 的工作流和旧数据不返回 `publication_state`；界面把缺失值显示为“不表示发布成功”，不能当作 published。
 
@@ -442,11 +446,19 @@ Provider 返回 `name`、`protocol`、`base_url`、`model`、`max_concurrency`�
 |---|---|---|
 | GET | `/api/v1/models` | 列出配置模型（`id=config:<name>`，只读）与用户模型（`id=user:<uuid>`）；不分页 |
 | GET | `/api/v1/models/{id}` | 详情 |
-| POST | `/api/v1/models` | 创建用户模型；`api_key` 只写不回显 |
-| PATCH | `/api/v1/models/{id}` | 修改，必须带 `revision`；`api_key` 省略表示不变，空串表示清除；配置模型返回 403 `read_only` |
+| POST | `/api/v1/models` | 创建用户模型；`api_key` 只写不回显；校验失败返回 400 `validation_failed` 与逐字段 `details` |
+| PATCH | `/api/v1/models/{id}` | 修改，必须带 `revision`；`api_key` 省略表示不变，空串表示清除；配置模型返回 403 `read_only`；校验失败同创建 |
 | DELETE | `/api/v1/models/{id}?revision=N` | 软删除；配置模型返回 403 `read_only` |
-| POST | `/api/v1/models/{id}/test` | 测试已保存模型；用户模型测试暂未实现 |
-| POST | `/api/v1/models:test` | 草稿测试；当前返回 501 |
+| POST | `/api/v1/models/{id}/test` | 测试已保存模型；成功返回 `{"ok": true, "model": "...", "latency_ms": N}` |
+| POST | `/api/v1/models:test` | 草稿测试，详见下文 |
+
+`POST /api/v1/models:test` 在保存前测试草稿：
+
+- 请求体与创建相同，另可带可选 `id`。`id` 必须是 `user:` 模型：非 `user:` 返回 400（字段 `id`），不存在或已删除返回 404。带 `id` 且省略 `api_key` 时，服务端使用已保存的凭据（编辑时「保持不变」）；显式传入 `api_key` 则优先使用；`id` 只要出现就会校验。仅当 `protocol` 与 `base_url` 的 scheme、host、port 都与已保存模型一致时才复用已保存凭据，否则返回 400（字段 `api_key`），避免把密钥发往其他端点。
+- 校验与创建一致，失败返回 400 `validation_failed`，`details` 按字段给出（`display_name`、`protocol`、`base_url`、`model`、`params.<name>`）。
+- 探测使用与用户模型相同的出站规则，超时 30 秒。出站被拒返回 422 `egress_denied`；上游失败返回 422 `provider_test_failed`，不回传上游响应体。
+- 成功返回 `{"ok": true, "model": "...", "latency_ms": N}`。不保存数据、不刷新目录，不写 `llm_calls`，不产生计费记录。
+- 仅平台管理员且需 CSRF，否则 403。审计 `platform_audit`，动作 `test_draft`，只记录字段名、是否使用已保存凭据（`stored_credential`）和目标 host（不含路径与查询）。
 
 写操作成功后调用运行时刷新，响应 `effective: "new_workflows"`；审计日志使用 `event=platform_audit`，只记录操作者、目标、动作和字段名。
 

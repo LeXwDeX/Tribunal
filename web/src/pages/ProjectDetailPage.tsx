@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { Link, Navigate, useNavigate, useParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { getProject, getStats, listProjects, listReviews } from '../api/api'
-import type { Project, ReviewSummary } from '../api/types'
+import type { Project, ReviewListItem } from '../api/types'
 import { ExtensionsManager } from '../features/extensions/ExtensionsManager'
 import { SettingsPanel } from '../features/project/SettingsPanel'
 import { WorkspacePanel } from '../features/project/WorkspacePanel'
@@ -37,7 +37,7 @@ function ProjectOverview({ project }: { project: Project }) {
     queryKey: ['stats', 'project', project.id, range.from, range.to],
     queryFn: () => getStats({ ...range, project_id: project.id }),
   })
-  const reviews = usePaginated<ReviewSummary>(
+  const reviews = usePaginated<ReviewListItem>(
     ['project', project.id, 'reviews'],
     (cursor) => listReviews({ project_id: project.id, limit: 20 }, cursor),
     'reviews',

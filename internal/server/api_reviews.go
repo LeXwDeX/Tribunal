@@ -135,12 +135,7 @@ func (s *Server) handleListReviews(w http.ResponseWriter, r *http.Request) {
 		Trigger:          queryFilterValue(r, "trigger"),
 		Since:            since,
 	}
-	workflows, next, err := s.store.ListWorkflows(r.Context(), filter, r.URL.Query().Get("cursor"), limit)
-	if err != nil {
-		s.writeStoreError(w, r, err)
-		return
-	}
-	reviews, err := s.summarizeReviewPage(r.Context(), workflows)
+	reviews, next, err := s.listReviewItems(r.Context(), filter, r.URL.Query().Get("cursor"), limit)
 	if err != nil {
 		s.writeStoreError(w, r, err)
 		return

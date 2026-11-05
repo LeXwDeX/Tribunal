@@ -1113,6 +1113,12 @@ func (s *ExtensionService) TestProvider(ctx context.Context, name string) (Provi
 	if err != nil {
 		return ProviderTestResult{}, errors.New("app: provider is not configured")
 	}
+	return ProbeProvider(ctx, client)
+}
+
+// ProbeProvider sends the minimal one-token request used by provider tests.
+// Errors are classified without upstream URLs, bodies, or credentials.
+func ProbeProvider(ctx context.Context, client llm.Client) (ProviderTestResult, error) {
 	started := time.Now()
 	response, err := client.Generate(ctx, &llm.Request{
 		Messages: []llm.Message{{

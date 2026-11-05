@@ -3,6 +3,7 @@
 package store
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"time"
 )
@@ -178,4 +179,15 @@ type FindingCount struct {
 	Decision   string
 	Severity   string
 	Count      int
+}
+
+// CursorTimeLayout is the stored timestamp layout. List cursors embed the
+// formatted time of the last returned row.
+const CursorTimeLayout = "2006-01-02T15:04:05.000000000Z"
+
+// EncodeCursor builds the keyset cursor that resumes a list after the row
+// with the given time and id. The SQLite store and the HTTP merge of several
+// lists share this one format.
+func EncodeCursor(at time.Time, id string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(at.UTC().Format(CursorTimeLayout) + "\x00" + id))
 }

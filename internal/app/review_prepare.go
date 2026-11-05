@@ -250,10 +250,14 @@ func (s *ReviewService) publishEmptyWithNote(ctx context.Context, project *store
 		inputs.Version.HeadSHA, reviewConfigHash(cfg), profileName,
 	}, "\n"))
 	verdict := review.VerdictPass
+	// The settled status keeps a recognizable detail so the console can list
+	// this run, which has no workflow, and show why it ended this way.
+	statusDetail := store.StatusDetailNoReviewable
 	summaryText := "无需评审：所有变更文件均被忽略规则过滤。"
 	warnings := append(cfg.Warnings, "no reviewable files after ignore rules")
 	if len(inputs.Diffs) == 0 {
 		verdict = review.VerdictIncomplete
+		statusDetail = store.StatusDetailEmptyDiff
 		summaryText = "没有可评审的变更：MR 的 diff 为空。"
 		warnings = append(cfg.Warnings, "no changed files in merge request")
 	}
@@ -294,6 +298,7 @@ func (s *ReviewService) publishEmptyWithNote(ctx context.Context, project *store
 			reason += "; omitted paths were not recorded in this older snapshot"
 		}
 		summaryInput.Verdict = review.VerdictIncomplete
+		statusDetail = store.StatusDetailSnapshotOmission
 		summaryInput.Summary = "没有可评审的文件：材料快照遗漏了变更文件。"
 		summaryInput.IncompleteReason = reason
 		summaryInput.Warnings = append(cfg.Warnings,
@@ -328,7 +333,7 @@ func (s *ReviewService) publishEmptyWithNote(ctx context.Context, project *store
 	}
 	state, reaction := reviewStatusForVerdict(summaryInput.Verdict)
 	s.settleReviewStatus(ctx, project.ID, control.MRIID, control.Generation, 0,
-		inputs.Version.HeadSHA, "", state, "", noteID, reaction)
+		inputs.Version.HeadSHA, "", state, statusDetail, noteID, reaction)
 	return nil
 }
 
