@@ -305,6 +305,8 @@
     display: block;
     position: fixed;
     inset: 0;
+    right: auto;
+    width: 100vw;
     z-index: var(--z-nav-backdrop);
     border: 0;
     padding: 0;

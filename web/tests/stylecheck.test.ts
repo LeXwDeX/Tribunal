@@ -1,8 +1,31 @@
 import { describe, expect, it } from 'vitest'
 // @ts-expect-error plain ESM helper script, not part of the app tsconfig
-import { scanCss, scanTsx } from '../scripts/stylecheck.mjs'
+import { checkDir, scanCss, scanTsx } from '../scripts/stylecheck.mjs'
 
 describe('web style checks', () => {
+  it('requires the root element to reserve the scrollbar gutter', () => {
+    const missing = scanCss('html { min-width: 320px; }', 'styles/global.css')
+    expect(missing.filter((d) => d.rule === 'root-scrollbar-gutter')).toHaveLength(1)
+    const present = scanCss('html { min-width: 320px; scrollbar-gutter: stable; }', 'styles/global.css')
+    expect(present.filter((d) => d.rule === 'root-scrollbar-gutter')).toHaveLength(0)
+    const otherFile = scanCss('.x { display: block; }', 'x.module.css')
+    expect(otherFile.filter((d) => d.rule === 'root-scrollbar-gutter')).toHaveLength(0)
+  })
+
+  it('requires full-viewport fixed overlays to cover the scrollbar gutter', () => {
+    const narrow = scanCss('.overlay { position: fixed; inset: 0; background: var(--overlay); }', 'x.module.css')
+    expect(narrow.filter((d) => d.rule === 'overlay-gutter')).toHaveLength(1)
+    const wide = scanCss('.overlay { position: fixed; inset: 0; right: auto; width: 100vw; }', 'x.module.css')
+    expect(wide.filter((d) => d.rule === 'overlay-gutter')).toHaveLength(0)
+    const anchored = scanCss('.toast { position: fixed; right: 16px; bottom: 16px; }', 'x.module.css')
+    expect(anchored.filter((d) => d.rule === 'overlay-gutter')).toHaveLength(0)
+  })
+
+  it('finds no scrollbar gutter violations in the application styles', () => {
+    const diagnostics = checkDir('src')
+    expect(diagnostics.filter((d) => d.rule === 'root-scrollbar-gutter' || d.rule === 'overlay-gutter')).toEqual([])
+  })
+
   it('rejects color literals in component CSS', () => {
     const diagnostics = scanCss('.x { color: #ffffff; background: rgba(0, 0, 0, .2); }', 'x.module.css')
     expect(diagnostics.filter((d) => d.rule === 'color-literal')).toHaveLength(2)

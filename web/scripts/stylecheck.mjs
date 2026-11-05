@@ -41,9 +41,56 @@ function declarations(text) {
   return out
 }
 
+function blocks(text) {
+  // Innermost rule blocks with the selector text that precedes them.
+  const out = []
+  for (const match of text.matchAll(/([^{}]*)\{([^{}]*)\}/g)) {
+    const props = new Map()
+    for (const part of match[2].split(';')) {
+      const colon = part.indexOf(':')
+      if (colon > 0) props.set(part.slice(0, colon).trim(), part.slice(colon + 1).trim())
+    }
+    out.push({ selector: match[1].trim(), props, index: match.index + match[1].length })
+  }
+  return out
+}
+
+function scanScrollbarGutter(clean, file) {
+  // A vertical scrollbar that appears or disappears with content height must
+  // not move centered content, so the root reserves its gutter and every
+  // full-viewport fixed overlay is widened to cover that gutter.
+  const diagnostics = []
+  const rules = blocks(clean)
+  if (file === 'global.css' || file.endsWith('/global.css')) {
+    const reserved = rules.some((rule) => rule.selector === 'html'
+      && /\bstable\b/.test(rule.props.get('scrollbar-gutter') || ''))
+    if (!reserved) {
+      diagnostics.push({
+        file,
+        line: 1,
+        rule: 'root-scrollbar-gutter',
+        severity: 'error',
+        message: 'html 必须声明 scrollbar-gutter: stable，否则页面会随纵向滚动条出现/消失横向跳动',
+      })
+    }
+  }
+  for (const rule of rules) {
+    if (rule.props.get('position') !== 'fixed' || rule.props.get('inset') !== '0') continue
+    if (rule.props.get('width') === '100vw') continue
+    diagnostics.push({
+      file,
+      line: lineOf(clean, rule.index),
+      rule: 'overlay-gutter',
+      severity: 'error',
+      message: '全屏 fixed 遮罩需加 right: auto; width: 100vw，以覆盖根元素预留的滚动条槽',
+    })
+  }
+  return diagnostics
+}
+
 export function scanCss(text, file) {
   const clean = withoutComments(text)
-  const diagnostics = []
+  const diagnostics = scanScrollbarGutter(clean, file)
   for (const decl of declarations(clean)) {
     for (const match of decl.value.matchAll(COLOR_RE)) {
       diagnostics.push({
