@@ -132,3 +132,19 @@ func TestModelCreateDoesNotLeakCredential(t *testing.T) {
 		t.Fatal("credential leaked")
 	}
 }
+
+func TestDeleteReferencedModelReturnsReferences(t *testing.T) {
+	catalog, err := llm.NewCatalog(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, _ := newModelTestServer(t, catalog, &fakeModelStore{updateErr: store.ErrConflict})
+	server.profileOverrides = &fakeProfileOverrides{refs: []store.ProfileModelReference{{Profile: "default", Node: "lanes.review"}}}
+	request := httptest.NewRequest(http.MethodDelete, "/api/v1/models/user:x?revision=1", nil)
+	request.SetPathValue("id", "user:x")
+	response := httptest.NewRecorder()
+	server.handleDeleteModel(response, request)
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "default/lanes.review") {
+		t.Fatalf("delete = %d %s", response.Code, response.Body.String())
+	}
+}

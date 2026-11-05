@@ -141,3 +141,20 @@ func (s *Store) DeleteProfileOverrides(ctx context.Context, profile string, user
 	}
 	return nil
 }
+
+func (s *Store) ListProfileModelReferences(ctx context.Context, modelID string) ([]store.ProfileModelReference, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT profile, node FROM review_profile_model_refs WHERE model_id=? ORDER BY profile, node`, modelID)
+	if err != nil {
+		return nil, errors.New("sqlite: list model references failed")
+	}
+	defer rows.Close()
+	refs := []store.ProfileModelReference{}
+	for rows.Next() {
+		var ref store.ProfileModelReference
+		if err := rows.Scan(&ref.Profile, &ref.Node); err != nil {
+			return nil, errors.New("sqlite: scan model reference failed")
+		}
+		refs = append(refs, ref)
+	}
+	return refs, rows.Err()
+}

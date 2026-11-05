@@ -19,4 +19,11 @@ type ProfileOverrideStore interface {
 	GetProfileOverrides(context.Context, string) (*ProfileOverrides, error)
 	PutProfileOverrides(context.Context, string, string, int64, int64) (*ProfileOverrides, error)
 	DeleteProfileOverrides(context.Context, string, int64) error
+	ListProfileModelReferences(context.Context, string) ([]ProfileModelReference, error)
+}
+
+// ProfileModelReference identifies one node that references a model.
+type ProfileModelReference struct {
+	Profile string `json:"profile"`
+	Node    string `json:"node"`
 }
