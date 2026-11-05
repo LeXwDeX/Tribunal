@@ -19,7 +19,7 @@
 
 平台角色只有 `admin` / `viewer`，由当前 `auth.bootstrap_admins` 计算：`id:<n>` 条目按 GitLab 用户 ID 匹配；用户名条目在首次以 admin 身份出现时绑定到当时的 GitLab 用户 ID（`admin_bindings`），之后同名但 ID 不同的账号只得到 `viewer` 并记录告警；`users.role` 只记录签发时标签，不作为已有 token 的权限来源。平台管理员可管理用户、项目授权、项目注册和系统配置，但不会自动获得项目业务数据权限。
 
-项目业务数据由本地 `project_grants` 的 `read` / `manage` 决定，平台管理员也必须被显式授权；用户开启 `global_read` 后无需逐项目 grant 即可读取全部项目（含之后新登记的项目），但写操作仍要求对应项目的 `manage`。无访问权限或项目不存在统一返回 404；只有 `read` 时执行写操作返回 403。列表、统计、SSE、上下文和项目扩展在查询或流式读取时按同一访问规则过滤；删除 grant 会让已有 API token 失去该项目访问并关闭已打开的 SSE，停用用户会撤销全部会话和 API token，其全局读取同时失效。
+项目业务数据由本地 `project_grants` 的 `read` / `manage` 决定，平台管理员也必须被显式授权；用户开启 `global_read` 后无需逐项目 grant 即可读取全部项目（含之后新登记的项目），但写操作仍要求对应项目的 `manage`。无访问权限或项目不存在统一返回 404；只有 `read` 时执行写操作返回 403。列表、统计、SSE、上下文和项目扩展在查询或流式读取时按同一访问规则过滤；删除 grant 后，若用户没有其他 grant 或有效的 `global_read`，已有 API token 会失去该项目访问并关闭已打开的 SSE，停用用户会撤销全部会话和 API token，其全局读取同时失效。
 
 `auth.bootstrap_token_env` 指定的静态 Bearer 只用于平台管理面：没有本地用户 ID，也没有任何项目 grant，不能读取项目业务数据。它的轮换由部署方更新环境变量并重启；`bootstrap_admins` 变化同样在重启后生效。
 
@@ -121,7 +121,7 @@ Note Hook 先入队 `review.command`，由 worker 请求 GitLab 校验身份、M
 | DELETE | `/api/v1/projects/{id}/webhook` | 项目 `manage`：停用 webhook，只删除已记录的 service hook，保留 secret 供再次启用 |
 | DELETE | `/api/v1/projects/{id}` | 项目 `manage`：注销并删除 webhook（若由本服务创建）、清理工作区 |
 
-`GET /api/v1/projects` 是业务列表，按当前用户的项目授权过滤；平台管理员或静态 bootstrap Bearer 没有 grant 时得到空列表。选择授权对象时使用 §4.6 的 `/api/v1/admin/projects` 管理列表。列表中的 `access` 为 `read` 或 `manage`；授权在分页读取后被撤销的项目不会出现在结果中。
+`GET /api/v1/projects` 是业务列表，按当前用户的有效项目访问权限（逐项目 grant 或有效的 `global_read`）过滤；没有这些权限的平台管理员或静态 bootstrap Bearer 得到空列表。选择授权对象时使用 §4.6 的 `/api/v1/admin/projects` 管理列表。列表中的 `access` 为 `read` 或 `manage`；访问权限在分页读取后被撤销的项目不会出现在结果中。
 
 `project` 支持正整数 ID、`namespace/path` 或配置的 GitLab 根地址下的完整 HTTP(S) 仓库 URL，可带 `.git` 后缀和尾斜杠。拒绝外域、URL 用户信息、query/fragment 和路径穿越；不会按用户输入连接任意主机。注册和连接校验要求平台管理员；项目详情读取需要 `read`，项目设置写入、Key 轮换、webhook 启用/重建/停用和注销需要 `manage`，不要求平台管理员。
 
@@ -214,7 +214,7 @@ POST /api/v1/projects
 }
 ```
 
-SSE 事件（`event:` 字段）：`node`（`{id, status, attempt}`）、`finding`（`{id, decision}`）、`workflow`（`{status, verdict, publication_state?, publication_error?}`）、`published`（`{kind, gitlab_id}`）。`workflow` 事件同时传播执行状态和发布状态；只有在 workflow 终态且 `publication_state` 为 `published`、`skipped`、`failed` 或空（旧数据）时，服务端才结束流。每轮轮询都重新认证并检查项目 grant；撤权、停用或 token 失效会关闭已打开的流。
+SSE 事件（`event:` 字段）：`node`（`{id, status, attempt}`）、`finding`（`{id, decision}`）、`workflow`（`{status, verdict, publication_state?, publication_error?}`）、`published`（`{kind, gitlab_id}`）。`workflow` 事件同时传播执行状态和发布状态；只有在 workflow 终态且 `publication_state` 为 `published`、`skipped`、`failed` 或空（旧数据）时，服务端才结束流。每轮轮询都重新认证并检查项目访问权限（grant 或有效的 `global_read`）；撤权、停用或 token 失效会关闭已打开的流。
 
 `mr_title` 从该工作流已存储的 dossier 快照读取；没有 dossier、数据为空或标题为空时省略，不在详情请求中调用 GitLab。`publications.commit_status` 从成功发布写入的 `status:<head_sha>:<state>` 发布键解析，只接受 `success` 或 `failed`；旧格式 `status:<head_sha>` 没有状态记录，此时字段缺失（unknown），不根据 verdict 猜测。SSE 仍由服务端每 2 秒轮询数据库生成，不是事件推送。
 
@@ -307,7 +307,7 @@ Finding 始终返回 `annotation`：`""` 为未标注，`valid` 为有效，`inv
 
 `scope=project` 的数据库行覆盖完整的项目级授权：没有行表示继承，保存空数组表示显式撤销该块的全部 MCP 工具和 Skill。平台 scope 没有数据库行时可能由配置文件 `blocks` 提供生效绑定；首次用 `absent` 保存平台空行会创建数据库覆盖，该块的文件声明不再生效。调用方必须先读取完整列表并确认这一影响，服务端不推断调用方是否只加载了部分页。
 
-权限边界：`scope=project` 的读取需要该项目 `read` grant；`scope=platform` 或省略 scope 的全局列表只允许平台管理员。创建和导入已关闭，认证后直接返回 403，不再执行 scope 授权；更新、删除、测试和块绑定写入仍要求平台管理员；项目 scope 写入还必须同时具备该项目 `manage`。项目 `manage` 本身不是宿主执行权限，不能写平台配置或绕过平台管理员。MCP 删除/更新/测试和 Skill 删除/启停按资源已存储的 scope 重新检查，不信任请求里的 scope。
+权限边界：`scope=project` 的读取需要该项目 `read` grant 或有效的 `global_read`；`scope=platform` 或省略 scope 的全局列表只允许平台管理员。创建和导入已关闭，认证后直接返回 403，不再执行 scope 授权；更新、删除、测试和块绑定写入仍要求平台管理员；项目 scope 写入还必须同时具备该项目 `manage`。项目 `manage` 本身不是宿主执行权限，不能写平台配置或绕过平台管理员。MCP 删除/更新/测试和 Skill 删除/启停按资源已存储的 scope 重新检查，不信任请求里的 scope。
 
 导入 MCP 和创建自定义 MCP 已关闭，相关请求返回 403。已有自定义 MCP 仍可更新：允许只传 `name` 或 `enabled`；省略 `config` 会保留原配置，传入 `config` 则完整替换配置。列表、更新响应的 `config` 统一为 `{}`，任何角色都不能通过这些接口读回配置；不要把响应中的空对象当作原配置再次提交。旧客户端提交 env 值或敏感 header 的 `****` 时仍恢复已存值，没有对应旧值的占位项会移除；新客户端替换配置应提交完整原始模板。保存时对配置做严格语义校验：未知字段、非法值、越界字段和尾随 JSON 都返回 `400`；`${NAME}` 引用按模板加密保存，不在保存阶段展开环境变量，也不把解析值写入数据库。运行或测试时才展开。
 
