@@ -5,6 +5,17 @@ import { installFetch, jsonResponse, renderWithProviders } from './test-utils'
 
 function renderModels(profileBudget: Record<string, unknown>) {
   installFetch((url) => {
+    if (url.startsWith('/api/v1/models')) {
+      return jsonResponse({
+        models: [{
+          id: 'config:primary', display_name: 'primary', source: 'config', read_only: true,
+          protocol: 'openai-chat', base_url: 'https://llm.example.com/v1', model: 'test-model',
+          params: { max_tokens: 100, max_concurrency: 4 }, has_api_key: true, available: true,
+          revision: 0, referenced_by: [], vote_identity: 'llm.example.com/test-model',
+          stats_24h: { calls: 3, errors: 0, error_rate: 0, p50_latency_ms: 900 },
+        }],
+      })
+    }
     if (url.startsWith('/api/v1/providers')) {
       return jsonResponse({
         providers: [{

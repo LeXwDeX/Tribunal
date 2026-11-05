@@ -20,6 +20,9 @@ import type {
   McpServer,
   McpServerPage,
   McpTool,
+  Model,
+  ModelHealth,
+  ModelWrite,
   Me,
   CallPage,
   Page,
@@ -301,6 +304,10 @@ export async function restoreDefaultBindings(input: RestoreDefaultBindingsInput)
 
 // System -------------------------------------------------------------------
 
+export async function listModels(): Promise<{ models: Model[] }> {
+  return request<{ models: Model[] }>('/api/v1/models')
+}
+
 export async function listProviders(cursor?: string): Promise<ProviderPage> {
   return request<ProviderPage>(withQuery('/api/v1/providers', { cursor }))
 }
@@ -387,4 +394,24 @@ export async function deleteAdminGrant(projectId: number | string, userId: numbe
 
 export function summaryFindings(summary?: FindingsSummary): FindingsSummary {
   return summary || {}
+}
+
+export async function createModel(input: ModelWrite): Promise<Model> {
+  return request<Model>('/api/v1/models', { method: 'POST', body: input })
+}
+
+export async function updateModel(id: string, input: ModelWrite): Promise<Model> {
+  return request<Model>(`/api/v1/models/${segment(id)}`, { method: 'PATCH', body: input })
+}
+
+export async function deleteModel(id: string, revision: number): Promise<void> {
+  await request<void>(withQuery(`/api/v1/models/${segment(id)}`, { revision }), { method: 'DELETE' })
+}
+
+export async function testModel(id: string): Promise<ProviderTestResult> {
+  return request<ProviderTestResult>(`/api/v1/models/${segment(id)}/test`, { method: 'POST' })
+}
+
+export async function testModelDraft(input: ModelWrite): Promise<ProviderTestResult> {
+  return request<ProviderTestResult>('/api/v1/models:test', { method: 'POST', body: input })
 }

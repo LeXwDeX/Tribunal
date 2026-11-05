@@ -10,7 +10,7 @@ type Source = 'projects' | 'providers' | 'failed' | 'publication-failed' | 'publ
 
 function sourceFor(url: URL): Source | undefined {
   if (url.pathname === '/api/v1/projects') return 'projects'
-  if (url.pathname === '/api/v1/providers') return 'providers'
+  if (url.pathname === '/api/v1/models') return 'providers'
   if (url.pathname !== '/api/v1/reviews') return undefined
   if (url.searchParams.get('status') === 'failed') return 'failed'
   if (url.searchParams.get('publication_state') === 'failed') return 'publication-failed'
@@ -19,7 +19,7 @@ function sourceFor(url: URL): Source | undefined {
 }
 
 function page(source: Source, items: unknown[] = [], next?: string) {
-  const key = source === 'projects' ? 'projects' : source === 'providers' ? 'providers' : 'reviews'
+  const key = source === 'projects' ? 'projects' : source === 'providers' ? 'models' : 'reviews'
   return jsonResponse({ [key]: items, ...(next ? { next_cursor: next } : {}) })
 }
 
@@ -103,7 +103,7 @@ describe('overview alert completeness', () => {
 
   it.each([
     ['projects', 'overview'],
-    ['providers', 'overview'],
+    ['models', 'overview'],
     ['reviews', 'overview', 'failed'],
     ['reviews', 'overview', 'publication-failed'],
     ['reviews', 'overview', 'publication-pending'],
@@ -138,7 +138,6 @@ describe('overview alert completeness', () => {
 
   it.each([
     { source: 'projects', key: ['projects', 'overview'], button: '加载更多项目以继续检查' },
-    { source: 'providers', key: ['providers', 'overview'], button: '加载更多 Provider 以继续检查' },
     { source: 'failed', key: ['reviews', 'overview', 'failed'], button: '加载更多告警数据' },
     { source: 'publication-failed', key: ['reviews', 'overview', 'publication-failed'], button: '加载更多告警数据' },
     { source: 'publication-pending', key: ['reviews', 'overview', 'publication-pending'], button: '加载更多告警数据' },
@@ -177,7 +176,6 @@ describe('overview alert completeness', () => {
 
   it.each([
     { source: 'projects', key: ['projects', 'overview'], button: '加载更多项目以继续检查' },
-    { source: 'providers', key: ['providers', 'overview'], button: '加载更多 Provider 以继续检查' },
     { source: 'failed', key: ['reviews', 'overview', 'failed'], button: '加载更多告警数据' },
     { source: 'publication-failed', key: ['reviews', 'overview', 'publication-failed'], button: '加载更多告警数据' },
     { source: 'publication-pending', key: ['reviews', 'overview', 'publication-pending'], button: '加载更多告警数据' },
@@ -210,7 +208,6 @@ describe('overview alert completeness', () => {
 
   it.each([
     { source: 'projects', button: '加载更多项目以继续检查', item: project({ enabled: false, path_with_namespace: 'group/disabled-later' }), text: /group\/disabled-later/ },
-    { source: 'providers', button: '加载更多 Provider 以继续检查', item: { name: 'provider-later', stats_24h: { errors: 2 } }, text: /provider-later/ },
     { source: 'failed', button: '加载更多告警数据', item: review({ id: 'failed-later', mr_title: 'failed later', status: 'failed' }), text: /failed later/ },
     { source: 'publication-failed', button: '加载更多告警数据', item: review({ id: 'publication-later', mr_title: 'publication later', publication_state: 'failed' }), text: /publication later/ },
     { source: 'publication-pending', button: '加载更多告警数据', item: review({ id: 'retry-later', mr_title: 'retry later', publication_state: 'pending', publication_error: 'retrying' }), text: /retry later/ },
@@ -256,6 +253,6 @@ describe('overview alert completeness', () => {
     const panel = alertPanel()
     expect(await panel.findByText('无异常')).toBeInTheDocument()
     expect(panel.queryByText(/provider 错误/)).not.toBeInTheDocument()
-    expect(requests.some((raw) => new URL(raw, 'http://localhost').pathname === '/api/v1/providers')).toBe(false)
+    expect(requests.some((raw) => new URL(raw, 'http://localhost').pathname === '/api/v1/models')).toBe(false)
   })
 })

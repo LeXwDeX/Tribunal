@@ -413,6 +413,12 @@ export interface ProviderStats24h {
   [key: string]: unknown
 }
 
+export interface ModelHealth {
+  id: string
+  display_name: string
+  stats_24h?: ProviderStats24h
+}
+
 export interface Provider {
   name: string
   protocol?: string
@@ -560,4 +566,47 @@ export type CollectionKey =
 export interface FindingFilters {
   decision?: string
   severity?: string
+}
+
+export interface ModelParams {
+  max_tokens?: number
+  context_window?: number
+  temperature?: number
+  reasoning?: { effort?: string }
+  thinking?: { budget_tokens?: number }
+  forced_tool_choice?: string
+  strict_role_alternation?: boolean
+  max_concurrency?: number
+  rpm?: number
+  price?: { input_per_mtok?: number; output_per_mtok?: number }
+  [key: string]: unknown
+}
+
+export interface Model {
+  id: string
+  display_name: string
+  source: 'config' | 'user'
+  read_only: boolean
+  protocol: string
+  base_url: string
+  model: string
+  params: ModelParams
+  has_api_key: boolean
+  available: boolean
+  unavailable_reason?: string
+  revision: number
+  referenced_by: string[]
+  vote_identity: string
+  stats_24h?: ProviderStats24h
+}
+
+export interface ModelWrite {
+  id?: string
+  display_name: string
+  protocol: string
+  base_url: string
+  model: string
+  params: ModelParams
+  api_key?: string
+  revision?: number
 }

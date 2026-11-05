@@ -101,6 +101,9 @@ describe('models layout', () => {
 
   it('shows only the 24h stats the API returns and puts each profile budget in its panel aside', async () => {
     installFetch((url) => {
+      if (url.startsWith('/api/v1/models')) {
+        return jsonResponse({ models: [{ id: 'config:claude', display_name: 'claude', source: 'config', read_only: true, protocol: 'anthropic', base_url: 'https://api.anthropic.com', model: 'test', params: {}, has_api_key: true, available: true, revision: 0, referenced_by: [], vote_identity: 'api.anthropic.com/test', stats_24h: { calls: 1284, p50_latency_ms: 2100 } }] })
+      }
       if (url.startsWith('/api/v1/providers')) {
         return jsonResponse({ providers: [{ name: 'claude', protocol: 'anthropic', stats_24h: { calls: 1284, p50_latency_ms: 2100 } }] })
       }
