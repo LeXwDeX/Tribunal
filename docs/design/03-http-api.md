@@ -428,16 +428,16 @@ Provider 返回 `name`、`protocol`、`base_url`、`model`、`max_concurrency`�
 | POST | `/api/v1/models` | 创建用户模型；`api_key` 只写不回显；校验失败返回 400 `validation_failed` 与逐字段 `details` |
 | PATCH | `/api/v1/models/{id}` | 修改，必须带 `revision`；`api_key` 省略表示不变，空串表示清除；配置模型返回 403 `read_only`；校验失败同创建 |
 | DELETE | `/api/v1/models/{id}?revision=N` | 软删除；配置模型返回 403 `read_only` |
-| POST | `/api/v1/models/{id}/test` | 测试已保存模型；成功返回 `{"model": "...", "latency_ms": N}` |
+| POST | `/api/v1/models/{id}/test` | 测试已保存模型；成功返回 `{"ok": true, "model": "...", "latency_ms": N}` |
 | POST | `/api/v1/models:test` | 草稿测试，详见下文 |
 
 `POST /api/v1/models:test` 在保存前测试草稿：
 
-- 请求体与创建相同，另可带可选 `id`。`id` 必须是 `user:` 模型：非 `user:` 返回 400（字段 `id`），不存在或已删除返回 404。带 `id` 且省略 `api_key` 时，服务端使用已保存的凭据（编辑时「保持不变」）；显式传入 `api_key` 则优先使用。
+- 请求体与创建相同，另可带可选 `id`。`id` 必须是 `user:` 模型：非 `user:` 返回 400（字段 `id`），不存在或已删除返回 404。带 `id` 且省略 `api_key` 时，服务端使用已保存的凭据（编辑时「保持不变」）；显式传入 `api_key` 则优先使用；`id` 只要出现就会校验。仅当 `protocol` 与 `base_url` 的 scheme、host、port 都与已保存模型一致时才复用已保存凭据，否则返回 400（字段 `api_key`），避免把密钥发往其他端点。
 - 校验与创建一致，失败返回 400 `validation_failed`，`details` 按字段给出（`display_name`、`protocol`、`base_url`、`model`、`params.<name>`）。
 - 探测使用与用户模型相同的出站规则，超时 30 秒。出站被拒返回 422 `egress_denied`；上游失败返回 422 `provider_test_failed`，不回传上游响应体。
-- 成功返回 `{"model": "...", "latency_ms": N}`。不保存数据、不刷新目录，不写 `llm_calls`，不产生计费记录。
-- 仅平台管理员且需 CSRF，否则 403。审计 `platform_audit`，动作 `test_draft`，只记录字段名。
+- 成功返回 `{"ok": true, "model": "...", "latency_ms": N}`。不保存数据、不刷新目录，不写 `llm_calls`，不产生计费记录。
+- 仅平台管理员且需 CSRF，否则 403。审计 `platform_audit`，动作 `test_draft`，只记录字段名、是否使用已保存凭据（`stored_credential`）和目标 host（不含路径与查询）。
 
 写操作成功后调用运行时刷新，响应 `effective: "new_workflows"`；审计日志使用 `event=platform_audit`，只记录操作者、目标、动作和字段名。
 

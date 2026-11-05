@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/config"
 	"github.com/LeXwDeX/tribunal/internal/llm"
@@ -53,6 +54,20 @@ func (u *draftUpstream) seen() []string {
 type storedKeyModelStore struct {
 	fakeModelStore
 	id, key string
+	baseURL string
+	deleted bool
+}
+
+func (f *storedKeyModelStore) GetModel(_ context.Context, id string) (*store.Model, error) {
+	if id != f.id {
+		return nil, store.ErrNotFound
+	}
+	m := &store.Model{ID: id, Protocol: "openai-chat", BaseURL: f.baseURL}
+	if f.deleted {
+		now := time.Now()
+		m.DeletedAt = &now
+	}
+	return m, nil
 }
 
 func (f *storedKeyModelStore) OpenModelCredential(_ context.Context, id string) ([]byte, error) {
@@ -88,10 +103,11 @@ func TestDraftModelTestReturnsResultWithoutPersisting(t *testing.T) {
 		t.Fatalf("status = %d body=%s, want 200", response.Code, response.Body.String())
 	}
 	var result struct {
+		OK        bool   `json:"ok"`
 		Model     string `json:"model"`
 		LatencyMS *int64 `json:"latency_ms"`
 	}
-	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil || result.Model != "upstream-model" || result.LatencyMS == nil {
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil || !result.OK || result.Model != "upstream-model" || result.LatencyMS == nil {
 		t.Fatalf("result = %s (%v), want model upstream-model and latency_ms", response.Body.String(), err)
 	}
 	if ms.createdCredential != "" || refreshed || len(catalog.List()) != 0 {
@@ -142,7 +158,7 @@ func TestDraftModelTestValidationReturnsFieldDetails(t *testing.T) {
 
 func TestDraftModelTestStoredKeyWhenAPIKeyOmitted(t *testing.T) {
 	upstream := newDraftUpstream(t)
-	ms := &storedKeyModelStore{id: "user:saved", key: "stored-key-canary"}
+	ms := &storedKeyModelStore{id: "user:saved", key: "stored-key-canary", baseURL: upstream.URL}
 	catalog, err := llm.NewCatalog(context.Background(), nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -162,7 +178,7 @@ func TestDraftModelTestStoredKeyWhenAPIKeyOmitted(t *testing.T) {
 
 func TestDraftModelTestExplicitKeyOverridesStoredKey(t *testing.T) {
 	upstream := newDraftUpstream(t)
-	ms := &storedKeyModelStore{id: "user:saved", key: "stored-key-canary"}
+	ms := &storedKeyModelStore{id: "user:saved", key: "stored-key-canary", baseURL: upstream.URL}
 	catalog, _ := llm.NewCatalog(context.Background(), nil, nil)
 	server, _ := newModelTestServer(t, catalog, ms)
 	response := postDraft(server, draftBody(upstream.URL, `,"id":"user:saved","api_key":"new-key"`))
@@ -174,7 +190,7 @@ func TestDraftModelTestExplicitKeyOverridesStoredKey(t *testing.T) {
 func TestDraftModelTestUnknownIDReturnsNotFound(t *testing.T) {
 	upstream := newDraftUpstream(t)
 	catalog, _ := llm.NewCatalog(context.Background(), nil, nil)
-	server, _ := newModelTestServer(t, catalog, &storedKeyModelStore{id: "user:saved", key: "k"})
+	server, _ := newModelTestServer(t, catalog, &storedKeyModelStore{id: "user:saved", key: "k", baseURL: upstream.URL})
 	response := postDraft(server, draftBody(upstream.URL, `,"id":"user:missing"`))
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", response.Code)
@@ -263,5 +279,109 @@ func TestModelWritesReturnFieldDetails(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestDraftModelTestStoredKeyAuditsHostOnly(t *testing.T) {
+	upstream := newDraftUpstream(t)
+	ms := &storedKeyModelStore{id: "user:saved", key: "stored-key-canary", baseURL: upstream.URL}
+	catalog, _ := llm.NewCatalog(context.Background(), nil, nil)
+	server, logs := newModelTestServer(t, catalog, ms)
+	postDraft(server, draftBody(upstream.URL+"/v1", `,"id":"user:saved"`))
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	if !strings.Contains(logs.String(), `"stored_credential":true`) || !strings.Contains(logs.String(), `"host":"`+host+`"`) {
+		t.Fatalf("audit lacks stored_credential/host: %s", logs.String())
+	}
+	if strings.Contains(logs.String(), "/v1") {
+		t.Fatalf("audit leaked path: %s", logs.String())
+	}
+}
+
+func TestDraftModelTestStoredKeyRequiresSameEndpoint(t *testing.T) {
+	upstream := newDraftUpstream(t)
+	other := newDraftUpstream(t)
+	ms := &storedKeyModelStore{id: "user:saved", key: "stored-key-canary", baseURL: upstream.URL}
+	catalog, _ := llm.NewCatalog(context.Background(), nil, nil)
+	server, _ := newModelTestServer(t, catalog, ms)
+	for name, body := range map[string]string{
+		"different host": draftBody(other.URL, `,"id":"user:saved"`),
+		"different protocol": strings.Replace(draftBody(upstream.URL, `,"id":"user:saved"`),
+			`"openai-chat"`, `"anthropic"`, 1),
+	} {
+		response := postDraft(server, body)
+		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"api_key"`) {
+			t.Errorf("%s: status = %d body=%s, want 400 on api_key", name, response.Code, response.Body.String())
+		}
+		if strings.Contains(response.Body.String(), "stored-key-canary") {
+			t.Errorf("%s: response leaked the stored key", name)
+		}
+	}
+	if len(upstream.seen())+len(other.seen()) != 0 {
+		t.Fatal("stored key was sent to a changed endpoint")
+	}
+	// A different path on the same scheme+host+port still reuses the key.
+	if response := postDraft(server, draftBody(upstream.URL+"/v2", `,"id":"user:saved"`)); response.Code != http.StatusOK {
+		t.Fatalf("same endpoint with other path: status = %d body=%s, want 200", response.Code, response.Body.String())
+	}
+}
+
+func TestDraftModelTestValidatesIDEvenWithExplicitKey(t *testing.T) {
+	upstream := newDraftUpstream(t)
+	ms := &storedKeyModelStore{id: "user:saved", key: "k", baseURL: upstream.URL, deleted: true}
+	catalog, _ := llm.NewCatalog(context.Background(), nil, nil)
+	server, _ := newModelTestServer(t, catalog, ms)
+	for id, want := range map[string]int{"config:primary": http.StatusBadRequest, "user:missing": http.StatusNotFound, "user:saved": http.StatusNotFound} {
+		response := postDraft(server, draftBody(upstream.URL, `,"api_key":"k","id":"`+id+`"`))
+		if response.Code != want {
+			t.Errorf("id %q: status = %d, want %d", id, response.Code, want)
+		}
+	}
+	if len(upstream.seen()) != 0 {
+		t.Fatal("upstream called despite invalid id")
+	}
+}
+
+type countingRecorder struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (c *countingRecorder) RecordCall(context.Context, llm.CallRecord) {
+	c.mu.Lock()
+	c.calls++
+	c.mu.Unlock()
+}
+
+func TestDraftModelTestRecordsNoLLMCalls(t *testing.T) {
+	upstream := newDraftUpstream(t)
+	recorder := &countingRecorder{}
+	catalog, err := llm.NewCatalog(context.Background(), nil, nil, llm.WithRecorder(recorder))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, _ := newModelTestServer(t, catalog, &fakeModelStore{})
+	if response := postDraft(server, draftBody(upstream.URL, `,"api_key":"k"`)); response.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200", response.Code, response.Body.String())
+	}
+	if recorder.calls != 0 {
+		t.Fatalf("recorded %d calls, want 0", recorder.calls)
+	}
+}
+
+func TestSavedModelTestResponseCarriesOK(t *testing.T) {
+	catalog, _ := llm.NewCatalog(context.Background(), nil, nil)
+	server, _ := newModelTestServer(t, catalog, &fakeModelStore{})
+	server.llm = &fakeLLM{result: ProviderTestResult{Model: "m", LatencyMS: 7}}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/models/user:x/test", nil)
+	request.SetPathValue("id", "user:x")
+	response := httptest.NewRecorder()
+	server.handleTestModel(response, request)
+	var body struct {
+		OK        bool   `json:"ok"`
+		Model     string `json:"model"`
+		LatencyMS int64  `json:"latency_ms"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || !body.OK || body.Model != "m" || body.LatencyMS != 7 {
+		t.Fatalf("body = %s (%v), want ok:true model:m latency_ms:7", response.Body.String(), err)
 	}
 }

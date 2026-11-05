@@ -110,22 +110,26 @@ func ModelConfig(m store.Model) config.ProviderConfig { return modelConfig(m) }
 // NewDraftClient builds a throwaway client for an unsaved model. It applies the
 // catalog's egress policy and HTTP client, is not registered in the catalog,
 // and records nothing: the call recorder is deliberately dropped.
-func (c *Catalog) NewDraftClient(model store.Model, apiKey string) (Client, error) {
+func (c *Catalog) NewDraftClient(model store.Model, apiKey string) (Client, func(), error) {
 	options := c.options
 	options.recorder = nil
 	policy, err := newEgressPolicy(options.egress)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	cfg := modelConfig(model)
 	if providerUnavailable(cfg.BaseURL, policy) == "egress_denied" {
-		return nil, &Error{Kind: ErrEgress, Err: ErrEgressDenied}
+		return nil, nil, &Error{Kind: ErrEgress, Err: ErrEgressDenied}
 	}
 	httpClient, err := newEgressHTTPClient(options.httpClient, options.egress)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return newProviderClientWithKey("draft", cfg, apiKey, httpClient, options)
+	client, err := newProviderClientWithKey("draft", cfg, apiKey, httpClient, options)
+	if err != nil {
+		return nil, nil, err
+	}
+	return client, httpClient.CloseIdleConnections, nil
 }
 
 // Refresh atomically replaces the registry after rebuilding changed models.

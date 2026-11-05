@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -246,7 +247,7 @@ func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusUnprocessableEntity, "provider_test_failed", "provider test failed", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, modelTestResponse(result))
+	writeJSON(w, http.StatusOK, modelTestResponse{OK: true, Model: result.Model, LatencyMS: result.LatencyMS})
 }
 
 // draftTestTimeout bounds one draft probe, including connection setup.
@@ -258,6 +259,7 @@ type draftModelRequest struct {
 }
 
 type modelTestResponse struct {
+	OK        bool   `json:"ok"`
 	Model     string `json:"model"`
 	LatencyMS int64  `json:"latency_ms"`
 }
@@ -282,12 +284,34 @@ func (s *Server) handleTestModelDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	credential := ""
+	storedCredential := false
+	var stored *store.Model
+	if request.ID != "" {
+		if !strings.HasPrefix(request.ID, "user:") {
+			validationFailed(w, r, "id", "only saved user models can be referenced")
+			return
+		}
+		var err error
+		stored, err = s.modelsStore.GetModel(r.Context(), request.ID)
+		if err == nil && stored.DeletedAt != nil {
+			err = store.ErrNotFound
+		}
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, r, http.StatusNotFound, "not_found", "model not found", nil)
+			return
+		}
+		if err != nil {
+			writeError(w, r, http.StatusServiceUnavailable, "unavailable", "model is unavailable", nil)
+			return
+		}
+	}
 	switch {
 	case request.APIKey != nil:
 		credential = *request.APIKey
-	case request.ID != "":
-		if !strings.HasPrefix(request.ID, "user:") {
-			validationFailed(w, r, "id", "only saved user models can reuse a stored credential")
+	case stored != nil:
+		// The stored key may only be sent to the endpoint it was saved for.
+		if stored.Protocol != model.Protocol || !sameEndpoint(stored.BaseURL, model.BaseURL) {
+			validationFailed(w, r, "api_key", "api_key is required when the endpoint changes")
 			return
 		}
 		key, err := s.modelsStore.OpenModelCredential(r.Context(), request.ID)
@@ -300,15 +324,19 @@ func (s *Server) handleTestModelDraft(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		credential = string(key)
+		storedCredential = true
 	}
-	s.auditModel(r, request.ID, "test_draft", request.modelWriteRequest)
-	client, err := s.models.NewDraftClient(model, credential)
+	s.logger.Info("model changed", "event", "platform_audit", "actor_id", currentUserID(r),
+		"target_id", request.ID, "action", "test_draft", "fields", modelAuditFields(request.modelWriteRequest),
+		"stored_credential", storedCredential, "host", endpointHost(model.BaseURL))
+	client, closeClient, err := s.models.NewDraftClient(model, credential)
 	if err == nil {
+		defer closeClient()
 		ctx, cancel := context.WithTimeout(r.Context(), draftTestTimeout)
 		defer cancel()
 		var result app.ProviderTestResult
 		if result, err = app.ProbeProvider(ctx, client); err == nil {
-			writeJSON(w, http.StatusOK, modelTestResponse{Model: result.Model, LatencyMS: result.LatencyMS})
+			writeJSON(w, http.StatusOK, modelTestResponse{OK: true, Model: result.Model, LatencyMS: result.LatencyMS})
 			return
 		}
 	}
@@ -319,8 +347,8 @@ func (s *Server) handleTestModelDraft(w http.ResponseWriter, r *http.Request) {
 	writeError(w, r, http.StatusUnprocessableEntity, "provider_test_failed", "provider test failed", nil)
 }
 
-// modelDetails applies the stored-model validation used by create, update and draft test, and reports failures
-// per field without echoing submitted values.
+// modelDetails applies the stored-model validation used by create, update and
+// draft test, and reports failures per field without echoing secrets.
 func modelDetails(model store.Model) []app.Detail {
 	details := []app.Detail{}
 	if n := utf8.RuneCountInString(model.DisplayName); n < 1 || n > 128 || strings.TrimSpace(model.DisplayName) == "" ||
@@ -367,6 +395,11 @@ func (s *Server) finishModelWrite(w http.ResponseWriter, r *http.Request, id str
 }
 
 func (s *Server) auditModel(r *http.Request, id, action string, request modelWriteRequest) {
+	s.logger.Info("model changed", "event", "platform_audit", "actor_id", currentUserID(r),
+		"target_id", id, "action", action, "fields", modelAuditFields(request))
+}
+
+func modelAuditFields(request modelWriteRequest) []string {
 	fields := make([]string, 0, 6)
 	for name, changed := range map[string]bool{
 		"display_name": request.DisplayName != "", "protocol": request.Protocol != "",
@@ -378,8 +411,37 @@ func (s *Server) auditModel(r *http.Request, id, action string, request modelWri
 		}
 	}
 	sort.Strings(fields)
-	s.logger.Info("model changed", "event", "platform_audit", "actor_id", currentUserID(r),
-		"target_id", id, "action", action, "fields", fields)
+	return fields
+}
+
+// sameEndpoint reports whether two base URLs share scheme, host and port.
+func sameEndpoint(a, b string) bool {
+	ua, errA := url.Parse(a)
+	ub, errB := url.Parse(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	return strings.EqualFold(ua.Scheme, ub.Scheme) && strings.EqualFold(ua.Hostname(), ub.Hostname()) &&
+		endpointPort(ua) == endpointPort(ub)
+}
+
+func endpointPort(u *url.URL) string {
+	if port := u.Port(); port != "" {
+		return port
+	}
+	if strings.EqualFold(u.Scheme, "https") {
+		return "443"
+	}
+	return "80"
+}
+
+// endpointHost returns host[:port] only, for audit logs.
+func endpointHost(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return u.Host
 }
 
 func (s *Server) writeModelError(w http.ResponseWriter, r *http.Request, err error) {

@@ -57,11 +57,11 @@
 - **大 MR 评审不再截断 diff**（[#300](https://github.com/LeXwDeX/Tribunal/issues/300)）：评审 prompt 先给出每个变更文件的索引，再在任务预算内完整内联 diff；放不下的文件整文件不内联，由新增的 `list_changes` 和 `read_diff` 工具按 hunk 读取。`read_file` 和 `grep` 新增 `rev=head|base`。覆盖判定要求未内联文件的所有 hunk 都经 `read_diff` 读过，节点输出记录 `diff_reads`；没读完时按证据缺口处理，不会给出干净的 PASS。单文件 16000 字符和单包 120000 字符的截断都已取消。大 MR 会因此增加读取工具调用，评审耗时和 token 用量可能上升。
 - **空 diff 评审不再 PASS**（[#329](https://github.com/LeXwDeX/Tribunal/issues/329)）：空 diff 的 MR 返回 INCOMPLETE，摘要说明“没有可评审的变更”，启用 commit status 时写 failed；全部变更被 ignore 的既有 PASS 行为不变。控制台可见性由 [#331](https://github.com/LeXwDeX/Tribunal/issues/331) 跟踪。
 - **控制台**：「模型与档位」页只把 `default` 显示为「评审档位」，按固定的八步拓扑（探索、提出、挑战、裁决、汇报）列出各步骤的 provider，`onboarding` 单独标为「项目接入」；项目注册、项目设置和手动触发评审对话框不再有档位选择，项目列表不再有档位列。执行阶段轨道里 `explore` 和 `plan` 归入「规划」，`code-review`、`review`、`reasoner` 和 `validate` 归入「提出」；「项目接入」一行在 onboarding 没有 provider 时显示「未配置」。
-- **模型草稿测试**（[#333](https://github.com/LeXwDeX/Tribunal/issues/333)）：`POST /api/v1/models:test` 不再固定返回 501，可在保存前测试草稿；校验同创建，出站规则同用户模型，不保存数据、不刷新目录、不产生计费记录。编辑已有用户模型时可传 `id` 并省略 `api_key`，服务端使用已保存的凭据。
+- **模型草稿测试**（[#333](https://github.com/LeXwDeX/Tribunal/issues/333)）：`POST /api/v1/models:test` 不再固定返回 501，可在保存前测试草稿；校验同创建，出站规则同用户模型，不保存数据、不刷新目录、不产生计费记录。编辑已有用户模型时可传 `id` 并省略 `api_key`，服务端使用已保存的凭据，且仅当协议和端点（scheme、host、port）未变时才复用，否则要求重新填写 `api_key`。成功响应为 `{ok, model, latency_ms}`。
 
 ### 修复
 
-- **已保存模型测试返回字段名**（[#333](https://github.com/LeXwDeX/Tribunal/issues/333)）：`POST /api/v1/models/{id}/test` 此前返回 Go 字段名 `Model` / `LatencyMS`，控制台无法读取；现在返回 `model` / `latency_ms`。旧版 `/providers` 测试端点不变。
+- **已保存模型测试返回字段名**（[#333](https://github.com/LeXwDeX/Tribunal/issues/333)）：`POST /api/v1/models/{id}/test` 此前返回 Go 字段名 `Model` / `LatencyMS`；现在与草稿测试一致，返回 `ok`、`model`、`latency_ms`（成功时 `ok` 为 `true`）。旧版 `/providers` 测试端点不变。
 - **模型创建与修改返回字段级校验详情**（[#333](https://github.com/LeXwDeX/Tribunal/issues/333)）：`POST /api/v1/models` 与 `PATCH /api/v1/models/{id}` 校验失败时返回 400 `validation_failed` 和逐字段 `details`，不再是无说明的 400。
 - **主密钥不匹配时明确拒绝启动**（[#332](https://github.com/LeXwDeX/Tribunal/issues/332)）：配置的主密钥打不开库中已有密文时，服务记录一行 ERROR `master key does not match stored encrypted data; refusing to start`（只含环境变量名，不含密钥值）并退出，错误为 `initialize secrets: master key does not match stored encrypted data`，取代此前误导性的 `migrate MCP secrets: storage update failed`。这是有意拒绝：继续启动会用另一把密钥加密新凭据，使同一数据库混用两把密钥。仍不支持主密钥轮换。
 - **用户模型凭据纳入主密钥校验证据（纵深防御）**（[#332](https://github.com/LeXwDeX/Tribunal/issues/332)）：校验依据顺序为 MCP 校验标记、项目 token/webhook 密文，再到用户模型 API key 密文（任一能打开即可）；有证据但都打不开时拒绝启动，且不写入校验标记。校验标记自迁移 0017 起在每次成功启动时写入，因此含模型凭据却无校验标记的库通常不会出现，此项主要覆盖校验标记缺失（如被手工删除）的情形，避免用错误密钥写入新校验标记。
