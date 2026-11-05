@@ -49,6 +49,7 @@ export interface AdminUser {
   username: string
   name?: string
   disabled: boolean
+  revision: number
   last_login_at?: string
 }
 

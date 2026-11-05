@@ -183,3 +183,27 @@ func TestPlatformUserRevisionAndActorAreCheckedInsideTransaction(t *testing.T) {
 		t.Fatalf("demoted actor: error=%v", err)
 	}
 }
+
+func TestConfiguredAdminRoleWritesAreProtected(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t, newFakeClock())
+	if err := s.CreateSession(ctx, sessionFor("configured-role", 7, "user", newFakeClock().Now()), store.SessionLimits{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SyncPlatformRoles(ctx, []int64{7}, nil); err != nil {
+		t.Fatal(err)
+	}
+	role := "admin"
+	user, err := s.GetUser(ctx, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision := user.Revision
+	_, _, err = s.UpdatePlatformUser(ctx, 7, store.PlatformUserUpdate{Role: &role, Revision: &revision, AdminIDs: []int64{7}})
+	if !errors.Is(err, store.ErrPlatformUserProtected) {
+		t.Fatalf("configured admin role write: error=%v, want protected", err)
+	}
+	if got := rowCount(t, s, `SELECT COUNT(*) FROM users WHERE id=7 AND granted_role IS NOT NULL`); got != 0 {
+		t.Fatalf("configured admin received a durable grant: %d", got)
+	}
+}

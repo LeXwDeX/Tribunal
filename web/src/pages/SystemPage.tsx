@@ -184,7 +184,7 @@ function AdminUsersPanel() {
     setDisableError(null)
     try {
       const next = !disableTarget.disabled
-      await setAdminUserDisabled(disableTarget.id, next)
+      await setAdminUserDisabled(disableTarget.id, next, disableTarget.revision)
       setDisableTarget(null)
       toast.push('success', next ? '账号已停用。' : '账号已启用。')
       await queryClient.invalidateQueries({ queryKey: ['admin-users'] })

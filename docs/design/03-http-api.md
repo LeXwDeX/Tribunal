@@ -408,8 +408,9 @@ Provider 返回 `name`、`protocol`、`base_url`、`model`、`max_concurrency`�
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/v1/admin/users` | `?limit=&cursor=` → `{users, next_cursor}`；每项含 `id`、`username`、`name`、`disabled`、`last_login_at?` |
-| PATCH | `/api/v1/admin/users/{id}` | `{disabled: bool}`；`disabled=true` 时在同一事务撤销该用户全部会话和 API token；启用不恢复旧凭据 |
+| GET | `/api/v1/admin/users` | `?limit=&cursor=` → `{users, next_cursor}`；每项含 `id`、`username`、`name`、`disabled`、`revision`、`role`、`role_source`（`config`/`granted`/`none`）、`global_read`、`grant_count`、`last_login_at?` |
+| PATCH | `/api/v1/admin/users/{id}` | `{disabled?: bool, role?: "admin"\|"viewer", revision: int64}`；`revision` 必须匹配当前用户，冲突返回 `409 stale_revision`；配置来源管理员只读；`disabled=true` 时在同一事务撤销该用户全部会话和 API token；启用不恢复旧凭据；角色变更在下一次请求生效，降级使旧 CSRF token 失效，但不删除全部会话或 API token |
+| GET | `/api/v1/admin/users/{id}/grants` | `?limit=&cursor=` → 该用户维度的项目授权 `{grants, next_cursor}`，与项目维度 grants 读取同一张表 |
 | DELETE | `/api/v1/admin/users/{id}/credentials` | 只撤销全部会话和 API token，不禁用账号；`204` |
 | GET | `/api/v1/admin/projects` | `?limit=&cursor=` → 全部已登记项目的管理视图 `{projects:[{id, path_with_namespace}], next_cursor}`；不含业务摘要 |
 | GET | `/api/v1/admin/projects/residues` | 平台管理员：只读列出可归属到未登记项目的残留（项目 ID、路径、类型、是否可清理），不修改文件 |

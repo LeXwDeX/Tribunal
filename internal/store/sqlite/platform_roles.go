@@ -151,7 +151,7 @@ func (s *Store) UpdatePlatformUser(ctx context.Context, userID int64, in store.P
 		newRole = "admin"
 	}
 	if (userID == in.ActorID && in.ActorID > 0 && ((oldRole == "admin" && newRole != "admin") || (!disabled && newDisabled))) ||
-		(configured && ((in.Role != nil && *in.Role == "viewer") || (!disabled && newDisabled))) {
+		(configured && (in.Role != nil || (!disabled && newDisabled))) {
 		return "", "", store.ErrPlatformUserProtected
 	}
 	if oldRole == "admin" && newRole != "admin" {
