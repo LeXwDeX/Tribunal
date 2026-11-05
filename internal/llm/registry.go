@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/llm/effort"
 	"golang.org/x/time/rate"
 )
 
@@ -93,6 +94,7 @@ type AuditRequest struct {
 	MaxTokens      int            `json:"max_tokens,omitempty"`
 	Temperature    *float64       `json:"temperature,omitempty"`
 	Reasoning      *ReasoningOpts `json:"reasoning,omitempty"`
+	Wire           *WireParams    `json:"wire,omitempty"`
 	// SubmitPrompt and CompactedToolResults come from CallMeta; they are
 	// fixed enum values and counts, never text.
 	SubmitPrompt         string `json:"submit_prompt,omitempty"`
@@ -100,6 +102,22 @@ type AuditRequest struct {
 	// ForcedToolChoice marks a request that forced a tool choice; the tool
 	// name itself is not stored.
 	ForcedToolChoice bool `json:"forced_tool_choice,omitempty"`
+}
+
+// WireParams records the effective protocol parameters without request content.
+type WireParams struct {
+	MaxTokens       int            `json:"max_tokens,omitempty"`
+	Temperature     *float64       `json:"temperature,omitempty"`
+	Reasoning       *WireReasoning `json:"reasoning,omitempty"`
+	Thinking        *WireThinking  `json:"thinking,omitempty"`
+	ThinkingEnabled bool           `json:"thinking_enabled"`
+}
+
+type WireReasoning struct {
+	Effort string `json:"effort,omitempty"`
+}
+type WireThinking struct {
+	BudgetTokens int `json:"budget_tokens,omitempty"`
 }
 
 // AuditResponse counts response structure and keeps usage and stop metadata.
@@ -154,6 +172,11 @@ func safeSubmitPrompt(reason string) string {
 	return ""
 }
 
+// ValidReasoningEffort reports whether effort is an allowed audit value.
+func ValidReasoningEffort(value string) bool {
+	return effort.Valid(value)
+}
+
 // NewCallAudit builds the persistence-safe audit payload. Tool choice is a
 // tool name and is therefore omitted even though the live request needs it.
 func NewCallAudit(req *Request, resp *Response) *CallAudit {
@@ -172,9 +195,7 @@ func NewCallAudit(req *Request, resp *Response) *CallAudit {
 		}
 		if req.Reasoning != nil {
 			value := *req.Reasoning
-			switch value.Effort {
-			case "", "low", "medium", "high":
-			default:
+			if !ValidReasoningEffort(value.Effort) {
 				value.Effort = ""
 			}
 			out.Reasoning = &value
@@ -385,6 +406,10 @@ type adapter interface {
 	Generate(ctx context.Context, req *Request) (*Response, error)
 }
 
+type wireAdapter interface {
+	GenerateWithWire(ctx context.Context, req *Request) (*Response, *WireParams, error)
+}
+
 // providerClient adds rate limiting, concurrency, single-layer retry and
 // recording around one protocol adapter.
 type providerClient struct {
@@ -488,7 +513,14 @@ func (c *providerClient) Generate(ctx context.Context, req *Request) (*Response,
 			return nil, &AttemptGuardError{Err: guardErr, Usage: usage, Previous: previous, responseObserved: observed}
 		}
 		started := time.Now()
-		resp, err := c.adapter.Generate(ctx, req)
+		var resp *Response
+		var wire *WireParams
+		var err error
+		if a, ok := c.adapter.(wireAdapter); ok {
+			resp, wire, err = a.GenerateWithWire(ctx, req)
+		} else {
+			resp, err = c.adapter.Generate(ctx, req)
+		}
 		c.release()
 		elapsed := time.Since(started)
 		if resp == nil && err == nil {
@@ -526,7 +558,7 @@ func (c *providerClient) Generate(ctx context.Context, req *Request) (*Response,
 			failure.responseObserved = attemptObserved
 		}
 		usage = AddUsage(usage, attemptUsage)
-		c.record(ctx, attempt, req, resp, failureOrNil(failure), elapsed)
+		c.record(ctx, attempt, req, resp, wire, failureOrNil(failure), elapsed)
 		if err == nil {
 			if resp != nil {
 				copy := *resp
@@ -623,7 +655,7 @@ func wait(ctx context.Context, delay time.Duration) bool {
 	}
 }
 
-func (c *providerClient) record(ctx context.Context, attempt int, req *Request, resp *Response, err error, elapsed time.Duration) {
+func (c *providerClient) record(ctx context.Context, attempt int, req *Request, resp *Response, wire *WireParams, err error, elapsed time.Duration) {
 	if c.recorder == nil {
 		return
 	}
@@ -636,6 +668,25 @@ func (c *providerClient) record(ctx context.Context, attempt int, req *Request, 
 	}
 	audit := NewCallAudit(req, resp)
 	if audit.Request != nil {
+		if wire != nil {
+			copy := *wire
+			if copy.Temperature != nil {
+				temperature := *copy.Temperature
+				copy.Temperature = &temperature
+			}
+			if copy.Thinking != nil {
+				thinking := *copy.Thinking
+				copy.Thinking = &thinking
+			}
+			if copy.Reasoning != nil {
+				reasoning := *copy.Reasoning
+				if !ValidReasoningEffort(reasoning.Effort) {
+					reasoning.Effort = ""
+				}
+				copy.Reasoning = &reasoning
+			}
+			audit.Request.Wire = &copy
+		}
 		meta := CallMetaFromContext(ctx)
 		audit.Request.SubmitPrompt = safeSubmitPrompt(meta.SubmitPrompt)
 		if meta.CompactedToolResults > 0 {

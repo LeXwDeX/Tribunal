@@ -29,12 +29,17 @@ func newAnthropicAdapter(info ProviderInfo, cfg providerDefaults, apiKey string,
 }
 
 func (a *anthropicAdapter) Generate(ctx context.Context, req *Request) (*Response, error) {
+	resp, _, err := a.GenerateWithWire(ctx, req)
+	return resp, err
+}
+
+func (a *anthropicAdapter) GenerateWithWire(ctx context.Context, req *Request) (*Response, *WireParams, error) {
 	if err := validateRequest(req); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	effective := resolveRequest(a.cfg, req)
 	if effective.maxTokens <= 0 {
-		return nil, badRequestf("anthropic requires max_tokens")
+		return nil, nil, badRequestf("anthropic requires max_tokens")
 	}
 	thinking := effective.budgetTokens > 0
 	if thinking && forcedToolChoice(req.ToolChoice) {
@@ -45,11 +50,11 @@ func (a *anthropicAdapter) Generate(ctx context.Context, req *Request) (*Respons
 		thinking = false
 	}
 	if thinking && effective.budgetTokens < 1024 {
-		return nil, badRequestf("thinking budget_tokens must be at least 1024")
+		return nil, nil, badRequestf("thinking budget_tokens must be at least 1024")
 	}
 	messages, err := anthropicMessages(req.Messages)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	params := anthropic.MessageNewParams{
 		Model:     anthropic.Model(a.info.Model),
@@ -66,16 +71,23 @@ func (a *anthropicAdapter) Generate(ctx context.Context, req *Request) (*Respons
 	if len(req.Tools) > 0 {
 		tools, err := anthropicTools(req.Tools)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		params.Tools = tools
 		params.ToolChoice = anthropicToolChoice(req.ToolChoice)
 	}
+	wire := &WireParams{MaxTokens: effective.maxTokens, ThinkingEnabled: thinking}
+	if thinking {
+		wire.Thinking = &WireThinking{BudgetTokens: effective.budgetTokens}
+	} else {
+		wire.Temperature = effective.temperature
+	}
 	message, err := a.sdk.Messages.New(ctx, params)
 	if err != nil {
-		return nil, sdkError(err)
+		return nil, wire, sdkError(err)
 	}
-	return anthropicResponse(message, a.info.Model)
+	response, err := anthropicResponse(message, a.info.Model)
+	return response, wire, err
 }
 
 func anthropicSystem(blocks []Block, messages []Message) []anthropic.TextBlockParam {

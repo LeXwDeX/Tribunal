@@ -204,7 +204,7 @@ export function ModelsPage() {
           </div>
           {providers.isPending ? <LoadingState /> : null}
           {providers.isError ? <ErrorState error={providers.error} onRetry={providers.retry} /> : null}
-          {providers.isSuccess && providers.items.length === 0 ? <EmptyState title="平台还没有配置 provider" description="在服务端配置文件中添加 provider 并重启或热加载后，会显示在这里。" /> : null}
+          {providers.isSuccess && providers.items.length === 0 ? <EmptyState title="平台还没有配置 provider" description="在服务端配置文件中添加 provider，服务启动时加载后会显示在这里。" /> : null}
           {providers.items.length ? (
             <div className={styles.cards}>
               {providers.items.map((provider) => <ProviderCard key={provider.name} provider={provider} canWrite={canWrite} />)}
@@ -237,4 +237,3 @@ export function ModelsPage() {
     </main>
   )
 }
-

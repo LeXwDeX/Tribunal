@@ -30,13 +30,18 @@ func newOpenAIChatAdapter(info ProviderInfo, cfg providerDefaults, apiKey string
 }
 
 func (a *openAIChatAdapter) Generate(ctx context.Context, req *Request) (*Response, error) {
+	resp, _, err := a.GenerateWithWire(ctx, req)
+	return resp, err
+}
+
+func (a *openAIChatAdapter) GenerateWithWire(ctx context.Context, req *Request) (*Response, *WireParams, error) {
 	if err := validateRequest(req); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	effective := resolveRequest(a.cfg, req)
 	messages, err := chatMessages(req, a.cfg.strictRoleAlternation)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	params := openai.ChatCompletionNewParams{
 		Model:    openai.ChatModel(a.info.Model),
@@ -56,16 +61,24 @@ func (a *openAIChatAdapter) Generate(ctx context.Context, req *Request) (*Respon
 	if len(req.Tools) > 0 {
 		tools, err := chatTools(req.Tools)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		params.Tools = tools
 		params.ToolChoice = chatToolChoice(req.ToolChoice)
 	}
+	wire := &WireParams{Temperature: effective.temperature}
+	if effective.maxTokens > 0 {
+		wire.MaxTokens = effective.maxTokens
+	}
+	if effective.effort != "" {
+		wire.Reasoning = &WireReasoning{Effort: effective.effort}
+	}
 	completion, err := a.sdk.Chat.Completions.New(ctx, params)
 	if err != nil {
-		return nil, sdkError(err)
+		return nil, wire, sdkError(err)
 	}
-	return chatResponse(completion, a.info.Model)
+	response, err := chatResponse(completion, a.info.Model)
+	return response, wire, err
 }
 
 // strictSystemNoticeHeader labels a prompt folded into a tool message so the

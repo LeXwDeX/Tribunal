@@ -288,7 +288,7 @@ describe('node drawer', () => {
         return jsonResponse({
           calls: [
             { id: 'c1', turn: 1, input_tokens: 18204, output_tokens: 1022, latency_ms: 6100, stop_reason: 'tool_use', request: { a: 1 } },
-            { id: 'c2', turn: 2, input_tokens: 22980, output_tokens: 640, latency_ms: 3400, stop_reason: 'end_turn' },
+            { id: 'c2', turn: 2, input_tokens: 22980, output_tokens: 640, latency_ms: 3400, stop_reason: 'end_turn', request: { wire: { max_tokens: 512, reasoning: { effort: 'high' }, thinking_enabled: false } } },
           ],
         })
       }
@@ -312,7 +312,13 @@ describe('node drawer', () => {
     expect(summaries[0]).toContain('#1')
     expect(summaries[0]).toContain('18,204')
     expect(summaries[0]).toContain('tool_use')
-    await userEvent.setup().keyboard('{Escape}')
+    const user = userEvent.setup()
+    await user.click(within(dialog).getByText('#1'))
+    await user.click(within(dialog).getByText('#2'))
+    expect(within(dialog).getByText('—（旧记录）')).toBeInTheDocument()
+    expect(within(dialog).getAllByText('实际发送参数')).toHaveLength(2)
+    expect(dialog).toHaveTextContent('"effort": "high"')
+    await user.keyboard('{Escape}')
     expect(onClose).toHaveBeenCalled()
   })
 })

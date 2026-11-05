@@ -54,6 +54,7 @@ function JsonSection({ title, value, copy }: { title: string; value: unknown; co
 function CallItem({ call }: { call: LlmCall }) {
   const request = formatJson(call.request)
   const response = formatJson(call.response)
+  const wire = isPlainObject(call.request) ? call.request.wire : undefined
   return (
     <details className={styles.call}>
       <summary className={styles.callSummary}>
@@ -69,6 +70,10 @@ function CallItem({ call }: { call: LlmCall }) {
           <>
             {request ? (
               <div className={styles.drawerSection}>
+                <h4 className={styles.sectionLabel}>实际发送参数</h4>
+                {wire !== undefined && wire !== null
+                  ? <pre className={`${ui.codeBlock} ${styles.codeBlockSmall}`}>{formatJson(wire)}</pre>
+                  : <span className="muted small">—（旧记录）</span>}
                 <h4 className={styles.sectionLabel}>请求</h4>
                 <pre className={`${ui.codeBlock} ${styles.codeBlockSmall}`}>{request}</pre>
               </div>

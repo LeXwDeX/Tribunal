@@ -253,7 +253,7 @@ type Request struct {
 
 // ReasoningOpts overrides the provider's reasoning defaults for one request.
 type ReasoningOpts struct {
-	Effort       string `json:"effort,omitempty"`        // low | medium | high (Responses)
+	Effort       string `json:"effort,omitempty"`        // low | medium | high | max (OpenAI)
 	BudgetTokens int    `json:"budget_tokens,omitempty"` // Anthropic thinking budget
 }
 

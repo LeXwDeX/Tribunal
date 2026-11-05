@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/LeXwDeX/tribunal/internal/llm/effort"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -157,6 +158,19 @@ func Load(paths ...string) (*Config, error) {
 		return nil, err
 	}
 	cfg.Warnings = normalizeProfiles(cfg)
+	for _, name := range sortedKeys(cfg.Providers) {
+		provider := cfg.Providers[name]
+		field := "providers." + name
+		if provider.Reasoning != nil && !effort.Valid(provider.Reasoning.Effort) {
+			return nil, fmt.Errorf("config: %s.reasoning.effort must be low, medium, high or max", field)
+		}
+		if provider.Protocol == "anthropic" && provider.Reasoning != nil && provider.Reasoning.Effort != "" {
+			cfg.Warnings = append(cfg.Warnings, field+".reasoning.effort is not sent by anthropic")
+		}
+		if (provider.Protocol == "openai-chat" || provider.Protocol == "openai-responses") && provider.Thinking != nil && provider.Thinking.BudgetTokens != 0 {
+			cfg.Warnings = append(cfg.Warnings, field+".thinking.budget_tokens is not sent by "+provider.Protocol)
+		}
+	}
 	return cfg, nil
 }
 
