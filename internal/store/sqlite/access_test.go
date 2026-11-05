@@ -488,6 +488,73 @@ func TestProjectAccessFiltersQueryBeforePaging(t *testing.T) {
 	if err != nil || deniedTotals.Total != 0 {
 		t.Fatalf("denied feedback totals = %+v, %v", deniedTotals, err)
 	}
+
+	enabled := true
+	revision := int64(1)
+	if _, _, _, err := s.UpdatePlatformUser(ctx, access, store.PlatformUserUpdate{GlobalRead: &enabled, Revision: &revision, ActorID: 8, AdminIDs: []int64{8}}); err != nil {
+		t.Fatal(err)
+	}
+	var changedBy int64
+	var changedAt string
+	if err := s.db.QueryRowContext(ctx, `SELECT global_read_by, global_read_at FROM users WHERE id = ?`, access).Scan(&changedBy, &changedAt); err != nil || changedBy != 8 || changedAt == "" {
+		t.Fatalf("global read attribution = %d, %q, %v", changedBy, changedAt, err)
+	}
+	if page, _, err := s.ListWorkflows(ctx, store.WorkflowFilter{AccessUserID: &access}, "", 10); err != nil || len(page) != 5 {
+		t.Fatalf("global workflows = %d, %v", len(page), err)
+	}
+	if page, _, err := s.ListProjectsFilteredPage(ctx, store.ProjectFilter{AccessUserID: &access}, "", 10); err != nil || len(page) != 2 {
+		t.Fatalf("global projects = %d, %v", len(page), err)
+	}
+	if stats, err := s.Stats(ctx, store.StatsFilter{AccessUserID: &access}); err != nil || stats.Runs != 5 || len(stats.ByProject) != 2 || stats.Feedback.Total != 2 {
+		t.Fatalf("global stats = %+v, %v", stats, err)
+	}
+	if feedback, _, err := s.ListFeedback(ctx, store.FeedbackFilter{AccessUserID: &access}); err != nil || len(feedback) != 2 {
+		t.Fatalf("global feedback = %+v, %v", feedback, err)
+	}
+	if totals, err := s.FeedbackTotals(ctx, store.FeedbackFilter{AccessUserID: &access}); err != nil || totals.Total != 2 {
+		t.Fatalf("global feedback totals = %+v, %v", totals, err)
+	}
+	if role, err := s.GetProjectAccess(ctx, access, 43); err != nil || role != store.ProjectAccessRead {
+		t.Fatalf("global access = %q, %v", role, err)
+	}
+	if err := s.SetProjectGrant(ctx, 42, access, store.ProjectAccessManage); err != nil {
+		t.Fatal(err)
+	}
+	if role, err := s.GetProjectAccess(ctx, access, 42); err != nil || role != store.ProjectAccessManage {
+		t.Fatalf("explicit manage with global read = %q, %v", role, err)
+	}
+	if _, err := s.GetProjectAccess(ctx, access, 999); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("global access to missing project = %v", err)
+	}
+	for id := int64(44); id <= 51; id++ {
+		mustProject(t, s, id)
+	}
+	if page, _, err := s.ListProjectsFilteredPage(ctx, store.ProjectFilter{AccessUserID: &access}, "", 20); err != nil || len(page) != 10 {
+		t.Fatalf("global projects after registration = %d, %v", len(page), err)
+	}
+	if err := s.SetUserDisabled(ctx, access, true); err != nil {
+		t.Fatal(err)
+	}
+	if page, _, err := s.ListProjectsFilteredPage(ctx, store.ProjectFilter{AccessUserID: &access}, "", 20); err != nil || len(page) != 0 {
+		t.Fatalf("disabled global projects = %d, %v", len(page), err)
+	}
+	if _, err := s.GetProjectAccess(ctx, access, 43); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("disabled global access = %v", err)
+	}
+	if err := s.SetUserDisabled(ctx, access, false); err != nil {
+		t.Fatal(err)
+	}
+	if role, err := s.GetProjectAccess(ctx, access, 43); err != nil || role != store.ProjectAccessRead {
+		t.Fatalf("reenabled global access = %q, %v", role, err)
+	}
+	enabled = false
+	revision = 4
+	if _, _, _, err := s.UpdatePlatformUser(ctx, access, store.PlatformUserUpdate{GlobalRead: &enabled, Revision: &revision}); err != nil {
+		t.Fatal(err)
+	}
+	if page, _, err := s.ListProjectsFilteredPage(ctx, store.ProjectFilter{AccessUserID: &access}, "", 20); err != nil || len(page) != 1 || page[0].ID != 42 {
+		t.Fatalf("projects after global read disabled = %+v, %v", page, err)
+	}
 }
 
 func TestDisableUserSerializesWithCredentialIssuance(t *testing.T) {

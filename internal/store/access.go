@@ -2,9 +2,8 @@ package store
 
 import "time"
 
-// Project access roles. A grant is the only way a user may read or manage one
-// project's business data. The nil AccessUserID on a filter keeps the trusted
-// internal, unrestricted path.
+// Project access roles. Global read or a project grant permits reading; only a
+// project grant permits management. A nil AccessUserID keeps the trusted path.
 const (
 	ProjectAccessRead   = "read"
 	ProjectAccessManage = "manage"
@@ -30,6 +29,7 @@ type User struct {
 type PlatformUserUpdate struct {
 	Role           *string
 	Disabled       *bool
+	GlobalRead     *bool
 	Revision       *int64
 	ActorID        int64
 	AdminIDs       []int64

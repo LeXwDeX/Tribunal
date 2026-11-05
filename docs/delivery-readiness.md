@@ -8,6 +8,11 @@
 >
 > 本文不复制完整日志，也不把测试实例结果扩大为生产验收。
 
+## 全局只读本地验证（#296，未提交工作区）
+
+- 基于 `bb280c8278eac9cb1e933c98b2d1498af1ad85ef` 的工作区，相关 SQLite、server、app 包测试、局部 race 测试和 Staticcheck 已运行。十个项目的本地列表基准对比了全局只读与逐项目授权，不代表生产负载。
+- 尚未运行该变更的 CI go job，也未验证真实部署升级或回滚。迁移 `0027` 不可逆，升级和回退要求见[运维文档](operations.md#项目授权用户停用和凭据撤销)。
+
 ## v1.2.0 候选批次本地修复验证（PR #128）
 
 - 2026-10-28，在 `main` `e7c59ab` 加本地未提交改动的工作区，MCP 配置加密、旧库回填、错误密钥拒绝、事务回滚和项目坏字段容错已通过 `go test -race -count=1 -timeout=15m ./internal/secret ./internal/store/sqlite ./internal/app ./internal/server ./cmd/server`；`go build ./...`、`go vet ./...` 通过。此前无密钥创建/导入及明文存储回归已实测失败，修复后通过。

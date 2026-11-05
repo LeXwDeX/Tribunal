@@ -376,13 +376,25 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusUnauthorized, "unauthenticated", "authentication required", nil)
 		return
 	}
+	globalRead := false
+	if users, ok := s.access.(interface {
+		GetUser(context.Context, int64) (*store.User, error)
+	}); ok && value.user.ID > 0 {
+		user, err := users.GetUser(r.Context(), value.user.ID)
+		if err != nil || user == nil {
+			writeError(w, r, http.StatusInternalServerError, "internal", "internal error", nil)
+			return
+		}
+		globalRead = user.GlobalRead && !user.Disabled
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id":         value.user.ID,
-		"username":   value.user.Username,
-		"name":       value.user.Name,
-		"role":       value.user.Role,
-		"csrf_token": value.csrf,
+		"id":          value.user.ID,
+		"username":    value.user.Username,
+		"name":        value.user.Name,
+		"role":        value.user.Role,
+		"global_read": globalRead,
+		"csrf_token":  value.csrf,
 	})
 }
 
