@@ -55,12 +55,12 @@
 | 本地构建、静态检查、scoped 测试、前端测试与 dist | PASS | 各 Issue 的本地验证记录与 PR |
 | 带历史数据的 v1.2.0 → v1.3.0 原地升级 | PASS | 2026-11-05 在隔离测试实例上，从 v1.2.0 数据卷原地升级到候选 `85175b8`；27 条迁移应用到 `0028`；3 个项目与历史评审可读，healthz/readyz 200。升级前一致性快照已校验，回退演练见下 |
 | 5 个终态 + 1 个中断工作流、effort 审计、pending publication 夹具 | FAIL（部分完成） | 升级前历史数据只有 2 个历史评审和 5 个 onboarding，没有按要求在升级前构造 5 个终态 + 1 个中断夹具；升级后新增 5 个 completed review，但不能替代升级前夹具。effort 审计已有真实记录；pending publication 夹具未单独构造和核实 |
-| 2 用户 / 2 项目授权矩阵 | BLOCKED | 测试实例只有 1 个 OAuth 用户；第 2 个用户需要测试 GitLab 管理操作授权，未执行 |
+| 2 用户 / 2 项目授权矩阵 | PASS | U1=平台管理员、U2=仅 OAuth 注册的 viewer，P1/P2 交叉授权。执行了跨项目 404、read 写 403、manage 写 200、payload 403/200、平台扩展 403、CSRF 403/200、撤权后 SSE 关闭、停用后 token 401、重登后 grant 保留 |
 | 真实评审、发布与 `model_id`/`wire` 审计 | PASS（部分） | 真实评审 `01a1ab42-c8d1` completed PASS，dossier 发布状态为 `published`；用户模型 lane `rv.p1` 记录 `provider=user:<uuid>`、`model=deepseek-flash`，其 `wire` 含 `max_tokens=1024` 与 `thinking_enabled=false`，没有 effort；`reasoning.effort=max` 出现在配置 provider 的调用中，未在该用户模型 lane 中证明；用户模型测试通过（历史操作记录） |
 | 中断工作流恢复 | FAIL | 两次 SIGKILL 中断均未续跑成功：`01a1ab49-6f2c` 被 `superseded` 取消；`01a1ab4e-df76` 恢复后 6 个节点以 `unsafe_model_response` 失败、3 个节点完成，工作流整体 failed；其失败摘要随后发布（`published`），但不是成功评审发布 |
 | 进行中修改模型、重启后身份取消 | BLOCKED | 需要真实运行中工作流与重启；本次未执行 |
 | link-local 422 `egress_denied` | PASS（部分） | 创建指向 link-local 的模型后，`POST /models/{id}/test` 返回 422；日志只保留状态码，未保留响应体，未独立证明 `egress_denied` 错误码。模型随后被删除 |
-| 用户管理只读矩阵 | BLOCKED | 全局模式开/关已验证（`/me.global_read` true/false，项目列表 3 项），但完整 2 用户 / 2 项目只读与写拒绝矩阵未执行 |
+| 用户管理只读矩阵 | PASS | 全局模式开/关已验证（`/me.global_read` true/false）；U2 对 P1 read 时写 403、对 P2 manage 时项目 PATCH 200；跨项目 404；平台扩展 403；停用/启用/重登流程通过 |
 | 错误 masterkey 启动与模型 unavailable | BLOCKED | 本次未执行；本地存储层测试已覆盖 |
 | 恢复默认后 hash/digest 等于升级前 | BLOCKED | 升级前未记录 `reviewProfileHash` 和执行 digest |
 | 版本回退演练（恢复快照 + v1.2.0 镜像） | PASS | 升级前一致性快照恢复到新卷，用 v1.2.0 镜像与原 masterkey 启动，readyz 200，项目与评审可读 |
@@ -69,7 +69,7 @@
 | 生产人工 Review（stage 3） | PENDING | 需维护者与明确授权 |
 | tag `v1.3.0` 与 GitHub Release | PENDING | 需用户明确授权 |
 
-未完成的“发布前必须”项标记为 BLOCKED、FAIL 或 PASS（部分），未用 mock 或 CI 结果替代。解除条件：2 用户矩阵需要测试 GitLab 管理操作授权；中断恢复缺陷需先修复并重跑；错误 masterkey 与恢复默认 hash 需在隔离实例补测。
+未完成的“发布前必须”项标记为 BLOCKED、FAIL 或 PASS（部分），未用 mock 或 CI 结果替代。解除条件：中断恢复缺陷需先修复并重跑；错误 masterkey 与恢复默认 hash 需在隔离实例补测。
 
 ### v1.3.0 真实实例验收记录（2026-11-05）
 
@@ -84,7 +84,25 @@
 - 回退：升级前一致性快照恢复到新卷，使用 v1.2.0 镜像和原 masterkey 启动，readyz 200，项目与历史评审可读。恢复实例未保留，无法二次核对。
 - 中断恢复（未通过）：两次真实 SIGKILL 中断测试均未完成续跑。第一次 workflow `01a1ab49-6f2c` 在重启后被标为 `cancelled/superseded`；第二次 workflow `01a1ab4e-df76` 恢复后 6 个节点以 `unsafe_model_response` 失败、3 个节点完成，工作流整体 failed；失败摘要随后发布为 `published`，但不是成功评审。该缺陷阻断“升级后续跑”发布条件。
 
-未执行：2 用户 / 2 项目矩阵、pending publication 夹具、错误 masterkey 启动、恢复默认后的 hash/digest 对比、运行中修改模型后重启取消。
+### 2 用户 / 2 项目矩阵结果（2026-11-05）
+
+- 夹具：U1 为平台管理员，对 P1/P2 均有 manage；U2 为仅通过 OAuth 登录创建的 viewer。U2 初始对 P1 read、对 P2 无 grant，随后临时对 P2 manage。
+- 管理面：bootstrap 可列用户和管理项目；读取项目详情或评审 404；业务项目列表为空。
+- 跨项目：U2 读 P2 项目详情和评审均为 404；项目列表只出现 P1。
+- 只读边界：U2 对 P1 read 时，`POST /projects/{id}/webhook` 403；`include_payload=true` 403；P1 项目统计 200、P2 统计 404、bootstrap 统计 404；项目级扩展列表 200、平台级扩展 403；admin 用户列表 403。
+- manage 授权：U2 对 P2 manage 时，`GET /projects` 同时返回 P1 read 与 P2 manage；`PATCH /projects/{id}` 200；项目级扩展列表 200；`include_payload=true` 200；项目块绑定写入 403（宿主配置仍需平台管理员）。
+- 全局模式：U2 对 P2 无 grant 时开启 `global_read`，P1/P2 项目和评审均可读，P2 写 403；关闭后 P2 恢复 404。
+- 管理员：U2 提升为平台管理员后 admin 用户列表 200，但仍无 P2 grant（404）；降级回 viewer 后 admin 接口 403。
+- 宿主配置：U2 对 P2 manage 时项目块绑定写入 403；`POST /mcp-servers` 的 403 只证明创建入口已关闭，不作为权限边界证据。
+- CSRF：U2 浏览器会话无 CSRF 的 PATCH 403，带 CSRF 200。
+- session/token：U2 用浏览器 session 和 API token 读取 P1 均为 200，`access` 一致。
+- 撤销/禁用：撤销 U2 的 P1 grant 后读取 404；重新授予 P1 read 后恢复；停用后 token 401、旧浏览器 session `/me` 401；启用后旧 token 仍 401；重新 OAuth 登录后 grant 保留。
+- 停用期间登录：GitLab 登录完成后 callback 未建立会话，`/me` 401；启用后重登成功。
+- 凭据撤销：`DELETE /admin/users/{id}/credentials` 返回 204 后旧 token 401。
+- SSE：U2 在评审运行中打开 P1 评审流，撤 P1 grant 后流关闭；关闭发生在撤权之后，撤权前流仍保持。
+- 豁免：webhook 归属、部分发布失败、stale、INCOMPLETE、升级会话（原浏览器 session 跨升级）在本次真实矩阵中未逐项执行；前四项仅由本地自动化测试覆盖。
+
+未执行：pending publication 夹具、错误 masterkey 启动、恢复默认后的 hash/digest 对比、运行中修改模型后重启取消。
 
 ## v1.2.0 候选批次本地修复验证（PR #128）
 
