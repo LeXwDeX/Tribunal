@@ -15,6 +15,13 @@ import (
 // agent call is running (a worker shutdown), and returns the workflow ID.
 func interruptReview(t *testing.T, f *reviewFixture, job *jobs.Job) string {
 	t.Helper()
+	return interruptReviewRunning(t, f, job, 1)
+}
+
+// interruptReviewRunning interrupts the review once at least running agent
+// calls are blocked inside the runner (concurrently running model nodes).
+func interruptReviewRunning(t *testing.T, f *reviewFixture, job *jobs.Job, running int) string {
+	t.Helper()
 	f.runner.setBlock(make(chan struct{}), make(chan struct{}))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -24,6 +31,11 @@ func interruptReview(t *testing.T, f *reviewFixture, job *jobs.Job) string {
 	case <-f.runner.startedSignal():
 	case <-time.After(5 * time.Second):
 		t.Fatal("review did not start")
+	}
+	for deadline := time.Now().Add(5 * time.Second); f.runner.count() < running; time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d agent calls running, want %d", f.runner.count(), running)
+		}
 	}
 	cancel()
 	select {
