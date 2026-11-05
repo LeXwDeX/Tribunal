@@ -27,6 +27,7 @@
 
 ### 变更
 
+- **评审档位模型覆盖**（[#291](https://github.com/LeXwDeX/Tribunal/issues/291)）：新增 `review_profile_overrides` 与模型引用表，可按 7 个节点覆盖 `default` 的 provider；覆盖在 `profileFor` 中逐工作流合并，不修改共享配置。当前仅实现 provider 覆盖与 API，参数覆盖、来源标注和 `/profiles` 生效值仍待补齐。
 - **工作流模型快照**（[#299](https://github.com/LeXwDeX/Tribunal/issues/299)）：工作流启动时固定所用 client，进程内 Refresh 不影响在途工作流；跨重启恢复仍按当前目录重算身份，不一致时取消并记录 `execution_identity_changed`。无用户模型时 profile hash 与旧版一致。
 - **用户模型目录与运行时刷新**（[#289](https://github.com/LeXwDeX/Tribunal/issues/289)）：配置模型与数据库用户模型合并到运行时目录，用户模型无需重启即可被新工作流使用；单条坏记录隔离为 unavailable，不影响启动和其他模型。修改模型会重建 client 和信号量，旧 client 继续服务在途工作流，因此同一模型 ID 的实际并发会短时叠加新旧两份上限。用户模型的成本按保存的价格计算，MR 评论署名显示 display_name。
 - **模型管理 API**（[#290](https://github.com/LeXwDeX/Tribunal/issues/290)）：新增 `/api/v1/models` 列表、详情、创建、修改、删除和测试端点，全部要求平台管理员；配置模型只读。写操作后刷新运行时目录，响应 `effective: "new_workflows"`。草稿测试端点暂返回 501，待后续补齐。

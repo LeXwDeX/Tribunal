@@ -312,7 +312,7 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 	if explicitValue != "true" && explicitValue != "false" {
 		return s.cancelWorkflow(ctx, workflow.ID)
 	}
-	profileName, profileCfg := s.profileFor(project, dossier.Metadata["requested_profile"], currentConfig.Profile, mr.Labels, explicitValue == "true")
+	profileName, profileCfg := s.profileFor(ctx, project, dossier.Metadata["requested_profile"], currentConfig.Profile, mr.Labels, explicitValue == "true")
 	profile := review.Profile{Name: profileName, Config: profileCfg}
 	if workflow.Profile != profileName || dossier.Metadata["profile_hash"] == "" || dossier.Metadata["profile_hash"] != s.reviewProfileHash(profile) {
 		return s.cancelWorkflow(ctx, workflow.ID)

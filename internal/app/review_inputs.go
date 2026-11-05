@@ -479,7 +479,7 @@ func reviewFingerprint(dossierHash, configHash, promptHash string) string {
 	return sha256Hex(dossierHash + "\n" + configHash + "\n" + promptHash)
 }
 
-func (s *ReviewService) profileFor(project *store.Project, requested, repoProfile string, labels []string, explicit bool) (string, config.ProfileConfig) {
+func (s *ReviewService) profileFor(ctx context.Context, project *store.Project, requested, repoProfile string, labels []string, explicit bool) (string, config.ProfileConfig) {
 	var candidates []string
 	if explicit {
 		candidates = []string{requested, repoProfile}
@@ -498,7 +498,13 @@ func (s *ReviewService) profileFor(project *store.Project, requested, repoProfil
 		}
 		seen[name] = struct{}{}
 		if isReviewProfile(s.profiles, name) {
-			return name, s.profiles[name]
+			cfg := s.profiles[name]
+			if s.overrides != nil {
+				if overrides, err := s.overrides.GetProfileOverrides(ctx, name); err == nil && overrides != nil {
+					cfg = applyProfileOverrides(cfg, parseProfileOverrides(overrides.OverridesJSON))
+				}
+			}
+			return name, cfg
 		}
 	}
 	return "custom", config.ProfileConfig{}

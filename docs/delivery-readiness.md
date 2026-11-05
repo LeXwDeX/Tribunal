@@ -31,6 +31,10 @@
 
 - 基于 `feat/299-workflow-snapshot` 的工作区，本地通过 `go build ./...`、`go vet ./...`、`go test -count=1 ./internal/app/... ./internal/review/... ./internal/llm/...` 和 `-race ./internal/llm`。覆盖快照代次、Refresh 后旧 client 保留、profile hash 金丝雀与取消原因；未验证真实工作流刷新、跨重启恢复或完整 CI。
 
+## 评审档位覆盖本地验证（#291）
+
+- 基于 `feat/291-profile-overrides` 的工作区，本地通过 `go build ./...`、`go vet ./...`、`go test -count=1 ./internal/app/... ./internal/server/... ./internal/store/sqlite/...` 和相关包 Staticcheck。覆盖存储、revision、引用检查、API 读写与错误映射；参数覆盖、来源标注、`/profiles` 生效值和 HTTP 层 403/CSRF 测试尚未补齐。
+
 ## v1.2.0 候选批次本地修复验证（PR #128）
 
 - 2026-10-28，在 `main` `e7c59ab` 加本地未提交改动的工作区，MCP 配置加密、旧库回填、错误密钥拒绝、事务回滚和项目坏字段容错已通过 `go test -race -count=1 -timeout=15m ./internal/secret ./internal/store/sqlite ./internal/app ./internal/server ./cmd/server`；`go build ./...`、`go vet ./...` 通过。此前无密钥创建/导入及明文存储回归已实测失败，修复后通过。
