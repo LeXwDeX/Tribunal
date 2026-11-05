@@ -6,6 +6,7 @@
 
 ### 升级前必读
 
+- **全局只读迁移**：迁移 `0027` 不可逆。升级前按运维文档做一致性备份；回退需恢复升级前快照和匹配的旧版镜像。
 - **模型存储与配置校验**：迁移 `0026` 不可逆，升级前按运维文档做一致性备份，回退需同时恢复旧版镜像和数据。所有配置 provider 的 `max_tokens` 必须为正数，名称不能含 `:`；temperature 为 0–2，thinking budget 和 context window 不能为负。旧配置不符合这些要求时会阻止启动。挂载的旧配置不会自动更新，须按供应方支持的上限填写 `max_tokens`。
 - **模型参数校验与审计**：`providers.*.reasoning.effort` 只接受空值、`low`、`medium`、`high` 和 `max`，非法值会阻止启动，请在升级前检查配置。协议不会发送的 effort 或 thinking budget 会在启动时告警；调用详情新增实际发送参数，旧记录显示为旧记录。
 - **LLM 出站规则**：默认拒绝链路本地、未指定、组播和受限广播地址，允许内网及 loopback 地址。升级后指向被拒地址的 provider 调用将失败，但不会因此阻止进程启动。可通过 `llm.egress.deny_cidrs` 和 `llm.egress.allow_cidrs` 调整，拒绝规则优先；重启后生效。为防止代理绕过地址校验，LLM 连接不再使用 `HTTP_PROXY` / `HTTPS_PROXY` 及其小写形式；依赖代理访问模型的部署升级前须提供可直接连接的模型网关，否则调用会失败。
@@ -26,6 +27,7 @@
 
 ### 变更
 
+- **全局只读**：平台管理员可显式为用户开启或关闭所有项目及评审的只读权限。新项目自动可见，项目管理仍需单独授权；禁用用户期间不可见，重新启用后保留设置。变更立即生效并写入平台审计日志。
 - **平台角色管理**：平台管理员可为已登录的 GitLab 用户授予或撤销管理员角色，并查看用户的项目授权；配置指定的管理员不能降级或禁用。角色变更在下一次请求生效。
 - **评审档位与图固定**：`profiles.default` 的配置收敛为 `provider`（所有节点默认）、`explore.provider`、`lanes.{code_review,review,reasoner,validate}.provider`、`challenge.provider`（逐条反证）、`plan.package_tokens` / `plan.max_packages` 和 `budget`；`provider` 为空时依次取 `lanes.code_review.provider`、`challenge.provider`。plan 固定为 code 模式，P0/P1 逐条挑战，不确定的挑战结果标记为「存疑」后发布，报告由代码生成，评审图不在汇报阶段扩展。`Load` 把 `plan.max_packages` 降到 `min(17, (budget.max_nodes − 9) / 2)`（至少 1），配置值高于上界时告警，未配置时静默降低；构建评审图时仍要求 `plan.max_packages × 2 + 2 ≤ max_fan_out`（默认 36），超出则拒绝。既没有 `provider` 也没有 `lanes.code_review.provider` 时构建评审图失败，字段为 `provider`。
 - **旧字段迁移或忽略**：`propose` 中第一个 `code-review` / `review` 条目分别迁移为 `lanes.code_review.provider` / `lanes.review.provider`，其余 `propose` 条目忽略；`reasoner.provider` 迁移为 `lanes.reasoner.provider`，`reasoner.when` 单独告警并忽略（reasoner 一路始终运行）；`challenge.provider: cross` 改用 `challenge.fallback` 作为挑战者，没有 fallback 时告警并由档位 `provider` 挑战；显式的新字段优先于迁移值（告警为「…is deprecated and was ignored: <新字段> is set」），迁移得到的 provider 仍被校验，错误指向新字段。`plan.mode`（非 code）、`plan.provider`、`consensus`、`challenge.only`（不等于 P0、P1）、非 `cross` 时的 `challenge.fallback`、`on_uncertain`（非 mark）、`synthesize`、`budget.max_extends`、`default` 下的 `agent` 被忽略并告警。
