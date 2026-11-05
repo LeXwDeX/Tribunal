@@ -757,3 +757,15 @@ func countOverviewBullets(section string) int {
 	}
 	return count
 }
+
+func TestFindingAttributionUsesProviderLabels(t *testing.T) {
+	group := renderGroup("label", ActionPublish, SeverityP2, true, "title", "body")
+	group.Sources[0].Origin = Origin{Node: "n", Provider: "user:abc", Model: "m"}
+	out, err := RenderFinding(group, FindingRenderOptions{ShowModelAttribution: true, ProviderLabels: map[string]string{"user:abc": "My Model"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "My Model/m") || strings.Contains(out, "user:abc") {
+		t.Fatalf("attribution = %q", out)
+	}
+}

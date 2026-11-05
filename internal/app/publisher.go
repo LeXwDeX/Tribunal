@@ -19,6 +19,7 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/config"
 	"github.com/LeXwDeX/tribunal/internal/errclass"
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
+	"github.com/LeXwDeX/tribunal/internal/llm"
 	"github.com/LeXwDeX/tribunal/internal/review"
 	"github.com/LeXwDeX/tribunal/internal/secret"
 	"github.com/LeXwDeX/tribunal/internal/store"
@@ -53,6 +54,7 @@ type Publisher struct {
 	engine         *dag.Engine
 	reviewDefaults config.ProjectSettings
 	profiles       map[string]config.ProfileConfig
+	catalog        *llm.Catalog
 	promptsHash    string
 	publicURL      string
 	logger         *slog.Logger
@@ -160,6 +162,13 @@ func NewPublisher(cfg PublisherConfig) (*Publisher, error) {
 		now:            now,
 		retries:        retries,
 	}, nil
+}
+
+func (p *Publisher) providerLabels() map[string]string {
+	if p == nil || p.catalog == nil {
+		return nil
+	}
+	return p.catalog.Labels()
 }
 
 type loadedReview struct {
@@ -390,7 +399,7 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 				}
 			}
 			if err == nil && publication.GitlabID != "" && !conflict {
-				body, renderErr := review.RenderFinding(*group, review.FindingRenderOptions{ShowModelAttribution: cfg.Settings.ShowModelAttribution})
+				body, renderErr := review.RenderFinding(*group, review.FindingRenderOptions{ShowModelAttribution: cfg.Settings.ShowModelAttribution, ProviderLabels: p.providerLabels()})
 				if renderErr != nil || publication.BodyHash == "" || publication.BodyHash != bodyHash(body) {
 					group.PositionOK = false
 					contentMismatch = true
@@ -461,7 +470,7 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			return err
 		}
-		findingBody, err := review.RenderFinding(group, review.FindingRenderOptions{ShowModelAttribution: cfg.Settings.ShowModelAttribution})
+		findingBody, err := review.RenderFinding(group, review.FindingRenderOptions{ShowModelAttribution: cfg.Settings.ShowModelAttribution, ProviderLabels: p.providerLabels()})
 		if err != nil {
 			groups[i].PositionOK = false
 			fallback = true

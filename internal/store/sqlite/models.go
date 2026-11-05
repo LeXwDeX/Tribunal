@@ -16,6 +16,8 @@ import (
 
 var _ store.ModelStore = (*Store)(nil)
 
+var errModelCorrupt = errors.New("sqlite: corrupt model record")
+
 const modelColumns = `id, display_name, protocol, base_url, model, params_json, api_key_sealed, revision, created_by, created_at, updated_by, updated_at, deleted_at`
 
 // ConfigureModelSecrets sets the cipher used to check credentials on reads.
@@ -52,8 +54,10 @@ func (s *Store) scanModel(row rowScanner) (*store.Model, error) {
 	if err := row.Scan(&m.ID, &m.DisplayName, &m.Protocol, &m.BaseURL, &m.Model, &params, &sealed, &m.Revision, &m.CreatedBy, &created, &m.UpdatedBy, &updated, &deleted); err != nil {
 		return nil, err
 	}
+	corrupt := false
 	if err := json.Unmarshal([]byte(params), &m.Params); err != nil {
-		return nil, errors.New("sqlite: invalid model parameters")
+		m.Params = store.ModelParams{}
+		corrupt = true
 	}
 	var err error
 	if m.CreatedAt, err = parseTime(created); err != nil {
@@ -79,6 +83,10 @@ func (s *Store) scanModel(row rowScanner) (*store.Model, error) {
 			m.Unavailable = err != nil
 		}
 	}
+	if corrupt {
+		m.Unavailable = true
+		return &m, errModelCorrupt
+	}
 	return &m, nil
 }
 
@@ -91,6 +99,10 @@ func (s *Store) ListModels(ctx context.Context) ([]store.Model, error) {
 	models := []store.Model{}
 	for rows.Next() {
 		m, err := s.scanModel(rows)
+		if errors.Is(err, errModelCorrupt) {
+			models = append(models, *m)
+			continue
+		}
 		if err != nil {
 			return nil, errors.New("sqlite: scan model failed")
 		}

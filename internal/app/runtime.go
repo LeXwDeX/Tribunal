@@ -106,6 +106,7 @@ type Runtime struct {
 	projectExts *ProjectExtensionResolver
 	skillBinder *projectAwareSkillProvider
 	clients     review.ClientProvider
+	catalog     *llm.Catalog
 	skills      *skill.Loader
 	logger      *slog.Logger
 	now         func() time.Time
@@ -148,12 +149,14 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		workspaceManager = workspace.NewManager(cfg.Workspace.Root, &repo.Git{Bin: cfg.Workspace.GitBin})
 	}
 	clients := deps.LLM
+	var modelCatalog *llm.Catalog
 	if clients == nil {
-		registry, err := llm.NewRegistry(cfg.Providers, llm.WithRecorder(deps.Store), llm.WithEgress(cfg.LLM.Egress))
+		catalog, err := llm.NewCatalog(ctx, cfg.Providers, deps.Store, llm.WithRecorder(deps.Store), llm.WithEgress(cfg.LLM.Egress))
 		if err != nil {
 			return nil, fmt.Errorf("app: build LLM registry: %w", err)
 		}
-		clients = registry
+		clients = catalog
+		modelCatalog = catalog
 	}
 	platformMCP, err := loadPlatformMCP(cfg)
 	if err != nil {
@@ -237,6 +240,7 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		}
 		return nil, err
 	}
+	publisher.catalog = modelCatalog
 	toolProvider := NewMCPToolProvider(mcpManager, blocks)
 	projectExts, err := NewProjectExtensionResolver(ProjectExtensionResolverConfig{
 		Store:      deps.Store,
@@ -286,7 +290,7 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		Clients:           clients,
 		Tools:             projectTools,
 		Skills:            projectSkills,
-		Cost:              newCostFunc(cfg.Providers),
+		Cost:              costFunc(modelCatalog, cfg.Providers),
 		Publisher:         publisher,
 		Status:            statusFeed,
 		AllowedProviders:  providerNames(cfg.Providers),
@@ -460,6 +464,7 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		projectExts: projectExts,
 		skillBinder: projectSkills,
 		clients:     clients,
+		catalog:     modelCatalog,
 		skills:      loader,
 		logger:      logger,
 		now:         now,
@@ -564,6 +569,17 @@ func (r *Runtime) ProjectExtensions() *ProjectExtensionResolver { return r.proje
 
 // LLMClients returns the provider client registry used by the admin probe.
 func (r *Runtime) LLMClients() review.ClientProvider { return r.clients }
+
+// Models returns the runtime model catalog when the runtime built one.
+func (r *Runtime) Models() *llm.Catalog { return r.catalog }
+
+// RefreshModels rebuilds changed user-model clients after a model write.
+func (r *Runtime) RefreshModels(ctx context.Context) error {
+	if r.catalog == nil {
+		return nil
+	}
+	return r.catalog.Refresh(ctx)
+}
 
 // Lifecycle returns the worker readiness flag.
 func (r *Runtime) Lifecycle() *Lifecycle { return r.lifecycle }
