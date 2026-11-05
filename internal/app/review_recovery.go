@@ -399,6 +399,7 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 		Cost:                     s.cost,
 		Outbound:                 outboundSender(ws),
 		RepositorySkillsVerified: execution.repositorySkillsVerified(),
+		Logger:                   s.logger,
 	})
 	if err != nil {
 		return err
