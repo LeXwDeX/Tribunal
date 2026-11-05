@@ -27,6 +27,7 @@
 
 ### 变更
 
+- **评审档位节点覆盖界面**（[#293](https://github.com/LeXwDeX/Tribunal/issues/293)）：模型页的「评审档位」区块显示 7 个节点的生效模型和来源，管理员可在 Drawer 中选择模型或恢复为配置；unavailable 模型不可选，保存带 revision。参数覆盖表单与同模型提示尚未实现。
 - **模型管理界面**（[#292](https://github.com/LeXwDeX/Tribunal/issues/292)）：模型页改为 `/models` 数据源，支持配置模型只读展示与用户模型新增、编辑、删除、草稿测试；API key 三态且只存在抽屉局部状态；同名模型显示短 ID；被引用删除、revision 冲突和出站拒绝有专门提示。概览页健康状态改用 `/models`。
 - **评审档位模型覆盖**（[#291](https://github.com/LeXwDeX/Tribunal/issues/291)）：新增 `review_profile_overrides` 与模型引用表，可按 7 个节点覆盖 `default` 的 provider；覆盖在 `profileFor` 中逐工作流合并，不修改共享配置。当前仅实现 provider 覆盖与 API，参数覆盖、来源标注和 `/profiles` 生效值仍待补齐。
 - **工作流模型快照**（[#299](https://github.com/LeXwDeX/Tribunal/issues/299)）：工作流启动时固定所用 client，进程内 Refresh 不影响在途工作流；跨重启恢复仍按当前目录重算身份，不一致时取消并记录 `execution_identity_changed`。无用户模型时 profile hash 与旧版一致。

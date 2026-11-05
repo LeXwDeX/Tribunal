@@ -39,6 +39,10 @@
 
 - 基于 `feat/292-models-ui` 的工作区，`npm test -- --coverage` 通过 62 个文件、518 项测试，整体覆盖率 85.01% statements / 80.41% branches / 82.51% functions / 88.33% lines；`npm run check:styles` 0 错误；`npm run build` 已刷新 `web/dist`。未做 1440/390 宽度和亮暗主题的浏览器截图。
 
+## 评审档位覆盖界面本地验证（#293）
+
+- 基于 `feat/293-profile-ui` 的工作区，`npm test -- --coverage` 通过 63 个文件、520 项测试，整体覆盖率 85.04% / 80.14% / 82.89% / 88.55%；`npm run check:styles` 0 错误；`npm run build` 已刷新 `web/dist`。覆盖来源显示、模型选择、保存与恢复请求；参数覆盖、同模型提示和浏览器截图未实现。
+
 ## v1.2.0 候选批次本地修复验证（PR #128）
 
 - 2026-10-28，在 `main` `e7c59ab` 加本地未提交改动的工作区，MCP 配置加密、旧库回填、错误密钥拒绝、事务回滚和项目坏字段容错已通过 `go test -race -count=1 -timeout=15m ./internal/secret ./internal/store/sqlite ./internal/app ./internal/server ./cmd/server`；`go build ./...`、`go vet ./...` 通过。此前无密钥创建/导入及明文存储回归已实测失败，修复后通过。

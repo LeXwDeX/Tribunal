@@ -107,6 +107,9 @@ describe('models layout', () => {
       if (url.startsWith('/api/v1/providers')) {
         return jsonResponse({ providers: [{ name: 'claude', protocol: 'anthropic', stats_24h: { calls: 1284, p50_latency_ms: 2100 } }] })
       }
+      if (url === '/api/v1/profiles/default') {
+        return jsonResponse({ profile: 'default', overrides: {}, revision: 0, effective: { budget: { max_cost_usd: 3 }, provider: 'claude' }, nodes: [] })
+      }
       if (url.startsWith('/api/v1/profiles')) {
         return jsonResponse({ profiles: [{ name: 'default', config: { budget: { max_cost_usd: 3 }, provider: 'claude' } }] })
       }

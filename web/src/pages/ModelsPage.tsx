@@ -2,10 +2,11 @@ import { useEffect, useId, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCanWrite } from '../components/RoleContext'
 import {
-  createModel, deleteModel, listModels, listProfiles, testModelDraft, updateModel,
+  createModel, deleteModel, deleteProfileOverrides, getDefaultProfile, listModels, listProfiles,
+  putProfileOverrides, testModelDraft, updateModel,
 } from '../api/api'
 import { ApiError, errorMessage } from '../api/client'
-import type { Model, ModelParams, ModelWrite, Profile, ProfileConfig, ProviderTestResult } from '../api/types'
+import type { Model, ModelParams, ModelWrite, Profile, ProfileConfig, ProfileDetail, ProviderTestResult } from '../api/types'
 import {
   Badge, Button, ConfirmDialog, Drawer, EmptyState, ErrorState, Field, LoadingState, PageHeader, Panel,
 } from '../components/ui'
@@ -268,21 +269,154 @@ function budgetValue(key: string, value: unknown): string {
   return typeof value === 'object' ? JSON.stringify(value) : String(value)
 }
 
-function ProfilePanel({ profile }: { profile: Profile }) {
-  const config = profile.config
+const PROFILE_NODES = [
+  ['default', '默认'],
+  ['explore', '探索'],
+  ['lanes.code_review', 'code-review'],
+  ['lanes.review', 'review'],
+  ['lanes.reasoner', 'reasoner'],
+  ['lanes.validate', 'validate'],
+  ['challenge', 'challenge'],
+] as const
+
+const SOURCE_LABELS: Record<string, string> = {
+  override: '覆盖',
+  config: '配置',
+  config_default: '配置默认',
+  derived: '派生',
+}
+
+function overrideSelection(overrides: Record<string, unknown>): Record<string, string> {
+  const result: Record<string, string> = {}
+  const doc = overrides as {
+    default?: { model?: string }
+    explore?: { model?: string }
+    lanes?: Record<string, { model?: string }>
+    challenge?: { model?: string }
+  }
+  if (doc.default?.model) result.default = doc.default.model
+  if (doc.explore?.model) result.explore = doc.explore.model
+  for (const [lane, value] of Object.entries(doc.lanes ?? {})) {
+    if (value?.model) result[`lanes.${lane}`] = value.model
+  }
+  if (doc.challenge?.model) result.challenge = doc.challenge.model
+  return result
+}
+
+function ProfileEditor({ open, detail, models, onClose, onSaved }: {
+  open: boolean
+  detail?: ProfileDetail
+  models: Model[]
+  onClose: () => void
+  onSaved: () => void
+}) {
+  const [selection, setSelection] = useState<Record<string, string>>({})
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState<string>()
+  useEffect(() => {
+    if (open && detail) {
+      setSelection(overrideSelection(detail.overrides))
+      setError(undefined)
+    }
+  }, [open, detail])
+
+  const save = async () => {
+    if (!detail) return
+    setPending(true)
+    setError(undefined)
+    try {
+      const overrides: Record<string, unknown> = {}
+      for (const [node, id] of Object.entries(selection)) {
+        if (!id) continue
+        if (node === 'default') overrides.default = { model: id }
+        else if (node === 'explore') overrides.explore = { model: id }
+        else if (node === 'challenge') overrides.challenge = { model: id }
+        else if (node.startsWith('lanes.')) {
+          const lanes = (overrides.lanes as Record<string, unknown>) ?? {}
+          lanes[node.slice('lanes.'.length)] = { model: id }
+          overrides.lanes = lanes
+        }
+      }
+      await putProfileOverrides(overrides, detail.revision)
+      onSaved()
+      onClose()
+    } catch (err) {
+      setError(err instanceof ApiError && err.code === 'stale_revision' ? '已被他人修改，请重新加载。' : errorMessage(err))
+    } finally {
+      setPending(false)
+    }
+  }
+
+  const reset = async () => {
+    if (!detail) return
+    setPending(true)
+    setError(undefined)
+    try {
+      await deleteProfileOverrides(detail.revision)
+      onSaved()
+      onClose()
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setPending(false)
+    }
+  }
+
+  return (
+    <Drawer
+      open={open}
+      onClose={onClose}
+      title="编辑评审档位"
+      description="留空表示继承配置；保存后对之后启动的评审生效。"
+      footer={(
+        <>
+          <Button variant="secondary" onClick={() => { void reset() }} loading={pending}>恢复为配置</Button>
+          <Button variant="secondary" onClick={onClose}>取消</Button>
+          <Button onClick={() => { void save() }} loading={pending}>保存</Button>
+        </>
+      )}
+    >
+      {PROFILE_NODES.map(([node, label]) => (
+        <Field key={node} label={label} htmlFor={`profile-node-${node}`}>
+          <select
+            id={`profile-node-${node}`}
+            className={ui.input}
+            value={selection[node] ?? ''}
+            onChange={(event) => setSelection((current) => ({ ...current, [node]: event.target.value }))}
+          >
+            <option value="">继承</option>
+            {models.map((model) => (
+              <option key={model.id} value={model.id} disabled={!model.available}>
+                {model.display_name}（{model.id}）
+              </option>
+            ))}
+          </select>
+        </Field>
+      ))}
+      {error ? <span className={styles.resultError}>{error}</span> : null}
+    </Drawer>
+  )
+}
+
+function ProfilePanel({ detail, canWrite, onEdit }: {
+  detail: ProfileDetail
+  canWrite: boolean
+  onEdit: () => void
+}) {
+  const config = detail.effective
   const steps = useMemo(() => profileSteps(config), [config])
   const budget = budgetLabel(asRecord(config?.budget))
   return (
     <Panel
-      title={<><span className={styles.profileTitle}>{profile.name}</span> <small>只读</small></>}
-      aside={budget ? <span className={styles.budget}>{budget}</span> : undefined}
+      title={<><span className={styles.profileTitle}>{detail.profile}</span> <small>可覆盖节点</small></>}
+      aside={canWrite ? <Button variant="secondary" className={ui.smallButton} onClick={onEdit}>编辑档位</Button> : budget ? <span className={styles.budget}>{budget}</span> : undefined}
     >
       <div className={styles.profileMeta}>
         <span>默认 provider：{text(config?.provider) ?? '未配置'}</span>
         <span>探索 → 四路并行 → 裁决 → 汇报</span>
       </div>
       {steps.length ? (
-        <ol className={styles.profileSteps} aria-label={`${profile.name} 拓扑步骤`}>
+        <ol className={styles.profileSteps} aria-label={`${detail.profile} 拓扑步骤`}>
           {steps.map((step, index) => (
             <li key={`${step.stage}-${index}`} className={styles.profileStep}>
               <span className={styles.profileStepN}>{index + 1} · {step.stage}</span>
@@ -292,6 +426,17 @@ function ProfilePanel({ profile }: { profile: Profile }) {
           ))}
         </ol>
       ) : <span className="small muted">配置未提供拓扑步骤。</span>}
+      {detail.nodes?.length ? (
+        <ul className={styles.cardStats} aria-label="节点生效模型">
+          {detail.nodes.map((node) => (
+            <li key={node.node}>
+              <span>{node.node}</span>
+              <b>{node.model || '继承'} <Badge tone="neutral" plain>{SOURCE_LABELS[node.source] ?? node.source}</Badge></b>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {budget ? <span className={styles.budget}>{budget}</span> : null}
       <details className={ui.disclosure}>
         <summary>查看完整档位配置</summary>
         <pre className={`pre ${ui.jsonBlock}`}>{formatJson(config)}</pre>
@@ -307,6 +452,8 @@ export function ModelsPage() {
   const profilesId = useId()
   const models = useQuery({ queryKey: ['models'], queryFn: listModels, retry: false })
   const profiles = useQuery({ queryKey: ['profiles'], queryFn: () => listProfiles(), retry: false })
+  const defaultProfile = useQuery({ queryKey: ['profile-default'], queryFn: getDefaultProfile, retry: false })
+  const [profileEditing, setProfileEditing] = useState(false)
   const [editing, setEditing] = useState<Model>()
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [deleting, setDeleting] = useState<Model>()
@@ -330,7 +477,6 @@ export function ModelsPage() {
     }
   }
 
-  const reviewProfiles = (profiles.data?.profiles ?? []).filter((profile) => profile.name === REVIEW_PROFILE)
   const onboarding = (profiles.data?.profiles ?? []).find((profile) => profile.name === 'onboarding')
   const onboardingProvider = text(asRecord(onboarding?.config?.agent)?.provider)
 
@@ -368,15 +514,23 @@ export function ModelsPage() {
             <h2 className={styles.sectionTitle} id={profilesId}>评审档位</h2>
             <span className={styles.sectionAside}>定义来自平台配置，只读</span>
           </div>
-          {profiles.isPending ? <LoadingState /> : null}
-          {profiles.isError ? <ErrorState error={profiles.error} onRetry={profiles.refetch} /> : null}
-          {profiles.isSuccess && !reviewProfiles.length ? <EmptyState title="平台还没有评审档位配置" /> : null}
-          {reviewProfiles.map((profile) => <ProfilePanel key={profile.name} profile={profile} />)}
+          {defaultProfile.isPending ? <LoadingState /> : null}
+          {defaultProfile.isError ? <ErrorState error={defaultProfile.error} onRetry={defaultProfile.refetch} /> : null}
+          {defaultProfile.isSuccess && defaultProfile.data
+            ? <ProfilePanel detail={defaultProfile.data} canWrite={canWrite} onEdit={() => setProfileEditing(true)} />
+            : null}
           {onboarding ? <span className="small muted">项目接入（onboarding，不是评审档位）使用 provider：{onboardingProvider ?? '未配置'}</span> : null}
         </section>
       </div>
 
       <ModelDrawer open={drawerOpen} model={editing} onClose={() => setDrawerOpen(false)} onSaved={saved} />
+      <ProfileEditor
+        open={profileEditing}
+        detail={defaultProfile.data}
+        models={models.data?.models ?? []}
+        onClose={() => setProfileEditing(false)}
+        onSaved={saved}
+      />
       <ConfirmDialog
         open={Boolean(deleting)}
         onClose={() => setDeleting(undefined)}

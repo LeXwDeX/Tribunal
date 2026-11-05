@@ -36,6 +36,7 @@ import type {
   Profile,
   ProfileConfig,
   ProfilesPage,
+  ProfileDetail,
   Project,
   ProjectRegistration,
   ProjectValidation,
@@ -414,4 +415,16 @@ export async function testModel(id: string): Promise<ProviderTestResult> {
 
 export async function testModelDraft(input: ModelWrite): Promise<ProviderTestResult> {
   return request<ProviderTestResult>('/api/v1/models:test', { method: 'POST', body: input })
+}
+
+export async function getDefaultProfile(): Promise<ProfileDetail> {
+  return request<ProfileDetail>('/api/v1/profiles/default')
+}
+
+export async function putProfileOverrides(overrides: Record<string, unknown>, revision: number): Promise<ProfileDetail> {
+  return request<ProfileDetail>('/api/v1/profiles/default/overrides', { method: 'PUT', body: { overrides, revision } })
+}
+
+export async function deleteProfileOverrides(revision: number): Promise<ProfileDetail> {
+  return request<ProfileDetail>(withQuery('/api/v1/profiles/default/overrides', { revision }), { method: 'DELETE' })
 }

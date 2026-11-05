@@ -9,6 +9,7 @@ function renderProfiles(profiles: Array<{ name: string; config: Record<string, u
   installFetch((url) => {
     if (url.startsWith('/api/v1/models')) return jsonResponse({ models: [] })
     if (url.startsWith('/api/v1/providers')) return jsonResponse({ providers: [] })
+    if (url === '/api/v1/profiles/default') return jsonResponse({ profile: 'default', overrides: {}, revision: 0, effective: profiles.find((profile) => profile.name === 'default')?.config ?? {}, nodes: [] })
     if (url.startsWith('/api/v1/profiles')) return jsonResponse({ profiles })
     return jsonResponse({})
   })
