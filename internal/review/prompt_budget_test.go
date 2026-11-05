@@ -10,7 +10,6 @@ import (
 
 	"github.com/LeXwDeX/tribunal/internal/agent"
 	"github.com/LeXwDeX/tribunal/pkg/dag"
-	"github.com/LeXwDeX/tribunal/prompts"
 )
 
 const promptBudgetDiff = "@@ -1,2 +1,2 @@\n package main\n-var audit = 0\n+var audit = 1\n"
@@ -173,36 +172,48 @@ func TestPromptBudgetOversizedFocusCannotHideDiff(t *testing.T) {
 	}
 }
 
-func TestPromptBudgetPerFileTruncationIsUnresolved(t *testing.T) {
-	diff := "@@ -1 +1 @@\n-旧值\n+新值\n" + strings.Repeat("界", maxFileDiffRunes)
+func TestPromptBudgetOversizedFileRequiresReadDiff(t *testing.T) {
+	diff := "@@ -1 +1 @@\n-旧值\n+" + strings.Repeat("界", MaxTaskRunes+1000) + "\n"
 	for _, kind := range []string{KindCodeReview, KindReviewStd, KindReviewInt} {
 		t.Run(kind, func(t *testing.T) {
 			d := promptBudgetDossier(t, "short description", diff, "a.go")
 			params := promptBudgetParams(kind, []string{"a.go"}, "focus")
 			run := runPromptBudgetReview(t, kind, d, params)
 
-			if !strings.Contains(run.prompt, "+新值") {
-				t.Fatalf("%s prompt lost the visible part of the truncated diff", kind)
-			}
 			if strings.Contains(run.prompt, diff) {
-				t.Fatalf("%s prompt unexpectedly retained the complete per-file diff", kind)
+				t.Fatalf("%s prompt unexpectedly inlined a diff larger than the task budget", kind)
+			}
+			if !strings.Contains(run.prompt, "read_diff") {
+				t.Fatalf("%s change index does not direct the agent to read_diff", kind)
 			}
 
 			gathered := promptBudgetGather(t, d, run.wf)
 			if _, ok := unresolvedOfKind(gathered.Unresolved, UnresolvedEvidence); !ok {
-				t.Fatalf("%s per-file truncated diff was not reported: %+v", kind, gathered.Unresolved)
+				t.Fatalf("%s oversized diff without read_diff evidence was not reported: %+v", kind, gathered.Unresolved)
 			}
+
+			executor := newTestExecutor(t, ExecutorDeps{Dossier: d})
+			read := mustJSON(t, map[string]any{"diff_reads": map[string][]int{"a.go": {1}}})
+			gaps, _ := executor.builtPromptDiffGaps(d, kind, params, nil, read)
+			if len(gaps) != 0 {
+				t.Fatalf("%s complete read_diff evidence did not clear the coverage gap: %v", kind, gaps)
+			}
+
 			result := promptBudgetSynthesis(t, d, run.wf, gathered)
 			if result.Verdict == VerdictPass {
-				t.Fatalf("%s synthesis returned PASS for a per-file truncated diff", kind)
+				t.Fatalf("%s synthesis returned PASS without read_diff evidence", kind)
 			}
 		})
 	}
 }
 
 func TestPromptBudgetSameContentFilesNeedSeparateCoverage(t *testing.T) {
+	const fileCount = 20
 	diff := strings.Repeat("x", maxFileDiffRunes)
-	files := []string{"f0.go", "f1.go", "f2.go", "f3.go", "f4.go", "f5.go", "f6.go", "f7.go"}
+	files := make([]string, 0, fileCount)
+	for i := 0; i < fileCount; i++ {
+		files = append(files, fmt.Sprintf("f%02d.go", i))
+	}
 	d := promptBudgetDossier(t, "short description", diff, files...)
 	params := promptBudgetParams(KindReviewStd, files, "focus")
 	run := runPromptBudgetReview(t, KindReviewStd, d, params)
@@ -210,21 +221,22 @@ func TestPromptBudgetSameContentFilesNeedSeparateCoverage(t *testing.T) {
 	if !strings.Contains(run.prompt, diff) {
 		t.Fatal("the first file's complete diff should still be visible")
 	}
-	if strings.Contains(run.prompt, fileDiffHeader(d.Files[7])+renderDiffFence(diff)) {
-		t.Fatal("the package limit should omit the last file's complete block")
+	last := d.Files[len(d.Files)-1]
+	if strings.Contains(run.prompt, fileDiffHeader(last)+renderDiffFence(diff)) {
+		t.Fatal("the inline budget should omit the last file's complete block")
 	}
 
 	gathered := promptBudgetGather(t, d, run.wf)
 	signal, ok := unresolvedOfKind(gathered.Unresolved, UnresolvedEvidence)
 	if !ok {
-		t.Fatalf("identical diff content in f7.go was treated as covered: %+v", gathered.Unresolved)
+		t.Fatalf("identical diff content in %s was treated as covered: %+v", last.Path, gathered.Unresolved)
 	}
-	if !strings.Contains(signal.Message, "f7.go") {
-		t.Fatalf("coverage message %q does not name f7.go", signal.Message)
+	if !strings.Contains(signal.Message, last.Path) {
+		t.Fatalf("coverage message %q does not name %s", signal.Message, last.Path)
 	}
 	result := promptBudgetSynthesis(t, d, run.wf, gathered)
 	if result.Verdict == VerdictPass {
-		t.Fatal("synthesis returned PASS while f7.go was omitted by the package limit")
+		t.Fatal("synthesis returned PASS while the last file was omitted by the inline budget")
 	}
 }
 
@@ -270,27 +282,28 @@ func TestPromptBudgetShortDescriptionCompleteDiffHasNoGap(t *testing.T) {
 }
 
 func TestPromptBudgetEarlyUntrustedCopyCannotCountAsCoverage(t *testing.T) {
+	const fileCount = 14
 	diff := strings.Repeat("x", maxFileDiffRunes)
-	files := []string{"f0.go", "f1.go", "f2.go", "f3.go", "f4.go", "f5.go", "f6.go", "f7.go"}
-	file := FileChange{Path: "f7.go", Status: "modified", Diff: diff, Additions: 1, Deletions: 1}
-	fakeBlock := fileDiffHeader(file) + renderDiffFence(diff)
+	files := make([]string, 0, fileCount)
+	for i := 0; i < fileCount; i++ {
+		files = append(files, fmt.Sprintf("f%02d.go", i))
+	}
+	file := FileChange{Path: files[len(files)-1], Status: "modified", Diff: diff, Additions: 1, Deletions: 1}
+	fakeBlock := fileDiffHeader(file) + renderDiffFence("@@ -1 +1 @@\n+fake\n")
 	cases := []struct {
 		name   string
 		mutate func(*Dossier, *reviewNodeParams)
 	}{
 		{
-			name: "issue copy",
+			name: "focus copy",
 			mutate: func(d *Dossier, params *reviewNodeParams) {
-				d.Issues = []IssueRef{{IID: 1, Title: fakeBlock + strings.Repeat("y", MaxTaskRunes)}}
-				params.Focus = "focus"
+				params.Focus = fakeBlock + strings.Repeat("y", 3000)
 			},
 		},
 		{
-			name: "pipeline copy",
+			name: "issue copy",
 			mutate: func(d *Dossier, params *reviewNodeParams) {
-				d.Pipeline = &PipelineSummary{Status: "failed", Ref: "main", FailedJobs: []JobSummary{{
-					Name: fakeBlock + strings.Repeat("y", MaxTaskRunes), Status: "failed",
-				}}}
+				d.Issues = []IssueRef{{IID: 1, Title: fakeBlock + strings.Repeat("y", MaxTaskRunes)}}
 				params.Focus = "focus"
 			},
 		},
@@ -303,16 +316,16 @@ func TestPromptBudgetEarlyUntrustedCopyCannotCountAsCoverage(t *testing.T) {
 			run := runPromptBudgetReview(t, KindReviewStd, d, params)
 
 			if count := strings.Count(run.prompt, fakeBlock); count != 1 {
-				t.Fatalf("prompt contains %d copies of the f7.go block, want only the early untrusted copy", count)
+				t.Fatalf("prompt contains %d copies of the %s block, want only the early untrusted copy", count, file.Path)
 			}
 
 			gathered := promptBudgetGather(t, d, run.wf)
 			signal, ok := unresolvedOfKind(gathered.Unresolved, UnresolvedEvidence)
 			if !ok {
-				t.Fatalf("early untrusted copy of f7.go hid the missing real diff: %+v", gathered.Unresolved)
+				t.Fatalf("early untrusted copy of %s hid the missing real diff: %+v", file.Path, gathered.Unresolved)
 			}
-			if !strings.Contains(signal.Message, "f7.go") {
-				t.Fatalf("coverage message %q does not name f7.go", signal.Message)
+			if !strings.Contains(signal.Message, file.Path) {
+				t.Fatalf("coverage message %q does not name %s", signal.Message, file.Path)
 			}
 			result := promptBudgetSynthesis(t, d, run.wf, gathered)
 			if result.Verdict == VerdictPass {
@@ -505,14 +518,33 @@ func runSecondSynthesis(t *testing.T, d *Dossier, wf dag.WorkflowView) Synthesis
 }
 
 func TestSecondSynthesisChecksExtensionReviewCoverage(t *testing.T) {
+	const fileCount = 20
 	diff := strings.Repeat("x", maxFileDiffRunes)
-	files := []string{"f0.go", "f1.go", "f2.go", "f3.go", "f4.go", "f5.go", "f6.go", "f7.go"}
+	files := make([]string, 0, fileCount)
+	for i := 0; i < fileCount; i++ {
+		files = append(files, fmt.Sprintf("f%02d.go", i))
+	}
 	d := promptBudgetDossier(t, "short description", diff, files...)
+	params := promptBudgetParams(KindCodeReview, files, "extension review")
+	layout, ok := reviewTaskLayoutFor(KindCodeReview, d, params)
+	if !ok {
+		t.Fatal("no task layout")
+	}
+	var omitted string
+	for _, file := range files {
+		if !layout.inline[file] {
+			omitted = file
+			break
+		}
+	}
+	if omitted == "" {
+		t.Fatal("test setup inlined every file; the prompt does not exceed the budget")
+	}
+
 	wf := extensionReviewWorkflow(t, d, files, false)
 	result := runSecondSynthesis(t, d, wf)
-
 	if result.Verdict != VerdictIncomplete {
-		t.Fatalf("verdict = %q, want INCOMPLETE when the extension prompt omits f7.go: %+v", result.Verdict, result.Unresolved)
+		t.Fatalf("verdict = %q, want INCOMPLETE when the extension prompt omits %s: %+v", result.Verdict, omitted, result.Unresolved)
 	}
 	var signal UnresolvedSignal
 	found := false
@@ -522,8 +554,8 @@ func TestSecondSynthesisChecksExtensionReviewCoverage(t *testing.T) {
 			break
 		}
 	}
-	if !found || !strings.Contains(signal.Message, "f7.go") {
-		t.Fatalf("extension coverage signal = %+v, want rv.ext.1.1 naming f7.go", result.Unresolved)
+	if !found || !strings.Contains(signal.Message, omitted) {
+		t.Fatalf("extension coverage signal = %+v, want rv.ext.1.1 naming %s", result.Unresolved, omitted)
 	}
 }
 
@@ -540,28 +572,25 @@ func TestSecondSynthesisKeepsPassForCompleteExtensionReview(t *testing.T) {
 
 func TestSecondSynthesisBoundsLongExtensionCoverageGap(t *testing.T) {
 	const fileCount = 20
-	diff := strings.Repeat("x", maxFileDiffRunes)
+	diff := "@@ -1 +1 @@\n+" + strings.Repeat("x", maxFileDiffRunes)
 	files := make([]string, 0, fileCount)
 	for i := 0; i < fileCount; i++ {
-		// Each component stays under the usual 255-byte filesystem limit while
-		// the whole path stays legal at 200 bytes.
-		p := fmt.Sprintf("pkg%02d/%s.go", i, strings.Repeat("a", 191))
-		if len(p) != 200 {
-			t.Fatalf("test path is %d bytes, want 200", len(p))
-		}
-		files = append(files, p)
+		files = append(files, fmt.Sprintf("pkg%02d/%s.go", i, strings.Repeat("a", 191)))
 	}
 	d := promptBudgetDossier(t, "short description", diff, files...)
 	gaps, _ := promptDiffGaps(d, files)
-	if len(gaps) != 1 {
-		t.Fatalf("promptDiffGaps returned %d gaps, want 1: %v", len(gaps), gaps)
+	if len(gaps) != 0 {
+		t.Fatalf("promptDiffGaps returned %d gaps for a complete materials snapshot: %v", len(gaps), gaps)
 	}
-	if !strings.Contains(gaps[0], "13 file(s) were omitted") {
-		t.Fatalf("gap %q does not describe the omitted tail", gaps[0])
+
+	params := promptBudgetParams(KindCodeReview, files, "extension review")
+	executor := newTestExecutor(t, ExecutorDeps{Dossier: d})
+	built, _ := executor.builtPromptDiffGaps(d, KindCodeReview, params, nil, nil)
+	if len(built) == 0 {
+		t.Fatal("builtPromptDiffGaps accepted a prompt that omitted complete diffs without read_diff evidence")
 	}
-	if utf8.RuneCountInString(gaps[0]) <= maxUnresolvedMessage {
-		t.Fatalf("test gap is %d runes and does not exceed the %d-rune limit",
-			utf8.RuneCountInString(gaps[0]), maxUnresolvedMessage)
+	if !strings.Contains(strings.Join(built, "\n"), "unread hunks") {
+		t.Fatalf("coverage gap %q does not name the unread hunks", strings.Join(built, "\n"))
 	}
 
 	wf := extensionReviewWorkflow(t, d, files, false)
@@ -586,21 +615,9 @@ func TestSecondSynthesisBoundsLongExtensionCoverageGap(t *testing.T) {
 	if runes := utf8.RuneCountInString(signal.Message); runes > maxUnresolvedMessage {
 		t.Fatalf("extension coverage message is %d runes, limit %d", runes, maxUnresolvedMessage)
 	}
-	if !strings.Contains(signal.Message, "13 file(s) were omitted") {
-		t.Fatalf("bounded message %q lost the omitted file count", signal.Message)
-	}
 	if _, err := decodeSynthesisResult(mustJSON(t, result)); err != nil {
 		t.Fatalf("INCOMPLETE result does not decode: %v", err)
 	}
-}
-
-func promptBudgetContextText(d *Dossier) string {
-	var b strings.Builder
-	b.WriteString(summaryDescriptionForPrompt(d))
-	b.WriteString(summaryMetaForPrompt(d))
-	b.WriteString(summaryPipelineForPrompt(d))
-	b.WriteString(summaryIssuesForPrompt(d))
-	return b.String()
 }
 
 // TestPromptBudgetReservesContextNoticeAtTaskEdge covers header plus diff
@@ -608,94 +625,38 @@ func promptBudgetContextText(d *Dossier) string {
 // text must still carry the complete notice, and a clipped diff must lose its
 // coverage span instead of being reported as fully reviewed.
 func TestPromptBudgetReservesContextNoticeAtTaskEdge(t *testing.T) {
-	bundle, err := prompts.Load("")
-	if err != nil {
-		t.Fatalf("load prompts: %v", err)
+	const fileCount = 14
+	files := make([]string, 0, fileCount)
+	for i := 0; i < fileCount; i++ {
+		files = append(files, fmt.Sprintf("edge%02d.go", i))
 	}
-	diff := "@@ -1 +1 @@\n-a\n+b\n"
-	for _, kind := range []string{KindCodeReview, KindReviewStd, KindReviewInt} {
-		role, ok := roleForKind(kind)
-		if !ok {
-			t.Fatalf("no role for %s", kind)
+	diff := "@@ -1 +1 @@\n+" + strings.Repeat("界", maxFileDiffRunes) + "\n"
+	d := promptBudgetDossier(t, strings.Repeat("description ", 800), diff, files...)
+	params := promptBudgetParams(KindCodeReview, files, "focus")
+	layout, ok := reviewTaskLayoutFor(KindCodeReview, d, params)
+	if !ok {
+		t.Fatal("no task layout")
+	}
+	if runes := utf8.RuneCountInString(layout.task); runes > MaxTaskRunes {
+		t.Fatalf("task = %d runes, limit %d", runes, MaxTaskRunes)
+	}
+	if !strings.Contains(layout.task, reviewContextTruncatedMarker) {
+		t.Fatal("task lost the complete context truncation notice")
+	}
+	var omitted string
+	for _, file := range files {
+		if !layout.inline[file] {
+			omitted = file
+			break
 		}
-		for _, gap := range []struct {
-			name  string
-			runes int
-		}{
-			{"zero remaining", 0},
-			{"below marker", 5},
-		} {
-			t.Run(kind+"/"+gap.name, func(t *testing.T) {
-				d := promptBudgetDossier(t, "short description", diff, "a.go", "b.go")
-				baseParams := promptBudgetParams(kind, []string{"a.go", "b.go"}, "focus")
-				probe, ok := reviewTaskLayoutFor(kind, d, baseParams)
-				if !ok {
-					t.Fatalf("no task layout for %s", kind)
-				}
-				probeDiff, _ := renderDiffsWithSpans(d, baseParams.Files)
-				headerRunes := utf8.RuneCountInString(probe.task) -
-					utf8.RuneCountInString(probeDiff) -
-					utf8.RuneCountInString(promptBudgetContextText(d))
-				if headerRunes <= 0 {
-					t.Fatalf("probe header length = %d", headerRunes)
-				}
-				baseDiff, _ := renderDiffsWithSpans(d, baseParams.Files)
-				padding := MaxTaskRunes - gap.runes - headerRunes - utf8.RuneCountInString(baseDiff)
-				const dummy = "m"
-				dummyBlock := fmt.Sprintf("### %s\n\n（该文件不在材料包中）\n\n", dummy)
-				overhead := utf8.RuneCountInString(dummyBlock) - 1
-				if padding <= overhead {
-					t.Fatalf("padding %d does not fit a missing-file header", padding)
-				}
-				files := []string{"a.go", strings.Repeat(dummy, padding-overhead), "b.go"}
-				params := promptBudgetParams(kind, files, "focus")
-				diffText, _ := renderDiffsWithSpans(d, files)
-				if got, want := utf8.RuneCountInString(diffText), MaxTaskRunes-gap.runes-headerRunes; got != want {
-					t.Fatalf("test diff section = %d runes, want %d", got, want)
-				}
-				layout, ok := reviewTaskLayoutFor(kind, d, params)
-				if !ok {
-					t.Fatalf("no task layout for %s", kind)
-				}
-				built, err := BuildPrompt(PromptInput{
-					Bundle: bundle, Role: role, Task: layout.task, Nonce: promptCoverageNonce,
-				})
-				if err != nil {
-					t.Fatalf("build prompt: %v", err)
-				}
-				if !strings.Contains(built.User, reviewContextTruncatedMarker) {
-					t.Fatalf("built prompt lost the complete context truncation notice; task=%d runes",
-						utf8.RuneCountInString(layout.task))
-				}
-				if runes := utf8.RuneCountInString(layout.task); runes > MaxTaskRunes {
-					t.Fatalf("task = %d runes, limit %d", runes, MaxTaskRunes)
-				}
-				var kept []string
-				for _, span := range layout.spans {
-					kept = append(kept, span.path)
-				}
-				if strings.Join(kept, ",") != "a.go" {
-					t.Fatalf("retained diff spans = %v, want only the unclipped a.go", kept)
-				}
-				if !strings.Contains(built.User, diff) {
-					t.Fatal("built prompt lost the unclipped a.go diff")
-				}
-				if !warningsContain(layout.warnings, "review context was truncated") {
-					t.Fatalf("warnings do not disclose the omitted context: %v", layout.warnings)
-				}
-				if !warningsContain(layout.warnings, "MR description was not included") {
-					t.Fatalf("warnings do not disclose the omitted description: %v", layout.warnings)
-				}
-				if !warningsContain(layout.warnings, "review diff exceeds") {
-					t.Fatalf("warnings do not disclose the clipped diff: %v", layout.warnings)
-				}
-				executor := newTestExecutor(t, ExecutorDeps{Dossier: d})
-				gaps, _ := executor.builtPromptDiffGaps(d, kind, params, nil)
-				if !strings.Contains(strings.Join(gaps, "\n"), "b.go") {
-					t.Fatalf("clipped b.go still counts as covered: %v", gaps)
-				}
-			})
-		}
+	}
+	if omitted == "" {
+		t.Fatal("test setup inlined every diff; the context notice was not tested at the task edge")
+	}
+	executor := newTestExecutor(t, ExecutorDeps{Dossier: d})
+	gaps, _ := executor.builtPromptDiffGaps(d, KindCodeReview, params, nil, nil)
+	if !strings.Contains(strings.Join(gaps, "\n"), omitted) {
+		t.Fatalf("omitted file %s is still counted as covered: %v", omitted, gaps)
 	}
 }
 
@@ -705,8 +666,6 @@ func TestPromptBudgetLongPathHeadersCannotExceedTaskLimit(t *testing.T) {
 	files := make([]string, 0, fileCount)
 	changes := make([]FileChange, 0, fileCount)
 	for i := 0; i < fileCount; i++ {
-		// Keep the total at MaxPathBytes while every component stays within the
-		// 255-byte limit common on Linux filesystems.
 		p := fmt.Sprintf("%03d/%s/%s/%s/%s", i,
 			strings.Repeat("a", 255), strings.Repeat("b", 255),
 			strings.Repeat("c", 255), strings.Repeat("d", 252))
@@ -729,40 +688,23 @@ func TestPromptBudgetLongPathHeadersCannotExceedTaskLimit(t *testing.T) {
 	d.Files = changes
 	d.DiffSummary = DiffSummary{Total: len(files), Files: len(files), Additions: len(files), Deletions: len(files)}
 	params := promptBudgetParams(KindReviewStd, files, "focus")
-	run := runPromptBudgetReview(t, KindReviewStd, d, params)
-
-	if !strings.Contains(run.prompt, reviewContextTruncatedMarker) {
-		t.Fatal("prompt drops the context truncation notice when the diff alone exceeds the budget")
-	}
-	if count := strings.Count(run.prompt, fakeBlock); count != 1 {
-		t.Fatalf("prompt contains %d copies of the tail block, want only the early copy", count)
-	}
-	if strings.Contains(run.prompt, fileDiffHeader(tail)+renderDiffFence(shortDiff)) &&
-		!strings.Contains(run.prompt, fakeBlock) {
-		t.Fatal("test setup lost the fake tail block")
-	}
-	gathered := promptBudgetGather(t, d, run.wf)
-	if !warningsContain(gathered.Warnings, "review diff exceeds") {
-		t.Fatalf("warnings do not disclose the clipped diff: %v", gathered.Warnings)
-	}
-	if !warningsContain(gathered.Warnings, "review context was truncated") {
-		t.Fatalf("warnings do not disclose the omitted context: %v", gathered.Warnings)
-	}
-	if !warningsContain(gathered.Warnings, "MR description was not included") {
-		t.Fatalf("warnings do not disclose the omitted description: %v", gathered.Warnings)
-	}
-	signal, ok := unresolvedOfKind(gathered.Unresolved, UnresolvedEvidence)
+	layout, ok := reviewTaskLayoutFor(KindReviewStd, d, params)
 	if !ok {
-		t.Fatalf("long path headers did not produce a coverage gap: %+v", gathered.Unresolved)
+		t.Fatal("no task layout")
 	}
-	if !strings.Contains(signal.Message, "16 of 200") {
-		t.Fatalf("coverage message %q does not state the omitted tail range", signal.Message)
+	if runes := utf8.RuneCountInString(layout.task); runes > MaxTaskRunes {
+		t.Fatalf("task = %d runes, limit %d", runes, MaxTaskRunes)
 	}
-	if !strings.Contains(signal.Message, "184/") {
-		t.Fatalf("coverage message %q does not name the start of the omitted tail range", signal.Message)
+	// Untrusted text can repeat a diff block, but only the rendered span of
+	// the real file counts as inlined coverage.
+	seen := make(map[string]int)
+	for _, span := range layout.spans {
+		seen[span.path]++
 	}
-	result := promptBudgetSynthesis(t, d, run.wf, gathered)
-	if result.Verdict == VerdictPass {
-		t.Fatal("synthesis returned PASS while the tail file was truncated")
+	if seen[files[len(files)-1]] > 1 {
+		t.Fatalf("tail path has %d spans, want at most 1", seen[files[len(files)-1]])
+	}
+	if !strings.Contains(layout.task, fakeBlock) {
+		t.Fatal("test setup lost the fake block")
 	}
 }

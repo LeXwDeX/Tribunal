@@ -118,14 +118,17 @@ func (e *Executor) executeCodeReview(ctx context.Context, in dag.NodeInput) (dag
 		},
 	}
 	var gaps []string
+	layout, _ := reviewTaskLayoutFor(KindCodeReview, e.deps.Dossier, params)
+	changes := e.changeSource(params.Files, layout.inline)
 	result, err := e.callAgent(ctx, in, agentOptions{
 		Role:       role,
 		Provider:   params.Provider,
 		Block:      BlockCodeReview,
 		Submit:     submit,
-		Task:       reviewTask(e.deps.Dossier, params),
+		Task:       layout.task,
 		Builtins:   true,
 		BlockTools: true,
+		Changes:    changes,
 		BeforeTurn: e.budgetHook(in.WorkflowID),
 		ToolGaps:   &gaps,
 	})
@@ -137,6 +140,7 @@ func (e *Executor) executeCodeReview(ctx context.Context, in dag.NodeInput) (dag
 		return e.agentOutputError(params.Provider, result, errors.New("review: code-review decoder returned an unexpected type"))
 	}
 	out.ToolGaps = gaps
+	out.DiffReads = changes.DiffReads()
 	return e.marshalAgentOutput(out, params.Provider, result.Usage)
 }
 
@@ -162,14 +166,17 @@ func (e *Executor) executeReviewChannel(ctx context.Context, in dag.NodeInput) (
 		},
 	}
 	var gaps []string
+	layout, _ := reviewTaskLayoutFor(kind, e.deps.Dossier, params)
+	changes := e.changeSource(params.Files, layout.inline)
 	result, err := e.callAgent(ctx, in, agentOptions{
 		Role:       role,
 		Provider:   params.Provider,
 		Block:      "review",
 		Submit:     submit,
-		Task:       reviewChannelTask(e.deps.Dossier, params, kind),
+		Task:       layout.task,
 		Builtins:   true,
 		BlockTools: true,
+		Changes:    changes,
 		BeforeTurn: e.budgetHook(in.WorkflowID),
 		ToolGaps:   &gaps,
 	})
@@ -181,6 +188,7 @@ func (e *Executor) executeReviewChannel(ctx context.Context, in dag.NodeInput) (
 		return e.agentOutputError(params.Provider, result, errors.New("review: review channel decoder returned an unexpected type"))
 	}
 	out.ToolGaps = gaps
+	out.DiffReads = changes.DiffReads()
 	return e.marshalAgentOutput(out, params.Provider, result.Usage)
 }
 
@@ -961,7 +969,7 @@ func (e *Executor) extensionCoverageUnresolved(wf dag.WorkflowView) ([]Unresolve
 			continue
 		}
 		gaps, locallyGapped := promptDiffGaps(e.deps.Dossier, params.Files)
-		builtGaps, builtWarnings := e.builtPromptDiffGaps(e.deps.Dossier, node.Spec.Kind, params, locallyGapped)
+		builtGaps, builtWarnings := e.builtPromptDiffGaps(e.deps.Dossier, node.Spec.Kind, params, locallyGapped, node.Output)
 		gaps = append(gaps, builtGaps...)
 		for _, gap := range gaps {
 			signals = append(signals, UnresolvedSignal{
@@ -1341,11 +1349,6 @@ func reviewTask(d *Dossier, params reviewNodeParams) string {
 	return layout.task
 }
 
-func reviewChannelTask(d *Dossier, params reviewNodeParams, kind string) string {
-	layout, _ := reviewTaskLayoutFor(kind, d, params)
-	return layout.task
-}
-
 // diffSpan locates one complete rendered diff block in a task. Offsets are
 // rune offsets in the whole task, so they survive the same rune-based
 // MaxTaskRunes truncation BuildPrompt applies.
@@ -1360,6 +1363,7 @@ type diffSpan struct {
 type reviewTaskLayout struct {
 	task     string
 	spans    []diffSpan
+	inline   map[string]bool
 	warnings []string
 }
 
@@ -1434,43 +1438,25 @@ func reviewTaskLayoutFor(kind string, d *Dossier, params reviewNodeParams) (revi
 	addContext("exploration", explorationSection(params.Exploration))
 	contextText := context.String()
 
-	diffText, spans := renderDiffsWithSpans(d, params.Files)
-	diffRunes := utf8.RuneCountInString(diffText)
 	headerRunes := utf8.RuneCountInString(headerText)
 	remaining := MaxTaskRunes - headerRunes
 	if remaining < 0 {
 		remaining = 0
 	}
+	renderBudget := remaining - utf8.RuneCountInString(reviewContextTruncatedMarker)
+	if renderBudget < 0 {
+		renderBudget = 0
+	}
+	indexText, diffText, spans, inline := renderDiffsWithSpans(d, params.Files, renderBudget)
+	indexRunes := utf8.RuneCountInString(indexText)
+	diffRunes := utf8.RuneCountInString(diffText)
+	remaining -= indexRunes + diffRunes
+	if remaining < 0 {
+		remaining = 0
+	}
 	marker := reviewContextTruncatedMarker
 	markerRunes := utf8.RuneCountInString(marker)
-	contextBudget := remaining - diffRunes
-	diffBudget := remaining
-	if contextRunes > contextBudget {
-		// The context needs a notice, so reserve its full length in the task
-		// that BuildPrompt keeps. The diff yields first, and a clipped diff
-		// drops its coverage span.
-		diffBudget = remaining - markerRunes
-		if diffBudget < 0 {
-			diffBudget = 0
-		}
-	}
-	if diffRunes > diffBudget {
-		warnings = appendUnique(warnings, fmt.Sprintf(
-			"review diff exceeds the %d-rune task budget remaining after the task header; it was clipped to keep the context truncation notice", remaining))
-		diffText = truncateRunes(diffText, diffBudget)
-		diffRunes = utf8.RuneCountInString(diffText)
-		kept := spans[:0]
-		for _, span := range spans {
-			if span.end <= diffRunes {
-				kept = append(kept, span)
-			}
-		}
-		spans = kept
-	}
-	contextBudget = remaining - diffRunes
-	if contextBudget < 0 {
-		contextBudget = 0
-	}
+	contextBudget := remaining
 	contentBudget := contextRunes
 	if contextRunes > contextBudget {
 		contentBudget = contextBudget - markerRunes
@@ -1488,7 +1474,7 @@ func reviewTaskLayoutFor(kind string, d *Dossier, params reviewNodeParams) (revi
 	for i := range spans {
 		spans[i].end += headerRunes
 	}
-	return reviewTaskLayout{task: headerText + diffText + contextText, spans: spans, warnings: warnings}, true
+	return reviewTaskLayout{task: headerText + indexText + diffText + contextText, spans: spans, inline: inline, warnings: warnings}, true
 }
 
 func contextSectionNames(sections []contextSection, budget int) string {
@@ -1812,20 +1798,21 @@ func renderDescription(description string) string {
 }
 
 func fileDiffHeader(file FileChange) string {
-	header := fmt.Sprintf("### %s（%s，+%d/-%d）\n\n", file.Path, file.Status, file.Additions, file.Deletions)
+	shownPath := truncateRunes(file.Path, 200)
+	shownOld := truncateRunes(file.OldPath, 200)
+	header := fmt.Sprintf("### %s（%s，+%d/-%d）\n\n", shownPath, file.Status, file.Additions, file.Deletions)
 	switch {
 	case file.Status == "added" || file.Status == "new":
-		header += fmt.Sprintf("- old: 不存在\n- new: %s\n\n", file.Path)
+		header += fmt.Sprintf("- old: 不存在\n- new: %s\n\n", shownPath)
 	case file.Status == "deleted":
-		oldPath := file.OldPath
-		if oldPath == "" {
-			oldPath = file.Path
+		if shownOld == "" {
+			shownOld = shownPath
 		}
-		header += fmt.Sprintf("- old: %s\n- new: 不存在\n\n", oldPath)
+		header += fmt.Sprintf("- old: %s\n- new: 不存在\n\n", shownOld)
 	case file.OldPath == "" && (file.Status == "renamed" || file.Status == "copied"):
-		header += fmt.Sprintf("- old: 未知\n- new: %s\n\n", file.Path)
+		header += "- old: 未知\n- new: " + shownPath + "\n\n"
 	case file.OldPath != "" && file.OldPath != file.Path:
-		header += fmt.Sprintf("- old: %s\n- new: %s\n\n", file.OldPath, file.Path)
+		header += fmt.Sprintf("- old: %s\n- new: %s\n\n", shownOld, shownPath)
 	}
 	return header
 }
@@ -1841,43 +1828,98 @@ func renderDiffFence(diff string) string {
 	return b.String()
 }
 
-// renderDiffsWithSpans renders the diff section and records each complete
-// block's rune range in that section.
-func renderDiffsWithSpans(d *Dossier, files []string) (string, []diffSpan) {
+// renderDiffsWithSpans renders the change index and the complete diffs that
+// fit the rune budget. A file is either inlined whole or left out; a file
+// omitted from the inline set must be read with read_diff. Spans locate the
+// complete inline blocks in the returned index+diff section.
+func renderDiffsWithSpans(d *Dossier, files []string, budget int) (string, string, []diffSpan, map[string]bool) {
 	if d == nil || len(files) == 0 {
-		return "（没有文件内容）\n", nil
+		return "（没有文件内容）\n", "", nil, nil
 	}
 	byPath := make(map[string]FileChange, len(d.Files))
 	for _, file := range d.Files {
 		byPath[file.Path] = file
 	}
-	var b strings.Builder
-	offset := 0
-	write := func(value string) {
-		b.WriteString(value)
-		offset += utf8.RuneCountInString(value)
+	type entry struct {
+		path string
+		file FileChange
+		ok   bool
 	}
-	total := 0
-	var spans []diffSpan
+	entries := make([]entry, 0, len(files))
 	for _, filePath := range files {
 		file, ok := byPath[filePath]
-		if !ok {
-			write(fmt.Sprintf("### %s\n\n（该文件不在材料包中）\n\n", filePath))
-			continue
-		}
-		write(fileDiffHeader(file))
-		diff := truncateRunes(file.Diff, maxFileDiffRunes)
-		if strings.TrimSpace(diff) == "" {
-			write("（没有 diff 内容）\n\n")
-			continue
-		}
-		if total+len(diff) > maxTaskFileRunes {
-			write("（diff 已按总长度截断）\n\n")
-			break
-		}
-		total += len(diff)
-		write(renderDiffFence(diff))
-		spans = append(spans, diffSpan{path: filePath, end: offset})
+		entries = append(entries, entry{path: filePath, file: file, ok: ok})
 	}
-	return b.String(), spans
+	indexLine := func(e entry, inline bool) string {
+		shown := truncateRunes(e.path, 200)
+		if !e.ok {
+			return fmt.Sprintf("- %s（不在材料包中）\n", shown)
+		}
+		if strings.TrimSpace(e.file.Diff) == "" {
+			return fmt.Sprintf("- %s（%s，+%d/-%d，无 diff 内容）\n", shown, e.file.Status, e.file.Additions, e.file.Deletions)
+		}
+		state := "未内联，用 read_diff 读取"
+		if inline {
+			state = "已完整内联"
+		}
+		return fmt.Sprintf("- %s（%s，+%d/-%d，%d hunk，%s）\n",
+			shown, e.file.Status, e.file.Additions, e.file.Deletions,
+			countFileHunks(e.file.Diff), state)
+	}
+	// Reserve the longest index form, then put each complete diff that fits.
+	var estimate strings.Builder
+	estimate.WriteString("## 变更索引\n\n")
+	for _, e := range entries {
+		estimate.WriteString(indexLine(e, false))
+	}
+	remaining := budget - utf8.RuneCountInString(estimate.String())
+	if remaining < 0 {
+		remaining = 0
+	}
+	inline := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		inline[e.path] = false
+		if !e.ok || strings.TrimSpace(e.file.Diff) == "" {
+			continue
+		}
+		// Budget the whole rendered block, not only the raw diff: the file
+		// header, old/new paths and Markdown fence are appended after it.
+		size := utf8.RuneCountInString(fileDiffHeader(e.file)) + utf8.RuneCountInString(renderDiffFence(e.file.Diff))
+		if size <= remaining {
+			inline[e.path] = true
+			remaining -= size
+		}
+	}
+	var index strings.Builder
+	index.WriteString("## 变更索引\n\n")
+	for _, e := range entries {
+		index.WriteString(indexLine(e, inline[e.path]))
+	}
+	indexText := index.String()
+	var diff strings.Builder
+	offset := utf8.RuneCountInString(indexText)
+	write := func(value string) {
+		diff.WriteString(value)
+		offset += utf8.RuneCountInString(value)
+	}
+	var spans []diffSpan
+	for _, e := range entries {
+		if !inline[e.path] {
+			continue
+		}
+		write(fileDiffHeader(e.file))
+		write(renderDiffFence(e.file.Diff))
+		spans = append(spans, diffSpan{path: e.path, end: offset})
+	}
+	return indexText, diff.String(), spans, inline
+}
+
+func countFileHunks(diff string) int {
+	count := 0
+	for _, line := range strings.Split(diff, "\n") {
+		if strings.HasPrefix(line, "@@") {
+			count++
+		}
+	}
+	return count
 }

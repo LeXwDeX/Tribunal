@@ -494,14 +494,17 @@ func (e *Executor) executeReviewLane(ctx context.Context, in dag.NodeInput) (dag
 		Decode: func(raw json.RawMessage) (any, error) { return DecodeStrict[*ReviewOut](raw) },
 	}
 	var gaps []string
+	layout, _ := reviewTaskLayoutFor(KindReview, e.deps.Dossier, params)
+	changes := e.changeSource(params.Files, layout.inline)
 	result, err := e.callAgent(ctx, in, agentOptions{
 		Role:       role,
 		Provider:   params.Provider,
 		Block:      BlockReview,
 		Submit:     submit,
-		Task:       reviewChannelTask(e.deps.Dossier, params, KindReview),
+		Task:       layout.task,
 		Builtins:   true,
 		BlockTools: true,
+		Changes:    changes,
 		BeforeTurn: e.budgetHook(in.WorkflowID),
 		ToolGaps:   &gaps,
 	})
@@ -513,6 +516,7 @@ func (e *Executor) executeReviewLane(ctx context.Context, in dag.NodeInput) (dag
 		return e.agentOutputError(params.Provider, result, errors.New("review: review lane decoder returned an unexpected type"))
 	}
 	out.ToolGaps = gaps
+	out.DiffReads = changes.DiffReads()
 	return e.marshalAgentOutput(out, params.Provider, result.Usage)
 }
 

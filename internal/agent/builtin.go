@@ -39,10 +39,16 @@ const (
 // BuiltinTools returns the read-only tool set confined to sb. The order is
 // stable: read_file, grep, glob, list_dir, git_log, git_blame.
 func BuiltinTools(sb *Sandbox) []Tool {
+	return BuiltinToolsWithChanges(sb, nil)
+}
+
+// BuiltinToolsWithChanges adds the review-only change tools. Without a
+// change source the base set is returned unchanged.
+func BuiltinToolsWithChanges(sb *Sandbox, changes *ChangeSource) []Tool {
 	if sb == nil {
 		return nil
 	}
-	return []Tool{
+	tools := []Tool{
 		readFileTool{sb: sb},
 		grepTool{sb: sb},
 		globTool{sb: sb},
@@ -50,6 +56,13 @@ func BuiltinTools(sb *Sandbox) []Tool {
 		gitLogTool{sb: sb},
 		gitBlameTool{sb: sb},
 	}
+	if changes != nil {
+		tools = append(tools,
+			listChangesTool{sb: sb, changes: changes},
+			readDiffTool{sb: sb, changes: changes},
+		)
+	}
+	return tools
 }
 
 type readFileInput struct {
@@ -57,6 +70,7 @@ type readFileInput struct {
 	StartLine int    `json:"start_line,omitempty"`
 	EndLine   int    `json:"end_line,omitempty"`
 	Root      string `json:"root,omitempty"`
+	Rev       string `json:"rev,omitempty"`
 }
 
 type readFileTool struct{ sb *Sandbox }
@@ -68,7 +82,8 @@ func (t readFileTool) Def() llm.ToolDef {
 			"path":{"type":"string"},
 			"start_line":{"type":"integer","minimum":1},
 			"end_line":{"type":"integer","minimum":0},
-			"root":{"type":"string"}},
+			"root":{"type":"string"},
+			"rev":{"type":"string","enum":["head","base"]}},
 			"additionalProperties":false}`)
 }
 
@@ -94,7 +109,11 @@ func (t readFileTool) Call(ctx context.Context, raw json.RawMessage) (Result, er
 		return Result{}, inputFeedback("end_line", "range", errors.New("end_line must be greater than or equal to start_line"))
 	}
 
-	file, clean, err := t.sb.open(in.Root, in.Path)
+	root, err := revisionRoot(in.Root, in.Rev)
+	if err != nil {
+		return Result{}, err
+	}
+	file, clean, err := t.sb.open(root, in.Path)
 	if err != nil {
 		return Result{}, sandboxFeedback("path", err)
 	}
@@ -164,6 +183,7 @@ type grepInput struct {
 	Glob       string `json:"glob,omitempty"`
 	MaxResults int    `json:"max_results,omitempty"`
 	Root       string `json:"root,omitempty"`
+	Rev        string `json:"rev,omitempty"`
 }
 
 type grepTool struct{ sb *Sandbox }
@@ -176,7 +196,8 @@ func (t grepTool) Def() llm.ToolDef {
 			"path":{"type":"string"},
 			"glob":{"type":"string"},
 			"max_results":{"type":"integer","minimum":1,"maximum":500},
-			"root":{"type":"string"}},
+			"root":{"type":"string"},
+			"rev":{"type":"string","enum":["head","base"]}},
 			"additionalProperties":false}`)
 }
 
@@ -210,7 +231,11 @@ func (t grepTool) Call(ctx context.Context, raw json.RawMessage) (Result, error)
 		}
 	}
 
-	root, _, clean, err := t.sb.resolve(in.Root, in.Path)
+	rootName, err := revisionRoot(in.Root, in.Rev)
+	if err != nil {
+		return Result{}, err
+	}
+	root, _, clean, err := t.sb.resolve(rootName, in.Path)
 	if err != nil {
 		return Result{}, sandboxFeedback("path", err)
 	}
@@ -772,4 +797,16 @@ func globRegexp(pattern string) (string, error) {
 	}
 	b.WriteString("$")
 	return b.String(), nil
+}
+
+// revisionRoot maps the optional rev selector onto a sandbox root. An empty
+// rev preserves the historical root argument.
+func revisionRoot(root, rev string) (string, error) {
+	if rev == "" {
+		return root, nil
+	}
+	if rev != "head" && rev != "base" {
+		return "", inputFeedback("rev", "range", fmt.Errorf("rev must be head or base"))
+	}
+	return rev, nil
 }

@@ -1,6 +1,7 @@
 package review
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -53,7 +54,7 @@ func (e *Executor) coverageUnresolved(wf dag.WorkflowView) ([]UnresolvedSignal, 
 			continue
 		}
 		gaps, locallyGapped := promptDiffGaps(d, params.Files)
-		builtGaps, builtWarnings := e.builtPromptDiffGaps(d, node.Spec.Kind, params, locallyGapped)
+		builtGaps, builtWarnings := e.builtPromptDiffGaps(d, node.Spec.Kind, params, locallyGapped, node.Output)
 		gaps = append(gaps, builtGaps...)
 		warnings = mergeWarnings(warnings, builtWarnings)
 		for _, gap := range gaps {
@@ -183,10 +184,10 @@ func boundedPathList(paths []string, max int) string {
 	return out
 }
 
-// promptDiffGaps mirrors renderDiffsWithSpans coverage: a missing file, a per-file
-// truncation, an empty diff, or a package total truncation means the model did
-// not see the full changed scope. Ignore rules are not gaps. The returned set
-// names files already reported, so the built-prompt check can skip them.
+// promptDiffGaps reports materials that cannot be reviewed at all: a file
+// missing from the snapshot or a file with no diff content. Prompt inline
+// truncation is no longer a gap by itself; builtPromptDiffGaps verifies that
+// every hunk of an omitted file was read through read_diff.
 func promptDiffGaps(d *Dossier, files []string) ([]string, map[string]struct{}) {
 	if d == nil || len(files) == 0 {
 		return nil, nil
@@ -197,8 +198,7 @@ func promptDiffGaps(d *Dossier, files []string) ([]string, map[string]struct{}) 
 	}
 	var gaps []string
 	gapped := make(map[string]struct{})
-	total := 0
-	for i, filePath := range files {
+	for _, filePath := range files {
 		file, ok := byPath[filePath]
 		if !ok {
 			gaps = append(gaps, fmt.Sprintf(
@@ -206,30 +206,11 @@ func promptDiffGaps(d *Dossier, files []string) ([]string, map[string]struct{}) 
 			gapped[filePath] = struct{}{}
 			continue
 		}
-		diff := file.Diff
-		if utf8.RuneCountInString(diff) > maxFileDiffRunes {
-			gaps = append(gaps, fmt.Sprintf(
-				"diff for %s was truncated at %d characters before review", filePath, maxFileDiffRunes))
-			gapped[filePath] = struct{}{}
-		}
-		diff = truncateRunes(diff, maxFileDiffRunes)
-		if strings.TrimSpace(diff) == "" {
+		if strings.TrimSpace(file.Diff) == "" {
 			gaps = append(gaps, fmt.Sprintf(
 				"file %s has no diff content in the materials snapshot; it was not reviewed", filePath))
 			gapped[filePath] = struct{}{}
-			continue
 		}
-		if total+len(diff) > maxTaskFileRunes {
-			omitted := files[i:]
-			gaps = append(gaps, fmt.Sprintf(
-				"package diff reached the %d-byte prompt limit at %s; %d file(s) were omitted: %s",
-				maxTaskFileRunes, filePath, len(omitted), boundedPathList(omitted, 20)))
-			for _, path := range omitted {
-				gapped[path] = struct{}{}
-			}
-			break
-		}
-		total += len(diff)
 	}
 	return gaps, gapped
 }
@@ -239,12 +220,14 @@ func promptDiffGaps(d *Dossier, files []string) ([]string, map[string]struct{}) 
 const promptCoverageNonce = "prompt_coverage_nonce"
 
 // builtPromptDiffGaps rebuilds the node task and judges coverage from where the
-// renderer placed each diff block, not from a search over untrusted text. A
-// block counts only when its recorded end lies inside the task that survives
-// MaxTaskRunes truncation. The whole user prompt is also checked against the
-// deterministic rebuild, so a change in prompt framing fails closed. Files
-// already reported by promptDiffGaps are skipped to avoid duplicate signals.
-func (e *Executor) builtPromptDiffGaps(d *Dossier, kind string, params reviewNodeParams, locallyGapped map[string]struct{}) ([]string, []string) {
+// renderer placed each complete diff block, not from a search over untrusted
+// text. A block counts only when its recorded end lies inside the task that
+// survives MaxTaskRunes truncation. A file omitted from the inline budget
+// counts only when the node output records every hunk as read through
+// read_diff. The whole user prompt is also checked against the deterministic
+// rebuild, so a change in prompt framing fails closed. Files already reported
+// by promptDiffGaps are skipped to avoid duplicate signals.
+func (e *Executor) builtPromptDiffGaps(d *Dossier, kind string, params reviewNodeParams, locallyGapped map[string]struct{}, output json.RawMessage) ([]string, []string) {
 	if d == nil || len(params.Files) == 0 {
 		return nil, nil
 	}
@@ -275,7 +258,20 @@ func (e *Executor) builtPromptDiffGaps(d *Dossier, kind string, params reviewNod
 			covered[span.path] = struct{}{}
 		}
 	}
+	var diffReads map[string][]int
+	if len(output) > 0 {
+		var record struct {
+			DiffReads map[string][]int `json:"diff_reads"`
+		}
+		_ = json.Unmarshal(output, &record)
+		diffReads = record.DiffReads
+	}
+	byPath := make(map[string]FileChange, len(d.Files))
+	for _, file := range d.Files {
+		byPath[file.Path] = file
+	}
 	var missing []string
+	var unread []string
 	reported := make(map[string]struct{}, len(params.Files))
 	for _, filePath := range params.Files {
 		if _, ok := locallyGapped[filePath]; ok {
@@ -288,12 +284,55 @@ func (e *Executor) builtPromptDiffGaps(d *Dossier, kind string, params reviewNod
 			continue
 		}
 		reported[filePath] = struct{}{}
+		file := byPath[filePath]
+		total := countFileHunks(file.Diff)
+		if total > 0 && hunksCovered(total, diffReads[filePath]) {
+			continue
+		}
 		missing = append(missing, filePath)
+		if total > 0 {
+			unread = append(unread, fmt.Sprintf("%s=%s", filePath, unreadHunks(total, diffReads[filePath])))
+		}
 	}
 	if len(missing) == 0 {
 		return nil, layout.warnings
 	}
-	return []string{fmt.Sprintf(
+	message := fmt.Sprintf(
 		"built prompt did not include the complete diff for %d of %d file(s): %s",
-		len(missing), len(params.Files), boundedPathList(missing, 8))}, layout.warnings
+		len(missing), len(params.Files), boundedPathList(missing, 8))
+	if len(unread) > 0 {
+		message += "; unread hunks: " + strings.Join(unread, ", ")
+	}
+	return []string{message}, layout.warnings
+}
+
+// hunksCovered reports whether every 1-based hunk index appears in reads.
+func hunksCovered(total int, reads []int) bool {
+	if total == 0 {
+		return true
+	}
+	seen := make(map[int]struct{}, len(reads))
+	for _, hunk := range reads {
+		seen[hunk] = struct{}{}
+	}
+	for hunk := 1; hunk <= total; hunk++ {
+		if _, ok := seen[hunk]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func unreadHunks(total int, reads []int) string {
+	seen := make(map[int]struct{}, len(reads))
+	for _, hunk := range reads {
+		seen[hunk] = struct{}{}
+	}
+	var missing []string
+	for hunk := 1; hunk <= total; hunk++ {
+		if _, ok := seen[hunk]; !ok {
+			missing = append(missing, fmt.Sprintf("%d", hunk))
+		}
+	}
+	return strings.Join(missing, ",")
 }

@@ -474,6 +474,9 @@ func (e *Executor) runAgent(ctx context.Context, provider string, spec agent.Run
 	var carry llm.Usage
 	var lastErr error
 	for attempt := 1; attempt <= e.maxAttempts; attempt++ {
+		if spec.OnAttempt != nil {
+			spec.OnAttempt()
+		}
 		attemptSpec := spec
 		if beforeTurn != nil {
 			attemptSpec.BeforeTurn = func(ctx context.Context, used llm.Usage) error {
@@ -593,6 +596,36 @@ func (e *Executor) agentOutputError(provider string, result *agent.RunResult, er
 	return dag.NodeOutput{}, &usageError{usage: e.dagUsage(provider, result.Usage), incomplete: result.Usage.Incomplete, err: err}
 }
 
+// changeSource builds the review tool view of the fixed dossier. inline
+// records which files the prompt inlined completely; nil means unknown.
+func (e *Executor) changeSource(files []string, inline map[string]bool) *agent.ChangeSource {
+	if e == nil || e.deps.Dossier == nil || len(files) == 0 {
+		return nil
+	}
+	byPath := make(map[string]FileChange, len(e.deps.Dossier.Files))
+	for _, file := range e.deps.Dossier.Files {
+		byPath[file.Path] = file
+	}
+	toAgent := func(file FileChange) agent.ChangeFile {
+		return agent.ChangeFile{
+			Path: file.Path, OldPath: file.OldPath, Status: file.Status,
+			Additions: file.Additions, Deletions: file.Deletions,
+			Diff: file.Diff, Generated: file.Generated,
+		}
+	}
+	selected := make([]agent.ChangeFile, 0, len(files))
+	for _, filePath := range files {
+		if file, ok := byPath[filePath]; ok {
+			selected = append(selected, toAgent(file))
+		}
+	}
+	all := make([]agent.ChangeFile, 0, len(e.deps.Dossier.Files))
+	for _, file := range e.deps.Dossier.Files {
+		all = append(all, toAgent(file))
+	}
+	return agent.NewChangeSource(selected, all, inline)
+}
+
 func (e *Executor) projectBackground() string {
 	if e.deps.Dossier == nil {
 		return ""
@@ -660,7 +693,10 @@ type agentOptions struct {
 	ExtraTools []agent.Tool
 	Builtins   bool
 	BlockTools bool
-	NoRetry    bool
+	// Changes enables list_changes/read_diff and diff-read coverage for a
+	// review node. Nil keeps the base builtin set.
+	Changes *agent.ChangeSource
+	NoRetry bool
 	// BudgetSubmitPrompt asks for submit_result when the workflow token
 	// budget is nearly spent instead of failing at the budget.
 	BudgetSubmitPrompt bool
@@ -822,7 +858,11 @@ func (e *Executor) callAgent(ctx context.Context, in dag.NodeInput, opts agentOp
 	if sandbox != nil {
 		defer sandbox.Close()
 		if opts.Builtins {
-			tools = append(tools, agent.BuiltinTools(sandbox)...)
+			if opts.Changes != nil {
+				tools = append(tools, agent.BuiltinToolsWithChanges(sandbox, opts.Changes)...)
+			} else {
+				tools = append(tools, agent.BuiltinTools(sandbox)...)
+			}
 		}
 	}
 	spec := agent.RunSpec{
@@ -839,6 +879,18 @@ func (e *Executor) callAgent(ctx context.Context, in dag.NodeInput, opts agentOp
 		// runs out (#260). Other nodes keep their budget-exhausted fallbacks
 		// and warnings.
 		spec.BudgetRemaining = e.budgetRemaining(in.WorkflowID)
+	}
+	if opts.Changes != nil {
+		spec.OnAttempt = opts.Changes.Reset
+		spec.OnEvidenceDropped = opts.Changes.DropEvidence
+		previous := spec.BeforeTurn
+		spec.BeforeTurn = func(ctx context.Context, usage llm.Usage) error {
+			opts.Changes.Flush()
+			if previous != nil {
+				return previous(ctx, usage)
+			}
+			return nil
+		}
 	}
 	ctx = llm.WithCallMeta(ctx, llm.CallMeta{WorkflowID: in.WorkflowID, NodeID: in.Node.ID, Turn: 0})
 	result, err := e.runAgent(ctx, opts.Provider, spec, !opts.NoRetry)

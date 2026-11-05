@@ -191,20 +191,22 @@ func (FindingOut) JSONSchemaExtend(schema *jsonschema.Schema) {
 // CodeReviewOut is the code-review node contract. ToolGaps is code-owned:
 // it is hidden from the submit schema and overwritten after decoding.
 type CodeReviewOut struct {
-	Summary  string       `json:"summary" jsonschema:"minLength=1,maxLength=3000"`
-	Findings []FindingOut `json:"findings" jsonschema:"maxItems=200"`
-	ToolGaps []string     `json:"tool_gaps,omitempty" jsonschema:"-"`
+	Summary   string           `json:"summary" jsonschema:"minLength=1,maxLength=3000"`
+	Findings  []FindingOut     `json:"findings" jsonschema:"maxItems=200"`
+	ToolGaps  []string         `json:"tool_gaps,omitempty" jsonschema:"-"`
+	DiffReads map[string][]int `json:"diff_reads,omitempty" jsonschema:"-"`
 }
 
 // ReviewOut is a standards or intent review channel. ToolGaps is code-owned,
 // as in CodeReviewOut.
 type ReviewOut struct {
-	Verdict        string       `json:"verdict" jsonschema:"enum=PASS,enum=BLOCKING"`
-	EvidenceStatus string       `json:"evidence_status" jsonschema:"enum=sufficient,enum=insufficient"`
-	Findings       []FindingOut `json:"findings" jsonschema:"maxItems=200"`
-	EvidenceGaps   []string     `json:"evidence_gaps" jsonschema:"maxItems=100"`
-	Summary        string       `json:"summary" jsonschema:"minLength=1,maxLength=3000"`
-	ToolGaps       []string     `json:"tool_gaps,omitempty" jsonschema:"-"`
+	Verdict        string           `json:"verdict" jsonschema:"enum=PASS,enum=BLOCKING"`
+	EvidenceStatus string           `json:"evidence_status" jsonschema:"enum=sufficient,enum=insufficient"`
+	Findings       []FindingOut     `json:"findings" jsonschema:"maxItems=200"`
+	EvidenceGaps   []string         `json:"evidence_gaps" jsonschema:"maxItems=100"`
+	Summary        string           `json:"summary" jsonschema:"minLength=1,maxLength=3000"`
+	ToolGaps       []string         `json:"tool_gaps,omitempty" jsonschema:"-"`
+	DiffReads      map[string][]int `json:"diff_reads,omitempty" jsonschema:"-"`
 }
 
 // ReviewGateOut is the deterministic gate over the two review channels.

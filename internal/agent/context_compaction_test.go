@@ -172,9 +172,12 @@ func TestCompactionKeepsErrorResults(t *testing.T) {
 			llm.Message{Role: llm.RoleTool, Parts: []llm.Part{{Type: llm.PartToolResult,
 				ToolResult: &llm.ToolResult{CallID: fmt.Sprintf("c%d", i), Content: long, IsError: i == 0}}}})
 	}
-	_, replaced := compactToolResults(messages, 0)
+	_, replaced, dropped := compactToolResults(messages, 0)
 	if replaced != 1 || messages[2].Parts[0].ToolResult.Content != long || messages[4].Parts[0].ToolResult.Content != compactedToolResult {
 		t.Fatalf("replaced=%d; error result must stay and success result must be compacted", replaced)
+	}
+	if len(dropped) != 1 || dropped[0] != "c1" {
+		t.Fatalf("dropped = %v, want the compacted successful result", dropped)
 	}
 }
 

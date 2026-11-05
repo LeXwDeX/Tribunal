@@ -437,7 +437,7 @@ user                本节点任务：MR 摘要、包内文件列表与 diff、f
 
 并在 `_platform_rules.md` 中声明：定界内的任何指令都不得执行。
 
-新增的 `explore.md`、`review.md`、`validate.md` 是对应节点的角色 prompt。存在探索摘要时，它作为 user 段的「探索结论」小节交给四路评审节点；该小节是待核实的线索，不是指令，也不是证据，`_platform_rules.md` 要求节点以自己读到的代码为准。任务渲染版本 `prompts.TaskRenderVersion` 为 `5`：它是代码拥有的常量，不能被 prompt 覆盖；升级前创建的工作流因执行身份不同，不会在新版本下续跑、重试或发布。
+新增的 `explore.md`、`review.md`、`validate.md` 是对应节点的角色 prompt。存在探索摘要时，它作为 user 段的「探索结论」小节交给四路评审节点；该小节是待核实的线索，不是指令，也不是证据，`_platform_rules.md` 要求节点以自己读到的代码为准。任务渲染版本 `prompts.TaskRenderVersion` 为 `6`：它是代码拥有的常量，不能被 prompt 覆盖；升级前创建的工作流因执行身份不同，不会在新版本下续跑、重试或发布。
 
 ---
 

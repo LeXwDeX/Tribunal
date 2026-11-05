@@ -21,6 +21,8 @@
   4. 回到旧评审图只能回退发布：恢复升级前的镜像和备份的配置，没有开关。
   逐项迁移规则见[配置设计 · 评审档位](docs/design/06-config.md#评审档位profiles)，操作步骤见[部署与运维 · 单一评审档位](docs/operations.md#单一评审档位升级)。
 
+- **未终态工作流不会在新任务布局下续跑**（[#300](https://github.com/LeXwDeX/Tribunal/issues/300)）：`prompts.TaskRenderVersion` 由 5 改为 6。升级前创建的未终态工作流在启动恢复时被取消，不会在新布局或覆盖语义下续跑、重试或发布；需要时等待其结束或接受取消后重新触发。
+
 ### 变更
 
 - **平台角色管理**：平台管理员可为已登录的 GitLab 用户授予或撤销管理员角色，并查看用户的项目授权；配置指定的管理员不能降级或禁用。角色变更在下一次请求生效。
@@ -30,6 +32,7 @@
 - **validate 通道不运行测试**：`validate` 对应 opencode 的 verify 角色，证据只有 GitLab pipeline 状态与失败 job 日志片段（`source=pipeline`）和只读读码（`source=code`），输出 PASS / FAIL / BLOCKED 与逐项检查。`BLOCKED`（如没有 CI；`BLOCKED` 的检查里不得出现 `FAIL`，有 `FAIL` 检查时状态必须是 `FAIL`）只在报告中给出「验证通道 BLOCKED：<原因>」告警，不降为 INCOMPLETE，没有 CI 的项目可以 PASS；`FAIL` 在增量过滤之后必须能由该节点仍在评审范围内的 P0/P1 finding 解释，否则 gather 加入一个 `review_blocking` 信号，结论为 INCOMPLETE 而不是 PASS（后来被 `verify.N` 反证的 P1 仍算作代码证据）；与本次变更无关的既有失败记为 `PRE_EXISTING`，不产生 finding。
 - **四路评审任一路缺失使结论为 INCOMPLETE**：四路评审节点都是可选节点，某一路失败、被取消或被跳过时，其他路的 findings 仍会发布，缺失的一路写入证据缺口「lane X did not complete」，结论不会是 PASS。`review` 为 BLOCKING 且没有 finding、证据不足同样给出对应的未解决信号；`reasoner` 的 critical / notable / informational 归一化为 P1 / P2 / info。只缺少或未跑完 pipeline 本身不算 `review` 的「证据不足」。
 - **Prompt 与 MCP 授权**：新增可绑定块 `explore` 和 `validate`，可绑定块共八个。示例配置和 Docker 配置的 codebase-memory 默认授权为 `explore` 11 项只读工具、`validate` 与 `verify` 各 `get_code_snippet`、`search_graph`、`trace_path`、`search_code`。新的 agent 节点使用同一个 agent 循环，因此最后一轮强制提交（[#255](https://github.com/LeXwDeX/Tribunal/issues/255)）和提交提示轮的不合法工具调用恢复（[#269](https://github.com/LeXwDeX/Tribunal/issues/269)）同样生效。
+- **大 MR 评审不再截断 diff**（[#300](https://github.com/LeXwDeX/Tribunal/issues/300)）：评审 prompt 先给出每个变更文件的索引，再在任务预算内完整内联 diff；放不下的文件整文件不内联，由新增的 `list_changes` 和 `read_diff` 工具按 hunk 读取。`read_file` 和 `grep` 新增 `rev=head|base`。覆盖判定要求未内联文件的所有 hunk 都经 `read_diff` 读过，节点输出记录 `diff_reads`；没读完时按证据缺口处理，不会给出干净的 PASS。单文件 16000 字符和单包 120000 字符的截断都已取消。大 MR 会因此增加读取工具调用，评审耗时和 token 用量可能上升。
 - **控制台**：「模型与档位」页只把 `default` 显示为「评审档位」，按固定的八步拓扑（探索、提出、挑战、裁决、汇报）列出各步骤的 provider，`onboarding` 单独标为「项目接入」；项目注册、项目设置和手动触发评审对话框不再有档位选择，项目列表不再有档位列。执行阶段轨道里 `explore` 和 `plan` 归入「规划」，`code-review`、`review`、`reasoner` 和 `validate` 归入「提出」；「项目接入」一行在 onboarding 没有 provider 时显示「未配置」。
 
 ## [1.2.0] - 2026-10-29
