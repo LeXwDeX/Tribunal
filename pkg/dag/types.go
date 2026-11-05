@@ -302,12 +302,21 @@ type WorkflowView struct {
 	ExtendsUsed     int                 `json:"extends_used"`
 	Usage           Usage               `json:"usage"`
 	UsageIncomplete bool                `json:"usage_incomplete,omitempty"`
-	CreatedAt       time.Time           `json:"created_at"`
-	StartedAt       time.Time           `json:"started_at,omitempty"`
-	FinishedAt      time.Time           `json:"finished_at,omitempty"`
-	Deadline        time.Time           `json:"deadline,omitempty"`
-	Error           string              `json:"error,omitempty"`
-	CancelReason    string              `json:"cancel_reason,omitempty"`
+	// UsageUnreported is true when usage is incomplete for a reason other than
+	// process interruption: a node payload that reported UsageIncomplete,
+	// sanitized-invalid usage, or counter overflow. Restart and abort
+	// incompleteness are interruption-only and never set it.
+	UsageUnreported bool `json:"usage_unreported,omitempty"`
+	// UsageInterruptions counts node restarts that marked usage incomplete
+	// (process recovery). Each may have lost usage the attempt had not yet
+	// committed; callers decide how many they tolerate.
+	UsageInterruptions int       `json:"usage_interruptions,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
+	StartedAt          time.Time `json:"started_at,omitempty"`
+	FinishedAt         time.Time `json:"finished_at,omitempty"`
+	Deadline           time.Time `json:"deadline,omitempty"`
+	Error              string    `json:"error,omitempty"`
+	CancelReason       string    `json:"cancel_reason,omitempty"`
 }
 
 // Terminal reports whether the workflow can no longer change.
