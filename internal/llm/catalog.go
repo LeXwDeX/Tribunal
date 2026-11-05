@@ -63,6 +63,10 @@ func (s *CatalogSnapshot) Resolve(id string) (CatalogModel, bool) {
 	return resolveCatalogModel(s.registry, id)
 }
 
+// ProviderConfig returns the model's non-secret provider settings; the
+// credential is never part of the result.
+func (m CatalogModel) ProviderConfig() config.ProviderConfig { return modelConfig(m.Model) }
+
 // Catalog merges configured providers with database models.
 type Catalog struct {
 	ClientHolder

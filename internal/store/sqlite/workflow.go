@@ -1301,7 +1301,7 @@ func normalizeLimit(limit int) int {
 }
 
 func encodeCursor(at time.Time, id string) string {
-	return encodeCursorParts(formatTime(at), id)
+	return store.EncodeCursor(at, id)
 }
 
 func decodeCursor(cursor string, sentinel error) (string, string, error) {

@@ -16,6 +16,7 @@ import (
 // tests can use small fakes for the review, workspace and stats endpoints.
 type Store interface {
 	ListWorkflows(ctx context.Context, filter store.WorkflowFilter, cursor string, limit int) ([]store.Workflow, string, error)
+	ListStatusOnlyReviews(ctx context.Context, filter store.StatusOnlyFilter, cursor string, limit int) ([]store.StatusOnlyReview, string, error)
 	GetWorkflow(ctx context.Context, id string) (*store.Workflow, error)
 	GetWorkflowNodes(ctx context.Context, workflowID string) ([]store.WorkflowNode, error)
 	GetWorkflowDossier(ctx context.Context, workflowID string) (*store.WorkflowDossier, error)

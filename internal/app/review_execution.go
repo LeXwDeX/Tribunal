@@ -34,7 +34,7 @@ type reviewExecution struct {
 // resolveReviewExecution requires the project workspace lock. It pins the
 // resolver set for identity and execution without contacting an MCP server.
 func (s *ReviewService) resolveReviewExecution(ctx context.Context, project *store.Project, token string, profile review.Profile, targetBranch string, deny func(string) bool) (*reviewExecution, error) {
-	activeBlocks, err := reviewExecutionSkillBlocks(profile, s.allowedProviders())
+	activeBlocks, err := reviewExecutionSkillBlocks(profile, s.graphProviders())
 	if err != nil {
 		return nil, PermanentJob(fmt.Errorf("build review graph: %w", err))
 	}

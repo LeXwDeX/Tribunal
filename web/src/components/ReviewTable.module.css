@@ -9,13 +9,20 @@
   min-width: 220px;
 }
 
-.titleLink {
+.titleLink,
+.titleText {
   max-width: 46ch;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text);
   font-weight: var(--fw-medium);
+}
+
+.reason {
+  color: var(--muted-strong);
+  font-size: var(--fs-meta);
+  overflow-wrap: anywhere;
 }
 
 .titleLink:hover {

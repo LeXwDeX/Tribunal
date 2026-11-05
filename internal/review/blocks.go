@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -480,6 +481,45 @@ func ValidateProfile(profile Profile) (Profile, error) {
 		}
 	}
 	return out, nil
+}
+
+// ProfileProviderRefs returns the sorted, de-duplicated provider names a
+// profile references, excluding the empty name and "cross".
+func ProfileProviderRefs(profile Profile) []string {
+	set := make(map[string]struct{})
+	add := func(provider string) {
+		if provider != "" && provider != "cross" {
+			set[provider] = struct{}{}
+		}
+	}
+	cfg := profile.Config
+	add(cfg.Plan.Provider)
+	if cfg.Explore != nil {
+		add(cfg.Explore.Provider)
+	}
+	if cfg.Lanes != nil {
+		add(cfg.Lanes.Review.Provider)
+		add(cfg.Lanes.Reasoner.Provider)
+		add(cfg.Lanes.Validate.Provider)
+	}
+	for _, propose := range cfg.Propose {
+		add(propose.Provider)
+	}
+	if cfg.Reasoner != nil {
+		add(cfg.Reasoner.Provider)
+	}
+	add(cfg.Challenge.Provider)
+	add(cfg.Challenge.Fallback)
+	add(cfg.Synthesize.Provider)
+	if cfg.Agent != nil {
+		add(cfg.Agent.Provider)
+	}
+	out := make([]string, 0, len(set))
+	for name := range set {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ValidateProfileProviders checks provider references against the registry

@@ -3,6 +3,7 @@ package dag
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"testing"
 	"time"
 )
@@ -605,5 +606,98 @@ func TestProjectEmptyPayload(t *testing.T) {
 	events := []Event{{Type: EventWorkflowCreated, At: testNow, Seq: 1}}
 	if _, err := Project(events); err == nil {
 		t.Fatal("empty created payload accepted")
+	}
+}
+
+func TestProjectUsageUnreportedSources(t *testing.T) {
+	start := func() []Event {
+		return []Event{
+			created(t, node("a")),
+			mustEv(t, EventNodeStarted, NodeStartedPayload{NodeID: "a", Attempt: 1}, testNow),
+		}
+	}
+	restart := mustEv(t, EventNodeRestarted, NodeRestartedPayload{NodeID: "a", Attempt: 2, NextAttempt: 2, Reason: "recovered", UsageIncomplete: true}, testNow)
+	started2 := mustEv(t, EventNodeStarted, NodeStartedPayload{NodeID: "a", Attempt: 2}, testNow)
+	out := json.RawMessage(`{"ok":true}`)
+	tests := []struct {
+		name           string
+		tail           []Event
+		wantIncomplete bool
+		wantUnreported bool
+	}{
+		{name: "restart only", tail: []Event{restart}, wantIncomplete: true},
+		{name: "restart then clean completion", tail: []Event{restart, started2,
+			mustEv(t, EventNodeCompleted, NodeCompletedPayload{NodeID: "a", Attempt: 2, Output: out, Usage: Usage{InputTokens: 2}}, testNow)},
+			wantIncomplete: true},
+		{name: "abort only", tail: []Event{
+			mustEv(t, EventNodeAborted, NodeAbortedPayload{NodeID: "a", Attempt: 1, Reason: "aborted", UsageIncomplete: true}, testNow)},
+			wantIncomplete: true},
+		{name: "completed reports incomplete", tail: []Event{
+			mustEv(t, EventNodeCompleted, NodeCompletedPayload{NodeID: "a", Attempt: 1, Output: out, UsageIncomplete: true}, testNow)},
+			wantIncomplete: true, wantUnreported: true},
+		{name: "restart then failed reports incomplete", tail: []Event{restart, started2,
+			mustEv(t, EventNodeFailed, NodeFailedPayload{NodeID: "a", Attempt: 2, Error: "x", ErrorKind: "x", UsageIncomplete: true}, testNow)},
+			wantIncomplete: true, wantUnreported: true},
+		{name: "invalid usage", tail: []Event{
+			mustEv(t, EventNodeCompleted, NodeCompletedPayload{NodeID: "a", Attempt: 1, Output: out, Usage: Usage{InputTokens: -1}}, testNow)},
+			wantIncomplete: true, wantUnreported: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			wf, err := Project(seq(append(start(), tc.tail...)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if wf.UsageIncomplete != tc.wantIncomplete || wf.UsageUnreported != tc.wantUnreported {
+				t.Fatalf("incomplete=%t unreported=%t, want %t/%t", wf.UsageIncomplete, wf.UsageUnreported, tc.wantIncomplete, tc.wantUnreported)
+			}
+		})
+	}
+}
+
+func TestProjectUsageInterruptionsCountRestarts(t *testing.T) {
+	events := []Event{created(t, node("a"), node("b")),
+		mustEv(t, EventNodeStarted, NodeStartedPayload{NodeID: "a", Attempt: 1}, testNow),
+		mustEv(t, EventNodeStarted, NodeStartedPayload{NodeID: "b", Attempt: 1}, testNow),
+		mustEv(t, EventNodeRestarted, NodeRestartedPayload{NodeID: "a", Attempt: 2, NextAttempt: 2, UsageIncomplete: true}, testNow),
+		mustEv(t, EventNodeRestarted, NodeRestartedPayload{NodeID: "b", Attempt: 2, NextAttempt: 2, UsageIncomplete: true}, testNow),
+		mustEv(t, EventNodeStarted, NodeStartedPayload{NodeID: "a", Attempt: 2}, testNow),
+		mustEv(t, EventNodeRestarted, NodeRestartedPayload{NodeID: "a", Attempt: 3, NextAttempt: 3, UsageIncomplete: false}, testNow),
+	}
+	wf, err := Project(seq(events))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wf.UsageInterruptions != 2 {
+		t.Fatalf("UsageInterruptions = %d, want 2 (restarts marked incomplete only)", wf.UsageInterruptions)
+	}
+}
+
+func TestProjectSkippedAndOverflowSetUsageUnreported(t *testing.T) {
+	big := Usage{InputTokens: math.MaxInt64}
+	tests := []struct {
+		name   string
+		events []Event
+	}{
+		{name: "skipped reports incomplete", events: []Event{
+			mustEv(t, EventNodeSkipped, NodeSkippedPayload{NodeID: "a", Reason: "x", UsageIncomplete: true}, testNow)}},
+		{name: "skipped invalid usage", events: []Event{
+			mustEv(t, EventNodeSkipped, NodeSkippedPayload{NodeID: "a", Reason: "x", Usage: &Usage{InputTokens: -1}}, testNow)}},
+		{name: "counter overflow", events: []Event{
+			mustEv(t, EventNodeStarted, NodeStartedPayload{NodeID: "a", Attempt: 1}, testNow),
+			mustEv(t, EventNodeStarted, NodeStartedPayload{NodeID: "b", Attempt: 1}, testNow),
+			mustEv(t, EventNodeCompleted, NodeCompletedPayload{NodeID: "a", Attempt: 1, Usage: big}, testNow),
+			mustEv(t, EventNodeCompleted, NodeCompletedPayload{NodeID: "b", Attempt: 1, Usage: Usage{InputTokens: 5}}, testNow)}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			wf, err := Project(seq(append([]Event{created(t, node("a"), node("b"))}, tc.events...)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !wf.UsageIncomplete || !wf.UsageUnreported {
+				t.Fatalf("incomplete=%t unreported=%t, want both true", wf.UsageIncomplete, wf.UsageUnreported)
+			}
+		})
 	}
 }

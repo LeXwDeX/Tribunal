@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { listProfiles, listProjects, listReviews } from '../api/api'
-import type { Project, ReviewSummary } from '../api/types'
+import type { Project, ReviewListItem } from '../api/types'
 import { ReviewTable } from '../components/ReviewTable'
 import { TriggerReviewDialog } from '../components/TriggerReviewDialog'
 import {
@@ -55,7 +55,7 @@ export function ReviewsPage() {
   const scope = params.get('access') === 'mine' ? 'mine' : 'all'
 
   const filtersKey = [projectId, status, verdict, profile, trigger, since, scope]
-  const reviews = usePaginated<ReviewSummary>(
+  const reviews = usePaginated<ReviewListItem>(
     ['reviews', 'list', ...filtersKey],
     (cursor) => listReviews({
       project_id: projectId || undefined,

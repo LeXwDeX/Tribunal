@@ -1,11 +1,12 @@
 import type { MouseEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import type { ReviewSummary } from '../api/types'
+import { isStatusOnly } from '../api/types'
+import type { ReviewListItem, ReviewSummary, StatusOnlyReview } from '../api/types'
 import { formatCost, formatDuration } from '../lib/format'
 import { Badge, PublicationBadge, RelativeTime, SevCounts, StatusBadge, VerdictBadge } from './ui'
 import styles from './ReviewTable.module.css'
 
-export function projectLabel(review: ReviewSummary, names: Map<number, string>): string {
+export function projectLabel(review: Pick<ReviewSummary, 'project_id' | 'project_path'>, names: Map<number, string>): string {
   return review.project_path || names.get(review.project_id) || `项目 ${review.project_id}`
 }
 
@@ -20,7 +21,45 @@ function isInteractiveClick(event: MouseEvent<HTMLElement>): boolean {
   return Boolean(window.getSelection()?.toString())
 }
 
-export function ReviewTable({ reviews, projectNames }: { reviews: ReviewSummary[]; projectNames: Map<number, string> }) {
+// Persisted reasons of reviews that never created a workflow.
+const STATUS_ONLY_REASONS: Record<string, string> = {
+  'empty diff': '没有可评审的变更（empty diff）',
+  'no reviewable files': '所有变更文件均被忽略规则过滤',
+  'snapshot omitted files': '材料快照遗漏了变更文件',
+}
+
+export function statusOnlyReasonLabel(reason: string): string {
+  return STATUS_ONLY_REASONS[reason] || reason || '未记录原因'
+}
+
+// No workflow means no graph page: the row is plain text, never a link.
+function StatusOnlyRow({ review, projectNames }: { review: StatusOnlyReview; projectNames: Map<number, string> }) {
+  const reason = statusOnlyReasonLabel(review.reason)
+  return (
+    <tr>
+      <td>
+        <div className={styles.primary}>
+          <span className={styles.titleText} title={reason}>!{review.mr_iid}</span>
+          <span className={styles.meta}>
+            <span className={styles.project}>{projectLabel(review, projectNames)}</span>
+            {review.head_sha ? <span className={styles.mrRef}>{review.head_sha.slice(0, 8)}</span> : null}
+          </span>
+          <span className={styles.reason}>原因：{reason}</span>
+        </div>
+      </td>
+      <td><span className="muted">—</span></td>
+      <td><Badge tone="neutral">未创建评审任务</Badge></td>
+      <td><span className="muted">—</span></td>
+      <td><VerdictBadge verdict={review.verdict} /></td>
+      <td><span className="muted">—</span></td>
+      <td className="right num mono">—</td>
+      <td className="right num mono">—</td>
+      <td className="muted nowrap"><RelativeTime value={review.created_at} /></td>
+    </tr>
+  )
+}
+
+export function ReviewTable({ reviews, projectNames }: { reviews: ReviewListItem[]; projectNames: Map<number, string> }) {
   const navigate = useNavigate()
   return (
     <div className="tableWrap">
@@ -40,6 +79,9 @@ export function ReviewTable({ reviews, projectNames }: { reviews: ReviewSummary[
         </thead>
         <tbody>
           {reviews.map((review) => {
+            if (isStatusOnly(review)) {
+              return <StatusOnlyRow key={`${review.project_id}-${review.mr_iid}-${review.head_sha || ''}`} review={review} projectNames={projectNames} />
+            }
             const href = reviewHref(review)
             // Reviews saved before titles were persisted have no mr_title; fall back to the MR reference.
             const title = review.mr_title || `!${review.mr_iid}`
