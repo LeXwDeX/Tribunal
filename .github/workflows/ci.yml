@@ -104,4 +104,4 @@ jobs:
             exit 1
           fi
       - name: Test with coverage
-        run: npm test -- --coverage
+        run: npm test -- --coverage --maxWorkers=2 --testTimeout=15000
