@@ -9,6 +9,10 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/secret"
 )
 
+// ErrMasterKeyMismatch reports that the configured master key does not open
+// ciphertext already stored in the database.
+var ErrMasterKeyMismatch = errors.New("sqlite: master key does not match stored encrypted data")
+
 var mcpVerifierAAD = []byte("tribunal/mcp-config/verifier/v1")
 var mcpVerifierValue = []byte("tribunal/mcp-config/key-verifier/v1")
 
@@ -37,13 +41,19 @@ func (s *Store) ConfigureMCPSecrets(ctx context.Context, cipher *secret.Cipher) 
 	if complete {
 		plain, err := cipher.Open(verifier, mcpVerifierAAD)
 		if err != nil || !bytes.Equal(plain, mcpVerifierValue) {
-			return false, errors.New("sqlite: MCP key verification failed")
+			return false, ErrMasterKeyMismatch
 		}
 		verified = true
 	} else {
 		verified, err = verifyProjectSecrets(ctx, tx, cipher)
 		if err != nil {
 			return false, err
+		}
+		if !verified {
+			verified, err = verifyModelSecrets(ctx, tx, cipher)
+			if err != nil {
+				return false, err
+			}
 		}
 	}
 
@@ -166,7 +176,40 @@ func verifyProjectSecrets(ctx context.Context, tx *sql.Tx, cipher *secret.Cipher
 	}
 	// Project migration isolates damaged fields, so one authenticated field is sufficient key evidence.
 	if present && !authenticated {
-		return false, errors.New("sqlite: project secret key verification failed")
+		return false, ErrMasterKeyMismatch
+	}
+	return authenticated, nil
+}
+
+// verifyModelSecrets uses stored model credentials as key evidence when no
+// project or MCP evidence exists. Like projects, one authenticated credential
+// is sufficient; credentials present but none authenticating mean a wrong key.
+func verifyModelSecrets(ctx context.Context, tx *sql.Tx, cipher *secret.Cipher) (bool, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT id, api_key_sealed FROM llm_models WHERE api_key_sealed IS NOT NULL AND length(api_key_sealed) > 0`)
+	if err != nil {
+		return false, errors.New("sqlite: read model secrets failed")
+	}
+	defer rows.Close()
+	var present, authenticated bool
+	for rows.Next() {
+		var id string
+		var sealed []byte
+		if err := rows.Scan(&id, &sealed); err != nil {
+			return false, errors.New("sqlite: scan model secrets failed")
+		}
+		present = true
+		if _, err := cipher.Open(sealed, secret.ModelCredentialAAD(id, "api_key")); err == nil {
+			authenticated = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, errors.New("sqlite: iterate model secrets failed")
+	}
+	if err := rows.Close(); err != nil {
+		return false, errors.New("sqlite: close model secrets failed")
+	}
+	if present && !authenticated {
+		return false, ErrMasterKeyMismatch
 	}
 	return authenticated, nil
 }
