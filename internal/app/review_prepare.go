@@ -249,13 +249,27 @@ func (s *ReviewService) publishEmptyWithNote(ctx context.Context, project *store
 	fingerprint := sha256Hex(strings.Join([]string{
 		inputs.Version.HeadSHA, reviewConfigHash(cfg), profileName,
 	}, "\n"))
+	verdict := review.VerdictPass
+	summaryText := "无需评审：所有变更文件均被忽略规则过滤。"
+	warnings := append(cfg.Warnings, "no reviewable files after ignore rules")
+	if len(inputs.Diffs) == 0 {
+		verdict = review.VerdictIncomplete
+		summaryText = "没有可评审的变更：MR 的 diff 为空。"
+		warnings = append(cfg.Warnings, "no changed files in merge request")
+	}
 	summaryInput := review.SummaryInput{
-		Verdict:     review.VerdictPass,
-		Summary:     "无需评审：所有变更文件均被忽略规则过滤。",
+		Verdict: verdict,
+		Summary: summaryText,
+		IncompleteReason: func() string {
+			if verdict == review.VerdictIncomplete && len(inputs.Diffs) == 0 {
+				return "empty diff"
+			}
+			return ""
+		}(),
 		Fingerprint: fingerprint,
 		HeadSHA:     inputs.Version.HeadSHA,
 		Profile:     profileName,
-		Warnings:    append(cfg.Warnings, "no reviewable files after ignore rules"),
+		Warnings:    warnings,
 	}
 	if summary.Truncated || len(summary.Omitted) > 0 {
 		total := summary.Total
