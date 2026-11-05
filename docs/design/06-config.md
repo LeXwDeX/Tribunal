@@ -76,6 +76,7 @@ providers:
     base_url: "https://api.openai.com/v1"
     model: "<model>"
     api_key_env: OPENAI_API_KEY
+    max_tokens: 16000             # 必填且为正数，按供应方上限调整
     reasoning: { effort: medium }
   local:
     protocol: openai-chat
@@ -83,6 +84,7 @@ providers:
     model: "<model>"
     api_key_env: LOCAL_LLM_KEY
     max_concurrency: 8
+    max_tokens: 4096              # 必填且为正数，按供应方上限调整
     temperature: 0.2
     strict_role_alternation: false  # 仅 openai-chat；网关要求角色严格交替时设为 true，见下文
 

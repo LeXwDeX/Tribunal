@@ -54,6 +54,7 @@ providers:
     model: "${LLM_MODEL}"
     api_key_env: LLM_API_KEY
     max_concurrency: 4
+    max_tokens: 16000
     # Optional input context size in tokens: the model window minus max_tokens
     # and any thinking budget. Agent nodes compact older tool output at 85%
     # of it. Leave unset (0) to disable compaction.
