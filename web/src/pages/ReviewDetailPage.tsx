@@ -746,7 +746,7 @@ export function ReviewDetailPage() {
         </div>
       </div>
 
-      <NodeDrawer reviewId={id} node={selectedNode} onClose={() => setSelectedNode(null)} />
+      <NodeDrawer reviewId={id} node={selectedNode} onClose={() => setSelectedNode(null)} canManage={canWrite} />
 
       <ConfirmDialog
         open={cancelOpen}

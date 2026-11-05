@@ -221,8 +221,11 @@ export async function getReviewNode(reviewId: string, nodeId: string): Promise<R
   return request<ReviewNodeDetail>(`/api/v1/reviews/${segment(reviewId)}/nodes/${segment(nodeId)}`)
 }
 
-export async function getNodeCalls(reviewId: string, nodeId: string, cursor?: string): Promise<CallPage> {
-  return request<CallPage>(withQuery(`/api/v1/reviews/${segment(reviewId)}/nodes/${segment(nodeId)}/calls`, { cursor }))
+export async function getNodeCalls(reviewId: string, nodeId: string, cursor?: string, includePayload = false): Promise<CallPage> {
+  return request<CallPage>(withQuery(`/api/v1/reviews/${segment(reviewId)}/nodes/${segment(nodeId)}/calls`, {
+    cursor,
+    include_payload: includePayload ? 'true' : undefined,
+  }))
 }
 
 export async function cancelReview(id: string): Promise<void> {

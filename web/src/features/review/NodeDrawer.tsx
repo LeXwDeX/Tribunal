@@ -92,8 +92,8 @@ function CallItem({ call }: { call: LlmCall }) {
 }
 
 export function NodeDrawer({
-  reviewId, node, onClose,
-}: { reviewId: string; node: GraphNode | null; onClose: () => void }) {
+  reviewId, node, onClose, canManage = false,
+}: { reviewId: string; node: GraphNode | null; onClose: () => void; canManage?: boolean }) {
   const open = Boolean(node)
   const nodeId = node?.id
   const detail = useQuery({
@@ -102,8 +102,8 @@ export function NodeDrawer({
     enabled: open && Boolean(nodeId),
   })
   const calls = usePaginated<LlmCall>(
-    ['review', reviewId, 'calls', nodeId],
-    (cursor) => nodeId ? getNodeCalls(reviewId, nodeId, cursor) : Promise.resolve({ calls: [] }),
+    ['review', reviewId, 'calls', nodeId, canManage],
+    (cursor) => nodeId ? getNodeCalls(reviewId, nodeId, cursor, canManage) : Promise.resolve({ calls: [] }),
     'calls',
     { enabled: open && Boolean(nodeId) },
   )

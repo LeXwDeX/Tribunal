@@ -88,6 +88,7 @@ func TestWireAuditOpenAIEffortsAndAnthropicForcedChoice(t *testing.T) {
 				req.Reasoning = &ReasoningOpts{Effort: value}
 				if protocol == "anthropic" {
 					req.ToolChoice = "required"
+					req.Tools = []ToolDef{{Name: "lookup", InputSchema: json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`)}}
 				}
 				_, _ = client.Generate(context.Background(), req)
 				if record.Audit == nil || record.Audit.Request.Wire == nil {
@@ -100,6 +101,9 @@ func TestWireAuditOpenAIEffortsAndAnthropicForcedChoice(t *testing.T) {
 				if protocol == "anthropic" {
 					if wire.Reasoning != nil || wire.ThinkingEnabled || wire.Thinking != nil || wire.Temperature == nil || *wire.Temperature != body["temperature"] {
 						t.Fatalf("wire=%+v body=%v", wire, body)
+					}
+					if body["tool_choice"] == nil || body["thinking"] != nil {
+						t.Fatalf("forced tool choice body=%v", body)
 					}
 				} else {
 					sent := body["reasoning_effort"]
