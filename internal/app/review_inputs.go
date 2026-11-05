@@ -510,7 +510,8 @@ func reviewFingerprint(dossierHash, configHash, promptHash string) string {
 	return sha256Hex(dossierHash + "\n" + configHash + "\n" + promptHash)
 }
 
-func (s *ReviewService) profileFor(ctx context.Context, project *store.Project, requested, repoProfile string, labels []string, explicit bool) (string, config.ProfileConfig) {
+// profileNameFor picks the review profile name; "custom" means none applies.
+func (s *ReviewService) profileNameFor(project *store.Project, requested, repoProfile string, labels []string, explicit bool) string {
 	var candidates []string
 	if explicit {
 		candidates = []string{requested, repoProfile}
@@ -529,20 +530,36 @@ func (s *ReviewService) profileFor(ctx context.Context, project *store.Project, 
 		}
 		seen[name] = struct{}{}
 		if isReviewProfile(s.profiles, name) {
-			cfg := s.profiles[name]
-			if s.overrides != nil {
-				if overrides, err := s.overrides.GetProfileOverrides(ctx, name); err == nil && overrides != nil {
-					raw, ok := s.rawProfiles[name]
-					if !ok {
-						raw = cfg
-					}
-					cfg = ApplyProfileOverrides(raw, cfg, overrides.OverridesJSON)
-				}
-			}
-			return name, cfg
+			return name
 		}
 	}
-	return "custom", config.ProfileConfig{}
+	return "custom"
+}
+
+// profileFor returns the profile a review executes: the configured one with
+// the stored overrides applied. A failed read of the overrides is returned, not
+// ignored: running without them would silently execute another profile, and a
+// recovery would cancel the workflow for a hash change that never happened.
+func (s *ReviewService) profileFor(ctx context.Context, project *store.Project, requested, repoProfile string, labels []string, explicit bool) (string, config.ProfileConfig, error) {
+	name := s.profileNameFor(project, requested, repoProfile, labels, explicit)
+	if name == "custom" {
+		return name, config.ProfileConfig{}, nil
+	}
+	cfg := s.profiles[name]
+	if s.overrides != nil {
+		overrides, err := s.overrides.GetProfileOverrides(ctx, name)
+		if err != nil {
+			return "", config.ProfileConfig{}, fmt.Errorf("app: read profile overrides: %w", err)
+		}
+		if overrides != nil {
+			raw, ok := s.rawProfiles[name]
+			if !ok {
+				raw = cfg
+			}
+			cfg = ApplyProfileOverrides(raw, cfg, overrides.OverridesJSON)
+		}
+	}
+	return name, cfg, nil
 }
 
 // graphProviders returns the provider allowlist used by graph validation:

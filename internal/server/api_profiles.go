@@ -143,7 +143,9 @@ func (s *Server) handlePutProfileOverrides(w http.ResponseWriter, r *http.Reques
 		validationFailed(w, r, "revision", "revision must not be negative")
 		return
 	}
-	if details := app.ValidateProfileOverrides(request.Overrides, s.modelExists()); len(details) > 0 {
+	normalized, _ := s.defaultProfile()
+	raw, _ := s.platform.RawProfile("default")
+	if details := app.ValidateProfileOverrides(request.Overrides, raw, normalized, s.modelLookup()); len(details) > 0 {
 		writeError(w, r, http.StatusBadRequest, "validation_failed", "invalid overrides", details)
 		return
 	}
@@ -166,25 +168,26 @@ func (s *Server) handleDeleteProfileOverrides(w http.ResponseWriter, r *http.Req
 		validationFailed(w, r, "revision", "revision is required")
 		return
 	}
-	if err := s.profileOverrides.DeleteProfileOverrides(r.Context(), "default", revision); err != nil {
+	overrides, err := s.profileOverrides.DeleteProfileOverrides(r.Context(), "default", revision, currentUserID(r))
+	if err != nil {
 		s.writeProfileOverrideError(w, r, err)
 		return
 	}
 	s.auditProfileOverrides(r, "delete")
-	view, _ := s.profileView(`{}`, revision+1)
+	view, _ := s.profileView(overrides.OverridesJSON, overrides.Revision)
 	writeJSON(w, http.StatusOK, view)
 }
 
-// modelExists reports whether a model ID is in the current catalog, which holds
-// configured providers and user models that are not deleted. Without a catalog
-// the store's own reference check is the only one.
-func (s *Server) modelExists() func(string) bool {
+// modelLookup reads a model from the current catalog, which holds configured
+// providers and user models that are not deleted. Without a catalog the
+// store's own reference check is the only one.
+func (s *Server) modelLookup() func(string) (app.OverrideModel, bool) {
 	if s.models == nil {
 		return nil
 	}
-	return func(id string) bool {
-		_, ok := s.models.Resolve(id)
-		return ok
+	return func(id string) (app.OverrideModel, bool) {
+		model, ok := s.models.Resolve(id)
+		return app.OverrideModel{Unavailable: model.Unavailable, Protocol: model.Protocol, MaxTokens: model.Params.MaxTokens}, ok
 	}
 }
 

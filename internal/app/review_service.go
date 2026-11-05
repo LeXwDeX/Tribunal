@@ -624,7 +624,10 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 	}
 	configHash := reviewConfigHash(cfg)
 	promptHash := s.prompts.Hash
-	profileName, profileCfg := s.profileFor(ctx, project, payload.Profile, cfg.Profile, inputs.MR.Labels, profileExplicit(payload))
+	profileName, profileCfg, err := s.profileFor(ctx, project, payload.Profile, cfg.Profile, inputs.MR.Labels, profileExplicit(payload))
+	if err != nil {
+		return err
+	}
 	profile := review.Profile{Name: profileName, Config: profileCfg}
 	profileHash := s.reviewProfileHash(profile)
 	if workflow != nil && storedDossier != nil {

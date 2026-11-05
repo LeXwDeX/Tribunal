@@ -82,11 +82,16 @@ func ValidateNodeParams(field string, p NodeParams) error {
 	if p.Temperature != nil && (math.IsNaN(*p.Temperature) || *p.Temperature < 0 || *p.Temperature > 2) {
 		p2.add("%s.temperature must be between 0 and 2", field)
 	}
-	if p.Reasoning != nil && !effort.Valid(p.Reasoning.Effort) {
-		p2.add("%s.reasoning.effort must be low, medium, high or max", field)
+	if p.Reasoning != nil {
+		switch {
+		case p.Reasoning.Effort == "":
+			p2.add("%s.reasoning.effort must be low, medium, high or max; omit the field to inherit", field)
+		case !effort.Valid(p.Reasoning.Effort):
+			p2.add("%s.reasoning.effort must be low, medium, high or max", field)
+		}
 	}
-	if p.Thinking != nil && p.Thinking.BudgetTokens < 0 {
-		p2.add("%s.thinking.budget_tokens must not be negative", field)
+	if p.Thinking != nil && p.Thinking.BudgetTokens <= 0 {
+		p2.add("%s.thinking.budget_tokens must be positive; omit the field to inherit", field)
 	}
 	return p2.err()
 }

@@ -3,8 +3,10 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/LeXwDeX/tribunal/internal/config"
@@ -241,21 +243,36 @@ func TestResolveProfileParams(t *testing.T) {
 }
 
 func TestValidateProfileOverrides(t *testing.T) {
-	known := func(id string) bool { return id == "user:ok" || id == "config:cfg" }
+	models := map[string]OverrideModel{
+		"user:ok": {Protocol: "openai-chat", MaxTokens: 8000}, "config:cfg": {Protocol: "openai-chat", MaxTokens: 8000},
+		"user:down": {Unavailable: true, Protocol: "openai-chat"}, "user:claude": {Protocol: "anthropic", MaxTokens: 8000},
+	}
+	known := func(id string) (OverrideModel, bool) { m, ok := models[id]; return m, ok }
+	raw := config.ProfileConfig{Provider: "user:ok"}
+	normalized := normalize(raw)
 	for _, tc := range []struct {
 		name, body string
 		fields     []string
 	}{
-		{"valid", `{"default":{"model":"user:ok","params":{"max_tokens":10,"temperature":2,"reasoning":{"effort":"high"},"thinking":{"budget_tokens":0}}},"lanes":{"review":{"model":"config:cfg"}}}`, nil},
+		{"valid", `{"default":{"model":"user:ok","params":{"max_tokens":10000,"temperature":2,"reasoning":{"effort":"high"},"thinking":{"budget_tokens":4000}}},"lanes":{"review":{"model":"config:cfg"}}}`, nil},
 		{"unknown model names the field", `{"lanes":{"validate":{"model":"user:gone"}}}`, []string{"overrides.lanes.validate.model"}},
 		{"bad params", `{"explore":{"params":{"max_tokens":0,"temperature":3,"reasoning":{"effort":"extreme"},"thinking":{"budget_tokens":-1}}}}`,
 			[]string{"overrides.explore.params", "overrides.explore.params", "overrides.explore.params", "overrides.explore.params"}},
+		{"whitespace model", `{"explore":{"model":" user:ok"}}`, []string{"overrides.explore.model"}},
+		{"unavailable model", `{"explore":{"model":"user:down"}}`, []string{"overrides.explore.model"}},
+		{"no-op params", `{"explore":{"params":{"thinking":{"budget_tokens":0},"reasoning":{"effort":""}}}}`,
+			[]string{"overrides.explore.params", "overrides.explore.params"}},
+		{"anthropic minimum budget", `{"explore":{"model":"user:claude","params":{"thinking":{"budget_tokens":500}}}}`, []string{"overrides.explore.params.thinking.budget_tokens"}},
+		{"openai small budget is fine", `{"explore":{"params":{"thinking":{"budget_tokens":500}}}}`, nil},
+		{"max_tokens not above budget", `{"explore":{"params":{"max_tokens":2000,"thinking":{"budget_tokens":2000}}}}`, []string{"overrides.explore.params.thinking.budget_tokens"}},
+		{"model max_tokens not above budget", `{"explore":{"params":{"thinking":{"budget_tokens":9000}}}}`, []string{"overrides.explore.params.thinking.budget_tokens"}},
+		{"default budget reaches an anthropic node", `{"default":{"params":{"thinking":{"budget_tokens":500}}},"lanes":{"review":{"model":"user:claude"}}}`, []string{"overrides.default.params.thinking.budget_tokens"}},
 		{"unknown param", `{"explore":{"params":{"context_window":10}}}`, []string{"overrides"}},
 		{"unknown node", `{"plan":{"model":"user:ok"}}`, []string{"overrides"}},
 		{"not an object", `[]`, []string{"overrides"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			details := ValidateProfileOverrides([]byte(tc.body), known)
+			details := ValidateProfileOverrides([]byte(tc.body), raw, normalized, known)
 			var fields []string
 			for _, detail := range details {
 				fields = append(fields, detail.Field)
@@ -284,7 +301,10 @@ func TestProfileForAppliesOverridesToRawProfile(t *testing.T) {
 	f.service.rawProfiles = map[string]config.ProfileConfig{"default": raw}
 	f.service.profiles["default"] = normalize(raw)
 	f.service.overrides = fakeOverrideStore{body: `{"default":{"model":"user:def"},"lanes":{"code_review":{"model":"user:new"}}}`}
-	_, cfg := f.service.profileFor(context.Background(), &store.Project{Profile: "default"}, "", "", nil, false)
+	_, cfg, err := f.service.profileFor(context.Background(), &store.Project{Profile: "default"}, "", "", nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if cfg.Propose[0].Provider != "user:new" || cfg.Explore.Provider != "user:def" || cfg.Challenge.Provider != "user:def" {
 		t.Fatalf("profile = %+v", cfg)
 	}
@@ -328,5 +348,114 @@ func TestNodeParamsEnterTheProfileHashOnlyWhenSet(t *testing.T) {
 	profile.Config.NodeParams = map[string]config.NodeParams{config.NodeExplore: {MaxTokens: intPtr(10), Source: "override"}}
 	if f.service.reviewProfileHash(profile) != changed {
 		t.Fatal("the audit-only source changed the hash")
+	}
+}
+
+type failingOverrideStore struct{ store.ProfileOverrideStore }
+
+func (failingOverrideStore) GetProfileOverrides(context.Context, string) (*store.ProfileOverrides, error) {
+	return nil, errors.New("overrides unavailable")
+}
+
+// An unreadable override store must not make a review run without the
+// overrides: a new review fails retryably before any workflow exists.
+func TestNewReviewFailsRetryablyWhenOverridesCannotBeRead(t *testing.T) {
+	f := newReviewFixture(t, reviewTestHead)
+	f.service.overrides = failingOverrideStore{}
+	job := f.seedReview(t, "job-overrides-unreadable")
+	err := f.service.RunReview(context.Background(), job)
+	if err == nil || IsPermanentJob(err) {
+		t.Fatalf("RunReview error = %v, want a retryable error", err)
+	}
+	if _, err := f.db.GetWorkflowByJob(context.Background(), job.ID); err == nil {
+		t.Fatal("a workflow was created without the overrides")
+	}
+}
+
+// Recovery must surface the read error instead of cancelling the interrupted
+// workflow for a profile hash change that never happened.
+func TestRecoveryDoesNotCancelWhenOverridesCannotBeRead(t *testing.T) {
+	f := newReviewFixture(t, reviewTestHead)
+	f.service.overrides = fakeOverrideStore{body: `{"default":{"model":"fake"}}`}
+	job := f.seedReview(t, "job-recovery-overrides-unreadable")
+	id := interruptReview(t, f, job)
+	f.service.overrides = failingOverrideStore{}
+	_ = f.service.Recover(context.Background())
+	wf, err := f.db.GetWorkflow(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wf.Status == "cancelled" {
+		snapshot, _ := f.service.engine.Snapshot(context.Background(), id)
+		t.Fatalf("workflow was cancelled (%s) because the overrides could not be read", snapshot.CancelReason)
+	}
+}
+
+func snapshotProfile(t *testing.T, cfg config.ProfileConfig) string {
+	t.Helper()
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+// Regression for the dev-server finding: resolving overrides must never write
+// through the Lanes/Explore pointers the services share, or a deleted override
+// keeps showing (and executing) its model until restart.
+func TestResolveProfileNeverMutatesSharedProfiles(t *testing.T) {
+	raw := config.ProfileConfig{
+		Provider: "base",
+		Explore:  &config.ExploreConfig{Provider: "cfg-explore"},
+		Lanes:    &config.LanesConfig{Reasoner: config.LaneConfig{Provider: "cfg-reasoner"}},
+	}
+	normalized := normalize(raw)
+	rawBefore, normBefore := snapshotProfile(t, raw), snapshotProfile(t, normalized)
+	bodies := []string{
+		`{"lanes":{"reasoner":{"model":"user:r"},"review":{"model":"user:v"},"code_review":{"model":"user:c"},"validate":{"model":"user:x"}}}`,
+		`{"explore":{"model":"user:e"},"challenge":{"model":"user:h"}}`,
+		`{"default":{"model":"user:d","params":{"max_tokens":9}}}`,
+	}
+	for i := 0; i < 3; i++ {
+		for _, body := range bodies {
+			ResolveProfile(raw, normalized, body)
+		}
+	}
+	if got := snapshotProfile(t, raw); got != rawBefore {
+		t.Fatalf("raw profile mutated:\n%s\nwant\n%s", got, rawBefore)
+	}
+	if got := snapshotProfile(t, normalized); got != normBefore {
+		t.Fatalf("normalized profile mutated:\n%s\nwant\n%s", got, normBefore)
+	}
+	after := ResolveProfile(raw, normalized, `{}`)
+	if !reflect.DeepEqual(after.Effective, normalized) {
+		t.Fatalf("resolving without overrides = %+v, want the original %+v", after.Effective, normalized)
+	}
+	if node := nodeByName(t, after.Nodes, "lanes.reasoner"); node.Model != "config:cfg-reasoner" || node.Source != "config" {
+		t.Fatalf("reasoner after reset = %+v", node)
+	}
+}
+
+func TestResolveProfileConcurrentlyIsRaceFree(t *testing.T) {
+	raw := config.ProfileConfig{Provider: "base"}
+	normalized := normalize(raw)
+	before := snapshotProfile(t, normalized)
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			body := `{"lanes":{"reasoner":{"model":"user:r"}},"explore":{"model":"user:e"},"challenge":{"model":"user:h"}}`
+			if i%2 == 0 {
+				body = `{}`
+			}
+			for j := 0; j < 50; j++ {
+				ResolveProfile(raw, normalized, body)
+			}
+		}(i)
+	}
+	wg.Wait()
+	if snapshotProfile(t, normalized) != before {
+		t.Fatal("shared profile changed")
 	}
 }

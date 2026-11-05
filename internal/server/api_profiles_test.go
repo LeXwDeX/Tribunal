@@ -34,8 +34,13 @@ func (f *fakeProfileOverrides) PutProfileOverrides(_ context.Context, profile, b
 	f.revision = revision + 1
 	return &store.ProfileOverrides{Profile: profile, OverridesJSON: body, Revision: f.revision}, nil
 }
-func (f *fakeProfileOverrides) DeleteProfileOverrides(context.Context, string, int64) error {
-	return f.putErr
+func (f *fakeProfileOverrides) DeleteProfileOverrides(_ context.Context, profile string, revision, userID int64) (*store.ProfileOverrides, error) {
+	if f.putErr != nil {
+		return nil, f.putErr
+	}
+	f.body = `{}`
+	f.revision = revision + 1
+	return &store.ProfileOverrides{Profile: profile, OverridesJSON: `{}`, Revision: f.revision, UpdatedBy: userID}, nil
 }
 func (f *fakeProfileOverrides) ListProfileModelReferences(context.Context, string) ([]store.ProfileModelReference, error) {
 	return f.refs, nil
@@ -94,7 +99,7 @@ func profileCatalog(t *testing.T) *llm.Catalog {
 	t.Helper()
 	t.Setenv("PROFILE_TEST_KEY", "k")
 	provider := func(model string) config.ProviderConfig {
-		return config.ProviderConfig{Protocol: "openai-chat", BaseURL: "https://llm.example.test/v1", Model: model,
+		return config.ProviderConfig{Protocol: "openai-chat", BaseURL: "https://93.184.216.34/v1", Model: model,
 			APIKeyEnv: "PROFILE_TEST_KEY", MaxTokens: 1000, MaxConcurrency: 1}
 	}
 	catalog, err := llm.NewCatalog(context.Background(), map[string]config.ProviderConfig{
@@ -289,4 +294,89 @@ func TestProfileOverridesHTTPUnknownModelAndRevisionConflict(t *testing.T) {
 	response = admin.json(http.MethodPut, "/api/v1/profiles/default/overrides", map[string]any{
 		"overrides": map[string]any{}, "revision": 0})
 	assertStatus(t, response, http.StatusConflict)
+}
+
+// DELETE needs the revision the admin saw: a stale one is a 409 that leaves
+// another admin's changes alone, and a good one records the acting user and
+// returns the stored revision.
+func TestProfileOverridesDeleteChecksRevisionAndRecordsActor(t *testing.T) {
+	platform := &config.Config{Profiles: map[string]config.ProfileConfig{"default": {Provider: "config-model"}}}
+	env := newM6Env(t, m6Options{profileOverrides: true, platform: platform})
+	admin := env.loginAs("code-admin")
+	for revision := 0; revision < 2; revision++ {
+		assertStatus(t, admin.json(http.MethodPut, "/api/v1/profiles/default/overrides", map[string]any{
+			"overrides": map[string]any{"default": map[string]any{"params": map[string]any{"max_tokens": 5 + revision}}}, "revision": revision}), http.StatusOK)
+	}
+	saved, err := env.sqlite.GetProfileOverrides(context.Background(), "default")
+	if err != nil || saved.Revision != 2 || saved.UpdatedBy == 0 {
+		t.Fatalf("saved = %+v (%v)", saved, err)
+	}
+	assertStatus(t, admin.request(http.MethodDelete, "/api/v1/profiles/default/overrides?revision=1", nil, nil), http.StatusConflict)
+	if after, _ := env.sqlite.GetProfileOverrides(context.Background(), "default"); after.Revision != 2 || after.OverridesJSON == `{}` {
+		t.Fatalf("a stale delete changed the document: %+v", after)
+	}
+	response := admin.request(http.MethodDelete, "/api/v1/profiles/default/overrides?revision=2", nil, nil)
+	assertStatus(t, response, http.StatusOK)
+	after, _ := env.sqlite.GetProfileOverrides(context.Background(), "default")
+	var view struct {
+		Revision int64 `json:"revision"`
+	}
+	if err := json.Unmarshal(response.body, &view); err != nil {
+		t.Fatal(err)
+	}
+	if after.Revision != 3 || view.Revision != after.Revision || after.UpdatedBy != saved.UpdatedBy || after.OverridesJSON != `{}` {
+		t.Fatalf("after delete: %+v, response revision %d", after, view.Revision)
+	}
+}
+
+func TestProfileOverridesPutRejectsUnavailableAndWhitespaceModels(t *testing.T) {
+	server := rawProfileServer(t, &fakeProfileOverrides{body: `{}`})
+	put := func(body string) *httptest.ResponseRecorder {
+		response := httptest.NewRecorder()
+		server.handlePutProfileOverrides(response, httptest.NewRequest(http.MethodPut, "/api/v1/profiles/default/overrides", strings.NewReader(body)))
+		return response
+	}
+	if r := put(`{"overrides":{"explore":{"model":" config:beta"}},"revision":0}`); r.Code != http.StatusBadRequest || !strings.Contains(r.Body.String(), "overrides.explore.model") {
+		t.Fatalf("whitespace id = %d %s", r.Code, r.Body.String())
+	}
+	if r := put(`{"overrides":{"explore":{"params":{"thinking":{"budget_tokens":0}}}},"revision":0}`); r.Code != http.StatusBadRequest || !strings.Contains(r.Body.String(), "omit the field to inherit") {
+		t.Fatalf("no-op param = %d %s", r.Code, r.Body.String())
+	}
+}
+
+// PUT, GET, DELETE, GET over real handlers: after the reset the configured
+// values are back and the platform profiles were never changed.
+func TestProfileOverridesResetRestoresConfiguredValues(t *testing.T) {
+	raw := config.ProfileConfig{Provider: "alpha", Lanes: &config.LanesConfig{Reasoner: config.LaneConfig{Provider: "gamma"}}}
+	normalized, _ := config.NormalizeReviewProfile(raw)
+	platform := &config.Config{
+		Profiles:    map[string]config.ProfileConfig{"default": normalized},
+		RawProfiles: map[string]config.ProfileConfig{"default": raw},
+	}
+	before, _ := json.Marshal(platform.Profiles)
+	beforeRaw, _ := json.Marshal(platform.RawProfiles)
+	env := newM6Env(t, m6Options{profileOverrides: true, platform: platform, models: profileCatalog(t)})
+	admin := env.loginAs("code-admin")
+	reasoner := func() nodeJSON {
+		response := admin.request(http.MethodGet, "/api/v1/profiles/default", nil, nil)
+		assertStatus(t, response, http.StatusOK)
+		return decodeNodes(t, response.body)["lanes.reasoner"]
+	}
+	if n := reasoner(); n.Model != "config:gamma" || n.Source != "config" {
+		t.Fatalf("initial reasoner = %+v", n)
+	}
+	assertStatus(t, admin.json(http.MethodPut, "/api/v1/profiles/default/overrides", map[string]any{
+		"overrides": map[string]any{"lanes": map[string]any{"reasoner": map[string]any{"model": "config:beta"}}}, "revision": 0}), http.StatusOK)
+	if n := reasoner(); n.Model != "config:beta" || n.Source != "override" {
+		t.Fatalf("overridden reasoner = %+v", n)
+	}
+	assertStatus(t, admin.request(http.MethodDelete, "/api/v1/profiles/default/overrides?revision=1", nil, nil), http.StatusOK)
+	if n := reasoner(); n.Model != "config:gamma" || n.Source != "config" || n.Override != nil {
+		t.Fatalf("reasoner after reset = %+v", n)
+	}
+	after, _ := json.Marshal(platform.Profiles)
+	afterRaw, _ := json.Marshal(platform.RawProfiles)
+	if string(after) != string(before) || string(afterRaw) != string(beforeRaw) {
+		t.Fatal("platform profiles were mutated")
+	}
 }

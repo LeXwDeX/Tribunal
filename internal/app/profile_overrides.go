@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 
 	"github.com/LeXwDeX/tribunal/internal/config"
@@ -102,11 +103,23 @@ func parseProfileOverrides(body string) profileOverrideDocument {
 	return doc
 }
 
+// OverrideModel is what validation needs to know about a catalog model.
+type OverrideModel struct {
+	Unavailable bool
+	Protocol    string
+	MaxTokens   int
+}
+
+// anthropicMinBudget is the smallest thinking budget the Anthropic API accepts.
+const anthropicMinBudget = 1024
+
 // ValidateProfileOverrides checks an override document before it is stored:
-// unknown fields, parameters outside the whitelist or the model rules, and
-// model IDs for which modelExists reports false. Each problem names the path
-// of the offending field under "overrides".
-func ValidateProfileOverrides(body []byte, modelExists func(id string) bool) []Detail {
+// unknown fields, model IDs that are not trimmed, missing or unavailable in the
+// catalog (lookup), parameters outside the whitelist or the model rules, and
+// parameter combinations the node's effective model cannot honour. Each
+// problem names the path of the offending field under "overrides". A nil
+// lookup skips the catalog checks.
+func ValidateProfileOverrides(body []byte, raw, normalized config.ProfileConfig, lookup func(id string) (OverrideModel, bool)) []Detail {
 	var doc profileOverrideDocument
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
@@ -120,8 +133,15 @@ func ValidateProfileOverrides(body []byte, modelExists func(id string) bool) []D
 			continue
 		}
 		field := "overrides." + slot.path
-		if id := o.model(); id != "" && modelExists != nil && !modelExists(id) {
-			details = append(details, Detail{Field: field + ".model", Message: "model does not exist"})
+		if id := o.Model; id != strings.TrimSpace(id) {
+			details = append(details, Detail{Field: field + ".model", Message: "model must not have leading or trailing whitespace"})
+		} else if id != "" && lookup != nil {
+			switch model, ok := lookup(id); {
+			case !ok:
+				details = append(details, Detail{Field: field + ".model", Message: "model does not exist"})
+			case model.Unavailable:
+				details = append(details, Detail{Field: field + ".model", Message: "model is unavailable"})
+			}
 		}
 		if o.Params != nil {
 			if err := config.ValidateNodeParams(field+".params", *o.Params); err != nil {
@@ -136,7 +156,53 @@ func ValidateProfileOverrides(body []byte, modelExists func(id string) bool) []D
 			}
 		}
 	}
+	if len(details) > 0 || lookup == nil {
+		return details
+	}
+	// The remaining checks depend on the model each node ends up with.
+	resolved := ResolveProfile(raw, normalized, string(body))
+	for _, slot := range profileSlots {
+		if slot.key == "" {
+			continue
+		}
+		params, ok := resolved.Effective.NodeParams[slot.key]
+		if !ok || params.Thinking == nil || params.Thinking.BudgetTokens <= 0 {
+			continue
+		}
+		field := "overrides." + slot.path
+		if doc.slot(slot.key).params().IsZero() {
+			field = "overrides.default"
+		}
+		field += ".params"
+		model, ok := lookup(nodeModelID(resolved.Nodes, slot.node))
+		budget := params.Thinking.BudgetTokens
+		add := func(message string) {
+			detail := Detail{Field: field + ".thinking.budget_tokens", Message: message}
+			if !slices.Contains(details, detail) {
+				details = append(details, detail)
+			}
+		}
+		if ok && model.Protocol == "anthropic" && budget < anthropicMinBudget {
+			add("must be at least 1024 for anthropic models")
+		}
+		maxTokens := model.MaxTokens
+		if params.MaxTokens != nil {
+			maxTokens = *params.MaxTokens
+		}
+		if (ok || params.MaxTokens != nil) && maxTokens > 0 && maxTokens <= budget {
+			add("must be less than max_tokens")
+		}
+	}
 	return details
+}
+
+func nodeModelID(nodes []ProfileNodeView, node string) string {
+	for _, n := range nodes {
+		if n.Node == node {
+			return n.Model
+		}
+	}
+	return ""
 }
 
 // ProfileNodeView is one configurable node: what the configuration alone
