@@ -204,10 +204,7 @@ func (s *Server) handleDeleteModel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if strings.HasPrefix(id, "config:") {
-		id = strings.TrimPrefix(id, "config:")
-	}
+	id := strings.TrimPrefix(r.PathValue("id"), "config:")
 	if s.llm == nil {
 		writeError(w, r, http.StatusServiceUnavailable, "unavailable", "provider testing is unavailable", nil)
 		return
