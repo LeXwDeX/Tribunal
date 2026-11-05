@@ -48,11 +48,27 @@ function blocks(text) {
     const props = new Map()
     for (const part of match[2].split(';')) {
       const colon = part.indexOf(':')
-      if (colon > 0) props.set(part.slice(0, colon).trim(), part.slice(colon + 1).trim())
+      if (colon > 0) props.set(part.slice(0, colon).trim(), part.slice(colon + 1).replace(/!important/, '').trim())
     }
     out.push({ selector: match[1].trim(), props, index: match.index + match[1].length })
   }
   return out
+}
+
+function isZero(value) {
+  return /^0(?:px)?$/.test(value || '')
+}
+
+function edges(props) {
+  // Resolve inset shorthand and longhands to [top, right, bottom, left].
+  const box = (props.get('inset') || '').split(/\s+/).filter(Boolean)
+  const [top, right = top, bottom = top, left = right] = box
+  return [
+    props.get('top') ?? top,
+    props.get('right') ?? right,
+    props.get('bottom') ?? bottom,
+    props.get('left') ?? left,
+  ]
 }
 
 function scanScrollbarGutter(clean, file) {
@@ -61,9 +77,9 @@ function scanScrollbarGutter(clean, file) {
   // full-viewport fixed overlay is widened to cover that gutter.
   const diagnostics = []
   const rules = blocks(clean)
-  if (file === 'global.css' || file.endsWith('/global.css')) {
-    const reserved = rules.some((rule) => rule.selector === 'html'
-      && /\bstable\b/.test(rule.props.get('scrollbar-gutter') || ''))
+  if (/(?:^|[\\/])global\.css$/.test(file)) {
+    const reserved = rules.some((rule) => rule.selector.split(',').some((part) => ['html', ':root'].includes(part.trim()))
+      && /^stable\b/.test(rule.props.get('scrollbar-gutter') || ''))
     if (!reserved) {
       diagnostics.push({
         file,
@@ -75,8 +91,9 @@ function scanScrollbarGutter(clean, file) {
     }
   }
   for (const rule of rules) {
-    if (rule.props.get('position') !== 'fixed' || rule.props.get('inset') !== '0') continue
-    if (rule.props.get('width') === '100vw') continue
+    if (rule.props.get('position') !== 'fixed') continue
+    if (!edges(rule.props).every(isZero)) continue
+    if (/^100[dsl]?vw$/.test(rule.props.get('width') || '')) continue
     diagnostics.push({
       file,
       line: lineOf(clean, rule.index),

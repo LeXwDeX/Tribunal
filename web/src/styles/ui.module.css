@@ -748,7 +748,7 @@
   width: min(620px, 100%);
   max-height: calc(100vh - 48px);
   overflow-y: auto;
-  scrollbar-gutter: stable;
+  scrollbar-gutter: stable both-edges;
   background: var(--surface);
   color: var(--text);
   border-radius: var(--radius-lg);
@@ -814,7 +814,7 @@
   flex: 1;
   min-width: 0;
   overflow: auto;
-  scrollbar-gutter: stable;
+  scrollbar-gutter: stable both-edges;
   padding: 18px 22px;
   display: flex;
   flex-direction: column;
@@ -1055,9 +1055,10 @@
     min-width: 0;
   }
   .toastRegion {
+    left: 12px;
     right: 12px;
     bottom: 12px;
-    width: calc(100vw - 24px);
+    width: auto;
   }
   .toolbar .field,
   .filterBarField {

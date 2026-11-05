@@ -21,6 +21,28 @@ describe('web style checks', () => {
     expect(anchored.filter((d) => d.rule === 'overlay-gutter')).toHaveLength(0)
   })
 
+  it('matches root and overlay variants of the scrollbar gutter rules', () => {
+    for (const css of [':root { scrollbar-gutter: stable; }', 'html, body { scrollbar-gutter: stable both-edges; }']) {
+      expect(scanCss(css, 'styles/global.css').filter((d) => d.rule === 'root-scrollbar-gutter')).toHaveLength(0)
+    }
+    expect(scanCss('html { scrollbar-gutter: auto; }', 'styles\\global.css')
+      .filter((d) => d.rule === 'root-scrollbar-gutter')).toHaveLength(1)
+    for (const css of [
+      '.o { position: fixed; inset: 0px; }',
+      '.o { position: fixed; inset: 0 0 0 0; }',
+      '.o { position: fixed !important; inset: 0 !important; }',
+      '.o { position: fixed; top: 0; right: 0; bottom: 0; left: 0; }',
+    ]) {
+      expect(scanCss(css, 'x.module.css').filter((d) => d.rule === 'overlay-gutter')).toHaveLength(1)
+    }
+    for (const css of [
+      '.o { position: fixed; inset: 0; right: auto; width: 100dvw; }',
+      '.o { position: fixed; inset: 0 auto 0 0; width: var(--nav-w); }',
+    ]) {
+      expect(scanCss(css, 'x.module.css').filter((d) => d.rule === 'overlay-gutter')).toHaveLength(0)
+    }
+  })
+
   it('finds no scrollbar gutter violations in the application styles', () => {
     const diagnostics = checkDir('src')
     expect(diagnostics.filter((d) => d.rule === 'root-scrollbar-gutter' || d.rule === 'overlay-gutter')).toEqual([])
