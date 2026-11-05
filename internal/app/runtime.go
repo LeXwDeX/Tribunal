@@ -275,14 +275,9 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 	projectSkills := &projectAwareSkillProvider{resolver: projectExts, base: skillProvider, blocks: blocks}
 	reviewBlocks := projectBindingStubs(blocks)
 	statusFeed := newStatusReporter(deps.GitLab, logger)
+	// Configured names only: user models are resolved from the catalog at
+	// call time and never enter the profile hash (#299).
 	allowedProviders := providerNames(cfg.Providers)
-	if modelCatalog != nil {
-		for _, model := range modelCatalog.List() {
-			if strings.HasPrefix(model.ID, "user:") {
-				allowedProviders = append(allowedProviders, model.ID)
-			}
-		}
-	}
 	reviews, err := NewReviewService(ReviewServiceConfig{
 		Store:             deps.Store,
 		GitLab:            deps.GitLab,

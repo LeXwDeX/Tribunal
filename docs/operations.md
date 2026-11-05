@@ -39,9 +39,9 @@ chmod 600 .env
 
 `config/server.docker.yaml` 只读挂载到 `/app/config/server.yaml`。它默认只绑定一个名为 `primary` 的 provider，`onboarding` 档位用其初始化仓库上下文，唯一的评审档位 `default` 用同一个 provider 运行全部评审节点（`explore`、`code-review`、`review`、`reasoner`、`validate` 和逐条反证 `verify`）；plan 和 synthesize 是代码节点，不默认启用多模型对抗。需要第二个 provider 时，按[多 Provider 配置](#多-provider-配置)操作；secondary 模板默认保持注释，不影响 primary-only 部署。该示例配置的数据库与工作区分别使用 `/app/data/review.db` 和 `/app/data/workspaces`；实际路径以生效配置和挂载为准。其他参数沿用应用内置默认值。不要移除 `profiles.onboarding.agent.provider` 或 `profiles.default.provider`：前者会导致工作区初始化失败，后者会让 `default` 档位没有 provider 可用而无法评审，即使健康检查和 `--check-config` 通过。
 
-升级到含迁移 `0027`/`0028` 的版本前，同样按第 7 节备份。`0027` 为 `users` 增加全局只读列；`0028` 增加评审档位覆盖与模型引用表，两者都不可逆。模型管理写操作立即对之后启动的评审生效；进行中的评审使用启动时的 client 快照，重启后若被引用模型变化会按执行身份取消。全局模式只授予读取，项目管理仍需逐项目 `manage`。回退必须恢复升级前快照和匹配的旧镜像，不能只换回旧镜像。
+升级到含迁移 `0027`/`0028` 的版本前，同样按第 7 节备份。`0027` 为 `users` 增加全局只读列；`0028` 增加评审档位覆盖与模型引用表，两者都不可逆。模型管理写操作立即对之后启动的评审生效；进行中的评审使用启动时的 client 快照，重启后若被引用的用户模型设置变化，档位哈希随之改变，被中断的工作流恢复时会取消（失败即关闭），恢复日志的 cause 为 `profile_hash_changed`。全局模式只授予读取，项目管理仍需逐项目 `manage`。回退必须恢复升级前快照和匹配的旧镜像，不能只换回旧镜像。
 
-升级到含迁移 `0026` 的版本前，按第 7 节做数据库及 WAL/SHM、工作区、配置、镜像和主密钥的一致性备份。该迁移没有 down migration；回退必须恢复匹配的旧镜像和备份。配置 provider 的名称不能含 `:`，`max_tokens` 必须为正数；旧挂载配置须手工补充该值并重启。temperature 须在 0–2，thinking budget 与 context window 不能为负。模型凭据使用原主密钥加密，不支持主密钥轮换；软删除清空当前行的密文，不保证擦除旧 WAL、快照或备份。运行时目录已接入：用户模型无需重启即可被新工作流使用，单条坏记录隔离为 unavailable，不影响其他模型；模型密文解不开时存储层将其标为不可用；已有 MCP 主密钥校验仍可能阻止错误主密钥启动。修改模型会重建 client 和信号量，旧 client 继续服务在途工作流，因此同一模型 ID 的实际并发会短时叠加新旧两份上限。模型管理 API 见 HTTP API 设计文档；界面尚未提供。可在控制台外通过 `GET/PUT/DELETE /api/v1/profiles/default/overrides` 管理默认档位的节点 provider 覆盖；覆盖只作用于之后启动的工作流。工作流启动时固定当时的 client 快照，进程内 Refresh 不会改变在途工作流；跨重启恢复仍按当前目录重算执行身份，身份不一致会取消并记录 `execution_identity_changed`。
+升级到含迁移 `0026` 的版本前，按第 7 节做数据库及 WAL/SHM、工作区、配置、镜像和主密钥的一致性备份。该迁移没有 down migration；回退必须恢复匹配的旧镜像和备份。配置 provider 的名称不能含 `:`，`max_tokens` 必须为正数；旧挂载配置须手工补充该值并重启。temperature 须在 0–2，thinking budget 与 context window 不能为负。模型凭据使用原主密钥加密，不支持主密钥轮换；软删除清空当前行的密文，不保证擦除旧 WAL、快照或备份。运行时目录已接入：用户模型无需重启即可被新工作流使用，单条坏记录隔离为 unavailable，不影响其他模型；模型密文解不开时存储层将其标为不可用；已有 MCP 主密钥校验仍可能阻止错误主密钥启动。修改模型会重建 client 和信号量，旧 client 继续服务在途工作流，因此同一模型 ID 的实际并发会短时叠加新旧两份上限。模型管理 API 见 HTTP API 设计文档；界面尚未提供。可在控制台外通过 `GET/PUT/DELETE /api/v1/profiles/default/overrides` 管理默认档位的节点 provider 覆盖；覆盖只作用于之后启动的工作流。工作流启动时固定当时的 client 快照，进程内 Refresh 不会改变在途工作流；跨重启恢复仍按当前配置重算执行身份（配置 provider、块绑定、MCP 与 Skill 等），身份不一致会取消并记录 `execution_identity_changed`；用户模型的变化不走执行身份，而是通过档位哈希生效（见下）。档位哈希只包含配置 provider 名称和档位实际引用的用户模型的非密钥设置：新增或修改未被引用的用户模型不影响在途评审，修改被引用模型的设置则使被中断的工作流在恢复时取消（`cause=profile_hash_changed`）；评审图校验每次读取当前模型目录，新建或删除模型无需重启。
 
 包含 #164 的版本将 Anthropic 未缓存输入、缓存读取和缓存创建各计入一次输入 token；缓存读写字段是明细，不应再加到总输入上。预算使用该总输入和输出，因此可能比旧版本更早耗尽。成本估算对全部输入使用配置的 `input_per_mtok`，对输出使用 `output_per_mtok`，不区分缓存费率，不等于供应方账单；未配置价格时估算为零，不代表没有费用。已保存的历史用量不会追溯回填；升级后恢复旧工作流时，其已记录节点的缓存用量仍可能少计，导致剩余预算被高估。若当前评审需要准确执行预算，应取消后在升级版本重新触发，并另行统计已产生的用量。等待旧工作流结束不会修正其已少计的用量或预算限制。
 
@@ -875,6 +875,10 @@ curl -fsS http://127.0.0.1:18080/readyz
 
 `0024_workflow_usage_incomplete.sql` 只向 `workflows` 和 `workflow_nodes` 追加非空 `usage_incomplete` 列，默认 false；无 down migration。历史行不回填，false 只能表示没有检测到缺失，不能证明历史账单或预算用量完整。新事件可带此字段；旧二进制可能因严格解码拒绝这些事件。升级前按第 7 节做一致性备份并核验数据库、工作区、配置和匹配镜像；不要只换回旧镜像。回退时先备份当前状态、核对事件与目标版本兼容性，并按第 7 节在隔离环境验证匹配的升级前快照和镜像；恢复旧快照会丢失之后的新本地数据，须另外核对 GitLab 等外部副作用。`0020` 已在 `cf29656` 合并，`0021`–`0023` 随 PR #180 合并；当前源码检查未发现这些迁移重建上述两张表，升级前仍须重新核验迁移编号、顺序及实际影响，不能据此承诺兼容回退。
 
+**重启恢复与 token 预算（#325）**：进程被 SIGKILL 或崩溃后，启动恢复会重启运行中的节点（attempt+1），并把该工作流的用量标记为不完整（`usage_incomplete=true`，API 和控制台仍显示）。视图中的三个标记均由事件投影：`usage_incomplete`（检测到任何缺失，含重启或中止）、`usage_unreported`（不完整源于进程中断以外的原因：节点上报不完整、无效用量或计数溢出）、`usage_interruptions`（标记为不完整的 NodeRestarted 事件数，即恢复重启次数）。对设置了 `max_tokens > 0` 的工作流，仅当 `usage_unreported` 为真或 `usage_interruptions` 超过 3 时以 `unsafe_model_response` 阻断，否则以已提交用量作为下限继续运行。已接受的风险：每次中断可能丢失当时所有运行中节点的 attempt 尚未提交的全部用量（每一轮和节点内重试），实际花费可能超过记录总量；超过 3 次中断后预算检查重新 fail-closed，工作流期限仍限制运行时长；被取代 attempt 的迟到提交会被丢弃且不记用量。对成本敏感时，按供应方账单核对。
+
+**恢复取消的原因**：恢复后的评审以取消结束时，在日志中按 `workflow_id` 查找 INFO 日志 `recovery cancelling workflow`（在取消前记录，只表示取消决定，工作流已处于终态时仍可能出现），其 `cause` 给出稳定原因：`profile_hash_changed`（评审档位或其引用的模型身份变化）、`execution_identity_changed`（执行身份变化，例如扩展或 provider 配置变化）、`config_changed`（仓库评审配置、ignore 规则或提示词包变化，取代原日志 `recovery skipped workflow with changed configuration`）、`diff_version_changed`（MR diff 版本已更新）、`control_not_current`（已有更新的评审代次或评审已取消）、`workspace_identity_changed`、`index_ineligible`、`mr_inputs_unavailable`、`repo_config_invalid`、`profile_explicit_invalid`、`publication_policy_invalid`、`workspace_provenance_invalid`、`dossier_invalid`、`dossier_mismatch`，以及仓库 Skill 相关的 `repository_skill_capability_unsupported`、`repository_skill_changed`、`repository_skill_deny_invalid`、`repository_skill_resolve_failed`。恢复重跑后工作流以取消结束时，另有 INFO 日志 `recovery observed cancelled workflow`，`cause` 为 `superseded_during_run`，或保存的取消原因（如 `deadline`；为空时为 `unknown`）。任务重试路径（RunReview/Handle）取消被取代的工作流前记录 `review cancelling workflow`，`cause=control_not_current`。工作流中保存的取消原因和发布行为不受此日志影响；处理方式是先消除对应变化，再重新触发评审。其中档位或其引用的用户模型变化（`profile_hash_changed`）与执行身份变化（`execution_identity_changed`）还会把同名取消原因写入工作流，在评审详情中可见；其他原因的工作流取消原因仍为 `superseded`。
+
 新的 LLM 审计只写安全结构计数、用量及固定状态，不写 prompt、模型输出、工具参数/输出、推理内容、错误原文或上游响应 ID。调用列表使用本地 `id`；新旧行的顶层 `request_id` 不再对任何调用方返回。`include_payload=true` 仍要求项目 manage：历史 payload 不删除、不迁移，可能包含明文 prompt、输出和上游 ID。数据库、WAL、快照与备份也可能保有历史原文，限制访问并按组织的保留与密钥事件流程处理；不要将历史内容复制到日志、聊天或工单，也不要为升级擅自删除历史行。回退旧二进制可能再次暴露历史字段。
 
 新 payload 的 request、response 分别有 `_format=audit_metadata_v1`；未标记历史 payload 可能是完整旧请求/响应、旧元数据或截断摘要，甚至无法判别。升级依赖该接口的脚本以格式标记和字段类型分支处理，保留 unknown 分支，不得把新元数据的数字 `messages` 当成旧消息数组。详见[节点调用审计格式](design/03-http-api.md#节点调用审计格式)。
@@ -1354,6 +1358,10 @@ tribunalctl projects retry-onboarding <项目 ID>
 ### ignore 策略与索引
 
 项目 ignore 非空时，工作区索引会被有意阻断，接口返回 `index_status=degraded` 和 `last_error="index: blocked by ignore policy"`。控制台显示信息提示，不再把它当成索引故障。需要代码图谱索引时，先调整项目 ignore 配置，再执行重建索引；阻断本身是安全降级，不影响评审继续执行，详见 [ignore 安全边界](#ignore-安全边界)。
+
+### 评审永久失败排查
+
+评审以 `review execution failed` 结束且不会重试时，服务端会记录 WARN `review run failed permanently`，字段为 `project_id`、`mr_iid`、`generation`、`error_class` 和 `stage`；不记录原始错误。先按 `project_id` 与 `mr_iid` 定位该次评审，再看 `stage` 判断失败发生在哪一环节：`control`、`inputs`、`config`、`execution`、`prepare`、`graph`、`workflow`。`error_class` 给出失败类别，两者结合缩小排查范围；若怀疑与模型有关，到「模型与档位」页核对档位覆盖引用的模型是否存在且未被删除。处理后重新触发评审。
 
 ## 11. 并发压测
 

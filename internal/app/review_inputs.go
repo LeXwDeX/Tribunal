@@ -460,16 +460,47 @@ func reviewConfigHash(cfg effectiveReviewConfig) string {
 }
 
 func (s *ReviewService) reviewProfileHash(profile review.Profile) string {
+	data := s.reviewProfileHashPayload(profile)
+	if data == nil {
+		return ""
+	}
+	return sha256Hex(string(data))
+}
+
+// reviewProfileHashPayload serializes the profile identity (#299). Providers
+// lists configured provider names only; UserModels carries the non-secret
+// settings of the user models the profile actually references.
+func (s *ReviewService) reviewProfileHashPayload(profile review.Profile) []byte {
 	data, err := json.Marshal(struct {
 		Profile    review.Profile
 		Blocks     map[string]config.BlockBinding
 		Providers  []string
 		UserModels map[string]config.ProviderConfig `json:"user_models,omitempty"`
-	}{profile, s.blocks, s.providerNames, nil})
+	}{profile, s.blocks, s.providerNames, s.referencedUserModels(profile)})
 	if err != nil {
-		return ""
+		return nil
 	}
-	return sha256Hex(string(data))
+	return data
+}
+
+// referencedUserModels returns the catalog settings, without credentials, of
+// the user models the profile resolves to. It returns nil when there are none.
+func (s *ReviewService) referencedUserModels(profile review.Profile) map[string]config.ProviderConfig {
+	var out map[string]config.ProviderConfig
+	for _, name := range review.ProfileProviderRefs(profile) {
+		if !strings.HasPrefix(name, "user:") {
+			continue
+		}
+		model, ok := s.catalog.Resolve(name)
+		if !ok {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]config.ProviderConfig)
+		}
+		out[name] = model.ProviderConfig()
+	}
+	return out
 }
 
 // reviewFingerprint binds a workflow to the exact dossier, configuration, and
@@ -510,9 +541,21 @@ func (s *ReviewService) profileFor(ctx context.Context, project *store.Project, 
 	return "custom", config.ProfileConfig{}
 }
 
-// allowedProviders returns the provider allowlist used by graph validation.
-func (s *ReviewService) allowedProviders() []string {
-	return append([]string(nil), s.providerNames...)
+// graphProviders returns the provider allowlist used by graph validation:
+// configured provider names plus the user models in the catalog at call time.
+// Models created or deleted after startup are therefore reflected without a
+// restart. A nil configured list keeps validation disabled.
+func (s *ReviewService) graphProviders() []string {
+	if s.providerNames == nil {
+		return nil
+	}
+	out := append([]string(nil), s.providerNames...)
+	for _, model := range s.catalog.List() {
+		if strings.HasPrefix(model.ID, "user:") {
+			out = append(out, model.ID)
+		}
+	}
+	return out
 }
 
 func (s *ReviewService) contextDoc(ctx context.Context, projectID int64, targetSHA string) (string, string) {
