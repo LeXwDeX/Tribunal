@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/LeXwDeX/tribunal/internal/secret"
+	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
 func sealTestCipher(t *testing.T, b byte) *secret.Cipher {
@@ -435,4 +437,65 @@ func TestMCPConfigSealReportsVerifiedProjectCiphertext(t *testing.T) {
 	if err != nil || unverified {
 		t.Fatalf("project ciphertext = %v, %v; want a verified key", unverified, err)
 	}
+}
+
+func TestMCPConfigSealMasterKeyMismatchSentinel(t *testing.T) {
+	ctx := context.Background()
+	t.Run("verifier", func(t *testing.T) {
+		s := sealTestOpen(t, filepath.Join(t.TempDir(), "db"))
+		if _, err := s.ConfigureMCPSecrets(ctx, sealTestCipher(t, 1)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.ConfigureMCPSecrets(ctx, sealTestCipher(t, 2)); !errors.Is(err, ErrMasterKeyMismatch) {
+			t.Fatalf("err = %v; want ErrMasterKeyMismatch", err)
+		}
+	})
+	t.Run("project", func(t *testing.T) {
+		s := sealTestOpen(t, filepath.Join(t.TempDir(), "db"))
+		token, err := sealTestCipher(t, 1).Seal([]byte("synthetic-token"), secret.TokenAAD(10))
+		if err != nil {
+			t.Fatal(err)
+		}
+		sealTestProject(t, s, 10, token)
+		if _, err := s.ConfigureMCPSecrets(ctx, sealTestCipher(t, 2)); !errors.Is(err, ErrMasterKeyMismatch) {
+			t.Fatalf("err = %v; want ErrMasterKeyMismatch", err)
+		}
+	})
+	t.Run("model only", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "db")
+		s := sealTestOpen(t, path)
+		if err := s.ConfigureModelSecrets(ctx, sealTestCipher(t, 1)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.CreateModel(ctx, store.Model{DisplayName: "model", Protocol: "openai-chat", Model: "m", Params: store.ModelParams{MaxTokens: 1, MaxConcurrency: 1}, CreatedBy: 1}, "synthetic-credential"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.ConfigureMCPSecrets(ctx, sealTestCipher(t, 2)); !errors.Is(err, ErrMasterKeyMismatch) {
+			t.Fatalf("err = %v; want ErrMasterKeyMismatch", err)
+		}
+		var n int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM mcp_config_seal`).Scan(&n); err != nil || n != 0 {
+			t.Fatalf("verifier rows = %d, %v; wrong key must not write a verifier", n, err)
+		}
+		unverified, err := s.ConfigureMCPSecrets(ctx, sealTestCipher(t, 1))
+		if err != nil || unverified {
+			t.Fatalf("correct key = %v, %v; want verified by model credential", unverified, err)
+		}
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM mcp_config_seal`).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("verifier rows = %d, %v", n, err)
+		}
+	})
+	t.Run("model without ciphertext stays unverified", func(t *testing.T) {
+		s := sealTestOpen(t, filepath.Join(t.TempDir(), "db"))
+		if err := s.ConfigureModelSecrets(ctx, sealTestCipher(t, 1)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.CreateModel(ctx, store.Model{DisplayName: "model", Protocol: "openai-chat", Model: "m", Params: store.ModelParams{MaxTokens: 1, MaxConcurrency: 1}, CreatedBy: 1}, ""); err != nil {
+			t.Fatal(err)
+		}
+		unverified, err := s.ConfigureMCPSecrets(ctx, sealTestCipher(t, 2))
+		if err != nil || !unverified {
+			t.Fatalf("= %v, %v; want unverified", unverified, err)
+		}
+	})
 }
