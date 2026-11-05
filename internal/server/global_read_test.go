@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -37,9 +38,25 @@ func TestGlobalReadAdministration(t *testing.T) {
 	assertStatus(t, viewer.request(http.MethodGet, "/api/v1/projects/42", nil, nil), http.StatusOK)
 	assertStatus(t, admin.json(http.MethodPatch, path, map[string]any{"global_read": false, "revision": 4}), http.StatusOK)
 	assertStatus(t, viewer.request(http.MethodGet, "/api/v1/projects/42", nil, nil), http.StatusNotFound)
-	for _, part := range []string{`"event":"platform_audit"`, `"actor_id":7`, `"target_id":8`, `"global_read":true`, `"global_read":false`} {
-		if !strings.Contains(logs.String(), part) {
-			t.Fatalf("audit missing %s", part)
+	type auditEvent struct {
+		Event      string `json:"event"`
+		ActorID    int64  `json:"actor_id"`
+		TargetID   int64  `json:"target_id"`
+		GlobalRead *bool  `json:"global_read"`
+	}
+	var events []auditEvent
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var event auditEvent
+		if json.Unmarshal([]byte(line), &event) == nil && event.Event == "platform_audit" && event.GlobalRead != nil {
+			events = append(events, event)
+		}
+	}
+	if len(events) != 2 {
+		t.Fatalf("audit events = %d, want 2", len(events))
+	}
+	for i, want := range []bool{true, false} {
+		if events[i].ActorID != 7 || events[i].TargetID != 8 || *events[i].GlobalRead != want {
+			t.Fatalf("audit event %d = %+v, want actor 7 target 8 global_read %v", i, events[i], want)
 		}
 	}
 }

@@ -701,3 +701,30 @@ func TestProjectAccessMigrationFreshAndLegacy(t *testing.T) {
 		t.Fatalf("schema_migrations = %d, want %d", got, migrationCount(t))
 	}
 }
+
+func TestGlobalReadPersistsAcrossRestart(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "global-read.db")
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustAccessUser(t, s, 8, "bob", "viewer")
+	enabled := true
+	revision := int64(1)
+	if _, _, _, err := s.UpdatePlatformUser(ctx, 8, store.PlatformUserUpdate{GlobalRead: &enabled, Revision: &revision, ActorID: 8, AdminIDs: []int64{8}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	user, err := s.GetUser(ctx, 8)
+	if err != nil || !user.GlobalRead {
+		t.Fatalf("global read after restart = %+v, %v", user, err)
+	}
+}
