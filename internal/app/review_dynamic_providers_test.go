@@ -3,10 +3,14 @@ package app
 import (
 	"bytes"
 	"context"
+	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/repo"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/errclass"
 	"github.com/LeXwDeX/tribunal/internal/llm"
@@ -191,5 +195,51 @@ func TestRunReviewLogsStageAndErrorClassOnPermanentFailure(t *testing.T) {
 	}
 	if strings.Contains(out, "user:missing") {
 		t.Fatalf("log leaks the raw error:\n%s", out)
+	}
+}
+
+// A user model that already exists when the runtime starts must not leak into
+// the provider list that feeds the profile hash (#299, #327): a restart would
+// otherwise change every in-flight workflow's hash.
+func TestRuntimeHashedProvidersExcludeStartupUserModels(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("RUNTIME_PROVIDER_TEST_KEY", "k")
+	st := openTestStore(t)
+	if err := st.ConfigureModelSecrets(ctx, newTestCipher(t)); err != nil {
+		t.Fatalf("ConfigureModelSecrets: %v", err)
+	}
+	created, err := st.CreateModel(ctx, userModel("user:startup", "https://llm.example.test/v1", "m1", 1), "sk-startup-secret")
+	if err != nil {
+		t.Fatalf("CreateModel: %v", err)
+	}
+	cfg := &config.Config{
+		Workspace: config.WorkspaceConfig{Root: t.TempDir(), RunCleanupAfter: time.Hour},
+		Storage:   config.StorageConfig{LLMCallRetention: time.Hour, DeliveryRetention: time.Hour, JobRetention: time.Hour, ContextVersions: 1},
+		Engine:    config.EngineConfig{MaxConcurrentNodes: 1, DefaultNodeTimeout: time.Minute},
+		Profiles:  testProfiles(),
+		Providers: map[string]config.ProviderConfig{
+			"cfgprov": {Protocol: "openai-chat", BaseURL: "https://cfg.example.test/v1", Model: "m", APIKeyEnv: "RUNTIME_PROVIDER_TEST_KEY", MaxTokens: 100, MaxConcurrency: 1},
+		},
+	}
+	runtime, err := NewRuntime(ctx, cfg, RuntimeDeps{
+		Store:  st,
+		Cipher: newTestCipher(t),
+		GitLab: newRuntimeTestGitLab(),
+		Git:    repoGit{git: &repo.Git{}},
+	})
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+
+	if _, ok := runtime.catalog.Resolve(created.ID); !ok {
+		t.Fatal("fixture user model is missing from the catalog")
+	}
+	got := runtime.reviews.providerNames
+	if len(got) != 1 || got[0] != "cfgprov" {
+		t.Fatalf("hashed provider list = %v, want configured names only", got)
+	}
+	if graph := runtime.reviews.graphProviders(); !slices.Contains(graph, created.ID) {
+		t.Fatalf("graph validation list = %v, want it to include the catalog user model", graph)
 	}
 }
