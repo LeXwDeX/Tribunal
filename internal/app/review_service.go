@@ -115,6 +115,7 @@ type ReviewService struct {
 	prompts           prompts.Bundle
 	clients           review.ClientProvider
 	catalog           *llm.Catalog
+	overrides         store.ProfileOverrideStore
 	agentRun          review.AgentRunner
 	tools             review.ToolProvider
 	skills            review.SkillProvider
@@ -154,6 +155,7 @@ type ReviewServiceConfig struct {
 	Prompts           prompts.Bundle
 	Clients           review.ClientProvider
 	Catalog           *llm.Catalog
+	Overrides         store.ProfileOverrideStore
 	AgentRun          review.AgentRunner
 	Tools             review.ToolProvider
 	Skills            review.SkillProvider
@@ -232,6 +234,7 @@ func NewReviewService(cfg ReviewServiceConfig) (*ReviewService, error) {
 		prompts:        cfg.Prompts,
 		clients:        cfg.Clients,
 		catalog:        cfg.Catalog,
+		overrides:      cfg.Overrides,
 		agentRun:       cfg.AgentRun,
 		cost:           cfg.Cost,
 		tools:          cfg.Tools,
@@ -606,7 +609,7 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 	}
 	configHash := reviewConfigHash(cfg)
 	promptHash := s.prompts.Hash
-	profileName, profileCfg := s.profileFor(project, payload.Profile, cfg.Profile, inputs.MR.Labels, profileExplicit(payload))
+	profileName, profileCfg := s.profileFor(ctx, project, payload.Profile, cfg.Profile, inputs.MR.Labels, profileExplicit(payload))
 	profile := review.Profile{Name: profileName, Config: profileCfg}
 	profileHash := s.reviewProfileHash(profile)
 	if workflow != nil && storedDossier != nil {
