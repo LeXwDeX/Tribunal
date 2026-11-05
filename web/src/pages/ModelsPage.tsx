@@ -91,6 +91,7 @@ function ModelDrawer({ open, model, onClose, onSaved }: {
   const [baseURL, setBaseURL] = useState('')
   const [upstreamModel, setUpstreamModel] = useState('')
   const [maxTokens, setMaxTokens] = useState('')
+  const [maxConcurrency, setMaxConcurrency] = useState('1')
   const [temperature, setTemperature] = useState('')
   const [effort, setEffort] = useState('')
   const [keyMode, setKeyMode] = useState<KeyMode>('keep')
@@ -98,7 +99,7 @@ function ModelDrawer({ open, model, onClose, onSaved }: {
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string>()
   const [test, setTest] = useState<ProviderTestResult>()
-  const ids = { display: useId(), protocol: useId(), base: useId(), model: useId(), tokens: useId(), temp: useId(), effort: useId(), key: useId() }
+  const ids = { display: useId(), protocol: useId(), base: useId(), model: useId(), tokens: useId(), concurrency: useId(), temp: useId(), effort: useId(), key: useId() }
 
   useEffect(() => {
     if (!open) {
@@ -113,6 +114,7 @@ function ModelDrawer({ open, model, onClose, onSaved }: {
     setBaseURL(model?.base_url ?? '')
     setUpstreamModel(model?.model ?? '')
     setMaxTokens(model?.params?.max_tokens ? String(model.params.max_tokens) : '')
+    setMaxConcurrency(String(model?.params?.max_concurrency || 1))
     setTemperature(model?.params?.temperature !== undefined ? String(model.params.temperature) : '')
     setEffort(model?.params?.reasoning?.effort ?? '')
     setApiKey('')
@@ -122,10 +124,16 @@ function ModelDrawer({ open, model, onClose, onSaved }: {
   }, [open, model])
 
   const input = (): ModelWrite => {
-    const params: ModelParams = {}
+    // PATCH replaces the whole record, so start from the stored params and
+    // overlay only what this form edits.
+    const params: ModelParams = { ...(model?.params ?? {}) }
     if (maxTokens) params.max_tokens = Number(maxTokens)
+    else delete params.max_tokens
+    params.max_concurrency = Number(maxConcurrency)
     if (temperature) params.temperature = Number(temperature)
-    if (effort) params.reasoning = { effort }
+    else delete params.temperature
+    if (effort) params.reasoning = { ...params.reasoning, effort }
+    else delete params.reasoning
     const value: ModelWrite = {
       display_name: displayName.trim(), protocol, base_url: baseURL.trim(), model: upstreamModel.trim(), params,
     }
@@ -138,7 +146,18 @@ function ModelDrawer({ open, model, onClose, onSaved }: {
     return value
   }
 
+  const invalidParams = (): string | undefined => {
+    if (maxTokens && !(Number.isInteger(Number(maxTokens)) && Number(maxTokens) > 0)) return 'max_tokens 必须是正整数。'
+    if (!(Number.isInteger(Number(maxConcurrency)) && Number(maxConcurrency) > 0)) return 'max_concurrency 必须是正整数。'
+    return undefined
+  }
+
   const save = async () => {
+    const invalid = invalidParams()
+    if (invalid) {
+      setError(invalid)
+      return
+    }
     setPending(true)
     setError(undefined)
     try {
@@ -156,6 +175,12 @@ function ModelDrawer({ open, model, onClose, onSaved }: {
   }
 
   const runTest = async () => {
+    const invalid = invalidParams()
+    if (invalid) {
+      setError(invalid)
+      setTest(undefined)
+      return
+    }
     setPending(true)
     setError(undefined)
     setTest(undefined)
@@ -195,6 +220,7 @@ function ModelDrawer({ open, model, onClose, onSaved }: {
       <Field label="base_url" htmlFor={ids.base}><input id={ids.base} className={ui.input} value={baseURL} onChange={(event) => setBaseURL(event.target.value)} /></Field>
       <Field label="上游模型" htmlFor={ids.model}><input id={ids.model} className={ui.input} value={upstreamModel} onChange={(event) => setUpstreamModel(event.target.value)} /></Field>
       <Field label="max_tokens" htmlFor={ids.tokens}><input id={ids.tokens} className={ui.input} inputMode="numeric" value={maxTokens} onChange={(event) => setMaxTokens(event.target.value)} /></Field>
+      <Field label="max_concurrency" htmlFor={ids.concurrency} hint="同时进行的请求数，必须为正整数。"><input id={ids.concurrency} className={ui.input} inputMode="numeric" value={maxConcurrency} onChange={(event) => setMaxConcurrency(event.target.value)} /></Field>
       <Field label="temperature" htmlFor={ids.temp}><input id={ids.temp} className={ui.input} inputMode="decimal" value={temperature} onChange={(event) => setTemperature(event.target.value)} /></Field>
       <Field label="reasoning effort" htmlFor={ids.effort} hint="anthropic 不会发送 effort。">
         <select id={ids.effort} className={ui.input} value={effort} onChange={(event) => setEffort(event.target.value)}>

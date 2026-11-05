@@ -106,7 +106,7 @@ func TestModelUpdateMapsStaleRevision(t *testing.T) {
 		t.Fatal(err)
 	}
 	server, _ := newModelTestServer(t, catalog, &fakeModelStore{updateErr: store.ErrStaleRevision})
-	request := httptest.NewRequest(http.MethodPatch, "/api/v1/models/user:x", strings.NewReader(`{"revision":2}`))
+	request := httptest.NewRequest(http.MethodPatch, "/api/v1/models/user:x", strings.NewReader(`{"display_name":"x","protocol":"openai-chat","base_url":"https://example.com","model":"m","params":{"max_tokens":16,"max_concurrency":1},"revision":2}`))
 	request.SetPathValue("id", "user:x")
 	response := httptest.NewRecorder()
 	server.handleUpdateModel(response, request)

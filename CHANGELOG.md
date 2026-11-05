@@ -35,7 +35,7 @@
 
 - 修改模型会重建 client 和信号量，旧 client 继续服务在途工作流，同一模型 ID 的实际并发会短时叠加新旧两份上限。
 - 不支持 masterkey 轮换；软删除保留模型元数据并清空当前行密文，不保证擦除 WAL、快照或备份。
-- 评审档位的参数覆盖、来源标注、同模型投票提示尚未完整实现；模型草稿测试端点返回 501。
+- 评审档位的参数覆盖、来源标注、同模型投票提示尚未完整实现。
 
 ### 变更
 
@@ -58,6 +58,7 @@
 - **大 MR 评审不再截断 diff**（[#300](https://github.com/LeXwDeX/Tribunal/issues/300)）：评审 prompt 先给出每个变更文件的索引，再在任务预算内完整内联 diff；放不下的文件整文件不内联，由新增的 `list_changes` 和 `read_diff` 工具按 hunk 读取。`read_file` 和 `grep` 新增 `rev=head|base`。覆盖判定要求未内联文件的所有 hunk 都经 `read_diff` 读过，节点输出记录 `diff_reads`；没读完时按证据缺口处理，不会给出干净的 PASS。单文件 16000 字符和单包 120000 字符的截断都已取消。大 MR 会因此增加读取工具调用，评审耗时和 token 用量可能上升。
 - **空 diff 评审不再 PASS**（[#329](https://github.com/LeXwDeX/Tribunal/issues/329)）：空 diff 的 MR 返回 INCOMPLETE，摘要说明“没有可评审的变更”，启用 commit status 时写 failed；全部变更被 ignore 的既有 PASS 行为不变。控制台可见性由 [#331](https://github.com/LeXwDeX/Tribunal/issues/331) 跟踪。
 - **控制台**：「模型与档位」页只把 `default` 显示为「评审档位」，按固定的八步拓扑（探索、提出、挑战、裁决、汇报）列出各步骤的 provider，`onboarding` 单独标为「项目接入」；项目注册、项目设置和手动触发评审对话框不再有档位选择，项目列表不再有档位列。执行阶段轨道里 `explore` 和 `plan` 归入「规划」，`code-review`、`review`、`reasoner` 和 `validate` 归入「提出」；「项目接入」一行在 onboarding 没有 provider 时显示「未配置」。
+- **模型草稿测试**（[#333](https://github.com/LeXwDeX/Tribunal/issues/333)）：`POST /api/v1/models:test` 不再固定返回 501，可在保存前测试草稿；校验同创建，出站规则同用户模型，不保存数据、不刷新目录、不产生计费记录。编辑已有用户模型时可传 `id` 并省略 `api_key`，服务端使用已保存的凭据，且仅当协议和端点（scheme、host、port）未变时才复用，否则要求重新填写 `api_key`。成功响应为 `{ok, model, latency_ms}`。
 
 ### 修复
 
@@ -66,6 +67,8 @@
 - **评审永久失败时输出可定位的诊断日志**（[#327](https://github.com/LeXwDeX/Tribunal/issues/327)）：服务端记录 WARN `review run failed permanently`，含 `project_id`、`mr_iid`、`generation`、`error_class` 和 `stage`（`control`、`inputs`、`config`、`execution`、`prepare`、`graph`、`workflow` 之一）；不记录原始错误。
 - **进程重启后带 token 预算的评审可以续跑**（[#325](https://github.com/LeXwDeX/Tribunal/issues/325)）：进程被 SIGKILL 或崩溃后，启动恢复会重启运行中的节点（attempt+1）并把该工作流的用量标记为不完整（`usage_incomplete=true`，API 和控制台仍显示）。v1.3.0 的不完整用量预算策略曾使设置了 `max_tokens > 0` 的工作流在恢复后所有模型节点都在调用模型前以 `unsafe_model_response` 失败，被中断的评审无法续跑。现在视图新增 `usage_unreported`（不完整源于进程中断以外的原因：节点上报不完整、无效用量或计数溢出）和 `usage_interruptions`（恢复重启次数）；仅当 `usage_unreported` 为真或 `usage_interruptions` 超过 3 时才以 `unsafe_model_response` 阻断，否则工作流以已提交用量作为下限继续。已接受的风险：每次中断可能丢失当时所有运行中节点尚未提交的全部用量（每一轮和节点内重试），实际花费可能超过记录总量；超过 3 次中断后预算检查重新 fail-closed，工作流期限仍限制运行时长。被取代 attempt 的迟到提交仍会被丢弃且不记用量。
 - **恢复取消原因写入日志**：启动恢复取消工作流前记录一条 INFO 日志 `recovery cancelling workflow`，带 `workflow_id` 和稳定的 `cause`（如 `profile_hash_changed`、`execution_identity_changed`、`config_changed`、`diff_version_changed`、`control_not_current`、`workspace_identity_changed`、`dossier_invalid`）；该日志记录取消决定，工作流已处于终态时仍可能出现。恢复重跑后发现工作流以取消结束时另记 INFO `recovery observed cancelled workflow`，`cause` 为 `superseded_during_run` 或保存的取消原因（如 `deadline`，为空则 `unknown`）。任务重试路径（RunReview/Handle）取消被取代的工作流前记录 `review cancelling workflow`，`cause=control_not_current`。工作流中保存的取消原因和发布行为不变。原日志 `recovery skipped workflow with changed configuration`（含 `config_hash`）已由 `cause=config_changed` 取代。
+- **已保存模型测试返回字段名**（[#333](https://github.com/LeXwDeX/Tribunal/issues/333)）：`POST /api/v1/models/{id}/test` 此前返回 Go 字段名 `Model` / `LatencyMS`；现在与草稿测试一致，返回 `ok`、`model`、`latency_ms`（成功时 `ok` 为 `true`）。旧版 `/providers` 测试端点不变。
+- **模型创建与修改返回字段级校验详情**（[#333](https://github.com/LeXwDeX/Tribunal/issues/333)）：`POST /api/v1/models` 与 `PATCH /api/v1/models/{id}` 校验失败时返回 400 `validation_failed` 和逐字段 `details`，不再是无说明的 400。
 - **主密钥不匹配时明确拒绝启动**（[#332](https://github.com/LeXwDeX/Tribunal/issues/332)）：配置的主密钥打不开库中已有密文时，服务记录一行 ERROR `master key does not match stored encrypted data; refusing to start`（只含环境变量名，不含密钥值）并退出，错误为 `initialize secrets: master key does not match stored encrypted data`，取代此前误导性的 `migrate MCP secrets: storage update failed`。这是有意拒绝：继续启动会用另一把密钥加密新凭据，使同一数据库混用两把密钥。仍不支持主密钥轮换。
 - **用户模型凭据纳入主密钥校验证据（纵深防御）**（[#332](https://github.com/LeXwDeX/Tribunal/issues/332)）：校验依据顺序为 MCP 校验标记、项目 token/webhook 密文，再到用户模型 API key 密文（任一能打开即可）；有证据但都打不开时拒绝启动，且不写入校验标记。校验标记自迁移 0017 起在每次成功启动时写入，因此含模型凭据却无校验标记的库通常不会出现，此项主要覆盖校验标记缺失（如被手工删除）的情形，避免用错误密钥写入新校验标记。
 
