@@ -349,7 +349,7 @@ MCP、Skill、块绑定列表使用游标分页。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/v1/providers` | provider 列表（**不含** API key）及近 24 小时调用统计；每项含 `unavailable` 与 `unavailable_reason`（`egress_denied` / `dns_lookup_failed`），被出站策略拒绝的配置 provider 在启动时标记，进程仍正常启动 |
+| GET | `/api/v1/providers` | provider 列表（**不含** API key）及近 24 小时调用统计；每项可含可选字段 `unavailable` 与 `unavailable_reason`（`egress_denied` / `dns_lookup_failed`），缺省表示配置 provider 可用。被出站策略拒绝的配置 provider 在启动时标记，进程仍正常启动 |
 | POST | `/api/v1/providers/{name}/test` | 发一条最小请求验证连通性和模型名；被出站策略拒绝时返回 `422 egress_denied`，日志只记录 provider ID 与错误类别 |
 | GET | `/api/v1/profiles` | 档位定义（来自配置文件，只读）；含评审档位 `default` 和 `onboarding`，后者不是评审档位 |
 | GET | `/api/v1/stats` | `?from=&to=&project_id=`：运行次数（含 onboarding）、耗时、成本、项目/provider/块统计与 UTC 日趋势、finding 处置分布、人工质量指标、按模型调用与反馈原始计数；`to` 为排他上界 |
@@ -400,7 +400,7 @@ Anthropic 的输入 token 将未缓存输入、缓存读取和缓存创建各计
 
 比例字段（包括 provider 的 `error_rate`）统一为 `[0, 1]` 的小数，不混用百分数。`cost_micros` 是按配置价格估算的微美元（1 USD = 1,000,000 micros），不是 provider 账单核对结果。未配置价格时不可把估算零值解释为免费。
 
-Provider 返回 `name`、`protocol`、`base_url`、`model`、`max_concurrency`、`rpm`、`unavailable`、`unavailable_reason` 及 `stats_24h`（`calls`、`errors`、`error_rate`、`p50_latency_ms`），不返回 API key。连通性测试必须返回 `ok: boolean`，可附 `message`、`model`、`latency_ms`；缺少 `ok` 不能当作成功。
+Provider 返回 `name`、`protocol`、`base_url`、`model`、`max_concurrency`、`rpm`、可选的 `unavailable` / `unavailable_reason` 及 `stats_24h`（`calls`、`errors`、`error_rate`、`p50_latency_ms`），不返回 API key。连通性测试必须返回 `ok: boolean`，可附 `message`、`model`、`latency_ms`；缺少 `ok` 不能当作成功。
 
 ### 4.6 访问管理（平台管理员）
 
