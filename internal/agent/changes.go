@@ -161,8 +161,8 @@ func (c *ChangeSource) recomputeCompleteLocked() {
 			}
 			complete := true
 			for line := 1; line <= total; line++ {
-				lineTotal := c.lineTotals[path][hunk][line]
-				if !c.lineCoveredLocked(path, hunk, line, lineTotal) {
+				lineTotal, ok := c.lineTotals[path][hunk][line]
+				if !ok || !c.lineCoveredLocked(path, hunk, line, lineTotal) {
 					complete = false
 					break
 				}
@@ -473,6 +473,20 @@ func (c *ChangeSource) recordLinePart(id, path string, hunk, line, start, end, t
 		end = total
 	}
 	if start >= end {
+		if total == 0 {
+			c.mu.Lock()
+			if c.lineTotals[path] == nil {
+				c.lineTotals[path] = make(map[int]map[int]int)
+			}
+			if c.lineTotals[path][hunk] == nil {
+				c.lineTotals[path][hunk] = make(map[int]int)
+			}
+			c.lineTotals[path][hunk][line] = 0
+			c.pendingEvidence[id] = append(c.pendingEvidence[id], pendingRead{
+				path: path, hunk: hunk, line: line, start: 0, end: 0, total: 0,
+			})
+			c.mu.Unlock()
+		}
 		return
 	}
 	c.mu.Lock()
@@ -497,6 +511,9 @@ func (c *ChangeSource) recordLinePart(id, path string, hunk, line, start, end, t
 }
 
 func (c *ChangeSource) lineCoveredLocked(path string, hunk, line, total int) bool {
+	if total <= 0 {
+		return true
+	}
 	intervals := append([]readPart(nil), c.parts[path][hunk][line]...)
 	sort.Slice(intervals, func(i, j int) bool { return intervals[i].start < intervals[j].start })
 	covered := 0

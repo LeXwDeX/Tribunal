@@ -88,8 +88,9 @@ func TestReadDiffNeedsEveryLineOfALargeHunk(t *testing.T) {
 	if !strings.Contains(first.Content, "next_hunk: 1") || !strings.Contains(first.Content, "next_line:") {
 		t.Fatalf("large hunk was not paginated by line: %q", first.Content)
 	}
+	source.Flush()
 	if got := source.DiffReads()["big.go"]; len(got) != 0 {
-		t.Fatalf("partial hunk was counted as read: %v", got)
+		t.Fatalf("partial hunk was counted as read after a flush: %v", got)
 	}
 	var nextLine int
 	for _, line := range strings.Split(first.Content, "\n") {
@@ -274,5 +275,23 @@ func TestDroppedDeliveredPageStillCounts(t *testing.T) {
 	source.Flush()
 	if got := source.DiffReads()["long.go"]; len(got) != 1 || got[0] != 1 {
 		t.Fatalf("delivered first page was lost after compaction: %v", got)
+	}
+}
+
+func TestPartialPageFlushDoesNotCoverHunk(t *testing.T) {
+	var lines []string
+	lines = append(lines, "@@ -1 +1 @@")
+	for i := 0; i < 500; i++ {
+		lines = append(lines, "+line")
+	}
+	source := NewChangeSource([]ChangeFile{{Path: "big.go", Status: "modified", Diff: strings.Join(lines, "\n")}}, nil, nil)
+	sb := changeSandbox(t)
+	read := toolByName(t, BuiltinToolsWithChanges(sb, source), "read_diff")
+	if _, err := invoke(t, read, `{"path":"big.go","from_hunk":1}`); err != nil {
+		t.Fatal(err)
+	}
+	source.Flush()
+	if got := source.DiffReads()["big.go"]; len(got) != 0 {
+		t.Fatalf("first page was counted as the whole hunk: %v", got)
 	}
 }
