@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -411,5 +412,56 @@ func TestSyncPlatformRoles(t *testing.T) {
 	}
 	if err := s.SetPlatformRole(ctx, 7, "owner"); err == nil {
 		t.Fatalf("SetPlatformRole accepted an invalid role")
+	}
+}
+
+func TestSyncPlatformRolesMergesGrantedRoles(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	s := openTestStore(t, clock)
+	tests := []struct {
+		id       int64
+		config   bool
+		granted  bool
+		disabled bool
+		want     string
+	}{
+		{11, true, false, false, "admin"},
+		{12, false, true, false, "admin"},
+		{13, true, true, false, "admin"},
+		{14, false, false, false, "viewer"},
+		{15, true, true, true, "viewer"},
+	}
+	var ids []int64
+	for _, tc := range tests {
+		if err := s.CreateSession(ctx, sessionFor(fmt.Sprintf("user-%d", tc.id), tc.id, fmt.Sprintf("user%d", tc.id), clock.Now()), store.SessionLimits{}); err != nil {
+			t.Fatal(err)
+		}
+		if tc.config {
+			ids = append(ids, tc.id)
+		}
+		if tc.granted {
+			if _, err := s.db.Exec(`UPDATE users SET granted_role = 'admin' WHERE id = ?`, tc.id); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if tc.disabled {
+			if err := s.SetUserDisabled(ctx, tc.id, true); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := s.SyncPlatformRoles(ctx, ids, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range tests {
+		var role string
+		var granted sql.NullString
+		if err := s.db.QueryRow(`SELECT role, granted_role FROM users WHERE id = ?`, tc.id).Scan(&role, &granted); err != nil {
+			t.Fatal(err)
+		}
+		if role != tc.want || granted.Valid != tc.granted || (granted.Valid && granted.String != "admin") {
+			t.Errorf("user %d: role=%q granted=%v, want role=%q granted=%v", tc.id, role, granted, tc.want, tc.granted)
+		}
 	}
 }

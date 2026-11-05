@@ -85,10 +85,7 @@ func (s *Store) createAPIToken(ctx context.Context, user store.TokenUser, token 
 	// overwrite it.
 	if _, err := tx.ExecContext(ctx, `INSERT INTO users (id, username, name, role, last_login_at)
 		VALUES (?, ?, ?, ?, NULL)
-		ON CONFLICT (id) DO UPDATE SET
-			username = excluded.username,
-			name = excluded.name,
-			role = excluded.role`,
+		ON CONFLICT (id) DO NOTHING`,
 		user.ID, user.Username, name, user.Role); err != nil {
 		return nil, fmt.Errorf("sqlite: upsert api token user: %w", err)
 	}

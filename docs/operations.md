@@ -359,7 +359,9 @@ tribunalctl projects residues clean --yes
 
 ### 项目授权、用户停用和凭据撤销
 
-项目访问是 Tribunal 本地的 `project_grants`，不从 GitLab 组成员关系推导。`bootstrap_admins` 只决定平台管理标签；平台管理员读取或写入项目业务数据同样需要该项目授权。除下述注册人自动授权外，默认没有任何授权，`admin` 标签也不例外。入口检查中，无授权或项目不存在统一返回 404，只有 `read` 授权执行写操作返回 403。下述 dispatch 锁内复核不满足 manage 时统一返回 404，包括入口检查之后被降为 read 的请求。
+项目访问是 Tribunal 本地的 `project_grants`，不从 GitLab 组成员关系推导。`bootstrap_admins` 和已授予的平台角色只决定平台管理标签；平台管理员读取或写入项目业务数据同样需要该项目授权。除下述注册人自动授权外，默认没有任何授权，`admin` 标签也不例外。入口检查中，无授权或项目不存在统一返回 404，只有 `read` 授权执行写操作返回 403。下述 dispatch 锁内复核不满足 manage 时统一返回 404，包括入口检查之后被降为 read 的请求。
+
+平台管理员可通过用户管理 API 为已登录的 GitLab 用户授予或撤销平台管理员角色。配置指定的管理员不能降级或禁用；不能降级或禁用自己，也不能移除最后一个生效的管理员。更新用户时先读取用户列表，并在 PATCH 请求中提交该用户的 `revision`；旧的仅含 `disabled` 的请求需要补充该字段。角色变更在下一次请求生效，用户已有会话需重新获取 CSRF token。新增迁移 `0025` 不可逆，升级前应按本手册备份数据库及其 WAL/SHM、工作区、配置、镜像和加密密钥；回滚时恢复匹配的备份和旧版镜像。
 
 手动触发评审、刷新工作区、取消及重发评审会在项目生命周期锁内重新查询当前 manage grant 和用户启用状态，再访问项目凭据或入队。项目删除与重新登记使用同一锁；旧请求在删除后继续执行时，没有新 grant 则拒绝。复核时已有新 grant 的请求仍可继续。grant 或用户状态的独立变更不与此锁串行，复核之后的撤销不能保证阻止正在进行的请求；会话和 API token 仍按入口认证，不在此处再次核验。其他项目写接口（包括项目配置、webhook、上下文、扩展和问题标注）没有此项锁内授权保证，不能将此修复视为所有在途请求的即时撤销。
 
@@ -682,9 +684,9 @@ docker run -d --name tribunal \
 
 - `server.public_url` 必须是 GitLab 能访问的外部地址，并且与 OAuth Application 的 Redirect URI 同源。应用固定使用 `public_url + /auth/callback`。
 - `read_user` 是登录所需的最小 scope；应用调用 GitLab `/api/v4/user` 获取用户名。
-- `bootstrap_admins: []` 不授予任何账号平台管理员标签。需要授予时，先向用户确认实际 GitLab 数字用户 ID 和授权，再填写 `id:<GitLab 用户 ID>`；该写法只按 ID 匹配，GitLab 改名不影响。用户 ID 可在 GitLab 个人资料页或 `GET /api/v4/users?username=<name>` 查到。也兼容旧写法 GitLab **用户名**（不区分大小写，已弃用，见下文迁移步骤）：该用户名第一次以 admin 身份登录或访问时，Tribunal 把它绑定到当时的 GitLab 用户 ID 并写入 `admin_bindings`；之后其他账号即使改名为同一用户名，也只得到 `viewer`，日志记录 `bootstrap admin username is bound to another GitLab user`。匹配的用户获得平台 `admin` 标签；其他登录用户为 `viewer`。它不会创建 GitLab 账号，也不授予任何项目数据访问；项目权限仍需 `project_grants`。
+- `bootstrap_admins: []` 不通过配置授予平台管理员标签，已有数据库授权仍然生效。需要通过配置授予时，先向用户确认实际 GitLab 数字用户 ID 和授权，再填写 `id:<GitLab 用户 ID>`；该写法只按 ID 匹配，GitLab 改名不影响。用户 ID 可在 GitLab 个人资料页或 `GET /api/v4/users?username=<name>` 查到。也兼容旧写法 GitLab **用户名**（不区分大小写，已弃用，见下文迁移步骤）：该用户名第一次以 admin 身份登录或访问时，Tribunal 把它绑定到当时的 GitLab 用户 ID 并写入 `admin_bindings`；之后其他账号即使改名为同一用户名，也不会从该配置获得管理员角色，日志记录 `bootstrap admin username is bound to another GitLab user`。未被禁用且匹配配置或数据库授权的用户获得平台 `admin` 标签；其他登录用户为 `viewer`。配置不会创建 GitLab 账号，也不授予任何项目数据访问；项目权限仍需 `project_grants`。
 - 用户名绑定是首次使用即信任：升级前若该用户名已被他人占用，第一个登录的账号会拿到绑定。升级后请确认绑定正确（`SELECT username, user_id FROM admin_bindings;`），或直接改用 `id:` 写法。管理员 GitLab 账号重建、需要重新绑定时，先停服务，执行 `DELETE FROM admin_bindings WHERE username = '<小写用户名>';`，再启动并让正确账号登录；改用 `id:` 写法则不需要这一步。
-- 每个用户最多保留 10 个浏览器会话，再次登录会淘汰该用户自己最旧的会话，不影响其他用户；全局 4096 个会话只是存储兜底，触发时先淘汰非管理员的最旧会话，只有剩下的会话全部属于管理员时才淘汰管理员的会话。角色按当前 `bootstrap_admins` 判断，启动时和会话被使用时都会刷新；用户名写法的管理员要等第一次使用、完成绑定之后才算管理员。
+- 每个用户最多保留 10 个浏览器会话，再次登录会淘汰该用户自己最旧的会话，不影响其他用户；全局 4096 个会话只是存储兜底，触发时先淘汰非管理员的最旧会话，只有剩下的会话全部属于管理员时才淘汰管理员的会话。角色合并当前 `bootstrap_admins` 与数据库授权；用户名写法的管理员要等第一次使用、完成绑定之后才算管理员。
 - OAuth 配置存在时，`client_id_env` 和 `client_secret_env` 必须同时设置，且两个环境变量都必须非空；`server.public_url` 必须是非空的绝对 HTTP(S) 地址，否则启动校验失败。
 - `REVIEW_ADMIN_TOKEN` 与 OAuth 相互独立；没有浏览器会话时仍可用它调用用户、授权和系统配置等平台管理 API。它没有用户 ID 和项目 grant，不能读取项目业务数据；轮换由部署方更新环境变量并重启。
 - 真实 OAuth 登录已在已验证快照的隔离测试实例验证；未单独复测其他生产 IdP 或所有设备场景。

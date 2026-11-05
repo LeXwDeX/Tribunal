@@ -132,11 +132,11 @@ func TestAcceptanceReloginKeepsGrantWithoutOldCredentials(t *testing.T) {
 		{
 			name: "disable then enable",
 			invalidate: func(t *testing.T, env *m6Env) {
-				disabled := env.bearerClient().json(http.MethodPatch, "/api/v1/admin/users/8", map[string]any{"disabled": true})
+				disabled := env.bearerClient().json(http.MethodPatch, "/api/v1/admin/users/8", map[string]any{"disabled": true, "revision": 1})
 				assertStatus(t, disabled, http.StatusOK)
 			},
 			restore: func(t *testing.T, env *m6Env) {
-				enabled := env.bearerClient().json(http.MethodPatch, "/api/v1/admin/users/8", map[string]any{"disabled": false})
+				enabled := env.bearerClient().json(http.MethodPatch, "/api/v1/admin/users/8", map[string]any{"disabled": false, "revision": 2})
 				assertStatus(t, enabled, http.StatusOK)
 			},
 		},

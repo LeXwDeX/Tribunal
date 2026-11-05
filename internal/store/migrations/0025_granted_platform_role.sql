@@ -1,0 +1,4 @@
+ALTER TABLE users ADD COLUMN granted_role TEXT NULL CHECK (granted_role IN ('admin'));
+ALTER TABLE users ADD COLUMN granted_by INTEGER NULL;
+ALTER TABLE users ADD COLUMN granted_at TEXT NULL;
+ALTER TABLE users ADD COLUMN revision INTEGER NOT NULL DEFAULT 1;

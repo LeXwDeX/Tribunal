@@ -8,6 +8,7 @@
 
 - **模型参数校验与审计**：`providers.*.reasoning.effort` 只接受空值、`low`、`medium`、`high` 和 `max`，非法值会阻止启动，请在升级前检查配置。协议不会发送的 effort 或 thinking budget 会在启动时告警；调用详情新增实际发送参数，旧记录显示为旧记录。
 - **LLM 出站规则**：默认拒绝链路本地、未指定、组播和受限广播地址，允许内网及 loopback 地址。升级后指向被拒地址的 provider 调用将失败，但不会因此阻止进程启动。可通过 `llm.egress.deny_cidrs` 和 `llm.egress.allow_cidrs` 调整，拒绝规则优先；重启后生效。为防止代理绕过地址校验，LLM 连接不再使用 `HTTP_PROXY` / `HTTPS_PROXY` 及其小写形式；依赖代理访问模型的部署升级前须提供可直接连接的模型网关，否则调用会失败。
+- **用户管理 API 变更**：更新用户时必须提交用户列表返回的 `revision`；旧客户端仅发送 `disabled` 的请求需要升级。迁移 `0025` 不可逆，升级前按运维文档备份数据库及其关联数据。
 - **行为变更：只有一个评审档位 `default`，评审图固定为「探索 → 四路并行评审 → 反证 → 裁决 → 报告」**（[#253](https://github.com/LeXwDeX/Tribunal/issues/253)）。`explore`（只读探索）之后，`code-review`（挂载内置 code-review Skill）、`review`、`reasoner`、`validate` 四路并行；`gather` 归一化后由 `verify.N` 逐条反证 P0/P1，`adjudicate` 规则裁决，`synthesize` 由代码渲染报告。`onboarding` 档位仍存在，只用于项目接入，不是评审档位。没有档位选择，也没有回到旧评审图的配置开关。
 - **模型调用更多，成本预期更高**：每次评审的 LLM agent 节点从原来的一两个增加到多个。具体增幅以后另行测量，此处不给数字；按实际用量核对 `budget.max_tokens`。`budget.deadline` 默认值由 20m 改为 30m。
 - **未终态工作流不会在新版本下续跑**：新增提示词 `explore.md`、`review.md`、`validate.md`，`_platform_rules.md` 升到 v5，`prompts.TaskRenderVersion` 由 4 改为 5。评审档位和提示词身份已变化，升级前创建的未终态工作流在启动恢复时被取消，不会在新身份下续跑、重试或发布；升级前核对未完成评审和待发布结果，需要时等待其结束或接受取消后重新触发。
@@ -22,6 +23,7 @@
 
 ### 变更
 
+- **平台角色管理**：平台管理员可为已登录的 GitLab 用户授予或撤销管理员角色，并查看用户的项目授权；配置指定的管理员不能降级或禁用。角色变更在下一次请求生效。
 - **评审档位与图固定**：`profiles.default` 的配置收敛为 `provider`（所有节点默认）、`explore.provider`、`lanes.{code_review,review,reasoner,validate}.provider`、`challenge.provider`（逐条反证）、`plan.package_tokens` / `plan.max_packages` 和 `budget`；`provider` 为空时依次取 `lanes.code_review.provider`、`challenge.provider`。plan 固定为 code 模式，P0/P1 逐条挑战，不确定的挑战结果标记为「存疑」后发布，报告由代码生成，评审图不在汇报阶段扩展。`Load` 把 `plan.max_packages` 降到 `min(17, (budget.max_nodes − 9) / 2)`（至少 1），配置值高于上界时告警，未配置时静默降低；构建评审图时仍要求 `plan.max_packages × 2 + 2 ≤ max_fan_out`（默认 36），超出则拒绝。既没有 `provider` 也没有 `lanes.code_review.provider` 时构建评审图失败，字段为 `provider`。
 - **旧字段迁移或忽略**：`propose` 中第一个 `code-review` / `review` 条目分别迁移为 `lanes.code_review.provider` / `lanes.review.provider`，其余 `propose` 条目忽略；`reasoner.provider` 迁移为 `lanes.reasoner.provider`，`reasoner.when` 单独告警并忽略（reasoner 一路始终运行）；`challenge.provider: cross` 改用 `challenge.fallback` 作为挑战者，没有 fallback 时告警并由档位 `provider` 挑战；显式的新字段优先于迁移值（告警为「…is deprecated and was ignored: <新字段> is set」），迁移得到的 provider 仍被校验，错误指向新字段。`plan.mode`（非 code）、`plan.provider`、`consensus`、`challenge.only`（不等于 P0、P1）、非 `cross` 时的 `challenge.fallback`、`on_uncertain`（非 mark）、`synthesize`、`budget.max_extends`、`default` 下的 `agent` 被忽略并告警。
 - **探索与四路评审**：`explore` 是可选的只读 agent 节点（超时 5 分钟），输出事实、推断和未知项；其摘要（不超过 6000 字符）写入每路评审节点的 params，作为待核实的线索。探索失败时四路评审不带摘要运行，报告给出告警。`explore`、`validate` 和 `reasoner` 与 `code-review`、`review` 一样在代码拥有的 `tool_gaps` 字段记录 MCP 绑定缺口，绑定工具缺失时评审不会得到干净的 PASS。每个包一个 `code-review` 和一个 `review`，每个 MR 一个 `reasoner` 和一个 `validate`。

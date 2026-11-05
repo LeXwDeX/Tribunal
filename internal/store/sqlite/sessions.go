@@ -58,9 +58,11 @@ func (s *Store) CreateSession(ctx context.Context, session store.Session, limits
 	if _, err := tx.ExecContext(ctx, `INSERT INTO users (id, username, name, role, last_login_at)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT (id) DO UPDATE SET
+			revision = users.revision + CASE WHEN users.username != excluded.username OR users.name != excluded.name OR
+				users.role != CASE WHEN users.granted_role = 'admin' THEN 'admin' ELSE excluded.role END THEN 1 ELSE 0 END,
 			username = excluded.username,
 			name = excluded.name,
-			role = excluded.role,
+			role = CASE WHEN users.granted_role = 'admin' THEN 'admin' ELSE excluded.role END,
 			last_login_at = excluded.last_login_at`,
 		session.UserID, session.Username, name, session.Role, formatTime(created)); err != nil {
 		return fmt.Errorf("sqlite: upsert session user: %w", err)
@@ -188,11 +190,11 @@ func sessionID(idHash []byte) (string, error) {
 	return hex.EncodeToString(idHash), nil
 }
 
-// SyncPlatformRoles rewrites the stored platform role of every user from the
-// current bootstrap admin configuration: adminIDs are GitLab user IDs and
+// SyncPlatformRoles merges granted roles with the current bootstrap admin
+// configuration: adminIDs are GitLab user IDs and
 // adminUsernames are lower-case usernames that count only for the user ID
 // already bound to them. Unbound usernames stay viewers until first use. The
-// stored role only ranks sessions for eviction; authorization recomputes it.
+// stored role also supports transactional authorization checks.
 func (s *Store) SyncPlatformRoles(ctx context.Context, adminIDs []int64, adminUsernames []string) error {
 	if adminIDs == nil {
 		adminIDs = []int64{}
@@ -210,11 +212,13 @@ func (s *Store) SyncPlatformRoles(ctx context.Context, adminIDs []int64, adminUs
 	}
 	if _, err := s.db.ExecContext(ctx, `WITH admins (id) AS (
 			SELECT value FROM json_each(?)
-			UNION SELECT b.user_id FROM admin_bindings b
-				WHERE b.username IN (SELECT value FROM json_each(?)))
-		UPDATE users SET role = CASE WHEN id IN (SELECT id FROM admins)
+			UNION SELECT b.user_id FROM admin_bindings b JOIN users u ON u.id = b.user_id
+				WHERE b.username IN (SELECT value FROM json_each(?)) AND lower(trim(u.username)) = b.username)
+		UPDATE users SET revision = revision + 1, role = CASE WHEN disabled = 0 AND
+			(id IN (SELECT id FROM admins) OR granted_role = 'admin')
 			THEN 'admin' ELSE 'viewer' END
-		WHERE (role = 'admin') != (id IN (SELECT id FROM admins))`, string(ids), string(names)); err != nil {
+		WHERE (role = 'admin') != (disabled = 0 AND
+			(id IN (SELECT id FROM admins) OR COALESCE(granted_role = 'admin', 0)))`, string(ids), string(names)); err != nil {
 		return fmt.Errorf("sqlite: sync platform roles: %w", err)
 	}
 	return nil
@@ -226,7 +230,7 @@ func (s *Store) SetPlatformRole(ctx context.Context, userID int64, role string) 
 	if role != "admin" && role != "viewer" {
 		return fmt.Errorf("sqlite: invalid platform role %q", role)
 	}
-	if _, err := s.db.ExecContext(ctx, `UPDATE users SET role = ? WHERE id = ? AND role != ?`,
+	if _, err := s.db.ExecContext(ctx, `UPDATE users SET revision = revision + 1, role = CASE WHEN disabled = 1 THEN 'viewer' WHEN granted_role = 'admin' THEN 'admin' ELSE ? END WHERE id = ? AND role != CASE WHEN disabled = 1 THEN 'viewer' WHEN granted_role = 'admin' THEN 'admin' ELSE ? END`,
 		role, userID, role); err != nil {
 		return fmt.Errorf("sqlite: set platform role: %w", err)
 	}
