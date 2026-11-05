@@ -48,6 +48,7 @@ type SummaryInput struct {
 // FindingRenderOptions controls optional attribution in an inline discussion.
 type FindingRenderOptions struct {
 	ShowModelAttribution bool
+	ProviderLabels       map[string]string
 }
 
 // SummaryMarkerLine returns the hidden first line of the summary note.
@@ -325,7 +326,7 @@ func RenderFinding(group Group, opts FindingRenderOptions) (string, error) {
 		b.WriteString("\n\n</details>\n")
 	}
 	if opts.ShowModelAttribution {
-		if attribution := modelAttribution(group); attribution != "" {
+		if attribution := modelAttribution(group, opts.ProviderLabels); attribution != "" {
 			b.WriteString("\n<sub>来源：")
 			b.WriteString(attribution)
 			b.WriteString("</sub>\n")
@@ -334,11 +335,14 @@ func RenderFinding(group Group, opts FindingRenderOptions) (string, error) {
 	return b.String(), nil
 }
 
-func modelAttribution(group Group) string {
+func modelAttribution(group Group, labels map[string]string) string {
 	seen := make(map[string]struct{})
 	values := make([]string, 0, 3)
 	for _, source := range group.Sources {
 		name := strings.TrimSpace(source.Origin.Provider)
+		if label := labels[name]; label != "" {
+			name = label
+		}
 		if source.Origin.Model != "" {
 			if name != "" {
 				name += "/" + source.Origin.Model
