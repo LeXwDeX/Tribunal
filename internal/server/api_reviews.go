@@ -125,6 +125,7 @@ func (s *Server) handleListReviews(w http.ResponseWriter, r *http.Request) {
 	filter := store.WorkflowFilter{
 		ProjectID:        projectID,
 		AccessUserID:     accessUserIDPtr(currentUserID(r)),
+		GrantOnly:        strings.EqualFold(queryFilterValue(r, "access"), "mine"),
 		MRIID:            mrIID,
 		Kind:             "review", // reviews only; onboarding workflows are not reviews
 		Status:           queryFilterValue(r, "status"),

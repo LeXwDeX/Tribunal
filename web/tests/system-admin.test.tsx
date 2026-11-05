@@ -39,6 +39,28 @@ describe('personal token expiry', () => {
 describe('admin user and grant management', () => {
   afterEach(() => vi.unstubAllGlobals())
 
+  it('shows the platform role, source, global mode and grant count', async () => {
+    const user = userEvent.setup()
+    installFetch((url) => {
+      if (url.startsWith('/api/v1/admin/users')) return jsonResponse({ users: [
+        { id: 1, username: 'alice', disabled: false, revision: 1, role: 'admin', role_source: 'config', global_read: true, grant_count: 3 },
+        { id: 2, username: 'bob', disabled: false, revision: 1, role: 'viewer', role_source: 'none', global_read: false, grant_count: 0 },
+      ] })
+      if (url.startsWith('/api/v1/api-tokens')) return apiTokensEmpty()
+      return jsonResponse({})
+    })
+    renderWithProviders(<SystemPage />)
+    await user.click(screen.getByRole('tab', { name: '用户与账号' }))
+    const alice = (await screen.findByText('alice')).closest('tr')!
+    const bob = screen.getByText('bob').closest('tr')!
+    expect(within(alice).getByText('管理员（配置）')).toBeInTheDocument()
+    expect(within(alice).getByText('开')).toBeInTheDocument()
+    expect(within(alice).getByText('3')).toBeInTheDocument()
+    expect(within(bob).getByText('普通（无）')).toBeInTheDocument()
+    expect(within(bob).getByText('关')).toBeInTheDocument()
+    expect(within(bob).getByText('0')).toBeInTheDocument()
+  })
+
   it('pages users and confirms disable and credential revocation', async () => {
     const user = userEvent.setup()
     const writes: Array<{ url: string; method?: string; body?: unknown }> = []

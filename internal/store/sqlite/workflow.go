@@ -662,7 +662,11 @@ func (s *Store) ListWorkflows(ctx context.Context, filter store.WorkflowFilter, 
 		where = append(where, "created_at >= ?")
 		args = append(args, formatTime(filter.Since.UTC()))
 	}
-	if clause, accessArgs := projectAccessClause("workflows.project_id", filter.AccessUserID); clause != "" {
+	accessClause := projectAccessClause
+	if filter.GrantOnly {
+		accessClause = projectGrantClause
+	}
+	if clause, accessArgs := accessClause("workflows.project_id", filter.AccessUserID); clause != "" {
 		where = append(where, clause)
 		args = append(args, accessArgs...)
 	}

@@ -383,6 +383,9 @@ function AdminUsersPanel() {
                 <tr>
                   <th scope="col">用户名</th>
                   <th scope="col">显示名</th>
+                  <th scope="col">角色</th>
+                  <th scope="col">全局模式</th>
+                  <th scope="col">项目授权数</th>
                   <th scope="col">状态</th>
                   <th scope="col">最近登录</th>
                   <th scope="col" className={insights.actionsCol}>操作</th>
@@ -393,6 +396,9 @@ function AdminUsersPanel() {
                   <tr key={user.id}>
                     <td className="mono">{user.username}</td>
                     <td>{user.name || '—'}</td>
+                    <td>{user.role && user.role_source ? `${user.role === 'admin' ? '管理员' : '普通'}（${{ config: '配置', granted: '授权', none: '无' }[user.role_source]}）` : '—'}</td>
+                    <td>{user.global_read == null ? '—' : user.global_read ? '开' : '关'}</td>
+                    <td>{user.grant_count ?? '—'}</td>
                     <td><Badge tone={user.disabled ? 'danger' : 'ok'}>{user.disabled ? '已停用' : '启用'}</Badge></td>
                     <td>{user.last_login_at ? formatDate(user.last_login_at) : '从未登录'}</td>
                     <td>

@@ -51,6 +51,10 @@ export interface AdminUser {
   name?: string
   disabled: boolean
   revision: number
+  role?: Role
+  role_source?: 'config' | 'granted' | 'none'
+  global_read?: boolean
+  grant_count?: number
   last_login_at?: string
 }
 

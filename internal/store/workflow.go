@@ -51,10 +51,12 @@ type WorkflowFilter struct {
 	// AccessUserID restricts rows to projects granted to that user. Nil is the
 	// trusted internal path; a non-positive value matches nothing.
 	AccessUserID *int64
-	MRIID        *int64
-	Kind         string
-	Status       string
-	Verdict      string
+	// GrantOnly excludes global-read visibility for the "my projects" view.
+	GrantOnly bool
+	MRIID     *int64
+	Kind      string
+	Status    string
+	Verdict   string
 	// PublicationState filters on the dossier publication state. Empty does
 	// not filter; workflows without a dossier never match a non-empty value.
 	PublicationState string
