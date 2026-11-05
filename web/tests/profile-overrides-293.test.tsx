@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { screen, waitFor } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { ModelsPage } from '../src/pages/ModelsPage'
 import { installFetch, jsonResponse, renderWithProviders } from './test-utils'
@@ -62,6 +62,7 @@ describe('profile overrides UI (#293)', () => {
 
     await user.click(screen.getByRole('button', { name: '编辑档位' }))
     await user.click(screen.getByRole('button', { name: '恢复为配置' }))
+    await user.click(within(screen.getByRole('dialog', { name: '恢复为配置' })).getByRole('button', { name: '恢复为配置' }))
     await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => url.startsWith('/api/v1/profiles/default/overrides') && init?.method === 'DELETE')).toBe(true))
   })
 })

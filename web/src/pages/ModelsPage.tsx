@@ -414,7 +414,10 @@ export function ModelsPage() {
         models={models.data?.models ?? []}
         onClose={() => setProfileEditing(false)}
         onSaved={saved}
-        onReload={saved}
+        onReload={async () => {
+          const result = await defaultProfile.refetch()
+          return !result.isError
+        }}
       />
       <ConfirmDialog
         open={Boolean(deleting)}

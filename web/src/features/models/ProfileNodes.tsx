@@ -1,8 +1,8 @@
-import { useEffect, useId, useMemo, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { deleteProfileOverrides, putProfileOverrides } from '../../api/api'
 import { ApiError, errorMessage } from '../../api/client'
 import type { Model, ProfileDetail, ProfileNodeParams, ProfileNodeView } from '../../api/types'
-import { Badge, Button, Drawer, Field } from '../../components/ui'
+import { Badge, Button, ConfirmDialog, Drawer, Field } from '../../components/ui'
 import ui from '../../styles/ui.module.css'
 import styles from './profile.module.css'
 
@@ -50,7 +50,7 @@ function modelName(models: Model[], id: string): string {
 }
 
 function paramsText(params?: ProfileNodeParams): string {
-  if (!params) return '无'
+  if (!params) return '不可用'
   const parts: string[] = []
   if (params.max_tokens) parts.push(`max_tokens ${params.max_tokens}`)
   if (typeof params.temperature === 'number') parts.push(`temperature ${params.temperature}`)
@@ -105,7 +105,6 @@ export function ProfileNodeList({ nodes, models }: { nodes: ProfileNodeView[]; m
       {groups.map((group) => (
         <p key={group.identity} className={styles.sameModel} role="note">
           这些节点会被计为同一模型：{group.nodes.join('、')}
-          <span className="mono">（{group.identity}）</span>
         </p>
       ))}
     </>
@@ -156,7 +155,8 @@ function isPositiveInt(value: string): boolean {
 function validate(form: NodeForm): NodeErrors {
   const errors: NodeErrors = {}
   if (form.maxTokens && !isPositiveInt(form.maxTokens)) errors.maxTokens = 'max_tokens 必须是正整数。'
-  if (form.temperature && !(Number.isFinite(Number(form.temperature)) && Number(form.temperature) >= 0 && Number(form.temperature) <= 2)) {
+  const temperature = form.temperature.trim()
+  if (form.temperature && !(/^(\d+\.?\d*|\.\d+)$/.test(temperature) && Number(temperature) <= 2)) {
     errors.temperature = 'temperature 必须在 0 到 2 之间。'
   }
   if (form.budget && !isPositiveInt(form.budget)) errors.budget = 'thinking.budget_tokens 必须是正整数。'
@@ -169,7 +169,7 @@ function buildDocument(forms: Record<string, NodeForm>): Record<string, unknown>
     const form = forms[node] ?? EMPTY_FORM
     const params: ProfileNodeParams = {}
     if (form.maxTokens) params.max_tokens = Number(form.maxTokens)
-    if (form.temperature) params.temperature = Number(form.temperature)
+    if (form.temperature) params.temperature = Number(form.temperature.trim())
     if (form.effort) params.reasoning = { effort: form.effort }
     if (form.budget) params.thinking = { budget_tokens: Number(form.budget) }
     const item: Record<string, unknown> = {}
@@ -214,7 +214,7 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
   models: Model[]
   onClose: () => void
   onSaved: () => void
-  onReload: () => void
+  onReload: () => Promise<boolean>
 }) {
   const baseId = useId()
   const [forms, setForms] = useState<Record<string, NodeForm>>({})
@@ -222,6 +222,9 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
   const [formError, setFormError] = useState<string>()
   const [stale, setStale] = useState(false)
   const [pending, setPending] = useState(false)
+  const [confirmReset, setConfirmReset] = useState(false)
+  const [focusTick, setFocusTick] = useState(0)
+  const bodyRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     if (open && detail) {
@@ -232,10 +235,27 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
     }
   }, [open, detail])
 
+  // After an error render, move focus to the first invalid input.
+  useEffect(() => {
+    if (!focusTick) return
+    const target = bodyRef.current?.querySelector<HTMLElement>('[aria-invalid="true"]')
+    if (!target) return
+    target.focus()
+    target.scrollIntoView?.({ block: 'center' })
+  }, [focusTick])
+
   const hasOverrides = Boolean(detail && Object.keys(detail.overrides ?? {}).length)
 
   const update = (node: string, patch: Partial<NodeForm>) => {
     setForms((current) => ({ ...current, [node]: { ...(current[node] ?? EMPTY_FORM), ...patch } }))
+    setErrors((current) => {
+      const existing = current[node]
+      if (!existing) return current
+      const next: NodeErrors = { ...existing }
+      for (const key of Object.keys(patch) as Array<keyof NodeForm>) delete next[key]
+      if (Object.keys(patch).some((key) => key !== 'model')) delete next.params
+      return { ...current, [node]: next }
+    })
   }
 
   const handleError = (err: unknown) => {
@@ -253,10 +273,13 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
           unmapped.push([detailItem.field, detailItem.message].filter(Boolean).join(': '))
           continue
         }
-        mapped[target.node] = { ...mapped[target.node], [target.key]: detailItem.message || err.message }
+        const message = detailItem.message || err.message
+        const previous = mapped[target.node]?.[target.key]
+        mapped[target.node] = { ...mapped[target.node], [target.key]: previous ? `${previous}；${message}` : message }
       }
       setErrors(mapped)
       setFormError(unmapped.length ? unmapped.join('；') : undefined)
+      setFocusTick((tick) => tick + 1)
       return
     }
     setFormError(errorMessage(err))
@@ -271,7 +294,10 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
     }
     setErrors(local)
     setFormError(undefined)
-    if (Object.keys(local).length) return
+    if (Object.keys(local).length) {
+      setFocusTick((tick) => tick + 1)
+      return
+    }
     setPending(true)
     try {
       await putProfileOverrides(buildDocument(forms), detail.revision)
@@ -300,15 +326,25 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
     }
   }
 
-  const reload = () => {
+  const reload = async () => {
     // A changed document resets the form through the effect above; an
-    // unchanged one keeps the user's edits.
-    setStale(false)
-    setFormError(undefined)
-    onReload()
+    // unchanged one keeps the user's edits. The notice stays until the
+    // refetch succeeds.
+    setPending(true)
+    try {
+      if (await onReload()) {
+        setStale(false)
+        setFormError(undefined)
+      } else {
+        setFormError('重新加载失败，请稍后重试。')
+      }
+    } finally {
+      setPending(false)
+    }
   }
 
   return (
+    <>
     <Drawer
       open={open}
       onClose={onClose}
@@ -316,16 +352,25 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
       description="留空表示继承配置；保存后对之后启动的评审生效。"
       footer={(
         <>
-          <Button variant="secondary" onClick={() => { void reset() }} loading={pending} disabled={!hasOverrides}>恢复为配置</Button>
+          <Button variant="secondary" onClick={() => setConfirmReset(true)} loading={pending} disabled={!hasOverrides}>恢复为配置</Button>
           <Button variant="secondary" onClick={onClose}>取消</Button>
           <Button onClick={() => { void save() }} loading={pending} disabled={stale}>保存</Button>
         </>
       )}
     >
+      <div ref={bodyRef} className={styles.editor}>
+      {formError || stale ? (
+        <div className={styles.formAlert}>
+          {formError ? <span className={styles.errorText} role="alert">{formError}</span> : null}
+          {stale ? <Button variant="secondary" onClick={() => { void reload() }} loading={pending}>刷新并重新加载</Button> : null}
+        </div>
+      ) : null}
       {PROFILE_NODES.map(([node, label]) => {
         const form = forms[node] ?? EMPTY_FORM
         const nodeErrors = errors[node] ?? {}
         const id = `${baseId}-${node}`
+        const paramsErr = nodeErrors.params ? `${id}-params-error` : undefined
+        const desc = (key: FieldKey, htmlFor: string, withParams = false) => [nodeErrors[key] ? `${htmlFor}-error` : undefined, withParams ? paramsErr : undefined].filter(Boolean).join(' ') || undefined
         const dirty = Object.values(form).some(Boolean)
         return (
           <fieldset key={node} className={styles.fieldset}>
@@ -336,6 +381,7 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
                 className={ui.input}
                 value={form.model}
                 aria-invalid={nodeErrors.model ? true : undefined}
+                aria-describedby={desc('model', `${id}-model`)}
                 onChange={(event) => update(node, { model: event.target.value })}
               >
                 <option value="">继承</option>
@@ -348,13 +394,13 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
             </Field>
             <div className={styles.paramGrid}>
               <Field label={`${label} max_tokens`} htmlFor={`${id}-max`} error={nodeErrors.maxTokens}>
-                <input id={`${id}-max`} className={ui.input} inputMode="numeric" placeholder="继承" value={form.maxTokens} aria-invalid={nodeErrors.maxTokens ? true : undefined} onChange={(event) => update(node, { maxTokens: event.target.value })} />
+                <input id={`${id}-max`} className={ui.input} inputMode="numeric" placeholder="继承" value={form.maxTokens} aria-invalid={nodeErrors.maxTokens ? true : undefined} aria-describedby={desc('maxTokens', `${id}-max`, true)} onChange={(event) => update(node, { maxTokens: event.target.value })} />
               </Field>
               <Field label={`${label} temperature`} htmlFor={`${id}-temp`} error={nodeErrors.temperature}>
-                <input id={`${id}-temp`} className={ui.input} inputMode="decimal" placeholder="继承" value={form.temperature} aria-invalid={nodeErrors.temperature ? true : undefined} onChange={(event) => update(node, { temperature: event.target.value })} />
+                <input id={`${id}-temp`} className={ui.input} inputMode="decimal" placeholder="继承" value={form.temperature} aria-invalid={nodeErrors.temperature ? true : undefined} aria-describedby={desc('temperature', `${id}-temp`, true)} onChange={(event) => update(node, { temperature: event.target.value })} />
               </Field>
               <Field label={`${label} reasoning.effort`} htmlFor={`${id}-effort`} error={nodeErrors.effort}>
-                <select id={`${id}-effort`} className={ui.input} value={form.effort} aria-invalid={nodeErrors.effort ? true : undefined} onChange={(event) => update(node, { effort: event.target.value })}>
+                <select id={`${id}-effort`} className={ui.input} value={form.effort} aria-invalid={nodeErrors.effort ? true : undefined} aria-describedby={desc('effort', `${id}-effort`, true)} onChange={(event) => update(node, { effort: event.target.value })}>
                   <option value="">继承</option>
                   <option value="low">low</option>
                   <option value="medium">medium</option>
@@ -363,10 +409,10 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
                 </select>
               </Field>
               <Field label={`${label} thinking.budget_tokens`} htmlFor={`${id}-budget`} error={nodeErrors.budget}>
-                <input id={`${id}-budget`} className={ui.input} inputMode="numeric" placeholder="继承" value={form.budget} aria-invalid={nodeErrors.budget ? true : undefined} onChange={(event) => update(node, { budget: event.target.value })} />
+                <input id={`${id}-budget`} className={ui.input} inputMode="numeric" placeholder="继承" value={form.budget} aria-invalid={nodeErrors.budget ? true : undefined} aria-describedby={desc('budget', `${id}-budget`, true)} onChange={(event) => update(node, { budget: event.target.value })} />
               </Field>
             </div>
-            {nodeErrors.params ? <span className={styles.errorText} role="alert">{nodeErrors.params}</span> : null}
+            {nodeErrors.params ? <span className={styles.errorText} id={paramsErr} role="alert">{nodeErrors.params}</span> : null}
             {dirty ? (
               <Button variant="secondary" className={ui.smallButton} onClick={() => update(node, EMPTY_FORM)}>
                 {`清除${label}覆盖`}
@@ -375,8 +421,16 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
           </fieldset>
         )
       })}
-      {formError ? <span className={styles.errorText} role="alert">{formError}</span> : null}
-      {stale ? <Button variant="secondary" onClick={reload}>刷新并重新加载</Button> : null}
+      </div>
     </Drawer>
+    <ConfirmDialog
+      open={confirmReset}
+      onClose={() => setConfirmReset(false)}
+      onConfirm={() => { setConfirmReset(false); void reset() }}
+      title="恢复为配置"
+      description="将清除所有节点的模型和参数覆盖，恢复为配置文件的值；对之后启动的评审生效。"
+      confirmLabel="恢复为配置"
+    />
+    </>
   )
 }

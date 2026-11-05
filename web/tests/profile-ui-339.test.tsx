@@ -107,6 +107,8 @@ describe('profile node sources, params and same-model hint (#339)', () => {
     const fetchMock = mock((url, init) => (init?.method === 'DELETE' ? jsonResponse(detail) : undefined))
     const user = await openEditor()
     await user.click(screen.getByRole('button', { name: '恢复为配置' }))
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'DELETE')).toBe(false)
+    await user.click(within(screen.getByRole('dialog', { name: '恢复为配置' })).getByRole('button', { name: '恢复为配置' }))
     await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => String(url) === '/api/v1/profiles/default/overrides?revision=3' && init?.method === 'DELETE')).toBe(true))
   })
 
@@ -149,6 +151,111 @@ describe('profile node sources, params and same-model hint (#339)', () => {
     await user.click(screen.getByRole('button', { name: '刷新并重新加载' }))
     await waitFor(() => expect(reads()).toBeGreaterThan(before))
     await waitFor(() => expect(screen.queryByText(/请刷新并重新加载/)).not.toBeInTheDocument())
+  })
+
+  it('cancelling the restore confirmation sends nothing', async () => {
+    const fetchMock = mock()
+    const user = await openEditor()
+    await user.click(screen.getByRole('button', { name: '恢复为配置' }))
+    await user.click(within(screen.getByRole('dialog', { name: '恢复为配置' })).getByRole('button', { name: '取消' }))
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'DELETE')).toBe(false)
+  })
+
+  it('disables restore when no overrides are stored', async () => {
+    mock((url) => (url === '/api/v1/profiles/default' ? jsonResponse({ ...detail, overrides: {} }) : undefined))
+    await openEditor()
+    expect(screen.getByRole('button', { name: '恢复为配置' })).toBeDisabled()
+  })
+
+  it('validates inputs on the client without sending a request', async () => {
+    const fetchMock = mock()
+    const user = await openEditor()
+    await user.type(screen.getByLabelText('review temperature'), '0x1')
+    await user.type(screen.getByLabelText('review max_tokens'), '-5')
+    await user.type(screen.getByLabelText('review thinking.budget_tokens'), '1.5')
+    await user.type(screen.getByLabelText('validate temperature'), ' ')
+    await user.type(screen.getByLabelText('reasoner temperature'), '2.5')
+    await user.click(screen.getByRole('button', { name: '保存' }))
+    expect(fetchMock.mock.calls.some(([url, init]) => isPut(String(url), init))).toBe(false)
+    const review = screen.getByRole('group', { name: 'review' })
+    expect(within(review).getByText('temperature 必须在 0 到 2 之间。')).toBeInTheDocument()
+    expect(within(review).getByText('max_tokens 必须是正整数。')).toBeInTheDocument()
+    expect(within(review).getByText('thinking.budget_tokens 必须是正整数。')).toBeInTheDocument()
+    expect(within(screen.getByRole('group', { name: 'validate' })).getByText('temperature 必须在 0 到 2 之间。')).toBeInTheDocument()
+    expect(within(screen.getByRole('group', { name: 'reasoner' })).getByText('temperature 必须在 0 到 2 之间。')).toBeInTheDocument()
+  })
+
+  it('links errors with aria-describedby, joins messages, focuses the first invalid input and clears on edit', async () => {
+    mock((url, init) => (isPut(url, init)
+      ? jsonResponse({ error: { code: 'validation_failed', message: 'invalid overrides', details: [
+        { field: 'overrides.explore.params.max_tokens', message: 'first' },
+        { field: 'overrides.explore.params.max_tokens', message: 'second' },
+        { field: 'overrides.lanes.validate.params', message: 'params broken' },
+      ] } }, 400)
+      : undefined))
+    const user = await openEditor()
+    await user.click(screen.getByRole('button', { name: '保存' }))
+    const max = screen.getByLabelText('探索 max_tokens')
+    expect(await within(screen.getByRole('group', { name: '探索' })).findByText('first；second')).toBeInTheDocument()
+    await waitFor(() => expect(max).toHaveFocus())
+    const describedBy = max.getAttribute('aria-describedby') ?? ''
+    expect(document.getElementById(describedBy)?.textContent).toBe('first；second')
+    const validateTemp = screen.getByLabelText('validate temperature')
+    expect(document.getElementById(validateTemp.getAttribute('aria-describedby') ?? '')?.textContent).toBe('params broken')
+    await user.type(max, '1')
+    expect(within(screen.getByRole('group', { name: '探索' })).queryByText('first；second')).not.toBeInTheDocument()
+    expect(max).not.toHaveAttribute('aria-describedby')
+    await user.type(validateTemp, '1')
+    expect(screen.queryByText('params broken')).not.toBeInTheDocument()
+  })
+
+  it('shows the stale notice at the top of the drawer body, before the node fieldsets', async () => {
+    mock((url, init) => (isPut(url, init)
+      ? jsonResponse({ error: { code: 'stale_revision', message: 'revision does not match' } }, 409)
+      : undefined))
+    const user = await openEditor()
+    await user.click(screen.getByRole('button', { name: '保存' }))
+    const alert = await screen.findByText(/请刷新并重新加载/)
+    const firstGroup = screen.getByRole('group', { name: '默认' })
+    expect(alert.compareDocumentPosition(firstGroup) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('keeps the stale notice when the reload fails and resets the form after a successful refetch', async () => {
+    let revision = 3
+    let failReads = false
+    mock((url, init) => {
+      if (isPut(url, init)) return jsonResponse({ error: { code: 'stale_revision', message: 'revision does not match' } }, 409)
+      if (url === '/api/v1/profiles/default' && (!init?.method || init.method === 'GET')) {
+        if (failReads) return jsonResponse({ error: { code: 'internal', message: 'boom' } }, 500)
+        return jsonResponse({ ...detail, revision, overrides: { challenge: { model: 'user:one', params: { max_tokens: 777 } } } })
+      }
+      return undefined
+    })
+    const user = await openEditor()
+    await user.type(screen.getByLabelText('review max_tokens'), '123')
+    await user.click(screen.getByRole('button', { name: '保存' }))
+    await screen.findByText(/请刷新并重新加载/)
+    failReads = true
+    await user.click(screen.getByRole('button', { name: '刷新并重新加载' }))
+    expect(await screen.findByText('重新加载失败，请稍后重试。')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '刷新并重新加载' })).toBeInTheDocument()
+    failReads = false
+    revision = 4
+    await user.click(screen.getByRole('button', { name: '刷新并重新加载' }))
+    await waitFor(() => expect(screen.queryByText(/请刷新并重新加载/)).not.toBeInTheDocument())
+    expect(screen.getByLabelText('challenge max_tokens')).toHaveValue('777')
+    expect(screen.getByLabelText('review max_tokens')).toHaveValue('')
+    expect(screen.getByRole('button', { name: '保存' })).toBeEnabled()
+  })
+
+  it('does not print the raw vote identity and shows unavailable when effective params are absent', async () => {
+    mock((url) => (url === '/api/v1/profiles/default'
+      ? jsonResponse({ ...detail, nodes: detail.nodes.map((item, index) => (index === 0 ? { ...item, effective_params: undefined } : item)) })
+      : undefined))
+    renderWithProviders(<ModelsPage />, { route: '/models' })
+    const list = await screen.findByRole('list', { name: '节点生效模型' })
+    expect(within(list).getByText(/生效参数 不可用/)).toBeInTheDocument()
+    expect(screen.queryByText(/example\.com\/m/)).not.toBeInTheDocument()
   })
 
   it('renders read-only for non-admins', async () => {
