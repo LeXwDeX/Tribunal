@@ -54,12 +54,12 @@
 | 每个 Issue 的自建 CI（go/web/docker） | PASS | 各 PR head 的 `summary.txt` 末行 `RESULT PASS`，覆盖率 ≥ 70% |
 | 本地构建、静态检查、scoped 测试、前端测试与 dist | PASS | 各 Issue 的本地验证记录与 PR |
 | 带历史数据的 v1.2.0 → v1.3.0 原地升级 | PASS | 2026-11-05 在隔离测试实例上，从 v1.2.0 数据卷原地升级到候选 `85175b8`；27 条迁移应用到 `0028`；3 个项目与历史评审可读，healthz/readyz 200。升级前一致性快照已校验，回退演练见下 |
-| 5 个终态 + 1 个中断工作流、effort 审计、pending publication 夹具 | FAIL（部分完成） | 升级前历史数据只有 2 个历史评审和 5 个 onboarding，没有按要求在升级前构造 5 个终态 + 1 个中断夹具；升级后新增 5 个 completed review，但不能替代升级前夹具。effort 审计已有真实记录 |
+| 5 个终态 + 1 个中断工作流、effort 审计、pending publication 夹具 | FAIL（部分完成） | 升级前历史数据只有 2 个历史评审和 5 个 onboarding，没有按要求在升级前构造 5 个终态 + 1 个中断夹具；升级后新增 5 个 completed review，但不能替代升级前夹具。effort 审计已有真实记录；pending publication 夹具未单独构造和核实 |
 | 2 用户 / 2 项目授权矩阵 | BLOCKED | 测试实例只有 1 个 OAuth 用户；第 2 个用户需要测试 GitLab 管理操作授权，未执行 |
-| 真实评审、发布与 `model_id`/`wire` 审计 | PASS（部分） | 真实评审 `01a1ab42-c8d1` completed PASS，dossier 发布状态为 `published`；用户模型 lane `rv.p1` 记录 `provider=user:<uuid>`、`model=deepseek-flash`，但其 `wire` 仅含 `max_tokens`；`reasoning.effort=max` 出现在配置 provider 的调用中，未在该用户模型 lane 中证明；用户模型测试通过（历史操作记录） |
+| 真实评审、发布与 `model_id`/`wire` 审计 | PASS（部分） | 真实评审 `01a1ab42-c8d1` completed PASS，dossier 发布状态为 `published`；用户模型 lane `rv.p1` 记录 `provider=user:<uuid>`、`model=deepseek-flash`，其 `wire` 含 `max_tokens=1024` 与 `thinking_enabled=false`，没有 effort；`reasoning.effort=max` 出现在配置 provider 的调用中，未在该用户模型 lane 中证明；用户模型测试通过（历史操作记录） |
 | 中断工作流恢复 | FAIL | 两次 SIGKILL 中断均未续跑成功：`01a1ab49-6f2c` 被 `superseded` 取消；`01a1ab4e-df76` 恢复后 6 个节点以 `unsafe_model_response` 失败、3 个节点完成，工作流整体 failed；其失败摘要随后发布（`published`），但不是成功评审发布 |
 | 进行中修改模型、重启后身份取消 | BLOCKED | 需要真实运行中工作流与重启；本次未执行 |
-| link-local 422 `egress_denied` | PASS | 创建指向 link-local 的模型后，`POST /models/{id}/test` 返回 422 `egress_denied`；模型随后被删除 |
+| link-local 422 `egress_denied` | PASS（部分） | 创建指向 link-local 的模型后，`POST /models/{id}/test` 返回 422；日志只保留状态码，未保留响应体，未独立证明 `egress_denied` 错误码。模型随后被删除 |
 | 用户管理只读矩阵 | BLOCKED | 全局模式开/关已验证（`/me.global_read` true/false，项目列表 3 项），但完整 2 用户 / 2 项目只读与写拒绝矩阵未执行 |
 | 错误 masterkey 启动与模型 unavailable | BLOCKED | 本次未执行；本地存储层测试已覆盖 |
 | 恢复默认后 hash/digest 等于升级前 | BLOCKED | 升级前未记录 `reviewProfileHash` 和执行 digest |
@@ -78,13 +78,13 @@
 - 升级：从 v1.2.0 的现有数据卷原地升级，迁移 27 条至 `0028`；3 个已注册项目、历史评审和审计可读，healthz/readyz 200。
 - 真实评审：固定 sandbox 项目上的 MR 由升级后的实例评审，workflow `01a1ab42-c8d1` 结论 `PASS`，dossier 发布状态为 `published`；此前同一 MR 的 `01a1ab1f-4bc1` 也为 `PASS`。后续同一 MR 的失败摘要更新了 GitLab 当前汇总评论，因此当前评论中已找不到这两个 workflow ID，发布结论以 dossier 持久化状态为依据。
 - 用户模型：创建 `sandbox-user-model` 并测试通过（历史操作记录；模型随后删除）；绑定到 `lanes.review` 后，`rv.p1` 节点的 `provider` 为 `user:<uuid>`，`model` 为 `deepseek-flash`；删除后可继续使用配置 provider。
-- effort 审计：配置 provider 的调用 `wire` 包含 `reasoning.effort=max`；`workflow_nodes` 和 `llm_calls` 同时记录用户模型 id 与 wire model 名。用户模型 lane 的 `wire` 只有 `max_tokens=1024`，没有 effort，因此不能把该 lane 当作 effort=max 的证据。
-- 出站限制：10:33:39 创建指向 link-local 地址的模型后，`POST /models/{id}/test` 返回 422，日志记录同一请求 ID；模型随后删除。
-- 全局模式：通过平台用户接口开启后 `/me.global_read=true`、项目列表返回 3 项；关闭后恢复 `false`。
+- effort 审计：配置 provider 的调用 `wire` 包含 `reasoning.effort=max`；`workflow_nodes` 和 `llm_calls` 同时记录用户模型 id 与 wire model 名。用户模型 lane 的 `wire` 是 `max_tokens=1024` 与 `thinking_enabled=false`，没有 effort，因此不能把该 lane 当作 effort=max 的证据。
+- 出站限制：10:33:39 创建指向 link-local 地址的模型后，`POST /models/{id}/test` 返回 422，日志记录同一请求 ID；响应体未保留，未独立证明 `egress_denied` 错误码。模型随后删除。
+- 全局模式：通过平台用户接口开启后 `/me.global_read=true`、项目列表返回 3 项；关闭后恢复 `false`。这是本次会话的执行记录，历史响应未附公开材料。
 - 回退：升级前一致性快照恢复到新卷，使用 v1.2.0 镜像和原 masterkey 启动，readyz 200，项目与历史评审可读。恢复实例未保留，无法二次核对。
 - 中断恢复（未通过）：两次真实 SIGKILL 中断测试均未完成续跑。第一次 workflow `01a1ab49-6f2c` 在重启后被标为 `cancelled/superseded`；第二次 workflow `01a1ab4e-df76` 恢复后 6 个节点以 `unsafe_model_response` 失败、3 个节点完成，工作流整体 failed；失败摘要随后发布为 `published`，但不是成功评审。该缺陷阻断“升级后续跑”发布条件。
 
-未执行：2 用户 / 2 项目矩阵、错误 masterkey 启动、恢复默认后的 hash/digest 对比、运行中修改模型后重启取消。
+未执行：2 用户 / 2 项目矩阵、pending publication 夹具、错误 masterkey 启动、恢复默认后的 hash/digest 对比、运行中修改模型后重启取消。
 
 ## v1.2.0 候选批次本地修复验证（PR #128）
 
