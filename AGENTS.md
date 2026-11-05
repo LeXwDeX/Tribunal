@@ -70,33 +70,34 @@ bash scripts/docker-smoke.sh
 
 Run scoped checks while developing; run the full sequence before delivery when the environment supports it.
 
-GitHub Actions runs `ci.yml` on every push and pull request. The `web` and `docker` jobs use hosted runners. The `go` job uses a labeled self-hosted runner for trusted events (pushes to `main`, pull requests from branches of this repository, and a manual dispatch with `self_hosted=true`) and a hosted runner otherwise, including pushes to other branches and pull requests from forks. A repository writer may request a manual run with `gh workflow run ci.yml --ref <trusted-branch> -f self_hosted=true`; it is supplementary evidence and does not replace the push/PR checks.
+GitHub Actions runs `ci.yml` automatically on every push and pull request, but those runs are not the development merge gate (the self-hosted CI below is) and development does not wait for them. GitHub Actions is the final pre-release runner (stage 2 of the release pipeline in section 9). The `web` and `docker` jobs use hosted runners. The `go` job uses a labeled self-hosted runner for trusted events (pushes to `main`, pull requests from branches of this repository, and a manual dispatch with `self_hosted=true`) and a hosted runner otherwise, including pushes to other branches and pull requests from forks. A repository writer may request a manual run with `gh workflow run ci.yml --ref <trusted-branch> -f self_hosted=true`; this is how the final pre-release run is requested on the release candidate.
 
 Only dispatch trusted branch code to a self-hosted runner: untrusted code can persistently compromise that machine. Pull requests from branches of this repository run the `go` job on it automatically, so push only trusted code to branches of this repository; untrusted contributions come from forks. This is an operational requirement, not a security boundary enforced automatically by GitHub or this workflow. Anyone who can modify a workflow can request a self-hosted runner; runner access controls may restrict whether it executes. Runner labels select any runner that carries them, not a specific machine. Verify runner isolation and its Docker, Docker Compose, Go, Node, Bash, Python 3 and race-enabled C compiler prerequisites before use.
 
-### Self-hosted CI
+### Self-hosted CI (development merge gate)
 
-Maintainers may run a self-hosted CI outside GitHub Actions on the development/test environment. Its rules:
+The self-hosted CI is a Docker-based runner on the development/test environment, outside GitHub Actions. It is the merge gate for every PR. Its rules:
 
 - **Location.** It lives only under this project's deployment directory on the development/test environment, as the `<project-deployment-dir>/ci/` subdirectory. The Dockerfile, the run and client scripts, the README, `inbox/` and `runs/` all stay there. Image and cache-volume names use the project prefix. Do not create a sibling directory next to the project directory or anywhere else outside it.
 - **Usage.** The client sends the revision under test as a git bundle to `inbox/`. Each run writes `runs/<time>-<sha>/summary.txt`, whose last line is `RESULT PASS` or `RESULT FAIL`, with per-job logs in the same directory. A full run takes several minutes; run the client in the background.
 - **Coverage.** It runs the same steps as the `go`, `web` and `docker` jobs in `ci.yml` and must be kept in sync with that file. A PASS means all three passed for that exact commit.
-- **Trust and isolation.** Submit only trusted branch code. The runner stores no GitHub credentials. It must not touch other services, containers, images, volumes or directories on the same host; tear-down removes only the runner's own resources.
-- **Merge gate.** A maintainer may designate a `RESULT PASS` on the self-hosted CI, for the PR head after it is brought up to date with the latest `main`, as the merge gate in place of or in addition to the GitHub Actions checks. Until a maintainer does so, the GitHub Actions checks remain the gate. A PR merged on this gate states so in the PR, with the tested commit SHA and the `RESULT PASS` summary line, without host names or paths.
+- **Trust and isolation.** Submit only trusted branch code. Pull requests from forks are not submitted until a maintainer has reviewed the code and judged it trusted. The runner stores no GitHub credentials. It must not touch other services, containers, images, volumes or directories on the same host; tear-down removes only the runner's own resources.
+- **Merge gate.** A PR merges when the self-hosted CI reports `RESULT PASS` for the PR head after it is brought up to date with the latest `main`. Development does not wait for GitHub Actions results. The PR states the tested commit SHA and the `RESULT PASS` summary line, without host names or paths.
+- **Environment details.** Concrete environment details (the development/test and production hosts, deployment directories, the self-hosted CI client location and how to invoke it) are recorded only in the untracked local `docs/handoff.md` in the primary checkout (ignored by `.gitignore`, never committed). Agents read them there and ask the user when they are missing.
 
 ## 4. Open-source contribution rules
 
 - **License and provenance.** The project is MIT licensed. By contributing, you agree to license your contribution under the same terms. Keep copyright notices and `LICENSE` intact. Do not copy code, assets or prompts from another project unless the license is compatible and the provenance is recorded. Bundled executables and third-party assets need a version and license record under `third_party/` and a regenerated license bundle.
 - **Issue first.** One goal maps to one Issue with Why / Scope / Approach / Acceptance, and one PR. Small typo or dependency-bot fixes may skip the Issue only when repository policy allows it.
 - **Branches and commits.** Do not push directly to `main`. Use a topic branch, keep commits focused, and include an `Issue: #N` trailer in every commit. External contributors do not need the local SpecGit checkpoint; the `Issue: #N` trailer and a normal PR are sufficient. Never use `--no-verify`; when a guard rejects a commit, fix the checkpoint or trailer instead of bypassing it.
-- **Merge policy.** Squash-merge only after the current head passes the designated CI gate (GitHub Actions, or the self-hosted CI when a maintainer has designated it; see "Self-hosted CI" in section 3) and the review workflow in section 8 is complete. Bring the branch up to date with the latest `main` first; a green run on an outdated base does not count.
+- **Merge policy.** Squash-merge only after the current head passes the self-hosted CI gate (section 3) and the review workflow in section 8 is complete. Bring the branch up to date with the latest `main` first; a green run on an outdated base does not count.
 - **Compatibility.** Prefer additive changes. Do not break existing HTTP clients, configuration files, stored data or event consumers without an Issue that documents the migration and deprecation plan. Keep old fields readable for at least one minor release unless the change is security-critical.
 - **Deprecation.** Document the replacement, the first release that warns, and the planned removal release. Do not remove a public field or endpoint silently.
 - **Dependencies.** Add a dependency only when the Issue justifies it. Check the license, run `go mod verify`, regenerate the license bundle, and keep `web` free of unjustified npm packages.
 - **Secrets.** Never commit tokens, keys, `.env` files, webhook secrets or request bodies that may contain them. Log identifiers and `errclass` categories, not raw errors. Report a vulnerability through the private security advisory process, not a public Issue.
 - **Generated artifacts.** `web/dist` is committed because the Go binary embeds it; rebuild it with every web change. Never hand-merge build output. Local environment files, editor state and agent scratch files stay untracked.
 - **Documentation.** User-visible documentation is Chinese. Update `CHANGELOG.md` for user-visible changes, `docs/operations.md` for operational behavior, and `docs/delivery-readiness.md` for verification status. Documentation-only PRs follow the reduced review chain in section 8.
-- **Release authority.** Maintainers tag releases and publish GitHub Releases. Agents and contributors do not create tags or Releases unless explicitly authorized. Use semantic versioning; breaking changes require a major version and a written migration path.
+- **Release authority.** Tags and GitHub Releases are created only at stage 4 of the release pipeline (section 9), by a maintainer or an agent explicitly authorized for that release. Use semantic versioning; breaking changes require a major version and a written migration path.
 
 ## 5. Architecture and backend conventions
 
@@ -140,7 +141,7 @@ Maintainers may run a self-hosted CI outside GitHub Actions on the development/t
 
 ## 8. Development review workflow
 
-Every behavior change and every user-visible document change goes through these stages before merge, unless the reduced chain below applies. The designated CI gate (section 3) passing is necessary but not sufficient; a PR that skips a stage is not ready.
+Every behavior change and every user-visible document change goes through these stages before merge, unless the reduced chain below applies. The self-hosted CI gate (section 3) passing is necessary but not sufficient; a PR that skips a stage is not ready.
 
 1. **Independent review** — a `review` subagent reads the real diff, callers, tests, and evidence. Give it the Issue, the diff range, and the evidence; do not give it the author's conclusion.
 2. **Three-way review** — run the development review subagents `reasoner`, `verify`, and `review` in parallel on the same diff. `reasoner` stress-tests logic, boundaries, races, and failure paths; `verify` reruns the scoped checks and reports PASS/FAIL/BLOCKED; `review` checks requirements, compatibility, and the evidence chain. These are development subagents, distinct from the product's review blocks with the same names.
@@ -160,11 +161,21 @@ the evidence; CI alone is not a substitute.
 
 ## 9. Acceptance and release
 
+### Release pipeline
+
+Development to release is a four-stage pipeline. This is the only place the stages are defined; other sections refer to it.
+
+1. **Development.** Work merges through PRs gated by the self-hosted CI (section 3) and the review workflow (section 8). Exit: all known issues for the release are resolved and a release candidate commit on `main` is chosen.
+2. **Final GitHub run.** Run all `ci.yml` jobs (`go`, `web`, `docker`) on GitHub Actions for the release candidate commit on `main` (the automatic run from its push to `main`, or a manual dispatch); all must pass. A failure sends the work back to stage 1; the fix goes through a normal PR and stage 2 reruns on the new candidate.
+3. **Human review on production.** After stage 2 passes, deploy that same candidate (same commit and image) to the production environment for human review and acceptance. Each production deployment needs explicit maintainer approval and follows the backup and rollback rules (Rollback below, section 10). A problem found sends the work back to stage 1.
+4. **Tag and release.** Only after the human review passes, a maintainer, or an agent explicitly authorized for that release, updates `CHANGELOG.md` and `docs/delivery-readiness.md`, tags `vX.Y.Z` on the reviewed commit, and publishes the GitHub Release. The release note distinguishes verified scope from remaining gaps.
+
+### Acceptance rules
+
 - **Issue acceptance.** Every Issue has testable acceptance criteria. A PR description maps each criterion to a check, a command result, or an explicitly accepted gap.
-- **PR gate.** The PR must be based on the latest `main`, pass the current head's `go`/`web`/`docker` checks on the designated CI gate (section 3), complete the applicable review workflow, and include the `Issue: #N` trailer. Do not merge on an outdated base.
+- **PR gate.** The PR must be based on the latest `main`, have a self-hosted CI `RESULT PASS` (all of `go`/`web`/`docker`, section 3) on the current head, complete the applicable review workflow, and include the `Issue: #N` trailer. Do not merge on an outdated base.
 - **Evidence.** Report the exact command, scope, and result. Separate local, CI and real-deployment evidence. Never present a mock, a partial run, or a CI-only result as a real deployment validation. If a check could not run, say why.
 - **Real-deployment acceptance.** When an Issue requires it, use an isolated deployment with a backup, verify the expected migration set and health endpoints, exercise a real review and the changed feature, and confirm rollback is possible. Do not write host names, ports, tokens or internal paths into public documents; describe them as environment-specific.
-- **Release.** Maintainers update `CHANGELOG.md` and `docs/delivery-readiness.md`, then tag `vX.Y.Z` and publish the GitHub Release. Agents do not tag or publish unless explicitly authorized. A release note must distinguish verified scope from remaining gaps.
 - **Rollback.** There are no down migrations. A rollback restores the pre-upgrade snapshot and a matching binary; replacing only the image is not supported. Document the backup boundary before an irreversible migration.
 - **Post-merge.** Read back the PR and Issue state, confirm the Issue is closed, update `docs/handoff.md` in the primary checkout when the state changes, and remove temporary worktrees.
 
@@ -192,6 +203,7 @@ the evidence; CI alone is not a substitute.
 - Read this file, then `docs/handoff.md` in the primary checkout if it exists, and the open Issues before starting work. Do not redo completed Issues.
 - Prefer a subagent or a bounded task for long-running monitoring. Do not use `sleep` or a foreground `--watch` to wait for CI; run the self-hosted CI client in the background and read its `summary.txt`. After starting a PR, continue independent work or report progress and end the turn only when a background callback is configured and verified to wake the session. If no such callback exists or it is unreliable, use a monitored subagent with an explicit timeout, or report the limitation instead of silently waiting.
 - Use SpecGit as required by the repository. Do not commit with `--no-verify`. If a checkpoint belongs to another branch, use a separate worktree and initialize it from the main declaration instead of overwriting the checkpoint. External contributors without SpecGit use a normal topic branch and PR with the `Issue: #N` trailer; the local checkpoint is a maintainer convenience, not a contribution requirement.
+- Do not wait for GitHub Actions during development; the self-hosted CI is the gate. Do not deploy to production, tag or publish a Release unless explicitly authorized for that step of the release pipeline (section 9).
 - Respect permission prompts. Do not bypass a denied command, a protected branch or a credential boundary. Stop and ask when the next action needs human authorization or a secret.
 - A subagent's finding is a lead, not a fact. Verify it against source or a reproducible command before reporting or acting on it.
 - Keep the final report short: what changed, what was verified, what was not verified, and the remaining risk.
