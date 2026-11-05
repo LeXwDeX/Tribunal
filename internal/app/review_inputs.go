@@ -465,7 +465,7 @@ func (s *ReviewService) reviewProfileHash(profile review.Profile) string {
 		Blocks     map[string]config.BlockBinding
 		Providers  []string
 		UserModels map[string]config.ProviderConfig `json:"user_models,omitempty"`
-	}{profile, s.blocks, s.allowedProviders(), nil})
+	}{profile, s.blocks, s.providerNames, nil})
 	if err != nil {
 		return ""
 	}

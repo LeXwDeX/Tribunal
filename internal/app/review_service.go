@@ -188,6 +188,9 @@ func NewReviewService(cfg ReviewServiceConfig) (*ReviewService, error) {
 		providers[name] = provider
 	}
 	for _, name := range cfg.AllowedProviders {
+		if strings.HasPrefix(name, "user:") {
+			continue
+		}
 		if _, ok := providers[name]; !ok {
 			return nil, errors.New("app: review provider identity is incomplete")
 		}
