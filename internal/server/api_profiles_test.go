@@ -76,3 +76,13 @@ func TestProfileOverridesMapErrors(t *testing.T) {
 		t.Fatalf("status = %d, want 409", response.Code)
 	}
 }
+
+func TestProfileOverridesFirstWriteUsesRevisionZero(t *testing.T) {
+	store := &fakeProfileOverrides{body: `{}`}
+	server := newProfileServer(t, store)
+	response := httptest.NewRecorder()
+	server.handlePutProfileOverrides(response, httptest.NewRequest(http.MethodPut, "/api/v1/profiles/default/overrides", strings.NewReader(`{"overrides":{"default":{"model":"config-other"}},"revision":0}`)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d %s", response.Code, response.Body.String())
+	}
+}

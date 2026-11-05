@@ -65,8 +65,8 @@ func (s *Server) handlePutProfileOverrides(w http.ResponseWriter, r *http.Reques
 		validationFailed(w, r, "overrides", "overrides is required")
 		return
 	}
-	if request.Revision <= 0 {
-		validationFailed(w, r, "revision", "revision is required")
+	if request.Revision < 0 {
+		validationFailed(w, r, "revision", "revision must not be negative")
 		return
 	}
 	overrides, err := s.profileOverrides.PutProfileOverrides(r.Context(), "default", string(request.Overrides), request.Revision, currentUserID(r))
