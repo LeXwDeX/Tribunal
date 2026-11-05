@@ -143,7 +143,7 @@ func llmErrorKind(err error) string {
 	if errors.As(err, &classified) && classified != nil {
 		switch classified.Kind {
 		case llm.ErrRateLimited, llm.ErrOverloaded, llm.ErrContextTooLong, llm.ErrAuth,
-			llm.ErrBadRequest, llm.ErrUnsafeResponse, llm.ErrTransient, llm.ErrCanceled:
+			llm.ErrBadRequest, llm.ErrUnsafeResponse, llm.ErrTransient, llm.ErrCanceled, llm.ErrEgress:
 			return string(classified.Kind)
 		}
 	}

@@ -136,6 +136,9 @@ func TestRegistryStartsWithBlockedLegacyProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !client.Info().Unavailable || client.Info().UnavailableReason != "egress_denied" {
+		t.Fatalf("client metadata is not unavailable: %+v", client.Info())
+	}
 	_, err = client.Generate(context.Background(), &Request{Messages: []Message{{Role: RoleUser, Parts: []Part{{Type: PartText, Text: "ping"}}}}})
 	if !errors.Is(err, ErrEgressDenied) {
 		t.Fatalf("legacy provider should fail with egress_denied: %v", err)

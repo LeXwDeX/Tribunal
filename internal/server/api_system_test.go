@@ -42,6 +42,28 @@ func systemPlatform() *config.Config {
 	}
 }
 
+func TestProviderListShowsUnavailable(t *testing.T) {
+	env := newM6Env(t, m6Options{platform: systemPlatform()})
+	env.api.llm = &fakeLLM{infos: []llm.ProviderInfo{{
+		Name: "claude", Unavailable: true, UnavailableReason: "egress_denied",
+	}}}
+	client := env.loginAs("code-admin")
+	response := client.request(http.MethodGet, "/api/v1/providers", nil, nil)
+	assertStatus(t, response, http.StatusOK)
+	providers := env.decode(t, response)["providers"].([]any)
+	for _, item := range providers {
+		provider := item.(map[string]any)
+		if provider["name"] != "claude" {
+			continue
+		}
+		if provider["unavailable"] != true || provider["unavailable_reason"] != "egress_denied" {
+			t.Fatalf("provider status = %#v", provider)
+		}
+		return
+	}
+	t.Fatal("claude provider not found")
+}
+
 func TestProvidersHideKeysAndReportStats(t *testing.T) {
 	fake := newFakeReviewStore()
 	fake.stats = store.Stats{

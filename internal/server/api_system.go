@@ -19,14 +19,16 @@ type providerStatsView struct {
 }
 
 type providerView struct {
-	Name           string            `json:"name"`
-	Protocol       string            `json:"protocol"`
-	BaseURL        string            `json:"base_url"`
-	Model          string            `json:"model"`
-	MaxConcurrency int               `json:"max_concurrency"`
-	RPM            int               `json:"rpm"`
-	MaxTokens      int               `json:"max_tokens,omitempty"`
-	Stats24h       providerStatsView `json:"stats_24h"`
+	Name              string            `json:"name"`
+	Protocol          string            `json:"protocol"`
+	BaseURL           string            `json:"base_url"`
+	Model             string            `json:"model"`
+	MaxConcurrency    int               `json:"max_concurrency"`
+	RPM               int               `json:"rpm"`
+	MaxTokens         int               `json:"max_tokens,omitempty"`
+	Unavailable       bool              `json:"unavailable,omitempty"`
+	UnavailableReason string            `json:"unavailable_reason,omitempty"`
+	Stats24h          providerStatsView `json:"stats_24h"`
 }
 
 type providerTestResponse struct {
@@ -61,11 +63,17 @@ func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	aggregated := aggregateProviderStats(stats.ByModel)
+	infos := make(map[string]llm.ProviderInfo)
+	if s.llm != nil {
+		for _, info := range s.llm.ProviderInfos() {
+			infos[info.Name] = info
+		}
+	}
 	providers := make([]providerView, 0)
 	if s.platform != nil {
 		for _, name := range sortedProviderNames(s.platform.Providers) {
 			provider := s.platform.Providers[name]
-			providers = append(providers, providerView{
+			view := providerView{
 				Name:           name,
 				Protocol:       provider.Protocol,
 				BaseURL:        provider.BaseURL,
@@ -74,7 +82,12 @@ func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
 				RPM:            provider.RPM,
 				MaxTokens:      provider.MaxTokens,
 				Stats24h:       aggregated[name],
-			})
+			}
+			if info, ok := infos[name]; ok {
+				view.Unavailable = info.Unavailable
+				view.UnavailableReason = info.UnavailableReason
+			}
+			providers = append(providers, view)
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"providers": providers})

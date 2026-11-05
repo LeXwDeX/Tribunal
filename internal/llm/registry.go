@@ -325,13 +325,12 @@ func NewRegistry(providers map[string]config.ProviderConfig, opts ...RegistryOpt
 		if err != nil {
 			return nil, err
 		}
-		registry.clients[name] = client
-		info := client.Info()
 		if reason := providerUnavailable(cfg.BaseURL, policy); reason != "" {
-			info.Unavailable = true
-			info.UnavailableReason = reason
+			client.info.Unavailable = true
+			client.info.UnavailableReason = reason
 		}
-		registry.infos = append(registry.infos, info)
+		registry.clients[name] = client
+		registry.infos = append(registry.infos, client.Info())
 	}
 	return registry, nil
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/LeXwDeX/tribunal/internal/app"
+	"github.com/LeXwDeX/tribunal/internal/llm"
 )
 
 // AppExtensions adapts the app extension service to the admin HTTP
@@ -231,6 +232,13 @@ func (a *AppExtensions) TestMCPServer(ctx context.Context, server MCPServer) ([]
 		out = append(out, MCPTool{Name: tool.Name, Description: tool.Description})
 	}
 	return out, nil
+}
+
+func (a *AppExtensions) ProviderInfos() []llm.ProviderInfo {
+	if a.ready() != nil {
+		return nil
+	}
+	return a.service.ProviderInfos()
 }
 
 func (a *AppExtensions) TestProvider(ctx context.Context, name string) (ProviderTestResult, error) {

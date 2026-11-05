@@ -1093,6 +1093,18 @@ func (s *ExtensionService) TestMCPServer(ctx context.Context, server MCPServer) 
 
 // TestProvider sends one minimal request to a configured provider. Errors are
 // classified without upstream URLs, bodies, or credentials.
+// ProviderInfos returns the registry metadata, including startup egress
+// availability. A provider client that does not expose Infos yields nil.
+func (s *ExtensionService) ProviderInfos() []llm.ProviderInfo {
+	if s == nil || s.clients == nil {
+		return nil
+	}
+	if provider, ok := s.clients.(interface{ Infos() []llm.ProviderInfo }); ok {
+		return provider.Infos()
+	}
+	return nil
+}
+
 func (s *ExtensionService) TestProvider(ctx context.Context, name string) (ProviderTestResult, error) {
 	if s.clients == nil {
 		return ProviderTestResult{}, errors.New("app: provider clients are not configured")
