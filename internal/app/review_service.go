@@ -110,6 +110,7 @@ type ReviewService struct {
 	engine            *dag.Engine
 	executors         *executorRegistry
 	profiles          map[string]config.ProfileConfig
+	rawProfiles       map[string]config.ProfileConfig
 	blocks            map[string]config.BlockBinding
 	reviewDefaults    config.ProjectSettings
 	prompts           prompts.Bundle
@@ -142,20 +143,23 @@ type ReviewService struct {
 
 // ReviewServiceConfig configures ReviewService.
 type ReviewServiceConfig struct {
-	Store             ReviewStore
-	GitLab            GitLabClient
-	Cipher            *secret.Cipher
-	Workspace         *workspace.Manager
-	Git               GitOps
-	Engine            *dag.Engine
-	Executors         *executorRegistry
-	Profiles          map[string]config.ProfileConfig
-	Blocks            map[string]config.BlockBinding
-	ReviewDefaults    config.ProjectSettings
-	Prompts           prompts.Bundle
-	Clients           review.ClientProvider
-	Catalog           *llm.Catalog
-	Overrides         store.ProfileOverrideStore
+	Store          ReviewStore
+	GitLab         GitLabClient
+	Cipher         *secret.Cipher
+	Workspace      *workspace.Manager
+	Git            GitOps
+	Engine         *dag.Engine
+	Executors      *executorRegistry
+	Profiles       map[string]config.ProfileConfig
+	Blocks         map[string]config.BlockBinding
+	ReviewDefaults config.ProjectSettings
+	Prompts        prompts.Bundle
+	Clients        review.ClientProvider
+	Catalog        *llm.Catalog
+	Overrides      store.ProfileOverrideStore
+	// RawProfiles holds the review profile before normalization. Overrides
+	// merge into it; without it Profiles is used as the base.
+	RawProfiles       map[string]config.ProfileConfig
 	AgentRun          review.AgentRunner
 	Tools             review.ToolProvider
 	Skills            review.SkillProvider
@@ -232,6 +236,7 @@ func NewReviewService(cfg ReviewServiceConfig) (*ReviewService, error) {
 		engine:         engine,
 		executors:      registry,
 		profiles:       cfg.Profiles,
+		rawProfiles:    cfg.RawProfiles,
 		blocks:         cfg.Blocks,
 		reviewDefaults: cfg.ReviewDefaults,
 		prompts:        cfg.Prompts,
@@ -619,7 +624,10 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 	}
 	configHash := reviewConfigHash(cfg)
 	promptHash := s.prompts.Hash
-	profileName, profileCfg := s.profileFor(ctx, project, payload.Profile, cfg.Profile, inputs.MR.Labels, profileExplicit(payload))
+	profileName, profileCfg, err := s.profileFor(ctx, project, payload.Profile, cfg.Profile, inputs.MR.Labels, profileExplicit(payload))
+	if err != nil {
+		return err
+	}
 	profile := review.Profile{Name: profileName, Config: profileCfg}
 	profileHash := s.reviewProfileHash(profile)
 	if workflow != nil && storedDossier != nil {

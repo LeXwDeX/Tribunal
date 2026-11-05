@@ -245,7 +245,7 @@ func (s *ReviewService) publishEmptyWithNote(ctx context.Context, project *store
 	}
 	s.setReviewStatus(ctx, project.ID, control.MRIID, control.Generation, 0,
 		inputs.Version.HeadSHA, "", reviewStatusPublishing, "")
-	profileName, _ := s.profileFor(ctx, project, "", cfg.Profile, inputs.MR.Labels, false)
+	profileName := s.profileNameFor(project, "", cfg.Profile, inputs.MR.Labels, false)
 	fingerprint := sha256Hex(strings.Join([]string{
 		inputs.Version.HeadSHA, reviewConfigHash(cfg), profileName,
 	}, "\n"))

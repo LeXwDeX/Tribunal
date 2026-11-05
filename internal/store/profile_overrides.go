@@ -18,7 +18,10 @@ type ProfileOverrides struct {
 type ProfileOverrideStore interface {
 	GetProfileOverrides(context.Context, string) (*ProfileOverrides, error)
 	PutProfileOverrides(context.Context, string, string, int64, int64) (*ProfileOverrides, error)
-	DeleteProfileOverrides(context.Context, string, int64) error
+	// DeleteProfileOverrides resets the document at the given revision, as the
+	// given user, and returns the stored result. A missing row or a different
+	// revision is ErrStaleRevision.
+	DeleteProfileOverrides(ctx context.Context, profile string, revision, userID int64) (*ProfileOverrides, error)
 	ListProfileModelReferences(context.Context, string) ([]ProfileModelReference, error)
 }
 

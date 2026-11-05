@@ -37,6 +37,11 @@ type CallMeta struct {
 	// CompactedToolResults counts tool outputs the run has replaced by
 	// context compaction so far.
 	CompactedToolResults int `json:"compacted_tool_results,omitempty"`
+	// ModelID is the catalog ID of the model the node was bound to and
+	// ParamSource says where request parameter overrides came from
+	// (override or override_default), or is empty (#334).
+	ModelID     string `json:"model_id,omitempty"`
+	ParamSource string `json:"param_source,omitempty"`
 }
 
 // Reasons recorded in CallMeta.SubmitPrompt and the request audit.
@@ -101,6 +106,9 @@ type AuditRequest struct {
 	// fixed enum values and counts, never text.
 	SubmitPrompt         string `json:"submit_prompt,omitempty"`
 	CompactedToolResults int    `json:"compacted_tool_results,omitempty"`
+	// ModelID and ParamSource come from CallMeta (#334).
+	ModelID     string `json:"model_id,omitempty"`
+	ParamSource string `json:"param_source,omitempty"`
 	// ForcedToolChoice marks a request that forced a tool choice; the tool
 	// name itself is not stored.
 	ForcedToolChoice bool `json:"forced_tool_choice,omitempty"`
@@ -172,6 +180,24 @@ func safeSubmitPrompt(reason string) string {
 		return reason
 	}
 	return ""
+}
+
+// safeParamSource keeps only the known CallMeta.ParamSource values.
+func safeParamSource(source string) string {
+	switch source {
+	case "override", "override_default":
+		return source
+	}
+	return ""
+}
+
+// safeAuditModelID keeps a catalog ID (config:<name> or user:<id>) and drops
+// anything else, including overlong values.
+func safeAuditModelID(id string) string {
+	if len(id) > 128 || !(strings.HasPrefix(id, "user:") || strings.HasPrefix(id, "config:")) {
+		return ""
+	}
+	return id
 }
 
 // ValidReasoningEffort reports whether effort is an allowed audit value.
@@ -710,6 +736,8 @@ func (c *providerClient) record(ctx context.Context, attempt int, req *Request, 
 		}
 		meta := CallMetaFromContext(ctx)
 		audit.Request.SubmitPrompt = safeSubmitPrompt(meta.SubmitPrompt)
+		audit.Request.ModelID = safeAuditModelID(meta.ModelID)
+		audit.Request.ParamSource = safeParamSource(meta.ParamSource)
 		if meta.CompactedToolResults > 0 {
 			audit.Request.CompactedToolResults = meta.CompactedToolResults
 		}
