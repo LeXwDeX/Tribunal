@@ -1,0 +1,109 @@
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { ModelsPage } from '../src/pages/ModelsPage'
+import { installFetch, jsonResponse, renderWithProviders } from './test-utils'
+
+const userModel = {
+  id: 'user:aaaaaaaa-1111', display_name: 'same', source: 'user', read_only: false,
+  protocol: 'openai-chat', base_url: 'https://example.com/v1', model: 'm',
+  params: { max_tokens: 100 }, has_api_key: true, available: true, revision: 1,
+  referenced_by: [], vote_identity: 'example.com/m',
+}
+
+function routes(overrides: Record<string, unknown> = {}) {
+  return (url: string, init?: RequestInit) => {
+    if (url === '/api/v1/models:test') return jsonResponse(overrides.test ?? { ok: true, model: 'm' })
+    if (url.startsWith('/api/v1/models') && init?.method === 'PATCH') return jsonResponse(overrides.patch ?? userModel)
+    if (url.startsWith('/api/v1/models') && init?.method === 'DELETE') return jsonResponse(overrides.delete ?? {})
+    if (url.startsWith('/api/v1/models')) return jsonResponse({ models: overrides.models ?? [userModel] })
+    if (url.startsWith('/api/v1/profiles')) return jsonResponse({ profiles: [] })
+    return jsonResponse({})
+  }
+}
+
+describe('models page management (#292)', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('keeps configured models read-only and shows unavailable reasons', async () => {
+    installFetch(routes({
+      models: [
+        { ...userModel, id: 'config:primary', display_name: 'primary', source: 'config', read_only: true },
+        { ...userModel, id: 'user:bad', display_name: 'bad', available: false, unavailable_reason: 'credential' },
+      ],
+    }))
+    renderWithProviders(<ModelsPage />, { route: '/models' })
+    expect(await screen.findByText('primary')).toBeInTheDocument()
+    expect(screen.queryAllByRole('button', { name: '编辑' })).toHaveLength(1)
+    expect(screen.getByText(/不可用原因：credential/)).toBeInTheDocument()
+  })
+
+  it('separates same-name models with short ids', async () => {
+    installFetch(routes({
+      models: [
+        userModel,
+        { ...userModel, id: 'user:bbbbbbbb-2222', display_name: 'same', revision: 2 },
+      ],
+    }))
+    renderWithProviders(<ModelsPage />, { route: '/models' })
+    expect(await screen.findByText(/user:aaa/)).toBeInTheDocument()
+    expect(screen.getByText(/user:bbb/)).toBeInTheDocument()
+  })
+
+  it('omits the key when it stays unchanged and sends it when replaced', async () => {
+    const user = userEvent.setup()
+    const fetchMock = installFetch(routes())
+    renderWithProviders(<ModelsPage />, { route: '/models' })
+    await user.click(await screen.findByRole('button', { name: '编辑' }))
+    await user.click(screen.getByRole('button', { name: '保存前测试' }))
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url === '/api/v1/models:test')).toBe(true))
+    let body = JSON.parse(String(fetchMock.mock.calls.find(([url]) => url === '/api/v1/models:test')?.[1]?.body))
+    expect(body.api_key).toBeUndefined()
+
+    await user.selectOptions(screen.getByLabelText('API key 状态'), 'replace')
+    await user.type(screen.getByLabelText('API key', { selector: 'input' }), 'secret-canary')
+    await user.click(screen.getByRole('button', { name: '保存前测试' }))
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => url === '/api/v1/models:test')).toHaveLength(2))
+    const calls = fetchMock.mock.calls.filter(([url]) => url === '/api/v1/models:test')
+    body = JSON.parse(String(calls[calls.length - 1][1]?.body))
+    expect(body.api_key).toBe('secret-canary')
+    expect(body.id).toBe('user:aaaaaaaa-1111')
+  })
+
+  it('shows revision conflicts and referenced deletes', async () => {
+    const user = userEvent.setup()
+    installFetch((url, init) => {
+      if (url.startsWith('/api/v1/models') && init?.method === 'PATCH') {
+        return jsonResponse({ error: { code: 'stale_revision', message: 'revision does not match' } }, 409)
+      }
+      if (url.startsWith('/api/v1/models') && init?.method === 'DELETE') {
+        return jsonResponse({ error: { code: 'referenced', message: 'model is referenced', details: [{ field: 'references', message: 'default/lanes.review' }] } }, 409)
+      }
+      if (url.startsWith('/api/v1/models')) return jsonResponse({ models: [userModel] })
+      if (url.startsWith('/api/v1/profiles')) return jsonResponse({ profiles: [] })
+      return jsonResponse({})
+    })
+    renderWithProviders(<ModelsPage />, { route: '/models' })
+    await user.click(await screen.findByRole('button', { name: '编辑' }))
+    await user.click(screen.getByRole('button', { name: '保存' }))
+    expect(await screen.findByText('已被他人修改，请重新加载。')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '取消' }))
+    await user.click(screen.getByRole('button', { name: '删除' }))
+    await user.click(screen.getAllByRole('button', { name: '删除' }).at(-1)!)
+    expect(await screen.findByText(/default\/lanes.review/)).toBeInTheDocument()
+  })
+
+  it('explains egress denials', async () => {
+    const user = userEvent.setup()
+    installFetch((url) => {
+      if (url === '/api/v1/models:test') return jsonResponse({ error: { code: 'egress_denied', message: 'denied' } }, 422)
+      if (url.startsWith('/api/v1/models')) return jsonResponse({ models: [userModel] })
+      if (url.startsWith('/api/v1/profiles')) return jsonResponse({ profiles: [] })
+      return jsonResponse({})
+    })
+    renderWithProviders(<ModelsPage />, { route: '/models' })
+    await user.click(await screen.findByRole('button', { name: '编辑' }))
+    await user.click(screen.getByRole('button', { name: '保存前测试' }))
+    expect(await screen.findByText(/出站地址被拒绝/)).toBeInTheDocument()
+  })
+})

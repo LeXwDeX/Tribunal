@@ -1,8 +1,8 @@
 import { useMemo, useState, useSyncExternalStore, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { getStats, listProjects, listProviders, listReviews } from '../api/api'
-import type { Project, Provider, ReviewSummary, Stats } from '../api/types'
+import { getStats, listModels, listProjects, listReviews } from '../api/api'
+import type { ModelHealth, Project, ReviewSummary, Stats } from '../api/types'
 import { useCanWrite } from '../components/RoleContext'
 import { ReviewTable } from '../components/ReviewTable'
 import { TriggerReviewDialog } from '../components/TriggerReviewDialog'
@@ -34,7 +34,7 @@ interface ReviewIssue {
   kind: ReviewIssueKind
 }
 
-function buildAlerts(projects: Project[], providers: Provider[], reviewIssues: ReviewIssue[]): Alert[] {
+function buildAlerts(projects: Project[], providers: ModelHealth[], reviewIssues: ReviewIssue[]): Alert[] {
   const alerts: Alert[] = []
   const now = Date.now()
   for (const project of projects) {
@@ -75,14 +75,14 @@ function buildAlerts(projects: Project[], providers: Provider[], reviewIssues: R
     }
   }
   for (const provider of providers) {
-    const errors = readNumber(provider.stats_24h, ['errors']) ?? readNumber(provider as unknown as Record<string, unknown>, ['errors_24h'])
-    const rate = readNumber(provider.stats_24h, ['error_rate']) ?? readNumber(provider as unknown as Record<string, unknown>, ['error_rate_24h'])
+    const errors = readNumber(provider.stats_24h, ['errors'])
+    const rate = readNumber(provider.stats_24h, ['error_rate'])
     if (errors && errors > 0) {
       alerts.push({
-        id: `provider-${provider.name}`,
+        id: `provider-${provider.id}`,
         tone: 'warn',
         label: 'Provider',
-        text: `${provider.name} 近 24 小时有 ${errors} 次错误${typeof rate === 'number' ? `（错误率 ${formatRatio(rate)}）` : ''}。`,
+        text: `${provider.display_name} 近 24 小时有 ${errors} 次错误${typeof rate === 'number' ? `（错误率 ${formatRatio(rate)}）` : ''}。`,
         href: '/models',
         action: '查看模型',
       })
@@ -222,12 +222,7 @@ export function OverviewPage() {
   // Provider health is a platform-admin view. Ordinary users must not receive
   // a false 403 alert from a query they cannot run.
   const providersEnabled = canRegister
-  const providersPage = usePaginated<Provider>(
-    ['providers', 'overview'],
-    (cursor) => listProviders(cursor),
-    'providers',
-    { enabled: providersEnabled },
-  )
+  const providersPage = useQuery({ queryKey: ['models', 'overview'], queryFn: listModels, enabled: providersEnabled, retry: false })
   const failedRuns = usePaginated<ReviewSummary>(
     ['reviews', 'overview', 'failed'],
     (cursor) => listReviews({ status: 'failed' }, cursor),
@@ -270,8 +265,8 @@ export function OverviewPage() {
     return Array.from(issues.values())
   }, [failedRuns.items, failedPublications.items, pendingPublications.items])
   const alerts = useMemo(
-    () => buildAlerts(projectsPage.items, providersPage.items, reviewIssues),
-    [projectsPage.items, providersPage.items, reviewIssues],
+    () => buildAlerts(projectsPage.items, providersPage.data?.models || [], reviewIssues),
+    [projectsPage.items, providersPage.data, reviewIssues],
   )
   const issuesError = projectsPage.error || failedRuns.error || failedPublications.error
     || pendingPublications.error || (providersEnabled ? providersPage.error : null)
@@ -285,7 +280,7 @@ export function OverviewPage() {
       ['reviews', 'overview', 'failed'],
       ['reviews', 'overview', 'publication-failed'],
       ['reviews', 'overview', 'publication-pending'],
-      ...(providersEnabled ? [['providers', 'overview']] : []),
+      ...(providersEnabled ? [['models', 'overview']] : []),
     ].some((key) => queryClient.getQueryState(key)?.fetchStatus === 'paused'),
     () => false,
   )
@@ -301,7 +296,7 @@ export function OverviewPage() {
   const reviewAlertsBlocked = pausedIssues || [failedRuns, failedPublications, pendingPublications]
     .some((source) => source.isFetching || source.isRefetchError)
   const hasMoreReviewAlerts = failedRuns.hasNextPage || failedPublications.hasNextPage || pendingPublications.hasNextPage
-  const hasMoreIssues = projectsPage.hasNextPage || hasMoreReviewAlerts || (providersEnabled && providersPage.hasNextPage)
+  const hasMoreIssues = projectsPage.hasNextPage || hasMoreReviewAlerts
   const loadMoreReviewAlerts = () => {
     if (failedRuns.hasNextPage) failedRuns.fetchNextPage()
     if (failedPublications.hasNextPage) failedPublications.fetchNextPage()
@@ -351,9 +346,10 @@ export function OverviewPage() {
                 <ErrorState
                   error={issuesError}
                   onRetry={() => {
-                    for (const source of [projectsPage, failedRuns, failedPublications, pendingPublications, ...(providersEnabled ? [providersPage] : [])]) {
+                    for (const source of [projectsPage, failedRuns, failedPublications, pendingPublications]) {
                       if (source.isError && !source.isFetching && !pausedIssues) source.retry()
                     }
+                    if (providersEnabled && providersPage.isError && !providersPage.isFetching && !pausedIssues) void providersPage.refetch()
                   }}
                   title="异常检查未完整加载"
                 />
@@ -379,9 +375,6 @@ export function OverviewPage() {
                 ) : null}
                 {hasMoreReviewAlerts ? (
                   <Button variant="secondary" className={ui.smallButton} onClick={loadMoreReviewAlerts} loading={reviewAlertsFetching} disabled={reviewAlertsBlocked}>加载更多告警数据</Button>
-                ) : null}
-                {providersEnabled && providersPage.hasNextPage ? (
-                  <Button variant="secondary" className={ui.smallButton} onClick={providersPage.fetchNextPage} loading={providersPage.isFetchingNextPage} disabled={pausedIssues || providersPage.isFetching || providersPage.isRefetchError}>加载更多 Provider 以继续检查</Button>
                 ) : null}
               </div>
             ) : null}

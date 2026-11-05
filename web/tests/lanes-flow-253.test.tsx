@@ -7,6 +7,7 @@ import { installFetch, jsonResponse, renderWithProviders } from './test-utils'
 
 function renderProfiles(profiles: Array<{ name: string; config: Record<string, unknown> }>) {
   installFetch((url) => {
+    if (url.startsWith('/api/v1/models')) return jsonResponse({ models: [] })
     if (url.startsWith('/api/v1/providers')) return jsonResponse({ providers: [] })
     if (url.startsWith('/api/v1/profiles')) return jsonResponse({ profiles })
     return jsonResponse({})

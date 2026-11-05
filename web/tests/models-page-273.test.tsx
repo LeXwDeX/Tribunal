@@ -5,6 +5,7 @@ import { installFetch, jsonResponse, renderWithProviders } from './test-utils'
 
 function renderProfile(config: Record<string, unknown>) {
   installFetch((url) => {
+    if (url.startsWith('/api/v1/models')) return jsonResponse({ models: [] })
     if (url.startsWith('/api/v1/providers')) return jsonResponse({ providers: [] })
     if (url.startsWith('/api/v1/profiles')) return jsonResponse({ profiles: [{ name: 'default', config }] })
     return jsonResponse({})
@@ -24,7 +25,7 @@ describe('models page blank providers (#273)', () => {
 
   it('shows the challenge provider without a fallback suffix', async () => {
     renderProfile({ challenge: { provider: 'primary', fallback: '', only: null } })
-    expect(await screen.findByText(/启动时加载/)).toBeInTheDocument()
+    expect(await screen.findByText(/还没有模型/)).toBeInTheDocument()
     expect(screen.queryByText(/重启或热加载/)).not.toBeInTheDocument()
     const text = await stepWho('挑战')
     expect(text).toContain('primary')
