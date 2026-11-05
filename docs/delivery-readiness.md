@@ -93,7 +93,7 @@
 - manage 授权：U2 对 P2 manage 时，`GET /projects` 同时返回 P1 read 与 P2 manage；`PATCH /projects/{id}` 200；项目级扩展列表 200；`include_payload=true` 200；项目块绑定写入 403（宿主配置仍需平台管理员）。
 - 全局模式：U2 对 P2 无 grant 时开启 `global_read`，P1/P2 项目和评审均可读，P2 写 403；关闭后 P2 恢复 404。
 - 管理员：U2 提升为平台管理员后 admin 用户列表 200，但仍无 P2 grant（404）；降级回 viewer 后 admin 接口 403。
-- 宿主配置：U2 对 P2 manage 时创建平台 MCP server 403；撤销 manage 后恢复。
+- 宿主配置：U2 对 P2 manage 时项目块绑定写入 403；`POST /mcp-servers` 的 403 只证明创建入口已关闭，不作为权限边界证据。
 - CSRF：U2 浏览器会话无 CSRF 的 PATCH 403，带 CSRF 200。
 - session/token：U2 用浏览器 session 和 API token 读取 P1 均为 200，`access` 一致。
 - 撤销/禁用：撤销 U2 的 P1 grant 后读取 404；重新授予 P1 read 后恢复；停用后 token 401、旧浏览器 session `/me` 401；启用后旧 token 仍 401；重新 OAuth 登录后 grant 保留。
