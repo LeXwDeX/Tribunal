@@ -24,9 +24,14 @@ func TestModelProviderValidation(t *testing.T) {
 }
 
 func TestProviderNameRejectsColon(t *testing.T) {
-	cfg := &Config{Providers: map[string]ProviderConfig{"user:collision": {}}}
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "providers.user:collision") {
+	provider := ProviderConfig{Protocol: "openai-chat", Model: "m", MaxConcurrency: 1, MaxTokens: 1}
+	cfg := &Config{Providers: map[string]ProviderConfig{"user:collision": provider}}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "providers.user:collision: provider name must not contain ':'") {
 		t.Fatalf("provider name error missing: %v", err)
+	}
+	cfg = &Config{Providers: map[string]ProviderConfig{"user-collision": provider}}
+	if err := cfg.Validate(); err != nil && strings.Contains(err.Error(), "provider name must not contain ':'") {
+		t.Fatalf("valid provider name rejected: %v", err)
 	}
 }
 

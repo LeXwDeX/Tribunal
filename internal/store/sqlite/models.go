@@ -146,11 +146,22 @@ func (s *Store) CreateModel(ctx context.Context, m store.Model, credential strin
 		return nil, errors.New("sqlite: invalid model parameters")
 	}
 	now := formatTime(s.now())
-	_, err = s.db.ExecContext(ctx, `INSERT INTO llm_models (id, display_name, protocol, base_url, model, params_json, api_key_sealed, revision, created_by, created_at, updated_by, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`, m.ID, m.DisplayName, m.Protocol, m.BaseURL, m.Model, string(params), sealed, m.CreatedBy, now, m.CreatedBy, now)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
+		return nil, errors.New("sqlite: begin model create failed")
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO llm_models (id, display_name, protocol, base_url, model, params_json, api_key_sealed, revision, created_by, created_at, updated_by, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`, m.ID, m.DisplayName, m.Protocol, m.BaseURL, m.Model, string(params), sealed, m.CreatedBy, now, m.CreatedBy, now); err != nil {
 		return nil, errors.New("sqlite: create model failed")
 	}
-	return s.GetModel(ctx, m.ID)
+	created, err := s.scanModel(tx.QueryRowContext(ctx, `SELECT `+modelColumns+` FROM llm_models WHERE id = ?`, m.ID))
+	if err != nil {
+		return nil, errors.New("sqlite: read created model failed")
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, errors.New("sqlite: commit model create failed")
+	}
+	return created, nil
 }
 
 func (s *Store) UpdateModel(ctx context.Context, m store.Model, revision int64, credential *string) (*store.Model, error) {
