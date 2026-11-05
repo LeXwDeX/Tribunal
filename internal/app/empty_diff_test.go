@@ -41,6 +41,7 @@ func TestEmptyDiffPublishesIncomplete(t *testing.T) {
 func TestIgnoredOnlyDiffStillPasses(t *testing.T) {
 	f := newReviewFixture(t, strings.Repeat("a", 40))
 	f.defaults.Ignore = []string{"ignored.txt"}
+	f.defaults.CommitStatus = true
 	f.service.reviewDefaults, f.publisher.reviewDefaults = f.defaults, f.defaults
 	f.gitlab.diffs = []gitlab.FileDiff{{NewPath: "ignored.txt", Diff: "+ignored\n"}}
 	job := f.seedReview(t, "ignored-only")
@@ -58,5 +59,9 @@ func TestIgnoredOnlyDiffStillPasses(t *testing.T) {
 	}
 	if len(f.gitlab.statuses) != 0 {
 		t.Fatalf("statuses = %+v, want no commit status", f.gitlab.statuses)
+	}
+	status, err := f.db.GetReviewStatus(context.Background(), 42, 7)
+	if err != nil || status.State != reviewStatusPass {
+		t.Fatalf("review status = %+v, %v; want pass", status, err)
 	}
 }
