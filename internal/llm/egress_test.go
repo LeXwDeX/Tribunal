@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -106,6 +107,9 @@ func TestRegistryUsesEgressPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if infos := registry.Infos(); len(infos) != 1 || !infos[0].Unavailable {
+		t.Fatalf("denied loopback provider was not marked unavailable: %+v", infos)
+	}
 	client, err := registry.Client("test")
 	if err != nil {
 		t.Fatal(err)
@@ -123,6 +127,10 @@ func TestRegistryStartsWithBlockedLegacyProvider(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("blocked legacy provider must not prevent startup: %v", err)
+	}
+	infos := registry.Infos()
+	if len(infos) != 1 || !infos[0].Unavailable || infos[0].UnavailableReason != "egress_denied" {
+		t.Fatalf("blocked legacy provider was not marked unavailable: %+v", infos)
 	}
 	client, err := registry.Client("legacy")
 	if err != nil {
@@ -203,5 +211,30 @@ func TestEgressDeniedAtDial(t *testing.T) {
 	_, err = client.Get(server.URL)
 	if !errors.Is(err, ErrEgressDenied) {
 		t.Fatalf("dial should be denied: %v", err)
+	}
+}
+
+func TestRegistryHostnameRequestUsesDialControl(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	defer server.Close()
+	t.Setenv("EGRESS_TEST_KEY", "test")
+	baseURL := strings.Replace(server.URL, "127.0.0.1", "localhost", 1)
+	registry, err := NewRegistry(map[string]config.ProviderConfig{
+		"host": {Protocol: "openai-chat", Model: "test", BaseURL: baseURL, APIKeyEnv: "EGRESS_TEST_KEY"},
+	}, WithEgress(config.EgressConfig{DenyCIDRs: []string{"127.0.0.0/8", "::1/128"}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := registry.Client("host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := &Request{Messages: []Message{{
+		Role:  RoleUser,
+		Parts: []Part{{Type: PartText, Text: "ping"}},
+	}}}
+	_, err = client.Generate(context.Background(), req)
+	if !errors.Is(err, ErrEgressDenied) {
+		t.Fatalf("hostname request must be denied by the dial control: %v", err)
 	}
 }

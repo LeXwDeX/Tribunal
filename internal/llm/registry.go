@@ -305,6 +305,10 @@ func NewRegistry(providers map[string]config.ProviderConfig, opts ...RegistryOpt
 			opt(&options)
 		}
 	}
+	policy, err := newEgressPolicy(options.egress)
+	if err != nil {
+		return nil, err
+	}
 	httpClient, err := newEgressHTTPClient(options.httpClient, options.egress)
 	if err != nil {
 		return nil, err
@@ -322,7 +326,12 @@ func NewRegistry(providers map[string]config.ProviderConfig, opts ...RegistryOpt
 			return nil, err
 		}
 		registry.clients[name] = client
-		registry.infos = append(registry.infos, client.Info())
+		info := client.Info()
+		if reason := providerUnavailable(cfg.BaseURL, policy); reason != "" {
+			info.Unavailable = true
+			info.UnavailableReason = reason
+		}
+		registry.infos = append(registry.infos, info)
 	}
 	return registry, nil
 }
@@ -845,6 +854,8 @@ func guardedHTTPClientWithPolicy(base *http.Client, policy egressPolicy) (*http.
 			}
 			return dialer.DialContext(ctx, network, address)
 		}
+		//lint:ignore SA1019 DialTLS is deprecated, but clearing it prevents a
+		// caller-provided TLS dialer from bypassing the egress policy.
 		secureTransport.DialTLS = nil
 		secureTransport.DialTLSContext = nil
 		clone.Transport = secureTransport

@@ -1,10 +1,14 @@
 package llm
 
 import (
+	"context"
 	"errors"
 	"net"
 	"net/netip"
+	"net/url"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/config"
 )
@@ -65,4 +69,37 @@ func (p egressPolicy) control(_ string, address string, _ syscall.RawConn) error
 		return ErrEgressDenied
 	}
 	return p.check(ip)
+}
+
+// providerUnavailable reports why a configured base URL cannot pass the
+// policy at startup. A DNS lookup failure also fails closed: the provider is
+// marked unavailable instead of stopping the whole process.
+func providerUnavailable(baseURL string, policy egressPolicy) string {
+	if strings.TrimSpace(baseURL) == "" {
+		return ""
+	}
+	parsed, err := url.Parse(baseURL)
+	if err != nil || parsed.Hostname() == "" {
+		return ""
+	}
+	host := parsed.Hostname()
+	if ip, err := netip.ParseAddr(host); err == nil {
+		if policy.check(ip) != nil {
+			return "egress_denied"
+		}
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	addresses, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil || len(addresses) == 0 {
+		return "dns_lookup_failed"
+	}
+	for _, address := range addresses {
+		ip, ok := netip.AddrFromSlice(address.IP)
+		if !ok || policy.check(ip) != nil {
+			return "egress_denied"
+		}
+	}
+	return ""
 }

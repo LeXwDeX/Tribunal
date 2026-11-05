@@ -136,6 +136,9 @@ func llmErrorKind(err error) string {
 	if err == nil {
 		return ""
 	}
+	if errors.Is(err, llm.ErrEgressDenied) {
+		return "egress_denied"
+	}
 	var classified *llm.Error
 	if errors.As(err, &classified) && classified != nil {
 		switch classified.Kind {
