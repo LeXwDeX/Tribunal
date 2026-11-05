@@ -35,6 +35,9 @@ type ChangeSource struct {
 
 	mu       sync.Mutex
 	read     map[string]map[int]map[int]bool
+	parts    map[string]map[int]map[int][][2]int
+	pending  map[string]map[int]map[int]bool
+	totals   map[string]map[int]int
 	complete map[string]map[int]bool
 }
 
@@ -46,24 +49,28 @@ func NewChangeSource(files, all []ChangeFile, inline map[string]bool) *ChangeSou
 		AllFiles: append([]ChangeFile(nil), all...),
 		Inline:   inline,
 		read:     make(map[string]map[int]map[int]bool),
+		parts:    make(map[string]map[int]map[int][][2]int),
+		pending:  make(map[string]map[int]map[int]bool),
+		totals:   make(map[string]map[int]int),
 		complete: make(map[string]map[int]bool),
 	}
 }
 
-// RecordLine records one hunk line as read.
+// RecordLine records one hunk line as read but not yet delivered to the
+// model. Flush commits pending reads only when the next model request starts.
 func (c *ChangeSource) RecordLine(path string, hunk, line int) {
 	if c == nil || hunk < 1 || line < 1 {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.read == nil {
-		c.read = make(map[string]map[int]map[int]bool)
+	if c.pending == nil {
+		c.pending = make(map[string]map[int]map[int]bool)
 	}
-	byHunk := c.read[path]
+	byHunk := c.pending[path]
 	if byHunk == nil {
 		byHunk = make(map[int]map[int]bool)
-		c.read[path] = byHunk
+		c.pending[path] = byHunk
 	}
 	lines := byHunk[hunk]
 	if lines == nil {
@@ -73,23 +80,69 @@ func (c *ChangeSource) RecordLine(path string, hunk, line int) {
 	lines[line] = true
 }
 
-// completeHunk reports whether every line 1..total has been read.
-func (c *ChangeSource) completeHunk(path string, hunk, total int) bool {
+// Flush commits reads that the next model request will see. Calling it after
+// a submit ends the run without committing that run's final read output.
+func (c *ChangeSource) Flush() {
 	if c == nil {
-		return false
+		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if total <= 0 {
-		return true
-	}
-	lines := c.read[path][hunk]
-	for line := 1; line <= total; line++ {
-		if !lines[line] {
-			return false
+	for path, hunks := range c.pending {
+		if c.read[path] == nil {
+			c.read[path] = make(map[int]map[int]bool)
+		}
+		for hunk, lines := range hunks {
+			if c.read[path][hunk] == nil {
+				c.read[path][hunk] = make(map[int]bool)
+			}
+			for line := range lines {
+				c.read[path][hunk][line] = true
+			}
 		}
 	}
-	return true
+	c.pending = make(map[string]map[int]map[int]bool)
+	c.recomputeCompleteLocked()
+}
+
+// Reset discards every read. A transport retry starts a fresh conversation,
+// so evidence from the failed attempt must not cover the next one.
+func (c *ChangeSource) Reset() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.read = make(map[string]map[int]map[int]bool)
+	c.parts = make(map[string]map[int]map[int][][2]int)
+	c.pending = make(map[string]map[int]map[int]bool)
+	c.totals = make(map[string]map[int]int)
+	c.complete = make(map[string]map[int]bool)
+}
+
+func (c *ChangeSource) recomputeCompleteLocked() {
+	c.complete = make(map[string]map[int]bool)
+	for path, hunks := range c.totals {
+		for hunk, total := range hunks {
+			if total <= 0 {
+				continue
+			}
+			lines := c.read[path][hunk]
+			complete := true
+			for line := 1; line <= total; line++ {
+				if !lines[line] {
+					complete = false
+					break
+				}
+			}
+			if complete {
+				if c.complete[path] == nil {
+					c.complete[path] = make(map[int]bool)
+				}
+				c.complete[path][hunk] = true
+			}
+		}
+	}
 }
 
 // DiffReads returns fully read hunk indexes per path in ascending order.
@@ -144,7 +197,7 @@ func (t listChangesTool) Call(_ context.Context, raw json.RawMessage) (Result, e
 		return Result{Content: "(no changed files)"}, nil
 	}
 	var b strings.Builder
-	b.WriteString("path\tstatus\tadditions\tdeletions\tdiff_runes\thunks\tgenerated\tinlined\n")
+	b.WriteString("path\told_path\tstatus\tadditions\tdeletions\tdiff_runes\thunks\tgenerated\tinlined\n")
 	for _, file := range files {
 		inlined := "unknown"
 		if t.changes.Inline != nil {
@@ -156,8 +209,8 @@ func (t listChangesTool) Call(_ context.Context, raw json.RawMessage) (Result, e
 				}
 			}
 		}
-		fmt.Fprintf(&b, "%s\t%s\t%d\t%d\t%d\t%d\t%t\t%s\n",
-			file.Path, file.Status, file.Additions, file.Deletions,
+		fmt.Fprintf(&b, "%s\t%s\t%s\t%d\t%d\t%d\t%d\t%t\t%s\n",
+			file.Path, file.OldPath, file.Status, file.Additions, file.Deletions,
 			utf8.RuneCountInString(file.Diff), countDiffHunks(file.Diff), file.Generated, inlined)
 	}
 	b.WriteString("\nfiles not inlined in the prompt must be read with read_diff before claiming coverage.\n")
@@ -165,10 +218,11 @@ func (t listChangesTool) Call(_ context.Context, raw json.RawMessage) (Result, e
 }
 
 type readDiffInput struct {
-	Path     string `json:"path"`
-	FromHunk int    `json:"from_hunk,omitempty"`
-	MaxHunks int    `json:"max_hunks,omitempty"`
-	FromLine int    `json:"from_line,omitempty"`
+	Path       string `json:"path"`
+	FromHunk   int    `json:"from_hunk,omitempty"`
+	MaxHunks   int    `json:"max_hunks,omitempty"`
+	FromLine   int    `json:"from_line,omitempty"`
+	FromOffset int    `json:"from_offset,omitempty"`
 }
 
 const (
@@ -194,7 +248,8 @@ func (t readDiffTool) Def() llm.ToolDef {
 			"path":{"type":"string"},
 			"from_hunk":{"type":"integer","minimum":1},
 			"max_hunks":{"type":"integer","minimum":1,"maximum":20},
-			"from_line":{"type":"integer","minimum":1}},
+			"from_line":{"type":"integer","minimum":1},
+			"from_offset":{"type":"integer","minimum":0}},
 			"additionalProperties":false}`)
 }
 
@@ -238,6 +293,9 @@ func (t readDiffTool) Call(_ context.Context, raw json.RawMessage) (Result, erro
 	if fromLine == 0 {
 		fromLine = 1
 	}
+	if in.FromOffset < 0 {
+		return Result{}, inputFeedback("from_offset", "range", errors.New("from_offset must not be negative"))
+	}
 
 	var b strings.Builder
 	runes := 0
@@ -250,7 +308,7 @@ func (t readDiffTool) Call(_ context.Context, raw json.RawMessage) (Result, erro
 			lines++
 		}
 	}
-	nextHunk, nextLine := 0, 0
+	nextHunk, nextLine, nextOffset := 0, 0, 0
 	stopped := false
 	lastHunk := fromHunk - 1
 	for hunk := fromHunk; hunk <= len(hunks) && hunk < fromHunk+maxHunks; hunk++ {
@@ -266,6 +324,7 @@ func (t readDiffTool) Call(_ context.Context, raw json.RawMessage) (Result, erro
 				return Result{}, inputFeedback("from_line", "range", fmt.Errorf("from_line exceeds hunk %d line count %d", hunk, len(content.lines)))
 			}
 		}
+		t.changes.setHunkTotal(file.Path, hunk, len(content.lines))
 		header := content.header
 		if start == 0 {
 			if runes+utf8.RuneCountInString(header)+1 > maxDiffRunesPerCall || lines >= maxDiffLinesPerCall {
@@ -278,34 +337,63 @@ func (t readDiffTool) Call(_ context.Context, raw json.RawMessage) (Result, erro
 			runes += utf8.RuneCountInString(header) + 1
 			lines++
 		}
-		wrote := 0
 		for i := start; i < len(content.lines); i++ {
 			line := content.lines[i]
-			if lines >= maxDiffLinesPerCall || runes+utf8.RuneCountInString(line)+1 > maxDiffRunesPerCall {
-				nextHunk, nextLine = hunk, i+1
+			lineRunes := utf8.RuneCountInString(line)
+			offset := 0
+			if hunk == fromHunk && i == start && in.FromOffset > 0 {
+				offset = in.FromOffset
+				if offset > lineRunes {
+					offset = lineRunes
+				}
+			}
+			remainingRunes := maxDiffRunesPerCall - runes
+			remainingLines := maxDiffLinesPerCall - lines
+			if remainingRunes <= 0 || remainingLines <= 0 {
+				nextHunk, nextLine, nextOffset = hunk, i+1, offset
 				stopped = true
 				break
 			}
-			b.WriteString(line)
+			available := lineRunes - offset
+			if available+1 > remainingRunes {
+				// A single line larger than the read budget is paged by rune
+				// offset so the cursor always advances.
+				partRunes := remainingRunes - 1
+				if partRunes < 1 {
+					partRunes = 1
+				}
+				end := offset + partRunes
+				if end > lineRunes {
+					end = lineRunes
+				}
+				part := sliceRunes(line, offset, end)
+				b.WriteString(part)
+				runes += utf8.RuneCountInString(part)
+				t.changes.recordLinePart(file.Path, hunk, i+1, offset, end, lineRunes)
+				nextHunk, nextLine, nextOffset = hunk, i+1, end
+				stopped = true
+				break
+			}
+			part := sliceRunes(line, offset, lineRunes)
+			b.WriteString(part)
 			b.WriteByte('\n')
-			runes += utf8.RuneCountInString(line) + 1
+			runes += utf8.RuneCountInString(part) + 1
 			lines++
-			wrote++
+			t.changes.recordLinePart(file.Path, hunk, i+1, offset, lineRunes, lineRunes)
 		}
 		if stopped {
-			if wrote > 0 {
-				// Only the complete prefix of this hunk is recorded.
-				t.changes.recordHunkLines(file.Path, hunk, start+1, start+wrote, len(content.lines))
-			}
 			break
 		}
-		t.changes.recordHunkLines(file.Path, hunk, start+1, len(content.lines), len(content.lines))
 	}
 	if !stopped && lastHunk < len(hunks) {
 		nextHunk, nextLine = lastHunk+1, 1
 	}
 	if nextHunk > 0 {
-		fmt.Fprintf(&b, "\n[read_diff] next_hunk: %d, next_line: %d\n", nextHunk, nextLine)
+		if nextOffset > 0 {
+			fmt.Fprintf(&b, "\n[read_diff] next_hunk: %d, next_line: %d, next_offset: %d\n", nextHunk, nextLine, nextOffset)
+		} else {
+			fmt.Fprintf(&b, "\n[read_diff] next_hunk: %d, next_line: %d\n", nextHunk, nextLine)
+		}
 	} else {
 		b.WriteString("\n[read_diff] end of diff\n")
 	}
@@ -326,18 +414,67 @@ func (c *ChangeSource) find(path string) (ChangeFile, bool) {
 	return ChangeFile{}, false
 }
 
-func (c *ChangeSource) recordHunkLines(path string, hunk, first, last, total int) {
-	for line := first; line <= last && line <= total; line++ {
+func (c *ChangeSource) setHunkTotal(path string, hunk, total int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.totals[path] == nil {
+		c.totals[path] = make(map[int]int)
+	}
+	c.totals[path][hunk] = total
+}
+
+func (c *ChangeSource) recordLinePart(path string, hunk, line, start, end, total int) {
+	if start < 0 {
+		start = 0
+	}
+	if end > total {
+		end = total
+	}
+	if start >= end {
+		return
+	}
+	c.mu.Lock()
+	if c.parts[path] == nil {
+		c.parts[path] = make(map[int]map[int][][2]int)
+	}
+	if c.parts[path][hunk] == nil {
+		c.parts[path][hunk] = make(map[int][][2]int)
+	}
+	c.parts[path][hunk][line] = append(c.parts[path][hunk][line], [2]int{start, end})
+	complete := c.lineCoveredLocked(path, hunk, line, total)
+	c.mu.Unlock()
+	if complete {
 		c.RecordLine(path, hunk, line)
 	}
-	if c.completeHunk(path, hunk, total) {
-		c.mu.Lock()
-		if c.complete[path] == nil {
-			c.complete[path] = make(map[int]bool)
+}
+
+func (c *ChangeSource) lineCoveredLocked(path string, hunk, line, total int) bool {
+	intervals := append([][2]int(nil), c.parts[path][hunk][line]...)
+	sort.Slice(intervals, func(i, j int) bool { return intervals[i][0] < intervals[j][0] })
+	covered := 0
+	for _, interval := range intervals {
+		if interval[0] > covered {
+			break
 		}
-		c.complete[path][hunk] = true
-		c.mu.Unlock()
+		if interval[1] > covered {
+			covered = interval[1]
+		}
 	}
+	return covered >= total
+}
+
+func sliceRunes(value string, start, end int) string {
+	runes := []rune(value)
+	if start < 0 {
+		start = 0
+	}
+	if end > len(runes) {
+		end = len(runes)
+	}
+	if start > end {
+		start = end
+	}
+	return string(runes[start:end])
 }
 
 func countDiffHunks(diff string) int {

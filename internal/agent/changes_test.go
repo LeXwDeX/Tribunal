@@ -53,6 +53,7 @@ func TestReadDiffPagesAndRecordsCompleteHunks(t *testing.T) {
 	if !strings.Contains(first.Content, "+one") || !strings.Contains(first.Content, "next_hunk: 2") {
 		t.Fatalf("first page = %q", first.Content)
 	}
+	source.Flush()
 	if got := source.DiffReads()["a.go"]; len(got) != 1 || got[0] != 1 {
 		t.Fatalf("diff reads after first page = %v, want [1]", got)
 	}
@@ -64,6 +65,7 @@ func TestReadDiffPagesAndRecordsCompleteHunks(t *testing.T) {
 	if !strings.Contains(second.Content, "+two") || strings.Contains(second.Content, "next_hunk") {
 		t.Fatalf("second page = %q", second.Content)
 	}
+	source.Flush()
 	if got := source.DiffReads()["a.go"]; len(got) != 2 || got[0] != 1 || got[1] != 2 {
 		t.Fatalf("diff reads after second page = %v, want [1 2]", got)
 	}
@@ -108,6 +110,7 @@ func TestReadDiffNeedsEveryLineOfALargeHunk(t *testing.T) {
 	if strings.Contains(rest.Content, "next_hunk") {
 		t.Fatalf("hunk still incomplete after reading the rest: %q", rest.Content)
 	}
+	source.Flush()
 	if got := source.DiffReads()["big.go"]; len(got) != 1 || got[0] != 1 {
 		t.Fatalf("diff reads after full hunk = %v, want [1]", got)
 	}
@@ -116,7 +119,7 @@ func TestReadDiffNeedsEveryLineOfALargeHunk(t *testing.T) {
 func TestListChangesShowsInlineStateAndHunks(t *testing.T) {
 	diff := "@@ -1 +1 @@\n+one\n@@ -10 +10 @@\n+two\n"
 	source := NewChangeSource([]ChangeFile{
-		{Path: "a.go", Status: "modified", Diff: diff, Additions: 2},
+		{Path: "a.go", OldPath: "old.go", Status: "renamed", Diff: diff, Additions: 2},
 		{Path: "b.go", Status: "added", Diff: "@@ -0 +1 @@\n+b\n"},
 	}, nil, map[string]bool{"a.go": true, "b.go": false})
 	sb := changeSandbox(t)
@@ -125,10 +128,10 @@ func TestListChangesShowsInlineStateAndHunks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list changes: %v", err)
 	}
-	if !strings.Contains(result.Content, "a.go\tmodified") || !strings.Contains(result.Content, "inlined") {
+	if !strings.Contains(result.Content, "old_path") || !strings.Contains(result.Content, "a.go\told.go\trenamed") || !strings.Contains(result.Content, "inlined") {
 		t.Fatalf("list output = %q", result.Content)
 	}
-	for _, want := range []string{"a.go", "yes", "b.go", "no"} {
+	for _, want := range []string{"a.go", "old.go", "yes", "b.go", "no"} {
 		if !strings.Contains(result.Content, want) {
 			t.Fatalf("list output missing %q: %q", want, result.Content)
 		}
@@ -146,4 +149,61 @@ func TestReadDiffRejectsUnknownPath(t *testing.T) {
 
 func itoa(value int) string {
 	return strconv.Itoa(value)
+}
+
+func TestFlushDefersReadsUntilModelTurn(t *testing.T) {
+	source := NewChangeSource([]ChangeFile{{Path: "a.go", Status: "modified", Diff: "@@ -1 +1 @@\n+one\n"}}, nil, nil)
+	sb := changeSandbox(t)
+	read := toolByName(t, BuiltinToolsWithChanges(sb, source), "read_diff")
+	if _, err := invoke(t, read, `{"path":"a.go"}`); err != nil {
+		t.Fatal(err)
+	}
+	if got := source.DiffReads(); len(got) != 0 {
+		t.Fatalf("read_diff committed before the next model turn: %v", got)
+	}
+	source.Flush()
+	if got := source.DiffReads()["a.go"]; len(got) != 1 || got[0] != 1 {
+		t.Fatalf("flush did not commit the read: %v", got)
+	}
+	source.Reset()
+	if got := source.DiffReads(); len(got) != 0 {
+		t.Fatalf("reset kept reads: %v", got)
+	}
+}
+
+func TestReadDiffPaginatesAnOversizedLine(t *testing.T) {
+	long := "+" + strings.Repeat("x", maxDiffRunesPerCall*2)
+	source := NewChangeSource([]ChangeFile{{Path: "long.go", Status: "modified", Diff: "@@ -1 +1 @@\n" + long + "\n"}}, nil, nil)
+	sb := changeSandbox(t)
+	read := toolByName(t, BuiltinToolsWithChanges(sb, source), "read_diff")
+
+	fromLine, fromOffset := 1, 0
+	for round := 0; round < 10; round++ {
+		input := fmt.Sprintf(`{"path":"long.go","from_line":%d,"from_offset":%d}`, fromLine, fromOffset)
+		result, err := invoke(t, read, input)
+		if err != nil {
+			t.Fatalf("round %d: %v", round, err)
+		}
+		if strings.Contains(result.Content, "end of diff") {
+			source.Flush()
+			if got := source.DiffReads()["long.go"]; len(got) != 1 || got[0] != 1 {
+				t.Fatalf("oversized line was not recorded after all pages: %v", got)
+			}
+			return
+		}
+		nextLine, nextOffset := 0, 0
+		for _, line := range strings.Split(result.Content, "\n") {
+			if strings.HasPrefix(line, "[read_diff] next_hunk:") {
+				var hunk int
+				if _, err := fmt.Sscanf(line, "[read_diff] next_hunk: %d, next_line: %d, next_offset: %d", &hunk, &nextLine, &nextOffset); err != nil {
+					t.Fatalf("parse cursor %q: %v", line, err)
+				}
+			}
+		}
+		if nextLine == 0 || (nextLine == fromLine && nextOffset <= fromOffset) {
+			t.Fatalf("cursor did not advance: line=%d offset=%d from=%d/%d content=%q", nextLine, nextOffset, fromLine, fromOffset, result.Content)
+		}
+		fromLine, fromOffset = nextLine, nextOffset
+	}
+	t.Fatal("oversized line did not finish within 10 pages")
 }

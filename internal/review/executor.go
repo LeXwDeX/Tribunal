@@ -474,6 +474,9 @@ func (e *Executor) runAgent(ctx context.Context, provider string, spec agent.Run
 	var carry llm.Usage
 	var lastErr error
 	for attempt := 1; attempt <= e.maxAttempts; attempt++ {
+		if spec.OnAttempt != nil {
+			spec.OnAttempt()
+		}
 		attemptSpec := spec
 		if beforeTurn != nil {
 			attemptSpec.BeforeTurn = func(ctx context.Context, used llm.Usage) error {
@@ -876,6 +879,17 @@ func (e *Executor) callAgent(ctx context.Context, in dag.NodeInput, opts agentOp
 		// runs out (#260). Other nodes keep their budget-exhausted fallbacks
 		// and warnings.
 		spec.BudgetRemaining = e.budgetRemaining(in.WorkflowID)
+	}
+	if opts.Changes != nil {
+		spec.OnAttempt = opts.Changes.Reset
+		previous := spec.BeforeTurn
+		spec.BeforeTurn = func(ctx context.Context, usage llm.Usage) error {
+			opts.Changes.Flush()
+			if previous != nil {
+				return previous(ctx, usage)
+			}
+			return nil
+		}
 	}
 	ctx = llm.WithCallMeta(ctx, llm.CallMeta{WorkflowID: in.WorkflowID, NodeID: in.Node.ID, Turn: 0})
 	result, err := e.runAgent(ctx, opts.Provider, spec, !opts.NoRetry)

@@ -94,6 +94,10 @@ type RunSpec struct {
 	// Outbound wraps each model and tool call in the execution's policy lease.
 	// Nil is for callers without project-bound repository material.
 	Outbound func(context.Context, func(context.Context) error) error
+	// OnAttempt runs before every attempt, including transport retries. A
+	// caller can discard per-conversation evidence that the new attempt will
+	// not see.
+	OnAttempt func()
 	// BeforeTurn runs before every model request with the usage already
 	// consumed by this run. A non-nil error stops the loop without another
 	// Generate call.

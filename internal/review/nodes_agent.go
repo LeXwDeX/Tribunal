@@ -1878,7 +1878,9 @@ func renderDiffsWithSpans(d *Dossier, files []string, budget int) (string, strin
 		if !e.ok || strings.TrimSpace(e.file.Diff) == "" {
 			continue
 		}
-		size := utf8.RuneCountInString(e.file.Diff)
+		// Budget the whole rendered block, not only the raw diff: the file
+		// header, old/new paths and Markdown fence are appended after it.
+		size := utf8.RuneCountInString(fileDiffHeader(e.file)) + utf8.RuneCountInString(renderDiffFence(e.file.Diff))
 		if size <= remaining {
 			inline[e.path] = true
 			remaining -= size

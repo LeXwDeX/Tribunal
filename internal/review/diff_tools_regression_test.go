@@ -1,9 +1,13 @@
 package review
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/LeXwDeX/tribunal/internal/agent"
 )
 
 func TestReviewTaskIncludesCompleteLargeDiffWithinBudget(t *testing.T) {
@@ -121,5 +125,55 @@ func TestReviewTaskKeepsSixtyFileDiffIndexed(t *testing.T) {
 	gaps, _ := executor.builtPromptDiffGaps(d, KindCodeReview, params, nil, nil)
 	if len(gaps) != 0 {
 		t.Fatalf("complete 60-file package produced coverage gaps: %v", gaps)
+	}
+}
+
+func TestCoverageClearsAfterRealReadDiffCalls(t *testing.T) {
+	const fileCount = 20
+	diff := "@@ -1 +1 @@\n+" + strings.Repeat("x", 9000)
+	files := make([]string, 0, fileCount)
+	changes := make([]agent.ChangeFile, 0, fileCount)
+	for i := 0; i < fileCount; i++ {
+		name := fmt.Sprintf("real%02d.go", i)
+		files = append(files, name)
+		changes = append(changes, agent.ChangeFile{Path: name, Status: "modified", Diff: diff, Additions: 1})
+	}
+	d := promptBudgetDossier(t, "short description", diff, files...)
+	params := promptBudgetParams(KindCodeReview, files, "focus")
+	layout, ok := reviewTaskLayoutFor(KindCodeReview, d, params)
+	if !ok {
+		t.Fatal("no task layout")
+	}
+	source := agent.NewChangeSource(changes, changes, layout.inline)
+	sb, err := agent.NewSandbox(t.TempDir(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sb.Close()
+	tools := agent.BuiltinToolsWithChanges(sb, source)
+	var read agent.Tool
+	for _, tool := range tools {
+		if tool.Def().Name == "read_diff" {
+			read = tool
+		}
+	}
+	if read == nil {
+		t.Fatal("read_diff is missing")
+	}
+	for _, file := range files {
+		if layout.inline[file] {
+			continue
+		}
+		input := fmt.Sprintf(`{"path":%q,"from_hunk":1}`, file)
+		if _, err := read.Call(context.Background(), json.RawMessage(input)); err != nil {
+			t.Fatalf("read_diff %s: %v", file, err)
+		}
+	}
+	source.Flush()
+	output := mustJSON(t, map[string]any{"diff_reads": source.DiffReads()})
+	executor := newTestExecutor(t, ExecutorDeps{Dossier: d})
+	gaps, _ := executor.builtPromptDiffGaps(d, KindCodeReview, params, nil, output)
+	if len(gaps) != 0 {
+		t.Fatalf("real read_diff evidence left coverage gaps: %v", gaps)
 	}
 }
