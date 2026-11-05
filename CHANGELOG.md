@@ -7,6 +7,7 @@
 ### 升级前必读
 
 - **模型参数校验与审计**：`providers.*.reasoning.effort` 只接受空值、`low`、`medium`、`high` 和 `max`，非法值会阻止启动，请在升级前检查配置。协议不会发送的 effort 或 thinking budget 会在启动时告警；调用详情新增实际发送参数，旧记录显示为旧记录。
+- **LLM 出站规则**：默认拒绝链路本地、未指定、组播和受限广播地址，允许内网及 loopback 地址。升级后指向被拒地址的 provider 调用将失败，但不会因此阻止进程启动。可通过 `llm.egress.deny_cidrs` 和 `llm.egress.allow_cidrs` 调整，拒绝规则优先；重启后生效。为防止代理绕过地址校验，LLM 连接不再使用 `HTTP_PROXY` / `HTTPS_PROXY` 及其小写形式；依赖代理访问模型的部署升级前须提供可直接连接的模型网关，否则调用会失败。
 - **行为变更：只有一个评审档位 `default`，评审图固定为「探索 → 四路并行评审 → 反证 → 裁决 → 报告」**（[#253](https://github.com/LeXwDeX/Tribunal/issues/253)）。`explore`（只读探索）之后，`code-review`（挂载内置 code-review Skill）、`review`、`reasoner`、`validate` 四路并行；`gather` 归一化后由 `verify.N` 逐条反证 P0/P1，`adjudicate` 规则裁决，`synthesize` 由代码渲染报告。`onboarding` 档位仍存在，只用于项目接入，不是评审档位。没有档位选择，也没有回到旧评审图的配置开关。
 - **模型调用更多，成本预期更高**：每次评审的 LLM agent 节点从原来的一两个增加到多个。具体增幅以后另行测量，此处不给数字；按实际用量核对 `budget.max_tokens`。`budget.deadline` 默认值由 20m 改为 30m。
 - **未终态工作流不会在新版本下续跑**：新增提示词 `explore.md`、`review.md`、`validate.md`，`_platform_rules.md` 升到 v5，`prompts.TaskRenderVersion` 由 4 改为 5。评审档位和提示词身份已变化，升级前创建的未终态工作流在启动恢复时被取消，不会在新身份下续跑、重试或发布；升级前核对未完成评审和待发布结果，需要时等待其结束或接受取消后重新触发。

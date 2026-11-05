@@ -59,6 +59,8 @@ docker compose exec -T review /app/tribunalctl projects all
 
 ### 上下文窗口与压缩
 
+LLM 默认允许私有网络和 loopback 地址，拒绝链路本地、未指定、组播和受限广播地址。拨号时检查实际 IP，配置 `llm.egress.deny_cidrs` 可追加拒绝网段，`llm.egress.allow_cidrs` 可放行默认拒绝的网段；显式拒绝优先。无效 CIDR 阻止启动，修改配置后须重启。被拒绝的 provider 不会导致进程启动失败，但调用会失败；旧配置指向链路本地地址时应迁移地址或谨慎放行。为防止代理绕过校验，LLM 连接忽略 `HTTP_PROXY`、`HTTPS_PROXY` 及其小写形式。依赖这些变量访问模型的部署须在升级前提供可直接连接的模型网关，否则模型调用会失败；此限制不改变其他服务的代理配置。
+
 `providers.<name>.context_window` 可选，填写可用于输入的 token 数：按供应方文档的上下文窗口，减去 `max_tokens` 和思考预算等输出预留（部分网关按「输入 + 最大输出」校验窗口）。不要估大，也不要小于实际需要，否则会过早压缩并要求提交。配置后，agent 节点的估算输入达到该值的 85% 时，会把较早的成功工具输出替换为「已省略」占位，只保留最近 3 轮完整输出；压缩后仍接近上限时，模型会被要求立即提交结果，本轮不再执行其他工具。压缩依赖 provider 返回 token 用量。不填或填 0 时不压缩，请求与之前一致，已有评审的执行身份也不变。反过来，给已有 provider 加上或修改 `context_window` 会改变评审执行身份：重启后恢复扫描会取消未终态的评审，处理方式同[多 Provider 配置](#多-provider-配置)第 4 步，修改前先等进行中的评审结束。该值不能为负，启动时校验。修改挂载的配置文件后需要重启服务生效。
 
 是否发生压缩或提前要求提交，可在 LLM 调用审计的请求元数据中看到：`submit_prompt` 记录原因（`last_turn`、`context`、`deadline`、`budget`），`compacted_tool_results` 记录本次运行累计压缩的工具结果数。onboarding 在工作流 token 预算剩余不足最近最大单轮用量（输入 + 输出）的 4 倍时也会提前要求提交，多出的两倍留给最多两次重提交；该阈值只按已观测用量计算，不受 `providers.<name>.max_tokens` 影响。其他节点的预算耗尽处理不变。

@@ -28,6 +28,27 @@ func TestValidateDefaultConfigWithoutProviders(t *testing.T) {
 	}
 }
 
+func TestEgressCIDRConfiguration(t *testing.T) {
+	setRequiredEnv(t)
+	cfg := loadConfig(t, writeConfig(t, "config.yaml", validGitLab+`
+llm:
+  egress:
+    deny_cidrs: ["10.0.0.0/8"]
+    allow_cidrs: ["169.254.10.0/24"]
+`))
+	if len(cfg.LLM.Egress.DenyCIDRs) != 1 || len(cfg.LLM.Egress.AllowCIDRs) != 1 {
+		t.Fatalf("egress lists were not loaded")
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid egress config: %v", err)
+	}
+	cfg.LLM.Egress.DenyCIDRs = []string{"invalid-secret-value"}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "llm.egress.deny_cidrs[0]") || strings.Contains(err.Error(), "invalid-secret-value") {
+		t.Fatalf("invalid CIDR should give a sanitized validation error: %v", err)
+	}
+}
+
 func TestValidateStorageRetention(t *testing.T) {
 	tests := []struct {
 		name string

@@ -25,6 +25,7 @@ const (
 	ErrUnsafeResponse ErrKind = "unsafe_model_response"
 	ErrTransient      ErrKind = "transient"
 	ErrCanceled       ErrKind = "canceled"
+	ErrEgress         ErrKind = "egress_denied"
 )
 
 // ErrUnsafeProviderResponse matches unsafe responses anywhere in an error chain.
@@ -240,6 +241,9 @@ func badRequestf(format string, args ...any) *Error {
 func sdkError(err error) *Error {
 	if err == nil {
 		return nil
+	}
+	if errors.Is(err, ErrEgressDenied) {
+		return &Error{Kind: ErrEgress, Err: ErrEgressDenied}
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		canceled := canceledError(err)

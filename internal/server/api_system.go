@@ -1,11 +1,13 @@
 package server
 
 import (
+	"errors"
 	"net/http"
 	"sort"
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/llm"
 	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
@@ -17,14 +19,16 @@ type providerStatsView struct {
 }
 
 type providerView struct {
-	Name           string            `json:"name"`
-	Protocol       string            `json:"protocol"`
-	BaseURL        string            `json:"base_url"`
-	Model          string            `json:"model"`
-	MaxConcurrency int               `json:"max_concurrency"`
-	RPM            int               `json:"rpm"`
-	MaxTokens      int               `json:"max_tokens,omitempty"`
-	Stats24h       providerStatsView `json:"stats_24h"`
+	Name              string            `json:"name"`
+	Protocol          string            `json:"protocol"`
+	BaseURL           string            `json:"base_url"`
+	Model             string            `json:"model"`
+	MaxConcurrency    int               `json:"max_concurrency"`
+	RPM               int               `json:"rpm"`
+	MaxTokens         int               `json:"max_tokens,omitempty"`
+	Unavailable       bool              `json:"unavailable,omitempty"`
+	UnavailableReason string            `json:"unavailable_reason,omitempty"`
+	Stats24h          providerStatsView `json:"stats_24h"`
 }
 
 type providerTestResponse struct {
@@ -59,11 +63,17 @@ func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	aggregated := aggregateProviderStats(stats.ByModel)
+	infos := make(map[string]llm.ProviderInfo)
+	if s.llm != nil {
+		for _, info := range s.llm.ProviderInfos() {
+			infos[info.Name] = info
+		}
+	}
 	providers := make([]providerView, 0)
 	if s.platform != nil {
 		for _, name := range sortedProviderNames(s.platform.Providers) {
 			provider := s.platform.Providers[name]
-			providers = append(providers, providerView{
+			view := providerView{
 				Name:           name,
 				Protocol:       provider.Protocol,
 				BaseURL:        provider.BaseURL,
@@ -72,7 +82,12 @@ func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
 				RPM:            provider.RPM,
 				MaxTokens:      provider.MaxTokens,
 				Stats24h:       aggregated[name],
-			})
+			}
+			if info, ok := infos[name]; ok {
+				view.Unavailable = info.Unavailable
+				view.UnavailableReason = info.UnavailableReason
+			}
+			providers = append(providers, view)
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"providers": providers})
@@ -141,6 +156,11 @@ func (s *Server) handleTestProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := s.llm.TestProvider(r.Context(), name)
 	if err != nil {
+		if errors.Is(err, llm.ErrEgressDenied) {
+			s.logger.Warn("provider connectivity test failed", "provider", name, "error_class", "egress_denied")
+			writeError(w, r, http.StatusUnprocessableEntity, "egress_denied", "provider destination denied", nil)
+			return
+		}
 		// The error text can contain a base URL or provider detail; log only
 		// the provider name and return a generic message with ok:false.
 		s.logger.Warn("provider connectivity test failed",

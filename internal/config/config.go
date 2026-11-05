@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"regexp"
@@ -28,6 +29,7 @@ type Config struct {
 	Workspace      WorkspaceConfig           `yaml:"workspace" json:"workspace"`
 	Jobs           JobsConfig                `yaml:"jobs" json:"jobs"`
 	Engine         EngineConfig              `yaml:"engine" json:"engine"`
+	LLM            LLMConfig                 `yaml:"llm" json:"llm"`
 	Providers      map[string]ProviderConfig `yaml:"providers" json:"providers"`
 	Profiles       map[string]ProfileConfig  `yaml:"profiles" json:"profiles"`
 	MCP            MCPConfig                 `yaml:"mcp" json:"mcp"`
@@ -43,6 +45,17 @@ type Config struct {
 	// removed review profiles or legacy profile fields. They are logged once
 	// at startup and never contain configuration values other than names.
 	Warnings []string `yaml:"-" json:"-"`
+}
+
+// LLMConfig controls outbound model connections.
+type LLMConfig struct {
+	Egress EgressConfig `yaml:"egress" json:"egress"`
+}
+
+// EgressConfig overrides the default IP policy. Explicit denies take priority.
+type EgressConfig struct {
+	DenyCIDRs  []string `yaml:"deny_cidrs" json:"deny_cidrs"`
+	AllowCIDRs []string `yaml:"allow_cidrs" json:"allow_cidrs"`
 }
 
 // ServerConfig controls the HTTP listener.
@@ -344,6 +357,17 @@ func (c *Config) Validate() error {
 		return errors.New("config: nil")
 	}
 	var p problems
+	for _, group := range []struct {
+		name  string
+		cidrs []string
+	}{{"deny_cidrs", c.LLM.Egress.DenyCIDRs}, {"allow_cidrs", c.LLM.Egress.AllowCIDRs}} {
+		for i, raw := range group.cidrs {
+			prefix, err := netip.ParsePrefix(raw)
+			if err != nil || prefix.Addr().Is4In6() {
+				p.add("llm.egress.%s[%d] must be a valid CIDR", group.name, i)
+			}
+		}
+	}
 
 	if c.Server.ReadTimeout <= 0 {
 		p.add("server.read_timeout must be positive")

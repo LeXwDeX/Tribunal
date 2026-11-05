@@ -356,6 +356,10 @@ type ProviderInfo struct {
 	// ForcedToolChoice reports that the agent loop may force submit_result
 	// with tool_choice on the last turn (#259).
 	ForcedToolChoice bool `json:"forced_tool_choice,omitempty"`
+	// Unavailable marks a configured provider whose base URL cannot pass the
+	// outbound egress policy. The process still starts; calls fail closed.
+	Unavailable       bool   `json:"unavailable,omitempty"`
+	UnavailableReason string `json:"unavailable_reason,omitempty"`
 }
 
 // ModelIdentity returns a stable identity for votes and challenger selection.

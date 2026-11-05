@@ -19,6 +19,7 @@ import (
 
 	"github.com/LeXwDeX/tribunal/internal/app"
 	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/llm"
 	"github.com/LeXwDeX/tribunal/internal/repo"
 	"github.com/LeXwDeX/tribunal/internal/secret"
 	"github.com/LeXwDeX/tribunal/internal/store"
@@ -503,6 +504,7 @@ type fakeLLM struct {
 	names  []string
 	result ProviderTestResult
 	err    error
+	infos  []llm.ProviderInfo
 }
 
 func (f *fakeLLM) TestProvider(ctx context.Context, name string) (ProviderTestResult, error) {
@@ -511,6 +513,8 @@ func (f *fakeLLM) TestProvider(ctx context.Context, name string) (ProviderTestRe
 	f.names = append(f.names, name)
 	return f.result, f.err
 }
+
+func (f *fakeLLM) ProviderInfos() []llm.ProviderInfo { return f.infos }
 
 type fakeExtensions struct {
 	mu       sync.Mutex

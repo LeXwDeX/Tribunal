@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/LeXwDeX/tribunal/internal/llm"
 	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
@@ -74,6 +75,7 @@ type ProviderTestResult struct {
 // ProviderTester sends one minimal request to a configured provider.
 type ProviderTester interface {
 	TestProvider(ctx context.Context, name string) (ProviderTestResult, error)
+	ProviderInfos() []llm.ProviderInfo
 }
 
 // SessionStore persists browser sessions. IDHash is the SHA-256 digest of the

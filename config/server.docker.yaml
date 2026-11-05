@@ -37,6 +37,14 @@ workspace:
 secrets:
   master_key_env: REVIEW_MASTER_KEY
 
+# Optional LLM outbound CIDRs. Explicit denies take priority over allows.
+# Link-local, unspecified, multicast and limited broadcast addresses are
+# denied by default; private and loopback addresses are allowed.
+# llm:
+#   egress:
+#     deny_cidrs: []
+#     allow_cidrs: []
+
 providers:
   primary:
     # anthropic | openai-chat | openai-responses.
