@@ -461,10 +461,11 @@ func reviewConfigHash(cfg effectiveReviewConfig) string {
 
 func (s *ReviewService) reviewProfileHash(profile review.Profile) string {
 	data, err := json.Marshal(struct {
-		Profile   review.Profile
-		Blocks    map[string]config.BlockBinding
-		Providers []string
-	}{profile, s.blocks, s.allowedProviders()})
+		Profile    review.Profile
+		Blocks     map[string]config.BlockBinding
+		Providers  []string
+		UserModels map[string]config.ProviderConfig `json:"user_models,omitempty"`
+	}{profile, s.blocks, s.allowedProviders(), nil})
 	if err != nil {
 		return ""
 	}

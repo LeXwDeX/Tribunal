@@ -1030,3 +1030,17 @@ func TestProvenanceMismatchedIdentityPreservesUnknown(t *testing.T) {
 		t.Fatalf("unknown = %v, %v", unknown, err)
 	}
 }
+
+func TestCancelWorkflowWithReasonPreservesCancelReason(t *testing.T) {
+	ctx := context.Background()
+	f := newReviewFixture(t, reviewTestHead)
+	id := repositorySkillWorkflow(t, f, "legacy")
+	seedProvenanceOutcome(t, f, id, reviewStatusRunning)
+	if err := f.service.cancelWorkflowWithReason(ctx, id, "execution_identity_changed"); err != nil {
+		t.Fatal(err)
+	}
+	wf, err := f.db.GetWorkflow(ctx, id)
+	if err != nil || wf.Status != "cancelled" || wf.CancelReason != "execution_identity_changed" {
+		t.Fatalf("workflow = %+v, %v", wf, err)
+	}
+}
