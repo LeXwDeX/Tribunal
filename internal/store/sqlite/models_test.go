@@ -205,3 +205,21 @@ func TestModelWrongKeyIsUnavailable(t *testing.T) {
 		t.Fatal("model credential leaked to logs")
 	}
 }
+
+func TestCreateModelRollsBackWhenReadBackFails(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t, newFakeClock())
+	if err := s.ConfigureModelSecrets(ctx, sealTestCipher(t, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE TRIGGER break_model AFTER INSERT ON llm_models BEGIN UPDATE llm_models SET params_json='not-json' WHERE id=NEW.id; END`); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.CreateModel(ctx, store.Model{DisplayName: "model", Protocol: "openai-chat", Model: "m", Params: store.ModelParams{MaxTokens: 1, MaxConcurrency: 1}, CreatedBy: 1}, "")
+	if err == nil {
+		t.Fatal("create with corrupt read-back must fail")
+	}
+	if got := rowCount(t, s, `SELECT COUNT(*) FROM llm_models`); got != 0 {
+		t.Fatalf("rollback left %d rows", got)
+	}
+}
