@@ -242,6 +242,13 @@ func (s *Store) SoftDeleteModel(ctx context.Context, id string, revision, userID
 	} else if n == 0 {
 		return modelWriteError(ctx, tx, id)
 	}
+	var referenced bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM review_profile_model_refs WHERE model_id=?)`, id).Scan(&referenced); err != nil {
+		return errors.New("sqlite: check model references failed")
+	}
+	if referenced {
+		return store.ErrConflict
+	}
 	if err := tx.Commit(); err != nil {
 		return errors.New("sqlite: commit model delete failed")
 	}
