@@ -52,16 +52,17 @@ func (s *Server) handleAdminSetUserDisabled(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	var request struct {
-		Disabled *bool   `json:"disabled"`
-		Role     *string `json:"role"`
-		Revision *int64  `json:"revision"`
+		Disabled   *bool   `json:"disabled"`
+		Role       *string `json:"role"`
+		Revision   *int64  `json:"revision"`
+		GlobalRead *bool   `json:"global_read"`
 	}
 	if err := decodeJSON(w, r, adminBodyLimit, &request); err != nil {
 		decodeRequestError(w, r, err)
 		return
 	}
-	if request.Disabled == nil && request.Role == nil {
-		validationFailed(w, r, "role", "role or disabled is required")
+	if request.Disabled == nil && request.Role == nil && request.GlobalRead == nil {
+		validationFailed(w, r, "role", "role, disabled or global_read is required")
 		return
 	}
 	if request.Role != nil && *request.Role != roleAdmin && *request.Role != roleViewer {
@@ -79,7 +80,7 @@ func (s *Server) handleAdminSetUserDisabled(w http.ResponseWriter, r *http.Reque
 	}
 	ids, names := s.platformAdmins()
 	oldRole, newRole, grantChanged, err := access.UpdatePlatformUser(r.Context(), userID, store.PlatformUserUpdate{
-		Role: request.Role, Disabled: request.Disabled, Revision: request.Revision,
+		Role: request.Role, Disabled: request.Disabled, GlobalRead: request.GlobalRead, Revision: request.Revision,
 		ActorID: currentUserID(r), AdminIDs: ids, AdminUsernames: names,
 	})
 	if err != nil {
@@ -89,9 +90,15 @@ func (s *Server) handleAdminSetUserDisabled(w http.ResponseWriter, r *http.Reque
 	if oldRole != newRole || grantChanged {
 		s.logger.Info("platform role changed", "event", "platform_audit", "actor_id", currentUserID(r), "target_id", userID, "old_role", oldRole, "new_role", newRole, "grant_changed", grantChanged)
 	}
+	if request.GlobalRead != nil {
+		s.logger.Info("global read updated", "event", "platform_audit", "actor_id", currentUserID(r), "target_id", userID, "global_read", *request.GlobalRead)
+	}
 	response := map[string]any{"id": userID, "role": newRole}
 	if request.Disabled != nil {
 		response["disabled"] = *request.Disabled
+	}
+	if request.GlobalRead != nil {
+		response["global_read"] = *request.GlobalRead
 	}
 	writeJSON(w, http.StatusOK, response)
 }

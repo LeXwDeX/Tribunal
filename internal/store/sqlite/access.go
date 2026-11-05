@@ -16,7 +16,7 @@ const (
 )
 
 // projectAccessClause returns a SQL predicate that restricts column to rows
-// owned by projects granted to userID. A nil user keeps the trusted internal
+// visible through a grant or global read. A nil user keeps the trusted internal
 // unrestricted path; a non-positive value matches no row. column is always a
 // caller-supplied identifier, never user input.
 func projectAccessClause(column string, userID *int64) (string, []any) {
@@ -26,9 +26,10 @@ func projectAccessClause(column string, userID *int64) (string, []any) {
 	if *userID <= 0 {
 		return "0 = 1", nil
 	}
-	return `EXISTS (SELECT 1 FROM project_grants pg
+	return `(EXISTS (SELECT 1 FROM project_grants pg
 		JOIN users pu ON pu.id = pg.user_id
-		WHERE pg.project_id = ` + column + ` AND pg.user_id = ? AND pu.disabled = 0)`, []any{*userID}
+		WHERE pg.project_id = ` + column + ` AND pg.user_id = ? AND pu.disabled = 0)
+		OR EXISTS (SELECT 1 FROM users gu WHERE gu.id = ? AND gu.global_read = 1 AND gu.disabled = 0))`, []any{*userID, *userID}
 }
 
 func scanUser(row rowScanner) (*store.User, error) {
@@ -37,7 +38,7 @@ func scanUser(row rowScanner) (*store.User, error) {
 		disabled    int
 		lastLoginAt sql.NullString
 	)
-	if err := row.Scan(&user.ID, &user.Username, &user.Name, &disabled, &lastLoginAt, &user.Role, &user.GrantedRole, &user.Revision, &user.GrantCount); err != nil {
+	if err := row.Scan(&user.ID, &user.Username, &user.Name, &disabled, &lastLoginAt, &user.Role, &user.GrantedRole, &user.Revision, &user.GrantCount, &user.GlobalRead); err != nil {
 		return nil, err
 	}
 	user.Disabled = disabled != 0
@@ -57,7 +58,7 @@ func (s *Store) GetUser(ctx context.Context, userID int64) (*store.User, error) 
 		return nil, errors.New("sqlite: user id is required")
 	}
 	user, err := scanUser(s.db.QueryRowContext(ctx,
-		`SELECT id, username, name, disabled, last_login_at, role, COALESCE(granted_role,''), revision, (SELECT COUNT(*) FROM project_grants WHERE user_id = users.id) FROM users WHERE id = ?`, userID))
+		`SELECT id, username, name, disabled, last_login_at, role, COALESCE(granted_role,''), revision, (SELECT COUNT(*) FROM project_grants WHERE user_id = users.id), global_read FROM users WHERE id = ?`, userID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%w: user %d", store.ErrNotFound, userID)
 	}
@@ -86,7 +87,7 @@ func (s *Store) ListUsers(ctx context.Context, cursor string, limit int) ([]stor
 	}
 	args = append(args, limit+1)
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, username, name, disabled, last_login_at, role, COALESCE(granted_role,''), revision, (SELECT COUNT(*) FROM project_grants WHERE user_id = users.id) FROM users
+		`SELECT id, username, name, disabled, last_login_at, role, COALESCE(granted_role,''), revision, (SELECT COUNT(*) FROM project_grants WHERE user_id = users.id), global_read FROM users
 		 WHERE `+strings.Join(where, " AND ")+` ORDER BY id LIMIT ?`, args...)
 	if err != nil {
 		return nil, "", fmt.Errorf("sqlite: list users: %w", err)
@@ -192,15 +193,16 @@ func revokeUserCredentialsTx(ctx context.Context, tx *sql.Tx, userID int64) erro
 }
 
 // GetProjectAccess returns the role granting userID access to projectID. A
-// missing grant, a disabled user, or an unknown user or project is ErrNotFound.
+// missing access, a disabled user, or an unknown user or project is ErrNotFound.
 func (s *Store) GetProjectAccess(ctx context.Context, userID, projectID int64) (string, error) {
 	if userID <= 0 || projectID <= 0 {
 		return "", errors.New("sqlite: user id and project id are required")
 	}
 	var role string
-	err := s.db.QueryRowContext(ctx, `SELECT g.role FROM project_grants g
-		JOIN users u ON u.id = g.user_id
-		WHERE g.project_id = ? AND g.user_id = ? AND u.disabled = 0`,
+	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(g.role, 'read') FROM projects p
+		JOIN users u ON u.id = ?2 AND u.disabled = 0
+		LEFT JOIN project_grants g ON g.project_id = p.id AND g.user_id = u.id
+		WHERE p.id = ?1 AND (g.role IS NOT NULL OR u.global_read = 1)`,
 		projectID, userID).Scan(&role)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("%w: project %d grant for user %d", store.ErrNotFound, projectID, userID)

@@ -98,7 +98,7 @@ func (s *Store) ListPlatformUsers(ctx context.Context, cursor string, limit int,
 
 // UpdatePlatformUser serializes the safety checks and the role/disabled write.
 func (s *Store) UpdatePlatformUser(ctx context.Context, userID int64, in store.PlatformUserUpdate) (string, string, bool, error) {
-	if userID <= 0 || (in.Role != nil && *in.Role != "admin" && *in.Role != "viewer") || (in.Role == nil && in.Disabled == nil) || in.Revision == nil || *in.Revision <= 0 {
+	if userID <= 0 || (in.Role != nil && *in.Role != "admin" && *in.Role != "viewer") || (in.Role == nil && in.Disabled == nil && in.GlobalRead == nil) || in.Revision == nil || *in.Revision <= 0 {
 		return "", "", false, errors.New("sqlite: invalid platform user update")
 	}
 	i, n := adminConfig(in.AdminIDs, in.AdminUsernames)
@@ -175,6 +175,12 @@ func (s *Store) UpdatePlatformUser(ctx context.Context, userID int64, in store.P
 		}
 	}
 	grantChanged := in.Role != nil && newGranted != granted
+	if in.GlobalRead != nil {
+		_, err = tx.ExecContext(ctx, `UPDATE users SET global_read=?, global_read_by=NULLIF(?,0), global_read_at=? WHERE id=?`, boolInt(*in.GlobalRead), in.ActorID, formatTime(s.now()), userID)
+		if err != nil {
+			return "", "", false, err
+		}
+	}
 	_, err = tx.ExecContext(ctx, `UPDATE users SET disabled=?, role=?, revision=revision+1 WHERE id=?`, boolInt(newDisabled), newRole, userID)
 	if err != nil {
 		return "", "", false, err
