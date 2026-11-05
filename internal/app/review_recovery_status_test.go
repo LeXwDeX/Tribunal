@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/LeXwDeX/tribunal/internal/review"
 	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
@@ -72,21 +73,60 @@ func TestRecoveryCancelSettlesCurrentGenerationStatus(t *testing.T) {
 	}
 }
 
-// A newer generation owns the MR; the recovery cancel of an older one must not
-// write status over it.
-func TestRecoveryCancelSettleSkipsSupersededGeneration(t *testing.T) {
+// The workspace-evidence cancel path settles the status like the others.
+func TestRecoveryCancelSettlesStatusForWorkspaceEvidence(t *testing.T) {
+	ctx := context.Background()
+	f := newReviewFixture(t, reviewTestHead)
+	f.service.status = testStatusReporter(f.gitlab)
+	job := f.seedReview(t, "job-settle-workspace")
+	id := interruptReview(t, f, job)
+	rewriteWorkspaceEvidence(t, f, id, func(d *review.Dossier) { d.WorkspaceProvenance = nil })
+	if err := f.service.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	drainReviewSideEffects(t, f)
+	status, err := f.db.GetReviewStatus(ctx, 42, 7)
+	if err != nil || status.State != reviewStatusCancelled || !strings.Contains(status.Detail, "cancelled on recovery: workspace_provenance_invalid") {
+		t.Fatalf("status = %+v, %v; want cancelled with workspace_provenance_invalid", status, err)
+	}
+	f.gitlab.mu.Lock()
+	updates := strings.Join(f.gitlab.statusUpdates, "\n")
+	f.gitlab.mu.Unlock()
+	if !strings.Contains(updates, "评审已取消") {
+		t.Fatalf("GitLab status updates missing cancelled:\n%s", updates)
+	}
+}
+
+type statusWriteCounter struct {
+	ReviewStore
+	writes int
+}
+
+func (c *statusWriteCounter) SetReviewStatus(ctx context.Context, goal store.ReviewStatusGoal) (bool, error) {
+	c.writes++
+	return c.ReviewStore.SetReviewStatus(ctx, goal)
+}
+
+// The store fences stale generations on its own, so prove the app-level guard
+// by asserting that no status write is even attempted once control moved on.
+func TestRecoveryCancelSettleSkipsNonCurrentControl(t *testing.T) {
 	ctx := context.Background()
 	f := newReviewFixture(t, reviewTestHead)
 	job := f.seedReview(t, "job-settle-old")
 	id := interruptReview(t, f, job)
-	f.seedReview(t, "job-settle-new")
-	before, err := f.db.GetReviewStatus(ctx, 42, 7)
+	record, err := f.db.GetWorkflowDossier(ctx, id)
 	if err != nil {
 		t.Fatal(err)
 	}
+	f.seedCancel(t, "cancel-after-interrupt")
+	control, err := f.db.GetReviewControl(ctx, 42, 7)
+	if err != nil || !control.Cancelled || control.Generation <= record.Generation {
+		t.Fatalf("control = %+v, %v; want cancelled above generation %d", control, err, record.Generation)
+	}
+	counter := &statusWriteCounter{ReviewStore: f.service.store}
+	f.service.store = counter
 	f.service.settleRecoveryCancel(ctx, id, "profile_hash_changed")
-	after, err := f.db.GetReviewStatus(ctx, 42, 7)
-	if err != nil || after.State != before.State || after.Generation != before.Generation || after.Detail != before.Detail {
-		t.Fatalf("status = %+v, %v; want unchanged %+v", after, err, before)
+	if counter.writes != 0 {
+		t.Fatalf("settle attempted %d status writes for a non-current generation, want 0", counter.writes)
 	}
 }
