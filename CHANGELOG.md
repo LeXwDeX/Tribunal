@@ -67,8 +67,8 @@
 
 ### 修复
 
+- **启动恢复取消当前代次的评审后，状态评论不再停在「评审运行中」**（[#341](https://github.com/LeXwDeX/Tribunal/issues/341)）：恢复时因 `profile_hash_changed`、`execution_identity_changed`、`config_changed` 等原因取消、且仍是 MR 当前代次的工作流，现在会把评审状态置为「评审已取消」，详情含 `cancelled on recovery: <原因>` 并提示重新触发，同时更新 GitLab 状态评论；发布记录的跳过原因同为该文本，不再是 `review superseded`。代次已被取代时不改动新代次的状态。
 - **`default` 与 `lanes.code_review` 覆盖现在真正改变执行的模型**（[#334](https://github.com/LeXwDeX/Tribunal/issues/334)，[#327](https://github.com/LeXwDeX/Tribunal/issues/327) 评审中发现的缺陷）：此前这两项覆盖只改变显示，评审仍按配置执行。现在覆盖合并进未归一化的 `default` 配置后统一归一化一次，七个节点的覆盖都影响实际模型。
-
 - **控制台新建的用户模型被档位覆盖引用后，评审不再整体失败**（[#327](https://github.com/LeXwDeX/Tribunal/issues/327)）：此前评审图校验用的 provider 白名单只在启动时计算一次；启动后创建的用户模型一旦被档位覆盖引用，每次评审都会在创建工作流前以 `review execution failed` 失败（永久性 `build review graph` 错误），重启后才恢复。现在每次评审都按当前模型目录校验，运行时新建或删除的模型无需重启即生效，已软删除的模型会被拒绝。
 - **新增或修改用户模型不再导致在途工作流被取消**（[#327](https://github.com/LeXwDeX/Tribunal/issues/327)，修正 [#299](https://github.com/LeXwDeX/Tribunal/issues/299) 的哈希约定）：`reviewProfileHash` 此前包含启动时已有的全部用户模型 ID，新增任一用户模型并重启就会改变所有在途工作流的档位哈希，恢复时被当作已被取代而取消。现在参与哈希的 provider 列表只含配置 provider 名称（无用户模型、无覆盖时与 v1.2.0 一致），`user_models` 只含档位实际引用的用户模型的非密钥设置（协议、base_url、model、参数、价格，不含凭据）。因此新增或修改未被引用的用户模型不影响在途评审；修改被引用模型的设置后，被中断的工作流在恢复时按失败即关闭取消（`cause=profile_hash_changed`），进程内正在运行的工作流仍沿用其启动时快照。**升级提示**：在用户模型已存在时由 v1.3.0 预发布版本启动的工作流带有旧哈希，升级后恢复时会被取消，需重新触发评审；v1.2.0 的工作流不受影响。
 - **评审永久失败时输出可定位的诊断日志**（[#327](https://github.com/LeXwDeX/Tribunal/issues/327)）：服务端记录 WARN `review run failed permanently`，含 `project_id`、`mr_iid`、`generation`、`error_class` 和 `stage`（`control`、`inputs`、`config`、`execution`、`prepare`、`graph`、`workflow` 之一）；不记录原始错误。
