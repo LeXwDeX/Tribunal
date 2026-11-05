@@ -506,6 +506,9 @@ func applyNodeRestarted(wf *WorkflowView, ev Event) error {
 	view.Output = nil
 	view.Usage = Usage{}
 	view.UsageIncomplete = view.UsageIncomplete || payload.UsageIncomplete
+	if payload.UsageIncomplete {
+		view.UsageInterruptions++
+	}
 	view.Provider = ""
 	view.Model = ""
 	view.Error = ""
@@ -515,8 +518,8 @@ func applyNodeRestarted(wf *WorkflowView, ev Event) error {
 	view.Revision = ev.Seq
 	wf.Nodes[id] = view
 	wf.UsageIncomplete = wf.UsageIncomplete || payload.UsageIncomplete
-	if payload.UsageIncomplete {
-		wf.UsageInterruptions++
+	if view.UsageInterruptions > wf.UsageInterruptions {
+		wf.UsageInterruptions = view.UsageInterruptions
 	}
 	wf.Revision = ev.Seq
 	return nil

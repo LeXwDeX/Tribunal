@@ -278,14 +278,17 @@ type NodeView struct {
 	Output          json.RawMessage   `json:"output,omitempty"`
 	Usage           Usage             `json:"usage"`
 	UsageIncomplete bool              `json:"usage_incomplete,omitempty"`
-	Provider        string            `json:"provider,omitempty"`
-	Model           string            `json:"model,omitempty"`
-	Error           string            `json:"error,omitempty"`
-	Reason          string            `json:"reason,omitempty"`
-	ErrorStatus     int               `json:"error_status,omitempty"`
-	QueuedAt        time.Time         `json:"queued_at,omitempty"`
-	StartedAt       time.Time         `json:"started_at,omitempty"`
-	FinishedAt      time.Time         `json:"finished_at,omitempty"`
+	// UsageInterruptions counts this node's restarts that marked usage
+	// incomplete (process recovery).
+	UsageInterruptions int       `json:"usage_interruptions,omitempty"`
+	Provider           string    `json:"provider,omitempty"`
+	Model              string    `json:"model,omitempty"`
+	Error              string    `json:"error,omitempty"`
+	Reason             string    `json:"reason,omitempty"`
+	ErrorStatus        int       `json:"error_status,omitempty"`
+	QueuedAt           time.Time `json:"queued_at,omitempty"`
+	StartedAt          time.Time `json:"started_at,omitempty"`
+	FinishedAt         time.Time `json:"finished_at,omitempty"`
 }
 
 // WorkflowView is the deterministic projection of a workflow's events.
@@ -307,9 +310,11 @@ type WorkflowView struct {
 	// sanitized-invalid usage, or counter overflow. Restart and abort
 	// incompleteness are interruption-only and never set it.
 	UsageUnreported bool `json:"usage_unreported,omitempty"`
-	// UsageInterruptions counts node restarts that marked usage incomplete
-	// (process recovery). Each may have lost usage the attempt had not yet
-	// committed; callers decide how many they tolerate.
+	// UsageInterruptions is the maximum, over nodes, of recovered restarts of
+	// a single node that marked usage incomplete (process recovery). Restarting
+	// many nodes in one recovery round counts once; the same node restarted
+	// repeatedly accumulates. Each restart may have lost usage the attempt had
+	// not yet committed; callers decide how many they tolerate.
 	UsageInterruptions int       `json:"usage_interruptions,omitempty"`
 	CreatedAt          time.Time `json:"created_at"`
 	StartedAt          time.Time `json:"started_at,omitempty"`

@@ -722,9 +722,11 @@ func (e *Executor) extensionFits(ctx context.Context, workflowID string, request
 	return requests+1 <= limit, nil
 }
 
-// maxRecoveredInterruptions is how many recovery restarts a budgeted workflow
-// tolerates. Beyond it the budget check fails closed, so a node that keeps
-// crashing the process cannot spend unrecorded tokens without limit.
+// maxRecoveredInterruptions is how many recovery restarts a single node of a
+// budgeted workflow tolerates (WorkflowView.UsageInterruptions is the maximum
+// over nodes, so restarting many nodes in one round counts once). Beyond it
+// the budget check fails closed, so a node that keeps crashing the process
+// cannot spend unrecorded tokens without limit.
 const maxRecoveredInterruptions = 3
 
 // tokenBudget returns the committed usage and the configured limit.
@@ -744,11 +746,24 @@ func (e *Executor) tokenBudget(ctx context.Context, workflowID string) (int64, i
 	// continues with the committed usage as a lower bound. Accepted risk: each
 	// interruption may lose all usage the interrupted attempts had not yet
 	// committed (every turn and in-node retry), for every node running at that
-	// moment. maxRecoveredInterruptions bounds that loss, and the workflow
+	// moment. maxRecoveredInterruptions bounds that loss per node, and the workflow
 	// deadline still bounds runtime. Late commits from a superseded attempt are
 	// discarded without usage (pre-existing).
-	if (wf.UsageUnreported || wf.UsageInterruptions > maxRecoveredInterruptions) && wf.Spec.Budget.MaxTokens > 0 {
-		return 0, 0, unsafeUsageError()
+	if wf.Spec.Budget.MaxTokens > 0 {
+		reason := ""
+		switch {
+		case wf.UsageUnreported:
+			reason = "usage_unreported"
+		case wf.UsageInterruptions > maxRecoveredInterruptions:
+			reason = "recovery_interruptions_exceeded"
+		}
+		if reason != "" {
+			if e.deps.Logger != nil {
+				nodeID, _ := ctx.Value(nodeIDKey{}).(string)
+				e.deps.Logger.Warn("token budget unsafe", "workflow_id", workflowID, "node_id", nodeID, "reason", reason)
+			}
+			return 0, 0, unsafeUsageError()
+		}
 	}
 	return sumTokens(wf.Usage.InputTokens, wf.Usage.OutputTokens), wf.Spec.Budget.MaxTokens, nil
 }

@@ -1,9 +1,12 @@
 package review
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/LeXwDeX/tribunal/internal/agent"
@@ -384,5 +387,36 @@ func TestTokenBudgetBoundsRecoveredInterruptions(t *testing.T) {
 		if tc.blocked != llm.IsUnsafeResponse(err) || (!tc.blocked && err != nil) {
 			t.Fatalf("interruptions=%d: error = %v, blocked want %t", tc.interruptions, err, tc.blocked)
 		}
+	}
+}
+
+func TestTokenBudgetUnsafeLogsReason(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*dag.WorkflowView)
+		reason string
+	}{
+		{"unreported", func(wf *dag.WorkflowView) { wf.UsageUnreported = true }, "usage_unreported"},
+		{"interruptions", func(wf *dag.WorkflowView) { wf.UsageInterruptions = maxRecoveredInterruptions + 1 }, "recovery_interruptions_exceeded"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wf := recoveredBudgetView(t, true)
+			tc.mutate(&wf)
+			var logs bytes.Buffer
+			executor := newTestExecutor(t, ExecutorDeps{
+				Snapshot: func(context.Context, string) (dag.WorkflowView, error) { return wf, nil },
+				Logger:   slog.New(slog.NewTextHandler(&logs, nil)),
+			})
+			ctx := context.WithValue(context.Background(), nodeIDKey{}, "node-x")
+			if _, _, err := executor.tokenBudget(ctx, wf.ID); !llm.IsUnsafeResponse(err) {
+				t.Fatalf("error = %v, want unsafe response", err)
+			}
+			out := logs.String()
+			for _, want := range []string{`msg="token budget unsafe"`, "workflow_id=" + wf.ID, "node_id=node-x", "reason=" + tc.reason} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("log missing %q:\n%s", want, out)
+				}
+			}
+		})
 	}
 }

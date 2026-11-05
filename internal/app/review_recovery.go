@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/LeXwDeX/tribunal/internal/errclass"
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/review"
 	"github.com/LeXwDeX/tribunal/internal/store"
@@ -25,6 +26,75 @@ import (
 func (s *ReviewService) recoveryCancel(ctx context.Context, workflowID, cause string, cancel func(context.Context, string) error) error {
 	s.logRecoveryCancel(workflowID, cause)
 	return cancel(ctx, workflowID)
+}
+
+// recoveryCancelWorkflow is the recovery cancel path for causes that used to
+// report "review superseded". It keeps the engine cancel reason, records the
+// real cause as the publication reason and, when the generation is still the
+// MR's current one, settles the status so it does not stay "running".
+func (s *ReviewService) recoveryCancelWorkflow(engineReason, cause string) func(context.Context, string) error {
+	return func(ctx context.Context, id string) error {
+		if err := s.cancelWorkflowSkipping(ctx, id, engineReason, recoveryCancelReason(cause)); err != nil {
+			return err
+		}
+		s.settleRecoveryCancel(ctx, id, cause)
+		return nil
+	}
+}
+
+// recoveryCancelThenSettle adds the status settlement to a cancel path that
+// owns its own engine and publication reasons.
+func (s *ReviewService) recoveryCancelThenSettle(cancel func(context.Context, string) error, cause string) func(context.Context, string) error {
+	return func(ctx context.Context, id string) error {
+		if err := cancel(ctx, id); err != nil {
+			return err
+		}
+		s.settleRecoveryCancel(ctx, id, cause)
+		return nil
+	}
+}
+
+func recoveryCancelReason(cause string) string { return "cancelled on recovery: " + cause }
+
+// settleRecoveryCancel terminates the review status of a workflow cancelled by
+// recovery, but only while its generation and head are still current; a newer
+// generation's status is never overwritten.
+func (s *ReviewService) settleRecoveryCancel(ctx context.Context, workflowID, cause string) {
+	warn := func(err error) {
+		s.logger.Warn("recovery cancel status not settled", "workflow_id", workflowID, "cause", cause, "error_class", errclass.Of(err))
+	}
+	wf, err := s.store.GetWorkflow(ctx, workflowID)
+	if err != nil {
+		warn(err)
+		return
+	}
+	if wf == nil || wf.MRIID == nil {
+		return
+	}
+	record, err := s.store.GetWorkflowDossier(ctx, workflowID)
+	if err != nil {
+		warn(err)
+		return
+	}
+	var dossier review.Dossier
+	if record == nil {
+		return
+	}
+	if err := json.Unmarshal(record.Data, &dossier); err != nil {
+		// An undecodable dossier has no trustworthy head to settle against.
+		warn(err)
+		return
+	}
+	head := dossier.DiffVersion.HeadSHA
+	if _, err := s.currentControl(ctx, wf.ProjectID, *wf.MRIID, record.Generation, head); err != nil {
+		if !IsPermanentJob(err) {
+			warn(err)
+		}
+		return
+	}
+	s.settleReviewStatus(ctx, wf.ProjectID, *wf.MRIID, record.Generation, 0, head, wf.Profile,
+		reviewStatusCancelled, recoveryCancelReason(cause)+"; please re-trigger the review",
+		dossierNoteID(dossier), reviewAwardNone)
 }
 
 func (s *ReviewService) logRecoveryCancel(workflowID, cause string) {
@@ -257,13 +327,13 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 	}
 	var dossier review.Dossier
 	if err := json.Unmarshal(record.Data, &dossier); err != nil {
-		return s.recoveryCancel(ctx, workflow.ID, "dossier_invalid", s.cancelWorkspaceWorkflow)
+		return s.recoveryCancel(ctx, workflow.ID, "dossier_invalid", s.recoveryCancelThenSettle(s.cancelWorkspaceWorkflow, "dossier_invalid"))
 	}
 	if err := review.ValidateDossier(&dossier); err != nil {
-		return s.recoveryCancel(ctx, workflow.ID, "dossier_invalid", s.cancelWorkspaceWorkflow)
+		return s.recoveryCancel(ctx, workflow.ID, "dossier_invalid", s.recoveryCancelThenSettle(s.cancelWorkspaceWorkflow, "dossier_invalid"))
 	}
 	if dossier.Project.ID != workflow.ProjectID || dossier.MR.IID != *workflow.MRIID {
-		return s.recoveryCancel(ctx, workflow.ID, "dossier_mismatch", s.cancelWorkflow)
+		return s.recoveryCancel(ctx, workflow.ID, "dossier_mismatch", s.recoveryCancelWorkflow("superseded", "dossier_mismatch"))
 	}
 	if _, err := s.currentControl(ctx, project.ID, *workflow.MRIID, record.Generation, dossier.DiffVersion.HeadSHA); err != nil {
 		if IsPermanentJob(err) {
@@ -278,14 +348,14 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 	}
 	if !validPublicationPolicy(&dossier) {
 		if !dossier.WorkspaceProvenanceValid() {
-			return s.recoveryCancel(ctx, workflow.ID, "workspace_provenance_invalid", s.cancelWorkspaceWorkflow)
+			return s.recoveryCancel(ctx, workflow.ID, "workspace_provenance_invalid", s.recoveryCancelThenSettle(s.cancelWorkspaceWorkflow, "workspace_provenance_invalid"))
 		}
-		return s.recoveryCancel(ctx, workflow.ID, "publication_policy_invalid", s.cancelWorkflow)
+		return s.recoveryCancel(ctx, workflow.ID, "publication_policy_invalid", s.recoveryCancelWorkflow("superseded", "publication_policy_invalid"))
 	}
 	mr, _, err := s.collectFilterInputs(ctx, project, token, *workflow.MRIID, dossier.DiffVersion.HeadSHA)
 	if err != nil {
 		if IsPermanentJob(err) {
-			return s.recoveryCancel(ctx, workflow.ID, "mr_inputs_unavailable", s.cancelWorkflow)
+			return s.recoveryCancel(ctx, workflow.ID, "mr_inputs_unavailable", s.recoveryCancelWorkflow("superseded", "mr_inputs_unavailable"))
 		}
 		return err
 	}
@@ -298,7 +368,7 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 		!strings.EqualFold(dossier.DiffVersion.BaseSHA, version.BaseSHA) ||
 		!strings.EqualFold(dossier.DiffVersion.StartSHA, version.StartSHA) ||
 		!strings.EqualFold(dossier.DiffVersion.HeadSHA, version.HeadSHA) {
-		return s.recoveryCancel(ctx, workflow.ID, "diff_version_changed", s.cancelWorkflow)
+		return s.recoveryCancel(ctx, workflow.ID, "diff_version_changed", s.recoveryCancelWorkflow("superseded", "diff_version_changed"))
 	}
 	docs, err := s.repoDocs(ctx, token, project.ID, mr.TargetBranch)
 	if err != nil {
@@ -318,11 +388,11 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 		storedHash == "" || reviewConfigHash(currentConfig) != storedHash ||
 		dossier.Metadata["prompt_hash"] == "" || dossier.Metadata["prompt_hash"] != s.prompts.Hash {
 		// Policy freshness is mandatory even when the optional config hash is absent.
-		return s.recoveryCancel(ctx, workflow.ID, "config_changed", s.cancelWorkflow)
+		return s.recoveryCancel(ctx, workflow.ID, "config_changed", s.recoveryCancelWorkflow("superseded", "config_changed"))
 	}
 	explicitValue := dossier.Metadata["profile_explicit"]
 	if explicitValue != "true" && explicitValue != "false" {
-		return s.recoveryCancel(ctx, workflow.ID, "profile_explicit_invalid", s.cancelWorkflow)
+		return s.recoveryCancel(ctx, workflow.ID, "profile_explicit_invalid", s.recoveryCancelWorkflow("superseded", "profile_explicit_invalid"))
 	}
 	profileName, profileCfg, err := s.profileFor(ctx, project, dossier.Metadata["requested_profile"], currentConfig.Profile, mr.Labels, explicitValue == "true")
 	if err != nil {
@@ -332,9 +402,7 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 	if workflow.Profile != profileName || dossier.Metadata["profile_hash"] == "" || dossier.Metadata["profile_hash"] != s.reviewProfileHash(profile) {
 		// The profile (including referenced user models, #299) changed while
 		// the process was down; record a visible reason like identity changes.
-		return s.recoveryCancel(ctx, workflow.ID, "profile_hash_changed", func(ctx context.Context, id string) error {
-			return s.cancelWorkflowWithReason(ctx, id, "profile_hash_changed")
-		})
+		return s.recoveryCancel(ctx, workflow.ID, "profile_hash_changed", s.recoveryCancelWorkflow("profile_hash_changed", "profile_hash_changed"))
 	}
 	if dossier.RepositorySkillProvenance != nil && dossier.RepositorySkillProvenance.Mode == "repository" {
 		lister, _ := s.store.(repositorySkillGrantLister)
@@ -355,9 +423,7 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 	}
 	defer execution.cleanupRepositorySkills()
 	if !s.matchesReviewExecution(project.ID, dossier.Metadata["execution_identity"], execution.digest) {
-		return s.recoveryCancel(ctx, workflow.ID, "execution_identity_changed", func(ctx context.Context, id string) error {
-			return s.cancelWorkflowWithReason(ctx, id, "execution_identity_changed")
-		})
+		return s.recoveryCancel(ctx, workflow.ID, "execution_identity_changed", s.recoveryCancelWorkflow("execution_identity_changed", "execution_identity_changed"))
 	}
 	headDir, cleanup, err := s.recoverRun(ctx, project, token, *workflow.MRIID, record.JobID, workflow.ID, dossier)
 	if err != nil {
@@ -371,14 +437,14 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 		return err
 	}
 	if workspaceIdentity == "" || dossier.Metadata["workspace_identity"] != workspaceIdentity {
-		return s.recoveryCancel(ctx, workflow.ID, "workspace_identity_changed", s.cancelWorkflow)
+		return s.recoveryCancel(ctx, workflow.ID, "workspace_identity_changed", s.recoveryCancelWorkflow("superseded", "workspace_identity_changed"))
 	}
 	_, indexEligible, err := s.reviewIndexState(ctx, project.ID, version.StartSHA, currentConfig.Settings.Ignore)
 	if err != nil {
 		return err
 	}
 	if dossier.WorkspaceProvenance.MCPEligible && !indexEligible {
-		return s.recoveryCancel(ctx, workflow.ID, "index_ineligible", s.cancelWorkspaceWorkflow)
+		return s.recoveryCancel(ctx, workflow.ID, "index_ineligible", s.recoveryCancelThenSettle(s.cancelWorkspaceWorkflow, "index_ineligible"))
 	}
 	index := dossierDiffIndex(dossier.DiffVersion, &dossier)
 	resolved := dossier
@@ -399,6 +465,7 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 		Cost:                     s.cost,
 		Outbound:                 outboundSender(ws),
 		RepositorySkillsVerified: execution.repositorySkillsVerified(),
+		Logger:                   s.logger,
 	})
 	if err != nil {
 		return err

@@ -115,3 +115,31 @@ func TestRecoveryContinuesBudgetedWorkflowAfterInterruption(t *testing.T) {
 	}
 	assertReviewPublished(t, f, id)
 }
+
+// One recovery round restarts every running node. With more concurrently
+// running model nodes than the interruption cap, a budgeted workflow must
+// still continue: the cap bounds restarts per node, not per round.
+func TestRecoveryContinuesBudgetedWorkflowWithParallelNodes(t *testing.T) {
+	const parallel = 5
+	f := newReviewFixtureWithProfile(t, reviewTestHead, func(p *config.ProfileConfig) {
+		p.Budget.MaxTokens = 1_000_000
+		p.Propose = nil
+		for i := 0; i < parallel; i++ {
+			p.Propose = append(p.Propose, config.ProposeConfig{Block: "code-review", Provider: "fake"})
+		}
+	})
+	job := f.seedReview(t, "job-budgeted-parallel-recovery")
+	id := interruptReviewRunning(t, f, job, parallel)
+	if err := f.service.Recover(context.Background()); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	wf, err := f.engine.Snapshot(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wf.Status != dag.WorkflowCompleted || wf.UsageUnreported || wf.UsageInterruptions != 1 {
+		t.Fatalf("status=%s unreported=%t interruptions=%d error=%q, want completed/false/1",
+			wf.Status, wf.UsageUnreported, wf.UsageInterruptions, wf.Error)
+	}
+	assertReviewPublished(t, f, id)
+}
