@@ -49,6 +49,11 @@ func MCPConfigAAD(scope string, projectID *int64, serverID string) ([]byte, erro
 	return []byte(fmt.Sprintf("tribunal/mcp-config/v1/%s/%d/%d:%s/config", scope, project, len(serverID), serverID)), nil
 }
 
+// ModelCredentialAAD binds a model credential to its immutable identity and field.
+func ModelCredentialAAD(id, field string) []byte {
+	return []byte(fmt.Sprintf("tribunal/llm-model/v1/%d:%s/%s", len(id), id, field))
+}
+
 // IsSealed reports whether value carries the versioned prefix.
 func IsSealed(value []byte) bool {
 	return bytes.HasPrefix(value, []byte(sealedPrefix))
