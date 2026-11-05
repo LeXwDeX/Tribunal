@@ -24,6 +24,9 @@ function renderModels(profileBudget: Record<string, unknown>) {
         }],
       })
     }
+    if (url === '/api/v1/profiles/default') {
+      return jsonResponse({ profile: 'default', overrides: {}, revision: 0, effective: { budget: profileBudget }, nodes: [] })
+    }
     if (url.startsWith('/api/v1/profiles')) {
       return jsonResponse({ profiles: [{ name: 'default', config: { budget: profileBudget } }] })
     }

@@ -111,6 +111,7 @@ web/
 ### 3.7 模型与档位
 
 - 模型列表：显示名、来源标签（配置/用户）、协议、上游 model、base_url host、参数摘要、API key 状态、可用性与 unavailable 原因、被引用节点、近 24 小时调用数/错误率/P50 延迟；同名模型显示短 ID。配置模型只读。
+- 「评审档位」区块显示 7 个可配置节点的生效模型与来源（覆盖/配置/配置默认/派生），管理员可在 Drawer 中为每个节点选择模型或恢复为配置；保存带 revision。参数覆盖与同模型提示尚未接入。
 - 管理员可通过 Drawer 新增或编辑用户模型；API key 三态（保持不变/替换/清除），只存在抽屉局部状态，关闭即清空；保存前测试调用草稿测试端点，编辑且 key 不变时不发送 key。删除被引用模型显示 409 引用位置；revision 冲突提示重新加载；出站被拒显示专门说明。本页数据只允许平台管理员读取；其他用户打开会看到权限错误，写入口隐藏。
 - 评审档位：只显示 `default`，标题为「评审档位」，按固定的八步拓扑列出各步骤及其 provider：探索（`explore`）、提出（`code-review`、`review`、`reasoner`、`validate`）、挑战（`verify`）、裁决（`adjudicate`）、汇报（`synthesize`），并展示预算。`onboarding` 单独标为「项目接入」，不是评审档位。
 - 手动触发评审的对话框也没有档位选择；评审详情的 DAG 阶段轨道中，`explore` 和 `plan` 归入「规划」，`code-review`、`review`、`reasoner` 和 `validate` 归入「提出」。「模型与档位」页的「项目接入」一行在 onboarding 没有配置 provider 时显示「未配置」。

@@ -610,3 +610,17 @@ export interface ModelWrite {
   api_key?: string
   revision?: number
 }
+
+export interface ProfileNodeView {
+  node: string
+  model: string
+  source: 'override' | 'config' | 'config_default' | 'derived' | string
+}
+
+export interface ProfileDetail {
+  profile: string
+  overrides: Record<string, unknown>
+  revision: number
+  effective: ProfileConfig
+  nodes: ProfileNodeView[]
+}
