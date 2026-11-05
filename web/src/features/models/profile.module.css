@@ -1,0 +1,84 @@
+.nodes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: var(--space-md);
+}
+
+.node {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  min-width: 0;
+  padding: var(--space-md);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.nodeHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.nodeName {
+  font: 600 var(--fs-body-sm) var(--font-mono);
+}
+
+.nodeModel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2xs) var(--space-sm);
+  overflow-wrap: anywhere;
+}
+
+.nodeMeta,
+.muted {
+  color: var(--muted);
+  font-size: var(--fs-label);
+  overflow-wrap: anywhere;
+}
+
+.sameModel {
+  margin: var(--space-md) 0 0;
+  color: var(--warn-fg);
+  font-size: var(--fs-label);
+  overflow-wrap: anywhere;
+}
+
+.fieldset {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  margin: 0 0 var(--space-md);
+  padding: var(--space-md);
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.legend {
+  padding: 0 var(--space-xs);
+  font: 600 var(--fs-label) var(--font-mono);
+}
+
+.paramGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-sm);
+}
+
+.errorText {
+  color: var(--danger-fg);
+  font-size: var(--fs-label);
+}
+
+@media (max-width: 480px) {
+  .paramGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

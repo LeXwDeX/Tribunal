@@ -636,10 +636,31 @@ export interface ModelWrite {
   revision?: number
 }
 
+export type ProfileNodeSource = 'override' | 'override_default' | 'config' | 'config_default' | 'derived'
+
+export interface ProfileNodeParams {
+  max_tokens?: number
+  temperature?: number | null
+  reasoning?: { effort?: string } | null
+  thinking?: { budget_tokens?: number } | null
+}
+
+export interface ProfileNodeOverride {
+  model?: string
+  params?: ProfileNodeParams
+}
+
 export interface ProfileNodeView {
   node: string
   model: string
-  source: 'override' | 'config' | 'config_default' | 'derived' | string
+  source: ProfileNodeSource | string
+  configured?: string
+  configured_source?: string
+  override?: ProfileNodeOverride
+  params?: ProfileNodeParams
+  param_source?: string
+  effective_params?: ProfileNodeParams
+  vote_identity?: string
 }
 
 export interface ProfileDetail {
