@@ -51,6 +51,9 @@ func profileModelRefs(body string) (map[string]string, error) {
 	}
 	all := map[string]string{"default": doc.Default.Model, "explore": doc.Explore.Model, "lanes.code_review": doc.Lanes.CodeReview.Model, "lanes.review": doc.Lanes.Review.Model, "lanes.reasoner": doc.Lanes.Reasoner.Model, "lanes.validate": doc.Lanes.Validate.Model, "challenge": doc.Challenge.Model}
 	for node, id := range all {
+		if id != strings.TrimSpace(id) {
+			return nil, errors.New("sqlite: invalid profile overrides")
+		}
 		if id == "" {
 			delete(all, node)
 		}
@@ -123,23 +126,40 @@ func (s *Store) PutProfileOverrides(ctx context.Context, profile, body string, r
 	return &result, nil
 }
 
-// Reset retains a monotonic revision to prevent stale writes after a reset.
-func (s *Store) DeleteProfileOverrides(ctx context.Context, profile string, userID int64) error {
+// DeleteProfileOverrides resets the document at the expected revision. The
+// revision stays monotonic so a stale writer cannot overwrite the reset.
+func (s *Store) DeleteProfileOverrides(ctx context.Context, profile string, revision, userID int64) (*store.ProfileOverrides, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return errors.New("sqlite: begin profile override reset failed")
+		return nil, errors.New("sqlite: begin profile override reset failed")
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `UPDATE review_profile_overrides SET overrides_json='{}', revision=revision+1, updated_by=?, updated_at=? WHERE profile=?`, userID, formatTime(s.now()), profile); err != nil {
-		return errors.New("sqlite: reset profile overrides failed")
+	res, err := tx.ExecContext(ctx, `UPDATE review_profile_overrides SET overrides_json='{}', revision=revision+1, updated_by=?, updated_at=? WHERE profile=? AND revision=?`, userID, formatTime(s.now()), profile, revision)
+	if err != nil {
+		return nil, errors.New("sqlite: reset profile overrides failed")
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return nil, errors.New("sqlite: reset profile overrides failed")
+	}
+	if n == 0 {
+		return nil, store.ErrStaleRevision
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM review_profile_model_refs WHERE profile=?`, profile); err != nil {
-		return errors.New("sqlite: clear profile model references failed")
+		return nil, errors.New("sqlite: clear profile model references failed")
+	}
+	var result store.ProfileOverrides
+	var updated string
+	if err := tx.QueryRowContext(ctx, `SELECT profile, overrides_json, revision, updated_by, updated_at FROM review_profile_overrides WHERE profile=?`, profile).Scan(&result.Profile, &result.OverridesJSON, &result.Revision, &result.UpdatedBy, &updated); err != nil {
+		return nil, errors.New("sqlite: read profile overrides failed")
+	}
+	if result.UpdatedAt, err = parseTime(updated); err != nil {
+		return nil, errors.New("sqlite: invalid profile override time")
 	}
 	if err := tx.Commit(); err != nil {
-		return errors.New("sqlite: commit profile override reset failed")
+		return nil, errors.New("sqlite: commit profile override reset failed")
 	}
-	return nil
+	return &result, nil
 }
 
 func (s *Store) ListProfileModelReferences(ctx context.Context, modelID string) ([]store.ProfileModelReference, error) {

@@ -44,6 +44,10 @@ func normalizeProfiles(c *Config) []string {
 		switch name {
 		case OnboardingProfile:
 		case ReviewProfile:
+			if c.RawProfiles == nil {
+				c.RawProfiles = make(map[string]ProfileConfig)
+			}
+			c.RawProfiles[name] = c.Profiles[name]
 			profile, profileWarnings := NormalizeReviewProfile(c.Profiles[name])
 			c.Profiles[name] = profile
 			warnings = append(warnings, profileWarnings...)

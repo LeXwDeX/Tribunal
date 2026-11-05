@@ -6,7 +6,6 @@ import (
 	"sort"
 	"time"
 
-	"github.com/LeXwDeX/tribunal/internal/app"
 	"github.com/LeXwDeX/tribunal/internal/config"
 	"github.com/LeXwDeX/tribunal/internal/llm"
 	"github.com/LeXwDeX/tribunal/internal/store"
@@ -189,7 +188,9 @@ func (s *Server) handleListProfiles(w http.ResponseWriter, r *http.Request) {
 			cfg := s.platform.Profiles[name]
 			if name == "default" && s.profileOverrides != nil {
 				if overrides, err := s.profileOverrides.GetProfileOverrides(r.Context(), "default"); err == nil && overrides != nil {
-					cfg = app.ApplyProfileOverrides(cfg, overrides.OverridesJSON)
+					if resolved, ok := s.resolveDefaultProfile(overrides.OverridesJSON); ok {
+						cfg = resolved.Effective
+					}
 				}
 			}
 			profiles = append(profiles, profileView{Name: name, Config: cfg})

@@ -216,6 +216,32 @@ Tribunal 只有一个评审档位 `default`，评审图固定：`explore` → �
 
 评审执行时（构建评审图）还会检查扇出上限：`plan.max_packages × 2 + 2 ≤ max_fan_out`（`max_fan_out` 默认 36），超出时拒绝该配置。每个包生成 `code-review` 和 `review` 各一个节点，`reasoner` 和 `validate` 每个 MR 各一个。
 
+#### 档位覆盖：节点模型与参数
+
+平台管理员可通过 `GET/PUT/DELETE /api/v1/profiles/default/overrides`（见 [03 HTTP API](03-http-api.md)）在配置文件之上覆盖 `default` 档位的模型和请求参数（[#291](https://github.com/LeXwDeX/Tribunal/issues/291)、[#334](https://github.com/LeXwDeX/Tribunal/issues/334)）。覆盖存于数据库，不修改配置文件，只作用于之后启动的工作流。
+
+覆盖文档的结构与配置的节点布局一致，所有字段可选，空值表示沿用配置：
+
+```json
+{
+  "default": {"model": "config:primary", "params": {"max_tokens": 8000}},
+  "explore": {"model": "user:<id>"},
+  "lanes": {
+    "code_review": {}, "review": {}, "reasoner": {}, "validate": {}
+  },
+  "challenge": {"params": {"reasoning": {"effort": "high"}}}
+}
+```
+
+- 可配置七项：`default`、`explore`、`lanes.code_review`、`lanes.review`、`lanes.reasoner`、`lanes.validate`、`challenge`；每项含 `model` 和 `params`。
+- `model` 是目录 ID（`config:<name>` 或 `user:<id>`）；不存在、已删除、不可用（出站被拒或记录损坏）或首尾带空白的 ID 返回 400，字段路径如 `overrides.default.model`。
+- `params` 只允许 `max_tokens`、`temperature`、`reasoning.effort`、`thinking.budget_tokens`，其他键返回 400。校验规则与模型参数相同：`max_tokens` > 0，`temperature` 在 0–2，`effort` 为 `low` / `medium` / `high` / `max`，`budget_tokens` > 0。`budget_tokens: 0` 和空 `effort` 不会生效，返回 400，提示省略该字段以继承；节点的生效模型是 Anthropic 协议时 `budget_tokens` 须 ≥ 1024，且 `max_tokens`（覆盖值，未覆盖则取模型值）须大于 `budget_tokens`。
+- 参数作为该节点的请求值注入，优先于模型自身默认；节点参数逐字段叠加在 `default` 参数之上。不创建独立 client，并发与限流仍按模型。
+
+**模型解析顺序**（每个节点）：节点覆盖 → `default` 覆盖 → 配置中该节点的 provider → 配置中档位的 provider → 派生回退。对应 `source` 取值 `override`、`override_default`、`config`、`config_default`、`derived`。
+
+**与配置文件的关系**：覆盖先合并进未归一化的 `default` 配置，再归一化一次，因此 `default` 和各节点（包括 `lanes.code_review`）的覆盖都会改变实际执行的模型，而不只是显示。由此，`default` 覆盖优先于配置文件里各节点自己的 provider；清除覆盖即恢复配置行为。档位哈希仅在设置了参数覆盖时才包含参数，未设置时哈希与此前一致。 覆盖 `lanes.code_review` 或 `challenge` 也会带动由它们派生的节点一起变化（这些节点的来源仍标为 `derived`）。
+
 #### 旧配置的兼容处理
 
 `config.Load` 不会因下列旧配置失败。每一项都在启动日志中产生一行 WARN，格式为 `configuration was migrated or ignored: <字段…>`，只含字段名，不含配置值。

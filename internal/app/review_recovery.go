@@ -394,7 +394,10 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 	if explicitValue != "true" && explicitValue != "false" {
 		return s.recoveryCancel(ctx, workflow.ID, "profile_explicit_invalid", s.recoveryCancelWorkflow("superseded", "profile_explicit_invalid"))
 	}
-	profileName, profileCfg := s.profileFor(ctx, project, dossier.Metadata["requested_profile"], currentConfig.Profile, mr.Labels, explicitValue == "true")
+	profileName, profileCfg, err := s.profileFor(ctx, project, dossier.Metadata["requested_profile"], currentConfig.Profile, mr.Labels, explicitValue == "true")
+	if err != nil {
+		return err
+	}
 	profile := review.Profile{Name: profileName, Config: profileCfg}
 	if workflow.Profile != profileName || dossier.Metadata["profile_hash"] == "" || dossier.Metadata["profile_hash"] != s.reviewProfileHash(profile) {
 		// The profile (including referenced user models, #299) changed while

@@ -293,6 +293,7 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		Clients:           clients,
 		Catalog:           modelCatalog,
 		Overrides:         deps.Store,
+		RawProfiles:       cfg.RawProfiles,
 		Tools:             projectTools,
 		Skills:            projectSkills,
 		Cost:              costFunc(modelCatalog, cfg.Providers),
