@@ -190,7 +190,9 @@ function AdminUsersPanel() {
       await queryClient.invalidateQueries({ queryKey: ['admin-users'] })
     } catch (error) {
       if (error instanceof ApiError && error.code === 'stale_revision') {
-        setDisableError(new Error('用户信息已被其他管理员更新，请关闭对话框并刷新后重试。'))
+        setDisableTarget(null)
+        setDisableError(null)
+        toast.push('error', '用户信息已被其他管理员更新，请刷新后重试。')
         await queryClient.invalidateQueries({ queryKey: ['admin-users'] })
       } else {
         setDisableError(error)

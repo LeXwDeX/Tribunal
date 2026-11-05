@@ -106,7 +106,8 @@ describe('admin user and grant management', () => {
     await user.click(screen.getByRole('button', { name: '停用账号' }))
     const dialog = await screen.findByRole('dialog', { name: '停用账号？' })
     await user.click(within(dialog).getByRole('button', { name: '停用' }))
-    expect(await screen.findByText('用户信息已被其他管理员更新，请关闭对话框并刷新后重试。')).toBeInTheDocument()
+    expect(await screen.findByText('用户信息已被其他管理员更新，请刷新后重试。')).toBeInTheDocument()
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: '停用账号？' })).not.toBeInTheDocument())
   })
 
   it('picks projects from the admin list even without a grant and manages grants', async () => {
