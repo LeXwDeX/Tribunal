@@ -519,10 +519,15 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 	if err != nil {
 		return err
 	}
+	// stage is a coarse marker for the permanent-failure log only.
+	stage := "control"
 	defer func() {
 		if err == nil || ctx.Err() != nil || !IsPermanentJob(err) {
 			return
 		}
+		s.logger.Warn("review run failed permanently",
+			"project_id", payload.ProjectID, "mr_iid", payload.MRIID, "generation", payload.Generation,
+			"error_class", errclass.Of(err), "stage", stage)
 		state, detail := reviewStatusFailed, reviewExecutionFailedReason
 		if errors.Is(err, ErrReviewSuperseded) || errors.Is(err, ErrMRClosed) {
 			state, detail = reviewStatusStale, "review is no longer current"
@@ -572,11 +577,13 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 	// The generation fence passed and this handler owns the workflow.
 	s.setReviewStatus(ctx, project.ID, control.MRIID, payload.Generation, job.Attempts,
 		payload.HeadSHA, payload.Profile, reviewStatusRunning, "")
+	stage = "inputs"
 	inputs, err := s.collectInputs(ctx, project, token, control.MRIID, payload.HeadSHA)
 	if err != nil {
 		return err
 	}
 
+	stage = "config"
 	cfg, err := resolveSecureReviewConfig(project, inputs.RepoDocs, s.reviewDefaults, s.profiles)
 	if err != nil {
 		// A retrigger of the same head is a new generation. The previous
@@ -649,6 +656,7 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 			return PermanentJob(errors.New("repository skill filter is unavailable"))
 		}
 	}
+	stage = "execution"
 	execution, err := s.resolveReviewExecution(ctx, project, token, profile, inputs.MR.TargetBranch, repositoryDeny)
 	if err != nil {
 		if workflow != nil && storedDossier != nil && review.DossierUsesRepositorySkills(storedDossier.Data) {
@@ -682,6 +690,7 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 		return nil
 	}
 	// Terminal snapshots need publication checks, not a new worktree.
+	stage = "prepare"
 	if workflow == nil || resumable {
 		if err := prepare(); err != nil {
 			return err
@@ -866,12 +875,14 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 		return PermanentJob(fmt.Errorf("hash dossier: %w", err))
 	}
 
-	graphCfg := review.GraphConfig{AllowedProviders: s.allowedProviders()}
+	stage = "graph"
+	graphCfg := review.GraphConfig{AllowedProviders: s.graphProviders()}
 	spec, err := review.BuildGraph(profile, dossier, graphCfg)
 	if err != nil {
 		return PermanentJob(fmt.Errorf("build review graph: %w", err))
 	}
 
+	stage = "workflow"
 	meta := map[string]string{
 		"trigger":     trigger,
 		"base_sha":    inputs.Version.BaseSHA,

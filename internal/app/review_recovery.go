@@ -384,7 +384,7 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 	executor, err := review.NewExecutor(review.ExecutorDeps{
 		Dossier:                  &resolved,
 		Profile:                  profile,
-		Graph:                    review.GraphConfig{AllowedProviders: s.allowedProviders()},
+		Graph:                    review.GraphConfig{AllowedProviders: s.graphProviders()},
 		Blocks:                   execution.blocks,
 		Clients:                  s.snapshotClients(),
 		Prompts:                  s.prompts,
