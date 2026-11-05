@@ -6,6 +6,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/LeXwDeX/tribunal/internal/app"
 	"github.com/LeXwDeX/tribunal/internal/config"
 	"github.com/LeXwDeX/tribunal/internal/llm"
 	"github.com/LeXwDeX/tribunal/internal/store"
@@ -185,7 +186,13 @@ func (s *Server) handleListProfiles(w http.ResponseWriter, r *http.Request) {
 		}
 		sort.Strings(names)
 		for _, name := range names {
-			profiles = append(profiles, profileView{Name: name, Config: s.platform.Profiles[name]})
+			cfg := s.platform.Profiles[name]
+			if name == "default" && s.profileOverrides != nil {
+				if overrides, err := s.profileOverrides.GetProfileOverrides(r.Context(), "default"); err == nil && overrides != nil {
+					cfg = app.ApplyProfileOverrides(cfg, overrides.OverridesJSON)
+				}
+			}
+			profiles = append(profiles, profileView{Name: name, Config: cfg})
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"profiles": profiles})
