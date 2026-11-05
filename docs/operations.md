@@ -947,6 +947,24 @@ v1.2.0 新增迁移 `0020_review_command_replay`。`0020` 新建已受理身份�
 
 迁移只清空当前逻辑列，不保证历史 WAL、SQLite 空闲页、文件系统快照或备份中的明文已擦除。继续限制这些文件的访问；本升级不自动删除或重写历史副本。
 
+### 主密钥不匹配时拒绝启动
+
+现象：服务启动时记录一行 ERROR `master key does not match stored encrypted data; refusing to start`，附带属性 `env=<变量名>`（`secrets.master_key_env` 指定的环境变量，默认 `REVIEW_MASTER_KEY`；日志不含密钥值），随后以 `initialize secrets: master key does not match stored encrypted data` 退出。
+
+原因：配置的主密钥打不开数据库中已有的密文。校验证据依次取 MCP 密钥校验标记、项目 token/webhook 密文（任一字段能打开即可）、用户模型 API key 密文（任一能打开即可）；有密文但都打不开时拒绝启动，且不写入校验标记。这是有意设计：用错误密钥继续运行会用另一把密钥加密新凭据，使同一数据库混用两把密钥。
+
+排查：
+
+1. 先停止服务。Compose 的 `restart: unless-stopped` 会让容器反复重启，须先 `docker compose stop`，不要在重启循环中反复尝试。
+2. 把环境变量的当前值与备份的原主密钥比对，修正 `.env` 或密钥注入方式；不要删除数据库、密文或校验标记来强行启动。
+3. 重新启动，确认 `/readyz` 返回就绪。
+
+注意：
+
+- 极少数情况下，库中全部项目密文都已损坏，即使密钥正确也会出现同样错误，二者无法区分。先确认密钥，仍不通过再从备份恢复。
+- 密钥正确时，单条无法解密的用户模型凭据仍只显示为 unavailable，不阻止启动。
+- 不支持主密钥轮换。
+
 ### 通用升级与回滚步骤
 
 升级步骤：

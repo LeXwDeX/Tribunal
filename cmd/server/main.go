@@ -151,10 +151,16 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return errors.New("initialize secrets: invalid master key")
 	}
 	if err := db.ConfigureModelSecrets(ctx, cipher); err != nil {
+		if errors.Is(err, sqlite.ErrMasterKeyMismatch) {
+			return masterKeyMismatch(logger, cfg.Secrets.MasterKeyEnv)
+		}
 		return errors.New("initialize model secrets: storage update failed")
 	}
 	unverifiedMCPKey, err := db.ConfigureMCPSecrets(ctx, cipher)
 	if err != nil {
+		if errors.Is(err, sqlite.ErrMasterKeyMismatch) {
+			return masterKeyMismatch(logger, cfg.Secrets.MasterKeyEnv)
+		}
 		return errors.New("migrate MCP secrets: storage update failed")
 	}
 	logUnverifiedMCPKey(logger, unverifiedMCPKey, cfg.Secrets.MasterKeyEnv)
@@ -665,6 +671,13 @@ func readHeaderTimeout(readTimeout time.Duration) time.Duration {
 		return maximum
 	}
 	return readTimeout
+}
+
+// masterKeyMismatch logs the operator-facing cause of a rejected master key and
+// returns the startup error. Only the variable name is logged, never the key.
+func masterKeyMismatch(logger *slog.Logger, keyEnv string) error {
+	logger.Error("master key does not match stored encrypted data; refusing to start", "env", keyEnv)
+	return errors.New("initialize secrets: master key does not match stored encrypted data")
 }
 
 // logUnverifiedMCPKey warns when startup creates the MCP key verifier without
