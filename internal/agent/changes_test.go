@@ -295,3 +295,21 @@ func TestPartialPageFlushDoesNotCoverHunk(t *testing.T) {
 		t.Fatalf("first page was counted as the whole hunk: %v", got)
 	}
 }
+
+func TestEmptyLineEvidenceCanBeDropped(t *testing.T) {
+	source := NewChangeSource([]ChangeFile{{Path: "a.go", Status: "modified"}}, nil, nil)
+	source.setHunkTotal("a.go", 1, 1)
+	source.recordLinePart("empty", "a.go", 1, 1, 0, 0, 0)
+	source.Flush()
+	if got := source.DiffReads()["a.go"]; len(got) != 1 || got[0] != 1 {
+		t.Fatalf("delivered empty line did not complete the hunk: %v", got)
+	}
+	source.Reset()
+	source.setHunkTotal("a.go", 1, 1)
+	source.recordLinePart("empty", "a.go", 1, 1, 0, 0, 0)
+	source.DropEvidence([]string{"empty"})
+	source.Flush()
+	if got := source.DiffReads()["a.go"]; len(got) != 0 {
+		t.Fatalf("undelivered empty line counted as read: %v", got)
+	}
+}

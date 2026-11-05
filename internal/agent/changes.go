@@ -482,6 +482,13 @@ func (c *ChangeSource) recordLinePart(id, path string, hunk, line, start, end, t
 				c.lineTotals[path][hunk] = make(map[int]int)
 			}
 			c.lineTotals[path][hunk][line] = 0
+			if c.parts[path] == nil {
+				c.parts[path] = make(map[int]map[int][]readPart)
+			}
+			if c.parts[path][hunk] == nil {
+				c.parts[path][hunk] = make(map[int][]readPart)
+			}
+			c.parts[path][hunk][line] = append(c.parts[path][hunk][line], readPart{id: id, start: 0, end: 0})
 			c.pendingEvidence[id] = append(c.pendingEvidence[id], pendingRead{
 				path: path, hunk: hunk, line: line, start: 0, end: 0, total: 0,
 			})
@@ -512,7 +519,7 @@ func (c *ChangeSource) recordLinePart(id, path string, hunk, line, start, end, t
 
 func (c *ChangeSource) lineCoveredLocked(path string, hunk, line, total int) bool {
 	if total <= 0 {
-		return true
+		return len(c.parts[path][hunk][line]) > 0
 	}
 	intervals := append([]readPart(nil), c.parts[path][hunk][line]...)
 	sort.Slice(intervals, func(i, j int) bool { return intervals[i].start < intervals[j].start })
