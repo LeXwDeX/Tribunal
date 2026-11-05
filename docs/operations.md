@@ -39,7 +39,7 @@ chmod 600 .env
 
 `config/server.docker.yaml` 只读挂载到 `/app/config/server.yaml`。它默认只绑定一个名为 `primary` 的 provider，`onboarding` 档位用其初始化仓库上下文，唯一的评审档位 `default` 用同一个 provider 运行全部评审节点（`explore`、`code-review`、`review`、`reasoner`、`validate` 和逐条反证 `verify`）；plan 和 synthesize 是代码节点，不默认启用多模型对抗。需要第二个 provider 时，按[多 Provider 配置](#多-provider-配置)操作；secondary 模板默认保持注释，不影响 primary-only 部署。该示例配置的数据库与工作区分别使用 `/app/data/review.db` 和 `/app/data/workspaces`；实际路径以生效配置和挂载为准。其他参数沿用应用内置默认值。不要移除 `profiles.onboarding.agent.provider` 或 `profiles.default.provider`：前者会导致工作区初始化失败，后者会让 `default` 档位没有 provider 可用而无法评审，即使健康检查和 `--check-config` 通过。
 
-升级到含迁移 `0026` 的版本前，按第 7 节做数据库及 WAL/SHM、工作区、配置、镜像和主密钥的一致性备份。该迁移没有 down migration；回退必须恢复匹配的旧镜像和备份。配置 provider 的名称不能含 `:`，`max_tokens` 必须为正数；旧挂载配置须手工补充该值并重启。temperature 须在 0–2，thinking budget 与 context window 不能为负。模型凭据使用原主密钥加密，不支持主密钥轮换；软删除清空当前行的密文，不保证擦除旧 WAL、快照或备份。运行时目录已接入：用户模型无需重启即可被新工作流使用，单条坏记录隔离为 unavailable，不影响其他模型；模型管理 API 和界面尚未提供。模型密文解不开时存储层将其标为不可用；已有 MCP 主密钥校验仍可能阻止错误主密钥启动。修改模型会重建 client 和信号量，旧 client 继续服务在途工作流，因此同一模型 ID 的实际并发会短时叠加新旧两份上限。
+升级到含迁移 `0026` 的版本前，按第 7 节做数据库及 WAL/SHM、工作区、配置、镜像和主密钥的一致性备份。该迁移没有 down migration；回退必须恢复匹配的旧镜像和备份。配置 provider 的名称不能含 `:`，`max_tokens` 必须为正数；旧挂载配置须手工补充该值并重启。temperature 须在 0–2，thinking budget 与 context window 不能为负。模型凭据使用原主密钥加密，不支持主密钥轮换；软删除清空当前行的密文，不保证擦除旧 WAL、快照或备份。运行时目录已接入：用户模型无需重启即可被新工作流使用，单条坏记录隔离为 unavailable，不影响其他模型；模型密文解不开时存储层将其标为不可用；已有 MCP 主密钥校验仍可能阻止错误主密钥启动。修改模型会重建 client 和信号量，旧 client 继续服务在途工作流，因此同一模型 ID 的实际并发会短时叠加新旧两份上限。模型管理 API 见 HTTP API 设计文档；界面尚未提供。
 
 包含 #164 的版本将 Anthropic 未缓存输入、缓存读取和缓存创建各计入一次输入 token；缓存读写字段是明细，不应再加到总输入上。预算使用该总输入和输出，因此可能比旧版本更早耗尽。成本估算对全部输入使用配置的 `input_per_mtok`，对输出使用 `output_per_mtok`，不区分缓存费率，不等于供应方账单；未配置价格时估算为零，不代表没有费用。已保存的历史用量不会追溯回填；升级后恢复旧工作流时，其已记录节点的缓存用量仍可能少计，导致剩余预算被高估。若当前评审需要准确执行预算，应取消后在升级版本重新触发，并另行统计已产生的用量。等待旧工作流结束不会修正其已少计的用量或预算限制。
 
@@ -361,7 +361,9 @@ tribunalctl projects residues clean --yes
 
 ### 项目授权、用户停用和凭据撤销
 
-项目访问是 Tribunal 本地的 `project_grants`，不从 GitLab 组成员关系推导。`bootstrap_admins` 和已授予的平台角色只决定平台管理标签；平台管理员读取或写入项目业务数据同样需要该项目授权。除下述注册人自动授权外，默认没有任何授权，`admin` 标签也不例外。入口检查中，无授权或项目不存在统一返回 404，只有 `read` 授权执行写操作返回 403。下述 dispatch 锁内复核不满足 manage 时统一返回 404，包括入口检查之后被降为 read 的请求。
+项目访问由 Tribunal 本地的 `project_grants` 和显式全局只读设置决定，不从 GitLab 组成员关系推导。`bootstrap_admins` 和已授予的平台角色只决定平台管理标签；平台管理员不自动获得全局只读或项目授权。除下述注册人自动授权外，默认没有任何授权。入口检查中，无读取权限或项目不存在统一返回 404，仅有 `read` 权限执行管理操作返回 403。下述 dispatch 锁内复核不满足 manage 时统一返回 404，包括入口检查之后被降为 read 的请求。
+
+平台管理员可在 `PATCH /api/v1/admin/users/{id}` 中提交 `global_read` 和当前 `revision`，为目标用户开启或关闭全局只读。浏览器会话须提供 CSRF token；变更随下一次请求生效，`GET /api/v1/me` 返回当前值。全局只读包括之后新登记的项目，但不授予 manage。禁用期间访问失效，重新启用后设置保留；关闭后仍保留逐项目授权。操作写入 `platform_audit` 日志，包含操作者、目标和新值。迁移 `0027` 没有 down migration，升级前须按第 7 节备份；回退须恢复升级前快照及匹配的旧版镜像。
 
 平台管理员可通过用户管理 API 为已登录的 GitLab 用户授予或撤销平台管理员角色。配置指定的管理员不能降级或禁用；不能降级或禁用自己，也不能移除最后一个生效的管理员。更新用户时先读取用户列表，并在 PATCH 请求中提交该用户的 `revision`；旧的仅含 `disabled` 的请求需要补充该字段，缺少 `revision` 返回 400，版本过期返回 409 `stale_revision`。角色变更在下一次请求生效，降级会使旧 CSRF token 失效，但不会删除该用户的全部会话或 API token；需要立即清除全部凭据时另行调用凭据撤销接口。新增迁移 `0025` 不可逆，升级前应按本手册备份数据库及其 WAL/SHM、工作区、配置、镜像和加密密钥；回滚时恢复匹配的备份和旧版镜像。
 
