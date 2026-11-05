@@ -41,9 +41,73 @@ function declarations(text) {
   return out
 }
 
+function blocks(text) {
+  // Innermost rule blocks with the selector text that precedes them.
+  const out = []
+  for (const match of text.matchAll(/([^{}]*)\{([^{}]*)\}/g)) {
+    const props = new Map()
+    for (const part of match[2].split(';')) {
+      const colon = part.indexOf(':')
+      if (colon > 0) props.set(part.slice(0, colon).trim(), part.slice(colon + 1).replace(/!important/, '').trim())
+    }
+    out.push({ selector: match[1].trim(), props, index: match.index + match[1].length })
+  }
+  return out
+}
+
+function isZero(value) {
+  return /^0(?:px)?$/.test(value || '')
+}
+
+function edges(props) {
+  // Resolve inset shorthand and longhands to [top, right, bottom, left].
+  const box = (props.get('inset') || '').split(/\s+/).filter(Boolean)
+  const [top, right = top, bottom = top, left = right] = box
+  return [
+    props.get('top') ?? top,
+    props.get('right') ?? right,
+    props.get('bottom') ?? bottom,
+    props.get('left') ?? left,
+  ]
+}
+
+function scanScrollbarGutter(clean, file) {
+  // A vertical scrollbar that appears or disappears with content height must
+  // not move centered content, so the root reserves its gutter and every
+  // full-viewport fixed overlay is widened to cover that gutter.
+  const diagnostics = []
+  const rules = blocks(clean)
+  if (/(?:^|[\\/])global\.css$/.test(file)) {
+    const reserved = rules.some((rule) => rule.selector.split(',').some((part) => ['html', ':root'].includes(part.trim()))
+      && /^stable\b/.test(rule.props.get('scrollbar-gutter') || ''))
+    if (!reserved) {
+      diagnostics.push({
+        file,
+        line: 1,
+        rule: 'root-scrollbar-gutter',
+        severity: 'error',
+        message: 'html 必须声明 scrollbar-gutter: stable，否则页面会随纵向滚动条出现/消失横向跳动',
+      })
+    }
+  }
+  for (const rule of rules) {
+    if (rule.props.get('position') !== 'fixed') continue
+    if (!edges(rule.props).every(isZero)) continue
+    if (/^100[dsl]?vw$/.test(rule.props.get('width') || '')) continue
+    diagnostics.push({
+      file,
+      line: lineOf(clean, rule.index),
+      rule: 'overlay-gutter',
+      severity: 'error',
+      message: '全屏 fixed 遮罩需加 right: auto; width: 100vw，以覆盖根元素预留的滚动条槽',
+    })
+  }
+  return diagnostics
+}
+
 export function scanCss(text, file) {
   const clean = withoutComments(text)
-  const diagnostics = []
+  const diagnostics = scanScrollbarGutter(clean, file)
   for (const decl of declarations(clean)) {
     for (const match of decl.value.matchAll(COLOR_RE)) {
       diagnostics.push({
