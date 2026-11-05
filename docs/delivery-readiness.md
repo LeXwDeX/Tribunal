@@ -47,6 +47,28 @@
 
 - 基于 `feat/297-user-console` 的工作区，`go test -count=1 ./internal/store/sqlite/... ./internal/server/...` 通过；`npm test -- --coverage` 通过 64 个文件、524 项测试；`npm run build` 已刷新 `web/dist`。覆盖用户抽屉角色/全局/授权操作、配置来源与自我降级禁用。未做 1440/390 与亮暗主题浏览器截图，未验证真实部署。
 
+## v1.3.0 发布检查表（#294）
+
+| 检查项 | 状态 | 证据 / 原因 |
+|---|---|---|
+| 每个 Issue 的自建 CI（go/web/docker） | PASS | 各 PR head 的 `summary.txt` 末行 `RESULT PASS`，覆盖率 ≥ 70% |
+| 本地构建、静态检查、scoped 测试、前端测试与 dist | PASS | 各 Issue 的本地验证记录与 PR |
+| 带历史数据的 v1.2.0 → v1.3.0 原地升级 | BLOCKED | 需要冻结的 v1.3.0 候选镜像、隔离部署、测试 GitLab 与 LLM；当前未提供 |
+| 5 个终态 + 1 个中断工作流、effort 审计、pending publication 夹具 | BLOCKED | 同上 |
+| 2 用户 / 2 项目授权矩阵 | BLOCKED | 同上 |
+| 升级后续跑、真实评审、发布与 `model_id`/`wire` 审计 | BLOCKED | 同上 |
+| 进行中修改模型、重启后身份取消 | BLOCKED | 需要真实工作流与重启 |
+| link-local 422 `egress_denied`、用户管理只读矩阵 | BLOCKED | 需要部署实例 |
+| 错误 masterkey 启动与模型 unavailable | BLOCKED | 需要部署实例；本地存储层测试已覆盖 |
+| 恢复默认后 hash/digest 等于升级前 | BLOCKED | 需要真实升级快照 |
+| 版本回退演练（恢复快照 + v1.2.0 镜像） | BLOCKED | 同上 |
+| CHANGELOG、operations、data model、HTTP API、web console 文档 | PASS | 本次提交 |
+| GitHub Runner（stage 2）三个 job | PENDING | 需在冻结候选 commit 上运行 |
+| 生产人工 Review（stage 3） | PENDING | 需维护者与明确授权 |
+| tag `v1.3.0` 与 GitHub Release | PENDING | 需用户明确授权 |
+
+未完成的“发布前必须”项均标记 BLOCKED，未用 mock 或 CI 结果替代。解除条件：提供冻结候选镜像、隔离测试环境、测试 GitLab 与 LLM 凭据，并完成上述矩阵。
+
 ## v1.2.0 候选批次本地修复验证（PR #128）
 
 - 2026-10-28，在 `main` `e7c59ab` 加本地未提交改动的工作区，MCP 配置加密、旧库回填、错误密钥拒绝、事务回滚和项目坏字段容错已通过 `go test -race -count=1 -timeout=15m ./internal/secret ./internal/store/sqlite ./internal/app ./internal/server ./cmd/server`；`go build ./...`、`go vet ./...` 通过。此前无密钥创建/导入及明文存储回归已实测失败，修复后通过。

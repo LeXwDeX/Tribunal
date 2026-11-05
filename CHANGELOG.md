@@ -2,7 +2,7 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [1.3.0] - 未发布
 
 ### 升级前必读
 
@@ -24,6 +24,18 @@
   逐项迁移规则见[配置设计 · 评审档位](docs/design/06-config.md#评审档位profiles)，操作步骤见[部署与运维 · 单一评审档位](docs/operations.md#单一评审档位升级)。
 
 - **未终态工作流不会在新任务布局下续跑**（[#300](https://github.com/LeXwDeX/Tribunal/issues/300)）：`prompts.TaskRenderVersion` 由 5 改为 6。升级前创建的未终态工作流在启动恢复时被取消，不会在新布局或覆盖语义下续跑、重试或发布；需要时等待其结束或接受取消后重新触发。
+
+### 已验证范围（#294，本地与 CI）
+
+- 每个 Issue 的自建 CI `go` / `web` / `docker` 在合并前对 PR head 通过，覆盖率门槛 70%。
+- 本地 `go build ./...`、`go vet ./...`、scoped `go test`、staticcheck 与前端 `npm test -- --coverage`、`check:styles`、`build` 通过。
+- 带数据的 v1.3.0 原地升级、2 用户/2 项目矩阵、真实 GitLab/LLM 评审与回滚演练尚未执行，见 `docs/delivery-readiness.md` 的 BLOCKED 项。
+
+### 已知限制
+
+- 修改模型会重建 client 和信号量，旧 client 继续服务在途工作流，同一模型 ID 的实际并发会短时叠加新旧两份上限。
+- 不支持 masterkey 轮换；软删除保留模型元数据并清空当前行密文，不保证擦除 WAL、快照或备份。
+- 评审档位的参数覆盖、来源标注、同模型投票提示尚未完整实现；模型草稿测试端点返回 501。
 
 ### 变更
 
@@ -47,7 +59,7 @@
 
 ## [1.2.0] - 2026-10-29
 
-> v1.2.0 尚未打 tag，也未发布 Release。本节的日期是版本说明的合并日，不是发布日；tag 和 Release 由维护者在 [#108](https://github.com/LeXwDeX/Tribunal/issues/108) 验收后决定。范围已扩大到当前 `main`，候选范围是 [v1.1.0...main](https://github.com/LeXwDeX/Tribunal/compare/v1.1.0...main)，包含 #143 与迁移 `0020`–`0024`；本节合并了原 `Unreleased` 条目。真实实例升级已验证 `0016`–`0024` 的应用、健康检查、内置扩展和 #143 授权迁移（最近一次 `a113e08` → `2621c44`）；`0020`/`0022` 带历史数据回填、完整 2 用户／2 项目矩阵和升级后新真实评审仍未做。打 tag 后补 `[1.2.0]: https://github.com/LeXwDeX/Tribunal/compare/v1.1.0...v1.2.0`，并回读确认链接可用。
+> v1.2.0 已发布（2026-11-05，tag `v1.2.0` 指向 `4e95f4f`，GitHub Release 为 Latest）。候选范围是 [v1.1.0...v1.2.0](https://github.com/LeXwDeX/Tribunal/compare/v1.1.0...v1.2.0)，包含 #143 与迁移 `0020`–`0024`；本节合并了原 `Unreleased` 条目。真实实例升级已验证 `0016`–`0024` 的应用、健康检查、内置扩展和 #143 授权迁移；`0020`/`0022` 带历史数据回填、完整 2 用户／2 项目矩阵和升级后新真实评审仍未做。
 
 ### 升级前必读
 
@@ -275,5 +287,6 @@ v1.0.0 之后的第一个版本：产品改名为 Tribunal，修复 1.0 复审�
 
 首个版本（GitHub Pre-release），交付 M0–M6 范围：webhook 与持久化队列、DAG 调度、主 agent 编排、对抗核验与裁决、GitLab 发布、三种 LLM 协议、工作区、MCP 与 Skill、OAuth、项目授权、Web 控制台和统计。详见 [Release v1.0.0](https://github.com/LeXwDeX/Tribunal/releases/tag/v1.0.0)。
 
+[1.2.0]: https://github.com/LeXwDeX/Tribunal/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/LeXwDeX/Tribunal/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/LeXwDeX/Tribunal/releases/tag/v1.0.0

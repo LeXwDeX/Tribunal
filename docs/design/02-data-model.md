@@ -21,7 +21,9 @@
 | `publications` | 发布 | 已发布到 GitLab 的对象，用于幂等 |
 | `llm_calls` | 审计 | 每次模型调用 |
 | `feedback` | 反馈 | 👍/👎、resolve 信号 |
-| `users`、`sessions`、`api_tokens` | 访问控制 | 本地用户、停用状态、持久会话与 CLI token |
+| `users`、`sessions`、`api_tokens` | 访问控制 | 本地用户、停用状态、角色、全局只读（0027）、持久会话与 CLI token |
+| `llm_models` | 模型 | 用户模型、参数、加密凭据与软删除（0026） |
+| `review_profile_overrides`、`review_profile_model_refs` | 模型 | 评审档位节点覆盖与模型引用（0028） |
 | `project_grants` | 访问控制 | 每项目 `read` / `manage` 授权，默认无权限（0007） |
 
 ---
@@ -362,6 +364,8 @@ CREATE TABLE api_tokens (
 > `0024_workflow_usage_incomplete.sql` 只给 `workflows` 和 `workflow_nodes` 各追加 `usage_incomplete INTEGER NOT NULL DEFAULT 0`，无 down migration。旧行不回填：默认 false 只表示没有检测到缺失，不能证明历史用量完整。新事件可能携带该字段，旧二进制的严格解码可能失败；不能仅替换镜像降级。`0020` 已在 `cf29656` 合并，`0021`–`0023` 已随 PR #180 合并；当前源码检查未发现这些迁移重建这两张表，集成时仍须重新核验迁移顺序和作用。
 
 新 `llm_calls` 的 `request`、`response` 若存在，各自的 JSON 对象都带 `"_format":"audit_metadata_v1"`，只存结构计数、请求选项、固定停止原因和用量，不存 prompt、工具参数/输出、推理内容、上游原始 ID 或错误原文。每次尝试有独立本地 `id`。对 agent 调用，记录器按非法调用批次、停止原因或拒绝预分类 `unsafe_model_response`；这只影响审计统计，不改变请求重试和 agent 拒绝策略，也不是节点最终状态。
+
+0025 为 `users` 增加 `granted_role`、`granted_by`、`granted_at` 与 `revision`；0026 新建 `llm_models`（`api_key_sealed` 只存密文，软删除清空；AAD 为 `tribunal/llm-model/v1/<len>:<id>/api_key`）；0027 为 `users` 增加 `global_read`、`global_read_by`、`global_read_at` 与部分索引；0028 新建 `review_profile_overrides` 与 `review_profile_model_refs`，保存覆盖时在同一事务内校验用户模型存在，软删除被引用模型返回冲突。四个迁移都不可逆。
 
 本次升级不删除或迁移历史审计，原有保留策略仍生效。没有 `_format` 的历史数据可能是完整 `llm.Request`/`Response`，也可能是旧版未标记的安全元数据或截断摘要；例如 request 的 `messages` 分别可能是数组或数字，不能仅因无标记就认定类型。部分或空 payload 可能无法判别。旧 payload 仍可能含敏感内容，只有项目 `manage` 可读取；详情见 [HTTP API](03-http-api.md#42-评审工作流)。
 

@@ -4,7 +4,7 @@ GitLab CE MR 多 agent 自动评审服务
 
 基于 Go 的 GitLab CE MR 自动评审服务，使用 MIT 协议。
 
-当前 M0–M6 功能已有本地实现，覆盖项目注册与 webhook、三种 LLM 协议、agent 工具循环、DAG 与持久化、只读探索与四路并行评审/对抗核验/裁决、GitLab 发布、工作区、MCP/Skill、OAuth 持久会话、项目 `read`/`manage` 授权与 CSRF、管理 API、React 控制台、API token、统计、反馈采集、人工标注与许可证清单。
+当前 M0–M6 功能已有本地实现，覆盖项目注册与 webhook、三种 LLM 协议、agent 工具循环、DAG 与持久化、只读探索与四路并行评审/对抗核验/裁决、GitLab 发布、工作区、MCP/Skill、OAuth 持久会话、项目 `read`/`manage` 授权与 CSRF、用户全局只读、平台角色管理、模型管理与评审档位节点覆盖、管理 API、React 控制台、API token、统计、反馈采集、人工标注与许可证清单。
 
 当前最新发布版本是 **v1.1.0**，待发布版本是 **v1.2.0**；变更和升级必读见 [CHANGELOG](CHANGELOG.md)。v1.2.0 尚未打 tag；范围已扩大到当前 `main`，包含 #143 与迁移 `0020`–`0024`。真实实例升级已验证迁移 `0016`–`0024` 的应用、健康检查、内置扩展和 #143 授权迁移；最新一次从 `a113e08` 升级到 `2621c44`。`0020`/`0022` 的带历史数据回填、完整 2 用户／2 项目矩阵和升级后新真实评审仍未验证；详见交付就绪文档。CI 以最终 tag commit 的 GitHub Actions 结果为准。完整验证状态见 [v1.2.0（待发布）验证状态](docs/delivery-readiness.md#v120-验证状态)。
 
