@@ -97,6 +97,13 @@ func TestCatalogConcurrentRefreshAndReads(t *testing.T) {
 				_, _ = c.Client("user:good")
 				_, _ = c.Resolve("user:good")
 				_ = c.List()
+				snapshot := c.Snapshot()
+				client, err := snapshot.Client("user:good")
+				model, ok := snapshot.Resolve("user:good")
+				if err != nil || !ok || client.Info().Model != model.Model.Model {
+					t.Error("snapshot client and model must use the same catalog generation")
+					return
+				}
 			}
 		}()
 	}
@@ -109,6 +116,39 @@ func TestCatalogConcurrentRefreshAndReads(t *testing.T) {
 		}
 	}
 	wg.Wait()
+}
+
+func TestCatalogSnapshotSurvivesRefresh(t *testing.T) {
+	s := &catalogStore{models: []store.Model{{ID: "user:good", DisplayName: "Good", Protocol: "openai-chat", BaseURL: "http://127.0.0.1/old", Model: "old", Revision: 1, Params: store.ModelParams{MaxTokens: 1, MaxConcurrency: 1}}}}
+	c, err := NewCatalog(context.Background(), nil, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := c.Snapshot()
+	old, err := snapshot.Client("user:good")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	s.models[0].Revision++
+	s.models[0].BaseURL = "http://127.0.0.1/new"
+	s.models[0].Model = "new"
+	s.mu.Unlock()
+	if err := c.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := snapshot.Client("user:good")
+	if err != nil || got != old || got.Info().BaseURL != "http://127.0.0.1/old" {
+		t.Fatal("snapshot did not retain the original client")
+	}
+	model, ok := snapshot.Resolve("user:good")
+	if !ok || model.BaseURL != "http://127.0.0.1/old" || model.Model.Model != "old" {
+		t.Fatal("snapshot did not retain the original model configuration")
+	}
+	current, err := c.Client("user:good")
+	if err != nil || current == old || current.Info().Model != "new" {
+		t.Fatal("catalog did not publish the new client")
+	}
 }
 
 func TestCatalogLabelsExposeUserDisplayNames(t *testing.T) {

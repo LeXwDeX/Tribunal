@@ -368,7 +368,7 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 		Profile:                  profile,
 		Graph:                    review.GraphConfig{AllowedProviders: s.allowedProviders()},
 		Blocks:                   execution.blocks,
-		Clients:                  s.clients,
+		Clients:                  s.snapshotClients(),
 		Prompts:                  s.prompts,
 		AgentRun:                 execution.agentRunner(s.agentRun),
 		Snapshot:                 engineSnapshot(s.engine),

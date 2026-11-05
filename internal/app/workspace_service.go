@@ -50,6 +50,7 @@ type WorkspaceService struct {
 	reviewDefaults config.ProjectSettings
 	prompts        prompts.Bundle
 	clients        review.ClientProvider
+	catalog        *llm.Catalog
 	agentRun       review.AgentRunner
 	tools          review.ToolProvider
 	skills         review.SkillProvider
@@ -74,6 +75,7 @@ type WorkspaceServiceConfig struct {
 	ReviewDefaults config.ProjectSettings
 	Prompts        prompts.Bundle
 	Clients        review.ClientProvider
+	Catalog        *llm.Catalog
 	AgentRun       review.AgentRunner
 	Tools          review.ToolProvider
 	Skills         review.SkillProvider
@@ -119,6 +121,7 @@ func NewWorkspaceService(cfg WorkspaceServiceConfig) (*WorkspaceService, error) 
 		reviewDefaults: cfg.ReviewDefaults,
 		prompts:        cfg.Prompts,
 		clients:        cfg.Clients,
+		catalog:        cfg.Catalog,
 		agentRun:       cfg.AgentRun,
 		tools:          cfg.Tools,
 		skills:         cfg.Skills,
@@ -149,6 +152,13 @@ type WorkspaceRefreshOptions struct {
 }
 
 // Handle dispatches workspace jobs. Permanent failures are logged and settled.
+func (s *WorkspaceService) snapshotClients() review.ClientProvider {
+	if s.catalog != nil {
+		return s.catalog.Snapshot()
+	}
+	return s.clients
+}
+
 func (s *WorkspaceService) Handle(ctx context.Context, job *jobs.Job) error {
 	if job == nil {
 		return nil
@@ -570,7 +580,7 @@ func (s *WorkspaceService) generateContext(ctx context.Context, project *store.P
 		Dossier:  dossier,
 		Profile:  profile,
 		Blocks:   s.blocks,
-		Clients:  s.clients,
+		Clients:  s.snapshotClients(),
 		Prompts:  s.prompts,
 		AgentRun: s.agentRun,
 		Snapshot: engineSnapshot(s.engine),

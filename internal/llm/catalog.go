@@ -28,7 +28,13 @@ type modelReader interface {
 type ClientHolder struct{ registry atomic.Pointer[Registry] }
 
 func (h *ClientHolder) Client(name string) (Client, error) {
-	r := h.registry.Load()
+	return clientFromRegistry(h.registry.Load(), name)
+}
+
+func clientFromRegistry(r *Registry, name string) (Client, error) {
+	if r == nil {
+		return nil, errors.New("llm: provider is not configured")
+	}
 	if strings.HasPrefix(name, "config:") {
 		key := strings.TrimPrefix(name, "config:")
 		if model, ok := r.models[key]; !ok || model.ID != name {
@@ -40,6 +46,22 @@ func (h *ClientHolder) Client(name string) (Client, error) {
 }
 
 func (h *ClientHolder) Infos() []ProviderInfo { return h.registry.Load().Infos() }
+
+// CatalogSnapshot retains one immutable catalog generation for a workflow.
+type CatalogSnapshot struct{ registry *Registry }
+
+// Snapshot captures clients and model configurations from the same generation.
+func (c *Catalog) Snapshot() *CatalogSnapshot {
+	return &CatalogSnapshot{registry: c.registry.Load()}
+}
+
+func (s *CatalogSnapshot) Client(name string) (Client, error) {
+	return clientFromRegistry(s.registry, name)
+}
+
+func (s *CatalogSnapshot) Resolve(id string) (CatalogModel, bool) {
+	return resolveCatalogModel(s.registry, id)
+}
 
 // Catalog merges configured providers with database models.
 type Catalog struct {
@@ -161,7 +183,14 @@ func (c *Catalog) Resolve(id string) (CatalogModel, bool) {
 	if c == nil || c.registry.Load() == nil {
 		return CatalogModel{}, false
 	}
-	m, ok := c.registry.Load().models[strings.TrimPrefix(id, "config:")]
+	return resolveCatalogModel(c.registry.Load(), id)
+}
+
+func resolveCatalogModel(r *Registry, id string) (CatalogModel, bool) {
+	if r == nil {
+		return CatalogModel{}, false
+	}
+	m, ok := r.models[strings.TrimPrefix(id, "config:")]
 	if strings.HasPrefix(id, "config:") && m.ID != id {
 		return CatalogModel{}, false
 	}
