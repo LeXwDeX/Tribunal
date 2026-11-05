@@ -8,6 +8,11 @@
 >
 > 本文不复制完整日志，也不把测试实例结果扩大为生产验收。
 
+## 用户模型存储本地验证（#288）
+
+- 基于 `bb280c8278eac9cb1e933c98b2d1498af1ad85ef` 的未提交工作区，本地通过 `go build ./...`、`go vet ./...`、`go test ./internal/store/... ./internal/store/sqlite/... ./internal/config/... ./internal/secret/...`，以及上述 store、config、secret 包的 Staticcheck v0.8.2。模型存储相关 race 测试也通过；这不是完整 CI 结果。
+- 空库和模拟 v1.2.0 schema 且带已有用户的临时 SQLite 库已覆盖迁移；未验证真实部署升级。模型引用约束留待 #291，模型目录和运行时接入留待后续工作。错误主密钥仍可能被既有 MCP 密钥校验拒绝。
+
 ## v1.2.0 候选批次本地修复验证（PR #128）
 
 - 2026-10-28，在 `main` `e7c59ab` 加本地未提交改动的工作区，MCP 配置加密、旧库回填、错误密钥拒绝、事务回滚和项目坏字段容错已通过 `go test -race -count=1 -timeout=15m ./internal/secret ./internal/store/sqlite ./internal/app ./internal/server ./cmd/server`；`go build ./...`、`go vet ./...` 通过。此前无密钥创建/导入及明文存储回归已实测失败，修复后通过。

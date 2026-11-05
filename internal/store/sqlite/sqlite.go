@@ -42,9 +42,10 @@ const MaxDeferWindow = 15 * time.Minute
 // Store is a SQLite-backed store. One connection serializes all reads and
 // writes; this is sufficient for the single-process M0 deployment.
 type Store struct {
-	db        *sql.DB
-	now       func() time.Time
-	mcpCipher atomic.Pointer[secret.Cipher]
+	db          *sql.DB
+	now         func() time.Time
+	mcpCipher   atomic.Pointer[secret.Cipher]
+	modelCipher atomic.Pointer[secret.Cipher]
 }
 
 // Option customizes Open.

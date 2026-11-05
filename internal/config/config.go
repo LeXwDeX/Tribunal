@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/netip"
 	"net/url"
 	"os"
@@ -465,31 +466,11 @@ func (c *Config) Validate() error {
 	for _, name := range sortedKeys(c.Providers) {
 		provider := c.Providers[name]
 		field := "providers." + name
-		if provider.Reasoning != nil && !effort.Valid(provider.Reasoning.Effort) {
-			p.add("%s.reasoning.effort must be low, medium, high or max", field)
+		if strings.Contains(name, ":") {
+			p.add("%s: provider name must not contain ':'", field)
 		}
-		if !isProviderProtocol(provider.Protocol) {
-			p.add("%s.protocol %q is not supported", field, provider.Protocol)
-		}
-		validateURL(&p, field+".base_url", provider.BaseURL, false)
-		if strings.TrimSpace(provider.Model) == "" {
-			p.add("%s.model must not be empty", field)
-		}
-		if provider.MaxConcurrency <= 0 {
-			p.add("%s.max_concurrency must be positive", field)
-		}
-		if provider.ContextWindow < 0 {
-			p.add("%s.context_window must not be negative", field)
-		}
-		switch provider.ForcedToolChoice {
-		case "", "auto", "supported", "unsupported":
-		default:
-			p.add("%s.forced_tool_choice must be auto, supported or unsupported", field)
-		}
-		if provider.APIKeyEnv == "" {
-			p.add("%s.api_key_env must be set", field)
-		} else {
-			p.env(field+".api_key_env", provider.APIKeyEnv)
+		if err := ValidateProviderConfig(field, provider, ProviderValidationOptions{RequireAPIKeyEnv: true}); err != nil {
+			p.errs = append(p.errs, err)
 		}
 	}
 
@@ -499,6 +480,54 @@ func (c *Config) Validate() error {
 	validateMCP(&p, c)
 	validateDefaultExtensions(&p, c.DefaultExtensions)
 
+	return p.err()
+}
+
+// ProviderValidationOptions selects validation needed for environment-backed providers.
+type ProviderValidationOptions struct {
+	RequireAPIKeyEnv bool
+}
+
+// ValidateProviderConfig validates both configured providers and stored models.
+func ValidateProviderConfig(field string, provider ProviderConfig, opts ProviderValidationOptions) error {
+	var p problems
+	if provider.Reasoning != nil && !effort.Valid(provider.Reasoning.Effort) {
+		p.add("%s.reasoning.effort must be low, medium, high or max", field)
+	}
+	if !isProviderProtocol(provider.Protocol) {
+		p.add("%s.protocol %q is not supported", field, provider.Protocol)
+	}
+	validateURL(&p, field+".base_url", provider.BaseURL, false)
+	if strings.TrimSpace(provider.Model) == "" {
+		p.add("%s.model must not be empty", field)
+	}
+	if provider.MaxConcurrency <= 0 {
+		p.add("%s.max_concurrency must be positive", field)
+	}
+	if provider.MaxTokens <= 0 {
+		p.add("%s.max_tokens must be positive", field)
+	}
+	if provider.ContextWindow < 0 {
+		p.add("%s.context_window must not be negative", field)
+	}
+	if provider.Thinking != nil && provider.Thinking.BudgetTokens < 0 {
+		p.add("%s.thinking.budget_tokens must not be negative", field)
+	}
+	if provider.Temperature != nil && (math.IsNaN(*provider.Temperature) || *provider.Temperature < 0 || *provider.Temperature > 2) {
+		p.add("%s.temperature must be between 0 and 2", field)
+	}
+	switch provider.ForcedToolChoice {
+	case "", "auto", "supported", "unsupported":
+	default:
+		p.add("%s.forced_tool_choice must be auto, supported or unsupported", field)
+	}
+	if opts.RequireAPIKeyEnv {
+		if provider.APIKeyEnv == "" {
+			p.add("%s.api_key_env must be set", field)
+		} else {
+			p.env(field+".api_key_env", provider.APIKeyEnv)
+		}
+	}
 	return p.err()
 }
 

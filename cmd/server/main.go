@@ -150,6 +150,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return errors.New("initialize secrets: invalid master key")
 	}
+	if err := db.ConfigureModelSecrets(ctx, cipher); err != nil {
+		return errors.New("initialize model secrets: storage update failed")
+	}
 	unverifiedMCPKey, err := db.ConfigureMCPSecrets(ctx, cipher)
 	if err != nil {
 		return errors.New("migrate MCP secrets: storage update failed")
