@@ -14,6 +14,9 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     globals: true,
+    // Component tests take longer on shared CI runners; keep this above the
+    // observed 5s default timeout while the suite still runs in seconds.
+    testTimeout: 15000,
     setupFiles: './tests/setup.ts',
     css: true,
     coverage: {
