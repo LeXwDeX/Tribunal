@@ -34,12 +34,22 @@ func TestProfileOverridesReferencesAndRevision(t *testing.T) {
 	if err != nil || got.Revision != 1 || got.OverridesJSON == `{}` {
 		t.Fatalf("failed write must preserve state: %+v %v", got, err)
 	}
-	if err := s.DeleteProfileOverrides(ctx, "default", 1); err != nil {
-		t.Fatal(err)
+	if _, err := s.DeleteProfileOverrides(ctx, "default", 7, 9); !errors.Is(err, store.ErrStaleRevision) {
+		t.Fatalf("stale delete: got %v", err)
+	}
+	if got, _ := s.GetProfileOverrides(ctx, "default"); got.Revision != 1 || got.OverridesJSON == `{}` {
+		t.Fatalf("stale delete changed state: %+v", got)
+	}
+	reset, err := s.DeleteProfileOverrides(ctx, "default", 1, 9)
+	if err != nil || reset.Revision != 2 || reset.UpdatedBy != 9 || reset.OverridesJSON != `{}` {
+		t.Fatalf("reset result: %+v %v", reset, err)
 	}
 	got, err = s.GetProfileOverrides(ctx, "default")
-	if err != nil || got.Revision != 2 || got.OverridesJSON != `{}` {
+	if err != nil || got.Revision != 2 || got.OverridesJSON != `{}` || got.UpdatedBy != 9 {
 		t.Fatalf("reset: %+v %v", got, err)
+	}
+	if _, err := s.DeleteProfileOverrides(ctx, "missing", 1, 9); !errors.Is(err, store.ErrStaleRevision) {
+		t.Fatalf("delete without a row: got %v", err)
 	}
 	if err := s.SoftDeleteModel(ctx, m.ID, m.Revision, 1); err != nil {
 		t.Fatal(err)
@@ -119,5 +129,22 @@ func TestProfileReferenceAndModelDeleteAreAtomic(t *testing.T) {
 	}
 	if invalid != 0 {
 		t.Fatal("override references a deleted model")
+	}
+}
+
+// A model ID with surrounding whitespace would execute trimmed but be indexed
+// raw, leaving the model deletable while a review uses it.
+func TestProfileOverridesRejectUntrimmedModelIDs(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t, newFakeClock())
+	m, err := s.CreateModel(ctx, store.Model{DisplayName: "model", Protocol: "openai-chat", Model: "m", Params: store.ModelParams{MaxTokens: 1, MaxConcurrency: 1}}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PutProfileOverrides(ctx, "default", `{"explore":{"model":" `+m.ID+`"}}`, 0, 1); err == nil {
+		t.Fatal("an untrimmed model ID was stored")
+	}
+	if err := s.SoftDeleteModel(ctx, m.ID, m.Revision, 1); err != nil {
+		t.Fatalf("nothing references the model: %v", err)
 	}
 }

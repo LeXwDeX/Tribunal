@@ -645,6 +645,48 @@ func TestRegistryAuditsSubmitPromptAndCompaction(t *testing.T) {
 	}
 }
 
+func TestRegistryAuditsModelIDAndParamSource(t *testing.T) {
+	t.Setenv("TEST_KEY", "k")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","object":"chat.completion","created":1,"model":"test","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer server.Close()
+	var records []CallRecord
+	client := mustClient(t, "chat", chatConfig(server.URL+"/v1", "TEST_KEY"),
+		WithRecorder(RecorderFunc(func(_ context.Context, call CallRecord) { records = append(records, call) })))
+	for _, meta := range []CallMeta{
+		{NodeID: "n", Turn: 1, ModelID: "user:abc", ParamSource: "override"},
+		{NodeID: "n", Turn: 1, ModelID: "free text", ParamSource: "free text"},
+		{NodeID: "n", Turn: 1},
+	} {
+		if _, err := client.Generate(WithCallMeta(context.Background(), meta), simpleRequest()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	audits := make([]map[string]any, len(records))
+	for i, record := range records {
+		raw, err := json.Marshal(record.Audit.Request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(raw, &audits[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if audits[0]["model_id"] != "user:abc" || audits[0]["param_source"] != "override" {
+		t.Fatalf("audit = %v", audits[0])
+	}
+	for _, i := range []int{1, 2} {
+		if _, ok := audits[i]["model_id"]; ok {
+			t.Fatalf("audit %d carries an unknown model_id: %v", i, audits[i])
+		}
+		if _, ok := audits[i]["param_source"]; ok {
+			t.Fatalf("audit %d carries an unknown param_source: %v", i, audits[i])
+		}
+	}
+}
+
 func TestForcedToolChoiceResolution(t *testing.T) {
 	thinking := &config.ThinkingConfig{BudgetTokens: 2048}
 	for _, tc := range []struct {
