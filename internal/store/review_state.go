@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"errors"
+	"strconv"
 	"time"
 )
 
@@ -220,4 +221,42 @@ type ReviewReactionGoal struct {
 	NoteID     int64
 	Generation int64
 	Desired    string
+}
+
+// Details persisted with a terminal review status that never created a
+// workflow. They let the console list those reviews without guessing from
+// free text; every other detail is invisible to StatusOnlyReview listing.
+const (
+	StatusDetailEmptyDiff        = "empty diff"
+	StatusDetailNoReviewable     = "no reviewable files"
+	StatusDetailSnapshotOmission = "snapshot omitted files"
+)
+
+// StatusOnlyReview is a terminal review status whose run settled without a
+// workflow (empty diff, everything ignored, omitted snapshot). The console
+// shows it next to workflow-backed reviews.
+type StatusOnlyReview struct {
+	ProjectID int64     `json:"project_id"`
+	MRIID     int64     `json:"mr_iid"`
+	HeadSHA   string    `json:"head_sha,omitempty"`
+	State     string    `json:"state"`
+	Detail    string    `json:"detail"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// StatusOnlyFilter mirrors the project, MR, verdict and since filters of
+// WorkflowFilter so one list request filters both sources the same way.
+type StatusOnlyFilter struct {
+	ProjectID    *int64
+	AccessUserID *int64
+	GrantOnly    bool
+	MRIID        *int64
+	// Verdict matches the settled state (PASS, INCOMPLETE) case-insensitively.
+	Verdict string
+	Since   time.Time
+}
+
+// StatusOnlyCursor resumes a status-only list after row.
+func StatusOnlyCursor(row StatusOnlyReview) string {
+	return EncodeCursor(row.UpdatedAt, strconv.FormatInt(row.ProjectID, 10)+":"+strconv.FormatInt(row.MRIID, 10))
 }

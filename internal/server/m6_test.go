@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -46,6 +47,7 @@ type fakeReviewStore struct {
 	lastCallFilter store.LLMCallFilter
 	lastStats      store.StatsFilter
 	accessByUser   map[int64]map[int64]bool
+	statusOnly     []store.StatusOnlyReview
 
 	// Per-workflow and batched read counters let list tests prove the page is
 	// summarized with one query per kind of data instead of one per row.
@@ -123,7 +125,7 @@ func (f *fakeReviewStore) ListWorkflows(ctx context.Context, filter store.Workfl
 		if err != nil {
 			return nil, "", store.ErrInvalidCursor
 		}
-		lastID := string(raw)
+		_, lastID, _ := strings.Cut(string(raw), "\x00")
 		start = -1
 		for i := range matched {
 			if matched[i].ID == lastID {
@@ -141,11 +143,69 @@ func (f *fakeReviewStore) ListWorkflows(ctx context.Context, filter store.Workfl
 	end := start + limit
 	next := ""
 	if end < len(matched) {
-		next = base64.RawURLEncoding.EncodeToString([]byte(matched[end-1].ID))
+		next = store.EncodeCursor(matched[end-1].CreatedAt, matched[end-1].ID)
 	} else {
 		end = len(matched)
 	}
 	return matched[start:end], next, nil
+}
+
+// ListStatusOnlyReviews mirrors the SQLite store: newest first, access
+// filtered, keyset cursor over (updated_at, project, mr).
+func (f *fakeReviewStore) ListStatusOnlyReviews(_ context.Context, filter store.StatusOnlyFilter, cursor string, limit int) ([]store.StatusOnlyReview, string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	rows := make([]store.StatusOnlyReview, 0, len(f.statusOnly))
+	for _, row := range f.statusOnly {
+		if filter.ProjectID != nil && row.ProjectID != *filter.ProjectID {
+			continue
+		}
+		if filter.AccessUserID != nil && f.accessByUser != nil && !f.accessByUser[*filter.AccessUserID][row.ProjectID] {
+			continue
+		}
+		if filter.MRIID != nil && row.MRIID != *filter.MRIID {
+			continue
+		}
+		if filter.Verdict != "" && !strings.EqualFold(filter.Verdict, row.State) {
+			continue
+		}
+		if !filter.Since.IsZero() && row.UpdatedAt.Before(filter.Since) {
+			continue
+		}
+		rows = append(rows, row)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if !rows[i].UpdatedAt.Equal(rows[j].UpdatedAt) {
+			return rows[i].UpdatedAt.After(rows[j].UpdatedAt)
+		}
+		if rows[i].ProjectID != rows[j].ProjectID {
+			return rows[i].ProjectID > rows[j].ProjectID
+		}
+		return rows[i].MRIID > rows[j].MRIID
+	})
+	start := 0
+	if cursor != "" {
+		start = -1
+		for i := range rows {
+			if store.StatusOnlyCursor(rows[i]) == cursor {
+				start = i + 1
+				break
+			}
+		}
+		if start < 0 {
+			return nil, "", store.ErrInvalidCursor
+		}
+	}
+	if start >= len(rows) {
+		return []store.StatusOnlyReview{}, "", nil
+	}
+	end, next := start+limit, ""
+	if end < len(rows) {
+		next = store.StatusOnlyCursor(rows[end-1])
+	} else {
+		end = len(rows)
+	}
+	return rows[start:end], next, nil
 }
 
 func (f *fakeReviewStore) GetWorkflow(ctx context.Context, id string) (*store.Workflow, error) {
