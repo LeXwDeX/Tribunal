@@ -160,13 +160,13 @@ func (f *fakeReviewStore) ListStatusOnlyReviews(_ context.Context, filter store.
 		if filter.ProjectID != nil && row.ProjectID != *filter.ProjectID {
 			continue
 		}
-		if filter.AccessUserID != nil && f.accessByUser != nil && !f.accessByUser[*filter.AccessUserID][row.ProjectID] {
+		if filter.AccessUserID != nil && (f.accessByUser != nil || filter.GrantOnly) && !f.accessByUser[*filter.AccessUserID][row.ProjectID] {
 			continue
 		}
 		if filter.MRIID != nil && row.MRIID != *filter.MRIID {
 			continue
 		}
-		if filter.Verdict != "" && !strings.EqualFold(filter.Verdict, row.State) {
+		if filter.Verdict != "" && filter.Verdict != row.State {
 			continue
 		}
 		if !filter.Since.IsZero() && row.UpdatedAt.Before(filter.Since) {

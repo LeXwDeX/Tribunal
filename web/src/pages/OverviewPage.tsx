@@ -2,7 +2,7 @@ import { useMemo, useState, useSyncExternalStore, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getStats, listModels, listProjects, listReviews } from '../api/api'
-import type { ModelHealth, Project, ReviewSummary, Stats } from '../api/types'
+import type { ModelHealth, Project, ReviewListItem, ReviewSummary, Stats } from '../api/types'
 import { useCanWrite } from '../components/RoleContext'
 import { ReviewTable } from '../components/ReviewTable'
 import { TriggerReviewDialog } from '../components/TriggerReviewDialog'
@@ -238,7 +238,7 @@ export function OverviewPage() {
     (cursor) => listReviews({ publication_state: 'pending' }, cursor),
     'reviews',
   )
-  const recent = usePaginated<ReviewSummary>(
+  const recent = usePaginated<ReviewListItem>(
     ['reviews', 'overview', 'recent'],
     (cursor) => listReviews({}, cursor),
     'reviews',

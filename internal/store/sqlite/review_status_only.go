@@ -35,7 +35,7 @@ func (s *Store) ListStatusOnlyReviews(ctx context.Context, filter store.StatusOn
 		args = append(args, *filter.MRIID)
 	}
 	if filter.Verdict != "" {
-		where = append(where, "upper(rs.state) = upper(?)")
+		where = append(where, "rs.state = ?")
 		args = append(args, filter.Verdict)
 	}
 	if !filter.Since.IsZero() {

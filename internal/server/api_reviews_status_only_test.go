@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/base64"
 	"net/http"
 	"testing"
 	"time"
@@ -145,5 +146,62 @@ func TestListReviewsWorkflowOnlyFiltersExcludeStatusOnly(t *testing.T) {
 	items, _ := reviewItems(t, env, alice.request(http.MethodGet, "/api/v1/reviews?verdict=INCOMPLETE", nil, nil))
 	if len(items) != 1 || items[0]["kind"] != "status_only" {
 		t.Fatalf("verdict filter = %v", items)
+	}
+}
+
+func TestListReviewsTieOrdersWorkflowFirst(t *testing.T) {
+	env, fake := isolationEnv(t)
+	at := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
+	fake.setWorkflow(store.Workflow{ID: "wf-tie", Kind: "review", ProjectID: 42, Trigger: "api", Status: "completed", CreatedAt: at})
+	seedStatusOnly(fake, 42, 9, at)
+	env.grant(7, 42, store.ProjectAccessRead)
+	alice := env.loginAs("code-admin")
+
+	items, _ := reviewItems(t, env, alice.request(http.MethodGet, "/api/v1/reviews", nil, nil))
+	if len(items) != 2 || items[0]["id"] != "wf-tie" || items[1]["kind"] != "status_only" {
+		t.Fatalf("tie order = %v", items)
+	}
+}
+
+func TestListReviewsAcceptsPlainWorkflowCursor(t *testing.T) {
+	env, fake := isolationEnv(t)
+	base := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
+	for i, id := range []string{"wf-a", "wf-b", "wf-c"} {
+		fake.setWorkflow(store.Workflow{ID: id, Kind: "review", ProjectID: 42, Trigger: "api", Status: "completed", CreatedAt: base.Add(time.Duration(i) * time.Minute)})
+	}
+	seedStatusOnly(fake, 42, 9, base.Add(time.Hour))
+	env.grant(7, 42, store.ProjectAccessRead)
+	alice := env.loginAs("code-admin")
+
+	// A status-filtered request yields a plain workflow cursor; an older
+	// client may replay it without the filter.
+	_, plain := reviewItems(t, env, alice.request(http.MethodGet, "/api/v1/reviews?status=completed&limit=1", nil, nil))
+	if plain == "" || len(plain) > 2 && plain[:3] == "m1." {
+		t.Fatalf("expected a plain cursor, got %q", plain)
+	}
+	items, _ := reviewItems(t, env, alice.request(http.MethodGet, "/api/v1/reviews?limit=5&cursor="+plain, nil, nil))
+	if len(items) != 2 || items[0]["id"] != "wf-b" || items[1]["id"] != "wf-a" {
+		t.Fatalf("plain cursor page = %v", items)
+	}
+}
+
+func TestListReviewsRejectsForgedMergedCursor(t *testing.T) {
+	env, fake := isolationEnv(t)
+	seedStatusOnly(fake, 42, 9, time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC))
+	env.grant(7, 42, store.ProjectAccessRead)
+	alice := env.loginAs("code-admin")
+
+	enc := func(v string) string { return "m1." + base64.RawURLEncoding.EncodeToString([]byte(v)) }
+	for name, cursor := range map[string]string{
+		"not base64":      "m1.!!!",
+		"not json":        enc("nope"),
+		"both exhausted":  enc(`{"wd":true,"sd":true}`),
+		"forged workflow": enc(`{"w":"forged"}`),
+		"forged status":   enc(`{"s":"forged"}`),
+	} {
+		resp := alice.request(http.MethodGet, "/api/v1/reviews?cursor="+cursor, nil, nil)
+		if resp.status != http.StatusBadRequest {
+			t.Fatalf("%s: status %d body %s", name, resp.status, resp.body)
+		}
 	}
 }

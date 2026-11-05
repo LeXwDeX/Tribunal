@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -103,7 +104,7 @@ func TestListStatusOnlyReviewsConditionsAndAccess(t *testing.T) {
 	}
 
 	// Filters: verdict matches the settled state; MR and project narrow.
-	rows, _, _ = s.ListStatusOnlyReviews(ctx, store.StatusOnlyFilter{Verdict: "pass"}, "", 50)
+	rows, _, _ = s.ListStatusOnlyReviews(ctx, store.StatusOnlyFilter{Verdict: "PASS"}, "", 50)
 	if len(rows) != 1 || rows[0].MRIID != 2 {
 		t.Fatalf("verdict filter = %v", statusOnlyKeys(rows))
 	}
@@ -157,5 +158,59 @@ func TestListStatusOnlyReviewsPaginates(t *testing.T) {
 	}
 	if _, _, err := s.ListStatusOnlyReviews(ctx, store.StatusOnlyFilter{}, "not-a-cursor", 2); err == nil {
 		t.Fatal("invalid cursor accepted")
+	}
+}
+
+func TestListStatusOnlyReviewsGrantOnlyGlobalReadAndStrictness(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t, newFakeClock())
+	mustProject(t, s, 42)
+	mustProject(t, s, 43)
+	mustAccessUser(t, s, 7, "alice", "viewer")
+	if err := s.SetProjectGrant(ctx, 42, 7, store.ProjectAccessRead); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
+	settleStatusOnly(t, s, 42, 1, reviewHead("a"), store.ReviewStatusIncomplete, store.StatusDetailEmptyDiff, base)
+	settleStatusOnly(t, s, 43, 1, reviewHead("a"), store.ReviewStatusPass, store.StatusDetailNoReviewable, base.Add(time.Minute))
+
+	alice := int64(7)
+	rows, _, err := s.ListStatusOnlyReviews(ctx, store.StatusOnlyFilter{AccessUserID: &alice, GrantOnly: true}, "", 10)
+	if err != nil || len(rows) != 1 || rows[0].ProjectID != 42 {
+		t.Fatalf("grant-only = %v, %v", statusOnlyKeys(rows), err)
+	}
+
+	enabled, revision := true, int64(1)
+	if _, _, _, err := s.UpdatePlatformUser(ctx, alice, store.PlatformUserUpdate{GlobalRead: &enabled, Revision: &revision}); err != nil {
+		t.Fatal(err)
+	}
+	rows, _, _ = s.ListStatusOnlyReviews(ctx, store.StatusOnlyFilter{AccessUserID: &alice}, "", 10)
+	if len(rows) != 2 {
+		t.Fatalf("global read = %v, want both projects", statusOnlyKeys(rows))
+	}
+	rows, _, _ = s.ListStatusOnlyReviews(ctx, store.StatusOnlyFilter{AccessUserID: &alice, GrantOnly: true}, "", 10)
+	if len(rows) != 1 || rows[0].ProjectID != 42 {
+		t.Fatalf("grant-only with global read = %v", statusOnlyKeys(rows))
+	}
+
+	// Verdict is an exact match like ListWorkflows.
+	if rows, _, _ = s.ListStatusOnlyReviews(ctx, store.StatusOnlyFilter{Verdict: "pass"}, "", 10); len(rows) != 0 {
+		t.Fatalf("lowercase verdict matched %v", statusOnlyKeys(rows))
+	}
+	if rows, _, _ = s.ListStatusOnlyReviews(ctx, store.StatusOnlyFilter{Verdict: "PASS"}, "", 10); len(rows) != 1 {
+		t.Fatalf("exact verdict = %v", statusOnlyKeys(rows))
+	}
+}
+
+func TestListStatusOnlyReviewsHeadCaseInsensitiveWorkflowMatch(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t, newFakeClock())
+	mustProject(t, s, 42)
+	settleStatusOnly(t, s, 42, 1, strings.Repeat("a", 40), store.ReviewStatusIncomplete, store.StatusDetailEmptyDiff,
+		time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC))
+	mustCreateWorkflow(t, s, "wf-upper", reviewMeta(42, 1, strings.Repeat("A", 40)), time.Date(2026, 10, 22, 11, 0, 0, 0, time.UTC))
+	rows, _, err := s.ListStatusOnlyReviews(ctx, store.StatusOnlyFilter{}, "", 10)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("workflow with differently cased head should hide the row: %v, %v", statusOnlyKeys(rows), err)
 	}
 }
