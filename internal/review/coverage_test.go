@@ -53,26 +53,38 @@ func TestExecutorCoverageTruncatedCollectionCannotPass(t *testing.T) {
 }
 
 func TestExecutorCoveragePromptTruncation(t *testing.T) {
-	longDiff := strings.Repeat("x", maxFileDiffRunes+10)
 	cases := []struct {
 		name   string
 		mutate func(*Dossier)
 		files  []string
 	}{
 		{
-			name: "per-file truncation",
+			name: "oversized file",
 			mutate: func(d *Dossier) {
-				d.Files[0].Diff = longDiff
+				d.Files[0].Diff = "@@ -1 +1 @@\n+" + strings.Repeat("x", MaxTaskRunes+1000)
 			},
 			files: []string{"a.go"},
 		},
 		{
-			name: "task total truncation",
+			name: "inline budget omits the tail",
 			mutate: func(d *Dossier) {
-				d.Files[0].Diff = strings.Repeat("y", maxTaskFileRunes/2+1)
-				d.Files[1].Diff = strings.Repeat("z", maxTaskFileRunes/2+1)
+				files := make([]FileChange, 0, 20)
+				for i := 0; i < 20; i++ {
+					files = append(files, FileChange{
+						Path: fmt.Sprintf("f%02d.go", i), Status: "modified",
+						Diff: "@@ -1 +1 @@\n+" + strings.Repeat("y", maxFileDiffRunes), Additions: 1,
+					})
+				}
+				d.Files = files
+				d.DiffSummary = DiffSummary{Files: len(files)}
 			},
-			files: []string{"a.go", "b.go"},
+			files: func() []string {
+				files := make([]string, 0, 20)
+				for i := 0; i < 20; i++ {
+					files = append(files, fmt.Sprintf("f%02d.go", i))
+				}
+				return files
+			}(),
 		},
 		{
 			name:   "file absent from materials",
@@ -163,16 +175,12 @@ func TestExecutorCoverageIgnoredFilesAreAllowed(t *testing.T) {
 
 func TestExecutorCoverageTaskLimitWithoutPerFileTruncation(t *testing.T) {
 	dossier := validDossier(t)
-	diff := strings.Repeat("x", maxFileDiffRunes)
+	diff := "@@ -1 +1 @@\n+" + strings.Repeat("x", MaxTaskRunes+1000)
 	dossier.Files = nil
-	files := make([]string, 0, 8)
-	for i := 0; i < 8; i++ {
-		name := fmt.Sprintf("f%d.go", i)
-		files = append(files, name)
-		dossier.Files = append(dossier.Files, FileChange{
-			Path: name, Status: "modified", Diff: diff, Additions: 1,
-		})
-	}
+	files := []string{"f0.go"}
+	dossier.Files = append(dossier.Files, FileChange{
+		Path: "f0.go", Status: "modified", Diff: diff, Additions: 1,
+	})
 	dossier.DiffSummary = DiffSummary{Files: len(files)}
 	wf := coverageWorkflow(files...)
 	executor := evidenceExecutorWithDossier(t, wf, dossier)
@@ -180,19 +188,16 @@ func TestExecutorCoverageTaskLimitWithoutPerFileTruncation(t *testing.T) {
 	coverageSignals := 0
 	var taskLimit string
 	for _, signal := range gathered.Unresolved {
-		if signal.Kind == UnresolvedEvidence && strings.Contains(signal.Message, "prompt limit") {
+		if signal.Kind == UnresolvedEvidence && strings.Contains(signal.Message, "f0.go") {
 			coverageSignals++
 			taskLimit = signal.Message
 		}
 	}
 	if coverageSignals != 1 {
-		t.Fatalf("task-limit coverage signals = %d, want exactly one: %+v", coverageSignals, gathered.Unresolved)
+		t.Fatalf("oversized-file coverage signals = %d, want exactly one: %+v", coverageSignals, gathered.Unresolved)
 	}
-	if !strings.Contains(taskLimit, "f7.go") || !strings.Contains(taskLimit, "1 file(s) were omitted") {
-		t.Fatalf("task-limit message %q does not list the omitted path", taskLimit)
-	}
-	if strings.Contains(taskLimit, "later files") {
-		t.Fatalf("task-limit message does not list every omitted path: %q", taskLimit)
+	if !strings.Contains(taskLimit, "f0.go") {
+		t.Fatalf("coverage message %q does not list the omitted path", taskLimit)
 	}
 	adjudicated := runEvidenceAdjudicate(t, executor, wf, gathered)
 	result := runEvidenceSynthesis(t, executor, wf, adjudicated)
