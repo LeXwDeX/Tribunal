@@ -358,19 +358,25 @@ func (s *ReviewService) cancelWorkflow(ctx context.Context, workflowID string) e
 }
 
 func (s *ReviewService) cancelWorkflowWithReason(ctx context.Context, workflowID, reason string) error {
+	return s.cancelWorkflowSkipping(ctx, workflowID, reason, reviewSupersededReason)
+}
+
+// cancelWorkflowSkipping cancels with the engine reason and settles
+// publication as skipped with its own, possibly different, reason.
+func (s *ReviewService) cancelWorkflowSkipping(ctx context.Context, workflowID, reason, skipReason string) error {
 	if err := s.engine.Cancel(ctx, workflowID, reason); err != nil {
 		if errors.Is(err, dag.ErrNotFound) {
-			return s.skipPublication(ctx, workflowID, reviewSupersededReason)
+			return s.skipPublication(ctx, workflowID, skipReason)
 		}
 		return err
 	}
 	if err := s.waitTerminal(ctx, workflowID); err != nil {
 		if errors.Is(err, dag.ErrNotFound) {
-			return s.skipPublication(ctx, workflowID, reviewSupersededReason)
+			return s.skipPublication(ctx, workflowID, skipReason)
 		}
 		return err
 	}
-	return s.skipPublication(ctx, workflowID, reviewSupersededReason)
+	return s.skipPublication(ctx, workflowID, skipReason)
 }
 
 // cancelInvalidRepoConfig terminates a workflow whose repository configuration
