@@ -20,6 +20,7 @@ type AccessStore interface {
 	ListProjectGrants(ctx context.Context, projectID int64, cursor string, limit int) ([]store.ProjectGrant, string, error)
 	SetProjectGrant(ctx context.Context, projectID, userID int64, role string) error
 	DeleteProjectGrant(ctx context.Context, projectID, userID int64) error
+	HasProjectGrant(ctx context.Context, userID, projectID int64) (bool, error)
 }
 
 type platformUserStore interface {

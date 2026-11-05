@@ -728,3 +728,19 @@ func TestGlobalReadPersistsAcrossRestart(t *testing.T) {
 		t.Fatalf("global read after restart = %+v, %v", user, err)
 	}
 }
+
+func TestHasProjectGrant(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t, newFakeClock())
+	mustAccessUser(t, s, 8, "bob", "viewer")
+	mustProject(t, s, 42)
+	if granted, err := s.HasProjectGrant(ctx, 8, 42); err != nil || granted {
+		t.Fatalf("grant before = %v, %v", granted, err)
+	}
+	if err := s.SetProjectGrant(ctx, 42, 8, store.ProjectAccessRead); err != nil {
+		t.Fatal(err)
+	}
+	if granted, err := s.HasProjectGrant(ctx, 8, 42); err != nil || !granted {
+		t.Fatalf("grant after = %v, %v", granted, err)
+	}
+}

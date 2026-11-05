@@ -20,6 +20,7 @@ const projectRecentReviewLimit = 20
 type projectDetailResponse struct {
 	*store.Project
 	Access        string                   `json:"access"`
+	AccessSource  string                   `json:"access_source,omitempty"`
 	Workspace     *projectWorkspaceSummary `json:"workspace,omitempty"`
 	RecentReviews []reviewSummary          `json:"recent_reviews"`
 }
@@ -28,9 +29,10 @@ type projectDetailResponse struct {
 // workspace and last_review carry the bounded admin summary.
 type projectListItem struct {
 	*store.Project
-	Access     string                   `json:"access"`
-	Workspace  *projectWorkspaceSummary `json:"workspace,omitempty"`
-	LastReview *reviewSummary           `json:"last_review,omitempty"`
+	Access       string                   `json:"access"`
+	AccessSource string                   `json:"access_source,omitempty"`
+	Workspace    *projectWorkspaceSummary `json:"workspace,omitempty"`
+	LastReview   *reviewSummary           `json:"last_review,omitempty"`
 }
 
 type registerProjectRequest struct {
@@ -234,7 +236,7 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				continue
 			}
-			items = append(items, projectListItem{Project: &projects[i], Access: access})
+			items = append(items, projectListItem{Project: &projects[i], Access: access, AccessSource: s.projectAccessSource(r, projects[i].ID, access)})
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"projects": items, "next_cursor": next})
 		return
@@ -269,7 +271,8 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 			lastReview = &reviews[0]
 		}
 		items = append(items, projectListItem{
-			Project: project, Access: access, Workspace: workspace, LastReview: lastReview,
+			Project: project, Access: access, AccessSource: s.projectAccessSource(r, project.ID, access),
+			Workspace: workspace, LastReview: lastReview,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"projects": items, "next_cursor": next})
@@ -292,6 +295,17 @@ func (s *Server) projectGrant(r *http.Request, projectID int64) (string, bool, e
 	return role, true, nil
 }
 
+func (s *Server) projectAccessSource(r *http.Request, projectID int64, role string) string {
+	if role != store.ProjectAccessRead || s.access == nil {
+		return ""
+	}
+	granted, err := s.access.HasProjectGrant(r.Context(), currentUserID(r), projectID)
+	if err != nil || granted {
+		return "grant"
+	}
+	return "global"
+}
+
 func (s *Server) handleGetProject(w http.ResponseWriter, r *http.Request) {
 	id, err := parseID(r.PathValue("id"))
 	if err != nil {
@@ -306,7 +320,8 @@ func (s *Server) handleGetProject(w http.ResponseWriter, r *http.Request) {
 	access := grantedAccess(r.Context())
 	if s.store == nil {
 		writeJSON(w, http.StatusOK, projectDetailResponse{
-			Project: project, Access: access, RecentReviews: []reviewSummary{},
+			Project: project, Access: access, AccessSource: s.projectAccessSource(r, project.ID, access),
+			RecentReviews: []reviewSummary{},
 		})
 		return
 	}
@@ -323,6 +338,7 @@ func (s *Server) handleGetProject(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, projectDetailResponse{
 		Project:       project,
 		Access:        access,
+		AccessSource:  s.projectAccessSource(r, project.ID, access),
 		Workspace:     workspace,
 		RecentReviews: reviews,
 	})

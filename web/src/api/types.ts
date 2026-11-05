@@ -15,6 +15,7 @@ export interface Me {
   username: string
   name?: string
   role: Role
+  global_read?: boolean
   csrf_token: string
 }
 
@@ -50,6 +51,10 @@ export interface AdminUser {
   name?: string
   disabled: boolean
   revision: number
+  role?: Role
+  role_source?: 'config' | 'granted' | 'none'
+  global_read?: boolean
+  grant_count?: number
   last_login_at?: string
 }
 
@@ -112,6 +117,7 @@ export interface Project {
   id: number
   path_with_namespace: string
   access?: ProjectAccess
+  access_source?: 'grant' | 'global'
   web_url?: string
   default_branch?: string
   token_expires_at?: string

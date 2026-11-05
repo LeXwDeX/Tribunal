@@ -32,6 +32,18 @@ func projectAccessClause(column string, userID *int64) (string, []any) {
 		OR EXISTS (SELECT 1 FROM users gu WHERE gu.id = ? AND gu.global_read = 1 AND gu.disabled = 0))`, []any{*userID, *userID}
 }
 
+func projectGrantClause(column string, userID *int64) (string, []any) {
+	if userID == nil {
+		return "", nil
+	}
+	if *userID <= 0 {
+		return "0 = 1", nil
+	}
+	return `EXISTS (SELECT 1 FROM project_grants pg
+		JOIN users pu ON pu.id = pg.user_id
+		WHERE pg.project_id = ` + column + ` AND pg.user_id = ? AND pu.disabled = 0)`, []any{*userID}
+}
+
 func scanUser(row rowScanner) (*store.User, error) {
 	var (
 		user        store.User
@@ -365,4 +377,13 @@ func requireEnabledUserTx(ctx context.Context, tx *sql.Tx, userID int64) error {
 		return fmt.Errorf("%w: user %d is disabled", store.ErrNotFound, userID)
 	}
 	return nil
+}
+
+// HasProjectGrant reports whether a direct grant exists, independent of global read.
+func (s *Store) HasProjectGrant(ctx context.Context, userID, projectID int64) (bool, error) {
+	var exists bool
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM project_grants WHERE user_id=? AND project_id=?)`, userID, projectID).Scan(&exists); err != nil {
+		return false, errors.New("sqlite: check project grant failed")
+	}
+	return exists, nil
 }

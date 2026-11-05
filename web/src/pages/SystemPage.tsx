@@ -1,8 +1,9 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  createApiToken, deleteAdminGrant, getSettings, listAdminGrants, listAdminProjects, listAdminUsers,
-  listApiTokens, revokeAdminUserCredentials, revokeApiToken, setAdminGrant, setAdminUserDisabled,
+  createApiToken, deleteAdminGrant, deleteAdminUserGrant, fetchMe, getSettings, listAdminGrants,
+  listAdminProjects, listAdminUserGrants, listAdminUsers, listApiTokens, revokeAdminUserCredentials,
+  revokeApiToken, setAdminGrant, setAdminUserDisabled, setAdminUserGrant, updateAdminUser,
 } from '../api/api'
 import { ApiError } from '../api/client'
 import type {
@@ -10,7 +11,7 @@ import type {
 } from '../api/types'
 import { useCanSelfService, useCanWrite } from '../components/RoleContext'
 import {
-  Badge, Button, ConfirmDialog, Dialog, EmptyState, ErrorState, Field, LoadingState, PageHeader, Panel, PanelBody, SecretField, Tabs, useToast,
+  Badge, Button, ConfirmDialog, Dialog, Drawer, EmptyState, ErrorState, Field, LoadingState, PageHeader, Panel, PanelBody, SecretField, Tabs, useToast,
 } from '../components/ui'
 import { usePaginated } from '../lib/hooks'
 import { formatDate } from '../lib/format'
@@ -167,6 +168,148 @@ function userLabel(user: AdminUser): string {
   return user.name ? `${user.name} (@${user.username})` : `@${user.username}`
 }
 
+function UserDrawer({ user, open, currentUserId, onClose }: {
+  user: AdminUser | null
+  open: boolean
+  currentUserId?: number | string
+  onClose: () => void
+}) {
+  const toast = useToast()
+  const queryClient = useQueryClient()
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState<unknown>(null)
+  const [projectID, setProjectID] = useState('')
+  const [grantRole, setGrantRole] = useState<ProjectAccess>('read')
+  const [confirm, setConfirm] = useState<{ role?: 'admin' | 'viewer'; global?: boolean } | null>(null)
+  const grants = usePaginated<ProjectGrant>(
+    ['admin-user-grants', user?.id],
+    (cursor) => listAdminUserGrants(user!.id, cursor),
+    'grants',
+    { enabled: open && Boolean(user) },
+  )
+
+  const saved = async () => {
+    await queryClient.invalidateQueries({ queryKey: ['admin-users'] })
+    await queryClient.invalidateQueries({ queryKey: ['admin-user-grants', user?.id] })
+  }
+
+  const patch = async (body: { role?: 'admin' | 'viewer'; global_read?: boolean }) => {
+    if (!user) return
+    setPending(true)
+    setError(null)
+    try {
+      await updateAdminUser(user.id, { ...body, revision: user.revision })
+      toast.push('success', '用户设置已更新。')
+      setConfirm(null)
+      await saved()
+    } catch (err) {
+      setError(err)
+    } finally {
+      setPending(false)
+    }
+  }
+
+  const addGrant = async () => {
+    if (!user || !projectID.trim()) return
+    setPending(true)
+    setError(null)
+    try {
+      await setAdminUserGrant(user.id, projectID.trim(), grantRole)
+      setProjectID('')
+      await saved()
+    } catch (err) {
+      setError(err)
+    } finally {
+      setPending(false)
+    }
+  }
+
+  const removeGrant = async (projectId: number) => {
+    if (!user) return
+    setPending(true)
+    setError(null)
+    try {
+      await deleteAdminUserGrant(user.id, projectId)
+      await saved()
+    } catch (err) {
+      setError(err)
+    } finally {
+      setPending(false)
+    }
+  }
+
+  if (!user) return null
+  const configured = user.role_source === 'config'
+  const self = String(user.id) === String(currentUserId)
+  const admin = user.role === 'admin'
+  return (
+    <Drawer open={open} onClose={onClose} title={userLabel(user)} description="角色与全局模式变更在下次请求生效；全局模式只读。">
+      <div className={styles.stack}>
+        <section>
+          <h3>角色</h3>
+          <p className="small muted">来源：{{ config: '配置', granted: '授权', none: '无' }[user.role_source ?? 'none'] ?? '无'}</p>
+          {configured ? <p className="small muted">由配置文件提供，修改需改配置并重启。</p> : null}
+          <Button
+            variant={admin ? 'danger' : 'primary'}
+            disabled={configured || (self && admin) || pending}
+            onClick={() => setConfirm({ role: admin ? 'viewer' : 'admin' })}
+          >
+            {admin ? '降级为普通用户' : '提升为管理员'}
+          </Button>
+          {self && admin ? <p className="small muted">不能对自己降级。</p> : null}
+        </section>
+        <section>
+          <h3>全局模式</h3>
+          <p className="small muted">该用户将能查看全部项目和全部评审（只读）。</p>
+          <Button variant="secondary" disabled={pending} onClick={() => setConfirm({ global: !user.global_read })}>
+            {user.global_read ? '关闭全局模式' : '开启全局模式'}
+          </Button>
+        </section>
+        <section>
+          <h3>项目授权</h3>
+          <div className={styles.inlineForm}>
+            <Field label="项目 ID" htmlFor={`grant-project-${user.id}`}>
+              <input id={`grant-project-${user.id}`} className={ui.input} value={projectID} onChange={(event) => setProjectID(event.target.value)} />
+            </Field>
+            <Field label="角色" htmlFor={`grant-role-${user.id}`}>
+              <select id={`grant-role-${user.id}`} className={ui.input} value={grantRole} onChange={(event) => setGrantRole(event.target.value as ProjectAccess)}>
+                <option value="read">read</option>
+                <option value="manage">manage</option>
+              </select>
+            </Field>
+            <Button variant="secondary" onClick={() => { void addGrant() }} loading={pending}>添加授权</Button>
+          </div>
+          {grants.isPending ? <LoadingState label="正在读取授权…" /> : null}
+          {grants.isError ? <ErrorState error={grants.error} onRetry={grants.retry} /> : null}
+          {grants.isSuccess && grants.items.length === 0 ? <p className="small muted">没有项目授权。</p> : null}
+          <ul>
+            {grants.items.map((grant) => (
+              <li key={grant.project_id}>
+                {grant.project_id} · {grant.role}
+                <Button variant="danger" className={ui.smallButton} disabled={pending} onClick={() => { void removeGrant(grant.project_id) }}>删除</Button>
+              </li>
+            ))}
+          </ul>
+        </section>
+        {error ? <ErrorState error={error} title="操作失败" /> : null}
+      </div>
+      <ConfirmDialog
+        open={Boolean(confirm)}
+        onClose={() => setConfirm(null)}
+        onConfirm={() => { void patch(confirm?.role ? { role: confirm.role } : { global_read: confirm?.global }) }}
+        title={confirm?.role ? (confirm.role === 'admin' ? '提升为管理员？' : '降级为普通用户？') : (confirm?.global ? '开启全局模式？' : '关闭全局模式？')}
+        description={confirm?.role
+          ? `将修改 ${userLabel(user)} 的平台角色。`
+          : `将修改 ${userLabel(user)} 的全局只读权限。`}
+        confirmLabel="确认"
+        pending={pending}
+        danger={confirm?.role === 'viewer'}
+        error={error}
+      />
+    </Drawer>
+  )
+}
+
 function AdminUsersPanel() {
   const toast = useToast()
   const queryClient = useQueryClient()
@@ -177,6 +320,8 @@ function AdminUsersPanel() {
   const [revokeTarget, setRevokeTarget] = useState<AdminUser | null>(null)
   const [revokePending, setRevokePending] = useState(false)
   const [revokeError, setRevokeError] = useState<unknown>(null)
+  const [manageTarget, setManageTarget] = useState<AdminUser | null>(null)
+  const me = useQuery({ queryKey: ['me'], queryFn: fetchMe, retry: false })
 
   const toggleDisabled = async () => {
     if (!disableTarget) return
@@ -238,6 +383,9 @@ function AdminUsersPanel() {
                 <tr>
                   <th scope="col">用户名</th>
                   <th scope="col">显示名</th>
+                  <th scope="col">角色</th>
+                  <th scope="col">全局模式</th>
+                  <th scope="col">项目授权数</th>
                   <th scope="col">状态</th>
                   <th scope="col">最近登录</th>
                   <th scope="col" className={insights.actionsCol}>操作</th>
@@ -248,10 +396,14 @@ function AdminUsersPanel() {
                   <tr key={user.id}>
                     <td className="mono">{user.username}</td>
                     <td>{user.name || '—'}</td>
+                    <td>{user.role && user.role_source ? `${user.role === 'admin' ? '管理员' : '普通'}（${{ config: '配置', granted: '授权', none: '无' }[user.role_source]}）` : '—'}</td>
+                    <td>{user.global_read == null ? '—' : user.global_read ? '开' : '关'}</td>
+                    <td>{user.grant_count ?? '—'}</td>
                     <td><Badge tone={user.disabled ? 'danger' : 'ok'}>{user.disabled ? '已停用' : '启用'}</Badge></td>
                     <td>{user.last_login_at ? formatDate(user.last_login_at) : '从未登录'}</td>
                     <td>
                       <div className={insights.rowActions}>
+                        <Button variant="secondary" className={ui.smallButton} onClick={() => setManageTarget(user)}>管理</Button>
                         <Button variant="secondary" className={ui.smallButton} onClick={() => setDisableTarget(user)}>
                           {user.disabled ? '启用账号' : '停用账号'}
                         </Button>
@@ -283,6 +435,13 @@ function AdminUsersPanel() {
         danger={!disableTarget?.disabled}
         pending={disablePending}
         error={disableError}
+      />
+
+      <UserDrawer
+        user={manageTarget}
+        open={Boolean(manageTarget)}
+        currentUserId={me.data?.id}
+        onClose={() => setManageTarget(null)}
       />
 
       <ConfirmDialog
@@ -612,6 +771,7 @@ export function SystemPage() {
       </div>
 
       {canSelfService ? <TokenCreateDialog open={createOpen} onClose={() => setCreateOpen(false)} /> : null}
+
       <ConfirmDialog
         open={Boolean(revokeTarget)}
         onClose={() => setRevokeTarget(null)}

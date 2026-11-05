@@ -268,6 +268,9 @@ func (paginationAccess) ListProjectGrants(context.Context, int64, string, int) (
 }
 func (paginationAccess) SetProjectGrant(context.Context, int64, int64, string) error { return nil }
 func (paginationAccess) DeleteProjectGrant(context.Context, int64, int64) error      { return nil }
+func (paginationAccess) HasProjectGrant(context.Context, int64, int64) (bool, error) {
+	return false, nil
+}
 
 func extensionList(t *testing.T, handler http.HandlerFunc, path string) (int, map[string]any, string) {
 	t.Helper()

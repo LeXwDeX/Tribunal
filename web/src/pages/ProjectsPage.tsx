@@ -455,7 +455,7 @@ export function ProjectsPage() {
                           <Badge tone={webhookTone(webhookState)}>{labelForWebhookState(webhookState)}</Badge>
                           {project.hook_id ? <span className={styles.tableMeta}> · #{project.hook_id}</span> : null}
                         </td>
-                        <td className="muted">{project.access ? ACCESS_LABELS[project.access] || project.access : '—'}</td>
+                        <td className="muted">{project.access === 'read' && project.access_source === 'global' ? '只读（全局）' : project.access ? ACCESS_LABELS[project.access] || project.access : '—'}</td>
                         <td>
                           {project.access === 'manage' ? (
                             <Switch
