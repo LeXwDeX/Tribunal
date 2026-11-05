@@ -8,6 +8,12 @@
 >
 > 本文不复制完整日志，也不把测试实例结果扩大为生产验收。
 
+## 全局只读本地验证（#296，未提交工作区）
+
+- 基于 `bb280c8278eac9cb1e933c98b2d1498af1ad85ef` 的工作区，相关 SQLite、server、app 包测试、局部 race 测试和 Staticcheck 已运行。十个项目的本地列表基准对比了全局只读与逐项目授权，不代表生产负载。
+- 尚未运行该变更的 CI go job，也未验证真实部署升级或回滚。迁移 `0027` 不可逆，升级和回退要求见[运维文档](operations.md#项目授权用户停用和凭据撤销)。
+
+
 ## 用户模型存储本地验证（#288）
 
 - 基于 `bb280c8278eac9cb1e933c98b2d1498af1ad85ef` 的未提交工作区，本地通过 `go build ./...`、`go vet ./...`、`go test ./internal/store/... ./internal/store/sqlite/... ./internal/config/... ./internal/secret/...`，以及上述 store、config、secret 包的 Staticcheck v0.8.2。模型存储相关 race 测试也通过；这不是完整 CI 结果。
@@ -17,6 +23,10 @@
 
 - 基于 `feat/288-llm-models`（`8a909b3`）的未提交工作区，本地通过 `go build ./...`、`go vet ./...`、`go test -count=1 ./internal/llm/... ./internal/review/... ./internal/store/sqlite/... ./internal/app/... ./cmd/server/...`，以及 `go test -race -count=1 ./internal/llm/...` 和相关包的 Staticcheck v0.8.2。
 - 覆盖 Catalog 刷新与并发读取、坏记录隔离、配置模型 client 保留、空 key、用户模型成本与署名；未验证真实部署升级、完整 CI 或真实模型调用。
+
+## 模型管理 API 本地验证（#290）
+
+- 基于 `feat/289-model-catalog`（`05b7704`）的工作区，本地通过 `go build ./...`、`go vet ./...`、`go test -count=1 ./internal/server/...`；覆盖端点权限与 CSRF。CRUD 校验、revision 409、只读 403 和泄露回归仍需补测；未验证真实部署。
 
 ## v1.2.0 候选批次本地修复验证（PR #128）
 
