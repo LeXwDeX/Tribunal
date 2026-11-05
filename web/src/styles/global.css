@@ -9,6 +9,9 @@
 html {
   min-width: 320px;
   background: var(--bg);
+  /* Reserve the scrollbar gutter so centered pages do not shift when a
+     route or tab switches between scrolling and non-scrolling content. */
+  scrollbar-gutter: stable;
 }
 
 body {
