@@ -358,8 +358,8 @@ export async function listAdminUsers(cursor?: string): Promise<AdminUserPage> {
   return request<AdminUserPage>(withQuery('/api/v1/admin/users', { cursor }))
 }
 
-export async function setAdminUserDisabled(id: number | string, disabled: boolean): Promise<AdminUser> {
-  return request<AdminUser>(`/api/v1/admin/users/${segment(id)}`, { method: 'PATCH', body: { disabled } })
+export async function setAdminUserDisabled(id: number | string, disabled: boolean, revision: number): Promise<AdminUser> {
+  return request<AdminUser>(`/api/v1/admin/users/${segment(id)}`, { method: 'PATCH', body: { disabled, revision } })
 }
 
 export async function revokeAdminUserCredentials(id: number | string): Promise<void> {

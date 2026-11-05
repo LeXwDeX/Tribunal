@@ -374,7 +374,7 @@ func TestAdminAccessEndpoints(t *testing.T) {
 		t.Fatalf("users = %s", users.body)
 	}
 
-	disabled := admin.json(http.MethodPatch, "/api/v1/admin/users/8", map[string]any{"disabled": true})
+	disabled := admin.json(http.MethodPatch, "/api/v1/admin/users/8", map[string]any{"disabled": true, "revision": 1})
 	assertStatus(t, disabled, http.StatusOK)
 	if env.decode(t, disabled)["disabled"] != true {
 		t.Fatalf("disabled response = %s", disabled.body)
@@ -382,7 +382,7 @@ func TestAdminAccessEndpoints(t *testing.T) {
 	// Disabling revokes bob's session.
 	assertStatus(t, bob.request(http.MethodGet, "/api/v1/me", nil, nil), http.StatusUnauthorized)
 
-	enabled := admin.json(http.MethodPatch, "/admin/users/8", map[string]any{"disabled": false})
+	enabled := admin.json(http.MethodPatch, "/admin/users/8", map[string]any{"disabled": false, "revision": 2})
 	assertStatus(t, enabled, http.StatusOK)
 	restored := env.loginAs("code-viewer")
 	assertStatus(t, restored.request(http.MethodGet, "/api/v1/me", nil, nil), http.StatusOK)

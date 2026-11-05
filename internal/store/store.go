@@ -9,8 +9,9 @@ import (
 )
 
 var (
-	ErrNotFound = errors.New("store: not found")
-	ErrConflict = errors.New("store: conflict")
+	ErrNotFound              = errors.New("store: not found")
+	ErrConflict              = errors.New("store: conflict")
+	ErrPlatformUserProtected = errors.New("store: protected platform user")
 	// ErrStaleRevision rejects a conditional block binding write whose expected
 	// revision no longer matches the stored row.
 	ErrStaleRevision = errors.New("store: stale revision")

@@ -184,12 +184,19 @@ function AdminUsersPanel() {
     setDisableError(null)
     try {
       const next = !disableTarget.disabled
-      await setAdminUserDisabled(disableTarget.id, next)
+      await setAdminUserDisabled(disableTarget.id, next, disableTarget.revision)
       setDisableTarget(null)
       toast.push('success', next ? '账号已停用。' : '账号已启用。')
       await queryClient.invalidateQueries({ queryKey: ['admin-users'] })
     } catch (error) {
-      setDisableError(error)
+      if (error instanceof ApiError && error.code === 'stale_revision') {
+        setDisableTarget(null)
+        setDisableError(null)
+        toast.push('error', '用户信息已被其他管理员更新，请刷新后重试。')
+        await queryClient.invalidateQueries({ queryKey: ['admin-users'] })
+      } else {
+        setDisableError(error)
+      }
     } finally {
       setDisablePending(false)
     }

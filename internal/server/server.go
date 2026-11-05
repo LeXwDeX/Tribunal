@@ -270,6 +270,7 @@ func New(cfg Config) (*Server, error) {
 	for _, prefix := range []string{"/admin", "/api/v1/admin"} {
 		mux.HandleFunc("GET "+prefix+"/users", s.apiAuth(s.guard(policyPlatformAdmin, s.handleAdminListUsers)))
 		mux.HandleFunc("PATCH "+prefix+"/users/{id}", s.apiAuth(s.guard(policyPlatformAdmin, s.handleAdminSetUserDisabled)))
+		mux.HandleFunc("GET "+prefix+"/users/{id}/grants", s.apiAuth(s.guard(policyPlatformAdmin, s.handleAdminListUserGrants)))
 		mux.HandleFunc("DELETE "+prefix+"/users/{id}/credentials", s.apiAuth(s.guard(policyPlatformAdmin, s.handleAdminRevokeCredentials)))
 		mux.HandleFunc("GET "+prefix+"/projects", s.apiAuth(s.guard(policyPlatformAdmin, s.handleAdminListProjects)))
 		mux.HandleFunc("GET "+prefix+"/projects/residues", s.apiAuth(s.guard(policyPlatformAdmin, s.handleAdminListProjectResidues)))

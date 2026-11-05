@@ -22,6 +22,24 @@ type AccessStore interface {
 	DeleteProjectGrant(ctx context.Context, projectID, userID int64) error
 }
 
+type platformUserStore interface {
+	ListPlatformUsers(context.Context, string, int, []int64, []string) ([]store.User, string, error)
+	UpdatePlatformUser(context.Context, int64, store.PlatformUserUpdate) (string, string, bool, error)
+	ListUserGrants(context.Context, int64, string, int) ([]store.ProjectGrant, string, error)
+}
+
+func (s *Server) platformAdmins() ([]int64, []string) {
+	ids := make([]int64, 0, len(s.auth.adminIDs))
+	for id := range s.auth.adminIDs {
+		ids = append(ids, id)
+	}
+	names := make([]string, 0, len(s.auth.admins))
+	for name := range s.auth.admins {
+		names = append(names, name)
+	}
+	return ids, names
+}
+
 // accessPolicy is the per-route authorization decision. Unknown zero values
 // deny, so adding a route without a policy cannot accidentally expose it.
 type accessPolicy int

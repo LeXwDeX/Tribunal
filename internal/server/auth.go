@@ -455,12 +455,29 @@ func (s *Server) fetchUser(ctx context.Context, accessToken string) (sessionUser
 	return sessionUser{ID: payload.ID, Username: payload.Username, Name: name}, nil
 }
 
-// roleFor maps a GitLab user to a platform role from the current
-// configuration. An id:<n> entry matches the GitLab user ID only. A username
+// roleFor combines the current configuration and a durable grant. An id:<n>
+// entry matches the GitLab user ID only. A username
 // entry is bound to the first GitLab user ID seen with that username, because
 // GitLab usernames can be renamed and reused: a later account that takes the
 // same username stays a viewer. Lookup failures fail closed.
 func (s *Server) roleFor(ctx context.Context, user sessionUser) string {
+	if s.configuredRoleFor(ctx, user) == roleAdmin {
+		return roleAdmin
+	}
+	if roles, ok := s.roles.(interface {
+		GrantedPlatformAdmin(context.Context, int64) (bool, error)
+	}); ok && user.ID > 0 {
+		granted, err := roles.GrantedPlatformAdmin(ctx, user.ID)
+		if err != nil {
+			s.logger.Warn("cannot verify granted platform role", "user_id", user.ID, "error_class", errclass.Of(err))
+		} else if granted {
+			return roleAdmin
+		}
+	}
+	return roleViewer
+}
+
+func (s *Server) configuredRoleFor(ctx context.Context, user sessionUser) string {
 	if _, ok := s.auth.adminIDs[user.ID]; ok && user.ID > 0 {
 		return roleAdmin
 	}
@@ -499,18 +516,41 @@ func (s *Server) createSession(ctx context.Context, user sessionUser) (session, 
 	now := s.auth.now()
 	expires := now.Add(s.auth.ttl)
 	sum := sha256.Sum256([]byte(id))
+	storedRole := user.Role
+	if _, ok := s.roles.(interface {
+		GrantedPlatformAdmin(context.Context, int64) (bool, error)
+	}); ok {
+		// The store combines this configuration role with the current grant in
+		// its write transaction, avoiding a stale grant during login.
+		storedRole = s.configuredRoleFor(ctx, user)
+	}
 	if err := s.sessions.CreateSession(ctx, store.Session{
 		IDHash:    sum[:],
 		UserID:    user.ID,
 		Username:  user.Username,
 		Name:      user.Name,
-		Role:      user.Role,
+		Role:      storedRole,
 		ExpiresAt: expires,
 		CreatedAt: now,
 	}, store.SessionLimits{}); err != nil {
 		return session{}, err
 	}
-	return session{id: id, user: user, csrf: s.auth.csrfFor(id)}, nil
+	return session{id: id, user: user, csrf: s.sessionCSRF(ctx, id, user.ID)}, nil
+}
+
+// Session CSRF tokens include the account revision, so an account update
+// invalidates earlier tokens while the next request rechecks its role.
+func (s *Server) sessionCSRF(ctx context.Context, id string, userID int64) string {
+	if users, ok := s.roles.(interface {
+		GetUser(context.Context, int64) (*store.User, error)
+	}); ok {
+		user, err := users.GetUser(ctx, userID)
+		if err == nil && user != nil {
+			return s.auth.csrfFor(id + ":" + strconv.FormatInt(user.Revision, 10))
+		}
+		return ""
+	}
+	return s.auth.csrfFor(id)
 }
 
 // deleteSession revokes the session named by a valid signed cookie. An
@@ -548,8 +588,7 @@ func (s *Server) sessionFromRequest(r *http.Request) (session, bool) {
 	if err != nil || stored == nil {
 		return session{}, false
 	}
-	// Roles come from the current configuration, not from login time, so
-	// removing a bootstrap admin also downgrades existing sessions.
+	// Recompute both role sources on every request, not just at login.
 	user := sessionUser{
 		ID:       stored.UserID,
 		Username: stored.Username,
@@ -557,19 +596,24 @@ func (s *Server) sessionFromRequest(r *http.Request) (session, bool) {
 	}
 	user.Role = s.roleFor(r.Context(), user)
 	if user.Role != stored.Role && s.roles != nil {
-		// Best effort: the stored role only ranks sessions for eviction.
-		if err := s.roles.SetPlatformRole(r.Context(), user.ID, user.Role); err != nil {
-			s.logger.Warn("cannot refresh stored platform role",
-				"user_id", user.ID, "error_class", errclass.Of(err))
+		var err error
+		if roles, ok := s.roles.(interface {
+			RefreshPlatformRole(context.Context, int64, []int64, []string) error
+		}); ok {
+			ids, names := s.platformAdmins()
+			err = roles.RefreshPlatformRole(r.Context(), user.ID, ids, names)
+		} else {
+			err = s.roles.SetPlatformRole(r.Context(), user.ID, user.Role)
+		}
+		if err != nil {
+			s.logger.Warn("cannot refresh stored platform role", "user_id", user.ID, "error_class", errclass.Of(err))
 		}
 	}
-	return session{id: id, user: user, csrf: s.auth.csrfFor(id)}, true
+	return session{id: id, user: user, csrf: s.sessionCSRF(r.Context(), id, user.ID)}, true
 }
 
-// syncPlatformRoles rewrites stored platform roles from the current
-// bootstrap_admins at startup, so global session eviction ranks sessions by
-// the configured roles even before their users log in again. A failure only
-// affects eviction order and is logged.
+// syncPlatformRoles merges the configured and granted roles at startup.
+// A failure is logged; request authentication still recomputes the role.
 func (s *Server) syncPlatformRoles() {
 	if s.roles == nil {
 		return
@@ -665,9 +709,8 @@ func (s *Server) authenticateAPIToken(r *http.Request, hash []byte) (sessionUser
 	if err != nil || owner == nil {
 		return sessionUser{}, false
 	}
-	// The stored users.role reflects login time. Re-evaluate against the
-	// current bootstrap_admins so removing an admin also downgrades tokens
-	// minted earlier. The configured bootstrap bearer token keeps admin.
+	// Re-evaluate both role sources on each request. The configured bootstrap
+	// bearer token is authenticated separately and keeps admin.
 	user := sessionUser{
 		ID:       owner.ID,
 		Username: owner.Username,

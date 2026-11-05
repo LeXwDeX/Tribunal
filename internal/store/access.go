@@ -18,6 +18,22 @@ type User struct {
 	Name        string     `json:"name"`
 	Disabled    bool       `json:"disabled"`
 	LastLoginAt *time.Time `json:"last_login_at,omitempty"`
+	Role        string     `json:"role"`
+	RoleSource  string     `json:"role_source"`
+	GlobalRead  bool       `json:"global_read"`
+	GrantCount  int        `json:"grant_count"`
+	Revision    int64      `json:"revision"`
+	GrantedRole string     `json:"-"`
+}
+
+// PlatformUserUpdate is applied atomically with administrator safety checks.
+type PlatformUserUpdate struct {
+	Role           *string
+	Disabled       *bool
+	Revision       *int64
+	ActorID        int64
+	AdminIDs       []int64
+	AdminUsernames []string
 }
 
 // ProjectGrant authorizes one user on one project. Username is optional and is

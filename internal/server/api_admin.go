@@ -25,7 +25,13 @@ func (s *Server) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
 		validationFailed(w, r, "limit", err.Error())
 		return
 	}
-	users, next, err := s.access.ListUsers(r.Context(), r.URL.Query().Get("cursor"), limit)
+	access, ok := s.access.(platformUserStore)
+	if !ok {
+		writeError(w, r, http.StatusServiceUnavailable, "internal", "platform user store is not configured", nil)
+		return
+	}
+	ids, names := s.platformAdmins()
+	users, next, err := access.ListPlatformUsers(r.Context(), r.URL.Query().Get("cursor"), limit, ids, names)
 	if err != nil {
 		s.writeAccessError(w, r, err)
 		return
@@ -46,21 +52,78 @@ func (s *Server) handleAdminSetUserDisabled(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	var request struct {
-		Disabled *bool `json:"disabled"`
+		Disabled *bool   `json:"disabled"`
+		Role     *string `json:"role"`
+		Revision *int64  `json:"revision"`
 	}
 	if err := decodeJSON(w, r, adminBodyLimit, &request); err != nil {
 		decodeRequestError(w, r, err)
 		return
 	}
-	if request.Disabled == nil {
-		validationFailed(w, r, "disabled", "disabled is required")
+	if request.Disabled == nil && request.Role == nil {
+		validationFailed(w, r, "role", "role or disabled is required")
 		return
 	}
-	if err := s.access.SetUserDisabled(r.Context(), userID, *request.Disabled); err != nil {
+	if request.Role != nil && *request.Role != roleAdmin && *request.Role != roleViewer {
+		validationFailed(w, r, "role", "role must be admin or viewer")
+		return
+	}
+	if request.Revision == nil || *request.Revision <= 0 {
+		validationFailed(w, r, "revision", "revision is required")
+		return
+	}
+	access, ok := s.access.(platformUserStore)
+	if !ok {
+		writeError(w, r, http.StatusServiceUnavailable, "internal", "platform user store is not configured", nil)
+		return
+	}
+	ids, names := s.platformAdmins()
+	oldRole, newRole, grantChanged, err := access.UpdatePlatformUser(r.Context(), userID, store.PlatformUserUpdate{
+		Role: request.Role, Disabled: request.Disabled, Revision: request.Revision,
+		ActorID: currentUserID(r), AdminIDs: ids, AdminUsernames: names,
+	})
+	if err != nil {
 		s.writeAccessError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": userID, "disabled": *request.Disabled})
+	if oldRole != newRole || grantChanged {
+		s.logger.Info("platform role changed", "event", "platform_audit", "actor_id", currentUserID(r), "target_id", userID, "old_role", oldRole, "new_role", newRole, "grant_changed", grantChanged)
+	}
+	response := map[string]any{"id": userID, "role": newRole}
+	if request.Disabled != nil {
+		response["disabled"] = *request.Disabled
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) handleAdminListUserGrants(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAccess(w, r) {
+		return
+	}
+	id, err := parseID(r.PathValue("id"))
+	if err != nil {
+		validationFailed(w, r, "id", "id must be a positive integer")
+		return
+	}
+	limit, err := pageLimit(r)
+	if err != nil {
+		validationFailed(w, r, "limit", err.Error())
+		return
+	}
+	access, ok := s.access.(platformUserStore)
+	if !ok {
+		writeError(w, r, http.StatusServiceUnavailable, "internal", "platform user store is not configured", nil)
+		return
+	}
+	grants, next, err := access.ListUserGrants(r.Context(), id, r.URL.Query().Get("cursor"), limit)
+	if err != nil {
+		s.writeAccessError(w, r, err)
+		return
+	}
+	if grants == nil {
+		grants = []store.ProjectGrant{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"grants": grants, "next_cursor": next})
 }
 
 func (s *Server) handleAdminRevokeCredentials(w http.ResponseWriter, r *http.Request) {
@@ -207,6 +270,14 @@ func (s *Server) handleAdminDeleteGrant(w http.ResponseWriter, r *http.Request) 
 
 // writeAccessError maps access-store sentinels without logging row content.
 func (s *Server) writeAccessError(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, store.ErrPlatformUserProtected) {
+		writeError(w, r, http.StatusForbidden, "protected_user", "platform administrator cannot be changed", nil)
+		return
+	}
+	if errors.Is(err, store.ErrStaleRevision) {
+		writeError(w, r, http.StatusConflict, "stale_revision", "user revision is stale", nil)
+		return
+	}
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, r, http.StatusNotFound, "not_found", "not found", nil)
 		return

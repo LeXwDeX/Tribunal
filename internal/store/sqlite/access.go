@@ -37,7 +37,7 @@ func scanUser(row rowScanner) (*store.User, error) {
 		disabled    int
 		lastLoginAt sql.NullString
 	)
-	if err := row.Scan(&user.ID, &user.Username, &user.Name, &disabled, &lastLoginAt); err != nil {
+	if err := row.Scan(&user.ID, &user.Username, &user.Name, &disabled, &lastLoginAt, &user.Role, &user.GrantedRole, &user.Revision, &user.GrantCount); err != nil {
 		return nil, err
 	}
 	user.Disabled = disabled != 0
@@ -57,7 +57,7 @@ func (s *Store) GetUser(ctx context.Context, userID int64) (*store.User, error) 
 		return nil, errors.New("sqlite: user id is required")
 	}
 	user, err := scanUser(s.db.QueryRowContext(ctx,
-		`SELECT id, username, name, disabled, last_login_at FROM users WHERE id = ?`, userID))
+		`SELECT id, username, name, disabled, last_login_at, role, COALESCE(granted_role,''), revision, (SELECT COUNT(*) FROM project_grants WHERE user_id = users.id) FROM users WHERE id = ?`, userID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%w: user %d", store.ErrNotFound, userID)
 	}
@@ -86,7 +86,7 @@ func (s *Store) ListUsers(ctx context.Context, cursor string, limit int) ([]stor
 	}
 	args = append(args, limit+1)
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, username, name, disabled, last_login_at FROM users
+		`SELECT id, username, name, disabled, last_login_at, role, COALESCE(granted_role,''), revision, (SELECT COUNT(*) FROM project_grants WHERE user_id = users.id) FROM users
 		 WHERE `+strings.Join(where, " AND ")+` ORDER BY id LIMIT ?`, args...)
 	if err != nil {
 		return nil, "", fmt.Errorf("sqlite: list users: %w", err)
@@ -133,7 +133,7 @@ func (s *Store) SetUserDisabled(ctx context.Context, userID int64, disabled bool
 		}
 		return fmt.Errorf("sqlite: check user: %w", err)
 	}
-	res, err := tx.ExecContext(ctx, `UPDATE users SET disabled = ? WHERE id = ?`,
+	res, err := tx.ExecContext(ctx, `UPDATE users SET disabled = ?, revision = revision + 1 WHERE id = ?`,
 		boolInt(disabled), userID)
 	if err != nil {
 		return fmt.Errorf("sqlite: set user disabled: %w", err)

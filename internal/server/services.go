@@ -93,10 +93,9 @@ type AdminBindingStore interface {
 	BindAdminUsername(ctx context.Context, username string, userID int64, now time.Time) (int64, error)
 }
 
-// PlatformRoleStore keeps each user's stored platform role in step with the
-// current bootstrap admin configuration. The stored role only decides which
-// sessions the global session limit evicts first; authorization always
-// recomputes the role.
+// PlatformRoleStore keeps the stored role mirror in step with the current
+// bootstrap configuration and durable grants. Request authentication
+// recomputes the role; the mirror also supports transactional checks.
 type PlatformRoleStore interface {
 	SyncPlatformRoles(ctx context.Context, adminIDs []int64, adminUsernames []string) error
 	SetPlatformRole(ctx context.Context, userID int64, role string) error
