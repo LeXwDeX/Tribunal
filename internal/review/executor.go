@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -150,7 +151,12 @@ type ExecutorDeps struct {
 	// RepositorySkillsVerified is set only after the app layer revalidated the
 	// stored repository grants and the filtered snapshot for this execution.
 	RepositorySkillsVerified bool
+	// Logger receives operational warnings; nil disables them.
+	Logger *slog.Logger
 }
+
+// nodeIDKey carries the executing node id to budget checks for logging.
+type nodeIDKey struct{}
 
 var (
 	_ dag.NodeExecutor         = (*Executor)(nil)
@@ -357,6 +363,7 @@ func (e *Executor) Execute(ctx context.Context, in dag.NodeInput) (dag.NodeOutpu
 	if in.Node.ID == "" {
 		return dag.NodeOutput{}, errors.New("review: node id is required")
 	}
+	ctx = context.WithValue(ctx, nodeIDKey{}, in.Node.ID)
 	timeout := in.Node.Timeout
 	if timeout <= 0 {
 		timeout = e.defaultTimeout

@@ -959,6 +959,7 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 		Cost:                     s.cost,
 		Outbound:                 outboundSender(ws),
 		RepositorySkillsVerified: execution.repositorySkillsVerified(),
+		Logger:                   s.logger,
 	})
 	if err != nil {
 		return PermanentJob(fmt.Errorf("build review executor: %w", err))

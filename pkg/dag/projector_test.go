@@ -668,8 +668,52 @@ func TestProjectUsageInterruptionsCountRestarts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if wf.UsageInterruptions != 2 {
-		t.Fatalf("UsageInterruptions = %d, want 2 (restarts marked incomplete only)", wf.UsageInterruptions)
+	if wf.UsageInterruptions != 1 {
+		t.Fatalf("UsageInterruptions = %d, want 1 (max per node, restarts marked incomplete only)", wf.UsageInterruptions)
+	}
+	if got := wf.Nodes["a"].UsageInterruptions; got != 1 {
+		t.Fatalf("node a UsageInterruptions = %d, want 1", got)
+	}
+}
+
+// One recovery round restarts every running node; that is one interruption,
+// not one per node.
+func TestProjectUsageInterruptionsParallelNodesOneRound(t *testing.T) {
+	ids := []string{"a", "b", "c", "d"}
+	nodes := make([]NodeSpec, 0, len(ids))
+	for _, id := range ids {
+		nodes = append(nodes, node(id))
+	}
+	events := []Event{created(t, nodes...)}
+	for _, id := range ids {
+		events = append(events, mustEv(t, EventNodeStarted, NodeStartedPayload{NodeID: id, Attempt: 1}, testNow))
+	}
+	for _, id := range ids {
+		events = append(events, mustEv(t, EventNodeRestarted, NodeRestartedPayload{NodeID: id, Attempt: 2, NextAttempt: 2, UsageIncomplete: true}, testNow))
+	}
+	wf, err := Project(seq(events))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wf.UsageInterruptions != 1 {
+		t.Fatalf("UsageInterruptions = %d, want 1 for four nodes restarted in one round", wf.UsageInterruptions)
+	}
+}
+
+// The same node restarted across rounds accumulates.
+func TestProjectUsageInterruptionsSameNodeAcrossRounds(t *testing.T) {
+	events := []Event{created(t, node("a"), node("b"))}
+	for attempt := 1; attempt <= 4; attempt++ {
+		events = append(events,
+			mustEv(t, EventNodeStarted, NodeStartedPayload{NodeID: "a", Attempt: attempt}, testNow),
+			mustEv(t, EventNodeRestarted, NodeRestartedPayload{NodeID: "a", Attempt: attempt + 1, NextAttempt: attempt + 1, UsageIncomplete: true}, testNow))
+	}
+	wf, err := Project(seq(events))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wf.UsageInterruptions != 4 || wf.Nodes["a"].UsageInterruptions != 4 || wf.Nodes["b"].UsageInterruptions != 0 {
+		t.Fatalf("interruptions wf=%d a=%d b=%d, want 4/4/0", wf.UsageInterruptions, wf.Nodes["a"].UsageInterruptions, wf.Nodes["b"].UsageInterruptions)
 	}
 }
 
