@@ -104,6 +104,30 @@ func modelConfig(m store.Model) config.ProviderConfig {
 	return config.ProviderConfig{Protocol: m.Protocol, BaseURL: m.BaseURL, Model: m.Model, MaxTokens: p.MaxTokens, ContextWindow: p.ContextWindow, Temperature: p.Temperature, Reasoning: p.Reasoning, Thinking: p.Thinking, ForcedToolChoice: p.ForcedToolChoice, StrictRoleAlternation: p.StrictRoleAlternation, MaxConcurrency: p.MaxConcurrency, RPM: p.RPM, Price: p.Price}
 }
 
+// ModelConfig converts a stored model definition into a provider config.
+func ModelConfig(m store.Model) config.ProviderConfig { return modelConfig(m) }
+
+// NewDraftClient builds a throwaway client for an unsaved model. It applies the
+// catalog's egress policy and HTTP client, is not registered in the catalog,
+// and records nothing: the call recorder is deliberately dropped.
+func (c *Catalog) NewDraftClient(model store.Model, apiKey string) (Client, error) {
+	options := c.options
+	options.recorder = nil
+	policy, err := newEgressPolicy(options.egress)
+	if err != nil {
+		return nil, err
+	}
+	cfg := modelConfig(model)
+	if providerUnavailable(cfg.BaseURL, policy) == "egress_denied" {
+		return nil, &Error{Kind: ErrEgress, Err: ErrEgressDenied}
+	}
+	httpClient, err := newEgressHTTPClient(options.httpClient, options.egress)
+	if err != nil {
+		return nil, err
+	}
+	return newProviderClientWithKey("draft", cfg, apiKey, httpClient, options)
+}
+
 // Refresh atomically replaces the registry after rebuilding changed models.
 func (c *Catalog) Refresh(ctx context.Context) error {
 	c.mu.Lock()

@@ -1,14 +1,18 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/LeXwDeX/tribunal/internal/app"
+	"github.com/LeXwDeX/tribunal/internal/config"
 	"github.com/LeXwDeX/tribunal/internal/llm"
 	"github.com/LeXwDeX/tribunal/internal/store"
 )
@@ -147,10 +151,15 @@ func (s *Server) handleCreateModel(w http.ResponseWriter, r *http.Request) {
 	if request.APIKey != nil {
 		credential = *request.APIKey
 	}
-	model, err := s.modelsStore.CreateModel(r.Context(), store.Model{
+	candidate := store.Model{
 		DisplayName: request.DisplayName, Protocol: request.Protocol, BaseURL: request.BaseURL,
 		Model: request.Model, Params: request.Params, CreatedBy: currentUserID(r),
-	}, credential)
+	}
+	if details := modelDetails(candidate); len(details) > 0 {
+		writeError(w, r, http.StatusBadRequest, "validation_failed", "invalid model", details)
+		return
+	}
+	model, err := s.modelsStore.CreateModel(r.Context(), candidate, credential)
 	if err != nil {
 		s.writeModelError(w, r, err)
 		return
@@ -177,10 +186,15 @@ func (s *Server) handleUpdateModel(w http.ResponseWriter, r *http.Request) {
 		validationFailed(w, r, "revision", "revision is required")
 		return
 	}
-	updated, err := s.modelsStore.UpdateModel(r.Context(), store.Model{
+	candidate := store.Model{
 		ID: id, DisplayName: request.DisplayName, Protocol: request.Protocol, BaseURL: request.BaseURL,
 		Model: request.Model, Params: request.Params, UpdatedBy: currentUserID(r),
-	}, *request.Revision, request.APIKey)
+	}
+	if details := modelDetails(candidate); len(details) > 0 {
+		writeError(w, r, http.StatusBadRequest, "validation_failed", "invalid model", details)
+		return
+	}
+	updated, err := s.modelsStore.UpdateModel(r.Context(), candidate, *request.Revision, request.APIKey)
 	if err != nil {
 		s.writeModelError(w, r, err)
 		return
@@ -232,11 +246,107 @@ func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusUnprocessableEntity, "provider_test_failed", "provider test failed", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	writeJSON(w, http.StatusOK, modelTestResponse{Model: result.Model, LatencyMS: result.LatencyMS})
 }
 
+// draftTestTimeout bounds one draft probe, including connection setup.
+const draftTestTimeout = 30 * time.Second
+
+type draftModelRequest struct {
+	modelWriteRequest
+	ID string `json:"id"`
+}
+
+type modelTestResponse struct {
+	Model     string `json:"model"`
+	LatencyMS int64  `json:"latency_ms"`
+}
+
+// handleTestModelDraft probes an unsaved model definition. Nothing is stored,
+// the catalog is not refreshed, and the probe records no llm_calls.
 func (s *Server) handleTestModelDraft(w http.ResponseWriter, r *http.Request) {
-	writeError(w, r, http.StatusNotImplemented, "not_implemented", "draft model testing is not available", nil)
+	if !s.requireModelStore(w, r) {
+		return
+	}
+	var request draftModelRequest
+	if err := decodeJSON(w, r, adminBodyLimit, &request); err != nil {
+		decodeRequestError(w, r, err)
+		return
+	}
+	model := store.Model{
+		DisplayName: request.DisplayName, Protocol: request.Protocol, BaseURL: request.BaseURL,
+		Model: request.Model, Params: request.Params,
+	}
+	if details := modelDetails(model); len(details) > 0 {
+		writeError(w, r, http.StatusBadRequest, "validation_failed", "invalid model", details)
+		return
+	}
+	credential := ""
+	switch {
+	case request.APIKey != nil:
+		credential = *request.APIKey
+	case request.ID != "":
+		if !strings.HasPrefix(request.ID, "user:") {
+			validationFailed(w, r, "id", "only saved user models can reuse a stored credential")
+			return
+		}
+		key, err := s.modelsStore.OpenModelCredential(r.Context(), request.ID)
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, r, http.StatusNotFound, "not_found", "model not found", nil)
+			return
+		}
+		if err != nil {
+			writeError(w, r, http.StatusServiceUnavailable, "unavailable", "model credential is unavailable", nil)
+			return
+		}
+		credential = string(key)
+	}
+	s.auditModel(r, request.ID, "test_draft", request.modelWriteRequest)
+	client, err := s.models.NewDraftClient(model, credential)
+	if err == nil {
+		ctx, cancel := context.WithTimeout(r.Context(), draftTestTimeout)
+		defer cancel()
+		var result app.ProviderTestResult
+		if result, err = app.ProbeProvider(ctx, client); err == nil {
+			writeJSON(w, http.StatusOK, modelTestResponse{Model: result.Model, LatencyMS: result.LatencyMS})
+			return
+		}
+	}
+	if errors.Is(err, llm.ErrEgressDenied) {
+		writeError(w, r, http.StatusUnprocessableEntity, "egress_denied", "provider destination denied", nil)
+		return
+	}
+	writeError(w, r, http.StatusUnprocessableEntity, "provider_test_failed", "provider test failed", nil)
+}
+
+// modelDetails applies the stored-model validation used by create, update and draft test, and reports failures
+// per field without echoing submitted values.
+func modelDetails(model store.Model) []app.Detail {
+	details := []app.Detail{}
+	if n := utf8.RuneCountInString(model.DisplayName); n < 1 || n > 128 || strings.TrimSpace(model.DisplayName) == "" ||
+		strings.IndexFunc(model.DisplayName, unicode.IsControl) >= 0 {
+		details = append(details, app.Detail{Field: "display_name", Message: "display_name must be 1-128 printable characters"})
+	}
+	err := config.ValidateProviderConfig("model", llm.ModelConfig(model), config.ProviderValidationOptions{})
+	if err == nil {
+		return details
+	}
+	var joined interface{ Unwrap() []error }
+	problems := []error{err}
+	if errors.As(err, &joined) {
+		problems = joined.Unwrap()
+	}
+	for _, problem := range problems {
+		message := strings.TrimPrefix(problem.Error(), "model.")
+		field, _, _ := strings.Cut(message, " ")
+		switch field {
+		case "protocol", "base_url", "model":
+		default:
+			field = "params." + field
+		}
+		details = append(details, app.Detail{Field: field, Message: message})
+	}
+	return details
 }
 
 func (s *Server) requireModelStore(w http.ResponseWriter, r *http.Request) bool {
