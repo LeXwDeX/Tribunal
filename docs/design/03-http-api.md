@@ -246,13 +246,13 @@ SSE 事件（`event:` 字段）：`node`（`{id, status, attempt}`）、`finding
 
 #### 节点调用审计格式
 
-`GET /api/v1/reviews/{wf_id}/nodes/{node_id}/calls` 返回 `{calls, next_cursor}`。项目 `read` 可读不带 payload 的列表；`include_payload=true` 需要项目 `manage`。默认不返回 `request`、`response`。所有调用方均不再收到顶层 `request_id`，包括历史行；使用本地 `id` 关联调用。正在执行的 provider 接口仍可使用其响应 ID，但它不写入新的审计行。
+`GET /api/v1/reviews/{wf_id}/nodes/{node_id}/calls` 返回 `{calls, next_cursor}`。项目 `read` 可读不带 payload 的列表；`include_payload=true` 需要项目 `manage`。默认不返回 `request`、`response`。请求 payload 的 `wire` 字段记录适配器实际发出的参数（`max_tokens`、`temperature`、`reasoning.effort`、`thinking.budget_tokens`、`thinking_enabled`）；旧记录没有该字段。所有调用方均不再收到顶层 `request_id`，包括历史行；使用本地 `id` 关联调用。正在执行的 provider 接口仍可使用其响应 ID，但它不写入新的审计行。
 
 启用 `include_payload=true` 时，存在的 `request` 和 `response` 分别是 JSON 对象。新记录各自带 `"_format":"audit_metadata_v1"`，例如：
 
 ```json
 {
-  "request": {"_format":"audit_metadata_v1", "messages":1, "text_parts":1, "tool_calls":0, "tool_results":0, "reasoning_parts":0},
+  "request": {"_format":"audit_metadata_v1", "messages":1, "text_parts":1, "tool_calls":0, "tool_results":0, "reasoning_parts":0, "wire":{"max_tokens":4096,"temperature":0.2,"reasoning":{"effort":"high"},"thinking_enabled":false}},
   "response": {"_format":"audit_metadata_v1", "stop_reason":"end_turn", "usage":{"input_tokens":11,"output_tokens":7,"cache_read_tokens":0,"cache_write_tokens":0,"reasoning_tokens":0}, "text_parts":1, "tool_calls":0, "tool_results":0, "reasoning_parts":0}
 }
 ```

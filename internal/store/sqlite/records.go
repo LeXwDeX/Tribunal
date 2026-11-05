@@ -54,12 +54,19 @@ func (s *Store) RecordLLMCall(ctx context.Context, call llm.CallRecord) error {
 		value.Format = llm.AuditMetadataFormat
 		if value.Reasoning != nil {
 			reasoning := *value.Reasoning
-			switch reasoning.Effort {
-			case "", "low", "medium", "high":
-			default:
+			if !llm.ValidReasoningEffort(reasoning.Effort) {
 				reasoning.Effort = ""
 			}
 			value.Reasoning = &reasoning
+		}
+		if value.Wire != nil && value.Wire.Reasoning != nil {
+			wire := *value.Wire
+			reasoning := *wire.Reasoning
+			if !llm.ValidReasoningEffort(reasoning.Effort) {
+				reasoning.Effort = ""
+			}
+			wire.Reasoning = &reasoning
+			value.Wire = &wire
 		}
 		requestValue = value
 	}

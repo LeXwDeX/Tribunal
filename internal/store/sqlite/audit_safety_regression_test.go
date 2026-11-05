@@ -92,7 +92,7 @@ func TestAuditSafetyRejectsFreeTextInMetadata(t *testing.T) {
 		Provider: "p", Model: "m", Meta: llm.CallMeta{WorkflowID: "wf", NodeID: "node"},
 		Response: &llm.Response{RequestID: secret},
 		Audit: &llm.CallAudit{
-			Request:  &llm.AuditRequest{Format: secret, Reasoning: &llm.ReasoningOpts{Effort: secret}},
+			Request:  &llm.AuditRequest{Format: secret, Reasoning: &llm.ReasoningOpts{Effort: secret}, Wire: &llm.WireParams{Reasoning: &llm.WireReasoning{Effort: secret}}},
 			Response: &llm.AuditResponse{Format: secret, StopReason: secret, Usage: llm.Usage{InputTokens: 3}},
 		},
 		Err: &llm.Error{Kind: llm.ErrKind(secret)},
@@ -108,7 +108,7 @@ func TestAuditSafetyRejectsFreeTextInMetadata(t *testing.T) {
 	if strings.Contains(string(raw), secret) || calls[0].StopReason != "other" || calls[0].ErrorKind != "error" {
 		t.Fatalf("unsafe metadata: %s", raw)
 	}
-	if call.Audit.Request.Format != secret || call.Audit.Response.StopReason != secret {
+	if call.Audit.Request.Format != secret || call.Audit.Response.StopReason != secret || call.Audit.Request.Wire.Reasoning.Effort != secret {
 		t.Fatal("recording mutated the caller's metadata")
 	}
 }

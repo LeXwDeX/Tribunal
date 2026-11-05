@@ -33,13 +33,18 @@ func newOpenAIResponsesAdapter(info ProviderInfo, cfg providerDefaults, apiKey s
 }
 
 func (a *openAIResponsesAdapter) Generate(ctx context.Context, req *Request) (*Response, error) {
+	resp, _, err := a.GenerateWithWire(ctx, req)
+	return resp, err
+}
+
+func (a *openAIResponsesAdapter) GenerateWithWire(ctx context.Context, req *Request) (*Response, *WireParams, error) {
 	if err := validateRequest(req); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	effective := resolveRequest(a.cfg, req)
 	input, err := responsesInput(req)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	params := responses.ResponseNewParams{
 		Model: shared.ResponsesModel(a.info.Model),
@@ -66,7 +71,7 @@ func (a *openAIResponsesAdapter) Generate(ctx context.Context, req *Request) (*R
 	if len(req.Tools) > 0 {
 		tools, err := responsesTools(req.Tools)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		params.Tools = tools
 		params.ToolChoice = responsesToolChoice(req.ToolChoice)
@@ -74,11 +79,19 @@ func (a *openAIResponsesAdapter) Generate(ctx context.Context, req *Request) (*R
 	// X-Session-Id is not part of the OpenAI API. The compatibility gateway
 	// uses it to isolate provider state per attempt, so every attempt gets a
 	// fresh opaque value.
+	wire := &WireParams{Temperature: effective.temperature}
+	if effective.maxTokens > 0 {
+		wire.MaxTokens = effective.maxTokens
+	}
+	if effective.effort != "" {
+		wire.Reasoning = &WireReasoning{Effort: effective.effort}
+	}
 	generated, err := a.sdk.Responses.New(ctx, params, option.WithHeader("X-Session-Id", rand.Text()))
 	if err != nil {
-		return nil, sdkError(err)
+		return nil, wire, sdkError(err)
 	}
-	return responsesResponse(generated, a.info.Model)
+	response, err := responsesResponse(generated, a.info.Model)
+	return response, wire, err
 }
 
 func responsesInput(req *Request) (responses.ResponseInputParam, error) {

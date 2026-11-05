@@ -275,6 +275,7 @@ describe('node drawer', () => {
   afterEach(() => vi.unstubAllGlobals())
 
   it('shows params, output JSON with a copy button and one details block per LLM turn, and closes on Escape', async () => {
+    let callsUrl = ''
     installFetch((url) => {
       if (url === '/api/v1/reviews/wf/nodes/review.a') {
         return jsonResponse({
@@ -285,10 +286,11 @@ describe('node drawer', () => {
         })
       }
       if (url.startsWith('/api/v1/reviews/wf/nodes/review.a/calls')) {
+        callsUrl = url
         return jsonResponse({
           calls: [
             { id: 'c1', turn: 1, input_tokens: 18204, output_tokens: 1022, latency_ms: 6100, stop_reason: 'tool_use', request: { a: 1 } },
-            { id: 'c2', turn: 2, input_tokens: 22980, output_tokens: 640, latency_ms: 3400, stop_reason: 'end_turn' },
+            { id: 'c2', turn: 2, input_tokens: 22980, output_tokens: 640, latency_ms: 3400, stop_reason: 'end_turn', request: { wire: { max_tokens: 512, reasoning: { effort: 'high' }, thinking_enabled: false } } },
           ],
         })
       }
@@ -298,7 +300,7 @@ describe('node drawer', () => {
     const client = createTestQueryClient()
     render(
       <QueryClientProvider client={client}>
-        <NodeDrawer reviewId="wf" node={{ id: 'review.a', kind: 'code-review', status: 'completed' }} onClose={onClose} />
+        <NodeDrawer reviewId="wf" node={{ id: 'review.a', kind: 'code-review', status: 'completed' }} onClose={onClose} canManage />
       </QueryClientProvider>,
     )
     const dialog = await screen.findByRole('dialog', { name: 'review.a' })
@@ -312,7 +314,41 @@ describe('node drawer', () => {
     expect(summaries[0]).toContain('#1')
     expect(summaries[0]).toContain('18,204')
     expect(summaries[0]).toContain('tool_use')
-    await userEvent.setup().keyboard('{Escape}')
+    const user = userEvent.setup()
+    await user.click(within(dialog).getByText('#1'))
+    await user.click(within(dialog).getByText('#2'))
+    expect(within(dialog).getByText('—（旧记录）')).toBeInTheDocument()
+    expect(within(dialog).getAllByText('实际发送参数')).toHaveLength(2)
+    expect(dialog).toHaveTextContent('"effort": "high"')
+    expect(callsUrl).toContain('include_payload=true')
+    await user.keyboard('{Escape}')
     expect(onClose).toHaveBeenCalled()
   })
 })
+
+  it('does not request payloads for read-only viewers', async () => {
+    let callsUrl = ''
+    installFetch((url) => {
+      if (url === '/api/v1/reviews/wf/nodes/review.a') {
+        return jsonResponse({
+          id: 'review.a', kind: 'code-review', status: 'completed', provider: 'claude', attempt: 1,
+          duration_ms: 1000, params: {}, output: {}, usage: { tokens_in: 1, tokens_out: 1, cost_micros: 0 },
+        })
+      }
+      if (url.startsWith('/api/v1/reviews/wf/nodes/review.a/calls')) {
+        callsUrl = url
+        return jsonResponse({ calls: [{ id: 'c1', turn: 1, input_tokens: 1, output_tokens: 1, latency_ms: 10 }] })
+      }
+      return jsonResponse({})
+    })
+    const client = createTestQueryClient()
+    render(
+      <QueryClientProvider client={client}>
+        <NodeDrawer reviewId="wf" node={{ id: 'review.a', kind: 'code-review', status: 'completed' }} onClose={() => {}} />
+      </QueryClientProvider>,
+    )
+    const dialog = await screen.findByRole('dialog', { name: 'review.a' })
+    await waitFor(() => expect(callsUrl).not.toBe(''))
+    expect(callsUrl).not.toContain('include_payload')
+    expect(within(dialog).getByText('没有保存请求或响应内容。')).toBeInTheDocument()
+  })

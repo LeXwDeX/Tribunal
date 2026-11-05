@@ -24,6 +24,8 @@ describe('models page blank providers (#273)', () => {
 
   it('shows the challenge provider without a fallback suffix', async () => {
     renderProfile({ challenge: { provider: 'primary', fallback: '', only: null } })
+    expect(await screen.findByText(/启动时加载/)).toBeInTheDocument()
+    expect(screen.queryByText(/重启或热加载/)).not.toBeInTheDocument()
     const text = await stepWho('挑战')
     expect(text).toContain('primary')
     expect(text).not.toContain('fallback')

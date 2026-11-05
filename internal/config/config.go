@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/LeXwDeX/tribunal/internal/llm/effort"
 )
 
 // Config is the complete platform configuration.
@@ -439,6 +441,9 @@ func (c *Config) Validate() error {
 	for _, name := range sortedKeys(c.Providers) {
 		provider := c.Providers[name]
 		field := "providers." + name
+		if provider.Reasoning != nil && !effort.Valid(provider.Reasoning.Effort) {
+			p.add("%s.reasoning.effort must be low, medium, high or max", field)
+		}
 		if !isProviderProtocol(provider.Protocol) {
 			p.add("%s.protocol %q is not supported", field, provider.Protocol)
 		}

@@ -206,10 +206,15 @@ func TestAPIAuditSafetyThreeProtocolsAndHistory(t *testing.T) {
 		}
 		if call["id"] == "old-metadata" {
 			request := call["request"].(map[string]any)
-			if request["messages"] != float64(2) || request["_format"] != nil {
+			if request["messages"] != float64(2) || request["_format"] != nil || request["wire"] != nil {
 				t.Fatalf("unversioned metadata = %v", request)
 			}
 			continue
+		}
+		request := call["request"].(map[string]any)
+		wire, ok := request["wire"].(map[string]any)
+		if !ok || wire["max_tokens"] != float64(512) {
+			t.Fatalf("API wire parameters = %v", request["wire"])
 		}
 		encoded, _ := json.Marshal(call)
 		if strings.Contains(string(encoded), secret) {

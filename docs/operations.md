@@ -71,6 +71,8 @@ docker compose exec -T review /app/tribunalctl projects all
 
 ### 多 Provider 配置
 
+服务启动时加载 provider 配置。`providers.<name>.reasoning.effort` 只允许空值、`low`、`medium`、`high`、`max`；非法值会阻止启动，错误指向字段路径。Anthropic 不发送 `reasoning.effort`，OpenAI 协议不发送 `thinking.budget_tokens`；配置这些组合时会在启动日志告警，但不阻止启动。调用详情的请求元数据 `wire` 记录实际发送的模型参数；旧记录没有该字段。Anthropic 开启 thinking 时不发送 temperature，强制工具选择时关闭 thinking。修改配置后需要重启。
+
 首次部署可先完成上一节的[构建与启动](#构建并启动)，确认 primary-only 部署正常。已有部署不要先执行启动或重启命令；重建容器前，先按本节第 4 步核对未完成评审和待发布结果。默认部署只有一个 `primary` provider：`profiles.onboarding.agent.provider` 和 `profiles.default.provider` 都指向它。primary 的名称和变量保持不变，已有部署不需要迁移。
 
 需要第二个模型时，按以下步骤操作。示例只展示格式；`LLM_SECONDARY_MODEL` 和 `LLM_SECONDARY_API_KEY` 的尖括号内容必须替换为真实值，协议和地址按用户实际供应方填写。不要复制真实密钥：
