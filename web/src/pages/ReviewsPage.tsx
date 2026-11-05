@@ -52,8 +52,9 @@ export function ReviewsPage() {
   const trigger = params.get('trigger') || ''
   const sinceDate = params.get('since') ? params.get('since')!.slice(0, 10) : ''
   const since = sinceDate ? new Date(`${sinceDate}T00:00:00`).toISOString() : undefined
+  const scope = params.get('access') === 'mine' ? 'mine' : 'all'
 
-  const filtersKey = [projectId, status, verdict, profile, trigger, since]
+  const filtersKey = [projectId, status, verdict, profile, trigger, since, scope]
   const reviews = usePaginated<ReviewSummary>(
     ['reviews', 'list', ...filtersKey],
     (cursor) => listReviews({
@@ -63,6 +64,7 @@ export function ReviewsPage() {
       profile: profile || undefined,
       trigger: trigger || undefined,
       since,
+      access: scope === 'mine' ? 'mine' : undefined,
     }, cursor),
     'reviews',
   )
@@ -111,7 +113,8 @@ export function ReviewsPage() {
             actions={<Button variant="secondary" className={ui.smallButton} onClick={clear} disabled={!hasFilters}>清除筛选{hasFilters ? `（${activeCount}）` : ''}</Button>}
           >
             <div className={reviewsStyles.statusFilter}>
-              <Segmented label="按状态筛选" options={statuses} value={status} onChange={(value) => update('status', value)} />
+              <Segmented label="评审范围" options={[{ value: 'all', label: '全部评审' }, { value: 'mine', label: '我的项目' }]} value={scope} onChange={(value) => update('access', value === 'mine' ? 'mine' : '')} />
+            <Segmented label="按状态筛选" options={statuses} value={status} onChange={(value) => update('status', value)} />
             </div>
             <select ref={projectFocus.selectRef} className="select" name="project_id" value={projectId} onChange={(event) => update('project_id', event.target.value)} aria-label="按项目筛选">
               <option value="">全部项目</option>

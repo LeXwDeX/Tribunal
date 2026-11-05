@@ -244,7 +244,7 @@ export function AppShell({ me }: { me: Me }) {
               </span>
               <div className={styles.sessionText}>
                 <span className={styles.sessionName}>{me.name || me.username}</span>
-                <span className={styles.sessionRole}>{roleLabel(me.role)} · @{me.username}</span>
+                <span className={styles.sessionRole}>{roleLabel(me.role)} · @{me.username}{me.global_read ? ' · 全局模式' : ''}</span>
               </div>
             </div>
             <div className={styles.navActions}>

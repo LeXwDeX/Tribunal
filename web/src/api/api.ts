@@ -185,6 +185,7 @@ export interface ReviewFilters {
   profile?: string
   trigger?: string
   since?: string
+  access?: 'all' | 'mine'
   limit?: number
 }
 
@@ -427,4 +428,27 @@ export async function putProfileOverrides(overrides: Record<string, unknown>, re
 
 export async function deleteProfileOverrides(revision: number): Promise<ProfileDetail> {
   return request<ProfileDetail>(withQuery('/api/v1/profiles/default/overrides', { revision }), { method: 'DELETE' })
+}
+
+export interface AdminUserPatch {
+  disabled?: boolean
+  role?: 'admin' | 'viewer'
+  global_read?: boolean
+  revision: number
+}
+
+export async function updateAdminUser(id: number | string, patch: AdminUserPatch): Promise<AdminUser> {
+  return request<AdminUser>(`/api/v1/admin/users/${segment(id)}`, { method: 'PATCH', body: patch })
+}
+
+export async function listAdminUserGrants(userId: number | string, cursor?: string): Promise<ProjectGrantPage> {
+  return request<ProjectGrantPage>(withQuery(`/api/v1/admin/users/${segment(userId)}/grants`, { cursor }))
+}
+
+export async function setAdminUserGrant(userId: number | string, projectId: number | string, role: ProjectAccess): Promise<ProjectGrant> {
+  return request<ProjectGrant>(`/api/v1/admin/projects/${segment(projectId)}/grants/${segment(userId)}`, { method: 'PUT', body: { role } })
+}
+
+export async function deleteAdminUserGrant(userId: number | string, projectId: number | string): Promise<void> {
+  await request<void>(`/api/v1/admin/projects/${segment(projectId)}/grants/${segment(userId)}`, { method: 'DELETE' })
 }
