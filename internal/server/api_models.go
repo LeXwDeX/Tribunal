@@ -246,7 +246,7 @@ func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusUnprocessableEntity, "provider_test_failed", "provider test failed", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, modelTestResponse{Model: result.Model, LatencyMS: result.LatencyMS})
+	writeJSON(w, http.StatusOK, modelTestResponse(result))
 }
 
 // draftTestTimeout bounds one draft probe, including connection setup.
