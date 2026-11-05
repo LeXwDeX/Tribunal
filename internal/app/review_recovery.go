@@ -17,19 +17,18 @@ import (
 	"github.com/LeXwDeX/tribunal/pkg/dag"
 )
 
-// recoveryCancel runs one recovery cancel path and, once it succeeds, records
-// the stable cause so an operator can tell why a recovered workflow ended
-// cancelled. It never changes the cancel reason or publication semantics.
+// recoveryCancel records the stable cause and then runs one recovery cancel
+// path, so a later failure while waiting for the terminal state or settling
+// publication cannot drop the cause. It never changes the cancel reason or
+// publication semantics. The cause is logged even when the workflow turns out
+// to be already terminal; the message says "cancelling", not "cancelled".
 func (s *ReviewService) recoveryCancel(ctx context.Context, workflowID, cause string, cancel func(context.Context, string) error) error {
-	if err := cancel(ctx, workflowID); err != nil {
-		return err
-	}
 	s.logRecoveryCancel(workflowID, cause)
-	return nil
+	return cancel(ctx, workflowID)
 }
 
 func (s *ReviewService) logRecoveryCancel(workflowID, cause string) {
-	s.logger.Info("recovery cancelled workflow", "workflow_id", workflowID, "cause", cause)
+	s.logger.Info("recovery cancelling workflow", "workflow_id", workflowID, "cause", cause)
 }
 
 // Recover rebuilds executors for unfinished review workflows and re-runs them,
@@ -268,11 +267,11 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 	}
 	if _, err := s.currentControl(ctx, project.ID, *workflow.MRIID, record.Generation, dossier.DiffVersion.HeadSHA); err != nil {
 		if IsPermanentJob(err) {
+			s.logRecoveryCancel(workflow.ID, "control_not_current")
 			if cancelErr := s.engine.Cancel(context.WithoutCancel(ctx), workflow.ID, "superseded"); cancelErr != nil &&
 				!errors.Is(cancelErr, dag.ErrNotFound) {
 				return cancelErr
 			}
-			s.logRecoveryCancel(workflow.ID, "control_not_current")
 			return s.skipPublication(ctx, workflow.ID, reviewSupersededReason)
 		}
 		return err
@@ -328,7 +327,11 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 	profileName, profileCfg := s.profileFor(ctx, project, dossier.Metadata["requested_profile"], currentConfig.Profile, mr.Labels, explicitValue == "true")
 	profile := review.Profile{Name: profileName, Config: profileCfg}
 	if workflow.Profile != profileName || dossier.Metadata["profile_hash"] == "" || dossier.Metadata["profile_hash"] != s.reviewProfileHash(profile) {
-		return s.recoveryCancel(ctx, workflow.ID, "profile_hash_changed", s.cancelWorkflow)
+		// The profile (including referenced user models, #299) changed while
+		// the process was down; record a visible reason like identity changes.
+		return s.recoveryCancel(ctx, workflow.ID, "profile_hash_changed", func(ctx context.Context, id string) error {
+			return s.cancelWorkflowWithReason(ctx, id, "profile_hash_changed")
+		})
 	}
 	if dossier.RepositorySkillProvenance != nil && dossier.RepositorySkillProvenance.Mode == "repository" {
 		lister, _ := s.store.(repositorySkillGrantLister)
@@ -410,6 +413,7 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 		return err
 	}
 	if superseded {
+		s.logger.Info("recovery observed cancelled workflow", "workflow_id", workflow.ID, "cause", "superseded_during_run")
 		s.settleRecoveredSuperseded(ctx, project.ID, *workflow.MRIID, record.Generation,
 			dossier.DiffVersion.HeadSHA, profileName, noteID, workflow.ID)
 		return s.skipPublication(ctx, workflow.ID, reviewSupersededReason)
@@ -456,6 +460,11 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 			dossier.DiffVersion.HeadSHA, profileName, reviewStatusFailed, "", noteID, reviewAwardFail)
 		return publishErr
 	case dag.WorkflowCancelled:
+		cause := snapshot.CancelReason
+		if cause == "" {
+			cause = "unknown"
+		}
+		s.logger.Info("recovery observed cancelled workflow", "workflow_id", workflow.ID, "cause", cause)
 		publishErr := s.skipPublication(ctx, workflow.ID, reviewCancelledReason)
 		s.settleReviewStatus(ctx, project.ID, *workflow.MRIID, record.Generation, 0,
 			dossier.DiffVersion.HeadSHA, profileName, reviewStatusCancelled, "", noteID, reviewAwardNone)

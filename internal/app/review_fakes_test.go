@@ -472,6 +472,13 @@ type reviewFixture struct {
 
 func newReviewFixture(t *testing.T, head string) *reviewFixture {
 	t.Helper()
+	return newReviewFixtureWithProfile(t, head, func(*config.ProfileConfig) {})
+}
+
+// newReviewFixtureWithProfile lets a test adjust the default profile before the
+// service is built, so the stored profile hash matches the adjusted profile.
+func newReviewFixtureWithProfile(t *testing.T, head string, adjust func(*config.ProfileConfig)) *reviewFixture {
+	t.Helper()
 	db := openTestStore(t)
 	cipher := newTestCipher(t)
 	seedProject(t, db, cipher, 42, "whsec", "{}", "default")
@@ -482,7 +489,9 @@ func newReviewFixture(t *testing.T, head string) *reviewFixture {
 	if err != nil {
 		t.Fatalf("prompts.Load: %v", err)
 	}
-	profiles := map[string]config.ProfileConfig{"default": testReviewProfile()}
+	profile := testReviewProfile()
+	adjust(&profile)
+	profiles := map[string]config.ProfileConfig{"default": profile}
 	defaults := testDefaults()
 	defaults.AllowRepoConfig = true
 	manager := workspace.NewManager(t.TempDir(), &repo.Git{})

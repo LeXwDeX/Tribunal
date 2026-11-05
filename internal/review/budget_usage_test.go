@@ -369,3 +369,20 @@ func TestRecoveredWorkflowModelNodeReachesAgent(t *testing.T) {
 		t.Fatalf("agent calls = %d, want 1", calls)
 	}
 }
+
+func TestTokenBudgetBoundsRecoveredInterruptions(t *testing.T) {
+	for _, tc := range []struct {
+		interruptions int
+		blocked       bool
+	}{{maxRecoveredInterruptions, false}, {maxRecoveredInterruptions + 1, true}} {
+		wf := recoveredBudgetView(t, true)
+		wf.UsageInterruptions = tc.interruptions
+		executor := newTestExecutor(t, ExecutorDeps{
+			Snapshot: func(context.Context, string) (dag.WorkflowView, error) { return wf, nil },
+		})
+		_, _, err := executor.tokenBudget(context.Background(), wf.ID)
+		if tc.blocked != llm.IsUnsafeResponse(err) || (!tc.blocked && err != nil) {
+			t.Fatalf("interruptions=%d: error = %v, blocked want %t", tc.interruptions, err, tc.blocked)
+		}
+	}
+}

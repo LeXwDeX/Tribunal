@@ -911,10 +911,9 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 	// A push may land between CreateReviewWorkflow and the event append.
 	if _, err := s.currentControl(ctx, project.ID, control.MRIID, payload.Generation, payload.HeadSHA); err != nil {
 		if IsPermanentJob(err) {
+			s.logger.Info("review cancelling workflow", "workflow_id", wfID, "cause", "control_not_current")
 			if cancelErr := s.engine.Cancel(context.WithoutCancel(ctx), wfID, "superseded"); cancelErr != nil && !errors.Is(cancelErr, dag.ErrNotFound) {
 				s.logger.Warn("cancel superseded workflow failed", "workflow_id", wfID, "error_class", errclass.Of(cancelErr))
-			} else {
-				s.logger.Info("review cancelled workflow", "workflow_id", wfID, "cause", "control_not_current")
 			}
 			return nil
 		}

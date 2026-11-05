@@ -7,6 +7,9 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+
+	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/pkg/dag"
 )
 
 func TestRecoveryCancelLogsStableCause(t *testing.T) {
@@ -55,10 +58,60 @@ func TestRecoveryCancelLogsStableCause(t *testing.T) {
 			if err != nil || wf.Status != "cancelled" {
 				t.Fatalf("recovery = %+v, %v; want cancelled", wf, err)
 			}
-			want := `msg="recovery cancelled workflow" workflow_id=` + id + " cause=" + tc.cause
+			want := `msg="recovery cancelling workflow" workflow_id=` + id + " cause=" + tc.cause
 			if !strings.Contains(logs.String(), want) {
 				t.Fatalf("log missing %q:\n%s", want, logs.String())
 			}
+			snapshot, err := f.service.engine.Snapshot(ctx, id)
+			if err != nil || snapshot.CancelReason != tc.cause {
+				t.Fatalf("cancel reason = %q, %v; want %q", snapshot.CancelReason, err, tc.cause)
+			}
 		})
 	}
+}
+
+func TestRecoveryLogsControlNotCurrentCause(t *testing.T) {
+	f := newReviewFixture(t, reviewTestHead)
+	job := f.seedReview(t, "job-cause-control")
+	id := interruptReview(t, f, job)
+	f.seedCancel(t, "cancel-after-interrupt")
+	var logs bytes.Buffer
+	f.service.logger = slog.New(slog.NewTextHandler(&logs, nil))
+	if err := f.service.Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	wf, err := f.db.GetWorkflow(context.Background(), id)
+	if err != nil || wf.Status != "cancelled" {
+		t.Fatalf("recovery = %+v, %v; want cancelled", wf, err)
+	}
+	want := `msg="recovery cancelling workflow" workflow_id=` + id + " cause=control_not_current"
+	if !strings.Contains(logs.String(), want) {
+		t.Fatalf("log missing %q:\n%s", want, logs.String())
+	}
+}
+
+// A process kill leaves a running node; recovery must restart it and run the
+// model nodes even though the workflow has a token budget.
+func TestRecoveryContinuesBudgetedWorkflowAfterInterruption(t *testing.T) {
+	f := newReviewFixtureWithProfile(t, reviewTestHead, func(p *config.ProfileConfig) {
+		p.Budget.MaxTokens = 1_000_000
+	})
+	job := f.seedReview(t, "job-budgeted-recovery")
+	id := interruptReview(t, f, job)
+	before := f.runner.count()
+	if err := f.service.Recover(context.Background()); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	if f.runner.count() <= before {
+		t.Fatalf("recovered budgeted workflow never reached the model: calls %d -> %d", before, f.runner.count())
+	}
+	wf, err := f.engine.Snapshot(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wf.Status != dag.WorkflowCompleted || !wf.UsageIncomplete || wf.UsageUnreported || wf.UsageInterruptions == 0 {
+		t.Fatalf("status=%s incomplete=%t unreported=%t interruptions=%d, want completed/true/false/>0",
+			wf.Status, wf.UsageIncomplete, wf.UsageUnreported, wf.UsageInterruptions)
+	}
+	assertReviewPublished(t, f, id)
 }
