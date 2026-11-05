@@ -79,7 +79,7 @@ func TestGrantedRoleSurvivesRenameAndTokenCreationDoesNotRestoreDemotion(t *test
 		t.Fatal(err)
 	}
 	role, rev := "admin", int64(1)
-	if _, _, err := s.UpdatePlatformUser(ctx, 8, store.PlatformUserUpdate{Role: &role, Revision: &rev}); err != nil {
+	if _, _, _, err := s.UpdatePlatformUser(ctx, 8, store.PlatformUserUpdate{Role: &role, Revision: &rev}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.CreateSession(ctx, sessionFor("renamed", 8, "after", clock.Now()), store.SessionLimits{}); err != nil {
@@ -122,7 +122,7 @@ func TestConcurrentDemotionsKeepAnEffectiveAdmin(t *testing.T) {
 	errs := make(chan error, 2)
 	for _, id := range []int64{7, 8} {
 		go func(id int64) {
-			_, _, err := s.UpdatePlatformUser(ctx, id, store.PlatformUserUpdate{Role: &role, Revision: &revision})
+			_, _, _, err := s.UpdatePlatformUser(ctx, id, store.PlatformUserUpdate{Role: &role, Revision: &revision})
 			errs <- err
 		}(id)
 	}
@@ -158,7 +158,7 @@ func TestPlatformUserRevisionAndActorAreCheckedInsideTransaction(t *testing.T) {
 	errs := make(chan error, 2)
 	for range 2 {
 		go func() {
-			_, _, err := s.UpdatePlatformUser(ctx, 7, store.PlatformUserUpdate{Role: &role, Revision: &revision})
+			_, _, _, err := s.UpdatePlatformUser(ctx, 7, store.PlatformUserUpdate{Role: &role, Revision: &revision})
 			errs <- err
 		}()
 	}
@@ -178,7 +178,7 @@ func TestPlatformUserRevisionAndActorAreCheckedInsideTransaction(t *testing.T) {
 	}
 	newRevision := int64(2)
 	viewer := "viewer"
-	_, _, err := s.UpdatePlatformUser(ctx, 7, store.PlatformUserUpdate{Role: &viewer, Revision: &newRevision, ActorID: 8})
+	_, _, _, err := s.UpdatePlatformUser(ctx, 7, store.PlatformUserUpdate{Role: &viewer, Revision: &newRevision, ActorID: 8})
 	if !errors.Is(err, store.ErrPlatformUserProtected) {
 		t.Fatalf("demoted actor: error=%v", err)
 	}
@@ -199,11 +199,39 @@ func TestConfiguredAdminRoleWritesAreProtected(t *testing.T) {
 		t.Fatal(err)
 	}
 	revision := user.Revision
-	_, _, err = s.UpdatePlatformUser(ctx, 7, store.PlatformUserUpdate{Role: &role, Revision: &revision, AdminIDs: []int64{7}})
+	_, _, _, err = s.UpdatePlatformUser(ctx, 7, store.PlatformUserUpdate{Role: &role, Revision: &revision, AdminIDs: []int64{7}})
 	if !errors.Is(err, store.ErrPlatformUserProtected) {
 		t.Fatalf("configured admin role write: error=%v, want protected", err)
 	}
 	if got := rowCount(t, s, `SELECT COUNT(*) FROM users WHERE id=7 AND granted_role IS NOT NULL`); got != 0 {
 		t.Fatalf("configured admin received a durable grant: %d", got)
+	}
+}
+
+func TestPlatformUserUpdateReportsGrantChange(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	s := openTestStore(t, clock)
+	if err := s.CreateSession(ctx, sessionFor("grant-change", 8, "user", clock.Now()), store.SessionLimits{}); err != nil {
+		t.Fatal(err)
+	}
+	role := "admin"
+	user, err := s.GetUser(ctx, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision := user.Revision
+	_, _, changed, err := s.UpdatePlatformUser(ctx, 8, store.PlatformUserUpdate{Role: &role, Revision: &revision})
+	if err != nil || !changed {
+		t.Fatalf("first grant: changed=%v err=%v", changed, err)
+	}
+	user, err = s.GetUser(ctx, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision = user.Revision
+	_, _, changed, err = s.UpdatePlatformUser(ctx, 8, store.PlatformUserUpdate{Role: &role, Revision: &revision})
+	if err != nil || changed {
+		t.Fatalf("repeat grant: changed=%v err=%v", changed, err)
 	}
 }

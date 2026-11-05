@@ -24,7 +24,7 @@ type AccessStore interface {
 
 type platformUserStore interface {
 	ListPlatformUsers(context.Context, string, int, []int64, []string) ([]store.User, string, error)
-	UpdatePlatformUser(context.Context, int64, store.PlatformUserUpdate) (string, string, error)
+	UpdatePlatformUser(context.Context, int64, store.PlatformUserUpdate) (string, string, bool, error)
 	ListUserGrants(context.Context, int64, string, int) ([]store.ProjectGrant, string, error)
 }
 

@@ -78,7 +78,7 @@ func (s *Server) handleAdminSetUserDisabled(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	ids, names := s.platformAdmins()
-	oldRole, newRole, err := access.UpdatePlatformUser(r.Context(), userID, store.PlatformUserUpdate{
+	oldRole, newRole, grantChanged, err := access.UpdatePlatformUser(r.Context(), userID, store.PlatformUserUpdate{
 		Role: request.Role, Disabled: request.Disabled, Revision: request.Revision,
 		ActorID: currentUserID(r), AdminIDs: ids, AdminUsernames: names,
 	})
@@ -86,8 +86,8 @@ func (s *Server) handleAdminSetUserDisabled(w http.ResponseWriter, r *http.Reque
 		s.writeAccessError(w, r, err)
 		return
 	}
-	if oldRole != newRole {
-		s.logger.Info("platform role changed", "event", "platform_audit", "actor_id", currentUserID(r), "target_id", userID, "old_role", oldRole, "new_role", newRole)
+	if oldRole != newRole || grantChanged {
+		s.logger.Info("platform role changed", "event", "platform_audit", "actor_id", currentUserID(r), "target_id", userID, "old_role", oldRole, "new_role", newRole, "grant_changed", grantChanged)
 	}
 	response := map[string]any{"id": userID, "role": newRole}
 	if request.Disabled != nil {

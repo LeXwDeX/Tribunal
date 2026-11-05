@@ -97,24 +97,24 @@ func (s *Store) ListPlatformUsers(ctx context.Context, cursor string, limit int,
 }
 
 // UpdatePlatformUser serializes the safety checks and the role/disabled write.
-func (s *Store) UpdatePlatformUser(ctx context.Context, userID int64, in store.PlatformUserUpdate) (string, string, error) {
+func (s *Store) UpdatePlatformUser(ctx context.Context, userID int64, in store.PlatformUserUpdate) (string, string, bool, error) {
 	if userID <= 0 || (in.Role != nil && *in.Role != "admin" && *in.Role != "viewer") || (in.Role == nil && in.Disabled == nil) || in.Revision == nil || *in.Revision <= 0 {
-		return "", "", errors.New("sqlite: invalid platform user update")
+		return "", "", false, errors.New("sqlite: invalid platform user update")
 	}
 	i, n := adminConfig(in.AdminIDs, in.AdminUsernames)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
 	defer tx.Rollback()
 	if in.ActorID > 0 {
 		var allowed bool
 		err := tx.QueryRowContext(ctx, `SELECT u.disabled=0 AND (`+configuredAdminSQL+` OR COALESCE(u.granted_role='admin',0)) FROM users u WHERE u.id=?`, i, n, in.ActorID).Scan(&allowed)
 		if errors.Is(err, sql.ErrNoRows) || (err == nil && !allowed) {
-			return "", "", store.ErrPlatformUserProtected
+			return "", "", false, store.ErrPlatformUserProtected
 		}
 		if err != nil {
-			return "", "", err
+			return "", "", false, err
 		}
 	}
 	var disabled, configured bool
@@ -122,13 +122,13 @@ func (s *Store) UpdatePlatformUser(ctx context.Context, userID int64, in store.P
 	var revision int64
 	err = tx.QueryRowContext(ctx, `SELECT u.disabled, COALESCE(u.granted_role,''), u.revision, `+configuredAdminSQL+` FROM users u WHERE u.id = ?`, i, n, userID).Scan(&disabled, &granted, &revision, &configured)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", "", store.ErrNotFound
+		return "", "", false, store.ErrNotFound
 	}
 	if err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
 	if in.Revision != nil && *in.Revision != revision {
-		return "", "", store.ErrStaleRevision
+		return "", "", false, store.ErrStaleRevision
 	}
 	oldRole := "viewer"
 	if !disabled && (configured || granted == "admin") {
@@ -152,16 +152,16 @@ func (s *Store) UpdatePlatformUser(ctx context.Context, userID int64, in store.P
 	}
 	if (userID == in.ActorID && in.ActorID > 0 && ((oldRole == "admin" && newRole != "admin") || (!disabled && newDisabled))) ||
 		(configured && (in.Role != nil || (!disabled && newDisabled))) {
-		return "", "", store.ErrPlatformUserProtected
+		return "", "", false, store.ErrPlatformUserProtected
 	}
 	if oldRole == "admin" && newRole != "admin" {
 		var count int
 		err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM users u WHERE u.disabled = 0 AND (`+configuredAdminSQL+` OR u.granted_role = 'admin')`, i, n).Scan(&count)
 		if err != nil {
-			return "", "", err
+			return "", "", false, err
 		}
 		if count <= 1 {
-			return "", "", store.ErrPlatformUserProtected
+			return "", "", false, store.ErrPlatformUserProtected
 		}
 	}
 	if in.Role != nil && newGranted != granted {
@@ -171,22 +171,23 @@ func (s *Store) UpdatePlatformUser(ctx context.Context, userID int64, in store.P
 			_, err = tx.ExecContext(ctx, `UPDATE users SET granted_role=NULL, granted_by=NULL, granted_at=NULL WHERE id=?`, userID)
 		}
 		if err != nil {
-			return "", "", err
+			return "", "", false, err
 		}
 	}
+	grantChanged := in.Role != nil && newGranted != granted
 	_, err = tx.ExecContext(ctx, `UPDATE users SET disabled=?, role=?, revision=revision+1 WHERE id=?`, boolInt(newDisabled), newRole, userID)
 	if err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
 	if !disabled && newDisabled {
 		if err := revokeUserCredentialsTx(ctx, tx, userID); err != nil {
-			return "", "", err
+			return "", "", false, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
-	return oldRole, newRole, nil
+	return oldRole, newRole, grantChanged, nil
 }
 
 func (s *Store) ListUserGrants(ctx context.Context, userID int64, cursor string, limit int) ([]store.ProjectGrant, string, error) {
