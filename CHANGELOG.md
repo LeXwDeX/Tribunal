@@ -58,6 +58,11 @@
 - **空 diff 评审不再 PASS**（[#329](https://github.com/LeXwDeX/Tribunal/issues/329)）：空 diff 的 MR 返回 INCOMPLETE，摘要说明“没有可评审的变更”，启用 commit status 时写 failed；全部变更被 ignore 的既有 PASS 行为不变。控制台可见性由 [#331](https://github.com/LeXwDeX/Tribunal/issues/331) 跟踪。
 - **控制台**：「模型与档位」页只把 `default` 显示为「评审档位」，按固定的八步拓扑（探索、提出、挑战、裁决、汇报）列出各步骤的 provider，`onboarding` 单独标为「项目接入」；项目注册、项目设置和手动触发评审对话框不再有档位选择，项目列表不再有档位列。执行阶段轨道里 `explore` 和 `plan` 归入「规划」，`code-review`、`review`、`reasoner` 和 `validate` 归入「提出」；「项目接入」一行在 onboarding 没有 provider 时显示「未配置」。
 
+### 修复
+
+- **进程重启后带 token 预算的评审可以续跑**（[#325](https://github.com/LeXwDeX/Tribunal/issues/325)）：进程被 SIGKILL 或崩溃后，启动恢复会重启运行中的节点（attempt+1）并把该工作流的用量标记为不完整（`usage_incomplete=true`，API 和控制台仍显示）。v1.3.0 的不完整用量预算策略曾使设置了 `max_tokens > 0` 的工作流在恢复后所有模型节点都在调用模型前以 `unsafe_model_response` 失败，被中断的评审无法续跑。现在仅由进程中断（节点重启或中止）造成的不完整不再阻断预算检查，工作流以已记录的用量作为下限继续；节点自身上报的不完整（模型未返回或返回无效用量、计数溢出）仍按 fail-closed 以 `unsafe_model_response` 阻断，行为不变。已接受的风险：每次恢复的 attempt 可能已消耗一次未记录的在途模型调用，实际花费可能超过记录总量，极少数情况下超过配置的预算。
+- **恢复取消原因写入日志**：启动恢复取消工作流时记录一条 INFO 日志 `recovery cancelled workflow`，带 `workflow_id` 和稳定的 `cause`（如 `profile_hash_changed`、`execution_identity_changed`、`config_changed`、`diff_version_changed`、`control_not_current`、`workspace_identity_changed`、`dossier_invalid`）。工作流中保存的取消原因和发布行为不变。原日志 `recovery skipped workflow with changed configuration`（含 `config_hash`）已由 `cause=config_changed` 取代。
+
 ## [1.2.0] - 2026-10-29
 
 > v1.2.0 已发布（2026-11-05，tag `v1.2.0` 指向 `4e95f4f`，GitHub Release 为 Latest）。候选范围是 [v1.1.0...v1.2.0](https://github.com/LeXwDeX/Tribunal/compare/v1.1.0...v1.2.0)，包含 #143 与迁移 `0020`–`0024`；本节合并了原 `Unreleased` 条目。真实实例升级已验证 `0016`–`0024` 的应用、健康检查、内置扩展和 #143 授权迁移；`0020`/`0022` 带历史数据回填、完整 2 用户／2 项目矩阵和升级后新真实评审仍未做。

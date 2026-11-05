@@ -301,3 +301,71 @@ func TestExecutorFailureRetainsCacheAndReasoningUsage(t *testing.T) {
 		t.Fatalf("failed node usage = %+v, want cache and reasoning tokens", out.Usage)
 	}
 }
+
+func recoveredBudgetView(t *testing.T, restartedOnly bool) dag.WorkflowView {
+	t.Helper()
+	wf := dag.WorkflowView{
+		ID:              "wf-recovered",
+		Spec:            dag.GraphSpec{Budget: dag.Budget{MaxTokens: 100}},
+		Usage:           dag.Usage{InputTokens: 7, OutputTokens: 3},
+		UsageIncomplete: true,
+		UsageUnreported: !restartedOnly,
+	}
+	return wf
+}
+
+func TestTokenBudgetContinuesAfterInterruptionOnlyIncompleteUsage(t *testing.T) {
+	wf := recoveredBudgetView(t, true)
+	executor := newTestExecutor(t, ExecutorDeps{
+		Snapshot: func(context.Context, string) (dag.WorkflowView, error) { return wf, nil },
+	})
+	used, max, err := executor.tokenBudget(context.Background(), wf.ID)
+	if err != nil || used != 10 || max != 100 {
+		t.Fatalf("tokenBudget = %d/%d err=%v, want committed usage 10 of 100 without error", used, max, err)
+	}
+	exhausted, err := executor.tokenBudgetExhausted(context.Background(), wf.ID)
+	if err != nil || exhausted {
+		t.Fatalf("tokenBudgetExhausted = %t err=%v, want false without error", exhausted, err)
+	}
+}
+
+func TestTokenBudgetBlocksWhenNodeReportedUnreportedUsage(t *testing.T) {
+	wf := recoveredBudgetView(t, false)
+	executor := newTestExecutor(t, ExecutorDeps{
+		Snapshot: func(context.Context, string) (dag.WorkflowView, error) { return wf, nil },
+	})
+	if _, _, err := executor.tokenBudget(context.Background(), wf.ID); !llm.IsUnsafeResponse(err) {
+		t.Fatalf("tokenBudget error = %v, want unsafe usage error", err)
+	}
+	if _, err := executor.tokenBudgetExhausted(context.Background(), wf.ID); !llm.IsUnsafeResponse(err) {
+		t.Fatalf("tokenBudgetExhausted error = %v, want unsafe usage error", err)
+	}
+}
+
+func TestRecoveredWorkflowModelNodeReachesAgent(t *testing.T) {
+	wf := recoveredBudgetView(t, true)
+	calls := 0
+	executor := newTestExecutor(t, ExecutorDeps{
+		Profile:  onboardingProfile(),
+		Snapshot: func(context.Context, string) (dag.WorkflowView, error) { return wf, nil },
+		AgentRun: func(ctx context.Context, spec agent.RunSpec) (*agent.RunResult, error) {
+			calls++
+			if spec.BeforeTurn != nil {
+				if err := spec.BeforeTurn(ctx, llm.Usage{}); err != nil {
+					return nil, err
+				}
+			}
+			return &agent.RunResult{Output: &OnboardingOut{Overview: "x"}}, nil
+		},
+	})
+	params, _ := json.Marshal(onboardingParams{Provider: "claude"})
+	if _, err := executor.Execute(context.Background(), dag.NodeInput{
+		WorkflowID: wf.ID,
+		Node:       dag.NodeSpec{ID: "onboarding", Kind: KindOnboarding, Params: params},
+	}); err != nil {
+		t.Fatalf("recovered model node failed before the model call: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("agent calls = %d, want 1", calls)
+	}
+}

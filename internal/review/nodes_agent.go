@@ -735,7 +735,12 @@ func (e *Executor) tokenBudget(ctx context.Context, workflowID string) (int64, i
 		CacheReadTokens: wf.Usage.CacheReadTokens, CacheWriteTokens: wf.Usage.CacheWriteTokens, ReasoningTokens: wf.Usage.ReasoningTokens}) {
 		return 0, 0, errors.New("review: invalid workflow token usage")
 	}
-	if wf.UsageIncomplete && wf.Spec.Budget.MaxTokens > 0 {
+	// Only usage that a node reported as incomplete blocks the budget check.
+	// Incompleteness caused purely by a process interruption (restart/abort)
+	// continues with the committed usage as a lower bound. Accepted risk: each
+	// recovered attempt may have spent up to one in-flight model call that was
+	// never recorded.
+	if wf.UsageUnreported && wf.Spec.Budget.MaxTokens > 0 {
 		return 0, 0, unsafeUsageError()
 	}
 	return sumTokens(wf.Usage.InputTokens, wf.Usage.OutputTokens), wf.Spec.Budget.MaxTokens, nil

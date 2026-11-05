@@ -372,11 +372,13 @@ func applyNodeCompleted(wf *WorkflowView, ev Event) error {
 	view.Usage = usage
 	view.UsageIncomplete = view.UsageIncomplete || payload.UsageIncomplete || invalid
 	wf.UsageIncomplete = wf.UsageIncomplete || view.UsageIncomplete
+	wf.UsageUnreported = wf.UsageUnreported || payload.UsageIncomplete || invalid
 	view.Error = ""
 	view.Reason = ""
 	finishNode(wf, *view, NodeCompleted, ev)
 	if wf.Usage.add(view.Usage) {
 		wf.UsageIncomplete = true
+		wf.UsageUnreported = true
 	}
 	return nil
 }
@@ -403,6 +405,7 @@ func applyNodeTerminal(wf *WorkflowView, ev Event, status NodeStatus) error {
 		view.Usage = usage
 		view.UsageIncomplete = view.UsageIncomplete || payload.UsageIncomplete || invalid
 		wf.UsageIncomplete = wf.UsageIncomplete || view.UsageIncomplete
+		wf.UsageUnreported = wf.UsageUnreported || payload.UsageIncomplete || invalid
 		view.Error = payload.Error
 		view.Reason = payload.Reason
 		view.ErrorStatus = payload.ErrorStatus
@@ -412,6 +415,7 @@ func applyNodeTerminal(wf *WorkflowView, ev Event, status NodeStatus) error {
 		finishNode(wf, *view, NodeFailed, ev)
 		if wf.Usage.add(view.Usage) {
 			wf.UsageIncomplete = true
+			wf.UsageUnreported = true
 		}
 		return nil
 	case EventNodeAborted:
@@ -451,12 +455,15 @@ func applyNodeTerminal(wf *WorkflowView, ev Event, status NodeStatus) error {
 		}
 		view.Reason = payload.Reason
 		view.UsageIncomplete = view.UsageIncomplete || payload.UsageIncomplete
+		wf.UsageUnreported = wf.UsageUnreported || payload.UsageIncomplete
 		if payload.Usage != nil {
 			usage, invalid := sanitizeUsage(*payload.Usage)
 			view.Usage = usage
 			view.UsageIncomplete = view.UsageIncomplete || invalid
+			wf.UsageUnreported = wf.UsageUnreported || invalid
 			if wf.Usage.add(usage) {
 				wf.UsageIncomplete = true
+				wf.UsageUnreported = true
 			}
 		}
 		wf.UsageIncomplete = wf.UsageIncomplete || view.UsageIncomplete

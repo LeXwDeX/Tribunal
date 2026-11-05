@@ -875,6 +875,10 @@ curl -fsS http://127.0.0.1:18080/readyz
 
 `0024_workflow_usage_incomplete.sql` 只向 `workflows` 和 `workflow_nodes` 追加非空 `usage_incomplete` 列，默认 false；无 down migration。历史行不回填，false 只能表示没有检测到缺失，不能证明历史账单或预算用量完整。新事件可带此字段；旧二进制可能因严格解码拒绝这些事件。升级前按第 7 节做一致性备份并核验数据库、工作区、配置和匹配镜像；不要只换回旧镜像。回退时先备份当前状态、核对事件与目标版本兼容性，并按第 7 节在隔离环境验证匹配的升级前快照和镜像；恢复旧快照会丢失之后的新本地数据，须另外核对 GitLab 等外部副作用。`0020` 已在 `cf29656` 合并，`0021`–`0023` 随 PR #180 合并；当前源码检查未发现这些迁移重建上述两张表，升级前仍须重新核验迁移编号、顺序及实际影响，不能据此承诺兼容回退。
 
+**重启恢复与 token 预算（#325）**：进程被 SIGKILL 或崩溃后，启动恢复会重启运行中的节点（attempt+1），并把该工作流的用量标记为不完整（`usage_incomplete=true`，API 和控制台仍显示）。对设置了 `max_tokens > 0` 的工作流，仅由进程中断（节点重启或中止）造成的不完整不再阻断预算检查，工作流以已记录的用量作为下限继续运行；节点自身上报的不完整（模型未返回或返回无效用量、计数溢出）仍按 fail-closed 以 `unsafe_model_response` 阻断。已接受的风险：每次恢复的 attempt 可能已消耗一次未记录的在途模型调用，因此实际花费可能超过记录总量，极少数情况下超过配置的预算；对成本敏感时，按供应方账单核对。
+
+**恢复取消的原因**：恢复后的评审以取消结束时，在日志中按 `workflow_id` 查找 INFO 日志 `recovery cancelled workflow`，其 `cause` 给出稳定原因：`profile_hash_changed`（评审档位或其引用的模型身份变化）、`execution_identity_changed`（执行身份变化，例如扩展或 provider 配置变化）、`config_changed`（仓库评审配置、ignore 规则或提示词包变化，取代原日志 `recovery skipped workflow with changed configuration`）、`diff_version_changed`（MR diff 版本已更新）、`control_not_current`（已有更新的评审代次或评审已取消）、`workspace_identity_changed`、`index_ineligible`、`mr_inputs_unavailable`、`repo_config_invalid`、`profile_explicit_invalid`、`publication_policy_invalid`、`workspace_provenance_invalid`、`dossier_invalid`、`dossier_mismatch`，以及仓库 Skill 相关的 `repository_skill_capability_unsupported`、`repository_skill_changed`、`repository_skill_deny_invalid`、`repository_skill_resolve_failed`。工作流中保存的取消原因和发布行为不受此日志影响；处理方式是先消除对应变化，再重新触发评审。
+
 新的 LLM 审计只写安全结构计数、用量及固定状态，不写 prompt、模型输出、工具参数/输出、推理内容、错误原文或上游响应 ID。调用列表使用本地 `id`；新旧行的顶层 `request_id` 不再对任何调用方返回。`include_payload=true` 仍要求项目 manage：历史 payload 不删除、不迁移，可能包含明文 prompt、输出和上游 ID。数据库、WAL、快照与备份也可能保有历史原文，限制访问并按组织的保留与密钥事件流程处理；不要将历史内容复制到日志、聊天或工单，也不要为升级擅自删除历史行。回退旧二进制可能再次暴露历史字段。
 
 新 payload 的 request、response 分别有 `_format=audit_metadata_v1`；未标记历史 payload 可能是完整旧请求/响应、旧元数据或截断摘要，甚至无法判别。升级依赖该接口的脚本以格式标记和字段类型分支处理，保留 unknown 分支，不得把新元数据的数字 `messages` 当成旧消息数组。详见[节点调用审计格式](design/03-http-api.md#节点调用审计格式)。
