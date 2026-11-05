@@ -355,7 +355,9 @@ func TestRunRejectsWrongMCPKeyAndReleasesResources(t *testing.T) {
 	t.Setenv("REVIEW_MASTER_KEY", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{2}, 32)))
 	var logs bytes.Buffer
 	err = run(ctx, []string{"--config", path}, &bytes.Buffer{}, &logs)
-	if err == nil || err.Error() != "migrate MCP secrets: storage update failed" || strings.Contains(logs.String(), "canary-startup") {
+	if err == nil || err.Error() != "initialize secrets: master key does not match stored encrypted data" || strings.Contains(logs.String(), "canary-startup") ||
+		!strings.Contains(logs.String(), "master key does not match stored encrypted data; refusing to start") || !strings.Contains(logs.String(), "env=REVIEW_MASTER_KEY") ||
+		strings.Contains(logs.String(), os.Getenv("REVIEW_MASTER_KEY")) {
 		t.Fatalf("wrong key result: %v, logs=%s", err, &logs)
 	}
 	lock, err := sqlite.LockDataDir(dir)

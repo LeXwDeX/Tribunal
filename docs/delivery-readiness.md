@@ -61,7 +61,7 @@
 | 进行中修改模型、重启后身份取消 | BLOCKED | 需要真实运行中工作流与重启；本次未执行 |
 | link-local 422 `egress_denied` | PASS（部分） | 创建指向 link-local 的模型后，`POST /models/{id}/test` 返回 422；日志只保留状态码，未保留响应体，未独立证明 `egress_denied` 错误码。模型随后被删除 |
 | 用户管理只读矩阵 | PASS | 全局模式开/关已验证（`/me.global_read` true/false）；U2 对 P1 read 时写 403、对 P2 manage 时项目 PATCH 200；跨项目 404；平台扩展 403；停用/启用/重登流程通过 |
-| 错误 masterkey 启动与模型 unavailable | FAIL | 使用合法但错误的 32 字节 masterkey 启动时，进程在 `migrate MCP secrets` 阶段失败并反复重启，readyz 未就绪；日志无敏感信息。恢复正确 masterkey 后 readyz 200、模型和项目恢复。未达到“进程不失败、模型 unavailable”的期望 |
+| 错误 masterkey 启动与模型 unavailable | 待复测 | 期望：错误主密钥应拒绝启动并给出明确、脱敏的错误（继续运行会用错误密钥加密新凭据，造成同库混用两套密钥）；单条模型凭据不可解密时标记 unavailable。2026-11-05 实测（旧行为）：合法但错误的 32 字节 masterkey 在 `migrate MCP secrets` 阶段失败并反复重启，日志无敏感信息，恢复正确 masterkey 后恢复。代码已由 #332 修复，待 dev-110 真实环境复测 |
 | 恢复默认后 hash/digest 等于升级前 | BLOCKED | 当前无覆盖时的默认 profile hash 为 `50495cdf…`；升级前未记录基线；override 后的评审被 #327 阻塞，未能对比变化与恢复 |
 | 新 MR head 评审创建 workflow 前永久失败 | FAIL | #327：MR 更新到新 head 后连续 3 次触发（generation 17–19）均为 `review execution failed`，未创建 workflow；GitLab diff/version/changes 正常 |
 | 版本回退演练（恢复快照 + v1.2.0 镜像） | PASS | 升级前一致性快照恢复到新卷，用 v1.2.0 镜像与原 masterkey 启动，readyz 200，项目与评审可读 |
@@ -70,7 +70,7 @@
 | 生产人工 Review（stage 3） | PENDING | 需维护者与明确授权 |
 | tag `v1.3.0` 与 GitHub Release | PENDING | 需用户明确授权 |
 
-未完成的“发布前必须”项标记为 BLOCKED、FAIL 或 PASS（部分），未用 mock 或 CI 结果替代。解除条件：#325 中断恢复、#327 新 head 评审失败需修复并重跑；masterkey 启动行为需明确期望后修复；恢复默认 hash 需在 #327 修复后补测。
+未完成的“发布前必须”项标记为 BLOCKED、FAIL 或 PASS（部分），未用 mock 或 CI 结果替代。解除条件：#325 中断恢复、#327 新 head 评审失败需修复并重跑；masterkey 启动行为的期望已在 #332 明确并修复代码，仅剩 dev-110 真实环境复测；恢复默认 hash 需在 #327 修复后补测。
 
 ### v1.3.0 真实实例验收记录（2026-11-05）
 
@@ -103,11 +103,11 @@
 - SSE：U2 在评审运行中打开 P1 评审流，撤 P1 grant 后流关闭；关闭发生在撤权之后，撤权前流仍保持。
 - 豁免：webhook 归属、部分发布失败、stale、INCOMPLETE、升级会话（原浏览器 session 跨升级）在本次真实矩阵中未逐项执行；前四项仅由本地自动化测试覆盖。
 
-未执行：pending publication 夹具、运行中修改模型后重启取消。错误 masterkey 已测试但结果 FAIL；恢复默认 hash 因 #327 阻塞。
+未执行：pending publication 夹具、运行中修改模型后重启取消。错误 masterkey 已按旧期望测试（旧行为 FAIL，期望与代码已由 #332 调整，待复测）；恢复默认 hash 因 #327 阻塞。
 
 ### 错误 masterkey 与 profile hash 测试记录（2026-11-05）
 
-- 错误 masterkey：停服后把 `REVIEW_MASTER_KEY` 替换为合法但错误的 32 字节值。进程启动到 `storage opened` 后报 `migrate MCP secrets: storage update failed`，反复重启，readyz 未就绪；日志未出现敏感值。恢复正确 key 后 readyz 200，模型 available，项目列表 200。
+- 错误 masterkey：停服后把 `REVIEW_MASTER_KEY` 替换为合法但错误的 32 字节值。进程启动到 `storage opened` 后报 `migrate MCP secrets: storage update failed`，反复重启，readyz 未就绪；日志未出现敏感值。恢复正确 key 后 readyz 200，模型 available，项目列表 200。#332 之后错误信息改为 `initialize secrets: master key does not match stored encrypted data`，期望也调整为“拒绝启动并给出明确、脱敏的错误”，复测待进行。
 - profile hash：无覆盖、无用户模型时，默认 workflow 的 `profile_hash` 为 `50495cdf…`。创建用户模型并写入 override 后，手动触发的评审未创建 workflow（`review execution failed`），无法取得 override 后的 hash；删除 override 与模型后，新触发仍被 #327 阻塞。
 
 ## v1.2.0 候选批次本地修复验证（PR #128）
