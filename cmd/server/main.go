@@ -150,10 +150,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return errors.New("initialize secrets: invalid master key")
 	}
+	// Model credentials do not authenticate the key here; a model whose
+	// credential cannot be opened is reported unavailable. Key evidence is
+	// checked by ConfigureMCPSecrets below.
 	if err := db.ConfigureModelSecrets(ctx, cipher); err != nil {
-		if errors.Is(err, sqlite.ErrMasterKeyMismatch) {
-			return masterKeyMismatch(logger, cfg.Secrets.MasterKeyEnv)
-		}
 		return errors.New("initialize model secrets: storage update failed")
 	}
 	unverifiedMCPKey, err := db.ConfigureMCPSecrets(ctx, cipher)

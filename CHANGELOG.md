@@ -61,7 +61,7 @@
 ### 修复
 
 - **主密钥不匹配时明确拒绝启动**（[#332](https://github.com/LeXwDeX/Tribunal/issues/332)）：配置的主密钥打不开库中已有密文时，服务记录一行 ERROR `master key does not match stored encrypted data; refusing to start`（只含环境变量名，不含密钥值）并退出，错误为 `initialize secrets: master key does not match stored encrypted data`，取代此前误导性的 `migrate MCP secrets: storage update failed`。这是有意拒绝：继续启动会用另一把密钥加密新凭据，使同一数据库混用两把密钥。仍不支持主密钥轮换。
-- **用户模型凭据纳入主密钥校验证据**（[#332](https://github.com/LeXwDeX/Tribunal/issues/332)）：校验依据顺序为 MCP 校验标记、项目 token/webhook 密文，再到用户模型 API key 密文（任一能打开即可）；有密文但都打不开时拒绝启动，且不写入校验标记。此前仅含用户模型凭据的库会用错误密钥写入新校验标记，导致之后正确密钥也无法启动，现已修复。
+- **用户模型凭据纳入主密钥校验证据（纵深防御）**（[#332](https://github.com/LeXwDeX/Tribunal/issues/332)）：校验依据顺序为 MCP 校验标记、项目 token/webhook 密文，再到用户模型 API key 密文（任一能打开即可）；有证据但都打不开时拒绝启动，且不写入校验标记。校验标记自迁移 0017 起在每次成功启动时写入，因此含模型凭据却无校验标记的库通常不会出现，此项主要覆盖校验标记缺失（如被手工删除）的情形，避免用错误密钥写入新校验标记。
 
 ## [1.2.0] - 2026-10-29
 
