@@ -63,7 +63,6 @@ func TestSummaryFoldsReasonerDuplicatesOfInlineFindings(t *testing.T) {
 	body := summaryFor(t, groups)
 	for _, dup := range []string{
 		"charge 的余额校验方向写反，且可能返回负余额",
-		"load_config 用 eval 执行配置文件内容",
 		"find_user 以 % 格式化拼接 SQL，存在注入且游标未关闭",
 		"会话缓存用 pickle 反序列化，可导致任意代码执行",
 		"read_token 把支付令牌打印到标准输出",
@@ -76,12 +75,12 @@ func TestSummaryFoldsReasonerDuplicatesOfInlineFindings(t *testing.T) {
 		}
 	}
 	// Folded duplicates are referenced under the inline finding, not dropped.
-	if !strings.Contains(body, "相关描述") || !strings.Contains(body, "load_config 用 eval 执行配置文件内容") {
+	if !strings.Contains(body, "相关描述") || !strings.Contains(body, "read_token 把支付令牌打印到标准输出") {
 		t.Errorf("folded duplicate must be referenced under 相关描述:\n%s", body)
 	}
 	// Header counts are of listed findings: the 18 duplicates are not counted twice.
-	if !strings.Contains(body, "无法定位到行的问题（5）") {
-		t.Errorf("unpositioned section must list the 2 distinct findings and the 3 duplicates of prose-only inline titles, which are kept conservatively:\n%s", body)
+	if !strings.Contains(body, "无法定位到行的问题（8）") {
+		t.Errorf("unpositioned section must list the 2 distinct findings and the 6 duplicates whose titles share too little content, which are kept conservatively:\n%s", body)
 	}
 }
 
@@ -147,6 +146,22 @@ func TestSummaryNeverFoldsMoreSevereOrDistinctFindings(t *testing.T) {
 			Title: "用户输入未做校验", Body: "create_user 没有校验 email 格式。", Decision: publish, PositionOK: true},
 			Group{ID: "b", Severity: SeverityP1, Title: "create_user 未校验用户输入导致 SQL 注入",
 				Body: "create_user 把输入拼进 SQL。", Decision: publish}},
+		{"same function negative vs empty", Group{ID: "a", Severity: SeverityP2, Path: "api/x.py", Line: 3, Side: SideNew,
+			Title: "parse_amount 未处理负数金额", Body: "parse_amount 接受负数金额并写入账本。", Decision: publish, PositionOK: true},
+			Group{ID: "b", Severity: SeverityP2, Title: "parse_amount 未处理空字符串金额",
+				Body: "parse_amount 对空字符串抛出 ValueError。", Decision: publish}},
+		{"same function encoding vs missing", Group{ID: "a", Severity: SeverityP2, Path: "api/x.py", Line: 3, Side: SideNew,
+			Title: "load_config 未处理文件编码异常", Body: "load_config 读取非 UTF-8 文件时崩溃。", Decision: publish, PositionOK: true},
+			Group{ID: "b", Severity: SeverityP2, Title: "load_config 未处理文件不存在异常",
+				Body: "load_config 打开不存在的路径时崩溃。", Decision: publish}},
+		{"qualified name parts are not content", Group{ID: "a", Severity: SeverityP2, Path: "api/x.py", Line: 3, Side: SideNew,
+			Title: "TokenBucket.allow 并发更新 tokens 存在竞态", Body: "TokenBucket.allow 无锁更新 tokens。", Decision: publish, PositionOK: true},
+			Group{ID: "b", Severity: SeverityP2, Title: "TokenBucket.allow 更新 tokens 时整数溢出",
+				Body: "TokenBucket.allow 的 tokens 累加可能溢出。", Decision: publish}},
+		{"english titles share only generic words", Group{ID: "a", Severity: SeverityP1, Path: "api/x.py", Line: 3, Side: SideNew,
+			Title: "fetch_user does not close database connection", Body: "fetch_user leaks the connection.", Decision: publish, PositionOK: true},
+			Group{ID: "b", Severity: SeverityP2, Title: "fetch_user opens database connection per row",
+				Body: "fetch_user opens a connection for every row.", Decision: publish}},
 		{"same severity distinct issue", Group{ID: "a", Severity: SeverityP2, Path: "api/x.py", Line: 3, Side: SideNew,
 			Title: "用户输入未做校验", Body: "create_user 没有校验 email 格式。", Decision: publish, PositionOK: true},
 			Group{ID: "b", Severity: SeverityP2, Title: "create_user 未校验用户输入导致 SQL 注入",
@@ -158,7 +173,36 @@ func TestSummaryNeverFoldsMoreSevereOrDistinctFindings(t *testing.T) {
 			t.Errorf("%s: candidate must stay listed:\n%s", c.name, body)
 		}
 	}
-	if got := len(SummaryFoldedGroups(loadSummaryDuplicates(t))); got != 25 {
-		t.Errorf("SummaryFoldedGroups kept %d groups, want 25", got)
+	if got := len(SummaryFoldedGroups(loadSummaryDuplicates(t))); got != 28 {
+		t.Errorf("SummaryFoldedGroups kept %d groups, want 28", got)
+	}
+}
+
+func TestSummaryFoldCarriesNestedRelatedAndResortsBeforeCap(t *testing.T) {
+	publish := &FindingDecision{Action: ActionPublish}
+	inline := Group{ID: "a", Severity: SeverityP2, Path: "api/x.py", Line: 3, Side: SideNew,
+		Title: "read_token 把支付令牌打印到标准输出", Body: "read_token 把支付令牌打印到标准输出，造成泄露。", Decision: publish, PositionOK: true}
+	pathless := Group{ID: "b", Severity: SeverityP2, Title: "read_token 把支付令牌打印到标准输出", Body: "read_token 把支付令牌打印到标准输出，造成泄露。",
+		Decision: publish, Related: []RelatedGroup{{ID: "c", Severity: SeverityP2, Title: "nested related title"}}}
+	body := summaryFor(t, []Group{inline, pathless})
+	if !strings.Contains(body, "nested related title") || !strings.Contains(body, "read_token 把支付令牌打印到标准输出") || strings.Contains(body, "#### ") {
+		t.Fatalf("the folded group's own related items must be carried along:\n%s", body)
+	}
+
+	// Related items are deduplicated and sorted by severity before the cap.
+	ref := Group{Related: []RelatedGroup{{ID: "x1", Severity: SeverityP2, Line: 1, Title: "old p2"}}}
+	got := SortRelated(append(append([]RelatedGroup(nil), ref.Related...), RelatedGroup{ID: "d", Severity: SeverityP1, Title: "p1"}, RelatedGroup{ID: "x1", Severity: SeverityP2, Title: "dup"}))
+	if len(got) != 2 || got[0].ID != "d" || got[1].ID != "x1" {
+		t.Fatalf("related must be deduplicated and sorted by severity: %+v", got)
+	}
+}
+
+func TestSummaryDoesNotFoldSameTextOnDifferentSides(t *testing.T) {
+	publish := &FindingDecision{Action: ActionPublish}
+	oldSide := Group{ID: "a", Severity: SeverityP2, Path: "b.go", Line: 1, Side: SideOld, Title: "bad assignment", Body: "the assignment is wrong", Decision: publish}
+	newSide := oldSide
+	newSide.ID, newSide.Side = "b", SideNew
+	if body := summaryFor(t, []Group{oldSide, newSide}); strings.Count(body, "#### [P2] bad assignment") != 2 {
+		t.Fatalf("findings on different sides of one path must both stay listed:\n%s", body)
 	}
 }

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/LeXwDeX/tribunal/internal/agent"
@@ -121,5 +122,43 @@ func TestPublisherRecordsFailedCommitStatusForBlockingVerdict(t *testing.T) {
 	}
 	if publications[0].PublishKey != wantKey {
 		t.Fatalf("status publish key = %q, want %q", publications[0].PublishKey, wantKey)
+	}
+}
+
+// The commit status description counts what the summary lists: a pathless
+// finding folded under the inline finding it duplicates is not counted twice.
+func TestPublisherCommitStatusDescriptionUsesFoldedCounts(t *testing.T) {
+	f := newReviewFixture(t, reviewTestHead)
+	profile := f.profiles["default"]
+	profile.Challenge.Only = []string{"info"}
+	f.profiles["default"] = profile
+	run := f.runner.Run
+	f.service.agentRun = func(ctx context.Context, spec agent.RunSpec) (*agent.RunResult, error) {
+		result, err := run(ctx, spec)
+		if err != nil {
+			return nil, err
+		}
+		if out, ok := result.Output.(*review.CodeReviewOut); ok && len(out.Findings) > 0 {
+			out.Findings[0].Title = "load_config 用 eval 执行配置文件内容"
+			out.Findings[0].Body = "load_config 把配置文件交给 eval 执行，可导致任意代码执行。"
+			duplicate := out.Findings[0]
+			duplicate.Path, duplicate.Line, duplicate.Side = "", 0, ""
+			out.Findings = append(out.Findings, duplicate)
+		}
+		return result, nil
+	}
+	f.defaults.CommitStatus = true
+	f.service.reviewDefaults = f.defaults
+	f.publisher.reviewDefaults = f.defaults
+
+	if err := f.service.Handle(context.Background(), f.seedReview(t, "job-folded-status")); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(f.gitlab.statuses) != 1 {
+		t.Fatalf("commit statuses = %d, want 1", len(f.gitlab.statuses))
+	}
+	description := f.gitlab.statuses[0].Description
+	if !strings.Contains(description, "P2 1)") {
+		t.Fatalf("commit status description %q must count the duplicated finding once", description)
 	}
 }

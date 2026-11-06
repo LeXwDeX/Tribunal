@@ -102,7 +102,7 @@ func RenderSummary(in SummaryInput) (string, error) {
 		}
 		if !group.PositionOK {
 			if related := fold.related[group.ID]; len(related) > 0 {
-				group.Related = append(append([]RelatedGroup(nil), group.Related...), related...)
+				group.Related = SortRelated(append(append([]RelatedGroup(nil), group.Related...), related...))
 			}
 			unpositioned = append(unpositioned, group)
 			continue

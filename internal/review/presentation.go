@@ -225,6 +225,133 @@ func englishContentWords(title string) map[string]struct{} {
 	return out
 }
 
+// summaryTitleContentMatches is the stricter title-content rule of the summary
+// folding. A pathless candidate has no location to anchor it, so the same
+// function name plus a similar-sounding title is not enough: the titles must
+// share at least two content units that cover a minimum share of the second
+// (candidate) title's CJK units, or of the union of English words. CJK units are
+// bigrams built after removing stop words from the text, so a fragment that
+// straddles a stop word (未处理 -> 未处/理文) never counts; English words
+// exclude any part of a code identifier of either title, including the parts
+// of a qualified name such as `Type.method`. Inline folding keeps the legacy
+// titleContentMatches.
+func summaryTitleContentMatches(a, b string) bool {
+	ca, cb := cjkContentUnits(a), cjkContentUnits(b)
+	if shared := sharedCount(ca, cb); shared >= nearDuplicateTitleContent && len(cb) > 0 &&
+		float64(shared)/float64(len(cb)) >= nearDuplicateCJKCoverage {
+		return true
+	}
+	exclude := identifierParts(a, b)
+	ea, eb := englishContentUnits(a, exclude), englishContentUnits(b, exclude)
+	shared := sharedCount(ea, eb)
+	union := len(ea) + len(eb) - shared
+	return shared >= nearDuplicateTitleContent && union > 0 && float64(shared)/float64(union) >= nearDuplicateTitleCoverage
+}
+
+// summaryStopWords are CJK words too common in titles to count as shared content.
+// They are removed from the text before bigrams are built.
+var summaryStopWords = []string{
+	"存在", "问题", "导致", "可能", "没有", "不能", "需要", "应该",
+	"配置", "文件", "用户", "输入", "校验", "参数", "数据", "处理", "检查",
+}
+
+func cjkContentUnits(title string) map[string]struct{} {
+	out := make(map[string]struct{})
+	var run []rune
+	flush := func() {
+		var segment []rune
+		endSegment := func() {
+			for i := 0; i+1 < len(segment); i++ {
+				out[string(segment[i:i+2])] = struct{}{}
+			}
+			segment = segment[:0]
+		}
+		for i := 0; i < len(run); i++ {
+			if i+1 < len(run) && isSummaryStopWord(string(run[i:i+2])) {
+				endSegment()
+				i++
+				continue
+			}
+			segment = append(segment, run[i])
+		}
+		endSegment()
+		run = run[:0]
+	}
+	for _, r := range title {
+		if unicode.Is(unicode.Han, r) {
+			run = append(run, r)
+		} else {
+			flush()
+		}
+	}
+	flush()
+	return out
+}
+
+func isSummaryStopWord(word string) bool {
+	for _, stop := range summaryStopWords {
+		if word == stop {
+			return true
+		}
+	}
+	return false
+}
+
+// identifierParts returns the lowercase parts of every code identifier in the
+// titles: qualified names (`TokenBucket.allow`), snake_case and camelCase.
+func identifierParts(titles ...string) map[string]struct{} {
+	out := make(map[string]struct{})
+	for _, title := range titles {
+		for _, field := range strings.FieldsFunc(title, func(r rune) bool {
+			return !(r < 0x80 && (unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '.'))
+		}) {
+			field = strings.Trim(field, ".")
+			if !strings.ContainsAny(field, "._") && !hasInnerUpper(field) {
+				continue
+			}
+			for _, part := range strings.FieldsFunc(field, func(r rune) bool { return r == '.' || r == '_' }) {
+				out[strings.ToLower(part)] = struct{}{}
+			}
+		}
+	}
+	return out
+}
+
+func hasInnerUpper(word string) bool {
+	for i, r := range word {
+		if i > 0 && unicode.IsUpper(r) {
+			return true
+		}
+	}
+	return false
+}
+
+// englishContentUnits returns lowercase plain words of three or more letters
+// that are not parts of a code identifier (exclude); code identifiers
+// (underscores, digits, camelCase) and generic words are out.
+func englishContentUnits(title string, exclude map[string]struct{}) map[string]struct{} {
+	out := make(map[string]struct{})
+	for _, word := range strings.FieldsFunc(title, func(r rune) bool {
+		return !(r < 0x80 && (unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_'))
+	}) {
+		if len(word) < 3 {
+			continue
+		}
+		plain := true
+		for i, r := range word {
+			if !unicode.IsLetter(r) || (i > 0 && unicode.IsUpper(r)) {
+				plain = false
+				break
+			}
+		}
+		lower := strings.ToLower(word)
+		if _, part := exclude[lower]; plain && !part && !genericIdentifiers[lower] && !nearDuplicateStopwords[lower] {
+			out[lower] = struct{}{}
+		}
+	}
+	return out
+}
+
 // Near-duplicate thresholds. Candidates are compared with the group anchor
 // only. Same-category findings 4-6 lines apart and cross-category findings on
 // the exact same line must share title identifiers (Jaccard over non-generic
@@ -236,6 +363,9 @@ const (
 	nearDuplicateMinShared     = 4
 	nearDuplicateTitleJaccard  = 0.5
 	nearDuplicateTitleContent  = 2
+	// Shared title content must also cover this share of the units compared.
+	nearDuplicateTitleCoverage = 0.5
+	nearDuplicateCJKCoverage   = 0.3
 	// Groups whose highest severities are this many levels apart (P0 vs P2)
 	// are never approximately merged.
 	nearDuplicateSeverityGap = 2
@@ -408,10 +538,13 @@ func foldUnpositionedForSummary(groups []Group) summaryFold {
 				continue
 			}
 			fold.folded[g.ID] = true
-			fold.related[rep.ID] = append(fold.related[rep.ID], RelatedGroup{
+			// The folded group's own related items (from MergePresentation)
+			// move along with it, so none of them disappears from the summary.
+			added := append([]RelatedGroup{{
 				ID: g.ID, Severity: g.EffectiveSeverity(), Category: g.Category,
 				Line: g.Line, Title: g.Title, Excerpt: oneLine(g.Body, relatedExcerptRunes),
-			})
+			}}, g.Related...)
+			fold.related[rep.ID] = append(fold.related[rep.ID], added...)
 			matched = true
 			break
 		}
@@ -419,15 +552,8 @@ func foldUnpositionedForSummary(groups []Group) summaryFold {
 			reps = append(reps, g)
 		}
 	}
-	for id := range fold.related {
-		list := fold.related[id]
-		sort.SliceStable(list, func(x, y int) bool {
-			a, b := list[x], list[y]
-			if ra, rb := severityRank[a.Severity], severityRank[b.Severity]; ra != rb {
-				return ra < rb
-			}
-			return a.ID < b.ID
-		})
+	for id, list := range fold.related {
+		fold.related[id] = SortRelated(list)
 	}
 	return fold
 }
@@ -439,7 +565,7 @@ func foldUnpositionedForSummary(groups []Group) summaryFold {
 // group's title or body, together with shared title content. A listed title
 // without identifiers (a plain-prose title) only needs the first direction.
 func unpositionedMatch(rep, g Group) bool {
-	if rep.Path != "" && g.Path != "" && rep.Path != g.Path {
+	if rep.Path != "" && g.Path != "" && (rep.Path != g.Path || normalizedSide(rep.Side) != normalizedSide(g.Side)) {
 		return false
 	}
 	// A more severe candidate would vanish from the header counts and the
@@ -452,7 +578,7 @@ func unpositionedMatch(rep, g Group) bool {
 	if !identifiersReferenced(g.Title, rep.Title, rep.Body) {
 		return false
 	}
-	contentMatch := titleContentMatches(rep.Title, g.Title)
+	contentMatch := summaryTitleContentMatches(rep.Title, g.Title)
 	similar := textSimilar(textTokens(rep.Title, rep.Body), Finding{Title: g.Title, Body: g.Body}, nearDuplicateSameCategory)
 	if len(titleIdentifiers(rep.Title)) == 0 {
 		// Nothing ties a prose-only title to the candidate's identifier except
@@ -486,4 +612,28 @@ func identifiersReferenced(title, otherTitle, otherBody string) bool {
 		}
 	}
 	return false
+}
+
+// SortRelated returns related items without duplicate IDs, ordered by
+// severity, then line, then ID, as the 「相关描述」 list is capped after sorting.
+func SortRelated(list []RelatedGroup) []RelatedGroup {
+	seen := make(map[string]bool, len(list))
+	out := make([]RelatedGroup, 0, len(list))
+	for _, r := range list {
+		if !seen[r.ID] {
+			seen[r.ID] = true
+			out = append(out, r)
+		}
+	}
+	sort.SliceStable(out, func(x, y int) bool {
+		a, b := out[x], out[y]
+		if ra, rb := severityRank[a.Severity], severityRank[b.Severity]; ra != rb {
+			return ra < rb
+		}
+		if a.Line != b.Line {
+			return a.Line < b.Line
+		}
+		return a.ID < b.ID
+	})
+	return out
 }
