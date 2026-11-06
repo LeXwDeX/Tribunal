@@ -132,6 +132,12 @@ func (s *Store) RecordReviewDelivery(ctx context.Context, d store.Delivery, comm
 
 	result := store.ReviewEnqueueResult{}
 	if command != nil {
+		if ok, err := reviewControlMatchesTx(ctx, tx, command.ProjectID, command.MRIID, command.Expect); err != nil {
+			return store.ReviewEnqueueResult{}, err
+		} else if !ok {
+			// The deferred rollback also drops the delivery row.
+			return store.ReviewEnqueueResult{Skipped: true}, nil
+		}
 		jobID, generation, duplicate, err := s.enqueueReviewTx(ctx, tx, *command, now)
 		if err != nil {
 			return store.ReviewEnqueueResult{}, err
@@ -1457,4 +1463,22 @@ func (s *Store) ListPendingPublications(ctx context.Context, limit int) ([]store
 		return nil, fmt.Errorf("sqlite: iterate pending publications: %w", err)
 	}
 	return pending, nil
+}
+
+// reviewControlMatchesTx reports whether the control still matches what the
+// caller observed. A nil expectation always matches.
+func reviewControlMatchesTx(ctx context.Context, tx *sql.Tx, projectID, mrIID int64, expect *store.ReviewControlExpect) (bool, error) {
+	if expect == nil {
+		return true, nil
+	}
+	var generation, candidateSeq int64
+	err := tx.QueryRowContext(ctx, `SELECT generation, candidate_seq FROM review_controls
+		WHERE project_id = ? AND mr_iid = ?`, projectID, mrIID).Scan(&generation, &candidateSeq)
+	if errors.Is(err, sql.ErrNoRows) {
+		return !expect.Exists, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("sqlite: read review control: %w", err)
+	}
+	return expect.Exists && generation == expect.Generation && candidateSeq == expect.CandidateSeq, nil
 }

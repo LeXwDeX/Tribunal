@@ -25,6 +25,11 @@ gitlab:
   request_timeout: 30s
   max_concurrency: 16
   bot_usernames: []
+  catch_up:
+    enabled: true
+    max_per_project: 10
+    max_total: 20
+    max_age: 24h
 auth:
   oauth: {}
   bootstrap_admins: []

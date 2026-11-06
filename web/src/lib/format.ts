@@ -161,6 +161,7 @@ const TRIGGER_LABELS: Record<string, string> = {
   api: 'API 手动触发',
   push: '推送',
   register: '项目注册',
+  catch_up: '启动补评',
 }
 
 const DECISION_LABELS: Record<string, string> = {

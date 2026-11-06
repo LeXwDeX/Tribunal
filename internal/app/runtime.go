@@ -94,6 +94,7 @@ type Runtime struct {
 	projects    *ProjectService
 	webhooks    *WebhookService
 	commands    *CommandWorker
+	catchUp     *CatchUpService
 	reviews     *ReviewService
 	workspaces  *WorkspaceService
 	feedback    *FeedbackService
@@ -447,6 +448,26 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		}
 		return nil, err
 	}
+	// The scan needs the optional bulk MR listing; a GitLab client without it
+	// (a test double) simply has no catch-up.
+	var catchUp *CatchUpService
+	if lister, ok := deps.GitLab.(OpenMergeRequestLister); ok {
+		catchUp, err = NewCatchUpService(CatchUpServiceConfig{
+			Store:     deps.Store,
+			GitLab:    lister,
+			Webhooks:  webhooks,
+			Workspace: workspaceManager,
+			Cipher:    deps.Cipher,
+			Settings:  cfg.GitLab.CatchUp,
+			Logger:    logger,
+		})
+		if err != nil {
+			if ownedMCP {
+				_ = mcpManager.Close()
+			}
+			return nil, err
+		}
+	}
 	return &Runtime{
 		cfg:         cfg,
 		store:       deps.Store,
@@ -459,6 +480,7 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		projects:    projects,
 		webhooks:    webhooks,
 		commands:    commands,
+		catchUp:     catchUp,
 		reviews:     reviews,
 		workspaces:  workspaces,
 		feedback:    feedback,
@@ -599,12 +621,26 @@ func (r *Runtime) Handlers() map[string]jobs.Handler {
 }
 
 // Recover runs engine recovery, rebuilds review executors, and retries pending
-// publications. It must be called after the job worker starts.
+// publications, then runs the catch-up scan for MR heads whose webhook was
+// missed while the service was down (#362). It must be called after the job
+// worker starts. The catch-up setting is read once at startup.
 func (r *Runtime) Recover(ctx context.Context) error {
-	if err := r.engine.Recover(ctx); err != nil {
+	return r.recoverThenCatchUp(ctx, r.engine.Recover, r.reviews.Recover)
+}
+
+// recoverThenCatchUp always runs the catch-up scan after recovery, even when
+// recovery reported an error.
+func (r *Runtime) recoverThenCatchUp(ctx context.Context, engineRecover, reviewsRecover func(context.Context) error) error {
+	if err := engineRecover(ctx); err != nil {
 		r.logger.Warn("workflow recovery failed", "error_class", errclass.Of(err))
 	}
-	return r.reviews.Recover(ctx)
+	err := reviewsRecover(ctx)
+	if r.catchUp != nil && ctx.Err() == nil {
+		if _, scanErr := r.catchUp.Run(ctx); scanErr != nil && ctx.Err() == nil {
+			r.logger.Warn("catch-up scan failed", "error_class", errclass.Of(scanErr))
+		}
+	}
+	return err
 }
 
 // reviewSideEffectReconcileInterval bounds how long a pending status or

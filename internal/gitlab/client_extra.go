@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/url"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	sdk "gitlab.com/gitlab-org/api/client-go"
@@ -725,4 +726,78 @@ func awardFromSDK(item *sdk.AwardEmoji) Award {
 func int64Ptr(value int) *int64 {
 	v := int64(value)
 	return &v
+}
+
+// ListOpenMergeRequests returns at most limit open merge requests of a
+// project, most recently updated first. A non-zero updatedAfter drops older
+// MRs (also asked of GitLab server-side) and stops paging at the first one.
+// It stops paging once limit is reached, so a project with thousands of open
+// MRs costs a bounded number of requests.
+func (c *Client) ListOpenMergeRequests(ctx context.Context, token string, projectID int64, limit int, updatedAfter time.Time) ([]MergeRequest, error) {
+	if projectID <= 0 || limit <= 0 {
+		return nil, errors.New("gitlab: invalid project ID or limit")
+	}
+	reqCtx, client, done, err := c.prepare(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	defer done()
+
+	state, orderBy, sortDir := "opened", "updated_at", "desc"
+	perPage := int64(pageSize)
+	if int64(limit) < perPage {
+		perPage = int64(limit)
+	}
+	out := make([]MergeRequest, 0, min(limit, pageSize))
+	page := int64(1)
+	var after *time.Time
+	if !updatedAfter.IsZero() {
+		after = &updatedAfter
+	}
+	older := false
+	for calls := 0; len(out) < limit && !older; calls++ {
+		if calls >= maxListPages {
+			return nil, errors.New("gitlab: list_open_merge_requests pagination limit exceeded")
+		}
+		items, resp, err := client.MergeRequests.ListProjectMergeRequests(projectID, &sdk.ListProjectMergeRequestsOptions{
+			ListOptions:  sdk.ListOptions{Page: page, PerPage: perPage},
+			State:        &state,
+			OrderBy:      &orderBy,
+			Sort:         &sortDir,
+			UpdatedAfter: after,
+		}, sdk.WithContext(reqCtx))
+		if err != nil {
+			return nil, mapError(reqCtx, "list_open_merge_requests", resp, err)
+		}
+		for _, mr := range items {
+			if mr == nil || len(out) >= limit {
+				continue
+			}
+			if after != nil && mr.UpdatedAt != nil && mr.UpdatedAt.Before(*after) {
+				older = true
+				break
+			}
+			out = append(out, MergeRequest{
+				IID:             mr.IID,
+				State:           mr.State,
+				TargetProjectID: mr.TargetProjectID,
+				SHA:             mr.SHA,
+				Title:           mr.Title,
+				SourceBranch:    mr.SourceBranch,
+				TargetBranch:    mr.TargetBranch,
+				Labels:          append([]string(nil), mr.Labels...),
+				Draft:           mr.Draft,
+				WebURL:          mr.WebURL,
+				UpdatedAt:       mr.UpdatedAt,
+			})
+		}
+		if older || resp == nil || resp.NextPage == 0 {
+			break
+		}
+		if resp.NextPage <= page {
+			return nil, errors.New("gitlab: list_open_merge_requests invalid pagination")
+		}
+		page = resp.NextPage
+	}
+	return out, nil
 }

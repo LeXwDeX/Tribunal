@@ -44,6 +44,8 @@ type ReviewCandidate struct {
 	HeadSHA     string
 	Payload     json.RawMessage
 	MaxAttempts int
+	// Expect, when set, skips the enqueue unless the control is unchanged.
+	Expect *ReviewControlExpect
 }
 
 // ReviewCandidateActivation identifies the claimed candidate job and the
@@ -86,6 +88,8 @@ type ReviewCommand struct {
 	Command     string
 	Payload     json.RawMessage
 	MaxAttempts int
+	// Expect, when set, skips the enqueue unless the control is unchanged.
+	Expect *ReviewControlExpect
 }
 
 // ReviewEnqueueResult reports the durable outcome of an ingress call.
@@ -94,6 +98,19 @@ type ReviewEnqueueResult struct {
 	JobID      string
 	Duplicate  bool
 	Generation int64
+	// Skipped reports that Expect no longer matched the review control, so
+	// nothing was written (the delivery is not consumed either).
+	Skipped bool
+}
+
+// ReviewControlExpect makes an enqueue conditional on the review control still
+// being what the caller observed. A producer that decided from a snapshot (the
+// startup catch-up scan) sets it so a live webhook that landed in between is
+// never overwritten. Exists=false requires that no control row exists.
+type ReviewControlExpect struct {
+	Exists       bool
+	Generation   int64
+	CandidateSeq int64
 }
 
 const (

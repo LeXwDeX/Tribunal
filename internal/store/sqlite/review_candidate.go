@@ -82,6 +82,11 @@ func (s *Store) RecordReviewCandidateDelivery(ctx context.Context, d store.Deliv
 	if err != nil {
 		return store.ReviewEnqueueResult{}, err
 	}
+	if ok, err := reviewControlMatchesTx(ctx, tx, candidate.ProjectID, candidate.MRIID, candidate.Expect); err != nil {
+		return store.ReviewEnqueueResult{}, err
+	} else if !ok {
+		return store.ReviewEnqueueResult{Skipped: true}, nil
+	}
 	sequence, err := allocateCandidateTx(ctx, tx, candidate, now)
 	if err != nil {
 		return store.ReviewEnqueueResult{}, err
