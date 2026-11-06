@@ -38,6 +38,7 @@
 
 ### 新增
 
+- **控制台档位页：节点参数覆盖、来源与同模型提示**（[#339](https://github.com/LeXwDeX/Tribunal/issues/339)，延续 [#293](https://github.com/LeXwDeX/Tribunal/issues/293)）：「模型与档位」页逐项显示 7 个节点的生效模型、来源（覆盖/继承覆盖默认/配置/配置默认/派生）、配置值和生效参数；管理员可设置模型与 `max_tokens`、`temperature`、`reasoning.effort`、`thinking.budget_tokens`（留空继承），校验错误显示在对应输入旁，修订冲突提示刷新，可恢复为配置；多个节点投票身份相同时提示「这些节点会被计为同一模型」。非管理员只读。
 - **评审档位节点参数覆盖、来源标注与投票身份**（[#334](https://github.com/LeXwDeX/Tribunal/issues/334)，延续 [#291](https://github.com/LeXwDeX/Tribunal/issues/291)）：七个节点（`default`、`explore`、`lanes.code_review`、`lanes.review`、`lanes.reasoner`、`lanes.validate`、`challenge`）可覆盖 `max_tokens`、`temperature`、`reasoning.effort`、`thinking.budget_tokens`，校验规则与模型参数相同，节点参数逐字段叠加在 `default` 参数之上，作为请求值注入，不创建独立 client，并发与限流不变。`GET /api/v1/profiles/default` 按节点返回 `model`、`source`（`override` / `override_default` / `config` / `config_default` / `derived`）、`configured`、`configured_source`、`override`、`params`、`param_source`、`effective_params` 和 `vote_identity`（相同的节点在投票中算同一个模型）；`GET /api/v1/profiles` 列表与详情一致，`DELETE /api/v1/profiles/default/overrides` 返回完整视图。覆盖中的模型 ID 不存在、参数非法或键不在白名单内返回 400，字段路径如 `overrides.default.model`。
 
 ### 变更
