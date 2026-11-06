@@ -377,6 +377,13 @@ func buildReviewFiles(diffs []gitlab.FileDiff, ignores []string, maxFiles, maxDi
 		summary.Truncated = true
 		summary.Omitted = append(summary.Omitted, review.OmittedFile{Path: filePath, Reason: reason})
 	}
+	// omitDiff also records the pre-rename path so withholding can follow it.
+	omitDiff := func(filePath, reason string, diff gitlab.FileDiff) {
+		omit(filePath, reason)
+		if old := strings.TrimSpace(diff.OldPath); old != filePath && validRepoPath(old) {
+			summary.Omitted[len(summary.Omitted)-1].OldPath = old
+		}
+	}
 	for _, diff := range diffs {
 		filePath := strings.TrimSpace(diff.NewPath)
 		if filePath == "" {
@@ -407,7 +414,7 @@ func buildReviewFiles(diffs []gitlab.FileDiff, ignores []string, maxFiles, maxDi
 		}
 		if maxFiles > 0 && len(files) >= maxFiles {
 			omittedByFiles++
-			omit(filePath, "max_files")
+			omitDiff(filePath, "max_files", diff)
 			continue
 		}
 		if diff.TooLarge || diff.Collapsed {
@@ -417,7 +424,7 @@ func buildReviewFiles(diffs []gitlab.FileDiff, ignores []string, maxFiles, maxDi
 			if diff.Collapsed {
 				cause = "collapsed"
 			}
-			omit(filePath, cause)
+			omitDiff(filePath, cause, diff)
 			warnings = append(warnings, fmt.Sprintf(
 				"review coverage gap: GitLab did not provide a diff for %s (%s)", filePath, cause))
 			continue
@@ -425,7 +432,7 @@ func buildReviewFiles(diffs []gitlab.FileDiff, ignores []string, maxFiles, maxDi
 		additions, deletions := countDiffLines(diff.Diff)
 		if maxDiffLines > 0 && lines+additions+deletions > maxDiffLines {
 			omittedByLines++
-			omit(filePath, "max_diff_lines")
+			omitDiff(filePath, "max_diff_lines", diff)
 			continue
 		}
 		status := "modified"
@@ -465,6 +472,35 @@ func buildReviewFiles(diffs []gitlab.FileDiff, ignores []string, maxFiles, maxDi
 	}
 	sort.Strings(ignored)
 	return files, ignored, summary, warnings
+}
+
+// ignoredOldPaths returns the pre-rename paths of ignored files and whether
+// that metadata is complete (no ignored rename or copy lacks a side).
+func ignoredOldPaths(diffs []gitlab.FileDiff, ignores []string) ([]string, bool) {
+	matcher := newIgnoreMatcher(ignores)
+	out := make([]string, 0)
+	complete := true
+	for _, diff := range diffs {
+		filePath := strings.TrimSpace(diff.NewPath)
+		if filePath == "" {
+			filePath = strings.TrimSpace(diff.OldPath)
+		}
+		old := strings.TrimSpace(diff.OldPath)
+		if !validRepoPath(filePath) || (old != "" && !validRepoPath(old)) {
+			continue
+		}
+		if !matcher.MatchPath(filePath) && !matcher.MatchPath(old) {
+			continue
+		}
+		if diff.RenamedFile && (old == "" || strings.TrimSpace(diff.NewPath) == "") {
+			complete = false
+		}
+		if old != "" && old != filePath {
+			out = append(out, old)
+		}
+	}
+	sort.Strings(out)
+	return out, complete
 }
 
 // invalidPathLabel turns an unsafe upstream path into a bounded repository-

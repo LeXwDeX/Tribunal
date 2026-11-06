@@ -471,3 +471,92 @@ func TestRenameFollowupRejectsOldAndUnknownRenderIdentity(t *testing.T) {
 		t.Fatalf("unknown render identity published effects: before=%+v after=%+v", before, after)
 	}
 }
+
+func withheldDossier(t *testing.T, mutate func(d *review.Dossier)) *review.Dossier {
+	t.Helper()
+	d := testDossier(t, reviewTestHead)
+	d.Files = []review.FileChange{
+		{Path: "stats/avg.py", Status: "modified", Diff: "@@ -1 +1 @@\n-old\n+new\n"},
+		{Path: "kept.go", OldPath: "moved.lock", Status: "renamed", Diff: "@@ -1 +1 @@\n-old\n+new\n"},
+		{Path: "other.go", Status: "modified", Diff: "@@ -1 +1 @@\n-old\n+new\n"},
+	}
+	d.PathAliasInfo = true
+	mutate(d)
+	return d
+}
+
+func positionOK(d *review.Dossier, path string) bool {
+	index := dossierDiffIndex(d.DiffVersion, d)
+	return markPositions([]review.Group{{Path: path, Line: 1, Side: review.SideNew}}, index)[0].PositionOK
+}
+
+func TestWithheldPathsIgnoredLockfileKeepsCodePositions(t *testing.T) {
+	d := withheldDossier(t, func(d *review.Dossier) {
+		d.Files = d.Files[:1]
+		d.Files = append(d.Files, review.FileChange{Path: "other.go", Status: "modified", Diff: "@@ -1 +1 @@\n-old\n+new\n"})
+		d.Ignored = []string{"poetry.lock"}
+	})
+	for _, p := range []string{"stats/avg.py", "other.go"} {
+		if !positionOK(d, p) {
+			t.Fatalf("%s must keep its inline position beside an ignored lockfile", p)
+		}
+	}
+}
+
+func TestWithheldPathsRenamedFromIgnoredPath(t *testing.T) {
+	d := withheldDossier(t, func(d *review.Dossier) { d.Ignored = []string{"moved.lock"} })
+	if positionOK(d, "kept.go") {
+		t.Fatal("file renamed from an ignored path must be withheld")
+	}
+	if !positionOK(d, "stats/avg.py") {
+		t.Fatal("unrelated file must keep its position")
+	}
+}
+
+func TestWithheldPathsIgnoredRenamedFromIncludedPath(t *testing.T) {
+	d := withheldDossier(t, func(d *review.Dossier) {
+		d.Ignored = []string{"new.lock"}
+		d.IgnoredOldPaths = []string{"other.go"}
+	})
+	if positionOK(d, "other.go") {
+		t.Fatal("included path an ignored file was renamed from must be withheld")
+	}
+	if !positionOK(d, "stats/avg.py") {
+		t.Fatal("unrelated file must keep its position")
+	}
+}
+
+func TestWithheldPathsOmittedWithOldPath(t *testing.T) {
+	d := withheldDossier(t, func(d *review.Dossier) {
+		d.DiffSummary.Truncated = true
+		d.DiffSummary.Omitted = []review.OmittedFile{{Path: "big.go", OldPath: "other.go", Reason: "max_files"}}
+	})
+	if positionOK(d, "other.go") || !positionOK(d, "stats/avg.py") {
+		t.Fatal("only the omitted file's alias should be withheld")
+	}
+}
+
+func TestWithheldPathsConservativeCases(t *testing.T) {
+	cases := map[string]func(d *review.Dossier){
+		"truncated without recorded omissions": func(d *review.Dossier) { d.DiffSummary.Truncated = true },
+		"rename missing old path": func(d *review.Dossier) {
+			d.Files[1].OldPath = ""
+		},
+		"old dossier without alias metadata": func(d *review.Dossier) {
+			d.PathAliasInfo = false
+			d.Ignored = []string{"poetry.lock"}
+		},
+		"omitted with unusable path": func(d *review.Dossier) {
+			d.DiffSummary.Truncated = true
+			d.DiffSummary.Omitted = []review.OmittedFile{{Path: "?", Reason: "invalid_path"}}
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			d := withheldDossier(t, mutate)
+			if positionOK(d, "stats/avg.py") {
+				t.Fatal("unknown metadata must withhold every path")
+			}
+		})
+	}
+}
