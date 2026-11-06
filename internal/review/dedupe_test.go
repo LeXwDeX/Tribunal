@@ -77,18 +77,18 @@ func TestDedupeRules(t *testing.T) {
 		{"within three lines", []Finding{base, gatheredFinding(wf, "cr.p2", "b", "m", 0, 1, outFinding("a.go", 13, SeverityP1, "Cache eviction race loses entries", "evidence two"))}, 1, SeverityP1},
 		{"beyond three lines", []Finding{base, gatheredFinding(wf, "cr.p2", "b", "m", 0, 1, outFinding("a.go", 14, SeverityP1, "Cache eviction race loses entries", "evidence two"))}, 2, ""},
 		{"different category", []Finding{base, func() Finding {
-			f := gatheredFinding(wf, "cr.p2", "b", "m", 0, 1, outFinding("a.go", 11, SeverityP1, "Same", "evidence two"))
+			f := gatheredFinding(wf, "cr.p2", "b", "m", 0, 1, outFinding("a.go", 11, SeverityP1, "Cache eviction race loses entries", "evidence two"))
 			f.Category = "security"
 			return f
 		}()}, 2, ""},
-		{"different path", []Finding{base, gatheredFinding(wf, "cr.p2", "b", "m", 0, 1, outFinding("b.go", 11, SeverityP1, "Same", "evidence two"))}, 2, ""},
+		{"different path", []Finding{base, gatheredFinding(wf, "cr.p2", "b", "m", 0, 1, outFinding("b.go", 11, SeverityP1, "Cache eviction race loses entries", "evidence two"))}, 2, ""},
 		{"line zero different title", []Finding{
 			gatheredFinding(wf, "reasoner", "a", "m", 0, 0, outFinding("", 0, SeverityInfo, "Design A", "evidence A")),
 			gatheredFinding(wf, "reasoner", "a", "m", 0, 1, outFinding("", 0, SeverityInfo, "Design B", "evidence B")),
 		}, 2, ""},
 		{"line zero same normalized title", []Finding{
 			gatheredFinding(wf, "reasoner", "a", "m", 0, 0, outFinding("", 0, SeverityInfo, "Design  Boundary", "evidence A")),
-			gatheredFinding(wf, "reasoner", "a", "m", 0, 1, outFinding("", 0, SeverityInfo, " design boundary ", "evidence B")),
+			gatheredFinding(wf, "rv.p1", "a", "m", 0, 1, outFinding("", 0, SeverityInfo, " design boundary ", "evidence B")),
 		}, 1, ""},
 		{"line zero with line finding", []Finding{
 			gatheredFinding(wf, "reasoner", "a", "m", 0, 0, outFinding("", 0, SeverityInfo, "Same title", "evidence A")),

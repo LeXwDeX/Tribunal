@@ -570,6 +570,14 @@ func canMerge(group Group, finding Finding, resolve func(string, Side) (string, 
 	if ambiguous(group.Path) || ambiguous(finding.Path) {
 		return false
 	}
+	// A lane that lists two findings considers them distinct, so they never
+	// share a group, however close their lines drift. This also keeps one
+	// lane from voting twice for what it reported as separate issues.
+	for _, source := range group.Sources {
+		if source.Origin.Node == finding.Origin.Node && source.Origin.Attempt == finding.Origin.Attempt {
+			return false
+		}
+	}
 	groupFile, groupMatches := resolve(group.Path, group.Side)
 	findingFile, findingMatches := resolve(finding.Path, finding.Side)
 	if groupMatches > 1 || findingMatches > 1 {
@@ -606,8 +614,10 @@ func canMerge(group Group, finding Finding, resolve func(string, Side) (string, 
 // Thresholds for same-category findings 1-3 lines apart. They are more lenient
 // than the presentation folding thresholds because the pair already shares a
 // category and sits within three lines. Measured on a real review, distinct
-// issues score at most 0.08 (all tokens) and 0.29 (identifier view); reports
-// of one issue by different lanes score at least 0.20 and 0.43.
+// issues score at most 0.08 (all tokens) and 0.29 (identifier view); the
+// closest same-issue pair across lanes (rv.p1@18 vs reasoner@18) scores 0.160
+// and 0.417. The title gate does most of the separating; the body thresholds
+// are a second check.
 const (
 	nearbyBodyJaccard       = 0.15
 	nearbyIdentifierJaccard = 0.35

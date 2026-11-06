@@ -61,7 +61,9 @@ func TestDedupeKeepsDistinctAdjacentIssuesSeparate(t *testing.T) {
 		}
 	}
 	check("fixture order", findings)
-	// Determinism: every rotation and the reverse order yield one partition.
+	// Order independence for this fixture: every rotation and the reverse order
+	// yield one partition (production order is deterministic; this is not a
+	// proof for arbitrary inputs).
 	for shift := 1; shift < len(findings); shift++ {
 		rotated := append(append([]Finding{}, findings[shift:]...), findings[:shift]...)
 		check(fmt.Sprintf("rotation %d", shift), rotated)
@@ -104,5 +106,68 @@ func TestDedupeSplitsDistinctSameCategoryIssuesOnAdjacentLines(t *testing.T) {
 	})
 	if len(groups) != 2 {
 		t.Fatalf("groups = %v, want two distinct issues", partition(groups))
+	}
+}
+
+// One lane mislabelling a line onto the other issue's line must not merge the
+// two issues: a lane's own two findings never share a group, so each issue
+// still collects exactly one report per lane (the original vote count).
+func TestDedupeSingleLaneLineDriftKeepsIssuesSeparate(t *testing.T) {
+	base := loadFixtureFindings(t, "testdata/dedupe_real_adjacent_median.json")
+	cases := []struct {
+		node     string
+		from, to int
+	}{
+		{"rv.p1", 11, 13}, {"cr.p1", 11, 13}, {"reasoner", 11, 13},
+		{"rv.p1", 13, 11}, {"cr.p1", 13, 11}, {"reasoner", 13, 11},
+	}
+	for _, c := range cases {
+		t.Run(fmt.Sprintf("%s %d to %d", c.node, c.from, c.to), func(t *testing.T) {
+			in := append([]Finding{}, base...)
+			for i := range in {
+				if in[i].Origin.Node == c.node && in[i].Line == c.from {
+					in[i].Line = c.to
+				}
+			}
+			var median []Group
+			for _, g := range Dedupe(in) {
+				if g.Category == "correctness" && g.Line != 18 {
+					median = append(median, g)
+				}
+			}
+			if len(median) != 2 {
+				t.Fatalf("median groups = %v, want two", partition(median))
+			}
+			for _, g := range median {
+				nodes := map[string]bool{}
+				for _, s := range g.Sources {
+					nodes[s.Origin.Node] = true
+				}
+				if len(g.Sources) != 3 || len(nodes) != 3 {
+					t.Fatalf("group = %v, want one report per lane", partition([]Group{g}))
+				}
+			}
+		})
+	}
+}
+
+func TestDedupeNeverMergesTwoFindingsOfOneLane(t *testing.T) {
+	const title = "Cache eviction race loses entries"
+	for _, line := range []int{10, 12} {
+		groups := Dedupe([]Finding{
+			gatheredFinding("wf", "cr.p1", "a", "m", 0, 0, outFinding("c.go", 10, SeverityP2, title, "evidence one")),
+			gatheredFinding("wf", "cr.p1", "a", "m", 0, 1, outFinding("c.go", line, SeverityP2, title, "evidence two")),
+		})
+		if len(groups) != 2 {
+			t.Fatalf("line %d: groups = %v, want two", line, partition(groups))
+		}
+	}
+	// A retry attempt of the same node is a different report.
+	groups := Dedupe([]Finding{
+		gatheredFinding("wf", "cr.p1", "a", "m", 1, 0, outFinding("c.go", 10, SeverityP2, title, "evidence one")),
+		gatheredFinding("wf", "cr.p1", "a", "m", 2, 0, outFinding("c.go", 10, SeverityP2, title, "evidence two")),
+	})
+	if len(groups) != 1 {
+		t.Fatalf("attempts: groups = %v, want one", partition(groups))
 	}
 }
