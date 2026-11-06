@@ -195,6 +195,7 @@ POST /api/v1/projects
   "trigger": "mr_update",
   "status": "completed",
   "usage_incomplete": false,
+  "usage_interruptions": 1,
   "verdict": "BLOCKING",
   "access": "manage",
   "publication_state": "published",
@@ -246,7 +247,9 @@ SSE 事件（`event:` 字段）：`node`（`{id, status, attempt}`）、`finding
 
 图响应为 `{nodes, edges}`。节点包含 `id`、`kind`、`status`、`depends_on`，以及可选的 `provider`、`attempt`；边为 `{from, to}`。节点 ID 允许点号，必须作为完整路径参数编码，不能按点号拆分。节点详情直接返回对象，不增加 `node` 包装层。
 
-工作流详情和列表每项的顶层，以及详情/列表/图中的每个节点和节点详情，都有布尔值 `usage_incomplete`。`true` 表示检测到用量缺失或无法精确表示；`false` 只表示未检测到，特别是迁移前的历史行默认 false，不能证明用量完整。它不嵌入 `usage`。迁移与回退限制见[数据模型](02-data-model.md)及[运维说明](../operations.md#用量完整性与审计升级v120)。
+工作流详情和列表每项的顶层，以及详情/列表/图中的每个节点和节点详情，都有布尔值 `usage_incomplete`。`true` 表示检测到用量缺失或无法精确表示；`false` 只表示未检测到，特别是迁移前的历史行默认 false，不能证明用量完整。它不嵌入 `usage`。
+
+工作流详情顶层、详情与图中的每个节点以及节点详情另有可选整数 `usage_interruptions`（增量字段，为 0 时省略）：顶层为任一单个节点被进程重启恢复中断的最大次数，节点上为该节点自身次数。它来自引擎对事件日志的投影，不是存储列；列表项不返回。控制台在评审详情的用量面板显示「中断恢复 N 次」。迁移与回退限制见[数据模型](02-data-model.md)及[运维说明](../operations.md#用量完整性与审计升级v120)。
 
 #### 节点调用审计格式
 
@@ -446,8 +449,8 @@ Provider 返回 `name`、`protocol`、`base_url`、`model`、`max_concurrency`�
 |---|---|---|
 | GET | `/api/v1/models` | 列出配置模型（`id=config:<name>`，只读）与用户模型（`id=user:<uuid>`）；不分页 |
 | GET | `/api/v1/models/{id}` | 详情 |
-| POST | `/api/v1/models` | 创建用户模型；`api_key` 只写不回显；校验失败返回 400 `validation_failed` 与逐字段 `details` |
-| PATCH | `/api/v1/models/{id}` | 修改，必须带 `revision`；`api_key` 省略表示不变，空串表示清除；配置模型返回 403 `read_only`；校验失败同创建 |
+| POST | `/api/v1/models` | 创建用户模型；`params.max_concurrency` 必须为正整数；`api_key` 只写不回显；成功返回 `{"id": "user:<uuid>", "effective": "new_workflows"}`，不返回完整模型视图（需要时再 `GET /api/v1/models/{id}`）；校验失败返回 400 `validation_failed` 与逐字段 `details` |
+| PATCH | `/api/v1/models/{id}` | 修改，必须带 `revision`；`api_key` 省略表示不变，空串表示清除；配置模型返回 403 `read_only`；成功返回值同创建（`{id, effective}`）；校验失败同创建 |
 | DELETE | `/api/v1/models/{id}?revision=N` | 软删除；配置模型返回 403 `read_only` |
 | POST | `/api/v1/models/{id}/test` | 测试已保存模型；成功返回 `{"ok": true, "model": "...", "latency_ms": N}` |
 | POST | `/api/v1/models:test` | 草稿测试，详见下文 |
@@ -455,12 +458,18 @@ Provider 返回 `name`、`protocol`、`base_url`、`model`、`max_concurrency`�
 `POST /api/v1/models:test` 在保存前测试草稿：
 
 - 请求体与创建相同，另可带可选 `id`。`id` 必须是 `user:` 模型：非 `user:` 返回 400（字段 `id`），不存在或已删除返回 404。带 `id` 且省略 `api_key` 时，服务端使用已保存的凭据（编辑时「保持不变」）；显式传入 `api_key` 则优先使用；`id` 只要出现就会校验。仅当 `protocol` 与 `base_url` 的 scheme、host、port 都与已保存模型一致时才复用已保存凭据，否则返回 400（字段 `api_key`），避免把密钥发往其他端点。
-- 校验与创建一致，失败返回 400 `validation_failed`，`details` 按字段给出（`display_name`、`protocol`、`base_url`、`model`、`params.<name>`）。
+- 校验与创建一致，包括 `params.max_concurrency` 必须为正整数；失败返回 400 `validation_failed`，`details` 按字段给出（`display_name`、`protocol`、`base_url`、`model`、`params.<name>`）。例如缺少或为 0 的并发上限：
+
+  ```json
+  { "error": { "code": "validation_failed", "message": "invalid model", "details": [
+    { "field": "params.max_concurrency", "message": "max_concurrency must be positive" }
+  ] } }
+  ```
 - 探测使用与用户模型相同的出站规则，超时 30 秒。出站被拒返回 422 `egress_denied`；上游失败返回 422 `provider_test_failed`，不回传上游响应体。
 - 成功返回 `{"ok": true, "model": "...", "latency_ms": N}`。不保存数据、不刷新目录，不写 `llm_calls`，不产生计费记录。
 - 仅平台管理员且需 CSRF，否则 403。审计 `platform_audit`，动作 `test_draft`，只记录字段名、是否使用已保存凭据（`stored_credential`）和目标 host（不含路径与查询）。
 
-写操作成功后调用运行时刷新，响应 `effective: "new_workflows"`；审计日志使用 `event=platform_audit`，只记录操作者、目标、动作和字段名。
+写操作（创建、修改、删除）成功后调用运行时刷新，响应体为 `{"id": "…", "effective": "new_workflows"}`；审计日志使用 `event=platform_audit`，只记录操作者、目标、动作和字段名。
 
 授权角色只有 `read` 和 `manage`，默认没有 grant。`global_read` 对所有项目授予只读访问，平台管理员不会自动获得，需要显式开启并写平台审计日志。`admin projects` 只用于选择授权对象，不返回项目业务数据；平台管理员要读取项目详情、评审、统计或 SSE，仍必须有对应 grant 或 `global_read`。停用用户不删除 `users` 行、grant 或 `global_read` 设置；停用期间全局读取失效，重新启用后恢复原设置，但已撤销的会话和 token 不会恢复。撤销凭据不禁用账号，用户仍可通过 OAuth 重新登录。只有平台管理员可以跨用户停用、撤销、管理 grant 或切换 `global_read`；普通用户只能管理自己的 API token。
 

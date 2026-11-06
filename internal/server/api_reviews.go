@@ -55,17 +55,22 @@ type reviewNode struct {
 	Attempt         int      `json:"attempt"`
 	DurationMS      *int64   `json:"duration_ms,omitempty"`
 	UsageIncomplete bool     `json:"usage_incomplete"`
+	// UsageInterruptions counts recovery restarts of this node. It comes from
+	// the engine snapshot, not a stored column, and is omitted when zero.
+	UsageInterruptions int `json:"usage_interruptions,omitempty"`
 }
 
 type reviewDetail struct {
 	store.Workflow
-	Access          string              `json:"access"`
-	MRTitle         *string             `json:"mr_title,omitempty"`
-	DurationMS      *int64              `json:"duration_ms,omitempty"`
-	Nodes           []reviewNode        `json:"nodes"`
-	FindingsSummary findingsSummary     `json:"findings_summary"`
-	Usage           reviewUsage         `json:"usage"`
-	Publications    publicationsSummary `json:"publications"`
+	// UsageInterruptions is the largest per-node recovery restart count.
+	UsageInterruptions int                 `json:"usage_interruptions,omitempty"`
+	Access             string              `json:"access"`
+	MRTitle            *string             `json:"mr_title,omitempty"`
+	DurationMS         *int64              `json:"duration_ms,omitempty"`
+	Nodes              []reviewNode        `json:"nodes"`
+	FindingsSummary    findingsSummary     `json:"findings_summary"`
+	Usage              reviewUsage         `json:"usage"`
+	Publications       publicationsSummary `json:"publications"`
 }
 
 type graphEdge struct {
@@ -75,8 +80,35 @@ type graphEdge struct {
 
 type nodeDetail struct {
 	store.WorkflowNode
-	DurationMS *int64    `json:"duration_ms,omitempty"`
-	Usage      nodeUsage `json:"usage"`
+	DurationMS         *int64    `json:"duration_ms,omitempty"`
+	Usage              nodeUsage `json:"usage"`
+	UsageInterruptions int       `json:"usage_interruptions,omitempty"`
+}
+
+// workflowEventLoader is implemented by stores that keep the dag event log.
+// The recovery interruption counters exist only in the projected engine view,
+// so detail endpoints replay the log to read them.
+type workflowEventLoader interface {
+	Load(ctx context.Context, wfID string) ([]dag.Event, error)
+}
+
+// engineSnapshot projects the workflow's event log. It is best effort: a store
+// without an event log, an unknown workflow or a projection error yields nil
+// and the interruption fields are simply omitted.
+func (s *Server) engineSnapshot(ctx context.Context, wfID string) *dag.WorkflowView {
+	loader, ok := s.store.(workflowEventLoader)
+	if !ok {
+		return nil
+	}
+	events, err := loader.Load(ctx, wfID)
+	if err != nil || len(events) == 0 {
+		return nil
+	}
+	view, err := dag.Project(events)
+	if err != nil {
+		return nil
+	}
+	return &view
 }
 
 type nodeUsage struct {
@@ -186,7 +218,7 @@ func (s *Server) summarizeReviewPage(ctx context.Context, workflows []store.Work
 			Workflow:        wf,
 			MRTitle:         mrTitle,
 			DurationMS:      workflowDuration(wf),
-			Nodes:           reviewNodes(nodesByWorkflow[wf.ID]),
+			Nodes:           reviewNodes(nodesByWorkflow[wf.ID], nil),
 			FindingsSummary: *summaries[wf.ID],
 		})
 	}
@@ -303,12 +335,13 @@ func (s *Server) handleGetReview(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, r, err)
 		return
 	}
+	snapshot := s.engineSnapshot(r.Context(), wf.ID)
 	detail := reviewDetail{
 		Workflow:        *wf,
 		Access:          grantedAccess(r.Context()),
 		MRTitle:         mrTitle,
 		DurationMS:      workflowDuration(*wf),
-		Nodes:           reviewNodes(nodes),
+		Nodes:           reviewNodes(nodes, snapshot),
 		FindingsSummary: summarizeFindings(findings),
 		Usage: reviewUsage{
 			TokensIn:   wf.TokensIn,
@@ -317,24 +350,35 @@ func (s *Server) handleGetReview(w http.ResponseWriter, r *http.Request) {
 		},
 		Publications: summarizePublications(publications),
 	}
+	if snapshot != nil {
+		detail.UsageInterruptions = snapshot.UsageInterruptions
+	}
 	writeJSON(w, http.StatusOK, detail)
 }
 
-func reviewNodes(nodes []store.WorkflowNode) []reviewNode {
+func reviewNodes(nodes []store.WorkflowNode, snapshot *dag.WorkflowView) []reviewNode {
 	out := make([]reviewNode, 0, len(nodes))
 	for _, node := range nodes {
 		out = append(out, reviewNode{
-			ID:              node.ID,
-			Kind:            node.Kind,
-			Status:          node.Status,
-			DependsOn:       node.DependsOn,
-			Provider:        node.Provider,
-			Attempt:         node.Attempt,
-			DurationMS:      nodeDuration(node),
-			UsageIncomplete: node.UsageIncomplete,
+			UsageInterruptions: nodeInterruptions(snapshot, node.ID),
+			ID:                 node.ID,
+			Kind:               node.Kind,
+			Status:             node.Status,
+			DependsOn:          node.DependsOn,
+			Provider:           node.Provider,
+			Attempt:            node.Attempt,
+			DurationMS:         nodeDuration(node),
+			UsageIncomplete:    node.UsageIncomplete,
 		})
 	}
 	return out
+}
+
+func nodeInterruptions(snapshot *dag.WorkflowView, nodeID string) int {
+	if snapshot == nil {
+		return 0
+	}
+	return snapshot.Nodes[nodeID].UsageInterruptions
 }
 
 func newFindingsSummary() findingsSummary {
@@ -472,7 +516,7 @@ func (s *Server) handleReviewGraph(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, r, err)
 		return
 	}
-	graphNodes := reviewNodes(nodes)
+	graphNodes := reviewNodes(nodes, s.engineSnapshot(r.Context(), wfID))
 	edges := make([]graphEdge, 0)
 	for _, node := range nodes {
 		for _, dependency := range node.DependsOn {
@@ -650,8 +694,9 @@ func (s *Server) handleReviewNode(w http.ResponseWriter, r *http.Request) {
 			node.Error = "node failed"
 		}
 		writeJSON(w, http.StatusOK, nodeDetail{
-			WorkflowNode: node,
-			DurationMS:   nodeDuration(node),
+			WorkflowNode:       node,
+			DurationMS:         nodeDuration(node),
+			UsageInterruptions: nodeInterruptions(s.engineSnapshot(r.Context(), wfID), node.ID),
 			Usage: nodeUsage{
 				TokensIn:   node.TokensIn,
 				TokensOut:  node.TokensOut,

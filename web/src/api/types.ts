@@ -272,6 +272,9 @@ export interface ReviewSummary {
 }
 
 export interface ReviewDetail extends ReviewSummary {
+  usage_incomplete?: boolean
+  // Largest per-node recovery restart count; omitted when zero.
+  usage_interruptions?: number
   access?: ProjectAccess
   publications?: Publications
   error?: string

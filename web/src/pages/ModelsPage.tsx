@@ -24,6 +24,32 @@ function hostOf(value: string): string {
   }
 }
 
+// Flattens model params into label/value pairs and drops unset values
+// (null, 0, empty string, false), so the card shows only what was configured.
+export function summarizeParams(params: ModelParams | undefined): Array<[string, string]> {
+  const out: Array<[string, string]> = []
+  const price = params?.price
+  const walk = (value: unknown, path: string) => {
+    if (value === null || value === undefined || value === 0 || value === '' || value === false) return
+    if (Array.isArray(value)) {
+      if (value.length) out.push([path, value.join(', ')])
+      return
+    }
+    if (typeof value === 'object') {
+      for (const [key, child] of Object.entries(value as Record<string, unknown>)) walk(child, path ? `${path}.${key}` : key)
+      return
+    }
+    out.push([path, String(value)])
+  }
+  for (const [key, value] of Object.entries(params ?? {})) {
+    if (key !== 'price') walk(value, key)
+  }
+  if (price?.input_per_mtok || price?.output_per_mtok) {
+    out.push(['价格（每百万 token）', `输入 ${price.input_per_mtok ?? 0} / 输出 ${price.output_per_mtok ?? 0}`])
+  }
+  return out
+}
+
 type KeyMode = 'keep' | 'replace' | 'clear'
 
 function ModelCard({ model, canWrite, onEdit, onDelete }: {
@@ -37,6 +63,7 @@ function ModelCard({ model, canWrite, onEdit, onDelete }: {
     ? `${(stats.error_rate <= 1 ? stats.error_rate * 100 : stats.error_rate).toFixed(2)}%`
     : '不可用'
   const p50 = typeof stats?.p50_latency_ms === 'number' ? formatDuration(stats.p50_latency_ms) : '不可用'
+  const params = summarizeParams(model.params)
   return (
     <article className={`${ui.panel} ${styles.providerCard}`}>
       <div className={styles.providerHead}>
@@ -55,7 +82,12 @@ function ModelCard({ model, canWrite, onEdit, onDelete }: {
       </div>
       <div className={styles.cardMeta}>
         <span>API key {model.has_api_key ? '已配置' : '未配置'}</span>
-        <span>参数 {formatJson(model.params)}</span>
+      </div>
+      <div className={styles.cardMeta} aria-label={`${model.display_name} 参数`}>
+        <span>参数</span>
+        {params.length
+          ? params.map(([key, value]) => <span key={key}>{key} <code>{value}</code></span>)
+          : <span>未设置</span>}
       </div>
       {model.unavailable_reason ? <span className={styles.resultError}>不可用原因：{model.unavailable_reason}</span> : null}
       {model.referenced_by?.length ? <span className={styles.cardMeta}>引用：{model.referenced_by.join('、')}</span> : null}
