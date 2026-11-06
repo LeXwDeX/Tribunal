@@ -214,12 +214,19 @@ func fileLabel(file FileChange) string {
 }
 
 // contentFreeWarning lists content-free files so the omission stays visible.
+// An incremental review lists only the files under review in this workflow.
 func contentFreeWarning(d *Dossier) string {
 	if d == nil {
 		return ""
 	}
+	scope := incrementalFileSet(d)
 	var paths []string
 	for _, file := range d.Files {
+		if scope != nil {
+			if _, ok := scope[file.Path]; !ok {
+				continue
+			}
+		}
 		if isContentFree(file) {
 			paths = append(paths, fileLabel(file))
 		}

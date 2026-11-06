@@ -112,6 +112,8 @@ type Group struct {
 	Decision   *FindingDecision
 	PositionOK bool
 	PublishKey string
+	// Related lists groups folded into this discussion by MergePresentation.
+	Related []RelatedGroup `json:"related,omitempty"`
 }
 
 // EffectiveSeverity applies a downgrade decision without changing the source.
