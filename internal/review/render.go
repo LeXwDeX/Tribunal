@@ -84,8 +84,12 @@ func RenderSummary(in SummaryInput) (string, error) {
 	positioned := make([]Group, 0)
 	marked := make([]Group, 0)
 	unpositioned := make([]Group, 0)
+	// Unpositioned near-duplicates of a listed group are referenced under it
+	// instead of listed (and counted) again. This is a summary-only view: the
+	// inline discussions and stored findings are untouched.
+	fold := foldUnpositionedForSummary(in.Groups)
 	for _, group := range in.Groups {
-		if !group.Published() {
+		if !group.Published() || fold.folded[group.ID] {
 			continue
 		}
 		severity := group.EffectiveSeverity()
@@ -97,6 +101,9 @@ func RenderSummary(in SummaryInput) (string, error) {
 			continue
 		}
 		if !group.PositionOK {
+			if related := fold.related[group.ID]; len(related) > 0 {
+				group.Related = SortRelated(append(append([]RelatedGroup(nil), group.Related...), related...))
+			}
 			unpositioned = append(unpositioned, group)
 			continue
 		}
@@ -132,6 +139,7 @@ func RenderSummary(in SummaryInput) (string, error) {
 				}
 			}
 			b.WriteByte('\n')
+			b.WriteString(inlineRelatedLines(fold.related[group.ID]))
 		}
 	}
 	if len(unpositioned) > 0 {
@@ -196,6 +204,24 @@ func verdictLabel(verdict string) string {
 	default:
 		return "⚪ 评审未完成"
 	}
+}
+
+// inlineRelatedLines renders unpositioned groups folded into an inline group
+// as indented sub-bullets of its overview row, capped at maxRelatedGroups.
+func inlineRelatedLines(related []RelatedGroup) string {
+	var b strings.Builder
+	for i, r := range related {
+		if i == maxRelatedGroups {
+			fmt.Fprintf(&b, "  - 相关描述：另有 %d 条\n", len(related)-maxRelatedGroups)
+			break
+		}
+		b.WriteString("  - 相关描述：**[")
+		b.WriteString(string(r.Severity))
+		b.WriteString("]** ")
+		b.WriteString(escapeOneLine(r.Title, MaxTitleRunes))
+		b.WriteByte('\n')
+	}
+	return b.String()
 }
 
 // severityCountLine renders non-zero counts on one line, for example
