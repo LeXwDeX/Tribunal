@@ -165,7 +165,7 @@ func (s *WebhookService) Handle(ctx context.Context, req WebhookRequest) (Webhoo
 	if reason != "" {
 		return s.recordIgnored(ctx, project.ID, req.Event, parsedUUID.String(), reason)
 	}
-	return s.recordJob(ctx, project.ID, req.Event, parsedUUID.String(), job)
+	return s.recordJob(ctx, project.ID, req.Event, parsedUUID.String(), job, nil)
 }
 
 func (s *WebhookService) validToken(project *store.Project, presented string) bool {
@@ -198,7 +198,10 @@ func (s *WebhookService) recordIgnored(ctx context.Context, projectID int64, eve
 	return WebhookResult{Ignored: reason}, nil
 }
 
-func (s *WebhookService) recordJob(ctx context.Context, projectID int64, event, eventUUID string, job *store.Job) (WebhookResult, error) {
+// recordJob persists the delivery and job. A non-nil expect makes the enqueue
+// conditional on the review control (see store.ReviewControlExpect); a changed
+// control yields Ignored "control_changed" and writes nothing.
+func (s *WebhookService) recordJob(ctx context.Context, projectID int64, event, eventUUID string, job *store.Job, expect *store.ReviewControlExpect) (WebhookResult, error) {
 	delivery := store.Delivery{
 		UUID:       eventUUID,
 		ProjectID:  projectID,
@@ -219,16 +222,24 @@ func (s *WebhookService) recordJob(ctx context.Context, projectID int64, event, 
 			s.logger.Warn("webhook candidate job is invalid", "project_id", projectID, "event", event)
 			return WebhookResult{Ignored: "storage_error"}, errors.New("app: invalid review.candidate job")
 		}
+		candidate.Expect = expect
 		var result store.ReviewEnqueueResult
 		result, err = s.store.RecordReviewCandidateDelivery(ctx, delivery, candidate)
 		jobID, duplicate = result.JobID, result.Duplicate
+		if err == nil && result.Skipped {
+			return WebhookResult{Ignored: "control_changed"}, nil
+		}
 	} else if command, ok := reviewCommandFromJob(job); ok {
+		command.Expect = expect
 		if recorder, supported := s.store.(interface {
 			RecordReviewDelivery(ctx context.Context, d store.Delivery, command *store.ReviewCommand) (store.ReviewEnqueueResult, error)
 		}); supported {
 			var result store.ReviewEnqueueResult
 			result, err = recorder.RecordReviewDelivery(ctx, delivery, command)
 			jobID, duplicate = result.JobID, result.Duplicate
+			if err == nil && result.Skipped {
+				return WebhookResult{Ignored: "control_changed"}, nil
+			}
 		} else {
 			jobID, duplicate, err = s.store.RecordDelivery(ctx, delivery, job)
 		}

@@ -162,7 +162,7 @@ CREATE TABLE workflows (
   base_sha     TEXT,
   fingerprint  TEXT,
   profile      TEXT,
-  trigger      TEXT    NOT NULL,      -- mr_open | mr_update | command | api | push | register
+  trigger      TEXT    NOT NULL,      -- mr_open | mr_update | command | api | push | register | catch_up
   triggered_by INTEGER,               -- GitLab user id（命令或 API 触发时）
   status       TEXT    NOT NULL,      -- pending | running | completed | failed | cancelled
   graph_rev    INTEGER NOT NULL DEFAULT 0,

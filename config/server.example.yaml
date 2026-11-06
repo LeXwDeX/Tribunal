@@ -13,6 +13,15 @@ gitlab:
   url: "https://gitlab.example.internal"
   request_timeout: 30s
   max_concurrency: 16
+  # One-time scan after startup recovery: open MR heads that never got a review
+  # (for example a webhook delivered while the service was down) are enqueued
+  # once with trigger catch_up, through the normal webhook filters. Read at
+  # startup only; changing it needs a restart.
+  catch_up:
+    enabled: true
+    max_per_project: 10             # reviews enqueued per project per scan
+    max_total: 20                   # reviews enqueued across all projects per scan
+    max_age: 24h                    # only MRs updated within this window
 
 auth:
   # Optional GitLab OAuth application for browser login. Add the oauth mapping

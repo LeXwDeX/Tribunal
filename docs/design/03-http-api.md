@@ -79,11 +79,13 @@ Web 控制台的“重试加载更多”复用失败请求的同一 cursor，不
 | `Note Hook` | `noteable_type=MergeRequest` 且正文以 `/review` 开头 | 按命令入队（见 §6） |
 | `Push Hook` | `ref` 为目标分支（默认分支或设置中的分支） | `workspace.refresh` |
 
+`catch_up` 不来自 webhook：服务启动恢复完成后，追赶扫描对每个打开的 MR 的当前 head 构造同样的合成事件，经上表相同的过滤与入队路径入队（投递事件为 `Catch Up`，UUID 由项目、MR 和 head 确定，同一 head 至多补评一次），见[运维文档](../operations.md#启动追赶扫描)。该值也出现在评审列表的 `trigger` 字段和筛选中。
+
 `review.run` 的 job key：`review:<project_id>:<mr_iid>`。去重记录与入队在同一事务中提交，新 webhook 就地替换同 key、同 kind 的 queued 内容；running 内容不变，允许保留一个 queued 后继。取消任务使用独立 key `review.cancel:<project_id>:<mr_iid>`。工作流取消由评审处理器负责（见 05-flows.md F2）；webhook handler 本身不执行评审。
 
 Note Hook 先入队 `review.command`，由 worker 请求 GitLab 校验身份、MR 状态和权限后入队 run/cancel；这样 webhook handler 不等待网络调用。通过校验的 run 命令使用最新参数替换已有 queued run，保留 `full`、`profile` 和最新 `head_sha`；不覆盖 running 任务。`/review help` 和权限不足由 worker 各回复一条 GitLab note；回复正文以 `<!-- gitlab-ce-review:command-reply note=<note_id>` 隐藏 marker 开头，按源 note 幂等，重试时更新同一条回复。受理 run/cancel 时，入队事务记录源 note 的 eyes，终态由状态 worker 协调；help/拒绝不添加表情。Webhook 自身仍无网络调用，也会忽略机器人自己发出的 command-reply note。数据库失败返回 `503 {"ignored":"storage_error"}`，不会写入去重记录或假报 accepted。不得假定 GitLab 自动重试；记录仍可用且版本支持时可在「Recent events」手动重发。如果重发保留原有效事件 UUID、此前没有去重记录且认证和过滤通过，则可再次入队。连续失败可能使 hook 临时或永久停用，条件随版本和功能开关而异，见 [Webhook 失败与恢复](../operations.md#webhook-失败与恢复)。
 
-自动触发（`mr_open` / `mr_update`）在 worker 合并配置后做最终 Draft、标签和目标分支过滤。`allow_repo_config=true` 时，Draft 检查不在 webhook 做，避免 webhook 调用 GitLab；标签仍可先用项目设置快速过滤，仓库配置只能追加排除；目标分支条件不被仓库配置覆盖。手动命令不受这些自动过滤限制。
+自动触发（`mr_open` / `mr_update` / `catch_up`）在 worker 合并配置后做最终 Draft、标签和目标分支过滤。`allow_repo_config=true` 时，Draft 检查不在 webhook 做，避免 webhook 调用 GitLab；标签仍可先用项目设置快速过滤，仓库配置只能追加排除；目标分支条件不被仓库配置覆盖。手动命令不受这些自动过滤限制。
 
 ---
 

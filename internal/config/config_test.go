@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -25,6 +26,18 @@ func TestValidateDefaultConfigWithoutProviders(t *testing.T) {
 	}
 	if cfg.Profiles["default"].Plan.Mode != "code" {
 		t.Errorf("default profile not usable: %+v", cfg.Profiles["default"])
+	}
+}
+
+func TestCatchUpDefaultsAndDisable(t *testing.T) {
+	setRequiredEnv(t)
+	cfg := loadConfig(t, writeConfig(t, "config.yaml", validGitLab))
+	if got := cfg.GitLab.CatchUp; !got.Enabled || got.MaxPerProject != 10 || got.MaxTotal != 20 || got.MaxAge != 24*time.Hour {
+		t.Fatalf("default catch_up = %+v, want enabled 10/20 within 24h", got)
+	}
+	cfg = loadConfig(t, writeConfig(t, "off.yaml", validGitLab+"  catch_up:\n    enabled: false\n"))
+	if got := cfg.GitLab.CatchUp; got.Enabled || got.MaxPerProject != 10 {
+		t.Fatalf("disabled catch_up = %+v, want enabled=false with default bounds kept", got)
 	}
 }
 
@@ -662,6 +675,21 @@ func TestValidatePositiveTimeoutsAndConcurrency(t *testing.T) {
 			name: "gitlab concurrency",
 			body: "gitlab:\n  url: \"https://gitlab.example.com\"\n  max_concurrency: 0\n",
 			want: "gitlab.max_concurrency",
+		},
+		{
+			name: "catch up per project",
+			body: "gitlab:\n  url: \"https://gitlab.example.com\"\n  catch_up:\n    max_per_project: 0\n",
+			want: "gitlab.catch_up.max_per_project",
+		},
+		{
+			name: "catch up age",
+			body: "gitlab:\n  url: \"https://gitlab.example.com\"\n  catch_up:\n    max_age: 0s\n",
+			want: "gitlab.catch_up.max_age",
+		},
+		{
+			name: "catch up total",
+			body: "gitlab:\n  url: \"https://gitlab.example.com\"\n  catch_up:\n    max_total: 0\n",
+			want: "gitlab.catch_up.max_total",
 		},
 		{
 			name: "jobs workers",
