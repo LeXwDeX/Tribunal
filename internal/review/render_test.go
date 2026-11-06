@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/LeXwDeX/tribunal/internal/gitlab"
 )
 
 func renderGroup(id string, action Action, severity Severity, positionOK bool, title, body string) Group {
@@ -768,4 +770,56 @@ func TestFindingAttributionUsesProviderLabels(t *testing.T) {
 	if !strings.Contains(out, "My Model/m") || strings.Contains(out, "user:abc") {
 		t.Fatalf("attribution = %q", out)
 	}
+}
+
+const quickActionText = "before\n/close\n- item\n  ```\n/title X\n  ```\n\n```\n/approve\n```\n`/inline`"
+
+func assertNoQuickAction(t *testing.T, label, out string) {
+	t.Helper()
+	inFence := false
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+			inFence = !inFence
+			continue
+		}
+		if !inFence && strings.HasPrefix(line, "/") {
+			t.Errorf("%s: line %q would run as a GitLab quick action:\n%s", label, line, out)
+		}
+	}
+}
+
+func TestRenderFindingNeutralizesQuickActions(t *testing.T) {
+	group := renderGroup("qa", ActionPublish, SeverityP1, true, "Title", quickActionText)
+	group.Suggestion = "/label ~x"
+	out, err := RenderFinding(group, FindingRenderOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertNoQuickAction(t, "finding", out)
+	if !strings.Contains(out, "&#47;close") || !strings.Contains(out, "```\n/approve\n```") {
+		t.Fatalf("finding must neutralize text and keep fenced content:\n%s", out)
+	}
+	if again := gitlab.NeutralizeQuickActions(out); again != out {
+		t.Fatalf("rendered finding is not stable under neutralization")
+	}
+}
+
+func TestRenderSummaryNeutralizesQuickActions(t *testing.T) {
+	in := SummaryInput{Verdict: VerdictBlocking, Fingerprint: "fp1", Summary: quickActionText}
+	out, err := RenderSummary(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertNoQuickAction(t, "summary", out)
+	if !strings.Contains(out, "&#47;close") {
+		t.Fatalf("summary must neutralize text:\n%s", out)
+	}
+	in.Verdict = VerdictIncomplete
+	in.Summary = "/close"
+	in.IncompleteReason = "/approve"
+	out, err = RenderSummary(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertNoQuickAction(t, "incomplete summary", out)
 }
