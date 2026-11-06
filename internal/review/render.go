@@ -5,6 +5,7 @@ import (
 	"html"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -34,8 +35,12 @@ const (
 
 // SummaryInput is structured data for the summary note.
 type SummaryInput struct {
-	Verdict              string
-	Summary              string
+	Verdict string
+	Summary string
+	// RuleSummary marks Summary as the deterministic rule-mode text, whose
+	// published count is aligned with the listed entries. Model-written
+	// synthesis text is never rewritten.
+	RuleSummary          bool
 	Groups               []Group
 	Fingerprint          string
 	HeadSHA              string
@@ -121,6 +126,9 @@ func RenderSummary(in SummaryInput) (string, error) {
 		b.WriteString("\n\n")
 	}
 	if summary != "" {
+		if in.RuleSummary {
+			summary = alignRuleSummaryCounts(summary, len(positioned)+len(unpositioned)+len(marked))
+		}
 		b.WriteString(renderMarkdown(summary, MaxSummaryRunes))
 		b.WriteString("\n\n")
 	}
@@ -222,6 +230,25 @@ func inlineRelatedLines(related []RelatedGroup) string {
 		b.WriteByte('\n')
 	}
 	return b.String()
+}
+
+var ruleSummaryCountsRE = regexp.MustCompile(`^(规则模式汇总：共 [0-9]+ 条问题，已发布 )([0-9]+)( 条。)`)
+
+// alignRuleSummaryCounts makes the published count of the rule-mode summary
+// line the number of entries the summary lists, as the header counts do, and
+// states how many published findings were folded into 「相关描述」. The
+// synthesis text counts every published group; folding happens afterwards,
+// in the publish view, and never changes the stored text or findings.
+func alignRuleSummaryCounts(summary string, listed int) string {
+	match := ruleSummaryCountsRE.FindStringSubmatchIndex(summary)
+	if match == nil {
+		return summary
+	}
+	published, err := strconv.Atoi(summary[match[4]:match[5]])
+	if err != nil || published <= listed {
+		return summary
+	}
+	return summary[:match[4]] + strconv.Itoa(listed) + " 条（另有 " + strconv.Itoa(published-listed) + " 条并入相关描述）。" + summary[match[1]:]
 }
 
 // severityCountLine renders non-zero counts on one line, for example

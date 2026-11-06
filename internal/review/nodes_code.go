@@ -125,6 +125,8 @@ type SynthesisResult struct {
 	Unresolved []UnresolvedSignal `json:"unresolved,omitempty"`
 	Output     SynthesizeOut      `json:"output"`
 	Fallback   bool               `json:"fallback,omitempty"`
+	// RuleSummary marks Summary as the deterministic rule-mode text.
+	RuleSummary bool `json:"rule_summary,omitempty"`
 }
 
 // Validate checks the final synthesis envelope.

@@ -89,6 +89,7 @@
 - **模型创建与修改返回字段级校验详情**（[#333](https://github.com/LeXwDeX/Tribunal/issues/333)）：`POST /api/v1/models` 与 `PATCH /api/v1/models/{id}` 校验失败时返回 400 `validation_failed` 和逐字段 `details`，不再是无说明的 400。
 - **主密钥不匹配时明确拒绝启动**（[#332](https://github.com/LeXwDeX/Tribunal/issues/332)）：配置的主密钥打不开库中已有密文时，服务记录一行 ERROR `master key does not match stored encrypted data; refusing to start`（只含环境变量名，不含密钥值）并退出，错误为 `initialize secrets: master key does not match stored encrypted data`，取代此前误导性的 `migrate MCP secrets: storage update failed`。这是有意拒绝：继续启动会用另一把密钥加密新凭据，使同一数据库混用两把密钥。仍不支持主密钥轮换。
 - **用户模型凭据纳入主密钥校验证据（纵深防御）**（[#332](https://github.com/LeXwDeX/Tribunal/issues/332)）：校验依据顺序为 MCP 校验标记、项目 token/webhook 密文，再到用户模型 API key 密文（任一能打开即可）；有证据但都打不开时拒绝启动，且不写入校验标记。校验标记自迁移 0017 起在每次成功启动时写入，因此含模型凭据却无校验标记的库通常不会出现，此项主要覆盖校验标记缺失（如被手工删除）的情形，避免用错误密钥写入新校验标记。
+- **同一行跨 lane 的同一问题折叠，摘要计数与评审提示不再自相矛盾**（[#366](https://github.com/LeXwDeX/Tribunal/issues/366)）：发布展示折叠对「完全同一文件、同一侧、同一行且来源 lane 不同（来源 finding 的 origin 节点+attempt 无交集）」的已发布组放宽，标题内容一致且标题加正文有重叠（相似度 ≥ 0.1）即折叠，不再要求标题标识符一致，正文相似单独不折叠（通用建议话术会让无关问题相似），该分支未命中时仍走原有的标识符+标题内容+正文相似规则；低相似度的同类重复（标题无共同内容、正文相似度很低）和级别相差 ≥2 的组（如 P1 与 info）有意保持分开；级别保护（相差不到 2 级）、展示最高级别成员、「相关描述」列出被折叠成员的级别/分类/标题/正文摘要均不变，非同一行的规则不变，仅影响发布视图，票数、裁决、存储的 finding 和 verdict 不变。摘要「规则模式汇总：共 N 条问题，已发布 M 条」的 M 改为与摘要头部计数一致（不含被折叠的组），并写明并入「相关描述」的条数，如「已发布 29 条（另有 1 条并入相关描述）」；该计数对齐只作用于规则模式生成的汇总文本（`SynthesisResult.rule_summary`），模型综合文本不改写。发布标识冲突的「评审提示」不再写「已保留在摘要中」，改为说明条目的实际位置：单独列在摘要中，或「以相关描述形式保留在「标题」条目下」。 (#366)
 
 ## [1.2.0] - 2026-10-29
 
