@@ -460,6 +460,7 @@ func (c *Client) CreateMRNote(ctx context.Context, token string, projectID, iid 
 	if strings.TrimSpace(body) == "" {
 		return nil, errors.New("gitlab: note body is required")
 	}
+	body = NeutralizeQuickActions(body)
 	reqCtx, client, done, err := c.prepare(ctx, token)
 	if err != nil {
 		return nil, err
@@ -487,6 +488,7 @@ func (c *Client) UpdateMRNote(ctx context.Context, token string, projectID, iid,
 	if strings.TrimSpace(body) == "" {
 		return errors.New("gitlab: note body is required")
 	}
+	body = NeutralizeQuickActions(body)
 	reqCtx, client, done, err := c.prepare(ctx, token)
 	if err != nil {
 		return err
@@ -538,6 +540,7 @@ func (c *Client) CreateDiscussion(ctx context.Context, token string, projectID, 
 	if strings.TrimSpace(d.Body) == "" {
 		return nil, errors.New("gitlab: discussion body is required")
 	}
+	d.Body = NeutralizeQuickActions(d.Body)
 	opts := &sdk.CreateMergeRequestDiscussionOptions{Body: &d.Body}
 	if d.Position != nil {
 		position := *d.Position

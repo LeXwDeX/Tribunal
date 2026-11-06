@@ -518,6 +518,10 @@ fi
 
 镜像不运行上游 `install`，不写任何 agent 配置或 hooks。示例配置和 `config/server.docker.yaml` 的 `default_extensions` 在首次启动时登记平台级 stdio 服务器 `codebase-memory`（`--tool-profile=analysis`），并为 `explore`、`code-review`、`review` 各授权 11 项只读图谱工具，为 `validate` 和 `verify` 各授权 `get_code_snippet`、`search_graph`、`trace_path`、`search_code`，为 `onboarding` 授权 `get_architecture`、`get_graph_schema`；`reasoner`、`synthesize` 不默认授权。有效 ignore 为空时，项目 onboarding 和刷新可用 CLI 为固定的 `base/` 建索引；非空时按下节停用这些执行路径。每个项目的 `HOME`、`CBM_CACHE_DIR`、`CBM_RUNTIME_DIR` 都在该项目工作区内，项目之间查不到彼此的索引；auto_index、watcher 和 UI 均关闭。规则详见 [默认扩展](design/06-config.md#默认扩展default_extensions) 和 [内置 codebase-memory-mcp](design/06-config.md#内置-codebase-memory-mcp)。
 
+### GitLab 正文中的 quick action
+
+GitLab 会以发评论的账号执行评论中任何以 `/` 开头的行（如 `/close`、`/merge`、`/approve`）。模型输出和仓库内容都是不可信文本，因此渲染器和 GitLab 客户端写方法（创建/更新评论、创建讨论）都会把代码围栏外、行首（含前导空白）的 `/` 改写为 `&#47;`，页面上仍显示为 `/`。围栏代码块、行内代码、引用块和列表项保持原样；未闭合的围栏不被信任，其内容同样处理。新增发布路径应经由这些写方法，无需额外处理。
+
 ### ignore 安全边界
 
 新评审保存合并后的有效 ignore 策略。规则写法做了规范化：去掉前导 `/` 和 `./`；`dir/` 匹配任意层级的目录。`!` 否定和 `[...]` 字符类不支持：保存项目设置时返回 400，平台配置在配置检查时拒绝；仓库配置中出现这类规则会让评审永久失败。旧配置已经包含这类写法时，评审会以配置错误永久失败；底层匹配器也按“全部忽略”兜底，不会静默放行。被忽略的 diff、仓库读取、遍历和证据路径使用相同规则，目录祖先和符号链接目标也受检查。重命名的任一侧被忽略时，整个 diff 和对应新路径均被排除。允许读取未被忽略的非 diff 文件作为证据，但行内定位只使用 dossier 接收的 diff。明确指向 ignored 路径的模型结果会被拒绝，不会降为汇总评论发布。

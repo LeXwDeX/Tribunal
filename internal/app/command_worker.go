@@ -330,7 +330,7 @@ func commandReplyMarker(noteID int64, kind string) string {
 }
 
 func commandReplyBody(noteID int64, kind, text string) string {
-	return commandReplyMarker(noteID, kind) + "\n" + text
+	return commandReplyMarker(noteID, kind) + "\n" + gitlab.NeutralizeQuickActions(text)
 }
 
 func isCommandReplyBody(body string) bool {

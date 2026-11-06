@@ -435,3 +435,18 @@ func TestEstimateReviewMinutesUsesMedianAndBounds(t *testing.T) {
 		t.Fatalf("no-sample estimate = %d, want 5", got)
 	}
 }
+
+func TestPublishedBodiesNeutralizeQuickActions(t *testing.T) {
+	status := reviewStatusBody(reviewStatusUpdate{State: reviewStatusRunning, Detail: "line\n/close"})
+	reply := commandReplyBody(555, "help", "ok\n/merge\n  /approve")
+	for name, body := range map[string]string{"status": status, "command reply": reply} {
+		for _, line := range strings.Split(body, "\n") {
+			if strings.HasPrefix(strings.TrimLeft(line, " \t"), "/") {
+				t.Errorf("%s: line %q would run as a GitLab quick action:\n%s", name, line, body)
+			}
+		}
+	}
+	if !strings.Contains(reply, "&#47;merge") {
+		t.Fatalf("command reply = %q, want neutralized /merge", reply)
+	}
+}
