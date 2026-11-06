@@ -817,6 +817,7 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 			return err
 		}
 		files, ignored, summary, warnings := buildReviewFiles(inputs.Diffs, cfg.Settings.Ignore, cfg.Settings.MaxFiles, cfg.Settings.MaxDiffLines)
+		ignoredOld, aliasComplete := ignoredOldPaths(inputs.Diffs, cfg.Settings.Ignore)
 		cfg.Warnings = append(cfg.Warnings, warnings...)
 		if len(files) == 0 {
 			if _, err := s.currentControl(ctx, project.ID, control.MRIID, payload.Generation, payload.HeadSHA); err != nil {
@@ -843,6 +844,8 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 			DiffSummary:               summary,
 			Files:                     files,
 			Ignored:                   ignored,
+			IgnoredOldPaths:           ignoredOld,
+			PathAliasInfo:             aliasComplete,
 			IgnorePolicy:              &review.IgnorePolicy{Version: review.IgnorePolicyVersion, Patterns: append([]string{}, cfg.Settings.Ignore...)},
 			WorkspaceProvenance:       provenance,
 			RepositorySkillProvenance: execution.repository,

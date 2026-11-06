@@ -613,20 +613,22 @@ func matchingFile(files []FileChange, path string, side Side) (string, int) {
 }
 
 func ambiguousFindingPath(dossier *Dossier, path string) bool {
-	return (dossier != nil && path != "" && len(dossier.Ignored) > 0) || unprovenFindingPath(dossier, path)
+	if dossier == nil || path == "" {
+		return false
+	}
+	if all, withheld := dossier.WithheldPaths(); all || withheld[path] {
+		return true
+	}
+	return unprovenFindingPath(dossier, path)
 }
 
 func unprovenFindingPath(dossier *Dossier, path string) bool {
 	if dossier == nil || path == "" {
 		return false
 	}
-	if dossier.DiffSummary.Truncated || len(dossier.DiffSummary.Omitted) > 0 {
+	// Shared with the inline-position index so both agree on what is unproven.
+	if all, withheld := dossier.UnprovenPaths(); all || withheld[path] {
 		return true
-	}
-	for _, file := range dossier.Files {
-		if file.OldPath == "" && (file.Status == "renamed" || file.Status == "copied") {
-			return true
-		}
 	}
 	oldFile, oldCount := matchingFile(dossier.Files, path, SideOld)
 	newFile, newCount := matchingFile(dossier.Files, path, SideNew)

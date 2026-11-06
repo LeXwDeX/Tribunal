@@ -338,3 +338,48 @@ func TestGatherRejectsInvalidInput(t *testing.T) {
 		})
 	}
 }
+
+func TestAmbiguousFindingPathSharesWithheldRule(t *testing.T) {
+	mod := func(path, old string) FileChange {
+		status := "modified"
+		if old != "" {
+			status = "renamed"
+		}
+		return FileChange{Path: path, OldPath: old, Status: status, Diff: "@@ -1 +1 @@\n-a\n+b\n"}
+	}
+	build := func(mutate func(d *Dossier)) *Dossier {
+		d := &Dossier{PathAliasInfo: true, Files: []FileChange{mod("stats/avg.py", ""), mod("kept.go", "moved.lock"), mod("other.go", "")}}
+		mutate(d)
+		return d
+	}
+	lock := build(func(d *Dossier) { d.Ignored = []string{"poetry.lock"} })
+	if ambiguousFindingPath(lock, "stats/avg.py") || unprovenFindingPath(lock, "stats/avg.py") {
+		t.Fatal("lockfile must not make code paths ambiguous")
+	}
+	from := build(func(d *Dossier) { d.Ignored = []string{"moved.lock"} })
+	if !ambiguousFindingPath(from, "kept.go") || ambiguousFindingPath(from, "other.go") {
+		t.Fatal("only the file renamed from the ignored path is ambiguous")
+	}
+	to := build(func(d *Dossier) { d.Ignored = []string{"n.lock"}; d.IgnoredOldPaths = []string{"other.go"} })
+	if !ambiguousFindingPath(to, "other.go") || ambiguousFindingPath(to, "stats/avg.py") {
+		t.Fatal("included path an ignored file was renamed from is ambiguous")
+	}
+	// Ignore-only ambiguity never becomes an evidence gap.
+	old := build(func(d *Dossier) { d.PathAliasInfo = false; d.Ignored = []string{"poetry.lock"} })
+	if !ambiguousFindingPath(old, "stats/avg.py") || unprovenFindingPath(old, "stats/avg.py") {
+		t.Fatal("old dossier with ignored files must be ambiguous but not unproven")
+	}
+	for name, mutate := range map[string]func(*Dossier){
+		"truncated unrecorded": func(d *Dossier) { d.DiffSummary.Truncated = true },
+		"no old path":          func(d *Dossier) { d.Files[1].OldPath = "" },
+		"old dossier omitted": func(d *Dossier) {
+			d.PathAliasInfo = false
+			d.DiffSummary.Omitted = []OmittedFile{{Path: "x.go", Reason: "max_files"}}
+		},
+	} {
+		d := build(mutate)
+		if !ambiguousFindingPath(d, "stats/avg.py") || !unprovenFindingPath(d, "stats/avg.py") {
+			t.Fatalf("%s must stay fully conservative", name)
+		}
+	}
+}

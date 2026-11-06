@@ -72,6 +72,9 @@ type FileChange struct {
 type OmittedFile struct {
 	Path   string `json:"path"`
 	Reason string `json:"reason"`
+	// OldPath is the pre-rename path when it differs from Path. It is only
+	// trusted when Dossier.PathAliasInfo is set.
+	OldPath string `json:"old_path,omitempty"`
 }
 
 // DiffSummary is the counts-only view of the MR diff index. Files counts
@@ -340,13 +343,19 @@ func compileIgnoreGlob(pattern string) (*regexp.Regexp, error) {
 // rejects secret-looking JSON keys as a second line of defense, but it does
 // not inspect free-form document text.
 type Dossier struct {
-	SchemaVersion             int                        `json:"schema_version"`
-	Project                   ProjectRef                 `json:"project"`
-	MR                        MRMeta                     `json:"mr"`
-	DiffVersion               gitlab.Version             `json:"diff_version"`
-	DiffSummary               DiffSummary                `json:"diff_summary"`
-	Files                     []FileChange               `json:"files"`
-	Ignored                   []string                   `json:"ignored,omitempty"`
+	SchemaVersion int            `json:"schema_version"`
+	Project       ProjectRef     `json:"project"`
+	MR            MRMeta         `json:"mr"`
+	DiffVersion   gitlab.Version `json:"diff_version"`
+	DiffSummary   DiffSummary    `json:"diff_summary"`
+	Files         []FileChange   `json:"files"`
+	Ignored       []string       `json:"ignored,omitempty"`
+	// IgnoredOldPaths lists the pre-rename paths of ignored files whose old
+	// path differs from the recorded path. PathAliasInfo set means the ignored
+	// and omitted rename metadata is complete; older snapshots lack it and
+	// keep the conservative withhold-everything behavior.
+	IgnoredOldPaths           []string                   `json:"ignored_old_paths,omitempty"`
+	PathAliasInfo             bool                       `json:"path_alias_info,omitempty"`
 	IgnorePolicy              *IgnorePolicy              `json:"ignore_policy,omitempty"`
 	WorkspaceProvenance       *WorkspaceProvenance       `json:"workspace_provenance,omitempty"`
 	RepositorySkillProvenance *RepositorySkillProvenance `json:"repository_skill_provenance,omitempty"`
@@ -377,6 +386,8 @@ type DossierInput struct {
 	DiffSummary               DiffSummary
 	Files                     []FileChange
 	Ignored                   []string
+	IgnoredOldPaths           []string
+	PathAliasInfo             bool
 	IgnorePolicy              *IgnorePolicy
 	WorkspaceProvenance       *WorkspaceProvenance
 	RepositorySkillProvenance *RepositorySkillProvenance
@@ -410,23 +421,25 @@ func BuildDossier(in DossierInput) (*Dossier, error) {
 		copy(files, in.Files)
 	}
 	d := &Dossier{
-		SchemaVersion: DossierSchemaVersion,
-		Project:       in.Project,
-		MR:            in.MR,
-		DiffVersion:   in.DiffVersion,
-		DiffSummary:   in.DiffSummary,
-		Files:         files,
-		Ignored:       append([]string(nil), in.Ignored...),
-		Issues:        append([]IssueRef(nil), in.Issues...),
-		RepoDocs:      in.RepoDocs,
-		ContextDocs:   in.ContextDocs,
-		Language:      in.Language,
-		CustomRules:   append([]string(nil), in.CustomRules...),
-		PriorFindings: append([]FindingOut(nil), in.PriorFindings...),
-		HeadDir:       in.HeadDir,
-		BaseDir:       in.BaseDir,
-		Metadata:      cloneMetadata(in.Metadata),
-		GeneratedAt:   generatedAt,
+		SchemaVersion:   DossierSchemaVersion,
+		Project:         in.Project,
+		MR:              in.MR,
+		DiffVersion:     in.DiffVersion,
+		DiffSummary:     in.DiffSummary,
+		Files:           files,
+		Ignored:         append([]string(nil), in.Ignored...),
+		IgnoredOldPaths: append([]string(nil), in.IgnoredOldPaths...),
+		PathAliasInfo:   in.PathAliasInfo,
+		Issues:          append([]IssueRef(nil), in.Issues...),
+		RepoDocs:        in.RepoDocs,
+		ContextDocs:     in.ContextDocs,
+		Language:        in.Language,
+		CustomRules:     append([]string(nil), in.CustomRules...),
+		PriorFindings:   append([]FindingOut(nil), in.PriorFindings...),
+		HeadDir:         in.HeadDir,
+		BaseDir:         in.BaseDir,
+		Metadata:        cloneMetadata(in.Metadata),
+		GeneratedAt:     generatedAt,
 	}
 	d.MR.Labels = append([]string(nil), in.MR.Labels...)
 	d.RepositorySkillExcluded = append([]string(nil), in.RepositorySkillExcluded...)
@@ -569,6 +582,11 @@ func ValidateDossier(d *Dossier) error {
 			return fmt.Errorf("%w: %v", ErrInvalidDossier, err)
 		}
 	}
+	for i, old := range d.IgnoredOldPaths {
+		if err := checkRepoPath(fmt.Sprintf("ignored_old_paths[%d]", i), old, true); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidDossier, err)
+		}
+	}
 	if len(d.RepositorySkillExcluded) > 100000 {
 		return dossierErr("repository_skill_excluded", "too many entries")
 	}
@@ -591,6 +609,11 @@ func ValidateDossier(d *Dossier) error {
 		}
 		if err := checkOneLine(field+".reason", omitted.Reason, 64, true); err != nil {
 			return fmt.Errorf("%w: %v", ErrInvalidDossier, err)
+		}
+		if omitted.OldPath != "" {
+			if err := checkRepoPath(field+".old_path", omitted.OldPath, true); err != nil {
+				return fmt.Errorf("%w: %v", ErrInvalidDossier, err)
+			}
 		}
 	}
 	if d.Pipeline != nil {
@@ -810,4 +833,74 @@ func dedupePaths(values []string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// WithheldPaths reports which changed paths cannot be attributed to a single
+// included file. all means the metadata is too incomplete to prove any path:
+// truncation without recorded omissions, renames missing a side, omissions
+// with unusable paths, or a snapshot that predates path alias metadata.
+// Otherwise paths holds the ignored and omitted paths, their old paths, and
+// every included file aliased to one of them through a rename.
+//
+// Ignored paths count only toward position and identity ambiguity, never as
+// evidence gaps: UnprovenPaths leaves them out.
+func (d *Dossier) WithheldPaths() (all bool, paths map[string]bool) {
+	return d.withheldPaths(true)
+}
+
+// UnprovenPaths is WithheldPaths without the ignore-only cases, used where an
+// unproven path becomes an evidence gap.
+func (d *Dossier) UnprovenPaths() (all bool, paths map[string]bool) {
+	return d.withheldPaths(false)
+}
+
+func (d *Dossier) withheldPaths(withIgnored bool) (all bool, paths map[string]bool) {
+	if d == nil {
+		return false, nil
+	}
+	for _, file := range d.Files {
+		if file.OldPath == "" && (file.Status == "renamed" || file.Status == "copied") {
+			return true, nil
+		}
+	}
+	if d.DiffSummary.Truncated && len(d.DiffSummary.Omitted) == 0 {
+		return true, nil
+	}
+	ignored := d.Ignored
+	if !withIgnored {
+		ignored = nil
+	}
+	if len(ignored) == 0 && len(d.DiffSummary.Omitted) == 0 {
+		return false, nil
+	}
+	if !d.PathAliasInfo {
+		return true, nil
+	}
+	paths = make(map[string]bool)
+	for _, name := range ignored {
+		paths[name] = true
+	}
+	if withIgnored {
+		for _, name := range d.IgnoredOldPaths {
+			paths[name] = true
+		}
+	}
+	for _, omitted := range d.DiffSummary.Omitted {
+		if omitted.Reason == "invalid_path" || omitted.Reason == "missing_rename_path" {
+			return true, nil
+		}
+		paths[omitted.Path] = true
+		if omitted.OldPath != "" {
+			paths[omitted.OldPath] = true
+		}
+	}
+	for _, file := range d.Files {
+		if paths[file.Path] || (file.OldPath != "" && paths[file.OldPath]) {
+			paths[file.Path] = true
+			if file.OldPath != "" {
+				paths[file.OldPath] = true
+			}
+		}
+	}
+	return false, paths
 }

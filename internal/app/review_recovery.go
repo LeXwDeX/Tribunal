@@ -955,21 +955,20 @@ func dossierDiffs(d *review.Dossier) []gitlab.FileDiff {
 
 func dossierDiffIndex(version gitlab.Version, d *review.Dossier) *gitlab.DiffIndex {
 	index := gitlab.BuildDiffIndex(version, dossierDiffs(d))
-	paths := append([]string(nil), d.Ignored...)
-	for _, omitted := range d.DiffSummary.Omitted {
-		paths = append(paths, omitted.Path)
-	}
-	unknown := d.DiffSummary.Truncated || len(d.DiffSummary.Omitted) > 0 || len(d.Ignored) > 0
-	for _, file := range d.Files {
-		if file.OldPath == "" && (file.Status == "renamed" || file.Status == "copied") {
-			unknown = true
+	all, withheld := d.WithheldPaths()
+	paths := make([]string, 0, len(withheld)+len(d.Files)*2)
+	if all {
+		// Unknown omissions or renames could alias any included file.
+		paths = append(paths, d.Ignored...)
+		for _, omitted := range d.DiffSummary.Omitted {
+			paths = append(paths, omitted.Path)
 		}
-	}
-	if unknown {
-		// A missing old or omitted path could alias any included file.
 		for _, file := range d.Files {
 			paths = append(paths, file.Path, file.OldPath)
 		}
+	}
+	for name := range withheld {
+		paths = append(paths, name)
 	}
 	index.WithholdPaths(paths)
 	return index
