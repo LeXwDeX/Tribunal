@@ -70,7 +70,7 @@
 | 生产人工 Review（stage 3） | PENDING | 需维护者与明确授权 |
 | tag `v1.3.0` 与 GitHub Release | PENDING | 需用户明确授权 |
 
-“发布前必须”项均已有真实实例结论。GitHub Runner（stage 2）、生产人工 Review（stage 3）、tag 与 Release 仍为 PENDING，需维护者与明确授权。#366（同行跨 lane 重复、汇总计数措辞）在处理中，属观察项，不阻塞上表。未用 mock 或 CI 结果替代真实验证。
+“发布前必须”项均已有真实实例结论。GitHub Runner（stage 2）、生产人工 Review（stage 3）、tag 与 Release 仍为 PENDING，需维护者与明确授权。。未用 mock 或 CI 结果替代真实验证。
 
 ### v1.3.0 真实实例验收记录（2026-11-06，第 1–5 轮）
 
@@ -84,7 +84,7 @@
 - **安全**：GitLab 会把机器人评论中以 `/` 开头的行当作 quick action 执行（在测试 GitLab 上验证）；#356 已修复，包括列表项和 HTML 绕过（已验证）。
 - **界面**：评审档位编辑页和评审列表在 1440 / 390 宽度下做过人工浏览器检查，未附截图文件。
 - **2 用户 / 2 项目矩阵**：PASS（2026-11-05，PR #326），见下节。
-- **未完成**：生产人工 Review（stage 3，需维护者批准）；候选 commit 上的 GitHub Actions（stage 2）；#366 处理中。
+- **未完成**：生产人工 Review（stage 3，需维护者批准）；候选 commit 上的 GitHub Actions（stage 2）。
 
 ### v1.2.0 → v1.3.0 升级夹具验收（2026-11-06）
 
