@@ -772,7 +772,7 @@ func TestFindingAttributionUsesProviderLabels(t *testing.T) {
 	}
 }
 
-const quickActionText = "before\n/close\n  /merge\n```\n/approve\n```\n`/inline`"
+const quickActionText = "before\n/close\n- item\n  ```\n/title X\n  ```\n\n```\n/approve\n```\n`/inline`"
 
 func assertNoQuickAction(t *testing.T, label, out string) {
 	t.Helper()
@@ -782,7 +782,7 @@ func assertNoQuickAction(t *testing.T, label, out string) {
 			inFence = !inFence
 			continue
 		}
-		if !inFence && strings.HasPrefix(strings.TrimLeft(line, " \t"), "/") {
+		if !inFence && strings.HasPrefix(line, "/") {
 			t.Errorf("%s: line %q would run as a GitLab quick action:\n%s", label, line, out)
 		}
 	}

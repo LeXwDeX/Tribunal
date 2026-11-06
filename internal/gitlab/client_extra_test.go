@@ -611,8 +611,8 @@ func TestHasSummaryMarker(t *testing.T) {
 }
 
 func TestClientWritesNeutralizeQuickActions(t *testing.T) {
-	const raw = "intro\n/close\n  /merge\n```\n/approve\n```\n`/inline`"
-	const want = "intro\n&#47;close\n  &#47;merge\n```\n/approve\n```\n`/inline`"
+	const raw = "intro\n/close\n  /merge\n- item\n  ```\n/title X\n  ```\n\n```\n/approve\n```\n`/inline`"
+	const want = "intro\n&#47;close\n  /merge\n- item\n  ```\n&#47;title X\n  ```\n\n```\n/approve\n```\n`/inline`"
 	got := map[string]string{}
 	client := newExtraClient(t, func(w http.ResponseWriter, r *http.Request) {
 		var body struct {

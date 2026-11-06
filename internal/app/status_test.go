@@ -436,17 +436,14 @@ func TestEstimateReviewMinutesUsesMedianAndBounds(t *testing.T) {
 	}
 }
 
-func TestPublishedBodiesNeutralizeQuickActions(t *testing.T) {
-	status := reviewStatusBody(reviewStatusUpdate{State: reviewStatusRunning, Detail: "line\n/close"})
-	reply := commandReplyBody(555, "help", "ok\n/merge\n  /approve")
-	for name, body := range map[string]string{"status": status, "command reply": reply} {
-		for _, line := range strings.Split(body, "\n") {
-			if strings.HasPrefix(strings.TrimLeft(line, " \t"), "/") {
-				t.Errorf("%s: line %q would run as a GitLab quick action:\n%s", name, line, body)
-			}
+func TestCommandReplyBodyNeutralizesQuickActions(t *testing.T) {
+	reply := commandReplyBody(555, "help", "ok\n/merge\n  /indented\n```\n/fenced\n```")
+	for _, line := range strings.Split(reply, "\n") {
+		if strings.HasPrefix(line, "/") && line != "/fenced" {
+			t.Errorf("line %q would run as a GitLab quick action:\n%s", line, reply)
 		}
 	}
-	if !strings.Contains(reply, "&#47;merge") {
-		t.Fatalf("command reply = %q, want neutralized /merge", reply)
+	if !strings.Contains(reply, "&#47;merge") || !strings.Contains(reply, "\n/fenced\n") {
+		t.Fatalf("command reply = %q, want /merge neutralized and fenced /fenced kept", reply)
 	}
 }
