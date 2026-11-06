@@ -1256,3 +1256,145 @@ func TestReclaimStaleLeasesLogsCount(t *testing.T) {
 		t.Fatalf("err = %v, want %v", err, wantErr)
 	}
 }
+
+// seedForeignRunningJob stores a running job leased by a dead process for a
+// kind no handler serves, so only reclaim can change its state.
+func seedForeignRunningJob(t *testing.T, dir string) string {
+	t.Helper()
+	ctx := context.Background()
+	db, err := sqlite.Open(ctx, filepath.Join(dir, "review.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	id, _, err := db.Enqueue(ctx, store.Job{Kind: "test.unserved", Key: "test:unserved", MaxAttempts: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j, err := db.Claim(ctx, "dead-process:0", []string{"test.unserved"}, time.Hour); err != nil || j == nil || j.ID != id {
+		t.Fatalf("claim as dead process: %+v, %v", j, err)
+	}
+	return id
+}
+
+func jobStateOf(t *testing.T, dir, id string) store.Job {
+	t.Helper()
+	db, err := sqlite.Open(context.Background(), filepath.Join(dir, "review.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	j, err := db.GetJob(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return *j
+}
+
+func TestRunReclaimsForeignLeasesAfterLockingDataDirectory(t *testing.T) {
+	if probe, err := sqlite.LockDataDir(t.TempDir()); err != nil || !probe.Held() {
+		t.Skip("data directory lock is not enforced on this platform")
+	}
+	dir := t.TempDir()
+	port := func() int {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer l.Close()
+		return l.Addr().(*net.TCPAddr).Port
+	}()
+	path := writeRunConfig(t, dir, port)
+	// Create the schema through run's own migrations first, then seed.
+	id := func() string {
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- run(ctx, []string{"--config", path}, &bytes.Buffer{}, &bytes.Buffer{}) }()
+		waitReady(t, port, done, cancel)
+		cancel()
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		return seedForeignRunningJob(t, dir)
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var logs syncBuffer
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, []string{"--config", path}, &bytes.Buffer{}, &logs) }()
+	waitReady(t, port, done, cancel)
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if j := jobStateOf(t, dir, id); j.State != store.JobQueued || j.LeaseOwner != "" || j.Attempts != 1 {
+		t.Fatalf("foreign job after restart = %+v, want queued and claimable", j)
+	}
+	if out := logs.String(); !strings.Contains(out, "reclaimed stale job leases") || !strings.Contains(out, "count=1") {
+		t.Fatalf("reclaim log missing: %s", out)
+	}
+}
+
+func TestRunDoesNotReclaimWhenDataDirectoryIsLocked(t *testing.T) {
+	dir := t.TempDir()
+	path := writeRunConfig(t, dir, 1)
+	id := seedForeignRunningJob(t, dir)
+	held, err := sqlite.LockDataDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Release()
+	if !held.Held() {
+		t.Skip("data directory lock is not enforced on this platform")
+	}
+	var logs bytes.Buffer
+	if err := run(context.Background(), []string{"--config", path}, &bytes.Buffer{}, &logs); err == nil {
+		t.Fatal("run succeeded with the data directory locked")
+	}
+	if j := jobStateOf(t, dir, id); j.State != store.JobRunning || j.LeaseOwner != "dead-process:0" {
+		t.Fatalf("job reclaimed without the lock: %+v", j)
+	}
+	if strings.Contains(logs.String(), "reclaimed stale job leases") {
+		t.Fatalf("reclaim logged without the lock: %s", logs.String())
+	}
+}
+
+func waitReady(t *testing.T, port int, done <-chan error, cancel context.CancelFunc) {
+	t.Helper()
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-done:
+			t.Fatalf("run exited before ready: %v", err)
+		default:
+		}
+		resp, err := http.Get(base + "/readyz")
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	cancel()
+	t.Fatal("server did not become ready")
+}
+
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}

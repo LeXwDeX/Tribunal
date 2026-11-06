@@ -436,7 +436,7 @@ func (s *Store) Claim(ctx context.Context, worker string, kinds []string, lease 
 	defer tx.Rollback()
 
 	now := s.now().UTC()
-	if _, err := recoverTx(ctx, tx, now, expiredLeaseCond, formatTime(now)); err != nil {
+	if _, err := recoverTx(ctx, tx, now, expiredLeaseCond, formatTime(now), "lease expired"); err != nil {
 		return nil, err
 	}
 
@@ -491,7 +491,8 @@ const (
 )
 
 // recoverTx settles running jobs matched by cond (one bound argument, condArg).
-func recoverTx(ctx context.Context, tx *sql.Tx, now time.Time, cond, condArg string) (int, error) {
+// reason prefixes the stored last_error text.
+func recoverTx(ctx context.Context, tx *sql.Tx, now time.Time, cond, condArg, reason string) (int, error) {
 	// Attempts increment only on Claim, so recovery requeues without
 	// double-counting an attempt that was already reserved.
 	nowText := formatTime(now)
@@ -513,10 +514,10 @@ func recoverTx(ctx context.Context, tx *sql.Tx, now time.Time, cond, condArg str
 
 	res, err = tx.ExecContext(ctx, `UPDATE jobs
 		SET state = ?, lease_owner = NULL, lease_until = NULL, defer_since = NULL,
-		    last_error = 'lease expired after maximum attempts', updated_at = ?
+		    last_error = ?, updated_at = ?
 		WHERE state = ? AND `+cond+`
 		  AND attempts >= max_attempts`,
-		store.JobFailed, nowText, store.JobRunning, condArg)
+		store.JobFailed, reason+" after maximum attempts", nowText, store.JobRunning, condArg)
 	if err != nil {
 		return 0, fmt.Errorf("sqlite: fail expired leases: %w", err)
 	}
@@ -525,9 +526,9 @@ func recoverTx(ctx context.Context, tx *sql.Tx, now time.Time, cond, condArg str
 
 	res, err = tx.ExecContext(ctx, `UPDATE jobs
 		SET state = ?, run_after = ?, lease_owner = NULL, lease_until = NULL,
-		    defer_since = NULL, last_error = 'lease expired; retry scheduled', updated_at = ?
+		    defer_since = NULL, last_error = ?, updated_at = ?
 		WHERE state = ? AND `+cond+``,
-		store.JobQueued, nowText, nowText, store.JobRunning, condArg)
+		store.JobQueued, nowText, reason+"; retry scheduled", nowText, store.JobRunning, condArg)
 	if err != nil {
 		return 0, fmt.Errorf("sqlite: requeue expired leases: %w", err)
 	}
@@ -546,7 +547,7 @@ func (s *Store) Recover(ctx context.Context) (int, error) {
 	defer tx.Rollback()
 
 	now := s.now().UTC()
-	count, err := recoverTx(ctx, tx, now, expiredLeaseCond, formatTime(now))
+	count, err := recoverTx(ctx, tx, now, expiredLeaseCond, formatTime(now), "lease expired")
 	if err != nil {
 		return 0, err
 	}
@@ -568,7 +569,7 @@ func (s *Store) ReclaimForeignLeases(ctx context.Context, currentOwner string) (
 	}
 	defer tx.Rollback()
 
-	count, err := recoverTx(ctx, tx, s.now().UTC(), foreignLeaseCond, currentOwner)
+	count, err := recoverTx(ctx, tx, s.now().UTC(), foreignLeaseCond, currentOwner, "lease reclaimed at startup")
 	if err != nil {
 		return 0, err
 	}

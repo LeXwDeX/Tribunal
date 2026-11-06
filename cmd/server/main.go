@@ -290,11 +290,15 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 	defer listener.Close()
 
-	// The data directory lock guarantees no other live process holds a job
-	// lease, so leases left by a killed predecessor are reclaimed now instead
-	// of waiting for them to expire.
-	if err := reclaimStaleLeases(ctx, db, logger); err != nil {
-		return errors.New("reclaim job leases: storage update failed")
+	// An enforced data directory lock guarantees no other live process holds a
+	// job lease, so leases left by a killed predecessor are reclaimed now
+	// instead of waiting for them to expire.
+	if dataLock.Held() {
+		if err := reclaimStaleLeases(ctx, db, logger); err != nil {
+			return errors.New("reclaim job leases: storage update failed")
+		}
+	} else {
+		logger.Info("stale job lease reclaim skipped: data directory lock is not enforced")
 	}
 
 	worker := jobs.NewWorker(db, jobs.WorkerConfig{
