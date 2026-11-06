@@ -942,7 +942,9 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 	if reused || resumable {
 		// A retried job can reuse a workflow left with running nodes by a
 		// crash; restart those nodes before Engine.Run rejects the graph.
-		if err := s.engine.Recover(ctx); err != nil {
+		// Only this workflow: a global recovery could restart nodes of another
+		// workflow that startup recovery is running.
+		if err := s.engine.RecoverWorkflow(ctx, wfID); err != nil {
 			return err
 		}
 	}
