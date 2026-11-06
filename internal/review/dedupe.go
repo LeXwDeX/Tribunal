@@ -500,7 +500,8 @@ func prepareDropped(in GatherInput, byRef map[Ref]Finding) ([]Finding, error) {
 	return out, nil
 }
 
-// Dedupe merges findings by side-specific path, category, and line proximity.
+// Dedupe merges findings by side-specific path, category, and line proximity;
+// findings on different lines also need matching content (sameIssueNearby).
 // File identity alone cannot establish cross-side line identity.
 func Dedupe(findings []Finding) []Group {
 	return dedupe(findings, nil)
@@ -585,7 +586,64 @@ func canMerge(group Group, finding Finding, resolve func(string, Side) (string, 
 		return group.Line == 0 && finding.Line == 0 && NormalizeTitle(group.Title) == NormalizeTitle(finding.Title)
 	}
 	difference := group.Line - finding.Line
-	return difference >= -3 && difference <= 3
+	if difference < -3 || difference > 3 {
+		return false
+	}
+	if difference == 0 {
+		return true
+	}
+	// Nearby but not identical lines: line drift of a few rows is common model
+	// noise for one issue, but adjacent lines also hold distinct issues, so the
+	// content must agree with at least one source already in the group.
+	for _, source := range group.Sources {
+		if sameIssueNearby(source, finding) {
+			return true
+		}
+	}
+	return false
+}
+
+// Thresholds for same-category findings 1-3 lines apart. They are more lenient
+// than the presentation folding thresholds because the pair already shares a
+// category and sits within three lines. Measured on a real review, distinct
+// issues score at most 0.08 (all tokens) and 0.29 (identifier view); reports
+// of one issue by different lanes score at least 0.20 and 0.43.
+const (
+	nearbyBodyJaccard       = 0.15
+	nearbyIdentifierJaccard = 0.35
+	nearbyMinSharedTokens   = 3
+)
+
+// sameIssueNearby reports whether two same-category findings on nearby lines
+// describe one issue: the titles must share an identifier or content words,
+// and title plus body must overlap in text.
+func sameIssueNearby(a, b Finding) bool {
+	if !titleIdentityMatches(a.Title, b.Title) && !titleContentMatches(a.Title, b.Title) {
+		return false
+	}
+	ta, tb := textTokens(a.Title, a.Body), textTokens(b.Title, b.Body)
+	return nearbyJaccardAtLeast(ta, tb, nearbyBodyJaccard, nil) ||
+		nearbyJaccardAtLeast(ta, tb, nearbyIdentifierJaccard, identifierToken)
+}
+
+func nearbyJaccardAtLeast(a, b map[string]struct{}, threshold float64, keep func(string) bool) bool {
+	sizeA, sizeB, shared := 0, 0, 0
+	for token := range a {
+		if keep != nil && !keep(token) {
+			continue
+		}
+		sizeA++
+		if _, ok := b[token]; ok {
+			shared++
+		}
+	}
+	for token := range b {
+		if keep == nil || keep(token) {
+			sizeB++
+		}
+	}
+	union := sizeA + sizeB - shared
+	return union > 0 && shared >= nearbyMinSharedTokens && float64(shared)/float64(union) >= threshold
 }
 
 func normalizedSide(side Side) Side {

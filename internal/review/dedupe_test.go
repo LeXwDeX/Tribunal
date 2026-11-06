@@ -67,15 +67,15 @@ func TestProposalFromReasonerNormalizesSeverityAndFields(t *testing.T) {
 
 func TestDedupeRules(t *testing.T) {
 	wf := "wf"
-	base := gatheredFinding(wf, "cr.p1", "a", "m", 0, 0, outFinding("a.go", 10, SeverityP2, "One issue", "line ten evidence"))
+	base := gatheredFinding(wf, "cr.p1", "a", "m", 0, 0, outFinding("a.go", 10, SeverityP2, "Cache eviction race loses entries", "line ten evidence"))
 	cases := []struct {
 		name       string
 		findings   []Finding
 		wantGroups int
 		wantHigh   Severity
 	}{
-		{"within three lines", []Finding{base, gatheredFinding(wf, "cr.p2", "b", "m", 0, 1, outFinding("a.go", 13, SeverityP1, "Same", "evidence two"))}, 1, SeverityP1},
-		{"beyond three lines", []Finding{base, gatheredFinding(wf, "cr.p2", "b", "m", 0, 1, outFinding("a.go", 14, SeverityP1, "Same", "evidence two"))}, 2, ""},
+		{"within three lines", []Finding{base, gatheredFinding(wf, "cr.p2", "b", "m", 0, 1, outFinding("a.go", 13, SeverityP1, "Cache eviction race loses entries", "evidence two"))}, 1, SeverityP1},
+		{"beyond three lines", []Finding{base, gatheredFinding(wf, "cr.p2", "b", "m", 0, 1, outFinding("a.go", 14, SeverityP1, "Cache eviction race loses entries", "evidence two"))}, 2, ""},
 		{"different category", []Finding{base, func() Finding {
 			f := gatheredFinding(wf, "cr.p2", "b", "m", 0, 1, outFinding("a.go", 11, SeverityP1, "Same", "evidence two"))
 			f.Category = "security"
@@ -116,8 +116,8 @@ func TestDedupeRules(t *testing.T) {
 func TestDedupePreservesAllSourcesAndRepresentativeEvidence(t *testing.T) {
 	wf := "wf"
 	findings := []Finding{
-		gatheredFinding(wf, "a", "provider", "model", 0, 0, outFinding("a.go", 10, SeverityP2, "First", "short")),
-		gatheredFinding(wf, "b", "provider", "model", 0, 1, outFinding("a.go", 11, SeverityP0, "Second", "a much longer piece of evidence")),
+		gatheredFinding(wf, "a", "provider", "model", 0, 0, outFinding("a.go", 10, SeverityP2, "Cache eviction race loses entries", "short")),
+		gatheredFinding(wf, "b", "provider", "model", 0, 1, outFinding("a.go", 11, SeverityP0, "Cache eviction race drops entries", "a much longer piece of evidence")),
 	}
 	groups := Dedupe(findings)
 	if len(groups) != 1 {
@@ -130,7 +130,7 @@ func TestDedupePreservesAllSourcesAndRepresentativeEvidence(t *testing.T) {
 	if len(group.Sources) != 2 {
 		t.Fatalf("sources = %d", len(group.Sources))
 	}
-	if group.Title != "Second" || group.Evidence != "a much longer piece of evidence" {
+	if group.Title != "Cache eviction race drops entries" || group.Evidence != "a much longer piece of evidence" {
 		t.Fatalf("representative = %q / %q", group.Title, group.Evidence)
 	}
 }

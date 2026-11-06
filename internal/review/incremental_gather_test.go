@@ -17,7 +17,9 @@ func TestExecutorGatherPreservesOriginalFindingIdentity(t *testing.T) {
 	stdB := Ref{Node: "rv.std.p1", Index: 1}
 	intentC := Ref{Node: "rv.intent.p1", Index: 0}
 	intentD := Ref{Node: "rv.intent.p1", Index: 1}
-	titles := map[Ref]string{stdA: "A", stdB: "B", intentC: "C", intentD: "D"}
+	// B and D report one issue one line apart, so they share a title and merge.
+	const sameIssue = "Cache eviction race loses entries"
+	titles := map[Ref]string{stdA: "A", stdB: sameIssue, intentC: "C", intentD: sameIssue}
 	tests := []struct {
 		name        string
 		incremental *IncrementalRange
@@ -78,7 +80,7 @@ func TestExecutorGatherPreservesOriginalFindingIdentity(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			std := completedNode(stdA.Node, KindReviewStd, reviewNodeParams{}, ReviewOut{
 				Verdict: "PASS", EvidenceStatus: "sufficient", EvidenceGaps: []string{}, Summary: "reviewed",
-				Findings: []FindingOut{finding("a.go", 10, SeverityP2, "A"), finding("b.go", 10, SeverityP2, "B")},
+				Findings: []FindingOut{finding("a.go", 10, SeverityP2, "A"), finding("b.go", 10, SeverityP2, sameIssue)},
 			})
 			std.Attempt, std.Provider, std.Model = 2, "local", "std-model"
 			nodes := []dag.NodeView{std}
@@ -86,7 +88,7 @@ func TestExecutorGatherPreservesOriginalFindingIdentity(t *testing.T) {
 			if tc.multi {
 				intent := completedNode(intentC.Node, KindReviewInt, reviewNodeParams{}, ReviewOut{
 					Verdict: "PASS", EvidenceStatus: "sufficient", EvidenceGaps: []string{}, Summary: "reviewed",
-					Findings: []FindingOut{finding("c.go", 20, SeverityP2, "C"), finding("b.go", 11, SeverityP2, "D")},
+					Findings: []FindingOut{finding("c.go", 20, SeverityP2, "C"), finding("b.go", 11, SeverityP2, sameIssue)},
 				})
 				intent.Attempt, intent.Provider, intent.Model = 3, "other", "intent-model"
 				nodes = append(nodes, intent)
