@@ -70,7 +70,7 @@
 | 生产人工 Review（stage 3） | PENDING | 需维护者与明确授权 |
 | tag `v1.3.0` 与 GitHub Release | PENDING | 需用户明确授权 |
 
-“发布前必须”项均已有真实实例结论。GitHub Runner（stage 2）、生产人工 Review（stage 3）、tag 与 Release 仍为 PENDING，需维护者与明确授权。。未用 mock 或 CI 结果替代真实验证。
+“发布前必须”项均已有真实实例结论。GitHub Runner（stage 2）、生产人工 Review（stage 3）、tag 与 Release 仍为 PENDING，需维护者与明确授权。未用 mock 或 CI 结果替代真实验证。
 
 ### v1.3.0 真实实例验收记录（2026-11-06，第 1–5 轮）
 
