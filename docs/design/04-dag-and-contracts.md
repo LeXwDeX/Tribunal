@@ -386,7 +386,7 @@ type Module struct {
 ### 7.1 gather（代码）
 
 1. 收集所有提出节点（`cr.*`、`rv.*`、`reasoner`、`validate`）的 findings，并按 §6.3 归一化；缺失的一路写入证据缺口。
-2. 去重：同一 `path`，行号区间重叠（±3 行）且 `category` 相同 → 同组。组内取最高严重级别，正文保留证据最充分的一条，记录所有来源。
+2. 去重：同一 `path` 与同一侧：行号相差不超过 3 行且 `category` 相同 → 同组；或行号相差不超过 6 行，且标题加正文的词集相似（同分类 Jaccard ≥ 0.45，跨分类 ≥ 0.5，至少共享 4 个有效词）→ 同组，用于合并各 lane 措辞、分类、行号略有差异的同一问题。组内取最高严重级别，正文保留证据最充分的一条，记录所有来源。
 3. 选择待挑战：严重级别为 P0 或 P1 的组。受 `max_nodes` 约束时，按严重级别（P0/P1 优先）排序后截断，未入选的组标记为 skipped 并写 warning。
 4. 写入 `findings` 表，输出 `GatherOut{groups, dropped, to_challenge, warnings}`，并展开 `verify.<seq>` 节点。
 

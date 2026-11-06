@@ -435,3 +435,23 @@ func TestContentFreeRenameShownWithOldPath(t *testing.T) {
 		t.Fatalf("warning = %q", w)
 	}
 }
+
+func TestContentFreeWarningScopedToIncrementalFiles(t *testing.T) {
+	d := validDossier(t)
+	d.Files = append(d.Files,
+		FileChange{Path: "pkg/__init__.py", Status: "added"},
+		FileChange{Path: "docs/empty.md", Status: "added"})
+	d.Incremental = &IncrementalRange{LastHead: strings.Repeat("a", 40), Head: strings.Repeat("b", 40), Files: []string{"a.go", "docs/empty.md"}}
+	w := contentFreeWarning(d)
+	if !strings.Contains(w, "docs/empty.md") || strings.Contains(w, "pkg/__init__.py") {
+		t.Fatalf("incremental warning = %q, want only docs/empty.md", w)
+	}
+	d.Incremental.Files = []string{"a.go"}
+	if w := contentFreeWarning(d); w != "" {
+		t.Fatalf("no in-scope content-free file, warning = %q", w)
+	}
+	d.Incremental.Full = true
+	if w := contentFreeWarning(d); !strings.Contains(w, "pkg/__init__.py") || !strings.Contains(w, "docs/empty.md") {
+		t.Fatalf("full review warning = %q, want all", w)
+	}
+}

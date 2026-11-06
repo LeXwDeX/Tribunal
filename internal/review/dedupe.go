@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -561,7 +562,7 @@ func dedupe(findings []Finding, dossier *Dossier) []Group {
 }
 
 func canMerge(group Group, finding Finding, resolve func(string, Side) (string, int), ambiguous func(string) bool) bool {
-	if group.Category != finding.Category || normalizedSide(group.Side) != normalizedSide(finding.Side) {
+	if normalizedSide(group.Side) != normalizedSide(finding.Side) {
 		return false
 	}
 	if ambiguous(group.Path) || ambiguous(finding.Path) {
@@ -579,11 +580,31 @@ func canMerge(group Group, finding Finding, resolve func(string, Side) (string, 
 	} else if groupMatches != findingMatches || group.Path != finding.Path {
 		return false
 	}
+	sameCategory := group.Category == finding.Category
 	if group.Line == 0 || finding.Line == 0 {
-		return group.Line == 0 && finding.Line == 0 && NormalizeTitle(group.Title) == NormalizeTitle(finding.Title)
+		return sameCategory && group.Line == 0 && finding.Line == 0 && NormalizeTitle(group.Title) == NormalizeTitle(finding.Title)
 	}
-	difference := group.Line - finding.Line
-	return difference >= -3 && difference <= 3
+	difference := absInt(group.Line - finding.Line)
+	if sameCategory && difference <= 3 {
+		return true
+	}
+	// Paraphrased near-duplicates: models rarely agree on the exact line or
+	// category slug, so location proximity must be backed by text similarity
+	// against the group display or any of its sources.
+	for _, candidate := range groupTexts(group) {
+		distance := absInt(candidate.line - finding.Line)
+		if distance > nearDuplicateLines {
+			continue
+		}
+		threshold := nearDuplicateCrossCategory
+		if sameCategoryOf(candidate, finding) {
+			threshold = nearDuplicateSameCategory
+		}
+		if textSimilar(candidate.tokens, finding, threshold) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizedSide(side Side) Side {
@@ -998,4 +1019,132 @@ func snippetFor(finding Finding) string {
 		return finding.Evidence
 	}
 	return finding.Body
+}
+
+// Near-duplicate thresholds. Lines are compared against the group display and
+// every source, so a chain of paraphrases still collapses while two distinct
+// problems in the same function stay apart. A different category must prove
+// itself with a higher text overlap; both paths also need a minimum number of
+// shared significant tokens so short generic titles cannot match by accident.
+const (
+	nearDuplicateLines         = 6
+	nearDuplicateSameCategory  = 0.45
+	nearDuplicateCrossCategory = 0.5
+	nearDuplicateMinShared     = 4
+)
+
+type mergeCandidate struct {
+	line     int
+	category string
+	tokens   map[string]struct{}
+}
+
+func sameCategoryOf(candidate mergeCandidate, finding Finding) bool {
+	return candidate.category == finding.Category
+}
+
+func groupTexts(group Group) []mergeCandidate {
+	out := make([]mergeCandidate, 0, len(group.Sources)+1)
+	out = append(out, mergeCandidate{group.Line, group.Category, textTokens(group.Title, group.Body)})
+	for _, source := range group.Sources {
+		if source.Line == 0 {
+			continue
+		}
+		out = append(out, mergeCandidate{source.Line, source.Category, textTokens(source.Title, source.Body)})
+	}
+	return out
+}
+
+func textSimilar(tokens map[string]struct{}, finding Finding, threshold float64) bool {
+	other := textTokens(finding.Title, finding.Body)
+	if tokenJaccardAtLeast(tokens, other, threshold, nil) {
+		return true
+	}
+	// CJK prose adds many incidental bigrams that dilute the score of two
+	// paraphrases of one problem, while identifiers (function and exception
+	// names, parameters) stay stable. Compare that identifier view too.
+	return tokenJaccardAtLeast(tokens, other, threshold, identifierToken)
+}
+
+func identifierToken(token string) bool {
+	return len(token) >= 3 && token[0] < 0x80
+}
+
+func tokenJaccardAtLeast(a, b map[string]struct{}, threshold float64, keep func(string) bool) bool {
+	sizeA, sizeB, shared := 0, 0, 0
+	for token := range a {
+		if keep != nil && !keep(token) {
+			continue
+		}
+		sizeA++
+		if _, ok := b[token]; ok {
+			shared++
+		}
+	}
+	for token := range b {
+		if keep == nil || keep(token) {
+			sizeB++
+		}
+	}
+	union := sizeA + sizeB - shared
+	if union == 0 || shared < nearDuplicateMinShared {
+		return false
+	}
+	return float64(shared)/float64(union) >= threshold
+}
+
+// textTokens lowercases title and body into a set of significant tokens:
+// alphanumeric words of two or more characters outside a small stopword list,
+// plus Han bigrams so Chinese text is comparable without a segmenter.
+func textTokens(parts ...string) map[string]struct{} {
+	tokens := make(map[string]struct{})
+	var word []rune
+	var han []rune
+	flushWord := func() {
+		if len(word) >= 2 {
+			if value := string(word); !nearDuplicateStopwords[value] {
+				tokens[value] = struct{}{}
+			}
+		}
+		word = word[:0]
+	}
+	flushHan := func() {
+		for i := 0; i+1 < len(han); i++ {
+			tokens[string(han[i:i+2])] = struct{}{}
+		}
+		han = han[:0]
+	}
+	for _, part := range parts {
+		for _, r := range strings.ToLower(part) {
+			switch {
+			case unicode.Is(unicode.Han, r):
+				flushWord()
+				han = append(han, r)
+			case unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_':
+				flushHan()
+				word = append(word, r)
+			default:
+				flushWord()
+				flushHan()
+			}
+		}
+		flushWord()
+		flushHan()
+	}
+	return tokens
+}
+
+var nearDuplicateStopwords = map[string]bool{
+	"the": true, "and": true, "for": true, "that": true, "this": true, "with": true, "are": true,
+	"not": true, "can": true, "may": true, "will": true, "when": true, "from": true, "which": true,
+	"does": true, "has": true, "have": true, "its": true, "but": true, "any": true, "all": true,
+	"is": true, "in": true, "to": true, "of": true, "or": true, "be": true, "as": true, "on": true,
+	"it": true, "by": true, "an": true, "at": true, "so": true, "if": true,
+}
+
+func absInt(value int) int {
+	if value < 0 {
+		return -value
+	}
+	return value
 }

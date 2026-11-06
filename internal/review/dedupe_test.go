@@ -1,6 +1,8 @@
 package review
 
 import (
+	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
@@ -336,5 +338,146 @@ func TestGatherRejectsInvalidInput(t *testing.T) {
 				t.Fatal("expected error")
 			}
 		})
+	}
+}
+
+func nearDup(node, provider, model string, index, line int, category string, severity Severity, title, body string) Finding {
+	f := outFinding("pkg/calc.py", line, severity, title, "")
+	f.Category = category
+	f.Body = body
+	return gatheredFinding("wf", node, provider, model, 0, index, f)
+}
+
+const splitEvenlyBody = "split_evenly divides total by parts with integer floor division so the remainder cents are silently dropped and the shares no longer sum to the total"
+
+func TestDedupeMergesParaphrasedNearDuplicates(t *testing.T) {
+	cases := []struct {
+		name     string
+		findings []Finding
+	}{
+		{"same lane different category and nearby line", []Finding{
+			nearDup("cr.p1", "a", "m1", 0, 15, "correctness", SeverityP2, "split_evenly drops the remainder", splitEvenlyBody),
+			nearDup("cr.p1", "a", "m1", 1, 17, "logic", SeverityP2, "split_evenly loses remainder cents", "split_evenly divides total by parts using floor division so the remainder is dropped and shares do not sum to the total"),
+		}},
+		{"cross lane same category six lines apart", []Finding{
+			nearDup("cr.p1", "a", "m1", 0, 15, "correctness", SeverityInfo, "split_evenly drops the remainder", splitEvenlyBody),
+			nearDup("cr.p2", "b", "m2", 0, 21, "correctness", SeverityP2, "Remainder is dropped by split_evenly", "The split_evenly function divides total by parts with floor division, so the remainder cents are dropped and the shares do not sum to the total"),
+		}},
+		{"three-way mixed", []Finding{
+			nearDup("cr.p1", "a", "m1", 0, 15, "correctness", SeverityP2, "split_evenly drops the remainder", splitEvenlyBody),
+			nearDup("cr.p2", "b", "m2", 0, 16, "data_loss", SeverityP2, "split_evenly remainder cents lost", "split_evenly uses floor division of total by parts, so remainder cents are silently dropped and the shares no longer sum to total"),
+			nearDup("cr.p3", "c", "m3", 0, 19, "correctness", SeverityP1, "Shares from split_evenly do not sum to total", "Because split_evenly floor divides total by parts, the remainder cents are dropped; shares no longer sum to the total"),
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			groups := Dedupe(tc.findings)
+			if len(groups) != 1 {
+				t.Fatalf("groups = %d, want 1 for near-duplicates", len(groups))
+			}
+			if len(groups[0].Sources) != len(tc.findings) {
+				t.Fatalf("sources = %d, want %d", len(groups[0].Sources), len(tc.findings))
+			}
+			high := tc.findings[0].Severity
+			for _, f := range tc.findings {
+				if f.Severity.Higher(high) {
+					high = f.Severity
+				}
+			}
+			if groups[0].Severity != high {
+				t.Fatalf("severity = %s, want %s", groups[0].Severity, high)
+			}
+		})
+	}
+}
+
+func TestDedupeKeepsDistinctIssuesApart(t *testing.T) {
+	base := nearDup("cr.p1", "a", "m1", 0, 15, "correctness", SeverityP2, "split_evenly drops the remainder", splitEvenlyBody)
+	cases := []struct {
+		name  string
+		other Finding
+	}{
+		{"nearby lines different substance", nearDup("cr.p2", "b", "m2", 0, 19, "correctness", SeverityP2, "Missing validation of zero parts", "parts equal to zero raises ZeroDivisionError which callers never handle, crashing the request")},
+		{"similar text far apart", nearDup("cr.p2", "b", "m2", 0, 60, "correctness", SeverityP2, "split_evenly drops the remainder", splitEvenlyBody)},
+		{"different category different substance", nearDup("cr.p2", "b", "m2", 0, 15, "security", SeverityP2, "Unbounded parts allows resource exhaustion", "parts is user controlled and never capped, so a huge value allocates an enormous list and exhausts memory")},
+		{"nearby but unrelated wording", nearDup("cr.p2", "b", "m2", 0, 19, "correctness", SeverityP2, "Rounding mode undocumented", "docstring does not state how currency rounding behaves for negative totals")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Dedupe([]Finding{base, tc.other}); len(got) != 2 {
+				t.Fatalf("groups = %d, want 2 for distinct issues", len(got))
+			}
+		})
+	}
+}
+
+func TestDedupeNearDuplicatesDoNotInflateVotes(t *testing.T) {
+	findings := []Finding{
+		nearDup("cr.p1", "a", "m1", 0, 15, "correctness", SeverityP2, "split_evenly drops the remainder", splitEvenlyBody),
+		nearDup("cr.p1", "a", "m1", 1, 17, "logic", SeverityP2, "split_evenly loses remainder cents", "split_evenly divides total by parts using floor division so the remainder is dropped and shares do not sum to the total"),
+		nearDup("cr.p1", "a", "m1", 2, 18, "logic", SeverityP2, "Remainder cents vanish in split_evenly", "floor division in split_evenly drops the remainder so shares do not sum to the total"),
+	}
+	groups := Dedupe(findings)
+	if len(groups) != 1 {
+		t.Fatalf("groups = %d", len(groups))
+	}
+	if votes := CountVotes(groups[0].Sources, 0); votes != 2 {
+		t.Fatalf("one model's 3 duplicates = %.2f votes, want 1 + 2*same-model weight (2.00), not 3 independent votes", votes)
+	}
+}
+
+type realFixtureFinding struct {
+	OriginNode     string `json:"origin_node"`
+	OriginProvider string `json:"origin_provider"`
+	Severity       string `json:"severity"`
+	Category       string `json:"category"`
+	Path           string `json:"path"`
+	Line           int    `json:"line"`
+	Side           string `json:"side"`
+	Title          string `json:"title"`
+	Body           string `json:"body"`
+	Evidence       string `json:"evidence"`
+	Confidence     string `json:"confidence"`
+}
+
+func loadRealFixture(t *testing.T) []Finding {
+	t.Helper()
+	raw, err := os.ReadFile("testdata/dedupe_real_split_evenly.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rows []realFixtureFinding
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		t.Fatal(err)
+	}
+	var out []Finding
+	for i, r := range rows {
+		out = append(out, gatheredFinding("wf", r.OriginNode, r.OriginProvider, "model", 0, i, FindingOut{
+			Path: r.Path, Line: r.Line, Side: r.Side, Severity: Severity(r.Severity), Category: r.Category,
+			Title: r.Title, Body: r.Body, Evidence: r.Evidence, Confidence: Confidence(r.Confidence),
+		}))
+	}
+	return out
+}
+
+func TestDedupeRealSplitEvenlyWorkflowMergesTriple(t *testing.T) {
+	findings := loadRealFixture(t)
+	groups := Dedupe(findings)
+	var merged, structure *Group
+	for i := range groups {
+		if groups[i].Line == 2 {
+			structure = &groups[i]
+		} else {
+			merged = &groups[i]
+		}
+	}
+	if len(groups) != 2 || merged == nil || structure == nil {
+		t.Fatalf("groups = %d, want the line-15 triple merged and line 2 separate", len(groups))
+	}
+	if len(merged.Sources) != 3 || merged.Severity != SeverityP2 {
+		t.Fatalf("merged sources=%d severity=%s", len(merged.Sources), merged.Severity)
+	}
+	if len(structure.Sources) != 1 || structure.Severity != SeverityInfo {
+		t.Fatalf("structure group = %+v", structure)
 	}
 }
