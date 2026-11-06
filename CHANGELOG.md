@@ -69,6 +69,7 @@
 
 ### 修复
 
+- **进程被强杀后重启，被中断的任务不再等租约到期才继续**（[#351](https://github.com/LeXwDeX/Tribunal/issues/351)）：此前同一 MR 的新 head 要等被中断的 `review.run` 任务租约（默认 5 分钟）过期才能开始。现在服务取得数据目录锁并打开数据库后，在 worker 开始领取前，把仍处于运行中的任务立即释放为可领取（沿用租约过期的重试与尝试次数语义，已有排队后继任务的则取消），并记录 INFO 日志 `reclaimed stale job leases`。仅服务启动路径执行，嵌入方不受影响。
 - **空文件、纯改名和删除空文件不再使评审 INCOMPLETE**（[#345](https://github.com/LeXwDeX/Tribunal/issues/345)）：状态为 `added`/`deleted`/`renamed` 且 diff 为空的文件没有文本内容可评审，不再计为覆盖缺口，路径列入评审警告「no textual changes to review」，变更索引标注「无文本变更」。二进制文件不受影响：GitLab 对其返回 `Binary files … differ` 文本（2026-11-06 在测试实例实测），按原有路径处理；`modified` 且 diff 为空（可能是仅模式变更）仍按覆盖缺口处理；`too_large`/`collapsed` 仍记为省略文件和覆盖缺口。计划阶段的文件列表同样标注，agent 规划遗漏这类文件不再算覆盖缺口，`list_changes` 对其显示 `inlined=n/a`。
 - **启动恢复取消当前代次的评审后，状态评论不再停在「评审运行中」**（[#341](https://github.com/LeXwDeX/Tribunal/issues/341)）：恢复时因 `profile_hash_changed`、`execution_identity_changed`、`config_changed` 等原因取消、且仍是 MR 当前代次的工作流，现在会把评审状态置为「评审已取消」，详情含 `cancelled on recovery: <原因>` 并提示重新触发，同时更新 GitLab 状态评论；发布记录的跳过原因同为该文本，不再是 `review superseded`。代次已被取代时不改动新代次的状态。
 - **`default` 与 `lanes.code_review` 覆盖现在真正改变执行的模型**（[#334](https://github.com/LeXwDeX/Tribunal/issues/334)，[#327](https://github.com/LeXwDeX/Tribunal/issues/327) 评审中发现的缺陷）：此前这两项覆盖只改变显示，评审仍按配置执行。现在覆盖合并进未归一化的 `default` 配置后统一归一化一次，七个节点的覆盖都影响实际模型。

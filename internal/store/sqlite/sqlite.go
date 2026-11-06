@@ -436,7 +436,7 @@ func (s *Store) Claim(ctx context.Context, worker string, kinds []string, lease 
 	defer tx.Rollback()
 
 	now := s.now().UTC()
-	if _, err := recoverTx(ctx, tx, now); err != nil {
+	if _, err := recoverTx(ctx, tx, now, expiredLeaseCond, formatTime(now)); err != nil {
 		return nil, err
 	}
 
@@ -483,7 +483,15 @@ func (s *Store) Claim(ctx context.Context, worker string, kinds []string, lease 
 	return job, nil
 }
 
-func recoverTx(ctx context.Context, tx *sql.Tx, now time.Time) (int, error) {
+// expiredLeaseCond selects running jobs whose lease has lapsed; foreignLeaseCond
+// selects running jobs held by any owner other than the bound one.
+const (
+	expiredLeaseCond = `(lease_until IS NULL OR lease_until < ?)`
+	foreignLeaseCond = `(lease_owner IS NULL OR lease_owner <> ?)`
+)
+
+// recoverTx settles running jobs matched by cond (one bound argument, condArg).
+func recoverTx(ctx context.Context, tx *sql.Tx, now time.Time, cond, condArg string) (int, error) {
 	// Attempts increment only on Claim, so recovery requeues without
 	// double-counting an attempt that was already reserved.
 	nowText := formatTime(now)
@@ -493,10 +501,10 @@ func recoverTx(ctx context.Context, tx *sql.Tx, now time.Time) (int, error) {
 	res, err := tx.ExecContext(ctx, `UPDATE jobs
 		SET state = ?, lease_owner = NULL, lease_until = NULL, defer_since = NULL,
 		    last_error = 'superseded by queued job', updated_at = ?
-		WHERE state = ? AND (lease_until IS NULL OR lease_until < ?)
+		WHERE state = ? AND `+cond+`
 		  AND "key" IS NOT NULL
 		  AND EXISTS (SELECT 1 FROM jobs q WHERE q."key" = jobs."key" AND q.state = ?)`,
-		store.JobCancelled, nowText, store.JobRunning, nowText, store.JobQueued)
+		store.JobCancelled, nowText, store.JobRunning, condArg, store.JobQueued)
 	if err != nil {
 		return 0, fmt.Errorf("sqlite: cancel stale leases: %w", err)
 	}
@@ -506,9 +514,9 @@ func recoverTx(ctx context.Context, tx *sql.Tx, now time.Time) (int, error) {
 	res, err = tx.ExecContext(ctx, `UPDATE jobs
 		SET state = ?, lease_owner = NULL, lease_until = NULL, defer_since = NULL,
 		    last_error = 'lease expired after maximum attempts', updated_at = ?
-		WHERE state = ? AND (lease_until IS NULL OR lease_until < ?)
+		WHERE state = ? AND `+cond+`
 		  AND attempts >= max_attempts`,
-		store.JobFailed, nowText, store.JobRunning, nowText)
+		store.JobFailed, nowText, store.JobRunning, condArg)
 	if err != nil {
 		return 0, fmt.Errorf("sqlite: fail expired leases: %w", err)
 	}
@@ -518,8 +526,8 @@ func recoverTx(ctx context.Context, tx *sql.Tx, now time.Time) (int, error) {
 	res, err = tx.ExecContext(ctx, `UPDATE jobs
 		SET state = ?, run_after = ?, lease_owner = NULL, lease_until = NULL,
 		    defer_since = NULL, last_error = 'lease expired; retry scheduled', updated_at = ?
-		WHERE state = ? AND (lease_until IS NULL OR lease_until < ?)`,
-		store.JobQueued, nowText, nowText, store.JobRunning, nowText)
+		WHERE state = ? AND `+cond+``,
+		store.JobQueued, nowText, nowText, store.JobRunning, condArg)
 	if err != nil {
 		return 0, fmt.Errorf("sqlite: requeue expired leases: %w", err)
 	}
@@ -537,12 +545,35 @@ func (s *Store) Recover(ctx context.Context) (int, error) {
 	}
 	defer tx.Rollback()
 
-	count, err := recoverTx(ctx, tx, s.now().UTC())
+	now := s.now().UTC()
+	count, err := recoverTx(ctx, tx, now, expiredLeaseCond, formatTime(now))
 	if err != nil {
 		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("sqlite: commit recover: %w", err)
+	}
+	return count, nil
+}
+
+// ReclaimForeignLeases requeues, fails or cancels running jobs whose lease
+// owner is not currentOwner, ignoring lease_until, with the same attempt and
+// successor semantics as Recover. Call it only while holding the data
+// directory lock and before the worker claims, when no other live process can
+// hold a lease; it never touches queued, terminal or currentOwner jobs.
+func (s *Store) ReclaimForeignLeases(ctx context.Context, currentOwner string) (int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("sqlite: begin reclaim: %w", err)
+	}
+	defer tx.Rollback()
+
+	count, err := recoverTx(ctx, tx, s.now().UTC(), foreignLeaseCond, currentOwner)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("sqlite: commit reclaim: %w", err)
 	}
 	return count, nil
 }

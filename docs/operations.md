@@ -493,6 +493,7 @@ fi
 - 两个实例不能共用一个数据卷。服务启动时在 SQLite 文件所在目录对 `tribunal.lock` 加独占锁（默认容器配置下为 `/app/data/tribunal.lock`，源码运行时默认为 `data/tribunal.lock`），在打开数据库之前完成。锁已被另一个进程持有时，服务记录 `data directory is locked by another Tribunal instance` 错误日志（带锁文件路径）并以退出码 1 退出，不会打开数据库。锁随进程退出由内核释放，包括崩溃或 `kill -9`；锁文件本身会留在目录里，不需要也不应该手工删除，它的存在不代表被锁。
   - 锁基于 `flock`，在 Linux（Docker 镜像）、macOS 和 BSD 上生效。Windows 等没有 `flock` 的平台只创建锁文件、不加锁，不在支持范围内。`flock` 只在同一内核内可靠：同一台宿主机上的多个容器共用一个卷可以互斥，跨主机共享的 NFS 等网络文件系统不受保护，不要把数据目录放在网络文件系统上。
   - `tribunalctl` 的命令都走 HTTP API，不直接打开数据库，不受锁影响。用 `sqlite3` 等外部工具直接打开 `review.db` 不会检查这个锁；按第 7 节先停止服务再操作。
+  - 持有数据目录锁意味着没有其他存活进程持有任务租约。服务在打开数据库后、worker 开始领取前，把上一个进程遗留的运行中任务立即释放为可领取，并记录 INFO 日志 `reclaimed stale job leases`（带 `count`）。因此 `kill -9` 或崩溃后重启不必再等任务租约（`jobs.lease`，默认 5 分钟）到期；尝试次数照常累计，超过上限的任务按失败处理。同一个评审的续跑仍由启动恢复和任务处理器按任务 ID 互斥，不会重复执行。
 - 后台 run cleanup 在启动后立即执行、之后每小时执行。它先查询 `workspaces`、run 保护集合和 context 保护 SHA，再触碰项目文件；只处理有 `workspaces` 记录的项目。超过 `workspace.run_cleanup_after` 的 `runs/<id>` 需未被未终态 workflow、queued/running job、`publication_state=pending` 的 dossier 或本进程注册 run 引用；`context/<sha>` 需未被任何 DB revision、当前 workspace base/context、未终态或待发布 workflow base 引用。locked/非法 metadata 保留并 fail closed；项目列表查询失败时整轮保留，某项保护查询失败时跳过该项目。
 
 基础镜像标签已在本机联网核对 Docker Hub（2026-10-22）：

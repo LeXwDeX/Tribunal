@@ -1260,3 +1260,63 @@ func migrationCount(t *testing.T) int {
 	}
 	return len(names)
 }
+
+func TestReclaimForeignLeasesMakesOtherOwnersJobsClaimableNow(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	s := openTestStore(t, clock)
+
+	enqueue := func(key string) string {
+		id, _, err := s.Enqueue(ctx, store.Job{Kind: "reclaim", Key: key, MaxAttempts: 3})
+		if err != nil {
+			t.Fatalf("Enqueue %s: %v", key, err)
+		}
+		return id
+	}
+	foreignID := enqueue("reclaim:foreign")
+	ownID := enqueue("reclaim:own")
+	doneID := enqueue("reclaim:done")
+	queuedID := enqueue("reclaim:queued")
+	claim := func(owner string) *store.Job {
+		j, err := s.Claim(ctx, owner, []string{"reclaim"}, 5*time.Minute)
+		if err != nil || j == nil {
+			t.Fatalf("Claim as %s: %v, %v", owner, j, err)
+		}
+		return j
+	}
+	// Claim order follows creation order; the fourth job stays queued.
+	claim("dead-process:0")
+	claim("live-process:0")
+	third := claim("dead-process:1")
+	if third.ID != doneID {
+		t.Fatalf("third claim = %s, want %s", third.ID, doneID)
+	}
+	if err := s.Complete(ctx, *third); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	n, err := s.ReclaimForeignLeases(ctx, "live-process:0")
+	if err != nil || n != 1 {
+		t.Fatalf("ReclaimForeignLeases = %d, %v; want 1", n, err)
+	}
+	foreign, _ := s.GetJob(ctx, foreignID)
+	if foreign.State != store.JobQueued || foreign.Attempts != 1 || foreign.LeaseOwner != "" || foreign.LeaseUntil != nil || foreign.RunAfter.After(clock.Now()) {
+		t.Fatalf("foreign job = %+v, want queued, attempts kept, claimable now", foreign)
+	}
+	own, _ := s.GetJob(ctx, ownID)
+	if own.State != store.JobRunning || own.LeaseOwner != "live-process:0" || own.LeaseUntil == nil {
+		t.Fatalf("own job touched: %+v", own)
+	}
+	if done, _ := s.GetJob(ctx, doneID); done.State != store.JobDone {
+		t.Fatalf("done job touched: %+v", done)
+	}
+	if q, _ := s.GetJob(ctx, queuedID); q.State != store.JobQueued || q.Attempts != 0 {
+		t.Fatalf("queued job touched: %+v", q)
+	}
+
+	// No clock advance: the reclaimed job is claimable now and counts a new attempt.
+	again, err := s.Claim(ctx, "live-process:1", []string{"reclaim"}, time.Minute)
+	if err != nil || again == nil || again.ID != foreignID || again.Attempts != 2 {
+		t.Fatalf("reclaimed claim = %+v, %v; want %s attempts 2", again, err, foreignID)
+	}
+}

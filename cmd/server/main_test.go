@@ -1226,3 +1226,33 @@ func TestWarnConfigLogsEachMigratedProfileField(t *testing.T) {
 		}
 	}
 }
+
+type fakeLeaseReclaimer struct {
+	owner string
+	n     int
+	err   error
+}
+
+func (f *fakeLeaseReclaimer) ReclaimForeignLeases(_ context.Context, owner string) (int, error) {
+	f.owner = owner
+	return f.n, f.err
+}
+
+func TestReclaimStaleLeasesLogsCount(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	if err := reclaimStaleLeases(context.Background(), &fakeLeaseReclaimer{n: 2}, logger); err != nil {
+		t.Fatal(err)
+	}
+	if out := buf.String(); !strings.Contains(out, "reclaimed stale job leases") || !strings.Contains(out, "count=2") {
+		t.Fatalf("log = %q, want reclaim message with count=2", out)
+	}
+	buf.Reset()
+	if err := reclaimStaleLeases(context.Background(), &fakeLeaseReclaimer{}, logger); err != nil || buf.Len() != 0 {
+		t.Fatalf("zero reclaim logged %q, err %v", buf.String(), err)
+	}
+	wantErr := errors.New("boom")
+	if err := reclaimStaleLeases(context.Background(), &fakeLeaseReclaimer{err: wantErr}, logger); !errors.Is(err, wantErr) {
+		t.Fatalf("err = %v, want %v", err, wantErr)
+	}
+}
