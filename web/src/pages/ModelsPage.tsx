@@ -396,7 +396,7 @@ export function ModelsPage() {
         <section className={styles.section} aria-labelledby={profilesId}>
           <div className={styles.sectionHeader}>
             <h2 className={styles.sectionTitle} id={profilesId}>评审档位</h2>
-            <span className={styles.sectionAside}>定义来自平台配置，只读</span>
+            <span className={styles.sectionAside}>基线来自平台配置；默认档位可按节点覆盖模型与参数</span>
           </div>
           {defaultProfile.isPending ? <LoadingState /> : null}
           {defaultProfile.isError ? <ErrorState error={defaultProfile.error} onRetry={defaultProfile.refetch} /> : null}
