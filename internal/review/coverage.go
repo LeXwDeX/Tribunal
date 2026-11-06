@@ -30,6 +30,9 @@ func (e *Executor) coverageUnresolved(wf dag.WorkflowView) ([]UnresolvedSignal, 
 			Node: "coverage", Kind: UnresolvedEvidence, Message: message,
 		})
 	}
+	if warning := contentFreeWarning(d); warning != "" {
+		warnings = append(warnings, warning)
+	}
 	if len(d.Files) > MaxFindings {
 		signals = append(signals, UnresolvedSignal{
 			Node: "plan",
@@ -149,7 +152,7 @@ func unassignedCoverageGap(d *Dossier, assigned map[string]struct{}) string {
 	reviewable := 0
 	missing := make([]string, 0)
 	for _, file := range d.Files {
-		if file.Generated {
+		if file.Generated || isContentFree(file) {
 			continue
 		}
 		reviewable++
@@ -184,6 +187,50 @@ func boundedPathList(paths []string, max int) string {
 	return out
 }
 
+// isContentFree reports an added, deleted or renamed file whose diff is empty:
+// there is no textual content to review (an empty file or a pure rename).
+// GitLab reports binary files with a non-empty "Binary files ... differ" diff,
+// so they never reach this rule. A modified file with an empty diff stays a
+// coverage gap: the client does not read a_mode/b_mode, so a mode-only change
+// cannot be told apart from a withheld diff.
+func isContentFree(file FileChange) bool {
+	if strings.TrimSpace(file.Diff) != "" {
+		return false
+	}
+	switch file.Status {
+	case "added", "deleted", "renamed":
+		return true
+	}
+	return false
+}
+
+// fileLabel shows "old → new" for a content-free rename so the previous path
+// stays visible; other files show their path.
+func fileLabel(file FileChange) string {
+	if file.Status == "renamed" && file.OldPath != "" && file.OldPath != file.Path {
+		return file.OldPath + " → " + file.Path
+	}
+	return file.Path
+}
+
+// contentFreeWarning lists content-free files so the omission stays visible.
+func contentFreeWarning(d *Dossier) string {
+	if d == nil {
+		return ""
+	}
+	var paths []string
+	for _, file := range d.Files {
+		if isContentFree(file) {
+			paths = append(paths, fileLabel(file))
+		}
+	}
+	if len(paths) == 0 {
+		return ""
+	}
+	sort.Strings(paths)
+	return "no textual changes to review: " + boundedPathList(paths, 12)
+}
+
 // promptDiffGaps reports materials that cannot be reviewed at all: a file
 // missing from the snapshot or a file with no diff content. Prompt inline
 // truncation is no longer a gap by itself; builtPromptDiffGaps verifies that
@@ -204,6 +251,9 @@ func promptDiffGaps(d *Dossier, files []string) ([]string, map[string]struct{}) 
 			gaps = append(gaps, fmt.Sprintf(
 				"file %s is not in the materials snapshot; it was not reviewed", filePath))
 			gapped[filePath] = struct{}{}
+			continue
+		}
+		if isContentFree(file) {
 			continue
 		}
 		if strings.TrimSpace(file.Diff) == "" {
@@ -285,6 +335,9 @@ func (e *Executor) builtPromptDiffGaps(d *Dossier, kind string, params reviewNod
 		}
 		reported[filePath] = struct{}{}
 		file := byPath[filePath]
+		if isContentFree(file) {
+			continue
+		}
 		total := countFileHunks(file.Diff)
 		if total > 0 && hunksCovered(total, diffReads[filePath]) {
 			continue

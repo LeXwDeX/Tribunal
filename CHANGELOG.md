@@ -23,7 +23,7 @@
   4. 回到旧评审图只能回退发布：恢复升级前的镜像和备份的配置，没有开关。
   逐项迁移规则见[配置设计 · 评审档位](docs/design/06-config.md#评审档位profiles)，操作步骤见[部署与运维 · 单一评审档位](docs/operations.md#单一评审档位升级)。
 
-- **未终态工作流不会在新任务布局下续跑**（[#300](https://github.com/LeXwDeX/Tribunal/issues/300)）：`prompts.TaskRenderVersion` 由 5 改为 6。升级前创建的未终态工作流在启动恢复时被取消，不会在新布局或覆盖语义下续跑、重试或发布；需要时等待其结束或接受取消后重新触发。
+- **未终态工作流不会在新任务布局下续跑**（[#300](https://github.com/LeXwDeX/Tribunal/issues/300)）：`prompts.TaskRenderVersion` 在 1.3.0 中由 5 改为 7（#300 改为 6，#345 再改为 7）。升级前由更早版本创建的未终态工作流在启动恢复时被取消，不会在新布局或覆盖语义下续跑、重试或发布，过期的未发布结果也不会被发布；需要时等待其结束或接受取消后重新触发。
 
 ### 已验证范围（#294，本地与 CI）
 
@@ -69,6 +69,7 @@
 
 ### 修复
 
+- **空文件、纯改名和删除空文件不再使评审 INCOMPLETE**（[#345](https://github.com/LeXwDeX/Tribunal/issues/345)）：状态为 `added`/`deleted`/`renamed` 且 diff 为空的文件没有文本内容可评审，不再计为覆盖缺口，路径列入评审警告「no textual changes to review」，变更索引标注「无文本变更」。二进制文件不受影响：GitLab 对其返回 `Binary files … differ` 文本（2026-11-06 在测试实例实测），按原有路径处理；`modified` 且 diff 为空（可能是仅模式变更）仍按覆盖缺口处理；`too_large`/`collapsed` 仍记为省略文件和覆盖缺口。计划阶段的文件列表同样标注，agent 规划遗漏这类文件不再算覆盖缺口，`list_changes` 对其显示 `inlined=n/a`。
 - **启动恢复取消当前代次的评审后，状态评论不再停在「评审运行中」**（[#341](https://github.com/LeXwDeX/Tribunal/issues/341)）：恢复时因 `profile_hash_changed`、`execution_identity_changed`、`config_changed` 等原因取消、且仍是 MR 当前代次的工作流，现在会把评审状态置为「评审已取消」，详情含 `cancelled on recovery: <原因>` 并提示重新触发，同时更新 GitLab 状态评论；发布记录的跳过原因同为该文本，不再是 `review superseded`。代次已被取代时不改动新代次的状态。
 - **`default` 与 `lanes.code_review` 覆盖现在真正改变执行的模型**（[#334](https://github.com/LeXwDeX/Tribunal/issues/334)，[#327](https://github.com/LeXwDeX/Tribunal/issues/327) 评审中发现的缺陷）：此前这两项覆盖只改变显示，评审仍按配置执行。现在覆盖合并进未归一化的 `default` 配置后统一归一化一次，七个节点的覆盖都影响实际模型。
 - **控制台新建的用户模型被档位覆盖引用后，评审不再整体失败**（[#327](https://github.com/LeXwDeX/Tribunal/issues/327)）：此前评审图校验用的 provider 白名单只在启动时计算一次；启动后创建的用户模型一旦被档位覆盖引用，每次评审都会在创建工作流前以 `review execution failed` 失败（永久性 `build review graph` 错误），重启后才恢复。现在每次评审都按当前模型目录校验，运行时新建或删除的模型无需重启即生效，已软删除的模型会被拒绝。
