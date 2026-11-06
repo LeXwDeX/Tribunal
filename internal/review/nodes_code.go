@@ -525,10 +525,16 @@ func nodeProvider(node dag.NodeView) string {
 }
 
 func (e *Executor) incrementalFiles() map[string]struct{} {
-	if e.deps.Dossier == nil || e.deps.Dossier.Incremental == nil || e.deps.Dossier.Incremental.Full {
+	return incrementalFileSet(e.deps.Dossier)
+}
+
+// incrementalFileSet returns the incremental review file set, or nil when the
+// review covers every file.
+func incrementalFileSet(d *Dossier) map[string]struct{} {
+	if d == nil || d.Incremental == nil || d.Incremental.Full {
 		return nil
 	}
-	files := e.deps.Dossier.Incremental.Files
+	files := d.Incremental.Files
 	if files == nil {
 		return nil
 	}

@@ -384,6 +384,8 @@ type fakeAgentRunner struct {
 	block    <-chan struct{}
 	started  chan struct{}
 	startOne sync.Once
+	// findings, when set, replaces the default single finding of every run.
+	findings []review.FindingOut
 }
 
 func (f *fakeAgentRunner) Run(ctx context.Context, _ agent.RunSpec) (*agent.RunResult, error) {
@@ -400,6 +402,12 @@ func (f *fakeAgentRunner) Run(ctx context.Context, _ agent.RunSpec) (*agent.RunR
 			return nil, ctx.Err()
 		case <-block:
 		}
+	}
+	if override := f.findings; override != nil {
+		return &agent.RunResult{
+			Output: &review.CodeReviewOut{Summary: "issues found", Findings: append([]review.FindingOut(nil), override...)},
+			Usage:  llm.Usage{InputTokens: 10, OutputTokens: 5},
+		}, nil
 	}
 	return &agent.RunResult{
 		Output: &review.CodeReviewOut{

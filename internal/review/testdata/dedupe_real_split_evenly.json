@@ -1,0 +1,54 @@
+[
+ {
+  "origin_node": "cr.p1",
+  "origin_provider": "primary",
+  "severity": "P2",
+  "category": "correctness",
+  "path": "pkg/calc.py",
+  "line": 15,
+  "side": "new",
+  "title": "split_evenly 未校验 people，非法人数抛出不透明异常",
+  "body": "新增函数没有校验 `people`，而同文件 `apply_discount` 对越界的 `percent` 显式抛出 `ValueError`。一旦调用方传入算出的人数 0，`total_cents // people` 直接抛 `ZeroDivisionError`；传入负数时 `[share] * people` 得到空列表，随后 `parts[0] += ...` 抛 `IndexError`。分账场景下人数常来自外部输入或计算，这两种异常既不能说明是哪个参数出错，也无法被只捕获 `ValueError` 的上层统一处理。建议入口先判断 `people <= 0` 并抛出 `ValueError`，与 `apply_discount` 的入参约定保持一致。",
+  "evidence": "def split_evenly(total_cents: int, people: int) -> list[int]:\n    share = total_cents // people\n    parts = [share] * people\n    parts[0] += total_cents - share * people",
+  "confidence": "medium"
+ },
+ {
+  "origin_node": "reasoner",
+  "origin_provider": "primary",
+  "severity": "P2",
+  "category": "boundary_handling",
+  "path": "pkg/calc.py",
+  "line": 15,
+  "side": "new",
+  "title": "split_evenly 完全未校验 people，0 或负值直接抛无关异常",
+  "body": "这个新函数是「金额按人数均摊」的结算辅助函数，却对人数没有任何前置校验：people=0 时 `total_cents // people` 抛 ZeroDivisionError；people<0 时 `[share] * people` 得到空列表，随后 `parts[0] += ...` 抛 IndexError。两种情况下调用方拿到的是与语义无关的底层异常，无法在下单路径上区分「输入非法」与「程序缺陷」。文档字符串声明了余数归属规则，却没有声明人数必须为正，因此调用方无从得知这个隐含前置条件。\n\nLocation: pkg/calc.py:15-17（新增的 split_evenly）",
+  "evidence": "pkg/calc.py:15-17（新增的 split_evenly）",
+  "confidence": "high"
+ },
+ {
+  "origin_node": "reasoner",
+  "origin_provider": "primary",
+  "severity": "info",
+  "category": "package_structure",
+  "path": "pkg/calc.py",
+  "line": 2,
+  "side": "new",
+  "title": "pkg 是常规包，而它依赖的 lib/lib.utils 是隐式命名空间包，导入根完全靠约定",
+  "body": "本 MR 只给 pkg 补了 `__init__.py`，而 `from lib.utils.helpers import truncate` 依赖的 lib、lib.utils 仍是隐式命名空间包，因此 `pkg.calc` 只有在仓库根位于 sys.path 时才能解析。以 `python pkg/calc.py` 从子目录执行时 sys.path[0] 是 pkg/，import 会 ModuleNotFoundError；若之后用常规 find_packages 打包 pkg，lib 与 lib.utils 也不会被收录，安装后同样导入失败。仓库没有 pyproject/setup.py 或入口声明，这个隐式约定没有任何文档承载。\n\nLocation: pkg/calc.py:2（同时新增了 pkg/__init__.py，但 lib/ 与 lib/utils/ 没有 __init__.py）",
+  "evidence": "pkg/calc.py:2（同时新增了 pkg/__init__.py，但 lib/ 与 lib/utils/ 没有 __init__.py）",
+  "confidence": "medium"
+ },
+ {
+  "origin_node": "rv.p1",
+  "origin_provider": "primary",
+  "severity": "P2",
+  "category": "error-handling",
+  "path": "pkg/calc.py",
+  "line": 15,
+  "side": "new",
+  "title": "split_evenly 未校验 people 导致底层异常",
+  "body": "当调用方传入 people = 0（例如付款人列表为空）时，`total_cents // people` 直接抛 ZeroDivisionError；people < 0 时 `[share] * people` 得到空列表，随后 `parts[0]` 抛 IndexError。调用方拿到的是与业务语义无关的底层异常，且与同文件中 apply_discount 对 percent 显式抛 ValueError 的防御风格不一致。建议在函数入口对 people <= 0 抛 ValueError，错误信息可直接说明需要正整数。",
+  "evidence": "share = total_cents // people\nparts = [share] * people\nparts[0] += total_cents - share * people",
+  "confidence": "medium"
+ }
+]

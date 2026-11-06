@@ -261,6 +261,9 @@ func renderSummaryItem(group Group, marked bool) string {
 		b.WriteString(codeFence(group.Evidence))
 		b.WriteString("\n\n</details>\n\n")
 	}
+	if related := relatedDescriptions(group); related != "" {
+		b.WriteString(related)
+	}
 	return strings.TrimRight(b.String(), "\n") + "\n"
 }
 
@@ -327,6 +330,10 @@ func RenderFinding(group Group, opts FindingRenderOptions) (string, error) {
 		b.WriteString(codeFence(group.Evidence))
 		b.WriteString("\n\n</details>\n")
 	}
+	if related := relatedDescriptions(group); related != "" {
+		b.WriteString("\n")
+		b.WriteString(related)
+	}
 	if opts.ShowModelAttribution {
 		if attribution := modelAttribution(group, opts.ProviderLabels); attribution != "" {
 			b.WriteString("\n<sub>来源：")
@@ -337,6 +344,34 @@ func RenderFinding(group Group, opts FindingRenderOptions) (string, error) {
 	// Rendered bodies are the final text: hashes and remote comparisons use
 	// them, and GitLab must never see a line it would run as a quick action.
 	return gitlab.NeutralizeQuickActions(b.String()), nil
+}
+
+// relatedDescriptions lists the groups folded into this discussion by
+// MergePresentation (severity, category, title, short body excerpt). The
+// list is already ordered by severity then position; at most maxRelatedGroups
+// are shown and the rest is counted.
+func relatedDescriptions(group Group) string {
+	if len(group.Related) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("**相关描述**：\n")
+	for i, related := range group.Related {
+		if i == maxRelatedGroups {
+			fmt.Fprintf(&b, "- 另有 %d 条\n", len(group.Related)-maxRelatedGroups)
+			break
+		}
+		label := string(related.Severity)
+		if related.Category != "" {
+			label += " · " + related.Category
+		}
+		b.WriteString("- [" + escapeOneLine(label, 64) + "] " + escapeOneLine(related.Title, MaxTitleRunes))
+		if excerpt := escapeOneLine(related.Excerpt, relatedExcerptRunes); excerpt != "" {
+			b.WriteString("：" + excerpt)
+		}
+		b.WriteByte('\n')
+	}
+	return b.String()
 }
 
 func modelAttribution(group Group, labels map[string]string) string {
