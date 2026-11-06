@@ -384,10 +384,54 @@ func TestContentFreeIndexLine(t *testing.T) {
 	d := contentFreeDossier(t, "added")
 	d.Files = append(d.Files, FileChange{Path: "m.py", Status: "modified"})
 	index, _, _, _ := renderDiffsWithSpans(d, []string{"billing/__init__.py", "m.py"}, 10000)
-	if !strings.Contains(index, "billing/__init__.py（added，+0/-0，无文本变更，无需评审）") {
+	if !strings.Contains(index, "billing/__init__.py（added，+0/-0，无文本变更）") {
 		t.Fatalf("index does not mark the content-free file: %s", index)
 	}
 	if !strings.Contains(index, "m.py（modified，+0/-0，无 diff 内容）") {
 		t.Fatalf("modified empty diff lost its marker: %s", index)
+	}
+}
+
+func TestExecutorCoverageAgentPlanMayOmitContentFreeFile(t *testing.T) {
+	dossier := contentFreeDossier(t, "added")
+	wf := coverageWorkflow("a.go", "b.go")
+	plan := PlanOut{
+		Risk: "low", RiskReasons: []string{"small"},
+		Packages: []Package{{
+			ID: "p1", Blocks: []string{"review"}, Files: []string{"a.go", "b.go"}, Focus: "review",
+		}},
+		ChallengeOnly: []Severity{SeverityP1},
+	}
+	wf.Nodes[NodePlan] = completedNode(NodePlan, KindPlan, planParams{}, plan)
+	wf.Order = append([]string{NodePlan}, wf.Order...)
+	executor := evidenceExecutorWithDossier(t, wf, dossier)
+	gathered := runEvidenceGather(t, executor, wf)
+	if signal, ok := unresolvedOfKind(gathered.Unresolved, UnresolvedEvidence); ok {
+		t.Fatalf("unassigned content-free file produced a gap: %+v", signal)
+	}
+	dossier.Files[2].Status = "modified"
+	gathered = runEvidenceGather(t, executor, wf)
+	if _, ok := unresolvedOfKind(gathered.Unresolved, UnresolvedEvidence); !ok {
+		t.Fatalf("unassigned modified empty file must stay a gap")
+	}
+}
+
+func TestPlanTaskMarksContentFreeFiles(t *testing.T) {
+	d := contentFreeDossier(t, "renamed")
+	task := planTask(d, planParams{})
+	if !strings.Contains(task, "billing/old.py → billing/__init__.py（renamed，+0/-0，无文本变更）") {
+		t.Fatalf("plan task does not mark the content-free rename: %s", task)
+	}
+}
+
+func TestContentFreeRenameShownWithOldPath(t *testing.T) {
+	d := contentFreeDossier(t, "renamed")
+	index, _, _, _ := renderDiffsWithSpans(d, []string{"billing/__init__.py"}, 10000)
+	if !strings.Contains(index, "billing/old.py → billing/__init__.py（renamed，+0/-0，无文本变更）") ||
+		strings.Contains(index, "无需评审") {
+		t.Fatalf("index = %s", index)
+	}
+	if w := contentFreeWarning(d); !strings.Contains(w, "billing/old.py → billing/__init__.py") {
+		t.Fatalf("warning = %q", w)
 	}
 }

@@ -152,7 +152,7 @@ func unassignedCoverageGap(d *Dossier, assigned map[string]struct{}) string {
 	reviewable := 0
 	missing := make([]string, 0)
 	for _, file := range d.Files {
-		if file.Generated {
+		if file.Generated || isContentFree(file) {
 			continue
 		}
 		reviewable++
@@ -204,6 +204,15 @@ func isContentFree(file FileChange) bool {
 	return false
 }
 
+// fileLabel shows "old → new" for a content-free rename so the previous path
+// stays visible; other files show their path.
+func fileLabel(file FileChange) string {
+	if file.Status == "renamed" && file.OldPath != "" && file.OldPath != file.Path {
+		return file.OldPath + " → " + file.Path
+	}
+	return file.Path
+}
+
 // contentFreeWarning lists content-free files so the omission stays visible.
 func contentFreeWarning(d *Dossier) string {
 	if d == nil {
@@ -212,7 +221,7 @@ func contentFreeWarning(d *Dossier) string {
 	var paths []string
 	for _, file := range d.Files {
 		if isContentFree(file) {
-			paths = append(paths, file.Path)
+			paths = append(paths, fileLabel(file))
 		}
 	}
 	if len(paths) == 0 {

@@ -518,3 +518,28 @@ func TestFilteredDossierCannotRouteRenameChainAcrossSides(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildReviewFilesWithheldDiffIsNeverContentFree(t *testing.T) {
+	for _, flag := range []string{"too_large", "collapsed"} {
+		for _, kind := range []string{"added", "renamed", "deleted"} {
+			t.Run(kind+"/"+flag, func(t *testing.T) {
+				diff := gitlab.FileDiff{OldPath: "old.py", NewPath: "new.py", TooLarge: flag == "too_large", Collapsed: flag == "collapsed"}
+				switch kind {
+				case "added":
+					diff.NewFile = true
+				case "renamed":
+					diff.RenamedFile = true
+				case "deleted":
+					diff.DeletedFile = true
+				}
+				files, _, summary, warnings := buildReviewFiles([]gitlab.FileDiff{diff}, nil, 10, 100)
+				if len(files) != 0 || len(summary.Omitted) != 1 || summary.Omitted[0].Reason != flag {
+					t.Fatalf("files=%v omitted=%v", files, summary.Omitted)
+				}
+				if len(warnings) != 1 || !strings.Contains(warnings[0], "coverage gap") {
+					t.Fatalf("warnings = %v", warnings)
+				}
+			})
+		}
+	}
+}

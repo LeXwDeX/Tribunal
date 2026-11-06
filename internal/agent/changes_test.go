@@ -313,3 +313,21 @@ func TestEmptyLineEvidenceCanBeDropped(t *testing.T) {
 		t.Fatalf("undelivered empty line counted as read: %v", got)
 	}
 }
+
+func TestListChangesContentFreeFileNeedsNoReadDiff(t *testing.T) {
+	source := NewChangeSource([]ChangeFile{
+		{Path: "pkg/__init__.py", Status: "added"},
+		{Path: "m.py", Status: "modified"},
+	}, nil, map[string]bool{"pkg/__init__.py": false, "m.py": false})
+	list := toolByName(t, BuiltinToolsWithChanges(changeSandbox(t), source), "list_changes")
+	result, err := invoke(t, list, `{}`)
+	if err != nil {
+		t.Fatalf("list changes: %v", err)
+	}
+	if !strings.Contains(result.Content, "pkg/__init__.py\t\tadded\t0\t0\t0\t0\tfalse\tn/a") {
+		t.Fatalf("content-free file not marked n/a: %q", result.Content)
+	}
+	if !strings.Contains(result.Content, "m.py\t\tmodified\t0\t0\t0\t0\tfalse\tno") {
+		t.Fatalf("modified empty file must stay not inlined: %q", result.Content)
+	}
+}

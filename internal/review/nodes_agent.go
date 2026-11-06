@@ -1357,6 +1357,10 @@ func planTask(d *Dossier, params planParams) string {
 				b.WriteString("- （其余文件已省略）\n")
 				break
 			}
+			if isContentFree(file) {
+				b.WriteString(fmt.Sprintf("- %s（%s，+%d/-%d，无文本变更）\n", fileLabel(file), file.Status, file.Additions, file.Deletions))
+				continue
+			}
 			b.WriteString(fmt.Sprintf("- %s（%s，+%d/-%d）\n", file.Path, file.Status, file.Additions, file.Deletions))
 		}
 	}
@@ -1883,7 +1887,7 @@ func renderDiffsWithSpans(d *Dossier, files []string, budget int) (string, strin
 			return fmt.Sprintf("- %s（不在材料包中）\n", shown)
 		}
 		if isContentFree(e.file) {
-			return fmt.Sprintf("- %s（%s，+%d/-%d，无文本变更，无需评审）\n", shown, e.file.Status, e.file.Additions, e.file.Deletions)
+			return fmt.Sprintf("- %s（%s，+%d/-%d，无文本变更）\n", truncateRunes(fileLabel(e.file), 400), e.file.Status, e.file.Additions, e.file.Deletions)
 		}
 		if strings.TrimSpace(e.file.Diff) == "" {
 			return fmt.Sprintf("- %s（%s，+%d/-%d，无 diff 内容）\n", shown, e.file.Status, e.file.Additions, e.file.Deletions)

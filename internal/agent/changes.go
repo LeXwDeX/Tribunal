@@ -248,11 +248,14 @@ func (t listChangesTool) Call(_ context.Context, raw json.RawMessage) (Result, e
 				}
 			}
 		}
+		if strings.TrimSpace(file.Diff) == "" && (file.Status == "added" || file.Status == "deleted" || file.Status == "renamed") {
+			inlined = "n/a"
+		}
 		fmt.Fprintf(&b, "%s\t%s\t%s\t%d\t%d\t%d\t%d\t%t\t%s\n",
 			file.Path, file.OldPath, file.Status, file.Additions, file.Deletions,
 			utf8.RuneCountInString(file.Diff), countDiffHunks(file.Diff), file.Generated, inlined)
 	}
-	b.WriteString("\nfiles not inlined in the prompt must be read with read_diff before claiming coverage.\n")
+	b.WriteString("\nfiles not inlined in the prompt must be read with read_diff before claiming coverage; inlined=n/a files have no text changes to read.\n")
 	return Result{Content: strings.TrimSuffix(b.String(), "\n")}, nil
 }
 
