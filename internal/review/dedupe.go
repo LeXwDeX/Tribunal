@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -537,23 +538,45 @@ func dedupe(findings []Finding, dossier *Dossier) []Group {
 		}
 		return value
 	}
-	groups := make([]Group, 0, len(findings))
-	for _, finding := range findings {
+	// Membership is decided in a deterministic order against each group's
+	// anchor (its first member in that order), so the partition does not depend
+	// on the order the lanes returned findings and cannot chain through
+	// intermediate members. Groups are then built in input order.
+	order := make([]int, len(findings))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(x, y int) bool { return findingLess(findings[order[x]], findings[order[y]]) })
+	var members [][]int
+	for _, idx := range order {
+		finding := findings[idx]
 		if ambiguous(finding.Path) {
-			groups = append(groups, newGroup(finding))
+			members = append(members, []int{idx})
 			continue
 		}
 		merged := false
-		for i := range groups {
-			if canMerge(groups[i], finding, resolve, ambiguous) {
-				mergeInto(&groups[i], finding)
+		for i := range members {
+			if canMerge(findings[members[i][0]], finding, resolve, ambiguous) {
+				members[i] = append(members[i], idx)
 				merged = true
 				break
 			}
 		}
 		if !merged {
-			groups = append(groups, newGroup(finding))
+			members = append(members, []int{idx})
 		}
+	}
+	for _, m := range members {
+		sort.Ints(m)
+	}
+	sort.Slice(members, func(x, y int) bool { return members[x][0] < members[y][0] })
+	groups := make([]Group, 0, len(members))
+	for _, m := range members {
+		group := newGroup(findings[m[0]])
+		for _, idx := range m[1:] {
+			mergeInto(&group, findings[idx])
+		}
+		groups = append(groups, group)
 	}
 	for i := range groups {
 		groups[i].PublishKey = GroupPublishKey(dossier, groups[i])
@@ -561,50 +584,81 @@ func dedupe(findings []Finding, dossier *Dossier) []Group {
 	return groups
 }
 
-func canMerge(group Group, finding Finding, resolve func(string, Side) (string, int), ambiguous func(string) bool) bool {
-	if normalizedSide(group.Side) != normalizedSide(finding.Side) {
+func canMerge(anchor, finding Finding, resolve func(string, Side) (string, int), ambiguous func(string) bool) bool {
+	if normalizedSide(anchor.Side) != normalizedSide(finding.Side) {
 		return false
 	}
-	if ambiguous(group.Path) || ambiguous(finding.Path) {
+	if ambiguous(anchor.Path) || ambiguous(finding.Path) {
 		return false
 	}
-	groupFile, groupMatches := resolve(group.Path, group.Side)
+	anchorFile, anchorMatches := resolve(anchor.Path, anchor.Side)
 	findingFile, findingMatches := resolve(finding.Path, finding.Side)
-	if groupMatches > 1 || findingMatches > 1 {
+	if anchorMatches > 1 || findingMatches > 1 {
 		return false
 	}
-	if groupMatches == 1 && findingMatches == 1 {
-		if groupFile != findingFile {
+	if anchorMatches == 1 && findingMatches == 1 {
+		if anchorFile != findingFile {
 			return false
 		}
-	} else if groupMatches != findingMatches || group.Path != finding.Path {
+	} else if anchorMatches != findingMatches || anchor.Path != finding.Path {
 		return false
 	}
-	sameCategory := group.Category == finding.Category
-	if group.Line == 0 || finding.Line == 0 {
-		return sameCategory && group.Line == 0 && finding.Line == 0 && NormalizeTitle(group.Title) == NormalizeTitle(finding.Title)
+	sameCategory := anchor.Category == finding.Category
+	if anchor.Line == 0 || finding.Line == 0 {
+		return sameCategory && anchor.Line == 0 && finding.Line == 0 && NormalizeTitle(anchor.Title) == NormalizeTitle(finding.Title)
 	}
-	difference := absInt(group.Line - finding.Line)
+	difference := absInt(anchor.Line - finding.Line)
 	if sameCategory && difference <= 3 {
 		return true
 	}
-	// Paraphrased near-duplicates: models rarely agree on the exact line or
-	// category slug, so location proximity must be backed by text similarity
-	// against the group display or any of its sources.
-	for _, candidate := range groupTexts(group) {
-		distance := absInt(candidate.line - finding.Line)
-		if distance > nearDuplicateLines {
-			continue
+	// Paraphrased near-duplicates need identity evidence beyond proximity: the
+	// titles must name the same non-generic identifiers, and the text must
+	// agree. A different category additionally requires the exact same line.
+	if sameCategory {
+		if difference > nearDuplicateLines {
+			return false
 		}
-		threshold := nearDuplicateCrossCategory
-		if sameCategoryOf(candidate, finding) {
-			threshold = nearDuplicateSameCategory
-		}
-		if textSimilar(candidate.tokens, finding, threshold) {
-			return true
-		}
+	} else if difference != 0 {
+		return false
 	}
-	return false
+	if !titleIdentityMatches(anchor.Title, finding.Title) {
+		return false
+	}
+	threshold := nearDuplicateCrossCategory
+	if sameCategory {
+		threshold = nearDuplicateSameCategory
+	}
+	return textSimilar(textTokens(anchor.Title, anchor.Body), finding, threshold)
+}
+
+// findingLess is the deterministic grouping order: location first, then text,
+// then origin, so equal inputs always partition the same way.
+func findingLess(a, b Finding) bool {
+	if a.Path != b.Path {
+		return a.Path < b.Path
+	}
+	if sa, sb := normalizedSide(a.Side), normalizedSide(b.Side); sa != sb {
+		return sa < sb
+	}
+	if a.Line != b.Line {
+		return a.Line < b.Line
+	}
+	if a.Category != b.Category {
+		return a.Category < b.Category
+	}
+	if a.Severity != b.Severity {
+		return a.Severity.Higher(b.Severity)
+	}
+	if a.Title != b.Title {
+		return a.Title < b.Title
+	}
+	if a.Body != b.Body {
+		return a.Body < b.Body
+	}
+	if a.Origin.Node != b.Origin.Node {
+		return a.Origin.Node < b.Origin.Node
+	}
+	return a.Origin.Index < b.Origin.Index
 }
 
 func normalizedSide(side Side) Side {
@@ -1021,38 +1075,51 @@ func snippetFor(finding Finding) string {
 	return finding.Body
 }
 
-// Near-duplicate thresholds. Lines are compared against the group display and
-// every source, so a chain of paraphrases still collapses while two distinct
-// problems in the same function stay apart. A different category must prove
-// itself with a higher text overlap; both paths also need a minimum number of
-// shared significant tokens so short generic titles cannot match by accident.
+// Near-duplicate thresholds. Candidates are compared with the group anchor
+// only. Same-category findings 4-6 lines apart and cross-category findings on
+// the exact same line must share title identifiers (Jaccard over non-generic
+// ASCII identifiers) and then pass a body text similarity check.
 const (
 	nearDuplicateLines         = 6
 	nearDuplicateSameCategory  = 0.45
 	nearDuplicateCrossCategory = 0.5
 	nearDuplicateMinShared     = 4
+	nearDuplicateTitleJaccard  = 0.5
 )
 
-type mergeCandidate struct {
-	line     int
-	category string
-	tokens   map[string]struct{}
+// genericIdentifiers are ASCII words common to many unrelated findings; they
+// never count as identity evidence in a title.
+var genericIdentifiers = map[string]bool{
+	"err": true, "nil": true, "ctx": true, "return": true, "error": true, "errors": true,
+	"true": true, "false": true, "null": true, "none": true, "self": true, "this": true,
+	"func": true, "def": true, "var": true, "let": true, "const": true, "resp": true,
+	"req": true, "data": true, "value": true, "values": true, "result": true, "results": true,
+	"handle": true, "handler": true, "get": true, "set": true, "new": true, "int": true,
+	"str": true, "string": true, "list": true, "map": true, "bool": true, "type": true,
+	"key": true, "name": true, "file": true, "code": true, "test": true, "main": true,
+	"not": true, "missing": true, "check": true, "unchecked": true, "invalid": true,
 }
 
-func sameCategoryOf(candidate mergeCandidate, finding Finding) bool {
-	return candidate.category == finding.Category
-}
-
-func groupTexts(group Group) []mergeCandidate {
-	out := make([]mergeCandidate, 0, len(group.Sources)+1)
-	out = append(out, mergeCandidate{group.Line, group.Category, textTokens(group.Title, group.Body)})
-	for _, source := range group.Sources {
-		if source.Line == 0 {
-			continue
+func titleIdentifiers(title string) map[string]struct{} {
+	out := make(map[string]struct{})
+	for token := range textTokens(title) {
+		if identifierToken(token) && !genericIdentifiers[token] {
+			out[token] = struct{}{}
 		}
-		out = append(out, mergeCandidate{source.Line, source.Category, textTokens(source.Title, source.Body)})
 	}
 	return out
+}
+
+func titleIdentityMatches(a, b string) bool {
+	ids, other := titleIdentifiers(a), titleIdentifiers(b)
+	shared := 0
+	for token := range ids {
+		if _, ok := other[token]; ok {
+			shared++
+		}
+	}
+	union := len(ids) + len(other) - shared
+	return shared >= 1 && float64(shared)/float64(union) >= nearDuplicateTitleJaccard
 }
 
 func textSimilar(tokens map[string]struct{}, finding Finding, threshold float64) bool {

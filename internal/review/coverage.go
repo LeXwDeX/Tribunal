@@ -219,13 +219,7 @@ func contentFreeWarning(d *Dossier) string {
 	if d == nil {
 		return ""
 	}
-	var scope map[string]struct{}
-	if inc := d.Incremental; inc != nil && !inc.Full && inc.Files != nil {
-		scope = make(map[string]struct{}, len(inc.Files))
-		for _, path := range inc.Files {
-			scope[path] = struct{}{}
-		}
-	}
+	scope := incrementalFileSet(d)
 	var paths []string
 	for _, file := range d.Files {
 		if scope != nil {

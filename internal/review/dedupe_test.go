@@ -3,6 +3,7 @@ package review
 import (
 	"encoding/json"
 	"os"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -357,16 +358,16 @@ func TestDedupeMergesParaphrasedNearDuplicates(t *testing.T) {
 	}{
 		{"same lane different category and nearby line", []Finding{
 			nearDup("cr.p1", "a", "m1", 0, 15, "correctness", SeverityP2, "split_evenly drops the remainder", splitEvenlyBody),
-			nearDup("cr.p1", "a", "m1", 1, 17, "logic", SeverityP2, "split_evenly loses remainder cents", "split_evenly divides total by parts using floor division so the remainder is dropped and shares do not sum to the total"),
+			nearDup("cr.p1", "a", "m1", 1, 15, "logic", SeverityP2, "split_evenly drops remainder cents", "split_evenly divides total by parts using floor division so the remainder is dropped and shares do not sum to the total"),
 		}},
 		{"cross lane same category six lines apart", []Finding{
 			nearDup("cr.p1", "a", "m1", 0, 15, "correctness", SeverityInfo, "split_evenly drops the remainder", splitEvenlyBody),
-			nearDup("cr.p2", "b", "m2", 0, 21, "correctness", SeverityP2, "Remainder is dropped by split_evenly", "The split_evenly function divides total by parts with floor division, so the remainder cents are dropped and the shares do not sum to the total"),
+			nearDup("cr.p2", "b", "m2", 0, 21, "correctness", SeverityP2, "split_evenly remainder is dropped", "The split_evenly function divides total by parts with floor division, so the remainder cents are dropped and the shares do not sum to the total"),
 		}},
 		{"three-way mixed", []Finding{
 			nearDup("cr.p1", "a", "m1", 0, 15, "correctness", SeverityP2, "split_evenly drops the remainder", splitEvenlyBody),
-			nearDup("cr.p2", "b", "m2", 0, 16, "data_loss", SeverityP2, "split_evenly remainder cents lost", "split_evenly uses floor division of total by parts, so remainder cents are silently dropped and the shares no longer sum to total"),
-			nearDup("cr.p3", "c", "m3", 0, 19, "correctness", SeverityP1, "Shares from split_evenly do not sum to total", "Because split_evenly floor divides total by parts, the remainder cents are dropped; shares no longer sum to the total"),
+			nearDup("cr.p2", "b", "m2", 0, 15, "data_loss", SeverityP2, "split_evenly drops remainder cents", "split_evenly uses floor division of total by parts, so remainder cents are silently dropped and the shares no longer sum to total"),
+			nearDup("cr.p3", "c", "m3", 0, 15, "correctness", SeverityP1, "split_evenly drops the remainder from shares", "Because split_evenly floor divides total by parts, the remainder cents are dropped; shares no longer sum to the total"),
 		}},
 	}
 	for _, tc := range cases {
@@ -414,8 +415,8 @@ func TestDedupeKeepsDistinctIssuesApart(t *testing.T) {
 func TestDedupeNearDuplicatesDoNotInflateVotes(t *testing.T) {
 	findings := []Finding{
 		nearDup("cr.p1", "a", "m1", 0, 15, "correctness", SeverityP2, "split_evenly drops the remainder", splitEvenlyBody),
-		nearDup("cr.p1", "a", "m1", 1, 17, "logic", SeverityP2, "split_evenly loses remainder cents", "split_evenly divides total by parts using floor division so the remainder is dropped and shares do not sum to the total"),
-		nearDup("cr.p1", "a", "m1", 2, 18, "logic", SeverityP2, "Remainder cents vanish in split_evenly", "floor division in split_evenly drops the remainder so shares do not sum to the total"),
+		nearDup("cr.p1", "a", "m1", 1, 15, "logic", SeverityP2, "split_evenly drops remainder cents", "split_evenly divides total by parts using floor division so the remainder is dropped and shares do not sum to the total"),
+		nearDup("cr.p1", "a", "m1", 2, 15, "logic", SeverityP2, "split_evenly drops the remainder cents", "floor division in split_evenly drops the remainder so shares do not sum to the total"),
 	}
 	groups := Dedupe(findings)
 	if len(groups) != 1 {
@@ -479,5 +480,89 @@ func TestDedupeRealSplitEvenlyWorkflowMergesTriple(t *testing.T) {
 	}
 	if len(structure.Sources) != 1 || structure.Severity != SeverityInfo {
 		t.Fatalf("structure group = %+v", structure)
+	}
+}
+
+func TestDedupeOverMergeCounterexamples(t *testing.T) {
+	mk := func(node string, idx, line int, cat string, sev Severity, title, body string) Finding {
+		f := outFinding("pkg/x.go", line, sev, title, "")
+		f.Category, f.Body = cat, body
+		return gatheredFinding("wf", node, "p", "m", 0, idx, f)
+	}
+	cases := []struct {
+		name string
+		a, b Finding
+	}{
+		{"split_evenly zero people vs negative total",
+			mk("cr.p1", 0, 15, "error-handling", SeverityP2, "people=0 抛 ZeroDivisionError", "split_evenly 在 people 为 0 时抛出 ZeroDivisionError，调用方拿到无关异常"),
+			mk("cr.p2", 0, 17, "correctness", SeverityP1, "负数 total_cents 余数分配错误", "split_evenly 在 total_cents 为负数时余数分配错误，people 份额之和不等于总额")},
+		{"rows.Err vs defer Close",
+			mk("cr.p1", 0, 40, "error-handling", SeverityP2, "`rows.Err()` 未检查", "遍历 rows 之后没有检查 rows.Err()，迭代错误被忽略，调用方 return nil"),
+			mk("cr.p2", 0, 44, "resource-leak", SeverityP1, "rows 未 `defer Close` 导致连接泄漏", "查询返回的 rows 没有 defer Close，错误分支 return 时连接泄漏")},
+		{"Handle err vs concurrent map",
+			mk("cr.p1", 0, 30, "error-handling", SeverityP2, "Handle 忽略 err", "Handle 调用后忽略 err 直接 return nil，ctx 取消时 resp 为空"),
+			mk("cr.p2", 0, 34, "concurrency", SeverityP1, "Handle 并发写 map", "Handle 在多个 goroutine 中并发写 map，ctx 取消时 err 返回 nil，resp 数据竞争")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Dedupe([]Finding{tc.a, tc.b}); len(got) != 2 {
+				t.Fatalf("groups = %d, want 2", len(got))
+			}
+			if got := Dedupe([]Finding{tc.b, tc.a}); len(got) != 2 {
+				t.Fatalf("reversed groups = %d, want 2", len(got))
+			}
+		})
+	}
+}
+
+func TestDedupeIsOrderIndependentAndDoesNotChain(t *testing.T) {
+	mk := func(idx, line int, cat string, sev Severity, title, body string) Finding {
+		f := outFinding("config.py", line, sev, title, "")
+		f.Category, f.Body = cat, body
+		return gatheredFinding("wf", "cr.p1", "p", "m", 0, idx, f)
+	}
+	a := mk(0, 10, "error-handling", SeverityP2, "load_config 未处理 FileNotFoundError", "load_config 打开配置文件时未处理 FileNotFoundError，json 解析失败也没有兜底")
+	b := mk(1, 16, "error-handling", SeverityP2, "json 解析失败", "load_config 中 json 解析失败时未处理异常，FileNotFoundError 之外的错误直接抛出")
+	c := mk(2, 22, "security", SeverityP1, "settings 中 secret 被写入日志", "load_config 把 settings 中的 secret 写入日志，造成凭据泄漏")
+	var want []string
+	for i, order := range [][]Finding{{a, b, c}, {b, c, a}, {c, a, b}, {a, c, b}, {b, a, c}, {c, b, a}} {
+		groups := Dedupe(order)
+		var sig []string
+		var security bool
+		for _, g := range groups {
+			ids := make([]string, 0, len(g.Sources))
+			for _, src := range g.Sources {
+				ids = append(ids, src.Title)
+			}
+			sort.Strings(ids)
+			sig = append(sig, strings.Join(ids, "|"))
+			if g.Severity == SeverityP1 && len(g.Sources) != 1 {
+				security = true
+			}
+		}
+		sort.Strings(sig)
+		if security {
+			t.Fatalf("order %d: security finding merged into another group: %v", i, sig)
+		}
+		if i == 0 {
+			want = sig
+		} else if strings.Join(sig, "\n") != strings.Join(want, "\n") {
+			t.Fatalf("order %d partition %v differs from %v", i, sig, want)
+		}
+	}
+}
+
+func TestTitleIdentityIgnoresGenericIdentifiers(t *testing.T) {
+	for _, pair := range [][2]string{
+		{"Handle 忽略 err", "Handle 并发写 map"},
+		{"return nil 被忽略", "nil 返回 return err"},
+		{"`rows.Err()` 未检查", "rows 未 `defer Close` 导致连接泄漏"},
+	} {
+		if titleIdentityMatches(pair[0], pair[1]) {
+			t.Fatalf("titles %q / %q must not match", pair[0], pair[1])
+		}
+	}
+	if !titleIdentityMatches("split_evenly 未校验 people", "split_evenly 完全未校验 people，0 或负值") {
+		t.Fatal("real fixture titles must match")
 	}
 }
