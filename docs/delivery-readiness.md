@@ -54,7 +54,7 @@
 | 每个 Issue 的自建 CI（go/web/docker） | PASS | 各 PR head 的 `summary.txt` 末行 `RESULT PASS`，覆盖率 ≥ 70% |
 | 本地构建、静态检查、scoped 测试、前端测试与 dist | PASS | 各 Issue 的本地验证记录与 PR |
 | 带历史数据的 v1.2.0 → v1.3.0 原地升级 | PASS | 2026-11-05 在隔离测试实例上，从 v1.2.0 数据卷原地升级到候选 `85175b8`；27 条迁移应用到 `0028`；3 个项目与历史评审可读，healthz/readyz 200。升级前一致性快照已校验，回退演练见下 |
-| 5 个终态 + 1 个中断工作流、effort 审计、pending publication 夹具 | 进行中 | 升级前夹具正在开发/测试环境的隔离实例中补做（v1.2.0 → 候选），结果补记于此。此前：升级前历史数据只有 2 个历史评审和 5 个 onboarding，未在升级前构造 5 个终态 + 1 个中断夹具；effort 审计已有真实记录。pending publication 夹具已在第 3、4 轮构造并核实：发布前、发布中 SIGKILL 后只发布一次，无重复讨论；发布中途崩溃后已发出的讨论被接管，计数一致（见下方验收记录） |
+| 5 个终态 + 1 个中断工作流、effort 审计、pending publication 夹具 | PASS | 2026-11-06 在隔离实例上于 v1.2.0 构造夹具后升级到候选 `92f6895`：升级前 6 个终态工作流（4 个 completed BLOCKING 已发布、1 个 completed INCOMPLETE 已发布、1 个 cancelled/superseded 发布跳过）、1 个空 diff MR（无 workflow，状态 PASS）和 1 个被 SIGKILL 中断的工作流；升级后迁移 `0025`–`0028` 应用，readyz 200，6 个终态工作流的状态、结论和发布情况不变，日志无 ERROR/WARN；中断工作流因配置/提示词变化被取代并重建为新 workflow，完成并与 GitLab 状态评论一致（见下方升级夹具记录）。effort 审计已有真实记录；pending publication 夹具已在第 3、4 轮构造并核实：发布前、发布中 SIGKILL 后只发布一次，无重复讨论；发布中途崩溃后已发出的讨论被接管，计数一致 |
 | 2 用户 / 2 项目授权矩阵 | PASS | U1=平台管理员、U2=仅 OAuth 注册的 viewer，P1/P2 交叉授权。执行了跨项目 404、read 写 403、manage 写 200、payload 403/200、平台扩展 403、CSRF 403/200、撤权后 SSE 关闭、停用后 token 401、重登后 grant 保留 |
 | 真实评审、发布与 `model_id`/`wire` 审计 | PASS | 真实评审 `01a1ab42-c8d1` completed PASS，dossier 发布状态为 `published`；用户模型 lane `rv.p1` 记录 `provider=user:<uuid>`、`model=deepseek-flash`，其 `wire` 含 `max_tokens=1024` 与 `thinking_enabled=false`，没有 effort；`reasoning.effort=max` 出现在配置 provider 的调用中，未在该用户模型 lane 中证明；用户模型测试通过（历史操作记录）。第 2 轮补证：reasoner 节点覆盖为用户模型，参数 `{temperature:0.2, max_tokens:4096}`，默认 `reasoning.effort: high`；4 次调用审计均为 `model_id=<用户模型>`、`param_source=override`，wire 为 `{max_tokens:4096, temperature:0.2, reasoning:{effort:"high"}}`；cr.p1 审计为 `model_id=config:primary`、`param_source=override_default` |
 | 中断工作流恢复 | PASS | 2026-11-05 两次 SIGKILL 均未续跑成功（#325）。第 1 轮 4 路并行 SIGKILL 仍失败（`unsafe_model_response`），由 #343 的单节点中断上限修复；第 2 轮 4 路运行中 SIGKILL 两次，同一 workflow 均完成并发布；第 3 轮 `usage_interruptions` API 在一次、两次中断后分别为 1、2 |
@@ -62,15 +62,15 @@
 | link-local 422 `egress_denied` | PASS（部分） | 创建指向 link-local 的模型后，`POST /models/{id}/test` 返回 422；日志只保留状态码，未保留响应体，未独立证明 `egress_denied` 错误码。模型随后被删除 |
 | 用户管理只读矩阵 | PASS | 全局模式开/关已验证（`/me.global_read` true/false）；U2 对 P1 read 时写 403、对 P2 manage 时项目 PATCH 200；跨项目 404；平台扩展 403；停用/启用/重登流程通过 |
 | 错误 masterkey 启动与模型 unavailable | PASS | 期望（#332）：错误主密钥拒绝启动并给出明确、脱敏的错误，避免同库混用两套密钥；单条模型凭据不可解密时标记 unavailable。2026-11-05 旧行为：错误 masterkey 在 `migrate MCP secrets` 阶段失败并反复重启。第 1 轮复测：拒绝启动，错误为 `initialize secrets: master key does not match stored encrypted data`，日志无敏感信息 |
-| 恢复默认后 hash/digest 等于升级前 | PASS（部分） | 当前无覆盖时的默认 profile hash 为 `50495cdf…`（升级前未记录基线）。对比的是当前无覆盖的默认基线；升级前基线缺失，将在升级夹具中补测。第 1 轮重置覆盖后已删除的模型要重启才消失（已由 #342 修复）；第 2 轮不重启即可删除覆盖，`nodes/effective` 与基线一致，过期 DELETE 返回 409 |
+| 恢复默认后 hash/digest 等于升级前 | PASS | 升级夹具中，无覆盖、无用户模型时升级后新评审的默认 `profile_hash` 为 `1f2c8670c397…`，与 v1.2.0 基线相等（升级后 17 个工作流全部相等）。第 1 轮重置覆盖后已删除的模型要重启才消失（已由 #342 修复）；第 2 轮不重启即可删除覆盖，`nodes/effective` 与基线一致，过期 DELETE 返回 409 |
 | 新 MR head 评审创建 workflow 前永久失败 | PASS | 2026-11-05 #327（根因：评审图校验使用启动时的模型列表，由 #337 修复）：MR 更新到新 head 后连续 3 次触发均 `review execution failed`，未创建 workflow。第 2–5 轮中新 head 均正常创建 workflow 并完成评审；第 4 轮重启后新 head 的 workflow 约 6 秒创建（此前约 4.5 分钟，#354） |
-| 版本回退演练（恢复快照 + v1.2.0 镜像） | PASS | 升级前一致性快照恢复到新卷，用 v1.2.0 镜像与原 masterkey 启动，readyz 200，项目与评审可读 |
+| 版本回退演练（恢复快照 + v1.2.0 镜像） | PASS | 升级前一致性快照恢复到新卷，用 v1.2.0 镜像与原 masterkey 启动，readyz 200，项目与评审可读。2026-11-06 在升级夹具上复测：终态工作流可读。副作用：快照时仍在途的工作流被 v1.2.0 续跑并以 `required node failed` 失败，覆盖了升级后实例已为该 MR 发布的 GitLab 汇总和状态评论；升级前应让在途评审结束或取消（见 [运维文档](operations.md#通用升级与回滚步骤)） |
 | CHANGELOG、operations、data model、HTTP API、web console 文档 | PASS | 本次提交 |
 | GitHub Runner（stage 2）三个 job | PENDING | 需在冻结候选 commit 上运行 |
 | 生产人工 Review（stage 3） | PENDING | 需维护者与明确授权 |
 | tag `v1.3.0` 与 GitHub Release | PENDING | 需用户明确授权 |
 
-除「5 个终态 + 1 个中断工作流」外，“发布前必须”项均已有真实实例结论。该项升级前夹具补做中；GitHub Runner（stage 2）、生产人工 Review（stage 3）、tag 与 Release 仍为 PENDING，需维护者与明确授权。#366（同行跨 lane 重复、汇总计数措辞）在处理中，属观察项，不阻塞上表。未用 mock 或 CI 结果替代真实验证。
+“发布前必须”项均已有真实实例结论。GitHub Runner（stage 2）、生产人工 Review（stage 3）、tag 与 Release 仍为 PENDING，需维护者与明确授权。#366（同行跨 lane 重复、汇总计数措辞）在处理中，属观察项，不阻塞上表。未用 mock 或 CI 结果替代真实验证。
 
 ### v1.3.0 真实实例验收记录（2026-11-06，第 1–5 轮）
 
@@ -85,6 +85,17 @@
 - **界面**：评审档位编辑页和评审列表在 1440 / 390 宽度下做过人工浏览器检查，未附截图文件。
 - **2 用户 / 2 项目矩阵**：PASS（2026-11-05，PR #326），见下节。
 - **未完成**：生产人工 Review（stage 3，需维护者批准）；候选 commit 上的 GitHub Actions（stage 2）；#366 处理中。
+
+### v1.2.0 → v1.3.0 升级夹具验收（2026-11-06）
+
+开发/测试环境的隔离实例；已发布的 v1.2.0 镜像升级到由 `main` `92f6895` 构建的候选，两个版本接受同一份配置。
+
+- **升级前（v1.2.0）**：6 个终态工作流（4 个 completed BLOCKING 已发布、1 个 completed INCOMPLETE 已发布、1 个 cancelled/superseded 发布跳过）；1 个空 diff MR（无 workflow，状态 PASS）；1 个被 SIGKILL 中断的工作流（2 个节点完成、4 个运行中、3 个待处理）。默认 `profile_hash` 基线 `1f2c8670c397…`，`schema_migrations` 最大 24。对整个数据卷做了一致性离线备份。
+- **升级**：迁移 `0025`–`0028` 应用（最大 28）；readyz 200；6 个终态工作流可读，状态、结论、发布情况不变；日志无 ERROR/WARN。
+- **中断工作流**：租约在启动时回收；由任务处理器（非启动恢复）发现该工作流因配置/提示词变化已过期（日志 `review workflow superseded by configuration or prompt change`），将其取消（`superseded`，发布跳过原因 `review superseded`），并立即为同一任务/代次创建新工作流；新工作流完成并发布，与 GitLab 状态评论一致。
+- **默认 hash**：无覆盖、无用户模型时，升级后新评审的 `profile_hash` 为 `1f2c8670c397…`，与 v1.2.0 基线相等（升级后 17 个工作流全部相等）。
+- **启动补漏**：首次启动的补漏扫描把该项目 10 个从未评审的 MR 入队（受每项目上限约束）并完成评审，属预期行为；生产升级若不希望如此，先设置 `gitlab.catch_up.enabled: false`。
+- **回退演练**：备份恢复到新卷并启动 v1.2.0：readyz 200，终态工作流可读。副作用：快照时在途的工作流被 v1.2.0 续跑并以 `required node failed` 失败，覆盖了升级后实例已为该 MR 发布的 GitLab 汇总和状态评论。结论：升级前让在途评审结束或取消。
 
 ### v1.3.0 真实实例验收记录（2026-11-05）
 
