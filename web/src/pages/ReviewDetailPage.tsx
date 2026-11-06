@@ -388,6 +388,7 @@ function PublicationsPanel({ review, mrUrl }: { review: ReviewDetail; mrUrl?: st
 
 function UsagePanel({ review }: { review: ReviewDetail }) {
   const usage = review.usage
+  const interruptions = review.usage_interruptions ?? 0
   const tokens = (value?: number) => (typeof value === 'number' ? `${formatNumber(value)} tokens` : '不可用')
   return (
     <Panel title="用量">
@@ -397,6 +398,12 @@ function UsagePanel({ review }: { review: ReviewDetail }) {
         <dt>成本</dt><dd className="mono">{typeof usage?.cost_micros === 'number' ? formatCost(usage.cost_micros) : '不可用'}</dd>
         <dt>用时</dt><dd className="mono">{formatDuration(review.duration_ms)}</dd>
       </dl>
+      {review.usage_incomplete || interruptions > 0 ? (
+        <p className={rv.usageNotice}>
+          {review.usage_incomplete ? <Badge tone="warn" plain>用量不完整</Badge> : null}
+          {interruptions > 0 ? <span>单节点最多中断恢复 {interruptions} 次</span> : null}
+        </p>
+      ) : null}
     </Panel>
   )
 }

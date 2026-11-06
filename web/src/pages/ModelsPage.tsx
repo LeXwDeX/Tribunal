@@ -1,15 +1,13 @@
 import { useEffect, useId, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCanWrite } from '../components/RoleContext'
-import {
-  createModel, deleteModel, deleteProfileOverrides, getDefaultProfile, listModels, listProfiles,
-  putProfileOverrides, testModelDraft, updateModel,
-} from '../api/api'
+import { createModel, deleteModel, getDefaultProfile, listModels, listProfiles, testModelDraft, updateModel } from '../api/api'
 import { ApiError, errorMessage } from '../api/client'
-import type { Model, ModelParams, ModelWrite, Profile, ProfileConfig, ProfileDetail, ProviderTestResult } from '../api/types'
+import type { Model, ModelParams, ModelWrite, ProfileConfig, ProfileDetail, ProviderTestResult } from '../api/types'
 import {
   Badge, Button, ConfirmDialog, Drawer, EmptyState, ErrorState, Field, LoadingState, PageHeader, Panel,
 } from '../components/ui'
+import { ProfileEditor, ProfileNodeList, shortID } from '../features/models/ProfileNodes'
 import { formatDuration, formatJson, formatNumber } from '../lib/format'
 import ui from '../styles/ui.module.css'
 import styles from './insights.module.css'
@@ -18,16 +16,41 @@ function fmt(value: number | undefined, suffix = ''): string {
   return typeof value === 'number' && Number.isFinite(value) ? `${formatNumber(value)}${suffix}` : '不可用'
 }
 
-function shortID(id: string): string {
-  return id.length > 16 ? `${id.slice(0, 8)}…${id.slice(-4)}` : id
-}
-
 function hostOf(value: string): string {
   try {
     return new URL(value).host || value
   } catch {
     return value || '不可用'
   }
+}
+
+// Flattens model params into label/value pairs and drops unset values
+// (null, 0, empty string, false), so the card shows only what was configured.
+// temperature is a nullable pointer in the API: an explicit 0 is a real value.
+export function summarizeParams(params: ModelParams | undefined): Array<[string, string]> {
+  const out: Array<[string, string]> = []
+  const price = params?.price
+  const walk = (value: unknown, path: string) => {
+    if (value === null || value === undefined || value === 0 || value === '' || value === false) return
+    if (Array.isArray(value)) {
+      if (value.length) out.push([path, value.join(', ')])
+      return
+    }
+    if (typeof value === 'object') {
+      for (const [key, child] of Object.entries(value as Record<string, unknown>)) walk(child, path ? `${path}.${key}` : key)
+      return
+    }
+    out.push([path, String(value)])
+  }
+  for (const [key, value] of Object.entries(params ?? {})) {
+    if (key === 'price') continue
+    if (key === 'temperature' && typeof value === 'number') out.push([key, String(value)])
+    else walk(value, key)
+  }
+  if (price?.input_per_mtok || price?.output_per_mtok) {
+    out.push(['价格（每百万 token）', `输入 ${price.input_per_mtok ?? 0} / 输出 ${price.output_per_mtok ?? 0}`])
+  }
+  return out
 }
 
 type KeyMode = 'keep' | 'replace' | 'clear'
@@ -43,6 +66,7 @@ function ModelCard({ model, canWrite, onEdit, onDelete }: {
     ? `${(stats.error_rate <= 1 ? stats.error_rate * 100 : stats.error_rate).toFixed(2)}%`
     : '不可用'
   const p50 = typeof stats?.p50_latency_ms === 'number' ? formatDuration(stats.p50_latency_ms) : '不可用'
+  const params = summarizeParams(model.params)
   return (
     <article className={`${ui.panel} ${styles.providerCard}`}>
       <div className={styles.providerHead}>
@@ -61,7 +85,12 @@ function ModelCard({ model, canWrite, onEdit, onDelete }: {
       </div>
       <div className={styles.cardMeta}>
         <span>API key {model.has_api_key ? '已配置' : '未配置'}</span>
-        <span>参数 {formatJson(model.params)}</span>
+      </div>
+      <div className={styles.cardMeta} role="group" aria-label={`${model.display_name} 参数`}>
+        <span>参数</span>
+        {params.length
+          ? params.map(([key, value]) => <span key={key}>{key} <code>{value}</code></span>)
+          : <span>未设置</span>}
       </div>
       {model.unavailable_reason ? <span className={styles.resultError}>不可用原因：{model.unavailable_reason}</span> : null}
       {model.referenced_by?.length ? <span className={styles.cardMeta}>引用：{model.referenced_by.join('、')}</span> : null}
@@ -115,7 +144,7 @@ function ModelDrawer({ open, model, onClose, onSaved }: {
     setUpstreamModel(model?.model ?? '')
     setMaxTokens(model?.params?.max_tokens ? String(model.params.max_tokens) : '')
     setMaxConcurrency(String(model?.params?.max_concurrency || 1))
-    setTemperature(model?.params?.temperature !== undefined ? String(model.params.temperature) : '')
+    setTemperature(model?.params?.temperature != null ? String(model.params.temperature) : '')
     setEffort(model?.params?.reasoning?.effort ?? '')
     setApiKey('')
     setKeyMode('keep')
@@ -295,137 +324,9 @@ function budgetValue(key: string, value: unknown): string {
   return typeof value === 'object' ? JSON.stringify(value) : String(value)
 }
 
-const PROFILE_NODES = [
-  ['default', '默认'],
-  ['explore', '探索'],
-  ['lanes.code_review', 'code-review'],
-  ['lanes.review', 'review'],
-  ['lanes.reasoner', 'reasoner'],
-  ['lanes.validate', 'validate'],
-  ['challenge', 'challenge'],
-] as const
-
-const SOURCE_LABELS: Record<string, string> = {
-  override: '覆盖',
-  config: '配置',
-  config_default: '配置默认',
-  derived: '派生',
-}
-
-function overrideSelection(overrides: Record<string, unknown>): Record<string, string> {
-  const result: Record<string, string> = {}
-  const doc = overrides as {
-    default?: { model?: string }
-    explore?: { model?: string }
-    lanes?: Record<string, { model?: string }>
-    challenge?: { model?: string }
-  }
-  if (doc.default?.model) result.default = doc.default.model
-  if (doc.explore?.model) result.explore = doc.explore.model
-  for (const [lane, value] of Object.entries(doc.lanes ?? {})) {
-    if (value?.model) result[`lanes.${lane}`] = value.model
-  }
-  if (doc.challenge?.model) result.challenge = doc.challenge.model
-  return result
-}
-
-function ProfileEditor({ open, detail, models, onClose, onSaved }: {
-  open: boolean
-  detail?: ProfileDetail
-  models: Model[]
-  onClose: () => void
-  onSaved: () => void
-}) {
-  const [selection, setSelection] = useState<Record<string, string>>({})
-  const [pending, setPending] = useState(false)
-  const [error, setError] = useState<string>()
-  useEffect(() => {
-    if (open && detail) {
-      setSelection(overrideSelection(detail.overrides))
-      setError(undefined)
-    }
-  }, [open, detail])
-
-  const save = async () => {
-    if (!detail) return
-    setPending(true)
-    setError(undefined)
-    try {
-      const overrides: Record<string, unknown> = {}
-      for (const [node, id] of Object.entries(selection)) {
-        if (!id) continue
-        if (node === 'default') overrides.default = { model: id }
-        else if (node === 'explore') overrides.explore = { model: id }
-        else if (node === 'challenge') overrides.challenge = { model: id }
-        else if (node.startsWith('lanes.')) {
-          const lanes = (overrides.lanes as Record<string, unknown>) ?? {}
-          lanes[node.slice('lanes.'.length)] = { model: id }
-          overrides.lanes = lanes
-        }
-      }
-      await putProfileOverrides(overrides, detail.revision)
-      onSaved()
-      onClose()
-    } catch (err) {
-      setError(err instanceof ApiError && err.code === 'stale_revision' ? '已被他人修改，请重新加载。' : errorMessage(err))
-    } finally {
-      setPending(false)
-    }
-  }
-
-  const reset = async () => {
-    if (!detail) return
-    setPending(true)
-    setError(undefined)
-    try {
-      await deleteProfileOverrides(detail.revision)
-      onSaved()
-      onClose()
-    } catch (err) {
-      setError(errorMessage(err))
-    } finally {
-      setPending(false)
-    }
-  }
-
-  return (
-    <Drawer
-      open={open}
-      onClose={onClose}
-      title="编辑评审档位"
-      description="留空表示继承配置；保存后对之后启动的评审生效。"
-      footer={(
-        <>
-          <Button variant="secondary" onClick={() => { void reset() }} loading={pending}>恢复为配置</Button>
-          <Button variant="secondary" onClick={onClose}>取消</Button>
-          <Button onClick={() => { void save() }} loading={pending}>保存</Button>
-        </>
-      )}
-    >
-      {PROFILE_NODES.map(([node, label]) => (
-        <Field key={node} label={label} htmlFor={`profile-node-${node}`}>
-          <select
-            id={`profile-node-${node}`}
-            className={ui.input}
-            value={selection[node] ?? ''}
-            onChange={(event) => setSelection((current) => ({ ...current, [node]: event.target.value }))}
-          >
-            <option value="">继承</option>
-            {models.map((model) => (
-              <option key={model.id} value={model.id} disabled={!model.available}>
-                {model.display_name}（{model.id}）
-              </option>
-            ))}
-          </select>
-        </Field>
-      ))}
-      {error ? <span className={styles.resultError}>{error}</span> : null}
-    </Drawer>
-  )
-}
-
-function ProfilePanel({ detail, canWrite, onEdit }: {
+function ProfilePanel({ detail, models, canWrite, onEdit }: {
   detail: ProfileDetail
+  models: Model[]
   canWrite: boolean
   onEdit: () => void
 }) {
@@ -452,16 +353,7 @@ function ProfilePanel({ detail, canWrite, onEdit }: {
           ))}
         </ol>
       ) : <span className="small muted">配置未提供拓扑步骤。</span>}
-      {detail.nodes?.length ? (
-        <ul className={styles.cardStats} aria-label="节点生效模型">
-          {detail.nodes.map((node) => (
-            <li key={node.node}>
-              <span>{node.node}</span>
-              <b>{node.model || '继承'} <Badge tone="neutral" plain>{SOURCE_LABELS[node.source] ?? node.source}</Badge></b>
-            </li>
-          ))}
-        </ul>
-      ) : null}
+      {detail.nodes?.length ? <ProfileNodeList nodes={detail.nodes} models={models} /> : null}
       {budget ? <span className={styles.budget}>{budget}</span> : null}
       <details className={ui.disclosure}>
         <summary>查看完整档位配置</summary>
@@ -489,6 +381,7 @@ export function ModelsPage() {
     void queryClient.invalidateQueries({ queryKey: ['models'] })
     void queryClient.invalidateQueries({ queryKey: ['providers'] })
     void queryClient.invalidateQueries({ queryKey: ['profiles'] })
+    void queryClient.invalidateQueries({ queryKey: ['profile-default'] })
   }
 
   const confirmDelete = async () => {
@@ -538,12 +431,12 @@ export function ModelsPage() {
         <section className={styles.section} aria-labelledby={profilesId}>
           <div className={styles.sectionHeader}>
             <h2 className={styles.sectionTitle} id={profilesId}>评审档位</h2>
-            <span className={styles.sectionAside}>定义来自平台配置，只读</span>
+            <span className={styles.sectionAside}>基线来自平台配置；默认档位可按节点覆盖模型与参数</span>
           </div>
           {defaultProfile.isPending ? <LoadingState /> : null}
           {defaultProfile.isError ? <ErrorState error={defaultProfile.error} onRetry={defaultProfile.refetch} /> : null}
           {defaultProfile.isSuccess && defaultProfile.data
-            ? <ProfilePanel detail={defaultProfile.data} canWrite={canWrite} onEdit={() => setProfileEditing(true)} />
+            ? <ProfilePanel detail={defaultProfile.data} models={models.data?.models ?? []} canWrite={canWrite} onEdit={() => setProfileEditing(true)} />
             : null}
           {onboarding ? <span className="small muted">项目接入（onboarding，不是评审档位）使用 provider：{onboardingProvider ?? '未配置'}</span> : null}
         </section>
@@ -556,6 +449,10 @@ export function ModelsPage() {
         models={models.data?.models ?? []}
         onClose={() => setProfileEditing(false)}
         onSaved={saved}
+        onReload={async () => {
+          const result = await defaultProfile.refetch()
+          return !result.isError
+        }}
       />
       <ConfirmDialog
         open={Boolean(deleting)}

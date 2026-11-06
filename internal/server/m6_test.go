@@ -26,6 +26,7 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
 	workspacepkg "github.com/LeXwDeX/tribunal/internal/workspace"
+	"github.com/LeXwDeX/tribunal/pkg/dag"
 )
 
 // ---------------------------------------------------------------- fake store
@@ -40,6 +41,7 @@ type fakeReviewStore struct {
 	publications map[string][]store.Publication
 	dossiers     map[string]*store.WorkflowDossier
 	dossierErr   error
+	events       dag.EventStore
 	stats        store.Stats
 
 	lastFilter     store.WorkflowFilter
@@ -242,6 +244,14 @@ func (f *fakeReviewStore) GetWorkflowDossier(_ context.Context, workflowID strin
 		return dossier, nil
 	}
 	return nil, store.ErrNotFound
+}
+
+// Load makes the fake expose an event log like the SQLite store.
+func (f *fakeReviewStore) Load(ctx context.Context, workflowID string) ([]dag.Event, error) {
+	if f.events == nil {
+		return nil, nil
+	}
+	return f.events.Load(ctx, workflowID)
 }
 
 func (f *fakeReviewStore) GetWorkflowNodes(ctx context.Context, workflowID string) ([]store.WorkflowNode, error) {

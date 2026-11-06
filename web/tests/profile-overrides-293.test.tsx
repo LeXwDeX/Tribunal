@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { screen, waitFor } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { ModelsPage } from '../src/pages/ModelsPage'
 import { installFetch, jsonResponse, renderWithProviders } from './test-utils'
@@ -11,7 +11,7 @@ const models = [
 ]
 
 const detail = {
-  profile: 'default', overrides: {}, revision: 3,
+  profile: 'default', overrides: { challenge: { model: 'user:one' } }, revision: 3,
   effective: { provider: 'base', challenge: { provider: 'base' } },
   nodes: [
     { node: 'default', model: 'base', source: 'config' },
@@ -43,6 +43,7 @@ describe('profile overrides UI (#293)', () => {
     expect(screen.getByText('配置默认')).toBeInTheDocument()
     expect(screen.getByText('派生')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '编辑档位' }))
+    expect(screen.getAllByRole('option', { name: /bad/ }).length).toBeGreaterThan(0)
     expect(screen.getAllByRole('option', { name: /bad/ }).every((option) => option.hasAttribute('disabled'))).toBe(true)
   })
 
@@ -51,7 +52,7 @@ describe('profile overrides UI (#293)', () => {
     const user = userEvent.setup()
     renderWithProviders(<ModelsPage />, { route: '/models' })
     await user.click(await screen.findByRole('button', { name: '编辑档位' }))
-    await user.selectOptions(screen.getByLabelText('review'), 'user:one')
+    await user.selectOptions(screen.getByLabelText('review 模型'), 'user:one')
     await user.click(screen.getByRole('button', { name: '保存' }))
     await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/v1/profiles/default/overrides' && init?.method === 'PUT')).toBe(true))
     const call = fetchMock.mock.calls.find(([url, init]) => url === '/api/v1/profiles/default/overrides' && init?.method === 'PUT')
@@ -61,6 +62,7 @@ describe('profile overrides UI (#293)', () => {
 
     await user.click(screen.getByRole('button', { name: '编辑档位' }))
     await user.click(screen.getByRole('button', { name: '恢复为配置' }))
+    await user.click(within(screen.getByRole('dialog', { name: '恢复为配置' })).getByRole('button', { name: '恢复为配置' }))
     await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => url.startsWith('/api/v1/profiles/default/overrides') && init?.method === 'DELETE')).toBe(true))
   })
 })
