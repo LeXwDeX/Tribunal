@@ -311,3 +311,83 @@ func TestExecutorFallbackCannotClearCoverageGap(t *testing.T) {
 		t.Fatalf("fallback summary masked the coverage gap: %q", result.Summary)
 	}
 }
+
+func contentFreeDossier(t *testing.T, status string) *Dossier {
+	t.Helper()
+	d := validDossier(t)
+	d.Files = append(d.Files, FileChange{Path: "billing/__init__.py", OldPath: "billing/old.py", Status: status})
+	d.DiffSummary.Files = len(d.Files)
+	return d
+}
+
+func TestExecutorCoverageContentFreeFileIsNotAGap(t *testing.T) {
+	for _, status := range []string{"added", "deleted", "renamed"} {
+		t.Run(status, func(t *testing.T) {
+			dossier := contentFreeDossier(t, status)
+			wf := coverageWorkflow("a.go", "b.go", "billing/__init__.py")
+			executor := evidenceExecutorWithDossier(t, wf, dossier)
+			gathered := runEvidenceGather(t, executor, wf)
+			if signal, ok := unresolvedOfKind(gathered.Unresolved, UnresolvedEvidence); ok {
+				t.Fatalf("content-free %s file produced a coverage gap: %+v", status, signal)
+			}
+			found := false
+			for _, w := range gathered.Warnings {
+				if strings.Contains(w, "no textual changes to review") && strings.Contains(w, "billing/__init__.py") {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("warnings do not list the content-free path: %v", gathered.Warnings)
+			}
+			adjudicated := runEvidenceAdjudicate(t, executor, wf, gathered)
+			result := runEvidenceSynthesis(t, executor, wf, adjudicated)
+			if result.Verdict != VerdictPass {
+				t.Fatalf("verdict = %q, want PASS", result.Verdict)
+			}
+		})
+	}
+}
+
+func TestExecutorCoverageModifiedEmptyDiffStaysGap(t *testing.T) {
+	dossier := contentFreeDossier(t, "modified")
+	wf := coverageWorkflow("a.go", "billing/__init__.py")
+	executor := evidenceExecutorWithDossier(t, wf, dossier)
+	gathered := runEvidenceGather(t, executor, wf)
+	signal, ok := unresolvedOfKind(gathered.Unresolved, UnresolvedEvidence)
+	if !ok || !strings.Contains(signal.Message, "billing/__init__.py") {
+		t.Fatalf("modified empty diff must stay a gap: %+v", gathered.Unresolved)
+	}
+	for _, w := range gathered.Warnings {
+		if strings.Contains(w, "no textual changes to review") {
+			t.Fatalf("modified empty diff must not be listed as content-free: %v", gathered.Warnings)
+		}
+	}
+	result := runEvidenceSynthesis(t, executor, wf, runEvidenceAdjudicate(t, executor, wf, gathered))
+	if result.Verdict != VerdictIncomplete {
+		t.Fatalf("verdict = %q, want INCOMPLETE", result.Verdict)
+	}
+}
+
+func TestPromptDiffGapsContentFree(t *testing.T) {
+	d := contentFreeDossier(t, "added")
+	gaps, gapped := promptDiffGaps(d, []string{"billing/__init__.py"})
+	if len(gaps) != 0 || len(gapped) != 0 {
+		t.Fatalf("gaps = %v, gapped = %v", gaps, gapped)
+	}
+	d.Files[2].Status = "modified"
+	if gaps, _ := promptDiffGaps(d, []string{"billing/__init__.py"}); len(gaps) != 1 {
+		t.Fatalf("modified empty diff gaps = %v", gaps)
+	}
+}
+
+func TestContentFreeIndexLine(t *testing.T) {
+	d := contentFreeDossier(t, "added")
+	d.Files = append(d.Files, FileChange{Path: "m.py", Status: "modified"})
+	index, _, _, _ := renderDiffsWithSpans(d, []string{"billing/__init__.py", "m.py"}, 10000)
+	if !strings.Contains(index, "billing/__init__.py（added，+0/-0，无文本变更，无需评审）") {
+		t.Fatalf("index does not mark the content-free file: %s", index)
+	}
+	if !strings.Contains(index, "m.py（modified，+0/-0，无 diff 内容）") {
+		t.Fatalf("modified empty diff lost its marker: %s", index)
+	}
+}

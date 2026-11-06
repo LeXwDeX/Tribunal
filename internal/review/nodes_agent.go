@@ -1882,6 +1882,9 @@ func renderDiffsWithSpans(d *Dossier, files []string, budget int) (string, strin
 		if !e.ok {
 			return fmt.Sprintf("- %s（不在材料包中）\n", shown)
 		}
+		if isContentFree(e.file) {
+			return fmt.Sprintf("- %s（%s，+%d/-%d，无文本变更，无需评审）\n", shown, e.file.Status, e.file.Additions, e.file.Deletions)
+		}
 		if strings.TrimSpace(e.file.Diff) == "" {
 			return fmt.Sprintf("- %s（%s，+%d/-%d，无 diff 内容）\n", shown, e.file.Status, e.file.Additions, e.file.Deletions)
 		}

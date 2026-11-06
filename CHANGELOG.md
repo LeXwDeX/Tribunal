@@ -67,6 +67,7 @@
 
 ### 修复
 
+- **空文件、纯改名和删除空文件不再使评审 INCOMPLETE**（[#345](https://github.com/LeXwDeX/Tribunal/issues/345)）：状态为 `added`/`deleted`/`renamed` 且 diff 为空的文件没有文本内容可评审，不再计为覆盖缺口，路径列入评审警告「no textual changes to review」，变更索引标注「无文本变更，无需评审」。二进制文件不受影响：GitLab 对其返回 `Binary files … differ` 文本（2026-11-06 在测试实例实测），按原有路径处理；`modified` 且 diff 为空（可能是仅模式变更）仍按覆盖缺口处理；`too_large`/`collapsed` 仍记为省略文件和覆盖缺口。`prompts.TaskRenderVersion` 由 6 改为 7，升级前创建的未终态工作流不会续跑。
 - **启动恢复取消当前代次的评审后，状态评论不再停在「评审运行中」**（[#341](https://github.com/LeXwDeX/Tribunal/issues/341)）：恢复时因 `profile_hash_changed`、`execution_identity_changed`、`config_changed` 等原因取消、且仍是 MR 当前代次的工作流，现在会把评审状态置为「评审已取消」，详情含 `cancelled on recovery: <原因>` 并提示重新触发，同时更新 GitLab 状态评论；发布记录的跳过原因同为该文本，不再是 `review superseded`。代次已被取代时不改动新代次的状态。
 - **`default` 与 `lanes.code_review` 覆盖现在真正改变执行的模型**（[#334](https://github.com/LeXwDeX/Tribunal/issues/334)，[#327](https://github.com/LeXwDeX/Tribunal/issues/327) 评审中发现的缺陷）：此前这两项覆盖只改变显示，评审仍按配置执行。现在覆盖合并进未归一化的 `default` 配置后统一归一化一次，七个节点的覆盖都影响实际模型。
 - **控制台新建的用户模型被档位覆盖引用后，评审不再整体失败**（[#327](https://github.com/LeXwDeX/Tribunal/issues/327)）：此前评审图校验用的 provider 白名单只在启动时计算一次；启动后创建的用户模型一旦被档位覆盖引用，每次评审都会在创建工作流前以 `review execution failed` 失败（永久性 `build review graph` 错误），重启后才恢复。现在每次评审都按当前模型目录校验，运行时新建或删除的模型无需重启即生效，已软删除的模型会被拒绝。
