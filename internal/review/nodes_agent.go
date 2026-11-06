@@ -1305,11 +1305,12 @@ func buildCodeSynthesis(groups []Group, params synthesizeParams, warnings []stri
 		return SynthesisResult{}, err
 	}
 	result := SynthesisResult{
-		Verdict:  verdict,
-		Summary:  output.Summary,
-		Groups:   final,
-		Warnings: warnings,
-		Output:   output,
+		Verdict:     verdict,
+		Summary:     output.Summary,
+		Groups:      final,
+		Warnings:    warnings,
+		Output:      output,
+		RuleSummary: true,
 	}
 	if err := result.Validate(); err != nil {
 		return SynthesisResult{}, err

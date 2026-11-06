@@ -151,16 +151,109 @@ func presentationMatch(rep, g Group) bool {
 	}
 	// Lanes use different category vocabularies and are not merged before
 	// adjudication, so the same problem on the exact same line from two lanes
-	// needs no title identifier: matching title content or similar text is
-	// enough.
-	if difference == 0 && differentLanes(rep, g) &&
-		(titleContentMatches(rep.Title, g.Title) || textSimilar(textTokens(rep.Title, rep.Body), Finding{Title: g.Title, Body: g.Body}, threshold)) {
+	// needs no title identifier. Shared title wording must be substantial
+	// (see sameLineTitleMatches) and be backed by body overlap; body
+	// similarity alone never folds, since advice boilerplate is shared by
+	// unrelated findings.
+	if difference == 0 && differentLanes(rep, g) && sameLineSameProblem(rep, g) {
 		return true
 	}
 	if !titleIdentityMatches(rep.Title, g.Title) || !titleContentMatches(rep.Title, g.Title) {
 		return false
 	}
 	return textSimilar(textTokens(rep.Title, rep.Body), Finding{Title: g.Title, Body: g.Body}, threshold)
+}
+
+// Same-line cross-lane thresholds.
+const (
+	// The shared title units (at least nearDuplicateTitleContent) must cover
+	// this share of the shorter title's units and of the longer title's units;
+	// a terse title and a verbose paraphrase of it share little of the latter.
+	sameLineTitleCoverageShort = 0.5
+	sameLineTitleCoverageLong  = 0.15
+	// sameLineTitleBody is the body+title similarity that must accompany a
+	// title content match.
+	sameLineTitleBody = 0.1
+)
+
+// sameLineStopWords are generic words removed from titles (longest match
+// first) before content units are built, so fragments that straddle them
+// (未处/数未/法缺) never count as shared content.
+var sameLineStopWords = []string{
+	"没有处理", "没有", "未处理", "缺少", "缺失", "函数", "方法", "处理", "存在", "问题", "导致", "可能", "需要", "应该", "建议",
+	"校验", "检查", "判断", "使用", "调用", "返回", "错误", "异常", "配置", "文件", "用户", "输入", "参数", "数据", "不能",
+	"未", "不", "的", "在", "时", "会", "被", "对", "将", "把", "了", "且", "与", "和", "或", "为", "是",
+}
+
+// sameLineTitleUnits returns the content units of a title: CJK bigrams built
+// after removing generic words, plus plain English words and code identifier
+// parts of three or more letters.
+func sameLineTitleUnits(title string) map[string]struct{} {
+	out := make(map[string]struct{})
+	var run []rune
+	flush := func() {
+		var segment []rune
+		end := func() {
+			for i := 0; i+1 < len(segment); i++ {
+				out[string(segment[i:i+2])] = struct{}{}
+			}
+			segment = segment[:0]
+		}
+		for i := 0; i < len(run); {
+			if n := stopWordLen(run[i:]); n > 0 {
+				end()
+				i += n
+				continue
+			}
+			segment = append(segment, run[i])
+			i++
+		}
+		end()
+		run = run[:0]
+	}
+	for _, r := range title {
+		if unicode.Is(unicode.Han, r) {
+			run = append(run, r)
+		} else {
+			flush()
+		}
+	}
+	flush()
+	for word := range englishContentUnits(title, nil) {
+		out[word] = struct{}{}
+	}
+	return out
+}
+
+func stopWordLen(rs []rune) int {
+	for _, w := range sameLineStopWords {
+		if wr := []rune(w); len(rs) >= len(wr) && string(rs[:len(wr)]) == w {
+			return len(wr)
+		}
+	}
+	return 0
+}
+
+// sameLineTitleMatches requires the shared units to be at least two and to
+// cover at least half of the shorter title's units and a minimum share of the
+// longer one's.
+func sameLineTitleMatches(a, b string) bool {
+	ua, ub := sameLineTitleUnits(a), sameLineTitleUnits(b)
+	shared := sharedCount(ua, ub)
+	short, long := len(ua), len(ub)
+	if short > long {
+		short, long = long, short
+	}
+	return shared >= nearDuplicateTitleContent && short > 0 &&
+		float64(shared)/float64(short) >= sameLineTitleCoverageShort &&
+		float64(shared)/float64(long) >= sameLineTitleCoverageLong
+}
+
+// sameLineSameProblem is the relaxed rule for groups on the exact same line
+// from different lanes.
+func sameLineSameProblem(rep, g Group) bool {
+	return sameLineTitleMatches(rep.Title, g.Title) &&
+		textSimilar(textTokens(rep.Title, rep.Body), Finding{Title: g.Title, Body: g.Body}, sameLineTitleBody)
 }
 
 type laneKey struct {

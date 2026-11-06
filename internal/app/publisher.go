@@ -473,6 +473,7 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 		return review.RenderSummary(review.SummaryInput{
 			Verdict:              result.Verdict,
 			Summary:              result.Summary,
+			RuleSummary:          result.RuleSummary,
 			Groups:               groups,
 			Fingerprint:          loaded.record.Hash,
 			HeadSHA:              loaded.dossier.DiffVersion.HeadSHA,

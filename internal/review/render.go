@@ -35,8 +35,12 @@ const (
 
 // SummaryInput is structured data for the summary note.
 type SummaryInput struct {
-	Verdict              string
-	Summary              string
+	Verdict string
+	Summary string
+	// RuleSummary marks Summary as the deterministic rule-mode text, whose
+	// published count is aligned with the listed entries. Model-written
+	// synthesis text is never rewritten.
+	RuleSummary          bool
 	Groups               []Group
 	Fingerprint          string
 	HeadSHA              string
@@ -122,7 +126,9 @@ func RenderSummary(in SummaryInput) (string, error) {
 		b.WriteString("\n\n")
 	}
 	if summary != "" {
-		summary = alignRuleSummaryCounts(summary, len(positioned)+len(unpositioned)+len(marked))
+		if in.RuleSummary {
+			summary = alignRuleSummaryCounts(summary, len(positioned)+len(unpositioned)+len(marked))
+		}
 		b.WriteString(renderMarkdown(summary, MaxSummaryRunes))
 		b.WriteString("\n\n")
 	}
@@ -226,8 +232,6 @@ func inlineRelatedLines(related []RelatedGroup) string {
 	return b.String()
 }
 
-// severityCountLine renders non-zero counts on one line, for example
-// "**P1** × 2 · **P2** × 1". It is empty when nothing was published.
 var ruleSummaryCountsRE = regexp.MustCompile(`^(规则模式汇总：共 [0-9]+ 条问题，已发布 )([0-9]+)( 条。)`)
 
 // alignRuleSummaryCounts makes the published count of the rule-mode summary
@@ -247,6 +251,8 @@ func alignRuleSummaryCounts(summary string, listed int) string {
 	return summary[:match[4]] + strconv.Itoa(listed) + " 条（另有 " + strconv.Itoa(published-listed) + " 条并入相关描述）。" + summary[match[1]:]
 }
 
+// severityCountLine renders non-zero counts on one line, for example
+// "**P1** × 2 · **P2** × 1". It is empty when nothing was published.
 func severityCountLine(counts map[Severity]int) string {
 	parts := make([]string, 0, 4)
 	for _, severity := range []Severity{SeverityP0, SeverityP1, SeverityP2, SeverityInfo} {

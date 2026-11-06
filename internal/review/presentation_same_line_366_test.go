@@ -119,9 +119,9 @@ func TestPresentationSameLineKeepsDistinctIssuesApart(t *testing.T) {
 	}
 }
 
-func TestPresentationSameLineCrossLaneFoldsOnTitleContentAlone(t *testing.T) {
-	a := laneGroup("a", "cr.p1", 10, "logic", SeverityP1, "余额校验方向写反", "条件写成小于号。")
-	b := laneGroup("b", "rv.p1", 10, "correctness", SeverityP2, "余额校验方向写反导致拒绝", "另一段完全不同措辞的说明，没有共同词汇。")
+func TestPresentationSameLineCrossLaneFoldsOnTitleAndBodyOverlap(t *testing.T) {
+	a := laneGroup("a", "cr.p1", 10, "logic", SeverityP1, "余额校验方向写反", "amount_cents 小于 balance_cents 时抛出 insufficient balance，条件写成了小于号。")
+	b := laneGroup("b", "rv.p1", 10, "correctness", SeverityP2, "余额校验方向写反导致拒绝", "amount_cents 与 balance_cents 比较方向写反，insufficient balance 被误抛出。")
 	merged := MergePresentation([]Group{b, a}, nil)
 	got := publishedIDs(merged)
 	if len(got) != 1 || got[0] != "a" {
@@ -136,6 +136,36 @@ func TestPresentationSameLineCrossLaneFoldsOnTitleContentAlone(t *testing.T) {
 	b.Line = 11
 	if got := publishedIDs(MergePresentation([]Group{a, b}, nil)); len(got) != 2 {
 		t.Fatalf("non-exact line must keep the old rule, published %v", got)
+	}
+}
+
+// Titles that share only generic words (函数/未处理) or one identifier, and
+// bodies that share only boilerplate advice, are different problems.
+func TestPresentationSameLineGenericWordingDoesNotFold(t *testing.T) {
+	boiler := "建议补充检查并增加测试。"
+	cases := []struct {
+		name string
+		a, b Group
+	}{
+		{"average empty vs negative",
+			laneGroup("a", "cr.p1", 5, "logic", SeverityP1, "average 函数未处理空列表", "空列表会触发除零。"+boiler),
+			laneGroup("b", "rv.p1", 5, "correctness", SeverityP1, "average 函数未处理负数输入", "负数会使均值失真。"+boiler)},
+		{"reserve limit vs lock",
+			laneGroup("a", "cr.p1", 5, "logic", SeverityP1, "reserve 方法缺少库存上限检查", "没有上限会超卖。"+boiler),
+			laneGroup("b", "rv.p1", 5, "concurrency", SeverityP1, "reserve 方法缺少线程锁保护", "并发读改写丢失更新。"+boiler)},
+		{"sql injection vs empty value",
+			laneGroup("a", "cr.p1", 5, "security", SeverityP0, "函数未处理 SQL 注入", "拼接 SQL 可被注入。"+boiler),
+			laneGroup("b", "rv.p1", 5, "correctness", SeverityP1, "函数未处理空值返回", "返回空值时调用方崩溃。"+boiler)},
+		{"negative vs precision with boilerplate bodies",
+			laneGroup("a", "cr.p1", 5, "logic", SeverityP1, "未处理负数", boiler+"另见调用方的处理说明。"),
+			laneGroup("b", "rv.p1", 5, "correctness", SeverityP1, "精度丢失", boiler+"另见调用方的处理说明。")},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := publishedIDs(MergePresentation([]Group{c.a, c.b}, nil)); len(got) != 2 {
+				t.Fatalf("published %v, want both kept separate", got)
+			}
+		})
 	}
 }
 

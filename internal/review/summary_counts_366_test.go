@@ -19,7 +19,7 @@ func countsFixture() []Group {
 func TestRuleSummaryCountsExcludeFoldedGroupsAndStateThem(t *testing.T) {
 	groups := MergePresentation(countsFixture(), nil)
 	body, err := RenderSummary(SummaryInput{
-		Verdict: VerdictBlocking, Summary: ruleSummary3, Groups: groups,
+		Verdict: VerdictBlocking, Summary: ruleSummary3, RuleSummary: true, Groups: groups,
 		Fingerprint: "0123456789abcdef0123456789abcdef",
 	})
 	if err != nil {
@@ -39,7 +39,7 @@ func TestRuleSummaryCountsExcludeFoldedGroupsAndStateThem(t *testing.T) {
 func TestRuleSummaryCountsUnchangedWithoutFolding(t *testing.T) {
 	groups := countsFixture()[2:]
 	body, err := RenderSummary(SummaryInput{
-		Verdict: VerdictBlocking, Summary: "规则模式汇总：共 2 条问题，已发布 1 条。", Groups: groups,
+		Verdict: VerdictBlocking, Summary: "规则模式汇总：共 2 条问题，已发布 1 条。", RuleSummary: true, Groups: groups,
 		Fingerprint: "0123456789abcdef0123456789abcdef",
 	})
 	if err != nil {
@@ -55,7 +55,7 @@ func TestRuleSummaryCountsIncludeSummaryFoldedGroups(t *testing.T) {
 	dup := laneGroup("b", "reasoner", 0, "security", SeverityP1, "read_token 把支付令牌打印到标准输出", "read_token 调用 print 输出支付令牌到标准输出，日志可读取。")
 	dup.Path, dup.PositionOK = "", false
 	body, err := RenderSummary(SummaryInput{
-		Verdict: VerdictBlocking, Summary: "规则模式汇总：共 2 条问题，已发布 2 条。", Groups: []Group{listed, dup},
+		Verdict: VerdictBlocking, Summary: "规则模式汇总：共 2 条问题，已发布 2 条。", RuleSummary: true, Groups: []Group{listed, dup},
 		Fingerprint: "0123456789abcdef0123456789abcdef",
 	})
 	if err != nil {
@@ -84,5 +84,19 @@ func TestPublishKeyConflictWarningSaysWhereTheItemIs(t *testing.T) {
 	got = PublishKeyConflictWarning([]Group{listed, dup, other}, map[string]bool{"b": true, "c": true})
 	if !strings.Contains(got, "相关描述") || !strings.Contains(got, "单独列出") {
 		t.Fatalf("mixed: %q", got)
+	}
+}
+
+func TestModelSummaryTextIsNeverRewritten(t *testing.T) {
+	groups := MergePresentation(countsFixture(), nil)
+	body, err := RenderSummary(SummaryInput{
+		Verdict: VerdictBlocking, Summary: ruleSummary3, Groups: groups,
+		Fingerprint: "0123456789abcdef0123456789abcdef",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(body, "已发布 3 条。") || strings.Contains(body, "并入相关描述）") {
+		t.Fatalf("non-rule summary text was rewritten:\n%s", body)
 	}
 }
