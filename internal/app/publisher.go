@@ -454,6 +454,7 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 	}
 
 	fallback := false
+	var lookup *discussionLookup // per-run cache for adoption reads
 	for i := range groups {
 		group := groups[i]
 		if !group.Published() || !group.PositionOK {
@@ -484,6 +485,9 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 		}
 		if err := recheck(); err != nil {
 			return err
+		}
+		if lookup == nil {
+			lookup = &discussionLookup{gl: p.gitlab, token: loaded.token, projectID: loaded.project.ID, mrIID: loaded.mrIID}
 		}
 		baseBody := findingBody
 		findingBody = withWorkflowMarker(baseBody, workflowID)
@@ -516,11 +520,10 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 			}
 			// An intent proves a remote ID only; adopt it when the remote body
 			// proves this workflow and finding sent exactly the current content.
-			adopted, err = p.discussionProvenOurs(callCtx, loaded.token, loaded.project.ID, loaded.mrIID, discussionID, findingBody)
-			if err != nil {
-				return errors.Join(errDiscussionUnknown, err)
-			}
-			return nil
+			// The remote ID is already confirmed, so a failed read is an
+			// ordinary retryable error: nothing is re-posted on the retry.
+			adopted, err = lookup.provenOurs(callCtx, discussionID, findingBody)
+			return err
 		})
 		if err != nil {
 			if created {
@@ -1221,7 +1224,7 @@ func (p *Publisher) createDiscussion(ctx context.Context, token string, projectI
 
 // workflowMarkerPrefix tags a discussion body with the workflow that sent it.
 // Discussions from older versions lack it and stay on the conservative path.
-const workflowMarkerPrefix = "<!-- tribunal:workflow id="
+const workflowMarkerPrefix = "<!-- gitlab-ce-review:workflow id="
 
 func withWorkflowMarker(body, workflowID string) string {
 	return strings.TrimRight(body, "\r\n") + "\n" + workflowMarkerPrefix + workflowID + " -->\n"
@@ -1231,25 +1234,43 @@ func normalizeDiscussionBody(body string) string {
 	return strings.TrimSpace(strings.ReplaceAll(body, "\r\n", "\n"))
 }
 
-// discussionProvenOurs reports whether the remote discussion was authored by
-// the current user and carries exactly the intended body, including this
-// workflow's marker. A fetch failure is returned so the caller retries instead
-// of posting a duplicate; a mismatch is a clean false.
-func (p *Publisher) discussionProvenOurs(ctx context.Context, token string, projectID, mrIID int64, discussionID, wantBody string) (bool, error) {
-	user, err := p.gitlab.CurrentUser(ctx, token)
-	if err != nil || user == nil || user.ID <= 0 {
-		return false, errors.Join(errors.New("app: current user unavailable for discussion adoption"), err)
+// discussionLookup reads the bot identity and the MR discussions at most once
+// per publication run. Failures are not cached, so the next finding retries.
+type discussionLookup struct {
+	gl          GitLabClient
+	token       string
+	projectID   int64
+	mrIID       int64
+	userID      int64
+	discussions []gitlab.Discussion
+	listed      bool
+}
+
+// provenOurs reports whether the remote discussion was authored by the current
+// user and carries exactly the intended body, including this workflow's
+// marker. A read failure is returned so the caller retries instead of posting
+// a duplicate; a mismatch is a clean false.
+func (l *discussionLookup) provenOurs(ctx context.Context, discussionID, wantBody string) (bool, error) {
+	if l.userID <= 0 {
+		user, err := l.gl.CurrentUser(ctx, l.token)
+		if err != nil || user == nil || user.ID <= 0 {
+			return false, errors.Join(errors.New("app: current user unavailable for discussion adoption"), err)
+		}
+		l.userID = user.ID
 	}
-	discussions, err := p.gitlab.ListDiscussions(ctx, token, projectID, mrIID)
-	if err != nil {
-		return false, err
+	if !l.listed {
+		discussions, err := l.gl.ListDiscussions(ctx, l.token, l.projectID, l.mrIID)
+		if err != nil {
+			return false, err
+		}
+		l.discussions, l.listed = discussions, true
 	}
 	want := normalizeDiscussionBody(wantBody)
-	for _, discussion := range discussions {
+	for _, discussion := range l.discussions {
 		if discussion.ID != discussionID {
 			continue
 		}
-		if len(discussion.Notes) == 0 || discussion.Notes[0].System || discussion.Notes[0].AuthorID != user.ID {
+		if len(discussion.Notes) == 0 || discussion.Notes[0].System || discussion.Notes[0].AuthorID != l.userID {
 			return false, nil
 		}
 		return normalizeDiscussionBody(discussion.Notes[0].Body) == want, nil

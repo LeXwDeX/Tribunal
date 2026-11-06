@@ -7,7 +7,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
@@ -84,14 +83,14 @@ func TestAdoptionRejectsChangedContentOrOtherWorkflow(t *testing.T) {
 	for name, mutate := range map[string]func(string) string{
 		"content differs": func(b string) string { return strings.Replace(b, "\n", "\nedited by hand ", 2) },
 		"other workflow": func(b string) string {
-			i := strings.LastIndex(b, "<!-- tribunal:workflow id=")
+			i := strings.LastIndex(b, "<!-- gitlab-ce-review:workflow id=")
 			if i < 0 {
 				return b
 			}
-			return b[:i] + "<!-- tribunal:workflow id=another-workflow -->"
+			return b[:i] + "<!-- gitlab-ce-review:workflow id=another-workflow -->"
 		},
 		"marker missing (older version)": func(b string) string {
-			i := strings.LastIndex(b, "<!-- tribunal:workflow id=")
+			i := strings.LastIndex(b, "<!-- gitlab-ce-review:workflow id=")
 			if i < 0 {
 				return b
 			}
@@ -151,6 +150,9 @@ func TestAdoptionFetchFailureIsRetryableWithoutPosting(t *testing.T) {
 	if err == nil {
 		t.Fatal("fetch failure must be retryable")
 	}
+	if errors.Is(err, errDiscussionUnknown) {
+		t.Fatalf("confirmed intent read failure must be an ordinary error: %v", err)
+	}
 	if f.gitlab.discussionCreates != 1 {
 		t.Fatalf("posted a duplicate: %d", f.gitlab.discussionCreates)
 	}
@@ -164,18 +166,27 @@ func TestAdoptionFetchFailureIsRetryableWithoutPosting(t *testing.T) {
 	assertAdopted(t, f, wf, key)
 }
 
-func TestConcurrentAdoptionDoesNotDuplicate(t *testing.T) {
+// Two publisher instances (e.g. a retry racing a manual republish) contend for
+// the same workflow; neither may post a duplicate and the discussion is adopted.
+func TestRacingPublishersAdoptWithoutDuplicate(t *testing.T) {
 	ctx := context.Background()
 	f := newReviewFixture(t, reviewTestHead)
 	wf, key := crashAfterDiscussion(t, f, "adopt-race")
 	restartFixturePublisher(t, f, f.gitlab)
+	second, err := NewPublisher(PublisherConfig{
+		Store: f.db, Workspace: f.manager, GitLab: f.gitlab, Git: f.service.git, Cipher: f.publisher.cipher,
+		Engine: f.engine, ReviewDefaults: f.defaults, Profiles: f.profiles, PromptsHash: f.bundle.Hash,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	var wg sync.WaitGroup
-	for i := 0; i < 4; i++ {
+	for _, pub := range []*Publisher{f.publisher, second, f.publisher, second} {
 		wg.Add(1)
-		go func() {
+		go func(pub *Publisher) {
 			defer wg.Done()
-			_ = f.publisher.Publish(ctx, wf.ID)
-		}()
+			_ = pub.Publish(ctx, wf.ID)
+		}(pub)
 	}
 	wg.Wait()
 	if err := f.publisher.Publish(ctx, wf.ID); err != nil {
@@ -183,5 +194,3 @@ func TestConcurrentAdoptionDoesNotDuplicate(t *testing.T) {
 	}
 	assertAdopted(t, f, wf, key)
 }
-
-var _ = gitlab.Discussion{}
