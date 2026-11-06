@@ -19,8 +19,8 @@ gitlab:
   # startup only; changing it needs a restart.
   catch_up:
     enabled: true
-    max_per_project: 10             # newest-updated open MRs checked per project
-    max_total: 20                   # MRs checked across all projects per scan
+    max_per_project: 10             # reviews enqueued per project per scan
+    max_total: 20                   # reviews enqueued across all projects per scan
     max_age: 24h                    # only MRs updated within this window
 
 auth:

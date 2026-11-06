@@ -675,7 +675,7 @@ func TestWebhookInvalidCandidateDoesNotFallBackToGenericDelivery(t *testing.T) {
 		Kind:        "review.candidate",
 		Payload:     json.RawMessage(`{"project_id":0}`),
 		MaxAttempts: 3,
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("expected invalid candidate error")
 	}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"strings"
 	"sync"
@@ -27,6 +28,8 @@ type fakeOpenMRs struct {
 	limits map[int64]int
 	since  map[int64]time.Time
 	calls  int
+	// afterList runs once the listing is built, before it is returned.
+	afterList func(projectID int64)
 }
 
 func (f *fakeOpenMRs) ListOpenMergeRequests(_ context.Context, token string, projectID int64, limit int, updatedAfter time.Time) ([]gitlab.MergeRequest, error) {
@@ -51,7 +54,11 @@ func (f *fakeOpenMRs) ListOpenMergeRequests(_ context.Context, token string, pro
 	if len(mrs) > limit {
 		mrs = mrs[:limit]
 	}
-	return append([]gitlab.MergeRequest(nil), mrs...), nil
+	out := append([]gitlab.MergeRequest(nil), mrs...)
+	if f.afterList != nil {
+		f.afterList(projectID)
+	}
+	return out, nil
 }
 
 // deliveryRecorder wraps the real store so review.run deliveries still create
@@ -280,15 +287,15 @@ func TestCatchUpBounds(t *testing.T) {
 	t.Run("per project", func(t *testing.T) {
 		svc, f := newCatchUp(t, config.CatchUpConfig{Enabled: true, MaxPerProject: 3, MaxTotal: 100}, `{"allow_repo_config":false}`, mrs...)
 		result, err := svc.Run(context.Background())
-		if err != nil || result.MRsChecked != 3 || result.Enqueued != 3 || f.lister.limits[42] != 3 {
-			t.Fatalf("result = %+v, err = %v, limit = %d", result, err, f.lister.limits[42])
+		if err != nil || result.MRsChecked != 3 || result.Enqueued != 3 || f.lister.limits[42] != catchUpListLimit {
+			t.Fatalf("result = %+v, err = %v, list limit = %d", result, err, f.lister.limits[42])
 		}
 	})
 	t.Run("overall", func(t *testing.T) {
-		svc, f := newCatchUp(t, config.CatchUpConfig{Enabled: true, MaxPerProject: 50, MaxTotal: 4}, `{"allow_repo_config":false}`, mrs...)
+		svc, _ := newCatchUp(t, config.CatchUpConfig{Enabled: true, MaxPerProject: 50, MaxTotal: 4}, `{"allow_repo_config":false}`, mrs...)
 		result, err := svc.Run(context.Background())
-		if err != nil || result.MRsChecked != 4 || result.Enqueued != 4 || f.lister.limits[42] != 4 {
-			t.Fatalf("result = %+v, err = %v, limit = %d", result, err, f.lister.limits[42])
+		if err != nil || result.MRsChecked != 4 || result.Enqueued != 4 {
+			t.Fatalf("result = %+v, err = %v", result, err)
 		}
 	})
 }
@@ -319,5 +326,127 @@ func TestCatchUpPassesAgeWindowToGitLab(t *testing.T) {
 	}
 	if got, want := f.lister.since[42], now.Add(-24*time.Hour); !got.Equal(want) {
 		t.Fatalf("updatedAfter = %v, want %v", got, want)
+	}
+}
+
+// The listing says head X, then a live webhook enqueues head Y before the
+// catch-up decides. Y must stay current and queued; X must not be enqueued.
+func TestCatchUpDoesNotReplaceWebhookThatLandedAfterListing(t *testing.T) {
+	svc, f := newCatchUp(t, defaultCatchUp, `{"allow_repo_config":false}`, openMR(7, shaOf("c")))
+	f.lister.afterList = func(int64) {
+		body := mrBody(42, 7, func(b map[string]any) {
+			patchAttr(b, "last_commit", map[string]any{"id": shaOf("d")})
+		})
+		if res, err := f.webhook.Handle(context.Background(), WebhookRequest{
+			Event: "Merge Request Hook", Token: "whsec", UUID: uuid.NewString(), Body: body,
+		}); err != nil || !res.Accepted {
+			t.Errorf("webhook = %+v, err = %v", res, err)
+		}
+	}
+	result, err := svc.Run(context.Background())
+	if err != nil || result.Enqueued != 0 {
+		t.Fatalf("result = %+v, err = %v; the stale listed head must not be enqueued", result, err)
+	}
+	control, err := f.st.GetReviewControl(context.Background(), 42, 7)
+	if err != nil || control.HeadSHA != shaOf("d") || control.Generation != 1 {
+		t.Fatalf("control = %+v, err = %v; the webhook head must stay current", control, err)
+	}
+	if got := f.enqueued(); len(got) != 0 {
+		t.Fatalf("catch-up enqueued %+v", got)
+	}
+}
+
+// Already-reviewed MRs must not consume the enqueue budget of later projects.
+func TestCatchUpBudgetCountsEnqueuedReviewsAcrossProjects(t *testing.T) {
+	svc, f := newCatchUp(t, config.CatchUpConfig{Enabled: true, MaxPerProject: 5, MaxTotal: 2, MaxAge: time.Hour}, `{"allow_repo_config":false}`)
+	seedProject(t, f.st, svc.cipher, 43, "whsec43", `{"allow_repo_config":false}`, "default")
+	// Project 42: three MRs whose heads are already known.
+	var reviewed []gitlab.MergeRequest
+	for iid := int64(1); iid <= 3; iid++ {
+		head := strings.Repeat(string("0123456789abcdef"[iid]), 40)
+		body := mrBody(42, iid, func(b map[string]any) { patchAttr(b, "last_commit", map[string]any{"id": head}) })
+		if res, err := f.webhook.Handle(context.Background(), WebhookRequest{
+			Event: "Merge Request Hook", Token: "whsec", UUID: uuid.NewString(), Body: body,
+		}); err != nil || !res.Accepted {
+			t.Fatalf("seed webhook = %+v, err = %v", res, err)
+		}
+		reviewed = append(reviewed, openMR(iid, head))
+	}
+	f.lister.byProj[42] = reviewed
+	var fresh []gitlab.MergeRequest
+	for iid := int64(1); iid <= 3; iid++ {
+		mr := openMR(iid, strings.Repeat(string("abcdef"[iid]), 40))
+		mr.TargetProjectID = 43
+		fresh = append(fresh, mr)
+	}
+	f.lister.byProj[43] = fresh
+	result, err := svc.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Projects != 2 || result.MRsChecked != 5 || result.Enqueued != 2 {
+		t.Fatalf("result = %+v, want project 43 to still get its 2 enqueues", result)
+	}
+}
+
+func TestCatchUpScanStopsAfterConsecutiveListFailures(t *testing.T) {
+	svc, f := newCatchUp(t, defaultCatchUp, `{"allow_repo_config":false}`)
+	for id := int64(43); id <= 46; id++ {
+		seedProject(t, f.st, svc.cipher, id, "whsec", `{}`, "default")
+	}
+	for id := int64(42); id <= 46; id++ {
+		f.lister.err[id] = errors.New("gitlab down")
+	}
+	result, err := svc.Run(context.Background())
+	if err != nil || result != (CatchUpResult{}) {
+		t.Fatalf("result = %+v, err = %v", result, err)
+	}
+	if f.lister.calls != catchUpMaxFailures {
+		t.Fatalf("GitLab list calls = %d, want %d (breaker)", f.lister.calls, catchUpMaxFailures)
+	}
+}
+
+func TestCatchUpSkipsProjectWithUnusableToken(t *testing.T) {
+	svc, f := newCatchUp(t, defaultCatchUp, `{"allow_repo_config":false}`, openMR(7, shaOf("c")))
+	if err := f.st.UpdateProjectToken(context.Background(), 42, store.ProjectTokenUpdate{TokenEnc: []byte("corrupt")}); err != nil {
+		t.Fatalf("corrupt token: %v", err)
+	}
+	result, err := svc.Run(context.Background())
+	if err != nil || result != (CatchUpResult{}) || f.lister.calls != 0 {
+		t.Fatalf("result = %+v, err = %v, GitLab calls = %d", result, err, f.lister.calls)
+	}
+}
+
+// With repo config allowed the enqueue is a deferred candidate; the fixed
+// delivery UUID keeps a second scan from adding another one.
+func TestCatchUpCandidatePathIsIdempotentAcrossScans(t *testing.T) {
+	svc, f := newCatchUp(t, defaultCatchUp, `{}`, openMR(7, shaOf("c")))
+	first, err := svc.Run(context.Background())
+	if err != nil || first.Enqueued != 1 {
+		t.Fatalf("first = %+v, err = %v", first, err)
+	}
+	second, err := svc.Run(context.Background())
+	if err != nil || second.Enqueued != 0 {
+		t.Fatalf("second = %+v, err = %v; the candidate must not be enqueued twice", second, err)
+	}
+	control, err := f.st.GetReviewControl(context.Background(), 42, 7)
+	if err != nil || control.CandidateSeq != 1 {
+		t.Fatalf("control = %+v, err = %v; want exactly one candidate", control, err)
+	}
+}
+
+func TestRecoverRunsCatchUpEvenWhenRecoveryFails(t *testing.T) {
+	svc, f := newCatchUp(t, defaultCatchUp, `{"allow_repo_config":false}`, openMR(7, shaOf("c")))
+	rt := &Runtime{catchUp: svc, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	var order []string
+	boom := errors.New("recover failed")
+	err := rt.recoverThenCatchUp(context.Background(),
+		func(context.Context) error { order = append(order, "engine"); return nil },
+		func(context.Context) error { order = append(order, "reviews"); return boom })
+	if !errors.Is(err, boom) || strings.Join(order, ",") != "engine,reviews" {
+		t.Fatalf("err = %v, order = %v", err, order)
+	}
+	if got := f.enqueued(); len(got) != 1 {
+		t.Fatalf("catch-up did not run after a failing recovery: %+v", got)
 	}
 }

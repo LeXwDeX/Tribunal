@@ -102,6 +102,17 @@ func NewCatchUpService(cfg CatchUpServiceConfig) (*CatchUpService, error) {
 	}, nil
 }
 
+const (
+	// catchUpListLimit bounds how many open MRs one project contributes to a
+	// scan (one GitLab page). max_per_project and max_total limit enqueued
+	// reviews, so already-reviewed MRs never consume the review budget.
+	catchUpListLimit = 100
+	// catchUpDeadline bounds the whole scan; catchUpMaxFailures stops it after
+	// that many consecutive project list failures (GitLab down).
+	catchUpDeadline    = 2 * time.Minute
+	catchUpMaxFailures = 3
+)
+
 // Run performs one scan. It never fails the caller for a single project: a
 // GitLab or storage error skips that project and is logged by class only.
 func (s *CatchUpService) Run(ctx context.Context) (CatchUpResult, error) {
@@ -114,68 +125,86 @@ func (s *CatchUpService) Run(ctx context.Context) (CatchUpResult, error) {
 	if err != nil {
 		return result, err
 	}
+	scanCtx, cancel := context.WithTimeout(ctx, catchUpDeadline)
+	defer cancel()
+	failures := 0
 	for _, project := range projects {
-		if err := ctx.Err(); err != nil {
-			return result, err
-		}
-		remaining := s.settings.MaxTotal - result.MRsChecked
-		if remaining <= 0 {
-			s.logger.Warn("catch-up scan reached the overall MR limit", "max_total", s.settings.MaxTotal)
+		if scanCtx.Err() != nil {
 			break
 		}
-		limit := min(s.settings.MaxPerProject, remaining)
-		checked, enqueued, ok := s.scanProject(ctx, project.ID, limit)
-		if !ok {
+		remaining := s.settings.MaxTotal - result.Enqueued
+		if remaining <= 0 {
+			s.logger.Info("catch-up scan reached the overall enqueue limit", "max_total", s.settings.MaxTotal)
+			break
+		}
+		checked, enqueued, outcome := s.scanProject(scanCtx, project.ID, min(s.settings.MaxPerProject, remaining))
+		switch outcome {
+		case catchUpSkipped:
+			continue
+		case catchUpListFailed:
+			if failures++; failures >= catchUpMaxFailures {
+				s.logger.Warn("catch-up scan stopped after consecutive GitLab failures", "failures", failures)
+				goto finished
+			}
 			continue
 		}
+		failures = 0
 		result.Projects++
 		result.MRsChecked += checked
 		result.Enqueued += enqueued
+	}
+finished:
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	if scanCtx.Err() != nil {
+		s.logger.Warn("catch-up scan hit its deadline", "deadline", catchUpDeadline.String())
 	}
 	s.logger.Info("catch-up scan finished",
 		"projects", result.Projects, "mrs_checked", result.MRsChecked, "enqueued", result.Enqueued)
 	return result, nil
 }
 
-// scanProject reports ok=false when the project was skipped entirely.
-func (s *CatchUpService) scanProject(ctx context.Context, projectID int64, limit int) (checked, enqueued int, ok bool) {
-	ws := s.workspace.Get(projectID)
-	if ws == nil {
-		return 0, 0, false
-	}
-	// Hold the lifecycle read lock like a webhook delivery does, so project
-	// deletion cannot race a catch-up enqueue.
-	unlock, err := ws.LifecycleRLock(ctx)
-	if err != nil {
-		return 0, 0, false
-	}
-	defer unlock()
+type catchUpOutcome int
 
+const (
+	catchUpScanned catchUpOutcome = iota
+	catchUpSkipped
+	catchUpListFailed
+)
+
+// scanProject lists the project's recently updated open MRs without holding
+// any project lock, then decides and enqueues each MR under the lifecycle read
+// lock. At most budget reviews are enqueued.
+func (s *CatchUpService) scanProject(ctx context.Context, projectID int64, budget int) (checked, enqueued int, outcome catchUpOutcome) {
 	project, token, usable := s.projectToken(ctx, projectID)
 	if !usable {
-		return 0, 0, false
+		return 0, 0, catchUpSkipped
 	}
-	settings, err := ResolveSettings(project.Settings, s.webhooks.reviewDefaults)
-	if err != nil {
+	if _, err := ResolveSettings(project.Settings, s.webhooks.reviewDefaults); err != nil {
 		s.logger.Warn("catch-up skipped project with invalid settings", "project_id", projectID)
-		return 0, 0, false
+		return 0, 0, catchUpSkipped
 	}
+	// Anything the control saw after this instant is newer than the listing.
+	listStart := s.now()
 	var since time.Time
 	if s.settings.MaxAge > 0 {
-		since = s.now().Add(-s.settings.MaxAge)
+		since = listStart.Add(-s.settings.MaxAge)
 	}
-	mrs, err := s.gitlab.ListOpenMergeRequests(ctx, token, projectID, limit, since)
+	mrs, err := s.gitlab.ListOpenMergeRequests(ctx, token, projectID, catchUpListLimit, since)
 	if err != nil {
-		s.logger.Warn("catch-up could not list open merge requests",
-			"project_id", projectID, "error_class", errclass.Of(err))
-		return 0, 0, false
+		if ctx.Err() == nil {
+			s.logger.Warn("catch-up could not list open merge requests",
+				"project_id", projectID, "error_class", errclass.Of(err))
+		}
+		return 0, 0, catchUpListFailed
 	}
 	for _, mr := range mrs {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || enqueued >= budget {
 			break
 		}
 		checked++
-		queued, err := s.catchUpMR(ctx, project, settings, mr)
+		queued, err := s.catchUpMR(ctx, projectID, mr, listStart)
 		if err != nil {
 			s.logger.Warn("catch-up enqueue failed",
 				"project_id", projectID, "mr_iid", mr.IID, "error_class", errclass.Of(err))
@@ -185,7 +214,7 @@ func (s *CatchUpService) scanProject(ctx context.Context, projectID int64, limit
 			enqueued++
 		}
 	}
-	return checked, enqueued, true
+	return checked, enqueued, catchUpScanned
 }
 
 func (s *CatchUpService) projectToken(ctx context.Context, projectID int64) (*store.Project, string, bool) {
@@ -202,20 +231,47 @@ func (s *CatchUpService) projectToken(ctx context.Context, projectID int64) (*st
 
 // catchUpMR enqueues a review when the MR's current head has no review
 // control. A control that already names this head means the head was reviewed,
-// is queued, was filtered after enqueue, or was cancelled on purpose.
-func (s *CatchUpService) catchUpMR(ctx context.Context, project *store.Project, settings config.ProjectSettings, mr gitlab.MergeRequest) (bool, error) {
+// is queued, was filtered after enqueue, or was cancelled on purpose. A
+// control touched since the listing started is newer than the listed head, and
+// the enqueue itself is conditional on the control being unchanged, so a live
+// webhook that lands in between is never replaced.
+func (s *CatchUpService) catchUpMR(ctx context.Context, projectID int64, mr gitlab.MergeRequest, listStart time.Time) (bool, error) {
 	head := strings.ToLower(strings.TrimSpace(mr.SHA))
 	if mr.IID <= 0 || !shaRE.MatchString(head) {
 		return false, nil
 	}
-	control, err := s.store.GetReviewControl(ctx, project.ID, mr.IID)
+	ws := s.workspace.Get(projectID)
+	if ws == nil {
+		return false, nil
+	}
+	// Like a webhook delivery, hold the lifecycle read lock only for the
+	// decision and enqueue so project deletion cannot race it.
+	unlock, err := ws.LifecycleRLock(ctx)
+	if err != nil {
+		return false, nil
+	}
+	defer unlock()
+
+	project, err := s.webhooks.store.GetProject(ctx, projectID)
+	if err != nil || project == nil || !project.Enabled {
+		return false, nil
+	}
+	settings, err := ResolveSettings(project.Settings, s.webhooks.reviewDefaults)
+	if err != nil {
+		return false, nil
+	}
+	control, err := s.store.GetReviewControl(ctx, projectID, mr.IID)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return false, err
 	}
-	if err == nil && control != nil && strings.EqualFold(control.HeadSHA, head) {
-		return false, nil
+	expect := &store.ReviewControlExpect{}
+	if err == nil && control != nil {
+		if strings.EqualFold(control.HeadSHA, head) || !control.UpdatedAt.Before(listStart) {
+			return false, nil
+		}
+		expect = &store.ReviewControlExpect{Exists: true, Generation: control.Generation, CandidateSeq: control.CandidateSeq}
 	}
-	queued, err := s.webhooks.enqueueCatchUp(ctx, project, settings, mr, head)
+	queued, err := s.webhooks.enqueueCatchUp(ctx, project, settings, mr, head, expect)
 	if queued {
 		s.logger.Info("catch-up enqueued review",
 			"project_id", project.ID, "mr_iid", mr.IID, "head", head[:8])
@@ -225,7 +281,7 @@ func (s *CatchUpService) catchUpMR(ctx context.Context, project *store.Project, 
 
 // enqueueCatchUp runs the webhook filter chain on a synthetic merge request
 // event and records the resulting job with trigger catch_up.
-func (s *WebhookService) enqueueCatchUp(ctx context.Context, project *store.Project, settings config.ProjectSettings, mr gitlab.MergeRequest, head string) (bool, error) {
+func (s *WebhookService) enqueueCatchUp(ctx context.Context, project *store.Project, settings config.ProjectSettings, mr gitlab.MergeRequest, head string, expect *store.ReviewControlExpect) (bool, error) {
 	if mr.TargetProjectID > 0 && mr.TargetProjectID != project.ID {
 		return false, nil
 	}
@@ -249,14 +305,16 @@ func (s *WebhookService) enqueueCatchUp(ctx context.Context, project *store.Proj
 			Title:           mr.Title,
 		},
 	}
-	job, reason := s.newReviewJob(project, settings, payload, mr.IID, catchUpTrigger, true)
+	// Not a full review: like mr_update, an earlier published head narrows the
+	// scope to the files changed since it.
+	job, reason := s.newReviewJob(project, settings, payload, mr.IID, catchUpTrigger, false)
 	if reason != "" {
 		s.logger.Info("catch-up skipped merge request",
 			"project_id", project.ID, "mr_iid", mr.IID, "reason", reason)
 		return false, nil
 	}
 	eventUUID := uuid.NewSHA1(catchUpNamespace, []byte(itoa(project.ID)+":"+itoa(mr.IID)+":"+head)).String()
-	result, err := s.recordJob(ctx, project.ID, catchUpEvent, eventUUID, job)
+	result, err := s.recordJob(ctx, project.ID, catchUpEvent, eventUUID, job, expect)
 	if err != nil {
 		return false, err
 	}

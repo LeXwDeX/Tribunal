@@ -232,3 +232,29 @@ func TestIncrementalReviewFallsBackWhenHistoryIsUnavailable(t *testing.T) {
 		t.Fatalf("reason = %q, want the history lookup failure", dossier.Incremental.Reason)
 	}
 }
+
+// A catch-up review follows the mr_update rules: with an earlier published
+// head it only covers the files changed since then.
+func TestIncrementalReviewAppliesToCatchUpTrigger(t *testing.T) {
+	ctx := context.Background()
+	f := newReviewFixture(t, reviewTestHead)
+	profile := f.profiles["default"]
+	profile.Challenge.Only = []string{"info"}
+	f.profiles["default"] = profile
+	f.service.agentRun = findingRunner(review.SeverityP2, "main.go")
+
+	first := f.seedRunFor(t, "job-catchup-first", reviewTestHead, "mr_open")
+	if err := f.service.Handle(ctx, first); err != nil {
+		t.Fatalf("first Handle: %v", err)
+	}
+	setIncrementalHead(f, strings.Repeat("c", 40), "other.go")
+	second := f.seedRunFor(t, "job-catchup-second", f.head, "catch_up")
+	if err := f.service.Handle(ctx, second); err != nil {
+		t.Fatalf("second Handle: %v", err)
+	}
+	dossier := secondRoundDossier(t, f, second)
+	if dossier.Incremental == nil || dossier.Incremental.Full ||
+		len(dossier.Incremental.Files) != 1 || dossier.Incremental.Files[0] != "other.go" {
+		t.Fatalf("incremental = %+v, want a narrow scope of [other.go]", dossier.Incremental)
+	}
+}

@@ -625,10 +625,16 @@ func (r *Runtime) Handlers() map[string]jobs.Handler {
 // missed while the service was down (#362). It must be called after the job
 // worker starts. The catch-up setting is read once at startup.
 func (r *Runtime) Recover(ctx context.Context) error {
-	if err := r.engine.Recover(ctx); err != nil {
+	return r.recoverThenCatchUp(ctx, r.engine.Recover, r.reviews.Recover)
+}
+
+// recoverThenCatchUp always runs the catch-up scan after recovery, even when
+// recovery reported an error.
+func (r *Runtime) recoverThenCatchUp(ctx context.Context, engineRecover, reviewsRecover func(context.Context) error) error {
+	if err := engineRecover(ctx); err != nil {
 		r.logger.Warn("workflow recovery failed", "error_class", errclass.Of(err))
 	}
-	err := r.reviews.Recover(ctx)
+	err := reviewsRecover(ctx)
 	if r.catchUp != nil && ctx.Err() == nil {
 		if _, scanErr := r.catchUp.Run(ctx); scanErr != nil && ctx.Err() == nil {
 			r.logger.Warn("catch-up scan failed", "error_class", errclass.Of(scanErr))

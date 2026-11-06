@@ -339,10 +339,11 @@ fi
 GitLab 对失败的 webhook 不保证重试，容器停机期间送达的 MR 事件会丢失。启动恢复（含取消、续跑和待发布重试）完成后，服务对每个已启用、token 可解密的项目做一次追赶扫描：按最近更新顺序列出打开的 MR，若某个 MR 的当前 head 在本库中没有评审控制记录，就经与 webhook 相同的过滤规则（Draft、标签、目标分支、仓库配置）入队一次评审，触发方式为 `catch_up`（控制台「启动补评」）。
 
 - 不会重复入队：该 head 已有控制记录（已评审、排队或运行中、入队后被过滤、被 `/review cancel` 取消）时跳过；每个（项目、MR、head）的投递 UUID 固定，重启多次也至多补评一次。关闭、合并和被过滤的 MR 遵守现有规则，不入队。
-- 有界且保守：只考虑最近 `gitlab.catch_up.max_age`（默认 24h）内有更新的 MR，按更新时间从新到旧分页，遇到窗口外的 MR 即停止；`max_per_project`（默认 10，每个项目检查的 MR 数）和 `max_total`（默认 20，一次扫描的总数）进一步限制数量。每入队一个 MR 输出 INFO `catch-up enqueued review`（`project_id`、`mr_iid`、`head` 短 SHA）。GitLab 请求走现有并发上限，一个项目失败只跳过该项目。`gitlab.catch_up.enabled: false` 关闭扫描。该配置只在启动时读取，修改后需重启。
+- 有界且保守：只考虑最近 `gitlab.catch_up.max_age`（默认 24h）内有更新的 MR，按更新时间从新到旧分页，遇到窗口外的 MR 即停止；`max_per_project`（默认 10）和 `max_total`（默认 20）限制入队的评审数，已评审的 MR 不占用额度；每个项目最多检查 100 个最近更新的 MR，以此限制 GitLab 请求量。扫描整体最长 2 分钟，连续 3 个项目列出 MR 失败即停止。项目的锁只在判定和入队时持有，列出 MR 的网络请求期间不持锁；入队与评审控制记录的比较在同一事务内完成，列出之后到达的 webhook（更新的 head）不会被扫描覆盖。每入队一个 MR 输出 INFO `catch-up enqueued review`（`project_id`、`mr_iid`、`head` 短 SHA）。GitLab 请求走现有并发上限，一个项目失败只跳过该项目。`gitlab.catch_up.enabled: false` 关闭扫描。该配置只在启动时读取，修改后需重启。
 - 日志：完成时输出 INFO `catch-up scan finished`（`projects`、`mrs_checked`、`enqueued`）；单个项目失败输出 WARN，只含项目号和错误类别。
 - 升级后首次启动：旧版本登记的项目里，窗口内仍打开、当前 head 没有评审记录的 MR（例如项目登记之后才更新、此前从未评审的 MR）会各入队一次，按默认上限最多 20 次评审，会产生相应的模型用量。若不希望首次升级触发评审，先在配置中设置 `gitlab.catch_up.enabled: false` 再启动，确认后按需改回（修改需重启）。
-- 局限：只补评当前 head；超出窗口或上限的较旧 MR 需手动 `/review`。扫描不补发停机期间错过的 close/merge 取消事件。
+- 增量范围：`catch_up` 评审与 `mr_update` 相同，已有上次发布的 head 时只评审其后变更的文件，否则为完整评审。
+- 局限：停机期间被关闭后重新打开、head 未变的 MR 不会被补评（它与被 `/review cancel` 取消的 MR 无法区分）；只补评当前 head；超出窗口或上限的较旧 MR 需手动 `/review`。扫描不补发停机期间错过的 close/merge 取消事件。
 
 **恢复取消的原因对应**：恢复取消的工作流有两个原因字段。事件中的取消原因（engine reason）是粗粒度类别，多数情形为 `superseded`，`profile_hash_changed` 与 `execution_identity_changed` 使用自己的名称；发布跳过原因（API 的 `publication_error`）和评审状态详情为 `cancelled on recovery: <cause>`，`<cause>` 是真实原因，与启动日志 `recovery cancelling workflow` 的 `cause` 字段一致（如 `mr_inputs_unavailable`、`diff_version_changed`、`config_changed`）。因此 `superseded` 与 `cancelled on recovery: mr_inputs_unavailable` 描述同一次取消，排查以后者为准。
 
