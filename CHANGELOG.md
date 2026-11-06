@@ -2,7 +2,9 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [1.3.0] - 未发布
+## [1.3.0] - 2026-11-06
+
+> v1.3.0 已发布（2026-11-06，tag `v1.3.0` 指向 `dcc630f`，GitHub Release 为 Latest）。发布候选经 GitHub Actions run `42176135590`（`go`、`web`、`docker` 全部成功），并已部署到生产环境、通过维护者人工 Review。完整变更见 [v1.2.0...v1.3.0](https://github.com/LeXwDeX/Tribunal/compare/v1.2.0...v1.3.0)。
 
 ### 升级前必读
 
@@ -35,7 +37,6 @@
 - 发布一致性：发布前、发布中崩溃后只发布一次、无重复讨论；重启后新 head 的 workflow 约 6 秒创建；停机期间推送的 head 由启动补漏评审且不重复入队。
 - 评审质量与安全：被忽略文件不再抑制其他文件的行内定位；近似重复项仅在展示层折叠，相邻的不同问题分别发布，无定位汇总条目大幅减少；机器人评论不再触发 GitLab quick action。
 - 界面：评审档位编辑页和评审列表在 1440 / 390 宽度下做过人工检查，未附截图文件。
-- 尚未完成：生产人工 Review（发布第 3 段）、候选 commit 上的 GitHub Actions（第 2 段）、tag 与 Release；详见 `docs/delivery-readiness.md`。
 
 ### 已知限制
 

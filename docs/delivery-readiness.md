@@ -66,11 +66,11 @@
 | 新 MR head 评审创建 workflow 前永久失败 | PASS | 2026-11-05 #327（根因：评审图校验使用启动时的模型列表，由 #337 修复）：MR 更新到新 head 后连续 3 次触发均 `review execution failed`，未创建 workflow。第 2–5 轮中新 head 均正常创建 workflow 并完成评审；第 4 轮重启后新 head 的 workflow 约 6 秒创建（此前约 4.5 分钟，#354） |
 | 版本回退演练（恢复快照 + v1.2.0 镜像） | PASS | 升级前一致性快照恢复到新卷，用 v1.2.0 镜像与原 masterkey 启动，readyz 200，项目与评审可读。2026-11-06 在升级夹具上复测：终态工作流可读。副作用：快照时仍在途的工作流被 v1.2.0 续跑并以 `required node failed` 失败，覆盖了升级后实例已为该 MR 发布的 GitLab 汇总和状态评论；升级前应让在途评审结束或取消（见 [运维文档](operations.md#通用升级与回滚步骤)） |
 | CHANGELOG、operations、data model、HTTP API、web console 文档 | PASS | 本次提交 |
-| GitHub Runner（stage 2）三个 job | PENDING | 需在冻结候选 commit 上运行 |
-| 生产人工 Review（stage 3） | PENDING | 需维护者与明确授权 |
-| tag `v1.3.0` 与 GitHub Release | PENDING | 需用户明确授权 |
+| GitHub Runner（stage 2）三个 job | PASS | 发布候选 `dcc630f`：GitHub Actions run `42176135590`，`go`、`web`、`docker` 全部成功 |
+| 生产人工 Review（stage 3） | PASS | 2026-11-06 经维护者批准部署候选镜像到生产环境：停服前无在途评审，一致性备份后升级，迁移至 `0028`，健康检查与公网入口通过；维护者人工 Review 通过 |
+| tag `v1.3.0` 与 GitHub Release | PASS | 2026-11-06 经维护者授权，tag `v1.3.0` 指向 `dcc630f`，GitHub Release 为 Latest |
 
-“发布前必须”项均已有真实实例结论。GitHub Runner（stage 2）、生产人工 Review（stage 3）、tag 与 Release 仍为 PENDING，需维护者与明确授权。未用 mock 或 CI 结果替代真实验证。
+“发布前必须”项均已有真实实例结论；发布第 2–4 段均已完成，v1.3.0 已于 2026-11-06 发布。未用 mock 或 CI 结果替代真实验证。
 
 ### v1.3.0 真实实例验收记录（2026-11-06，第 1–5 轮）
 
