@@ -141,15 +141,19 @@ func TestPublisherFoldsEvenWhenAnotherPathIsIgnored(t *testing.T) {
 	f.defaults.Ignore = []string{"**/*.sum"}
 	f.service.reviewDefaults = f.defaults
 	f.publisher.reviewDefaults = f.defaults
-	_, workflow := publishWithFindings(t, f, duplicateFindings())
-	// With an ignored file in the MR the existing path-ambiguity rule keeps
-	// every finding out of inline discussions, so the folded problem is one
-	// summary entry that still lists the related descriptions.
+	captured, workflow := publishWithFindings(t, f, duplicateFindings())
+	// An unrelated ignored file (#357) only withholds its own path, so the
+	// folded problem is still posted as one inline discussion listing the
+	// related descriptions. This is the end-to-end regression for #357.
+	requests, body, _, decodeErr := captured.snapshot()
+	if decodeErr != nil || requests != 1 || !strings.Contains(body, "相关描述") {
+		t.Fatalf("inline discussions = %d (decode %v), want exactly 1 with related descriptions:\n%s", requests, decodeErr, body)
+	}
 	f.gitlab.mu.Lock()
 	summary := f.gitlab.notes[0].Body
 	f.gitlab.mu.Unlock()
-	if strings.Count(summary, "#### [P2]") != 1 || !strings.Contains(summary, "相关描述") {
-		t.Fatalf("an unrelated ignored file disabled folding:\n%s", summary)
+	if !strings.Contains(summary, "P2** × 1") && !strings.Contains(summary, "P2 × 1") {
+		t.Fatalf("summary counts must reflect one posted problem:\n%s", summary)
 	}
 	findings, _ := f.db.ListFindings(context.Background(), store.FindingFilter{WorkflowID: workflow.ID})
 	for _, finding := range findings {
