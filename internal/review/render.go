@@ -342,34 +342,56 @@ func RenderFinding(group Group, opts FindingRenderOptions) (string, error) {
 // maxRelatedDescriptions bounds the 「相关描述」 list.
 const maxRelatedDescriptions = 5
 
-// relatedDescriptions lists the titles, severities and categories of merged
-// sources whose title differs from the displayed one, so an approximate merge
-// never hides another lane's description.
+// relatedDescriptions lists every other member of an approximately merged
+// group (severity, category, title and a one-line body excerpt), so a merge
+// never hides another lane's description. Groups made only by the exact rule
+// list nothing. Members with identical title and body are shown once.
 func relatedDescriptions(group Group) string {
-	seen := map[string]struct{}{NormalizeTitle(group.Title): {}}
-	var lines []string
+	approximate := false
 	for _, source := range group.Sources {
-		key := NormalizeTitle(source.Title)
-		if key == "" {
-			continue
-		}
+		approximate = approximate || source.Approximate
+	}
+	if !approximate {
+		return ""
+	}
+	seen := map[string]struct{}{descriptionKey(group.Title, group.Body): {}}
+	var lines []string
+	extra := 0
+	for _, source := range group.Sources {
+		key := descriptionKey(source.Title, source.Body)
 		if _, ok := seen[key]; ok {
 			continue
 		}
 		seen[key] = struct{}{}
 		if len(lines) == maxRelatedDescriptions {
-			break
+			extra++
+			continue
 		}
 		label := string(source.Severity)
 		if source.Category != "" {
 			label += " · " + source.Category
 		}
-		lines = append(lines, "- ["+escapeOneLine(label, 64)+"] "+escapeOneLine(source.Title, MaxTitleRunes)+"\n")
+		line := "- [" + escapeOneLine(label, 64) + "] " + escapeOneLine(source.Title, MaxTitleRunes)
+		if excerpt := escapeOneLine(source.Body, relatedExcerptRunes); excerpt != "" {
+			line += "：" + excerpt
+		}
+		lines = append(lines, line+"\n")
 	}
 	if len(lines) == 0 {
 		return ""
 	}
-	return "**相关描述**：\n" + strings.Join(lines, "")
+	out := "**相关描述**：\n" + strings.Join(lines, "")
+	if extra > 0 {
+		out += fmt.Sprintf("- 另有 %d 条\n", extra)
+	}
+	return out
+}
+
+// relatedExcerptRunes bounds each body excerpt in the related list.
+const relatedExcerptRunes = 120
+
+func descriptionKey(title, body string) string {
+	return NormalizeTitle(title) + "\x00" + NormalizeTitle(body)
 }
 
 func modelAttribution(group Group, labels map[string]string) string {

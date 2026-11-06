@@ -2,6 +2,7 @@ package review
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"sort"
 	"strings"
@@ -670,5 +671,108 @@ func TestRenderFindingListsRelatedDescriptions(t *testing.T) {
 	single.PositionOK, single.Decision = true, &FindingDecision{Action: ActionPublish}
 	if body, _ := RenderFinding(single, FindingRenderOptions{}); strings.Contains(body, "相关描述") {
 		t.Fatalf("single-source finding must not list related descriptions:\n%s", body)
+	}
+}
+
+func publishedBody(t *testing.T, g Group) string {
+	t.Helper()
+	g.PositionOK = true
+	g.Decision = &FindingDecision{Action: ActionPublish}
+	body, err := RenderFinding(g, FindingRenderOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+func TestDedupeSeverityGapBlocksApproximateMerge(t *testing.T) {
+	a := nearDup("cr.p1", "a", "m1", 0, 20, "error-handling", SeverityP1, "fetch_user 未处理异常", "fetch_user 调用 requests 时没有处理 requests.Timeout，请求挂起")
+	a.Severity = SeverityP0
+	b := nearDup("cr.p2", "b", "m2", 0, 20, "logic", SeverityP2, "fetch_user 未处理异常", "fetch_user 解析响应时没有处理 JSONDecodeError，请求失败")
+	for _, in := range [][]Finding{{a, b}, {b, a}} {
+		if got := Dedupe(in); len(got) != 2 {
+			t.Fatalf("P0 and P2 must not be approximately merged, groups = %d", len(got))
+		}
+	}
+}
+
+func TestApproximateMergeShowsHighestSeverityAndAllBodies(t *testing.T) {
+	a := nearDup("cr.p1", "a", "m1", 0, 20, "error-handling", SeverityP1, "fetch_user 未处理异常", "fetch_user 发送请求后没有处理异常 requests.Timeout，导致调用方崩溃")
+	b := nearDup("cr.p2", "b", "m2", 0, 20, "logic", SeverityP2, "fetch_user 未处理异常", "fetch_user 发送请求后没有处理异常 JSONDecodeError，导致调用方崩溃并且正文更长一些")
+	c := nearDup("cr.p3", "c", "m3", 0, 20, "logic", SeverityP2, "load_config 缺少空值检查", "load_config 读取配置后对 path 变量没有做空值检查，直接解引用会导致崩溃")
+	d := nearDup("cr.p4", "d", "m4", 0, 20, "style", SeverityP2, "load_config 缺少空值检查", "load_config 读取配置后对 mode 变量没有做空值检查，直接解引用会导致崩溃")
+	for _, in := range [][]Finding{{a, b}, {b, a}} {
+		groups := Dedupe(in)
+		if len(groups) != 1 {
+			t.Fatalf("groups = %d, want 1", len(groups))
+		}
+		if groups[0].Severity != SeverityP1 || !strings.Contains(groups[0].Body, "requests.Timeout") {
+			t.Fatalf("display must come from the highest-severity member: %q", groups[0].Body)
+		}
+		if body := publishedBody(t, groups[0]); !strings.Contains(body, "JSONDecodeError") {
+			t.Fatalf("other member body missing:\n%s", body)
+		}
+	}
+	for _, in := range [][]Finding{{c, d}, {d, c}} {
+		groups := Dedupe(in)
+		if len(groups) != 1 {
+			t.Fatalf("same-title cross-category groups = %d, want 1", len(groups))
+		}
+		body := publishedBody(t, groups[0])
+		if !strings.Contains(body, "path") || !strings.Contains(body, "mode") {
+			t.Fatalf("both variables must be visible:\n%s", body)
+		}
+	}
+}
+
+func TestRelatedDescriptionsCapAndCount(t *testing.T) {
+	g := Group{Title: "T0", Body: "b0", Severity: SeverityP2}
+	for i := 0; i < 8; i++ {
+		g.Sources = append(g.Sources, Finding{Title: fmt.Sprintf("T%d", i), Body: fmt.Sprintf("b%d", i), Severity: SeverityP2, Approximate: i > 0})
+	}
+	out := relatedDescriptions(g)
+	if strings.Count(out, "\n- [") != 5 || !strings.Contains(out, "另有 2 条") {
+		t.Fatalf("related list = %q", out)
+	}
+}
+
+func TestExactDuplicateIsNotStolenByCrossCategoryAnchor(t *testing.T) {
+	a := nearDup("cr.p1", "a", "m1", 0, 10, "logic", SeverityP2, "alpha handling", "alpha body one")
+	b := nearDup("cr.p2", "b", "m2", 0, 11, "logic", SeverityP2, "beta handling", "other words entirely")
+	c := nearDup("cr.p3", "c", "m3", 0, 10, "correctness", SeverityP2, "gamma handling", "something else")
+	for i, in := range [][]Finding{{a, b, c}, {c, b, a}, {b, c, a}} {
+		groups := Dedupe(in)
+		if len(groups) != 2 {
+			t.Fatalf("order %d: groups = %d, want 2", i, len(groups))
+		}
+		for _, g := range groups {
+			if len(g.Sources) == 2 {
+				if countVotes(g.Sources, 0, nil) != 2 {
+					t.Fatalf("exact pair must keep independent votes")
+				}
+				return
+			}
+		}
+		t.Fatalf("order %d: a and b were not merged", i)
+	}
+}
+
+func TestApproximateFlagSurvivesJSONRoundTrip(t *testing.T) {
+	a := nearDup("cr.p1", "a", "m1", 0, 15, "correctness", SeverityP1, "split_evenly drops the remainder", splitEvenlyBody)
+	b := nearDup("cr.p2", "b", "m2", 0, 15, "logic", SeverityP1, "split_evenly drops remainder cents", splitEvenlyBody)
+	groups := Dedupe([]Finding{a, b})
+	if len(groups) != 1 {
+		t.Fatalf("groups = %d", len(groups))
+	}
+	raw, err := json.Marshal(groups[0].Sources)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back []Finding
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatal(err)
+	}
+	if want, got := countVotes(groups[0].Sources, 0, nil), countVotes(back, 0, nil); want != got || got != 1 {
+		t.Fatalf("votes before=%.2f after round trip=%.2f, want both 1", want, got)
 	}
 }

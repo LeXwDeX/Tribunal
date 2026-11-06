@@ -71,9 +71,9 @@ type Finding struct {
 	Confidence Confidence
 	Decision   *FindingDecision
 	PublishKey string
-	// approximate marks a source merged by the text-similarity rule rather than
+	// Approximate marks a source merged by the text-similarity rule rather than
 	// the same-category proximity rule. It never counts as an independent vote.
-	approximate bool
+	Approximate bool `json:"approximate,omitempty"`
 }
 
 // FindingDecision is the rule, gate, judge, or fallback decision for a group.
@@ -541,36 +541,80 @@ func dedupe(findings []Finding, dossier *Dossier) []Group {
 		}
 		return value
 	}
-	// Membership is decided in a deterministic order against each group's
-	// anchor (its first member in that order), so the partition does not depend
-	// on the order the lanes returned findings and cannot chain through
-	// intermediate members. Groups are then built in input order.
+	// Grouping is deterministic and independent of lane order. Pass 1 applies
+	// only the original rule (same category, close lines) against each group's
+	// anchor, its first member in sorted order. Pass 2 merges whole pass-1
+	// groups approximately against the representative group's anchor, never
+	// splitting pass-1 groups and never chaining.
 	order := make([]int, len(findings))
 	for i := range order {
 		order[i] = i
 	}
 	sort.SliceStable(order, func(x, y int) bool { return findingLess(findings[order[x]], findings[order[y]]) })
-	var members [][]int
-	approx := make(map[int]bool)
+	var exactGroups [][]int
 	for _, idx := range order {
 		finding := findings[idx]
 		if ambiguous(finding.Path) {
-			members = append(members, []int{idx})
+			exactGroups = append(exactGroups, []int{idx})
 			continue
 		}
 		merged := false
-		for i := range members {
-			if exact, ok := canMerge(findings[members[i][0]], finding, resolve, ambiguous); ok {
-				if !exact {
-					approx[idx] = true
-				}
-				members[i] = append(members[i], idx)
+		for i := range exactGroups {
+			if exact, ok := canMerge(findings[exactGroups[i][0]], finding, resolve, ambiguous); ok && exact {
+				exactGroups[i] = append(exactGroups[i], idx)
 				merged = true
 				break
 			}
 		}
 		if !merged {
-			members = append(members, []int{idx})
+			exactGroups = append(exactGroups, []int{idx})
+		}
+	}
+	maxRank := func(m []int) int {
+		best := severityRank[findings[m[0]].Severity]
+		for _, idx := range m[1:] {
+			if rank := severityRank[findings[idx].Severity]; rank < best {
+				best = rank
+			}
+		}
+		return best
+	}
+	var members [][]int
+	var parts [][][]int // pass-1 groups of each pass-2 group; parts[i][0] is the representative
+	approx := make(map[int]bool)
+	for _, g := range exactGroups {
+		anchor := findings[g[0]]
+		merged := false
+		if !ambiguous(anchor.Path) {
+			for i := range members {
+				head := parts[i][0]
+				if ambiguous(findings[head[0]].Path) {
+					continue
+				}
+				gap := false
+				for _, part := range parts[i] {
+					if d := maxRank(part) - maxRank(g); d >= nearDuplicateSeverityGap || -d >= nearDuplicateSeverityGap {
+						gap = true
+						break
+					}
+				}
+				if gap {
+					continue
+				}
+				if exact, ok := canMerge(findings[head[0]], anchor, resolve, ambiguous); ok && !exact {
+					for _, idx := range g {
+						approx[idx] = true
+					}
+					members[i] = append(members[i], g...)
+					parts[i] = append(parts[i], g)
+					merged = true
+					break
+				}
+			}
+		}
+		if !merged {
+			members = append(members, append([]int(nil), g...))
+			parts = append(parts, [][]int{g})
 		}
 	}
 	for _, m := range members {
@@ -580,12 +624,17 @@ func dedupe(findings []Finding, dossier *Dossier) []Group {
 	groups := make([]Group, 0, len(members))
 	for _, m := range members {
 		first := findings[m[0]]
-		first.approximate = approx[m[0]]
+		first.Approximate = approx[m[0]]
 		group := newGroup(first)
+		hasApprox := first.Approximate
 		for _, idx := range m[1:] {
 			member := findings[idx]
-			member.approximate = approx[idx]
+			member.Approximate = approx[idx]
+			hasApprox = hasApprox || member.Approximate
 			mergeInto(&group, member)
+		}
+		if hasApprox {
+			displayHighestSeverity(&group)
 		}
 		groups = append(groups, group)
 	}
@@ -929,6 +978,21 @@ func mergeInto(group *Group, finding Finding) {
 	}
 }
 
+// displayHighestSeverity shows an approximately merged group through its most
+// severe member (ties: the richer one), so a lower-severity body never stands
+// in for a higher-severity finding.
+func displayHighestSeverity(group *Group) {
+	best := group.Sources[0]
+	for _, source := range group.Sources[1:] {
+		if source.Severity.Higher(best.Severity) || (source.Severity == best.Severity && richer(source, best)) {
+			best = source
+		}
+	}
+	group.Title, group.Body, group.Suggestion = best.Title, best.Body, best.Suggestion
+	group.Evidence, group.Confidence = best.Evidence, best.Confidence
+	group.Line, group.Side, group.Category, group.Path = best.Line, best.Side, best.Category, best.Path
+}
+
 func groupDisplay(group Group) Finding {
 	return Finding{
 		Title:      group.Title,
@@ -985,7 +1049,7 @@ func countVotes(sources []Finding, sameModelWeight float64, identities map[strin
 	seen := make(map[string]struct{}, len(sources))
 	total := 0.0
 	for _, source := range sources {
-		if source.approximate {
+		if source.Approximate {
 			// A text-similarity merge is not proof of independent agreement.
 			continue
 		}
@@ -1172,6 +1236,9 @@ const (
 	nearDuplicateMinShared     = 4
 	nearDuplicateTitleJaccard  = 0.5
 	nearDuplicateTitleContent  = 2
+	// Groups whose highest severities are this many levels apart (P0 vs P2)
+	// are never approximately merged.
+	nearDuplicateSeverityGap = 2
 )
 
 // genericIdentifiers are ASCII words common to many unrelated findings; they
