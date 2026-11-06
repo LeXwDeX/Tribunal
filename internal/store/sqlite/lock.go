@@ -38,6 +38,12 @@ func LockDataDir(dir string) (*DataDirLock, error) {
 	return &DataDirLock{path: path, file: file}, nil
 }
 
+// Held reports whether the operating system actually enforces the lock. It is
+// false on platforms without flock, where the lock file is only created.
+func (l *DataDirLock) Held() bool {
+	return l != nil && dataDirLockSupported
+}
+
 // Path returns the lock file path.
 func (l *DataDirLock) Path() string {
 	return l.path
