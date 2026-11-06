@@ -329,6 +329,10 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 	if err != nil {
 		return PermanentJob(err)
 	}
+	// Presentation only: fold near-duplicate groups that are already decided
+	// to publish. Votes, challenges and decisions of the folded groups stay in
+	// the stored findings; only the discussion is shared.
+	result.Groups = review.MergePresentation(result.Groups, loaded.dossier)
 	for _, group := range result.Groups {
 		if loaded.dossier.IgnoresPath(group.Path) {
 			return p.stale(ctx, workflowID, "ignored finding rejected")

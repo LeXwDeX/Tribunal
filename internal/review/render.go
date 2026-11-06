@@ -259,6 +259,9 @@ func renderSummaryItem(group Group, marked bool) string {
 		b.WriteString(codeFence(group.Evidence))
 		b.WriteString("\n\n</details>\n\n")
 	}
+	if related := relatedDescriptions(group); related != "" {
+		b.WriteString(related)
+	}
 	return strings.TrimRight(b.String(), "\n") + "\n"
 }
 
@@ -339,59 +342,32 @@ func RenderFinding(group Group, opts FindingRenderOptions) (string, error) {
 	return b.String(), nil
 }
 
-// maxRelatedDescriptions bounds the 「相关描述」 list.
-const maxRelatedDescriptions = 5
-
-// relatedDescriptions lists every other member of an approximately merged
-// group (severity, category, title and a one-line body excerpt), so a merge
-// never hides another lane's description. Groups made only by the exact rule
-// list nothing. Members with identical title and body are shown once.
+// relatedDescriptions lists the groups folded into this discussion by
+// MergePresentation (severity, category, title, short body excerpt). The
+// list is already ordered by severity then position; at most maxRelatedGroups
+// are shown and the rest is counted.
 func relatedDescriptions(group Group) string {
-	approximate := false
-	for _, source := range group.Sources {
-		approximate = approximate || source.Approximate
-	}
-	if !approximate {
+	if len(group.Related) == 0 {
 		return ""
 	}
-	seen := map[string]struct{}{descriptionKey(group.Title, group.Body): {}}
-	var lines []string
-	extra := 0
-	for _, source := range group.Sources {
-		key := descriptionKey(source.Title, source.Body)
-		if _, ok := seen[key]; ok {
-			continue
+	var b strings.Builder
+	b.WriteString("**相关描述**：\n")
+	for i, related := range group.Related {
+		if i == maxRelatedGroups {
+			fmt.Fprintf(&b, "- 另有 %d 条\n", len(group.Related)-maxRelatedGroups)
+			break
 		}
-		seen[key] = struct{}{}
-		if len(lines) == maxRelatedDescriptions {
-			extra++
-			continue
+		label := string(related.Severity)
+		if related.Category != "" {
+			label += " · " + related.Category
 		}
-		label := string(source.Severity)
-		if source.Category != "" {
-			label += " · " + source.Category
+		b.WriteString("- [" + escapeOneLine(label, 64) + "] " + escapeOneLine(related.Title, MaxTitleRunes))
+		if excerpt := escapeOneLine(related.Excerpt, relatedExcerptRunes); excerpt != "" {
+			b.WriteString("：" + excerpt)
 		}
-		line := "- [" + escapeOneLine(label, 64) + "] " + escapeOneLine(source.Title, MaxTitleRunes)
-		if excerpt := escapeOneLine(source.Body, relatedExcerptRunes); excerpt != "" {
-			line += "：" + excerpt
-		}
-		lines = append(lines, line+"\n")
+		b.WriteByte('\n')
 	}
-	if len(lines) == 0 {
-		return ""
-	}
-	out := "**相关描述**：\n" + strings.Join(lines, "")
-	if extra > 0 {
-		out += fmt.Sprintf("- 另有 %d 条\n", extra)
-	}
-	return out
-}
-
-// relatedExcerptRunes bounds each body excerpt in the related list.
-const relatedExcerptRunes = 120
-
-func descriptionKey(title, body string) string {
-	return NormalizeTitle(title) + "\x00" + NormalizeTitle(body)
+	return b.String()
 }
 
 func modelAttribution(group Group, labels map[string]string) string {

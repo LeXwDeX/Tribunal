@@ -4,9 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"sort"
 	"strings"
-	"unicode"
 	"unicode/utf8"
 )
 
@@ -71,9 +69,6 @@ type Finding struct {
 	Confidence Confidence
 	Decision   *FindingDecision
 	PublishKey string
-	// Approximate marks a source merged by the text-similarity rule rather than
-	// the same-category proximity rule. It never counts as an independent vote.
-	Approximate bool `json:"approximate,omitempty"`
 }
 
 // FindingDecision is the rule, gate, judge, or fallback decision for a group.
@@ -117,6 +112,8 @@ type Group struct {
 	Decision   *FindingDecision
 	PositionOK bool
 	PublishKey string
+	// Related lists groups folded into this discussion by MergePresentation.
+	Related []RelatedGroup `json:"related,omitempty"`
 }
 
 // EffectiveSeverity applies a downgrade decision without changing the source.
@@ -541,102 +538,23 @@ func dedupe(findings []Finding, dossier *Dossier) []Group {
 		}
 		return value
 	}
-	// Grouping is deterministic and independent of lane order. Pass 1 applies
-	// only the original rule (same category, close lines) against each group's
-	// anchor, its first member in sorted order. Pass 2 merges whole pass-1
-	// groups approximately against the representative group's anchor, never
-	// splitting pass-1 groups and never chaining.
-	order := make([]int, len(findings))
-	for i := range order {
-		order[i] = i
-	}
-	sort.SliceStable(order, func(x, y int) bool { return findingLess(findings[order[x]], findings[order[y]]) })
-	var exactGroups [][]int
-	for _, idx := range order {
-		finding := findings[idx]
+	groups := make([]Group, 0, len(findings))
+	for _, finding := range findings {
 		if ambiguous(finding.Path) {
-			exactGroups = append(exactGroups, []int{idx})
+			groups = append(groups, newGroup(finding))
 			continue
 		}
 		merged := false
-		for i := range exactGroups {
-			if exact, ok := canMerge(findings[exactGroups[i][0]], finding, resolve, ambiguous); ok && exact {
-				exactGroups[i] = append(exactGroups[i], idx)
+		for i := range groups {
+			if canMerge(groups[i], finding, resolve, ambiguous) {
+				mergeInto(&groups[i], finding)
 				merged = true
 				break
 			}
 		}
 		if !merged {
-			exactGroups = append(exactGroups, []int{idx})
+			groups = append(groups, newGroup(finding))
 		}
-	}
-	maxRank := func(m []int) int {
-		best := severityRank[findings[m[0]].Severity]
-		for _, idx := range m[1:] {
-			if rank := severityRank[findings[idx].Severity]; rank < best {
-				best = rank
-			}
-		}
-		return best
-	}
-	var members [][]int
-	var parts [][][]int // pass-1 groups of each pass-2 group; parts[i][0] is the representative
-	approx := make(map[int]bool)
-	for _, g := range exactGroups {
-		anchor := findings[g[0]]
-		merged := false
-		if !ambiguous(anchor.Path) {
-			for i := range members {
-				head := parts[i][0]
-				if ambiguous(findings[head[0]].Path) {
-					continue
-				}
-				gap := false
-				for _, part := range parts[i] {
-					if d := maxRank(part) - maxRank(g); d >= nearDuplicateSeverityGap || -d >= nearDuplicateSeverityGap {
-						gap = true
-						break
-					}
-				}
-				if gap {
-					continue
-				}
-				if exact, ok := canMerge(findings[head[0]], anchor, resolve, ambiguous); ok && !exact {
-					for _, idx := range g {
-						approx[idx] = true
-					}
-					members[i] = append(members[i], g...)
-					parts[i] = append(parts[i], g)
-					merged = true
-					break
-				}
-			}
-		}
-		if !merged {
-			members = append(members, append([]int(nil), g...))
-			parts = append(parts, [][]int{g})
-		}
-	}
-	for _, m := range members {
-		sort.Ints(m)
-	}
-	sort.Slice(members, func(x, y int) bool { return members[x][0] < members[y][0] })
-	groups := make([]Group, 0, len(members))
-	for _, m := range members {
-		first := findings[m[0]]
-		first.Approximate = approx[m[0]]
-		group := newGroup(first)
-		hasApprox := first.Approximate
-		for _, idx := range m[1:] {
-			member := findings[idx]
-			member.Approximate = approx[idx]
-			hasApprox = hasApprox || member.Approximate
-			mergeInto(&group, member)
-		}
-		if hasApprox {
-			displayHighestSeverity(&group)
-		}
-		groups = append(groups, group)
 	}
 	for i := range groups {
 		groups[i].PublishKey = GroupPublishKey(dossier, groups[i])
@@ -644,152 +562,30 @@ func dedupe(findings []Finding, dossier *Dossier) []Group {
 	return groups
 }
 
-func canMerge(anchor, finding Finding, resolve func(string, Side) (string, int), ambiguous func(string) bool) (exact, ok bool) {
-	if normalizedSide(anchor.Side) != normalizedSide(finding.Side) {
-		return false, false
+func canMerge(group Group, finding Finding, resolve func(string, Side) (string, int), ambiguous func(string) bool) bool {
+	if group.Category != finding.Category || normalizedSide(group.Side) != normalizedSide(finding.Side) {
+		return false
 	}
-	if ambiguous(anchor.Path) || ambiguous(finding.Path) {
-		return false, false
+	if ambiguous(group.Path) || ambiguous(finding.Path) {
+		return false
 	}
-	anchorFile, anchorMatches := resolve(anchor.Path, anchor.Side)
+	groupFile, groupMatches := resolve(group.Path, group.Side)
 	findingFile, findingMatches := resolve(finding.Path, finding.Side)
-	if anchorMatches > 1 || findingMatches > 1 {
-		return false, false
+	if groupMatches > 1 || findingMatches > 1 {
+		return false
 	}
-	if anchorMatches == 1 && findingMatches == 1 {
-		if anchorFile != findingFile {
-			return false, false
+	if groupMatches == 1 && findingMatches == 1 {
+		if groupFile != findingFile {
+			return false
 		}
-	} else if anchorMatches != findingMatches || anchor.Path != finding.Path {
-		return false, false
+	} else if groupMatches != findingMatches || group.Path != finding.Path {
+		return false
 	}
-	sameCategory := anchor.Category == finding.Category
-	if anchor.Line == 0 || finding.Line == 0 {
-		match := sameCategory && anchor.Line == 0 && finding.Line == 0 && NormalizeTitle(anchor.Title) == NormalizeTitle(finding.Title)
-		return match, match
+	if group.Line == 0 || finding.Line == 0 {
+		return group.Line == 0 && finding.Line == 0 && NormalizeTitle(group.Title) == NormalizeTitle(finding.Title)
 	}
-	difference := absInt(anchor.Line - finding.Line)
-	if sameCategory && difference <= 3 {
-		return true, true
-	}
-	// Paraphrased near-duplicates need identity evidence beyond proximity: the
-	// titles must name the same non-generic identifiers, and the text must
-	// agree. A different category additionally requires the exact same line.
-	if sameCategory {
-		if difference > nearDuplicateLines {
-			return false, false
-		}
-	} else if difference != 0 {
-		return false, false
-	}
-	if !titleIdentityMatches(anchor.Title, finding.Title) || !titleContentMatches(anchor.Title, finding.Title) {
-		return false, false
-	}
-	threshold := nearDuplicateCrossCategory
-	if sameCategory {
-		threshold = nearDuplicateSameCategory
-	}
-	return false, textSimilar(textTokens(anchor.Title, anchor.Body), finding, threshold)
-}
-
-// titleContentMatches requires the titles to share content beyond identifiers
-// (a function name alone never proves the same problem): at least two shared
-// CJK bigrams, or at least two shared plain English words.
-func titleContentMatches(a, b string) bool {
-	return sharedCount(cjkBigrams(a), cjkBigrams(b)) >= nearDuplicateTitleContent ||
-		sharedCount(englishContentWords(a), englishContentWords(b)) >= nearDuplicateTitleContent
-}
-
-func sharedCount(a, b map[string]struct{}) int {
-	n := 0
-	for token := range a {
-		if _, ok := b[token]; ok {
-			n++
-		}
-	}
-	return n
-}
-
-// stopBigrams are CJK bigrams too common in titles to count as shared content.
-var stopBigrams = map[string]bool{
-	"存在": true, "问题": true, "导致": true, "可能": true, "没有": true, "不能": true, "需要": true, "应该": true,
-}
-
-func cjkBigrams(title string) map[string]struct{} {
-	out := make(map[string]struct{})
-	var run []rune
-	flush := func() {
-		for i := 0; i+1 < len(run); i++ {
-			if bigram := string(run[i : i+2]); !stopBigrams[bigram] {
-				out[bigram] = struct{}{}
-			}
-		}
-		run = run[:0]
-	}
-	for _, r := range title {
-		if unicode.Is(unicode.Han, r) {
-			run = append(run, r)
-		} else {
-			flush()
-		}
-	}
-	flush()
-	return out
-}
-
-// englishContentWords returns lowercase plain words of four or more letters;
-// code identifiers (underscores, digits, camelCase) and generic words are out.
-func englishContentWords(title string) map[string]struct{} {
-	out := make(map[string]struct{})
-	for _, word := range strings.FieldsFunc(title, func(r rune) bool {
-		return !(r < 0x80 && (unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_'))
-	}) {
-		if len(word) < 4 {
-			continue
-		}
-		plain := true
-		for i, r := range word {
-			if !unicode.IsLetter(r) || (i > 0 && unicode.IsUpper(r)) {
-				plain = false
-				break
-			}
-		}
-		lower := strings.ToLower(word)
-		if plain && !genericIdentifiers[lower] && !nearDuplicateStopwords[lower] {
-			out[lower] = struct{}{}
-		}
-	}
-	return out
-}
-
-// findingLess is the deterministic grouping order: location first, then text,
-// then origin, so equal inputs always partition the same way.
-func findingLess(a, b Finding) bool {
-	if a.Path != b.Path {
-		return a.Path < b.Path
-	}
-	if sa, sb := normalizedSide(a.Side), normalizedSide(b.Side); sa != sb {
-		return sa < sb
-	}
-	if a.Line != b.Line {
-		return a.Line < b.Line
-	}
-	if a.Category != b.Category {
-		return a.Category < b.Category
-	}
-	if a.Severity != b.Severity {
-		return a.Severity.Higher(b.Severity)
-	}
-	if a.Title != b.Title {
-		return a.Title < b.Title
-	}
-	if a.Body != b.Body {
-		return a.Body < b.Body
-	}
-	if a.Origin.Node != b.Origin.Node {
-		return a.Origin.Node < b.Origin.Node
-	}
-	return a.Origin.Index < b.Origin.Index
+	difference := group.Line - finding.Line
+	return difference >= -3 && difference <= 3
 }
 
 func normalizedSide(side Side) Side {
@@ -978,21 +774,6 @@ func mergeInto(group *Group, finding Finding) {
 	}
 }
 
-// displayHighestSeverity shows an approximately merged group through its most
-// severe member (ties: the richer one), so a lower-severity body never stands
-// in for a higher-severity finding.
-func displayHighestSeverity(group *Group) {
-	best := group.Sources[0]
-	for _, source := range group.Sources[1:] {
-		if source.Severity.Higher(best.Severity) || (source.Severity == best.Severity && richer(source, best)) {
-			best = source
-		}
-	}
-	group.Title, group.Body, group.Suggestion = best.Title, best.Body, best.Suggestion
-	group.Evidence, group.Confidence = best.Evidence, best.Confidence
-	group.Line, group.Side, group.Category, group.Path = best.Line, best.Side, best.Category, best.Path
-}
-
 func groupDisplay(group Group) Finding {
 	return Finding{
 		Title:      group.Title,
@@ -1049,10 +830,6 @@ func countVotes(sources []Finding, sameModelWeight float64, identities map[strin
 	seen := make(map[string]struct{}, len(sources))
 	total := 0.0
 	for _, source := range sources {
-		if source.Approximate {
-			// A text-similarity merge is not proof of independent agreement.
-			continue
-		}
 		key := ""
 		if identities == nil {
 			key = source.Origin.Provider + "\x1f" + source.Origin.Model
@@ -1223,149 +1000,4 @@ func snippetFor(finding Finding) string {
 		return finding.Evidence
 	}
 	return finding.Body
-}
-
-// Near-duplicate thresholds. Candidates are compared with the group anchor
-// only. Same-category findings 4-6 lines apart and cross-category findings on
-// the exact same line must share title identifiers (Jaccard over non-generic
-// ASCII identifiers) and then pass a body text similarity check.
-const (
-	nearDuplicateLines         = 6
-	nearDuplicateSameCategory  = 0.45
-	nearDuplicateCrossCategory = 0.5
-	nearDuplicateMinShared     = 4
-	nearDuplicateTitleJaccard  = 0.5
-	nearDuplicateTitleContent  = 2
-	// Groups whose highest severities are this many levels apart (P0 vs P2)
-	// are never approximately merged.
-	nearDuplicateSeverityGap = 2
-)
-
-// genericIdentifiers are ASCII words common to many unrelated findings; they
-// never count as identity evidence in a title.
-var genericIdentifiers = map[string]bool{
-	"err": true, "nil": true, "ctx": true, "return": true, "error": true, "errors": true,
-	"true": true, "false": true, "null": true, "none": true, "self": true, "this": true,
-	"func": true, "def": true, "var": true, "let": true, "const": true, "resp": true,
-	"req": true, "data": true, "value": true, "values": true, "result": true, "results": true,
-	"handle": true, "handler": true, "get": true, "set": true, "new": true, "int": true,
-	"str": true, "string": true, "list": true, "map": true, "bool": true, "type": true,
-	"key": true, "name": true, "file": true, "code": true, "test": true, "main": true,
-	"not": true, "missing": true, "check": true, "unchecked": true, "invalid": true,
-}
-
-func titleIdentifiers(title string) map[string]struct{} {
-	out := make(map[string]struct{})
-	for token := range textTokens(title) {
-		if identifierToken(token) && !genericIdentifiers[token] {
-			out[token] = struct{}{}
-		}
-	}
-	return out
-}
-
-func titleIdentityMatches(a, b string) bool {
-	ids, other := titleIdentifiers(a), titleIdentifiers(b)
-	shared := 0
-	for token := range ids {
-		if _, ok := other[token]; ok {
-			shared++
-		}
-	}
-	union := len(ids) + len(other) - shared
-	return shared >= 1 && float64(shared)/float64(union) >= nearDuplicateTitleJaccard
-}
-
-func textSimilar(tokens map[string]struct{}, finding Finding, threshold float64) bool {
-	other := textTokens(finding.Title, finding.Body)
-	if tokenJaccardAtLeast(tokens, other, threshold, nil) {
-		return true
-	}
-	// CJK prose adds many incidental bigrams that dilute the score of two
-	// paraphrases of one problem, while identifiers (function and exception
-	// names, parameters) stay stable. Compare that identifier view too.
-	return tokenJaccardAtLeast(tokens, other, threshold, identifierToken)
-}
-
-func identifierToken(token string) bool {
-	return len(token) >= 3 && token[0] < 0x80
-}
-
-func tokenJaccardAtLeast(a, b map[string]struct{}, threshold float64, keep func(string) bool) bool {
-	sizeA, sizeB, shared := 0, 0, 0
-	for token := range a {
-		if keep != nil && !keep(token) {
-			continue
-		}
-		sizeA++
-		if _, ok := b[token]; ok {
-			shared++
-		}
-	}
-	for token := range b {
-		if keep == nil || keep(token) {
-			sizeB++
-		}
-	}
-	union := sizeA + sizeB - shared
-	if union == 0 || shared < nearDuplicateMinShared {
-		return false
-	}
-	return float64(shared)/float64(union) >= threshold
-}
-
-// textTokens lowercases title and body into a set of significant tokens:
-// alphanumeric words of two or more characters outside a small stopword list,
-// plus Han bigrams so Chinese text is comparable without a segmenter.
-func textTokens(parts ...string) map[string]struct{} {
-	tokens := make(map[string]struct{})
-	var word []rune
-	var han []rune
-	flushWord := func() {
-		if len(word) >= 2 {
-			if value := string(word); !nearDuplicateStopwords[value] {
-				tokens[value] = struct{}{}
-			}
-		}
-		word = word[:0]
-	}
-	flushHan := func() {
-		for i := 0; i+1 < len(han); i++ {
-			tokens[string(han[i:i+2])] = struct{}{}
-		}
-		han = han[:0]
-	}
-	for _, part := range parts {
-		for _, r := range strings.ToLower(part) {
-			switch {
-			case unicode.Is(unicode.Han, r):
-				flushWord()
-				han = append(han, r)
-			case unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_':
-				flushHan()
-				word = append(word, r)
-			default:
-				flushWord()
-				flushHan()
-			}
-		}
-		flushWord()
-		flushHan()
-	}
-	return tokens
-}
-
-var nearDuplicateStopwords = map[string]bool{
-	"the": true, "and": true, "for": true, "that": true, "this": true, "with": true, "are": true,
-	"not": true, "can": true, "may": true, "will": true, "when": true, "from": true, "which": true,
-	"does": true, "has": true, "have": true, "its": true, "but": true, "any": true, "all": true,
-	"is": true, "in": true, "to": true, "of": true, "or": true, "be": true, "as": true, "on": true,
-	"it": true, "by": true, "an": true, "at": true, "so": true, "if": true,
-}
-
-func absInt(value int) int {
-	if value < 0 {
-		return -value
-	}
-	return value
 }
