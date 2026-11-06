@@ -57,6 +57,7 @@ type MergeRequest struct {
 	TargetProjectID int64
 	SHA             string
 	MergedAt        *time.Time
+	UpdatedAt       *time.Time
 	Title           string
 	Description     string
 	SourceBranch    string

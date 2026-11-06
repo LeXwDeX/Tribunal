@@ -22,7 +22,7 @@ import (
 )
 
 func (s *ReviewService) incrementalRange(ctx context.Context, projectID int64, payload reviewRunPayload, control *store.ReviewControl, head string, files []review.FileChange) *review.IncrementalRange {
-	if payload.Trigger != "mr_update" || payload.Full {
+	if (payload.Trigger != "mr_update" && payload.Trigger != catchUpTrigger) || payload.Full {
 		return &review.IncrementalRange{Head: head, Full: true, Reason: "full review"}
 	}
 	last, err := s.store.LastPublishedHead(ctx, projectID, control.MRIID)
