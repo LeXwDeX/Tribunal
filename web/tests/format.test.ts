@@ -1,8 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { formatDuration, formatJson, formatTokens, safeExternalUrl } from '../src/lib/format'
+import { formatDuration, formatJson, formatTokens, labelForTrigger, safeExternalUrl } from '../src/lib/format'
 import { formatRatio, statNumber } from '../src/lib/stats'
 
 describe('display formatting', () => {
+  it('labels the startup catch-up trigger', () => {
+    expect(labelForTrigger('catch_up')).toBe('启动补评')
+    expect(labelForTrigger('mr_update')).toBe('MR 更新')
+  })
+
   it('distinguishes unavailable statistics from a real zero', () => {
     expect(statNumber({ runs: 0 }, 'runs')).toBe(0)
     expect(statNumber({ runs: null }, 'runs')).toBeNull()

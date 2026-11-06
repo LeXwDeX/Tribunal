@@ -32,6 +32,11 @@ func (s *ReviewService) recoveryCancel(ctx context.Context, workflowID, cause st
 // report "review superseded". It keeps the engine cancel reason, records the
 // real cause as the publication reason and, when the generation is still the
 // MR's current one, settles the status so it does not stay "running".
+//
+// The two reasons are deliberately different: engineReason is the coarse
+// category on the cancel event (mostly "superseded"), while the publication
+// reason (API publication_error) and status detail are
+// "cancelled on recovery: <cause>" with the real cause (#362; docs/operations.md).
 func (s *ReviewService) recoveryCancelWorkflow(engineReason, cause string) func(context.Context, string) error {
 	return func(ctx context.Context, id string) error {
 		if err := s.cancelWorkflowSkipping(ctx, id, engineReason, recoveryCancelReason(cause)); err != nil {

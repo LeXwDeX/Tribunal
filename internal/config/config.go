@@ -80,6 +80,17 @@ type GitLabConfig struct {
 	RequestTimeout time.Duration `yaml:"request_timeout" json:"request_timeout"`
 	MaxConcurrency int           `yaml:"max_concurrency" json:"max_concurrency"`
 	BotUsernames   []string      `yaml:"bot_usernames" json:"bot_usernames"`
+	CatchUp        CatchUpConfig `yaml:"catch_up" json:"catch_up"`
+}
+
+// CatchUpConfig controls the one-time startup scan that enqueues reviews for
+// open MR heads whose webhook was missed while the service was down (#362).
+// It is read once at startup; changing it requires a restart.
+type CatchUpConfig struct {
+	Enabled       bool          `yaml:"enabled" json:"enabled"`
+	MaxPerProject int           `yaml:"max_per_project" json:"max_per_project"`
+	MaxTotal      int           `yaml:"max_total" json:"max_total"`
+	MaxAge        time.Duration `yaml:"max_age" json:"max_age"`
 }
 
 // AuthConfig controls login and the M0 bootstrap token.
@@ -396,6 +407,15 @@ func (c *Config) Validate() error {
 	}
 	if c.GitLab.MaxConcurrency <= 0 {
 		p.add("gitlab.max_concurrency must be positive")
+	}
+	if c.GitLab.CatchUp.MaxPerProject <= 0 {
+		p.add("gitlab.catch_up.max_per_project must be positive")
+	}
+	if c.GitLab.CatchUp.MaxAge <= 0 {
+		p.add("gitlab.catch_up.max_age must be positive")
+	}
+	if c.GitLab.CatchUp.MaxTotal <= 0 {
+		p.add("gitlab.catch_up.max_total must be positive")
 	}
 
 	if c.Auth.SessionTTL <= 0 {

@@ -334,6 +334,18 @@ fi
 
 运维应监控 GitLab 的 hook 状态及失败投递，先排除 Tribunal、网络或反向代理的故障，再检查 GitLab 的「Recent events」。在记录仍可用且版本支持时，有权限的人员可用「Resend Request」手动重发；若重发保留原有效 `X-Gitlab-Event-UUID`，此前没有去重记录，且认证和事件过滤均通过，则可再次入队。不要假定所有 GitLab 版本的重发都保留该字段。Recent events 有保留和重发条件限制，无法保证每次失败都可重发，也不代表 GitLab 一定自动重试。对不可重发或未投递的事件，核对 GitLab 与评审状态后按权限采取人工补救；hook 若仍停用，依该 GitLab 版本检查是否需要手动恢复。请求详情可能含 secret 和请求体，不要复制到日志或聊天。操作说明见 [GitLab 请求历史](https://docs.gitlab.com/user/project/integrations/webhooks/#inspect-request-and-response-details)。
 
+### 启动追赶扫描
+
+GitLab 对失败的 webhook 不保证重试，容器停机期间送达的 MR 事件会丢失。启动恢复（含取消、续跑和待发布重试）完成后，服务对每个已启用、token 可解密的项目做一次追赶扫描：按最近更新顺序列出打开的 MR，若某个 MR 的当前 head 在本库中没有评审控制记录，就经与 webhook 相同的过滤规则（Draft、标签、目标分支、仓库配置）入队一次评审，触发方式为 `catch_up`（控制台「启动补评」）。
+
+- 不会重复入队：该 head 已有控制记录（已评审、排队或运行中、入队后被过滤、被 `/review cancel` 取消）时跳过；每个（项目、MR、head）的投递 UUID 固定，重启多次也至多补评一次。关闭、合并和被过滤的 MR 遵守现有规则，不入队。
+- 有界且保守：只考虑最近 `gitlab.catch_up.max_age`（默认 24h）内有更新的 MR，按更新时间从新到旧分页，遇到窗口外的 MR 即停止；`max_per_project`（默认 10，每个项目检查的 MR 数）和 `max_total`（默认 20，一次扫描的总数）进一步限制数量。每入队一个 MR 输出 INFO `catch-up enqueued review`（`project_id`、`mr_iid`、`head` 短 SHA）。GitLab 请求走现有并发上限，一个项目失败只跳过该项目。`gitlab.catch_up.enabled: false` 关闭扫描。该配置只在启动时读取，修改后需重启。
+- 日志：完成时输出 INFO `catch-up scan finished`（`projects`、`mrs_checked`、`enqueued`）；单个项目失败输出 WARN，只含项目号和错误类别。
+- 升级后首次启动：旧版本登记的项目里，窗口内仍打开、当前 head 没有评审记录的 MR（例如项目登记之后才更新、此前从未评审的 MR）会各入队一次，按默认上限最多 20 次评审，会产生相应的模型用量。若不希望首次升级触发评审，先在配置中设置 `gitlab.catch_up.enabled: false` 再启动，确认后按需改回（修改需重启）。
+- 局限：只补评当前 head；超出窗口或上限的较旧 MR 需手动 `/review`。扫描不补发停机期间错过的 close/merge 取消事件。
+
+**恢复取消的原因对应**：恢复取消的工作流有两个原因字段。事件中的取消原因（engine reason）是粗粒度类别，多数情形为 `superseded`，`profile_hash_changed` 与 `execution_identity_changed` 使用自己的名称；发布跳过原因（API 的 `publication_error`）和评审状态详情为 `cancelled on recovery: <cause>`，`<cause>` 是真实原因，与启动日志 `recovery cancelling workflow` 的 `cause` 字段一致（如 `mr_inputs_unavailable`、`diff_version_changed`、`config_changed`）。因此 `superseded` 与 `cancelled on recovery: mr_inputs_unavailable` 描述同一次取消，排查以后者为准。
+
 ### 项目删除后的残留核对
 
 项目删除先安全检查本地目标、关闭项目 MCP 会话，再删除数据库登记和本地文件。数据库操作返回错误时，文件清理不会开始；该错误不证明数据库一定回滚。数据库提交后若文件清理失败，接口返回错误并说明登记已删除但本地清理未完成。GitLab webhook 删除是有界的尽力操作，不与数据库和文件系统原子提交。

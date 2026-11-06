@@ -30,6 +30,7 @@ const triggers = [
   ['api', 'API 手动触发'],
   ['push', '推送'],
   ['register', '项目注册'],
+  ['catch_up', '启动补评'],
 ]
 
 export function ReviewsPage() {

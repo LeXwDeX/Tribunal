@@ -293,7 +293,7 @@ func workflowMetaFromView(wf dag.WorkflowView, wfID string) (workflowMeta, error
 	}
 	meta.trigger = strings.TrimSpace(raw["trigger"])
 	switch meta.trigger {
-	case "mr_open", "mr_update", "command", "api", "push", "register":
+	case "mr_open", "mr_update", "command", "api", "push", "register", "catch_up":
 	case "":
 		return meta, fmt.Errorf("sqlite: workflow %s metadata requires trigger", wfID)
 	default:

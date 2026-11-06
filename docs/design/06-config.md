@@ -23,6 +23,11 @@ gitlab:
   request_timeout: 30s
   max_concurrency: 16               # 对 GitLab API 的总并发
   bot_usernames: []                 # 额外需要忽略的 bot 用户名（项目 bot 会自动识别）
+  catch_up:                         # 启动恢复后一次性补评停机期间错过的 MR head（#362）
+    enabled: true                   # false 关闭；仅启动时读取，修改需重启
+    max_per_project: 10             # 每个项目检查最近更新的打开 MR 数，须为正
+    max_total: 20                   # 一次扫描检查的 MR 总数，须为正
+    max_age: 24h                    # 只考虑此时间窗内更新过的 MR，须为正
 
 auth:
   oauth:

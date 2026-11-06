@@ -647,3 +647,67 @@ func TestClientWritesNeutralizeQuickActions(t *testing.T) {
 		t.Fatalf("requests = %v, want create note, update note and create discussion", got)
 	}
 }
+
+func TestListOpenMergeRequestsIsBounded(t *testing.T) {
+	const token = "glpat-open"
+	var pages []string
+	client := newExtraClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v4/projects/42/merge_requests" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		q := r.URL.Query()
+		if q.Get("state") != "opened" || q.Get("order_by") != "updated_at" || q.Get("per_page") != "3" {
+			t.Errorf("unexpected query %q", r.URL.RawQuery)
+		}
+		pages = append(pages, q.Get("page"))
+		w.Header().Set("Content-Type", "application/json")
+		if q.Get("page") == "1" {
+			w.Header().Set("X-Next-Page", "2")
+			fmt.Fprintf(w, `[{"iid":1,"state":"opened","sha":%q,"target_project_id":42,"target_branch":"main","labels":["a"]},{"iid":2,"state":"opened","sha":%q,"draft":true}]`, sha("a"), sha("b"))
+			return
+		}
+		fmt.Fprintf(w, `[{"iid":3,"state":"opened","sha":%q},{"iid":4,"state":"opened","sha":%q}]`, sha("c"), sha("d"))
+	})
+
+	mrs, err := client.ListOpenMergeRequests(context.Background(), token, 42, 3, time.Time{})
+	if err != nil {
+		t.Fatalf("ListOpenMergeRequests: %v", err)
+	}
+	if len(mrs) != 3 || mrs[0].IID != 1 || mrs[0].SHA != sha("a") || mrs[0].TargetBranch != "main" || !mrs[1].Draft || mrs[2].IID != 3 {
+		t.Fatalf("mrs = %+v, want first three open MRs", mrs)
+	}
+	if len(pages) != 2 {
+		t.Fatalf("pages fetched = %v, want 2 (stop once the limit is reached)", pages)
+	}
+	if _, err := client.ListOpenMergeRequests(context.Background(), token, 42, 0, time.Time{}); err == nil {
+		t.Fatal("limit 0 accepted")
+	}
+}
+
+func TestListOpenMergeRequestsStopsAtAgeWindow(t *testing.T) {
+	const token = "glpat-open"
+	cutoff := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	var pages []string
+	client := newExtraClient(t, func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if got := q.Get("updated_after"); got != cutoff.Format(time.RFC3339) {
+			t.Errorf("updated_after = %q, want %q", got, cutoff.Format(time.RFC3339))
+		}
+		pages = append(pages, q.Get("page"))
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Next-Page", "2")
+		fmt.Fprintf(w, `[{"iid":1,"state":"opened","sha":%q,"updated_at":"2026-11-06T10:00:00Z"},{"iid":2,"state":"opened","sha":%q,"updated_at":"2026-11-05T11:00:00Z"},{"iid":3,"state":"opened","sha":%q,"updated_at":"2026-11-01T00:00:00Z"}]`, sha("a"), sha("b"), sha("c"))
+	})
+	mrs, err := client.ListOpenMergeRequests(context.Background(), token, 42, 50, cutoff)
+	if err != nil {
+		t.Fatalf("ListOpenMergeRequests: %v", err)
+	}
+	if len(mrs) != 1 || mrs[0].IID != 1 {
+		t.Fatalf("mrs = %+v, want only the MR updated inside the window", mrs)
+	}
+	if len(pages) != 1 {
+		t.Fatalf("pages = %v, want paging to stop at the first MR older than the window", pages)
+	}
+}
