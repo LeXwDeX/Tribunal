@@ -249,7 +249,7 @@ SSE 事件（`event:` 字段）：`node`（`{id, status, attempt}`）、`finding
 
 工作流详情和列表每项的顶层，以及详情/列表/图中的每个节点和节点详情，都有布尔值 `usage_incomplete`。`true` 表示检测到用量缺失或无法精确表示；`false` 只表示未检测到，特别是迁移前的历史行默认 false，不能证明用量完整。它不嵌入 `usage`。
 
-工作流详情顶层、详情与图中的每个节点以及节点详情另有可选整数 `usage_interruptions`（增量字段，为 0 时省略）：顶层为任一单个节点被进程重启恢复中断的最大次数，节点上为该节点自身次数。它来自引擎对事件日志的投影，不是存储列；列表项不返回。控制台在评审详情的用量面板显示「中断恢复 N 次」。迁移与回退限制见[数据模型](02-data-model.md)及[运维说明](../operations.md#用量完整性与审计升级v120)。
+工作流详情顶层、详情与图中的每个节点以及节点详情另有可选整数 `usage_interruptions`（增量字段，为 0 时省略）：顶层为任一单个节点被进程重启恢复中断的最大次数，节点上为该节点自身次数。它来自引擎对事件日志的投影，不是存储列；列表项不返回。控制台在评审详情的用量面板显示「单节点最多中断恢复 N 次」。迁移与回退限制见[数据模型](02-data-model.md)及[运维说明](../operations.md#用量完整性与审计升级v120)。
 
 #### 节点调用审计格式
 
@@ -449,7 +449,7 @@ Provider 返回 `name`、`protocol`、`base_url`、`model`、`max_concurrency`�
 |---|---|---|
 | GET | `/api/v1/models` | 列出配置模型（`id=config:<name>`，只读）与用户模型（`id=user:<uuid>`）；不分页 |
 | GET | `/api/v1/models/{id}` | 详情 |
-| POST | `/api/v1/models` | 创建用户模型；`params.max_concurrency` 必须为正整数；`api_key` 只写不回显；成功返回 `{"id": "user:<uuid>", "effective": "new_workflows"}`，不返回完整模型视图（需要时再 `GET /api/v1/models/{id}`）；校验失败返回 400 `validation_failed` 与逐字段 `details` |
+| POST | `/api/v1/models` | 创建用户模型；`params.max_tokens` 与 `params.max_concurrency` 必须为正整数；`api_key` 只写不回显；成功返回 `{"id": "user:<uuid>", "effective": "new_workflows"}`，不返回完整模型视图（需要时再 `GET /api/v1/models/{id}`）；校验失败返回 400 `validation_failed` 与逐字段 `details` |
 | PATCH | `/api/v1/models/{id}` | 修改，必须带 `revision`；`api_key` 省略表示不变，空串表示清除；配置模型返回 403 `read_only`；成功返回值同创建（`{id, effective}`）；校验失败同创建 |
 | DELETE | `/api/v1/models/{id}?revision=N` | 软删除；配置模型返回 403 `read_only` |
 | POST | `/api/v1/models/{id}/test` | 测试已保存模型；成功返回 `{"ok": true, "model": "...", "latency_ms": N}` |
@@ -458,10 +458,10 @@ Provider 返回 `name`、`protocol`、`base_url`、`model`、`max_concurrency`�
 `POST /api/v1/models:test` 在保存前测试草稿：
 
 - 请求体与创建相同，另可带可选 `id`。`id` 必须是 `user:` 模型：非 `user:` 返回 400（字段 `id`），不存在或已删除返回 404。带 `id` 且省略 `api_key` 时，服务端使用已保存的凭据（编辑时「保持不变」）；显式传入 `api_key` 则优先使用；`id` 只要出现就会校验。仅当 `protocol` 与 `base_url` 的 scheme、host、port 都与已保存模型一致时才复用已保存凭据，否则返回 400（字段 `api_key`），避免把密钥发往其他端点。
-- 校验与创建一致，包括 `params.max_concurrency` 必须为正整数；失败返回 400 `validation_failed`，`details` 按字段给出（`display_name`、`protocol`、`base_url`、`model`、`params.<name>`）。例如缺少或为 0 的并发上限：
+- 校验与创建一致，包括 `params.max_tokens` 与 `params.max_concurrency` 都必须为正整数；失败返回 400 `validation_failed`，`details` 按字段给出（`display_name`、`protocol`、`base_url`、`model`、`params.<name>`）。例如缺少或为 0 的并发上限：
 
   ```json
-  { "error": { "code": "validation_failed", "message": "invalid model", "details": [
+  { "error": { "code": "validation_failed", "message": "invalid model", "request_id": "01J…", "details": [
     { "field": "params.max_concurrency", "message": "max_concurrency must be positive" }
   ] } }
   ```

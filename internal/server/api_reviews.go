@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/LeXwDeX/tribunal/internal/errclass"
 	"github.com/LeXwDeX/tribunal/internal/repo"
 	"github.com/LeXwDeX/tribunal/internal/review"
 	"github.com/LeXwDeX/tribunal/internal/store"
@@ -101,11 +102,16 @@ func (s *Server) engineSnapshot(ctx context.Context, wfID string) *dag.WorkflowV
 		return nil
 	}
 	events, err := loader.Load(ctx, wfID)
-	if err != nil || len(events) == 0 {
+	if err != nil {
+		s.logger.Warn("usage interruptions unavailable", "workflow_id", wfID, "error_class", errclass.Of(err))
+		return nil
+	}
+	if len(events) == 0 {
 		return nil
 	}
 	view, err := dag.Project(events)
 	if err != nil {
+		s.logger.Warn("usage interruptions unavailable", "workflow_id", wfID, "error_class", errclass.Of(err))
 		return nil
 	}
 	return &view

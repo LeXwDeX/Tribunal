@@ -401,7 +401,7 @@ function UsagePanel({ review }: { review: ReviewDetail }) {
       {review.usage_incomplete || interruptions > 0 ? (
         <p className={rv.usageNotice}>
           {review.usage_incomplete ? <Badge tone="warn" plain>用量不完整</Badge> : null}
-          {interruptions > 0 ? <span>中断恢复 {interruptions} 次</span> : null}
+          {interruptions > 0 ? <span>单节点最多中断恢复 {interruptions} 次</span> : null}
         </p>
       ) : null}
     </Panel>

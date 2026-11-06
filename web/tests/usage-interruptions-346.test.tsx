@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import userEvent from '@testing-library/user-event'
 import { screen } from '@testing-library/react'
 import { Route, Routes } from 'react-router-dom'
 import type { ReviewDetail } from '../src/api/types'
@@ -33,7 +34,7 @@ describe('usage interruptions on review detail (#346)', () => {
 
   it('shows the recovery count next to the incomplete-usage notice', async () => {
     renderDetail(review({ usage_incomplete: true, usage_interruptions: 2 }))
-    expect(await screen.findByText('中断恢复 2 次')).toBeInTheDocument()
+    expect(await screen.findByText('单节点最多中断恢复 2 次')).toBeInTheDocument()
     expect(screen.getByText('用量不完整')).toBeInTheDocument()
   })
 
@@ -55,10 +56,11 @@ describe('model card params summary (#346)', () => {
       reasoning: { effort: 'high' }, thinking: { budget_tokens: 2048 },
       price: { input_per_mtok: 3, output_per_mtok: 15 },
     })).toEqual([
-      ['max_tokens', '64000'], ['max_concurrency', '4'],
+      ['max_tokens', '64000'], ['temperature', '0'], ['max_concurrency', '4'],
       ['reasoning.effort', 'high'], ['thinking.budget_tokens', '2048'],
       ['价格（每百万 token）', '输入 3 / 输出 15'],
     ])
+    expect(summarizeParams({ temperature: null as unknown as undefined, reasoning: null as never, thinking: null as never, price: null as never })).toEqual([])
     expect(summarizeParams({ price: { input_per_mtok: 0, output_per_mtok: 0 } })).toEqual([])
   })
 
@@ -76,10 +78,29 @@ describe('model card params summary (#346)', () => {
       return jsonResponse({})
     })
     renderWithProviders(<ModelsPage />, { route: '/models' })
-    const group = await screen.findByLabelText('card 参数')
+    const group = await screen.findByRole('group', { name: 'card 参数' })
     expect(group).toHaveTextContent('max_tokens 64000')
     expect(group).toHaveTextContent('reasoning.effort high')
     expect(group).not.toHaveTextContent('context_window')
     expect(group).not.toHaveTextContent('{')
+  })
+
+  it('leaves temperature empty in the edit form when the API returns null', async () => {
+    const user = userEvent.setup()
+    installFetch((url) => {
+      if (url.startsWith('/api/v1/models')) {
+        return jsonResponse({ models: [{
+          id: 'user:aaaaaaaa-1111', display_name: 'card', source: 'user', read_only: false,
+          protocol: 'openai-chat', base_url: 'https://example.com/v1', model: 'm',
+          params: { max_tokens: 100, temperature: null, max_concurrency: 1 },
+          has_api_key: true, available: true, revision: 1, referenced_by: [],
+        }] })
+      }
+      if (url.startsWith('/api/v1/profiles')) return jsonResponse({ profiles: [] })
+      return jsonResponse({})
+    })
+    renderWithProviders(<ModelsPage />, { route: '/models' })
+    await user.click(await screen.findByRole('button', { name: '编辑' }))
+    expect(screen.getByLabelText('temperature')).toHaveValue('')
   })
 })

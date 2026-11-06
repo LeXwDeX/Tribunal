@@ -26,6 +26,7 @@ function hostOf(value: string): string {
 
 // Flattens model params into label/value pairs and drops unset values
 // (null, 0, empty string, false), so the card shows only what was configured.
+// temperature is a nullable pointer in the API: an explicit 0 is a real value.
 export function summarizeParams(params: ModelParams | undefined): Array<[string, string]> {
   const out: Array<[string, string]> = []
   const price = params?.price
@@ -42,7 +43,9 @@ export function summarizeParams(params: ModelParams | undefined): Array<[string,
     out.push([path, String(value)])
   }
   for (const [key, value] of Object.entries(params ?? {})) {
-    if (key !== 'price') walk(value, key)
+    if (key === 'price') continue
+    if (key === 'temperature' && typeof value === 'number') out.push([key, String(value)])
+    else walk(value, key)
   }
   if (price?.input_per_mtok || price?.output_per_mtok) {
     out.push(['价格（每百万 token）', `输入 ${price.input_per_mtok ?? 0} / 输出 ${price.output_per_mtok ?? 0}`])
@@ -83,7 +86,7 @@ function ModelCard({ model, canWrite, onEdit, onDelete }: {
       <div className={styles.cardMeta}>
         <span>API key {model.has_api_key ? '已配置' : '未配置'}</span>
       </div>
-      <div className={styles.cardMeta} aria-label={`${model.display_name} 参数`}>
+      <div className={styles.cardMeta} role="group" aria-label={`${model.display_name} 参数`}>
         <span>参数</span>
         {params.length
           ? params.map(([key, value]) => <span key={key}>{key} <code>{value}</code></span>)
@@ -141,7 +144,7 @@ function ModelDrawer({ open, model, onClose, onSaved }: {
     setUpstreamModel(model?.model ?? '')
     setMaxTokens(model?.params?.max_tokens ? String(model.params.max_tokens) : '')
     setMaxConcurrency(String(model?.params?.max_concurrency || 1))
-    setTemperature(model?.params?.temperature !== undefined ? String(model.params.temperature) : '')
+    setTemperature(model?.params?.temperature != null ? String(model.params.temperature) : '')
     setEffort(model?.params?.reasoning?.effort ?? '')
     setApiKey('')
     setKeyMode('keep')
