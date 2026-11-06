@@ -71,6 +71,9 @@ type Finding struct {
 	Confidence Confidence
 	Decision   *FindingDecision
 	PublishKey string
+	// approximate marks a source merged by the text-similarity rule rather than
+	// the same-category proximity rule. It never counts as an independent vote.
+	approximate bool
 }
 
 // FindingDecision is the rule, gate, judge, or fallback decision for a group.
@@ -548,6 +551,7 @@ func dedupe(findings []Finding, dossier *Dossier) []Group {
 	}
 	sort.SliceStable(order, func(x, y int) bool { return findingLess(findings[order[x]], findings[order[y]]) })
 	var members [][]int
+	approx := make(map[int]bool)
 	for _, idx := range order {
 		finding := findings[idx]
 		if ambiguous(finding.Path) {
@@ -556,7 +560,10 @@ func dedupe(findings []Finding, dossier *Dossier) []Group {
 		}
 		merged := false
 		for i := range members {
-			if canMerge(findings[members[i][0]], finding, resolve, ambiguous) {
+			if exact, ok := canMerge(findings[members[i][0]], finding, resolve, ambiguous); ok {
+				if !exact {
+					approx[idx] = true
+				}
 				members[i] = append(members[i], idx)
 				merged = true
 				break
@@ -572,9 +579,13 @@ func dedupe(findings []Finding, dossier *Dossier) []Group {
 	sort.Slice(members, func(x, y int) bool { return members[x][0] < members[y][0] })
 	groups := make([]Group, 0, len(members))
 	for _, m := range members {
-		group := newGroup(findings[m[0]])
+		first := findings[m[0]]
+		first.approximate = approx[m[0]]
+		group := newGroup(first)
 		for _, idx := range m[1:] {
-			mergeInto(&group, findings[idx])
+			member := findings[idx]
+			member.approximate = approx[idx]
+			mergeInto(&group, member)
 		}
 		groups = append(groups, group)
 	}
@@ -584,51 +595,122 @@ func dedupe(findings []Finding, dossier *Dossier) []Group {
 	return groups
 }
 
-func canMerge(anchor, finding Finding, resolve func(string, Side) (string, int), ambiguous func(string) bool) bool {
+func canMerge(anchor, finding Finding, resolve func(string, Side) (string, int), ambiguous func(string) bool) (exact, ok bool) {
 	if normalizedSide(anchor.Side) != normalizedSide(finding.Side) {
-		return false
+		return false, false
 	}
 	if ambiguous(anchor.Path) || ambiguous(finding.Path) {
-		return false
+		return false, false
 	}
 	anchorFile, anchorMatches := resolve(anchor.Path, anchor.Side)
 	findingFile, findingMatches := resolve(finding.Path, finding.Side)
 	if anchorMatches > 1 || findingMatches > 1 {
-		return false
+		return false, false
 	}
 	if anchorMatches == 1 && findingMatches == 1 {
 		if anchorFile != findingFile {
-			return false
+			return false, false
 		}
 	} else if anchorMatches != findingMatches || anchor.Path != finding.Path {
-		return false
+		return false, false
 	}
 	sameCategory := anchor.Category == finding.Category
 	if anchor.Line == 0 || finding.Line == 0 {
-		return sameCategory && anchor.Line == 0 && finding.Line == 0 && NormalizeTitle(anchor.Title) == NormalizeTitle(finding.Title)
+		match := sameCategory && anchor.Line == 0 && finding.Line == 0 && NormalizeTitle(anchor.Title) == NormalizeTitle(finding.Title)
+		return match, match
 	}
 	difference := absInt(anchor.Line - finding.Line)
 	if sameCategory && difference <= 3 {
-		return true
+		return true, true
 	}
 	// Paraphrased near-duplicates need identity evidence beyond proximity: the
 	// titles must name the same non-generic identifiers, and the text must
 	// agree. A different category additionally requires the exact same line.
 	if sameCategory {
 		if difference > nearDuplicateLines {
-			return false
+			return false, false
 		}
 	} else if difference != 0 {
-		return false
+		return false, false
 	}
-	if !titleIdentityMatches(anchor.Title, finding.Title) {
-		return false
+	if !titleIdentityMatches(anchor.Title, finding.Title) || !titleContentMatches(anchor.Title, finding.Title) {
+		return false, false
 	}
 	threshold := nearDuplicateCrossCategory
 	if sameCategory {
 		threshold = nearDuplicateSameCategory
 	}
-	return textSimilar(textTokens(anchor.Title, anchor.Body), finding, threshold)
+	return false, textSimilar(textTokens(anchor.Title, anchor.Body), finding, threshold)
+}
+
+// titleContentMatches requires the titles to share content beyond identifiers
+// (a function name alone never proves the same problem): at least two shared
+// CJK bigrams, or at least two shared plain English words.
+func titleContentMatches(a, b string) bool {
+	return sharedCount(cjkBigrams(a), cjkBigrams(b)) >= nearDuplicateTitleContent ||
+		sharedCount(englishContentWords(a), englishContentWords(b)) >= nearDuplicateTitleContent
+}
+
+func sharedCount(a, b map[string]struct{}) int {
+	n := 0
+	for token := range a {
+		if _, ok := b[token]; ok {
+			n++
+		}
+	}
+	return n
+}
+
+// stopBigrams are CJK bigrams too common in titles to count as shared content.
+var stopBigrams = map[string]bool{
+	"存在": true, "问题": true, "导致": true, "可能": true, "没有": true, "不能": true, "需要": true, "应该": true,
+}
+
+func cjkBigrams(title string) map[string]struct{} {
+	out := make(map[string]struct{})
+	var run []rune
+	flush := func() {
+		for i := 0; i+1 < len(run); i++ {
+			if bigram := string(run[i : i+2]); !stopBigrams[bigram] {
+				out[bigram] = struct{}{}
+			}
+		}
+		run = run[:0]
+	}
+	for _, r := range title {
+		if unicode.Is(unicode.Han, r) {
+			run = append(run, r)
+		} else {
+			flush()
+		}
+	}
+	flush()
+	return out
+}
+
+// englishContentWords returns lowercase plain words of four or more letters;
+// code identifiers (underscores, digits, camelCase) and generic words are out.
+func englishContentWords(title string) map[string]struct{} {
+	out := make(map[string]struct{})
+	for _, word := range strings.FieldsFunc(title, func(r rune) bool {
+		return !(r < 0x80 && (unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_'))
+	}) {
+		if len(word) < 4 {
+			continue
+		}
+		plain := true
+		for i, r := range word {
+			if !unicode.IsLetter(r) || (i > 0 && unicode.IsUpper(r)) {
+				plain = false
+				break
+			}
+		}
+		lower := strings.ToLower(word)
+		if plain && !genericIdentifiers[lower] && !nearDuplicateStopwords[lower] {
+			out[lower] = struct{}{}
+		}
+	}
+	return out
 }
 
 // findingLess is the deterministic grouping order: location first, then text,
@@ -903,6 +985,10 @@ func countVotes(sources []Finding, sameModelWeight float64, identities map[strin
 	seen := make(map[string]struct{}, len(sources))
 	total := 0.0
 	for _, source := range sources {
+		if source.approximate {
+			// A text-similarity merge is not proof of independent agreement.
+			continue
+		}
 		key := ""
 		if identities == nil {
 			key = source.Origin.Provider + "\x1f" + source.Origin.Model
@@ -1085,6 +1171,7 @@ const (
 	nearDuplicateCrossCategory = 0.5
 	nearDuplicateMinShared     = 4
 	nearDuplicateTitleJaccard  = 0.5
+	nearDuplicateTitleContent  = 2
 )
 
 // genericIdentifiers are ASCII words common to many unrelated findings; they

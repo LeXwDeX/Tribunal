@@ -325,6 +325,10 @@ func RenderFinding(group Group, opts FindingRenderOptions) (string, error) {
 		b.WriteString(codeFence(group.Evidence))
 		b.WriteString("\n\n</details>\n")
 	}
+	if related := relatedDescriptions(group); related != "" {
+		b.WriteString("\n")
+		b.WriteString(related)
+	}
 	if opts.ShowModelAttribution {
 		if attribution := modelAttribution(group, opts.ProviderLabels); attribution != "" {
 			b.WriteString("\n<sub>来源：")
@@ -333,6 +337,39 @@ func RenderFinding(group Group, opts FindingRenderOptions) (string, error) {
 		}
 	}
 	return b.String(), nil
+}
+
+// maxRelatedDescriptions bounds the 「相关描述」 list.
+const maxRelatedDescriptions = 5
+
+// relatedDescriptions lists the titles, severities and categories of merged
+// sources whose title differs from the displayed one, so an approximate merge
+// never hides another lane's description.
+func relatedDescriptions(group Group) string {
+	seen := map[string]struct{}{NormalizeTitle(group.Title): {}}
+	var lines []string
+	for _, source := range group.Sources {
+		key := NormalizeTitle(source.Title)
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		if len(lines) == maxRelatedDescriptions {
+			break
+		}
+		label := string(source.Severity)
+		if source.Category != "" {
+			label += " · " + source.Category
+		}
+		lines = append(lines, "- ["+escapeOneLine(label, 64)+"] "+escapeOneLine(source.Title, MaxTitleRunes)+"\n")
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return "**相关描述**：\n" + strings.Join(lines, "")
 }
 
 func modelAttribution(group Group, labels map[string]string) string {
