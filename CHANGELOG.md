@@ -6,6 +6,7 @@
 
 ### 升级前必读
 
+- **升级前让在途评审结束或取消；首次启动会补漏评审**：回滚到升级前快照时，旧版本会续跑快照时仍在途的评审，可能覆盖升级后已发布的 GitLab 汇总和状态评论。升级后的首次启动会运行启动补漏扫描，把窗口内从未评审的 MR 入队评审（按默认上限最多 20 次，产生模型用量）；不希望如此时，升级这次启动前设置 `gitlab.catch_up.enabled: false`。
 - **全局只读迁移**：迁移 `0027` 不可逆。升级前按运维文档做一致性备份；回退需恢复升级前快照和匹配的旧版镜像。
 - **模型存储与配置校验**：迁移 `0026` 不可逆，升级前按运维文档做一致性备份，回退需同时恢复旧版镜像和数据。所有配置 provider 的 `max_tokens` 必须为正数，名称不能含 `:`；temperature 为 0–2，thinking budget 和 context window 不能为负。旧配置不符合这些要求时会阻止启动。挂载的旧配置不会自动更新，须按供应方支持的上限填写 `max_tokens`。
 - **模型参数校验与审计**：`providers.*.reasoning.effort` 只接受空值、`low`、`medium`、`high` 和 `max`，非法值会阻止启动，请在升级前检查配置。协议不会发送的 effort 或 thinking budget 会在启动时告警；调用详情新增实际发送参数，旧记录显示为旧记录。
@@ -25,16 +26,25 @@
 
 - **未终态工作流不会在新任务布局下续跑**（[#300](https://github.com/LeXwDeX/Tribunal/issues/300)）：`prompts.TaskRenderVersion` 在 1.3.0 中由 5 改为 7（#300 改为 6，#345 再改为 7）。升级前由更早版本创建的未终态工作流在启动恢复时被取消，不会在新布局或覆盖语义下续跑、重试或发布，过期的未发布结果也不会被发布；需要时等待其结束或接受取消后重新触发。
 
-### 已验证范围（#294，本地与 CI）
+### 已验证范围（#294，本地、CI 与真实实例）
 
-- 每个 Issue 的自建 CI `go` / `web` / `docker` 在合并前对 PR head 通过，覆盖率门槛 70%。
-- 本地 `go build ./...`、`go vet ./...`、scoped `go test`、staticcheck 与前端 `npm test -- --coverage`、`check:styles`、`build` 通过。
-- 带数据的 v1.3.0 原地升级、2 用户/2 项目矩阵、真实 GitLab/LLM 评审与回滚演练尚未执行，见 `docs/delivery-readiness.md` 的 BLOCKED 项。
+- 每个 Issue 的自建 CI `go` / `web` / `docker` 在合并前对 PR head 通过，覆盖率门槛 70%；本地 `go build ./...`、`go vet ./...`、scoped `go test`、staticcheck 与前端测试、`check:styles`、`build` 通过。
+- 2026-11-05：v1.2.0 数据卷原地升级（迁移至 `0028`）、2 用户/2 项目矩阵、回退演练通过。
+- 2026-11-06 第 1–5 轮：开发/测试环境、固定 sandbox 项目、真实 LLM provider 的真实实例验收。覆盖：错误 master key 拒绝启动并给出脱敏错误；多路并行下反复 SIGKILL 后同一 workflow 完成并发布；运行中改模型并重启后按 `profile_hash_changed` 取消且 GitLab 状态同步；用户模型与节点覆盖的调用审计与参数。
+- 2026-11-06 升级夹具（隔离实例，v1.2.0 → `main` `92f6895` 候选）：迁移 `0025`–`0028` 应用；升级前 6 个终态工作流升级后状态、结论和发布情况不变；被 SIGKILL 中断的工作流因配置/提示词变化被取代并重建，新工作流完成且发布与 GitLab 状态一致；无覆盖时默认 `profile_hash` 与 v1.2.0 基线相等；回退演练（备份恢复后启动 v1.2.0）终态工作流可读。
+- 发布一致性：发布前、发布中崩溃后只发布一次、无重复讨论；重启后新 head 的 workflow 约 6 秒创建；停机期间推送的 head 由启动补漏评审且不重复入队。
+- 评审质量与安全：被忽略文件不再抑制其他文件的行内定位；近似重复项仅在展示层折叠，相邻的不同问题分别发布，无定位汇总条目大幅减少；机器人评论不再触发 GitLab quick action。
+- 界面：评审档位编辑页和评审列表在 1440 / 390 宽度下做过人工检查，未附截图文件。
+- 尚未完成：生产人工 Review（发布第 3 段）、候选 commit 上的 GitHub Actions（第 2 段）、tag 与 Release；详见 `docs/delivery-readiness.md`。
 
 ### 已知限制
 
 - 修改模型会重建 client 和信号量，旧 client 继续服务在途工作流，同一模型 ID 的实际并发会短时叠加新旧两份上限。
 - 不支持 masterkey 轮换；软删除保留模型元数据并清空当前行密文，不保证擦除 WAL、快照或备份。
+- 去重与折叠基于启发式：措辞改写后的重复可能保留，极少数情况下相隔 1–3 行、描述较泛的不同问题可能被合并（[#360](https://github.com/LeXwDeX/Tribunal/issues/360)、[#352](https://github.com/LeXwDeX/Tribunal/issues/352)、[#361](https://github.com/LeXwDeX/Tribunal/issues/361)）。
+- 展示折叠偏保守：措辞与正文差异很大的同一问题、或级别相差 2 级及以上的配对，仍会各发一条讨论（[#366](https://github.com/LeXwDeX/Tribunal/issues/366) 已处理同一行跨 lane 的常见情形）。
+- 启动补漏不处理停机期间被重新打开且 head 未变的 MR。
+- 回退到 v1.2.0 必须恢复升级前快照；迁移 `0025` 及之后不可逆。
 
 ### 新增
 
