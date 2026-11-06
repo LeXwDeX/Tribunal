@@ -69,6 +69,7 @@
 
 ### 修复
 
+- **崩溃恢复后采纳已发出的行内讨论**（[#350](https://github.com/LeXwDeX/Tribunal/issues/350)）：此前若在行内讨论已发出、意图已记录远端 ID，但发布记录和讨论计数尚未写入时崩溃，重启后虽不会重复发送，却始终不采纳该讨论，问题被列入「无法定位到行的问题」并带「历史讨论内容与当前内容不同或无法确认」提示，`publications.discussions` 也会少计。现在新的行内讨论正文末尾带隐藏标记行 `<!-- tribunal:workflow id=<工作流ID> -->`；恢复时，意图已有远端 ID（或经唯一的发现标记找回 ID）则重新读取该讨论，仅当作者是当前机器人用户、且正文（忽略首尾空白和 CRLF）与现在为该发现渲染的、含本工作流标记的正文完全一致时才采纳，写入发布记录（计数正确），摘要中仍按行内讨论显示。读取失败时发布保持可重试（状态仍为待处理/未知），不会重复发送。内容已变、其他工作流、其他作者或缺少标记时，沿用原有保守行为。兼容性：旧版本发出的讨论没有工作流标记，仍走保守路径、不会被采纳，不提供迁移。
 - **空文件、纯改名和删除空文件不再使评审 INCOMPLETE**（[#345](https://github.com/LeXwDeX/Tribunal/issues/345)）：状态为 `added`/`deleted`/`renamed` 且 diff 为空的文件没有文本内容可评审，不再计为覆盖缺口，路径列入评审警告「no textual changes to review」，变更索引标注「无文本变更」。二进制文件不受影响：GitLab 对其返回 `Binary files … differ` 文本（2026-11-06 在测试实例实测），按原有路径处理；`modified` 且 diff 为空（可能是仅模式变更）仍按覆盖缺口处理；`too_large`/`collapsed` 仍记为省略文件和覆盖缺口。计划阶段的文件列表同样标注，agent 规划遗漏这类文件不再算覆盖缺口，`list_changes` 对其显示 `inlined=n/a`。
 - **启动恢复取消当前代次的评审后，状态评论不再停在「评审运行中」**（[#341](https://github.com/LeXwDeX/Tribunal/issues/341)）：恢复时因 `profile_hash_changed`、`execution_identity_changed`、`config_changed` 等原因取消、且仍是 MR 当前代次的工作流，现在会把评审状态置为「评审已取消」，详情含 `cancelled on recovery: <原因>` 并提示重新触发，同时更新 GitLab 状态评论；发布记录的跳过原因同为该文本，不再是 `review superseded`。代次已被取代时不改动新代次的状态。
 - **`default` 与 `lanes.code_review` 覆盖现在真正改变执行的模型**（[#334](https://github.com/LeXwDeX/Tribunal/issues/334)，[#327](https://github.com/LeXwDeX/Tribunal/issues/327) 评审中发现的缺陷）：此前这两项覆盖只改变显示，评审仍按配置执行。现在覆盖合并进未归一化的 `default` 配置后统一归一化一次，七个节点的覆盖都影响实际模型。

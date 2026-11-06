@@ -91,32 +91,6 @@ func TestRecoveredDiscussionIntentDoesNotClaimNewWorkflowContent(t *testing.T) {
 	}
 }
 
-func TestRecoveredDiscussionIntentSameWorkflowIsUnproven(t *testing.T) {
-	ctx := context.Background()
-	f := newReviewFixture(t, reviewTestHead)
-	wf := reviewWithFailedNote(t, f, "intent-same-workflow")
-	f.publisher.gitlab = &lostDiscussionResponse{f.gitlab}
-	if err := f.publisher.Publish(ctx, wf.ID); !errors.Is(err, errDiscussionUnknown) {
-		t.Fatalf("first publication: %v", err)
-	}
-	restartFixturePublisher(t, f, f.gitlab)
-	for attempt := 0; attempt < 2; attempt++ {
-		if err := f.publisher.Publish(ctx, wf.ID); err != nil {
-			t.Fatal(err)
-		}
-		findings, err := f.db.ListFindings(ctx, store.FindingFilter{WorkflowID: wf.ID})
-		if err != nil || len(findings) != 1 || findings[0].PositionOK == nil || *findings[0].PositionOK {
-			t.Fatalf("findings: %+v, %v", findings, err)
-		}
-		if pub, err := f.db.GetPublication(ctx, 42, 7, discussionPublishKind, findings[0].PublishKey); !errors.Is(err, store.ErrNotFound) {
-			t.Fatalf("unverified publication attributed: %+v, %v", pub, err)
-		}
-		if f.gitlab.discussionCreates != 1 || len(f.gitlab.notes) != 1 || !strings.Contains(f.gitlab.notes[0].Body, "历史讨论内容") || !strings.Contains(f.gitlab.notes[0].Body, findings[0].Body) {
-			t.Fatalf("recovery effects: discussions=%d summaries=%+v", f.gitlab.discussionCreates, f.gitlab.notes)
-		}
-	}
-}
-
 func TestSameWorkflowPublicationWithoutBodyHashFallsBack(t *testing.T) {
 	ctx := context.Background()
 	f := newReviewFixture(t, reviewTestHead)
