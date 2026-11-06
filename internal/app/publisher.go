@@ -329,10 +329,6 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 	if err != nil {
 		return PermanentJob(err)
 	}
-	// Presentation only: fold near-duplicate groups that are already decided
-	// to publish. Votes, challenges and decisions of the folded groups stay in
-	// the stored findings; only the discussion is shared.
-	result.Groups = review.MergePresentation(result.Groups, loaded.dossier)
 	for _, group := range result.Groups {
 		if loaded.dossier.IgnoresPath(group.Path) {
 			return p.stale(ctx, workflowID, "ignored finding rejected")
@@ -355,13 +351,41 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 			return p.stale(ctx, workflowID, "ignored finding rejected")
 		}
 	}
-	groups := markPositions(result.Groups, index)
+	original := markPositions(result.Groups, index)
 	warnings := append(append([]string(nil), result.Warnings...), cfg.Warnings...)
-	for i := range groups {
-		groups[i].PublishKey = review.GroupPublishKey(loaded.dossier, groups[i])
+	for i := range original {
+		original[i].PublishKey = review.GroupPublishKey(loaded.dossier, original[i])
+	}
+	// groups is the presentation view used for posting, the summary and the
+	// commit status: near-duplicate groups that are already decided to publish
+	// are folded into one discussion. The stored findings (see storedGroups)
+	// always keep the original adjudicated groups, so decisions, severities,
+	// votes and statistics are unaffected by folding.
+	groups := review.MergePresentation(original, loaded.dossier)
+	folded := func(i int) bool {
+		return groups[i].Decision != nil && groups[i].Decision.Source == "presentation" &&
+			(original[i].Decision == nil || original[i].Decision.Source != "presentation")
+	}
+	// storedGroups returns the original groups with the position outcome of
+	// the view. A folded group is not posted, so it keeps no publish key: the
+	// display group alone owns the discussion and its feedback.
+	storedGroups := func() []review.Group {
+		out := make([]review.Group, len(original))
+		copy(out, original)
+		for i := range out {
+			if folded(i) {
+				out[i].PublishKey = ""
+				continue
+			}
+			out[i].PositionOK = groups[i].PositionOK
+		}
+		return out
 	}
 	keyCounts := make(map[string]int, len(groups))
-	for _, group := range groups {
+	for i, group := range groups {
+		if folded(i) {
+			continue
+		}
 		keyCounts[group.PublishKey]++
 	}
 	collision := false
@@ -427,7 +451,7 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 			break
 		}
 	}
-	if err := p.store.ReplaceFindings(ctx, workflowID, findingsForStore(workflowID, groups)); err != nil {
+	if err := p.store.ReplaceFindings(ctx, workflowID, findingsForStore(workflowID, storedGroups())); err != nil {
 		return err
 	}
 	if err := p.store.SetWorkflowVerdict(ctx, workflowID, result.Verdict); err != nil {
@@ -574,7 +598,7 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 		}
 	}
 	if fallback {
-		if err := p.store.ReplaceFindings(ctx, workflowID, findingsForStore(workflowID, groups)); err != nil {
+		if err := p.store.ReplaceFindings(ctx, workflowID, findingsForStore(workflowID, storedGroups())); err != nil {
 			return err
 		}
 		updated, err := render()

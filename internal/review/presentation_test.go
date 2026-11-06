@@ -319,3 +319,21 @@ func TestGroupRelatedSurvivesJSONRoundTrip(t *testing.T) {
 		t.Fatalf("related lost in round trip: %+v", back.Related)
 	}
 }
+
+func TestPresentationFoldingIsPerPathNotPerMR(t *testing.T) {
+	a := mkGroup("a", 20, "error-handling", SeverityP1, "fetch_user 未处理异常", "fetch_user 发送请求后没有处理异常 requests.Timeout，导致调用方崩溃")
+	b := mkGroup("b", 20, "logic", SeverityP2, "fetch_user 未处理异常", "fetch_user 发送请求后没有处理异常 JSONDecodeError，导致调用方崩溃")
+	d := &Dossier{
+		Ignored:      []string{"go.sum"},
+		IgnorePolicy: &IgnorePolicy{Version: IgnorePolicyVersion, Patterns: []string{"**/*.sum"}},
+		Files:        []FileChange{{Path: "pkg/x.go", Status: "modified"}},
+	}
+	d.DiffSummary.Omitted = []OmittedFile{{Path: "big.bin", Reason: "too_large"}}
+	if got := publishedIDs(MergePresentation([]Group{a, b}, d)); len(got) != 1 {
+		t.Fatalf("an unrelated ignored or omitted file must not disable folding, published = %v", got)
+	}
+	d.DiffSummary.Omitted = []OmittedFile{{Path: "pkg/x.go", Reason: "too_large"}}
+	if got := publishedIDs(MergePresentation([]Group{a, b}, d)); len(got) != 2 {
+		t.Fatalf("the group's own omitted path must not fold, published = %v", got)
+	}
+}

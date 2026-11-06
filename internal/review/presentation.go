@@ -38,7 +38,7 @@ func MergePresentation(groups []Group, dossier *Dossier) []Group {
 	copy(out, groups)
 	var order []int
 	for i, g := range out {
-		if g.Published() && g.Line > 0 && !ambiguousFindingPath(dossier, g.Path) {
+		if g.Published() && g.Line > 0 && foldablePath(dossier, g.Path) {
 			order = append(order, i)
 		}
 	}
@@ -83,6 +83,30 @@ func MergePresentation(groups []Group, dossier *Dossier) []Group {
 		})
 	}
 	return out
+}
+
+// foldablePath reports whether a group's own path can take part in folding.
+// Unlike publish-key provenance it is per path: an unrelated ignored or
+// omitted file elsewhere in the MR must not disable folding. The path itself
+// must not be ignored or omitted, and must resolve to one changed file.
+func foldablePath(dossier *Dossier, path string) bool {
+	if path == "" {
+		return false
+	}
+	if dossier == nil {
+		return true
+	}
+	if dossier.IgnoresPath(path) {
+		return false
+	}
+	for _, omitted := range dossier.DiffSummary.Omitted {
+		if omitted.Path == path {
+			return false
+		}
+	}
+	oldFile, oldCount := matchingFile(dossier.Files, path, SideOld)
+	newFile, newCount := matchingFile(dossier.Files, path, SideNew)
+	return !(oldCount > 1 || newCount > 1 || (oldCount == 1 && newCount == 1 && oldFile != newFile))
 }
 
 func presentationLess(a, b Group) bool {
