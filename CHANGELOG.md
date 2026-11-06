@@ -31,15 +31,16 @@
 - 2026-11-05：v1.2.0 数据卷原地升级（迁移至 `0028`）、2 用户/2 项目矩阵、回退演练通过。
 - 2026-11-06 第 1–5 轮：开发/测试环境、固定 sandbox 项目、真实 LLM provider 的真实实例验收。覆盖：错误 master key 拒绝启动并给出脱敏错误；多路并行下反复 SIGKILL 后同一 workflow 完成并发布；运行中改模型并重启后按 `profile_hash_changed` 取消且 GitLab 状态同步；用户模型与节点覆盖的调用审计与参数。
 - 发布一致性：发布前、发布中崩溃后只发布一次、无重复讨论；重启后新 head 的 workflow 约 6 秒创建；停机期间推送的 head 由启动补漏评审且不重复入队。
-- 评审质量与安全：被忽略文件不再抑制其他文件的行内定位；近似重复与相邻不同问题的处理、无定位汇总条目大幅减少；机器人评论不再触发 GitLab quick action。
+- 评审质量与安全：被忽略文件不再抑制其他文件的行内定位；近似重复项仅在展示层折叠，相邻的不同问题分别发布，无定位汇总条目大幅减少；机器人评论不再触发 GitLab quick action。
 - 界面：评审档位编辑页和评审列表在 1440 / 390 宽度下做过人工检查，未附截图文件。
-- 尚未完成：生产人工 Review 与候选 commit 上的 GitHub Actions；详见 `docs/delivery-readiness.md`。
+- 尚未完成：生产人工 Review（发布第 3 段）、候选 commit 上的 GitHub Actions（第 2 段）、tag 与 Release、#366；升级前 5+1 工作流夹具补测中；详见 `docs/delivery-readiness.md`。
 
 ### 已知限制
 
 - 修改模型会重建 client 和信号量，旧 client 继续服务在途工作流，同一模型 ID 的实际并发会短时叠加新旧两份上限。
 - 不支持 masterkey 轮换；软删除保留模型元数据并清空当前行密文，不保证擦除 WAL、快照或备份。
-- 去重与折叠基于启发式：措辞改写后的重复可能保留，极少数情况下相隔 1–3 行、描述较泛的不同问题可能被合并（#360、#352、#361）。
+- 去重与折叠基于启发式：措辞改写后的重复可能保留，极少数情况下相隔 1–3 行、描述较泛的不同问题可能被合并（[#360](https://github.com/LeXwDeX/Tribunal/issues/360)、[#352](https://github.com/LeXwDeX/Tribunal/issues/352)、[#361](https://github.com/LeXwDeX/Tribunal/issues/361)）。
+- 同一行、来自不同 lane 的同一问题可能各发一条讨论；规则模式汇总计数含被折叠项（[#366](https://github.com/LeXwDeX/Tribunal/issues/366)，修复中）。
 - 启动补漏不处理停机期间被重新打开且 head 未变的 MR。
 - 回退到 v1.2.0 必须恢复升级前快照；迁移 `0025` 及之后不可逆。
 
