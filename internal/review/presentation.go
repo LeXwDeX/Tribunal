@@ -175,6 +175,7 @@ func sharedCount(a, b map[string]struct{}) int {
 // stopBigrams are CJK bigrams too common in titles to count as shared content.
 var stopBigrams = map[string]bool{
 	"存在": true, "问题": true, "导致": true, "可能": true, "没有": true, "不能": true, "需要": true, "应该": true,
+	"配置": true, "文件": true, "用户": true, "输入": true, "校验": true, "参数": true, "数据": true, "处理": true, "检查": true,
 }
 
 func cjkBigrams(title string) map[string]struct{} {
@@ -441,12 +442,38 @@ func unpositionedMatch(rep, g Group) bool {
 	if rep.Path != "" && g.Path != "" && rep.Path != g.Path {
 		return false
 	}
-	d := severityRank[rep.EffectiveSeverity()] - severityRank[g.EffectiveSeverity()]
-	if d >= nearDuplicateSeverityGap || -d >= nearDuplicateSeverityGap {
+	// A more severe candidate would vanish from the header counts and the
+	// listing, so it never folds under a less severe group; a candidate at
+	// most one level less severe may.
+	d := severityRank[g.EffectiveSeverity()] - severityRank[rep.EffectiveSeverity()]
+	if d < 0 || d >= nearDuplicateSeverityGap {
 		return false
 	}
-	return identifiersReferenced(g.Title, rep.Title, rep.Body) && (len(titleIdentifiers(rep.Title)) == 0 || identifiersReferenced(rep.Title, g.Title, g.Body)) &&
-		(titleContentMatches(rep.Title, g.Title) || textSimilar(textTokens(rep.Title, rep.Body), Finding{Title: g.Title, Body: g.Body}, nearDuplicateSameCategory))
+	if !identifiersReferenced(g.Title, rep.Title, rep.Body) {
+		return false
+	}
+	contentMatch := titleContentMatches(rep.Title, g.Title)
+	similar := textSimilar(textTokens(rep.Title, rep.Body), Finding{Title: g.Title, Body: g.Body}, nearDuplicateSameCategory)
+	if len(titleIdentifiers(rep.Title)) == 0 {
+		// Nothing ties a prose-only title to the candidate's identifier except
+		// the body, so both content and text evidence are required.
+		return contentMatch && similar
+	}
+	return identifiersReferenced(rep.Title, g.Title, g.Body) && (contentMatch || similar)
+}
+
+// SummaryFoldedGroups returns the groups the summary lists or counts: those
+// folded into another entry by the summary presentation are removed. Stored
+// findings are unaffected; callers use it for display-only counts.
+func SummaryFoldedGroups(groups []Group) []Group {
+	fold := foldUnpositionedForSummary(groups)
+	out := make([]Group, 0, len(groups))
+	for _, g := range groups {
+		if !fold.folded[g.ID] {
+			out = append(out, g)
+		}
+	}
+	return out
 }
 
 // identifiersReferenced reports whether a non-generic identifier of title

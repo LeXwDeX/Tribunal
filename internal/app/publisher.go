@@ -619,7 +619,7 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 		if result.Verdict == review.VerdictPass {
 			state = "success"
 		}
-		if err := p.publishCommitStatus(ctx, loaded, state, statusDescription(result.Verdict, groups), recheck); err != nil {
+		if err := p.publishCommitStatus(ctx, loaded, state, statusDescription(result.Verdict, review.SummaryFoldedGroups(groups)), recheck); err != nil {
 			return err
 		}
 	}

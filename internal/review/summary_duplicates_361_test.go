@@ -70,9 +70,6 @@ func TestSummaryFoldsReasonerDuplicatesOfInlineFindings(t *testing.T) {
 		"save_state 打开的文件从不关闭",
 		"TokenBucket.allow 在 tokens 恰好等于 cost 时拒绝请求",
 		"purge 对目录等非普通文件调用 os.remove，会中断整轮清理",
-		"refund_fee 用真除法返回浮点金额",
-		"append_item 的可变默认参数在调用间共享同一个列表",
-		"TokenBucket.allow 的补充/判断/扣减是非原子读改写且无锁",
 	} {
 		if strings.Contains(body, "#### ") && strings.Contains(body, "] "+dup) {
 			t.Errorf("duplicate %q is still listed separately", dup)
@@ -83,8 +80,8 @@ func TestSummaryFoldsReasonerDuplicatesOfInlineFindings(t *testing.T) {
 		t.Errorf("folded duplicate must be referenced under 相关描述:\n%s", body)
 	}
 	// Header counts are of listed findings: the 18 duplicates are not counted twice.
-	if !strings.Contains(body, "无法定位到行的问题（2）") {
-		t.Errorf("unpositioned section must list only the 2 distinct findings:\n%s", body)
+	if !strings.Contains(body, "无法定位到行的问题（5）") {
+		t.Errorf("unpositioned section must list the 2 distinct findings and the 3 duplicates of prose-only inline titles, which are kept conservatively:\n%s", body)
 	}
 }
 
@@ -132,5 +129,36 @@ func TestSummaryFoldIsDeterministic(t *testing.T) {
 		if again := summaryFor(t, groups); again != first {
 			t.Fatalf("summary changed between renders:\n%s\n---\n%s", first, again)
 		}
+	}
+}
+
+func TestSummaryNeverFoldsMoreSevereOrDistinctFindings(t *testing.T) {
+	publish := &FindingDecision{Action: ActionPublish}
+	cases := []struct {
+		name   string
+		inline Group
+		cand   Group
+	}{
+		{"more severe path traversal", Group{ID: "a", Severity: SeverityP2, Path: "api/x.py", Line: 3, Side: SideNew,
+			Title: "读取文件前未限制路径", Body: "load_config 读取调用方给出的文件。", Decision: publish, PositionOK: true},
+			Group{ID: "b", Severity: SeverityP1, Title: "load_config 允许路径穿越读取任意文件",
+				Body: "load_config 读取调用方给出的文件，../ 可逃出目录。", Decision: publish}},
+		{"more severe sql injection", Group{ID: "a", Severity: SeverityP2, Path: "api/x.py", Line: 3, Side: SideNew,
+			Title: "用户输入未做校验", Body: "create_user 没有校验 email 格式。", Decision: publish, PositionOK: true},
+			Group{ID: "b", Severity: SeverityP1, Title: "create_user 未校验用户输入导致 SQL 注入",
+				Body: "create_user 把输入拼进 SQL。", Decision: publish}},
+		{"same severity distinct issue", Group{ID: "a", Severity: SeverityP2, Path: "api/x.py", Line: 3, Side: SideNew,
+			Title: "用户输入未做校验", Body: "create_user 没有校验 email 格式。", Decision: publish, PositionOK: true},
+			Group{ID: "b", Severity: SeverityP2, Title: "create_user 未校验用户输入导致 SQL 注入",
+				Body: "create_user 把输入拼进 SQL。", Decision: publish}},
+	}
+	for _, c := range cases {
+		body := summaryFor(t, []Group{c.inline, c.cand})
+		if !strings.Contains(body, "#### ["+string(c.cand.Severity)+"] "+c.cand.Title) {
+			t.Errorf("%s: candidate must stay listed:\n%s", c.name, body)
+		}
+	}
+	if got := len(SummaryFoldedGroups(loadSummaryDuplicates(t))); got != 25 {
+		t.Errorf("SummaryFoldedGroups kept %d groups, want 25", got)
 	}
 }

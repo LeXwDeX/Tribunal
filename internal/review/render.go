@@ -206,8 +206,6 @@ func verdictLabel(verdict string) string {
 	}
 }
 
-// severityCountLine renders non-zero counts on one line, for example
-// "**P1** × 2 · **P2** × 1". It is empty when nothing was published.
 // inlineRelatedLines renders unpositioned groups folded into an inline group
 // as indented sub-bullets of its overview row, capped at maxRelatedGroups.
 func inlineRelatedLines(related []RelatedGroup) string {
@@ -226,6 +224,8 @@ func inlineRelatedLines(related []RelatedGroup) string {
 	return b.String()
 }
 
+// severityCountLine renders non-zero counts on one line, for example
+// "**P1** × 2 · **P2** × 1". It is empty when nothing was published.
 func severityCountLine(counts map[Severity]int) string {
 	parts := make([]string, 0, 4)
 	for _, severity := range []Severity{SeverityP0, SeverityP1, SeverityP2, SeverityInfo} {
