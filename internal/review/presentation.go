@@ -368,3 +368,95 @@ func absInt(value int) int {
 	}
 	return value
 }
+
+// summaryFold is the summary-only view of publish-decided groups after
+// near-duplicate unpositioned groups were referenced from a group that is
+// already listed. It never touches inline discussions (their bodies and
+// hashes stay stable) or stored findings.
+type summaryFold struct {
+	// folded holds IDs of groups not listed separately.
+	folded map[string]bool
+	// related maps a listed group ID to the groups referenced under it.
+	related map[string][]RelatedGroup
+}
+
+// foldUnpositionedForSummary decides which unpositioned (no path or position
+// not OK), confident, publish-decided groups duplicate a group that is already
+// published inline or already listed. Candidates are visited in a fixed order
+// (severity, richness, location, ID) and matched against the representatives
+// only: positioned groups first, then earlier kept unpositioned groups.
+func foldUnpositionedForSummary(groups []Group) summaryFold {
+	fold := summaryFold{folded: map[string]bool{}, related: map[string][]RelatedGroup{}}
+	var reps, candidates []Group
+	for _, g := range groups {
+		if !g.Published() || g.Decision.Action == ActionMark {
+			continue
+		}
+		if g.PositionOK {
+			reps = append(reps, g)
+		} else {
+			candidates = append(candidates, g)
+		}
+	}
+	sort.SliceStable(reps, func(x, y int) bool { return presentationLess(reps[x], reps[y]) })
+	sort.SliceStable(candidates, func(x, y int) bool { return presentationLess(candidates[x], candidates[y]) })
+	for _, g := range candidates {
+		matched := false
+		for _, rep := range reps {
+			if !unpositionedMatch(rep, g) {
+				continue
+			}
+			fold.folded[g.ID] = true
+			fold.related[rep.ID] = append(fold.related[rep.ID], RelatedGroup{
+				ID: g.ID, Severity: g.EffectiveSeverity(), Category: g.Category,
+				Line: g.Line, Title: g.Title, Excerpt: oneLine(g.Body, relatedExcerptRunes),
+			})
+			matched = true
+			break
+		}
+		if !matched {
+			reps = append(reps, g)
+		}
+	}
+	for id := range fold.related {
+		list := fold.related[id]
+		sort.SliceStable(list, func(x, y int) bool {
+			a, b := list[x], list[y]
+			if ra, rb := severityRank[a.Severity], severityRank[b.Severity]; ra != rb {
+				return ra < rb
+			}
+			return a.ID < b.ID
+		})
+	}
+	return fold
+}
+
+// unpositionedMatch reports whether an unpositioned group g describes the
+// same problem as the listed group rep. A reasoner finding often has no path
+// and a differently worded title, so the evidence is the named identifiers
+// (functions, parameters, exceptions) that one title shares with the other
+// group's title or body, together with shared title content. A listed title
+// without identifiers (a plain-prose title) only needs the first direction.
+func unpositionedMatch(rep, g Group) bool {
+	if rep.Path != "" && g.Path != "" && rep.Path != g.Path {
+		return false
+	}
+	d := severityRank[rep.EffectiveSeverity()] - severityRank[g.EffectiveSeverity()]
+	if d >= nearDuplicateSeverityGap || -d >= nearDuplicateSeverityGap {
+		return false
+	}
+	return identifiersReferenced(g.Title, rep.Title, rep.Body) && (len(titleIdentifiers(rep.Title)) == 0 || identifiersReferenced(rep.Title, g.Title, g.Body)) &&
+		(titleContentMatches(rep.Title, g.Title) || textSimilar(textTokens(rep.Title, rep.Body), Finding{Title: g.Title, Body: g.Body}, nearDuplicateSameCategory))
+}
+
+// identifiersReferenced reports whether a non-generic identifier of title
+// occurs in the other title or body.
+func identifiersReferenced(title, otherTitle, otherBody string) bool {
+	other := textTokens(otherTitle, otherBody)
+	for id := range titleIdentifiers(title) {
+		if _, ok := other[id]; ok {
+			return true
+		}
+	}
+	return false
+}
