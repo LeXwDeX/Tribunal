@@ -346,14 +346,30 @@ func (e *Engine) Recover(ctx context.Context) error {
 	}
 	var errs []error
 	for _, id := range ids {
-		if e.isRunning(id) {
-			continue
-		}
-		if err := e.recoverOne(ctx, id); err != nil {
+		if err := e.RecoverWorkflow(ctx, id); err != nil {
 			errs = append(errs, fmt.Errorf("dag: recover %s: %w", id, err))
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// RecoverWorkflow prepares one unfinished workflow for a later Run, with the
+// semantics of Recover. A workflow with an active local Run is left alone.
+// Recovery holds the workflow's run slot while it appends, so a Run that
+// starts concurrently is refused with ErrAlreadyRunning and can never have its
+// freshly started nodes restarted.
+func (e *Engine) RecoverWorkflow(ctx context.Context, wfID string) error {
+	if e.store == nil {
+		return errors.New("dag: nil EventStore")
+	}
+	if _, err := e.registerRun(wfID); err != nil {
+		if errors.Is(err, ErrAlreadyRunning) {
+			return nil
+		}
+		return err
+	}
+	defer e.unregisterRun(wfID)
+	return e.recoverOne(ctx, wfID)
 }
 
 func (e *Engine) recoverOne(ctx context.Context, wfID string) error {
@@ -443,13 +459,6 @@ func (e *Engine) unregisterRun(wfID string) {
 	e.mu.Lock()
 	delete(e.runs, wfID)
 	e.mu.Unlock()
-}
-
-func (e *Engine) isRunning(wfID string) bool {
-	e.mu.Lock()
-	_, ok := e.runs[wfID]
-	e.mu.Unlock()
-	return ok
 }
 
 func (e *Engine) cancelRun(wfID string) {

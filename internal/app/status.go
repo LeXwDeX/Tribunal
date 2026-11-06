@@ -308,7 +308,7 @@ func reviewStatusBody(update reviewStatusUpdate) string {
 		b.WriteString(detail)
 		b.WriteString("\n")
 	}
-	return b.String()
+	return gitlab.NeutralizeQuickActions(b.String())
 }
 
 func reviewStatusLabel(state string) string {

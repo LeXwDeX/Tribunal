@@ -609,3 +609,41 @@ func TestHasSummaryMarker(t *testing.T) {
 		t.Fatal("empty body was accepted")
 	}
 }
+
+func TestClientWritesNeutralizeQuickActions(t *testing.T) {
+	const raw = "intro\n/close\n  /merge\n- item\n  ```\n/title X\n  ```\n\n```\n/approve\n```\n`/inline`"
+	const want = "intro\n&#47;close\n  /merge\n- item\n  ```\n&#47;title X\n  ```\n\n```\n/approve\n```\n`/inline`"
+	got := map[string]string{}
+	client := newExtraClient(t, func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Body string `json:"body"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		got[r.Method+" "+r.URL.Path] = body.Body
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/discussions"):
+			fmt.Fprint(w, `{"id":"d1","notes":[{"id":5,"body":"x","author":{"id":9,"username":"bot"}}]}`)
+		default:
+			fmt.Fprint(w, `{"id":12,"body":"x","author":{"id":9,"username":"bot"}}`)
+		}
+	})
+	ctx := context.Background()
+	if _, err := client.CreateMRNote(ctx, "token", 42, 7, raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.UpdateMRNote(ctx, "token", 42, 7, 11, raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.CreateDiscussion(ctx, "token", 42, 7, NewDiscussion{Body: raw}); err != nil {
+		t.Fatal(err)
+	}
+	for key, body := range got {
+		if body != want {
+			t.Errorf("%s sent body %q, want %q", key, body, want)
+		}
+	}
+	if len(got) != 3 {
+		t.Fatalf("requests = %v, want create note, update note and create discussion", got)
+	}
+}

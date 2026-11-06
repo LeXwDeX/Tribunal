@@ -9,6 +9,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/LeXwDeX/tribunal/internal/gitlab"
 )
 
 const SummaryMarkerPrefix = "<!-- gitlab-ce-review:summary"
@@ -182,7 +184,7 @@ func RenderSummary(in SummaryInput) (string, error) {
 		b.WriteString(strings.Join(footer, " · "))
 		b.WriteString("</sub>\n")
 	}
-	return b.String(), nil
+	return gitlab.NeutralizeQuickActions(b.String()), nil
 }
 
 func verdictLabel(verdict string) string {
@@ -339,7 +341,9 @@ func RenderFinding(group Group, opts FindingRenderOptions) (string, error) {
 			b.WriteString("</sub>\n")
 		}
 	}
-	return b.String(), nil
+	// Rendered bodies are the final text: hashes and remote comparisons use
+	// them, and GitLab must never see a line it would run as a quick action.
+	return gitlab.NeutralizeQuickActions(b.String()), nil
 }
 
 // relatedDescriptions lists the groups folded into this discussion by

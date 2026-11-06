@@ -290,6 +290,17 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 	defer listener.Close()
 
+	// An enforced data directory lock guarantees no other live process holds a
+	// job lease, so leases left by a killed predecessor are reclaimed now
+	// instead of waiting for them to expire.
+	if dataLock.Held() {
+		if err := reclaimStaleLeases(ctx, db, logger); err != nil {
+			return errors.New("reclaim job leases: storage update failed")
+		}
+	} else {
+		logger.Info("stale job lease reclaim skipped: data directory lock is not enforced")
+	}
+
 	worker := jobs.NewWorker(db, jobs.WorkerConfig{
 		Handlers:     runtime.Handlers(),
 		Workers:      cfg.Jobs.Workers,
@@ -479,6 +490,26 @@ func (t *httpTracker) seal() <-chan struct{} {
 		}
 	}
 	return t.done
+}
+
+// leaseReclaimer is the storage surface used to release leases left by a
+// previous process.
+type leaseReclaimer interface {
+	ReclaimForeignLeases(ctx context.Context, currentOwner string) (int, error)
+}
+
+// reclaimStaleLeases makes running jobs left by a dead process claimable at
+// once. No worker of this process exists yet, so every running job is foreign.
+// Call it only while holding the data directory lock.
+func reclaimStaleLeases(ctx context.Context, q leaseReclaimer, logger *slog.Logger) error {
+	n, err := q.ReclaimForeignLeases(ctx, "")
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		logger.Info("reclaimed stale job leases", "count", n)
+	}
+	return nil
 }
 
 // startRecovery runs startup recovery in the background. The returned stop
