@@ -45,7 +45,7 @@ func TestPublicationCollidingGroupsRemainInSummary(t *testing.T) {
 			if err != nil || len(findings) != 2 {
 				t.Fatalf("findings = %+v, %v", findings, err)
 			}
-			if f.gitlab.discussionCreates != 0 || len(f.gitlab.notes) != 1 || strings.Count(f.gitlab.notes[0].Body, "bad assignment") != 2 || !strings.Contains(f.gitlab.notes[0].Body, "标识冲突") {
+			if f.gitlab.discussionCreates != 0 || len(f.gitlab.notes) != 1 || strings.Count(f.gitlab.notes[0].Body, "bad assignment") != 3 || !strings.Contains(f.gitlab.notes[0].Body, "标识冲突") || !strings.Contains(f.gitlab.notes[0].Body, "以相关描述形式保留在「bad assignment」条目下") {
 				t.Fatalf("discussions=%d notes=%+v", f.gitlab.discussionCreates, f.gitlab.notes)
 			}
 			if err := f.publisher.Publish(ctx, wf.ID); err != nil || f.gitlab.discussionCreates != 0 {

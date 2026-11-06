@@ -389,6 +389,7 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 		keyCounts[group.PublishKey]++
 	}
 	collision := false
+	conflicted := map[string]bool{}
 	contentMismatch := false
 	for i := range groups {
 		group := &groups[i]
@@ -437,10 +438,15 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 		if conflict {
 			group.PositionOK = false
 			collision = true
+			conflicted[group.ID] = true
 		}
 	}
+	// The conflict warning is worded at render time: where an item ends up
+	// (listed on its own or as a related description) depends on the final
+	// summary view.
+	collisionAt := -1
 	if collision {
-		warnings = append(warnings, "部分问题的发布标识冲突，已保留在摘要中，未创建行内讨论。")
+		collisionAt = len(warnings)
 	}
 	if contentMismatch {
 		warnings = append(warnings, "部分问题的历史讨论内容与当前内容不同或无法确认，当前问题已保留在摘要中，未修改历史讨论。")
@@ -459,6 +465,11 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 	}
 
 	render := func() (string, error) {
+		renderWarnings := warnings
+		if collisionAt >= 0 {
+			renderWarnings = append(append(append([]string(nil), warnings[:collisionAt]...),
+				review.PublishKeyConflictWarning(groups, conflicted)), warnings[collisionAt:]...)
+		}
 		return review.RenderSummary(review.SummaryInput{
 			Verdict:              result.Verdict,
 			Summary:              result.Summary,
@@ -469,7 +480,7 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 			Duration:             workflowDuration(loaded.workflow),
 			DetailURL:            p.detailURL(workflowID),
 			ShowModelAttribution: cfg.Settings.ShowModelAttribution,
-			Warnings:             warnings,
+			Warnings:             renderWarnings,
 		})
 	}
 	body, err := render()

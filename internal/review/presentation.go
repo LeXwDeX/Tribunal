@@ -1,6 +1,7 @@
 package review
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 	"unicode"
@@ -148,10 +149,52 @@ func presentationMatch(rep, g Group) bool {
 	} else if difference != 0 {
 		return false
 	}
+	// Lanes use different category vocabularies and are not merged before
+	// adjudication, so the same problem on the exact same line from two lanes
+	// needs no title identifier: matching title content or similar text is
+	// enough.
+	if difference == 0 && differentLanes(rep, g) &&
+		(titleContentMatches(rep.Title, g.Title) || textSimilar(textTokens(rep.Title, rep.Body), Finding{Title: g.Title, Body: g.Body}, threshold)) {
+		return true
+	}
 	if !titleIdentityMatches(rep.Title, g.Title) || !titleContentMatches(rep.Title, g.Title) {
 		return false
 	}
 	return textSimilar(textTokens(rep.Title, rep.Body), Finding{Title: g.Title, Body: g.Body}, threshold)
+}
+
+type laneKey struct {
+	node    string
+	attempt int
+}
+
+// groupLanes returns the proposer lanes (origin node and attempt) a group's
+// sources came from; a group without sources falls back to its own origin.
+func groupLanes(g Group) map[laneKey]struct{} {
+	out := make(map[laneKey]struct{})
+	for _, source := range g.Sources {
+		if source.Origin.Node != "" {
+			out[laneKey{source.Origin.Node, source.Origin.Attempt}] = struct{}{}
+		}
+	}
+	if len(out) == 0 && g.Origin.Node != "" {
+		out[laneKey{g.Origin.Node, g.Origin.Attempt}] = struct{}{}
+	}
+	return out
+}
+
+// differentLanes reports whether both groups have known lanes and share none.
+func differentLanes(a, b Group) bool {
+	la, lb := groupLanes(a), groupLanes(b)
+	if len(la) == 0 || len(lb) == 0 {
+		return false
+	}
+	for lane := range la {
+		if _, ok := lb[lane]; ok {
+			return false
+		}
+	}
+	return true
 }
 
 // titleContentMatches requires the titles to share content beyond identifiers
@@ -509,6 +552,8 @@ type summaryFold struct {
 	folded map[string]bool
 	// related maps a listed group ID to the groups referenced under it.
 	related map[string][]RelatedGroup
+	// into maps a folded group ID to the listed group it is referenced under.
+	into map[string]string
 }
 
 // foldUnpositionedForSummary decides which unpositioned (no path or position
@@ -517,7 +562,7 @@ type summaryFold struct {
 // (severity, richness, location, ID) and matched against the representatives
 // only: positioned groups first, then earlier kept unpositioned groups.
 func foldUnpositionedForSummary(groups []Group) summaryFold {
-	fold := summaryFold{folded: map[string]bool{}, related: map[string][]RelatedGroup{}}
+	fold := summaryFold{folded: map[string]bool{}, related: map[string][]RelatedGroup{}, into: map[string]string{}}
 	var reps, candidates []Group
 	for _, g := range groups {
 		if !g.Published() || g.Decision.Action == ActionMark {
@@ -538,6 +583,7 @@ func foldUnpositionedForSummary(groups []Group) summaryFold {
 				continue
 			}
 			fold.folded[g.ID] = true
+			fold.into[g.ID] = rep.ID
 			// The folded group's own related items (from MergePresentation)
 			// move along with it, so none of them disappears from the summary.
 			added := append([]RelatedGroup{{
@@ -636,4 +682,46 @@ func SortRelated(list []RelatedGroup) []RelatedGroup {
 		return a.ID < b.ID
 	})
 	return out
+}
+
+// PublishKeyConflictWarning is the 评审提示 for groups whose publish key
+// conflicted, so none of them got an inline discussion. It states where each
+// item is in the summary: listed on its own, or kept as a 「相关描述」 item
+// under the entry it was folded into.
+func PublishKeyConflictWarning(groups []Group, conflicted map[string]bool) string {
+	fold := foldUnpositionedForSummary(groups)
+	titles := make(map[string]string, len(groups))
+	for _, g := range groups {
+		titles[g.ID] = g.Title
+	}
+	foldedCount, listedCount := 0, 0
+	targets := map[string]struct{}{}
+	for _, g := range groups {
+		if !conflicted[g.ID] {
+			continue
+		}
+		if rep, ok := fold.into[g.ID]; ok {
+			foldedCount++
+			targets[oneLine(titles[rep], 60)] = struct{}{}
+		} else {
+			listedCount++
+		}
+	}
+	names := make([]string, 0, len(targets))
+	for title := range targets {
+		names = append(names, "「"+title+"」")
+	}
+	sort.Strings(names)
+	if len(names) > 3 {
+		names = append(names[:3], "等")
+	}
+	where := "以相关描述形式保留在" + strings.Join(names, "、") + "条目下"
+	switch {
+	case foldedCount == 0:
+		return "部分问题的发布标识冲突，未创建行内讨论，已在摘要中单独列出。"
+	case listedCount == 0:
+		return "部分问题的发布标识冲突，未创建行内讨论，" + where + "。"
+	default:
+		return fmt.Sprintf("部分问题的发布标识冲突，未创建行内讨论；其中 %d 条%s，其余在摘要中单独列出。", foldedCount, where)
+	}
 }
