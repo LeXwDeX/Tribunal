@@ -54,6 +54,9 @@ describe('unsaved block binding tab switch', () => {
     await user.click(screen.getByRole('tab', { name: /^Skill/ }))
     await user.click(await screen.findByRole('button', { name: '放弃并切换' }))
     expect(await screen.findByRole('tab', { name: /^Skill/, selected: true })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('tab', { name: /^块绑定/ }))
+    expect(await screen.findByRole('button', { name: 'review 使用 Skill team-rules' })).toHaveAttribute('aria-pressed', 'true')
   })
 
   it('switches without confirmation when the matrix is clean', async () => {

@@ -89,10 +89,17 @@ function ScopedExtensionsManager({
   const [skillDeletePending, setSkillDeletePending] = useState(false)
   const [skillDeleteError, setSkillDeleteError] = useState<unknown>(null)
   const [bindingsDirty, setBindingsDirty] = useState(false)
+  const [bindingsBusy, setBindingsBusy] = useState(false)
   const [pendingTab, setPendingTab] = useState<string | null>(null)
+
+  useEffect(() => { setPendingTab(null) }, [tab])
 
   const changeTab = (next: string) => {
     if (next === tab) return
+    if (bindingsBusy) {
+      toast.push('info', '正在保存绑定，请稍后切换。')
+      return
+    }
     if (tab === 'bindings' && bindingsDirty) {
       setPendingTab(next)
       return
@@ -283,6 +290,7 @@ function ScopedExtensionsManager({
           testResults={testResults}
           refreshBindings={refreshBindings}
           onDirtyChange={setBindingsDirty}
+          onBusyChange={setBindingsBusy}
         />
       ) : null}
       </div>
@@ -708,7 +716,7 @@ function mergeBindingDrafts(
   return { baseline, local, conflicts, revisions }
 }
 function BindingsTab({
-  canWrite, scope, projectId, bindingState, servers, skills, testResults, refreshBindings, onDirtyChange,
+  canWrite, scope, projectId, bindingState, servers, skills, testResults, refreshBindings, onDirtyChange, onBusyChange,
 }: {
   canWrite: boolean
   scope: 'platform' | 'project'
@@ -719,6 +727,7 @@ function BindingsTab({
   testResults: Record<string, { tools?: McpTool[]; error?: string; pending?: boolean }>
   refreshBindings: () => Promise<{ items: BlockBinding[]; complete: boolean }>
   onDirtyChange?: (dirty: boolean) => void
+  onBusyChange?: (busy: boolean) => void
 }) {
   const toast = useToast()
   const queryClient = useQueryClient()
@@ -898,6 +907,7 @@ function BindingsTab({
     !sameDraft(baseline[block] || emptyDraft, local[block] || emptyDraft)
   )), [rowNames, baseline, local])
   useEffect(() => { onDirtyChange?.(dirty) }, [dirty, onDirtyChange])
+  useEffect(() => { onBusyChange?.(saving || saveRefreshState !== 'idle') }, [saving, saveRefreshState, onBusyChange])
 
   const previewRestore = async (target: RestoreTarget) => {
     const requestId = ++restoreRequest.current
