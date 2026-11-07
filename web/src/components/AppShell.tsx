@@ -258,6 +258,12 @@ export function AppShell({ me }: { me: Me }) {
               </div>
             </div>
             <div className={styles.navActions}>
+              {isMobile && menuOpen ? (
+                <button type="button" className={styles.navAction} onClick={() => setMenuOpen(false)}>
+                  <Icon name="close" size={14} />
+                  关闭菜单
+                </button>
+              ) : null}
               <ThemeToggle />
               <button type="button" className={styles.navAction} onClick={() => { void onLogout() }} disabled={loggingOut}>
                 <Icon name="logout" size={14} />

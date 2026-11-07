@@ -190,9 +190,14 @@ describe('AppShell mobile navigation focus', () => {
     const nav = screen.getByRole('navigation', { name: '主导航' })
     expect(nav.contains(document.activeElement)).toBe(true)
     expect(menu.closest('[inert]')).not.toBeNull()
+    expect(within(nav).getByRole('button', { name: '关闭菜单' })).toBeInTheDocument()
 
-    await user.keyboard('{Escape}')
+    await user.click(within(nav).getByRole('button', { name: '关闭菜单' }))
     expect(menu).toHaveFocus()
     expect(menu.closest('[inert]')).toBeNull()
+
+    await user.click(menu)
+    await user.keyboard('{Escape}')
+    expect(menu).toHaveFocus()
   })
 })
