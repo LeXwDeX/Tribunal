@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
 import { AppShell } from '../src/components/AppShell'
@@ -160,5 +161,43 @@ describe('AppShell breadcrumbs', () => {
     installFetch(() => jsonResponse({ reviews: [] }))
     renderShell('/nope')
     expect(within(crumbs()).getByText('页面不存在')).toBeInTheDocument()
+  })
+})
+
+describe('AppShell mobile navigation focus', () => {
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+  })
+
+  function stubMobile() {
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: true,
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }))
+  }
+
+  it('moves focus into the menu and back to the menu button', async () => {
+    stubMobile()
+    installFetch(() => jsonResponse({ reviews: [] }))
+    const user = userEvent.setup()
+    renderShell()
+    const menu = screen.getByLabelText('打开导航菜单')
+    await user.click(menu)
+
+    const nav = screen.getByRole('navigation', { name: '主导航' })
+    expect(nav.contains(document.activeElement)).toBe(true)
+    expect(menu.closest('[inert]')).not.toBeNull()
+    expect(within(nav).getByRole('button', { name: '关闭菜单' })).toBeInTheDocument()
+
+    await user.click(within(nav).getByRole('button', { name: '关闭菜单' }))
+    expect(menu).toHaveFocus()
+    expect(menu.closest('[inert]')).toBeNull()
+
+    await user.click(menu)
+    await user.keyboard('{Escape}')
+    expect(menu).toHaveFocus()
   })
 })
