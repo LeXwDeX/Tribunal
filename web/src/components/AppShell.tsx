@@ -145,6 +145,8 @@ export function AppShell({ me }: { me: Me }) {
   const toast = useToast()
   const location = useLocation()
   const menuButtonRef = useRef<HTMLButtonElement>(null)
+  const navRef = useRef<HTMLElement>(null)
+  const menuHadFocusRef = useRef(false)
   const runningCount = useRunningCount()
 
   useEffect(() => {
@@ -163,12 +165,19 @@ export function AppShell({ me }: { me: Me }) {
   }, [])
 
   useEffect(() => {
-    if (!menuOpen) return
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setMenuOpen(false)
+    if (!menuOpen) {
+      // Return focus to the trigger whenever the panel closes (Escape,
+      // overlay, or following a link) so keyboard position is predictable.
+      if (menuHadFocusRef.current) {
+        menuHadFocusRef.current = false
         menuButtonRef.current?.focus()
       }
+      return
+    }
+    menuHadFocusRef.current = true
+    navRef.current?.querySelector<HTMLElement>('a[href],button:not([disabled])')?.focus()
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setMenuOpen(false)
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
@@ -197,6 +206,7 @@ export function AppShell({ me }: { me: Me }) {
           aria-hidden="true"
         />
         <nav
+          ref={navRef}
           id="primary-navigation"
           aria-label="主导航"
           className={classNames(styles.nav, menuOpen && styles.navOpen)}
@@ -257,7 +267,7 @@ export function AppShell({ me }: { me: Me }) {
           </div>
         </nav>
 
-        <div className={styles.main}>
+        <div className={styles.main} inert={isMobile && menuOpen} aria-hidden={isMobile && menuOpen ? true : undefined}>
           <div className={styles.mobileBar}>
             <button
               ref={menuButtonRef}
