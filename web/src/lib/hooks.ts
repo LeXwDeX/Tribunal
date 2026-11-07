@@ -93,12 +93,13 @@ export function useLoadMoreFocus(hasNextPage: boolean) {
   }
 }
 
-export function useNow(intervalMs = 1000): number {
+export function useNow(intervalMs = 1000, enabled = true): number {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
+    if (!enabled) return
     const timer = window.setInterval(() => setNow(Date.now()), intervalMs)
     return () => window.clearInterval(timer)
-  }, [intervalMs])
+  }, [intervalMs, enabled])
   return now
 }
 
