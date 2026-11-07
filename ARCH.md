@@ -133,7 +133,7 @@ web/                   Web 控制台（M6）
 
 - 用户首次通过 GitLab OAuth 登录后建立本地 `users` 行；平台管理角色来自 `auth.bootstrap_admins` 或数据库授予，静态 bootstrap Bearer 不在此列。平台管理员（`users.id > 0`）对全部已登记项目隐式拥有 `manage`，无需逐项目 grant；普通用户的项目业务数据读取和写入由本地 `project_grants` 的 `read` / `manage` 决定，默认无权限。
 - 平台管理员可以管理用户、项目授权、项目注册和系统配置，并隐式管理全部已登记项目的数据：读取项目、评审、工作区、统计、SSE 和项目扩展，执行项目写操作和删除项目。普通用户无访问权限或项目不存在统一返回 404，只有 `read` 时执行写操作返回 403。
-- 已登录用户（浏览器会话或用户 API token）可以调用项目注册和连接校验接口登记项目；注册事务为注册人写入该项目 `manage` grant。静态 bootstrap Bearer 也可以注册，但不写 owner grant。
+- 已认证用户（浏览器会话或用户 API token）可以调用项目注册和连接校验接口登记项目；普通调用方的 token 必须能识别出该项目至少 Reporter 的成员，非成员或更低角色返回 `400 validation_failed`（字段 `access_level`），平台管理员与静态 bootstrap Bearer 免成员检查。注册事务为注册人写入该项目 `manage` grant。静态 bootstrap Bearer 也可以注册，但不写 owner grant。
 - `auth.bootstrap_token_env` 指向的静态 Bearer 只用于平台管理面，没有本地用户 ID 和 grant，不接受项目业务路由。它的轮换由部署方更新环境变量并重启完成。
 - 用户被本地停用后不能登录、使用已有会话/API token 或获得新凭据；撤销凭据与停用都是本地控制。GitLab 组成员关系变化不会自动同步到 Tribunal，退组后仍需删除普通用户的 grant 或停用本地用户。
 
@@ -683,7 +683,7 @@ blocks:                     # 按块授权 MCP 工具、挂载 Skill
 | # | 问题 | 当前建议 |
 |---|---|---|
 | Q1 | 是否同时支持 Group Token 或 bot 账号 PAT？ | 首版只支持 Project Token，数据模型预留 |
-| Q2 | 项目接入方式：管理员手工登记，还是项目方自助（服务用项目 token 自动创建 webhook）？ | 已支持自助：任何已登录用户可注册项目并获得该项目 manage；管理员仍可代为登记和分配授权 |
+| Q2 | 项目接入方式：管理员手工登记，还是项目方自助（服务用项目 token 自动创建 webhook）？ | 已支持自助：任何已认证用户可注册项目，普通调用方需拥有该项目至少 Reporter 的成员身份（平台管理员与静态 bootstrap Bearer 免检），注册人获得该项目 manage；管理员仍可代为登记和分配授权 |
 | Q3 | 是否需要 Web 管理界面？ | 首版用 CLI 和管理 API，界面放到 M6 |
 | Q4 | `verify` 是否就定位为挑战者（D11）？读取 CI 日志诊断是否需要？ | 挑战者为主，CI 诊断作为后续可选 |
 | Q5 | 默认拓扑用 A 还是 B？ | 只用 A（提出加反证）；评审档位只有 `default` |

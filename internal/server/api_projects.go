@@ -142,8 +142,9 @@ func (s *Server) handleValidateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := s.projects.Validate(r.Context(), app.ValidateProjectInput{
-		Project:     request.Project,
-		AccessToken: request.Token,
+		Project:              request.Project,
+		AccessToken:          request.Token,
+		TrustedPlatformAdmin: s.isPlatformAdmin(r) || currentUserID(r) == 0,
 	})
 	if err != nil {
 		if errors.Is(err, app.ErrProjectValidationUnavailable) {
@@ -212,10 +213,15 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cursor := r.URL.Query().Get("cursor")
+	admin := s.isPlatformAdmin(r)
+	var accessUserID *int64
+	if !admin {
+		accessUserID = accessUserIDPtr(currentUserID(r))
+	}
 	filter := app.ProjectListFilter{
 		Query:        query,
 		Enabled:      enabled,
-		AccessUserID: s.projectScopeUserID(r),
+		AccessUserID: accessUserID,
 	}
 	projects, next, err := s.projects.ListFilteredPage(r.Context(), filter, cursor, limit)
 	if err != nil {
@@ -225,7 +231,6 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 	if projects == nil {
 		projects = []store.Project{}
 	}
-	admin := s.isPlatformAdmin(r)
 	if s.store == nil {
 		items := make([]projectListItem, 0, len(projects))
 		for i := range projects {
@@ -279,8 +284,9 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"projects": items, "next_cursor": next})
 }
 
-// projectGrant re-reads one project grant for response decoration. A row that
-// lost its grant is skipped instead of being shown with stale access.
+// projectGrantFor re-reads one project grant for response decoration. A row
+// that lost its grant is skipped instead of being shown with stale access;
+// admins skip the per-project lookup.
 func (s *Server) projectGrantFor(r *http.Request, projectID int64, admin bool) (string, bool, error) {
 	if admin {
 		return store.ProjectAccessManage, true, nil

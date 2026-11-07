@@ -188,7 +188,7 @@ fi
 
 `--project` 也可以是 GitLab 项目 ID 或配置的 GitLab 根地址下的完整 HTTP(S) 仓库 URL。命令块会尝试清除当前 shell 的项目 token；无法确认或清除时返回失败，保留响应路径并提示结束受影响的 shell。即使最后清除 token 失败，注册也可能已经成功；不要直接重试，先安全核对项目和 webhook 状态。信号中断可能跳过清理；中断后先尝试在当前 shell 清除 token，若不能确认清除则结束该 shell。清除当前变量也不会清除已继承 token 的子进程或其他副本。响应先写入新建的 0600 私有文件，标准输出只显示项目 ID；该正整数校验不能证明 onboarding 已完成，须另行检查任务状态。确认提示和不含秘密的错误信息写入标准错误。不要输出、复制到日志或直接打开响应文件。默认手工创建 webhook，响应中的 `webhook_secret` 只返回一次。如何通过受控渠道填写 GitLab 的 Secret token、清理私有文件，以及失败时如何处理，见[部署与运维的项目注册步骤](docs/operations.md#浏览器登录与项目注册)。URL 为服务地址加 `/webhooks/gitlab`，启用 Merge request、Comments 和 Push 事件。
 
-控制台先「校验连接」，再「保存并初始化」。已登录用户都可调用 `POST /api/v1/projects/validate`，提交 `{project, token}`，只读验证身份、至少 Reporter 权限、scope、有效期和 Git HEAD；不会保存凭据、调用模型或创建 webhook。校验成功不证明完整 clone 或评论发布可用，详见 [项目 API](docs/design/03-http-api.md#41-项目)。设置页的「更新访问 Key」只更新本平台凭据，不在 GitLab 创建或撤销 token。
+控制台先「校验连接」，再「保存并初始化」。已认证用户均可调用 `POST /api/v1/projects/validate`，提交 `{project, token}`，只读验证身份、至少 Reporter 权限、scope、有效期和 Git HEAD；普通调用方的 token 必须能识别出该项目至少 Reporter 的成员，否则返回 `400 validation_failed`、字段 `access_level`；平台管理员（本地 `users.id>0` 且 `role=admin`）与静态 bootstrap Bearer（用户 ID 0）免检，管理员免检时 `access_level` 可能为 0。不会保存凭据、调用模型或创建 webhook。校验成功不证明完整 clone 或评论发布可用，详见 [项目 API](docs/design/03-http-api.md#41-项目)。设置页的「更新访问 Key」只更新本平台凭据，不在 GitLab 创建或撤销 token。
 
 自动创建时在同一个注册命令的 `--profile default` 后添加 `--auto-webhook`，仍须将响应写入私有文件并安全清理；把 `server.public_url` 配为 GitLab 能访问的服务地址。重复注册返回冲突，不覆盖已有凭据。自动创建 hook 成功但入库失败时会尝试删除刚创建的 hook；网络中断等异常仍可能需要管理员核对 GitLab 上的 hook。
 

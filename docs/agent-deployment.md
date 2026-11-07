@@ -164,7 +164,7 @@ docker compose up -d --force-recreate --wait --wait-timeout 120
 
 **先向用户确认**：实际 GitLab 目标、要接入的项目、注册动作及可能产生的模型费用。注册会访问 GitLab，并创建一个会调用模型的 onboarding 任务；未得到明确授权就不要执行。
 
-注册和连接校验接口对任意已认证用户开放；注册人自动获得该项目的 `manage`，之后可以用同一账号调用 `projects get` 和 `projects webhook ...`。`.env` 里的 `REVIEW_ADMIN_TOKEN` 是 CLI 的默认凭据，属于静态 bootstrap Bearer（用户 ID 0）：它仍可注册，但不写注册人授权，调用项目级接口会得到 404。所以 Webhook 最好在注册时就一起建好。
+注册和连接校验接口对任意已认证用户开放，但普通调用方的 token 必须能识别出该项目至少 Reporter 的成员，非成员或更低角色返回 `400 validation_failed`（字段 `access_level`）；平台管理员与静态 bootstrap Bearer 免成员检查。注册人自动获得该项目的 `manage`，之后可以用同一账号调用 `projects get` 和 `projects webhook ...`。`.env` 里的 `REVIEW_ADMIN_TOKEN` 是 CLI 的默认凭据，属于静态 bootstrap Bearer（用户 ID 0）：它仍可注册，但不写注册人授权，调用项目级接口会得到 404。所以 Webhook 最好在注册时就一起建好。
 
 **注册**
 
@@ -172,7 +172,7 @@ docker compose up -d --force-recreate --wait --wait-timeout 120
 
 注册响应可能带有一次性的 `webhook_secret`。注入秘密之前先在当前 shell 执行 `set +x`，确认终端录制和日志不会捕获秘密，再由用户或安全秘密管理器直接注入 `GITLAB_PROJECT_TOKEN`。不要把 token 写入命令、shell history、聊天、日志或长期运行服务的 `.env`；它仅用于本次 CLI 注册。token 和打开的响应文件描述符可被当前 shell 的子进程继承，秘密处理完成前只运行可信程序；Docker 管理员仍可访问容器环境。按运维步骤设置仓库外的受控私有 `REGISTRATION_DIR` 绝对路径，并在提示时确认授权。响应只写入唯一的 0600 私有文件 `$REGISTRATION_FILE`；标准输出只能显示经过校验的正整数项目 ID，不要查看或输出完整响应。该 ID 不能证明 onboarding 已完成，须另行检查任务状态。
 
-- 只想校验、不落库，已登录用户都可以调用 `POST /api/v1/projects/validate`，见 [项目 API](design/03-http-api.md#41-项目)。
+- 只想校验、不落库，已认证用户都可以调用 `POST /api/v1/projects/validate`；普通调用方的 token 需能识别出至少 Reporter 的成员，平台管理员与静态 bootstrap Bearer 免检，见 [项目 API](design/03-http-api.md#41-项目)。
 - 任一步失败都停止，不解析或使用部分响应，也不要盲目重试：注册可能已提交。按运维步骤保留并安全处理私有响应，核对项目和 Webhook 状态。命令块会尝试清除当前 shell 中的项目 token；readonly、清除失败或信号中断时不能保证清除，无法确认时应结束受影响的 shell。已继承 token 的子进程和其他副本不会随当前变量的清除而清除。
 
 **Webhook**（二选一，都要先征得用户同意）

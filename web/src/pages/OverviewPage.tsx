@@ -331,7 +331,14 @@ export function OverviewPage() {
           ) : undefined}
         />
 
-        {!canTrigger ? <p className={styles.notice}>当前账号没有可管理的项目；可以注册自己的项目，或等待管理员分配。只显示可读数据。后端会独立校验权限。</p> : null}
+        {projectsPage.isSuccess && !canTrigger ? (
+          <p className={styles.notice}>
+            {providersEnabled
+              ? '还没有登记项目；可以注册第一个项目。'
+              : '当前账号没有可管理的项目；可以注册自己的项目，或等待管理员分配。只显示可读数据。'}
+            后端会独立校验权限。
+          </p>
+        ) : null}
 
         <MetricStrip
           stats={stats.data}

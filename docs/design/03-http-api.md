@@ -113,8 +113,8 @@ Note Hook 先入队 `review.command`，由 worker 请求 GitLab 校验身份、M
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/v1/projects` | 当前用户可见的项目列表：平台管理员为全部已登记项目，其他用户为已授权或 `global_read` 可见的项目；`?q=&enabled=&limit=&cursor=`，响应 `{projects, next_cursor}`，每项带 `access`，平台管理员另带 `access_source=admin`，只读项目带 `access_source=grant\|global` |
-| POST | `/api/v1/projects/validate` | 已登录用户只读连接校验：`{project, token}`；不保存项目或凭据 |
-| POST | `/api/v1/projects` | 已登录用户注册项目；注册人自动获得该项目 `manage` |
+| POST | `/api/v1/projects/validate` | 已认证用户只读连接校验：`{project, token}`；普通调用方的 token 需能识别出该项目至少 Reporter 的成员，平台管理员与静态 bootstrap Bearer 免检；不保存项目或凭据 |
+| POST | `/api/v1/projects` | 已认证用户注册项目；普通调用方需至少 Reporter 成员，平台管理员与静态 bootstrap Bearer 免检；注册人自动获得该项目 `manage`（静态 Bearer 除外） |
 | GET | `/api/v1/projects/{id}` | 项目 `read`：详情（含工作区状态、最近评审和 `access`） |
 | PATCH | `/api/v1/projects/{id}` | 项目 `manage`：修改 `profile`（只接受 `default`，其他值返回 400 `unknown profile`）、`settings`（其中 `profile_by_label` 的值不是 `default` 的映射在保存时被丢弃，不报错）、`enabled` |
 | PUT | `/api/v1/projects/{id}/token` | 项目 `manage`：轮换 token：`{token}` |
@@ -125,9 +125,9 @@ Note Hook 先入队 `review.command`，由 worker 请求 GitLab 校验身份、M
 
 `GET /api/v1/projects` 是业务列表：平台管理员看到全部已登记项目（`access=manage`、`access_source=admin`），非管理员按逐项目 grant 或有效的 `global_read` 过滤，没有这些权限时得到空列表；静态 bootstrap Bearer 仍得到空列表。选择授权对象时使用 §4.6 的 `/api/v1/admin/projects` 管理列表。列表中的 `access` 为 `read` 或 `manage`；访问权限在分页读取后被撤销的项目不会出现在结果中。
 
-`project` 支持正整数 ID、`namespace/path` 或配置的 GitLab 根地址下的完整 HTTP(S) 仓库 URL，可带 `.git` 后缀和尾斜杠。拒绝外域、URL 用户信息、query/fragment 和路径穿越；不会按用户输入连接任意主机。注册和连接校验不再要求平台管理员，已认证调用方均可调用；项目详情读取需要 `read`，项目设置写入、Key 轮换、webhook 启用/重建/停用和注销需要 `manage`。平台管理员对已登记项目隐式拥有 `manage`；普通用户的 `manage` 来自注册人自动授权或管理员分配，同一项目可有多个 `manage` 持有者，任一持有者都可删除项目。
+`project` 支持正整数 ID、`namespace/path` 或配置的 GitLab 根地址下的完整 HTTP(S) 仓库 URL，可带 `.git` 后缀和尾斜杠。拒绝外域、URL 用户信息、query/fragment 和路径穿越；不会按用户输入连接任意主机。注册和连接校验对所有已认证用户开放，浏览器会话需 CSRF；普通调用方的 token 必须能识别出该项目至少 Reporter 的成员，平台管理员（本地用户 ID 且 `role=admin`）与静态 bootstrap Bearer（用户 ID 0）跳过成员检查。项目详情读取需要 `read`，项目设置写入、Key 轮换、webhook 启用/重建/停用和注销需要 `manage`。平台管理员对已登记项目隐式拥有 `manage`；普通用户的 `manage` 来自注册人自动授权或管理员分配，同一项目可有多个 `manage` 持有者，任一持有者都可删除项目。
 
-只读校验依次确认项目身份、当前用户及至少 Reporter 的项目权限、`api` 和 `read_repository` scope、有效期，以及 `git ls-remote ... HEAD`。全程默认限时 30 秒。成功返回 `200 {project_id, path_with_namespace, web_url, default_branch, username, access_level, token_scopes, token_expires_at?, git_head}`；未配置可信 GitLab 根地址或 Git 探针时返回 503。校验不落库、不创建 webhook、不入队、不调用模型；读取 HEAD 不等于完整 clone 或评论写权限验证。注册仍独立复核凭据，不依赖先前校验结果。
+只读校验依次确认项目身份、当前用户及至少 Reporter 的项目权限、`api` 和 `read_repository` scope、有效期，以及 `git ls-remote ... HEAD`。普通调用方的 token 无法识别出该项目至少 Reporter 的成员时（成员查询 404 或返回更低角色）返回 `400 validation_failed`，字段 `access_level`；平台管理员与静态 bootstrap Bearer 跳过成员检查，此时 `access_level` 可能为 0。全程默认限时 30 秒。成功返回 `200 {project_id, path_with_namespace, web_url, default_branch, username, access_level, token_scopes, token_expires_at?, git_head}`；未配置可信 GitLab 根地址或 Git 探针时返回 503。校验不落库、不创建 webhook、不入队、不调用模型；读取 HEAD 不等于完整 clone 或评论写权限验证。注册仍独立复核凭据，不依赖先前校验结果。
 
 注册请求：
 
@@ -146,9 +146,10 @@ POST /api/v1/projects
 服务端校验步骤：
 
 1. 用 token 调 `GET /projects/:id` 确认可访问；读出 `default_branch`、`web_url`。
-2. 调 `GET /personal_access_tokens/self` 读取 scope 和过期时间；缺少 `api` 或 `read_repository` → `400 validation_failed`。
-3. `auto_webhook=true` 时直接调 `POST /projects/:id/hooks` 创建新 hook，不列出或复用已有 hook；需要 Maintainer。新 hook 使用期望 URL，勾选 Merge request、Comments、Push 事件并写入生成的 secret。注册流程不会修改或删除已有 hook，即使存在同 URL hook 也只创建新 hook。创建成功但入库失败时会补偿删除刚创建的 hook；创建失败则注册失败且不落库。
-4. 入库后入队 `workspace.onboard`。注册人是有用户 ID 的账号（浏览器会话或用户 API token）时，项目、工作区、onboarding 任务和注册人的 `manage` grant 在同一事务内写入；静态 bootstrap Bearer（用户 ID 0）不写 grant。
+2. 普通注册人（非平台管理员、非静态 bootstrap Bearer）先用该 token 调 `GET /user` 识别所有者，再调 `GET /projects/:id/members/all/:user_id` 要求至少 Reporter。成员查询返回 404（非成员或未继承成员）或角色低于 Reporter 时返回 `400 validation_failed`（字段 `access_level`）；其他上游失败返回脱敏的上游错误。平台管理员与静态 bootstrap Bearer 跳过此步。
+3. 调 `GET /personal_access_tokens/self` 读取 scope 和过期时间；缺少 `api` 或 `read_repository` → `400 validation_failed`。
+4. `auto_webhook=true` 时直接调 `POST /projects/:id/hooks` 创建新 hook，不列出或复用已有 hook；需要 Maintainer。新 hook 使用期望 URL，勾选 Merge request、Comments、Push 事件并写入生成的 secret。注册流程不会修改或删除已有 hook，即使存在同 URL hook 也只创建新 hook。创建成功但入库失败时会补偿删除刚创建的 hook；创建失败则注册失败且不落库。
+5. 入库后入队 `workspace.onboard`。注册人是有用户 ID 的账号（浏览器会话或用户 API token）时，项目、工作区、onboarding 任务和注册人的 `manage` grant 在同一事务内写入；静态 bootstrap Bearer（用户 ID 0）不写 grant。
 
 注册响应：`201 {project, job_id, webhook_secret?}`。`auto_webhook` 默认 false，此时只在注册响应中返回一次 `webhook_secret`，供手工配置 webhook，`webhook_state=disabled`；自动创建时不返回 secret，`webhook_state=enabled`。项目列表支持 `q` / `enabled` 筛选和游标分页；筛选值会绑定到 cursor。
 

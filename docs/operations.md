@@ -386,9 +386,9 @@ tribunalctl projects residues clean --yes
 
 **注册人自动授权**
 
-`POST /api/v1/projects` 允许任何已登录用户调用。调用者是有用户 ID 的用户（浏览器会话，或用户创建的 API token）时，注册人自动获得该项目的 `manage` 授权；项目、工作区、onboarding 任务和这条授权在同一个 SQLite 事务内写入，授权写入失败则整体回滚，不会留下半注册状态。静态 bootstrap bearer token（用户 ID 0）注册时行为不变，不写任何授权，仍需按下文手动授权。
+`POST /api/v1/projects` 允许任何已认证用户调用，但普通调用方的 token 必须能识别出该项目至少 Reporter 的成员，非成员或更低角色返回 `400 validation_failed`（字段 `access_level`）；平台管理员与静态 bootstrap Bearer 免成员检查。调用者是有用户 ID 的用户（浏览器会话，或用户创建的 API token）时，注册人自动获得该项目的 `manage` 授权；项目、工作区、onboarding 任务和这条授权在同一个 SQLite 事务内写入，授权写入失败则整体回滚，不会留下半注册状态。静态 bootstrap bearer token（用户 ID 0）注册时行为不变，不写任何授权，仍需按下文手动授权。
 
-项目已登记时返回 `409`，消息为 `project is already registered; ask a platform administrator to assign it to you`：项目已存在但当前账号没有访问权限时，请联系平台管理员把该项目分配给你。控制台注册弹窗会显示对应中文提示。注册接口对所有已登录用户开放，会告知调用方项目是否已登记。
+项目已登记时返回 `409`，消息为 `project is already registered; ask a platform administrator to assign it to you`：项目已存在但当前账号没有访问权限时，请联系平台管理员把该项目分配给你。控制台注册弹窗会显示对应中文提示。注册接口对所有已认证用户开放，但非成员在成员检查阶段就返回 `400 validation_failed`，不会得到 `409` 或项目是否已登记的信息；对已登记项目仍有至少 Reporter 成员的调用方才会看到 `409`。
 
 #### 存量项目补授权
 

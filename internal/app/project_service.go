@@ -66,6 +66,10 @@ type RegisterInput struct {
 type ValidateProjectInput struct {
 	Project     string
 	AccessToken string
+	// TrustedPlatformAdmin skips the Reporter membership requirement for
+	// platform administrators and the static bootstrap bearer, matching
+	// Register. The token owner is still identified for the response.
+	TrustedPlatformAdmin bool
 }
 
 // ProjectValidation is the metadata returned by a successful read-only check.
@@ -96,6 +100,15 @@ const WarningWebhookRequiresMaintainer = "webhook_requires_maintainer"
 type TokenRotation struct {
 	Project  *store.Project
 	Warnings []ProjectWarning
+}
+
+// validationWarnings omits role warnings for trusted callers, whose missing
+// membership is intentional rather than a token limitation.
+func validationWarnings(access int, trusted bool) []ProjectWarning {
+	if trusted && access < reporterAccessLevel {
+		return nil
+	}
+	return tokenRoleWarnings(access)
 }
 
 // tokenRoleWarnings returns the warnings for a project access level.
@@ -451,6 +464,10 @@ func (s *ProjectService) verifyRegistrationMembership(ctx context.Context, token
 	}
 	access, err := s.gitlab.GetMemberAccess(ctx, token, projectID, user.ID)
 	if err != nil {
+		if gitlab.IsNotFound(err) {
+			return validationError("access level is insufficient",
+				Detail{Field: "access_level", Message: "Reporter or higher is required to register this project"})
+		}
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
 		}
@@ -496,11 +513,17 @@ func (s *ProjectService) Validate(ctx context.Context, in ValidateProjectInput) 
 	if user == nil || user.ID <= 0 || strings.TrimSpace(user.Username) == "" {
 		return nil, upstreamError(0)
 	}
-	access, err := s.gitlab.GetMemberAccess(ctx, in.AccessToken, project.ID, user.ID)
-	if err != nil {
-		return nil, s.validationUpstreamError(ctx, "get_member", err)
-	}
-	if access < reporterAccessLevel {
+	access, memberErr := s.gitlab.GetMemberAccess(ctx, in.AccessToken, project.ID, user.ID)
+	if memberErr != nil {
+		if !in.TrustedPlatformAdmin {
+			if gitlab.IsNotFound(memberErr) {
+				return nil, validationError("access level is insufficient",
+					Detail{Field: "access_level", Message: "Reporter or higher is required"})
+			}
+			return nil, s.validationUpstreamError(ctx, "get_member", memberErr)
+		}
+		access = 0
+	} else if access < reporterAccessLevel && !in.TrustedPlatformAdmin {
 		return nil, validationError("access level is insufficient",
 			Detail{Field: "access_level", Message: "Reporter or higher is required"})
 	}
@@ -536,7 +559,7 @@ func (s *ProjectService) Validate(ctx context.Context, in ValidateProjectInput) 
 		TokenScopes:       append([]string(nil), info.Scopes...),
 		TokenExpiresAt:    info.ExpiresAt,
 		GitHead:           strings.ToLower(head),
-		Warnings:          tokenRoleWarnings(access),
+		Warnings:          validationWarnings(access, in.TrustedPlatformAdmin),
 	}, nil
 }
 

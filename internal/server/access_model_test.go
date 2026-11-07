@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
 )
@@ -21,32 +22,71 @@ func TestPlatformAdminDispatchesWithoutGrant(t *testing.T) {
 }
 
 // A signed-in user cannot claim a project their token can only read: the
-// registrant must be a Reporter or higher. Platform administrators skip the
-// check because they already manage every registered project.
+// registrant must be a Reporter or higher. Platform administrators and the
+// static bearer skip the check because they already manage every project.
 func TestRegistrationRequiresReporterMembership(t *testing.T) {
-	api := defaultStubGitLab()
-	api.memberAccess = 10
-	env := newM6Env(t, m6Options{adminFactory: func(st *sqlite.Store) AdminService {
-		return testProjectService(t, st, api, t.TempDir())
-	}})
-	viewer := env.loginAs("code-viewer")
-	denied := viewer.json(http.MethodPost, "/api/v1/projects", map[string]any{
-		"project": "42", "token": testProjectTok,
-	})
-	if denied.status != http.StatusBadRequest {
-		t.Fatalf("non-member register = %d %s", denied.status, denied.body)
+	newEnv := func(memberAccess int, memberErr error) *m6Env {
+		t.Helper()
+		api := defaultStubGitLab()
+		api.memberAccess = memberAccess
+		api.memberErr = memberErr
+		return newM6Env(t, m6Options{adminFactory: func(st *sqlite.Store) AdminService {
+			return testProjectService(t, st, api, t.TempDir())
+		}})
 	}
-	if _, err := env.sqlite.GetProjectAccess(context.Background(), 8, 42); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("non-member registration granted access: %v", err)
+	register := func(client *m6Client) apiResponse {
+		t.Helper()
+		return client.json(http.MethodPost, "/api/v1/projects", map[string]any{
+			"project": "42", "token": testProjectTok,
+		})
+	}
+	requireNotStored := func(t *testing.T, env *m6Env) {
+		t.Helper()
+		if _, err := env.sqlite.GetProject(context.Background(), 42); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("rejected registration stored the project: %v", err)
+		}
+		if _, err := env.sqlite.GetProjectAccess(context.Background(), 8, 42); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("rejected registration granted access: %v", err)
+		}
 	}
 
-	admin := env.loginAs("code-admin")
-	created := admin.json(http.MethodPost, "/api/v1/projects", map[string]any{
-		"project": "42", "token": testProjectTok,
+	t.Run("viewer below reporter", func(t *testing.T) {
+		env := newEnv(10, nil)
+		denied := register(env.loginAs("code-viewer"))
+		if denied.status != http.StatusBadRequest {
+			t.Fatalf("non-member register = %d %s", denied.status, denied.body)
+		}
+		requireNotStored(t, env)
 	})
-	if created.status != http.StatusCreated {
-		t.Fatalf("admin register without membership = %d %s", created.status, created.body)
-	}
+
+	t.Run("viewer not a member", func(t *testing.T) {
+		env := newEnv(0, &gitlab.Error{Op: "get_member", Status: http.StatusNotFound})
+		denied := register(env.loginAs("code-viewer"))
+		if denied.status != http.StatusBadRequest {
+			t.Fatalf("missing member register = %d %s", denied.status, denied.body)
+		}
+		requireNotStored(t, env)
+	})
+
+	t.Run("static bearer skips membership", func(t *testing.T) {
+		env := newEnv(10, nil)
+		created := register(env.bearerClient())
+		if created.status != http.StatusCreated {
+			t.Fatalf("bearer register = %d %s", created.status, created.body)
+		}
+		grants, _, err := env.sqlite.ListProjectGrants(context.Background(), 42, "", 10)
+		if err != nil || len(grants) != 0 {
+			t.Fatalf("bearer registration wrote grants: %+v, %v", grants, err)
+		}
+	})
+
+	t.Run("admin skips membership", func(t *testing.T) {
+		env := newEnv(10, nil)
+		created := register(env.loginAs("code-admin"))
+		if created.status != http.StatusCreated {
+			t.Fatalf("admin register without membership = %d %s", created.status, created.body)
+		}
+	})
 }
 
 // A platform administrator manages every registered project without a
