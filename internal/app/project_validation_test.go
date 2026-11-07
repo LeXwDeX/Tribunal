@@ -259,7 +259,7 @@ func TestValidateRejectsInsufficientIdentityOrAccess(t *testing.T) {
 		{name: "guest access", mutate: func(f *fakeGitLab) { f.access = 10 }, wantCode: "validation_failed"},
 		{name: "no member", mutate: func(f *fakeGitLab) {
 			f.accessErr = &gitlab.Error{Op: "get_member", Status: 404}
-		}, wantCode: "gitlab_rejected"},
+		}, wantCode: "validation_failed"},
 		{name: "user lookup failed", mutate: func(f *fakeGitLab) {
 			f.userErr = &gitlab.Error{Op: "current_user", Status: 401}
 		}, wantCode: "gitlab_rejected"},

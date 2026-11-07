@@ -3,8 +3,11 @@ import type { Me } from '../api/types'
 
 interface Session {
   me: Me
-  // Platform-level administration (settings, providers, project registration).
+  // Platform-level administration (settings, providers, user management).
   canWrite: boolean
+  // Any signed-in browser session may register a project (the registrant then
+  // owns it); platform administration is not required.
+  canRegisterProject: boolean
   // The logged-in browser session may manage its own credentials.
   canSelfService: boolean
 }
@@ -13,8 +16,9 @@ const SessionContext = createContext<Session | null>(null)
 
 export function SessionProvider({ me, children }: { me: Me; children: ReactNode }) {
   const canWrite = me.role === 'admin' && Boolean(me.csrf_token)
+  const canRegisterProject = Boolean(me.csrf_token)
   const canSelfService = Boolean(me.csrf_token)
-  return <SessionContext.Provider value={{ me, canWrite, canSelfService }}>{children}</SessionContext.Provider>
+  return <SessionContext.Provider value={{ me, canWrite, canRegisterProject, canSelfService }}>{children}</SessionContext.Provider>
 }
 
 export function useSession(): Session {
@@ -25,6 +29,10 @@ export function useSession(): Session {
 
 export function useCanWrite(): boolean {
   return useSession().canWrite
+}
+
+export function useCanRegisterProject(): boolean {
+  return useSession().canRegisterProject
 }
 
 export function useCanSelfService(): boolean {

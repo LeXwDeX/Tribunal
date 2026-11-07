@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getStats, listModels, listProjects, listReviews } from '../api/api'
 import type { ModelHealth, Project, ReviewListItem, ReviewSummary, Stats } from '../api/types'
-import { useCanWrite } from '../components/RoleContext'
+import { useCanRegisterProject, useCanWrite } from '../components/RoleContext'
 import { ReviewTable } from '../components/ReviewTable'
 import { TriggerReviewDialog } from '../components/TriggerReviewDialog'
 import {
@@ -197,7 +197,7 @@ function StageTrack({ stage }: { stage: number }) {
 }
 
 export function OverviewPage() {
-  const canRegister = useCanWrite()
+  const canRegister = useCanRegisterProject()
   const toast = useToast()
   const queryClient = useQueryClient()
   const now = useNow(1000)
@@ -221,7 +221,7 @@ export function OverviewPage() {
   )
   // Provider health is a platform-admin view. Ordinary users must not receive
   // a false 403 alert from a query they cannot run.
-  const providersEnabled = canRegister
+  const providersEnabled = useCanWrite()
   const providersPage = useQuery({ queryKey: ['models', 'overview'], queryFn: listModels, enabled: providersEnabled, retry: false })
   const failedRuns = usePaginated<ReviewSummary>(
     ['reviews', 'overview', 'failed'],
@@ -331,7 +331,14 @@ export function OverviewPage() {
           ) : undefined}
         />
 
-        {!canRegister && !canTrigger ? <p className={styles.notice}>当前账号没有平台管理权限，也没有可管理的项目；只显示可读数据。后端会独立校验权限。</p> : null}
+        {projectsPage.isSuccess && !canTrigger ? (
+          <p className={styles.notice}>
+            {providersEnabled
+              ? '还没有登记项目；可以注册第一个项目。'
+              : '当前账号没有可管理的项目；可以注册自己的项目，或等待管理员分配。只显示可读数据。'}
+            后端会独立校验权限。
+          </p>
+        ) : null}
 
         <MetricStrip
           stats={stats.data}

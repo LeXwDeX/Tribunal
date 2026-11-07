@@ -3,7 +3,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { ProjectsPage } from '../src/pages/ProjectsPage'
 import { project } from './fixtures'
-import { installFetch, jsonResponse, renderWithProviders } from './test-utils'
+import { installFetch, jsonResponse, renderWithProviders, viewerMe } from './test-utils'
 
 const repositoryUrl = 'https://gitlab.example.com/group/backend'
 const accessToken = 'glpat-secret'
@@ -49,6 +49,12 @@ function baseRoutes(handlers: { validate?: () => Response; register?: () => Resp
 
 describe('project registration', () => {
   afterEach(() => vi.unstubAllGlobals())
+
+  it('offers registration to a signed-in viewer', async () => {
+    installFetch(baseRoutes())
+    renderWithProviders(<ProjectsPage />, { route: '/projects', me: viewerMe })
+    expect(await screen.findByRole('button', { name: '注册项目' })).toBeInTheDocument()
+  })
 
   it('validates a full repository URL without registering the project', async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = []
@@ -232,11 +238,11 @@ describe('project registration', () => {
 describe('already registered conflict (#277)', () => {
   afterEach(() => vi.unstubAllGlobals())
 
-  it('points the admin to the System page to grant access', async () => {
+  it('tells the registrant to ask an administrator for access', async () => {
     installFetch(baseRoutes({
       register: () => jsonResponse({ error: {
         code: 'conflict',
-        message: 'project is already registered; if it is not in your project list, grant yourself access on the System page',
+        message: 'project is already registered; ask a platform administrator to assign it to you',
       } }, 409),
     }))
     const user = await openRegisterDialog()
@@ -247,9 +253,10 @@ describe('already registered conflict (#277)', () => {
     await user.click(screen.getByRole('button', { name: '保存并初始化' }))
 
     expect(await screen.findByText(/该项目已注册。若项目列表中看不到它/)).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: '前往系统页授权' })).toHaveAttribute('href', '/system')
+    expect(screen.getByText(/请联系管理员把该项目分配给你/)).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: '前往系统页授权' })).not.toBeInTheDocument()
     expect(screen.queryByText('保存并初始化失败')).not.toBeInTheDocument()
-    expect(screen.queryByText(/grant yourself access/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/ask a platform administrator/)).not.toBeInTheDocument()
   })
 
   it('shows no grant hint for other conflicts', async () => {
@@ -267,7 +274,7 @@ describe('already registered conflict (#277)', () => {
     await user.click(screen.getByRole('button', { name: '保存并初始化' }))
 
     expect(await screen.findByText('保存并初始化失败')).toBeInTheDocument()
-    expect(screen.queryByRole('link', { name: '前往系统页授权' })).not.toBeInTheDocument()
+    expect(screen.queryByText(/请联系管理员把该项目分配给你/)).not.toBeInTheDocument()
   })
 })
 

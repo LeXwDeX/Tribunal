@@ -167,7 +167,7 @@ LLM 默认允许私有网络和 loopback 地址，拒绝链路本地、未指定
 OAuth 默认关闭：API 客户端访问 `/auth/login` 得到 503 是预期行为，控制台登录页会隐藏登录按钮并提示缺少配置；Bearer API 和 CLI 仍可使用。启用控制台登录时：
 
 1. 在 GitLab 创建 OAuth Application，scope 为 `read_user`，回调 URI 为 `<TRIBUNAL_PUBLIC_URL>/auth/callback`。
-2. 在 `.env` 设置 `GITLAB_OAUTH_CLIENT_ID`、`GITLAB_OAUTH_CLIENT_SECRET` 和 `GITLAB_ADMIN_USERNAME`。管理员值填写 `id:<GitLab 用户 ID>`，必须先向用户确认实际数字 ID 和授权；GitLab 用户名写法仍兼容但已弃用（见[用户名写法弃用与迁移](#bootstrap_admins-用户名写法弃用与迁移)）；留空不会给任何正常账号平台管理员标签。该标签只用于平台管理面，不授予项目业务数据访问，项目授权见下文。
+2. 在 `.env` 设置 `GITLAB_OAUTH_CLIENT_ID`、`GITLAB_OAUTH_CLIENT_SECRET` 和 `GITLAB_ADMIN_USERNAME`。管理员值填写 `id:<GitLab 用户 ID>`，必须先向用户确认实际数字 ID 和授权；GitLab 用户名写法仍兼容但已弃用（见[用户名写法弃用与迁移](#bootstrap_admins-用户名写法弃用与迁移)）；留空不会给任何正常账号平台管理员标签。该标签同时让拥有本地用户 ID 的管理员隐式管理全部已登记项目；静态 bootstrap Bearer 仍只能访问平台管理面，项目授权见下文。
 3. 在 `config/server.docker.yaml` 取消 `oauth` 及两个子字段、`bootstrap_admins` 的注释。设置正确的 HTTPS `TRIBUNAL_PUBLIC_URL`，配置反向代理，再执行 `docker compose up -d --force-recreate --wait --wait-timeout 120`。
 
 注册会访问真实 GitLab 并创建后台 onboarding 任务，可能产生模型费用。执行前必须向用户确认目标 GitLab、项目、注册动作和可能费用，并获得明确授权；未授权时不要执行。
@@ -376,23 +376,23 @@ tribunalctl projects residues clean --yes
 
 ### 项目授权、用户停用和凭据撤销
 
-项目访问由 Tribunal 本地的 `project_grants` 和显式全局只读设置决定，不从 GitLab 组成员关系推导。`bootstrap_admins` 和已授予的平台角色只决定平台管理标签；平台管理员不自动获得全局只读或项目授权。除下述注册人自动授权外，默认没有任何授权。入口检查中，无读取权限或项目不存在统一返回 404，仅有 `read` 权限执行管理操作返回 403。下述 dispatch 锁内复核不满足 manage 时统一返回 404，包括入口检查之后被降为 read 的请求。
+普通用户的项目访问由 Tribunal 本地的 `project_grants` 和显式全局只读设置决定，不从 GitLab 组成员关系推导。`bootstrap_admins` 和已授予的平台角色决定平台管理标签；拥有本地用户 ID 的平台管理员对全部已登记项目隐式拥有 `manage`，不需要逐项目 grant 或 `global_read`。普通用户除下述注册人自动授权和显式分配外，默认没有任何授权。入口检查中，无读取权限或项目不存在统一返回 404，仅有 `read` 权限执行管理操作返回 403。下述 dispatch 锁内复核不满足 manage 时统一返回 404，包括入口检查之后被降为 read 的请求。
 
 平台管理员可在 `PATCH /api/v1/admin/users/{id}` 中提交 `global_read` 和当前 `revision`，为目标用户开启或关闭全局只读。浏览器会话须提供 CSRF token；变更随下一次请求生效，`GET /api/v1/me` 返回当前值。全局只读包括之后新登记的项目，但不授予 manage。禁用期间访问失效，重新启用后设置保留；关闭后仍保留逐项目授权。操作写入 `platform_audit` 日志，包含操作者、目标和新值。迁移 `0027` 没有 down migration，升级前须按第 7 节备份；回退须恢复升级前快照及匹配的旧版镜像。
 
 平台管理员可通过用户管理 API 为已登录的 GitLab 用户授予或撤销平台管理员角色。配置指定的管理员不能降级或禁用；不能降级或禁用自己，也不能移除最后一个生效的管理员。更新用户时先读取用户列表，并在 PATCH 请求中提交该用户的 `revision`；旧的仅含 `disabled` 的请求需要补充该字段，缺少 `revision` 返回 400，版本过期返回 409 `stale_revision`。角色变更在下一次请求生效，降级会使旧 CSRF token 失效，但不会删除该用户的全部会话或 API token；需要立即清除全部凭据时另行调用凭据撤销接口。新增迁移 `0025` 不可逆，升级前应按本手册备份数据库及其 WAL/SHM、工作区、配置、镜像和加密密钥；回滚时恢复匹配的备份和旧版镜像。
 
-手动触发评审、刷新工作区、取消及重发评审会在项目生命周期锁内重新查询当前 manage grant 和用户启用状态，再访问项目凭据或入队。项目删除与重新登记使用同一锁；旧请求在删除后继续执行时，没有新 grant 则拒绝。复核时已有新 grant 的请求仍可继续。grant 或用户状态的独立变更不与此锁串行，复核之后的撤销不能保证阻止正在进行的请求；会话和 API token 仍按入口认证，不在此处再次核验。其他项目写接口（包括项目配置、webhook、上下文、扩展和问题标注）没有此项锁内授权保证，不能将此修复视为所有在途请求的即时撤销。
+手动触发评审、刷新工作区、取消及重发评审会在项目生命周期锁内重新确认当前用户是否具备 manage（平台管理员隐式通过）和用户启用状态，再访问项目凭据或入队。项目删除与重新登记使用同一锁；旧请求在删除后继续执行时，没有新 grant 且不是平台管理员则拒绝。复核时已有新 grant 的请求仍可继续。grant 或用户状态的独立变更不与此锁串行，复核之后的撤销不能保证阻止正在进行的请求；会话和 API token 仍按入口认证，不在此处再次核验。其他项目写接口（包括项目配置、webhook、上下文、扩展和问题标注）没有此项锁内授权保证，不能将此修复视为所有在途请求的即时撤销。
 
 **注册人自动授权**
 
-`POST /api/v1/projects` 仍只允许平台管理员调用。调用者是有用户 ID 的用户（浏览器会话，或用户创建的 API token）时，注册人自动获得该项目的 `manage` 授权；项目、工作区、onboarding 任务和这条授权在同一个 SQLite 事务内写入，授权写入失败则整体回滚，不会留下半注册状态。静态 bootstrap bearer token（用户 ID 0）注册时行为不变，不写任何授权，仍需按下文手动授权。
+`POST /api/v1/projects` 允许任何已认证用户调用，但普通调用方的 token 必须能识别出该项目至少 Reporter 的成员，非成员或更低角色返回 `400 validation_failed`（字段 `access_level`）；平台管理员与静态 bootstrap Bearer 免成员检查。调用者是有用户 ID 的用户（浏览器会话，或用户创建的 API token）时，注册人自动获得该项目的 `manage` 授权；项目、工作区、onboarding 任务和这条授权在同一个 SQLite 事务内写入，授权写入失败则整体回滚，不会留下半注册状态。静态 bootstrap bearer token（用户 ID 0）注册时行为不变，不写任何授权，仍需按下文手动授权。
 
-项目已登记时返回 `409`，消息为 `project is already registered; if it is not in your project list, grant yourself access on the System page`：项目已存在，但不在你的项目列表中时，请到控制台“系统”页给自己授权。控制台注册弹窗会显示对应中文提示和“前往系统页授权”按钮。该路由仅平台管理员可调用，不向其他用户泄露项目是否存在。
+项目已登记时返回 `409`，消息为 `project is already registered; ask a platform administrator to assign it to you`：项目已存在但当前账号没有访问权限时，请联系平台管理员把该项目分配给你。控制台注册弹窗会显示对应中文提示。注册接口对所有已认证用户开放，但非成员在成员检查阶段就返回 `400 validation_failed`，不会得到 `409` 或项目是否已登记的信息；对已登记项目仍有至少 Reporter 成员的调用方才会看到 `409`。
 
 #### 存量项目补授权
 
-升级前已注册、但注册人没有授权的项目不会自动补授权。平台管理员任选以下方式补授权；目标用户须先通过 OAuth 登录一次，需要平台管理员凭据：
+升级前已注册、但普通用户注册人没有授权的项目不会自动补授权；平台管理员不需要补 grant，对已登记项目隐式拥有 `manage`。平台管理员任选以下方式为普通用户补授权；目标用户须先通过 OAuth 登录一次，需要平台管理员凭据：
 
 ```bash
 curl -fsS -X PUT \
@@ -408,7 +408,7 @@ curl -fsS -X PUT \
 
 **迁移已有部署并首次授权**
 
-`0007_project_access.sql` 为现有 `users` 行补 `disabled=0`，并新增空的 `project_grants` 表；不会为任何用户创建 grant。升级后已有用户默认看不到任何项目，需按以下步骤逐个授权；新部署同样从零开始。
+`0007_project_access.sql` 为现有 `users` 行补 `disabled=0`，并新增空的 `project_grants` 表；不会为任何用户创建 grant。升级后平台管理员自动看到并管理全部已登记项目，普通用户默认看不到任何项目，需按以下步骤逐个授权；新部署同样从零开始。
 
 1. 让目标用户先通过 OAuth 登录一次。没有登录过的 GitLab 用户不在本地 `users` 表中，无法预先授权。
 2. 用平台管理员 Bearer token 列出本地用户和全部已登记项目：
@@ -418,7 +418,7 @@ curl -fsS -X PUT \
    docker compose exec -T review /app/tribunalctl projects all
    ```
 
-   `projects list` 按 bearer 所属用户的项目授权过滤；bootstrap token 没有用户 ID 和 grant，通常返回空列表，不能用它确认“没有项目”。`projects all` 和 `users list` 是管理面列表，需要平台管理员凭据。
+   `projects list` 按 bearer 所属用户的项目授权过滤，平台管理员用户则返回全部已登记项目；bootstrap token 没有用户 ID 和 grant，通常返回空列表，不能用它确认“没有项目”。`projects all` 和 `users list` 是管理面列表，需要平台管理员凭据。
 3. 先向用户明确确认实际项目 ID、目标 GitLab 用户 ID，以及本次唯一动作：授予 `read`、授予 `manage` 或删除授权。每次执行前，在当前 shell 将 `PROJECT_ID`、`GITLAB_USER_ID` 和 `GRANT_ACTION` 分别设置为这次确认的数字 ID 和动作（`read`、`manage` 或 `delete`）；不要沿用未重新确认的旧值。下列命令只执行一个动作，再核对结果；缺少输入、ID 不是无前导零的正整数或动作无效时不执行任何授权命令：
 
    ```bash
@@ -438,7 +438,7 @@ curl -fsS -X PUT \
    fi
    ```
 
-   `set` 参数依次是项目 ID、GitLab 用户 ID 和角色；`delete` 只接收两个 ID。`read` 可读取项目、评审、工作区、统计、SSE 和项目扩展；`manage` 还可修改项目设置、触发/取消评审、重新发布、人工标注、刷新工作区、轮换项目 Key 和重建 webhook。项目级 MCP/Skill/块绑定属于宿主执行配置，写入还需平台管理员标签，`manage` 本身不授予平台配置能力。
+   `set` 参数依次是项目 ID、GitLab 用户 ID 和角色；`delete` 只接收两个 ID。`read` 可读取项目、评审、工作区、统计、SSE 和项目扩展；`manage` 还可修改项目设置、触发/取消评审、重新发布、人工标注、刷新工作区、轮换项目 Key、重建 webhook 和删除项目。项目级 MCP/Skill/块绑定属于宿主执行配置，写入仍只属于平台管理员，但不再要求逐项目 `manage` grant；`manage` 本身不授予平台配置能力。
 4. 让用户用自己的 API token 验证业务列表：
 
    ```bash
@@ -473,7 +473,7 @@ fi
 
 **bootstrap 凭据轮换**
 
-`REVIEW_ADMIN_TOKEN` 由部署方生成、保存和轮换，Tribunal 不提供在线轮换 API。修改 `.env` 或 secret 注入后执行 `docker compose up -d --force-recreate --wait --wait-timeout 120`，重启后旧 token 立即失效；不要用数据库操作或用户 grant 替代这次轮换。`bootstrap_admins` 是 `id:<GitLab 用户 ID>` 或 GitLab 用户名的列表，修改后同样需要重启服务，不会创建 GitLab 账号，也不等于项目授权。
+`REVIEW_ADMIN_TOKEN` 由部署方生成、保存和轮换，Tribunal 不提供在线轮换 API。修改 `.env` 或 secret 注入后执行 `docker compose up -d --force-recreate --wait --wait-timeout 120`，重启后旧 token 立即失效；不要用数据库操作或用户 grant 替代这次轮换。`bootstrap_admins` 是 `id:<GitLab 用户 ID>` 或 GitLab 用户名的列表，修改后同样需要重启服务，不会创建 GitLab 账号；拥有本地用户 ID 的管理员对已登记项目隐式拥有 `manage`，不需要另行授予项目授权。
 
 ### 停止、修改和备份
 
@@ -708,7 +708,7 @@ docker run -d --name tribunal \
 
 - `server.public_url` 必须是 GitLab 能访问的外部地址，并且与 OAuth Application 的 Redirect URI 同源。应用固定使用 `public_url + /auth/callback`。
 - `read_user` 是登录所需的最小 scope；应用调用 GitLab `/api/v4/user` 获取用户名。
-- `bootstrap_admins: []` 不通过配置授予平台管理员标签，已有数据库授权仍然生效。需要通过配置授予时，先向用户确认实际 GitLab 数字用户 ID 和授权，再填写 `id:<GitLab 用户 ID>`；该写法只按 ID 匹配，GitLab 改名不影响。用户 ID 可在 GitLab 个人资料页或 `GET /api/v4/users?username=<name>` 查到。也兼容旧写法 GitLab **用户名**（不区分大小写，已弃用，见下文迁移步骤）：该用户名第一次以 admin 身份登录或访问时，Tribunal 把它绑定到当时的 GitLab 用户 ID 并写入 `admin_bindings`；之后其他账号即使改名为同一用户名，也不会从该配置获得管理员角色，日志记录 `bootstrap admin username is bound to another GitLab user`。未被禁用且匹配配置或数据库授权的用户获得平台 `admin` 标签；其他登录用户为 `viewer`。配置不会创建 GitLab 账号，也不授予任何项目数据访问；项目权限仍需 `project_grants`。
+- `bootstrap_admins: []` 不通过配置授予平台管理员标签，已有数据库授权仍然生效。需要通过配置授予时，先向用户确认实际 GitLab 数字用户 ID 和授权，再填写 `id:<GitLab 用户 ID>`；该写法只按 ID 匹配，GitLab 改名不影响。用户 ID 可在 GitLab 个人资料页或 `GET /api/v4/users?username=<name>` 查到。也兼容旧写法 GitLab **用户名**（不区分大小写，已弃用，见下文迁移步骤）：该用户名第一次以 admin 身份登录或访问时，Tribunal 把它绑定到当时的 GitLab 用户 ID 并写入 `admin_bindings`；之后其他账号即使改名为同一用户名，也不会从该配置获得管理员角色，日志记录 `bootstrap admin username is bound to another GitLab user`。未被禁用且匹配配置或数据库授权的用户获得平台 `admin` 标签；其他登录用户为 `viewer`。配置不会创建 GitLab 账号；它授予的平台管理员标签会让拥有本地用户 ID 的管理员隐式管理全部已登记项目，其他用户的项目权限仍需 `project_grants`。
 - 用户名绑定是首次使用即信任：升级前若该用户名已被他人占用，第一个登录的账号会拿到绑定。升级后请确认绑定正确（`SELECT username, user_id FROM admin_bindings;`），或直接改用 `id:` 写法。管理员 GitLab 账号重建、需要重新绑定时，先停服务，执行 `DELETE FROM admin_bindings WHERE username = '<小写用户名>';`，再启动并让正确账号登录；改用 `id:` 写法则不需要这一步。
 - 每个用户最多保留 10 个浏览器会话，再次登录会淘汰该用户自己最旧的会话，不影响其他用户；全局 4096 个会话只是存储兜底，触发时先淘汰非管理员的最旧会话，只有剩下的会话全部属于管理员时才淘汰管理员的会话。角色合并当前 `bootstrap_admins` 与数据库授权；用户名写法的管理员要等第一次使用、完成绑定之后才算管理员。
 - OAuth 配置存在时，`client_id_env` 和 `client_secret_env` 必须同时设置，且两个环境变量都必须非空；`server.public_url` 必须是非空的绝对 HTTP(S) 地址，否则启动校验失败。
@@ -883,7 +883,7 @@ curl -fsS http://127.0.0.1:18080/readyz
 
 `0021_repository_skill_authorizations` 新建独立授权表，不转换旧的块绑定。`0023_repository_skill_snapshot_sha256` 追加 `snapshot_sha256 TEXT NOT NULL DEFAULT ''`，两个迁移都不可回退。非空授权保存项目、目标分支、块、管理员核对的完整目标 commit SHA 和过滤后仓库 Skill 快照的 SHA-256；空授权清空两个 SHA。快照按相对 `.claude/skills` 的路径字节排序，逐文件依次计算路径长度、路径、内容长度和内容，长度为无符号 64 位大端序；空文件、二进制和名称变更都参与计算，错误信息不输出文件内容。存储写入使用版本比较，撤销也会产生新版本，过期写入不会覆盖已保存的撤销。授权写入重新发现同一目标 commit，并核对调用者明确提供的目标 SHA 和快照 hash；ignore 放宽、文件内容或名称变化时返回冲突且不修改记录。读取时无法证明目标 SHA 的授权会被拒绝；执行或应用时还要求非空授权带有格式有效的快照 hash，缺失或格式无效时拒绝。该 hash 由授权写入基于重新发现的结果核对，不能据此推断数据库外写入或完整端到端快照校验已经完成。评审运行时在执行前重新拉取目标分支 tip，要求它与授权记录的目标 SHA 相等，且当前过滤快照的 SHA-256 与授权记录一致；分支移动、快照变化或无法验证时 fail closed 并需要重新授权。目标分支变更不会自动授权新 commit。
 
-仓库 Skill 发现和授权 HTTP 路由已经注册：`GET /api/v1/admin/projects/{id}/repository-skills` 返回目标分支当前 tip、过滤快照 hash 和可用 Skill；`GET`/`PUT /api/v1/admin/projects/{id}/repository-skill-authorizations` 读取或按 revision 替换某个块的授权。需要平台管理员且持有该项目的 manage 授权。项目设置中的“允许仓库内 Skill”开启后，评审运行时只接受当前目标分支 tip 等于授权 commit、且过滤快照 hash 与授权记录一致的 `repo:` Skill；没有非空授权时不加载仓库 Skill。评审和 onboarding 执行器仍会拒绝没有已验证仓库来源的 `repo:` Skill。这不改变普通仓库文件评审的现有 ignore 规则，不构成对所有仓库文件的禁发保证。项目级外发门禁会使旧令牌失效，取消并等待已接入的发送结束，再提交策略或授权变更；超时不会提交变更，但旧令牌仍失效。该门禁只在本进程生效，也不能撤回远端已经收到的数据。恢复和发布会在原执行身份之外重新校验授权 revision、目标 SHA 和过滤快照 hash；授权撤销、目标移动或快照变化后不会续跑或重发，需要重新触发评审并重新授权。`0021` 升级前保存的非空授权没有快照 hash，读取路径会返回空值，执行路径必须拒绝；管理员可以按现有 revision 撤销，或在重新发现后重新授权。
+仓库 Skill 发现和授权 HTTP 路由已经注册：`GET /api/v1/admin/projects/{id}/repository-skills` 返回目标分支当前 tip、过滤快照 hash 和可用 Skill；`GET`/`PUT /api/v1/admin/projects/{id}/repository-skill-authorizations` 读取或按 revision 替换某个块的授权。需要平台管理员；管理员对已登记项目隐式具备 `manage`，不需要逐项目 grant。项目设置中的“允许仓库内 Skill”开启后，评审运行时只接受当前目标分支 tip 等于授权 commit、且过滤快照 hash 与授权记录一致的 `repo:` Skill；没有非空授权时不加载仓库 Skill。评审和 onboarding 执行器仍会拒绝没有已验证仓库来源的 `repo:` Skill。这不改变普通仓库文件评审的现有 ignore 规则，不构成对所有仓库文件的禁发保证。项目级外发门禁会使旧令牌失效，取消并等待已接入的发送结束，再提交策略或授权变更；超时不会提交变更，但旧令牌仍失效。该门禁只在本进程生效，也不能撤回远端已经收到的数据。恢复和发布会在原执行身份之外重新校验授权 revision、目标 SHA 和过滤快照 hash；授权撤销、目标移动或快照变化后不会续跑或重发，需要重新触发评审并重新授权。`0021` 升级前保存的非空授权没有快照 hash，读取路径会返回空值，执行路径必须拒绝；管理员可以按现有 revision 撤销，或在重新发现后重新授权。
 
 启用前，必须验证项目级门禁覆盖每次外发及所有生效策略与授权写入，并核对它和工作区 lifecycle、内容、mirror、MR、workflow 锁的统一顺序；不能在已持有工作区内容锁时递归获取该锁。恢复与待发布结果必须验证完整授权、目标 SHA 和过滤快照身份。取消不能收回已经发送的内容，本服务的锁也不能阻止远端分支推送。
 

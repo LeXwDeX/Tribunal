@@ -264,7 +264,9 @@ func TestPolicyGateServiceCancellationDoesNotCommit(t *testing.T) {
 }
 
 func TestPolicyGateRevokeRechecksActorAfterDrain(t *testing.T) {
-	for _, change := range []string{"platform", "project", "disabled"} {
+	// A platform administrator does not need a project grant, so only role
+	// demotion and account disabling revoke host-execution permission.
+	for _, change := range []string{"platform", "disabled"} {
 		t.Run(change, func(t *testing.T) {
 			f := newPolicyGateFixture(t)
 			canceled, release, sendDone := startPolicyGateLease(t, f.f.manager.Get(42))
@@ -286,8 +288,6 @@ func TestPolicyGateRevokeRechecksActorAfterDrain(t *testing.T) {
 			switch change {
 			case "platform":
 				err = f.f.db.SetPlatformRole(context.Background(), 7, "viewer")
-			case "project":
-				err = f.f.db.SetProjectGrant(context.Background(), 42, 7, store.ProjectAccessRead)
 			case "disabled":
 				err = f.f.db.SetUserDisabled(context.Background(), 7, true)
 			}

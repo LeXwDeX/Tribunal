@@ -51,12 +51,13 @@ func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := s.now()
-	// Provider usage is still business data. Scope it to the caller's grants
-	// even for platform administrators; the static bearer (ID 0) sees none.
+	// Provider usage is business data. Platform administrators see every
+	// project; other callers stay scoped to their grants, and the static
+	// bearer (ID 0) sees none.
 	stats, err := s.store.Stats(r.Context(), store.StatsFilter{
 		From:         now.Add(-24 * time.Hour),
 		To:           now,
-		AccessUserID: accessUserIDPtr(currentUserID(r)),
+		AccessUserID: s.projectScopeUserID(r),
 	})
 	if err != nil {
 		s.writeStoreError(w, r, err)
@@ -234,7 +235,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		From:         from,
 		To:           to,
 		ProjectID:    projectID,
-		AccessUserID: accessUserIDPtr(currentUserID(r)),
+		AccessUserID: s.projectScopeUserID(r),
 	})
 	if err != nil {
 		s.writeStoreError(w, r, err)

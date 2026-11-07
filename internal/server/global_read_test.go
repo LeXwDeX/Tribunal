@@ -64,7 +64,7 @@ func TestGlobalReadAdministration(t *testing.T) {
 func TestAdministratorCanEnableOwnGlobalRead(t *testing.T) {
 	env, _ := isolationEnv(t)
 	admin := env.loginAs("code-admin")
-	assertStatus(t, admin.request(http.MethodGet, "/api/v1/projects/42", nil, nil), http.StatusNotFound)
+	assertStatus(t, admin.request(http.MethodGet, "/api/v1/projects/42", nil, nil), http.StatusOK)
 	assertStatus(t, admin.json(http.MethodPatch, "/api/v1/admin/users/7", map[string]any{"global_read": true, "revision": 1}), http.StatusOK)
 	assertStatus(t, admin.request(http.MethodGet, "/api/v1/projects/42", nil, nil), http.StatusOK)
 	if got := env.decode(t, admin.request(http.MethodGet, "/api/v1/me", nil, nil))["global_read"]; got != true {

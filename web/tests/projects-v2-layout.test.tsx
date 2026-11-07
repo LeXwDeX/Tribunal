@@ -58,7 +58,8 @@ describe('projects list v2 layout', () => {
               id: 'r1', project_id: 42, mr_iid: 318, mr_title: 'feat: 批量导入', status: 'completed', verdict: 'BLOCKING',
               created_at: new Date().toISOString(),
             },
-          }), project({ id: 43, path_with_namespace: 'group/readonly', access: 'read' })],
+          }), project({ id: 43, path_with_namespace: 'group/readonly', access: 'read' }),
+          project({ id: 44, path_with_namespace: 'group/admin', access: 'manage', access_source: 'admin' })],
         })
       }
       return jsonResponse({})
@@ -73,6 +74,8 @@ describe('projects list v2 layout', () => {
     expect(within(row).getByText('可管理')).toBeInTheDocument()
     const readonly = screen.getByRole('link', { name: 'group/readonly' }).closest('tr') as HTMLElement
     expect(within(readonly).getByText('只读')).toBeInTheDocument()
+    const admin = screen.getByRole('link', { name: 'group/admin' }).closest('tr') as HTMLElement
+    expect(within(admin).getByText('管理员')).toBeInTheDocument()
   })
 
   it('opens the project when the row is clicked but not when its switch is toggled', async () => {

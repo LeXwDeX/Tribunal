@@ -115,7 +115,7 @@ function Breadcrumbs() {
   )
 }
 
-const roleLabel = (role: string) => (role === 'admin' ? '管理员' : role === 'viewer' ? '只读用户' : role)
+const roleLabel = (role: string) => (role === 'admin' ? '管理员' : role === 'viewer' ? '普通用户' : role)
 
 function ThemeToggle() {
   const [theme, setTheme] = useState(() => document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light')

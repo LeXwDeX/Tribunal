@@ -179,7 +179,7 @@ function UserDrawer({ user, open, currentUserId, onClose }: {
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<unknown>(null)
   const [projectID, setProjectID] = useState('')
-  const [grantRole, setGrantRole] = useState<ProjectAccess>('read')
+  const [grantRole, setGrantRole] = useState<ProjectAccess>('manage')
   const [confirm, setConfirm] = useState<{ role?: 'admin' | 'viewer'; global?: boolean } | null>(null)
   const grants = usePaginated<ProjectGrant>(
     ['admin-user-grants', user?.id],
@@ -467,7 +467,7 @@ function AdminGrantsPanel() {
   const users = usePaginated<AdminUser>(['admin-users'], (cursor) => listAdminUsers(cursor), 'users')
   const [projectId, setProjectId] = useState('')
   const [userId, setUserId] = useState('')
-  const [role, setRole] = useState<ProjectAccess>('read')
+  const [role, setRole] = useState<ProjectAccess>('manage')
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<unknown>(null)
   const [deleteTarget, setDeleteTarget] = useState<ProjectGrant | null>(null)
@@ -523,7 +523,7 @@ function AdminGrantsPanel() {
       <Panel flush title="项目授权" aside={selectedProject ? selectedProject.path_with_namespace : '未选择项目'}>
         <PanelBody className={insights.grantForm}>
           <div className={styles.notice}>
-            除注册人自动获得所注册项目的 manage 外，管理员不会自动获得项目业务数据；请在这里为账号授予 read 或 manage。项目列表来自管理面，不需要管理员自身拥有 grant。
+            平台管理员对全部已登记项目隐式拥有 manage，无需在这里授权；此处用于给普通用户分配 read 或 manage（manage 可删除项目）。项目列表来自管理面，不需要管理员自身拥有 grant。
           </div>
           <div className={insights.grantPicker}>
             <label className={insights.field}>

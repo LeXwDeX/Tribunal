@@ -119,7 +119,7 @@ M0 先把命令持久化为 `review.command`，以下 GitLab 校验由 worker �
 
 ## F5 项目注册与 onboarding
 
-1. 管理员调用 `POST /api/v1/projects`（03-http-api.md §4.1），服务端校验 token 和 scope。
+1. 已登录用户（平台管理员也可代为执行）调用 `POST /api/v1/projects`（03-http-api.md §4.1），服务端校验 token 和 scope。普通注册人的 token 必须能识别出该项目至少 Reporter 的成员；平台管理员与静态 bootstrap Bearer 免此检查。本地注册人（用户 ID > 0）在同一事务获得该项目的 `manage` grant。
 2. 可选：创建 webhook。
 3. 入库，`workspaces.state=new`，入队 `workspace.onboard`。
 4. onboarding job：

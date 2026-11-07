@@ -33,7 +33,7 @@ auth:
   oauth:
     client_id_env: GITLAB_OAUTH_CLIENT_ID
     client_secret_env: GITLAB_OAUTH_CLIENT_SECRET
-  bootstrap_admins: []              # 默认不授予平台管理员；项目数据仍需 grant
+  bootstrap_admins: []              # 默认不授予平台管理员；管理员隐式管理全部已登记项目，其他用户仍需 grant
   session_ttl: 168h                 # 持久化浏览器会话有效期
 
 storage:

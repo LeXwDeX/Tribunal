@@ -55,12 +55,21 @@ type RegisterInput struct {
 	// OwnerUserID is the registering user. A positive ID receives a manage
 	// grant atomically with the project; 0 (the bootstrap bearer) writes none.
 	OwnerUserID int64
+	// TrustedPlatformAdmin skips the GitLab membership check. Platform
+	// administrators manage every registered project, so they may register a
+	// project without joining it first; the static bootstrap bearer is also
+	// trusted because it has no GitLab identity to check.
+	TrustedPlatformAdmin bool
 }
 
 // ValidateProjectInput is a read-only repository connection check.
 type ValidateProjectInput struct {
 	Project     string
 	AccessToken string
+	// TrustedPlatformAdmin skips the Reporter membership requirement for
+	// platform administrators and the static bootstrap bearer, matching
+	// Register. The token owner is still identified for the response.
+	TrustedPlatformAdmin bool
 }
 
 // ProjectValidation is the metadata returned by a successful read-only check.
@@ -91,6 +100,15 @@ const WarningWebhookRequiresMaintainer = "webhook_requires_maintainer"
 type TokenRotation struct {
 	Project  *store.Project
 	Warnings []ProjectWarning
+}
+
+// validationWarnings omits role warnings for trusted callers, whose missing
+// membership is intentional rather than a token limitation.
+func validationWarnings(access int, trusted bool) []ProjectWarning {
+	if trusted && access < reporterAccessLevel {
+		return nil
+	}
+	return tokenRoleWarnings(access)
 }
 
 // tokenRoleWarnings returns the warnings for a project access level.
@@ -248,9 +266,10 @@ func NewProjectService(cfg ProjectServiceConfig) (*ProjectService, error) {
 	}, nil
 }
 
-// projectAlreadyRegisteredMessage is returned only on the platform-admin
-// registration route, so the hint never reveals existence to other callers.
-const projectAlreadyRegisteredMessage = "project is already registered; if it is not in your project list, grant yourself access on the System page"
+// projectAlreadyRegisteredMessage is returned when registration finds an
+// existing project. The hint asks for assignment instead of exposing how the
+// project is administered.
+const projectAlreadyRegisteredMessage = "project is already registered; ask a platform administrator to assign it to you"
 
 // Register validates the project token and scopes, optionally creates a
 // webhook, then atomically stores the project and onboarding job.
@@ -289,6 +308,11 @@ func (s *ProjectService) Register(ctx context.Context, in RegisterInput) (*Regis
 	}
 	if err := s.verifyProject(project, ref, false); err != nil {
 		return nil, err
+	}
+	if !in.TrustedPlatformAdmin {
+		if err := s.verifyRegistrationMembership(ctx, in.AccessToken, project.ID); err != nil {
+			return nil, err
+		}
 	}
 
 	info, err := s.gitlab.GetTokenInfo(ctx, in.AccessToken)
@@ -423,6 +447,40 @@ func (s *ProjectService) Register(ctx context.Context, in RegisterInput) (*Regis
 	return result, nil
 }
 
+// verifyRegistrationMembership requires a non-admin registrant's token to
+// identify a member with Reporter access or higher. Without this check any
+// signed-in user could claim a public or internal project they can merely read.
+func (s *ProjectService) verifyRegistrationMembership(ctx context.Context, token string, projectID int64) error {
+	user, err := s.gitlab.CurrentUser(ctx, token)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		s.logger.Warn("GitLab current user lookup failed", "status", gitlab.StatusOf(err))
+		return upstreamError(gitlab.StatusOf(err))
+	}
+	if user == nil || user.ID <= 0 || strings.TrimSpace(user.Username) == "" {
+		return upstreamError(0)
+	}
+	access, err := s.gitlab.GetMemberAccess(ctx, token, projectID, user.ID)
+	if err != nil {
+		if gitlab.IsNotFound(err) {
+			return validationError("access level is insufficient",
+				Detail{Field: "access_level", Message: "Reporter or higher is required to register this project"})
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		s.logger.Warn("GitLab member lookup failed", "status", gitlab.StatusOf(err))
+		return upstreamError(gitlab.StatusOf(err))
+	}
+	if access < reporterAccessLevel {
+		return validationError("access level is insufficient",
+			Detail{Field: "access_level", Message: "Reporter or higher is required to register this project"})
+	}
+	return nil
+}
+
 // Validate performs a read-only connection check. It does not persist the
 // project, encrypt the token, create a webhook, enqueue a job, or call a model.
 func (s *ProjectService) Validate(ctx context.Context, in ValidateProjectInput) (*ProjectValidation, error) {
@@ -455,11 +513,17 @@ func (s *ProjectService) Validate(ctx context.Context, in ValidateProjectInput) 
 	if user == nil || user.ID <= 0 || strings.TrimSpace(user.Username) == "" {
 		return nil, upstreamError(0)
 	}
-	access, err := s.gitlab.GetMemberAccess(ctx, in.AccessToken, project.ID, user.ID)
-	if err != nil {
-		return nil, s.validationUpstreamError(ctx, "get_member", err)
-	}
-	if access < reporterAccessLevel {
+	access, memberErr := s.gitlab.GetMemberAccess(ctx, in.AccessToken, project.ID, user.ID)
+	if memberErr != nil {
+		if !in.TrustedPlatformAdmin {
+			if gitlab.IsNotFound(memberErr) {
+				return nil, validationError("access level is insufficient",
+					Detail{Field: "access_level", Message: "Reporter or higher is required"})
+			}
+			return nil, s.validationUpstreamError(ctx, "get_member", memberErr)
+		}
+		access = 0
+	} else if access < reporterAccessLevel && !in.TrustedPlatformAdmin {
 		return nil, validationError("access level is insufficient",
 			Detail{Field: "access_level", Message: "Reporter or higher is required"})
 	}
@@ -495,7 +559,7 @@ func (s *ProjectService) Validate(ctx context.Context, in ValidateProjectInput) 
 		TokenScopes:       append([]string(nil), info.Scopes...),
 		TokenExpiresAt:    info.ExpiresAt,
 		GitHead:           strings.ToLower(head),
-		Warnings:          tokenRoleWarnings(access),
+		Warnings:          validationWarnings(access, in.TrustedPlatformAdmin),
 	}, nil
 }
 

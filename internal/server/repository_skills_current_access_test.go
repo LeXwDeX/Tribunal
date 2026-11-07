@@ -32,7 +32,9 @@ type discoveryUnusedGit struct{ app.GitOps }
 type discoveryUnusedGitLab struct{ app.GitLabClient }
 
 func TestRepositorySkillDiscoveryRechecksCurrentAccess(t *testing.T) {
-	for _, change := range []string{"unchanged", "platform", "configured-platform", "project", "disabled", "missing-current-access"} {
+	// Project grants no longer gate host execution for platform administrators;
+	// role demotion, configured-admin removal, disabling and missing access do.
+	for _, change := range []string{"unchanged", "platform", "configured-platform", "disabled", "missing-current-access"} {
 		t.Run(change, func(t *testing.T) { testRepositorySkillDiscoveryAccessChange(t, change) })
 	}
 }
@@ -76,7 +78,8 @@ func testRepositorySkillDiscoveryAccessChange(t *testing.T, change string) {
 	case "disabled":
 		changeErr = env.db.SetUserDisabled(context.Background(), 7, true)
 	case "missing-current-access":
-		env.service.access = repositorySkillHTTPAccess{role: store.ProjectAccessManage}
+		// This access store has no host-execution authorization surface.
+		env.service.access = paginationAccess{}
 	}
 	if changeErr != nil {
 		close(paused.release)

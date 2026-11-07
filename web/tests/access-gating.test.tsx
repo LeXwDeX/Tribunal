@@ -143,6 +143,18 @@ describe('project access gates write controls', () => {
     expect(await screen.findByRole('switch', { name: '启用 group/backend' })).toBeInTheDocument()
   })
 
+  it('offers project registration on the overview to a signed-in viewer', async () => {
+    installFetch((url) => {
+      const parsed = new URL(url, 'http://localhost')
+      if (parsed.pathname === '/api/v1/stats') return jsonResponse({ runs: 0 })
+      if (parsed.pathname === '/api/v1/reviews') return jsonResponse({ reviews: [] })
+      if (parsed.pathname === '/api/v1/projects') return jsonResponse({ projects: [] })
+      return jsonResponse({})
+    })
+    renderWithProviders(<OverviewPage />, { route: '/', me: viewerMe })
+    expect(await screen.findByRole('link', { name: '注册项目' })).toBeInTheDocument()
+  })
+
   it('gates overview manual triggering on manageable projects', async () => {
     const overviewRoutes = (access: 'read' | 'manage') => (url: string) => {
       const parsed = new URL(url, 'http://localhost')

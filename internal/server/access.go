@@ -149,9 +149,31 @@ func (s *Server) requireAccess(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
+// isPlatformAdmin reports whether the request principal is a platform
+// administrator. The static bootstrap bearer (ID 0) never qualifies, and the
+// role is recomputed per request so granted administrators are included.
+func (s *Server) isPlatformAdmin(r *http.Request) bool {
+	value, ok := principalFrom(r.Context())
+	if !ok || value.user.ID <= 0 || s.auth == nil {
+		return false
+	}
+	return s.roleFor(r.Context(), value.user) == roleAdmin
+}
+
+// projectScopeUserID scopes business list and stats queries. Platform
+// administrators are unscoped; everyone else keeps the existing grant or
+// global-read scope. The static bearer remains scoped to ID 0 (matches no row).
+func (s *Server) projectScopeUserID(r *http.Request) *int64 {
+	if s.isPlatformAdmin(r) {
+		return nil
+	}
+	return accessUserIDPtr(currentUserID(r))
+}
+
 // requireProjectAccess checks the stored grant for the authenticated user.
-// Platform administrators get no implicit grant: missing grants are 404 and a
-// read grant cannot perform a manage operation.
+// Platform administrators have implicit manage access to every registered
+// project (the project must still exist), while missing grants for other users
+// are 404 and a read grant cannot perform a manage operation.
 func (s *Server) requireProjectAccess(w http.ResponseWriter, r *http.Request, projectID int64, manage bool) (string, bool) {
 	if !s.requireAccess(w, r) {
 		return "", false
@@ -165,6 +187,25 @@ func (s *Server) requireProjectAccess(w http.ResponseWriter, r *http.Request, pr
 	if value.user.ID <= 0 || projectID <= 0 {
 		writeError(w, r, http.StatusNotFound, "not_found", "not found", nil)
 		return "", false
+	}
+	if s.isPlatformAdmin(r) {
+		// Confirm the project exists so a deleted or unknown ID stays 404. A
+		// server without a project service (narrow tests) skips the lookup;
+		// its handlers cannot serve project data anyway.
+		if s.projects != nil {
+			if _, err := s.projects.Get(r.Context(), projectID); err != nil {
+				var appErr *app.Error
+				if errors.Is(err, store.ErrNotFound) || (errors.As(err, &appErr) && appErr.Code == "not_found") {
+					writeError(w, r, http.StatusNotFound, "not_found", "not found", nil)
+					return "", false
+				}
+				s.logger.Error("project lookup failed",
+					"request_id", requestID(r.Context()), "project_id", projectID)
+				writeError(w, r, http.StatusInternalServerError, "internal", "internal error", nil)
+				return "", false
+			}
+		}
+		return store.ProjectAccessManage, true
 	}
 	role, err := s.access.GetProjectAccess(r.Context(), value.user.ID, projectID)
 	if err != nil {
@@ -215,9 +256,28 @@ func currentUserID(r *http.Request) int64 {
 // dispatchContext requires a fresh manage grant inside the dispatcher's
 // project lifecycle lock. It never grants an unauthenticated HTTP request.
 func (s *Server) dispatchContext(r *http.Request, projectID int64) context.Context {
-	userID := currentUserID(r)
+	principal, ok := principalFrom(r.Context())
+	userID := principal.user.ID
 	return app.WithDispatchAuthorization(r.Context(), func(ctx context.Context, id int64) error {
-		if s.access == nil || userID <= 0 || projectID <= 0 || id != projectID {
+		if !ok || userID <= 0 || projectID <= 0 || id != projectID {
+			return store.ErrNotFound
+		}
+		// Re-read the role and account state inside the lifecycle lock: the
+		// request may have waited while the administrator was demoted or
+		// disabled. roleFor alone is not enough for configured administrators,
+		// because configuredRoleFor does not check the disabled flag.
+		if s.auth != nil && s.roleFor(ctx, principal.user) == roleAdmin {
+			if users, hasUsers := s.access.(interface {
+				GetUser(context.Context, int64) (*store.User, error)
+			}); hasUsers {
+				user, err := users.GetUser(ctx, userID)
+				if err != nil || user.Disabled {
+					return store.ErrNotFound
+				}
+				return nil
+			}
+		}
+		if s.access == nil {
 			return store.ErrNotFound
 		}
 		role, err := s.access.GetProjectAccess(ctx, userID, id)

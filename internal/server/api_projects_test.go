@@ -301,16 +301,15 @@ func TestValidateProjectEndpoint(t *testing.T) {
 	}); got.status != http.StatusOK {
 		t.Fatalf("bearer validate = %d %s", got.status, got.body)
 	}
-	for name, client := range map[string]*m6Client{
-		"viewer":  env.loginAs("code-viewer"),
-		"no csrf": admin.withoutCSRF(),
-	} {
-		got := client.json(http.MethodPost, "/api/v1/projects/validate", map[string]any{
-			"project": "42", "token": testProjectTok,
-		})
-		if got.status != http.StatusForbidden {
-			t.Fatalf("%s validate = %d %s", name, got.status, got.body)
-		}
+	if got := env.loginAs("code-viewer").json(http.MethodPost, "/api/v1/projects/validate", map[string]any{
+		"project": "42", "token": testProjectTok,
+	}); got.status != http.StatusOK {
+		t.Fatalf("viewer validate = %d %s", got.status, got.body)
+	}
+	if got := admin.withoutCSRF().json(http.MethodPost, "/api/v1/projects/validate", map[string]any{
+		"project": "42", "token": testProjectTok,
+	}); got.status != http.StatusForbidden {
+		t.Fatalf("no csrf validate = %d %s", got.status, got.body)
 	}
 	if got := admin.json(http.MethodPost, "/api/v1/projects/validate", map[string]any{
 		"project": "42", "token": testProjectTok, "extra": true,

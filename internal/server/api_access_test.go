@@ -63,10 +63,10 @@ func TestProjectAccessIsolationTwoUsersTwoProjects(t *testing.T) {
 		want   int
 	}{
 		"alice own project":       {alice, "/api/v1/projects/42", http.StatusOK},
-		"alice foreign project":   {alice, "/api/v1/projects/43", http.StatusNotFound},
+		"alice any project":       {alice, "/api/v1/projects/43", http.StatusOK},
 		"bob foreign project":     {bob, "/api/v1/projects/42", http.StatusNotFound},
 		"bob granted project":     {bob, "/api/v1/projects/43", http.StatusOK},
-		"alice foreign review":    {alice, "/api/v1/reviews/wf-43", http.StatusNotFound},
+		"alice any review":        {alice, "/api/v1/reviews/wf-43", http.StatusOK},
 		"bob foreign review":      {bob, "/api/v1/reviews/wf-42", http.StatusNotFound},
 		"bob granted review":      {bob, "/api/v1/reviews/wf-43", http.StatusOK},
 		"bob foreign node":        {bob, "/api/v1/reviews/wf-42/nodes/plan", http.StatusNotFound},
@@ -91,14 +91,14 @@ func TestProjectAccessIsolationTwoUsersTwoProjects(t *testing.T) {
 
 	aliceList := alice.request(http.MethodGet, "/api/v1/reviews", nil, nil)
 	assertStatus(t, aliceList, http.StatusOK)
-	assertReviewIDs(t, env.decode(t, aliceList), []string{"wf-42"})
+	assertReviewIDs(t, env.decode(t, aliceList), []string{"wf-43", "wf-42"})
 	bobList := bob.request(http.MethodGet, "/api/v1/reviews", nil, nil)
 	assertStatus(t, bobList, http.StatusOK)
 	assertReviewIDs(t, env.decode(t, bobList), []string{"wf-43"})
 
 	aliceProjects := alice.request(http.MethodGet, "/api/v1/projects", nil, nil)
 	assertStatus(t, aliceProjects, http.StatusOK)
-	assertProjectAccess(t, env.decode(t, aliceProjects), map[int64]string{42: store.ProjectAccessManage})
+	assertProjectAccess(t, env.decode(t, aliceProjects), map[int64]string{42: store.ProjectAccessManage, 43: store.ProjectAccessManage})
 	bobProjects := bob.request(http.MethodGet, "/api/v1/projects", nil, nil)
 	assertStatus(t, bobProjects, http.StatusOK)
 	assertProjectAccess(t, env.decode(t, bobProjects), map[int64]string{43: store.ProjectAccessRead})
@@ -131,7 +131,7 @@ func TestProjectAccessIsolationTwoUsersTwoProjects(t *testing.T) {
 		map[string]any{"annotation": "valid"})
 	assertStatus(t, bobAnnotate, http.StatusForbidden)
 
-	// Stats always carry the caller's access scope before aggregation.
+	// Ordinary users carry their access scope; administrators are unscoped.
 	bobStats := bob.request(http.MethodGet, "/api/v1/stats", nil, nil)
 	assertStatus(t, bobStats, http.StatusOK)
 	if fake.lastStats.AccessUserID == nil || *fake.lastStats.AccessUserID != 8 {
@@ -139,8 +139,8 @@ func TestProjectAccessIsolationTwoUsersTwoProjects(t *testing.T) {
 	}
 	aliceStats := alice.request(http.MethodGet, "/api/v1/stats?project_id=42", nil, nil)
 	assertStatus(t, aliceStats, http.StatusOK)
-	if fake.lastStats.AccessUserID == nil || *fake.lastStats.AccessUserID != 7 {
-		t.Fatalf("stats access user = %v", fake.lastStats.AccessUserID)
+	if fake.lastStats.AccessUserID != nil {
+		t.Fatalf("admin stats access user = %v, want unscoped", *fake.lastStats.AccessUserID)
 	}
 	if fake.lastStats.ProjectID == nil || *fake.lastStats.ProjectID != 42 {
 		t.Fatalf("stats project filter = %v", fake.lastStats.ProjectID)
@@ -200,7 +200,8 @@ func TestExtensionScopeAuthorization(t *testing.T) {
 		})
 	}
 
-	// Updates still require the platform admin role and project manage grant.
+	// Updates still require the platform administrator role; administrators do
+	// not need a per-project grant.
 	project42, project43 := int64(42), int64(43)
 	env.extensions.servers = []MCPServer{
 		{ID: "platform", Scope: "platform", Name: "platform", Enabled: true},
@@ -212,11 +213,11 @@ func TestExtensionScopeAuthorization(t *testing.T) {
 	bobPlatform := bob.json(http.MethodPut, "/api/v1/mcp-servers/platform", map[string]any{"enabled": false})
 	assertStatus(t, bobPlatform, http.StatusForbidden)
 
-	// Alice is a platform admin but still needs the manage grant.
+	// Alice is a platform admin, so both project extensions are writable.
 	aliceCreate := alice.json(http.MethodPut, "/api/v1/mcp-servers/project42", map[string]any{"enabled": false})
 	assertStatus(t, aliceCreate, http.StatusOK)
 	aliceOther := alice.json(http.MethodPut, "/api/v1/mcp-servers/project43", map[string]any{"enabled": false})
-	assertStatus(t, aliceOther, http.StatusNotFound)
+	assertStatus(t, aliceOther, http.StatusOK)
 }
 
 func TestPublicationStateFilterAndStreamTerminal(t *testing.T) {

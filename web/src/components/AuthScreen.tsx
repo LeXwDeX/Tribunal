@@ -42,7 +42,7 @@ export function AuthScreen({
             <span className={styles.cardMark}><BrandMark size={30} /></span>
             <h1 className={styles.title} id="login-title">登录评审平台</h1>
             <p className={styles.text}>
-              使用 GitLab 账号登录。管理员可注册项目和维护配置，只读用户只能查看评审证据。
+              使用 GitLab 账号登录。登录后可注册自己的项目并管理分配给你的项目；平台管理员还可维护平台配置和用户授权。
             </p>
           </div>
           {notice ? <p className={styles.notice} role="status">{notice}</p> : null}

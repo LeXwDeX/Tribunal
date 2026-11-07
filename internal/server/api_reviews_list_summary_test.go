@@ -108,26 +108,26 @@ func TestListReviewsSummaryKeepsAccessFiltering(t *testing.T) {
 	fake.setFindings("wf-43", store.Finding{ID: "secret", WorkflowID: "wf-43", Severity: "P0", Decision: "publish"})
 	env.grant(7, 42, store.ProjectAccessManage)
 	env.grant(8, 43, store.ProjectAccessRead)
-	alice := env.loginAs("code-admin")
+	bob := env.loginAs("code-viewer")
 
 	fake.resetReadCounters()
-	list := alice.request(http.MethodGet, "/api/v1/reviews", nil, nil)
+	list := bob.request(http.MethodGet, "/api/v1/reviews", nil, nil)
 	assertStatus(t, list, http.StatusOK)
 	items := listItemsByID(t, env.decode(t, list))
 	if len(items) != 1 {
-		t.Fatalf("alice sees %d reviews: %s", len(items), list.body)
+		t.Fatalf("bob sees %d reviews: %s", len(items), list.body)
 	}
-	item, ok := items["wf-42"]
+	item, ok := items["wf-43"]
 	if !ok {
-		t.Fatalf("wf-42 missing: %s", list.body)
+		t.Fatalf("wf-43 missing: %s", list.body)
 	}
 	if nodes := item["nodes"].([]any); len(nodes) != 1 {
-		t.Fatalf("wf-42 nodes = %v", nodes)
+		t.Fatalf("wf-43 nodes = %v", nodes)
 	}
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
 	for _, ids := range append(append([][]string{}, fake.nodeBatchReads...), fake.findingCountReads...) {
-		if !reflect.DeepEqual(ids, []string{"wf-42"}) {
+		if !reflect.DeepEqual(ids, []string{"wf-43"}) {
 			t.Fatalf("summary read covered %v", ids)
 		}
 	}

@@ -200,10 +200,16 @@ func workflowStreamEvent(snapshot streamSnapshot) streamWorkflowEvent {
 
 // streamStillAuthorized repeats authentication and the project grant check.
 // It never writes a response: the stream is already open, so the only safe
-// outcome is closing it.
+// outcome is closing it. Platform administrators keep every project readable.
 func (s *Server) streamStillAuthorized(r *http.Request, projectID int64) bool {
 	value, ok := s.authenticate(r)
-	if !ok || value.user.ID <= 0 || s.access == nil {
+	if !ok || value.user.ID <= 0 {
+		return false
+	}
+	if s.roleFor(r.Context(), value.user) == roleAdmin {
+		return true
+	}
+	if s.access == nil {
 		return false
 	}
 	_, err := s.access.GetProjectAccess(r.Context(), value.user.ID, projectID)

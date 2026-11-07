@@ -184,6 +184,7 @@ describe('admin user and grant management', () => {
     expect(await within(projectSelect).findByRole('option', { name: 'group/second' })).toBeInTheDocument()
 
     await user.selectOptions(projectSelect, '7')
+    expect(screen.getByLabelText('权限角色')).toHaveValue('manage')
     await waitFor(() => expect(grantReads).toContain('/api/v1/admin/projects/7/grants'))
     expect(await screen.findByText('bob')).toBeInTheDocument()
 

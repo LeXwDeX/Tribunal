@@ -252,14 +252,24 @@ func TestRepositorySkillAuthorizationRejectsCorruptTargetState(t *testing.T) {
 	}
 }
 
-func TestRepositorySkillAuthorizationChecksCurrentManageGrantAndNames(t *testing.T) {
+func TestRepositorySkillAuthorizationChecksCurrentAdminRoleAndNames(t *testing.T) {
 	ctx := context.Background()
 	s := repositorySkillStore(t)
+	mustAccessUser(t, s, 8, "bob", "viewer")
+	if err := s.SetProjectGrant(ctx, 42, 8, store.ProjectAccessManage); err != nil {
+		t.Fatal(err)
+	}
 	grant := store.RepositorySkillAuthorization{ProjectID: 42, TargetBranch: "main", TargetSHA: strings.Repeat("a", 40), Block: "review", Skills: []string{"repo:safe"}, SnapshotSHA256: strings.Repeat("b", 64)}
+	// Host execution stays administrator-only: a project manager without the
+	// platform administrator role is rejected even with a manage grant.
+	if _, err := s.SaveRepositorySkillAuthorization(ctx, grant, store.BlockBindingAbsentRevision, 8); err == nil {
+		t.Fatal("project manager without platform admin authorized repository skills")
+	}
+	// A platform administrator does not need a per-project grant.
 	otherProject := grant
 	otherProject.ProjectID = 43
-	if _, err := s.SaveRepositorySkillAuthorization(ctx, otherProject, store.BlockBindingAbsentRevision, 7); err == nil {
-		t.Fatal("manage grant for another project authorized repository skills")
+	if _, err := s.SaveRepositorySkillAuthorization(ctx, otherProject, store.BlockBindingAbsentRevision, 7); err != nil {
+		t.Fatalf("admin save on another project: %v", err)
 	}
 	for _, name := range []string{"safe", "repo:", "repo:../bad", "repo:Bad", "repo:a__b"} {
 		invalid := grant
@@ -267,15 +277,6 @@ func TestRepositorySkillAuthorizationChecksCurrentManageGrantAndNames(t *testing
 		if _, err := s.SaveRepositorySkillAuthorization(ctx, invalid, store.BlockBindingAbsentRevision, 7); err == nil {
 			t.Errorf("invalid source-qualified name %q accepted", name)
 		}
-	}
-	if err := s.SetProjectGrant(ctx, 42, 7, store.ProjectAccessRead); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.SaveRepositorySkillAuthorization(ctx, grant, store.BlockBindingAbsentRevision, 7); err == nil {
-		t.Fatal("project reader authorized repository skills")
-	}
-	if err := s.SetProjectGrant(ctx, 42, 7, store.ProjectAccessManage); err != nil {
-		t.Fatal(err)
 	}
 	if err := s.SetUserDisabled(ctx, 7, true); err != nil {
 		t.Fatal(err)
