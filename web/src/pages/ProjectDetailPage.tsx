@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link, Navigate, useNavigate, useParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { getProject, getStats, listProjects, listReviews } from '../api/api'
@@ -8,7 +8,7 @@ import { SettingsPanel } from '../features/project/SettingsPanel'
 import { WorkspacePanel } from '../features/project/WorkspacePanel'
 import { ReviewTable } from '../components/ReviewTable'
 import {
-  Badge, Button, ButtonLink, EmptyState, ErrorState, LoadingState, Metric, PageHeader, Panel, StatusBadge, Tabs,
+  Badge, Button, ButtonLink, ConfirmDialog, EmptyState, ErrorState, LoadingState, Metric, PageHeader, Panel, StatusBadge, Tabs,
 } from '../components/ui'
 import { usePaginated } from '../lib/hooks'
 import {
@@ -119,7 +119,10 @@ function ProjectOverview({ project }: { project: Project }) {
   )
 }
 
-function ProjectExtensionsPanel({ project }: { project: Project }) {
+function ProjectExtensionsPanel({ project, onBindingsDirtyChange }: {
+  project: Project
+  onBindingsDirtyChange: (dirty: boolean) => void
+}) {
   const [subTab, setSubTab] = useState('mcp')
   return (
     <ExtensionsManager
@@ -130,6 +133,7 @@ function ProjectExtensionsPanel({ project }: { project: Project }) {
       projects={[project]}
       tab={subTab}
       onTabChange={setSubTab}
+      onBindingsDirtyChange={onBindingsDirtyChange}
     />
   )
 }
@@ -144,6 +148,43 @@ export function ProjectDetailPage() {
     queryFn: () => getProject(projectId),
     enabled: Number.isInteger(projectId) && projectId > 0,
   })
+
+  // Keep the extensions panel mounted while a route-driven tab change would
+  // discard unsaved block binding drafts, and restore the URL until confirmed.
+  const [shownTab, setShownTab] = useState(tab)
+  const [extensionsDirty, setExtensionsDirty] = useState(false)
+  const [pendingOuterTab, setPendingOuterTab] = useState<string | null>(null)
+
+  // A different project starts from a clean extensions panel.
+  useEffect(() => { setExtensionsDirty(false) }, [projectId])
+
+  useEffect(() => {
+    if (tab === shownTab) return
+    if (shownTab === 'extensions' && extensionsDirty) {
+      setPendingOuterTab(tab)
+      navigate(`/projects/${projectId}/${shownTab}`, { replace: true })
+      return
+    }
+    setShownTab(tab)
+  }, [tab, shownTab, extensionsDirty, navigate, projectId])
+
+  const changeTab = (next: string) => {
+    if (next === shownTab) return
+    if (shownTab === 'extensions' && extensionsDirty) {
+      setPendingOuterTab(next)
+      return
+    }
+    setShownTab(next)
+    navigate(`/projects/${projectId}/${next}`)
+  }
+  const discardExtensionsAndChangeTab = () => {
+    const next = pendingOuterTab
+    setPendingOuterTab(null)
+    setExtensionsDirty(false)
+    if (!next) return
+    setShownTab(next)
+    navigate(`/projects/${projectId}/${next}`)
+  }
 
   if (!Number.isInteger(projectId) || projectId <= 0) {
     return <main className={ui.page}><ErrorState error={new Error('URL 中的项目 ID 无效。')} title="无法打开项目" /></main>
@@ -188,19 +229,30 @@ export function ProjectDetailPage() {
 
         <Tabs
           items={projectTabs}
-          value={tab}
-          onChange={(next) => navigate(`/projects/${projectId}/${next}`)}
+          value={shownTab}
+          onChange={changeTab}
           label="项目详情"
           idPrefix="project-tab"
         />
 
-        <div id={`project-tabpanel-${tab}`} role="tabpanel" aria-labelledby={`project-tab-${tab}`}>
-          {tab === 'overview' ? <ProjectOverview project={data} /> : null}
-          {tab === 'workspace' ? <WorkspacePanel key={data.id} projectId={data.id} canManage={data.access === 'manage'} /> : null}
-          {tab === 'settings' ? <SettingsPanel key={data.id} project={data} /> : null}
-          {tab === 'extensions' ? <ProjectExtensionsPanel project={data} /> : null}
+        <div id={`project-tabpanel-${shownTab}`} role="tabpanel" aria-labelledby={`project-tab-${shownTab}`}>
+          {shownTab === 'overview' ? <ProjectOverview project={data} /> : null}
+          {shownTab === 'workspace' ? <WorkspacePanel key={data.id} projectId={data.id} canManage={data.access === 'manage'} /> : null}
+          {shownTab === 'settings' ? <SettingsPanel key={data.id} project={data} /> : null}
+          {shownTab === 'extensions' ? (
+            <ProjectExtensionsPanel project={data} onBindingsDirtyChange={setExtensionsDirty} />
+          ) : null}
         </div>
       </div>
+
+      <ConfirmDialog
+        open={Boolean(pendingOuterTab)}
+        onClose={() => setPendingOuterTab(null)}
+        onConfirm={discardExtensionsAndChangeTab}
+        title="放弃未保存的绑定修改？"
+        description="切换标签会丢弃块绑定矩阵中尚未保存的修改。"
+        confirmLabel="放弃并切换"
+      />
     </main>
   )
 }

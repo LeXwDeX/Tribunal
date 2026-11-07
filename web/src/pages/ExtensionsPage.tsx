@@ -89,7 +89,7 @@ export function ExtensionsPage() {
           projectId={scope === 'project' && projectId ? Number(projectId) : undefined}
           canManage={scope === 'project' && projectOptions.find((project) => String(project.id) === projectId)?.access === 'manage'}
           tab={tab}
-          onTabChange={(next) => navigate(`/extensions/${next}`)}
+          onTabChange={(next, replace) => navigate(`/extensions/${next}`, { replace })}
           projects={projectOptions}
           placeholder={projectPlaceholder}
           notice={projectNotice}

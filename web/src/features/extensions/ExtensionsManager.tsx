@@ -57,7 +57,10 @@ type ExtensionsManagerProps = {
   scope: 'platform' | 'project'
   projectId?: number
   tab: string
-  onTabChange: (tab: string) => void
+  // `replace` keeps the guarded tab in the history entry instead of pushing a
+  // new one when a route-driven change is rolled back.
+  onTabChange: (tab: string, replace?: boolean) => void
+  onBindingsDirtyChange?: (dirty: boolean) => void
   projects?: Project[]
   canManage?: boolean
   // Shown in the tab panel while project scope has no project selected.
@@ -71,7 +74,7 @@ export function ExtensionsManager(props: ExtensionsManagerProps) {
 }
 
 function ScopedExtensionsManager({
-  scope, projectId, tab, onTabChange, projects = [], canManage = false, placeholder, notice,
+  scope, projectId, tab, onTabChange, onBindingsDirtyChange, projects = [], canManage = false, placeholder, notice,
 }: ExtensionsManagerProps) {
   const platformAdmin = useCanWrite()
   // Every extension write changes host execution security, so the server
@@ -90,27 +93,46 @@ function ScopedExtensionsManager({
   const [skillDeleteError, setSkillDeleteError] = useState<unknown>(null)
   const [bindingsDirty, setBindingsDirty] = useState(false)
   const [bindingsBusy, setBindingsBusy] = useState(false)
+  // The rendered tab can temporarily differ from the routed tab while a
+  // guarded change is pending: keeping the bindings panel mounted preserves
+  // its drafts even when the URL (browser back/forward, a link) already moved.
+  const [shownTab, setShownTab] = useState(tab)
   const [pendingTab, setPendingTab] = useState<string | null>(null)
 
-  useEffect(() => { setPendingTab(null) }, [tab])
+  useEffect(() => { onBindingsDirtyChange?.(bindingsDirty) }, [bindingsDirty, onBindingsDirtyChange])
+
+  useEffect(() => {
+    if (tab === shownTab) return
+    if (shownTab === 'bindings' && bindingsDirty) {
+      // Restore the routed tab so the URL keeps describing the panel on screen,
+      // then ask before the drafts are discarded.
+      setPendingTab(tab)
+      onTabChange(shownTab, true)
+      return
+    }
+    setShownTab(tab)
+  }, [tab, shownTab, bindingsDirty, onTabChange])
 
   const changeTab = (next: string) => {
-    if (next === tab) return
+    if (next === shownTab) return
     if (bindingsBusy) {
       toast.push('info', '正在保存绑定，请稍后切换。')
       return
     }
-    if (tab === 'bindings' && bindingsDirty) {
+    if (shownTab === 'bindings' && bindingsDirty) {
       setPendingTab(next)
       return
     }
+    setShownTab(next)
     onTabChange(next)
   }
   const discardBindingsAndChangeTab = () => {
     const next = pendingTab
     setPendingTab(null)
     setBindingsDirty(false)
-    if (next) onTabChange(next)
+    if (!next) return
+    setShownTab(next)
+    onTabChange(next)
   }
 
   const projectEnabled = scope === 'platform' || Boolean(projectId)
@@ -246,14 +268,14 @@ function ScopedExtensionsManager({
 
   return (
     <div className={ui.pageStack}>
-      <Tabs items={tabItems} value={tab} onChange={changeTab} label="扩展类型" idPrefix="extension-tab" />
-      <div role="tabpanel" id={`tabpanel-${tab}`} aria-labelledby={`extension-tab-${tab}`} className={ui.pageStack}>
+      <Tabs items={tabItems} value={shownTab} onChange={changeTab} label="扩展类型" idPrefix="extension-tab" />
+      <div role="tabpanel" id={`tabpanel-${shownTab}`} aria-labelledby={`extension-tab-${shownTab}`} className={ui.pageStack}>
       {notice}
       {!projectEnabled ? (
         placeholder ?? <EmptyState title="请选择项目" description="项目级扩展需要指定项目后才能读取。" />
       ) : null}
 
-      {projectEnabled && tab === 'mcp' ? (
+      {projectEnabled && shownTab === 'mcp' ? (
         <McpTab
           canWrite={canWrite}
           scope={scope}
@@ -266,7 +288,7 @@ function ScopedExtensionsManager({
         />
       ) : null}
 
-      {projectEnabled && tab === 'skills' ? (
+      {projectEnabled && shownTab === 'skills' ? (
         <SkillsTab
           canWrite={canWrite}
           skills={skills}
@@ -276,7 +298,7 @@ function ScopedExtensionsManager({
         />
       ) : null}
 
-      {projectEnabled && tab === 'bindings' ? (
+      {projectEnabled && shownTab === 'bindings' ? (
         // Drafts belong to one scope: a cached project switch must remount
         // instead of merging project A's draft into project B's baseline.
         <BindingsTab
