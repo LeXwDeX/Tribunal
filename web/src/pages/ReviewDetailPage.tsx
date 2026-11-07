@@ -508,6 +508,8 @@ export function ReviewDetailPage() {
     queryFn: () => getProject(detail.data!.project_id),
     enabled: Boolean(detail.data?.project_id),
   })
+  // One page is enough for the preset project; the dialog always keeps the
+  // current review project as a fallback when this page has no manage entry.
   const allProjects = useQuery({
     queryKey: ['projects', 'review-trigger'],
     queryFn: () => listProjects({ limit: 100 }),
@@ -517,6 +519,11 @@ export function ReviewDetailPage() {
   const stream = useReviewStream(id, detail.data)
   const projectNames = useMemo(
     () => new Map((allProjects.data?.projects || []).map((item) => [item.id, item.path_with_namespace])),
+    [allProjects.data],
+  )
+  // The trigger endpoint requires manage; read-only projects would only 403.
+  const manageableProjects = useMemo(
+    () => (allProjects.data?.projects || []).filter((item) => item.access === 'manage'),
     [allProjects.data],
   )
 
@@ -770,7 +777,7 @@ export function ReviewDetailPage() {
         <TriggerReviewDialog
           open={triggerOpen}
           onClose={() => setTriggerOpen(false)}
-          projects={allProjects.data?.projects || []}
+          projects={manageableProjects}
           presetProjectId={review.project_id}
           presetIid={review.mr_iid}
           presetProjectLabel={projectPath}
