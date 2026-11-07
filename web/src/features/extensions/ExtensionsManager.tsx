@@ -88,6 +88,23 @@ function ScopedExtensionsManager({
   const [deleteSkillTarget, setDeleteSkillTarget] = useState<Skill | null>(null)
   const [skillDeletePending, setSkillDeletePending] = useState(false)
   const [skillDeleteError, setSkillDeleteError] = useState<unknown>(null)
+  const [bindingsDirty, setBindingsDirty] = useState(false)
+  const [pendingTab, setPendingTab] = useState<string | null>(null)
+
+  const changeTab = (next: string) => {
+    if (next === tab) return
+    if (tab === 'bindings' && bindingsDirty) {
+      setPendingTab(next)
+      return
+    }
+    onTabChange(next)
+  }
+  const discardBindingsAndChangeTab = () => {
+    const next = pendingTab
+    setPendingTab(null)
+    setBindingsDirty(false)
+    if (next) onTabChange(next)
+  }
 
   const projectEnabled = scope === 'platform' || Boolean(projectId)
   const servers = useScopeQuery(projectEnabled, scope, projectId)
@@ -222,7 +239,7 @@ function ScopedExtensionsManager({
 
   return (
     <div className={ui.pageStack}>
-      <Tabs items={tabItems} value={tab} onChange={onTabChange} label="扩展类型" idPrefix="extension-tab" />
+      <Tabs items={tabItems} value={tab} onChange={changeTab} label="扩展类型" idPrefix="extension-tab" />
       <div role="tabpanel" id={`tabpanel-${tab}`} aria-labelledby={`extension-tab-${tab}`} className={ui.pageStack}>
       {notice}
       {!projectEnabled ? (
@@ -265,6 +282,7 @@ function ScopedExtensionsManager({
           skills={skills.items}
           testResults={testResults}
           refreshBindings={refreshBindings}
+          onDirtyChange={setBindingsDirty}
         />
       ) : null}
       </div>
@@ -290,6 +308,14 @@ function ScopedExtensionsManager({
         confirmLabel="删除"
         pending={skillDeletePending}
         error={skillDeleteError}
+      />
+      <ConfirmDialog
+        open={Boolean(pendingTab)}
+        onClose={() => setPendingTab(null)}
+        onConfirm={discardBindingsAndChangeTab}
+        title="放弃未保存的绑定修改？"
+        description="切换标签会丢弃块绑定矩阵中尚未保存的修改。"
+        confirmLabel="放弃并切换"
       />
     </div>
   )
@@ -682,7 +708,7 @@ function mergeBindingDrafts(
   return { baseline, local, conflicts, revisions }
 }
 function BindingsTab({
-  canWrite, scope, projectId, bindingState, servers, skills, testResults, refreshBindings,
+  canWrite, scope, projectId, bindingState, servers, skills, testResults, refreshBindings, onDirtyChange,
 }: {
   canWrite: boolean
   scope: 'platform' | 'project'
@@ -692,6 +718,7 @@ function BindingsTab({
   skills: Skill[]
   testResults: Record<string, { tools?: McpTool[]; error?: string; pending?: boolean }>
   refreshBindings: () => Promise<{ items: BlockBinding[]; complete: boolean }>
+  onDirtyChange?: (dirty: boolean) => void
 }) {
   const toast = useToast()
   const queryClient = useQueryClient()
@@ -870,6 +897,7 @@ function BindingsTab({
   const dirty = useMemo(() => rowNames.some((block) => (
     !sameDraft(baseline[block] || emptyDraft, local[block] || emptyDraft)
   )), [rowNames, baseline, local])
+  useEffect(() => { onDirtyChange?.(dirty) }, [dirty, onDirtyChange])
 
   const previewRestore = async (target: RestoreTarget) => {
     const requestId = ++restoreRequest.current

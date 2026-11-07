@@ -36,3 +36,5 @@ Icon[\r]
 # SpecGit 与本地 Agent 生成的本地资产（不追踪）
 /.claude/settings.json
 /CLAUDE.md
+
+/node_modules/
