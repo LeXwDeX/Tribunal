@@ -29,6 +29,38 @@ interface Alert {
 
 type ReviewIssueKind = 'run' | 'publication' | 'retry'
 
+// The elapsed clock ticks every second; keeping it inside the running list
+// means the rest of the overview (stats, alerts, recent reviews) stays put.
+function RunningReviewList({ items, projectNames }: {
+  items: ReviewSummary[]
+  projectNames: Map<number, string>
+}) {
+  const now = useNow(1000, items.length > 0)
+  return (
+    <ul className={overview.liveList}>
+      {items.map((review) => {
+        const stage = deriveReviewStage(review.nodes)
+        const title = review.mr_title || `!${review.mr_iid}`
+        return (
+          <li key={review.id} className={overview.liveItem}>
+            <div className={overview.primary}>
+              <Link className={overview.liveTitle} to={`/reviews/${encodeURIComponent(review.id)}`} title={title}>{title}</Link>
+              <span className={overview.meta}>
+                <span className={overview.mrRef}>!{review.mr_iid}</span>
+                <span className="mono">{review.project_path || projectNames.get(review.project_id) || `项目 ${review.project_id}`}</span>
+                <span aria-hidden="true">·</span>
+                <Badge plain>{review.profile || '默认档位'}</Badge>
+              </span>
+            </div>
+            <span className={overview.elapsed}>已用时 {elapsedSince(review.created_at, now)}</span>
+            {stage === null ? null : <StageTrack stage={stage} />}
+          </li>
+        )
+      })}
+    </ul>
+  )
+}
+
 interface ReviewIssue {
   review: ReviewSummary
   kind: ReviewIssueKind
@@ -214,8 +246,6 @@ export function OverviewPage() {
     (cursor) => listReviews({ status: 'running' }, cursor),
     'reviews',
   )
-  // Only tick the elapsed clock while at least one review is running.
-  const now = useNow(1000, running.items.length > 0)
   const projectsPage = usePaginated<Project>(
     ['projects', 'overview'],
     (cursor) => listProjects({}, cursor),
@@ -410,27 +440,7 @@ export function OverviewPage() {
               <p className={overview.compactState}>还有未加载的运行中评审数据。</p>
             ) : null}
             {running.items.length ? (
-              <ul className={overview.liveList}>
-                {running.items.map((review) => {
-                  const stage = deriveReviewStage(review.nodes)
-                  const title = review.mr_title || `!${review.mr_iid}`
-                  return (
-                    <li key={review.id} className={overview.liveItem}>
-                      <div className={overview.primary}>
-                        <Link className={overview.liveTitle} to={`/reviews/${encodeURIComponent(review.id)}`} title={title}>{title}</Link>
-                        <span className={overview.meta}>
-                          <span className={overview.mrRef}>!{review.mr_iid}</span>
-                          <span className="mono">{review.project_path || projectNames.get(review.project_id) || `项目 ${review.project_id}`}</span>
-                          <span aria-hidden="true">·</span>
-                          <Badge plain>{review.profile || '默认档位'}</Badge>
-                        </span>
-                      </div>
-                      <span className={overview.elapsed}>已用时 {elapsedSince(review.created_at, now)}</span>
-                      {stage === null ? null : <StageTrack stage={stage} />}
-                    </li>
-                  )
-                })}
-              </ul>
+              <RunningReviewList items={running.items} projectNames={projectNames} />
             ) : null}
             <div className={overview.panelFooter}>
               {running.hasNextPage ? <Button variant="secondary" className={ui.smallButton} onClick={running.fetchNextPage} loading={running.isFetchingNextPage} disabled={running.isFetching || pausedRunning || running.isRefetchError}>加载更多运行中评审</Button> : null}
