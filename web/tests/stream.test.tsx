@@ -97,6 +97,30 @@ describe('review SSE lifecycle', () => {
     expect(FakeEventSource.instances[1].url).toBe('/api/v1/reviews/second.review/stream')
   })
 
+  it('keeps list and stats caches on node events', async () => {
+    const client = createTestQueryClient()
+    const invalidate = vi.spyOn(client, 'invalidateQueries')
+    render(
+      <QueryClientProvider client={client}><Harness id="review.1" status="running" /></QueryClientProvider>,
+    )
+    await vi.waitFor(() => expect(FakeEventSource.instances).toHaveLength(1))
+    const source = FakeEventSource.instances[0]
+    await act(async () => {
+      source.emit('node', JSON.stringify({ id: 'plan', status: 'completed', attempt: 1 }))
+    })
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ['reviews'] })
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ['stats'] })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['review', 'review.1', 'detail'] })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['review', 'review.1', 'graph'] })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['review', 'review.1', 'node', 'plan'] })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['review', 'review.1', 'calls', 'plan'] })
+
+    await act(async () => {
+      source.emit('finding', JSON.stringify({ id: 'f1', decision: 'publish' }))
+    })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['reviews'] })
+  })
+
   it('does not connect for an already-terminal review', () => {
     const client = createTestQueryClient()
     render(

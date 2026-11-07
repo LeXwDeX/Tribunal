@@ -62,7 +62,9 @@ export function useReviewStream(reviewId: string | undefined, review: ReviewDeta
           void queryClient.invalidateQueries({ queryKey: ['review', reviewId, 'node', data.id] })
           void queryClient.invalidateQueries({ queryKey: ['review', reviewId, 'calls', data.id] })
         }
-        invalidateList()
+        // A node event does not change the review list summary: keep the
+        // global running-list query cached and refresh it on workflow and
+        // finding events instead.
       } catch {
         setError('收到无法解析的节点事件。')
       }
