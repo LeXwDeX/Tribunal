@@ -62,7 +62,10 @@ export function useReviewStream(reviewId: string | undefined, review: ReviewDeta
           void queryClient.invalidateQueries({ queryKey: ['review', reviewId, 'node', data.id] })
           void queryClient.invalidateQueries({ queryKey: ['review', reviewId, 'calls', data.id] })
         }
-        invalidateList()
+        // Node events change node-derived counters and cost. Mark stats stale
+        // (this page has no stats observer, so no request); keep the global
+        // review list cached and refresh it on finding/workflow events.
+        void queryClient.invalidateQueries({ queryKey: ['stats'] })
       } catch {
         setError('收到无法解析的节点事件。')
       }
@@ -73,6 +76,7 @@ export function useReviewStream(reviewId: string | undefined, review: ReviewDeta
         void queryClient.invalidateQueries({ queryKey: ['review', reviewId, 'findings'] })
         void queryClient.invalidateQueries({ queryKey: ['review', reviewId, 'detail'] })
         void queryClient.invalidateQueries({ queryKey: ['reviews'] })
+        void queryClient.invalidateQueries({ queryKey: ['stats'] })
       } catch {
         setError('收到无法解析的问题事件。')
       }
