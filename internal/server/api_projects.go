@@ -281,10 +281,6 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 
 // projectGrant re-reads one project grant for response decoration. A row that
 // lost its grant is skipped instead of being shown with stale access.
-func (s *Server) projectGrant(r *http.Request, projectID int64) (string, bool, error) {
-	return s.projectGrantFor(r, projectID, s.isPlatformAdmin(r))
-}
-
 func (s *Server) projectGrantFor(r *http.Request, projectID int64, admin bool) (string, bool, error) {
 	if admin {
 		return store.ProjectAccessManage, true, nil
