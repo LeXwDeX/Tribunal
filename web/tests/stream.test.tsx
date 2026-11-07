@@ -109,16 +109,26 @@ describe('review SSE lifecycle', () => {
       source.emit('node', JSON.stringify({ id: 'plan', status: 'completed', attempt: 1 }))
     })
     expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ['reviews'] })
-    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ['stats'] })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['stats'] })
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['review', 'review.1', 'detail'] })
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['review', 'review.1', 'graph'] })
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['review', 'review.1', 'node', 'plan'] })
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['review', 'review.1', 'calls', 'plan'] })
 
+    invalidate.mockClear()
     await act(async () => {
       source.emit('finding', JSON.stringify({ id: 'f1', decision: 'publish' }))
     })
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['reviews'] })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['stats'] })
+
+    invalidate.mockClear()
+    await act(async () => {
+      source.emit('workflow', JSON.stringify({ status: 'completed', publication_state: 'published' }))
+    })
+    await vi.waitFor(() => expect(source.closed).toBe(true))
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['reviews'] })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['stats'] })
   })
 
   it('does not connect for an already-terminal review', () => {
