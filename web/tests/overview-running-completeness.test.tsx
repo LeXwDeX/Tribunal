@@ -1,14 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { onlineManager } from '@tanstack/react-query'
+import { QueryClient, onlineManager } from '@tanstack/react-query'
 import { OverviewPage } from '../src/pages/OverviewPage'
 import { review } from './fixtures'
 import { installFetch, jsonResponse, renderWithProviders } from './test-utils'
 
 const runningKey = ['reviews', 'overview', 'running']
 
-function setup(running: (url: URL) => Response | Promise<Response>) {
+function setup(running: (url: URL) => Response | Promise<Response>, options: { queryClient?: QueryClient } = {}) {
   installFetch((raw) => {
     const url = new URL(raw, 'http://localhost')
     if (url.pathname === '/api/v1/reviews' && url.searchParams.get('status') === 'running') return running(url)
@@ -17,7 +17,7 @@ function setup(running: (url: URL) => Response | Promise<Response>) {
     if (url.pathname === '/api/v1/providers') return jsonResponse({ providers: [] })
     return jsonResponse({ runs: 0 })
   })
-  return renderWithProviders(<OverviewPage />)
+  return renderWithProviders(<OverviewPage />, options)
 }
 
 function panel() {
@@ -115,14 +115,23 @@ describe('overview running completeness', () => {
     expect(await panel().findByText('later running review')).toBeInTheDocument()
   })
 
-  it('ticks the elapsed clock inside the running list', async () => {
-    setup(() => jsonResponse({
-      reviews: [review({ created_at: new Date(Date.now() - 200).toISOString() })],
-    }))
-    const elapsed = await panel().findByText(/已用时 \d+s/)
-    const before = elapsed.textContent
-    await waitFor(() => {
-      expect(panel().getByText(/已用时 \d+s/).textContent).not.toBe(before)
-    }, { timeout: 2500 })
+  it('ticks the elapsed clock inside the running list', () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(new Date('2026-11-08T00:00:00.000Z'))
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+      })
+      queryClient.setQueryData(runningKey, {
+        pages: [{ reviews: [review({ created_at: '2026-11-07T23:59:59.800Z' })] }],
+        pageParams: [undefined],
+      })
+      setup(() => jsonResponse({ reviews: [] }), { queryClient })
+      expect(panel().getByText('已用时 0s')).toBeInTheDocument()
+      act(() => { vi.advanceTimersByTime(1000) })
+      expect(panel().getByText('已用时 1s')).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
