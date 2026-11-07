@@ -1185,3 +1185,22 @@ func TestProjectWebhookControlAllowsAdminWithoutManageGrant(t *testing.T) {
 		t.Fatalf("admin webhook control did not reach GitLab")
 	}
 }
+
+func TestRecoverPanicLogsStackWithoutPanicValue(t *testing.T) {
+	var logs strings.Builder
+	s := &Server{logger: newTestLogger(&logs)}
+	handler := s.recoverPanic(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("secret-request-payload")
+	}))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/projects", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
+	}
+	if strings.Contains(logs.String(), "secret-request-payload") {
+		t.Fatal("panic value leaked into logs")
+	}
+	if !strings.Contains(logs.String(), `"stack"`) {
+		t.Fatalf("panic log has no stack: %s", logs.String())
+	}
+}

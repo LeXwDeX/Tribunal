@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"strconv"
 	"sync"
 	"time"
@@ -415,12 +416,16 @@ func (s *Server) recoverPanic(next http.Handler) http.Handler {
 				return
 			}
 			if responseStarted(w) {
-				// The panic value can contain request data; do not log it.
-				s.logger.Warn("panic after response started", "request_id", requestID(r.Context()), "path", r.URL.Path)
+				// The panic value can contain request data; do not log it. The
+				// stack only names functions and source lines, so it is safe.
+				s.logger.Warn("panic after response started",
+					"request_id", requestID(r.Context()), "path", r.URL.Path, "stack", string(debug.Stack()))
 				return
 			}
-			// The panic value can contain request data; do not log it.
-			s.logger.Warn("panic recovered", "request_id", requestID(r.Context()), "path", r.URL.Path)
+			// The panic value can contain request data; do not log it. The
+			// stack only names functions and source lines, so it is safe.
+			s.logger.Warn("panic recovered",
+				"request_id", requestID(r.Context()), "path", r.URL.Path, "stack", string(debug.Stack()))
 			if r.URL.Path == "/webhooks/gitlab" {
 				writeWebhookResponse(w, r, map[string]any{"ignored": "internal_error"})
 				return
