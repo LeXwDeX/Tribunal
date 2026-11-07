@@ -395,7 +395,9 @@ export function OverviewPage() {
             aside={(
               <span>
                 已加载 {runningCount}{running.hasNextPage ? '+' : ''} 个 · 每 10 秒刷新
-                {running.isFetching && running.isSuccess && !pausedRunning ? <span role="status"> · 刷新中…</span> : null}
+                {running.isFetching && !running.isFetchingNextPage && !pausedRunning
+                  ? <span className="small muted"> · 刷新中…</span>
+                  : null}
               </span>
             )}
           >
