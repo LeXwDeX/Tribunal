@@ -57,9 +57,7 @@ type ExtensionsManagerProps = {
   scope: 'platform' | 'project'
   projectId?: number
   tab: string
-  // `replace` keeps the guarded tab in the history entry instead of pushing a
-  // new one when a route-driven change is rolled back.
-  onTabChange: (tab: string, replace?: boolean) => void
+  onTabChange: (tab: string) => void
   onBindingsDirtyChange?: (dirty: boolean) => void
   projects?: Project[]
   canManage?: boolean
@@ -104,10 +102,10 @@ function ScopedExtensionsManager({
   useEffect(() => {
     if (tab === shownTab) return
     if (shownTab === 'bindings' && bindingsDirty) {
-      // Restore the routed tab so the URL keeps describing the panel on screen,
-      // then ask before the drafts are discarded.
+      // Push the routed tab back so the URL describes the panel on screen while
+      // keeping the requested entry in history, then ask before discarding.
       setPendingTab(tab)
-      onTabChange(shownTab, true)
+      onTabChange(shownTab)
       return
     }
     setShownTab(tab)

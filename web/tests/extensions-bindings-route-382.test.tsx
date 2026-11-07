@@ -117,4 +117,36 @@ describe('block binding drafts across route-driven tab changes', () => {
     expect(await screen.findByRole('tab', { name: '概览', selected: true })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'review 使用 Skill team-rules' })).not.toBeInTheDocument()
   })
+
+  it('does not guard another project after leaving a dirty extensions tab', async () => {
+    const user = userEvent.setup()
+    const queryClient = setup()
+    queryClient.setQueryData(['project', 7], project({ id: 7, path_with_namespace: 'group/other' }))
+    installFetch((url) => {
+      const path = new URL(url, 'http://localhost').pathname
+      if (path === '/api/v1/projects/7') return jsonResponse(project({ id: 7, path_with_namespace: 'group/other' }))
+      if (path === '/api/v1/projects/42') return jsonResponse(project({ id: 42 }))
+      if (path === '/api/v1/stats') return jsonResponse({ runs: 0, blocking: 0 })
+      if (path === '/api/v1/reviews') return jsonResponse({ reviews: [] })
+      if (path === '/api/v1/projects') return jsonResponse({ projects: [] })
+      return jsonResponse({})
+    })
+    renderWithProviders(
+      <>
+        <ExtensionLink to="/projects/7/overview" />
+        <Routes>
+          <Route path="/projects/:id/:tab" element={<ProjectDetailPage />} />
+        </Routes>
+      </>,
+      { route: '/projects/42/extensions', queryClient },
+    )
+
+    await user.click(await screen.findByRole('tab', { name: '块绑定' }))
+    const toggle = await screen.findByRole('button', { name: 'review 使用 Skill team-rules' })
+    await user.click(toggle)
+
+    await user.click(screen.getByRole('link', { name: '前往 /projects/7/overview' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(await screen.findByRole('tab', { name: '概览', selected: true })).toBeInTheDocument()
+  })
 })

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, Navigate, useNavigate, useParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { getProject, getStats, listProjects, listReviews } from '../api/api'
@@ -152,25 +152,30 @@ export function ProjectDetailPage() {
   // Keep the extensions panel mounted while a route-driven tab change would
   // discard unsaved block binding drafts, and restore the URL until confirmed.
   const [shownTab, setShownTab] = useState(tab)
-  const [extensionsDirty, setExtensionsDirty] = useState(false)
+  // The dirty flag belongs to the project that produced it: navigating straight
+  // from another project's extensions tab must not trip this project's guard.
+  const [dirtyExtensionsProject, setDirtyExtensionsProject] = useState<number | null>(null)
   const [pendingOuterTab, setPendingOuterTab] = useState<string | null>(null)
-
-  // A different project starts from a clean extensions panel.
-  useEffect(() => { setExtensionsDirty(false) }, [projectId])
+  const guardExtensions = shownTab === 'extensions' && dirtyExtensionsProject === projectId
+  const onExtensionsDirtyChange = useCallback((dirty: boolean) => {
+    setDirtyExtensionsProject(dirty ? projectId : null)
+  }, [projectId])
 
   useEffect(() => {
     if (tab === shownTab) return
-    if (shownTab === 'extensions' && extensionsDirty) {
+    if (guardExtensions) {
+      // Push the routed tab back so the URL matches the panel on screen while
+      // the requested entry stays in history, then ask before discarding.
       setPendingOuterTab(tab)
-      navigate(`/projects/${projectId}/${shownTab}`, { replace: true })
+      navigate(`/projects/${projectId}/${shownTab}`)
       return
     }
     setShownTab(tab)
-  }, [tab, shownTab, extensionsDirty, navigate, projectId])
+  }, [tab, shownTab, guardExtensions, navigate, projectId])
 
   const changeTab = (next: string) => {
     if (next === shownTab) return
-    if (shownTab === 'extensions' && extensionsDirty) {
+    if (guardExtensions) {
       setPendingOuterTab(next)
       return
     }
@@ -180,7 +185,7 @@ export function ProjectDetailPage() {
   const discardExtensionsAndChangeTab = () => {
     const next = pendingOuterTab
     setPendingOuterTab(null)
-    setExtensionsDirty(false)
+    setDirtyExtensionsProject(null)
     if (!next) return
     setShownTab(next)
     navigate(`/projects/${projectId}/${next}`)
@@ -240,7 +245,7 @@ export function ProjectDetailPage() {
           {shownTab === 'workspace' ? <WorkspacePanel key={data.id} projectId={data.id} canManage={data.access === 'manage'} /> : null}
           {shownTab === 'settings' ? <SettingsPanel key={data.id} project={data} /> : null}
           {shownTab === 'extensions' ? (
-            <ProjectExtensionsPanel project={data} onBindingsDirtyChange={setExtensionsDirty} />
+            <ProjectExtensionsPanel project={data} onBindingsDirtyChange={onExtensionsDirtyChange} />
           ) : null}
         </div>
       </div>
