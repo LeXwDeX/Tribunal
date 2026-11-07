@@ -109,7 +109,8 @@
   --z-nav-backdrop: 39;
   --z-nav: 40;
   --z-overlay: 50;
-  --z-modal: 51;
+  /* Dialogs may be opened from a drawer, so they must stack above it. */
+  --z-modal: 56;
   --z-drawer: 55;
   --z-toast: 60;
 

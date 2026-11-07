@@ -374,6 +374,10 @@ export function Switch({ checked, onChange, label, disabled }: { checked: boolea
 
 const FOCUSABLE = 'a[href],button:not([disabled]),textarea:not([disabled]),input:not([disabled]):not([type="hidden"]),select:not([disabled]),[tabindex]:not([tabindex="-1"])'
 
+// Only the topmost modal handles Tab and Escape. A confirmation rendered inside
+// a drawer would otherwise be trapped by the drawer's own handler.
+const modalStack: symbol[] = []
+
 function useModalFocus(open: boolean, onClose: () => void, containerRef: React.RefObject<HTMLElement | null>) {
   const closeRef = useRef(onClose)
   closeRef.current = onClose
@@ -391,8 +395,12 @@ function useModalFocus(open: boolean, onClose: () => void, containerRef: React.R
     ;(focusables[0] || container).focus()
     const previousOverflow = document.body.style.overflow
     document.body.style.overflow = 'hidden'
+    const token = Symbol('modal')
+    modalStack.push(token)
+    const isTopmost = () => modalStack[modalStack.length - 1] === token
 
     const onKeyDown = (event: KeyboardEvent) => {
+      if (!isTopmost()) return
       if (event.key === 'Escape') {
         event.preventDefault()
         closeRef.current()
@@ -423,6 +431,8 @@ function useModalFocus(open: boolean, onClose: () => void, containerRef: React.R
     document.addEventListener('keydown', onKeyDown)
     return () => {
       document.removeEventListener('keydown', onKeyDown)
+      const index = modalStack.lastIndexOf(token)
+      if (index >= 0) modalStack.splice(index, 1)
       document.body.style.overflow = previousOverflow
       const target = returnFocusRef.current
       if (target?.isConnected) target.focus()

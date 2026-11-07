@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { SystemPage } from '../src/pages/SystemPage'
@@ -10,14 +12,17 @@ const users = [
   { id: 9, username: 'carol', name: 'Carol', disabled: false, revision: 1, role: 'admin', role_source: 'config', global_read: false, grant_count: 0 },
 ]
 
-function mock(writes: Array<{ url: string; method?: string; body?: unknown }>) {
+function mock(
+  writes: Array<{ url: string; method?: string; body?: unknown }>,
+  grants: Array<{ project_id: number; user_id: number; role: string }> = [],
+) {
   return installFetch((url, init) => {
     const method = (init?.method || 'GET').toUpperCase()
     const path = new URL(url, 'http://localhost').pathname
     if (method !== 'GET') writes.push({ url, method, body: init?.body ? JSON.parse(String(init.body)) : undefined })
     if (path === '/api/v1/me') return jsonResponse({ id: 7, username: 'alice', role: 'admin', global_read: false, csrf_token: 'x' })
     if (path === '/api/v1/admin/users') return jsonResponse({ users, next_cursor: '' })
-    if (path === '/api/v1/admin/users/8/grants') return jsonResponse({ grants: [], next_cursor: '' })
+    if (path === '/api/v1/admin/users/8/grants') return jsonResponse({ grants, next_cursor: '' })
     if (path === '/api/v1/admin/projects/42/grants/8') return jsonResponse({ project_id: 42, user_id: 8, role: 'manage' })
     if (path.startsWith('/api/v1/admin/users/')) return jsonResponse(users[1])
     return jsonResponse({})
@@ -69,5 +74,46 @@ describe('user management drawer (#297)', () => {
     await user.click(screen.getByRole('button', { name: '添加授权' }))
     await waitFor(() => expect(writes.some((write) => write.method === 'PUT' && write.url.includes('/admin/projects/42/grants/8'))).toBe(true))
     expect(writes.find((write) => write.method === 'PUT')?.body).toEqual({ role: 'manage' })
+  })
+
+  it('confirms before deleting a user project grant', async () => {
+    const writes: Array<{ url: string; method?: string; body?: unknown }> = []
+    mock(writes, [{ project_id: 42, user_id: 8, role: 'manage' }])
+    const user = userEvent.setup()
+    await openUser(user, 'bob')
+
+    await user.click(await screen.findByRole('button', { name: '删除' }))
+    const dialog = await screen.findByRole('dialog', { name: '删除项目授权？' })
+    await user.click(within(dialog).getByRole('button', { name: '取消' }))
+    expect(screen.queryByRole('dialog', { name: '删除项目授权？' })).not.toBeInTheDocument()
+    expect(writes.some((write) => write.method === 'DELETE')).toBe(false)
+
+    await user.click(screen.getByRole('button', { name: '删除' }))
+    const confirm = await screen.findByRole('dialog', { name: '删除项目授权？' })
+    await user.click(within(confirm).getByRole('button', { name: '删除' }))
+    await waitFor(() => expect(writes.some(
+      (write) => write.method === 'DELETE' && write.url.includes('/admin/projects/42/grants/8'),
+    )).toBe(true))
+  })
+
+  it('keeps the grant confirmation keyboard reachable inside the drawer', async () => {
+    mock([], [{ project_id: 42, user_id: 8, role: 'manage' }])
+    const user = userEvent.setup()
+    await openUser(user, 'bob')
+    await user.click(await screen.findByRole('button', { name: '删除' }))
+    const dialog = await screen.findByRole('dialog', { name: '删除项目授权？' })
+    const confirm = within(dialog).getByRole('button', { name: '删除' })
+    for (let index = 0; index < 6 && document.activeElement !== confirm; index += 1) {
+      await user.tab()
+    }
+    expect(confirm).toHaveFocus()
+  })
+
+  it('stacks modal overlays above drawers', () => {
+    const tokens = readFileSync(resolve(process.cwd(), 'src/styles/tokens.css'), 'utf8')
+    const z = (name: string) => Number(tokens.match(new RegExp(`--${name}:\\s*(\\d+)`))?.[1])
+    expect(z('z-modal')).toBeGreaterThan(z('z-drawer'))
+    const css = readFileSync(resolve(process.cwd(), 'src/styles/ui.module.css'), 'utf8')
+    expect(css).toMatch(/\.modalOverlay\s*\{[^}]*z-index:\s*var\(--z-modal\)/)
   })
 })

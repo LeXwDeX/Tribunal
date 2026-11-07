@@ -181,6 +181,7 @@ function UserDrawer({ user, open, currentUserId, onClose }: {
   const [projectID, setProjectID] = useState('')
   const [grantRole, setGrantRole] = useState<ProjectAccess>('manage')
   const [confirm, setConfirm] = useState<{ role?: 'admin' | 'viewer'; global?: boolean } | null>(null)
+  const [removeTarget, setRemoveTarget] = useState<{ projectId: number; role: string } | null>(null)
   const grants = usePaginated<ProjectGrant>(
     ['admin-user-grants', user?.id],
     (cursor) => listAdminUserGrants(user!.id, cursor),
@@ -230,6 +231,7 @@ function UserDrawer({ user, open, currentUserId, onClose }: {
     setError(null)
     try {
       await deleteAdminUserGrant(user.id, projectId)
+      setRemoveTarget(null)
       await saved()
     } catch (err) {
       setError(err)
@@ -286,7 +288,14 @@ function UserDrawer({ user, open, currentUserId, onClose }: {
             {grants.items.map((grant) => (
               <li key={grant.project_id}>
                 {grant.project_id} · {grant.role}
-                <Button variant="danger" className={ui.smallButton} disabled={pending} onClick={() => { void removeGrant(grant.project_id) }}>删除</Button>
+                <Button
+                  variant="danger"
+                  className={ui.smallButton}
+                  disabled={pending}
+                  onClick={() => { setError(null); setRemoveTarget({ projectId: grant.project_id, role: grant.role }) }}
+                >
+                  删除
+                </Button>
               </li>
             ))}
           </ul>
@@ -304,6 +313,19 @@ function UserDrawer({ user, open, currentUserId, onClose }: {
         confirmLabel="确认"
         pending={pending}
         danger={confirm?.role === 'viewer'}
+        error={error}
+      />
+      <ConfirmDialog
+        open={Boolean(removeTarget)}
+        onClose={() => setRemoveTarget(null)}
+        onConfirm={() => { if (removeTarget) void removeGrant(removeTarget.projectId) }}
+        title="删除项目授权？"
+        description={removeTarget
+          ? `将移除 ${userLabel(user)} 在项目 #${removeTarget.projectId} 的 ${removeTarget.role} 授权。`
+          : ''}
+        confirmLabel="删除"
+        pending={pending}
+        danger
         error={error}
       />
     </Drawer>
