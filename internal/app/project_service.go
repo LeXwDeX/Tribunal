@@ -55,6 +55,11 @@ type RegisterInput struct {
 	// OwnerUserID is the registering user. A positive ID receives a manage
 	// grant atomically with the project; 0 (the bootstrap bearer) writes none.
 	OwnerUserID int64
+	// TrustedPlatformAdmin skips the GitLab membership check. Platform
+	// administrators manage every registered project, so they may register a
+	// project without joining it first; the static bootstrap bearer is also
+	// trusted because it has no GitLab identity to check.
+	TrustedPlatformAdmin bool
 }
 
 // ValidateProjectInput is a read-only repository connection check.
@@ -291,6 +296,11 @@ func (s *ProjectService) Register(ctx context.Context, in RegisterInput) (*Regis
 	if err := s.verifyProject(project, ref, false); err != nil {
 		return nil, err
 	}
+	if !in.TrustedPlatformAdmin {
+		if err := s.verifyRegistrationMembership(ctx, in.AccessToken, project.ID); err != nil {
+			return nil, err
+		}
+	}
 
 	info, err := s.gitlab.GetTokenInfo(ctx, in.AccessToken)
 	if err != nil {
@@ -422,6 +432,36 @@ func (s *ProjectService) Register(ctx context.Context, in RegisterInput) (*Regis
 		result.WebhookSecret = webhookSecret
 	}
 	return result, nil
+}
+
+// verifyRegistrationMembership requires a non-admin registrant's token to
+// identify a member with Reporter access or higher. Without this check any
+// signed-in user could claim a public or internal project they can merely read.
+func (s *ProjectService) verifyRegistrationMembership(ctx context.Context, token string, projectID int64) error {
+	user, err := s.gitlab.CurrentUser(ctx, token)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		s.logger.Warn("GitLab current user lookup failed", "status", gitlab.StatusOf(err))
+		return upstreamError(gitlab.StatusOf(err))
+	}
+	if user == nil || user.ID <= 0 || strings.TrimSpace(user.Username) == "" {
+		return upstreamError(0)
+	}
+	access, err := s.gitlab.GetMemberAccess(ctx, token, projectID, user.ID)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		s.logger.Warn("GitLab member lookup failed", "status", gitlab.StatusOf(err))
+		return upstreamError(gitlab.StatusOf(err))
+	}
+	if access < reporterAccessLevel {
+		return validationError("access level is insufficient",
+			Detail{Field: "access_level", Message: "Reporter or higher is required to register this project"})
+	}
+	return nil
 }
 
 // Validate performs a read-only connection check. It does not persist the

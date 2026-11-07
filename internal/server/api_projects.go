@@ -114,12 +114,13 @@ func (s *Server) handleRegisterProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	registration, err := s.projects.Register(r.Context(), app.RegisterInput{
-		Project:     request.Project,
-		AccessToken: request.Token,
-		Profile:     request.Profile,
-		AutoWebhook: request.AutoWebhook,
-		Settings:    request.Settings,
-		OwnerUserID: max(currentUserID(r), 0),
+		Project:              request.Project,
+		AccessToken:          request.Token,
+		Profile:              request.Profile,
+		AutoWebhook:          request.AutoWebhook,
+		Settings:             request.Settings,
+		OwnerUserID:          max(currentUserID(r), 0),
+		TrustedPlatformAdmin: s.isPlatformAdmin(r) || currentUserID(r) == 0,
 	})
 	if err != nil {
 		writeAppError(w, r, err)
@@ -224,10 +225,11 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 	if projects == nil {
 		projects = []store.Project{}
 	}
+	admin := s.isPlatformAdmin(r)
 	if s.store == nil {
 		items := make([]projectListItem, 0, len(projects))
 		for i := range projects {
-			access, ok, err := s.projectGrant(r, projects[i].ID)
+			access, ok, err := s.projectGrantFor(r, projects[i].ID, admin)
 			if err != nil {
 				s.writeStoreError(w, r, err)
 				return
@@ -235,7 +237,7 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				continue
 			}
-			items = append(items, projectListItem{Project: &projects[i], Access: access, AccessSource: s.projectAccessSource(r, projects[i].ID, access)})
+			items = append(items, projectListItem{Project: &projects[i], Access: access, AccessSource: s.projectAccessSourceFor(r, projects[i].ID, access, admin)})
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"projects": items, "next_cursor": next})
 		return
@@ -245,7 +247,7 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 	items := make([]projectListItem, 0, len(projects))
 	for i := range projects {
 		project := &projects[i]
-		access, ok, err := s.projectGrant(r, project.ID)
+		access, ok, err := s.projectGrantFor(r, project.ID, admin)
 		if err != nil {
 			s.writeStoreError(w, r, err)
 			return
@@ -270,7 +272,7 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 			lastReview = &reviews[0]
 		}
 		items = append(items, projectListItem{
-			Project: project, Access: access, AccessSource: s.projectAccessSource(r, project.ID, access),
+			Project: project, Access: access, AccessSource: s.projectAccessSourceFor(r, project.ID, access, admin),
 			Workspace: workspace, LastReview: lastReview,
 		})
 	}
@@ -280,7 +282,11 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 // projectGrant re-reads one project grant for response decoration. A row that
 // lost its grant is skipped instead of being shown with stale access.
 func (s *Server) projectGrant(r *http.Request, projectID int64) (string, bool, error) {
-	if s.isPlatformAdmin(r) {
+	return s.projectGrantFor(r, projectID, s.isPlatformAdmin(r))
+}
+
+func (s *Server) projectGrantFor(r *http.Request, projectID int64, admin bool) (string, bool, error) {
+	if admin {
 		return store.ProjectAccessManage, true, nil
 	}
 	userID := currentUserID(r)
@@ -298,7 +304,11 @@ func (s *Server) projectGrant(r *http.Request, projectID int64) (string, bool, e
 }
 
 func (s *Server) projectAccessSource(r *http.Request, projectID int64, role string) string {
-	if s.isPlatformAdmin(r) {
+	return s.projectAccessSourceFor(r, projectID, role, s.isPlatformAdmin(r))
+}
+
+func (s *Server) projectAccessSourceFor(r *http.Request, projectID int64, role string, admin bool) string {
+	if admin {
 		return "admin"
 	}
 	if role != store.ProjectAccessRead || s.access == nil {

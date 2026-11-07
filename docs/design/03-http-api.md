@@ -21,7 +21,7 @@
 
 非管理员的项目业务数据由本地 `project_grants` 的 `read` / `manage` 决定，默认没有授权；平台管理员的隐式 `manage` 不写入 grant，也不要求 `access_source=grant`。用户开启 `global_read` 后无需逐项目 grant 即可读取全部项目（含之后新登记的项目），但写操作仍要求对应项目的 `manage`；平台管理员不再依赖 `global_read`。无访问权限或项目不存在统一返回 404；只有 `read` 时执行写操作返回 403。列表、详情、统计、SSE、上下文和项目扩展在查询或流式读取时按同一访问规则过滤；删除 grant 后，若用户没有其他 grant 或有效的 `global_read`，已有 API token 会失去该项目访问并关闭已打开的 SSE，停用用户会撤销全部会话和 API token，其全局读取同时失效。
 
-`auth.bootstrap_token_env` 指定的静态 Bearer 只用于平台管理面：没有本地用户 ID，也没有任何项目 grant，不能读取项目业务数据——项目业务列表为空，项目详情、评审、统计、SSE 和项目扩展返回 404；它仍可调用管理面接口并注册项目，注册后不产生 owner grant。它的轮换由部署方更新环境变量并重启；`bootstrap_admins` 变化同样在重启后生效。
+`auth.bootstrap_token_env` 指定的静态 Bearer 只用于平台管理面：没有本地用户 ID，也没有任何项目 grant，不能读取项目业务数据——带项目范围的读取（项目详情、带 `project_id` 的统计、评审详情/流、项目扩展）返回 404，不带项目过滤的业务列表（如 `GET /api/v1/projects`、`GET /api/v1/reviews`、`GET /api/v1/stats`）返回 200 空结果/空聚合；它仍可调用管理面接口并注册项目，注册后不产生 owner grant。它的轮换由部署方更新环境变量并重启；`bootstrap_admins` 变化同样在重启后生效。
 
 浏览器会话保存在 SQLite `sessions` 表，cookie 保存随机 token 及其 HMAC 签名，数据库只保存 token 的 SHA-256。CSRF token 由会话 token 和 `TRIBUNAL_SESSION_KEY` 派生，不单独存储。固定 `TRIBUNAL_SESSION_KEY`（旧名 `CRC_SESSION_KEY` 仍兼容，新名优先）时，重启后未过期会话仍有效；未设置时进程内随机生成 key 并输出告警，旧 cookie 在重启后失效。
 

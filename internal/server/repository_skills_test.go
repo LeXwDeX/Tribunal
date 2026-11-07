@@ -49,6 +49,19 @@ func (a repositorySkillHTTPAccess) GetProjectAccess(context.Context, int64, int6
 	return a.role, a.err
 }
 
+// Host execution is limited to platform administrators; the real store checks
+// users.role and users.disabled, which the server role check already covers.
+func (repositorySkillHTTPAccess) AuthorizeRepositorySkillManagement(context.Context, int64, int64) error {
+	return nil
+}
+
+func testAdminAuth() *authService {
+	return &authService{
+		adminIDs: map[int64]struct{}{7: {}},
+		admins:   map[string]struct{}{},
+	}
+}
+
 func repositorySkillRequest(method, url, body, platformRole string) *http.Request {
 	req := httptest.NewRequest(method, url, strings.NewReader(body))
 	req.SetPathValue("id", "42")
@@ -109,13 +122,13 @@ func TestRepositorySkillHTTPRequiresPlatformAdminAndProjectManage(t *testing.T) 
 		want                    int
 	}{
 		{"project manager without admin", "user", store.ProjectAccessManage, nil, http.StatusForbidden},
-		{"admin with read", roleAdmin, store.ProjectAccessRead, nil, http.StatusForbidden},
-		{"admin without grant", roleAdmin, "", store.ErrNotFound, http.StatusNotFound},
+		{"admin with read", roleAdmin, store.ProjectAccessRead, nil, http.StatusOK},
+		{"admin without grant", roleAdmin, "", store.ErrNotFound, http.StatusOK},
 		{"admin with manage", roleAdmin, store.ProjectAccessManage, nil, http.StatusOK},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			backend := &repositorySkillHTTPFake{}
-			s := &Server{workspace: backend, access: repositorySkillHTTPAccess{role: tc.project, err: tc.err}, logger: newTestLogger(io.Discard)}
+			s := &Server{workspace: backend, access: repositorySkillHTTPAccess{role: tc.project, err: tc.err}, auth: testAdminAuth(), logger: newTestLogger(io.Discard)}
 			rec := httptest.NewRecorder()
 			req := repositorySkillRequest(http.MethodGet, "/api/v1/admin/projects/42/repository-skills?target_branch=main", "", tc.platform)
 			s.handleDiscoverRepositorySkills(rec, req)
@@ -151,11 +164,11 @@ func TestRepositorySkillAuthorizationHTTPAccessAndRevisionConflict(t *testing.T)
 			want              int
 		}{
 			{"user", store.ProjectAccessManage, http.StatusForbidden},
-			{roleAdmin, store.ProjectAccessRead, http.StatusForbidden},
+			{roleAdmin, store.ProjectAccessRead, http.StatusOK},
 			{roleAdmin, store.ProjectAccessManage, http.StatusOK},
 		} {
 			backend := &repositorySkillHTTPFake{}
-			s := &Server{workspace: backend, access: repositorySkillHTTPAccess{role: tc.project}, logger: newTestLogger(io.Discard)}
+			s := &Server{workspace: backend, access: repositorySkillHTTPAccess{role: tc.project}, auth: testAdminAuth(), logger: newTestLogger(io.Discard)}
 			rec := httptest.NewRecorder()
 			req := repositorySkillRequest(method, "/api/v1/admin/projects/42/repository-skill-authorizations?target_branch=main&block=review", `{"expected_revision":"absent","skills":[]}`, tc.platform)
 			if method == http.MethodGet {
@@ -169,7 +182,7 @@ func TestRepositorySkillAuthorizationHTTPAccessAndRevisionConflict(t *testing.T)
 		}
 	}
 	backend := &repositorySkillHTTPFake{err: &app.Error{Code: "conflict", Message: "authorization changed"}}
-	s := &Server{workspace: backend, access: paginationAccess{}, logger: newTestLogger(io.Discard)}
+	s := &Server{workspace: backend, access: paginationAccess{}, auth: testAdminAuth(), logger: newTestLogger(io.Discard)}
 	rec := httptest.NewRecorder()
 	req := repositorySkillRequest(http.MethodPut, "/api/v1/admin/projects/42/repository-skill-authorizations?target_branch=main&block=review", `{"expected_revision":"absent","skills":[]}`, roleAdmin)
 	s.handleReplaceRepositorySkillAuthorization(rec, req)

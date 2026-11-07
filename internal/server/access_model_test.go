@@ -2,12 +2,52 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"testing"
 
 	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
 )
+
+// A platform administrator can dispatch project work without a grant.
+func TestPlatformAdminDispatchesWithoutGrant(t *testing.T) {
+	env := newWiringEnv(t)
+	client := env.loginAs("code-admin")
+	got := client.json(http.MethodPost, "/api/v1/projects/42/workspace/refresh", nil)
+	if got.status != http.StatusAccepted {
+		t.Fatalf("admin dispatch = %d %s", got.status, got.body)
+	}
+}
+
+// A signed-in user cannot claim a project their token can only read: the
+// registrant must be a Reporter or higher. Platform administrators skip the
+// check because they already manage every registered project.
+func TestRegistrationRequiresReporterMembership(t *testing.T) {
+	api := defaultStubGitLab()
+	api.memberAccess = 10
+	env := newM6Env(t, m6Options{adminFactory: func(st *sqlite.Store) AdminService {
+		return testProjectService(t, st, api, t.TempDir())
+	}})
+	viewer := env.loginAs("code-viewer")
+	denied := viewer.json(http.MethodPost, "/api/v1/projects", map[string]any{
+		"project": "42", "token": testProjectTok,
+	})
+	if denied.status != http.StatusBadRequest {
+		t.Fatalf("non-member register = %d %s", denied.status, denied.body)
+	}
+	if _, err := env.sqlite.GetProjectAccess(context.Background(), 8, 42); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("non-member registration granted access: %v", err)
+	}
+
+	admin := env.loginAs("code-admin")
+	created := admin.json(http.MethodPost, "/api/v1/projects", map[string]any{
+		"project": "42", "token": testProjectTok,
+	})
+	if created.status != http.StatusCreated {
+		t.Fatalf("admin register without membership = %d %s", created.status, created.body)
+	}
+}
 
 // A platform administrator manages every registered project without a
 // per-project grant. The project must still exist, so a deleted project keeps

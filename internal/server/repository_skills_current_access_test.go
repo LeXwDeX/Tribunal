@@ -78,7 +78,8 @@ func testRepositorySkillDiscoveryAccessChange(t *testing.T, change string) {
 	case "disabled":
 		changeErr = env.db.SetUserDisabled(context.Background(), 7, true)
 	case "missing-current-access":
-		env.service.access = repositorySkillHTTPAccess{role: store.ProjectAccessManage}
+		// This access store has no host-execution authorization surface.
+		env.service.access = paginationAccess{}
 	}
 	if changeErr != nil {
 		close(paused.release)

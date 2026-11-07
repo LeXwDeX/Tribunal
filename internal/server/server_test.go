@@ -59,6 +59,7 @@ type stubGitLab struct {
 	project      *gitlab.Project
 	projectErr   error
 	tokenInfo    *gitlab.TokenInfo
+	memberAccess int
 	hookID       int64
 	listHookErr  error
 	hooks        []gitlab.Hook
@@ -121,6 +122,9 @@ func (s *stubGitLab) GetMergeRequest(context.Context, string, int64, int64) (*gi
 
 func (s *stubGitLab) GetMemberAccess(context.Context, string, int64, int64) (int, error) {
 	s.record("GetMemberAccess")
+	if s.memberAccess > 0 {
+		return s.memberAccess, nil
+	}
 	return 30, nil
 }
 

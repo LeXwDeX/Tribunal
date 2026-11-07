@@ -6,7 +6,7 @@
 
 ### 行为变更
 
-- **平台管理员隐式管理全部项目**（[#372](https://github.com/LeXwDeX/Tribunal/issues/372)）：拥有本地用户 ID（`users.id > 0`）且 `role=admin` 的平台管理员（含 `bootstrap_admins` 配置和数据库授予的管理员）对全部已登记项目隐式拥有 `manage`，可读取、修改设置、轮换 token、管理 webhook、触发/取消/重发评审、管理工作区与项目扩展，以及删除项目，无需逐项目 grant。项目列表、详情、统计、SSE 和项目扩展对管理员不再按 grant 过滤；`access=mine` 对管理员等同全部项目。静态 bootstrap Bearer（用户 ID 0）仍只有平台管理面权限，项目业务列表为空，项目详情、评审、统计、SSE 和项目扩展返回 404。
+- **平台管理员隐式管理全部项目**（[#372](https://github.com/LeXwDeX/Tribunal/issues/372)）：拥有本地用户 ID（`users.id > 0`）且 `role=admin` 的平台管理员（含 `bootstrap_admins` 配置和数据库授予的管理员）对全部已登记项目隐式拥有 `manage`，可读取、修改设置、轮换 token、管理 webhook、触发/取消/重发评审、管理工作区与项目扩展，以及删除项目，无需逐项目 grant。项目列表、详情、统计、SSE 和项目扩展对管理员不再按 grant 过滤；`access=mine` 对管理员等同全部项目。静态 bootstrap Bearer（用户 ID 0）仍只有平台管理面权限：带项目范围的读取（项目详情、带 `project_id` 的统计、评审详情/流、项目扩展）返回 404，不带项目过滤的业务列表（如 `GET /api/v1/projects`、`GET /api/v1/reviews`、`GET /api/v1/stats`）返回 200 空结果/空聚合。
 - **普通用户可自助注册项目**（[#372](https://github.com/LeXwDeX/Tribunal/issues/372)）：已登录会话或用户 API token 可调用 `POST /api/v1/projects` 和 `POST /api/v1/projects/validate`；注册事务同时为注册人写入该项目 `manage` grant，注册人立即可见并可删除项目。静态 bootstrap Bearer 注册时不写 owner grant。已登记项目再次注册返回 409，提示联系平台管理员分配该项目。
 - **项目授权默认分配 `manage`**（[#372](https://github.com/LeXwDeX/Tribunal/issues/372)）：平台管理员通过 `PUT /api/v1/admin/projects/{id}/grants/{user_id}` 分配项目时，控制台默认角色改为 `manage`；分配 `manage` 后该项目由该用户管理（可读、可写、可删除）。`read` 仍为只读共享，写操作和删除返回 403。不新增 owner 列，同一项目可有多个 `manage` 持有者，任一持有者可删除。
 - **`global_read` 与宿主扩展权限**（[#372](https://github.com/LeXwDeX/Tribunal/issues/372)）：`global_read` 保留为普通用户的全局只读模式，开启后无需逐项目 grant 即可读取全部项目；平台管理员不再依赖它，其隐式 `manage` 不需要 `access_source=grant`。扩展与仓库 Skill 的宿主执行权限仍只属于平台管理员，这次只去掉了对逐项目 `manage` grant 的依赖。

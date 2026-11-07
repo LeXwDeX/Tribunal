@@ -28,6 +28,14 @@ func (registrationGitLab) GetTokenInfo(context.Context, string) (*gitlab.TokenIn
 	return &gitlab.TokenInfo{Active: true, Scopes: []string{"api", "read_repository"}}, nil
 }
 
+func (registrationGitLab) CurrentUser(context.Context, string) (*gitlab.User, error) {
+	return &gitlab.User{ID: 9, Username: "registrant"}, nil
+}
+
+func (registrationGitLab) GetMemberAccess(context.Context, string, int64, int64) (int, error) {
+	return 30, nil
+}
+
 type dispatchBodyBarrier struct {
 	entered chan struct{}
 	release chan struct{}
@@ -199,6 +207,54 @@ func TestDispatchHTTPRechecksCurrentGrantAndEnabledUser(t *testing.T) {
 			case "disabled":
 				err = env.db.SetUserDisabled(ctx, 8, true)
 			}
+			close(body.release)
+			if err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("dispatch stalled")
+			}
+			if res.Code != http.StatusNotFound && res.Code != http.StatusForbidden {
+				t.Fatalf("status = %d", res.Code)
+			}
+			job, err := env.db.Claim(ctx, "authorization-test", []string{"workspace.refresh"}, time.Minute)
+			if err != nil || job != nil {
+				t.Fatalf("unexpected job = %+v, err = %v", job, err)
+			}
+		})
+	}
+}
+
+// A platform administrator waiting on the project lifecycle lock must lose
+// dispatch permission if the account is disabled while it waits. Configured
+// administrators cannot be demoted at runtime (a configuration change requires
+// a restart); granted administrators are re-evaluated by roleFor inside the
+// same callback.
+func TestDispatchAdminRechecksAccountStateAfterLockWait(t *testing.T) {
+	for _, change := range []string{"disabled"} {
+		t.Run(change, func(t *testing.T) {
+			env := newWiringEnv(t)
+			ctx := context.Background()
+			client := env.loginAs("code-admin")
+			userID := int64(7)
+			body := &dispatchBodyBarrier{entered: make(chan struct{}), release: make(chan struct{}), reader: strings.NewReader(`{}`)}
+			req := httptest.NewRequest(http.MethodPost, env.server.URL+"/api/v1/projects/42/workspace/refresh", body)
+			req.Header.Set("X-CSRF-Token", client.csrf)
+			base, _ := url.Parse(env.server.URL)
+			for _, cookie := range client.client.Jar.Cookies(base) {
+				req.AddCookie(cookie)
+			}
+			res := httptest.NewRecorder()
+			done := make(chan struct{})
+			go func() { env.handler.ServeHTTP(res, req); close(done) }()
+			select {
+			case <-body.entered:
+			case <-time.After(10 * time.Second):
+				t.Fatal("request did not reach body")
+			}
+			err := env.db.SetUserDisabled(ctx, userID, true)
 			close(body.release)
 			if err != nil {
 				t.Fatal(err)

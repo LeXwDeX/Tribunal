@@ -63,6 +63,7 @@ describe('user management drawer (#297)', () => {
     mock(writes)
     const user = userEvent.setup()
     await openUser(user, 'bob')
+    expect(screen.getByLabelText('角色')).toHaveValue('manage')
     await user.type(screen.getByLabelText('项目 ID'), '42')
     await user.selectOptions(screen.getByLabelText('角色'), 'manage')
     await user.click(screen.getByRole('button', { name: '添加授权' }))

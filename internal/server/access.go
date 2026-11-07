@@ -189,20 +189,21 @@ func (s *Server) requireProjectAccess(w http.ResponseWriter, r *http.Request, pr
 		return "", false
 	}
 	if s.isPlatformAdmin(r) {
-		if s.projects == nil {
-			writeError(w, r, http.StatusServiceUnavailable, "internal", "project store is not configured", nil)
-			return "", false
-		}
-		if _, err := s.projects.Get(r.Context(), projectID); err != nil {
-			var appErr *app.Error
-			if errors.Is(err, store.ErrNotFound) || (errors.As(err, &appErr) && appErr.Code == "not_found") {
-				writeError(w, r, http.StatusNotFound, "not_found", "not found", nil)
+		// Confirm the project exists so a deleted or unknown ID stays 404. A
+		// server without a project service (narrow tests) skips the lookup;
+		// its handlers cannot serve project data anyway.
+		if s.projects != nil {
+			if _, err := s.projects.Get(r.Context(), projectID); err != nil {
+				var appErr *app.Error
+				if errors.Is(err, store.ErrNotFound) || (errors.As(err, &appErr) && appErr.Code == "not_found") {
+					writeError(w, r, http.StatusNotFound, "not_found", "not found", nil)
+					return "", false
+				}
+				s.logger.Error("project lookup failed",
+					"request_id", requestID(r.Context()), "project_id", projectID)
+				writeError(w, r, http.StatusInternalServerError, "internal", "internal error", nil)
 				return "", false
 			}
-			s.logger.Error("project lookup failed",
-				"request_id", requestID(r.Context()), "project_id", projectID)
-			writeError(w, r, http.StatusInternalServerError, "internal", "internal error", nil)
-			return "", false
 		}
 		return store.ProjectAccessManage, true
 	}
@@ -255,14 +256,26 @@ func currentUserID(r *http.Request) int64 {
 // dispatchContext requires a fresh manage grant inside the dispatcher's
 // project lifecycle lock. It never grants an unauthenticated HTTP request.
 func (s *Server) dispatchContext(r *http.Request, projectID int64) context.Context {
-	userID := currentUserID(r)
-	admin := s.isPlatformAdmin(r)
+	principal, ok := principalFrom(r.Context())
+	userID := principal.user.ID
 	return app.WithDispatchAuthorization(r.Context(), func(ctx context.Context, id int64) error {
-		if userID <= 0 || projectID <= 0 || id != projectID {
+		if !ok || userID <= 0 || projectID <= 0 || id != projectID {
 			return store.ErrNotFound
 		}
-		if admin {
-			return nil
+		// Re-read the role and account state inside the lifecycle lock: the
+		// request may have waited while the administrator was demoted or
+		// disabled. roleFor alone is not enough for configured administrators,
+		// because configuredRoleFor does not check the disabled flag.
+		if s.auth != nil && s.roleFor(ctx, principal.user) == roleAdmin {
+			if users, hasUsers := s.access.(interface {
+				GetUser(context.Context, int64) (*store.User, error)
+			}); hasUsers {
+				user, err := users.GetUser(ctx, userID)
+				if err != nil || user.Disabled {
+					return store.ErrNotFound
+				}
+				return nil
+			}
 		}
 		if s.access == nil {
 			return store.ErrNotFound
