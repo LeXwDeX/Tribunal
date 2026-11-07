@@ -519,6 +519,11 @@ export function ReviewDetailPage() {
     () => new Map((allProjects.data?.projects || []).map((item) => [item.id, item.path_with_namespace])),
     [allProjects.data],
   )
+  // The trigger endpoint requires manage; read-only projects would only 403.
+  const manageableProjects = useMemo(
+    () => (allProjects.data?.projects || []).filter((item) => item.access === 'manage'),
+    [allProjects.data],
+  )
 
   useEffect(() => {
     setExpanded(new Set())
@@ -770,7 +775,7 @@ export function ReviewDetailPage() {
         <TriggerReviewDialog
           open={triggerOpen}
           onClose={() => setTriggerOpen(false)}
-          projects={allProjects.data?.projects || []}
+          projects={manageableProjects}
           presetProjectId={review.project_id}
           presetIid={review.mr_iid}
           presetProjectLabel={projectPath}
