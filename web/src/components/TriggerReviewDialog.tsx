@@ -66,7 +66,7 @@ export function TriggerReviewDialog({
       )}
     >
       {error ? <ErrorState error={error} title="触发失败" /> : null}
-      {projects.length === 0 ? <div className="muted">尚无已注册项目，请先注册项目。</div> : null}
+      {projects.length === 0 && !presetProjectId ? <div className="muted">尚无已注册项目，请先注册项目。</div> : null}
       <div className="formGrid">
         <Field label="项目" htmlFor={projectId} error={fieldErrors.project}>
           <select id={projectId} className="select" value={selectedProject} onChange={(event) => setSelectedProject(event.target.value)} aria-invalid={Boolean(fieldErrors.project)} aria-describedby={fieldErrors.project ? `${projectId}-error` : undefined}>

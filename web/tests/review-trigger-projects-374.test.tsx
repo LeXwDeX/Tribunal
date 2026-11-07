@@ -33,6 +33,7 @@ describe('review trigger project picker', () => {
           projects: [
             { id: 42, path_with_namespace: 'group/backend', access: 'manage', enabled: true },
             { id: 43, path_with_namespace: 'group/readonly', access: 'read', enabled: true },
+            { id: 44, path_with_namespace: 'group/second', access: 'manage', enabled: true },
           ],
         })
       }
@@ -52,6 +53,7 @@ describe('review trigger project picker', () => {
     const select = within(dialog).getByLabelText('项目') as HTMLSelectElement
     const values = Array.from(select.options).map((option) => option.value)
     expect(values).toContain('42')
+    expect(values).toContain('44')
     expect(values).not.toContain('43')
   })
 })

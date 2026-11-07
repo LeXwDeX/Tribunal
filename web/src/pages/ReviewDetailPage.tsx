@@ -508,6 +508,8 @@ export function ReviewDetailPage() {
     queryFn: () => getProject(detail.data!.project_id),
     enabled: Boolean(detail.data?.project_id),
   })
+  // One page is enough for the preset project; the dialog always keeps the
+  // current review project as a fallback when this page has no manage entry.
   const allProjects = useQuery({
     queryKey: ['projects', 'review-trigger'],
     queryFn: () => listProjects({ limit: 100 }),
