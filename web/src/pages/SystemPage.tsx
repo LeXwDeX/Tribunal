@@ -179,7 +179,7 @@ function UserDrawer({ user, open, currentUserId, onClose }: {
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<unknown>(null)
   const [projectID, setProjectID] = useState('')
-  const [grantRole, setGrantRole] = useState<ProjectAccess>('read')
+  const [grantRole, setGrantRole] = useState<ProjectAccess>('manage')
   const [confirm, setConfirm] = useState<{ role?: 'admin' | 'viewer'; global?: boolean } | null>(null)
   const grants = usePaginated<ProjectGrant>(
     ['admin-user-grants', user?.id],
@@ -467,7 +467,7 @@ function AdminGrantsPanel() {
   const users = usePaginated<AdminUser>(['admin-users'], (cursor) => listAdminUsers(cursor), 'users')
   const [projectId, setProjectId] = useState('')
   const [userId, setUserId] = useState('')
-  const [role, setRole] = useState<ProjectAccess>('read')
+  const [role, setRole] = useState<ProjectAccess>('manage')
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<unknown>(null)
   const [deleteTarget, setDeleteTarget] = useState<ProjectGrant | null>(null)

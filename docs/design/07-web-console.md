@@ -2,7 +2,7 @@
 
 > 平台内部使用的管理控制台。页面原型见设计画布「GitLab CE 评审平台原型」；本文定义页面、每页用到的 API 和前端技术选型。
 
-> 实现状态：控制台已实现，构建产物由 Go 服务 embed。评审详情返回来自存储 dossier 的 `mr_title`、当前用户的项目 `access`、独立于执行状态的 `publication_state`/`publication_error`，以及仅含 `success`/`failed` 的 `publications.commit_status`（旧发布键没有状态时为 unknown，界面显示不可用）。`INCOMPLETE` 与 BLOCKING、PASS 分开显示；BLOCKING 或 INCOMPLETE 的 `commit_status=failed` 表示评审结论，不表示发布失败。项目详情返回工作区摘要和最多 20 条最近 review，项目列表按当前用户 grant 过滤并返回 `access`、`workspace` 与 `last_review`。统计页展示总体/项目/provider/块的运行统计与 UTC 日趋势。人工标注在评审详情维护，项目 `manage` 可写、`read` 只读；`quality_by_provider` 展示提出方准确率和挑战方误杀率，`stats.feedback` 的原始计数与 provider/角色归因仍单独展示，不代替人工结论。
+> 实现状态：控制台已实现，构建产物由 Go 服务 embed。评审详情返回来自存储 dossier 的 `mr_title`、当前用户的项目 `access`、独立于执行状态的 `publication_state`/`publication_error`，以及仅含 `success`/`failed` 的 `publications.commit_status`（旧发布键没有状态时为 unknown，界面显示不可用）。`INCOMPLETE` 与 BLOCKING、PASS 分开显示；BLOCKING 或 INCOMPLETE 的 `commit_status=failed` 表示评审结论，不表示发布失败。项目详情返回工作区摘要和最多 20 条最近 review，项目列表对平台管理员返回全部已登记项目，对其他用户按 grant 或 `global_read` 过滤，并返回 `access`、`access_source`、`workspace` 与 `last_review`。统计页展示总体/项目/provider/块的运行统计与 UTC 日趋势。人工标注在评审详情维护，项目 `manage` 可写、`read` 只读；`quality_by_provider` 展示提出方准确率和挑战方误杀率，`stats.feedback` 的原始计数与 provider/角色归因仍单独展示，不代替人工结论。
 >
 > 以下字段/页面存在降级，界面用占位符显示：
 > - 工作区 `index_status` 按已存储 SHA 显示 `ready` / `stale` / `unknown`；这是检查点状态，不是实时索引健康证明，历史 SHA 的限制见 [HTTP API](03-http-api.md)。
@@ -52,7 +52,7 @@ web/
 系统（API Token / 平台配置只读视图 / 用户与账号 / 项目授权）
 ```
 
-`admin`/`viewer` 是平台标签，项目业务写操作由 API 返回的 `access` 控制：只有 `manage` 才显示按钮，`admin` 没有 grant 时也只能读或看不到项目。平台配置、用户与账号、项目授权标签只对平台管理员显示；模型与档位页面导航仍可见，但 provider/profile 数据只允许平台管理员读取，非管理员会看到权限错误。后端仍逐请求校验。普通登录用户都能在“系统 → API Token”自助管理自己的 token。
+`admin`/`viewer` 是平台标签，项目业务写操作由 API 返回的 `access` 控制：只有 `manage` 才显示按钮；平台管理员对全部已登记项目隐式拥有 `manage`，项目列表的来源列显示「管理员」。平台配置、用户与账号、项目授权标签只对平台管理员显示；模型与档位页面导航仍可见，但 provider/profile 数据只允许平台管理员读取，非管理员会看到权限错误。后端仍逐请求校验。已登录用户都能注册项目，也都能在“系统 → API Token”自助管理自己的 token。
 
 ---
 
@@ -87,11 +87,11 @@ web/
 
 ### 3.4 项目列表与注册
 
-列表列：项目路径、工作区状态、最近评审、token 过期时间、启用开关（评审档位只有 `default`，列表不再显示档位列）。普通用户只看到自己有 grant 的项目；平台管理员可看到“注册项目”入口，后端仍要求平台管理员。
+列表列：项目路径、工作区状态、最近评审、token 过期时间、启用开关（评审档位只有 `default`，列表不再显示档位列）。平台管理员看到全部已登记项目，来源列显示「管理员」；其他用户只看到自己有 grant 或 `global_read` 可见的项目。已登录用户都可看到“注册项目”入口，注册成功后注册人自动获得该项目 `manage`。
 
 注册分两步：输入仓库完整网址、路径或 ID 和访问 Key，先执行只读「校验连接」，展示项目、身份、角色、scope、有效期和 Git HEAD，并明确「校验通过，尚未保存」。修改地址或 Key 后校验失效，保存按钮再次禁用。
 
-「保存并初始化」才登记项目、加密保存 Key 并入队后台初始化，可能产生模型费用。高级设置保留分支、跳过 Draft 和自动 webhook，没有档位选择（项目固定使用 `default`）；自动 webhook 默认关闭。Key 仅保存在对话框局部状态，不写入 URL、查询缓存或浏览器持久存储；关闭对话框会清除 Key 和校验结果。
+「保存并初始化」才登记项目、加密保存 Key 并入队后台初始化，可能产生模型费用；注册人自动成为该项目的 `manage` 持有者。高级设置保留分支、跳过 Draft 和自动 webhook，没有档位选择（项目固定使用 `default`）；自动 webhook 默认关闭。Key 仅保存在对话框局部状态，不写入 URL、查询缓存或浏览器持久存储；关闭对话框会清除 Key 和校验结果。
 
 ### 3.5 项目详情
 
@@ -99,8 +99,8 @@ web/
 |---|---|---|
 | 概览 | 基本信息、最近评审、本项目统计 | `GET /projects/{id}`、`GET /stats?project_id=` |
 | 工作区与上下文 | 工作区状态、base sha、索引状态、最近刷新；操作：刷新、重建索引、重新生成上下文；上下文文档查看与编辑、锁定开关、历史版本 | `/workspace`、`/context-docs` |
-| 设置 | 项目 `manage` 可编辑项目设置（没有档位选择）、更新访问 Key、重建 webhook；`read` 只读。`POST /projects/validate` 仅平台管理员可用；项目 `manage` 保存 Key 时直接 `PUT .../token`，由后端校验凭据 | `PATCH /projects/{id}`、`POST /projects/validate`、`PUT .../token` |
-| 扩展绑定 | 项目 `read` 可查看项目级 MCP、Skill 和块绑定；写入宿主执行配置还需平台管理员，并同时具备项目 `manage` | `/mcp-servers`、`/skills`、`/block-bindings` |
+| 设置 | 项目 `manage` 可编辑项目设置（没有档位选择）、更新访问 Key、重建 webhook；`read` 只读。`POST /projects/validate` 已登录用户可调用；项目 `manage`（平台管理员隐式具备）保存 Key 时直接 `PUT .../token`，由后端校验凭据 | `PATCH /projects/{id}`、`POST /projects/validate`、`PUT .../token` |
+| 扩展绑定 | 项目 `read` 可查看项目级 MCP、Skill 和块绑定；写入宿主执行配置仍仅平台管理员，项目 scope 不再要求逐项目 `manage` grant（管理员隐式具备） | `/mcp-servers`、`/skills`、`/block-bindings` |
 
 平台管理员更新访问 Key 时可先做只读校验，返回的项目 ID 必须与当前项目一致；项目 `manage` 不要求调用 validate 端点，直接保存时由服务端校验凭据。该操作只更新平台保存的凭据，不在 GitLab 创建或撤销 token，也不自动初始化或触发评审。
 
@@ -108,11 +108,11 @@ web/
 
 - **MCP 服务器**：列表（作用域、名称、命令、状态、工具数）；已有自定义服务器的编辑、删除、启停；「测试」按钮列出工具。新增和导入入口已关闭。
 - **Skill**：列表（作用域、名称、描述、来源目录）；已有自定义 Skill 的启停和删除。上传和目录登记入口已关闭；内置项始终启用。
-- **块绑定**：矩阵视图，行是块（explore / code-review / review / reasoner / validate / verify / synthesize / onboarding），列是可用的 MCP 工具和 Skill，勾选即绑定。项目 scope 的读取需要该项目 grant；任何写入都要求平台管理员，项目 scope 还要求 `manage`。
+- **块绑定**：矩阵视图，行是块（explore / code-review / review / reasoner / validate / verify / synthesize / onboarding），列是可用的 MCP 工具和 Skill，勾选即绑定。项目 scope 的读取需要该项目 grant 或 `global_read`，平台管理员隐式可读；任何写入都仍要求平台管理员，项目 scope 不再要求逐项目 `manage` grant。
 
 ### 3.7 模型与档位
 
-- 用户管理：用户列表显示角色来源、全局模式、项目授权数；管理抽屉可提升/降级管理员、开关全局模式、增删用户维度项目授权。配置来源与自我降级不可操作。全局用户在页头显示标识，项目列表标记“只读（全局）”，评审页可切换“全部评审/我的项目”。
+- 用户管理：用户列表显示角色来源、全局模式、项目授权数；管理抽屉可提升/降级管理员、开关全局模式、增删用户维度项目授权。新增项目授权默认 `manage`（可读、可写、可删除），也可改为 `read` 只读共享；平台管理员的项目数据访问不依赖这些授权。配置来源与自我降级不可操作。全局用户在页头显示标识，项目列表标记“只读（全局）”，评审页可切换“全部评审/我的项目”。
 - 模型列表：显示名、来源标签（配置/用户）、协议、上游 model、base_url host、参数摘要、API key 状态、可用性与 unavailable 原因、被引用节点、近 24 小时调用数/错误率/P50 延迟；同名模型显示短 ID。配置模型只读。
 - 「评审档位」区块逐项显示 7 个可配置节点（default、explore、四路 lanes、challenge）的生效模型（显示名与短 ID）、来源标签（覆盖/继承覆盖默认/配置/配置默认/派生，以 API 返回的 `source` 为准）、配置值和生效参数（`effective_params`）。多个节点的 `vote_identity` 相同时提示「这些节点会被计为同一模型」并列出节点。管理员在 Drawer 中为每个节点选择模型（不可用模型禁用并显示原因）并设置 `max_tokens`、`temperature`、`reasoning.effort`（含 `max`）、`thinking.budget_tokens`，留空表示继承；「清除某项覆盖」只清空该节点表单，保存时整体 PUT 不含该节点；「恢复为配置」调用 DELETE 清除全部覆盖。保存和恢复都带当前 revision：400 的 `details[].field` 路径显示在对应输入旁，409 提示刷新并提供重新加载。非管理员只读，不渲染写控件。
 - 管理员可通过 Drawer 新增或编辑用户模型；API key 三态（保持不变/替换/清除），只存在抽屉局部状态，关闭即清空；保存前测试调用草稿测试端点，编辑且 key 不变时不发送 key。删除被引用模型显示 409 引用位置；revision 冲突提示重新加载；出站被拒显示专门说明。本页数据只允许平台管理员读取；其他用户打开会看到权限错误，写入口隐藏。
@@ -121,7 +121,7 @@ web/
 
 ### 3.8 统计与反馈
 
-- 目标视图：按项目、按 provider、按块的运行次数、成本、耗时趋势，以及按 provider 的提出方准确率/挑战方误杀率。统计只覆盖当前用户有 grant 的项目；平台管理员也按自己的项目授权过滤。
+- 目标视图：按项目、按 provider、按块的运行次数、成本、耗时趋势，以及按 provider 的提出方准确率/挑战方误杀率。统计对平台管理员覆盖全部已登记项目；其他用户只覆盖自己有 grant 或 `global_read` 可见的项目。
 - 当前页面已展示总体及按项目、provider、块的运行数、成本、平均/P95 耗时、有效耗时样本数与 UTC 日趋势。项目统计工作流；provider/块统计已启动节点，每个当前节点行只计一次，不按 LLM 调用轮次或重试次数累加。无 provider 的代码节点只进入块统计。
 - 趋势以可横向滚动的日期表格展示；每个项目/provider/块可展开自己的每日明细。筛选和日桶都基于 workflow 创建时间，日桶采用 UTC；只返回有记录的日，不补零。节点指标仅表示最新一次尝试的投影，不代表完整重试历史。字段、样本和成本口径见 [HTTP API](03-http-api.md#45-系统)。旧响应缺字段显示不可用，已知空数组单独显示空状态，非法趋势不显示部分合计。
 - 运行次数包含评审和 onboarding；`overturned_ratio` 标为「规则丢弃比例」，是规则裁决 `drop` 的占比，不是「被挑战推翻」或模型准确率。

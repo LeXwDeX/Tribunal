@@ -96,7 +96,8 @@ func TestRepositorySkillRoutesSuccessAuthAndConflict(t *testing.T) {
 	if err := env.db.DeleteProjectGrant(context.Background(), 42, 7); err != nil {
 		t.Fatal(err)
 	}
-	if response := admin.request(http.MethodGet, "/api/v1/admin/projects/42/repository-skills?target_branch=main", nil, nil); response.status != http.StatusNotFound || backend.calls != 0 {
+	// A platform administrator keeps host-execution access without a grant.
+	if response := admin.request(http.MethodGet, "/api/v1/admin/projects/42/repository-skills?target_branch=main", nil, nil); response.status != http.StatusOK || backend.calls != 1 {
 		t.Fatalf("admin without grant status = %d calls=%d", response.status, backend.calls)
 	}
 }

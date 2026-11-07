@@ -86,16 +86,16 @@ func TestRegisterProjectConflictHintIsAdminOnly(t *testing.T) {
 	if !strings.HasPrefix(message, "project is already registered") {
 		t.Fatalf("duplicate message prefix changed: %q", message)
 	}
-	if !strings.Contains(string(duplicate.body), "System page") {
-		t.Fatalf("duplicate message lacks the grant hint: %s", duplicate.body)
+	if !strings.Contains(string(duplicate.body), "assign it to you") {
+		t.Fatalf("duplicate message lacks the assignment hint: %s", duplicate.body)
 	}
 	if _, err := env.sqlite.GetProjectAccess(context.Background(), 7, 42); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("duplicate registration granted access: %v", err)
 	}
 	viewer := env.loginAs("code-viewer")
-	denied := viewer.json(http.MethodPost, "/api/v1/projects", body)
-	if denied.status != http.StatusForbidden || strings.Contains(string(denied.body), "registered") {
-		t.Fatalf("viewer register = %d %s", denied.status, denied.body)
+	duplicateAgain := viewer.json(http.MethodPost, "/api/v1/projects", body)
+	if duplicateAgain.status != http.StatusConflict || !strings.Contains(string(duplicateAgain.body), "already registered") {
+		t.Fatalf("viewer duplicate register = %d %s", duplicateAgain.status, duplicateAgain.body)
 	}
 }
 

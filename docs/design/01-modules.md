@@ -47,7 +47,7 @@ internal/
     server.go                    http.Server、路由、中间件（request id、日志、recover）
     webhook.go                   POST /webhooks/gitlab：校验 → 去重 → 入队
     auth.go                      GitLab OAuth 登录、会话 cookie、API token
-    access.go                    路由授权策略与项目 grant 检查
+    access.go                    路由授权策略、平台管理员隐式项目权限与项目 grant 检查
     api_admin.go                 平台管理面的用户停用/凭据撤销与项目授权
     api_projects.go              项目相关 API
     api_reviews.go               评审（工作流）相关 API

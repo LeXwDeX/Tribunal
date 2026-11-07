@@ -53,7 +53,7 @@ func (s *Server) modelViews(r *http.Request) ([]modelView, error) {
 	now := s.now()
 	stats, err := s.store.Stats(r.Context(), store.StatsFilter{
 		From: now.Add(-24 * time.Hour), To: now,
-		AccessUserID: accessUserIDPtr(currentUserID(r)),
+		AccessUserID: s.projectScopeUserID(r),
 	})
 	if err != nil {
 		return nil, err

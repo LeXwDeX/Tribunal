@@ -18,9 +18,12 @@ in the Go service. SQLite is the first supported storage backend. See
 
 ## Users
 
-Platform administrators register GitLab projects, inspect review runs, maintain
-project context and extensions, and diagnose failures. Viewers inspect the same
-review evidence without changing platform state.
+Platform administrators manage every registered GitLab project without
+per-project grants: they register projects, inspect review runs, maintain
+project context and extensions, and diagnose failures. Signed-in users may
+register projects themselves and then manage the projects they registered.
+Viewers with a read grant inspect the same review evidence without changing it;
+global-read users can inspect all projects read-only.
 
 ## Product Purpose
 
@@ -41,8 +44,11 @@ on a desktop, but must also be able to operate the console at 390px width.
 - It does not push changes or merge merge requests.
 - Repository context and configuration come from the target branch. Generated
   context, indexes, and worktrees remain inside the platform.
-- GitLab OAuth sessions support admin and viewer roles. Browser writes require
-  CSRF protection; CLI access uses API tokens.
+- GitLab OAuth sessions support admin and viewer roles. Platform administrators
+  implicitly manage every registered project; other users need a per-project
+  read or manage grant, or global read for read-only access. Signed-in users
+  can self-register projects, and the registrant receives manage. Browser
+  writes require CSRF protection; CLI access uses API tokens.
 - An execution failure or incomplete verification must not appear as a PASS.
 - Provider secrets, project tokens, and webhook secrets must not appear in UI
   responses or logs. Newly issued secrets are displayed only when required.

@@ -248,9 +248,10 @@ func NewProjectService(cfg ProjectServiceConfig) (*ProjectService, error) {
 	}, nil
 }
 
-// projectAlreadyRegisteredMessage is returned only on the platform-admin
-// registration route, so the hint never reveals existence to other callers.
-const projectAlreadyRegisteredMessage = "project is already registered; if it is not in your project list, grant yourself access on the System page"
+// projectAlreadyRegisteredMessage is returned when registration finds an
+// existing project. The hint asks for assignment instead of exposing how the
+// project is administered.
+const projectAlreadyRegisteredMessage = "project is already registered; ask a platform administrator to assign it to you"
 
 // Register validates the project token and scopes, optionally creates a
 // webhook, then atomically stores the project and onboarding job.

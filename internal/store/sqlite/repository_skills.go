@@ -21,9 +21,8 @@ var (
 	repositorySkillBlockRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 )
 
-const repositorySkillManagerQuery = `SELECT EXISTS(SELECT 1 FROM project_grants pg
-	JOIN users u ON u.id = pg.user_id WHERE pg.project_id = ? AND pg.user_id = ?
-	AND pg.role = 'manage' AND u.role = 'admin' AND u.disabled = 0)`
+const repositorySkillManagerQuery = `SELECT EXISTS(SELECT 1 FROM users u
+	WHERE u.id = ? AND u.role = 'admin' AND u.disabled = 0)`
 
 func validRepositorySkillBranch(project int64, branch string) bool {
 	return project > 0 && branch != "" && len(branch) <= 1024 && strings.TrimSpace(branch) == branch &&
@@ -140,13 +139,15 @@ func (s *Store) ListRepositorySkillAuthorizations(ctx context.Context, project i
 	return out, nil
 }
 
-// AuthorizeRepositorySkillManagement checks both current roles in one read.
+// AuthorizeRepositorySkillManagement checks the current platform administrator
+// role in one read. Repository skill execution is a host-level capability, so
+// it stays limited to administrators; project access is checked separately.
 func (s *Store) AuthorizeRepositorySkillManagement(ctx context.Context, userID, projectID int64) error {
 	if userID <= 0 || projectID <= 0 {
 		return store.ErrNotFound
 	}
 	var allowed int
-	err := s.db.QueryRowContext(ctx, repositorySkillManagerQuery, projectID, userID).Scan(&allowed)
+	err := s.db.QueryRowContext(ctx, repositorySkillManagerQuery, userID).Scan(&allowed)
 	if err != nil {
 		return fmt.Errorf("sqlite: verify repository skill access: %w", err)
 	}
@@ -157,7 +158,7 @@ func (s *Store) AuthorizeRepositorySkillManagement(ctx context.Context, userID, 
 }
 
 // SaveRepositorySkillAuthorization atomically checks the actor's current
-// platform administrator role, project manage grant and expected revision.
+// platform administrator role and expected revision.
 func (s *Store) SaveRepositorySkillAuthorization(ctx context.Context, grant store.RepositorySkillAuthorization, expected string, actorID int64) (*store.RepositorySkillAuthorization, error) {
 	if !validRepositorySkillScope(grant.ProjectID, grant.TargetBranch, grant.Block) || actorID <= 0 || !store.ValidBlockBindingRevision(expected) {
 		return nil, errors.New("sqlite: invalid repository skill authorization")
@@ -193,7 +194,7 @@ func (s *Store) SaveRepositorySkillAuthorization(ctx context.Context, grant stor
 	}
 	defer func() { _ = tx.Rollback() }()
 	var allowed int
-	err = tx.QueryRowContext(ctx, repositorySkillManagerQuery, grant.ProjectID, actorID).Scan(&allowed)
+	err = tx.QueryRowContext(ctx, repositorySkillManagerQuery, actorID).Scan(&allowed)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: verify repository skill authorization: %w", err)
 	}

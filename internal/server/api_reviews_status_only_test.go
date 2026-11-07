@@ -63,14 +63,14 @@ func TestListReviewsStatusOnlyKeepsAccessFiltering(t *testing.T) {
 	seedStatusOnly(fake, 43, 2, base.Add(time.Minute))
 	env.grant(7, 42, store.ProjectAccessRead)
 	env.grant(8, 43, store.ProjectAccessRead)
-	alice := env.loginAs("code-admin")
+	bob := env.loginAs("code-viewer")
 
-	items, _ := reviewItems(t, env, alice.request(http.MethodGet, "/api/v1/reviews", nil, nil))
-	if len(items) != 1 || items[0]["project_id"] != float64(42) {
-		t.Fatalf("alice sees %v", items)
+	items, _ := reviewItems(t, env, bob.request(http.MethodGet, "/api/v1/reviews", nil, nil))
+	if len(items) != 1 || items[0]["project_id"] != float64(43) {
+		t.Fatalf("bob sees %v", items)
 	}
 	// A project the caller cannot read stays indistinguishable from a missing one.
-	denied := alice.request(http.MethodGet, "/api/v1/reviews?project_id=43", nil, nil)
+	denied := bob.request(http.MethodGet, "/api/v1/reviews?project_id=42", nil, nil)
 	assertStatus(t, denied, http.StatusNotFound)
 }
 

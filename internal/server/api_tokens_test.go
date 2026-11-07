@@ -323,8 +323,10 @@ func TestAPITokenExpiryAndViewerRole(t *testing.T) {
 	if role := env.decode(t, me)["role"]; role != roleViewer {
 		t.Fatalf("viewer role = %v", role)
 	}
+	// Registration is open to every signed-in user; the token role still
+	// follows the platform configuration.
 	write := viewer.json(http.MethodPost, "/api/v1/projects", map[string]any{"project": "42", "token": "x"})
-	assertStatus(t, write, http.StatusForbidden)
+	assertStatus(t, write, http.StatusCreated)
 }
 
 func TestAPITokenListPagination(t *testing.T) {

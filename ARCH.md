@@ -46,7 +46,7 @@
 | D15 | 采用项目工作区，允许模型生成 AGENTS.md / CLAUDE.md 等上下文文档；**生成内容只存平台内部，不提交到仓库** | 已定 |
 | D16 | 支持 MCP 接入（配置格式兼容 Claude Code），首个接入 codebase-memory-mcp 用于代码地图检索；Docker 镜像默认内置并启用（§8.4） | 已定 |
 | D17 | 支持 Skill 接入（格式兼容 Claude Code Skill） | 已定 |
-| D18 | Web 控制台：SPA（Vite + React + TypeScript）embed 进二进制；用 GitLab OAuth 登录，平台角色分 admin / viewer，项目业务数据另由本地 read / manage grant 控制 | 建议默认 |
+| D18 | Web 控制台：SPA（Vite + React + TypeScript）embed 进二进制；用 GitLab OAuth 登录，平台角色分 admin / viewer；平台管理员对全部已登记项目隐式 manage，普通用户的项目业务数据由本地 read / manage grant 控制，并支持自助注册项目 | 建议默认 |
 | D19 | DAG 节点分 agent 节点和代码节点（如 plan、gather、adjudicate、synthesize）两类，对引擎透明 | 建议默认 |
 
 ---
@@ -131,10 +131,11 @@ web/                   Web 控制台（M6）
 
 平台登录授权与 GitLab 项目 token 分离：
 
-- 用户首次通过 GitLab OAuth 登录后建立本地 `users` 行；`auth.bootstrap_admins` 只决定平台管理角色。项目业务数据的读取和写入由本地 `project_grants` 的 `read` / `manage` 决定，默认无权限，平台管理员也不例外。
-- 平台管理员可以管理用户、项目授权和系统配置；读取项目、评审、工作区、统计、SSE 或项目扩展仍需该项目 grant。无 grant 或项目不存在统一返回 404，只有 `read` 时执行写操作返回 403。
+- 用户首次通过 GitLab OAuth 登录后建立本地 `users` 行；平台管理角色来自 `auth.bootstrap_admins` 或数据库授予，静态 bootstrap Bearer 不在此列。平台管理员（`users.id > 0`）对全部已登记项目隐式拥有 `manage`，无需逐项目 grant；普通用户的项目业务数据读取和写入由本地 `project_grants` 的 `read` / `manage` 决定，默认无权限。
+- 平台管理员可以管理用户、项目授权、项目注册和系统配置，并隐式管理全部已登记项目的数据：读取项目、评审、工作区、统计、SSE 和项目扩展，执行项目写操作和删除项目。普通用户无访问权限或项目不存在统一返回 404，只有 `read` 时执行写操作返回 403。
+- 已登录用户（浏览器会话或用户 API token）可以调用项目注册和连接校验接口登记项目；注册事务为注册人写入该项目 `manage` grant。静态 bootstrap Bearer 也可以注册，但不写 owner grant。
 - `auth.bootstrap_token_env` 指向的静态 Bearer 只用于平台管理面，没有本地用户 ID 和 grant，不接受项目业务路由。它的轮换由部署方更新环境变量并重启完成。
-- 用户被本地停用后不能登录、使用已有会话/API token 或获得新凭据；撤销凭据与停用都是本地控制。GitLab 组成员关系变化不会自动同步到 Tribunal，退组后仍需删除 grant 或停用本地用户。
+- 用户被本地停用后不能登录、使用已有会话/API token 或获得新凭据；撤销凭据与停用都是本地控制。GitLab 组成员关系变化不会自动同步到 Tribunal，退组后仍需删除普通用户的 grant 或停用本地用户。
 
 ### 4.2 触发
 
@@ -433,7 +434,7 @@ data/workspaces/<project_id>/
 
 - **SDK**：官方 `github.com/modelcontextprotocol/go-sdk`。
 - **配置格式兼容 Claude Code**：沿用 `mcpServers` JSON 结构（stdio 的 `command` / `args` / `env`，HTTP 的 `url` / `headers`），可以从 Claude Code 的配置直接复制。
-- **分层**：平台级（所有项目共享）加项目级（工作区 `mcp.json`），同名时项目级覆盖平台级。平台级配置和任何范围写入需要平台管理员；项目级写入还需该项目 `manage`，项目 `read` 只能查看，不能修改宿主执行配置。Skill 和块绑定使用相同边界。
+- **分层**：平台级（所有项目共享）加项目级（工作区 `mcp.json`），同名时项目级覆盖平台级。平台级配置和任何范围写入需要平台管理员；项目级写入使用平台管理员对已登记项目的隐式 `manage`，不再要求逐项目 grant，项目 `read` 只能查看，不能修改宿主执行配置。Skill 和块绑定使用相同边界。
 - **工具命名**：`mcp__<server>__<tool>`。
 - **按块授权**：每个块声明允许使用的 MCP 工具白名单，未列入的工具对该块不可见。
 - **进程管理**：stdio 服务器按工作区建立进程池，cwd 指向工作区；每次调用都有超时和输出长度上限；空闲超时后回收；崩溃后自动重启，并计入节点错误。
@@ -597,7 +598,7 @@ blocks:                     # 按块授权 MCP 工具、挂载 Skill
 | 仓库内 AGENTS.md / CLAUDE.md 被篡改 | 只读目标分支版本，作为非授权背景注入 |
 | MCP 服务器子进程 | 环境变量白名单，不传 token 和 API key；只开放只读工具；超时与输出上限 |
 | Skill 内容 | 只支持指令类，不执行脚本；附属文件读取限定在 skill 目录 |
-| 越权读取/写入 | 项目业务路由检查本地 grant；无 grant 统一 404，只有 read 时写操作 403；列表、统计和 SSE 按 grant 过滤 |
+| 越权读取/写入 | 平台管理员仅对已登记项目隐式 manage；其他项目的业务路由检查本地 grant，无权限统一 404，只有 read 时写操作 403；列表、统计和 SSE 按访问范围过滤 |
 | 退组或离职后的残留访问 | GitLab 组成员关系不自动同步；本地停用用户并撤销全部会话/API token，或删除项目 grant |
 | 静态管理 token 泄露 | 仅平台管理面，无用户 ID 和项目授权；由部署方轮换环境变量并重启 |
 
@@ -682,7 +683,7 @@ blocks:                     # 按块授权 MCP 工具、挂载 Skill
 | # | 问题 | 当前建议 |
 |---|---|---|
 | Q1 | 是否同时支持 Group Token 或 bot 账号 PAT？ | 首版只支持 Project Token，数据模型预留 |
-| Q2 | 项目接入方式：管理员手工登记，还是项目方自助（服务用项目 token 自动创建 webhook）？ | 首版手工登记加 CLI，自助注册放到 M6 |
+| Q2 | 项目接入方式：管理员手工登记，还是项目方自助（服务用项目 token 自动创建 webhook）？ | 已支持自助：任何已登录用户可注册项目并获得该项目 manage；管理员仍可代为登记和分配授权 |
 | Q3 | 是否需要 Web 管理界面？ | 首版用 CLI 和管理 API，界面放到 M6 |
 | Q4 | `verify` 是否就定位为挑战者（D11）？读取 CI 日志诊断是否需要？ | 挑战者为主，CI 诊断作为后续可选 |
 | Q5 | 默认拓扑用 A 还是 B？ | 只用 A（提出加反证）；评审档位只有 `default` |

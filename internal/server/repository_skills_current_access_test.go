@@ -32,7 +32,9 @@ type discoveryUnusedGit struct{ app.GitOps }
 type discoveryUnusedGitLab struct{ app.GitLabClient }
 
 func TestRepositorySkillDiscoveryRechecksCurrentAccess(t *testing.T) {
-	for _, change := range []string{"unchanged", "platform", "configured-platform", "project", "disabled", "missing-current-access"} {
+	// Project grants no longer gate host execution for platform administrators;
+	// role demotion, configured-admin removal, disabling and missing access do.
+	for _, change := range []string{"unchanged", "platform", "configured-platform", "disabled", "missing-current-access"} {
 		t.Run(change, func(t *testing.T) { testRepositorySkillDiscoveryAccessChange(t, change) })
 	}
 }

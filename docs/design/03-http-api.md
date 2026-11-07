@@ -17,11 +17,11 @@
 | Web 控制台 | GitLab OAuth 登录后下发会话 cookie（`HttpOnly`、`Secure`、`SameSite=Lax`）；写操作要求 `X-CSRF-Token` |
 | `tribunalctl` / 脚本 | `Authorization: Bearer <api_token>`；bootstrap Bearer 仅用于平台管理面 |
 
-平台角色只有 `admin` / `viewer`，由当前 `auth.bootstrap_admins` 计算：`id:<n>` 条目按 GitLab 用户 ID 匹配；用户名条目在首次以 admin 身份出现时绑定到当时的 GitLab 用户 ID（`admin_bindings`），之后同名但 ID 不同的账号只得到 `viewer` 并记录告警；`users.role` 只记录签发时标签，不作为已有 token 的权限来源。平台管理员可管理用户、项目授权、项目注册和系统配置，但不会自动获得项目业务数据权限。
+平台角色只有 `admin` / `viewer`，按请求合并当前 `auth.bootstrap_admins` 与数据库授予的平台角色：`id:<n>` 条目按 GitLab 用户 ID 匹配；用户名条目在首次以 admin 身份出现时绑定到当时的 GitLab 用户 ID（`admin_bindings`），之后同名但 ID 不同的账号只得到 `viewer` 并记录告警；数据库授予的角色由用户管理接口维护。`users.role` 只记录签发时标签，不作为已有 token 的权限来源。拥有本地用户 ID（`users.id > 0`）的平台管理员对全部已登记项目隐式拥有 `manage`：可读取项目、修改设置、轮换 token、管理 webhook、触发/取消/重发评审、管理工作区与项目扩展、删除项目，无需逐项目 grant。静态 bootstrap Bearer 没有用户 ID，不具备这一隐式权限。
 
-项目业务数据由本地 `project_grants` 的 `read` / `manage` 决定，平台管理员也必须被显式授权；用户开启 `global_read` 后无需逐项目 grant 即可读取全部项目（含之后新登记的项目），但写操作仍要求对应项目的 `manage`。无访问权限或项目不存在统一返回 404；只有 `read` 时执行写操作返回 403。列表、统计、SSE、上下文和项目扩展在查询或流式读取时按同一访问规则过滤；删除 grant 后，若用户没有其他 grant 或有效的 `global_read`，已有 API token 会失去该项目访问并关闭已打开的 SSE，停用用户会撤销全部会话和 API token，其全局读取同时失效。
+非管理员的项目业务数据由本地 `project_grants` 的 `read` / `manage` 决定，默认没有授权；平台管理员的隐式 `manage` 不写入 grant，也不要求 `access_source=grant`。用户开启 `global_read` 后无需逐项目 grant 即可读取全部项目（含之后新登记的项目），但写操作仍要求对应项目的 `manage`；平台管理员不再依赖 `global_read`。无访问权限或项目不存在统一返回 404；只有 `read` 时执行写操作返回 403。列表、详情、统计、SSE、上下文和项目扩展在查询或流式读取时按同一访问规则过滤；删除 grant 后，若用户没有其他 grant 或有效的 `global_read`，已有 API token 会失去该项目访问并关闭已打开的 SSE，停用用户会撤销全部会话和 API token，其全局读取同时失效。
 
-`auth.bootstrap_token_env` 指定的静态 Bearer 只用于平台管理面：没有本地用户 ID，也没有任何项目 grant，不能读取项目业务数据。它的轮换由部署方更新环境变量并重启；`bootstrap_admins` 变化同样在重启后生效。
+`auth.bootstrap_token_env` 指定的静态 Bearer 只用于平台管理面：没有本地用户 ID，也没有任何项目 grant，不能读取项目业务数据——项目业务列表为空，项目详情、评审、统计、SSE 和项目扩展返回 404；它仍可调用管理面接口并注册项目，注册后不产生 owner grant。它的轮换由部署方更新环境变量并重启；`bootstrap_admins` 变化同样在重启后生效。
 
 浏览器会话保存在 SQLite `sessions` 表，cookie 保存随机 token 及其 HMAC 签名，数据库只保存 token 的 SHA-256。CSRF token 由会话 token 和 `TRIBUNAL_SESSION_KEY` 派生，不单独存储。固定 `TRIBUNAL_SESSION_KEY`（旧名 `CRC_SESSION_KEY` 仍兼容，新名优先）时，重启后未过期会话仍有效；未设置时进程内随机生成 key 并输出告警，旧 cookie 在重启后失效。
 
@@ -112,9 +112,9 @@ Note Hook 先入队 `review.command`，由 worker 请求 GitLab 校验身份、M
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/v1/projects` | 当前用户已授权的项目列表：`?q=&enabled=&limit=&cursor=`，响应 `{projects, next_cursor}`，每项带 `access` |
-| POST | `/api/v1/projects/validate` | 平台管理员只读连接校验：`{project, token}`；不保存项目或凭据 |
-| POST | `/api/v1/projects` | 平台管理员注册项目 |
+| GET | `/api/v1/projects` | 当前用户可见的项目列表：平台管理员为全部已登记项目，其他用户为已授权或 `global_read` 可见的项目；`?q=&enabled=&limit=&cursor=`，响应 `{projects, next_cursor}`，每项带 `access`，平台管理员另带 `access_source=admin`，只读项目带 `access_source=grant\|global` |
+| POST | `/api/v1/projects/validate` | 已登录用户只读连接校验：`{project, token}`；不保存项目或凭据 |
+| POST | `/api/v1/projects` | 已登录用户注册项目；注册人自动获得该项目 `manage` |
 | GET | `/api/v1/projects/{id}` | 项目 `read`：详情（含工作区状态、最近评审和 `access`） |
 | PATCH | `/api/v1/projects/{id}` | 项目 `manage`：修改 `profile`（只接受 `default`，其他值返回 400 `unknown profile`）、`settings`（其中 `profile_by_label` 的值不是 `default` 的映射在保存时被丢弃，不报错）、`enabled` |
 | PUT | `/api/v1/projects/{id}/token` | 项目 `manage`：轮换 token：`{token}` |
@@ -123,9 +123,9 @@ Note Hook 先入队 `review.command`，由 worker 请求 GitLab 校验身份、M
 | DELETE | `/api/v1/projects/{id}/webhook` | 项目 `manage`：停用 webhook，只删除已记录的 service hook，保留 secret 供再次启用 |
 | DELETE | `/api/v1/projects/{id}` | 项目 `manage`：注销并删除 webhook（若由本服务创建）、清理工作区 |
 
-`GET /api/v1/projects` 是业务列表，按当前用户的有效项目访问权限（逐项目 grant 或有效的 `global_read`）过滤；没有这些权限的平台管理员或静态 bootstrap Bearer 得到空列表。选择授权对象时使用 §4.6 的 `/api/v1/admin/projects` 管理列表。列表中的 `access` 为 `read` 或 `manage`；访问权限在分页读取后被撤销的项目不会出现在结果中。
+`GET /api/v1/projects` 是业务列表：平台管理员看到全部已登记项目（`access=manage`、`access_source=admin`），非管理员按逐项目 grant 或有效的 `global_read` 过滤，没有这些权限时得到空列表；静态 bootstrap Bearer 仍得到空列表。选择授权对象时使用 §4.6 的 `/api/v1/admin/projects` 管理列表。列表中的 `access` 为 `read` 或 `manage`；访问权限在分页读取后被撤销的项目不会出现在结果中。
 
-`project` 支持正整数 ID、`namespace/path` 或配置的 GitLab 根地址下的完整 HTTP(S) 仓库 URL，可带 `.git` 后缀和尾斜杠。拒绝外域、URL 用户信息、query/fragment 和路径穿越；不会按用户输入连接任意主机。注册和连接校验要求平台管理员；项目详情读取需要 `read`，项目设置写入、Key 轮换、webhook 启用/重建/停用和注销需要 `manage`，不要求平台管理员。
+`project` 支持正整数 ID、`namespace/path` 或配置的 GitLab 根地址下的完整 HTTP(S) 仓库 URL，可带 `.git` 后缀和尾斜杠。拒绝外域、URL 用户信息、query/fragment 和路径穿越；不会按用户输入连接任意主机。注册和连接校验不再要求平台管理员，已认证调用方均可调用；项目详情读取需要 `read`，项目设置写入、Key 轮换、webhook 启用/重建/停用和注销需要 `manage`。平台管理员对已登记项目隐式拥有 `manage`；普通用户的 `manage` 来自注册人自动授权或管理员分配，同一项目可有多个 `manage` 持有者，任一持有者都可删除项目。
 
 只读校验依次确认项目身份、当前用户及至少 Reporter 的项目权限、`api` 和 `read_repository` scope、有效期，以及 `git ls-remote ... HEAD`。全程默认限时 30 秒。成功返回 `200 {project_id, path_with_namespace, web_url, default_branch, username, access_level, token_scopes, token_expires_at?, git_head}`；未配置可信 GitLab 根地址或 Git 探针时返回 503。校验不落库、不创建 webhook、不入队、不调用模型；读取 HEAD 不等于完整 clone 或评论写权限验证。注册仍独立复核凭据，不依赖先前校验结果。
 
@@ -148,7 +148,7 @@ POST /api/v1/projects
 1. 用 token 调 `GET /projects/:id` 确认可访问；读出 `default_branch`、`web_url`。
 2. 调 `GET /personal_access_tokens/self` 读取 scope 和过期时间；缺少 `api` 或 `read_repository` → `400 validation_failed`。
 3. `auto_webhook=true` 时直接调 `POST /projects/:id/hooks` 创建新 hook，不列出或复用已有 hook；需要 Maintainer。新 hook 使用期望 URL，勾选 Merge request、Comments、Push 事件并写入生成的 secret。注册流程不会修改或删除已有 hook，即使存在同 URL hook 也只创建新 hook。创建成功但入库失败时会补偿删除刚创建的 hook；创建失败则注册失败且不落库。
-4. 入库后入队 `workspace.onboard`。
+4. 入库后入队 `workspace.onboard`。注册人是有用户 ID 的账号（浏览器会话或用户 API token）时，项目、工作区、onboarding 任务和注册人的 `manage` grant 在同一事务内写入；静态 bootstrap Bearer（用户 ID 0）不写 grant。
 
 注册响应：`201 {project, job_id, webhook_secret?}`。`auto_webhook` 默认 false，此时只在注册响应中返回一次 `webhook_secret`，供手工配置 webhook，`webhook_state=disabled`；自动创建时不返回 secret，`webhook_state=enabled`。项目列表支持 `q` / `enabled` 筛选和游标分页；筛选值会绑定到 cursor。
 
@@ -217,7 +217,7 @@ POST /api/v1/projects
 }
 ```
 
-SSE 事件（`event:` 字段）：`node`（`{id, status, attempt}`）、`finding`（`{id, decision}`）、`workflow`（`{status, verdict, publication_state?, publication_error?}`）、`published`（`{kind, gitlab_id}`）。`workflow` 事件同时传播执行状态和发布状态；只有在 workflow 终态且 `publication_state` 为 `published`、`skipped`、`failed` 或空（旧数据）时，服务端才结束流。每轮轮询都重新认证并检查项目访问权限（grant 或有效的 `global_read`）；撤权、停用或 token 失效会关闭已打开的流。
+SSE 事件（`event:` 字段）：`node`（`{id, status, attempt}`）、`finding`（`{id, decision}`）、`workflow`（`{status, verdict, publication_state?, publication_error?}`）、`published`（`{kind, gitlab_id}`）。`workflow` 事件同时传播执行状态和发布状态；只有在 workflow 终态且 `publication_state` 为 `published`、`skipped`、`failed` 或空（旧数据）时，服务端才结束流。每轮轮询都重新认证并检查项目访问权限（平台管理员隐式 `manage`、逐项目 grant 或有效的 `global_read`）；撤权、停用或 token 失效会关闭已打开的流。
 
 `mr_title` 从该工作流已存储的 dossier 快照读取；没有 dossier、数据为空或标题为空时省略，不在详情请求中调用 GitLab。`publications.commit_status` 从成功发布写入的 `status:<head_sha>:<state>` 发布键解析，只接受 `success` 或 `failed`；旧格式 `status:<head_sha>` 没有状态记录，此时字段缺失（unknown），不根据 verdict 猜测。SSE 仍由服务端每 2 秒轮询数据库生成，不是事件推送。
 
@@ -243,7 +243,7 @@ SSE 事件（`event:` 字段）：`node`（`{id, status, attempt}`）、`finding
 
 **未创建工作流的评审（`kind: "status_only"`）**：评审在创建工作流之前结束时，列表仍会返回一项 `{kind: "status_only", project_id, mr_iid, head_sha, verdict, reason, created_at}`，`verdict` 为 `INCOMPLETE` 或 `PASS`。这类项没有 `id`，不能请求详情、graph 等 `/reviews/{wf_id}` 端点，控制台也不链接到图页面。工作流项保持已有的 `kind: "review"`，其余字段不变。`reason` 有三种持久化取值：`empty diff`（MR diff 为空，INCOMPLETE）、`no reviewable files`（变更文件全被 ignore 规则过滤，PASS）、`snapshot omitted files`（材料快照遗漏了变更文件，INCOMPLETE）；同一原因也写入评审状态详情，GitLab 状态评论中显示为 `详情：<reason>`。
 
-仅当同一项目、MR、head SHA 不存在评审工作流时才返回 status-only 项；`review_status` 每个 MR 只保留一行，因此仅当该 MR 当前评审状态就是这类结果时显示（后续运行会覆盖状态行；发布失败的此类运行不显示）。升级前写入的行详情为空，不显示。授权与工作流项相同（项目 read 授权、全局只读模式、`access=mine`）；筛选未授权的 `project_id` 返回 404。`verdict`、`project_id`、`mr_iid`、`since` 对两类项都生效；`status`、`publication_state`、`profile`、`trigger` 会排除 status-only 项。分页把两类项按时间从新到旧合并（时间相同时工作流在前）。`next_cursor` 可能是以 `m1.` 开头的复合值；客户端必须把 cursor 当作不透明字符串，不得解析或构造。旧的工作流 cursor 仍被接受。
+仅当同一项目、MR、head SHA 不存在评审工作流时才返回 status-only 项；`review_status` 每个 MR 只保留一行，因此仅当该 MR 当前评审状态就是这类结果时显示（后续运行会覆盖状态行；发布失败的此类运行不显示）。升级前写入的行详情为空，不显示。授权与工作流项相同（项目 read 授权、全局只读模式、平台管理员隐式 `manage`、`access=mine`；对平台管理员，`access=mine` 等同全部项目）；筛选未授权的 `project_id` 返回 404。`verdict`、`project_id`、`mr_iid`、`since` 对两类项都生效；`status`、`publication_state`、`profile`、`trigger` 会排除 status-only 项。分页把两类项按时间从新到旧合并（时间相同时工作流在前）。`next_cursor` 可能是以 `m1.` 开头的复合值；客户端必须把 cursor 当作不透明字符串，不得解析或构造。旧的工作流 cursor 仍被接受。
 
 `GET /api/v1/reviews` 的 `publication_state` 只接受 `pending`、`published`、`skipped`、`failed`，其他值返回 `400`；筛选在分页前应用。`publication_state` 独立于 `status`，取值为 `pending`、`published`、`skipped`、`failed`。`pending` 表示评审执行已结束但 GitLab 发布尚未完成，可在重启或手动重试后继续；`published` 表示汇总评论/失败摘要已成功写入；`skipped` 表示 stale（head、配置或 prompt 变化）、取消/被新代次替换，或关闭 failure note，不会自动重发；`failed` 是永久发布失败，需要手动 republish。`publication_error` 是有界、脱敏的失败或跳过原因，不含上游响应正文或凭据。发布状态与 GitLab commit status 不同：BLOCKING 的 `commit_status=failed` 是评审结论，不是发布失败；只有 PASS 会写 success，INCOMPLETE 也不会写 success。没有 dossier 的工作流和旧数据不返回 `publication_state`；界面把缺失值显示为“不表示发布成功”，不能当作 published。
 
@@ -270,7 +270,7 @@ agent 节点的 request 还可能带可选字段 `submit_prompt`（本次请求�
 
 **兼容契约：**没有 `_format` 的历史 payload 按存储原样返回；它可能是旧 `llm.Request`/`Response`（其中 request 的 `messages` 是数组），也可能是早期未标记的元数据（`messages` 是数字）或截断摘要。历史响应、部分 payload 或缺失 payload 有时无法单独判别，客户端应保留 unknown 分支，不得把未标记数据一律解析为某一种格式。版本和请求、响应应分别判断；同一列表可能混合各类历史和新格式。不能按旧类型把新 `messages` 当数组；未知未来版本也不应猜测。`include_payload` 可能读取含 prompt、响应正文或上游 ID 的历史数据，管理权限不等于已脱敏，禁止把它们写入普通日志。历史数据库和备份未被清洗。
 
-Finding 始终返回 `annotation`：`""` 为未标注，`valid` 为有效，`invalid` 为无效，`uncertain` 为未确定。非空时附 `annotated_by`（认证用户名）和 `annotated_at`（服务端 RFC 3339 时间）。标注 PUT 仅接收 `{"annotation":"valid"}` 这样的单字段请求；缺失、`null`、非法值、未知字段或非法 JSON 返回 `400`，不属于所选 workflow 的 finding 返回 `404`。只有项目 `read` 的账号写入、其他项目或无项目 grant 返回 403/404；浏览器会话缺少 CSRF 返回 `403`。发送空字符串可清除结论及操作者/时间。支持更正，采用最后一次成功写入；不改变 finding 处置、发布或 workflow verdict。相同 ID 的重新发布保留标注，其他 workflow 不继承标注。
+Finding 始终返回 `annotation`：`""` 为未标注，`valid` 为有效，`invalid` 为无效，`uncertain` 为未确定。非空时附 `annotated_by`（认证用户名）和 `annotated_at`（服务端 RFC 3339 时间）。标注 PUT 仅接收 `{"annotation":"valid"}` 这样的单字段请求；缺失、`null`、非法值、未知字段或非法 JSON 返回 `400`，不属于所选 workflow 的 finding 返回 `404`。写入需要项目 `manage`（平台管理员隐式具备）；只有 `read`、其他项目或无项目 grant 返回 403/404；浏览器会话缺少 CSRF 返回 `403`。发送空字符串可清除结论及操作者/时间。支持更正，采用最后一次成功写入；不改变 finding 处置、发布或 workflow verdict。相同 ID 的重新发布保留标注，其他 workflow 不继承标注。
 
 ### 4.3 工作区与上下文文档
 
@@ -316,7 +316,7 @@ Finding 始终返回 `annotation`：`""` 为未标注，`valid` 为有效，`inv
 
 `scope=project` 的数据库行覆盖完整的项目级授权：没有行表示继承，保存空数组表示显式撤销该块的全部 MCP 工具和 Skill。平台 scope 没有数据库行时可能由配置文件 `blocks` 提供生效绑定；首次用 `absent` 保存平台空行会创建数据库覆盖，该块的文件声明不再生效。调用方必须先读取完整列表并确认这一影响，服务端不推断调用方是否只加载了部分页。
 
-权限边界：`scope=project` 的读取需要该项目 `read` grant 或有效的 `global_read`；`scope=platform` 或省略 scope 的全局列表只允许平台管理员。创建和导入已关闭，认证后直接返回 403，不再执行 scope 授权；更新、删除、测试和块绑定写入仍要求平台管理员；项目 scope 写入还必须同时具备该项目 `manage`。项目 `manage` 本身不是宿主执行权限，不能写平台配置或绕过平台管理员。MCP 删除/更新/测试和 Skill 删除/启停按资源已存储的 scope 重新检查，不信任请求里的 scope。
+权限边界：`scope=project` 的读取需要该项目 `read` grant、有效的 `global_read`，或平台管理员的隐式 `manage`；`scope=platform` 或省略 scope 的全局列表只允许平台管理员。创建和导入已关闭，认证后直接返回 403，不再执行 scope 授权；更新、删除、测试和块绑定写入仍要求平台管理员；项目 scope 写入不再要求逐项目 `manage` grant，平台管理员对已登记项目隐式具备 `manage`。项目 `manage` 本身不是宿主执行权限，不能写平台配置或绕过平台管理员。MCP 删除/更新/测试和 Skill 删除/启停按资源已存储的 scope 重新检查，不信任请求里的 scope。
 
 导入 MCP 和创建自定义 MCP 已关闭，相关请求返回 403。已有自定义 MCP 仍可更新：允许只传 `name` 或 `enabled`；省略 `config` 会保留原配置，传入 `config` 则完整替换配置。列表、更新响应的 `config` 统一为 `{}`，任何角色都不能通过这些接口读回配置；不要把响应中的空对象当作原配置再次提交。旧客户端提交 env 值或敏感 header 的 `****` 时仍恢复已存值，没有对应旧值的占位项会移除；新客户端替换配置应提交完整原始模板。保存时对配置做严格语义校验：未知字段、非法值、越界字段和尾随 JSON 都返回 `400`；`${NAME}` 引用按模板加密保存，不在保存阶段展开环境变量，也不把解析值写入数据库。运行或测试时才展开。
 
@@ -384,7 +384,7 @@ provider 和 profile 的基线以配置文件为准；改动配置需重启服�
 | `effective_params` | 为该节点请求的值：模型自身参数叠加覆盖后的 `max_tokens`、`temperature`、`reasoning`、`thinking`。provider 适配器可能丢弃不支持的项：Anthropic 在开启 thinking 时不发送 `temperature`，也不发送 `reasoning.effort`；OpenAI 协议不发送 thinking |
 | `vote_identity` | 由端点和模型名得到的投票身份；`vote_identity` 相同的节点在投票中算同一个模型 |
 
-`/stats` 按当前用户的项目授权在聚合和分页前过滤；指定 `project_id` 时还要求该项目 `read`。平台管理员也只会看到自己已获授权项目的业务统计，平台管理标签不扩大项目数据范围。
+`/stats` 在聚合和分页前按当前用户的项目授权过滤；平台管理员不按 grant 过滤，统计全部已登记项目；其他用户按逐项目 grant 或有效的 `global_read` 过滤。指定 `project_id` 时还要求该项目 `read`（平台管理员隐式具备）。
 
 控制台集合响应按资源命名：`{projects}`、`{reviews}`、`{findings}`、`{servers}`、`{skills}`、`{bindings}`、`{providers}`、`{profiles}`、`{calls}`、`{documents}`、`{tokens}`；可分页的集合另带 `next_cursor`。不提供未发布的旧字段别名。
 
@@ -442,7 +442,7 @@ Provider 返回 `name`、`protocol`、`base_url`、`model`、`max_concurrency`�
 | GET | `/api/v1/admin/projects/residues` | 平台管理员：只读列出可归属到未登记项目的残留（项目 ID、路径、类型、是否可清理），不修改文件 |
 | POST | `/api/v1/admin/projects/residues/cleanup` | 平台管理员：`{confirm:true}` 清理归属明确的残留；未知归属保留并报告 |
 | GET | `/api/v1/admin/projects/{id}/grants` | `?limit=&cursor=` → `{grants:[{project_id, user_id, role, username?}], next_cursor}` |
-| PUT | `/api/v1/admin/projects/{id}/grants/{user_id}` | `{role: "read"|"manage"}`，返回保存后的 grant |
+| PUT | `/api/v1/admin/projects/{id}/grants/{user_id}` | `{role: "read"\|"manage"}`，返回保存后的 grant；分配 `manage` 后该项目由该用户管理（可读、可写、可删除），`read` 仍为只读共享 |
 | DELETE | `/api/v1/admin/projects/{id}/grants/{user_id}` | 删除一个 grant；`204` |
 
 模型管理（平台管理员，见 #290）：
@@ -473,7 +473,7 @@ Provider 返回 `name`、`protocol`、`base_url`、`model`、`max_concurrency`�
 
 写操作（创建、修改、删除）成功后调用运行时刷新，响应体为 `{"id": "…", "effective": "new_workflows"}`；审计日志使用 `event=platform_audit`，只记录操作者、目标、动作和字段名。
 
-授权角色只有 `read` 和 `manage`，默认没有 grant。`global_read` 对所有项目授予只读访问，平台管理员不会自动获得，需要显式开启并写平台审计日志。`admin projects` 只用于选择授权对象，不返回项目业务数据；平台管理员要读取项目详情、评审、统计或 SSE，仍必须有对应 grant 或 `global_read`。停用用户不删除 `users` 行、grant 或 `global_read` 设置；停用期间全局读取失效，重新启用后恢复原设置，但已撤销的会话和 token 不会恢复。撤销凭据不禁用账号，用户仍可通过 OAuth 重新登录。只有平台管理员可以跨用户停用、撤销、管理 grant 或切换 `global_read`；普通用户只能管理自己的 API token。
+授权角色只有 `read` 和 `manage`，普通用户默认没有 grant；平台管理员对全部已登记项目隐式拥有 `manage`，不需要逐项目 grant，也不要求 `access_source=grant`。`manage` 持有者可以读取、写入、删除该项目，同一项目可有多个 `manage` 持有者，任一持有者都可删除；`read` 是只读共享，写操作和删除返回 403。控制台的「项目授权/分配」默认选择 `manage`。`global_read` 对普通用户授予全部项目的只读访问（含之后新登记的项目），但不授予 `manage`；平台管理员不再依赖 `global_read`。`admin projects` 只用于选择授权对象，不返回项目业务数据。停用用户不删除 `users` 行、grant 或 `global_read` 设置；停用期间全局读取失效，重新启用后恢复原设置，但已撤销的会话和 token 不会恢复。撤销凭据不禁用账号，用户仍可通过 OAuth 重新登录。只有平台管理员可以跨用户停用、撤销、管理 grant 或切换 `global_read`；普通用户只能管理自己的 API token。
 
 ---
 

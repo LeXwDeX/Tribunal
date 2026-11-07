@@ -714,7 +714,7 @@ func TestCSRFRequiredForUnsafeSessionRequests(t *testing.T) {
 	}
 }
 
-func TestViewerCannotUseUnsafeMethods(t *testing.T) {
+func TestViewerCanRegisterProjects(t *testing.T) {
 	env := newAuthEnv(t)
 	client := env.client()
 	env.loginAs(client, "code-viewer")
@@ -733,11 +733,8 @@ func TestViewerCannotUseUnsafeMethods(t *testing.T) {
 		"Content-Type": "application/json",
 		csrfHeaderName: csrf,
 	})
-	if resp.status != http.StatusForbidden {
-		t.Fatalf("viewer write status = %d, body=%s", resp.status, resp.body)
-	}
-	if code := decodeMap(t, resp.body)["error"].(map[string]any)["code"]; code != "forbidden" {
-		t.Errorf("viewer write code = %v", code)
+	if resp.status != http.StatusCreated {
+		t.Fatalf("viewer register status = %d, body=%s", resp.status, resp.body)
 	}
 }
 
@@ -804,7 +801,9 @@ func TestAPITokenRoleFollowsCurrentBootstrapAdmins(t *testing.T) {
 		"Authorization": "Bearer " + token,
 		"Content-Type":  "application/json",
 	})
-	if write.status != http.StatusForbidden {
+	// Project registration is open to every authenticated user, including a
+	// token whose platform role was downgraded.
+	if write.status != http.StatusCreated {
 		t.Fatalf("api token write after admin removal = %d, body=%s", write.status, write.body)
 	}
 }

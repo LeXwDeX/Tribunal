@@ -1140,7 +1140,7 @@ func TestProjectWebhookLifecycleEndpoints(t *testing.T) {
 	}
 }
 
-func TestProjectWebhookControlRequiresManageGrant(t *testing.T) {
+func TestProjectWebhookControlAllowsAdminWithoutManageGrant(t *testing.T) {
 	env := newTestEnv(t)
 	defer env.close()
 	if resp := env.register("group/repo", testProjectTok, false, nil); resp.status != http.StatusCreated {
@@ -1148,6 +1148,7 @@ func TestProjectWebhookControlRequiresManageGrant(t *testing.T) {
 	}
 	const userID = int64(7)
 	cookie := env.sessionCookie(userID, "alice")
+	// A per-project read grant no longer restricts a platform administrator.
 	if err := env.store.SetProjectGrant(context.Background(), 42, userID, store.ProjectAccessRead); err != nil {
 		t.Fatal(err)
 	}
@@ -1168,11 +1169,11 @@ func TestProjectWebhookControlRequiresManageGrant(t *testing.T) {
 		{http.MethodDelete, "/api/v1/projects/42/webhook"},
 	} {
 		resp := env.request(request.method, request.path, "", nil, headers)
-		if resp.status != http.StatusForbidden {
+		if resp.status != http.StatusOK {
 			t.Fatalf("%s %s status = %d, body=%s", request.method, request.path, resp.status, resp.body)
 		}
 	}
-	if env.api.callCount("CreateProjectHook") != 0 || len(env.api.deletedHooks) != 0 {
-		t.Fatalf("read grant reached GitLab")
+	if env.api.callCount("CreateProjectHook") == 0 {
+		t.Fatalf("admin webhook control did not reach GitLab")
 	}
 }

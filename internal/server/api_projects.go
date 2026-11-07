@@ -211,11 +211,10 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cursor := r.URL.Query().Get("cursor")
-	userID := currentUserID(r)
 	filter := app.ProjectListFilter{
 		Query:        query,
 		Enabled:      enabled,
-		AccessUserID: accessUserIDPtr(userID),
+		AccessUserID: s.projectScopeUserID(r),
 	}
 	projects, next, err := s.projects.ListFilteredPage(r.Context(), filter, cursor, limit)
 	if err != nil {
@@ -281,6 +280,9 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 // projectGrant re-reads one project grant for response decoration. A row that
 // lost its grant is skipped instead of being shown with stale access.
 func (s *Server) projectGrant(r *http.Request, projectID int64) (string, bool, error) {
+	if s.isPlatformAdmin(r) {
+		return store.ProjectAccessManage, true, nil
+	}
 	userID := currentUserID(r)
 	if userID <= 0 || s.access == nil {
 		return "", false, nil
@@ -296,6 +298,9 @@ func (s *Server) projectGrant(r *http.Request, projectID int64) (string, bool, e
 }
 
 func (s *Server) projectAccessSource(r *http.Request, projectID int64, role string) string {
+	if s.isPlatformAdmin(r) {
+		return "admin"
+	}
 	if role != store.ProjectAccessRead || s.access == nil {
 		return ""
 	}

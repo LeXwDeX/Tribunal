@@ -4,9 +4,9 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { listProjects, registerProject, updateProject, validateProjectConnection } from '../api/api'
 import { ApiError, errorMessage } from '../api/client'
 import type { Project, ProjectRegistration, ProjectValidation } from '../api/types'
-import { useCanWrite } from '../components/RoleContext'
+import { useCanRegisterProject } from '../components/RoleContext'
 import {
-  Badge, Button, ButtonLink, Dialog, EmptyState, ErrorState, ExternalLink, Field, LoadingState, PageHeader, Panel, PanelBody, RelativeTime, Segmented, StatusBadge,
+  Badge, Button, Dialog, EmptyState, ErrorState, ExternalLink, Field, LoadingState, PageHeader, Panel, PanelBody, RelativeTime, Segmented, StatusBadge,
   Switch, Toolbar, VerdictBadge, useToast,
 } from '../components/ui'
 import { usePaginated } from '../lib/hooks'
@@ -238,8 +238,7 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
           {isAlreadyRegistered(error) ? (
             <div className={ui.errorBox} role="alert">
               <strong>项目已注册</strong>
-              <span>该项目已注册。若项目列表中看不到它，说明你还没有该项目的访问授权，可在「系统」页的项目授权中为自己授予 manage。</span>
-              <ButtonLink to="/system" className={ui.smallButton} onClick={close}>前往系统页授权</ButtonLink>
+              <span>该项目已注册。若项目列表中看不到它，说明你还没有访问权限；请联系管理员把该项目分配给你。</span>
             </div>
           ) : error ? <ErrorState error={error} title="保存并初始化失败" /> : null}
           {validation ? (
@@ -317,7 +316,7 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
 }
 
 export function ProjectsPage() {
-  const canRegister = useCanWrite()
+  const canRegister = useCanRegisterProject()
   const navigate = useNavigate()
   const toast = useToast()
   const queryClient = useQueryClient()
@@ -455,7 +454,7 @@ export function ProjectsPage() {
                           <Badge tone={webhookTone(webhookState)}>{labelForWebhookState(webhookState)}</Badge>
                           {project.hook_id ? <span className={styles.tableMeta}> · #{project.hook_id}</span> : null}
                         </td>
-                        <td className="muted">{project.access === 'read' && project.access_source === 'global' ? '只读（全局）' : project.access ? ACCESS_LABELS[project.access] || project.access : '—'}</td>
+                        <td className="muted">{project.access_source === 'admin' ? '管理员' : project.access === 'read' && project.access_source === 'global' ? '只读（全局）' : project.access ? ACCESS_LABELS[project.access] || project.access : '—'}</td>
                         <td>
                           {project.access === 'manage' ? (
                             <Switch

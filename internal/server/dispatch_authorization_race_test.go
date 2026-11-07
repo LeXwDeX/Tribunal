@@ -47,8 +47,11 @@ func TestDispatchHTTPAuthorizationAfterReregistration(t *testing.T) {
 	for _, path := range []string{"/api/v1/projects/42/merge_requests/7/reviews", "/api/v1/projects/42/workspace/refresh"} {
 		t.Run(path, func(t *testing.T) {
 			env := newWiringEnv(t)
-			client := env.business()
+			client := env.loginAs("code-viewer")
 			ctx := context.Background()
+			if err := env.db.SetProjectGrant(ctx, 42, 8, store.ProjectAccessManage); err != nil {
+				t.Fatal(err)
+			}
 			projects, err := app.NewProjectService(app.ProjectServiceConfig{Store: env.db, GitLab: registrationGitLab{}, Cipher: env.cipher, Workspace: env.manager, Profiles: map[string]config.ProfileConfig{"default": {}}})
 			if err != nil {
 				t.Fatal(err)
@@ -78,7 +81,7 @@ func TestDispatchHTTPAuthorizationAfterReregistration(t *testing.T) {
 				close(body.release)
 				t.Fatal(err)
 			}
-			if _, err := env.db.GetProjectAccess(ctx, 7, 42); !errors.Is(err, store.ErrNotFound) {
+			if _, err := env.db.GetProjectAccess(ctx, 8, 42); !errors.Is(err, store.ErrNotFound) {
 				close(body.release)
 				t.Fatalf("old grant survived: %v", err)
 			}
@@ -127,7 +130,10 @@ func TestDispatchReviewActionsRecheckGrant(t *testing.T) {
 	for _, action := range []string{"cancel", "republish"} {
 		t.Run(action, func(t *testing.T) {
 			env := newWiringEnv(t)
-			client := env.business()
+			client := env.loginAs("code-viewer")
+			if err := env.db.SetProjectGrant(context.Background(), 42, 8, store.ProjectAccessManage); err != nil {
+				t.Fatal(err)
+			}
 			assertStatus(t, client.json(http.MethodPost, "/api/v1/projects/42/merge_requests/7/reviews", nil), http.StatusAccepted)
 			id := env.seededWorkflow()
 			paused := &pausedReviewDispatch{ReviewController: env.dispatcher, entered: make(chan struct{}), release: make(chan struct{})}
@@ -139,7 +145,7 @@ func TestDispatchReviewActionsRecheckGrant(t *testing.T) {
 			case <-time.After(10 * time.Second):
 				t.Fatal("dispatch did not start")
 			}
-			if err := env.db.DeleteProjectGrant(context.Background(), 42, 7); err != nil {
+			if err := env.db.DeleteProjectGrant(context.Background(), 42, 8); err != nil {
 				close(paused.release)
 				t.Fatal(err)
 			}
@@ -164,7 +170,10 @@ func TestDispatchHTTPRechecksCurrentGrantAndEnabledUser(t *testing.T) {
 	for _, change := range []string{"revoke", "read", "disabled"} {
 		t.Run(change, func(t *testing.T) {
 			env := newWiringEnv(t)
-			client := env.business()
+			client := env.loginAs("code-viewer")
+			if err := env.db.SetProjectGrant(context.Background(), 42, 8, store.ProjectAccessManage); err != nil {
+				t.Fatal(err)
+			}
 			body := &dispatchBodyBarrier{entered: make(chan struct{}), release: make(chan struct{}), reader: strings.NewReader(`{}`)}
 			req := httptest.NewRequest(http.MethodPost, env.server.URL+"/api/v1/projects/42/workspace/refresh", body)
 			req.Header.Set("X-CSRF-Token", client.csrf)
@@ -184,11 +193,11 @@ func TestDispatchHTTPRechecksCurrentGrantAndEnabledUser(t *testing.T) {
 			var err error
 			switch change {
 			case "revoke":
-				err = env.db.DeleteProjectGrant(ctx, 42, 7)
+				err = env.db.DeleteProjectGrant(ctx, 42, 8)
 			case "read":
-				err = env.db.SetProjectGrant(ctx, 42, 7, store.ProjectAccessRead)
+				err = env.db.SetProjectGrant(ctx, 42, 8, store.ProjectAccessRead)
 			case "disabled":
-				err = env.db.SetUserDisabled(ctx, 7, true)
+				err = env.db.SetUserDisabled(ctx, 8, true)
 			}
 			close(body.release)
 			if err != nil {
