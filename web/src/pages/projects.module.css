@@ -160,11 +160,57 @@
   border-top: 1px solid var(--border);
 }
 
+.manualToggle[aria-expanded="true"] {
+  color: var(--text);
+}
+
+.manualBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  margin-top: var(--space-sm);
+}
+
+.manualChevron {
+  flex: none;
+  color: var(--muted);
+  transition: transform var(--dur-fast);
+}
+
+.manualChevronOpen {
+  transform: rotate(90deg);
+}
+
 .manualActions {
   display: flex;
   flex-wrap: wrap;
+  align-items: flex-start;
   gap: var(--space-sm) var(--space-md);
-  margin-top: var(--space-md);
+}
+
+.manualAction {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-xs);
+}
+
+.manualStatus {
+  display: flex;
+  gap: var(--space-sm);
+  font-size: var(--fs-meta);
+  color: var(--muted);
+  line-height: var(--lh-normal);
+}
+
+.manualStatus::before {
+  content: '';
+  flex: none;
+  width: var(--space-xs);
+  height: var(--space-xs);
+  margin-top: var(--space-xs);
+  border-radius: 50%;
+  background: var(--info-dot);
 }
 
 .tileMeta {
@@ -301,6 +347,10 @@
   }
   .tileFooter .hint {
     margin-left: 0;
+  }
+  .manualActions {
+    flex-direction: column;
+    align-items: flex-start;
   }
 }
 
