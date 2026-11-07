@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   getCurrentContextDoc, getWorkspace, listContextDocs, refreshWorkspace, saveCurrentContextDoc, setContextDocLock,
@@ -6,8 +6,9 @@ import {
 import { ApiError, errorMessage } from '../../api/client'
 import type { ContextDoc } from '../../api/types'
 import {
-  Badge, Button, EmptyState, ErrorState, LoadingState, Panel, Segmented, StatusBadge, Switch, useToast,
+  Badge, Button, classNames, EmptyState, ErrorState, LoadingState, Panel, Segmented, StatusBadge, Switch, useToast,
 } from '../../components/ui'
+import { Icon } from '../../components/Icons'
 import { usePaginated } from '../../lib/hooks'
 import { formatDate, labelForSource, labelForStatus, shortSha } from '../../lib/format'
 import { describeWorkspaceError } from '../../lib/diagnostics'
@@ -46,6 +47,11 @@ export function WorkspacePanel({ projectId, canManage = false }: { projectId: nu
   const [refreshError, setRefreshError] = useState<unknown>(null)
   const [manualChoice, setManualChoice] = useState<boolean | null>(null)
   const manualButton = useRef<HTMLButtonElement>(null)
+  const manualPanelId = useId()
+  const manualBodyId = `${manualPanelId}-body`
+  const indexBlockedId = `${manualPanelId}-index-blocked`
+  const feeHintId = `${manualPanelId}-fee-hint`
+  const lockedHintId = `${manualPanelId}-locked-hint`
   const pendingJob = pendingWorkspaceJobs.get(projectId)
   const [trackingJob, setTrackingJob] = useState(() => Boolean(pendingJob && pendingJob.until > Date.now()))
   const submittedRefreshAt = useRef(pendingJob?.baseRefreshAt)
@@ -246,6 +252,7 @@ export function WorkspacePanel({ projectId, canManage = false }: { projectId: nu
   const ws = workspace.data
   const indexBlocked = Boolean(ws?.index_status === 'degraded' && ws.last_error === 'index: blocked by ignore policy')
   const manualOpen = manualChoice ?? indexBlocked
+  const regenerateDescriptions = [feeHintId, agentsCurrent.data?.locked ? lockedHintId : undefined].filter(Boolean).join(' ')
 
   return (
     <div className={ui.pageStack}>
@@ -289,21 +296,35 @@ export function WorkspacePanel({ projectId, canManage = false }: { projectId: nu
         </div>
         {canWrite || indexBlocked ? (
           <div className={page.manualOperations}>
-            <Button ref={manualButton} variant="secondary" className={ui.smallButton} aria-expanded={manualOpen} onClick={() => setManualChoice(!manualOpen)}>手动操作</Button>
+            <Button
+              ref={manualButton}
+              variant="ghost"
+              className={classNames(ui.smallButton, page.manualToggle)}
+              aria-expanded={manualOpen}
+              aria-controls={manualOpen ? manualBodyId : undefined}
+              onClick={() => setManualChoice(!manualOpen)}
+            >
+              <Icon name="chevron" size={14} aria-hidden="true" className={classNames(page.manualChevron, manualOpen && page.manualChevronOpen)} />
+              手动操作
+            </Button>
             {manualOpen ? (
-              <>
-                {indexBlocked ? <div id={`workspace-index-blocked-${projectId}`} className={styles.notice} role="status">已按 ignore 策略跳过索引，这是安全配置，不是故障。修改项目 ignore 配置后重建索引。</div> : null}
-                {canWrite ? (
-                  <>
-                    <div className={page.manualActions}>
-                      <Button variant="secondary" className={ui.smallButton} onClick={(event) => { void refresh('reindex', event.currentTarget) }} loading={refreshAction === 'reindex'} disabled={Boolean(refreshAction)} aria-describedby={indexBlocked ? `workspace-index-blocked-${projectId}` : undefined}>重建索引</Button>
-                      <Button variant="secondary" className={ui.smallButton} onClick={(event) => { void refresh('regenerate', event.currentTarget) }} loading={refreshAction === 'regenerate'} disabled={Boolean(refreshAction)}>重新生成上下文</Button>
-                    </div>
-                    {agentsCurrent.data?.locked ? <p className={page.hint}>AGENTS 当前已锁定。执行时若 AGENTS 仍锁定，新版本会保存但不会生效，当前文档保持不变。</p> : null}
-                    <p className={page.hint}>重新生成上下文会调用模型，可能产生费用。</p>
-                  </>
+              <div id={manualBodyId} className={page.manualBody}>
+                {indexBlocked ? (
+                  <p id={indexBlockedId} className={page.manualStatus} role="status">已按 ignore 策略跳过索引，这是安全配置，不是故障。修改项目 ignore 配置后重建索引。</p>
                 ) : null}
-              </>
+                {canWrite ? (
+                  <div className={page.manualActions}>
+                    <div className={page.manualAction}>
+                      <Button variant="secondary" className={ui.smallButton} onClick={(event) => { void refresh('reindex', event.currentTarget) }} loading={refreshAction === 'reindex'} disabled={Boolean(refreshAction)} aria-describedby={indexBlocked ? indexBlockedId : undefined}>重建索引</Button>
+                    </div>
+                    <div className={page.manualAction}>
+                      <Button variant="secondary" className={ui.smallButton} onClick={(event) => { void refresh('regenerate', event.currentTarget) }} loading={refreshAction === 'regenerate'} disabled={Boolean(refreshAction)} aria-describedby={regenerateDescriptions}>重新生成上下文</Button>
+                      <p id={feeHintId} className={page.hint}>重新生成上下文会调用模型，可能产生费用。</p>
+                      {agentsCurrent.data?.locked ? <p id={lockedHintId} className={page.hint}>AGENTS 当前已锁定。执行时若 AGENTS 仍锁定，新版本会保存但不会生效，当前文档保持不变。</p> : null}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
             ) : null}
           </div>
         ) : null}
