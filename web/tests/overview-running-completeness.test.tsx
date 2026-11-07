@@ -37,15 +37,16 @@ describe('overview running completeness', () => {
     expect(await panel().findByText('当前没有运行中的评审')).toBeInTheDocument()
   })
 
-  it('suppresses the empty result while refreshing and restores it after success', async () => {
+  it('keeps the empty result visible while refreshing and shows a non-blocking status', async () => {
     let resolveRefresh: (response: Response) => void = () => {}
     const pending = new Promise<Response>((resolve) => { resolveRefresh = resolve })
     let calls = 0
     const { queryClient } = setup(() => ++calls === 1 ? jsonResponse({ reviews: [] }) : pending)
     await panel().findByText('当前没有运行中的评审')
     act(() => { void queryClient.invalidateQueries({ queryKey: runningKey }) })
-    await waitFor(() => expect(panel().queryByText('当前没有运行中的评审')).not.toBeInTheDocument())
-    expect(panel().getByRole('status')).toHaveTextContent('加载中')
+    await waitFor(() => expect(panel().getByText(/刷新中/)).toBeInTheDocument())
+    expect(panel().getByText('当前没有运行中的评审')).toBeInTheDocument()
+    expect(panel().queryByText(/^加载中/)).not.toBeInTheDocument()
     resolveRefresh(jsonResponse({ reviews: [] }))
     expect(await panel().findByText('当前没有运行中的评审')).toBeInTheDocument()
   })
@@ -82,10 +83,11 @@ describe('overview running completeness', () => {
     const { queryClient } = setup(() => ++calls === 1 ? jsonResponse(data) : pending)
     await panel().findByText('known running review')
     act(() => { void queryClient.invalidateQueries({ queryKey: runningKey }) })
-    await waitFor(() => expect(panel().getByRole('status')).toHaveTextContent('加载中'))
+    await waitFor(() => expect(panel().getByText(/刷新中/)).toBeInTheDocument())
+    expect(panel().queryByText(/^加载中/)).not.toBeInTheDocument()
     expect(panel().getByText('known running review')).toBeInTheDocument()
     resolveRefresh(jsonResponse(data))
-    await waitFor(() => expect(panel().queryByRole('status')).not.toBeInTheDocument())
+    await waitFor(() => expect(panel().queryByText(/刷新中/)).not.toBeInTheDocument())
   })
 
   it('keeps pagination available after a failed refresh is retried', async () => {

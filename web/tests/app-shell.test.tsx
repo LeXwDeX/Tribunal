@@ -54,6 +54,25 @@ describe('AppShell navigation', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
+  it('polls the shared running query every 10 seconds', async () => {
+    vi.useFakeTimers()
+    try {
+      const fetchMock = installFetch((url) => {
+        if (url.includes('/api/v1/reviews') && url.includes('status=running')) {
+          return jsonResponse({ reviews: [] })
+        }
+        return jsonResponse({}, 404)
+      })
+      renderShell()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('reads the count from the same cache key the overview page fills', () => {
     installFetch(() => new Promise<Response>(() => {}))
     const client = createTestQueryClient()

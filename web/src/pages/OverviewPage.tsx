@@ -200,7 +200,6 @@ export function OverviewPage() {
   const canRegister = useCanRegisterProject()
   const toast = useToast()
   const queryClient = useQueryClient()
-  const now = useNow(1000)
   const [triggerOpen, setTriggerOpen] = useState(false)
   const [range] = useState(() => {
     const to = new Date()
@@ -208,12 +207,15 @@ export function OverviewPage() {
     return { from: from.toISOString(), to: to.toISOString() }
   })
 
+  // AppShell owns the 10s polling for this shared query key; adding another
+  // refetchInterval here would create a second observer timer.
   const running = usePaginated<ReviewSummary>(
     ['reviews', 'overview', 'running'],
     (cursor) => listReviews({ status: 'running' }, cursor),
     'reviews',
-    { refetchInterval: 10_000 },
   )
+  // Only tick the elapsed clock while at least one review is running.
+  const now = useNow(1000, running.items.length > 0)
   const projectsPage = usePaginated<Project>(
     ['projects', 'overview'],
     (cursor) => listProjects({}, cursor),
@@ -390,14 +392,21 @@ export function OverviewPage() {
           <Panel
             flush
             title="运行中"
-            aside={<span>已加载 {runningCount}{running.hasNextPage ? '+' : ''} 个 · 每 10 秒刷新</span>}
+            aside={(
+              <span>
+                已加载 {runningCount}{running.hasNextPage ? '+' : ''} 个 · 每 10 秒刷新
+                {running.isFetching && !running.isFetchingNextPage && !pausedRunning
+                  ? <span className="small muted"> · 刷新中…</span>
+                  : null}
+              </span>
+            )}
           >
-            {running.isPending || running.isFetching || pausedRunning ? <div className={overview.state}><LoadingState label={pausedRunning ? '等待网络连接以读取运行状态…' : undefined} /></div> : null}
+            {running.isPending || pausedRunning ? <div className={overview.state}><LoadingState label={pausedRunning ? '等待网络连接以读取运行状态…' : undefined} /></div> : null}
             {running.isError ? <div className={overview.state}><ErrorState error={running.error} onRetry={running.retry} /></div> : null}
-            {running.isSuccess && !running.isFetching && !pausedRunning && !running.hasNextPage && running.items.length === 0 ? (
+            {running.isSuccess && !pausedRunning && !running.hasNextPage && running.items.length === 0 ? (
               <p className={overview.compactState}>当前没有运行中的评审</p>
             ) : null}
-            {running.isSuccess && !running.isFetching && !pausedRunning && running.hasNextPage && running.items.length === 0 ? (
+            {running.isSuccess && !pausedRunning && running.hasNextPage && running.items.length === 0 ? (
               <p className={overview.compactState}>还有未加载的运行中评审数据。</p>
             ) : null}
             {running.items.length ? (
