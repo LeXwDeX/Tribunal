@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { SystemPage } from '../src/pages/SystemPage'
@@ -92,5 +94,26 @@ describe('user management drawer (#297)', () => {
     await waitFor(() => expect(writes.some(
       (write) => write.method === 'DELETE' && write.url.includes('/admin/projects/42/grants/8'),
     )).toBe(true))
+  })
+
+  it('keeps the grant confirmation keyboard reachable inside the drawer', async () => {
+    mock([], [{ project_id: 42, user_id: 8, role: 'manage' }])
+    const user = userEvent.setup()
+    await openUser(user, 'bob')
+    await user.click(await screen.findByRole('button', { name: '删除' }))
+    const dialog = await screen.findByRole('dialog', { name: '删除项目授权？' })
+    const confirm = within(dialog).getByRole('button', { name: '删除' })
+    for (let index = 0; index < 6 && document.activeElement !== confirm; index += 1) {
+      await user.tab()
+    }
+    expect(confirm).toHaveFocus()
+  })
+
+  it('stacks modal overlays above drawers', () => {
+    const tokens = readFileSync(resolve(process.cwd(), 'src/styles/tokens.css'), 'utf8')
+    const z = (name: string) => Number(tokens.match(new RegExp(`--${name}:\\s*(\\d+)`))?.[1])
+    expect(z('z-modal')).toBeGreaterThan(z('z-drawer'))
+    const css = readFileSync(resolve(process.cwd(), 'src/styles/ui.module.css'), 'utf8')
+    expect(css).toMatch(/\.modalOverlay\s*\{[^}]*z-index:\s*var\(--z-modal\)/)
   })
 })

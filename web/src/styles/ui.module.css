@@ -718,7 +718,7 @@
   /* Cover the reserved root scrollbar gutter as well. */
   right: auto;
   width: 100vw;
-  z-index: var(--z-overlay);
+  z-index: var(--z-modal);
   display: flex;
   align-items: center;
   justify-content: center;
