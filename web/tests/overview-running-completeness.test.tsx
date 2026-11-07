@@ -114,4 +114,15 @@ describe('overview running completeness', () => {
     await user.click(load)
     expect(await panel().findByText('later running review')).toBeInTheDocument()
   })
+
+  it('ticks the elapsed clock inside the running list', async () => {
+    setup(() => jsonResponse({
+      reviews: [review({ created_at: new Date(Date.now() - 200).toISOString() })],
+    }))
+    const elapsed = await panel().findByText(/已用时 \d+s/)
+    const before = elapsed.textContent
+    await waitFor(() => {
+      expect(panel().getByText(/已用时 \d+s/).textContent).not.toBe(before)
+    }, { timeout: 2500 })
+  })
 })
