@@ -91,7 +91,9 @@ profiles:
     #   validate: { provider: primary }
     # challenge: { provider: primary }
     plan: { package_tokens: 60000 }
-    budget: { max_nodes: 30, deadline: 30m, max_tokens: 1500000 }
+    # max_tokens: 0 (default) sets no workflow token cap; the upstream key quota
+    # limits usage. Set a positive value only to cap tokens per review.
+    budget: { max_nodes: 30, deadline: 30m, max_tokens: 0 }
 
 review_defaults:
   language: zh-CN

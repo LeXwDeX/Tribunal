@@ -104,7 +104,7 @@ profiles:
       validate:    { provider: gpt }
     challenge: { provider: gpt }    # 可选：覆盖逐条反证（verify）
     plan:      { package_tokens: 60000, max_packages: 6 }
-    budget:    { max_nodes: 30, deadline: 30m, max_tokens: 1500000 }
+    budget:    { max_nodes: 30, deadline: 30m, max_tokens: 0 }   # 0 = 不设 token 上限
   onboarding:
     agent:      { provider: claude }
 
@@ -213,7 +213,7 @@ Tribunal 只有一个评审档位 `default`，评审图固定：`explore` → �
 | `lanes.code_review.provider`、`lanes.review.provider`、`lanes.reasoner.provider`、`lanes.validate.provider` | 可选，分别覆盖四路评审；留空取 `provider` |
 | `challenge.provider` | 可选，覆盖逐条反证（`verify`）；留空取 `provider` |
 | `plan.package_tokens`、`plan.max_packages` | 分包上限：每包估算 token（默认 60000）和最大包数（默认 6，受下述上界限制） |
-| `budget.max_nodes`、`budget.deadline`、`budget.max_tokens` | 节点总数（默认 30）、总时长（默认 30m）、token 上限（默认 1500000） |
+| `budget.max_nodes`、`budget.deadline`、`budget.max_tokens` | 节点总数（默认 30）、总时长（默认 30m）、token 上限（默认 0，即不设上限，用量由上游 LLM key 的额度决定；填正数才启用工作流 token 预算，见 [#392](https://github.com/LeXwDeX/Tribunal/issues/392)） |
 
 其余行为由代码固定，不可配置：plan 为 code 模式（不调用模型），P0/P1 逐条挑战，挑战结果不确定的条目标记为「存疑」后发布，报告由代码生成，评审图不在汇报阶段扩展。
 

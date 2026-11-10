@@ -65,7 +65,8 @@ profiles:
     budget:
       max_nodes: 30
       deadline: 30m
-      max_tokens: 1500000
+      # 0: no workflow token cap; the upstream key quota limits usage (#392).
+      max_tokens: 0
 mcp: {}
 skills:
   dirs: []
@@ -109,7 +110,8 @@ budget:
   max_nodes: 30
   max_extends: 0
   deadline: 30m
-  max_tokens: 1500000
+  # 0: no workflow token cap; the upstream key quota limits usage (#392).
+  max_tokens: 0
 `
 
 const providerDefaultsYAML = `
