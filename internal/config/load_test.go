@@ -54,7 +54,7 @@ func TestLoadDefaults(t *testing.T) {
 		t.Errorf("default profile = %+v", profile)
 	}
 	if profile.Budget.MaxNodes != 30 || profile.Budget.MaxExtends != 0 ||
-		profile.Budget.Deadline != 30*time.Minute || profile.Budget.MaxTokens != 1500000 {
+		profile.Budget.Deadline != 30*time.Minute || profile.Budget.MaxTokens != 0 {
 		t.Errorf("default budget = %+v", profile.Budget)
 	}
 	if len(profile.Propose) != 1 || profile.Propose[0].Block != "code-review" || profile.Propose[0].Provider != "" {
@@ -290,5 +290,23 @@ func TestYAMLTimeDurationDecodes(t *testing.T) {
 	var node yaml.Node
 	if err := yaml.Unmarshal([]byte("budget:\n  deadline: 20m\n"), &node); err != nil {
 		t.Fatalf("yaml node sanity check: %v", err)
+	}
+}
+
+// Token usage is limited by the upstream key by default (#392); an operator
+// who still wants a workflow token cap keeps it by setting a positive value.
+func TestLoadKeepsExplicitTokenBudget(t *testing.T) {
+	path := writeConfig(t, "budget.yaml", `
+profiles:
+  default:
+    budget:
+      max_tokens: 2500000
+`)
+	cfg := loadConfig(t, path)
+	if got := cfg.Profiles["default"].Budget.MaxTokens; got != 2500000 {
+		t.Errorf("explicit budget.max_tokens = %d, want 2500000", got)
+	}
+	if got := cfg.Profiles["default"].Budget.Deadline; got != 30*time.Minute {
+		t.Errorf("budget.deadline default = %v, want 30m", got)
 	}
 }

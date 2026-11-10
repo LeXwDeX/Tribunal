@@ -321,6 +321,9 @@ function budgetValue(key: string, value: unknown): string {
   if (key === 'deadline' && typeof value === 'number' && Number.isFinite(value) && value >= 0) {
     return formatDuration(value / 1_000_000)
   }
+  if (key === 'max_tokens' && (value === 0 || value === null || value === undefined)) {
+    return '不限（由上游 key 额度决定）'
+  }
   return typeof value === 'object' ? JSON.stringify(value) : String(value)
 }
 

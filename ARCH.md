@@ -355,10 +355,10 @@ pending ─→ queued ─→ running ─→ completed
 |---|---|
 | 每个工作流的节点总数 | 30 |
 | extend 次数 | 0（评审图不在汇报阶段扩展） |
-| 每个工作流的 token 上限 / 时长上限 | `profiles.default.budget`（`deadline` 默认 30m，`max_tokens` 默认 1500000） |
+| 每个工作流的 token 上限 / 时长上限 | `profiles.default.budget`（`deadline` 默认 30m；`max_tokens` 默认 0，即不设 token 上限，用量由上游 LLM key 的额度决定，见 [#392](https://github.com/LeXwDeX/Tribunal/issues/392)） |
 | 超出预算时 | 不再展开 verify，待挑战条目标记为未核验并在报告中注明；终止未完成的非 `TokenFree` 节点（见 04 §5.5） |
 
-`max_tokens` 是 workflow 共享预算，按 `input_tokens + output_tokens` 计算。cache read/write 和 reasoning 在 usage 中分别表示，但不额外加入预算，避免与 input/output 重复计数。调度器和节点执行器在每次模型请求前检查已提交用量加当前 attempt 已知的 partial usage；并发节点不预留额度，已发出的请求可能在检查后完成并造成超支，因此这是尽力上限，不是精确账单。transport 重试的已知 usage 计入下一次 attempt 的预算检查和最终节点用量；预算不足时保留已有结果，按 required / optional 和确定性规则兜底，不能无提示地给出 PASS。`usage_incomplete` 标记检测到的缺失或无法精确表示的用量；为 false 不证明历史用量完整。
+`max_tokens` 为 0 时不做 token 预算检查，模型额度耗尽时由上游返回错误，按普通节点失败处理。设为正数时，`max_tokens` 是 workflow 共享预算，按 `input_tokens + output_tokens` 计算。cache read/write 和 reasoning 在 usage 中分别表示，但不额外加入预算，避免与 input/output 重复计数。调度器和节点执行器在每次模型请求前检查已提交用量加当前 attempt 已知的 partial usage；并发节点不预留额度，已发出的请求可能在检查后完成并造成超支，因此这是尽力上限，不是精确账单。transport 重试的已知 usage 计入下一次 attempt 的预算检查和最终节点用量；预算不足时保留已有结果，按 required / optional 和确定性规则兜底，不能无提示地给出 PASS。`usage_incomplete` 标记检测到的缺失或无法精确表示的用量；为 false 不证明历史用量完整。
 
 ---
 
@@ -564,7 +564,7 @@ profiles:
       code_review: { provider: local }
     challenge: { provider: gpt }
     plan:   { package_tokens: 60000, max_packages: 6 }
-    budget: { max_nodes: 30, deadline: 30m, max_tokens: 1500000 }
+    budget: { max_nodes: 30, deadline: 30m, max_tokens: 0 }   # 0 = 不设 token 上限
   onboarding:
     agent: { provider: claude }
 

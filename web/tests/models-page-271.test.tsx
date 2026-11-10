@@ -47,6 +47,13 @@ describe('models page display (#271)', () => {
     expect(budget).toHaveTextContent('max_tokens: 1500000')
   })
 
+  it('shows an unset token budget as unlimited (#392)', async () => {
+    renderModels({ max_nodes: 30, deadline: 1_800_000_000_000, max_tokens: 0 })
+    const budget = await screen.findByText(/^预算 /)
+    expect(budget).toHaveTextContent('max_tokens: 不限（由上游 key 额度决定）')
+    expect(budget).not.toHaveTextContent('max_tokens: 0')
+  })
+
   it('keeps a non-numeric deadline as sent', async () => {
     renderModels({ deadline: '20m' })
     expect(await screen.findByText(/^预算 /)).toHaveTextContent('deadline: 20m')

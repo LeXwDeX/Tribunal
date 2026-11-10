@@ -190,7 +190,7 @@ finalize 若在重读时发现新节点，返回主循环继续调度，而不�
 | 工作流取消 | 运行中节点 `aborted`，未开始节点 `skipped(workflow_cancelled)` |
 | 四路评审节点（`cr.*`、`rv.*`、`reasoner`、`validate`）失败、被取消或被跳过 | 它们都是可选节点，其余各路继续运行并照常发布各自的 findings。`gather` 为缺失的一路写入证据缺口「lane X did not complete」，最终结论为 `INCOMPLETE`，不会是 `PASS` |
 | `explore` 未成功完成 | 四路评审不带探索摘要运行；报告给出一条告警，不产生证据缺口 |
-| `explore` 被跳过 | 只会发生在 token 预算在它开始前已耗尽时；此时 `plan` 也被跳过，工作流在没有结论的情况下结束 |
+| `explore` 被跳过 | 只会发生在设置了 token 预算（`max_tokens > 0`）且预算在它开始前已耗尽时；此时 `plan` 也被跳过，工作流在没有结论的情况下结束 |
 
 ### 5.5 预算校验
 
@@ -200,7 +200,7 @@ finalize 若在重读时发现新节点，返回主循环继续调度，而不�
 - 显式补派（`source=extend`）次数 ≤ `budget.max_extends`。评审档位固定为 0（报告阶段不扩展图）；plan 和 gather 的正常 `fan_out` 不消耗此额度。
 - 累计 token 超过 `budget.max_tokens` 时（设计意图）：不再展开 verify（`gather` 只输出不挑战的结果），并在汇总里注明「预算不足，部分条目未经核验」。
 
-当前实现的 token 预算语义：
+当前实现的 token 预算语义（仅在 `budget.max_tokens > 0` 时生效；默认 0 不做 token 预算检查，用量由上游 LLM key 的额度决定，见 [#392](https://github.com/LeXwDeX/Tribunal/issues/392)）：
 
 - `pkg/dag` 在预算耗尽时终止未完成的非 `TokenFree` 节点：required 节点写 `failed(budget_exhausted)`，optional 节点写 `skipped(budget_exhausted)`。
 - 标记为 `TokenFree` 的节点不会被引擎终止，仍会运行。当前构建把 `plan`（code 模式）、`gather`、`adjudicate`、`synthesize` 和 `synthesize.2` 标为 `TokenFree`；其他未完成节点按 required/optional 失败或跳过。
