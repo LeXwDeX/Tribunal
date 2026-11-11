@@ -150,7 +150,13 @@ export function WebhookPanel({ project }: { project: Project }) {
   const enabled = view.state === 'enabled'
 
   return (
-    <Panel title="GitLab Webhook" aside={<Badge tone={webhookTone(view.state)}>{labelForWebhookState(view.state)}</Badge>}>
+    <Panel
+      title="GitLab Webhook"
+      aside={<Badge tone={webhookTone(view.state)}>{labelForWebhookState(view.state)}</Badge>}
+      note={canWrite
+        ? '启用会在 GitLab 创建或复用本服务记录的 hook；同 URL 的手动 hook 不会被接管或删除。保存项目设置、校验或更新访问 Key 都不会修改 Webhook。'
+        : undefined}
+    >
       <div className={ui.stack}>
         <span className="small muted">
           托管方：{webhookManagedByLabel(view.managedBy, view.hookId)}
@@ -165,8 +171,6 @@ export function WebhookPanel({ project }: { project: Project }) {
 
         {canWrite ? (
           <>
-            {pending ? <span className="small" role="status">{PENDING_LABELS[pending]}</span> : null}
-            {!pending && done ? <span role="status"><Badge tone="ok">{SUCCESS_LABELS[done]}</Badge></span> : null}
             <div className={ui.row}>
               {enabled ? (
                 <>
@@ -187,10 +191,9 @@ export function WebhookPanel({ project }: { project: Project }) {
                 <Button variant="secondary" onClick={() => openDialog('rebuild')} disabled={busy}>重建 webhook</Button>
               ) : null}
             </div>
+            {pending ? <span className="small" role="status">{PENDING_LABELS[pending]}</span> : null}
+            {!pending && done ? <span role="status"><Badge tone="ok">{SUCCESS_LABELS[done]}</Badge></span> : null}
             {enableError ? <ErrorState error={enableError} title="启用 Webhook 失败" hint={webhookFailureHint(enableError)} /> : null}
-            <span className="small muted">
-              启用会在 GitLab 创建或复用本服务记录的 hook；同 URL 的手动 hook 不会被接管或删除。保存项目设置、校验或更新访问 Key 都不会修改 Webhook。
-            </span>
           </>
         ) : null}
       </div>

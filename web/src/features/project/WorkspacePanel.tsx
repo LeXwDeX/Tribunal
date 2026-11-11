@@ -6,7 +6,7 @@ import {
 import { ApiError, errorMessage } from '../../api/client'
 import type { ContextDoc } from '../../api/types'
 import {
-  Badge, Button, classNames, EmptyState, ErrorState, LoadingState, Panel, Segmented, StatusBadge, Switch, useToast,
+  ActionHint, Badge, Button, classNames, EmptyState, ErrorState, LoadingState, Panel, Segmented, StatusBadge, Switch, Textarea, useToast,
 } from '../../components/ui'
 import { Icon } from '../../components/Icons'
 import { usePaginated } from '../../lib/hooks'
@@ -256,7 +256,7 @@ export function WorkspacePanel({ projectId, canManage = false }: { projectId: nu
 
   return (
     <div className={ui.pageStack}>
-      <Panel flush>
+      <Panel flush note="收到并接受符合项目目标分支配置的推送 Webhook 后会排队刷新。自动刷新会尝试重建索引，并按上下文新鲜度规则决定是否生成上下文。手动刷新只刷新工作区，不会重建索引或按新鲜度规则生成上下文。">
         {workspace.isPending ? <div className={ui.panelBody}><LoadingState label="正在读取工作区…" /></div> : null}
         {workspace.isError ? <div className={ui.panelBody}><ErrorState error={workspace.error} onRetry={() => { void workspace.refetch() }} title="工作区状态加载失败" /></div> : null}
         {ws ? (
@@ -288,12 +288,15 @@ export function WorkspacePanel({ projectId, canManage = false }: { projectId: nu
             ) : null}
           </>
         ) : null}
-        <div className={page.tileFooter}>
-          {canWrite ? (
+        {canWrite ? (
+          <div className={page.tileFooter}>
             <Button variant="secondary" className={ui.smallButton} onClick={(event) => { void refresh('refresh', event.currentTarget) }} loading={refreshAction === 'refresh'} disabled={Boolean(refreshAction)}>刷新工作区</Button>
-          ) : <span className="small muted">只读账号可以查看工作区状态，不能触发刷新或修改上下文。</span>}
-          <span className={page.hint}>收到并接受符合项目目标分支配置的推送 Webhook 后会排队刷新。自动刷新会尝试重建索引，并按上下文新鲜度规则决定是否生成上下文。手动刷新只刷新工作区，不会重建索引或按新鲜度规则生成上下文。</span>
-        </div>
+          </div>
+        ) : (
+          <div className={page.tileFooter}>
+            <ActionHint>只读账号可以查看工作区状态，不能触发刷新或修改上下文。</ActionHint>
+          </div>
+        )}
         {canWrite || indexBlocked ? (
           <div className={page.manualOperations}>
             <Button
@@ -309,20 +312,26 @@ export function WorkspacePanel({ projectId, canManage = false }: { projectId: nu
             </Button>
             {manualOpen ? (
               <div id={manualBodyId} className={page.manualBody}>
-                {indexBlocked ? (
-                  <p id={indexBlockedId} className={page.manualStatus} role="status">已按 ignore 策略跳过索引，这是安全配置，不是故障。修改项目 ignore 配置后重建索引。</p>
-                ) : null}
                 {canWrite ? (
-                  <div className={page.manualActions}>
-                    <div className={page.manualAction}>
-                      <Button variant="secondary" className={ui.smallButton} onClick={(event) => { void refresh('reindex', event.currentTarget) }} loading={refreshAction === 'reindex'} disabled={Boolean(refreshAction)} aria-describedby={indexBlocked ? indexBlockedId : undefined}>重建索引</Button>
+                  <>
+                    <div className={page.manualActions}>
+                      <div className={page.manualAction}>
+                        <Button variant="secondary" className={ui.smallButton} onClick={(event) => { void refresh('reindex', event.currentTarget) }} loading={refreshAction === 'reindex'} disabled={Boolean(refreshAction)} aria-describedby={indexBlocked ? indexBlockedId : undefined}>重建索引</Button>
+                      </div>
+                      <div className={page.manualAction}>
+                        <Button variant="secondary" className={ui.smallButton} onClick={(event) => { void refresh('regenerate', event.currentTarget) }} loading={refreshAction === 'regenerate'} disabled={Boolean(refreshAction)} aria-describedby={regenerateDescriptions}>重新生成上下文</Button>
+                      </div>
                     </div>
-                    <div className={page.manualAction}>
-                      <Button variant="secondary" className={ui.smallButton} onClick={(event) => { void refresh('regenerate', event.currentTarget) }} loading={refreshAction === 'regenerate'} disabled={Boolean(refreshAction)} aria-describedby={regenerateDescriptions}>重新生成上下文</Button>
+                    <div className={page.manualHints}>
+                      {indexBlocked ? (
+                        <p id={indexBlockedId} className={page.manualStatus} role="status">已按 ignore 策略跳过索引，这是安全配置，不是故障。修改项目 ignore 配置后重建索引。</p>
+                      ) : null}
                       <p id={feeHintId} className={page.hint}>重新生成上下文会调用模型，可能产生费用。</p>
                       {agentsCurrent.data?.locked ? <p id={lockedHintId} className={page.hint}>AGENTS 当前已锁定。执行时若 AGENTS 仍锁定，新版本会保存但不会生效，当前文档保持不变。</p> : null}
                     </div>
-                  </div>
+                  </>
+                ) : indexBlocked ? (
+                  <p id={indexBlockedId} className={page.manualStatus} role="status">已按 ignore 策略跳过索引，这是安全配置，不是故障。修改项目 ignore 配置后重建索引。</p>
                 ) : null}
               </div>
             ) : null}
@@ -407,9 +416,9 @@ export function WorkspacePanel({ projectId, canManage = false }: { projectId: nu
                 {editing ? (
                   <>
                     <label className="srOnly" htmlFor="context-doc-editor">编辑上下文文档</label>
-                    <textarea
+                    <Textarea
                       id="context-doc-editor"
-                      className={`textarea ${page.docTextarea}`}
+                      className={page.docTextarea}
                       value={draft}
                       onChange={(event) => setDraft(event.target.value)}
                       spellCheck={false}

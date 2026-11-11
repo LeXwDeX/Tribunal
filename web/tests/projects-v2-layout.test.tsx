@@ -47,6 +47,35 @@ describe('projects list v2 layout', () => {
     await waitFor(() => expect(listUrls.some((url) => url.includes('enabled=true'))).toBe(true))
   })
 
+  it('announces loading and loaded counts through Toolbar.status', async () => {
+    let resolveFirst!: (response: Response) => void
+    const pending = new Promise<Response>((resolve) => { resolveFirst = resolve })
+    installFetch((url) => url.startsWith('/api/v1/projects') ? pending : jsonResponse({}))
+    renderProjects()
+
+    expect(await screen.findByText('刷新中…')).toBeInTheDocument()
+    const toolbar = screen.getByRole('toolbar', { name: '项目筛选' })
+    const status = toolbar.nextElementSibling as HTMLElement
+    expect(status).toHaveAttribute('role', 'status')
+    expect(status).toHaveTextContent('刷新中…')
+
+    resolveFirst(jsonResponse({ projects: [project()] }))
+    expect(await screen.findByText('已加载 1 个项目 · 1 个启用')).toBeInTheDocument()
+    expect(status).toHaveTextContent('已加载 1 个项目 · 1 个启用')
+  })
+
+  it('keeps the Toolbar.status live region mounted after a load error', async () => {
+    installFetch((url) => url.startsWith('/api/v1/projects')
+      ? jsonResponse({ error: { message: 'unavailable' } }, 500)
+      : jsonResponse({}))
+    renderProjects()
+
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
+    const status = screen.getByRole('toolbar', { name: '项目筛选' }).nextElementSibling as HTMLElement
+    expect(status).toHaveAttribute('role', 'status')
+    expect(status).toBeEmptyDOMElement()
+  })
+
   it('shows the last review verdict, key expiry days and access per row, without a profile column', async () => {
     installFetch((url) => {
       if (url.startsWith('/api/v1/projects')) {

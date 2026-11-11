@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -8,7 +8,8 @@ import { ApiError, errorMessage } from '../../api/client'
 import type { Project, ProjectValidation } from '../../api/types'
 import { useCanWrite } from '../../components/RoleContext'
 import {
-  Badge, Button, ConfirmDialog, Dialog, ErrorState, Field, LoadingState, Panel, Switch, useToast,
+  ActionHint, Badge, Button, ConfirmDialog, Dialog, Disclosure, ErrorState, Field, FieldHint, LoadingState,
+  NumberField, Panel, Select, Switch, Textarea, useToast,
 } from '../../components/ui'
 import { formatDate, labelForWebhookState, webhookTone } from '../../lib/format'
 import { tokenWarningText } from '../../lib/diagnostics'
@@ -53,20 +54,18 @@ function BoolSetting({
   const current = value === true ? 'true' : value === false ? 'false' : ''
   return (
     <Field label={label} htmlFor={id} hint="选择“继承平台默认”时不会写入项目覆盖值。">
-      <select
+      <Select
         id={id}
-        className="select"
         value={current}
         disabled={disabled}
-        onChange={(event) => {
-          const next = event.target.value
-          onChange(next === '' ? undefined : next === 'true')
-        }}
-      >
-        <option value="">继承平台默认</option>
-        <option value="true">启用</option>
-        <option value="false">禁用</option>
-      </select>
+        emptyLabel="继承平台默认"
+        options={[
+          { value: '', label: '继承平台默认' },
+          { value: 'true', label: '启用' },
+          { value: 'false', label: '禁用' },
+        ]}
+        onChange={(next) => onChange(next === '' ? undefined : next === 'true')}
+      />
     </Field>
   )
 }
@@ -299,10 +298,9 @@ export function SettingsPanel({ project }: { project: Project }) {
           </dl>
           {project.webhook_error ? <span className={styles.resultError}>{project.webhook_error}</span> : null}
           <div className={styles.notice}>只读账号不能修改项目设置、更新访问 Key、启用、重建或禁用 webhook，也不能注销项目。</div>
-          <details className={ui.disclosure}>
-            <summary>查看设置 JSON</summary>
+          <Disclosure summary="查看设置 JSON">
             <pre className={`pre ${ui.jsonBlock}`}>{JSON.stringify(project.settings || {}, null, 2)}</pre>
-          </details>
+          </Disclosure>
         </Panel>
       </div>
     )
@@ -317,12 +315,20 @@ export function SettingsPanel({ project }: { project: Project }) {
         >
           <div className="formGrid">
             <Field label="评审语言" htmlFor="setting-language" hint="留空时继承平台默认。">
-              <select id="setting-language" className="select" value={typeof draft.language === 'string' ? draft.language : ''} onChange={(event) => updateDraft('language', event.target.value)}>
-                <option value="">继承平台默认</option>
-                <option value="zh-CN">中文</option>
-                <option value="en">English</option>
-                {typeof draft.language === 'string' && !['zh-CN', 'en'].includes(draft.language) ? <option value={draft.language}>{draft.language}</option> : null}
-              </select>
+              <Select
+                id="setting-language"
+                value={typeof draft.language === 'string' ? draft.language : ''}
+                emptyLabel="继承平台默认"
+                options={[
+                  { value: '', label: '继承平台默认' },
+                  { value: 'zh-CN', label: '中文' },
+                  { value: 'en', label: 'English' },
+                  ...(typeof draft.language === 'string' && !['zh-CN', 'en', ''].includes(draft.language)
+                    ? [{ value: draft.language, label: draft.language }]
+                    : []),
+                ]}
+                onChange={(value) => updateDraft('language', value)}
+              />
             </Field>
             <BoolSetting label="跳过 Draft MR" value={draft.skip_draft} onChange={(value) => updateDraft('skip_draft', value)} />
             <BoolSetting label="BLOCKING 时写 commit status" value={draft.commit_status} onChange={(value) => updateDraft('commit_status', value)} />
@@ -340,31 +346,38 @@ export function SettingsPanel({ project }: { project: Project }) {
               <input id="setting-labels-exclude" className="input" value={splitComma(draft.labels_exclude)} onChange={(event) => updateDraft('labels_exclude', parseComma(event.target.value))} />
             </Field>
             <Field label="max files" htmlFor="setting-max-files" hint="留空使用平台默认。">
-              <input id="setting-max-files" className="input" type="number" min={1} value={typeof draft.max_files === 'number' ? draft.max_files : ''} onChange={(event) => updateDraft('max_files', event.target.value ? Number(event.target.value) : undefined)} />
+              <NumberField id="setting-max-files" min={1} value={typeof draft.max_files === 'number' ? draft.max_files : ''} onChange={(event) => updateDraft('max_files', event.target.value ? Number(event.target.value) : undefined)} />
             </Field>
             <Field label="max diff lines" htmlFor="setting-max-lines" hint="留空使用平台默认。">
-              <input id="setting-max-lines" className="input" type="number" min={1} value={typeof draft.max_diff_lines === 'number' ? draft.max_diff_lines : ''} onChange={(event) => updateDraft('max_diff_lines', event.target.value ? Number(event.target.value) : undefined)} />
+              <NumberField id="setting-max-lines" min={1} value={typeof draft.max_diff_lines === 'number' ? draft.max_diff_lines : ''} onChange={(event) => updateDraft('max_diff_lines', event.target.value ? Number(event.target.value) : undefined)} />
             </Field>
           </div>
           <div className="formGrid">
             <Field label="忽略路径" htmlFor="setting-ignore" hint="每行一个 glob，与平台默认值合并。">
-              <textarea id="setting-ignore" className="textarea" rows={5} value={splitLines(draft.ignore)} onChange={(event) => updateDraft('ignore', parseLines(event.target.value))} placeholder="docs/generated/**" />
+              <Textarea id="setting-ignore" rows={5} value={splitLines(draft.ignore)} onChange={(event) => updateDraft('ignore', parseLines(event.target.value))} placeholder="docs/generated/**" />
             </Field>
             <Field label="项目规则" htmlFor="setting-rules" hint="每行一条，作为项目背景注入评审。">
-              <textarea id="setting-rules" className="textarea" rows={5} value={splitLines(draft.custom_rules)} onChange={(event) => updateDraft('custom_rules', parseLines(event.target.value))} placeholder="金额计算必须使用 decimal 类型" />
+              <Textarea id="setting-rules" rows={5} value={splitLines(draft.custom_rules)} onChange={(event) => updateDraft('custom_rules', parseLines(event.target.value))} placeholder="金额计算必须使用 decimal 类型" />
             </Field>
           </div>
 
-          <details className={ui.disclosure}>
-            <summary>高级 JSON（profile_by_label 等）</summary>
+          <Disclosure summary="高级 JSON（profile_by_label 等）">
             <div className={ui.stackTop}>
               <label className="srOnly" htmlFor="settings-json">项目设置 JSON</label>
-              <textarea id="settings-json" className="textarea textareaCode" rows={12} value={jsonText} onChange={(event) => setJsonText(event.target.value)} spellCheck={false} />
-              {jsonError ? <span className={styles.resultError}>{jsonError}</span> : null}
+              <Textarea
+                id="settings-json"
+                code
+                rows={12}
+                value={jsonText}
+                onChange={(event) => setJsonText(event.target.value)}
+                spellCheck={false}
+                aria-describedby="settings-json-hint"
+              />
+              <FieldHint id="settings-json-hint">应用后，保存时提交当前表单值与未在表单中显示的 JSON 字段。</FieldHint>
+              {jsonError ? <span className={styles.resultError} role="alert">{jsonError}</span> : null}
               <Button variant="secondary" onClick={applyJson}>应用 JSON 到表单</Button>
-              <span className="small muted">应用后，保存时提交当前表单值与未在表单中显示的 JSON 字段。</span>
             </div>
-          </details>
+          </Disclosure>
 
           {saveError ? <ErrorState error={saveError} title="保存设置失败" /> : null}
           <div className={styles.actionsRight}>
@@ -391,7 +404,7 @@ export function SettingsPanel({ project }: { project: Project }) {
             <span className="small muted">token 过期时间：{project.token_expires_at ? formatDate(project.token_expires_at) : '未提供'}</span>
             <span className="small muted">token scope：<span className="mono">{project.token_scopes?.join(', ') || '不可用'}</span></span>
             <Button variant="secondary" onClick={openKeyDialog}>更新访问 Key</Button>
-            <span className="small muted">更新访问 Key 不会修改 GitLab Webhook。</span>
+            <ActionHint>更新访问 Key 不会修改 GitLab Webhook。</ActionHint>
           </div>
         </Panel>
         <WebhookPanel project={project} />

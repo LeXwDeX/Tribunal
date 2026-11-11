@@ -1,7 +1,7 @@
 import { useEffect, useId, useState } from 'react'
 import { triggerReview } from '../api/api'
 import type { Project } from '../api/types'
-import { Button, Dialog, ErrorState, Field } from './ui'
+import { Button, Checkbox, Dialog, ErrorState, Field, Select, type SelectOption } from './ui'
 
 export function TriggerReviewDialog({
   open, onClose, projects, onTriggered, presetProjectId, presetIid, presetProjectLabel,
@@ -52,6 +52,17 @@ export function TriggerReviewDialog({
     }
   }
 
+  const projectOptions: SelectOption[] = [
+    { value: '', label: '选择项目' },
+    ...(presetProjectId && !projects.some((project) => String(project.id) === String(presetProjectId))
+      ? [{ value: String(presetProjectId), label: presetProjectLabel || `项目 ${presetProjectId}` }]
+      : []),
+    ...projects.map((project) => ({
+      value: String(project.id),
+      label: `${project.path_with_namespace}${project.enabled ? '' : '（已停用）'}`,
+    })),
+  ]
+
   return (
     <Dialog
       open={open}
@@ -69,24 +80,21 @@ export function TriggerReviewDialog({
       {projects.length === 0 && !presetProjectId ? <div className="muted">尚无已注册项目，请先注册项目。</div> : null}
       <div className="formGrid">
         <Field label="项目" htmlFor={projectId} error={fieldErrors.project}>
-          <select id={projectId} className="select" value={selectedProject} onChange={(event) => setSelectedProject(event.target.value)} aria-invalid={Boolean(fieldErrors.project)} aria-describedby={fieldErrors.project ? `${projectId}-error` : undefined}>
-            <option value="">选择项目</option>
-            {presetProjectId && !projects.some((project) => String(project.id) === String(presetProjectId)) ? (
-              <option value={String(presetProjectId)}>{presetProjectLabel || `项目 ${presetProjectId}`}</option>
-            ) : null}
-            {projects.map((project) => (
-              <option key={project.id} value={project.id}>{project.path_with_namespace}{project.enabled ? '' : '（已停用）'}</option>
-            ))}
-          </select>
+          <Select
+            id={projectId}
+            value={selectedProject}
+            options={projectOptions}
+            onChange={setSelectedProject}
+            emptyLabel="选择项目"
+            aria-invalid={Boolean(fieldErrors.project)}
+            aria-describedby={fieldErrors.project ? `${projectId}-error` : undefined}
+          />
         </Field>
         <Field label="MR IID" htmlFor={iid} error={fieldErrors.iid}>
           <input id={iid} className="input" inputMode="numeric" value={mrIid} onChange={(event) => setMrIid(event.target.value)} placeholder="例如 318" aria-invalid={Boolean(fieldErrors.iid)} aria-describedby={fieldErrors.iid ? `${iid}-error` : undefined} />
         </Field>
       </div>
-      <label className="checkboxRow">
-        <input type="checkbox" checked={full} onChange={(event) => setFull(event.target.checked)} />
-        <span>全量评审（full）</span>
-      </label>
+      <Checkbox label="全量评审（full）" checked={full} onChange={(event) => setFull(event.target.checked)} />
     </Dialog>
   )
 }

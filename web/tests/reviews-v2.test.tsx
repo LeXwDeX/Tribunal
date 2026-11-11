@@ -1,5 +1,7 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { screen, within } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { render } from '@testing-library/react'
@@ -40,6 +42,78 @@ function Location() {
   const location = useLocation()
   return <span data-testid="location">{location.pathname}</span>
 }
+
+describe('review filter controls', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('selects a verdict filter with the keyboard', async () => {
+    const reviewCalls: string[] = []
+    installFetch((url) => {
+      if (url.startsWith('/api/v1/reviews')) {
+        reviewCalls.push(url)
+        return jsonResponse({ reviews: [] })
+      }
+      if (url.startsWith('/api/v1/projects')) return jsonResponse({ projects: [] })
+      if (url.startsWith('/api/v1/profiles')) return jsonResponse({ profiles: [] })
+      return jsonResponse({})
+    })
+    const user = userEvent.setup()
+    renderWithProviders(<ReviewsPage />, { route: '/reviews' })
+
+    const trigger = await screen.findByRole('combobox', { name: '按结论筛选' })
+    trigger.focus()
+    await user.keyboard('{Enter}')
+    expect(screen.getByRole('option', { name: '全部结论' })).toHaveAttribute('aria-selected', 'true')
+    await user.keyboard('{ArrowDown}{ArrowDown}{Enter}')
+
+    expect(trigger).toHaveTextContent('BLOCKING')
+    expect(trigger).toHaveFocus()
+    await waitFor(() => expect(reviewCalls.some((url) => new URL(url, 'http://localhost').searchParams.get('verdict') === 'BLOCKING')).toBe(true))
+  })
+
+  it('sends the selected start date as local midnight', async () => {
+    const reviewCalls: string[] = []
+    installFetch((url) => {
+      if (url.startsWith('/api/v1/reviews')) {
+        reviewCalls.push(url)
+        return jsonResponse({ reviews: [] })
+      }
+      if (url.startsWith('/api/v1/projects')) return jsonResponse({ projects: [] })
+      if (url.startsWith('/api/v1/profiles')) return jsonResponse({ profiles: [] })
+      return jsonResponse({})
+    })
+    const user = userEvent.setup()
+    renderWithProviders(<ReviewsPage />, { route: '/reviews' })
+
+    const input = await screen.findByLabelText('起始日期')
+    await user.type(input, '2026-10-02')
+    expect(input).toHaveValue('2026-10-02')
+    await waitFor(() => {
+      const since = reviewCalls
+        .map((url) => new URL(url, 'http://localhost').searchParams.get('since'))
+        .find((value) => value !== null)
+      expect(since).toBeTruthy()
+      // The API receives the local calendar day as an ISO timestamp.
+      expect(new Date(since!).getTime()).toBe(new Date('2026-10-02T00:00:00').getTime())
+    })
+  })
+})
+
+describe('review filter layout', () => {
+  it('lets migrated filter controls fill the narrow toolbar row', () => {
+    const css = readFileSync(resolve(process.cwd(), 'src/pages/ReviewsPage.module.css'), 'utf8')
+    const desktop = css.match(/\.filters \.filterSelect,\s*\.filters \.filterDate\s*\{([^}]*)\}/)?.[1] ?? ''
+    expect(desktop).toMatch(/width:\s*auto/)
+    expect(desktop).toMatch(/max-width:\s*180px/)
+    const narrow = css.match(/@media \(max-width: 900px\)\s*\{[\s\S]*?\.filters \.filterSelect,\s*\.filters \.filterDate\s*\{([^}]*)\}/)?.[1] ?? ''
+    expect(narrow).toMatch(/flex:\s*1 1 100%/)
+    expect(narrow).toMatch(/max-width:\s*none/)
+    // The DatePicker root must stretch inside the full-width wrapper.
+    const dateChild = css.match(/\.filters \.filterDate > \*\s*\{([^}]*)\}/)?.[1] ?? ''
+    expect(dateChild).toMatch(/flex:\s*1 1 auto/)
+    expect(dateChild).toMatch(/min-width:\s*0/)
+  })
+})
 
 describe('review table v2 rows', () => {
   it('merges MR and project into a primary cell, keeps a focusable link and opens the row on click', async () => {

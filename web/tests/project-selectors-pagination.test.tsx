@@ -14,6 +14,37 @@ const laterProjects = [
   project({ id: 102, path_with_namespace: 'group/read-later', access: 'read' }),
 ]
 
+// The extensions page still renders a native select; ReviewsPage uses the
+// Select combobox whose options live in a portal only while it is open.
+function isNativeSelect(selector: HTMLElement) {
+  return selector.tagName === 'SELECT'
+}
+
+async function openProjectOptions(user: ReturnType<typeof userEvent.setup>, selector: HTMLElement) {
+  if (isNativeSelect(selector)) return
+  if (selector.getAttribute('aria-expanded') !== 'true') await user.click(selector)
+}
+
+async function closeProjectOptions(user: ReturnType<typeof userEvent.setup>, selector: HTMLElement) {
+  if (isNativeSelect(selector)) return
+  if (selector.getAttribute('aria-expanded') === 'true') await user.click(selector)
+}
+
+async function selectProject(user: ReturnType<typeof userEvent.setup>, selector: HTMLElement, name: string) {
+  await openProjectOptions(user, selector)
+  const option = await screen.findByRole('option', { name })
+  if (isNativeSelect(selector)) {
+    await user.selectOptions(selector, option)
+    return
+  }
+  await user.click(option)
+}
+
+function expectSelectedProject(selector: HTMLElement, value: string, label: string) {
+  if (isNativeSelect(selector)) expect(selector).toHaveValue(value)
+  else expect(selector).toHaveTextContent(label)
+}
+
 function otherRoutes(url: string) {
   const path = new URL(url, 'http://localhost').pathname
   if (path === '/api/v1/reviews') return jsonResponse({ reviews: [] })
@@ -54,32 +85,38 @@ describe.each([
     renderWithProviders(page === 'extensions' ? <ExtensionsPage /> : <ReviewsPage />)
     if (page === 'extensions') await user.click(screen.getByRole('button', { name: '项目级' }))
     const selector = screen.getByRole('combobox', { name: label })
-    await within(selector).findByRole('option', { name: 'group/project-100' })
-    expect(within(selector).queryByRole('option', { name: 'group/manage-later' })).not.toBeInTheDocument()
+    await openProjectOptions(user, selector)
+    expect(await screen.findByRole('option', { name: 'group/project-100' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'group/manage-later' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: page === 'extensions' ? '编辑' : '手动触发评审' })).not.toBeInTheDocument()
+    await closeProjectOptions(user, selector)
 
     await user.click(screen.getByRole('button', { name: '加载更多项目' }))
     await waitFor(() => expect(screen.getByRole('button', { name: '加载更多项目' })).toBeDisabled())
-    expect(within(selector).getByRole('option', { name: 'group/project-100' })).toBeInTheDocument()
+    await openProjectOptions(user, selector)
+    expect(screen.getByRole('option', { name: 'group/project-100' })).toBeInTheDocument()
+    await closeProjectOptions(user, selector)
     resolveSecond(jsonResponse({ error: { message: 'next failed' } }, 500))
     await user.click(await screen.findByRole('button', { name: '重试加载更多项目' }))
-    await within(selector).findByRole('option', { name: 'group/manage-later' })
+    await selectProject(user, selector, 'group/manage-later')
     expect(laterAttempts).toBe(2)
-    expect(within(selector).getByRole('option', { name: 'group/project-100' })).toBeInTheDocument()
-    await user.selectOptions(selector, '101')
+    await openProjectOptions(user, selector)
+    expect(screen.getByRole('option', { name: 'group/project-100' })).toBeInTheDocument()
+    await closeProjectOptions(user, selector)
 
     if (page === 'extensions') {
       await screen.findByText('server-101')
       expect(screen.getByRole('button', { name: '编辑' })).toBeInTheDocument()
-      await user.selectOptions(selector, '102')
+      await selectProject(user, selector, 'group/read-later')
       await screen.findByText('server-102')
       expect(screen.queryByRole('button', { name: '编辑' })).not.toBeInTheDocument()
     } else {
       await waitFor(() => expect(reviewRequests.some((url) => new URL(url, 'http://localhost').searchParams.get('project_id') === '101')).toBe(true))
       await user.click(screen.getByRole('button', { name: '手动触发评审' }))
       const dialog = screen.getByRole('dialog', { name: '手动触发评审' })
-      expect(within(dialog).getByRole('option', { name: 'group/manage-later' })).toBeInTheDocument()
-      expect(within(dialog).queryByRole('option', { name: 'group/read-later' })).not.toBeInTheDocument()
+      await user.click(within(dialog).getByRole('combobox', { name: '项目' }))
+      expect(await screen.findByRole('option', { name: 'group/manage-later' })).toBeInTheDocument()
+      expect(screen.queryByRole('option', { name: 'group/read-later' })).not.toBeInTheDocument()
     }
   })
 
@@ -96,7 +133,8 @@ describe.each([
     renderWithProviders(page === 'extensions' ? <ExtensionsPage /> : <ReviewsPage />)
     if (page === 'extensions') await user.click(screen.getByRole('button', { name: '项目级' }))
     await user.click(await screen.findByRole('button', { name: page === 'extensions' ? '重试' : '重试加载项目' }))
-    expect(await within(screen.getByRole('combobox', { name: label })).findByRole('option', { name: 'group/project-1' })).toBeInTheDocument()
+    await openProjectOptions(user, screen.getByRole('combobox', { name: label }))
+    expect(await screen.findByRole('option', { name: 'group/project-1' })).toBeInTheDocument()
     expect(attempts).toBe(2)
   })
 
@@ -113,14 +151,16 @@ describe.each([
     const { queryClient } = renderWithProviders(page === 'extensions' ? <ExtensionsPage /> : <ReviewsPage />)
     if (page === 'extensions') await user.click(screen.getByRole('button', { name: '项目级' }))
     const selector = screen.getByRole('combobox', { name: label })
-    await within(selector).findByRole('option', { name: 'group/project-2' })
-    await user.selectOptions(selector, '2')
+    await openProjectOptions(user, selector)
+    expect(await screen.findByRole('option', { name: 'group/project-2' })).toBeInTheDocument()
+    await closeProjectOptions(user, selector)
+    await selectProject(user, selector, 'group/project-2')
     await act(async () => { await queryClient.invalidateQueries({ queryKey: ['projects', page === 'extensions' ? 'extensions' : 'filter'] }) })
     expect(await screen.findByText(/项目列表刷新失败/)).toBeInTheDocument()
-    expect(selector).toHaveValue('2')
+    expectSelectedProject(selector, '2', 'group/project-2')
     await user.click(screen.getByRole('button', { name: page === 'extensions' ? '重试' : '重试刷新项目' }))
     await waitFor(() => expect(screen.queryByText(/项目列表刷新失败/)).not.toBeInTheDocument())
-    expect(selector).toHaveValue('2')
+    expectSelectedProject(selector, '2', 'group/project-2')
     expect(attempts).toBe(3)
   })
 
@@ -143,7 +183,8 @@ describe.each([
     expect(screen.queryByRole('button', { name: '重试加载项目' })).not.toBeInTheDocument()
     expect(screen.queryByText('还没有项目')).not.toBeInTheDocument()
     await user.click(retry)
-    expect(await within(screen.getByRole('combobox', { name: label })).findByRole('option', { name: 'group/manage-later' })).toBeInTheDocument()
+    await openProjectOptions(user, screen.getByRole('combobox', { name: label }))
+    expect(await screen.findByRole('option', { name: 'group/manage-later' })).toBeInTheDocument()
     expect(nextAttempts).toBe(2)
     expect(screen.queryByText('还没有项目')).not.toBeInTheDocument()
   })
@@ -210,11 +251,15 @@ describe('reviews direct project filter', () => {
       if (url.pathname === '/api/v1/projects') return jsonResponse({ projects: firstPage, next_cursor: 'next' })
       return otherRoutes(raw)
     })
+    const user = userEvent.setup()
     renderWithProviders(<ReviewsPage />, { route: `/reviews?project_id=${projectId}` })
     const select = screen.getByRole('combobox', { name: '按项目筛选' })
-    await within(select).findByRole('option', { name: 'group/project-100' })
-    expect(select).toHaveValue(projectId)
-    expect((within(select).getByRole('option', { name: '指定项目（未加载或不可访问）' }) as HTMLOptionElement).selected).toBe(true)
+    await user.click(select)
+    expect(await screen.findByRole('option', { name: 'group/project-100' })).toBeInTheDocument()
+    expect(select).toHaveTextContent('指定项目（未加载或不可访问）')
+    const placeholder = screen.getByRole('option', { name: '指定项目（未加载或不可访问）' })
+    expect(placeholder).toHaveAttribute('aria-selected', 'true')
+    expect(placeholder).toHaveAttribute('aria-disabled', 'true')
     await waitFor(() => expect(requests.some((raw) => {
       const url = new URL(raw, 'http://localhost')
       return url.pathname === '/api/v1/reviews' && url.searchParams.get('project_id') === projectId
@@ -232,9 +277,10 @@ describe('reviews direct project filter', () => {
     renderWithProviders(<ReviewsPage />, { route: '/reviews?project_id=101' })
     const select = screen.getByRole('combobox', { name: '按项目筛选' })
     await user.click(await screen.findByRole('button', { name: '加载更多项目' }))
-    expect((await within(select).findByRole('option', { name: 'group/manage-later' }) as HTMLOptionElement).selected).toBe(true)
-    expect(select).toHaveValue('101')
-    expect(within(select).queryByRole('option', { name: '指定项目（未加载或不可访问）' })).not.toBeInTheDocument()
+    expect(select).toHaveTextContent('group/manage-later')
+    await user.click(select)
+    expect(await screen.findByRole('option', { name: 'group/manage-later' })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.queryByRole('option', { name: '指定项目（未加载或不可访问）' })).not.toBeInTheDocument()
   })
 })
 
