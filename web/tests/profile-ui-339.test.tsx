@@ -91,7 +91,7 @@ describe('profile node sources, params and same-model hint (#339)', () => {
     expect(within(globalCard).getByText(/参数来源 覆盖/)).toBeInTheDocument()
     const list = screen.getByRole('list', { name: '节点生效模型' })
     expect(within(list).getAllByRole('listitem')).toHaveLength(6)
-      })
+  })
 
   it('shows all five source labels with model name, short id and effective params', async () => {
     mock()
@@ -164,7 +164,7 @@ describe('profile node sources, params and same-model hint (#339)', () => {
         lanes: { validate: { model: 'user:one', params: { max_tokens: 1500, temperature: 0.3, reasoning: { effort: 'max' }, thinking: { budget_tokens: 2048 } } } },
       },
     })
-    // Inherited values are presentation only; untouched nodes are never submitted.
+    // Inherited values are presentation only; nodes without overrides are never submitted.
     expect(body.overrides.explore).toBeUndefined()
     expect(body.overrides.lanes.review).toBeUndefined()
   })
