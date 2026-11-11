@@ -21,6 +21,20 @@
   gap: var(--space-lg);
 }
 
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  min-width: 0;
+}
+
+.inlineForm {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: var(--space-md);
+  align-items: end;
+}
+
 .list {
   display: flex;
   flex-direction: column;

@@ -219,6 +219,13 @@
   font-size: var(--fs-label);
 }
 
+.restoreGroup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  min-width: 0;
+}
+
 .restoreGroups {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
