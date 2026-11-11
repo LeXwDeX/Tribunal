@@ -84,7 +84,7 @@ func (s *Server) handleApplyModelPreset(w http.ResponseWriter, r *http.Request) 
 	// The preset's parameters and capabilities are verified for one protocol
 	// and endpoint. Another provider must not receive them by accident.
 	if !presetMatchesModel(preset, *stored) {
-		validationFailed(w, r, "preset", "preset requires an openai-chat model at api.deepseek.com")
+		validationFailed(w, r, "preset", "preset requires protocol "+preset.Protocol+" at "+preset.BaseURL)
 		return
 	}
 	patch, changes := preset.PatchFor(stored.Params)

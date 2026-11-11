@@ -330,6 +330,38 @@ func TestModelPresetAcceptsDeepSeekPathVariant(t *testing.T) {
 	}
 }
 
+// An already-current model with conflicting overrides returns the conflicts
+// but stays a no-op: no write, no revision change and no confirmation gate.
+func TestModelPresetAlreadyAtPresetReportsConflictsWithoutWriting(t *testing.T) {
+	stored := presetTestModel()
+	preset, _ := llm.Preset(llm.PresetDeepSeekFlashMax)
+	stored.Params = preset.Params
+	fake := &fakeModelStore{stored: stored}
+	overrides := &fakeProfileOverrides{
+		body: `{"lanes":{"review":{"model":"user:deepseek","params":{"max_tokens":4096}}}}`,
+	}
+	server, _ := newParamsTestServer(t, fake)
+	server.platform = &config.Config{Profiles: map[string]config.ProfileConfig{"default": {Provider: "config-model"}}}
+	server.profileOverrides = overrides
+	response := applyModelPreset(server, "user:deepseek", `{"preset":"deepseek-flash-max","revision":5,"dry_run":false}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
+	}
+	var body modelPresetResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Applied || len(body.Changes) != 0 || body.Revision != 5 {
+		t.Fatalf("response = %+v", body)
+	}
+	if len(body.Conflicts) != 1 || strings.Join(body.Conflicts[0].Fields, ",") != "max_tokens" {
+		t.Fatalf("conflicts = %+v, want one max_tokens conflict", body.Conflicts)
+	}
+	if fake.paramsCalls != 0 {
+		t.Fatalf("no-op apply wrote to the store: %d", fake.paramsCalls)
+	}
+}
+
 func TestModelPresetEqualOverrideValueIsNotAConflict(t *testing.T) {
 	fake := &fakeModelStore{stored: presetTestModel()}
 	overrides := &fakeProfileOverrides{

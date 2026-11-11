@@ -186,7 +186,7 @@ DeepSeek thinking + tools 要求后续请求完整回传 `reasoning_content`，�
 [#405](https://github.com/LeXwDeX/Tribunal/issues/405) 增加两个内置预设 `deepseek-v4-pro-max` 与 `deepseek-flash-max`，数值于 2026-11-11 按官方文档核对（[api-docs.deepseek.com/quick_start/pricing](https://api-docs.deepseek.com/quick_start/pricing)；`max_tokens` 的默认值语义见 [Chat Completions 文档](https://api-docs.deepseek.com/api/create-chat-completion)）。官方事实：
 
 - `deepseek-v4-pro` 与 `deepseek-flash`：上下文 1,048,576，最大输出 393,216；`reasoning.effort` 支持 `low`/`high`/`max`，默认 `high`；账号并发上限分别为 500 与 2500；KV 缓存自动。
-- Chat Completions 的 `max_tokens` 默认值不是最大输出：非 thinking 8K、thinking 64K、`effort=max` 128K，上限 393,216；省略该字段不会得到最大输出。`reasoning.effort: none` 可关闭 thinking。
+- Chat Completions 的 `max_tokens` 默认值不是最大输出：非 thinking 8K、thinking 64K、`effort=max` 128K，上限 393,216；省略该字段不会得到最大输出。`reasoning.effort: none` 可关闭 thinking，但必须同时声明 `allow_reasoning_effort_none: true`，否则配置校验和节点覆盖校验都会拒绝（字段 `reasoning.effort`）。
 - `deepseek-chat` 与 `deepseek-reasoner` 已退役；旧名 `deepseek-v4-flash` 仍被接受但实际是 V4.1 Flash。
 
 预设值：`protocol=openai-chat`、`base_url=https://api.deepseek.com`；`max_tokens=393216`、`context_window=655360`（1,048,576 上下文减去 393,216 输出预留）、`reasoning.effort=max`、`max_concurrency` 为 500（v4-pro）或 2500（flash）、`rpm=0`、`forced_tool_choice=unsupported`、`strict_role_alternation=false`、`preserve_reasoning_content=true`。预设不写入价格：响应中的 `params.price` 为 `null`，成本字段由 [#407](https://github.com/LeXwDeX/Tribunal/issues/407) 处理。
