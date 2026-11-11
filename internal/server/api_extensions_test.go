@@ -155,7 +155,7 @@ func TestMCPServerTestUsesUnmaskedConfig(t *testing.T) {
 	}
 }
 
-func TestMCPImportDisabled(t *testing.T) {
+func TestMCPImportDocument(t *testing.T) {
 	env := newM6Env(t, m6Options{})
 	env.grant(7, 42, store.ProjectAccessManage)
 	client := env.loginAs("code-admin")
@@ -163,21 +163,35 @@ func TestMCPImportDisabled(t *testing.T) {
 	body := []byte(`{"mcpServers":{"alpha":{"command":"npx"},"beta":{"url":"https://mcp.example.com"}}}`)
 	response := client.request(http.MethodPost, "/api/v1/mcp-servers/import?scope=project&project_id=42", body,
 		map[string]string{"Content-Type": "application/json"})
-	assertStatus(t, response, http.StatusForbidden)
+	assertStatus(t, response, http.StatusCreated)
+	servers := env.decode(t, response)["servers"].([]any)
+	if len(servers) != 2 {
+		t.Fatalf("imported = %v", servers)
+	}
+	if len(env.extensions.imports) != 1 {
+		t.Fatalf("imports = %v", env.extensions.imports)
+	}
+	imported := env.extensions.imports[0]
+	if imported.Scope != "project" || imported.ProjectID == nil || *imported.ProjectID != 42 {
+		t.Fatalf("import scope = %+v", imported)
+	}
+	if string(imported.Servers["alpha"]) != `{"command":"npx"}` {
+		t.Fatalf("imported config = %s", imported.Servers["alpha"])
+	}
 
 	missingProject := client.request(http.MethodPost, "/api/v1/mcp-servers/import?scope=project", body,
 		map[string]string{"Content-Type": "application/json"})
-	assertStatus(t, missingProject, http.StatusForbidden)
+	assertStatus(t, missingProject, http.StatusBadRequest)
 
 	wrapper := []byte(`{"servers":{"alpha":{"command":"npx"}}}`)
 	rejected := client.request(http.MethodPost, "/api/v1/mcp-servers/import?scope=platform", wrapper,
 		map[string]string{"Content-Type": "application/json"})
-	assertStatus(t, rejected, http.StatusForbidden)
+	assertStatus(t, rejected, http.StatusBadRequest)
 
 	badConfig := []byte(`{"mcpServers":{"alpha":[]}}`)
 	bad := client.request(http.MethodPost, "/api/v1/mcp-servers/import?scope=platform", badConfig,
 		map[string]string{"Content-Type": "application/json"})
-	assertStatus(t, bad, http.StatusForbidden)
+	assertStatus(t, bad, http.StatusBadRequest)
 }
 
 // These legacy handlers are not routed, but retain their parser coverage.

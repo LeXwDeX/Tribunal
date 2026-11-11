@@ -315,10 +315,8 @@ func (m *Manager) remove(entry *serverEntry) {
 }
 
 func (entry *serverEntry) connectError() error {
-	if errors.Is(entry.err, context.DeadlineExceeded) {
-		return fmt.Errorf("mcp: server %q: connect timed out", entry.key.server)
-	}
-	return fmt.Errorf("mcp: server %q: connect failed", entry.key.server)
+	category := classifyConnectError(entry.err)
+	return fmt.Errorf("%w: server %q", connectSentinel(category), entry.key.server)
 }
 
 type serverEntry struct {
@@ -467,7 +465,7 @@ func (entry *serverEntry) connect(ctx context.Context) (*sdk.ClientSession, erro
 								seen.names[tool.Name]++
 								seen.count++
 								if seen.count > maxRemoteTools {
-									return nil, errors.New("mcp: too many advertised tools")
+									return nil, fmt.Errorf("%w: too many advertised tools", ErrTooManyTools)
 								}
 							}
 						}

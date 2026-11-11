@@ -183,7 +183,7 @@ func TestMCPWriteResponsesHideConfigAndPreserveStoredValues(t *testing.T) {
 	update := client.json(http.MethodPut, "/api/v1/mcp-servers/mcp-new", map[string]any{"config": config})
 	assertStatus(t, update, http.StatusOK)
 	imported := client.json(http.MethodPost, "/api/v1/mcp-servers/import?scope=platform", map[string]any{"mcpServers": map[string]any{"imported": config}})
-	assertStatus(t, imported, http.StatusForbidden)
+	assertStatus(t, imported, http.StatusCreated)
 	for _, response := range []apiResponse{nameOnly, update, imported} {
 		for _, value := range []string{"private-canary", "header-canary"} {
 			if strings.Contains(string(response.body), value) {

@@ -299,10 +299,11 @@ Finding 始终返回 `annotation`：`""` 为未标注，`valid` 为有效，`inv
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/v1/mcp-servers` | `?scope=&project_id=&limit=&cursor=`，响应 `{servers, next_cursor}` |
-| POST | `/api/v1/mcp-servers` | 已关闭；返回 403 `custom_mcp_creation_disabled` |
+| POST | `/api/v1/mcp-servers` | `{scope, project_id?, name, config, enabled?}`；仅平台管理员；201 返回脱敏服务器 |
 | PUT / DELETE | `/api/v1/mcp-servers/{id}` | 修改 / 删除已有自定义服务器；内置服务器（`builtin: true`）禁用、改名、改配置和删除均返回 409 |
-| POST | `/api/v1/mcp-servers/{id}/test` | 启动并列出工具：`{tools:[{name, description}]}` |
-| POST | `/api/v1/mcp-servers/import` | 已关闭；返回 403 `custom_mcp_creation_disabled` |
+| POST | `/api/v1/mcp-servers:test` | 草稿测试：body 同创建，可带 `id`；不落库，返回 `{ok, latency_ms, tool_count, truncated, tools[]}` |
+| POST | `/api/v1/mcp-servers/{id}/test` | 测试已保存服务器，返回与草稿测试相同的结构 |
+| POST | `/api/v1/mcp-servers/import` | `?scope=&project_id=` 加 Claude Code `mcpServers` 文档；同一事务内按名 upsert，返回 `{servers}` |
 | GET | `/api/v1/skills` | `?scope=&project_id=&limit=&cursor=`，响应 `{skills, next_cursor}` |
 | POST | `/api/v1/skills` | 已关闭；上传 zip 和目录登记都返回 403 `custom_skill_creation_disabled` |
 | PATCH | `/api/v1/skills/{id}` | `{enabled: bool}` 启用或禁用已有自定义 Skill；内置 Skill 禁用返回 409 |
@@ -317,9 +318,11 @@ Finding 始终返回 `annotation`：`""` 为未标注，`valid` 为有效，`inv
 
 `scope=project` 的数据库行覆盖完整的项目级授权：没有行表示继承，保存空数组表示显式撤销该块的全部 MCP 工具和 Skill。平台 scope 没有数据库行时可能由配置文件 `blocks` 提供生效绑定；首次用 `absent` 保存平台空行会创建数据库覆盖，该块的文件声明不再生效。调用方必须先读取完整列表并确认这一影响，服务端不推断调用方是否只加载了部分页。
 
-权限边界：`scope=project` 的读取需要该项目 `read` grant、有效的 `global_read`，或平台管理员的隐式 `manage`；`scope=platform` 或省略 scope 的全局列表只允许平台管理员。创建和导入已关闭，认证后直接返回 403，不再执行 scope 授权；更新、删除、测试和块绑定写入仍要求平台管理员；项目 scope 写入不再要求逐项目 `manage` grant，平台管理员对已登记项目隐式具备 `manage`。项目 `manage` 本身不是宿主执行权限，不能写平台配置或绕过平台管理员。MCP 删除/更新/测试和 Skill 删除/启停按资源已存储的 scope 重新检查，不信任请求里的 scope。
+权限边界：`scope=project` 的读取需要该项目 `read` grant、有效的 `global_read`，或平台管理员的隐式 `manage`；`scope=platform` 或省略 scope 的全局列表只允许平台管理员。创建和导入仅平台管理员可调用；项目 scope 还要求项目已登记，平台管理员对已登记项目隐式具备 `manage`，普通用户即使持有项目 `manage` 也返回 403。更新、删除、测试和块绑定写入仍要求平台管理员；项目 scope 写入不要求逐项目 `manage` grant。项目 `manage` 本身不是宿主执行权限，不能写平台配置或绕过平台管理员。MCP 删除/更新/测试和 Skill 删除/启停按资源已存储的 scope 重新检查，不信任请求里的 scope。
 
-导入 MCP 和创建自定义 MCP 已关闭，相关请求返回 403。已有自定义 MCP 仍可更新：允许只传 `name` 或 `enabled`；省略 `config` 会保留原配置，传入 `config` 则完整替换配置。列表、更新响应的 `config` 统一为 `{}`，任何角色都不能通过这些接口读回配置；不要把响应中的空对象当作原配置再次提交。旧客户端提交 env 值或敏感 header 的 `****` 时仍恢复已存值，没有对应旧值的占位项会移除；新客户端替换配置应提交完整原始模板。保存时对配置做严格语义校验：未知字段、非法值、越界字段和尾随 JSON 都返回 `400`；`${NAME}` 引用按模板加密保存，不在保存阶段展开环境变量，也不把解析值写入数据库。运行或测试时才展开。
+创建和导入的请求体做严格校验：未知字段、非法名称或非法 MCP 配置返回 `400`；同一 scope 重名或与内置服务器同名返回 `409`，且不写库；导入任一项非法时整批不写，已存在的同名导入保留原 ID 与 `enabled`。列表、创建、导入和更新响应的 `config` 统一为 `{}`，任何角色都不能通过这些接口读回配置；不要把响应中的空对象当作原配置再次提交。已有自定义 MCP 仍可更新：允许只传 `name` 或 `enabled`；省略 `config` 会保留原配置，传入 `config` 则完整替换配置。旧客户端提交 env 值或敏感 header 的 `****` 时仍恢复已存值，没有对应旧值的占位项会移除；新客户端替换配置应提交完整原始模板。保存时对配置做严格语义校验：未知字段、非法值、越界字段和尾随 JSON 都返回 `400`；`${NAME}` 引用按模板加密保存，不在保存阶段展开环境变量，也不把解析值写入数据库。运行或测试时才展开。
+
+`POST /api/v1/mcp-servers:test` 与 `POST /api/v1/mcp-servers/{id}/test` 返回 `{ok, latency_ms, tool_count, truncated, tools:[{name, description, read_only, destructive, bindable, annotated}]}`。`tool_count` 是服务器公布的工具总数；返回列表超过 200 项时截断并置 `truncated: true`。`bindable` 按运行时 `annotationsAllow` 语义：未注解工具为 `true`，已注解工具需要 `readOnlyHint=true` 且 `destructiveHint` 不为 `true`。草稿测试不写数据库；带 `id` 时使用已存储服务器的 scope 与名称回退，`config` 可省略，其中 `****` 从已存值恢复，无对应旧值返回 `400`。失败只返回固定类别 `invalid_config`、`connect_timeout`、`connect_failed`、`handshake_failed`、`list_tools_timeout`、`list_tools_failed`、`too_many_tools`、`cleanup_failed`，响应、日志和审计都不含 config 或上游原文。测试受进程级并发信号量与 30 秒 handler 超时约束，超过并发上限返回 `429 test_busy`。
 
 项目级扩展解析使用按项目构建的合并配置：每个项目都有独立的 MCP manager，空绑定表示显式撤销该块的平台工具，不回退到平台工具；项目合并配置读取或构建失败会中止本次解析（返回错误），不会静默降级为仅平台配置。账号和扩展的数据库变更仍受进程内缓存影响，通常需要重启服务；当前没有可靠的跨进程缓存失效。
 
