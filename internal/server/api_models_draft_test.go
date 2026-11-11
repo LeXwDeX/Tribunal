@@ -130,7 +130,7 @@ func TestDraftModelTestValidationReturnsFieldDetails(t *testing.T) {
 		t.Fatal(err)
 	}
 	server, _ := newModelTestServer(t, catalog, &fakeModelStore{})
-	response := postDraft(server, `{"display_name":"","protocol":"nope","base_url":"https://example.com","model":"","params":{"max_tokens":0,"max_concurrency":1},"api_key":"k"}`)
+	response := postDraft(server, `{"display_name":"","protocol":"nope","base_url":"https://example.com","model":"","params":{"max_tokens":-1,"max_concurrency":1},"api_key":"k"}`)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", response.Code)
 	}
@@ -255,7 +255,7 @@ func TestModelWritesReturnFieldDetails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	invalid := `{"display_name":"","protocol":"nope","base_url":"https://example.com","model":"","params":{"max_tokens":0,"max_concurrency":1},"revision":1}`
+	invalid := `{"display_name":"","protocol":"nope","base_url":"https://example.com","model":"","params":{"max_tokens":-1,"max_concurrency":1},"revision":1}`
 	for _, tc := range []struct {
 		name string
 		call func(*Server, http.ResponseWriter, *http.Request)

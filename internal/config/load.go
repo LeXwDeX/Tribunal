@@ -168,14 +168,32 @@ func Load(paths ...string) (*Config, error) {
 	for _, name := range sortedKeys(cfg.Providers) {
 		provider := cfg.Providers[name]
 		field := "providers." + name
-		if provider.Reasoning != nil && !effort.Valid(provider.Reasoning.Effort) {
+		if provider.Reasoning != nil && !effort.ValidCapability(provider.Reasoning.Effort, provider.AllowReasoningEffortNone) {
+			if provider.Reasoning.Effort == "none" {
+				return nil, fmt.Errorf("config: %s.reasoning.effort none requires allow_reasoning_effort_none", field)
+			}
 			return nil, fmt.Errorf("config: %s.reasoning.effort must be low, medium, high or max", field)
 		}
-		if provider.Protocol == "anthropic" && provider.Reasoning != nil && provider.Reasoning.Effort != "" {
-			cfg.Warnings = append(cfg.Warnings, field+".reasoning.effort is not sent by anthropic")
+		if provider.Protocol == "anthropic" && provider.Reasoning != nil && provider.Reasoning.Effort != "" && !provider.OutputConfigEffort {
+			cfg.Warnings = append(cfg.Warnings, field+".reasoning.effort is not sent by anthropic without output_config_effort")
+		}
+		if provider.Protocol != "anthropic" && provider.OutputConfigEffort {
+			cfg.Warnings = append(cfg.Warnings, field+".output_config_effort is only sent by anthropic")
 		}
 		if (provider.Protocol == "openai-chat" || provider.Protocol == "openai-responses") && provider.Thinking != nil && provider.Thinking.BudgetTokens != 0 {
 			cfg.Warnings = append(cfg.Warnings, field+".thinking.budget_tokens is not sent by "+provider.Protocol)
+		}
+		if provider.Protocol != "openai-chat" && provider.Thinking != nil && provider.Thinking.Type != "" {
+			cfg.Warnings = append(cfg.Warnings, field+".thinking.type is not sent by "+provider.Protocol)
+		}
+		if provider.Protocol != "openai-chat" && provider.PreserveReasoningContent {
+			cfg.Warnings = append(cfg.Warnings, field+".preserve_reasoning_content is only honoured by openai-chat")
+		}
+		if provider.Protocol != "openai-responses" && provider.ResponsesParams != "" {
+			cfg.Warnings = append(cfg.Warnings, field+".responses_params is only used by openai-responses")
+		}
+		if provider.Protocol == "anthropic" && provider.AllowReasoningEffortNone {
+			cfg.Warnings = append(cfg.Warnings, field+".allow_reasoning_effort_none is only used by OpenAI protocols")
 		}
 	}
 	return cfg, nil

@@ -12,7 +12,7 @@ func TestModelProviderValidation(t *testing.T) {
 		t.Fatalf("valid model: %v", err)
 	}
 	cfg.Temperature = &temp
-	cfg.MaxTokens = 0
+	cfg.MaxTokens = -1
 	cfg.Thinking = &ThinkingConfig{BudgetTokens: -1}
 	cfg.ContextWindow = -1
 	cfg.RPM = -1

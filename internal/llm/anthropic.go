@@ -38,7 +38,10 @@ func (a *anthropicAdapter) GenerateWithWire(ctx context.Context, req *Request) (
 		return nil, nil, err
 	}
 	effective := resolveRequest(a.cfg, req)
-	if effective.maxTokens <= 0 {
+	if err := validateMaxTokens(effective.maxTokens); err != nil {
+		return nil, nil, err
+	}
+	if effective.maxTokens == 0 {
 		return nil, nil, badRequestf("anthropic requires max_tokens")
 	}
 	thinking := effective.budgetTokens > 0
@@ -76,11 +79,24 @@ func (a *anthropicAdapter) GenerateWithWire(ctx context.Context, req *Request) (
 		params.Tools = tools
 		params.ToolChoice = anthropicToolChoice(req.ToolChoice)
 	}
+	// DeepSeek's Anthropic-compatible API ignores thinking.budget_tokens and
+	// reads output_config.effort instead. The default keeps the old body.
+	outputConfigEffort := a.cfg.outputConfigEffort && effective.effort != ""
+	if outputConfigEffort {
+		if effective.effort == "none" {
+			return nil, nil, badRequestf("anthropic does not support reasoning.effort none")
+		}
+		params.OutputConfig = anthropic.OutputConfigParam{Effort: anthropic.OutputConfigEffort(effective.effort)}
+	}
 	wire := &WireParams{MaxTokens: effective.maxTokens, ThinkingEnabled: thinking}
 	if thinking {
 		wire.Thinking = &WireThinking{BudgetTokens: effective.budgetTokens}
+		wire.ThinkingType = "enabled"
 	} else {
 		wire.Temperature = effective.temperature
+	}
+	if outputConfigEffort {
+		wire.Reasoning = &WireReasoning{Effort: effective.effort}
 	}
 	message, err := a.sdk.Messages.New(ctx, params)
 	if err != nil {

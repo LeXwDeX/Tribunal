@@ -97,7 +97,7 @@ func (s *Server) profileNode(node app.ProfileNodeView) profileNodeView {
 		if node.Params.Reasoning != nil && node.Params.Reasoning.Effort != "" {
 			params.Reasoning = node.Params.Reasoning
 		}
-		if node.Params.Thinking != nil && node.Params.Thinking.BudgetTokens != 0 {
+		if node.Params.Thinking != nil && (node.Params.Thinking.BudgetTokens != 0 || node.Params.Thinking.Type != "") {
 			params.Thinking = node.Params.Thinking
 		}
 	}
@@ -187,7 +187,8 @@ func (s *Server) modelLookup() func(string) (app.OverrideModel, bool) {
 	}
 	return func(id string) (app.OverrideModel, bool) {
 		model, ok := s.models.Resolve(id)
-		return app.OverrideModel{Unavailable: model.Unavailable, Protocol: model.Protocol, MaxTokens: model.Params.MaxTokens}, ok
+		return app.OverrideModel{Unavailable: model.Unavailable, Protocol: model.Protocol, MaxTokens: model.Params.MaxTokens,
+			AllowReasoningEffortNone: model.Params.AllowReasoningEffortNone}, ok
 	}
 }
 

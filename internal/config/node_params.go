@@ -34,7 +34,7 @@ type NodeParams struct {
 func (p NodeParams) IsZero() bool {
 	return p.MaxTokens == nil && p.Temperature == nil &&
 		(p.Reasoning == nil || p.Reasoning.Effort == "") &&
-		(p.Thinking == nil || p.Thinking.BudgetTokens == 0)
+		(p.Thinking == nil || (p.Thinking.BudgetTokens == 0 && p.Thinking.Type == ""))
 }
 
 // Overlay returns p with every field p leaves unset taken from base.
@@ -61,7 +61,7 @@ func (p NodeParams) Overlay(base NodeParams) NodeParams {
 		v := *out.Reasoning
 		out.Reasoning = &v
 	}
-	if p.Thinking != nil && p.Thinking.BudgetTokens != 0 {
+	if p.Thinking != nil && (p.Thinking.BudgetTokens != 0 || p.Thinking.Type != "") {
 		v := *p.Thinking
 		out.Thinking = &v
 	} else if out.Thinking != nil {
@@ -86,12 +86,19 @@ func ValidateNodeParams(field string, p NodeParams) error {
 		switch {
 		case p.Reasoning.Effort == "":
 			p2.add("%s.reasoning.effort must be low, medium, high or max; omit the field to inherit", field)
-		case !effort.Valid(p.Reasoning.Effort):
+		case p.Reasoning.Effort != "none" && !effort.Valid(p.Reasoning.Effort):
 			p2.add("%s.reasoning.effort must be low, medium, high or max", field)
 		}
 	}
-	if p.Thinking != nil && p.Thinking.BudgetTokens <= 0 {
-		p2.add("%s.thinking.budget_tokens must be positive; omit the field to inherit", field)
+	if p.Thinking != nil {
+		if p.Thinking.BudgetTokens < 0 || (p.Thinking.BudgetTokens == 0 && p.Thinking.Type == "") {
+			p2.add("%s.thinking.budget_tokens must be positive; omit the field to inherit", field)
+		}
+		switch p.Thinking.Type {
+		case "", "enabled", "disabled":
+		default:
+			p2.add("%s.thinking.type must be enabled or disabled", field)
+		}
 	}
 	return p2.err()
 }

@@ -129,7 +129,7 @@ describe('models page management (#292)', () => {
     expect(body.params).toEqual({ ...stored.params, reasoning: { effort: 'high' } })
   })
 
-  it('defaults max_concurrency to 1 for new models and rejects non-positive values', async () => {
+  it('keeps the new-model default and accepts explicit zero concurrency', async () => {
     const user = userEvent.setup()
     const fetchMock = installFetch(routes({ models: [] }))
     renderWithProviders(<ModelsPage />, { route: '/models' })
@@ -138,13 +138,34 @@ describe('models page management (#292)', () => {
     await user.type(screen.getByLabelText('max_tokens'), '256')
     await user.click(screen.getByRole('button', { name: '保存前测试' }))
     await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url === '/api/v1/models:test')).toBe(true))
-    const testCall = fetchMock.mock.calls.find(([url]) => url === '/api/v1/models:test')
+    let testCall = fetchMock.mock.calls.find(([url]) => url === '/api/v1/models:test')
     expect(JSON.parse(String(testCall?.[1]?.body)).params).toEqual({ max_tokens: 256, max_concurrency: 1 })
 
     await user.clear(screen.getByLabelText('max_concurrency'))
     await user.type(screen.getByLabelText('max_concurrency'), '0')
     await user.click(screen.getByRole('button', { name: '保存前测试' }))
-    expect(await screen.findByText('max_concurrency 必须是正整数。')).toBeInTheDocument()
-    expect(fetchMock.mock.calls.filter(([url]) => url === '/api/v1/models:test')).toHaveLength(1)
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => url === '/api/v1/models:test')).toHaveLength(2))
+    const calls = fetchMock.mock.calls.filter(([url]) => url === '/api/v1/models:test')
+    testCall = calls[calls.length - 1]
+    expect(JSON.parse(String(testCall?.[1]?.body)).params).toEqual({ max_tokens: 256, max_concurrency: 0 })
+
+    await user.clear(screen.getByLabelText('max_concurrency'))
+    await user.type(screen.getByLabelText('max_concurrency'), '-1')
+    await user.click(screen.getByRole('button', { name: '保存前测试' }))
+    expect(await screen.findByText('max_concurrency 必须是不小于 0 的整数。')).toBeInTheDocument()
+    expect(fetchMock.mock.calls.filter(([url]) => url === '/api/v1/models:test')).toHaveLength(2)
+  })
+
+  it('preserves a stored zero max_concurrency when editing', async () => {
+    const user = userEvent.setup()
+    const stored = { ...userModel, params: { max_tokens: 100, max_concurrency: 0 } }
+    const fetchMock = installFetch(routes({ models: [stored] }))
+    renderWithProviders(<ModelsPage />, { route: '/models' })
+    await user.click(await screen.findByRole('button', { name: '编辑' }))
+    expect(screen.getByLabelText('max_concurrency')).toHaveValue('0')
+    await user.click(screen.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'PATCH')).toBe(true))
+    const patch = fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH')
+    expect(JSON.parse(String(patch?.[1]?.body)).params.max_concurrency).toBe(0)
   })
 })

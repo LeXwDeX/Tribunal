@@ -114,6 +114,10 @@ var chatUsageFields = []usageWireField{
 	{path: []string{"prompt_tokens_details", "cached_tokens"}, set: func(u *Usage, n int64) { u.CacheReadTokens = n }},
 	{path: []string{"prompt_tokens_details", "cache_write_tokens"}, set: func(u *Usage, n int64) { u.CacheWriteTokens = n }},
 	{path: []string{"completion_tokens_details", "reasoning_tokens"}, set: func(u *Usage, n int64) { u.ReasoningTokens = n }},
+	// DeepSeek reports cache hits and misses at the top level. They are
+	// details of prompt_tokens, which is already the total input count.
+	{path: []string{"prompt_cache_hit_tokens"}, set: func(u *Usage, n int64) { u.CacheReadTokens = n }},
+	{path: []string{"prompt_cache_miss_tokens"}, set: func(u *Usage, n int64) { u.CacheMissTokens = n }},
 }
 
 var responsesUsageFields = []usageWireField{

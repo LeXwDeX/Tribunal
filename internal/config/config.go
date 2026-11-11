@@ -189,11 +189,28 @@ type ProviderConfig struct {
 	// into the last tool message for openai-chat gateways that reject a
 	// tool -> user sequence (#262). It is ignored by other protocols.
 	StrictRoleAlternation bool `yaml:"strict_role_alternation" json:"strict_role_alternation,omitempty"`
+	// AllowReasoningEffortNone permits reasoning.effort "none" for gateways
+	// that declare it (DeepSeek thinking). Without it, none is rejected.
+	AllowReasoningEffortNone bool `yaml:"allow_reasoning_effort_none" json:"allow_reasoning_effort_none,omitempty"`
+	// PreserveReasoningContent replays openai-chat reasoning_content on later
+	// assistant messages. DeepSeek thinking + tools requires it (#404).
+	PreserveReasoningContent bool `yaml:"preserve_reasoning_content" json:"preserve_reasoning_content,omitempty"`
+	// OutputConfigEffort makes anthropic send reasoning.effort as
+	// output_config.effort. The default keeps the previous request body.
+	OutputConfigEffort bool `yaml:"output_config_effort" json:"output_config_effort,omitempty"`
+	// ResponsesParams declares whether an openai-responses endpoint accepts
+	// the Responses-only include and store parameters: auto (default, send),
+	// supported or unsupported. Compatible gateways that reject
+	// reasoning.encrypted_content declare unsupported.
+	ResponsesParams string `yaml:"responses_params" json:"responses_params,omitempty"`
 }
 
-// ThinkingConfig carries provider-specific reasoning token settings.
+// ThinkingConfig carries provider-specific reasoning token settings. Type is
+// the openai-chat thinking switch (enabled or disabled); the Anthropic adapter
+// derives thinking from BudgetTokens instead.
 type ThinkingConfig struct {
-	BudgetTokens int `yaml:"budget_tokens" json:"budget_tokens"`
+	BudgetTokens int    `yaml:"budget_tokens" json:"budget_tokens"`
+	Type         string `yaml:"type" json:"type,omitempty"`
 }
 
 // ReasoningConfig carries provider-specific reasoning effort.
@@ -522,8 +539,17 @@ type ProviderValidationOptions struct {
 // ValidateProviderConfig validates both configured providers and stored models.
 func ValidateProviderConfig(field string, provider ProviderConfig, opts ProviderValidationOptions) error {
 	var p problems
-	if provider.Reasoning != nil && !effort.Valid(provider.Reasoning.Effort) {
-		p.add("%s.reasoning.effort must be low, medium, high or max", field)
+	if provider.Reasoning != nil && !effort.ValidCapability(provider.Reasoning.Effort, provider.AllowReasoningEffortNone) {
+		if provider.Reasoning.Effort == "none" {
+			p.add("%s.reasoning.effort none requires allow_reasoning_effort_none", field)
+		} else {
+			p.add("%s.reasoning.effort must be low, medium, high or max", field)
+		}
+	}
+	// The Anthropic API has no "none" effort, so a provider that could start
+	// would fail every request. Reject it instead of warning.
+	if provider.Protocol == "anthropic" && provider.Reasoning != nil && provider.Reasoning.Effort == "none" {
+		p.add("%s.reasoning.effort none is not supported by anthropic", field)
 	}
 	if !isProviderProtocol(provider.Protocol) {
 		p.add("%s.protocol %q is not supported", field, provider.Protocol)
@@ -532,11 +558,14 @@ func ValidateProviderConfig(field string, provider ProviderConfig, opts Provider
 	if strings.TrimSpace(provider.Model) == "" {
 		p.add("%s.model must not be empty", field)
 	}
-	if provider.MaxConcurrency <= 0 {
-		p.add("%s.max_concurrency must be positive", field)
+	if provider.MaxConcurrency < 0 {
+		p.add("%s.max_concurrency must not be negative", field)
 	}
-	if provider.MaxTokens <= 0 {
-		p.add("%s.max_tokens must be positive", field)
+	switch {
+	case provider.MaxTokens < 0:
+		p.add("%s.max_tokens must not be negative", field)
+	case provider.MaxTokens == 0 && provider.Protocol == "anthropic":
+		p.add("%s.max_tokens must be positive for anthropic", field)
 	}
 	if provider.RPM < 0 {
 		p.add("%s.rpm must not be negative", field)
@@ -544,8 +573,20 @@ func ValidateProviderConfig(field string, provider ProviderConfig, opts Provider
 	if provider.ContextWindow < 0 {
 		p.add("%s.context_window must not be negative", field)
 	}
-	if provider.Thinking != nil && provider.Thinking.BudgetTokens < 0 {
-		p.add("%s.thinking.budget_tokens must not be negative", field)
+	if provider.Thinking != nil {
+		if provider.Thinking.BudgetTokens < 0 {
+			p.add("%s.thinking.budget_tokens must not be negative", field)
+		}
+		switch provider.Thinking.Type {
+		case "", "enabled", "disabled":
+		default:
+			p.add("%s.thinking.type must be enabled or disabled", field)
+		}
+	}
+	switch provider.ResponsesParams {
+	case "", "auto", "supported", "unsupported":
+	default:
+		p.add("%s.responses_params must be auto, supported or unsupported", field)
 	}
 	if provider.Temperature != nil && (math.IsNaN(*provider.Temperature) || *provider.Temperature < 0 || *provider.Temperature > 2) {
 		p.add("%s.temperature must be between 0 and 2", field)

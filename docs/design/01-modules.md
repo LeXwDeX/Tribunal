@@ -324,8 +324,9 @@ type Request struct {
 }
 
 type ReasoningOpts struct {
-	Effort       string // low | medium | high（Responses）
+	Effort       string // low | medium | high | max；none 需 allow_reasoning_effort_none
 	BudgetTokens int    // Anthropic thinking budget
+	ThinkingType string // openai-chat：enabled | disabled
 }
 
 type StopReason string // end_turn | tool_use | max_tokens | refusal | other
@@ -339,7 +340,7 @@ type Response struct {
 }
 
 type Usage struct {
-	InputTokens, OutputTokens, CacheReadTokens, CacheWriteTokens, ReasoningTokens int64
+	InputTokens, OutputTokens, CacheReadTokens, CacheWriteTokens, CacheMissTokens, ReasoningTokens int64
 }
 
 type Client interface {
@@ -375,9 +376,11 @@ adapter 要点：
 
 | adapter | 要点 |
 |---|---|
-| `openai_chat.go` | `tool_calls` ↔ `ToolCall`；`role=tool` ↔ `ToolResult`；不支持推理块回传，`Reasoning` 丢弃 |
-| `openai_responses.go` | `store=false`，`include=["reasoning.encrypted_content"]`；输入为 item 列表，`function_call` / `function_call_output` / `reasoning` 三类 item 与统一类型互转 |
-| `anthropic.go` | `system` 用 block 数组，`Cache=true` 的 block 加 `cache_control: ephemeral`；开启 thinking 时 `temperature` 不传；`thinking` 块原样回传 |
+| `openai_chat.go` | `tool_calls` ↔ `ToolCall`；`role=tool` ↔ `ToolResult`；默认丢弃推理块、请求体与旧版一致；声明 `preserve_reasoning_content` 时从响应 `choices[0].message.reasoning_content` 提取并存为 reasoning part，后续 assistant 消息（尤其带 `tool_calls`）回传 `reasoning_content`。`thinking.type` 仅在此适配器发送；只支持 function 类型工具 |
+| `openai_responses.go` | `store=false`，`include=["reasoning.encrypted_content"]`；`responses_params: unsupported` 时两者都省略；输入为 item 列表，`function_call` / `function_call_output` / `reasoning` 三类 item 与统一类型互转。`parallel_tool_calls` 被上游忽略且并行始终开启，多个 `tool_calls` 仍按顺序串行执行 |
+| `anthropic.go` | `system` 用 block 数组，`Cache=true` 的 block 加 `cache_control: ephemeral`；开启 thinking 时 `temperature` 不传；`thinking` 块原样回传。`output_config_effort: true` 且 effort 非空时发送 `output_config.effort`，不发送 `thinking.type` |
+
+`Usage.CacheMissTokens` 来自 Chat Completions 的 `prompt_cache_miss_tokens`（DeepSeek 提示词缓存明细）；它不重复计入 `InputTokens`，审计 JSON 中为 `cache_miss_tokens`、omitempty。
 
 ---
 

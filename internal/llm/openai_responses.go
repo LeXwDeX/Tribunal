@@ -42,20 +42,30 @@ func (a *openAIResponsesAdapter) GenerateWithWire(ctx context.Context, req *Requ
 		return nil, nil, err
 	}
 	effective := resolveRequest(a.cfg, req)
+	if err := validateMaxTokens(effective.maxTokens); err != nil {
+		return nil, nil, err
+	}
+	if err := validateReasoningCapabilities(effective, a.cfg); err != nil {
+		return nil, nil, err
+	}
 	input, err := responsesInput(req)
 	if err != nil {
 		return nil, nil, err
 	}
 	params := responses.ResponseNewParams{
 		Model: shared.ResponsesModel(a.info.Model),
-		Store: openai.Bool(false),
 		Input: responses.ResponseNewParamsInputUnion{OfInputItemList: input},
-		Include: []responses.ResponseIncludable{
-			responses.ResponseIncludableReasoningEncryptedContent,
-		},
 	}
 	// Stateless mode: every turn sends the full explicit item history.
-	// previous_response_id is intentionally never set.
+	// previous_response_id is intentionally never set. include/store are
+	// Responses-only parameters; compatible gateways that reject
+	// reasoning.encrypted_content declare responses_params: unsupported.
+	if a.cfg.responsesParams != "unsupported" {
+		params.Store = openai.Bool(false)
+		params.Include = []responses.ResponseIncludable{
+			responses.ResponseIncludableReasoningEncryptedContent,
+		}
+	}
 	if text := joinBlocks(req.System); text != "" {
 		params.Instructions = openai.String(text)
 	}
@@ -85,6 +95,8 @@ func (a *openAIResponsesAdapter) GenerateWithWire(ctx context.Context, req *Requ
 	}
 	if effective.effort != "" {
 		wire.Reasoning = &WireReasoning{Effort: effective.effort}
+		// Responses has no thinking.type; the effort is the explicit switch.
+		wire.ThinkingEnabled = effective.effort != "none"
 	}
 	generated, err := a.sdk.Responses.New(ctx, params, option.WithHeader("X-Session-Id", rand.Text()))
 	if err != nil {

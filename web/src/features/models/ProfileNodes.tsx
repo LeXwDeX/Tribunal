@@ -56,6 +56,7 @@ function paramsText(params?: ProfileNodeParams): string {
   if (typeof params.temperature === 'number') parts.push(`temperature ${params.temperature}`)
   if (params.reasoning?.effort) parts.push(`reasoning.effort ${params.reasoning.effort}`)
   if (params.thinking?.budget_tokens) parts.push(`thinking.budget_tokens ${params.thinking.budget_tokens}`)
+  if (params.thinking?.type) parts.push(`thinking.type ${params.thinking.type}`)
   return parts.length ? parts.join(' · ') : '无'
 }
 
@@ -117,12 +118,15 @@ interface NodeForm {
   temperature: string
   effort: string
   budget: string
+  // thinking.type is openai-chat only. It is part of the document even when
+  // budget_tokens is inherited, so it must round-trip like the other params.
+  thinkingType: string
 }
 
 type FieldKey = keyof NodeForm | 'params'
 type NodeErrors = Partial<Record<FieldKey, string>>
 
-const EMPTY_FORM: NodeForm = { model: '', maxTokens: '', temperature: '', effort: '', budget: '' }
+const EMPTY_FORM: NodeForm = { model: '', maxTokens: '', temperature: '', effort: '', budget: '', thinkingType: '' }
 
 function docNode(doc: Record<string, unknown>, path: string): Record<string, unknown> | undefined {
   let current: unknown = doc
@@ -143,6 +147,7 @@ function formFromDoc(doc: Record<string, unknown>): Record<string, NodeForm> {
       temperature: typeof item?.params?.temperature === 'number' ? String(item.params.temperature) : '',
       effort: item?.params?.reasoning?.effort ?? '',
       budget: item?.params?.thinking?.budget_tokens ? String(item.params.thinking.budget_tokens) : '',
+      thinkingType: item?.params?.thinking?.type ?? '',
     }
   }
   return forms
@@ -160,6 +165,9 @@ function validate(form: NodeForm): NodeErrors {
     errors.temperature = 'temperature 必须在 0 到 2 之间。'
   }
   if (form.budget && !isPositiveInt(form.budget)) errors.budget = 'thinking.budget_tokens 必须是正整数。'
+  if (form.thinkingType && form.thinkingType !== 'enabled' && form.thinkingType !== 'disabled') {
+    errors.thinkingType = 'thinking.type 只能是 enabled 或 disabled。'
+  }
   return errors
 }
 
@@ -171,7 +179,11 @@ function buildDocument(forms: Record<string, NodeForm>): Record<string, unknown>
     if (form.maxTokens) params.max_tokens = Number(form.maxTokens)
     if (form.temperature) params.temperature = Number(form.temperature.trim())
     if (form.effort) params.reasoning = { effort: form.effort }
-    if (form.budget) params.thinking = { budget_tokens: Number(form.budget) }
+    if (form.budget || form.thinkingType) {
+      params.thinking = {}
+      if (form.budget) params.thinking.budget_tokens = Number(form.budget)
+      if (form.thinkingType) params.thinking.type = form.thinkingType
+    }
     const item: Record<string, unknown> = {}
     if (form.model) item.model = form.model
     if (Object.keys(params).length) item.params = params
@@ -190,6 +202,7 @@ function buildDocument(forms: Record<string, NodeForm>): Record<string, unknown>
 const PARAM_FIELDS: Array<[string, FieldKey]> = [
   ['max_tokens', 'maxTokens'], ['temperature', 'temperature'],
   ['reasoning.effort', 'effort'], ['thinking.budget_tokens', 'budget'],
+  ['thinking.type', 'thinkingType'],
 ]
 
 // mapFieldError routes an API validation path such as
@@ -410,6 +423,13 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
               </Field>
               <Field label={`${label} thinking.budget_tokens`} htmlFor={`${id}-budget`} error={nodeErrors.budget}>
                 <input id={`${id}-budget`} className={ui.input} inputMode="numeric" placeholder="继承" value={form.budget} aria-invalid={nodeErrors.budget ? true : undefined} aria-describedby={desc('budget', `${id}-budget`, true)} onChange={(event) => update(node, { budget: event.target.value })} />
+              </Field>
+              <Field label={`${label} thinking.type`} htmlFor={`${id}-thinking-type`} error={nodeErrors.thinkingType}>
+                <select id={`${id}-thinking-type`} className={ui.select} value={form.thinkingType} aria-invalid={nodeErrors.thinkingType ? true : undefined} aria-describedby={desc('thinkingType', `${id}-thinking-type`, true)} onChange={(event) => update(node, { thinkingType: event.target.value })}>
+                  <option value="">继承</option>
+                  <option value="enabled">enabled</option>
+                  <option value="disabled">disabled</option>
+                </select>
               </Field>
             </div>
             {nodeErrors.params ? <span className={styles.errorText} id={paramsErr} role="alert">{nodeErrors.params}</span> : null}

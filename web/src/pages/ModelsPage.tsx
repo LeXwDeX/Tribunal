@@ -120,6 +120,9 @@ function ModelDrawer({ open, model, onClose, onSaved }: {
   const [baseURL, setBaseURL] = useState('')
   const [upstreamModel, setUpstreamModel] = useState('')
   const [maxTokens, setMaxTokens] = useState('')
+  // The historical new-model default is 1. #406 will move the platform default
+  // out of this form; an empty value means "do not set" (the backend stores 0,
+  // which creates no local semaphore).
   const [maxConcurrency, setMaxConcurrency] = useState('1')
   const [temperature, setTemperature] = useState('')
   const [effort, setEffort] = useState('')
@@ -143,7 +146,9 @@ function ModelDrawer({ open, model, onClose, onSaved }: {
     setBaseURL(model?.base_url ?? '')
     setUpstreamModel(model?.model ?? '')
     setMaxTokens(model?.params?.max_tokens ? String(model.params.max_tokens) : '')
-    setMaxConcurrency(String(model?.params?.max_concurrency || 1))
+    // 0 is a meaningful stored value (no local semaphore); only a missing value
+    // falls back to the new-model default.
+    setMaxConcurrency(model?.params?.max_concurrency != null ? String(model.params.max_concurrency) : '1')
     setTemperature(model?.params?.temperature != null ? String(model.params.temperature) : '')
     setEffort(model?.params?.reasoning?.effort ?? '')
     setApiKey('')
@@ -158,7 +163,10 @@ function ModelDrawer({ open, model, onClose, onSaved }: {
     const params: ModelParams = { ...(model?.params ?? {}) }
     if (maxTokens) params.max_tokens = Number(maxTokens)
     else delete params.max_tokens
-    params.max_concurrency = Number(maxConcurrency)
+    // An empty field means "do not set"; the backend reads the absent value as
+    // 0, which disables the local semaphore.
+    if (maxConcurrency.trim()) params.max_concurrency = Number(maxConcurrency)
+    else delete params.max_concurrency
     if (temperature) params.temperature = Number(temperature)
     else delete params.temperature
     if (effort) params.reasoning = { ...params.reasoning, effort }
@@ -177,7 +185,7 @@ function ModelDrawer({ open, model, onClose, onSaved }: {
 
   const invalidParams = (): string | undefined => {
     if (maxTokens && !(Number.isInteger(Number(maxTokens)) && Number(maxTokens) > 0)) return 'max_tokens 必须是正整数。'
-    if (!(Number.isInteger(Number(maxConcurrency)) && Number(maxConcurrency) > 0)) return 'max_concurrency 必须是正整数。'
+    if (maxConcurrency.trim() && !(/^\d+$/.test(maxConcurrency.trim()))) return 'max_concurrency 必须是不小于 0 的整数。'
     return undefined
   }
 
@@ -249,7 +257,7 @@ function ModelDrawer({ open, model, onClose, onSaved }: {
       <Field label="base_url" htmlFor={ids.base}><input id={ids.base} className={ui.input} value={baseURL} onChange={(event) => setBaseURL(event.target.value)} /></Field>
       <Field label="上游模型" htmlFor={ids.model}><input id={ids.model} className={ui.input} value={upstreamModel} onChange={(event) => setUpstreamModel(event.target.value)} /></Field>
       <Field label="max_tokens" htmlFor={ids.tokens}><input id={ids.tokens} className={ui.input} inputMode="numeric" value={maxTokens} onChange={(event) => setMaxTokens(event.target.value)} /></Field>
-      <Field label="max_concurrency" htmlFor={ids.concurrency} hint="同时进行的请求数，必须为正整数。"><input id={ids.concurrency} className={ui.input} inputMode="numeric" value={maxConcurrency} onChange={(event) => setMaxConcurrency(event.target.value)} /></Field>
+      <Field label="max_concurrency" htmlFor={ids.concurrency} hint="同时进行的请求数；0 或留空表示不限制本地并发。"><input id={ids.concurrency} className={ui.input} inputMode="numeric" value={maxConcurrency} onChange={(event) => setMaxConcurrency(event.target.value)} /></Field>
       <Field label="temperature" htmlFor={ids.temp}><input id={ids.temp} className={ui.input} inputMode="decimal" value={temperature} onChange={(event) => setTemperature(event.target.value)} /></Field>
       <Field label="reasoning effort" htmlFor={ids.effort} hint="anthropic 不会发送 effort。">
         <select id={ids.effort} className={ui.select} value={effort} onChange={(event) => setEffort(event.target.value)}>

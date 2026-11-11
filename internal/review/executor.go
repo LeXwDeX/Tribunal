@@ -544,7 +544,8 @@ func (e *Executor) runAgent(ctx context.Context, provider string, spec agent.Run
 func carryRunResult(result *agent.RunResult, usage llm.Usage) *agent.RunResult {
 	if result == nil {
 		if !usage.Incomplete && usage.InputTokens == 0 && usage.OutputTokens == 0 &&
-			usage.CacheReadTokens == 0 && usage.CacheWriteTokens == 0 && usage.ReasoningTokens == 0 {
+			usage.CacheReadTokens == 0 && usage.CacheWriteTokens == 0 && usage.ReasoningTokens == 0 &&
+			usage.CacheMissTokens == 0 {
 			return nil
 		}
 		return &agent.RunResult{Usage: usage}
@@ -960,6 +961,7 @@ func applyNodeParams(spec *agent.RunSpec, params config.NodeParams) {
 	}
 	if params.Thinking != nil {
 		reasoning.BudgetTokens = params.Thinking.BudgetTokens
+		reasoning.ThinkingType = params.Thinking.Type
 	}
 	if reasoning != (llm.ReasoningOpts{}) {
 		spec.Reasoning = &reasoning

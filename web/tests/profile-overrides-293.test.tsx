@@ -11,7 +11,7 @@ const models = [
 ]
 
 const detail = {
-  profile: 'default', overrides: { challenge: { model: 'user:one' } }, revision: 3,
+  profile: 'default', overrides: { challenge: { model: 'user:one' } } as Record<string, unknown>, revision: 3,
   effective: { provider: 'base', challenge: { provider: 'base' } },
   nodes: [
     { node: 'default', model: 'base', source: 'config' },
@@ -21,13 +21,13 @@ const detail = {
   ],
 }
 
-function mock() {
+function mock(profile = detail) {
   return installFetch((url, init) => {
-    if (url === '/api/v1/profiles/default' && init?.method === 'PUT') return jsonResponse(detail, 200)
-    if (url.startsWith('/api/v1/profiles/default') && init?.method === 'DELETE') return jsonResponse(detail, 200)
-    if (url === '/api/v1/profiles/default') return jsonResponse(detail)
+    if (url === '/api/v1/profiles/default' && init?.method === 'PUT') return jsonResponse(profile, 200)
+    if (url.startsWith('/api/v1/profiles/default') && init?.method === 'DELETE') return jsonResponse(profile, 200)
+    if (url === '/api/v1/profiles/default') return jsonResponse(profile)
     if (url.startsWith('/api/v1/models')) return jsonResponse({ models })
-    if (url.startsWith('/api/v1/profiles')) return jsonResponse({ profiles: [{ name: 'default', config: detail.effective }, { name: 'onboarding', config: {} }] })
+    if (url.startsWith('/api/v1/profiles')) return jsonResponse({ profiles: [{ name: 'default', config: profile.effective }, { name: 'onboarding', config: {} }] })
     return jsonResponse({})
   })
 }
@@ -45,6 +45,25 @@ describe('profile overrides UI (#293)', () => {
     await user.click(screen.getByRole('button', { name: '编辑档位' }))
     expect(screen.getAllByRole('option', { name: /bad/ }).length).toBeGreaterThan(0)
     expect(screen.getAllByRole('option', { name: /bad/ }).every((option) => option.hasAttribute('disabled'))).toBe(true)
+  })
+
+  it('round-trips a stored thinking.type when saving another node', async () => {
+    const profile = {
+      ...detail,
+      overrides: { explore: { params: { thinking: { type: 'disabled' } } } },
+    }
+    const fetchMock = mock(profile)
+    const user = userEvent.setup()
+    renderWithProviders(<ModelsPage />, { route: '/models' })
+    await user.click(await screen.findByRole('button', { name: '编辑档位' }))
+    expect(screen.getByLabelText('探索 thinking.type')).toHaveValue('disabled')
+    await user.selectOptions(screen.getByLabelText('review 模型'), 'user:one')
+    await user.click(screen.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/v1/profiles/default/overrides' && init?.method === 'PUT')).toBe(true))
+    const call = fetchMock.mock.calls.find(([url, init]) => url === '/api/v1/profiles/default/overrides' && init?.method === 'PUT')
+    const body = JSON.parse(String(call?.[1]?.body))
+    expect(body.overrides.explore.params.thinking.type).toBe('disabled')
+    expect(body.overrides.lanes.review.model).toBe('user:one')
   })
 
   it('saves a lane override and resets to configuration', async () => {
