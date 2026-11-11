@@ -146,6 +146,9 @@ type Server struct {
 	lockStats        func() LockStats
 	streamPoll       time.Duration
 	now              func() time.Time
+	// mcpTestTimeout bounds one MCP connection test. It is derived from the
+	// runtime server.write_timeout so a test never outlives the response budget.
+	mcpTestTimeout time.Duration
 
 	// shutdown closes when the HTTP server starts shutting down. Long-lived
 	// responses watch it because Shutdown does not cancel active requests.
@@ -222,6 +225,11 @@ func New(cfg Config) (*Server, error) {
 		now:              cfg.Now,
 		shutdown:         make(chan struct{}),
 	}
+	var writeTimeout time.Duration
+	if cfg.Platform != nil {
+		writeTimeout = cfg.Platform.Server.WriteTimeout
+	}
+	s.mcpTestTimeout = mcpTestTimeoutFor(writeTimeout)
 	if s.now == nil {
 		s.now = time.Now
 	}

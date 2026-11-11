@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"mime"
 	"net/http"
@@ -25,8 +24,9 @@ import (
 )
 
 const (
-	// mcpTestTimeout keeps one connection test below the HTTP write timeout.
-	mcpTestTimeout = 30 * time.Second
+	// mcpTestTimeoutFallback bounds one connection test when the runtime
+	// server.write_timeout is unavailable.
+	mcpTestTimeoutFallback = 30 * time.Second
 	// mcpTestConcurrency bounds simultaneous test connections.
 	mcpTestConcurrency = 4
 	// skillUploadMax bounds the archive bytes read from one multipart upload.
@@ -39,6 +39,21 @@ const (
 	// parts to temporary files until the request ends.
 	skillUploadFormMemory = 1 << 20
 )
+
+// mcpTestTimeoutFor derives the per-test handler budget from the HTTP write
+// timeout. A quarter of the write budget stays free to serialize the response.
+// The historical 30-second bound is kept as a ceiling so a large write_timeout
+// does not turn one test into an unbounded upstream wait.
+func mcpTestTimeoutFor(writeTimeout time.Duration) time.Duration {
+	if writeTimeout <= 0 {
+		return mcpTestTimeoutFallback
+	}
+	timeout := writeTimeout - writeTimeout/4
+	if timeout > mcpTestTimeoutFallback {
+		return mcpTestTimeoutFallback
+	}
+	return timeout
+}
 
 // mcpTestSlots is the process-wide connection-test semaphore. Tests that fill
 // it must drain it before returning.
@@ -77,8 +92,9 @@ type MCPTool struct {
 	Annotated   bool   `json:"annotated"`
 }
 
-// MCPTestResult is one successful test. ToolCount is the total advertised
-// count; Tools may be capped, in which case Truncated is true.
+// MCPTestResult is one successful test. ToolCount is the number of distinct
+// valid advertised tools after duplicate-name collapsing; Tools may be capped,
+// in which case Truncated is true.
 type MCPTestResult struct {
 	LatencyMS int64
 	ToolCount int
@@ -336,15 +352,6 @@ func (s *Server) handleCreateMCPServer(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeExtensionScope(w, r, scope, true) {
 		return
 	}
-	name := strings.TrimSpace(request.Name)
-	if !mcpNameRE.MatchString(name) {
-		validationFailed(w, r, "name", "name must match "+mcpNameRE.String())
-		return
-	}
-	if err := validateMCPConfigObject(request.Config); err != nil {
-		validationFailed(w, r, "config", err.Error())
-		return
-	}
 	enabled := true
 	if request.Enabled != nil {
 		enabled = *request.Enabled
@@ -352,7 +359,7 @@ func (s *Server) handleCreateMCPServer(w http.ResponseWriter, r *http.Request) {
 	server, err := s.extensions.CreateMCPServer(r.Context(), MCPServerInput{
 		Scope:     scope.scope,
 		ProjectID: scope.projectID,
-		Name:      name,
+		Name:      request.Name,
 		Config:    request.Config,
 		Enabled:   enabled,
 	})
@@ -468,25 +475,13 @@ func (s *Server) handleImportMCPServers(w http.ResponseWriter, r *http.Request) 
 		decodeRequestError(w, r, err)
 		return
 	}
-	if len(document.MCPServers) == 0 {
-		validationFailed(w, r, "mcpServers", "mcpServers must contain at least one server")
-		return
-	}
+	// Validation of names and configs lives in the extension service so every
+	// entry point returns the same code and detail field.
 	names := make([]string, 0, len(document.MCPServers))
 	for name := range document.MCPServers {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	for _, name := range names {
-		if !mcpNameRE.MatchString(name) {
-			validationFailed(w, r, "mcpServers", fmt.Sprintf("invalid server name %q", name))
-			return
-		}
-		if err := validateMCPConfigObject(document.MCPServers[name]); err != nil {
-			validationFailed(w, r, "mcpServers."+name, err.Error())
-			return
-		}
-	}
 	servers, err := s.extensions.ImportMCPServers(r.Context(), MCPImportInput{
 		Scope:     scope.scope,
 		ProjectID: scope.projectID,
@@ -528,7 +523,7 @@ func (s *Server) handleTestMCPServer(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeExtensionResource(w, r, server.Scope, server.ProjectID, true) {
 		return
 	}
-	s.runMCPTest(w, r, "test", server.ID, server.Scope, server.ProjectID, func(ctx context.Context) (MCPTestResult, error) {
+	s.runMCPTest(w, r, "test", server.ID, server.Scope, server.ProjectID, nil, func(ctx context.Context) (MCPTestResult, error) {
 		return s.mcp.TestMCPServer(ctx, *server)
 	})
 }
@@ -565,16 +560,6 @@ func (s *Server) handleTestMCPDraft(w http.ResponseWriter, r *http.Request) {
 		if !s.requireExtensionWriter(w, r) {
 			return
 		}
-		if name := strings.TrimSpace(request.Name); name != "" && !mcpNameRE.MatchString(name) {
-			validationFailed(w, r, "name", "name must match "+mcpNameRE.String())
-			return
-		}
-		if len(request.Config) > 0 {
-			if err := validateMCPConfigObject(request.Config); err != nil {
-				validationFailed(w, r, "config", err.Error())
-				return
-			}
-		}
 		current, err := s.extensions.GetMCPServer(r.Context(), id)
 		if err != nil {
 			s.writeServiceError(w, r, err)
@@ -590,9 +575,11 @@ func (s *Server) handleTestMCPDraft(w http.ResponseWriter, r *http.Request) {
 			Name:      request.Name,
 			Config:    request.Config,
 		}
-		s.runMCPTest(w, r, "test_draft", current.ID, current.Scope, current.ProjectID, func(ctx context.Context) (MCPTestResult, error) {
-			return s.mcp.TestMCPDraft(ctx, in)
-		})
+		s.runMCPTest(w, r, "test_draft", current.ID, current.Scope, current.ProjectID,
+			func(ctx context.Context) error { return s.mcp.ValidateMCPDraft(ctx, in) },
+			func(ctx context.Context) (MCPTestResult, error) {
+				return s.mcp.TestMCPDraft(ctx, in)
+			})
 		return
 	}
 	scope, err := validateExtensionScope(strings.TrimSpace(request.Scope), request.ProjectID, true)
@@ -603,44 +590,43 @@ func (s *Server) handleTestMCPDraft(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeExtensionScope(w, r, scope, true) {
 		return
 	}
-	name := strings.TrimSpace(request.Name)
-	if !mcpNameRE.MatchString(name) {
-		validationFailed(w, r, "name", "name must match "+mcpNameRE.String())
-		return
-	}
-	if err := validateMCPConfigObject(request.Config); err != nil {
-		validationFailed(w, r, "config", err.Error())
-		return
-	}
 	in := MCPDraftInput{
 		Scope:     scope.scope,
 		ProjectID: scope.projectID,
-		Name:      name,
+		Name:      request.Name,
 		Config:    request.Config,
 	}
-	s.runMCPTest(w, r, "test_draft", "draft", scope.scope, scope.projectID, func(ctx context.Context) (MCPTestResult, error) {
-		return s.mcp.TestMCPDraft(ctx, in)
-	})
+	s.runMCPTest(w, r, "test_draft", "draft", scope.scope, scope.projectID,
+		func(ctx context.Context) error { return s.mcp.ValidateMCPDraft(ctx, in) },
+		func(ctx context.Context) (MCPTestResult, error) {
+			return s.mcp.TestMCPDraft(ctx, in)
+		})
 }
 
-// runMCPTest applies the concurrency limit and handler timeout, then writes
-// the fixed test response or a sanitized error category.
+// runMCPTest validates the request first, then applies the concurrency limit
+// and handler timeout, and finally writes the fixed test response or a
+// sanitized error category. Validating before acquiring a slot makes invalid
+// input answer 400 even when every test slot is busy.
 func (s *Server) runMCPTest(w http.ResponseWriter, r *http.Request, action, targetID, scope string,
-	projectID *int64, test func(context.Context) (MCPTestResult, error)) {
+	projectID *int64, validate func(context.Context) error, test func(context.Context) (MCPTestResult, error)) {
+	if validate != nil {
+		if err := validate(r.Context()); err != nil {
+			s.auditMCPTestFailure(r, action, targetID, scope, projectID, err)
+			s.writeMCPTestError(w, r, err)
+			return
+		}
+	}
 	release, ok := acquireMCPTestSlot(r.Context())
 	if !ok {
 		writeError(w, r, http.StatusTooManyRequests, "test_busy", "too many concurrent MCP tests", nil)
 		return
 	}
 	defer release()
-	ctx, cancel := context.WithTimeout(r.Context(), mcpTestTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), s.mcpTestBudget())
 	defer cancel()
 	result, err := test(ctx)
 	if err != nil {
-		category := mcpTestCategory(err)
-		s.logger.Warn("mcp server test failed", "event", "platform_audit", "actor_id", currentUserID(r),
-			"target_id", targetID, "action", action, "scope", scope,
-			"project_id", auditProjectID(projectID), "ok", false, "error_class", category)
+		s.auditMCPTestFailure(r, action, targetID, scope, projectID, err)
 		s.writeMCPTestError(w, r, err)
 		return
 	}
@@ -659,6 +645,15 @@ func (s *Server) runMCPTest(w http.ResponseWriter, r *http.Request, action, targ
 		"truncated":  result.Truncated,
 		"tools":      tools,
 	})
+}
+
+// auditMCPTestFailure records one failed test without config or upstream text.
+func (s *Server) auditMCPTestFailure(r *http.Request, action, targetID, scope string, projectID *int64, err error) {
+	class, code := mcpTestAudit(err)
+	s.logger.Warn("mcp server test failed", "event", "platform_audit", "actor_id", currentUserID(r),
+		"target_id", targetID, "action", action, "scope", scope,
+		"project_id", auditProjectID(projectID), "ok", false,
+		"error_class", class, "error_code", code)
 }
 
 func acquireMCPTestSlot(ctx context.Context) (func(), bool) {
@@ -701,6 +696,35 @@ func mcpTestCategory(err error) string {
 	return "internal"
 }
 
+// mcpTestBudget returns the wired test budget, falling back when the Server was
+// assembled without a runtime platform configuration.
+func (s *Server) mcpTestBudget() time.Duration {
+	if s.mcpTestTimeout > 0 {
+		return s.mcpTestTimeout
+	}
+	return mcpTestTimeoutFallback
+}
+
+// mcpTestAudit classifies one failed test for the platform audit log. Local
+// request errors expose their sanitized app code, upstream test failures the
+// fixed test category, and anything else stays internal. Only codes and
+// categories are logged; config and upstream text never are.
+func mcpTestAudit(err error) (class, code string) {
+	var appErr *app.Error
+	if errors.As(err, &appErr) {
+		return "local", appErr.Code
+	}
+	category := mcpTestCategory(err)
+	switch category {
+	case mcp.TestCategoryInvalidConfig:
+		return "local", category
+	case mcp.TestCategoryCleanupFailed, "internal":
+		return "internal", category
+	default:
+		return "upstream", category
+	}
+}
+
 func mcpTestFailure(category string) (int, string) {
 	switch category {
 	case mcp.TestCategoryInvalidConfig:
@@ -716,6 +740,8 @@ func mcpTestFailure(category string) (int, string) {
 	case mcp.TestCategoryListToolsFailed:
 		return http.StatusBadGateway, "listing MCP tools failed"
 	case mcp.TestCategoryTooManyTools:
+		// Fixed contract: the request is well formed but the upstream server
+		// advertises more tools than the platform limit, so this stays 422.
 		return http.StatusUnprocessableEntity, "MCP server advertises too many tools"
 	case mcp.TestCategoryCleanupFailed:
 		return http.StatusInternalServerError, "MCP server test cleanup failed"
@@ -731,8 +757,9 @@ func auditProjectID(projectID *int64) any {
 	return *projectID
 }
 
-// validateMCPConfigObject rejects non-object or empty server configs. It runs
-// before persistence so a bad import fails as one request.
+// validateMCPConfigObject rejects non-object or empty server configs on the
+// update endpoint before the service runs. Create, import and draft rely only
+// on the service validation so every entry point returns the same field/code.
 func validateMCPConfigObject(raw json.RawMessage) error {
 	if len(raw) == 0 {
 		return errors.New("config is required")

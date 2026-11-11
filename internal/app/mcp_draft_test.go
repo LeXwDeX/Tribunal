@@ -34,6 +34,95 @@ func captureMCPTest(t *testing.T, service *ExtensionService, session mcpTestSess
 	}
 }
 
+// TestMCPConfigValidationStableAcrossCreateImportAndDraft pins the shared
+// contract for one invalid config: every service entry point returns the same
+// sanitized code and detail field.
+func TestMCPConfigValidationStableAcrossCreateImportAndDraft(t *testing.T) {
+	ctx := context.Background()
+	invalid := map[string]json.RawMessage{
+		"missing":       nil,
+		"empty object":  json.RawMessage(`{}`),
+		"array":         json.RawMessage(`[]`),
+		"unknown field": json.RawMessage(`{"command":"npx","bogus":"super-secret"}`),
+		"bad url":       json.RawMessage(`{"url":"ftp://mcp.example.invalid"}`),
+		"masked secret": json.RawMessage(`{"command":"npx","env":{"API_KEY":"****"}}`),
+	}
+	for name, config := range invalid {
+		t.Run(name, func(t *testing.T) {
+			service, _ := newExtensionFixture(t)
+			assertConfig := func(entry string, err error) {
+				t.Helper()
+				var appErr *Error
+				if !errors.As(err, &appErr) || appErr.Code != "validation_failed" ||
+					len(appErr.Details) == 0 || appErr.Details[0].Field != "config" {
+					t.Fatalf("%s error = %v, want validation_failed on config", entry, err)
+				}
+				if strings.Contains(err.Error(), "super-secret") {
+					t.Fatalf("%s error leaked a config value: %v", entry, err)
+				}
+			}
+
+			_, err := service.CreateMCPServer(ctx, MCPServerInput{
+				Scope: "platform", Name: "srv", Config: config,
+			})
+			assertConfig("create", err)
+			_, err = service.ImportMCPServers(ctx, MCPImportInput{
+				Scope: "platform", Servers: map[string]json.RawMessage{"srv": config},
+			})
+			assertConfig("import", err)
+			_, err = service.TestMCPDraft(ctx, MCPDraftInput{
+				Scope: "platform", Name: "srv", Config: config,
+			})
+			assertConfig("draft", err)
+		})
+	}
+}
+
+// TestMCPNameValidationStableAcrossCreateImportAndDraft pins the name contract
+// for create, import and draft.
+func TestMCPNameValidationStableAcrossCreateImportAndDraft(t *testing.T) {
+	ctx := context.Background()
+	config := json.RawMessage(`{"command":"npx"}`)
+	for _, name := range []string{"", "bad name", "bad/name", "bad__name", strings.Repeat("a", 65)} {
+		t.Run(name, func(t *testing.T) {
+			service, _ := newExtensionFixture(t)
+			assertName := func(entry string, err error) {
+				t.Helper()
+				var appErr *Error
+				if !errors.As(err, &appErr) || appErr.Code != "validation_failed" ||
+					len(appErr.Details) == 0 || appErr.Details[0].Field != "name" {
+					t.Fatalf("%s error = %v, want validation_failed on name", entry, err)
+				}
+			}
+
+			_, err := service.CreateMCPServer(ctx, MCPServerInput{Scope: "platform", Name: name, Config: config})
+			assertName("create", err)
+			_, err = service.ImportMCPServers(ctx, MCPImportInput{
+				Scope: "platform", Servers: map[string]json.RawMessage{name: config},
+			})
+			assertName("import", err)
+			_, err = service.TestMCPDraft(ctx, MCPDraftInput{Scope: "platform", Name: name, Config: config})
+			assertName("draft", err)
+		})
+	}
+}
+
+// TestMCPDraftUnresolvableTemplateIsInvalidConfig documents the one exception
+// to the request-validation contract: a stored template that is valid at save
+// time can still fail environment expansion when a test actually runs, and
+// that test-time failure keeps the fixed invalid_config category.
+func TestMCPDraftUnresolvableTemplateIsInvalidConfig(t *testing.T) {
+	ctx := context.Background()
+	service, _ := newExtensionFixture(t)
+	_, err := service.TestMCPDraft(ctx, MCPDraftInput{
+		Scope: "platform", Name: "srv",
+		Config: json.RawMessage(`{"command":"${MCP_DRAFT_MISSING_BIN}"}`),
+	})
+	if got := mcp.TestCategory(err); got != mcp.TestCategoryInvalidConfig {
+		t.Fatalf("category = %q, err = %v", got, err)
+	}
+}
+
 func TestExtensionServiceTestMCPDraftDoesNotPersist(t *testing.T) {
 	ctx := context.Background()
 	service, st := newExtensionFixture(t)

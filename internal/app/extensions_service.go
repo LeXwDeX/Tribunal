@@ -84,8 +84,9 @@ type MCPTool struct {
 	Annotated   bool   `json:"annotated"`
 }
 
-// MCPTestResult is one successful connection test. ToolCount is the total
-// advertised count; Tools may be capped, in which case Truncated is true.
+// MCPTestResult is one successful connection test. ToolCount is the number of
+// distinct valid advertised tools after duplicate-name collapsing; Tools may be
+// capped, in which case Truncated is true.
 type MCPTestResult struct {
 	LatencyMS int64
 	ToolCount int
@@ -396,9 +397,6 @@ func (s *ExtensionService) CreateMCPServer(ctx context.Context, in MCPServerInpu
 		return nil, err
 	}
 	name := strings.TrimSpace(in.Name)
-	if name == "" {
-		return nil, validationError("name is required", Detail{Field: "name", Message: "name is required"})
-	}
 	if err := validateMCPServerName(name); err != nil {
 		return nil, err
 	}
@@ -502,10 +500,15 @@ func (s *ExtensionService) ImportMCPServers(ctx context.Context, in MCPImportInp
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	// Validate every name first so a bad name always wins over a bad config,
+	// matching the order the HTTP layer documents. The detail field stays the
+	// stable name/config form; the offending mcpServers key is not a field.
 	for _, name := range names {
 		if err := validateMCPServerName(name); err != nil {
 			return nil, err
 		}
+	}
+	for _, name := range names {
 		config := in.Servers[name]
 		if err := guardMaskedConfig(config); err != nil {
 			return nil, err
@@ -1199,17 +1202,52 @@ func (s *ExtensionService) TestMCPServer(ctx context.Context, server MCPServer) 
 // set the stored row supplies the scope, the name fallback and any masked
 // secret values; nothing is persisted either way.
 func (s *ExtensionService) TestMCPDraft(ctx context.Context, in MCPDraftInput) (MCPTestResult, error) {
+	prepared, err := s.prepareMCPDraft(ctx, in)
+	if err != nil {
+		return MCPTestResult{}, err
+	}
+	defer prepared.unlock()
+	return s.testMCPConnection(ctx, prepared.input.Name, prepared.input.Scope, prepared.input.ProjectID, prepared.input.Config)
+}
+
+// ValidateMCPDraft applies the same name/config and stored-row resolution as
+// TestMCPDraft without connecting or taking a test slot. The HTTP layer calls
+// it before the concurrency limit so invalid input answers 400, not 429.
+func (s *ExtensionService) ValidateMCPDraft(ctx context.Context, in MCPDraftInput) error {
+	prepared, err := s.prepareMCPDraft(ctx, in)
+	if err != nil {
+		return err
+	}
+	prepared.unlock()
+	return nil
+}
+
+// preparedMCPDraft is a validated draft plus the scope lock that keeps the
+// referenced stored server stable while the connection test runs.
+type preparedMCPDraft struct {
+	input  MCPDraftInput
+	unlock func()
+}
+
+// prepareMCPDraft resolves an id-backed draft and validates its name/config.
+// It holds the scope lock until the caller runs the test or releases it.
+func (s *ExtensionService) prepareMCPDraft(ctx context.Context, in MCPDraftInput) (*preparedMCPDraft, error) {
 	id := strings.TrimSpace(in.ID)
 	scope := strings.TrimSpace(in.Scope)
 	projectID := in.ProjectID
 	name := strings.TrimSpace(in.Name)
 	config := append(json.RawMessage(nil), in.Config...)
+	unlock := func() {}
+	fail := func(err error) (*preparedMCPDraft, error) {
+		unlock()
+		return nil, err
+	}
 	if id != "" {
-		current, unlock, err := s.lockMCPServer(ctx, id)
+		current, storedUnlock, err := s.lockMCPServer(ctx, id)
 		if err != nil {
-			return MCPTestResult{}, err
+			return nil, err
 		}
-		defer unlock()
+		unlock = storedUnlock
 		scope, projectID = current.Scope, current.ProjectID
 		if name == "" {
 			name = strings.TrimSpace(current.Name)
@@ -1219,36 +1257,39 @@ func (s *ExtensionService) TestMCPDraft(ctx context.Context, in MCPDraftInput) (
 		} else {
 			restored, err := restoreMaskedMCPConfigRequired(config, current.Config)
 			if err != nil {
-				return MCPTestResult{}, err
+				return fail(err)
 			}
 			config = restored
 		}
 	}
 	if len(config) == 0 {
-		return MCPTestResult{}, validationError("config is required", Detail{Field: "config", Message: "config is required"})
+		return fail(validationError("config is required", Detail{Field: "config", Message: "config is required"}))
 	}
 	if err := validateMCPServerName(name); err != nil {
-		return MCPTestResult{}, err
+		return fail(err)
 	}
 	if err := guardMaskedConfig(config); err != nil {
-		return MCPTestResult{}, err
+		return fail(err)
 	}
 	if err := s.validateMCPConfig(config); err != nil {
-		return MCPTestResult{}, err
+		return fail(err)
 	}
 	if id == "" {
 		var err error
 		scope, projectID, err = extensionScope(scope, projectID)
 		if err != nil {
-			return MCPTestResult{}, err
+			return fail(err)
 		}
-		unlock, err := s.lockScope(ctx, scope, projectID)
+		scopeUnlock, err := s.lockScope(ctx, scope, projectID)
 		if err != nil {
-			return MCPTestResult{}, err
+			return fail(err)
 		}
-		defer unlock()
+		unlock = scopeUnlock
 	}
-	return s.testMCPConnection(ctx, name, scope, projectID, config)
+	return &preparedMCPDraft{
+		input:  MCPDraftInput{ID: id, Scope: scope, ProjectID: projectID, Name: name, Config: config},
+		unlock: unlock,
+	}, nil
 }
 
 // testMCPConnection is the shared draft/saved test path. Errors are classified

@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/LeXwDeX/tribunal/internal/app"
 	"github.com/LeXwDeX/tribunal/internal/mcp"
 	"github.com/LeXwDeX/tribunal/internal/store"
 )
@@ -317,6 +319,52 @@ func TestMCPTestConcurrencyLimit(t *testing.T) {
 	assertStatus(t, response, http.StatusTooManyRequests)
 	if body := env.decode(t, response)["error"].(map[string]any); body["code"] != "test_busy" {
 		t.Fatalf("error = %v", body)
+	}
+}
+
+func TestMCPTestAuditClassifiesFailures(t *testing.T) {
+	var logs bytes.Buffer
+	env := newM6Env(t, m6Options{logWriter: &logs})
+	seedMCPServer(env)
+	client := env.loginAs("code-admin")
+	cases := []struct {
+		name  string
+		err   error
+		class string
+		code  string
+	}{
+		{"local validation", &app.Error{Code: "validation_failed", Message: "invalid",
+			Details: []app.Detail{{Field: "config", Message: "invalid"}}}, "local", "validation_failed"},
+		{"invalid config", mcp.NewTestError(mcp.TestCategoryInvalidConfig, mcp.ErrInvalidConfig), "local", "invalid_config"},
+		{"upstream connect", mcp.NewTestError(mcp.TestCategoryConnectFailed, mcp.ErrConnectFailed), "upstream", "connect_failed"},
+		{"upstream too many tools", mcp.NewTestError(mcp.TestCategoryTooManyTools, mcp.ErrTooManyTools), "upstream", "too_many_tools"},
+		{"cleanup failure", mcp.NewTestError(mcp.TestCategoryCleanupFailed, mcp.ErrCleanupFailed), "internal", "cleanup_failed"},
+		{"internal fault", errors.New("private failure detail"), "internal", "internal"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			logs.Reset()
+			env.mcp.err = tc.err
+			response := client.request(http.MethodPost, "/api/v1/mcp-servers/mcp-1/test", nil, nil)
+			if response.status == http.StatusOK {
+				t.Fatalf("test with %v succeeded", tc.err)
+			}
+			text := logs.String()
+			for _, want := range []string{
+				`"event":"platform_audit"`,
+				`"error_class":"` + tc.class + `"`,
+				`"error_code":"` + tc.code + `"`,
+			} {
+				if !strings.Contains(text, want) {
+					t.Fatalf("audit log missing %s: %s", want, text)
+				}
+			}
+			for _, secret := range []string{"super-secret", "private failure detail"} {
+				if strings.Contains(text, secret) {
+					t.Fatalf("audit log leaked %q: %s", secret, text)
+				}
+			}
+		})
 	}
 }
 

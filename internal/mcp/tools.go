@@ -60,7 +60,9 @@ type toolRef struct {
 }
 
 // ListTools connects to server and returns its advertised tools for status and
-// test APIs. It does not grant model access.
+// test APIs. It does not grant model access. The result contains one entry per
+// name: a name advertised more than once, or a tool whose input schema the
+// runtime cannot use, stays visible but is never bindable.
 func (m *Manager) ListTools(ctx context.Context, server string) ([]ToolInfo, error) {
 	if m == nil {
 		return nil, ErrClosed
@@ -79,12 +81,46 @@ func (m *Manager) ListTools(ctx context.Context, server string) ([]ToolInfo, err
 	}
 	infos := make([]ToolInfo, 0, len(raws))
 	for _, raw := range raws {
-		if info, ok := infoFor(raw); ok {
-			infos = append(infos, info)
+		info, ok := infoFor(raw)
+		if !ok {
+			continue
 		}
+		// The runtime refuses a tool with an unusable input schema, so the test
+		// API must not offer it as bindable even though the server advertises it.
+		if _, ok := inputSchema(raw.InputSchema); !ok {
+			info.Bindable = false
+		}
+		infos = append(infos, info)
 	}
+	infos = dedupeToolInfos(infos)
 	sort.Slice(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
 	return infos, nil
+}
+
+// dedupeToolInfos keeps one entry per advertised name. The runtime treats a
+// duplicate name as an unusable tool (Manager.call refuses conflicting
+// definitions), so the surviving entry is reported as not bindable.
+func dedupeToolInfos(infos []ToolInfo) []ToolInfo {
+	if len(infos) < 2 {
+		return infos
+	}
+	counts := make(map[string]int, len(infos))
+	for _, info := range infos {
+		counts[info.Name]++
+	}
+	out := make([]ToolInfo, 0, len(infos))
+	seen := make(map[string]bool, len(infos))
+	for _, info := range infos {
+		if seen[info.Name] {
+			continue
+		}
+		seen[info.Name] = true
+		if counts[info.Name] > 1 {
+			info.Bindable = false
+		}
+		out = append(out, info)
+	}
+	return out
 }
 
 // Tools returns only the explicitly allowlisted mcp__server__tool entries.
