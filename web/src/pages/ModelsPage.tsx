@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCanWrite } from '../components/RoleContext'
 import {
@@ -41,6 +41,7 @@ const EXPLICIT_PARAM_LABELS: Record<string, string> = {
   max_tokens: '0（模型默认，不发送）',
   context_window: '0（未知）',
   max_concurrency: '0（不限制本地并发）',
+  rpm: '0（不限制）',
   strict_role_alternation: 'false（关闭）',
 }
 
@@ -407,14 +408,32 @@ function nodeOverrideParams(node: ProfileNodeView): string {
   return parts.join(' · ')
 }
 
-// configNodeOverrides lists the 0028 stored overrides whose effective model is
-// this configured provider. The stored document is never modified here; the
-// profile editor is the only clearing path.
+// configNodeOverrides lists the stored 0028 overrides that affect this
+// configured provider: a node's own model or parameters, and the profile
+// default override. A default-level parameter override is listed once as
+// "default" instead of repeating the inherited parameters on every node.
+// The stored document is never modified here; the profile editor is the only
+// clearing path.
 function configNodeOverrides(nodes: ProfileNodeView[] | undefined, providerName: string): ProfileNodeView[] {
   const id = `config:${providerName}`
-  return (nodes ?? []).filter((node) => (
-    node.model === id && (node.source === 'override' || node.source === 'override_default')
+  const list = nodes ?? []
+  const defaultNode = list.find((node) => node.node === 'default')
+  const defaultLevel = defaultNode !== undefined && list.some((node) => (
+    node.node !== 'default' && node.model === id &&
+    (node.source === 'override_default' || node.param_source === 'override_default')
   ))
+  const defaultApplies = defaultNode !== undefined && (
+    defaultLevel ||
+    (defaultNode.model === id && (
+      defaultNode.source === 'override' || defaultNode.source === 'override_default' || defaultNode.param_source === 'override'
+    ))
+  )
+  const overrides: ProfileNodeView[] = defaultApplies ? [defaultNode] : []
+  for (const node of list) {
+    if (node.node === 'default' || node.model !== id) continue
+    if (node.source === 'override' || node.param_source === 'override') overrides.push(node)
+  }
+  return overrides
 }
 
 function NodeOverrideLine({ nodes }: { nodes: ProfileNodeView[] }) {
@@ -424,7 +443,7 @@ function NodeOverrideLine({ nodes }: { nodes: ProfileNodeView[] }) {
       {nodes.map((node, index) => (
         <span key={node.node}>
           {index > 0 ? '、' : ''}
-          {profileNodeLabel(node.node)}
+          {node.node === 'default' ? 'default' : profileNodeLabel(node.node)}
           {nodeOverrideParams(node) ? `（${nodeOverrideParams(node)}）` : ''}
         </span>
       ))}
@@ -825,12 +844,13 @@ function presetLabel(preset: ModelPreset): string {
   return PRESET_LABELS[preset.id] ?? preset.display_name
 }
 
-function ModelCard({ model, canWrite, configProvider, origins, nodeOverrides, onEdit, onEditConfig, onDelete, onClearNodeOverrides }: {
+function ModelCard({ model, canWrite, configProvider, origins, nodeOverrides, applying, onEdit, onEditConfig, onDelete, onClearNodeOverrides }: {
   model: Model
   canWrite: boolean
   configProvider?: ConfigProviderView
   origins?: Record<string, ConfigOrigin>
   nodeOverrides: ProfileNodeView[]
+  applying?: boolean
   onEdit: () => void
   onEditConfig: () => void
   onDelete: () => void
@@ -906,7 +926,7 @@ function ModelCard({ model, canWrite, configProvider, origins, nodeOverrides, on
       {canWrite ? (
         <div className={styles.cardActions}>
           {isConfig ? (
-            <Button variant="secondary" className={ui.smallButton} onClick={onEditConfig} disabled={!configProvider}>编辑配置</Button>
+            <Button variant="secondary" className={ui.smallButton} onClick={onEditConfig} disabled={!configProvider || applying}>编辑配置</Button>
           ) : (
             <>
               <Button variant="secondary" className={ui.smallButton} onClick={onEdit}>编辑</Button>
@@ -919,8 +939,11 @@ function ModelCard({ model, canWrite, configProvider, origins, nodeOverrides, on
         </div>
       ) : null}
       {isConfig && !configProvider ? (
-        <span className="small muted">配置文件快照不可用，暂不能在控制台编辑。</span>
+        <span className="small muted">
+          {canWrite ? '配置文件快照不可用，暂不能在控制台编辑。' : '只读：仅平台管理员可通过配置文件（overlay）编辑。'}
+        </span>
       ) : null}
+      {isConfig && applying ? <span className="small muted">配置快照应用中，稍后可再次编辑。</span> : null}
     </article>
   )
 }
@@ -1288,9 +1311,11 @@ const CONFIG_PATH_FIELDS: Array<[string, ConfigField]> = [
   ['model', 'model'],
 ]
 
-// configFormFrom mirrors the file-effective provider view. A missing numeric
-// value and zero both render blank: the provider treats zero as "not sent",
-// "unknown" or "no limit".
+// configFormFrom mirrors the file-effective provider view. max_tokens and
+// context_window render blank for zero because zero means "not sent" and
+// "unknown" respectively. max_concurrency and rpm keep an explicit zero when
+// the view returns one: zero there means "no local limit", matching the user
+// model form and the card's explicit-zero labels.
 function configFormFrom(provider?: ConfigProviderView): ConfigModelForm {
   return {
     protocol: provider?.protocol ?? 'openai-chat',
@@ -1298,8 +1323,8 @@ function configFormFrom(provider?: ConfigProviderView): ConfigModelForm {
     model: provider?.model ?? '',
     maxTokens: provider?.max_tokens ? numberText(provider.max_tokens) : '',
     contextWindow: provider?.context_window ? numberText(provider.context_window) : '',
-    maxConcurrency: provider?.max_concurrency ? numberText(provider.max_concurrency) : '',
-    rpm: provider?.rpm ? numberText(provider.rpm) : '',
+    maxConcurrency: provider?.max_concurrency !== undefined ? numberText(provider.max_concurrency) : '',
+    rpm: provider?.rpm !== undefined ? numberText(provider.rpm) : '',
     temperature: typeof provider?.temperature === 'number' ? numberText(provider.temperature) : '',
     forcedToolChoice: provider?.forced_tool_choice ?? '',
     strictRoleAlternation: provider?.strict_role_alternation === true,
@@ -1313,12 +1338,28 @@ function configFormFrom(provider?: ConfigProviderView): ConfigModelForm {
   }
 }
 
+// providerBaseURLValid mirrors the server's URL rule; an empty base_url is
+// allowed and means the protocol adapter's default endpoint.
+function providerBaseURLValid(raw: string): boolean {
+  if (raw.includes('?') || raw.includes('#')) return false
+  try {
+    const url = new URL(raw)
+    return (url.protocol === 'http:' || url.protocol === 'https:') &&
+      Boolean(url.hostname) && !url.username && !url.password && !url.search && !url.hash
+  } catch {
+    return false
+  }
+}
+
 // validateConfigForm applies the same allowlist ranges as the overlay writer
 // so a bad value is reported before any request is sent.
 function validateConfigForm(form: ConfigModelForm): ConfigErrors {
   const errors: ConfigErrors = {}
   if (!PROTOCOL_OPTIONS.some((option) => option.value === form.protocol)) errors.protocol = '协议不受支持。'
-  if (!form.baseURL.trim()) errors.baseURL = 'base_url 不能为空。'
+  const baseURL = form.baseURL.trim()
+  if (baseURL && !providerBaseURLValid(baseURL)) {
+    errors.baseURL = 'base_url 必须是绝对 http(s) URL，不含凭据、查询或片段。'
+  }
   if (!form.model.trim()) errors.model = '上游模型不能为空。'
   const maxTokens = form.maxTokens.trim()
   if (maxTokens) {
@@ -1496,11 +1537,15 @@ function ConfigModelDrawer({
     responses: `${id}-responses`,
   }
   const providerName = model ? configName(model.id) : ''
+  const formSnapshot = useRef<{ id?: string; baseRevision: string; overlayRevision: string } | undefined>(undefined)
 
-  // Reinitialize on open and after a file revision change (a reload or a
-  // successful write); do not clobber unsaved edits on an unrelated rerender.
+  // Reinitialize on open and after a file revision change. A revision change
+  // while the drawer is already open means an external edit or a reload
+  // replaced the file snapshot; tell the user their draft was replaced instead
+  // of silently discarding it.
   useEffect(() => {
     if (!open) {
+      formSnapshot.current = undefined
       setErrors({})
       setError(undefined)
       setDetails([])
@@ -1508,12 +1553,16 @@ function ConfigModelDrawer({
       setStatus(undefined)
       return
     }
+    const previous = formSnapshot.current
+    const external = Boolean(previous && previous.id === model?.id &&
+      (previous.baseRevision !== baseRevision || previous.overlayRevision !== overlayRevision))
     setForm(configFormFrom(provider))
     setErrors({})
     setError(undefined)
     setDetails([])
     setStale(false)
-    setStatus(undefined)
+    setStatus(external ? '配置已被他人修改，已重新加载。' : undefined)
+    formSnapshot.current = { id: model?.id, baseRevision, overlayRevision }
   }, [open, model?.id, baseRevision, overlayRevision])
 
   const update = (patch: Partial<ConfigModelForm>) => {
@@ -1651,8 +1700,8 @@ function ConfigModelDrawer({
           <fieldset className={styles.modelFormGroup}>
             <legend className={styles.modelFormLegend}>推理与能力</legend>
             <div className={styles.modelFormGrid}>
-              <Field label="reasoning.effort" htmlFor={ids.effort} hint={hintFor('reasoning.effort', 'anthropic 不发送 effort，改用 thinking.budget_tokens。')} error={errors.effort}>
-                <Select id={ids.effort} value={form.effort} options={EFFORT_OPTIONS} onChange={(value) => update({ effort: value })} aria-invalid={errors.effort ? true : undefined} />
+              <Field label="reasoning.effort" htmlFor={ids.effort} hint={hintFor('reasoning.effort', 'anthropic 不发送 effort，改用 thinking.budget_tokens；none 需要同时开启 allow_reasoning_effort_none。')} error={errors.effort}>
+                <Select id={ids.effort} value={form.effort} options={DEFAULTS_EFFORT_OPTIONS} onChange={(value) => update({ effort: value })} aria-invalid={errors.effort ? true : undefined} />
               </Field>
               <Field label="thinking.type" htmlFor={ids.thinkingType} hint={hintFor('thinking.type', '仅 openai-chat 发送 thinking.type。')} error={errors.thinkingType}>
                 <Select id={ids.thinkingType} value={form.thinkingType} options={THINKING_TYPE_OPTIONS} onChange={(value) => update({ thinkingType: value })} aria-invalid={errors.thinkingType ? true : undefined} />
@@ -1705,10 +1754,10 @@ function ConfigModelDrawer({
               <Field label="context_window" htmlFor={ids.context} hint={hintFor('context_window', '上游可接收的输入窗口；0 表示未知。')} error={errors.contextWindow}>
                 <NumberField id={ids.context} min={0} step={1} value={form.contextWindow} aria-invalid={errors.contextWindow ? true : undefined} onChange={(event) => update({ contextWindow: event.target.value })} />
               </Field>
-              <Field label="max_concurrency" htmlFor={ids.concurrency} hint={hintFor('max_concurrency', '0 表示不限制本地并发。')} error={errors.maxConcurrency}>
+              <Field label="max_concurrency" htmlFor={ids.concurrency} hint={hintFor('max_concurrency', '0 或留空都表示不限制本地并发；填写 0 会显式写入 overlay。')} error={errors.maxConcurrency}>
                 <NumberField id={ids.concurrency} min={0} step={1} value={form.maxConcurrency} aria-invalid={errors.maxConcurrency ? true : undefined} onChange={(event) => update({ maxConcurrency: event.target.value })} />
               </Field>
-              <Field label="rpm" htmlFor={ids.rpm} hint={hintFor('rpm', '每分钟请求数；0 表示不限制。')} error={errors.rpm}>
+              <Field label="rpm" htmlFor={ids.rpm} hint={hintFor('rpm', '每分钟请求数；0 或留空表示不限制，填写 0 会显式写入 overlay。')} error={errors.rpm}>
                 <NumberField id={ids.rpm} min={0} step={1} value={form.rpm} aria-invalid={errors.rpm ? true : undefined} onChange={(event) => update({ rpm: event.target.value })} />
               </Field>
             </div>
@@ -1756,7 +1805,9 @@ function ConfigModelDrawer({
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined
-}interface Step { stage: string; what: string; who: string }
+}
+
+interface Step { stage: string; what: string; who: string }
 
 const REVIEW_PROFILE = 'default'
 
@@ -1851,11 +1902,31 @@ export function ModelsPage() {
   // The config snapshot is the file-effective view; it is the source for the
   // config: model editor and its per-field origins. Writes still go to the
   // overlay endpoint and need a restart before the runtime catalog changes.
-  // Poll it like the System page: the watcher applies a saved file after two
-  // stable observations (~2-4s), so an immediate refetch alone can be stale.
+  // After a write, poll faster until the watcher has published the revision
+  // the write returned (~2-4s), then fall back to the normal refresh interval.
+  const [applyingOverlayRevision, setApplyingOverlayRevision] = useState<string>()
   const fileConfig = useQuery({
-    queryKey: ['config'], queryFn: getConfig, retry: false, enabled: canWrite, refetchInterval: 5000,
+    queryKey: ['config'],
+    queryFn: getConfig,
+    retry: false,
+    enabled: canWrite,
+    refetchInterval: (query) => {
+      if (!applyingOverlayRevision) return 5000
+      return query.state.data?.overlay_revision === applyingOverlayRevision ? 5000 : 1000
+    },
   })
+  const configApplying = Boolean(
+    applyingOverlayRevision && fileConfig.data?.overlay_revision !== applyingOverlayRevision,
+  )
+  useEffect(() => {
+    if (!applyingOverlayRevision || fileConfig.data?.overlay_revision !== applyingOverlayRevision) return
+    setApplyingOverlayRevision(undefined)
+    setConfigNotice((current) => (
+      current?.startsWith('已保存到 overlay，正在应用')
+        ? '已保存到 overlay，待重启生效。重启服务可能取消在途评审。'
+        : current
+    ))
+  }, [applyingOverlayRevision, fileConfig.data?.overlay_revision])
   const [profileEditing, setProfileEditing] = useState(false)
   const [editing, setEditing] = useState<Model>()
   const [configEditing, setConfigEditing] = useState<Model>()
@@ -1892,10 +1963,11 @@ export function ModelsPage() {
     setConfigEditing(undefined)
     if (!result.changed) {
       setConfigNotice('没有需要保存的更改。')
-    } else if (result.restart_required) {
-      setConfigNotice('已保存到 overlay，待重启生效。重启服务可能取消在途评审。')
     } else {
-      setConfigNotice('已保存到 overlay。')
+      setApplyingOverlayRevision(result.overlay_revision)
+      setConfigNotice(result.restart_required
+        ? '已保存到 overlay，正在应用配置快照；待重启生效。重启服务可能取消在途评审。'
+        : '已保存到 overlay，正在应用配置快照。')
     }
     saved()
     void fileConfig.refetch()
@@ -1963,6 +2035,7 @@ export function ModelsPage() {
                 configProvider={configProviderByName.get(configName(model.id))}
                 origins={configOrigins}
                 nodeOverrides={configNodeOverrides(configNodes, configName(model.id))}
+                applying={configApplying && model.source === 'config'}
                 onEdit={() => { setEditing(model); setDrawerOpen(true) }}
                 onEditConfig={() => { setConfigNotice(undefined); setConfigEditing(model) }}
                 onDelete={() => { setDeleting(model); setDeleteError(undefined) }}

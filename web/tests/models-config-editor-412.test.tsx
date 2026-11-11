@@ -61,15 +61,47 @@ const nodeOverride = {
   vote_identity: 'api.example.test/deepseek-chat',
 }
 
+// A node whose model still comes from the configuration but whose parameters
+// are overridden in 0028. Its `source` stays "config"; only param_source marks
+// the override.
+const paramOnlyOverride = {
+  node: 'lanes.review', model: 'config:primary', source: 'config',
+  configured: 'config:primary', configured_source: 'config',
+  override: { params: { max_tokens: 700 } },
+  params: { max_tokens: 700 }, param_source: 'override',
+  effective_params: { max_tokens: 700 },
+  vote_identity: 'api.example.test/deepseek-chat',
+}
+
+const defaultParamOverride = {
+  node: 'default', model: 'config:primary', source: 'config',
+  configured: 'config:primary', configured_source: 'config',
+  override: { params: { temperature: 0.2 } },
+  params: { temperature: 0.2 }, param_source: 'override',
+  effective_params: { temperature: 0.2 },
+  vote_identity: 'api.example.test/deepseek-chat',
+}
+
+// This node inherits the default-level parameter override; it has no own
+// override and must not be listed a second time.
+const inheritedParamOverride = {
+  node: 'lanes.code_review', model: 'config:primary', source: 'config',
+  configured: 'config:primary', configured_source: 'config',
+  params: { temperature: 0.2 }, param_source: 'override_default',
+  effective_params: { temperature: 0.2 },
+  vote_identity: 'api.example.test/deepseek-chat',
+}
+
 interface RouteOptions {
   overlay?: (body: Record<string, unknown>) => Response
   nodes?: unknown[]
   models?: unknown[]
+  provider?: Record<string, unknown>
 }
 
 function routes(options: RouteOptions = {}) {
   const state = {
-    provider: configPayload().config.providers[0] as Record<string, unknown> | undefined,
+    provider: { ...configPayload().config.providers[0], ...options.provider } as Record<string, unknown> | undefined,
     origins: { ...configPayload().origins } as Record<string, string>,
     overlayRevision: 'overlay-rev-1',
     patchBody: undefined as Record<string, unknown> | undefined,
@@ -187,6 +219,19 @@ describe('config model overlay editor (#412)', () => {
     expect(screen.getByText('API key 已配置')).toBeInTheDocument()
   })
 
+  it('shows parameter-only 0028 overrides and lists the default level separately', async () => {
+    routes({ nodes: [defaultParamOverride, paramOnlyOverride, inheritedParamOverride] })
+    renderWithProviders(<ModelsPage />, { route: '/models' })
+    await screen.findByRole('button', { name: '编辑配置' })
+    const nodes = screen.getByText(/0028 节点覆盖/)
+    expect(nodes).toHaveTextContent('default')
+    expect(nodes).toHaveTextContent('temperature 0.2')
+    expect(nodes).toHaveTextContent('review')
+    expect(nodes).toHaveTextContent('max_tokens 700')
+    // The inherited default-level parameters are not repeated on every node.
+    expect(nodes).not.toHaveTextContent('code-review')
+  })
+
   it('saves edited fields to the overlay with both revisions and asks for a restart', async () => {
     const user = userEvent.setup()
     const { fetchMock, state } = routes()
@@ -217,6 +262,12 @@ describe('config model overlay editor (#412)', () => {
     expect(changeFor(state, ['providers', 'primary', 'reasoning', 'effort'])).toMatchObject({ value: 'max' })
     expect(changeFor(state, ['providers', 'primary', 'thinking', 'type'])).toMatchObject({ value: 'disabled' })
     expect(changeFor(state, ['providers', 'primary', 'strict_role_alternation'])).toMatchObject({ value: false })
+    // Only changed leaves are submitted: unchanged connection fields and
+    // parameters stay out of the patch.
+    expect(patchedChanges(state)).toHaveLength(5)
+    expect(changeFor(state, ['providers', 'primary', 'model'])).toBeUndefined()
+    expect(changeFor(state, ['providers', 'primary', 'base_url'])).toBeUndefined()
+    expect(changeFor(state, ['providers', 'primary', 'thinking', 'budget_tokens'])).toBeUndefined()
 
     expect(await screen.findByText(/已保存到 overlay，待重启生效/)).toBeInTheDocument()
     expect(screen.getByText(/重启服务可能取消在途评审/)).toBeInTheDocument()
@@ -227,7 +278,7 @@ describe('config model overlay editor (#412)', () => {
     const maxTokensEntry = within(paramsGroup).getByText('max_tokens').closest('span')
     expect(maxTokensEntry).not.toBeNull()
     expect(within(maxTokensEntry as HTMLElement).getByText('overlay')).toBeInTheDocument()
-    expect(await screen.findByRole('button', { name: '编辑配置' })).toBeEnabled()
+    await waitFor(() => expect(screen.getByRole('button', { name: '编辑配置' })).toBeEnabled())
     await waitFor(() => expect(state.configReads).toBeGreaterThan(configReadsBefore))
     await waitFor(() => expect(state.modelReads).toBeGreaterThan(modelReadsBefore))
     expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/v1/config' && init?.method !== 'PATCH')).toBe(true)
@@ -287,6 +338,101 @@ describe('config model overlay editor (#412)', () => {
     await user.click(within(dialog).getByRole('button', { name: '保存' }))
     expect(await within(dialog).findByText('没有需要保存的更改。')).toBeInTheDocument()
     expect(state.patchBody).toBeUndefined()
+  })
+
+  it('allows an empty base_url and only validates a non-empty value', async () => {
+    const user = userEvent.setup()
+    const { state } = routes({ provider: { base_url: '' } })
+    const dialog = await openConfigEditor(user)
+    const form = within(dialog)
+    expect(form.getByLabelText('base_url')).toHaveValue('')
+
+    fireEvent.change(form.getByLabelText('base_url'), { target: { value: 'ftp://api.example.test/v1' } })
+    await user.click(form.getByRole('button', { name: '保存' }))
+    expect(await form.findByText('base_url 必须是绝对 http(s) URL，不含凭据、查询或片段。')).toBeInTheDocument()
+    expect(state.patchBody).toBeUndefined()
+
+    fireEvent.change(form.getByLabelText('base_url'), { target: { value: '' } })
+    await user.clear(form.getByLabelText('max_tokens'))
+    await user.type(form.getByLabelText('max_tokens'), '4096')
+    await user.click(form.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(state.patchBody).toBeDefined())
+    expect(patchedChanges(state)).toHaveLength(1)
+    expect(changeFor(state, ['providers', 'primary', 'max_tokens'])).toMatchObject({ value: 4096 })
+    expect(changeFor(state, ['providers', 'primary', 'base_url'])).toBeUndefined()
+  })
+
+  it('offers effort none with the allow switch and saves both leaves', async () => {
+    const user = userEvent.setup()
+    const { state } = routes()
+    const dialog = await openConfigEditor(user)
+    const form = within(dialog)
+    await chooseOption(user, form.getByLabelText('reasoning.effort'), 'none（需开启 allow_reasoning_effort_none）')
+    await user.click(form.getByLabelText('allow_reasoning_effort_none'))
+    await user.click(form.getByRole('button', { name: '保存' }))
+
+    await waitFor(() => expect(state.patchBody).toBeDefined())
+    expect(changeFor(state, ['providers', 'primary', 'reasoning', 'effort'])).toMatchObject({ value: 'none' })
+    expect(changeFor(state, ['providers', 'primary', 'allow_reasoning_effort_none'])).toMatchObject({ value: true })
+  })
+
+  it('shows explicit zero max_concurrency and rpm on the card and in the editor', async () => {
+    const user = userEvent.setup()
+    routes({ provider: { max_concurrency: 0, rpm: 0 } })
+    renderWithProviders(<ModelsPage />, { route: '/models' })
+    const button = await screen.findByRole('button', { name: '编辑配置' })
+    await waitFor(() => expect(button).toBeEnabled())
+    const params = screen.getByRole('group', { name: 'primary 参数' })
+    expect(within(params).getByText('max_concurrency')).toBeInTheDocument()
+    expect(within(params).getByText('0（不限制本地并发）')).toBeInTheDocument()
+    expect(within(params).getByText('rpm')).toBeInTheDocument()
+    expect(within(params).getByText('0（不限制）')).toBeInTheDocument()
+
+    await user.click(button)
+    const dialog = screen.getByRole('dialog')
+    expect(within(dialog).getByLabelText('max_concurrency')).toHaveValue(0)
+    expect(within(dialog).getByLabelText('rpm')).toHaveValue(0)
+  })
+
+  it('maps server invalid_config details under the matching field', async () => {
+    const user = userEvent.setup()
+    const { state } = routes({
+      overlay: () => jsonResponse({
+        error: {
+          code: 'invalid_config', message: 'candidate configuration is invalid',
+          details: [{ field: 'changes', message: 'providers.primary.model must not be empty' }],
+        },
+      }, 400),
+    })
+    const dialog = await openConfigEditor(user)
+    const form = within(dialog)
+    await user.clear(form.getByLabelText('max_tokens'))
+    await user.type(form.getByLabelText('max_tokens'), '4096')
+    await user.click(form.getByRole('button', { name: '保存' }))
+
+    expect(await form.findByText('providers.primary.model must not be empty')).toBeInTheDocument()
+    expect(form.getByLabelText('上游模型')).toHaveAttribute('aria-invalid', 'true')
+    expect(state.patchBody).toBeDefined()
+  })
+
+  it('reloads the draft and says so when the config changed externally', async () => {
+    const user = userEvent.setup()
+    const { state } = routes()
+    const { queryClient } = renderWithProviders(<ModelsPage />, { route: '/models' })
+    const button = await screen.findByRole('button', { name: '编辑配置' })
+    await waitFor(() => expect(button).toBeEnabled())
+    await user.click(button)
+    const dialog = screen.getByRole('dialog')
+    const form = within(dialog)
+    await user.clear(form.getByLabelText('max_tokens'))
+    await user.type(form.getByLabelText('max_tokens'), '1234')
+
+    state.provider = { ...(state.provider ?? {}), max_tokens: 2048 }
+    state.overlayRevision = 'overlay-rev-9'
+    await queryClient.refetchQueries({ queryKey: ['config'] })
+
+    expect(await form.findByText('配置已被他人修改，已重新加载。')).toBeInTheDocument()
+    expect(form.getByLabelText('max_tokens')).toHaveValue(2048)
   })
 
   it('resets the whole model to base after confirmation', async () => {
@@ -350,10 +496,12 @@ describe('config model overlay editor (#412)', () => {
     expect(await screen.findByRole('dialog', { name: '编辑评审档位' })).toBeInTheDocument()
   })
 
-  it('hides the config editor from viewers', async () => {
+  it('hides the config editor from viewers and explains the read-only source', async () => {
     routes()
     renderWithProviders(<ModelsPage />, { route: '/models', me: viewerMe })
     expect(await screen.findByText('primary')).toBeInTheDocument()
+    expect(screen.getByText('只读：仅平台管理员可通过配置文件（overlay）编辑。')).toBeInTheDocument()
+    expect(screen.queryByText('配置文件快照不可用，暂不能在控制台编辑。')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '编辑配置' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '在评审档位中清除' })).not.toBeInTheDocument()
   })

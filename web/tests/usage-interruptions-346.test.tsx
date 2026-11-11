@@ -65,7 +65,7 @@ describe('model card params summary (#346)', () => {
       price: { input_per_mtok: 3, output_per_mtok: 15 },
     })).toEqual([
       ['max_tokens', '64000'], ['context_window', '0（未知）'], ['temperature', '0'],
-      ['strict_role_alternation', 'false（关闭）'], ['max_concurrency', '4'],
+      ['strict_role_alternation', 'false（关闭）'], ['rpm', '0（不限制）'], ['max_concurrency', '4'],
       ['reasoning.effort', 'high'], ['thinking.budget_tokens', '2048'],
     ])
     expect(summarizeParams({ temperature: null as unknown as undefined, reasoning: null as never, thinking: null as never, price: null as never })).toEqual([])
