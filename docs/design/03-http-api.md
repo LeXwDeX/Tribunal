@@ -392,7 +392,7 @@ provider 和 profile 的基线以配置文件为准；改动配置需重启服�
 
 `/stats` 在聚合和分页前按当前用户的项目授权过滤；平台管理员不按 grant 过滤，统计全部已登记项目；其他用户按逐项目 grant 或有效的 `global_read` 过滤。指定 `project_id` 时还要求该项目 `read`（平台管理员隐式具备）。
 
-控制台集合响应按资源命名：`{projects}`、`{reviews}`、`{findings}`、`{servers}`、`{skills}`、`{bindings}`、`{providers}`、`{profiles}`、`{calls}`、`{documents}`、`{tokens}`；可分页的集合另带 `next_cursor`。不提供未发布的旧字段别名。
+控制台集合响应按资源命名：`{projects}`、`{reviews}`、`{findings}`、`{servers}`、`{skills}`、`{bindings}`、`{providers}`、`{presets}`、`{profiles}`、`{calls}`、`{documents}`、`{tokens}`；可分页的集合另带 `next_cursor`。不提供未发布的旧字段别名。
 
 `stats` 使用字段 `runs`、`blocking`、`blocking_ratio`、`published`、`overturned_ratio`、`avg_duration_ms`、`p95_duration_ms`、`duration_samples`、`cost_micros`、`trend`、`by_project`、`by_provider`、`by_block`、`by_model`、`decisions`、`quality_by_provider` 和 `feedback`。`runs` 统计窗口内全部 workflow（包括评审和 onboarding），不是仅评审次数；`blocking_ratio` 当前也是 `blocking / runs`，所以 onboarding 会稀释该比例。
 
@@ -456,10 +456,12 @@ Provider 返回 `name`、`protocol`、`base_url`、`model`、`max_concurrency`�
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/v1/models` | 列出配置模型（`id=config:<name>`，只读）与用户模型（`id=user:<uuid>`）；不分页 |
+| GET | `/api/v1/model-presets` | 平台管理员：只读的内置模型预设 `{presets:[...]}`，当前为 `deepseek-v4-pro-max` 与 `deepseek-flash-max`；每项含 `id`、`display_name`、`protocol`、`base_url`、`model`、`params`、`source_url` 与 `verified_at`，不含密钥或价格 |
 | GET | `/api/v1/models/{id}` | 详情 |
 | POST | `/api/v1/models` | 创建用户模型；`params.max_tokens` 与 `params.max_concurrency` 不能为负，`max_tokens` 为 0 时仅 `openai-chat` / `openai-responses` 接受（请求不发送该字段，由上游取默认），`anthropic` 要求 > 0；`max_concurrency` 为 0 表示不创建本地并发信号量；`api_key` 只写不回显；成功返回 `{"id": "user:<uuid>", "effective": "new_workflows"}`，不返回完整模型视图（需要时再 `GET /api/v1/models/{id}`）；校验失败返回 400 `validation_failed` 与逐字段 `details` |
 | PATCH | `/api/v1/models/{id}` | 整记录替换，必须带 `revision`：请求需给出完整的 `display_name`、`protocol`、`base_url`、`model` 与 `params`，未提交的可选参数按零值或 `null` 覆盖；`api_key` 省略表示不变，空串表示清除；`protocol` 或 `base_url` 的 scheme/host/port 发生变化时必须显式提供 `api_key`，否则返回 400 `validation_failed`（字段 `api_key`）且不写库；配置模型返回 403 `read_only`；成功返回值同创建（`{id, effective}`）；校验失败同创建 |
 | PATCH | `/api/v1/models/{id}/params` | 参数级合并，必须带 `revision`：请求体为 `{"revision": N, "params": {…}}`，只更新 `params` 中出现的键，显式 `null` 清除可空参数（`temperature`、`reasoning`、`thinking`、`price`），未出现的键保持不变；`params` 为空、出现未知参数名或给非可空参数（含 `allow_reasoning_effort_none`、`preserve_reasoning_content`、`output_config_effort`、`responses_params`）传 `null` 返回 400；`thinking.type` 位于整体替换的 `thinking` 对象内，对象内出现 `null` 也返回 400；`max_tokens` 不能为负（`anthropic` 要求 > 0），`max_concurrency` 不能为负（0 表示不创建本地并发信号量）；合并后的生效参数按创建规则校验并返回逐字段 `details`；`revision` 过期返回 409 `stale_revision`；配置模型 403 `read_only`，未知或已删除模型 404；成功返回值同创建 |
+| POST | `/api/v1/models/{id}/preset` | 平台管理员：预览或应用内置预设到已保存用户模型，详见下文「模型预设」 |
 | DELETE | `/api/v1/models/{id}?revision=N` | 软删除；配置模型返回 403 `read_only` |
 | POST | `/api/v1/models/{id}/test` | 测试已保存模型；成功返回 `{"ok": true, "model": "...", "latency_ms": N}` |
 | POST | `/api/v1/models:test` | 草稿测试，详见下文 |
@@ -467,6 +469,20 @@ Provider 返回 `name`、`protocol`、`base_url`、`model`、`max_concurrency`�
 两种修改语义不要混用：`PATCH /api/v1/models/{id}` 是整记录替换，适合提交完整表单；`PATCH /api/v1/models/{id}/params` 是参数级合并，只改提交的键，适合调整部分参数。两者都要求调用方提交 `revision` 做乐观锁。整记录替换在 `protocol` 或 `base_url` 的 scheme/host/port 变化时必须显式提供 `api_key`（已存模型没有密钥时不需要）；参数合并不改变 `protocol`、`base_url`，不涉及已存凭据的复用。端点预读只查询协议、地址与密钥存在性，`params_json` 损坏的记录仍可通过整记录替换修复。
 
 参数合并中的 `reasoning`、`thinking`、`price` 是整体替换：提交其中某个对象时，对象内未提交的字段按零值写入（例如只提交 `price.input_per_mtok` 会把 `output_per_mtok` 归零），调用方须提交完整对象。对象内的未知字段返回 400（字段为 `params.reasoning`、`params.thinking` 或 `params.price`）；对象内出现 `null` 也返回 400，清除整个对象须对顶层键传 `null`。`responses_params` 只接受 `auto`、`supported`、`unsupported`；`thinking.type` 只接受 `enabled`、`disabled` 或空值。
+
+#### 模型预设（[#405](https://github.com/LeXwDeX/Tribunal/issues/405)）
+
+`GET /api/v1/model-presets` 返回随服务发布的能力预设 `{presets:[...]}`，当前是 `deepseek-v4-pro-max` 与 `deepseek-flash-max`。每项含 `id`、`display_name`、`protocol`、`base_url`、`model`、`params`（与模型参数同构）、`source_url` 与 `verified_at`；预设不含密钥和价格。`source_url` 是官方模型表，`verified_at` 是核对日期；数值变更必须同时更新这两个字段和文档。
+
+`POST /api/v1/models/{id}/preset` 把预设合并到已保存的 `user:` 模型，请求体：
+
+```json
+{"preset": "deepseek-flash-max", "dry_run": true, "revision": 5, "confirm_overrides": false}
+```
+
+`dry_run` 缺省或为 `true` 时只预览，不写库，也不需要 `revision`。响应为 `{model_id, preset, dry_run, applied, revision, changes, conflicts, effective?}`：`changes` 按固定顺序列出将变化的参数（`field`、`from`、`to`）；`conflicts` 列出仍会覆盖预设参数的档位节点（`profile`、`node`、`source`、`fields`），只列字段名，不含覆盖值。`revision` 在预览时是当前版本，应用后是新版本。
+
+预设只合并 `max_tokens`、`context_window`、`reasoning`、`max_concurrency`、`rpm`、`forced_tool_choice`、`strict_role_alternation` 与 `preserve_reasoning_content`；模型已有显式 `thinking` 开关（例如旧记录里的 `thinking.type: disabled`）时清除该对象，避免它压过预设 effort。预设不改变 `protocol`、`base_url`、`model`、`temperature`、`price` 或已存密钥，也不匹配模型名前缀。应用必须显式传 `"dry_run": false` 与当前 `revision`；没有字段需要变化时返回 `applied: false`，不写库、不增加 `revision`。若已有档位节点覆盖冲突，未传 `"confirm_overrides": true` 时返回 409 `override_conflict`，`details[].field` 为 `overrides.<节点>`；确认后应用但**不删除**已有覆盖，受覆盖的节点仍按覆盖值运行，管理员须在档位页另行清除。`revision` 不匹配返回 409 `stale_revision`；配置模型返回 403 `read_only`；未知或已删除模型 404；未知预设返回 400（字段 `preset`）。成功应用返回 `effective: "new_workflows"`；审计动作 `apply_preset`，只记录预设 ID 与字段名，不记录参数值或密钥。
 
 `POST /api/v1/models:test` 在保存前测试草稿：
 
@@ -482,7 +498,7 @@ Provider 返回 `name`、`protocol`、`base_url`、`model`、`max_concurrency`�
 - 成功返回 `{"ok": true, "model": "...", "latency_ms": N}`。不保存数据、不刷新目录，不写 `llm_calls`，不产生计费记录。
 - 仅平台管理员且需 CSRF，否则 403。审计 `platform_audit`，动作 `test_draft`，只记录字段名、是否使用已保存凭据（`stored_credential`）和目标 host（不含路径与查询）。
 
-写操作（创建、整记录修改、参数合并、删除）成功后调用运行时刷新，响应体为 `{"id": "…", "effective": "new_workflows"}`；审计日志使用 `event=platform_audit`，只记录操作者、目标、动作和字段名。参数合并审计的动作是 `update_params`，字段名形如 `params.temperature`，不记录参数值或密钥。
+写操作（创建、整记录修改、参数合并、应用预设、删除）成功后调用运行时刷新，响应体为 `{"id": "…", "effective": "new_workflows"}`；应用预设返回预设响应并带 `effective`。审计日志使用 `event=platform_audit`，只记录操作者、目标、动作和字段名。参数合并审计的动作是 `update_params`，应用预设的动作是 `apply_preset`（另记预设 ID），字段名形如 `params.temperature`，不记录参数值或密钥。
 
 授权角色只有 `read` 和 `manage`，普通用户默认没有 grant；平台管理员对全部已登记项目隐式拥有 `manage`，不需要逐项目 grant，也不要求 `access_source=grant`。`manage` 持有者可以读取、写入、删除该项目，同一项目可有多个 `manage` 持有者，任一持有者都可删除；`read` 是只读共享，写操作和删除返回 403。控制台的「项目授权/分配」默认选择 `manage`。`global_read` 对普通用户授予全部项目的只读访问（含之后新登记的项目），但不授予 `manage`；平台管理员不再依赖 `global_read`。`admin projects` 只用于选择授权对象，不返回项目业务数据。停用用户不删除 `users` 行、grant 或 `global_read` 设置；停用期间全局读取失效，重新启用后恢复原设置，但已撤销的会话和 token 不会恢复。撤销凭据不禁用账号，用户仍可通过 OAuth 重新登录。只有平台管理员可以跨用户停用、撤销、管理 grant 或切换 `global_read`；普通用户只能管理自己的 API token。
 
