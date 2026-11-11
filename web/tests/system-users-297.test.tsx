@@ -36,6 +36,11 @@ async function openUser(user: ReturnType<typeof userEvent.setup>, name: string) 
   await user.click(within(row).getByRole('button', { name: '管理' }))
 }
 
+async function chooseOption(user: ReturnType<typeof userEvent.setup>, trigger: HTMLElement, name: string) {
+  await user.click(trigger)
+  await user.click(await screen.findByRole('option', { name }))
+}
+
 describe('user management drawer (#297)', () => {
   afterEach(() => vi.unstubAllGlobals())
 
@@ -68,9 +73,9 @@ describe('user management drawer (#297)', () => {
     mock(writes)
     const user = userEvent.setup()
     await openUser(user, 'bob')
-    expect(screen.getByLabelText('角色')).toHaveValue('manage')
+    expect(screen.getByLabelText('角色')).toHaveTextContent('manage')
     await user.type(screen.getByLabelText('项目 ID'), '42')
-    await user.selectOptions(screen.getByLabelText('角色'), 'manage')
+    await chooseOption(user, screen.getByLabelText('角色'), 'manage')
     await user.click(screen.getByRole('button', { name: '添加授权' }))
     await waitFor(() => expect(writes.some((write) => write.method === 'PUT' && write.url.includes('/admin/projects/42/grants/8'))).toBe(true))
     expect(writes.find((write) => write.method === 'PUT')?.body).toEqual({ role: 'manage' })

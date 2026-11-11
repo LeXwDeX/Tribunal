@@ -289,7 +289,8 @@ describe('finding annotation controls', () => {
     await screen.findByRole('button', { name: /展开：并发写 map 未加锁/ })
 
     await user.click(screen.getByRole('button', { name: '发布' }))
-    await user.selectOptions(screen.getByRole('combobox', { name: '按严重级别过滤' }), 'P1')
+    await user.click(screen.getByRole('combobox', { name: '按严重级别过滤' }))
+    await user.click(await screen.findByRole('option', { name: 'P1' }))
     await waitFor(() => expect(
       state.findingsUrls.some((url) => url.includes('decision=publish') && url.includes('severity=P1')),
     ).toBe(true))

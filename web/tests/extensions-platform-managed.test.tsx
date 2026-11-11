@@ -87,7 +87,8 @@ it.each([true, false])('keeps editing and toggling an existing custom MCP server
   const custom = (await screen.findByText('custom-mcp')).closest('tr') as HTMLElement
   await user.click(within(custom).getByRole('button', { name: '编辑' }))
   const dialog = screen.getByRole('dialog', { name: '编辑 MCP 服务器' })
-  await user.selectOptions(within(dialog).getByRole('combobox', { name: '启用' }), String(!enabled))
+  await user.click(within(dialog).getByRole('combobox', { name: '启用' }))
+  await user.click(await screen.findByRole('option', { name: enabled ? '停用' : '启用' }))
   await user.click(within(dialog).getByRole('button', { name: '保存' }))
   await waitFor(() => expect(writes).toEqual([{ url: '/api/v1/mcp-servers/custom', body: { name: 'custom-mcp', enabled: !enabled } }]))
 })

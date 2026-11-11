@@ -234,12 +234,19 @@
   margin-left: auto;
 }
 
-.headerFilters input[type="date"] {
-  width: 150px;
+.headerFilters .dateFilter,
+.headerFilters .filterSelect {
+  display: flex;
+  min-width: 0;
 }
 
-.headerFilters select {
-  width: 200px;
+.headerFilters .dateFilter { width: 150px; }
+.headerFilters .filterSelect { width: 200px; }
+
+.headerFilters .dateFilter > *,
+.headerFilters .filterSelect > * {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .filterStatus {
@@ -409,9 +416,10 @@
   .headerFilters > * {
     flex: 1 1 100%;
   }
-  .headerFilters input[type="date"],
-  .headerFilters select {
+  .headerFilters .dateFilter,
+  .headerFilters .filterSelect {
     width: auto;
+    flex: 1 1 auto;
   }
   .chart {
     height: 180px;

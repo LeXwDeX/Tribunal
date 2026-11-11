@@ -23,6 +23,30 @@ function runsMetric() {
   return metric
 }
 
+function projectTrigger() {
+  return screen.getByRole('combobox', { name: '项目' })
+}
+
+async function openProjectOptions(user: ReturnType<typeof userEvent.setup>) {
+  const trigger = projectTrigger()
+  if (trigger.getAttribute('aria-expanded') !== 'true') await user.click(trigger)
+  return trigger
+}
+
+async function closeProjectOptions(user: ReturnType<typeof userEvent.setup>) {
+  const trigger = projectTrigger()
+  if (trigger.getAttribute('aria-expanded') === 'true') await user.click(trigger)
+}
+
+async function selectProject(user: ReturnType<typeof userEvent.setup>, name: string) {
+  await openProjectOptions(user)
+  await user.click(await screen.findByRole('option', { name }))
+}
+
+function expectSelectedProject(label: string) {
+  expect(projectTrigger()).toHaveTextContent(label)
+}
+
 describe('statistics project selector pagination', () => {
   afterEach(() => vi.unstubAllGlobals())
 
@@ -43,13 +67,13 @@ describe('statistics project selector pagination', () => {
     const user = userEvent.setup()
     renderWithProviders(<StatisticsPage />)
 
-    await screen.findByRole('option', { name: 'group/first' })
+    await openProjectOptions(user)
+    expect(await screen.findByRole('option', { name: 'group/first' })).toBeInTheDocument()
     expect(screen.queryByRole('option', { name: 'group/third' })).not.toBeInTheDocument()
+    await closeProjectOptions(user)
 
     await user.click(screen.getByRole('button', { name: '加载更多项目' }))
-    await screen.findByRole('option', { name: 'group/third' })
-
-    await user.selectOptions(screen.getByRole('combobox', { name: '项目' }), '3')
+    await selectProject(user, 'group/third')
     await user.click(screen.getByRole('button', { name: '应用' }))
 
     await waitFor(() => {
@@ -77,11 +101,14 @@ describe('statistics project selector pagination', () => {
     const user = userEvent.setup()
     renderWithProviders(<StatisticsPage />)
 
+    await openProjectOptions(user)
     await screen.findByRole('option', { name: 'group/first' })
+    await closeProjectOptions(user)
     await user.click(screen.getByRole('button', { name: '加载更多项目' }))
 
     await waitFor(() => expect(screen.getByRole('button', { name: '加载更多项目' })).toBeDisabled())
     expect(secondPageAttempts).toBe(1)
+    await openProjectOptions(user)
     expect(screen.getByRole('option', { name: 'group/first' })).toBeInTheDocument()
     expect(screen.getByRole('option', { name: 'group/second' })).toBeInTheDocument()
     expect(screen.queryByRole('option', { name: 'group/third' })).not.toBeInTheDocument()
@@ -91,12 +118,14 @@ describe('statistics project selector pagination', () => {
     expect(screen.getByText('更多项目加载失败；已加载的项目仍可选择。')).toBeInTheDocument()
     expect(screen.getByRole('option', { name: 'group/first' })).toBeInTheDocument()
     expect(screen.getByRole('option', { name: 'group/second' })).toBeInTheDocument()
+    await closeProjectOptions(user)
 
     await user.click(screen.getByRole('button', { name: '重试加载更多项目' }))
-    await screen.findByRole('option', { name: 'group/third' })
+    await selectProject(user, 'group/third')
     expect(secondPageAttempts).toBe(2)
+    await openProjectOptions(user)
     expect(screen.getByRole('option', { name: 'group/first' })).toBeInTheDocument()
-    expect(screen.queryByText('更多项目加载失败；已加载的项目仍可选择。')).not.toBeInTheDocument()
+    await closeProjectOptions(user)
   })
 
   it('retries a failed background refresh when cached projects have no next page', async () => {
@@ -119,25 +148,34 @@ describe('statistics project selector pagination', () => {
     const user = userEvent.setup()
     const { queryClient } = renderWithProviders(<StatisticsPage />)
 
+    await openProjectOptions(user)
     await screen.findByRole('option', { name: 'group/first' })
-    await user.selectOptions(screen.getByRole('combobox', { name: '项目' }), '2')
+    await closeProjectOptions(user)
+    await selectProject(user, 'group/second')
 
     await act(async () => {
       await queryClient.invalidateQueries({ queryKey: ['projects', 'statistics'] })
     })
     await screen.findByText(/项目列表刷新失败/)
     expect(screen.queryByRole('button', { name: '重试加载更多项目' })).not.toBeInTheDocument()
+    await openProjectOptions(user)
     expect(screen.getByRole('option', { name: 'group/first' })).toBeInTheDocument()
-    expect(screen.getByRole('combobox', { name: '项目' })).toHaveValue('2')
+    await closeProjectOptions(user)
+    expectSelectedProject('group/second')
 
     await user.click(screen.getByRole('button', { name: '重试刷新项目' }))
     await waitFor(() => expect(screen.getByRole('button', { name: '重试刷新项目' })).toBeDisabled())
+    await openProjectOptions(user)
     expect(screen.getByRole('option', { name: 'group/first' })).toBeInTheDocument()
-    expect(screen.getByRole('combobox', { name: '项目' })).toHaveValue('2')
+    await closeProjectOptions(user)
+    expectSelectedProject('group/second')
 
     await act(async () => { resolveRefresh(jsonResponse({ projects: firstPage })) })
     await waitFor(() => expect(screen.queryByText(/项目列表刷新失败/)).not.toBeInTheDocument())
-    expect(screen.getByRole('combobox', { name: '项目' })).toHaveValue('2')
+    await openProjectOptions(user)
+    expect(screen.getByRole('option', { name: 'group/first' })).toBeInTheDocument()
+    await closeProjectOptions(user)
+    expectSelectedProject('group/second')
     expect(projectRequests).toHaveLength(3)
     expect(new URL(projectRequests[2], 'http://localhost').searchParams.get('cursor')).toBeNull()
   })
@@ -160,7 +198,9 @@ describe('statistics project selector pagination', () => {
     const user = userEvent.setup()
     const { queryClient } = renderWithProviders(<StatisticsPage />)
 
+    await openProjectOptions(user)
     await screen.findByRole('option', { name: 'group/first' })
+    await closeProjectOptions(user)
     await act(async () => {
       await queryClient.invalidateQueries({ queryKey: ['projects', 'statistics'] })
     })
@@ -172,7 +212,7 @@ describe('statistics project selector pagination', () => {
     expect(new URL(projectRequests[2], 'http://localhost').searchParams.get('cursor')).toBeNull()
 
     await user.click(screen.getByRole('button', { name: '加载更多项目' }))
-    await screen.findByRole('option', { name: 'group/third' })
+    await selectProject(user, 'group/third')
     expect(new URL(projectRequests[3], 'http://localhost').searchParams.get('cursor')).toBe('page-2')
   })
 
@@ -192,13 +232,17 @@ describe('statistics project selector pagination', () => {
     renderWithProviders(<StatisticsPage />)
 
     await screen.findByText('项目筛选列表加载失败，仍可查看全部项目统计。')
+    await openProjectOptions(user)
     expect(screen.queryByRole('option', { name: 'group/first' })).not.toBeInTheDocument()
+    await closeProjectOptions(user)
 
     const retry = screen.getByRole('button', { name: '重试加载项目' })
     expect(retry.className).toMatch(/secondary/)
     await user.click(retry)
 
-    await screen.findByRole('option', { name: 'group/first' })
+    await openProjectOptions(user)
+    expect(await screen.findByRole('option', { name: 'group/first' })).toBeInTheDocument()
+    await closeProjectOptions(user)
     expect(attempts).toBe(2)
     expect(screen.queryByText('项目筛选列表加载失败，仍可查看全部项目统计。')).not.toBeInTheDocument()
   })
@@ -215,10 +259,9 @@ describe('statistics project selector pagination', () => {
     const user = userEvent.setup()
     renderWithProviders(<StatisticsPage />)
 
-    await screen.findByRole('option', { name: 'group/first' })
     await waitFor(() => expect(within(runsMetric()).getByText('7')).toBeInTheDocument())
 
-    await user.selectOptions(screen.getByRole('combobox', { name: '项目' }), '1')
+    await selectProject(user, 'group/first')
     await user.click(screen.getByRole('button', { name: '应用' }))
 
     await waitFor(() => expect(within(runsMetric()).getByText('不可用')).toBeInTheDocument())

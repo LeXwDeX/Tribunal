@@ -5,7 +5,8 @@ import { createModel, deleteModel, getDefaultProfile, listModels, listProfiles, 
 import { ApiError, errorMessage } from '../api/client'
 import type { Model, ModelParams, ModelWrite, ProfileConfig, ProfileDetail, ProviderTestResult } from '../api/types'
 import {
-  Badge, Button, ConfirmDialog, Drawer, EmptyState, ErrorState, Field, LoadingState, PageHeader, Panel,
+  Badge, Button, ConfirmDialog, Disclosure, Drawer, EmptyState, ErrorState, Field, LoadingState, PageHeader, Panel,
+  Select,
 } from '../components/ui'
 import { ProfileEditor, ProfileNodeList, shortID } from '../features/models/ProfileNodes'
 import { formatDuration, formatJson, formatNumber } from '../lib/format'
@@ -54,6 +55,26 @@ export function summarizeParams(params: ModelParams | undefined): Array<[string,
 }
 
 type KeyMode = 'keep' | 'replace' | 'clear'
+
+const PROTOCOL_OPTIONS = [
+  { value: 'openai-chat', label: 'openai-chat' },
+  { value: 'openai-responses', label: 'openai-responses' },
+  { value: 'anthropic', label: 'anthropic' },
+]
+
+const EFFORT_OPTIONS = [
+  { value: '', label: '继承' },
+  { value: 'low', label: 'low' },
+  { value: 'medium', label: 'medium' },
+  { value: 'high', label: 'high' },
+  { value: 'max', label: 'max' },
+]
+
+const KEY_MODE_OPTIONS = [
+  { value: 'keep', label: '保持不变' },
+  { value: 'replace', label: '替换' },
+  { value: 'clear', label: '清除' },
+]
 
 function ModelCard({ model, canWrite, onEdit, onDelete }: {
   model: Model
@@ -248,11 +269,12 @@ function ModelDrawer({ open, model, onClose, onSaved }: {
     >
       <Field label="显示名" htmlFor={ids.display}><input id={ids.display} className={ui.input} value={displayName} onChange={(event) => setDisplayName(event.target.value)} /></Field>
       <Field label="协议" htmlFor={ids.protocol}>
-        <select id={ids.protocol} className={ui.select} value={protocol} onChange={(event) => setProtocol(event.target.value)}>
-          <option value="openai-chat">openai-chat</option>
-          <option value="openai-responses">openai-responses</option>
-          <option value="anthropic">anthropic</option>
-        </select>
+        <Select
+          id={ids.protocol}
+          value={protocol}
+          options={PROTOCOL_OPTIONS}
+          onChange={setProtocol}
+        />
       </Field>
       <Field label="base_url" htmlFor={ids.base}><input id={ids.base} className={ui.input} value={baseURL} onChange={(event) => setBaseURL(event.target.value)} /></Field>
       <Field label="上游模型" htmlFor={ids.model}><input id={ids.model} className={ui.input} value={upstreamModel} onChange={(event) => setUpstreamModel(event.target.value)} /></Field>
@@ -260,20 +282,22 @@ function ModelDrawer({ open, model, onClose, onSaved }: {
       <Field label="max_concurrency" htmlFor={ids.concurrency} hint="同时进行的请求数；0 或留空表示不限制本地并发。"><input id={ids.concurrency} className={ui.input} inputMode="numeric" value={maxConcurrency} onChange={(event) => setMaxConcurrency(event.target.value)} /></Field>
       <Field label="temperature" htmlFor={ids.temp}><input id={ids.temp} className={ui.input} inputMode="decimal" value={temperature} onChange={(event) => setTemperature(event.target.value)} /></Field>
       <Field label="reasoning effort" htmlFor={ids.effort} hint="anthropic 不会发送 effort。">
-        <select id={ids.effort} className={ui.select} value={effort} onChange={(event) => setEffort(event.target.value)}>
-          <option value="">继承</option>
-          <option value="low">low</option>
-          <option value="medium">medium</option>
-          <option value="high">high</option>
-          <option value="max">max</option>
-        </select>
+        <Select
+          id={ids.effort}
+          value={effort}
+          options={EFFORT_OPTIONS}
+          onChange={setEffort}
+          emptyLabel="继承"
+        />
       </Field>
       <Field label="API key" htmlFor={ids.key}>
-        <select id={`${ids.key}-mode`} className={ui.select} value={keyMode} onChange={(event) => setKeyMode(event.target.value as KeyMode)} aria-label="API key 状态">
-          <option value="keep">保持不变</option>
-          <option value="replace">替换</option>
-          <option value="clear">清除</option>
-        </select>
+        <Select
+          id={`${ids.key}-mode`}
+          value={keyMode}
+          options={KEY_MODE_OPTIONS}
+          onChange={(value) => setKeyMode(value as KeyMode)}
+          aria-label="API key 状态"
+        />
         {keyMode === 'replace' ? <input id={ids.key} className={ui.input} type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} /> : null}
       </Field>
       {model?.read_only ? <p className="small muted">由配置文件提供，修改需改配置并重启。</p> : null}
@@ -347,7 +371,7 @@ function ProfilePanel({ detail, models, canWrite, onEdit }: {
   return (
     <Panel
       title={<><span className={styles.profileTitle}>{detail.profile}</span> <small>可覆盖节点</small></>}
-      aside={canWrite ? <Button variant="secondary" className={ui.smallButton} onClick={onEdit}>编辑档位</Button> : budget ? <span className={styles.budget}>{budget}</span> : undefined}
+      aside={canWrite ? <Button variant="secondary" className={ui.smallButton} onClick={onEdit}>编辑档位</Button> : undefined}
     >
       <div className={styles.profileMeta}>
         <span>默认 provider：{text(config?.provider) ?? '未配置'}</span>
@@ -366,10 +390,9 @@ function ProfilePanel({ detail, models, canWrite, onEdit }: {
       ) : <span className="small muted">配置未提供拓扑步骤。</span>}
       {detail.nodes?.length ? <ProfileNodeList nodes={detail.nodes} models={models} /> : null}
       {budget ? <span className={styles.budget}>{budget}</span> : null}
-      <details className={ui.disclosure}>
-        <summary>查看完整档位配置</summary>
+      <Disclosure summary="查看完整档位配置">
         <pre className={`pre ${ui.jsonBlock}`}>{formatJson(config)}</pre>
-      </details>
+      </Disclosure>
     </Panel>
   )
 }
@@ -442,13 +465,13 @@ export function ModelsPage() {
         <section className={styles.section} aria-labelledby={profilesId}>
           <div className={styles.sectionHeader}>
             <h2 className={styles.sectionTitle} id={profilesId}>评审档位</h2>
-            <span className={styles.sectionAside}>基线来自平台配置；默认档位可按节点覆盖模型与参数</span>
           </div>
           {defaultProfile.isPending ? <LoadingState /> : null}
           {defaultProfile.isError ? <ErrorState error={defaultProfile.error} onRetry={defaultProfile.refetch} /> : null}
           {defaultProfile.isSuccess && defaultProfile.data
             ? <ProfilePanel detail={defaultProfile.data} models={models.data?.models ?? []} canWrite={canWrite} onEdit={() => setProfileEditing(true)} />
             : null}
+          <span className={styles.sectionAside}>基线来自平台配置；默认档位可按节点覆盖模型与参数</span>
           {onboarding ? <span className="small muted">项目接入（onboarding，不是评审档位）使用 provider：{onboardingProvider ?? '未配置'}</span> : null}
         </section>
       </div>

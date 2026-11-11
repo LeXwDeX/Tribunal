@@ -22,6 +22,11 @@ function routes(overrides: Record<string, unknown> = {}) {
   }
 }
 
+async function chooseOption(user: ReturnType<typeof userEvent.setup>, trigger: HTMLElement, name: string) {
+  await user.click(trigger)
+  await user.click(await screen.findByRole('option', { name }))
+}
+
 describe('models page management (#292)', () => {
   afterEach(() => vi.unstubAllGlobals())
 
@@ -60,7 +65,7 @@ describe('models page management (#292)', () => {
     let body = JSON.parse(String(fetchMock.mock.calls.find(([url]) => url === '/api/v1/models:test')?.[1]?.body))
     expect(body.api_key).toBeUndefined()
 
-    await user.selectOptions(screen.getByLabelText('API key 状态'), 'replace')
+    await chooseOption(user, screen.getByLabelText('API key 状态'), '替换')
     await user.type(screen.getByLabelText('API key', { selector: 'input' }), 'secret-canary')
     await user.click(screen.getByRole('button', { name: '保存前测试' }))
     await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => url === '/api/v1/models:test')).toHaveLength(2))
@@ -121,7 +126,7 @@ describe('models page management (#292)', () => {
     renderWithProviders(<ModelsPage />, { route: '/models' })
     await user.click(await screen.findByRole('button', { name: '编辑' }))
     expect(screen.getByLabelText('max_concurrency')).toHaveValue('3')
-    await user.selectOptions(screen.getByLabelText('reasoning effort'), 'high')
+    await chooseOption(user, screen.getByLabelText('reasoning effort'), 'high')
     await user.click(screen.getByRole('button', { name: '保存' }))
     await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'PATCH')).toBe(true))
     const patch = fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH')

@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { getNodeCalls, getReviewNode } from '../../api/api'
 import type { GraphNode, LlmCall } from '../../api/types'
 import {
-  Badge, Button, CopyButton, Drawer, EmptyState, ErrorState, LoadingState, StatusBadge,
+  Badge, Button, CopyButton, Disclosure, Drawer, EmptyState, ErrorState, LoadingState, StatusBadge,
 } from '../../components/ui'
 import { usePaginated } from '../../lib/hooks'
 import { formatCost, formatDuration, formatJson, formatNumber } from '../../lib/format'
@@ -56,15 +56,19 @@ function CallItem({ call }: { call: LlmCall }) {
   const response = formatJson(call.response)
   const wire = isPlainObject(call.request) ? call.request.wire : undefined
   return (
-    <details className={styles.call}>
-      <summary className={styles.callSummary}>
-        <b className="mono">#{call.turn ?? '?'}</b>
-        <span className="mono muted">{formatNumber(call.input_tokens)} → {formatNumber(call.output_tokens)}</span>
-        <span className="mono muted">{formatDuration(call.latency_ms)}</span>
-        {call.provider || call.model ? <span className="muted">{[call.provider, call.model].filter(Boolean).join(' · ')}</span> : null}
-        {call.error_kind ? <Badge tone="danger">错误: {call.error_kind}</Badge> : null}
-        {call.stop_reason ? <span className={styles.callStop}><Badge plain>{call.stop_reason}</Badge></span> : null}
-      </summary>
+    <Disclosure
+      className={styles.call}
+      summary={(
+        <>
+          <b className="mono">#{call.turn ?? '?'}</b>
+          <span className="mono muted">{formatNumber(call.input_tokens)} → {formatNumber(call.output_tokens)}</span>
+          <span className="mono muted">{formatDuration(call.latency_ms)}</span>
+          {call.provider || call.model ? <span className="muted">{[call.provider, call.model].filter(Boolean).join(' · ')}</span> : null}
+          {call.error_kind ? <Badge tone="danger">错误: {call.error_kind}</Badge> : null}
+          {call.stop_reason ? <span className={styles.callStop}><Badge plain>{call.stop_reason}</Badge></span> : null}
+        </>
+      )}
+    >
       <div className={styles.callBody}>
         {request || response ? (
           <>
@@ -87,7 +91,7 @@ function CallItem({ call }: { call: LlmCall }) {
           </>
         ) : <span className="muted small">没有保存请求或响应内容。</span>}
       </div>
-    </details>
+    </Disclosure>
   )
 }
 

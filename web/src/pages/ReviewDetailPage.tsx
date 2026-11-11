@@ -8,8 +8,8 @@ import type { Finding, FindingAnnotation, FindingsSummary, ReviewDetail } from '
 import { Icon } from '../components/Icons'
 import { TriggerReviewDialog } from '../components/TriggerReviewDialog'
 import {
-  Badge, Button, ButtonLink, ConfirmDialog, EmptyState, ErrorState, LoadingState, Panel, PanelBody, PublicationBadge,
-  RelativeTime, Segmented, SeverityBadge, StatusBadge, classNames, useToast,
+  ActionHint, Badge, Button, ButtonLink, ConfirmDialog, EmptyState, ErrorState, LoadingState, Panel, PanelBody, PublicationBadge,
+  RelativeTime, Segmented, Select, SeverityBadge, StatusBadge, classNames, useToast,
 } from '../components/ui'
 import { ExecutionGraph } from '../features/review/ExecutionGraph'
 import { NodeDrawer } from '../features/review/NodeDrawer'
@@ -24,7 +24,13 @@ import ui from '../styles/ui.module.css'
 import rv from '../features/review/review.module.css'
 import type { GraphNode } from '../api/types'
 
-const severityOptions = [['', '全部级别'], ['P0', 'P0'], ['P1', 'P1'], ['P2', 'P2'], ['info', 'info']]
+const severityOptions = [
+  { value: '', label: '全部级别' },
+  { value: 'P0', label: 'P0' },
+  { value: 'P1', label: 'P1' },
+  { value: 'P2', label: 'P2' },
+  { value: 'info', label: 'info' },
+]
 const annotationOptions: Array<{ value: FindingAnnotation; label: string }> = [
   { value: 'valid', label: '有效' },
   { value: 'invalid', label: '无效' },
@@ -124,9 +130,6 @@ function FindingAnnotationEditor({
   return (
     <section aria-label="人工标注" className={rv.annotationPanel}>
       <h4>人工标注</h4>
-      <p className={rv.annotationIntro}>
-        人工标注是评审人员对问题是否有效的评估，不会改变发布结果或评审结论。
-      </p>
       <div className={rv.annotationSaved} role="status" aria-label="已保存的人工标注">
         <span>已保存：</span>
         <Badge tone={annotationTone(saved.annotation)}>{annotationLabels[saved.annotation]}</Badge>
@@ -151,13 +154,16 @@ function FindingAnnotationEditor({
               </button>
             ))}
           </div>
-          {draft !== saved.annotation ? <span className="small muted">有未保存的更改。</span> : null}
           <Button variant="primary" className={ui.smallButton} onClick={() => { void save() }} loading={pending}>
             保存标注
           </Button>
+          {draft !== saved.annotation ? <ActionHint>有未保存的更改。</ActionHint> : null}
           {error ? <ErrorState error={error} onRetry={() => { void save() }} title="标注保存失败" /> : null}
         </>
       ) : null}
+      <p className={rv.annotationIntro}>
+        人工标注是评审人员对问题是否有效的评估，不会改变发布结果或评审结论。
+      </p>
     </section>
   )
 }
@@ -666,7 +672,7 @@ export function ReviewDetailPage() {
 
         <Panel
           title={<>执行图 {graph.isSuccess ? <small>{graph.data.nodes.length} 个节点</small> : null}</>}
-          aside={<span className={ui.hint}>点击节点查看输出与模型调用</span>}
+          note="点击节点查看输出与模型调用"
           flush
         >
           {graph.isPending ? <PanelBody><LoadingState label="正在读取执行图…" /></PanelBody> : null}
@@ -699,9 +705,15 @@ export function ReviewDetailPage() {
                     value={decision}
                     onChange={setDecision}
                   />
-                  <select className="select" name="severity" value={severity} onChange={(event) => setSeverity(event.target.value)} aria-label="按严重级别过滤">
-                    {severityOptions.map(([value, label]) => <option key={value || 'all'} value={value}>{label}</option>)}
-                  </select>
+                  <span className={rv.severityFilter}>
+                    <Select
+                      value={severity}
+                      options={severityOptions}
+                      onChange={setSeverity}
+                      aria-label="按严重级别过滤"
+                      emptyLabel="全部级别"
+                    />
+                  </span>
                 </div>
               )}
               flush

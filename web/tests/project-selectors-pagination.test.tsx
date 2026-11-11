@@ -14,35 +14,24 @@ const laterProjects = [
   project({ id: 102, path_with_namespace: 'group/read-later', access: 'read' }),
 ]
 
-// The extensions page still renders a native select; ReviewsPage uses the
-// Select combobox whose options live in a portal only while it is open.
-function isNativeSelect(selector: HTMLElement) {
-  return selector.tagName === 'SELECT'
-}
-
+// Both pages use the Select combobox; options live in a portal only while it
+// is open.
 async function openProjectOptions(user: ReturnType<typeof userEvent.setup>, selector: HTMLElement) {
-  if (isNativeSelect(selector)) return
   if (selector.getAttribute('aria-expanded') !== 'true') await user.click(selector)
 }
 
 async function closeProjectOptions(user: ReturnType<typeof userEvent.setup>, selector: HTMLElement) {
-  if (isNativeSelect(selector)) return
   if (selector.getAttribute('aria-expanded') === 'true') await user.click(selector)
 }
 
 async function selectProject(user: ReturnType<typeof userEvent.setup>, selector: HTMLElement, name: string) {
   await openProjectOptions(user, selector)
   const option = await screen.findByRole('option', { name })
-  if (isNativeSelect(selector)) {
-    await user.selectOptions(selector, option)
-    return
-  }
   await user.click(option)
 }
 
-function expectSelectedProject(selector: HTMLElement, value: string, label: string) {
-  if (isNativeSelect(selector)) expect(selector).toHaveValue(value)
-  else expect(selector).toHaveTextContent(label)
+function expectSelectedProject(selector: HTMLElement, _value: string, label: string) {
+  expect(selector).toHaveTextContent(label)
 }
 
 function otherRoutes(url: string) {

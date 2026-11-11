@@ -39,7 +39,7 @@ function StatusOnlyRow({ review, projectNames }: { review: StatusOnlyReview; pro
     <tr>
       <td>
         <div className={styles.primary}>
-          <span className={styles.titleText} title={reason}>!{review.mr_iid}</span>
+          <span className={styles.titleText}>!{review.mr_iid}</span>
           <span className={styles.meta}>
             <span className={styles.project}>{projectLabel(review, projectNames)}</span>
             {review.head_sha ? <span className={styles.mrRef}>{review.head_sha.slice(0, 8)}</span> : null}
@@ -112,7 +112,7 @@ export function ReviewTable({ reviews, projectNames }: { reviews: ReviewListItem
                   <div className={styles.publicationCell}>
                     <PublicationBadge state={review.publication_state} />
                     {review.publication_error ? (
-                      <span className={styles.publicationError} title={review.publication_error}>
+                      <span className={styles.publicationError}>
                         {review.publication_error}
                       </span>
                     ) : null}

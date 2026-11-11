@@ -94,7 +94,9 @@ describe('statistics date filters', () => {
     fireEvent.change(screen.getByLabelText('结束日期'), { target: { value: '9999-99-99' } })
     await user.click(screen.getByRole('button', { name: '应用' }))
 
-    expect(screen.getByRole('alert')).toBeInTheDocument()
+    const alerts = screen.getAllByRole('alert')
+    expect(alerts).toHaveLength(2)
+    expect(alerts.every((alert) => alert.textContent === '请输入 YYYY-MM-DD 格式的有效日期。')).toBe(true)
     expect(calls).toHaveLength(1)
     expect(screen.getByText('运行次数')).toBeInTheDocument()
   })

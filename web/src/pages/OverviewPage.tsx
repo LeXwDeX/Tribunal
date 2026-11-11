@@ -204,7 +204,7 @@ function MetricStrip({ stats, loading, error, onRetry }: { stats?: Stats; loadin
       <Metric
         label="成本"
         value={cost === null ? '不可用' : formatCost(cost)}
-        note={<TrendNote points={trendPoints(stats, 'cost_micros')} color="var(--warn-dot)"><span title="接口无法区分未配置价格和实际零成本">需在 provider 配置 price 才统计成本；无法区分未配置价格和实际零成本</span></TrendNote>}
+        note={<TrendNote points={trendPoints(stats, 'cost_micros')} color="var(--warn-dot)"><span>需在 provider 配置 price 才统计成本；无法区分未配置价格和实际零成本</span></TrendNote>}
       />
       <Metric label="耗时 平均 / P95" value={avg === null ? '不可用' : formatMs(avg)} note={`有有效起止时间的工作流 · P95 ${formatMs(p95)}`} />
     </section>

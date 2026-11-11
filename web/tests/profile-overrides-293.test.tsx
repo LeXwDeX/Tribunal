@@ -32,6 +32,13 @@ function mock(profile = detail) {
   })
 }
 
+const PROFILE_LABELS = ['默认', '探索', 'code-review', 'review', 'reasoner', 'validate', 'challenge']
+
+async function chooseOption(user: ReturnType<typeof userEvent.setup>, trigger: HTMLElement, name: RegExp | string) {
+  await user.click(trigger)
+  await user.click(await screen.findByRole('option', { name }))
+}
+
 describe('profile overrides UI (#293)', () => {
   afterEach(() => vi.unstubAllGlobals())
 
@@ -43,8 +50,13 @@ describe('profile overrides UI (#293)', () => {
     expect(screen.getByText('配置默认')).toBeInTheDocument()
     expect(screen.getByText('派生')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '编辑档位' }))
-    expect(screen.getAllByRole('option', { name: /bad/ }).length).toBeGreaterThan(0)
-    expect(screen.getAllByRole('option', { name: /bad/ }).every((option) => option.hasAttribute('disabled'))).toBe(true)
+    for (const label of PROFILE_LABELS) {
+      await user.click(screen.getByRole('combobox', { name: `${label} 模型` }))
+      const options = await screen.findAllByRole('option', { name: /bad.*不可用：credential/ })
+      expect(options).toHaveLength(1)
+      expect(options[0]).toHaveAttribute('aria-disabled', 'true')
+      await user.keyboard('{Escape}')
+    }
   })
 
   it('round-trips a stored thinking.type when saving another node', async () => {
@@ -56,8 +68,8 @@ describe('profile overrides UI (#293)', () => {
     const user = userEvent.setup()
     renderWithProviders(<ModelsPage />, { route: '/models' })
     await user.click(await screen.findByRole('button', { name: '编辑档位' }))
-    expect(screen.getByLabelText('探索 thinking.type')).toHaveValue('disabled')
-    await user.selectOptions(screen.getByLabelText('review 模型'), 'user:one')
+    expect(screen.getByLabelText('探索 thinking.type')).toHaveTextContent('disabled')
+    await chooseOption(user, screen.getByLabelText('review 模型'), /^one（user:one）/)
     await user.click(screen.getByRole('button', { name: '保存' }))
     await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/v1/profiles/default/overrides' && init?.method === 'PUT')).toBe(true))
     const call = fetchMock.mock.calls.find(([url, init]) => url === '/api/v1/profiles/default/overrides' && init?.method === 'PUT')
@@ -71,7 +83,7 @@ describe('profile overrides UI (#293)', () => {
     const user = userEvent.setup()
     renderWithProviders(<ModelsPage />, { route: '/models' })
     await user.click(await screen.findByRole('button', { name: '编辑档位' }))
-    await user.selectOptions(screen.getByLabelText('review 模型'), 'user:one')
+    await chooseOption(user, screen.getByLabelText('review 模型'), /^one（user:one）/)
     await user.click(screen.getByRole('button', { name: '保存' }))
     await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/v1/profiles/default/overrides' && init?.method === 'PUT')).toBe(true))
     const call = fetchMock.mock.calls.find(([url, init]) => url === '/api/v1/profiles/default/overrides' && init?.method === 'PUT')
