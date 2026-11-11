@@ -444,12 +444,16 @@ function viewportWidth() {
 
 // Popovers are portaled and fixed so they escape overflow containers. The
 // position is computed from the anchor rect, which is data-driven inline style.
+// minUsableHeight keeps a tall popover (a calendar) usable when the viewport is
+// too short for the space beside the anchor: it is pinned to the viewport
+// instead of shrinking to an unusable sliver.
 function usePopoverPosition(
   open: boolean,
   anchorRef: React.RefObject<HTMLElement | null>,
   matchAnchorWidth: boolean,
   width: number,
   estimatedHeight: number,
+  minUsableHeight = 0,
 ) {
   const [style, setStyle] = useState<CSSProperties>()
   useLayoutEffect(() => {
@@ -467,6 +471,14 @@ function usePopoverPosition(
       const openUp = spaceBelow < estimatedHeight + 16 && rect.top > spaceBelow
       // Never exceed the space actually available on the chosen side.
       const available = (openUp ? rect.top : spaceBelow) - 12
+      const maxViewportHeight = Math.max(0, vh - 16)
+      const floor = Math.min(minUsableHeight, maxViewportHeight)
+      if (minUsableHeight > 0 && available < floor) {
+        const maxHeight = Math.max(floor, Math.min(estimatedHeight, maxViewportHeight))
+        const top = Math.max(8, Math.min(rect.bottom + 4, vh - maxHeight - 8))
+        setStyle({ left, width: popupWidth, top, maxHeight })
+        return
+      }
       const maxHeight = Math.max(0, Math.min(estimatedHeight, available))
       setStyle(openUp
         ? { left, width: popupWidth, bottom: vh - rect.top + 4, maxHeight }
@@ -479,7 +491,7 @@ function usePopoverPosition(
       window.removeEventListener('resize', update)
       window.removeEventListener('scroll', update, true)
     }
-  }, [open, anchorRef, matchAnchorWidth, width, estimatedHeight])
+  }, [open, anchorRef, matchAnchorWidth, width, estimatedHeight, minUsableHeight])
   return style
 }
 
@@ -848,6 +860,19 @@ function sameLocalDay(left: Date, right: Date) {
 
 const WEEKDAYS = ['一', '二', '三', '四', '五', '六', '日']
 
+// Dialog and Drawer publish their container so popovers opened inside them
+// render in the aria-modal subtree instead of escaping to document.body.
+const ModalContainerContext = createContext<React.RefObject<HTMLElement | null> | null>(null)
+
+// The calendar keeps at least this height when the viewport is too short for
+// the space beside the anchor; overflow-y:auto keeps the grid reachable.
+const CALENDAR_MIN_HEIGHT = 180
+
+function isEnabledButtonTarget(target: EventTarget | null) {
+  const button = target instanceof Element ? target.closest('button') : null
+  return button instanceof HTMLButtonElement && !button.disabled
+}
+
 export interface DatePickerProps {
   id?: string
   className?: string
@@ -875,19 +900,24 @@ export const DatePicker = forwardRef<HTMLInputElement, DatePickerProps>(function
 }, ref) {
   const generatedId = useId()
   const errorId = `${generatedId}-date-error`
+  const modalContainerRef = useContext(ModalContainerContext)
   const fieldRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<HTMLInputElement | null>(null)
   const popoverRef = useRef<HTMLDivElement | null>(null)
   // Only move focus into the grid when the calendar itself asked for it.
   // Typing while open updates the roving tab stop without stealing focus.
   const shouldFocusDay = useRef(false)
+  // Clicks on non-focusable popover areas (title, weekday row, padding) move
+  // focus to <body>; remember whether the press started inside the field.
+  const pointerDownInside = useRef(false)
   const emitted = useRef(value)
   const [text, setText] = useState(value)
   const [error, setError] = useState<string | null>(null)
   const [open, setOpen] = useState(false)
   const [viewDate, setViewDate] = useState<Date>(() => parseLocalDate(value) ?? new Date())
   const [focusDate, setFocusDate] = useState<Date>(() => parseLocalDate(value) ?? new Date())
-  const popoverStyle = usePopoverPosition(open, inputRef, false, 292, 360)
+  const popoverStyle = usePopoverPosition(open, inputRef, false, 292, 360, CALENDAR_MIN_HEIGHT)
+  const portalTarget = modalContainerRef?.current ?? document.body
 
   const minDate = min ? parseLocalDate(min) : null
   const maxDate = max ? parseLocalDate(max) : null
@@ -947,11 +977,12 @@ export const DatePicker = forwardRef<HTMLInputElement, DatePickerProps>(function
     const onPointerDown = (event: MouseEvent) => {
       const target = event.target
       if (!(target instanceof Node)) return
-      if (fieldRef.current?.contains(target) || popoverRef.current?.contains(target)) return
-      setOpen(false)
+      const inside = Boolean(fieldRef.current?.contains(target) || popoverRef.current?.contains(target))
+      pointerDownInside.current = inside
+      if (!inside) setOpen(false)
     }
-    document.addEventListener('mousedown', onPointerDown)
-    return () => document.removeEventListener('mousedown', onPointerDown)
+    document.addEventListener('mousedown', onPointerDown, true)
+    return () => document.removeEventListener('mousedown', onPointerDown, true)
   }, [open])
 
   useEffect(() => {
@@ -971,7 +1002,13 @@ export const DatePicker = forwardRef<HTMLInputElement, DatePickerProps>(function
 
   useEffect(() => {
     if (!disabled) return
+    const focusWasInPopover = popoverRef.current?.contains(document.activeElement) ?? false
     setOpen(false)
+    if (!focusWasInPopover) return
+    // Unmounting the focused day would drop focus to <body>. A disabled input
+    // cannot take focus, so fall back to the field wrapper (tabIndex -1).
+    inputRef.current?.focus()
+    if (document.activeElement !== inputRef.current) fieldRef.current?.focus()
   }, [disabled])
 
   const openCalendar = () => {
@@ -987,6 +1024,10 @@ export const DatePicker = forwardRef<HTMLInputElement, DatePickerProps>(function
   const closeCalendar = (restoreFocus: boolean) => {
     setOpen(false)
     if (restoreFocus) inputRef.current?.focus()
+  }
+
+  const focusRovingDay = () => {
+    popoverRef.current?.querySelector<HTMLElement>('[data-date][tabindex="0"]')?.focus()
   }
 
   const selectDate = (date: Date) => {
@@ -1100,11 +1141,6 @@ export const DatePicker = forwardRef<HTMLInputElement, DatePickerProps>(function
         event.stopPropagation()
         closeCalendar(true)
         return
-      case 'Tab':
-        // Unmounting the focused day synchronously would drop focus to body.
-        event.preventDefault()
-        closeCalendar(true)
-        return
       default:
         return
     }
@@ -1120,12 +1156,21 @@ export const DatePicker = forwardRef<HTMLInputElement, DatePickerProps>(function
   const changeMonth = (delta: number) => {
     const first = new Date(viewDate.getFullYear(), viewDate.getMonth() + delta, 1)
     const target = clampToRange(first)
-    shouldFocusDay.current = true
+    // Keep focus on the month button so repeated navigation is possible; only
+    // keyboard day navigation moves the roving tab stop into the grid.
     setViewDate(new Date(target.getFullYear(), target.getMonth(), 1))
     setFocusDate(target)
   }
 
   const onPopoverKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'Tab') {
+      // Unmounting the focused control synchronously would drop focus to body.
+      // Closing here also keeps the modal trap from handing focus to the
+      // dialog's close button.
+      event.preventDefault()
+      closeCalendar(true)
+      return
+    }
     if (event.key !== 'Escape') return
     event.preventDefault()
     event.stopPropagation()
@@ -1134,8 +1179,16 @@ export const DatePicker = forwardRef<HTMLInputElement, DatePickerProps>(function
 
   const onFieldBlur = (event: React.FocusEvent<HTMLDivElement>) => {
     const related = event.relatedTarget as Node | null
+    const pressedInside = pointerDownInside.current
+    pointerDownInside.current = false
     if (related && (fieldRef.current?.contains(related) || popoverRef.current?.contains(related))) return
     if (disabled) return
+    // A press that started inside the field or popover is not leaving it, even
+    // when focus falls to <body> or to the focusable modal container.
+    if (open && pressedInside) {
+      commitText()
+      return
+    }
     setOpen(false)
     commitText()
   }
@@ -1152,7 +1205,7 @@ export const DatePicker = forwardRef<HTMLInputElement, DatePickerProps>(function
   const invalid = error ? true : ariaInvalid
 
   return (
-    <div ref={fieldRef} className={styles.dateField} onBlur={onFieldBlur}>
+    <div ref={fieldRef} className={styles.dateField} onBlur={onFieldBlur} tabIndex={-1}>
       <div className={styles.dateInputWrap}>
         <input
           ref={mergeRefs(ref, inputRef)}
@@ -1191,16 +1244,36 @@ export const DatePicker = forwardRef<HTMLInputElement, DatePickerProps>(function
           aria-label="选择日期"
           className={styles.calendar}
           style={popoverStyle}
+          onMouseDown={(event) => {
+            if (isEnabledButtonTarget(event.target)) return
+            // Non-interactive calendar areas must not take focus from the
+            // roving day; otherwise Escape would close the whole modal.
+            event.preventDefault()
+          }}
+          onClick={(event) => {
+            if (isEnabledButtonTarget(event.target)) return
+            event.preventDefault()
+            const active = document.activeElement
+            if (!(active instanceof Node) || !popoverRef.current?.contains(active)) focusRovingDay()
+          }}
           onKeyDown={onPopoverKeyDown}
         >
           <div className={styles.calendarHeader}>
-            <button type="button" className={styles.calendarNav} aria-label="上个月" onClick={() => changeMonth(-1)}>
+            <button type="button" className={styles.calendarNav} aria-label="上个月" onClick={(event) => {
+              // Safari does not focus buttons on click; keep repeated month
+              // navigation on this button instead of dropping focus to <body>.
+              event.currentTarget.focus()
+              changeMonth(-1)
+            }}>
               <Icon name="chevron" size={16} className={styles.calendarPrev} />
             </button>
             <span className={styles.calendarTitle} aria-live="polite">
               {`${viewDate.getFullYear()}年${viewDate.getMonth() + 1}月`}
             </span>
-            <button type="button" className={styles.calendarNav} aria-label="下个月" onClick={() => changeMonth(1)}>
+            <button type="button" className={styles.calendarNav} aria-label="下个月" onClick={(event) => {
+              event.currentTarget.focus()
+              changeMonth(1)
+            }}>
               <Icon name="chevron" size={16} />
             </button>
           </div>
@@ -1252,7 +1325,7 @@ export const DatePicker = forwardRef<HTMLInputElement, DatePickerProps>(function
             </button>
           </div>
         </div>,
-        document.body,
+        portalTarget,
       ) : null}
     </div>
   )
@@ -1529,32 +1602,34 @@ export function Dialog({ open, onClose, title, description, children, footer, wi
   useModalFocus(open, onClose, containerRef)
   if (!open) return null
   return createPortal(
-    <div
-      className={styles.modalOverlay}
-      onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}
-    >
+    <ModalContainerContext.Provider value={containerRef}>
       <div
-        ref={containerRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        aria-describedby={description ? descriptionId : undefined}
-        tabIndex={-1}
-        className={classNames(styles.modal, wide && styles.modalWide)}
+        className={styles.modalOverlay}
+        onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}
       >
-        <div className={styles.modalHeader}>
-          <div className={styles.stack}>
-            <h2 className={styles.modalTitle} id={titleId}>{title}</h2>
-            {description ? <p className={styles.modalDescription} id={descriptionId}>{description}</p> : null}
+        <div
+          ref={containerRef}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby={titleId}
+          aria-describedby={description ? descriptionId : undefined}
+          tabIndex={-1}
+          className={classNames(styles.modal, wide && styles.modalWide)}
+        >
+          <div className={styles.modalHeader}>
+            <div className={styles.stack}>
+              <h2 className={styles.modalTitle} id={titleId}>{title}</h2>
+              {description ? <p className={styles.modalDescription} id={descriptionId}>{description}</p> : null}
+            </div>
+            <button type="button" className={styles.iconButton} onClick={onClose} aria-label="关闭对话框">
+              <Icon name="close" />
+            </button>
           </div>
-          <button type="button" className={styles.iconButton} onClick={onClose} aria-label="关闭对话框">
-            <Icon name="close" />
-          </button>
+          {children != null ? <div className={styles.modalBody}>{children}</div> : null}
+          {footer ? <div className={styles.modalFooter}>{footer}</div> : null}
         </div>
-        {children != null ? <div className={styles.modalBody}>{children}</div> : null}
-        {footer ? <div className={styles.modalFooter}>{footer}</div> : null}
       </div>
-    </div>,
+    </ModalContainerContext.Provider>,
     document.body,
   )
 }
@@ -1566,29 +1641,31 @@ export function Drawer({ open, onClose, title, description, children, footer }: 
   useModalFocus(open, onClose, containerRef)
   if (!open) return null
   return createPortal(
-    <div className={styles.drawerOverlay} onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
-      <aside
-        ref={containerRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        aria-describedby={description ? descriptionId : undefined}
-        tabIndex={-1}
-        className={styles.drawer}
-      >
-        <div className={styles.drawerHeader}>
-          <div className={styles.stack}>
-            <h2 className={styles.modalTitle} id={titleId}>{title}</h2>
-            {description ? <p className={styles.modalDescription} id={descriptionId}>{description}</p> : null}
+    <ModalContainerContext.Provider value={containerRef}>
+      <div className={styles.drawerOverlay} onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
+        <aside
+          ref={containerRef}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby={titleId}
+          aria-describedby={description ? descriptionId : undefined}
+          tabIndex={-1}
+          className={styles.drawer}
+        >
+          <div className={styles.drawerHeader}>
+            <div className={styles.stack}>
+              <h2 className={styles.modalTitle} id={titleId}>{title}</h2>
+              {description ? <p className={styles.modalDescription} id={descriptionId}>{description}</p> : null}
+            </div>
+            <button type="button" className={styles.iconButton} onClick={onClose} aria-label="关闭抽屉">
+              <Icon name="close" />
+            </button>
           </div>
-          <button type="button" className={styles.iconButton} onClick={onClose} aria-label="关闭抽屉">
-            <Icon name="close" />
-          </button>
-        </div>
-        {children != null ? <div className={styles.drawerBody}>{children}</div> : null}
-        {footer ? <div className={styles.drawerFooter}>{footer}</div> : null}
-      </aside>
-    </div>,
+          {children != null ? <div className={styles.drawerBody}>{children}</div> : null}
+          {footer ? <div className={styles.drawerFooter}>{footer}</div> : null}
+        </aside>
+      </div>
+    </ModalContainerContext.Provider>,
     document.body,
   )
 }

@@ -177,7 +177,7 @@ web/
 | --- | --- |
 | `Select` | 单选 combobox；空值显示 `emptyLabel`，默认「继承」；空值语义为「全部」等其它含义时显式传入 `emptyLabel`。键盘、ARIA（`aria-activedescendant`）与点外关闭由原语负责。 |
 | `Checkbox` | 视觉隐藏原生 `input`，保留 label 点击、Space 与 `focus-visible`。组件自带 label，不要再包在 `Field` 里，避免重复关联 label；需要说明文字时用 `FieldHint` 并手动设置 `aria-describedby`。 |
-| `DatePicker` | 值格式 `YYYY-MM-DD`，按本地日历日处理；支持 `min`/`max`、手动输入、清空、Esc 与点外关闭。不得用 `new Date('YYYY-MM-DD')`（按 UTC 解析会使日期偏移）。模态（`Dialog`/`Drawer`）内暂不支持 DatePicker 弹层，与 `useModalFocus` 的焦点陷阱冲突，后续 Issue 支持。 |
+| `DatePicker` | 值格式 `YYYY-MM-DD`，按本地日历日处理；支持 `min`/`max`、手动输入、清空、Esc 与点外关闭。不得用 `new Date('YYYY-MM-DD')`（按 UTC 解析会使日期偏移）。模态（`Dialog`/`Drawer`）内弹层 portal 到最近的模态容器，其余场景仍 portal 到 `document.body`，无需页面传参。模态内日历处于 `aria-modal="true"` 子树中，焦点陷阱会包含日历控件：日历内按 Tab/Shift+Tab 会关闭日历并把焦点交回输入框，点击月份标题、星期行或弹层留白等不可聚焦区域不会关闭，只有焦点真正离开控件与弹层或点击真实外部区域才关闭；月份导航按钮保持焦点，disabled 关闭且焦点位于日历时，焦点不落到 `<body>`，极矮视口下弹层留在视口内、保留最小可用高度并内部滚动。限制：只识别本库的 `Dialog`/`Drawer`，自建模态容器收不到该能力，弹层回落到 `document.body`，可能与其焦点陷阱冲突；弹层为 `position: fixed`，模态容器或祖先使用 `transform`/`filter` 等会改变 fixed 包含块，导致定位偏移，因此应复用 UI-KIT 的 `Dialog`/`Drawer`。 |
 | `NumberField` / `SearchField` / `Textarea` | 保留原生可访问语义（`spinbutton`、`searchbox`、文本域），隐藏浏览器默认 spinner/清除叉；`Textarea` 传 `code` 使用代码变体。 |
 | `Tooltip` | hover 与 focus 显示、Esc 关闭，通过 `aria-describedby` 关联；不使用 DOM `title`。 |
 | `Disclosure` | 保留 `<details>` / `<summary>` 语义，隐藏原生 marker，使用自定义 chevron。 |
