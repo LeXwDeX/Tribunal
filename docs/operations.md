@@ -1075,7 +1075,7 @@ v1.2.0 新增迁移 `0020_review_command_replay`。`0020` 新建已受理身份�
 
 `0030_remove_cost.sql` 重建 `workflows` 和 `workflow_nodes` 去掉 `cost_micros`，保留原有索引、外键和约束；同时从 `llm_models.params_json` 剥离 legacy `price` 键，无效 JSON 保持原样。迁移执行器在迁移期间关闭外键检查，实际应用迁移后恢复并对全部表运行 `foreign_key_check`；违规时错误会指出表名。该迁移没有 down migration，不可逆。升级前按第 7 节停服做一致性备份，保存数据库及可能存在的 `-wal`/`-shm`、全部工作区、实际配置、加密主密钥和镜像 digest；回滚只能恢复升级前的数据库快照并启动匹配的旧镜像，不能只换镜像或让旧镜像直接使用已迁移的数据库。旧事件和旧节点 usage JSON 中的 `cost_micros` 仍可解码，但投影和新 API 不再暴露该字段。
 
-**在途工作流影响**：`profile_hash` 只包含档位实际引用的 `user:` 模型设置。升级前保存了 `price` 的 `user:` 模型现在不再把 `price` 纳入执行身份，因此引用带 legacy `price` 的 `user:` 模型的未终态工作流，在升级重启恢复时会以 `profile_hash_changed` 取消，需要重新触发；未保存 `price` 的 `user:` 模型和 config provider 不受影响。需要保留在途结果时，先让评审结束或接受取消后重跑。
+**在途工作流影响**：`profile_hash` 只包含档位实际引用的 `user:` 模型设置。升级前保存了 `price` 的 `user:` 模型现在不再把 `price` 纳入档位哈希（`profile_hash`），因此引用带 legacy `price` 的 `user:` 模型的未终态工作流，在升级重启恢复时会以 `profile_hash_changed` 取消，需要重新触发；未保存 `price` 的 `user:` 模型和 config provider 不受影响。需要保留在途结果时，先让评审结束或接受取消后重跑。
 
 legacy `providers.*.price` 在 v1.4.0 仍会解析，仅用于兼容旧 YAML 和保持 provider 执行身份 JSON 逐字节不变，不参与计算，也不进入 API、控制台或统计；配置含 `price` 时启动产生一条脱敏 WARN（只列 provider 名，不列数值）。该字段将在 v2.0 删除，届时含 `price` 的旧配置需要移除。从 YAML 中删除 `price` 会改变 provider 执行身份；执行身份包含全部配置 provider，因此重启恢复时未终态工作流会以 `execution_identity_changed` 取消，需要重新触发。
 
