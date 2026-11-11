@@ -16,7 +16,7 @@ describe('model draft test', () => {
           models: [{
             id: 'user:1', display_name: 'claude', source: 'user', read_only: false,
             protocol: 'anthropic', base_url: 'https://api.anthropic.com', model: 'test',
-            params: {}, has_api_key: true, available: true, revision: 1,
+            params: { max_tokens: 4096 }, has_api_key: true, available: true, revision: 1,
             referenced_by: [], vote_identity: 'api.anthropic.com/test',
           }],
         })

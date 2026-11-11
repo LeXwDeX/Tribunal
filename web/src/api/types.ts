@@ -455,6 +455,7 @@ export interface Provider {
   max_concurrency?: number
   rpm?: number
   max_tokens?: number
+  context_window?: number
   stats_24h?: ProviderStats24h
   calls_24h?: number
   errors_24h?: number
@@ -599,15 +600,33 @@ export interface FindingFilters {
 export interface ModelParams {
   max_tokens?: number
   context_window?: number
-  temperature?: number
-  reasoning?: { effort?: string }
-  thinking?: { budget_tokens?: number; type?: string }
+  temperature?: number | null
+  reasoning?: { effort?: string } | null
+  thinking?: { budget_tokens?: number; type?: string } | null
   forced_tool_choice?: string
   strict_role_alternation?: boolean
   max_concurrency?: number
   rpm?: number
-  price?: { input_per_mtok?: number; output_per_mtok?: number }
+  allow_reasoning_effort_none?: boolean
+  preserve_reasoning_content?: boolean
+  output_config_effort?: boolean
+  responses_params?: string
+  // Legacy cost field. The console no longer reads, edits or submits it (#407).
+  price?: { input_per_mtok?: number; output_per_mtok?: number } | null
   [key: string]: unknown
+}
+
+// ModelPreset is a verified definition shipped by the server. The console
+// fills the form from these values and never keeps its own copy (#405/#406).
+export interface ModelPreset {
+  id: string
+  display_name: string
+  protocol: string
+  base_url: string
+  model: string
+  params: ModelParams
+  source_url: string
+  verified_at: string
 }
 
 export interface Model {

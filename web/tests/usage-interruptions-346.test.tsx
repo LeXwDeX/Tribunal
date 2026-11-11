@@ -49,19 +49,23 @@ describe('usage interruptions on review detail (#346)', () => {
 describe('model card params summary (#346)', () => {
   afterEach(() => vi.unstubAllGlobals())
 
-  it('flattens set values and skips unset defaults', () => {
+  it('labels explicit zeros and false, skips unset defaults, and never shows price', () => {
     expect(summarizeParams({
       max_tokens: 64000, context_window: 0, temperature: 0, forced_tool_choice: '',
       strict_role_alternation: false, rpm: 0, max_concurrency: 4,
       reasoning: { effort: 'high' }, thinking: { budget_tokens: 2048 },
       price: { input_per_mtok: 3, output_per_mtok: 15 },
     })).toEqual([
-      ['max_tokens', '64000'], ['temperature', '0'], ['max_concurrency', '4'],
+      ['max_tokens', '64000'], ['context_window', '0（未知）'], ['temperature', '0'],
+      ['strict_role_alternation', 'false（关闭）'], ['max_concurrency', '4'],
       ['reasoning.effort', 'high'], ['thinking.budget_tokens', '2048'],
-      ['价格（每百万 token）', '输入 3 / 输出 15'],
     ])
     expect(summarizeParams({ temperature: null as unknown as undefined, reasoning: null as never, thinking: null as never, price: null as never })).toEqual([])
     expect(summarizeParams({ price: { input_per_mtok: 0, output_per_mtok: 0 } })).toEqual([])
+    expect(summarizeParams({ max_tokens: 0, context_window: 0, max_concurrency: 0, strict_role_alternation: false })).toEqual([
+      ['max_tokens', '0（模型默认，不发送）'], ['context_window', '0（未知）'],
+      ['max_concurrency', '0（不限制本地并发）'], ['strict_role_alternation', 'false（关闭）'],
+    ])
   })
 
   it('renders readable key/value pairs instead of raw JSON', async () => {
@@ -80,8 +84,8 @@ describe('model card params summary (#346)', () => {
     renderWithProviders(<ModelsPage />, { route: '/models' })
     const group = await screen.findByRole('group', { name: 'card 参数' })
     expect(group).toHaveTextContent('max_tokens 64000')
+    expect(group).toHaveTextContent('context_window 0（未知）')
     expect(group).toHaveTextContent('reasoning.effort high')
-    expect(group).not.toHaveTextContent('context_window')
     expect(group).not.toHaveTextContent('{')
   })
 
@@ -101,6 +105,6 @@ describe('model card params summary (#346)', () => {
     })
     renderWithProviders(<ModelsPage />, { route: '/models' })
     await user.click(await screen.findByRole('button', { name: '编辑' }))
-    expect(screen.getByLabelText('temperature')).toHaveValue('')
+    expect(screen.getByLabelText('temperature')).toHaveValue(null)
   })
 })

@@ -24,6 +24,28 @@ func TestModelProviderValidation(t *testing.T) {
 	}
 }
 
+func TestAnthropicThinkingBudgetMinimum(t *testing.T) {
+	cfg := ProviderConfig{
+		Protocol: "anthropic", Model: "m", MaxTokens: 4096,
+		Thinking: &ThinkingConfig{BudgetTokens: 1023},
+	}
+	err := ValidateProviderConfig("model", cfg, ProviderValidationOptions{})
+	if err == nil || !strings.Contains(err.Error(), "model.thinking.budget_tokens must be at least 1024 for anthropic") {
+		t.Fatalf("anthropic budget below minimum: %v", err)
+	}
+	cfg.Thinking.BudgetTokens = 1024
+	if err := ValidateProviderConfig("model", cfg, ProviderValidationOptions{}); err != nil {
+		t.Fatalf("anthropic minimum budget rejected: %v", err)
+	}
+	// The minimum is protocol-specific: OpenAI-compatible gateways accept a
+	// smaller thinking budget.
+	cfg.Protocol = "openai-chat"
+	cfg.Thinking.BudgetTokens = 1
+	if err := ValidateProviderConfig("model", cfg, ProviderValidationOptions{}); err != nil {
+		t.Fatalf("openai-chat budget rejected: %v", err)
+	}
+}
+
 func TestProviderNameRejectsColon(t *testing.T) {
 	provider := ProviderConfig{Protocol: "openai-chat", Model: "m", MaxConcurrency: 1, MaxTokens: 1}
 	cfg := &Config{Providers: map[string]ProviderConfig{"user:collision": provider}}

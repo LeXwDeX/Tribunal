@@ -26,6 +26,7 @@ type providerView struct {
 	MaxConcurrency    int               `json:"max_concurrency"`
 	RPM               int               `json:"rpm"`
 	MaxTokens         int               `json:"max_tokens,omitempty"`
+	ContextWindow     int               `json:"context_window,omitempty"`
 	Unavailable       bool              `json:"unavailable,omitempty"`
 	UnavailableReason string            `json:"unavailable_reason,omitempty"`
 	Stats24h          providerStatsView `json:"stats_24h"`
@@ -82,6 +83,7 @@ func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
 				MaxConcurrency: provider.MaxConcurrency,
 				RPM:            provider.RPM,
 				MaxTokens:      provider.MaxTokens,
+				ContextWindow:  provider.ContextWindow,
 				Stats24h:       aggregated[name],
 			}
 			if info, ok := infos[name]; ok {
@@ -339,6 +341,8 @@ type settingsProviderView struct {
 	APIKeyConfigured bool   `json:"api_key_configured"`
 	MaxConcurrency   int    `json:"max_concurrency"`
 	RPM              int    `json:"rpm"`
+	MaxTokens        int    `json:"max_tokens"`
+	ContextWindow    int    `json:"context_window"`
 }
 
 type settingsMCPView struct {
@@ -387,6 +391,8 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			APIKeyConfigured: provider.APIKeyEnv != "",
 			MaxConcurrency:   provider.MaxConcurrency,
 			RPM:              provider.RPM,
+			MaxTokens:        provider.MaxTokens,
+			ContextWindow:    provider.ContextWindow,
 		})
 	}
 	profiles := make([]string, 0, len(cfg.Profiles))

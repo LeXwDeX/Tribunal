@@ -263,6 +263,25 @@ func TestModelParamsUpdateRejectsZeroMaxTokensForAnthropic(t *testing.T) {
 	}
 }
 
+// Anthropic extended thinking rejects a budget below 1024 at request time, so
+// the stored-model validation must report it on the parameter field (#406).
+func TestModelParamsUpdateRejectsSmallAnthropicThinkingBudget(t *testing.T) {
+	stored := savedParamsModel()
+	stored.Protocol = "anthropic"
+	fake := &fakeModelStore{stored: stored}
+	server, _ := newParamsTestServer(t, fake)
+	response := patchModelParams(server, "user:saved", `{"revision":3,"params":{"thinking":{"budget_tokens":512}}}`)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body = %s, want 400", response.Code, response.Body.String())
+	}
+	if _, fields := errorDetails(t, response); fields["params.thinking.budget_tokens"] == "" {
+		t.Fatalf("details = %v, want params.thinking.budget_tokens", fields)
+	}
+	if fake.paramsCalls != 0 {
+		t.Fatal("invalid parameters reached the store")
+	}
+}
+
 func TestModelParamsUpdateRejectsConfiguredModels(t *testing.T) {
 	fake := &fakeModelStore{stored: savedParamsModel()}
 	server, _ := newParamsTestServer(t, fake)
