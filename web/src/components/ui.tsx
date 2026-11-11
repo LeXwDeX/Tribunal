@@ -465,7 +465,9 @@ function usePopoverPosition(
       const left = Math.min(Math.max(8, rect.left), Math.max(8, vw - popupWidth - 8))
       const spaceBelow = vh - rect.bottom
       const openUp = spaceBelow < estimatedHeight + 16 && rect.top > spaceBelow
-      const maxHeight = Math.max(120, Math.min(estimatedHeight, openUp ? rect.top - 12 : spaceBelow - 12))
+      // Never exceed the space actually available on the chosen side.
+      const available = (openUp ? rect.top : spaceBelow) - 12
+      const maxHeight = Math.max(0, Math.min(estimatedHeight, available))
       setStyle(openUp
         ? { left, width: popupWidth, bottom: vh - rect.top + 4, maxHeight }
         : { left, width: popupWidth, top: rect.bottom + 4, maxHeight })
@@ -758,6 +760,8 @@ export const Select = forwardRef<HTMLButtonElement, SelectProps>(function Select
         >
           {options.length === 0 ? (
             <div className={styles.selectEmpty} role="presentation">无可选项</div>
+          ) : enabledIndexes.length === 0 ? (
+            <div className={styles.selectEmpty} role="presentation">没有可用选项</div>
           ) : options.map((option, index) => {
             const selected = option.value === value
             return (
@@ -872,6 +876,9 @@ export const DatePicker = forwardRef<HTMLInputElement, DatePickerProps>(function
   const fieldRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<HTMLInputElement | null>(null)
   const popoverRef = useRef<HTMLDivElement | null>(null)
+  // Only move focus into the grid when the calendar itself asked for it.
+  // Typing while open updates the roving tab stop without stealing focus.
+  const shouldFocusDay = useRef(false)
   const emitted = useRef(value)
   const [text, setText] = useState(value)
   const [error, setError] = useState<string | null>(null)
@@ -896,6 +903,15 @@ export const DatePicker = forwardRef<HTMLInputElement, DatePickerProps>(function
     return date
   }
   const isDisabledDay = (date: Date) => Boolean(rangeError(date))
+  const firstAvailableDay = (date: Date): Date => {
+    const start = new Date(date.getFullYear(), date.getMonth(), 1)
+    for (let index = 0; index < 31; index += 1) {
+      const candidate = addLocalDays(start, index)
+      if (candidate.getMonth() !== start.getMonth()) break
+      if (!isDisabledDay(candidate)) return candidate
+    }
+    return start
+  }
 
   useEffect(() => {
     if (value === emitted.current) return
@@ -925,13 +941,27 @@ export const DatePicker = forwardRef<HTMLInputElement, DatePickerProps>(function
     if (!open) return
     const key = formatLocalDate(focusDate)
     const button = popoverRef.current?.querySelector<HTMLElement>(`[data-date="${key}"]`)
-    button?.focus()
-  }, [open, focusDate])
+    if (!button) {
+      // The roving tab stop must stay inside the rendered 42-day grid.
+      const fallback = firstAvailableDay(viewDate)
+      if (formatLocalDate(fallback) !== key) setFocusDate(fallback)
+      return
+    }
+    if (!shouldFocusDay.current) return
+    shouldFocusDay.current = false
+    button.focus()
+  }, [open, focusDate, viewDate])
+
+  useEffect(() => {
+    if (!disabled) return
+    setOpen(false)
+  }, [disabled])
 
   const openCalendar = () => {
     if (disabled) return
     const current = parseLocalDate(text.trim()) ?? parseLocalDate(value) ?? new Date()
     const target = clampToRange(current)
+    shouldFocusDay.current = true
     setViewDate(target)
     setFocusDate(target)
     setOpen(true)
@@ -943,7 +973,7 @@ export const DatePicker = forwardRef<HTMLInputElement, DatePickerProps>(function
   }
 
   const selectDate = (date: Date) => {
-    if (isDisabledDay(date)) return
+    if (disabled || isDisabledDay(date)) return
     const formatted = formatLocalDate(date)
     setText(formatted)
     setError(null)
@@ -1005,7 +1035,10 @@ export const DatePicker = forwardRef<HTMLInputElement, DatePickerProps>(function
     const formatted = formatLocalDate(parsed)
     emitted.current = formatted
     if (formatted !== value) onChange(formatted)
-    if (open) setViewDate(parsed)
+    if (open) {
+      setViewDate(parsed)
+      setFocusDate(parsed)
+    }
   }
 
   const onInputKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
@@ -1048,12 +1081,15 @@ export const DatePicker = forwardRef<HTMLInputElement, DatePickerProps>(function
         closeCalendar(true)
         return
       case 'Tab':
-        closeCalendar(false)
+        // Unmounting the focused day synchronously would drop focus to body.
+        event.preventDefault()
+        closeCalendar(true)
         return
       default:
         return
     }
     event.preventDefault()
+    shouldFocusDay.current = true
     const target = clampToRange(next)
     setFocusDate(target)
     if (target.getMonth() !== viewDate.getMonth() || target.getFullYear() !== viewDate.getFullYear()) {
@@ -1064,29 +1100,24 @@ export const DatePicker = forwardRef<HTMLInputElement, DatePickerProps>(function
   const changeMonth = (delta: number) => {
     const first = new Date(viewDate.getFullYear(), viewDate.getMonth() + delta, 1)
     const target = clampToRange(first)
+    shouldFocusDay.current = true
     setViewDate(new Date(target.getFullYear(), target.getMonth(), 1))
     setFocusDate(target)
   }
 
   const onPopoverKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    if (event.key === 'Escape') {
-      event.preventDefault()
-      event.stopPropagation()
-      closeCalendar(true)
-      return
-    }
-    if (event.key !== 'Tab') return
-    const focusables = Array.from(popoverRef.current?.querySelectorAll<HTMLElement>('button:not([disabled])') ?? [])
-    if (!focusables.length) return
-    const first = focusables[0]
-    const last = focusables[focusables.length - 1]
-    if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault()
-      last.focus()
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault()
-      first.focus()
-    }
+    if (event.key !== 'Escape') return
+    event.preventDefault()
+    event.stopPropagation()
+    closeCalendar(true)
+  }
+
+  const onFieldBlur = (event: React.FocusEvent<HTMLDivElement>) => {
+    const related = event.relatedTarget as Node | null
+    if (related && (fieldRef.current?.contains(related) || popoverRef.current?.contains(related))) return
+    if (disabled) return
+    setOpen(false)
+    commitText()
   }
 
   const monthStart = new Date(viewDate.getFullYear(), viewDate.getMonth(), 1)
@@ -1094,12 +1125,14 @@ export const DatePicker = forwardRef<HTMLInputElement, DatePickerProps>(function
   const days = Array.from({ length: 42 }, (_, index) => addLocalDays(gridStart, index))
   const selectedDate = parseLocalDate(text.trim()) ?? parseLocalDate(value)
   const selectedKey = selectedDate ? formatLocalDate(selectedDate) : ''
-  const todayKey = formatLocalDate(new Date())
+  const today = new Date()
+  const todayKey = formatLocalDate(today)
+  const todayDisabled = isDisabledDay(today)
   const describedBy = [ariaDescribedBy, error ? errorId : undefined].filter(Boolean).join(' ') || undefined
   const invalid = error ? true : ariaInvalid
 
   return (
-    <div ref={fieldRef} className={styles.dateField}>
+    <div ref={fieldRef} className={styles.dateField} onBlur={onFieldBlur}>
       <div className={styles.dateInputWrap}>
         <input
           ref={mergeRefs(ref, inputRef)}
@@ -1118,11 +1151,6 @@ export const DatePicker = forwardRef<HTMLInputElement, DatePickerProps>(function
           aria-invalid={invalid}
           onChange={onTextChange}
           onKeyDown={onInputKeyDown}
-          onBlur={(event) => {
-            const related = event.relatedTarget as Node | null
-            if (related && (fieldRef.current?.contains(related) || popoverRef.current?.contains(related))) return
-            if (!open) commitText()
-          }}
         />
         <button
           type="button"
@@ -1198,7 +1226,7 @@ export const DatePicker = forwardRef<HTMLInputElement, DatePickerProps>(function
             }}>
               清除
             </button>
-            <button type="button" className={styles.calendarAction} onClick={() => selectDate(clampToRange(new Date()))}>
+            <button type="button" className={styles.calendarAction} disabled={todayDisabled} onClick={() => selectDate(today)}>
               今天
             </button>
           </div>

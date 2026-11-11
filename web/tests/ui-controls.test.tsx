@@ -191,6 +191,26 @@ describe('Select', () => {
     await user.click(trigger)
     expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
   })
+
+  it('shows a readable state for empty and fully disabled option lists', async () => {
+    const user = userEvent.setup()
+    const { rerender } = render(<Select id="empty-options" value="" options={[]} onChange={() => {}} />)
+    const trigger = screen.getByRole('combobox')
+    await user.click(trigger)
+    expect(screen.getByText('无可选项')).toBeInTheDocument()
+    await user.keyboard('{Escape}')
+
+    rerender(
+      <Select
+        id="disabled-options"
+        value=""
+        options={[{ value: 'a', label: '模型 A', disabled: true }]}
+        onChange={() => {}}
+      />,
+    )
+    await user.click(trigger)
+    expect(screen.getByText('没有可用选项')).toBeInTheDocument()
+  })
 })
 
 function CheckboxHarness({ disabled }: { disabled?: boolean }) {
@@ -241,14 +261,31 @@ describe('Checkbox', () => {
   })
 })
 
-function DateHarness(props: Omit<DatePickerProps, 'value' | 'onChange'> & { initial?: string }) {
-  const { initial = '', ...rest } = props
+function DateHarness(
+  props: Omit<DatePickerProps, 'value' | 'onChange'> & { initial?: string; onChange?: (value: string) => void },
+) {
+  const { initial = '', onChange, ...rest } = props
   const [value, setValue] = useState(initial)
   return (
-    <Field label="开始日期" htmlFor="from" hint="使用本地日期。">
-      <DatePicker id="from" value={value} onChange={setValue} {...rest} />
-    </Field>
+    <>
+      <Field label="开始日期" htmlFor="from" hint="使用本地日期。">
+        <DatePicker
+          id="from"
+          value={value}
+          onChange={(next) => {
+            onChange?.(next)
+            setValue(next)
+          }}
+          {...rest}
+        />
+      </Field>
+      <output aria-label="已提交日期">{value}</output>
+    </>
   )
+}
+
+function committedDate() {
+  return screen.getByLabelText('已提交日期')
 }
 
 describe('DatePicker', () => {
@@ -260,28 +297,35 @@ describe('DatePicker', () => {
     expect(parseLocalDate('2026-1-1')).toBeNull()
   })
 
-  it('accepts a manually typed valid date', async () => {
+  it('accepts a manually typed valid date and commits it to the parent', async () => {
     const user = userEvent.setup()
-    render(<DateHarness />)
+    const onChange = vi.fn()
+    render(<DateHarness onChange={onChange} />)
     const input = screen.getByLabelText('开始日期')
     await user.type(input, '2026-11-01')
     expect(input).toHaveValue('2026-11-01')
+    expect(committedDate()).toHaveTextContent('2026-11-01')
+    expect(onChange).toHaveBeenLastCalledWith('2026-11-01')
     expect(input).not.toHaveAttribute('aria-invalid', 'true')
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
   it('reports an impossible date without emitting it', async () => {
     const user = userEvent.setup()
-    render(<DateHarness />)
+    const onChange = vi.fn()
+    render(<DateHarness onChange={onChange} />)
     const input = screen.getByLabelText('开始日期')
     await user.type(input, '2026-02-30')
     expect(screen.getByRole('alert')).toHaveTextContent('请输入 YYYY-MM-DD 格式的有效日期。')
     expect(input).toHaveAttribute('aria-invalid', 'true')
+    expect(onChange).not.toHaveBeenCalled()
+    expect(committedDate()).toBeEmptyDOMElement()
   })
 
   it('reports dates outside min and max', async () => {
     const user = userEvent.setup()
-    render(<DateHarness min="2026-10-01" max="2026-10-31" />)
+    const onChange = vi.fn()
+    render(<DateHarness min="2026-10-01" max="2026-10-31" onChange={onChange} />)
     const input = screen.getByLabelText('开始日期')
     await user.type(input, '2026-09-30')
     expect(screen.getByRole('alert')).toHaveTextContent('日期不能早于 2026-10-01。')
@@ -289,11 +333,14 @@ describe('DatePicker', () => {
     await user.clear(input)
     await user.type(input, '2026-11-02')
     expect(screen.getByRole('alert')).toHaveTextContent('日期不能晚于 2026-10-31。')
+    expect(onChange).not.toHaveBeenCalled()
+    expect(committedDate()).toBeEmptyDOMElement()
   })
 
   it('selects a day from the calendar and closes it', async () => {
     const user = userEvent.setup()
-    render(<DateHarness initial="2026-10-15" />)
+    const onChange = vi.fn()
+    render(<DateHarness initial="2026-10-15" onChange={onChange} />)
     const input = screen.getByLabelText('开始日期')
     await user.click(screen.getByRole('button', { name: '打开日历' }))
 
@@ -303,22 +350,32 @@ describe('DatePicker', () => {
 
     await user.click(screen.getByRole('button', { name: '2026年10月20日' }))
     expect(input).toHaveValue('2026-10-20')
+    expect(committedDate()).toHaveTextContent('2026-10-20')
+    expect(onChange).toHaveBeenLastCalledWith('2026-10-20')
     expect(screen.queryByRole('dialog', { name: '选择日期' })).not.toBeInTheDocument()
     expect(input).toHaveFocus()
   })
 
-  it('disables calendar days outside min and max', async () => {
+  it('disables calendar days outside min and max, keeping the boundaries enabled', async () => {
     const user = userEvent.setup()
     render(<DateHarness initial="2026-10-15" min="2026-10-10" max="2026-10-20" />)
     await user.click(screen.getByRole('button', { name: '打开日历' }))
     expect(screen.getByRole('button', { name: '2026年10月5日' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '2026年10月9日' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '2026年10月10日' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: '2026年10月20日' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: '2026年10月21日' })).toBeDisabled()
     expect(screen.getByRole('button', { name: '2026年10月25日' })).toBeDisabled()
     expect(screen.getByRole('button', { name: '2026年10月15日' })).toBeEnabled()
   })
 
-  it('navigates months and supports keyboard day selection across DST', async () => {
+  it('steps through local calendar days and months', async () => {
+    // Node fixes the process time zone at start-up. This asserts local
+    // calendar-day arithmetic (never UTC string parsing); run the suite with
+    // TZ=America/New_York to exercise a real DST transition.
     const user = userEvent.setup()
-    render(<DateHarness initial="2026-11-01" />)
+    const onChange = vi.fn()
+    render(<DateHarness initial="2026-11-01" onChange={onChange} />)
     const input = screen.getByLabelText('开始日期')
     input.focus()
     await user.keyboard('{ArrowDown}')
@@ -329,6 +386,8 @@ describe('DatePicker', () => {
     expect(screen.getByRole('button', { name: '2026年11月2日' })).toHaveFocus()
     await user.keyboard('{Enter}')
     expect(input).toHaveValue('2026-11-02')
+    expect(committedDate()).toHaveTextContent('2026-11-02')
+    expect(onChange).toHaveBeenLastCalledWith('2026-11-02')
     expect(input).toHaveFocus()
 
     await user.click(screen.getByRole('button', { name: '打开日历' }))
@@ -338,10 +397,122 @@ describe('DatePicker', () => {
     expect(screen.getByText('2026年11月')).toBeInTheDocument()
   })
 
-  it('closes with Escape or a click outside and supports clearing', async () => {
+  it('keeps one grid tab stop when typing another month while open', async () => {
     const user = userEvent.setup()
     render(<DateHarness initial="2026-10-15" />)
     const input = screen.getByLabelText('开始日期')
+    await user.click(screen.getByRole('button', { name: '打开日历' }))
+    expect(screen.getByRole('button', { name: '2026年10月15日' })).toHaveFocus()
+
+    input.focus()
+    await user.clear(input)
+    await user.type(input, '2026-12-20')
+    expect(input).toHaveFocus()
+    expect(committedDate()).toHaveTextContent('2026-12-20')
+    expect(screen.getByText('2026年12月')).toBeInTheDocument()
+
+    const dialog = screen.getByRole('dialog', { name: '选择日期' })
+    const stops = within(dialog).getAllByRole('button').filter((button) => button.getAttribute('tabindex') === '0')
+    expect(stops).toHaveLength(1)
+    expect(stops[0]).toHaveAccessibleName('2026年12月20日')
+  })
+
+  it('supports Home, End, PageUp and PageDown in the day grid', async () => {
+    const user = userEvent.setup()
+    render(<DateHarness initial="2026-10-15" />)
+    const input = screen.getByLabelText('开始日期')
+    input.focus()
+    await user.keyboard('{ArrowDown}')
+    expect(screen.getByRole('button', { name: '2026年10月15日' })).toHaveFocus()
+
+    await user.keyboard('{End}')
+    expect(screen.getByRole('button', { name: '2026年10月18日' })).toHaveFocus()
+    await user.keyboard('{Home}')
+    expect(screen.getByRole('button', { name: '2026年10月12日' })).toHaveFocus()
+
+    await user.keyboard('{PageDown}')
+    expect(screen.getByText('2026年11月')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '2026年11月12日' })).toHaveFocus()
+    await user.keyboard('{PageUp}')
+    expect(screen.getByText('2026年10月')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '2026年10月12日' })).toHaveFocus()
+  })
+
+  it('returns focus to the input when Tab or Shift+Tab leaves the focused day', async () => {
+    const user = userEvent.setup()
+    render(<DateHarness initial="2026-10-15" />)
+    const input = screen.getByLabelText('开始日期')
+
+    await user.click(screen.getByRole('button', { name: '打开日历' }))
+    expect(screen.getByRole('button', { name: '2026年10月15日' })).toHaveFocus()
+    await user.tab()
+    expect(screen.queryByRole('dialog', { name: '选择日期' })).not.toBeInTheDocument()
+    expect(input).toHaveFocus()
+
+    await user.click(screen.getByRole('button', { name: '打开日历' }))
+    expect(screen.getByRole('button', { name: '2026年10月15日' })).toHaveFocus()
+    await user.tab({ shift: true })
+    expect(screen.queryByRole('dialog', { name: '选择日期' })).not.toBeInTheDocument()
+    expect(input).toHaveFocus()
+  })
+
+  it('closes and validates when focus leaves the field while the calendar is open', async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    render(
+      <>
+        <DateHarness onChange={onChange} />
+        <button type="button">下一步</button>
+      </>,
+    )
+    const input = screen.getByLabelText('开始日期')
+    await user.type(input, '2026-10')
+    await user.click(screen.getByRole('button', { name: '打开日历' }))
+    expect(screen.getByRole('dialog', { name: '选择日期' })).toBeInTheDocument()
+
+    input.focus()
+    await user.tab()
+    expect(screen.getByRole('button', { name: '关闭日历' })).toHaveFocus()
+    expect(screen.getByRole('dialog', { name: '选择日期' })).toBeInTheDocument()
+
+    await user.tab()
+    expect(screen.getByRole('button', { name: '下一步' })).toHaveFocus()
+    expect(screen.queryByRole('dialog', { name: '选择日期' })).not.toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('请输入 YYYY-MM-DD 格式的有效日期。')
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it('closes the calendar and stops edits when disabled becomes true', async () => {
+    function DisabledHarness() {
+      const [disabled, setDisabled] = useState(false)
+      const [value, setValue] = useState('2026-10-15')
+      return (
+        <>
+          <Field label="开始日期" htmlFor="from">
+            <DatePicker id="from" value={value} onChange={setValue} disabled={disabled} />
+          </Field>
+          <button type="button" onClick={() => setDisabled(true)}>禁用日期</button>
+        </>
+      )
+    }
+    const user = userEvent.setup()
+    render(<DisabledHarness />)
+    await user.click(screen.getByRole('button', { name: '打开日历' }))
+    expect(screen.getByRole('dialog', { name: '选择日期' })).toBeInTheDocument()
+
+    // fireEvent.click does not emit mousedown, so only the disabled effect can
+    // close the portal here.
+    fireEvent.click(screen.getByRole('button', { name: '禁用日期' }))
+    expect(screen.queryByRole('dialog', { name: '选择日期' })).not.toBeInTheDocument()
+    expect(screen.getByLabelText('开始日期')).toBeDisabled()
+  })
+
+  it('closes with Escape or a click outside and supports clearing', async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    render(<DateHarness initial="2026-10-15" onChange={onChange} />)
+    const input = screen.getByLabelText('开始日期')
+    expect(committedDate()).toHaveTextContent('2026-10-15')
 
     await user.click(screen.getByRole('button', { name: '打开日历' }))
     await user.keyboard('{Escape}')
@@ -355,6 +526,8 @@ describe('DatePicker', () => {
     await user.click(screen.getByRole('button', { name: '打开日历' }))
     await user.click(screen.getByRole('button', { name: '清除' }))
     expect(input).toHaveValue('')
+    expect(committedDate()).toBeEmptyDOMElement()
+    expect(onChange).toHaveBeenLastCalledWith('')
     expect(screen.queryByRole('dialog', { name: '选择日期' })).not.toBeInTheDocument()
   })
 })
