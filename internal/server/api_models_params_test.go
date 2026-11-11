@@ -107,7 +107,10 @@ func TestModelParamsUpdateMergesOnlySubmittedKeys(t *testing.T) {
 			t.Errorf("audit log missing %s: %s", want, log)
 		}
 	}
-	for _, value := range []string{"1.25", "0.7"} {
+	// Match the parameter value in its JSON context. A bare "0.7" would also
+	// match the audit timestamp (for example "10:35:30.714"), making the test
+	// fail at random.
+	for _, value := range []string{`"temperature":1.25`, `"temperature":0.7`} {
 		if strings.Contains(log, value) {
 			t.Errorf("audit log leaked parameter value %s: %s", value, log)
 		}
