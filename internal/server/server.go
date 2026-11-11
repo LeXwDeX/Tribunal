@@ -101,9 +101,12 @@ type Config struct {
 	// watcher replaces it without touching Platform, which stays the runtime
 	// snapshot until the process restarts.
 	FileConfig *config.State
-	LockStats  func() LockStats
-	StreamPoll time.Duration
-	Now        func() time.Time
+	// OverlayWriter writes console changes to the --overlay file. When nil or
+	// unconfigured, the write route answers 409 overlay_not_configured.
+	OverlayWriter *config.OverlayWriter
+	LockStats     func() LockStats
+	StreamPoll    time.Duration
+	Now           func() time.Time
 }
 
 // Server routes all HTTP requests.
@@ -137,6 +140,7 @@ type Server struct {
 	access           AccessStore
 	platform         *config.Config
 	fileConfig       atomic.Pointer[config.State]
+	overlayWriter    *config.OverlayWriter
 	lockStats        func() LockStats
 	streamPoll       time.Duration
 	now              func() time.Time
@@ -209,6 +213,7 @@ func New(cfg Config) (*Server, error) {
 		tokens:           cfg.Tokens,
 		access:           cfg.Access,
 		platform:         cfg.Platform,
+		overlayWriter:    cfg.OverlayWriter,
 		lockStats:        cfg.LockStats,
 		streamPoll:       cfg.StreamPoll,
 		now:              cfg.Now,
@@ -300,6 +305,7 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("GET /api/v1/settings", s.apiAuth(s.guard(policyPlatformAdmin, s.handleSettings)))
 	mux.HandleFunc("GET /api/v1/config", s.apiAuth(s.guard(policyPlatformAdmin, s.handleConfig)))
 	mux.HandleFunc("GET /api/v1/config/status", s.apiAuth(s.guard(policyPlatformAdmin, s.handleConfigStatus)))
+	mux.HandleFunc("PATCH "+configOverlayEndpoint, s.apiAuth(s.configOverlayAdmin(s.handleConfigOverlayPatch)))
 	// API tokens (browser self-service; CSRF still applies).
 	mux.HandleFunc("GET /api/v1/api-tokens", s.apiAuth(s.guard(policyAuthenticated, s.handleListAPITokens)))
 	mux.HandleFunc("POST /api/v1/api-tokens", s.apiAuth(s.guard(policyAuthenticated, s.handleCreateAPIToken)))

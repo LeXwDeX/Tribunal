@@ -239,6 +239,13 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	warnEphemeralSessionKey(logger)
 	logOAuthStatus(logger, cfg.Auth.OAuth)
 	extensionsAPI := server.NewAppExtensions(extensions)
+	overlayWriter, err := config.NewOverlayWriter(config.OverlayWriterOptions{
+		BasePaths:   opts.configs,
+		OverlayPath: opts.overlay,
+	})
+	if err != nil {
+		return err
+	}
 	apiServer, err := server.New(server.Config{
 		AdminToken: adminToken,
 		Projects:   runtime.Projects(),
@@ -273,6 +280,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		Access:           db,
 		Platform:         cfg,
 		FileConfig:       &config.State{Snapshot: snapshot, UpdatedAt: time.Now()},
+		OverlayWriter:    overlayWriter,
 		LockStats: func() server.LockStats {
 			dbStats := db.DBStats()
 			wsStats := runtime.WorkspaceManager().LockStats()

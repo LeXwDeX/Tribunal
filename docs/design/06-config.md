@@ -174,7 +174,31 @@ review_defaults:                    # 项目设置的默认值（见 §3）
 - `last_error` 不含文件内容、绝对路径、源文件标量值或密钥/凭据类环境变量值：配置文件名只显示 basename；配置中的路径类值和源文件标量值（含 `%q`、单引号与反引号形式）被脱敏；环境变量值同样按引用形式脱敏。非敏感配置值仍可能以普通文本出现在错误信息中。
 - 运行期单例（server/listener、gitlab/auth/storage/workspace/jobs/engine、provider、档位等）继续使用启动时的配置快照，v1 不做运行期热替换。`applied` 表示显示快照与运行中配置一致，`restart_required` 为其反义；重启后新值生效。状态经 `GET /api/v1/config` 和 `GET /api/v1/config/status` 暴露，见 [HTTP API](03-http-api.md#45-系统)。
 - watcher 随 SIGTERM 停止并等待 goroutine 退出，不泄漏。
-- 本实现不写回任何配置文件，也不提供控制台编辑；overlay 只能由部署方在宿主机或数据卷中维护。被引用的外部文件（如 `mcp.config`、`prompts_dir`）的内容变化不在轮询范围内，仍需重启。
+- 控制台可通过 `PATCH /api/v1/config/overlay` 写回 overlay（见下）；基础 `--config` 文件仍不写回。前端编辑器、表单与冲突处理由 [#412](https://github.com/LeXwDeX/Tribunal/issues/412) 接入。被引用的外部文件（如 `mcp.config`、`prompts_dir`）的内容变化不在轮询范围内，仍需重启。
+
+#### 控制台写回 overlay
+
+控制台只写 `--overlay` 指向的 overlay 文件；`--config` 基础文件保持只读，服务不会改写它们。overlay 路径不得与任一 `--config` 指向同一文件，否则启动失败（`overlay_conflicts_with_base`）。未配置 overlay（`--overlay ""`）时写接口返回 `409 overlay_not_configured`。
+
+写入不把合并后的 `Config` 或 `config.Load` 结果序列化回文件，而是只替换 allowlist 指定路径对应的原始 `yaml.Node` 叶子，因此注释、锚点 / 别名、引号风格、键顺序和 overlay 中已有的未展开 `${ENV}` 占位符都保留；仅含注释或 `null` 根的 overlay 在首次写入时也会保留原注释块。新写入的字符串值（包括列表项和对象值）、map 键以及 provider 名称等所有路径段都不得包含 `${...}`：否则写入后 `GET /api/v1/config` 会按既有行为返回展开值（`expandEnv` 也会展开映射键），形成读取任意环境变量的 oracle；命中时返回 400 `invalid_change`，错误不回显该值。`delete` 请求不受此限制，便于清理历史占位符命名的键。只修改其他字段不会改动已有占位符。整文件 round-trip 仍可能规范化空行与行内空格。若目标节点带锚点、路径经过被别名引用的映射、替换容器叶子会使容器内的锚点被外部别名引用，或删除会让别名悬空，请求返回 `400 invalid_change`。
+
+允许写入的路径分为三组：
+
+- `providers.<name>`：`protocol`、`base_url`、`model`、`max_tokens`、`context_window`、`temperature`、`thinking.budget_tokens`、`thinking.type`、`reasoning.effort`、`max_concurrency`、`rpm`、`forced_tool_choice`、`strict_role_alternation`、`preserve_reasoning_content`、`allow_reasoning_effort_none`、`output_config_effort`、`responses_params`、`api_key_env`。`api_key_env` 只允许环境变量名，不写密钥值；允许删除整个 `providers.<name>`，以及删除 `thinking` / `reasoning` 子树。
+- `profiles.default`：`provider`、`explore.provider`、`lanes.code_review.provider`、`lanes.review.provider`、`lanes.reasoner.provider`、`lanes.validate.provider`、`plan.package_tokens`、`plan.max_packages`、`budget.max_nodes`、`budget.max_tokens`、`budget.deadline`。只允许能被 `NormalizeReviewProfile` 保留的字段；`plan.mode`、`plan.provider`、`reasoner.*`、`consensus`、`challenge.fallback`、`synthesize`、`agent`、`budget.max_extends`、`propose` 等派生或被忽略字段拒绝。
+- `review_defaults`：全部字段，即 `language`、`skip_draft`、`target_branches`、`labels_include`、`labels_exclude`、`ignore`、`max_files`、`max_diff_lines`、`commit_status`、`post_failure_note`、`show_model_attribution`、`allow_repo_config`、`allow_repo_skills`、`profile_by_label`、`custom_rules`。
+
+永久只读：`price`、`mcp.config`、`storage.dsn`、`secrets.master_key_env`、`auth.bootstrap_token_env`、`auth.oauth.*_env`、`workspace.root`、`workspace.git_bin`、`prompts_dir`、`skills.dirs`、`blocks`、`default_extensions`，以及 `server`、`gitlab`、`jobs`、`engine`、`llm` 等其余全部路径。对未知、敏感或被忽略的路径设置、对非叶子路径设置、类型错误、重复或父子路径冲突，以及空 `changes`，返回 `400 invalid_change`。
+
+写入前用候选 overlay 与全部基础文件做完整 Load + Validate；失败返回 `400 invalid_config`，原文件不变。`review_defaults` 还补充项目设置侧的校验：`max_files` / `max_diff_lines` 必须为正，`language` 非空，`target_branches` 是合法 glob，`custom_rules`、`ignore` 与 labels 不含空项，`profile_by_label` 只能指向 `default`。overlay 中的 `review_defaults.ignore` 是整体替换内置默认列表，不是追加；只有项目设置中的 `ignore` 才与平台默认值合并（追加）。响应 `review_defaults` 为 `{overlay, effective_ignore, ignore_origin, builtin_ignore}`：`overlay` 是 overlay 文件中的 `review_defaults` 子树原样值（含未展开的 `${ENV}` 占位符），`effective_ignore` 是合并后 `ignore` 列表的原始值（同样不展开），`ignore_origin` 为 `default` / `base` / `overlay`，`builtin_ignore` 是 6 条内置默认，便于控制台展示继承与替换关系；写响应不返回展开后的配置值，避免成为环境变量读取 oracle。
+
+`base_revision`（各 base 文件 SHA-256 按加载顺序再哈希）和 `overlay_revision`（overlay 文件内容 SHA-256，缺失时为空串）对应 `GET /api/v1/config` 的返回值；写前在锁内重读并校验两者，不一致返回 `409 stale_config`。同一进程内用互斥锁串行化，跨进程使用 `<overlay>.lock` sidecar 的 flock，锁内重新读取文件；锁文件必须是普通文件（符号链接返回 `409 config_symlink`），等待受请求 context 截止时间约束，超时返回 `409 config_busy`。加锁后 best-effort 清理上次中断留下的 `.<overlay>.tmp-*` / `.<overlay>.bak.tmp-*`。落盘使用同目录 `O_EXCL` 临时文件，写入后 fsync、rename 到目标并 fsync 目录；overlay 已存在时，替换前先把当前文件以 `600` 权限备份为 `<overlay>.bak`。失败时原文件字节不变，临时文件被清理。overlay 目录必须存在且对服务进程可写；只读目录、只读挂载、`EROFS` / `EBUSY` 或权限错误返回 `409 config_read_only`，overlay 路径是符号链接返回 `409 config_symlink`，超过 1 MiB 返回 `413 config_too_large`。新建文件权限为 `600`，已有文件沿用原权限。
+
+删除 provider 前会比较变更前后的有效 provider 集合：只有变更前存在、变更后不再存在的 provider 才检查引用。配置中的 `profiles` 仍引用该 provider，或数据库已存档位覆盖仍以 `config:<provider>` 引用它（迁移 0028 的 `review_profile_overrides`）时，返回 `409 provider_in_use`，`details` 列出引用路径；删除从未存在的 provider 是 no-op，不会触发该错误。服务不会自动清除数据库覆盖，需要先通过档位接口删除或改写覆盖。
+
+非 dry-run 的写操作记录平台审计：actor、动作、变更路径、base / previous overlay / overlay revision 和 `changed`；通过认证的写请求，其成功与失败（含参数 / 路径 / 候选校验失败、revision 冲突、存储错误、CSRF 失败和平台管理员校验失败）都记录 actor、路径和稳定错误码。审计不记录配置值或密钥。
+
+只有文件实际变化（`changed: true`）时 `restart_required` 才为 `true` 并返回 `notice`：watcher 约 2–4 秒后刷新显示快照，但运行期单例仍使用启动时配置，必须重启才生效；重启可能取消在途评审。no-op 写入返回 200、`changed: false`、`restart_required: false`，不提示已保存。`dry_run: true` 只做候选校验和引用检查，返回拟议的 `overlay_revision`，不写文件。本 Issue 不改前端，编辑器、表单与冲突处理见 [#412](https://github.com/LeXwDeX/Tribunal/issues/412)。
 
 ### Go 结构体（节选）
 

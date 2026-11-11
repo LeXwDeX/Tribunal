@@ -236,6 +236,9 @@ type principal struct {
 	csrf      string
 	sessionID string
 	bearer    bool
+	// bootstrapBearer marks the static bootstrap token from the environment.
+	// It is platform administration only and cannot write configuration.
+	bootstrapBearer bool
 }
 
 const principalKey contextKey = requestIDKey + 1
@@ -692,8 +695,9 @@ func (s *Server) authenticate(r *http.Request) (principal, bool) {
 	if strings.TrimSpace(r.Header.Get("Authorization")) != "" {
 		if s.authorized(r) {
 			return principal{
-				user:   sessionUser{Username: "api", Name: "API client", Role: roleAdmin},
-				bearer: true,
+				user:            sessionUser{Username: "api", Name: "API client", Role: roleAdmin},
+				bearer:          true,
+				bootstrapBearer: true,
 			}, true
 		}
 		raw := bearerValue(r)
@@ -767,6 +771,13 @@ func (s *Server) apiAuth(next http.HandlerFunc) http.HandlerFunc {
 		if !safeMethod(r.Method) && !value.bearer {
 			token := strings.TrimSpace(r.Header.Get(csrfHeaderName))
 			if token == "" || !constantTimeEqualStrings(value.csrf, token) {
+				if r.URL.Path == configOverlayEndpoint {
+					// The handler never runs for a CSRF failure; audit the
+					// rejected configuration write here.
+					s.logger.Info("configuration overlay write rejected", "event", "platform_audit",
+						"actor_id", value.user.ID, "action", "update", "paths", []string{},
+						"code", "forbidden", "dry_run", false)
+				}
 				writeError(w, r, http.StatusForbidden, "forbidden", "invalid CSRF token", nil)
 				return
 			}

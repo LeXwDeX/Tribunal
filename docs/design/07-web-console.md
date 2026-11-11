@@ -142,7 +142,7 @@ web/
 
 - 标签：API Token、平台配置（只读）、用户与账号、项目授权；平台配置、用户与账号、项目授权只对平台管理员显示。
 - 平台配置（只读）标签顶部新增「配置来源与待重启」面板。面板约每 5 秒轮询 `GET /api/v1/config/status` 与 `GET /api/v1/config`，显示 applied / 待重启徽标、base 与 overlay 的短 revision（overlay 缺失时显示「未挂载」）、`last_error`（`role="alert"`）和 `warnings`（`role="status"`）。
-- 面板以表格列出文件生效的标量配置项：路径、值、来源徽标（内置默认/基础配置/overlay）。数组和映射只通过其标量叶子显示；不提供编辑。
+- 面板以表格列出文件生效的标量配置项：路径、值、来源徽标（内置默认/基础配置/overlay）。数组和映射只通过其标量叶子显示；本页不提供编辑。后端在 [#411](https://github.com/LeXwDeX/Tribunal/issues/411) 后已提供 `PATCH /api/v1/config/overlay` 写 API，但系统页仍只读，不渲染写控件；编辑器、表单与冲突处理由 [#412](https://github.com/LeXwDeX/Tribunal/issues/412) 接入。
 - revision 变化时，前端让 settings、providers、profiles、models 和配置快照相关查询失效并重新拉取。
 - 面板说明文字：文件生效值按“内置默认 < `--config` < overlay”合并，不含数据库覆盖；运行中的服务仍使用启动快照，标记为“待重启”的字段需要重启后生效。
 

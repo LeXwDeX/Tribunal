@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+	"sort"
 	"strings"
 
 	"github.com/LeXwDeX/tribunal/internal/config"
@@ -270,6 +271,24 @@ func ResolveProfile(raw, normalized config.ProfileConfig, body string) ResolvedP
 // ApplyProfileOverrides returns the effective profile for a stored document.
 func ApplyProfileOverrides(raw, normalized config.ProfileConfig, body string) config.ProfileConfig {
 	return ResolveProfile(raw, normalized, body).Effective
+}
+
+// OverrideProviderReferences lists the stored override fields whose model
+// reference names one of providers. A configured provider is stored as the
+// catalog ID config:<name>. It reads the stored document, so a caller can list
+// referrers without deleting the overrides.
+func OverrideProviderReferences(body string, providers map[string]bool) []string {
+	doc := parseProfileOverrides(body)
+	var references []string
+	for _, slot := range profileSlots {
+		name := providerRef(doc.slot(slot.key).model())
+		if name == "" || !providers[name] {
+			continue
+		}
+		references = append(references, "overrides."+slot.path+".model refers to providers."+name)
+	}
+	sort.Strings(references)
+	return references
 }
 
 // providerRef maps a catalog ID to the provider name profiles use: configured

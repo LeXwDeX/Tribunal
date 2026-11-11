@@ -117,6 +117,23 @@ const providerDefaultsYAML = `
 max_concurrency: 4
 `
 
+// defaultReviewIgnorePatterns mirrors review_defaults.ignore in
+// defaultConfigYAML. The console shows it as the inherited list that an
+// overlay ignore value replaces.
+var defaultReviewIgnorePatterns = []string{
+	"**/*.lock",
+	"**/vendor/**",
+	"**/node_modules/**",
+	"**/*.pb.go",
+	"**/*_generated.*",
+	"**/*.min.js",
+}
+
+// DefaultReviewIgnorePatterns returns a copy of the built-in ignore list.
+func DefaultReviewIgnorePatterns() []string {
+	return append([]string(nil), defaultReviewIgnorePatterns...)
+}
+
 var (
 	envRefRE      = regexp.MustCompile(`\$\{([^}]*)\}`)
 	backtickValue = regexp.MustCompile("`[^`]*`")
@@ -134,6 +151,21 @@ func Load(paths ...string) (*Config, error) {
 }
 
 func parseYAML(data []byte, source string) (*yaml.Node, error) {
+	doc, err := parseYAMLDocument(data, source)
+	if err != nil || doc == nil {
+		return nil, err
+	}
+	root := doc.Content[0]
+	if root.Kind == yaml.ScalarNode && root.Tag == "!!null" {
+		return nil, nil
+	}
+	return root, nil
+}
+
+// parseYAMLDocument parses one YAML document and keeps the document node so
+// comments before and after the root mapping survive a Node round trip. A null
+// root is returned as-is so callers can preserve its comments.
+func parseYAMLDocument(data []byte, source string) (*yaml.Node, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	var doc yaml.Node
 	if err := dec.Decode(&doc); err != nil {
@@ -154,16 +186,13 @@ func parseYAML(data []byte, source string) (*yaml.Node, error) {
 		return nil, nil
 	}
 	root := doc.Content[0]
-	if root.Kind == yaml.ScalarNode && root.Tag == "!!null" {
-		return nil, nil
-	}
-	if root.Kind != yaml.MappingNode {
+	if root.Kind != yaml.MappingNode && !(root.Kind == yaml.ScalarNode && root.Tag == "!!null") {
 		return nil, fmt.Errorf("config %s: top-level value must be a mapping", source)
 	}
 	if err := checkDuplicateKeys(root); err != nil {
 		return nil, fmt.Errorf("config %s: %w", source, err)
 	}
-	return root, nil
+	return &doc, nil
 }
 
 func mergeNode(dst, src *yaml.Node) *yaml.Node {
