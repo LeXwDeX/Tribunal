@@ -15,7 +15,10 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/errclass"
 )
 
-const configOverlayRestartNotice = "Saved to the overlay file. Restart the service to apply it; restarting may cancel in-flight reviews."
+const (
+	configOverlayEndpoint      = "/api/v1/config/overlay"
+	configOverlayRestartNotice = "Saved to the overlay file. Restart the service to apply it; restarting may cancel in-flight reviews."
+)
 
 type configOverlayPatchRequest struct {
 	BaseRevision    string                     `json:"base_revision"`

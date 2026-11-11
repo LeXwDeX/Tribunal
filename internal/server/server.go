@@ -305,7 +305,7 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("GET /api/v1/settings", s.apiAuth(s.guard(policyPlatformAdmin, s.handleSettings)))
 	mux.HandleFunc("GET /api/v1/config", s.apiAuth(s.guard(policyPlatformAdmin, s.handleConfig)))
 	mux.HandleFunc("GET /api/v1/config/status", s.apiAuth(s.guard(policyPlatformAdmin, s.handleConfigStatus)))
-	mux.HandleFunc("PATCH /api/v1/config/overlay", s.apiAuth(s.configOverlayAdmin(s.handleConfigOverlayPatch)))
+	mux.HandleFunc("PATCH "+configOverlayEndpoint, s.apiAuth(s.configOverlayAdmin(s.handleConfigOverlayPatch)))
 	// API tokens (browser self-service; CSRF still applies).
 	mux.HandleFunc("GET /api/v1/api-tokens", s.apiAuth(s.guard(policyAuthenticated, s.handleListAPITokens)))
 	mux.HandleFunc("POST /api/v1/api-tokens", s.apiAuth(s.guard(policyAuthenticated, s.handleCreateAPIToken)))
