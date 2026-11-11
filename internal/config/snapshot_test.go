@@ -270,3 +270,13 @@ func TestEqualRuntimeIgnoresDisplayWarnings(t *testing.T) {
 		t.Fatal("a changed effective value must not be runtime-equal")
 	}
 }
+
+func TestLoadSnapshotOverlayEnvErrorNamesSource(t *testing.T) {
+	const name = "CFG_OVERLAY_DEFINITELY_UNSET"
+	unsetEnv(t, name)
+	base := writeConfig(t, "base.yaml", "server:\n  listen: \":9000\"\n")
+	overlay := writeConfig(t, "server.overlay.yaml", "server:\n  read_timeout: ${"+name+"}\n")
+
+	_, err := LoadSnapshot([]string{base}, overlay)
+	requireErrorContains(t, err, name, "server.overlay.yaml")
+}

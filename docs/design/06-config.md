@@ -172,7 +172,7 @@ review_defaults:                    # 项目设置的默认值（见 §3）
 **热刷新（v1，只刷新显示快照）**：服务启动后，后台每约 2 秒轮询全部 `--config` 文件与 overlay 的 size、mtime 和 SHA-256；连续两次观测一致才应用，避免半写文件。内容未变但 mtime 变化（如 `touch`）不会触发重载。
 
 - 变化后执行完整 Load + Validate。成功后原子替换内存中的显示快照（`atomic.Pointer`）；失败保留 last-good 快照并记录脱敏的 `last_error`，进程不退出，不关闭 listener、数据库或 worker。修复文件后，下一次稳定观测自动恢复，`last_error` 清空。
-- `last_error` 不含文件内容、绝对路径或环境变量值：配置文件名只显示 basename；配置中的路径类值（DSN、workspace root/`git_bin`、MCP 配置、prompts 目录、skills 目录）被脱敏；YAML 错误中的值显示为 `<redacted>`。
+- `last_error` 不含文件内容、绝对路径、源文件标量值或密钥/凭据类环境变量值：配置文件名只显示 basename；配置中的路径类值和源文件标量值（含 `%q`、单引号与反引号形式）被脱敏；环境变量值同样按引用形式脱敏。非敏感配置值仍可能以普通文本出现在错误信息中。
 - 运行期单例（server/listener、gitlab/auth/storage/workspace/jobs/engine、provider、档位等）继续使用启动时的配置快照，v1 不做运行期热替换。`applied` 表示显示快照与运行中配置一致，`restart_required` 为其反义；重启后新值生效。状态经 `GET /api/v1/config` 和 `GET /api/v1/config/status` 暴露，见 [HTTP API](03-http-api.md#45-系统)。
 - watcher 随 SIGTERM 停止并等待 goroutine 退出，不泄漏。
 - 本实现不写回任何配置文件，也不提供控制台编辑；overlay 只能由部署方在宿主机或数据卷中维护。被引用的外部文件（如 `mcp.config`、`prompts_dir`）的内容变化不在轮询范围内，仍需重启。

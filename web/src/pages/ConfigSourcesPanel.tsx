@@ -24,25 +24,38 @@ function shortRevision(revision: string): string {
 }
 
 // valueAt resolves a dotted origin path against the effective configuration
-// object. Provider origins use the provider name (providers.claude.model)
-// while the API returns providers as a name-carrying array, so array segments
-// that are not indexes match on the element's name field.
+// object. Provider origins use the provider name (providers.<name>.<field>)
+// while the API returns providers as a name-carrying array. Array segments are
+// matched against the longest element name first, which also covers provider
+// names that contain dots; numeric segments remain array indexes.
 function valueAt(root: unknown, path: string): unknown {
   const segments = path.replace(/\[(\d+)\]/g, '.$1').split('.').filter(Boolean)
   let current: unknown = root
-  for (const segment of segments) {
+  for (let index = 0; index < segments.length;) {
     if (current === null || typeof current !== 'object') return undefined
-    if (Array.isArray(current)) {
-      if (/^\d+$/.test(segment)) {
-        current = current[Number(segment)]
-      } else {
-        current = current.find((item) => (
-          item !== null && typeof item === 'object' && (item as { name?: unknown }).name === segment
-        ))
-      }
-    } else {
-      current = (current as Record<string, unknown>)[segment]
+    if (!Array.isArray(current)) {
+      current = (current as Record<string, unknown>)[segments[index]]
+      index += 1
+      continue
     }
+    const items = current
+    let matched = false
+    for (let end = segments.length; end > index; end -= 1) {
+      const name = segments.slice(index, end).join('.')
+      const item = items.find((candidate) => (
+        candidate !== null && typeof candidate === 'object' && (candidate as { name?: unknown }).name === name
+      ))
+      if (item !== undefined) {
+        current = item
+        index = end
+        matched = true
+        break
+      }
+    }
+    if (matched) continue
+    if (!/^\d+$/.test(segments[index])) return undefined
+    current = items[Number(segments[index])]
+    index += 1
   }
   return current
 }

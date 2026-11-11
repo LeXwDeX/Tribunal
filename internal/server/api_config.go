@@ -75,7 +75,6 @@ type configEffectiveProviderView struct {
 	Temperature              *float64                `json:"temperature,omitempty"`
 	Thinking                 *config.ThinkingConfig  `json:"thinking,omitempty"`
 	Reasoning                *config.ReasoningConfig `json:"reasoning,omitempty"`
-	Price                    *config.PriceConfig     `json:"price,omitempty"`
 	StrictRoleAlternation    bool                    `json:"strict_role_alternation,omitempty"`
 	AllowReasoningEffortNone bool                    `json:"allow_reasoning_effort_none,omitempty"`
 	PreserveReasoningContent bool                    `json:"preserve_reasoning_content,omitempty"`
@@ -208,7 +207,6 @@ func effectiveConfigView(cfg *config.Config) configEffectiveView {
 			Temperature:              provider.Temperature,
 			Thinking:                 provider.Thinking,
 			Reasoning:                provider.Reasoning,
-			Price:                    provider.Price,
 			StrictRoleAlternation:    provider.StrictRoleAlternation,
 			AllowReasoningEffortNone: provider.AllowReasoningEffortNone,
 			PreserveReasoningContent: provider.PreserveReasoningContent,
@@ -273,7 +271,13 @@ func internalConfigPath(path string) bool {
 	if strings.HasPrefix(path, "skills.dirs") || strings.HasPrefix(path, "default_extensions.") {
 		return true
 	}
-	return strings.HasPrefix(path, "providers.") && strings.HasSuffix(path, ".api_key_env")
+	if strings.HasPrefix(path, "providers.") && strings.HasSuffix(path, ".api_key_env") {
+		return true
+	}
+	// Price fields are being removed from the cost surface (#407); they must
+	// not appear in the configuration API, including as origin keys.
+	return strings.HasPrefix(path, "providers.") &&
+		(strings.HasSuffix(path, ".price") || strings.Contains(path, ".price."))
 }
 
 // stringSlice renders nil as a JSON array instead of null.

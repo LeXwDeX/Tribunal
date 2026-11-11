@@ -248,7 +248,7 @@ func TestCheckConfig(t *testing.T) {
 	t.Setenv("CRC_SESSION_KEY", "")
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
-	if err := run(context.Background(), []string{"--config", path, "--check-config"}, stdout, stderr); err != nil {
+	if err := run(context.Background(), []string{"--config", path, "--overlay", "", "--check-config"}, stdout, stderr); err != nil {
 		t.Fatalf("run: %v, stderr=%s", err, stderr)
 	}
 	if !strings.Contains(stdout.String(), "configuration OK") {
@@ -305,7 +305,7 @@ func TestCheckConfigRequiresSecrets(t *testing.T) {
 	}
 	t.Setenv("REVIEW_MASTER_KEY", "")
 	t.Setenv("REVIEW_ADMIN_TOKEN", "")
-	if err := run(context.Background(), []string{"--config", path, "--check-config"}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
+	if err := run(context.Background(), []string{"--config", path, "--overlay", "", "--check-config"}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
 		t.Fatal("check-config accepted missing secrets")
 	}
 }
@@ -690,7 +690,7 @@ func TestDeprecatedEnvironmentWarnings(t *testing.T) {
 	runCheck := func(t *testing.T) string {
 		t.Helper()
 		stderr := &bytes.Buffer{}
-		if err := run(context.Background(), []string{"--config", path, "--check-config"}, &bytes.Buffer{}, stderr); err != nil {
+		if err := run(context.Background(), []string{"--config", path, "--overlay", "", "--check-config"}, &bytes.Buffer{}, stderr); err != nil {
 			t.Fatalf("run: %v", err)
 		}
 		return stderr.String()

@@ -186,7 +186,7 @@ func TestInvalidSessionKeyDoesNotChangeExistingDatabase(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				args := []string{"--config", configPath}
+				args := []string{"--config", configPath, "--overlay", ""}
 				if check {
 					args = append(args, "--check-config")
 				}
@@ -279,7 +279,7 @@ func TestCheckConfigSessionKeyCompatibility(t *testing.T) {
 				}
 			}
 			var stdout, stderr bytes.Buffer
-			if err := run(context.Background(), []string{"--config", path, "--check-config"}, &stdout, &stderr); err != nil || stdout.String() != "configuration OK\n" {
+			if err := run(context.Background(), []string{"--config", path, "--overlay", "", "--check-config"}, &stdout, &stderr); err != nil || stdout.String() != "configuration OK\n" {
 				t.Fatalf("check-config: stdout=%q error=%v", stdout.String(), err)
 			}
 			if strings.Contains(stderr.String(), "generated an ephemeral session key") {

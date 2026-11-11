@@ -114,7 +114,7 @@ func LoadSnapshot(basePaths []string, overlayPath string) (*Snapshot, error) {
 			var envErrs []error
 			expandEnv(checkRoot, &envErrs)
 			if len(envErrs) > 0 {
-				return nil, errors.Join(envErrs...)
+				return nil, fmt.Errorf("config %s: %w", overlayPath, errors.Join(envErrs...))
 			}
 			if err := decodeStrict(checkRoot, &Config{}); err != nil {
 				return nil, fmt.Errorf("config %s: %w", overlayPath, err)

@@ -49,6 +49,9 @@ providers:
     model: claude-sonnet
     api_key_env: ANTHROPIC_API_KEY
     max_tokens: 16000
+    price:
+      input_per_mtok: 1
+      output_per_mtok: 2
 jobs:
   workers: 2
 `
@@ -95,6 +98,7 @@ func TestConfigViewShowsFileEffectiveValuesAndOrigins(t *testing.T) {
 		"GITLAB_CLIENT_ID", "GITLAB_CLIENT_SECRET", "hunter2",
 		"/srv/private", "/etc/tribunal", "file:", "api_key_env", "master_key_env",
 		"bootstrap_token_env", "client_secret_env", "prompts_dir",
+		`"price"`, "input_per_mtok", "output_per_mtok",
 	} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("config response leaked %q: %s", forbidden, text)
@@ -139,7 +143,8 @@ func TestConfigViewShowsFileEffectiveValuesAndOrigins(t *testing.T) {
 	}
 	for _, hidden := range []string{"storage.dsn", "workspace.root", "workspace.git_bin", "secrets.master_key_env",
 		"auth.bootstrap_token_env", "auth.oauth.client_id_env", "auth.oauth.client_secret_env",
-		"mcp.config", "skills.dirs", "skills.dirs[0]", "prompts_dir", "providers.claude.api_key_env"} {
+		"mcp.config", "skills.dirs", "skills.dirs[0]", "prompts_dir", "providers.claude.api_key_env",
+		"providers.claude.price", "providers.claude.price.input_per_mtok"} {
 		if _, ok := origins[hidden]; ok {
 			t.Errorf("origins exposed %s", hidden)
 		}

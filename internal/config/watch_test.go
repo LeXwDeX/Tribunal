@@ -263,3 +263,64 @@ func TestWatcherClearsErrorWhenLastGoodContentReturns(t *testing.T) {
 		t.Fatalf("last-good listen = %q, want :8080", got)
 	}
 }
+
+func TestWatcherClearsErrorWhenBadOverlayIsDeleted(t *testing.T) {
+	harness := newWatcherHarness(t, watcherBase+"server:\n  listen: \":8080\"\n", "")
+	harness.watcher.poll()
+
+	harness.rewrite(t, harness.overlay, "server:\n  read_timeout: nope\n")
+	harness.watcher.poll()
+	harness.watcher.poll()
+	failed := harness.requireState(t)
+	if failed.LastError == "" {
+		t.Fatal("invalid overlay did not produce a last_error")
+	}
+
+	if err := os.Remove(harness.overlay); err != nil {
+		t.Fatal(err)
+	}
+	harness.watcher.poll()
+	harness.watcher.poll()
+	recovered := harness.requireState(t)
+	if recovered.LastError != "" || !recovered.LastErrorAt.IsZero() {
+		t.Fatalf("deleting the bad overlay did not clear the error: %q/%v", recovered.LastError, recovered.LastErrorAt)
+	}
+	if recovered.Snapshot.OverlayPresent {
+		t.Fatal("deleted overlay is still reported as present")
+	}
+}
+
+func TestWatcherLastErrorHidesShortEnvironmentValues(t *testing.T) {
+	harness := newWatcherHarness(t, watcherBase+"server:\n  listen: \":8080\"\n", "")
+	harness.watcher.poll()
+
+	const secret = "mysql"
+	t.Setenv("CFG_SHORT_DRIVER", secret)
+	harness.rewrite(t, harness.base, watcherBase+"storage:\n  driver: ${CFG_SHORT_DRIVER}\n")
+	harness.watcher.poll()
+	harness.watcher.poll()
+	state := harness.requireState(t)
+	if !strings.Contains(state.LastError, "storage.driver") {
+		t.Fatalf("last error does not name the field: %q", state.LastError)
+	}
+	if strings.Contains(state.LastError, secret) {
+		t.Fatalf("last error leaked a short environment value: %q", state.LastError)
+	}
+}
+
+func TestWatcherLastErrorHidesFileScalarValues(t *testing.T) {
+	harness := newWatcherHarness(t, watcherBase+"server:\n  listen: \":8080\"\n", "")
+	harness.watcher.poll()
+
+	const secret = "hunter2-driver-value"
+	harness.rewrite(t, harness.overlay, "storage:\n  driver: "+secret+"\n")
+	harness.watcher.poll()
+	harness.watcher.poll()
+	state := harness.requireState(t)
+	if !strings.Contains(state.LastError, "storage.driver") {
+		t.Fatalf("last error does not name the field: %q", state.LastError)
+	}
+	if strings.Contains(state.LastError, secret) {
+		t.Fatalf("last error leaked a source value: %q", state.LastError)
+	}
+}

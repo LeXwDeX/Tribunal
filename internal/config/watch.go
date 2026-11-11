@@ -50,6 +50,9 @@ type Watcher struct {
 	appliedSet bool
 	pending    observation
 	stable     int
+	// failedKey is the observation that produced the current reload error.
+	// While it stays unchanged there is no point in repeating the full load.
+	failedKey string
 
 	published       bool
 	lastPublished   State
@@ -135,11 +138,17 @@ func (w *Watcher) poll() {
 		return
 	}
 
+	if w.failedKey != "" && observed.key == w.failedKey {
+		// The same bytes already failed validation; retry only after a change.
+		return
+	}
+
 	snapshot, err := LoadSnapshot(w.opts.BasePaths, w.opts.OverlayPath)
 	if err == nil {
 		err = snapshot.Config.Validate()
 	}
 	if err != nil {
+		w.failedKey = observed.key
 		w.fail(err, snapshot)
 		return
 	}
@@ -153,6 +162,7 @@ func (w *Watcher) poll() {
 
 	w.applied = observed
 	w.appliedSet = true
+	w.failedKey = ""
 	w.pending = observation{}
 	w.stable = 0
 	w.succeed(snapshot)
@@ -180,6 +190,7 @@ func (w *Watcher) clearError() {
 	}
 	w.state.LastError = ""
 	w.state.LastErrorAt = time.Time{}
+	w.failedKey = ""
 	w.lastLoggedError = ""
 	if w.opts.Logger != nil {
 		w.opts.Logger.Info("configuration files returned to the last-good contents; reload error cleared")
@@ -270,7 +281,7 @@ func observeFile(path string) (string, string, bool) {
 }
 
 // sanitizeReloadError keeps the last_error useful without leaking absolute
-// paths, configured path values, or environment values into the API or logs.
+// paths, configured values, or environment values into the API or logs.
 func sanitizeReloadError(err error, paths []string, snapshot *Snapshot) string {
 	message := err.Error()
 	for _, path := range paths {
@@ -283,18 +294,36 @@ func sanitizeReloadError(err error, paths []string, snapshot *Snapshot) string {
 	if snapshot != nil {
 		values = append(values, configInternalPaths(snapshot.Config)...)
 		values = append(values, sourceEnvValues(snapshot.Sources)...)
+		values = append(values, sourceScalarValues(snapshot.Sources)...)
 	}
-	sort.Slice(values, func(i, j int) bool { return len(values[i]) > len(values[j]) })
+	message = redactValues(message, values)
+	return redactYAMLValues(message)
+}
+
+// redactValues replaces the quoted forms of each value regardless of length,
+// because validation errors echo field values with %q. A bare occurrence is
+// replaced only for path-like or long values: replacing every short plain
+// value in a message would corrupt unrelated field names.
+func redactValues(message string, values []string) string {
+	seen := make(map[string]bool, len(values))
+	unique := make([]string, 0, len(values))
 	for _, value := range values {
-		// Only redact values that can look like a path or contain a
-		// credential; short plain values such as the default git binary
-		// would corrupt unrelated field names in the message.
-		if value == "" || (!strings.ContainsAny(value, `/\:`) && len(value) < 8) {
+		if value == "" || seen[value] {
 			continue
 		}
-		message = strings.ReplaceAll(message, value, "<redacted>")
+		seen[value] = true
+		unique = append(unique, value)
 	}
-	return redactYAMLValues(message)
+	sort.Slice(unique, func(i, j int) bool { return len(unique[i]) > len(unique[j]) })
+	for _, value := range unique {
+		message = strings.ReplaceAll(message, fmt.Sprintf("%q", value), `"<redacted>"`)
+		message = strings.ReplaceAll(message, "'"+value+"'", "'<redacted>'")
+		message = strings.ReplaceAll(message, "`"+value+"`", "`<redacted>`")
+		if strings.ContainsAny(value, `/\:`) || len(value) >= 8 {
+			message = strings.ReplaceAll(message, value, "<redacted>")
+		}
+	}
+	return message
 }
 
 // sourceEnvValues collects the values of environment variables referenced by
@@ -312,6 +341,44 @@ func sourceEnvValues(sources []Source) []string {
 		}
 	}
 	return values
+}
+
+// sourceScalarValues collects every scalar written in the file layers. Mapping
+// keys are skipped: a key is a field name, not a value that an error echoes.
+func sourceScalarValues(sources []Source) []string {
+	values := make(map[string]bool)
+	visited := make(map[*yaml.Node]bool)
+	for _, source := range sources {
+		collectScalarValues(source.Root, values, visited)
+	}
+	collected := make([]string, 0, len(values))
+	for value := range values {
+		collected = append(collected, value)
+	}
+	return collected
+}
+
+func collectScalarValues(node *yaml.Node, values map[string]bool, visited map[*yaml.Node]bool) {
+	if node == nil || visited[node] {
+		return
+	}
+	visited[node] = true
+	switch node.Kind {
+	case yaml.AliasNode:
+		collectScalarValues(node.Alias, values, visited)
+	case yaml.MappingNode:
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			collectScalarValues(node.Content[i+1], values, visited)
+		}
+	case yaml.SequenceNode:
+		for _, child := range node.Content {
+			collectScalarValues(child, values, visited)
+		}
+	case yaml.ScalarNode:
+		if node.Value != "" {
+			values[node.Value] = true
+		}
+	}
 }
 
 func collectEnvNames(node *yaml.Node, names map[string]bool) {
