@@ -12,6 +12,8 @@ import type {
   ContextDoc,
   ContextDocPage,
   ConfigFileResponse,
+  ConfigOverlayChange,
+  ConfigOverlayWriteResponse,
   ConfigStatus,
   CreatedApiToken,
   Finding,
@@ -416,6 +418,17 @@ export async function getConfig(): Promise<ConfigFileResponse> {
 
 export async function getConfigStatus(): Promise<ConfigStatus> {
   return request<ConfigStatus>('/api/v1/config/status')
+}
+
+// patchConfigOverlay writes allowlisted leaves to the console overlay. A
+// changed file still requires a restart; the response says whether one is
+// needed. It never accepts credentials or environment variable values.
+export async function patchConfigOverlay(input: {
+  base_revision: string
+  overlay_revision: string
+  changes: ConfigOverlayChange[]
+}): Promise<ConfigOverlayWriteResponse> {
+  return request<ConfigOverlayWriteResponse>('/api/v1/config/overlay', { method: 'PATCH', body: input })
 }
 
 export async function listApiTokens(cursor?: string): Promise<ApiTokenPage> {

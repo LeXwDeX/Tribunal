@@ -13,6 +13,19 @@ const userModel = {
 
 function routes(overrides: Record<string, unknown> = {}) {
   return (url: string, init?: RequestInit) => {
+    if (url === '/api/v1/config') {
+      return jsonResponse({
+        config: {
+          providers: [{
+            name: 'primary', protocol: 'openai-chat', base_url: 'https://example.com/v1',
+            model: 'm', api_key_configured: true, max_tokens: 100,
+          }],
+        },
+        origins: {},
+        warnings: [], base_revision: 'base-revision', overlay_revision: 'overlay-revision',
+        overlay_present: true, applied: true, restart_required: false, last_error: '', last_error_at: null,
+      })
+    }
     if (url === '/api/v1/models:test') return jsonResponse(overrides.test ?? { ok: true, model: 'm' })
     if (url.startsWith('/api/v1/models') && init?.method === 'PATCH') return jsonResponse(overrides.patch ?? userModel)
     if (url.startsWith('/api/v1/models') && init?.method === 'DELETE') return jsonResponse(overrides.delete ?? {})
@@ -30,7 +43,7 @@ async function chooseOption(user: ReturnType<typeof userEvent.setup>, trigger: H
 describe('models page management (#292)', () => {
   afterEach(() => vi.unstubAllGlobals())
 
-  it('keeps configured models read-only and shows unavailable reasons', async () => {
+  it('offers the overlay editor for configured models and shows unavailable reasons', async () => {
     installFetch(routes({
       models: [
         { ...userModel, id: 'config:primary', display_name: 'primary', source: 'config', read_only: true },
@@ -39,7 +52,10 @@ describe('models page management (#292)', () => {
     }))
     renderWithProviders(<ModelsPage />, { route: '/models' })
     expect(await screen.findByText('primary')).toBeInTheDocument()
+    // User models keep the database editor; configured models use the overlay
+    // editor, and the API still reports read_only for them.
     expect(screen.queryAllByRole('button', { name: '编辑' })).toHaveLength(1)
+    expect(screen.getByRole('button', { name: '编辑配置' })).toBeInTheDocument()
     expect(screen.getByText(/不可用原因：credential/)).toBeInTheDocument()
   })
 

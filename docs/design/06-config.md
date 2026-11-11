@@ -174,7 +174,7 @@ review_defaults:                    # 项目设置的默认值（见 §3）
 - `last_error` 不含文件内容、绝对路径、源文件标量值或密钥/凭据类环境变量值：配置文件名只显示 basename；配置中的路径类值和源文件标量值（含 `%q`、单引号与反引号形式）被脱敏；环境变量值同样按引用形式脱敏。非敏感配置值仍可能以普通文本出现在错误信息中。
 - 运行期单例（server/listener、gitlab/auth/storage/workspace/jobs/engine、provider、档位等）继续使用启动时的配置快照，v1 不做运行期热替换。`applied` 表示显示快照与运行中配置一致，`restart_required` 为其反义；重启后新值生效。状态经 `GET /api/v1/config` 和 `GET /api/v1/config/status` 暴露，见 [HTTP API](03-http-api.md#45-系统)。
 - watcher 随 SIGTERM 停止并等待 goroutine 退出，不泄漏。
-- 控制台可通过 `PATCH /api/v1/config/overlay` 写回 overlay（见下）；基础 `--config` 文件仍不写回。前端编辑器、表单与冲突处理由 [#412](https://github.com/LeXwDeX/Tribunal/issues/412) 接入。被引用的外部文件（如 `mcp.config`、`prompts_dir`）的内容变化不在轮询范围内，仍需重启。
+- 控制台可通过 `PATCH /api/v1/config/overlay` 写回 overlay（见下）；基础 `--config` 文件仍不写回。控制台「模型与档位」页已接入配置模型编辑器：`config:` 模型卡片显示文件生效值与逐字段来源，平台管理员可通过「编辑配置」抽屉写回 `providers.<name>.*`。被引用的外部文件（如 `mcp.config`、`prompts_dir`）的内容变化不在轮询范围内，仍需重启。
 
 #### 控制台写回 overlay
 
@@ -198,7 +198,9 @@ review_defaults:                    # 项目设置的默认值（见 §3）
 
 非 dry-run 的写操作记录平台审计：actor、动作、变更路径、base / previous overlay / overlay revision 和 `changed`；通过认证的写请求，其成功与失败（含参数 / 路径 / 候选校验失败、revision 冲突、存储错误、CSRF 失败和平台管理员校验失败）都记录 actor、路径和稳定错误码。审计不记录配置值或密钥。
 
-只有文件实际变化（`changed: true`）时 `restart_required` 才为 `true` 并返回 `notice`：watcher 约 2–4 秒后刷新显示快照，但运行期单例仍使用启动时配置，必须重启才生效；重启可能取消在途评审。no-op 写入返回 200、`changed: false`、`restart_required: false`，不提示已保存。`dry_run: true` 只做候选校验和引用检查，返回拟议的 `overlay_revision`，不写文件。本 Issue 不改前端，编辑器、表单与冲突处理见 [#412](https://github.com/LeXwDeX/Tribunal/issues/412)。
+只有文件实际变化（`changed: true`）时 `restart_required` 才为 `true` 并返回 `notice`：watcher 约 2–4 秒后刷新显示快照，但运行期单例仍使用启动时配置，必须重启才生效；重启可能取消在途评审。no-op 写入返回 200、`changed: false`、`restart_required: false`，不提示已保存。`dry_run: true` 只做候选校验和引用检查，返回拟议的 `overlay_revision`，不写文件。控制台编辑器已接入（#412），保存与重置的界面语义见下段。
+
+**控制台模型编辑器（[#412](https://github.com/LeXwDeX/Tribunal/issues/412)）**：控制台「模型与档位」页的 `config:` 模型卡片显示 `GET /api/v1/config` 中 `config.providers` 的文件生效值，并在协议、上游模型、base_url 和参数旁显示 `origins` 的来源徽标（`default` / `base` / `overlay`）；卡片与「编辑配置模型」抽屉同时列出迁移 0028 的节点覆盖，「在评审档位中清除」打开既有「编辑评审档位」抽屉。平台管理员可在抽屉中编辑 allowlist 内的非密钥叶子：`protocol`、`base_url`、`model`、`max_tokens`、`context_window`、`temperature`、`thinking.type`、`thinking.budget_tokens`、`reasoning.effort`、`max_concurrency`、`rpm`、`forced_tool_choice`、`strict_role_alternation`、`preserve_reasoning_content`、`allow_reasoning_effort_none`、`output_config_effort`、`responses_params`。保存只提交实际变化的 `providers.<name>.*` 叶子，并带当前 `base_revision` 与 `overlay_revision`；成功且文件变化时显示「已保存到 overlay，待重启生效。重启服务可能取消在途评审。」，没有变化时显示「没有需要保存的更改」。「重置为 base」删除 overlay 中整个 `providers.<name>` 覆盖：若该 provider 只存在于 overlay，重启后会移除该模型；仍被配置中的 `profiles`（含 `profiles.default`）或 0028 节点覆盖引用时返回 409 `provider_in_use` 并列出引用路径，服务不会自动修改数据库或档位。凭据、`api_key_env` 的值与 MCP env/headers 不可编辑或回显；`api_key_env` 仍是 overlay allowlist 的变量名叶子，但控制台抽屉不提供该字段，只显示 `api_key_configured` 的「API key 已配置（只读）」/「API key 未配置（只读）」。仅平台管理员渲染编辑与清除控件，服务端同样拒绝非管理员写入。
 
 ### Go 结构体（节选）
 

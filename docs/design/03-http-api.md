@@ -426,7 +426,7 @@ provider 和 profile 的基线以配置文件为准；改动配置需重启服�
 
 写入只修改原始 overlay 的 `yaml.Node` 叶子，保留注释、锚点 / 别名、引号风格、键顺序和 overlay 中已有的未展开 `${ENV}` 占位符（新写入值不得引入新的 `${...}`；仅含注释或 `null` 根的 overlay 在首次写入时也保留原注释块），不把 `config.Load` 的结果或结构体 Marshal 写盘；整文件 round-trip 可能规范化空行与行内空格。替换带锚点或别名目标的容器叶子、或删除会让别名悬空的子树返回 400 `invalid_change`。`overlay_revision` 是 overlay 文件内容的 SHA-256，`base_revision` 由各 base 文件的 SHA-256 按加载顺序再哈希得到；写前校验两个 revision，进程内串行化并用 `<overlay>.lock` sidecar flock（锁文件必须是普通文件；两个等待都受请求 context 截止时间约束，超时返回 409 `config_busy`），锁内重读文件并 best-effort 清理上次中断留下的 `.<overlay>.tmp-*` / `.<overlay>.bak.tmp-*`；随后在同目录创建 `O_EXCL` 临时文件，fsync、rename 到目标并 fsync 目录；overlay 已存在时，替换前以 0600 权限写 `<overlay>.bak`。失败时原文件不变。通过认证的写请求，其成功与失败（含 CSRF 失败和平台管理员校验失败）都记录 `platform_audit`：actor、路径和稳定错误码；成功时另记 base / overlay revision 与 `changed`，从不记录配置值或密钥。未认证请求由认证层直接返回 401。
 
-本 Issue 不改前端：系统页“平台配置（只读）”仍只读，编辑器、表单与冲突处理由 [#412](https://github.com/LeXwDeX/Tribunal/issues/412) 接入。
+系统页“平台配置（只读）”仍只读；配置模型的编辑入口在控制台「模型与档位」页（[#412](https://github.com/LeXwDeX/Tribunal/issues/412)），通过本接口写 `providers.<name>.*`，系统页不提供编辑控件。
 
 `GET /api/v1/profiles/default` 的 `nodes` 按 `default`、`explore`、`lanes.code_review`、`lanes.review`、`lanes.reasoner`、`lanes.validate`、`challenge` 顺序给出七项，每项字段：
 
@@ -524,6 +524,8 @@ Provider 返回 `name`、`protocol`、`base_url`、`model`、`max_concurrency`�
 两种修改语义不要混用：`PATCH /api/v1/models/{id}` 是整记录替换，适合提交完整表单；`PATCH /api/v1/models/{id}/params` 是参数级合并，只改提交的键，适合调整部分参数。两者都要求调用方提交 `revision` 做乐观锁。整记录替换在 `protocol` 或 `base_url` 的 scheme/host/port 变化时必须显式提供 `api_key`（已存模型没有密钥时不需要）；参数合并不改变 `protocol`、`base_url`，不涉及已存凭据的复用。端点预读只查询协议、地址与密钥存在性，`params_json` 损坏的记录仍可通过整记录替换修复。
 
 参数合并中的 `reasoning`、`thinking` 是整体替换：提交其中某个对象时，对象内未提交的字段按零值写入（例如只提交 `thinking.budget_tokens` 会把 `thinking.type` 清空），调用方须提交完整对象。对象内的未知字段返回 400（字段为 `params.reasoning` 或 `params.thinking`）；对象内出现 `null` 也返回 400，清除整个对象须对顶层键传 `null`。`responses_params` 只接受 `auto`、`supported`、`unsupported`；`thinking.type` 只接受 `enabled`、`disabled` 或空值。`params.price` 在 v1.4.0 已删除，参数合并提交该键返回 400（字段 `params.price`）；模型创建和整记录修改也不再接受 `params.price`。
+
+`config:` 模型的模型级参数不在 `/api/v1/models` 上修改：配置模型仍以 `id=config:<name>` 列出且 `read_only: true`，`PATCH /api/v1/models/{id}`、`PATCH /api/v1/models/{id}/params` 与 `DELETE /api/v1/models/{id}` 仍返回 403 `read_only`。控制台通过 `PATCH /api/v1/config/overlay` 写 `providers.<name>.*` 叶子（见[配置设计 · 控制台写回 overlay](06-config.md#控制台写回-overlay)），不写数据库。控制台模型卡片的文件生效值与逐字段来源来自 `GET /api/v1/config` 的 `config.providers` 和 `origins`（`default` / `base` / `overlay`）；0028 的节点覆盖来自 `GET /api/v1/profiles/default` 的 `nodes`，该接口与节点级语义不变。保存后响应 `restart_required` 表示需要重启才作用于运行期。
 
 #### user 模型全局默认参数（[#413](https://github.com/LeXwDeX/Tribunal/issues/413)）
 
