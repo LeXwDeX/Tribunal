@@ -17,7 +17,7 @@ import (
 
 // newInvalidationFixture wires an ExtensionService to a ProjectExtensionResolver
 // the same way the runtime does: successful writes invalidate the resolver.
-func newInvalidationFixture(t *testing.T) (*ExtensionService, *ProjectExtensionResolver) {
+func newInvalidationFixture(t *testing.T) (*ExtensionService, *ProjectExtensionResolver, *workspace.Manager) {
 	t.Helper()
 	st := openTestStore(t)
 	seedProject(t, st, newTestCipher(t), 42, "whsec", "{}", "default")
@@ -40,7 +40,7 @@ func newInvalidationFixture(t *testing.T) (*ExtensionService, *ProjectExtensionR
 	if err != nil {
 		t.Fatalf("NewExtensionService: %v", err)
 	}
-	return service, resolver
+	return service, resolver, manager
 }
 
 func resolveInvalidationProject(t *testing.T, resolver *ProjectExtensionResolver, projectID int64) *projectExtensionSet {
@@ -86,7 +86,7 @@ func registerInvalidationSkill(t *testing.T, service *ExtensionService, scope st
 
 func TestExtensionWritesTakeEffectOnNextProjectResolution(t *testing.T) {
 	ctx := context.Background()
-	service, resolver := newInvalidationFixture(t)
+	service, resolver, _ := newInvalidationFixture(t)
 	project42, project43 := int64(42), int64(43)
 
 	initial := resolveInvalidationProject(t, resolver, project42)
@@ -138,16 +138,59 @@ func TestExtensionWritesTakeEffectOnNextProjectResolution(t *testing.T) {
 	}
 }
 
+func TestMCPImportInvalidatesProjectResolution(t *testing.T) {
+	ctx := context.Background()
+	service, resolver, _ := newInvalidationFixture(t)
+	project42 := int64(42)
+	initial := resolveInvalidationProject(t, resolver, project42)
+	if len(initial.mcpConfig.MCPServers) != 0 {
+		t.Fatalf("initial servers = %v", initial.mcpConfig.MCPServers)
+	}
+
+	if _, err := service.ImportMCPServers(ctx, MCPImportInput{
+		Scope: "project", ProjectID: &project42,
+		Servers: map[string]json.RawMessage{
+			"alpha": json.RawMessage(`{"command":"imported-alpha"}`),
+			"beta":  json.RawMessage(`{"command":"imported-beta"}`),
+		},
+	}); err != nil {
+		t.Fatalf("ImportMCPServers: %v", err)
+	}
+	resolved := resolveInvalidationProject(t, resolver, project42)
+	if resolved == initial {
+		t.Fatal("import reused the cached resolution")
+	}
+	for name, command := range map[string]string{"alpha": "imported-alpha", "beta": "imported-beta"} {
+		if got := resolved.mcpConfig.MCPServers[name].Command; got != command {
+			t.Fatalf("%s command = %q, want %q", name, got, command)
+		}
+	}
+
+	// A re-import replaces the stored config and must invalidate again.
+	if _, err := service.ImportMCPServers(ctx, MCPImportInput{
+		Scope: "project", ProjectID: &project42,
+		Servers: map[string]json.RawMessage{
+			"alpha": json.RawMessage(`{"command":"imported-alpha-2"}`),
+		},
+	}); err != nil {
+		t.Fatalf("second ImportMCPServers: %v", err)
+	}
+	resolved = resolveInvalidationProject(t, resolver, project42)
+	if got := resolved.mcpConfig.MCPServers["alpha"].Command; got != "imported-alpha-2" {
+		t.Fatalf("re-imported command = %q", got)
+	}
+}
+
 func TestPlatformExtensionWritesInvalidateEveryProject(t *testing.T) {
 	ctx := context.Background()
-	service, resolver := newInvalidationFixture(t)
+	service, resolver, _ := newInvalidationFixture(t)
 	project42 := int64(42)
 
 	createInvalidationMCP(t, service, "project", &project42, "project-only", "project-command")
 	projectSet := resolveInvalidationProject(t, resolver, project42)
 	otherSet := resolveInvalidationProject(t, resolver, 43)
 
-	createInvalidationMCP(t, service, "platform", nil, "shared", "platform-command")
+	shared := createInvalidationMCP(t, service, "platform", nil, "shared", "platform-command")
 	for _, projectID := range []int64{42, 43} {
 		set := resolveInvalidationProject(t, resolver, projectID)
 		if got := set.mcpConfig.MCPServers["shared"].Command; got != "platform-command" {
@@ -163,6 +206,28 @@ func TestPlatformExtensionWritesInvalidateEveryProject(t *testing.T) {
 	}
 	if again := resolveInvalidationProject(t, resolver, 43); again == otherSet {
 		t.Fatal("platform write did not invalidate project 43")
+	}
+
+	disabled := false
+	if _, err := service.UpdateMCPServer(ctx, shared.ID, MCPServerUpdate{Enabled: &disabled}); err != nil {
+		t.Fatalf("disable platform MCP: %v", err)
+	}
+	for _, projectID := range []int64{42, 43} {
+		if _, ok := resolveInvalidationProject(t, resolver, projectID).mcpConfig.MCPServers["shared"]; ok {
+			t.Fatalf("project %d still resolves the disabled platform server", projectID)
+		}
+	}
+	enabled := true
+	if _, err := service.UpdateMCPServer(ctx, shared.ID, MCPServerUpdate{Enabled: &enabled}); err != nil {
+		t.Fatalf("enable platform MCP: %v", err)
+	}
+	if err := service.DeleteMCPServer(ctx, shared.ID); err != nil {
+		t.Fatalf("delete platform MCP: %v", err)
+	}
+	for _, projectID := range []int64{42, 43} {
+		if _, ok := resolveInvalidationProject(t, resolver, projectID).mcpConfig.MCPServers["shared"]; ok {
+			t.Fatalf("project %d still resolves the deleted platform server", projectID)
+		}
 	}
 
 	if _, err := service.UpsertBlockBinding(ctx, BlockBindingInput{
@@ -192,7 +257,7 @@ func TestPlatformExtensionWritesInvalidateEveryProject(t *testing.T) {
 
 func TestSkillWritesTakeEffectOnNextProjectResolution(t *testing.T) {
 	ctx := context.Background()
-	service, resolver := newInvalidationFixture(t)
+	service, resolver, _ := newInvalidationFixture(t)
 	project42 := int64(42)
 
 	saved := registerInvalidationSkill(t, service, "project", &project42, "project-skill")
@@ -241,12 +306,28 @@ func TestSkillWritesTakeEffectOnNextProjectResolution(t *testing.T) {
 }
 
 func TestPlatformSkillWriteInvalidatesEveryProject(t *testing.T) {
-	service, resolver := newInvalidationFixture(t)
+	service, resolver, _ := newInvalidationFixture(t)
 	saved := registerInvalidationSkill(t, service, "platform", nil, "platform-skill")
 	for _, projectID := range []int64{42, 43} {
 		set := resolveInvalidationProject(t, resolver, projectID)
 		if set.loader == nil || !containsString(catalogueNames(set.loader), "platform-skill") {
 			t.Fatalf("project %d did not load the platform skill", projectID)
+		}
+	}
+	if _, err := service.SetSkillEnabled(context.Background(), saved.ID, false); err != nil {
+		t.Fatalf("SetSkillEnabled(false): %v", err)
+	}
+	for _, projectID := range []int64{42, 43} {
+		if platformSkillBindable(t, resolver, projectID, "platform-skill") {
+			t.Fatalf("project %d still binds the disabled platform skill", projectID)
+		}
+	}
+	if _, err := service.SetSkillEnabled(context.Background(), saved.ID, true); err != nil {
+		t.Fatalf("SetSkillEnabled(true): %v", err)
+	}
+	for _, projectID := range []int64{42, 43} {
+		if !platformSkillBindable(t, resolver, projectID, "platform-skill") {
+			t.Fatalf("project %d does not bind the re-enabled platform skill", projectID)
 		}
 	}
 	if err := service.DeleteSkill(context.Background(), saved.ID); err != nil {
@@ -258,6 +339,19 @@ func TestPlatformSkillWriteInvalidatesEveryProject(t *testing.T) {
 			t.Fatalf("project %d still loads the deleted platform skill", projectID)
 		}
 	}
+}
+
+func platformSkillBindable(t *testing.T, resolver *ProjectExtensionResolver, projectID int64, name string) bool {
+	t.Helper()
+	set := resolveInvalidationProject(t, resolver, projectID)
+	if set.skills == nil {
+		return false
+	}
+	binding, err := set.skills.BindSkills(context.Background(), []string{name})
+	if err != nil {
+		t.Fatalf("BindSkills(%s): %v", name, err)
+	}
+	return containedSkill(binding, name)
 }
 
 func TestFailedExtensionWriteDoesNotInvalidate(t *testing.T) {
@@ -387,7 +481,8 @@ func TestProjectExtensionResolverDiscardsBuildInvalidatedInFlight(t *testing.T) 
 			}
 			t.Cleanup(func() { _ = resolver.Close() })
 
-			stale, fresh := &projectExtensionSet{}, &projectExtensionSet{}
+			staleCloser := &lifecycleCloser{entered: make(chan struct{})}
+			stale, fresh := &projectExtensionSet{closer: staleCloser}, &projectExtensionSet{}
 			started, release := make(chan struct{}), make(chan struct{})
 			var builds atomic.Int32
 			resolver.buildSet = func(context.Context, int64) (*projectExtensionSet, error) {
@@ -415,6 +510,11 @@ func TestProjectExtensionResolverDiscardsBuildInvalidatedInFlight(t *testing.T) 
 			}
 			if got := <-result; got != fresh {
 				t.Fatal("a build invalidated in flight was returned or cached")
+			}
+			select {
+			case <-staleCloser.entered:
+			case <-time.After(2 * time.Second):
+				t.Fatal("the discarded in-flight build was not closed")
 			}
 			cached, err := resolver.ForProject(context.Background(), 42)
 			if err != nil {
@@ -508,10 +608,11 @@ func TestInvalidationDoesNotBlockWorkspaceReadersAndClosesLeasedSetOnRelease(t *
 }
 
 func TestProjectExtensionResolverConcurrentResolveAndInvalidate(t *testing.T) {
-	service, resolver := newInvalidationFixture(t)
+	service, resolver, manager := newInvalidationFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	project42 := int64(42)
+	ws := manager.Get(project42)
 	server := createInvalidationMCP(t, service, "project", &project42, "alpha", "v0")
 
 	done := make(chan struct{})
@@ -526,8 +627,18 @@ func TestProjectExtensionResolverConcurrentResolveAndInvalidate(t *testing.T) {
 					return
 				default:
 				}
+				// Resolve under the same read lock a review holds, so the
+				// writer invalidates while readers are pinned.
+				unlock, err := ws.RLock(ctx)
+				if err != nil {
+					if ctx.Err() == nil {
+						t.Errorf("RLock: %v", err)
+					}
+					return
+				}
 				set, err := resolver.ForProject(ctx, project42)
 				if err != nil {
+					unlock()
 					if ctx.Err() != nil {
 						return
 					}
@@ -537,6 +648,7 @@ func TestProjectExtensionResolverConcurrentResolveAndInvalidate(t *testing.T) {
 				_ = set.mcpConfig.MCPServers["alpha"].Command
 				_ = set.blocks["code-review"]
 				set.release()
+				unlock()
 			}
 		}()
 	}

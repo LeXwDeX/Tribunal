@@ -110,7 +110,7 @@ web/
 - **Skill**：列表（作用域、名称、描述、来源目录）；已有自定义 Skill 的启停和删除。zip 上传和目录登记的后端 API 已恢复（仅平台管理员，默认推荐 zip，目录登记为高级选项）；控制台的上传/登记界面另行交付，当前页面仍只管理已有 Skill；内置项始终启用。
 - **块绑定**：矩阵视图，行是块（explore / code-review / review / reasoner / validate / verify / synthesize / onboarding），列是可用的 MCP 工具和 Skill，勾选即绑定。项目 scope 的读取需要该项目 grant 或 `global_read`，平台管理员隐式可读；任何写入都仍要求平台管理员，项目 scope 不再要求逐项目 `manage` grant。
 
-API 层：MCP、Skill 和块绑定的保存成功后立即在服务进程内生效，下一次评审使用新配置；平台 scope 影响全部项目，项目 scope 只影响当前项目；恢复默认响应中的 `restart_required` 为 `false`。控制台文案尚未同步：Skill 启停的成功提示仍写「重启服务后生效」，恢复默认仅在 `restart_required` 为 true 时显示重启提示；这些提示的更新属于 [#401](https://github.com/LeXwDeX/Tribunal/issues/401)。配置文件中的扩展声明仍需重启，控制台不提供文件编辑。
+后端立即生效：MCP、Skill 和块绑定的保存成功后，下一次评审在本进程内使用新配置；平台 scope 影响全部项目，项目 scope 只影响当前项目；恢复默认响应中的 `restart_required` 为 `false`，恢复默认的预览文案只在为 true 时显示重启提示。仅本进程内即时生效，多实例部署的其他进程不会收到失效通知。控制台 Skill 启停的旧提示「重启服务后生效」随 [#401](https://github.com/LeXwDeX/Tribunal/issues/401) 移除；本 Issue 不改 web / `web/dist`。配置文件中的扩展声明仍需重启，控制台不提供文件编辑。
 
 ### 3.7 模型与档位
 

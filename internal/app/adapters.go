@@ -508,17 +508,22 @@ type ProjectExtensionResolver struct {
 	buildSet func(context.Context, int64) (*projectExtensionSet, error)
 }
 
-// ProjectExtensionResolverConfig configures ProjectExtensionResolver. The base
-// skill provider is platform-only and is never closed here.
+// ProjectExtensionResolverConfig configures ProjectExtensionResolver. It is an
+// embedded-process boundary: invalidation only affects this resolver instance.
 type ProjectExtensionResolverConfig struct {
-	Store      *sqlite.Store
-	Blocks     map[string]config.BlockBinding
-	MCP        mcp.Config
-	SkillDirs  []string
-	Workspace  string
-	DeniedEnv  []string
-	Now        func() time.Time
-	Logger     *slog.Logger
+	Store     *sqlite.Store
+	Blocks    map[string]config.BlockBinding
+	MCP       mcp.Config
+	SkillDirs []string
+	Workspace string
+	DeniedEnv []string
+	Now       func() time.Time
+	Logger    *slog.Logger
+	// BaseSkills is the platform-only provider used when a project build adds
+	// no stored skill rows. As soon as a platform or project database skill
+	// row is visible, build replaces it with a fresh loader over the
+	// configured and stored directories, so an embedded custom provider does
+	// not see those rows.
 	BaseSkills review.SkillProvider
 }
 
