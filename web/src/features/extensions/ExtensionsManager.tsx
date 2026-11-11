@@ -1,16 +1,19 @@
 import { Fragment, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import {
-  deleteMcpServer, deleteSkill, listBindings, listMcpServers, listSkills, restoreDefaultBindings,
-  saveBinding, setSkillEnabled, testMcpServer, updateMcpServer,
+  createMcpServer, deleteMcpServer, deleteSkill, importMcpServers, listBindings, listMcpServers, listSkills,
+  registerSkillDir, restoreDefaultBindings, saveBinding, setSkillEnabled, testMcpDraft, testMcpServer,
+  updateMcpServer, uploadSkill,
 } from '../../api/api'
 import { ApiError, errorMessage } from '../../api/client'
 import type {
-  BlockBinding, McpServer, McpTool, Project, RestoreDefaultsChange, RestoreDefaultsResult, Skill,
+  BlockBinding, McpDraftTestInput, McpServer, McpServerWrite, McpTestResult, McpTool, Project, RestoreDefaultsChange,
+  RestoreDefaultsResult, Skill,
 } from '../../api/types'
 import { useCanWrite } from '../../components/RoleContext'
 import {
-  Badge, Button, Checkbox, ConfirmDialog, Dialog, Disclosure, EmptyState, ErrorState, Field, LoadingState, Panel, Select, Tabs, Textarea, useToast,
+  ActionHint, Badge, Button, Checkbox, ConfirmDialog, Dialog, Disclosure, EmptyState, ErrorState, Field, FieldHint,
+  LoadingState, Note, Panel, Select, Tabs, Textarea, useToast,
 } from '../../components/ui'
 import { usePaginated } from '../../lib/hooks'
 import { formatJson } from '../../lib/format'
@@ -24,6 +27,139 @@ const tabs = [
   { key: 'skills', label: 'Skill', panelId: 'tabpanel-skills' },
   { key: 'bindings', label: '块绑定', panelId: 'tabpanel-bindings' },
 ]
+
+const mcpNameHint = '首字符须为字母或数字，仅含字母、数字、点、下划线和连字符，最多 64 字符；不得包含连续下划线（__）。'
+const mcpNamePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
+
+const mcpTestFailureLabels: Record<string, string> = {
+  invalid_config: '配置无效',
+  connect_timeout: '连接超时',
+  connect_failed: '连接失败',
+  handshake_failed: '握手失败',
+  list_tools_timeout: '读取工具超时',
+  list_tools_failed: '读取工具失败',
+  too_many_tools: '工具数量超出上限',
+  cleanup_failed: '测试清理失败',
+  test_busy: '测试并发已满，请稍后重试',
+  internal: '测试服务不可用',
+  forbidden: '没有权限执行此操作',
+  network_error: '无法连接服务器',
+}
+
+type McpTestState = {
+  pending?: boolean
+  result?: McpTestResult
+  error?: string
+  errorCode?: string
+  serverName?: string
+}
+type McpTestResults = Record<string, McpTestState>
+
+function normalizeTestResult(result: McpTestResult | null | undefined): McpTestResult {
+  return {
+    ok: result?.ok,
+    latency_ms: typeof result?.latency_ms === 'number' ? result.latency_ms : undefined,
+    tool_count: typeof result?.tool_count === 'number' ? result.tool_count : undefined,
+    truncated: result?.truncated === true,
+    tools: Array.isArray(result?.tools) ? result.tools : [],
+  }
+}
+
+function testFailureText(state?: McpTestState): string {
+  if (!state) return '测试失败'
+  if (state.errorCode && mcpTestFailureLabels[state.errorCode]) return mcpTestFailureLabels[state.errorCode]
+  return state.error || '测试失败'
+}
+
+function failedTestState(error: unknown, serverName?: string): McpTestState {
+  return {
+    error: errorMessage(error),
+    errorCode: error instanceof ApiError ? error.code : undefined,
+    serverName,
+  }
+}
+
+function succeededTestState(result: McpTestResult | null | undefined, serverName?: string): McpTestState {
+  if (result?.error || result?.ok === false) {
+    return { error: result?.error || '测试未成功', serverName }
+  }
+  return { result: normalizeTestResult(result), serverName }
+}
+
+// Validation details identify the request field; rendering them beside the
+// control avoids hiding the actionable part in a generic banner.
+function errorFieldMessages(error: unknown): Record<string, string> {
+  if (!(error instanceof ApiError)) return {}
+  const fields: Record<string, string> = {}
+  for (const detail of error.details || []) {
+    if (!detail.field) continue
+    const message = detail.message || '输入无效'
+    fields[detail.field] = fields[detail.field] ? `${fields[detail.field]}；${message}` : message
+  }
+  return fields
+}
+
+function hasFieldDetails(error: unknown): boolean {
+  return error instanceof ApiError && Boolean(error.details?.some((detail) => detail.field))
+}
+
+const mcpConfigFieldNames = ['config', 'command', 'args', 'env', 'url', 'headers'] as const
+
+// Map the request's validation details onto the form. Unknown fields stay in
+// `unmapped` so the caller shows a banner instead of silently dropping them.
+function mappedMcpFieldErrors(fields: Record<string, string>): { name: string; config: string; unmapped: string[] } {
+  const known = new Set<string>(['name', ...mcpConfigFieldNames])
+  return {
+    name: fields.name || '',
+    config: mcpConfigFieldNames.map((field) => fields[field]).filter(Boolean).join('；'),
+    unmapped: Object.keys(fields).filter((field) => !known.has(field)),
+  }
+}
+
+// A lost, timed-out or 5xx response does not prove the write was rejected.
+function uncertainWriteError(error: unknown): unknown {
+  const uncertain = !(error instanceof ApiError) || error.status === 0 || error.status === 408 || error.status >= 500
+  if (!uncertain) return error
+  return new Error(`${errorMessage(error)} 请求结果可能不确定，请先刷新列表确认后再重试。`)
+}
+
+function formatFileSize(bytes: number): string {
+  if (!Number.isFinite(bytes)) return '—'
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`
+}
+
+type ImportEntry = { name: string; config: Record<string, unknown> }
+
+// The pasted document is the Claude Code mcpServers object. Parsing never
+// stores or renders the configuration values themselves.
+function parseImportDocument(text: string): { entries: ImportEntry[]; error?: string } {
+  if (!text.trim()) return { entries: [] }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return { entries: [], error: 'JSON 格式无效。' }
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { entries: [], error: '配置必须是 JSON 对象。' }
+  }
+  const servers = (parsed as Record<string, unknown>).mcpServers
+  if (!servers || typeof servers !== 'object' || Array.isArray(servers)) {
+    return { entries: [], error: '缺少 mcpServers 对象。' }
+  }
+  const entries: ImportEntry[] = []
+  for (const [name, config] of Object.entries(servers as Record<string, unknown>)) {
+    if (!config || typeof config !== 'object' || Array.isArray(config)) {
+      return { entries: [], error: `mcpServers.${name} 必须是 JSON 对象。` }
+    }
+    entries.push({ name, config: config as Record<string, unknown> })
+  }
+  entries.sort((left, right) => left.name.localeCompare(right.name))
+  if (!entries.length) return { entries: [], error: 'mcpServers 至少需要一个服务器。' }
+  return { entries }
+}
 
 const mcpCommand = (server: McpServer): string => {
   const config = server.config || {}
@@ -81,7 +217,18 @@ function ScopedExtensionsManager({
   const canWrite = platformAdmin && (scope === 'platform' || (Boolean(projectId) && canManage))
   const toast = useToast()
   const queryClient = useQueryClient()
-  const [testResults, setTestResults] = useState<Record<string, { tools?: McpTool[]; error?: string; pending?: boolean }>>({})
+  // Matrix-eligible results come from enabled servers; results for disabled
+  // servers are display-only and must never grant tools to a block.
+  const [testResults, setTestResults] = useState<McpTestResults>({})
+  const [readonlyTestResults, setReadonlyTestResults] = useState<McpTestResults>({})
+  const displayTestResults = useMemo(
+    () => ({ ...readonlyTestResults, ...testResults }),
+    [readonlyTestResults, testResults],
+  )
+  const [addServerOpen, setAddServerOpen] = useState(false)
+  const [importServersOpen, setImportServersOpen] = useState(false)
+  const [skillUploadFile, setSkillUploadFile] = useState<File | null>(null)
+  const [registerSkillOpen, setRegisterSkillOpen] = useState(false)
   const [editServer, setEditServer] = useState<McpServer | null>(null)
   const [deleteServer, setDeleteServer] = useState<McpServer | null>(null)
   const [deletePending, setDeletePending] = useState(false)
@@ -155,6 +302,7 @@ function ScopedExtensionsManager({
 
   useEffect(() => {
     setTestResults({})
+    setReadonlyTestResults({})
   }, [scope, projectId])
 
   const invalidateServers = () => queryClient.invalidateQueries({ queryKey: ['mcp-servers', scope, projectId] })
@@ -193,22 +341,64 @@ function ScopedExtensionsManager({
   const invalidateBindings = () => queryClient.invalidateQueries({ queryKey: ['block-bindings', scope, projectId] })
 
   const runTest = async (server: McpServer) => {
-    setTestResults((current) => ({ ...current, [server.id]: { pending: true } }))
+    // Disabled servers can still be probed, but their tools are display-only;
+    // keeping them out of testResults prevents the binding matrix from
+    // offering tools the runtime will not expose.
+    const updateResults = server.enabled === false ? setReadonlyTestResults : setTestResults
+    updateResults((current) => ({ ...current, [server.id]: { pending: true, serverName: server.name } }))
     try {
       const result = await testMcpServer(server.id)
-      if (result?.error) {
-        setTestResults((current) => ({ ...current, [server.id]: { error: result.error } }))
-      } else {
-        setTestResults((current) => ({
-          ...current,
-          [server.id]: { tools: Array.isArray(result?.tools) ? result.tools : [] },
-        }))
+      updateResults((current) => ({ ...current, [server.id]: succeededTestState(result, server.name) }))
+      if (server.enabled !== false && !result?.error && result?.ok !== false) {
         void invalidateServers()
         void invalidateBindings()
       }
     } catch (error) {
-      setTestResults((current) => ({ ...current, [server.id]: { error: errorMessage(error) } }))
+      updateResults((current) => ({ ...current, [server.id]: failedTestState(error, server.name) }))
     }
+  }
+
+  // Draft tests run before any row exists, so the discovered tools are kept
+  // under the created/deployed server ID and name for the binding matrix.
+  const handleServerCreated = (server: McpServer, draft?: McpTestState) => {
+    if (draft?.result && server.enabled !== false) {
+      setTestResults((current) => ({ ...current, [server.id]: { ...draft, serverName: server.name } }))
+    }
+    setAddServerOpen(false)
+    void invalidateServers()
+    void invalidateBindings()
+    toast.push('success', `MCP 服务器 ${server.name} 已创建。`)
+  }
+
+  const handleServersImported = (created: McpServer[], tests: Record<string, McpTestState>) => {
+    setTestResults((current) => {
+      const next = { ...current }
+      for (const server of created) {
+        // The upsert replaced the stored configuration, so a previous tool
+        // list for this ID is stale. Only a successful test of the imported
+        // draft may repopulate it, and only for an enabled server.
+        delete next[server.id]
+        const state = tests[server.name]
+        if (state?.result && server.enabled !== false) next[server.id] = { ...state, serverName: server.name }
+      }
+      return next
+    })
+    setReadonlyTestResults((current) => {
+      const next = { ...current }
+      for (const server of created) delete next[server.id]
+      return next
+    })
+    setImportServersOpen(false)
+    void invalidateServers()
+    void invalidateBindings()
+    toast.push('success', `已导入 ${created.length} 个 MCP 服务器。`)
+  }
+
+  const handleSkillCreated = (created: Skill, action: 'uploaded' | 'registered') => {
+    if (action === 'uploaded') setSkillUploadFile(null)
+    else setRegisterSkillOpen(false)
+    void invalidateSkills()
+    toast.push('success', action === 'uploaded' ? `Skill ${created.name} 已上传。` : `Skill ${created.name} 已登记。`)
   }
 
   const removeServer = async () => {
@@ -217,6 +407,16 @@ function ScopedExtensionsManager({
     setDeleteError(null)
     try {
       await deleteMcpServer(deleteServer.id)
+      setTestResults((current) => {
+        const next = { ...current }
+        delete next[deleteServer.id]
+        return next
+      })
+      setReadonlyTestResults((current) => {
+        const next = { ...current }
+        delete next[deleteServer.id]
+        return next
+      })
       setDeleteServer(null)
       toast.push('success', 'MCP 服务器已删除。')
       await invalidateServers()
@@ -279,10 +479,12 @@ function ScopedExtensionsManager({
           scope={scope}
           projectName={projectName}
           servers={servers}
-          testResults={testResults}
+          testResults={displayTestResults}
           onTest={runTest}
           onEdit={setEditServer}
           onDelete={setDeleteServer}
+          onAdd={() => setAddServerOpen(true)}
+          onImport={() => setImportServersOpen(true)}
         />
       ) : null}
 
@@ -293,6 +495,8 @@ function ScopedExtensionsManager({
           bindings={bindings.items}
           onToggle={toggleSkill}
           onDelete={setDeleteSkillTarget}
+          onUpload={setSkillUploadFile}
+          onRegisterDir={() => setRegisterSkillOpen(true)}
         />
       ) : null}
 
@@ -315,7 +519,64 @@ function ScopedExtensionsManager({
       ) : null}
       </div>
 
-      {canWrite && editServer ? <EditMcpDialog server={editServer} onClose={() => setEditServer(null)} onSaved={() => { void invalidateServers() }} /> : null}
+      {canWrite && editServer ? (
+        <EditMcpDialog
+          server={editServer}
+          onClose={() => setEditServer(null)}
+          onSaved={() => {
+            // A rename or config replacement invalidates the session's tool
+            // list for this server; the next test repopulates it.
+            setTestResults((current) => {
+              const next = { ...current }
+              delete next[editServer.id]
+              return next
+            })
+            setReadonlyTestResults((current) => {
+              const next = { ...current }
+              delete next[editServer.id]
+              return next
+            })
+            void invalidateServers()
+          }}
+        />
+      ) : null}
+      {canWrite && addServerOpen ? (
+        <AddMcpDialog
+          scope={scope}
+          projectId={projectId}
+          projectName={projectName}
+          onClose={() => setAddServerOpen(false)}
+          onCreated={handleServerCreated}
+        />
+      ) : null}
+      {canWrite && importServersOpen ? (
+        <ImportMcpDialog
+          scope={scope}
+          projectId={projectId}
+          projectName={projectName}
+          onClose={() => setImportServersOpen(false)}
+          onImported={handleServersImported}
+        />
+      ) : null}
+      {canWrite && skillUploadFile ? (
+        <UploadSkillDialog
+          file={skillUploadFile}
+          scope={scope}
+          projectId={projectId}
+          projectName={projectName}
+          onClose={() => setSkillUploadFile(null)}
+          onUploaded={(created) => handleSkillCreated(created, 'uploaded')}
+        />
+      ) : null}
+      {canWrite && registerSkillOpen ? (
+        <RegisterSkillDirDialog
+          scope={scope}
+          projectId={projectId}
+          projectName={projectName}
+          onClose={() => setRegisterSkillOpen(false)}
+          onRegistered={(created) => handleSkillCreated(created, 'registered')}
+        />
+      ) : null}
 
       <ConfirmDialog
         open={Boolean(deleteServer)}
@@ -350,26 +611,42 @@ function ScopedExtensionsManager({
 }
 
 function McpTab({
-  canWrite, scope, projectName, servers, testResults, onTest, onEdit, onDelete,
+  canWrite, scope, projectName, servers, testResults, onTest, onEdit, onDelete, onAdd, onImport,
 }: {
   canWrite: boolean
   scope: string
   projectName: string
   servers: ReturnType<typeof useScopeQuery>
-  testResults: Record<string, { tools?: McpTool[]; error?: string; pending?: boolean }>
+  testResults: McpTestResults
   onTest: (server: McpServer) => void
   onEdit: (server: McpServer) => void
   onDelete: (server: McpServer) => void
+  onAdd: () => void
+  onImport: () => void
 }) {
   return (
     <Panel
       title="MCP 服务器"
       aside={scope === 'platform' ? '平台级' : `项目级 · ${projectName}`}
     >
+      {canWrite ? (
+        <>
+          <div className={ext.panelActions}>
+            <Button variant="primary" onClick={onAdd}>新增 MCP 服务器</Button>
+            <Button variant="secondary" onClick={onImport}>粘贴 Claude Code 配置导入</Button>
+          </div>
+          <ActionHint>新增或导入后可先测试连接；测试不会写入服务器。</ActionHint>
+        </>
+      ) : null}
       {servers.isPending ? <LoadingState /> : null}
       {servers.isError ? <ErrorState error={servers.error} onRetry={servers.retry} /> : null}
       {servers.isSuccess && servers.items.length === 0 ? (
-        <EmptyState title="还没有 MCP 服务器" description="内置 MCP 服务器由平台管理。" />
+        <EmptyState
+          title="还没有 MCP 服务器"
+          description={canWrite
+            ? '内置 MCP 服务器由平台管理。可以新增或导入自定义服务器。'
+            : '内置 MCP 服务器由平台管理。'}
+        />
       ) : null}
       {servers.items.length ? (
         <div className="tableWrap">
@@ -387,7 +664,7 @@ function McpTab({
             <tbody>
               {servers.items.map((server) => {
                 const result = testResults[server.id]
-                const hasDetail = Boolean(server.last_error || result?.error || result?.tools)
+                const hasDetail = Boolean(server.last_error || result)
                 return (
                   <Fragment key={server.id}>
                     <tr>
@@ -405,7 +682,11 @@ function McpTab({
                           <span className="small muted">{server.status || '状态未提供'}</span>
                         </div>
                       </td>
-                      <td className="right num">{server.tools?.length ? server.tools.length : <span className="muted">未提供</span>}</td>
+                      <td className="right num">
+                        {result?.result && typeof result.result.tool_count === 'number'
+                          ? result.result.tool_count
+                          : server.tools?.length ? server.tools.length : <span className="muted">未提供</span>}
+                      </td>
                       {canWrite ? (
                         <td className="right">
                           <div className={ext.rowActions}>
@@ -424,25 +705,14 @@ function McpTab({
                       <tr className={ext.detailRow}>
                         <td colSpan={canWrite ? 6 : 5}>
                           {server.last_error ? <span className={styles.resultError}>{server.last_error}</span> : null}
-                          {result?.error ? <span className={styles.resultError} role="status">测试失败：{result.error}</span> : null}
-                          {result?.tools ? (
-                            <div className={styles.testResult} role="status">
-                              {result.tools.length ? (
-                                <Disclosure summary={`测试成功：${result.tools.length} 个工具`}>
-                                  <ul className={styles.toolsList}>
-                                    {result.tools.map((tool) => (
-                                      <li key={tool.name} className={styles.listItem}>
-                                        <div className={styles.listMain}>
-                                          <span className="mono small">{tool.name}</span>
-                                          {tool.description ? <span className="small muted">{tool.description}</span> : null}
-                                        </div>
-                                      </li>
-                                    ))}
-                                  </ul>
-                                </Disclosure>
-                              ) : <span>测试成功，但服务端没有返回工具列表。</span>}
+                          {result?.pending ? <span className={styles.testResult} role="status">正在测试连接…</span> : null}
+                          {result?.error ? (
+                            <div className={ext.testFailure}>
+                              <span className={styles.resultError} role="status">测试失败：{testFailureText(result)}</span>
+                              <Button variant="secondary" className={ui.smallButton} onClick={() => onTest(server)}>重试测试</Button>
                             </div>
                           ) : null}
+                          {result?.result ? <TestResultPanel result={result.result} /> : null}
                         </td>
                       </tr>
                     ) : null}
@@ -458,15 +728,74 @@ function McpTab({
   )
 }
 
+function ToolTable({ tools }: { tools: McpTool[] }) {
+  return (
+    <div className="tableWrap">
+      <table className={ext.toolTable}>
+        <thead>
+          <tr>
+            <th scope="col">工具</th>
+            <th scope="col">描述</th>
+            <th scope="col">注解</th>
+          </tr>
+        </thead>
+        <tbody>
+          {tools.map((tool) => (
+            <tr key={tool.name}>
+              <td><code className="mono small">{tool.name}</code></td>
+              <td className="small muted">{tool.description || '—'}</td>
+              <td>
+                <div className={ext.toolBadges}>
+                  {tool.annotated === false ? (
+                    <Badge tone="neutral" plain>未注解（按可绑定处理）</Badge>
+                  ) : (
+                    <>
+                      {tool.annotated ? (
+                        <>
+                          <Badge tone={tool.read_only ? 'ok' : 'neutral'} plain>{tool.read_only ? '只读' : '非只读'}</Badge>
+                          <Badge tone={tool.destructive ? 'danger' : 'neutral'} plain>{tool.destructive ? '破坏性' : '非破坏性'}</Badge>
+                        </>
+                      ) : null}
+                      <Badge tone={tool.bindable === false ? 'warn' : 'info'} plain>{tool.bindable === false ? '不可绑定' : '可绑定'}</Badge>
+                    </>
+                  )}
+                </div>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function TestResultPanel({ result }: { result: McpTestResult }) {
+  const tools = result.tools || []
+  const count = typeof result.tool_count === 'number' ? result.tool_count : tools.length
+  return (
+    <div className={ext.testPanel}>
+      <div className={ext.testSummary} role="status">
+        <Badge tone="ok">连接成功</Badge>
+        <span>{typeof result.latency_ms === 'number' ? `延迟 ${result.latency_ms} ms` : '延迟不可用'}</span>
+        <span>{`工具 ${count} 个${result.truncated ? '（列表已截断）' : ''}`}</span>
+      </div>
+      {tools.length ? <ToolTable tools={tools} /> : <span className={ext.testEmpty}>测试成功，但服务端没有返回工具列表。</span>}
+    </div>
+  )
+}
+
 function SkillsTab({
-  canWrite, skills, bindings, onToggle, onDelete,
+  canWrite, skills, bindings, onToggle, onDelete, onUpload, onRegisterDir,
 }: {
   canWrite: boolean
   skills: ReturnType<typeof usePaginated<Skill>>
   bindings: BlockBinding[]
   onToggle: (skill: Skill) => void
   onDelete: (skill: Skill) => void
+  onUpload: (file: File) => void
+  onRegisterDir: () => void
 }) {
+  const fileInput = useRef<HTMLInputElement | null>(null)
   const usage = useMemo(() => {
     const map = new Map<string, string[]>()
     for (const binding of bindings) {
@@ -481,9 +810,39 @@ function SkillsTab({
 
   return (
     <Panel title="Skill" note="首版只支持指令类 Skill，其中的脚本不会被执行。">
+      {canWrite ? (
+        <>
+          <div className={ext.panelActions}>
+            <Button variant="primary" onClick={() => fileInput.current?.click()}>上传 Skill zip</Button>
+            <input
+              ref={fileInput}
+              type="file"
+              accept=".zip,application/zip"
+              className="srOnly"
+              aria-label="Skill zip 文件"
+              tabIndex={-1}
+              onChange={(event) => {
+                const file = event.target.files?.[0]
+                // Reset so selecting the same file again still fires change.
+                event.target.value = ''
+                if (file) onUpload(file)
+              }}
+            />
+            <Button variant="secondary" onClick={onRegisterDir}>登记服务器目录</Button>
+          </div>
+          <ActionHint>上传的 zip 必须包含 SKILL.md；目录登记会把服务端目录内容复制到受管目录，不执行其中的脚本。</ActionHint>
+        </>
+      ) : null}
       {skills.isPending ? <LoadingState /> : null}
       {skills.isError ? <ErrorState error={skills.error} onRetry={skills.retry} /> : null}
-      {skills.isSuccess && skills.items.length === 0 ? <EmptyState title="还没有 Skill" description="内置 Skill 由平台管理。" /> : null}
+      {skills.isSuccess && skills.items.length === 0 ? (
+        <EmptyState
+          title="还没有 Skill"
+          description={canWrite
+            ? '内置 Skill 由平台管理。可以上传 zip 或登记服务端目录。'
+            : '内置 Skill 由平台管理。'}
+        />
+      ) : null}
       {skills.items.length ? (
         <div className={ext.skillCards}>
           {skills.items.map((skill) => (
@@ -743,7 +1102,7 @@ function BindingsTab({
   bindingState: ReturnType<typeof usePaginated<BlockBinding>>
   servers: McpServer[]
   skills: Skill[]
-  testResults: Record<string, { tools?: McpTool[]; error?: string; pending?: boolean }>
+  testResults: McpTestResults
   refreshBindings: () => Promise<{ items: BlockBinding[]; complete: boolean }>
   onDirtyChange?: (dirty: boolean) => void
   onBusyChange?: (busy: boolean) => void
@@ -875,15 +1234,26 @@ function BindingsTab({
     return names
   }, [local, conflictBlocks])
 
-  const toolColumns = useMemo(() => {
-    const set = new Set<string>()
-    for (const binding of bindingState.items) for (const tool of binding.mcp_tools || []) set.add(tool)
-    for (const server of servers) {
-      for (const tool of server.tools || []) set.add(`mcp__${server.name}__${tool.name}`)
-      for (const tool of testResults[server.id]?.tools || []) set.add(`mcp__${server.name}__${tool.name}`)
+  const toolMeta = useMemo(() => {
+    const meta = new Map<string, boolean>()
+    // A tool stays bindable unless a test result explicitly marks it unsafe.
+    const add = (name: string, bindable = true) => {
+      const previous = meta.get(name)
+      meta.set(name, previous === undefined ? bindable : previous && bindable)
     }
-    return Array.from(set).sort()
+    for (const binding of bindingState.items) for (const tool of binding.mcp_tools || []) add(tool)
+    for (const server of servers) {
+      for (const tool of server.tools || []) add(`mcp__${server.name}__${tool.name}`, tool.bindable !== false)
+    }
+    for (const state of Object.values(testResults)) {
+      if (!state.result || !state.serverName) continue
+      for (const tool of state.result.tools || []) {
+        add(`mcp__${state.serverName}__${tool.name}`, tool.bindable !== false)
+      }
+    }
+    return meta
   }, [bindingState.items, servers, testResults])
+  const toolColumns = useMemo(() => Array.from(toolMeta.keys()).sort(), [toolMeta])
 
   const skillColumns = useMemo(() => {
     const set = new Set<string>()
@@ -1299,7 +1669,12 @@ function BindingsTab({
                 <tr>
                   <th scope="col">块</th>
                   {canRestore ? <th scope="col" className="right">默认</th> : null}
-                  {toolColumns.map((tool) => <th key={tool} scope="col">{tool}</th>)}
+                  {toolColumns.map((tool) => (
+                    <th key={tool} scope="col">
+                      <span>{tool}</span>
+                      {toolMeta.get(tool) === false ? <span className={ext.matrixLocked}>不可绑定</span> : null}
+                    </th>
+                  ))}
                   {skillColumns.map((skill) => <th key={`skill-${skill}`} scope="col">skill: {skill}</th>)}
                 </tr>
               </thead>
@@ -1331,6 +1706,7 @@ function BindingsTab({
                       ) : null}
                       {toolColumns.map((tool) => {
                         const on = row.mcp_tools.includes(tool)
+                        const bindable = toolMeta.get(tool) !== false
                         return (
                           <td key={tool}>
                             <button
@@ -1338,7 +1714,7 @@ function BindingsTab({
                               className={[styles.matrixCell, on ? styles.matrixCellOn : ''].filter(Boolean).join(' ')}
                               aria-pressed={on}
                               aria-label={`${block} 使用 ${tool}`}
-                              disabled={!editable}
+                              disabled={!editable || (!bindable && !on)}
                               onClick={() => toggle(block, 'mcp_tools', tool)}
                             >
                               {on ? '✓' : ''}
@@ -1671,6 +2047,653 @@ function EditMcpDialog({ server, onClose, onSaved }: { server: McpServer | null;
           </div>
         </>
       ) : null}
+    </Dialog>
+  )
+}
+
+function useMountedRef() {
+  const mounted = useRef(false)
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false }
+  }, [])
+  return mounted
+}
+
+type DialogScope = 'platform' | 'project'
+
+function scopeLabel(scope: DialogScope, projectName?: string): string {
+  return scope === 'platform' ? '平台级' : `项目级${projectName ? ` · ${projectName}` : ''}`
+}
+
+type McpDraftForm = McpServerWrite
+
+function AddMcpDialog({
+  scope, projectId, projectName, onClose, onCreated,
+}: {
+  scope: DialogScope
+  projectId?: number
+  projectName: string
+  onClose: () => void
+  onCreated: (server: McpServer, draft?: McpTestState) => void
+}) {
+  const mounted = useMountedRef()
+  const nameId = useId()
+  const transportId = useId()
+  const commandId = useId()
+  const argsId = useId()
+  const envId = useId()
+  const urlId = useId()
+  const headersId = useId()
+  const enabledHintId = useId()
+  const [transport, setTransport] = useState<'stdio' | 'http'>('stdio')
+  const [name, setName] = useState('')
+  const [command, setCommand] = useState('')
+  const [argsText, setArgsText] = useState('')
+  const [envText, setEnvText] = useState('')
+  const [url, setUrl] = useState('')
+  const [headersText, setHeadersText] = useState('')
+  const [enabled, setEnabled] = useState(true)
+  const [pasteText, setPasteText] = useState('')
+  const [pasteError, setPasteError] = useState('')
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
+  const [testState, setTestState] = useState<McpTestState | null>(null)
+  const [testedDraft, setTestedDraft] = useState<McpDraftForm | null>(null)
+  const [testing, setTesting] = useState(false)
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState<unknown>(null)
+  const testGeneration = useRef(0)
+
+  // Any draft edit invalidates the previous probe: the displayed tools and
+  // the status no longer describe what would be saved. Bumping the generation
+  // also makes an in-flight response land harmlessly.
+  const invalidateTest = () => {
+    testGeneration.current += 1
+    setTesting(false)
+    setTestState(null)
+    setTestedDraft(null)
+    setFieldErrors({})
+  }
+
+  const buildDraft = (): { draft?: McpDraftForm; errors: Record<string, string> } => {
+    const errors: Record<string, string> = {}
+    const trimmedName = name.trim()
+    if (!trimmedName) errors.name = '请输入名称。'
+    else if (!mcpNamePattern.test(trimmedName)) errors.name = `名称无效：${mcpNameHint}`
+    else if (trimmedName.includes('__')) errors.name = '名称不得包含连续下划线（__）。'
+    const config: Record<string, unknown> = {}
+    if (transport === 'stdio') {
+      if (!command.trim()) errors.command = '请输入启动命令。'
+      else config.command = command.trim()
+      const args = argsText.split('\n').map((line) => line.trim()).filter(Boolean)
+      if (args.length) config.args = args
+      if (envText.trim()) {
+        try {
+          config.env = parseJsonObject(envText, '环境变量')
+        } catch {
+          errors.env = '环境变量 JSON 无效或不是对象。'
+        }
+      }
+    } else {
+      if (!url.trim()) errors.url = '请输入服务地址。'
+      else config.url = url.trim()
+      if (headersText.trim()) {
+        try {
+          config.headers = parseJsonObject(headersText, '请求头')
+        } catch {
+          errors.headers = '请求头 JSON 无效或不是对象。'
+        }
+      }
+    }
+    if (Object.keys(errors).length) return { errors }
+    return {
+      draft: {
+        scope,
+        ...(scope === 'project' && projectId ? { project_id: projectId } : {}),
+        name: trimmedName,
+        config,
+        enabled,
+      },
+      errors,
+    }
+  }
+
+  const fillFromPaste = () => {
+    let value: Record<string, unknown>
+    try {
+      value = parseJsonObject(pasteText, '服务器配置')
+    } catch {
+      setPasteError('JSON 无效或不是对象。')
+      return
+    }
+    const pastedName = typeof value.name === 'string' ? value.name : ''
+    if (typeof value.command === 'string') {
+      setTransport('stdio')
+      setCommand(value.command)
+      setArgsText(Array.isArray(value.args) ? value.args.map(String).join('\n') : '')
+      setEnvText(value.env && typeof value.env === 'object' && !Array.isArray(value.env)
+        ? JSON.stringify(value.env, null, 2)
+        : '')
+      setUrl('')
+      setHeadersText('')
+    } else if (typeof value.url === 'string') {
+      setTransport('http')
+      setUrl(value.url)
+      setHeadersText(value.headers && typeof value.headers === 'object' && !Array.isArray(value.headers)
+        ? JSON.stringify(value.headers, null, 2)
+        : '')
+      setCommand('')
+      setArgsText('')
+      setEnvText('')
+    } else {
+      setPasteError('配置必须包含 command 或 url。')
+      return
+    }
+    if (pastedName) setName(pastedName)
+    setPasteError('')
+    invalidateTest()
+  }
+
+  const runTest = async () => {
+    const { draft, errors } = buildDraft()
+    if (!draft) {
+      setFieldErrors(errors)
+      return
+    }
+    setFieldErrors({})
+    setError(null)
+    setTesting(true)
+    const input: McpDraftTestInput = draft
+    const generation = testGeneration.current + 1
+    testGeneration.current = generation
+    setTestedDraft(draft)
+    setTestState({ pending: true, serverName: draft.name })
+    try {
+      const result = await testMcpDraft(input)
+      if (!mounted.current || testGeneration.current !== generation) return
+      setTestState(succeededTestState(result, draft.name))
+    } catch (caught) {
+      if (!mounted.current || testGeneration.current !== generation) return
+      const fields = errorFieldMessages(caught)
+      if (Object.keys(fields).length) {
+        const mapped = mappedMcpFieldErrors(fields)
+        setFieldErrors({ name: mapped.name, config: mapped.config })
+        setTestState({
+          error: mapped.name || mapped.config ? '配置校验未通过，请检查标记的字段。' : errorMessage(caught),
+          serverName: draft.name,
+        })
+      } else {
+        setTestState(failedTestState(caught, draft.name))
+      }
+    } finally {
+      if (mounted.current && testGeneration.current === generation) setTesting(false)
+    }
+  }
+
+  const submit = async () => {
+    const { draft, errors } = buildDraft()
+    if (!draft) {
+      setFieldErrors(errors)
+      return
+    }
+    setFieldErrors({})
+    setError(null)
+    setPending(true)
+    try {
+      const created = await createMcpServer(draft)
+      // Only a test of the exact draft being saved may contribute its tools;
+      // editing the form after a test makes the old tool list inapplicable.
+      const unchanged = testedDraft !== null && JSON.stringify(testedDraft) === JSON.stringify(draft)
+      if (mounted.current) onCreated(created, testState?.result && unchanged ? testState : undefined)
+    } catch (caught) {
+      if (!mounted.current) return
+      const fields = errorFieldMessages(caught)
+      const mapped = mappedMcpFieldErrors(fields)
+      setFieldErrors({ name: mapped.name, config: mapped.config })
+      if (caught instanceof ApiError && caught.status === 409) {
+        setError(new Error('同名 MCP 服务器已存在，请更换名称。'))
+      } else if (mapped.unmapped.length || (hasFieldDetails(caught) && !mapped.name && !mapped.config)) {
+        // A detail on an unmapped field (scope, project_id, body, ...) must
+        // stay visible; dropping it would leave the form looking valid.
+        setError(caught)
+      } else if (hasFieldDetails(caught)) {
+        setError(null)
+      } else {
+        setError(uncertainWriteError(caught))
+      }
+    } finally {
+      if (mounted.current) setPending(false)
+    }
+  }
+
+  const testLabel = testState?.result ? '重新测试' : testState?.error ? '重试测试' : '测试连接'
+
+  return (
+    <Dialog
+      open
+      onClose={pending ? () => {} : onClose}
+      title="新增 MCP 服务器"
+      description={`${scopeLabel(scope, projectName)}。配置兼容 Claude Code mcpServers，保存前可先测试连接。`}
+      wide
+      footer={(
+        <>
+          <Button variant="secondary" onClick={onClose} disabled={pending}>取消</Button>
+          <Button variant="secondary" onClick={() => { void runTest() }} loading={testing} disabled={pending}>{testLabel}</Button>
+          <Button variant="primary" onClick={() => { void submit() }} loading={pending} disabled={testing}>保存</Button>
+        </>
+      )}
+    >
+      {error ? <ErrorState error={error} title="创建 MCP 服务器失败" /> : null}
+      <div className="formGrid">
+        <Field label="名称" htmlFor={nameId} hint={mcpNameHint} error={fieldErrors.name}>
+          <input
+            id={nameId}
+            className="input"
+            value={name}
+            onChange={(event) => { setName(event.target.value); invalidateTest() }}
+            aria-invalid={Boolean(fieldErrors.name)}
+            disabled={pending}
+          />
+        </Field>
+        <Field label="传输方式" htmlFor={transportId} hint="stdio 启动本地命令；http 连接远程 MCP 端点。">
+          <Select
+            id={transportId}
+            value={transport}
+            options={[{ value: 'stdio', label: 'stdio（本地命令）' }, { value: 'http', label: 'http（远程 URL）' }]}
+            onChange={(value) => {
+              setTransport(value === 'http' ? 'http' : 'stdio')
+              invalidateTest()
+            }}
+            disabled={pending}
+          />
+        </Field>
+      </div>
+      {transport === 'stdio' ? (
+        <>
+          <div className="formGrid">
+            <Field label="启动命令" htmlFor={commandId} hint="例如 npx、uvx 或服务端二进制路径。" error={fieldErrors.command}>
+              <input
+                id={commandId}
+                className="input"
+                value={command}
+                onChange={(event) => { setCommand(event.target.value); invalidateTest() }}
+                aria-invalid={Boolean(fieldErrors.command)}
+                disabled={pending}
+              />
+            </Field>
+            <Field label="参数" htmlFor={argsId} hint="每行一个参数；留空表示没有参数。">
+              <Textarea id={argsId} rows={4} value={argsText} onChange={(event) => { setArgsText(event.target.value); invalidateTest() }} disabled={pending} />
+            </Field>
+          </div>
+          <Field label="环境变量" htmlFor={envId} hint="JSON 对象；值可用 ${NAME} 引用服务端环境变量。" error={fieldErrors.env}>
+            <Textarea id={envId} code rows={4} value={envText} onChange={(event) => { setEnvText(event.target.value); invalidateTest() }} spellCheck={false} aria-invalid={Boolean(fieldErrors.env)} disabled={pending} />
+          </Field>
+        </>
+      ) : (
+        <>
+          <div className="formGrid">
+            <Field label="服务地址" htmlFor={urlId} hint="必须是服务端可访问的 MCP HTTP 端点。" error={fieldErrors.url}>
+              <input
+                id={urlId}
+                className="input"
+                value={url}
+                onChange={(event) => { setUrl(event.target.value); invalidateTest() }}
+                aria-invalid={Boolean(fieldErrors.url)}
+                disabled={pending}
+              />
+            </Field>
+            <Field label="请求头" htmlFor={headersId} hint="JSON 对象；值可用 ${NAME} 引用服务端环境变量。" error={fieldErrors.headers}>
+              <Textarea id={headersId} code rows={4} value={headersText} onChange={(event) => { setHeadersText(event.target.value); invalidateTest() }} spellCheck={false} aria-invalid={Boolean(fieldErrors.headers)} disabled={pending} />
+            </Field>
+          </div>
+        </>
+      )}
+      {fieldErrors.config ? <span className={styles.resultError} role="alert">{fieldErrors.config}</span> : null}
+      <div className={ext.checkboxField}>
+        <Checkbox
+          id="mcp-add-enabled"
+          label="创建后启用"
+          checked={enabled}
+          disabled={pending}
+          aria-describedby={`${enabledHintId}-hint`}
+          onChange={(event) => { setEnabled(event.target.checked); invalidateTest() }}
+        />
+        <FieldHint id={`${enabledHintId}-hint`}>停用的服务器不会参与扩展解析，之后可在列表中启用。</FieldHint>
+      </div>
+      <Disclosure summary="粘贴单个服务器 JSON 配置">
+        <Field label="服务器 JSON" htmlFor="mcp-add-paste" hint="支持 name、command、args、env、url 和 headers；不会写入服务器，仅填入表单。">
+          <Textarea id="mcp-add-paste" code rows={6} value={pasteText} onChange={(event) => setPasteText(event.target.value)} spellCheck={false} disabled={pending} />
+        </Field>
+        {pasteError ? <span className={styles.resultError} role="alert">{pasteError}</span> : null}
+        <div className={ext.dialogActions}>
+          <Button variant="secondary" onClick={fillFromPaste} disabled={pending}>填入表单</Button>
+        </div>
+      </Disclosure>
+      {testState?.pending ? <p className={styles.testResult} role="status">正在测试连接…</p> : null}
+      {testState?.error ? <p className={styles.resultError} role="status">测试失败：{testFailureText(testState)}</p> : null}
+      {testState?.result ? <TestResultPanel result={testState.result} /> : null}
+      <ActionHint>测试不会写入服务器；保存时服务端会再次校验名称和配置。</ActionHint>
+    </Dialog>
+  )
+}
+
+function ImportMcpDialog({
+  scope, projectId, projectName, onClose, onImported,
+}: {
+  scope: DialogScope
+  projectId?: number
+  projectName: string
+  onClose: () => void
+  onImported: (servers: McpServer[], tests: Record<string, McpTestState>) => void
+}) {
+  const mounted = useMountedRef()
+  const [text, setText] = useState('')
+  const parsed = useMemo(() => parseImportDocument(text), [text])
+  const [results, setResults] = useState<Record<string, McpTestState>>({})
+  const [testingAll, setTestingAll] = useState(false)
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState<unknown>(null)
+  const documentGeneration = useRef(0)
+
+  // Editing the pasted document starts a new generation: a probe that was
+  // started against the old text must not write its result under the same
+  // server name after the document changed.
+  const resetResults = () => {
+    documentGeneration.current += 1
+    setResults({})
+  }
+
+  const runEntryTest = async (entry: ImportEntry) => {
+    const generation = documentGeneration.current
+    setResults((current) => ({ ...current, [entry.name]: { pending: true, serverName: entry.name } }))
+    try {
+      const result = await testMcpDraft({
+        scope,
+        ...(scope === 'project' && projectId ? { project_id: projectId } : {}),
+        name: entry.name,
+        config: entry.config,
+        enabled: true,
+      })
+      if (mounted.current && documentGeneration.current === generation) {
+        setResults((current) => ({ ...current, [entry.name]: succeededTestState(result, entry.name) }))
+      }
+    } catch (caught) {
+      if (mounted.current && documentGeneration.current === generation) {
+        setResults((current) => ({ ...current, [entry.name]: failedTestState(caught, entry.name) }))
+      }
+    }
+  }
+
+  const runAllTests = async () => {
+    if (!parsed.entries.length) return
+    setTestingAll(true)
+    setError(null)
+    const generation = documentGeneration.current
+    for (const entry of parsed.entries) {
+      if (!mounted.current || documentGeneration.current !== generation) break
+      // Sequential probes stay below the server's process-wide test limit.
+      await runEntryTest(entry)
+    }
+    if (mounted.current) setTestingAll(false)
+  }
+
+  const submit = async () => {
+    if (!parsed.entries.length || parsed.error) return
+    setPending(true)
+    setError(null)
+    try {
+      const document = { mcpServers: Object.fromEntries(parsed.entries.map((entry) => [entry.name, entry.config])) }
+      const response = await importMcpServers(scope, projectId, document)
+      if (mounted.current) onImported(response?.servers || [], results)
+    } catch (caught) {
+      if (!mounted.current) return
+      if (caught instanceof ApiError && caught.status === 409) {
+        setError(new Error('导入失败：存在同名服务器，整批未写入。请修改名称后重试。'))
+      } else if (caught instanceof ApiError && caught.status === 400) {
+        setError(new Error(`导入失败：配置校验未通过，整批未写入。${errorMessage(caught)}`))
+      } else {
+        setError(uncertainWriteError(caught))
+      }
+    } finally {
+      if (mounted.current) setPending(false)
+    }
+  }
+
+  const anyPending = Object.values(results).some((state) => state.pending)
+
+  return (
+    <Dialog
+      open
+      onClose={pending ? () => {} : onClose}
+      title="导入 MCP 服务器"
+      description={`${scopeLabel(scope, projectName)}。粘贴 Claude Code 的 mcpServers 文档，导入前可逐项测试连通性。`}
+      wide
+      footer={(
+        <>
+          <Button variant="secondary" onClick={onClose} disabled={pending}>取消</Button>
+          <Button
+            variant="primary"
+            onClick={() => { void submit() }}
+            loading={pending}
+            disabled={Boolean(parsed.error) || !parsed.entries.length || testingAll || anyPending}
+          >
+            {parsed.entries.length ? `导入 ${parsed.entries.length} 个服务器` : '导入'}
+          </Button>
+        </>
+      )}
+    >
+      {error ? <ErrorState error={error} title="导入失败" /> : null}
+      <Field label="Claude Code 配置" htmlFor="mcp-import-document" hint="粘贴包含 mcpServers 的 JSON 文档；导入和测试结果都不会回显配置值。">
+        <Textarea
+          id="mcp-import-document"
+          code
+          rows={10}
+          value={text}
+          onChange={(event) => { setText(event.target.value); resetResults() }}
+          spellCheck={false}
+          disabled={pending || testingAll || anyPending}
+        />
+      </Field>
+      {parsed.error ? <span className={styles.resultError} role="alert">{parsed.error}</span> : null}
+      {parsed.entries.length ? (
+        <>
+          <p className={ext.importSummary} role="status">已解析 {parsed.entries.length} 个服务器：{parsed.entries.map((entry) => entry.name).join('、')}</p>
+          <div className={ext.dialogActions}>
+            <Button variant="secondary" onClick={() => { void runAllTests() }} loading={testingAll} disabled={pending || anyPending}>逐项测试全部</Button>
+          </div>
+          <ul className={ext.importList}>
+            {parsed.entries.map((entry) => {
+              const state = results[entry.name]
+              return (
+                <li key={entry.name} className={ext.importItem}>
+                  <div className={ext.importItemMain} aria-live="polite">
+                    <code className="mono small">{entry.name}</code>
+                    {state?.pending ? <span className="small muted" role="status">测试中…</span> : null}
+                    {state?.result ? (
+                      <>
+                        <Badge tone="ok">连接成功</Badge>
+                        <span className="small muted">
+                          {typeof state.result.latency_ms === 'number' ? `延迟 ${state.result.latency_ms} ms` : '延迟不可用'}
+                        </span>
+                        <span className="small muted">
+                          工具 {typeof state.result.tool_count === 'number' ? state.result.tool_count : (state.result.tools || []).length} 个
+                        </span>
+                      </>
+                    ) : null}
+                    {state?.error ? (
+                      <span className={styles.resultError}>测试失败：{testFailureText(state)}</span>
+                    ) : null}
+                  </div>
+                  <Button
+                    variant="secondary"
+                    className={ui.smallButton}
+                    onClick={() => { void runEntryTest(entry) }}
+                    loading={state?.pending}
+                    disabled={pending || testingAll}
+                  >
+                    {state?.result ? '重新测试' : state?.error ? '重试' : '测试'}
+                  </Button>
+                </li>
+              )
+            })}
+          </ul>
+        </>
+      ) : null}
+      <ActionHint>导入在单个事务内按名称写入；任一项校验失败时整批不写入。测试只验证连通性，不会写入服务器。</ActionHint>
+    </Dialog>
+  )
+}
+
+function UploadSkillDialog({
+  file, scope, projectId, projectName, onClose, onUploaded,
+}: {
+  file: File
+  scope: DialogScope
+  projectId?: number
+  projectName: string
+  onClose: () => void
+  onUploaded: (skill: Skill) => void
+}) {
+  const mounted = useMountedRef()
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState<unknown>(null)
+  const [fileError, setFileError] = useState('')
+
+  const submit = async () => {
+    const zipName = /\.zip$/i.test(file.name)
+    const zipType = ['application/zip', 'application/x-zip-compressed'].includes(file.type)
+    if (!zipName && !zipType) {
+      setFileError('请选择 .zip 文件。')
+      return
+    }
+    if (file.size > 8 * 1024 * 1024) {
+      setFileError('zip 文件不能超过 8 MiB。')
+      return
+    }
+    setPending(true)
+    setError(null)
+    setFileError('')
+    try {
+      const created = await uploadSkill(scope, projectId, file)
+      if (mounted.current) onUploaded(created)
+    } catch (caught) {
+      if (!mounted.current) return
+      const fields = errorFieldMessages(caught)
+      setFileError(fields.file || '')
+      if (caught instanceof ApiError && caught.status === 409) {
+        setError(new Error('同名 Skill 已存在，请更换名称或删除旧项后重试。'))
+      } else if (!fields.file) {
+        setError(uncertainWriteError(caught))
+      } else {
+        setError(null)
+      }
+    } finally {
+      if (mounted.current) setPending(false)
+    }
+  }
+
+  return (
+    <Dialog
+      open
+      onClose={pending ? () => {} : onClose}
+      title="上传 Skill zip"
+      description={`${scopeLabel(scope, projectName)}。上传的 zip 会解压到受管 Skill 目录；其中的脚本不会被执行。`}
+      footer={(
+        <>
+          <Button variant="secondary" onClick={onClose} disabled={pending}>取消</Button>
+          <Button variant="primary" onClick={() => { void submit() }} loading={pending}>上传</Button>
+        </>
+      )}
+    >
+      {error ? <ErrorState error={error} title="上传失败" /> : null}
+      <Note tone="info">
+        zip 必须包含 SKILL.md；压缩包不超过 8 MiB，解压总量不超过 16 MiB，单文件不超过 4 MiB，最多 512 个文件。同名 Skill 不会被覆盖。
+      </Note>
+      <div className={ext.fileRow}>
+        <span className={ext.fileName}>{file.name}</span>
+        <span className="small muted">{formatFileSize(file.size)}</span>
+      </div>
+      {fileError ? <span className={styles.resultError} role="alert">{fileError}</span> : null}
+      <ActionHint>上传成功后列表会刷新；内置 Skill 不提供替换或删除入口。</ActionHint>
+    </Dialog>
+  )
+}
+
+function RegisterSkillDirDialog({
+  scope, projectId, projectName, onClose, onRegistered,
+}: {
+  scope: DialogScope
+  projectId?: number
+  projectName: string
+  onClose: () => void
+  onRegistered: (skill: Skill) => void
+}) {
+  const mounted = useMountedRef()
+  const [dir, setDir] = useState('')
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState<unknown>(null)
+  const [fieldError, setFieldError] = useState('')
+
+  const submit = async () => {
+    const trimmed = dir.trim()
+    if (!trimmed.startsWith('/')) {
+      setFieldError('请输入以 / 开头的绝对路径。')
+      return
+    }
+    if (trimmed.includes('\n') || trimmed.includes('\0')) {
+      setFieldError('路径不能包含换行或空字符。')
+      return
+    }
+    setFieldError('')
+    setError(null)
+    setPending(true)
+    try {
+      const created = await registerSkillDir(scope, projectId, trimmed)
+      if (mounted.current) onRegistered(created)
+    } catch (caught) {
+      if (!mounted.current) return
+      const fields = errorFieldMessages(caught)
+      setFieldError(fields.dir || '')
+      if (caught instanceof ApiError && caught.status === 409) {
+        setError(new Error('同名 Skill 已存在，请更换名称或删除旧项后重试。'))
+      } else if (!fields.dir) {
+        setError(uncertainWriteError(caught))
+      } else {
+        setError(null)
+      }
+    } finally {
+      if (mounted.current) setPending(false)
+    }
+  }
+
+  return (
+    <Dialog
+      open
+      onClose={pending ? () => {} : onClose}
+      title="登记服务器目录"
+      description={`${scopeLabel(scope, projectName)}。从服务端文件系统读取目录并复制到受管 Skill 目录。`}
+      footer={(
+        <>
+          <Button variant="secondary" onClick={onClose} disabled={pending}>取消</Button>
+          <Button variant="primary" onClick={() => { void submit() }} loading={pending}>登记</Button>
+        </>
+      )}
+    >
+      {error ? <ErrorState error={error} title="登记失败" /> : null}
+      <Note tone="warn">
+        该操作读取服务端文件系统路径并复制到受管目录，源目录不会被修改或删除。只登记自己控制的目录，目录及其内部不能包含符号链接。
+      </Note>
+      <Field label="服务端绝对路径" htmlFor="skill-register-dir" hint="必须是以 / 开头的绝对路径，且目录中必须包含 SKILL.md。" error={fieldError}>
+        <input
+          id="skill-register-dir"
+          className="input"
+          value={dir}
+          onChange={(event) => setDir(event.target.value)}
+          aria-invalid={Boolean(fieldError)}
+          disabled={pending}
+        />
+      </Field>
+      <ActionHint>目录登记是高级选项；默认推荐使用 zip 上传。</ActionHint>
     </Dialog>
   )
 }

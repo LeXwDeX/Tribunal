@@ -17,9 +17,12 @@ import type {
   FindingPage,
   FindingsSummary,
   LlmCall,
+  McpDraftTestInput,
+  McpImportResult,
   McpServer,
   McpServerPage,
-  McpTool,
+  McpServerWrite,
+  McpTestResult,
   Model,
   ModelHealth,
   ModelPreset,
@@ -257,6 +260,28 @@ export async function listMcpServers(scope: string, projectId?: number | string,
   return request<McpServerPage>(withQuery('/api/v1/mcp-servers', { scope, project_id: projectId, cursor }))
 }
 
+export async function createMcpServer(input: McpServerWrite): Promise<McpServer> {
+  return request<McpServer>('/api/v1/mcp-servers', { method: 'POST', body: input })
+}
+
+export interface McpImportDocument {
+  mcpServers: Record<string, Record<string, unknown>>
+}
+
+export async function importMcpServers(
+  scope: string,
+  projectId: number | string | undefined,
+  document: McpImportDocument,
+): Promise<McpImportResult> {
+  return request<McpImportResult>(withQuery('/api/v1/mcp-servers/import', { scope, project_id: projectId }), {
+    method: 'POST',
+    body: document,
+  })
+}
+
+export async function testMcpDraft(input: McpDraftTestInput): Promise<McpTestResult> {
+  return request<McpTestResult>('/api/v1/mcp-servers:test', { method: 'POST', body: input })
+}
 
 export async function updateMcpServer(id: string, input: { name?: string; config?: Record<string, unknown>; enabled?: boolean }): Promise<McpServer> {
   return request<McpServer>(`/api/v1/mcp-servers/${segment(id)}`, { method: 'PUT', body: input })
@@ -266,13 +291,28 @@ export async function deleteMcpServer(id: string): Promise<void> {
   await request<void>(`/api/v1/mcp-servers/${segment(id)}`, { method: 'DELETE' })
 }
 
-export async function testMcpServer(id: string): Promise<{ tools?: McpTool[]; error?: string }> {
-  return request<{ tools?: McpTool[]; error?: string }>(`/api/v1/mcp-servers/${segment(id)}/test`, { method: 'POST' })
+export async function testMcpServer(id: string): Promise<McpTestResult> {
+  return request<McpTestResult>(`/api/v1/mcp-servers/${segment(id)}/test`, { method: 'POST' })
 }
 
 
 export async function listSkills(scope: string, projectId?: number | string, cursor?: string): Promise<SkillPage> {
   return request<SkillPage>(withQuery('/api/v1/skills', { scope, project_id: projectId, cursor }))
+}
+
+export async function uploadSkill(scope: string, projectId: number | string | undefined, file: File): Promise<Skill> {
+  const form = new FormData()
+  form.set('scope', scope)
+  if (projectId !== undefined) form.set('project_id', String(projectId))
+  form.set('file', file)
+  return request<Skill>('/api/v1/skills', { method: 'POST', body: form })
+}
+
+export async function registerSkillDir(scope: string, projectId: number | string | undefined, dir: string): Promise<Skill> {
+  return request<Skill>('/api/v1/skills', {
+    method: 'POST',
+    body: { scope, project_id: projectId, dir },
+  })
 }
 
 

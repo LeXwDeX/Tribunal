@@ -386,6 +386,55 @@ export interface McpServer {
 export interface McpTool {
   name: string
   description?: string
+  /** Tool annotations from the MCP server; absent on older responses. */
+  read_only?: boolean
+  destructive?: boolean
+  /** False when the annotations make the tool unsafe to grant to a block. */
+  bindable?: boolean
+  annotated?: boolean
+}
+
+export interface McpTestResult {
+  ok?: boolean
+  latency_ms?: number
+  tool_count?: number
+  truncated?: boolean
+  tools?: McpTool[]
+  /** Legacy success body; current failures use the API error envelope. */
+  error?: string
+}
+
+export interface McpServerWrite {
+  scope: 'platform' | 'project'
+  project_id?: number
+  name: string
+  config: Record<string, unknown>
+  enabled?: boolean
+}
+
+// A draft test either references a stored server (id) or carries a complete
+// unsaved definition. The two shapes keep the stored-server fallback from
+// being mixed with a half-filled new server.
+export type McpDraftTestInput =
+  | {
+    id: string
+    scope?: 'platform' | 'project'
+    project_id?: number
+    name?: string
+    config?: Record<string, unknown>
+    enabled?: boolean
+  }
+  | {
+    id?: undefined
+    scope: 'platform' | 'project'
+    project_id?: number
+    name: string
+    config: Record<string, unknown>
+    enabled?: boolean
+  }
+
+export interface McpImportResult {
+  servers: McpServer[]
 }
 
 export interface Skill {

@@ -45,13 +45,14 @@ describe('extensions v2 layout', () => {
     expect(await screen.findByRole('tab', { name: 'MCP 服务器 2' })).toBeInTheDocument()
   })
 
-  it('renders skills as cards without an upload card for writers', async () => {
+  it('renders skills as cards with upload and directory entries for writers', async () => {
     installFetch(routes())
     renderWithProviders(<ExtensionsManager scope="platform" tab="skills" onTabChange={() => {}} />)
 
     const card = (await screen.findByText('sec-checklist')).closest('article') as HTMLElement
     expect(within(card).getByText('平台级')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /上传 Skill zip/ })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '上传 Skill zip' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '登记服务器目录' })).toBeInTheDocument()
   })
 
   it('hides the upload card from viewers', async () => {
@@ -59,6 +60,7 @@ describe('extensions v2 layout', () => {
     renderWithProviders(<ExtensionsManager scope="platform" tab="skills" onTabChange={() => {}} />, { me: viewerMe })
 
     await screen.findByText('sec-checklist')
-    expect(screen.queryByRole('button', { name: /上传 Skill zip/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '上传 Skill zip' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '登记服务器目录' })).not.toBeInTheDocument()
   })
 })
