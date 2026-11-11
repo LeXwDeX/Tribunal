@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/url"
 	"sort"
@@ -197,8 +198,10 @@ func (s *Server) handleUpdateModel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "validation_failed", "invalid model", details)
 		return
 	}
-	stored, err := s.modelsStore.GetModel(r.Context(), id)
-	if errors.Is(err, store.ErrNotFound) || (err == nil && stored.DeletedAt != nil) {
+	// Read only the endpoint columns so a corrupt params_json does not block a
+	// full-record replacement that repairs the record.
+	stored, err := s.modelsStore.GetModelEndpoint(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, r, http.StatusNotFound, "not_found", "model not found", nil)
 		return
 	}
@@ -208,8 +211,9 @@ func (s *Server) handleUpdateModel(w http.ResponseWriter, r *http.Request) {
 	}
 	// The stored credential may only be sent to the endpoint it was saved for,
 	// matching the draft test rule. An explicit key (including an empty value
-	// that clears it) allows the change.
-	if request.APIKey == nil && endpointChanged(*stored, candidate) {
+	// that clears it) allows the change. A model without a stored key has
+	// nothing to forward.
+	if request.APIKey == nil && stored.HasAPIKey && endpointChanged(stored.Protocol, stored.BaseURL, candidate.Protocol, candidate.BaseURL) {
 		validationFailed(w, r, "api_key", "api_key is required when the endpoint changes")
 		return
 	}
@@ -322,6 +326,27 @@ func decodeModelParamsPatch(raw map[string]json.RawMessage) (store.ModelParamsPa
 			}
 			return true
 		}
+		// Object parameters are replaced wholesale: unsubmitted nested fields
+		// are written as zero values. Unknown nested keys and null values are
+		// rejected so a typo cannot silently reset stored settings.
+		decodeObject := func(name string, target any) bool {
+			if containsJSONNull(value) {
+				detail(name, "must not contain null values; use a top-level null to clear the object")
+				return false
+			}
+			dec := json.NewDecoder(bytes.NewReader(value))
+			dec.DisallowUnknownFields()
+			if err := dec.Decode(target); err != nil {
+				detail(name, "must be an object with only known fields")
+				return false
+			}
+			var extra any
+			if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+				detail(name, "must be a single object")
+				return false
+			}
+			return true
+		}
 		switch name {
 		case "max_tokens":
 			var v int
@@ -350,17 +375,17 @@ func decodeModelParamsPatch(raw map[string]json.RawMessage) (store.ModelParamsPa
 			}
 		case "reasoning":
 			var v config.ReasoningConfig
-			if decode(name, &v) {
+			if decodeObject(name, &v) {
 				patch.Reasoning = store.ParamUpdate[config.ReasoningConfig]{Set: true, Value: &v}
 			}
 		case "thinking":
 			var v config.ThinkingConfig
-			if decode(name, &v) {
+			if decodeObject(name, &v) {
 				patch.Thinking = store.ParamUpdate[config.ThinkingConfig]{Set: true, Value: &v}
 			}
 		case "price":
 			var v config.PriceConfig
-			if decode(name, &v) {
+			if decodeObject(name, &v) {
 				patch.Price = store.ParamUpdate[config.PriceConfig]{Set: true, Value: &v}
 			}
 		case "forced_tool_choice":
@@ -378,6 +403,21 @@ func decodeModelParamsPatch(raw map[string]json.RawMessage) (store.ModelParamsPa
 		}
 	}
 	return patch, details
+}
+
+// containsJSONNull reports whether raw contains a JSON null token at any
+// depth. Only a top-level null clears a nullable parameter object.
+func containsJSONNull(raw json.RawMessage) bool {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	for {
+		token, err := dec.Token()
+		if err != nil {
+			return false
+		}
+		if token == nil {
+			return true
+		}
+	}
 }
 
 func (s *Server) handleDeleteModel(w http.ResponseWriter, r *http.Request) {
@@ -486,7 +526,7 @@ func (s *Server) handleTestModelDraft(w http.ResponseWriter, r *http.Request) {
 		credential = *request.APIKey
 	case stored != nil:
 		// The stored key may only be sent to the endpoint it was saved for.
-		if endpointChanged(*stored, model) {
+		if endpointChanged(stored.Protocol, stored.BaseURL, model.Protocol, model.BaseURL) {
 			validationFailed(w, r, "api_key", "api_key is required when the endpoint changes")
 			return
 		}
@@ -593,8 +633,8 @@ func modelAuditFields(request modelWriteRequest) []string {
 // endpointChanged reports whether a requested model definition points at a
 // different protocol or endpoint (scheme, host and port) than the stored one.
 // A path-only change keeps the stored credential reusable.
-func endpointChanged(stored, requested store.Model) bool {
-	return stored.Protocol != requested.Protocol || !sameEndpoint(stored.BaseURL, requested.BaseURL)
+func endpointChanged(storedProtocol, storedBaseURL, requestedProtocol, requestedBaseURL string) bool {
+	return storedProtocol != requestedProtocol || !sameEndpoint(storedBaseURL, requestedBaseURL)
 }
 
 // sameEndpoint reports whether two base URLs share scheme, host and port.

@@ -50,6 +50,8 @@ type fakeModelStore struct {
 	updateErr         error
 	createdCredential string
 	stored            *store.Model
+	getModelErr       error
+	endpointErr       error
 	updated           *store.Model
 	updateCredential  *string
 	paramsUpdateErr   error
@@ -60,10 +62,24 @@ type fakeModelStore struct {
 
 func (f *fakeModelStore) ListModels(context.Context) ([]store.Model, error) { return nil, nil }
 func (f *fakeModelStore) GetModel(_ context.Context, id string) (*store.Model, error) {
+	if f.getModelErr != nil {
+		return nil, f.getModelErr
+	}
 	if f.stored == nil || f.stored.ID != id {
 		return nil, store.ErrNotFound
 	}
 	return f.stored, nil
+}
+func (f *fakeModelStore) GetModelEndpoint(_ context.Context, id string) (store.ModelEndpoint, error) {
+	if f.endpointErr != nil {
+		return store.ModelEndpoint{}, f.endpointErr
+	}
+	if f.stored == nil || f.stored.ID != id || f.stored.DeletedAt != nil {
+		return store.ModelEndpoint{}, store.ErrNotFound
+	}
+	return store.ModelEndpoint{
+		Protocol: f.stored.Protocol, BaseURL: f.stored.BaseURL, HasAPIKey: f.stored.HasAPIKey,
+	}, nil
 }
 func (f *fakeModelStore) CreateModel(_ context.Context, m store.Model, credential string) (*store.Model, error) {
 	f.createdCredential = credential

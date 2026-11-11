@@ -270,6 +270,49 @@ func TestUpdateModelParamsMergesOnlySubmittedKeys(t *testing.T) {
 	}
 }
 
+// A corrupt params_json must not hide endpoint metadata, and a full-record
+// update must still be able to replace and repair the corrupt parameters.
+func TestModelEndpointAndFullUpdateRepairCorruptParams(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t, newFakeClock())
+	if err := s.ConfigureModelSecrets(ctx, sealTestCipher(t, 1)); err != nil {
+		t.Fatal(err)
+	}
+	created, err := s.CreateModel(ctx, store.Model{
+		DisplayName: "model", Protocol: "openai-chat", BaseURL: "https://example.com", Model: "m",
+		Params: store.ModelParams{MaxTokens: 10, MaxConcurrency: 1}, CreatedBy: 1,
+	}, "secret-canary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE llm_models SET params_json='not-json' WHERE id=?`, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetModel(ctx, created.ID); err == nil {
+		t.Fatal("corrupt parameters must keep GetModel failing")
+	}
+	endpoint, err := s.GetModelEndpoint(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("endpoint lookup on a corrupt record: %v", err)
+	}
+	if endpoint.Protocol != "openai-chat" || endpoint.BaseURL != "https://example.com" || !endpoint.HasAPIKey {
+		t.Fatalf("endpoint = %+v, want stored protocol, base URL and key presence", endpoint)
+	}
+	if _, err := s.GetModelEndpoint(ctx, "user:missing"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("missing endpoint = %v, want ErrNotFound", err)
+	}
+	repaired, err := s.UpdateModel(ctx, *created, created.Revision, nil)
+	if err != nil {
+		t.Fatalf("full-record update did not repair corrupt parameters: %v", err)
+	}
+	if repaired.Params.MaxTokens != 10 || repaired.Revision != created.Revision+1 {
+		t.Fatalf("repaired model = %+v", repaired)
+	}
+	if got, err := s.GetModel(ctx, created.ID); err != nil || got.Params.MaxTokens != 10 {
+		t.Fatalf("repaired record unreadable: %+v, %v", got, err)
+	}
+}
+
 func TestCreateModelRollsBackWhenReadBackFails(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t, newFakeClock())

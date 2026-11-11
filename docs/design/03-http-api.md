@@ -459,7 +459,9 @@ Provider 返回 `name`、`protocol`、`base_url`、`model`、`max_concurrency`�
 | POST | `/api/v1/models/{id}/test` | 测试已保存模型；成功返回 `{"ok": true, "model": "...", "latency_ms": N}` |
 | POST | `/api/v1/models:test` | 草稿测试，详见下文 |
 
-两种修改语义不要混用：`PATCH /api/v1/models/{id}` 是整记录替换，适合提交完整表单；`PATCH /api/v1/models/{id}/params` 是参数级合并，只改提交的键，适合调整部分参数。两者都要求调用方提交 `revision` 做乐观锁。整记录替换在 `protocol` 或 `base_url` 的 scheme/host/port 变化时必须显式提供 `api_key`；参数合并不改变 `protocol`、`base_url`，不涉及已存凭据的复用。
+两种修改语义不要混用：`PATCH /api/v1/models/{id}` 是整记录替换，适合提交完整表单；`PATCH /api/v1/models/{id}/params` 是参数级合并，只改提交的键，适合调整部分参数。两者都要求调用方提交 `revision` 做乐观锁。整记录替换在 `protocol` 或 `base_url` 的 scheme/host/port 变化时必须显式提供 `api_key`（已存模型没有密钥时不需要）；参数合并不改变 `protocol`、`base_url`，不涉及已存凭据的复用。端点预读只查询协议、地址与密钥存在性，`params_json` 损坏的记录仍可通过整记录替换修复。
+
+参数合并中的 `reasoning`、`thinking`、`price` 是整体替换：提交其中某个对象时，对象内未提交的字段按零值写入（例如只提交 `price.input_per_mtok` 会把 `output_per_mtok` 归零），调用方须提交完整对象。对象内的未知字段返回 400（字段为 `params.reasoning`、`params.thinking` 或 `params.price`）；对象内出现 `null` 也返回 400，清除整个对象须对顶层键传 `null`。
 
 `POST /api/v1/models:test` 在保存前测试草稿：
 

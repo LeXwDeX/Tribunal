@@ -116,6 +116,15 @@ func (p ModelParamsPatch) Fields() []string {
 	return fields
 }
 
+// ModelEndpoint is the stored endpoint metadata needed to decide whether a
+// saved credential may be reused. It does not parse the parameter JSON, so it
+// remains readable when a record's parameters are corrupt.
+type ModelEndpoint struct {
+	Protocol  string
+	BaseURL   string
+	HasAPIKey bool
+}
+
 // Model is a public model record. Credentials are never included.
 type Model struct {
 	ID          string      `json:"id"`
@@ -141,6 +150,7 @@ type Model struct {
 type ModelStore interface {
 	ListModels(context.Context) ([]Model, error)
 	GetModel(context.Context, string) (*Model, error)
+	GetModelEndpoint(context.Context, string) (ModelEndpoint, error)
 	CreateModel(context.Context, Model, string) (*Model, error)
 	UpdateModel(context.Context, Model, int64, *string) (*Model, error)
 	UpdateModelParams(context.Context, string, int64, ModelParamsPatch, int64) (*Model, error)
