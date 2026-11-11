@@ -577,6 +577,12 @@ func ValidateProviderConfig(field string, provider ProviderConfig, opts Provider
 		if provider.Thinking.BudgetTokens < 0 {
 			p.add("%s.thinking.budget_tokens must not be negative", field)
 		}
+		// Anthropic rejects an extended-thinking budget below 1024 tokens at
+		// request time. Reject it here so a stored model cannot pass validation
+		// and then fail every request.
+		if provider.Protocol == "anthropic" && provider.Thinking.BudgetTokens > 0 && provider.Thinking.BudgetTokens < 1024 {
+			p.add("%s.thinking.budget_tokens must be at least 1024 for anthropic", field)
+		}
 		switch provider.Thinking.Type {
 		case "", "enabled", "disabled":
 		default:

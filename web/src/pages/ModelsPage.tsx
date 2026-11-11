@@ -208,8 +208,11 @@ function validateModelForm(form: ModelForm): FormErrors {
     const value = Number(form.temperature)
     if (!Number.isFinite(value) || value < 0 || value > 2) errors.temperature = 'temperature 必须在 0 到 2 之间。'
   }
-  if (form.thinkingBudget.trim() && !NON_NEGATIVE_INT.test(form.thinkingBudget.trim())) {
+  const budget = form.thinkingBudget.trim()
+  if (budget && !NON_NEGATIVE_INT.test(budget)) {
     errors.thinkingBudget = 'thinking.budget_tokens 必须是不小于 0 的整数。'
+  } else if (budget && form.protocol === 'anthropic' && Number(budget) > 0 && Number(budget) < 1024) {
+    errors.thinkingBudget = 'anthropic 的 thinking.budget_tokens 必须不小于 1024。'
   }
   return errors
 }
@@ -273,14 +276,18 @@ function apiFieldErrors(error: unknown): { fields: FormErrors; message?: string 
   for (const detail of error.details ?? []) {
     const key = detail.field ? API_FIELD_MAP[detail.field] : undefined
     if (!key) {
-      unmapped.push([detail.field, detail.message].filter(Boolean).join(': '))
+      const text = [detail.field, detail.message].filter(Boolean).join(': ')
+      if (text) unmapped.push(text)
       continue
     }
     const message = detail.message || error.message
     fields[key] = fields[key] ? `${fields[key]}；${message}` : message
   }
-  const message = unmapped.length ? `${error.message}（${unmapped.join('；')}）` : undefined
-  return { fields, message }
+  if (unmapped.length) return { fields, message: `${error.message}（${unmapped.join('；')}）` }
+  // An API error without field details (for example a 422 provider_test_failed,
+  // 503 unavailable or 403 forbidden) must still surface at form level.
+  if (!Object.keys(fields).length) return { fields, message: errorMessage(error) }
+  return { fields }
 }
 
 function configName(id: string): string {
@@ -355,10 +362,15 @@ function ModelCard({ model, canWrite, onEdit, onDelete }: {
   )
 }
 
-function ModelDrawer({ open, model, presets, onClose, onSaved }: {
+function ModelDrawer({
+  open, model, presets, presetsLoading, presetsFailed, onReloadPresets, onClose, onSaved,
+}: {
   open: boolean
   model?: Model
   presets: ModelPreset[]
+  presetsLoading: boolean
+  presetsFailed: boolean
+  onReloadPresets: () => void
   onClose: () => void
   onSaved: () => void
 }) {
@@ -503,18 +515,29 @@ function ModelDrawer({ open, model, presets, onClose, onSaved }: {
       )}
     >
       <div className={styles.modelForm}>
-        {!configModel && presets.length ? (
+        {!configModel && !model ? (
           <section className={styles.presetBlock} aria-label="模型预设">
             <span className={styles.presetTitle}>DeepSeek 预设</span>
-            <div className={styles.presetRow}>
-              {presets.map((preset) => (
-                <Button key={preset.id} variant="secondary" className={ui.smallButton} onClick={() => applyPreset(preset)}>
-                  {presetLabel(preset)}
-                </Button>
-              ))}
-            </div>
-            <FieldHint>预设只填入当前表单，不会立即保存；保存后对之后启动的评审生效。</FieldHint>
-            {presetNote ? <span className={styles.presetApplied} role="status">已填入 {presetNote}，可继续修改。</span> : null}
+            {presetsLoading ? <LoadingState label="预设加载中…" /> : presetsFailed ? (
+              <Note tone="danger" role="alert">
+                <div className={styles.presetError}>
+                  <span>预设加载失败，仍可手动填写。</span>
+                  <Button variant="secondary" className={ui.smallButton} onClick={onReloadPresets}>重试</Button>
+                </div>
+              </Note>
+            ) : presets.length ? (
+              <>
+                <div className={styles.presetRow}>
+                  {presets.map((preset) => (
+                    <Button key={preset.id} variant="secondary" className={ui.smallButton} onClick={() => applyPreset(preset)}>
+                      {presetLabel(preset)}
+                    </Button>
+                  ))}
+                </div>
+                <FieldHint>预设只填入当前表单，不会立即保存；保存后对之后启动的评审生效。</FieldHint>
+                {presetNote ? <span className={styles.presetApplied} role="status">已填入 {presetNote}，可继续修改。</span> : null}
+              </>
+            ) : <FieldHint>没有可用预设，请手动填写。</FieldHint>}
           </section>
         ) : null}
 
@@ -522,16 +545,16 @@ function ModelDrawer({ open, model, presets, onClose, onSaved }: {
           <legend className={styles.modelFormLegend}>连接</legend>
           <div className={styles.modelFormGrid}>
             <Field label="显示名" htmlFor={ids.display} error={errors.displayName}>
-              <input id={ids.display} className={ui.input} value={form.displayName} onChange={(event) => update({ displayName: event.target.value })} />
+              <input id={ids.display} className={ui.input} value={form.displayName} aria-invalid={errors.displayName ? true : undefined} onChange={(event) => update({ displayName: event.target.value })} />
             </Field>
             <Field label="协议" htmlFor={ids.protocol} error={errors.protocol}>
-              <Select id={ids.protocol} value={form.protocol} options={PROTOCOL_OPTIONS} onChange={(value) => update({ protocol: value })} />
+              <Select id={ids.protocol} value={form.protocol} options={PROTOCOL_OPTIONS} onChange={(value) => update({ protocol: value })} aria-invalid={errors.protocol ? true : undefined} />
             </Field>
             <Field label="base_url" htmlFor={ids.base} error={errors.baseURL}>
-              <input id={ids.base} className={ui.input} value={form.baseURL} onChange={(event) => update({ baseURL: event.target.value })} />
+              <input id={ids.base} className={ui.input} value={form.baseURL} aria-invalid={errors.baseURL ? true : undefined} onChange={(event) => update({ baseURL: event.target.value })} />
             </Field>
             <Field label="上游模型" htmlFor={ids.model} error={errors.upstreamModel}>
-              <input id={ids.model} className={ui.input} value={form.upstreamModel} onChange={(event) => update({ upstreamModel: event.target.value })} />
+              <input id={ids.model} className={ui.input} value={form.upstreamModel} aria-invalid={errors.upstreamModel ? true : undefined} onChange={(event) => update({ upstreamModel: event.target.value })} />
             </Field>
             <Field label="API key" htmlFor={ids.key} error={errors.apiKey}>
               <Select
@@ -540,8 +563,20 @@ function ModelDrawer({ open, model, presets, onClose, onSaved }: {
                 options={KEY_MODE_OPTIONS}
                 onChange={(value) => setKeyMode(value as KeyMode)}
                 aria-label="API key 状态"
+                aria-invalid={errors.apiKey ? true : undefined}
+                aria-describedby={errors.apiKey ? `${ids.key}-error` : undefined}
               />
-              {keyMode === 'replace' ? <input id={ids.key} className={ui.input} type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} /> : null}
+              {keyMode === 'replace' ? (
+                <input
+                  id={ids.key}
+                  className={ui.input}
+                  type="password"
+                  value={apiKey}
+                  aria-invalid={errors.apiKey ? true : undefined}
+                  aria-describedby={errors.apiKey ? `${ids.key}-error` : undefined}
+                  onChange={(event) => setApiKey(event.target.value)}
+                />
+              ) : null}
             </Field>
           </div>
         </fieldset>
@@ -550,7 +585,7 @@ function ModelDrawer({ open, model, presets, onClose, onSaved }: {
           <legend className={styles.modelFormLegend}>采样</legend>
           <div className={styles.modelFormGrid}>
             <Field label="temperature" htmlFor={ids.temperature} hint="0 到 2；留空使用上游默认。" error={errors.temperature}>
-              <NumberField id={ids.temperature} min={0} max={2} step={0.1} value={form.temperature} onChange={(event) => update({ temperature: event.target.value })} />
+              <NumberField id={ids.temperature} min={0} max={2} step={0.1} value={form.temperature} aria-invalid={errors.temperature ? true : undefined} onChange={(event) => update({ temperature: event.target.value })} />
             </Field>
             <Field label="forced_tool_choice" htmlFor={ids.toolChoice} hint="声明上游是否接受强制 submit_result 工具选择。" error={errors.forcedToolChoice}>
               <Select
@@ -558,6 +593,7 @@ function ModelDrawer({ open, model, presets, onClose, onSaved }: {
                 value={form.forcedToolChoice}
                 options={FORCED_TOOL_CHOICE_OPTIONS}
                 onChange={(value) => update({ forcedToolChoice: value })}
+                aria-invalid={errors.forcedToolChoice ? true : undefined}
               />
             </Field>
             <div className={styles.checkField}>
@@ -566,10 +602,11 @@ function ModelDrawer({ open, model, presets, onClose, onSaved }: {
                 label="strict_role_alternation"
                 checked={form.strictRoleAlternation}
                 onChange={(event) => update({ strictRoleAlternation: event.target.checked })}
-                aria-describedby={`${ids.strict}-hint`}
+                aria-invalid={errors.strictRoleAlternation ? true : undefined}
+                aria-describedby={[`${ids.strict}-hint`, errors.strictRoleAlternation ? `${ids.strict}-error` : undefined].filter(Boolean).join(' ')}
               />
               <FieldHint id={`${ids.strict}-hint`}>开启后把用户提示折入最后一条工具消息，满足严格的角色交替。</FieldHint>
-              {errors.strictRoleAlternation ? <span className={styles.formError} role="alert">{errors.strictRoleAlternation}</span> : null}
+              {errors.strictRoleAlternation ? <span className={styles.formError} id={`${ids.strict}-error`} role="alert">{errors.strictRoleAlternation}</span> : null}
             </div>
           </div>
         </fieldset>
@@ -578,13 +615,13 @@ function ModelDrawer({ open, model, presets, onClose, onSaved }: {
           <legend className={styles.modelFormLegend}>推理</legend>
           <div className={styles.modelFormGrid}>
             <Field label="reasoning.effort" htmlFor={ids.effort} hint="anthropic 不发送 effort，改用 thinking.budget_tokens。" error={errors.effort}>
-              <Select id={ids.effort} value={form.effort} options={EFFORT_OPTIONS} onChange={(value) => update({ effort: value })} />
+              <Select id={ids.effort} value={form.effort} options={EFFORT_OPTIONS} onChange={(value) => update({ effort: value })} aria-invalid={errors.effort ? true : undefined} />
             </Field>
             <Field label="thinking.type" htmlFor={ids.thinkingType} hint="仅 openai-chat 发送 thinking.type；anthropic 由 budget_tokens 决定。" error={errors.thinkingType}>
-              <Select id={ids.thinkingType} value={form.thinkingType} options={THINKING_TYPE_OPTIONS} onChange={(value) => update({ thinkingType: value })} />
+              <Select id={ids.thinkingType} value={form.thinkingType} options={THINKING_TYPE_OPTIONS} onChange={(value) => update({ thinkingType: value })} aria-invalid={errors.thinkingType ? true : undefined} />
             </Field>
-            <Field label="thinking.budget_tokens" htmlFor={ids.thinkingBudget} hint="0 或留空表示不设置 thinking 预算。" error={errors.thinkingBudget}>
-              <NumberField id={ids.thinkingBudget} min={0} step={1} value={form.thinkingBudget} onChange={(event) => update({ thinkingBudget: event.target.value })} />
+            <Field label="thinking.budget_tokens" htmlFor={ids.thinkingBudget} hint="0 或留空表示不设置；anthropic 启用时必须不小于 1024。" error={errors.thinkingBudget}>
+              <NumberField id={ids.thinkingBudget} min={0} step={1} value={form.thinkingBudget} aria-invalid={errors.thinkingBudget ? true : undefined} onChange={(event) => update({ thinkingBudget: event.target.value })} />
             </Field>
             <div className={styles.checkField}>
               <Checkbox
@@ -592,10 +629,11 @@ function ModelDrawer({ open, model, presets, onClose, onSaved }: {
                 label="preserve_reasoning_content"
                 checked={form.preserveReasoningContent}
                 onChange={(event) => update({ preserveReasoningContent: event.target.checked })}
-                aria-describedby={`${ids.preserve}-hint`}
+                aria-invalid={errors.preserveReasoningContent ? true : undefined}
+                aria-describedby={[`${ids.preserve}-hint`, errors.preserveReasoningContent ? `${ids.preserve}-error` : undefined].filter(Boolean).join(' ')}
               />
               <FieldHint id={`${ids.preserve}-hint`}>仅在 openai-chat 生效：把 reasoning_content 回传给后续请求。</FieldHint>
-              {errors.preserveReasoningContent ? <span className={styles.formError} role="alert">{errors.preserveReasoningContent}</span> : null}
+              {errors.preserveReasoningContent ? <span className={styles.formError} id={`${ids.preserve}-error`} role="alert">{errors.preserveReasoningContent}</span> : null}
             </div>
           </div>
         </fieldset>
@@ -604,16 +642,16 @@ function ModelDrawer({ open, model, presets, onClose, onSaved }: {
           <legend className={styles.modelFormLegend}>限流</legend>
           <div className={styles.modelFormGrid}>
             <Field label="max_tokens" htmlFor={ids.tokens} hint="模型默认（不发送；DeepSeek 默认 8K/64K/128K，不等于最大）。anthropic 必须填写大于 0 的值。" error={errors.maxTokens}>
-              <NumberField id={ids.tokens} min={0} step={1} value={form.maxTokens} onChange={(event) => update({ maxTokens: event.target.value })} />
+              <NumberField id={ids.tokens} min={0} step={1} value={form.maxTokens} aria-invalid={errors.maxTokens ? true : undefined} onChange={(event) => update({ maxTokens: event.target.value })} />
             </Field>
             <Field label="max_concurrency" htmlFor={ids.concurrency} hint="留空或 0 表示不限制本地并发。" error={errors.maxConcurrency}>
-              <NumberField id={ids.concurrency} min={0} step={1} value={form.maxConcurrency} onChange={(event) => update({ maxConcurrency: event.target.value })} />
+              <NumberField id={ids.concurrency} min={0} step={1} value={form.maxConcurrency} aria-invalid={errors.maxConcurrency ? true : undefined} onChange={(event) => update({ maxConcurrency: event.target.value })} />
             </Field>
             <Field label="context_window" htmlFor={ids.context} hint="上游可接收的输入窗口；0 表示未知。" error={errors.contextWindow}>
-              <NumberField id={ids.context} min={0} step={1} value={form.contextWindow} onChange={(event) => update({ contextWindow: event.target.value })} />
+              <NumberField id={ids.context} min={0} step={1} value={form.contextWindow} aria-invalid={errors.contextWindow ? true : undefined} onChange={(event) => update({ contextWindow: event.target.value })} />
             </Field>
             <Field label="rpm" htmlFor={ids.rpm} hint="每分钟请求数；0 表示不限制。" error={errors.rpm}>
-              <NumberField id={ids.rpm} min={0} step={1} value={form.rpm} onChange={(event) => update({ rpm: event.target.value })} />
+              <NumberField id={ids.rpm} min={0} step={1} value={form.rpm} aria-invalid={errors.rpm ? true : undefined} onChange={(event) => update({ rpm: event.target.value })} />
             </Field>
           </div>
           {form.maxConcurrency.trim() === '0' ? (
@@ -809,6 +847,9 @@ export function ModelsPage() {
         open={drawerOpen}
         model={editing}
         presets={modelPresets.data?.presets ?? []}
+        presetsLoading={modelPresets.isPending}
+        presetsFailed={modelPresets.isError}
+        onReloadPresets={() => { void modelPresets.refetch() }}
         onClose={() => setDrawerOpen(false)}
         onSaved={saved}
       />

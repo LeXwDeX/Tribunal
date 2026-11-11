@@ -455,6 +455,7 @@ export interface Provider {
   max_concurrency?: number
   rpm?: number
   max_tokens?: number
+  context_window?: number
   stats_24h?: ProviderStats24h
   calls_24h?: number
   errors_24h?: number

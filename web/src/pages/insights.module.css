@@ -220,6 +220,13 @@
   font-size: var(--fs-label);
 }
 
+.presetError {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
 .checkField {
   display: flex;
   flex-direction: column;

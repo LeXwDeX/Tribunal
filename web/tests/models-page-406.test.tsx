@@ -50,13 +50,15 @@ const storedModel = {
 function routes(overrides: {
   models?: unknown[]
   presets?: unknown[]
+  presetsResponse?: Response | Promise<Response>
+  test?: Response
   create?: Response
 } = {}) {
   return (url: string, init?: RequestInit) => {
     if (url === '/api/v1/model-presets') {
-      return jsonResponse({ presets: overrides.presets ?? [v4Preset, flashPreset] })
+      return overrides.presetsResponse ?? jsonResponse({ presets: overrides.presets ?? [v4Preset, flashPreset] })
     }
-    if (url === '/api/v1/models:test') return jsonResponse({ ok: true, model: 'm' })
+    if (url === '/api/v1/models:test') return overrides.test ?? jsonResponse({ ok: true, model: 'm' })
     if (url === '/api/v1/models' && init?.method === 'POST') {
       return overrides.create ?? jsonResponse({ id: 'user:new', effective: 'new_workflows' })
     }
@@ -213,6 +215,7 @@ describe('model form capability fields (#406)', () => {
           details: [
             { field: 'params.max_tokens', message: 'params.max_tokens must not be negative' },
             { field: 'api_key', message: 'api_key is required when the endpoint changes' },
+            { field: 'params.strict_role_alternation', message: 'must be a boolean' },
           ],
         },
       }, 400),
@@ -224,8 +227,91 @@ describe('model form capability fields (#406)', () => {
 
     const tokens = await screen.findByLabelText('max_tokens')
     expect(await screen.findByText('params.max_tokens must not be negative')).toBeInTheDocument()
+    expect(tokens).toHaveAttribute('aria-invalid', 'true')
     expect(tokens).toHaveAttribute('aria-describedby', expect.stringContaining('-error'))
     expect(screen.getByText('api_key is required when the endpoint changes')).toBeInTheDocument()
+    const keyMode = screen.getByLabelText('API key 状态')
+    expect(keyMode).toHaveAttribute('aria-invalid', 'true')
+    expect(keyMode).toHaveAttribute('aria-describedby', expect.stringContaining('-error'))
+    const strict = screen.getByLabelText('strict_role_alternation')
+    expect(strict).toHaveAttribute('aria-invalid', 'true')
+    expect(strict).toHaveAttribute('aria-describedby', expect.stringContaining('-error'))
+    expect(screen.getByText('must be a boolean')).toBeInTheDocument()
+  })
+
+  it('surfaces save failures that carry no field details', async () => {
+    const user = userEvent.setup()
+    installFetch(routes({
+      models: [],
+      create: jsonResponse({ error: { code: 'provider_test_failed', message: 'provider test failed' } }, 422),
+    }))
+    renderWithProviders(<ModelsPage />, { route: '/models' })
+    await openCreate(user)
+    await fillConnection(user)
+    await user.click(screen.getByRole('button', { name: '创建' }))
+    expect(await screen.findByText('provider test failed')).toBeInTheDocument()
+  })
+
+  it('surfaces draft test failures that carry no field details', async () => {
+    const user = userEvent.setup()
+    installFetch(routes({
+      models: [],
+      test: jsonResponse({ error: { code: 'provider_test_failed', message: 'provider test failed' } }, 422),
+    }))
+    renderWithProviders(<ModelsPage />, { route: '/models' })
+    await openCreate(user)
+    await fillConnection(user)
+    await user.click(screen.getByRole('button', { name: '保存前测试' }))
+    expect(await screen.findByText('provider test failed')).toBeInTheDocument()
+  })
+
+  it('rejects an anthropic thinking budget below the minimum', async () => {
+    const user = userEvent.setup()
+    const fetchMock = installFetch(routes({ models: [] }))
+    renderWithProviders(<ModelsPage />, { route: '/models' })
+    await openCreate(user)
+    await fillConnection(user)
+    await chooseOption(user, screen.getByLabelText('协议'), 'anthropic')
+    await user.type(screen.getByLabelText('max_tokens'), '4096')
+    fireEvent.change(screen.getByLabelText('thinking.budget_tokens'), { target: { value: '512' } })
+    await user.click(screen.getByRole('button', { name: '创建' }))
+    expect(await screen.findByText('anthropic 的 thinking.budget_tokens 必须不小于 1024。')).toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/v1/models' && init?.method === 'POST')).toBe(false)
+
+    fireEvent.change(screen.getByLabelText('thinking.budget_tokens'), { target: { value: '1024' } })
+    await user.click(screen.getByRole('button', { name: '创建' }))
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/v1/models' && init?.method === 'POST')).toBe(true))
+  })
+
+  it('does not offer preset fill when editing an existing model', async () => {
+    const user = userEvent.setup()
+    installFetch(routes({ models: [storedModel] }))
+    renderWithProviders(<ModelsPage />, { route: '/models' })
+    await user.click(await screen.findByRole('button', { name: '编辑' }))
+    expect(await screen.findByRole('button', { name: '保存' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /最大能力/ })).not.toBeInTheDocument()
+  })
+
+  it('shows a loading state while presets load', async () => {
+    const user = userEvent.setup()
+    installFetch(routes({ models: [], presetsResponse: new Promise<Response>(() => {}) }))
+    renderWithProviders(<ModelsPage />, { route: '/models' })
+    await openCreate(user)
+    expect(await screen.findByText('预设加载中…')).toBeInTheDocument()
+  })
+
+  it('shows a retryable error when presets fail to load', async () => {
+    const user = userEvent.setup()
+    const fetchMock = installFetch(routes({
+      models: [],
+      presetsResponse: jsonResponse({ error: { code: 'unavailable', message: 'unavailable' } }, 503),
+    }))
+    renderWithProviders(<ModelsPage />, { route: '/models' })
+    await openCreate(user)
+    expect(await screen.findByText('预设加载失败，仍可手动填写。')).toBeInTheDocument()
+    const before = fetchMock.mock.calls.filter(([url]) => url === '/api/v1/model-presets').length
+    await user.click(screen.getByRole('button', { name: '重试' }))
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => url === '/api/v1/model-presets').length).toBe(before + 1))
   })
 
   it('shows the YAML path on read-only config model cards and no price summary', async () => {
