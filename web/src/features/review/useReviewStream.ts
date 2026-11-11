@@ -62,7 +62,7 @@ export function useReviewStream(reviewId: string | undefined, review: ReviewDeta
           void queryClient.invalidateQueries({ queryKey: ['review', reviewId, 'node', data.id] })
           void queryClient.invalidateQueries({ queryKey: ['review', reviewId, 'calls', data.id] })
         }
-        // Node events change node-derived counters and cost. Mark stats stale
+        // Node events change node-derived counters. Mark stats stale
         // (this page has no stats observer, so no request); keep the global
         // review list cached and refresh it on finding/workflow events.
         void queryClient.invalidateQueries({ queryKey: ['stats'] })

@@ -15,6 +15,22 @@ import insights from './insights.module.css'
 
 type Row = Record<string, unknown>
 
+// Cost fields are removed from the API (#407/#430). Older responses may still
+// carry them, but the console never renders them, including the raw dump.
+const LEGACY_COST_KEYS = new Set(['cost_micros', 'price'])
+
+function stripLegacyCostKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripLegacyCostKeys)
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .filter(([key]) => !LEGACY_COST_KEYS.has(key))
+        .map(([key, item]) => [key, stripLegacyCostKeys(item)]),
+    )
+  }
+  return value
+}
+
 const DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/
 
 function localMidnight(value: string): Date | null {
@@ -40,7 +56,11 @@ export function dateRange(value: { fromDate: string; toDate: string }): { from: 
 }
 
 function asRows(value: unknown): Row[] {
-  if (Array.isArray(value)) return value.filter((item): item is Row => Boolean(item) && typeof item === 'object' && !Array.isArray(item))
+  if (Array.isArray(value)) {
+    return value
+      .filter((item): item is Row => Boolean(item) && typeof item === 'object' && !Array.isArray(item))
+      .map((row) => Object.fromEntries(Object.entries(row).filter(([key]) => !LEGACY_COST_KEYS.has(key))))
+  }
   if (value && typeof value === 'object') {
     return Object.entries(value as Record<string, unknown>).map(([key, item]) => ({
       key,
@@ -499,7 +519,11 @@ function cellValue(value: unknown): string {
 function DimensionTable({ rows, emptyLabel }: { rows: Row[]; emptyLabel: string }) {
   const columns = useMemo(() => {
     const set = new Set<string>()
-    for (const row of rows.slice(0, 12)) for (const key of Object.keys(row)) set.add(key)
+    for (const row of rows.slice(0, 12)) {
+      for (const key of Object.keys(row)) {
+        if (!LEGACY_COST_KEYS.has(key)) set.add(key)
+      }
+    }
     return Array.from(set)
   }, [rows])
   if (!rows.length) return <EmptyState title={emptyLabel} description="stats API 没有返回该维度的数据。" />
@@ -964,7 +988,7 @@ function StatsContent({ stats }: { stats: Stats }) {
       </Panel>
 
       <Disclosure summary="查看原始 stats 响应">
-        <pre className={`pre statsJson ${ui.jsonBlock}`}>{JSON.stringify(stats, null, 2)}</pre>
+        <pre className={`pre statsJson ${ui.jsonBlock}`}>{JSON.stringify(stripLegacyCostKeys(stats), null, 2)}</pre>
       </Disclosure>
     </>
   )

@@ -508,6 +508,45 @@ describe('statistics daily trends', () => {
     expect(screen.getByText(/样本 0/)).toBeInTheDocument()
   })
 
+  it('hides legacy cost fields from the by-model table and the raw stats response', async () => {
+    routeStats({
+      runs: 1,
+      by_model: [{
+        provider: 'anthropic',
+        model: 'claude-sonnet',
+        calls: 11,
+        errors: 2,
+        input_tokens: 1200,
+        output_tokens: 300,
+        cost_micros: 999,
+        price: { input_per_mtok: 3 },
+        avg_latency_ms: 120.5,
+        p50_latency_ms: 100,
+        error_rate: 0.18,
+      }],
+    })
+    renderWithProviders(<StatisticsPage />)
+
+    const panel = await panelByTitle('按模型')
+    const table = panel.getByRole('table')
+    expect(within(table).queryByRole('columnheader', { name: 'cost_micros' })).not.toBeInTheDocument()
+    expect(within(table).queryByRole('columnheader', { name: 'price' })).not.toBeInTheDocument()
+    expect(within(table).getByRole('columnheader', { name: 'calls' })).toBeInTheDocument()
+    expect(within(table).getByRole('columnheader', { name: 'input_tokens' })).toBeInTheDocument()
+    expect(within(table).getByRole('columnheader', { name: 'p50_latency_ms' })).toBeInTheDocument()
+    const row = rowFor(table, 'anthropic')
+    expect(row.getByText('11')).toBeInTheDocument()
+    expect(row.getByText('1,200')).toBeInTheDocument()
+    expect(row.getByText('100')).toBeInTheDocument()
+    expect(panel.queryByText('999')).not.toBeInTheDocument()
+
+    const raw = screen.getByText('查看原始 stats 响应').closest('details')
+    if (!raw) throw new Error('raw stats disclosure missing')
+    expect(raw).not.toHaveTextContent('cost_micros')
+    expect(raw).not.toHaveTextContent('"price"')
+    expect(raw).toHaveTextContent('p50_latency_ms')
+  })
+
   it('marks the trend unavailable when an older response omits it even with metrics', async () => {
     routeStats({ runs: 1 })
     renderWithProviders(<StatisticsPage />)
