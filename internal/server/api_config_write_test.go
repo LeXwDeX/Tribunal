@@ -167,6 +167,9 @@ func TestConfigOverlayPatchRequiresPlatformAdminAndCSRF(t *testing.T) {
 	assertStatus(t, harness.patch(harness.env.anonymousClient(), body), http.StatusUnauthorized)
 	viewer := harness.env.loginAs("code-viewer")
 	assertStatus(t, harness.patch(viewer, body), http.StatusForbidden)
+	if logs := harness.logs.String(); !strings.Contains(logs, `"code":"forbidden"`) || !strings.Contains(logs, `"actor_id":8`) {
+		t.Fatalf("viewer rejection audit lacks actor/code:\n%s", logs)
+	}
 	admin := harness.env.loginAs("code-admin")
 	assertStatus(t, harness.patch(admin.withoutCSRF(), body), http.StatusForbidden)
 	logs := harness.logs.String()

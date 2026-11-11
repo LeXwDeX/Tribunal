@@ -197,7 +197,7 @@ review_defaults:                    # 项目设置的默认值（见 §3）
 
 删除 provider 前会比较变更前后的有效 provider 集合：只有变更前存在、变更后不再存在的 provider 才检查引用。配置中的 `profiles` 仍引用该 provider，或数据库已存档位覆盖仍以 `config:<provider>` 引用它（迁移 0028 的 `review_profile_overrides`）时，返回 `409 provider_in_use`，`details` 列出引用路径；删除从未存在的 provider 是 no-op，不会触发该错误。服务不会自动清除数据库覆盖，需要先通过档位接口删除或改写覆盖。
 
-非 dry-run 的写操作记录平台审计：actor、动作、变更路径、base / previous overlay / overlay revision 和 `changed`；写处理器拒绝的请求（含参数 / 路径 / 候选校验失败、revision 冲突、存储错误）和 CSRF 失败也记录 actor、路径和稳定错误码。审计不记录配置值或密钥。
+非 dry-run 的写操作记录平台审计：actor、动作、变更路径、base / previous overlay / overlay revision 和 `changed`；通过认证的写请求，其成功与失败（含参数 / 路径 / 候选校验失败、revision 冲突、存储错误、CSRF 失败和平台管理员校验失败）都记录 actor、路径和稳定错误码。审计不记录配置值或密钥。
 
 只有文件实际变化（`changed: true`）时 `restart_required` 才为 `true` 并返回 `notice`：watcher 约 2–4 秒后刷新显示快照，但运行期单例仍使用启动时配置，必须重启才生效；重启可能取消在途评审。no-op 写入返回 200、`changed: false`、`restart_required: false`，不提示已保存。`dry_run: true` 只做候选校验和引用检查，返回拟议的 `overlay_revision`，不写文件。本 Issue 不改前端，编辑器、表单与冲突处理见 [#412](https://github.com/LeXwDeX/Tribunal/issues/412)。
 

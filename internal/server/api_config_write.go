@@ -52,6 +52,18 @@ type configReviewDefaultsView struct {
 	BuiltinIgnore   []string       `json:"builtin_ignore"`
 }
 
+// configOverlayAdmin logs a rejected platform-admin check before delegating to
+// the standard guard, which still makes the authorization decision.
+func (s *Server) configOverlayAdmin(next http.HandlerFunc) http.HandlerFunc {
+	guarded := s.guard(policyPlatformAdmin, next)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if value, ok := principalFrom(r.Context()); !ok || value.user.Role != roleAdmin {
+			s.auditConfigOverlayRejected(r, nil, "forbidden", false)
+		}
+		guarded(w, r)
+	}
+}
+
 // handleConfigOverlayPatch applies allowlisted leaf changes to the overlay
 // file. The static bootstrap bearer cannot use it because that token is not
 // bound to a person and has no CSRF protection.
