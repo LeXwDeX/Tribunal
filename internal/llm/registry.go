@@ -20,10 +20,9 @@ import (
 )
 
 const (
-	maxRetries         = 4
-	defaultBaseDelay   = 250 * time.Millisecond
-	defaultConcurrency = 8
-	maxRetryDelay      = 60 * time.Second
+	maxRetries       = 4
+	defaultBaseDelay = 250 * time.Millisecond
+	maxRetryDelay    = 60 * time.Second
 )
 
 // CallMeta identifies the workflow/node/turn that caused a model call.
@@ -121,6 +120,12 @@ type WireParams struct {
 	Reasoning       *WireReasoning `json:"reasoning,omitempty"`
 	Thinking        *WireThinking  `json:"thinking,omitempty"`
 	ThinkingEnabled bool           `json:"thinking_enabled"`
+	// ThinkingType is the thinking switch actually sent on the wire
+	// (openai-chat, or the enabled type Anthropic derives from a budget).
+	ThinkingType string `json:"thinking_type,omitempty"`
+	// ReasoningContentReplayed reports that at least one assistant turn sent
+	// provider reasoning_content back. The content itself is never audited.
+	ReasoningContentReplayed bool `json:"reasoning_content_replayed,omitempty"`
 }
 
 type WireReasoning struct {
@@ -201,8 +206,18 @@ func safeAuditModelID(id string) string {
 }
 
 // ValidReasoningEffort reports whether effort is an allowed audit value.
+// "none" is included because a capability-declaring provider sends it.
 func ValidReasoningEffort(value string) bool {
-	return effort.Valid(value)
+	return effort.ValidWire(value)
+}
+
+// safeThinkingType keeps only the fixed thinking switch vocabulary.
+func safeThinkingType(value string) string {
+	switch value {
+	case "enabled", "disabled":
+		return value
+	}
+	return ""
 }
 
 // NewCallAudit builds the persistence-safe audit payload. Tool choice is a
@@ -226,6 +241,7 @@ func NewCallAudit(req *Request, resp *Response) *CallAudit {
 			if !ValidReasoningEffort(value.Effort) {
 				value.Effort = ""
 			}
+			value.ThinkingType = safeThinkingType(value.ThinkingType)
 			out.Reasoning = &value
 		}
 		for _, msg := range req.Messages {
@@ -420,9 +436,7 @@ func newProviderClientWithKey(name string, cfg config.ProviderConfig, apiKey str
 	if cfg.MaxConcurrency < 0 {
 		return nil, fmt.Errorf("llm: provider %q: max_concurrency must not be negative", name)
 	}
-	if cfg.MaxConcurrency == 0 {
-		client.sem = make(chan struct{}, defaultConcurrency)
-	} else {
+	if cfg.MaxConcurrency > 0 {
 		client.sem = make(chan struct{}, cfg.MaxConcurrency)
 	}
 	if cfg.RPM > 0 {
@@ -732,6 +746,7 @@ func (c *providerClient) record(ctx context.Context, attempt int, req *Request, 
 				}
 				copy.Reasoning = &reasoning
 			}
+			copy.ThinkingType = safeThinkingType(copy.ThinkingType)
 			audit.Request.Wire = &copy
 		}
 		meta := CallMetaFromContext(ctx)
@@ -797,7 +812,8 @@ func (c *providerClient) record(ctx context.Context, attempt int, req *Request, 
 
 func usageZero(usage Usage) bool {
 	return usage.InputTokens == 0 && usage.OutputTokens == 0 &&
-		usage.CacheReadTokens == 0 && usage.CacheWriteTokens == 0 && usage.ReasoningTokens == 0
+		usage.CacheReadTokens == 0 && usage.CacheWriteTokens == 0 && usage.ReasoningTokens == 0 &&
+		usage.CacheMissTokens == 0
 }
 
 // UsageZero reports whether no token category was used.
@@ -915,12 +931,17 @@ func guardedHTTPClientWithPolicy(base *http.Client, policy egressPolicy) (*http.
 
 func newAdapter(info ProviderInfo, cfg config.ProviderConfig, apiKey string, httpClient *http.Client) (adapter, error) {
 	defaults := providerDefaults{
-		maxTokens:             cfg.MaxTokens,
-		temperature:           cfg.Temperature,
-		strictRoleAlternation: cfg.StrictRoleAlternation,
+		maxTokens:                cfg.MaxTokens,
+		temperature:              cfg.Temperature,
+		strictRoleAlternation:    cfg.StrictRoleAlternation,
+		allowReasoningEffortNone: cfg.AllowReasoningEffortNone,
+		preserveReasoningContent: cfg.PreserveReasoningContent,
+		outputConfigEffort:       cfg.OutputConfigEffort,
+		responsesParams:          cfg.ResponsesParams,
 	}
 	if cfg.Thinking != nil {
 		defaults.budgetTokens = cfg.Thinking.BudgetTokens
+		defaults.thinkingType = cfg.Thinking.Type
 	}
 	if cfg.Reasoning != nil {
 		defaults.effort = cfg.Reasoning.Effort

@@ -163,6 +163,7 @@ func TestModelParamsUpdateRejectsNullInsideObjectParameters(t *testing.T) {
 		body string
 	}{
 		{"thinking budget", `{"revision":3,"params":{"thinking":{"budget_tokens":null}}}`},
+		{"thinking type", `{"revision":3,"params":{"thinking":{"type":null}}}`},
 		{"reasoning effort", `{"revision":3,"params":{"reasoning":{"effort":null}}}`},
 		{"price field", `{"revision":3,"params":{"price":{"input_per_mtok":null}}}`},
 	} {
@@ -212,9 +213,13 @@ func TestModelParamsUpdateRejectsInvalidParameters(t *testing.T) {
 		{"negative rpm", `{"revision":3,"params":{"rpm":-1}}`, "params.rpm"},
 		{"temperature above range", `{"revision":3,"params":{"temperature":2.5}}`, "params.temperature"},
 		{"temperature below range", `{"revision":3,"params":{"temperature":-0.1}}`, "params.temperature"},
-		{"zero max tokens", `{"revision":3,"params":{"max_tokens":0}}`, "params.max_tokens"},
-		{"zero max concurrency", `{"revision":3,"params":{"max_concurrency":0}}`, "params.max_concurrency"},
+		{"negative max tokens", `{"revision":3,"params":{"max_tokens":-1}}`, "params.max_tokens"},
+		{"negative max concurrency", `{"revision":3,"params":{"max_concurrency":-1}}`, "params.max_concurrency"},
+		{"invalid thinking type", `{"revision":3,"params":{"thinking":{"type":"always"}}}`, "params.thinking.type"},
+		{"invalid responses params", `{"revision":3,"params":{"responses_params":"never"}}`, "params.responses_params"},
+		{"effort none without capability", `{"revision":3,"params":{"reasoning":{"effort":"none"}}}`, "params.reasoning.effort"},
 		{"null required parameter", `{"revision":3,"params":{"rpm":null}}`, "params.rpm"},
+		{"null capability parameter", `{"revision":3,"params":{"preserve_reasoning_content":null}}`, "params.preserve_reasoning_content"},
 		{"unknown parameter", `{"revision":3,"params":{"nope":1}}`, "params.nope"},
 		{"wrong value type", `{"revision":3,"params":{"temperature":"hot"}}`, "params.temperature"},
 		{"empty params", `{"revision":3,"params":{}}`, "params"},
@@ -236,6 +241,25 @@ func TestModelParamsUpdateRejectsInvalidParameters(t *testing.T) {
 				t.Fatalf("store was called %d times for an invalid request", fake.paramsCalls)
 			}
 		})
+	}
+}
+
+// Zero max_tokens means "do not send" for the OpenAI protocols but the
+// Anthropic API requires a positive limit (#404).
+func TestModelParamsUpdateRejectsZeroMaxTokensForAnthropic(t *testing.T) {
+	stored := savedParamsModel()
+	stored.Protocol = "anthropic"
+	fake := &fakeModelStore{stored: stored}
+	server, _ := newParamsTestServer(t, fake)
+	response := patchModelParams(server, "user:saved", `{"revision":3,"params":{"max_tokens":0}}`)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body = %s, want 400", response.Code, response.Body.String())
+	}
+	if _, fields := errorDetails(t, response); fields["params.max_tokens"] == "" {
+		t.Fatalf("details = %v, want params.max_tokens", fields)
+	}
+	if fake.paramsCalls != 0 {
+		t.Fatal("invalid parameters reached the store")
 	}
 }
 
@@ -304,6 +328,9 @@ func TestModelParamsUpdateSetsAndClearsEachKey(t *testing.T) {
 		{"set thinking", `{"thinking":{"budget_tokens":2048}}`, ptr(paramsWith(func(p *store.ModelParams) {
 			p.Thinking = &config.ThinkingConfig{BudgetTokens: 2048}
 		})), ""},
+		{"set thinking type", `{"thinking":{"type":"enabled"}}`, ptr(paramsWith(func(p *store.ModelParams) {
+			p.Thinking = &config.ThinkingConfig{Type: "enabled"}
+		})), ""},
 		{"set price", `{"price":{"input_per_mtok":3,"output_per_mtok":4}}`, ptr(paramsWith(func(p *store.ModelParams) {
 			p.Price = &config.PriceConfig{InputPerMTok: 3, OutputPerMTok: 4}
 		})), ""},
@@ -312,6 +339,22 @@ func TestModelParamsUpdateSetsAndClearsEachKey(t *testing.T) {
 		})), ""},
 		{"set strict_role_alternation", `{"strict_role_alternation":true}`, ptr(paramsWith(func(p *store.ModelParams) {
 			p.StrictRoleAlternation = true
+		})), ""},
+		{"set preserve_reasoning_content", `{"preserve_reasoning_content":true}`, ptr(paramsWith(func(p *store.ModelParams) {
+			p.PreserveReasoningContent = true
+		})), ""},
+		{"set allow_reasoning_effort_none", `{"allow_reasoning_effort_none":true}`, ptr(paramsWith(func(p *store.ModelParams) {
+			p.AllowReasoningEffortNone = true
+		})), ""},
+		{"set output_config_effort", `{"output_config_effort":true}`, ptr(paramsWith(func(p *store.ModelParams) {
+			p.OutputConfigEffort = true
+		})), ""},
+		{"set responses_params", `{"responses_params":"unsupported"}`, ptr(paramsWith(func(p *store.ModelParams) {
+			p.ResponsesParams = "unsupported"
+		})), ""},
+		{"set effort none with capability", `{"allow_reasoning_effort_none":true,"reasoning":{"effort":"none"}}`, ptr(paramsWith(func(p *store.ModelParams) {
+			p.AllowReasoningEffortNone = true
+			p.Reasoning = &config.ReasoningConfig{Effort: "none"}
 		})), ""},
 		{"clear temperature", `{"temperature":null}`, ptr(paramsWith(func(p *store.ModelParams) { p.Temperature = nil })), ""},
 		{"clear reasoning", `{"reasoning":null}`, ptr(paramsWith(func(p *store.ModelParams) { p.Reasoning = nil })), ""},
@@ -325,8 +368,20 @@ func TestModelParamsUpdateSetsAndClearsEachKey(t *testing.T) {
 		{"reset strict_role_alternation", `{"strict_role_alternation":false}`, ptr(paramsWith(func(p *store.ModelParams) {
 			p.StrictRoleAlternation = false
 		})), ""},
-		{"cannot clear max_tokens", `{"max_tokens":0}`, nil, "params.max_tokens"},
-		{"cannot clear max_concurrency", `{"max_concurrency":0}`, nil, "params.max_concurrency"},
+		{"reset max_tokens", `{"max_tokens":0}`, ptr(paramsWith(func(p *store.ModelParams) { p.MaxTokens = 0 })), ""},
+		{"reset max_concurrency", `{"max_concurrency":0}`, ptr(paramsWith(func(p *store.ModelParams) { p.MaxConcurrency = 0 })), ""},
+		{"reset preserve_reasoning_content", `{"preserve_reasoning_content":false}`, ptr(paramsWith(func(p *store.ModelParams) {
+			p.PreserveReasoningContent = false
+		})), ""},
+		{"reset allow_reasoning_effort_none", `{"allow_reasoning_effort_none":false}`, ptr(paramsWith(func(p *store.ModelParams) {
+			p.AllowReasoningEffortNone = false
+		})), ""},
+		{"reset output_config_effort", `{"output_config_effort":false}`, ptr(paramsWith(func(p *store.ModelParams) {
+			p.OutputConfigEffort = false
+		})), ""},
+		{"reset responses_params", `{"responses_params":""}`, ptr(paramsWith(func(p *store.ModelParams) {
+			p.ResponsesParams = ""
+		})), ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeModelStore{stored: savedParamsModel()}

@@ -312,7 +312,8 @@ func decodeModelParamsPatch(raw map[string]json.RawMessage) (store.ModelParamsPa
 				patch.Thinking.Set = true
 			case "price":
 				patch.Price.Set = true
-			case "max_tokens", "context_window", "forced_tool_choice", "strict_role_alternation", "max_concurrency", "rpm":
+			case "max_tokens", "context_window", "forced_tool_choice", "strict_role_alternation", "max_concurrency", "rpm",
+				"allow_reasoning_effort_none", "preserve_reasoning_content", "output_config_effort", "responses_params":
 				detail(name, "must not be null")
 			default:
 				detail(name, "is not a supported parameter")
@@ -397,6 +398,26 @@ func decodeModelParamsPatch(raw map[string]json.RawMessage) (store.ModelParamsPa
 			var v bool
 			if decode(name, &v) {
 				patch.StrictRoleAlternation = &v
+			}
+		case "allow_reasoning_effort_none":
+			var v bool
+			if decode(name, &v) {
+				patch.AllowReasoningEffortNone = &v
+			}
+		case "preserve_reasoning_content":
+			var v bool
+			if decode(name, &v) {
+				patch.PreserveReasoningContent = &v
+			}
+		case "output_config_effort":
+			var v bool
+			if decode(name, &v) {
+				patch.OutputConfigEffort = &v
+			}
+		case "responses_params":
+			var v string
+			if decode(name, &v) {
+				patch.ResponsesParams = &v
 			}
 		default:
 			detail(name, "is not a supported parameter")

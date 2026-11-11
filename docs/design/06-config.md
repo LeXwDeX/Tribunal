@@ -71,7 +71,8 @@ providers:
     api_key_env: ANTHROPIC_API_KEY
     max_concurrency: 4
     rpm: 50
-    max_tokens: 16000
+    max_tokens: 16000               # anthropic 必填且为正数
+    output_config_effort: false     # 可选；true 且 reasoning.effort 非空时发送 output_config.effort，仅 anthropic
     forced_tool_choice: auto        # 可选；auto（默认）| supported | unsupported，见运维说明「最后一轮强制提交」
     context_window: 176000          # 可选；可用于输入的 token 数（窗口减去 max_tokens 与思考预算），agent 用量达 85% 时压缩旧工具输出，0 或不填则不压缩
     thinking: { budget_tokens: 8000 }
@@ -81,7 +82,9 @@ providers:
     base_url: "https://api.openai.com/v1"
     model: "<model>"
     api_key_env: OPENAI_API_KEY
-    max_tokens: 16000             # 必填且为正数，按供应方上限调整
+    max_tokens: 16000             # 不能为负；0 表示不发送 max_output_tokens，由上游取默认
+    allow_reasoning_effort_none: false  # 可选；true 时接受 reasoning.effort: none，仅 OpenAI 协议
+    responses_params: auto         # 可选；auto（默认）| supported | unsupported，仅 openai-responses
     reasoning: { effort: medium }
   local:
     protocol: openai-chat
@@ -89,8 +92,10 @@ providers:
     model: "<model>"
     api_key_env: LOCAL_LLM_KEY
     max_concurrency: 8
-    max_tokens: 4096              # 必填且为正数，按供应方上限调整
+    max_tokens: 4096              # 不能为负；0 表示不发送 max_tokens，由上游取默认
     temperature: 0.2
+    thinking: { type: disabled }    # 可选；enabled | disabled，仅 openai-chat
+    preserve_reasoning_content: false  # 可选；true 时提取并回放 reasoning_content，仅 openai-chat
     strict_role_alternation: false  # 仅 openai-chat；网关要求角色严格交替时设为 true，见下文
 
 profiles:
@@ -165,9 +170,9 @@ type ProviderConfig struct {
 	BaseURL        string          `yaml:"base_url"`
 	Model          string          `yaml:"model"`
 	APIKeyEnv      string          `yaml:"api_key_env"`
-	MaxConcurrency int             `yaml:"max_concurrency"`
+	MaxConcurrency int             `yaml:"max_concurrency"` // 不能为负；0 表示不创建本地并发信号量
 	RPM            int             `yaml:"rpm"`
-	MaxTokens      int             `yaml:"max_tokens"`
+	MaxTokens      int             `yaml:"max_tokens"` // 不能为负；0 表示不发送，anthropic 必须为正
 	ContextWindow  int             `yaml:"context_window"` // 可选，不能为负；0 表示不压缩
 	ForcedToolChoice string        `yaml:"forced_tool_choice"` // 可选：auto | supported | unsupported
 	Temperature    *float64        `yaml:"temperature"`
@@ -175,6 +180,15 @@ type ProviderConfig struct {
 	Reasoning      *ReasoningConfig `yaml:"reasoning"`
 	Price          *PriceConfig    `yaml:"price"`
 	StrictRoleAlternation bool `yaml:"strict_role_alternation"` // 仅 openai-chat，默认 false
+	AllowReasoningEffortNone bool `yaml:"allow_reasoning_effort_none"` // 默认 false；仅 OpenAI 协议，true 时接受 effort none
+	PreserveReasoningContent bool `yaml:"preserve_reasoning_content"` // 默认 false；仅 openai-chat，true 时回放 reasoning_content
+	OutputConfigEffort bool `yaml:"output_config_effort"` // 默认 false；仅 anthropic，true 时发送 output_config.effort
+	ResponsesParams string `yaml:"responses_params"` // 默认 auto；仅 openai-responses：auto | supported | unsupported
+}
+
+type ThinkingConfig struct {
+	BudgetTokens int    `yaml:"budget_tokens"` // anthropic：> 0 时开启 thinking
+	Type         string `yaml:"type"`          // openai-chat：enabled | disabled，空值省略
 }
 
 type ProfileConfig struct {
@@ -190,9 +204,28 @@ type ProfileConfig struct {
 }
 ```
 
+### provider 能力字段
+
+以下新增能力字段均可选，未设置时不写入序列化配置（`omitempty`）；`max_tokens`、`max_concurrency` 等既有字段的序列化不变。旧 provider identity JSON（评审执行身份）逐字节不变，未开启新能力时请求体与旧版一致。
+
+| 字段 | 默认值 | 适用协议 | 说明 |
+|---|---|---|---|
+| `max_tokens` | 未填为 0 | 全部 | 不能为负；`openai-chat` / `openai-responses` 的 0 表示请求不发送 `max_tokens` / `max_output_tokens`，由上游取默认；`anthropic` 必须 > 0，0 返回字段级错误 |
+| `max_concurrency` | 未填为 0；`config/server.docker.yaml` 的 provider 显式设为 4 | 全部 | 不能为负；0 表示不创建本地并发信号量（不限本地并发），正数为信号量容量 |
+| `allow_reasoning_effort_none` | `false` | OpenAI 协议 | 为 true 时才接受 `reasoning.effort: none`；否则配置校验和节点覆盖校验拒绝（字段 `reasoning.effort`）。`none` 作为 `reasoning_effort` 发给 OpenAI 协议，`anthropic` 不支持；`anthropic` 设为 true 会启动告警 |
+| `thinking.budget_tokens` | `0` | anthropic | 大于 0 时开启 thinking；OpenAI 协议不发送该字段，配置非 0 会启动告警 |
+| `thinking.type` | 空（省略） | openai-chat | `enabled` / `disabled`；其他协议不发送，配置非空会启动告警。`anthropic` 的 thinking 仍由 `budget_tokens > 0` 决定 |
+| `output_config_effort` | `false` | anthropic | 为 true 且 `reasoning.effort` 非空时发送 `output_config:{"effort":...}`，不再只依赖 `thinking.budget_tokens`；其他协议设为 true 会启动告警 |
+| `responses_params` | `auto` | openai-responses | `auto` / `supported` 保持旧请求体（`store:false` + `include:["reasoning.encrypted_content"]`）；`unsupported` 同时省略两者，用于拒绝 `encrypted_content` 的兼容网关；其他协议设置会启动告警 |
+| `preserve_reasoning_content` | `false` | openai-chat | 为 true 时从响应提取并回放 `reasoning_content`；其他协议不生效，设为 true 会启动告警 |
+
+`thinking` 仍是整体替换对象，`thinking.type` 位于其中。`PATCH /api/v1/models/{id}/params` 中，`allow_reasoning_effort_none`、`preserve_reasoning_content`、`output_config_effort`、`responses_params` 不接受顶层 `null`；`thinking` 对象内的 `null` 返回 400，顶层 `thinking: null` 仍表示清除整个对象。
+
 ### 启动校验（`Config.Validate()`）
 
 - 每个 provider 的 `protocol` 合法，`model` 非空且不全为空白，`api_key_env` 对应的环境变量存在且非空；`base_url` 可为空，非空时校验地址格式。
+- `max_tokens` 不能为负，`anthropic` 必须为正；`max_concurrency`、`rpm`、`context_window` 和 `thinking.budget_tokens` 不能为负。`temperature` 在 0–2。
+- `reasoning.effort` 只能为空或 `low` / `medium` / `high` / `max`；`none` 仅在 `allow_reasoning_effort_none: true` 时通过校验，未声明时阻止启动。`thinking.type` 只能为空、`enabled` 或 `disabled`；`responses_params` 只能为空、`auto`、`supported` 或 `unsupported`。不适用的协议组合只在启动日志告警，不阻止启动。
 - profile 中引用的 provider 都存在：`provider`、`explore.provider`、`lanes.*.provider`、`challenge.provider` 和 onboarding 的 `agent.provider`。留空表示沿用 `provider`，不做检查。
 - `budget.max_nodes` 在 1 到 100 之间，`budget.deadline` 为正。
 - `blocks` 中的 `mcp_tools` 名称格式为 `mcp__<server>__<tool>`，且 server 在 MCP 配置中存在（工具是否存在在启动后探测，不存在只告警）。
@@ -240,7 +273,7 @@ Tribunal 只有一个评审档位 `default`，评审图固定：`explore` → �
 
 - 可配置七项：`default`、`explore`、`lanes.code_review`、`lanes.review`、`lanes.reasoner`、`lanes.validate`、`challenge`；每项含 `model` 和 `params`。
 - `model` 是目录 ID（`config:<name>` 或 `user:<id>`）；不存在、已删除、不可用（出站被拒或记录损坏）或首尾带空白的 ID 返回 400，字段路径如 `overrides.default.model`。
-- `params` 只允许 `max_tokens`、`temperature`、`reasoning.effort`、`thinking.budget_tokens`，其他键返回 400。校验规则与模型参数相同：`max_tokens` > 0，`temperature` 在 0–2，`effort` 为 `low` / `medium` / `high` / `max`，`budget_tokens` > 0。`budget_tokens: 0` 和空 `effort` 不会生效，返回 400，提示省略该字段以继承；节点的生效模型是 Anthropic 协议时 `budget_tokens` 须 ≥ 1024，且 `max_tokens`（覆盖值，未覆盖则取模型值）须大于 `budget_tokens`。
+- `params` 只允许 `max_tokens`、`temperature`、`reasoning.effort`、`thinking.budget_tokens`、`thinking.type`，其他键返回 400。校验规则：`max_tokens` > 0（节点覆盖不采用模型 `max_tokens` 的 0 语义），`temperature` 在 0–2，`effort` 为 `low` / `medium` / `high` / `max`（`none` 仅当生效模型声明 `allow_reasoning_effort_none` 时接受，否则返回 400，字段 `reasoning.effort`），`budget_tokens` > 0（仅设置 `thinking.type` 时可为 0），`thinking.type` 为 `enabled` / `disabled`。只提交 `budget_tokens: 0` 而未设置 `thinking.type`、或空 `effort` 不会生效，返回 400，提示省略该字段以继承；节点的生效模型是 Anthropic 协议时 `budget_tokens` 须 ≥ 1024，且 `max_tokens`（覆盖值，未覆盖则取模型值）须大于 `budget_tokens`。
 - 参数作为该节点的请求值注入，优先于模型自身默认；节点参数逐字段叠加在 `default` 参数之上。不创建独立 client，并发与限流仍按模型。
 
 **模型解析顺序**（每个节点）：节点覆盖 → `default` 覆盖 → 配置中该节点的 provider → 配置中档位的 provider → 派生回退。对应 `source` 取值 `override`、`override_default`、`config`、`config_default`、`derived`。

@@ -253,8 +253,10 @@ type Request struct {
 
 // ReasoningOpts overrides the provider's reasoning defaults for one request.
 type ReasoningOpts struct {
-	Effort       string `json:"effort,omitempty"`        // low | medium | high | max (OpenAI)
+	Effort       string `json:"effort,omitempty"`        // low | medium | high | max, or none with a capability
 	BudgetTokens int    `json:"budget_tokens,omitempty"` // Anthropic thinking budget
+	// ThinkingType is the openai-chat thinking switch: enabled or disabled.
+	ThinkingType string `json:"thinking_type,omitempty"`
 }
 
 // StopReason explains why the model stopped.
@@ -292,12 +294,17 @@ type Usage struct {
 	CacheReadTokens  int64 `json:"cache_read_tokens"`
 	CacheWriteTokens int64 `json:"cache_write_tokens"`
 	ReasoningTokens  int64 `json:"reasoning_tokens"`
-	Incomplete       bool  `json:"-"`
+	// CacheMissTokens is the provider-reported uncached prompt prefix
+	// (DeepSeek prompt_cache_miss_tokens). It details InputTokens and is not
+	// costed separately. omitempty keeps existing audit responses unchanged.
+	CacheMissTokens int64 `json:"cache_miss_tokens,omitempty"`
+	Incomplete      bool  `json:"-"`
 }
 
 // ValidUsage rejects invalid provider counts before they can affect a budget.
 func ValidUsage(u Usage) bool {
-	return u.InputTokens >= 0 && u.OutputTokens >= 0 && u.CacheReadTokens >= 0 && u.CacheWriteTokens >= 0 && u.ReasoningTokens >= 0
+	return u.InputTokens >= 0 && u.OutputTokens >= 0 && u.CacheReadTokens >= 0 && u.CacheWriteTokens >= 0 &&
+		u.ReasoningTokens >= 0 && u.CacheMissTokens >= 0
 }
 
 // AddUsage preserves nonnegative known usage and saturates on overflow.
@@ -320,7 +327,7 @@ func AddUsage(a, b Usage) Usage {
 	}
 	out := Usage{InputTokens: add(a.InputTokens, b.InputTokens), OutputTokens: add(a.OutputTokens, b.OutputTokens),
 		CacheReadTokens: add(a.CacheReadTokens, b.CacheReadTokens), CacheWriteTokens: add(a.CacheWriteTokens, b.CacheWriteTokens),
-		ReasoningTokens: add(a.ReasoningTokens, b.ReasoningTokens)}
+		ReasoningTokens: add(a.ReasoningTokens, b.ReasoningTokens), CacheMissTokens: add(a.CacheMissTokens, b.CacheMissTokens)}
 	out.Incomplete = incomplete || out.InputTokens > math.MaxInt64-out.OutputTokens
 	return out
 }
@@ -335,6 +342,7 @@ func MaxUsage(a, b Usage) Usage {
 		CacheReadTokens:  max(a.CacheReadTokens, b.CacheReadTokens),
 		CacheWriteTokens: max(a.CacheWriteTokens, b.CacheWriteTokens),
 		ReasoningTokens:  max(a.ReasoningTokens, b.ReasoningTokens),
+		CacheMissTokens:  max(a.CacheMissTokens, b.CacheMissTokens),
 		Incomplete:       a.Incomplete || b.Incomplete,
 	})
 }
@@ -399,6 +407,7 @@ func resolveRequest(cfg providerDefaults, req *Request) resolvedRequest {
 		temperature:  cfg.temperature,
 		effort:       cfg.effort,
 		budgetTokens: cfg.budgetTokens,
+		thinkingType: cfg.thinkingType,
 	}
 	if req.MaxTokens > 0 {
 		out.maxTokens = req.MaxTokens
@@ -413,6 +422,9 @@ func resolveRequest(cfg providerDefaults, req *Request) resolvedRequest {
 		if req.Reasoning.BudgetTokens > 0 {
 			out.budgetTokens = req.Reasoning.BudgetTokens
 		}
+		if req.Reasoning.ThinkingType != "" {
+			out.thinkingType = req.Reasoning.ThinkingType
+		}
 	}
 	return out
 }
@@ -423,6 +435,13 @@ type providerDefaults struct {
 	temperature  *float64
 	effort       string
 	budgetTokens int
+	thinkingType string
+	// Capability declarations. Adapters enforce them so a registry built
+	// without ValidateProviderConfig (draft clients, embedders) stays safe.
+	allowReasoningEffortNone bool
+	preserveReasoningContent bool
+	outputConfigEffort       bool
+	responsesParams          string
 	// strictRoleAlternation is honoured by the openai-chat adapter only.
 	strictRoleAlternation bool
 }
@@ -432,6 +451,32 @@ type resolvedRequest struct {
 	temperature  *float64
 	effort       string
 	budgetTokens int
+	thinkingType string
+}
+
+// validateMaxTokens enforces the protocol-neutral bound. A zero value means
+// "do not send"; the Anthropic adapter rejects it separately because its API
+// requires a positive limit.
+func validateMaxTokens(maxTokens int) *Error {
+	if maxTokens < 0 {
+		return badRequestf("max_tokens must not be negative")
+	}
+	return nil
+}
+
+// validateReasoningCapabilities enforces capability declarations that the
+// adapters can send on the wire. Configuration validation applies the same
+// rules, but a registry can be built without it.
+func validateReasoningCapabilities(effective resolvedRequest, cfg providerDefaults) *Error {
+	switch effective.thinkingType {
+	case "", "enabled", "disabled":
+	default:
+		return badRequestf("thinking.type must be enabled or disabled")
+	}
+	if effective.effort == "none" && !cfg.allowReasoningEffortNone {
+		return badRequestf("reasoning.effort none requires allow_reasoning_effort_none")
+	}
+	return nil
 }
 
 func joinBlocks(blocks []Block) string {

@@ -19,6 +19,12 @@ type ModelParams struct {
 	MaxConcurrency        int                     `json:"max_concurrency"`
 	RPM                   int                     `json:"rpm"`
 	Price                 *config.PriceConfig     `json:"price"`
+	// Capability declarations (omitempty keeps existing stored records and API
+	// responses byte-identical when unset).
+	AllowReasoningEffortNone bool   `json:"allow_reasoning_effort_none,omitempty"`
+	PreserveReasoningContent bool   `json:"preserve_reasoning_content,omitempty"`
+	OutputConfigEffort       bool   `json:"output_config_effort,omitempty"`
+	ResponsesParams          string `json:"responses_params,omitempty"`
 }
 
 // ParamUpdate marks one nullable parameter present in a merge request. Set is
@@ -32,16 +38,20 @@ type ParamUpdate[T any] struct {
 // pointers leave the stored value unchanged; explicit nulls are represented by
 // ParamUpdate with a nil Value.
 type ModelParamsPatch struct {
-	MaxTokens             *int
-	ContextWindow         *int
-	Temperature           ParamUpdate[float64]
-	Reasoning             ParamUpdate[config.ReasoningConfig]
-	Thinking              ParamUpdate[config.ThinkingConfig]
-	ForcedToolChoice      *string
-	StrictRoleAlternation *bool
-	MaxConcurrency        *int
-	RPM                   *int
-	Price                 ParamUpdate[config.PriceConfig]
+	MaxTokens                *int
+	ContextWindow            *int
+	Temperature              ParamUpdate[float64]
+	Reasoning                ParamUpdate[config.ReasoningConfig]
+	Thinking                 ParamUpdate[config.ThinkingConfig]
+	ForcedToolChoice         *string
+	StrictRoleAlternation    *bool
+	MaxConcurrency           *int
+	RPM                      *int
+	Price                    ParamUpdate[config.PriceConfig]
+	AllowReasoningEffortNone *bool
+	PreserveReasoningContent *bool
+	OutputConfigEffort       *bool
+	ResponsesParams          *string
 }
 
 // Apply merges the patch into base. Keys absent from the patch keep their
@@ -77,12 +87,27 @@ func (p ModelParamsPatch) Apply(base ModelParams) ModelParams {
 	if p.Price.Set {
 		base.Price = p.Price.Value
 	}
+	if p.AllowReasoningEffortNone != nil {
+		base.AllowReasoningEffortNone = *p.AllowReasoningEffortNone
+	}
+	if p.PreserveReasoningContent != nil {
+		base.PreserveReasoningContent = *p.PreserveReasoningContent
+	}
+	if p.OutputConfigEffort != nil {
+		base.OutputConfigEffort = *p.OutputConfigEffort
+	}
+	if p.ResponsesParams != nil {
+		base.ResponsesParams = *p.ResponsesParams
+	}
 	return base
 }
 
 // Fields returns the changed parameter paths in sorted order without values.
 func (p ModelParamsPatch) Fields() []string {
 	fields := []string{}
+	if p.AllowReasoningEffortNone != nil {
+		fields = append(fields, "params.allow_reasoning_effort_none")
+	}
 	if p.ContextWindow != nil {
 		fields = append(fields, "params.context_window")
 	}
@@ -95,11 +120,20 @@ func (p ModelParamsPatch) Fields() []string {
 	if p.MaxTokens != nil {
 		fields = append(fields, "params.max_tokens")
 	}
+	if p.OutputConfigEffort != nil {
+		fields = append(fields, "params.output_config_effort")
+	}
+	if p.PreserveReasoningContent != nil {
+		fields = append(fields, "params.preserve_reasoning_content")
+	}
 	if p.Price.Set {
 		fields = append(fields, "params.price")
 	}
 	if p.Reasoning.Set {
 		fields = append(fields, "params.reasoning")
+	}
+	if p.ResponsesParams != nil {
+		fields = append(fields, "params.responses_params")
 	}
 	if p.RPM != nil {
 		fields = append(fields, "params.rpm")

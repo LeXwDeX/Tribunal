@@ -183,7 +183,8 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 	longestTurn := max(spec.TurnEstimate, 0)
 	partial := func(err error) (*RunResult, error) {
 		if turns == 0 && !usage.Incomplete && usage.InputTokens == 0 && usage.OutputTokens == 0 &&
-			usage.CacheReadTokens == 0 && usage.CacheWriteTokens == 0 && usage.ReasoningTokens == 0 {
+			usage.CacheReadTokens == 0 && usage.CacheWriteTokens == 0 && usage.ReasoningTokens == 0 &&
+			usage.CacheMissTokens == 0 {
 			return nil, err
 		}
 		return &RunResult{

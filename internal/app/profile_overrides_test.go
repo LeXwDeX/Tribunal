@@ -246,6 +246,7 @@ func TestValidateProfileOverrides(t *testing.T) {
 	models := map[string]OverrideModel{
 		"user:ok": {Protocol: "openai-chat", MaxTokens: 8000}, "config:cfg": {Protocol: "openai-chat", MaxTokens: 8000},
 		"user:down": {Unavailable: true, Protocol: "openai-chat"}, "user:claude": {Protocol: "anthropic", MaxTokens: 8000},
+		"user:deepseek": {Protocol: "openai-chat", MaxTokens: 8000, AllowReasoningEffortNone: true},
 	}
 	known := func(id string) (OverrideModel, bool) { m, ok := models[id]; return m, ok }
 	raw := config.ProfileConfig{Provider: "user:ok"}
@@ -267,6 +268,9 @@ func TestValidateProfileOverrides(t *testing.T) {
 		{"max_tokens not above budget", `{"explore":{"params":{"max_tokens":2000,"thinking":{"budget_tokens":2000}}}}`, []string{"overrides.explore.params.thinking.budget_tokens"}},
 		{"model max_tokens not above budget", `{"explore":{"params":{"thinking":{"budget_tokens":9000}}}}`, []string{"overrides.explore.params.thinking.budget_tokens"}},
 		{"default budget reaches an anthropic node", `{"default":{"params":{"thinking":{"budget_tokens":500}}},"lanes":{"review":{"model":"user:claude"}}}`, []string{"overrides.default.params.thinking.budget_tokens"}},
+		{"effort none with capability", `{"explore":{"model":"user:deepseek","params":{"reasoning":{"effort":"none"}}}}`, nil},
+		{"effort none without capability", `{"explore":{"params":{"reasoning":{"effort":"none"}}}}`, []string{"overrides.explore.params.reasoning.effort"}},
+		{"default effort none without capability", `{"default":{"params":{"reasoning":{"effort":"none"}}}}`, []string{"overrides.default.params.reasoning.effort"}},
 		{"unknown param", `{"explore":{"params":{"context_window":10}}}`, []string{"overrides"}},
 		{"unknown node", `{"plan":{"model":"user:ok"}}`, []string{"overrides"}},
 		{"not an object", `[]`, []string{"overrides"}},

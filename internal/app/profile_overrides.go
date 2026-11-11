@@ -105,9 +105,10 @@ func parseProfileOverrides(body string) profileOverrideDocument {
 
 // OverrideModel is what validation needs to know about a catalog model.
 type OverrideModel struct {
-	Unavailable bool
-	Protocol    string
-	MaxTokens   int
+	Unavailable              bool
+	Protocol                 string
+	MaxTokens                int
+	AllowReasoningEffortNone bool
 }
 
 // anthropicMinBudget is the smallest thinking budget the Anthropic API accepts.
@@ -166,7 +167,7 @@ func ValidateProfileOverrides(body []byte, raw, normalized config.ProfileConfig,
 			continue
 		}
 		params, ok := resolved.Effective.NodeParams[slot.key]
-		if !ok || params.Thinking == nil || params.Thinking.BudgetTokens <= 0 {
+		if !ok {
 			continue
 		}
 		field := "overrides." + slot.path
@@ -174,23 +175,29 @@ func ValidateProfileOverrides(body []byte, raw, normalized config.ProfileConfig,
 			field = "overrides.default"
 		}
 		field += ".params"
-		model, ok := lookup(nodeModelID(resolved.Nodes, slot.node))
-		budget := params.Thinking.BudgetTokens
-		add := func(message string) {
-			detail := Detail{Field: field + ".thinking.budget_tokens", Message: message}
+		model, modelKnown := lookup(nodeModelID(resolved.Nodes, slot.node))
+		add := func(path, message string) {
+			detail := Detail{Field: field + path, Message: message}
 			if !slices.Contains(details, detail) {
 				details = append(details, detail)
 			}
 		}
-		if ok && model.Protocol == "anthropic" && budget < anthropicMinBudget {
-			add("must be at least 1024 for anthropic models")
+		if params.Reasoning != nil && params.Reasoning.Effort == "none" && modelKnown && !model.AllowReasoningEffortNone {
+			add(".reasoning.effort", "none requires a model with allow_reasoning_effort_none")
+		}
+		if params.Thinking == nil || params.Thinking.BudgetTokens <= 0 {
+			continue
+		}
+		budget := params.Thinking.BudgetTokens
+		if modelKnown && model.Protocol == "anthropic" && budget < anthropicMinBudget {
+			add(".thinking.budget_tokens", "must be at least 1024 for anthropic models")
 		}
 		maxTokens := model.MaxTokens
 		if params.MaxTokens != nil {
 			maxTokens = *params.MaxTokens
 		}
-		if (ok || params.MaxTokens != nil) && maxTokens > 0 && maxTokens <= budget {
-			add("must be less than max_tokens")
+		if (modelKnown || params.MaxTokens != nil) && maxTokens > 0 && maxTokens <= budget {
+			add(".thinking.budget_tokens", "must be less than max_tokens")
 		}
 	}
 	return details

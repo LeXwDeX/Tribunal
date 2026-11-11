@@ -39,7 +39,13 @@ func (a *openAIChatAdapter) GenerateWithWire(ctx context.Context, req *Request) 
 		return nil, nil, err
 	}
 	effective := resolveRequest(a.cfg, req)
-	messages, err := chatMessages(req, a.cfg.strictRoleAlternation)
+	if err := validateMaxTokens(effective.maxTokens); err != nil {
+		return nil, nil, err
+	}
+	if err := validateReasoningCapabilities(effective, a.cfg); err != nil {
+		return nil, nil, err
+	}
+	messages, reasoningContents, err := chatMessagesWithReasoning(req, a.cfg.strictRoleAlternation, a.cfg.preserveReasoningContent)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -73,11 +79,27 @@ func (a *openAIChatAdapter) GenerateWithWire(ctx context.Context, req *Request) 
 	if effective.effort != "" {
 		wire.Reasoning = &WireReasoning{Effort: effective.effort}
 	}
-	completion, err := a.sdk.Chat.Completions.New(ctx, params)
+	var requestOptions []option.RequestOption
+	if effective.thinkingType != "" {
+		requestOptions = append(requestOptions, option.WithJSONSet("thinking.type", effective.thinkingType))
+		wire.ThinkingType = effective.thinkingType
+		wire.ThinkingEnabled = effective.thinkingType == "enabled"
+	}
+	if a.cfg.preserveReasoningContent {
+		replayedMessages, replayed, err := chatMessagesReplayingReasoning(messages, reasoningContents)
+		if err != nil {
+			return nil, nil, err
+		}
+		if replayed {
+			requestOptions = append(requestOptions, option.WithJSONSet("messages", replayedMessages))
+			wire.ReasoningContentReplayed = true
+		}
+	}
+	completion, err := a.sdk.Chat.Completions.New(ctx, params, requestOptions...)
 	if err != nil {
 		return nil, wire, sdkError(err)
 	}
-	response, err := chatResponse(completion, a.info.Model)
+	response, err := chatResponseWithReasoning(completion, a.info.Model, a.cfg.preserveReasoningContent)
 	return response, wire, err
 }
 
@@ -110,31 +132,45 @@ func appendChatUserText(messages []openai.ChatCompletionMessageParamUnion, text 
 }
 
 func chatMessages(req *Request, strictRoleAlternation bool) ([]openai.ChatCompletionMessageParamUnion, error) {
+	messages, _, err := chatMessagesWithReasoning(req, strictRoleAlternation, false)
+	return messages, err
+}
+
+// chatMessagesWithReasoning builds the wire messages. With preserve, it also
+// returns one reasoning_content value per message (empty when absent) so the
+// caller can replay DeepSeek thinking parts on later assistant turns.
+func chatMessagesWithReasoning(req *Request, strictRoleAlternation, preserve bool) ([]openai.ChatCompletionMessageParamUnion, []string, error) {
 	messages := make([]openai.ChatCompletionMessageParamUnion, 0, len(req.Messages)+1)
+	reasoning := make([]string, 0, len(req.Messages)+1)
+	appendMessage := func(message openai.ChatCompletionMessageParamUnion) {
+		messages = append(messages, message)
+		reasoning = append(reasoning, "")
+	}
 	if text := joinBlocks(req.System); text != "" {
-		messages = append(messages, openai.SystemMessage(text))
+		appendMessage(openai.SystemMessage(text))
 	}
 	for _, msg := range req.Messages {
 		switch msg.Role {
 		case RoleSystem:
 			if text := partsText(msg.Parts); text != "" {
-				messages = append(messages, openai.SystemMessage(text))
+				appendMessage(openai.SystemMessage(text))
 			}
 		case RoleUser:
-			var results []openai.ChatCompletionMessageParamUnion
 			for _, part := range msg.Parts {
 				if part.Type == PartToolResult && part.ToolResult != nil {
-					results = append(results, openai.ToolMessage(part.ToolResult.Content, part.ToolResult.CallID))
+					appendMessage(openai.ToolMessage(part.ToolResult.Content, part.ToolResult.CallID))
 				}
 			}
-			messages = append(messages, results...)
 			if text := partsText(msg.Parts); text != "" {
 				messages = appendChatUserText(messages, text, strictRoleAlternation)
+				for len(reasoning) < len(messages) {
+					reasoning = append(reasoning, "")
+				}
 			}
 		case RoleTool:
 			for _, part := range msg.Parts {
 				if part.Type == PartToolResult && part.ToolResult != nil {
-					messages = append(messages, openai.ToolMessage(part.ToolResult.Content, part.ToolResult.CallID))
+					appendMessage(openai.ToolMessage(part.ToolResult.Content, part.ToolResult.CallID))
 				}
 			}
 		case RoleAssistant:
@@ -165,13 +201,75 @@ func chatMessages(req *Request, strictRoleAlternation bool) ([]openai.ChatComple
 				assistant.ToolCalls = calls
 				hasContent = true
 			}
-			// Chat Completions rejects unsupported reasoning history; drop it.
+			content := ""
+			if preserve {
+				var err error
+				content, err = chatReasoningContent(msg.Parts)
+				if err != nil {
+					return nil, nil, err
+				}
+			}
+			// Without a declared capability, Chat Completions reasoning history
+			// is dropped because compatible endpoints reject it.
 			if hasContent {
 				messages = append(messages, openai.ChatCompletionMessageParamUnion{OfAssistant: &assistant})
+				reasoning = append(reasoning, content)
 			}
 		}
 	}
-	return messages, nil
+	return messages, reasoning, nil
+}
+
+// chatReasoningContent extracts the reasoning_content this adapter stored on a
+// previous assistant turn. Other protocols' reasoning parts stay dropped.
+func chatReasoningContent(parts []Part) (string, error) {
+	for _, part := range parts {
+		if part.Type != PartReasoning || part.Reasoning == nil || part.Reasoning.Protocol != "openai-chat" {
+			continue
+		}
+		var payload struct {
+			ReasoningContent string `json:"reasoning_content"`
+		}
+		if err := json.Unmarshal(part.Reasoning.Raw, &payload); err != nil {
+			return "", badRequestf("reasoning content is not valid JSON")
+		}
+		if payload.ReasoningContent != "" {
+			return payload.ReasoningContent, nil
+		}
+	}
+	return "", nil
+}
+
+// chatMessagesReplayingReasoning reserializes messages with reasoning_content
+// on the assistant turns that carry it. It reports false when there is nothing
+// to replay, so the request body stays byte-identical without the capability.
+func chatMessagesReplayingReasoning(messages []openai.ChatCompletionMessageParamUnion, reasoning []string) ([]map[string]any, bool, error) {
+	replayed := false
+	for _, content := range reasoning {
+		if content != "" {
+			replayed = true
+			break
+		}
+	}
+	if !replayed {
+		return nil, false, nil
+	}
+	out := make([]map[string]any, len(messages))
+	for i, message := range messages {
+		raw, err := json.Marshal(message)
+		if err != nil {
+			return nil, false, badRequestf("message history cannot be serialized")
+		}
+		object := map[string]any{}
+		if err := json.Unmarshal(raw, &object); err != nil {
+			return nil, false, badRequestf("message history cannot be serialized")
+		}
+		if i < len(reasoning) && reasoning[i] != "" {
+			object["reasoning_content"] = reasoning[i]
+		}
+		out[i] = object
+	}
+	return out, true, nil
 }
 
 func chatTools(tools []ToolDef) ([]openai.ChatCompletionToolUnionParam, error) {
@@ -217,6 +315,12 @@ func chatToolChoice(choice string) openai.ChatCompletionToolChoiceOptionUnionPar
 }
 
 func chatResponse(completion *openai.ChatCompletion, defaultModel string) (*Response, error) {
+	return chatResponseWithReasoning(completion, defaultModel, false)
+}
+
+// chatResponseWithReasoning additionally keeps provider reasoning_content as a
+// reasoning part when the provider declares preserve_reasoning_content.
+func chatResponseWithReasoning(completion *openai.ChatCompletion, defaultModel string, preserveReasoning bool) (*Response, error) {
 	usage := Usage{}
 	usageComplete := true
 	if completion != nil {
@@ -230,6 +334,9 @@ func chatResponse(completion *openai.ChatCompletion, defaultModel string) (*Resp
 	}
 	choice := completion.Choices[0]
 	message := Message{Role: RoleAssistant}
+	if reasoning, ok := chatReasoningPart(completion, preserveReasoning); ok {
+		message.Parts = append(message.Parts, reasoning)
+	}
 	if choice.Message.Content != "" {
 		message.Parts = append(message.Parts, Part{Type: PartText, Text: choice.Message.Content})
 	}
@@ -291,6 +398,33 @@ func chatResponse(completion *openai.ChatCompletion, defaultModel string) (*Resp
 		Model:      model,
 		RequestID:  completion.ID,
 	}, nil
+}
+
+// chatReasoningPart reads the DeepSeek Chat Completions reasoning_content
+// extension from the provider's original JSON. The SDK types do not model the
+// field, so only a declared provider preserves it.
+func chatReasoningPart(completion *openai.ChatCompletion, preserve bool) (Part, bool) {
+	if !preserve || completion == nil {
+		return Part{}, false
+	}
+	var raw struct {
+		Choices []struct {
+			Message struct {
+				ReasoningContent string `json:"reasoning_content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal([]byte(completion.RawJSON()), &raw); err != nil || len(raw.Choices) == 0 ||
+		raw.Choices[0].Message.ReasoningContent == "" {
+		return Part{}, false
+	}
+	payload, err := json.Marshal(struct {
+		ReasoningContent string `json:"reasoning_content"`
+	}{ReasoningContent: raw.Choices[0].Message.ReasoningContent})
+	if err != nil {
+		return Part{}, false
+	}
+	return Part{Type: PartReasoning, Reasoning: &Reasoning{Protocol: "openai-chat", Raw: payload}}, true
 }
 
 func chatUsage(usage openai.CompletionUsage, responseRaw string) (Usage, bool) {

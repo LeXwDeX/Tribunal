@@ -413,6 +413,11 @@ func TestNewRegistryValidation(t *testing.T) {
 	}); err == nil || !strings.Contains(err.Error(), "base_url") {
 		t.Fatalf("expected base_url error, got %v", err)
 	}
+	if _, err := NewRegistry(map[string]config.ProviderConfig{
+		"bad": {Protocol: "openai-chat", Model: "m", APIKeyEnv: "PRESENT_KEY", MaxConcurrency: -1},
+	}); err == nil || !strings.Contains(err.Error(), "max_concurrency") {
+		t.Fatalf("expected max_concurrency error, got %v", err)
+	}
 	if _, err := NewRegistry(nil); err != nil {
 		t.Fatalf("empty registry: %v", err)
 	}

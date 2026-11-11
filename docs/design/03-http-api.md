@@ -256,16 +256,18 @@ SSE 事件（`event:` 字段）：`node`（`{id, status, attempt}`）、`finding
 
 #### 节点调用审计格式
 
-`GET /api/v1/reviews/{wf_id}/nodes/{node_id}/calls` 返回 `{calls, next_cursor}`。项目 `read` 可读不带 payload 的列表；`include_payload=true` 需要项目 `manage`。默认不返回 `request`、`response`。请求 payload 的 `wire` 字段记录适配器实际发出的参数（`max_tokens`、`temperature`、`reasoning.effort`、`thinking.budget_tokens`、`thinking_enabled`）；旧记录没有该字段。所有调用方均不再收到顶层 `request_id`，包括历史行；使用本地 `id` 关联调用。正在执行的 provider 接口仍可使用其响应 ID，但它不写入新的审计行。
+`GET /api/v1/reviews/{wf_id}/nodes/{node_id}/calls` 返回 `{calls, next_cursor}`。项目 `read` 可读不带 payload 的列表；`include_payload=true` 需要项目 `manage`。默认不返回 `request`、`response`。请求 payload 的 `wire` 字段记录适配器实际发出的参数（`max_tokens`、`temperature`、`reasoning.effort`、`thinking.budget_tokens`、`thinking_enabled`、`thinking_type`、`reasoning_content_replayed`）；旧记录没有该字段。`thinking_enabled` 按协议反映实际状态：`openai-chat` 为显式 `thinking.type=enabled`，`openai-responses` 为显式 `reasoning.effort` 非空且不是 `none`，`anthropic` 由 thinking budget 决定。`thinking_type` 是实际发送的 thinking 开关（`openai-chat` 的 `enabled` / `disabled`；`anthropic` 开启 thinking 时为 `enabled`）。`reasoning.effort` 记录实际发送的 effort；`anthropic` 仅在 `output_config_effort: true` 时出现。`reasoning_content_replayed` 表示本请求是否回传了 `reasoning_content`；不记录 reasoning 正文或摘要。所有调用方均不再收到顶层 `request_id`，包括历史行；使用本地 `id` 关联调用。正在执行的 provider 接口仍可使用其响应 ID，但它不写入新的审计行。
 
 启用 `include_payload=true` 时，存在的 `request` 和 `response` 分别是 JSON 对象。新记录各自带 `"_format":"audit_metadata_v1"`，例如：
 
 ```json
 {
-  "request": {"_format":"audit_metadata_v1", "messages":1, "text_parts":1, "tool_calls":0, "tool_results":0, "reasoning_parts":0, "wire":{"max_tokens":4096,"temperature":0.2,"reasoning":{"effort":"high"},"thinking_enabled":false}},
-  "response": {"_format":"audit_metadata_v1", "stop_reason":"end_turn", "usage":{"input_tokens":11,"output_tokens":7,"cache_read_tokens":0,"cache_write_tokens":0,"reasoning_tokens":0}, "text_parts":1, "tool_calls":0, "tool_results":0, "reasoning_parts":0}
+  "request": {"_format":"audit_metadata_v1", "messages":1, "text_parts":1, "tool_calls":0, "tool_results":0, "reasoning_parts":1, "wire":{"max_tokens":4096,"temperature":0.2,"reasoning":{"effort":"high"},"thinking_enabled":true,"thinking_type":"enabled","reasoning_content_replayed":true}},
+  "response": {"_format":"audit_metadata_v1", "stop_reason":"end_turn", "usage":{"input_tokens":11,"output_tokens":7,"cache_read_tokens":0,"cache_write_tokens":0,"cache_miss_tokens":11,"reasoning_tokens":0}, "text_parts":1, "tool_calls":0, "tool_results":0, "reasoning_parts":1}
 }
 ```
+
+响应 `usage` 中的 `cache_miss_tokens` 是 DeepSeek `prompt_cache_miss_tokens` 的明细，omitempty（0 或缺失时省略）；输入 token 总数仍是 `input_tokens`，不重复计数。
 
 agent 节点的 request 还可能带可选字段 `submit_prompt`（本次请求追加提交提示的原因：`last_turn`、`context`、`deadline`、`budget`）、`compacted_tool_results`（本次运行累计被上下文压缩的工具结果数）和 `forced_tool_choice`（本次请求强制了工具选择，不记录工具名）；缺省表示没有。agent 节点的 response 在有工具调用被拒绝（清除、未执行）时还可能带 `invalid_tool_call`（首个不合法调用（优先于 `rejected_batch`、`unexpected_stop`）的固定类别：`missing_call`、`empty_id`、`empty_name`、`duplicate_id`、`empty_input`、`not_object`、`invalid_json`、`non_string_field`、`unsupported_item`、`malformed_list`、`unexpected_stop`、`rejected_batch`）和 `invalid_tool_input_bytes`（该调用参数的字节数），`invalid_tool_call` 缺省表示没有被拒绝的调用；`invalid_tool_input_bytes` 为 0 或参数无法读取时也会省略，不记录工具名和参数。新记录只包含结构计数、允许的请求选项、固定 stop reason 和 usage，不含 prompt、响应正文、工具参数/输出、推理内容、上游 ID 或错误原文。响应可因请求失败而缺失；只返回已知用量的响应也有格式标记。记录器按 agent 的停止原因和调用批次检查预分类 `error_kind=unsafe_model_response`，计入错误，但不改变实际拒绝和重试策略，也不代表节点最终状态。
 
@@ -385,7 +387,7 @@ provider 和 profile 的基线以配置文件为准；改动配置需重启服�
 | `configured`、`configured_source` | 仅按配置文件得到的模型及其来源（`config`、`config_default` 或 `derived`） |
 | `override` | 本节点已存的覆盖，没有则缺省 |
 | `params`、`param_source` | 生效的参数覆盖（本节点覆盖逐字段叠加在 `default` 覆盖之上）及来源（`override` 或 `override_default`） |
-| `effective_params` | 为该节点请求的值：模型自身参数叠加覆盖后的 `max_tokens`、`temperature`、`reasoning`、`thinking`。provider 适配器可能丢弃不支持的项：Anthropic 在开启 thinking 时不发送 `temperature`，也不发送 `reasoning.effort`；OpenAI 协议不发送 thinking |
+| `effective_params` | 为该节点请求的值：模型自身参数叠加覆盖后的 `max_tokens`、`temperature`、`reasoning`、`thinking`。模型的能力字段决定适配器如何发送这些值，可能丢弃或改写不支持的项：`thinking.type` 只由 `openai-chat` 发送；OpenAI 协议不发送 `thinking.budget_tokens`；`anthropic` 在开启 thinking 时不发送 `temperature`，默认不发送 `reasoning.effort`（`output_config_effort: true` 时改为发送 `output_config.effort`）；`output_config_effort` 仅 `anthropic` 生效，`responses_params` 仅 `openai-responses` 生效，`preserve_reasoning_content` 仅 `openai-chat` 生效 |
 | `vote_identity` | 由端点和模型名得到的投票身份；`vote_identity` 相同的节点在投票中算同一个模型 |
 
 `/stats` 在聚合和分页前按当前用户的项目授权过滤；平台管理员不按 grant 过滤，统计全部已登记项目；其他用户按逐项目 grant 或有效的 `global_read` 过滤。指定 `project_id` 时还要求该项目 `read`（平台管理员隐式具备）。
@@ -455,25 +457,25 @@ Provider 返回 `name`、`protocol`、`base_url`、`model`、`max_concurrency`�
 |---|---|---|
 | GET | `/api/v1/models` | 列出配置模型（`id=config:<name>`，只读）与用户模型（`id=user:<uuid>`）；不分页 |
 | GET | `/api/v1/models/{id}` | 详情 |
-| POST | `/api/v1/models` | 创建用户模型；`params.max_tokens` 与 `params.max_concurrency` 必须为正整数；`api_key` 只写不回显；成功返回 `{"id": "user:<uuid>", "effective": "new_workflows"}`，不返回完整模型视图（需要时再 `GET /api/v1/models/{id}`）；校验失败返回 400 `validation_failed` 与逐字段 `details` |
+| POST | `/api/v1/models` | 创建用户模型；`params.max_tokens` 与 `params.max_concurrency` 不能为负，`max_tokens` 为 0 时仅 `openai-chat` / `openai-responses` 接受（请求不发送该字段，由上游取默认），`anthropic` 要求 > 0；`max_concurrency` 为 0 表示不创建本地并发信号量；`api_key` 只写不回显；成功返回 `{"id": "user:<uuid>", "effective": "new_workflows"}`，不返回完整模型视图（需要时再 `GET /api/v1/models/{id}`）；校验失败返回 400 `validation_failed` 与逐字段 `details` |
 | PATCH | `/api/v1/models/{id}` | 整记录替换，必须带 `revision`：请求需给出完整的 `display_name`、`protocol`、`base_url`、`model` 与 `params`，未提交的可选参数按零值或 `null` 覆盖；`api_key` 省略表示不变，空串表示清除；`protocol` 或 `base_url` 的 scheme/host/port 发生变化时必须显式提供 `api_key`，否则返回 400 `validation_failed`（字段 `api_key`）且不写库；配置模型返回 403 `read_only`；成功返回值同创建（`{id, effective}`）；校验失败同创建 |
-| PATCH | `/api/v1/models/{id}/params` | 参数级合并，必须带 `revision`：请求体为 `{"revision": N, "params": {…}}`，只更新 `params` 中出现的键，显式 `null` 清除可空参数（`temperature`、`reasoning`、`thinking`、`price`），未出现的键保持不变；`params` 为空、出现未知参数名或给非可空参数传 `null` 返回 400；合并后的生效参数按创建规则校验并返回逐字段 `details`；`revision` 过期返回 409 `stale_revision`；配置模型 403 `read_only`，未知或已删除模型 404；成功返回值同创建 |
+| PATCH | `/api/v1/models/{id}/params` | 参数级合并，必须带 `revision`：请求体为 `{"revision": N, "params": {…}}`，只更新 `params` 中出现的键，显式 `null` 清除可空参数（`temperature`、`reasoning`、`thinking`、`price`），未出现的键保持不变；`params` 为空、出现未知参数名或给非可空参数（含 `allow_reasoning_effort_none`、`preserve_reasoning_content`、`output_config_effort`、`responses_params`）传 `null` 返回 400；`thinking.type` 位于整体替换的 `thinking` 对象内，对象内出现 `null` 也返回 400；`max_tokens` 不能为负（`anthropic` 要求 > 0），`max_concurrency` 不能为负（0 表示不创建本地并发信号量）；合并后的生效参数按创建规则校验并返回逐字段 `details`；`revision` 过期返回 409 `stale_revision`；配置模型 403 `read_only`，未知或已删除模型 404；成功返回值同创建 |
 | DELETE | `/api/v1/models/{id}?revision=N` | 软删除；配置模型返回 403 `read_only` |
 | POST | `/api/v1/models/{id}/test` | 测试已保存模型；成功返回 `{"ok": true, "model": "...", "latency_ms": N}` |
 | POST | `/api/v1/models:test` | 草稿测试，详见下文 |
 
 两种修改语义不要混用：`PATCH /api/v1/models/{id}` 是整记录替换，适合提交完整表单；`PATCH /api/v1/models/{id}/params` 是参数级合并，只改提交的键，适合调整部分参数。两者都要求调用方提交 `revision` 做乐观锁。整记录替换在 `protocol` 或 `base_url` 的 scheme/host/port 变化时必须显式提供 `api_key`（已存模型没有密钥时不需要）；参数合并不改变 `protocol`、`base_url`，不涉及已存凭据的复用。端点预读只查询协议、地址与密钥存在性，`params_json` 损坏的记录仍可通过整记录替换修复。
 
-参数合并中的 `reasoning`、`thinking`、`price` 是整体替换：提交其中某个对象时，对象内未提交的字段按零值写入（例如只提交 `price.input_per_mtok` 会把 `output_per_mtok` 归零），调用方须提交完整对象。对象内的未知字段返回 400（字段为 `params.reasoning`、`params.thinking` 或 `params.price`）；对象内出现 `null` 也返回 400，清除整个对象须对顶层键传 `null`。
+参数合并中的 `reasoning`、`thinking`、`price` 是整体替换：提交其中某个对象时，对象内未提交的字段按零值写入（例如只提交 `price.input_per_mtok` 会把 `output_per_mtok` 归零），调用方须提交完整对象。对象内的未知字段返回 400（字段为 `params.reasoning`、`params.thinking` 或 `params.price`）；对象内出现 `null` 也返回 400，清除整个对象须对顶层键传 `null`。`responses_params` 只接受 `auto`、`supported`、`unsupported`；`thinking.type` 只接受 `enabled`、`disabled` 或空值。
 
 `POST /api/v1/models:test` 在保存前测试草稿：
 
 - 请求体与创建相同，另可带可选 `id`。`id` 必须是 `user:` 模型：非 `user:` 返回 400（字段 `id`），不存在或已删除返回 404。带 `id` 且省略 `api_key` 时，服务端使用已保存的凭据（编辑时「保持不变」）；显式传入 `api_key` 则优先使用；`id` 只要出现就会校验。仅当 `protocol` 与 `base_url` 的 scheme、host、port 都与已保存模型一致时才复用已保存凭据，否则返回 400（字段 `api_key`），避免把密钥发往其他端点。
-- 校验与创建一致，包括 `params.max_tokens` 与 `params.max_concurrency` 都必须为正整数；失败返回 400 `validation_failed`，`details` 按字段给出（`display_name`、`protocol`、`base_url`、`model`、`params.<name>`）。例如缺少或为 0 的并发上限：
+- 校验与创建一致：`params.max_tokens` 与 `params.max_concurrency` 不能为负，`max_tokens` 为 0 时仅 OpenAI 协议接受（`anthropic` 返回字段级错误），`max_concurrency` 为 0 表示不创建本地并发信号量；失败返回 400 `validation_failed`，`details` 按字段给出（`display_name`、`protocol`、`base_url`、`model`、`params.<name>`）。例如为负的并发上限：
 
   ```json
   { "error": { "code": "validation_failed", "message": "invalid model", "request_id": "01J…", "details": [
-    { "field": "params.max_concurrency", "message": "max_concurrency must be positive" }
+    { "field": "params.max_concurrency", "message": "max_concurrency must not be negative" }
   ] } }
   ```
 - 探测使用与用户模型相同的出站规则，超时 30 秒。出站被拒返回 422 `egress_denied`；上游失败返回 422 `provider_test_failed`，不回传上游响应体。
