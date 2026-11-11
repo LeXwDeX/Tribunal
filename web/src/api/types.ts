@@ -613,6 +613,48 @@ export interface PlatformSettings {
 
 export type ConfigOrigin = 'default' | 'base' | 'overlay'
 
+// ConfigProviderView is the file-effective provider view returned by
+// GET /api/v1/config. It never carries api_key_env or a credential value.
+export interface ConfigProviderView {
+  name: string
+  protocol: string
+  base_url: string
+  model: string
+  api_key_configured: boolean
+  max_concurrency?: number
+  rpm?: number
+  max_tokens?: number
+  context_window?: number
+  forced_tool_choice?: string
+  temperature?: number | null
+  thinking?: { budget_tokens?: number; type?: string } | null
+  reasoning?: { effort?: string } | null
+  strict_role_alternation?: boolean
+  allow_reasoning_effort_none?: boolean
+  preserve_reasoning_content?: boolean
+  output_config_effort?: boolean
+  responses_params?: string
+}
+
+// ConfigOverlayChange is one allowlisted leaf patch. value and delete are
+// mutually exclusive.
+export interface ConfigOverlayChange {
+  path: string[]
+  value?: unknown
+  delete?: boolean
+}
+
+export interface ConfigOverlayWriteResponse {
+  dry_run: boolean
+  applied: boolean
+  changed: boolean
+  base_revision: string
+  previous_overlay_revision: string
+  overlay_revision: string
+  restart_required: boolean
+  notice?: string
+}
+
 // ConfigFileResponse is the file-effective configuration view. Values are
 // nested by configuration path; origins map dotted paths to their layer.
 export interface ConfigFileResponse {

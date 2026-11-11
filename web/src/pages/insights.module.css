@@ -239,6 +239,12 @@
   font-size: var(--fs-label);
 }
 
+.configDetails {
+  margin: 0;
+  padding-left: var(--space-lg);
+  overflow-wrap: anywhere;
+}
+
 @media (max-width: 640px) {
   .modelFormGrid {
     grid-template-columns: minmax(0, 1fr);

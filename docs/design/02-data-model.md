@@ -370,6 +370,8 @@ CREATE TABLE api_tokens (
 
 0030 重建 `workflows` 与 `workflow_nodes` 去掉 `cost_micros`，保留其余列、默认值、主键、索引和外键；迁移执行器在迁移期间关闭外键检查，实际应用迁移后恢复并执行 `foreign_key_check`。同一迁移从 `llm_models.params_json` 剥离 legacy `price`，无效 JSON 保持原样。该迁移不可逆，回滚需恢复升级前快照与匹配的旧镜像。
 
+模型参数的配置侧覆盖不写入数据库：不存在数据库模型级覆盖表。`config:` 模型的参数层级为 base < overlay（模型级）< 0028 节点覆盖（节点级）；base 与 overlay 均来自配置文件，overlay 由配置文件维护，控制台经 `PATCH /api/v1/config/overlay` 写回，服务不把模型级修改写入 SQLite。原计划的“0030 模型级覆盖”已取消；实际迁移 `0030_remove_cost.sql` 是移除 `cost_micros` 的成本字段迁移，不创建模型覆盖表。0028 只保存评审档位节点覆盖与模型引用，不保存模型级字段；0029 的 `llm_model_defaults` 只作用于 `user:` 模型，不覆盖 `config:` 模型。
+
 本次升级不删除或迁移历史审计，原有保留策略仍生效。没有 `_format` 的历史数据可能是完整 `llm.Request`/`Response`，也可能是旧版未标记的安全元数据或截断摘要；例如 request 的 `messages` 分别可能是数组或数字，不能仅因无标记就认定类型。部分或空 payload 可能无法判别。旧 payload 仍可能含敏感内容，只有项目 `manage` 可读取；详情见 [HTTP API](03-http-api.md#42-评审工作流)。
 
 ---

@@ -418,7 +418,7 @@ describe('model form capability fields (#406)', () => {
     expect(screen.queryByText('预设加载失败，仍可手动填写。')).not.toBeInTheDocument()
   })
 
-  it('shows the YAML path on read-only config model cards and no price summary', async () => {
+  it('shows the config provider path on configured cards and no price summary', async () => {
     installFetch(routes({
       models: [{
         ...storedModel, id: 'config:primary', display_name: 'primary', source: 'config', read_only: true,
