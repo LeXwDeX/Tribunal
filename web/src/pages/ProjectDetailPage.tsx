@@ -63,13 +63,13 @@ function ProjectOverview({ project }: { project: Project }) {
         {!stats.isPending && !stats.isError ? (
           <>
             <div className={ui.metricStrip}>
-            <Metric label="运行次数" value={runs === null ? '不可用' : runs} note={`包含评审与 onboarding · BLOCKING ${blocking === null ? '不可用' : blocking} 次`} />
+            <Metric label="运行次数" value={runs === null ? '不可用' : runs} note={`含评审与 onboarding · BLOCKING ${blocking === null ? '不可用' : blocking} 次`} />
             <Metric label="BLOCKING 比例" value={formatRatio(blockingRatio)} note="来自 stats.blocking_ratio" />
             <Metric label="已发布问题" value={published === null ? '不可用' : published} note="来自 stats.published" />
             <Metric label="规则丢弃比例" value={formatRatio(overturned)} note="规则 drop 占比，不是模型准确率" />
             <Metric label="耗时 平均 / P95" value={avg === null ? '不可用' : formatMs(avg)} note={`有有效起止时间的工作流 · P95 ${formatMs(p95)}`} />
             </div>
-            <ActionHint>本项目近 7 天 · 所有数值来自 stats API；缺失时显示不可用</ActionHint>
+            <ActionHint>近 7 天 · 数值来自 stats API，缺失显示不可用。</ActionHint>
           </>
         ) : null}
       </section>

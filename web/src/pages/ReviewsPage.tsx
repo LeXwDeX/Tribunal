@@ -111,7 +111,7 @@ export function ReviewsPage() {
       <div className={ui.pageStack}>
         <PageHeader
           title="评审"
-          description="所有有权限项目的评审记录，可按状态、项目、结论、档位、触发方式和起始日期筛选。"
+          description="所有可读项目的评审记录，可按状态、项目、结论、档位、触发方式和日期筛选。"
           actions={canTrigger ? (
             <Button variant="primary" onClick={() => setTriggerOpen(true)} disabled={projects.isPending}>
               手动触发评审

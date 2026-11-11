@@ -86,8 +86,8 @@ describe('workspace manual actions', () => {
 
     await screen.findByRole('button', { name: '手动操作' })
     await user.click(screen.getByRole('button', { name: '手动操作' }))
-    expect(await screen.findByText(/执行时若 AGENTS 仍锁定/)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '重新生成上下文' })).toHaveAccessibleDescription(/执行时若 AGENTS 仍锁定/)
-    expect(screen.getByRole('button', { name: '重建索引' })).not.toHaveAccessibleDescription(/执行时若 AGENTS 仍锁定/)
+    expect(await screen.findByText(/执行时若仍锁定/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '重新生成上下文' })).toHaveAccessibleDescription(/执行时若仍锁定/)
+    expect(screen.getByRole('button', { name: '重建索引' })).not.toHaveAccessibleDescription(/执行时若仍锁定/)
   })
 })

@@ -111,9 +111,9 @@ describe('statistics provider quality', () => {
     expect(within(openai).getByText('50.0%')).toBeInTheDocument()
     expect(within(openai).getByText('1 / 2')).toBeInTheDocument()
 
-    expect(panel.getByText(/未标注和未确定不计入/)).toBeInTheDocument()
-    expect(panel.getByText(/没有样本时显示“无样本”/)).toBeInTheDocument()
-    expect(panel.getByText(/不会改变发布结果或评审结论/)).toBeInTheDocument()
+    expect(panel.getByText(/未标注、未确定不计入/)).toBeInTheDocument()
+    expect(panel.getByText(/零分母显示“无样本”/)).toBeInTheDocument()
+    expect(panel.getByText(/不改变发布结果或评审结论/)).toBeInTheDocument()
   })
 
   it('marks a missing field as unavailable, not a zero result', async () => {

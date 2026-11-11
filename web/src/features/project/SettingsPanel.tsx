@@ -53,7 +53,7 @@ function BoolSetting({
   const id = useId()
   const current = value === true ? 'true' : value === false ? 'false' : ''
   return (
-    <Field label={label} htmlFor={id} hint="选择“继承平台默认”时不会写入项目覆盖值。">
+    <Field label={label} htmlFor={id} hint="选择“继承平台默认”不写入项目覆盖值。">
       <Select
         id={id}
         value={current}
@@ -314,7 +314,7 @@ export function SettingsPanel({ project }: { project: Project }) {
           aside={projectsAside(project)}
         >
           <div className="formGrid">
-            <Field label="评审语言" htmlFor="setting-language" hint="留空时继承平台默认。">
+            <Field label="评审语言" htmlFor="setting-language" hint="留空继承平台默认。">
               <Select
                 id="setting-language"
                 value={typeof draft.language === 'string' ? draft.language : ''}
@@ -345,10 +345,10 @@ export function SettingsPanel({ project }: { project: Project }) {
             <Field label="排除标签" htmlFor="setting-labels-exclude" hint="带这些标签的 MR 跳过评审。">
               <input id="setting-labels-exclude" className="input" value={splitComma(draft.labels_exclude)} onChange={(event) => updateDraft('labels_exclude', parseComma(event.target.value))} />
             </Field>
-            <Field label="max files" htmlFor="setting-max-files" hint="留空使用平台默认。">
+            <Field label="max files" htmlFor="setting-max-files" hint="留空继承平台默认。">
               <NumberField id="setting-max-files" min={1} value={typeof draft.max_files === 'number' ? draft.max_files : ''} onChange={(event) => updateDraft('max_files', event.target.value ? Number(event.target.value) : undefined)} />
             </Field>
-            <Field label="max diff lines" htmlFor="setting-max-lines" hint="留空使用平台默认。">
+            <Field label="max diff lines" htmlFor="setting-max-lines" hint="留空继承平台默认。">
               <NumberField id="setting-max-lines" min={1} value={typeof draft.max_diff_lines === 'number' ? draft.max_diff_lines : ''} onChange={(event) => updateDraft('max_diff_lines', event.target.value ? Number(event.target.value) : undefined)} />
             </Field>
           </div>
@@ -373,7 +373,7 @@ export function SettingsPanel({ project }: { project: Project }) {
                 spellCheck={false}
                 aria-describedby="settings-json-hint"
               />
-              <FieldHint id="settings-json-hint">应用后，保存时提交当前表单值与未在表单中显示的 JSON 字段。</FieldHint>
+              <FieldHint id="settings-json-hint">应用后，保存会提交表单值与表单未显示的 JSON 字段。</FieldHint>
               {jsonError ? <span className={styles.resultError} role="alert">{jsonError}</span> : null}
               <Button variant="secondary" onClick={applyJson}>应用 JSON 到表单</Button>
             </div>

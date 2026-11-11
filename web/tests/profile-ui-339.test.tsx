@@ -106,7 +106,7 @@ describe('profile node sources, params and same-model hint (#339)', () => {
     expect(within(globalCard).getByText('base')).toBeInTheDocument()
     expect(within(globalCard).getByText(/生效参数 max_tokens 1000 · temperature 0.5/)).toBeInTheDocument()
     expect(within(globalCard).getByText(/参数来源 覆盖/)).toBeInTheDocument()
-    expect(within(globalCard).getByText('全局默认的覆盖参数逐字段作用于下方节点；节点未覆盖的字段继承全局默认覆盖，仍未设置的继承自身模型')).toBeInTheDocument()
+    expect(within(globalCard).getByText('全局默认覆盖逐字段作用于下方节点；节点未覆盖字段继承全局默认，仍未设置的继承自身模型')).toBeInTheDocument()
     const list = screen.getByRole('list', { name: '节点生效模型' })
     expect(within(list).getAllByRole('listitem')).toHaveLength(6)
     expect(globalCard.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
@@ -235,7 +235,7 @@ describe('profile node sources, params and same-model hint (#339)', () => {
     expect(within(global).getByText(hint('0.2', '模型'))).toBeInTheDocument()
     expect(within(global).getByText(hint('high', '模型'))).toBeInTheDocument()
     expect(within(global).getAllByText(thinkingObject('1024', 'disabled', '模型'))).toHaveLength(2)
-    expect(screen.getByText('参数留空表示继承模型；保存时只提交已填写的字段')).toBeInTheDocument()
+    expect(screen.getByText('节点输入下方显示继承值与来源；保存只提交实际覆盖项。')).toBeInTheDocument()
 
     const review = screen.getByRole('group', { name: 'review' })
     expect(within(review).getByText(hint('1000', '全局默认'))).toBeInTheDocument()
