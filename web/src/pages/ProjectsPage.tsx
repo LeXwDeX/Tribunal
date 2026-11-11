@@ -361,7 +361,7 @@ export function ProjectsPage() {
       <div className={ui.pageStack}>
         <PageHeader
           title="项目"
-          description="每个项目使用自己的 Project Access Token；评审结果以该 token 的 bot 用户身份发布。"
+          description="每个项目用自己的 Project Access Token；评审结果以该 token 的 bot 用户身份发布。"
           actions={canRegister ? <Button variant="primary" onClick={() => setRegisterOpen(true)}>注册项目</Button> : undefined}
         />
 

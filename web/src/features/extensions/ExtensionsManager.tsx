@@ -635,7 +635,7 @@ function McpTab({
             <Button variant="primary" onClick={onAdd}>新增 MCP 服务器</Button>
             <Button variant="secondary" onClick={onImport}>粘贴 Claude Code 配置导入</Button>
           </div>
-          <ActionHint>新增或导入后可先测试连接；测试不会写入服务器。</ActionHint>
+          <ActionHint>新增或导入后可先测试连接；测试不写入服务器。</ActionHint>
         </>
       ) : null}
       {servers.isPending ? <LoadingState /> : null}
@@ -644,8 +644,8 @@ function McpTab({
         <EmptyState
           title="还没有 MCP 服务器"
           description={canWrite
-            ? '内置 MCP 服务器由平台管理。可以新增或导入自定义服务器。'
-            : '内置 MCP 服务器由平台管理。'}
+            ? '内置 MCP 由平台管理；可新增或导入自定义服务器。'
+            : '内置 MCP 由平台管理。'}
         />
       ) : null}
       {servers.items.length ? (
@@ -809,7 +809,7 @@ function SkillsTab({
   }, [bindings])
 
   return (
-    <Panel title="Skill" note="首版只支持指令类 Skill，其中的脚本不会被执行。">
+    <Panel title="Skill" note="目前只支持指令类 Skill，脚本不会执行。">
       {canWrite ? (
         <>
           <div className={ext.panelActions}>
@@ -830,7 +830,7 @@ function SkillsTab({
             />
             <Button variant="secondary" onClick={onRegisterDir}>登记服务器目录</Button>
           </div>
-          <ActionHint>上传的 zip 必须包含 SKILL.md；目录登记会把服务端目录内容复制到受管目录，不执行其中的脚本。</ActionHint>
+          <ActionHint>zip 必须包含 SKILL.md；目录登记会复制服务端目录到受管目录，不执行脚本。</ActionHint>
         </>
       ) : null}
       {skills.isPending ? <LoadingState /> : null}
@@ -839,7 +839,7 @@ function SkillsTab({
         <EmptyState
           title="还没有 Skill"
           description={canWrite
-            ? '内置 Skill 由平台管理。可以上传 zip 或登记服务端目录。'
+            ? '内置 Skill 由平台管理；可上传 zip 或登记服务端目录。'
             : '内置 Skill 由平台管理。'}
         />
       ) : null}
@@ -1515,7 +1515,7 @@ function BindingsTab({
           onRetry={bindingState.retry}
         />
         <p className={ext.restoreHint} role="status">
-          绑定列表未全部加载，重新读取成功后才能编辑和保存。
+          绑定未全部加载；重新读取成功后才能编辑和保存。
         </p>
       </Panel>
     )
@@ -1614,7 +1614,7 @@ function BindingsTab({
         <div className={styles.warning}>
           <div role="alert" tabIndex={0}>
             检测到 {conflictBlocks.length} 个块同时存在本地修改和远端变化。保存和恢复默认已停用。
-            选择对应操作只会放弃该块的本地更改，其他块的草稿不受影响。
+            选择对应操作只放弃该块的本地更改，其他块草稿不受影响。
           </div>
           <div className={ext.conflictActions}>
             {conflictBlocks.map((block) => (
@@ -1638,7 +1638,7 @@ function BindingsTab({
       {!bindingsReady ? (
         <div className={styles.warning} role="status">
           {bindingState.hasNextPage
-            ? '绑定列表尚未全部加载。加载全部绑定后才能编辑或保存，否则未加载页中的授权可能被覆盖。'
+            ? '绑定尚未全部加载；加载完才能编辑或保存，否则未加载页的授权可能被覆盖。'
             : '正在读取并合并完整的绑定列表，完成前不能编辑或保存。'}
         </div>
       ) : null}
@@ -1745,7 +1745,7 @@ function BindingsTab({
               </tbody>
             </table>
           </div>
-          <span className={styles.matrixNote}>工具名使用 `mcp__server__tool` 形式。测试 MCP 成功后，发现的工具会出现在列中。</span>
+          <span className={styles.matrixNote}>工具名用 `mcp__server__tool` 形式；MCP 测试成功后发现的工具出现在列中。</span>
       {saveError ? <ErrorState error={saveError} title="保存绑定失败" /> : null}
       {canWrite ? (
         <div className={styles.actionsRight}>
@@ -1997,7 +1997,7 @@ function EditMcpDialog({ server, onClose, onSaved }: { server: McpServer | null;
       open={Boolean(server)}
       onClose={onClose}
       title="编辑 MCP 服务器"
-      description="默认只修改名称和启用状态。为保护密钥，服务端不返回配置内容。"
+      description="默认只改名称和启用状态；为保护密钥，服务端不返回配置内容。"
       wide
       footer={(
         <>
@@ -2273,7 +2273,7 @@ function AddMcpDialog({
       open
       onClose={pending ? () => {} : onClose}
       title="新增 MCP 服务器"
-      description={`${scopeLabel(scope, projectName)}。配置兼容 Claude Code mcpServers，保存前可先测试连接。`}
+      description={`${scopeLabel(scope, projectName)}。配置兼容 Claude Code mcpServers，保存前可测试连接。`}
       wide
       footer={(
         <>
@@ -2372,7 +2372,7 @@ function AddMcpDialog({
       {testState?.pending ? <p className={styles.testResult} role="status">正在测试连接…</p> : null}
       {testState?.error ? <p className={styles.resultError} role="status">测试失败：{testFailureText(testState)}</p> : null}
       {testState?.result ? <TestResultPanel result={testState.result} /> : null}
-      <ActionHint>测试不会写入服务器；保存时服务端会再次校验名称和配置。</ActionHint>
+      <ActionHint>测试不写入服务器；保存时服务端会再次校验名称和配置。</ActionHint>
     </Dialog>
   )
 }
@@ -2466,7 +2466,7 @@ function ImportMcpDialog({
       open
       onClose={pending ? () => {} : onClose}
       title="导入 MCP 服务器"
-      description={`${scopeLabel(scope, projectName)}。粘贴 Claude Code 的 mcpServers 文档，导入前可逐项测试连通性。`}
+      description={`${scopeLabel(scope, projectName)}。粘贴 Claude Code mcpServers 文档；导入前可逐项测试连通性。`}
       wide
       footer={(
         <>
@@ -2539,7 +2539,7 @@ function ImportMcpDialog({
           </ul>
         </>
       ) : null}
-      <ActionHint>导入在单个事务内按名称写入；任一项校验失败时整批不写入。测试只验证连通性，不会写入服务器。</ActionHint>
+      <ActionHint>导入在单个事务内按名称写入；任一项校验失败则整批不写入。测试只验证连通性，不写入服务器。</ActionHint>
     </Dialog>
   )
 }
@@ -2597,7 +2597,7 @@ function UploadSkillDialog({
       open
       onClose={pending ? () => {} : onClose}
       title="上传 Skill zip"
-      description={`${scopeLabel(scope, projectName)}。上传的 zip 会解压到受管 Skill 目录；其中的脚本不会被执行。`}
+      description={`${scopeLabel(scope, projectName)}。zip 会解压到受管 Skill 目录，脚本不会执行。`}
       footer={(
         <>
           <Button variant="secondary" onClick={onClose} disabled={pending}>取消</Button>
@@ -2614,7 +2614,7 @@ function UploadSkillDialog({
         <span className="small muted">{formatFileSize(file.size)}</span>
       </div>
       {fileError ? <span className={styles.resultError} role="alert">{fileError}</span> : null}
-      <ActionHint>上传成功后列表会刷新；内置 Skill 不提供替换或删除入口。</ActionHint>
+      <ActionHint>上传成功后列表刷新；内置 Skill 无替换或删除入口。</ActionHint>
     </Dialog>
   )
 }
@@ -2671,7 +2671,7 @@ function RegisterSkillDirDialog({
       open
       onClose={pending ? () => {} : onClose}
       title="登记服务器目录"
-      description={`${scopeLabel(scope, projectName)}。从服务端文件系统读取目录并复制到受管 Skill 目录。`}
+      description={`${scopeLabel(scope, projectName)}。读取服务端目录并复制到受管 Skill 目录。`}
       footer={(
         <>
           <Button variant="secondary" onClick={onClose} disabled={pending}>取消</Button>
@@ -2693,7 +2693,7 @@ function RegisterSkillDirDialog({
           disabled={pending}
         />
       </Field>
-      <ActionHint>目录登记是高级选项；默认推荐使用 zip 上传。</ActionHint>
+      <ActionHint>目录登记是高级选项，推荐用 zip 上传。</ActionHint>
     </Dialog>
   )
 }

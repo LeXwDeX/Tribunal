@@ -80,7 +80,7 @@ describe('platform model defaults (#413)', () => {
     expect(screen.getByLabelText('temperature')).toHaveValue(0.3)
     expect(screen.getByText('revision 3')).toBeInTheDocument()
     expect(screen.getByText(/只对 user: 模型生效/)).toBeInTheDocument()
-    expect(screen.getByText(/config: 模型的参数由配置文件负责/)).toBeInTheDocument()
+    expect(screen.getByText(/config: 模型由配置文件负责/)).toBeInTheDocument()
     // The user card lists the inherited values; the config card never does.
     const inherited = screen.getByRole('group', { name: 'inherits 全局默认参数' })
     expect(within(inherited).getByText('max_tokens')).toBeInTheDocument()

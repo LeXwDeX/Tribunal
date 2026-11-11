@@ -300,7 +300,7 @@ function QualityPanel({ value }: { value: unknown }) {
   if (state.kind === 'missing') {
     return (
       <Panel title="人工质量指标" aside="来自 stats.quality_by_provider">
-        <EmptyState title="人工质量指标不可用" description="stats 响应没有 quality_by_provider 字段；旧版服务端可能不返回人工标注指标。" />
+        <EmptyState title="人工质量指标不可用" description="stats 未返回 quality_by_provider；旧版服务端可能不支持人工标注指标。" />
       </Panel>
     )
   }
@@ -309,7 +309,7 @@ function QualityPanel({ value }: { value: unknown }) {
       <Panel title="人工质量指标" aside="来自 stats.quality_by_provider">
         <EmptyState
           title="人工质量指标数据格式无效"
-          description="stats.quality_by_provider 含负数、非整数、重复 provider、越界比例或彼此不一致的计数；为避免显示错误比例，这里不展示任何行。"
+          description="stats.quality_by_provider 含负数、非整数、重复 provider、越界比例或计数不一致；为避免显示错误比例，不展示任何行。"
         />
       </Panel>
     )
@@ -320,10 +320,10 @@ function QualityPanel({ value }: { value: unknown }) {
     <Panel
       title="人工质量指标"
       aside="来自 stats.quality_by_provider"
-      note="准确率 = 人工标注有效 / 已复核（有效 + 无效）；推翻率 = 提出方问题被挑战推翻 / 提出问题；误杀率 = 反驳后经人工标注有效 / 复核的反驳。未标注和未确定不计入准确率或误杀率的分母，但仍计入提出数、反驳数和推翻率。缺少 provider 归因的角色不计入。没有样本时显示“无样本”，不显示 0.0%。人工标注不会改变发布结果或评审结论；它不同于下方 GitLab 原始反馈信号。"
+      note="准确率 = 有效标注 / 已复核（有效 + 无效）；推翻率 = 提出方被推翻 / 提出问题；误杀率 = 反驳后标注有效 / 复核反驳。未标注、未确定不计入准确率与误杀率分母，但仍计入提出数、反驳数和推翻率。缺少 provider 归因的角色不计入。样本为零时显示“无样本”，不显示 0.0%。人工标注不改变发布结果或评审结论，也不同于下方 GitLab 原始反馈信号。"
     >
       {state.rows.length === 0 ? (
-        <EmptyState title="没有人工质量样本" description="筛选范围内没有可归因的提出或反驳记录；这是已统计的空结果，不是不可用。" />
+        <EmptyState title="没有人工质量样本" description="筛选范围内没有可归因的提出或反驳记录；这是空结果，不是不可用。" />
       ) : (
         <>
           <h3 className={insights.subTitle}>提出方</h3>
@@ -548,9 +548,9 @@ function ProviderAttribution({ providers }: { providers: ProviderFeedbackCounts[
     <>
       <h3 className={insights.subTitle}>按 provider 与角色归因</h3>
       {providers === null ? (
-        <EmptyState title="按 provider 归因不可用" description="stats.feedback 没有 by_provider 字段；旧版服务端可能不返回归因。原始信号总数仍显示在上方。" />
+        <EmptyState title="按 provider 归因不可用" description="stats.feedback 未返回 by_provider；旧版服务端可能不支持归因。原始信号总数仍显示在上方。" />
       ) : providers.length === 0 ? (
-        <EmptyState title="没有可归因的反馈" description="当前筛选范围内没有同时关联 finding 与挑战节点的反馈；summary、未关联或关联不一致的反馈不计入。" />
+        <EmptyState title="没有可归因的反馈" description="当前筛选范围内没有同时关联 finding 与挑战节点的反馈；summary、未关联或关联不一致的不计入。" />
       ) : (
         <div className="tableWrap">
           <table className={`dataTable ${insights.min480}`}>
@@ -582,7 +582,7 @@ function ProviderAttribution({ providers }: { providers: ProviderFeedbackCounts[
         </div>
       )}
       <TableNote>
-        计数是反馈归因，不代表判断正确率或误杀率。同一信号可能同时计入提出方和挑战方，不能把两个角色的计数相加当作反馈总数。summary、未关联或关联不一致的反馈不计入。
+        计数是反馈归因，不代表判断正确率或误杀率。同一信号可能同时计入提出方和挑战方，两个角色的计数不能相加当作反馈总数。summary、未关联或关联不一致的不计入。
       </TableNote>
     </>
   )
@@ -597,8 +597,8 @@ function FeedbackPanel({ value }: { value: unknown }) {
         <EmptyState
           title="反馈统计不可用"
           description={missing
-            ? 'stats 响应没有 feedback 字段；旧版服务端可能不返回该字段。'
-            : 'stats.feedback 格式无效；为避免显示错误总数，这里不展示任何反馈计数。'}
+            ? 'stats 未返回 feedback；旧版服务端可能不支持该字段。'
+            : 'stats.feedback 格式无效；为避免显示错误总数，不展示任何反馈计数。'}
         />
       </Panel>
     )
@@ -607,7 +607,7 @@ function FeedbackPanel({ value }: { value: unknown }) {
     <Panel
       title="反馈信号"
       aside="来自 stats.feedback"
-      note="按 GitLab 反馈信号展示原始计数；这是原始反馈，不代表模型准确率，也不是人工标注的误杀率。人工评估见上方“人工质量指标”。"
+      note="按 GitLab 信号展示原始计数；这是原始反馈，不代表模型准确率，也不是人工标注的误杀率。人工评估见上方“人工质量指标”。"
     >
       <div className={styles.statGrid}>
         <Metric label="反馈总数" value={feedback.total} note="按反馈时间与项目筛选计数" />
@@ -621,7 +621,7 @@ function FeedbackPanel({ value }: { value: unknown }) {
           ))}
         </div>
       ) : feedback.total === 0 ? (
-        <EmptyState title="没有反馈信号" description="筛选范围内的反馈总数为 0；这是已统计的空结果，不是不可用。" />
+        <EmptyState title="没有反馈信号" description="筛选范围内的反馈总数为 0；这是空结果，不是不可用。" />
       ) : (
         <span className="small muted">stats.feedback 没有返回按信号的明细。</span>
       )}
@@ -722,13 +722,13 @@ export function DailyRunsChart({ rows }: { rows: DailyStats[] }) {
 
 function OverallTrend({ trend }: { trend: Trend }) {
   if (trend.kind === 'missing') {
-    return <EmptyState title="每日趋势不可用" description="stats 响应没有 trend 字段；旧版服务端可能不返回每日趋势。" />
+    return <EmptyState title="每日趋势不可用" description="stats 未返回 trend；旧版服务端可能不支持每日趋势。" />
   }
   if (trend.kind === 'invalid') {
-    return <EmptyState title="每日趋势数据格式无效" description="stats.trend 中含负数、非数字或无效日期；为避免显示错误合计，这里不展示任何趋势行。" />
+    return <EmptyState title="每日趋势数据格式无效" description="stats.trend 含负数、非数字或无效日期；为避免显示错误合计，不展示任何趋势行。" />
   }
   if (trend.kind === 'empty') {
-    return <EmptyState title="没有每日趋势" description="trend 为空表示筛选范围内没有执行；这是已统计的空结果，不是不可用。缺失日期不会补零。" />
+    return <EmptyState title="没有每日趋势" description="trend 为空表示筛选范围内没有执行；这是空结果，不是不可用。缺失日期不补零。" />
   }
   return (
     <>
@@ -746,21 +746,21 @@ function ProjectStatsPanel({ value }: { value: unknown }) {
   if (state.kind === 'missing') {
     return (
       <Panel title="项目统计" aside="来自 stats.by_project">
-        <EmptyState title="项目统计不可用" description="stats 响应没有 by_project 字段；旧版服务端可能不返回按项目统计。" />
+        <EmptyState title="项目统计不可用" description="stats 未返回 by_project；旧版服务端可能不支持按项目统计。" />
       </Panel>
     )
   }
   if (state.kind === 'invalid') {
     return (
       <Panel title="项目统计" aside="来自 stats.by_project">
-        <EmptyState title="项目统计数据格式无效" description="stats.by_project 中含负数、非数字或无效字段；为避免显示错误合计，这里不展示任何项目行。" />
+        <EmptyState title="项目统计数据格式无效" description="stats.by_project 含负数、非数字或无效字段；为避免显示错误合计，不展示任何项目行。" />
       </Panel>
     )
   }
   if (!state.rows.length) {
     return (
       <Panel title="项目统计" aside="来自 stats.by_project">
-        <EmptyState title="没有项目统计" description="筛选范围内没有项目工作流；这是已统计的空结果，不是不可用。" />
+        <EmptyState title="没有项目统计" description="筛选范围内没有项目工作流；这是空结果，不是不可用。" />
       </Panel>
     )
   }
@@ -769,7 +769,7 @@ function ProjectStatsPanel({ value }: { value: unknown }) {
     <Panel
       title="项目统计"
       aside="来自 stats.by_project"
-      note="运行次数统计窗口内全部工作流（含评审与 onboarding）；BLOCKING 与已发布仍按项目工作流统计。日期按工作流创建时间归入 UTC 日；筛选范围仍按浏览器本地日选择。"
+      note="运行次数统计窗口内全部工作流（含评审与 onboarding）；BLOCKING 与已发布也按项目工作流统计。日期按创建时间归入 UTC 日；筛选范围按浏览器本地日选择。"
     >
       <div className="tableWrap">
         <table className={`dataTable ${insights.min920}`} aria-label="按项目统计明细">
@@ -845,21 +845,21 @@ function GroupStatsPanel({ value, dimension }: { value: unknown; dimension: 'pro
   if (state.kind === 'missing') {
     return (
       <Panel title={title} aside={`来自 stats.by_${dimension}`}>
-        <EmptyState title={`${title}不可用`} description={`stats 响应没有 by_${dimension} 字段；旧版服务端可能不返回节点维度统计。`} />
+        <EmptyState title={`${title}不可用`} description={`stats 未返回 by_${dimension}；旧版服务端可能不支持节点维度统计。`} />
       </Panel>
     )
   }
   if (state.kind === 'invalid') {
     return (
       <Panel title={title} aside={`来自 stats.by_${dimension}`}>
-        <EmptyState title={`${title}数据格式无效`} description={`stats.by_${dimension} 中含负数、非数字或无效字段；为避免显示错误合计，这里不展示任何行。`} />
+        <EmptyState title={`${title}数据格式无效`} description={`stats.by_${dimension} 含负数、非数字或无效字段；为避免显示错误合计，不展示任何行。`} />
       </Panel>
     )
   }
   if (!state.rows.length) {
     return (
       <Panel title={title} aside={`来自 stats.by_${dimension}`}>
-        <EmptyState title={`没有 ${dimension} 统计`} description="筛选范围内没有该维度的已启动节点；这是已统计的空结果，不是不可用。" />
+        <EmptyState title={`没有 ${dimension} 统计`} description="筛选范围内没有该维度的已启动节点；这是空结果，不是不可用。" />
       </Panel>
     )
   }
@@ -869,8 +869,8 @@ function GroupStatsPanel({ value, dimension }: { value: unknown; dimension: 'pro
       title={title}
       aside={`来自 stats.by_${dimension}`}
       note={dimension === 'provider'
-        ? '运行次数按已启动节点统计：只要节点有开始时间（started_at）就计入，每个当前保存的节点行只计一次。不按状态字段筛选，运行中、已完成和失败的节点都会计入；也不等于 LLM 调用次数或重试尝试次数。没有 provider 的节点只计入 block。这里显示当前保存的最新一次尝试，不是重试尝试历史。'
-        : '与 Provider 统计使用同一已启动节点口径；Block 始终存在，因此没有 provider 的节点仍会显示在这里。'}
+        ? '已启动节点数：节点有 started_at 就计入，每个当前保存的节点行只计一次。不按状态筛选，运行中、已完成和失败的节点都计入；不等于 LLM 调用次数或重试尝试次数。无 provider 的节点只计入 block。这里显示当前保存的最新一次尝试，不是重试历史。'
+        : '与 Provider 统计同一已启动节点口径；Block 始终存在，无 provider 的节点也会显示在这里。'}
     >
       <div className="tableWrap">
         <table className={`dataTable ${insights.min820}`} aria-label={`按 ${dimension} 统计明细`}>
@@ -944,7 +944,7 @@ function StatsContent({ stats }: { stats: Stats }) {
   return (
     <>
       <div className={ui.metricStrip}>
-        <Metric label="运行次数" value={runs === null ? '不可用' : runs} note={blocking === null ? '包含评审与 onboarding · BLOCKING 次数不可用' : `包含评审与 onboarding · BLOCKING ${blocking} 次`} />
+        <Metric label="运行次数" value={runs === null ? '不可用' : runs} note={blocking === null ? '含评审与 onboarding · BLOCKING 次数不可用' : `含评审与 onboarding · BLOCKING ${blocking} 次`} />
         <Metric label="BLOCKING 比例" value={formatRatio(statNumber(stats, 'blocking_ratio'))} note="来自 stats.blocking_ratio" />
         <Metric label="已发布问题" value={published === null ? '不可用' : published} note="来自 stats.published" />
         <Metric label="规则丢弃比例" value={formatRatio(statNumber(stats, 'overturned_ratio'))} note="规则 drop 占比，不是模型准确率" />
@@ -958,7 +958,7 @@ function StatsContent({ stats }: { stats: Stats }) {
       <Panel
         title="每日运行趋势"
         aside="来自 stats.trend · UTC 日"
-        note="趋势按工作流创建时间归入 UTC 日，只返回有执行的日期，不补零。用时为空时表示没有有效的开始与结束时间配对；样本数显示参与计算的配对数量。"
+        note="趋势按工作流创建时间归入 UTC 日，只返回有执行的日期，不补零。用时为空表示没有有效的开始与结束时间配对；样本数是参与计算的配对数量。"
       >
         <OverallTrend trend={trend} />
       </Panel>
@@ -966,7 +966,7 @@ function StatsContent({ stats }: { stats: Stats }) {
       <Panel
         title="问题处置分布"
         aside="来自 stats.decisions"
-        note="人工标注在评审详情的问题展开行中维护；这里只显示规则处置分布，人工评估汇总见下方“人工质量指标”。"
+        note="人工标注在评审详情的问题展开行维护；这里只显示规则处置分布，人工评估汇总见下方“人工质量指标”。"
       >
         {decisions.length ? (
           <div className={styles.budgetRow}>
@@ -1047,7 +1047,7 @@ export function StatisticsPage() {
       <div className={ui.pageStack}>
         <PageHeader
           title="统计与反馈"
-          description="按时间与项目查看运行统计、每日趋势和节点维度数据；不可用的值不会显示为零。"
+          description="按时间与项目查看运行统计、每日趋势和节点维度；不可用的值不显示为零。"
           actions={(
             <div className={insights.headerFilters} role="group" aria-label="筛选">
               <div className={insights.filterField}>

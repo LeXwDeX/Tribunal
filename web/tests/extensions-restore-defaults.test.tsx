@@ -338,7 +338,7 @@ describe('restore default block bindings', () => {
 
     const reviewSkill = await screen.findByRole('button', { name: 'review 使用 Skill coding-standards' })
     expect(reviewSkill).toBeDisabled()
-    expect(screen.getByText(/绑定列表尚未全部加载/)).toBeInTheDocument()
+    expect(screen.getByText(/绑定尚未全部加载/)).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: '加载更多绑定' }))
     const nextPageSkill = await screen.findByRole('button', { name: 'reasoner 使用 Skill reasoner-standards' })

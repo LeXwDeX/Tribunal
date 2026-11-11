@@ -709,13 +709,13 @@ function ModelDefaultsPanel({
           <fieldset className={styles.modelFormGroup}>
             <legend className={styles.modelFormLegend}>限流与窗口</legend>
             <div className={styles.modelFormGrid}>
-              <Field label="max_tokens" htmlFor={ids.tokens} hint="模型未设置时继承此值；留空表示不设置，由上游取默认。anthropic 用户模型需要此处或模型自身给出大于 0 的值。" error={errors.maxTokens}>
+              <Field label="max_tokens" htmlFor={ids.tokens} hint="模型未设置时继承；留空由上游取默认。anthropic 用户模型需要此处或模型自身给出大于 0 的值。" error={errors.maxTokens}>
                 <NumberField id={ids.tokens} min={0} step={1} value={form.maxTokens} aria-invalid={errors.maxTokens ? true : undefined} onChange={(event) => update({ maxTokens: event.target.value })} />
               </Field>
               <Field label="context_window" htmlFor={ids.context} hint="上游可接收的输入窗口；留空表示未知，不做上下文压缩。" error={errors.contextWindow}>
                 <NumberField id={ids.context} min={0} step={1} value={form.contextWindow} aria-invalid={errors.contextWindow ? true : undefined} onChange={(event) => update({ contextWindow: event.target.value })} />
               </Field>
-              <Field label="max_concurrency" htmlFor={ids.concurrency} hint="模型未设置时使用；留空或 0 表示不限制本地并发。" error={errors.maxConcurrency}>
+              <Field label="max_concurrency" htmlFor={ids.concurrency} hint="模型未设置时使用；留空或 0 不限制本地并发。" error={errors.maxConcurrency}>
                 <NumberField id={ids.concurrency} min={0} step={1} value={form.maxConcurrency} aria-invalid={errors.maxConcurrency ? true : undefined} onChange={(event) => update({ maxConcurrency: event.target.value })} />
               </Field>
               <Field label="rpm" htmlFor={ids.rpm} hint="每分钟请求数；留空或 0 表示不限制。" error={errors.rpm}>
@@ -742,7 +742,7 @@ function ModelDefaultsPanel({
                   aria-invalid={errors.strictRoleAlternation ? true : undefined}
                   aria-describedby={[`${ids.strict}-hint`, errors.strictRoleAlternation ? `${ids.strict}-error` : undefined].filter(Boolean).join(' ')}
                 />
-                <FieldHint id={`${ids.strict}-hint`}>开启后把用户提示折入最后一条工具消息；关闭表示不设置该默认值。</FieldHint>
+                <FieldHint id={`${ids.strict}-hint`}>开启后把用户提示折入最后一条工具消息；关闭不设置该默认值。</FieldHint>
                 {errors.strictRoleAlternation ? <span className={styles.formError} id={`${ids.strict}-error`} role="alert">{errors.strictRoleAlternation}</span> : null}
               </div>
             </div>
@@ -814,9 +814,9 @@ function ModelDefaultsPanel({
             </span>
           ) : null}
           <Note tone="neutral">
-            只对 user: 模型生效；config: 模型的参数由配置文件负责。模型显式设置的值优先于这里的默认值；
-            整数字段的 0、布尔 false 或留空表示未设置，会继续使用内置/协议默认；temperature 是显式值，填 0 会覆盖默认。
-            保存时会用候选值合并现有 user: 模型并按各自协议交叉校验，会让模型变为不可用的组合会被拒绝，不写库。
+            只对 user: 模型生效；config: 模型由配置文件负责。模型显式设置优先于这里的默认值；
+            整数字段的 0、布尔 false 或留空表示未设置，继续使用内置/协议默认；temperature 是显式值，填 0 会覆盖默认。
+            保存时用候选值合并现有 user: 模型并按各自协议交叉校验，会让模型不可用的组合被拒绝且不写库。
             保存后对之后启动的评审生效。
           </Note>
         </form>
@@ -1122,7 +1122,7 @@ function ModelDrawer({
                     </Button>
                   ))}
                 </div>
-                <FieldHint>预设只填入当前表单，不会立即保存；保存后对之后启动的评审生效。</FieldHint>
+                <FieldHint>预设只填入表单，不立即保存；保存后对之后启动的评审生效。</FieldHint>
                 {presetNote ? <span className={styles.presetApplied} role="status">已填入 {presetNote}，可继续修改。</span> : null}
               </>
             ) : <FieldHint>没有可用预设，请手动填写。</FieldHint>}
@@ -1229,7 +1229,7 @@ function ModelDrawer({
         <fieldset className={styles.modelFormGroup}>
           <legend className={styles.modelFormLegend}>限流</legend>
           <div className={styles.modelFormGrid}>
-            <Field label="max_tokens" htmlFor={ids.tokens} hint="模型默认（不发送；DeepSeek 默认 8K/64K/128K，不等于最大）。anthropic 需要模型自身或全局默认给出大于 0 的值。" error={errors.maxTokens}>
+            <Field label="max_tokens" htmlFor={ids.tokens} hint="不发送时由模型默认（DeepSeek 8K/64K/128K，不是最大值）。anthropic 需模型自身或全局默认给出大于 0 的值。" error={errors.maxTokens}>
               <NumberField id={ids.tokens} min={0} step={1} value={form.maxTokens} aria-invalid={errors.maxTokens ? true : undefined} onChange={(event) => update({ maxTokens: event.target.value })} />
             </Field>
             <Field label="max_concurrency" htmlFor={ids.concurrency} hint="留空或 0 表示不限制本地并发。" error={errors.maxConcurrency}>
@@ -1249,7 +1249,7 @@ function ModelDrawer({
 
         {configModel ? (
           <Note tone="neutral">
-            该模型来自平台配置文件，控制台不会写入数据库。YAML 字段路径：<code>providers.{configName(model?.id ?? '')}</code> 下的
+            该模型来自平台配置文件，控制台不写数据库。YAML 字段路径：<code>providers.{configName(model?.id ?? '')}</code> 下的
             protocol、base_url、model、max_tokens、context_window、temperature、reasoning、thinking、max_concurrency、rpm、
             forced_tool_choice、strict_role_alternation；修改后重启生效。
           </Note>
@@ -1644,7 +1644,7 @@ function ConfigModelDrawer({
         open={open}
         onClose={onClose}
         title="编辑配置模型"
-        description={`通过 overlay 修改 providers.${providerName}；保存后需要重启服务生效，重启可能取消在途评审。API key 与 api_key_env 只读。`}
+        description={`通过 overlay 修改 providers.${providerName}；保存后需重启生效，重启可能取消在途评审。API key 与 api_key_env 只读。`}
         footer={(
           <>
             <Button variant="secondary" onClick={() => setResetOpen(true)} loading={pending}>重置为 base</Button>
@@ -1994,7 +1994,7 @@ export function ModelsPage() {
       <div className={ui.pageStack}>
         <PageHeader
           title="模型与档位"
-          description="配置模型来自平台配置文件，可在控制台通过 overlay 编辑并重启生效；用户模型可在控制台管理。API key 只写不回显。"
+          description="配置模型来自平台配置文件，可通过 overlay 编辑并重启生效；用户模型在此管理。API key 只写不回显。"
         />
 
         {canWrite && !defaultsForbidden && !drawerOpen && !profileEditing && !configEditing ? (

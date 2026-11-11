@@ -21,7 +21,7 @@ describe('overview run count label', () => {
     const metric = label.closest('div')
     if (!metric) throw new Error('runs metric not found')
     expect(within(metric).getByText('12')).toBeInTheDocument()
-    expect(within(metric).getByText(/包含评审与 onboarding/)).toBeInTheDocument()
+    expect(within(metric).getByText(/含评审与 onboarding/)).toBeInTheDocument()
     expect(screen.queryByText('评审次数')).not.toBeInTheDocument()
   })
 })

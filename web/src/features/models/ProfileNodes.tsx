@@ -110,7 +110,7 @@ export function ProfileNodeList({ nodes, models }: { nodes: ProfileNodeView[]; m
             {defaultNode.effective_params ? <> · 参数来源 {paramSourceLabel(defaultNode.param_source)}</> : null}
           </span>
           <span className={styles.nodeMeta}>
-            全局默认的覆盖参数逐字段作用于下方节点；节点未覆盖的字段继承全局默认覆盖，仍未设置的继承自身模型
+            全局默认覆盖逐字段作用于下方节点；节点未覆盖字段继承全局默认，仍未设置的继承自身模型
           </span>
         </section>
       ) : null}
@@ -611,7 +611,7 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
       open={open}
       onClose={onClose}
       title="编辑评审档位"
-      description="全局默认作用于 6 个节点；节点留空或清除覆盖即继承全局默认，仍未设置的继承模型。保存后对之后启动的评审生效。"
+      description="全局默认作用于 6 个节点；节点留空或清除覆盖即继承全局默认，仍未设置的继承模型。对之后启动的评审生效。"
       footer={(
         <>
           <Button variant="secondary" onClick={() => setConfirmReset(true)} loading={pending} disabled={!hasOverrides}>恢复为配置</Button>
@@ -622,7 +622,7 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
     >
       <div ref={bodyRef} className={styles.editor}>
       <Note tone="info">
-        全局默认逐字段作用于下方 6 个节点；节点输入下方显示继承值与来源，保存时只提交实际覆盖项。
+        全局默认逐字段作用于 6 个节点；节点输入下方显示继承值与来源，保存只提交实际覆盖项。
       </Note>
       <fieldset className={`${styles.fieldset} ${styles.globalCard}`}>
         <legend className={styles.legend}>全局默认</legend>
@@ -712,8 +712,7 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
             </Button>
           </div>
         ) : null}
-        {defaultDirty ? <ActionHint>清除后保存，全局默认恢复为配置文件的值。</ActionHint> : null}
-        <FieldHint>参数留空表示继承模型；保存时只提交已填写的字段</FieldHint>
+        {defaultDirty ? <ActionHint>清除后保存，全局默认恢复配置值。</ActionHint> : null}
       </fieldset>
       {CONFIGURED_NODES.map(([node, label]) => {
         const form = forms[node] ?? EMPTY_FORM

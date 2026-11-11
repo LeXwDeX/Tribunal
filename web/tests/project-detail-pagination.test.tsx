@@ -37,7 +37,7 @@ describe('project detail review pagination', () => {
     )
 
     expect(await screen.findByText('运行次数')).toBeInTheDocument()
-    expect(screen.getByText(/包含评审与 onboarding/)).toBeInTheDocument()
+    expect(screen.getByText(/含评审与 onboarding/)).toBeInTheDocument()
     expect(screen.queryByText('评审次数')).not.toBeInTheDocument()
     expect(await screen.findByRole('link', { name: /!318/ })).toBeInTheDocument()
 

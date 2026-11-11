@@ -131,7 +131,7 @@ function TokenCreateDialog({ open, onClose }: { open: boolean; onClose: () => vo
       title={created ? '复制新 API token' : '创建 API token'}
       description={created
         ? '明文 token 只显示这一次。关闭对话框后将从界面状态中清除。'
-        : 'API token 用于 tribunalctl 或脚本访问管理 API。请设置名称和有效期。'}
+        : 'API token 供 tribunalctl 或脚本访问管理 API。设置名称和有效期。'}
       footer={created ? (
         <Button variant="primary" onClick={close}>我已复制，关闭</Button>
       ) : (
@@ -722,8 +722,8 @@ export function SystemPage() {
         <PageHeader
           title="系统"
           description={isAdmin
-            ? '管理个人 API token、平台配置只读视图、用户账号和项目授权。'
-            : '管理当前用户的 API token。平台配置与用户管理仅管理员可见。'}
+            ? '管理个人 API token、平台配置只读视图、用户与项目授权。'
+            : '管理自己的 API token；平台配置与用户管理仅管理员可见。'}
         />
         <Tabs
           items={tabs}

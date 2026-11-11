@@ -66,7 +66,7 @@ describe('project access gates write controls', () => {
       return jsonResponse({})
     })
     const read = renderWithProviders(<WorkspacePanel projectId={42} canManage={false} />)
-    await waitFor(() => expect(screen.getByText(/只读账号可以查看工作区状态/)).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText(/只读账号可查看工作区状态/)).toBeInTheDocument())
     expect(screen.queryByRole('button', { name: '刷新工作区' })).not.toBeInTheDocument()
     read.unmount()
 

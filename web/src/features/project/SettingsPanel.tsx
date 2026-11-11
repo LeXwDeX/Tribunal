@@ -53,7 +53,7 @@ function BoolSetting({
   const id = useId()
   const current = value === true ? 'true' : value === false ? 'false' : ''
   return (
-    <Field label={label} htmlFor={id} hint="选择“继承平台默认”时不会写入项目覆盖值。">
+    <Field label={label} htmlFor={id} hint="选择“继承平台默认”不写入项目覆盖值。">
       <Select
         id={id}
         value={current}
@@ -373,7 +373,7 @@ export function SettingsPanel({ project }: { project: Project }) {
                 spellCheck={false}
                 aria-describedby="settings-json-hint"
               />
-              <FieldHint id="settings-json-hint">应用后，保存时提交当前表单值与未在表单中显示的 JSON 字段。</FieldHint>
+              <FieldHint id="settings-json-hint">应用后，保存会提交表单值与表单未显示的 JSON 字段。</FieldHint>
               {jsonError ? <span className={styles.resultError} role="alert">{jsonError}</span> : null}
               <Button variant="secondary" onClick={applyJson}>应用 JSON 到表单</Button>
             </div>
