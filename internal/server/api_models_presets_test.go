@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -135,6 +136,10 @@ func TestModelPresetApplyMergesOnlyPresetFields(t *testing.T) {
 	if params.Temperature == nil || *params.Temperature != 0.6 || params.Price == nil || params.Price.OutputPerMTok != 2 {
 		t.Fatalf("unrelated params changed: %+v", params)
 	}
+	if fake.paramsResult.Protocol != "openai-chat" || fake.paramsResult.BaseURL != "https://api.deepseek.com" ||
+		fake.paramsResult.Model != "deepseek-flash" || !fake.paramsResult.HasAPIKey {
+		t.Fatalf("endpoint or credential changed: %+v", fake.paramsResult)
+	}
 	var body modelPresetResponse
 	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -213,20 +218,35 @@ func TestModelPresetConflictRequiresConfirmation(t *testing.T) {
 }
 
 func TestModelPresetRejectsInvalidTargets(t *testing.T) {
-	fake := &fakeModelStore{stored: presetTestModel()}
-	server, _ := newParamsTestServer(t, fake)
 	cases := []struct {
 		name, id, body string
 		status         int
 		field          string
+		model          func() *store.Model
 	}{
-		{"configured model", "config:primary", `{"preset":"deepseek-flash-max"}`, http.StatusForbidden, ""},
-		{"unknown model", "user:missing", `{"preset":"deepseek-flash-max"}`, http.StatusNotFound, ""},
-		{"unknown preset", "user:deepseek", `{"preset":"missing"}`, http.StatusBadRequest, "preset"},
-		{"apply without revision", "user:deepseek", `{"preset":"deepseek-flash-max","dry_run":false}`, http.StatusBadRequest, "revision"},
+		{"configured model", "config:primary", `{"preset":"deepseek-flash-max"}`, http.StatusForbidden, "", nil},
+		{"unknown model", "user:missing", `{"preset":"deepseek-flash-max"}`, http.StatusNotFound, "", nil},
+		{"unknown preset", "user:deepseek", `{"preset":"missing"}`, http.StatusBadRequest, "preset", nil},
+		{"apply without revision", "user:deepseek", `{"preset":"deepseek-flash-max","dry_run":false}`, http.StatusBadRequest, "revision", nil},
+		{"wrong protocol", "user:deepseek", `{"preset":"deepseek-flash-max"}`, http.StatusBadRequest, "preset", func() *store.Model {
+			model := presetTestModel()
+			model.Protocol = "anthropic"
+			return model
+		}},
+		{"other endpoint", "user:deepseek", `{"preset":"deepseek-flash-max"}`, http.StatusBadRequest, "preset", func() *store.Model {
+			model := presetTestModel()
+			model.BaseURL = "https://api.example.com/v1"
+			return model
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			stored := presetTestModel()
+			if tc.model != nil {
+				stored = tc.model()
+			}
+			fake := &fakeModelStore{stored: stored}
+			server, _ := newParamsTestServer(t, fake)
 			response := applyModelPreset(server, tc.id, tc.body)
 			if response.Code != tc.status {
 				t.Fatalf("status = %d, want %d: %s", response.Code, tc.status, response.Body.String())
@@ -236,10 +256,36 @@ func TestModelPresetRejectsInvalidTargets(t *testing.T) {
 					t.Fatalf("missing field %s: %s", tc.field, response.Body.String())
 				}
 			}
+			if fake.paramsCalls != 0 {
+				t.Fatalf("invalid request wrote to the store: %d", fake.paramsCalls)
+			}
 		})
 	}
+}
+
+func TestModelPresetApplyMapsStaleRevision(t *testing.T) {
+	fake := &fakeModelStore{stored: presetTestModel(), paramsUpdateErr: store.ErrStaleRevision}
+	server, _ := newParamsTestServer(t, fake)
+	response := applyModelPreset(server, "user:deepseek", `{"preset":"deepseek-flash-max","revision":4,"dry_run":false}`)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", response.Code, response.Body.String())
+	}
+	if code, _ := errorDetails(t, response); code != "stale_revision" {
+		t.Fatalf("error code = %q, want stale_revision", code)
+	}
+}
+
+func TestModelPresetOverrideReadFailureIsUnavailable(t *testing.T) {
+	fake := &fakeModelStore{stored: presetTestModel()}
+	server, _ := newParamsTestServer(t, fake)
+	server.platform = &config.Config{Profiles: map[string]config.ProfileConfig{"default": {Provider: "config-model"}}}
+	server.profileOverrides = &fakeProfileOverrides{getErr: errors.New("read failed")}
+	response := applyModelPreset(server, "user:deepseek", `{"preset":"deepseek-flash-max"}`)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503: %s", response.Code, response.Body.String())
+	}
 	if fake.paramsCalls != 0 {
-		t.Fatalf("invalid requests wrote to the store: %d", fake.paramsCalls)
+		t.Fatalf("unavailable overrides still wrote to the store: %d", fake.paramsCalls)
 	}
 }
 

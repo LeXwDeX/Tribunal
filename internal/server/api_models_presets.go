@@ -3,6 +3,7 @@ package server
 import (
 	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/LeXwDeX/tribunal/internal/app"
@@ -81,6 +82,12 @@ func (s *Server) handleApplyModelPreset(w http.ResponseWriter, r *http.Request) 
 		writeError(w, r, http.StatusServiceUnavailable, "unavailable", "model is unavailable", nil)
 		return
 	}
+	// The preset's parameters and capabilities are verified for one protocol
+	// and endpoint. Another provider must not receive them by accident.
+	if !presetMatchesModel(preset, *stored) {
+		validationFailed(w, r, "preset", "preset requires an openai-chat model at api.deepseek.com")
+		return
+	}
 	patch, changes := preset.PatchFor(stored.Params)
 	conflicts, err := s.presetConflicts(r, id)
 	if err != nil {
@@ -121,6 +128,24 @@ func (s *Server) handleApplyModelPreset(w http.ResponseWriter, r *http.Request) 
 	response.Revision = updated.Revision
 	response.Effective = "new_workflows"
 	writeJSON(w, http.StatusOK, response)
+}
+
+// presetMatchesModel reports whether the target model uses the preset's
+// protocol and endpoint host. A path difference such as /v1 is allowed;
+// another protocol, host or an unparseable URL is not.
+func presetMatchesModel(preset llm.ModelPreset, model store.Model) bool {
+	if model.Protocol != preset.Protocol {
+		return false
+	}
+	modelURL, err := url.Parse(model.BaseURL)
+	if err != nil {
+		return false
+	}
+	presetURL, err := url.Parse(preset.BaseURL)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(modelURL.Hostname(), presetURL.Hostname())
 }
 
 // presetConflicts collects the stored default profile node overrides that

@@ -472,7 +472,7 @@ Provider 返回 `name`、`protocol`、`base_url`、`model`、`max_concurrency`�
 
 #### 模型预设（[#405](https://github.com/LeXwDeX/Tribunal/issues/405)）
 
-`GET /api/v1/model-presets` 返回随服务发布的能力预设 `{presets:[...]}`，当前是 `deepseek-v4-pro-max` 与 `deepseek-flash-max`。每项含 `id`、`display_name`、`protocol`、`base_url`、`model`、`params`（与模型参数同构）、`source_url` 与 `verified_at`；预设不含密钥和价格。`source_url` 是官方模型表，`verified_at` 是核对日期；数值变更必须同时更新这两个字段和文档。
+`GET /api/v1/model-presets` 返回随服务发布的能力预设 `{presets:[...]}`，当前是 `deepseek-v4-pro-max` 与 `deepseek-flash-max`。每项含 `id`、`display_name`、`protocol`、`base_url`、`model`、`params`（与模型参数同构）、`source_url` 与 `verified_at`；预设不含密钥，`params.price` 恒为 `null`（预设不写入价格，成本字段由 [#407](https://github.com/LeXwDeX/Tribunal/issues/407) 处理）。`source_url` 是官方模型表，`verified_at` 是核对日期；数值变更必须同时更新这两个字段和文档。
 
 `POST /api/v1/models/{id}/preset` 把预设合并到已保存的 `user:` 模型，请求体：
 
@@ -482,7 +482,7 @@ Provider 返回 `name`、`protocol`、`base_url`、`model`、`max_concurrency`�
 
 `dry_run` 缺省或为 `true` 时只预览，不写库，也不需要 `revision`。响应为 `{model_id, preset, dry_run, applied, revision, changes, conflicts, effective?}`：`changes` 按固定顺序列出将变化的参数（`field`、`from`、`to`）；`conflicts` 列出仍会覆盖预设参数的档位节点（`profile`、`node`、`source`、`fields`），只列字段名，不含覆盖值。`revision` 在预览时是当前版本，应用后是新版本。
 
-预设只合并 `max_tokens`、`context_window`、`reasoning`、`max_concurrency`、`rpm`、`forced_tool_choice`、`strict_role_alternation` 与 `preserve_reasoning_content`；模型已有显式 `thinking` 开关（例如旧记录里的 `thinking.type: disabled`）时清除该对象，避免它压过预设 effort。预设不改变 `protocol`、`base_url`、`model`、`temperature`、`price` 或已存密钥，也不匹配模型名前缀。应用必须显式传 `"dry_run": false` 与当前 `revision`；没有字段需要变化时返回 `applied: false`，不写库、不增加 `revision`。若已有档位节点覆盖冲突，未传 `"confirm_overrides": true` 时返回 409 `override_conflict`，`details[].field` 为 `overrides.<节点>`；确认后应用但**不删除**已有覆盖，受覆盖的节点仍按覆盖值运行，管理员须在档位页另行清除。`revision` 不匹配返回 409 `stale_revision`；配置模型返回 403 `read_only`；未知或已删除模型 404；未知预设返回 400（字段 `preset`）。成功应用返回 `effective: "new_workflows"`；审计动作 `apply_preset`，只记录预设 ID 与字段名，不记录参数值或密钥。
+预设只合并 `max_tokens`、`context_window`、`reasoning`、`max_concurrency`、`rpm`、`forced_tool_choice`、`strict_role_alternation` 与 `preserve_reasoning_content`；模型已有显式 `thinking` 开关（例如旧记录里的 `thinking.type: disabled`）时清除该对象，避免它压过预设 effort。目标模型必须与预设的 `protocol` 相同，且 `base_url` 的 host 与预设一致（`api.deepseek.com`，路径可不同，例如 `/v1`），否则返回 400 `validation_failed`（字段 `preset`）。预设不改变 `protocol`、`base_url`、`model`、`temperature`、`price` 或已存密钥，也不匹配模型名前缀。应用必须显式传 `"dry_run": false` 与当前 `revision`；没有字段需要变化时返回 `applied: false`，不写库、不增加 `revision`。若已有档位节点覆盖冲突，未传 `"confirm_overrides": true` 时返回 409 `override_conflict`，`details[].field` 为 `overrides.<节点>`；确认后应用但**不删除**已有覆盖，受覆盖的节点仍按覆盖值运行，管理员须在档位页另行清除。`revision` 不匹配返回 409 `stale_revision`；配置模型返回 403 `read_only`；未知或已删除模型 404；未知预设返回 400（字段 `preset`）。成功应用返回 `effective: "new_workflows"`；审计动作 `apply_preset`，只记录预设 ID 与字段名，不记录参数值或密钥。
 
 `POST /api/v1/models:test` 在保存前测试草稿：
 

@@ -189,11 +189,11 @@ DeepSeek thinking + tools 要求后续请求完整回传 `reasoning_content`，�
 - Chat Completions 的 `max_tokens` 默认值不是最大输出：非 thinking 8K、thinking 64K、`effort=max` 128K，上限 393,216；省略该字段不会得到最大输出。`reasoning.effort: none` 可关闭 thinking。
 - `deepseek-chat` 与 `deepseek-reasoner` 已退役；旧名 `deepseek-v4-flash` 仍被接受但实际是 V4.1 Flash。
 
-预设值：`protocol=openai-chat`、`base_url=https://api.deepseek.com`；`max_tokens=393216`、`context_window=655360`（1,048,576 上下文减去 393,216 输出预留）、`reasoning.effort=max`、`max_concurrency` 为 500（v4-pro）或 2500（flash）、`rpm=0`、`forced_tool_choice=unsupported`、`strict_role_alternation=false`、`preserve_reasoning_content=true`。预设不含价格。
+预设值：`protocol=openai-chat`、`base_url=https://api.deepseek.com`；`max_tokens=393216`、`context_window=655360`（1,048,576 上下文减去 393,216 输出预留）、`reasoning.effort=max`、`max_concurrency` 为 500（v4-pro）或 2500（flash）、`rpm=0`、`forced_tool_choice=unsupported`、`strict_role_alternation=false`、`preserve_reasoning_content=true`。预设不写入价格：响应中的 `params.price` 为 `null`，成本字段由 [#407](https://github.com/LeXwDeX/Tribunal/issues/407) 处理。
 
 配置模板 `config/server.example.yaml` 与 `config/server.docker.yaml` 以注释形式给出同一组 DeepSeek provider 值；这些值**只适用于 DeepSeek，不要照抄到其他供应方**，也不是通用 `primary` 默认值。`internal/config/testdata/deepseek-preset.yaml` 用 `Load+Validate` 证明文档值可解析，测试还会检查两个模板包含这些片段。使用 Docker 时，取消注释后还需把 `DEEPSEEK_API_KEY` 加入 Compose 的显式环境变量列表。
 
-**存量用户模型升级**：预设不会在启动时自动套用，也不会按模型名前缀匹配。平台管理员先 `GET /api/v1/model-presets` 查看预设，再对目标 `user:` 模型调用 `POST /api/v1/models/{id}/preset`：
+**存量用户模型升级**：预设不会在启动时自动套用，也不会按模型名前缀匹配。平台管理员先 `GET /api/v1/model-presets` 查看预设，再对目标 `user:` 模型调用 `POST /api/v1/models/{id}/preset`。目标模型必须与预设 `protocol` 相同且 `base_url` host 为 `api.deepseek.com`（路径可带 `/v1`），否则返回 400 `validation_failed`（字段 `preset`）：
 
 ```json
 {"preset": "deepseek-flash-max", "dry_run": true}
