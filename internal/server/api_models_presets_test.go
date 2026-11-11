@@ -227,7 +227,7 @@ func TestModelPresetRejectsInvalidTargets(t *testing.T) {
 	}{
 		{"configured model", "config:primary", `{"preset":"deepseek-flash-max"}`, http.StatusForbidden, "", nil},
 		{"unknown model", "user:missing", `{"preset":"deepseek-flash-max"}`, http.StatusNotFound, "", nil},
-		{"unknown id", "deepseek", `{"preset":"deepseek-flash-max"}`, http.StatusNotFound, "", nil},
+		{"unknown id", "foo", `{"preset":"deepseek-flash-max"}`, http.StatusNotFound, "", nil},
 		{"deleted model", "user:deepseek", `{"preset":"deepseek-flash-max"}`, http.StatusNotFound, "", func() *store.Model {
 			model := presetTestModel()
 			deleted := time.Now()
