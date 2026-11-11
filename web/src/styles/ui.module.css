@@ -951,6 +951,7 @@
 .hint {
   color: var(--muted);
   font-size: var(--fs-meta);
+  overflow-wrap: anywhere;
 }
 
 .actionHint {

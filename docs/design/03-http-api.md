@@ -390,6 +390,8 @@ provider 和 profile 的基线以配置文件为准；改动配置需重启服�
 | `effective_params` | 为该节点请求的值：模型自身参数叠加覆盖后的 `max_tokens`、`temperature`、`reasoning`、`thinking`。模型的能力字段决定适配器如何发送这些值，可能丢弃或改写不支持的项：`thinking.type` 只由 `openai-chat` 发送，节点覆盖在生效模型不是 `openai-chat` 时保存即返回 400（字段 `thinking.type`）；OpenAI 协议不发送 `thinking.budget_tokens`；`anthropic` 在开启 thinking 时不发送 `temperature`，默认不发送 `reasoning.effort`（`output_config_effort: true` 时改为发送 `output_config.effort`）；`output_config_effort` 仅 `anthropic` 生效，`responses_params` 仅 `openai-responses` 生效，`preserve_reasoning_content` 仅 `openai-chat` 生效 |
 | `vote_identity` | 由端点和模型名得到的投票身份；`vote_identity` 相同的节点在投票中算同一个模型 |
 
+控制台把 `default` 节点显示为「全局默认」，并用 `effective_params`、`param_source` 与各节点的 `override` 展示继承值和来源；节点自身未填写的字段不进入 PUT 的 `overrides` 文档，所以保存只表达实际覆盖项，PUT 仍整体替换该文档。
+
 `/stats` 在聚合和分页前按当前用户的项目授权过滤；平台管理员不按 grant 过滤，统计全部已登记项目；其他用户按逐项目 grant 或有效的 `global_read` 过滤。指定 `project_id` 时还要求该项目 `read`（平台管理员隐式具备）。
 
 控制台集合响应按资源命名：`{projects}`、`{reviews}`、`{findings}`、`{servers}`、`{skills}`、`{bindings}`、`{providers}`、`{presets}`、`{profiles}`、`{calls}`、`{documents}`、`{tokens}`；可分页的集合另带 `next_cursor`。不提供未发布的旧字段别名。

@@ -32,7 +32,7 @@ function mock(profile = detail) {
   })
 }
 
-const PROFILE_LABELS = ['默认', '探索', 'code-review', 'review', 'reasoner', 'validate', 'challenge']
+const PROFILE_LABELS = ['全局默认', '探索', 'code-review', 'review', 'reasoner', 'validate', 'challenge']
 
 async function chooseOption(user: ReturnType<typeof userEvent.setup>, trigger: HTMLElement, name: RegExp | string) {
   await user.click(trigger)
@@ -46,7 +46,8 @@ describe('profile overrides UI (#293)', () => {
     mock()
     const user = userEvent.setup()
     renderWithProviders(<ModelsPage />, { route: '/models' })
-    expect(await screen.findByText('覆盖')).toBeInTheDocument()
+    expect(await screen.findByRole('region', { name: '全局默认' })).toBeInTheDocument()
+    expect(screen.getByText('覆盖')).toBeInTheDocument()
     expect(screen.getByText('配置默认')).toBeInTheDocument()
     expect(screen.getByText('派生')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '编辑档位' }))
