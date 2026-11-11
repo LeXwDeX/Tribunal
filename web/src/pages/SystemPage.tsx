@@ -274,7 +274,7 @@ function UserDrawer({ user, open, currentUserId, onClose }: {
               <input id={`grant-project-${user.id}`} className={ui.input} value={projectID} onChange={(event) => setProjectID(event.target.value)} />
             </Field>
             <Field label="角色" htmlFor={`grant-role-${user.id}`}>
-              <select id={`grant-role-${user.id}`} className={ui.input} value={grantRole} onChange={(event) => setGrantRole(event.target.value as ProjectAccess)}>
+              <select id={`grant-role-${user.id}`} className={ui.select} value={grantRole} onChange={(event) => setGrantRole(event.target.value as ProjectAccess)}>
                 <option value="read">read</option>
                 <option value="manage">manage</option>
               </select>

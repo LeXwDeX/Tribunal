@@ -37,6 +37,15 @@ describe('shared form and explanation primitives', () => {
     expect(toolbar.compareDocumentPosition(status) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
+  it('keeps an empty toolbar status region mounted for announcements', () => {
+    render(
+      <Toolbar label="筛选" status="">
+        <span>筛选条件</span>
+      </Toolbar>,
+    )
+    expect(screen.getByRole('status')).toBeEmptyDOMElement()
+  })
+
   it('renders a panel note after its children', () => {
     render(
       <Panel title="面板" note="说明文字。">
@@ -45,7 +54,7 @@ describe('shared form and explanation primitives', () => {
     )
     const body = screen.getByText('主体内容')
     const note = screen.getByText('说明文字。')
-    expect(body.compareDocumentPosition(note) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(note.previousElementSibling).toBe(body)
   })
 
   it('renders the standalone explanation primitives', () => {

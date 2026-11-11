@@ -477,6 +477,7 @@
   display: flex;
   align-items: flex-start;
   gap: var(--space-xs);
+  min-width: 0;
   padding: 10px var(--space-md);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -484,6 +485,7 @@
   color: var(--text);
   font-size: var(--fs-meta);
   line-height: var(--lh-relaxed);
+  overflow-wrap: anywhere;
 }
 
 .noteNeutral {
@@ -782,6 +784,16 @@
   padding: 10px 18px;
   border-top: 1px solid var(--border);
   background: var(--surface-2);
+  color: var(--muted);
+  font-size: var(--fs-meta);
+}
+
+/* Non-flush panels already have horizontal padding; the note aligns with
+   their content instead of adding a second inset or full-bleed background. */
+.panelNote {
+  margin: 0;
+  padding: 10px 0 0;
+  border-top: 1px solid var(--border);
   color: var(--muted);
   font-size: var(--fs-meta);
 }

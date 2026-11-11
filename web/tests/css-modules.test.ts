@@ -45,7 +45,10 @@ describe('CSS module class references', () => {
       for (const imported of moduleImports(source)) {
         const cssFile = resolve(dirname(file), imported.file)
         const defined = cssClasses.get(cssFile)
-        if (!defined) continue
+        if (!defined) {
+          missing.push(`${file}: module ${imported.file} could not be resolved`)
+          continue
+        }
         for (const match of code.matchAll(new RegExp(`\\b${imported.alias}\\.([A-Za-z_][\\w-]*)`, 'g'))) {
           const name = match[1]
           if (!defined.has(name)) missing.push(`${file}: ${imported.alias}.${name}`)
@@ -60,5 +63,14 @@ describe('CSS module class references', () => {
     const ui = classNames(readFileSync(join(root, 'styles/ui.module.css'), 'utf8'))
     expect([...ui].filter((name) => ['input', 'select', 'textarea'].includes(name)).sort())
       .toEqual(['input', 'select', 'textarea'])
+  })
+
+  it('composes the shared controls from classes that exist in global.css', () => {
+    const ui = readFileSync(join(root, 'styles/ui.module.css'), 'utf8')
+    const global = readFileSync(join(root, 'styles/global.css'), 'utf8')
+    for (const name of ['input', 'select', 'textarea']) {
+      expect(ui).toMatch(new RegExp(`\\.${name}\\s*\\{\\s*composes:\\s*${name} from global;`))
+      expect(global).toMatch(new RegExp(`(^|\\n)\\.${name}(,|\\s*\\{)`))
+    }
   })
 })

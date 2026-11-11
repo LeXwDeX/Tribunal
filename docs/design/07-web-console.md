@@ -143,10 +143,10 @@ web/
 
 | 类型 | 组件 | 位置与关联 |
 | --- | --- | --- |
-| 字段说明 | `Field` 的 `hint` | 控件下方；id 为 `<htmlFor>-hint`，由 `Field` 自动并入 `aria-describedby`；错误在 hint 之后，保持 `role="alert"` |
+| 字段说明 | `Field` 的 `hint` | 控件下方；id 为 `<htmlFor>-hint`，仅在包裹单个控件子元素时由 `Field` 自动并入 `aria-describedby`，多控件字段（如 select + input）需手动设置；错误在 hint 之后，保持 `role="alert"` |
 | 页面说明 | `PageHeader` 的 `description` | 标题下方 |
-| 面板说明 | `Panel` 的 `note`、`TableNote` | 内容之后，即面板底部 |
-| 工具栏状态 | `Toolbar` 的 `status` | `role="toolbar"` 元素之后，不放进 `actions` |
+| 面板说明 | `Panel` 的 `note`、`TableNote` | 内容之后，即面板底部；非 flush 用 `.panelNote`，flush 用 `.tableNote` |
+| 工具栏状态 | `Toolbar` 的 `status` | `role="toolbar"` 元素之后，不放进 `actions`；传空字符串仍保留 live region 节点，需要可靠播报时不要用 `undefined` 卸载 |
 | 操作说明 | `ActionHint` | 按钮组下方 |
 
 `Panel` 的 `aside` 只放计数、状态、来源短标签、链接和操作，长说明不放在这里。警示与错误保持 `role="alert"` / `role="status"`，不降级为普通说明。

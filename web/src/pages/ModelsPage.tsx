@@ -240,7 +240,7 @@ function ModelDrawer({ open, model, onClose, onSaved }: {
     >
       <Field label="显示名" htmlFor={ids.display}><input id={ids.display} className={ui.input} value={displayName} onChange={(event) => setDisplayName(event.target.value)} /></Field>
       <Field label="协议" htmlFor={ids.protocol}>
-        <select id={ids.protocol} className={ui.input} value={protocol} onChange={(event) => setProtocol(event.target.value)}>
+        <select id={ids.protocol} className={ui.select} value={protocol} onChange={(event) => setProtocol(event.target.value)}>
           <option value="openai-chat">openai-chat</option>
           <option value="openai-responses">openai-responses</option>
           <option value="anthropic">anthropic</option>
@@ -252,7 +252,7 @@ function ModelDrawer({ open, model, onClose, onSaved }: {
       <Field label="max_concurrency" htmlFor={ids.concurrency} hint="同时进行的请求数，必须为正整数。"><input id={ids.concurrency} className={ui.input} inputMode="numeric" value={maxConcurrency} onChange={(event) => setMaxConcurrency(event.target.value)} /></Field>
       <Field label="temperature" htmlFor={ids.temp}><input id={ids.temp} className={ui.input} inputMode="decimal" value={temperature} onChange={(event) => setTemperature(event.target.value)} /></Field>
       <Field label="reasoning effort" htmlFor={ids.effort} hint="anthropic 不会发送 effort。">
-        <select id={ids.effort} className={ui.input} value={effort} onChange={(event) => setEffort(event.target.value)}>
+        <select id={ids.effort} className={ui.select} value={effort} onChange={(event) => setEffort(event.target.value)}>
           <option value="">继承</option>
           <option value="low">low</option>
           <option value="medium">medium</option>
@@ -261,7 +261,7 @@ function ModelDrawer({ open, model, onClose, onSaved }: {
         </select>
       </Field>
       <Field label="API key" htmlFor={ids.key}>
-        <select id={`${ids.key}-mode`} className={ui.input} value={keyMode} onChange={(event) => setKeyMode(event.target.value as KeyMode)} aria-label="API key 状态">
+        <select id={`${ids.key}-mode`} className={ui.select} value={keyMode} onChange={(event) => setKeyMode(event.target.value as KeyMode)} aria-label="API key 状态">
           <option value="keep">保持不变</option>
           <option value="replace">替换</option>
           <option value="clear">清除</option>

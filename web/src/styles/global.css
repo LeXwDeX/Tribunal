@@ -311,6 +311,12 @@ td.nowrap {
   background-repeat: no-repeat;
 }
 
+@media (forced-colors: active) {
+  .select {
+    appearance: auto;
+  }
+}
+
 .textarea {
   min-height: 110px;
   resize: vertical;

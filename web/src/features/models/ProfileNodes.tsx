@@ -378,7 +378,7 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
             <Field label={`${label} 模型`} htmlFor={`${id}-model`} error={nodeErrors.model}>
               <select
                 id={`${id}-model`}
-                className={ui.input}
+                className={ui.select}
                 value={form.model}
                 aria-invalid={nodeErrors.model ? true : undefined}
                 aria-describedby={desc('model', `${id}-model`)}
@@ -400,7 +400,7 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
                 <input id={`${id}-temp`} className={ui.input} inputMode="decimal" placeholder="继承" value={form.temperature} aria-invalid={nodeErrors.temperature ? true : undefined} aria-describedby={desc('temperature', `${id}-temp`, true)} onChange={(event) => update(node, { temperature: event.target.value })} />
               </Field>
               <Field label={`${label} reasoning.effort`} htmlFor={`${id}-effort`} error={nodeErrors.effort}>
-                <select id={`${id}-effort`} className={ui.input} value={form.effort} aria-invalid={nodeErrors.effort ? true : undefined} aria-describedby={desc('effort', `${id}-effort`, true)} onChange={(event) => update(node, { effort: event.target.value })}>
+                <select id={`${id}-effort`} className={ui.select} value={form.effort} aria-invalid={nodeErrors.effort ? true : undefined} aria-describedby={desc('effort', `${id}-effort`, true)} onChange={(event) => update(node, { effort: event.target.value })}>
                   <option value="">继承</option>
                   <option value="low">low</option>
                   <option value="medium">medium</option>

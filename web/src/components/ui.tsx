@@ -72,7 +72,7 @@ export function Toolbar({
         <div className={styles.filterBarMain}>{children}</div>
         {actions ? <div className={styles.filterBarActions}>{actions}</div> : null}
       </div>
-      {status ? <div className={classNames(styles.toolbarStatus, inset && styles.toolbarStatusInset)} role="status">{status}</div> : null}
+      {status !== undefined ? <div className={classNames(styles.toolbarStatus, inset && styles.toolbarStatusInset)} role="status">{status}</div> : null}
     </>
   )
 }
@@ -214,7 +214,7 @@ export function Panel({
         </div>
       ) : null}
       {children}
-      {note ? <div className={styles.tableNote}>{note}</div> : null}
+      {note ? <div className={flush ? styles.tableNote : styles.panelNote}>{note}</div> : null}
     </section>
   )
 }
