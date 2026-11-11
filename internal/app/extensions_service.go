@@ -264,12 +264,12 @@ func NewExtensionService(cfg ExtensionServiceConfig) (*ExtensionService, error) 
 
 // invalidateExtensions drops cached runtime inputs after a successful write.
 // A project-scope write only affects its project; a platform-scope write
-// affects every project's merged configuration.
+// affects every project's merged configuration. When only the all-projects
+// hook is wired, a project-scope write falls back to it instead of silently
+// leaving the cache stale.
 func (s *ExtensionService) invalidateExtensions(scope string, projectID *int64) {
-	if scope == store.ScopeProject && projectID != nil {
-		if s.invalidateProject != nil {
-			s.invalidateProject(*projectID)
-		}
+	if scope == store.ScopeProject && projectID != nil && s.invalidateProject != nil {
+		s.invalidateProject(*projectID)
 		return
 	}
 	if s.invalidateAll != nil {

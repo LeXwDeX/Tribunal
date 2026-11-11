@@ -29,6 +29,18 @@ type reviewExecution struct {
 	skillRoots        map[string]string
 	repository        *review.RepositorySkillProvenance
 	repositoryCleanup func()
+	releaseSet        func()
+}
+
+// releaseResolverSet drops the project extension lease. The caller must keep
+// it until every tool and engine use of the pinned execution has finished.
+func (e *reviewExecution) releaseResolverSet() {
+	if e == nil || e.releaseSet == nil {
+		return
+	}
+	release := e.releaseSet
+	e.releaseSet = nil
+	release()
 }
 
 // resolveReviewExecution requires the project workspace lock. It pins the
@@ -39,6 +51,12 @@ func (s *ReviewService) resolveReviewExecution(ctx context.Context, project *sto
 		return nil, PermanentJob(fmt.Errorf("build review graph: %w", err))
 	}
 	execution := &reviewExecution{blocks: s.blocks, tools: s.tools, skills: s.skills, skillRoots: make(map[string]string)}
+	releaseOnError := true
+	defer func() {
+		if releaseOnError {
+			execution.releaseResolverSet()
+		}
+	}()
 	var mcpConfig *mcp.Config
 	var deniedEnv []string
 	if s.extensions != nil {
@@ -46,9 +64,7 @@ func (s *ReviewService) resolveReviewExecution(ctx context.Context, project *sto
 		if err != nil {
 			return nil, err
 		}
-		if set == nil {
-			return nil, errors.New("app: project execution identity unavailable")
-		}
+		execution.releaseSet = set.release
 		execution.blocks, execution.tools, execution.skills = set.blocks, set.tools, set.skills
 		mcpConfig = &set.mcpConfig
 		if len(set.mcpConfig.MCPServers) > 0 {
@@ -127,6 +143,7 @@ func (s *ReviewService) resolveReviewExecution(ctx context.Context, project *sto
 	sum := sha256.Sum256(data)
 	execution.digest = sum[:]
 	resolved = true
+	releaseOnError = false
 	return execution, nil
 }
 

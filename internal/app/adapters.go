@@ -12,10 +12,12 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/agent"
 	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/errclass"
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/llm"
 	"github.com/LeXwDeX/tribunal/internal/mcp"
@@ -297,6 +299,20 @@ func projectIDFromContext(ctx context.Context) (int64, bool) {
 	return id, ok && id > 0
 }
 
+// releaseSetOnContextDone holds the set lease until the caller's context ends.
+// Tool handles returned by a provider keep using the MCP manager after the
+// provider call returns, and the node context bounds that usage.
+func releaseSetOnContextDone(ctx context.Context, set *projectExtensionSet) {
+	done := ctx.Done()
+	if done == nil {
+		return
+	}
+	go func() {
+		<-done
+		set.release()
+	}()
+}
+
 func (r *executorRegistry) withProject(ctx context.Context, workflowID string) (context.Context, error) {
 	if r == nil || workflowID == "" {
 		return ctx, nil
@@ -465,24 +481,28 @@ func currentProjectRemote(ctx context.Context, client GitLabClient, project *sto
 // project configuration, including when the project adds no MCP servers, so
 // merged bindings and the project workspace apply. The cache is built on first
 // use; InvalidateProject and InvalidateAll drop it after a stored extension
-// change so the next resolution rebuilds from the current database rows.
+// change so the next resolution rebuilds from the current database rows. A
+// dropped set is retired: it closes once the last holder releases it, so an
+// in-flight review keeps its MCP manager without blocking other readers.
 type ProjectExtensionResolver struct {
-	store       *sqlite.Store
-	blocks      map[string]config.BlockBinding
-	mcpConfig   mcp.Config
-	skillDirs   []string
-	workspace   string
-	deniedEnv   []string
-	now         func() time.Time
-	logger      *slog.Logger
-	baseSkills  review.SkillProvider
-	lockProject func(context.Context, int64) (func(), error)
+	store      *sqlite.Store
+	blocks     map[string]config.BlockBinding
+	mcpConfig  mcp.Config
+	skillDirs  []string
+	workspace  string
+	deniedEnv  []string
+	now        func() time.Time
+	logger     *slog.Logger
+	baseSkills review.SkillProvider
 
 	mu          sync.Mutex
 	sets        map[int64]*projectExtensionSet
+	retired     map[*projectExtensionSet]struct{}
+	retiredWG   sync.WaitGroup
 	epochs      map[int64]uint64
 	globalEpoch uint64
 	closed      bool
+	shutdown    chan struct{}
 	// buildSet is replaceable so a test can hold a build in flight while an
 	// invalidation lands; production always builds through build.
 	buildSet func(context.Context, int64) (*projectExtensionSet, error)
@@ -500,11 +520,6 @@ type ProjectExtensionResolverConfig struct {
 	Now        func() time.Time
 	Logger     *slog.Logger
 	BaseSkills review.SkillProvider
-	// LockProject takes the project workspace write lock before a retired set
-	// is closed. Reviews hold the same lock for reading while they use a set,
-	// so this waits for them without blocking the extension write that
-	// invalidated the cache. When nil, retired sets close immediately.
-	LockProject func(context.Context, int64) (func(), error)
 }
 
 type projectExtensionSet struct {
@@ -515,8 +530,18 @@ type projectExtensionSet struct {
 	closer    io.Closer
 	loader    *skill.Loader
 	mcpConfig mcp.Config
+
+	// refs counts holders that received this set from ForProject and have not
+	// released it yet. A retired set closes when refs reaches zero.
+	refs atomic.Int64
+
+	stateMu   sync.Mutex
+	retired   bool
 	closing   bool
 	closeErr  error
+	closed    bool
+	refsZero  chan struct{}
+	closeOnce sync.Once
 }
 
 func (set *projectExtensionSet) close() error {
@@ -524,6 +549,89 @@ func (set *projectExtensionSet) close() error {
 		return nil
 	}
 	return set.closer.Close()
+}
+
+// finishClose closes the underlying resources exactly once.
+func (set *projectExtensionSet) finishClose() error {
+	set.closeOnce.Do(func() {
+		err := set.close()
+		set.stateMu.Lock()
+		set.closed = true
+		set.closeErr = err
+		set.stateMu.Unlock()
+	})
+	set.stateMu.Lock()
+	defer set.stateMu.Unlock()
+	return set.closeErr
+}
+
+// acquire registers one holder. It must not be called after the set is
+// retired; ForProject only acquires sets that are still cached.
+func (set *projectExtensionSet) acquire() {
+	set.refs.Add(1)
+}
+
+// release drops one holder and wakes the retirement waiter at zero.
+func (set *projectExtensionSet) release() {
+	if set.refs.Add(-1) > 0 {
+		return
+	}
+	set.stateMu.Lock()
+	defer set.stateMu.Unlock()
+	if set.retired {
+		set.closeRefsZeroLocked()
+	}
+}
+
+// retire marks the set unusable for new holders and returns a channel closed
+// when the last holder releases it.
+func (set *projectExtensionSet) retire() <-chan struct{} {
+	set.stateMu.Lock()
+	defer set.stateMu.Unlock()
+	set.retired = true
+	if set.refsZero == nil {
+		set.refsZero = make(chan struct{})
+	}
+	if set.refs.Load() == 0 {
+		set.closeRefsZeroLocked()
+	}
+	return set.refsZero
+}
+
+func (set *projectExtensionSet) closeRefsZeroLocked() {
+	select {
+	case <-set.refsZero:
+	default:
+		close(set.refsZero)
+	}
+}
+
+// unavailable reports whether the set cannot be handed out.
+func (set *projectExtensionSet) unavailable() bool {
+	set.stateMu.Lock()
+	defer set.stateMu.Unlock()
+	return set.closing || set.closeErr != nil || set.closed
+}
+
+// beginClose marks an explicit close in progress. It returns false when the
+// set is already closing or has failed to close.
+func (set *projectExtensionSet) beginClose() bool {
+	set.stateMu.Lock()
+	defer set.stateMu.Unlock()
+	if set.closing || set.closeErr != nil || set.closed {
+		return false
+	}
+	set.closing = true
+	return true
+}
+
+func (set *projectExtensionSet) endClose(err error) {
+	set.stateMu.Lock()
+	defer set.stateMu.Unlock()
+	set.closing = false
+	if err != nil {
+		set.closeErr = err
+	}
 }
 
 // NewProjectExtensionResolver validates dependencies and copies base state.
@@ -540,18 +648,19 @@ func NewProjectExtensionResolver(cfg ProjectExtensionResolverConfig) (*ProjectEx
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	resolver := &ProjectExtensionResolver{
-		store:       cfg.Store,
-		blocks:      cloneBlockBindings(cfg.Blocks),
-		mcpConfig:   mcp.Merge(cfg.MCP, mcp.Config{}),
-		skillDirs:   append([]string(nil), cfg.SkillDirs...),
-		workspace:   cfg.Workspace,
-		deniedEnv:   append([]string(nil), cfg.DeniedEnv...),
-		now:         now,
-		logger:      logger,
-		baseSkills:  cfg.BaseSkills,
-		lockProject: cfg.LockProject,
-		sets:        make(map[int64]*projectExtensionSet),
-		epochs:      make(map[int64]uint64),
+		store:      cfg.Store,
+		blocks:     cloneBlockBindings(cfg.Blocks),
+		mcpConfig:  mcp.Merge(cfg.MCP, mcp.Config{}),
+		skillDirs:  append([]string(nil), cfg.SkillDirs...),
+		workspace:  cfg.Workspace,
+		deniedEnv:  append([]string(nil), cfg.DeniedEnv...),
+		now:        now,
+		logger:     logger,
+		baseSkills: cfg.BaseSkills,
+		sets:       make(map[int64]*projectExtensionSet),
+		retired:    make(map[*projectExtensionSet]struct{}),
+		epochs:     make(map[int64]uint64),
+		shutdown:   make(chan struct{}),
 	}
 	resolver.buildSet = resolver.build
 	return resolver, nil
@@ -573,17 +682,15 @@ func (r *ProjectExtensionResolver) CloseProject(projectID int64) error {
 		r.mu.Unlock()
 		return nil
 	}
-	if set.closing || set.closeErr != nil {
+	if !set.beginClose() {
 		r.mu.Unlock()
 		return errProjectExtensionsUnavailable
 	}
-	set.closing = true
 	r.mu.Unlock()
 
-	err := set.close()
+	err := set.finishClose()
+	set.endClose(err)
 	r.mu.Lock()
-	set.closing = false
-	set.closeErr = err
 	if err == nil && r.sets[projectID] == set {
 		delete(r.sets, projectID)
 		r.epochs[projectID]++
@@ -597,10 +704,9 @@ func (r *ProjectExtensionResolver) CloseProject(projectID int64) error {
 
 // InvalidateProject drops one project's cached inputs so the next ForProject
 // rebuilds them from the stored rows. It is called after a successful
-// project-scope extension write. The retired set is closed after taking the
-// project workspace write lock, so a review that already received it through
-// its read lock can finish first; a build that was in flight when the
-// invalidation landed is discarded instead of being cached.
+// project-scope extension write. The dropped set is retired without waiting
+// for its holders: it closes when the last holder releases it, so invalidation
+// never blocks the project workspace readers.
 func (r *ProjectExtensionResolver) InvalidateProject(projectID int64) {
 	if r == nil || projectID <= 0 {
 		return
@@ -615,7 +721,7 @@ func (r *ProjectExtensionResolver) InvalidateProject(projectID int64) {
 	delete(r.sets, projectID)
 	r.mu.Unlock()
 	if set != nil {
-		r.closeRetired(projectID, set)
+		r.retireSet(set)
 	}
 }
 
@@ -635,36 +741,43 @@ func (r *ProjectExtensionResolver) InvalidateAll() {
 	sets := r.sets
 	r.sets = make(map[int64]*projectExtensionSet)
 	r.mu.Unlock()
-	for projectID, set := range sets {
-		r.closeRetired(projectID, set)
+	for _, set := range sets {
+		r.retireSet(set)
 	}
 }
 
-// closeRetired closes a set that is no longer cached. Without a workspace lock
-// hook (tests) it closes immediately; the runtime wires LockProject so an
-// in-flight review finishes before its MCP manager is closed.
-func (r *ProjectExtensionResolver) closeRetired(projectID int64, set *projectExtensionSet) {
-	if r.lockProject == nil {
-		_ = set.close()
+// retireSet closes a set after its last holder releases it. The waiting close
+// is tracked so Close can drain it instead of leaking MCP child processes.
+func (r *ProjectExtensionResolver) retireSet(set *projectExtensionSet) {
+	released := set.retire()
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		_ = set.finishClose()
 		return
 	}
+	r.retired[set] = struct{}{}
+	r.retiredWG.Add(1)
+	r.mu.Unlock()
 	go func() {
-		unlock, err := r.lockProject(context.Background(), projectID)
-		if err != nil {
-			r.logger.Warn("project extension close lock failed", "project_id", projectID)
+		defer r.retiredWG.Done()
+		select {
+		case <-released:
+		case <-r.shutdown:
 		}
-		if unlock != nil {
-			defer unlock()
+		if err := set.finishClose(); err != nil {
+			r.logger.Warn("project extension close failed", "error_class", errclass.Of(err))
 		}
-		if err := set.close(); err != nil {
-			r.logger.Warn("project extension close failed", "project_id", projectID)
-		}
+		r.mu.Lock()
+		delete(r.retired, set)
+		r.mu.Unlock()
 	}()
 }
 
 // ForProject returns the project-scoped inputs, building them on first use.
 // A read error is returned instead of silently running with platform-only
-// configuration. Callers must hold the shared project workspace lock.
+// configuration. Callers must hold the shared project workspace lock and call
+// release on the returned set when they stop using its tools.
 func (r *ProjectExtensionResolver) ForProject(ctx context.Context, projectID int64) (*projectExtensionSet, error) {
 	if projectID <= 0 {
 		return nil, errors.New("app: project id is required")
@@ -679,7 +792,10 @@ func (r *ProjectExtensionResolver) ForProject(ctx context.Context, projectID int
 			return nil, errProjectExtensionResolverClosed
 		}
 		if existing := r.sets[projectID]; existing != nil {
-			unavailable := existing.closing || existing.closeErr != nil
+			unavailable := existing.unavailable()
+			if !unavailable {
+				existing.acquire()
+			}
 			r.mu.Unlock()
 			if unavailable {
 				return nil, errProjectExtensionsUnavailable
@@ -697,13 +813,16 @@ func (r *ProjectExtensionResolver) ForProject(ctx context.Context, projectID int
 		r.mu.Lock()
 		if r.closed {
 			r.mu.Unlock()
-			_ = set.close()
+			_ = set.finishClose()
 			return nil, errProjectExtensionResolverClosed
 		}
 		if existing := r.sets[projectID]; existing != nil {
-			unavailable := existing.closing || existing.closeErr != nil
+			unavailable := existing.unavailable()
+			if !unavailable {
+				existing.acquire()
+			}
 			r.mu.Unlock()
-			_ = set.close()
+			_ = set.finishClose()
 			if unavailable {
 				return nil, errProjectExtensionsUnavailable
 			}
@@ -713,9 +832,10 @@ func (r *ProjectExtensionResolver) ForProject(ctx context.Context, projectID int
 			// An extension write invalidated the cache while this set was
 			// being built from pre-write rows. Never return or cache it.
 			r.mu.Unlock()
-			_ = set.close()
+			_ = set.finishClose()
 			continue
 		}
+		set.acquire()
 		r.sets[projectID] = set
 		r.mu.Unlock()
 		return set, nil
@@ -730,16 +850,24 @@ func (r *ProjectExtensionResolver) Close() error {
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
+		r.retiredWG.Wait()
 		return nil
 	}
 	r.closed = true
+	close(r.shutdown)
 	sets := r.sets
+	retired := r.retired
 	r.sets = make(map[int64]*projectExtensionSet)
+	r.retired = make(map[*projectExtensionSet]struct{})
 	r.mu.Unlock()
 	var errs []error
 	for _, set := range sets {
-		errs = append(errs, set.close())
+		errs = append(errs, set.finishClose())
 	}
+	for set := range retired {
+		_ = set.finishClose()
+	}
+	r.retiredWG.Wait()
 	return errors.Join(errs...)
 }
 
@@ -1059,10 +1187,19 @@ func (p *projectAwareToolProvider) Tools(ctx context.Context, block string) ([]a
 		if err != nil {
 			return nil, fmt.Errorf("app: resolve project tools: %w", err)
 		}
-		if set == nil || set.tools == nil {
+		if set.tools == nil {
+			set.release()
 			return nil, nil
 		}
-		return set.tools.Tools(ctx, block)
+		tools, err := set.tools.Tools(ctx, block)
+		if err != nil {
+			set.release()
+			return nil, err
+		}
+		// The tool handles keep calling the MCP manager after Tools returns, so
+		// the lease lives until the caller's node context ends.
+		releaseSetOnContextDone(ctx, set)
+		return tools, nil
 	}
 	if p.base == nil {
 		return nil, nil
@@ -1082,7 +1219,8 @@ func (p *projectAwareToolProvider) BoundToolNames(ctx context.Context, block str
 		if err != nil {
 			return nil, err
 		}
-		if set == nil || set.tools == nil {
+		defer set.release()
+		if set.tools == nil {
 			return nil, nil
 		}
 		provider, ok := set.tools.(review.ToolBindingProvider)
@@ -1125,6 +1263,7 @@ func (p *projectAwareSkillProvider) BindSkills(ctx context.Context, names []stri
 		if err != nil {
 			return review.SkillBinding{}, fmt.Errorf("app: resolve project skills: %w", err)
 		}
+		defer set.release()
 		if block != "" {
 			names = set.blocks[block].Skills
 		}

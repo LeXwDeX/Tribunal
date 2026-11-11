@@ -261,13 +261,6 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		Now:        now,
 		Logger:     logger,
 		BaseSkills: skillProvider,
-		LockProject: func(ctx context.Context, projectID int64) (func(), error) {
-			ws := workspaceManager.Get(projectID)
-			if ws == nil {
-				return nil, nil
-			}
-			return ws.Lock(ctx)
-		},
 	})
 	if err != nil {
 		if ownedMCP {
@@ -282,10 +275,14 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		if err != nil {
 			return nil, err
 		}
-		if set != nil && set.mcp != nil {
-			return set.mcp, nil
+		if set.mcp == nil {
+			set.release()
+			return mcpManager, nil
 		}
-		return mcpManager, nil
+		// The caller uses the manager for the duration of this context; keep
+		// the set alive until then so an invalidation cannot close it early.
+		releaseSetOnContextDone(ctx, set)
+		return set.mcp, nil
 	}
 	projectTools := &projectAwareToolProvider{resolver: projectExts, base: toolProvider}
 	projectSkills := &projectAwareSkillProvider{resolver: projectExts, base: skillProvider, blocks: blocks}

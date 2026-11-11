@@ -49,6 +49,7 @@ func resolveInvalidationProject(t *testing.T, resolver *ProjectExtensionResolver
 	if err != nil {
 		t.Fatalf("ForProject(%d): %v", projectID, err)
 	}
+	t.Cleanup(set.release)
 	return set
 }
 
@@ -340,6 +341,32 @@ func TestFailedExtensionWriteDoesNotInvalidate(t *testing.T) {
 	}
 }
 
+func TestProjectScopeWriteFallsBackToAllInvalidation(t *testing.T) {
+	st := openTestStore(t)
+	seedProject(t, st, newTestCipher(t), 42, "whsec", "{}", "default")
+	var allCalls atomic.Int32
+	service, err := NewExtensionService(ExtensionServiceConfig{
+		Store:     st,
+		Workspace: workspace.NewManager(t.TempDir(), nil),
+		InvalidateAll: func() {
+			allCalls.Add(1)
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewExtensionService: %v", err)
+	}
+	project42 := int64(42)
+	if _, err := service.CreateMCPServer(context.Background(), MCPServerInput{
+		Scope: "project", ProjectID: &project42, Name: "alpha", Enabled: true,
+		Config: json.RawMessage(`{"command":"alpha"}`),
+	}); err != nil {
+		t.Fatalf("CreateMCPServer: %v", err)
+	}
+	if allCalls.Load() != 1 {
+		t.Fatalf("all-invalidation calls = %d, want 1", allCalls.Load())
+	}
+}
+
 func TestProjectExtensionResolverDiscardsBuildInvalidatedInFlight(t *testing.T) {
 	for _, invalidate := range []struct {
 		name string
@@ -400,53 +427,80 @@ func TestProjectExtensionResolverDiscardsBuildInvalidatedInFlight(t *testing.T) 
 	}
 }
 
-func TestProjectExtensionResolverDefersRetiredCloseUntilWorkspaceLock(t *testing.T) {
+func TestInvalidationDoesNotBlockWorkspaceReadersAndClosesLeasedSetOnRelease(t *testing.T) {
+	ctx := context.Background()
 	st := openTestStore(t)
 	seedProject(t, st, newTestCipher(t), 42, "whsec", "{}", "default")
-	lockRequested, releaseLock := make(chan int64, 1), make(chan struct{})
+	manager := workspace.NewManager(t.TempDir(), nil)
 	resolver, err := NewProjectExtensionResolver(ProjectExtensionResolverConfig{
 		Store:     st,
-		Workspace: t.TempDir(),
-		LockProject: func(_ context.Context, projectID int64) (func(), error) {
-			lockRequested <- projectID
-			<-releaseLock
-			return func() {}, nil
-		},
+		Workspace: manager.Root(),
 	})
 	if err != nil {
 		t.Fatalf("resolver: %v", err)
 	}
 	t.Cleanup(func() { _ = resolver.Close() })
 
-	set := resolveInvalidationProject(t, resolver, 42)
+	set, err := resolver.ForProject(ctx, 42)
+	if err != nil {
+		t.Fatalf("ForProject: %v", err)
+	}
 	t.Cleanup(func() { _ = set.mcp.Close() })
 	closer := &lifecycleCloser{entered: make(chan struct{})}
 	set.closer = closer
 
-	resolver.InvalidateProject(42)
+	// A review holds the project workspace read lock while it uses the set.
+	ws := manager.Get(42)
+	unlock, err := ws.RLock(ctx)
+	if err != nil {
+		t.Fatalf("RLock: %v", err)
+	}
+
+	invalidated := make(chan struct{})
+	go func() {
+		resolver.InvalidateProject(42)
+		close(invalidated)
+	}()
 	select {
-	case projectID := <-lockRequested:
-		if projectID != 42 {
-			t.Fatalf("lock project = %d", projectID)
-		}
+	case <-invalidated:
 	case <-time.After(2 * time.Second):
-		t.Fatal("retired close did not request the workspace lock")
+		t.Fatal("InvalidateProject blocked on the workspace lock")
 	}
+
+	// Writer preference must not turn the invalidation into a queued writer
+	// that blocks new readers.
+	readAcquired := make(chan struct{})
+	go func() {
+		unlockReader, err := ws.RLock(ctx)
+		if err != nil {
+			t.Errorf("second RLock: %v", err)
+			return
+		}
+		close(readAcquired)
+		unlockReader()
+	}()
 	select {
-	case <-closer.entered:
-		t.Fatal("retired set closed before the workspace lock was released")
-	default:
+	case <-readAcquired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("workspace reader blocked after invalidation")
 	}
-	// A new resolution must not wait for the retired close.
-	next := resolveInvalidationProject(t, resolver, 42)
-	if next == set {
+
+	// The leased set stays open; a new resolution builds a fresh set.
+	if next := resolveInvalidationProject(t, resolver, 42); next == set {
 		t.Fatal("invalidated set was returned again")
 	}
-	close(releaseLock)
+	select {
+	case <-closer.entered:
+		t.Fatal("leased set closed while a holder still uses it")
+	default:
+	}
+
+	unlock()
+	set.release()
 	select {
 	case <-closer.entered:
 	case <-time.After(2 * time.Second):
-		t.Fatal("retired set was not closed after the lock was released")
+		t.Fatal("retired set was not closed after the last release")
 	}
 	if calls := closer.calls.Load(); calls != 1 {
 		t.Fatalf("retired close calls = %d", calls)
@@ -482,6 +536,7 @@ func TestProjectExtensionResolverConcurrentResolveAndInvalidate(t *testing.T) {
 				}
 				_ = set.mcpConfig.MCPServers["alpha"].Command
 				_ = set.blocks["code-review"]
+				set.release()
 			}
 		}()
 	}
