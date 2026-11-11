@@ -138,3 +138,15 @@ web/
 - 分页列表的「重试加载更多」复用失败请求的同一 cursor，保留已加载项；「刷新」重新加载已加载页并从第一页开始。
 - 时间显示为相对时间，悬停显示绝对时间（本地时区）。
 - 表格超出宽度时在容器内横向滚动；窄屏下侧边导航收起为顶部菜单。
+
+### 4.1 说明文字位置
+
+| 类型 | 组件 | 位置与关联 |
+| --- | --- | --- |
+| 字段说明 | `Field` 的 `hint` | 控件下方；id 为 `<htmlFor>-hint`，由 `Field` 自动并入 `aria-describedby`；错误在 hint 之后，保持 `role="alert"` |
+| 页面说明 | `PageHeader` 的 `description` | 标题下方 |
+| 面板说明 | `Panel` 的 `note`、`TableNote` | 内容之后，即面板底部 |
+| 工具栏状态 | `Toolbar` 的 `status` | `role="toolbar"` 元素之后，不放进 `actions` |
+| 操作说明 | `ActionHint` | 按钮组下方 |
+
+`Panel` 的 `aside` 只放计数、状态、来源短标签、链接和操作，长说明不放在这里。警示与错误保持 `role="alert"` / `role="status"`，不降级为普通说明。

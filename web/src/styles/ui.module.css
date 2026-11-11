@@ -433,6 +433,21 @@
 }
 
 
+/* Form controls share the global control styling; the module classes exist so
+   pages can use `ui.input` / `ui.select` / `ui.textarea` without falling back
+   to the browser default appearance. */
+.input {
+  composes: input from global;
+}
+
+.select {
+  composes: select from global;
+}
+
+.textarea {
+  composes: textarea from global;
+}
+
 .field {
   display: flex;
   flex-direction: column;
@@ -447,6 +462,65 @@
 }
 
 .hint {
+  color: var(--muted);
+  font-size: var(--fs-meta);
+}
+
+.actionHint {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-relaxed);
+}
+
+.note {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-xs);
+  padding: 10px var(--space-md);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-relaxed);
+}
+
+.noteNeutral {
+  background: var(--neutral-bg);
+  color: var(--neutral-fg);
+  border-color: color-mix(in srgb, var(--neutral-dot) 28%, transparent);
+}
+
+.noteInfo {
+  background: var(--info-bg);
+  color: var(--info-fg);
+  border-color: color-mix(in srgb, var(--info-dot) 28%, transparent);
+}
+
+.noteWarn {
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  border-color: color-mix(in srgb, var(--warn-dot) 30%, transparent);
+}
+
+.noteDanger {
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+  border-color: color-mix(in srgb, var(--danger-dot) 30%, transparent);
+}
+
+.noteSuccess {
+  background: var(--ok-bg);
+  color: var(--ok-fg);
+  border-color: color-mix(in srgb, var(--ok-dot) 30%, transparent);
+}
+
+.toolbarStatus {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  min-height: 18px;
   color: var(--muted);
   font-size: var(--fs-meta);
 }

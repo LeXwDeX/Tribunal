@@ -107,6 +107,9 @@ Run scoped checks while developing; run the full sequence before delivery when t
 - Rebuild and commit `web/dist` with every web change. On merge conflicts in `web/dist`, take `main`'s version and rebuild; never hand-merge build output.
 - Check UI changes at 1440 and 390 widths, in light and dark themes. The page itself must not scroll horizontally; tables and graphs scroll inside their own containers.
 - Do not hide a destructive or privileged action only in CSS; remove it from the render tree and enforce the same rule on the server.
+- Use the shared form-control classes `ui.input` / `ui.select` / `ui.textarea` (or the global `input` / `select` / `textarea` classes). Never leave a form control on the browser default appearance; `select` uses `appearance: none` plus the shared chevron.
+- Explanation text placement: `Field` hint goes below the control and is linked with `aria-describedby` (`<htmlFor>-hint`); `PageHeader` description goes below the title; `Panel` `note` / `TableNote` go after the content; `Toolbar` `status` goes after the `role="toolbar"` element, never inside its actions; `ActionHint` goes below the button group.
+- Keep `Panel` `aside` for short counts, status, source labels, links and actions only; do not put long explanations there. Warnings and errors keep `role="alert"` / `role="status"`; do not downgrade them to plain hints.
 
 ## 7. Testing requirements
 

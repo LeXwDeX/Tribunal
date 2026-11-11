@@ -1,6 +1,6 @@
 import {
-  createContext, forwardRef, useCallback, useContext, useEffect, useId, useRef, useState,
-  type AnchorHTMLAttributes, type ButtonHTMLAttributes, type ReactNode,
+  cloneElement, createContext, forwardRef, isValidElement, useCallback, useContext, useEffect, useId, useRef, useState,
+  type AnchorHTMLAttributes, type ButtonHTMLAttributes, type ReactElement, type ReactNode,
 } from 'react'
 import { createPortal } from 'react-dom'
 import { Link, type LinkProps } from 'react-router-dom'
@@ -57,13 +57,23 @@ export function ButtonLink({ variant = 'secondary', className, ...props }: Butto
 // Toolbar holds filters and scope controls on one aligned row. Its height is
 // fixed to the control height, so status messages belong below it.
 export function Toolbar({
-  children, actions, label, inset, className,
-}: { children: ReactNode; actions?: ReactNode; label?: string; inset?: boolean; className?: string }) {
+  children, actions, label, inset, className, status,
+}: {
+  children: ReactNode
+  actions?: ReactNode
+  label?: string
+  inset?: boolean
+  className?: string
+  status?: ReactNode
+}) {
   return (
-    <div className={classNames(styles.filterBar, inset && styles.toolbar, className)} role={label ? 'toolbar' : undefined} aria-label={label}>
-      <div className={styles.filterBarMain}>{children}</div>
-      {actions ? <div className={styles.filterBarActions}>{actions}</div> : null}
-    </div>
+    <>
+      <div className={classNames(styles.filterBar, inset && styles.toolbar, className)} role={label ? 'toolbar' : undefined} aria-label={label}>
+        <div className={styles.filterBarMain}>{children}</div>
+        {actions ? <div className={styles.filterBarActions}>{actions}</div> : null}
+      </div>
+      {status ? <div className={styles.toolbarStatus} role="status">{status}</div> : null}
+    </>
   )
 }
 
@@ -193,8 +203,8 @@ export function PageHeader({
 }
 
 export function Panel({
-  title, aside, children, className, flush,
-}: { title?: ReactNode; aside?: ReactNode; children: ReactNode; className?: string; flush?: boolean }) {
+  title, aside, children, className, flush, note,
+}: { title?: ReactNode; aside?: ReactNode; children: ReactNode; className?: string; flush?: boolean; note?: ReactNode }) {
   return (
     <section className={classNames(styles.panel, flush && styles.panelFlush, className)}>
       {title || aside ? (
@@ -204,6 +214,7 @@ export function Panel({
         </div>
       ) : null}
       {children}
+      {note ? <div className={styles.tableNote}>{note}</div> : null}
     </section>
   )
 }
@@ -242,15 +253,52 @@ export function Sparkline({ points, color = 'var(--accent)' }: { points: number[
   )
 }
 
+export function FieldHint({ children, id }: { children: ReactNode; id?: string }) {
+  return <span className={styles.hint} id={id}>{children}</span>
+}
+
+export function ActionHint({ children }: { children: ReactNode }) {
+  return <p className={styles.actionHint}>{children}</p>
+}
+
+type NoteTone = 'neutral' | 'info' | 'warn' | 'danger' | 'success'
+
+const NOTE_CLASSES: Record<NoteTone, string> = {
+  neutral: styles.noteNeutral,
+  info: styles.noteInfo,
+  warn: styles.noteWarn,
+  danger: styles.noteDanger,
+  success: styles.noteSuccess,
+}
+
+export function Note({ tone = 'neutral', role, children }: { tone?: NoteTone; role?: React.AriaRole; children: ReactNode }) {
+  return <div className={classNames(styles.note, NOTE_CLASSES[tone])} role={role}>{children}</div>
+}
+
+export function TableNote({ children, className }: { children: ReactNode; className?: string }) {
+  return <div className={classNames(styles.tableNote, className)}>{children}</div>
+}
+
+// Field links its hint and error to the control through aria-describedby, so
+// screen readers announce both without the page wiring ids by hand.
 export function Field({
   label, htmlFor, hint, error, children,
 }: { label: string; htmlFor: string; hint?: ReactNode; error?: ReactNode; children: ReactNode }) {
+  const hintId = hint ? `${htmlFor}-hint` : undefined
+  const errorId = error ? `${htmlFor}-error` : undefined
+  let control = children
+  const child = isValidElement(children) ? children as ReactElement<{ 'aria-describedby'?: string }> : null
+  const describedBy = [hintId, errorId].filter((id): id is string => Boolean(id))
+  if (child && describedBy.length) {
+    const existing = child.props['aria-describedby']?.split(/\s+/).filter(Boolean) ?? []
+    control = cloneElement(child, { 'aria-describedby': [...new Set([...existing, ...describedBy])].join(' ') })
+  }
   return (
     <div className={styles.field}>
       <label className={styles.label} htmlFor={htmlFor}>{label}</label>
-      {children}
-      {hint ? <span className={styles.hint}>{hint}</span> : null}
-      {error ? <span className={styles.errorText} id={`${htmlFor}-error`} role="alert">{error}</span> : null}
+      {control}
+      {hint ? <FieldHint id={hintId}>{hint}</FieldHint> : null}
+      {error ? <span className={styles.errorText} id={errorId} role="alert">{error}</span> : null}
     </div>
   )
 }
