@@ -373,7 +373,7 @@ export function ProjectsPage() {
               ? '刷新中…'
               : projects.isSuccess
                 ? `已加载 ${projects.items.length}${projects.hasNextPage ? '+' : ''} 个项目 · ${enabledCount} 个启用`
-                : undefined}
+                : ''}
             actions={(
               <Segmented
                 label="按启用状态筛选"

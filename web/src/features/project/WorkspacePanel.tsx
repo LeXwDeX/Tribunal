@@ -6,7 +6,7 @@ import {
 import { ApiError, errorMessage } from '../../api/client'
 import type { ContextDoc } from '../../api/types'
 import {
-  ActionHint, Badge, Button, classNames, EmptyState, ErrorState, LoadingState, Panel, Segmented, StatusBadge, Switch, useToast,
+  ActionHint, Badge, Button, classNames, EmptyState, ErrorState, LoadingState, Panel, Segmented, StatusBadge, Switch, Textarea, useToast,
 } from '../../components/ui'
 import { Icon } from '../../components/Icons'
 import { usePaginated } from '../../lib/hooks'
@@ -416,9 +416,9 @@ export function WorkspacePanel({ projectId, canManage = false }: { projectId: nu
                 {editing ? (
                   <>
                     <label className="srOnly" htmlFor="context-doc-editor">编辑上下文文档</label>
-                    <textarea
+                    <Textarea
                       id="context-doc-editor"
-                      className={`textarea ${page.docTextarea}`}
+                      className={page.docTextarea}
                       value={draft}
                       onChange={(event) => setDraft(event.target.value)}
                       spellCheck={false}

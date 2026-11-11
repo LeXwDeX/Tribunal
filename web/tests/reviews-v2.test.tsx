@@ -70,6 +70,33 @@ describe('review filter controls', () => {
     expect(trigger).toHaveFocus()
     await waitFor(() => expect(reviewCalls.some((url) => new URL(url, 'http://localhost').searchParams.get('verdict') === 'BLOCKING')).toBe(true))
   })
+
+  it('sends the selected start date as local midnight', async () => {
+    const reviewCalls: string[] = []
+    installFetch((url) => {
+      if (url.startsWith('/api/v1/reviews')) {
+        reviewCalls.push(url)
+        return jsonResponse({ reviews: [] })
+      }
+      if (url.startsWith('/api/v1/projects')) return jsonResponse({ projects: [] })
+      if (url.startsWith('/api/v1/profiles')) return jsonResponse({ profiles: [] })
+      return jsonResponse({})
+    })
+    const user = userEvent.setup()
+    renderWithProviders(<ReviewsPage />, { route: '/reviews' })
+
+    const input = await screen.findByLabelText('起始日期')
+    await user.type(input, '2026-10-02')
+    expect(input).toHaveValue('2026-10-02')
+    await waitFor(() => {
+      const since = reviewCalls
+        .map((url) => new URL(url, 'http://localhost').searchParams.get('since'))
+        .find((value) => value !== null)
+      expect(since).toBeTruthy()
+      // The API receives the local calendar day as an ISO timestamp.
+      expect(new Date(since!).getTime()).toBe(new Date('2026-10-02T00:00:00').getTime())
+    })
+  })
 })
 
 describe('review filter layout', () => {
@@ -81,6 +108,10 @@ describe('review filter layout', () => {
     const narrow = css.match(/@media \(max-width: 900px\)\s*\{[\s\S]*?\.filters \.filterSelect,\s*\.filters \.filterDate\s*\{([^}]*)\}/)?.[1] ?? ''
     expect(narrow).toMatch(/flex:\s*1 1 100%/)
     expect(narrow).toMatch(/max-width:\s*none/)
+    // The DatePicker root must stretch inside the full-width wrapper.
+    const dateChild = css.match(/\.filters \.filterDate > \*\s*\{([^}]*)\}/)?.[1] ?? ''
+    expect(dateChild).toMatch(/flex:\s*1 1 auto/)
+    expect(dateChild).toMatch(/min-width:\s*0/)
   })
 })
 

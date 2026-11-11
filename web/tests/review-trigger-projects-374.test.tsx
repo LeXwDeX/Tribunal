@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { screen, within } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { Route, Routes } from 'react-router-dom'
 import { ReviewDetailPage } from '../src/pages/ReviewDetailPage'
@@ -19,9 +19,14 @@ class FakeEventSource {
 describe('review trigger project picker', () => {
   afterEach(() => vi.unstubAllGlobals())
 
-  it('only offers projects the caller can manage', async () => {
+  it('only offers manageable projects and submits the selected id with full', async () => {
     const detail = review({ id: 'wf-374', project_id: 42, mr_iid: 7, access: 'manage' })
-    installFetch((url) => {
+    const triggers: Array<{ url: string; method: string; body: unknown }> = []
+    installFetch((url, init) => {
+      if (url.includes('/merge_requests/7/reviews') && init?.method === 'POST') {
+        triggers.push({ url, method: init.method, body: JSON.parse(String(init.body)) })
+        return jsonResponse({ job_id: 'job-374' })
+      }
       if (url === `/api/v1/reviews/${detail.id}`) return jsonResponse(detail)
       if (url === `/api/v1/reviews/${detail.id}/graph`) return jsonResponse({ nodes: [], edges: [] })
       if (url.startsWith(`/api/v1/reviews/${detail.id}/findings`)) return jsonResponse({ findings: [finding()] })
@@ -50,11 +55,28 @@ describe('review trigger project picker', () => {
 
     await user.click(await screen.findByRole('button', { name: '重新触发评审' }))
     const dialog = await screen.findByRole('dialog', { name: '手动触发评审' })
-    await user.click(within(dialog).getByRole('combobox', { name: '项目' }))
+    const picker = within(dialog).getByRole('combobox', { name: '项目' })
+    expect(picker).toHaveTextContent('group/backend')
+
+    await user.click(picker)
     const options = await screen.findAllByRole('option')
     const values = options.map((option) => option.textContent)
     expect(values).toContain('group/backend')
     expect(values).toContain('group/second')
     expect(values).not.toContain('group/readonly')
+    await user.click(screen.getByRole('option', { name: 'group/backend' }))
+    expect(picker).toHaveTextContent('group/backend')
+
+    await user.click(picker)
+    await user.click(await screen.findByRole('option', { name: 'group/second' }))
+    expect(picker).toHaveTextContent('group/second')
+
+    await user.click(within(dialog).getByRole('checkbox', { name: '全量评审（full）' }))
+    await user.click(within(dialog).getByRole('button', { name: '触发评审' }))
+    await waitFor(() => expect(triggers).toEqual([{
+      url: '/api/v1/projects/44/merge_requests/7/reviews',
+      method: 'POST',
+      body: { full: true },
+    }]))
   })
 })
