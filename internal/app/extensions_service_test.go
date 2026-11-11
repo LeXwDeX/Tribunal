@@ -299,12 +299,12 @@ func TestExtensionServiceTestMCPServerBothPaths(t *testing.T) {
 	httpServer := newHTTPMCPTestServer(t)
 	config := json.RawMessage(`{"url":"` + httpServer.URL + `"}`)
 
-	tools, err := service.TestMCPServer(ctx, MCPServer{Name: "remote", Config: config})
+	result, err := service.TestMCPServer(ctx, MCPServer{Name: "remote", Config: config})
 	if err != nil {
 		t.Fatalf("TestMCPServer short-lived: %v", err)
 	}
-	if len(tools) != 1 || tools[0].Name != "echo" {
-		t.Fatalf("tools = %+v", tools)
+	if len(result.Tools) != 1 || result.Tools[0].Name != "echo" {
+		t.Fatalf("tools = %+v", result.Tools)
 	}
 
 	manager, err := mcp.New(mcp.Options{
@@ -318,16 +318,16 @@ func TestExtensionServiceTestMCPServerBothPaths(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = manager.Close() })
 	service.mcp = manager
-	tools, err = service.TestMCPServer(ctx, MCPServer{Name: "remote", Config: config})
+	result, err = service.TestMCPServer(ctx, MCPServer{Name: "remote", Config: config})
 	if err != nil {
 		t.Fatalf("TestMCPServer existing: %v", err)
 	}
-	if len(tools) != 1 || tools[0].Name != "echo" {
-		t.Fatalf("existing tools = %+v", tools)
+	if len(result.Tools) != 1 || result.Tools[0].Name != "echo" {
+		t.Fatalf("existing tools = %+v", result.Tools)
 	}
 
 	other, err := service.TestMCPServer(ctx, MCPServer{Name: "other", Config: config})
-	if err != nil || len(other) != 1 {
+	if err != nil || len(other.Tools) != 1 {
 		t.Fatalf("not-yet-loaded test = %+v, %v", other, err)
 	}
 
@@ -360,14 +360,14 @@ func TestExtensionServiceTestMCPServerUsesSubmittedConfig(t *testing.T) {
 	service.mcp = stale
 
 	httpServer := newHTTPMCPTestServer(t)
-	tools, err := service.TestMCPServer(ctx, MCPServer{
+	result, err := service.TestMCPServer(ctx, MCPServer{
 		Name: "same", Config: json.RawMessage(`{"url":"` + httpServer.URL + `"}`),
 	})
 	if err != nil {
 		t.Fatalf("TestMCPServer: %v", err)
 	}
-	if len(tools) != 1 || tools[0].Name != "echo" {
-		t.Fatalf("tools = %+v", tools)
+	if len(result.Tools) != 1 || result.Tools[0].Name != "echo" {
+		t.Fatalf("tools = %+v", result.Tools)
 	}
 }
 
@@ -378,14 +378,14 @@ func TestExtensionServiceTestMCPServerParsesConfig(t *testing.T) {
 	t.Run("expands environment", func(t *testing.T) {
 		service, _ := newExtensionFixture(t)
 		t.Setenv("MCP_TEST_URL", httpServer.URL)
-		tools, err := service.TestMCPServer(ctx, MCPServer{
+		result, err := service.TestMCPServer(ctx, MCPServer{
 			Name: "expanded", Config: json.RawMessage(`{"url":"${MCP_TEST_URL}"}`),
 		})
 		if err != nil {
 			t.Fatalf("TestMCPServer: %v", err)
 		}
-		if len(tools) != 1 || tools[0].Name != "echo" {
-			t.Fatalf("tools = %+v", tools)
+		if len(result.Tools) != 1 || result.Tools[0].Name != "echo" {
+			t.Fatalf("tools = %+v", result.Tools)
 		}
 	})
 
@@ -415,8 +415,11 @@ func TestExtensionServiceTestMCPServerParsesConfig(t *testing.T) {
 		_, err := service.TestMCPServer(ctx, MCPServer{
 			Name: "missing", Config: json.RawMessage(`{"url":"${MCP_TEST_MISSING_NEVER_SET}"}`),
 		})
-		if err == nil || !strings.Contains(err.Error(), "environment variable MCP_TEST_MISSING_NEVER_SET is not set") {
-			t.Fatalf("error = %v, want a missing environment error", err)
+		if got := mcp.TestCategory(err); got != mcp.TestCategoryInvalidConfig {
+			t.Fatalf("category = %q, error = %v", got, err)
+		}
+		if strings.Contains(err.Error(), "MCP_TEST_MISSING_NEVER_SET") {
+			t.Fatalf("error leaked the configuration reference: %v", err)
 		}
 	})
 }

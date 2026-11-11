@@ -30,11 +30,15 @@ var ErrListTools = errors.New("mcp: list tools failed")
 
 // ToolInfo describes one advertised tool for the extension API. It does not
 // grant access; only Tools with an explicit allowlist creates callable tools.
+// Bindable follows annotationsAllow: an unannotated tool stays bindable for
+// compatibility, while an annotated tool must be read-only and non-destructive.
 type ToolInfo struct {
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
-	ReadOnly    bool   `json:"read_only,omitempty"`
-	Destructive bool   `json:"destructive,omitempty"`
+	ReadOnly    bool   `json:"read_only"`
+	Destructive bool   `json:"destructive"`
+	Bindable    bool   `json:"bindable"`
+	Annotated   bool   `json:"annotated"`
 }
 
 // ToolSet is the explicitly allowlisted MCP tool set for one block. Unannotated
@@ -63,7 +67,7 @@ func (m *Manager) ListTools(ctx context.Context, server string) ([]ToolInfo, err
 	}
 	entry, err := m.acquire(ctx, server)
 	if err != nil {
-		return nil, err
+		return nil, connectTestError(err)
 	}
 	defer entry.end()
 
@@ -71,7 +75,7 @@ func (m *Manager) ListTools(ctx context.Context, server string) ([]ToolInfo, err
 	defer cancel()
 	raws, err := entry.list(callCtx)
 	if err != nil {
-		return nil, entry.listError(ctx, callCtx, err)
+		return nil, listToolsError(entry.listError(ctx, callCtx, err))
 	}
 	infos := make([]ToolInfo, 0, len(raws))
 	for _, raw := range raws {
@@ -242,7 +246,7 @@ func (entry *serverEntry) list(ctx context.Context) ([]*sdk.Tool, error) {
 			continue
 		}
 		if len(tools) >= maxRemoteTools {
-			return nil, fmt.Errorf("mcp: server %q advertises too many tools", entry.key.server)
+			return nil, fmt.Errorf("%w: server %q", ErrTooManyTools, entry.key.server)
 		}
 		tools = append(tools, tool)
 	}
@@ -266,10 +270,16 @@ func (entry *serverEntry) listError(parent, callCtx context.Context, err error) 
 		return fmt.Errorf("%w: %q", ErrConnectionClosed, entry.key.server)
 	}
 	if parent.Err() != nil {
-		return fmt.Errorf("%w: server %q", parent.Err(), entry.key.server)
+		if errors.Is(parent.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("%w: server %q", ErrListToolsTimeout, entry.key.server)
+		}
+		return fmt.Errorf("%w: %q", ErrListTools, entry.key.server)
 	}
 	if callCtx != nil && errors.Is(callCtx.Err(), context.DeadlineExceeded) {
-		return fmt.Errorf("%w: server %q: timed out", ErrListTools, entry.key.server)
+		return fmt.Errorf("%w: server %q", ErrListToolsTimeout, entry.key.server)
+	}
+	if errors.Is(err, ErrTooManyTools) {
+		return fmt.Errorf("%w: %q", ErrTooManyTools, entry.key.server)
 	}
 	return fmt.Errorf("%w: %q", ErrListTools, entry.key.server)
 }
@@ -281,10 +291,13 @@ func infoFor(raw *sdk.Tool) (ToolInfo, bool) {
 	info := ToolInfo{
 		Name:        raw.Name,
 		Description: truncateUTF8(oneLine(raw.Description), maxDescription),
+		Bindable:    true,
 	}
 	if raw.Annotations != nil {
+		info.Annotated = true
 		info.ReadOnly = raw.Annotations.ReadOnlyHint
 		info.Destructive = raw.Annotations.DestructiveHint != nil && *raw.Annotations.DestructiveHint
+		info.Bindable = annotationsAllow(raw)
 	}
 	return info, true
 }

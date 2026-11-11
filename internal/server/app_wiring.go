@@ -77,6 +77,43 @@ func (a *AppExtensions) GetMCPServer(ctx context.Context, id string) (*MCPServer
 	return &out, nil
 }
 
+func (a *AppExtensions) CreateMCPServer(ctx context.Context, in MCPServerInput) (*MCPServer, error) {
+	if err := a.ready(); err != nil {
+		return nil, err
+	}
+	server, err := a.service.CreateMCPServer(ctx, app.MCPServerInput{
+		Scope:     in.Scope,
+		ProjectID: in.ProjectID,
+		Name:      in.Name,
+		Config:    in.Config,
+		Enabled:   in.Enabled,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := mcpServerFromApp(*server)
+	return &out, nil
+}
+
+func (a *AppExtensions) ImportMCPServers(ctx context.Context, in MCPImportInput) ([]MCPServer, error) {
+	if err := a.ready(); err != nil {
+		return nil, err
+	}
+	servers, err := a.service.ImportMCPServers(ctx, app.MCPImportInput{
+		Scope:     in.Scope,
+		ProjectID: in.ProjectID,
+		Servers:   in.Servers,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]MCPServer, 0, len(servers))
+	for _, server := range servers {
+		out = append(out, mcpServerFromApp(server))
+	}
+	return out, nil
+}
+
 func (a *AppExtensions) UpdateMCPServer(ctx context.Context, id string, in MCPServerUpdate) (*MCPServer, error) {
 	if err := a.ready(); err != nil {
 		return nil, err
@@ -210,11 +247,11 @@ func (a *AppExtensions) ReplaceBlockBinding(ctx context.Context, in BlockBinding
 	return &out, nil
 }
 
-func (a *AppExtensions) TestMCPServer(ctx context.Context, server MCPServer) ([]MCPTool, error) {
+func (a *AppExtensions) TestMCPServer(ctx context.Context, server MCPServer) (MCPTestResult, error) {
 	if err := a.ready(); err != nil {
-		return nil, err
+		return MCPTestResult{}, err
 	}
-	tools, err := a.service.TestMCPServer(ctx, app.MCPServer{
+	result, err := a.service.TestMCPServer(ctx, app.MCPServer{
 		ID:        server.ID,
 		Scope:     server.Scope,
 		ProjectID: server.ProjectID,
@@ -225,13 +262,46 @@ func (a *AppExtensions) TestMCPServer(ctx context.Context, server MCPServer) ([]
 		UpdatedAt: server.UpdatedAt,
 	})
 	if err != nil {
-		return nil, err
+		return MCPTestResult{}, err
 	}
-	out := make([]MCPTool, 0, len(tools))
-	for _, tool := range tools {
-		out = append(out, MCPTool{Name: tool.Name, Description: tool.Description})
+	return mcpTestResultFromApp(result), nil
+}
+
+func (a *AppExtensions) TestMCPDraft(ctx context.Context, in MCPDraftInput) (MCPTestResult, error) {
+	if err := a.ready(); err != nil {
+		return MCPTestResult{}, err
 	}
-	return out, nil
+	result, err := a.service.TestMCPDraft(ctx, app.MCPDraftInput{
+		ID:        in.ID,
+		Scope:     in.Scope,
+		ProjectID: in.ProjectID,
+		Name:      in.Name,
+		Config:    in.Config,
+	})
+	if err != nil {
+		return MCPTestResult{}, err
+	}
+	return mcpTestResultFromApp(result), nil
+}
+
+func mcpTestResultFromApp(result app.MCPTestResult) MCPTestResult {
+	out := MCPTestResult{
+		LatencyMS: result.LatencyMS,
+		ToolCount: result.ToolCount,
+		Truncated: result.Truncated,
+		Tools:     make([]MCPTool, 0, len(result.Tools)),
+	}
+	for _, tool := range result.Tools {
+		out.Tools = append(out.Tools, MCPTool{
+			Name:        tool.Name,
+			Description: tool.Description,
+			ReadOnly:    tool.ReadOnly,
+			Destructive: tool.Destructive,
+			Bindable:    tool.Bindable,
+			Annotated:   tool.Annotated,
+		})
+	}
+	return out
 }
 
 func (a *AppExtensions) ProviderInfos() []llm.ProviderInfo {

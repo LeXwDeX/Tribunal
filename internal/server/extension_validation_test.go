@@ -7,7 +7,9 @@ import (
 	"testing"
 )
 
-func TestMCPServerCreationDisabledWithoutLeaking(t *testing.T) {
+// Invalid create and import bodies are rejected before persistence and never
+// echo a configuration value.
+func TestMCPServerCreationRejectsInvalidConfigWithoutLeaking(t *testing.T) {
 	env := newWiringEnv(t)
 	client := env.bearer()
 
@@ -19,7 +21,7 @@ func TestMCPServerCreationDisabledWithoutLeaking(t *testing.T) {
 			"bogus":   "super-secret",
 		},
 	})
-	assertStatus(t, created, http.StatusForbidden)
+	assertStatus(t, created, http.StatusBadRequest)
 	if strings.Contains(string(created.body), "super-secret") {
 		t.Fatalf("response leaked a config value: %s", created.body)
 	}
@@ -34,7 +36,7 @@ func TestMCPServerCreationDisabledWithoutLeaking(t *testing.T) {
 	imported := client.request(http.MethodPost, "/api/v1/mcp-servers/import?scope=platform",
 		[]byte(`{"mcpServers":{"good":{"command":"npx"},"bad":{"command":"npx","bogus":"super-secret"}}}`),
 		map[string]string{"Content-Type": "application/json"})
-	assertStatus(t, imported, http.StatusForbidden)
+	assertStatus(t, imported, http.StatusBadRequest)
 	if strings.Contains(string(imported.body), "super-secret") {
 		t.Fatalf("response leaked a config value: %s", imported.body)
 	}

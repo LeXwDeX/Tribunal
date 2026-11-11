@@ -558,15 +558,41 @@ func (f *fakeWorkspace) RefreshWorkspace(ctx context.Context, projectID int64, r
 type fakeMCP struct {
 	mu      sync.Mutex
 	servers []MCPServer
+	drafts  []MCPDraftInput
+	result  MCPTestResult
 	tools   []MCPTool
 	err     error
 }
 
-func (f *fakeMCP) TestMCPServer(ctx context.Context, server MCPServer) ([]MCPTool, error) {
+func (f *fakeMCP) TestMCPServer(ctx context.Context, server MCPServer) (MCPTestResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.servers = append(f.servers, server)
-	return f.tools, f.err
+	if f.err != nil {
+		return MCPTestResult{}, f.err
+	}
+	return f.testResult(), nil
+}
+
+func (f *fakeMCP) TestMCPDraft(ctx context.Context, in MCPDraftInput) (MCPTestResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.drafts = append(f.drafts, in)
+	if f.err != nil {
+		return MCPTestResult{}, f.err
+	}
+	return f.testResult(), nil
+}
+
+func (f *fakeMCP) testResult() MCPTestResult {
+	result := f.result
+	if result.Tools == nil && f.tools != nil {
+		result.Tools = append([]MCPTool(nil), f.tools...)
+	}
+	if result.ToolCount == 0 {
+		result.ToolCount = len(result.Tools)
+	}
+	return result
 }
 
 type fakeLLM struct {
@@ -592,9 +618,12 @@ type fakeExtensions struct {
 	skills   []Skill
 	bindings []BlockBinding
 	updated  []MCPServerUpdate
+	imports  []MCPImportInput
+	created  []MCPServerInput
 	lastID   string
 	deleted  []string
 	err      error
+	nextID   int
 }
 
 func (f *fakeExtensions) RestoreDefaults(ctx context.Context, in RestoreDefaultsInput) (*RestoreDefaultsResult, error) {
@@ -635,6 +664,65 @@ func (f *fakeExtensions) GetMCPServer(ctx context.Context, id string) (*MCPServe
 		}
 	}
 	return nil, store.ErrNotFound
+}
+
+func (f *fakeExtensions) CreateMCPServer(ctx context.Context, in MCPServerInput) (*MCPServer, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.created = append(f.created, in)
+	if f.err != nil {
+		return nil, f.err
+	}
+	for _, server := range f.servers {
+		if server.Scope == in.Scope && sameProject(server.ProjectID, in.ProjectID) && server.Name == in.Name {
+			return nil, store.ErrConflict
+		}
+	}
+	f.nextID++
+	server := MCPServer{
+		ID: "mcp-created-" + strconv.Itoa(f.nextID), Scope: in.Scope, ProjectID: in.ProjectID,
+		Name: in.Name, Config: in.Config, Enabled: in.Enabled,
+	}
+	f.servers = append(f.servers, server)
+	return &server, nil
+}
+
+func (f *fakeExtensions) ImportMCPServers(ctx context.Context, in MCPImportInput) ([]MCPServer, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.imports = append(f.imports, in)
+	if f.err != nil {
+		return nil, f.err
+	}
+	names := make([]string, 0, len(in.Servers))
+	for name := range in.Servers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]MCPServer, 0, len(names))
+	for _, name := range names {
+		index := -1
+		for i := range f.servers {
+			server := f.servers[i]
+			if server.Scope == in.Scope && sameProject(server.ProjectID, in.ProjectID) && server.Name == name {
+				index = i
+				break
+			}
+		}
+		if index >= 0 {
+			f.servers[index].Config = in.Servers[name]
+			out = append(out, f.servers[index])
+			continue
+		}
+		f.nextID++
+		server := MCPServer{
+			ID: "mcp-imported-" + strconv.Itoa(f.nextID), Scope: in.Scope, ProjectID: in.ProjectID,
+			Name: name, Config: in.Servers[name], Enabled: true,
+		}
+		f.servers = append(f.servers, server)
+		out = append(out, server)
+	}
+	return out, nil
 }
 
 func (f *fakeExtensions) UpdateMCPServer(ctx context.Context, id string, in MCPServerUpdate) (*MCPServer, error) {

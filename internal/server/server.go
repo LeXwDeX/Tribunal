@@ -256,6 +256,7 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("GET /api/v1/mcp-servers", s.apiAuth(s.guard(policyAuthenticated, s.handleListMCPServers)))
 	mux.HandleFunc("POST /api/v1/mcp-servers", s.apiAuth(s.guard(policyAuthenticated, s.handleCreateMCPServer)))
 	mux.HandleFunc("POST /api/v1/mcp-servers/import", s.apiAuth(s.guard(policyAuthenticated, s.handleImportMCPServers)))
+	mux.HandleFunc("POST /api/v1/mcp-servers:test", s.apiAuth(s.guard(policyAuthenticated, s.handleTestMCPDraft)))
 	mux.HandleFunc("PUT /api/v1/mcp-servers/{id}", s.apiAuth(s.guard(policyAuthenticated, s.handleUpdateMCPServer)))
 	mux.HandleFunc("DELETE /api/v1/mcp-servers/{id}", s.apiAuth(s.guard(policyAuthenticated, s.handleDeleteMCPServer)))
 	mux.HandleFunc("POST /api/v1/mcp-servers/{id}/test", s.apiAuth(s.guard(policyAuthenticated, s.handleTestMCPServer)))

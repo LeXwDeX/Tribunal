@@ -30,6 +30,11 @@ import (
 
 const maskedExtensionSecret = "****"
 
+// maxTestTools caps the tools returned by one test response. The connection
+// still lists up to the MCP limit; the response reports the total in ToolCount
+// and sets Truncated when the returned list was capped.
+const maxTestTools = 200
+
 const (
 	maxSkillArchiveBytes   = 8 << 20
 	maxSkillExtractedBytes = 16 << 20
@@ -57,10 +62,35 @@ type MCPServer struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// MCPTool is one tool advertised by a test connection.
+// MCPTool is one tool advertised by a test connection. Bindable follows the
+// runtime annotationsAllow rule: unannotated tools stay bindable, annotated
+// tools must be read-only and non-destructive.
 type MCPTool struct {
 	Name        string `json:"name"`
-	Description string `json:"description,omitempty"`
+	Description string `json:"description"`
+	ReadOnly    bool   `json:"read_only"`
+	Destructive bool   `json:"destructive"`
+	Bindable    bool   `json:"bindable"`
+	Annotated   bool   `json:"annotated"`
+}
+
+// MCPTestResult is one successful connection test. ToolCount is the total
+// advertised count; Tools may be capped, in which case Truncated is true.
+type MCPTestResult struct {
+	LatencyMS int64
+	ToolCount int
+	Truncated bool
+	Tools     []MCPTool
+}
+
+// MCPDraftInput tests a server that is not necessarily stored. When ID is set
+// the stored server supplies the scope and any masked config values.
+type MCPDraftInput struct {
+	ID        string
+	Scope     string
+	ProjectID *int64
+	Name      string
+	Config    json.RawMessage
 }
 
 // MCPServerInput creates one server.
@@ -1030,39 +1060,103 @@ func (s *ExtensionService) ReplaceBlockBinding(ctx context.Context, in BlockBind
 	return &binding, nil
 }
 
-// TestMCPServer starts a short-lived manager from the submitted configuration.
+// TestMCPServer starts a short-lived manager from the stored configuration.
 // It never reuses the runtime manager: a project server can share a name with
 // a platform server and carry different configuration.
-func (s *ExtensionService) TestMCPServer(ctx context.Context, server MCPServer) (tools []MCPTool, err error) {
+func (s *ExtensionService) TestMCPServer(ctx context.Context, server MCPServer) (MCPTestResult, error) {
 	unlock, err := s.lockScope(ctx, server.Scope, server.ProjectID)
 	if err != nil {
-		return nil, err
+		return MCPTestResult{}, err
 	}
 	defer unlock()
 	if server.Scope == store.ScopeProject {
 		row, err := s.store.GetMCPServer(ctx, server.ID)
 		if err != nil {
-			return nil, extensionStoreError(err)
+			return MCPTestResult{}, extensionStoreError(err)
 		}
 		if row == nil || !sameExtensionScope(server.Scope, server.ProjectID, row.Scope, row.ProjectID) {
-			return nil, notFoundError("extension not found")
+			return MCPTestResult{}, notFoundError("extension not found")
 		}
 		server = mcpServerFromStore(*row)
 	}
 	name := strings.TrimSpace(server.Name)
 	if name == "" {
-		return nil, validationError("name is required", Detail{Field: "name", Message: "name is required"})
+		return MCPTestResult{}, validationError("name is required", Detail{Field: "name", Message: "name is required"})
 	}
-	config, err := mcp.ParseServer(server.Config, s.deniedEnv...)
+	return s.testMCPConnection(ctx, name, server.Scope, server.ProjectID, server.Config)
+}
+
+// TestMCPDraft tests a submitted configuration without writing it. When ID is
+// set the stored row supplies the scope, the name fallback and any masked
+// secret values; nothing is persisted either way.
+func (s *ExtensionService) TestMCPDraft(ctx context.Context, in MCPDraftInput) (MCPTestResult, error) {
+	id := strings.TrimSpace(in.ID)
+	scope := strings.TrimSpace(in.Scope)
+	projectID := in.ProjectID
+	name := strings.TrimSpace(in.Name)
+	config := append(json.RawMessage(nil), in.Config...)
+	if id != "" {
+		current, unlock, err := s.lockMCPServer(ctx, id)
+		if err != nil {
+			return MCPTestResult{}, err
+		}
+		defer unlock()
+		scope, projectID = current.Scope, current.ProjectID
+		if name == "" {
+			name = strings.TrimSpace(current.Name)
+		}
+		if len(config) == 0 {
+			config = append(json.RawMessage(nil), current.Config...)
+		} else {
+			restored, err := restoreMaskedMCPConfigRequired(config, current.Config)
+			if err != nil {
+				return MCPTestResult{}, err
+			}
+			config = restored
+		}
+	}
+	if len(config) == 0 {
+		return MCPTestResult{}, validationError("config is required", Detail{Field: "config", Message: "config is required"})
+	}
+	if err := validateMCPServerName(name); err != nil {
+		return MCPTestResult{}, err
+	}
+	if err := guardMaskedConfig(config); err != nil {
+		return MCPTestResult{}, err
+	}
+	if err := s.validateMCPConfig(config); err != nil {
+		return MCPTestResult{}, err
+	}
+	if id == "" {
+		var err error
+		scope, projectID, err = extensionScope(scope, projectID)
+		if err != nil {
+			return MCPTestResult{}, err
+		}
+		unlock, err := s.lockScope(ctx, scope, projectID)
+		if err != nil {
+			return MCPTestResult{}, err
+		}
+		defer unlock()
+	}
+	return s.testMCPConnection(ctx, name, scope, projectID, config)
+}
+
+// testMCPConnection is the shared draft/saved test path. Errors are classified
+// with a fixed category and never carry configuration or upstream text.
+func (s *ExtensionService) testMCPConnection(ctx context.Context, name, scope string, projectID *int64,
+	rawConfig json.RawMessage) (result MCPTestResult, err error) {
+	started := time.Now()
+	config, err := mcp.ParseServer(rawConfig, s.deniedEnv...)
 	if err != nil {
-		return nil, fmt.Errorf("app: MCP server test failed: %w", err)
+		return MCPTestResult{}, mcp.NewTestError(mcp.TestCategoryInvalidConfig, err)
 	}
 	workspace := s.workspace
-	if server.Scope == store.ScopeProject {
-		if server.ProjectID == nil || *server.ProjectID <= 0 {
-			return nil, validationError("project_id is required for project scope", Detail{Field: "project_id", Message: "must be positive"})
+	if scope == store.ScopeProject {
+		if projectID == nil || *projectID <= 0 {
+			return MCPTestResult{}, validationError("project_id is required for project scope", Detail{Field: "project_id", Message: "must be positive"})
 		}
-		workspace = filepath.Join(workspace, fmt.Sprintf("%d", *server.ProjectID))
+		workspace = filepath.Join(workspace, fmt.Sprintf("%d", *projectID))
 	}
 	manager, err := s.newMCPTest(mcp.Options{
 		Platform:  mcp.Config{MCPServers: map[string]mcp.ServerConfig{name: config}},
@@ -1071,24 +1165,50 @@ func (s *ExtensionService) TestMCPServer(ctx context.Context, server MCPServer) 
 		Now:       s.now,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("app: MCP server test failed: %w", err)
+		return MCPTestResult{}, mcp.NewTestError(mcp.TestCategoryInvalidConfig, err)
 	}
 	defer func() {
 		if closeErr := manager.Close(); closeErr != nil {
 			s.logger.Warn("mcp test manager close failed")
-			tools = nil
-			err = errors.Join(err, errors.New("app: MCP server test cleanup failed"))
+			cleanupErr := mcp.NewTestError(mcp.TestCategoryCleanupFailed, mcp.ErrCleanupFailed)
+			if err == nil {
+				result = MCPTestResult{}
+				err = cleanupErr
+			} else {
+				err = errors.Join(err, cleanupErr)
+			}
 		}
 	}()
 	infos, err := manager.ListTools(ctx, name)
 	if err != nil {
-		return nil, fmt.Errorf("app: MCP server test failed: %w", err)
+		return MCPTestResult{}, err
 	}
-	tools = make([]MCPTool, 0, len(infos))
-	for _, info := range infos {
-		tools = append(tools, MCPTool{Name: info.Name, Description: info.Description})
+	return mcpTestResult(infos, time.Since(started).Milliseconds()), nil
+}
+
+// mcpTestResult converts the advertised tools into the bounded test response.
+func mcpTestResult(infos []mcp.ToolInfo, latencyMS int64) MCPTestResult {
+	shown := infos
+	if len(shown) > maxTestTools {
+		shown = shown[:maxTestTools]
 	}
-	return tools, nil
+	tools := make([]MCPTool, 0, len(shown))
+	for _, info := range shown {
+		tools = append(tools, MCPTool{
+			Name:        info.Name,
+			Description: info.Description,
+			ReadOnly:    info.ReadOnly,
+			Destructive: info.Destructive,
+			Bindable:    info.Bindable,
+			Annotated:   info.Annotated,
+		})
+	}
+	return MCPTestResult{
+		LatencyMS: latencyMS,
+		ToolCount: len(infos),
+		Truncated: len(infos) > len(shown),
+		Tools:     tools,
+	}
 }
 
 // TestProvider sends one minimal request to a configured provider. Errors are
@@ -1216,6 +1336,51 @@ func restoreMCPMap(next, stored map[string]any, sensitive func(string) bool) {
 		}
 		delete(next, key)
 	}
+}
+
+// restoreMaskedMCPConfigRequired is the draft-test variant: a masked value
+// with no stored counterpart is rejected instead of silently dropped, because
+// the caller asked to test a secret that does not exist. Invalid JSON is left
+// for the config parser to reject.
+func restoreMaskedMCPConfigRequired(submitted, current json.RawMessage) (json.RawMessage, error) {
+	var nextObject map[string]any
+	if err := json.Unmarshal(submitted, &nextObject); err != nil {
+		return submitted, nil
+	}
+	var currentObject map[string]any
+	_ = json.Unmarshal(current, &currentObject)
+	if env, ok := nextObject["env"].(map[string]any); ok {
+		stored, _ := currentObject["env"].(map[string]any)
+		if err := restoreMCPMapRequired(env, stored, func(string) bool { return true }); err != nil {
+			return nil, err
+		}
+	}
+	if headers, ok := nextObject["headers"].(map[string]any); ok {
+		stored, _ := currentObject["headers"].(map[string]any)
+		if err := restoreMCPMapRequired(headers, stored, extensionSensitiveKeyRE.MatchString); err != nil {
+			return nil, err
+		}
+	}
+	restored, err := json.Marshal(nextObject)
+	if err != nil {
+		return submitted, nil
+	}
+	return restored, nil
+}
+
+func restoreMCPMapRequired(next, stored map[string]any, sensitive func(string) bool) error {
+	for key, value := range next {
+		if value != maskedExtensionSecret || !sensitive(key) {
+			continue
+		}
+		if original, ok := stored[key]; ok {
+			next[key] = original
+			continue
+		}
+		return validationError("masked secret placeholder has no stored value",
+			Detail{Field: "config", Message: "masked secret placeholder has no stored value"})
+	}
+	return nil
 }
 
 // guardMaskedConfig refuses to persist the display placeholder the admin API
