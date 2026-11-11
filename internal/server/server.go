@@ -275,6 +275,7 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("GET /api/v1/models/{id}", s.apiAuth(s.guard(policyPlatformAdmin, s.handleGetModel)))
 	mux.HandleFunc("POST /api/v1/models", s.apiAuth(s.guard(policyPlatformAdmin, s.handleCreateModel)))
 	mux.HandleFunc("PATCH /api/v1/models/{id}", s.apiAuth(s.guard(policyPlatformAdmin, s.handleUpdateModel)))
+	mux.HandleFunc("PATCH /api/v1/models/{id}/params", s.apiAuth(s.guard(policyPlatformAdmin, s.handleUpdateModelParams)))
 	mux.HandleFunc("DELETE /api/v1/models/{id}", s.apiAuth(s.guard(policyPlatformAdmin, s.handleDeleteModel)))
 	mux.HandleFunc("POST /api/v1/models/{id}/test", s.apiAuth(s.guard(policyPlatformAdmin, s.handleTestModel)))
 	mux.HandleFunc("POST /api/v1/models:test", s.apiAuth(s.guard(policyPlatformAdmin, s.handleTestModelDraft)))

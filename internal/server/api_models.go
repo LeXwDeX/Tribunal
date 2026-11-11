@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
@@ -195,6 +197,22 @@ func (s *Server) handleUpdateModel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "validation_failed", "invalid model", details)
 		return
 	}
+	stored, err := s.modelsStore.GetModel(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) || (err == nil && stored.DeletedAt != nil) {
+		writeError(w, r, http.StatusNotFound, "not_found", "model not found", nil)
+		return
+	}
+	if err != nil {
+		writeError(w, r, http.StatusServiceUnavailable, "unavailable", "model is unavailable", nil)
+		return
+	}
+	// The stored credential may only be sent to the endpoint it was saved for,
+	// matching the draft test rule. An explicit key (including an empty value
+	// that clears it) allows the change.
+	if request.APIKey == nil && endpointChanged(*stored, candidate) {
+		validationFailed(w, r, "api_key", "api_key is required when the endpoint changes")
+		return
+	}
 	updated, err := s.modelsStore.UpdateModel(r.Context(), candidate, *request.Revision, request.APIKey)
 	if err != nil {
 		s.writeModelError(w, r, err)
@@ -202,6 +220,164 @@ func (s *Server) handleUpdateModel(w http.ResponseWriter, r *http.Request) {
 	}
 	s.auditModel(r, updated.ID, "update", request)
 	s.finishModelWrite(w, r, updated.ID)
+}
+
+// modelParamsRequest updates individual parameter keys of a saved model. Only
+// keys present in params change; an explicit null clears a nullable parameter.
+type modelParamsRequest struct {
+	Revision *int64                     `json:"revision"`
+	Params   map[string]json.RawMessage `json:"params"`
+}
+
+func (s *Server) handleUpdateModelParams(w http.ResponseWriter, r *http.Request) {
+	if !s.requireModelStore(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	if strings.HasPrefix(id, "config:") {
+		writeError(w, r, http.StatusForbidden, "read_only", "configured models are read-only", nil)
+		return
+	}
+	var request modelParamsRequest
+	if err := decodeJSON(w, r, adminBodyLimit, &request); err != nil {
+		decodeRequestError(w, r, err)
+		return
+	}
+	if request.Revision == nil || *request.Revision <= 0 {
+		validationFailed(w, r, "revision", "revision is required")
+		return
+	}
+	if len(request.Params) == 0 {
+		validationFailed(w, r, "params", "params must include at least one parameter")
+		return
+	}
+	patch, details := decodeModelParamsPatch(request.Params)
+	if len(details) > 0 {
+		writeError(w, r, http.StatusBadRequest, "validation_failed", "invalid model", details)
+		return
+	}
+	stored, err := s.modelsStore.GetModel(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) || (err == nil && stored.DeletedAt != nil) {
+		writeError(w, r, http.StatusNotFound, "not_found", "model not found", nil)
+		return
+	}
+	if err != nil {
+		writeError(w, r, http.StatusServiceUnavailable, "unavailable", "model is unavailable", nil)
+		return
+	}
+	candidate := *stored
+	candidate.Params = patch.Apply(stored.Params)
+	if details := modelDetails(candidate); len(details) > 0 {
+		writeError(w, r, http.StatusBadRequest, "validation_failed", "invalid model", details)
+		return
+	}
+	updated, err := s.modelsStore.UpdateModelParams(r.Context(), id, *request.Revision, patch, currentUserID(r))
+	if err != nil {
+		s.writeModelError(w, r, err)
+		return
+	}
+	// Audit only the changed parameter names; values and credentials stay out.
+	s.logger.Info("model changed", "event", "platform_audit", "actor_id", currentUserID(r),
+		"target_id", updated.ID, "action", "update_params", "fields", patch.Fields())
+	s.finishModelWrite(w, r, updated.ID)
+}
+
+// decodeModelParamsPatch turns the request's parameter object into a merge
+// patch. It distinguishes an absent key (unchanged) from an explicit null
+// (clear) and reports failures per field without echoing values.
+func decodeModelParamsPatch(raw map[string]json.RawMessage) (store.ModelParamsPatch, []app.Detail) {
+	patch := store.ModelParamsPatch{}
+	details := []app.Detail{}
+	detail := func(name, message string) {
+		details = append(details, app.Detail{Field: "params." + name, Message: "params." + name + " " + message})
+	}
+	names := make([]string, 0, len(raw))
+	for name := range raw {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		value := bytes.TrimSpace(raw[name])
+		if string(value) == "null" {
+			switch name {
+			case "temperature":
+				patch.Temperature.Set = true
+			case "reasoning":
+				patch.Reasoning.Set = true
+			case "thinking":
+				patch.Thinking.Set = true
+			case "price":
+				patch.Price.Set = true
+			case "max_tokens", "context_window", "forced_tool_choice", "strict_role_alternation", "max_concurrency", "rpm":
+				detail(name, "must not be null")
+			default:
+				detail(name, "is not a supported parameter")
+			}
+			continue
+		}
+		decode := func(name string, target any) bool {
+			if err := json.Unmarshal(value, target); err != nil {
+				detail(name, "has an invalid value")
+				return false
+			}
+			return true
+		}
+		switch name {
+		case "max_tokens":
+			var v int
+			if decode(name, &v) {
+				patch.MaxTokens = &v
+			}
+		case "context_window":
+			var v int
+			if decode(name, &v) {
+				patch.ContextWindow = &v
+			}
+		case "max_concurrency":
+			var v int
+			if decode(name, &v) {
+				patch.MaxConcurrency = &v
+			}
+		case "rpm":
+			var v int
+			if decode(name, &v) {
+				patch.RPM = &v
+			}
+		case "temperature":
+			var v float64
+			if decode(name, &v) {
+				patch.Temperature = store.ParamUpdate[float64]{Set: true, Value: &v}
+			}
+		case "reasoning":
+			var v config.ReasoningConfig
+			if decode(name, &v) {
+				patch.Reasoning = store.ParamUpdate[config.ReasoningConfig]{Set: true, Value: &v}
+			}
+		case "thinking":
+			var v config.ThinkingConfig
+			if decode(name, &v) {
+				patch.Thinking = store.ParamUpdate[config.ThinkingConfig]{Set: true, Value: &v}
+			}
+		case "price":
+			var v config.PriceConfig
+			if decode(name, &v) {
+				patch.Price = store.ParamUpdate[config.PriceConfig]{Set: true, Value: &v}
+			}
+		case "forced_tool_choice":
+			var v string
+			if decode(name, &v) {
+				patch.ForcedToolChoice = &v
+			}
+		case "strict_role_alternation":
+			var v bool
+			if decode(name, &v) {
+				patch.StrictRoleAlternation = &v
+			}
+		default:
+			detail(name, "is not a supported parameter")
+		}
+	}
+	return patch, details
 }
 
 func (s *Server) handleDeleteModel(w http.ResponseWriter, r *http.Request) {
@@ -310,7 +486,7 @@ func (s *Server) handleTestModelDraft(w http.ResponseWriter, r *http.Request) {
 		credential = *request.APIKey
 	case stored != nil:
 		// The stored key may only be sent to the endpoint it was saved for.
-		if stored.Protocol != model.Protocol || !sameEndpoint(stored.BaseURL, model.BaseURL) {
+		if endpointChanged(*stored, model) {
 			validationFailed(w, r, "api_key", "api_key is required when the endpoint changes")
 			return
 		}
@@ -412,6 +588,13 @@ func modelAuditFields(request modelWriteRequest) []string {
 	}
 	sort.Strings(fields)
 	return fields
+}
+
+// endpointChanged reports whether a requested model definition points at a
+// different protocol or endpoint (scheme, host and port) than the stored one.
+// A path-only change keeps the stored credential reusable.
+func endpointChanged(stored, requested store.Model) bool {
+	return stored.Protocol != requested.Protocol || !sameEndpoint(stored.BaseURL, requested.BaseURL)
 }
 
 // sameEndpoint reports whether two base URLs share scheme, host and port.

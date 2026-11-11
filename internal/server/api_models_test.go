@@ -25,6 +25,7 @@ func TestModelEndpointsRequirePlatformAdminAndCSRF(t *testing.T) {
 		{"detail", http.MethodGet, "/api/v1/models/user:missing"},
 		{"create", http.MethodPost, "/api/v1/models"},
 		{"update", http.MethodPatch, "/api/v1/models/user:missing"},
+		{"params update", http.MethodPatch, "/api/v1/models/user:missing/params"},
 		{"delete", http.MethodDelete, "/api/v1/models/user:missing?revision=1"},
 		{"saved test", http.MethodPost, "/api/v1/models/user:missing/test"},
 		{"draft test", http.MethodPost, "/api/v1/models:test"},
@@ -48,11 +49,21 @@ func TestModelEndpointsRequirePlatformAdminAndCSRF(t *testing.T) {
 type fakeModelStore struct {
 	updateErr         error
 	createdCredential string
+	stored            *store.Model
+	updated           *store.Model
+	updateCredential  *string
+	paramsUpdateErr   error
+	paramsCalls       int
+	paramsPatch       store.ModelParamsPatch
+	paramsResult      *store.Model
 }
 
 func (f *fakeModelStore) ListModels(context.Context) ([]store.Model, error) { return nil, nil }
-func (f *fakeModelStore) GetModel(context.Context, string) (*store.Model, error) {
-	return nil, store.ErrNotFound
+func (f *fakeModelStore) GetModel(_ context.Context, id string) (*store.Model, error) {
+	if f.stored == nil || f.stored.ID != id {
+		return nil, store.ErrNotFound
+	}
+	return f.stored, nil
 }
 func (f *fakeModelStore) CreateModel(_ context.Context, m store.Model, credential string) (*store.Model, error) {
 	f.createdCredential = credential
@@ -60,8 +71,30 @@ func (f *fakeModelStore) CreateModel(_ context.Context, m store.Model, credentia
 	m.Revision = 1
 	return &m, nil
 }
-func (f *fakeModelStore) UpdateModel(context.Context, store.Model, int64, *string) (*store.Model, error) {
-	return nil, f.updateErr
+func (f *fakeModelStore) UpdateModel(_ context.Context, m store.Model, _ int64, credential *string) (*store.Model, error) {
+	f.updated = &m
+	f.updateCredential = credential
+	if f.updateErr != nil {
+		return nil, f.updateErr
+	}
+	m.Revision++
+	return &m, nil
+}
+func (f *fakeModelStore) UpdateModelParams(_ context.Context, id string, revision int64, patch store.ModelParamsPatch, updatedBy int64) (*store.Model, error) {
+	f.paramsCalls++
+	f.paramsPatch = patch
+	if f.paramsUpdateErr != nil {
+		return nil, f.paramsUpdateErr
+	}
+	if f.stored == nil || f.stored.ID != id {
+		return nil, store.ErrNotFound
+	}
+	updated := *f.stored
+	updated.Params = patch.Apply(updated.Params)
+	updated.Revision = revision + 1
+	updated.UpdatedBy = updatedBy
+	f.paramsResult = &updated
+	return &updated, nil
 }
 func (f *fakeModelStore) SoftDeleteModel(context.Context, string, int64, int64) error {
 	return f.updateErr
@@ -105,7 +138,10 @@ func TestModelUpdateMapsStaleRevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server, _ := newModelTestServer(t, catalog, &fakeModelStore{updateErr: store.ErrStaleRevision})
+	server, _ := newModelTestServer(t, catalog, &fakeModelStore{
+		updateErr: store.ErrStaleRevision,
+		stored:    &store.Model{ID: "user:x", Protocol: "openai-chat", BaseURL: "https://example.com"},
+	})
 	request := httptest.NewRequest(http.MethodPatch, "/api/v1/models/user:x", strings.NewReader(`{"display_name":"x","protocol":"openai-chat","base_url":"https://example.com","model":"m","params":{"max_tokens":16,"max_concurrency":1},"revision":2}`))
 	request.SetPathValue("id", "user:x")
 	response := httptest.NewRecorder()

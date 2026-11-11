@@ -206,6 +206,70 @@ func TestModelWrongKeyIsUnavailable(t *testing.T) {
 	}
 }
 
+func modelIntPtr(value int) *int           { return &value }
+func modelFloatPtr(value float64) *float64 { return &value }
+
+func TestUpdateModelParamsMergesOnlySubmittedKeys(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t, newFakeClock())
+	if err := s.ConfigureModelSecrets(ctx, sealTestCipher(t, 1)); err != nil {
+		t.Fatal(err)
+	}
+	created, err := s.CreateModel(ctx, store.Model{
+		DisplayName: "model", Protocol: "openai-chat", BaseURL: "https://example.com", Model: "m",
+		Params: store.ModelParams{
+			MaxTokens: 10, ContextWindow: 100, MaxConcurrency: 2, RPM: 60,
+			Temperature: modelFloatPtr(0.5),
+		},
+		CreatedBy: 1,
+	}, "secret-canary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := s.UpdateModelParams(ctx, created.ID, created.Revision, store.ModelParamsPatch{RPM: modelIntPtr(7)}, 9)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Revision != created.Revision+1 || updated.UpdatedBy != 9 {
+		t.Fatalf("revision = %d updated_by = %d, want %d/9", updated.Revision, updated.UpdatedBy, created.Revision+1)
+	}
+	params := updated.Params
+	if params.RPM != 7 {
+		t.Fatalf("rpm = %d, want 7", params.RPM)
+	}
+	if params.MaxTokens != 10 || params.ContextWindow != 100 || params.MaxConcurrency != 2 {
+		t.Fatalf("unsubmitted parameters changed: %+v", params)
+	}
+	if params.Temperature == nil || *params.Temperature != 0.5 {
+		t.Fatalf("temperature = %v, want 0.5", params.Temperature)
+	}
+	plain, err := s.OpenModelCredential(ctx, updated.ID)
+	if err != nil || string(plain) != "secret-canary" {
+		t.Fatal("parameter update did not preserve the credential")
+	}
+
+	cleared, err := s.UpdateModelParams(ctx, updated.ID, updated.Revision, store.ModelParamsPatch{Temperature: store.ParamUpdate[float64]{Set: true}}, 9)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared.Params.Temperature != nil || cleared.Params.RPM != 7 {
+		t.Fatalf("explicit null did not clear only temperature: %+v", cleared.Params)
+	}
+
+	if _, err := s.UpdateModelParams(ctx, updated.ID, created.Revision, store.ModelParamsPatch{RPM: modelIntPtr(1)}, 9); !errors.Is(err, store.ErrStaleRevision) {
+		t.Fatalf("stale update = %v, want ErrStaleRevision", err)
+	}
+	if _, err := s.UpdateModelParams(ctx, "user:missing", 1, store.ModelParamsPatch{RPM: modelIntPtr(1)}, 9); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("missing model = %v, want ErrNotFound", err)
+	}
+	if _, err := s.UpdateModelParams(ctx, cleared.ID, cleared.Revision, store.ModelParamsPatch{RPM: modelIntPtr(-1)}, 9); err == nil {
+		t.Fatal("negative rpm was stored")
+	}
+	if got, err := s.GetModel(ctx, cleared.ID); err != nil || got.Params.RPM != 7 {
+		t.Fatalf("invalid update changed the record: %+v, %v", got, err)
+	}
+}
+
 func TestCreateModelRollsBackWhenReadBackFails(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t, newFakeClock())

@@ -453,10 +453,13 @@ Provider 返回 `name`、`protocol`、`base_url`、`model`、`max_concurrency`�
 | GET | `/api/v1/models` | 列出配置模型（`id=config:<name>`，只读）与用户模型（`id=user:<uuid>`）；不分页 |
 | GET | `/api/v1/models/{id}` | 详情 |
 | POST | `/api/v1/models` | 创建用户模型；`params.max_tokens` 与 `params.max_concurrency` 必须为正整数；`api_key` 只写不回显；成功返回 `{"id": "user:<uuid>", "effective": "new_workflows"}`，不返回完整模型视图（需要时再 `GET /api/v1/models/{id}`）；校验失败返回 400 `validation_failed` 与逐字段 `details` |
-| PATCH | `/api/v1/models/{id}` | 修改，必须带 `revision`；`api_key` 省略表示不变，空串表示清除；配置模型返回 403 `read_only`；成功返回值同创建（`{id, effective}`）；校验失败同创建 |
+| PATCH | `/api/v1/models/{id}` | 整记录替换，必须带 `revision`：请求需给出完整的 `display_name`、`protocol`、`base_url`、`model` 与 `params`，未提交的可选参数按零值或 `null` 覆盖；`api_key` 省略表示不变，空串表示清除；`protocol` 或 `base_url` 的 scheme/host/port 发生变化时必须显式提供 `api_key`，否则返回 400 `validation_failed`（字段 `api_key`）且不写库；配置模型返回 403 `read_only`；成功返回值同创建（`{id, effective}`）；校验失败同创建 |
+| PATCH | `/api/v1/models/{id}/params` | 参数级合并，必须带 `revision`：请求体为 `{"revision": N, "params": {…}}`，只更新 `params` 中出现的键，显式 `null` 清除可空参数（`temperature`、`reasoning`、`thinking`、`price`），未出现的键保持不变；`params` 为空、出现未知参数名或给非可空参数传 `null` 返回 400；合并后的生效参数按创建规则校验并返回逐字段 `details`；`revision` 过期返回 409 `stale_revision`；配置模型 403 `read_only`，未知或已删除模型 404；成功返回值同创建 |
 | DELETE | `/api/v1/models/{id}?revision=N` | 软删除；配置模型返回 403 `read_only` |
 | POST | `/api/v1/models/{id}/test` | 测试已保存模型；成功返回 `{"ok": true, "model": "...", "latency_ms": N}` |
 | POST | `/api/v1/models:test` | 草稿测试，详见下文 |
+
+两种修改语义不要混用：`PATCH /api/v1/models/{id}` 是整记录替换，适合提交完整表单；`PATCH /api/v1/models/{id}/params` 是参数级合并，只改提交的键，适合调整部分参数。两者都要求调用方提交 `revision` 做乐观锁。整记录替换在 `protocol` 或 `base_url` 的 scheme/host/port 变化时必须显式提供 `api_key`；参数合并不改变 `protocol`、`base_url`，不涉及已存凭据的复用。
 
 `POST /api/v1/models:test` 在保存前测试草稿：
 
@@ -472,7 +475,7 @@ Provider 返回 `name`、`protocol`、`base_url`、`model`、`max_concurrency`�
 - 成功返回 `{"ok": true, "model": "...", "latency_ms": N}`。不保存数据、不刷新目录，不写 `llm_calls`，不产生计费记录。
 - 仅平台管理员且需 CSRF，否则 403。审计 `platform_audit`，动作 `test_draft`，只记录字段名、是否使用已保存凭据（`stored_credential`）和目标 host（不含路径与查询）。
 
-写操作（创建、修改、删除）成功后调用运行时刷新，响应体为 `{"id": "…", "effective": "new_workflows"}`；审计日志使用 `event=platform_audit`，只记录操作者、目标、动作和字段名。
+写操作（创建、整记录修改、参数合并、删除）成功后调用运行时刷新，响应体为 `{"id": "…", "effective": "new_workflows"}`；审计日志使用 `event=platform_audit`，只记录操作者、目标、动作和字段名。参数合并审计的动作是 `update_params`，字段名形如 `params.temperature`，不记录参数值或密钥。
 
 授权角色只有 `read` 和 `manage`，普通用户默认没有 grant；平台管理员对全部已登记项目隐式拥有 `manage`，不需要逐项目 grant，也不要求 `access_source=grant`。`manage` 持有者可以读取、写入、删除该项目，同一项目可有多个 `manage` 持有者，任一持有者都可删除；`read` 是只读共享，写操作和删除返回 403。控制台的「项目授权/分配」默认选择 `manage`。`global_read` 对普通用户授予全部项目的只读访问（含之后新登记的项目），但不授予 `manage`；平台管理员不再依赖 `global_read`。`admin projects` 只用于选择授权对象，不返回项目业务数据。停用用户不删除 `users` 行、grant 或 `global_read` 设置；停用期间全局读取失效，重新启用后恢复原设置，但已撤销的会话和 token 不会恢复。撤销凭据不禁用账号，用户仍可通过 OAuth 重新登录。只有平台管理员可以跨用户停用、撤销、管理 grant 或切换 `global_read`；普通用户只能管理自己的 API token。
 

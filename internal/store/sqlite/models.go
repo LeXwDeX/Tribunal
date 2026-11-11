@@ -215,6 +215,23 @@ func (s *Store) UpdateModel(ctx context.Context, m store.Model, revision int64, 
 	return updated, nil
 }
 
+// UpdateModelParams merges patch into the stored parameters. It reads the
+// current record, applies only the named keys and writes the result under the
+// caller's revision, so a concurrent change reports ErrStaleRevision instead
+// of losing an update.
+func (s *Store) UpdateModelParams(ctx context.Context, id string, revision int64, patch store.ModelParamsPatch, updatedBy int64) (*store.Model, error) {
+	current, err := s.GetModel(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if current.DeletedAt != nil {
+		return nil, store.ErrNotFound
+	}
+	current.Params = patch.Apply(current.Params)
+	current.UpdatedBy = updatedBy
+	return s.UpdateModel(ctx, *current, revision, nil)
+}
+
 func modelWriteError(ctx context.Context, tx *sql.Tx, id string) error {
 	var exists bool
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM llm_models WHERE id = ? AND deleted_at IS NULL)`, id).Scan(&exists); err != nil {
