@@ -193,12 +193,12 @@ function MetricStrip({ stats, loading, error, onRetry }: { stats?: Stats; loadin
         value={runs === null ? '不可用' : runs}
         note={(
           <TrendNote points={trendPoints(stats, 'runs')}>
-            {blocking === null ? '包含评审与 onboarding · BLOCKING 次数不可用' : `包含评审与 onboarding · 其中 BLOCKING ${blocking} 次`}
+            {blocking === null ? '含评审与 onboarding · BLOCKING 次数不可用' : `含评审与 onboarding · BLOCKING ${blocking} 次`}
           </TrendNote>
         )}
       />
       <Metric label="BLOCKING 比例" value={formatRatio(blockingRatio)} note="BLOCKING 工作流数 / 所有工作流数" />
-      <Metric label="发布类问题" value={published === null ? '不可用' : published} note="裁决为 publish 或 mark 的问题数，不代表实际发布成功" />
+      <Metric label="发布类问题" value={published === null ? '不可用' : published} note="裁决为 publish 或 mark 的问题数，不等于发布成功。" />
       <Metric label="规则丢弃比例" value={formatRatio(overturned)} note="drop 问题数 / 有裁决的问题数，不是模型准确率" />
       <Metric label="耗时 平均 / P95" value={avg === null ? '不可用' : formatMs(avg)} note={`有有效起止时间的工作流 · P95 ${formatMs(p95)}`} />
     </section>

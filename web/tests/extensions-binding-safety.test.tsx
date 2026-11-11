@@ -90,7 +90,7 @@ describe('binding pagination safety', () => {
     expect(screen.getByRole('button', { name: '加载更多绑定' })).toBeInTheDocument()
     expect(newSkill).toBeDisabled()
     expect(screen.getByRole('button', { name: '保存绑定' })).toBeDisabled()
-    expect(screen.getByText(/绑定列表尚未全部加载/)).toBeInTheDocument()
+    expect(screen.getByText(/绑定尚未全部加载/)).toBeInTheDocument()
 
     await user.click(newSkill)
     await user.click(screen.getByRole('button', { name: '保存绑定' }))
@@ -99,7 +99,7 @@ describe('binding pagination safety', () => {
     await user.click(screen.getByRole('button', { name: '加载更多绑定' }))
     expect(await screen.findByRole('button', { name: 'review 使用 Skill legacy-skill' })).toHaveAttribute('aria-pressed', 'true')
     await waitFor(() => expect(screen.getByRole('button', { name: 'review 使用 Skill new-skill' })).toBeEnabled())
-    expect(screen.queryByText(/绑定列表尚未全部加载/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/绑定尚未全部加载/)).not.toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'review 使用 Skill new-skill' }))
     const save = screen.getByRole('button', { name: '保存绑定' })
@@ -139,7 +139,7 @@ describe('binding pagination safety', () => {
 
     await user.click(await screen.findByRole('button', { name: '加载更多绑定' }))
     expect(await screen.findByText('读取更多绑定失败')).toBeInTheDocument()
-    expect(screen.getByText(/绑定列表未全部加载/)).toBeInTheDocument()
+    expect(screen.getByText(/绑定未全部加载/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '重试' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '保存绑定' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'review 使用 Skill legacy-skill' })).not.toBeInTheDocument()

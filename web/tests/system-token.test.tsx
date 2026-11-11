@@ -23,6 +23,14 @@ async function openAndSubmit(user: ReturnType<typeof userEvent.setup>) {
 describe('one-time API token display', () => {
   afterEach(() => vi.unstubAllGlobals())
 
+  it('explains user API tokens and the bootstrap bearer difference', async () => {
+    installFetch((url) => (url.startsWith('/api/v1/api-tokens') ? jsonResponse({ tokens: [] }) : jsonResponse({})))
+    renderWithProviders(<SystemPage />)
+    expect(await screen.findByText(/用户 API token 由登录用户在控制台创建，供 tribunalctl 或脚本访问项目级 API/)).toBeInTheDocument()
+    expect(screen.getByText('REVIEW_ADMIN_TOKEN')).toBeInTheDocument()
+    expect(screen.getByText(/平台管理面 bootstrap Bearer，无用户 ID 与项目 grant，不能读取项目业务数据/)).toBeInTheDocument()
+  })
+
   it('renders the secret only once and clears it when the dialog closes', async () => {
     const user = userEvent.setup()
     let created = false
@@ -36,6 +44,7 @@ describe('one-time API token display', () => {
     })
     renderWithProviders(<SystemPage />)
     await user.click(await screen.findByRole('button', { name: '创建 token' }))
+    expect(screen.getByText('API token 供 tribunalctl 或脚本访问项目级 API。设置名称和有效期。')).toBeInTheDocument()
     await user.type(screen.getByLabelText('名称'), 'ci')
     const createButtons = screen.getAllByRole('button', { name: '创建', exact: true })
     await user.click(createButtons[createButtons.length - 1])

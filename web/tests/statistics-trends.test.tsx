@@ -125,7 +125,7 @@ describe('statistics daily trends', () => {
 
     expect(within(table).queryByText('2026-10-02')).not.toBeInTheDocument()
     expect(panel.getByText(/只返回有执行的日期，不补零/)).toBeInTheDocument()
-    expect(panel.getByText(/用时为空时表示没有有效的开始与结束时间配对/)).toBeInTheDocument()
+    expect(panel.getByText(/用时为空表示没有有效的起止时间配对/)).toBeInTheDocument()
 
     expect(screen.getByText(/样本 2 · P95 2s/)).toBeInTheDocument()
   })
@@ -160,11 +160,11 @@ describe('statistics daily trends', () => {
     expect(blockRow.getByText('2')).toBeInTheDocument()
     expect(within(blockTable).queryByRole('columnheader', { name: '成本' })).not.toBeInTheDocument()
 
-    expect(screen.getByText(/只要节点有开始时间（started_at）就计入/)).toBeInTheDocument()
-    expect(screen.getByText(/运行中、已完成和失败的节点都会计入/)).toBeInTheDocument()
+    expect(screen.getByText(/节点有 started_at 就计入/)).toBeInTheDocument()
+    expect(screen.getByText(/运行中、已完成和失败的节点都计入/)).toBeInTheDocument()
     expect(screen.getByText(/不等于 LLM 调用次数或重试尝试次数/)).toBeInTheDocument()
-    expect(screen.getByText(/没有 provider 的节点只计入 block/)).toBeInTheDocument()
-    expect(screen.getByText(/最新一次尝试，不是重试尝试历史/)).toBeInTheDocument()
+    expect(screen.getByText(/无 provider 的节点只计入 block/)).toBeInTheDocument()
+    expect(screen.getByText(/最新一次尝试，不是重试历史/)).toBeInTheDocument()
   })
 
   it('expands and collapses a dimension trend with the keyboard', async () => {
@@ -552,6 +552,6 @@ describe('statistics daily trends', () => {
     renderWithProviders(<StatisticsPage />)
 
     await waitFor(() => expect(screen.getByText('每日趋势不可用')).toBeInTheDocument())
-    expect(screen.getByText(/旧版服务端可能不返回每日趋势/)).toBeInTheDocument()
+    expect(screen.getByText(/旧版服务端可能不支持每日趋势/)).toBeInTheDocument()
   })
 })

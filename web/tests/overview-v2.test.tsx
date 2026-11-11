@@ -117,7 +117,7 @@ describe('overview v2 layout', () => {
     expect(screen.queryByText('当前没有运行中的评审')).not.toBeInTheDocument()
     expect(screen.queryByText('成本')).not.toBeInTheDocument()
     expect(screen.getByText('BLOCKING 工作流数 / 所有工作流数')).toBeInTheDocument()
-    expect(screen.getByText('裁决为 publish 或 mark 的问题数，不代表实际发布成功')).toBeInTheDocument()
+    expect(screen.getByText('裁决为 publish 或 mark 的问题数，不等于发布成功。')).toBeInTheDocument()
     expect(screen.getByText('drop 问题数 / 有裁决的问题数，不是模型准确率')).toBeInTheDocument()
   })
 

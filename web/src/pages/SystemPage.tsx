@@ -131,7 +131,7 @@ function TokenCreateDialog({ open, onClose }: { open: boolean; onClose: () => vo
       title={created ? '复制新 API token' : '创建 API token'}
       description={created
         ? '明文 token 只显示这一次。关闭对话框后将从界面状态中清除。'
-        : 'API token 用于 tribunalctl 或脚本访问管理 API。请设置名称和有效期。'}
+        : 'API token 供 tribunalctl 或脚本访问项目级 API。设置名称和有效期。'}
       footer={created ? (
         <Button variant="primary" onClick={close}>我已复制，关闭</Button>
       ) : (
@@ -722,8 +722,8 @@ export function SystemPage() {
         <PageHeader
           title="系统"
           description={isAdmin
-            ? '管理个人 API token、平台配置只读视图、用户账号和项目授权。'
-            : '管理当前用户的 API token。平台配置与用户管理仅管理员可见。'}
+            ? '管理个人 API token、平台配置只读视图、用户账号与项目授权。'
+            : '管理自己的 API token；平台配置与用户管理仅管理员可见。'}
         />
         <Tabs
           items={tabs}
@@ -741,9 +741,14 @@ export function SystemPage() {
               aside={canSelfService ? (
                 <Button variant="primary" className={ui.smallButton} onClick={() => setCreateOpen(true)}>创建 token</Button>
               ) : undefined}
-              note={canSelfService
-                ? '登录用户可管理自己的 token；写操作由 CSRF 保护。明文 token 只在创建时显示一次。'
-                : '当前会话不能创建或撤销 token。登录用户可管理自己的 token；写操作由 CSRF 保护。'}
+              note={(
+                <>
+                  {canSelfService ? '登录用户可管理自己的 token；写操作由 CSRF 保护。' : '当前会话不能创建或撤销 token。'}
+                  用户 API token 由登录用户在控制台创建，供 tribunalctl 或脚本访问项目级 API，明文只在创建时显示一次。
+                  <br />
+                  <code>REVIEW_ADMIN_TOKEN</code> 是部署方在环境变量配置的平台管理面 bootstrap Bearer，无用户 ID 与项目 grant，不能读取项目业务数据，也不能在控制台创建或轮换；修改它需改环境变量并重启。
+                </>
+              )}
             >
               {tokens.isPending || tokens.isError || (tokens.isSuccess && tokens.items.length === 0) ? (
                 <PanelBody>

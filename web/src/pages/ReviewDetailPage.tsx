@@ -162,7 +162,7 @@ function FindingAnnotationEditor({
         </>
       ) : null}
       <p className={rv.annotationIntro}>
-        人工标注是评审人员对问题是否有效的评估，不会改变发布结果或评审结论。
+        人工标注评估问题是否有效，不改变发布结果或评审结论。
       </p>
     </section>
   )
@@ -323,10 +323,10 @@ function PublicationsPanel({ review, mrUrl }: { review: ReviewDetail; mrUrl?: st
   const publications = review.publications
   const commitNote = publications?.commit_status === 'failed'
     ? review.publication_state === 'published' && review.verdict === 'BLOCKING'
-      ? 'commit status 为 failed，表示评审结论为 BLOCKING（阻断合并）；发布本身已成功。'
+      ? 'commit status 为 failed：评审结论为 BLOCKING（阻断合并），发布本身已成功。'
       : review.publication_state === 'failed'
         ? '发布失败，不能视为 PASS。'
-        : 'commit status 为 failed，请结合发布状态判断，不能直接视为 PASS。'
+        : 'commit status 为 failed：请结合发布状态判断，不能直接视为 PASS。'
     : ''
   return (
     <Panel title="发布结果" flush>
@@ -384,7 +384,7 @@ function PublicationsPanel({ review, mrUrl }: { review: ReviewDetail; mrUrl?: st
       ) : null}
       {!publications ? (
         <PanelBody className={rv.publicationEmpty}>
-          <EmptyState title="尚无发布结果记录" description="服务端详情没有 publications 字段；这不表示发布成功。" />
+          <EmptyState title="尚无发布结果记录" description="服务端未返回 publications 字段，不代表发布成功。" />
         </PanelBody>
       ) : null}
       {commitNote ? <div className={ui.tableNote}>{commitNote}</div> : null}

@@ -34,7 +34,7 @@ describe('statistics feedback', () => {
     expect(panel.getByText(/不代表模型准确率/)).toBeInTheDocument()
     expect(screen.getByText('规则丢弃比例')).toBeInTheDocument()
     expect(screen.getByText('运行次数')).toBeInTheDocument()
-    expect(screen.getByText(/包含评审与 onboarding/)).toBeInTheDocument()
+    expect(screen.getByText(/含评审与 onboarding/)).toBeInTheDocument()
     expect(screen.queryByText('评审次数')).not.toBeInTheDocument()
   })
 
@@ -146,9 +146,9 @@ describe('statistics feedback', () => {
     expect(within(table).getByText('thumbsup: 2')).toBeInTheDocument()
     expect(within(table).getByText('thumbsdown: 1')).toBeInTheDocument()
     expect(within(table).queryByText(/%/)).not.toBeInTheDocument()
-    expect(panel.getByText(/同一信号可能同时计入提出方和挑战方/)).toBeInTheDocument()
-    expect(panel.getByText(/不能把两个角色的计数相加当作反馈总数/)).toBeInTheDocument()
-    expect(panel.getByText(/summary、未关联或关联不一致的反馈不计入/)).toBeInTheDocument()
+    expect(panel.getByText(/同一信号可同时计入提出方和挑战方/)).toBeInTheDocument()
+    expect(panel.getByText(/两个角色计数不能相加当作反馈总数/)).toBeInTheDocument()
+    expect(panel.getByText(/summary、未关联或关联不一致的不计入/)).toBeInTheDocument()
     expect(panel.getByText(/不代表.*正确率/)).toBeInTheDocument()
   })
 

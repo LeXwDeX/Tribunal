@@ -104,7 +104,7 @@ describe('model form capability fields (#406)', () => {
 
     expect(screen.getByLabelText('max_tokens')).toHaveValue(null)
     expect(screen.getByLabelText('max_concurrency')).toHaveValue(null)
-    expect(screen.getByText(/模型默认（不发送；DeepSeek 默认 8K\/64K\/128K，不等于最大）/)).toBeInTheDocument()
+    expect(screen.getByText(/不发送时由模型默认（DeepSeek 8K\/64K\/128K，不是最大值）/)).toBeInTheDocument()
 
     await fillConnection(user)
     await user.click(screen.getByRole('button', { name: '创建' }))
