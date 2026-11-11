@@ -82,7 +82,7 @@ func ParseManifest(data []byte) (Manifest, error) {
 	if err != nil {
 		return Manifest{}, err
 	}
-	return Manifest{Name: fm.Name, Description: fm.Description}, nil
+	return Manifest(fm), nil
 }
 
 // Skill is one catalogue entry. It deliberately omits the body and path.
