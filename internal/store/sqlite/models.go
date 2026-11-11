@@ -38,11 +38,18 @@ func (s *Store) ConfigureModelSecrets(ctx context.Context, cipher *secret.Cipher
 	return nil
 }
 
-func validateModel(m store.Model) error {
+// validateModel validates a stored user model against its effective
+// parameters. Platform defaults are merged first so a required value supplied
+// by the defaults (for example anthropic max_tokens) is not rejected.
+func (s *Store) validateModel(ctx context.Context, m store.Model) error {
 	if n := utf8.RuneCountInString(m.DisplayName); n < 1 || n > 128 || strings.TrimSpace(m.DisplayName) == "" || strings.IndexFunc(m.DisplayName, unicode.IsControl) >= 0 {
 		return errors.New("sqlite: invalid model display name")
 	}
-	p := m.Params
+	defaults, err := s.GetModelDefaults(ctx)
+	if err != nil {
+		return err
+	}
+	p, _ := store.MergeModelParams(m.Params, defaults.Params)
 	return config.ValidateProviderConfig("model", config.ProviderConfig{Protocol: m.Protocol, BaseURL: m.BaseURL, Model: m.Model, MaxTokens: p.MaxTokens, ContextWindow: p.ContextWindow, Temperature: p.Temperature, Reasoning: p.Reasoning, Thinking: p.Thinking, ForcedToolChoice: p.ForcedToolChoice, StrictRoleAlternation: p.StrictRoleAlternation, MaxConcurrency: p.MaxConcurrency, RPM: p.RPM,
 		AllowReasoningEffortNone: p.AllowReasoningEffortNone, PreserveReasoningContent: p.PreserveReasoningContent, OutputConfigEffort: p.OutputConfigEffort, ResponsesParams: p.ResponsesParams}, config.ProviderValidationOptions{})
 }
@@ -157,7 +164,7 @@ func (s *Store) sealModelCredential(id, value string) ([]byte, error) {
 }
 
 func (s *Store) CreateModel(ctx context.Context, m store.Model, credential string) (*store.Model, error) {
-	if err := validateModel(m); err != nil {
+	if err := s.validateModel(ctx, m); err != nil {
 		return nil, err
 	}
 	id, err := newID()
@@ -193,7 +200,7 @@ func (s *Store) CreateModel(ctx context.Context, m store.Model, credential strin
 }
 
 func (s *Store) UpdateModel(ctx context.Context, m store.Model, revision int64, credential *string) (*store.Model, error) {
-	if err := validateModel(m); err != nil {
+	if err := s.validateModel(ctx, m); err != nil {
 		return nil, err
 	}
 	params, err := json.Marshal(m.Params)

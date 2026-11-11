@@ -1081,6 +1081,12 @@ v1.2.0 新增迁移 `0020_review_command_replay`。`0020` 新建已受理身份�
 
 legacy `providers.*.price` 在 v1.4.0 仍会解析，仅用于兼容旧 YAML 和保持 provider 执行身份 JSON 逐字节不变，不参与计算，也不进入 API、控制台或统计；配置含 `price` 时启动产生一条脱敏 WARN（只列 provider 名，不列数值）。该字段将在 v2.0 删除，届时含 `price` 的旧配置需要移除。从 YAML 中删除 `price` 会改变 provider 执行身份；执行身份包含全部配置 provider，因此重启恢复时未终态工作流会以 `execution_identity_changed` 取消，需要重新触发。
 
+### 模型全局默认参数迁移（v1.4.0）
+
+`0029_model_param_defaults.sql` 新建单行 `llm_model_defaults`，保存 `user:` 模型的平台级默认参数，不修改 `llm_models` 中已存的显式参数，也不涉及 `config:` 模型。该迁移只建表，没有数据转换，但仍不可逆：回退必须恢复升级前的数据库及 `-wal`/`-shm` 快照，并启动匹配的旧镜像；旧二进制不认识该表，不会使用默认值。
+
+升级后默认参数为空（`revision 0`），现有用户模型的生效参数与升级前一致。管理员在控制台「模型与档位」页或通过 `GET/PUT/DELETE /api/v1/model-defaults` 设置默认值后，新的模型读取、草稿测试和之后启动的评审使用合并后的参数；进行中的评审继续使用启动时的 client 快照。保存默认值时会用候选值合并每个现有可用 `user:` 模型并按协议交叉校验，会让模型变为不可用的组合（例如 anthropic 的 `thinking.budget_tokens` 1–1023 或 `reasoning.effort: none`）返回 400 且不写库；重置同样必须带当前 `revision`，尚无记录（`revision=0`）或版本不匹配返回 409。默认值进入被引用 `user:` 模型的档位哈希，修改默认值后重启恢复可能使未终态评审以 `profile_hash_changed` 取消，需要重新触发；不希望影响在途评审时先让其结束。token 预算与 token 统计（`tokens_in`、`tokens_out`、`budget.max_tokens`）不受该迁移影响。
+
 ### 通用升级与回滚步骤
 
 升级步骤：

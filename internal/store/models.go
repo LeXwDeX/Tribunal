@@ -142,6 +142,121 @@ func (p ModelParamsPatch) Fields() []string {
 	return fields
 }
 
+// ParamSource labels the layer that supplied an effective parameter.
+const (
+	ParamSourceModel   = "model"
+	ParamSourceDefault = "default"
+)
+
+// MergeModelParams resolves a user model's effective parameters: an explicit
+// stored value wins, an unset value inherits the platform default, and a value
+// set by neither layer stays unset. A parameter is unset when it holds its
+// zero value (0, false, an empty string or nil), so the result cannot express
+// an explicit zero that overrides a non-zero default. Object parameters
+// (reasoning, thinking) are inherited or replaced as a whole, matching the
+// merge-request semantics.
+//
+// sources maps each flat parameter name that has a value to the layer that
+// supplied it (ParamSourceModel or ParamSourceDefault); parameters unset in
+// both layers are omitted.
+func MergeModelParams(explicit, defaults ModelParams) (ModelParams, map[string]string) {
+	merged := explicit
+	sources := map[string]string{}
+	sourceInt := func(name string, explicitValue, defaultValue int) int {
+		switch {
+		case explicitValue != 0:
+			sources[name] = ParamSourceModel
+			return explicitValue
+		case defaultValue != 0:
+			sources[name] = ParamSourceDefault
+			return defaultValue
+		default:
+			return 0
+		}
+	}
+	sourceBool := func(name string, explicitValue, defaultValue bool) bool {
+		switch {
+		case explicitValue:
+			sources[name] = ParamSourceModel
+			return true
+		case defaultValue:
+			sources[name] = ParamSourceDefault
+			return true
+		default:
+			return false
+		}
+	}
+	sourceString := func(name, explicitValue, defaultValue string) string {
+		switch {
+		case explicitValue != "":
+			sources[name] = ParamSourceModel
+			return explicitValue
+		case defaultValue != "":
+			sources[name] = ParamSourceDefault
+			return defaultValue
+		default:
+			return ""
+		}
+	}
+	merged.MaxTokens = sourceInt("max_tokens", explicit.MaxTokens, defaults.MaxTokens)
+	merged.ContextWindow = sourceInt("context_window", explicit.ContextWindow, defaults.ContextWindow)
+	merged.MaxConcurrency = sourceInt("max_concurrency", explicit.MaxConcurrency, defaults.MaxConcurrency)
+	merged.RPM = sourceInt("rpm", explicit.RPM, defaults.RPM)
+	switch {
+	case explicit.Temperature != nil:
+		sources["temperature"] = ParamSourceModel
+	case defaults.Temperature != nil:
+		merged.Temperature = defaults.Temperature
+		sources["temperature"] = ParamSourceDefault
+	}
+	switch {
+	case explicit.Reasoning != nil:
+		sources["reasoning"] = ParamSourceModel
+	case defaults.Reasoning != nil:
+		merged.Reasoning = defaults.Reasoning
+		sources["reasoning"] = ParamSourceDefault
+	}
+	switch {
+	case explicit.Thinking != nil:
+		sources["thinking"] = ParamSourceModel
+	case defaults.Thinking != nil:
+		merged.Thinking = defaults.Thinking
+		sources["thinking"] = ParamSourceDefault
+	}
+	merged.ForcedToolChoice = sourceString("forced_tool_choice", explicit.ForcedToolChoice, defaults.ForcedToolChoice)
+	merged.ResponsesParams = sourceString("responses_params", explicit.ResponsesParams, defaults.ResponsesParams)
+	merged.StrictRoleAlternation = sourceBool("strict_role_alternation", explicit.StrictRoleAlternation, defaults.StrictRoleAlternation)
+	merged.AllowReasoningEffortNone = sourceBool("allow_reasoning_effort_none", explicit.AllowReasoningEffortNone, defaults.AllowReasoningEffortNone)
+	merged.PreserveReasoningContent = sourceBool("preserve_reasoning_content", explicit.PreserveReasoningContent, defaults.PreserveReasoningContent)
+	merged.OutputConfigEffort = sourceBool("output_config_effort", explicit.OutputConfigEffort, defaults.OutputConfigEffort)
+	return merged, sources
+}
+
+// ModelDefaults is the platform-level default parameter document applied to
+// user models. Params uses the same zero-value-means-unset convention as a
+// stored model.
+type ModelDefaults struct {
+	Params    ModelParams `json:"params"`
+	Revision  int64       `json:"revision"`
+	UpdatedBy int64       `json:"updated_by"`
+	UpdatedAt time.Time   `json:"updated_at"`
+}
+
+// ModelDefaultsStore stores the single platform-level defaults row used by
+// user models. Config models are not affected; their defaults come from the
+// base/overlay configuration.
+type ModelDefaultsStore interface {
+	// GetModelDefaults returns an empty document with revision 0 when no row
+	// has been saved yet.
+	GetModelDefaults(context.Context) (*ModelDefaults, error)
+	// PutModelDefaults replaces the whole document at the given revision. A
+	// different current revision is ErrStaleRevision.
+	PutModelDefaults(ctx context.Context, params ModelParams, revision, userID int64) (*ModelDefaults, error)
+	// DeleteModelDefaults clears the document at the given revision and keeps
+	// the revision monotonic. A different current revision is ErrStaleRevision.
+	DeleteModelDefaults(ctx context.Context, revision, userID int64) (*ModelDefaults, error)
+}
+
 // ModelEndpoint is the stored endpoint metadata needed to decide whether a
 // saved credential may be reused. It does not parse the parameter JSON, so it
 // remains readable when a record's parameters are corrupt.

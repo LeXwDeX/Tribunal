@@ -30,6 +30,8 @@ type modelView struct {
 	BaseURL           string            `json:"base_url"`
 	Model             string            `json:"model"`
 	Params            store.ModelParams `json:"params"`
+	EffectiveParams   store.ModelParams `json:"effective_params"`
+	ParamSources      map[string]string `json:"param_sources"`
 	HasAPIKey         bool              `json:"has_api_key"`
 	Available         bool              `json:"available"`
 	UnavailableReason string            `json:"unavailable_reason,omitempty"`
@@ -90,6 +92,10 @@ func (s *Server) modelView(model llm.CatalogModel, stats providerStatsView) mode
 	if client, err := s.models.Client(model.ID); err == nil {
 		identity = client.Info().ModelIdentity()
 	}
+	sources := model.ParamSources
+	if sources == nil {
+		sources = map[string]string{}
+	}
 	return modelView{
 		ID:                model.ID,
 		DisplayName:       model.DisplayName,
@@ -99,6 +105,8 @@ func (s *Server) modelView(model llm.CatalogModel, stats providerStatsView) mode
 		BaseURL:           model.BaseURL,
 		Model:             model.Model.Model,
 		Params:            model.Params,
+		EffectiveParams:   model.EffectiveParams,
+		ParamSources:      sources,
 		HasAPIKey:         model.HasAPIKey,
 		Available:         !model.Unavailable,
 		UnavailableReason: model.UnavailableReason,
@@ -162,7 +170,12 @@ func (s *Server) handleCreateModel(w http.ResponseWriter, r *http.Request) {
 		DisplayName: request.DisplayName, Protocol: request.Protocol, BaseURL: request.BaseURL,
 		Model: request.Model, Params: request.Params, CreatedBy: currentUserID(r),
 	}
-	if details := modelDetails(candidate); len(details) > 0 {
+	details, err := s.modelValidationDetails(r.Context(), candidate)
+	if err != nil {
+		writeError(w, r, http.StatusServiceUnavailable, "unavailable", "model defaults are unavailable", nil)
+		return
+	}
+	if len(details) > 0 {
 		writeError(w, r, http.StatusBadRequest, "validation_failed", "invalid model", details)
 		return
 	}
@@ -200,7 +213,12 @@ func (s *Server) handleUpdateModel(w http.ResponseWriter, r *http.Request) {
 		ID: id, DisplayName: request.DisplayName, Protocol: request.Protocol, BaseURL: request.BaseURL,
 		Model: request.Model, Params: request.Params, UpdatedBy: currentUserID(r),
 	}
-	if details := modelDetails(candidate); len(details) > 0 {
+	details, err := s.modelValidationDetails(r.Context(), candidate)
+	if err != nil {
+		writeError(w, r, http.StatusServiceUnavailable, "unavailable", "model defaults are unavailable", nil)
+		return
+	}
+	if len(details) > 0 {
 		writeError(w, r, http.StatusBadRequest, "validation_failed", "invalid model", details)
 		return
 	}
@@ -277,7 +295,12 @@ func (s *Server) handleUpdateModelParams(w http.ResponseWriter, r *http.Request)
 	}
 	candidate := *stored
 	candidate.Params = patch.Apply(stored.Params)
-	if details := modelDetails(candidate); len(details) > 0 {
+	details, err = s.modelValidationDetails(r.Context(), candidate)
+	if err != nil {
+		writeError(w, r, http.StatusServiceUnavailable, "unavailable", "model defaults are unavailable", nil)
+		return
+	}
+	if len(details) > 0 {
 		writeError(w, r, http.StatusBadRequest, "validation_failed", "invalid model", details)
 		return
 	}
@@ -527,6 +550,15 @@ func (s *Server) handleTestModelDraft(w http.ResponseWriter, r *http.Request) {
 		DisplayName: request.DisplayName, Protocol: request.Protocol, BaseURL: request.BaseURL,
 		Model: request.Model, Params: request.Params,
 	}
+	// The draft must probe the same parameters a saved model would run with,
+	// so platform defaults are merged into the definition before validation
+	// and before the throwaway client is built.
+	effective, err := s.modelValidationParams(r.Context(), model.Params)
+	if err != nil {
+		writeError(w, r, http.StatusServiceUnavailable, "unavailable", "model defaults are unavailable", nil)
+		return
+	}
+	model.Params = effective
 	if details := modelDetails(model); len(details) > 0 {
 		writeError(w, r, http.StatusBadRequest, "validation_failed", "invalid model", details)
 		return
@@ -593,6 +625,19 @@ func (s *Server) handleTestModelDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeError(w, r, http.StatusUnprocessableEntity, "provider_test_failed", "provider test failed", nil)
+}
+
+// modelValidationDetails validates a candidate's explicit parameters with the
+// platform defaults merged in. A required value may come from the defaults,
+// so the merge happens before validation.
+func (s *Server) modelValidationDetails(ctx context.Context, model store.Model) ([]app.Detail, error) {
+	effective, err := s.modelValidationParams(ctx, model.Params)
+	if err != nil {
+		return nil, err
+	}
+	validation := model
+	validation.Params = effective
+	return modelDetails(validation), nil
 }
 
 // modelDetails applies the stored-model validation used by create, update and

@@ -17,11 +17,19 @@ type CatalogModel struct {
 	store.Model
 	Key               string `json:"-"`
 	UnavailableReason string `json:"unavailable_reason,omitempty"`
+	// EffectiveParams are the stored parameters with the platform defaults
+	// applied. Config models carry their configured parameters unchanged.
+	EffectiveParams store.ModelParams `json:"effective_params"`
+	// ParamSources names the layer that supplied each effective parameter
+	// (store.ParamSourceModel or store.ParamSourceDefault); parameters set by
+	// neither layer are omitted.
+	ParamSources map[string]string `json:"param_sources,omitempty"`
 }
 
 type modelReader interface {
 	ListModels(context.Context) ([]store.Model, error)
 	OpenModelCredential(context.Context, string) ([]byte, error)
+	GetModelDefaults(context.Context) (*store.ModelDefaults, error)
 }
 
 // ClientHolder publishes immutable registries while existing clients remain usable.
@@ -63,17 +71,20 @@ func (s *CatalogSnapshot) Resolve(id string) (CatalogModel, bool) {
 	return resolveCatalogModel(s.registry, id)
 }
 
-// ProviderConfig returns the model's non-secret provider settings; the
-// credential is never part of the result.
-func (m CatalogModel) ProviderConfig() config.ProviderConfig { return modelConfig(m.Model) }
+// ProviderConfig returns the model's non-secret provider settings, including
+// platform defaults; the credential is never part of the result.
+func (m CatalogModel) ProviderConfig() config.ProviderConfig {
+	return modelConfigWithParams(m.Model, m.EffectiveParams)
+}
 
 // Catalog merges configured providers with database models.
 type Catalog struct {
 	ClientHolder
-	mu         sync.Mutex
-	store      modelReader
-	configured *Registry
-	options    registryOptions
+	mu               sync.Mutex
+	store            modelReader
+	configured       *Registry
+	options          registryOptions
+	defaultsRevision int64
 }
 
 func NewCatalog(ctx context.Context, providers map[string]config.ProviderConfig, models modelReader, opts ...RegistryOption) (*Catalog, error) {
@@ -84,7 +95,8 @@ func NewCatalog(ctx context.Context, providers map[string]config.ProviderConfig,
 	registry.models = make(map[string]CatalogModel, len(providers))
 	for name, cfg := range providers {
 		info := registry.clients[name].Info()
-		registry.models[name] = cloneCatalogModel(CatalogModel{Key: name, Model: store.Model{ID: "config:" + name, DisplayName: name, Protocol: cfg.Protocol, BaseURL: cfg.BaseURL, Model: cfg.Model, Params: paramsFromConfig(cfg), HasAPIKey: true, Unavailable: info.Unavailable}, UnavailableReason: info.UnavailableReason})
+		params := paramsFromConfig(cfg)
+		registry.models[name] = cloneCatalogModel(CatalogModel{Key: name, Model: store.Model{ID: "config:" + name, DisplayName: name, Protocol: cfg.Protocol, BaseURL: cfg.BaseURL, Model: cfg.Model, Params: params, HasAPIKey: true, Unavailable: info.Unavailable}, EffectiveParams: params, UnavailableReason: info.UnavailableReason})
 	}
 	c := &Catalog{store: models, configured: registry, options: registryOptions{retryBaseDelay: defaultBaseDelay}}
 	for _, opt := range opts {
@@ -105,7 +117,11 @@ func paramsFromConfig(p config.ProviderConfig) store.ModelParams {
 }
 
 func modelConfig(m store.Model) config.ProviderConfig {
-	p := m.Params
+	return modelConfigWithParams(m, m.Params)
+}
+
+func modelConfigWithParams(m store.Model, params store.ModelParams) config.ProviderConfig {
+	p := params
 	return config.ProviderConfig{Protocol: m.Protocol, BaseURL: m.BaseURL, Model: m.Model, MaxTokens: p.MaxTokens, ContextWindow: p.ContextWindow, Temperature: p.Temperature, Reasoning: p.Reasoning, Thinking: p.Thinking, ForcedToolChoice: p.ForcedToolChoice, StrictRoleAlternation: p.StrictRoleAlternation, MaxConcurrency: p.MaxConcurrency, RPM: p.RPM,
 		AllowReasoningEffortNone: p.AllowReasoningEffortNone, PreserveReasoningContent: p.PreserveReasoningContent, OutputConfigEffort: p.OutputConfigEffort, ResponsesParams: p.ResponsesParams}
 }
@@ -143,13 +159,26 @@ func (c *Catalog) Refresh(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	var models []store.Model
-	var err error
+	var defaults store.ModelParams
+	var defaultsRevision int64
 	if c.store != nil {
+		var err error
 		models, err = c.store.ListModels(ctx)
 		if err != nil {
 			return err
 		}
+		storedDefaults, err := c.store.GetModelDefaults(ctx)
+		if err != nil {
+			return err
+		}
+		if storedDefaults != nil {
+			defaults = storedDefaults.Params
+			defaultsRevision = storedDefaults.Revision
+		}
 	}
+	// A defaults change invalidates every user-model client because its
+	// effective configuration may have changed without a model revision bump.
+	defaultsChanged := defaultsRevision != c.defaultsRevision
 	policy, err := newEgressPolicy(c.options.egress)
 	if err != nil {
 		return err
@@ -169,11 +198,16 @@ func (c *Catalog) Refresh(ctx context.Context) error {
 			return err
 		}
 		entry := cloneCatalogModel(CatalogModel{Model: model, Key: model.ID})
-		if old, ok := previous.models[model.ID]; ok && old.Revision == model.Revision && !old.Unavailable && !model.Unavailable {
+		if strings.HasPrefix(model.ID, "user:") {
+			entry.EffectiveParams, entry.ParamSources = store.MergeModelParams(model.Params, defaults)
+		} else {
+			entry.EffectiveParams = model.Params
+		}
+		if old, ok := previous.models[model.ID]; ok && !defaultsChanged && old.Revision == model.Revision && !old.Unavailable && !model.Unavailable {
 			entry = old
 			next.clients[model.ID] = previous.clients[model.ID]
 		} else {
-			cfg := modelConfig(model)
+			cfg := modelConfigWithParams(model, entry.EffectiveParams)
 			switch {
 			case !strings.HasPrefix(model.ID, "user:"):
 				entry.UnavailableReason = "validation"
@@ -210,6 +244,7 @@ func (c *Catalog) Refresh(ctx context.Context) error {
 		return err
 	}
 	c.registry.Store(next)
+	c.defaultsRevision = defaultsRevision
 	return nil
 }
 
@@ -272,6 +307,26 @@ func cloneCatalogModel(m CatalogModel) CatalogModel {
 	if p.Thinking != nil {
 		v := *p.Thinking
 		p.Thinking = &v
+	}
+	effective := &m.EffectiveParams
+	if effective.Temperature != nil {
+		v := *effective.Temperature
+		effective.Temperature = &v
+	}
+	if effective.Reasoning != nil {
+		v := *effective.Reasoning
+		effective.Reasoning = &v
+	}
+	if effective.Thinking != nil {
+		v := *effective.Thinking
+		effective.Thinking = &v
+	}
+	if m.ParamSources != nil {
+		sources := make(map[string]string, len(m.ParamSources))
+		for name, source := range m.ParamSources {
+			sources[name] = source
+		}
+		m.ParamSources = sources
 	}
 	if m.DeletedAt != nil {
 		v := *m.DeletedAt

@@ -34,6 +34,10 @@ func (m *mutableModelStore) OpenModelCredential(context.Context, string) ([]byte
 	return []byte("sk-dynamic-secret-bytes"), nil
 }
 
+func (m *mutableModelStore) GetModelDefaults(context.Context) (*store.ModelDefaults, error) {
+	return &store.ModelDefaults{}, nil
+}
+
 func (m *mutableModelStore) set(models ...store.Model) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

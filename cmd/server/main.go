@@ -273,6 +273,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		LLM:              extensionsAPI,
 		Models:           runtime.Models(),
 		ModelsStore:      db,
+		ModelDefaults:    db,
 		RefreshModels:    runtime.RefreshModels,
 		ProfileOverrides: db,
 		Sessions:         db,

@@ -2,10 +2,13 @@ import { useEffect, useId, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCanWrite } from '../components/RoleContext'
 import {
-  createModel, deleteModel, getDefaultProfile, listModelPresets, listModels, listProfiles, testModelDraft, updateModel,
+  createModel, deleteModel, deleteModelDefaults, getDefaultProfile, getModelDefaults, listModelPresets, listModels, listProfiles,
+  putModelDefaults, testModelDraft, updateModel,
 } from '../api/api'
 import { ApiError, errorMessage } from '../api/client'
-import type { Model, ModelParams, ModelPreset, ModelWrite, ProfileConfig, ProfileDetail, ProviderTestResult } from '../api/types'
+import type {
+  Model, ModelDefaults, ModelParams, ModelPreset, ModelWrite, ProfileConfig, ProfileDetail, ProviderTestResult,
+} from '../api/types'
 import {
   Badge, Button, Checkbox, ConfirmDialog, Disclosure, Drawer, EmptyState, ErrorState, Field, FieldHint, LoadingState,
   Note, NumberField, PageHeader, Panel, Select,
@@ -30,7 +33,9 @@ function hostOf(value: string): string {
 // Flattens model params into label/value pairs and drops unset values
 // (null, undefined, empty string), so the card shows only what was configured.
 // Explicit zeros and false are meaningful capability switches and keep a label
-// instead of disappearing. Price is never rendered (#406/#407).
+// instead of disappearing, unless a platform default supplies that parameter:
+// the zero/false is then not in effect and the inherited line shows the
+// effective value (#413). Price is never rendered (#406/#407).
 const EXPLICIT_PARAM_LABELS: Record<string, string> = {
   max_tokens: '0（模型默认，不发送）',
   context_window: '0（未知）',
@@ -38,7 +43,7 @@ const EXPLICIT_PARAM_LABELS: Record<string, string> = {
   strict_role_alternation: 'false（关闭）',
 }
 
-export function summarizeParams(params: ModelParams | undefined): Array<[string, string]> {
+export function summarizeParams(params: ModelParams | undefined, sources?: Record<string, string>): Array<[string, string]> {
   const out: Array<[string, string]> = []
   const walk = (value: unknown, path: string) => {
     if (value === null || value === undefined || value === 0 || value === '' || value === false) return
@@ -55,10 +60,28 @@ export function summarizeParams(params: ModelParams | undefined): Array<[string,
   for (const [key, value] of Object.entries(params ?? {})) {
     if (key === 'price') continue
     if (key === 'temperature' && typeof value === 'number') out.push([key, String(value)])
-    else if ((value === 0 || value === false) && key in EXPLICIT_PARAM_LABELS) out.push([key, EXPLICIT_PARAM_LABELS[key]])
-    else walk(value, key)
+    else if ((value === 0 || value === false) && key in EXPLICIT_PARAM_LABELS) {
+      // The effective value comes from the platform default, so the explicit
+      // zero/false is overridden; do not present it as the active setting.
+      if (sources?.[key] !== 'default') out.push([key, EXPLICIT_PARAM_LABELS[key]])
+    } else walk(value, key)
   }
   return out
+}
+
+// inheritedParams keeps only the effective values the platform defaults
+// supplied, so a model card can show what it inherits without repeating its
+// own explicit parameters.
+export function inheritedParams(model: Model): Array<[string, string]> {
+  const sources = model.param_sources ?? {}
+  const effective = model.effective_params
+  if (!effective) return []
+  const inherited: Record<string, unknown> = {}
+  for (const [key, source] of Object.entries(sources)) {
+    if (source !== 'default') continue
+    inherited[key] = (effective as Record<string, unknown>)[key]
+  }
+  return summarizeParams(inherited)
 }
 
 type KeyMode = 'keep' | 'replace' | 'clear'
@@ -186,15 +209,20 @@ function formFromPreset(preset: ModelPreset, current: ModelForm): ModelForm {
 const NON_NEGATIVE_INT = /^\d+$/
 
 // validateModelForm covers the rules the form can judge without the server.
-// Protocol-level requirements the server also enforces stay here so the user
-// gets the error before any request is sent.
-function validateModelForm(form: ModelForm): FormErrors {
+// inheritedMaxTokens is the platform default a blank or zero model value
+// inherits; an anthropic model may rely on it instead of storing its own
+// max_tokens. Protocol-level requirements the server also enforces stay here
+// so the user gets the error before any request is sent.
+function validateModelForm(form: ModelForm, inheritedMaxTokens = 0): FormErrors {
   const errors: FormErrors = {}
   const maxTokens = form.maxTokens.trim()
+  const effectiveMaxTokens = maxTokens ? Number(maxTokens) : inheritedMaxTokens
   if (maxTokens) {
     if (!NON_NEGATIVE_INT.test(maxTokens)) errors.maxTokens = 'max_tokens 必须是不小于 0 的整数。'
-    else if (form.protocol === 'anthropic' && Number(maxTokens) === 0) errors.maxTokens = 'anthropic 协议要求 max_tokens 大于 0。'
-  } else if (form.protocol === 'anthropic') {
+    else if (form.protocol === 'anthropic' && Number(maxTokens) === 0 && inheritedMaxTokens <= 0) {
+      errors.maxTokens = 'anthropic 协议要求 max_tokens 大于 0。'
+    }
+  } else if (form.protocol === 'anthropic' && inheritedMaxTokens <= 0) {
     errors.maxTokens = 'anthropic 协议要求 max_tokens 大于 0，不能留空。'
   }
   if (form.maxConcurrency.trim() && !NON_NEGATIVE_INT.test(form.maxConcurrency.trim())) {
@@ -216,7 +244,7 @@ function validateModelForm(form: ModelForm): FormErrors {
   } else if (budget && form.protocol === 'anthropic' && Number(budget) > 0) {
     const value = Number(budget)
     if (value < 1024) errors.thinkingBudget = 'anthropic 的 thinking.budget_tokens 必须不小于 1024。'
-    else if (maxTokens && Number(maxTokens) > 0 && value >= Number(maxTokens)) {
+    else if (effectiveMaxTokens > 0 && value >= effectiveMaxTokens) {
       errors.thinkingBudget = 'anthropic 的 thinking.budget_tokens 必须小于 max_tokens。'
     }
   }
@@ -304,6 +332,390 @@ function configName(id: string): string {
   return id.startsWith('config:') ? id.slice('config:'.length) : id
 }
 
+// ------------------------------------------------- platform model defaults
+
+interface DefaultsForm {
+  maxTokens: string
+  contextWindow: string
+  maxConcurrency: string
+  rpm: string
+  temperature: string
+  forcedToolChoice: string
+  strictRoleAlternation: boolean
+  effort: string
+  thinkingType: string
+  thinkingBudget: string
+  allowReasoningEffortNone: boolean
+  preserveReasoningContent: boolean
+  outputConfigEffort: boolean
+  responsesParams: string
+}
+
+type DefaultsField = keyof DefaultsForm
+type DefaultsErrors = Partial<Record<DefaultsField, string>>
+
+const RESPONSES_PARAMS_OPTIONS = [
+  { value: '', label: '不设置' },
+  { value: 'auto', label: 'auto（按协议判断）' },
+  { value: 'supported', label: 'supported（发送 include/store）' },
+  { value: 'unsupported', label: 'unsupported（不发送）' },
+]
+
+const DEFAULTS_EFFORT_OPTIONS = [
+  ...EFFORT_OPTIONS,
+  { value: 'none', label: 'none（需开启 allow_reasoning_effort_none）' },
+]
+
+function emptyDefaultsForm(): DefaultsForm {
+  return {
+    maxTokens: '', contextWindow: '', maxConcurrency: '', rpm: '', temperature: '',
+    forcedToolChoice: '', strictRoleAlternation: false, effort: '', thinkingType: '', thinkingBudget: '',
+    allowReasoningEffortNone: false, preserveReasoningContent: false, outputConfigEffort: false, responsesParams: '',
+  }
+}
+
+// Zero values mean "unset" in the defaults document: 0, false and an empty
+// string all inherit the built-in behavior instead of overriding it.
+function defaultsFormFrom(defaults?: ModelDefaults): DefaultsForm {
+  const params = defaults?.params ?? {}
+  return {
+    maxTokens: params.max_tokens ? numberText(params.max_tokens) : '',
+    contextWindow: params.context_window ? numberText(params.context_window) : '',
+    maxConcurrency: params.max_concurrency ? numberText(params.max_concurrency) : '',
+    rpm: params.rpm ? numberText(params.rpm) : '',
+    temperature: typeof params.temperature === 'number' ? numberText(params.temperature) : '',
+    forcedToolChoice: params.forced_tool_choice ?? '',
+    strictRoleAlternation: params.strict_role_alternation === true,
+    effort: params.reasoning?.effort ?? '',
+    thinkingType: params.thinking?.type ?? '',
+    thinkingBudget: params.thinking?.budget_tokens ? numberText(params.thinking.budget_tokens) : '',
+    allowReasoningEffortNone: params.allow_reasoning_effort_none === true,
+    preserveReasoningContent: params.preserve_reasoning_content === true,
+    outputConfigEffort: params.output_config_effort === true,
+    responsesParams: params.responses_params ?? '',
+  }
+}
+
+function validateDefaultsForm(form: DefaultsForm): DefaultsErrors {
+  const errors: DefaultsErrors = {}
+  const nonNegative = (value: string, field: DefaultsField, label: string) => {
+    const text = value.trim()
+    if (text && !NON_NEGATIVE_INT.test(text)) errors[field] = `${label} 必须是不小于 0 的整数。`
+  }
+  nonNegative(form.maxTokens, 'maxTokens', 'max_tokens')
+  nonNegative(form.contextWindow, 'contextWindow', 'context_window')
+  nonNegative(form.maxConcurrency, 'maxConcurrency', 'max_concurrency')
+  nonNegative(form.rpm, 'rpm', 'rpm')
+  nonNegative(form.thinkingBudget, 'thinkingBudget', 'thinking.budget_tokens')
+  if (form.temperature.trim()) {
+    const value = Number(form.temperature)
+    if (!Number.isFinite(value) || value < 0 || value > 2) errors.temperature = 'temperature 必须在 0 到 2 之间。'
+  }
+  if (form.effort === 'none' && !form.allowReasoningEffortNone) {
+    errors.effort = 'reasoning.effort 为 none 时需要同时开启 allow_reasoning_effort_none。'
+  }
+  return errors
+}
+
+// Only submitted keys are stored. Boolean false and numeric 0 are omitted so
+// they keep meaning "unset" rather than overriding a built-in value.
+function buildDefaultsParams(form: DefaultsForm): ModelParams {
+  const params: ModelParams = {}
+  if (form.maxTokens.trim()) params.max_tokens = Number(form.maxTokens)
+  if (form.contextWindow.trim()) params.context_window = Number(form.contextWindow)
+  if (form.maxConcurrency.trim()) params.max_concurrency = Number(form.maxConcurrency)
+  if (form.rpm.trim()) params.rpm = Number(form.rpm)
+  if (form.temperature.trim()) params.temperature = Number(form.temperature)
+  if (form.forcedToolChoice) params.forced_tool_choice = form.forcedToolChoice
+  if (form.effort) params.reasoning = { effort: form.effort }
+  const budget = form.thinkingBudget.trim()
+  if (form.thinkingType || (budget && Number(budget) > 0)) {
+    params.thinking = {}
+    if (budget && Number(budget) > 0) params.thinking.budget_tokens = Number(budget)
+    if (form.thinkingType) params.thinking.type = form.thinkingType
+  }
+  if (form.strictRoleAlternation) params.strict_role_alternation = true
+  if (form.allowReasoningEffortNone) params.allow_reasoning_effort_none = true
+  if (form.preserveReasoningContent) params.preserve_reasoning_content = true
+  if (form.outputConfigEffort) params.output_config_effort = true
+  if (form.responsesParams) params.responses_params = form.responsesParams
+  return params
+}
+
+const DEFAULTS_FIELD_MAP: Record<string, DefaultsField> = {
+  'params.max_tokens': 'maxTokens',
+  'params.context_window': 'contextWindow',
+  'params.max_concurrency': 'maxConcurrency',
+  'params.rpm': 'rpm',
+  'params.temperature': 'temperature',
+  'params.forced_tool_choice': 'forcedToolChoice',
+  'params.strict_role_alternation': 'strictRoleAlternation',
+  'params.reasoning': 'effort',
+  'params.reasoning.effort': 'effort',
+  'params.thinking': 'thinkingType',
+  'params.thinking.type': 'thinkingType',
+  'params.thinking.budget_tokens': 'thinkingBudget',
+  'params.allow_reasoning_effort_none': 'allowReasoningEffortNone',
+  'params.preserve_reasoning_content': 'preserveReasoningContent',
+  'params.output_config_effort': 'outputConfigEffort',
+  'params.responses_params': 'responsesParams',
+}
+
+function defaultsApiErrors(error: unknown): { fields: DefaultsErrors; message?: string } {
+  if (!(error instanceof ApiError)) return { fields: {}, message: errorMessage(error) }
+  const fields: DefaultsErrors = {}
+  const unmapped: string[] = []
+  for (const detail of error.details ?? []) {
+    const key = detail.field ? DEFAULTS_FIELD_MAP[detail.field] : undefined
+    if (!key) {
+      const text = [detail.field, detail.message].filter(Boolean).join(': ')
+      if (text) unmapped.push(text)
+      continue
+    }
+    const message = detail.message || error.message
+    fields[key] = fields[key] ? `${fields[key]}；${message}` : message
+  }
+  if (unmapped.length) return { fields, message: `${error.message}（${unmapped.join('；')}）` }
+  if (!Object.keys(fields).length) return { fields, message: errorMessage(error) }
+  return { fields }
+}
+
+function ModelDefaultsPanel({
+  defaults, form, onFormChange, loading, loadError, onReload, onSaved,
+}: {
+  defaults?: ModelDefaults
+  form: DefaultsForm
+  onFormChange: (form: DefaultsForm) => void
+  loading: boolean
+  loadError?: unknown
+  onReload: () => void
+  onSaved: () => void
+}) {
+  const [errors, setErrors] = useState<DefaultsErrors>({})
+  const [error, setError] = useState<string>()
+  const [stale, setStale] = useState(false)
+  const [status, setStatus] = useState<string>()
+  const [pending, setPending] = useState(false)
+  const [resetOpen, setResetOpen] = useState(false)
+  const [resetError, setResetError] = useState<unknown>()
+  const id = useId()
+  const ids = {
+    tokens: `${id}-tokens`, context: `${id}-context`, concurrency: `${id}-concurrency`, rpm: `${id}-rpm`,
+    temperature: `${id}-temperature`, toolChoice: `${id}-tool-choice`, strict: `${id}-strict`,
+    effort: `${id}-effort`, thinkingType: `${id}-thinking-type`, thinkingBudget: `${id}-thinking-budget`,
+    preserve: `${id}-preserve`, allowNone: `${id}-allow-none`, outputEffort: `${id}-output-effort`,
+    responses: `${id}-responses`,
+  }
+  const revision = defaults?.revision ?? 0
+  // A stored document with only unset values has nothing to reset.
+  const hasDefaults = Object.keys(buildDefaultsParams(defaultsFormFrom(defaults))).length > 0
+
+  const update = (patch: Partial<DefaultsForm>) => {
+    onFormChange({ ...form, ...patch })
+  }
+
+  const reload = () => {
+    setError(undefined)
+    setStale(false)
+    setResetError(undefined)
+    onReload()
+  }
+
+  const save = async () => {
+    const found = validateDefaultsForm(form)
+    if (Object.keys(found).length) {
+      setErrors(found)
+      setError(undefined)
+      return
+    }
+    setPending(true)
+    setErrors({})
+    setError(undefined)
+    setStale(false)
+    setStatus(undefined)
+    try {
+      const saved = await putModelDefaults(buildDefaultsParams(form), revision)
+      setStatus(`已保存（revision ${saved.revision}）。`)
+      onSaved()
+    } catch (err) {
+      if (err instanceof ApiError && err.code === 'stale_revision') {
+        setError('已被他人修改，请重新加载后再保存。')
+        setStale(true)
+      } else {
+        const mapped = defaultsApiErrors(err)
+        setErrors(mapped.fields)
+        setError(mapped.message)
+      }
+    } finally {
+      setPending(false)
+    }
+  }
+
+  const reset = async () => {
+    setPending(true)
+    setResetError(undefined)
+    try {
+      const cleared = await deleteModelDefaults(revision)
+      setResetOpen(false)
+      setStatus(`已重置全部默认值（revision ${cleared.revision}）。`)
+      onSaved()
+    } catch (err) {
+      if (err instanceof ApiError && err.code === 'stale_revision') {
+        // The dialog cannot refresh the query itself; surface the same reload
+        // path as a save conflict instead of leaving a dead-end error.
+        setResetOpen(false)
+        setError('已被他人修改，请重新加载后再重置。')
+        setStale(true)
+      } else {
+        setResetError(err)
+      }
+    } finally {
+      setPending(false)
+    }
+  }
+
+  if (loading) return <LoadingState label="全局默认参数加载中…" />
+  // A caller without the platform admin role must not see the panel at all;
+  // the server already enforces the same rule on every read and write.
+  if (loadError instanceof ApiError && loadError.status === 403) return null
+  if (loadError) return <ErrorState error={loadError} onRetry={onReload} />
+
+  return (
+    <>
+      <Panel
+        title={<>全局默认参数 <small>仅 user: 模型</small></>}
+        aside={<span>revision {revision}</span>}
+      >
+        <form className={styles.modelForm} onSubmit={(event) => event.preventDefault()}>
+          <fieldset className={styles.modelFormGroup}>
+            <legend className={styles.modelFormLegend}>限流与窗口</legend>
+            <div className={styles.modelFormGrid}>
+              <Field label="max_tokens" htmlFor={ids.tokens} hint="模型未设置时继承此值；留空表示不设置，由上游取默认。anthropic 用户模型需要此处或模型自身给出大于 0 的值。" error={errors.maxTokens}>
+                <NumberField id={ids.tokens} min={0} step={1} value={form.maxTokens} aria-invalid={errors.maxTokens ? true : undefined} onChange={(event) => update({ maxTokens: event.target.value })} />
+              </Field>
+              <Field label="context_window" htmlFor={ids.context} hint="上游可接收的输入窗口；留空表示未知，不做上下文压缩。" error={errors.contextWindow}>
+                <NumberField id={ids.context} min={0} step={1} value={form.contextWindow} aria-invalid={errors.contextWindow ? true : undefined} onChange={(event) => update({ contextWindow: event.target.value })} />
+              </Field>
+              <Field label="max_concurrency" htmlFor={ids.concurrency} hint="模型未设置时使用；留空或 0 表示不限制本地并发。" error={errors.maxConcurrency}>
+                <NumberField id={ids.concurrency} min={0} step={1} value={form.maxConcurrency} aria-invalid={errors.maxConcurrency ? true : undefined} onChange={(event) => update({ maxConcurrency: event.target.value })} />
+              </Field>
+              <Field label="rpm" htmlFor={ids.rpm} hint="每分钟请求数；留空或 0 表示不限制。" error={errors.rpm}>
+                <NumberField id={ids.rpm} min={0} step={1} value={form.rpm} aria-invalid={errors.rpm ? true : undefined} onChange={(event) => update({ rpm: event.target.value })} />
+              </Field>
+            </div>
+          </fieldset>
+
+          <fieldset className={styles.modelFormGroup}>
+            <legend className={styles.modelFormLegend}>采样</legend>
+            <div className={styles.modelFormGrid}>
+              <Field label="temperature" htmlFor={ids.temperature} hint="0 到 2；留空表示不设置。" error={errors.temperature}>
+                <NumberField id={ids.temperature} min={0} max={2} step={0.1} value={form.temperature} aria-invalid={errors.temperature ? true : undefined} onChange={(event) => update({ temperature: event.target.value })} />
+              </Field>
+              <Field label="forced_tool_choice" htmlFor={ids.toolChoice} hint="声明上游是否接受强制 submit_result 工具选择。" error={errors.forcedToolChoice}>
+                <Select id={ids.toolChoice} value={form.forcedToolChoice} options={FORCED_TOOL_CHOICE_OPTIONS} onChange={(value) => update({ forcedToolChoice: value })} aria-invalid={errors.forcedToolChoice ? true : undefined} />
+              </Field>
+              <div className={styles.checkField}>
+                <Checkbox
+                  id={ids.strict}
+                  label="strict_role_alternation"
+                  checked={form.strictRoleAlternation}
+                  onChange={(event) => update({ strictRoleAlternation: event.target.checked })}
+                  aria-invalid={errors.strictRoleAlternation ? true : undefined}
+                  aria-describedby={[`${ids.strict}-hint`, errors.strictRoleAlternation ? `${ids.strict}-error` : undefined].filter(Boolean).join(' ')}
+                />
+                <FieldHint id={`${ids.strict}-hint`}>开启后把用户提示折入最后一条工具消息；关闭表示不设置该默认值。</FieldHint>
+                {errors.strictRoleAlternation ? <span className={styles.formError} id={`${ids.strict}-error`} role="alert">{errors.strictRoleAlternation}</span> : null}
+              </div>
+            </div>
+          </fieldset>
+
+          <fieldset className={styles.modelFormGroup}>
+            <legend className={styles.modelFormLegend}>推理与能力</legend>
+            <div className={styles.modelFormGrid}>
+              <Field label="reasoning.effort" htmlFor={ids.effort} hint="none 需要同时开启 allow_reasoning_effort_none；anthropic 不接受 none。" error={errors.effort}>
+                <Select id={ids.effort} value={form.effort} options={DEFAULTS_EFFORT_OPTIONS} onChange={(value) => update({ effort: value })} aria-invalid={errors.effort ? true : undefined} />
+              </Field>
+              <Field label="thinking.type" htmlFor={ids.thinkingType} hint="仅 openai-chat 发送 thinking.type；留空表示不设置。" error={errors.thinkingType}>
+                <Select id={ids.thinkingType} value={form.thinkingType} options={THINKING_TYPE_OPTIONS} onChange={(value) => update({ thinkingType: value })} aria-invalid={errors.thinkingType ? true : undefined} />
+              </Field>
+              <Field label="thinking.budget_tokens" htmlFor={ids.thinkingBudget} hint="0 或留空表示不设置；仅 anthropic 生效。" error={errors.thinkingBudget}>
+                <NumberField id={ids.thinkingBudget} min={0} step={1} value={form.thinkingBudget} aria-invalid={errors.thinkingBudget ? true : undefined} onChange={(event) => update({ thinkingBudget: event.target.value })} />
+              </Field>
+              <Field label="responses_params" htmlFor={ids.responses} hint="仅 openai-responses 端点使用；留空表示 auto。" error={errors.responsesParams}>
+                <Select id={ids.responses} value={form.responsesParams} options={RESPONSES_PARAMS_OPTIONS} onChange={(value) => update({ responsesParams: value })} aria-invalid={errors.responsesParams ? true : undefined} />
+              </Field>
+              <div className={styles.checkField}>
+                <Checkbox
+                  id={ids.allowNone}
+                  label="allow_reasoning_effort_none"
+                  checked={form.allowReasoningEffortNone}
+                  onChange={(event) => update({ allowReasoningEffortNone: event.target.checked })}
+                  aria-invalid={errors.allowReasoningEffortNone ? true : undefined}
+                  aria-describedby={[`${ids.allowNone}-hint`, errors.allowReasoningEffortNone ? `${ids.allowNone}-error` : undefined].filter(Boolean).join(' ')}
+                />
+                <FieldHint id={`${ids.allowNone}-hint`}>允许 effort 为 none 的上游（DeepSeek thinking）。</FieldHint>
+                {errors.allowReasoningEffortNone ? <span className={styles.formError} id={`${ids.allowNone}-error`} role="alert">{errors.allowReasoningEffortNone}</span> : null}
+              </div>
+              <div className={styles.checkField}>
+                <Checkbox
+                  id={ids.preserve}
+                  label="preserve_reasoning_content"
+                  checked={form.preserveReasoningContent}
+                  onChange={(event) => update({ preserveReasoningContent: event.target.checked })}
+                  aria-invalid={errors.preserveReasoningContent ? true : undefined}
+                  aria-describedby={[`${ids.preserve}-hint`, errors.preserveReasoningContent ? `${ids.preserve}-error` : undefined].filter(Boolean).join(' ')}
+                />
+                <FieldHint id={`${ids.preserve}-hint`}>openai-chat 回传 reasoning_content，DeepSeek thinking + tools 需要。</FieldHint>
+                {errors.preserveReasoningContent ? <span className={styles.formError} id={`${ids.preserve}-error`} role="alert">{errors.preserveReasoningContent}</span> : null}
+              </div>
+              <div className={styles.checkField}>
+                <Checkbox
+                  id={ids.outputEffort}
+                  label="output_config_effort"
+                  checked={form.outputConfigEffort}
+                  onChange={(event) => update({ outputConfigEffort: event.target.checked })}
+                  aria-invalid={errors.outputConfigEffort ? true : undefined}
+                  aria-describedby={[`${ids.outputEffort}-hint`, errors.outputConfigEffort ? `${ids.outputEffort}-error` : undefined].filter(Boolean).join(' ')}
+                />
+                <FieldHint id={`${ids.outputEffort}-hint`}>anthropic 通过 output_config.effort 发送 reasoning.effort。</FieldHint>
+                {errors.outputConfigEffort ? <span className={styles.formError} id={`${ids.outputEffort}-error`} role="alert">{errors.outputConfigEffort}</span> : null}
+              </div>
+            </div>
+          </fieldset>
+
+          <div className={styles.cardActions}>
+            <Button onClick={() => { void save() }} loading={pending}>保存全局默认</Button>
+            <Button variant="secondary" onClick={() => { setResetError(undefined); setResetOpen(true) }} disabled={pending || revision === 0 || !hasDefaults}>重置</Button>
+          </div>
+          {status ? <span className={styles.resultOk} role="status">{status}</span> : null}
+          {error ? (
+            <span className={styles.resultError} role="alert">
+              {error}
+              {stale ? <> <Button variant="secondary" className={ui.smallButton} onClick={reload}>重新加载</Button></> : null}
+            </span>
+          ) : null}
+          <Note tone="neutral">
+            只对 user: 模型生效；config: 模型的参数由配置文件负责。模型显式设置的值优先于这里的默认值；
+            整数字段的 0、布尔 false 或留空表示未设置，会继续使用内置/协议默认；temperature 是显式值，填 0 会覆盖默认。
+            保存时会用候选值合并现有 user: 模型并按各自协议交叉校验，会让模型变为不可用的组合会被拒绝，不写库。
+            保存后对之后启动的评审生效。
+          </Note>
+        </form>
+      </Panel>
+      <ConfirmDialog
+        open={resetOpen}
+        onClose={() => setResetOpen(false)}
+        onConfirm={() => { void reset() }}
+        title="重置全局默认参数"
+        description="清除全部平台默认参数？各 user: 模型会恢复为只使用自身参数与内置/协议默认。"
+        confirmLabel="重置"
+        pending={pending}
+        error={resetError}
+      />
+    </>
+  )
+}
+
 const PRESET_LABELS: Record<string, string> = {
   'deepseek-v4-pro-max': 'DeepSeek V4 Pro 最大能力',
   'deepseek-flash-max': 'DeepSeek Flash 最大能力',
@@ -324,7 +736,8 @@ function ModelCard({ model, canWrite, onEdit, onDelete }: {
     ? `${(stats.error_rate <= 1 ? stats.error_rate * 100 : stats.error_rate).toFixed(2)}%`
     : '不可用'
   const p50 = typeof stats?.p50_latency_ms === 'number' ? formatDuration(stats.p50_latency_ms) : '不可用'
-  const params = summarizeParams(model.params)
+  const params = summarizeParams(model.params, model.param_sources)
+  const inherited = inheritedParams(model)
   return (
     <article className={`${ui.panel} ${styles.providerCard}`}>
       <div className={styles.providerHead}>
@@ -355,6 +768,12 @@ function ModelCard({ model, canWrite, onEdit, onDelete }: {
           ? params.map(([key, value]) => <span key={key}>{key} <code>{value}</code></span>)
           : <span>未设置</span>}
       </div>
+      {inherited.length ? (
+        <div className={styles.cardMeta} role="group" aria-label={`${model.display_name} 全局默认参数`}>
+          <span>全局默认</span>
+          {inherited.map(([key, value]) => <span key={key}>{key} <code>{value}</code></span>)}
+        </div>
+      ) : null}
       {model.unavailable_reason ? <span className={styles.resultError}>不可用原因：{model.unavailable_reason}</span> : null}
       {model.referenced_by?.length ? <span className={styles.cardMeta}>引用：{model.referenced_by.join('、')}</span> : null}
       <ul className={styles.cardStats} aria-label={`${model.display_name} 近 24 小时`}>
@@ -373,7 +792,7 @@ function ModelCard({ model, canWrite, onEdit, onDelete }: {
 }
 
 function ModelDrawer({
-  open, model, presets, presetsLoading, presetsFailed, presetsUnavailable, onReloadPresets, onClose, onSaved,
+  open, model, presets, presetsLoading, presetsFailed, presetsUnavailable, inheritedMaxTokens, onReloadPresets, onClose, onSaved,
 }: {
   open: boolean
   model?: Model
@@ -381,6 +800,7 @@ function ModelDrawer({
   presetsLoading: boolean
   presetsFailed: boolean
   presetsUnavailable: boolean
+  inheritedMaxTokens: number
   onReloadPresets: () => void
   onClose: () => void
   onSaved: () => void
@@ -465,7 +885,7 @@ function ModelDrawer({
   }
 
   const save = async () => {
-    const found = validateModelForm(form)
+    const found = validateModelForm(form, inheritedMaxTokens)
     if (Object.keys(found).length) {
       setErrors(found)
       setError(undefined)
@@ -487,7 +907,7 @@ function ModelDrawer({
   }
 
   const runTest = async () => {
-    const found = validateModelForm(form)
+    const found = validateModelForm(form, inheritedMaxTokens)
     if (Object.keys(found).length) {
       setErrors(found)
       setError(undefined)
@@ -652,7 +1072,7 @@ function ModelDrawer({
         <fieldset className={styles.modelFormGroup}>
           <legend className={styles.modelFormLegend}>限流</legend>
           <div className={styles.modelFormGrid}>
-            <Field label="max_tokens" htmlFor={ids.tokens} hint="模型默认（不发送；DeepSeek 默认 8K/64K/128K，不等于最大）。anthropic 必须填写大于 0 的值。" error={errors.maxTokens}>
+            <Field label="max_tokens" htmlFor={ids.tokens} hint="模型默认（不发送；DeepSeek 默认 8K/64K/128K，不等于最大）。anthropic 需要模型自身或全局默认给出大于 0 的值。" error={errors.maxTokens}>
               <NumberField id={ids.tokens} min={0} step={1} value={form.maxTokens} aria-invalid={errors.maxTokens ? true : undefined} onChange={(event) => update({ maxTokens: event.target.value })} />
             </Field>
             <Field label="max_concurrency" htmlFor={ids.concurrency} hint="留空或 0 表示不限制本地并发。" error={errors.maxConcurrency}>
@@ -778,8 +1198,10 @@ export function ModelsPage() {
   const canWrite = useCanWrite()
   const queryClient = useQueryClient()
   const modelsId = useId()
+  const defaultsId = useId()
   const profilesId = useId()
   const models = useQuery({ queryKey: ['models'], queryFn: listModels, retry: false })
+  const modelDefaults = useQuery({ queryKey: ['model-defaults'], queryFn: getModelDefaults, retry: false, enabled: canWrite })
   const modelPresets = useQuery({ queryKey: ['model-presets'], queryFn: listModelPresets, retry: false, enabled: canWrite })
   const profiles = useQuery({ queryKey: ['profiles'], queryFn: () => listProfiles(), retry: false })
   const defaultProfile = useQuery({ queryKey: ['profile-default'], queryFn: getDefaultProfile, retry: false })
@@ -788,9 +1210,17 @@ export function ModelsPage() {
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [deleting, setDeleting] = useState<Model>()
   const [deleteError, setDeleteError] = useState<unknown>()
+  // The defaults form lives at page level so an unsaved draft survives the
+  // panel unmounting while a model or profile drawer is open.
+  const defaultsRevision = modelDefaults.data?.revision ?? 0
+  const [defaultsForm, setDefaultsForm] = useState<DefaultsForm>(emptyDefaultsForm)
+  useEffect(() => {
+    setDefaultsForm(defaultsFormFrom(modelDefaults.data))
+  }, [defaultsRevision])
 
   const saved = () => {
     void queryClient.invalidateQueries({ queryKey: ['models'] })
+    void queryClient.invalidateQueries({ queryKey: ['model-defaults'] })
     void queryClient.invalidateQueries({ queryKey: ['providers'] })
     void queryClient.invalidateQueries({ queryKey: ['profiles'] })
     void queryClient.invalidateQueries({ queryKey: ['profile-default'] })
@@ -810,6 +1240,7 @@ export function ModelsPage() {
 
   const onboarding = (profiles.data?.profiles ?? []).find((profile) => profile.name === 'onboarding')
   const onboardingProvider = text(asRecord(onboarding?.config?.agent)?.provider)
+  const defaultsForbidden = modelDefaults.isError && modelDefaults.error instanceof ApiError && modelDefaults.error.status === 403
 
   return (
     <main className={ui.page}>
@@ -818,6 +1249,23 @@ export function ModelsPage() {
           title="模型与档位"
           description="配置模型来自平台配置文件，用户模型可在控制台管理。API key 只写不回显。"
         />
+
+        {canWrite && !defaultsForbidden && !drawerOpen && !profileEditing ? (
+          <section className={styles.section} aria-labelledby={defaultsId}>
+            <div className={styles.sectionHeader}>
+              <h2 className={styles.sectionTitle} id={defaultsId}>全局默认参数</h2>
+            </div>
+            <ModelDefaultsPanel
+              defaults={modelDefaults.data}
+              form={defaultsForm}
+              onFormChange={setDefaultsForm}
+              loading={modelDefaults.isPending}
+              loadError={modelDefaults.isError ? modelDefaults.error : undefined}
+              onReload={() => { void modelDefaults.refetch() }}
+              onSaved={saved}
+            />
+          </section>
+        ) : null}
 
         <section className={styles.section} aria-labelledby={modelsId}>
           <div className={styles.sectionHeader}>
@@ -861,6 +1309,7 @@ export function ModelsPage() {
         presetsLoading={modelPresets.isPending}
         presetsFailed={modelPresets.isError}
         presetsUnavailable={modelPresets.isError && modelPresets.error instanceof ApiError && modelPresets.error.status === 404}
+        inheritedMaxTokens={modelDefaults.data?.params?.max_tokens ?? 0}
         onReloadPresets={() => { void modelPresets.refetch() }}
         onClose={() => setDrawerOpen(false)}
         onSaved={saved}
