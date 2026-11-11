@@ -68,6 +68,7 @@ func TestUploadSkillRejectsUnsafeArchives(t *testing.T) {
 	ctx := context.Background()
 	service, _ := newExtensionFixture(t)
 
+	longDescription := "---\nname: go-review\ndescription: " + strings.Repeat("x", 4097) + "\n---\n"
 	cases := []struct {
 		name string
 		data []byte
@@ -76,11 +77,25 @@ func TestUploadSkillRejectsUnsafeArchives(t *testing.T) {
 			"skill/SKILL.md":         testSkillBody,
 			"skill/../../../evil.go": "package evil",
 		})},
+		{name: "absolute path", data: testSkillArchiveFiles(t, map[string]string{
+			"skill/SKILL.md": testSkillBody,
+			"/etc/evil":      "x",
+		})},
 		{name: "missing manifest", data: testSkillArchiveFiles(t, map[string]string{
 			"skill/README.md": "# nope",
 		})},
+		{name: "multiple manifests", data: testSkillArchiveFiles(t, map[string]string{
+			"a/SKILL.md": testSkillBody,
+			"b/SKILL.md": testSkillBody,
+		})},
+		{name: "duplicate paths", data: duplicatePathArchive(t)},
 		{name: "symlink", data: symlinkArchive(t)},
 		{name: "oversize", data: oversizeArchive(t)},
+		{name: "bad yaml", data: testSkillArchive(t, "---\nname: go-review\ndescription: \"unterminated\n---\n")},
+		{name: "double underscore name", data: testSkillArchive(t, "---\nname: bad__name\ndescription: review\n---\n")},
+		{name: "long description", data: testSkillArchive(t, longDescription)},
+		{name: "non utf8 manifest", data: testSkillArchive(t, "---\nname: go-review\ndescription: \xff\n---\n")},
+		{name: "oversize manifest", data: testSkillArchive(t, testSkillBody+strings.Repeat("x", skill.MaxManifestBytes))},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -90,7 +105,53 @@ func TestUploadSkillRejectsUnsafeArchives(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(service.workspace, "evil.go")); err == nil {
 				t.Fatal("traversal wrote outside the managed root")
 			}
+			if rows, err := service.store.ListSkills(ctx, store.ScopePlatform, nil); err != nil || len(rows) != 0 {
+				t.Fatalf("invalid upload persisted rows: %+v, %v", rows, err)
+			}
 		})
+	}
+}
+
+// duplicatePathArchive writes the same zip path twice; the store must reject
+// the second entry instead of letting the last one win.
+func duplicatePathArchive(t *testing.T) []byte {
+	t.Helper()
+	var buffer bytes.Buffer
+	writer := zip.NewWriter(&buffer)
+	for _, body := range []string{testSkillBody, testSkillBody} {
+		entry, err := writer.Create("skill/SKILL.md")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := entry.Write([]byte(body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buffer.Bytes()
+}
+
+func TestUploadSkillAcceptsYAMLBlockDescription(t *testing.T) {
+	ctx := context.Background()
+	service, _ := newExtensionFixture(t)
+	manifest := "---\nname: yaml-review\ndescription: |\n  First line.\n  Second line.\n---\nbody\n"
+	uploaded, err := service.UploadSkill(ctx, SkillUpload{
+		Scope: "platform", Data: testSkillArchive(t, manifest),
+	})
+	if err != nil {
+		t.Fatalf("UploadSkill: %v", err)
+	}
+	if uploaded.Name != "yaml-review" || !strings.Contains(uploaded.Description, "Second line.") {
+		t.Fatalf("uploaded = %+v", uploaded)
+	}
+	loader, err := skill.New(skill.Options{PlatformDirs: []string{filepath.Dir(uploaded.Dir)}})
+	if err != nil {
+		t.Fatalf("skill.New: %v", err)
+	}
+	if names := catalogueNames(loader); !containsString(names, "yaml-review") {
+		t.Fatalf("catalogue = %v", names)
 	}
 }
 
@@ -170,6 +231,123 @@ func TestRegisterSkillDirCopiesIntoManagedRoot(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(registered.Dir, "references", "check.md")); err != nil {
 		t.Fatalf("copied resource: %v", err)
+	}
+	// The source stays independent of later changes to the copy.
+	if err := os.WriteFile(filepath.Join(source, "references", "check.md"), []byte("changed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	copied, err := os.ReadFile(filepath.Join(registered.Dir, "references", "check.md"))
+	if err != nil || string(copied) != "check" {
+		t.Fatalf("registered copy changed with the source: %q, %v", copied, err)
+	}
+	if _, err := os.Stat(filepath.Join(source, "SKILL.md")); err != nil {
+		t.Fatalf("source directory was removed: %v", err)
+	}
+}
+
+func TestRegisterSkillDirRejectsUnsafeDirectories(t *testing.T) {
+	ctx := context.Background()
+	service, _ := newExtensionFixture(t)
+
+	writeManifest := func(t *testing.T, dir, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("relative path", func(t *testing.T) {
+		if _, err := service.RegisterSkillDir(ctx, SkillDirInput{Scope: "platform", Dir: "relative/path"}); err == nil {
+			t.Fatal("relative directory accepted")
+		}
+	})
+	t.Run("symlinked source", func(t *testing.T) {
+		source := t.TempDir()
+		writeManifest(t, source, testSkillBody)
+		link := filepath.Join(t.TempDir(), "link")
+		if err := os.Symlink(source, link); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := service.RegisterSkillDir(ctx, SkillDirInput{Scope: "platform", Dir: link}); err == nil {
+			t.Fatal("symlinked source accepted")
+		}
+	})
+	t.Run("symlink inside source", func(t *testing.T) {
+		source := t.TempDir()
+		writeManifest(t, source, testSkillBody)
+		target := filepath.Join(t.TempDir(), "outside.md")
+		if err := os.WriteFile(target, []byte("outside"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(source, "linked.md")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := service.RegisterSkillDir(ctx, SkillDirInput{Scope: "platform", Dir: source}); err == nil {
+			t.Fatal("directory containing a symlink accepted")
+		}
+	})
+	t.Run("symlinked manifest", func(t *testing.T) {
+		source := t.TempDir()
+		manifest := filepath.Join(t.TempDir(), "SKILL.md")
+		if err := os.WriteFile(manifest, []byte(testSkillBody), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(manifest, filepath.Join(source, "SKILL.md")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := service.RegisterSkillDir(ctx, SkillDirInput{Scope: "platform", Dir: source}); err == nil {
+			t.Fatal("symlinked SKILL.md accepted")
+		}
+	})
+	t.Run("invalid manifest", func(t *testing.T) {
+		source := t.TempDir()
+		writeManifest(t, source, "---\nname: bad__name\ndescription: review\n---\n")
+		if _, err := service.RegisterSkillDir(ctx, SkillDirInput{Scope: "platform", Dir: source}); err == nil {
+			t.Fatal("invalid manifest accepted")
+		}
+	})
+	t.Run("oversized file", func(t *testing.T) {
+		source := t.TempDir()
+		writeManifest(t, source, testSkillBody)
+		if err := os.WriteFile(filepath.Join(source, "blob.bin"), make([]byte, maxSkillFileBytes+1), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := service.RegisterSkillDir(ctx, SkillDirInput{Scope: "platform", Dir: source}); err == nil {
+			t.Fatal("oversized file accepted")
+		}
+	})
+	if rows, err := service.store.ListSkills(ctx, store.ScopePlatform, nil); err != nil || len(rows) != 0 {
+		t.Fatalf("invalid registration persisted rows: %+v, %v", rows, err)
+	}
+}
+
+func TestSkillCreationRejectsBuiltinNameConflict(t *testing.T) {
+	ctx := context.Background()
+	service, st := newExtensionFixture(t)
+	if _, err := st.CreateSkill(ctx, store.Skill{
+		Scope: store.ScopePlatform, Name: "code-review", Description: "built-in",
+		Enabled: true, Builtin: "default:1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var appErr *Error
+	if _, err := service.UploadSkill(ctx, SkillUpload{
+		Scope: "platform",
+		Data:  testSkillArchive(t, generateSkillBody("code-review", "shadow built-in")),
+	}); !errors.As(err, &appErr) || appErr.Code != "conflict" {
+		t.Fatalf("upload over builtin = %v, want conflict", err)
+	}
+	source := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "SKILL.md"),
+		[]byte(generateSkillBody("code-review", "shadow built-in")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.RegisterSkillDir(ctx, SkillDirInput{Scope: "platform", Dir: source}); !errors.As(err, &appErr) || appErr.Code != "conflict" {
+		t.Fatalf("register over builtin = %v, want conflict", err)
+	}
+	rows, err := st.ListSkills(ctx, store.ScopePlatform, nil)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows = %+v, %v", rows, err)
 	}
 }
 

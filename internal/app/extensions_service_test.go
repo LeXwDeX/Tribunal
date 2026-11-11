@@ -272,7 +272,7 @@ func TestExtensionServiceSkillsAndBindings(t *testing.T) {
 	if err := service.DeleteSkill(ctx, uploaded.ID); err == nil {
 		t.Fatal("second DeleteSkill succeeded")
 	}
-	if _, err := service.UploadSkill(ctx, SkillUpload{Scope: "project", Name: "x"}); err == nil {
+	if _, err := service.UploadSkill(ctx, SkillUpload{Scope: "project", Data: testSkillArchive(t, testSkillBody)}); err == nil {
 		t.Fatal("project skill without project_id accepted")
 	}
 }

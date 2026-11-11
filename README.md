@@ -227,7 +227,7 @@ UUID 在项目内去重，去重记录和入队在同一事务中提交。同一
 
 新部署首次启动时会自动登记内置的平台级 Skill `code-review`，并只挂到 `code-review` 评审块。它改编自 [mattpocock/skills 的 code-review](https://www.skills.sh/mattpocock/skills/code-review)（MIT，出处见 `internal/skill/builtin/code-review/NOTICE.md`），提供 Standards / Spec 双轴评审方法和代码坏味道基线，改成了无需交互的版本。
 
-- 控制台「扩展 → Skill」中，内置项带「内置」标签，始终启用，不能禁用或删除（API 返回 409）。自定义 Skill 的上传和目录登记入口已关闭。
+- 控制台「扩展 → Skill」中，内置项带「内置」标签，始终启用，不能禁用或删除（API 返回 409）。自定义 Skill 的 zip 上传和目录登记后端 API 仅平台管理员可用（默认推荐 zip，目录登记为高级选项）；控制台入口另行交付。
 - 平台升级后，下次启动会把已登记副本的文件和描述更新为新版本附带的内容，并保持启用。
 - 在「块绑定」中把它从某个块移除后，重启不会恢复；升级也不会改写管理员改过的绑定。
 - 配置 `default_extensions.skills: []` 可以让新部署不登记默认 Skill。详见 [默认扩展配置](docs/design/06-config.md#默认扩展default_extensions)。

@@ -127,6 +127,8 @@ type ExtensionService interface {
 
 	ListSkills(ctx context.Context, scope string, projectID *int64) ([]Skill, error)
 	ListSkillsPage(ctx context.Context, scope string, projectID *int64, cursor string, limit int) ([]Skill, string, error)
+	UploadSkill(ctx context.Context, in SkillUpload) (*Skill, error)
+	RegisterSkillDir(ctx context.Context, in SkillDirInput) (*Skill, error)
 	DeleteSkill(ctx context.Context, id string) error
 	GetSkill(ctx context.Context, id string) (*Skill, error)
 	SetSkillEnabled(ctx context.Context, id string, enabled bool) (*Skill, error)
