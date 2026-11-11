@@ -658,8 +658,15 @@ func emptyOverlayDocument(original *yaml.Node, rawPrefix string) *yaml.Node {
 			foot = original.FootComment
 		}
 	}
-	mapping.HeadComment = strings.TrimRight(head, "\n")
-	mapping.FootComment = strings.TrimRight(foot, "\n")
+	head = strings.TrimRight(head, "\n")
+	foot = strings.TrimRight(foot, "\n")
+	if foot == head {
+		// A comment block followed by an orphan "---" can end up as both the
+		// document's footer and the raw leading block. Emit it once.
+		foot = ""
+	}
+	mapping.HeadComment = head
+	mapping.FootComment = foot
 	return doc
 }
 
@@ -925,10 +932,21 @@ func pathPrefix(left, right []string) bool {
 
 func validateOverlayValue(kind leafKind, value any) error {
 	invalidType := func(want string) error { return fmt.Errorf("must be %s", want) }
+	rejectPlaceholder := func(text string) error {
+		if envRefRE.MatchString(text) {
+			// Echoing the value would defeat the purpose of the check.
+			return errors.New("must not contain an ${ENV} placeholder")
+		}
+		return nil
+	}
 	switch kind {
 	case kindString:
-		if _, ok := value.(string); !ok {
+		text, ok := value.(string)
+		if !ok {
 			return invalidType("a string")
+		}
+		if err := rejectPlaceholder(text); err != nil {
+			return err
 		}
 	case kindEnvName:
 		name, ok := value.(string)
@@ -953,12 +971,24 @@ func validateOverlayValue(kind leafKind, value any) error {
 			return invalidType("a boolean")
 		}
 	case kindStringList:
-		if _, ok := overlayStringList(value); !ok {
+		list, ok := overlayStringList(value)
+		if !ok {
 			return invalidType("a list of strings")
 		}
+		for _, item := range list {
+			if err := rejectPlaceholder(item); err != nil {
+				return err
+			}
+		}
 	case kindStringMap:
-		if _, ok := overlayStringMap(value); !ok {
+		object, ok := overlayStringMap(value)
+		if !ok {
 			return invalidType("a map of strings")
+		}
+		for _, item := range object {
+			if err := rejectPlaceholder(item); err != nil {
+				return err
+			}
 		}
 	case kindDuration:
 		text, ok := value.(string)

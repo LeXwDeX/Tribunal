@@ -493,19 +493,56 @@ func TestOverlayWriterReviewDefaultsIgnoreInheritanceAndReplacement(t *testing.T
 	}
 }
 
-func TestOverlayWriterRawReviewDefaultsKeepsPlaceholders(t *testing.T) {
-	harness := newOverlayHarness(t, overlayTestBase, overlayTestDocument)
+func TestOverlayWriterRawReviewDefaultsKeepsExistingPlaceholders(t *testing.T) {
+	const overlay = `# console overlay
+review_defaults:
+  custom_rules: ["${CANARY_RULE}"]
+providers:
+  primary:
+    model: "claude-sonnet"
+`
 	t.Setenv("CANARY_RULE", "expanded-rule-value")
+	harness := newOverlayHarness(t, overlayTestBase, overlay)
 	result, err := harness.apply(harness.request(
-		OverlayChange{Path: []string{"review_defaults", "custom_rules"}, Value: []any{"${CANARY_RULE}"}},
+		OverlayChange{Path: []string{"review_defaults", "max_files"}, Value: 150},
 	))
 	requireOverlayNoError(t, err)
 	rules, ok := result.OverlayReviewDefaults["custom_rules"].([]any)
 	if !ok || len(rules) != 1 || rules[0] != "${CANARY_RULE}" {
 		t.Fatalf("raw overlay custom_rules = %v", result.OverlayReviewDefaults)
 	}
+	if !strings.Contains(string(harness.read()), "${CANARY_RULE}") {
+		t.Fatalf("existing placeholder was not preserved:\n%s", harness.read())
+	}
 	if strings.Contains(string(harness.read()), "expanded-rule-value") {
 		t.Fatalf("overlay contains the expanded value:\n%s", harness.read())
+	}
+}
+
+func TestOverlayWriterRejectsNewEnvPlaceholders(t *testing.T) {
+	const canary = "CANARY_PLACEHOLDER_VALUE"
+	tests := []struct {
+		name   string
+		change OverlayChange
+	}{
+		{"string", OverlayChange{Path: []string{"providers", "primary", "model"}, Value: "${" + canary + "}"}},
+		{"embedded string", OverlayChange{Path: []string{"providers", "primary", "base_url"}, Value: "https://example.com/${" + canary + "}"}},
+		{"list item", OverlayChange{Path: []string{"review_defaults", "custom_rules"}, Value: []any{"${" + canary + "}"}}},
+		{"map value", OverlayChange{Path: []string{"review_defaults", "profile_by_label"}, Value: map[string]any{"bug": "${" + canary + "}"}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			harness := newOverlayHarness(t, overlayTestBase, overlayTestDocument)
+			before := harness.read()
+			_, err := harness.apply(harness.request(test.change))
+			writeErr := requireOverlayError(t, err, OverlayErrorInvalidChange)
+			if strings.Contains(writeErr.Error(), canary) || strings.Contains(strings.Join(writeErr.Details, " "), canary) {
+				t.Fatalf("error echoed the rejected value: %v", writeErr)
+			}
+			if !bytes.Equal(before, harness.read()) {
+				t.Fatal("overlay changed after a rejected placeholder")
+			}
+		})
 	}
 }
 
@@ -853,6 +890,7 @@ func TestOverlayWriterPreservesCommentsOnEmptyOverlayRoot(t *testing.T) {
 		{"comment only", "# header\n# second\n", []string{"# header", "# second"}},
 		{"null root with header", "# header\n---\nnull\n", []string{"# header"}},
 		{"null root with trailing comment", "# header\n---\nnull\n# trailer\n", []string{"# header", "# trailer"}},
+		{"comment block with orphan separator", "# header\n---\n", []string{"# header"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -863,8 +901,8 @@ func TestOverlayWriterPreservesCommentsOnEmptyOverlayRoot(t *testing.T) {
 			requireOverlayNoError(t, err)
 			after := string(harness.read())
 			for _, want := range test.wants {
-				if !strings.Contains(after, want) {
-					t.Fatalf("overlay lost %q:\n%s", want, after)
+				if count := strings.Count(after, want); count != 1 {
+					t.Fatalf("overlay contains %q %d times, want once:\n%s", want, count, after)
 				}
 			}
 			snapshot, err := LoadSnapshot([]string{harness.base}, harness.overlay)

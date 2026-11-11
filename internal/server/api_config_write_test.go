@@ -233,6 +233,9 @@ func TestConfigOverlayPatchWritesAndAuditsWithoutValues(t *testing.T) {
 	if !strings.Contains(after, canary) || !strings.Contains(after, "# model comment") {
 		t.Fatalf("overlay was not patched in place:\n%s", after)
 	}
+	if !strings.Contains(after, "${CANARY_BASE_URL}") || strings.Contains(after, "expanded-secret") {
+		t.Fatalf("existing placeholder was not preserved:\n%s", after)
+	}
 	if harness.readBase() != baseBefore {
 		t.Fatal("base configuration was modified")
 	}
@@ -438,29 +441,51 @@ providers:
 	}
 }
 
-func TestConfigOverlayPatchSuccessResponseKeepsPlaceholders(t *testing.T) {
+func TestConfigOverlayPatchKeepsExistingPlaceholders(t *testing.T) {
 	harness := newOverlayAPIHarness(t, overlayAPIBase, overlayAPIDocument)
-	const secret = "expanded-canary-value"
+	const secret = "https://canary.example.com/expanded-secret"
 	admin := harness.env.loginAs("code-admin")
 	response := harness.patch(admin, harness.requestBody(
-		setChange([]string{"review_defaults", "custom_rules"}, []any{"${CANARY_SECRET}"}),
+		setChange([]string{"providers", "primary", "max_tokens"}, 8192),
 	))
 	assertStatus(t, response, http.StatusOK)
-	if !strings.Contains(string(response.body), "${CANARY_SECRET}") {
-		t.Fatalf("response does not keep the placeholder: %s", response.body)
-	}
 	if strings.Contains(string(response.body), secret) {
 		t.Fatalf("response leaked the expanded environment value: %s", response.body)
 	}
 	overlay := harness.readOverlay()
-	if !strings.Contains(overlay, "${CANARY_SECRET}") {
-		t.Fatalf("overlay does not keep the placeholder:\n%s", overlay)
+	if !strings.Contains(overlay, "${CANARY_BASE_URL}") {
+		t.Fatalf("existing placeholder was not preserved:\n%s", overlay)
 	}
 	if strings.Contains(overlay, secret) {
 		t.Fatalf("overlay contains the expanded environment value:\n%s", overlay)
 	}
 	if strings.Contains(harness.logs.String(), secret) {
 		t.Fatalf("logs leaked the expanded environment value:\n%s", harness.logs.String())
+	}
+}
+
+func TestConfigOverlayPatchRejectsNewEnvPlaceholder(t *testing.T) {
+	harness := newOverlayAPIHarness(t, overlayAPIBase, overlayAPIDocument)
+	const masterKey = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+	before := harness.readOverlay()
+	admin := harness.env.loginAs("code-admin")
+	response := harness.patch(admin, harness.requestBody(
+		setChange([]string{"review_defaults", "custom_rules"}, []any{"${REVIEW_MASTER_KEY}"}),
+	))
+	assertStatus(t, response, http.StatusBadRequest)
+	if code := errorCode(t, harness.env.decode(t, response)); code != config.OverlayErrorInvalidChange {
+		t.Fatalf("error code = %q, want %q", code, config.OverlayErrorInvalidChange)
+	}
+	if strings.Contains(string(response.body), masterKey) || strings.Contains(string(response.body), "${REVIEW_MASTER_KEY}") {
+		t.Fatalf("error response echoed the rejected placeholder: %s", response.body)
+	}
+	if harness.readOverlay() != before {
+		t.Fatal("rejected placeholder modified the overlay")
+	}
+	get := admin.request(http.MethodGet, "/api/v1/config", nil, nil)
+	assertStatus(t, get, http.StatusOK)
+	if strings.Contains(string(get.body), masterKey) {
+		t.Fatalf("GET /api/v1/config leaked the master key: %s", get.body)
 	}
 }
 
