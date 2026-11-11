@@ -50,10 +50,11 @@ describe('review trigger project picker', () => {
 
     await user.click(await screen.findByRole('button', { name: '重新触发评审' }))
     const dialog = await screen.findByRole('dialog', { name: '手动触发评审' })
-    const select = within(dialog).getByLabelText('项目') as HTMLSelectElement
-    const values = Array.from(select.options).map((option) => option.value)
-    expect(values).toContain('42')
-    expect(values).toContain('44')
-    expect(values).not.toContain('43')
+    await user.click(within(dialog).getByRole('combobox', { name: '项目' }))
+    const options = await screen.findAllByRole('option')
+    const values = options.map((option) => option.textContent)
+    expect(values).toContain('group/backend')
+    expect(values).toContain('group/second')
+    expect(values).not.toContain('group/readonly')
   })
 })

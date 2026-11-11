@@ -23,7 +23,7 @@ export function ExtensionsPage() {
   const [projectId, setProjectId] = useState('')
 
   const projects = usePaginated<Project>(['projects', 'extensions'], (cursor) => listProjects({ limit: 100 }, cursor), 'projects')
-  const projectFocus = useLoadMoreFocus(projects.hasNextPage)
+  const projectFocus = useLoadMoreFocus<HTMLSelectElement>(projects.hasNextPage)
 
   useEffect(() => {
     if (scope !== 'project' || projectId || !projects.items.length) return
@@ -63,7 +63,7 @@ export function ExtensionsPage() {
           />
           {scope === 'project' ? <ToolbarField label="项目">
             <select
-              ref={projectFocus.selectRef}
+              ref={projectFocus.controlRef}
               className="select"
               name="project_id"
               value={projectId}

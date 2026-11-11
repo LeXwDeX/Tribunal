@@ -6,8 +6,8 @@ import { ApiError, errorMessage } from '../api/client'
 import type { Project, ProjectRegistration, ProjectValidation } from '../api/types'
 import { useCanRegisterProject } from '../components/RoleContext'
 import {
-  Badge, Button, Dialog, EmptyState, ErrorState, ExternalLink, Field, LoadingState, PageHeader, Panel, PanelBody, RelativeTime, Segmented, StatusBadge,
-  Switch, Toolbar, VerdictBadge, useToast,
+  Badge, Button, Checkbox, Dialog, Disclosure, EmptyState, ErrorState, ExternalLink, Field, LoadingState, PageHeader, Panel,
+  PanelBody, RelativeTime, SearchField, Segmented, StatusBadge, Switch, Toolbar, VerdictBadge, useToast,
 } from '../components/ui'
 import { usePaginated } from '../lib/hooks'
 import { formatDate, labelForStatus, labelForWebhookState, webhookTone } from '../lib/format'
@@ -290,8 +290,7 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
               <input id={tokenId} className="input" type="password" value={token} onChange={(event) => changeToken(event.target.value)} autoComplete="new-password" aria-invalid={Boolean(errors.token)} disabled={pending} />
             </Field>
           </div>
-          <details className={ui.disclosure}>
-            <summary>高级设置：分支与 Draft</summary>
+          <Disclosure summary="高级设置：分支与 Draft">
             <div className={ui.stackTop}>
               <div className="formGrid">
                 <Field label="目标分支" htmlFor={branchesId} hint="逗号分隔；留空沿用平台默认分支设置。">
@@ -299,13 +298,10 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
                 </Field>
               </div>
               <div className={styles.filterChipsColumn}>
-                <label className="checkboxRow">
-                  <input type="checkbox" checked={skipDraft} onChange={(event) => setSkipDraft(event.target.checked)} disabled={pending} />
-                  <span>跳过 Draft MR</span>
-                </label>
+                <Checkbox label="跳过 Draft MR" checked={skipDraft} onChange={(event) => setSkipDraft(event.target.checked)} disabled={pending} />
               </div>
             </div>
-          </details>
+          </Disclosure>
           <div className={page.costNotice}>
             保存并初始化会登记项目、加密保存访问 Key、入队后台拉取与上下文生成，并可能在初始化或评审时产生模型费用；不创建或修改 Webhook，Webhook 在项目设置中单独配置。所有操作都不会修改仓库代码。
           </div>
@@ -373,20 +369,23 @@ export function ProjectsPage() {
           <Toolbar
             inset
             label="项目筛选"
+            status={projects.isFetching
+              ? '刷新中…'
+              : projects.isSuccess
+                ? `已加载 ${projects.items.length}${projects.hasNextPage ? '+' : ''} 个项目 · ${enabledCount} 个启用`
+                : undefined}
             actions={(
-              <>
-                {projects.isFetching ? <span className="small muted" role="status">刷新中…</span> : null}
-                {projects.isSuccess ? <span className="small muted">已加载 {projects.items.length}{projects.hasNextPage ? '+' : ''} 个项目 · {enabledCount} 个启用</span> : null}
-                <Segmented
-                  label="按启用状态筛选"
-                  options={ENABLED_FILTERS}
-                  value={enabled}
-                  onChange={setEnabled}
-                />
-              </>
+              <Segmented
+                label="按启用状态筛选"
+                options={ENABLED_FILTERS}
+                value={enabled}
+                onChange={setEnabled}
+              />
             )}
           >
-            <input className={`input ${page.search}`} name="q" type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索项目路径" aria-label="搜索项目路径" />
+            <span className={page.search}>
+              <SearchField name="q" value={search} onChange={setSearch} placeholder="搜索项目路径" aria-label="搜索项目路径" />
+            </span>
           </Toolbar>
 
           {projects.isPending ? <PanelBody><LoadingState /></PanelBody> : null}

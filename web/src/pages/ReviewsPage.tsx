@@ -6,7 +6,8 @@ import type { Project, ReviewListItem } from '../api/types'
 import { ReviewTable } from '../components/ReviewTable'
 import { TriggerReviewDialog } from '../components/TriggerReviewDialog'
 import {
-  Button, EmptyState, ErrorState, LoadingState, PageHeader, Panel, Segmented, Toolbar, useToast,
+  Button, DatePicker, EmptyState, ErrorState, LoadingState, Note, PageHeader, Panel, Segmented, Select, Toolbar,
+  type SelectOption, useToast,
 } from '../components/ui'
 import { useLoadMoreFocus, usePaginated } from '../lib/hooks'
 import ui from '../styles/ui.module.css'
@@ -21,16 +22,21 @@ const statuses = [
   { value: 'cancelled', label: '已取消' },
 ]
 
-const verdicts = [['', '全部结论'], ['PASS', 'PASS'], ['BLOCKING', 'BLOCKING'], ['INCOMPLETE', 'INCOMPLETE']]
-const triggers = [
-  ['', '全部触发方式'],
-  ['mr_open', 'MR 打开'],
-  ['mr_update', 'MR 更新'],
-  ['command', '评论命令'],
-  ['api', 'API 手动触发'],
-  ['push', '推送'],
-  ['register', '项目注册'],
-  ['catch_up', '启动补评'],
+const verdicts: SelectOption[] = [
+  { value: '', label: '全部结论' },
+  { value: 'PASS', label: 'PASS' },
+  { value: 'BLOCKING', label: 'BLOCKING' },
+  { value: 'INCOMPLETE', label: 'INCOMPLETE' },
+]
+const triggers: SelectOption[] = [
+  { value: '', label: '全部触发方式' },
+  { value: 'mr_open', label: 'MR 打开' },
+  { value: 'mr_update', label: 'MR 更新' },
+  { value: 'command', label: '评论命令' },
+  { value: 'api', label: 'API 手动触发' },
+  { value: 'push', label: '推送' },
+  { value: 'register', label: '项目注册' },
+  { value: 'catch_up', label: '启动补评' },
 ]
 
 export function ReviewsPage() {
@@ -70,13 +76,24 @@ export function ReviewsPage() {
     'reviews',
   )
   const projects = usePaginated<Project>(['projects', 'filter'], (cursor) => listProjects({ limit: 100 }, cursor), 'projects')
-  const projectFocus = useLoadMoreFocus(projects.hasNextPage)
+  const projectFocus = useLoadMoreFocus<HTMLButtonElement>(projects.hasNextPage)
   const profiles = useQuery({ queryKey: ['profiles', 'filter'], queryFn: () => listProfiles() })
 
   const projectNames = new Map(projects.items.map((item) => [item.id, item.path_with_namespace]))
   const activeCount = [projectId, status, verdict, profile, trigger, sinceDate].filter(Boolean).length
   const hasFilters = activeCount > 0
   const projectsList = projects.items
+  const projectOptions: SelectOption[] = [
+    { value: '', label: '全部项目' },
+    ...(projectId && !projectsList.some((project) => String(project.id) === projectId)
+      ? [{ value: projectId, label: '指定项目（未加载或不可访问）', disabled: true }]
+      : []),
+    ...projectsList.map((project) => ({ value: String(project.id), label: project.path_with_namespace })),
+  ]
+  const profileOptions: SelectOption[] = [
+    { value: '', label: '全部档位' },
+    ...(profiles.data?.profiles || []).map((item) => ({ value: item.name, label: item.name })),
+  ]
   const manageableProjects = projectsList.filter((project) => project.access === 'manage')
   const canTrigger = manageableProjects.length > 0
 
@@ -117,39 +134,57 @@ export function ReviewsPage() {
               <Segmented label="评审范围" options={[{ value: 'all', label: '全部评审' }, { value: 'mine', label: '我的项目' }]} value={scope} onChange={(value) => update('access', value === 'mine' ? 'mine' : '')} />
             <Segmented label="按状态筛选" options={statuses} value={status} onChange={(value) => update('status', value)} />
             </div>
-            <select ref={projectFocus.selectRef} className="select" name="project_id" value={projectId} onChange={(event) => update('project_id', event.target.value)} aria-label="按项目筛选">
-              <option value="">全部项目</option>
-              {projectId && !projectsList.some((project) => String(project.id) === projectId) ? <option value={projectId} disabled>指定项目（未加载或不可访问）</option> : null}
-              {projectsList.map((project) => (
-                <option key={project.id} value={project.id}>{project.path_with_namespace}</option>
-              ))}
-            </select>
+            <Select
+              ref={projectFocus.controlRef}
+              className={reviewsStyles.filterSelect}
+              value={projectId}
+              options={projectOptions}
+              onChange={(value) => update('project_id', value)}
+              emptyLabel="全部项目"
+              aria-label="按项目筛选"
+            />
             {projects.hasNextPage ? (
               <Button variant="secondary" onClick={projects.fetchNextPage} loading={projects.isFetchingNextPage} onFocus={projectFocus.onFocus} onBlur={projectFocus.onBlur}>
                 {projects.isFetchNextPageError ? '重试加载更多项目' : '加载更多项目'}
               </Button>
             ) : null}
-            <select className="select" name="verdict" value={verdict} onChange={(event) => update('verdict', event.target.value)} aria-label="按结论筛选">
-              {verdicts.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-            </select>
-            <select className="select" name="profile" value={profile} onChange={(event) => update('profile', event.target.value)} aria-label="按档位筛选">
-              <option value="">全部档位</option>
-              {(profiles.data?.profiles || []).map((item) => <option key={item.name} value={item.name}>{item.name}</option>)}
-            </select>
-            <select className="select" name="trigger" value={trigger} onChange={(event) => update('trigger', event.target.value)} aria-label="按触发方式筛选">
-              {triggers.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-            </select>
-            <input className="input" name="since" type="date" value={sinceDate} onChange={(event) => update('since', event.target.value)} aria-label="起始日期" title="起始日期" />
+            <Select
+              className={reviewsStyles.filterSelect}
+              value={verdict}
+              options={verdicts}
+              onChange={(value) => update('verdict', value)}
+              emptyLabel="全部结论"
+              aria-label="按结论筛选"
+            />
+            <Select
+              className={reviewsStyles.filterSelect}
+              value={profile}
+              options={profileOptions}
+              onChange={(value) => update('profile', value)}
+              emptyLabel="全部档位"
+              aria-label="按档位筛选"
+            />
+            <Select
+              className={reviewsStyles.filterSelect}
+              value={trigger}
+              options={triggers}
+              onChange={(value) => update('trigger', value)}
+              emptyLabel="全部触发方式"
+              aria-label="按触发方式筛选"
+            />
+            <span className={reviewsStyles.filterDate}>
+              <DatePicker value={sinceDate} onChange={(value) => update('since', value)} aria-label="起始日期" />
+            </span>
           </Toolbar>
           {projects.isError || profiles.isError ? (
             <div className={reviewsStyles.notes}>
               {projects.isError ? (
                 <>
-                  <span className="small muted" role="alert">
+                  <Note tone="warn" role="alert">
                     {projects.isFetchNextPageError
                       ? projects.items.length ? '更多项目加载失败；已加载的项目仍可选择。' : '更多项目加载失败，请重试。'
                       : projects.items.length ? '项目列表刷新失败；已加载的项目与当前选择仍保留。' : '项目筛选列表加载失败，请重试。'}
-                  </span>
+                  </Note>
                   {!projects.isFetchNextPageError ? (
                     <Button variant="secondary" onClick={projects.refetch} loading={projects.isFetching}>
                       {projects.items.length ? '重试刷新项目' : '重试加载项目'}
@@ -157,7 +192,7 @@ export function ReviewsPage() {
                   ) : null}
                 </>
               ) : null}
-              {profiles.isError ? <span className="small muted">档位筛选列表加载失败。</span> : null}
+              {profiles.isError ? <Note tone="warn" role="alert">档位筛选列表加载失败。</Note> : null}
             </div>
           ) : null}
           {reviews.isPending ? <div className={reviewsStyles.state}><LoadingState /></div> : null}

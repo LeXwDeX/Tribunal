@@ -75,19 +75,22 @@ export function usePaginated<T>(
   }
 }
 
-export function useLoadMoreFocus(hasNextPage: boolean) {
-  const selectRef = useRef<HTMLSelectElement>(null)
+// Restores focus to any focusable control (native select, combobox trigger or
+// button) after the load-more button unmounts with the last page.
+export function useLoadMoreFocus<T extends HTMLElement = HTMLElement>(hasNextPage: boolean) {
+  const controlRef = useRef<T>(null)
   const hadFocus = useRef(false)
   useLayoutEffect(() => {
     if (hasNextPage || !hadFocus.current) return
     hadFocus.current = false
     if (document.activeElement !== document.body) return
-    const select = selectRef.current
-    if (select && !select.disabled) select.focus()
-    else select?.closest('[role="toolbar"]')?.querySelector<HTMLElement>('button:not(:disabled)')?.focus()
+    const control = controlRef.current
+    const disabled = control ? 'disabled' in control && Boolean((control as { disabled: boolean }).disabled) : false
+    if (control && !disabled) control.focus()
+    else control?.closest('[role="toolbar"]')?.querySelector<HTMLElement>('button:not(:disabled)')?.focus()
   }, [hasNextPage])
   return {
-    selectRef,
+    controlRef,
     onFocus: () => { hadFocus.current = true },
     onBlur: (event: FocusEvent<HTMLButtonElement>) => { if (event.relatedTarget) hadFocus.current = false },
   }
