@@ -729,7 +729,7 @@ func (r *ProjectExtensionResolver) InvalidateProject(projectID int64) {
 	delete(r.sets, projectID)
 	r.mu.Unlock()
 	if set != nil {
-		r.retireSet(set)
+		r.retireSet(projectID, set)
 	}
 }
 
@@ -749,14 +749,14 @@ func (r *ProjectExtensionResolver) InvalidateAll() {
 	sets := r.sets
 	r.sets = make(map[int64]*projectExtensionSet)
 	r.mu.Unlock()
-	for _, set := range sets {
-		r.retireSet(set)
+	for projectID, set := range sets {
+		r.retireSet(projectID, set)
 	}
 }
 
 // retireSet closes a set after its last holder releases it. The waiting close
 // is tracked so Close can drain it instead of leaking MCP child processes.
-func (r *ProjectExtensionResolver) retireSet(set *projectExtensionSet) {
+func (r *ProjectExtensionResolver) retireSet(projectID int64, set *projectExtensionSet) {
 	released := set.retire()
 	r.mu.Lock()
 	if r.closed {
@@ -774,7 +774,7 @@ func (r *ProjectExtensionResolver) retireSet(set *projectExtensionSet) {
 		case <-r.shutdown:
 		}
 		if err := set.finishClose(); err != nil {
-			r.logger.Warn("project extension close failed", "error_class", errclass.Of(err))
+			r.logger.Warn("project extension close failed", "project_id", projectID, "error_class", errclass.Of(err))
 		}
 		r.mu.Lock()
 		delete(r.retired, set)
@@ -784,8 +784,10 @@ func (r *ProjectExtensionResolver) retireSet(set *projectExtensionSet) {
 
 // ForProject returns the project-scoped inputs, building them on first use.
 // A read error is returned instead of silently running with platform-only
-// configuration. Callers must hold the shared project workspace lock and call
-// release on the returned set when they stop using its tools.
+// configuration. The returned set carries a lease: the caller must hold the
+// shared project workspace lock while using it and call release exactly once.
+// This is an in-process building block, not a stable package API; an embedded
+// caller that drops the lease keeps a retired set alive until resolver Close.
 func (r *ProjectExtensionResolver) ForProject(ctx context.Context, projectID int64) (*projectExtensionSet, error) {
 	if projectID <= 0 {
 		return nil, errors.New("app: project id is required")
@@ -1201,11 +1203,12 @@ func (p *projectAwareToolProvider) Tools(ctx context.Context, block string) ([]a
 		}
 		tools, err := set.tools.Tools(ctx, block)
 		if err != nil {
-			// A partial binding still hands usable tools to the executor after
-			// this call, so the lease follows the same node-context rule as a
-			// successful binding. Every other error leaves no tools behind.
+			// A partial binding with usable tools hands them to the executor
+			// after this call, so the lease follows the same node-context rule
+			// as a successful binding. A partial binding without tools and
+			// every other error leaves nothing behind.
 			var partial *review.PartialToolsError
-			if errors.As(err, &partial) {
+			if errors.As(err, &partial) && len(partial.Tools) > 0 {
 				releaseSetOnContextDone(ctx, set)
 			} else {
 				set.release()

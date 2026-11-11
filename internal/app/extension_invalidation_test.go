@@ -764,6 +764,11 @@ func TestProjectToolProviderKeepsLeaseForPartialBinding(t *testing.T) {
 			holdsLease:    true,
 		},
 		{
+			name:          "partial binding without tools",
+			providerError: &review.PartialToolsError{Gaps: []string{"mcp__server__missing"}},
+			holdsLease:    false,
+		},
+		{
 			name:          "hard error",
 			providerError: errors.New("mcp unavailable"),
 			holdsLease:    false,
@@ -814,6 +819,46 @@ func TestProjectToolProviderKeepsLeaseForPartialBinding(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestResolverCloseWakesRetiredCloseWhileLeased(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	seedProject(t, st, newTestCipher(t), 42, "whsec", "{}", "default")
+	resolver, err := NewProjectExtensionResolver(ProjectExtensionResolverConfig{
+		Store:     st,
+		Workspace: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("resolver: %v", err)
+	}
+	set, err := resolver.ForProject(ctx, 42)
+	if err != nil {
+		t.Fatalf("ForProject: %v", err)
+	}
+	t.Cleanup(func() { _ = set.mcp.Close() })
+	closer := &lifecycleCloser{entered: make(chan struct{})}
+	set.closer = closer
+
+	// Retire while the lease is still held: the retirement waiter blocks on
+	// the refcount.
+	resolver.InvalidateProject(42)
+	closed := make(chan error, 1)
+	go func() { closed <- resolver.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not wake the retired close of a leased set")
+	}
+	select {
+	case <-closer.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not close the retired set")
+	}
+	set.release()
 }
 
 type fixedToolProvider struct {
