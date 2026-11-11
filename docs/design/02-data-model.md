@@ -172,7 +172,6 @@ CREATE TABLE workflows (
   error        TEXT,
   tokens_in    INTEGER NOT NULL DEFAULT 0,
   tokens_out   INTEGER NOT NULL DEFAULT 0,
-  cost_micros  INTEGER NOT NULL DEFAULT 0,
   usage_incomplete INTEGER NOT NULL DEFAULT 0, -- 0024：检测到用量不完整
   created_at   TEXT    NOT NULL,
   started_at   TEXT,
@@ -199,7 +198,6 @@ CREATE TABLE workflow_nodes (
   error       TEXT,
   tokens_in   INTEGER NOT NULL DEFAULT 0,
   tokens_out  INTEGER NOT NULL DEFAULT 0,
-  cost_micros INTEGER NOT NULL DEFAULT 0,
   usage_incomplete INTEGER NOT NULL DEFAULT 0, -- 0024：检测到用量不完整
   added_rev   INTEGER NOT NULL DEFAULT 0, -- 由哪次 graph_rev 加入（fan_out / extend）
   queued_at   TEXT,
@@ -366,6 +364,8 @@ CREATE TABLE api_tokens (
 新 `llm_calls` 的 `request`、`response` 若存在，各自的 JSON 对象都带 `"_format":"audit_metadata_v1"`，只存结构计数、请求选项、固定停止原因和用量，不存 prompt、工具参数/输出、推理内容、上游原始 ID 或错误原文。每次尝试有独立本地 `id`。对 agent 调用，记录器按非法调用批次、停止原因或拒绝预分类 `unsafe_model_response`；这只影响审计统计，不改变请求重试和 agent 拒绝策略，也不是节点最终状态。
 
 0025 为 `users` 增加 `granted_role`、`granted_by`、`granted_at` 与 `revision`；0026 新建 `llm_models`（`api_key_sealed` 只存密文，软删除清空；AAD 为 `tribunal/llm-model/v1/<len>:<id>/api_key`）；0027 为 `users` 增加 `global_read`、`global_read_by`、`global_read_at` 与部分索引；0028 新建 `review_profile_overrides` 与 `review_profile_model_refs`，保存覆盖时在同一事务内校验用户模型存在，软删除被引用模型返回冲突。四个迁移都不可逆。
+
+0030 重建 `workflows` 与 `workflow_nodes` 去掉 `cost_micros`，保留其余列、默认值、主键、索引和外键；迁移执行器在迁移期间关闭外键检查，实际应用迁移后恢复并执行 `foreign_key_check`。同一迁移从 `llm_models.params_json` 剥离 legacy `price`，无效 JSON 保持原样。该迁移不可逆，回滚需恢复升级前快照与匹配的旧镜像。
 
 本次升级不删除或迁移历史审计，原有保留策略仍生效。没有 `_format` 的历史数据可能是完整 `llm.Request`/`Response`，也可能是旧版未标记的安全元数据或截断摘要；例如 request 的 `messages` 分别可能是数组或数字，不能仅因无标记就认定类型。部分或空 payload 可能无法判别。旧 payload 仍可能含敏感内容，只有项目 `manage` 可读取；详情见 [HTTP API](03-http-api.md#42-评审工作流)。
 

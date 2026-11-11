@@ -96,9 +96,9 @@ func (e *Executor) executePlanAgent(ctx context.Context, in dag.NodeInput, param
 	}
 	out, ok := result.Output.(*PlanOut)
 	if !ok || out == nil {
-		return e.agentOutputError(params.Provider, result, errors.New("review: plan decoder returned an unexpected type"))
+		return e.agentOutputError(result, errors.New("review: plan decoder returned an unexpected type"))
 	}
-	return e.marshalAgentOutput(out, params.Provider, result.Usage)
+	return e.marshalAgentOutput(out, result.Usage)
 }
 
 func (e *Executor) executeCodeReview(ctx context.Context, in dag.NodeInput) (dag.NodeOutput, error) {
@@ -137,11 +137,11 @@ func (e *Executor) executeCodeReview(ctx context.Context, in dag.NodeInput) (dag
 	}
 	out, ok := result.Output.(*CodeReviewOut)
 	if !ok || out == nil {
-		return e.agentOutputError(params.Provider, result, errors.New("review: code-review decoder returned an unexpected type"))
+		return e.agentOutputError(result, errors.New("review: code-review decoder returned an unexpected type"))
 	}
 	out.ToolGaps = gaps
 	out.DiffReads = changes.DiffReads()
-	return e.marshalAgentOutput(out, params.Provider, result.Usage)
+	return e.marshalAgentOutput(out, result.Usage)
 }
 
 func (e *Executor) executeReviewChannel(ctx context.Context, in dag.NodeInput) (dag.NodeOutput, error) {
@@ -185,11 +185,11 @@ func (e *Executor) executeReviewChannel(ctx context.Context, in dag.NodeInput) (
 	}
 	out, ok := result.Output.(*ReviewOut)
 	if !ok || out == nil {
-		return e.agentOutputError(params.Provider, result, errors.New("review: review channel decoder returned an unexpected type"))
+		return e.agentOutputError(result, errors.New("review: review channel decoder returned an unexpected type"))
 	}
 	out.ToolGaps = gaps
 	out.DiffReads = changes.DiffReads()
-	return e.marshalAgentOutput(out, params.Provider, result.Usage)
+	return e.marshalAgentOutput(out, result.Usage)
 }
 
 func (e *Executor) executeReviewGate(ctx context.Context, in dag.NodeInput) (dag.NodeOutput, error) {
@@ -256,9 +256,9 @@ func (e *Executor) executeReviewGate(ctx context.Context, in dag.NodeInput) (dag
 	}
 	out, ok := result.Output.(*ReviewGateOut)
 	if !ok || out == nil {
-		return e.agentOutputError(provider, result, errors.New("review: gate decoder returned an unexpected type"))
+		return e.agentOutputError(result, errors.New("review: gate decoder returned an unexpected type"))
 	}
-	return e.marshalAgentOutput(out, provider, result.Usage)
+	return e.marshalAgentOutput(out, result.Usage)
 }
 
 func (e *Executor) executeReasoner(ctx context.Context, in dag.NodeInput) (dag.NodeOutput, error) {
@@ -310,10 +310,10 @@ func (e *Executor) executeReasoner(ctx context.Context, in dag.NodeInput) (dag.N
 	}
 	out, ok := result.Output.(*ReasonerOut)
 	if !ok || out == nil {
-		return e.agentOutputError(provider, result, errors.New("review: reasoner decoder returned an unexpected type"))
+		return e.agentOutputError(result, errors.New("review: reasoner decoder returned an unexpected type"))
 	}
 	out.ToolGaps = gaps
-	return e.marshalAgentOutput(out, provider, result.Usage)
+	return e.marshalAgentOutput(out, result.Usage)
 }
 
 func (e *Executor) executeVerify(ctx context.Context, in dag.NodeInput) (dag.NodeOutput, error) {
@@ -354,7 +354,7 @@ func (e *Executor) executeVerify(ctx context.Context, in dag.NodeInput) (dag.Nod
 	}
 	out, ok := result.Output.(*VerifyOut)
 	if !ok || out == nil {
-		return e.agentOutputError(params.Provider, result, errors.New("review: verify decoder returned an unexpected type"))
+		return e.agentOutputError(result, errors.New("review: verify decoder returned an unexpected type"))
 	}
 	envelope := VerifyResult{
 		GroupID:   params.GroupID,
@@ -365,9 +365,9 @@ func (e *Executor) executeVerify(ctx context.Context, in dag.NodeInput) (dag.Nod
 		ToolGaps:  gaps,
 	}
 	if err := envelope.Validate(); err != nil {
-		return e.agentOutputError(params.Provider, result, err)
+		return e.agentOutputError(result, err)
 	}
-	return e.marshalAgentOutput(envelope, params.Provider, result.Usage)
+	return e.marshalAgentOutput(envelope, result.Usage)
 }
 
 func (e *Executor) executeSynthesize(ctx context.Context, in dag.NodeInput) (dag.NodeOutput, error) {
@@ -519,7 +519,7 @@ func (e *Executor) executeSynthesize(ctx context.Context, in dag.NodeInput) (dag
 		}
 		current, budgetErr := e.tokenBudgetWithUsage(ctx, in.WorkflowID, resultUsage)
 		if budgetErr != nil {
-			return dag.NodeOutput{}, &usageError{usage: e.dagUsage(provider, resultUsage), incomplete: resultUsage.Incomplete, err: budgetErr}
+			return dag.NodeOutput{}, &usageError{usage: e.dagUsage(resultUsage), incomplete: resultUsage.Incomplete, err: budgetErr}
 		}
 		exhausted = exhausted || current
 		if budgetStopped {
@@ -542,7 +542,7 @@ func (e *Executor) executeSynthesize(ctx context.Context, in dag.NodeInput) (dag
 		out := synthesizeOutFromFallback(fallback)
 		mergedWarnings := mergeWarnings(warnings, fallback.Warnings)
 		if err := validatePublishedMainGroups(fallback.Groups, e.validateCodeRef); err != nil {
-			return e.agentOutputError(provider, result, err)
+			return e.agentOutputError(result, err)
 		}
 		final := SynthesisResult{
 			Verdict:  fallback.Verdict,
@@ -556,16 +556,16 @@ func (e *Executor) executeSynthesize(ctx context.Context, in dag.NodeInput) (dag
 		applyBudgetGap(&final, exhausted || budgetStopped)
 		applyToolGaps(&final, toolGaps)
 		if err := final.Validate(); err != nil {
-			return e.agentOutputError(provider, result, err)
+			return e.agentOutputError(result, err)
 		}
-		return e.marshalAgentOutput(final, provider, resultUsage)
+		return e.marshalAgentOutput(final, resultUsage)
 	}
 	if result == nil {
 		return dag.NodeOutput{}, errors.New("review: synthesize returned no result")
 	}
 	current, budgetErr := e.tokenBudgetWithUsage(ctx, in.WorkflowID, result.Usage)
 	if budgetErr != nil {
-		return dag.NodeOutput{}, &usageError{usage: e.dagUsage(provider, result.Usage), incomplete: result.Usage.Incomplete, err: budgetErr}
+		return dag.NodeOutput{}, &usageError{usage: e.dagUsage(result.Usage), incomplete: result.Usage.Incomplete, err: budgetErr}
 	}
 	exhausted = exhausted || current
 	if current {
@@ -573,7 +573,7 @@ func (e *Executor) executeSynthesize(ctx context.Context, in dag.NodeInput) (dag
 	}
 	out, ok := result.Output.(*SynthesizeOut)
 	if !ok || out == nil {
-		return e.agentOutputError(provider, result, errors.New("review: synthesize decoder returned an unexpected type"))
+		return e.agentOutputError(result, errors.New("review: synthesize decoder returned an unexpected type"))
 	}
 	applied := ApplySynthesisDecisions(groups, *out)
 	if !isSecondSynthesis(in.Node.ID) && len(out.NewFindings) > 0 {
@@ -583,14 +583,14 @@ func (e *Executor) executeSynthesize(ctx context.Context, in dag.NodeInput) (dag
 	if !isSecondSynthesis(in.Node.ID) && len(out.ExtendRequests) > 0 {
 		fits, err := e.extensionFits(ctx, in.WorkflowID, len(out.ExtendRequests))
 		if err != nil {
-			return e.agentOutputError(provider, result, err)
+			return e.agentOutputError(result, err)
 		}
 		if !fits {
 			warnings = appendUnique(warnings, "max_nodes limit reached: extension requests were not scheduled")
 		}
 	}
 	if err := validatePublishedMainGroups(applied, e.validateCodeRef); err != nil {
-		return e.agentOutputError(provider, result, err)
+		return e.agentOutputError(result, err)
 	}
 	final := SynthesisResult{
 		Verdict:  out.Verdict,
@@ -603,9 +603,9 @@ func (e *Executor) executeSynthesize(ctx context.Context, in dag.NodeInput) (dag
 	applyBudgetGap(&final, exhausted)
 	applyToolGaps(&final, toolGaps)
 	if err := final.Validate(); err != nil {
-		return e.agentOutputError(provider, result, err)
+		return e.agentOutputError(result, err)
 	}
-	return e.marshalAgentOutput(final, provider, result.Usage)
+	return e.marshalAgentOutput(final, result.Usage)
 }
 
 // applyBudgetGap prevents an exhausted budget from producing a clean PASS
@@ -668,9 +668,9 @@ func (e *Executor) executeOnboarding(ctx context.Context, in dag.NodeInput) (dag
 	}
 	out, ok := result.Output.(*OnboardingOut)
 	if !ok || out == nil {
-		return e.agentOutputError(provider, result, errors.New("review: onboarding decoder returned an unexpected type"))
+		return e.agentOutputError(result, errors.New("review: onboarding decoder returned an unexpected type"))
 	}
-	return e.marshalAgentOutput(out, provider, result.Usage)
+	return e.marshalAgentOutput(out, result.Usage)
 }
 
 func (e *Executor) reviewProvider() string {

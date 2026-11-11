@@ -43,7 +43,7 @@ chmod 600 .env
 
 升级到含迁移 `0026` 的版本前，按第 7 节做数据库及 WAL/SHM、工作区、配置、镜像和主密钥的一致性备份。该迁移没有 down migration；回退必须恢复匹配的旧镜像和备份。配置 provider 的名称不能含 `:`；`max_tokens` 不能为负，`anthropic` 仍要求为正数，`openai-chat` / `openai-responses` 允许 0（请求不发送 `max_tokens` / `max_output_tokens`，由上游取默认），使用 `anthropic` 的旧挂载配置仍须手工补充正数 `max_tokens` 并重启。`max_concurrency` 不能为负，0 表示不创建本地并发信号量（不限本地并发），正数仍为信号量容量；`config/server.docker.yaml` 的 provider 默认值仍是 `max_concurrency: 4`，用户模型未填时为 0。新增能力字段均为 `omitempty`，旧 provider identity JSON（评审执行身份）逐字节不变。temperature 须在 0–2，thinking budget 与 context window 不能为负。模型凭据使用原主密钥加密，不支持主密钥轮换；软删除清空当前行的密文，不保证擦除旧 WAL、快照或备份。运行时目录已接入：用户模型无需重启即可被新工作流使用，单条坏记录隔离为 unavailable，不影响其他模型；模型密文解不开时存储层将其标为不可用；已有 MCP 主密钥校验仍可能阻止错误主密钥启动。修改模型会重建 client 和信号量，旧 client 继续服务在途工作流，因此同一模型 ID 的实际并发会短时叠加新旧两份上限。模型管理 API 见 HTTP API 设计文档；控制台的「测试」按钮对未保存的草稿同样可用，并遵循与用户模型相同的出站规则。可在控制台外通过 `GET/PUT/DELETE /api/v1/profiles/default/overrides` 管理默认档位七个节点的模型和请求参数覆盖（参数仅限 `max_tokens`、`temperature`、`reasoning.effort`、`thinking.budget_tokens`、`thinking.type`；`reasoning.effort: none` 仅在生效模型声明 `allow_reasoning_effort_none` 时可用，否则校验失败，字段 `reasoning.effort`）；覆盖只作用于之后启动的工作流。模型解析顺序为节点覆盖、`default` 覆盖、配置中的节点 provider、配置中的档位 provider、派生回退，因此 `default` 覆盖优先于配置文件里各节点自己的 provider，清除覆盖即恢复配置行为。`GET /api/v1/profiles/default` 返回每个节点的生效模型、来源和 `vote_identity`，`vote_identity` 相同的节点在投票中算同一个模型。工作流启动时固定当时的 client 快照，进程内 Refresh 不会改变在途工作流；跨重启恢复仍按当前配置重算执行身份（配置 provider、块绑定、MCP 与 Skill 等），身份不一致会取消并记录 `execution_identity_changed`；用户模型的变化不走执行身份，而是通过档位哈希生效（见下）。档位哈希只包含配置 provider 名称和档位实际引用的用户模型的非密钥设置：新增或修改未被引用的用户模型不影响在途评审，修改被引用模型的设置则使被中断的工作流在恢复时取消（`cause=profile_hash_changed`）；恢复取消的工作流若仍是 MR 当前代次，评审状态会置为「评审已取消」，详情为 `cancelled on recovery: <cause>`（`profile_hash_changed`、`execution_identity_changed`、`config_changed` 等），发布跳过原因同此，GitLab 状态评论随之更新，需重新触发评审；代次已被取代时不改动新代次的状态；评审图校验每次读取当前模型目录，新建或删除模型无需重启。
 
-包含 #164 的版本将 Anthropic 未缓存输入、缓存读取和缓存创建各计入一次输入 token；缓存读写字段是明细，不应再加到总输入上。预算使用该总输入和输出，因此可能比旧版本更早耗尽。成本估算对全部输入使用配置的 `input_per_mtok`，对输出使用 `output_per_mtok`，不区分缓存费率，不等于供应方账单；未配置价格时估算为零，不代表没有费用。已保存的历史用量不会追溯回填；升级后恢复旧工作流时，其已记录节点的缓存用量仍可能少计，导致剩余预算被高估。若当前评审需要准确执行预算，应取消后在升级版本重新触发，并另行统计已产生的用量。等待旧工作流结束不会修正其已少计的用量或预算限制。
+包含 #164 的版本将 Anthropic 未缓存输入、缓存读取和缓存创建各计入一次输入 token；缓存读写字段是明细，不应再加到总输入上。预算使用该总输入和输出，因此可能比旧版本更早耗尽。已保存的历史用量不会追溯回填；升级后恢复旧工作流时，其已记录节点的缓存用量仍可能少计，导致剩余预算被高估。若当前评审需要准确执行预算，应取消后在升级版本重新触发，并另行统计已产生的用量。等待旧工作流结束不会修正其已少计的用量或预算限制。v1.4.0 起不再计算或展示成本；历史库升级见[移除成本字段迁移](#移除成本字段迁移v140)。
 
 ### 构建并启动
 
@@ -105,7 +105,7 @@ LLM 默认允许私有网络和 loopback 地址，拒绝链路本地、未指定
          provider: primary       # 保留：工作区初始化继续使用 primary
      default:
        provider: primary         # 默认：所有评审节点使用 primary
-       # 可选：取消注释，让指定节点使用 secondary；成本会随之变化
+       # 可选：取消注释，让指定节点使用 secondary；token 用量会随之变化
        # lanes:
        #   review: { provider: secondary }
        challenge:
@@ -189,7 +189,7 @@ DeepSeek thinking + tools 要求后续请求完整回传 `reasoning_content`，�
 - Chat Completions 的 `max_tokens` 默认值不是最大输出：非 thinking 8K、thinking 64K、`effort=max` 128K，上限 393,216；省略该字段不会得到最大输出。`reasoning.effort: none` 可关闭 thinking，但必须同时声明 `allow_reasoning_effort_none: true`，否则配置校验和节点覆盖校验都会拒绝（字段 `reasoning.effort`）。
 - `deepseek-chat` 与 `deepseek-reasoner` 已退役；旧名 `deepseek-v4-flash` 仍被接受但实际是 V4.1 Flash。
 
-预设值：`protocol=openai-chat`、`base_url=https://api.deepseek.com`；`max_tokens=393216`、`context_window=655360`（1,048,576 上下文减去 393,216 输出预留）、`reasoning.effort=max`、`max_concurrency` 为 500（v4-pro）或 2500（flash）、`rpm=0`、`forced_tool_choice=unsupported`、`strict_role_alternation=false`、`preserve_reasoning_content=true`。预设不写入价格：响应中的 `params.price` 为 `null`，成本字段由 [#407](https://github.com/LeXwDeX/Tribunal/issues/407) 处理。
+预设值：`protocol=openai-chat`、`base_url=https://api.deepseek.com`；`max_tokens=393216`、`context_window=655360`（1,048,576 上下文减去 393,216 输出预留）、`reasoning.effort=max`、`max_concurrency` 为 500（v4-pro）或 2500（flash）、`rpm=0`、`forced_tool_choice=unsupported`、`strict_role_alternation=false`、`preserve_reasoning_content=true`。预设不包含成本或价格字段。
 
 配置模板 `config/server.example.yaml` 与 `config/server.docker.yaml` 以注释形式给出同一组 DeepSeek provider 值；这些值**只适用于 DeepSeek，不要照抄到其他供应方**，也不是通用 `primary` 默认值。`internal/config/testdata/deepseek-preset.yaml` 用 `Load+Validate` 证明文档值可解析，测试还会检查两个模板包含这些片段。使用 Docker 时，取消注释后还需把 `DEEPSEEK_API_KEY` 加入 Compose 的显式环境变量列表。
 
@@ -205,7 +205,7 @@ DeepSeek thinking + tools 要求后续请求完整回传 `reasoning_content`，�
 {"preset": "deepseek-flash-max", "revision": 5, "dry_run": false}
 ```
 
-预设只合并 `max_tokens`、`context_window`、`reasoning`、`max_concurrency`、`rpm`、`forced_tool_choice`、`strict_role_alternation`、`preserve_reasoning_content`，并清除旧的显式 `thinking` 开关；不改变端点、模型名、`temperature`、`price` 或已存密钥，也不覆盖未涉及的字段。若档位节点覆盖了与预设不同的 `max_tokens`/`reasoning`/`thinking`，未传 `"confirm_overrides": true` 时返回 409 `override_conflict`；确认后应用但不会删除（迁移 `0028` 的）档位覆盖，受覆盖的节点仍按覆盖值运行，需要时在「模型与档位」页手工清除。覆盖值已等于预设值的节点不算冲突，不会要求确认。若所有字段都已是预设值，执行请求返回 `applied: false`：不写库、不增加 `revision`、不要求确认，响应仍返回 `conflicts`；这与“有实际变更且存在不同值覆盖时返回 409”是两条路径。修改模型会改变引用它的档位哈希：重启后未终态评审会以 `profile_hash_changed` 取消，升级前先让在途评审结束。审计只记录预设 ID 与字段名，不记录参数值或密钥。
+预设只合并 `max_tokens`、`context_window`、`reasoning`、`max_concurrency`、`rpm`、`forced_tool_choice`、`strict_role_alternation`、`preserve_reasoning_content`，并清除旧的显式 `thinking` 开关；不改变端点、模型名、`temperature` 或已存密钥，也不覆盖未涉及的字段。若档位节点覆盖了与预设不同的 `max_tokens`/`reasoning`/`thinking`，未传 `"confirm_overrides": true` 时返回 409 `override_conflict`；确认后应用但不会删除（迁移 `0028` 的）档位覆盖，受覆盖的节点仍按覆盖值运行，需要时在「模型与档位」页手工清除。覆盖值已等于预设值的节点不算冲突，不会要求确认。若所有字段都已是预设值，执行请求返回 `applied: false`：不写库、不增加 `revision`、不要求确认，响应仍返回 `conflicts`；这与“有实际变更且存在不同值覆盖时返回 409”是两条路径。修改模型会改变引用它的档位哈希：重启后未终态评审会以 `profile_hash_changed` 取消，升级前先让在途评审结束。审计只记录预设 ID 与字段名，不记录参数值或密钥。
 
 **已知限制**：
 
@@ -977,7 +977,7 @@ curl -fsS http://127.0.0.1:18080/readyz
 
 **token 预算默认关闭（#392）**：`profiles.default.budget.max_tokens` 默认 0，不做工作流 token 预算检查，用量由上游 LLM key 的额度决定；上游额度耗尽时节点以上游错误失败，评审结论为 INCOMPLETE。需要限制单次评审 token 时，在挂载配置中把它设为正数并重启。镜像不会改写挂载配置：从旧版 `config/server.example.yaml` 复制的配置带有显式 `max_tokens: 1500000`，升级时须删除该项或改为 0。下文与预算相关的行为只在 `max_tokens > 0` 时生效。
 
-**重启恢复与 token 预算（#325）**：进程被 SIGKILL 或崩溃后，启动恢复会重启运行中的节点（attempt+1），并把该工作流的用量标记为不完整（`usage_incomplete=true`，API 和控制台仍显示）。视图中的三个标记均由事件投影（#346 起 `usage_interruptions` 也通过评审详情、节点详情和图节点的 API 返回，为 0 时省略；控制台显示「单节点最多中断恢复 N 次」；`usage_unreported` 仍只在内部视图）：`usage_incomplete`（检测到任何缺失，含重启或中止）、`usage_unreported`（不完整源于进程中断以外的原因：节点上报不完整、无效用量或计数溢出）、`usage_interruptions`（任一单个节点被恢复重启并标记为不完整的最大次数；一轮恢复同时重启多个节点只计 1 次）。对设置了 `max_tokens > 0` 的工作流，仅当 `usage_unreported` 为真或 `usage_interruptions` 超过 3（同一节点被中断超过 3 次）时以 `unsafe_model_response` 阻断，否则以已提交用量作为下限继续运行。已接受的风险：每次中断可能丢失当时所有运行中节点的 attempt 尚未提交的全部用量（每一轮和节点内重试），实际花费可能超过记录总量；同一节点被中断超过 3 次后预算检查重新 fail-closed，工作流期限仍限制运行时长；被取代 attempt 的迟到提交会被丢弃且不记用量。对成本敏感时，按供应方账单核对。
+**重启恢复与 token 预算（#325）**：进程被 SIGKILL 或崩溃后，启动恢复会重启运行中的节点（attempt+1），并把该工作流的用量标记为不完整（`usage_incomplete=true`，API 和控制台仍显示）。视图中的三个标记均由事件投影（#346 起 `usage_interruptions` 也通过评审详情、节点详情和图节点的 API 返回，为 0 时省略；控制台显示「单节点最多中断恢复 N 次」；`usage_unreported` 仍只在内部视图）：`usage_incomplete`（检测到任何缺失，含重启或中止）、`usage_unreported`（不完整源于进程中断以外的原因：节点上报不完整、无效用量或计数溢出）、`usage_interruptions`（任一单个节点被恢复重启并标记为不完整的最大次数；一轮恢复同时重启多个节点只计 1 次）。对设置了 `max_tokens > 0` 的工作流，仅当 `usage_unreported` 为真或 `usage_interruptions` 超过 3（同一节点被中断超过 3 次）时以 `unsafe_model_response` 阻断，否则以已提交用量作为下限继续运行。已接受的风险：每次中断可能丢失当时所有运行中节点的 attempt 尚未提交的全部用量（每一轮和节点内重试），实际花费可能超过记录总量；同一节点被中断超过 3 次后预算检查重新 fail-closed，工作流期限仍限制运行时长；被取代 attempt 的迟到提交会被丢弃且不记用量。需要核对实际开销时，以供应方账单为准。
 
 **恢复取消的原因**：恢复后的评审以取消结束时，在日志中按 `workflow_id` 查找 INFO 日志 `recovery cancelling workflow`（在取消前记录，只表示取消决定，工作流已处于终态时仍可能出现），其 `cause` 给出稳定原因：`profile_hash_changed`（评审档位或其引用的模型身份变化）、`execution_identity_changed`（执行身份变化，例如扩展或 provider 配置变化）、`config_changed`（仓库评审配置、ignore 规则或提示词包变化，取代原日志 `recovery skipped workflow with changed configuration`）、`diff_version_changed`（MR diff 版本已更新）、`control_not_current`（已有更新的评审代次或评审已取消）、`workspace_identity_changed`、`index_ineligible`、`mr_inputs_unavailable`、`repo_config_invalid`、`profile_explicit_invalid`、`publication_policy_invalid`、`workspace_provenance_invalid`、`dossier_invalid`、`dossier_mismatch`，以及仓库 Skill 相关的 `repository_skill_capability_unsupported`、`repository_skill_changed`、`repository_skill_deny_invalid`、`repository_skill_resolve_failed`。恢复重跑后工作流以取消结束时，另有 INFO 日志 `recovery observed cancelled workflow`，`cause` 为 `superseded_during_run`，或保存的取消原因（如 `deadline`；为空时为 `unknown`）。任务重试路径（RunReview/Handle）取消被取代的工作流前记录 `review cancelling workflow`，`cause=control_not_current`。任务处理器（RunReview 路径）发现在途工作流已被配置或提示词变化取代时，记录 `review workflow superseded by configuration or prompt change`，将其取消（取消原因 `superseded`，发布跳过原因 `review superseded`），并为同一任务和代次立即创建新工作流重新评审；这不是启动恢复的取消。工作流中保存的取消原因和发布行为不受此日志影响；处理方式是先消除对应变化，再重新触发评审。其中档位或其引用的用户模型变化（`profile_hash_changed`）与执行身份变化（`execution_identity_changed`）还会把同名取消原因写入工作流，在评审详情中可见；其他原因的工作流取消原因仍为 `superseded`。
 
@@ -1070,6 +1070,14 @@ v1.2.0 新增迁移 `0020_review_command_replay`。`0020` 新建已受理身份�
 - 所有可用证据都无法打开时拒绝启动，该错误无法区分密钥错误与证据本身损坏：校验标记自身损坏，或（无校验标记时）全部项目密文、全部用户模型凭据都已损坏，即使密钥正确也会出现同样错误。先确认密钥，仍不通过再从备份恢复。
 - 仅当密钥已通过校验标记认证时，单条无法解密的用户模型凭据才只显示为 unavailable，不阻止启动。
 - 不支持主密钥轮换。
+
+### 移除成本字段迁移（v1.4.0）
+
+`0030_remove_cost.sql` 重建 `workflows` 和 `workflow_nodes` 去掉 `cost_micros`，保留原有索引、外键和约束；同时从 `llm_models.params_json` 剥离 legacy `price` 键，无效 JSON 保持原样。迁移执行器在迁移期间关闭外键检查，实际应用迁移后恢复并对全部表运行 `foreign_key_check`；违规时错误会指出表名。该迁移没有 down migration，不可逆。升级前按第 7 节停服做一致性备份，保存数据库及可能存在的 `-wal`/`-shm`、全部工作区、实际配置、加密主密钥和镜像 digest；回滚只能恢复升级前的数据库快照并启动匹配的旧镜像，不能只换镜像或让旧镜像直接使用已迁移的数据库。旧事件和旧节点 usage JSON 中的 `cost_micros` 仍可解码，但投影和新 API 不再暴露该字段。
+
+**在途工作流影响**：`profile_hash` 只包含档位实际引用的 `user:` 模型设置。升级前保存了 `price` 的 `user:` 模型现在不再把 `price` 纳入执行身份，因此引用带 legacy `price` 的 `user:` 模型的未终态工作流，在升级重启恢复时会以 `profile_hash_changed` 取消，需要重新触发；未保存 `price` 的 `user:` 模型和 config provider 不受影响。需要保留在途结果时，先让评审结束或接受取消后重跑。
+
+legacy `providers.*.price` 在 v1.4.0 仍会解析，仅用于兼容旧 YAML 和保持 provider 执行身份 JSON 逐字节不变，不参与计算，也不进入 API、控制台或统计；配置含 `price` 时启动产生一条脱敏 WARN（只列 provider 名，不列数值）。该字段将在 v2.0 删除，届时含 `price` 的旧配置需要移除。从 YAML 中删除 `price` 会改变 provider 执行身份；执行身份包含全部配置 provider，因此重启恢复时未终态工作流会以 `execution_identity_changed` 取消，需要重新触发。
 
 ### 通用升级与回滚步骤
 
@@ -1172,7 +1180,7 @@ v1.2.0 起，所有 `PUT /api/v1/block-bindings/{block}` 必须带 `expected_rev
 
 影响：
 
-- **成本预期更高。** 每次评审运行的 LLM agent 节点从原来的一两个增加到多个（`explore`、每个包的 `code-review` 与 `review`、`reasoner`、`validate`，另有每条 P0/P1 的 `verify`）。具体增幅以后另行测量，此处不给出数字；升级后按实际用量核对 `budget.max_tokens`。`budget.deadline` 默认从 20m 改为 30m。
+- **token 用量预期更大。** 每次评审运行的 LLM agent 节点从原来的一两个增加到多个（`explore`、每个包的 `code-review` 与 `review`、`reasoner`、`validate`，另有每条 P0/P1 的 `verify`）。具体增幅以后另行测量，此处不给出数字；升级后按实际用量核对 `budget.max_tokens`。`budget.deadline` 默认从 20m 改为 30m。
 - **工作流身份变化。** 提示词新增 `explore.md`、`review.md`、`validate.md`，`_platform_rules.md` 升到 v5，`TaskRenderVersion` 由 4 改为 5。评审档位和提示词身份已变化，升级前创建的未终态工作流在启动恢复时被取消，不会在新版本下续跑、重试或发布；升级前按[多 Provider 配置](#多-provider-配置)第 4 步核对未完成评审和待发布结果，需要时等待其结束或接受取消后重新触发。
 - **已有的 `reasoner` 块绑定开始生效。** reasoner 一路现在以块 `reasoner` 运行，此前登记在该块上的 MCP 工具和 Skill 绑定会开始作用于它；升级前核对这些绑定。
 - **挂载的配置文件需要手工补充工具授权。** 镜像不会改写已挂载的配置文件。要让 `explore` 和 `validate` 使用 codebase-memory 工具，把这两个块加入 `default_extensions.mcp_servers[].tools`（见 `config/server.example.yaml`）；否则这两路只带内置的 `read_file` / `grep` 运行。
@@ -1493,13 +1501,13 @@ bash scripts/loadtest.sh > loadtest.csv
 
 脚本在触发前读取每个 MR 的现有评审 ID 作为基线，触发后只统计基线之外的最新评审，避免同一秒旧评审或时钟偏差被计入。`duration_ms` 是执行耗时（workflow 开始执行到完成），不包含 workflow 创建后等待 worker 的入口排队；provider 限流发生在执行内，会计入。
 
-stdout 是 CSV：`project_id,mr_iid,status,verdict,duration_ms,tokens_in,tokens_out,cost_micros`。stderr 汇总：
+stdout 是 CSV：`project_id,mr_iid,status,verdict,duration_ms,tokens_in,tokens_out`。stderr 汇总：
 
 ```text
-reviews=... completed=... failed=... cancelled=... triggers_failed=... failure_rate=...% p50_ms=... p95_ms=... wall_s=... reviews_per_sec=... tokens_in=... tokens_out=... cost_micros=... sqlite_wait_count=... sqlite_wait_ms=... workspace_wait_count=... workspace_wait_ms=... workspace_max_wait_ms=...
+reviews=... completed=... failed=... cancelled=... triggers_failed=... failure_rate=...% p50_ms=... p95_ms=... wall_s=... reviews_per_sec=... tokens_in=... tokens_out=... sqlite_wait_count=... sqlite_wait_ms=... workspace_wait_count=... workspace_wait_ms=... workspace_max_wait_ms=...
 ```
 
-`failure_rate` 只统计已触发评审中的 `failed` 和 `cancelled`；触发失败单独看 `triggers_failed`。`wall_s` 从脚本开始（注册、授权、基线之前）到结束，`reviews_per_sec` 使用同一墙钟。`p50` 对偶数样本取较低的中位数，`p95` 使用 nearest-rank 上取整。有 `failed`、`cancelled` 或触发失败时脚本返回 1，并保留已收集的部分结果。`cost_micros` 依赖 provider 的 `price` 配置；未配置时始终为 0。
+`failure_rate` 只统计已触发评审中的 `failed` 和 `cancelled`；触发失败单独看 `triggers_failed`。`wall_s` 从脚本开始（注册、授权、基线之前）到结束，`reviews_per_sec` 使用同一墙钟。`p50` 对偶数样本取较低的中位数，`p95` 使用 nearest-rank 上取整。有 `failed`、`cancelled` 或触发失败时脚本返回 1，并保留已收集的部分结果。
 
 `sqlite_wait_*` 来自 `GET /api/v1/system/lock-stats`：存储层只开一个 SQLite 连接，所有 SQL 串行使用该连接；`wait_count` 和 `wait_duration_ms` 是进程启动以来排队等待连接的累计值，`max_open_connections`、`in_use`、`idle` 是当前连接池值。`workspace_wait_count` 和 `workspace_wait_ms` 是项目内容锁、生命周期锁和 mirror 锁的累计等待，`workspace_max_wait_ms` 是进程启动以来单次最长等待。计数是累计值，不是单次压测的增量；可在压测前后各取一次，用 count/duration 差值得到本次压测的等待。本服务单进程使用时，driver 的 busy handler 在正常路径不会触发；如果有其它进程直接持有同一个 SQLite 文件，仍可能出现 driver 等待，本指标不统计这类重试。因此它是 SQL 串行化等待的代理，不是 busy 重试次数。旧服务端没有该端点时，汇总字段显示 `n/a`，压测结果和退出码不受影响。
 
@@ -1508,11 +1516,11 @@ reviews=... completed=... failed=... cancelled=... triggers_failed=... failure_r
 ### 结果解读
 
 - 延迟是 workflow 开始执行到完成的耗时；入口排队不在 `duration_ms` 内，需要结合 `wall_s` 和触发时间判断。
-- 真实 10 项目、每个 MR 840 行 diff 的一次观测：10/10 完成，p50 22.2 秒，p95 27.2 秒，输入 627,034 tokens，输出 32,927 tokens，成本约 $0.2055（占位价格）。
+- 真实 10 项目、每个 MR 840 行 diff 的一次观测：10/10 完成，p50 22.2 秒，p95 27.2 秒，输入 627,034 tokens，输出 32,927 tokens。
 - 示例配置的 provider 并发为 4，前 4 个评审立即启动，其余等待 `providers.<name>.max_concurrency`；没有观察到 SQLite 锁错误、工作区锁错误或任务丢失。
 - 这是一次环境观测，不是容量承诺；provider、diff 大小、网络和 GitLab 限流都会改变结果。
 - SQLite 与工作区锁等待已由 `GET /api/v1/system/lock-stats` 提供累计指标；上述观测发生时尚未采集。
-- 2026-11-02 用复审后的脚本跑 5 项目：修复 GitLab 项目 token 后 5/5 完成、0 失败，p50 27.4 秒，p95 31.9 秒，wall 58 秒，输入 348,429 tokens，输出 20,008 tokens，成本 116,085 micros。首次运行时项目 token 失效返回 `gitlab_rejected`（GitLab 401），脚本按预期返回 1 并列出失败项；mock 测试不能替代真实环境结论。
+- 2026-11-02 用复审后的脚本跑 5 项目：修复 GitLab 项目 token 后 5/5 完成、0 失败，p50 27.4 秒，p95 31.9 秒，wall 58 秒，输入 348,429 tokens，输出 20,008 tokens。首次运行时项目 token 失效返回 `gitlab_rejected`（GitLab 401），脚本按预期返回 1 并列出失败项；mock 测试不能替代真实环境结论。
 
 ## 12. 验证状态
 

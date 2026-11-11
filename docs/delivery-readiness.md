@@ -22,7 +22,7 @@
 ## 模型目录与运行时刷新本地验证（#289）
 
 - 基于 `feat/288-llm-models`（`8a909b3`）的未提交工作区，本地通过 `go build ./...`、`go vet ./...`、`go test -count=1 ./internal/llm/... ./internal/review/... ./internal/store/sqlite/... ./internal/app/... ./cmd/server/...`，以及 `go test -race -count=1 ./internal/llm/...` 和相关包的 Staticcheck v0.8.2。
-- 覆盖 Catalog 刷新与并发读取、坏记录隔离、配置模型 client 保留、空 key、用户模型成本与署名；未验证真实部署升级、完整 CI 或真实模型调用。
+- 覆盖 Catalog 刷新与并发读取、坏记录隔离、配置模型 client 保留、空 key、用户模型参数与署名；未验证真实部署升级、完整 CI 或真实模型调用。
 
 ## 模型管理 API 本地验证（#290）
 
@@ -46,6 +46,15 @@
 ## 用户管理页与全局视图本地验证（#297）
 
 - 基于 `feat/297-user-console` 的工作区，`go test -count=1 ./internal/store/sqlite/... ./internal/server/...` 通过；`npm test -- --coverage` 通过 64 个文件、524 项测试；`npm run build` 已刷新 `web/dist`。覆盖用户抽屉角色/全局/授权操作、配置来源与自我降级禁用。未做 1440/390 与亮暗主题浏览器截图，未验证真实部署。
+
+## 成本移除本地验证（#407，PR #430）
+
+- 本地通过 `go build ./...`、`go vet ./...`、gofmt、全仓 `go test -count=1 ./...`，以及受影响包的 `go test -race -count=1`（app 396–455s、server、sqlite）；Staticcheck v0.8.2、govulncheck、`scripts/loadtest_test.sh`（34 passed）通过。CI push run 的 `go`/`web`/`docker` 作业通过。
+- 迁移 `0030_remove_cost` 在 0028 旧库与全新库上回归：重建 `workflows`/`workflow_nodes` 去掉 `cost_micros`，保留列、默认值、主键、索引和 `ON DELETE CASCADE` 外键，findings 未被级联删除；`llm_models.params_json` 的 legacy `price` 被剥离，无效 JSON 不变。
+- 旧事件/节点 usage 的 `cost_micros` 仍可解码并丢弃，其他未知字段被拒绝；`params.price` 在模型创建、整记录修改和参数合并均返回 400（字段 `params.price`）；带 legacy `price` 的旧配置仍可启动并产生脱敏 WARN，provider identity JSON 逐字节不变。
+- 引用带 legacy `price` 的 `user:` 模型的未终态工作流会因 `profile_hash_changed` 取消，已有回归测试；未保存 `price` 的 `user:` 模型和 config provider 不受影响。
+- **BLOCKED**：未执行真实部署升级/回退演练（缺隔离部署环境）；升级前须按运维文档备份数据库及 WAL/SHM、工作区和密钥，回滚需恢复快照与匹配旧镜像。
+- 控制台成本展示由 [#408](https://github.com/LeXwDeX/Tribunal/issues/408) 移除，本 PR 未改 `web/`；后端与前端需同批发布。
 
 ## v1.3.0 发布检查表（#294）
 
@@ -278,6 +287,7 @@ v1.2.0 尚未发布：版本说明已合并到 `main`，尚未打 tag，也未�
 
 - 迁移实现：`internal/store/sqlite/sqlite.go` 的 `migrate()`；当前工作区迁移文件为 `0001`、`0003`–`0024`，共 23 个（没有 `0002`）。其中 `0016`–`0024` 均属于 v1.2.0；v1.2.0 升级基线为 `0001`、`0003`–`0024`，共 23 个。确认迁移结果时按已知版本集合核对，不把最大版本号当数量。
 - 每个未应用迁移单独开事务；没有 down migration。启动时只跳过 `schema_migrations` 已记录的版本；数据库中已记录、但不在当前嵌入文件列表的高版本会被忽略而不报错。
+- v1.4.0 新增 `0030_remove_cost`：重建 `workflows`/`workflow_nodes` 去掉 `cost_micros`，迁移期间关闭外键检查、完成后恢复并执行 `foreign_key_check`；同时从模型参数剥离 legacy `price`。不可逆，旧库/新库迁移回归在本地通过；真实升级演练 BLOCKED（缺隔离部署环境）。
 - `migration_rollback_test` 只覆盖 `0004` 单文件在“建表完成、记录版本前”失败时的事务回滚及之后重试；不覆盖整批升级失败、跨版本回滚或降级。
 - `0007` 给 `users` 增加 `disabled`，并新建空的 `project_grants`；升级不会给任何用户创建 grant。
 - `0008` 增加 `publication_error`；`0009` 增加 webhook 状态/事件/错误，并把已有 `hook_id` 的行标为 `unknown`；`0010` 增加 deferred review candidate 序号；`0011` 增加状态 note 与逐 note 表情的持久化表；`0012` 增加 webhook 归属和时间戳，已有 `hook_id` 的行视为本服务所有。

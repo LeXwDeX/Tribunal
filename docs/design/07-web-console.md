@@ -63,13 +63,13 @@ web/
 | 区块 | 内容 | API |
 |---|---|---|
 | 运行中 | 正在运行的评审：项目、MR、当前阶段、已用时 | `GET /reviews?status=running` + SSE |
-| 近 7 天 | 运行次数（含评审与 onboarding）、BLOCKING 比例、发布条目数、规则丢弃比例、成本、平均/P95 耗时 | `GET /stats` |
+| 近 7 天 | 运行次数（含评审与 onboarding）、BLOCKING 比例、发布条目数、规则丢弃比例、平均/P95 耗时 | `GET /stats` |
 | 需要处理 | 工作区异常、token 30 天内过期、发布失败，或带 `publication_error` 的 pending 重试；普通 pending 不告警；provider 连续错误只对平台管理员加载 | `GET /projects`、`GET /providers`、`GET /reviews?publication_state=failed`、`GET /reviews?publication_state=pending` |
 | 最近评审 | 最近 20 条 | `GET /reviews?limit=20` |
 
 ### 3.2 评审列表
 
-过滤：项目、状态、结论、档位、触发方式、时间。列：MR、项目、档位、状态、结论、P0/P1/P2 数、用时、成本、时间。
+过滤：项目、状态、结论、档位、触发方式、时间。列：MR、项目、档位、状态、结论、P0/P1/P2 数、用时、时间。后端响应中的 `cost_micros` 已在 v1.4.0 移除；控制台的成本列由 [#408](https://github.com/LeXwDeX/Tribunal/issues/408) 移除。
 
 未创建评审任务的结果（API 中 `kind: "status_only"`，如 MR diff 为空）也出现在此列表以及概览、项目页的最近评审表中：该行不可点击，显示 MR、项目、短 head SHA、原因行（如「原因：没有可评审的变更（empty diff）」）、中性徽标「未创建评审任务」和结论徽标。这类行没有评审详情页。
 
@@ -129,9 +129,11 @@ web/
 
 ### 3.8 统计与反馈
 
-- 目标视图：按项目、按 provider、按块的运行次数、成本、耗时趋势，以及按 provider 的提出方准确率/挑战方误杀率。统计对平台管理员覆盖全部已登记项目；其他用户只覆盖自己有 grant 或 `global_read` 可见的项目。
-- 当前页面已展示总体及按项目、provider、块的运行数、成本、平均/P95 耗时、有效耗时样本数与 UTC 日趋势。项目统计工作流；provider/块统计已启动节点，每个当前节点行只计一次，不按 LLM 调用轮次或重试次数累加。无 provider 的代码节点只进入块统计。
-- 趋势以可横向滚动的日期表格展示；每个项目/provider/块可展开自己的每日明细。筛选和日桶都基于 workflow 创建时间，日桶采用 UTC；只返回有记录的日，不补零。节点指标仅表示最新一次尝试的投影，不代表完整重试历史。字段、样本和成本口径见 [HTTP API](03-http-api.md#45-系统)。旧响应缺字段显示不可用，已知空数组单独显示空状态，非法趋势不显示部分合计。
+后端统计字段已移除成本；控制台的成本卡片、趋势与表格列由 [#408](https://github.com/LeXwDeX/Tribunal/issues/408) 移除。
+
+- 目标视图：按项目、按 provider、按块的运行次数、耗时趋势，以及按 provider 的提出方准确率/挑战方误杀率。统计对平台管理员覆盖全部已登记项目；其他用户只覆盖自己有 grant 或 `global_read` 可见的项目。
+- 当前页面已展示总体及按项目、provider、块的运行数、平均/P95 耗时、有效耗时样本数与 UTC 日趋势。项目统计工作流；provider/块统计已启动节点，每个当前节点行只计一次，不按 LLM 调用轮次或重试次数累加。无 provider 的代码节点只进入块统计。
+- 趋势以可横向滚动的日期表格展示；每个项目/provider/块可展开自己的每日明细。筛选和日桶都基于 workflow 创建时间，日桶采用 UTC；只返回有记录的日，不补零。节点指标仅表示最新一次尝试的投影，不代表完整重试历史。字段和样本口径见 [HTTP API](03-http-api.md#45-系统)。旧响应缺字段显示不可用，已知空数组单独显示空状态，非法趋势不显示部分合计。
 - 运行次数包含评审和 onboarding；`overturned_ratio` 标为「规则丢弃比例」，是规则裁决 `drop` 的占比，不是「被挑战推翻」或模型准确率。
 - 反馈原始计数：`stats.feedback.total` 与 `by_signal`，按项目和 `observed_at` 的 `[from, to)` 筛选；日期控件把结束日映射到次日本地午夜，选择同一天覆盖完整一天。空范围显示已知为零，缺失字段显示不可用。
 - 按 provider 与角色归因：`stats.feedback.by_provider` 每项为 `{provider, role, total, by_signal}`，`role` 为 `proposer`/`challenger`。提出方取 `findings.origin_provider`，挑战方取 `challenge_node` 的 provider；仅统计 `feedback.finding_id` 能精确匹配 finding 且 publication 一致的 discussion，summary/unlinked 不计入 `by_provider`，但仍计入原始 `total`/`by_signal`。同一 signal 可同时计入两个角色，两个角色合计不是反馈总数。

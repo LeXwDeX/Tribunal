@@ -96,13 +96,13 @@ func startedEvent(t *testing.T, node string, attempt int, provider, model string
 	}, at)
 }
 
-func completedEvent(t *testing.T, node string, attempt int, cost int64, at time.Time) dag.Event {
+func completedEvent(t *testing.T, node string, attempt int, at time.Time) dag.Event {
 	t.Helper()
 	return testEvent(t, dag.EventNodeCompleted, dag.NodeCompletedPayload{
 		NodeID:  node,
 		Attempt: attempt,
 		Output:  json.RawMessage(`{"ok":true}`),
-		Usage:   dag.Usage{InputTokens: 2, OutputTokens: 3, CostMicros: cost},
+		Usage:   dag.Usage{InputTokens: 2, OutputTokens: 3},
 	}, at)
 }
 
@@ -111,10 +111,10 @@ func finishWorkflow(t *testing.T, s *Store, wfID string, rev int64, at time.Time
 	rev = mustAppendEvent(t, s, wfID, rev, testEvent(t, dag.EventWorkflowStarted, dag.WorkflowTerminalPayload{}, at))
 	rev = mustAppendEvent(t, s, wfID, rev, queuedEvent(t, "a", 1, at))
 	rev = mustAppendEvent(t, s, wfID, rev, startedEvent(t, "a", 1, "p", "m", at))
-	rev = mustAppendEvent(t, s, wfID, rev, completedEvent(t, "a", 1, 5, at))
+	rev = mustAppendEvent(t, s, wfID, rev, completedEvent(t, "a", 1, at))
 	rev = mustAppendEvent(t, s, wfID, rev, queuedEvent(t, "b", 1, at))
 	rev = mustAppendEvent(t, s, wfID, rev, startedEvent(t, "b", 1, "p", "m", at))
-	rev = mustAppendEvent(t, s, wfID, rev, completedEvent(t, "b", 1, 7, at))
+	rev = mustAppendEvent(t, s, wfID, rev, completedEvent(t, "b", 1, at))
 	return mustAppendEvent(t, s, wfID, rev, testEvent(t, dag.EventWorkflowCompleted, dag.WorkflowTerminalPayload{}, at))
 }
 
@@ -156,7 +156,7 @@ func TestWorkflowEventStoreReplayAndRecovery(t *testing.T) {
 	rev = mustAppendEvent(t, st, wfID, rev, testEvent(t, dag.EventWorkflowStarted, dag.WorkflowTerminalPayload{}, clock.Now()))
 	rev = mustAppendEvent(t, st, wfID, rev, queuedEvent(t, "a", 1, clock.Now()))
 	rev = mustAppendEvent(t, st, wfID, rev, startedEvent(t, "a", 1, "p", "m", clock.Now()))
-	rev = mustAppendEvent(t, st, wfID, rev, completedEvent(t, "a", 1, 5, clock.Now()))
+	rev = mustAppendEvent(t, st, wfID, rev, completedEvent(t, "a", 1, clock.Now()))
 	if rev != 5 {
 		t.Fatalf("revision after completed a = %d, want 5", rev)
 	}
@@ -240,7 +240,7 @@ func TestAppendFencesAndRollback(t *testing.T) {
 	}
 	_, err = st.Append(ctx, wfID, rev,
 		queuedEvent(t, "a", 1, clock.Now()),
-		completedEvent(t, "b", 1, 0, clock.Now()))
+		completedEvent(t, "b", 1, clock.Now()))
 	if !errors.Is(err, dag.ErrInvalidTransition) {
 		t.Fatalf("invalid batch error = %v, want ErrInvalidTransition", err)
 	}
@@ -257,16 +257,16 @@ func TestAppendFencesAndRollback(t *testing.T) {
 	rev = mustAppendEvent(t, st, wfID, rev, testEvent(t, dag.EventNodeRestarted, dag.NodeRestartedPayload{
 		NodeID: "a", NextAttempt: 2, Reason: "recovered",
 	}, clock.Now()))
-	_, err = st.Append(ctx, wfID, rev, completedEvent(t, "a", 1, 0, clock.Now()))
+	_, err = st.Append(ctx, wfID, rev, completedEvent(t, "a", 1, clock.Now()))
 	if !errors.Is(err, dag.ErrStaleAttempt) {
 		t.Fatalf("late result error = %v, want ErrStaleAttempt", err)
 	}
 	rev = mustAppendEvent(t, st, wfID, rev, queuedEvent(t, "a", 2, clock.Now()))
 	rev = mustAppendEvent(t, st, wfID, rev, startedEvent(t, "a", 2, "p", "m", clock.Now()))
-	rev = mustAppendEvent(t, st, wfID, rev, completedEvent(t, "a", 2, 0, clock.Now()))
+	rev = mustAppendEvent(t, st, wfID, rev, completedEvent(t, "a", 2, clock.Now()))
 	rev = mustAppendEvent(t, st, wfID, rev, queuedEvent(t, "b", 1, clock.Now()))
 	rev = mustAppendEvent(t, st, wfID, rev, startedEvent(t, "b", 1, "p", "m", clock.Now()))
-	rev = mustAppendEvent(t, st, wfID, rev, completedEvent(t, "b", 1, 0, clock.Now()))
+	rev = mustAppendEvent(t, st, wfID, rev, completedEvent(t, "b", 1, clock.Now()))
 	rev = mustAppendEvent(t, st, wfID, rev, testEvent(t, dag.EventWorkflowCompleted, dag.WorkflowTerminalPayload{}, clock.Now()))
 
 	before, err = st.Load(ctx, wfID)

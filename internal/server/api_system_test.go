@@ -388,23 +388,23 @@ func TestStatsTrendJSON(t *testing.T) {
 	fake.stats = store.Stats{
 		DurationSamples: 2,
 		Trend: []store.DailyStats{
-			{Day: "2026-10-20", Runs: 1, CostMicros: 5, DurationSamples: 1, AvgDurationMS: ptr(1000.0), P95DurationMS: ptr(1000.0)},
-			{Day: "2026-10-21", Runs: 1, CostMicros: 0, DurationSamples: 0},
+			{Day: "2026-10-20", Runs: 1, DurationSamples: 1, AvgDurationMS: ptr(1000.0), P95DurationMS: ptr(1000.0)},
+			{Day: "2026-10-21", Runs: 1, DurationSamples: 0},
 		},
 		ByProject: []store.ProjectStats{{
-			ProjectID: 42, Runs: 1, CostMicros: 5, DurationSamples: 1,
+			ProjectID: 42, Runs: 1, DurationSamples: 1,
 			AvgDurationMS: ptr(1000.0), P95DurationMS: ptr(1000.0),
 		}},
 		ByProvider: []store.ProviderStats{
 			{
-				Provider: "anthropic", Runs: 1, CostMicros: 5, DurationSamples: 1,
+				Provider: "anthropic", Runs: 1, DurationSamples: 1,
 				AvgDurationMS: ptr(1000.0), P95DurationMS: ptr(1000.0),
-				Trend: []store.DailyStats{{Day: "2026-10-20", Runs: 1, CostMicros: 5, DurationSamples: 1, AvgDurationMS: ptr(1000.0), P95DurationMS: ptr(1000.0)}},
+				Trend: []store.DailyStats{{Day: "2026-10-20", Runs: 1, DurationSamples: 1, AvgDurationMS: ptr(1000.0), P95DurationMS: ptr(1000.0)}},
 			},
 			{Provider: "openai", Runs: 1},
 		},
 		ByBlock: []store.BlockStats{{
-			Block: "code-review", Runs: 1, CostMicros: 5, DurationSamples: 1,
+			Block: "code-review", Runs: 1, DurationSamples: 1,
 			AvgDurationMS: ptr(1000.0), P95DurationMS: ptr(1000.0),
 		}},
 	}
@@ -423,7 +423,7 @@ func TestStatsTrendJSON(t *testing.T) {
 		t.Fatalf("trend = %v", trend)
 	}
 	first := trend[0].(map[string]any)
-	if first["day"] != "2026-10-20" || first["runs"] != float64(1) || first["cost_micros"] != float64(5) ||
+	if first["day"] != "2026-10-20" || first["runs"] != float64(1) ||
 		first["duration_samples"] != float64(1) || first["avg_duration_ms"] != float64(1000) ||
 		first["p95_duration_ms"] != float64(1000) {
 		t.Fatalf("first trend = %v", first)
@@ -452,7 +452,7 @@ func TestStatsTrendJSON(t *testing.T) {
 	}
 	anthropic := providers[0].(map[string]any)
 	if anthropic["provider"] != "anthropic" || anthropic["runs"] != float64(1) ||
-		anthropic["cost_micros"] != float64(5) || anthropic["duration_samples"] != float64(1) ||
+		anthropic["duration_samples"] != float64(1) ||
 		anthropic["avg_duration_ms"] != float64(1000) || anthropic["p95_duration_ms"] != float64(1000) {
 		t.Fatalf("anthropic = %v", anthropic)
 	}
@@ -478,6 +478,14 @@ func TestStatsTrendJSON(t *testing.T) {
 	}
 	if values, ok := block["trend"].([]any); !ok || len(values) != 0 {
 		t.Fatalf("block trend = %v, want []", block["trend"])
+	}
+	for label, object := range map[string]map[string]any{
+		"stats": body, "trend": first, "second trend": second, "project": project,
+		"provider": anthropic, "block": block,
+	} {
+		if _, present := object["cost_micros"]; present {
+			t.Fatalf("%s exposes cost_micros: %v", label, object)
+		}
 	}
 }
 

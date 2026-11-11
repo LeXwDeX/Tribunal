@@ -473,10 +473,10 @@ func (e *Executor) executeExplore(ctx context.Context, in dag.NodeInput) (dag.No
 	}
 	out, ok := result.Output.(*ExploreOut)
 	if !ok || out == nil {
-		return e.agentOutputError(params.Provider, result, errors.New("review: explore decoder returned an unexpected type"))
+		return e.agentOutputError(result, errors.New("review: explore decoder returned an unexpected type"))
 	}
 	out.ToolGaps = gaps
-	return e.marshalAgentOutput(out, params.Provider, result.Usage)
+	return e.marshalAgentOutput(out, result.Usage)
 }
 
 func (e *Executor) executeReviewLane(ctx context.Context, in dag.NodeInput) (dag.NodeOutput, error) {
@@ -513,11 +513,11 @@ func (e *Executor) executeReviewLane(ctx context.Context, in dag.NodeInput) (dag
 	}
 	out, ok := result.Output.(*ReviewOut)
 	if !ok || out == nil {
-		return e.agentOutputError(params.Provider, result, errors.New("review: review lane decoder returned an unexpected type"))
+		return e.agentOutputError(result, errors.New("review: review lane decoder returned an unexpected type"))
 	}
 	out.ToolGaps = gaps
 	out.DiffReads = changes.DiffReads()
-	return e.marshalAgentOutput(out, params.Provider, result.Usage)
+	return e.marshalAgentOutput(out, result.Usage)
 }
 
 func (e *Executor) executeValidate(ctx context.Context, in dag.NodeInput) (dag.NodeOutput, error) {
@@ -551,10 +551,10 @@ func (e *Executor) executeValidate(ctx context.Context, in dag.NodeInput) (dag.N
 	}
 	out, ok := result.Output.(*ValidateOut)
 	if !ok || out == nil {
-		return e.agentOutputError(params.Provider, result, errors.New("review: validate decoder returned an unexpected type"))
+		return e.agentOutputError(result, errors.New("review: validate decoder returned an unexpected type"))
 	}
 	out.ToolGaps = gaps
-	return e.marshalAgentOutput(out, params.Provider, result.Usage)
+	return e.marshalAgentOutput(out, result.Usage)
 }
 
 func exploreTask(d *Dossier) string {

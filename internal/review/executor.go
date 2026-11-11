@@ -125,9 +125,6 @@ type SkillProvider interface {
 // WorkflowSnapshot reads the projected workflow with completed node outputs.
 type WorkflowSnapshot func(ctx context.Context, workflowID string) (dag.WorkflowView, error)
 
-// CostFunc converts provider usage into micro-dollars.
-type CostFunc func(provider string, usage llm.Usage) int64
-
 // ExecutorDeps contains every external capability of the review executor.
 // A nil Dossier only supports onboarding graphs.
 type ExecutorDeps struct {
@@ -146,7 +143,6 @@ type ExecutorDeps struct {
 	MaxAttempts    int
 	Backoff        time.Duration
 	Sleep          func(context.Context, time.Duration) error
-	Cost           CostFunc
 	Outbound       func(context.Context, func(context.Context) error) error
 	// RepositorySkillsVerified is set only after the app layer revalidated the
 	// stored repository grants and the filtered snapshot for this execution.
@@ -573,22 +569,18 @@ func retryableTransport(err error) bool {
 	return false
 }
 
-func (e *Executor) dagUsage(provider string, usage llm.Usage) dag.Usage {
-	out := dag.Usage{
+func (e *Executor) dagUsage(usage llm.Usage) dag.Usage {
+	return dag.Usage{
 		InputTokens:      usage.InputTokens,
 		OutputTokens:     usage.OutputTokens,
 		CacheReadTokens:  usage.CacheReadTokens,
 		CacheWriteTokens: usage.CacheWriteTokens,
 		ReasoningTokens:  usage.ReasoningTokens,
 	}
-	if e.deps.Cost != nil {
-		out.CostMicros = e.deps.Cost(provider, usage)
-	}
-	return out
 }
 
-func (e *Executor) marshalAgentOutput(value any, provider string, usage llm.Usage) (dag.NodeOutput, error) {
-	dagUsage := e.dagUsage(provider, usage)
+func (e *Executor) marshalAgentOutput(value any, usage llm.Usage) (dag.NodeOutput, error) {
+	dagUsage := e.dagUsage(usage)
 	out, err := marshalNodeOutput(value, dagUsage)
 	if err != nil {
 		return dag.NodeOutput{}, &usageError{usage: dagUsage, incomplete: usage.Incomplete, err: err}
@@ -597,11 +589,11 @@ func (e *Executor) marshalAgentOutput(value any, provider string, usage llm.Usag
 	return out, nil
 }
 
-func (e *Executor) agentOutputError(provider string, result *agent.RunResult, err error) (dag.NodeOutput, error) {
+func (e *Executor) agentOutputError(result *agent.RunResult, err error) (dag.NodeOutput, error) {
 	if result == nil {
 		return dag.NodeOutput{}, err
 	}
-	return dag.NodeOutput{}, &usageError{usage: e.dagUsage(provider, result.Usage), incomplete: result.Usage.Incomplete, err: err}
+	return dag.NodeOutput{}, &usageError{usage: e.dagUsage(result.Usage), incomplete: result.Usage.Incomplete, err: err}
 }
 
 // changeSource builds the review tool view of the fixed dossier. inline
@@ -914,10 +906,10 @@ func (e *Executor) callAgent(ctx context.Context, in dag.NodeInput, opts agentOp
 		usage := dag.Usage{}
 		incomplete := false
 		if result != nil {
-			usage = e.dagUsage(opts.Provider, result.Usage)
+			usage = e.dagUsage(result.Usage)
 			incomplete = result.Usage.Incomplete
 		}
-		if incomplete || usage.InputTokens > 0 || usage.OutputTokens > 0 || usage.CostMicros > 0 ||
+		if incomplete || usage.InputTokens > 0 || usage.OutputTokens > 0 ||
 			usage.CacheReadTokens > 0 || usage.CacheWriteTokens > 0 || usage.ReasoningTokens > 0 {
 			return result, &usageError{usage: usage, incomplete: incomplete, err: err}
 		}

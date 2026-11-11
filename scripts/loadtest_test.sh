@@ -91,7 +91,6 @@ class Handler(BaseHTTPRequestHandler):
                         "duration_ms": 1000,
                         "tokens_in": 9999,
                         "tokens_out": 9999,
-                        "cost_micros": 9999,
                         "created_at": "2026-01-01T00:00:00Z",
                     }]
                 return self.send_json(200, {"reviews": old, "next_cursor": None})
@@ -115,7 +114,6 @@ class Handler(BaseHTTPRequestHandler):
                     "duration_ms": 1000,
                     "tokens_in": 9999,
                     "tokens_out": 9999,
-                    "cost_micros": 9999,
                     "created_at": old_created,
                 })
             reviews.append({
@@ -127,7 +125,6 @@ class Handler(BaseHTTPRequestHandler):
                 "duration_ms": 0 if status == "cancelled" else 15000,
                 "tokens_in": 100,
                 "tokens_out": 50,
-                "cost_micros": 123,
                 "created_at": new_created,
             })
             return self.send_json(200, {"reviews": reviews, "next_cursor": None})

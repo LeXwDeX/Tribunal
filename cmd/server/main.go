@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -104,6 +105,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	// Migration warnings come first: a validation error may name a field
 	// that a warning explains.
 	warnConfig(logger, cfg.Warnings)
+	warnDeprecatedProviderPrices(logger, cfg.Providers)
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
@@ -616,6 +618,23 @@ func warnConfig(logger *slog.Logger, warnings []string) {
 	for _, warning := range warnings {
 		logger.Warn("configuration was migrated or ignored: " + warning)
 	}
+}
+
+// warnDeprecatedProviderPrices reports provider price blocks that are parsed
+// for legacy compatibility only. The message names providers, never amounts.
+func warnDeprecatedProviderPrices(logger *slog.Logger, providers map[string]config.ProviderConfig) {
+	names := make([]string, 0, len(providers))
+	for name, provider := range providers {
+		if provider.Price != nil {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return
+	}
+	sort.Strings(names)
+	logger.Warn("provider price is deprecated and no longer used; remove it before v2.0",
+		"providers", strings.Join(names, ", "))
 }
 
 // warnDeprecatedEnv tells the operator once per startup which legacy

@@ -18,7 +18,6 @@ type ModelParams struct {
 	StrictRoleAlternation bool                    `json:"strict_role_alternation"`
 	MaxConcurrency        int                     `json:"max_concurrency"`
 	RPM                   int                     `json:"rpm"`
-	Price                 *config.PriceConfig     `json:"price"`
 	// Capability declarations (omitempty keeps existing stored records and API
 	// responses byte-identical when unset).
 	AllowReasoningEffortNone bool   `json:"allow_reasoning_effort_none,omitempty"`
@@ -47,7 +46,6 @@ type ModelParamsPatch struct {
 	StrictRoleAlternation    *bool
 	MaxConcurrency           *int
 	RPM                      *int
-	Price                    ParamUpdate[config.PriceConfig]
 	AllowReasoningEffortNone *bool
 	PreserveReasoningContent *bool
 	OutputConfigEffort       *bool
@@ -83,9 +81,6 @@ func (p ModelParamsPatch) Apply(base ModelParams) ModelParams {
 	}
 	if p.RPM != nil {
 		base.RPM = *p.RPM
-	}
-	if p.Price.Set {
-		base.Price = p.Price.Value
 	}
 	if p.AllowReasoningEffortNone != nil {
 		base.AllowReasoningEffortNone = *p.AllowReasoningEffortNone
@@ -125,9 +120,6 @@ func (p ModelParamsPatch) Fields() []string {
 	}
 	if p.PreserveReasoningContent != nil {
 		fields = append(fields, "params.preserve_reasoning_content")
-	}
-	if p.Price.Set {
-		fields = append(fields, "params.price")
 	}
 	if p.Reasoning.Set {
 		fields = append(fields, "params.reasoning")

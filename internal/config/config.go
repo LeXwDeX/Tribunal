@@ -184,7 +184,11 @@ type ProviderConfig struct {
 	Temperature      *float64         `yaml:"temperature" json:"temperature"`
 	Thinking         *ThinkingConfig  `yaml:"thinking" json:"thinking"`
 	Reasoning        *ReasoningConfig `yaml:"reasoning" json:"reasoning"`
-	Price            *PriceConfig     `yaml:"price" json:"price"`
+	// Price is a legacy field kept only so old YAML files still load and
+	// existing review execution identities stay byte-identical. It is no
+	// longer used for any calculation and will be removed in v2.0. The JSON
+	// tag intentionally has no omitempty for identity compatibility.
+	Price *PriceConfig `yaml:"price" json:"price"`
 	// StrictRoleAlternation folds a text prompt that follows tool results
 	// into the last tool message for openai-chat gateways that reject a
 	// tool -> user sequence (#262). It is ignored by other protocols.
@@ -218,7 +222,9 @@ type ReasoningConfig struct {
 	Effort string `yaml:"effort" json:"effort"`
 }
 
-// PriceConfig records per-million-token prices for cost statistics.
+// PriceConfig is the deprecated per-million-token price shape. Tribunal no
+// longer computes money cost; the field is parsed only for legacy YAML and
+// execution identity compatibility and is planned for removal in v2.0.
 type PriceConfig struct {
 	InputPerMTok  float64 `yaml:"input_per_mtok" json:"input_per_mtok"`
 	OutputPerMTok float64 `yaml:"output_per_mtok" json:"output_per_mtok"`

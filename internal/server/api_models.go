@@ -148,6 +148,9 @@ func (s *Server) handleCreateModel(w http.ResponseWriter, r *http.Request) {
 	}
 	var request modelWriteRequest
 	if err := decodeJSON(w, r, adminBodyLimit, &request); err != nil {
+		if modelWriteDecodeError(w, r, err) {
+			return
+		}
 		decodeRequestError(w, r, err)
 		return
 	}
@@ -183,6 +186,9 @@ func (s *Server) handleUpdateModel(w http.ResponseWriter, r *http.Request) {
 	}
 	var request modelWriteRequest
 	if err := decodeJSON(w, r, adminBodyLimit, &request); err != nil {
+		if modelWriteDecodeError(w, r, err) {
+			return
+		}
 		decodeRequestError(w, r, err)
 		return
 	}
@@ -286,6 +292,18 @@ func (s *Server) handleUpdateModelParams(w http.ResponseWriter, r *http.Request)
 	s.finishModelWrite(w, r, updated.ID)
 }
 
+// modelWriteDecodeError maps the removed params.price key in a whole-record
+// model write to its field path. The strict decoder only reports the leaf
+// name, so this is limited to the one removed parameter; every other decode
+// failure keeps the generic body error.
+func modelWriteDecodeError(w http.ResponseWriter, r *http.Request, err error) bool {
+	if !strings.Contains(err.Error(), `unknown field "price"`) {
+		return false
+	}
+	validationFailed(w, r, "params.price", "params.price is not a supported parameter")
+	return true
+}
+
 // decodeModelParamsPatch turns the request's parameter object into a merge
 // patch. It distinguishes an absent key (unchanged) from an explicit null
 // (clear) and reports failures per field without echoing values.
@@ -310,8 +328,6 @@ func decodeModelParamsPatch(raw map[string]json.RawMessage) (store.ModelParamsPa
 				patch.Reasoning.Set = true
 			case "thinking":
 				patch.Thinking.Set = true
-			case "price":
-				patch.Price.Set = true
 			case "max_tokens", "context_window", "forced_tool_choice", "strict_role_alternation", "max_concurrency", "rpm",
 				"allow_reasoning_effort_none", "preserve_reasoning_content", "output_config_effort", "responses_params":
 				detail(name, "must not be null")
@@ -383,11 +399,6 @@ func decodeModelParamsPatch(raw map[string]json.RawMessage) (store.ModelParamsPa
 			var v config.ThinkingConfig
 			if decodeObject(name, &v) {
 				patch.Thinking = store.ParamUpdate[config.ThinkingConfig]{Set: true, Value: &v}
-			}
-		case "price":
-			var v config.PriceConfig
-			if decodeObject(name, &v) {
-				patch.Price = store.ParamUpdate[config.PriceConfig]{Set: true, Value: &v}
 			}
 		case "forced_tool_choice":
 			var v string

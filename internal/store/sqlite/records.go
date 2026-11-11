@@ -1184,16 +1184,14 @@ func statsConditions(filter store.StatsFilter, alias string) ([]string, []any) {
 }
 
 type statsBucket struct {
-	runs       int64
-	costMicros int64
-	durations  []float64
+	runs      int64
+	durations []float64
 }
 
 type groupAccumulator struct {
-	runs       int64
-	costMicros int64
-	durations  []float64
-	days       map[string]*statsBucket
+	runs      int64
+	durations []float64
+	days      map[string]*statsBucket
 }
 
 func dayBucket(days map[string]*statsBucket, day string) *statsBucket {
@@ -1223,12 +1221,10 @@ func groupAccumulatorFor(groups map[string]*groupAccumulator, key string) *group
 	return group
 }
 
-func (g *groupAccumulator) add(day string, cost int64, duration *float64) {
+func (g *groupAccumulator) add(day string, duration *float64) {
 	g.runs++
-	g.costMicros = saturatingAddInt64(g.costMicros, cost)
 	bucket := dayBucket(g.days, day)
 	bucket.runs++
-	bucket.costMicros = saturatingAddInt64(bucket.costMicros, cost)
 	if duration != nil {
 		g.durations = append(g.durations, *duration)
 		bucket.durations = append(bucket.durations, *duration)
@@ -1274,7 +1270,6 @@ func dailyTrend(days map[string]*statsBucket) []store.DailyStats {
 		trend = append(trend, store.DailyStats{
 			Day:             day,
 			Runs:            bucket.runs,
-			CostMicros:      bucket.costMicros,
 			DurationSamples: samples,
 			AvgDurationMS:   avg,
 			P95DurationMS:   p95,
@@ -1296,7 +1291,6 @@ func providerTrend(groups map[string]*groupAccumulator) []store.ProviderStats {
 		out = append(out, store.ProviderStats{
 			Provider:        name,
 			Runs:            group.runs,
-			CostMicros:      group.costMicros,
 			DurationSamples: samples,
 			AvgDurationMS:   avg,
 			P95DurationMS:   p95,
@@ -1319,7 +1313,6 @@ func blockTrend(groups map[string]*groupAccumulator) []store.BlockStats {
 		out = append(out, store.BlockStats{
 			Block:           name,
 			Runs:            group.runs,
-			CostMicros:      group.costMicros,
 			DurationSamples: samples,
 			AvgDurationMS:   avg,
 			P95DurationMS:   p95,
@@ -1329,7 +1322,7 @@ func blockTrend(groups map[string]*groupAccumulator) []store.BlockStats {
 	return out
 }
 
-// Stats aggregates workflow outcomes, findings decisions, costs and per-model
+// Stats aggregates workflow outcomes, findings decisions and per-model
 // audit usage. Unknown denominators stay nil.
 func (s *Store) Stats(ctx context.Context, filter store.StatsFilter) (store.Stats, error) {
 	stats := store.Stats{
@@ -1356,7 +1349,7 @@ func (s *Store) Stats(ctx context.Context, filter store.StatsFilter) (store.Stat
 	topDays := make(map[string]*statsBucket)
 	projectDays := make(map[int64]map[string]*statsBucket)
 	rows, err := s.db.QueryContext(ctx, `SELECT
-		w.project_id, w.verdict, w.started_at, w.finished_at, w.cost_micros, w.created_at
+		w.project_id, w.verdict, w.started_at, w.finished_at, w.created_at
 		FROM workflows w `+where, args...)
 	if err != nil {
 		return stats, fmt.Errorf("sqlite: stats workflows: %w", err)
@@ -1367,10 +1360,9 @@ func (s *Store) Stats(ctx context.Context, filter store.StatsFilter) (store.Stat
 			verdict   sql.NullString
 			started   sql.NullString
 			finished  sql.NullString
-			cost      int64
 			created   string
 		)
-		if err := rows.Scan(&projectID, &verdict, &started, &finished, &cost, &created); err != nil {
+		if err := rows.Scan(&projectID, &verdict, &started, &finished, &created); err != nil {
 			rows.Close()
 			return stats, fmt.Errorf("sqlite: scan stats workflow: %w", err)
 		}
@@ -1381,10 +1373,8 @@ func (s *Store) Stats(ctx context.Context, filter store.StatsFilter) (store.Stat
 		}
 		day := createdAt.UTC().Format("2006-01-02")
 		stats.Runs++
-		stats.CostMicros = saturatingAddInt64(stats.CostMicros, cost)
 		topBucket := dayBucket(topDays, day)
 		topBucket.runs++
-		topBucket.costMicros = saturatingAddInt64(topBucket.costMicros, cost)
 		index, ok := projectIndex[projectID]
 		if !ok {
 			index = len(stats.ByProject)
@@ -1392,10 +1382,8 @@ func (s *Store) Stats(ctx context.Context, filter store.StatsFilter) (store.Stat
 			stats.ByProject = append(stats.ByProject, store.ProjectStats{ProjectID: projectID})
 		}
 		stats.ByProject[index].Runs++
-		stats.ByProject[index].CostMicros = saturatingAddInt64(stats.ByProject[index].CostMicros, cost)
 		projectBucket := dayBucket(projectDaysFor(projectDays, projectID), day)
 		projectBucket.runs++
-		projectBucket.costMicros = saturatingAddInt64(projectBucket.costMicros, cost)
 		if verdict.String == "BLOCKING" {
 			stats.Blocking++
 			stats.ByProject[index].Blocking++
@@ -1443,7 +1431,7 @@ func (s *Store) Stats(ctx context.Context, filter store.StatsFilter) (store.Stat
 	}
 	nodeWhere += "COALESCE(n.started_at, '') <> ''"
 	nodeRows, err := s.db.QueryContext(ctx, `SELECT
-		n.provider, n.kind, n.cost_micros, n.started_at, n.finished_at, w.created_at
+		n.provider, n.kind, n.started_at, n.finished_at, w.created_at
 		FROM workflow_nodes n JOIN workflows w ON w.id = n.workflow_id `+nodeWhere, args...)
 	if err != nil {
 		return stats, fmt.Errorf("sqlite: stats nodes: %w", err)
@@ -1452,12 +1440,11 @@ func (s *Store) Stats(ctx context.Context, filter store.StatsFilter) (store.Stat
 		var (
 			provider sql.NullString
 			kind     string
-			cost     int64
 			started  string
 			finished sql.NullString
 			created  string
 		)
-		if err := nodeRows.Scan(&provider, &kind, &cost, &started, &finished, &created); err != nil {
+		if err := nodeRows.Scan(&provider, &kind, &started, &finished, &created); err != nil {
 			nodeRows.Close()
 			return stats, fmt.Errorf("sqlite: scan stats node: %w", err)
 		}
@@ -1485,9 +1472,9 @@ func (s *Store) Stats(ctx context.Context, filter store.StatsFilter) (store.Stat
 			}
 		}
 		if provider.String != "" {
-			groupAccumulatorFor(providerGroups, provider.String).add(day, cost, duration)
+			groupAccumulatorFor(providerGroups, provider.String).add(day, duration)
 		}
-		groupAccumulatorFor(blockGroups, kind).add(day, cost, duration)
+		groupAccumulatorFor(blockGroups, kind).add(day, duration)
 	}
 	if err := nodeRows.Err(); err != nil {
 		nodeRows.Close()
@@ -1607,45 +1594,6 @@ func (s *Store) Stats(ctx context.Context, filter store.StatsFilter) (store.Stat
 			entry.P50LatencyMS = &p50
 		}
 	}
-
-	costWhere := where
-	if costWhere == "" {
-		costWhere = "WHERE "
-	} else {
-		costWhere += " AND "
-	}
-	costRows, err := s.db.QueryContext(ctx, `SELECT n.provider, n.model, n.cost_micros
-		FROM workflow_nodes n JOIN workflows w ON w.id = n.workflow_id `+costWhere+`
-		n.provider IS NOT NULL AND n.provider <> ''
-		AND n.model IS NOT NULL AND n.model <> ''
-		ORDER BY n.provider, n.model`, args...)
-	if err != nil {
-		return stats, fmt.Errorf("sqlite: stats model costs: %w", err)
-	}
-	for costRows.Next() {
-		var (
-			provider string
-			model    string
-			cost     int64
-		)
-		if err := costRows.Scan(&provider, &model, &cost); err != nil {
-			costRows.Close()
-			return stats, fmt.Errorf("sqlite: scan model cost: %w", err)
-		}
-		key := provider + "\x00" + model
-		index, ok := modelIndex[key]
-		if !ok {
-			index = len(stats.ByModel)
-			modelIndex[key] = index
-			stats.ByModel = append(stats.ByModel, store.ModelStats{Provider: provider, Model: model})
-		}
-		stats.ByModel[index].CostMicros = saturatingAddInt64(stats.ByModel[index].CostMicros, cost)
-	}
-	if err := costRows.Err(); err != nil {
-		costRows.Close()
-		return stats, fmt.Errorf("sqlite: iterate model costs: %w", err)
-	}
-	costRows.Close()
 
 	feedback, err := s.FeedbackTotals(ctx, store.FeedbackFilter{
 		ProjectID:    filter.ProjectID,

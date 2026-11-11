@@ -468,7 +468,6 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 		Tools:                    execution.tools,
 		Skills:                   execution.skills,
 		Locate:                   locateFunc(index),
-		Cost:                     s.cost,
 		Outbound:                 outboundSender(ws),
 		RepositorySkillsVerified: execution.repositorySkillsVerified(),
 		Logger:                   s.logger,

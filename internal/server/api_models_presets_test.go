@@ -20,8 +20,8 @@ func presetTestModel() *store.Model {
 		BaseURL: "https://api.deepseek.com", Model: "deepseek-flash", Revision: 5, HasAPIKey: true,
 		Params: store.ModelParams{
 			MaxTokens: 1024, MaxConcurrency: 1,
-			Temperature: ptr(0.6), Price: &config.PriceConfig{InputPerMTok: 1, OutputPerMTok: 2},
-			Thinking: &config.ThinkingConfig{Type: "disabled"},
+			Temperature: ptr(0.6),
+			Thinking:    &config.ThinkingConfig{Type: "disabled"},
 		},
 	}
 }
@@ -134,7 +134,7 @@ func TestModelPresetApplyMergesOnlyPresetFields(t *testing.T) {
 	if params.ForcedToolChoice != "unsupported" || !params.PreserveReasoningContent || params.RPM != 0 {
 		t.Fatalf("capability params = %+v", params)
 	}
-	if params.Temperature == nil || *params.Temperature != 0.6 || params.Price == nil || params.Price.OutputPerMTok != 2 {
+	if params.Temperature == nil || *params.Temperature != 0.6 {
 		t.Fatalf("unrelated params changed: %+v", params)
 	}
 	if fake.paramsResult.Protocol != "openai-chat" || fake.paramsResult.BaseURL != "https://api.deepseek.com" ||

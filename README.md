@@ -267,7 +267,7 @@ go mod verify
 - DAG 引擎、评审块、固定评审流程（explore、四路并行评审、verify 反证、裁决）、结果发布与 republish。
 - 工作区 onboarding/刷新、上下文文档、MCP/Skill 与项目级绑定。
 - OAuth 持久会话、CSRF、平台 admin/viewer 标签、项目 `read`/`manage` 授权、用户停用与凭据撤销、API token（默认 90 天、最长 365 天）、管理 API、React 控制台、反馈收集。
-- 总体/项目/provider/块的运行次数、成本、平均/P95 耗时、样本数及 UTC 日趋势。项目统计工作流，provider/块统计已启动节点，界面可展开每日明细；不把节点重试或多轮调用当作额外运行。筛选与分桶均以 workflow 创建时间为准，详见 [统计 API 口径](docs/design/03-http-api.md#45-系统)。
+- 总体/项目/provider/块的运行次数、平均/P95 耗时、样本数及 UTC 日趋势。项目统计工作流，provider/块统计已启动节点，界面可展开每日明细；不把节点重试或多轮调用当作额外运行。筛选与分桶均以 workflow 创建时间为准，详见 [统计 API 口径](docs/design/03-http-api.md#45-系统)。
 - 项目/评审摘要、运行趋势，以及按 provider 的提出方准确率和挑战方误杀率；原始反馈计数单独展示，不作为人工结论。
 - finding 人工标注：项目 `manage` 权限可保存、更正或清除有效/无效/未确定结论，`read` 只读；保存操作者与时间，同一 finding ID 的重新发布保留标注。`quality_by_provider` 展示提出方准确率、被挑战推翻比例、挑战方误杀率及样本数，未标注/未确定不进入人工结论分母。
 - DAG 并发提交在 revision 前进时继续重试，同 revision 连续冲突有界失败；完成写入的持久化错误显式返回。finalize 遇到并发新增节点会回到调度循环。deep 完整执行、失败评审摘要、optional verify 失败转 uncertain、MR 描述的不可信边界与 P1 禁止 PASS 均有本地集成测试。模型替身只证明调用链和确定性约束，不证明真实模型抗提示注入。

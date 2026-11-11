@@ -25,7 +25,6 @@ func savedParamsModel() *store.Model {
 			MaxTokens: 4096, ContextWindow: 128000, MaxConcurrency: 2, RPM: 60,
 			Temperature: ptr(0.7), Reasoning: &config.ReasoningConfig{Effort: "high"},
 			Thinking: &config.ThinkingConfig{BudgetTokens: 1024},
-			Price:    &config.PriceConfig{InputPerMTok: 1, OutputPerMTok: 2},
 		},
 	}
 }
@@ -91,9 +90,6 @@ func TestModelParamsUpdateMergesOnlySubmittedKeys(t *testing.T) {
 	if params.Thinking == nil || params.Thinking.BudgetTokens != 1024 {
 		t.Fatalf("thinking changed: %+v", params.Thinking)
 	}
-	if params.Price == nil || params.Price.InputPerMTok != 1 || params.Price.OutputPerMTok != 2 {
-		t.Fatalf("price changed: %+v", params.Price)
-	}
 	if fake.paramsResult.Revision != 4 {
 		t.Fatalf("revision = %d, want 4", fake.paramsResult.Revision)
 	}
@@ -120,12 +116,12 @@ func TestModelParamsUpdateMergesOnlySubmittedKeys(t *testing.T) {
 func TestModelParamsUpdateExplicitNullClearsNullableFields(t *testing.T) {
 	fake := &fakeModelStore{stored: savedParamsModel()}
 	server, _ := newParamsTestServer(t, fake)
-	response := patchModelParams(server, "user:saved", `{"revision":3,"params":{"temperature":null,"reasoning":null,"thinking":null,"price":null}}`)
+	response := patchModelParams(server, "user:saved", `{"revision":3,"params":{"temperature":null,"reasoning":null,"thinking":null}}`)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d body = %s, want 200", response.Code, response.Body.String())
 	}
 	params := fake.paramsResult.Params
-	if params.Temperature != nil || params.Reasoning != nil || params.Thinking != nil || params.Price != nil {
+	if params.Temperature != nil || params.Reasoning != nil || params.Thinking != nil {
 		t.Fatalf("nullable fields not cleared: %+v", params)
 	}
 	if params.MaxTokens != 4096 || params.RPM != 60 {
@@ -141,7 +137,6 @@ func TestModelParamsUpdateRejectsUnknownNestedFields(t *testing.T) {
 	}{
 		{"reasoning typo", `{"revision":3,"params":{"reasoning":{"effrot":"high"}}}`, "params.reasoning"},
 		{"thinking typo", `{"revision":3,"params":{"thinking":{"budget_token":1}}}`, "params.thinking"},
-		{"price typo", `{"revision":3,"params":{"price":{"input_per_mtoken":1}}}`, "params.price"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeModelStore{stored: savedParamsModel()}
@@ -168,7 +163,6 @@ func TestModelParamsUpdateRejectsNullInsideObjectParameters(t *testing.T) {
 		{"thinking budget", `{"revision":3,"params":{"thinking":{"budget_tokens":null}}}`},
 		{"thinking type", `{"revision":3,"params":{"thinking":{"type":null}}}`},
 		{"reasoning effort", `{"revision":3,"params":{"reasoning":{"effort":null}}}`},
-		{"price field", `{"revision":3,"params":{"price":{"input_per_mtok":null}}}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeModelStore{stored: savedParamsModel()}
@@ -181,7 +175,7 @@ func TestModelParamsUpdateRejectsNullInsideObjectParameters(t *testing.T) {
 			if code != "validation_failed" {
 				t.Fatalf("code = %q, want validation_failed", code)
 			}
-			message := fields["params.thinking"] + fields["params.reasoning"] + fields["params.price"]
+			message := fields["params.thinking"] + fields["params.reasoning"]
 			if !strings.Contains(message, "top-level null") {
 				t.Fatalf("details = %v, want a top-level null hint", fields)
 			}
@@ -197,13 +191,36 @@ func TestModelParamsUpdateRejectsNullInsideObjectParameters(t *testing.T) {
 func TestModelParamsUpdateReplacesObjectParametersWholesale(t *testing.T) {
 	fake := &fakeModelStore{stored: savedParamsModel()}
 	server, _ := newParamsTestServer(t, fake)
-	response := patchModelParams(server, "user:saved", `{"revision":3,"params":{"price":{"input_per_mtok":7}}}`)
+	response := patchModelParams(server, "user:saved", `{"revision":3,"params":{"thinking":{"budget_tokens":7}}}`)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d body = %s, want 200", response.Code, response.Body.String())
 	}
-	price := fake.paramsResult.Params.Price
-	if price == nil || price.InputPerMTok != 7 || price.OutputPerMTok != 0 {
-		t.Fatalf("price = %+v, want input 7 and output reset to 0", price)
+	thinking := fake.paramsResult.Params.Thinking
+	if thinking == nil || thinking.BudgetTokens != 7 || thinking.Type != "" {
+		t.Fatalf("thinking = %+v, want budget 7 and type reset to empty", thinking)
+	}
+}
+
+// Money cost was removed in v1.4.0. Both an explicit null and an object must
+// be rejected as an unsupported parameter without echoing values.
+func TestModelParamsUpdateRejectsPrice(t *testing.T) {
+	for _, body := range []string{
+		`{"revision":3,"params":{"price":null}}`,
+		`{"revision":3,"params":{"price":{"input_per_mtok":1,"output_per_mtok":2}}}`,
+	} {
+		fake := &fakeModelStore{stored: savedParamsModel()}
+		server, _ := newParamsTestServer(t, fake)
+		response := patchModelParams(server, "user:saved", body)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("body %s: status = %d body = %s, want 400", body, response.Code, response.Body.String())
+		}
+		code, fields := errorDetails(t, response)
+		if code != "validation_failed" || !strings.Contains(fields["params.price"], "not a supported parameter") {
+			t.Fatalf("body %s: code = %q details = %v", body, code, fields)
+		}
+		if fake.paramsCalls != 0 {
+			t.Fatalf("body %s: store was called for a removed parameter", body)
+		}
 	}
 }
 
@@ -353,9 +370,6 @@ func TestModelParamsUpdateSetsAndClearsEachKey(t *testing.T) {
 		{"set thinking type", `{"thinking":{"type":"enabled"}}`, ptr(paramsWith(func(p *store.ModelParams) {
 			p.Thinking = &config.ThinkingConfig{Type: "enabled"}
 		})), ""},
-		{"set price", `{"price":{"input_per_mtok":3,"output_per_mtok":4}}`, ptr(paramsWith(func(p *store.ModelParams) {
-			p.Price = &config.PriceConfig{InputPerMTok: 3, OutputPerMTok: 4}
-		})), ""},
 		{"set forced_tool_choice", `{"forced_tool_choice":"supported"}`, ptr(paramsWith(func(p *store.ModelParams) {
 			p.ForcedToolChoice = "supported"
 		})), ""},
@@ -381,7 +395,6 @@ func TestModelParamsUpdateSetsAndClearsEachKey(t *testing.T) {
 		{"clear temperature", `{"temperature":null}`, ptr(paramsWith(func(p *store.ModelParams) { p.Temperature = nil })), ""},
 		{"clear reasoning", `{"reasoning":null}`, ptr(paramsWith(func(p *store.ModelParams) { p.Reasoning = nil })), ""},
 		{"clear thinking", `{"thinking":null}`, ptr(paramsWith(func(p *store.ModelParams) { p.Thinking = nil })), ""},
-		{"clear price", `{"price":null}`, ptr(paramsWith(func(p *store.ModelParams) { p.Price = nil })), ""},
 		{"reset context_window", `{"context_window":0}`, ptr(paramsWith(func(p *store.ModelParams) { p.ContextWindow = 0 })), ""},
 		{"reset rpm", `{"rpm":0}`, ptr(paramsWith(func(p *store.ModelParams) { p.RPM = 0 })), ""},
 		{"reset forced_tool_choice", `{"forced_tool_choice":""}`, ptr(paramsWith(func(p *store.ModelParams) {

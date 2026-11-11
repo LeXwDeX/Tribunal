@@ -28,7 +28,7 @@ func TestBudgetCancellationAccountsForRunningUsage(t *testing.T) {
 			settled := make(chan struct{})
 			release := make(chan struct{})
 			defer close(release)
-			usage := Usage{InputTokens: 7, OutputTokens: 3, CostMicros: 11, CacheReadTokens: 2, CacheWriteTokens: 4, ReasoningTokens: 5}
+			usage := Usage{InputTokens: 7, OutputTokens: 3, CacheReadTokens: 2, CacheWriteTokens: 4, ReasoningTokens: 5}
 			inner := NewMemoryEventStore()
 			terminalType := EventNodeSkipped
 			wantStatus, wantWorkflow := NodeSkipped, WorkflowCompleted
@@ -118,7 +118,7 @@ func TestProjectBudgetUsageAndLegacyEvents(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := Usage{InputTokens: 7, OutputTokens: 3, CostMicros: 4}
+			want := Usage{InputTokens: 7, OutputTokens: 3}
 			if wf.Usage != want || wf.Nodes["a"].Usage != want || wf.Nodes["b"].Usage != (Usage{}) {
 				t.Fatalf("usage=%+v a=%+v b=%+v", wf.Usage, wf.Nodes["a"], wf.Nodes["b"])
 			}
@@ -598,8 +598,8 @@ func spentEngine(t *testing.T, budget Budget, specs ...NodeSpec) (*Engine, *Memo
 }
 
 func TestProjectUsageRejectsNegativeCounters(t *testing.T) {
-	valid := Usage{InputTokens: 10, OutputTokens: 5, CostMicros: 3, CacheReadTokens: 2, CacheWriteTokens: 1, ReasoningTokens: 4}
-	invalid := Usage{InputTokens: -10, OutputTokens: -5, CostMicros: -3, CacheReadTokens: -2, CacheWriteTokens: -1, ReasoningTokens: -4}
+	valid := Usage{InputTokens: 10, OutputTokens: 5, CacheReadTokens: 2, CacheWriteTokens: 1, ReasoningTokens: 4}
+	invalid := Usage{InputTokens: -10, OutputTokens: -5, CacheReadTokens: -2, CacheWriteTokens: -1, ReasoningTokens: -4}
 	events := seq([]Event{created(t, node("a"), node("b")), mustEv(t, EventWorkflowStarted, struct{}{}, testNow),
 		nodeEvent(t, EventNodeQueued, "a", 1), nodeEvent(t, EventNodeStarted, "a", 1), completedWithUsage(t, "a", 1, valid),
 		nodeEvent(t, EventNodeQueued, "b", 1), nodeEvent(t, EventNodeStarted, "b", 1), completedWithUsage(t, "b", 1, invalid),
@@ -617,8 +617,8 @@ func TestProjectUsageRejectsNegativeCounters(t *testing.T) {
 }
 
 func TestProjectUsageSaturatesOverflow(t *testing.T) {
-	first := Usage{InputTokens: math.MaxInt64 - 5, OutputTokens: 1, CostMicros: math.MaxInt64, CacheReadTokens: math.MaxInt64 - 3, CacheWriteTokens: math.MaxInt64 - 1, ReasoningTokens: math.MaxInt64 - 2}
-	second := Usage{InputTokens: 10, OutputTokens: 2, CostMicros: 1, CacheReadTokens: 5, CacheWriteTokens: 3, ReasoningTokens: 4}
+	first := Usage{InputTokens: math.MaxInt64 - 5, OutputTokens: 1, CacheReadTokens: math.MaxInt64 - 3, CacheWriteTokens: math.MaxInt64 - 1, ReasoningTokens: math.MaxInt64 - 2}
+	second := Usage{InputTokens: 10, OutputTokens: 2, CacheReadTokens: 5, CacheWriteTokens: 3, ReasoningTokens: 4}
 	events := seq([]Event{created(t, node("a"), node("b")), mustEv(t, EventWorkflowStarted, struct{}{}, testNow),
 		nodeEvent(t, EventNodeQueued, "a", 1), nodeEvent(t, EventNodeStarted, "a", 1), completedWithUsage(t, "a", 1, first),
 		nodeEvent(t, EventNodeQueued, "b", 1), nodeEvent(t, EventNodeStarted, "b", 1), completedWithUsage(t, "b", 1, second),
@@ -627,7 +627,7 @@ func TestProjectUsageSaturatesOverflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := Usage{InputTokens: math.MaxInt64, OutputTokens: 3, CostMicros: math.MaxInt64, CacheReadTokens: math.MaxInt64, CacheWriteTokens: math.MaxInt64, ReasoningTokens: math.MaxInt64}
+	want := Usage{InputTokens: math.MaxInt64, OutputTokens: 3, CacheReadTokens: math.MaxInt64, CacheWriteTokens: math.MaxInt64, ReasoningTokens: math.MaxInt64}
 	if wf.Usage != want || !wf.UsageIncomplete || wf.Usage.totalTokens() != math.MaxInt64 {
 		t.Fatalf("usage=%+v incomplete=%t total=%d", wf.Usage, wf.UsageIncomplete, wf.Usage.totalTokens())
 	}
@@ -650,7 +650,7 @@ func TestProjectUsageMarksInputOutputOverflow(t *testing.T) {
 func TestCommitNodeSuccessSanitizesInvalidUsage(t *testing.T) {
 	engine, store, wfID := spentEngine(t, Budget{MaxTokens: 1}, NodeSpec{ID: "b", Kind: "x"}, NodeSpec{ID: "c", Kind: "x", DependsOn: []string{"a", "b"}})
 	if err := engine.commitNodeSuccess(context.Background(), wfID, "b", NodeSpec{ID: "b", Kind: "x"}, 1, NodeOutput{
-		Data: json.RawMessage(`{"ok":true}`), Usage: Usage{InputTokens: -10, OutputTokens: -5, CostMicros: -1},
+		Data: json.RawMessage(`{"ok":true}`), Usage: Usage{InputTokens: -10, OutputTokens: -5},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -701,10 +701,10 @@ func TestCommitNodeFailureSanitizesInvalidUsage(t *testing.T) {
 
 func TestUsageAddSaturatesAndFailsClosed(t *testing.T) {
 	all := func(v int64) Usage {
-		return Usage{InputTokens: v, OutputTokens: v, CostMicros: v, CacheReadTokens: v, CacheWriteTokens: v, ReasoningTokens: v}
+		return Usage{InputTokens: v, OutputTokens: v, CacheReadTokens: v, CacheWriteTokens: v, ReasoningTokens: v}
 	}
 	saturated := all(math.MaxInt64)
-	if !saturated.add(Usage{InputTokens: 1, OutputTokens: 1, CostMicros: 1, CacheReadTokens: 1, CacheWriteTokens: 1, ReasoningTokens: 1}) {
+	if !saturated.add(Usage{InputTokens: 1, OutputTokens: 1, CacheReadTokens: 1, CacheWriteTokens: 1, ReasoningTokens: 1}) {
 		t.Fatal("saturated addition was reported as exact")
 	}
 	if saturated != all(math.MaxInt64) {

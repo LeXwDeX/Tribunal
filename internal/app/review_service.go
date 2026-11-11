@@ -124,7 +124,6 @@ type ReviewService struct {
 	providerConfig    json.RawMessage
 	extensions        *ProjectExtensionResolver
 	testIdentity      string
-	cost              review.CostFunc
 	publisher         *Publisher
 	publicURL         string
 	status            *statusReporter
@@ -163,7 +162,6 @@ type ReviewServiceConfig struct {
 	AgentRun          review.AgentRunner
 	Tools             review.ToolProvider
 	Skills            review.SkillProvider
-	Cost              review.CostFunc
 	Publisher         *Publisher
 	Status            *statusReporter
 	AllowedProviders  []string
@@ -244,7 +242,6 @@ func NewReviewService(cfg ReviewServiceConfig) (*ReviewService, error) {
 		catalog:        cfg.Catalog,
 		overrides:      cfg.Overrides,
 		agentRun:       cfg.AgentRun,
-		cost:           cfg.Cost,
 		tools:          cfg.Tools,
 		skills:         cfg.Skills,
 		providerNames:  cfg.AllowedProviders,
@@ -970,7 +967,6 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 		Tools:                    execution.tools,
 		Skills:                   execution.skills,
 		Locate:                   locateFunc(diffIndex),
-		Cost:                     s.cost,
 		Outbound:                 outboundSender(ws),
 		RepositorySkillsVerified: execution.repositorySkillsVerified(),
 		Logger:                   s.logger,

@@ -21,25 +21,17 @@ func insertStatsOverflowCall(t *testing.T, st *Store, id, workflowID string, inp
 	}
 }
 
-func setStatsOverflowNode(t *testing.T, st *Store, workflowID, nodeID string, cost int64, at time.Time) {
+func setStatsOverflowNode(t *testing.T, st *Store, workflowID, nodeID string, at time.Time) {
 	t.Helper()
 	result, err := st.db.ExecContext(context.Background(), `UPDATE workflow_nodes
-		SET provider = 'p', model = 'm', cost_micros = ?, started_at = ?, finished_at = ?
+		SET provider = 'p', model = 'm', started_at = ?, finished_at = ?
 		WHERE workflow_id = ? AND id = ?`,
-		cost, formatTime(at), formatTime(at), workflowID, nodeID)
+		formatTime(at), formatTime(at), workflowID, nodeID)
 	if err != nil {
 		t.Fatalf("set workflow node %s: %v", nodeID, err)
 	}
 	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
 		t.Fatalf("set workflow node %s: rows=%d err=%v", nodeID, changed, err)
-	}
-}
-
-func setStatsOverflowWorkflowCost(t *testing.T, st *Store, workflowID string, cost int64) {
-	t.Helper()
-	if _, err := st.db.ExecContext(context.Background(),
-		`UPDATE workflows SET cost_micros = ? WHERE id = ?`, cost, workflowID); err != nil {
-		t.Fatalf("set workflow cost %s: %v", workflowID, err)
 	}
 }
 
@@ -58,7 +50,7 @@ func TestSaturatingAddInt64Bounds(t *testing.T) {
 	}
 }
 
-func TestStatsSaturatesExtremeTokenAndCostAggregates(t *testing.T) {
+func TestStatsSaturatesExtremeTokenAggregates(t *testing.T) {
 	ctx := context.Background()
 	clock := newFakeClock()
 	st := openTestStore(t, clock)
@@ -66,41 +58,30 @@ func TestStatsSaturatesExtremeTokenAndCostAggregates(t *testing.T) {
 	at := clock.Now().UTC()
 	wfID := "wf-overflow"
 	mustCreateWorkflow(t, st, wfID, reviewMeta(42, 9, "head-overflow"), at)
-	otherID := "wf-overflow-other"
-	mustCreateWorkflow(t, st, otherID, reviewMeta(42, 10, "head-overflow-other"), at)
 
 	insertStatsOverflowCall(t, st, "call-huge", wfID, math.MaxInt64, math.MaxInt64, 100, at)
 	insertStatsOverflowCall(t, st, "call-one", wfID, 1, 1, 300, at)
-	setStatsOverflowNode(t, st, wfID, "a", math.MaxInt64, at)
-	setStatsOverflowNode(t, st, wfID, "b", 1, at)
-	setStatsOverflowWorkflowCost(t, st, wfID, math.MaxInt64)
-	setStatsOverflowWorkflowCost(t, st, otherID, 1)
+	setStatsOverflowNode(t, st, wfID, "a", at)
+	setStatsOverflowNode(t, st, wfID, "b", at)
 
 	stats, err := st.Stats(ctx, store.StatsFilter{ProjectID: ptrInt64(42)})
 	if err != nil {
 		t.Fatalf("Stats: %v", err)
 	}
-	if stats.CostMicros != math.MaxInt64 {
-		t.Fatalf("top cost = %d, want saturated MaxInt64", stats.CostMicros)
-	}
-	if len(stats.ByProject) != 1 || stats.ByProject[0].CostMicros != math.MaxInt64 {
-		t.Fatalf("by project = %+v, want saturated cost", stats.ByProject)
-	}
-	if len(stats.ByProvider) != 1 || stats.ByProvider[0].CostMicros != math.MaxInt64 {
-		t.Fatalf("by provider = %+v, want saturated cost", stats.ByProvider)
+	if len(stats.ByProvider) != 1 || stats.ByProvider[0].Runs != 2 {
+		t.Fatalf("by provider = %+v", stats.ByProvider)
 	}
 	if len(stats.ByBlock) != 2 ||
-		stats.ByBlock[0].Block != "code-review" || stats.ByBlock[0].CostMicros != math.MaxInt64 ||
-		stats.ByBlock[1].Block != "synthesize" || stats.ByBlock[1].CostMicros != 1 {
-		t.Fatalf("by block = %+v, want per-block costs without overflow", stats.ByBlock)
+		stats.ByBlock[0].Block != "code-review" || stats.ByBlock[0].Runs != 1 ||
+		stats.ByBlock[1].Block != "synthesize" || stats.ByBlock[1].Runs != 1 {
+		t.Fatalf("by block = %+v", stats.ByBlock)
 	}
 	if len(stats.ByModel) != 1 {
 		t.Fatalf("by model = %+v", stats.ByModel)
 	}
 	model := stats.ByModel[0]
-	if model.InputTokens != math.MaxInt64 || model.OutputTokens != math.MaxInt64 ||
-		model.CostMicros != math.MaxInt64 {
-		t.Fatalf("model stats = %+v, want saturated usage and cost", model)
+	if model.InputTokens != math.MaxInt64 || model.OutputTokens != math.MaxInt64 {
+		t.Fatalf("model stats = %+v, want saturated usage", model)
 	}
 	if model.Calls != 2 || model.AvgLatencyMS == nil || *model.AvgLatencyMS != 200 ||
 		model.P50LatencyMS == nil || *model.P50LatencyMS != 100 {
@@ -108,7 +89,7 @@ func TestStatsSaturatesExtremeTokenAndCostAggregates(t *testing.T) {
 	}
 }
 
-func TestStatsKeepsLegacyNegativeUsageSums(t *testing.T) {
+func TestStatsKeepsLegacyNegativeTokenSums(t *testing.T) {
 	ctx := context.Background()
 	clock := newFakeClock()
 	st := openTestStore(t, clock)
@@ -116,31 +97,19 @@ func TestStatsKeepsLegacyNegativeUsageSums(t *testing.T) {
 	at := clock.Now().UTC()
 	wfID := "wf-negative"
 	mustCreateWorkflow(t, st, wfID, reviewMeta(44, 9, "head-negative"), at)
-	otherID := "wf-negative-other"
-	mustCreateWorkflow(t, st, otherID, reviewMeta(44, 10, "head-negative-other"), at)
 
 	insertStatsOverflowCall(t, st, "call-negative", wfID, -5, -5, 100, at)
 	insertStatsOverflowCall(t, st, "call-positive", wfID, 3, 3, 300, at)
-	setStatsOverflowNode(t, st, wfID, "a", -7, at)
-	setStatsOverflowNode(t, st, wfID, "b", 2, at)
-	setStatsOverflowWorkflowCost(t, st, wfID, -7)
-	setStatsOverflowWorkflowCost(t, st, otherID, 2)
 
 	stats, err := st.Stats(ctx, store.StatsFilter{ProjectID: ptrInt64(44)})
 	if err != nil {
 		t.Fatalf("Stats: %v", err)
 	}
-	if stats.CostMicros != -5 {
-		t.Fatalf("top cost = %d, want -5", stats.CostMicros)
-	}
-	if len(stats.ByProject) != 1 || stats.ByProject[0].CostMicros != -5 {
-		t.Fatalf("by project = %+v, want cost -5", stats.ByProject)
-	}
 	if len(stats.ByModel) != 1 {
 		t.Fatalf("by model = %+v", stats.ByModel)
 	}
 	model := stats.ByModel[0]
-	if model.InputTokens != -2 || model.OutputTokens != -2 || model.CostMicros != -5 {
+	if model.InputTokens != -2 || model.OutputTokens != -2 {
 		t.Fatalf("model stats = %+v, want summed negatives", model)
 	}
 }

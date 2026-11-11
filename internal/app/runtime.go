@@ -309,7 +309,6 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		RawProfiles:       cfg.RawProfiles,
 		Tools:             projectTools,
 		Skills:            projectSkills,
-		Cost:              costFunc(modelCatalog, cfg.Providers),
 		Publisher:         publisher,
 		Status:            statusFeed,
 		AllowedProviders:  allowedProviders,

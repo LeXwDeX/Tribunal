@@ -55,10 +55,6 @@ func anthropicUsage164Registry(t *testing.T) (*llm.Registry, *anthropicUsage164T
 	return registry, transport
 }
 
-func anthropicUsage164Cost(_ string, usage llm.Usage) int64 {
-	return usage.InputTokens*3 + usage.OutputTokens*15
-}
-
 func TestAnthropicUsage164ReviewExecutorBudget(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -79,17 +75,15 @@ func TestAnthropicUsage164ReviewExecutorBudget(t *testing.T) {
 				Profile:  onboardingProfile(),
 				Clients:  registry,
 				Snapshot: func(context.Context, string) (dag.WorkflowView, error) { return wf, nil },
-				Cost:     anthropicUsage164Cost,
 			})
 			out, err := executor.Execute(context.Background(), dag.NodeInput{
 				WorkflowID: "usage-164", Node: dag.NodeSpec{ID: "onboarding", Kind: KindOnboarding, Params: json.RawMessage(`{"provider":"fake"}`)},
 			})
-			want := dag.Usage{InputTokens: 15, OutputTokens: 5, CacheReadTokens: 2, CacheWriteTokens: 3, ReasoningTokens: 4, CostMicros: 120}
+			want := dag.Usage{InputTokens: 15, OutputTokens: 5, CacheReadTokens: 2, CacheWriteTokens: 3, ReasoningTokens: 4}
 			wantCalls := int64(1)
 			if !tc.wantBlocks {
 				want.InputTokens++
 				want.OutputTokens++
-				want.CostMicros = 138
 				wantCalls++
 			}
 			if tc.wantBlocks && !errors.Is(err, errTokenBudgetExhausted) || !tc.wantBlocks && err != nil {
@@ -112,7 +106,7 @@ func (e anthropicUsage164DAGExecutor) Execute(ctx context.Context, _ dag.NodeInp
 	if err != nil {
 		return dag.NodeOutput{}, err
 	}
-	return dag.NodeOutput{Data: json.RawMessage(`{}`), Usage: e.review.dagUsage("fake", resp.Usage)}, nil
+	return dag.NodeOutput{Data: json.RawMessage(`{}`), Usage: e.review.dagUsage(resp.Usage)}, nil
 }
 
 func TestAnthropicUsage164DAGSchedulerBudget(t *testing.T) {
@@ -121,7 +115,7 @@ func TestAnthropicUsage164DAGSchedulerBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	executor := newTestExecutor(t, ExecutorDeps{Cost: anthropicUsage164Cost})
+	executor := newTestExecutor(t, ExecutorDeps{})
 	engine := dag.NewEngine(dag.NewMemoryEventStore(), anthropicUsage164DAGExecutor{client: client, review: executor}, nil, dag.Options{MaxConcurrentNodes: 1})
 	id, err := engine.Create(context.Background(), dag.GraphSpec{
 		Nodes: []dag.NodeSpec{
@@ -139,7 +133,7 @@ func TestAnthropicUsage164DAGSchedulerBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := dag.Usage{InputTokens: 15, OutputTokens: 5, CacheReadTokens: 2, CacheWriteTokens: 3, ReasoningTokens: 4, CostMicros: 120}
+	want := dag.Usage{InputTokens: 15, OutputTokens: 5, CacheReadTokens: 2, CacheWriteTokens: 3, ReasoningTokens: 4}
 	if wf.Usage != want || wf.Nodes["a"].Usage != want || wf.Nodes["b"].Status != dag.NodeFailed || wf.Nodes["b"].Reason != "budget_exhausted" || transport.calls.Load() != 1 {
 		t.Fatalf("workflow usage = %+v, first = %+v, second = %+v, calls = %d; want usage %+v and second node blocked after one call", wf.Usage, wf.Nodes["a"], wf.Nodes["b"], transport.calls.Load(), want)
 	}
