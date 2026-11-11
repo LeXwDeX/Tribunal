@@ -529,6 +529,8 @@ func TestOverlayWriterRejectsNewEnvPlaceholders(t *testing.T) {
 		{"embedded string", OverlayChange{Path: []string{"providers", "primary", "base_url"}, Value: "https://example.com/${" + canary + "}"}},
 		{"list item", OverlayChange{Path: []string{"review_defaults", "custom_rules"}, Value: []any{"${" + canary + "}"}}},
 		{"map value", OverlayChange{Path: []string{"review_defaults", "profile_by_label"}, Value: map[string]any{"bug": "${" + canary + "}"}}},
+		{"map key", OverlayChange{Path: []string{"review_defaults", "profile_by_label"}, Value: map[string]any{"${" + canary + "}": "default"}}},
+		{"provider name", OverlayChange{Path: []string{"providers", "${" + canary + "}", "model"}, Value: "claude"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -543,6 +545,17 @@ func TestOverlayWriterRejectsNewEnvPlaceholders(t *testing.T) {
 				t.Fatal("overlay changed after a rejected placeholder")
 			}
 		})
+	}
+}
+
+func TestOverlayWriterAllowsDeletingPlaceholderNamedProvider(t *testing.T) {
+	harness := newOverlayHarness(t, overlayTestBase, overlayTestDocument)
+	result, err := harness.apply(harness.request(
+		OverlayChange{Path: []string{"providers", "${CANARY_DELETE}"}, Delete: true},
+	))
+	requireOverlayNoError(t, err)
+	if !result.Applied || result.Changed {
+		t.Fatalf("delete of a missing placeholder-named provider = %+v", result)
 	}
 }
 

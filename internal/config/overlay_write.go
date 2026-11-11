@@ -899,6 +899,14 @@ func validateOverlayChange(index int, change OverlayChange) error {
 			return invalid("path segments must be non-empty and free of control characters")
 		}
 	}
+	if !change.Delete {
+		for _, segment := range change.Path {
+			if envRefRE.MatchString(segment) {
+				// Do not quote the segment: it may be the rejected value.
+				return invalid("path must not contain an ${ENV} placeholder")
+			}
+		}
+	}
 	kind, class := classifyOverlayPath(change.Path)
 	joined := strings.Join(change.Path, ".")
 	switch class {
@@ -985,7 +993,10 @@ func validateOverlayValue(kind leafKind, value any) error {
 		if !ok {
 			return invalidType("a map of strings")
 		}
-		for _, item := range object {
+		for key, item := range object {
+			if err := rejectPlaceholder(key); err != nil {
+				return err
+			}
 			if err := rejectPlaceholder(item); err != nil {
 				return err
 			}

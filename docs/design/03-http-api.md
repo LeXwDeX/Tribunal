@@ -405,7 +405,7 @@ provider 和 profile 的基线以配置文件为准；改动配置需重启服�
 }
 ```
 
-`path` 是 YAML 映射键的段数组；`value` 表示设置，`delete: true` 表示删除，删除不存在的键是成功的 no-op 且不改写文件；同一次请求不允许同一路径或父子路径重复。`value` 按叶子类型强制校验，`temperature` 可为 `null` 表示清除；新写入的字符串值（包括列表项和对象值）不得包含 `${...}` 占位符，否则返回 400 `invalid_change`，避免写入后经 `GET /api/v1/config` 读取任意环境变量；overlay 中已有的占位符不受影响，只修改其他字段时原样保留。`dry_run: true` 走完整的 Load + Validate 和引用检查，返回拟议的 `overlay_revision`，不写文件。允许写入的叶子路径、永久只读路径和删除 provider 的引用规则见[配置设计 · 控制台写回 overlay](06-config.md#控制台写回-overlay)。
+`path` 是 YAML 映射键的段数组；`value` 表示设置，`delete: true` 表示删除，删除不存在的键是成功的 no-op 且不改写文件；同一次请求不允许同一路径或父子路径重复。`value` 按叶子类型强制校验，`temperature` 可为 `null` 表示清除；新写入的字符串值（包括列表项和对象值）、map 键以及 provider 名称等所有路径段都不得包含 `${...}` 占位符，否则返回 400 `invalid_change`，避免写入后经 `GET /api/v1/config` 读取任意环境变量；`delete` 请求不受此限制，便于清理历史占位符命名的键。overlay 中已有的占位符不受影响，只修改其他字段时原样保留。`dry_run: true` 走完整的 Load + Validate 和引用检查，返回拟议的 `overlay_revision`，不写文件。允许写入的叶子路径、永久只读路径和删除 provider 的引用规则见[配置设计 · 控制台写回 overlay](06-config.md#控制台写回-overlay)。
 
 成功返回 200，字段包括 `dry_run`、`applied`、`changed`、`base_revision`、`previous_overlay_revision`、`overlay_revision`、`restart_required`、`notice` 和 `review_defaults`。非 dry-run 请求 `applied` 为 `true`，no-op 也返回 200 且 `changed` 为 `false`；dry-run 时 `applied` 和 `restart_required` 均为 `false`，不返回 `notice`。`changed` 表示修改是否会改变 overlay 文件字节；只有 `changed: true` 时 `restart_required` 才为 `true` 并返回 `notice`，no-op 不提示已保存。`notice` 提示重启后生效且重启可能取消在途评审；运行中的服务仍使用启动时配置，watcher 约 2–4 秒后刷新显示快照。`review_defaults` 为 `{overlay, effective_ignore, ignore_origin, builtin_ignore}`：`overlay` 是 overlay 文件中的 `review_defaults` 子树原样值（含未展开的 `${ENV}` 占位符，未设置时为 `null`），`effective_ignore` 是合并后 `ignore` 列表的原始值（同样不展开），`ignore_origin` 是 `ignore` 的来源（`default` / `base` / `overlay`），`builtin_ignore` 是 6 条内置默认；接口不返回展开后的配置值，避免成为环境变量读取 oracle。overlay 写入 `review_defaults.ignore` 会整体替换内置列表，不是追加（项目设置覆盖才是追加）。
 
@@ -413,7 +413,7 @@ provider 和 profile 的基线以配置文件为准；改动配置需重启服�
 
 | 状态码 | `code` | 条件 |
 |---|---|---|
-| 400 | `invalid_change` | 未知、敏感或被忽略的路径，对非叶子路径设置，类型错误，新值含 `${...}` 占位符，重复或父子路径冲突，或 `changes` 为空 |
+| 400 | `invalid_change` | 未知、敏感或被忽略的路径，对非叶子路径设置，类型错误，新值 / map 键 / 路径段含 `${...}` 占位符，重复或父子路径冲突，或 `changes` 为空 |
 | 400 | `invalid_config` | 候选合并配置 Load 或 Validate 失败（在展开后的副本上），或 `review_defaults` 补充校验失败（`max_files` / `max_diff_lines` 必须为正、`language` 非空、`target_branches` 合法 glob、`custom_rules` / `ignore` / labels 不含空项、`profile_by_label` 只能指向 `default`）；原文件不变 |
 | 409 | `stale_config` | `base_revision` 或 `overlay_revision` 与磁盘不一致 |
 | 409 | `overlay_not_configured` | 未配置 overlay（例如 `--overlay ""`） |

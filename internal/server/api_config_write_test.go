@@ -469,18 +469,28 @@ func TestConfigOverlayPatchRejectsNewEnvPlaceholder(t *testing.T) {
 	const masterKey = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
 	before := harness.readOverlay()
 	admin := harness.env.loginAs("code-admin")
-	response := harness.patch(admin, harness.requestBody(
-		setChange([]string{"review_defaults", "custom_rules"}, []any{"${REVIEW_MASTER_KEY}"}),
-	))
-	assertStatus(t, response, http.StatusBadRequest)
-	if code := errorCode(t, harness.env.decode(t, response)); code != config.OverlayErrorInvalidChange {
-		t.Fatalf("error code = %q, want %q", code, config.OverlayErrorInvalidChange)
+	cases := []struct {
+		name   string
+		change map[string]any
+	}{
+		{"string value", setChange([]string{"review_defaults", "custom_rules"}, []any{"${REVIEW_MASTER_KEY}"})},
+		{"map key", setChange([]string{"review_defaults", "profile_by_label"}, map[string]any{"${REVIEW_MASTER_KEY}": "default"})},
+		{"provider name path", setChange([]string{"providers", "${REVIEW_MASTER_KEY}", "model"}, "claude")},
 	}
-	if strings.Contains(string(response.body), masterKey) || strings.Contains(string(response.body), "${REVIEW_MASTER_KEY}") {
-		t.Fatalf("error response echoed the rejected placeholder: %s", response.body)
-	}
-	if harness.readOverlay() != before {
-		t.Fatal("rejected placeholder modified the overlay")
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			response := harness.patch(admin, harness.requestBody(test.change))
+			assertStatus(t, response, http.StatusBadRequest)
+			if code := errorCode(t, harness.env.decode(t, response)); code != config.OverlayErrorInvalidChange {
+				t.Fatalf("error code = %q, want %q", code, config.OverlayErrorInvalidChange)
+			}
+			if strings.Contains(string(response.body), masterKey) || strings.Contains(string(response.body), "${REVIEW_MASTER_KEY}") {
+				t.Fatalf("error response echoed the rejected placeholder: %s", response.body)
+			}
+			if harness.readOverlay() != before {
+				t.Fatal("rejected placeholder modified the overlay")
+			}
+		})
 	}
 	get := admin.request(http.MethodGet, "/api/v1/config", nil, nil)
 	assertStatus(t, get, http.StatusOK)

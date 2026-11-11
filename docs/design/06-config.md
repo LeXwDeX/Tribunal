@@ -181,7 +181,7 @@ review_defaults:                    # 项目设置的默认值（见 §3）
 
 控制台只写 `--overlay` 指向的 overlay 文件；`--config` 基础文件保持只读，服务不会改写它们。overlay 路径不得与任一 `--config` 指向同一文件，否则启动失败（`overlay_conflicts_with_base`）。未配置 overlay（`--overlay ""`）时写接口返回 `409 overlay_not_configured`。
 
-写入不把合并后的 `Config` 或 `config.Load` 结果序列化回文件，而是只替换 allowlist 指定路径对应的原始 `yaml.Node` 叶子，因此注释、锚点 / 别名、引号风格、键顺序和 overlay 中已有的未展开 `${ENV}` 占位符都保留；仅含注释或 `null` 根的 overlay 在首次写入时也会保留原注释块。新写入的字符串值（包括列表项和对象值）不得包含 `${...}`：否则写入后 `GET /api/v1/config` 会按既有行为返回展开值，形成读取任意环境变量的 oracle；命中时返回 400 `invalid_change`，错误不回显该值。只修改其他字段不会改动已有占位符。整文件 round-trip 仍可能规范化空行与行内空格。若目标节点带锚点、路径经过被别名引用的映射、替换容器叶子会使容器内的锚点被外部别名引用，或删除会让别名悬空，请求返回 `400 invalid_change`。
+写入不把合并后的 `Config` 或 `config.Load` 结果序列化回文件，而是只替换 allowlist 指定路径对应的原始 `yaml.Node` 叶子，因此注释、锚点 / 别名、引号风格、键顺序和 overlay 中已有的未展开 `${ENV}` 占位符都保留；仅含注释或 `null` 根的 overlay 在首次写入时也会保留原注释块。新写入的字符串值（包括列表项和对象值）、map 键以及 provider 名称等所有路径段都不得包含 `${...}`：否则写入后 `GET /api/v1/config` 会按既有行为返回展开值（`expandEnv` 也会展开映射键），形成读取任意环境变量的 oracle；命中时返回 400 `invalid_change`，错误不回显该值。`delete` 请求不受此限制，便于清理历史占位符命名的键。只修改其他字段不会改动已有占位符。整文件 round-trip 仍可能规范化空行与行内空格。若目标节点带锚点、路径经过被别名引用的映射、替换容器叶子会使容器内的锚点被外部别名引用，或删除会让别名悬空，请求返回 `400 invalid_change`。
 
 允许写入的路径分为三组：
 
