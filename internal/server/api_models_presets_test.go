@@ -157,7 +157,9 @@ func TestModelPresetApplyMergesOnlyPresetFields(t *testing.T) {
 			t.Errorf("audit log missing %s: %s", want, log)
 		}
 	}
-	for _, value := range []string{"393216", "1024", "0.6"} {
+	// Match values in their JSON context; bare numbers can hit the audit
+	// timestamp (for example "10:51:50.244409699" contains "4096").
+	for _, value := range []string{`"max_tokens":393216`, `"max_tokens":1024`, `"temperature":0.6`} {
 		if strings.Contains(log, value) {
 			t.Errorf("audit log leaked parameter value %s: %s", value, log)
 		}
@@ -213,7 +215,7 @@ func TestModelPresetConflictRequiresConfirmation(t *testing.T) {
 	if !strings.Contains(overrides.body, `"max_tokens":4096`) {
 		t.Fatalf("apply cleared stored profile overrides: %s", overrides.body)
 	}
-	if strings.Contains(logs.String(), "4096") {
+	if strings.Contains(logs.String(), `"max_tokens":4096`) {
 		t.Fatalf("audit log leaked an override value: %s", logs.String())
 	}
 }
