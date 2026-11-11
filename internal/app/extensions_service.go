@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/config"
@@ -41,6 +42,10 @@ const (
 	maxSkillExtractedBytes = 16 << 20
 	maxSkillFileBytes      = 4 << 20
 	maxSkillArchiveEntries = 512
+	// maxSkillArchivePath bounds one archive entry name. It matches the
+	// loader's resource path limit and keeps a long name from failing later
+	// as a local filesystem write error.
+	maxSkillArchivePath = 512
 )
 
 var (
@@ -818,12 +823,18 @@ func extractSkillArchive(data []byte, parent string) (string, string, string, er
 		}
 		if file.FileInfo().IsDir() {
 			if err := root.MkdirAll(rel, 0o700); err != nil {
+				if isArchivePathConflict(err) {
+					return "", "", "", fmt.Errorf("archive path %q conflicts with a file", rel)
+				}
 				return "", "", "", fmt.Errorf("%w: create directory", errSkillStorage)
 			}
 			continue
 		}
 		if parent := path.Dir(rel); parent != "." {
 			if err := root.MkdirAll(parent, 0o700); err != nil {
+				if isArchivePathConflict(err) {
+					return "", "", "", fmt.Errorf("archive path %q conflicts with a file", rel)
+				}
 				return "", "", "", fmt.Errorf("%w: create directory", errSkillStorage)
 			}
 		}
@@ -925,10 +936,17 @@ func copySkillDir(source, parent string) (string, string, string, error) {
 			_ = file.Close()
 			return fmt.Errorf("%w: create file", errSkillStorage)
 		}
-		written, copyErr := io.Copy(out, io.LimitReader(file, maxSkillFileBytes+1))
+		source := &trackedReader{reader: file}
+		written, copyErr := io.Copy(out, io.LimitReader(source, maxSkillFileBytes+1))
 		closeOutErr := out.Close()
 		closeInErr := file.Close()
-		if copyErr != nil || closeInErr != nil {
+		if copyErr != nil {
+			if source.readErr != nil {
+				return errors.New("dir could not be read")
+			}
+			return fmt.Errorf("%w: write file", errSkillStorage)
+		}
+		if closeInErr != nil {
 			return errors.New("dir could not be read")
 		}
 		if written != info.Size() {
@@ -950,14 +968,46 @@ func copySkillDir(source, parent string) (string, string, string, error) {
 	return staged, name, description, nil
 }
 
+// trackedReader records an error returned by the archive stream so a failed
+// copy can distinguish a corrupt entry from a local write failure.
+type trackedReader struct {
+	reader  io.Reader
+	readErr error
+}
+
+func (t *trackedReader) Read(p []byte) (int, error) {
+	n, err := t.reader.Read(p)
+	if err != nil && !errors.Is(err, io.EOF) {
+		t.readErr = err
+	}
+	return n, err
+}
+
+// isArchivePathConflict reports whether an archive entry could not be created
+// because the archive maps a file and a directory to the same path. That is
+// invalid input, not a local storage failure.
+func isArchivePathConflict(err error) bool {
+	return errors.Is(err, fs.ErrExist) || errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.EISDIR)
+}
+
 func writeArchiveFile(root *os.Root, rel string, stream io.Reader, size int64) error {
 	out, err := root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
+		if isArchivePathConflict(err) {
+			return fmt.Errorf("archive path %q conflicts with a directory", rel)
+		}
 		return fmt.Errorf("%w: create file", errSkillStorage)
 	}
-	written, copyErr := io.Copy(out, io.LimitReader(stream, size+1))
+	source := &trackedReader{reader: stream}
+	written, copyErr := io.Copy(out, io.LimitReader(source, size+1))
 	closeErr := out.Close()
-	if copyErr != nil || closeErr != nil {
+	if copyErr != nil {
+		if source.readErr != nil {
+			return fmt.Errorf("archive entry %q could not be read", rel)
+		}
+		return fmt.Errorf("%w: write archive entry", errSkillStorage)
+	}
+	if closeErr != nil {
 		return fmt.Errorf("%w: write archive entry", errSkillStorage)
 	}
 	if written != size {
@@ -966,10 +1016,11 @@ func writeArchiveFile(root *os.Root, rel string, stream io.Reader, size int64) e
 	return nil
 }
 
-// cleanArchivePath rejects absolute paths, backslashes, drive letters and any
-// parent traversal component.
+// cleanArchivePath rejects absolute paths, backslashes, drive letters, NUL
+// bytes, overlong names and any parent traversal component.
 func cleanArchivePath(name string) (string, error) {
-	if name == "" || strings.HasPrefix(name, "/") || strings.Contains(name, "\\") ||
+	if name == "" || len(name) > maxSkillArchivePath || strings.ContainsRune(name, 0) ||
+		strings.HasPrefix(name, "/") || strings.Contains(name, "\\") ||
 		strings.Contains(name, ":") {
 		return "", errors.New("archive contains an unsafe path")
 	}

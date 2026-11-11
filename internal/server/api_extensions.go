@@ -796,6 +796,12 @@ func (s *Server) handleUploadSkill(w http.ResponseWriter, r *http.Request) {
 	if !s.requireExtensions(w, r) {
 		return
 	}
+	// Authorize the platform role before reading or buffering the body. The
+	// scope selector arrives inside the form, so the project grant check runs
+	// after parsing.
+	if !s.requireExtensionWriter(w, r) {
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, skillUploadBodyMax)
 	if err := r.ParseMultipartForm(skillUploadFormMemory); err != nil {
 		var maxErr *http.MaxBytesError

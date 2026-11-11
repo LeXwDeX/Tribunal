@@ -7,6 +7,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -84,13 +86,103 @@ func duplicateSkillZip(t *testing.T) []byte {
 	return buffer.Bytes()
 }
 
+// corruptStoredSkillZip flips one payload byte in a stored entry so reading
+// it fails CRC validation while the archive structure stays valid.
+func corruptStoredSkillZip(t *testing.T) []byte {
+	t.Helper()
+	payload := strings.Repeat("a", 512)
+	var buffer bytes.Buffer
+	writer := zip.NewWriter(&buffer)
+	for name, content := range map[string]string{
+		"skill/SKILL.md": testSkillManifest,
+		"skill/data.txt": payload,
+	} {
+		entry, err := writer.CreateHeader(&zip.FileHeader{Name: name, Method: zip.Store})
+		if err != nil {
+			t.Fatalf("zip create: %v", err)
+		}
+		if _, err := entry.Write([]byte(content)); err != nil {
+			t.Fatalf("zip write: %v", err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("zip close: %v", err)
+	}
+	data := buffer.Bytes()
+	index := bytes.Index(data, []byte(payload))
+	if index < 0 {
+		t.Fatal("stored payload not found in archive")
+	}
+	data[index+7] ^= 0xff
+	return data
+}
+
+type countingReader struct {
+	reader io.Reader
+	read   int
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.reader.Read(p)
+	c.read += n
+	return n, err
+}
+
 func uploadBody(t *testing.T, fields map[string]string, data []byte) ([]byte, string) {
 	t.Helper()
 	return multipartBody(t, fields, "file", "skill.zip", data)
 }
 
+func multipartFieldsBody(t *testing.T, fields map[string]string) ([]byte, string) {
+	t.Helper()
+	var buffer bytes.Buffer
+	writer := multipart.NewWriter(&buffer)
+	for key, value := range fields {
+		if err := writer.WriteField(key, value); err != nil {
+			t.Fatalf("WriteField: %v", err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart: %v", err)
+	}
+	return buffer.Bytes(), writer.FormDataContentType()
+}
+
+func assertErrorCode(t *testing.T, response apiResponse, want string) {
+	t.Helper()
+	body := decodeMap(t, response.body)
+	errBody, ok := body["error"].(map[string]any)
+	if !ok || errBody["code"] != want {
+		t.Fatalf("error = %v, want code %q", body["error"], want)
+	}
+}
+
 func wiringAnonymousClient(env *wiringEnv) *m6Client {
 	return &m6Client{t: env.t, base: env.server.URL, client: &http.Client{}}
+}
+
+func TestSkillUploadAuthorizesBeforeReadingBody(t *testing.T) {
+	ctx := context.Background()
+	st, srv := newExtensionPaginationServer(t)
+	// A viewer must be rejected without the server reading or buffering the
+	// body. A one-megabyte body would otherwise spill to a temporary file.
+	body := &countingReader{reader: strings.NewReader(strings.Repeat("x", 1<<20))}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/skills", body)
+	request.Header.Set("Content-Type", "multipart/form-data; boundary=missing")
+	request = request.WithContext(context.WithValue(request.Context(), principalKey,
+		principal{user: sessionUser{ID: 8, Username: "bob", Role: roleViewer}}))
+	recorder := httptest.NewRecorder()
+	srv.handleUploadSkillOrRegisterDirectory(recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if body.read != 0 {
+		t.Fatalf("handler read %d body bytes before authorization", body.read)
+	}
+	rows, err := st.ListSkills(ctx, store.ScopePlatform, nil)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("unauthorized upload persisted rows: %+v, %v", rows, err)
+	}
 }
 
 func TestSkillUploadAuthorizationAndSuccess(t *testing.T) {
@@ -149,7 +241,7 @@ func TestSkillUploadAuthorizationAndSuccess(t *testing.T) {
 	}{
 		"missing scope":    {fields: map[string]string{}, data: skillZip(t, testSkillManifest, true)},
 		"bad project id":   {fields: map[string]string{"scope": "project", "project_id": "nope"}, data: skillZip(t, testSkillManifest, true)},
-		"missing file":     {fields: map[string]string{"scope": "platform"}, data: nil},
+		"empty file":       {fields: map[string]string{"scope": "platform"}, data: nil},
 		"not a zip":        {fields: map[string]string{"scope": "platform"}, data: []byte("not a zip")},
 		"missing manifest": {fields: map[string]string{"scope": "platform"}, data: skillZip(t, "hello", false)},
 		"invalid manifest": {fields: map[string]string{"scope": "platform"}, data: skillZip(t, "---\nname: bad__name\ndescription: x\n---\n", true)},
@@ -159,8 +251,15 @@ func TestSkillUploadAuthorizationAndSuccess(t *testing.T) {
 			response := env.loginAs("code-admin").request(http.MethodPost, "/api/v1/skills", invalid,
 				map[string]string{"Content-Type": invalidType})
 			assertStatus(t, response, http.StatusBadRequest)
+			assertErrorCode(t, response, "validation_failed")
 		})
 	}
+
+	noFile, noFileType := multipartFieldsBody(t, map[string]string{"scope": "platform"})
+	missingFile := env.loginAs("code-admin").request(http.MethodPost, "/api/v1/skills", noFile,
+		map[string]string{"Content-Type": noFileType})
+	assertStatus(t, missingFile, http.StatusBadRequest)
+	assertErrorCode(t, missingFile, "validation_failed")
 }
 
 func TestSkillUploadRejectsUnsafeArchivesAtHTTP(t *testing.T) {
@@ -175,10 +274,24 @@ func TestSkillUploadRejectsUnsafeArchivesAtHTTP(t *testing.T) {
 			"a/SKILL.md": testSkillManifest,
 			"b/SKILL.md": testSkillManifest,
 		}),
-		"duplicate paths":  duplicateSkillZip(t),
+		"duplicate paths": duplicateSkillZip(t),
+		"nul path": skillZipFiles(t, map[string]string{
+			"skill/SKILL.md":    testSkillManifest,
+			"skill/bad\x00name": "x",
+		}),
+		"overlong path": skillZipFiles(t, map[string]string{
+			"skill/SKILL.md":                    testSkillManifest,
+			"skill/" + strings.Repeat("a", 512): "x",
+		}),
+		"file directory conflict": skillZipFiles(t, map[string]string{
+			"skill/SKILL.md":   testSkillManifest,
+			"skill/x":          "file",
+			"skill/x/child.md": "child",
+		}),
 		"symlink":          symlinkSkillZip(t),
 		"bad yaml":         skillZip(t, "---\nname: go-review\ndescription: \"unterminated\n---\n", true),
 		"long description": skillZip(t, longDescription, true),
+		"corrupt checksum": corruptStoredSkillZip(t),
 	}
 	for name, archive := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -186,6 +299,7 @@ func TestSkillUploadRejectsUnsafeArchivesAtHTTP(t *testing.T) {
 			response := env.loginAs("code-admin").request(http.MethodPost, "/api/v1/skills", body,
 				map[string]string{"Content-Type": contentType})
 			assertStatus(t, response, http.StatusBadRequest)
+			assertErrorCode(t, response, "validation_failed")
 			if text := string(response.body); strings.Contains(text, "\\xff") || strings.Contains(text, "unterminated") {
 				t.Fatalf("response leaked manifest content: %s", text)
 			}
@@ -197,6 +311,7 @@ func TestSkillUploadRejectsUnsafeArchivesAtHTTP(t *testing.T) {
 	response := env.loginAs("code-admin").request(http.MethodPost, "/api/v1/skills", body,
 		map[string]string{"Content-Type": contentType})
 	assertStatus(t, response, http.StatusBadRequest)
+	assertErrorCode(t, response, "validation_failed")
 
 	list := env.loginAs("code-admin").request(http.MethodGet, "/api/v1/skills?scope=platform&limit=200", nil, nil)
 	assertStatus(t, list, http.StatusOK)
@@ -251,6 +366,7 @@ func TestSkillDirectoryRegistrationHTTP(t *testing.T) {
 
 	relative := register(env.loginAs("code-admin"), map[string]any{"scope": "platform", "dir": "skills/go"})
 	assertStatus(t, relative, http.StatusBadRequest)
+	assertErrorCode(t, relative, "validation_failed")
 
 	linkParent := t.TempDir()
 	link := filepath.Join(linkParent, "linked")
@@ -259,12 +375,14 @@ func TestSkillDirectoryRegistrationHTTP(t *testing.T) {
 	}
 	symlinked := register(env.loginAs("code-admin"), map[string]any{"scope": "platform", "dir": link})
 	assertStatus(t, symlinked, http.StatusBadRequest)
+	assertErrorCode(t, symlinked, "validation_failed")
 	if text := string(symlinked.body); strings.Contains(text, linkParent) {
 		t.Fatalf("response leaked the absolute path: %s", text)
 	}
 
 	noManifest := register(env.loginAs("code-admin"), map[string]any{"scope": "platform", "dir": t.TempDir()})
 	assertStatus(t, noManifest, http.StatusBadRequest)
+	assertErrorCode(t, noManifest, "validation_failed")
 
 	invalidSource := t.TempDir()
 	if err := os.WriteFile(filepath.Join(invalidSource, "SKILL.md"),
@@ -273,6 +391,7 @@ func TestSkillDirectoryRegistrationHTTP(t *testing.T) {
 	}
 	invalid := register(env.loginAs("code-admin"), map[string]any{"scope": "platform", "dir": invalidSource})
 	assertStatus(t, invalid, http.StatusBadRequest)
+	assertErrorCode(t, invalid, "validation_failed")
 	if text := string(invalid.body); strings.Contains(text, invalidSource) {
 		t.Fatalf("response leaked the absolute path: %s", text)
 	}
@@ -280,6 +399,7 @@ func TestSkillDirectoryRegistrationHTTP(t *testing.T) {
 	unknown := env.loginAs("code-admin").request(http.MethodPost, "/api/v1/skills",
 		[]byte(`{"scope":"platform","dir":"`+source+`","bogus":true}`), map[string]string{"Content-Type": "application/json"})
 	assertStatus(t, unknown, http.StatusBadRequest)
+	assertErrorCode(t, unknown, "validation_failed")
 }
 
 func TestSkillCreationRejectsBuiltinNameConflictAtHTTP(t *testing.T) {
@@ -294,6 +414,7 @@ func TestSkillCreationRejectsBuiltinNameConflictAtHTTP(t *testing.T) {
 	response := env.loginAs("code-admin").request(http.MethodPost, "/api/v1/skills", body,
 		map[string]string{"Content-Type": contentType})
 	assertStatus(t, response, http.StatusConflict)
+	assertErrorCode(t, response, "conflict")
 
 	source := t.TempDir()
 	if err := os.WriteFile(filepath.Join(source, "SKILL.md"),
@@ -303,6 +424,7 @@ func TestSkillCreationRejectsBuiltinNameConflictAtHTTP(t *testing.T) {
 	registered := env.loginAs("code-admin").json(http.MethodPost, "/api/v1/skills",
 		map[string]any{"scope": "platform", "dir": source})
 	assertStatus(t, registered, http.StatusConflict)
+	assertErrorCode(t, registered, "conflict")
 }
 
 func TestSkillCreationHandlerRequiresService(t *testing.T) {

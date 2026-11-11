@@ -7,9 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/LeXwDeX/tribunal/internal/config"
@@ -89,6 +92,20 @@ func TestUploadSkillRejectsUnsafeArchives(t *testing.T) {
 			"b/SKILL.md": testSkillBody,
 		})},
 		{name: "duplicate paths", data: duplicatePathArchive(t)},
+		{name: "nul path", data: testSkillArchiveFiles(t, map[string]string{
+			"skill/SKILL.md":    testSkillBody,
+			"skill/bad\x00name": "x",
+		})},
+		{name: "overlong path", data: testSkillArchiveFiles(t, map[string]string{
+			"skill/SKILL.md": testSkillBody,
+			"skill/" + strings.Repeat("a", maxSkillArchivePath): "x",
+		})},
+		{name: "file directory conflict", data: testSkillArchiveFiles(t, map[string]string{
+			"skill/SKILL.md":   testSkillBody,
+			"skill/x":          "file",
+			"skill/x/child.md": "child",
+		})},
+		{name: "too many entries", data: manyEntryArchive(t)},
 		{name: "symlink", data: symlinkArchive(t)},
 		{name: "oversize", data: oversizeArchive(t)},
 		{name: "bad yaml", data: testSkillArchive(t, "---\nname: go-review\ndescription: \"unterminated\n---\n")},
@@ -99,8 +116,10 @@ func TestUploadSkillRejectsUnsafeArchives(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := service.UploadSkill(ctx, SkillUpload{Scope: "platform", Data: tc.data}); err == nil {
-				t.Fatal("unsafe archive was accepted")
+			_, err := service.UploadSkill(ctx, SkillUpload{Scope: "platform", Data: tc.data})
+			var appErr *Error
+			if !errors.As(err, &appErr) || appErr.Code != "validation_failed" {
+				t.Fatalf("error = %v, want validation_failed", err)
 			}
 			if _, err := os.Stat(filepath.Join(service.workspace, "evil.go")); err == nil {
 				t.Fatal("traversal wrote outside the managed root")
@@ -110,6 +129,15 @@ func TestUploadSkillRejectsUnsafeArchives(t *testing.T) {
 			}
 		})
 	}
+}
+
+func manyEntryArchive(t *testing.T) []byte {
+	t.Helper()
+	files := map[string]string{"skill/SKILL.md": testSkillBody}
+	for i := 0; i < maxSkillArchiveEntries; i++ {
+		files[fmt.Sprintf("skill/file-%d.txt", i)] = "x"
+	}
+	return testSkillArchiveFiles(t, files)
 }
 
 // duplicatePathArchive writes the same zip path twice; the store must reject
@@ -131,6 +159,133 @@ func duplicatePathArchive(t *testing.T) []byte {
 		t.Fatal(err)
 	}
 	return buffer.Bytes()
+}
+
+// storedSkillArchiveFiles builds a zip without compression so tests can
+// corrupt payload bytes and keep the entry name/size intact.
+func storedSkillArchiveFiles(t *testing.T, files map[string]string) []byte {
+	t.Helper()
+	var buffer bytes.Buffer
+	writer := zip.NewWriter(&buffer)
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		entry, err := writer.CreateHeader(&zip.FileHeader{Name: name, Method: zip.Store})
+		if err != nil {
+			t.Fatalf("zip create: %v", err)
+		}
+		if _, err := entry.Write([]byte(files[name])); err != nil {
+			t.Fatalf("zip write: %v", err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("zip close: %v", err)
+	}
+	return buffer.Bytes()
+}
+
+type nopWriteCloser struct{ io.Writer }
+
+func (nopWriteCloser) Close() error { return nil }
+
+var registerUnsupportedMethod sync.Once
+
+// unsupportedMethodArchive declares a compression method the standard reader
+// cannot decompress, producing zip.ErrAlgorithm on extraction.
+func unsupportedMethodArchive(t *testing.T) []byte {
+	t.Helper()
+	const method = 99
+	registerUnsupportedMethod.Do(func() {
+		zip.RegisterCompressor(method, func(out io.Writer) (io.WriteCloser, error) {
+			return nopWriteCloser{out}, nil
+		})
+	})
+	var buffer bytes.Buffer
+	writer := zip.NewWriter(&buffer)
+	entry, err := writer.CreateHeader(&zip.FileHeader{Name: "skill/SKILL.md", Method: method})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entry.Write([]byte(testSkillBody)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buffer.Bytes()
+}
+
+func corruptChecksumArchive(t *testing.T) []byte {
+	t.Helper()
+	payload := strings.Repeat("a", 512)
+	data := storedSkillArchiveFiles(t, map[string]string{
+		"skill/SKILL.md": testSkillBody,
+		"skill/data.txt": payload,
+	})
+	index := bytes.Index(data, []byte(payload))
+	if index < 0 {
+		t.Fatal("stored payload not found in archive")
+	}
+	data[index+7] ^= 0xff
+	return data
+}
+
+func TestUploadSkillCorruptArchivesAreValidationErrors(t *testing.T) {
+	ctx := context.Background()
+	service, _ := newExtensionFixture(t)
+	cases := map[string][]byte{
+		"checksum":                corruptChecksumArchive(t),
+		"unsupported compression": unsupportedMethodArchive(t),
+		"truncated central record": func() []byte {
+			data := storedSkillArchiveFiles(t, map[string]string{"skill/SKILL.md": testSkillBody})
+			return data[:len(data)-10]
+		}(),
+	}
+	for name, data := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := service.UploadSkill(ctx, SkillUpload{Scope: "platform", Data: data})
+			var appErr *Error
+			if !errors.As(err, &appErr) || appErr.Code != "validation_failed" {
+				t.Fatalf("error = %v, want validation_failed", err)
+			}
+			if errors.Is(err, errSkillStorage) {
+				t.Fatalf("corrupt archive was classified as storage failure: %v", err)
+			}
+			rows, listErr := service.store.ListSkills(ctx, store.ScopePlatform, nil)
+			if listErr != nil || len(rows) != 0 {
+				t.Fatalf("corrupt archive persisted rows: %+v, %v", rows, listErr)
+			}
+		})
+	}
+}
+
+func TestWriteArchiveFileRejectsSizeMismatch(t *testing.T) {
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	cases := map[string]struct {
+		content string
+		size    int64
+	}{
+		"shorter than header": {content: "ab", size: 3},
+		"longer than header":  {content: "abcd", size: 3},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			err := writeArchiveFile(root, name, strings.NewReader(tc.content), tc.size)
+			if err == nil {
+				t.Fatal("size mismatch accepted")
+			}
+			if errors.Is(err, errSkillStorage) {
+				t.Fatalf("size mismatch classified as storage failure: %v", err)
+			}
+		})
+	}
 }
 
 func TestUploadSkillAcceptsYAMLBlockDescription(t *testing.T) {
