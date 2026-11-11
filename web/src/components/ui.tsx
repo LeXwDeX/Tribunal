@@ -1671,7 +1671,7 @@ export function Drawer({ open, onClose, title, description, children, footer }: 
 }
 
 export function ConfirmDialog({
-  open, onClose, onConfirm, title, description, confirmLabel = '确认', pending, error, errorHint, danger = true,
+  open, onClose, onConfirm, title, description, confirmLabel = '确认', pending, error, errorHint, danger = true, children,
 }: {
   open: boolean
   onClose: () => void
@@ -1683,6 +1683,7 @@ export function ConfirmDialog({
   error?: unknown
   errorHint?: string | null
   danger?: boolean
+  children?: ReactNode
 }) {
   return (
     <Dialog
@@ -1697,7 +1698,12 @@ export function ConfirmDialog({
         </>
       )}
     >
-      {error ? <ErrorState error={error} title="操作失败" hint={errorHint} /> : null}
+      {children != null || error != null ? (
+        <>
+          {children}
+          {error ? <ErrorState error={error} title="操作失败" hint={errorHint} /> : null}
+        </>
+      ) : null}
     </Dialog>
   )
 }

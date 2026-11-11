@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {
-  Badge, Button, ButtonLink, CopyButton, Dialog, Drawer, ErrorState, Field, Metric, Panel, PanelBody, Segmented, SevCounts, SeverityBadge, Sparkline, StatusBadge, Switch, Tabs, ToastProvider, useToast,
+  Badge, Button, ButtonLink, ConfirmDialog, CopyButton, Dialog, Drawer, ErrorState, Field, Metric, Panel, PanelBody, Segmented, SevCounts, SeverityBadge, Sparkline, StatusBadge, Switch, Tabs, ToastProvider, useToast,
 } from '../src/components/ui'
 import { ApiError } from '../src/api/client'
 import { MemoryRouter } from 'react-router-dom'
@@ -193,6 +193,25 @@ describe('dialogs and form states', () => {
     const body = screen.getByText('普通正文')
     expect(body.parentElement).toHaveClass(ui.panel)
     expect(body.parentElement).not.toHaveClass(ui.panelFlush)
+  })
+})
+
+describe('confirm dialog body', () => {
+  it('omits the body wrapper when there are no children or error', () => {
+    const props = { open: true, onClose: vi.fn(), onConfirm: vi.fn(), title: '删除模型', description: '确认删除？' }
+    const { rerender } = render(<ConfirmDialog {...props} />)
+    const dialog = () => screen.getByRole('dialog', { name: '删除模型' })
+    // Header and footer only; an empty body would add a third child and its
+    // padding to every confirmation dialog that passes neither slot.
+    expect(dialog().children).toHaveLength(2)
+
+    rerender(<ConfirmDialog {...props}><p>受影响模型</p></ConfirmDialog>)
+    expect(dialog().children).toHaveLength(3)
+    expect(screen.getByText('受影响模型')).toBeInTheDocument()
+
+    rerender(<ConfirmDialog {...props} error={new ApiError(503, 'unavailable', '服务不可用')} />)
+    expect(dialog().children).toHaveLength(3)
+    expect(screen.getByRole('alert')).toHaveTextContent('服务不可用')
   })
 })
 

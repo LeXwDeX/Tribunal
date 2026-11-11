@@ -37,7 +37,7 @@ const storedDefaults = {
 function routes(overrides: {
   defaults?: unknown
   put?: Response | ((init?: RequestInit) => Response)
-  remove?: Response
+  remove?: Response | ((url: string, init?: RequestInit) => Response)
 } = {}) {
   return (url: string, init?: RequestInit) => {
     if (url === '/api/v1/model-defaults' && init?.method === 'PUT') {
@@ -47,6 +47,7 @@ function routes(overrides: {
       return jsonResponse({ params: body.params, revision: body.revision + 1 })
     }
     if (url.startsWith('/api/v1/model-defaults') && init?.method === 'DELETE') {
+      if (typeof overrides.remove === 'function') return overrides.remove(url, init)
       return overrides.remove ?? jsonResponse({ params: {}, revision: 4 })
     }
     if (url.startsWith('/api/v1/model-defaults')) return jsonResponse(overrides.defaults ?? storedDefaults)
@@ -118,10 +119,111 @@ describe('platform model defaults (#413)', () => {
     await user.click(screen.getByRole('button', { name: '重置' }))
     const dialog = await screen.findByRole('dialog')
     expect(within(dialog).getByText('重置全局默认参数')).toBeInTheDocument()
+    expect(within(dialog).getByText(/依赖默认值的模型会恢复为只使用自身参数/)).toBeInTheDocument()
     await user.click(within(dialog).getByRole('button', { name: '重置' }))
     await waitFor(() => expect(screen.getByText(/已重置全部默认值（revision 4）/)).toBeInTheDocument())
     const call = fetchMock.mock.calls.find(([url, init]) => String(url).startsWith('/api/v1/model-defaults') && init?.method === 'DELETE')
     expect(String(call?.[0])).toBe('/api/v1/model-defaults?revision=3')
+  })
+
+  it('lists models blocked by a reset and forces after explicit confirmation', async () => {
+    let deletes = 0
+    const fetchMock = installFetch(routes({
+      remove: () => {
+        deletes += 1
+        if (deletes === 1) {
+          return jsonResponse({
+            error: {
+              code: 'defaults_in_use',
+              message: 'model defaults are required by existing models',
+              request_id: 'r1',
+              details: [
+                { field: 'models.user:inherits.params.max_tokens', message: 'inherits: params.max_tokens must be positive for anthropic' },
+              ],
+            },
+          }, 409)
+        }
+        return jsonResponse({ params: {}, revision: 4 })
+      },
+    }))
+    const user = await openPage()
+    await user.click(screen.getByRole('button', { name: '重置' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('button', { name: '重置' }))
+    expect(await within(dialog).findByText('models.user:inherits.params.max_tokens')).toBeInTheDocument()
+    expect(within(dialog).getByText(/inherits: params\.max_tokens must be positive for anthropic/)).toBeInTheDocument()
+    expect(within(dialog).getByRole('listitem')).toHaveTextContent(
+      'models.user:inherits.params.max_tokens inherits: params.max_tokens must be positive for anthropic',
+    )
+    expect(within(dialog).getByText(/强制重置会清除全部默认值/)).toBeInTheDocument()
+    const modelsBefore = fetchMock.mock.calls.filter(([url]) => String(url).startsWith('/api/v1/models')).length
+    const configBefore = fetchMock.mock.calls.filter(([url]) => String(url).startsWith('/api/v1/config')).length
+    await user.click(within(dialog).getByRole('button', { name: '仍然重置' }))
+    await waitFor(() => expect(screen.getByText(/已强制重置全部默认值（revision 4）/)).toBeInTheDocument())
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    const deleteCalls = fetchMock.mock.calls.filter(([url, init]) => String(url).startsWith('/api/v1/model-defaults') && init?.method === 'DELETE')
+    expect(String(deleteCalls[0]?.[0])).toBe('/api/v1/model-defaults?revision=3')
+    expect(String(deleteCalls[1]?.[0])).toBe('/api/v1/model-defaults?revision=3&force=true')
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => String(url).startsWith('/api/v1/models')).length).toBeGreaterThan(modelsBefore))
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => String(url).startsWith('/api/v1/config')).length).toBeGreaterThan(configBefore))
+  })
+
+  it('keeps a non-conflict reset error in the dialog', async () => {
+    installFetch(routes({
+      remove: jsonResponse({ error: { code: 'unavailable', message: 'model defaults are unavailable', request_id: 'r1' } }, 503),
+    }))
+    const user = await openPage()
+    await user.click(screen.getByRole('button', { name: '重置' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('button', { name: '重置' }))
+    expect(await within(dialog).findByText('操作失败')).toBeInTheDocument()
+    expect(within(dialog).getByText('model defaults are unavailable')).toBeInTheDocument()
+  })
+
+  it('shows a fallback when a blocked reset returns no details', async () => {
+    installFetch(routes({
+      remove: jsonResponse({
+        error: { code: 'defaults_in_use', message: 'model defaults are required by existing models', request_id: 'r1' },
+      }, 409),
+    }))
+    const user = await openPage()
+    await user.click(screen.getByRole('button', { name: '重置' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('button', { name: '重置' }))
+    expect(await within(dialog).findByText(/服务器未返回具体受影响模型/)).toBeInTheDocument()
+    expect(within(dialog).queryByRole('listitem')).not.toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: '仍然重置' })).toBeInTheDocument()
+  })
+
+  it('renders the blocked reset details at 390 and 1440 widths in both themes', async () => {
+    installFetch(routes({
+      remove: jsonResponse({
+        error: {
+          code: 'defaults_in_use',
+          message: 'model defaults are required by existing models',
+          request_id: 'r1',
+          details: [
+            { field: 'models.user:inherits.params.max_tokens', message: 'inherits: params.max_tokens must be positive for anthropic' },
+          ],
+        },
+      }, 409),
+    }))
+    const user = await openPage()
+    await user.click(screen.getByRole('button', { name: '重置' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('button', { name: '重置' }))
+    await within(dialog).findByText('models.user:inherits.params.max_tokens')
+    for (const width of [390, 1440]) {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: width })
+      for (const theme of ['light', 'dark']) {
+        document.documentElement.dataset.theme = theme
+        fireEvent(window, new Event('resize'))
+        expect(within(dialog).getByText('models.user:inherits.params.max_tokens')).toBeInTheDocument()
+        expect(within(dialog).getByText(/inherits: params\.max_tokens must be positive for anthropic/)).toBeInTheDocument()
+        expect(within(dialog).getByRole('button', { name: '仍然重置' })).toBeInTheDocument()
+      }
+    }
+    document.documentElement.dataset.theme = 'light'
   })
 
   it('reports a stale revision and offers a reload', async () => {
@@ -233,6 +335,23 @@ describe('platform model defaults (#413)', () => {
     const body = JSON.parse(String(call?.[1]?.body)) as { params: Record<string, unknown> }
     expect(body.params.max_tokens).toBeUndefined()
     expect(screen.queryByText('anthropic 协议要求 max_tokens 大于 0，不能留空。')).not.toBeInTheDocument()
+  })
+
+  it('validates an explicit zero max_tokens against the inherited default', async () => {
+    const fetchMock = installFetch(routes())
+    const user = userEvent.setup()
+    renderWithProviders(<ModelsPage />, { route: '/models' })
+    await screen.findByLabelText('max_tokens')
+    await user.click(screen.getByRole('button', { name: '新增模型' }))
+    await user.type(screen.getByLabelText('显示名'), 'claude')
+    await user.type(screen.getByLabelText('base_url'), 'https://example.test/v1')
+    await user.type(screen.getByLabelText('上游模型'), 'claude-x')
+    await chooseOption(user, screen.getByLabelText('协议'), 'anthropic')
+    await user.type(screen.getByLabelText('max_tokens'), '0')
+    await user.type(screen.getByLabelText('thinking.budget_tokens'), '8192')
+    await user.click(screen.getByRole('button', { name: '创建' }))
+    expect(await screen.findByText('anthropic 的 thinking.budget_tokens 必须小于 max_tokens。')).toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/v1/models' && init?.method === 'POST')).toBe(false)
   })
 
   it('does not render the defaults panel for viewers', async () => {
