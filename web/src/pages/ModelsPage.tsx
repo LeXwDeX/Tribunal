@@ -1,12 +1,14 @@
 import { useEffect, useId, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCanWrite } from '../components/RoleContext'
-import { createModel, deleteModel, getDefaultProfile, listModels, listProfiles, testModelDraft, updateModel } from '../api/api'
-import { ApiError, errorMessage } from '../api/client'
-import type { Model, ModelParams, ModelWrite, ProfileConfig, ProfileDetail, ProviderTestResult } from '../api/types'
 import {
-  Badge, Button, ConfirmDialog, Disclosure, Drawer, EmptyState, ErrorState, Field, LoadingState, PageHeader, Panel,
-  Select,
+  createModel, deleteModel, getDefaultProfile, listModelPresets, listModels, listProfiles, testModelDraft, updateModel,
+} from '../api/api'
+import { ApiError, errorMessage } from '../api/client'
+import type { Model, ModelParams, ModelPreset, ModelWrite, ProfileConfig, ProfileDetail, ProviderTestResult } from '../api/types'
+import {
+  Badge, Button, Checkbox, ConfirmDialog, Disclosure, Drawer, EmptyState, ErrorState, Field, FieldHint, LoadingState,
+  Note, NumberField, PageHeader, Panel, Select,
 } from '../components/ui'
 import { ProfileEditor, ProfileNodeList, shortID } from '../features/models/ProfileNodes'
 import { formatDuration, formatJson, formatNumber } from '../lib/format'
@@ -26,11 +28,18 @@ function hostOf(value: string): string {
 }
 
 // Flattens model params into label/value pairs and drops unset values
-// (null, 0, empty string, false), so the card shows only what was configured.
-// temperature is a nullable pointer in the API: an explicit 0 is a real value.
+// (null, undefined, empty string), so the card shows only what was configured.
+// Explicit zeros and false are meaningful capability switches and keep a label
+// instead of disappearing. Price is never rendered (#406/#407).
+const EXPLICIT_PARAM_LABELS: Record<string, string> = {
+  max_tokens: '0（模型默认，不发送）',
+  context_window: '0（未知）',
+  max_concurrency: '0（不限制本地并发）',
+  strict_role_alternation: 'false（关闭）',
+}
+
 export function summarizeParams(params: ModelParams | undefined): Array<[string, string]> {
   const out: Array<[string, string]> = []
-  const price = params?.price
   const walk = (value: unknown, path: string) => {
     if (value === null || value === undefined || value === 0 || value === '' || value === false) return
     if (Array.isArray(value)) {
@@ -46,10 +55,8 @@ export function summarizeParams(params: ModelParams | undefined): Array<[string,
   for (const [key, value] of Object.entries(params ?? {})) {
     if (key === 'price') continue
     if (key === 'temperature' && typeof value === 'number') out.push([key, String(value)])
+    else if ((value === 0 || value === false) && key in EXPLICIT_PARAM_LABELS) out.push([key, EXPLICIT_PARAM_LABELS[key]])
     else walk(value, key)
-  }
-  if (price?.input_per_mtok || price?.output_per_mtok) {
-    out.push(['价格（每百万 token）', `输入 ${price.input_per_mtok ?? 0} / 输出 ${price.output_per_mtok ?? 0}`])
   }
   return out
 }
@@ -63,11 +70,24 @@ const PROTOCOL_OPTIONS = [
 ]
 
 const EFFORT_OPTIONS = [
-  { value: '', label: '继承' },
+  { value: '', label: '不设置' },
   { value: 'low', label: 'low' },
   { value: 'medium', label: 'medium' },
   { value: 'high', label: 'high' },
   { value: 'max', label: 'max' },
+]
+
+const FORCED_TOOL_CHOICE_OPTIONS = [
+  { value: '', label: '不设置' },
+  { value: 'auto', label: 'auto（按协议判断）' },
+  { value: 'supported', label: 'supported（允许强制 submit_result）' },
+  { value: 'unsupported', label: 'unsupported（不强制）' },
+]
+
+const THINKING_TYPE_OPTIONS = [
+  { value: '', label: '不设置' },
+  { value: 'enabled', label: 'enabled' },
+  { value: 'disabled', label: 'disabled' },
 ]
 
 const KEY_MODE_OPTIONS = [
@@ -75,6 +95,206 @@ const KEY_MODE_OPTIONS = [
   { value: 'replace', label: '替换' },
   { value: 'clear', label: '清除' },
 ]
+
+interface ModelForm {
+  displayName: string
+  protocol: string
+  baseURL: string
+  upstreamModel: string
+  maxTokens: string
+  maxConcurrency: string
+  contextWindow: string
+  rpm: string
+  temperature: string
+  forcedToolChoice: string
+  strictRoleAlternation: boolean
+  effort: string
+  thinkingType: string
+  thinkingBudget: string
+  preserveReasoningContent: boolean
+}
+
+type FormField = keyof ModelForm | 'apiKey'
+type FormErrors = Partial<Record<FormField, string>>
+
+// New models leave every optional number blank. The backend stores an absent
+// value as 0: max_tokens is then not sent upstream, and max_concurrency 0
+// creates no local semaphore. Only values the administrator types are written.
+function emptyForm(): ModelForm {
+  return {
+    displayName: '', protocol: 'openai-chat', baseURL: '', upstreamModel: '',
+    maxTokens: '', maxConcurrency: '', contextWindow: '', rpm: '', temperature: '',
+    forcedToolChoice: '', strictRoleAlternation: false, effort: '', thinkingType: '', thinkingBudget: '',
+    preserveReasoningContent: false,
+  }
+}
+
+function numberText(value: unknown): string {
+  return typeof value === 'number' && Number.isFinite(value) ? String(value) : ''
+}
+
+function formFromModel(model?: Model): ModelForm {
+  const params = model?.params ?? {}
+  return {
+    displayName: model?.display_name ?? '',
+    protocol: model?.protocol ?? 'openai-chat',
+    baseURL: model?.base_url ?? '',
+    upstreamModel: model?.model ?? '',
+    // 0 means "not sent" for max_tokens and "unknown" for context_window, so
+    // the inputs stay blank. A stored 0 max_concurrency or rpm is an explicit
+    // "no limit" and stays visible.
+    maxTokens: params.max_tokens ? numberText(params.max_tokens) : '',
+    maxConcurrency: numberText(params.max_concurrency),
+    contextWindow: params.context_window ? numberText(params.context_window) : '',
+    rpm: numberText(params.rpm),
+    temperature: numberText(params.temperature),
+    forcedToolChoice: params.forced_tool_choice ?? '',
+    strictRoleAlternation: params.strict_role_alternation === true,
+    effort: params.reasoning?.effort ?? '',
+    thinkingType: params.thinking?.type ?? '',
+    thinkingBudget: params.thinking?.budget_tokens ? numberText(params.thinking.budget_tokens) : '',
+    preserveReasoningContent: params.preserve_reasoning_content === true,
+  }
+}
+
+// A preset fills the local form only. The user can change any field before
+// saving; nothing is written until the normal create/update request (#405).
+function formFromPreset(preset: ModelPreset, current: ModelForm): ModelForm {
+  const params = preset.params
+  return {
+    ...current,
+    displayName: preset.display_name,
+    protocol: preset.protocol,
+    baseURL: preset.base_url,
+    upstreamModel: preset.model,
+    maxTokens: numberText(params.max_tokens),
+    maxConcurrency: numberText(params.max_concurrency),
+    contextWindow: numberText(params.context_window),
+    rpm: numberText(params.rpm),
+    temperature: numberText(params.temperature),
+    forcedToolChoice: params.forced_tool_choice ?? '',
+    strictRoleAlternation: params.strict_role_alternation === true,
+    effort: params.reasoning?.effort ?? '',
+    thinkingType: params.thinking?.type ?? '',
+    thinkingBudget: params.thinking?.budget_tokens ? numberText(params.thinking.budget_tokens) : '',
+    preserveReasoningContent: params.preserve_reasoning_content === true,
+  }
+}
+
+const NON_NEGATIVE_INT = /^\d+$/
+
+// validateModelForm covers the rules the form can judge without the server.
+// Protocol-level requirements the server also enforces stay here so the user
+// gets the error before any request is sent.
+function validateModelForm(form: ModelForm): FormErrors {
+  const errors: FormErrors = {}
+  const maxTokens = form.maxTokens.trim()
+  if (maxTokens) {
+    if (!NON_NEGATIVE_INT.test(maxTokens)) errors.maxTokens = 'max_tokens 必须是不小于 0 的整数。'
+    else if (form.protocol === 'anthropic' && Number(maxTokens) === 0) errors.maxTokens = 'anthropic 协议要求 max_tokens 大于 0。'
+  } else if (form.protocol === 'anthropic') {
+    errors.maxTokens = 'anthropic 协议要求 max_tokens 大于 0，不能留空。'
+  }
+  if (form.maxConcurrency.trim() && !NON_NEGATIVE_INT.test(form.maxConcurrency.trim())) {
+    errors.maxConcurrency = 'max_concurrency 必须是不小于 0 的整数。'
+  }
+  if (form.contextWindow.trim() && !NON_NEGATIVE_INT.test(form.contextWindow.trim())) {
+    errors.contextWindow = 'context_window 必须是不小于 0 的整数。'
+  }
+  if (form.rpm.trim() && !NON_NEGATIVE_INT.test(form.rpm.trim())) {
+    errors.rpm = 'rpm 必须是不小于 0 的整数。'
+  }
+  if (form.temperature.trim()) {
+    const value = Number(form.temperature)
+    if (!Number.isFinite(value) || value < 0 || value > 2) errors.temperature = 'temperature 必须在 0 到 2 之间。'
+  }
+  if (form.thinkingBudget.trim() && !NON_NEGATIVE_INT.test(form.thinkingBudget.trim())) {
+    errors.thinkingBudget = 'thinking.budget_tokens 必须是不小于 0 的整数。'
+  }
+  return errors
+}
+
+// buildParams merges the displayed fields over the stored parameter object.
+// Parameters without a control (allow_reasoning_effort_none,
+// output_config_effort, responses_params) survive an edit. price is legacy
+// cost data and is never submitted (#406/#407).
+function buildParams(model: Model | undefined, form: ModelForm): ModelParams {
+  const params: ModelParams = { ...(model?.params ?? {}) }
+  delete params.price
+  if (form.maxTokens.trim()) params.max_tokens = Number(form.maxTokens)
+  else delete params.max_tokens
+  if (form.maxConcurrency.trim()) params.max_concurrency = Number(form.maxConcurrency)
+  else delete params.max_concurrency
+  if (form.contextWindow.trim()) params.context_window = Number(form.contextWindow)
+  else delete params.context_window
+  if (form.rpm.trim()) params.rpm = Number(form.rpm)
+  else delete params.rpm
+  if (form.temperature.trim()) params.temperature = Number(form.temperature)
+  else delete params.temperature
+  if (form.forcedToolChoice) params.forced_tool_choice = form.forcedToolChoice
+  else delete params.forced_tool_choice
+  params.strict_role_alternation = form.strictRoleAlternation
+  if (form.effort) params.reasoning = { effort: form.effort }
+  else delete params.reasoning
+  if (form.thinkingType || form.thinkingBudget.trim()) {
+    params.thinking = {}
+    if (form.thinkingBudget.trim()) params.thinking.budget_tokens = Number(form.thinkingBudget)
+    if (form.thinkingType) params.thinking.type = form.thinkingType
+  } else delete params.thinking
+  params.preserve_reasoning_content = form.preserveReasoningContent
+  return params
+}
+
+const API_FIELD_MAP: Record<string, FormField> = {
+  display_name: 'displayName',
+  protocol: 'protocol',
+  base_url: 'baseURL',
+  model: 'upstreamModel',
+  api_key: 'apiKey',
+  'params.max_tokens': 'maxTokens',
+  'params.context_window': 'contextWindow',
+  'params.max_concurrency': 'maxConcurrency',
+  'params.rpm': 'rpm',
+  'params.temperature': 'temperature',
+  'params.forced_tool_choice': 'forcedToolChoice',
+  'params.strict_role_alternation': 'strictRoleAlternation',
+  'params.preserve_reasoning_content': 'preserveReasoningContent',
+  'params.reasoning': 'effort',
+  'params.reasoning.effort': 'effort',
+  'params.thinking': 'thinkingType',
+  'params.thinking.type': 'thinkingType',
+  'params.thinking.budget_tokens': 'thinkingBudget',
+}
+
+function apiFieldErrors(error: unknown): { fields: FormErrors; message?: string } {
+  if (!(error instanceof ApiError)) return { fields: {}, message: errorMessage(error) }
+  const fields: FormErrors = {}
+  const unmapped: string[] = []
+  for (const detail of error.details ?? []) {
+    const key = detail.field ? API_FIELD_MAP[detail.field] : undefined
+    if (!key) {
+      unmapped.push([detail.field, detail.message].filter(Boolean).join(': '))
+      continue
+    }
+    const message = detail.message || error.message
+    fields[key] = fields[key] ? `${fields[key]}；${message}` : message
+  }
+  const message = unmapped.length ? `${error.message}（${unmapped.join('；')}）` : undefined
+  return { fields, message }
+}
+
+function configName(id: string): string {
+  return id.startsWith('config:') ? id.slice('config:'.length) : id
+}
+
+const PRESET_LABELS: Record<string, string> = {
+  'deepseek-v4-pro-max': 'DeepSeek V4 Pro 最大能力',
+  'deepseek-flash-max': 'DeepSeek Flash 最大能力',
+}
+
+function presetLabel(preset: ModelPreset): string {
+  return PRESET_LABELS[preset.id] ?? preset.display_name
+}
 
 function ModelCard({ model, canWrite, onEdit, onDelete }: {
   model: Model
@@ -107,6 +327,11 @@ function ModelCard({ model, canWrite, onEdit, onDelete }: {
       <div className={styles.cardMeta}>
         <span>API key {model.has_api_key ? '已配置' : '未配置'}</span>
       </div>
+      {model.source === 'config' ? (
+        <div className={styles.cardMeta}>
+          <span>只读：YAML 路径 <code>providers.{configName(model.id)}</code>，修改配置后重启生效</span>
+        </div>
+      ) : null}
       <div className={styles.cardMeta} role="group" aria-label={`${model.display_name} 参数`}>
         <span>参数</span>
         {params.length
@@ -130,29 +355,29 @@ function ModelCard({ model, canWrite, onEdit, onDelete }: {
   )
 }
 
-function ModelDrawer({ open, model, onClose, onSaved }: {
+function ModelDrawer({ open, model, presets, onClose, onSaved }: {
   open: boolean
   model?: Model
+  presets: ModelPreset[]
   onClose: () => void
   onSaved: () => void
 }) {
-  const [displayName, setDisplayName] = useState('')
-  const [protocol, setProtocol] = useState('openai-chat')
-  const [baseURL, setBaseURL] = useState('')
-  const [upstreamModel, setUpstreamModel] = useState('')
-  const [maxTokens, setMaxTokens] = useState('')
-  // The historical new-model default is 1. #406 will move the platform default
-  // out of this form; an empty value means "do not set" (the backend stores 0,
-  // which creates no local semaphore).
-  const [maxConcurrency, setMaxConcurrency] = useState('1')
-  const [temperature, setTemperature] = useState('')
-  const [effort, setEffort] = useState('')
+  const [form, setForm] = useState<ModelForm>(emptyForm)
+  const [errors, setErrors] = useState<FormErrors>({})
   const [keyMode, setKeyMode] = useState<KeyMode>('keep')
   const [apiKey, setApiKey] = useState('')
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string>()
   const [test, setTest] = useState<ProviderTestResult>()
-  const ids = { display: useId(), protocol: useId(), base: useId(), model: useId(), tokens: useId(), concurrency: useId(), temp: useId(), effort: useId(), key: useId() }
+  const [presetNote, setPresetNote] = useState<string>()
+  const id = useId()
+  const ids = {
+    display: `${id}-display`, protocol: `${id}-protocol`, base: `${id}-base`, model: `${id}-model`,
+    tokens: `${id}-tokens`, concurrency: `${id}-concurrency`, context: `${id}-context`, rpm: `${id}-rpm`,
+    temperature: `${id}-temperature`, toolChoice: `${id}-tool-choice`, strict: `${id}-strict`,
+    effort: `${id}-effort`, thinkingType: `${id}-thinking-type`, thinkingBudget: `${id}-thinking-budget`,
+    preserve: `${id}-preserve`, key: `${id}-key`,
+  }
 
   useEffect(() => {
     if (!open) {
@@ -160,40 +385,30 @@ function ModelDrawer({ open, model, onClose, onSaved }: {
       setKeyMode('keep')
       setError(undefined)
       setTest(undefined)
+      setErrors({})
+      setPresetNote(undefined)
       return
     }
-    setDisplayName(model?.display_name ?? '')
-    setProtocol(model?.protocol ?? 'openai-chat')
-    setBaseURL(model?.base_url ?? '')
-    setUpstreamModel(model?.model ?? '')
-    setMaxTokens(model?.params?.max_tokens ? String(model.params.max_tokens) : '')
-    // 0 is a meaningful stored value (no local semaphore); only a missing value
-    // falls back to the new-model default.
-    setMaxConcurrency(model?.params?.max_concurrency != null ? String(model.params.max_concurrency) : '1')
-    setTemperature(model?.params?.temperature != null ? String(model.params.temperature) : '')
-    setEffort(model?.params?.reasoning?.effort ?? '')
+    setForm(formFromModel(model))
     setApiKey('')
     setKeyMode('keep')
     setError(undefined)
     setTest(undefined)
+    setErrors({})
+    setPresetNote(undefined)
   }, [open, model])
 
+  const update = (patch: Partial<ModelForm>) => {
+    setForm((current) => ({ ...current, ...patch }))
+  }
+
   const input = (): ModelWrite => {
-    // PATCH replaces the whole record, so start from the stored params and
-    // overlay only what this form edits.
-    const params: ModelParams = { ...(model?.params ?? {}) }
-    if (maxTokens) params.max_tokens = Number(maxTokens)
-    else delete params.max_tokens
-    // An empty field means "do not set"; the backend reads the absent value as
-    // 0, which disables the local semaphore.
-    if (maxConcurrency.trim()) params.max_concurrency = Number(maxConcurrency)
-    else delete params.max_concurrency
-    if (temperature) params.temperature = Number(temperature)
-    else delete params.temperature
-    if (effort) params.reasoning = { ...params.reasoning, effort }
-    else delete params.reasoning
     const value: ModelWrite = {
-      display_name: displayName.trim(), protocol, base_url: baseURL.trim(), model: upstreamModel.trim(), params,
+      display_name: form.displayName.trim(),
+      protocol: form.protocol,
+      base_url: form.baseURL.trim(),
+      model: form.upstreamModel.trim(),
+      params: buildParams(model, form),
     }
     if (keyMode === 'replace') value.api_key = apiKey
     if (keyMode === 'clear') value.api_key = ''
@@ -204,19 +419,37 @@ function ModelDrawer({ open, model, onClose, onSaved }: {
     return value
   }
 
-  const invalidParams = (): string | undefined => {
-    if (maxTokens && !(Number.isInteger(Number(maxTokens)) && Number(maxTokens) > 0)) return 'max_tokens 必须是正整数。'
-    if (maxConcurrency.trim() && !(/^\d+$/.test(maxConcurrency.trim()))) return 'max_concurrency 必须是不小于 0 的整数。'
-    return undefined
+  const applyPreset = (preset: ModelPreset) => {
+    setForm((current) => formFromPreset(preset, current))
+    setPresetNote(presetLabel(preset))
+    setErrors({})
+    setError(undefined)
+    setTest(undefined)
+  }
+
+  const handleError = (err: unknown, prefix?: string) => {
+    if (err instanceof ApiError && err.code === 'stale_revision') {
+      setError('已被他人修改，请重新加载。')
+      return
+    }
+    if (prefix) {
+      setError(prefix)
+      return
+    }
+    const mapped = apiFieldErrors(err)
+    setErrors(mapped.fields)
+    setError(mapped.message)
   }
 
   const save = async () => {
-    const invalid = invalidParams()
-    if (invalid) {
-      setError(invalid)
+    const found = validateModelForm(form)
+    if (Object.keys(found).length) {
+      setErrors(found)
+      setError(undefined)
       return
     }
     setPending(true)
+    setErrors({})
     setError(undefined)
     try {
       if (model) await updateModel(model.id, input())
@@ -224,34 +457,36 @@ function ModelDrawer({ open, model, onClose, onSaved }: {
       onSaved()
       onClose()
     } catch (err) {
-      setError(err instanceof ApiError && err.code === 'stale_revision'
-        ? '已被他人修改，请重新加载。'
-        : errorMessage(err))
+      handleError(err)
     } finally {
       setPending(false)
     }
   }
 
   const runTest = async () => {
-    const invalid = invalidParams()
-    if (invalid) {
-      setError(invalid)
+    const found = validateModelForm(form)
+    if (Object.keys(found).length) {
+      setErrors(found)
+      setError(undefined)
       setTest(undefined)
       return
     }
     setPending(true)
+    setErrors({})
     setError(undefined)
     setTest(undefined)
     try {
       setTest(await testModelDraft(input()))
     } catch (err) {
-      setError(err instanceof ApiError && err.code === 'egress_denied'
+      handleError(err, err instanceof ApiError && err.code === 'egress_denied'
         ? '出站地址被拒绝：请检查 base_url 或服务端出站规则。'
-        : errorMessage(err))
+        : undefined)
     } finally {
       setPending(false)
     }
   }
+
+  const configModel = model?.read_only ?? false
 
   return (
     <Drawer
@@ -267,47 +502,140 @@ function ModelDrawer({ open, model, onClose, onSaved }: {
         </>
       )}
     >
-      <Field label="显示名" htmlFor={ids.display}><input id={ids.display} className={ui.input} value={displayName} onChange={(event) => setDisplayName(event.target.value)} /></Field>
-      <Field label="协议" htmlFor={ids.protocol}>
-        <Select
-          id={ids.protocol}
-          value={protocol}
-          options={PROTOCOL_OPTIONS}
-          onChange={setProtocol}
-        />
-      </Field>
-      <Field label="base_url" htmlFor={ids.base}><input id={ids.base} className={ui.input} value={baseURL} onChange={(event) => setBaseURL(event.target.value)} /></Field>
-      <Field label="上游模型" htmlFor={ids.model}><input id={ids.model} className={ui.input} value={upstreamModel} onChange={(event) => setUpstreamModel(event.target.value)} /></Field>
-      <Field label="max_tokens" htmlFor={ids.tokens}><input id={ids.tokens} className={ui.input} inputMode="numeric" value={maxTokens} onChange={(event) => setMaxTokens(event.target.value)} /></Field>
-      <Field label="max_concurrency" htmlFor={ids.concurrency} hint="同时进行的请求数；0 或留空表示不限制本地并发。"><input id={ids.concurrency} className={ui.input} inputMode="numeric" value={maxConcurrency} onChange={(event) => setMaxConcurrency(event.target.value)} /></Field>
-      <Field label="temperature" htmlFor={ids.temp}><input id={ids.temp} className={ui.input} inputMode="decimal" value={temperature} onChange={(event) => setTemperature(event.target.value)} /></Field>
-      <Field label="reasoning effort" htmlFor={ids.effort} hint="anthropic 不会发送 effort。">
-        <Select
-          id={ids.effort}
-          value={effort}
-          options={EFFORT_OPTIONS}
-          onChange={setEffort}
-          emptyLabel="继承"
-        />
-      </Field>
-      <Field label="API key" htmlFor={ids.key}>
-        <Select
-          id={`${ids.key}-mode`}
-          value={keyMode}
-          options={KEY_MODE_OPTIONS}
-          onChange={(value) => setKeyMode(value as KeyMode)}
-          aria-label="API key 状态"
-        />
-        {keyMode === 'replace' ? <input id={ids.key} className={ui.input} type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} /> : null}
-      </Field>
-      {model?.read_only ? <p className="small muted">由配置文件提供，修改需改配置并重启。</p> : null}
-      {error ? <span className={styles.resultError}>{error}</span> : null}
-      {test ? (
-        <span className={test.ok === false ? styles.resultError : styles.resultOk}>
-          {test.ok === true ? '测试成功。' : '测试失败。'} {test.model ? `模型：${test.model}。` : ''}
-          {typeof test.latency_ms === 'number' ? `延迟：${formatDuration(test.latency_ms)}。` : ''}
-        </span>
-      ) : null}
+      <div className={styles.modelForm}>
+        {!configModel && presets.length ? (
+          <section className={styles.presetBlock} aria-label="模型预设">
+            <span className={styles.presetTitle}>DeepSeek 预设</span>
+            <div className={styles.presetRow}>
+              {presets.map((preset) => (
+                <Button key={preset.id} variant="secondary" className={ui.smallButton} onClick={() => applyPreset(preset)}>
+                  {presetLabel(preset)}
+                </Button>
+              ))}
+            </div>
+            <FieldHint>预设只填入当前表单，不会立即保存；保存后对之后启动的评审生效。</FieldHint>
+            {presetNote ? <span className={styles.presetApplied} role="status">已填入 {presetNote}，可继续修改。</span> : null}
+          </section>
+        ) : null}
+
+        <fieldset className={styles.modelFormGroup}>
+          <legend className={styles.modelFormLegend}>连接</legend>
+          <div className={styles.modelFormGrid}>
+            <Field label="显示名" htmlFor={ids.display} error={errors.displayName}>
+              <input id={ids.display} className={ui.input} value={form.displayName} onChange={(event) => update({ displayName: event.target.value })} />
+            </Field>
+            <Field label="协议" htmlFor={ids.protocol} error={errors.protocol}>
+              <Select id={ids.protocol} value={form.protocol} options={PROTOCOL_OPTIONS} onChange={(value) => update({ protocol: value })} />
+            </Field>
+            <Field label="base_url" htmlFor={ids.base} error={errors.baseURL}>
+              <input id={ids.base} className={ui.input} value={form.baseURL} onChange={(event) => update({ baseURL: event.target.value })} />
+            </Field>
+            <Field label="上游模型" htmlFor={ids.model} error={errors.upstreamModel}>
+              <input id={ids.model} className={ui.input} value={form.upstreamModel} onChange={(event) => update({ upstreamModel: event.target.value })} />
+            </Field>
+            <Field label="API key" htmlFor={ids.key} error={errors.apiKey}>
+              <Select
+                id={`${ids.key}-mode`}
+                value={keyMode}
+                options={KEY_MODE_OPTIONS}
+                onChange={(value) => setKeyMode(value as KeyMode)}
+                aria-label="API key 状态"
+              />
+              {keyMode === 'replace' ? <input id={ids.key} className={ui.input} type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} /> : null}
+            </Field>
+          </div>
+        </fieldset>
+
+        <fieldset className={styles.modelFormGroup}>
+          <legend className={styles.modelFormLegend}>采样</legend>
+          <div className={styles.modelFormGrid}>
+            <Field label="temperature" htmlFor={ids.temperature} hint="0 到 2；留空使用上游默认。" error={errors.temperature}>
+              <NumberField id={ids.temperature} min={0} max={2} step={0.1} value={form.temperature} onChange={(event) => update({ temperature: event.target.value })} />
+            </Field>
+            <Field label="forced_tool_choice" htmlFor={ids.toolChoice} hint="声明上游是否接受强制 submit_result 工具选择。" error={errors.forcedToolChoice}>
+              <Select
+                id={ids.toolChoice}
+                value={form.forcedToolChoice}
+                options={FORCED_TOOL_CHOICE_OPTIONS}
+                onChange={(value) => update({ forcedToolChoice: value })}
+              />
+            </Field>
+            <div className={styles.checkField}>
+              <Checkbox
+                id={ids.strict}
+                label="strict_role_alternation"
+                checked={form.strictRoleAlternation}
+                onChange={(event) => update({ strictRoleAlternation: event.target.checked })}
+                aria-describedby={`${ids.strict}-hint`}
+              />
+              <FieldHint id={`${ids.strict}-hint`}>开启后把用户提示折入最后一条工具消息，满足严格的角色交替。</FieldHint>
+              {errors.strictRoleAlternation ? <span className={styles.formError} role="alert">{errors.strictRoleAlternation}</span> : null}
+            </div>
+          </div>
+        </fieldset>
+
+        <fieldset className={styles.modelFormGroup}>
+          <legend className={styles.modelFormLegend}>推理</legend>
+          <div className={styles.modelFormGrid}>
+            <Field label="reasoning.effort" htmlFor={ids.effort} hint="anthropic 不发送 effort，改用 thinking.budget_tokens。" error={errors.effort}>
+              <Select id={ids.effort} value={form.effort} options={EFFORT_OPTIONS} onChange={(value) => update({ effort: value })} />
+            </Field>
+            <Field label="thinking.type" htmlFor={ids.thinkingType} hint="仅 openai-chat 发送 thinking.type；anthropic 由 budget_tokens 决定。" error={errors.thinkingType}>
+              <Select id={ids.thinkingType} value={form.thinkingType} options={THINKING_TYPE_OPTIONS} onChange={(value) => update({ thinkingType: value })} />
+            </Field>
+            <Field label="thinking.budget_tokens" htmlFor={ids.thinkingBudget} hint="0 或留空表示不设置 thinking 预算。" error={errors.thinkingBudget}>
+              <NumberField id={ids.thinkingBudget} min={0} step={1} value={form.thinkingBudget} onChange={(event) => update({ thinkingBudget: event.target.value })} />
+            </Field>
+            <div className={styles.checkField}>
+              <Checkbox
+                id={ids.preserve}
+                label="preserve_reasoning_content"
+                checked={form.preserveReasoningContent}
+                onChange={(event) => update({ preserveReasoningContent: event.target.checked })}
+                aria-describedby={`${ids.preserve}-hint`}
+              />
+              <FieldHint id={`${ids.preserve}-hint`}>仅在 openai-chat 生效：把 reasoning_content 回传给后续请求。</FieldHint>
+              {errors.preserveReasoningContent ? <span className={styles.formError} role="alert">{errors.preserveReasoningContent}</span> : null}
+            </div>
+          </div>
+        </fieldset>
+
+        <fieldset className={styles.modelFormGroup}>
+          <legend className={styles.modelFormLegend}>限流</legend>
+          <div className={styles.modelFormGrid}>
+            <Field label="max_tokens" htmlFor={ids.tokens} hint="模型默认（不发送；DeepSeek 默认 8K/64K/128K，不等于最大）。anthropic 必须填写大于 0 的值。" error={errors.maxTokens}>
+              <NumberField id={ids.tokens} min={0} step={1} value={form.maxTokens} onChange={(event) => update({ maxTokens: event.target.value })} />
+            </Field>
+            <Field label="max_concurrency" htmlFor={ids.concurrency} hint="留空或 0 表示不限制本地并发。" error={errors.maxConcurrency}>
+              <NumberField id={ids.concurrency} min={0} step={1} value={form.maxConcurrency} onChange={(event) => update({ maxConcurrency: event.target.value })} />
+            </Field>
+            <Field label="context_window" htmlFor={ids.context} hint="上游可接收的输入窗口；0 表示未知。" error={errors.contextWindow}>
+              <NumberField id={ids.context} min={0} step={1} value={form.contextWindow} onChange={(event) => update({ contextWindow: event.target.value })} />
+            </Field>
+            <Field label="rpm" htmlFor={ids.rpm} hint="每分钟请求数；0 表示不限制。" error={errors.rpm}>
+              <NumberField id={ids.rpm} min={0} step={1} value={form.rpm} onChange={(event) => update({ rpm: event.target.value })} />
+            </Field>
+          </div>
+          {form.maxConcurrency.trim() === '0' ? (
+            <Note tone="warn" role="status">max_concurrency = 0：不创建本地并发信号量，不限制本地并发。</Note>
+          ) : null}
+        </fieldset>
+
+        {configModel ? (
+          <Note tone="neutral">
+            该模型来自平台配置文件，控制台不会写入数据库。YAML 字段路径：<code>providers.{configName(model?.id ?? '')}</code> 下的
+            protocol、base_url、model、max_tokens、context_window、temperature、reasoning、thinking、max_concurrency、rpm、
+            forced_tool_choice、strict_role_alternation；修改后重启生效。
+          </Note>
+        ) : null}
+        {error ? <span className={styles.resultError}>{error}</span> : null}
+        {test ? (
+          <span className={test.ok === false ? styles.resultError : styles.resultOk}>
+            {test.ok === true ? '测试成功。' : '测试失败。'} {test.model ? `模型：${test.model}。` : ''}
+            {typeof test.latency_ms === 'number' ? `延迟：${formatDuration(test.latency_ms)}。` : ''}
+          </span>
+        ) : null}
+      </div>
     </Drawer>
   )
 }
@@ -403,6 +731,7 @@ export function ModelsPage() {
   const modelsId = useId()
   const profilesId = useId()
   const models = useQuery({ queryKey: ['models'], queryFn: listModels, retry: false })
+  const modelPresets = useQuery({ queryKey: ['model-presets'], queryFn: listModelPresets, retry: false, enabled: canWrite })
   const profiles = useQuery({ queryKey: ['profiles'], queryFn: () => listProfiles(), retry: false })
   const defaultProfile = useQuery({ queryKey: ['profile-default'], queryFn: getDefaultProfile, retry: false })
   const [profileEditing, setProfileEditing] = useState(false)
@@ -476,7 +805,13 @@ export function ModelsPage() {
         </section>
       </div>
 
-      <ModelDrawer open={drawerOpen} model={editing} onClose={() => setDrawerOpen(false)} onSaved={saved} />
+      <ModelDrawer
+        open={drawerOpen}
+        model={editing}
+        presets={modelPresets.data?.presets ?? []}
+        onClose={() => setDrawerOpen(false)}
+        onSaved={saved}
+      />
       <ProfileEditor
         open={profileEditing}
         detail={defaultProfile.data}

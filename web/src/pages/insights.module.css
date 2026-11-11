@@ -166,6 +166,78 @@
 .resultOk { color: var(--ok-fg); }
 .resultError { color: var(--danger-fg); }
 
+.modelForm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  min-width: 0;
+}
+
+.modelFormGroup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  margin: 0;
+  padding: var(--space-md);
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.modelFormLegend {
+  padding: 0 var(--space-xs);
+  font: 600 var(--fs-label) var(--font-mono);
+}
+
+.modelFormGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-sm);
+  min-width: 0;
+}
+
+.presetBlock {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  min-width: 0;
+}
+
+.presetTitle {
+  color: var(--muted-strong);
+  font-size: var(--fs-label);
+  font-weight: var(--fw-semibold);
+}
+
+.presetRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+.presetApplied {
+  color: var(--ok-fg);
+  font-size: var(--fs-label);
+}
+
+.checkField {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+  min-width: 0;
+}
+
+.formError {
+  color: var(--danger-fg);
+  font-size: var(--fs-label);
+}
+
+@media (max-width: 640px) {
+  .modelFormGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .profileTitle {
   font-family: var(--font-mono);
 }

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { screen, waitFor } from '@testing-library/react'
+import { fireEvent, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { ModelsPage } from '../src/pages/ModelsPage'
 import { installFetch, jsonResponse, renderWithProviders } from './test-utils'
@@ -125,26 +125,29 @@ describe('models page management (#292)', () => {
     const fetchMock = installFetch(routes({ models: [stored] }))
     renderWithProviders(<ModelsPage />, { route: '/models' })
     await user.click(await screen.findByRole('button', { name: '编辑' }))
-    expect(screen.getByLabelText('max_concurrency')).toHaveValue('3')
-    await chooseOption(user, screen.getByLabelText('reasoning effort'), 'high')
+    expect(screen.getByLabelText('max_concurrency')).toHaveValue(3)
+    await chooseOption(user, screen.getByLabelText('reasoning.effort'), 'high')
     await user.click(screen.getByRole('button', { name: '保存' }))
     await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'PATCH')).toBe(true))
     const patch = fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH')
     const body = JSON.parse(String(patch?.[1]?.body))
-    expect(body.params).toEqual({ ...stored.params, reasoning: { effort: 'high' } })
+    const { price: _price, ...expected } = stored.params
+    expect(body.params).toEqual({ ...expected, reasoning: { effort: 'high' }, preserve_reasoning_content: false })
   })
 
-  it('keeps the new-model default and accepts explicit zero concurrency', async () => {
+  it('keeps the new-model defaults and accepts explicit zero concurrency', async () => {
     const user = userEvent.setup()
     const fetchMock = installFetch(routes({ models: [] }))
     renderWithProviders(<ModelsPage />, { route: '/models' })
     await user.click(await screen.findByRole('button', { name: '新增模型' }))
-    expect(screen.getByLabelText('max_concurrency')).toHaveValue('1')
+    expect(screen.getByLabelText('max_concurrency')).toHaveValue(null)
     await user.type(screen.getByLabelText('max_tokens'), '256')
     await user.click(screen.getByRole('button', { name: '保存前测试' }))
     await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url === '/api/v1/models:test')).toBe(true))
     let testCall = fetchMock.mock.calls.find(([url]) => url === '/api/v1/models:test')
-    expect(JSON.parse(String(testCall?.[1]?.body)).params).toEqual({ max_tokens: 256, max_concurrency: 1 })
+    expect(JSON.parse(String(testCall?.[1]?.body)).params).toEqual({
+      max_tokens: 256, strict_role_alternation: false, preserve_reasoning_content: false,
+    })
 
     await user.clear(screen.getByLabelText('max_concurrency'))
     await user.type(screen.getByLabelText('max_concurrency'), '0')
@@ -152,10 +155,11 @@ describe('models page management (#292)', () => {
     await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => url === '/api/v1/models:test')).toHaveLength(2))
     const calls = fetchMock.mock.calls.filter(([url]) => url === '/api/v1/models:test')
     testCall = calls[calls.length - 1]
-    expect(JSON.parse(String(testCall?.[1]?.body)).params).toEqual({ max_tokens: 256, max_concurrency: 0 })
+    expect(JSON.parse(String(testCall?.[1]?.body)).params).toEqual({
+      max_tokens: 256, max_concurrency: 0, strict_role_alternation: false, preserve_reasoning_content: false,
+    })
 
-    await user.clear(screen.getByLabelText('max_concurrency'))
-    await user.type(screen.getByLabelText('max_concurrency'), '-1')
+    fireEvent.change(screen.getByLabelText('max_concurrency'), { target: { value: '-1' } })
     await user.click(screen.getByRole('button', { name: '保存前测试' }))
     expect(await screen.findByText('max_concurrency 必须是不小于 0 的整数。')).toBeInTheDocument()
     expect(fetchMock.mock.calls.filter(([url]) => url === '/api/v1/models:test')).toHaveLength(2)
@@ -167,7 +171,7 @@ describe('models page management (#292)', () => {
     const fetchMock = installFetch(routes({ models: [stored] }))
     renderWithProviders(<ModelsPage />, { route: '/models' })
     await user.click(await screen.findByRole('button', { name: '编辑' }))
-    expect(screen.getByLabelText('max_concurrency')).toHaveValue('0')
+    expect(screen.getByLabelText('max_concurrency')).toHaveValue(0)
     await user.click(screen.getByRole('button', { name: '保存' }))
     await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'PATCH')).toBe(true))
     const patch = fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH')
