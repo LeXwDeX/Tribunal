@@ -4,7 +4,7 @@ import { getStats, listProjects } from '../api/api'
 import type { DailyStats, Project, ProviderQualityRow, Stats } from '../api/types'
 import {
   Badge, Button, DatePicker, Disclosure, EmptyState, ErrorState, LoadingState, Metric, PageHeader, Panel, Select,
-  TableNote, ToolbarField, type SelectOption,
+  TableNote, type SelectOption,
 } from '../components/ui'
 import { formatCost, formatNumber } from '../lib/format'
 import { usePaginated } from '../lib/hooks'
@@ -997,6 +997,8 @@ export function StatisticsPage() {
   const [projectId, setProjectId] = useState(initial.projectId)
   const [applied, setApplied] = useState(initial)
   const [validation, setValidation] = useState('')
+  const [fromValid, setFromValid] = useState(true)
+  const [toValid, setToValid] = useState(true)
 
   const projects = usePaginated<Project>(
     ['projects', 'statistics'],
@@ -1014,6 +1016,7 @@ export function StatisticsPage() {
   })
 
   const apply = () => {
+    if (!fromValid || !toValid) { setValidation('请修正日期格式。'); return }
     if (!fromDate || !toDate) { setValidation('请选择开始和结束日期。'); return }
     if (fromDate > toDate) { setValidation('开始日期不能晚于结束日期。'); return }
     if (!dateRange({ fromDate, toDate })) { setValidation('日期范围无效，请重新选择。'); return }
@@ -1034,17 +1037,30 @@ export function StatisticsPage() {
           description="按时间与项目查看运行统计、每日趋势和节点维度数据；不可用的值不会显示为零。"
           actions={(
             <div className={insights.headerFilters} role="group" aria-label="筛选">
-              <ToolbarField label="开始日期">
+              <div className={insights.filterField}>
+                <span className={insights.filterLabel}>开始日期</span>
                 <div className={insights.dateFilter}>
-                  <DatePicker value={fromDate} onChange={setFromDate} aria-label="开始日期" />
+                  <DatePicker
+                    value={fromDate}
+                    onChange={setFromDate}
+                    onValidityChange={setFromValid}
+                    aria-label="开始日期"
+                  />
                 </div>
-              </ToolbarField>
-              <ToolbarField label="结束日期">
+              </div>
+              <div className={insights.filterField}>
+                <span className={insights.filterLabel}>结束日期</span>
                 <div className={insights.dateFilter}>
-                  <DatePicker value={toDate} onChange={setToDate} aria-label="结束日期" />
+                  <DatePicker
+                    value={toDate}
+                    onChange={setToDate}
+                    onValidityChange={setToValid}
+                    aria-label="结束日期"
+                  />
                 </div>
-              </ToolbarField>
-              <ToolbarField label="项目">
+              </div>
+              <div className={insights.filterField}>
+                <span className={insights.filterLabel}>项目</span>
                 <div className={insights.filterSelect}>
                   <Select
                     value={projectId}
@@ -1054,7 +1070,7 @@ export function StatisticsPage() {
                     emptyLabel="全部项目"
                   />
                 </div>
-              </ToolbarField>
+              </div>
               {projects.hasNextPage ? (
                 <Button
                   variant="secondary"

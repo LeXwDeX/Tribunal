@@ -234,6 +234,21 @@
   margin-left: auto;
 }
 
+.filterField {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  min-width: 0;
+}
+
+.filterLabel {
+  flex: none;
+  color: var(--muted-strong);
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
+  white-space: nowrap;
+}
+
 .headerFilters .dateFilter,
 .headerFilters .filterSelect {
   display: flex;

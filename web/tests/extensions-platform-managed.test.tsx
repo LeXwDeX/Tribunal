@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { setCsrfToken } from '../src/api/client'
 import { ExtensionsManager } from '../src/features/extensions/ExtensionsManager'
@@ -91,6 +91,58 @@ it.each([true, false])('keeps editing and toggling an existing custom MCP server
   await user.click(await screen.findByRole('option', { name: enabled ? '停用' : '启用' }))
   await user.click(within(dialog).getByRole('button', { name: '保存' }))
   await waitFor(() => expect(writes).toEqual([{ url: '/api/v1/mcp-servers/custom', body: { name: 'custom-mcp', enabled: !enabled } }]))
+})
+
+it('replaces the full MCP config when the replacement JSON is valid', async () => {
+  const writes: Array<{ url: string; body: unknown }> = []
+  installFetch((url, init) => {
+    if (init?.method === 'PUT') {
+      writes.push({ url, body: JSON.parse(String(init.body)) })
+      return jsonResponse({})
+    }
+    if (url.startsWith('/api/v1/mcp-servers')) return jsonResponse({ servers })
+    if (url.startsWith('/api/v1/skills')) return jsonResponse({ skills })
+    return jsonResponse({ bindings: [] })
+  })
+  setCsrfToken('csrf-test')
+  const user = userEvent.setup()
+  renderWithProviders(<ExtensionsManager scope="platform" tab="mcp" onTabChange={() => {}} />)
+  const custom = (await screen.findByText('custom-mcp')).closest('tr') as HTMLElement
+  await user.click(within(custom).getByRole('button', { name: '编辑' }))
+  const dialog = screen.getByRole('dialog', { name: '编辑 MCP 服务器' })
+  await user.click(within(dialog).getByRole('checkbox', { name: '替换完整配置' }))
+  fireEvent.change(within(dialog).getByLabelText('新的配置 JSON'), {
+    target: { value: '{"command":"new-mcp","args":["--x"]}' },
+  })
+  await user.click(within(dialog).getByRole('button', { name: '保存' }))
+  await waitFor(() => expect(writes).toEqual([{
+    url: '/api/v1/mcp-servers/custom',
+    body: { name: 'custom-mcp', enabled: true, config: { command: 'new-mcp', args: ['--x'] } },
+  }]))
+})
+
+it('rejects invalid replacement JSON without submitting', async () => {
+  const writes: Array<{ url: string; body: unknown }> = []
+  installFetch((url, init) => {
+    if (init?.method === 'PUT') {
+      writes.push({ url, body: JSON.parse(String(init.body)) })
+      return jsonResponse({})
+    }
+    if (url.startsWith('/api/v1/mcp-servers')) return jsonResponse({ servers })
+    if (url.startsWith('/api/v1/skills')) return jsonResponse({ skills })
+    return jsonResponse({ bindings: [] })
+  })
+  setCsrfToken('csrf-test')
+  const user = userEvent.setup()
+  renderWithProviders(<ExtensionsManager scope="platform" tab="mcp" onTabChange={() => {}} />)
+  const custom = (await screen.findByText('custom-mcp')).closest('tr') as HTMLElement
+  await user.click(within(custom).getByRole('button', { name: '编辑' }))
+  const dialog = screen.getByRole('dialog', { name: '编辑 MCP 服务器' })
+  await user.click(within(dialog).getByRole('checkbox', { name: '替换完整配置' }))
+  fireEvent.change(within(dialog).getByLabelText('新的配置 JSON'), { target: { value: 'not json' } })
+  await user.click(within(dialog).getByRole('button', { name: '保存' }))
+  expect(await within(dialog).findByText('替换配置 JSON 无效或不是对象。')).toBeInTheDocument()
+  expect(writes).toHaveLength(0)
 })
 
 it.each(['mcp', 'skills'] as const)('keeps deleting existing custom %s extensions', async (tab) => {

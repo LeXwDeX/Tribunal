@@ -853,6 +853,8 @@ export interface DatePickerProps {
   className?: string
   value: string
   onChange: (value: string) => void
+  /** Reports whether the current text can be applied as a date. */
+  onValidityChange?: (valid: boolean) => void
   min?: string
   max?: string
   disabled?: boolean
@@ -867,7 +869,7 @@ export interface DatePickerProps {
 // local YYYY-MM-DD date; the calendar navigates with local calendar arithmetic
 // so DST transitions never shift a selected day.
 export const DatePicker = forwardRef<HTMLInputElement, DatePickerProps>(function DatePicker({
-  id, className, value, onChange, min, max, disabled, placeholder = 'YYYY-MM-DD',
+  id, className, value, onChange, onValidityChange, min, max, disabled, placeholder = 'YYYY-MM-DD',
   'aria-label': ariaLabel, 'aria-labelledby': ariaLabelledBy, 'aria-describedby': ariaDescribedBy,
   'aria-invalid': ariaInvalid,
 }, ref) {
@@ -913,7 +915,22 @@ export const DatePicker = forwardRef<HTMLInputElement, DatePickerProps>(function
     return start
   }
 
+  const reportedValidity = useRef<boolean | null>(null)
+  const textValidity = (next: string): boolean => {
+    const trimmed = next.trim()
+    if (trimmed === '') return true
+    const parsed = parseLocalDate(trimmed)
+    if (!parsed) return false
+    return rangeError(parsed) === null
+  }
+  const reportValidity = (valid: boolean) => {
+    if (reportedValidity.current === valid) return
+    reportedValidity.current = valid
+    onValidityChange?.(valid)
+  }
+
   useEffect(() => {
+    reportValidity(textValidity(value))
     if (value === emitted.current) return
     emitted.current = value
     setText(value)
@@ -977,6 +994,7 @@ export const DatePicker = forwardRef<HTMLInputElement, DatePickerProps>(function
     const formatted = formatLocalDate(date)
     setText(formatted)
     setError(null)
+    reportValidity(true)
     emitted.current = formatted
     if (formatted !== value) onChange(formatted)
     closeCalendar(true)
@@ -984,6 +1002,7 @@ export const DatePicker = forwardRef<HTMLInputElement, DatePickerProps>(function
 
   const commitText = () => {
     const trimmed = text.trim()
+    reportValidity(textValidity(trimmed))
     if (trimmed === '') {
       setError(null)
       if (value !== '') {
@@ -1012,6 +1031,7 @@ export const DatePicker = forwardRef<HTMLInputElement, DatePickerProps>(function
   const onTextChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const next = event.target.value
     setText(next)
+    reportValidity(textValidity(next))
     const trimmed = next.trim()
     if (trimmed === '') {
       setError(null)
@@ -1220,6 +1240,7 @@ export const DatePicker = forwardRef<HTMLInputElement, DatePickerProps>(function
             <button type="button" className={styles.calendarAction} onClick={() => {
               setText('')
               setError(null)
+              reportValidity(true)
               emitted.current = ''
               if (value !== '') onChange('')
               closeCalendar(true)

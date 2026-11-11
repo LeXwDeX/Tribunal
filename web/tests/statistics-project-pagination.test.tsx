@@ -123,6 +123,7 @@ describe('statistics project selector pagination', () => {
     await user.click(screen.getByRole('button', { name: '重试加载更多项目' }))
     await selectProject(user, 'group/third')
     expect(secondPageAttempts).toBe(2)
+    expect(screen.queryByText('更多项目加载失败；已加载的项目仍可选择。')).not.toBeInTheDocument()
     await openProjectOptions(user)
     expect(screen.getByRole('option', { name: 'group/first' })).toBeInTheDocument()
     await closeProjectOptions(user)
