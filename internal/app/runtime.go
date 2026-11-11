@@ -163,10 +163,14 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 	if err != nil {
 		return nil, err
 	}
+	// The resolver owns the database rows. Keep the file configuration aside so
+	// a platform extension deleted at runtime is not resurrected from the
+	// startup snapshot.
+	fileMCP := mcp.Merge(platformMCP, mcp.Config{})
 	if err := seedDefaultExtensions(ctx, cfg, deps.Store, workspaceManager, logger, now); err != nil {
 		return nil, err
 	}
-	blocks, platformMCP, skillDirs, err := loadStoredPlatformExtensions(
+	blocks, platformMCP, _, err := loadStoredPlatformExtensions(
 		ctx, deps.Store, cfg.Blocks, platformMCP, cfg.Skills.Dirs, deniedEnvNames(cfg)...)
 	if err != nil {
 		return nil, err
@@ -174,7 +178,9 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 	skillProvider := deps.Skills
 	var loader *skill.Loader
 	if skillProvider == nil {
-		created, err := skill.New(skill.Options{PlatformDirs: skillDirs})
+		// Stored platform skills are appended by the project resolver on every
+		// build, so the process snapshot only carries file configuration.
+		created, err := skill.New(skill.Options{PlatformDirs: cfg.Skills.Dirs})
 		if err != nil {
 			return nil, fmt.Errorf("app: load skills: %w", err)
 		}
@@ -244,15 +250,24 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 	publisher.catalog = modelCatalog
 	toolProvider := NewMCPToolProvider(mcpManager, blocks)
 	projectExts, err := NewProjectExtensionResolver(ProjectExtensionResolverConfig{
-		Store:      deps.Store,
-		Blocks:     blocks,
-		MCP:        platformMCP,
-		SkillDirs:  skillDirs,
+		Store: deps.Store,
+		// File blocks are the base; the resolver overlays the current platform
+		// and project database rows on every build.
+		Blocks:     cfg.Blocks,
+		MCP:        fileMCP,
+		SkillDirs:  cfg.Skills.Dirs,
 		Workspace:  workspaceManager.Root(),
 		DeniedEnv:  deniedEnvNames(cfg),
 		Now:        now,
 		Logger:     logger,
 		BaseSkills: skillProvider,
+		LockProject: func(ctx context.Context, projectID int64) (func(), error) {
+			ws := workspaceManager.Get(projectID)
+			if ws == nil {
+				return nil, nil
+			}
+			return ws.Lock(ctx)
+		},
 	})
 	if err != nil {
 		if ownedMCP {

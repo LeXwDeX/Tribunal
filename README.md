@@ -280,7 +280,7 @@ go mod verify
 
 - SSE 通过每 2 秒轮询数据库产生事件，不是推送。
 - 统计按筛选范围读取 workflow 和节点，并在内存中保存耗时样本计算 P95；`/providers` 的近 24 小时统计也复用该完整聚合。未做生产规模压测，大数据量下的响应时间与内存占用仍待测量，不能据本地测试声称满足容量目标。
-- 数据库中的平台/项目 MCP、Skill 和绑定变更按进程内缓存生效，通常需要重启服务。
+- 数据库中的平台/项目 MCP、Skill 和绑定写操作在单进程内立即生效：成功写入后失效对应缓存，下一次解析使用新配置（平台 scope 影响全部项目，项目 scope 只影响该项目）；配置文件中的扩展声明仍需重启。
 - 数据库 MCP 配置在保存时保留 `${NAME}` 模板，在启动、项目解析和测试时展开；缺失或禁止的变量、未知字段会拒绝执行。MCP 测试始终使用当前记录的配置和作用域，不按同名平台实例复用；保存前的草稿测试使用提交的配置（带 `id` 时用已存储 scope 并恢复 `****` 占位值），不写数据库。相对工作区路径会规范化；项目删除会清理项目工作区和受管技能目录，并拒绝通过根或父级符号链接删除外部目录。
 - 数据保留清理已实现（`internal/app/retention_service.go`，默认每 6 小时）：`llm_calls`、`webhook_deliveries`、终态 `jobs` 按配置保留期删除，`0005_retention_indexes.sql` 为这些扫描增加索引；`context_docs` 对每个 `(project, kind)` 保留最近 `storage.context_versions` 个非 active 且未锁定版本，active 版本和所有 locked 版本不删除。
 - 上下文文档保存采用追加版本：每个 `(project, kind)` 只有一个 active 版本。人工保存会追加 active 版本；生成任务在当前 active 版本 locked 时写入新版本但不切换；同一 base 和 workflow 的重试复用已有版本。数据库是 source of truth，人工保存和锁定会同步工作区上下文文件与 metadata；`workspaces.context_sha` 只跟踪 agents。

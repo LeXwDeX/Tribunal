@@ -214,13 +214,15 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	extensions, err := app.NewExtensionService(app.ExtensionServiceConfig{
-		Store:     db,
-		MCP:       runtime.MCPManager(),
-		Clients:   runtime.LLMClients(),
-		Workspace: runtime.WorkspaceManager(),
-		DeniedEnv: app.DeniedEnvNames(cfg),
-		Logger:    logger,
-		Platform:  cfg,
+		Store:             db,
+		MCP:               runtime.MCPManager(),
+		Clients:           runtime.LLMClients(),
+		Workspace:         runtime.WorkspaceManager(),
+		DeniedEnv:         app.DeniedEnvNames(cfg),
+		Logger:            logger,
+		Platform:          cfg,
+		InvalidateProject: runtime.ProjectExtensions().InvalidateProject,
+		InvalidateAll:     runtime.ProjectExtensions().InvalidateAll,
 	})
 	if err != nil {
 		return err

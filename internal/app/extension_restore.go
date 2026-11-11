@@ -53,7 +53,8 @@ type RestoreDefaultsChange struct {
 }
 
 // RestoreDefaultsResult is the preview and execution response. RestartRequired
-// is always true: the runtime reads platform bindings at start.
+// is true only when the service has no cache invalidation hook (a restart is
+// then the only way the runtime observes the restored platform bindings).
 type RestoreDefaultsResult struct {
 	Changes         []RestoreDefaultsChange `json:"changes"`
 	PreviewToken    string                  `json:"preview_token"`
@@ -87,6 +88,7 @@ func (s *ExtensionService) RestoreDefaults(ctx context.Context, request RestoreD
 		if err != nil {
 			return nil, err
 		}
+		outcome.result.RestartRequired = s.invalidateAll == nil
 		return outcome.result, nil
 	}
 	if strings.TrimSpace(request.PreviewToken) == "" {
@@ -107,6 +109,12 @@ func (s *ExtensionService) RestoreDefaults(ctx context.Context, request RestoreD
 	}); err != nil {
 		return nil, err
 	}
+	// The transaction wrote platform block bindings. Drop every project's
+	// cached inputs so the next resolution rebuilds from the restored rows.
+	if s.invalidateAll != nil {
+		s.invalidateAll()
+	}
+	result.RestartRequired = s.invalidateAll == nil
 	return result, nil
 }
 
@@ -194,8 +202,7 @@ func planDefaultRestore(defaults []ExtensionDefault, fileBlocks map[string]confi
 		builtins[row.Kind+":"+row.Name] = row
 	}
 	result := &RestoreDefaultsResult{
-		Changes:         make([]RestoreDefaultsChange, 0, len(blocks)),
-		RestartRequired: true,
+		Changes: make([]RestoreDefaultsChange, 0, len(blocks)),
 	}
 	outcome := &restoreOutcome{result: result}
 	for _, block := range blocks {

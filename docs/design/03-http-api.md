@@ -294,7 +294,7 @@ Finding 始终返回 `annotation`：`""` 为未标注，`valid` 为有效，`inv
 
 `index_status` 只描述已存储的索引检查点：两项 SHA 相同为 `ready`，不同为 `stale`，缺少任一项为 `unknown`。平台 MCP 配置为空不能证明项目级索引已禁用，因此不返回推测的 `disabled`。新 onboarding/refresh 只有实际成功执行至少一个 `index_command` 才推进 `index_sha`；没有命令时不伪造新 SHA，refresh 保留旧检查点。历史版本可能在未执行命令时写过 SHA，本次没有迁移重写，`ready` 不是当前外部索引健康或历史命令执行的证明。
 
-手动 `POST .../workspace/refresh` 的两个布尔参数默认都是 `false`：空请求只更新 base，重建索引和重新生成上下文由界面的独立操作显式请求。显式 `regenerate_context: true` 即使当前 AGENTS 已锁定也会调用模型，可能产生费用；成功保存时若当前版本锁定，新版本不生效，当前文档和 `context_sha` 不变。请求返回 `202` 只表示任务已入队；锁定状态以异步保存时为准。普通生成失败会记录告警，刷新仍可能成功且没有新版本；投影失败、出站令牌失效或生成后读取当前文档遇到存储错误则使刷新报错。读取未找到文档或发生错误时不会推断新版本已生效；发生错误时新版本可能已经保存，重试可能再次调用模型。目标分支 push 触发的自动刷新按新鲜度策略执行，当前 AGENTS 锁定时跳过生成。项目扩展配置目前按项目缓存，已加载项目的 MCP/Skill/块绑定更新需重启服务才能可靠生效；缓存失效机制尚未实现。
+手动 `POST .../workspace/refresh` 的两个布尔参数默认都是 `false`：空请求只更新 base，重建索引和重新生成上下文由界面的独立操作显式请求。显式 `regenerate_context: true` 即使当前 AGENTS 已锁定也会调用模型，可能产生费用；成功保存时若当前版本锁定，新版本不生效，当前文档和 `context_sha` 不变。请求返回 `202` 只表示任务已入队；锁定状态以异步保存时为准。普通生成失败会记录告警，刷新仍可能成功且没有新版本；投影失败、出站令牌失效或生成后读取当前文档遇到存储错误则使刷新报错。读取未找到文档或发生错误时不会推断新版本已生效；发生错误时新版本可能已经保存，重试可能再次调用模型。目标分支 push 触发的自动刷新按新鲜度策略执行，当前 AGENTS 锁定时跳过生成。项目扩展的数据库写操作在单进程内立即失效对应缓存，下一次解析即使用新配置；配置文件中的扩展声明仍在启动时读取，修改后需重启（#410）。
 
 ### 4.4 扩展：MCP、Skill、块绑定
 
@@ -326,7 +326,14 @@ Finding 始终返回 `annotation`：`""` 为未标注，`valid` 为有效，`inv
 
 `POST /api/v1/mcp-servers:test` 与 `POST /api/v1/mcp-servers/{id}/test` 返回 `{ok, latency_ms, tool_count, truncated, tools:[{name, description, read_only, destructive, bindable, annotated}]}`。`tool_count` 是服务器公布的工具总数；返回列表超过 200 项时截断并置 `truncated: true`。`bindable` 按运行时 `annotationsAllow` 语义：未注解工具为 `true`，已注解工具需要 `readOnlyHint=true` 且 `destructiveHint` 不为 `true`。草稿测试不写数据库；带 `id` 时使用已存储服务器的 scope 与名称回退，`config` 可省略，其中 `****` 从已存值恢复，无对应旧值返回 `400`。失败只返回固定类别 `invalid_config`、`connect_timeout`、`connect_failed`、`handshake_failed`、`list_tools_timeout`、`list_tools_failed`、`too_many_tools`、`cleanup_failed`，响应、日志和审计都不含 config 或上游原文。测试受进程级并发信号量与 30 秒 handler 超时约束，超过并发上限返回 `429 test_busy`。
 
-项目级扩展解析使用按项目构建的合并配置：每个项目都有独立的 MCP manager，空绑定表示显式撤销该块的平台工具，不回退到平台工具；项目合并配置读取或构建失败会中止本次解析（返回错误），不会静默降级为仅平台配置。账号和扩展的数据库变更仍受进程内缓存影响，通常需要重启服务；当前没有可靠的跨进程缓存失效。
+项目级扩展解析使用按项目构建的合并配置：每个项目都有独立的 MCP manager，空绑定表示显式撤销该块的平台工具，不回退到平台工具；项目合并配置读取或构建失败会中止本次解析（返回错误），不会静默降级为仅平台配置。
+
+写操作的生效时机如下，失败的写操作不失效任何缓存：
+
+- **项目 scope**（MCP、Skill、块绑定）成功后只失效该项目的缓存，其他项目继续使用各自缓存；下一次解析重新读取该项目的 MCP、Skill 和块绑定。
+- **平台 scope** 成功后失效全部项目的缓存；下一次解析对每个项目重新合并平台与项目配置。平台 MCP/Skill 的删除和停用不会从缓存里复活。
+- **恢复默认**写入平台绑定后失效全部项目缓存，响应中的 `restart_required` 因此为 `false`。
+- 进程内失效只覆盖本进程；不支持跨进程缓存失效。配置文件中的 `blocks`、MCP 与 Skill 目录仍在启动时读取，修改后须重启（#410）。账号的数据库变更不受此机制影响。
 
 Skill 创建只对平台管理员开放，默认推荐 zip 上传。`multipart/form-data` 使用 `file` 字段提交 zip：压缩包不超过 8 MiB，解压总量不超过 16 MiB，单文件不超过 4 MiB，最多 512 个条目；拒绝符号链接、绝对路径、`..` 穿越、重复路径、文件/目录路径冲突，以及含 NUL 或超过 512 字节的条目名；归档必须包含 `SKILL.md`，取层级最浅的一个作为 Skill 根，最浅层出现多个时拒绝。`application/json` 使用 `{scope, project_id?, dir}` 登记服务端已有目录：`dir` 必须是绝对路径，源目录及其内部不得包含符号链接，内容复制到受管 Skill 根目录，源目录不被修改或删除；这是高级选项，默认应使用 zip，服务端不提供可配置的登记根 allowlist。两种路径都使用与运行时加载器相同的严格 frontmatter 解析（UTF-8、无 NUL、合法 YAML、`name` 匹配小写规则且不得包含 `__`、`description` 非空且不超过 4096 字节）；校验失败返回 `400` 且不写库。冲突按 scope 唯一约束判定：平台 scope 与内置 Skill 同名返回 `409`，项目 scope 允许与平台 Skill 同名并按现有加载器规则覆盖平台 Skill；同 scope 重名返回 `409`，已存在的 Skill 不会被覆盖。目录登记的源目录必须由管理员控制；复制路径中位于源目录之上的中间符号链接会被解析，当前只对源目录本身和遍历到的每个条目做符号链接检查，针对该竞态的后续加固另立 Issue。成功响应可含 `dir`（受管目录）。写操作记录 `platform_audit`：zip 上传记录动作、scope、名称、归档字节数和 SHA-256；目录登记记录动作、scope、名称以及受管副本 `SKILL.md` 的字节数和 SHA-256；两者都不记录 manifest 或附件内容，目录登记也不记录源绝对路径。已有 Skill 仍可按 ID 删除或启停；内置 Skill 始终启用，禁用返回 409。
 
@@ -358,7 +365,7 @@ MCP、Skill、块绑定列表使用游标分页。
 
 执行恢复只在平台绑定的内容或存在性改变时更新相关块的 `revision`；仅更新 ledger 或没有变化时 `revision` 不变。预览后到执行前，其他写入若改变 `preview_token` 覆盖的输入（相关平台绑定、ledger、内置身份或启用状态等），执行返回 `409`。执行成功且绑定变化后，旧 `revision` 不能再用于 PUT，保存中的草稿必须重新读取。
 
-**恢复后需要重启服务**才能让运行时重新读取平台绑定，因此 `restart_required` 始终为 `true`。
+恢复写入平台绑定后立即失效全部项目缓存，下一次解析使用恢复后的绑定，因此 `restart_required` 为 `false`；只有未装配进程内失效回调的嵌入式调用方会收到 `true`。
 
 ### 4.5 系统
 

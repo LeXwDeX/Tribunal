@@ -430,7 +430,7 @@ default_extensions:
 - **升级与恢复边界**：自动升级只刷新已登记的内置扩展，不覆盖管理员改过或解绑的绑定，保留管理员自建的同名扩展。显式恢复只处理选定块上台账记录为已登记的内置扩展：移除这些内置扩展在该块的授权并重新应用当前默认，因此会重置该块上被管理员改过或解绑的内置授权；管理员自建扩展的授权和项目级绑定保留。
 - **文件显式声明优先**：配置文件 `blocks` 显式声明某个块时，该块的默认授权跳过；数据库平台行释放后，以文件为准。释放条件见[文件声明与数据库绑定](#文件声明与数据库绑定)。即使 `default_extensions` 已清空，这条规则也不变。
 - **始终启用**：内置 Skill 和 MCP 服务器始终启用；升级、重启和内置配置同步都不会改变这一点。历史数据库中已被禁用的内置行会在下次启动时恢复启用。
-- **生效时机**：修改配置文件中的 `default_extensions` 或数据库中的扩展、绑定后，需要重启服务才生效；运行中的进程继续使用启动时读取的扩展和绑定。管理员从某个块解绑后，重启不会恢复。
+- **生效时机**：数据库中的扩展和绑定写操作成功后立即失效进程内缓存，下一次解析使用新配置，无需重启；平台 scope 失效全部项目，项目 scope 只失效该项目，失败的写操作不失效。配置文件中的 `default_extensions`、`blocks`、`mcp.config` 和 Skill 目录仍在启动时读取，修改后需要重启。管理员从某个块解绑后，重启不会恢复。
 - `skills: []` 只是不再登记新的默认项，不删除已登记的扩展和绑定。配置文件和 `mcp.config` 是部署者特权入口；HTTP API 的自定义 MCP 新增/导入和自定义 Skill 创建（zip 上传，或复制服务端目录的高级选项）都仅平台管理员可用，项目 scope 需要项目已登记。Skill 创建使用运行时加载器相同的严格 manifest 校验，上传和目录登记的限制见 [HTTP API · 扩展](03-http-api.md#44-扩展mcp-skill块绑定)；控制台的新增/导入界面另行交付。
 - 登记或更新失败（例如工作区不可写）会让启动失败；登记失败不写台账，下次启动重试。
 
@@ -508,7 +508,7 @@ default_extensions:
 - **默认登记**：示例配置和 Docker 配置通过 `default_extensions.mcp_servers` 登记内置平台服务器 `codebase-memory`，规则见 [默认扩展](#默认扩展default_extensions)。
 - **隔离**：项目 MCP 管理器以项目工作区为 cwd 和 `HOME` 根，wrapper 把 `CBM_CACHE_DIR`、`CBM_RUNTIME_DIR` 放在该 `HOME` 下，因此每个项目使用自己的索引和 daemon，查不到其他项目的索引；不使用账号级 daemon。`auto_index`、`auto_watch`、`watcher_enabled`、`ui_enabled` 都被关闭，不启动 CBM Lens UI。
 - **降级**：二进制缺失或 MCP 启动、列工具失败时，评审节点不带 MCP 工具继续执行，并在节点输出中记录代码生成的 `tool_gaps`。只有部分绑定工具可用时（服务器未公布某个工具，或工具带写入注解被跳过），可用工具照常提供，每个缺失工具各记一条 `tool_gaps`；汇总把它们写入告警，原本的 PASS 改为 INCOMPLETE，原有 BLOCKING 结论保持不变。`explore`、`validate` 和 `reasoner` 节点与 `code-review`、`review` 一样记录 `tool_gaps`，所以任一路绑定工具缺失都会使评审不会得到干净的 PASS。建索引失败不阻断 onboarding 或刷新，工作区记录 `last_error`，刷新时继续使用上一次索引。已有自定义服务器停用后，绑定中引用它的工具直接不提供，不算降级。
-- **停用**：已有自定义 MCP 可在编辑窗口把「启用」改为「停用」，或调用 `PUT /api/v1/mcp-servers/{id}` 设置 `enabled: false`，重启后生效；重启和升级都保持停用。内置 `codebase-memory` 始终启用，停用请求返回 409，启动同步会恢复启用。要让新部署不登记内置服务器，把配置中的 `mcp_servers` 设为 `[]`。
+- **停用**：已有自定义 MCP 可在编辑窗口把「启用」改为「停用」，或调用 `PUT /api/v1/mcp-servers/{id}` 设置 `enabled: false`；保存后立即对本进程的下一次解析生效，无需重启。重启和升级都保持停用。内置 `codebase-memory` 始终启用，停用请求返回 409，启动同步会恢复启用。要让新部署不登记内置服务器，把配置中的 `mcp_servers` 设为 `[]`。
 - **升级版本**：同时修改 Dockerfile 中的版本和两个 SHA-256（取自上游 release 资产和 `checksums.txt`）、`third_party/codebase-memory-mcp/VERSION` 和 `LICENSE`，用 `gh attestation verify <archive> -R DeusData/codebase-memory-mcp` 核对 SLSA provenance，再运行 `go run ./scripts/licensebundle`、`go test ./scripts/...` 和 Docker smoke。新版本须重新确认 analysis profile 不含写入工具。已部署实例在新镜像首次启动时同步内置服务器的配置和默认工具白名单，见上文规则。
 
 ---
