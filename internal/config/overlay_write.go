@@ -14,7 +14,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"go.yaml.in/yaml/v3"
@@ -36,6 +35,8 @@ const (
 	OverlayErrorInvalidConfig = "invalid_config"
 	OverlayErrorProviderInUse = "provider_in_use"
 	OverlayErrorWriteFailed   = "config_write_failed"
+	OverlayErrorPathConflict  = "overlay_conflicts_with_base"
+	OverlayErrorBusy          = "config_busy"
 )
 
 // OverlayWriteError is a classified overlay write failure. Details carry field
@@ -90,7 +91,15 @@ type OverlayWriteResult struct {
 	OverlayRevision         string
 	// Candidate is the merged, validated configuration after the patch. It is
 	// display data only; the running process keeps its startup configuration.
-	Candidate        *Snapshot
+	Candidate *Snapshot
+	// OverlayReviewDefaults is the patched overlay's review_defaults subtree
+	// with ${ENV} placeholders unexpanded, or nil when the overlay does not set
+	// it. It never contains expanded environment values.
+	OverlayReviewDefaults map[string]any
+	// EffectiveIgnore is the merged review_defaults.ignore list with
+	// placeholders unexpanded, so the console can show inheritance without
+	// reading environment values.
+	EffectiveIgnore  []string
 	RemovedProviders []string
 }
 
@@ -107,17 +116,62 @@ type OverlayWriterOptions struct {
 type OverlayWriter struct {
 	basePaths   []string
 	overlayPath string
-	mu          sync.Mutex
+	// sem serializes writes in this process. A channel is used instead of a
+	// mutex so waiting for another write honours the request context.
+	sem chan struct{}
 }
 
 // NewOverlayWriter builds a writer. The returned writer is safe for concurrent
-// use; writes within one process are serialized by a mutex and across
-// processes by a sidecar flock.
-func NewOverlayWriter(opts OverlayWriterOptions) *OverlayWriter {
+// use; writes within one process are serialized by a semaphore and across
+// processes by a sidecar flock. It refuses an overlay path that names one of
+// the base configuration files, because writing it would rewrite a base file.
+func NewOverlayWriter(opts OverlayWriterOptions) (*OverlayWriter, error) {
+	if opts.OverlayPath != "" {
+		for _, basePath := range opts.BasePaths {
+			if sameConfigFile(basePath, opts.OverlayPath) {
+				return nil, &OverlayWriteError{
+					Code:    OverlayErrorPathConflict,
+					Message: "configuration overlay must not be one of the base configuration files",
+				}
+			}
+		}
+	}
 	return &OverlayWriter{
 		basePaths:   append([]string(nil), opts.BasePaths...),
 		overlayPath: opts.OverlayPath,
+		sem:         make(chan struct{}, 1),
+	}, nil
+}
+
+// sameConfigFile reports whether two paths name the same file. Canonical paths
+// cover a missing overlay; Stat plus SameFile cover symlinks and hard links.
+func sameConfigFile(left, right string) bool {
+	if canonicalConfigPath(left) == canonicalConfigPath(right) {
+		return true
 	}
+	leftInfo, err := os.Stat(left)
+	if err != nil {
+		return false
+	}
+	rightInfo, err := os.Stat(right)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(leftInfo, rightInfo)
+}
+
+func canonicalConfigPath(path string) string {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	if resolved, err := filepath.EvalSymlinks(absolute); err == nil {
+		return resolved
+	}
+	if dir, err := filepath.EvalSymlinks(filepath.Dir(absolute)); err == nil {
+		return filepath.Join(dir, filepath.Base(absolute))
+	}
+	return filepath.Clean(absolute)
 }
 
 // Configured reports whether the writer has an overlay path.
@@ -142,14 +196,23 @@ func (w *OverlayWriter) Apply(ctx context.Context, req OverlayWriteRequest) (*Ov
 		return nil, err
 	}
 
-	w.mu.Lock()
-	defer w.mu.Unlock()
+	select {
+	case w.sem <- struct{}{}:
+		defer func() { <-w.sem }()
+	case <-ctx.Done():
+		return nil, &OverlayWriteError{
+			Code:    OverlayErrorBusy,
+			Message: "timed out waiting for the configuration overlay writer",
+			Err:     ctx.Err(),
+		}
+	}
 
-	unlock, err := lockOverlayPath(w.overlayPath)
+	unlock, err := lockOverlayPath(ctx, w.overlayPath)
 	if err != nil {
 		return nil, err
 	}
 	defer unlock()
+	cleanupOverlayTemps(w.overlayPath)
 
 	current, err := w.readCurrent()
 	if err != nil {
@@ -173,6 +236,7 @@ func (w *OverlayWriter) Apply(ctx context.Context, req OverlayWriteRequest) (*Ov
 		return nil, w.invalidConfig(err, nil, nil)
 	}
 	root := doc.Content[0]
+	beforeRoot := cloneNode(root)
 	modified := false
 	for _, change := range req.Changes {
 		changed, err := applyOverlayChange(doc, root, change)
@@ -200,15 +264,25 @@ func (w *OverlayWriter) Apply(ctx context.Context, req OverlayWriteRequest) (*Ov
 	}
 
 	// Redaction context: the current files plus the candidate overlay. Errors
-	// echoed by validation are sanitized against both.
+	// echoed by validation are sanitized against both. The base sources also
+	// feed the raw (unexpanded) review_defaults view returned to the console.
 	redaction, _ := LoadSnapshot(w.basePaths, w.overlayPath)
+	var baseSources []Source
 	sources := make([]Source, 0, 2)
 	if redaction != nil {
+		for _, source := range redaction.Sources {
+			if source.Origin == OriginBase {
+				baseSources = append(baseSources, source)
+			}
+		}
 		sources = append(sources, redaction.Sources...)
-	} else if baseSources, _, err := readBaseSources(w.basePaths); err == nil {
+	} else {
 		// A broken overlay fails the full load; keep the base scalars and
 		// environment names available for redaction anyway.
-		sources = append(sources, baseSources...)
+		if readSources, _, err := readBaseSources(w.basePaths); err == nil {
+			baseSources = readSources
+			sources = append(sources, readSources...)
+		}
 	}
 	candidateRevision := ""
 	if current.present || modified {
@@ -239,7 +313,17 @@ func (w *OverlayWriter) Apply(ctx context.Context, req OverlayWriteRequest) (*Ov
 		}
 	}
 
-	removed := removedProviders(req.Changes, candidate.Config)
+	// Compare the effective provider sets before and after the patch. Fall back
+	// to raw merged names when the current configuration is too broken to load.
+	beforeProviders := mergedProviderNames(baseSources, beforeRoot)
+	if redaction != nil && redaction.Config != nil {
+		beforeProviders = providerNameSet(redaction.Config.Providers)
+	}
+	afterProviders := mergedProviderNames(baseSources, root)
+	if candidate.Config != nil {
+		afterProviders = providerNameSet(candidate.Config.Providers)
+	}
+	removed := removedProviders(req.Changes, beforeProviders, afterProviders)
 	if len(removed) > 0 {
 		references := ProviderReferences(candidate.Config)
 		var details []string
@@ -272,6 +356,8 @@ func (w *OverlayWriter) Apply(ctx context.Context, req OverlayWriteRequest) (*Ov
 		PreviousOverlayRevision: current.overlayRevision,
 		OverlayRevision:         current.overlayRevision,
 		Candidate:               candidate,
+		OverlayReviewDefaults:   rawReviewDefaults(root),
+		EffectiveIgnore:         rawEffectiveIgnore(baseSources, &candidateSource),
 		RemovedProviders:        removed,
 	}
 	if changed {
@@ -286,7 +372,9 @@ func (w *OverlayWriter) Apply(ctx context.Context, req OverlayWriteRequest) (*Ov
 	}
 
 	if current.present {
-		if err := writeOverlayFile(w.overlayPath+".bak", current.data, current.mode); err != nil {
+		// The backup is not a configuration source; keep it private regardless
+		// of the overlay's mode.
+		if err := writeOverlayFile(w.overlayPath+".bak", current.data, 0o600); err != nil {
 			return nil, overlayFileError("backup the configuration overlay", err)
 		}
 	}
@@ -408,17 +496,63 @@ func baseRevisionOf(paths []string) (string, error) {
 	return combineRevisions(revisions), nil
 }
 
-// lockOverlayPath takes the sidecar flock. Closing the file releases it.
-func lockOverlayPath(overlayPath string) (func(), error) {
-	file, err := os.OpenFile(overlayPath+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+// lockOverlayPath takes the sidecar flock. Closing the file releases it. The
+// lock file must be a regular file, never a symlink, and waiting honours the
+// request context.
+func lockOverlayPath(ctx context.Context, overlayPath string) (func(), error) {
+	lockPath := overlayPath + ".lock"
+	if info, err := os.Lstat(lockPath); err == nil {
+		switch {
+		case info.Mode()&os.ModeSymlink != 0:
+			return nil, &OverlayWriteError{Code: OverlayErrorSymlink, Message: "configuration overlay lock must not be a symlink"}
+		case !info.Mode().IsRegular():
+			return nil, &OverlayWriteError{Code: OverlayErrorReadOnly, Message: "configuration overlay lock is not a regular file"}
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return nil, overlayFileError("inspect the configuration overlay lock", err)
+	}
+	file, err := openOverlayLock(lockPath)
 	if err != nil {
+		if overlayLockSymlinkError(err) {
+			return nil, &OverlayWriteError{Code: OverlayErrorSymlink, Message: "configuration overlay lock must not be a symlink"}
+		}
 		return nil, overlayFileError("create the configuration overlay lock", err)
 	}
-	if err := lockOverlayFlock(file); err != nil {
+	if err := lockOverlayFlock(ctx, file); err != nil {
 		_ = file.Close()
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, &OverlayWriteError{
+				Code:    OverlayErrorBusy,
+				Message: "timed out waiting for the configuration overlay lock",
+				Err:     err,
+			}
+		}
 		return nil, overlayFileError("lock the configuration overlay", err)
 	}
 	return func() { _ = file.Close() }, nil
+}
+
+// cleanupOverlayTemps removes temp files left by an interrupted writer. The
+// caller holds the overlay lock, so a matching file is stale.
+func cleanupOverlayTemps(overlayPath string) {
+	dir := filepath.Dir(overlayPath)
+	base := filepath.Base(overlayPath)
+	for _, pattern := range []string{
+		"." + base + ".tmp-*",
+		"." + base + ".bak.tmp-*",
+	} {
+		matches, err := filepath.Glob(filepath.Join(dir, pattern))
+		if err != nil {
+			continue
+		}
+		for _, match := range matches {
+			info, err := os.Lstat(match)
+			if err != nil || !info.Mode().IsRegular() {
+				continue
+			}
+			_ = os.Remove(match)
+		}
+	}
 }
 
 func overlayFileError(action string, err error) *OverlayWriteError {
@@ -475,27 +609,99 @@ func syncOverlayDir(dir string) {
 }
 
 // overlayDocument parses the raw overlay and returns its document node so
-// comments before and after the root mapping survive the round trip. An empty
-// or missing file is an empty mapping.
+// comments before and after the root mapping survive the round trip. A missing,
+// empty, comment-only or null-root file becomes an empty mapping that keeps the
+// original comment block.
 func overlayDocument(data []byte, source string) (*yaml.Node, error) {
 	if len(bytes.TrimSpace(data)) == 0 {
-		return emptyOverlayDocument(), nil
+		return emptyOverlayDocument(nil, ""), nil
 	}
 	doc, err := parseYAMLDocument(data, source)
 	if err != nil {
 		return nil, err
 	}
 	if doc == nil {
-		return emptyOverlayDocument(), nil
+		return emptyOverlayDocument(nil, leadingCommentBlock(data)), nil
+	}
+	root := doc.Content[0]
+	if root.Kind == yaml.ScalarNode && root.Tag == "!!null" {
+		return emptyOverlayDocument(doc, leadingCommentBlock(data)), nil
 	}
 	return doc, nil
 }
 
-func emptyOverlayDocument() *yaml.Node {
-	return &yaml.Node{
-		Kind:    yaml.DocumentNode,
-		Content: []*yaml.Node{{Kind: yaml.MappingNode, Tag: "!!map"}},
+// emptyOverlayDocument builds a writable empty mapping. Comments on the parsed
+// null document are carried over; a raw leading comment block covers
+// comment-only files that the YAML decoder discards.
+func emptyOverlayDocument(original *yaml.Node, rawPrefix string) *yaml.Node {
+	mapping := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+	doc := &yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{mapping}}
+	head, foot := rawPrefix, ""
+	if original != nil {
+		if len(original.Content) > 0 {
+			root := original.Content[0]
+			switch {
+			case root.HeadComment != "":
+				head = root.HeadComment
+			case original.HeadComment != "":
+				head = joinComment(head, original.HeadComment)
+			}
+			if root.LineComment != "" {
+				head = joinComment(head, root.LineComment)
+			}
+			foot = root.FootComment
+			if foot == "" {
+				foot = original.FootComment
+			}
+		} else {
+			head = joinComment(head, original.HeadComment)
+			foot = original.FootComment
+		}
 	}
+	mapping.HeadComment = strings.TrimRight(head, "\n")
+	mapping.FootComment = strings.TrimRight(foot, "\n")
+	return doc
+}
+
+func joinComment(left, right string) string {
+	left = strings.TrimRight(left, "\n")
+	right = strings.TrimSpace(right)
+	switch {
+	case left == "":
+		return right
+	case right == "":
+		return left
+	default:
+		return left + "\n" + right
+	}
+}
+
+// leadingCommentBlock returns the blank and comment lines before the first YAML
+// token. comment-only documents have no nodes, so this text would otherwise be
+// lost on the first patch.
+func leadingCommentBlock(data []byte) string {
+	lines := strings.Split(string(data), "\n")
+	comments := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case trimmed == "":
+			if len(comments) > 0 {
+				comments = append(comments, "")
+			}
+		case strings.HasPrefix(trimmed, "#"):
+			comments = append(comments, strings.TrimRight(line, "\r"))
+		default:
+			for len(comments) > 0 && comments[len(comments)-1] == "" {
+				comments = comments[:len(comments)-1]
+			}
+			return strings.Join(comments, "\n")
+		}
+	}
+	for len(comments) > 0 && comments[len(comments)-1] == "" {
+		comments = comments[:len(comments)-1]
+	}
+	return strings.Join(comments, "\n")
 }
 
 func marshalYAMLDocument(doc *yaml.Node) ([]byte, error) {
@@ -898,6 +1104,9 @@ func setOverlayPath(doc, root *yaml.Node, segments []string, value any) (bool, e
 	if old.Kind != yaml.AliasNode && (old.Anchor != "" || nodeIsAliased(doc, old)) {
 		return false, overlayAliasError(segments)
 	}
+	if subtreeAliasEscape(doc, old) {
+		return false, overlayAliasError(segments)
+	}
 	valueNode, err := overlayValueNode(value)
 	if err != nil {
 		return false, &OverlayWriteError{Code: OverlayErrorInvalidChange, Message: err.Error()}
@@ -1201,7 +1410,13 @@ func validateReviewDefaultsPolicy(cfg *Config) []string {
 	return details
 }
 
-func removedProviders(changes []OverlayChange, cfg *Config) []string {
+// removedProviders reports providers that existed before the patch and no
+// longer exist after it. A delete of a provider that never existed is a no-op,
+// not a removal, so it must not fail the referenced-provider check.
+func removedProviders(changes []OverlayChange, before, after map[string]bool) []string {
+	if before == nil || after == nil {
+		return nil
+	}
 	seen := make(map[string]bool)
 	var removed []string
 	for _, change := range changes {
@@ -1213,12 +1428,100 @@ func removedProviders(changes []OverlayChange, cfg *Config) []string {
 			continue
 		}
 		seen[name] = true
-		if _, ok := cfg.Providers[name]; !ok {
+		if before[name] && !after[name] {
 			removed = append(removed, name)
 		}
 	}
 	sort.Strings(removed)
 	return removed
+}
+
+func providerNameSet(providers map[string]ProviderConfig) map[string]bool {
+	names := make(map[string]bool, len(providers))
+	for name := range providers {
+		names[name] = true
+	}
+	return names
+}
+
+// mergedProviderNames returns the provider keys visible after merging the
+// defaults, base files and one overlay root. It reads raw nodes, so it works
+// even when the current configuration does not pass type validation.
+func mergedProviderNames(baseSources []Source, overlayRoot *yaml.Node) map[string]bool {
+	defaultRoot, err := parseYAML([]byte(defaultConfigYAML), "<defaults>")
+	if err != nil {
+		return nil
+	}
+	merged := cloneNode(defaultRoot)
+	for _, source := range baseSources {
+		if source.Root != nil {
+			merged = mergeNode(merged, cloneNode(source.Root))
+		}
+	}
+	if overlayRoot != nil {
+		merged = mergeNode(merged, cloneNode(overlayRoot))
+	}
+	providers := mappingValue(merged, "providers")
+	if providers == nil || providers.Kind != yaml.MappingNode {
+		return map[string]bool{}
+	}
+	names := make(map[string]bool, len(providers.Content)/2)
+	for i := 0; i+1 < len(providers.Content); i += 2 {
+		names[providers.Content[i].Value] = true
+	}
+	return names
+}
+
+// rawReviewDefaults returns the overlay's review_defaults mapping with
+// placeholders unexpanded. It is nil when the overlay does not set the key.
+func rawReviewDefaults(root *yaml.Node) map[string]any {
+	node := mappingValue(root, "review_defaults")
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil
+	}
+	values := make(map[string]any, len(node.Content)/2)
+	if err := node.Decode(&values); err != nil {
+		return nil
+	}
+	return values
+}
+
+// rawEffectiveIgnore merges the raw layers and extracts
+// review_defaults.ignore without expanding ${ENV}, so the console can show
+// inheritance or replacement without turning the API into an environment
+// variable read oracle.
+func rawEffectiveIgnore(baseSources []Source, overlay *Source) []string {
+	defaultRoot, err := parseYAML([]byte(defaultConfigYAML), "<defaults>")
+	if err != nil {
+		return nil
+	}
+	merged := cloneNode(defaultRoot)
+	for _, source := range baseSources {
+		if source.Root != nil {
+			merged = mergeNode(merged, cloneNode(source.Root))
+		}
+	}
+	if overlay != nil && overlay.Root != nil {
+		merged = mergeNode(merged, cloneNode(overlay.Root))
+	}
+	ignore := mappingValue(mappingValue(merged, "review_defaults"), "ignore")
+	if ignore != nil && ignore.Kind == yaml.AliasNode {
+		ignore = ignore.Alias
+	}
+	if ignore == nil || ignore.Kind != yaml.SequenceNode {
+		return nil
+	}
+	values := make([]string, 0, len(ignore.Content))
+	for _, item := range ignore.Content {
+		if item.Kind == yaml.AliasNode {
+			item = item.Alias
+		}
+		if item == nil || item.Kind != yaml.ScalarNode || item.Tag != "!!str" {
+			continue
+		}
+		values = append(values, item.Value)
+	}
+	return values
 }
 
 // ProviderReferences maps each provider name to the configuration paths that

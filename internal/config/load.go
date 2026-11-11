@@ -155,11 +155,16 @@ func parseYAML(data []byte, source string) (*yaml.Node, error) {
 	if err != nil || doc == nil {
 		return nil, err
 	}
-	return doc.Content[0], nil
+	root := doc.Content[0]
+	if root.Kind == yaml.ScalarNode && root.Tag == "!!null" {
+		return nil, nil
+	}
+	return root, nil
 }
 
 // parseYAMLDocument parses one YAML document and keeps the document node so
-// comments before and after the root mapping survive a Node round trip.
+// comments before and after the root mapping survive a Node round trip. A null
+// root is returned as-is so callers can preserve its comments.
 func parseYAMLDocument(data []byte, source string) (*yaml.Node, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	var doc yaml.Node
@@ -181,10 +186,7 @@ func parseYAMLDocument(data []byte, source string) (*yaml.Node, error) {
 		return nil, nil
 	}
 	root := doc.Content[0]
-	if root.Kind == yaml.ScalarNode && root.Tag == "!!null" {
-		return nil, nil
-	}
-	if root.Kind != yaml.MappingNode {
+	if root.Kind != yaml.MappingNode && !(root.Kind == yaml.ScalarNode && root.Tag == "!!null") {
 		return nil, fmt.Errorf("config %s: top-level value must be a mapping", source)
 	}
 	if err := checkDuplicateKeys(root); err != nil {

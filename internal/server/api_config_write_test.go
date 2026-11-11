@@ -69,6 +69,7 @@ func newOverlayAPIHarness(t *testing.T, baseBody, overlayBody string) *overlayAP
 	t.Setenv("SECONDARY_KEY", "secondary-key-value")
 	t.Setenv("CANARY_BASE_URL", "https://canary.example.com/expanded-secret")
 	t.Setenv("CANARY_PROTOCOL", "expanded-secret-protocol")
+	t.Setenv("CANARY_SECRET", "expanded-canary-value")
 
 	dir := t.TempDir()
 	base := filepath.Join(dir, "server.yaml")
@@ -84,10 +85,13 @@ func newOverlayAPIHarness(t *testing.T, baseBody, overlayBody string) *overlayAP
 		t.Fatalf("LoadSnapshot() error: %v", err)
 	}
 	logs := &lockedBuffer{}
-	writer := config.NewOverlayWriter(config.OverlayWriterOptions{
+	writer, err := config.NewOverlayWriter(config.OverlayWriterOptions{
 		BasePaths:   []string{base},
 		OverlayPath: overlay,
 	})
+	if err != nil {
+		t.Fatalf("NewOverlayWriter: %v", err)
+	}
 	env := newM6Env(t, m6Options{
 		platform:         snapshot.Config,
 		overlayWriter:    writer,
@@ -165,6 +169,12 @@ func TestConfigOverlayPatchRequiresPlatformAdminAndCSRF(t *testing.T) {
 	assertStatus(t, harness.patch(viewer, body), http.StatusForbidden)
 	admin := harness.env.loginAs("code-admin")
 	assertStatus(t, harness.patch(admin.withoutCSRF(), body), http.StatusForbidden)
+	logs := harness.logs.String()
+	for _, want := range []string{`"code":"forbidden"`, `"actor_id":7`, `"event":"platform_audit"`} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("CSRF rejection audit lacks %s:\n%s", want, logs)
+		}
+	}
 	assertStatus(t, harness.patch(admin, body), http.StatusOK)
 }
 
@@ -288,7 +298,11 @@ func TestConfigOverlayPatchNotConfigured(t *testing.T) {
 	admin := harness.env.loginAs("code-admin")
 	body := harness.requestBody(setChange([]string{"review_defaults", "language"}, "en-US"))
 	// Replace the wired writer with one that has no overlay path.
-	harness.env.api.overlayWriter = config.NewOverlayWriter(config.OverlayWriterOptions{})
+	writer, err := config.NewOverlayWriter(config.OverlayWriterOptions{})
+	if err != nil {
+		t.Fatalf("NewOverlayWriter: %v", err)
+	}
+	harness.env.api.overlayWriter = writer
 	response := harness.patch(admin, body)
 	assertStatus(t, response, http.StatusConflict)
 	if code := errorCode(t, harness.env.decode(t, response)); code != config.OverlayErrorNotConfigured {
@@ -347,10 +361,14 @@ func TestConfigOverlayPatchReviewDefaultsIgnoreDisplay(t *testing.T) {
 	assertStatus(t, response, http.StatusOK)
 	body := harness.env.decode(t, response)
 	defaults := body["review_defaults"].(map[string]any)
-	effective := defaults["effective"].(map[string]any)
-	ignore := effective["ignore"].([]any)
-	if len(ignore) != 1 || ignore[0] != "custom/**" {
-		t.Fatalf("effective ignore = %v", ignore)
+	overlay := defaults["overlay"].(map[string]any)
+	overlayIgnore := overlay["ignore"].([]any)
+	if len(overlayIgnore) != 1 || overlayIgnore[0] != "custom/**" {
+		t.Fatalf("overlay ignore = %v", overlayIgnore)
+	}
+	effective := defaults["effective_ignore"].([]any)
+	if len(effective) != 1 || effective[0] != "custom/**" {
+		t.Fatalf("effective ignore = %v", effective)
 	}
 	if defaults["ignore_origin"] != "overlay" {
 		t.Fatalf("ignore origin = %v", defaults["ignore_origin"])
@@ -369,9 +387,13 @@ func TestConfigOverlayPatchReviewDefaultsIgnoreDisplay(t *testing.T) {
 	if defaults["ignore_origin"] != "default" {
 		t.Fatalf("restored ignore origin = %v", defaults["ignore_origin"])
 	}
-	restored := defaults["effective"].(map[string]any)["ignore"].([]any)
+	restored := defaults["effective_ignore"].([]any)
 	if len(restored) != len(builtin) {
 		t.Fatalf("restored ignore = %v, want the built-in list", restored)
+	}
+	overlay = defaults["overlay"].(map[string]any)
+	if _, ok := overlay["ignore"]; ok {
+		t.Fatalf("deleted ignore is still in the raw overlay view: %v", overlay)
 	}
 }
 
@@ -410,5 +432,88 @@ providers:
 	}
 	if harness.readOverlay() != before {
 		t.Fatal("failed write modified the overlay")
+	}
+}
+
+func TestConfigOverlayPatchSuccessResponseKeepsPlaceholders(t *testing.T) {
+	harness := newOverlayAPIHarness(t, overlayAPIBase, overlayAPIDocument)
+	const secret = "expanded-canary-value"
+	admin := harness.env.loginAs("code-admin")
+	response := harness.patch(admin, harness.requestBody(
+		setChange([]string{"review_defaults", "custom_rules"}, []any{"${CANARY_SECRET}"}),
+	))
+	assertStatus(t, response, http.StatusOK)
+	if !strings.Contains(string(response.body), "${CANARY_SECRET}") {
+		t.Fatalf("response does not keep the placeholder: %s", response.body)
+	}
+	if strings.Contains(string(response.body), secret) {
+		t.Fatalf("response leaked the expanded environment value: %s", response.body)
+	}
+	overlay := harness.readOverlay()
+	if !strings.Contains(overlay, "${CANARY_SECRET}") {
+		t.Fatalf("overlay does not keep the placeholder:\n%s", overlay)
+	}
+	if strings.Contains(overlay, secret) {
+		t.Fatalf("overlay contains the expanded environment value:\n%s", overlay)
+	}
+	if strings.Contains(harness.logs.String(), secret) {
+		t.Fatalf("logs leaked the expanded environment value:\n%s", harness.logs.String())
+	}
+}
+
+func TestConfigOverlayPatchNoopDoesNotAskForRestart(t *testing.T) {
+	harness := newOverlayAPIHarness(t, overlayAPIBase, overlayAPIDocument)
+	admin := harness.env.loginAs("code-admin")
+	response := harness.patch(admin, harness.requestBody(deleteChange([]string{"providers", "missing"})))
+	assertStatus(t, response, http.StatusOK)
+	body := harness.env.decode(t, response)
+	if body["applied"] != true || body["changed"] != false || body["restart_required"] != false {
+		t.Fatalf("applied/changed/restart_required = %v/%v/%v", body["applied"], body["changed"], body["restart_required"])
+	}
+	if notice, ok := body["notice"].(string); ok && notice != "" {
+		t.Fatalf("no-op response carries a save notice: %q", notice)
+	}
+	if !strings.Contains(harness.logs.String(), `"changed":false`) {
+		t.Fatalf("audit does not mark the no-op write:\n%s", harness.logs.String())
+	}
+}
+
+func TestConfigOverlayPatchRejectionIsAudited(t *testing.T) {
+	harness := newOverlayAPIHarness(t, overlayAPIBase, overlayAPIDocument)
+	admin := harness.env.loginAs("code-admin")
+	response := harness.patch(admin, harness.requestBody(
+		setChange([]string{"storage", "dsn"}, "file:elsewhere.db"),
+	))
+	assertStatus(t, response, http.StatusBadRequest)
+	logs := harness.logs.String()
+	for _, want := range []string{
+		`"event":"platform_audit"`, `"actor_id":7`, `"paths":["storage.dsn"]`, `"code":"invalid_change"`,
+	} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("rejection audit lacks %s:\n%s", want, logs)
+		}
+	}
+	if strings.Contains(logs, "elsewhere") {
+		t.Fatalf("rejection audit leaked the rejected value:\n%s", logs)
+	}
+}
+
+func TestConfigOverlayPatchDeleteMissingProviderIgnoresStaleOverride(t *testing.T) {
+	harness := newOverlayAPIHarness(t, overlayAPIBase, overlayAPIDocument)
+	ctx := context.Background()
+	const overrides = `{"lanes":{"review":{"model":"config:ghost"}}}`
+	if _, err := harness.env.sqlite.PutProfileOverrides(ctx, "default", overrides, 0, 7); err != nil {
+		t.Fatalf("PutProfileOverrides: %v", err)
+	}
+	admin := harness.env.loginAs("code-admin")
+	response := harness.patch(admin, harness.requestBody(deleteChange([]string{"providers", "ghost"})))
+	assertStatus(t, response, http.StatusOK)
+	body := harness.env.decode(t, response)
+	if body["applied"] != true || body["changed"] != false {
+		t.Fatalf("applied/changed = %v/%v", body["applied"], body["changed"])
+	}
+	stored, err := harness.env.sqlite.GetProfileOverrides(ctx, "default")
+	if err != nil || stored.OverridesJSON != overrides {
+		t.Fatalf("stored overrides changed: %+v, %v", stored, err)
 	}
 }

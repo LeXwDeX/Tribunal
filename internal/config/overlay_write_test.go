@@ -73,13 +73,14 @@ func newOverlayHarness(t *testing.T, baseBody, overlayBody string) *overlayHarne
 			t.Fatalf("write overlay: %v", err)
 		}
 	}
-	return &overlayHarness{
-		t: t, base: base, overlay: overlay,
-		writer: NewOverlayWriter(OverlayWriterOptions{
-			BasePaths:   []string{base},
-			OverlayPath: overlay,
-		}),
+	writer, err := NewOverlayWriter(OverlayWriterOptions{
+		BasePaths:   []string{base},
+		OverlayPath: overlay,
+	})
+	if err != nil {
+		t.Fatalf("NewOverlayWriter: %v", err)
 	}
+	return &overlayHarness{t: t, base: base, overlay: overlay, writer: writer}
 }
 
 // request builds a request whose revisions match the files on disk.
@@ -460,6 +461,13 @@ func TestOverlayWriterReviewDefaultsIgnoreInheritanceAndReplacement(t *testing.T
 	if origin := result.Candidate.Origins["review_defaults.ignore"]; origin != OriginOverlay {
 		t.Fatalf("ignore origin = %q, want overlay", origin)
 	}
+	rawIgnore, ok := result.OverlayReviewDefaults["ignore"].([]any)
+	if !ok || len(rawIgnore) != 2 || rawIgnore[0] != "custom/**" {
+		t.Fatalf("raw overlay ignore = %v", result.OverlayReviewDefaults)
+	}
+	if len(result.EffectiveIgnore) != 2 || result.EffectiveIgnore[0] != "custom/**" {
+		t.Fatalf("effective ignore = %v", result.EffectiveIgnore)
+	}
 
 	// Deleting the overlay key falls back to the built-in list.
 	result, err = harness.apply(harness.request(
@@ -479,6 +487,25 @@ func TestOverlayWriterReviewDefaultsIgnoreInheritanceAndReplacement(t *testing.T
 	}
 	if origin := result.Candidate.Origins["review_defaults.ignore"]; origin != OriginDefault {
 		t.Fatalf("restored ignore origin = %q, want default", origin)
+	}
+	if len(result.EffectiveIgnore) != len(builtin) || result.EffectiveIgnore[0] != builtin[0] {
+		t.Fatalf("restored effective ignore = %v, want %v", result.EffectiveIgnore, builtin)
+	}
+}
+
+func TestOverlayWriterRawReviewDefaultsKeepsPlaceholders(t *testing.T) {
+	harness := newOverlayHarness(t, overlayTestBase, overlayTestDocument)
+	t.Setenv("CANARY_RULE", "expanded-rule-value")
+	result, err := harness.apply(harness.request(
+		OverlayChange{Path: []string{"review_defaults", "custom_rules"}, Value: []any{"${CANARY_RULE}"}},
+	))
+	requireOverlayNoError(t, err)
+	rules, ok := result.OverlayReviewDefaults["custom_rules"].([]any)
+	if !ok || len(rules) != 1 || rules[0] != "${CANARY_RULE}" {
+		t.Fatalf("raw overlay custom_rules = %v", result.OverlayReviewDefaults)
+	}
+	if strings.Contains(string(harness.read()), "expanded-rule-value") {
+		t.Fatalf("overlay contains the expanded value:\n%s", harness.read())
 	}
 }
 
@@ -600,7 +627,10 @@ func TestOverlayWriterReadOnlySymlinkAndOversized(t *testing.T) {
 		if err := os.Symlink(real, link); err != nil {
 			t.Fatal(err)
 		}
-		writer := NewOverlayWriter(OverlayWriterOptions{BasePaths: []string{base}, OverlayPath: link})
+		writer, err := NewOverlayWriter(OverlayWriterOptions{BasePaths: []string{base}, OverlayPath: link})
+		if err != nil {
+			t.Fatalf("NewOverlayWriter: %v", err)
+		}
 		before, err := os.ReadFile(real)
 		if err != nil {
 			t.Fatal(err)
@@ -753,8 +783,11 @@ func TestOverlayFileErrorMapping(t *testing.T) {
 }
 
 func TestOverlayWriterNotConfigured(t *testing.T) {
-	writer := NewOverlayWriter(OverlayWriterOptions{})
-	_, err := writer.Apply(context.Background(), OverlayWriteRequest{Changes: []OverlayChange{
+	writer, err := NewOverlayWriter(OverlayWriterOptions{})
+	if err != nil {
+		t.Fatalf("NewOverlayWriter: %v", err)
+	}
+	_, err = writer.Apply(context.Background(), OverlayWriteRequest{Changes: []OverlayChange{
 		{Path: []string{"providers", "primary", "max_tokens"}, Value: 1},
 	}})
 	requireOverlayError(t, err, OverlayErrorNotConfigured)
@@ -775,5 +808,166 @@ func TestOverlayWriterNoopDeleteDoesNotRewrite(t *testing.T) {
 	}
 	if !bytes.Equal(before, harness.read()) {
 		t.Fatal("no-op delete rewrote the overlay")
+	}
+}
+
+func TestNewOverlayWriterRejectsBaseOverlayConflict(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "server.yaml")
+	if err := os.WriteFile(base, []byte(overlayTestBase), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, overlay := range []string{base, filepath.Join(dir, ".", "server.yaml")} {
+		_, err := NewOverlayWriter(OverlayWriterOptions{BasePaths: []string{base}, OverlayPath: overlay})
+		requireOverlayError(t, err, OverlayErrorPathConflict)
+	}
+
+	link := filepath.Join(dir, "overlay-link.yaml")
+	if err := os.Symlink(base, link); err != nil {
+		t.Fatal(err)
+	}
+	_, err := NewOverlayWriter(OverlayWriterOptions{BasePaths: []string{base}, OverlayPath: link})
+	requireOverlayError(t, err, OverlayErrorPathConflict)
+
+	hard := filepath.Join(dir, "overlay-hard.yaml")
+	if err := os.Link(base, hard); err != nil {
+		t.Fatal(err)
+	}
+	_, err = NewOverlayWriter(OverlayWriterOptions{BasePaths: []string{base}, OverlayPath: hard})
+	requireOverlayError(t, err, OverlayErrorPathConflict)
+
+	distinct := filepath.Join(dir, "server.overlay.yaml")
+	writer, err := NewOverlayWriter(OverlayWriterOptions{BasePaths: []string{base}, OverlayPath: distinct})
+	requireOverlayNoError(t, err)
+	if writer == nil || !writer.Configured() {
+		t.Fatalf("writer = %+v", writer)
+	}
+}
+
+func TestOverlayWriterPreservesCommentsOnEmptyOverlayRoot(t *testing.T) {
+	tests := []struct {
+		name  string
+		body  string
+		wants []string
+	}{
+		{"comment only", "# header\n# second\n", []string{"# header", "# second"}},
+		{"null root with header", "# header\n---\nnull\n", []string{"# header"}},
+		{"null root with trailing comment", "# header\n---\nnull\n# trailer\n", []string{"# header", "# trailer"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			harness := newOverlayHarness(t, overlayTestBase, test.body)
+			_, err := harness.apply(harness.request(
+				OverlayChange{Path: []string{"providers", "primary", "max_tokens"}, Value: 2048},
+			))
+			requireOverlayNoError(t, err)
+			after := string(harness.read())
+			for _, want := range test.wants {
+				if !strings.Contains(after, want) {
+					t.Fatalf("overlay lost %q:\n%s", want, after)
+				}
+			}
+			snapshot, err := LoadSnapshot([]string{harness.base}, harness.overlay)
+			if err != nil {
+				t.Fatalf("LoadSnapshot() after write: %v", err)
+			}
+			if snapshot.Config.Providers["primary"].MaxTokens != 2048 {
+				t.Fatalf("max_tokens = %d, want 2048", snapshot.Config.Providers["primary"].MaxTokens)
+			}
+		})
+	}
+}
+
+func TestOverlayWriterRejectsSymlinkLock(t *testing.T) {
+	harness := newOverlayHarness(t, overlayTestBase, overlayTestDocument)
+	target := filepath.Join(t.TempDir(), "lock-target")
+	if err := os.WriteFile(target, []byte("do not touch"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, harness.overlay+".lock"); err != nil {
+		t.Fatal(err)
+	}
+	before := harness.read()
+	_, err := harness.apply(harness.request(
+		OverlayChange{Path: []string{"providers", "primary", "max_tokens"}, Value: 1},
+	))
+	requireOverlayError(t, err, OverlayErrorSymlink)
+	if !bytes.Equal(before, harness.read()) {
+		t.Fatal("overlay changed with a symlink lock")
+	}
+	data, err := os.ReadFile(target)
+	if err != nil || string(data) != "do not touch" {
+		t.Fatalf("symlink target changed: %q, %v", data, err)
+	}
+}
+
+func TestOverlayWriterCleansStaleTempFiles(t *testing.T) {
+	harness := newOverlayHarness(t, overlayTestBase, overlayTestDocument)
+	dir := filepath.Dir(harness.overlay)
+	base := filepath.Base(harness.overlay)
+	stale := []string{
+		filepath.Join(dir, "."+base+".tmp-stale"),
+		filepath.Join(dir, "."+base+".bak.tmp-stale"),
+	}
+	for _, path := range stale {
+		if err := os.WriteFile(path, []byte("stale"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unrelated := filepath.Join(dir, ".other.tmp-stale")
+	if err := os.WriteFile(unrelated, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := harness.apply(harness.request(
+		OverlayChange{Path: []string{"providers", "primary", "max_tokens"}, Value: 2048},
+	))
+	requireOverlayNoError(t, err)
+	for _, path := range stale {
+		if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("stale temp file %s was not removed", filepath.Base(path))
+		}
+	}
+	if _, err := os.Stat(unrelated); err != nil {
+		t.Fatalf("unrelated temp file was removed: %v", err)
+	}
+}
+
+func TestOverlayWriterBackupIsPrivate(t *testing.T) {
+	harness := newOverlayHarness(t, overlayTestBase, overlayTestDocument)
+	before := harness.read()
+	_, err := harness.apply(harness.request(
+		OverlayChange{Path: []string{"providers", "primary", "max_tokens"}, Value: 2048},
+	))
+	requireOverlayNoError(t, err)
+	backup, err := os.ReadFile(harness.overlay + ".bak")
+	if err != nil {
+		t.Fatalf("read backup: %v", err)
+	}
+	if !bytes.Equal(before, backup) {
+		t.Fatal("backup does not contain the pre-write overlay")
+	}
+	info, err := os.Stat(harness.overlay + ".bak")
+	if err != nil {
+		t.Fatalf("stat backup: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("backup mode = %o, want 600", info.Mode().Perm())
+	}
+}
+
+func TestOverlayWriterRejectsReplacingAliasedContainer(t *testing.T) {
+	const overlay = `review_defaults:
+  profile_by_label:
+    bug: &label default
+  custom_rules: [*label]
+`
+	harness := newOverlayHarness(t, overlayTestBase, overlay)
+	before := harness.read()
+	_, err := harness.apply(harness.request(
+		OverlayChange{Path: []string{"review_defaults", "profile_by_label"}, Value: map[string]any{"bug": "default"}},
+	))
+	requireOverlayError(t, err, OverlayErrorInvalidChange)
+	if !bytes.Equal(before, harness.read()) {
+		t.Fatal("overlay changed after replacing an aliased container")
 	}
 }

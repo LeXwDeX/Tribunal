@@ -42,10 +42,14 @@ type configOverlayWriteResponse struct {
 	ReviewDefaults          configReviewDefaultsView `json:"review_defaults"`
 }
 
+// configReviewDefaultsView shows raw overlay values and the inherited ignore
+// list. It never contains expanded environment values, so the write response
+// cannot be used to read environment variables.
 type configReviewDefaultsView struct {
-	Effective     config.ProjectSettings `json:"effective"`
-	IgnoreOrigin  string                 `json:"ignore_origin"`
-	BuiltinIgnore []string               `json:"builtin_ignore"`
+	Overlay         map[string]any `json:"overlay"`
+	EffectiveIgnore []string       `json:"effective_ignore"`
+	IgnoreOrigin    string         `json:"ignore_origin"`
+	BuiltinIgnore   []string       `json:"builtin_ignore"`
 }
 
 // handleConfigOverlayPatch applies allowlisted leaf changes to the overlay
@@ -53,21 +57,25 @@ type configReviewDefaultsView struct {
 // bound to a person and has no CSRF protection.
 func (s *Server) handleConfigOverlayPatch(w http.ResponseWriter, r *http.Request) {
 	if value, ok := principalFrom(r.Context()); ok && value.bootstrapBearer {
+		s.auditConfigOverlayRejected(r, nil, "forbidden", false)
 		writeError(w, r, http.StatusForbidden, "forbidden", "the static bootstrap token cannot write configuration", nil)
-		return
-	}
-	if s.overlayWriter == nil {
-		writeError(w, r, http.StatusConflict, config.OverlayErrorNotConfigured, "configuration overlay is not configured", nil)
 		return
 	}
 	var request configOverlayPatchRequest
 	if err := decodeJSON(w, r, adminBodyLimit, &request); err != nil {
+		s.auditConfigOverlayRejected(r, nil, decodeRequestErrorCode(err), false)
 		decodeRequestError(w, r, err)
 		return
 	}
 	changes, err := request.overlayChanges()
 	if err != nil {
+		s.auditConfigOverlayRejectedPaths(r, configOverlayRequestPaths(request), config.OverlayErrorInvalidChange, request.DryRun)
 		writeError(w, r, http.StatusBadRequest, config.OverlayErrorInvalidChange, err.Error(), nil)
+		return
+	}
+	if s.overlayWriter == nil {
+		s.auditConfigOverlayRejected(r, changes, config.OverlayErrorNotConfigured, request.DryRun)
+		writeError(w, r, http.StatusConflict, config.OverlayErrorNotConfigured, "configuration overlay is not configured", nil)
 		return
 	}
 	result, err := s.overlayWriter.Apply(r.Context(), config.OverlayWriteRequest{
@@ -78,6 +86,7 @@ func (s *Server) handleConfigOverlayPatch(w http.ResponseWriter, r *http.Request
 		CheckRemovedProviders: s.checkOverlayProviderReferences,
 	})
 	if err != nil {
+		s.auditConfigOverlayRejected(r, changes, configOverlayErrorCode(err), request.DryRun)
 		s.writeConfigOverlayError(w, r, err)
 		return
 	}
@@ -91,10 +100,11 @@ func (s *Server) handleConfigOverlayPatch(w http.ResponseWriter, r *http.Request
 		BaseRevision:            result.BaseRevision,
 		PreviousOverlayRevision: result.PreviousOverlayRevision,
 		OverlayRevision:         result.OverlayRevision,
-		RestartRequired:         result.Applied,
-		ReviewDefaults:          configReviewDefaultsViewFor(result.Candidate),
+		// A no-op write changed nothing, so there is nothing to restart for.
+		RestartRequired: result.Applied && result.Changed,
+		ReviewDefaults:  configReviewDefaultsViewFor(result),
 	}
-	if result.Applied {
+	if response.RestartRequired {
 		response.Notice = configOverlayRestartNotice
 	}
 	writeJSON(w, http.StatusOK, response)
@@ -141,6 +151,22 @@ func decodeConfigOverlayValue(raw json.RawMessage) (any, error) {
 	return value, nil
 }
 
+func decodeRequestErrorCode(err error) string {
+	var maxErr *http.MaxBytesError
+	if errors.As(err, &maxErr) {
+		return "bad_request"
+	}
+	return "validation_failed"
+}
+
+func configOverlayErrorCode(err error) string {
+	var writeErr *config.OverlayWriteError
+	if errors.As(err, &writeErr) {
+		return writeErr.Code
+	}
+	return "internal"
+}
+
 func (s *Server) writeConfigOverlayError(w http.ResponseWriter, r *http.Request, err error) {
 	var writeErr *config.OverlayWriteError
 	if !errors.As(err, &writeErr) {
@@ -154,7 +180,8 @@ func (s *Server) writeConfigOverlayError(w http.ResponseWriter, r *http.Request,
 		status = http.StatusBadRequest
 	case config.OverlayErrorNotConfigured, config.OverlayErrorReadOnly,
 		config.OverlayErrorSymlink, config.OverlayErrorStaleConfig,
-		config.OverlayErrorProviderInUse:
+		config.OverlayErrorProviderInUse, config.OverlayErrorPathConflict,
+		config.OverlayErrorBusy:
 		status = http.StatusConflict
 	case config.OverlayErrorTooLarge:
 		status = http.StatusRequestEntityTooLarge
@@ -193,27 +220,74 @@ func (s *Server) checkOverlayProviderReferences(ctx context.Context, providers [
 	}
 }
 
-// auditConfigOverlay records actor, paths and revisions. Values never reach the
-// audit log.
+// auditConfigOverlay records actor, paths and revisions after a write. Values
+// never reach the audit log.
 func (s *Server) auditConfigOverlay(r *http.Request, changes []config.OverlayChange, result *config.OverlayWriteResult) {
-	paths := make([]string, 0, len(changes))
-	for _, change := range changes {
-		paths = append(paths, strings.Join(change.Path, "."))
+	message := "configuration overlay unchanged"
+	if result.Changed {
+		message = "configuration overlay changed"
 	}
-	s.logger.Info("configuration overlay changed", "event", "platform_audit", "actor_id", currentUserID(r),
-		"action", "update", "paths", paths,
+	s.logger.Info(message, "event", "platform_audit", "actor_id", currentUserID(r),
+		"action", "update", "paths", configOverlayPaths(changes),
 		"base_revision", result.BaseRevision,
 		"previous_overlay_revision", result.PreviousOverlayRevision,
 		"overlay_revision", result.OverlayRevision,
 		"changed", result.Changed)
 }
 
-func configReviewDefaultsViewFor(candidate *config.Snapshot) configReviewDefaultsView {
-	view := configReviewDefaultsView{BuiltinIgnore: config.DefaultReviewIgnorePatterns()}
-	if candidate == nil || candidate.Config == nil {
-		return view
+// auditConfigOverlayRejected records a rejected write with its stable code.
+// Paths are only logged after request conversion, so arbitrary raw request
+// strings never reach the log; values are never logged.
+func (s *Server) auditConfigOverlayRejected(r *http.Request, changes []config.OverlayChange, code string, dryRun bool) {
+	s.auditConfigOverlayRejectedPaths(r, configOverlayPaths(changes), code, dryRun)
+}
+
+func (s *Server) auditConfigOverlayRejectedPaths(r *http.Request, paths []string, code string, dryRun bool) {
+	s.logger.Info("configuration overlay write rejected", "event", "platform_audit", "actor_id", currentUserID(r),
+		"action", "update", "paths", paths, "code", code, "dry_run", dryRun)
+}
+
+func configOverlayPaths(changes []config.OverlayChange) []string {
+	paths := make([]string, 0, len(changes))
+	for _, change := range changes {
+		paths = append(paths, strings.Join(change.Path, "."))
 	}
-	view.Effective = candidate.Config.ReviewDefaults
-	view.IgnoreOrigin = string(candidate.Origins["review_defaults.ignore"])
+	return paths
+}
+
+// configOverlayRequestPaths returns only paths that are safe to log before
+// validation: bounded, non-empty, and free of control characters.
+func configOverlayRequestPaths(request configOverlayPatchRequest) []string {
+	paths := make([]string, 0, len(request.Changes))
+	for _, change := range request.Changes {
+		if len(change.Path) == 0 || len(change.Path) > 8 {
+			continue
+		}
+		valid := true
+		for _, segment := range change.Path {
+			if segment == "" || len(segment) > 128 || strings.ContainsAny(segment, "\x00\n\r\t") {
+				valid = false
+				break
+			}
+		}
+		if valid {
+			paths = append(paths, strings.Join(change.Path, "."))
+		}
+	}
+	return paths
+}
+
+func configReviewDefaultsViewFor(result *config.OverlayWriteResult) configReviewDefaultsView {
+	view := configReviewDefaultsView{
+		Overlay:         result.OverlayReviewDefaults,
+		EffectiveIgnore: result.EffectiveIgnore,
+		BuiltinIgnore:   config.DefaultReviewIgnorePatterns(),
+	}
+	if view.EffectiveIgnore == nil {
+		view.EffectiveIgnore = []string{}
+	}
+	if result.Candidate != nil {
+		view.IgnoreOrigin = string(result.Candidate.Origins["review_defaults.ignore"])
+	}
 	return view
 }

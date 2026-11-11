@@ -771,6 +771,13 @@ func (s *Server) apiAuth(next http.HandlerFunc) http.HandlerFunc {
 		if !safeMethod(r.Method) && !value.bearer {
 			token := strings.TrimSpace(r.Header.Get(csrfHeaderName))
 			if token == "" || !constantTimeEqualStrings(value.csrf, token) {
+				if r.URL.Path == "/api/v1/config/overlay" {
+					// The handler never runs for a CSRF failure; audit the
+					// rejected configuration write here.
+					s.logger.Info("configuration overlay write rejected", "event", "platform_audit",
+						"actor_id", value.user.ID, "action", "update", "paths", []string{},
+						"code", "forbidden", "dry_run", false)
+				}
 				writeError(w, r, http.StatusForbidden, "forbidden", "invalid CSRF token", nil)
 				return
 			}
