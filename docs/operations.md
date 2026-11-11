@@ -527,6 +527,34 @@ fi
 
 `REVIEW_ADMIN_TOKEN` 由部署方生成、保存和轮换，Tribunal 不提供在线轮换 API。修改 `.env` 或 secret 注入后执行 `docker compose up -d --force-recreate --wait --wait-timeout 120`，重启后旧 token 立即失效；不要用数据库操作或用户 grant 替代这次轮换。`bootstrap_admins` 是 `id:<GitLab 用户 ID>` 或 GitLab 用户名的列表，修改后同样需要重启服务，不会创建 GitLab 账号；拥有本地用户 ID 的管理员对已登记项目隐式拥有 `manage`，不需要另行授予项目授权。
 
+### 配置 overlay 与热刷新
+
+基础配置仍是启动必需文件，Compose 默认把它只读挂载到 `/app/config/server.yaml`。overlay 是叠加在基础配置之上的可选层，默认路径 `/app/data/config-overlay/server.overlay.yaml`，位于持久化数据卷内；文件不存在等价空 overlay，属正常状态。加载顺序为内置默认 < `--config` < overlay。传 `--overlay ""` 可关闭 overlay，`--overlay <path>` 可改用其他路径。
+
+创建或修改 overlay 时，直接在数据卷内写文件，不要改只读的基础配置挂载。沿用数据卷属主（默认 `10001:10001`），文件权限设为 `600`；目录不存在时先创建。例如：
+
+```bash
+docker compose exec -T review mkdir -p /app/data/config-overlay
+docker compose exec -T review sh -c 'cat > /app/data/config-overlay/server.overlay.yaml && chmod 600 /app/data/config-overlay/server.overlay.yaml' <<'YAML'
+server:
+  public_url: "https://review.example.com"
+YAML
+```
+
+overlay 位于数据卷中，镜像升级不会覆盖它；基础配置文件来自仓库，升级时仍需人工比对并按新版本更新。也可以在宿主机上按实际挂载路径维护同一个文件，但不要把它放进 `/app/config/` 的只读挂载。
+
+保存后，后台 watcher 每约 2 秒轮询全部基础配置文件和 overlay，连续两次观测一致才应用；后端通常在约 2–4 秒内应用变更，系统页最多再等一个 5 秒轮询显示新值。运行中的服务仍使用启动时的配置快照，运行期仍需重启，重启方式见下一节。这里的 `restart_required` 只描述文件配置；扩展和块绑定等数据库变更（#402）保存后即可对新请求生效，两者不要混用同一套期望。
+
+overlay 或基础配置存在 YAML 语法错误、未知字段、重复键或类型错误时，重载失败：服务继续运行并保留上一份可用（last-good）显示快照，健康检查仍健康，进程不退出，监听、数据库和 worker 不受影响。在系统页「平台配置（只读）」的「配置来源与待重启」面板，或通过 `GET /api/v1/config/status`，可查看脱敏的 `last_error` 和 `last_error_at`；配置文件名只保留 basename，校验错误中按引号形式回显的路径值、源文件标量值与环境变量值会被脱敏，路径类或较长的裸值也会被替换。修复文件后，下一次稳定观测会自动恢复并清空 `last_error`。半写文件不会被应用，因为需要连续两次观测一致。
+
+修改前可先用 `--check-config` 验证基础配置与 overlay：
+
+```bash
+docker compose run --rm --no-deps review --config /app/config/server.yaml --check-config
+```
+
+`--check-config` 会读取并校验默认路径的 overlay；使用自定义 overlay 路径时同时传 `--overlay <path>`。overlay 存在但非法时检查失败并带源文件名；文件不存在时按空 overlay 处理。排障时如需临时不加载 overlay，可传 `--overlay ""`。
+
 ### 停止、修改和备份
 
 单独停服使用 `docker compose stop review`。`docker compose down` 会删除容器但保留命名卷，不适用于需要从旧容器复制数据的备份；**不要执行 `down -v`**，它会删除数据库和工作区。默认项目名仍为 `crc-review`，数据卷仍为 `crc-review_data`；这是刻意保留的兼容身份，改名会创建新卷并让现有数据不可见。若用 `-p` 更换项目名，也会使用另一数据卷。不要同时启动多个实例共享同一卷。

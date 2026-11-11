@@ -11,6 +11,8 @@ import type {
   BindingPage,
   ContextDoc,
   ContextDocPage,
+  ConfigFileResponse,
+  ConfigStatus,
   CreatedApiToken,
   Finding,
   FindingAnnotation,
@@ -392,6 +394,14 @@ export async function getStats(filters: StatsFilters = {}): Promise<Stats> {
 
 export async function getSettings(): Promise<PlatformSettings> {
   return request<PlatformSettings>('/api/v1/settings')
+}
+
+export async function getConfig(): Promise<ConfigFileResponse> {
+  return request<ConfigFileResponse>('/api/v1/config')
+}
+
+export async function getConfigStatus(): Promise<ConfigStatus> {
+  return request<ConfigStatus>('/api/v1/config/status')
 }
 
 export async function listApiTokens(cursor?: string): Promise<ApiTokenPage> {

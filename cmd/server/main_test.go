@@ -33,12 +33,22 @@ func TestParseOptions(t *testing.T) {
 	if len(opts.configs) != 1 || opts.configs[0] != "config/server.yaml" {
 		t.Fatalf("default configs = %v", opts.configs)
 	}
-	opts, err = parseOptions([]string{"--config", "a.yaml", "--config", "b.yaml", "--check-config"}, &bytes.Buffer{})
+	if opts.overlay != defaultOverlayPath {
+		t.Fatalf("default overlay = %q, want %q", opts.overlay, defaultOverlayPath)
+	}
+	opts, err = parseOptions([]string{"--config", "a.yaml", "--config", "b.yaml", "--overlay", "o.yaml", "--check-config"}, &bytes.Buffer{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(opts.configs, ",") != "a.yaml,b.yaml" || !opts.checkConfig {
+	if strings.Join(opts.configs, ",") != "a.yaml,b.yaml" || opts.overlay != "o.yaml" || !opts.checkConfig {
 		t.Fatalf("opts = %+v", opts)
+	}
+	opts, err = parseOptions([]string{"--overlay", ""}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.overlay != "" {
+		t.Fatalf("empty overlay did not disable the overlay: %q", opts.overlay)
 	}
 	if _, err := parseOptions([]string{"--nope"}, &bytes.Buffer{}); err == nil {
 		t.Fatal("unknown flag accepted")
@@ -238,11 +248,49 @@ func TestCheckConfig(t *testing.T) {
 	t.Setenv("CRC_SESSION_KEY", "")
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
-	if err := run(context.Background(), []string{"--config", path, "--check-config"}, stdout, stderr); err != nil {
+	if err := run(context.Background(), []string{"--config", path, "--overlay", "", "--check-config"}, stdout, stderr); err != nil {
 		t.Fatalf("run: %v, stderr=%s", err, stderr)
 	}
 	if !strings.Contains(stdout.String(), "configuration OK") {
 		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestCheckConfigLoadsOverlay(t *testing.T) {
+	source, err := os.ReadFile("../../config/server.example.yaml")
+	if err != nil {
+		t.Fatalf("read example config: %v", err)
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.yaml")
+	if err := os.WriteFile(path, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	overlay := filepath.Join(dir, "server.overlay.yaml")
+	if err := os.WriteFile(overlay, []byte("server:\n  write_timeout: 45s\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("REVIEW_MASTER_KEY", base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")))
+	t.Setenv("REVIEW_ADMIN_TOKEN", "abcdefghijklmnopqrstuvwxyz012345")
+	t.Setenv("TRIBUNAL_SESSION_KEY", "")
+	t.Setenv("CRC_SESSION_KEY", "")
+	stdout := &bytes.Buffer{}
+	if err := run(context.Background(), []string{"--config", path, "--overlay", overlay, "--check-config"}, stdout, &bytes.Buffer{}); err != nil {
+		t.Fatalf("check-config with overlay: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "configuration OK") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+
+	if err := os.WriteFile(overlay, []byte("server:\n  nope: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = run(context.Background(), []string{"--config", path, "--overlay", overlay, "--check-config"}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("check-config accepted an overlay with an unknown field")
+	}
+	if !strings.Contains(err.Error(), "server.overlay.yaml") || !strings.Contains(err.Error(), "field nope not found") {
+		t.Fatalf("overlay error = %q", err)
 	}
 }
 
@@ -257,7 +305,7 @@ func TestCheckConfigRequiresSecrets(t *testing.T) {
 	}
 	t.Setenv("REVIEW_MASTER_KEY", "")
 	t.Setenv("REVIEW_ADMIN_TOKEN", "")
-	if err := run(context.Background(), []string{"--config", path, "--check-config"}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
+	if err := run(context.Background(), []string{"--config", path, "--overlay", "", "--check-config"}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
 		t.Fatal("check-config accepted missing secrets")
 	}
 }
@@ -319,7 +367,7 @@ func TestRunRefusesLockedDataDirectory(t *testing.T) {
 	}
 	defer held.Release()
 	stderr := &bytes.Buffer{}
-	err = run(context.Background(), []string{"--config", path}, &bytes.Buffer{}, stderr)
+	err = run(context.Background(), []string{"--config", path, "--overlay", ""}, &bytes.Buffer{}, stderr)
 	if err == nil || !strings.Contains(err.Error(), "locked by another Tribunal instance") {
 		t.Fatalf("run error = %v, want data directory lock failure", err)
 	}
@@ -354,7 +402,7 @@ func TestRunRejectsWrongMCPKeyAndReleasesResources(t *testing.T) {
 	}
 	t.Setenv("REVIEW_MASTER_KEY", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{2}, 32)))
 	var logs bytes.Buffer
-	err = run(ctx, []string{"--config", path}, &bytes.Buffer{}, &logs)
+	err = run(ctx, []string{"--config", path, "--overlay", ""}, &bytes.Buffer{}, &logs)
 	if err == nil || err.Error() != "initialize secrets: master key does not match stored encrypted data" || strings.Contains(logs.String(), "canary-startup") ||
 		!strings.Contains(logs.String(), "master key does not match stored encrypted data; refusing to start") || !strings.Contains(logs.String(), "env=REVIEW_MASTER_KEY") ||
 		strings.Contains(logs.String(), os.Getenv("REVIEW_MASTER_KEY")) {
@@ -642,7 +690,7 @@ func TestDeprecatedEnvironmentWarnings(t *testing.T) {
 	runCheck := func(t *testing.T) string {
 		t.Helper()
 		stderr := &bytes.Buffer{}
-		if err := run(context.Background(), []string{"--config", path, "--check-config"}, &bytes.Buffer{}, stderr); err != nil {
+		if err := run(context.Background(), []string{"--config", path, "--overlay", "", "--check-config"}, &bytes.Buffer{}, stderr); err != nil {
 			t.Fatalf("run: %v", err)
 		}
 		return stderr.String()
@@ -1321,7 +1369,7 @@ func TestRunReclaimsForeignLeasesAfterLockingDataDirectory(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var logs syncBuffer
 	done := make(chan error, 1)
-	go func() { done <- run(ctx, []string{"--config", path}, &bytes.Buffer{}, &logs) }()
+	go func() { done <- run(ctx, []string{"--config", path, "--overlay", ""}, &bytes.Buffer{}, &logs) }()
 	waitReady(t, port, done, cancel)
 	cancel()
 	if err := <-done; err != nil {
@@ -1348,7 +1396,7 @@ func TestRunDoesNotReclaimWhenDataDirectoryIsLocked(t *testing.T) {
 		t.Skip("data directory lock is not enforced on this platform")
 	}
 	var logs bytes.Buffer
-	if err := run(context.Background(), []string{"--config", path}, &bytes.Buffer{}, &logs); err == nil {
+	if err := run(context.Background(), []string{"--config", path, "--overlay", ""}, &bytes.Buffer{}, &logs); err == nil {
 		t.Fatal("run succeeded with the data directory locked")
 	}
 	if j := jobStateOf(t, dir, id); j.State != store.JobRunning || j.LeaseOwner != "dead-process:0" {

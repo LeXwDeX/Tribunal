@@ -16,6 +16,7 @@ import {
 } from '../components/ui'
 import { usePaginated } from '../lib/hooks'
 import { formatDate } from '../lib/format'
+import { ConfigSourcesPanel } from './ConfigSourcesPanel'
 import ui from '../styles/ui.module.css'
 import styles from './pages.module.css'
 import insights from './insights.module.css'
@@ -786,21 +787,24 @@ export function SystemPage() {
           ) : null}
 
           {tab === 'settings' && isAdmin ? (
-            <Panel
-              title="平台配置"
-              aside="服务端脱敏只读视图"
-              note="此页面不提供编辑；密钥和凭据由服务端脱敏，界面不显示其值。"
-            >
-              {settings.isPending ? <LoadingState label="正在读取平台配置…" /> : null}
-              {settings.isError ? <ErrorState error={settings.error} onRetry={() => { void settings.refetch() }} /> : null}
-              {settings.isSuccess ? (
-                <>
-                  {Object.keys(settings.data || {}).length ? (
-                    <pre className={`pre ${ui.jsonBlock} ${ui.jsonBlockTall}`}>{JSON.stringify(settings.data, null, 2)}</pre>
-                  ) : <EmptyState title="平台配置为空" description="服务端返回了空对象；这不代表配置缺失或加载成功。" />}
-                </>
-              ) : null}
-            </Panel>
+            <>
+              <ConfigSourcesPanel enabled={isAdmin && tab === 'settings'} />
+              <Panel
+                title="平台配置"
+                aside="服务端脱敏只读视图"
+                note="此页面不提供编辑；密钥和凭据由服务端脱敏，界面不显示其值。"
+              >
+                {settings.isPending ? <LoadingState label="正在读取平台配置…" /> : null}
+                {settings.isError ? <ErrorState error={settings.error} onRetry={() => { void settings.refetch() }} /> : null}
+                {settings.isSuccess ? (
+                  <>
+                    {Object.keys(settings.data || {}).length ? (
+                      <pre className={`pre ${ui.jsonBlock} ${ui.jsonBlockTall}`}>{JSON.stringify(settings.data, null, 2)}</pre>
+                    ) : <EmptyState title="平台配置为空" description="服务端返回了空对象；这不代表配置缺失或加载成功。" />}
+                  </>
+                ) : null}
+              </Panel>
+            </>
           ) : null}
 
           {tab === 'users' && isAdmin ? <AdminUsersPanel /> : null}

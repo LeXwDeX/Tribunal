@@ -14,6 +14,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -96,9 +97,13 @@ type Config struct {
 	Sessions         SessionStore
 	Access           AccessStore
 	Platform         *config.Config
-	LockStats        func() LockStats
-	StreamPoll       time.Duration
-	Now              func() time.Time
+	// FileConfig is the file-effective display state loaded at startup. The
+	// watcher replaces it without touching Platform, which stays the runtime
+	// snapshot until the process restarts.
+	FileConfig *config.State
+	LockStats  func() LockStats
+	StreamPoll time.Duration
+	Now        func() time.Time
 }
 
 // Server routes all HTTP requests.
@@ -131,6 +136,7 @@ type Server struct {
 	tokens           TokenStore
 	access           AccessStore
 	platform         *config.Config
+	fileConfig       atomic.Pointer[config.State]
 	lockStats        func() LockStats
 	streamPoll       time.Duration
 	now              func() time.Time
@@ -211,6 +217,9 @@ func New(cfg Config) (*Server, error) {
 	if s.now == nil {
 		s.now = time.Now
 	}
+	if cfg.FileConfig != nil {
+		s.fileConfig.Store(cfg.FileConfig)
+	}
 	s.syncPlatformRoles()
 
 	mux := http.NewServeMux()
@@ -289,6 +298,8 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("GET /api/v1/stats", s.apiAuth(s.handleStats))
 	mux.HandleFunc("GET /api/v1/system/lock-stats", s.apiAuth(s.guard(policyPlatformAdmin, s.handleLockStats)))
 	mux.HandleFunc("GET /api/v1/settings", s.apiAuth(s.guard(policyPlatformAdmin, s.handleSettings)))
+	mux.HandleFunc("GET /api/v1/config", s.apiAuth(s.guard(policyPlatformAdmin, s.handleConfig)))
+	mux.HandleFunc("GET /api/v1/config/status", s.apiAuth(s.guard(policyPlatformAdmin, s.handleConfigStatus)))
 	// API tokens (browser self-service; CSRF still applies).
 	mux.HandleFunc("GET /api/v1/api-tokens", s.apiAuth(s.guard(policyAuthenticated, s.handleListAPITokens)))
 	mux.HandleFunc("POST /api/v1/api-tokens", s.apiAuth(s.guard(policyAuthenticated, s.handleCreateAPIToken)))
@@ -324,6 +335,16 @@ func New(cfg Config) (*Server, error) {
 // Handler returns the composed HTTP handler.
 func (s *Server) Handler() http.Handler {
 	return s.handler
+}
+
+// SetConfigState atomically replaces the file-effective display snapshot. It is
+// called from the configuration watcher; the runtime Platform config is not
+// touched, so handlers keep observing the startup snapshot.
+func (s *Server) SetConfigState(state *config.State) {
+	if state == nil {
+		return
+	}
+	s.fileConfig.Store(state)
 }
 
 // BeginShutdown ends open review streams. Register it with

@@ -606,6 +606,35 @@ export interface PlatformSettings {
   [key: string]: unknown
 }
 
+export type ConfigOrigin = 'default' | 'base' | 'overlay'
+
+// ConfigFileResponse is the file-effective configuration view. Values are
+// nested by configuration path; origins map dotted paths to their layer.
+export interface ConfigFileResponse {
+  config: Record<string, unknown>
+  origins: Record<string, ConfigOrigin>
+  warnings: string[]
+  base_revision: string
+  overlay_revision: string
+  overlay_present: boolean
+  applied: boolean
+  restart_required: boolean
+  last_error: string
+  last_error_at: string | null
+}
+
+export interface ConfigStatus {
+  applied: boolean
+  restart_required: boolean
+  base_revision: string
+  overlay_revision: string
+  overlay_present: boolean
+  warnings: string[]
+  last_error: string
+  last_error_at: string | null
+  updated_at: string | null
+}
+
 export interface ApiToken {
   id: string | number
   name: string
