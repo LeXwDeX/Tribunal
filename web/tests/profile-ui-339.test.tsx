@@ -4,11 +4,15 @@ import userEvent from '@testing-library/user-event'
 import { ModelsPage } from '../src/pages/ModelsPage'
 import { installFetch, jsonResponse, renderWithProviders, viewerMe } from './test-utils'
 
-const base = { protocol: 'openai-chat', base_url: 'https://example.com', params: {}, has_api_key: true, revision: 1, referenced_by: [] }
+const base = { protocol: 'openai-chat', base_url: 'https://example.com', has_api_key: true, revision: 1, referenced_by: [] }
+const baseParams = {
+  max_tokens: 4096, temperature: 0.2, reasoning: { effort: 'high' },
+  thinking: { budget_tokens: 1024, type: 'disabled' },
+}
 const models = [
-  { ...base, id: 'config:base', display_name: 'base', source: 'config', read_only: true, model: 'm', available: true, vote_identity: 'example.com/m' },
-  { ...base, id: 'user:one', display_name: 'one', source: 'user', read_only: false, model: 'm2', available: true, vote_identity: 'example.com/m2' },
-  { ...base, id: 'user:bad', display_name: 'bad', source: 'user', read_only: false, model: 'm3', available: false, unavailable_reason: 'credential', vote_identity: 'example.com/m3' },
+  { ...base, id: 'config:base', display_name: 'base', source: 'config', read_only: true, model: 'm', params: baseParams, available: true, vote_identity: 'example.com/m' },
+  { ...base, id: 'user:one', display_name: 'one', source: 'user', read_only: false, model: 'm2', params: { max_tokens: 2048 }, available: true, vote_identity: 'example.com/m2' },
+  { ...base, id: 'user:bad', display_name: 'bad', source: 'user', read_only: false, model: 'm3', params: {}, available: false, unavailable_reason: 'credential', vote_identity: 'example.com/m3' },
 ]
 
 const node = (name: string, model: string, source: string, extra: Record<string, unknown> = {}) => ({
@@ -16,17 +20,30 @@ const node = (name: string, model: string, source: string, extra: Record<string,
   effective_params: { max_tokens: 4096 }, vote_identity: model === 'config:base' ? 'example.com/m' : 'example.com/m2', ...extra,
 })
 
+const defaultParams = {
+  max_tokens: 1000, temperature: 0.5, reasoning: { effort: 'max' },
+  thinking: { budget_tokens: 2048, type: 'enabled' },
+}
+
 const detail = {
-  profile: 'default', overrides: { challenge: { model: 'user:one', params: { max_tokens: 2048 } } }, revision: 3,
+  profile: 'default',
+  overrides: {
+    default: { model: 'config:base', params: defaultParams },
+    challenge: { model: 'user:one', params: { max_tokens: 2048 } },
+  },
+  revision: 3,
   effective: { provider: 'base' },
   nodes: [
-    node('default', 'config:base', 'config'),
-    node('explore', 'config:base', 'derived'),
-    node('lanes.code_review', 'config:base', 'config_default'),
-    node('lanes.review', 'user:one', 'override_default', { param_source: 'override_default', effective_params: { max_tokens: 1000, temperature: 0.5, reasoning: { effort: 'max' }, thinking: { budget_tokens: 2048 } } }),
-    node('lanes.reasoner', 'config:base', 'config'),
-    node('lanes.validate', 'config:base', 'config'),
-    node('challenge', 'user:one', 'override', { param_source: 'override' }),
+    node('default', 'config:base', 'override', { param_source: 'override', effective_params: defaultParams }),
+    node('explore', 'config:base', 'derived', { configured_source: 'derived', param_source: 'override_default', effective_params: defaultParams }),
+    node('lanes.code_review', 'config:base', 'config_default', { configured_source: 'config_default', param_source: 'override_default', effective_params: defaultParams }),
+    node('lanes.review', 'user:one', 'override_default', {
+      configured_source: 'config_default', param_source: 'override_default',
+      effective_params: { max_tokens: 1000, temperature: 0.5, reasoning: { effort: 'max' }, thinking: { budget_tokens: 2048 } },
+    }),
+    node('lanes.reasoner', 'config:base', 'config', { param_source: 'override_default', effective_params: defaultParams }),
+    node('lanes.validate', 'config:base', 'config', { param_source: 'override_default', effective_params: defaultParams }),
+    node('challenge', 'user:one', 'override', { configured_source: 'config', param_source: 'override', effective_params: { max_tokens: 2048, temperature: 0.5, reasoning: { effort: 'max' }, thinking: { budget_tokens: 2048 } } }),
   ],
 }
 
@@ -43,7 +60,7 @@ function mock(handler?: (url: string, init?: RequestInit) => Response | undefine
 
 const isPut = (url: string, init?: RequestInit) => url === '/api/v1/profiles/default/overrides' && init?.method === 'PUT'
 
-const PROFILE_LABELS = ['默认', '探索', 'code-review', 'review', 'reasoner', 'validate', 'challenge']
+const PROFILE_LABELS = ['全局默认', '探索', 'code-review', 'review', 'reasoner', 'validate', 'challenge']
 
 async function chooseOption(user: ReturnType<typeof userEvent.setup>, trigger: HTMLElement, name: RegExp | string) {
   await user.click(trigger)
@@ -57,30 +74,78 @@ async function openEditor() {
   return user
 }
 
+function putBody(fetchMock: ReturnType<typeof mock>) {
+  const call = fetchMock.mock.calls.find(([url, init]) => isPut(String(url), init))
+  return JSON.parse(String(call?.[1]?.body))
+}
+
 describe('profile node sources, params and same-model hint (#339)', () => {
   afterEach(() => vi.unstubAllGlobals())
+
+  it('shows the global default card above the six configurable nodes', async () => {
+    mock()
+    renderWithProviders(<ModelsPage />, { route: '/models' })
+    const globalCard = await screen.findByRole('region', { name: '全局默认' })
+    expect(within(globalCard).getByText('base')).toBeInTheDocument()
+    expect(within(globalCard).getByText(/生效参数 max_tokens 1000 · temperature 0.5/)).toBeInTheDocument()
+    expect(within(globalCard).getByText(/参数来源 覆盖/)).toBeInTheDocument()
+    const list = screen.getByRole('list', { name: '节点生效模型' })
+    expect(within(list).getAllByRole('listitem')).toHaveLength(6)
+      })
 
   it('shows all five source labels with model name, short id and effective params', async () => {
     mock()
     renderWithProviders(<ModelsPage />, { route: '/models' })
     const list = await screen.findByRole('list', { name: '节点生效模型' })
-    for (const label of ['覆盖', '继承覆盖默认', '配置', '配置默认', '派生']) {
+    for (const label of ['覆盖', '全局默认', '配置', '配置默认', '派生']) {
       expect(within(list).getAllByText(label).length).toBeGreaterThan(0)
     }
     expect(within(list).getAllByText('one').length).toBeGreaterThan(0)
-    expect(within(list).getByText(/max_tokens 1000 · temperature 0.5 · reasoning.effort max · thinking.budget_tokens 2048/)).toBeInTheDocument()
+    expect(within(list).getAllByText(/max_tokens 1000 · temperature 0.5 · reasoning.effort max · thinking.budget_tokens 2048/).length).toBeGreaterThan(0)
     expect(within(list).getAllByText(/配置值 base（配置）/).length).toBeGreaterThan(0)
+    expect(within(list).getAllByText(/参数来源 全局默认/).length).toBeGreaterThan(0)
+    expect(within(list).getAllByText(/参数来源 覆盖/).length).toBeGreaterThan(0)
   })
 
   it('shows the same-model hint for nodes sharing a vote identity', async () => {
     mock()
     renderWithProviders(<ModelsPage />, { route: '/models' })
     const notes = await screen.findAllByRole('note')
-    expect(notes.some((item) => item.textContent?.includes('这些节点会被计为同一模型：默认、探索'))).toBe(true)
+    expect(notes.some((item) => item.textContent?.includes('这些节点会被计为同一模型：全局默认、探索'))).toBe(true)
     expect(notes.some((item) => item.textContent?.includes('review、challenge'))).toBe(true)
   })
 
-  it('saves model and params overrides with the current revision', async () => {
+  it('shows inherited values and their sources below the node inputs', async () => {
+    mock()
+    const user = await openEditor()
+    const global = screen.getByRole('group', { name: '全局默认' })
+    expect(within(global).getByText('覆盖中 · 继承值：4096 · 来源：模型')).toBeInTheDocument()
+    expect(within(global).getByText('覆盖中 · 继承值：0.2 · 来源：模型')).toBeInTheDocument()
+    expect(within(global).getByText('覆盖中 · 继承值：high · 来源：模型')).toBeInTheDocument()
+    expect(within(global).getByText('覆盖中 · 继承值：1024 · 来源：模型')).toBeInTheDocument()
+    expect(within(global).getByText('覆盖中 · 继承值：disabled · 来源：模型')).toBeInTheDocument()
+    expect(within(global).getByText('覆盖中 · 继承值：base（config:base） · 来源：配置')).toBeInTheDocument()
+
+    const review = screen.getByRole('group', { name: 'review' })
+    expect(within(review).getByText('继承值：1000 · 来源：全局默认')).toBeInTheDocument()
+    expect(within(review).getByText('继承值：0.5 · 来源：全局默认')).toBeInTheDocument()
+    expect(within(review).getByText('继承值：max · 来源：全局默认')).toBeInTheDocument()
+    expect(within(review).getByText('继承值：2048 · 来源：全局默认')).toBeInTheDocument()
+    expect(within(review).getByText('继承值：enabled · 来源：全局默认')).toBeInTheDocument()
+    expect(within(review).getByText('继承值：base（config:base） · 来源：全局默认')).toBeInTheDocument()
+
+    const challenge = screen.getByRole('group', { name: 'challenge' })
+    expect(within(challenge).getByText('覆盖中 · 继承值：1000 · 来源：全局默认')).toBeInTheDocument()
+    expect(within(challenge).getByText('覆盖中 · 继承值：base（config:base） · 来源：全局默认')).toBeInTheDocument()
+
+    // Editing the global default updates what the nodes inherit, before saving.
+    const globalMax = screen.getByLabelText('全局默认 max_tokens')
+    await user.clear(globalMax)
+    await user.type(globalMax, '2500')
+    expect(within(review).getByText('继承值：2500 · 来源：全局默认')).toBeInTheDocument()
+  })
+
+  it('saves model and params overrides with the current revision and only the overridden fields', async () => {
     const fetchMock = mock((url, init) => (isPut(url, init) ? jsonResponse(detail) : undefined))
     const user = await openEditor()
     await chooseOption(user, screen.getByLabelText('validate 模型'), /^one（user:one）/)
@@ -90,12 +155,48 @@ describe('profile node sources, params and same-model hint (#339)', () => {
     await user.type(screen.getByLabelText('validate thinking.budget_tokens'), '2048')
     await user.click(screen.getByRole('button', { name: '保存' }))
     await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => isPut(String(url), init))).toBe(true))
-    const call = fetchMock.mock.calls.find(([url, init]) => isPut(String(url), init))
-    expect(JSON.parse(String(call?.[1]?.body))).toEqual({
+    const body = putBody(fetchMock)
+    expect(body).toEqual({
       revision: 3,
       overrides: {
+        default: { model: 'config:base', params: defaultParams },
         challenge: { model: 'user:one', params: { max_tokens: 2048 } },
         lanes: { validate: { model: 'user:one', params: { max_tokens: 1500, temperature: 0.3, reasoning: { effort: 'max' }, thinking: { budget_tokens: 2048 } } } },
+      },
+    })
+    // Inherited values are presentation only; untouched nodes are never submitted.
+    expect(body.overrides.explore).toBeUndefined()
+    expect(body.overrides.lanes.review).toBeUndefined()
+  })
+
+  it('edits the global default card and submits it as the default slot', async () => {
+    const fetchMock = mock((url, init) => (isPut(url, init) ? jsonResponse(detail) : undefined))
+    const user = await openEditor()
+    await user.click(screen.getByRole('button', { name: '清除challenge覆盖' }))
+    await chooseOption(user, screen.getByLabelText('全局默认 模型'), /^one（user:one）/)
+    const max = screen.getByLabelText('全局默认 max_tokens')
+    await user.clear(max)
+    await user.type(max, '2000')
+    const temperature = screen.getByLabelText('全局默认 temperature')
+    await user.clear(temperature)
+    await user.type(temperature, '0.7')
+    await chooseOption(user, screen.getByLabelText('全局默认 reasoning.effort'), 'low')
+    const budget = screen.getByLabelText('全局默认 thinking.budget_tokens')
+    await user.clear(budget)
+    await user.type(budget, '1500')
+    await chooseOption(user, screen.getByLabelText('全局默认 thinking.type'), 'disabled')
+    await user.click(screen.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => isPut(String(url), init))).toBe(true))
+    expect(putBody(fetchMock)).toEqual({
+      revision: 3,
+      overrides: {
+        default: {
+          model: 'user:one',
+          params: {
+            max_tokens: 2000, temperature: 0.7, reasoning: { effort: 'low' },
+            thinking: { budget_tokens: 1500, type: 'disabled' },
+          },
+        },
       },
     })
   })
@@ -106,8 +207,24 @@ describe('profile node sources, params and same-model hint (#339)', () => {
     await user.click(screen.getByRole('button', { name: '清除challenge覆盖' }))
     await user.click(screen.getByRole('button', { name: '保存' }))
     await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => isPut(String(url), init))).toBe(true))
-    const call = fetchMock.mock.calls.find(([url, init]) => isPut(String(url), init))
-    expect(JSON.parse(String(call?.[1]?.body))).toEqual({ revision: 3, overrides: {} })
+    expect(putBody(fetchMock)).toEqual({
+      revision: 3,
+      overrides: { default: { model: 'config:base', params: defaultParams } },
+    })
+  })
+
+  it('clears the global default and restores inheritance for the six nodes', async () => {
+    const fetchMock = mock((url, init) => (isPut(url, init) ? jsonResponse(detail) : undefined))
+    const user = await openEditor()
+    await user.click(screen.getByRole('button', { name: '清除全局默认覆盖' }))
+    const review = screen.getByRole('group', { name: 'review' })
+    expect(within(review).getByText('继承值：4096 · 来源：模型')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => isPut(String(url), init))).toBe(true))
+    expect(putBody(fetchMock)).toEqual({
+      revision: 3,
+      overrides: { challenge: { model: 'user:one', params: { max_tokens: 2048 } } },
+    })
   })
 
   it('restores the whole profile to configuration', async () => {
@@ -143,7 +260,7 @@ describe('profile node sources, params and same-model hint (#339)', () => {
     await user.click(screen.getByRole('button', { name: '保存' }))
     const validate = screen.getByRole('group', { name: 'validate' })
     expect(await within(validate).findByText('model is unavailable')).toBeInTheDocument()
-    expect(within(screen.getByRole('group', { name: '默认' })).getByText('must be at least 1024 for anthropic models')).toBeInTheDocument()
+    expect(within(screen.getByRole('group', { name: '全局默认' })).getByText('must be at least 1024 for anthropic models')).toBeInTheDocument()
     expect(within(screen.getByRole('group', { name: '探索' })).getByText('overrides.explore.params.temperature must be between 0 and 2')).toBeInTheDocument()
     expect(screen.getByLabelText('validate 模型')).toHaveAttribute('aria-invalid', 'true')
     expect(screen.getByLabelText('探索 temperature')).toHaveAttribute('aria-invalid', 'true')
@@ -181,11 +298,14 @@ describe('profile node sources, params and same-model hint (#339)', () => {
   it('validates inputs on the client without sending a request', async () => {
     const fetchMock = mock()
     const user = await openEditor()
-    await user.type(screen.getByLabelText('review temperature'), '0x1')
+    await user.type(screen.getByLabelText('review temperature'), '2.5')
     await user.type(screen.getByLabelText('review max_tokens'), '-5')
     await user.type(screen.getByLabelText('review thinking.budget_tokens'), '1.5')
-    await user.type(screen.getByLabelText('validate temperature'), ' ')
-    await user.type(screen.getByLabelText('reasoner temperature'), '2.5')
+    await user.type(screen.getByLabelText('validate temperature'), '3')
+    await user.type(screen.getByLabelText('reasoner temperature'), '2.6')
+    const globalMax = screen.getByLabelText('全局默认 max_tokens')
+    await user.clear(globalMax)
+    await user.type(globalMax, '-1')
     await user.click(screen.getByRole('button', { name: '保存' }))
     expect(fetchMock.mock.calls.some(([url, init]) => isPut(String(url), init))).toBe(false)
     const review = screen.getByRole('group', { name: 'review' })
@@ -194,6 +314,7 @@ describe('profile node sources, params and same-model hint (#339)', () => {
     expect(within(review).getByText('thinking.budget_tokens 必须是正整数。')).toBeInTheDocument()
     expect(within(screen.getByRole('group', { name: 'validate' })).getByText('temperature 必须在 0 到 2 之间。')).toBeInTheDocument()
     expect(within(screen.getByRole('group', { name: 'reasoner' })).getByText('temperature 必须在 0 到 2 之间。')).toBeInTheDocument()
+    expect(within(screen.getByRole('group', { name: '全局默认' })).getByText('max_tokens 必须是正整数。')).toBeInTheDocument()
   })
 
   it('links errors with aria-describedby, joins messages, focuses the first invalid input and clears on edit', async () => {
@@ -209,26 +330,30 @@ describe('profile node sources, params and same-model hint (#339)', () => {
     const max = screen.getByLabelText('探索 max_tokens')
     expect(await within(screen.getByRole('group', { name: '探索' })).findByText('first；second')).toBeInTheDocument()
     await waitFor(() => expect(max).toHaveFocus())
-    const describedBy = max.getAttribute('aria-describedby') ?? ''
-    expect(document.getElementById(describedBy)?.textContent).toBe('first；second')
+    const describedText = (control: HTMLElement) => (control.getAttribute('aria-describedby') ?? '')
+      .split(/\s+/).filter(Boolean).map((id) => document.getElementById(id)?.textContent).filter(Boolean).join(' ')
+    expect(describedText(max)).toContain('first；second')
+    expect(describedText(max)).toContain('继承值：1000 · 来源：全局默认')
     const validateTemp = screen.getByLabelText('validate temperature')
-    expect(document.getElementById(validateTemp.getAttribute('aria-describedby') ?? '')?.textContent).toBe('params broken')
+    expect(describedText(validateTemp)).toContain('params broken')
+    await user.clear(max)
     await user.type(max, '1')
     expect(within(screen.getByRole('group', { name: '探索' })).queryByText('first；second')).not.toBeInTheDocument()
-    expect(max).not.toHaveAttribute('aria-describedby')
+    expect(describedText(max)).not.toContain('first；second')
+    await user.clear(validateTemp)
     await user.type(validateTemp, '1')
     expect(screen.queryByText('params broken')).not.toBeInTheDocument()
   })
 
-  it('shows the stale notice at the top of the drawer body, before the node fieldsets', async () => {
+  it('shows the stale notice after the fieldsets', async () => {
     mock((url, init) => (isPut(url, init)
       ? jsonResponse({ error: { code: 'stale_revision', message: 'revision does not match' } }, 409)
       : undefined))
     const user = await openEditor()
     await user.click(screen.getByRole('button', { name: '保存' }))
     const alert = await screen.findByText(/请刷新并重新加载/)
-    const firstGroup = screen.getByRole('group', { name: '默认' })
-    expect(alert.compareDocumentPosition(firstGroup) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    const lastGroup = screen.getByRole('group', { name: 'challenge' })
+    expect(lastGroup.compareDocumentPosition(alert) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
   it('keeps the stale notice when the reload fails and resets the form after a successful refetch', async () => {
@@ -254,18 +379,19 @@ describe('profile node sources, params and same-model hint (#339)', () => {
     revision = 4
     await user.click(screen.getByRole('button', { name: '刷新并重新加载' }))
     await waitFor(() => expect(screen.queryByText(/请刷新并重新加载/)).not.toBeInTheDocument())
-    expect(screen.getByLabelText('challenge max_tokens')).toHaveValue('777')
-    expect(screen.getByLabelText('review max_tokens')).toHaveValue('')
+    expect(screen.getByLabelText('challenge max_tokens')).toHaveValue(777)
+    expect(screen.getByLabelText('review max_tokens')).toHaveValue(null)
+    expect(screen.getByLabelText('全局默认 max_tokens')).toHaveValue(null)
     expect(screen.getByRole('button', { name: '保存' })).toBeEnabled()
   })
 
   it('does not print the raw vote identity and shows unavailable when effective params are absent', async () => {
     mock((url) => (url === '/api/v1/profiles/default'
-      ? jsonResponse({ ...detail, nodes: detail.nodes.map((item, index) => (index === 0 ? { ...item, effective_params: undefined } : item)) })
+      ? jsonResponse({ ...detail, nodes: detail.nodes.map((item) => (item.node === 'default' ? { ...item, effective_params: undefined } : item)) })
       : undefined))
     renderWithProviders(<ModelsPage />, { route: '/models' })
-    const list = await screen.findByRole('list', { name: '节点生效模型' })
-    expect(within(list).getByText(/生效参数 不可用/)).toBeInTheDocument()
+    const globalCard = await screen.findByRole('region', { name: '全局默认' })
+    expect(within(globalCard).getByText(/生效参数 不可用/)).toBeInTheDocument()
     expect(screen.queryByText(/example\.com\/m/)).not.toBeInTheDocument()
   })
 

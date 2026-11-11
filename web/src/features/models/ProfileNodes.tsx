@@ -2,7 +2,9 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { deleteProfileOverrides, putProfileOverrides } from '../../api/api'
 import { ApiError, errorMessage } from '../../api/client'
 import type { Model, ProfileDetail, ProfileNodeParams, ProfileNodeView } from '../../api/types'
-import { Badge, Button, ConfirmDialog, Drawer, Field, Select } from '../../components/ui'
+import {
+  ActionHint, Badge, Button, ConfirmDialog, Drawer, Field, FieldHint, Note, NumberField, Select,
+} from '../../components/ui'
 import ui from '../../styles/ui.module.css'
 import styles from './profile.module.css'
 
@@ -11,7 +13,7 @@ export function shortID(id: string): string {
 }
 
 export const PROFILE_NODES = [
-  ['default', '默认'],
+  ['default', '全局默认'],
   ['explore', '探索'],
   ['lanes.code_review', 'code-review'],
   ['lanes.review', 'review'],
@@ -20,9 +22,11 @@ export const PROFILE_NODES = [
   ['challenge', 'challenge'],
 ] as const
 
+const CONFIGURED_NODES = PROFILE_NODES.filter(([node]) => node !== 'default')
+
 const SOURCE_LABELS: Record<string, string> = {
   override: '覆盖',
-  override_default: '继承覆盖默认',
+  override_default: '全局默认',
   config: '配置',
   config_default: '配置默认',
   derived: '派生',
@@ -35,6 +39,13 @@ const SOURCE_TONES: Record<string, 'info' | 'warn' | 'neutral'> = {
 
 function sourceLabel(source?: string): string {
   return source ? SOURCE_LABELS[source] ?? source : '不可用'
+}
+
+// paramSourceLabel names where the effective params come from: a node or
+// default override, or the model itself when no override sets the field.
+function paramSourceLabel(source?: string): string {
+  if (!source) return '模型'
+  return source === 'override_default' ? '全局默认' : sourceLabel(source)
 }
 
 function SourceBadge({ source }: { source?: string }) {
@@ -71,10 +82,37 @@ function sameModelGroups(nodes: ProfileNodeView[]): Array<{ identity: string; no
 
 export function ProfileNodeList({ nodes, models }: { nodes: ProfileNodeView[]; models: Model[] }) {
   const groups = useMemo(() => sameModelGroups(nodes), [nodes])
+  const defaultNode = nodes.find((node) => node.node === 'default')
+  const configuredNodes = nodes.filter((node) => node.node !== 'default')
   return (
     <>
+      {defaultNode ? (
+        <section className={styles.globalDefault} aria-label="全局默认">
+          <div className={styles.nodeHead}>
+            <span className={styles.nodeName}>全局默认</span>
+            <SourceBadge source={defaultNode.source} />
+          </div>
+          <div className={styles.nodeModel}>
+            {defaultNode.model ? (
+              <>
+                <span>{modelName(models, defaultNode.model)}</span>
+                <span className="mono">{shortID(defaultNode.model)}</span>
+              </>
+            ) : <span className={styles.muted}>不可用</span>}
+          </div>
+          {defaultNode.configured && defaultNode.configured !== defaultNode.model ? (
+            <span className={styles.nodeMeta}>
+              配置值 {modelName(models, defaultNode.configured)}（{sourceLabel(defaultNode.configured_source)}）
+            </span>
+          ) : null}
+          <span className={styles.nodeMeta}>
+            生效参数 {paramsText(defaultNode.effective_params)} · 参数来源 {paramSourceLabel(defaultNode.param_source)}
+          </span>
+          <span className={styles.nodeMeta}>逐字段作用于下方节点；节点未覆盖的字段继承这里。</span>
+        </section>
+      ) : null}
       <ul className={styles.nodes} aria-label="节点生效模型">
-        {nodes.map((node) => {
+        {configuredNodes.map((node) => {
           const configuredDiffers = node.configured && node.configured !== node.model
           return (
             <li key={node.node} className={styles.node}>
@@ -97,7 +135,7 @@ export function ProfileNodeList({ nodes, models }: { nodes: ProfileNodeView[]; m
               ) : null}
               <span className={styles.nodeMeta}>
                 生效参数 {paramsText(node.effective_params)}
-                {node.param_source ? <> · 参数来源 {sourceLabel(node.param_source)}</> : null}
+                {' · '}参数来源 {paramSourceLabel(node.param_source)}
               </span>
             </li>
           )
@@ -123,10 +161,18 @@ interface NodeForm {
   thinkingType: string
 }
 
+type ParamKey = 'maxTokens' | 'temperature' | 'effort' | 'budget' | 'thinkingType'
 type FieldKey = keyof NodeForm | 'params'
 type NodeErrors = Partial<Record<FieldKey, string>>
 
 const EMPTY_FORM: NodeForm = { model: '', maxTokens: '', temperature: '', effort: '', budget: '', thinkingType: '' }
+
+interface ParamBag {
+  max_tokens?: number
+  temperature?: number | null
+  reasoning?: { effort?: string } | null
+  thinking?: { budget_tokens?: number; type?: string } | null
+}
 
 const EFFORT_OPTIONS = [
   { value: '', label: '继承' },
@@ -235,6 +281,81 @@ function mapFieldError(field: string, message: string): { node: string; key: Fie
   return undefined
 }
 
+function isDirty(form: NodeForm): boolean {
+  return Object.values(form).some(Boolean)
+}
+
+function modelText(models: Model[], id: string): string {
+  return id ? `${modelName(models, id)}（${shortID(id)}）` : '未配置'
+}
+
+function fieldValue(params: ParamBag | undefined, key: ParamKey): string {
+  switch (key) {
+    case 'maxTokens': {
+      const value = params?.max_tokens
+      return typeof value === 'number' && value > 0 ? String(value) : ''
+    }
+    case 'temperature': {
+      const value = params?.temperature
+      return typeof value === 'number' ? String(value) : ''
+    }
+    case 'effort':
+      return params?.reasoning?.effort ?? ''
+    case 'budget': {
+      const value = params?.thinking?.budget_tokens
+      return typeof value === 'number' && value > 0 ? String(value) : ''
+    }
+    case 'thinkingType':
+      return params?.thinking?.type ?? ''
+  }
+}
+
+function paramHint(value: string, source: string, overridden: boolean): string {
+  return `${overridden ? '覆盖中 · ' : ''}继承值：${value || '未设置'} · 来源：${source}`
+}
+
+function modelHint(models: Model[], id: string, source: string, overridden: boolean): string {
+  return `${overridden ? '覆盖中 · ' : ''}继承值：${modelText(models, id)} · 来源：${source}`
+}
+
+function effectiveModelID(form: NodeForm, defaultForm: NodeForm, node?: ProfileNodeView): string {
+  return form.model || defaultForm.model || node?.configured || node?.model || ''
+}
+
+// inheritedNodeParam is what a node would use after clearing its own value:
+// the global default override if it sets the field, otherwise the model.
+function inheritedNodeParam(
+  key: ParamKey,
+  form: NodeForm,
+  defaultForm: NodeForm,
+  node: ProfileNodeView | undefined,
+  models: Model[],
+): { value: string; source: '全局默认' | '模型' } {
+  if (defaultForm[key]) return { value: defaultForm[key], source: '全局默认' }
+  const model = models.find((item) => item.id === effectiveModelID(form, defaultForm, node))
+  if (model) return { value: fieldValue(model.params, key), source: '模型' }
+  if (!form[key] && node?.effective_params) return { value: fieldValue(node.effective_params, key), source: '模型' }
+  return { value: '', source: '模型' }
+}
+
+// inheritedModelParam is the model's own value for a global default field.
+function inheritedModelParam(
+  key: ParamKey,
+  form: NodeForm,
+  node: ProfileNodeView | undefined,
+  models: Model[],
+): string {
+  const model = models.find((item) => item.id === (form.model || node?.configured || node?.model || ''))
+  if (model) return fieldValue(model.params, key)
+  if (!form[key] && node?.effective_params) return fieldValue(node.effective_params, key)
+  return ''
+}
+
+function inheritedModelSource(defaultForm: NodeForm, node?: ProfileNodeView): string {
+  if (defaultForm.model) return '全局默认'
+  return sourceLabel(node?.configured_source ?? node?.source)
+}
+
 export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload }: {
   open: boolean
   detail?: ProfileDetail
@@ -272,6 +393,7 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
   }, [focusTick])
 
   const hasOverrides = Boolean(detail && Object.keys(detail.overrides ?? {}).length)
+  const nodeByName = useMemo(() => new Map((detail?.nodes ?? []).map((node) => [node.node, node])), [detail])
 
   const update = (node: string, patch: Partial<NodeForm>) => {
     setForms((current) => ({ ...current, [node]: { ...(current[node] ?? EMPTY_FORM), ...patch } }))
@@ -370,13 +492,26 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
     }
   }
 
+  const defaultForm = forms.default ?? EMPTY_FORM
+  const defaultNode = nodeByName.get('default')
+  const defaultErrors = errors.default ?? {}
+  const defaultId = `${baseId}-default`
+  const defaultDirty = isDirty(defaultForm)
+  const defaultParamsErr = defaultErrors.params ? `${defaultId}-params-error` : undefined
+  const defaultModelInherited = defaultNode?.configured || defaultNode?.model || ''
+  const defaultHintFor = (key: ParamKey) => paramHint(inheritedModelParam(key, defaultForm, defaultNode, models), '模型', Boolean(defaultForm[key]))
+  const nodeHintFor = (node: ProfileNodeView | undefined, form: NodeForm) => (key: ParamKey) => {
+    const inherited = inheritedNodeParam(key, form, defaultForm, node, models)
+    return paramHint(inherited.value, inherited.source, Boolean(form[key]))
+  }
+
   return (
     <>
     <Drawer
       open={open}
       onClose={onClose}
       title="编辑评审档位"
-      description="留空表示继承配置；保存后对之后启动的评审生效。"
+      description="全局默认作用于 6 个节点；节点留空或清除覆盖即继承全局默认，仍未设置的继承模型。保存后对之后启动的评审生效。"
       footer={(
         <>
           <Button variant="secondary" onClick={() => setConfirmReset(true)} loading={pending} disabled={!hasOverrides}>恢复为配置</Button>
@@ -386,23 +521,117 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
       )}
     >
       <div ref={bodyRef} className={styles.editor}>
-      {formError || stale ? (
-        <div className={styles.formAlert}>
-          {formError ? <span className={styles.errorText} role="alert">{formError}</span> : null}
-          {stale ? <Button variant="secondary" onClick={() => { void reload() }} loading={pending}>刷新并重新加载</Button> : null}
+      <Note tone="info">
+        全局默认逐字段作用于下方 6 个节点；节点输入下方显示继承值与来源，保存时只提交实际覆盖项。
+      </Note>
+      <fieldset className={`${styles.fieldset} ${styles.globalCard}`}>
+        <legend className={styles.legend}>全局默认</legend>
+        <Field
+          label="全局默认 模型"
+          htmlFor={`${defaultId}-model`}
+          hint={modelHint(models, defaultModelInherited, sourceLabel(defaultNode?.configured_source), Boolean(defaultForm.model))}
+          error={defaultErrors.model}
+        >
+          <Select
+            id={`${defaultId}-model`}
+            value={defaultForm.model}
+            options={[
+              { value: '', label: '继承配置' },
+              ...models.map((model) => ({
+                value: model.id,
+                label: `${model.display_name}（${shortID(model.id)}）${model.available ? '' : `不可用：${model.unavailable_reason || '未知原因'}`}`,
+                disabled: !model.available,
+              })),
+            ]}
+            onChange={(value) => update('default', { model: value })}
+            aria-invalid={defaultErrors.model ? true : undefined}
+            aria-describedby={defaultParamsErr}
+            emptyLabel="继承配置"
+          />
+        </Field>
+        <div className={styles.paramGrid}>
+          <Field label="全局默认 max_tokens" htmlFor={`${defaultId}-max`} hint={defaultHintFor('maxTokens')} error={defaultErrors.maxTokens}>
+            <NumberField
+              id={`${defaultId}-max`}
+              placeholder="继承模型"
+              value={defaultForm.maxTokens}
+              aria-invalid={defaultErrors.maxTokens ? true : undefined}
+              aria-describedby={defaultParamsErr}
+              onChange={(event) => update('default', { maxTokens: event.target.value })}
+            />
+          </Field>
+          <Field label="全局默认 temperature" htmlFor={`${defaultId}-temp`} hint={defaultHintFor('temperature')} error={defaultErrors.temperature}>
+            <NumberField
+              id={`${defaultId}-temp`}
+              step="any"
+              placeholder="继承模型"
+              value={defaultForm.temperature}
+              aria-invalid={defaultErrors.temperature ? true : undefined}
+              aria-describedby={defaultParamsErr}
+              onChange={(event) => update('default', { temperature: event.target.value })}
+            />
+          </Field>
+          <Field label="全局默认 reasoning.effort" htmlFor={`${defaultId}-effort`} hint={defaultHintFor('effort')} error={defaultErrors.effort}>
+            <Select
+              id={`${defaultId}-effort`}
+              value={defaultForm.effort}
+              options={EFFORT_OPTIONS}
+              onChange={(value) => update('default', { effort: value })}
+              aria-invalid={defaultErrors.effort ? true : undefined}
+              aria-describedby={defaultParamsErr}
+              emptyLabel="继承"
+            />
+          </Field>
+          <Field label="全局默认 thinking.budget_tokens" htmlFor={`${defaultId}-budget`} hint={defaultHintFor('budget')} error={defaultErrors.budget}>
+            <NumberField
+              id={`${defaultId}-budget`}
+              placeholder="继承模型"
+              value={defaultForm.budget}
+              aria-invalid={defaultErrors.budget ? true : undefined}
+              aria-describedby={defaultParamsErr}
+              onChange={(event) => update('default', { budget: event.target.value })}
+            />
+          </Field>
+          <Field label="全局默认 thinking.type" htmlFor={`${defaultId}-thinking-type`} hint={defaultHintFor('thinkingType')} error={defaultErrors.thinkingType}>
+            <Select
+              id={`${defaultId}-thinking-type`}
+              value={defaultForm.thinkingType}
+              options={THINKING_TYPE_OPTIONS}
+              onChange={(value) => update('default', { thinkingType: value })}
+              aria-invalid={defaultErrors.thinkingType ? true : undefined}
+              aria-describedby={defaultParamsErr}
+              emptyLabel="继承"
+            />
+          </Field>
         </div>
-      ) : null}
-      {PROFILE_NODES.map(([node, label]) => {
+        {defaultErrors.params ? <span className={styles.errorText} id={defaultParamsErr} role="alert">{defaultErrors.params}</span> : null}
+        {defaultDirty ? (
+          <div className={styles.nodeActions}>
+            <Button variant="secondary" className={ui.smallButton} onClick={() => update('default', EMPTY_FORM)}>
+              清除全局默认覆盖
+            </Button>
+          </div>
+        ) : null}
+        {defaultDirty ? <ActionHint>清除后保存，全局默认恢复为配置文件的值。</ActionHint> : null}
+        <FieldHint>留空表示继承模型；保存时只提交已填写的字段。</FieldHint>
+      </fieldset>
+      {CONFIGURED_NODES.map(([node, label]) => {
         const form = forms[node] ?? EMPTY_FORM
         const nodeErrors = errors[node] ?? {}
+        const view = nodeByName.get(node)
         const id = `${baseId}-${node}`
         const paramsErr = nodeErrors.params ? `${id}-params-error` : undefined
-        const desc = (key: FieldKey, htmlFor: string, withParams = false) => [nodeErrors[key] ? `${htmlFor}-error` : undefined, withParams ? paramsErr : undefined].filter(Boolean).join(' ') || undefined
-        const dirty = Object.values(form).some(Boolean)
+        const hintFor = nodeHintFor(view, form)
+        const dirty = isDirty(form)
         return (
           <fieldset key={node} className={styles.fieldset}>
             <legend className={styles.legend}>{label}</legend>
-            <Field label={`${label} 模型`} htmlFor={`${id}-model`} error={nodeErrors.model}>
+            <Field
+              label={`${label} 模型`}
+              htmlFor={`${id}-model`}
+              hint={modelHint(models, defaultForm.model || view?.configured || view?.model || '', inheritedModelSource(defaultForm, view), Boolean(form.model))}
+              error={nodeErrors.model}
+            >
               <Select
                 id={`${id}-model`}
                 value={form.model}
@@ -416,52 +645,83 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
                 ]}
                 onChange={(value) => update(node, { model: value })}
                 aria-invalid={nodeErrors.model ? true : undefined}
-                aria-describedby={desc('model', `${id}-model`)}
+                aria-describedby={paramsErr}
                 emptyLabel="继承"
               />
             </Field>
             <div className={styles.paramGrid}>
-              <Field label={`${label} max_tokens`} htmlFor={`${id}-max`} error={nodeErrors.maxTokens}>
-                <input id={`${id}-max`} className={ui.input} inputMode="numeric" placeholder="继承" value={form.maxTokens} aria-invalid={nodeErrors.maxTokens ? true : undefined} aria-describedby={desc('maxTokens', `${id}-max`, true)} onChange={(event) => update(node, { maxTokens: event.target.value })} />
+              <Field label={`${label} max_tokens`} htmlFor={`${id}-max`} hint={hintFor('maxTokens')} error={nodeErrors.maxTokens}>
+                <NumberField
+                  id={`${id}-max`}
+                  placeholder="继承"
+                  value={form.maxTokens}
+                  aria-invalid={nodeErrors.maxTokens ? true : undefined}
+                  aria-describedby={paramsErr}
+                  onChange={(event) => update(node, { maxTokens: event.target.value })}
+                />
               </Field>
-              <Field label={`${label} temperature`} htmlFor={`${id}-temp`} error={nodeErrors.temperature}>
-                <input id={`${id}-temp`} className={ui.input} inputMode="decimal" placeholder="继承" value={form.temperature} aria-invalid={nodeErrors.temperature ? true : undefined} aria-describedby={desc('temperature', `${id}-temp`, true)} onChange={(event) => update(node, { temperature: event.target.value })} />
+              <Field label={`${label} temperature`} htmlFor={`${id}-temp`} hint={hintFor('temperature')} error={nodeErrors.temperature}>
+                <NumberField
+                  id={`${id}-temp`}
+                  step="any"
+                  placeholder="继承"
+                  value={form.temperature}
+                  aria-invalid={nodeErrors.temperature ? true : undefined}
+                  aria-describedby={paramsErr}
+                  onChange={(event) => update(node, { temperature: event.target.value })}
+                />
               </Field>
-              <Field label={`${label} reasoning.effort`} htmlFor={`${id}-effort`} error={nodeErrors.effort}>
+              <Field label={`${label} reasoning.effort`} htmlFor={`${id}-effort`} hint={hintFor('effort')} error={nodeErrors.effort}>
                 <Select
                   id={`${id}-effort`}
                   value={form.effort}
                   options={EFFORT_OPTIONS}
                   onChange={(value) => update(node, { effort: value })}
                   aria-invalid={nodeErrors.effort ? true : undefined}
-                  aria-describedby={desc('effort', `${id}-effort`, true)}
+                  aria-describedby={paramsErr}
                   emptyLabel="继承"
                 />
               </Field>
-              <Field label={`${label} thinking.budget_tokens`} htmlFor={`${id}-budget`} error={nodeErrors.budget}>
-                <input id={`${id}-budget`} className={ui.input} inputMode="numeric" placeholder="继承" value={form.budget} aria-invalid={nodeErrors.budget ? true : undefined} aria-describedby={desc('budget', `${id}-budget`, true)} onChange={(event) => update(node, { budget: event.target.value })} />
+              <Field label={`${label} thinking.budget_tokens`} htmlFor={`${id}-budget`} hint={hintFor('budget')} error={nodeErrors.budget}>
+                <NumberField
+                  id={`${id}-budget`}
+                  placeholder="继承"
+                  value={form.budget}
+                  aria-invalid={nodeErrors.budget ? true : undefined}
+                  aria-describedby={paramsErr}
+                  onChange={(event) => update(node, { budget: event.target.value })}
+                />
               </Field>
-              <Field label={`${label} thinking.type`} htmlFor={`${id}-thinking-type`} error={nodeErrors.thinkingType}>
+              <Field label={`${label} thinking.type`} htmlFor={`${id}-thinking-type`} hint={hintFor('thinkingType')} error={nodeErrors.thinkingType}>
                 <Select
                   id={`${id}-thinking-type`}
                   value={form.thinkingType}
                   options={THINKING_TYPE_OPTIONS}
                   onChange={(value) => update(node, { thinkingType: value })}
                   aria-invalid={nodeErrors.thinkingType ? true : undefined}
-                  aria-describedby={desc('thinkingType', `${id}-thinking-type`, true)}
+                  aria-describedby={paramsErr}
                   emptyLabel="继承"
                 />
               </Field>
             </div>
             {nodeErrors.params ? <span className={styles.errorText} id={paramsErr} role="alert">{nodeErrors.params}</span> : null}
             {dirty ? (
-              <Button variant="secondary" className={ui.smallButton} onClick={() => update(node, EMPTY_FORM)}>
-                {`清除${label}覆盖`}
-              </Button>
+              <div className={styles.nodeActions}>
+                <Button variant="secondary" className={ui.smallButton} onClick={() => update(node, EMPTY_FORM)}>
+                  {`清除${label}覆盖`}
+                </Button>
+              </div>
             ) : null}
+            {dirty ? <ActionHint>清除后保存，该节点恢复继承。</ActionHint> : null}
           </fieldset>
         )
       })}
+      {formError || stale ? (
+        <div className={styles.formAlert}>
+          {formError ? <Note tone="danger" role="alert">{formError}</Note> : null}
+          {stale ? <Button variant="secondary" onClick={() => { void reload() }} loading={pending}>刷新并重新加载</Button> : null}
+        </div>
+      ) : null}
       </div>
     </Drawer>
     <ConfirmDialog
@@ -469,7 +729,7 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
       onClose={() => setConfirmReset(false)}
       onConfirm={() => { setConfirmReset(false); void reset() }}
       title="恢复为配置"
-      description="将清除所有节点的模型和参数覆盖，恢复为配置文件的值；对之后启动的评审生效。"
+      description="将清除全局默认与 6 个节点的全部覆盖，恢复为配置文件的值；对之后启动的评审生效。"
       confirmLabel="恢复为配置"
     />
     </>
