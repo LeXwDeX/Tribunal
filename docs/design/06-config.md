@@ -97,6 +97,19 @@ providers:
     thinking: { type: disabled }    # 可选；enabled | disabled，仅 openai-chat
     preserve_reasoning_content: false  # 可选；true 时提取并回放 reasoning_content，仅 openai-chat
     strict_role_alternation: false  # 仅 openai-chat；网关要求角色严格交替时设为 true，见下文
+  # DeepSeek 最大能力示例（2026-11-11 按官方模型表核对，见下）。仅用于
+  # DeepSeek，不要把这些数值照抄到其他供应方。
+  deepseek-v4-pro:
+    protocol: openai-chat
+    base_url: "https://api.deepseek.com"
+    model: "deepseek-v4-pro"
+    api_key_env: DEEPSEEK_API_KEY
+    max_concurrency: 500            # 官方账号并发上限，不是本地目标值
+    max_tokens: 393216              # 官方最大输出；省略该字段不等于最大输出
+    context_window: 655360          # 1,048,576 上下文减去 393,216 输出预留
+    reasoning: { effort: max }      # low | high | max；上游默认 high
+    forced_tool_choice: unsupported # thinking + tools 下上游拒绝强制工具选择
+    preserve_reasoning_content: true  # thinking + tools 必须回传 reasoning_content
 
 profiles:
   default:                          # 唯一的评审档位，字段见下文「评审档位」
@@ -316,6 +329,8 @@ Tribunal 只有一个评审档位 `default`，评审图固定：`explore` → �
 ### 多 Provider 与档位引用
 
 `providers` 的键是 provider 别名。每个别名绑定一个 `protocol`、`base_url`、`model` 和一个 `api_key_env`；`api_key_env` 只保存**变量名**，密钥值由部署环境注入，不写进 YAML、命令、日志或接口响应。同一个供应方的两个模型需要两个别名，例如 `primary` 和 `secondary`，即使二者共用 `base_url` 和密钥变量：一个别名只有一个 `model`。
+
+上面的 `deepseek-v4-pro` 是 DeepSeek 最大能力示例，数值于 2026-11-11 按官方模型表核对（[api-docs.deepseek.com/quick_start/pricing](https://api-docs.deepseek.com/quick_start/pricing)），只适用于 DeepSeek；`config/server.example.yaml` 与 `config/server.docker.yaml` 以注释形式给出同一组值，`internal/config/testdata/deepseek-preset.yaml` 用 `Load+Validate` 证明这些文档值可解析。`deepseek-flash` 的配置相同，仅 `model` 与 `max_concurrency`（2500）不同。官方能力为：两模型上下文 1,048,576、最大输出 393,216、effort 支持 `low`/`high`/`max`（默认 `high`）、账号并发上限 2500/500、KV 缓存自动；Chat Completions 的 `max_tokens` 默认值不是最大输出（非 thinking 8K、thinking 64K、`effort=max` 128K），省略该字段不会得到 393,216。这里的 `context_window: 655360` 是可用于输入的预算：1,048,576 总上下文减去 393,216 最大输出。存量用户模型当前可通过 `POST /api/v1/models/{id}/preset` 显式应用同名预设（控制台入口见 [#406](https://github.com/LeXwDeX/Tribunal/issues/406)），见 [HTTP API · 模型预设](03-http-api.md#模型预设405) 和 [部署与运维 · DeepSeek 最大能力预设](../operations.md#deepseek-最大能力预设)。
 
 Docker Compose 默认只启用 `primary`。`config/server.docker.yaml` 另有一个注释掉的 `secondary` 示例，四个值分别来自 `LLM_SECONDARY_PROTOCOL`、`LLM_SECONDARY_BASE_URL`、`LLM_SECONDARY_MODEL` 和 `LLM_SECONDARY_API_KEY`。`compose.yaml` 的 `environment` 已允许这四个变量，但 `.env` 只用于 Compose 插值，不会自动注入容器；未列在 `environment` 中的变量容器看不到。若新增第三个 provider 并使用新变量名，须在 `compose.override.yaml` 的 `services.review.environment` 中逐一透传它引用的变量；只透传 key 会使未透传的 protocol 和 model 为空，导致启动失败。`base_url` 可为空以使用协议适配器默认地址；复用容器已有变量时不需要重复透传。
 
