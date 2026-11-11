@@ -5,8 +5,8 @@ import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {
-  Checkbox, DatePicker, Disclosure, Field, NumberField, SearchField, Select, Textarea, Tooltip, computeTooltipPosition,
-  formatLocalDate, parseLocalDate, type DatePickerProps, type SelectOption,
+  Checkbox, DatePicker, Dialog, Disclosure, Field, NumberField, SearchField, Select, Textarea, Tooltip,
+  computeTooltipPosition, formatLocalDate, parseLocalDate, type DatePickerProps, type SelectOption,
 } from '../src/components/ui'
 import ui from '../src/styles/ui.module.css'
 
@@ -529,6 +529,154 @@ describe('DatePicker', () => {
     expect(committedDate()).toBeEmptyDOMElement()
     expect(onChange).toHaveBeenLastCalledWith('')
     expect(screen.queryByRole('dialog', { name: '选择日期' })).not.toBeInTheDocument()
+  })
+
+  it('keeps the calendar open when a click lands on non-focusable popover areas', async () => {
+    const user = userEvent.setup()
+    render(<DateHarness initial="2026-10-15" />)
+    await user.click(screen.getByRole('button', { name: '打开日历' }))
+    const calendar = screen.getByRole('dialog', { name: '选择日期' })
+    const day = screen.getByRole('button', { name: '2026年10月15日' })
+    expect(day).toHaveFocus()
+
+    // Month title, weekday row and padding are not focusable: the browser moves
+    // focus to <body>, which must not count as leaving the field.
+    await user.click(screen.getByText('2026年10月'))
+    expect(calendar).toBeInTheDocument()
+
+    day.focus()
+    await user.click(within(calendar).getByText('一'))
+    expect(calendar).toBeInTheDocument()
+
+    day.focus()
+    await user.click(calendar)
+    expect(calendar).toBeInTheDocument()
+  })
+
+  it('closes when focus leaves the field and the popover', async () => {
+    const user = userEvent.setup()
+    render(
+      <>
+        <DateHarness initial="2026-10-15" />
+        <button type="button">下一步</button>
+      </>,
+    )
+    await user.click(screen.getByRole('button', { name: '打开日历' }))
+    expect(screen.getByRole('dialog', { name: '选择日期' })).toBeInTheDocument()
+
+    await user.click(screen.getByText('2026年10月'))
+    expect(screen.getByRole('dialog', { name: '选择日期' })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '下一步' }))
+    expect(screen.queryByRole('dialog', { name: '选择日期' })).not.toBeInTheDocument()
+  })
+
+  it('moves focus out of the calendar before disabling unmounts it', async () => {
+    function DisabledWhileOpenHarness() {
+      const [disabled, setDisabled] = useState(false)
+      const [value, setValue] = useState('2026-10-15')
+      return (
+        <>
+          <Field label="开始日期" htmlFor="from">
+            <DatePicker id="from" value={value} onChange={setValue} disabled={disabled} />
+          </Field>
+          <button type="button" onClick={() => setDisabled(true)}>禁用日期</button>
+        </>
+      )
+    }
+    const user = userEvent.setup()
+    render(<DisabledWhileOpenHarness />)
+    await user.click(screen.getByRole('button', { name: '打开日历' }))
+    expect(screen.getByRole('button', { name: '2026年10月15日' })).toHaveFocus()
+
+    // fireEvent does not focus the trigger, so the focused day is the only
+    // element holding focus when the calendar unmounts.
+    fireEvent.click(screen.getByRole('button', { name: '禁用日期' }))
+    expect(screen.queryByRole('dialog', { name: '选择日期' })).not.toBeInTheDocument()
+    const input = screen.getByLabelText('开始日期')
+    expect(input).toBeDisabled()
+    // A disabled input cannot take focus; keep focus on the field wrapper so it
+    // never falls back to <body>.
+    const field = input.parentElement?.parentElement
+    expect(field).not.toBeNull()
+    expect(document.activeElement).not.toBe(document.body)
+    expect(field?.contains(document.activeElement)).toBe(true)
+  })
+
+  it('keeps the calendar inside a very short viewport with a usable height', async () => {
+    const originalHeight = window.innerHeight
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 300 })
+    const user = userEvent.setup()
+    render(<DateHarness initial="2026-10-15" />)
+    const input = screen.getByLabelText('开始日期')
+    const rectSpy = vi.spyOn(input, 'getBoundingClientRect').mockReturnValue({
+      x: 20, y: 140, top: 140, bottom: 160, left: 20, right: 220, width: 200, height: 20,
+      toJSON: () => ({}),
+    })
+    try {
+      await user.click(screen.getByRole('button', { name: '打开日历' }))
+      const calendar = screen.getByRole('dialog', { name: '选择日期' })
+      const maxHeight = Number.parseFloat(calendar.style.maxHeight)
+      const top = Number.parseFloat(calendar.style.top)
+      expect(maxHeight).toBeGreaterThanOrEqual(180)
+      expect(top).toBeGreaterThanOrEqual(8)
+      expect(top + maxHeight).toBeLessThanOrEqual(292)
+      expect(getComputedStyle(calendar).overflowY).toBe('auto')
+    } finally {
+      rectSpy.mockRestore()
+      Object.defineProperty(window, 'innerHeight', { configurable: true, value: originalHeight })
+    }
+  })
+})
+
+function DatePickerInDialogHarness() {
+  const [value, setValue] = useState('2026-10-15')
+  return (
+    <Dialog open onClose={() => {}} title="评审时间">
+      <Field label="开始日期" htmlFor="from">
+        <DatePicker id="from" value={value} onChange={setValue} />
+      </Field>
+    </Dialog>
+  )
+}
+
+describe('DatePicker in a modal', () => {
+  it('portals the calendar into the modal and keeps Tab off the dialog close button', async () => {
+    const user = userEvent.setup()
+    render(<DatePickerInDialogHarness />)
+    const modal = screen.getByRole('dialog', { name: '评审时间' })
+    const closeButton = screen.getByRole('button', { name: '关闭对话框' })
+    const input = screen.getByLabelText('开始日期')
+
+    await user.click(screen.getByRole('button', { name: '打开日历' }))
+    const calendar = screen.getByRole('dialog', { name: '选择日期' })
+    expect(modal.contains(calendar)).toBe(true)
+    expect(calendar.closest('[aria-modal="true"]')).toBe(modal)
+    expect(screen.getByRole('button', { name: '2026年10月15日' })).toHaveFocus()
+
+    await user.click(screen.getByRole('button', { name: '下个月' }))
+    expect(screen.getByRole('button', { name: '下个月' })).toHaveFocus()
+
+    await user.tab()
+    expect(screen.queryByRole('dialog', { name: '选择日期' })).not.toBeInTheDocument()
+    expect(input).toHaveFocus()
+    expect(closeButton).not.toHaveFocus()
+  })
+
+  it('returns focus to the field for Shift+Tab from a month button', async () => {
+    const user = userEvent.setup()
+    render(<DatePickerInDialogHarness />)
+    const closeButton = screen.getByRole('button', { name: '关闭对话框' })
+    const input = screen.getByLabelText('开始日期')
+
+    await user.click(screen.getByRole('button', { name: '打开日历' }))
+    await user.click(screen.getByRole('button', { name: '上个月' }))
+    expect(screen.getByRole('button', { name: '上个月' })).toHaveFocus()
+
+    await user.tab({ shift: true })
+    expect(screen.queryByRole('dialog', { name: '选择日期' })).not.toBeInTheDocument()
+    expect(input).toHaveFocus()
+    expect(closeButton).not.toHaveFocus()
   })
 })
 
