@@ -76,54 +76,94 @@ type State struct {
 // LoadSnapshot merges the built-in defaults, the base files in order, and an
 // optional overlay, then records per-key origins. An empty overlayPath disables
 // the overlay. A configured but missing overlay is treated as an empty
-// document; other overlay read errors fail the load.
+// document; other overlay read errors fail the load. Base files are read first
+// so a missing base is reported before an overlay problem.
 func LoadSnapshot(basePaths []string, overlayPath string) (*Snapshot, error) {
+	baseSources, baseRevisions, err := readBaseSources(basePaths)
+	if err != nil {
+		return nil, err
+	}
+	overlay, err := readOverlaySource(overlayPath)
+	if err != nil {
+		return nil, err
+	}
+	return buildSnapshot(baseSources, baseRevisions, overlay)
+}
+
+// readOverlaySource reads and pre-validates the optional overlay. The returned
+// source keeps the document exactly as written.
+func readOverlaySource(overlayPath string) (*Source, error) {
+	if overlayPath == "" {
+		return nil, nil
+	}
+	root, revision, missing, err := loadOverlayFile(overlayPath)
+	if err != nil {
+		return nil, err
+	}
+	if root != nil {
+		// Reject overlay-only structural problems with the source name before
+		// merging. Expand a copy first so typed fields may still use ${ENV};
+		// type errors survive merging because the overlay is the highest layer,
+		// so reporting them here is accurate.
+		checkRoot := cloneNode(root)
+		var envErrs []error
+		expandEnv(checkRoot, &envErrs)
+		if len(envErrs) > 0 {
+			return nil, fmt.Errorf("config %s: %w", overlayPath, errors.Join(envErrs...))
+		}
+		if err := decodeStrict(checkRoot, &Config{}); err != nil {
+			return nil, fmt.Errorf("config %s: %w", overlayPath, err)
+		}
+	}
+	return &Source{Origin: OriginOverlay, Path: overlayPath, Revision: revision, Root: root, Missing: missing}, nil
+}
+
+// readBaseSources parses the required --config files in load order.
+func readBaseSources(basePaths []string) ([]Source, []string, error) {
+	sources := make([]Source, 0, len(basePaths))
+	revisions := make([]string, 0, len(basePaths))
+	for _, path := range basePaths {
+		root, revision, err := loadSourceFile(path)
+		if err != nil {
+			return nil, nil, err
+		}
+		sources = append(sources, Source{Origin: OriginBase, Path: path, Revision: revision, Root: root})
+		revisions = append(revisions, revision)
+	}
+	return sources, revisions, nil
+}
+
+// loadSnapshot merges the defaults and the base files with a parsed overlay
+// source. The overlay tree is cloned before expansion, so callers may reuse it.
+func loadSnapshot(basePaths []string, overlay *Source) (*Snapshot, error) {
+	baseSources, baseRevisions, err := readBaseSources(basePaths)
+	if err != nil {
+		return nil, err
+	}
+	return buildSnapshot(baseSources, baseRevisions, overlay)
+}
+
+// buildSnapshot merges the defaults, base sources and a parsed overlay source.
+func buildSnapshot(baseSources []Source, baseRevisions []string, overlay *Source) (*Snapshot, error) {
 	defaultRoot, err := parseYAML([]byte(defaultConfigYAML), "<defaults>")
 	if err != nil {
 		return nil, err
 	}
 
 	layers := []originLayer{{origin: OriginDefault, paths: collectPaths(defaultRoot)}}
-	sources := make([]Source, 0, len(basePaths)+1)
-	baseRevisions := make([]string, 0, len(basePaths))
-	for _, path := range basePaths {
-		root, revision, err := loadSourceFile(path)
-		if err != nil {
-			return nil, err
-		}
-		sources = append(sources, Source{Origin: OriginBase, Path: path, Revision: revision, Root: root})
-		layers = append(layers, originLayer{origin: OriginBase, paths: collectPaths(root)})
-		baseRevisions = append(baseRevisions, revision)
+	sources := make([]Source, 0, len(baseSources)+1)
+	for _, source := range baseSources {
+		sources = append(sources, source)
+		layers = append(layers, originLayer{origin: OriginBase, paths: collectPaths(source.Root)})
 	}
 
 	overlayRevision := ""
 	overlayPresent := false
-	if overlayPath != "" {
-		root, revision, missing, err := loadOverlayFile(overlayPath)
-		if err != nil {
-			return nil, err
-		}
-		overlayPresent = !missing
-		overlayRevision = revision
-		if root != nil {
-			// Reject overlay-only structural problems with the source name
-			// before merging. Expand a copy first so typed fields may still use
-			// ${ENV}; type errors survive merging because the overlay is the
-			// highest layer, so reporting them here is accurate.
-			checkRoot := cloneNode(root)
-			var envErrs []error
-			expandEnv(checkRoot, &envErrs)
-			if len(envErrs) > 0 {
-				return nil, fmt.Errorf("config %s: %w", overlayPath, errors.Join(envErrs...))
-			}
-			if err := decodeStrict(checkRoot, &Config{}); err != nil {
-				return nil, fmt.Errorf("config %s: %w", overlayPath, err)
-			}
-		}
-		sources = append(sources, Source{
-			Origin: OriginOverlay, Path: overlayPath, Revision: revision, Root: root, Missing: missing,
-		})
-		layers = append(layers, originLayer{origin: OriginOverlay, paths: collectPaths(root)})
+	if overlay != nil {
+		overlayPresent = !overlay.Missing
+		overlayRevision = overlay.Revision
+		sources = append(sources, *overlay)
+		layers = append(layers, originLayer{origin: OriginOverlay, paths: collectPaths(overlay.Root)})
 	}
 
 	merged := cloneNode(defaultRoot)

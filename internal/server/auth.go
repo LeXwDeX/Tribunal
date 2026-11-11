@@ -236,6 +236,9 @@ type principal struct {
 	csrf      string
 	sessionID string
 	bearer    bool
+	// bootstrapBearer marks the static bootstrap token from the environment.
+	// It is platform administration only and cannot write configuration.
+	bootstrapBearer bool
 }
 
 const principalKey contextKey = requestIDKey + 1
@@ -692,8 +695,9 @@ func (s *Server) authenticate(r *http.Request) (principal, bool) {
 	if strings.TrimSpace(r.Header.Get("Authorization")) != "" {
 		if s.authorized(r) {
 			return principal{
-				user:   sessionUser{Username: "api", Name: "API client", Role: roleAdmin},
-				bearer: true,
+				user:            sessionUser{Username: "api", Name: "API client", Role: roleAdmin},
+				bearer:          true,
+				bootstrapBearer: true,
 			}, true
 		}
 		raw := bearerValue(r)

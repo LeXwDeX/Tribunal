@@ -271,6 +271,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		Access:           db,
 		Platform:         cfg,
 		FileConfig:       &config.State{Snapshot: snapshot, UpdatedAt: time.Now()},
+		OverlayWriter: config.NewOverlayWriter(config.OverlayWriterOptions{
+			BasePaths:   opts.configs,
+			OverlayPath: opts.overlay,
+		}),
 		LockStats: func() server.LockStats {
 			dbStats := db.DBStats()
 			wsStats := runtime.WorkspaceManager().LockStats()

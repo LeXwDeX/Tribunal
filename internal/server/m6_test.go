@@ -918,6 +918,10 @@ type m6Options struct {
 	// profileOverrides wires the sqlite store as the profile override store.
 	profileOverrides bool
 	models           *llm.Catalog
+	// overlayWriter wires console overlay writes.
+	overlayWriter *config.OverlayWriter
+	// logWriter captures structured logs; nil discards them.
+	logWriter io.Writer
 }
 
 func newM6Env(t *testing.T, opts m6Options) *m6Env {
@@ -947,6 +951,10 @@ func newM6Env(t *testing.T, opts m6Options) *m6Env {
 		streamPoll = 10 * time.Millisecond
 	}
 	gitlab := newFakeGitLab(t)
+	logWriter := opts.logWriter
+	if logWriter == nil {
+		logWriter = io.Discard
+	}
 	admin := opts.admin
 	if admin == nil && opts.adminFactory != nil {
 		admin = opts.adminFactory(st)
@@ -989,19 +997,20 @@ func newM6Env(t *testing.T, opts m6Options) *m6Env {
 			HTTPClient:      gitlab.Client(),
 			Now:             time.Now,
 		},
-		Store:      view,
-		Access:     st,
-		Reviews:    reviews,
-		Workspace:  workspace,
-		Contexts:   contexts,
-		Extensions: extensions,
-		MCP:        mcp,
-		LLM:        llm,
-		Tokens:     st,
-		Platform:   platform,
-		Models:     opts.models,
-		StreamPoll: streamPoll,
-		Logger:     newTestLogger(io.Discard),
+		Store:         view,
+		Access:        st,
+		Reviews:       reviews,
+		Workspace:     workspace,
+		Contexts:      contexts,
+		Extensions:    extensions,
+		MCP:           mcp,
+		LLM:           llm,
+		Tokens:        st,
+		Platform:      platform,
+		Models:        opts.models,
+		OverlayWriter: opts.overlayWriter,
+		StreamPoll:    streamPoll,
+		Logger:        newTestLogger(logWriter),
 	})
 	if err != nil {
 		t.Fatalf("server.New: %v", err)
