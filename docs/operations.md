@@ -618,7 +618,7 @@ GitLab 会以发评论的账号执行评论中首字节为 `/` 的行（如 `/cl
 
 - **查看和测试**：控制台「扩展」页列出 `codebase-memory`；「测试并列出工具」返回的列表不含 `index_repository`、`delete_project`、`ingest_traces`、`manage_adr`。
 - **内置标识**：它带「内置」标签，始终启用，不能停用或删除。名称和配置随平台版本走，不能在控制台编辑；禁用、删除、改名、改配置都返回 409。
-- **禁用**：已有自定义 MCP 可在编辑窗口把「启用」改为「停用」，或 `PUT /api/v1/mcp-servers/{id}` 设置 `"enabled": false`，然后重启服务。重启和升级都保持停用。内置 `codebase-memory` 始终启用，停用请求返回 409；启动同步会把历史停用状态恢复为启用。
+- **禁用**：已有自定义 MCP 可在编辑窗口把「启用」改为「停用」，或 `PUT /api/v1/mcp-servers/{id}` 设置 `"enabled": false`；保存后立即对本进程的下一次评审生效，无需重启。重启和升级都保持停用。内置 `codebase-memory` 始终启用，停用请求返回 409；启动同步会把历史停用状态恢复为启用。
 - **故障表现**：二进制缺失或无法启动时评审照常完成，但没有图谱工具；评审结论里出现 `MCP tools unavailable` 告警，原本会 PASS 的评审显示为 INCOMPLETE（`explore`、`code-review`、`review`、`reasoner`、`validate` 绑定的工具缺失都会记为 `tool_gaps`）。非取消的建索引失败不阻断 onboarding 或刷新；其他必要步骤及状态保存成功时工作区最终为 `ready`，`last_error` 为固定消息 `index: code graph indexing failed`，刷新保留旧 `index_sha`。ignore 阻断索引时 `index_status` 为 `degraded`；其他情况下比较已存的 SHA，不代表当前索引健康。
 - **验证记录**：2026-11-02 在 Docker 部署环境用 `9c3b4e2` 镜像验证：容器内 `codebase-memory-mcp --version` 为 `0.12.1`；`POST /api/v1/mcp-servers/{id}/test` 返回 13 个只读工具；真实 MR 评审完成并发布 summary。该项目使用非空 ignore policy，因此评审未注入 MCP 工具，符合上文的预期安全降级。
 - **排查信息**：索引失败告警 `code graph index failed; continuing without it` 和一般工作区失败告警 `workspace operation failed` 含 `project_id` 与 `error_class`；工作区/onboarding 类别包括模型 provider 侧的 `upstream_auth`、`rate_limited`、`network`、`config`、`overloaded`、`context_too_long`，GitLab/git 侧的 `gitlab_auth`、`gitlab_forbidden`、`gitlab_not_found`、`gitlab_rate_limited`、`gitlab_unavailable`、`gitlab_rejected`、`gitlab_project_changed`、`git_auth`、`git_forbidden`、`git_repository_not_found`、`git_ref_not_found`、`git_network`、`git_failed`，以及 `timeout`、`canceled`、`panic`、`internal`；未知类别归为 `internal`，GitLab 或模型 provider 有 HTTP 响应时另带脱敏的 `upstream_status`，各类别含义和处理见第 10 节。 节点失败事件优先使用执行器提供的固定类别（如 `auth`、`rate_limited`、`sandbox_denied`、`panic`），没有分类时仍是 `executor_error`、`timeout` 或 `expand_failed`；`panic` 不记录 panic 值。这些日志和工作区 API 不提供原始原因；按项目 ID 在受控环境中检查索引配置、可执行文件和运行环境。旧数据库和备份可能仍含错误原文，读取接口不会清除它们；应限制数据库和备份访问，回退旧版可能重新暴露原文。
@@ -1053,7 +1053,7 @@ v1.2.0 新增迁移 `0020_review_command_replay`。`0020` 新建已受理身份�
 2. 按第 7 节核对生效路径与全部挂载，停止旧服务并备份、核验数据库和所有工作区，另存实际挂载配置、秘密和镜像 digest。只有符合默认布局前提时才能使用 [Compose](#compose-停机备份)或[独立容器](#单独-docker-run-停机备份)示例；在启动新镜像前保持旧服务停止。镜像升级不会改写宿主机配置文件：Compose 默认挂载宿主机 `config/server.docker.yaml`，自定义部署也可能挂载旧的 `server.yaml`。升级到 v1.2.0 时，另按 [默认扩展授权迁移](#默认扩展授权迁移) 核对并更新 `default_extensions`，保留管理员自定义项。
 3. 隔离验证并获得部署授权后，拉取并启动新镜像，继续使用原来的全部数据挂载、同一 `REVIEW_MASTER_KEY` 和真实配置。
 4. 等待 `/readyz` 返回 200，检查日志和关键功能。
-5. 在控制台“扩展 → 块绑定”核对实际授予是否与生效配置一致；管理员改过或解绑的绑定保留，控制台以实际绑定为准。文件声明生效后，块绑定 API 不返回它的数据库行；控制台可能显示为空绑定，不要为消除空行而重新保存。包含 #160 的版本起，保存前先刷新控制台并加载完整列表，PUT 必须带 `expected_revision`；脚本按 [块绑定写入版本校验迁移](#块绑定写入版本校验迁移v120) 更新。修改配置或绑定后用 `docker compose up -d --force-recreate --wait --wait-timeout 120` 重启再核对。
+5. 在控制台“扩展 → 块绑定”核对实际授予是否与生效配置一致；管理员改过或解绑的绑定保留，控制台以实际绑定为准。文件声明生效后，块绑定 API 不返回它的数据库行；控制台可能显示为空绑定，不要为消除空行而重新保存。包含 #160 的版本起，保存前先刷新控制台并加载完整列表，PUT 必须带 `expected_revision`；脚本按 [块绑定写入版本校验迁移](#块绑定写入版本校验迁移v120) 更新。修改挂载配置文件后用 `docker compose up -d --force-recreate --wait --wait-timeout 120` 重启再核对；数据库中的绑定写操作本身在保存后立即生效，但本节的升级流程仍按配置变更重启一次。
 
 回滚步骤：
 
@@ -1106,11 +1106,11 @@ v1.2.0 起，所有 `PUT /api/v1/block-bindings/{block}` 必须带 `expected_rev
 2. 核对实际挂载的配置文件及其来源。Compose 默认读取宿主机 `config/server.docker.yaml`；自定义部署可能是 `server.yaml`。使用实际挂载的文件，不要只看仓库示例。
 3. 对照实际配置、仓库内 `config/server.docker.yaml` 和 `config/server.example.yaml` 的 `default_extensions`，按需更新工具矩阵。保留管理员添加的 MCP 服务器、Skill 和自定义授权项；不要用示例整段覆盖生产配置。
 4. 若继续使用顶层 `blocks` 声明块，确认文件内容是完整绑定。文件声明会跳过该块的默认授权，所以文件里必须同时写出需要的默认工具和要保留的自建授权。MCP 工具名带 `mcp__<server>__<tool>` 前缀。
-5. 启动新镜像后，在控制台“扩展 → 块绑定”的平台范围核对：未由文件 `blocks` 接管、且未被管理员改过的块应与生效配置的矩阵一致；管理员改过或解绑的绑定保留，控制台以实际绑定为准。文件声明块由配置文件直接提供，块绑定 API 不返回它的数据库行，控制台可能显示为空绑定，不能把空行当作失败，也不要保存空绑定。修改配置或绑定后执行 `docker compose up -d --force-recreate --wait --wait-timeout 120`，再核对一次。`restart` 不会加载新的容器环境变量；已挂载的配置文件会重新读取，但不能替代环境变量或 Compose 层配置变更。
+5. 启动新镜像后，在控制台“扩展 → 块绑定”的平台范围核对：未由文件 `blocks` 接管、且未被管理员改过的块应与生效配置的矩阵一致；管理员改过或解绑的绑定保留，控制台以实际绑定为准。文件声明块由配置文件直接提供，块绑定 API 不返回它的数据库行，控制台可能显示为空绑定，不能把空行当作失败，也不要保存空绑定。修改挂载配置文件后执行 `docker compose up -d --force-recreate --wait --wait-timeout 120`，再核对一次；数据库中的绑定写操作保存后立即生效，但配置文件变更仍需重启。`restart` 不会加载新的容器环境变量；已挂载的配置文件会重新读取，但不能替代环境变量或 Compose 层配置变更。
 
 #### 从数据库绑定迁移到文件声明
 
-只有需要让文件 `blocks` 接管某个块时执行本节。只想让新默认生效、继续由控制台管理绑定时，不写文件 `blocks`，直接按需调整绑定或执行恢复默认并重启。
+只有需要让文件 `blocks` 接管某个块时执行本节。只想让新默认生效、继续由控制台管理绑定时，不写文件 `blocks`，直接按需调整绑定或执行恢复默认；保存或恢复后立即生效，无需重启。
 
 前置条件：已完成上面的备份和配置核对；能访问平台管理员账号；不要直接修改或删除数据库中的绑定行。
 
@@ -1132,7 +1132,7 @@ v1.2.0 起，所有 `PUT /api/v1/block-bindings/{block}` 必须带 `expected_rev
 
 3. **清除数据库绑定中的自建授权。** 在控制台“扩展 → 块绑定”选择平台范围，取消勾选该块的自建 MCP 工具和 Skill，保存。也可以对 `PUT /api/v1/block-bindings/{block}` 提交完整 `mcp_tools` 和 `skills` 数组。不要用 SQL 删除行或改 `extension_defaults` 台账；没有删除绑定的 API，清除授权就是保存去掉这些条目的完整绑定。
 
-4. **对该块执行恢复默认。** 在“块绑定”里点该块的“恢复默认”，先看预览再确认。恢复只处理平台级绑定，会移除已登记内置扩展在该块的授权，保留自建扩展授权，并重建默认授权台账。移除项应只涉及已登记的内置扩展（当前为 `codebase-memory` 和内置 Skill）；如果预览要移除其他服务器或 Skill 的授权，停止操作，核对台账和绑定来源。`restart_required` 为 true 是预期。
+4. **对该块执行恢复默认。** 在“块绑定”里点该块的“恢复默认”，先看预览再确认。恢复只处理平台级绑定，会移除已登记内置扩展在该块的授权，保留自建扩展授权，并重建默认授权台账。移除项应只涉及已登记的内置扩展（当前为 `codebase-memory` 和内置 Skill）；如果预览要移除其他服务器或 Skill 的授权，停止操作，核对台账和绑定来源。`restart_required` 为 `false`，恢复后的绑定在下一次评审解析时生效，无需重启。
 
 5. **启用草稿中的文件声明并重启。** 把第 1 步草稿中的完整 `blocks` 条目写入实际挂载配置，执行 `docker compose up -d --force-recreate --wait --wait-timeout 120`。启动日志应出现 `file configuration replaces default block binding`，表示纯默认行已释放，文件绑定生效。
 

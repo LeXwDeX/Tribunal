@@ -193,20 +193,29 @@ type ExtensionServiceConfig struct {
 	// it to rebuild the shipped defaults; it never re-reads the configuration
 	// files.
 	Platform *config.Config
+	// InvalidateProject drops the cached runtime inputs of one project after a
+	// successful project-scope write. The runtime wires it to the project
+	// extension resolver; nil leaves the cache untouched.
+	InvalidateProject func(projectID int64)
+	// InvalidateAll drops every project's cached runtime inputs after a
+	// successful platform-scope write. nil leaves the cache untouched.
+	InvalidateAll func()
 }
 
 // ExtensionService persists MCP servers, skills and block bindings, tests MCP
 // connections, and probes configured providers.
 type ExtensionService struct {
-	store      *sqlite.Store
-	mcp        *mcp.Manager
-	clients    review.ClientProvider
-	workspace  string
-	workspaces *workspace.Manager
-	deniedEnv  []string
-	logger     *slog.Logger
-	now        func() time.Time
-	newMCPTest func(mcp.Options) (mcpTestSession, error)
+	store             *sqlite.Store
+	mcp               *mcp.Manager
+	clients           review.ClientProvider
+	workspace         string
+	workspaces        *workspace.Manager
+	deniedEnv         []string
+	logger            *slog.Logger
+	now               func() time.Time
+	newMCPTest        func(mcp.Options) (mcpTestSession, error)
+	invalidateProject func(int64)
+	invalidateAll     func()
 
 	platform    *config.Config
 	restoreOnce sync.Once
@@ -238,17 +247,34 @@ func NewExtensionService(cfg ExtensionServiceConfig) (*ExtensionService, error) 
 		return nil, errors.New("app: extension workspace must not be a filesystem root")
 	}
 	return &ExtensionService{
-		store:      cfg.Store,
-		mcp:        cfg.MCP,
-		clients:    cfg.Clients,
-		workspace:  root,
-		workspaces: cfg.Workspace,
-		deniedEnv:  append([]string(nil), cfg.DeniedEnv...),
-		logger:     logger,
-		now:        now,
-		platform:   cfg.Platform,
-		newMCPTest: func(opts mcp.Options) (mcpTestSession, error) { return mcp.New(opts) },
+		store:             cfg.Store,
+		mcp:               cfg.MCP,
+		clients:           cfg.Clients,
+		workspace:         root,
+		workspaces:        cfg.Workspace,
+		deniedEnv:         append([]string(nil), cfg.DeniedEnv...),
+		logger:            logger,
+		now:               now,
+		platform:          cfg.Platform,
+		invalidateProject: cfg.InvalidateProject,
+		invalidateAll:     cfg.InvalidateAll,
+		newMCPTest:        func(opts mcp.Options) (mcpTestSession, error) { return mcp.New(opts) },
 	}, nil
+}
+
+// invalidateExtensions drops cached runtime inputs after a successful write.
+// A project-scope write only affects its project; a platform-scope write
+// affects every project's merged configuration. When only the all-projects
+// hook is wired, a project-scope write falls back to it instead of silently
+// leaving the cache stale.
+func (s *ExtensionService) invalidateExtensions(scope string, projectID *int64) {
+	if scope == store.ScopeProject && projectID != nil && s.invalidateProject != nil {
+		s.invalidateProject(*projectID)
+		return
+	}
+	if s.invalidateAll != nil {
+		s.invalidateAll()
+	}
 }
 
 // lockScope protects project configuration and paths through the full operation.
@@ -398,6 +424,7 @@ func (s *ExtensionService) CreateMCPServer(ctx context.Context, in MCPServerInpu
 		return nil, extensionStoreError(err)
 	}
 	server := mcpServerFromStore(*row)
+	s.invalidateExtensions(scope, projectID)
 	return &server, nil
 }
 
@@ -439,6 +466,7 @@ func (s *ExtensionService) UpdateMCPServer(ctx context.Context, id string, updat
 		return nil, extensionStoreError(err)
 	}
 	server := mcpServerFromStore(*row)
+	s.invalidateExtensions(current.Scope, current.ProjectID)
 	return &server, nil
 }
 
@@ -456,6 +484,7 @@ func (s *ExtensionService) DeleteMCPServer(ctx context.Context, id string) error
 	if err := s.store.DeleteMCPServer(ctx, id); err != nil {
 		return extensionStoreError(err)
 	}
+	s.invalidateExtensions(current.Scope, current.ProjectID)
 	return nil
 }
 
@@ -507,6 +536,7 @@ func (s *ExtensionService) ImportMCPServers(ctx context.Context, in MCPImportInp
 	for _, row := range rows {
 		out = append(out, mcpServerFromStore(row))
 	}
+	s.invalidateExtensions(scope, projectID)
 	return out, nil
 }
 
@@ -648,6 +678,7 @@ func (s *ExtensionService) persistSkillDir(ctx context.Context, scope string, pr
 	}
 	row.Dir = dir
 	skill := skillFromStore(*row)
+	s.invalidateExtensions(scope, projectID)
 	return &skill, nil
 }
 
@@ -671,6 +702,7 @@ func (s *ExtensionService) DeleteSkill(ctx context.Context, id string) error {
 			s.logger.Warn("skill directory cleanup failed", "skill_id", id)
 		}
 	}
+	s.invalidateExtensions(row.Scope, row.ProjectID)
 	return nil
 }
 
@@ -698,6 +730,7 @@ func (s *ExtensionService) SetSkillEnabled(ctx context.Context, id string, enabl
 	if err := s.store.SetSkillEnabled(ctx, id, enabled); err != nil {
 		return nil, extensionStoreError(err)
 	}
+	s.invalidateExtensions(current.Scope, current.ProjectID)
 	return s.GetSkill(ctx, id)
 }
 
@@ -1096,6 +1129,7 @@ func (s *ExtensionService) UpsertBlockBinding(ctx context.Context, in BlockBindi
 		return nil, extensionStoreError(err)
 	}
 	binding := blockBindingFromStore(*row)
+	s.invalidateExtensions(scope, projectID)
 	return &binding, nil
 }
 
@@ -1131,6 +1165,7 @@ func (s *ExtensionService) ReplaceBlockBinding(ctx context.Context, in BlockBind
 		return nil, extensionStoreError(err)
 	}
 	binding := blockBindingFromStore(*row)
+	s.invalidateExtensions(scope, projectID)
 	return &binding, nil
 }
 

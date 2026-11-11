@@ -672,6 +672,7 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 		}
 		return err
 	}
+	defer execution.releaseResolverSet()
 	defer execution.cleanupRepositorySkills()
 	var head, baseDir, workspaceIdentity, indexSHA string
 	var indexEligible bool

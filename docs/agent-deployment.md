@@ -252,7 +252,7 @@ v1.2.0 开箱自带两项内置扩展，不需要额外配置：
      `compose.yaml` 只会把 `environment` 里列出的变量传进容器，所以光写在 `.env` 里，服务读不到。
   3. 在 MCP 配置里写成 `${MY_MCP_TOKEN}` 模板。如果子进程也要读这个变量，把变量名加进 `x-review.env_allowlist`。然后用 `docker compose config --quiet` 检查，再执行 `docker compose up -d --force-recreate --wait` 重建容器。`env_allowlist` 只决定子进程能继承哪些变量，不能把变量带进容器。
 - **扩展范围**：自定义 Skill 的创建 API 已恢复（[#400](https://github.com/LeXwDeX/Tribunal/issues/400)），仅平台管理员可调用：支持 zip 上传，或登记服务端已有目录（高级选项，内容复制到受管 Skill 根目录，源目录不变）；项目 scope 还要求项目已登记。控制台上传和目录登记界面在 [#401](https://github.com/LeXwDeX/Tribunal/issues/401)。自定义 MCP 的新增和导入 API 已恢复（[#420](https://github.com/LeXwDeX/Tribunal/pull/420)），仅平台管理员可调用（项目 scope 还要求项目已登记），控制台界面仍待 [#401](https://github.com/LeXwDeX/Tribunal/issues/401)。控制台只保留内置 `code-review` Skill 和 `codebase-memory` MCP；两者始终启用，禁用请求返回 409。配置文件 `default_extensions` 和 `mcp.config` 仍是部署者特权入口，可另行登记扩展。已有自定义 MCP 可测试、编辑、删除和启停（API 还支持保存前的草稿测试）；已有自定义 Skill 可启停和删除。Skill 里的脚本不会被执行。
-- 数据库里的扩展改动按进程缓存生效，改完通常要重启：`docker compose up -d --force-recreate --wait`。
+- 数据库里的扩展改动（MCP、Skill、块绑定、恢复默认）保存成功后立即在服务进程内生效，下一次评审使用新配置，无需重启；平台 scope 影响全部项目，项目 scope 只影响该项目。配置文件中的 `default_extensions`、`blocks` 和 `mcp.config` 仍在启动时读取，修改后需重启：`docker compose up -d --force-recreate --wait`。
 
 ## 8. 从 v1.0.0 升级
 

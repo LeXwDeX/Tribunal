@@ -426,6 +426,7 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 		}
 		return err
 	}
+	defer execution.releaseResolverSet()
 	defer execution.cleanupRepositorySkills()
 	if !s.matchesReviewExecution(project.ID, dossier.Metadata["execution_identity"], execution.digest) {
 		return s.recoveryCancel(ctx, workflow.ID, "execution_identity_changed", s.recoveryCancelWorkflow("execution_identity_changed", "execution_identity_changed"))
