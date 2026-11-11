@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {
-  Checkbox, DatePicker, Dialog, Disclosure, Field, NumberField, SearchField, Select, Textarea, Tooltip,
+  Checkbox, DatePicker, Dialog, Disclosure, Drawer, Field, NumberField, SearchField, Select, Textarea, Tooltip,
   computeTooltipPosition, formatLocalDate, parseLocalDate, type DatePickerProps, type SelectOption,
 } from '../src/components/ui'
 import ui from '../src/styles/ui.module.css'
@@ -660,6 +660,17 @@ function DatePickerInDialogHarness() {
   )
 }
 
+function DatePickerInDrawerHarness() {
+  const [value, setValue] = useState('2026-10-15')
+  return (
+    <Drawer open onClose={() => {}} title="评审时间">
+      <Field label="开始日期" htmlFor="from">
+        <DatePicker id="from" value={value} onChange={setValue} />
+      </Field>
+    </Drawer>
+  )
+}
+
 describe('DatePicker in a modal', () => {
   it('portals the calendar into the modal and keeps Tab off the dialog close button', async () => {
     const user = userEvent.setup()
@@ -697,6 +708,58 @@ describe('DatePicker in a modal', () => {
     expect(screen.queryByRole('dialog', { name: '选择日期' })).not.toBeInTheDocument()
     expect(input).toHaveFocus()
     expect(closeButton).not.toHaveFocus()
+  })
+
+  it('keeps the calendar open on non-focusable areas inside a dialog', async () => {
+    const user = userEvent.setup()
+    render(<DatePickerInDialogHarness />)
+    const modal = screen.getByRole('dialog', { name: '评审时间' })
+    await user.click(screen.getByRole('button', { name: '打开日历' }))
+    const calendar = screen.getByRole('dialog', { name: '选择日期' })
+    const day = screen.getByRole('button', { name: '2026年10月15日' })
+    expect(day).toHaveFocus()
+
+    // The modal container itself is focusable (tabIndex -1), so these presses
+    // blur to the dialog instead of <body>.
+    await user.click(screen.getByText('2026年10月'))
+    expect(calendar).toBeInTheDocument()
+    expect(day).toHaveFocus()
+
+    await user.click(within(calendar).getByText('一'))
+    expect(calendar).toBeInTheDocument()
+    expect(day).toHaveFocus()
+
+    await user.click(calendar)
+    expect(calendar).toBeInTheDocument()
+    expect(day).toHaveFocus()
+
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('dialog', { name: '选择日期' })).not.toBeInTheDocument()
+    expect(modal).toBeInTheDocument()
+  })
+
+  it('keeps the calendar open on non-focusable areas inside a drawer', async () => {
+    const user = userEvent.setup()
+    render(<DatePickerInDrawerHarness />)
+    await user.click(screen.getByRole('button', { name: '打开日历' }))
+    const calendar = screen.getByRole('dialog', { name: '选择日期' })
+
+    await user.click(screen.getByText('2026年10月'))
+    expect(calendar).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '2026年10月15日' })).toHaveFocus()
+    expect(screen.getByRole('dialog', { name: '评审时间' })).toBeInTheDocument()
+  })
+
+  it('closes the calendar when clicking elsewhere inside the dialog', async () => {
+    const user = userEvent.setup()
+    render(<DatePickerInDialogHarness />)
+    const modal = screen.getByRole('dialog', { name: '评审时间' })
+    await user.click(screen.getByRole('button', { name: '打开日历' }))
+    expect(screen.getByRole('dialog', { name: '选择日期' })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('heading', { name: '评审时间' }))
+    expect(screen.queryByRole('dialog', { name: '选择日期' })).not.toBeInTheDocument()
+    expect(modal).toBeInTheDocument()
   })
 })
 

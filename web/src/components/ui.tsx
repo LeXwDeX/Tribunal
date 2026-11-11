@@ -868,6 +868,11 @@ const ModalContainerContext = createContext<React.RefObject<HTMLElement | null> 
 // the space beside the anchor; overflow-y:auto keeps the grid reachable.
 const CALENDAR_MIN_HEIGHT = 180
 
+function isEnabledButtonTarget(target: EventTarget | null) {
+  const button = target instanceof Element ? target.closest('button') : null
+  return button instanceof HTMLButtonElement && !button.disabled
+}
+
 export interface DatePickerProps {
   id?: string
   className?: string
@@ -1019,6 +1024,10 @@ export const DatePicker = forwardRef<HTMLInputElement, DatePickerProps>(function
   const closeCalendar = (restoreFocus: boolean) => {
     setOpen(false)
     if (restoreFocus) inputRef.current?.focus()
+  }
+
+  const focusRovingDay = () => {
+    popoverRef.current?.querySelector<HTMLElement>('[data-date][tabindex="0"]')?.focus()
   }
 
   const selectDate = (date: Date) => {
@@ -1174,9 +1183,9 @@ export const DatePicker = forwardRef<HTMLInputElement, DatePickerProps>(function
     pointerDownInside.current = false
     if (related && (fieldRef.current?.contains(related) || popoverRef.current?.contains(related))) return
     if (disabled) return
-    // A press inside the field or popover on a non-focusable area blurs to
-    // <body>; that is not leaving the field.
-    if (open && !related && pressedInside) {
+    // A press that started inside the field or popover is not leaving it, even
+    // when focus falls to <body> or to the focusable modal container.
+    if (open && pressedInside) {
       commitText()
       return
     }
@@ -1235,6 +1244,18 @@ export const DatePicker = forwardRef<HTMLInputElement, DatePickerProps>(function
           aria-label="选择日期"
           className={styles.calendar}
           style={popoverStyle}
+          onMouseDown={(event) => {
+            if (isEnabledButtonTarget(event.target)) return
+            // Non-interactive calendar areas must not take focus from the
+            // roving day; otherwise Escape would close the whole modal.
+            event.preventDefault()
+          }}
+          onClick={(event) => {
+            if (isEnabledButtonTarget(event.target)) return
+            event.preventDefault()
+            const active = document.activeElement
+            if (!(active instanceof Node) || !popoverRef.current?.contains(active)) focusRovingDay()
+          }}
           onKeyDown={onPopoverKeyDown}
         >
           <div className={styles.calendarHeader}>
