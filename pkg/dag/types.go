@@ -3,6 +3,7 @@
 package dag
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -172,14 +173,17 @@ type Usage struct {
 
 // UnmarshalJSON accepts the legacy cost_micros field in stored events and
 // projections but discards it. Money cost was removed in v1.4.0; old usage
-// payloads must stay readable without exposing the field again.
+// payloads must stay readable without exposing the field again. Every other
+// unknown field is rejected so a typo cannot silently drop usage data.
 func (u *Usage) UnmarshalJSON(data []byte) error {
 	type plain Usage
 	var decoded struct {
 		plain
 		LegacyCostMicros json.RawMessage `json:"cost_micros"`
 	}
-	if err := json.Unmarshal(data, &decoded); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&decoded); err != nil {
 		return err
 	}
 	*u = Usage(decoded.plain)

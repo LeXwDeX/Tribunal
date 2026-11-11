@@ -80,3 +80,13 @@ func TestUsageDecodesLegacyCostMicrosWithoutExposingIt(t *testing.T) {
 		t.Fatalf("encoded usage exposes cost_micros: %s", encoded)
 	}
 }
+
+// Only legacy cost_micros is tolerated. Other unknown keys are rejected so a
+// typo cannot silently discard a usage counter.
+func TestUsageRejectsUnknownFields(t *testing.T) {
+	var usage Usage
+	err := json.Unmarshal([]byte(`{"input_tokens":7,"output_tokens":3,"input_token":9}`), &usage)
+	if err == nil || !strings.Contains(err.Error(), `unknown field "input_token"`) {
+		t.Fatalf("unknown field error = %v", err)
+	}
+}

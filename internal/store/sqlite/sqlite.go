@@ -176,7 +176,16 @@ func migrate(ctx context.Context, db *sql.DB, now func() time.Time) error {
 	}
 	defer rows.Close()
 	if rows.Next() {
-		return errors.New("sqlite: migration left a foreign key violation")
+		var (
+			table  string
+			rowID  sql.NullInt64
+			parent string
+			fkID   int
+		)
+		if err := rows.Scan(&table, &rowID, &parent, &fkID); err != nil {
+			return fmt.Errorf("sqlite: scan foreign key violation: %w", err)
+		}
+		return fmt.Errorf("sqlite: migration left a foreign key violation in table %q", table)
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("sqlite: foreign key check: %w", err)

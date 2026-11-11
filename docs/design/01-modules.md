@@ -205,7 +205,7 @@ type NodeOutput struct {
 
 type Usage struct {
 	InputTokens, OutputTokens int64
-	CostMicros                int64
+	// v1.4.0 起不再包含金钱成本字段；旧事件的 cost_micros 解码时丢弃。
 }
 
 // NodeExecutor 由使用方实现（internal/review）。返回 error 即节点 failed。

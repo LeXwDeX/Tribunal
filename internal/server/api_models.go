@@ -148,6 +148,9 @@ func (s *Server) handleCreateModel(w http.ResponseWriter, r *http.Request) {
 	}
 	var request modelWriteRequest
 	if err := decodeJSON(w, r, adminBodyLimit, &request); err != nil {
+		if modelWriteDecodeError(w, r, err) {
+			return
+		}
 		decodeRequestError(w, r, err)
 		return
 	}
@@ -183,6 +186,9 @@ func (s *Server) handleUpdateModel(w http.ResponseWriter, r *http.Request) {
 	}
 	var request modelWriteRequest
 	if err := decodeJSON(w, r, adminBodyLimit, &request); err != nil {
+		if modelWriteDecodeError(w, r, err) {
+			return
+		}
 		decodeRequestError(w, r, err)
 		return
 	}
@@ -284,6 +290,18 @@ func (s *Server) handleUpdateModelParams(w http.ResponseWriter, r *http.Request)
 	s.logger.Info("model changed", "event", "platform_audit", "actor_id", currentUserID(r),
 		"target_id", updated.ID, "action", "update_params", "fields", patch.Fields())
 	s.finishModelWrite(w, r, updated.ID)
+}
+
+// modelWriteDecodeError maps the removed params.price key in a whole-record
+// model write to its field path. The strict decoder only reports the leaf
+// name, so this is limited to the one removed parameter; every other decode
+// failure keeps the generic body error.
+func modelWriteDecodeError(w http.ResponseWriter, r *http.Request, err error) bool {
+	if !strings.Contains(err.Error(), `unknown field "price"`) {
+		return false
+	}
+	validationFailed(w, r, "params.price", "params.price is not a supported parameter")
+	return true
 }
 
 // decodeModelParamsPatch turns the request's parameter object into a merge

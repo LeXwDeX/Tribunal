@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/LeXwDeX/tribunal/internal/store/migrations"
@@ -115,11 +116,12 @@ func TestRemoveCostMigrationDropsColumnsAndPreservesData(t *testing.T) {
 
 	for _, table := range []string{"workflows", "workflow_nodes"} {
 		for _, column := range tableColumns(t, st, table) {
-			if column == "cost_micros" {
+			if column.Name == "cost_micros" {
 				t.Fatalf("%s still has cost_micros", table)
 			}
 		}
 	}
+	assertRebuiltSchema(t, st)
 
 	wf, err := st.GetWorkflow(ctx, "wf-cost")
 	if err != nil {
@@ -164,32 +166,132 @@ func TestRemoveCostMigrationDropsColumnsAndPreservesData(t *testing.T) {
 	}
 }
 
-func tableColumns(t *testing.T, st *Store, table string) []string {
+type columnInfo struct {
+	Name       string
+	Type       string
+	NotNull    bool
+	Default    sql.NullString
+	PrimaryKey int
+}
+
+func tableColumns(t *testing.T, st *Store, table string) []columnInfo {
 	t.Helper()
 	rows, err := st.db.Query(`PRAGMA table_info(` + table + `)`)
 	if err != nil {
 		t.Fatalf("table_info(%s): %v", table, err)
 	}
 	defer rows.Close()
-	var columns []string
+	var columns []columnInfo
 	for rows.Next() {
 		var (
-			cid        int
-			name       string
-			ctype      string
-			notNull    int
-			defaultV   sql.NullString
-			primaryKey int
+			cid      int
+			info     columnInfo
+			defaultV sql.NullString
+			notNull  int
 		)
+		var name, ctype string
+		var primaryKey int
 		if err := rows.Scan(&cid, &name, &ctype, &notNull, &defaultV, &primaryKey); err != nil {
 			t.Fatalf("scan table_info(%s): %v", table, err)
 		}
-		columns = append(columns, name)
+		info.Name = name
+		info.Type = ctype
+		info.NotNull = notNull != 0
+		info.Default = defaultV
+		info.PrimaryKey = primaryKey
+		columns = append(columns, info)
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatalf("iterate table_info(%s): %v", table, err)
 	}
 	return columns
+}
+
+func assertRebuiltSchema(t *testing.T, st *Store) {
+	t.Helper()
+	assertColumn := func(table, name string, notNull bool, defaultValue string, primaryKey int) {
+		t.Helper()
+		for _, column := range tableColumns(t, st, table) {
+			if column.Name != name {
+				continue
+			}
+			if column.NotNull != notNull || column.PrimaryKey != primaryKey {
+				t.Fatalf("%s.%s notNull=%t pk=%d, want %t/%d", table, name, column.NotNull, column.PrimaryKey, notNull, primaryKey)
+			}
+			if defaultValue != "" && !strings.Contains(column.Default.String, defaultValue) {
+				t.Fatalf("%s.%s default = %q, want containing %q", table, name, column.Default.String, defaultValue)
+			}
+			return
+		}
+		t.Fatalf("%s.%s missing", table, name)
+	}
+	assertColumn("workflows", "id", false, "", 1)
+	assertColumn("workflows", "kind", true, "", 0)
+	assertColumn("workflows", "project_id", true, "", 0)
+	assertColumn("workflows", "status", true, "", 0)
+	assertColumn("workflows", "created_at", true, "", 0)
+	for _, name := range []string{"graph_rev", "extends_used", "tokens_in", "tokens_out", "usage_incomplete"} {
+		assertColumn("workflows", name, true, "0", 0)
+	}
+	assertColumn("workflow_nodes", "workflow_id", true, "", 1)
+	assertColumn("workflow_nodes", "id", true, "", 2)
+	assertColumn("workflow_nodes", "depends_on", true, "[]", 0)
+	assertColumn("workflow_nodes", "params", true, "{}", 0)
+	for _, name := range []string{"attempt", "tokens_in", "tokens_out", "usage_incomplete", "added_rev"} {
+		assertColumn("workflow_nodes", name, true, "0", 0)
+	}
+
+	rows, err := st.db.Query(`PRAGMA foreign_key_list(workflows)`)
+	if err != nil {
+		t.Fatalf("foreign_key_list(workflows): %v", err)
+	}
+	defer rows.Close()
+	foundProject := false
+	for rows.Next() {
+		var (
+			id, seq            int
+			table, from, to    string
+			onUpdate, onDelete string
+			match              string
+		)
+		if err := rows.Scan(&id, &seq, &table, &from, &to, &onUpdate, &onDelete, &match); err != nil {
+			t.Fatalf("scan foreign_key_list(workflows): %v", err)
+		}
+		if table == "projects" && from == "project_id" && to == "id" && onDelete == "CASCADE" {
+			foundProject = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate foreign_key_list(workflows): %v", err)
+	}
+	if !foundProject {
+		t.Fatal("workflows -> projects ON DELETE CASCADE foreign key missing")
+	}
+
+	wantIndexes := map[string][]string{
+		"workflows_mr":     {"project_id", "mr_iid", "created_at"},
+		"workflows_status": {"status", "created_at"},
+	}
+	for name, want := range wantIndexes {
+		indexRows, err := st.db.Query(`PRAGMA index_info(` + name + `)`)
+		if err != nil {
+			t.Fatalf("index_info(%s): %v", name, err)
+		}
+		var got []string
+		for indexRows.Next() {
+			var seqno, cid int
+			var column string
+			if err := indexRows.Scan(&seqno, &cid, &column); err != nil {
+				indexRows.Close()
+				t.Fatalf("scan index_info(%s): %v", name, err)
+			}
+			got = append(got, column)
+		}
+		indexRows.Close()
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("index %s columns = %v, want %v", name, got, want)
+		}
+	}
 }
 
 func assertWorkflowIndexes(t *testing.T, st *Store) {
@@ -267,11 +369,12 @@ func TestRemoveCostMigrationFreshDatabase(t *testing.T) {
 	defer st.Close()
 	for _, table := range []string{"workflows", "workflow_nodes"} {
 		for _, column := range tableColumns(t, st, table) {
-			if column == "cost_micros" {
+			if column.Name == "cost_micros" {
 				t.Fatalf("%s still has cost_micros", table)
 			}
 		}
 	}
+	assertRebuiltSchema(t, st)
 	assertWorkflowIndexes(t, st)
 	var violations int
 	if err := st.db.QueryRow(`SELECT COUNT(*) FROM pragma_foreign_key_check`).Scan(&violations); err != nil {
