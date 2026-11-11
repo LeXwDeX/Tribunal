@@ -5,7 +5,7 @@ import type { Project } from '../api/types'
 import { ExtensionsManager } from '../features/extensions/ExtensionsManager'
 import { useCanWrite } from '../components/RoleContext'
 import {
-  Button, EmptyState, ErrorState, LoadingState, PageHeader, Segmented, Toolbar, ToolbarField,
+  Button, EmptyState, ErrorState, LoadingState, PageHeader, Segmented, Select, Toolbar, ToolbarField, type SelectOption,
 } from '../components/ui'
 import { useLoadMoreFocus, usePaginated } from '../lib/hooks'
 import ui from '../styles/ui.module.css'
@@ -23,7 +23,7 @@ export function ExtensionsPage() {
   const [projectId, setProjectId] = useState('')
 
   const projects = usePaginated<Project>(['projects', 'extensions'], (cursor) => listProjects({ limit: 100 }, cursor), 'projects')
-  const projectFocus = useLoadMoreFocus<HTMLSelectElement>(projects.hasNextPage)
+  const projectFocus = useLoadMoreFocus<HTMLButtonElement>(projects.hasNextPage)
 
   useEffect(() => {
     if (scope !== 'project' || projectId || !projects.items.length) return
@@ -31,6 +31,10 @@ export function ExtensionsPage() {
   }, [scope, projectId, projects.items])
 
   const projectOptions = projects.items
+  const projectChoices: SelectOption[] = [
+    { value: '', label: '选择项目', disabled: projectOptions.length > 0 },
+    ...projectOptions.map((project) => ({ value: String(project.id), label: project.path_with_namespace })),
+  ]
 
   // Project-scope states render under the tabs so the toolbar and tabs never move.
   let projectPlaceholder: ReactNode
@@ -61,20 +65,17 @@ export function ExtensionsPage() {
               if (next === 'platform') setProjectId('')
             }}
           />
-          {scope === 'project' ? <ToolbarField label="项目">
-            <select
+          {scope === 'project' ? <ToolbarField label="项目" htmlFor="extensions-project">
+            <Select
               ref={projectFocus.controlRef}
-              className="select"
-              name="project_id"
+              id="extensions-project"
               value={projectId}
-              onChange={(event) => setProjectId(event.target.value)}
+              options={projectChoices}
+              onChange={setProjectId}
               aria-label="扩展作用域项目"
               disabled={projectOptions.length === 0}
-            >
-              {/* Project scope auto-selects the first project, so the placeholder is not selectable then. */}
-              <option value="" disabled={projectOptions.length > 0}>选择项目</option>
-              {projectOptions.map((project) => <option key={project.id} value={project.id}>{project.path_with_namespace}</option>)}
-            </select>
+              emptyLabel="选择项目"
+            />
           </ToolbarField> : null}
           {scope === 'project' && projects.hasNextPage ? (
             <Button variant="secondary" onClick={projects.fetchNextPage} loading={projects.isFetchingNextPage} onFocus={projectFocus.onFocus} onBlur={projectFocus.onBlur}>

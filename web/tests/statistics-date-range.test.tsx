@@ -94,8 +94,38 @@ describe('statistics date filters', () => {
     fireEvent.change(screen.getByLabelText('结束日期'), { target: { value: '9999-99-99' } })
     await user.click(screen.getByRole('button', { name: '应用' }))
 
-    expect(screen.getByRole('alert')).toBeInTheDocument()
+    const dateAlerts = screen.getAllByRole('alert').filter((alert) => alert.textContent === '请输入 YYYY-MM-DD 格式的有效日期。')
+    expect(dateAlerts).toHaveLength(2)
+    expect(screen.getByText('请修正日期格式。')).toBeInTheDocument()
     expect(calls).toHaveLength(1)
     expect(screen.getByText('运行次数')).toBeInTheDocument()
+  })
+
+  it('does not apply one invalid date while the other date has changed', async () => {
+    const calls: string[] = []
+    routeStats(calls)
+    const user = userEvent.setup()
+    renderWithProviders(<StatisticsPage />)
+    await waitFor(() => expect(calls.length).toBe(1))
+
+    fireEvent.change(screen.getByLabelText('开始日期'), { target: { value: '2026-10-99' } })
+    fireEvent.change(screen.getByLabelText('结束日期'), { target: { value: '2026-10-08' } })
+    await user.click(screen.getByRole('button', { name: '应用' }))
+
+    expect(await screen.findByText('请修正日期格式。')).toBeInTheDocument()
+    expect(calls).toHaveLength(1)
+
+    fireEvent.change(screen.getByLabelText('开始日期'), { target: { value: '2026-10-02' } })
+    await user.click(screen.getByRole('button', { name: '应用' }))
+
+    const from = new Date(2026, 9, 2).toISOString()
+    const to = new Date(2026, 9, 9).toISOString()
+    await waitFor(() => {
+      const match = calls
+        .map((url) => new URL(url, 'http://localhost'))
+        .find((parsed) => parsed.searchParams.get('from') === from)
+      expect(match).toBeDefined()
+      expect(match?.searchParams.get('to')).toBe(to)
+    })
   })
 })

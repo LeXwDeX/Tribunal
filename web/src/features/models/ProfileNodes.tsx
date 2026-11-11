@@ -2,7 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { deleteProfileOverrides, putProfileOverrides } from '../../api/api'
 import { ApiError, errorMessage } from '../../api/client'
 import type { Model, ProfileDetail, ProfileNodeParams, ProfileNodeView } from '../../api/types'
-import { Badge, Button, ConfirmDialog, Drawer, Field } from '../../components/ui'
+import { Badge, Button, ConfirmDialog, Drawer, Field, Select } from '../../components/ui'
 import ui from '../../styles/ui.module.css'
 import styles from './profile.module.css'
 
@@ -127,6 +127,20 @@ type FieldKey = keyof NodeForm | 'params'
 type NodeErrors = Partial<Record<FieldKey, string>>
 
 const EMPTY_FORM: NodeForm = { model: '', maxTokens: '', temperature: '', effort: '', budget: '', thinkingType: '' }
+
+const EFFORT_OPTIONS = [
+  { value: '', label: '继承' },
+  { value: 'low', label: 'low' },
+  { value: 'medium', label: 'medium' },
+  { value: 'high', label: 'high' },
+  { value: 'max', label: 'max' },
+]
+
+const THINKING_TYPE_OPTIONS = [
+  { value: '', label: '继承' },
+  { value: 'enabled', label: 'enabled' },
+  { value: 'disabled', label: 'disabled' },
+]
 
 function docNode(doc: Record<string, unknown>, path: string): Record<string, unknown> | undefined {
   let current: unknown = doc
@@ -389,21 +403,22 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
           <fieldset key={node} className={styles.fieldset}>
             <legend className={styles.legend}>{label}</legend>
             <Field label={`${label} 模型`} htmlFor={`${id}-model`} error={nodeErrors.model}>
-              <select
+              <Select
                 id={`${id}-model`}
-                className={ui.select}
                 value={form.model}
+                options={[
+                  { value: '', label: '继承' },
+                  ...models.map((model) => ({
+                    value: model.id,
+                    label: `${model.display_name}（${shortID(model.id)}）${model.available ? '' : `不可用：${model.unavailable_reason || '未知原因'}`}`,
+                    disabled: !model.available,
+                  })),
+                ]}
+                onChange={(value) => update(node, { model: value })}
                 aria-invalid={nodeErrors.model ? true : undefined}
                 aria-describedby={desc('model', `${id}-model`)}
-                onChange={(event) => update(node, { model: event.target.value })}
-              >
-                <option value="">继承</option>
-                {models.map((model) => (
-                  <option key={model.id} value={model.id} disabled={!model.available}>
-                    {model.display_name}（{shortID(model.id)}）{model.available ? '' : `不可用：${model.unavailable_reason || '未知原因'}`}
-                  </option>
-                ))}
-              </select>
+                emptyLabel="继承"
+              />
             </Field>
             <div className={styles.paramGrid}>
               <Field label={`${label} max_tokens`} htmlFor={`${id}-max`} error={nodeErrors.maxTokens}>
@@ -413,23 +428,29 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
                 <input id={`${id}-temp`} className={ui.input} inputMode="decimal" placeholder="继承" value={form.temperature} aria-invalid={nodeErrors.temperature ? true : undefined} aria-describedby={desc('temperature', `${id}-temp`, true)} onChange={(event) => update(node, { temperature: event.target.value })} />
               </Field>
               <Field label={`${label} reasoning.effort`} htmlFor={`${id}-effort`} error={nodeErrors.effort}>
-                <select id={`${id}-effort`} className={ui.select} value={form.effort} aria-invalid={nodeErrors.effort ? true : undefined} aria-describedby={desc('effort', `${id}-effort`, true)} onChange={(event) => update(node, { effort: event.target.value })}>
-                  <option value="">继承</option>
-                  <option value="low">low</option>
-                  <option value="medium">medium</option>
-                  <option value="high">high</option>
-                  <option value="max">max</option>
-                </select>
+                <Select
+                  id={`${id}-effort`}
+                  value={form.effort}
+                  options={EFFORT_OPTIONS}
+                  onChange={(value) => update(node, { effort: value })}
+                  aria-invalid={nodeErrors.effort ? true : undefined}
+                  aria-describedby={desc('effort', `${id}-effort`, true)}
+                  emptyLabel="继承"
+                />
               </Field>
               <Field label={`${label} thinking.budget_tokens`} htmlFor={`${id}-budget`} error={nodeErrors.budget}>
                 <input id={`${id}-budget`} className={ui.input} inputMode="numeric" placeholder="继承" value={form.budget} aria-invalid={nodeErrors.budget ? true : undefined} aria-describedby={desc('budget', `${id}-budget`, true)} onChange={(event) => update(node, { budget: event.target.value })} />
               </Field>
               <Field label={`${label} thinking.type`} htmlFor={`${id}-thinking-type`} error={nodeErrors.thinkingType}>
-                <select id={`${id}-thinking-type`} className={ui.select} value={form.thinkingType} aria-invalid={nodeErrors.thinkingType ? true : undefined} aria-describedby={desc('thinkingType', `${id}-thinking-type`, true)} onChange={(event) => update(node, { thinkingType: event.target.value })}>
-                  <option value="">继承</option>
-                  <option value="enabled">enabled</option>
-                  <option value="disabled">disabled</option>
-                </select>
+                <Select
+                  id={`${id}-thinking-type`}
+                  value={form.thinkingType}
+                  options={THINKING_TYPE_OPTIONS}
+                  onChange={(value) => update(node, { thinkingType: value })}
+                  aria-invalid={nodeErrors.thinkingType ? true : undefined}
+                  aria-describedby={desc('thinkingType', `${id}-thinking-type`, true)}
+                  emptyLabel="继承"
+                />
               </Field>
             </div>
             {nodeErrors.params ? <span className={styles.errorText} id={paramsErr} role="alert">{nodeErrors.params}</span> : null}

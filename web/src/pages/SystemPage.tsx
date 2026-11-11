@@ -11,7 +11,8 @@ import type {
 } from '../api/types'
 import { useCanSelfService, useCanWrite } from '../components/RoleContext'
 import {
-  Badge, Button, ConfirmDialog, Dialog, Drawer, EmptyState, ErrorState, Field, LoadingState, PageHeader, Panel, PanelBody, SecretField, Tabs, useToast,
+  ActionHint, Badge, Button, ConfirmDialog, Dialog, Drawer, EmptyState, ErrorState, Field, LoadingState, NumberField,
+  PageHeader, Panel, PanelBody, SecretField, Select, Tabs, useToast,
 } from '../components/ui'
 import { usePaginated } from '../lib/hooks'
 import { formatDate } from '../lib/format'
@@ -155,7 +156,7 @@ function TokenCreateDialog({ open, onClose }: { open: boolean; onClose: () => vo
               <input id={nameId} className="input" value={name} onChange={(event) => setName(event.target.value)} placeholder="例如 ci-tribunalctl" aria-invalid={Boolean(fieldError)} disabled={pending} />
             </Field>
             <Field label="有效天数" htmlFor={expiresId} hint="正整数，最长 365 天。">
-              <input id={expiresId} className="input" type="number" min={1} max={365} value={days} onChange={(event) => setDays(event.target.value)} disabled={pending} />
+              <NumberField id={expiresId} min={1} max={365} value={days} onChange={(event) => setDays(event.target.value)} disabled={pending} />
             </Field>
           </div>
         </>
@@ -250,7 +251,6 @@ function UserDrawer({ user, open, currentUserId, onClose }: {
         <section>
           <h3>角色</h3>
           <p className="small muted">来源：{{ config: '配置', granted: '授权', none: '无' }[user.role_source ?? 'none'] ?? '无'}</p>
-          {configured ? <p className="small muted">由配置文件提供，修改需改配置并重启。</p> : null}
           <Button
             variant={admin ? 'danger' : 'primary'}
             disabled={configured || (self && admin) || pending}
@@ -258,14 +258,15 @@ function UserDrawer({ user, open, currentUserId, onClose }: {
           >
             {admin ? '降级为普通用户' : '提升为管理员'}
           </Button>
-          {self && admin ? <p className="small muted">不能对自己降级。</p> : null}
+          {configured ? <ActionHint>由配置文件提供，修改需改配置并重启。</ActionHint> : null}
+          {self && admin ? <ActionHint>不能对自己降级。</ActionHint> : null}
         </section>
         <section>
           <h3>全局模式</h3>
-          <p className="small muted">该用户将能查看全部项目和全部评审（只读）。</p>
           <Button variant="secondary" disabled={pending} onClick={() => setConfirm({ global: !user.global_read })}>
             {user.global_read ? '关闭全局模式' : '开启全局模式'}
           </Button>
+          <ActionHint>该用户将能查看全部项目和全部评审（只读）。</ActionHint>
         </section>
         <section>
           <h3>项目授权</h3>
@@ -274,10 +275,12 @@ function UserDrawer({ user, open, currentUserId, onClose }: {
               <input id={`grant-project-${user.id}`} className={ui.input} value={projectID} onChange={(event) => setProjectID(event.target.value)} />
             </Field>
             <Field label="角色" htmlFor={`grant-role-${user.id}`}>
-              <select id={`grant-role-${user.id}`} className={ui.select} value={grantRole} onChange={(event) => setGrantRole(event.target.value as ProjectAccess)}>
-                <option value="read">read</option>
-                <option value="manage">manage</option>
-              </select>
+              <Select
+                id={`grant-role-${user.id}`}
+                value={grantRole}
+                options={[{ value: 'read', label: 'read' }, { value: 'manage', label: 'manage' }]}
+                onChange={(value) => setGrantRole(value as ProjectAccess)}
+              />
             </Field>
             <Button variant="secondary" onClick={() => { void addGrant() }} loading={pending}>添加授权</Button>
           </div>
@@ -391,9 +394,9 @@ function AdminUsersPanel() {
         flush
         title="用户与账号"
         aside={users.isSuccess ? `${users.items.length}${users.hasNextPage ? '+' : ''} 个用户` : undefined}
+        note="停用后该账号不能登录、使用现有会话或 API token，也不能获得新凭据。撤销凭据会立即使全部会话与 token 失效。"
       >
         <PanelBody>
-          <div className={styles.notice}>停用后该账号不能登录、使用现有会话或 API token，也不能获得新凭据。撤销凭据会立即使全部会话与 token 失效。</div>
           {users.isPending ? <LoadingState label="正在读取用户…" /> : null}
           {users.isError ? <ErrorState error={users.error} onRetry={users.retry} /> : null}
           {users.isSuccess && users.items.length === 0 ? <EmptyState title="还没有本地用户" description="用户首次通过 GitLab 登录后会出现在这里。" /> : null}
@@ -542,26 +545,28 @@ function AdminGrantsPanel() {
 
   return (
     <>
-      <Panel flush title="项目授权" aside={selectedProject ? selectedProject.path_with_namespace : '未选择项目'}>
+      <Panel
+        flush
+        title="项目授权"
+        aside={selectedProject ? selectedProject.path_with_namespace : '未选择项目'}
+        note="平台管理员对全部已登记项目隐式拥有 manage，无需在这里授权；此处用于给普通用户分配 read 或 manage（manage 可删除项目）。项目列表来自管理面，不需要管理员自身拥有 grant。"
+      >
         <PanelBody className={insights.grantForm}>
-          <div className={styles.notice}>
-            平台管理员对全部已登记项目隐式拥有 manage，无需在这里授权；此处用于给普通用户分配 read 或 manage（manage 可删除项目）。项目列表来自管理面，不需要管理员自身拥有 grant。
-          </div>
           <div className={insights.grantPicker}>
-            <label className={insights.field}>
+            <label className={insights.field} htmlFor="grant-project">
               <span className="small">选择项目</span>
-              <select
-                className="select"
-                aria-label="选择项目"
+              <Select
+                id="grant-project"
                 value={projectId}
-                onChange={(event) => setProjectId(event.target.value)}
+                options={[
+                  { value: '', label: '选择项目' },
+                  ...projects.items.map((project) => ({ value: String(project.id), label: project.path_with_namespace })),
+                ]}
+                onChange={setProjectId}
                 disabled={projects.isPending}
-              >
-                <option value="">选择项目</option>
-                {projects.items.map((project) => (
-                  <option key={project.id} value={project.id}>{project.path_with_namespace}</option>
-                ))}
-              </select>
+                aria-label="选择项目"
+                emptyLabel="选择项目"
+              />
             </label>
             {projects.hasNextPage ? (
               <Button variant="secondary" onClick={projects.fetchNextPage} loading={projects.isFetchingNextPage}>加载更多项目</Button>
@@ -573,16 +578,25 @@ function AdminGrantsPanel() {
             <>
               <div className="formGrid">
                 <Field label="选择用户" htmlFor="grant-user">
-                  <select id="grant-user" className="select" value={userId} onChange={(event) => setUserId(event.target.value)} disabled={users.isPending}>
-                    <option value="">选择用户</option>
-                    {users.items.map((user) => <option key={user.id} value={user.id}>{userLabel(user)}</option>)}
-                  </select>
+                  <Select
+                    id="grant-user"
+                    value={userId}
+                    options={[
+                      { value: '', label: '选择用户' },
+                      ...users.items.map((user) => ({ value: String(user.id), label: userLabel(user) })),
+                    ]}
+                    onChange={setUserId}
+                    disabled={users.isPending}
+                    emptyLabel="选择用户"
+                  />
                 </Field>
                 <Field label="权限角色" htmlFor="grant-role">
-                  <select id="grant-role" className="select" value={role} onChange={(event) => setRole(event.target.value as ProjectAccess)}>
-                    <option value="read">只读（read）</option>
-                    <option value="manage">管理（manage）</option>
-                  </select>
+                  <Select
+                    id="grant-role"
+                    value={role}
+                    options={[{ value: 'read', label: '只读（read）' }, { value: 'manage', label: '管理（manage）' }]}
+                    onChange={(value) => setRole(value as ProjectAccess)}
+                  />
                 </Field>
               </div>
               {users.hasNextPage ? <Button variant="secondary" onClick={users.fetchNextPage} loading={users.isFetchingNextPage}>加载更多用户</Button> : null}
@@ -725,7 +739,10 @@ export function SystemPage() {
               title="我的 API token"
               aside={canSelfService ? (
                 <Button variant="primary" className={ui.smallButton} onClick={() => setCreateOpen(true)}>创建 token</Button>
-              ) : '当前会话不能创建或撤销 token'}
+              ) : undefined}
+              note={canSelfService
+                ? '登录用户可管理自己的 token；写操作由 CSRF 保护。明文 token 只在创建时显示一次。'
+                : '当前会话不能创建或撤销 token。登录用户可管理自己的 token；写操作由 CSRF 保护。'}
             >
               {tokens.isPending || tokens.isError || (tokens.isSuccess && tokens.items.length === 0) ? (
                 <PanelBody>
@@ -765,7 +782,6 @@ export function SystemPage() {
                   <Button variant="secondary" onClick={tokens.fetchNextPage} loading={tokens.isFetchingNextPage}>加载更多</Button>
                 </div>
               ) : null}
-              {canSelfService ? <div className={ui.tableNote}>登录用户可管理自己的 token；写操作由 CSRF 保护。明文 token 只在创建时显示一次。</div> : null}
             </Panel>
           ) : null}
 
@@ -773,12 +789,12 @@ export function SystemPage() {
             <Panel
               title="平台配置"
               aside="服务端脱敏只读视图"
+              note="此页面不提供编辑；密钥和凭据由服务端脱敏，界面不显示其值。"
             >
               {settings.isPending ? <LoadingState label="正在读取平台配置…" /> : null}
               {settings.isError ? <ErrorState error={settings.error} onRetry={() => { void settings.refetch() }} /> : null}
               {settings.isSuccess ? (
                 <>
-                  <div className={styles.notice}>此页面不提供编辑；密钥和凭据由服务端脱敏，界面不显示其值。</div>
                   {Object.keys(settings.data || {}).length ? (
                     <pre className={`pre ${ui.jsonBlock} ${ui.jsonBlockTall}`}>{JSON.stringify(settings.data, null, 2)}</pre>
                   ) : <EmptyState title="平台配置为空" description="服务端返回了空对象；这不代表配置缺失或加载成功。" />}

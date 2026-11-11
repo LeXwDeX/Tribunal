@@ -8,6 +8,11 @@ function apiTokensEmpty() {
   return jsonResponse({ tokens: [] })
 }
 
+async function chooseOption(user: ReturnType<typeof userEvent.setup>, trigger: HTMLElement, name: RegExp | string) {
+  await user.click(trigger)
+  await user.click(await screen.findByRole('option', { name }))
+}
+
 describe('personal token expiry', () => {
   afterEach(() => vi.unstubAllGlobals())
 
@@ -179,17 +184,20 @@ describe('admin user and grant management', () => {
     await user.click(await screen.findByRole('tab', { name: '项目授权' }))
 
     const projectSelect = await screen.findByLabelText('选择项目')
-    expect(await within(projectSelect).findByRole('option', { name: 'group/first' })).toBeInTheDocument()
+    await user.click(projectSelect)
+    expect(await screen.findByRole('option', { name: 'group/first' })).toBeInTheDocument()
+    await user.click(projectSelect)
     await user.click(screen.getByRole('button', { name: '加载更多项目' }))
-    expect(await within(projectSelect).findByRole('option', { name: 'group/second' })).toBeInTheDocument()
+    await user.click(projectSelect)
+    expect(await screen.findByRole('option', { name: 'group/second' })).toBeInTheDocument()
 
-    await user.selectOptions(projectSelect, '7')
-    expect(screen.getByLabelText('权限角色')).toHaveValue('manage')
+    await user.click(screen.getByRole('option', { name: 'group/first' }))
+    expect(screen.getByLabelText('权限角色')).toHaveTextContent('管理（manage）')
     await waitFor(() => expect(grantReads).toContain('/api/v1/admin/projects/7/grants'))
     expect(await screen.findByText('bob')).toBeInTheDocument()
 
-    await user.selectOptions(screen.getByLabelText('选择用户'), '1')
-    await user.selectOptions(screen.getByLabelText('权限角色'), 'manage')
+    await chooseOption(user, screen.getByLabelText('选择用户'), /Alice/)
+    await chooseOption(user, screen.getByLabelText('权限角色'), '管理（manage）')
     await user.click(screen.getByRole('button', { name: '授予权限' }))
     await waitFor(() => expect(writes).toContainEqual({
       url: '/api/v1/admin/projects/7/grants/1', method: 'PUT', body: { role: 'manage' },

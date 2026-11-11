@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 // @ts-expect-error plain ESM helper script, not part of the app tsconfig
-import { checkDir, scanCss, scanTsx } from '../scripts/stylecheck.mjs'
+import { checkDir, scanCss, scanNativeControls, scanTsx } from '../scripts/stylecheck.mjs'
 
 describe('web style checks', () => {
   it('requires the root element to reserve the scrollbar gutter', () => {
@@ -148,5 +148,60 @@ describe('web style checks', () => {
     const diagnostics = scanTsx('<div style={{ color: count === 0 ? \'#fff\' : color }} />', 'x.tsx')
     expect(diagnostics.filter((d) => d.rule === 'color-literal')).toHaveLength(1)
     expect(diagnostics.filter((d) => d.rule === 'inline-style')).toHaveLength(0)
+  })
+})
+
+describe('native control checks', () => {
+  it('rejects native selects, page-level disclosures, control inputs and DOM titles', () => {
+    const diagnostics = scanNativeControls(`
+      <div>
+        <select><option value="a">A</option></select>
+        <details><summary>更多</summary></details>
+        <input type="checkbox" />
+        <input type="date" />
+        <input type="number" />
+        <input type='search' />
+        <span title="提示">x</span>
+      </div>
+    `, 'pages/X.tsx')
+    expect(diagnostics.filter((d) => d.rule === 'native-select')).toHaveLength(2)
+    expect(diagnostics.filter((d) => d.rule === 'native-details')).toHaveLength(2)
+    expect(diagnostics.filter((d) => d.rule === 'native-input-type')).toHaveLength(4)
+    expect(diagnostics.filter((d) => d.rule === 'dom-title')).toHaveLength(1)
+    expect(diagnostics.every((d) => d.severity === 'error')).toBe(true)
+  })
+
+  it('accepts shared primitives and component title props', () => {
+    const diagnostics = scanNativeControls(`
+      <div>
+        <Select value="" options={[]} onChange={() => {}} />
+        <Disclosure summary="更多">内容</Disclosure>
+        <Checkbox label="启用" />
+        <DatePicker value="" onChange={() => {}} />
+        <NumberField value="1" onChange={() => {}} />
+        <SearchField value="" onChange={() => {}} />
+        <Textarea value="" onChange={() => {}} />
+        <Panel title="标题" />
+      </div>
+    `, 'pages/X.tsx')
+    expect(diagnostics).toHaveLength(0)
+  })
+
+  it('allows the primitive implementation file', () => {
+    const code = '<details><summary>x</summary></details><input type="checkbox" /><input type="number" /><input type="search" /><span title="t" />'
+    expect(scanNativeControls(code, 'components/ui.tsx')).toHaveLength(0)
+    expect(scanNativeControls(code, 'components\\ui.tsx')).toHaveLength(0)
+  })
+
+  it('allows text and password inputs', () => {
+    const diagnostics = scanNativeControls('<input type="text" /><input type="password" /><input value="x" />', 'pages/X.tsx')
+    expect(diagnostics).toHaveLength(0)
+  })
+
+  it('finds no native control violations in the application sources', () => {
+    const diagnostics = checkDir('src')
+    expect(diagnostics.filter((d) => (
+      ['native-select', 'native-details', 'native-input-type', 'dom-title'].includes(d.rule)
+    ))).toEqual([])
   })
 })

@@ -176,6 +176,85 @@ function colorInText(text) {
   return /#[0-9a-fA-F]{3,8}\b|\brgba?\(|\bhsla?\(/.test(text)
 }
 
+const NATIVE_CONTROL_TAGS = new Map([
+  ['select', 'native-select'],
+  ['option', 'native-select'],
+  ['details', 'native-details'],
+  ['summary', 'native-details'],
+])
+const NATIVE_INPUT_TYPES = new Set(['checkbox', 'date', 'number', 'search'])
+
+// components/ui.tsx owns the primitives: Checkbox/NumberField/SearchField
+// render native inputs and Disclosure renders details/summary on purpose.
+// Add a file here only when the native control is the documented exception.
+export const NATIVE_CONTROL_ALLOWLIST = new Map([
+  ['components/ui.tsx', new Set(['native-select', 'native-details', 'native-input-type', 'dom-title'])],
+])
+
+function allowNativeControl(file, rule) {
+  const rules = NATIVE_CONTROL_ALLOWLIST.get(file.replace(/\\/g, '/'))
+  return Boolean(rules && rules.has(rule))
+}
+
+function intrinsicTagName(element) {
+  const tagName = element.tagName
+  if (!tagName || !ts.isIdentifier(tagName)) return undefined
+  return /^[a-z]/.test(tagName.text) ? tagName.text : undefined
+}
+
+function literalAttributeValue(attribute) {
+  const initializer = attribute.initializer
+  if (!initializer) return undefined
+  if (ts.isStringLiteral(initializer)) return initializer.text
+  if (ts.isJsxExpression(initializer) && initializer.expression) {
+    const expression = initializer.expression
+    if (ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression)) return expression.text
+  }
+  return undefined
+}
+
+export function scanNativeControls(text, file) {
+  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+  const diagnostics = []
+  const lineOfNode = (node) => source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1
+  const report = (node, rule, message) => {
+    if (allowNativeControl(file, rule)) return
+    diagnostics.push({ file, line: lineOfNode(node), rule, severity: 'error', message })
+  }
+
+  const visit = (node) => {
+    const element = ts.isJsxElement(node) ? node.openingElement : ts.isJsxSelfClosingElement(node) ? node : null
+    if (element) {
+      const tag = intrinsicTagName(element)
+      if (tag) {
+        const tagRule = NATIVE_CONTROL_TAGS.get(tag)
+        if (tagRule) {
+          report(element, tagRule, tagRule === 'native-select'
+            ? '禁止原生 <select>/<option>；请使用 components/ui.tsx 的 Select'
+            : '禁止页面级 <details>/<summary>；请使用 Disclosure')
+        }
+        const attributes = element.attributes.properties.filter(ts.isJsxAttribute)
+        if (tag === 'input') {
+          const typeAttribute = attributes.find((attribute) => attribute.name.text === 'type')
+          const type = typeAttribute ? literalAttributeValue(typeAttribute) : undefined
+          if (type && NATIVE_INPUT_TYPES.has(type)) {
+            report(typeAttribute, 'native-input-type',
+              `禁止原生 input type="${type}"；请使用 Checkbox、DatePicker、NumberField 或 SearchField`)
+          }
+        }
+        const titleAttribute = attributes.find((attribute) => attribute.name.text === 'title')
+        if (titleAttribute) {
+          report(titleAttribute, 'dom-title', '禁止 intrinsic DOM title；请使用 Tooltip 或删除')
+        }
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+
+  visit(source)
+  return diagnostics
+}
+
 export function scanTsx(text, file) {
   const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
   const diagnostics = []
@@ -250,6 +329,7 @@ export function checkDir(root) {
       diagnostics.push(...scanCss(text, file))
     } else {
       diagnostics.push(...scanTsx(text, file))
+      diagnostics.push(...scanNativeControls(text, file))
     }
   }
   return diagnostics

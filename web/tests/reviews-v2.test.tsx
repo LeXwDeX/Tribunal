@@ -129,6 +129,12 @@ describe('review table v2 rows', () => {
     expect(screen.queryByRole('columnheader', { name: '项目' })).not.toBeInTheDocument()
     const link = screen.getByRole('link', { name: '!7 row title' })
     expect(link).toHaveAttribute('href', '/reviews/r-1')
+    // The full title is exposed through the shared Tooltip, never a DOM title.
+    expect(link).not.toHaveAttribute('title')
+    await user.hover(link)
+    const tooltip = await screen.findByRole('tooltip')
+    expect(tooltip).toHaveTextContent('row title')
+    expect(link).toHaveAttribute('aria-describedby', tooltip.id)
     const row = link.closest('tr')!
     expect(within(row).getByText('!7')).toBeInTheDocument()
     expect(within(row).getByText('group/backend')).toBeInTheDocument()

@@ -69,7 +69,6 @@ export function ExecutionGraph({
                 onFocus={() => setHotId(node.id)}
                 onBlur={() => setHotId(null)}
                 aria-pressed={selected}
-                title={node.id}
               >
                 <span className={styles.nodeHead}>
                   <span className={styles.nodeId}>{node.id}</span>

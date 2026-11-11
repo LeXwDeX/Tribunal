@@ -175,7 +175,8 @@ describe('statistics provider quality', () => {
     renderWithProviders(<StatisticsPage />)
     await qualityPanel()
 
-    await user.selectOptions(screen.getByRole('combobox', { name: '项目' }), '42')
+    await user.click(screen.getByRole('combobox', { name: '项目' }))
+    await user.click(await screen.findByRole('option', { name: 'group/backend' }))
     await user.click(screen.getByRole('button', { name: '应用' }))
 
     await waitFor(() => {

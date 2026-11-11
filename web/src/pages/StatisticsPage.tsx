@@ -3,7 +3,8 @@ import { useQuery } from '@tanstack/react-query'
 import { getStats, listProjects } from '../api/api'
 import type { DailyStats, Project, ProviderQualityRow, Stats } from '../api/types'
 import {
-  Badge, Button, EmptyState, ErrorState, LoadingState, Metric, PageHeader, Panel, ToolbarField,
+  Badge, Button, DatePicker, Disclosure, EmptyState, ErrorState, LoadingState, Metric, PageHeader, Panel, Select,
+  TableNote, type SelectOption,
 } from '../components/ui'
 import { formatCost, formatNumber } from '../lib/format'
 import { usePaginated } from '../lib/hooks'
@@ -296,7 +297,11 @@ function QualityPanel({ value }: { value: unknown }) {
   const proposed = state.rows.filter((row) => row.proposed > 0)
   const refuted = state.rows.filter((row) => row.refuted > 0)
   return (
-    <Panel title="人工质量指标" aside="来自 stats.quality_by_provider · 人工标注">
+    <Panel
+      title="人工质量指标"
+      aside="来自 stats.quality_by_provider"
+      note="准确率 = 人工标注有效 / 已复核（有效 + 无效）；推翻率 = 提出方问题被挑战推翻 / 提出问题；误杀率 = 反驳后经人工标注有效 / 复核的反驳。未标注和未确定不计入准确率或误杀率的分母，但仍计入提出数、反驳数和推翻率。缺少 provider 归因的角色不计入。没有样本时显示“无样本”，不显示 0.0%。人工标注不会改变发布结果或评审结论；它不同于下方 GitLab 原始反馈信号。"
+    >
       {state.rows.length === 0 ? (
         <EmptyState title="没有人工质量样本" description="筛选范围内没有可归因的提出或反驳记录；这是已统计的空结果，不是不可用。" />
       ) : (
@@ -315,9 +320,6 @@ function QualityPanel({ value }: { value: unknown }) {
           )}
         </>
       )}
-      <div className={styles.notice}>
-        准确率 = 人工标注有效 / 已复核（有效 + 无效）；推翻率 = 提出方问题被挑战推翻 / 提出问题；误杀率 = 反驳后经人工标注有效 / 复核的反驳。未标注和未确定不计入准确率或误杀率的分母，但仍计入提出数、反驳数和推翻率。缺少 provider 归因的角色不计入。没有样本时显示“无样本”，不显示 0.0%。人工标注不会改变发布结果或评审结论；它不同于下方 GitLab 原始反馈信号。
-      </div>
     </Panel>
   )
 }
@@ -559,9 +561,9 @@ function ProviderAttribution({ providers }: { providers: ProviderFeedbackCounts[
           </table>
         </div>
       )}
-      <div className={styles.notice}>
+      <TableNote>
         计数是反馈归因，不代表判断正确率或误杀率。同一信号可能同时计入提出方和挑战方，不能把两个角色的计数相加当作反馈总数。summary、未关联或关联不一致的反馈不计入。
-      </div>
+      </TableNote>
     </>
   )
 }
@@ -582,7 +584,11 @@ function FeedbackPanel({ value }: { value: unknown }) {
     )
   }
   return (
-    <Panel title="反馈信号" aside="来自 stats.feedback">
+    <Panel
+      title="反馈信号"
+      aside="来自 stats.feedback"
+      note="按 GitLab 反馈信号展示原始计数；这是原始反馈，不代表模型准确率，也不是人工标注的误杀率。人工评估见上方“人工质量指标”。"
+    >
       <div className={styles.statGrid}>
         <Metric label="反馈总数" value={feedback.total} note="按反馈时间与项目筛选计数" />
       </div>
@@ -600,9 +606,6 @@ function FeedbackPanel({ value }: { value: unknown }) {
         <span className="small muted">stats.feedback 没有返回按信号的明细。</span>
       )}
       <ProviderAttribution providers={feedback.providers} />
-      <div className={styles.notice}>
-        按 GitLab 反馈信号展示原始计数；这是原始反馈，不代表模型准确率，也不是人工标注的误杀率。人工评估见上方“人工质量指标”。
-      </div>
     </Panel>
   )
 }
@@ -745,8 +748,11 @@ function ProjectStatsPanel({ value }: { value: unknown }) {
   }
 
   return (
-    <Panel title="项目统计" aside="按工作流创建时间 · 来自 stats.by_project">
-      <p className="small muted">运行次数统计窗口内全部工作流（含评审与 onboarding）；BLOCKING 与已发布仍按项目工作流统计。</p>
+    <Panel
+      title="项目统计"
+      aside="来自 stats.by_project"
+      note="运行次数统计窗口内全部工作流（含评审与 onboarding）；BLOCKING 与已发布仍按项目工作流统计。日期按工作流创建时间归入 UTC 日；筛选范围仍按浏览器本地日选择。"
+    >
       <div className="tableWrap">
         <table className={`dataTable ${insights.min920}`} aria-label="按项目统计明细">
           <thead>
@@ -810,7 +816,6 @@ function ProjectStatsPanel({ value }: { value: unknown }) {
           </tbody>
         </table>
       </div>
-      <div className={styles.notice}>日期按工作流创建时间归入 UTC 日；筛选范围仍按浏览器本地日选择。</div>
     </Panel>
   )
 }
@@ -844,7 +849,13 @@ function GroupStatsPanel({ value, dimension }: { value: unknown; dimension: 'pro
   }
 
   return (
-    <Panel title={title} aside={`按已启动节点统计 · 来自 stats.by_${dimension}`}>
+    <Panel
+      title={title}
+      aside={`来自 stats.by_${dimension}`}
+      note={dimension === 'provider'
+        ? '运行次数按已启动节点统计：只要节点有开始时间（started_at）就计入，每个当前保存的节点行只计一次。不按状态字段筛选，运行中、已完成和失败的节点都会计入；也不等于 LLM 调用次数或重试尝试次数。没有 provider 的节点只计入 block。这里显示当前保存的最新一次尝试，不是重试尝试历史。'
+        : '与 Provider 统计使用同一已启动节点口径；Block 始终存在，因此没有 provider 的节点仍会显示在这里。'}
+    >
       <div className="tableWrap">
         <table className={`dataTable ${insights.min820}`} aria-label={`按 ${dimension} 统计明细`}>
           <thead>
@@ -899,15 +910,6 @@ function GroupStatsPanel({ value, dimension }: { value: unknown; dimension: 'pro
           </tbody>
         </table>
       </div>
-      {dimension === 'provider' ? (
-        <div className={styles.notice}>
-          运行次数按已启动节点统计：只要节点有开始时间（started_at）就计入，每个当前保存的节点行只计一次。不按状态字段筛选，运行中、已完成和失败的节点都会计入；也不等于 LLM 调用次数或重试尝试次数。没有 provider 的节点只计入 block。这里显示当前保存的最新一次尝试，不是重试尝试历史。
-        </div>
-      ) : (
-        <div className={styles.notice}>
-          与 Provider 统计使用同一已启动节点口径；Block 始终存在，因此没有 provider 的节点仍会显示在这里。
-        </div>
-      )}
     </Panel>
   )
 }
@@ -940,22 +942,24 @@ function StatsContent({ stats }: { stats: Stats }) {
         <Metric label="成本" value={(() => { const cost = statNumber(stats, 'cost_micros'); return cost === null ? '不可用' : formatCost(cost) })()} note="按 API 的 micros 原值换算" />
       </div>
 
-      <Panel title="每日运行趋势" aside="来自 stats.trend · UTC 日">
+      <Panel
+        title="每日运行趋势"
+        aside="来自 stats.trend · UTC 日"
+        note="趋势按工作流创建时间归入 UTC 日，只返回有执行的日期，不补零。用时为空时表示没有有效的开始与结束时间配对；样本数显示参与计算的配对数量。"
+      >
         <OverallTrend trend={trend} />
-        <div className={styles.notice}>
-          趋势按工作流创建时间归入 UTC 日，只返回有执行的日期，不补零。用时为空时表示没有有效的开始与结束时间配对；样本数显示参与计算的配对数量。
-        </div>
       </Panel>
 
-      <Panel title="问题处置分布" aside="来自 stats.decisions">
+      <Panel
+        title="问题处置分布"
+        aside="来自 stats.decisions"
+        note="人工标注在评审详情的问题展开行中维护；这里只显示规则处置分布，人工评估汇总见下方“人工质量指标”。"
+      >
         {decisions.length ? (
           <div className={styles.budgetRow}>
             {decisions.map((row) => <Badge key={row.label} tone={row.label === 'publish' ? 'ok' : row.label === 'mark' ? 'warn' : 'neutral'}>{row.label}: {row.count}</Badge>)}
           </div>
         ) : <EmptyState title="没有处置分布数据" description="stats.decisions 缺失或为空；显示不可用，而不是零值。" />}
-        <div className={styles.notice}>
-          人工标注在评审详情的问题展开行中维护；这里只显示规则处置分布，人工评估汇总见下方“人工质量指标”。
-        </div>
       </Panel>
 
       <QualityPanel value={stats.quality_by_provider} />
@@ -970,10 +974,9 @@ function StatsContent({ stats }: { stats: Stats }) {
         <DimensionTable rows={byModel} emptyLabel="没有按模型统计" />
       </Panel>
 
-      <details className={ui.disclosure}>
-        <summary>查看原始 stats 响应</summary>
+      <Disclosure summary="查看原始 stats 响应">
         <pre className={`pre statsJson ${ui.jsonBlock}`}>{JSON.stringify(stats, null, 2)}</pre>
-      </details>
+      </Disclosure>
     </>
   )
 }
@@ -994,6 +997,8 @@ export function StatisticsPage() {
   const [projectId, setProjectId] = useState(initial.projectId)
   const [applied, setApplied] = useState(initial)
   const [validation, setValidation] = useState('')
+  const [fromValid, setFromValid] = useState(true)
+  const [toValid, setToValid] = useState(true)
 
   const projects = usePaginated<Project>(
     ['projects', 'statistics'],
@@ -1011,12 +1016,18 @@ export function StatisticsPage() {
   })
 
   const apply = () => {
+    if (!fromValid || !toValid) { setValidation('请修正日期格式。'); return }
     if (!fromDate || !toDate) { setValidation('请选择开始和结束日期。'); return }
     if (fromDate > toDate) { setValidation('开始日期不能晚于结束日期。'); return }
     if (!dateRange({ fromDate, toDate })) { setValidation('日期范围无效，请重新选择。'); return }
     setValidation('')
     setApplied({ fromDate, toDate, projectId })
   }
+
+  const projectChoices: SelectOption[] = [
+    { value: '', label: '全部项目' },
+    ...projects.items.map((project) => ({ value: String(project.id), label: project.path_with_namespace })),
+  ]
 
   return (
     <main className={ui.page}>
@@ -1026,18 +1037,40 @@ export function StatisticsPage() {
           description="按时间与项目查看运行统计、每日趋势和节点维度数据；不可用的值不会显示为零。"
           actions={(
             <div className={insights.headerFilters} role="group" aria-label="筛选">
-              <ToolbarField label="开始日期">
-                <input className="input" name="from" type="date" value={fromDate} onChange={(event) => setFromDate(event.target.value)} />
-              </ToolbarField>
-              <ToolbarField label="结束日期">
-                <input className="input" name="to" type="date" value={toDate} onChange={(event) => setToDate(event.target.value)} />
-              </ToolbarField>
-              <ToolbarField label="项目">
-                <select className="select" name="project_id" value={projectId} onChange={(event) => setProjectId(event.target.value)}>
-                  <option value="">全部项目</option>
-                  {projects.items.map((project) => <option key={project.id} value={project.id}>{project.path_with_namespace}</option>)}
-                </select>
-              </ToolbarField>
+              <div className={insights.filterField}>
+                <span className={insights.filterLabel}>开始日期</span>
+                <div className={insights.dateFilter}>
+                  <DatePicker
+                    value={fromDate}
+                    onChange={setFromDate}
+                    onValidityChange={setFromValid}
+                    aria-label="开始日期"
+                  />
+                </div>
+              </div>
+              <div className={insights.filterField}>
+                <span className={insights.filterLabel}>结束日期</span>
+                <div className={insights.dateFilter}>
+                  <DatePicker
+                    value={toDate}
+                    onChange={setToDate}
+                    onValidityChange={setToValid}
+                    aria-label="结束日期"
+                  />
+                </div>
+              </div>
+              <div className={insights.filterField}>
+                <span className={insights.filterLabel}>项目</span>
+                <div className={insights.filterSelect}>
+                  <Select
+                    value={projectId}
+                    options={projectChoices}
+                    onChange={setProjectId}
+                    aria-label="项目"
+                    emptyLabel="全部项目"
+                  />
+                </div>
+              </div>
               {projects.hasNextPage ? (
                 <Button
                   variant="secondary"

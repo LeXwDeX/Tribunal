@@ -373,9 +373,14 @@
   gap: var(--space-sm);
 }
 
-.findingFilters select {
-  width: auto;
-  height: 32px;
+.severityFilter {
+  display: flex;
+  width: 132px;
+}
+
+.severityFilter > * {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 /* Narrow screens scroll the table inside .tableWrap instead of squeezing it. */
@@ -771,7 +776,7 @@
 
 .call:last-child { border-bottom: 0; }
 
-.callSummary {
+.call > summary {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -782,8 +787,18 @@
   list-style: none;
 }
 
-.callSummary::-webkit-details-marker { display: none; }
-.callSummary:hover { background: var(--surface-2); }
+.call > summary::-webkit-details-marker { display: none; }
+
+.call > summary > span {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-xs) 14px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.call > summary:hover { background: var(--surface-2); }
 
 .callStop { margin-left: auto; }
 

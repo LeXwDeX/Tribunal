@@ -10,7 +10,7 @@ import type {
 } from '../../api/types'
 import { useCanWrite } from '../../components/RoleContext'
 import {
-  Badge, Button, ConfirmDialog, Dialog, EmptyState, ErrorState, Field, LoadingState, Panel, Tabs, useToast,
+  Badge, Button, Checkbox, ConfirmDialog, Dialog, Disclosure, EmptyState, ErrorState, Field, LoadingState, Panel, Select, Tabs, Textarea, useToast,
 } from '../../components/ui'
 import { usePaginated } from '../../lib/hooks'
 import { formatJson } from '../../lib/format'
@@ -428,8 +428,7 @@ function McpTab({
                           {result?.tools ? (
                             <div className={styles.testResult} role="status">
                               {result.tools.length ? (
-                                <details className={ui.disclosure}>
-                                  <summary>测试成功：{result.tools.length} 个工具</summary>
+                                <Disclosure summary={`测试成功：${result.tools.length} 个工具`}>
                                   <ul className={styles.toolsList}>
                                     {result.tools.map((tool) => (
                                       <li key={tool.name} className={styles.listItem}>
@@ -440,7 +439,7 @@ function McpTab({
                                       </li>
                                     ))}
                                   </ul>
-                                </details>
+                                </Disclosure>
                               ) : <span>测试成功，但服务端没有返回工具列表。</span>}
                             </div>
                           ) : null}
@@ -481,7 +480,7 @@ function SkillsTab({
   }, [bindings])
 
   return (
-    <Panel title="Skill" aside="首版只支持指令类 Skill，其中的脚本不会被执行。">
+    <Panel title="Skill" note="首版只支持指令类 Skill，其中的脚本不会被执行。">
       {skills.isPending ? <LoadingState /> : null}
       {skills.isError ? <ErrorState error={skills.error} onRetry={skills.retry} /> : null}
       {skills.isSuccess && skills.items.length === 0 ? <EmptyState title="还没有 Skill" description="内置 Skill 由平台管理。" /> : null}
@@ -1224,19 +1223,22 @@ function BindingsTab({
     <>
     <Panel
       title="块绑定"
-      aside={scope === 'platform' ? '平台默认绑定' : '项目覆盖绑定（未覆盖的块继承平台默认）'}
+      aside={scope === 'platform' ? '平台默认绑定' : '项目覆盖绑定'}
+      note={scope === 'platform' ? undefined : '未覆盖的块继承平台默认。'}
     >
       {canRestore ? (
         <div className={ext.restoreBar}>
           <div className={ext.restoreText}>
             <span className={ext.restoreTitle}>内置默认授权</span>
-            <span>恢复只处理平台级绑定。全部恢复由服务端选择全部可恢复块。</span>
             {dirty ? (
               <span className={ext.restoreWarning} role="status">先保存绑定再恢复默认，未保存的更改会丢失。</span>
             ) : null}
           </div>
           <Button variant="secondary" disabled={dirty || saving || restoring || hasConflicts} onClick={() => openRestore('all')}>恢复全部默认</Button>
         </div>
+      ) : null}
+      {canRestore ? (
+        <p className={ext.restoreHint}>恢复只处理平台级绑定。全部恢复由服务端选择全部可恢复块。</p>
       ) : null}
       {hasConflicts ? (
         <div className={styles.warning}>
@@ -1634,34 +1636,39 @@ function EditMcpDialog({ server, onClose, onSaved }: { server: McpServer | null;
           <input id={nameId} className="input" value={name} onChange={(event) => setName(event.target.value)} aria-invalid={Boolean(fieldError)} disabled={pending} />
         </Field>
         <Field label="启用" htmlFor="mcp-edit-enabled">
-          <select id="mcp-edit-enabled" className="select" value={enabled ? 'true' : 'false'} onChange={(event) => setEnabled(event.target.value === 'true')} disabled={pending}>
-            <option value="true">启用</option>
-            <option value="false">停用</option>
-          </select>
+          <Select
+            id="mcp-edit-enabled"
+            value={enabled ? 'true' : 'false'}
+            options={[{ value: 'true', label: '启用' }, { value: 'false', label: '停用' }]}
+            onChange={(value) => setEnabled(value === 'true')}
+            disabled={pending}
+          />
         </Field>
       </div>
       {server ? (
-        <details className={ui.disclosure}>
-          <summary>查看服务端返回的配置（已隐藏）</summary>
+        <Disclosure summary="查看服务端返回的配置（已隐藏）">
           <pre className={`pre ${ui.jsonBlock}`}>{formatJson(server.config)}</pre>
-        </details>
+        </Disclosure>
       ) : null}
-      <label className="checkboxRow">
-        <input type="checkbox" checked={replaceConfig} disabled={pending} onChange={(event) => {
+      <Checkbox
+        id="mcp-replace-config-enabled"
+        label="替换完整配置"
+        checked={replaceConfig}
+        disabled={pending}
+        onChange={(event) => {
           setReplaceConfig(event.target.checked)
           setConfigText('')
           setFieldError('')
-        }} />
-        <span>替换完整配置</span>
-      </label>
+        }}
+      />
       {replaceConfig ? (
         <>
+          <Field label="新的配置 JSON" htmlFor="mcp-replace-config" hint="从空白开始填写完整配置。">
+            <Textarea id="mcp-replace-config" code rows={9} value={configText} onChange={(event) => setConfigText(event.target.value)} spellCheck={false} disabled={pending} />
+          </Field>
           <div className={styles.warning}>
             替换会覆盖已有配置。脱敏的 env/header 值不会保留；如配置需要密钥，请重新填写完整值，且不要粘贴脱敏占位符。
           </div>
-          <Field label="新的配置 JSON" htmlFor="mcp-replace-config" hint="从空白开始填写完整配置。">
-            <textarea id="mcp-replace-config" className="textarea textareaCode" rows={9} value={configText} onChange={(event) => setConfigText(event.target.value)} spellCheck={false} disabled={pending} />
-          </Field>
         </>
       ) : null}
     </Dialog>

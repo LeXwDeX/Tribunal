@@ -43,6 +43,13 @@ function mock(handler?: (url: string, init?: RequestInit) => Response | undefine
 
 const isPut = (url: string, init?: RequestInit) => url === '/api/v1/profiles/default/overrides' && init?.method === 'PUT'
 
+const PROFILE_LABELS = ['默认', '探索', 'code-review', 'review', 'reasoner', 'validate', 'challenge']
+
+async function chooseOption(user: ReturnType<typeof userEvent.setup>, trigger: HTMLElement, name: RegExp | string) {
+  await user.click(trigger)
+  await user.click(await screen.findByRole('option', { name }))
+}
+
 async function openEditor() {
   const user = userEvent.setup()
   renderWithProviders(<ModelsPage />, { route: '/models' })
@@ -76,10 +83,10 @@ describe('profile node sources, params and same-model hint (#339)', () => {
   it('saves model and params overrides with the current revision', async () => {
     const fetchMock = mock((url, init) => (isPut(url, init) ? jsonResponse(detail) : undefined))
     const user = await openEditor()
-    await user.selectOptions(screen.getByLabelText('validate 模型'), 'user:one')
+    await chooseOption(user, screen.getByLabelText('validate 模型'), /^one（user:one）/)
     await user.type(screen.getByLabelText('validate max_tokens'), '1500')
     await user.type(screen.getByLabelText('validate temperature'), '0.3')
-    await user.selectOptions(screen.getByLabelText('validate reasoning.effort'), 'max')
+    await chooseOption(user, screen.getByLabelText('validate reasoning.effort'), 'max')
     await user.type(screen.getByLabelText('validate thinking.budget_tokens'), '2048')
     await user.click(screen.getByRole('button', { name: '保存' }))
     await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => isPut(String(url), init))).toBe(true))
@@ -114,10 +121,14 @@ describe('profile node sources, params and same-model hint (#339)', () => {
 
   it('disables unavailable models and shows the reason', async () => {
     mock()
-    await openEditor()
-    const options = screen.getAllByRole('option', { name: /bad.*不可用：credential/ })
-    expect(options.length).toBe(7)
-    expect(options.every((option) => option.hasAttribute('disabled'))).toBe(true)
+    const user = await openEditor()
+    for (const label of PROFILE_LABELS) {
+      await user.click(screen.getByRole('combobox', { name: `${label} 模型` }))
+      const options = await screen.findAllByRole('option', { name: /bad.*不可用：credential/ })
+      expect(options).toHaveLength(1)
+      expect(options[0]).toHaveAttribute('aria-disabled', 'true')
+      await user.keyboard('{Escape}')
+    }
   })
 
   it('maps 400 field paths next to the matching inputs', async () => {
