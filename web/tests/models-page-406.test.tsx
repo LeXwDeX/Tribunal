@@ -15,7 +15,9 @@ const v4Preset = {
   params: {
     max_tokens: 393216,
     context_window: 655360,
+    temperature: null,
     reasoning: { effort: 'max' },
+    thinking: null,
     forced_tool_choice: 'unsupported',
     strict_role_alternation: false,
     max_concurrency: 500,
@@ -166,6 +168,76 @@ describe('model form capability fields (#406)', () => {
     })
   })
 
+  it('keeps a temperature the preset does not define and clears its thinking', async () => {
+    const user = userEvent.setup()
+    const fetchMock = installFetch(routes({ models: [] }))
+    renderWithProviders(<ModelsPage />, { route: '/models' })
+    await openCreate(user)
+    await user.type(screen.getByLabelText('temperature'), '0.7')
+    await user.click(await screen.findByRole('button', { name: 'DeepSeek Flash 最大能力' }))
+    expect(screen.getByLabelText('temperature')).toHaveValue(0.7)
+    expect(screen.getByLabelText('thinking.type')).toHaveTextContent('不设置')
+    expect(screen.getByLabelText('thinking.budget_tokens')).toHaveValue(null)
+
+    await user.click(screen.getByRole('button', { name: '创建' }))
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/v1/models' && init?.method === 'POST')).toBe(true))
+    const params = postedBody(fetchMock, 'POST').params as Record<string, unknown>
+    expect(params.temperature).toBe(0.7)
+    expect(params.thinking).toBeUndefined()
+  })
+
+  it('submits thinking.type without a budget when the budget is blank', async () => {
+    const user = userEvent.setup()
+    const fetchMock = installFetch(routes({ models: [] }))
+    renderWithProviders(<ModelsPage />, { route: '/models' })
+    await openCreate(user)
+    await fillConnection(user)
+    await chooseOption(user, screen.getByLabelText('thinking.type'), 'enabled')
+    await user.click(screen.getByRole('button', { name: '创建' }))
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/v1/models' && init?.method === 'POST')).toBe(true))
+    expect((postedBody(fetchMock, 'POST').params as Record<string, unknown>).thinking).toEqual({ type: 'enabled' })
+  })
+
+  it('treats a zero thinking budget as unset', async () => {
+    const user = userEvent.setup()
+    const fetchMock = installFetch(routes({ models: [] }))
+    renderWithProviders(<ModelsPage />, { route: '/models' })
+    await openCreate(user)
+    await fillConnection(user)
+    await chooseOption(user, screen.getByLabelText('thinking.type'), 'disabled')
+    fireEvent.change(screen.getByLabelText('thinking.budget_tokens'), { target: { value: '0' } })
+    await user.click(screen.getByRole('button', { name: '创建' }))
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/v1/models' && init?.method === 'POST')).toBe(true))
+    const thinking = (postedBody(fetchMock, 'POST').params as Record<string, unknown>).thinking
+    expect(thinking).toEqual({ type: 'disabled' })
+    expect((thinking as Record<string, unknown>).budget_tokens).toBeUndefined()
+  })
+
+  it('clears the stored thinking object when type and budget are cleared', async () => {
+    const user = userEvent.setup()
+    const fetchMock = installFetch(routes({ models: [storedModel] }))
+    renderWithProviders(<ModelsPage />, { route: '/models' })
+    await user.click(await screen.findByRole('button', { name: '编辑' }))
+    await chooseOption(user, screen.getByLabelText('thinking.type'), '不设置')
+    await user.clear(screen.getByLabelText('thinking.budget_tokens'))
+    await user.click(screen.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'PATCH')).toBe(true))
+    expect((postedBody(fetchMock, 'PATCH').params as Record<string, unknown>).thinking).toBeUndefined()
+  })
+
+  it('submits an explicit zero temperature', async () => {
+    const user = userEvent.setup()
+    const fetchMock = installFetch(routes({
+      models: [{ ...storedModel, params: { ...storedModel.params, temperature: 0 } }],
+    }))
+    renderWithProviders(<ModelsPage />, { route: '/models' })
+    await user.click(await screen.findByRole('button', { name: '编辑' }))
+    expect(screen.getByLabelText('temperature')).toHaveValue(0)
+    await user.click(screen.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'PATCH')).toBe(true))
+    expect((postedBody(fetchMock, 'PATCH').params as Record<string, unknown>).temperature).toBe(0)
+  })
+
   it('echoes every stored capability field when editing and never submits price', async () => {
     const user = userEvent.setup()
     const fetchMock = installFetch(routes({ models: [storedModel] }))
@@ -252,6 +324,19 @@ describe('model form capability fields (#406)', () => {
     expect(await screen.findByText('provider test failed')).toBeInTheDocument()
   })
 
+  it('surfaces 503 save failures without field details', async () => {
+    const user = userEvent.setup()
+    installFetch(routes({
+      models: [],
+      create: jsonResponse({ error: { code: 'unavailable', message: 'model catalog is unavailable' } }, 503),
+    }))
+    renderWithProviders(<ModelsPage />, { route: '/models' })
+    await openCreate(user)
+    await fillConnection(user)
+    await user.click(screen.getByRole('button', { name: '创建' }))
+    expect(await screen.findByText('model catalog is unavailable')).toBeInTheDocument()
+  })
+
   it('surfaces draft test failures that carry no field details', async () => {
     const user = userEvent.setup()
     installFetch(routes({
@@ -279,6 +364,12 @@ describe('model form capability fields (#406)', () => {
     expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/v1/models' && init?.method === 'POST')).toBe(false)
 
     fireEvent.change(screen.getByLabelText('thinking.budget_tokens'), { target: { value: '1024' } })
+    fireEvent.change(screen.getByLabelText('max_tokens'), { target: { value: '512' } })
+    await user.click(screen.getByRole('button', { name: '创建' }))
+    expect(await screen.findByText('anthropic 的 thinking.budget_tokens 必须小于 max_tokens。')).toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/v1/models' && init?.method === 'POST')).toBe(false)
+
+    fireEvent.change(screen.getByLabelText('max_tokens'), { target: { value: '4096' } })
     await user.click(screen.getByRole('button', { name: '创建' }))
     await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/v1/models' && init?.method === 'POST')).toBe(true))
   })
@@ -312,6 +403,19 @@ describe('model form capability fields (#406)', () => {
     const before = fetchMock.mock.calls.filter(([url]) => url === '/api/v1/model-presets').length
     await user.click(screen.getByRole('button', { name: '重试' }))
     await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => url === '/api/v1/model-presets').length).toBe(before + 1))
+  })
+
+  it('hides the preset section quietly when the endpoint is missing', async () => {
+    const user = userEvent.setup()
+    installFetch(routes({
+      models: [],
+      presetsResponse: jsonResponse({ error: { code: 'not_found', message: 'not found' } }, 404),
+    }))
+    renderWithProviders(<ModelsPage />, { route: '/models' })
+    await openCreate(user)
+    await waitFor(() => expect(screen.queryByText('预设加载中…')).not.toBeInTheDocument())
+    expect(screen.queryByRole('region', { name: '模型预设' })).not.toBeInTheDocument()
+    expect(screen.queryByText('预设加载失败，仍可手动填写。')).not.toBeInTheDocument()
   })
 
   it('shows the YAML path on read-only config model cards and no price summary', async () => {

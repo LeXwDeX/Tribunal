@@ -159,6 +159,8 @@ function formFromModel(model?: Model): ModelForm {
 
 // A preset fills the local form only. The user can change any field before
 // saving; nothing is written until the normal create/update request (#405).
+// A parameter the preset does not define (temperature is null) keeps the value
+// already in the form, matching POST /models/{id}/preset semantics.
 function formFromPreset(preset: ModelPreset, current: ModelForm): ModelForm {
   const params = preset.params
   return {
@@ -171,7 +173,7 @@ function formFromPreset(preset: ModelPreset, current: ModelForm): ModelForm {
     maxConcurrency: numberText(params.max_concurrency),
     contextWindow: numberText(params.context_window),
     rpm: numberText(params.rpm),
-    temperature: numberText(params.temperature),
+    temperature: typeof params.temperature === 'number' ? numberText(params.temperature) : current.temperature,
     forcedToolChoice: params.forced_tool_choice ?? '',
     strictRoleAlternation: params.strict_role_alternation === true,
     effort: params.reasoning?.effort ?? '',
@@ -211,8 +213,12 @@ function validateModelForm(form: ModelForm): FormErrors {
   const budget = form.thinkingBudget.trim()
   if (budget && !NON_NEGATIVE_INT.test(budget)) {
     errors.thinkingBudget = 'thinking.budget_tokens 必须是不小于 0 的整数。'
-  } else if (budget && form.protocol === 'anthropic' && Number(budget) > 0 && Number(budget) < 1024) {
-    errors.thinkingBudget = 'anthropic 的 thinking.budget_tokens 必须不小于 1024。'
+  } else if (budget && form.protocol === 'anthropic' && Number(budget) > 0) {
+    const value = Number(budget)
+    if (value < 1024) errors.thinkingBudget = 'anthropic 的 thinking.budget_tokens 必须不小于 1024。'
+    else if (maxTokens && Number(maxTokens) > 0 && value >= Number(maxTokens)) {
+      errors.thinkingBudget = 'anthropic 的 thinking.budget_tokens 必须小于 max_tokens。'
+    }
   }
   return errors
 }
@@ -239,9 +245,13 @@ function buildParams(model: Model | undefined, form: ModelForm): ModelParams {
   params.strict_role_alternation = form.strictRoleAlternation
   if (form.effort) params.reasoning = { effort: form.effort }
   else delete params.reasoning
-  if (form.thinkingType || form.thinkingBudget.trim()) {
+  // A zero budget means "not set": omit budget_tokens, and omit the whole
+  // thinking object when no type is selected either.
+  const thinkingBudget = form.thinkingBudget.trim()
+  const hasThinkingBudget = thinkingBudget !== '' && Number(thinkingBudget) > 0
+  if (form.thinkingType || hasThinkingBudget) {
     params.thinking = {}
-    if (form.thinkingBudget.trim()) params.thinking.budget_tokens = Number(form.thinkingBudget)
+    if (hasThinkingBudget) params.thinking.budget_tokens = Number(thinkingBudget)
     if (form.thinkingType) params.thinking.type = form.thinkingType
   } else delete params.thinking
   params.preserve_reasoning_content = form.preserveReasoningContent
@@ -363,13 +373,14 @@ function ModelCard({ model, canWrite, onEdit, onDelete }: {
 }
 
 function ModelDrawer({
-  open, model, presets, presetsLoading, presetsFailed, onReloadPresets, onClose, onSaved,
+  open, model, presets, presetsLoading, presetsFailed, presetsUnavailable, onReloadPresets, onClose, onSaved,
 }: {
   open: boolean
   model?: Model
   presets: ModelPreset[]
   presetsLoading: boolean
   presetsFailed: boolean
+  presetsUnavailable: boolean
   onReloadPresets: () => void
   onClose: () => void
   onSaved: () => void
@@ -515,7 +526,7 @@ function ModelDrawer({
       )}
     >
       <div className={styles.modelForm}>
-        {!configModel && !model ? (
+        {!configModel && !model && !presetsUnavailable ? (
           <section className={styles.presetBlock} aria-label="模型预设">
             <span className={styles.presetTitle}>DeepSeek 预设</span>
             {presetsLoading ? <LoadingState label="预设加载中…" /> : presetsFailed ? (
@@ -620,7 +631,7 @@ function ModelDrawer({
             <Field label="thinking.type" htmlFor={ids.thinkingType} hint="仅 openai-chat 发送 thinking.type；anthropic 由 budget_tokens 决定。" error={errors.thinkingType}>
               <Select id={ids.thinkingType} value={form.thinkingType} options={THINKING_TYPE_OPTIONS} onChange={(value) => update({ thinkingType: value })} aria-invalid={errors.thinkingType ? true : undefined} />
             </Field>
-            <Field label="thinking.budget_tokens" htmlFor={ids.thinkingBudget} hint="0 或留空表示不设置；anthropic 启用时必须不小于 1024。" error={errors.thinkingBudget}>
+            <Field label="thinking.budget_tokens" htmlFor={ids.thinkingBudget} hint="0 或留空表示不设置；仅 anthropic 生效，启用时必须不小于 1024 且小于 max_tokens。" error={errors.thinkingBudget}>
               <NumberField id={ids.thinkingBudget} min={0} step={1} value={form.thinkingBudget} aria-invalid={errors.thinkingBudget ? true : undefined} onChange={(event) => update({ thinkingBudget: event.target.value })} />
             </Field>
             <div className={styles.checkField}>
@@ -849,6 +860,7 @@ export function ModelsPage() {
         presets={modelPresets.data?.presets ?? []}
         presetsLoading={modelPresets.isPending}
         presetsFailed={modelPresets.isError}
+        presetsUnavailable={modelPresets.isError && modelPresets.error instanceof ApiError && modelPresets.error.status === 404}
         onReloadPresets={() => { void modelPresets.refetch() }}
         onClose={() => setDrawerOpen(false)}
         onSaved={saved}
