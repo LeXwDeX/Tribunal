@@ -150,3 +150,18 @@ web/
 | 操作说明 | `ActionHint` | 按钮组下方 |
 
 `Panel` 的 `aside` 只放计数、状态、来源短标签、链接和操作，长说明不放在这里。警示与错误保持 `role="alert"` / `role="status"`，不降级为普通说明。
+
+### 4.2 UI-KIT 表单与控制原语
+
+`web/src/components/ui.tsx` 提供以下原语，新页面和新表单优先复用。
+
+| 原语 | 约定 |
+| --- | --- |
+| `Select` | 单选 combobox；空值显示 `emptyLabel`，默认「继承」；空值语义为「全部」等其它含义时显式传入 `emptyLabel`。键盘、ARIA（`aria-activedescendant`）与点外关闭由原语负责。 |
+| `Checkbox` | 视觉隐藏原生 `input`，保留 label 点击、Space 与 `focus-visible`。组件自带 label，不要再包在 `Field` 里，避免重复关联 label；需要说明文字时用 `FieldHint` 并手动设置 `aria-describedby`。 |
+| `DatePicker` | 值格式 `YYYY-MM-DD`，按本地日历日处理；支持 `min`/`max`、手动输入、清空、Esc 与点外关闭。不得用 `new Date('YYYY-MM-DD')`（按 UTC 解析会使日期偏移）。模态（`Dialog`/`Drawer`）内暂不支持 DatePicker 弹层，与 `useModalFocus` 的焦点陷阱冲突，后续 Issue 支持。 |
+| `NumberField` / `SearchField` / `Textarea` | 保留原生可访问语义（`spinbutton`、`searchbox`、文本域），隐藏浏览器默认 spinner/清除叉；`Textarea` 传 `code` 使用代码变体。 |
+| `Tooltip` | hover 与 focus 显示、Esc 关闭，通过 `aria-describedby` 关联；不使用 DOM `title`。 |
+| `Disclosure` | 保留 `<details>` / `<summary>` 语义，隐藏原生 marker，使用自定义 chevron。 |
+
+例外：移动端原生日期滚轮、滚动条、密码管理器、textarea resize、焦点与选区仍保留浏览器行为；这些原语不新增 npm 依赖。

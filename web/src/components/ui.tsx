@@ -1,6 +1,8 @@
 import {
-  cloneElement, createContext, forwardRef, isValidElement, useCallback, useContext, useEffect, useId, useRef, useState,
-  type AnchorHTMLAttributes, type ButtonHTMLAttributes, type ReactElement, type ReactNode,
+  cloneElement, createContext, forwardRef, isValidElement, useCallback, useContext, useEffect, useId, useLayoutEffect, useRef,
+  useState,
+  type AnchorHTMLAttributes, type ButtonHTMLAttributes, type CSSProperties, type InputHTMLAttributes, type ReactElement,
+  type ReactNode, type Ref, type TextareaHTMLAttributes,
 } from 'react'
 import { createPortal } from 'react-dom'
 import { Link, type LinkProps } from 'react-router-dom'
@@ -417,6 +419,1007 @@ export function Switch({ checked, onChange, label, disabled }: { checked: boolea
       onClick={() => onChange(!checked)}
       className={classNames(styles.switch, checked && styles.switchOn)}
     />
+  )
+}
+
+/* ---------------------------------------------------------------------------
+ * Form and control primitives
+ * ------------------------------------------------------------------------- */
+
+function assignRef<T>(ref: Ref<T> | undefined, node: T | null) {
+  if (!ref) return
+  if (typeof ref === 'function') ref(node)
+  else (ref as { current: T | null }).current = node
+}
+
+function mergeRefs<T>(...refs: Array<Ref<T> | undefined>): (node: T | null) => void {
+  return (node) => {
+    for (const ref of refs) assignRef(ref, node)
+  }
+}
+
+function viewportWidth() {
+  return document.documentElement.clientWidth || window.innerWidth
+}
+
+// Popovers are portaled and fixed so they escape overflow containers. The
+// position is computed from the anchor rect, which is data-driven inline style.
+function usePopoverPosition(
+  open: boolean,
+  anchorRef: React.RefObject<HTMLElement | null>,
+  matchAnchorWidth: boolean,
+  width: number,
+  estimatedHeight: number,
+) {
+  const [style, setStyle] = useState<CSSProperties>()
+  useLayoutEffect(() => {
+    if (!open) return
+    const update = () => {
+      const anchor = anchorRef.current
+      if (!anchor) return
+      const rect = anchor.getBoundingClientRect()
+      const vw = viewportWidth()
+      const vh = window.innerHeight
+      const preferred = matchAnchorWidth ? Math.max(width, rect.width) : width
+      const popupWidth = Math.min(preferred, Math.max(160, vw - 16))
+      const left = Math.min(Math.max(8, rect.left), Math.max(8, vw - popupWidth - 8))
+      const spaceBelow = vh - rect.bottom
+      const openUp = spaceBelow < estimatedHeight + 16 && rect.top > spaceBelow
+      // Never exceed the space actually available on the chosen side.
+      const available = (openUp ? rect.top : spaceBelow) - 12
+      const maxHeight = Math.max(0, Math.min(estimatedHeight, available))
+      setStyle(openUp
+        ? { left, width: popupWidth, bottom: vh - rect.top + 4, maxHeight }
+        : { left, width: popupWidth, top: rect.bottom + 4, maxHeight })
+    }
+    update()
+    window.addEventListener('resize', update)
+    window.addEventListener('scroll', update, true)
+    return () => {
+      window.removeEventListener('resize', update)
+      window.removeEventListener('scroll', update, true)
+    }
+  }, [open, anchorRef, matchAnchorWidth, width, estimatedHeight])
+  return style
+}
+
+export interface TooltipPosition {
+  left: number
+  top: number
+  placement: 'above' | 'below'
+}
+
+export interface TooltipAnchorRect {
+  left: number
+  top: number
+  width: number
+  height: number
+}
+
+// Pure geometry so the 390px edges, long-content widths and flip/clamp cases
+// are testable without a layout engine. The tooltip CSS translates by -50%
+// horizontally and by -100% vertically when placement is "above".
+export function computeTooltipPosition(
+  anchor: TooltipAnchorRect,
+  tooltip: { width: number; height: number },
+  viewport: { width: number; height: number },
+  offset = 8,
+): TooltipPosition {
+  const minLeft = offset + tooltip.width / 2
+  const maxLeft = viewport.width - offset - tooltip.width / 2
+  const center = anchor.left + anchor.width / 2
+  const left = maxLeft >= minLeft ? Math.min(Math.max(center, minLeft), maxLeft) : viewport.width / 2
+  const anchorBottom = anchor.top + anchor.height
+  if (anchor.top - offset - tooltip.height >= offset) {
+    return { left, top: anchor.top - offset, placement: 'above' }
+  }
+  if (viewport.height - anchorBottom - offset - tooltip.height >= offset) {
+    return { left, top: anchorBottom + offset, placement: 'below' }
+  }
+  return {
+    left,
+    top: Math.max(offset, Math.min(anchorBottom + offset, viewport.height - offset - tooltip.height)),
+    placement: 'below',
+  }
+}
+
+function useTooltipPosition(
+  open: boolean,
+  anchorRef: React.RefObject<HTMLElement | null>,
+  tooltipRef: React.RefObject<HTMLElement | null>,
+) {
+  const [position, setPosition] = useState<{ style: CSSProperties; placement: 'above' | 'below' }>()
+  useLayoutEffect(() => {
+    if (!open) return
+    const update = () => {
+      const anchor = anchorRef.current
+      const tooltip = tooltipRef.current
+      if (!anchor || !tooltip) return
+      const rect = anchor.getBoundingClientRect()
+      const next = computeTooltipPosition(
+        { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+        { width: tooltip.offsetWidth, height: tooltip.offsetHeight },
+        { width: viewportWidth(), height: window.innerHeight },
+      )
+      setPosition({ placement: next.placement, style: { left: next.left, top: next.top } })
+    }
+    update()
+    window.addEventListener('resize', update)
+    window.addEventListener('scroll', update, true)
+    return () => {
+      window.removeEventListener('resize', update)
+      window.removeEventListener('scroll', update, true)
+    }
+  }, [open, anchorRef, tooltipRef])
+  return position
+}
+
+type AriaInvalid = boolean | 'false' | 'true' | 'grammar' | 'spelling'
+
+export interface SelectOption {
+  value: string
+  label: string
+  disabled?: boolean
+}
+
+export interface SelectProps {
+  id?: string
+  className?: string
+  value: string
+  options: ReadonlyArray<SelectOption>
+  onChange: (value: string) => void
+  disabled?: boolean
+  /** Shown when the value is empty and no option carries the empty value. */
+  emptyLabel?: string
+  'aria-label'?: string
+  'aria-labelledby'?: string
+  'aria-describedby'?: string
+  'aria-invalid'?: AriaInvalid
+  'aria-required'?: boolean | 'false' | 'true'
+}
+
+// Select is a select-only combobox: focus stays on the trigger and the active
+// option is announced with aria-activedescendant. The popup is portaled so
+// page overflow and table scroll containers never clip it.
+export const Select = forwardRef<HTMLButtonElement, SelectProps>(function Select({
+  id, className, value, options, onChange, disabled, emptyLabel = '继承',
+  'aria-label': ariaLabel, 'aria-labelledby': ariaLabelledBy, 'aria-describedby': ariaDescribedBy,
+  'aria-invalid': ariaInvalid, 'aria-required': ariaRequired,
+}, ref) {
+  const generatedId = useId()
+  const triggerId = id ?? generatedId
+  const listboxId = `${generatedId}-listbox`
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const listboxRef = useRef<HTMLDivElement | null>(null)
+  const typeahead = useRef<{ buffer: string; timer: number | undefined }>({ buffer: '', timer: undefined })
+  const [open, setOpen] = useState(false)
+  const [activeIndex, setActiveIndex] = useState(-1)
+  const popoverStyle = usePopoverPosition(open, triggerRef, true, 160, 320)
+
+  const selectedIndex = options.findIndex((option) => option.value === value)
+  const selectedOption = selectedIndex >= 0 ? options[selectedIndex] : undefined
+  const display = selectedOption ? selectedOption.label : value === '' ? emptyLabel : value
+  const enabledIndexes: number[] = []
+  options.forEach((option, index) => { if (!option.disabled) enabledIndexes.push(index) })
+  const firstEnabled = enabledIndexes[0] ?? -1
+  const lastEnabled = enabledIndexes[enabledIndexes.length - 1] ?? -1
+  const activeDescendant = open && activeIndex >= 0 && activeIndex < options.length
+    ? `${listboxId}-option-${activeIndex}`
+    : undefined
+
+  const closeMenu = useCallback((restoreFocus: boolean) => {
+    setOpen(false)
+    setActiveIndex(-1)
+    if (restoreFocus) triggerRef.current?.focus()
+  }, [])
+
+  const openMenu = useCallback((direction: 1 | -1) => {
+    if (disabled) return
+    setOpen(true)
+    if (selectedIndex >= 0 && !options[selectedIndex]?.disabled) setActiveIndex(selectedIndex)
+    else setActiveIndex(direction === 1 ? enabledIndexes[0] ?? -1 : enabledIndexes[enabledIndexes.length - 1] ?? -1)
+  }, [disabled, selectedIndex, options, enabledIndexes])
+
+  const choose = useCallback((index: number) => {
+    const option = options[index]
+    if (!option || option.disabled) return
+    if (option.value !== value) onChange(option.value)
+    closeMenu(true)
+  }, [options, value, onChange, closeMenu])
+
+  const moveEnabled = (from: number, direction: 1 | -1) => {
+    if (!enabledIndexes.length) return -1
+    if (from < 0) return direction === 1 ? enabledIndexes[0] : enabledIndexes[enabledIndexes.length - 1]
+    const position = enabledIndexes.indexOf(from)
+    if (position < 0) return direction === 1 ? enabledIndexes[0] : enabledIndexes[enabledIndexes.length - 1]
+    const next = position + direction
+    if (next < 0 || next >= enabledIndexes.length) return from
+    return enabledIndexes[next]
+  }
+
+  const typeaheadSearch = (key: string) => {
+    const state = typeahead.current
+    if (state.timer !== undefined) window.clearTimeout(state.timer)
+    state.buffer = `${state.buffer}${key}`.toLowerCase()
+    state.timer = window.setTimeout(() => { state.buffer = ''; state.timer = undefined }, 500)
+    const match = options.findIndex((option) => !option.disabled && option.label.toLowerCase().startsWith(state.buffer))
+    if (match >= 0) { setActiveIndex(match); return }
+    // Repeated presses of one character cycle through matching options.
+    state.buffer = key.toLowerCase()
+    const after = options.findIndex((option, index) => !option.disabled && index > activeIndex && option.label.toLowerCase().startsWith(state.buffer))
+    if (after >= 0) setActiveIndex(after)
+  }
+
+  const onTriggerKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
+    if (disabled) return
+    const key = event.key
+    if (!open) {
+      if (key === 'Enter' || key === ' ' || key === 'ArrowDown' || key === 'ArrowUp') {
+        event.preventDefault()
+        openMenu(key === 'ArrowUp' ? -1 : 1)
+        return
+      }
+      if (key === 'Home' || key === 'End') {
+        event.preventDefault()
+        openMenu(key === 'Home' ? 1 : -1)
+        return
+      }
+      if (key.length === 1 && !event.metaKey && !event.ctrlKey && !event.altKey) {
+        event.preventDefault()
+        openMenu(1)
+        typeaheadSearch(key)
+      }
+      return
+    }
+    if (key === 'ArrowDown' || key === 'ArrowUp') {
+      event.preventDefault()
+      setActiveIndex((current) => moveEnabled(current, key === 'ArrowDown' ? 1 : -1))
+    } else if (key === 'Home') {
+      event.preventDefault()
+      setActiveIndex(firstEnabled)
+    } else if (key === 'End') {
+      event.preventDefault()
+      setActiveIndex(lastEnabled)
+    } else if (key === 'Enter' || key === ' ') {
+      event.preventDefault()
+      if (activeIndex >= 0) choose(activeIndex)
+      else closeMenu(true)
+    } else if (key === 'Escape') {
+      event.preventDefault()
+      event.stopPropagation()
+      closeMenu(true)
+    } else if (key === 'Tab') {
+      closeMenu(false)
+    } else if (key.length === 1 && !event.metaKey && !event.ctrlKey && !event.altKey) {
+      event.preventDefault()
+      typeaheadSearch(key)
+    }
+  }
+
+  useEffect(() => {
+    if (!disabled) return
+    setOpen(false)
+    setActiveIndex(-1)
+  }, [disabled])
+
+  useEffect(() => {
+    if (!open) return
+    const onPointerDown = (event: MouseEvent) => {
+      const target = event.target
+      if (!(target instanceof Node)) return
+      if (triggerRef.current?.contains(target) || listboxRef.current?.contains(target)) return
+      closeMenu(false)
+    }
+    document.addEventListener('mousedown', onPointerDown)
+    return () => document.removeEventListener('mousedown', onPointerDown)
+  }, [open, closeMenu])
+
+  useEffect(() => {
+    if (!open || activeIndex < 0) return
+    const active = listboxRef.current?.querySelector<HTMLElement>(`[data-index="${activeIndex}"]`)
+    if (active && typeof active.scrollIntoView === 'function') active.scrollIntoView({ block: 'nearest' })
+  }, [open, activeIndex])
+
+  return (
+    <>
+      <button
+        ref={mergeRefs(ref, triggerRef)}
+        id={triggerId}
+        type="button"
+        role="combobox"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-controls={open ? listboxId : undefined}
+        aria-activedescendant={activeDescendant}
+        aria-label={ariaLabel}
+        aria-labelledby={ariaLabelledBy}
+        aria-describedby={ariaDescribedBy}
+        aria-invalid={ariaInvalid}
+        aria-required={ariaRequired}
+        disabled={disabled}
+        className={classNames(styles.selectTrigger, className)}
+        onClick={() => {
+          if (open) closeMenu(true)
+          else openMenu(1)
+        }}
+        onKeyDown={onTriggerKeyDown}
+      >
+        <span className={classNames(styles.selectValue, !selectedOption && value === '' && styles.selectValueEmpty)}>
+          {display}
+        </span>
+        <Icon name="chevronDown" size={16} className={styles.selectChevron} />
+      </button>
+      {open ? createPortal(
+        <div
+          ref={listboxRef}
+          id={listboxId}
+          role="listbox"
+          aria-labelledby={triggerId}
+          className={styles.selectPopover}
+          style={popoverStyle}
+        >
+          {options.length === 0 ? (
+            <div className={styles.selectEmpty} role="presentation">无可选项</div>
+          ) : enabledIndexes.length === 0 ? (
+            <div className={styles.selectEmpty} role="presentation">没有可用选项</div>
+          ) : options.map((option, index) => {
+            const selected = option.value === value
+            return (
+              <div
+                key={option.value}
+                id={`${listboxId}-option-${index}`}
+                role="option"
+                aria-selected={selected}
+                aria-disabled={option.disabled ? true : undefined}
+                data-index={index}
+                className={classNames(
+                  styles.selectOption,
+                  index === activeIndex && styles.selectOptionActive,
+                  selected && styles.selectOptionSelected,
+                  option.disabled && styles.selectOptionDisabled,
+                )}
+                onMouseDown={(event) => event.preventDefault()}
+                onMouseEnter={() => { if (!option.disabled) setActiveIndex(index) }}
+                onClick={() => choose(index)}
+              >
+                <span className={styles.selectOptionLabel}>{option.label}</span>
+                {selected ? <Icon name="check" size={14} className={styles.selectOptionCheck} /> : null}
+              </div>
+            )
+          })}
+        </div>,
+        document.body,
+      ) : null}
+    </>
+  )
+})
+
+export interface CheckboxProps extends Omit<InputHTMLAttributes<HTMLInputElement>, 'type'> {
+  label: ReactNode
+}
+
+// Checkbox keeps a real input for label clicks, Space and form semantics, and
+// paints the box on a sibling so focus-visible and checked states are shared.
+export const Checkbox = forwardRef<HTMLInputElement, CheckboxProps>(function Checkbox({
+  label, id, className, disabled, ...props
+}, ref) {
+  return (
+    <label className={classNames(styles.checkbox, disabled && styles.checkboxDisabled, className)} htmlFor={id}>
+      <input ref={ref} id={id} type="checkbox" disabled={disabled} className={styles.checkboxInput} {...props} />
+      <span className={styles.checkboxBox} aria-hidden="true"><Icon name="check" size={12} /></span>
+      {label !== null && label !== undefined && label !== '' ? <span className={styles.checkboxLabel}>{label}</span> : null}
+    </label>
+  )
+})
+
+const DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/
+
+// Dates are calendar days in the local time zone. Never parse YYYY-MM-DD with
+// new Date(string): that is UTC midnight and shifts the day west of UTC.
+export function parseLocalDate(value: string): Date | null {
+  const match = DATE_PATTERN.exec(value)
+  if (!match) return null
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  if (year < 100) return null
+  const date = new Date(year, month - 1, day)
+  if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) return null
+  return date
+}
+
+export function formatLocalDate(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+}
+
+function addLocalDays(date: Date, days: number): Date {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate() + days)
+}
+
+function addLocalMonths(date: Date, months: number): Date {
+  const target = new Date(date.getFullYear(), date.getMonth() + months, 1)
+  const lastDay = new Date(target.getFullYear(), target.getMonth() + 1, 0).getDate()
+  return new Date(target.getFullYear(), target.getMonth(), Math.min(date.getDate(), lastDay))
+}
+
+function sameLocalDay(left: Date, right: Date) {
+  return left.getFullYear() === right.getFullYear() && left.getMonth() === right.getMonth() && left.getDate() === right.getDate()
+}
+
+const WEEKDAYS = ['一', '二', '三', '四', '五', '六', '日']
+
+export interface DatePickerProps {
+  id?: string
+  className?: string
+  value: string
+  onChange: (value: string) => void
+  min?: string
+  max?: string
+  disabled?: boolean
+  placeholder?: string
+  'aria-label'?: string
+  'aria-labelledby'?: string
+  'aria-describedby'?: string
+  'aria-invalid'?: AriaInvalid
+}
+
+// DatePicker is a text field plus a calendar popup. Typing accepts only a
+// local YYYY-MM-DD date; the calendar navigates with local calendar arithmetic
+// so DST transitions never shift a selected day.
+export const DatePicker = forwardRef<HTMLInputElement, DatePickerProps>(function DatePicker({
+  id, className, value, onChange, min, max, disabled, placeholder = 'YYYY-MM-DD',
+  'aria-label': ariaLabel, 'aria-labelledby': ariaLabelledBy, 'aria-describedby': ariaDescribedBy,
+  'aria-invalid': ariaInvalid,
+}, ref) {
+  const generatedId = useId()
+  const errorId = `${generatedId}-date-error`
+  const fieldRef = useRef<HTMLDivElement | null>(null)
+  const inputRef = useRef<HTMLInputElement | null>(null)
+  const popoverRef = useRef<HTMLDivElement | null>(null)
+  // Only move focus into the grid when the calendar itself asked for it.
+  // Typing while open updates the roving tab stop without stealing focus.
+  const shouldFocusDay = useRef(false)
+  const emitted = useRef(value)
+  const [text, setText] = useState(value)
+  const [error, setError] = useState<string | null>(null)
+  const [open, setOpen] = useState(false)
+  const [viewDate, setViewDate] = useState<Date>(() => parseLocalDate(value) ?? new Date())
+  const [focusDate, setFocusDate] = useState<Date>(() => parseLocalDate(value) ?? new Date())
+  const popoverStyle = usePopoverPosition(open, inputRef, false, 292, 360)
+
+  const minDate = min ? parseLocalDate(min) : null
+  const maxDate = max ? parseLocalDate(max) : null
+  const minDay = minDate && !Number.isNaN(minDate.getTime()) ? minDate : null
+  const maxDay = maxDate && !Number.isNaN(maxDate.getTime()) ? maxDate : null
+
+  const rangeError = (date: Date): string | null => {
+    if (minDay && date.getTime() < minDay.getTime()) return `日期不能早于 ${min}。`
+    if (maxDay && date.getTime() > maxDay.getTime()) return `日期不能晚于 ${max}。`
+    return null
+  }
+  const clampToRange = (date: Date): Date => {
+    if (minDay && date.getTime() < minDay.getTime()) return minDay
+    if (maxDay && date.getTime() > maxDay.getTime()) return maxDay
+    return date
+  }
+  const isDisabledDay = (date: Date) => Boolean(rangeError(date))
+  const firstAvailableDay = (date: Date): Date => {
+    const start = new Date(date.getFullYear(), date.getMonth(), 1)
+    for (let index = 0; index < 31; index += 1) {
+      const candidate = addLocalDays(start, index)
+      if (candidate.getMonth() !== start.getMonth()) break
+      if (!isDisabledDay(candidate)) return candidate
+    }
+    return start
+  }
+
+  useEffect(() => {
+    if (value === emitted.current) return
+    emitted.current = value
+    setText(value)
+    setError(null)
+    const parsed = parseLocalDate(value)
+    if (parsed) {
+      setViewDate(parsed)
+      setFocusDate(parsed)
+    }
+  }, [value])
+
+  useEffect(() => {
+    if (!open) return
+    const onPointerDown = (event: MouseEvent) => {
+      const target = event.target
+      if (!(target instanceof Node)) return
+      if (fieldRef.current?.contains(target) || popoverRef.current?.contains(target)) return
+      setOpen(false)
+    }
+    document.addEventListener('mousedown', onPointerDown)
+    return () => document.removeEventListener('mousedown', onPointerDown)
+  }, [open])
+
+  useEffect(() => {
+    if (!open) return
+    const key = formatLocalDate(focusDate)
+    const button = popoverRef.current?.querySelector<HTMLElement>(`[data-date="${key}"]`)
+    if (!button) {
+      // The roving tab stop must stay inside the rendered 42-day grid.
+      const fallback = firstAvailableDay(viewDate)
+      if (formatLocalDate(fallback) !== key) setFocusDate(fallback)
+      return
+    }
+    if (!shouldFocusDay.current) return
+    shouldFocusDay.current = false
+    button.focus()
+  }, [open, focusDate, viewDate])
+
+  useEffect(() => {
+    if (!disabled) return
+    setOpen(false)
+  }, [disabled])
+
+  const openCalendar = () => {
+    if (disabled) return
+    const current = parseLocalDate(text.trim()) ?? parseLocalDate(value) ?? new Date()
+    const target = clampToRange(current)
+    shouldFocusDay.current = true
+    setViewDate(target)
+    setFocusDate(target)
+    setOpen(true)
+  }
+
+  const closeCalendar = (restoreFocus: boolean) => {
+    setOpen(false)
+    if (restoreFocus) inputRef.current?.focus()
+  }
+
+  const selectDate = (date: Date) => {
+    if (disabled || isDisabledDay(date)) return
+    const formatted = formatLocalDate(date)
+    setText(formatted)
+    setError(null)
+    emitted.current = formatted
+    if (formatted !== value) onChange(formatted)
+    closeCalendar(true)
+  }
+
+  const commitText = () => {
+    const trimmed = text.trim()
+    if (trimmed === '') {
+      setError(null)
+      if (value !== '') {
+        emitted.current = ''
+        onChange('')
+      }
+      return
+    }
+    const parsed = parseLocalDate(trimmed)
+    if (!parsed) {
+      setError('请输入 YYYY-MM-DD 格式的有效日期。')
+      return
+    }
+    const message = rangeError(parsed)
+    if (message) {
+      setError(message)
+      return
+    }
+    setError(null)
+    const formatted = formatLocalDate(parsed)
+    setText(formatted)
+    emitted.current = formatted
+    if (formatted !== value) onChange(formatted)
+  }
+
+  const onTextChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const next = event.target.value
+    setText(next)
+    const trimmed = next.trim()
+    if (trimmed === '') {
+      setError(null)
+      if (value !== '') {
+        emitted.current = ''
+        onChange('')
+      }
+      return
+    }
+    const parsed = parseLocalDate(trimmed)
+    if (!parsed) {
+      setError(trimmed.length >= 10 ? '请输入 YYYY-MM-DD 格式的有效日期。' : null)
+      return
+    }
+    const message = rangeError(parsed)
+    if (message) {
+      setError(trimmed.length >= 10 ? message : null)
+      return
+    }
+    setError(null)
+    const formatted = formatLocalDate(parsed)
+    emitted.current = formatted
+    if (formatted !== value) onChange(formatted)
+    if (open) {
+      setViewDate(parsed)
+      setFocusDate(parsed)
+    }
+  }
+
+  const onInputKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Escape' && open) {
+      event.preventDefault()
+      event.stopPropagation()
+      closeCalendar(true)
+      return
+    }
+    if (event.key === 'ArrowDown' && !open) {
+      event.preventDefault()
+      openCalendar()
+      return
+    }
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      commitText()
+    }
+  }
+
+  const onDayKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>, date: Date) => {
+    let next: Date | null = null
+    switch (event.key) {
+      case 'ArrowLeft': next = addLocalDays(date, -1); break
+      case 'ArrowRight': next = addLocalDays(date, 1); break
+      case 'ArrowUp': next = addLocalDays(date, -7); break
+      case 'ArrowDown': next = addLocalDays(date, 7); break
+      case 'Home': next = addLocalDays(date, -((date.getDay() + 6) % 7)); break
+      case 'End': next = addLocalDays(date, 6 - ((date.getDay() + 6) % 7)); break
+      case 'PageUp': next = addLocalMonths(date, event.shiftKey ? -12 : -1); break
+      case 'PageDown': next = addLocalMonths(date, event.shiftKey ? 12 : 1); break
+      case 'Enter':
+      case ' ':
+        event.preventDefault()
+        selectDate(date)
+        return
+      case 'Escape':
+        event.preventDefault()
+        event.stopPropagation()
+        closeCalendar(true)
+        return
+      case 'Tab':
+        // Unmounting the focused day synchronously would drop focus to body.
+        event.preventDefault()
+        closeCalendar(true)
+        return
+      default:
+        return
+    }
+    event.preventDefault()
+    shouldFocusDay.current = true
+    const target = clampToRange(next)
+    setFocusDate(target)
+    if (target.getMonth() !== viewDate.getMonth() || target.getFullYear() !== viewDate.getFullYear()) {
+      setViewDate(target)
+    }
+  }
+
+  const changeMonth = (delta: number) => {
+    const first = new Date(viewDate.getFullYear(), viewDate.getMonth() + delta, 1)
+    const target = clampToRange(first)
+    shouldFocusDay.current = true
+    setViewDate(new Date(target.getFullYear(), target.getMonth(), 1))
+    setFocusDate(target)
+  }
+
+  const onPopoverKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'Escape') return
+    event.preventDefault()
+    event.stopPropagation()
+    closeCalendar(true)
+  }
+
+  const onFieldBlur = (event: React.FocusEvent<HTMLDivElement>) => {
+    const related = event.relatedTarget as Node | null
+    if (related && (fieldRef.current?.contains(related) || popoverRef.current?.contains(related))) return
+    if (disabled) return
+    setOpen(false)
+    commitText()
+  }
+
+  const monthStart = new Date(viewDate.getFullYear(), viewDate.getMonth(), 1)
+  const gridStart = addLocalDays(monthStart, -((monthStart.getDay() + 6) % 7))
+  const days = Array.from({ length: 42 }, (_, index) => addLocalDays(gridStart, index))
+  const selectedDate = parseLocalDate(text.trim()) ?? parseLocalDate(value)
+  const selectedKey = selectedDate ? formatLocalDate(selectedDate) : ''
+  const today = new Date()
+  const todayKey = formatLocalDate(today)
+  const todayDisabled = isDisabledDay(today)
+  const describedBy = [ariaDescribedBy, error ? errorId : undefined].filter(Boolean).join(' ') || undefined
+  const invalid = error ? true : ariaInvalid
+
+  return (
+    <div ref={fieldRef} className={styles.dateField} onBlur={onFieldBlur}>
+      <div className={styles.dateInputWrap}>
+        <input
+          ref={mergeRefs(ref, inputRef)}
+          id={id}
+          type="text"
+          inputMode="text"
+          autoComplete="off"
+          spellCheck={false}
+          className={classNames(styles.input, styles.dateInput, className)}
+          value={text}
+          placeholder={placeholder}
+          disabled={disabled}
+          aria-label={ariaLabel}
+          aria-labelledby={ariaLabelledBy}
+          aria-describedby={describedBy}
+          aria-invalid={invalid}
+          onChange={onTextChange}
+          onKeyDown={onInputKeyDown}
+        />
+        <button
+          type="button"
+          className={styles.dateButton}
+          aria-label={open ? '关闭日历' : '打开日历'}
+          aria-expanded={open}
+          disabled={disabled}
+          onClick={() => { if (open) closeCalendar(false); else openCalendar() }}
+        >
+          <Icon name="calendar" size={16} />
+        </button>
+      </div>
+      {error ? <span className={styles.dateError} id={errorId} role="alert">{error}</span> : null}
+      {open ? createPortal(
+        <div
+          ref={popoverRef}
+          role="dialog"
+          aria-label="选择日期"
+          className={styles.calendar}
+          style={popoverStyle}
+          onKeyDown={onPopoverKeyDown}
+        >
+          <div className={styles.calendarHeader}>
+            <button type="button" className={styles.calendarNav} aria-label="上个月" onClick={() => changeMonth(-1)}>
+              <Icon name="chevron" size={16} className={styles.calendarPrev} />
+            </button>
+            <span className={styles.calendarTitle} aria-live="polite">
+              {`${viewDate.getFullYear()}年${viewDate.getMonth() + 1}月`}
+            </span>
+            <button type="button" className={styles.calendarNav} aria-label="下个月" onClick={() => changeMonth(1)}>
+              <Icon name="chevron" size={16} />
+            </button>
+          </div>
+          <div className={styles.calendarWeekdays} aria-hidden="true">
+            {WEEKDAYS.map((weekday) => <span key={weekday}>{weekday}</span>)}
+          </div>
+          <div className={styles.calendarGrid}>
+            {days.map((date) => {
+              const key = formatLocalDate(date)
+              const inMonth = date.getMonth() === viewDate.getMonth() && date.getFullYear() === viewDate.getFullYear()
+              const selected = key === selectedKey
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  data-date={key}
+                  aria-label={`${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`}
+                  aria-pressed={selected}
+                  tabIndex={sameLocalDay(date, focusDate) ? 0 : -1}
+                  disabled={isDisabledDay(date)}
+                  className={classNames(
+                    styles.calendarDay,
+                    !inMonth && styles.calendarDayOutside,
+                    key === todayKey && styles.calendarDayToday,
+                    selected && styles.calendarDaySelected,
+                  )}
+                  onClick={() => selectDate(date)}
+                  onFocus={() => setFocusDate(date)}
+                  onKeyDown={(event) => onDayKeyDown(event, date)}
+                >
+                  {date.getDate()}
+                </button>
+              )
+            })}
+          </div>
+          <div className={styles.calendarFooter}>
+            <button type="button" className={styles.calendarAction} onClick={() => {
+              setText('')
+              setError(null)
+              emitted.current = ''
+              if (value !== '') onChange('')
+              closeCalendar(true)
+            }}>
+              清除
+            </button>
+            <button type="button" className={styles.calendarAction} disabled={todayDisabled} onClick={() => selectDate(today)}>
+              今天
+            </button>
+          </div>
+        </div>,
+        document.body,
+      ) : null}
+    </div>
+  )
+})
+
+export type NumberFieldProps = Omit<InputHTMLAttributes<HTMLInputElement>, 'type'>
+
+// NumberField keeps role=spinbutton and native min/max/step semantics while
+// the CSS removes the browser spinner controls.
+export const NumberField = forwardRef<HTMLInputElement, NumberFieldProps>(function NumberField({ className, ...props }, ref) {
+  return <input ref={ref} {...props} type="number" className={classNames(styles.input, styles.numberField, className)} />
+})
+
+export interface SearchFieldProps extends Omit<InputHTMLAttributes<HTMLInputElement>, 'type' | 'value' | 'onChange'> {
+  value: string
+  onChange: (value: string) => void
+  clearLabel?: string
+}
+
+// SearchField is a controlled searchbox with one shared clear affordance; the
+// WebKit cancel button is removed in CSS so the two never render side by side.
+export const SearchField = forwardRef<HTMLInputElement, SearchFieldProps>(function SearchField({
+  value, onChange, className, clearLabel = '清除搜索', disabled, ...props
+}, ref) {
+  return (
+    <span className={styles.searchField}>
+      <Icon name="search" size={16} className={styles.searchIcon} />
+      <input
+        ref={ref}
+        {...props}
+        type="search"
+        role="searchbox"
+        disabled={disabled}
+        className={classNames(styles.input, styles.searchInput, className)}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+      />
+      {value !== '' ? (
+        <button type="button" className={styles.searchClear} aria-label={clearLabel} disabled={disabled} onClick={() => onChange('')}>
+          <Icon name="close" size={14} />
+        </button>
+      ) : null}
+    </span>
+  )
+})
+
+export type TextareaProps = TextareaHTMLAttributes<HTMLTextAreaElement> & { code?: boolean }
+
+export const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(function Textarea({ code, className, ...props }, ref) {
+  return <textarea ref={ref} className={classNames(styles.textarea, code && styles.textareaCode, className)} {...props} />
+})
+
+export interface TooltipProps {
+  content: ReactNode
+  /**
+   * One ReactElement: only a single element can receive the injected
+   * aria-describedby, so fragments, strings and arrays are not accepted.
+   */
+  children: ReactElement<{ 'aria-describedby'?: string }>
+  className?: string
+}
+
+// Tooltip shows while hovered or focused, hides on Escape, and exposes its
+// text via aria-describedby. It never sets a DOM title and portals above
+// dialogs with measured viewport clamping.
+export function Tooltip({ content, children, className }: TooltipProps) {
+  const tooltipId = useId()
+  const anchorRef = useRef<HTMLSpanElement | null>(null)
+  const tooltipRef = useRef<HTMLDivElement | null>(null)
+  const [hovered, setHovered] = useState(false)
+  const [focused, setFocused] = useState(false)
+  const [suppressed, setSuppressed] = useState(false)
+  const open = (hovered || focused) && !suppressed
+  const position = useTooltipPosition(open, anchorRef, tooltipRef)
+
+  useEffect(() => {
+    if (!hovered && !focused) setSuppressed(false)
+  }, [hovered, focused])
+
+  if (content === null || content === undefined || content === '') return children
+  const existing = children.props['aria-describedby']?.split(/\s+/).filter(Boolean) ?? []
+  const trigger = cloneElement(children, { 'aria-describedby': [...new Set([...existing, tooltipId])].join(' ') })
+  return (
+    <>
+      <span
+        ref={anchorRef}
+        className={classNames(styles.tooltipAnchor, className)}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+        onFocus={() => setFocused(true)}
+        onBlur={(event) => {
+          const related = event.relatedTarget as Node | null
+          if (!related || !event.currentTarget.contains(related)) setFocused(false)
+        }}
+        onKeyDown={(event) => {
+          if (event.key !== 'Escape' || !open) return
+          event.preventDefault()
+          event.stopPropagation()
+          setSuppressed(true)
+        }}
+      >
+        {trigger}
+      </span>
+      {createPortal(
+        <div
+          ref={tooltipRef}
+          role="tooltip"
+          id={tooltipId}
+          hidden={!open}
+          className={classNames(styles.tooltip, position?.placement === 'below' ? styles.tooltipBelow : styles.tooltipAbove)}
+          style={position?.style}
+        >
+          {content}
+        </div>,
+        document.body,
+      )}
+    </>
+  )
+}
+
+export interface DisclosureProps {
+  summary: ReactNode
+  children: ReactNode
+  defaultOpen?: boolean
+  open?: boolean
+  onToggle?: (open: boolean) => void
+  className?: string
+}
+
+// Disclosure keeps native details/summary semantics and only hides the marker.
+// State follows the native toggle event, which fires after details.open has
+// changed; no microtask or click-order assumption is involved. Enter and Space
+// are handled explicitly so the behaviour does not depend on browser keyboard
+// activation of summary.
+export function Disclosure({ summary, children, defaultOpen = false, open, onToggle, className }: DisclosureProps) {
+  const detailsRef = useRef<HTMLDetailsElement | null>(null)
+  const [internalOpen, setInternalOpen] = useState(defaultOpen)
+  const initialOpen = useRef(defaultOpen)
+  const expanded = open ?? internalOpen
+
+  useEffect(() => {
+    if (open !== undefined) return
+    // Uncontrolled details stay unmanaged by React, so an unrelated render
+    // cannot reset the attribute between the click and its toggle event.
+    const details = detailsRef.current
+    if (details && details.open !== initialOpen.current) details.open = initialOpen.current
+  }, [open])
+
+  // A controlled parent that ignores a toggle must keep the old state. The
+  // internal state bump guarantees this check runs even when the prop is
+  // unchanged, so React's value-based attribute diff cannot leave it open.
+  useLayoutEffect(() => {
+    if (open === undefined) return
+    const details = detailsRef.current
+    if (details && details.open !== open) details.open = open
+  }, [open, internalOpen])
+
+  const sync = (next: boolean) => {
+    if (next === expanded) return
+    setInternalOpen(next)
+    onToggle?.(next)
+  }
+
+  return (
+    <details
+      ref={detailsRef}
+      className={classNames(styles.disclosure, className)}
+      open={open}
+      onToggle={(event) => sync(event.currentTarget.open)}
+    >
+      <summary
+        className={styles.disclosureSummary}
+        aria-expanded={expanded}
+        onKeyDown={(event) => {
+          if (event.key !== 'Enter' && event.key !== ' ') return
+          event.preventDefault()
+          const details = detailsRef.current
+          if (!details) return
+          const next = !details.open
+          if (open === undefined) details.open = next
+          sync(next)
+        }}
+      >
+        <Icon name="chevron" size={15} className={styles.disclosureChevron} />
+        <span>{summary}</span>
+      </summary>
+      <div className={styles.disclosureBody}>{children}</div>
+    </details>
   )
 }
 
