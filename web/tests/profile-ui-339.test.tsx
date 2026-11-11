@@ -30,7 +30,7 @@ const detail = {
   overrides: {
     default: { model: 'config:base', params: defaultParams },
     challenge: { model: 'user:one', params: { max_tokens: 2048 } },
-  },
+  } as Record<string, unknown>,
   revision: 3,
   effective: { provider: 'base' },
   nodes: [
@@ -47,13 +47,29 @@ const detail = {
   ],
 }
 
-function mock(handler?: (url: string, init?: RequestInit) => Response | undefined) {
+function hint(value: string, source: string, overridden = false): string {
+  return `${overridden ? '覆盖中 · ' : ''}继承值：${value || '未设置'} · 来源：${source}`
+}
+
+function modelHint(label: string, source: string, overridden = false): string {
+  return `${overridden ? '覆盖中 · ' : ''}继承值：${label} · 来源：${source}`
+}
+
+function thinkingObject(budget: string, type: string, source: string): string {
+  return `继承 thinking：budget_tokens ${budget || '未设置'} · type ${type || '未设置'} · 来源：${source}`
+}
+
+function thinkingWhole(overridden = false): string {
+  return `${overridden ? '覆盖中 · ' : ''}thinking 由本层整体覆盖；未填写的子字段不继承`
+}
+
+function mock(handler?: (url: string, init?: RequestInit) => Response | undefined, source: typeof detail = detail) {
   return installFetch((url, init) => {
     const custom = handler?.(url, init)
     if (custom) return custom
-    if (url.startsWith('/api/v1/profiles/default')) return jsonResponse(detail)
+    if (url.startsWith('/api/v1/profiles/default')) return jsonResponse(source)
     if (url.startsWith('/api/v1/models')) return jsonResponse({ models })
-    if (url.startsWith('/api/v1/profiles')) return jsonResponse({ profiles: [{ name: 'default', config: detail.effective }] })
+    if (url.startsWith('/api/v1/profiles')) return jsonResponse({ profiles: [{ name: 'default', config: source.effective }] })
     return jsonResponse({})
   })
 }
@@ -86,11 +102,14 @@ describe('profile node sources, params and same-model hint (#339)', () => {
     mock()
     renderWithProviders(<ModelsPage />, { route: '/models' })
     const globalCard = await screen.findByRole('region', { name: '全局默认' })
+    expect(screen.getByRole('heading', { name: '全局默认', level: 3 })).toBeInTheDocument()
     expect(within(globalCard).getByText('base')).toBeInTheDocument()
     expect(within(globalCard).getByText(/生效参数 max_tokens 1000 · temperature 0.5/)).toBeInTheDocument()
     expect(within(globalCard).getByText(/参数来源 覆盖/)).toBeInTheDocument()
+    expect(within(globalCard).getByText('全局默认的覆盖参数逐字段作用于下方节点；节点未覆盖的字段继承全局默认覆盖，仍未设置的继承自身模型')).toBeInTheDocument()
     const list = screen.getByRole('list', { name: '节点生效模型' })
     expect(within(list).getAllByRole('listitem')).toHaveLength(6)
+    expect(globalCard.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
   it('shows all five source labels with model name, short id and effective params', async () => {
@@ -119,30 +138,29 @@ describe('profile node sources, params and same-model hint (#339)', () => {
     mock()
     const user = await openEditor()
     const global = screen.getByRole('group', { name: '全局默认' })
-    expect(within(global).getByText('覆盖中 · 继承值：4096 · 来源：模型')).toBeInTheDocument()
-    expect(within(global).getByText('覆盖中 · 继承值：0.2 · 来源：模型')).toBeInTheDocument()
-    expect(within(global).getByText('覆盖中 · 继承值：high · 来源：模型')).toBeInTheDocument()
-    expect(within(global).getByText('覆盖中 · 继承值：1024 · 来源：模型')).toBeInTheDocument()
-    expect(within(global).getByText('覆盖中 · 继承值：disabled · 来源：模型')).toBeInTheDocument()
-    expect(within(global).getByText('覆盖中 · 继承值：base（config:base） · 来源：配置')).toBeInTheDocument()
+    expect(within(global).getByText(hint('4096', '模型', true))).toBeInTheDocument()
+    expect(within(global).getByText(hint('0.2', '模型', true))).toBeInTheDocument()
+    expect(within(global).getByText(hint('high', '模型', true))).toBeInTheDocument()
+    expect(within(global).getAllByText(thinkingWhole(true))).toHaveLength(2)
+    expect(within(global).getByText(modelHint('base（config:base）', '配置', true))).toBeInTheDocument()
 
     const review = screen.getByRole('group', { name: 'review' })
-    expect(within(review).getByText('继承值：1000 · 来源：全局默认')).toBeInTheDocument()
-    expect(within(review).getByText('继承值：0.5 · 来源：全局默认')).toBeInTheDocument()
-    expect(within(review).getByText('继承值：max · 来源：全局默认')).toBeInTheDocument()
-    expect(within(review).getByText('继承值：2048 · 来源：全局默认')).toBeInTheDocument()
-    expect(within(review).getByText('继承值：enabled · 来源：全局默认')).toBeInTheDocument()
-    expect(within(review).getByText('继承值：base（config:base） · 来源：全局默认')).toBeInTheDocument()
+    expect(within(review).getByText(hint('1000', '全局默认'))).toBeInTheDocument()
+    expect(within(review).getByText(hint('0.5', '全局默认'))).toBeInTheDocument()
+    expect(within(review).getByText(hint('max', '全局默认'))).toBeInTheDocument()
+    expect(within(review).getAllByText(thinkingObject('2048', 'enabled', '全局默认'))).toHaveLength(2)
+    expect(within(review).getByText(modelHint('base（config:base）', '全局默认'))).toBeInTheDocument()
 
     const challenge = screen.getByRole('group', { name: 'challenge' })
-    expect(within(challenge).getByText('覆盖中 · 继承值：1000 · 来源：全局默认')).toBeInTheDocument()
-    expect(within(challenge).getByText('覆盖中 · 继承值：base（config:base） · 来源：全局默认')).toBeInTheDocument()
+    expect(within(challenge).getByText(hint('1000', '全局默认', true))).toBeInTheDocument()
+    expect(within(challenge).getByText(modelHint('base（config:base）', '全局默认', true))).toBeInTheDocument()
+    expect(within(challenge).getAllByText(thinkingObject('2048', 'enabled', '全局默认'))).toHaveLength(2)
 
     // Editing the global default updates what the nodes inherit, before saving.
     const globalMax = screen.getByLabelText('全局默认 max_tokens')
     await user.clear(globalMax)
     await user.type(globalMax, '2500')
-    expect(within(review).getByText('继承值：2500 · 来源：全局默认')).toBeInTheDocument()
+    expect(within(review).getByText(hint('2500', '全局默认'))).toBeInTheDocument()
   })
 
   it('saves model and params overrides with the current revision and only the overridden fields', async () => {
@@ -201,6 +219,139 @@ describe('profile node sources, params and same-model hint (#339)', () => {
     })
   })
 
+  it('submits only a partially overridden global default and falls back to the model elsewhere', async () => {
+    const partial = {
+      ...detail,
+      overrides: { default: { params: { max_tokens: 1000 } } },
+      nodes: detail.nodes.map((item) => (item.node === 'default'
+        ? { ...item, param_source: 'override', effective_params: { max_tokens: 1000 } }
+        : item)),
+    }
+    const fetchMock = mock((url, init) => (isPut(url, init) ? jsonResponse(partial) : undefined), partial)
+    const user = await openEditor()
+
+    const global = screen.getByRole('group', { name: '全局默认' })
+    expect(within(global).getByText(hint('4096', '模型', true))).toBeInTheDocument()
+    expect(within(global).getByText(hint('0.2', '模型'))).toBeInTheDocument()
+    expect(within(global).getByText(hint('high', '模型'))).toBeInTheDocument()
+    expect(within(global).getAllByText(thinkingObject('1024', 'disabled', '模型'))).toHaveLength(2)
+    expect(screen.getByText('参数留空表示继承模型；保存时只提交已填写的字段')).toBeInTheDocument()
+
+    const review = screen.getByRole('group', { name: 'review' })
+    expect(within(review).getByText(hint('1000', '全局默认'))).toBeInTheDocument()
+    expect(within(review).getByText(hint('0.2', '模型'))).toBeInTheDocument()
+    expect(within(review).getByText(hint('high', '模型'))).toBeInTheDocument()
+    expect(within(review).getAllByText(thinkingObject('1024', 'disabled', '模型'))).toHaveLength(2)
+
+    await user.click(screen.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => isPut(String(url), init))).toBe(true))
+    expect(putBody(fetchMock)).toEqual({
+      revision: 3,
+      overrides: { default: { params: { max_tokens: 1000 } } },
+    })
+  })
+
+  it('does not claim a thinking subfield is inherited when the node overrides the other one', async () => {
+    const source = {
+      ...detail,
+      overrides: {
+        default: { params: { thinking: { budget_tokens: 2048, type: 'enabled' } } },
+        challenge: { params: { thinking: { budget_tokens: 1024 } } },
+      },
+    }
+    mock(undefined, source)
+    await openEditor()
+    const challenge = screen.getByRole('group', { name: 'challenge' })
+    expect(within(challenge).getByText(thinkingWhole(true))).toBeInTheDocument()
+    expect(within(challenge).getByText(thinkingWhole(false))).toBeInTheDocument()
+    expect(within(challenge).queryByText(/继承 thinking/)).not.toBeInTheDocument()
+    expect(within(challenge).queryByText(/继承值：enabled/)).not.toBeInTheDocument()
+    expect(within(screen.getByRole('group', { name: '全局默认' })).getAllByText(thinkingWhole(true))).toHaveLength(2)
+  })
+
+  it('does not claim the missing thinking subfield when the node only sets type', async () => {
+    const source = {
+      ...detail,
+      overrides: {
+        default: { params: { thinking: { budget_tokens: 2048 } } },
+        challenge: { params: { thinking: { type: 'enabled' } } },
+      },
+    }
+    mock(undefined, source)
+    await openEditor()
+    const challenge = screen.getByRole('group', { name: 'challenge' })
+    expect(within(challenge).getByText(thinkingWhole(false))).toBeInTheDocument()
+    expect(within(challenge).getByText(thinkingWhole(true))).toBeInTheDocument()
+    expect(within(challenge).queryByText(/继承 thinking/)).not.toBeInTheDocument()
+    expect(within(challenge).queryByText(/继承值：2048/)).not.toBeInTheDocument()
+
+    const global = screen.getByRole('group', { name: '全局默认' })
+    expect(within(global).getByText(thinkingWhole(true))).toBeInTheDocument()
+    expect(within(global).getByText(thinkingWhole(false))).toBeInTheDocument()
+    expect(within(global).queryByText(/继承值：disabled/)).not.toBeInTheDocument()
+  })
+
+  it('treats a partially overridden global default thinking as a whole object', async () => {
+    const source = {
+      ...detail,
+      overrides: { default: { params: { thinking: { budget_tokens: 2048 } } } },
+    }
+    mock(undefined, source)
+    await openEditor()
+    const global = screen.getByRole('group', { name: '全局默认' })
+    expect(within(global).getByText(thinkingWhole(true))).toBeInTheDocument()
+    expect(within(global).getByText(thinkingWhole(false))).toBeInTheDocument()
+    expect(within(global).queryByText(/继承 thinking/)).not.toBeInTheDocument()
+    expect(within(global).queryByText(/继承值：disabled/)).not.toBeInTheDocument()
+
+    const review = screen.getByRole('group', { name: 'review' })
+    expect(within(review).getAllByText(thinkingObject('2048', '', '全局默认'))).toHaveLength(2)
+  })
+
+  it('shows unknown instead of stale effective params when the model catalog is empty', async () => {
+    const partial = {
+      ...detail,
+      overrides: { default: { params: { max_tokens: 1000 } } },
+      nodes: detail.nodes.map((item) => (item.node === 'lanes.review'
+        ? { ...item, effective_params: { max_tokens: 1000, temperature: 0.9 } }
+        : item)),
+    }
+    installFetch((url, init) => {
+      if (isPut(url, init)) return jsonResponse(partial)
+      if (url.startsWith('/api/v1/profiles/default')) return jsonResponse(partial)
+      if (url.startsWith('/api/v1/models')) return jsonResponse({ models: [] })
+      if (url.startsWith('/api/v1/profiles')) return jsonResponse({ profiles: [{ name: 'default', config: partial.effective }] })
+      return jsonResponse({})
+    })
+    const user = userEvent.setup()
+    renderWithProviders(<ModelsPage />, { route: '/models' })
+    await user.click(await screen.findByRole('button', { name: '编辑档位' }))
+
+    const review = screen.getByRole('group', { name: 'review' })
+    expect(within(review).getAllByText('继承值：未知').length).toBeGreaterThan(0)
+    expect(within(review).queryByText(/继承值：0\.9/)).not.toBeInTheDocument()
+    const global = screen.getByRole('group', { name: '全局默认' })
+    expect(within(global).getAllByText('继承值：未知').length).toBeGreaterThan(0)
+  })
+
+  it('does not present a node override as the inherited model when configuration has no source', async () => {
+    const source = {
+      ...detail,
+      overrides: {
+        default: { params: defaultParams },
+        challenge: { model: 'user:one' },
+      },
+      nodes: detail.nodes.map((item) => (item.node === 'challenge'
+        ? { ...item, configured: '', configured_source: 'derived' }
+        : item)),
+    }
+    mock(undefined, source)
+    await openEditor()
+    const challenge = screen.getByRole('group', { name: 'challenge' })
+    expect(within(challenge).getByText('覆盖中 · 继承值：未知（无配置来源）')).toBeInTheDocument()
+    expect(within(challenge).queryByText(/继承值：one/)).not.toBeInTheDocument()
+  })
+
   it('clears one node by saving without it', async () => {
     const fetchMock = mock((url, init) => (isPut(url, init) ? jsonResponse(detail) : undefined))
     const user = await openEditor()
@@ -218,7 +369,7 @@ describe('profile node sources, params and same-model hint (#339)', () => {
     const user = await openEditor()
     await user.click(screen.getByRole('button', { name: '清除全局默认覆盖' }))
     const review = screen.getByRole('group', { name: 'review' })
-    expect(within(review).getByText('继承值：4096 · 来源：模型')).toBeInTheDocument()
+    expect(within(review).getByText(hint('4096', '模型'))).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '保存' }))
     await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => isPut(String(url), init))).toBe(true))
     expect(putBody(fetchMock)).toEqual({
@@ -345,15 +496,38 @@ describe('profile node sources, params and same-model hint (#339)', () => {
     expect(screen.queryByText('params broken')).not.toBeInTheDocument()
   })
 
-  it('shows the stale notice after the fieldsets', async () => {
+  it('shows the stale notice after the fieldsets, scrolls it into view and focuses the reload action', async () => {
+    const scroll = vi.fn()
+    const original = Element.prototype.scrollIntoView
+    Element.prototype.scrollIntoView = scroll
+    try {
+      mock((url, init) => (isPut(url, init)
+        ? jsonResponse({ error: { code: 'stale_revision', message: 'revision does not match' } }, 409)
+        : undefined))
+      const user = await openEditor()
+      await user.click(screen.getByRole('button', { name: '保存' }))
+      const alert = await screen.findByText(/请刷新并重新加载/)
+      const lastGroup = screen.getByRole('group', { name: 'challenge' })
+      expect(lastGroup.compareDocumentPosition(alert) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+      const reload = screen.getByRole('button', { name: '刷新并重新加载' })
+      await waitFor(() => expect(reload).toHaveFocus())
+      expect(scroll).toHaveBeenCalledWith({ block: 'nearest' })
+    } finally {
+      Element.prototype.scrollIntoView = original
+    }
+  })
+
+  it('focuses an unmapped server error below the fieldsets', async () => {
     mock((url, init) => (isPut(url, init)
-      ? jsonResponse({ error: { code: 'stale_revision', message: 'revision does not match' } }, 409)
+      ? jsonResponse({ error: { code: 'validation_failed', message: 'invalid overrides', details: [
+        { field: 'overrides.unknown.model', message: 'nope' },
+      ] } }, 400)
       : undefined))
     const user = await openEditor()
     await user.click(screen.getByRole('button', { name: '保存' }))
-    const alert = await screen.findByText(/请刷新并重新加载/)
-    const lastGroup = screen.getByRole('group', { name: 'challenge' })
-    expect(lastGroup.compareDocumentPosition(alert) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('overrides.unknown.model: nope')
+    await waitFor(() => expect(alert).toHaveFocus())
   })
 
   it('keeps the stale notice when the reload fails and resets the form after a successful refetch', async () => {
@@ -392,6 +566,7 @@ describe('profile node sources, params and same-model hint (#339)', () => {
     renderWithProviders(<ModelsPage />, { route: '/models' })
     const globalCard = await screen.findByRole('region', { name: '全局默认' })
     expect(within(globalCard).getByText(/生效参数 不可用/)).toBeInTheDocument()
+    expect(within(globalCard).queryByText(/参数来源/)).not.toBeInTheDocument()
     expect(screen.queryByText(/example\.com\/m/)).not.toBeInTheDocument()
   })
 

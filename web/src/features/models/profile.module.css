@@ -38,6 +38,7 @@
 }
 
 .nodeName {
+  margin: 0;
   font: 600 var(--fs-body-sm) var(--font-mono);
 }
 

@@ -89,7 +89,7 @@ export function ProfileNodeList({ nodes, models }: { nodes: ProfileNodeView[]; m
       {defaultNode ? (
         <section className={styles.globalDefault} aria-label="全局默认">
           <div className={styles.nodeHead}>
-            <span className={styles.nodeName}>全局默认</span>
+            <h3 className={styles.nodeName}>全局默认</h3>
             <SourceBadge source={defaultNode.source} />
           </div>
           <div className={styles.nodeModel}>
@@ -106,9 +106,12 @@ export function ProfileNodeList({ nodes, models }: { nodes: ProfileNodeView[]; m
             </span>
           ) : null}
           <span className={styles.nodeMeta}>
-            生效参数 {paramsText(defaultNode.effective_params)} · 参数来源 {paramSourceLabel(defaultNode.param_source)}
+            生效参数 {paramsText(defaultNode.effective_params)}
+            {defaultNode.effective_params ? <> · 参数来源 {paramSourceLabel(defaultNode.param_source)}</> : null}
           </span>
-          <span className={styles.nodeMeta}>逐字段作用于下方节点；节点未覆盖的字段继承这里。</span>
+          <span className={styles.nodeMeta}>
+            全局默认的覆盖参数逐字段作用于下方节点；节点未覆盖的字段继承全局默认覆盖，仍未设置的继承自身模型
+          </span>
         </section>
       ) : null}
       <ul className={styles.nodes} aria-label="节点生效模型">
@@ -135,7 +138,7 @@ export function ProfileNodeList({ nodes, models }: { nodes: ProfileNodeView[]; m
               ) : null}
               <span className={styles.nodeMeta}>
                 生效参数 {paramsText(node.effective_params)}
-                {' · '}参数来源 {paramSourceLabel(node.param_source)}
+                {node.effective_params ? <> · 参数来源 {paramSourceLabel(node.param_source)}</> : null}
               </span>
             </li>
           )
@@ -310,16 +313,44 @@ function fieldValue(params: ParamBag | undefined, key: ParamKey): string {
   }
 }
 
-function paramHint(value: string, source: string, overridden: boolean): string {
-  return `${overridden ? '覆盖中 · ' : ''}继承值：${value || '未设置'} · 来源：${source}`
+interface InheritedValue {
+  value: string
+  source: '全局默认' | '模型'
+  unknown?: boolean
+}
+
+interface InheritedThinking {
+  budget: string
+  type: string
+  source: '全局默认' | '模型'
+}
+
+function paramHint(inherited: InheritedValue, overridden: boolean): string {
+  const prefix = overridden ? '覆盖中 · ' : ''
+  if (inherited.unknown) return `${prefix}继承值：未知`
+  return `${prefix}继承值：${inherited.value || '未设置'} · 来源：${inherited.source}`
 }
 
 function modelHint(models: Model[], id: string, source: string, overridden: boolean): string {
-  return `${overridden ? '覆盖中 · ' : ''}继承值：${modelText(models, id)} · 来源：${source}`
+  const prefix = overridden ? '覆盖中 · ' : ''
+  if (!id) return `${prefix}继承值：未知（无配置来源）`
+  return `${prefix}继承值：${modelText(models, id)} · 来源：${source}`
+}
+
+// lookupModel separates a catalog that has not loaded (or is empty) from a
+// loaded catalog that does not contain the effective model. effective_params
+// is only a safe fallback for the latter; the former must say unknown so a
+// just-cleared saved override is never presented as an inherited value.
+function lookupModel(models: Model[], id: string): { model?: Model; missing: boolean; unknown: boolean } {
+  if (!id || !models.length) return { missing: false, unknown: true }
+  const model = models.find((item) => item.id === id)
+  return model ? { model, missing: false, unknown: false } : { missing: true, unknown: false }
 }
 
 function effectiveModelID(form: NodeForm, defaultForm: NodeForm, node?: ProfileNodeView): string {
-  return form.model || defaultForm.model || node?.configured || node?.model || ''
+  // view.model may itself be the node override; only form.model, the global
+  // default and the configuration value can act as the inherited model.
+  return form.model || defaultForm.model || node?.configured || ''
 }
 
 // inheritedNodeParam is what a node would use after clearing its own value:
@@ -330,12 +361,14 @@ function inheritedNodeParam(
   defaultForm: NodeForm,
   node: ProfileNodeView | undefined,
   models: Model[],
-): { value: string; source: '全局默认' | '模型' } {
+): InheritedValue {
   if (defaultForm[key]) return { value: defaultForm[key], source: '全局默认' }
-  const model = models.find((item) => item.id === effectiveModelID(form, defaultForm, node))
-  if (model) return { value: fieldValue(model.params, key), source: '模型' }
-  if (!form[key] && node?.effective_params) return { value: fieldValue(node.effective_params, key), source: '模型' }
-  return { value: '', source: '模型' }
+  const lookup = lookupModel(models, effectiveModelID(form, defaultForm, node))
+  if (lookup.model) return { value: fieldValue(lookup.model.params, key), source: '模型' }
+  if (lookup.missing && !form[key] && node?.effective_params) {
+    return { value: fieldValue(node.effective_params, key), source: '模型' }
+  }
+  return { value: '', source: '模型', unknown: true }
 }
 
 // inheritedModelParam is the model's own value for a global default field.
@@ -344,16 +377,69 @@ function inheritedModelParam(
   form: NodeForm,
   node: ProfileNodeView | undefined,
   models: Model[],
-): string {
-  const model = models.find((item) => item.id === (form.model || node?.configured || node?.model || ''))
-  if (model) return fieldValue(model.params, key)
-  if (!form[key] && node?.effective_params) return fieldValue(node.effective_params, key)
-  return ''
+): InheritedValue {
+  const lookup = lookupModel(models, form.model || node?.configured || '')
+  if (lookup.model) return { value: fieldValue(lookup.model.params, key), source: '模型' }
+  if (lookup.missing && !form[key] && node?.effective_params) {
+    return { value: fieldValue(node.effective_params, key), source: '模型' }
+  }
+  return { value: '', source: '模型', unknown: true }
 }
 
 function inheritedModelSource(defaultForm: NodeForm, node?: ProfileNodeView): string {
   if (defaultForm.model) return '全局默认'
   return sourceLabel(node?.configured_source ?? node?.source)
+}
+
+function modelThinking(model: Model): InheritedThinking {
+  return {
+    budget: fieldValue(model.params, 'budget'),
+    type: fieldValue(model.params, 'thinkingType'),
+    source: '模型',
+  }
+}
+
+// inheritedNodeThinking returns the thinking object the node inherits as a
+// whole: the global default's object when it overrides thinking, otherwise the
+// effective model's object. thinking is never merged field by field.
+function inheritedNodeThinking(
+  defaultForm: NodeForm,
+  form: NodeForm,
+  node: ProfileNodeView | undefined,
+  models: Model[],
+): InheritedThinking | undefined {
+  if (defaultForm.budget || defaultForm.thinkingType) {
+    return { budget: defaultForm.budget, type: defaultForm.thinkingType, source: '全局默认' }
+  }
+  const lookup = lookupModel(models, effectiveModelID(form, defaultForm, node))
+  return lookup.model ? modelThinking(lookup.model) : undefined
+}
+
+function inheritedDefaultThinking(
+  form: NodeForm,
+  node: ProfileNodeView | undefined,
+  models: Model[],
+): InheritedThinking | undefined {
+  const lookup = lookupModel(models, form.model || node?.configured || '')
+  return lookup.model ? modelThinking(lookup.model) : undefined
+}
+
+// thinkingHints follows the backend's whole-object replacement: once this
+// layer sets budget_tokens or type, the other subfield does not inherit.
+function thinkingHints(
+  form: NodeForm,
+  inherited: InheritedThinking | undefined,
+): { budget: string; thinkingType: string } {
+  if (form.budget || form.thinkingType) {
+    const whole = 'thinking 由本层整体覆盖；未填写的子字段不继承'
+    return {
+      budget: `${form.budget ? '覆盖中 · ' : ''}${whole}`,
+      thinkingType: `${form.thinkingType ? '覆盖中 · ' : ''}${whole}`,
+    }
+  }
+  if (!inherited) return { budget: '继承值：未知', thinkingType: '继承值：未知' }
+  const object = `继承 thinking：budget_tokens ${inherited.budget || '未设置'} · type ${inherited.type || '未设置'} · 来源：${inherited.source}`
+  return { budget: object, thinkingType: object }
 }
 
 export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload }: {
@@ -373,6 +459,7 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
   const [confirmReset, setConfirmReset] = useState(false)
   const [focusTick, setFocusTick] = useState(0)
   const bodyRef = useRef<HTMLDivElement>(null)
+  const alertRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     if (open && detail) {
@@ -391,6 +478,17 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
     target.focus()
     target.scrollIntoView?.({ block: 'center' })
   }, [focusTick])
+
+  // The error notice sits below every fieldset, past the scroll position that
+  // triggered it. Bring it into view and focus its action (or the notice).
+  useEffect(() => {
+    if (!formError) return
+    const container = alertRef.current
+    if (!container) return
+    container.scrollIntoView?.({ block: 'nearest' })
+    const target = container.querySelector<HTMLElement>('button') ?? container
+    target.focus()
+  }, [formError])
 
   const hasOverrides = Boolean(detail && Object.keys(detail.overrides ?? {}).length)
   const nodeByName = useMemo(() => new Map((detail?.nodes ?? []).map((node) => [node.node, node])), [detail])
@@ -498,12 +596,14 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
   const defaultId = `${baseId}-default`
   const defaultDirty = isDirty(defaultForm)
   const defaultParamsErr = defaultErrors.params ? `${defaultId}-params-error` : undefined
-  const defaultModelInherited = defaultNode?.configured || defaultNode?.model || ''
-  const defaultHintFor = (key: ParamKey) => paramHint(inheritedModelParam(key, defaultForm, defaultNode, models), '模型', Boolean(defaultForm[key]))
+  const defaultModelInherited = defaultNode?.configured || ''
+  const defaultHintFor = (key: ParamKey) => paramHint(inheritedModelParam(key, defaultForm, defaultNode, models), Boolean(defaultForm[key]))
+  const defaultThinking = thinkingHints(defaultForm, inheritedDefaultThinking(defaultForm, defaultNode, models))
   const nodeHintFor = (node: ProfileNodeView | undefined, form: NodeForm) => (key: ParamKey) => {
     const inherited = inheritedNodeParam(key, form, defaultForm, node, models)
-    return paramHint(inherited.value, inherited.source, Boolean(form[key]))
+    return paramHint(inherited, Boolean(form[key]))
   }
+  const nodeThinkingFor = (node: ProfileNodeView | undefined, form: NodeForm) => thinkingHints(form, inheritedNodeThinking(defaultForm, form, node, models))
 
   return (
     <>
@@ -582,7 +682,7 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
               emptyLabel="继承"
             />
           </Field>
-          <Field label="全局默认 thinking.budget_tokens" htmlFor={`${defaultId}-budget`} hint={defaultHintFor('budget')} error={defaultErrors.budget}>
+          <Field label="全局默认 thinking.budget_tokens" htmlFor={`${defaultId}-budget`} hint={defaultThinking.budget} error={defaultErrors.budget}>
             <NumberField
               id={`${defaultId}-budget`}
               placeholder="继承模型"
@@ -592,7 +692,7 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
               onChange={(event) => update('default', { budget: event.target.value })}
             />
           </Field>
-          <Field label="全局默认 thinking.type" htmlFor={`${defaultId}-thinking-type`} hint={defaultHintFor('thinkingType')} error={defaultErrors.thinkingType}>
+          <Field label="全局默认 thinking.type" htmlFor={`${defaultId}-thinking-type`} hint={defaultThinking.thinkingType} error={defaultErrors.thinkingType}>
             <Select
               id={`${defaultId}-thinking-type`}
               value={defaultForm.thinkingType}
@@ -613,7 +713,7 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
           </div>
         ) : null}
         {defaultDirty ? <ActionHint>清除后保存，全局默认恢复为配置文件的值。</ActionHint> : null}
-        <FieldHint>留空表示继承模型；保存时只提交已填写的字段。</FieldHint>
+        <FieldHint>参数留空表示继承模型；保存时只提交已填写的字段</FieldHint>
       </fieldset>
       {CONFIGURED_NODES.map(([node, label]) => {
         const form = forms[node] ?? EMPTY_FORM
@@ -622,6 +722,7 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
         const id = `${baseId}-${node}`
         const paramsErr = nodeErrors.params ? `${id}-params-error` : undefined
         const hintFor = nodeHintFor(view, form)
+        const thinkingHintsForNode = nodeThinkingFor(view, form)
         const dirty = isDirty(form)
         return (
           <fieldset key={node} className={styles.fieldset}>
@@ -629,7 +730,7 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
             <Field
               label={`${label} 模型`}
               htmlFor={`${id}-model`}
-              hint={modelHint(models, defaultForm.model || view?.configured || view?.model || '', inheritedModelSource(defaultForm, view), Boolean(form.model))}
+              hint={modelHint(models, defaultForm.model || view?.configured || '', inheritedModelSource(defaultForm, view), Boolean(form.model))}
               error={nodeErrors.model}
             >
               <Select
@@ -682,7 +783,7 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
                   emptyLabel="继承"
                 />
               </Field>
-              <Field label={`${label} thinking.budget_tokens`} htmlFor={`${id}-budget`} hint={hintFor('budget')} error={nodeErrors.budget}>
+              <Field label={`${label} thinking.budget_tokens`} htmlFor={`${id}-budget`} hint={thinkingHintsForNode.budget} error={nodeErrors.budget}>
                 <NumberField
                   id={`${id}-budget`}
                   placeholder="继承"
@@ -692,7 +793,7 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
                   onChange={(event) => update(node, { budget: event.target.value })}
                 />
               </Field>
-              <Field label={`${label} thinking.type`} htmlFor={`${id}-thinking-type`} hint={hintFor('thinkingType')} error={nodeErrors.thinkingType}>
+              <Field label={`${label} thinking.type`} htmlFor={`${id}-thinking-type`} hint={thinkingHintsForNode.thinkingType} error={nodeErrors.thinkingType}>
                 <Select
                   id={`${id}-thinking-type`}
                   value={form.thinkingType}
@@ -717,8 +818,8 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
         )
       })}
       {formError || stale ? (
-        <div className={styles.formAlert}>
-          {formError ? <Note tone="danger" role="alert">{formError}</Note> : null}
+        <div ref={alertRef} className={styles.formAlert} role="alert" tabIndex={-1}>
+          {formError ? <Note tone="danger">{formError}</Note> : null}
           {stale ? <Button variant="secondary" onClick={() => { void reload() }} loading={pending}>刷新并重新加载</Button> : null}
         </div>
       ) : null}
