@@ -380,8 +380,12 @@ MCP、Skill、块绑定列表使用游标分页。
 | GET | `/api/v1/stats` | `?from=&to=&project_id=`：运行次数（含 onboarding）、耗时、成本、项目/provider/块统计与 UTC 日趋势、finding 处置分布、人工质量指标、按模型调用与反馈原始计数；`to` 为排他上界 |
 | GET | `/api/v1/system/lock-stats` | 平台管理员：SQLite 连接等待（`wait_count`、`wait_duration_ms` 为累计值；`max_open_connections`、`in_use`、`idle` 为当前连接池值）与工作区锁等待（`wait_count`、`wait_duration_ms` 为累计值，`max_wait_ms` 为进程启动以来单次最长等待）；单连接下连接等待是 SQL 串行化的代理，不是 driver busy 重试计数 |
 | GET | `/api/v1/settings` | 平台配置的只读视图（脱敏） |
+| GET | `/api/v1/config` | 平台管理员：文件生效配置的脱敏 allowlist 视图、逐键 `origins`、`warnings`、`last_error`、`last_error_at`，以及 `base_revision`、`overlay_revision`、`overlay_present`、`applied`、`restart_required` |
+| GET | `/api/v1/config/status` | 平台管理员：仅返回 `applied`、`restart_required`、`base_revision`、`overlay_revision`、`overlay_present`、`warnings`、`last_error`、`last_error_at`、`updated_at`，不返回配置值 |
 
-provider 和 profile 的基线以配置文件为准；改动配置需重启服务，当前进程不处理 `SIGHUP` 热加载。`default` 档位的节点模型和参数可经上面的 overrides 端点覆盖（见[配置设计 · 档位覆盖](06-config.md#档位覆盖节点模型与参数)），覆盖只作用于之后启动的工作流。`/providers`、`/profiles` 和 `/settings` 仅平台管理员可访问。
+provider 和 profile 的基线以配置文件为准；改动配置需重启服务才能作用于运行期，当前进程不处理 `SIGHUP`。文件变化会刷新显示快照（后台约 2 秒轮询，连续两次观测一致后应用），`/api/v1/config` 和 `/api/v1/config/status` 反映的是该显示快照；运行期单例仍使用启动时读取的配置，`restart_required: true` 表示显示快照与运行中配置不一致。`default` 档位的节点模型和参数可经上面的 overrides 端点覆盖（见[配置设计 · 档位覆盖](06-config.md#档位覆盖节点模型与参数)），覆盖只作用于之后启动的工作流。`/providers`、`/profiles`、`/settings`、`/config` 和 `/config/status` 仅平台管理员可访问。
+
+`/api/v1/config` 的 `config` 是文件生效值的脱敏 allowlist 视图，明确不含 DSN、`master_key_env`、bootstrap token 和 OAuth 的变量名、workspace root、`git_bin`、`mcp.config` 路径、`skills.dirs` 路径、`prompts_dir`、任何环境变量值或绝对路径；provider 以 `api_key_configured` 布尔值代替 `api_key_env`。`origins` 是点号路径到 `default` / `base` / `overlay` 的映射，同样过滤上述敏感字段路径；`warnings` 无内容时为 `[]`。`base_revision` 由各 base 文件 SHA-256 按加载顺序再哈希得到，`overlay_revision` 为 overlay 文件的 SHA-256，overlay 缺失时为空串；两者均取自最近的 last-good 显示快照，不代表运行中配置。`applied` 表示显示快照与运行中配置一致，`restart_required` 为其反义。两个端点都返回脱敏的 `last_error` 和 `last_error_at`：无错误时分别为空串和 `null`。`/api/v1/config/status` 不返回值内容，另有 `updated_at`，表示最近一次成功加载或替换显示快照的时间；真实启动时由初始成功加载设置，只有未接入时间戳的测试装配才为 `null`。未接入显示快照时（例如未由 `cmd/server` 启动的测试装配），两个端点返回 503。`GET /api/v1/settings` 仍描述运行期配置，语义不变。
 
 覆盖文档的字段、白名单和解析顺序见配置设计。校验失败返回 400，`details` 的 `field` 指向出错路径：模型 ID 不存在或已删除为 `overrides.<节点>.model`（如 `overrides.default.model`），参数不合法或不在白名单内为 `overrides.<节点>.params`。
 

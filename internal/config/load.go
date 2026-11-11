@@ -9,7 +9,6 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/LeXwDeX/tribunal/internal/llm/effort"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -127,84 +126,11 @@ var (
 // string scalars, and applies defaults. It does not validate required
 // environment-backed values; call Config.Validate for that.
 func Load(paths ...string) (*Config, error) {
-	root, err := parseYAML([]byte(defaultConfigYAML), "<defaults>")
+	snapshot, err := LoadSnapshot(paths, "")
 	if err != nil {
 		return nil, err
 	}
-
-	for _, path := range paths {
-		fileRoot, err := loadFile(path)
-		if err != nil {
-			return nil, err
-		}
-		if fileRoot == nil {
-			continue
-		}
-		if root == nil {
-			root = fileRoot
-		} else {
-			root = mergeNode(root, fileRoot)
-		}
-	}
-	if root == nil {
-		return nil, errors.New("config: empty configuration")
-	}
-
-	var envErrs []error
-	expandEnv(root, &envErrs)
-	if len(envErrs) > 0 {
-		return nil, errors.Join(envErrs...)
-	}
-	applyProfileAndProviderDefaults(root)
-	if err := checkDuplicateKeys(root); err != nil {
-		return nil, fmt.Errorf("config: %w", err)
-	}
-
-	cfg := &Config{}
-	if err := decodeStrict(root, cfg); err != nil {
-		return nil, err
-	}
-	cfg.Warnings = normalizeProfiles(cfg)
-	for _, name := range sortedKeys(cfg.Providers) {
-		provider := cfg.Providers[name]
-		field := "providers." + name
-		if provider.Reasoning != nil && !effort.ValidCapability(provider.Reasoning.Effort, provider.AllowReasoningEffortNone) {
-			if provider.Reasoning.Effort == "none" {
-				return nil, fmt.Errorf("config: %s.reasoning.effort none requires allow_reasoning_effort_none", field)
-			}
-			return nil, fmt.Errorf("config: %s.reasoning.effort must be low, medium, high or max", field)
-		}
-		if provider.Protocol == "anthropic" && provider.Reasoning != nil && provider.Reasoning.Effort != "" && !provider.OutputConfigEffort {
-			cfg.Warnings = append(cfg.Warnings, field+".reasoning.effort is not sent by anthropic without output_config_effort")
-		}
-		if provider.Protocol != "anthropic" && provider.OutputConfigEffort {
-			cfg.Warnings = append(cfg.Warnings, field+".output_config_effort is only sent by anthropic")
-		}
-		if (provider.Protocol == "openai-chat" || provider.Protocol == "openai-responses") && provider.Thinking != nil && provider.Thinking.BudgetTokens != 0 {
-			cfg.Warnings = append(cfg.Warnings, field+".thinking.budget_tokens is not sent by "+provider.Protocol)
-		}
-		if provider.Protocol != "openai-chat" && provider.Thinking != nil && provider.Thinking.Type != "" {
-			cfg.Warnings = append(cfg.Warnings, field+".thinking.type is not sent by "+provider.Protocol)
-		}
-		if provider.Protocol != "openai-chat" && provider.PreserveReasoningContent {
-			cfg.Warnings = append(cfg.Warnings, field+".preserve_reasoning_content is only honoured by openai-chat")
-		}
-		if provider.Protocol != "openai-responses" && provider.ResponsesParams != "" {
-			cfg.Warnings = append(cfg.Warnings, field+".responses_params is only used by openai-responses")
-		}
-		if provider.Protocol == "anthropic" && provider.AllowReasoningEffortNone {
-			cfg.Warnings = append(cfg.Warnings, field+".allow_reasoning_effort_none is only used by OpenAI protocols")
-		}
-	}
-	return cfg, nil
-}
-
-func loadFile(path string) (*yaml.Node, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read config %s: %w", path, err)
-	}
-	return parseYAML(data, path)
+	return snapshot.Config, nil
 }
 
 func parseYAML(data []byte, source string) (*yaml.Node, error) {

@@ -137,6 +137,14 @@ web/
 - 按 provider 与角色归因：`stats.feedback.by_provider` 每项为 `{provider, role, total, by_signal}`，`role` 为 `proposer`/`challenger`。提出方取 `findings.origin_provider`，挑战方取 `challenge_node` 的 provider；仅统计 `feedback.finding_id` 能精确匹配 finding 且 publication 一致的 discussion，summary/unlinked 不计入 `by_provider`，但仍计入原始 `total`/`by_signal`。同一 signal 可同时计入两个角色，两个角色合计不是反馈总数。
 - 人工质量面板按提出方、挑战方分表展示 `quality_by_provider`：提出方有效/明确人工结论总数，挑战方被反驳且人工有效/被反驳且已有明确人工结论总数；另列挑战推翻数/提出总数。每个比例同时显示分子与分母，零分母显示「无样本」。未标注和未确定不进人工分母；被丢弃条目也可标注。缺失字段、已知空数组和非法数据分别显示不可用、空状态和错误，不显示部分或伪造的百分比。具体统计口径见 [HTTP API](03-http-api.md#45-系统)。
 
+### 3.9 系统
+
+- 标签：API Token、平台配置（只读）、用户与账号、项目授权；平台配置、用户与账号、项目授权只对平台管理员显示。
+- 平台配置（只读）标签顶部新增「配置来源与待重启」面板。面板约每 5 秒轮询 `GET /api/v1/config/status` 与 `GET /api/v1/config`，显示 applied / 待重启徽标、base 与 overlay 的短 revision（overlay 缺失时显示「未挂载」）、`last_error`（`role="alert"`）和 `warnings`（`role="status"`）。
+- 面板以表格列出文件生效的标量配置项：路径、值、来源徽标（内置默认/基础配置/overlay）。数组和映射只通过其标量叶子显示；不提供编辑。
+- revision 变化时，前端让 settings、providers、profiles、models 和配置快照相关查询失效并重新拉取。
+- 面板说明文字：文件生效值按“内置默认 < `--config` < overlay”合并，不含数据库覆盖；运行中的服务仍使用启动快照，标记为“待重启”的字段需要重启后生效。
+
 ---
 
 ## 4. 交互约定

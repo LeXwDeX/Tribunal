@@ -35,6 +35,10 @@ import (
 const (
 	tribunalSessionKeyEnv = "TRIBUNAL_SESSION_KEY"
 	legacySessionKeyEnv   = "CRC_SESSION_KEY"
+	// defaultOverlayPath is the optional file layer loaded over --config. The
+	// file normally lives in the persistent data volume, so a missing overlay
+	// is a normal empty layer rather than a startup error.
+	defaultOverlayPath = "/app/data/config-overlay/server.overlay.yaml"
 )
 
 func main() {
@@ -48,16 +52,17 @@ func main() {
 
 type options struct {
 	configs     []string
+	overlay     string
 	checkConfig bool
 	configSet   bool
 }
 
 func parseOptions(args []string, output io.Writer) (options, error) {
-	opts := options{configs: []string{"config/server.yaml"}}
+	opts := options{configs: []string{"config/server.yaml"}, overlay: defaultOverlayPath}
 	fs := flag.NewFlagSet("server", flag.ContinueOnError)
 	fs.SetOutput(output)
 	fs.Usage = func() {
-		fmt.Fprintln(output, "Usage: server [--config path ...] [--check-config]")
+		fmt.Fprintln(output, "Usage: server [--config path ...] [--overlay path] [--check-config]")
 		fs.PrintDefaults()
 	}
 	fs.Func("config", "configuration file (repeatable)", func(value string) error {
@@ -68,6 +73,7 @@ func parseOptions(args []string, output io.Writer) (options, error) {
 		opts.configs = append(opts.configs, value)
 		return nil
 	})
+	fs.StringVar(&opts.overlay, "overlay", defaultOverlayPath, "optional overlay configuration file; a missing file is an empty overlay")
 	fs.BoolVar(&opts.checkConfig, "check-config", false, "validate configuration and exit")
 	if err := fs.Parse(args); err != nil {
 		return options{}, err
@@ -86,10 +92,11 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	cfg, err := config.Load(opts.configs...)
+	snapshot, err := config.LoadSnapshot(opts.configs, opts.overlay)
 	if err != nil {
 		return err
 	}
+	cfg := snapshot.Config
 	logger, err := newLogger(stderr)
 	if err != nil {
 		return err
@@ -263,6 +270,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		Tokens:           db,
 		Access:           db,
 		Platform:         cfg,
+		FileConfig:       &config.State{Snapshot: snapshot, UpdatedAt: time.Now()},
 		LockStats: func() server.LockStats {
 			dbStats := db.DBStats()
 			wsStats := runtime.WorkspaceManager().LockStats()
@@ -350,6 +358,34 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		serveErr <- err
 	}()
 	logger.Info("server listening", "listen", cfg.Server.Listen)
+
+	// The watcher only refreshes the display snapshot. Runtime singletons keep
+	// the startup Config until the process restarts, so SIGTERM cancels it and
+	// waits for the goroutine before the resources are released.
+	watchCtx, stopWatch := context.WithCancel(ctx)
+	watchDone := make(chan struct{})
+	watcher := config.NewWatcher(config.WatcherOptions{
+		BasePaths:   opts.configs,
+		OverlayPath: opts.overlay,
+		Initial:     snapshot,
+		Logger:      logger,
+		OnState: func(state config.State) {
+			apiServer.SetConfigState(&state)
+		},
+	})
+	go func() {
+		defer close(watchDone)
+		watcher.Run(watchCtx)
+	}()
+	defer func() {
+		stopWatch()
+		<-watchDone
+	}()
+	if snapshot.OverlayPresent {
+		logger.Info("configuration overlay loaded")
+	} else if opts.overlay != "" {
+		logger.Info("configuration overlay is not present; continuing without it")
+	}
 
 	var runErr error
 	workerConsumed := false

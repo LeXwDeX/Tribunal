@@ -158,6 +158,25 @@ review_defaults:                    # 项目设置的默认值（见 §3）
 
 需要授予平台管理员时，先向用户确认实际 GitLab 数字用户 ID 和本次授权，再填写 `id:<GitLab 用户 ID>`；修改后重启生效。用户名写法已弃用，将在下一个大版本移除。
 
+### 配置来源快照、overlay 与热刷新
+
+文件加载顺序为**内置默认 < `--config`（可重复，按顺序）< overlay**。新增启动参数 `--overlay`，默认 `/app/data/config-overlay/server.overlay.yaml`；传 `--overlay ""` 关闭 overlay，传其他路径可改用自定义文件。`--config` 文件仍是必需文件，缺失仍启动失败。overlay 文件不存在等价空文档，属正常状态；overlay 存在但 YAML 非法、含未知字段、重复键或类型错误时启动失败，错误信息带源文件名（overlay 路径）。`--check-config` 同样会读取并校验 overlay。不传 `--overlay`（使用默认路径且文件不存在）时，最终配置与之前一致。
+
+`internal/config` 新增 `Source` 和 `Snapshot`，用于描述文件来源与合并结果：
+
+- 每个 `Source` 保留该文件**未展开**的原始文档；`${ENV}` 原文不被改写，环境变量只在合并后的副本上展开。加载不会修改任何输入文件，也不会改写已保存的原始文档。
+- `Origins` 记录每个配置键最终来自哪一层：`default`（内置默认）、`base`（`--config`）或 `overlay`。键是点号路径，数组元素用 `[n]`，例如 `review_defaults.ignore[0]`。映射节点本身也报告来源，取最后一个写入该路径的层，因此父映射的 origin 可能比其子键“新”。origin 只表示值来自哪一层，不表示运行期是否已经应用。
+- `BaseRevision` 由各 base 文件的 SHA-256 按加载顺序再哈希得到；`OverlayRevision` 是 overlay 文件的 SHA-256，overlay 缺失时为空串。两者都取自最近一次成功加载的显示快照。另有 `OverlayPresent` 和 `Warnings`。
+- `config.Load(paths...)` 等价于不启用 overlay 的快照加载，原有行为和返回值不变。
+
+**热刷新（v1，只刷新显示快照）**：服务启动后，后台每约 2 秒轮询全部 `--config` 文件与 overlay 的 size、mtime 和 SHA-256；连续两次观测一致才应用，避免半写文件。内容未变但 mtime 变化（如 `touch`）不会触发重载。
+
+- 变化后执行完整 Load + Validate。成功后原子替换内存中的显示快照（`atomic.Pointer`）；失败保留 last-good 快照并记录脱敏的 `last_error`，进程不退出，不关闭 listener、数据库或 worker。修复文件后，下一次稳定观测自动恢复，`last_error` 清空。
+- `last_error` 不含文件内容、绝对路径或环境变量值：配置文件名只显示 basename；配置中的路径类值（DSN、workspace root/`git_bin`、MCP 配置、prompts 目录、skills 目录）被脱敏；YAML 错误中的值显示为 `<redacted>`。
+- 运行期单例（server/listener、gitlab/auth/storage/workspace/jobs/engine、provider、档位等）继续使用启动时的配置快照，v1 不做运行期热替换。`applied` 表示显示快照与运行中配置一致，`restart_required` 为其反义；重启后新值生效。状态经 `GET /api/v1/config` 和 `GET /api/v1/config/status` 暴露，见 [HTTP API](03-http-api.md#45-系统)。
+- watcher 随 SIGTERM 停止并等待 goroutine 退出，不泄漏。
+- 本实现不写回任何配置文件，也不提供控制台编辑；overlay 只能由部署方在宿主机或数据卷中维护。被引用的外部文件（如 `mcp.config`、`prompts_dir`）的内容变化不在轮询范围内，仍需重启。
+
 ### Go 结构体（节选）
 
 ```go
@@ -350,7 +369,7 @@ Docker Compose 默认只启用 `primary`。`config/server.docker.yaml` 另有一
 
 平台管理员可在控制台「模型与档位」查看配置中的全部 provider 和评审档位。页面只把 `default` 显示为「评审档位」，并按固定的八步拓扑列出各步骤的 provider：探索（`explore`）、提出（`code-review`、`review`、`reasoner`、`validate`）、挑战（`verify`）、裁决（`adjudicate`）、汇报（`synthesize`）；`onboarding` 单独标为「项目接入」，不是评审档位。该页面只读，界面不显示密钥值。逐个 provider 的连通性测试发送一条最小真实请求，会产生费用，需事先取得用户授权；成功只代表协议、地址、密钥和模型 ID 基本可用，不证明工具调用、长上下文、推理参数或完整业务流程兼容。
 
-修改 provider 或档位需要重启服务，当前进程不热加载配置；`docker compose restart` 会重新读取已挂载的配置文件，但不会加载新的容器环境变量。新增 provider（即使没有被任何档位引用）会改变评审执行配置；启动恢复会对未终态工作流重新检查配置、档位和执行身份，不匹配时取消，而不是续跑。待发布结果是否继续发布由发布时校验决定，不能假定会自动跳过或一定发布。修改前应核对并等待或处理未完成和待发布结果；已发布或失败的评审不会被改写，被取消的评审需要重新触发。移除已配置的 provider 前，检查 `profiles.default` 的 `provider`、`explore.provider`、`lanes.*.provider`、`challenge.provider`，以及 `profiles.onboarding.agent.provider`；仍留在配置里的旧字段（`propose[].provider`、`reasoner.provider`、`challenge.fallback`）也一并清理：被保留或迁移的 provider 字段才会被校验，被忽略的旧字段先被丢弃，不参与校验，但仍应清理以免告警。对已移除 provider 的残留引用若出现在被保留或迁移的字段上，会使配置校验失败；不要清空 onboarding 的 `agent.provider`，`profiles.default` 也必须至少能解析出一个 provider。完整操作步骤见 [多 Provider 配置](../operations.md#多-provider-配置) 和 [Agent 部署指南](../agent-deployment.md#多-provider-配置)。
+修改 provider 或档位需要重启服务，当前进程不热加载运行期配置（文件变化只刷新显示快照，见上文）；`docker compose restart` 会重新读取已挂载的配置文件，但不会加载新的容器环境变量。新增 provider（即使没有被任何档位引用）会改变评审执行配置；启动恢复会对未终态工作流重新检查配置、档位和执行身份，不匹配时取消，而不是续跑。待发布结果是否继续发布由发布时校验决定，不能假定会自动跳过或一定发布。修改前应核对并等待或处理未完成和待发布结果；已发布或失败的评审不会被改写，被取消的评审需要重新触发。移除已配置的 provider 前，检查 `profiles.default` 的 `provider`、`explore.provider`、`lanes.*.provider`、`challenge.provider`，以及 `profiles.onboarding.agent.provider`；仍留在配置里的旧字段（`propose[].provider`、`reasoner.provider`、`challenge.fallback`）也一并清理：被保留或迁移的 provider 字段才会被校验，被忽略的旧字段先被丢弃，不参与校验，但仍应清理以免告警。对已移除 provider 的残留引用若出现在被保留或迁移的字段上，会使配置校验失败；不要清空 onboarding 的 `agent.provider`，`profiles.default` 也必须至少能解析出一个 provider。完整操作步骤见 [多 Provider 配置](../operations.md#多-provider-配置) 和 [Agent 部署指南](../agent-deployment.md#多-provider-配置)。
 
 ### 严格角色交替（`strict_role_alternation`）
 

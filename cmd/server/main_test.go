@@ -33,12 +33,22 @@ func TestParseOptions(t *testing.T) {
 	if len(opts.configs) != 1 || opts.configs[0] != "config/server.yaml" {
 		t.Fatalf("default configs = %v", opts.configs)
 	}
-	opts, err = parseOptions([]string{"--config", "a.yaml", "--config", "b.yaml", "--check-config"}, &bytes.Buffer{})
+	if opts.overlay != defaultOverlayPath {
+		t.Fatalf("default overlay = %q, want %q", opts.overlay, defaultOverlayPath)
+	}
+	opts, err = parseOptions([]string{"--config", "a.yaml", "--config", "b.yaml", "--overlay", "o.yaml", "--check-config"}, &bytes.Buffer{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(opts.configs, ",") != "a.yaml,b.yaml" || !opts.checkConfig {
+	if strings.Join(opts.configs, ",") != "a.yaml,b.yaml" || opts.overlay != "o.yaml" || !opts.checkConfig {
 		t.Fatalf("opts = %+v", opts)
+	}
+	opts, err = parseOptions([]string{"--overlay", ""}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.overlay != "" {
+		t.Fatalf("empty overlay did not disable the overlay: %q", opts.overlay)
 	}
 	if _, err := parseOptions([]string{"--nope"}, &bytes.Buffer{}); err == nil {
 		t.Fatal("unknown flag accepted")
@@ -243,6 +253,44 @@ func TestCheckConfig(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "configuration OK") {
 		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestCheckConfigLoadsOverlay(t *testing.T) {
+	source, err := os.ReadFile("../../config/server.example.yaml")
+	if err != nil {
+		t.Fatalf("read example config: %v", err)
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.yaml")
+	if err := os.WriteFile(path, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	overlay := filepath.Join(dir, "server.overlay.yaml")
+	if err := os.WriteFile(overlay, []byte("server:\n  write_timeout: 45s\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("REVIEW_MASTER_KEY", base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")))
+	t.Setenv("REVIEW_ADMIN_TOKEN", "abcdefghijklmnopqrstuvwxyz012345")
+	t.Setenv("TRIBUNAL_SESSION_KEY", "")
+	t.Setenv("CRC_SESSION_KEY", "")
+	stdout := &bytes.Buffer{}
+	if err := run(context.Background(), []string{"--config", path, "--overlay", overlay, "--check-config"}, stdout, &bytes.Buffer{}); err != nil {
+		t.Fatalf("check-config with overlay: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "configuration OK") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+
+	if err := os.WriteFile(overlay, []byte("server:\n  nope: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = run(context.Background(), []string{"--config", path, "--overlay", overlay, "--check-config"}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("check-config accepted an overlay with an unknown field")
+	}
+	if !strings.Contains(err.Error(), "server.overlay.yaml") || !strings.Contains(err.Error(), "field nope not found") {
+		t.Fatalf("overlay error = %q", err)
 	}
 }
 
