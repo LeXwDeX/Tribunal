@@ -84,8 +84,9 @@ type MCPTool struct {
 	Annotated   bool   `json:"annotated"`
 }
 
-// MCPTestResult is one successful connection test. ToolCount is the total
-// advertised count; Tools may be capped, in which case Truncated is true.
+// MCPTestResult is one successful connection test. ToolCount is the number of
+// distinct valid advertised tools after duplicate-name collapsing; Tools may be
+// capped, in which case Truncated is true.
 type MCPTestResult struct {
 	LatencyMS int64
 	ToolCount int
@@ -396,9 +397,6 @@ func (s *ExtensionService) CreateMCPServer(ctx context.Context, in MCPServerInpu
 		return nil, err
 	}
 	name := strings.TrimSpace(in.Name)
-	if name == "" {
-		return nil, validationError("name is required", Detail{Field: "name", Message: "name is required"})
-	}
 	if err := validateMCPServerName(name); err != nil {
 		return nil, err
 	}
@@ -502,10 +500,15 @@ func (s *ExtensionService) ImportMCPServers(ctx context.Context, in MCPImportInp
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	// Validate every name first so a bad name always wins over a bad config,
+	// matching the order the HTTP layer documents. The detail field stays the
+	// stable name/config form; the offending mcpServers key is not a field.
 	for _, name := range names {
 		if err := validateMCPServerName(name); err != nil {
 			return nil, err
 		}
+	}
+	for _, name := range names {
 		config := in.Servers[name]
 		if err := guardMaskedConfig(config); err != nil {
 			return nil, err

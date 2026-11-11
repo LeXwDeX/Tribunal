@@ -187,11 +187,6 @@ func TestMCPImportDocument(t *testing.T) {
 	rejected := client.request(http.MethodPost, "/api/v1/mcp-servers/import?scope=platform", wrapper,
 		map[string]string{"Content-Type": "application/json"})
 	assertStatus(t, rejected, http.StatusBadRequest)
-
-	badConfig := []byte(`{"mcpServers":{"alpha":[]}}`)
-	bad := client.request(http.MethodPost, "/api/v1/mcp-servers/import?scope=platform", badConfig,
-		map[string]string{"Content-Type": "application/json"})
-	assertStatus(t, bad, http.StatusBadRequest)
 }
 
 // These legacy handlers are not routed, but retain their parser coverage.

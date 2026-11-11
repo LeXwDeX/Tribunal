@@ -157,6 +157,8 @@ review_defaults:                    # 项目设置的默认值（见 §3）
 
 需要授予平台管理员时，先向用户确认实际 GitLab 数字用户 ID 和本次授权，再填写 `id:<GitLab 用户 ID>`；修改后重启生效。用户名写法已弃用，将在下一个大版本移除。
 
+`server.write_timeout` 同时约束 MCP 连接测试的 handler 预算：测试超时取 `min(30s, 75% × write_timeout)`，为响应写出保留 25% 余量。默认 60 秒仍对应 30 秒测试上限；把 `write_timeout` 设到 40 秒以下会按比例缩短测试窗口（例如 30 秒配置对应 22.5 秒），过小的值会让连接、握手与工具列表来不及完成。该预算只影响测试端点，运行期 MCP 调用仍由各服务器的 `x-review.call_timeout` 控制。
+
 ### 配置来源快照、overlay 与热刷新
 
 文件加载顺序为**内置默认 < `--config`（可重复，按顺序）< overlay**。新增启动参数 `--overlay`，默认 `/app/data/config-overlay/server.overlay.yaml`；传 `--overlay ""` 关闭 overlay，传其他路径可改用自定义文件。`--config` 文件仍是必需文件，缺失仍启动失败。overlay 文件不存在等价空文档，属正常状态；overlay 存在但 YAML 非法、含未知字段、重复键或类型错误时启动失败，错误信息带源文件名（overlay 路径）。`--check-config` 同样会读取并校验 overlay。不传 `--overlay`（使用默认路径且文件不存在）时，最终配置与之前一致。
