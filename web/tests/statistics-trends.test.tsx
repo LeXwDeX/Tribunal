@@ -7,7 +7,6 @@ import { installFetch, jsonResponse, renderWithProviders } from './test-utils'
 const trendDay = {
   day: '2026-10-01',
   runs: 3,
-  cost_micros: 1_500_000,
   duration_samples: 2,
   avg_duration_ms: 950,
   p95_duration_ms: 1800,
@@ -16,7 +15,6 @@ const trendDay = {
 const anotherTrendDay = {
   day: '2026-10-03',
   runs: 1,
-  cost_micros: 0,
   duration_samples: 0,
   avg_duration_ms: null,
   p95_duration_ms: null,
@@ -25,7 +23,6 @@ const anotherTrendDay = {
 const providerTrendDay = {
   day: '2026-10-01',
   runs: 5,
-  cost_micros: 2_000_000,
   duration_samples: 4,
   avg_duration_ms: 100,
   p95_duration_ms: 200,
@@ -34,7 +31,6 @@ const providerTrendDay = {
 const blockTrendDay = {
   day: '2026-10-01',
   runs: 4,
-  cost_micros: 3_000_000,
   duration_samples: 2,
   avg_duration_ms: 300,
   p95_duration_ms: 400,
@@ -74,14 +70,12 @@ const fullStats = {
   duration_samples: 2,
   avg_duration_ms: 950,
   p95_duration_ms: 1800,
-  cost_micros: 1_500_000,
   trend: [trendDay, anotherTrendDay],
   by_project: [{
     project_id: 42,
     runs: 3,
     blocking: 1,
     published: 4,
-    cost_micros: 1_000_000,
     duration_samples: 2,
     avg_duration_ms: 950,
     p95_duration_ms: 1800,
@@ -90,7 +84,6 @@ const fullStats = {
   by_provider: [{
     provider: 'anthropic',
     runs: 5,
-    cost_micros: 2_000_000,
     duration_samples: 4,
     avg_duration_ms: 100,
     p95_duration_ms: 200,
@@ -99,7 +92,6 @@ const fullStats = {
   by_block: [{
     block: 'propose',
     runs: 4,
-    cost_micros: 3_000_000,
     duration_samples: 2,
     avg_duration_ms: 300,
     p95_duration_ms: 400,
@@ -110,7 +102,7 @@ const fullStats = {
 describe('statistics daily trends', () => {
   afterEach(() => vi.unstubAllGlobals())
 
-  it('shows an overall sparse UTC trend with cost, durations and sample counts', async () => {
+  it('shows an overall sparse UTC trend with durations and sample counts', async () => {
     routeStats(fullStats)
     renderWithProviders(<StatisticsPage />)
 
@@ -119,16 +111,15 @@ describe('statistics daily trends', () => {
     expect(within(table).getByRole('columnheader', { name: '日期 (UTC)' })).toBeInTheDocument()
     expect(within(table).getByRole('columnheader', { name: '工作流次数' })).toBeInTheDocument()
     expect(within(table).getByRole('columnheader', { name: '耗时样本' })).toBeInTheDocument()
+    expect(within(table).queryByRole('columnheader', { name: '成本' })).not.toBeInTheDocument()
 
     const first = rowFor(table, '2026-10-01')
     expect(first.getByText('3')).toBeInTheDocument()
     expect(first.getByText('2')).toBeInTheDocument()
-    expect(first.getByText('$1.5000')).toBeInTheDocument()
     expect(first.getByText('950ms')).toBeInTheDocument()
     expect(first.getByText('2s')).toBeInTheDocument()
 
     const second = rowFor(table, '2026-10-03')
-    expect(second.getByText('$0.0000')).toBeInTheDocument()
     expect(second.getAllByText('不可用')).toHaveLength(2)
     expect(second.getByText('0')).toBeInTheDocument()
 
@@ -152,15 +143,14 @@ describe('statistics daily trends', () => {
     expect(projectRow.getByText('3')).toBeInTheDocument()
     expect(projectRow.getByText('1')).toBeInTheDocument()
     expect(projectRow.getByText('4')).toBeInTheDocument()
-    expect(projectRow.getByText('$1.0000')).toBeInTheDocument()
     expect(projectRow.getByText('2')).toBeInTheDocument()
+    expect(within(projectTable).queryByRole('columnheader', { name: '成本' })).not.toBeInTheDocument()
 
     const providerPanel = await panelByTitle('Provider 统计')
     const providerTable = providerPanel.getByRole('table')
     expect(within(providerTable).getByRole('columnheader', { name: '已启动节点数' })).toBeInTheDocument()
     const providerRow = rowFor(providerTable, 'anthropic')
     expect(providerRow.getByText('5')).toBeInTheDocument()
-    expect(providerRow.getByText('$2.0000')).toBeInTheDocument()
     expect(providerRow.getByText('4')).toBeInTheDocument()
 
     const blockPanel = await panelByTitle('Block 统计')
@@ -168,7 +158,7 @@ describe('statistics daily trends', () => {
     const blockRow = rowFor(blockTable, 'propose')
     expect(blockRow.getByText('4')).toBeInTheDocument()
     expect(blockRow.getByText('2')).toBeInTheDocument()
-    expect(blockRow.getByText('$3.0000')).toBeInTheDocument()
+    expect(within(blockTable).queryByRole('columnheader', { name: '成本' })).not.toBeInTheDocument()
 
     expect(screen.getByText(/只要节点有开始时间（started_at）就计入/)).toBeInTheDocument()
     expect(screen.getByText(/运行中、已完成和失败的节点都会计入/)).toBeInTheDocument()
@@ -232,7 +222,6 @@ describe('statistics daily trends', () => {
   ])('hides misleading top durations for %s', async (_label, partial, note) => {
     routeStats({
       runs: 3,
-      cost_micros: 100,
       avg_duration_ms: 2000,
       p95_duration_ms: 4000,
       ...partial,
@@ -248,14 +237,12 @@ describe('statistics daily trends', () => {
 
     const runs = within(topMetric('运行次数'))
     expect(runs.getByText('3')).toBeInTheDocument()
-    const cost = within(topMetric('成本'))
-    expect(cost.getByText('$0.0001')).toBeInTheDocument()
+    expect(screen.queryByText('成本')).not.toBeInTheDocument()
   })
 
   it('keeps valid legacy average and P95 when duration samples are absent', async () => {
     routeStats({
       runs: 3,
-      cost_micros: 100,
       avg_duration_ms: 2000,
       p95_duration_ms: 4000,
     })
@@ -266,10 +253,10 @@ describe('statistics daily trends', () => {
     expect(average.getByText('2s')).toBeInTheDocument()
     expect(average.queryByText('不可用')).not.toBeInTheDocument()
     expect(within(topMetric('运行次数')).getByText('3')).toBeInTheDocument()
-    expect(within(topMetric('成本')).getByText('$0.0001')).toBeInTheDocument()
+    expect(screen.queryByText('成本')).not.toBeInTheDocument()
   })
 
-  it('renders zero cost and null durations without inventing zero durations', async () => {
+  it('renders null durations without inventing zero durations and ignores a legacy cost field', async () => {
     routeStats({
       runs: 1,
       by_provider: [{
@@ -286,9 +273,9 @@ describe('statistics daily trends', () => {
 
     const panel = await panelByTitle('Provider 统计')
     const row = rowFor(panel.getByRole('table'), 'local')
-    expect(row.getByText('$0.0000')).toBeInTheDocument()
     expect(row.getAllByText('不可用')).toHaveLength(2)
     expect(row.getByText('0')).toBeInTheDocument()
+    expect(panel.queryByText('成本')).not.toBeInTheDocument()
   })
 
   it('keeps old project rows and marks missing new fields unavailable, not zero', async () => {
@@ -296,13 +283,11 @@ describe('statistics daily trends', () => {
       runs: 3,
       blocking: 1,
       published: 2,
-      cost_micros: 100,
       by_project: [{
         project_id: 7,
         runs: 3,
         blocking: 1,
         published: 2,
-        cost_micros: 100,
       }],
     })
     renderWithProviders(<StatisticsPage />)
@@ -312,7 +297,6 @@ describe('statistics daily trends', () => {
     expect(row.getByText('3')).toBeInTheDocument()
     expect(row.getByText('1')).toBeInTheDocument()
     expect(row.getByText('2')).toBeInTheDocument()
-    expect(row.getByText('$0.0001')).toBeInTheDocument()
     expect(row.getAllByText('不可用').length).toBeGreaterThanOrEqual(3)
     expect(row.queryByText('0')).not.toBeInTheDocument()
 
@@ -320,6 +304,24 @@ describe('statistics daily trends', () => {
     expect(screen.getByText('Provider 统计不可用')).toBeInTheDocument()
     expect(screen.getByText('Block 统计不可用')).toBeInTheDocument()
     expect(screen.getByText(/样本数不可用/)).toBeInTheDocument()
+  })
+
+  it('ignores legacy cost values that are missing, zero or not a non-negative integer', async () => {
+    routeStats({
+      runs: 1,
+      cost_micros: 'legacy',
+      trend: [{ ...trendDay, cost_micros: -1 }],
+      by_project: [{ project_id: 42, runs: 3, blocking: 1, published: 4, cost_micros: 0, duration_samples: 0, avg_duration_ms: null, p95_duration_ms: null, trend: [] }],
+      by_provider: [{ provider: 'anthropic', runs: 5, cost_micros: -2, duration_samples: 0, avg_duration_ms: null, p95_duration_ms: null, trend: [] }],
+      by_block: [{ block: 'propose', runs: 4, cost_micros: 1.5, duration_samples: 0, avg_duration_ms: null, p95_duration_ms: null, trend: [] }],
+    })
+    renderWithProviders(<StatisticsPage />)
+
+    const trend = await panelByTitle('每日运行趋势')
+    expect(rowFor(trend.getByRole('table', { name: '每日运行趋势' }), '2026-10-01').getByText('3')).toBeInTheDocument()
+    expect(rowFor((await panelByTitle('项目统计')).getByRole('table'), '项目 #42').getByText('3')).toBeInTheDocument()
+    expect(rowFor((await panelByTitle('Provider 统计')).getByRole('table'), 'anthropic').getByText('5')).toBeInTheDocument()
+    expect(rowFor((await panelByTitle('Block 统计')).getByRole('table'), 'propose').getByText('4')).toBeInTheDocument()
   })
 
   it('fails the whole overall trend closed on a malformed row', async () => {
@@ -504,6 +506,45 @@ describe('statistics daily trends', () => {
     expect(screen.queryByText('每日趋势不可用')).not.toBeInTheDocument()
     expect(screen.queryByText('Provider 统计不可用')).not.toBeInTheDocument()
     expect(screen.getByText(/样本 0/)).toBeInTheDocument()
+  })
+
+  it('hides legacy cost fields from the by-model table and the raw stats response', async () => {
+    routeStats({
+      runs: 1,
+      by_model: [{
+        provider: 'anthropic',
+        model: 'claude-sonnet',
+        calls: 11,
+        errors: 2,
+        input_tokens: 1200,
+        output_tokens: 300,
+        cost_micros: 999,
+        price: { input_per_mtok: 3 },
+        avg_latency_ms: 120.5,
+        p50_latency_ms: 100,
+        error_rate: 0.18,
+      }],
+    })
+    renderWithProviders(<StatisticsPage />)
+
+    const panel = await panelByTitle('按模型')
+    const table = panel.getByRole('table')
+    expect(within(table).queryByRole('columnheader', { name: 'cost_micros' })).not.toBeInTheDocument()
+    expect(within(table).queryByRole('columnheader', { name: 'price' })).not.toBeInTheDocument()
+    expect(within(table).getByRole('columnheader', { name: 'calls' })).toBeInTheDocument()
+    expect(within(table).getByRole('columnheader', { name: 'input_tokens' })).toBeInTheDocument()
+    expect(within(table).getByRole('columnheader', { name: 'p50_latency_ms' })).toBeInTheDocument()
+    const row = rowFor(table, 'anthropic')
+    expect(row.getByText('11')).toBeInTheDocument()
+    expect(row.getByText('1,200')).toBeInTheDocument()
+    expect(row.getByText('100')).toBeInTheDocument()
+    expect(panel.queryByText('999')).not.toBeInTheDocument()
+
+    const raw = screen.getByText('查看原始 stats 响应').closest('details')
+    if (!raw) throw new Error('raw stats disclosure missing')
+    expect(raw).not.toHaveTextContent('cost_micros')
+    expect(raw).not.toHaveTextContent('"price"')
+    expect(raw).toHaveTextContent('p50_latency_ms')
   })
 
   it('marks the trend unavailable when an older response omits it even with metrics', async () => {

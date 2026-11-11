@@ -150,13 +150,14 @@ describe('review table v2 rows', () => {
     const { mr_title: _t, project_path: _p, ...row } = review({ id: 'r-2', mr_iid: 9 })
     render(
       <MemoryRouter>
-        <ReviewTable reviews={[{ ...row, cost_micros: 1_250_000 }]} projectNames={new Map([[row.project_id, 'group/listed']])} />
+        <ReviewTable reviews={[{ ...row, duration_ms: 83_000 }]} projectNames={new Map([[row.project_id, 'group/listed']])} />
       </MemoryRouter>,
     )
     expect(screen.queryByText('未命名 MR')).not.toBeInTheDocument()
     const link = screen.getByRole('link', { name: '!9' })
     const tr = link.closest('tr')!
     expect(within(tr).getByText('group/listed')).toBeInTheDocument()
-    expect(within(tr).getByText('$1.2500')).toBeInTheDocument()
+    expect(within(tr).getByText('1m 23s')).toBeInTheDocument()
+    expect(screen.queryByRole('columnheader', { name: '成本' })).not.toBeInTheDocument()
   })
 })

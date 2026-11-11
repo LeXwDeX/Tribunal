@@ -107,7 +107,8 @@ describe('project registration', () => {
     expect(dialog).toHaveTextContent('job-1')
     expect(dialog).toHaveTextContent('group/backend')
     expect(screen.getByText(/加密保存访问 Key/)).toBeInTheDocument()
-    expect(screen.getByText(/可能产生模型费用/)).toBeInTheDocument()
+    expect(screen.getByText(/会调用模型并消耗 token/)).toBeInTheDocument()
+    expect(screen.queryByText(/费用/)).not.toBeInTheDocument()
     expect(dialog).toHaveTextContent('Webhook 需在项目设置中单独配置')
     expect(registerBodies).toHaveLength(1)
     expect(registerBodies[0]).toEqual({

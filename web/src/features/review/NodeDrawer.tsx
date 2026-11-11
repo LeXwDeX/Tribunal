@@ -5,7 +5,7 @@ import {
   Badge, Button, CopyButton, Disclosure, Drawer, EmptyState, ErrorState, LoadingState, StatusBadge,
 } from '../../components/ui'
 import { usePaginated } from '../../lib/hooks'
-import { formatCost, formatDuration, formatJson, formatNumber } from '../../lib/format'
+import { formatDuration, formatJson, formatNumber } from '../../lib/format'
 import ui from '../../styles/ui.module.css'
 import styles from './review.module.css'
 
@@ -130,7 +130,6 @@ export function NodeDrawer({
           <span>{current.provider || '—'}</span>
           {typeof attempt === 'number' && attempt > 0 ? <span>第 {attempt} 次尝试</span> : null}
           <span className="mono">{formatDuration(data?.duration_ms)}</span>
-          <span className="mono">{formatCost(data?.usage?.cost_micros)}</span>
           {current.depends_on?.length ? <span>依赖 <code>{current.depends_on.join(', ')}</code></span> : null}
         </div>
       ) : null}

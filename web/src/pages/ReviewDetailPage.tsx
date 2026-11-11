@@ -17,7 +17,7 @@ import { findingFunnel, verdictCardState } from '../features/review/reviewView'
 import { useReviewStream } from '../features/review/useReviewStream'
 import { usePaginated } from '../lib/hooks'
 import {
-  formatCost, formatDuration, formatJson, formatNumber, formatTokens, labelForChallenge, labelForDecision,
+  formatDuration, formatJson, formatNumber, formatTokens, labelForChallenge, labelForDecision,
   labelForTrigger, safeExternalUrl, shortSha, stringifyUnknown,
 } from '../lib/format'
 import ui from '../styles/ui.module.css'
@@ -401,7 +401,6 @@ function UsagePanel({ review }: { review: ReviewDetail }) {
       <dl className={`${ui.definitionGrid} ${rv.usageGrid}`}>
         <dt>输入</dt><dd className="mono">{tokens(usage?.tokens_in)}</dd>
         <dt>输出</dt><dd className="mono">{tokens(usage?.tokens_out)}</dd>
-        <dt>成本</dt><dd className="mono">{typeof usage?.cost_micros === 'number' ? formatCost(usage.cost_micros) : '不可用'}</dd>
         <dt>用时</dt><dd className="mono">{formatDuration(review.duration_ms)}</dd>
       </dl>
       {review.usage_incomplete || interruptions > 0 ? (
@@ -470,7 +469,6 @@ function VerdictCard({
       <div className={rv.verdictStats}>
         <div><span className={rv.statLabel}>发布</span><PublicationBadge state={review.publication_state} /></div>
         <div><span className={rv.statLabel}>Tokens</span><b>{formatTokens(review.usage?.tokens_in, review.usage?.tokens_out)}</b></div>
-        <div><span className={rv.statLabel}>成本</span><b>{formatCost(review.usage?.cost_micros)}</b></div>
       </div>
     </section>
   )

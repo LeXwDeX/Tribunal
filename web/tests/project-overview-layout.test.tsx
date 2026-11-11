@@ -24,4 +24,9 @@ it('places both project cards before the full-width recent reviews panel', async
   expect(basic.parentElement?.nextElementSibling).toBe(reviews)
   expect(within(reviews).getByRole('link', { name: '查看全部' })).toHaveAttribute('href', '/reviews?project_id=42')
   expect(await within(reviews).findAllByRole('row')).toHaveLength(21)
+
+  const stats = screen.getByRole('region', { name: '本项目近 7 天' })
+  expect(within(stats).getByText('运行次数')).toBeInTheDocument()
+  expect(within(stats).getByText('耗时 平均 / P95')).toBeInTheDocument()
+  expect(within(stats).queryByText('成本')).not.toBeInTheDocument()
 })

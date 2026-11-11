@@ -214,6 +214,7 @@ export interface FindingsSummary {
 export interface ReviewUsage {
   tokens_in?: number
   tokens_out?: number
+  // Legacy cost field. The console never reads it (#408).
   cost_micros?: number
 }
 
@@ -263,6 +264,7 @@ export interface ReviewSummary {
   // List items carry usage at the top level (store.Workflow); detail adds `usage`.
   tokens_in?: number
   tokens_out?: number
+  // Legacy cost field. The console never reads it (#408).
   cost_micros?: number
   duration_ms?: number
   created_at?: string
@@ -313,6 +315,7 @@ export interface Finding {
 export interface NodeUsage {
   tokens_in?: number
   tokens_out?: number
+  // Legacy cost field. The console never reads it (#408).
   cost_micros?: number
 }
 
@@ -548,7 +551,8 @@ export interface Profile {
 export interface DailyStats {
   day: string
   runs: number
-  cost_micros: number
+  // Legacy cost field. The console never reads it (#408).
+  cost_micros?: number
   duration_samples: number
   avg_duration_ms: number | null
   p95_duration_ms: number | null
@@ -556,7 +560,8 @@ export interface DailyStats {
 
 export interface StatsBreakdown {
   runs: number
-  cost_micros: number
+  // Legacy cost field. The console never reads it (#408).
+  cost_micros?: number
   duration_samples: number
   avg_duration_ms: number | null
   p95_duration_ms: number | null

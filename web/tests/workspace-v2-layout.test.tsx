@@ -72,7 +72,8 @@ describe('workspace v2 layout', () => {
     await user.click(screen.getByRole('button', { name: '重新生成上下文' }))
     await waitFor(() => expect(bodies).toHaveLength(3))
     expect(bodies).toEqual([{}, { reindex: true }, { regenerate_context: true }])
-    expect(screen.getByText(/可能产生费用/)).toBeInTheDocument()
+    expect(screen.getByText(/会调用模型并消耗 token/)).toBeInTheDocument()
+    expect(screen.queryByText(/费用/)).not.toBeInTheDocument()
   })
 
   it.each([
@@ -139,7 +140,8 @@ describe('workspace v2 layout', () => {
     await user.click(screen.getByRole('button', { name: 'CLAUDE' }))
     await user.click(screen.getByRole('button', { name: '手动操作' }))
     expect(await screen.findByText(/执行时若 AGENTS 仍锁定，新版本会保存但不会生效/)).toBeInTheDocument()
-    expect(screen.getByText(/可能产生费用/)).toBeInTheDocument()
+    expect(screen.getByText(/会调用模型并消耗 token/)).toBeInTheDocument()
+    expect(screen.queryByText(/费用/)).not.toBeInTheDocument()
   })
 
   it('switches document kind and opens an older version read-only from the version list', async () => {

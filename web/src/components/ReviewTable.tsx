@@ -2,7 +2,7 @@ import type { MouseEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { isStatusOnly } from '../api/types'
 import type { ReviewListItem, ReviewSummary, StatusOnlyReview } from '../api/types'
-import { formatCost, formatDuration } from '../lib/format'
+import { formatDuration } from '../lib/format'
 import { Badge, PublicationBadge, RelativeTime, SevCounts, StatusBadge, Tooltip, VerdictBadge } from './ui'
 import styles from './ReviewTable.module.css'
 
@@ -53,7 +53,6 @@ function StatusOnlyRow({ review, projectNames }: { review: StatusOnlyReview; pro
       <td><VerdictBadge verdict={review.verdict} /></td>
       <td><span className="muted">—</span></td>
       <td className="right num mono">—</td>
-      <td className="right num mono">—</td>
       <td className="muted nowrap"><RelativeTime value={review.created_at} /></td>
     </tr>
   )
@@ -73,7 +72,6 @@ export function ReviewTable({ reviews, projectNames }: { reviews: ReviewListItem
             <th scope="col">结论</th>
             <th scope="col">P0 · P1 · P2</th>
             <th scope="col" className="right">用时</th>
-            <th scope="col" className="right">成本</th>
             <th scope="col">时间</th>
           </tr>
         </thead>
@@ -123,7 +121,6 @@ export function ReviewTable({ reviews, projectNames }: { reviews: ReviewListItem
                 <td>{review.verdict ? <VerdictBadge verdict={review.verdict} /> : <span className="muted">—</span>}</td>
                 <td><SevCounts summary={review.findings_summary} /></td>
                 <td className="right num mono">{formatDuration(review.duration_ms)}</td>
-                <td className="right num mono">{formatCost(review.usage?.cost_micros ?? review.cost_micros)}</td>
                 <td className="muted nowrap"><RelativeTime value={review.created_at} /></td>
               </tr>
             )

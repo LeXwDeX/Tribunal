@@ -44,6 +44,14 @@ describe('usage interruptions on review detail (#346)', () => {
     expect(screen.queryByText(/中断恢复/)).not.toBeInTheDocument()
     expect(screen.queryByText('用量不完整')).not.toBeInTheDocument()
   })
+
+  it('ignores a legacy cost_micros field in the usage panel', async () => {
+    renderDetail(review({ usage: { tokens_in: 100, tokens_out: 20, cost_micros: 999 } }))
+    await screen.findByText('用量')
+    expect(screen.getByText('100 tokens')).toBeInTheDocument()
+    expect(screen.queryByText('成本')).not.toBeInTheDocument()
+    expect(screen.queryByText('$0.0010')).not.toBeInTheDocument()
+  })
 })
 
 describe('model card params summary (#346)', () => {

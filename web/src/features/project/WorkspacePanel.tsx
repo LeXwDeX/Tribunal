@@ -50,7 +50,7 @@ export function WorkspacePanel({ projectId, canManage = false }: { projectId: nu
   const manualPanelId = useId()
   const manualBodyId = `${manualPanelId}-body`
   const indexBlockedId = `${manualPanelId}-index-blocked`
-  const feeHintId = `${manualPanelId}-fee-hint`
+  const tokenHintId = `${manualPanelId}-token-hint`
   const lockedHintId = `${manualPanelId}-locked-hint`
   const pendingJob = pendingWorkspaceJobs.get(projectId)
   const [trackingJob, setTrackingJob] = useState(() => Boolean(pendingJob && pendingJob.until > Date.now()))
@@ -252,7 +252,7 @@ export function WorkspacePanel({ projectId, canManage = false }: { projectId: nu
   const ws = workspace.data
   const indexBlocked = Boolean(ws?.index_status === 'degraded' && ws.last_error === 'index: blocked by ignore policy')
   const manualOpen = manualChoice ?? indexBlocked
-  const regenerateDescriptions = [feeHintId, agentsCurrent.data?.locked ? lockedHintId : undefined].filter(Boolean).join(' ')
+  const regenerateDescriptions = [tokenHintId, agentsCurrent.data?.locked ? lockedHintId : undefined].filter(Boolean).join(' ')
 
   return (
     <div className={ui.pageStack}>
@@ -326,7 +326,7 @@ export function WorkspacePanel({ projectId, canManage = false }: { projectId: nu
                       {indexBlocked ? (
                         <p id={indexBlockedId} className={page.manualStatus} role="status">已按 ignore 策略跳过索引，这是安全配置，不是故障。修改项目 ignore 配置后重建索引。</p>
                       ) : null}
-                      <p id={feeHintId} className={page.hint}>重新生成上下文会调用模型，可能产生费用。</p>
+                      <p id={tokenHintId} className={page.hint}>重新生成上下文会调用模型并消耗 token。</p>
                       {agentsCurrent.data?.locked ? <p id={lockedHintId} className={page.hint}>AGENTS 当前已锁定。执行时若 AGENTS 仍锁定，新版本会保存但不会生效，当前文档保持不变。</p> : null}
                     </div>
                   </>

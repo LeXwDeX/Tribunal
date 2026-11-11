@@ -237,7 +237,7 @@ export function Metric({ label, value, note }: { label: string; value: ReactNode
   )
 }
 
-export function Sparkline({ points, color = 'var(--accent)' }: { points: number[]; color?: string }) {
+export function Sparkline({ points }: { points: number[] }) {
   const values = points.filter((point) => Number.isFinite(point))
   if (values.length < 2) return null
   const max = Math.max(...values)
@@ -250,7 +250,7 @@ export function Sparkline({ points, color = 'var(--accent)' }: { points: number[
   }).join(' ')
   return (
     <svg width="64" height="18" viewBox="0 0 64 18" aria-hidden="true" focusable="false">
-      <polyline points={polyline} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round" />
+      <polyline points={polyline} fill="none" stroke="var(--accent)" strokeWidth="1.5" strokeLinejoin="round" />
     </svg>
   )
 }

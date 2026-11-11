@@ -57,8 +57,8 @@ function routeOverview(stats: unknown, running: unknown[] = [], failed: unknown[
   })
 }
 
-function trendDay(day: string, runs: number, cost: number) {
-  return { day, runs, cost_micros: cost, duration_samples: 0, avg_duration_ms: null, p95_duration_ms: null }
+function trendDay(day: string, runs: number) {
+  return { day, runs, duration_samples: 0, avg_duration_ms: null, p95_duration_ms: null }
 }
 
 async function metric(label: string) {
@@ -70,10 +70,11 @@ async function metric(label: string) {
 describe('overview v2 layout', () => {
   afterEach(() => vi.unstubAllGlobals())
 
-  it('explains cost pricing and places the alert coverage beside the title', async () => {
-    routeOverview({ runs: 1, cost_micros: 0 })
+  it('places the alert coverage beside the title and never shows cost', async () => {
+    routeOverview({ runs: 1 })
     renderWithProviders(<OverviewPage />)
-    expect(await screen.findByText(/需在 provider 配置 price 才统计成本/)).toBeInTheDocument()
+    expect(await screen.findByText('运行次数')).toBeInTheDocument()
+    expect(screen.queryByText('成本')).not.toBeInTheDocument()
     const heading = screen.getByRole('heading', { name: '告警' })
     const header = heading.parentElement
     if (!header) throw new Error('alert header missing')
@@ -92,7 +93,7 @@ describe('overview v2 layout', () => {
   })
 
   it.each([[false, false], [true, false], [false, true], [true, true]])('orders sections with alerts=%s and running=%s', async (hasAlert, hasRunning) => {
-    routeOverview({ runs: 1, cost_micros: 0 }, hasRunning ? [review({ id: 'running', mr_title: 'active review' })] : [], hasAlert ? [review({ id: 'failure', mr_title: 'failed run', status: 'failed' })] : [])
+    routeOverview({ runs: 1 }, hasRunning ? [review({ id: 'running', mr_title: 'active review' })] : [], hasAlert ? [review({ id: 'failure', mr_title: 'failed run', status: 'failed' })] : [])
     renderWithProviders(<OverviewPage />)
     const stats = await screen.findByRole('region', { name: '近 7 天指标' })
     const alerts = screen.getByRole('heading', { name: '告警' })
@@ -109,32 +110,30 @@ describe('overview v2 layout', () => {
     } else expect(await screen.findByText('当前没有运行中的评审')).toBeInTheDocument()
   })
 
-  it('shows running reviews without the empty state and explains the cost limit', async () => {
-    routeOverview({ runs: 1, cost_micros: 0 }, [review({ id: 'running', mr_title: 'active review' })])
+  it('shows running reviews without the empty state and explains the metrics', async () => {
+    routeOverview({ runs: 1 }, [review({ id: 'running', mr_title: 'active review' })])
     renderWithProviders(<OverviewPage />)
     expect(await screen.findByText('active review')).toBeInTheDocument()
     expect(screen.queryByText('当前没有运行中的评审')).not.toBeInTheDocument()
-    expect(await screen.findByText(/无法区分未配置价格/)).toHaveTextContent(/需在 provider 配置 price 才统计成本；无法区分未配置价格和实际零成本/)
+    expect(screen.queryByText('成本')).not.toBeInTheDocument()
     expect(screen.getByText('BLOCKING 工作流数 / 所有工作流数')).toBeInTheDocument()
     expect(screen.getByText('裁决为 publish 或 mark 的问题数，不代表实际发布成功')).toBeInTheDocument()
     expect(screen.getByText('drop 问题数 / 有裁决的问题数，不是模型准确率')).toBeInTheDocument()
   })
 
-  it('draws sparklines only on runs and cost when the trend has at least two points', async () => {
+  it('draws a sparkline only on runs when the trend has at least two points', async () => {
     routeOverview({
       runs: 5,
-      cost_micros: 2_000_000,
-      trend: [trendDay('2026-10-20', 2, 500_000), trendDay('2026-10-21', 3, 1_500_000)],
+      trend: [trendDay('2026-10-20', 2), trendDay('2026-10-21', 3)],
     })
     const { container } = renderWithProviders(<OverviewPage />, { route: '/' })
     expect((await metric('运行次数')).querySelector('svg polyline')).not.toBeNull()
-    expect((await metric('成本')).querySelector('svg polyline')).not.toBeNull()
     expect((await metric('BLOCKING 比例')).querySelector('svg')).toBeNull()
-    expect(container.querySelectorAll('section[aria-label="近 7 天指标"] svg')).toHaveLength(2)
+    expect(container.querySelectorAll('section[aria-label="近 7 天指标"] svg')).toHaveLength(1)
   })
 
   it('does not draw sparklines for a missing or single-point trend', async () => {
-    routeOverview({ runs: 5, cost_micros: 1, trend: [trendDay('2026-10-21', 5, 1)] })
+    routeOverview({ runs: 5, trend: [trendDay('2026-10-21', 5)] })
     const single = renderWithProviders(<OverviewPage />, { route: '/' })
     await metric('运行次数')
     expect(single.container.querySelectorAll('section[aria-label="近 7 天指标"] svg')).toHaveLength(0)
@@ -146,7 +145,7 @@ describe('overview v2 layout', () => {
     expect(missing.container.querySelectorAll('section[aria-label="近 7 天指标"] svg')).toHaveLength(0)
   })
 
-  it('shows six metrics in the strip', async () => {
+  it('shows five metrics without cost in the strip', async () => {
     routeOverview({ runs: 5 })
     renderWithProviders(<OverviewPage />, { route: '/' })
     const strip = await screen.findByRole('region', { name: '近 7 天指标' })
@@ -154,8 +153,20 @@ describe('overview v2 layout', () => {
     expect(within(strip).getByText('BLOCKING 比例')).toBeInTheDocument()
     expect(within(strip).getByText('发布类问题')).toBeInTheDocument()
     expect(within(strip).getByText('规则丢弃比例')).toBeInTheDocument()
-    expect(within(strip).getByText('成本')).toBeInTheDocument()
     expect(within(strip).getByText('耗时 平均 / P95')).toBeInTheDocument()
+    expect(within(strip).queryByText('成本')).not.toBeInTheDocument()
+  })
+
+  it.each([
+    ['missing', {}],
+    ['zero', { cost_micros: 0 }],
+    ['invalid', { cost_micros: -1 }],
+  ])('renders the metric strip when cost_micros is %s', async (_label, cost) => {
+    routeOverview({ runs: 3, ...cost })
+    renderWithProviders(<OverviewPage />, { route: '/' })
+    const strip = await screen.findByRole('region', { name: '近 7 天指标' })
+    expect(within(strip).getByText('运行次数')).toBeInTheDocument()
+    expect(within(strip).queryByText('成本')).not.toBeInTheDocument()
   })
 
   it('renders a stage track for derivable runs and omits it otherwise', async () => {

@@ -64,20 +64,21 @@ describe('verdictCardState', () => {
 describe('verdict card', () => {
   afterEach(() => vi.unstubAllGlobals())
 
-  it('renders PASS with the publication state, tokens and cost', async () => {
+  it('renders PASS with the publication state and tokens, without cost', async () => {
     renderDetail(review({
       id: 'wf-pass',
       status: 'completed',
       verdict: 'PASS',
       publication_state: 'published',
-      usage: { tokens_in: 412000, tokens_out: 38000, cost_micros: 1_840_000 },
+      usage: { tokens_in: 412000, tokens_out: 38000 },
       findings_summary: { published: 0, marked: 0, dropped: 1, by_severity: { P0: 0, P1: 0, P2: 1, info: 0 } },
     }))
     const card = await verdictCard()
     expect(card).toHaveAttribute('data-verdict', 'PASS')
     expect(within(card).getByText('PASS')).toBeInTheDocument()
     expect(within(card).getByText('已发布')).toBeInTheDocument()
-    expect(within(card).getByText('$1.8400')).toBeInTheDocument()
+    expect(within(card).getByText('412.0k / 38.0k')).toBeInTheDocument()
+    expect(within(card).queryByText('成本')).not.toBeInTheDocument()
   })
 
   it('renders BLOCKING with a summary built only from findings_summary', async () => {
@@ -282,7 +283,7 @@ describe('node drawer', () => {
           id: 'review.a', kind: 'code-review', status: 'completed', provider: 'claude', attempt: 2, duration_ms: 48000,
           params: { focus: 'internal/**', max_turns: 8 },
           output: { findings: [] },
-          usage: { tokens_in: 100, tokens_out: 20, cost_micros: 310000 },
+          usage: { tokens_in: 100, tokens_out: 20 },
         })
       }
       if (url.startsWith('/api/v1/reviews/wf/nodes/review.a/calls')) {
@@ -307,7 +308,8 @@ describe('node drawer', () => {
     await within(dialog).findByText('internal/**')
     expect(within(dialog).getByText('max_turns')).toBeInTheDocument()
     expect(within(dialog).getByRole('button', { name: '复制 JSON' })).toBeInTheDocument()
-    expect(dialog).toHaveTextContent('$0.3100')
+    expect(dialog).not.toHaveTextContent('成本')
+    expect(dialog).not.toHaveTextContent('$0.3100')
     expect(dialog).toHaveTextContent('第 2 次尝试')
     await waitFor(() => expect(dialog.querySelectorAll('details')).toHaveLength(2))
     const summaries = Array.from(dialog.querySelectorAll('details > summary')).map((item) => item.textContent)
@@ -332,7 +334,7 @@ describe('node drawer', () => {
       if (url === '/api/v1/reviews/wf/nodes/review.a') {
         return jsonResponse({
           id: 'review.a', kind: 'code-review', status: 'completed', provider: 'claude', attempt: 1,
-          duration_ms: 1000, params: {}, output: {}, usage: { tokens_in: 1, tokens_out: 1, cost_micros: 0 },
+          duration_ms: 1000, params: {}, output: {}, usage: { tokens_in: 1, tokens_out: 1 },
         })
       }
       if (url.startsWith('/api/v1/reviews/wf/nodes/review.a/calls')) {
