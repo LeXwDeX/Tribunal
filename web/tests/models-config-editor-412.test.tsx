@@ -69,17 +69,41 @@ interface RouteOptions {
 
 function routes(options: RouteOptions = {}) {
   const state = {
-    provider: configPayload().config.providers[0],
+    provider: configPayload().config.providers[0] as Record<string, unknown> | undefined,
+    origins: { ...configPayload().origins } as Record<string, string>,
     overlayRevision: 'overlay-rev-1',
     patchBody: undefined as Record<string, unknown> | undefined,
     configReads: 0,
     modelReads: 0,
+  }
+  // applyChanges simulates the file watcher: after a successful PATCH the next
+  // GET /api/v1/config returns the new file-effective values and origins.
+  const applyChanges = (body: Record<string, unknown>) => {
+    const changes = (body.changes ?? []) as Array<{ path: string[]; value?: unknown; delete?: boolean }>
+    for (const change of changes) {
+      const [, name, ...rest] = change.path
+      if (!state.provider || name !== state.provider.name || !rest.length) {
+        if (change.delete && change.path.length === 2 && state.provider?.name === name) state.provider = undefined
+        continue
+      }
+      let current = state.provider
+      for (const key of rest.slice(0, -1)) {
+        if (!current[key] || typeof current[key] !== 'object') current[key] = {}
+        current = current[key] as Record<string, unknown>
+      }
+      const leaf = rest[rest.length - 1]
+      if (change.delete) delete current[leaf]
+      else current[leaf] = change.value
+      state.origins[`providers.${[name, ...rest].join('.')}`] = change.delete ? 'base' : 'overlay'
+    }
+    state.overlayRevision = 'overlay-rev-2'
   }
   const fetchImpl = (url: string, init?: RequestInit) => {
     if (url === '/api/v1/config/overlay' && init?.method === 'PATCH') {
       const body = JSON.parse(String(init.body)) as Record<string, unknown>
       state.patchBody = body
       if (options.overlay) return options.overlay(body)
+      applyChanges(body)
       return jsonResponse({
         dry_run: false, applied: true, changed: true,
         base_revision: body.base_revision,
@@ -93,7 +117,8 @@ function routes(options: RouteOptions = {}) {
       state.configReads += 1
       return jsonResponse({
         ...configPayload({ overlayRevision: state.overlayRevision }),
-        config: { providers: [state.provider] },
+        config: { providers: state.provider ? [state.provider] : [] },
+        origins: state.origins,
       })
     }
     if (url === '/api/v1/config/status') {
@@ -195,6 +220,14 @@ describe('config model overlay editor (#412)', () => {
 
     expect(await screen.findByText(/已保存到 overlay，待重启生效/)).toBeInTheDocument()
     expect(screen.getByText(/重启服务可能取消在途评审/)).toBeInTheDocument()
+    // The refetched file-effective values reach the card, not just the
+    // running-catalog copy; the edited field now reports the overlay origin.
+    const paramsGroup = await screen.findByRole('group', { name: 'primary 参数' })
+    await waitFor(() => expect(within(paramsGroup).getByText('4096')).toBeInTheDocument())
+    const maxTokensEntry = within(paramsGroup).getByText('max_tokens').closest('span')
+    expect(maxTokensEntry).not.toBeNull()
+    expect(within(maxTokensEntry as HTMLElement).getByText('overlay')).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: '编辑配置' })).toBeEnabled()
     await waitFor(() => expect(state.configReads).toBeGreaterThan(configReadsBefore))
     await waitFor(() => expect(state.modelReads).toBeGreaterThan(modelReadsBefore))
     expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/v1/config' && init?.method !== 'PATCH')).toBe(true)

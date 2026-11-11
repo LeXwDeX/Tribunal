@@ -1851,7 +1851,11 @@ export function ModelsPage() {
   // The config snapshot is the file-effective view; it is the source for the
   // config: model editor and its per-field origins. Writes still go to the
   // overlay endpoint and need a restart before the runtime catalog changes.
-  const fileConfig = useQuery({ queryKey: ['config'], queryFn: getConfig, retry: false, enabled: canWrite })
+  // Poll it like the System page: the watcher applies a saved file after two
+  // stable observations (~2-4s), so an immediate refetch alone can be stale.
+  const fileConfig = useQuery({
+    queryKey: ['config'], queryFn: getConfig, retry: false, enabled: canWrite, refetchInterval: 5000,
+  })
   const [profileEditing, setProfileEditing] = useState(false)
   const [editing, setEditing] = useState<Model>()
   const [configEditing, setConfigEditing] = useState<Model>()
