@@ -1195,7 +1195,7 @@ func seedWorkflow(env *m6Env) {
 	env.store.(*fakeReviewStore).workflows = append(env.store.(*fakeReviewStore).workflows, store.Workflow{
 		ID: wfID, Kind: "review", ProjectID: 42, MRIID: &mrIID, HeadSHA: "head-1",
 		Profile: "default", Trigger: "mr_update", Status: "completed", Verdict: "BLOCKING",
-		TokensIn: 1000, TokensOut: 200, CostMicros: 5000,
+		TokensIn: 1000, TokensOut: 200,
 		CreatedAt: started, StartedAt: &started, FinishedAt: &finished,
 	})
 	planStart := started
@@ -1203,14 +1203,14 @@ func seedWorkflow(env *m6Env) {
 	env.store.(*fakeReviewStore).setNodes(wfID,
 		store.WorkflowNode{WorkflowID: wfID, ID: "plan", Kind: "plan", Status: "completed",
 			Required: true, Provider: "claude", Attempt: 1,
-			TokensIn: 100, TokensOut: 20, CostMicros: 100,
+			TokensIn: 100, TokensOut: 20,
 			StartedAt: &planStart, FinishedAt: &planEnd},
 		store.WorkflowNode{WorkflowID: wfID, ID: "review.std.p1", Kind: "review.standards", Status: "completed",
 			DependsOn: []string{"plan"}, Provider: "claude", Attempt: 1,
-			TokensIn: 200, TokensOut: 40, CostMicros: 200},
+			TokensIn: 200, TokensOut: 40},
 		store.WorkflowNode{WorkflowID: wfID, ID: "verify.f7", Kind: "verify", Status: "completed",
 			DependsOn: []string{"review.std.p1"}, Provider: "gpt", Attempt: 1,
-			TokensIn: 300, TokensOut: 60, CostMicros: 300},
+			TokensIn: 300, TokensOut: 60},
 	)
 	env.store.(*fakeReviewStore).setFindings(wfID,
 		store.Finding{ID: "f1", WorkflowID: wfID, OriginNode: "review.std.p1", Severity: "P1",

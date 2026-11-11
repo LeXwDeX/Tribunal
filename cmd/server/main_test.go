@@ -617,6 +617,34 @@ func TestSessionKeyFromEnv(t *testing.T) {
 	})
 }
 
+func TestDeprecatedProviderPricesWarnWithoutValues(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	warnDeprecatedProviderPrices(logger, map[string]config.ProviderConfig{
+		"b":     {Price: &config.PriceConfig{InputPerMTok: 1.25, OutputPerMTok: 9.75}},
+		"a":     {Price: &config.PriceConfig{InputPerMTok: 0.5}},
+		"clean": {},
+	})
+	// Assert the structured record instead of the raw line: a timestamp can
+	// contain the same digits as a price value and make a substring check flaky.
+	var record map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &record); err != nil {
+		t.Fatalf("decode warning %q: %v", logs.String(), err)
+	}
+	msg, _ := record["msg"].(string)
+	if !strings.Contains(msg, "deprecated") || record["providers"] != "a, b" {
+		t.Fatalf("warning = %v", record)
+	}
+	if len(record) != 4 {
+		t.Fatalf("warning carries unexpected fields: %v", record)
+	}
+	logs.Reset()
+	warnDeprecatedProviderPrices(logger, map[string]config.ProviderConfig{"clean": {}})
+	if logs.Len() != 0 {
+		t.Fatalf("providers without price warned: %q", logs.String())
+	}
+}
+
 func TestEphemeralSessionKeyWarns(t *testing.T) {
 	t.Setenv("TRIBUNAL_SESSION_KEY", "")
 	t.Setenv("CRC_SESSION_KEY", "")

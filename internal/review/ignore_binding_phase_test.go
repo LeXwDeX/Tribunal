@@ -23,9 +23,9 @@ func TestIgnoredOutputRetainsAgentUsage(t *testing.T) {
 	e := newTestExecutor(t, ExecutorDeps{Dossier: d, AgentRun: func(context.Context, agent.RunSpec) (*agent.RunResult, error) {
 		calls++
 		return &agent.RunResult{Output: &CodeReviewOut{Summary: "bad", Findings: []FindingOut{{Path: "private.txt"}}}, Usage: llm.Usage{InputTokens: 42, OutputTokens: 9, CacheReadTokens: 6, CacheWriteTokens: 3, ReasoningTokens: 2}}, nil
-	}, Cost: func(string, llm.Usage) int64 { return 17 }})
+	}})
 	out, err := e.Execute(context.Background(), codeReviewInput(t))
-	want := dag.Usage{InputTokens: 42, OutputTokens: 9, CacheReadTokens: 6, CacheWriteTokens: 3, ReasoningTokens: 2, CostMicros: 17}
+	want := dag.Usage{InputTokens: 42, OutputTokens: 9, CacheReadTokens: 6, CacheWriteTokens: 3, ReasoningTokens: 2}
 	if err == nil || knownUsage(err) != want || out.Usage != want || len(out.Data) != 0 || calls != 1 {
 		t.Fatalf("error=%v error usage=%+v node output=%+v calls=%d", err, knownUsage(err), out, calls)
 	}

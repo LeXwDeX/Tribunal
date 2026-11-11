@@ -139,8 +139,11 @@ func TestReviewDetailGraphNodeAndCalls(t *testing.T) {
 		t.Fatalf("by_severity = %v", bySeverity)
 	}
 	usage := body["usage"].(map[string]any)
-	if usage["tokens_in"] != float64(1000) || usage["cost_micros"] != float64(5000) {
+	if usage["tokens_in"] != float64(1000) || usage["tokens_out"] != float64(200) {
 		t.Fatalf("usage = %v", usage)
+	}
+	if _, present := usage["cost_micros"]; present {
+		t.Fatalf("usage exposes cost_micros: %v", usage)
 	}
 	publications := body["publications"].(map[string]any)
 	if publications["summary_note_id"] != float64(99102) || publications["discussions"] != float64(1) {

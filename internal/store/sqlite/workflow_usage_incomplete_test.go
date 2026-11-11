@@ -42,7 +42,7 @@ func TestWorkflowUsageIncompletePersistsAcrossReadModelsAndRestart(t *testing.T)
 		NodeID:          "a",
 		Attempt:         1,
 		Output:          json.RawMessage(`{"ok":true}`),
-		Usage:           dag.Usage{InputTokens: 2, OutputTokens: 3, CostMicros: 5},
+		Usage:           dag.Usage{InputTokens: 2, OutputTokens: 3},
 		UsageIncomplete: true,
 	}, clock.Now()))
 
@@ -55,7 +55,7 @@ func TestWorkflowUsageIncompletePersistsAcrossReadModelsAndRestart(t *testing.T)
 		if !wf.UsageIncomplete {
 			t.Fatalf("%s workflow usage_incomplete = false, want true", label)
 		}
-		if wf.TokensIn != 2 || wf.TokensOut != 3 || wf.CostMicros != 5 {
+		if wf.TokensIn != 2 || wf.TokensOut != 3 {
 			t.Fatalf("%s workflow usage = %+v", label, wf)
 		}
 		nodes, err := st.GetWorkflowNodes(ctx, wfID)
@@ -100,7 +100,7 @@ func TestWorkflowUsageIncompletePersistsAcrossReadModelsAndRestart(t *testing.T)
 	// A later complete result must not clear the workflow-level marker.
 	rev = mustAppendEvent(t, st, wfID, rev, queuedEvent(t, "b", 1, clock.Now()))
 	rev = mustAppendEvent(t, st, wfID, rev, startedEvent(t, "b", 1, "p", "m", clock.Now()))
-	mustAppendEvent(t, st, wfID, rev, completedEvent(t, "b", 1, 7, clock.Now()))
+	mustAppendEvent(t, st, wfID, rev, completedEvent(t, "b", 1, clock.Now()))
 	wf, err := st.GetWorkflow(ctx, wfID)
 	if err != nil {
 		t.Fatalf("GetWorkflow after second node: %v", err)
@@ -230,7 +230,7 @@ func TestWorkflowUsageIncompleteMigrationLeavesLegacyRowsUnmarked(t *testing.T) 
 	if err != nil {
 		t.Fatalf("GetWorkflow: %v", err)
 	}
-	if wf.UsageIncomplete || wf.TokensIn != 17 || wf.TokensOut != 5 || wf.CostMicros != 3 {
+	if wf.UsageIncomplete || wf.TokensIn != 17 || wf.TokensOut != 5 {
 		t.Fatalf("legacy workflow = %+v", wf)
 	}
 	nodes, err := st.GetWorkflowNodes(ctx, "wf-legacy-usage")

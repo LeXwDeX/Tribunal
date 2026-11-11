@@ -5,7 +5,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
 // The console reads `model` and `latency_ms` from both the saved and draft
@@ -28,5 +31,16 @@ func TestSavedModelTestUsesSnakeCaseFields(t *testing.T) {
 	}
 	if _, ok := body["Model"]; ok {
 		t.Fatalf("body = %v, must not contain Go field names", body)
+	}
+}
+
+// Model responses no longer expose a money price parameter.
+func TestModelViewDoesNotExposePrice(t *testing.T) {
+	raw, err := json.Marshal(modelView{ID: "user:x", Params: store.ModelParams{MaxTokens: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "price") {
+		t.Fatalf("model view exposes price: %s", raw)
 	}
 }

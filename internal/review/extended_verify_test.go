@@ -105,8 +105,7 @@ func TestExtendedVerifyExistingGroup(t *testing.T) {
 				second.Params, _ = json.Marshal(p)
 			}
 			var prompt string
-			var chargedProvider string
-			executor := newTestExecutor(t, ExecutorDeps{Dossier: dossier, Profile: profile, Snapshot: func(context.Context, string) (dag.WorkflowView, error) { return wf, nil }, Cost: func(provider string, _ llm.Usage) int64 { chargedProvider = provider; return 42 }, AgentRun: func(_ context.Context, spec agent.RunSpec) (*agent.RunResult, error) {
+			executor := newTestExecutor(t, ExecutorDeps{Dossier: dossier, Profile: profile, Snapshot: func(context.Context, string) (dag.WorkflowView, error) { return wf, nil }, AgentRun: func(_ context.Context, spec agent.RunSpec) (*agent.RunResult, error) {
 				prompt = spec.Prompt
 				out := SynthesizeOut{Verdict: VerdictPass, Summary: "second", Decisions: []Decision{}, NewFindings: []FindingOut{}, ExtendRequests: []ExtendRequest{}}
 				if tc.override || tc.judge {
@@ -123,8 +122,8 @@ func TestExtendedVerifyExistingGroup(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !tc.code && (chargedProvider != "claude" || resultRaw.Usage.InputTokens != 4 || resultRaw.Usage.OutputTokens != 5 || resultRaw.Usage.CostMicros != 42) {
-				t.Fatalf("lost provider usage: provider=%q usage=%+v", chargedProvider, resultRaw.Usage)
+			if !tc.code && (resultRaw.Usage.InputTokens != 4 || resultRaw.Usage.OutputTokens != 5) {
+				t.Fatalf("lost provider usage: usage=%+v", resultRaw.Usage)
 			}
 			result, err := decodeSynthesisResult(resultRaw.Data)
 			if err != nil {

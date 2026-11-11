@@ -603,10 +603,10 @@ func TestStatsAggregates(t *testing.T) {
 	rev = mustAppendEvent(t, st, wfID, rev, testEvent(t, dag.EventWorkflowStarted, dag.WorkflowTerminalPayload{}, startedAt))
 	rev = mustAppendEvent(t, st, wfID, rev, queuedEvent(t, "a", 1, startedAt))
 	rev = mustAppendEvent(t, st, wfID, rev, startedEvent(t, "a", 1, "p", "m", startedAt))
-	rev = mustAppendEvent(t, st, wfID, rev, completedEvent(t, "a", 1, 5, startedAt))
+	rev = mustAppendEvent(t, st, wfID, rev, completedEvent(t, "a", 1, startedAt))
 	rev = mustAppendEvent(t, st, wfID, rev, queuedEvent(t, "b", 1, startedAt))
 	rev = mustAppendEvent(t, st, wfID, rev, startedEvent(t, "b", 1, "p", "m", startedAt))
-	rev = mustAppendEvent(t, st, wfID, rev, completedEvent(t, "b", 1, 7, startedAt))
+	rev = mustAppendEvent(t, st, wfID, rev, completedEvent(t, "b", 1, startedAt))
 	clock.Advance(2 * time.Second)
 	finishedAt := clock.Now()
 	if _, err := st.Append(ctx, wfID, rev, testEvent(t, dag.EventWorkflowCompleted, dag.WorkflowTerminalPayload{}, finishedAt)); err != nil {
@@ -663,12 +663,9 @@ func TestStatsAggregates(t *testing.T) {
 	if stats.Decisions["publish"] != 1 || stats.Decisions["drop"] != 1 || stats.Decisions["mark"] != 1 {
 		t.Fatalf("decisions = %+v", stats.Decisions)
 	}
-	if stats.CostMicros != 12 {
-		t.Fatalf("cost = %d", stats.CostMicros)
-	}
 	if len(stats.ByProject) != 1 || stats.ByProject[0].ProjectID != 42 ||
 		stats.ByProject[0].Runs != 1 || stats.ByProject[0].Blocking != 1 ||
-		stats.ByProject[0].Published != 2 || stats.ByProject[0].CostMicros != 12 {
+		stats.ByProject[0].Published != 2 {
 		t.Fatalf("by project = %+v", stats.ByProject)
 	}
 	if len(stats.ByModel) != 1 {
@@ -676,7 +673,7 @@ func TestStatsAggregates(t *testing.T) {
 	}
 	model := stats.ByModel[0]
 	if model.Provider != "p" || model.Model != "m" || model.Calls != 2 || model.Errors != 1 ||
-		model.InputTokens != 10 || model.OutputTokens != 4 || model.CostMicros != 12 ||
+		model.InputTokens != 10 || model.OutputTokens != 4 ||
 		model.AvgLatencyMS == nil || *model.AvgLatencyMS != 2000 ||
 		model.P50LatencyMS == nil || *model.P50LatencyMS != 1000 ||
 		model.ErrorRate == nil || *model.ErrorRate != 0.5 {

@@ -310,8 +310,6 @@ func decodeModelParamsPatch(raw map[string]json.RawMessage) (store.ModelParamsPa
 				patch.Reasoning.Set = true
 			case "thinking":
 				patch.Thinking.Set = true
-			case "price":
-				patch.Price.Set = true
 			case "max_tokens", "context_window", "forced_tool_choice", "strict_role_alternation", "max_concurrency", "rpm",
 				"allow_reasoning_effort_none", "preserve_reasoning_content", "output_config_effort", "responses_params":
 				detail(name, "must not be null")
@@ -383,11 +381,6 @@ func decodeModelParamsPatch(raw map[string]json.RawMessage) (store.ModelParamsPa
 			var v config.ThinkingConfig
 			if decodeObject(name, &v) {
 				patch.Thinking = store.ParamUpdate[config.ThinkingConfig]{Set: true, Value: &v}
-			}
-		case "price":
-			var v config.PriceConfig
-			if decodeObject(name, &v) {
-				patch.Price = store.ParamUpdate[config.PriceConfig]{Set: true, Value: &v}
 			}
 		case "forced_tool_choice":
 			var v string

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -19,7 +18,6 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/config"
 	"github.com/LeXwDeX/tribunal/internal/errclass"
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
-	"github.com/LeXwDeX/tribunal/internal/llm"
 	"github.com/LeXwDeX/tribunal/internal/mcp"
 	"github.com/LeXwDeX/tribunal/internal/repo"
 	"github.com/LeXwDeX/tribunal/internal/review"
@@ -200,41 +198,6 @@ func locateFunc(index *gitlab.DiffIndex) review.LocateFunc {
 		_, ok := index.LocateUnambiguous(path, line, mapped)
 		return ok
 	}
-}
-
-// newCostFunc converts provider usage to micro-dollars using the configured
-// per-million-token prices. Unknown providers cost zero.
-func newCostFunc(providers map[string]config.ProviderConfig) review.CostFunc {
-	return func(provider string, usage llm.Usage) int64 {
-		cfg, ok := providers[provider]
-		if !ok || cfg.Price == nil {
-			return 0
-		}
-		return priceMicros(cfg.Price, usage)
-	}
-}
-
-// costFunc prefers catalog prices so user models are not always zero.
-func costFunc(catalog *llm.Catalog, providers map[string]config.ProviderConfig) review.CostFunc {
-	if catalog == nil {
-		return newCostFunc(providers)
-	}
-	return func(provider string, usage llm.Usage) int64 {
-		model, ok := catalog.Resolve(provider)
-		if !ok || model.Params.Price == nil {
-			return 0
-		}
-		return priceMicros(model.Params.Price, usage)
-	}
-}
-
-func priceMicros(price *config.PriceConfig, usage llm.Usage) int64 {
-	micros := float64(usage.InputTokens)*price.InputPerMTok +
-		float64(usage.OutputTokens)*price.OutputPerMTok
-	if micros <= 0 {
-		return 0
-	}
-	return int64(math.Round(micros))
 }
 
 // executorRegistry dispatches engine calls to the per-workflow Executor that

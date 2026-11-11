@@ -23,7 +23,7 @@ const (
 )
 
 // ModelPreset is a verified model definition shipped with the server. It
-// contains no credential and no price; cost fields are owned by #407.
+// contains no credentials and no cost data.
 //
 // ContextWindow is the input window after reserving the maximum output:
 // 1,048,576 total context minus 393,216 max output = 655,360.

@@ -381,7 +381,7 @@ type Client interface {
 |---|---|---|
 | OpenAI Chat Completions | `github.com/openai/openai-go/v3` | 兼容端点最多（vLLM、Ollama、各家国产模型），是内网部署的主力。`base_url` 可配置 |
 | OpenAI Responses | `github.com/openai/openai-go/v3`（`responses` 包） | 使用**无状态模式**（不依赖 `previous_response_id`），推理项按协议要求原样回传，便于重试和切换模型 |
-| Anthropic Messages | `github.com/anthropics/anthropic-sdk-go` | 开启 thinking 时，thinking 块（含签名）在工具循环中原样回传；对材料包等稳定前缀设置 `cache_control`，降低同一 MR 多次评审的成本 |
+| Anthropic Messages | `github.com/anthropics/anthropic-sdk-go` | 开启 thinking 时，thinking 块（含签名）在工具循环中原样回传；对材料包等稳定前缀设置 `cache_control`，减少同一 MR 多次评审的重复输入 token |
 
 ### 7.3 结构化交付
 
@@ -428,7 +428,7 @@ data/workspaces/<project_id>/
 - **来源优先级**：仓库中人工编写的 AGENTS.md / CLAUDE.md（**只读目标分支版本**）作为输入纳入，生成内容是补充。**MR 中对这两个文件的修改不生效**，防止有人借此绕过评审。
 - **人工修正**：管理员可通过管理 API / CLI 编辑或锁定生成的文档。锁定后刷新不会覆盖，只标记「已过期」。
 - **注入方式**：作为「项目背景（非授权内容）」注入，不能覆盖平台的评审规则和裁决不变量。
-- **成本**：同一 base_sha 下内容不变，放在 prompt 最前面作为稳定前缀，命中 Anthropic 的 `cache_control` 和 OpenAI 的自动缓存。
+- **重复输入**：同一 base_sha 下内容不变，放在 prompt 最前面作为稳定前缀，命中 Anthropic 的 `cache_control` 和 OpenAI 的自动缓存，减少重复输入 token。
 
 ### 8.3 MCP 接入
 
@@ -607,7 +607,7 @@ blocks:                     # 按块授权 MCP 工具、挂载 Skill
 ## 12. 可观测性与反馈闭环
 
 - 工作流可根据事件日志检查状态和结果。新 LLM 审计只保留模型、用量及结构计数，不能用它完整回放输入输出；历史 payload 可能包含敏感内容。
-- 指标：工作流耗时、节点失败率、各 provider 的延迟、错误率和 token 用量、每个 MR 的成本。
+- 指标：工作流耗时、节点失败率、各 provider 的延迟、错误率和 token 用量。
 - **反馈信号**：从 GitLab 收集发布者评论的 👍/👎（award emoji），以及讨论 resolve 后对应行是否改动。这些信号仅供参考，不自动判定问题有效性。
 - **原始计数**：`stats.feedback` 提供 `total`、`by_signal` 和按 `{provider, role, total, by_signal}` 的归因。归因只统计能按持久化 `feedback.finding_id` 精确关联 finding、且 publication 一致的 discussion；提出方取 `findings.origin_provider`，挑战方取 `challenge_node` 的 provider；汇总/未关联反馈不计入 provider 归因，但仍计入原始总数；同一 signal 可同时进入两个角色。讨论 award 只取发布者首条 note，不取 thread reply。
 - **执行与发布状态**：workflow 执行状态和 GitLab 发布状态分开保存。`publication_state` 为 `pending`（等待或可重试）、`published`（发布完成）、`skipped`（stale、取消或关闭 failure note）或 `failed`（永久失败，需手动 republish）；失败原因和跳过原因有界、脱敏保存。SSE 和轮询在两者都达到终态后结束。

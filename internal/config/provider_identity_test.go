@@ -28,3 +28,35 @@ func TestProviderConfigJSONOmitsUnsetContextWindow(t *testing.T) {
 		t.Fatalf("configured context window must be part of the identity: %s err=%v", raw, err)
 	}
 }
+
+// Legacy YAML files still carry providers.*.price. v1.4.0 keeps parsing the
+// field so those files load and the execution identity stays byte-identical;
+// it is no longer used for any calculation.
+func TestLoadKeepsLegacyProviderPrice(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("TEST_LEGACY_PRICE_KEY", "key")
+	path := writeConfig(t, "legacy-price.yaml", validGitLab+`
+providers:
+  legacy:
+    protocol: openai-chat
+    base_url: "https://example.test/v1"
+    model: "m"
+    api_key_env: TEST_LEGACY_PRICE_KEY
+    price: { input_per_mtok: 1.5, output_per_mtok: 2.5 }
+`)
+	cfg := loadConfig(t, path)
+	provider, ok := cfg.Providers["legacy"]
+	if !ok || provider.Price == nil || provider.Price.InputPerMTok != 1.5 || provider.Price.OutputPerMTok != 2.5 {
+		t.Fatalf("legacy price was not parsed: %+v", provider.Price)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("legacy price config must still start: %v", err)
+	}
+	raw, err := json.Marshal(provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"price":{"input_per_mtok":1.5,"output_per_mtok":2.5}`) {
+		t.Fatalf("legacy price must stay in the execution identity JSON: %s", raw)
+	}
+}

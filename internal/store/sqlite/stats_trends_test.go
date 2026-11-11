@@ -61,10 +61,10 @@ func assertStatDuration(t *testing.T, label string, got *float64, want float64) 
 	}
 }
 
-func assertDailyTrend(t *testing.T, got store.DailyStats, day string, runs, cost, samples int64, avg, p95 *float64) {
+func assertDailyTrend(t *testing.T, got store.DailyStats, day string, runs, samples int64, avg, p95 *float64) {
 	t.Helper()
-	if got.Day != day || got.Runs != runs || got.CostMicros != cost || got.DurationSamples != samples {
-		t.Fatalf("daily stats %s = %+v, want runs=%d cost=%d samples=%d", day, got, runs, cost, samples)
+	if got.Day != day || got.Runs != runs || got.DurationSamples != samples {
+		t.Fatalf("daily stats %s = %+v, want runs=%d samples=%d", day, got, runs, samples)
 	}
 	for label, pair := range map[string][2]*float64{"avg": {got.AvgDurationMS, avg}, "p95": {got.P95DurationMS, p95}} {
 		switch {
@@ -107,10 +107,10 @@ func TestStatsTrendsGroupsNodesAndWorkflowDurations(t *testing.T) {
 	rev = mustAppendEvent(t, st, "wf-42-d1", rev, testEvent(t, dag.EventWorkflowStarted, dag.WorkflowTerminalPayload{}, start))
 	rev = mustAppendEvent(t, st, "wf-42-d1", rev, queuedEvent(t, "a", 1, start))
 	rev = mustAppendEvent(t, st, "wf-42-d1", rev, startedEvent(t, "a", 1, "anthropic", "m", start.Add(time.Second)))
-	rev = mustAppendEvent(t, st, "wf-42-d1", rev, completedEvent(t, "a", 1, 5, start.Add(2*time.Second)))
+	rev = mustAppendEvent(t, st, "wf-42-d1", rev, completedEvent(t, "a", 1, start.Add(2*time.Second)))
 	rev = mustAppendEvent(t, st, "wf-42-d1", rev, queuedEvent(t, "b", 1, start.Add(2*time.Second)))
 	rev = mustAppendEvent(t, st, "wf-42-d1", rev, startedEvent(t, "b", 1, "", "", start.Add(3*time.Second)))
-	rev = mustAppendEvent(t, st, "wf-42-d1", rev, completedEvent(t, "b", 1, 0, start.Add(4*time.Second)))
+	rev = mustAppendEvent(t, st, "wf-42-d1", rev, completedEvent(t, "b", 1, start.Add(4*time.Second)))
 	if _, err := st.Append(ctx, "wf-42-d1", rev,
 		testEvent(t, dag.EventWorkflowCompleted, dag.WorkflowTerminalPayload{}, start.Add(9*time.Second))); err != nil {
 		t.Fatalf("complete wf-42-d1: %v", err)
@@ -135,7 +135,7 @@ func TestStatsTrendsGroupsNodesAndWorkflowDurations(t *testing.T) {
 	rev = mustAppendEvent(t, st, "wf-43-d2", rev, testEvent(t, dag.EventWorkflowStarted, dag.WorkflowTerminalPayload{}, wf2Start))
 	rev = mustAppendEvent(t, st, "wf-43-d2", rev, queuedEvent(t, "a", 1, wf2Start))
 	rev = mustAppendEvent(t, st, "wf-43-d2", rev, startedEvent(t, "a", 1, "openai", "m", wf2Start.Add(time.Second)))
-	rev = mustAppendEvent(t, st, "wf-43-d2", rev, completedEvent(t, "a", 1, 7, wf2Start.Add(3*time.Second)))
+	rev = mustAppendEvent(t, st, "wf-43-d2", rev, completedEvent(t, "a", 1, wf2Start.Add(3*time.Second)))
 	rev = mustAppendEvent(t, st, "wf-43-d2", rev, queuedEvent(t, "b", 1, wf2Start.Add(3*time.Second)))
 	rev = mustAppendEvent(t, st, "wf-43-d2", rev, startedEvent(t, "b", 1, "anthropic", "m", wf2Start.Add(4*time.Second)))
 	_ = mustAppendEvent(t, st, "wf-43-d2", rev, queuedEvent(t, "c", 1, wf2Start.Add(4*time.Second)))
@@ -148,7 +148,7 @@ func TestStatsTrendsGroupsNodesAndWorkflowDurations(t *testing.T) {
 	rev = mustAppendEvent(t, st, "wf-42-onboard", rev, testEvent(t, dag.EventWorkflowStarted, dag.WorkflowTerminalPayload{}, wf3Start))
 	rev = mustAppendEvent(t, st, "wf-42-onboard", rev, queuedEvent(t, "a", 1, wf3Start))
 	rev = mustAppendEvent(t, st, "wf-42-onboard", rev, startedEvent(t, "a", 1, "openai", "m", wf3Start.Add(time.Second)))
-	rev = mustAppendEvent(t, st, "wf-42-onboard", rev, completedEvent(t, "a", 1, 11, wf3Start.Add(4*time.Second)))
+	rev = mustAppendEvent(t, st, "wf-42-onboard", rev, completedEvent(t, "a", 1, wf3Start.Add(4*time.Second)))
 	if _, err := st.Append(ctx, "wf-42-onboard", rev,
 		testEvent(t, dag.EventWorkflowCompleted, dag.WorkflowTerminalPayload{}, wf3Start.Add(4*time.Second))); err != nil {
 		t.Fatalf("complete wf-42-onboard: %v", err)
@@ -161,14 +161,14 @@ func TestStatsTrendsGroupsNodesAndWorkflowDurations(t *testing.T) {
 	rev = mustAppendEvent(t, st, "wf-excluded", rev, testEvent(t, dag.EventWorkflowStarted, dag.WorkflowTerminalPayload{}, to))
 	rev = mustAppendEvent(t, st, "wf-excluded", rev, queuedEvent(t, "a", 1, to))
 	rev = mustAppendEvent(t, st, "wf-excluded", rev, startedEvent(t, "a", 1, "openai", "m", to.Add(time.Second)))
-	_ = mustAppendEvent(t, st, "wf-excluded", rev, completedEvent(t, "a", 1, 100, to.Add(2*time.Second)))
+	_ = mustAppendEvent(t, st, "wf-excluded", rev, completedEvent(t, "a", 1, to.Add(2*time.Second)))
 
 	stats, err := st.Stats(ctx, store.StatsFilter{From: day1, To: to})
 	if err != nil {
 		t.Fatalf("Stats: %v", err)
 	}
-	if stats.Runs != 3 || stats.CostMicros != 23 || stats.DurationSamples != 2 {
-		t.Fatalf("top totals = runs %d cost %d samples %d", stats.Runs, stats.CostMicros, stats.DurationSamples)
+	if stats.Runs != 3 || stats.DurationSamples != 2 {
+		t.Fatalf("top totals = runs %d samples %d", stats.Runs, stats.DurationSamples)
 	}
 	assertStatDuration(t, "avg_duration_ms", stats.AvgDurationMS, 6500)
 	assertStatDuration(t, "p95_duration_ms", stats.P95DurationMS, 9000)
@@ -177,15 +177,15 @@ func TestStatsTrendsGroupsNodesAndWorkflowDurations(t *testing.T) {
 		t.Fatalf("trend order = %+v", stats.Trend)
 	}
 	days := trendIndex(t, stats.Trend)
-	assertDailyTrend(t, days["2026-10-20"], "2026-10-20", 1, 5, 1, ptrFloat64(9000), ptrFloat64(9000))
-	assertDailyTrend(t, days["2026-10-21"], "2026-10-21", 2, 18, 1, ptrFloat64(4000), ptrFloat64(4000))
+	assertDailyTrend(t, days["2026-10-20"], "2026-10-20", 1, 1, ptrFloat64(9000), ptrFloat64(9000))
+	assertDailyTrend(t, days["2026-10-21"], "2026-10-21", 2, 1, ptrFloat64(4000), ptrFloat64(4000))
 
 	if len(stats.ByProject) != 2 || stats.ByProject[0].ProjectID != 42 || stats.ByProject[1].ProjectID != 43 {
 		t.Fatalf("by_project order = %+v", stats.ByProject)
 	}
 	p42, p43 := stats.ByProject[0], stats.ByProject[1]
-	if p42.Runs != 2 || p42.CostMicros != 16 || p42.DurationSamples != 2 || p43.Runs != 1 ||
-		p43.CostMicros != 7 || p43.DurationSamples != 0 || p43.AvgDurationMS != nil || p43.P95DurationMS != nil {
+	if p42.Runs != 2 || p42.DurationSamples != 2 || p43.Runs != 1 ||
+		p43.DurationSamples != 0 || p43.AvgDurationMS != nil || p43.P95DurationMS != nil {
 		t.Fatalf("project stats = %+v / %+v", p42, p43)
 	}
 	assertStatDuration(t, "project 42 avg", p42.AvgDurationMS, 6500)
@@ -193,24 +193,24 @@ func TestStatsTrendsGroupsNodesAndWorkflowDurations(t *testing.T) {
 	if len(p42.Trend) != 2 || len(p43.Trend) != 1 {
 		t.Fatalf("project trends = %+v / %+v", p42.Trend, p43.Trend)
 	}
-	assertDailyTrend(t, p42.Trend[0], "2026-10-20", 1, 5, 1, ptrFloat64(9000), ptrFloat64(9000))
-	assertDailyTrend(t, p42.Trend[1], "2026-10-21", 1, 11, 1, ptrFloat64(4000), ptrFloat64(4000))
-	assertDailyTrend(t, p43.Trend[0], "2026-10-21", 1, 7, 0, nil, nil)
+	assertDailyTrend(t, p42.Trend[0], "2026-10-20", 1, 1, ptrFloat64(9000), ptrFloat64(9000))
+	assertDailyTrend(t, p42.Trend[1], "2026-10-21", 1, 1, ptrFloat64(4000), ptrFloat64(4000))
+	assertDailyTrend(t, p43.Trend[0], "2026-10-21", 1, 0, nil, nil)
 
 	if len(stats.ByProvider) != 2 || stats.ByProvider[0].Provider != "anthropic" ||
 		stats.ByProvider[1].Provider != "openai" {
 		t.Fatalf("by_provider order = %+v", stats.ByProvider)
 	}
 	anthropic, openai := stats.ByProvider[0], stats.ByProvider[1]
-	if anthropic.Runs != 2 || anthropic.CostMicros != 5 || anthropic.DurationSamples != 1 {
+	if anthropic.Runs != 2 || anthropic.DurationSamples != 1 {
 		t.Fatalf("anthropic stats = %+v", anthropic)
 	}
 	assertStatDuration(t, "anthropic avg", anthropic.AvgDurationMS, 1000)
 	assertStatDuration(t, "anthropic p95", anthropic.P95DurationMS, 1000)
 	anthropicDays := trendIndex(t, anthropic.Trend)
-	assertDailyTrend(t, anthropicDays["2026-10-20"], "2026-10-20", 1, 5, 1, ptrFloat64(1000), ptrFloat64(1000))
-	assertDailyTrend(t, anthropicDays["2026-10-21"], "2026-10-21", 1, 0, 0, nil, nil)
-	if openai.Runs != 2 || openai.CostMicros != 18 || openai.DurationSamples != 2 {
+	assertDailyTrend(t, anthropicDays["2026-10-20"], "2026-10-20", 1, 1, ptrFloat64(1000), ptrFloat64(1000))
+	assertDailyTrend(t, anthropicDays["2026-10-21"], "2026-10-21", 1, 0, nil, nil)
+	if openai.Runs != 2 || openai.DurationSamples != 2 {
 		t.Fatalf("openai stats = %+v", openai)
 	}
 	assertStatDuration(t, "openai avg", openai.AvgDurationMS, 2500)
@@ -218,7 +218,7 @@ func TestStatsTrendsGroupsNodesAndWorkflowDurations(t *testing.T) {
 	if len(openai.Trend) != 1 {
 		t.Fatalf("openai trend = %+v", openai.Trend)
 	}
-	assertDailyTrend(t, openai.Trend[0], "2026-10-21", 2, 18, 2, ptrFloat64(2500), ptrFloat64(3000))
+	assertDailyTrend(t, openai.Trend[0], "2026-10-21", 2, 2, ptrFloat64(2500), ptrFloat64(3000))
 
 	wantBlocks := []string{"code-review", "review.intent", "review.standards", "synthesize", "verify"}
 	if len(stats.ByBlock) != len(wantBlocks) {
@@ -233,7 +233,7 @@ func TestStatsTrendsGroupsNodesAndWorkflowDurations(t *testing.T) {
 	for _, block := range stats.ByBlock {
 		blocks[block.Block] = block
 	}
-	if blocks["code-review"].Runs != 1 || blocks["code-review"].CostMicros != 5 ||
+	if blocks["code-review"].Runs != 1 ||
 		blocks["code-review"].DurationSamples != 1 || blocks["code-review"].Trend[0].Day != "2026-10-20" {
 		t.Fatalf("code-review block = %+v", blocks["code-review"])
 	}
@@ -251,7 +251,7 @@ func TestStatsTrendsGroupsNodesAndWorkflowDurations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stats project 42: %v", err)
 	}
-	if projectStats.Runs != 2 || projectStats.CostMicros != 16 || projectStats.DurationSamples != 2 {
+	if projectStats.Runs != 2 || projectStats.DurationSamples != 2 {
 		t.Fatalf("project-filtered totals = %+v", projectStats)
 	}
 	if len(projectStats.ByProject) != 1 || projectStats.ByProject[0].ProjectID != 42 {
@@ -261,7 +261,7 @@ func TestStatsTrendsGroupsNodesAndWorkflowDurations(t *testing.T) {
 		t.Fatalf("project-filtered groups = providers %+v blocks %+v", projectStats.ByProvider, projectStats.ByBlock)
 	}
 	for _, provider := range projectStats.ByProvider {
-		if provider.Provider == "openai" && (provider.Runs != 1 || provider.CostMicros != 11) {
+		if provider.Provider == "openai" && provider.Runs != 1 {
 			t.Fatalf("project-filtered openai = %+v", provider)
 		}
 	}
@@ -276,7 +276,7 @@ func TestStatsTrendsGroupsNodesAndWorkflowDurations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stats first day: %v", err)
 	}
-	if firstDay.Runs != 1 || firstDay.CostMicros != 5 || len(firstDay.ByBlock) != 2 ||
+	if firstDay.Runs != 1 || len(firstDay.ByBlock) != 2 ||
 		len(firstDay.ByProvider) != 1 || firstDay.ByProvider[0].Provider != "anthropic" {
 		t.Fatalf("first-day stats = %+v", firstDay)
 	}
@@ -326,7 +326,7 @@ func TestStatsGroupsWorkflowsByCreatedDayNotCompletionDay(t *testing.T) {
 	rev = mustAppendEvent(t, st, "wf-cross-day", rev, testEvent(t, dag.EventWorkflowStarted, dag.WorkflowTerminalPayload{}, started))
 	rev = mustAppendEvent(t, st, "wf-cross-day", rev, queuedEvent(t, "a", 1, started))
 	rev = mustAppendEvent(t, st, "wf-cross-day", rev, startedEvent(t, "a", 1, "anthropic", "m", day1.Add(23*time.Hour+52*time.Minute)))
-	rev = mustAppendEvent(t, st, "wf-cross-day", rev, completedEvent(t, "a", 1, 5, day2.Add(9*time.Minute)))
+	rev = mustAppendEvent(t, st, "wf-cross-day", rev, completedEvent(t, "a", 1, day2.Add(9*time.Minute)))
 	if _, err := st.Append(ctx, "wf-cross-day", rev,
 		testEvent(t, dag.EventWorkflowCompleted, dag.WorkflowTerminalPayload{}, finished)); err != nil {
 		t.Fatalf("complete wf-cross-day: %v", err)

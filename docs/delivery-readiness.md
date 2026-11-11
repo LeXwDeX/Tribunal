@@ -22,7 +22,7 @@
 ## 模型目录与运行时刷新本地验证（#289）
 
 - 基于 `feat/288-llm-models`（`8a909b3`）的未提交工作区，本地通过 `go build ./...`、`go vet ./...`、`go test -count=1 ./internal/llm/... ./internal/review/... ./internal/store/sqlite/... ./internal/app/... ./cmd/server/...`，以及 `go test -race -count=1 ./internal/llm/...` 和相关包的 Staticcheck v0.8.2。
-- 覆盖 Catalog 刷新与并发读取、坏记录隔离、配置模型 client 保留、空 key、用户模型成本与署名；未验证真实部署升级、完整 CI 或真实模型调用。
+- 覆盖 Catalog 刷新与并发读取、坏记录隔离、配置模型 client 保留、空 key、用户模型参数与署名；未验证真实部署升级、完整 CI 或真实模型调用。
 
 ## 模型管理 API 本地验证（#290）
 

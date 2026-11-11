@@ -36,7 +36,6 @@ type Workflow struct {
 	PublicationError string `json:"publication_error,omitempty"`
 	TokensIn         int64  `json:"tokens_in"`
 	TokensOut        int64  `json:"tokens_out"`
-	CostMicros       int64  `json:"cost_micros"`
 	// UsageIncomplete reports a detected missing usage result. False does not
 	// prove that old events or providers reported every token.
 	UsageIncomplete bool       `json:"usage_incomplete"`
@@ -83,7 +82,6 @@ type WorkflowNode struct {
 	Error      string          `json:"error,omitempty"`
 	TokensIn   int64           `json:"tokens_in"`
 	TokensOut  int64           `json:"tokens_out"`
-	CostMicros int64           `json:"cost_micros"`
 	// UsageIncomplete reports a detected missing usage result. False does not
 	// prove that old events or providers reported every token.
 	UsageIncomplete bool       `json:"usage_incomplete"`

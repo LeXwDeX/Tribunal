@@ -582,7 +582,7 @@ func sanitizeUsage(in Usage) (Usage, bool) {
 
 func clampNegative(u *Usage) bool {
 	incomplete := false
-	for _, counter := range []*int64{&u.InputTokens, &u.OutputTokens, &u.CostMicros, &u.CacheReadTokens, &u.CacheWriteTokens, &u.ReasoningTokens} {
+	for _, counter := range []*int64{&u.InputTokens, &u.OutputTokens, &u.CacheReadTokens, &u.CacheWriteTokens, &u.ReasoningTokens} {
 		if *counter < 0 {
 			*counter = 0
 			incomplete = true
@@ -615,7 +615,6 @@ func (u *Usage) add(other Usage) bool {
 	}
 	addCounter(&u.InputTokens, other.InputTokens)
 	addCounter(&u.OutputTokens, other.OutputTokens)
-	addCounter(&u.CostMicros, other.CostMicros)
 	addCounter(&u.CacheReadTokens, other.CacheReadTokens)
 	addCounter(&u.CacheWriteTokens, other.CacheWriteTokens)
 	addCounter(&u.ReasoningTokens, other.ReasoningTokens)

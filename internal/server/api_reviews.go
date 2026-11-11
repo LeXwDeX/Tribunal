@@ -36,9 +36,8 @@ type findingsSummary struct {
 }
 
 type reviewUsage struct {
-	TokensIn   int64 `json:"tokens_in"`
-	TokensOut  int64 `json:"tokens_out"`
-	CostMicros int64 `json:"cost_micros"`
+	TokensIn  int64 `json:"tokens_in"`
+	TokensOut int64 `json:"tokens_out"`
 }
 
 type publicationsSummary struct {
@@ -118,9 +117,8 @@ func (s *Server) engineSnapshot(ctx context.Context, wfID string) *dag.WorkflowV
 }
 
 type nodeUsage struct {
-	TokensIn   int64 `json:"tokens_in"`
-	TokensOut  int64 `json:"tokens_out"`
-	CostMicros int64 `json:"cost_micros"`
+	TokensIn  int64 `json:"tokens_in"`
+	TokensOut int64 `json:"tokens_out"`
 }
 
 func (s *Server) handleListReviews(w http.ResponseWriter, r *http.Request) {
@@ -350,9 +348,8 @@ func (s *Server) handleGetReview(w http.ResponseWriter, r *http.Request) {
 		Nodes:           reviewNodes(nodes, snapshot),
 		FindingsSummary: summarizeFindings(findings),
 		Usage: reviewUsage{
-			TokensIn:   wf.TokensIn,
-			TokensOut:  wf.TokensOut,
-			CostMicros: wf.CostMicros,
+			TokensIn:  wf.TokensIn,
+			TokensOut: wf.TokensOut,
 		},
 		Publications: summarizePublications(publications),
 	}
@@ -704,9 +701,8 @@ func (s *Server) handleReviewNode(w http.ResponseWriter, r *http.Request) {
 			DurationMS:         nodeDuration(node),
 			UsageInterruptions: nodeInterruptions(s.engineSnapshot(r.Context(), wfID), node.ID),
 			Usage: nodeUsage{
-				TokensIn:   node.TokensIn,
-				TokensOut:  node.TokensOut,
-				CostMicros: node.CostMicros,
+				TokensIn:  node.TokensIn,
+				TokensOut: node.TokensOut,
 			},
 		})
 		return

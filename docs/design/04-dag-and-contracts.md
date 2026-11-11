@@ -206,7 +206,7 @@ finalize 若在重读时发现新节点，返回主循环继续调度，而不�
 - 标记为 `TokenFree` 的节点不会被引擎终止，仍会运行。当前构建把 `plan`（code 模式）、`gather`、`adjudicate`、`synthesize` 和 `synthesize.2` 标为 `TokenFree`；其他未完成节点按 required/optional 失败或跳过。
 - `gather` 在预算耗尽时不展开 verify，把待挑战组标记为 `skipped(budget_exhausted)`，并写入 warning；`adjudicate` 固定按 `mark` 处理这些组（标「存疑」后发布），汇总会注明部分条目未核验。
 - 引擎不会因为 plan 超出 token 预算而自动减少包或降级 plan。plan 仍按原包数展开，后续 LLM 节点按上面的规则失败或跳过。
-- agent 循环在至少完成一轮后失败会返回 partial usage。agent 节点只对 transport 错误重试，每次重试携带上一次已知 partial usage 参与下一轮预算检查，最终节点 usage 也包含这些已知用量；上游未返回 usage 的请求仍无法精确计费，因此跨重试 token/成本只能按已知边界使用，不能当账单。
+- agent 循环在至少完成一轮后失败会返回 partial usage。agent 节点只对 transport 错误重试，每次重试携带上一次已知 partial usage 参与下一轮预算检查，最终节点 usage 也包含这些已知用量；上游未返回 usage 的请求仍无法精确计量，因此跨重试只能按已知 token 边界使用，不能当作完整用量。v1.4.0 起不再估算或展示金钱成本。
 - workflow 的 `max_tokens` 是共享预算，按 `input_tokens + output_tokens` 计算。cache read/write 和 reasoning 在 usage 中分别表示，但不额外相加，避免与输入/输出重复计数。执行器在每次模型请求前检查已提交用量加当前 attempt 已知 partial usage；并发节点不预留额度，已发出的请求可能在检查后完成，因此允许有界超支，不是账单级硬上限；四路评审并行，超支幅度随并行节点数增加。探索摘要（不超过 6000 字符）与 diff 共用任务预算。
 
 ---

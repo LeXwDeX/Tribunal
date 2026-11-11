@@ -187,6 +187,28 @@ func TestModelCreateDoesNotLeakCredential(t *testing.T) {
 	}
 }
 
+func TestModelWriteEndpointsRejectPrice(t *testing.T) {
+	catalog, err := llm.NewCatalog(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeModelStore{}
+	server, _ := newModelTestServer(t, catalog, fake)
+	create := httptest.NewRequest(http.MethodPost, "/api/v1/models", strings.NewReader(`{"display_name":"m","protocol":"openai-chat","base_url":"https://example.com","model":"m","params":{"max_tokens":1,"max_concurrency":1,"price":{"input_per_mtok":1}},"api_key":"key"}`))
+	response := httptest.NewRecorder()
+	server.handleCreateModel(response, create)
+	if response.Code != http.StatusBadRequest || fake.createdCredential != "" {
+		t.Fatalf("create status = %d credential = %q, want 400 and no store call", response.Code, fake.createdCredential)
+	}
+	update := httptest.NewRequest(http.MethodPatch, "/api/v1/models/user:x", strings.NewReader(`{"display_name":"m","protocol":"openai-chat","base_url":"https://example.com","model":"m","params":{"max_tokens":1,"max_concurrency":1,"price":null},"revision":1}`))
+	update.SetPathValue("id", "user:x")
+	response = httptest.NewRecorder()
+	server.handleUpdateModel(response, update)
+	if response.Code != http.StatusBadRequest || fake.updated != nil {
+		t.Fatalf("update status = %d updated = %+v, want 400 and no store call", response.Code, fake.updated)
+	}
+}
+
 func TestDeleteReferencedModelReturnsReferences(t *testing.T) {
 	catalog, err := llm.NewCatalog(context.Background(), nil, nil)
 	if err != nil {

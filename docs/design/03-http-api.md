@@ -212,7 +212,7 @@ POST /api/v1/projects
     { "id": "verify.f7", "kind": "verify", "status": "completed", "provider": "gpt" }
   ],
   "findings_summary": { "published": 4, "marked": 1, "dropped": 3, "by_severity": { "P0": 0, "P1": 2, "P2": 3 } },
-  "usage": { "tokens_in": 182340, "tokens_out": 12011, "cost_micros": 0 },
+  "usage": { "tokens_in": 182340, "tokens_out": 12011 },
   "publications": { "summary_note_id": 99102, "discussions": 4, "commit_status": "failed" },
   "created_at": "…", "finished_at": "…"
 }
@@ -377,7 +377,7 @@ MCP、Skill、块绑定列表使用游标分页。
 | GET | `/api/v1/profiles/default` | 平台管理员：`default` 档位详情，含 `overrides`（已存覆盖文档）、`revision`、`effective` 和逐节点 `nodes` |
 | PUT | `/api/v1/profiles/default/overrides` | 平台管理员：`{overrides, revision}` 整体替换覆盖文档；`revision` 不匹配返回 409 `stale_revision`；返回完整详情视图 |
 | DELETE | `/api/v1/profiles/default/overrides?revision=` | 平台管理员：清除全部覆盖，恢复为配置；`revision` 必须是当前版本，不匹配或尚无覆盖记录返回 409 `stale_revision`；返回完整详情视图（`revision` 为存储的新版本） |
-| GET | `/api/v1/stats` | `?from=&to=&project_id=`：运行次数（含 onboarding）、耗时、成本、项目/provider/块统计与 UTC 日趋势、finding 处置分布、人工质量指标、按模型调用与反馈原始计数；`to` 为排他上界 |
+| GET | `/api/v1/stats` | `?from=&to=&project_id=`：运行次数（含 onboarding）、耗时、项目/provider/块统计与 UTC 日趋势、finding 处置分布、人工质量指标、按模型调用与反馈原始计数；`to` 为排他上界 |
 | GET | `/api/v1/system/lock-stats` | 平台管理员：SQLite 连接等待（`wait_count`、`wait_duration_ms` 为累计值；`max_open_connections`、`in_use`、`idle` 为当前连接池值）与工作区锁等待（`wait_count`、`wait_duration_ms` 为累计值，`max_wait_ms` 为进程启动以来单次最长等待）；单连接下连接等待是 SQL 串行化的代理，不是 driver busy 重试计数 |
 | GET | `/api/v1/settings` | 平台配置的只读视图（脱敏） |
 | GET | `/api/v1/config` | 平台管理员：文件生效配置的脱敏 allowlist 视图、逐键 `origins`、`warnings`、`last_error`、`last_error_at`，以及 `base_revision`、`overlay_revision`、`overlay_present`、`applied`、`restart_required` |
@@ -407,20 +407,20 @@ provider 和 profile 的基线以配置文件为准；改动配置需重启服�
 
 控制台集合响应按资源命名：`{projects}`、`{reviews}`、`{findings}`、`{servers}`、`{skills}`、`{bindings}`、`{providers}`、`{presets}`、`{profiles}`、`{calls}`、`{documents}`、`{tokens}`；可分页的集合另带 `next_cursor`。不提供未发布的旧字段别名。
 
-`stats` 使用字段 `runs`、`blocking`、`blocking_ratio`、`published`、`overturned_ratio`、`avg_duration_ms`、`p95_duration_ms`、`duration_samples`、`cost_micros`、`trend`、`by_project`、`by_provider`、`by_block`、`by_model`、`decisions`、`quality_by_provider` 和 `feedback`。`runs` 统计窗口内全部 workflow（包括评审和 onboarding），不是仅评审次数；`blocking_ratio` 当前也是 `blocking / runs`，所以 onboarding 会稀释该比例。
+`stats` 使用字段 `runs`、`blocking`、`blocking_ratio`、`published`、`overturned_ratio`、`avg_duration_ms`、`p95_duration_ms`、`duration_samples`、`trend`、`by_project`、`by_provider`、`by_block`、`by_model`、`decisions`、`quality_by_provider` 和 `feedback`。`runs` 统计窗口内全部 workflow（包括评审和 onboarding），不是仅评审次数；`blocking_ratio` 当前也是 `blocking / runs`，所以 onboarding 会稀释该比例。
 
 运行统计按 workflow 的 `created_at` 落在 `[from, to)` 内筛选，所有维度都应用同一个项目筛选。每日趋势按该创建时间归入 UTC 日，不按完成时间或 LLM 调用时间分桶。日期控件使用本地日，因而一个本地日可能跨两个 UTC 日桶。
 
 | 字段 | 每项内容与计数口径 |
 |---|---|
-| `trend` | `{day, runs, cost_micros, duration_samples, avg_duration_ms, p95_duration_ms}`；`day` 为 `YYYY-MM-DD`。顶层和项目的 `trend.runs` 是 workflow 数，provider/块内同形的 `trend.runs` 是已启动节点数 |
-| `by_project` | `{project_id, runs, blocking, published, cost_micros, duration_samples, avg_duration_ms, p95_duration_ms, trend}`；按项目统计 workflow |
-| `by_provider` | `{provider, runs, cost_micros, duration_samples, avg_duration_ms, p95_duration_ms, trend}`；只统计 `started_at` 存在且 provider 非空的节点 |
-| `by_block` | `{block, runs, cost_micros, duration_samples, avg_duration_ms, p95_duration_ms, trend}`；按节点 `kind` 分组，包括没有 provider 的代码节点 |
+| `trend` | `{day, runs, duration_samples, avg_duration_ms, p95_duration_ms}`；`day` 为 `YYYY-MM-DD`。顶层和项目的 `trend.runs` 是 workflow 数，provider/块内同形的 `trend.runs` 是已启动节点数 |
+| `by_project` | `{project_id, runs, blocking, published, duration_samples, avg_duration_ms, p95_duration_ms, trend}`；按项目统计 workflow |
+| `by_provider` | `{provider, runs, duration_samples, avg_duration_ms, p95_duration_ms, trend}`；只统计 `started_at` 存在且 provider 非空的节点 |
+| `by_block` | `{block, runs, duration_samples, avg_duration_ms, p95_duration_ms, trend}`；按节点 `kind` 分组，包括没有 provider 的代码节点 |
 
-provider/块的 `runs` 是当前保存的已启动节点行数，每行只计一次，不是 LLM 调用次数，也不是重试次数。运行中、完成和失败节点只要保留 `started_at` 都可计入；从未启动的排队或跳过节点不计入。节点字段只反映最新一次尝试，不包含完整重试历史。总体/项目成本取 workflow 的持久化成本，provider/块成本取节点成本，不因多轮 LLM 调用重复累加。
+provider/块的 `runs` 是当前保存的已启动节点行数，每行只计一次，不是 LLM 调用次数，也不是重试次数。运行中、完成和失败节点只要保留 `started_at` 都可计入；从未启动的排队或跳过节点不计入。节点字段只反映最新一次尝试，不包含完整重试历史。
 
-Anthropic 的输入 token 将未缓存输入、缓存读取和缓存创建各计一次；内部缓存读写字段是总输入的明细，不能再次相加。评审与节点的 `usage` 仍只含 `tokens_in`、`tokens_out` 和 `cost_micros`。评审 token 预算使用归一化后的输入和输出。成本使用配置的输入、输出单价，不按缓存读写分别计价，是估算而非供应方账单；未配置价格时估算为零。已保存的历史用量不会追溯回填。
+Anthropic 的输入 token 将未缓存输入、缓存读取和缓存创建各计一次；内部缓存读写字段是总输入的明细，不能再次相加。评审与节点的 `usage` 只含 `tokens_in` 和 `tokens_out`，v1.4.0 起不再提供成本字段。评审 token 预算使用归一化后的输入和输出。已保存的历史用量不会追溯回填。
 
 耗时仅计入 `started_at`、`finished_at` 都存在且间隔非负的记录；总体/项目使用工作流耗时，provider/块使用节点耗时。`duration_samples` 是有效配对数，无样本时平均/P95 均为 `null`；P95 取排序后第 `ceil(0.95 * 样本数)` 个值。所有 `trend` 均为稀疏序列，只返回有记录的日，不补零。数组按项目 ID、provider/块名称、日期升序返回，已统计的空数组为 `[]`。旧响应缺少新增字段时，界面显示不可用而不是零。
 
@@ -441,9 +441,9 @@ Anthropic 的输入 token 将未缓存输入、缓存读取和缓存创建各计
 
 `feedback` 为 `{total, by_signal, by_provider}`，按 `project_id` 筛选，并按 `observed_at` 落在 `[from, to)` 内计数；`from` 和 `to` 是 RFC 3339 时间。Web 日期选择把开始日映射到本地零点，把结束日映射到次日本地零点（不是当日 23:59:59.999），因此选择同一天也覆盖完整一天。`observed_at` 在重复采集时会更新，所以窗口表示最近观察时间，不是首次创建时间。空范围返回 `total=0`、`by_signal={}`、`by_provider=[]` 的已知空值；旧响应缺少整个 `feedback` 字段时表示不可用，两者不能混同。
 
-`feedback.by_provider` 的每项为 `{provider, role, total, by_signal}`，与顶层 `by_provider` 的运行统计不同；`role` 是 `proposer` 或 `challenger`。提出方取 `findings.origin_provider`，挑战方取该 finding 的 `challenge_node` 对应节点 provider；归因按持久化 `feedback.finding_id = findings.id` 精确连接，publication 必须是同一 workflow/project/MR 的 discussion。summary、未关联 finding 和关联不一致的反馈不计入 `feedback.by_provider`，但仍计入 `feedback.total`/`by_signal`。同一 signal 可以同时计入两个角色，两个角色的合计不是反馈总数。顶层 `overturned_ratio` 是规则裁决中 `drop` 占已处置 finding 的比例；`by_model` 只有调用数、错误数、token、成本和延迟。不能用原始反馈计数代替人工质量指标。无法计算的比例和耗时返回 `null`，不能伪装成零错误或零耗时。
+`feedback.by_provider` 的每项为 `{provider, role, total, by_signal}`，与顶层 `by_provider` 的运行统计不同；`role` 是 `proposer` 或 `challenger`。提出方取 `findings.origin_provider`，挑战方取该 finding 的 `challenge_node` 对应节点 provider；归因按持久化 `feedback.finding_id = findings.id` 精确连接，publication 必须是同一 workflow/project/MR 的 discussion。summary、未关联 finding 和关联不一致的反馈不计入 `feedback.by_provider`，但仍计入 `feedback.total`/`by_signal`。同一 signal 可以同时计入两个角色，两个角色的合计不是反馈总数。顶层 `overturned_ratio` 是规则裁决中 `drop` 占已处置 finding 的比例；`by_model` 只有调用数、错误数、token 和延迟。不能用原始反馈计数代替人工质量指标。无法计算的比例和耗时返回 `null`，不能伪装成零错误或零耗时。
 
-比例字段（包括 provider 的 `error_rate`）统一为 `[0, 1]` 的小数，不混用百分数。`cost_micros` 是按配置价格估算的微美元（1 USD = 1,000,000 micros），不是 provider 账单核对结果。未配置价格时不可把估算零值解释为免费。
+比例字段（包括 provider 的 `error_rate`）统一为 `[0, 1]` 的小数，不混用百分数。
 
 Provider 返回 `name`、`protocol`、`base_url`、`model`、`max_concurrency`、`rpm`、可选的 `unavailable` / `unavailable_reason` 及 `stats_24h`（`calls`、`errors`、`error_rate`、`p50_latency_ms`），不返回 API key。连通性测试必须返回 `ok: boolean`，可附 `message`、`model`、`latency_ms`；缺少 `ok` 不能当作成功。
 
@@ -473,7 +473,7 @@ Provider 返回 `name`、`protocol`、`base_url`、`model`、`max_concurrency`�
 | GET | `/api/v1/models/{id}` | 详情 |
 | POST | `/api/v1/models` | 创建用户模型；`params.max_tokens` 与 `params.max_concurrency` 不能为负，`max_tokens` 为 0 时仅 `openai-chat` / `openai-responses` 接受（请求不发送该字段，由上游取默认），`anthropic` 要求 > 0；`max_concurrency` 为 0 表示不创建本地并发信号量；`api_key` 只写不回显；成功返回 `{"id": "user:<uuid>", "effective": "new_workflows"}`，不返回完整模型视图（需要时再 `GET /api/v1/models/{id}`）；校验失败返回 400 `validation_failed` 与逐字段 `details` |
 | PATCH | `/api/v1/models/{id}` | 整记录替换，必须带 `revision`：请求需给出完整的 `display_name`、`protocol`、`base_url`、`model` 与 `params`，未提交的可选参数按零值或 `null` 覆盖；`api_key` 省略表示不变，空串表示清除；`protocol` 或 `base_url` 的 scheme/host/port 发生变化时必须显式提供 `api_key`，否则返回 400 `validation_failed`（字段 `api_key`）且不写库；配置模型返回 403 `read_only`；成功返回值同创建（`{id, effective}`）；校验失败同创建 |
-| PATCH | `/api/v1/models/{id}/params` | 参数级合并，必须带 `revision`：请求体为 `{"revision": N, "params": {…}}`，只更新 `params` 中出现的键，显式 `null` 清除可空参数（`temperature`、`reasoning`、`thinking`、`price`），未出现的键保持不变；`params` 为空、出现未知参数名或给非可空参数（含 `allow_reasoning_effort_none`、`preserve_reasoning_content`、`output_config_effort`、`responses_params`）传 `null` 返回 400；`thinking.type` 位于整体替换的 `thinking` 对象内，对象内出现 `null` 也返回 400；`max_tokens` 不能为负（`anthropic` 要求 > 0），`max_concurrency` 不能为负（0 表示不创建本地并发信号量）；合并后的生效参数按创建规则校验并返回逐字段 `details`；`revision` 过期返回 409 `stale_revision`；配置模型 403 `read_only`，未知或已删除模型 404；成功返回值同创建 |
+| PATCH | `/api/v1/models/{id}/params` | 参数级合并，必须带 `revision`：请求体为 `{"revision": N, "params": {…}}`，只更新 `params` 中出现的键，显式 `null` 清除可空参数（`temperature`、`reasoning`、`thinking`），未出现的键保持不变；`params` 为空、出现未知参数名或给非可空参数（含 `allow_reasoning_effort_none`、`preserve_reasoning_content`、`output_config_effort`、`responses_params`）传 `null` 返回 400；`thinking.type` 位于整体替换的 `thinking` 对象内，对象内出现 `null` 也返回 400；`max_tokens` 不能为负（`anthropic` 要求 > 0），`max_concurrency` 不能为负（0 表示不创建本地并发信号量）；合并后的生效参数按创建规则校验并返回逐字段 `details`；`revision` 过期返回 409 `stale_revision`；配置模型 403 `read_only`，未知或已删除模型 404；成功返回值同创建 |
 | POST | `/api/v1/models/{id}/preset` | 平台管理员：预览或应用内置预设到已保存用户模型，详见下文「模型预设」 |
 | DELETE | `/api/v1/models/{id}?revision=N` | 软删除；配置模型返回 403 `read_only` |
 | POST | `/api/v1/models/{id}/test` | 测试已保存模型；成功返回 `{"ok": true, "model": "...", "latency_ms": N}` |
@@ -481,11 +481,11 @@ Provider 返回 `name`、`protocol`、`base_url`、`model`、`max_concurrency`�
 
 两种修改语义不要混用：`PATCH /api/v1/models/{id}` 是整记录替换，适合提交完整表单；`PATCH /api/v1/models/{id}/params` 是参数级合并，只改提交的键，适合调整部分参数。两者都要求调用方提交 `revision` 做乐观锁。整记录替换在 `protocol` 或 `base_url` 的 scheme/host/port 变化时必须显式提供 `api_key`（已存模型没有密钥时不需要）；参数合并不改变 `protocol`、`base_url`，不涉及已存凭据的复用。端点预读只查询协议、地址与密钥存在性，`params_json` 损坏的记录仍可通过整记录替换修复。
 
-参数合并中的 `reasoning`、`thinking`、`price` 是整体替换：提交其中某个对象时，对象内未提交的字段按零值写入（例如只提交 `price.input_per_mtok` 会把 `output_per_mtok` 归零），调用方须提交完整对象。对象内的未知字段返回 400（字段为 `params.reasoning`、`params.thinking` 或 `params.price`）；对象内出现 `null` 也返回 400，清除整个对象须对顶层键传 `null`。`responses_params` 只接受 `auto`、`supported`、`unsupported`；`thinking.type` 只接受 `enabled`、`disabled` 或空值。
+参数合并中的 `reasoning`、`thinking` 是整体替换：提交其中某个对象时，对象内未提交的字段按零值写入（例如只提交 `thinking.budget_tokens` 会把 `thinking.type` 清空），调用方须提交完整对象。对象内的未知字段返回 400（字段为 `params.reasoning` 或 `params.thinking`）；对象内出现 `null` 也返回 400，清除整个对象须对顶层键传 `null`。`responses_params` 只接受 `auto`、`supported`、`unsupported`；`thinking.type` 只接受 `enabled`、`disabled` 或空值。`params.price` 在 v1.4.0 已删除，参数合并提交该键返回 400（字段 `params.price`）；模型创建和整记录修改也不再接受 `params.price`。
 
 #### 模型预设（[#405](https://github.com/LeXwDeX/Tribunal/issues/405)）
 
-`GET /api/v1/model-presets` 返回随服务发布的能力预设 `{presets:[...]}`，当前是 `deepseek-v4-pro-max` 与 `deepseek-flash-max`。每项含 `id`、`display_name`、`protocol`、`base_url`、`model`、`params`（与模型参数同构）、`source_url` 与 `verified_at`；预设不含密钥，`params.price` 恒为 `null`（预设不写入价格，成本字段由 [#407](https://github.com/LeXwDeX/Tribunal/issues/407) 处理）。`source_url` 是官方模型表，`verified_at` 是核对日期；数值变更必须同时更新这两个字段和文档。
+`GET /api/v1/model-presets` 返回随服务发布的能力预设 `{presets:[...]}`，当前是 `deepseek-v4-pro-max` 与 `deepseek-flash-max`。每项含 `id`、`display_name`、`protocol`、`base_url`、`model`、`params`（与模型参数同构）、`source_url` 与 `verified_at`；预设不含密钥，也不包含成本或价格字段。`source_url` 是官方模型表，`verified_at` 是核对日期；数值变更必须同时更新这两个字段和文档。
 
 `POST /api/v1/models/{id}/preset` 把预设合并到已保存的 `user:` 模型，请求体：
 
@@ -495,7 +495,7 @@ Provider 返回 `name`、`protocol`、`base_url`、`model`、`max_concurrency`�
 
 `dry_run` 缺省或为 `true` 时只预览，不写库，也不需要 `revision`。响应为 `{model_id, preset, dry_run, applied, revision, changes, conflicts, effective?}`：`changes` 按固定顺序列出将变化的参数（`field`、`from`、`to`）；`conflicts` 列出覆盖值与预设不同、仍会压过预设参数的档位节点（`profile`、`node`、`source`、`fields`），只列字段名，不含覆盖值；覆盖值已等于预设值的节点不算冲突。预设不携带显式 `thinking` 开关，因此节点上的 `thinking.type: enabled` 与 `disabled` 都会被保守地视为与预设不同并列入 `conflicts`。`revision` 在预览时是当前版本，应用后是新版本。
 
-预设只合并 `max_tokens`、`context_window`、`reasoning`、`max_concurrency`、`rpm`、`forced_tool_choice`、`strict_role_alternation` 与 `preserve_reasoning_content`；模型已有显式 `thinking` 开关（例如旧记录里的 `thinking.type: disabled`）时清除该对象，避免它压过预设 effort。目标模型必须与预设的 `protocol` 相同，且 `base_url` 的 scheme/host/port 与预设一致（`https://api.deepseek.com`，路径可不同，例如 `/v1`），否则返回 400 `validation_failed`（字段 `preset`）。预设不改变 `protocol`、`base_url`、`model`、`temperature`、`price` 或已存密钥，也不匹配模型名前缀。应用必须显式传 `"dry_run": false` 与当前 `revision`；没有字段需要变化时，即使传 `dry_run: false` 也返回 `applied: false`：不写库、不增加 `revision`、不要求 `confirm_overrides`，响应仍带 `conflicts`。只有存在待写入变更且该节点覆盖值与预设不同时，未传 `"confirm_overrides": true` 才返回 409 `override_conflict`，`details[].field` 为 `overrides.<节点>`；确认后应用但**不删除**已有覆盖，受覆盖的节点仍按覆盖值运行，管理员须在档位页另行清除。`revision` 不匹配返回 409 `stale_revision`；配置模型返回 403 `read_only`；未知或已删除模型 404；未知预设返回 400（字段 `preset`）。成功应用返回 `effective: "new_workflows"`；审计动作 `apply_preset`，只记录预设 ID 与字段名，不记录参数值或密钥。
+预设只合并 `max_tokens`、`context_window`、`reasoning`、`max_concurrency`、`rpm`、`forced_tool_choice`、`strict_role_alternation` 与 `preserve_reasoning_content`；模型已有显式 `thinking` 开关（例如旧记录里的 `thinking.type: disabled`）时清除该对象，避免它压过预设 effort。目标模型必须与预设的 `protocol` 相同，且 `base_url` 的 scheme/host/port 与预设一致（`https://api.deepseek.com`，路径可不同，例如 `/v1`），否则返回 400 `validation_failed`（字段 `preset`）。预设不改变 `protocol`、`base_url`、`model`、`temperature` 或已存密钥，也不匹配模型名前缀。应用必须显式传 `"dry_run": false` 与当前 `revision`；没有字段需要变化时，即使传 `dry_run: false` 也返回 `applied: false`：不写库、不增加 `revision`、不要求 `confirm_overrides`，响应仍带 `conflicts`。只有存在待写入变更且该节点覆盖值与预设不同时，未传 `"confirm_overrides": true` 才返回 409 `override_conflict`，`details[].field` 为 `overrides.<节点>`；确认后应用但**不删除**已有覆盖，受覆盖的节点仍按覆盖值运行，管理员须在档位页另行清除。`revision` 不匹配返回 409 `stale_revision`；配置模型返回 403 `read_only`；未知或已删除模型 404；未知预设返回 400（字段 `preset`）。成功应用返回 `effective: "new_workflows"`；审计动作 `apply_preset`，只记录预设 ID 与字段名，不记录参数值或密钥。
 
 `POST /api/v1/models:test` 在保存前测试草稿：
 

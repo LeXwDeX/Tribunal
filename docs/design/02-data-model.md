@@ -172,7 +172,6 @@ CREATE TABLE workflows (
   error        TEXT,
   tokens_in    INTEGER NOT NULL DEFAULT 0,
   tokens_out   INTEGER NOT NULL DEFAULT 0,
-  cost_micros  INTEGER NOT NULL DEFAULT 0,
   usage_incomplete INTEGER NOT NULL DEFAULT 0, -- 0024：检测到用量不完整
   created_at   TEXT    NOT NULL,
   started_at   TEXT,
@@ -199,7 +198,6 @@ CREATE TABLE workflow_nodes (
   error       TEXT,
   tokens_in   INTEGER NOT NULL DEFAULT 0,
   tokens_out  INTEGER NOT NULL DEFAULT 0,
-  cost_micros INTEGER NOT NULL DEFAULT 0,
   usage_incomplete INTEGER NOT NULL DEFAULT 0, -- 0024：检测到用量不完整
   added_rev   INTEGER NOT NULL DEFAULT 0, -- 由哪次 graph_rev 加入（fan_out / extend）
   queued_at   TEXT,

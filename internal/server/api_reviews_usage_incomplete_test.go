@@ -48,18 +48,24 @@ func nodesByID(t *testing.T, body map[string]any) map[string]map[string]any {
 	return out
 }
 
-// assertUsageThreeNumbers keeps the existing usage object contract: exactly
-// the three numeric fields, with no nested completeness flag. The top-level
-// usage_incomplete field is the single source of that state.
-func assertUsageThreeNumbers(t *testing.T, label string, usage map[string]any) {
+// assertUsageTwoNumbers keeps the usage object contract: exactly the two
+// token fields, with no nested completeness flag and no money cost. The
+// top-level usage_incomplete field is the single source of that state.
+func assertUsageTwoNumbers(t *testing.T, label string, usage map[string]any) {
 	t.Helper()
 	if _, present := usage["incomplete"]; present {
 		t.Fatalf("%s usage has a nested incomplete field: %v", label, usage)
 	}
-	for _, key := range []string{"tokens_in", "tokens_out", "cost_micros"} {
+	if len(usage) != 2 {
+		t.Fatalf("%s usage has unexpected fields: %v", label, usage)
+	}
+	for _, key := range []string{"tokens_in", "tokens_out"} {
 		if _, present := usage[key]; !present {
 			t.Fatalf("%s usage missing %s: %v", label, key, usage)
 		}
+	}
+	if _, present := usage["cost_micros"]; present {
+		t.Fatalf("%s usage exposes cost_micros: %v", label, usage)
 	}
 }
 
@@ -77,8 +83,8 @@ func TestReviewUsageIncompleteAPIExposure(t *testing.T) {
 		t.Fatalf("detail usage_incomplete = %v, want true", body["usage_incomplete"])
 	}
 	usage := body["usage"].(map[string]any)
-	assertUsageThreeNumbers(t, "detail", usage)
-	if usage["tokens_in"] != float64(1000) || usage["cost_micros"] != float64(5000) {
+	assertUsageTwoNumbers(t, "detail", usage)
+	if usage["tokens_in"] != float64(1000) {
 		t.Fatalf("detail usage values = %v", usage)
 	}
 	detailNodes := nodesByID(t, body)
@@ -113,7 +119,7 @@ func TestReviewUsageIncompleteAPIExposure(t *testing.T) {
 		t.Fatalf("node usage_incomplete = %v, want true", nodeBody["usage_incomplete"])
 	}
 	nodeUsage := nodeBody["usage"].(map[string]any)
-	assertUsageThreeNumbers(t, "node", nodeUsage)
+	assertUsageTwoNumbers(t, "node", nodeUsage)
 	if nodeUsage["tokens_in"] != float64(200) {
 		t.Fatalf("node usage values = %v", nodeUsage)
 	}
@@ -136,7 +142,7 @@ func TestReviewUsageIncompleteAPILegacyValuesAreFalseNotAbsent(t *testing.T) {
 		t.Fatalf("detail usage_incomplete = %v (present=%t), want present false", value, present)
 	}
 	usage := body["usage"].(map[string]any)
-	assertUsageThreeNumbers(t, "legacy detail", usage)
+	assertUsageTwoNumbers(t, "legacy detail", usage)
 	for id, node := range nodesByID(t, body) {
 		value, present := node["usage_incomplete"]
 		if !present || value != false {
@@ -175,7 +181,7 @@ func TestReviewUsageIncompleteAPILegacyValuesAreFalseNotAbsent(t *testing.T) {
 		t.Fatalf("node usage_incomplete = %v (present=%t), want present false", value, present)
 	}
 	nodeUsage := nodeBody["usage"].(map[string]any)
-	assertUsageThreeNumbers(t, "legacy node", nodeUsage)
+	assertUsageTwoNumbers(t, "legacy node", nodeUsage)
 }
 
 func TestReviewUsageIncompleteAPIRespectsProjectAccess(t *testing.T) {

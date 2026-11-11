@@ -142,7 +142,67 @@ func (s *Store) Ping(ctx context.Context) error {
 	return s.db.PingContext(ctx)
 }
 
+// migrate applies the embedded migrations with foreign key enforcement
+// disabled. SQLite's documented table-rebuild procedure requires this: with
+// enforcement on, DROP TABLE performs an implicit DELETE that cascades into
+// child tables and loses rows. Enforcement is restored and, when this call
+// actually applied a migration, every remaining reference is checked before
+// migrate returns.
 func migrate(ctx context.Context, db *sql.DB, now func() time.Time) error {
+	before, err := appliedMigrationCount(ctx, db)
+	if err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
+		return fmt.Errorf("sqlite: disable foreign keys for migrations: %w", err)
+	}
+	applyErr := applyMigrations(ctx, db, now)
+	if _, err := db.ExecContext(ctx, `PRAGMA foreign_keys=ON`); err != nil && applyErr == nil {
+		return fmt.Errorf("sqlite: re-enable foreign keys: %w", err)
+	}
+	if applyErr != nil {
+		return applyErr
+	}
+	after, err := appliedMigrationCount(ctx, db)
+	if err != nil {
+		return err
+	}
+	if after == before {
+		return nil
+	}
+	rows, err := db.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		return fmt.Errorf("sqlite: foreign key check: %w", err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		return errors.New("sqlite: migration left a foreign key violation")
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("sqlite: foreign key check: %w", err)
+	}
+	return nil
+}
+
+// appliedMigrationCount reports how many migrations are recorded. A database
+// without the bookkeeping table counts as zero.
+func appliedMigrationCount(ctx context.Context, db *sql.DB) (int, error) {
+	var exists int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master
+		WHERE type = 'table' AND name = 'schema_migrations'`).Scan(&exists); err != nil {
+		return 0, fmt.Errorf("sqlite: check schema_migrations: %w", err)
+	}
+	if exists == 0 {
+		return 0, nil
+	}
+	var count int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil {
+		return 0, fmt.Errorf("sqlite: count schema_migrations: %w", err)
+	}
+	return count, nil
+}
+
+func applyMigrations(ctx context.Context, db *sql.DB, now func() time.Time) error {
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version INTEGER PRIMARY KEY,
 		name TEXT NOT NULL,

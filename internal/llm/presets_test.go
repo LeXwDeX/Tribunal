@@ -63,9 +63,6 @@ func TestDeepSeekPresetsGoldenValues(t *testing.T) {
 		if !params.PreserveReasoningContent {
 			t.Errorf("%s preserve_reasoning_content = false, want true", preset.ID)
 		}
-		if params.Price != nil {
-			t.Errorf("%s price = %+v, want unset (#407 owns cost fields)", preset.ID, params.Price)
-		}
 		if params.Temperature != nil {
 			t.Errorf("%s temperature = %v, want unset", preset.ID, *params.Temperature)
 		}
@@ -107,11 +104,10 @@ func TestPresetLookupAndIsolation(t *testing.T) {
 
 func TestPresetPatchOnlyChangesPresetFields(t *testing.T) {
 	temperature := 0.6
-	price := &config.PriceConfig{InputPerMTok: 1, OutputPerMTok: 2}
 	current := store.ModelParams{
 		MaxTokens: 1024, MaxConcurrency: 1,
-		Temperature: &temperature, Price: price,
-		Thinking: &config.ThinkingConfig{Type: "disabled"},
+		Temperature: &temperature,
+		Thinking:    &config.ThinkingConfig{Type: "disabled"},
 	}
 	preset, _ := Preset(PresetDeepSeekFlashMax)
 	patch, changes := preset.PatchFor(current)
@@ -133,9 +129,6 @@ func TestPresetPatchOnlyChangesPresetFields(t *testing.T) {
 	}
 	if !reflect.DeepEqual(next.Temperature, &temperature) {
 		t.Fatalf("temperature changed: %v", next.Temperature)
-	}
-	if next.Price != price {
-		t.Fatalf("price changed: %+v", next.Price)
 	}
 
 	again, secondChanges := preset.PatchFor(next)

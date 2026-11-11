@@ -214,7 +214,6 @@ type ProjectStats struct {
 	Runs            int64        `json:"runs"`
 	Blocking        int64        `json:"blocking"`
 	Published       int64        `json:"published"`
-	CostMicros      int64        `json:"cost_micros"`
 	DurationSamples int64        `json:"duration_samples"`
 	AvgDurationMS   *float64     `json:"avg_duration_ms"`
 	P95DurationMS   *float64     `json:"p95_duration_ms"`
@@ -227,7 +226,6 @@ type ProjectStats struct {
 type DailyStats struct {
 	Day             string   `json:"day"`
 	Runs            int64    `json:"runs"`
-	CostMicros      int64    `json:"cost_micros"`
 	DurationSamples int64    `json:"duration_samples"`
 	AvgDurationMS   *float64 `json:"avg_duration_ms"`
 	P95DurationMS   *float64 `json:"p95_duration_ms"`
@@ -238,7 +236,6 @@ type DailyStats struct {
 type ProviderStats struct {
 	Provider        string       `json:"provider"`
 	Runs            int64        `json:"runs"`
-	CostMicros      int64        `json:"cost_micros"`
 	DurationSamples int64        `json:"duration_samples"`
 	AvgDurationMS   *float64     `json:"avg_duration_ms"`
 	P95DurationMS   *float64     `json:"p95_duration_ms"`
@@ -250,7 +247,6 @@ type ProviderStats struct {
 type BlockStats struct {
 	Block           string       `json:"block"`
 	Runs            int64        `json:"runs"`
-	CostMicros      int64        `json:"cost_micros"`
 	DurationSamples int64        `json:"duration_samples"`
 	AvgDurationMS   *float64     `json:"avg_duration_ms"`
 	P95DurationMS   *float64     `json:"p95_duration_ms"`
@@ -265,7 +261,6 @@ type ModelStats struct {
 	Errors       int64    `json:"errors"`
 	InputTokens  int64    `json:"input_tokens"`
 	OutputTokens int64    `json:"output_tokens"`
-	CostMicros   int64    `json:"cost_micros"`
 	AvgLatencyMS *float64 `json:"avg_latency_ms"`
 	P50LatencyMS *float64 `json:"p50_latency_ms"`
 	ErrorRate    *float64 `json:"error_rate"`
@@ -303,7 +298,6 @@ type Stats struct {
 	AvgDurationMS     *float64               `json:"avg_duration_ms"`
 	P95DurationMS     *float64               `json:"p95_duration_ms"`
 	DurationSamples   int64                  `json:"duration_samples"`
-	CostMicros        int64                  `json:"cost_micros"`
 	ByProject         []ProjectStats         `json:"by_project"`
 	ByModel           []ModelStats           `json:"by_model"`
 	ByProvider        []ProviderStats        `json:"by_provider"`

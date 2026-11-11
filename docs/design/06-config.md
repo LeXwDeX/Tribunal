@@ -76,7 +76,6 @@ providers:
     forced_tool_choice: auto        # 可选；auto（默认）| supported | unsupported，见运维说明「最后一轮强制提交」
     context_window: 176000          # 可选；可用于输入的 token 数（窗口减去 max_tokens 与思考预算），agent 用量达 85% 时压缩旧工具输出，0 或不填则不压缩
     thinking: { budget_tokens: 8000 }
-    price: { input_per_mtok: 0, output_per_mtok: 0 }   # USD / 百万 token；用于估算，按实际填写
   gpt:
     protocol: openai-responses
     base_url: "https://api.openai.com/v1"
@@ -210,7 +209,6 @@ type ProviderConfig struct {
 	Temperature    *float64        `yaml:"temperature"`
 	Thinking       *ThinkingConfig `yaml:"thinking"`
 	Reasoning      *ReasoningConfig `yaml:"reasoning"`
-	Price          *PriceConfig    `yaml:"price"`
 	StrictRoleAlternation bool `yaml:"strict_role_alternation"` // 仅 openai-chat，默认 false
 	AllowReasoningEffortNone bool `yaml:"allow_reasoning_effort_none"` // 默认 false；仅 OpenAI 协议，true 时接受 effort none
 	PreserveReasoningContent bool `yaml:"preserve_reasoning_content"` // 默认 false；仅 openai-chat，true 时回放 reasoning_content
@@ -252,6 +250,8 @@ type ProfileConfig struct {
 | `preserve_reasoning_content` | `false` | openai-chat | 为 true 时从响应提取并回放 `reasoning_content`；其他协议不生效，设为 true 会启动告警 |
 
 `thinking` 仍是整体替换对象，`thinking.type` 位于其中。`PATCH /api/v1/models/{id}/params` 中，`allow_reasoning_effort_none`、`preserve_reasoning_content`、`output_config_effort`、`responses_params` 不接受顶层 `null`；`thinking` 对象内的 `null` 返回 400，顶层 `thinking: null` 仍表示清除整个对象。
+
+`price`（`input_per_mtok` / `output_per_mtok`）是已弃用的 legacy 字段。v1.4.0 仍解析它，仅用于兼容旧 YAML 和保持 provider 执行身份 JSON 逐字节不变；它不参与任何计算，也不进入 API、控制台或统计。配置中含 `price` 时，启动产生一条脱敏 WARN（只列 provider 名，不列数值）。该字段将在 v2.0 删除，届时含 `price` 的旧配置需要移除。
 
 ### 启动校验（`Config.Validate()`）
 
@@ -365,7 +365,7 @@ Docker Compose 默认只启用 `primary`。`config/server.docker.yaml` 另有一
 
 `plan`、`gather`、`adjudicate` 和 `synthesize` 是代码节点，不调用模型，也没有 provider 字段；旧配置中的 `plan.provider`、`synthesize.provider` 会被忽略并在启动日志中提示。`verify` 使用 `challenge.provider`；挑战者与提出方按 endpoint 和 model 身份归一后相同，或身份无法解析时，该条挑战被标记为同模型，不能证明跨模型独立，不同别名也不保证实际模型独立。不再支持 `cross`，也没有自动选择独立候选或调用失败后的自动故障切换。
 
-每个 MR 至少运行 `explore`、每个包的 `code-review` 和 `review`、`reasoner`、`validate` 这些 agent 节点，另有每条 P0/P1 finding 一个 `verify` 节点。因此一次评审调用模型的次数多于此前每次一两个 agent 节点的评审，token 成本预期更高；具体数字以后另行测量，此处不给出估计。节点数受 `budget.max_nodes` 与 fan-out 限制约束。
+每个 MR 至少运行 `explore`、每个包的 `code-review` 和 `review`、`reasoner`、`validate` 这些 agent 节点，另有每条 P0/P1 finding 一个 `verify` 节点。因此一次评审调用模型的次数多于此前每次一两个 agent 节点的评审，token 用量预期更大；具体数字以后另行测量，此处不给出估计。节点数受 `budget.max_nodes` 与 fan-out 限制约束。
 
 平台管理员可在控制台「模型与档位」查看配置中的全部 provider 和评审档位。页面只把 `default` 显示为「评审档位」，并按固定的八步拓扑列出各步骤的 provider：探索（`explore`）、提出（`code-review`、`review`、`reasoner`、`validate`）、挑战（`verify`）、裁决（`adjudicate`）、汇报（`synthesize`）；`onboarding` 单独标为「项目接入」，不是评审档位。该页面只读，界面不显示密钥值。逐个 provider 的连通性测试发送一条最小真实请求，会产生费用，需事先取得用户授权；成功只代表协议、地址、密钥和模型 ID 基本可用，不证明工具调用、长上下文、推理参数或完整业务流程兼容。
 

@@ -165,10 +165,25 @@ type NodeOutput struct {
 type Usage struct {
 	InputTokens      int64 `json:"input_tokens"`
 	OutputTokens     int64 `json:"output_tokens"`
-	CostMicros       int64 `json:"cost_micros"`
 	CacheReadTokens  int64 `json:"cache_read_tokens,omitempty"`
 	CacheWriteTokens int64 `json:"cache_write_tokens,omitempty"`
 	ReasoningTokens  int64 `json:"reasoning_tokens,omitempty"`
+}
+
+// UnmarshalJSON accepts the legacy cost_micros field in stored events and
+// projections but discards it. Money cost was removed in v1.4.0; old usage
+// payloads must stay readable without exposing the field again.
+func (u *Usage) UnmarshalJSON(data []byte) error {
+	type plain Usage
+	var decoded struct {
+		plain
+		LegacyCostMicros json.RawMessage `json:"cost_micros"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*u = Usage(decoded.plain)
+	return nil
 }
 
 // ErrorStatusProvider optionally exposes a sanitized upstream HTTP status for

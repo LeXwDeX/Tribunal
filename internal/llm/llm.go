@@ -296,7 +296,7 @@ type Usage struct {
 	ReasoningTokens  int64 `json:"reasoning_tokens"`
 	// CacheMissTokens is the provider-reported uncached prompt prefix
 	// (DeepSeek prompt_cache_miss_tokens). It details InputTokens and is not
-	// costed separately. omitempty keeps existing audit responses unchanged.
+	// added to it again. omitempty keeps existing audit responses unchanged.
 	CacheMissTokens int64 `json:"cache_miss_tokens,omitempty"`
 	Incomplete      bool  `json:"-"`
 }

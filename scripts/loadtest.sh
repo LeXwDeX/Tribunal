@@ -217,10 +217,10 @@ fi
 
 print_rows() {
   if [ ! -s "$tmp/rows.tsv" ]; then
-    printf 'project_id,mr_iid,status,verdict,duration_ms,tokens_in,tokens_out,cost_micros\n'
+    printf 'project_id,mr_iid,status,verdict,duration_ms,tokens_in,tokens_out\n'
     return
   fi
-  awk -F'\t' 'BEGIN{OFS=","; print "project_id,mr_iid,status,verdict,duration_ms,tokens_in,tokens_out,cost_micros"}
+  awk -F'\t' 'BEGIN{OFS=","; print "project_id,mr_iid,status,verdict,duration_ms,tokens_in,tokens_out"}
     NF {
       for (i = 1; i <= NF; i++) {
         gsub(/"/, "\"\"", $i)
@@ -246,7 +246,7 @@ while :; do
       [.reviews[]? | select(.kind != "status_only") | select(.id as $id | ($baseline | index($id)) == null)]
       | max_by(.created_at) // empty
       | [.project_id,.mr_iid,.status,(.verdict // ""),(.duration_ms // 0),
-         .tokens_in,.tokens_out,.cost_micros] | @tsv' <<<"$page") || {
+         .tokens_in,.tokens_out] | @tsv' <<<"$page") || {
       print_rows
       printf 'invalid polling response for %s\n' "${project_list[$idx]}" >&2
       exit 1
@@ -298,8 +298,8 @@ else
   p95=0
 fi
 
-totals=$(awk -F'\t' 'NF {tin+=$6; tout+=$7; cost+=$8} END{printf "%d %d %d", tin, tout, cost}' "$tmp/rows.tsv")
-read -r tokens_in tokens_out cost_micros <<<"$totals"
+totals=$(awk -F'\t' 'NF {tin+=$6; tout+=$7} END{printf "%d %d", tin, tout}' "$tmp/rows.tsv")
+read -r tokens_in tokens_out <<<"$totals"
 
 lock_stats=$(api_get "/api/v1/system/lock-stats" "$TRIBUNAL_ADMIN_TOKEN" 2>/dev/null) || lock_stats=""
 if [ -n "$lock_stats" ] && jq -s -e '
@@ -328,9 +328,9 @@ wall_s=$((finished_epoch - started_epoch))
 [ "$wall_s" -gt 0 ] || wall_s=1
 reviews_per_sec=$(awk -v n="$count" -v s="$wall_s" 'BEGIN{ printf "%.2f", n / s }')
 
-printf 'reviews=%d completed=%d failed=%d cancelled=%d triggers_failed=%d failure_rate=%s%% p50_ms=%s p95_ms=%s wall_s=%d reviews_per_sec=%s tokens_in=%d tokens_out=%d cost_micros=%d sqlite_wait_count=%s sqlite_wait_ms=%s workspace_wait_count=%s workspace_wait_ms=%s workspace_max_wait_ms=%s\n' \
+printf 'reviews=%d completed=%d failed=%d cancelled=%d triggers_failed=%d failure_rate=%s%% p50_ms=%s p95_ms=%s wall_s=%d reviews_per_sec=%s tokens_in=%d tokens_out=%d sqlite_wait_count=%s sqlite_wait_ms=%s workspace_wait_count=%s workspace_wait_ms=%s workspace_max_wait_ms=%s\n' \
   "$count" "$completed" "$failed" "$cancelled" "$failed_triggers" "$failure_rate" \
-  "$p50" "$p95" "$wall_s" "$reviews_per_sec" "$tokens_in" "$tokens_out" "$cost_micros" \
+  "$p50" "$p95" "$wall_s" "$reviews_per_sec" "$tokens_in" "$tokens_out" \
   "$sqlite_wait_count" "$sqlite_wait_ms" "$workspace_wait_count" "$workspace_wait_ms" "$workspace_max_wait_ms" >&2
 
 status_code=0
