@@ -27,11 +27,16 @@ function mock() {
     }
     if (path === '/api/v1/config') {
       return jsonResponse({
-        config: { server: { listen: ':9090' }, jobs: { workers: 3 } },
+        config: {
+          server: { listen: ':9090' },
+          jobs: { workers: 3 },
+          providers: [{ name: 'claude', model: 'claude-sonnet', api_key_configured: true }],
+        },
         origins: {
           'server.listen': 'base',
           'server.write_timeout': 'overlay',
           'jobs.workers': 'overlay',
+          'providers.claude.model': 'base',
         },
         warnings,
         base_revision: 'aaaaaaaaaaaaaaaa',
@@ -59,8 +64,10 @@ describe('configuration sources panel (#410)', () => {
     expect(await screen.findByText('server.listen')).toBeInTheDocument()
     expect(screen.getByText(':9090')).toBeInTheDocument()
     expect(screen.getByText('jobs.workers')).toBeInTheDocument()
+    expect(screen.getByText('providers.claude.model')).toBeInTheDocument()
+    expect(screen.getByText('claude-sonnet')).toBeInTheDocument()
     expect(screen.getAllByText('overlay').length).toBeGreaterThan(0)
-    expect(screen.getByText('基础配置')).toBeInTheDocument()
+    expect(screen.getAllByText('基础配置').length).toBeGreaterThan(0)
     expect(screen.getByRole('alert')).toHaveTextContent('server.overlay.yaml')
     expect(screen.getAllByRole('status').some((node) => node.textContent?.includes('reasoning.effort'))).toBe(true)
   })

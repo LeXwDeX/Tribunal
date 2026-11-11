@@ -233,3 +233,33 @@ func TestWatcherLastErrorHidesEnvironmentValues(t *testing.T) {
 		t.Fatalf("last error leaked an environment value: %q", state.LastError)
 	}
 }
+
+func TestWatcherClearsErrorWhenLastGoodContentReturns(t *testing.T) {
+	valid := watcherBase + "server:\n  listen: \":8080\"\n"
+	harness := newWatcherHarness(t, valid, "")
+	harness.watcher.poll()
+
+	harness.rewrite(t, harness.base, "server:\n  listen: [\n")
+	harness.watcher.poll()
+	harness.watcher.poll()
+	failed := harness.requireState(t)
+	if failed.LastError == "" {
+		t.Fatal("invalid config did not produce a last_error")
+	}
+
+	// Restoring the exact last-good contents does not replace the display
+	// snapshot; the watcher must still clear the stale reload error.
+	harness.rewrite(t, harness.base, valid)
+	harness.watcher.poll()
+	harness.watcher.poll()
+	recovered := harness.requireState(t)
+	if recovered.LastError != "" {
+		t.Fatalf("last_error was not cleared: %q", recovered.LastError)
+	}
+	if !recovered.LastErrorAt.IsZero() {
+		t.Fatalf("last_error_at was not cleared: %v", recovered.LastErrorAt)
+	}
+	if got := recovered.Snapshot.Config.Server.Listen; got != ":8080" {
+		t.Fatalf("last-good listen = %q, want :8080", got)
+	}
+}

@@ -23,15 +23,26 @@ function shortRevision(revision: string): string {
   return revision ? revision.slice(0, 12) : '—'
 }
 
-// valueAt resolves a dotted origin path, including array indexes such as
-// review_defaults.ignore[0], against the effective configuration object.
+// valueAt resolves a dotted origin path against the effective configuration
+// object. Provider origins use the provider name (providers.claude.model)
+// while the API returns providers as a name-carrying array, so array segments
+// that are not indexes match on the element's name field.
 function valueAt(root: unknown, path: string): unknown {
   const segments = path.replace(/\[(\d+)\]/g, '.$1').split('.').filter(Boolean)
   let current: unknown = root
   for (const segment of segments) {
     if (current === null || typeof current !== 'object') return undefined
-    const key = /^\d+$/.test(segment) ? Number(segment) : segment
-    current = (current as Record<string | number, unknown>)[key]
+    if (Array.isArray(current)) {
+      if (/^\d+$/.test(segment)) {
+        current = current[Number(segment)]
+      } else {
+        current = current.find((item) => (
+          item !== null && typeof item === 'object' && (item as { name?: unknown }).name === segment
+        ))
+      }
+    } else {
+      current = (current as Record<string, unknown>)[segment]
+    }
   }
   return current
 }
