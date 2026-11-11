@@ -367,7 +367,7 @@ func TestRunRefusesLockedDataDirectory(t *testing.T) {
 	}
 	defer held.Release()
 	stderr := &bytes.Buffer{}
-	err = run(context.Background(), []string{"--config", path}, &bytes.Buffer{}, stderr)
+	err = run(context.Background(), []string{"--config", path, "--overlay", ""}, &bytes.Buffer{}, stderr)
 	if err == nil || !strings.Contains(err.Error(), "locked by another Tribunal instance") {
 		t.Fatalf("run error = %v, want data directory lock failure", err)
 	}
@@ -402,7 +402,7 @@ func TestRunRejectsWrongMCPKeyAndReleasesResources(t *testing.T) {
 	}
 	t.Setenv("REVIEW_MASTER_KEY", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{2}, 32)))
 	var logs bytes.Buffer
-	err = run(ctx, []string{"--config", path}, &bytes.Buffer{}, &logs)
+	err = run(ctx, []string{"--config", path, "--overlay", ""}, &bytes.Buffer{}, &logs)
 	if err == nil || err.Error() != "initialize secrets: master key does not match stored encrypted data" || strings.Contains(logs.String(), "canary-startup") ||
 		!strings.Contains(logs.String(), "master key does not match stored encrypted data; refusing to start") || !strings.Contains(logs.String(), "env=REVIEW_MASTER_KEY") ||
 		strings.Contains(logs.String(), os.Getenv("REVIEW_MASTER_KEY")) {
@@ -1369,7 +1369,7 @@ func TestRunReclaimsForeignLeasesAfterLockingDataDirectory(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var logs syncBuffer
 	done := make(chan error, 1)
-	go func() { done <- run(ctx, []string{"--config", path}, &bytes.Buffer{}, &logs) }()
+	go func() { done <- run(ctx, []string{"--config", path, "--overlay", ""}, &bytes.Buffer{}, &logs) }()
 	waitReady(t, port, done, cancel)
 	cancel()
 	if err := <-done; err != nil {
@@ -1396,7 +1396,7 @@ func TestRunDoesNotReclaimWhenDataDirectoryIsLocked(t *testing.T) {
 		t.Skip("data directory lock is not enforced on this platform")
 	}
 	var logs bytes.Buffer
-	if err := run(context.Background(), []string{"--config", path}, &bytes.Buffer{}, &logs); err == nil {
+	if err := run(context.Background(), []string{"--config", path, "--overlay", ""}, &bytes.Buffer{}, &logs); err == nil {
 		t.Fatal("run succeeded with the data directory locked")
 	}
 	if j := jobStateOf(t, dir, id); j.State != store.JobRunning || j.LeaseOwner != "dead-process:0" {

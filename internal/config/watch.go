@@ -111,8 +111,7 @@ type observation struct {
 
 func (w *Watcher) poll() {
 	observed := observeFiles(w.opts.BasePaths, w.opts.OverlayPath)
-	if w.appliedSet && observed.key == w.applied.key {
-		w.clearError()
+	if w.appliedSet && observed.key == w.applied.key && w.state.LastError == "" {
 		w.pending = observation{}
 		w.stable = 0
 		return
@@ -127,14 +126,13 @@ func (w *Watcher) poll() {
 		return
 	}
 	if w.appliedSet &&
+		w.state.LastError == "" &&
 		observed.baseRevision == w.applied.baseRevision &&
 		observed.overlayRevision == w.applied.overlayRevision {
 		// The file was touched but its effective contents did not change.
-		// Returning to the last-good contents also recovers a failed reload.
 		w.applied = observed
 		w.pending = observation{}
 		w.stable = 0
-		w.clearError()
 		return
 	}
 
@@ -178,22 +176,6 @@ func (w *Watcher) succeed(snapshot *Snapshot) {
 		w.opts.Logger.Info("configuration files changed; display snapshot reloaded",
 			"base_revision", shortRevision(snapshot.BaseRevision),
 			"overlay_present", snapshot.OverlayPresent)
-	}
-	w.publish()
-}
-
-// clearError publishes recovery when the files return to the last-good
-// contents without replacing the display snapshot.
-func (w *Watcher) clearError() {
-	if w.state.LastError == "" {
-		return
-	}
-	w.state.LastError = ""
-	w.state.LastErrorAt = time.Time{}
-	w.failedKey = ""
-	w.lastLoggedError = ""
-	if w.opts.Logger != nil {
-		w.opts.Logger.Info("configuration files returned to the last-good contents; reload error cleared")
 	}
 	w.publish()
 }

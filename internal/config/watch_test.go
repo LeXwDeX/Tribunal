@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -322,5 +323,77 @@ func TestWatcherLastErrorHidesFileScalarValues(t *testing.T) {
 	}
 	if strings.Contains(state.LastError, secret) {
 		t.Fatalf("last error leaked a source value: %q", state.LastError)
+	}
+}
+
+func TestWatcherKeepsErrorWhenExternalConfigRemainsInvalid(t *testing.T) {
+	dir := t.TempDir()
+	mcpPath := filepath.Join(dir, "mcp.json")
+	writeMCP := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(mcpPath, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeMCP(`{"mcpServers":{"srv":{}}}`)
+
+	valid := watcherBase + fmt.Sprintf(`server:
+  listen: ":8080"
+blocks:
+  review:
+    mcp_tools: [mcp__srv__tool]
+mcp:
+  config: %q
+`, mcpPath)
+	harness := newWatcherHarness(t, valid, "")
+	harness.watcher.poll()
+	harness.requireNoState(t)
+
+	// Break the unpolled external file, then change a monitored file so the
+	// reload fails in Validate rather than Load.
+	writeMCP("{")
+	changed := watcherBase + fmt.Sprintf(`server:
+  listen: ":8080"
+  write_timeout: 30s
+blocks:
+  review:
+    mcp_tools: [mcp__srv__tool]
+mcp:
+  config: %q
+`, mcpPath)
+	harness.rewrite(t, harness.base, changed)
+	harness.watcher.poll()
+	harness.watcher.poll()
+	failed := harness.requireState(t)
+	if !strings.Contains(failed.LastError, "mcp.config") {
+		t.Fatalf("last error = %q, want an mcp.config validation error", failed.LastError)
+	}
+
+	// Restoring the monitored file to the last-good bytes must not take the
+	// metadata-only shortcut: the external file still fails validation.
+	harness.rewrite(t, harness.base, valid)
+	harness.watcher.poll()
+	harness.watcher.poll()
+	harness.requireNoState(t)
+	if harness.watcher.state.LastError == "" {
+		t.Fatal("error was cleared without a successful validation")
+	}
+	if got := harness.watcher.state.Snapshot.Config.Server.Listen; got != ":8080" {
+		t.Fatalf("last-good listen = %q, want :8080", got)
+	}
+
+	// Fixing the external file and touching the monitored file runs the full
+	// validation, which now succeeds and clears the error.
+	writeMCP(`{"mcpServers":{"srv":{}}}`)
+	harness.rewrite(t, harness.base, valid)
+	stamp := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(harness.base, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	harness.watcher.poll()
+	harness.watcher.poll()
+	recovered := harness.requireState(t)
+	if recovered.LastError != "" {
+		t.Fatalf("last error was not cleared after a successful validation: %q", recovered.LastError)
 	}
 }

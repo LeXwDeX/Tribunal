@@ -242,7 +242,7 @@ func TestInvalidSessionKeyDoesNotCreateStorageDirectory(t *testing.T) {
 	}
 	t.Setenv("TRIBUNAL_SESSION_KEY", "")
 	t.Setenv("CRC_SESSION_KEY", "invalid!!!")
-	err = run(context.Background(), []string{"--config", path}, &bytes.Buffer{}, &bytes.Buffer{})
+	err = run(context.Background(), []string{"--config", path, "--overlay", ""}, &bytes.Buffer{}, &bytes.Buffer{})
 	if err == nil || err.Error() != "auth: CRC_SESSION_KEY must be base64 of at least 32 bytes" {
 		t.Errorf("startup error = %v", err)
 	}
