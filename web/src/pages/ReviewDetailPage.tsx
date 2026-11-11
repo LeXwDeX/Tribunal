@@ -672,7 +672,6 @@ export function ReviewDetailPage() {
 
         <Panel
           title={<>执行图 {graph.isSuccess ? <small>{graph.data.nodes.length} 个节点</small> : null}</>}
-          note="点击节点查看输出与模型调用"
           flush
         >
           {graph.isPending ? <PanelBody><LoadingState label="正在读取执行图…" /></PanelBody> : null}

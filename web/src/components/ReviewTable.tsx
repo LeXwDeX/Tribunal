@@ -3,7 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { isStatusOnly } from '../api/types'
 import type { ReviewListItem, ReviewSummary, StatusOnlyReview } from '../api/types'
 import { formatCost, formatDuration } from '../lib/format'
-import { Badge, PublicationBadge, RelativeTime, SevCounts, StatusBadge, VerdictBadge } from './ui'
+import { Badge, PublicationBadge, RelativeTime, SevCounts, StatusBadge, Tooltip, VerdictBadge } from './ui'
 import styles from './ReviewTable.module.css'
 
 export function projectLabel(review: Pick<ReviewSummary, 'project_id' | 'project_path'>, names: Map<number, string>): string {
@@ -97,9 +97,11 @@ export function ReviewTable({ reviews, projectNames }: { reviews: ReviewListItem
               >
                 <td>
                   <div className={styles.primary}>
-                    <Link to={href} className={styles.titleLink} aria-label={label} title={title}>
-                      {title}
-                    </Link>
+                    <Tooltip content={title}>
+                      <Link to={href} className={styles.titleLink} aria-label={label}>
+                        {title}
+                      </Link>
+                    </Tooltip>
                     <span className={styles.meta}>
                       <span className={styles.mrRef}>!{review.mr_iid}</span>
                       <span className={styles.project}>{projectLabel(review, projectNames)}</span>
