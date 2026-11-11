@@ -21,6 +21,110 @@ type ModelParams struct {
 	Price                 *config.PriceConfig     `json:"price"`
 }
 
+// ParamUpdate marks one nullable parameter present in a merge request. Set is
+// false when the key is absent; Set with a nil Value clears the stored value.
+type ParamUpdate[T any] struct {
+	Set   bool
+	Value *T
+}
+
+// ModelParamsPatch names the parameter keys present in a merge request. Nil
+// pointers leave the stored value unchanged; explicit nulls are represented by
+// ParamUpdate with a nil Value.
+type ModelParamsPatch struct {
+	MaxTokens             *int
+	ContextWindow         *int
+	Temperature           ParamUpdate[float64]
+	Reasoning             ParamUpdate[config.ReasoningConfig]
+	Thinking              ParamUpdate[config.ThinkingConfig]
+	ForcedToolChoice      *string
+	StrictRoleAlternation *bool
+	MaxConcurrency        *int
+	RPM                   *int
+	Price                 ParamUpdate[config.PriceConfig]
+}
+
+// Apply merges the patch into base. Keys absent from the patch keep their
+// stored value; an explicit null clears a nullable parameter.
+func (p ModelParamsPatch) Apply(base ModelParams) ModelParams {
+	if p.MaxTokens != nil {
+		base.MaxTokens = *p.MaxTokens
+	}
+	if p.ContextWindow != nil {
+		base.ContextWindow = *p.ContextWindow
+	}
+	if p.Temperature.Set {
+		base.Temperature = p.Temperature.Value
+	}
+	if p.Reasoning.Set {
+		base.Reasoning = p.Reasoning.Value
+	}
+	if p.Thinking.Set {
+		base.Thinking = p.Thinking.Value
+	}
+	if p.ForcedToolChoice != nil {
+		base.ForcedToolChoice = *p.ForcedToolChoice
+	}
+	if p.StrictRoleAlternation != nil {
+		base.StrictRoleAlternation = *p.StrictRoleAlternation
+	}
+	if p.MaxConcurrency != nil {
+		base.MaxConcurrency = *p.MaxConcurrency
+	}
+	if p.RPM != nil {
+		base.RPM = *p.RPM
+	}
+	if p.Price.Set {
+		base.Price = p.Price.Value
+	}
+	return base
+}
+
+// Fields returns the changed parameter paths in sorted order without values.
+func (p ModelParamsPatch) Fields() []string {
+	fields := []string{}
+	if p.ContextWindow != nil {
+		fields = append(fields, "params.context_window")
+	}
+	if p.ForcedToolChoice != nil {
+		fields = append(fields, "params.forced_tool_choice")
+	}
+	if p.MaxConcurrency != nil {
+		fields = append(fields, "params.max_concurrency")
+	}
+	if p.MaxTokens != nil {
+		fields = append(fields, "params.max_tokens")
+	}
+	if p.Price.Set {
+		fields = append(fields, "params.price")
+	}
+	if p.Reasoning.Set {
+		fields = append(fields, "params.reasoning")
+	}
+	if p.RPM != nil {
+		fields = append(fields, "params.rpm")
+	}
+	if p.StrictRoleAlternation != nil {
+		fields = append(fields, "params.strict_role_alternation")
+	}
+	if p.Temperature.Set {
+		fields = append(fields, "params.temperature")
+	}
+	if p.Thinking.Set {
+		fields = append(fields, "params.thinking")
+	}
+	return fields
+}
+
+// ModelEndpoint is the stored endpoint metadata needed to decide whether a
+// saved credential may be reused. It does not parse the parameter JSON, so it
+// remains readable when a record's parameters are corrupt.
+type ModelEndpoint struct {
+	Protocol  string
+	BaseURL   string
+	HasAPIKey bool
+}
+
 // Model is a public model record. Credentials are never included.
 type Model struct {
 	ID          string      `json:"id"`
@@ -41,11 +145,15 @@ type Model struct {
 
 // ModelStore stores models without returning credentials in records. A nil
 // update credential keeps the existing credential; an empty value clears it.
+// UpdateModelParams merges only the parameter keys named by its patch, under
+// the same revision check as UpdateModel.
 type ModelStore interface {
 	ListModels(context.Context) ([]Model, error)
 	GetModel(context.Context, string) (*Model, error)
+	GetModelEndpoint(context.Context, string) (ModelEndpoint, error)
 	CreateModel(context.Context, Model, string) (*Model, error)
 	UpdateModel(context.Context, Model, int64, *string) (*Model, error)
+	UpdateModelParams(context.Context, string, int64, ModelParamsPatch, int64) (*Model, error)
 	SoftDeleteModel(context.Context, string, int64, int64) error
 	OpenModelCredential(context.Context, string) ([]byte, error)
 }

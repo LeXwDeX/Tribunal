@@ -538,6 +538,9 @@ func ValidateProviderConfig(field string, provider ProviderConfig, opts Provider
 	if provider.MaxTokens <= 0 {
 		p.add("%s.max_tokens must be positive", field)
 	}
+	if provider.RPM < 0 {
+		p.add("%s.rpm must not be negative", field)
+	}
 	if provider.ContextWindow < 0 {
 		p.add("%s.context_window must not be negative", field)
 	}

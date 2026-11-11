@@ -15,8 +15,9 @@ func TestModelProviderValidation(t *testing.T) {
 	cfg.MaxTokens = 0
 	cfg.Thinking = &ThinkingConfig{BudgetTokens: -1}
 	cfg.ContextWindow = -1
+	cfg.RPM = -1
 	err := ValidateProviderConfig("model", cfg, ProviderValidationOptions{})
-	for _, field := range []string{"temperature", "max_tokens", "budget_tokens", "context_window"} {
+	for _, field := range []string{"temperature", "max_tokens", "budget_tokens", "context_window", "rpm"} {
 		if err == nil || !strings.Contains(err.Error(), "model."+field) && !strings.Contains(err.Error(), "model.thinking."+field) {
 			t.Errorf("missing %s error: %v", field, err)
 		}

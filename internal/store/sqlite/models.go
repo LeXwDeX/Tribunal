@@ -125,6 +125,21 @@ func (s *Store) GetModel(ctx context.Context, id string) (*store.Model, error) {
 	return m, nil
 }
 
+// GetModelEndpoint reads only the endpoint and credential-presence columns, so
+// a corrupt params_json does not hide whether a stored key exists. A full
+// record update can still replace the corrupt parameters.
+func (s *Store) GetModelEndpoint(ctx context.Context, id string) (store.ModelEndpoint, error) {
+	var endpoint store.ModelEndpoint
+	err := s.db.QueryRowContext(ctx, `SELECT protocol, base_url, CASE WHEN api_key_sealed IS NOT NULL AND length(api_key_sealed) > 0 THEN 1 ELSE 0 END FROM llm_models WHERE id = ? AND deleted_at IS NULL`, id).Scan(&endpoint.Protocol, &endpoint.BaseURL, &endpoint.HasAPIKey)
+	if errors.Is(err, sql.ErrNoRows) {
+		return store.ModelEndpoint{}, store.ErrNotFound
+	}
+	if err != nil {
+		return store.ModelEndpoint{}, errors.New("sqlite: get model endpoint failed")
+	}
+	return endpoint, nil
+}
+
 func (s *Store) sealModelCredential(id, value string) ([]byte, error) {
 	if value == "" {
 		return nil, nil
@@ -213,6 +228,23 @@ func (s *Store) UpdateModel(ctx context.Context, m store.Model, revision int64, 
 		return nil, errors.New("sqlite: commit model update failed")
 	}
 	return updated, nil
+}
+
+// UpdateModelParams merges patch into the stored parameters. It reads the
+// current record, applies only the named keys and writes the result under the
+// caller's revision, so a concurrent change reports ErrStaleRevision instead
+// of losing an update.
+func (s *Store) UpdateModelParams(ctx context.Context, id string, revision int64, patch store.ModelParamsPatch, updatedBy int64) (*store.Model, error) {
+	current, err := s.GetModel(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if current.DeletedAt != nil {
+		return nil, store.ErrNotFound
+	}
+	current.Params = patch.Apply(current.Params)
+	current.UpdatedBy = updatedBy
+	return s.UpdateModel(ctx, *current, revision, nil)
 }
 
 func modelWriteError(ctx context.Context, tx *sql.Tx, id string) error {
