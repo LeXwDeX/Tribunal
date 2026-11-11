@@ -397,6 +397,26 @@ describe('DatePicker', () => {
     expect(screen.getByText('2026年11月')).toBeInTheDocument()
   })
 
+  it('focuses the month button even when the click itself does not focus it', async () => {
+    const user = userEvent.setup()
+    render(<DateHarness initial="2026-10-15" />)
+    await user.click(screen.getByRole('button', { name: '打开日历' }))
+    const day = screen.getByRole('button', { name: '2026年10月15日' })
+    expect(day).toHaveFocus()
+
+    // Safari does not focus buttons on click. The press stays inside the
+    // popover, so the calendar remains open while focus falls to <body>.
+    const nextMonth = screen.getByRole('button', { name: '下个月' })
+    fireEvent.mouseDown(nextMonth)
+    day.blur()
+    expect(document.activeElement).toBe(document.body)
+    expect(screen.getByRole('dialog', { name: '选择日期' })).toBeInTheDocument()
+
+    fireEvent.click(nextMonth)
+    expect(screen.getByText('2026年11月')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '下个月' })).toHaveFocus()
+  })
+
   it('keeps one grid tab stop when typing another month while open', async () => {
     const user = userEvent.setup()
     render(<DateHarness initial="2026-10-15" />)

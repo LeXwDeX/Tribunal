@@ -1238,13 +1238,21 @@ export const DatePicker = forwardRef<HTMLInputElement, DatePickerProps>(function
           onKeyDown={onPopoverKeyDown}
         >
           <div className={styles.calendarHeader}>
-            <button type="button" className={styles.calendarNav} aria-label="上个月" onClick={() => changeMonth(-1)}>
+            <button type="button" className={styles.calendarNav} aria-label="上个月" onClick={(event) => {
+              // Safari does not focus buttons on click; keep repeated month
+              // navigation on this button instead of dropping focus to <body>.
+              event.currentTarget.focus()
+              changeMonth(-1)
+            }}>
               <Icon name="chevron" size={16} className={styles.calendarPrev} />
             </button>
             <span className={styles.calendarTitle} aria-live="polite">
               {`${viewDate.getFullYear()}年${viewDate.getMonth() + 1}月`}
             </span>
-            <button type="button" className={styles.calendarNav} aria-label="下个月" onClick={() => changeMonth(1)}>
+            <button type="button" className={styles.calendarNav} aria-label="下个月" onClick={(event) => {
+              event.currentTarget.focus()
+              changeMonth(1)
+            }}>
               <Icon name="chevron" size={16} />
             </button>
           </div>
