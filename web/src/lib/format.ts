@@ -24,11 +24,6 @@ export function formatDuration(ms: unknown): string {
   return `${hours}h ${minutes % 60}m`
 }
 
-export function formatCost(micros: unknown): string {
-  if (typeof micros !== 'number' || !Number.isFinite(micros)) return '—'
-  return `$${(micros / 1_000_000).toFixed(4)}`
-}
-
 export function formatTokens(input: unknown, output?: unknown): string {
   if (typeof input !== 'number' && typeof output !== 'number') return '—'
   return `${formatCompactNumber(input)} / ${formatCompactNumber(output)}`

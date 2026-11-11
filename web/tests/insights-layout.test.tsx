@@ -8,7 +8,6 @@ import { installFetch, jsonResponse, renderWithProviders } from './test-utils'
 const day = (value: string, runs: number) => ({
   day: value,
   runs,
-  cost_micros: 0,
   duration_samples: 0,
   avg_duration_ms: null,
   p95_duration_ms: null,

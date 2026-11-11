@@ -43,7 +43,7 @@ describe('workspace manual actions', () => {
     expect(document.getElementById(controls ?? '')).toBeNull()
   })
 
-  it('associates the fee hint only with regenerate', async () => {
+  it('associates the model token hint only with regenerate', async () => {
     installFetch(routes({ state: 'ready' }))
     const user = userEvent.setup()
     renderWithProviders(<WorkspacePanel projectId={42} canManage />)
@@ -51,8 +51,9 @@ describe('workspace manual actions', () => {
     await screen.findByRole('button', { name: '手动操作' })
     await user.click(screen.getByRole('button', { name: '手动操作' }))
 
-    expect(screen.getByRole('button', { name: '重新生成上下文' })).toHaveAccessibleDescription(/可能产生费用/)
-    expect(screen.getByRole('button', { name: '重建索引' })).not.toHaveAccessibleDescription(/可能产生费用/)
+    expect(screen.getByRole('button', { name: '重新生成上下文' })).toHaveAccessibleDescription(/会调用模型并消耗 token/)
+    expect(screen.getByRole('button', { name: '重建索引' })).not.toHaveAccessibleDescription(/会调用模型并消耗 token/)
+    expect(screen.queryByText(/费用/)).not.toBeInTheDocument()
   })
 
   it('keeps the ignore-policy description on reindex and off regenerate', async () => {
@@ -69,7 +70,7 @@ describe('workspace manual actions', () => {
     expect(message).toHaveAttribute('role', 'status')
     expect(reindex).toHaveAccessibleDescription(/已按 ignore 策略跳过索引/)
     expect(regenerate).not.toHaveAccessibleDescription(/已按 ignore 策略跳过索引/)
-    expect(regenerate).toHaveAccessibleDescription(/可能产生费用/)
+    expect(regenerate).toHaveAccessibleDescription(/会调用模型并消耗 token/)
   })
 
   it('associates the locked-document warning only with regenerate', async () => {

@@ -84,7 +84,7 @@
   color: var(--text);
 }
 
-.costNotice {
+.registrationNotice {
   padding: 10px 14px;
   border-radius: var(--radius-sm);
   background: var(--warn-bg);

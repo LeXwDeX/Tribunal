@@ -22,7 +22,6 @@ function listItem(overrides: Record<string, unknown> = {}) {
     status: 'running',
     tokens_in: 0,
     tokens_out: 0,
-    cost_micros: 0,
     created_at: new Date().toISOString(),
     nodes: [
       { id: 'plan', kind: 'plan', status: 'completed', provider: 'claude', attempt: 1, duration_ms: 8120 },
@@ -41,7 +40,7 @@ function routeList(reviews: unknown[]) {
     if (parsed.pathname === '/api/v1/projects') {
       return jsonResponse({ projects: [{ id: 42, path_with_namespace: 'group/backend' }], next_cursor: '' })
     }
-    if (parsed.pathname === '/api/v1/stats') return jsonResponse({ runs: 1, cost_micros: 0, trend: [] })
+    if (parsed.pathname === '/api/v1/stats') return jsonResponse({ runs: 1, trend: [] })
     return jsonResponse({})
   })
 }
@@ -58,6 +57,8 @@ describe('review list summary fields', () => {
     expect(within(row).getByRole('img', { name: 'P0 1' })).toBeInTheDocument()
     expect(within(row).getByRole('img', { name: 'P1 0' })).toBeInTheDocument()
     expect(within(row).getByRole('img', { name: 'P2 3' })).toBeInTheDocument()
+    const table = row.closest('table')!
+    expect(within(table).queryByRole('columnheader', { name: '成本' })).not.toBeInTheDocument()
   })
 
   it('draws the overview stage track from list nodes', async () => {

@@ -197,8 +197,8 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
       onClose={close}
       title={result ? '项目已保存，初始化已开始' : '接入 GitLab 项目'}
       description={result
-        ? '项目已保存。平台已加密保存访问 Key；后台会拉取仓库并生成评审上下文，可能产生模型费用，但不会修改仓库代码。'
-        : '先只读校验连接，确认项目和权限；校验通过后才保存并初始化。保存会加密存储访问 Key，并在后台拉取仓库、生成评审上下文，可能产生模型费用。不会修改仓库代码。'}
+        ? '项目已保存。平台已加密保存访问 Key；后台会拉取仓库并生成评审上下文，会调用模型并消耗 token，但不会修改仓库代码。'
+        : '先只读校验连接，确认项目和权限；校验通过后才保存并初始化。保存会加密存储访问 Key，并在后台拉取仓库、生成评审上下文，会调用模型并消耗 token。不会修改仓库代码。'}
       wide
       footer={result ? (
         <Button variant="primary" onClick={close}>完成</Button>
@@ -302,8 +302,8 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
               </div>
             </div>
           </Disclosure>
-          <div className={page.costNotice}>
-            保存并初始化会登记项目、加密保存访问 Key、入队后台拉取与上下文生成，并可能在初始化或评审时产生模型费用；不创建或修改 Webhook，Webhook 在项目设置中单独配置。所有操作都不会修改仓库代码。
+          <div className={page.registrationNotice}>
+            保存并初始化会登记项目、加密保存访问 Key、入队后台拉取与上下文生成，会调用模型并消耗 token；不创建或修改 Webhook，Webhook 在项目设置中单独配置。所有操作都不会修改仓库代码。
           </div>
         </>
       )}

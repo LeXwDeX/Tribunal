@@ -13,7 +13,7 @@ import {
 } from '../components/ui'
 import { usePaginated } from '../lib/hooks'
 import {
-  formatCost, formatDate, labelForWebhookState, safeExternalUrl, shortSha, webhookTone,
+  formatDate, labelForWebhookState, safeExternalUrl, shortSha, webhookTone,
 } from '../lib/format'
 import { formatMs, formatRatio, statNumber } from '../lib/stats'
 import { describeWorkspaceError } from '../lib/diagnostics'
@@ -52,7 +52,6 @@ function ProjectOverview({ project }: { project: Project }) {
   const blockingRatio = statNumber(stats.data, 'blocking_ratio')
   const published = statNumber(stats.data, 'published')
   const overturned = statNumber(stats.data, 'overturned_ratio')
-  const cost = statNumber(stats.data, 'cost_micros')
   const avg = statNumber(stats.data, 'avg_duration_ms')
   const p95 = statNumber(stats.data, 'p95_duration_ms')
 
@@ -68,7 +67,7 @@ function ProjectOverview({ project }: { project: Project }) {
             <Metric label="BLOCKING 比例" value={formatRatio(blockingRatio)} note="来自 stats.blocking_ratio" />
             <Metric label="已发布问题" value={published === null ? '不可用' : published} note="来自 stats.published" />
             <Metric label="规则丢弃比例" value={formatRatio(overturned)} note="规则 drop 占比，不是模型准确率" />
-            <Metric label="成本" value={cost === null ? '不可用' : formatCost(cost)} note={`平均 ${formatMs(avg)} · P95 ${formatMs(p95)}`} />
+            <Metric label="耗时 平均 / P95" value={avg === null ? '不可用' : formatMs(avg)} note={`有有效起止时间的工作流 · P95 ${formatMs(p95)}`} />
             </div>
             <ActionHint>本项目近 7 天 · 所有数值来自 stats API；缺失时显示不可用</ActionHint>
           </>

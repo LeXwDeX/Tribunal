@@ -6,7 +6,7 @@ import {
   Badge, Button, DatePicker, Disclosure, EmptyState, ErrorState, LoadingState, Metric, PageHeader, Panel, Select,
   TableNote, type SelectOption,
 } from '../components/ui'
-import { formatCost, formatNumber } from '../lib/format'
+import { formatNumber } from '../lib/format'
 import { usePaginated } from '../lib/hooks'
 import { formatMs, formatRatio, statNumber } from '../lib/stats'
 import ui from '../styles/ui.module.css'
@@ -337,7 +337,6 @@ type BreakdownState<T> =
 
 type BreakdownRow = {
   runs: number
-  cost_micros: number
   duration_samples: number | null
   avg_duration_ms: number | null
   p95_duration_ms: number | null
@@ -395,7 +394,7 @@ function readDuration(value: unknown): number | null {
 function parseDailyStats(value: unknown): DailyStats | null {
   if (!isObject(value)) return null
   if (typeof value.day !== 'string' || !isUtcDay(value.day)) return null
-  if (!isNonNegativeInteger(value.runs) || !isNonNegativeInteger(value.cost_micros) || !isNonNegativeInteger(value.duration_samples)) return null
+  if (!isNonNegativeInteger(value.runs) || !isNonNegativeInteger(value.duration_samples)) return null
   if (value.duration_samples > value.runs) return null
   const avg = nullableDuration(value.avg_duration_ms)
   const p95 = nullableDuration(value.p95_duration_ms)
@@ -404,7 +403,6 @@ function parseDailyStats(value: unknown): DailyStats | null {
   return {
     day: value.day,
     runs: value.runs,
-    cost_micros: value.cost_micros,
     duration_samples: value.duration_samples,
     avg_duration_ms: avg,
     p95_duration_ms: p95,
@@ -427,12 +425,11 @@ function parseDailyTrend(value: unknown): Trend {
 }
 
 function parseBreakdown(row: Row, allowLegacy: boolean): BreakdownRow | null {
-  if (!isNonNegativeInteger(row.runs) || !isNonNegativeInteger(row.cost_micros)) return null
+  if (!isNonNegativeInteger(row.runs)) return null
   const hasAny = TREND_FIELDS.some((key) => Object.prototype.hasOwnProperty.call(row, key))
   if (allowLegacy && !hasAny) {
     return {
       runs: row.runs,
-      cost_micros: row.cost_micros,
       duration_samples: null,
       avg_duration_ms: null,
       p95_duration_ms: null,
@@ -450,7 +447,6 @@ function parseBreakdown(row: Row, allowLegacy: boolean): BreakdownRow | null {
   if (trend.kind === 'missing' || trend.kind === 'invalid') return null
   return {
     runs: row.runs,
-    cost_micros: row.cost_micros,
     duration_samples: row.duration_samples,
     avg_duration_ms: avg,
     p95_duration_ms: p95,
@@ -621,7 +617,6 @@ function DailyTrendTable({ rows, label, countLabel }: { rows: DailyStats[]; labe
           <tr>
             <th scope="col">日期 (UTC)</th>
             <th scope="col">{countLabel}</th>
-            <th scope="col">成本</th>
             <th scope="col">平均用时</th>
             <th scope="col">P95 用时</th>
             <th scope="col">耗时样本</th>
@@ -632,7 +627,6 @@ function DailyTrendTable({ rows, label, countLabel }: { rows: DailyStats[]; labe
             <tr key={row.day}>
               <td><time dateTime={`${row.day}T00:00:00Z`} className="mono">{row.day}</time></td>
               <td className="tabular">{formatNumber(row.runs)}</td>
-              <td className="tabular">{formatCost(row.cost_micros)}</td>
               <td className="tabular">{formatMs(row.avg_duration_ms)}</td>
               <td className="tabular">{formatMs(row.p95_duration_ms)}</td>
               <td className="tabular">{formatNumber(row.duration_samples)}</td>
@@ -761,7 +755,6 @@ function ProjectStatsPanel({ value }: { value: unknown }) {
               <th scope="col">工作流次数</th>
               <th scope="col">BLOCKING</th>
               <th scope="col">已发布</th>
-              <th scope="col">成本</th>
               <th scope="col">平均用时</th>
               <th scope="col">P95 用时</th>
               <th scope="col">耗时样本</th>
@@ -780,7 +773,6 @@ function ProjectStatsPanel({ value }: { value: unknown }) {
                     <td className="tabular">{formatNumber(row.runs)}</td>
                     <td className="tabular">{formatNumber(row.blocking)}</td>
                     <td className="tabular">{formatNumber(row.published)}</td>
-                    <td className="tabular">{formatCost(row.cost_micros)}</td>
                     <td className="tabular">{formatMs(row.avg_duration_ms)}</td>
                     <td className="tabular">{formatMs(row.p95_duration_ms)}</td>
                     <td className="tabular">{row.duration_samples === null ? '不可用' : formatNumber(row.duration_samples)}</td>
@@ -803,7 +795,7 @@ function ProjectStatsPanel({ value }: { value: unknown }) {
                   </tr>
                   {open ? (
                     <tr>
-                      <td colSpan={9} className={insights.trendCell}>
+                      <td colSpan={8} className={insights.trendCell}>
                         <div id={detailId} role="group" aria-label={`${label} 每日趋势`}>
                           <DimensionTrend trend={row.trend} label={`${label} 每日趋势`} countLabel="工作流次数" />
                         </div>
@@ -862,7 +854,6 @@ function GroupStatsPanel({ value, dimension }: { value: unknown; dimension: 'pro
             <tr>
               <th scope="col">{dimension === 'provider' ? 'Provider' : 'Block'}</th>
               <th scope="col">已启动节点数</th>
-              <th scope="col">成本</th>
               <th scope="col">平均用时</th>
               <th scope="col">P95 用时</th>
               <th scope="col">耗时样本</th>
@@ -878,7 +869,6 @@ function GroupStatsPanel({ value, dimension }: { value: unknown; dimension: 'pro
                   <tr>
                     <td className="mono">{row.key}</td>
                     <td className="tabular">{formatNumber(row.runs)}</td>
-                    <td className="tabular">{formatCost(row.cost_micros)}</td>
                     <td className="tabular">{formatMs(row.avg_duration_ms)}</td>
                     <td className="tabular">{formatMs(row.p95_duration_ms)}</td>
                     <td className="tabular">{formatNumber(row.duration_samples)}</td>
@@ -897,7 +887,7 @@ function GroupStatsPanel({ value, dimension }: { value: unknown; dimension: 'pro
                   </tr>
                   {open ? (
                     <tr>
-                      <td colSpan={7} className={insights.trendCell}>
+                      <td colSpan={6} className={insights.trendCell}>
                         <div id={detailId} role="group" aria-label={`${row.key} 每日趋势`}>
                           <DimensionTrend trend={row.trend} label={`${row.key} 每日趋势`} countLabel="已启动节点数" />
                         </div>
@@ -939,7 +929,6 @@ function StatsContent({ stats }: { stats: Stats }) {
           value={formatMs(avgDuration)}
           note={`${durationSamples === null ? '样本数不可用' : `样本 ${formatNumber(durationSamples)}`} · P95 ${formatMs(p95Duration)}`}
         />
-        <Metric label="成本" value={(() => { const cost = statNumber(stats, 'cost_micros'); return cost === null ? '不可用' : formatCost(cost) })()} note="按 API 的 micros 原值换算" />
       </div>
 
       <Panel

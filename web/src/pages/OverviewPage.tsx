@@ -10,7 +10,7 @@ import {
   Badge, Button, ButtonLink, EmptyState, ErrorState, LoadingState, Metric, PageHeader, Panel, Sparkline, classNames, useToast,
 } from '../components/ui'
 import { elapsedSince, useNow, usePaginated } from '../lib/hooks'
-import { formatCost, readNumber } from '../lib/format'
+import { readNumber } from '../lib/format'
 import { formatMs, formatRatio, statNumber } from '../lib/stats'
 import { describeWorkspaceError } from '../lib/diagnostics'
 import { REVIEW_STAGES, deriveReviewStage } from '../lib/reviewStage'
@@ -155,15 +155,15 @@ function buildAlerts(projects: Project[], providers: ModelHealth[], reviewIssues
   return alerts
 }
 
-function trendPoints(stats: Stats | undefined, field: 'runs' | 'cost_micros'): number[] {
+function trendPoints(stats: Stats | undefined, field: 'runs'): number[] {
   if (!Array.isArray(stats?.trend)) return []
   return stats.trend.map((day) => Number(day?.[field])).filter((value) => Number.isFinite(value))
 }
 
-function TrendNote({ points, color, children }: { points: number[]; color?: string; children: ReactNode }) {
+function TrendNote({ points, children }: { points: number[]; children: ReactNode }) {
   return (
     <>
-      {points.length >= 2 ? <Sparkline points={points} color={color} /> : null}
+      {points.length >= 2 ? <Sparkline points={points} /> : null}
       <span className={overview.metricNoteText}>{children}</span>
     </>
   )
@@ -184,7 +184,6 @@ function MetricStrip({ stats, loading, error, onRetry }: { stats?: Stats; loadin
   const blockingRatio = statNumber(stats, 'blocking_ratio')
   const published = statNumber(stats, 'published')
   const overturned = statNumber(stats, 'overturned_ratio')
-  const cost = statNumber(stats, 'cost_micros')
   const avg = statNumber(stats, 'avg_duration_ms')
   const p95 = statNumber(stats, 'p95_duration_ms')
   return (
@@ -201,11 +200,6 @@ function MetricStrip({ stats, loading, error, onRetry }: { stats?: Stats; loadin
       <Metric label="BLOCKING 比例" value={formatRatio(blockingRatio)} note="BLOCKING 工作流数 / 所有工作流数" />
       <Metric label="发布类问题" value={published === null ? '不可用' : published} note="裁决为 publish 或 mark 的问题数，不代表实际发布成功" />
       <Metric label="规则丢弃比例" value={formatRatio(overturned)} note="drop 问题数 / 有裁决的问题数，不是模型准确率" />
-      <Metric
-        label="成本"
-        value={cost === null ? '不可用' : formatCost(cost)}
-        note={<TrendNote points={trendPoints(stats, 'cost_micros')} color="var(--warn-dot)"><span>需在 provider 配置 price 才统计成本；无法区分未配置价格和实际零成本</span></TrendNote>}
-      />
       <Metric label="耗时 平均 / P95" value={avg === null ? '不可用' : formatMs(avg)} note={`有有效起止时间的工作流 · P95 ${formatMs(p95)}`} />
     </section>
   )
