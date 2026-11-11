@@ -478,10 +478,19 @@ Provider 返回 `name`、`protocol`、`base_url`、`model`、`max_concurrency`�
 | DELETE | `/api/v1/models/{id}?revision=N` | 软删除；配置模型返回 403 `read_only` |
 | POST | `/api/v1/models/{id}/test` | 测试已保存模型；成功返回 `{"ok": true, "model": "...", "latency_ms": N}` |
 | POST | `/api/v1/models:test` | 草稿测试，详见下文 |
+| GET | `/api/v1/model-defaults` | 平台管理员：`user:` 模型的平台默认参数 `{params, revision, updated_by?, updated_at?}`；尚无保存记录时 `revision=0`、`params` 全为未设置 |
+| PUT | `/api/v1/model-defaults` | 平台管理员：`{params, revision}` 整体替换默认参数；`params` 必须出现，空的 `{}` 表示清除全部默认值；`revision` 必须匹配当前版本（首次保存用 0），不匹配返回 409 `stale_revision`；未知参数、`params.price` 或非法值返回 400 逐字段 `details`；合并后会让现有可用 `user:` 模型按自身协议不可用的组合也返回 400（`details[].field` 为 `models.<id>.<字段>`）；返回保存后的完整视图 |
+| DELETE | `/api/v1/model-defaults?revision=N` | 平台管理员：清除全部默认值，`revision` 必须匹配当前版本，否则返回 409 `stale_revision`（尚无记录即 `revision=0` 时同样返回 409）；不清除行，`revision` 单调递增；返回清除后的完整视图 |
 
 两种修改语义不要混用：`PATCH /api/v1/models/{id}` 是整记录替换，适合提交完整表单；`PATCH /api/v1/models/{id}/params` 是参数级合并，只改提交的键，适合调整部分参数。两者都要求调用方提交 `revision` 做乐观锁。整记录替换在 `protocol` 或 `base_url` 的 scheme/host/port 变化时必须显式提供 `api_key`（已存模型没有密钥时不需要）；参数合并不改变 `protocol`、`base_url`，不涉及已存凭据的复用。端点预读只查询协议、地址与密钥存在性，`params_json` 损坏的记录仍可通过整记录替换修复。
 
 参数合并中的 `reasoning`、`thinking` 是整体替换：提交其中某个对象时，对象内未提交的字段按零值写入（例如只提交 `thinking.budget_tokens` 会把 `thinking.type` 清空），调用方须提交完整对象。对象内的未知字段返回 400（字段为 `params.reasoning` 或 `params.thinking`）；对象内出现 `null` 也返回 400，清除整个对象须对顶层键传 `null`。`responses_params` 只接受 `auto`、`supported`、`unsupported`；`thinking.type` 只接受 `enabled`、`disabled` 或空值。`params.price` 在 v1.4.0 已删除，参数合并提交该键返回 400（字段 `params.price`）；模型创建和整记录修改也不再接受 `params.price`。
+
+#### user 模型全局默认参数（[#413](https://github.com/LeXwDeX/Tribunal/issues/413)）
+
+`GET/PUT/DELETE /api/v1/model-defaults` 读写 `llm_model_defaults` 单行，只作用于 `user:` 模型；`config:` 模型的参数仍由 base/overlay 配置负责。PUT 是整体替换：`params` 中未出现的参数在保存后视为未设置，而不是保留旧值；`params` 缺失返回 400（字段 `params`）。参数键与模型参数相同，`reasoning`、`thinking` 仍是整体对象；未知键（含 `price`）返回 400，字段路径形如 `params.<name>`；范围与枚举校验与模型参数一致（非负计数、`temperature` 0–2、`effort` 为 `low`/`medium`/`high`/`max`，`none` 需要同一文档声明 `allow_reasoning_effort_none`）。写操作记录 `platform_audit`，动作 `update`/`reset`，只记录字段名，不记录参数值。
+
+解析优先级为模型显式值 > 全局默认 > 内置/协议默认。非指针字段的零值（0、false、空串）表示“未设置”，因此全局默认会填补这些字段，显式 0/false 不能压过非零默认；指针字段（`temperature`、`reasoning`、`thinking`）的 `null` 表示未设置，显式 `temperature: 0` 会压过默认。默认值只改变生效参数，不改写已存模型的 `params`：模型视图同时返回 `params`（存储的显式值）、`effective_params`（合并后的生效值）与 `param_sources`（`model` 或 `default`；两层都未设置的参数不出现）。`config:` 模型的 `effective_params` 等于配置值，`param_sources` 为空对象。创建、整记录修改、参数合并和草稿测试先合并默认再跑协议校验，因此依赖默认 `max_tokens` 的 anthropic 用户模型可以保存。默认值是跨协议共享的，保存时还会用候选默认合并每个现有可用 `user:` 模型并按其协议跑 `ValidateProviderConfig`；会让已有模型变为不可用的组合返回 400 `validation_failed`，`details` 逐条给出 `models.<id>.<字段>` 与模型显示名，不写库，避免保存后目录把模型标记为 unavailable。保存后调用运行时刷新，下一次模型读取和之后启动的评审使用新值，无需重启。默认变化会改变被引用 `user:` 模型的档位哈希，重启后未终态评审可能以 `profile_hash_changed` 取消，与修改模型本身相同。
 
 #### 模型预设（[#405](https://github.com/LeXwDeX/Tribunal/issues/405)）
 

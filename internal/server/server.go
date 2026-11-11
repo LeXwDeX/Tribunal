@@ -91,6 +91,7 @@ type Config struct {
 	LLM              ProviderTester
 	Models           *llm.Catalog
 	ModelsStore      store.ModelStore
+	ModelDefaults    store.ModelDefaultsStore
 	RefreshModels    func(context.Context) error
 	ProfileOverrides store.ProfileOverrideStore
 	Tokens           TokenStore
@@ -131,6 +132,7 @@ type Server struct {
 	llm              ProviderTester
 	models           *llm.Catalog
 	modelsStore      store.ModelStore
+	modelDefaults    store.ModelDefaultsStore
 	refreshModels    func(context.Context) error
 	profileOverrides store.ProfileOverrideStore
 	tokens           TokenStore
@@ -204,6 +206,7 @@ func New(cfg Config) (*Server, error) {
 		llm:              cfg.LLM,
 		models:           cfg.Models,
 		modelsStore:      cfg.ModelsStore,
+		modelDefaults:    cfg.ModelDefaults,
 		refreshModels:    cfg.RefreshModels,
 		profileOverrides: cfg.ProfileOverrides,
 		tokens:           cfg.Tokens,
@@ -282,6 +285,9 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("GET /api/v1/providers", s.apiAuth(s.guard(policyPlatformAdmin, s.handleListProviders)))
 	mux.HandleFunc("POST /api/v1/providers/{name}/test", s.apiAuth(s.guard(policyPlatformAdmin, s.handleTestProvider)))
 	mux.HandleFunc("GET /api/v1/models", s.apiAuth(s.guard(policyPlatformAdmin, s.handleListModels)))
+	mux.HandleFunc("GET /api/v1/model-defaults", s.apiAuth(s.guard(policyPlatformAdmin, s.handleGetModelDefaults)))
+	mux.HandleFunc("PUT /api/v1/model-defaults", s.apiAuth(s.guard(policyPlatformAdmin, s.handlePutModelDefaults)))
+	mux.HandleFunc("DELETE /api/v1/model-defaults", s.apiAuth(s.guard(policyPlatformAdmin, s.handleDeleteModelDefaults)))
 	mux.HandleFunc("GET /api/v1/model-presets", s.apiAuth(s.guard(policyPlatformAdmin, s.handleListModelPresets)))
 	mux.HandleFunc("GET /api/v1/models/{id}", s.apiAuth(s.guard(policyPlatformAdmin, s.handleGetModel)))
 	mux.HandleFunc("POST /api/v1/models", s.apiAuth(s.guard(policyPlatformAdmin, s.handleCreateModel)))

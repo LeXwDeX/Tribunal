@@ -312,6 +312,15 @@ Tribunal 只有一个评审档位 `default`，评审图固定：`explore` → �
 
 **与配置文件的关系**：覆盖先合并进未归一化的 `default` 配置，再归一化一次，因此 `default` 和各节点（包括 `lanes.code_review`）的覆盖都会改变实际执行的模型，而不只是显示。由此，`default` 覆盖优先于配置文件里各节点自己的 provider；清除覆盖即恢复配置行为。档位哈希仅在设置了参数覆盖时才包含参数，未设置时哈希与此前一致。 覆盖 `lanes.code_review` 或 `challenge` 也会带动由它们派生的节点一起变化（这些节点的来源仍标为 `derived`）。
 
+#### `user:` 模型的全局默认参数
+
+`user:` 模型的参数存在数据库（0026），没有对应的 YAML 字段，因此支持一组平台级默认参数（0029，`GET/PUT/DELETE /api/v1/model-defaults`）。它不是配置文件的一部分：`config:` 模型的默认仍由 base/overlay 中的 provider 字段承担，该表不覆盖 `config:` 模型。
+
+- 解析优先级：模型显式值 > 全局默认 > 内置/协议默认。非指针字段的 0、false、空串以及指针字段的 `null` 表示未设置，会继承全局默认；`temperature: 0` 是显式值，不会被默认覆盖。`reasoning`、`thinking` 按对象整体继承或覆盖，不做子字段合并。
+- 默认值不写回模型的 `params_json`：模型视图的 `params` 仍是显式值，`effective_params` 是合并后的生效值，`param_sources` 标出来源（`model` / `default`）。
+- 校验顺序是先合并默认再跑 `ValidateProviderConfig`，所以依赖默认 `max_tokens` 的 anthropic 用户模型可以保存；对默认值本身先校验与协议无关的字段规则（非负计数、temperature 范围、`effort` 与枚举值），再用候选默认合并每个现有可用 `user:` 模型并按各自协议复查。会让已有模型变为不可用的组合（例如 anthropic 的 `thinking.budget_tokens` 1–1023、`reasoning.effort: none`）返回 400 并列出受影响模型，不写库。
+- 默认值变化后，运行时刷新模型目录；之后启动的评审使用新值。进行中的评审继续使用启动时的 client 快照。重启恢复时，默认值会进入被引用 `user:` 模型的档位哈希，变化可能导致未终态工作流以 `profile_hash_changed` 取消。
+
 #### 旧配置的兼容处理
 
 `config.Load` 不会因下列旧配置失败。每一项都在启动日志中产生一行 WARN，格式为 `configuration was migrated or ignored: <字段…>`，只含字段名，不含配置值。

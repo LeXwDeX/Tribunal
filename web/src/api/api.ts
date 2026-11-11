@@ -26,7 +26,9 @@ import type {
   McpServerWrite,
   McpTestResult,
   Model,
+  ModelDefaults,
   ModelHealth,
+  ModelParams,
   ModelPreset,
   ModelWrite,
   Me,
@@ -355,6 +357,18 @@ export async function listModels(): Promise<{ models: Model[] }> {
 
 export async function listModelPresets(): Promise<{ presets: ModelPreset[] }> {
   return request<{ presets: ModelPreset[] }>('/api/v1/model-presets')
+}
+
+export async function getModelDefaults(): Promise<ModelDefaults> {
+  return request<ModelDefaults>('/api/v1/model-defaults')
+}
+
+export async function putModelDefaults(params: ModelParams, revision: number): Promise<ModelDefaults> {
+  return request<ModelDefaults>('/api/v1/model-defaults', { method: 'PUT', body: { params, revision } })
+}
+
+export async function deleteModelDefaults(revision: number): Promise<ModelDefaults> {
+  return request<ModelDefaults>(withQuery('/api/v1/model-defaults', { revision }), { method: 'DELETE' })
 }
 
 export async function listProviders(cursor?: string): Promise<ProviderPage> {

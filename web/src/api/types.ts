@@ -721,6 +721,11 @@ export interface Model {
   base_url: string
   model: string
   params: ModelParams
+  // effective_params applies the platform defaults to a user model; params
+  // keeps only the values stored on the model. param_sources maps a parameter
+  // name to 'model' or 'default'.
+  effective_params?: ModelParams
+  param_sources?: Record<string, string>
   has_api_key: boolean
   available: boolean
   unavailable_reason?: string
@@ -739,6 +744,15 @@ export interface ModelWrite {
   params: ModelParams
   api_key?: string
   revision?: number
+}
+
+// ModelDefaults is the single platform-level defaults document applied to
+// user models. revision 0 means no document has been saved yet.
+export interface ModelDefaults {
+  params: ModelParams
+  revision: number
+  updated_by?: number
+  updated_at?: string
 }
 
 export type ProfileNodeSource = 'override' | 'override_default' | 'config' | 'config_default' | 'derived'

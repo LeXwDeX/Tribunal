@@ -56,6 +56,13 @@
 - **BLOCKED**：未执行真实部署升级/回退演练（缺隔离部署环境）；升级前须按运维文档备份数据库及 WAL/SHM、工作区和密钥，回滚需恢复快照与匹配旧镜像。
 - 控制台成本展示由 [#408](https://github.com/LeXwDeX/Tribunal/issues/408) 移除，本 PR 未改 `web/`；后端与前端需同批发布。
 
+## user 模型全局默认参数本地验证（#413）
+
+- 本地通过 `go build ./...`、`go vet ./...`、新增和修改文件的 gofmt、全仓 `go test -count=1 ./...`、改动包 staticcheck v0.8.2，以及 `go test -race -count=1 ./internal/store/sqlite ./internal/llm ./internal/server`（sqlite 251s、llm 6s、server 188s）。前端 `npx tsc -b`、`npm run check:styles`、`npm test -- --coverage --maxWorkers=2 --testTimeout=15000`（81 个文件、731 项测试，语句/分支/函数/行覆盖率 87.64% / 81.62% / 87.48% / 91.07%）、`npm run build` 通过，`web/dist` 已刷新。
+- 迁移 `0029_model_param_defaults` 在 0028 旧库与全新库上回归：单行 `llm_model_defaults` 建表成功，旧模型、`tokens_in`/`tokens_out`/`usage_incomplete` 保持不变；store 测试覆盖 PUT/DELETE revision 冲突、清除后 revision 单调递增和重启持久化。
+- HTTP 测试覆盖 `GET/PUT/DELETE /api/v1/model-defaults` 的平台管理员与 CSRF 校验、未知/非法字段与 `params.price` 的 400、409 `stale_revision`（含 `revision=0` 重置冲突）、`user:` 模型继承/显式覆盖、`config:` 模型不受影响、模型视图 `effective_params`/`param_sources`、创建/整记录修改/参数合并/草稿测试先合并默认、保存默认值时按现有 `user:` 模型协议交叉校验（anthropic budget 512 与 effort none 返回 400 并列出受影响模型）；档位覆盖校验使用生效参数（继承的 `allow_reasoning_effort_none` 与 `max_tokens`）。控制台测试覆盖面板展示、保存、确认重置、409 保存/重置后重新加载、布尔字段错误、`config:` 模型说明、非管理员与 403 隐藏、Drawer 打开时保留未保存草稿、无默认值时禁用重置、被默认覆盖的显式 0/false 不再显示为生效值、anthropic 模型在编辑器中留空 `max_tokens` 继承全局默认，以及 390/1440 宽度与亮暗主题契约。
+- **BLOCKED**：未执行真实部署升级/回退演练（缺隔离部署环境）；升级前须按运维文档备份数据库及 WAL/SHM、工作区和密钥，回滚需恢复快照与匹配旧镜像。
+
 ## v1.3.0 发布检查表（#294）
 
 | 检查项 | 状态 | 证据 / 原因 |
@@ -288,6 +295,7 @@ v1.2.0 尚未发布：版本说明已合并到 `main`，尚未打 tag，也未�
 - 迁移实现：`internal/store/sqlite/sqlite.go` 的 `migrate()`；当前工作区迁移文件为 `0001`、`0003`–`0024`，共 23 个（没有 `0002`）。其中 `0016`–`0024` 均属于 v1.2.0；v1.2.0 升级基线为 `0001`、`0003`–`0024`，共 23 个。确认迁移结果时按已知版本集合核对，不把最大版本号当数量。
 - 每个未应用迁移单独开事务；没有 down migration。启动时只跳过 `schema_migrations` 已记录的版本；数据库中已记录、但不在当前嵌入文件列表的高版本会被忽略而不报错。
 - v1.4.0 新增 `0030_remove_cost`：重建 `workflows`/`workflow_nodes` 去掉 `cost_micros`，迁移期间关闭外键检查、完成后恢复并执行 `foreign_key_check`；同时从模型参数剥离 legacy `price`。不可逆，旧库/新库迁移回归在本地通过；真实升级演练 BLOCKED（缺隔离部署环境）。
+- v1.4.0 新增 `0029_model_param_defaults`：新建单行 `llm_model_defaults`，无数据转换；未保存时读取为空文档 `revision 0`。不可逆，0028 旧库/新库迁移回归在本地通过；真实升级演练 BLOCKED（缺隔离部署环境）。
 - `migration_rollback_test` 只覆盖 `0004` 单文件在“建表完成、记录版本前”失败时的事务回滚及之后重试；不覆盖整批升级失败、跨版本回滚或降级。
 - `0007` 给 `users` 增加 `disabled`，并新建空的 `project_grants`；升级不会给任何用户创建 grant。
 - `0008` 增加 `publication_error`；`0009` 增加 webhook 状态/事件/错误，并把已有 `hook_id` 的行标为 `unknown`；`0010` 增加 deferred review candidate 序号；`0011` 增加状态 note 与逐 note 表情的持久化表；`0012` 增加 webhook 归属和时间戳，已有 `hook_id` 的行视为本服务所有。

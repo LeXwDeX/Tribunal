@@ -84,8 +84,8 @@ func (s *Server) profileNode(node app.ProfileNodeView) profileNodeView {
 	}
 	out.VoteIdentity = llm.ProviderInfo{BaseURL: model.BaseURL, Model: model.Model.Model}.ModelIdentity()
 	params := profileNodeParams{
-		MaxTokens: model.Params.MaxTokens, Temperature: model.Params.Temperature,
-		Reasoning: model.Params.Reasoning, Thinking: model.Params.Thinking,
+		MaxTokens: model.EffectiveParams.MaxTokens, Temperature: model.EffectiveParams.Temperature,
+		Reasoning: model.EffectiveParams.Reasoning, Thinking: model.EffectiveParams.Thinking,
 	}
 	if node.Params != nil {
 		if node.Params.MaxTokens != nil {
@@ -179,16 +179,17 @@ func (s *Server) handleDeleteProfileOverrides(w http.ResponseWriter, r *http.Req
 }
 
 // modelLookup reads a model from the current catalog, which holds configured
-// providers and user models that are not deleted. Without a catalog the
-// store's own reference check is the only one.
+// providers and user models that are not deleted. Validation uses the
+// effective parameters so a capability or max_tokens inherited from the
+// platform defaults applies to profile overrides too.
 func (s *Server) modelLookup() func(string) (app.OverrideModel, bool) {
 	if s.models == nil {
 		return nil
 	}
 	return func(id string) (app.OverrideModel, bool) {
 		model, ok := s.models.Resolve(id)
-		return app.OverrideModel{Unavailable: model.Unavailable, Protocol: model.Protocol, MaxTokens: model.Params.MaxTokens,
-			AllowReasoningEffortNone: model.Params.AllowReasoningEffortNone}, ok
+		return app.OverrideModel{Unavailable: model.Unavailable, Protocol: model.Protocol, MaxTokens: model.EffectiveParams.MaxTokens,
+			AllowReasoningEffortNone: model.EffectiveParams.AllowReasoningEffortNone}, ok
 	}
 }
 

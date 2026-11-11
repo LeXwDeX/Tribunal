@@ -12,8 +12,10 @@ import (
 )
 
 type catalogStore struct {
-	mu     sync.Mutex
-	models []store.Model
+	mu               sync.Mutex
+	models           []store.Model
+	defaults         store.ModelParams
+	defaultsRevision int64
 }
 
 func (s *catalogStore) ListModels(context.Context) ([]store.Model, error) {
@@ -26,6 +28,11 @@ func (s *catalogStore) OpenModelCredential(_ context.Context, id string) ([]byte
 		return nil, errors.New("unavailable")
 	}
 	return nil, nil
+}
+func (s *catalogStore) GetModelDefaults(context.Context) (*store.ModelDefaults, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return &store.ModelDefaults{Params: s.defaults, Revision: s.defaultsRevision}, nil
 }
 
 func TestCatalogRefreshIsolatesFailuresAndKeepsOldClients(t *testing.T) {
