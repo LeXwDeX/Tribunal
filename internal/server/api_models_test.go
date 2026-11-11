@@ -22,10 +22,12 @@ func TestModelEndpointsRequirePlatformAdminAndCSRF(t *testing.T) {
 		name, method, path string
 	}{
 		{"list", http.MethodGet, "/api/v1/models"},
+		{"presets", http.MethodGet, "/api/v1/model-presets"},
 		{"detail", http.MethodGet, "/api/v1/models/user:missing"},
 		{"create", http.MethodPost, "/api/v1/models"},
 		{"update", http.MethodPatch, "/api/v1/models/user:missing"},
 		{"params update", http.MethodPatch, "/api/v1/models/user:missing/params"},
+		{"apply preset", http.MethodPost, "/api/v1/models/user:missing/preset"},
 		{"delete", http.MethodDelete, "/api/v1/models/user:missing?revision=1"},
 		{"saved test", http.MethodPost, "/api/v1/models/user:missing/test"},
 		{"draft test", http.MethodPost, "/api/v1/models:test"},

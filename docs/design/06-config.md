@@ -97,6 +97,19 @@ providers:
     thinking: { type: disabled }    # 可选；enabled | disabled，仅 openai-chat
     preserve_reasoning_content: false  # 可选；true 时提取并回放 reasoning_content，仅 openai-chat
     strict_role_alternation: false  # 仅 openai-chat；网关要求角色严格交替时设为 true，见下文
+  # DeepSeek 最大能力示例（2026-11-11 按官方模型表核对，见下）。仅用于
+  # DeepSeek，不要把这些数值照抄到其他供应方。
+  deepseek-v4-pro:
+    protocol: openai-chat
+    base_url: "https://api.deepseek.com"
+    model: "deepseek-v4-pro"
+    api_key_env: DEEPSEEK_API_KEY
+    max_concurrency: 500            # 官方账号并发上限，不是本地目标值
+    max_tokens: 393216              # 官方最大输出；省略该字段不等于最大输出
+    context_window: 655360          # 1,048,576 上下文减去 393,216 输出预留
+    reasoning: { effort: max }      # low | high | max；上游默认 high
+    forced_tool_choice: unsupported # thinking + tools 下上游拒绝强制工具选择
+    preserve_reasoning_content: true  # thinking + tools 必须回传 reasoning_content
 
 profiles:
   default:                          # 唯一的评审档位，字段见下文「评审档位」
@@ -317,6 +330,8 @@ Tribunal 只有一个评审档位 `default`，评审图固定：`explore` → �
 
 `providers` 的键是 provider 别名。每个别名绑定一个 `protocol`、`base_url`、`model` 和一个 `api_key_env`；`api_key_env` 只保存**变量名**，密钥值由部署环境注入，不写进 YAML、命令、日志或接口响应。同一个供应方的两个模型需要两个别名，例如 `primary` 和 `secondary`，即使二者共用 `base_url` 和密钥变量：一个别名只有一个 `model`。
 
+上面的 `deepseek-v4-pro` 是 DeepSeek 最大能力示例，数值于 2026-11-11 按官方模型表核对（[api-docs.deepseek.com/quick_start/pricing](https://api-docs.deepseek.com/quick_start/pricing)），只适用于 DeepSeek；`config/server.example.yaml` 与 `config/server.docker.yaml` 以注释形式给出同一组值，`internal/config/testdata/deepseek-preset.yaml` 用 `Load+Validate` 证明这些文档值可解析。`deepseek-flash` 的配置相同，仅 `model` 与 `max_concurrency`（2500）不同。官方能力为：两模型上下文 1,048,576、最大输出 393,216、effort 支持 `low`/`high`/`max`（默认 `high`）、账号并发上限 2500/500、KV 缓存自动；Chat Completions 的 `max_tokens` 默认值不是最大输出（非 thinking 8K、thinking 64K、`effort=max` 128K），省略该字段不会得到 393,216。这里的 `context_window: 655360` 是可用于输入的预算：1,048,576 总上下文减去 393,216 最大输出。存量用户模型当前可通过 `POST /api/v1/models/{id}/preset` 显式应用同名预设（控制台入口见 [#406](https://github.com/LeXwDeX/Tribunal/issues/406)），见 [HTTP API · 模型预设](03-http-api.md#模型预设405) 和 [部署与运维 · DeepSeek 最大能力预设](../operations.md#deepseek-最大能力预设)。
+
 Docker Compose 默认只启用 `primary`。`config/server.docker.yaml` 另有一个注释掉的 `secondary` 示例，四个值分别来自 `LLM_SECONDARY_PROTOCOL`、`LLM_SECONDARY_BASE_URL`、`LLM_SECONDARY_MODEL` 和 `LLM_SECONDARY_API_KEY`。`compose.yaml` 的 `environment` 已允许这四个变量，但 `.env` 只用于 Compose 插值，不会自动注入容器；未列在 `environment` 中的变量容器看不到。若新增第三个 provider 并使用新变量名，须在 `compose.override.yaml` 的 `services.review.environment` 中逐一透传它引用的变量；只透传 key 会使未透传的 protocol 和 model 为空，导致启动失败。`base_url` 可为空以使用协议适配器默认地址；复用容器已有变量时不需要重复透传。
 
 可引用模型的字段：
@@ -416,7 +431,7 @@ default_extensions:
 - **文件显式声明优先**：配置文件 `blocks` 显式声明某个块时，该块的默认授权跳过；数据库平台行释放后，以文件为准。释放条件见[文件声明与数据库绑定](#文件声明与数据库绑定)。即使 `default_extensions` 已清空，这条规则也不变。
 - **始终启用**：内置 Skill 和 MCP 服务器始终启用；升级、重启和内置配置同步都不会改变这一点。历史数据库中已被禁用的内置行会在下次启动时恢复启用。
 - **生效时机**：修改配置文件中的 `default_extensions` 或数据库中的扩展、绑定后，需要重启服务才生效；运行中的进程继续使用启动时读取的扩展和绑定。管理员从某个块解绑后，重启不会恢复。
-- `skills: []` 只是不再登记新的默认项，不删除已登记的扩展和绑定。配置文件和 `mcp.config` 是部署者特权入口；HTTP API 的自定义 MCP 新增/导入仅平台管理员可用，自定义 Skill 创建入口仍关闭，控制台尚未提供新增/导入界面。
+- `skills: []` 只是不再登记新的默认项，不删除已登记的扩展和绑定。配置文件和 `mcp.config` 是部署者特权入口；HTTP API 的自定义 MCP 新增/导入和自定义 Skill 创建（zip 上传，或复制服务端目录的高级选项）都仅平台管理员可用，项目 scope 需要项目已登记。Skill 创建使用运行时加载器相同的严格 manifest 校验，上传和目录登记的限制见 [HTTP API · 扩展](03-http-api.md#44-扩展mcp-skill块绑定)；控制台的新增/导入界面另行交付。
 - 登记或更新失败（例如工作区不可写）会让启动失败；登记失败不写台账，下次启动重试。
 
 #### 文件声明与数据库绑定

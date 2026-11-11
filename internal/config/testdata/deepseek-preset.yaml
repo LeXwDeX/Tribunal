@@ -1,0 +1,34 @@
+# Fixture for the documented DeepSeek maximum-capability provider values
+# (#405). It mirrors the commented example in config/server.example.yaml and
+# config/server.docker.yaml; the values were verified on 2026-11-11 against
+# https://api-docs.deepseek.com/quick_start/pricing. Keep all three in sync.
+gitlab:
+  url: "https://gitlab.example.test"
+
+providers:
+  deepseek-v4-pro:
+    protocol: openai-chat
+    base_url: "https://api.deepseek.com"
+    model: "deepseek-v4-pro"
+    api_key_env: DEEPSEEK_API_KEY
+    max_concurrency: 500
+    max_tokens: 393216
+    context_window: 655360
+    reasoning: { effort: max }
+    forced_tool_choice: unsupported
+    preserve_reasoning_content: true
+  deepseek-flash:
+    protocol: openai-chat
+    base_url: "https://api.deepseek.com"
+    model: "deepseek-flash"
+    api_key_env: DEEPSEEK_API_KEY
+    max_concurrency: 2500
+    max_tokens: 393216
+    context_window: 655360
+    reasoning: { effort: max }
+    forced_tool_choice: unsupported
+    preserve_reasoning_content: true
+
+profiles:
+  default:
+    provider: deepseek-v4-pro

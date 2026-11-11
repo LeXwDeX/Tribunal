@@ -22,6 +22,7 @@ import type {
   McpTool,
   Model,
   ModelHealth,
+  ModelPreset,
   ModelWrite,
   Me,
   CallPage,
@@ -308,6 +309,10 @@ export async function restoreDefaultBindings(input: RestoreDefaultBindingsInput)
 
 export async function listModels(): Promise<{ models: Model[] }> {
   return request<{ models: Model[] }>('/api/v1/models')
+}
+
+export async function listModelPresets(): Promise<{ presets: ModelPreset[] }> {
+  return request<{ presets: ModelPreset[] }>('/api/v1/model-presets')
 }
 
 export async function listProviders(cursor?: string): Promise<ProviderPage> {

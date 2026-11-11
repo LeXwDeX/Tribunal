@@ -198,6 +198,38 @@ func (a *AppExtensions) SetSkillEnabled(ctx context.Context, id string, enabled 
 	return &out, nil
 }
 
+func (a *AppExtensions) UploadSkill(ctx context.Context, in SkillUpload) (*Skill, error) {
+	if err := a.ready(); err != nil {
+		return nil, err
+	}
+	skill, err := a.service.UploadSkill(ctx, app.SkillUpload{
+		Scope:     in.Scope,
+		ProjectID: in.ProjectID,
+		Data:      in.Data,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := skillFromApp(*skill)
+	return &out, nil
+}
+
+func (a *AppExtensions) RegisterSkillDir(ctx context.Context, in SkillDirInput) (*Skill, error) {
+	if err := a.ready(); err != nil {
+		return nil, err
+	}
+	skill, err := a.service.RegisterSkillDir(ctx, app.SkillDirInput{
+		Scope:     in.Scope,
+		ProjectID: in.ProjectID,
+		Dir:       in.Dir,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := skillFromApp(*skill)
+	return &out, nil
+}
+
 func (a *AppExtensions) ListBlockBindings(ctx context.Context, scope string, projectID *int64) ([]BlockBinding, error) {
 	if err := a.ready(); err != nil {
 		return nil, err

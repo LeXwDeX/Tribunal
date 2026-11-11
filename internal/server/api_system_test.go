@@ -20,7 +20,7 @@ func systemPlatform() *config.Config {
 			"claude": {
 				Protocol: "anthropic", BaseURL: "https://api.anthropic.com",
 				Model: "claude-sonnet", APIKeyEnv: "ANTHROPIC_API_KEY",
-				MaxConcurrency: 4, RPM: 60,
+				MaxConcurrency: 4, RPM: 60, MaxTokens: 8192, ContextWindow: 64000,
 			},
 			"unused": {Protocol: "openai-chat", BaseURL: "https://llm.example.com", Model: "m"},
 		},
@@ -58,6 +58,9 @@ func TestProviderListShowsUnavailable(t *testing.T) {
 		}
 		if provider["unavailable"] != true || provider["unavailable_reason"] != "egress_denied" {
 			t.Fatalf("provider status = %#v", provider)
+		}
+		if provider["max_tokens"] != float64(8192) || provider["context_window"] != float64(64000) {
+			t.Fatalf("provider capabilities = %#v", provider)
 		}
 		return
 	}
@@ -519,6 +522,10 @@ func TestSettingsMaskSecrets(t *testing.T) {
 	}
 	if providers[1].(map[string]any)["api_key_configured"] != false {
 		t.Fatalf("second provider = %v", providers[1])
+	}
+	first := providers[0].(map[string]any)
+	if first["max_tokens"] != float64(8192) || first["context_window"] != float64(64000) {
+		t.Fatalf("settings provider capabilities = %v", first)
 	}
 	secrets := body["secrets"].(map[string]any)
 	if secrets["master_key_configured"] != true {

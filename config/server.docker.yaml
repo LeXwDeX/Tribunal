@@ -78,6 +78,34 @@ providers:
   #   api_key_env: LLM_SECONDARY_API_KEY
   #   max_concurrency: 4
   #   max_tokens: 16000
+  # Optional DeepSeek maximum-capability example, verified 2026-11-11 against
+  # https://api-docs.deepseek.com/quick_start/pricing. DeepSeek-only: do not
+  # copy these values to another provider. Uncomment one block, set
+  # DEEPSEEK_API_KEY in the environment (add it to compose.yaml), and point
+  # profiles.default or a lane at it. An existing user model can receive the
+  # same parameters from the shipped presets (GET /api/v1/model-presets).
+  # deepseek-v4-pro:
+  #   protocol: openai-chat
+  #   base_url: "https://api.deepseek.com"
+  #   model: "deepseek-v4-pro"
+  #   api_key_env: DEEPSEEK_API_KEY
+  #   max_concurrency: 500             # documented account ceiling, not a local target
+  #   max_tokens: 393216               # documented maximum output; omitting it is not maximum
+  #   context_window: 655360           # 1,048,576 context minus the 393,216 output reserve
+  #   reasoning: { effort: max }       # low | high | max; the upstream default is high
+  #   forced_tool_choice: unsupported  # thinking + tools rejects a forced tool choice
+  #   preserve_reasoning_content: true # required when thinking and tools are combined
+  # deepseek-flash:
+  #   protocol: openai-chat
+  #   base_url: "https://api.deepseek.com"
+  #   model: "deepseek-flash"
+  #   api_key_env: DEEPSEEK_API_KEY
+  #   max_concurrency: 2500
+  #   max_tokens: 393216
+  #   context_window: 655360
+  #   reasoning: { effort: max }
+  #   forced_tool_choice: unsupported
+  #   preserve_reasoning_content: true
 
 profiles:
   onboarding:

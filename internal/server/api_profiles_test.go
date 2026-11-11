@@ -19,11 +19,15 @@ import (
 type fakeProfileOverrides struct {
 	body     string
 	revision int64
+	getErr   error
 	putErr   error
 	refs     []store.ProfileModelReference
 }
 
 func (f *fakeProfileOverrides) GetProfileOverrides(context.Context, string) (*store.ProfileOverrides, error) {
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
 	return &store.ProfileOverrides{Profile: "default", OverridesJSON: f.body, Revision: f.revision}, nil
 }
 func (f *fakeProfileOverrides) PutProfileOverrides(_ context.Context, profile, body string, revision, _ int64) (*store.ProfileOverrides, error) {
