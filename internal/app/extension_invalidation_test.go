@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/LeXwDeX/tribunal/internal/agent"
 	"github.com/LeXwDeX/tribunal/internal/review"
 	"github.com/LeXwDeX/tribunal/internal/workspace"
 )
@@ -748,6 +750,82 @@ func TestRestoreDefaultsInvalidatesEveryProject(t *testing.T) {
 			t.Fatalf("project %d restored custom tools = %v", projectID, binding.MCPTools)
 		}
 	}
+}
+
+func TestProjectToolProviderKeepsLeaseForPartialBinding(t *testing.T) {
+	tests := []struct {
+		name          string
+		providerError error
+		holdsLease    bool
+	}{
+		{
+			name:          "partial binding",
+			providerError: &review.PartialToolsError{Tools: []agent.Tool{nil}, Gaps: []string{"mcp__server__missing"}},
+			holdsLease:    true,
+		},
+		{
+			name:          "hard error",
+			providerError: errors.New("mcp unavailable"),
+			holdsLease:    false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			st := openTestStore(t)
+			seedProject(t, st, newTestCipher(t), 42, "whsec", "{}", "default")
+			resolver, err := NewProjectExtensionResolver(ProjectExtensionResolverConfig{
+				Store:     st,
+				Workspace: t.TempDir(),
+			})
+			if err != nil {
+				t.Fatalf("resolver: %v", err)
+			}
+			t.Cleanup(func() { _ = resolver.Close() })
+			closer := &lifecycleCloser{entered: make(chan struct{})}
+			set := &projectExtensionSet{
+				tools:  &fixedToolProvider{err: test.providerError},
+				closer: closer,
+			}
+			resolver.buildSet = func(context.Context, int64) (*projectExtensionSet, error) {
+				return set, nil
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			projectCtx := context.WithValue(ctx, projectIDContextKey{}, int64(42))
+			provider := &projectAwareToolProvider{resolver: resolver}
+			if _, err := provider.Tools(projectCtx, "code-review"); err == nil {
+				t.Fatal("Tools did not return the provider error")
+			}
+
+			resolver.InvalidateProject(42)
+			if test.holdsLease {
+				select {
+				case <-closer.entered:
+					t.Fatal("a partial binding closed the set before its tool handles finished")
+				default:
+				}
+				cancel()
+			}
+			select {
+			case <-closer.entered:
+			case <-time.After(2 * time.Second):
+				t.Fatal("retired set was not closed")
+			}
+		})
+	}
+}
+
+type fixedToolProvider struct {
+	err error
+}
+
+func (p *fixedToolProvider) Tools(context.Context, string) ([]agent.Tool, error) {
+	return nil, p.err
+}
+
+func (p *fixedToolProvider) BoundToolNames(context.Context, string) ([]string, error) {
+	return nil, nil
 }
 
 func containedSkill(binding review.SkillBinding, name string) bool {

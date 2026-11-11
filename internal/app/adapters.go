@@ -301,7 +301,10 @@ func projectIDFromContext(ctx context.Context) (int64, bool) {
 
 // releaseSetOnContextDone holds the set lease until the caller's context ends.
 // Tool handles returned by a provider keep using the MCP manager after the
-// provider call returns, and the node context bounds that usage.
+// provider call returns, and the node context bounds that usage. A context
+// without a Done channel (Background/TODO) has no observable lifecycle: the
+// lease is then held until the set is retired and the resolver closes at
+// shutdown, so callers must pass the operation or node context.
 func releaseSetOnContextDone(ctx context.Context, set *projectExtensionSet) {
 	done := ctx.Done()
 	if done == nil {
@@ -1198,7 +1201,15 @@ func (p *projectAwareToolProvider) Tools(ctx context.Context, block string) ([]a
 		}
 		tools, err := set.tools.Tools(ctx, block)
 		if err != nil {
-			set.release()
+			// A partial binding still hands usable tools to the executor after
+			// this call, so the lease follows the same node-context rule as a
+			// successful binding. Every other error leaves no tools behind.
+			var partial *review.PartialToolsError
+			if errors.As(err, &partial) {
+				releaseSetOnContextDone(ctx, set)
+			} else {
+				set.release()
+			}
 			return nil, err
 		}
 		// The tool handles keep calling the MCP manager after Tools returns, so
