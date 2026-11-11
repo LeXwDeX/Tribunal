@@ -72,7 +72,7 @@ export function Toolbar({
         <div className={styles.filterBarMain}>{children}</div>
         {actions ? <div className={styles.filterBarActions}>{actions}</div> : null}
       </div>
-      {status ? <div className={styles.toolbarStatus} role="status">{status}</div> : null}
+      {status ? <div className={classNames(styles.toolbarStatus, inset && styles.toolbarStatusInset)} role="status">{status}</div> : null}
     </>
   )
 }
