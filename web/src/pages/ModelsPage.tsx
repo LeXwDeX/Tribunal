@@ -1172,7 +1172,7 @@ function ModelDrawer({
         <fieldset className={styles.modelFormGroup}>
           <legend className={styles.modelFormLegend}>采样</legend>
           <div className={styles.modelFormGrid}>
-            <Field label="temperature" htmlFor={ids.temperature} hint="0 到 2；留空表示不设置该字段。" error={errors.temperature}>
+            <Field label="temperature" htmlFor={ids.temperature} hint="0 到 2；留空不发送，使用上游默认。" error={errors.temperature}>
               <NumberField id={ids.temperature} min={0} max={2} step={0.1} value={form.temperature} aria-invalid={errors.temperature ? true : undefined} onChange={(event) => update({ temperature: event.target.value })} />
             </Field>
             <Field label="forced_tool_choice" htmlFor={ids.toolChoice} hint="声明上游是否接受强制 submit_result 工具选择。" error={errors.forcedToolChoice}>

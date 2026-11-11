@@ -611,7 +611,7 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
       open={open}
       onClose={onClose}
       title="编辑评审档位"
-      description="全局默认作用于 6 个节点；留空或清除覆盖即继承全局默认，未设置的继承模型。对之后启动的评审生效。"
+      description="全局默认作用于 6 个节点；节点留空或清除覆盖即继承全局默认，未设置的继承模型。对之后启动的评审生效。"
       footer={(
         <>
           <Button variant="secondary" onClick={() => setConfirmReset(true)} loading={pending} disabled={!hasOverrides}>恢复为配置</Button>

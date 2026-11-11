@@ -44,6 +44,7 @@ describe('one-time API token display', () => {
     })
     renderWithProviders(<SystemPage />)
     await user.click(await screen.findByRole('button', { name: '创建 token' }))
+    expect(screen.getByText('API token 供 tribunalctl 或脚本访问项目级 API。设置名称和有效期。')).toBeInTheDocument()
     await user.type(screen.getByLabelText('名称'), 'ci')
     const createButtons = screen.getAllByRole('button', { name: '创建', exact: true })
     await user.click(createButtons[createButtons.length - 1])

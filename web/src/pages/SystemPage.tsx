@@ -131,7 +131,7 @@ function TokenCreateDialog({ open, onClose }: { open: boolean; onClose: () => vo
       title={created ? '复制新 API token' : '创建 API token'}
       description={created
         ? '明文 token 只显示这一次。关闭对话框后将从界面状态中清除。'
-        : 'API token 供 tribunalctl 或脚本访问管理 API。设置名称和有效期。'}
+        : 'API token 供 tribunalctl 或脚本访问项目级 API。设置名称和有效期。'}
       footer={created ? (
         <Button variant="primary" onClick={close}>我已复制，关闭</Button>
       ) : (

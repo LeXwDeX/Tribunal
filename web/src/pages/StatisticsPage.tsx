@@ -582,7 +582,7 @@ function ProviderAttribution({ providers }: { providers: ProviderFeedbackCounts[
         </div>
       )}
       <TableNote>
-        计数是反馈归因，不代表判断正确率或误杀率。同一信号可能同时计入提出方和挑战方，两个角色的计数不能相加当作反馈总数。summary、未关联或关联不一致的不计入。
+        计数是反馈归因，不代表正确率或误杀率。同一信号可同时计入提出方和挑战方，两个角色计数不能相加当作反馈总数。summary、未关联或关联不一致的不计入。
       </TableNote>
     </>
   )
