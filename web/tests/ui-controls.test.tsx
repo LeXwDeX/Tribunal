@@ -683,6 +683,15 @@ describe('Tooltip', () => {
     await user.hover(trigger)
     expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
   })
+
+  it('sizes the tooltip independently of the applied left offset', () => {
+    const css = readFileSync(resolve(process.cwd(), 'src/styles/ui.module.css'), 'utf8')
+    const rule = css.match(/\.tooltip\s*\{[^}]*\}/)?.[0] ?? ''
+    // width:auto would shrink-to-fit against the space left of `left`, so the
+    // pre-position measurement would not match the final wrapped height.
+    expect(rule).toMatch(/width:\s*max-content/)
+    expect(rule).toMatch(/max-width:\s*min\(280px,\s*calc\(100vw - 16px\)\)/)
+  })
 })
 
 describe('computeTooltipPosition', () => {

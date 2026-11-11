@@ -878,6 +878,11 @@
 .tooltip {
   position: fixed;
   z-index: calc(var(--z-modal) + 2);
+  /* A fixed tooltip with left set and width auto shrink-to-fits against the
+     remaining viewport width, so the measured size would change after the
+     position is applied. max-content keeps the size independent of left, which
+     makes offsetWidth/offsetHeight from the first measurement final. */
+  width: max-content;
   max-width: min(280px, calc(100vw - 16px));
   padding: var(--space-xs) 10px;
   border-radius: var(--radius-sm);
