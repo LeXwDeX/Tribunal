@@ -601,7 +601,7 @@ export interface ModelParams {
   context_window?: number
   temperature?: number
   reasoning?: { effort?: string }
-  thinking?: { budget_tokens?: number }
+  thinking?: { budget_tokens?: number; type?: string }
   forced_tool_choice?: string
   strict_role_alternation?: boolean
   max_concurrency?: number
@@ -645,7 +645,7 @@ export interface ProfileNodeParams {
   max_tokens?: number
   temperature?: number | null
   reasoning?: { effort?: string } | null
-  thinking?: { budget_tokens?: number } | null
+  thinking?: { budget_tokens?: number; type?: string } | null
 }
 
 export interface ProfileNodeOverride {

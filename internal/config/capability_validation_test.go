@@ -62,6 +62,12 @@ func TestProviderCapabilityBounds(t *testing.T) {
 			c.Reasoning = &ReasoningConfig{Effort: "none"}
 			return c
 		}(), "allow_reasoning_effort_none"},
+		{"anthropic effort none is rejected even with capability", func() ProviderConfig {
+			c := base("anthropic")
+			c.AllowReasoningEffortNone = true
+			c.Reasoning = &ReasoningConfig{Effort: "none"}
+			return c
+		}(), "not supported by anthropic"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := ValidateProviderConfig("model", tc.cfg, ProviderValidationOptions{})

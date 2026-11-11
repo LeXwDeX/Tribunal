@@ -185,6 +185,12 @@ func ValidateProfileOverrides(body []byte, raw, normalized config.ProfileConfig,
 		if params.Reasoning != nil && params.Reasoning.Effort == "none" && modelKnown && !model.AllowReasoningEffortNone {
 			add(".reasoning.effort", "none requires a model with allow_reasoning_effort_none")
 		}
+		// thinking.type is the openai-chat thinking switch; other protocols
+		// derive thinking from an Anthropic budget or Responses effort and
+		// would silently ignore the override.
+		if params.Thinking != nil && params.Thinking.Type != "" && modelKnown && model.Protocol != "openai-chat" {
+			add(".thinking.type", "is only supported by openai-chat models")
+		}
 		if params.Thinking == nil || params.Thinking.BudgetTokens <= 0 {
 			continue
 		}

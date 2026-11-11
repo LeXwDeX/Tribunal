@@ -212,7 +212,7 @@ type ProfileConfig struct {
 |---|---|---|---|
 | `max_tokens` | 未填为 0 | 全部 | 不能为负；`openai-chat` / `openai-responses` 的 0 表示请求不发送 `max_tokens` / `max_output_tokens`，由上游取默认；`anthropic` 必须 > 0，0 返回字段级错误 |
 | `max_concurrency` | 未填为 0；`config/server.docker.yaml` 的 provider 显式设为 4 | 全部 | 不能为负；0 表示不创建本地并发信号量（不限本地并发），正数为信号量容量 |
-| `allow_reasoning_effort_none` | `false` | OpenAI 协议 | 为 true 时才接受 `reasoning.effort: none`；否则配置校验和节点覆盖校验拒绝（字段 `reasoning.effort`）。`none` 作为 `reasoning_effort` 发给 OpenAI 协议，`anthropic` 不支持；`anthropic` 设为 true 会启动告警 |
+| `allow_reasoning_effort_none` | `false` | OpenAI 协议 | 为 true 时才接受 `reasoning.effort: none`；否则配置校验和节点覆盖校验拒绝（字段 `reasoning.effort`）。`none` 作为 `reasoning_effort` 发给 OpenAI 协议；`anthropic` 不支持 `none`，即使设为 true 也会在配置校验阶段被拒绝（字段 `reasoning.effort`），不会等到请求时报错 |
 | `thinking.budget_tokens` | `0` | anthropic | 大于 0 时开启 thinking；OpenAI 协议不发送该字段，配置非 0 会启动告警 |
 | `thinking.type` | 空（省略） | openai-chat | `enabled` / `disabled`；其他协议不发送，配置非空会启动告警。`anthropic` 的 thinking 仍由 `budget_tokens > 0` 决定 |
 | `output_config_effort` | `false` | anthropic | 为 true 且 `reasoning.effort` 非空时发送 `output_config:{"effort":...}`，不再只依赖 `thinking.budget_tokens`；其他协议设为 true 会启动告警 |
@@ -225,7 +225,7 @@ type ProfileConfig struct {
 
 - 每个 provider 的 `protocol` 合法，`model` 非空且不全为空白，`api_key_env` 对应的环境变量存在且非空；`base_url` 可为空，非空时校验地址格式。
 - `max_tokens` 不能为负，`anthropic` 必须为正；`max_concurrency`、`rpm`、`context_window` 和 `thinking.budget_tokens` 不能为负。`temperature` 在 0–2。
-- `reasoning.effort` 只能为空或 `low` / `medium` / `high` / `max`；`none` 仅在 `allow_reasoning_effort_none: true` 时通过校验，未声明时阻止启动。`thinking.type` 只能为空、`enabled` 或 `disabled`；`responses_params` 只能为空、`auto`、`supported` 或 `unsupported`。不适用的协议组合只在启动日志告警，不阻止启动。
+- `reasoning.effort` 只能为空或 `low` / `medium` / `high` / `max`；`none` 仅在 `allow_reasoning_effort_none: true` 时通过校验，未声明时阻止启动；`anthropic` 协议声明 `none` 时无论能力开关如何都阻止启动。`thinking.type` 只能为空、`enabled` 或 `disabled`；`responses_params` 只能为空、`auto`、`supported` 或 `unsupported`。不适用的协议组合一般只在启动日志告警，不阻止启动（`anthropic` + `none` 除外）。
 - profile 中引用的 provider 都存在：`provider`、`explore.provider`、`lanes.*.provider`、`challenge.provider` 和 onboarding 的 `agent.provider`。留空表示沿用 `provider`，不做检查。
 - `budget.max_nodes` 在 1 到 100 之间，`budget.deadline` 为正。
 - `blocks` 中的 `mcp_tools` 名称格式为 `mcp__<server>__<tool>`，且 server 在 MCP 配置中存在（工具是否存在在启动后探测，不存在只告警）。
@@ -273,7 +273,7 @@ Tribunal 只有一个评审档位 `default`，评审图固定：`explore` → �
 
 - 可配置七项：`default`、`explore`、`lanes.code_review`、`lanes.review`、`lanes.reasoner`、`lanes.validate`、`challenge`；每项含 `model` 和 `params`。
 - `model` 是目录 ID（`config:<name>` 或 `user:<id>`）；不存在、已删除、不可用（出站被拒或记录损坏）或首尾带空白的 ID 返回 400，字段路径如 `overrides.default.model`。
-- `params` 只允许 `max_tokens`、`temperature`、`reasoning.effort`、`thinking.budget_tokens`、`thinking.type`，其他键返回 400。校验规则：`max_tokens` > 0（节点覆盖不采用模型 `max_tokens` 的 0 语义），`temperature` 在 0–2，`effort` 为 `low` / `medium` / `high` / `max`（`none` 仅当生效模型声明 `allow_reasoning_effort_none` 时接受，否则返回 400，字段 `reasoning.effort`），`budget_tokens` > 0（仅设置 `thinking.type` 时可为 0），`thinking.type` 为 `enabled` / `disabled`。只提交 `budget_tokens: 0` 而未设置 `thinking.type`、或空 `effort` 不会生效，返回 400，提示省略该字段以继承；节点的生效模型是 Anthropic 协议时 `budget_tokens` 须 ≥ 1024，且 `max_tokens`（覆盖值，未覆盖则取模型值）须大于 `budget_tokens`。
+- `params` 只允许 `max_tokens`、`temperature`、`reasoning.effort`、`thinking.budget_tokens`、`thinking.type`，其他键返回 400。校验规则：`max_tokens` > 0（节点覆盖不采用模型 `max_tokens` 的 0 语义），`temperature` 在 0–2，`effort` 为 `low` / `medium` / `high` / `max`（`none` 仅当生效模型声明 `allow_reasoning_effort_none` 时接受，否则返回 400，字段 `reasoning.effort`），`budget_tokens` > 0（仅设置 `thinking.type` 时可为 0），`thinking.type` 为 `enabled` / `disabled`，且生效模型必须是 `openai-chat`（其他协议返回 400，字段 `thinking.type`）。只提交 `budget_tokens: 0` 而未设置 `thinking.type`、或空 `effort` 不会生效，返回 400，提示省略该字段以继承；节点的生效模型是 Anthropic 协议时 `budget_tokens` 须 ≥ 1024，且 `max_tokens`（覆盖值，未覆盖则取模型值）须大于 `budget_tokens`。
 - 参数作为该节点的请求值注入，优先于模型自身默认；节点参数逐字段叠加在 `default` 参数之上。不创建独立 client，并发与限流仍按模型。
 
 **模型解析顺序**（每个节点）：节点覆盖 → `default` 覆盖 → 配置中该节点的 provider → 配置中档位的 provider → 派生回退。对应 `source` 取值 `override`、`override_default`、`config`、`config_default`、`derived`。

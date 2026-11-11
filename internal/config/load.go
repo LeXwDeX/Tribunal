@@ -177,9 +177,6 @@ func Load(paths ...string) (*Config, error) {
 		if provider.Protocol == "anthropic" && provider.Reasoning != nil && provider.Reasoning.Effort != "" && !provider.OutputConfigEffort {
 			cfg.Warnings = append(cfg.Warnings, field+".reasoning.effort is not sent by anthropic without output_config_effort")
 		}
-		if provider.Protocol == "anthropic" && provider.Reasoning != nil && provider.Reasoning.Effort == "none" {
-			cfg.Warnings = append(cfg.Warnings, field+".reasoning.effort none is not supported by anthropic")
-		}
 		if provider.Protocol != "anthropic" && provider.OutputConfigEffort {
 			cfg.Warnings = append(cfg.Warnings, field+".output_config_effort is only sent by anthropic")
 		}

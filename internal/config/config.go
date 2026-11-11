@@ -546,6 +546,11 @@ func ValidateProviderConfig(field string, provider ProviderConfig, opts Provider
 			p.add("%s.reasoning.effort must be low, medium, high or max", field)
 		}
 	}
+	// The Anthropic API has no "none" effort, so a provider that could start
+	// would fail every request. Reject it instead of warning.
+	if provider.Protocol == "anthropic" && provider.Reasoning != nil && provider.Reasoning.Effort == "none" {
+		p.add("%s.reasoning.effort none is not supported by anthropic", field)
+	}
 	if !isProviderProtocol(provider.Protocol) {
 		p.add("%s.protocol %q is not supported", field, provider.Protocol)
 	}
