@@ -159,7 +159,7 @@ func TestModelPresetApplyMergesOnlyPresetFields(t *testing.T) {
 	}
 	// Match values in their JSON context; bare numbers can hit the audit
 	// timestamp (for example "10:51:50.244409699" contains "4096").
-	for _, value := range []string{`"max_tokens":393216`, `"budget_tokens":1024`, `"temperature":0.6`} {
+	for _, value := range []string{`"max_tokens":393216`, `"max_tokens":1024`, `"temperature":0.6`} {
 		if strings.Contains(log, value) {
 			t.Errorf("audit log leaked parameter value %s: %s", value, log)
 		}
