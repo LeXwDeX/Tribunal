@@ -256,3 +256,127 @@
   overflow-wrap: anywhere;
   word-break: break-word;
 }
+
+/* Creation, import and connection-test surfaces. */
+.panelActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.dialogActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+.checkboxField {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+}
+
+.testFailure {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.testPanel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  min-width: 0;
+  padding: var(--space-md);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+
+.testSummary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+  color: var(--muted-strong);
+  font-size: var(--fs-label);
+}
+
+.testEmpty {
+  color: var(--muted-strong);
+  font-size: var(--fs-label);
+}
+
+.toolTable {
+  min-width: 520px;
+}
+
+.toolBadges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2xs);
+}
+
+.matrixLocked {
+  display: block;
+  margin-top: var(--space-2xs);
+  color: var(--warn-fg);
+  font-size: var(--fs-micro);
+  font-weight: var(--fw-medium);
+}
+
+.importSummary {
+  margin: 0;
+  color: var(--muted-strong);
+  font-size: var(--fs-label);
+  overflow-wrap: anywhere;
+}
+
+.importList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.importItem {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  min-width: 0;
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.importItemMain {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+  min-width: 0;
+}
+
+.fileRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-md);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+
+.fileName {
+  font-family: var(--font-mono);
+  font-weight: var(--fw-semibold);
+  overflow-wrap: anywhere;
+}

@@ -106,9 +106,13 @@ web/
 
 ### 3.6 扩展
 
-- **MCP 服务器**：列表（作用域、名称、命令、状态、工具数）；已有自定义服务器的编辑、删除、启停；「测试」按钮列出工具。新增、导入和保存前草稿测试的后端 API 已恢复（仅平台管理员，项目 scope 需项目已登记）；控制台的新增/导入表单与草稿测试界面另行交付，当前页面仍只管理已有服务器。
-- **Skill**：列表（作用域、名称、描述、来源目录）；已有自定义 Skill 的启停和删除。zip 上传和目录登记的后端 API 已恢复（仅平台管理员，默认推荐 zip，目录登记为高级选项）；控制台的上传/登记界面另行交付，当前页面仍只管理已有 Skill；内置项始终启用。
-- **块绑定**：矩阵视图，行是块（explore / code-review / review / reasoner / validate / verify / synthesize / onboarding），列是可用的 MCP 工具和 Skill，勾选即绑定。项目 scope 的读取需要该项目 grant 或 `global_read`，平台管理员隐式可读；任何写入都仍要求平台管理员，项目 scope 不再要求逐项目 `manage` grant。
+- **MCP 服务器**：列表（作用域、名称、命令、状态、工具数）；已有自定义服务器的编辑、删除、启停；「测试」按钮列出工具。平台管理员还会看到「新增 MCP 服务器」和「粘贴 Claude Code 配置导入」：
+    - 新增对话框支持 stdio（command、args、env）和 http（url、headers），可设置创建后启用，也可从单个服务器的 JSON 粘贴填入表单；保存前可先执行草稿测试，测试不写库。
+    - 导入对话框粘贴 Claude Code `mcpServers` 文档，显示解析出的服务器数量和名称，可逐项或全部执行草稿测试；任一项后端校验失败时整批不写入，错误只显示字段路径与固定类别，不回显配置值。
+    - 测试结果面板显示连接状态、延迟、工具总数与截断状态，以及每个工具的名称、描述、只读/破坏性/可绑定注解；失败按 `invalid_config`、`connect_timeout`、`connect_failed`、`handshake_failed`、`list_tools_timeout`、`list_tools_failed`、`too_many_tools`、`cleanup_failed`、`test_busy` 等固定类别显示并提供重试。
+    - 测试发现的工具以 `mcp__<server>__<tool>` 出现在块绑定矩阵；`bindable=false` 的列标注「不可绑定」，新增授权被禁用，已绑定的工具仍可取消。停用服务器的测试结果只展示，不进入矩阵。会话内测试结果不持久化，切换 scope 后清空。
+- **Skill**：列表（作用域、名称、描述、来源目录）；已有自定义 Skill 的启停和删除。平台管理员可「上传 Skill zip」或「登记服务器目录」：上传入口使用 UI-KIT 按钮触发隐藏文件输入，不支持浏览器原生文件按钮外观；zip 必须包含 `SKILL.md`，服务端限制归档大小、解压总量和条目数。目录登记要求服务端绝对路径，并在对话框中明确提示会读取服务端文件系统路径、把内容复制到受管目录，源目录不会被修改或删除；这是高级选项，默认推荐 zip。成功后列表刷新并显示名称、描述和来源目录；同名或非法 manifest 的 400/409 错误保持对话框可重试。内置 Skill 始终启用，不提供替换或删除入口。
+- **块绑定**：矩阵视图，行是块（explore / code-review / review / reasoner / validate / verify / synthesize / onboarding），列是可用的 MCP 工具和 Skill，勾选即绑定。项目 scope 的读取需要该项目 grant 或 `global_read`，平台管理员隐式可读；任何写入都仍要求平台管理员，项目 scope 不再要求逐项目 `manage` grant。矩阵中的工具来自已保存绑定、当前会话的服务器测试结果和 API 返回的 `server.tools`；测试结果显示的 `bindable=false` 工具阻止新增授权，已绑定的工具仍可取消；停用服务器的测试结果不进入矩阵。
 
 后端立即生效：MCP、Skill 和块绑定的保存成功后，下一次评审在本进程内使用新配置；平台 scope 影响全部项目，项目 scope 只影响当前项目；恢复默认响应中的 `restart_required` 为 `false`，恢复默认的预览文案只在为 true 时显示重启提示。仅本进程内即时生效，多实例部署的其他进程不会收到失效通知。控制台 Skill 启停的旧提示「重启服务后生效」随 [#401](https://github.com/LeXwDeX/Tribunal/issues/401) 移除；本 Issue 不改 web / `web/dist`。配置文件中的扩展声明仍需重启，控制台不提供文件编辑。
 
