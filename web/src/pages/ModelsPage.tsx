@@ -815,7 +815,7 @@ function ModelDefaultsPanel({
           ) : null}
           <Note tone="neutral">
             只对 user: 模型生效；config: 模型由配置文件负责。模型显式值优先于默认值；
-            整数字段的 0、false 或留空表示未设置，继续使用内置/协议默认；temperature 是显式值，填 0 会覆盖默认。
+            整数字段的 0、布尔字段的 false 或留空表示未设置，继续使用内置/协议默认；temperature 是显式值，填 0 会覆盖默认。
             保存时用候选值合并现有 user: 模型并按各自协议交叉校验，不可用组合会被拒绝且不写库。
             保存后对之后启动的评审生效。
           </Note>
