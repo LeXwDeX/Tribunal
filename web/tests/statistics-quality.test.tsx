@@ -112,7 +112,7 @@ describe('statistics provider quality', () => {
     expect(within(openai).getByText('1 / 2')).toBeInTheDocument()
 
     expect(panel.getByText(/未标注、未确定不计入/)).toBeInTheDocument()
-    expect(panel.getByText(/样本为零时显示“无样本”/)).toBeInTheDocument()
+    expect(panel.getByText(/零分母显示“无样本”/)).toBeInTheDocument()
     expect(panel.getByText(/不改变发布结果或评审结论/)).toBeInTheDocument()
   })
 

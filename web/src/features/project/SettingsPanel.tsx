@@ -314,7 +314,7 @@ export function SettingsPanel({ project }: { project: Project }) {
           aside={projectsAside(project)}
         >
           <div className="formGrid">
-            <Field label="评审语言" htmlFor="setting-language" hint="留空时继承平台默认。">
+            <Field label="评审语言" htmlFor="setting-language" hint="留空继承平台默认。">
               <Select
                 id="setting-language"
                 value={typeof draft.language === 'string' ? draft.language : ''}
@@ -345,10 +345,10 @@ export function SettingsPanel({ project }: { project: Project }) {
             <Field label="排除标签" htmlFor="setting-labels-exclude" hint="带这些标签的 MR 跳过评审。">
               <input id="setting-labels-exclude" className="input" value={splitComma(draft.labels_exclude)} onChange={(event) => updateDraft('labels_exclude', parseComma(event.target.value))} />
             </Field>
-            <Field label="max files" htmlFor="setting-max-files" hint="留空使用平台默认。">
+            <Field label="max files" htmlFor="setting-max-files" hint="留空继承平台默认。">
               <NumberField id="setting-max-files" min={1} value={typeof draft.max_files === 'number' ? draft.max_files : ''} onChange={(event) => updateDraft('max_files', event.target.value ? Number(event.target.value) : undefined)} />
             </Field>
-            <Field label="max diff lines" htmlFor="setting-max-lines" hint="留空使用平台默认。">
+            <Field label="max diff lines" htmlFor="setting-max-lines" hint="留空继承平台默认。">
               <NumberField id="setting-max-lines" min={1} value={typeof draft.max_diff_lines === 'number' ? draft.max_diff_lines : ''} onChange={(event) => updateDraft('max_diff_lines', event.target.value ? Number(event.target.value) : undefined)} />
             </Field>
           </div>

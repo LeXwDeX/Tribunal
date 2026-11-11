@@ -125,7 +125,7 @@ describe('statistics daily trends', () => {
 
     expect(within(table).queryByText('2026-10-02')).not.toBeInTheDocument()
     expect(panel.getByText(/只返回有执行的日期，不补零/)).toBeInTheDocument()
-    expect(panel.getByText(/用时为空表示没有有效的开始与结束时间配对/)).toBeInTheDocument()
+    expect(panel.getByText(/用时为空表示没有有效的起止时间配对/)).toBeInTheDocument()
 
     expect(screen.getByText(/样本 2 · P95 2s/)).toBeInTheDocument()
   })

@@ -320,7 +320,7 @@ function QualityPanel({ value }: { value: unknown }) {
     <Panel
       title="人工质量指标"
       aside="来自 stats.quality_by_provider"
-      note="准确率 = 有效标注 / 已复核（有效 + 无效）；推翻率 = 提出方被推翻 / 提出问题；误杀率 = 反驳后标注有效 / 复核反驳。未标注、未确定不计入准确率与误杀率分母，但仍计入提出数、反驳数和推翻率。缺少 provider 归因的角色不计入。样本为零时显示“无样本”，不显示 0.0%。人工标注不改变发布结果或评审结论，也不同于下方 GitLab 原始反馈信号。"
+      note="准确率 = 人工标注有效 / 已复核（有效+无效）；推翻率 = 提出方被挑战推翻 / 提出问题；误杀率 = 反驳后人工判有效 / 复核反驳。未标注、未确定不计入准确率与误杀率分母，但仍计入提出数、反驳数和推翻率。缺少 provider 归因不计入。零分母显示“无样本”，不显示 0.0%。人工标注不改变发布结果或评审结论，也不同于下方 GitLab 反馈信号。"
     >
       {state.rows.length === 0 ? (
         <EmptyState title="没有人工质量样本" description="筛选范围内没有可归因的提出或反驳记录；这是空结果，不是不可用。" />
@@ -663,7 +663,7 @@ function DailyTrendTable({ rows, label, countLabel }: { rows: DailyStats[]; labe
 }
 
 function DimensionTrend({ trend, label, countLabel }: { trend: Trend; label: string; countLabel: string }) {
-  if (trend.kind === 'missing') return <p className="small muted">该行没有每日趋势数据；旧版服务端可能不返回。</p>
+  if (trend.kind === 'missing') return <p className="small muted">该行没有每日趋势数据；旧版服务端可能不支持。</p>
   if (trend.kind === 'invalid') return <p className="small muted">该行每日趋势格式无效，未显示任何行。</p>
   if (trend.kind === 'empty') return <p className="small muted">该范围内没有每日执行数据。</p>
   return <DailyTrendTable rows={trend.rows} label={label} countLabel={countLabel} />
@@ -769,7 +769,7 @@ function ProjectStatsPanel({ value }: { value: unknown }) {
     <Panel
       title="项目统计"
       aside="来自 stats.by_project"
-      note="运行次数统计窗口内全部工作流（含评审与 onboarding）；BLOCKING 与已发布也按项目工作流统计。日期按创建时间归入 UTC 日；筛选范围按浏览器本地日选择。"
+      note="运行次数统计窗口内全部工作流（含评审与 onboarding）；BLOCKING 与已发布也按项目统计。日期按工作流创建时间归入 UTC 日；筛选按浏览器本地日。"
     >
       <div className="tableWrap">
         <table className={`dataTable ${insights.min920}`} aria-label="按项目统计明细">
@@ -958,7 +958,7 @@ function StatsContent({ stats }: { stats: Stats }) {
       <Panel
         title="每日运行趋势"
         aside="来自 stats.trend · UTC 日"
-        note="趋势按工作流创建时间归入 UTC 日，只返回有执行的日期，不补零。用时为空表示没有有效的开始与结束时间配对；样本数是参与计算的配对数量。"
+        note="趋势按工作流创建时间归入 UTC 日，只返回有执行的日期，不补零。用时为空表示没有有效的起止时间配对；样本数是参与计算的配对数。"
       >
         <OverallTrend trend={trend} />
       </Panel>

@@ -6,7 +6,7 @@
 >
 > 以下字段/页面存在降级，界面用占位符显示：
 > - 工作区 `index_status` 按已存储 SHA 显示 `ready` / `stale` / `unknown`；这是检查点状态，不是实时索引健康证明，历史 SHA 的限制见 [HTTP API](03-http-api.md)。
-> - 统计页、总览和项目详情将 `stats.runs` 统一标为「运行次数」，注明包含评审和 onboarding。`blocking_ratio` 的分母仍是全部 workflow，onboarding 会稀释该比例；不能解释为仅评审的阻断比例。
+> - 统计页、总览和项目详情将 `stats.runs` 统一标为「运行次数」，注明含评审与 onboarding。`blocking_ratio` 的分母仍是全部 workflow，onboarding 会稀释该比例；不能解释为仅评审的阻断比例。
 >
 > 项目设置写接口（`PATCH /projects/{id}`、`PUT .../token`、`POST .../webhook`）已实现，平台配置视图仍为只读。
 
@@ -83,7 +83,9 @@ web/
 | 发布 | `publication_state`、脱敏的 `publication_error`、汇总评论链接、行内讨论数量、commit status；failed 可重试，pending 等待发布完成（启动恢复或手动重试），skipped 显示原因且不重发 | 详情中的 `publication_state`、`publication_error`、`publications` |
 | 节点抽屉 | 参数、输出 JSON、错误、每轮 LLM 调用（用量、耗时、stop reason，可展开请求和响应） | `GET /reviews/{id}/nodes/{node}`、`.../calls` |
 
-人工标注显示已保存结论、操作者和时间。项目 `manage` 选择有效、无效、未确定或未标注后点击「保存标注」，`read` 只读；保存中禁用操作，失败保留旧结论并提供重试。成功后刷新当前评审的 finding 缓存和统计缓存，保留筛选。旧响应没有标注字段时显示未标注。标注不改变发布结果或评审结论，不提供历史记录或并发冲突提示。
+`publications.commit_status` 仅含 `success`/`failed`；旧发布键没有状态时为 unknown，界面显示不可用。
+
+人工标注显示已保存结论、操作者和时间。项目 `manage` 选择有效、无效、未确定或未标注后点击「保存标注」，`read` 只读；保存中禁用操作，失败保留旧结论并提供重试。成功后刷新当前评审的 finding 缓存和统计缓存，保留筛选。旧响应没有标注字段时显示未标注。被丢弃条目也可标注。标注不改变发布结果或评审结论，不提供历史记录或并发冲突提示。
 
 ### 3.4 项目列表与注册
 

@@ -118,7 +118,7 @@ export function ConfigSourcesPanel({ enabled }: { enabled: boolean }) {
           {status.data.restart_required ? '待重启' : '已应用'}
         </Badge>
       ) : undefined}
-      note="文件生效值按“内置默认 < --config < overlay”合并，不含数据库覆盖。运行中的服务使用启动时快照；显示“待重启”时，界面是重载后的文件值，重启后生效。"
+      note="文件生效值按“内置默认 < --config < overlay”合并，不含数据库覆盖。运行中的服务使用启动时快照；显示“待重启”时，界面显示的是重载后的文件值，重启后生效。"
     >
       <PanelBody>
         {status.isPending ? <LoadingState label="正在读取配置状态…" /> : null}

@@ -154,7 +154,7 @@ export function WebhookPanel({ project }: { project: Project }) {
       title="GitLab Webhook"
       aside={<Badge tone={webhookTone(view.state)}>{labelForWebhookState(view.state)}</Badge>}
       note={canWrite
-        ? '启用会在 GitLab 创建或复用本服务记录的 hook；同 URL 的手动 hook 不会被接管或删除。保存设置、校验或更新访问 Key 都不修改 Webhook。'
+        ? '启用会在 GitLab 创建或复用本服务记录的 hook；同 URL 的手动 hook 不受影响。保存、校验或更新访问 Key 都不改 Webhook。'
         : undefined}
     >
       <div className={ui.stack}>

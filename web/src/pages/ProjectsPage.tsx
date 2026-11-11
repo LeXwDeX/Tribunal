@@ -293,7 +293,7 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
           <Disclosure summary="高级设置：分支与 Draft">
             <div className={ui.stackTop}>
               <div className="formGrid">
-                <Field label="目标分支" htmlFor={branchesId} hint="逗号分隔；留空沿用平台默认分支设置。">
+                <Field label="目标分支" htmlFor={branchesId} hint="逗号分隔；留空继承平台默认。">
                   <input id={branchesId} className="input" value={branches} onChange={(event) => setBranches(event.target.value)} placeholder="main, release/*" autoComplete="off" disabled={pending} />
                 </Field>
               </div>

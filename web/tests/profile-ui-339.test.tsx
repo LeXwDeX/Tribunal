@@ -235,7 +235,7 @@ describe('profile node sources, params and same-model hint (#339)', () => {
     expect(within(global).getByText(hint('0.2', '模型'))).toBeInTheDocument()
     expect(within(global).getByText(hint('high', '模型'))).toBeInTheDocument()
     expect(within(global).getAllByText(thinkingObject('1024', 'disabled', '模型'))).toHaveLength(2)
-    expect(screen.getByText('全局默认逐字段作用于 6 个节点；节点输入下方显示继承值与来源，保存只提交实际覆盖项。')).toBeInTheDocument()
+    expect(screen.getByText('节点输入下方显示继承值与来源；保存只提交实际覆盖项。')).toBeInTheDocument()
 
     const review = screen.getByRole('group', { name: 'review' })
     expect(within(review).getByText(hint('1000', '全局默认'))).toBeInTheDocument()

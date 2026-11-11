@@ -1613,8 +1613,8 @@ function BindingsTab({
       {hasConflicts ? (
         <div className={styles.warning}>
           <div role="alert" tabIndex={0}>
-            检测到 {conflictBlocks.length} 个块同时存在本地修改和远端变化。保存和恢复默认已停用。
-            选择对应操作只放弃该块的本地更改，其他块草稿不受影响。
+            检测到 {conflictBlocks.length} 个块本地修改与远端变化并存。保存和恢复默认已停用。
+            各操作只放弃对应块的本地更改，其他块草稿不受影响。
           </div>
           <div className={ext.conflictActions}>
             {conflictBlocks.map((block) => (

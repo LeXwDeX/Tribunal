@@ -323,10 +323,10 @@ function PublicationsPanel({ review, mrUrl }: { review: ReviewDetail; mrUrl?: st
   const publications = review.publications
   const commitNote = publications?.commit_status === 'failed'
     ? review.publication_state === 'published' && review.verdict === 'BLOCKING'
-      ? 'commit status failed 表示评审结论为 BLOCKING（阻断合并），发布本身已成功。'
+      ? 'commit status 为 failed：评审结论为 BLOCKING（阻断合并），发布本身已成功。'
       : review.publication_state === 'failed'
         ? '发布失败，不能视为 PASS。'
-        : 'commit status 为 failed，请结合发布状态判断，不能直接视为 PASS。'
+        : 'commit status 为 failed：请结合发布状态判断，不能直接视为 PASS。'
     : ''
   return (
     <Panel title="发布结果" flush>

@@ -718,7 +718,7 @@ function ModelDefaultsPanel({
               <Field label="max_concurrency" htmlFor={ids.concurrency} hint="模型未设置时使用；留空或 0 不限制本地并发。" error={errors.maxConcurrency}>
                 <NumberField id={ids.concurrency} min={0} step={1} value={form.maxConcurrency} aria-invalid={errors.maxConcurrency ? true : undefined} onChange={(event) => update({ maxConcurrency: event.target.value })} />
               </Field>
-              <Field label="rpm" htmlFor={ids.rpm} hint="每分钟请求数；留空或 0 表示不限制。" error={errors.rpm}>
+              <Field label="rpm" htmlFor={ids.rpm} hint="每分钟请求数；留空或 0 不限制。" error={errors.rpm}>
                 <NumberField id={ids.rpm} min={0} step={1} value={form.rpm} aria-invalid={errors.rpm ? true : undefined} onChange={(event) => update({ rpm: event.target.value })} />
               </Field>
             </div>
@@ -814,9 +814,9 @@ function ModelDefaultsPanel({
             </span>
           ) : null}
           <Note tone="neutral">
-            只对 user: 模型生效；config: 模型由配置文件负责。模型显式设置优先于这里的默认值；
-            整数字段的 0、布尔 false 或留空表示未设置，继续使用内置/协议默认；temperature 是显式值，填 0 会覆盖默认。
-            保存时用候选值合并现有 user: 模型并按各自协议交叉校验，会让模型不可用的组合被拒绝且不写库。
+            只对 user: 模型生效；config: 模型由配置文件负责。模型显式值优先于默认值；
+            整数字段的 0、false 或留空表示未设置，继续使用内置/协议默认；temperature 是显式值，填 0 会覆盖默认。
+            保存时用候选值合并现有 user: 模型并按各自协议交叉校验，不可用组合会被拒绝且不写库。
             保存后对之后启动的评审生效。
           </Note>
         </form>
@@ -1172,7 +1172,7 @@ function ModelDrawer({
         <fieldset className={styles.modelFormGroup}>
           <legend className={styles.modelFormLegend}>采样</legend>
           <div className={styles.modelFormGrid}>
-            <Field label="temperature" htmlFor={ids.temperature} hint="0 到 2；留空使用上游默认。" error={errors.temperature}>
+            <Field label="temperature" htmlFor={ids.temperature} hint="0 到 2；留空表示不设置该字段。" error={errors.temperature}>
               <NumberField id={ids.temperature} min={0} max={2} step={0.1} value={form.temperature} aria-invalid={errors.temperature ? true : undefined} onChange={(event) => update({ temperature: event.target.value })} />
             </Field>
             <Field label="forced_tool_choice" htmlFor={ids.toolChoice} hint="声明上游是否接受强制 submit_result 工具选择。" error={errors.forcedToolChoice}>
@@ -1232,7 +1232,7 @@ function ModelDrawer({
             <Field label="max_tokens" htmlFor={ids.tokens} hint="不发送时由模型默认（DeepSeek 8K/64K/128K，不是最大值）。anthropic 需模型自身或全局默认给出大于 0 的值。" error={errors.maxTokens}>
               <NumberField id={ids.tokens} min={0} step={1} value={form.maxTokens} aria-invalid={errors.maxTokens ? true : undefined} onChange={(event) => update({ maxTokens: event.target.value })} />
             </Field>
-            <Field label="max_concurrency" htmlFor={ids.concurrency} hint="留空或 0 表示不限制本地并发。" error={errors.maxConcurrency}>
+            <Field label="max_concurrency" htmlFor={ids.concurrency} hint="留空或 0 不限制本地并发。" error={errors.maxConcurrency}>
               <NumberField id={ids.concurrency} min={0} step={1} value={form.maxConcurrency} aria-invalid={errors.maxConcurrency ? true : undefined} onChange={(event) => update({ maxConcurrency: event.target.value })} />
             </Field>
             <Field label="context_window" htmlFor={ids.context} hint="上游可接收的输入窗口；0 表示未知。" error={errors.contextWindow}>
@@ -1249,9 +1249,7 @@ function ModelDrawer({
 
         {configModel ? (
           <Note tone="neutral">
-            该模型来自平台配置文件，控制台不写数据库。YAML 字段路径：<code>providers.{configName(model?.id ?? '')}</code> 下的
-            protocol、base_url、model、max_tokens、context_window、temperature、reasoning、thinking、max_concurrency、rpm、
-            forced_tool_choice、strict_role_alternation；修改后重启生效。
+            该模型来自平台配置文件，控制台不写数据库。YAML 路径：<code>providers.{configName(model?.id ?? '')}</code>；字段即上方表单项，修改后重启生效。
           </Note>
         ) : null}
         {error ? <span className={styles.resultError}>{error}</span> : null}
@@ -1754,7 +1752,7 @@ function ConfigModelDrawer({
               <Field label="context_window" htmlFor={ids.context} hint={hintFor('context_window', '上游可接收的输入窗口；0 表示未知。')} error={errors.contextWindow}>
                 <NumberField id={ids.context} min={0} step={1} value={form.contextWindow} aria-invalid={errors.contextWindow ? true : undefined} onChange={(event) => update({ contextWindow: event.target.value })} />
               </Field>
-              <Field label="max_concurrency" htmlFor={ids.concurrency} hint={hintFor('max_concurrency', '0 或留空都表示不限制本地并发；填写 0 会显式写入 overlay。')} error={errors.maxConcurrency}>
+              <Field label="max_concurrency" htmlFor={ids.concurrency} hint={hintFor('max_concurrency', '0 或留空表示不限制本地并发；填写 0 会显式写入 overlay。')} error={errors.maxConcurrency}>
                 <NumberField id={ids.concurrency} min={0} step={1} value={form.maxConcurrency} aria-invalid={errors.maxConcurrency ? true : undefined} onChange={(event) => update({ maxConcurrency: event.target.value })} />
               </Field>
               <Field label="rpm" htmlFor={ids.rpm} hint={hintFor('rpm', '每分钟请求数；0 或留空表示不限制，填写 0 会显式写入 overlay。')} error={errors.rpm}>

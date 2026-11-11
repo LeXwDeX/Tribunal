@@ -256,7 +256,7 @@ export function WorkspacePanel({ projectId, canManage = false }: { projectId: nu
 
   return (
     <div className={ui.pageStack}>
-      <Panel flush note="收到并接受符合项目目标分支配置的推送 Webhook 后排入刷新队列。自动刷新会尝试重建索引，并按新鲜度规则决定是否生成上下文；手动刷新只刷新工作区，不重建索引，也不按新鲜度生成上下文。">
+      <Panel flush note="接受符合目标分支配置的推送 Webhook 后排队刷新。自动刷新会尝试重建索引，并按新鲜度规则决定是否生成上下文；手动刷新只刷新工作区，不重建索引，也不按新鲜度生成上下文。">
         {workspace.isPending ? <div className={ui.panelBody}><LoadingState label="正在读取工作区…" /></div> : null}
         {workspace.isError ? <div className={ui.panelBody}><ErrorState error={workspace.error} onRetry={() => { void workspace.refetch() }} title="工作区状态加载失败" /></div> : null}
         {ws ? (

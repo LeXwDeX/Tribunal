@@ -42,7 +42,7 @@ describe('workspace v2 layout', () => {
     expect(screen.getByRole('button', { name: '刷新工作区' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '重建索引' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '重新生成上下文' })).not.toBeInTheDocument()
-    expect(screen.getByText(/符合项目目标分支配置的推送/)).toBeInTheDocument()
+    expect(screen.getByText(/符合目标分支配置的推送/)).toBeInTheDocument()
     expect(screen.getByText(/自动刷新会尝试重建索引/)).toBeInTheDocument()
     expect(screen.getByText(/手动刷新只刷新工作区，不重建索引，也不按新鲜度生成上下文/)).toBeInTheDocument()
     const manual = screen.getByRole('button', { name: '手动操作' })
