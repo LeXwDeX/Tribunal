@@ -63,9 +63,12 @@ type ContextService interface {
 
 // MCPTester starts one MCP server and lists its tools. The server entry passed
 // in carries the unmasked config; the server layer masks only responses.
+// ValidateMCPDraft applies the draft's request validation without connecting so
+// the handler can reject bad input before taking a test slot.
 type MCPTester interface {
 	TestMCPServer(ctx context.Context, server MCPServer) (MCPTestResult, error)
 	TestMCPDraft(ctx context.Context, in MCPDraftInput) (MCPTestResult, error)
+	ValidateMCPDraft(ctx context.Context, in MCPDraftInput) error
 }
 
 // ProviderTestResult is the outcome of a provider connectivity probe.

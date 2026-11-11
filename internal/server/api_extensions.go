@@ -523,7 +523,7 @@ func (s *Server) handleTestMCPServer(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeExtensionResource(w, r, server.Scope, server.ProjectID, true) {
 		return
 	}
-	s.runMCPTest(w, r, "test", server.ID, server.Scope, server.ProjectID, func(ctx context.Context) (MCPTestResult, error) {
+	s.runMCPTest(w, r, "test", server.ID, server.Scope, server.ProjectID, nil, func(ctx context.Context) (MCPTestResult, error) {
 		return s.mcp.TestMCPServer(ctx, *server)
 	})
 }
@@ -575,9 +575,11 @@ func (s *Server) handleTestMCPDraft(w http.ResponseWriter, r *http.Request) {
 			Name:      request.Name,
 			Config:    request.Config,
 		}
-		s.runMCPTest(w, r, "test_draft", current.ID, current.Scope, current.ProjectID, func(ctx context.Context) (MCPTestResult, error) {
-			return s.mcp.TestMCPDraft(ctx, in)
-		})
+		s.runMCPTest(w, r, "test_draft", current.ID, current.Scope, current.ProjectID,
+			func(ctx context.Context) error { return s.mcp.ValidateMCPDraft(ctx, in) },
+			func(ctx context.Context) (MCPTestResult, error) {
+				return s.mcp.TestMCPDraft(ctx, in)
+			})
 		return
 	}
 	scope, err := validateExtensionScope(strings.TrimSpace(request.Scope), request.ProjectID, true)
@@ -594,15 +596,26 @@ func (s *Server) handleTestMCPDraft(w http.ResponseWriter, r *http.Request) {
 		Name:      request.Name,
 		Config:    request.Config,
 	}
-	s.runMCPTest(w, r, "test_draft", "draft", scope.scope, scope.projectID, func(ctx context.Context) (MCPTestResult, error) {
-		return s.mcp.TestMCPDraft(ctx, in)
-	})
+	s.runMCPTest(w, r, "test_draft", "draft", scope.scope, scope.projectID,
+		func(ctx context.Context) error { return s.mcp.ValidateMCPDraft(ctx, in) },
+		func(ctx context.Context) (MCPTestResult, error) {
+			return s.mcp.TestMCPDraft(ctx, in)
+		})
 }
 
-// runMCPTest applies the concurrency limit and handler timeout, then writes
-// the fixed test response or a sanitized error category.
+// runMCPTest validates the request first, then applies the concurrency limit
+// and handler timeout, and finally writes the fixed test response or a
+// sanitized error category. Validating before acquiring a slot makes invalid
+// input answer 400 even when every test slot is busy.
 func (s *Server) runMCPTest(w http.ResponseWriter, r *http.Request, action, targetID, scope string,
-	projectID *int64, test func(context.Context) (MCPTestResult, error)) {
+	projectID *int64, validate func(context.Context) error, test func(context.Context) (MCPTestResult, error)) {
+	if validate != nil {
+		if err := validate(r.Context()); err != nil {
+			s.auditMCPTestFailure(r, action, targetID, scope, projectID, err)
+			s.writeMCPTestError(w, r, err)
+			return
+		}
+	}
 	release, ok := acquireMCPTestSlot(r.Context())
 	if !ok {
 		writeError(w, r, http.StatusTooManyRequests, "test_busy", "too many concurrent MCP tests", nil)
@@ -613,11 +626,7 @@ func (s *Server) runMCPTest(w http.ResponseWriter, r *http.Request, action, targ
 	defer cancel()
 	result, err := test(ctx)
 	if err != nil {
-		class, code := mcpTestAudit(err)
-		s.logger.Warn("mcp server test failed", "event", "platform_audit", "actor_id", currentUserID(r),
-			"target_id", targetID, "action", action, "scope", scope,
-			"project_id", auditProjectID(projectID), "ok", false,
-			"error_class", class, "error_code", code)
+		s.auditMCPTestFailure(r, action, targetID, scope, projectID, err)
 		s.writeMCPTestError(w, r, err)
 		return
 	}
@@ -636,6 +645,15 @@ func (s *Server) runMCPTest(w http.ResponseWriter, r *http.Request, action, targ
 		"truncated":  result.Truncated,
 		"tools":      tools,
 	})
+}
+
+// auditMCPTestFailure records one failed test without config or upstream text.
+func (s *Server) auditMCPTestFailure(r *http.Request, action, targetID, scope string, projectID *int64, err error) {
+	class, code := mcpTestAudit(err)
+	s.logger.Warn("mcp server test failed", "event", "platform_audit", "actor_id", currentUserID(r),
+		"target_id", targetID, "action", action, "scope", scope,
+		"project_id", auditProjectID(projectID), "ok", false,
+		"error_class", class, "error_code", code)
 }
 
 func acquireMCPTestSlot(ctx context.Context) (func(), bool) {

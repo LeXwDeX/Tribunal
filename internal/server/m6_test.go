@@ -584,6 +584,10 @@ func (f *fakeMCP) TestMCPDraft(ctx context.Context, in MCPDraftInput) (MCPTestRe
 	return f.testResult(), nil
 }
 
+// ValidateMCPDraft is a no-op for the fake; validation-order tests use the
+// real extension service.
+func (f *fakeMCP) ValidateMCPDraft(context.Context, MCPDraftInput) error { return nil }
+
 func (f *fakeMCP) testResult() MCPTestResult {
 	result := f.result
 	if result.Tools == nil && f.tools != nil {

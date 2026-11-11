@@ -44,6 +44,8 @@ func (d *deadlineMCP) TestMCPDraft(ctx context.Context, _ MCPDraftInput) (MCPTes
 	return MCPTestResult{}, nil
 }
 
+func (d *deadlineMCP) ValidateMCPDraft(context.Context, MCPDraftInput) error { return nil }
+
 // TestMCPTestHandlerUsesWriteTimeoutBudget checks the wired handler picks the
 // derived budget instead of a fixed 30 seconds.
 func TestMCPTestHandlerUsesWriteTimeoutBudget(t *testing.T) {

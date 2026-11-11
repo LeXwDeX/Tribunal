@@ -316,6 +316,20 @@ func (a *AppExtensions) TestMCPDraft(ctx context.Context, in MCPDraftInput) (MCP
 	return mcpTestResultFromApp(result), nil
 }
 
+// ValidateMCPDraft applies the draft request validation without connecting.
+func (a *AppExtensions) ValidateMCPDraft(ctx context.Context, in MCPDraftInput) error {
+	if err := a.ready(); err != nil {
+		return err
+	}
+	return a.service.ValidateMCPDraft(ctx, app.MCPDraftInput{
+		ID:        in.ID,
+		Scope:     in.Scope,
+		ProjectID: in.ProjectID,
+		Name:      in.Name,
+		Config:    in.Config,
+	})
+}
+
 func mcpTestResultFromApp(result app.MCPTestResult) MCPTestResult {
 	out := MCPTestResult{
 		LatencyMS: result.LatencyMS,
