@@ -193,19 +193,19 @@ DeepSeek thinking + tools 要求后续请求完整回传 `reasoning_content`，�
 
 配置模板 `config/server.example.yaml` 与 `config/server.docker.yaml` 以注释形式给出同一组 DeepSeek provider 值；这些值**只适用于 DeepSeek，不要照抄到其他供应方**，也不是通用 `primary` 默认值。`internal/config/testdata/deepseek-preset.yaml` 用 `Load+Validate` 证明文档值可解析，测试还会检查两个模板包含这些片段。使用 Docker 时，取消注释后还需把 `DEEPSEEK_API_KEY` 加入 Compose 的显式环境变量列表。
 
-**存量用户模型升级**：预设不会在启动时自动套用，也不会按模型名前缀匹配。平台管理员先 `GET /api/v1/model-presets` 查看预设，再对目标 `user:` 模型调用 `POST /api/v1/models/{id}/preset`。目标模型必须与预设 `protocol` 相同且 `base_url` host 为 `api.deepseek.com`（路径可带 `/v1`），否则返回 400 `validation_failed`（字段 `preset`）：
+**存量用户模型升级**：预设不会在启动时自动套用，也不会按模型名前缀匹配。平台管理员先 `GET /api/v1/model-presets` 查看预设，再对目标 `user:` 模型调用 `POST /api/v1/models/{id}/preset`。目标模型必须与预设 `protocol` 相同且 `base_url` 的 scheme/host/port 与预设一致（`https://api.deepseek.com`，路径可带 `/v1`），否则返回 400 `validation_failed`（字段 `preset`）：
 
 ```json
 {"preset": "deepseek-flash-max", "dry_run": true}
 ```
 
-预览返回将变化的字段（`changes`）与仍会覆盖预设参数的档位节点（`conflicts`）。确认后带当前 `revision` 和 `"dry_run": false` 执行：
+预览返回将变化的字段（`changes`）与覆盖值仍不同于预设的档位节点（`conflicts`）。确认后带当前 `revision` 和 `"dry_run": false` 执行：
 
 ```json
 {"preset": "deepseek-flash-max", "revision": 5, "dry_run": false}
 ```
 
-预设只合并 `max_tokens`、`context_window`、`reasoning`、`max_concurrency`、`rpm`、`forced_tool_choice`、`strict_role_alternation`、`preserve_reasoning_content`，并清除旧的显式 `thinking` 开关；不改变端点、模型名、`temperature`、`price` 或已存密钥，也不覆盖未涉及的字段。若档位节点仍覆盖 `max_tokens`/`reasoning`/`thinking`，未传 `"confirm_overrides": true` 时返回 409 `override_conflict`；确认后应用但不会删除（迁移 `0028` 的）档位覆盖，受覆盖的节点仍按覆盖值运行，需要时在「模型与档位」页手工清除。修改模型会改变引用它的档位哈希：重启后未终态评审会以 `profile_hash_changed` 取消，升级前先让在途评审结束。审计只记录预设 ID 与字段名，不记录参数值或密钥。
+预设只合并 `max_tokens`、`context_window`、`reasoning`、`max_concurrency`、`rpm`、`forced_tool_choice`、`strict_role_alternation`、`preserve_reasoning_content`，并清除旧的显式 `thinking` 开关；不改变端点、模型名、`temperature`、`price` 或已存密钥，也不覆盖未涉及的字段。若档位节点覆盖了与预设不同的 `max_tokens`/`reasoning`/`thinking`，未传 `"confirm_overrides": true` 时返回 409 `override_conflict`；确认后应用但不会删除（迁移 `0028` 的）档位覆盖，受覆盖的节点仍按覆盖值运行，需要时在「模型与档位」页手工清除。覆盖值已等于预设值的节点不算冲突，不会要求确认。若所有字段都已是预设值，执行请求返回 `applied: false`：不写库、不增加 `revision`、不要求确认，响应仍返回 `conflicts`；这与“有实际变更且存在不同值覆盖时返回 409”是两条路径。修改模型会改变引用它的档位哈希：重启后未终态评审会以 `profile_hash_changed` 取消，升级前先让在途评审结束。审计只记录预设 ID 与字段名，不记录参数值或密钥。
 
 **已知限制**：
 

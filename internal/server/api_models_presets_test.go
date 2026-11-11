@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/config"
 	"github.com/LeXwDeX/tribunal/internal/llm"
@@ -226,6 +227,13 @@ func TestModelPresetRejectsInvalidTargets(t *testing.T) {
 	}{
 		{"configured model", "config:primary", `{"preset":"deepseek-flash-max"}`, http.StatusForbidden, "", nil},
 		{"unknown model", "user:missing", `{"preset":"deepseek-flash-max"}`, http.StatusNotFound, "", nil},
+		{"unknown id", "deepseek", `{"preset":"deepseek-flash-max"}`, http.StatusNotFound, "", nil},
+		{"deleted model", "user:deepseek", `{"preset":"deepseek-flash-max"}`, http.StatusNotFound, "", func() *store.Model {
+			model := presetTestModel()
+			deleted := time.Now()
+			model.DeletedAt = &deleted
+			return model
+		}},
 		{"unknown preset", "user:deepseek", `{"preset":"missing"}`, http.StatusBadRequest, "preset", nil},
 		{"apply without revision", "user:deepseek", `{"preset":"deepseek-flash-max","dry_run":false}`, http.StatusBadRequest, "revision", nil},
 		{"wrong protocol", "user:deepseek", `{"preset":"deepseek-flash-max"}`, http.StatusBadRequest, "preset", func() *store.Model {
@@ -308,5 +316,74 @@ func TestModelPresetApplyAlreadyAtPresetDoesNotWrite(t *testing.T) {
 	}
 	if fake.paramsCalls != 0 {
 		t.Fatalf("no-op apply wrote to the store: %d", fake.paramsCalls)
+	}
+}
+
+func TestModelPresetAcceptsDeepSeekPathVariant(t *testing.T) {
+	stored := presetTestModel()
+	stored.BaseURL = "https://api.deepseek.com/v1"
+	fake := &fakeModelStore{stored: stored}
+	server, _ := newParamsTestServer(t, fake)
+	response := applyModelPreset(server, "user:deepseek", `{"preset":"deepseek-flash-max"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestModelPresetEqualOverrideValueIsNotAConflict(t *testing.T) {
+	fake := &fakeModelStore{stored: presetTestModel()}
+	overrides := &fakeProfileOverrides{
+		body: `{"lanes":{"review":{"model":"user:deepseek","params":{"max_tokens":393216,"reasoning":{"effort":"max"}}}}}`,
+	}
+	server, _ := newParamsTestServer(t, fake)
+	server.platform = &config.Config{Profiles: map[string]config.ProfileConfig{"default": {Provider: "config-model"}}}
+	server.profileOverrides = overrides
+
+	preview := applyModelPreset(server, "user:deepseek", `{"preset":"deepseek-flash-max"}`)
+	if preview.Code != http.StatusOK {
+		t.Fatalf("preview status = %d: %s", preview.Code, preview.Body.String())
+	}
+	var body modelPresetResponse
+	if err := json.Unmarshal(preview.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Conflicts) != 0 {
+		t.Fatalf("equal overrides reported as conflicts: %+v", body.Conflicts)
+	}
+	applied := applyModelPreset(server, "user:deepseek", `{"preset":"deepseek-flash-max","revision":5,"dry_run":false}`)
+	if applied.Code != http.StatusOK {
+		t.Fatalf("apply status = %d, want 200: %s", applied.Code, applied.Body.String())
+	}
+	if fake.paramsCalls != 1 {
+		t.Fatalf("apply calls = %d, want 1", fake.paramsCalls)
+	}
+}
+
+func TestModelPresetThinkingOnlyConflictRequiresConfirmation(t *testing.T) {
+	fake := &fakeModelStore{stored: presetTestModel()}
+	overrides := &fakeProfileOverrides{
+		body: `{"lanes":{"review":{"model":"user:deepseek","params":{"thinking":{"type":"disabled"}}}}}`,
+	}
+	server, _ := newParamsTestServer(t, fake)
+	server.platform = &config.Config{Profiles: map[string]config.ProfileConfig{"default": {Provider: "config-model"}}}
+	server.profileOverrides = overrides
+
+	preview := applyModelPreset(server, "user:deepseek", `{"preset":"deepseek-flash-max"}`)
+	if preview.Code != http.StatusOK {
+		t.Fatalf("preview status = %d: %s", preview.Code, preview.Body.String())
+	}
+	var body modelPresetResponse
+	if err := json.Unmarshal(preview.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Conflicts) != 1 || strings.Join(body.Conflicts[0].Fields, ",") != "thinking" {
+		t.Fatalf("conflicts = %+v, want thinking only", body.Conflicts)
+	}
+	blocked := applyModelPreset(server, "user:deepseek", `{"preset":"deepseek-flash-max","revision":5,"dry_run":false}`)
+	if blocked.Code != http.StatusConflict {
+		t.Fatalf("apply status = %d, want 409: %s", blocked.Code, blocked.Body.String())
+	}
+	if fake.paramsCalls != 0 {
+		t.Fatalf("conflicting apply wrote to the store: %d", fake.paramsCalls)
 	}
 }

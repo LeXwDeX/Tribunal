@@ -3,7 +3,6 @@ package server
 import (
 	"errors"
 	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/LeXwDeX/tribunal/internal/app"
@@ -54,8 +53,8 @@ func (s *Server) handleApplyModelPreset(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	id := r.PathValue("id")
-	if !strings.HasPrefix(id, "user:") {
-		writeError(w, r, http.StatusForbidden, "read_only", "only saved user models accept a preset", nil)
+	if strings.HasPrefix(id, "config:") {
+		writeError(w, r, http.StatusForbidden, "read_only", "configured models are read-only", nil)
 		return
 	}
 	var request modelPresetRequest
@@ -89,7 +88,7 @@ func (s *Server) handleApplyModelPreset(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	patch, changes := preset.PatchFor(stored.Params)
-	conflicts, err := s.presetConflicts(r, id)
+	conflicts, err := s.presetConflicts(r, id, preset)
 	if err != nil {
 		writeError(w, r, http.StatusServiceUnavailable, "unavailable", "profile overrides are unavailable", nil)
 		return
@@ -131,28 +130,18 @@ func (s *Server) handleApplyModelPreset(w http.ResponseWriter, r *http.Request) 
 }
 
 // presetMatchesModel reports whether the target model uses the preset's
-// protocol and endpoint host. A path difference such as /v1 is allowed;
-// another protocol, host or an unparseable URL is not.
+// protocol and endpoint. Path differences such as /v1 are allowed; another
+// protocol, scheme, host or port is not.
 func presetMatchesModel(preset llm.ModelPreset, model store.Model) bool {
-	if model.Protocol != preset.Protocol {
-		return false
-	}
-	modelURL, err := url.Parse(model.BaseURL)
-	if err != nil {
-		return false
-	}
-	presetURL, err := url.Parse(preset.BaseURL)
-	if err != nil {
-		return false
-	}
-	return strings.EqualFold(modelURL.Hostname(), presetURL.Hostname())
+	return model.Protocol == preset.Protocol && sameEndpoint(preset.BaseURL, model.BaseURL)
 }
 
 // presetConflicts collects the stored default profile node overrides that
 // currently shadow a preset parameter on nodes bound to the model. It reads
-// the same merged view the review uses; an unreadable override document is an
-// error instead of an empty result.
-func (s *Server) presetConflicts(r *http.Request, modelID string) ([]modelPresetConflict, error) {
+// the same merged view the review uses; a corrupt override document is
+// treated as empty by app.ResolveProfile, and only a store read failure is
+// reported as an error.
+func (s *Server) presetConflicts(r *http.Request, modelID string, preset llm.ModelPreset) ([]modelPresetConflict, error) {
 	conflicts := []modelPresetConflict{}
 	if s.profileOverrides == nil || s.platform == nil {
 		return conflicts, nil
@@ -168,6 +157,10 @@ func (s *Server) presetConflicts(r *http.Request, modelID string) ([]modelPreset
 	if overrides == nil || strings.TrimSpace(overrides.OverridesJSON) == "" {
 		return conflicts, nil
 	}
+	presetEffort := ""
+	if preset.Params.Reasoning != nil {
+		presetEffort = preset.Params.Reasoning.Effort
+	}
 	raw, _ := s.platform.RawProfile("default")
 	resolved := app.ResolveProfile(raw, normalized, overrides.OverridesJSON)
 	for _, node := range resolved.Nodes {
@@ -178,15 +171,19 @@ func (s *Server) presetConflicts(r *http.Request, modelID string) ([]modelPreset
 		for _, field := range llm.PresetNodeOverrideFields() {
 			switch field {
 			case "max_tokens":
-				if node.Params.MaxTokens != nil {
+				// A node value equal to the preset changes nothing.
+				if node.Params.MaxTokens != nil && *node.Params.MaxTokens != preset.Params.MaxTokens {
 					fields = append(fields, field)
 				}
 			case "reasoning":
-				if node.Params.Reasoning != nil && node.Params.Reasoning.Effort != "" {
+				if node.Params.Reasoning != nil && node.Params.Reasoning.Effort != "" &&
+					node.Params.Reasoning.Effort != presetEffort {
 					fields = append(fields, field)
 				}
 			case "thinking":
-				if node.Params.Thinking != nil && (node.Params.Thinking.BudgetTokens != 0 || node.Params.Thinking.Type != "") {
+				if node.Params.Thinking != nil && (node.Params.Thinking.BudgetTokens != 0 || node.Params.Thinking.Type != "") &&
+					(preset.Params.Thinking == nil || node.Params.Thinking.BudgetTokens != preset.Params.Thinking.BudgetTokens ||
+						node.Params.Thinking.Type != preset.Params.Thinking.Type) {
 					fields = append(fields, field)
 				}
 			}
