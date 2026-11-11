@@ -17,12 +17,14 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/config"
 	"github.com/LeXwDeX/tribunal/internal/llm"
 	"github.com/LeXwDeX/tribunal/internal/mcp"
 	"github.com/LeXwDeX/tribunal/internal/review"
+	"github.com/LeXwDeX/tribunal/internal/skill"
 	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
 	"github.com/LeXwDeX/tribunal/internal/workspace"
@@ -40,11 +42,19 @@ const (
 	maxSkillExtractedBytes = 16 << 20
 	maxSkillFileBytes      = 4 << 20
 	maxSkillArchiveEntries = 512
+	// maxSkillArchivePath bounds one archive entry name. It matches the
+	// loader's resource path limit and keeps a long name from failing later
+	// as a local filesystem write error.
+	maxSkillArchivePath = 512
 )
 
 var (
 	extensionSensitiveKeyRE = regexp.MustCompile(`(?i)(authorization|token|secret|password|api[-_]?key|cookie|credential)`)
-	skillDirNameRE          = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+	// errSkillStorage classifies local filesystem failures while staging an
+	// upload or directory registration. Those errors may carry absolute paths,
+	// so callers answer with a generic internal error instead of validation
+	// text.
+	errSkillStorage = errors.New("app: skill storage failed")
 )
 
 // MCPServer is the app view of one stored MCP server.
@@ -130,14 +140,12 @@ type Skill struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// SkillUpload carries a validated archive. Uploads are extracted below the
-// managed skills root, and the resulting directory is persisted with the row.
+// SkillUpload carries one archive. The manifest name and description are
+// parsed from the extracted SKILL.md; callers cannot supply them.
 type SkillUpload struct {
-	Scope       string
-	ProjectID   *int64
-	Name        string
-	Description string
-	Data        []byte
+	Scope     string
+	ProjectID *int64
+	Data      []byte
 }
 
 // SkillDirInput registers an existing server-side directory.
@@ -553,13 +561,14 @@ func (s *ExtensionService) UploadSkill(ctx context.Context, in SkillUpload) (*Sk
 	}
 	extracted, name, description, err := extractSkillArchive(in.Data, scopeRoot)
 	if err != nil {
-		return nil, validationError(err.Error(), Detail{Field: "file", Message: err.Error()})
+		return nil, s.skillStageError(err, "upload", scope, "file")
 	}
 	return s.persistSkillDir(ctx, scope, projectID, name, description, "", scopeRoot, extracted)
 }
 
 // RegisterSkillDir copies the registered directory into the managed skills
 // root so the loader can scan it and later deletes cannot remove the source.
+// The copied tree, not the source, supplies the manifest that is persisted.
 func (s *ExtensionService) RegisterSkillDir(ctx context.Context, in SkillDirInput) (*Skill, error) {
 	scope, projectID, err := extensionScope(in.Scope, in.ProjectID)
 	if err != nil {
@@ -568,10 +577,6 @@ func (s *ExtensionService) RegisterSkillDir(ctx context.Context, in SkillDirInpu
 	dir := strings.TrimSpace(in.Dir)
 	if dir == "" || !filepath.IsAbs(dir) {
 		return nil, validationError("dir must be an absolute server path", Detail{Field: "dir", Message: "dir must be an absolute server path"})
-	}
-	name, description, err := readSkillManifest(dir)
-	if err != nil {
-		return nil, validationError(err.Error(), Detail{Field: "dir", Message: err.Error()})
 	}
 	unlock, err := s.lockScope(ctx, scope, projectID)
 	if err != nil {
@@ -582,20 +587,33 @@ func (s *ExtensionService) RegisterSkillDir(ctx context.Context, in SkillDirInpu
 	if err != nil {
 		return nil, err
 	}
-	extracted, err := copySkillDir(dir, scopeRoot)
+	staged, name, description, err := copySkillDir(dir, scopeRoot)
 	if err != nil {
-		return nil, validationError(err.Error(), Detail{Field: "dir", Message: err.Error()})
+		return nil, s.skillStageError(err, "register_dir", scope, "dir")
 	}
-	return s.persistSkillDir(ctx, scope, projectID, name, description, "", scopeRoot, extracted)
+	return s.persistSkillDir(ctx, scope, projectID, name, description, "", scopeRoot, staged)
+}
+
+// skillStageError keeps validation reasons visible and turns local storage
+// failures into a generic internal error, because wrapped filesystem errors
+// may contain absolute paths. The log line carries only the operation and
+// scope.
+func (s *ExtensionService) skillStageError(err error, op, scope, field string) error {
+	if errors.Is(err, errSkillStorage) {
+		s.logger.Warn("skill storage failed", "op", op, "scope", scope)
+		return internalError()
+	}
+	return validationError(err.Error(), Detail{Field: field, Message: err.Error()})
 }
 
 // persistSkillDir renames the staged directory to <scope>/<id>/skill, stores
 // the row, and records the final path. builtin is the bundled skill name, or
 // empty for administrator skills.
 func (s *ExtensionService) persistSkillDir(ctx context.Context, scope string, projectID *int64, name, description, builtin, scopeRoot, staged string) (*Skill, error) {
-	if !skillDirNameRE.MatchString(name) {
+	if !skill.ValidName(name) {
 		_ = os.RemoveAll(staged)
-		return nil, validationError("invalid skill name", Detail{Field: "name", Message: "must match " + skillDirNameRE.String()})
+		return nil, validationError("invalid skill name",
+			Detail{Field: "name", Message: "must be a lowercase name of at most 64 characters without \"__\""})
 	}
 	row, err := s.store.CreateSkill(ctx, store.Skill{
 		Scope:       scope,
@@ -772,7 +790,7 @@ func extractSkillArchive(data []byte, parent string) (string, string, string, er
 	}
 	staged, err := os.MkdirTemp(parent, ".upload-*")
 	if err != nil {
-		return "", "", "", fmt.Errorf("app: create skill directory: %w", err)
+		return "", "", "", fmt.Errorf("%w: create staging directory", errSkillStorage)
 	}
 	ok := false
 	defer func() {
@@ -783,7 +801,7 @@ func extractSkillArchive(data []byte, parent string) (string, string, string, er
 
 	root, err := os.OpenRoot(staged)
 	if err != nil {
-		return "", "", "", fmt.Errorf("app: open skill directory: %w", err)
+		return "", "", "", fmt.Errorf("%w: open staging directory", errSkillStorage)
 	}
 	defer root.Close()
 
@@ -805,13 +823,19 @@ func extractSkillArchive(data []byte, parent string) (string, string, string, er
 		}
 		if file.FileInfo().IsDir() {
 			if err := root.MkdirAll(rel, 0o700); err != nil {
-				return "", "", "", fmt.Errorf("app: create skill directory: %w", err)
+				if isArchivePathConflict(err) {
+					return "", "", "", fmt.Errorf("archive path %q conflicts with a file", rel)
+				}
+				return "", "", "", fmt.Errorf("%w: create directory", errSkillStorage)
 			}
 			continue
 		}
 		if parent := path.Dir(rel); parent != "." {
 			if err := root.MkdirAll(parent, 0o700); err != nil {
-				return "", "", "", fmt.Errorf("app: create skill directory: %w", err)
+				if isArchivePathConflict(err) {
+					return "", "", "", fmt.Errorf("archive path %q conflicts with a file", rel)
+				}
+				return "", "", "", fmt.Errorf("%w: create directory", errSkillStorage)
 			}
 		}
 		size := int64(file.UncompressedSize64)
@@ -841,18 +865,19 @@ func extractSkillArchive(data []byte, parent string) (string, string, string, er
 }
 
 // copySkillDir stages a copy of an existing server-side skill directory so
-// the loader can scan it from the managed root.
-func copySkillDir(source, parent string) (string, error) {
+// the loader can scan it from the managed root. It returns the staged
+// directory and the manifest parsed from the copy.
+func copySkillDir(source, parent string) (string, string, string, error) {
 	info, err := os.Lstat(source)
 	if err != nil {
-		return "", errors.New("dir must be an existing directory")
+		return "", "", "", errors.New("dir must be an existing directory")
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return "", errors.New("dir must be a real directory")
+		return "", "", "", errors.New("dir must be a real directory")
 	}
 	staged, err := os.MkdirTemp(parent, ".register-*")
 	if err != nil {
-		return "", fmt.Errorf("app: create skill directory: %w", err)
+		return "", "", "", fmt.Errorf("%w: create staging directory", errSkillStorage)
 	}
 	ok := false
 	defer func() {
@@ -879,7 +904,10 @@ func copySkillDir(source, parent string) (string, error) {
 			return errors.New("dir must not contain symlinks")
 		}
 		if entry.IsDir() {
-			return os.MkdirAll(target, 0o700)
+			if err := os.MkdirAll(target, 0o700); err != nil {
+				return fmt.Errorf("%w: create directory", errSkillStorage)
+			}
+			return nil
 		}
 		if !entry.Type().IsRegular() {
 			return errors.New("dir must contain only regular files")
@@ -899,43 +927,88 @@ func copySkillDir(source, parent string) (string, error) {
 		if err != nil {
 			return errors.New("dir could not be read")
 		}
-		defer file.Close()
 		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
-			return fmt.Errorf("app: create skill directory: %w", err)
+			_ = file.Close()
+			return fmt.Errorf("%w: create directory", errSkillStorage)
 		}
 		out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err != nil {
-			return fmt.Errorf("app: create skill file: %w", err)
+			_ = file.Close()
+			return fmt.Errorf("%w: create file", errSkillStorage)
 		}
-		_, copyErr := io.Copy(out, io.LimitReader(file, maxSkillFileBytes+1))
-		closeErr := out.Close()
+		source := &trackedReader{reader: file}
+		written, copyErr := io.Copy(out, io.LimitReader(source, maxSkillFileBytes+1))
+		closeOutErr := out.Close()
+		closeInErr := file.Close()
 		if copyErr != nil {
+			if source.readErr != nil {
+				return errors.New("dir could not be read")
+			}
+			return fmt.Errorf("%w: write file", errSkillStorage)
+		}
+		if closeInErr != nil {
 			return errors.New("dir could not be read")
 		}
-		if closeErr != nil {
-			return fmt.Errorf("app: create skill file: %w", closeErr)
+		if written != info.Size() {
+			return fmt.Errorf("file %q changed while copying", rel)
+		}
+		if closeOutErr != nil {
+			return fmt.Errorf("%w: close file", errSkillStorage)
 		}
 		return nil
 	})
 	if err != nil {
-		return "", err
+		return "", "", "", err
 	}
-	if _, _, err := readSkillManifest(staged); err != nil {
-		return "", err
+	name, description, err := readSkillManifest(staged)
+	if err != nil {
+		return "", "", "", err
 	}
 	ok = true
-	return staged, nil
+	return staged, name, description, nil
+}
+
+// trackedReader records an error returned by the archive stream so a failed
+// copy can distinguish a corrupt entry from a local write failure.
+type trackedReader struct {
+	reader  io.Reader
+	readErr error
+}
+
+func (t *trackedReader) Read(p []byte) (int, error) {
+	n, err := t.reader.Read(p)
+	if err != nil && !errors.Is(err, io.EOF) {
+		t.readErr = err
+	}
+	return n, err
+}
+
+// isArchivePathConflict reports whether an archive entry could not be created
+// because the archive maps a file and a directory to the same path. That is
+// invalid input, not a local storage failure.
+func isArchivePathConflict(err error) bool {
+	return errors.Is(err, fs.ErrExist) || errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.EISDIR)
 }
 
 func writeArchiveFile(root *os.Root, rel string, stream io.Reader, size int64) error {
 	out, err := root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		return fmt.Errorf("app: create skill file: %w", err)
+		if isArchivePathConflict(err) {
+			return fmt.Errorf("archive path %q conflicts with a directory", rel)
+		}
+		return fmt.Errorf("%w: create file", errSkillStorage)
 	}
-	written, copyErr := io.Copy(out, io.LimitReader(stream, size+1))
+	source := &trackedReader{reader: stream}
+	written, copyErr := io.Copy(out, io.LimitReader(source, size+1))
 	closeErr := out.Close()
-	if copyErr != nil || closeErr != nil {
-		return fmt.Errorf("archive entry %q could not be written", rel)
+	if copyErr != nil {
+		if source.readErr != nil {
+			return fmt.Errorf("archive entry %q could not be read", rel)
+		}
+		return fmt.Errorf("%w: write archive entry", errSkillStorage)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("%w: write archive entry", errSkillStorage)
 	}
 	if written != size {
 		return fmt.Errorf("archive entry %q size does not match its header", rel)
@@ -943,10 +1016,11 @@ func writeArchiveFile(root *os.Root, rel string, stream io.Reader, size int64) e
 	return nil
 }
 
-// cleanArchivePath rejects absolute paths, backslashes, drive letters and any
-// parent traversal component.
+// cleanArchivePath rejects absolute paths, backslashes, drive letters, NUL
+// bytes, overlong names and any parent traversal component.
 func cleanArchivePath(name string) (string, error) {
-	if name == "" || strings.HasPrefix(name, "/") || strings.Contains(name, "\\") ||
+	if name == "" || len(name) > maxSkillArchivePath || strings.ContainsRune(name, 0) ||
+		strings.HasPrefix(name, "/") || strings.Contains(name, "\\") ||
 		strings.Contains(name, ":") {
 		return "", errors.New("archive contains an unsafe path")
 	}
@@ -1475,49 +1549,39 @@ func containsString(values []string, want string) bool {
 	return false
 }
 
-// readSkillManifest reads the small frontmatter subset SKILL.md uses. The
-// directory itself is validated by the HTTP layer; this repeats the file
-// checks so the service is safe when called directly.
+// readSkillManifest applies the runtime loader's strict parser to SKILL.md so
+// upload and directory registration accept exactly what the loader will load.
+// Errors carry the parser's reason but never the directory or file content.
 func readSkillManifest(dir string) (string, string, error) {
-	file, err := os.Open(filepath.Join(dir, "SKILL.md"))
+	path := filepath.Join(dir, "SKILL.md")
+	info, err := os.Lstat(path)
 	if err != nil {
 		return "", "", errors.New("dir must contain SKILL.md")
 	}
-	defer file.Close()
-	raw, err := io.ReadAll(io.LimitReader(file, 64<<10))
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return "", "", errors.New("SKILL.md must be a regular file, not a symlink")
+	}
+	file, err := os.Open(path)
 	if err != nil {
 		return "", "", errors.New("SKILL.md could not be read")
 	}
-	text := strings.ReplaceAll(strings.TrimPrefix(string(raw), "\ufeff"), "\r\n", "\n")
-	lines := strings.Split(text, "\n")
-	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
-		return "", "", errors.New("SKILL.md must start with a frontmatter block")
+	defer file.Close()
+	raw, err := io.ReadAll(io.LimitReader(file, skill.MaxManifestBytes+1))
+	if err != nil {
+		return "", "", errors.New("SKILL.md could not be read")
 	}
-	name, description := "", ""
-	closed := false
-	for _, line := range lines[1:] {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "---" {
-			closed = true
-			break
-		}
-		key, value, ok := strings.Cut(trimmed, ":")
-		if !ok {
-			continue
-		}
-		value = strings.Trim(strings.TrimSpace(value), `"'`)
-		switch strings.TrimSpace(key) {
-		case "name":
-			name = value
-		case "description":
-			description = value
-		}
+	if len(raw) > skill.MaxManifestBytes {
+		return "", "", errors.New("SKILL.md is too large")
 	}
-	if !closed {
-		return "", "", errors.New("SKILL.md frontmatter is not closed")
+	manifest, err := skill.ParseManifest(raw)
+	if err != nil {
+		return "", "", manifestValidationError(err)
 	}
-	if name == "" || description == "" {
-		return "", "", errors.New("SKILL.md must define name and description")
-	}
-	return name, description, nil
+	return manifest.Name, manifest.Description, nil
+}
+
+// manifestValidationError drops the internal package prefix while keeping the
+// stable validation reason.
+func manifestValidationError(err error) error {
+	return errors.New(strings.TrimPrefix(err.Error(), skill.ErrInvalidSkill.Error()+": "))
 }

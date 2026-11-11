@@ -2,17 +2,25 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"mime"
 	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/app"
 	"github.com/LeXwDeX/tribunal/internal/mcp"
+	"github.com/LeXwDeX/tribunal/internal/skill"
 	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
@@ -21,6 +29,15 @@ const (
 	mcpTestTimeout = 30 * time.Second
 	// mcpTestConcurrency bounds simultaneous test connections.
 	mcpTestConcurrency = 4
+	// skillUploadMax bounds the archive bytes read from one multipart upload.
+	// It must match app.maxSkillArchiveBytes; the service re-checks the limit.
+	skillUploadMax = 8 << 20
+	// skillUploadBodyMax leaves room for multipart framing around an archive
+	// at the skillUploadMax limit.
+	skillUploadBodyMax = skillUploadMax + (1 << 20)
+	// skillUploadFormMemory keeps small uploads in memory and spills larger
+	// parts to temporary files until the request ends.
+	skillUploadFormMemory = 1 << 20
 )
 
 // mcpTestSlots is the process-wide connection-test semaphore. Tests that fill
@@ -101,6 +118,21 @@ type MCPServerUpdate struct {
 	Name    *string
 	Config  json.RawMessage
 	Enabled *bool
+}
+
+// SkillUpload is one bounded zip archive. The manifest name and description
+// are parsed by the service from the extracted SKILL.md.
+type SkillUpload struct {
+	Scope     string
+	ProjectID *int64
+	Data      []byte
+}
+
+// SkillDirInput registers one existing server-side directory.
+type SkillDirInput struct {
+	Scope     string
+	ProjectID *int64
+	Dir       string
 }
 
 // Skill is one registered skill. Dir is the managed server-side directory
@@ -747,9 +779,185 @@ func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"skills": skills, "next_cursor": next})
 }
 
-// handleUploadSkillOrRegisterDirectory closes both custom skill creation paths.
+// handleUploadSkillOrRegisterDirectory dispatches the two documented shapes
+// of POST /api/v1/skills: a multipart zip archive upload and a JSON
+// registration of an existing server-side directory. Zip is the default;
+// directory registration is an advanced administrator-only option.
 func (s *Server) handleUploadSkillOrRegisterDirectory(w http.ResponseWriter, r *http.Request) {
-	writeError(w, r, http.StatusForbidden, "custom_skill_creation_disabled", "custom skill creation is disabled", nil)
+	mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if mediaType == "multipart/form-data" {
+		s.handleUploadSkill(w, r)
+		return
+	}
+	s.handleRegisterSkillDirectory(w, r)
+}
+
+func (s *Server) handleUploadSkill(w http.ResponseWriter, r *http.Request) {
+	if !s.requireExtensions(w, r) {
+		return
+	}
+	// Authorize the platform role before reading or buffering the body. The
+	// scope selector arrives inside the form, so the project grant check runs
+	// after parsing.
+	if !s.requireExtensionWriter(w, r) {
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, skillUploadBodyMax)
+	if err := r.ParseMultipartForm(skillUploadFormMemory); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			badRequest(w, r, "request body is too large")
+			return
+		}
+		badRequest(w, r, "invalid multipart upload")
+		return
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
+	}
+	projectID, err := parseFormProjectID(r.FormValue("project_id"))
+	if err != nil {
+		validationFailed(w, r, "project_id", err.Error())
+		return
+	}
+	scope, err := validateExtensionScope(strings.TrimSpace(r.FormValue("scope")), projectID, true)
+	if err != nil {
+		validationFailed(w, r, "scope", err.Error())
+		return
+	}
+	if !s.authorizeExtensionScope(w, r, scope, true) {
+		return
+	}
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		validationFailed(w, r, "file", "a zip file is required in the file field")
+		return
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, skillUploadMax+1))
+	if err != nil {
+		badRequest(w, r, "skill archive could not be read")
+		return
+	}
+	if len(data) == 0 {
+		validationFailed(w, r, "file", "file must not be empty")
+		return
+	}
+	if len(data) > skillUploadMax {
+		validationFailed(w, r, "file", "file must be at most 8 MiB")
+		return
+	}
+	created, err := s.extensions.UploadSkill(r.Context(), SkillUpload{
+		Scope:     scope.scope,
+		ProjectID: scope.projectID,
+		Data:      data,
+	})
+	if err != nil {
+		s.writeServiceError(w, r, err)
+		return
+	}
+	sum := sha256.Sum256(data)
+	s.logger.Info("skill changed", "event", "platform_audit", "actor_id", currentUserID(r),
+		"target_id", created.ID, "action", "upload", "scope", created.Scope,
+		"project_id", auditProjectID(created.ProjectID), "name", created.Name,
+		"size_bytes", len(data), "sha256", hex.EncodeToString(sum[:]))
+	writeJSON(w, http.StatusCreated, created)
+}
+
+// parseFormProjectID interprets an empty form value as nil and rejects
+// malformed or non-positive values before scope validation.
+func parseFormProjectID(raw string) (*int64, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value <= 0 {
+		return nil, errors.New("project_id must be a positive integer")
+	}
+	return &value, nil
+}
+
+type skillDirectoryRequest struct {
+	Scope     string `json:"scope"`
+	ProjectID *int64 `json:"project_id,omitempty"`
+	Dir       string `json:"dir"`
+}
+
+func (s *Server) handleRegisterSkillDirectory(w http.ResponseWriter, r *http.Request) {
+	if !s.requireExtensions(w, r) {
+		return
+	}
+	var request skillDirectoryRequest
+	if err := decodeJSON(w, r, adminBodyLimit, &request); err != nil {
+		decodeRequestError(w, r, err)
+		return
+	}
+	scope, err := validateExtensionScope(strings.TrimSpace(request.Scope), request.ProjectID, true)
+	if err != nil {
+		validationFailed(w, r, "scope", err.Error())
+		return
+	}
+	if !s.authorizeExtensionScope(w, r, scope, true) {
+		return
+	}
+	dir := strings.TrimSpace(request.Dir)
+	if dir == "" || !filepath.IsAbs(dir) || strings.ContainsRune(dir, 0) || strings.ContainsAny(dir, "\r\n") {
+		validationFailed(w, r, "dir", "dir must be an absolute server path")
+		return
+	}
+	// Reject symlinks here as well as in the service so the response never
+	// depends on where the link points. os.Lstat errors stay generic because
+	// they would carry the absolute path.
+	info, err := os.Lstat(dir)
+	if err != nil {
+		validationFailed(w, r, "dir", "dir must be an existing directory")
+		return
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		validationFailed(w, r, "dir", "dir must be a real directory, not a symlink")
+		return
+	}
+	manifest, err := os.Lstat(filepath.Join(dir, "SKILL.md"))
+	if err != nil || manifest.Mode()&os.ModeSymlink != 0 || !manifest.Mode().IsRegular() {
+		validationFailed(w, r, "dir", "dir must contain a regular SKILL.md")
+		return
+	}
+	created, err := s.extensions.RegisterSkillDir(r.Context(), SkillDirInput{
+		Scope:     scope.scope,
+		ProjectID: scope.projectID,
+		Dir:       dir,
+	})
+	if err != nil {
+		s.writeServiceError(w, r, err)
+		return
+	}
+	attrs := []any{"event", "platform_audit", "actor_id", currentUserID(r),
+		"target_id", created.ID, "action", "register_dir", "scope", created.Scope,
+		"project_id", auditProjectID(created.ProjectID), "name", created.Name,
+		"source", "server_directory"}
+	if size, digest := manifestDigest(created.Dir); digest != "" {
+		attrs = append(attrs, "manifest_size_bytes", size, "manifest_sha256", digest)
+	}
+	s.logger.Info("skill changed", attrs...)
+	writeJSON(w, http.StatusCreated, created)
+}
+
+// manifestDigest returns the size and SHA-256 of the persisted SKILL.md for
+// the audit log. It never returns file content, and a read failure only
+// omits the fields from an already successful audit event.
+func manifestDigest(dir string) (int, string) {
+	file, err := os.Open(filepath.Join(dir, "SKILL.md"))
+	if err != nil {
+		return 0, ""
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, skill.MaxManifestBytes+1))
+	if err != nil || len(data) > skill.MaxManifestBytes {
+		return 0, ""
+	}
+	sum := sha256.Sum256(data)
+	return len(data), hex.EncodeToString(sum[:])
 }
 
 func (s *Server) handleDeleteSkill(w http.ResponseWriter, r *http.Request) {

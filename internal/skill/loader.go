@@ -49,11 +49,40 @@ var (
 	skillNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 )
 
+// MaxManifestBytes bounds one SKILL.md read by the loader and by the
+// administrator upload paths. Keeping both on the same limit ensures an
+// accepted upload is loadable at runtime.
+const MaxManifestBytes = maxSkillFileBytes
+
+// ValidName reports whether name is a valid custom skill name. It does not
+// grant access to the name.
+func ValidName(name string) bool {
+	return skillNameRE.MatchString(name) && !strings.Contains(name, "__")
+}
+
 // ValidRepositoryName identifies names that are distinct from legacy skill
 // names. It only checks syntax and does not grant access to the name.
 func ValidRepositoryName(name string) bool {
 	value, ok := strings.CutPrefix(name, "repo:")
-	return ok && skillNameRE.MatchString(value) && !strings.Contains(value, "__")
+	return ok && ValidName(value)
+}
+
+// Manifest is the validated frontmatter shared by the runtime loader and the
+// administrator upload paths.
+type Manifest struct {
+	Name        string
+	Description string
+}
+
+// ParseManifest validates one SKILL.md with the same strict rules as the
+// runtime loader: UTF-8, no NUL, a closed YAML frontmatter block, a lowercase
+// name without "__", and a non-empty description of at most 4096 bytes.
+func ParseManifest(data []byte) (Manifest, error) {
+	fm, _, err := parseSkill(data)
+	if err != nil {
+		return Manifest{}, err
+	}
+	return Manifest(fm), nil
 }
 
 // Skill is one catalogue entry. It deliberately omits the body and path.
@@ -262,8 +291,8 @@ func parseSkill(data []byte) (frontmatter, string, error) {
 	}
 	fm.Name = strings.TrimSpace(fm.Name)
 	fm.Description = strings.TrimSpace(fm.Description)
-	if !skillNameRE.MatchString(fm.Name) || strings.Contains(fm.Name, "__") {
-		return frontmatter{}, "", fmt.Errorf("%w: name must match %s", ErrInvalidSkill, skillNameRE)
+	if !ValidName(fm.Name) {
+		return frontmatter{}, "", fmt.Errorf("%w: name must match %s and must not contain \"__\"", ErrInvalidSkill, skillNameRE)
 	}
 	if fm.Description == "" {
 		return frontmatter{}, "", fmt.Errorf("%w: description is required", ErrInvalidSkill)

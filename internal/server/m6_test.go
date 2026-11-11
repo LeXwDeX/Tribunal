@@ -620,6 +620,8 @@ type fakeExtensions struct {
 	updated  []MCPServerUpdate
 	imports  []MCPImportInput
 	created  []MCPServerInput
+	uploads  []SkillUpload
+	dirs     []SkillDirInput
 	lastID   string
 	deleted  []string
 	err      error
@@ -754,6 +756,38 @@ func (f *fakeExtensions) DeleteMCPServer(ctx context.Context, id string) error {
 	defer f.mu.Unlock()
 	f.deleted = append(f.deleted, id)
 	return f.err
+}
+
+func (f *fakeExtensions) UploadSkill(ctx context.Context, in SkillUpload) (*Skill, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.uploads = append(f.uploads, in)
+	if f.err != nil {
+		return nil, f.err
+	}
+	f.nextID++
+	skill := Skill{
+		ID: "skill-uploaded-" + strconv.Itoa(f.nextID), Scope: in.Scope, ProjectID: in.ProjectID,
+		Name: "uploaded-skill", Description: "uploaded", Enabled: true,
+	}
+	f.skills = append(f.skills, skill)
+	return &skill, nil
+}
+
+func (f *fakeExtensions) RegisterSkillDir(ctx context.Context, in SkillDirInput) (*Skill, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.dirs = append(f.dirs, in)
+	if f.err != nil {
+		return nil, f.err
+	}
+	f.nextID++
+	skill := Skill{
+		ID: "skill-dir-" + strconv.Itoa(f.nextID), Scope: in.Scope, ProjectID: in.ProjectID,
+		Name: "registered-skill", Description: "registered", Dir: in.Dir, Enabled: true,
+	}
+	f.skills = append(f.skills, skill)
+	return &skill, nil
 }
 
 func (f *fakeExtensions) ListSkills(ctx context.Context, scope string, projectID *int64) ([]Skill, error) {

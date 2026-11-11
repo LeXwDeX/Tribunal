@@ -253,6 +253,49 @@ func TestBindingValidation(t *testing.T) {
 	}
 }
 
+func TestParseManifestSharesLoaderRules(t *testing.T) {
+	valid := "---\nname: review\ndescription: review rules\n---\nBody\n"
+	manifest, err := ParseManifest([]byte("\xef\xbb\xbf" + strings.ReplaceAll(valid, "\n", "\r\n")))
+	if err != nil {
+		t.Fatalf("ParseManifest: %v", err)
+	}
+	if manifest.Name != "review" || manifest.Description != "review rules" {
+		t.Fatalf("manifest = %+v", manifest)
+	}
+	longDescription := "---\nname: review\ndescription: " + strings.Repeat("x", 4097) + "\n---\n"
+	cases := map[string]string{
+		"not utf8":          "---\nname: review\ndescription: \xff\n---\n",
+		"nul":               "---\nname: review\ndescription: rules\n---\nbody\x00",
+		"no frontmatter":    "name: review\ndescription: rules\n",
+		"unclosed":          "---\nname: review\ndescription: rules\n",
+		"bad yaml":          "---\nname: review\ndescription: \"unterminated\n---\n",
+		"upper name":        "---\nname: Review\ndescription: rules\n---\n",
+		"double underscore": "---\nname: bad__name\ndescription: rules\n---\n",
+		"empty description": "---\nname: review\ndescription: \"  \"\n---\n",
+		"long description":  longDescription,
+	}
+	for name, data := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ParseManifest([]byte(data)); !errors.Is(err, ErrInvalidSkill) {
+				t.Fatalf("ParseManifest(%q) error = %v, want %v", data, err, ErrInvalidSkill)
+			}
+		})
+	}
+}
+
+func TestValidName(t *testing.T) {
+	for _, name := range []string{"review", "go-review", "a1_b2", "1abc", strings.Repeat("a", 64)} {
+		if !ValidName(name) {
+			t.Errorf("ValidName(%q) = false", name)
+		}
+	}
+	for _, name := range []string{"", "Review", "bad name", "bad__name", "bad.name", strings.Repeat("a", 65)} {
+		if ValidName(name) {
+			t.Errorf("ValidName(%q) = true", name)
+		}
+	}
+}
+
 func TestParseSkillFrontmatter(t *testing.T) {
 	valid := "---\nname: review\nlicense: MIT\ndescription: review rules\n---\nBody\n"
 	fm, body, err := parseSkill([]byte(valid))
