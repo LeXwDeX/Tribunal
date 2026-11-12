@@ -2,7 +2,15 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [1.4.0] - 2026-11-12
+
+> **发布摘要**
+>
+> - **移除金钱成本**：后端计算、数据库列、API 字段、控制台展示与压测脚本中的成本全部移除，迁移 `0030_remove_cost` 不可逆；token 预算与 token 统计不变。
+> - **配置双向同步**：新增配置来源快照与 overlay 写入接口，控制台可查看逐字段来源与待重启状态，并直接编辑 `config:` 模型参数。
+> - **模型能力与预设**：模型表单补齐 thinking、reasoning 与缓存等全部能力参数，内置 DeepSeek 最大能力预设，新增 `0029` 全局默认参数及其控制台编辑。
+> - **扩展控制台补全**：恢复 MCP 新增/导入与草稿连通测试、Skill zip 上传与目录登记，扩展写入后无需重启即生效。
+> - **控制台统一**：各页面迁移到 UI-KIT，说明文字与 Tips 收敛，DatePicker 支持模态内交互。
 
 ### 行为变更
 
@@ -377,6 +385,8 @@ v1.0.0 之后的第一个版本：产品改名为 Tribunal，修复 1.0 复审�
 
 首个版本（GitHub Pre-release），交付 M0–M6 范围：webhook 与持久化队列、DAG 调度、主 agent 编排、对抗核验与裁决、GitLab 发布、三种 LLM 协议、工作区、MCP 与 Skill、OAuth、项目授权、Web 控制台和统计。详见 [Release v1.0.0](https://github.com/LeXwDeX/Tribunal/releases/tag/v1.0.0)。
 
+[1.4.0]: https://github.com/LeXwDeX/Tribunal/compare/v1.3.0...v1.4.0
+[1.3.0]: https://github.com/LeXwDeX/Tribunal/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/LeXwDeX/Tribunal/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/LeXwDeX/Tribunal/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/LeXwDeX/Tribunal/releases/tag/v1.0.0
