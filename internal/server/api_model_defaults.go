@@ -94,8 +94,14 @@ func (s *Server) handlePutModelDefaults(w http.ResponseWriter, r *http.Request) 
 	}
 	// Defaults are protocol-agnostic, so a value that is valid on its own can
 	// make an existing model of another protocol unavailable. Refuse the save
-	// instead of silently breaking the catalog.
-	crossDetails, err := s.modelDefaultCrossModelDetails(r.Context(), params)
+	// instead of silently breaking the catalog. The current document is the
+	// baseline: models already invalid with it are skipped.
+	current, err := s.modelDefaultParams(r.Context())
+	if err != nil {
+		s.writeModelDefaultsError(w, r, err)
+		return
+	}
+	crossDetails, err := s.modelDefaultCrossModelDetails(r.Context(), current, params)
 	if err != nil {
 		s.writeModelDefaultsError(w, r, err)
 		return
@@ -123,12 +129,54 @@ func (s *Server) handleDeleteModelDefaults(w http.ResponseWriter, r *http.Reques
 		validationFailed(w, r, "revision", "revision is required and must not be negative")
 		return
 	}
+	force := false
+	switch raw := r.URL.Query().Get("force"); raw {
+	case "":
+	case "true":
+		force = true
+	case "false":
+	default:
+		validationFailed(w, r, "force", "force must be true or false")
+		return
+	}
+	// The revision check precedes the cross-model check: a stale writer learns
+	// about the conflict instead of the effect of a reset it cannot perform.
+	current, err := s.modelDefaults.GetModelDefaults(r.Context())
+	if err != nil {
+		s.writeModelDefaultsError(w, r, err)
+		return
+	}
+	if current.Revision != revision {
+		writeError(w, r, http.StatusConflict, "stale_revision", "revision does not match", nil)
+		return
+	}
+	// A reset removes every value a user model may inherit, so it runs the same
+	// cross-model check as PUT with an empty candidate. Without force it fails
+	// before writing; force is the explicit administrator override and its audit
+	// records the affected model fields. An empty document resets to the same
+	// state, so it succeeds without reporting models as in use.
+	crossDetails, err := s.modelDefaultCrossModelDetails(r.Context(), current.Params, store.ModelParams{})
+	if err != nil {
+		s.writeModelDefaultsError(w, r, err)
+		return
+	}
+	if len(crossDetails) > 0 && !force {
+		writeError(w, r, http.StatusConflict, "defaults_in_use", "model defaults are required by existing models", crossDetails)
+		return
+	}
 	defaults, err := s.modelDefaults.DeleteModelDefaults(r.Context(), revision, currentUserID(r))
 	if err != nil {
 		s.writeModelDefaultsError(w, r, err)
 		return
 	}
-	s.auditModelDefaults(r, "reset", nil)
+	var fields []string
+	if force {
+		fields = append(fields, "force")
+		for _, detail := range crossDetails {
+			fields = append(fields, detail.Field)
+		}
+	}
+	s.auditModelDefaults(r, "reset", fields)
 	s.refreshModelCatalogAfterDefaults(r)
 	writeJSON(w, http.StatusOK, modelDefaultsViewOf(defaults))
 }
@@ -183,9 +231,14 @@ func modelDefaultDetails(params store.ModelParams) []app.Detail {
 // modelDefaultCrossModelDetails validates the candidate defaults against every
 // existing user model that is currently usable. A value valid for one
 // protocol can be invalid for another; this check keeps a save from turning a
-// working model unavailable. Already unavailable records are skipped so their
-// pre-existing problems do not block the defaults.
-func (s *Server) modelDefaultCrossModelDetails(ctx context.Context, params store.ModelParams) ([]app.Detail, error) {
+// working model unavailable.
+//
+// current is the stored document. A model that is already invalid with the
+// current defaults is unavailable in the catalog for validation reasons even
+// when the stored model row is not flagged, so its pre-existing problem is
+// skipped instead of blocking this write. The same rule lets an empty document
+// reset succeed as a no-op.
+func (s *Server) modelDefaultCrossModelDetails(ctx context.Context, current, params store.ModelParams) ([]app.Detail, error) {
 	if s.modelsStore == nil {
 		return nil, nil
 	}
@@ -198,30 +251,42 @@ func (s *Server) modelDefaultCrossModelDetails(ctx context.Context, params store
 		if !strings.HasPrefix(model.ID, "user:") || model.DeletedAt != nil || model.Unavailable {
 			continue
 		}
-		effective, _ := store.MergeModelParams(model.Params, params)
-		candidate := model
-		candidate.Params = effective
-		err := config.ValidateProviderConfig("model", llm.ModelConfig(candidate), config.ProviderValidationOptions{})
-		if err == nil {
+		effective, _ := store.MergeModelParams(model.Params, current)
+		if len(modelParamsDetails(model, effective)) > 0 {
 			continue
 		}
-		var joined interface{ Unwrap() []error }
-		problems := []error{err}
-		if errors.As(err, &joined) {
-			problems = joined.Unwrap()
-		}
-		for _, problem := range problems {
-			message := strings.TrimPrefix(problem.Error(), "model.")
-			field, _, _ := strings.Cut(message, " ")
-			path := "models." + model.ID + ".params." + field
-			switch field {
-			case "protocol", "base_url", "model":
-				path = "models." + model.ID + "." + field
-			}
-			details = append(details, app.Detail{Field: path, Message: model.DisplayName + ": " + message})
-		}
+		effective, _ = store.MergeModelParams(model.Params, params)
+		details = append(details, modelParamsDetails(model, effective)...)
 	}
 	return details, nil
+}
+
+// modelParamsDetails validates one model with the given effective parameters
+// and returns API details on failure.
+func modelParamsDetails(model store.Model, params store.ModelParams) []app.Detail {
+	candidate := model
+	candidate.Params = params
+	err := config.ValidateProviderConfig("model", llm.ModelConfig(candidate), config.ProviderValidationOptions{})
+	if err == nil {
+		return nil
+	}
+	var joined interface{ Unwrap() []error }
+	problems := []error{err}
+	if errors.As(err, &joined) {
+		problems = joined.Unwrap()
+	}
+	details := make([]app.Detail, 0, len(problems))
+	for _, problem := range problems {
+		message := strings.TrimPrefix(problem.Error(), "model.")
+		field, _, _ := strings.Cut(message, " ")
+		path := "models." + model.ID + ".params." + field
+		switch field {
+		case "protocol", "base_url", "model":
+			path = "models." + model.ID + "." + field
+		}
+		details = append(details, app.Detail{Field: path, Message: model.DisplayName + ": " + message})
+	}
+	return details
 }
 
 func (s *Server) writeModelDefaultsError(w http.ResponseWriter, r *http.Request, err error) {

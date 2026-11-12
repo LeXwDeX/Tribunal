@@ -417,3 +417,97 @@ func TestModelDefaultsRejectCrossProtocolBreakage(t *testing.T) {
 		"params": map[string]any{"max_tokens": 8192}, "revision": 1,
 	}), http.StatusOK)
 }
+
+// Resetting with DELETE removes the values every model may inherit, so it runs
+// the same cross-model check as PUT. A model that would become unavailable
+// blocks the reset unless the administrator explicitly forces it; the forced
+// reset is audited with the affected fields.
+func TestModelDefaultsResetRejectsCrossModelBreakage(t *testing.T) {
+	var logs strings.Builder
+	env := newM6Env(t, m6Options{logWriter: &logs})
+	wireModelDefaults(t, env, nil)
+	admin := env.loginAs("code-admin")
+
+	assertStatus(t, admin.json(http.MethodPut, "/api/v1/model-defaults", map[string]any{
+		"params": map[string]any{"max_tokens": 4096}, "revision": 0,
+	}), http.StatusOK)
+	ctx := context.Background()
+	model, err := env.sqlite.CreateModel(ctx, store.Model{
+		DisplayName: "claude", Protocol: "anthropic", BaseURL: "https://93.184.216.34/v1", Model: "claude-x",
+		Params: store.ModelParams{MaxConcurrency: 1}, CreatedBy: 7,
+	}, "")
+	if err != nil {
+		t.Fatalf("create anthropic model: %v", err)
+	}
+
+	// The revision check runs before the cross-model check: a stale writer must
+	// see stale_revision even when the current defaults are in use.
+	stale := admin.request(http.MethodDelete, "/api/v1/model-defaults?revision=0", nil, nil)
+	assertStatus(t, stale, http.StatusConflict)
+	if !strings.Contains(string(stale.body), "stale_revision") || strings.Contains(string(stale.body), "defaults_in_use") {
+		t.Fatalf("stale reset = %d %s", stale.status, stale.body)
+	}
+
+	response := admin.request(http.MethodDelete, "/api/v1/model-defaults?revision=1", nil, nil)
+	assertStatus(t, response, http.StatusConflict)
+	body := string(response.body)
+	for _, want := range []string{"defaults_in_use", model.ID, "models." + model.ID + ".params.max_tokens", "claude"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("409 lacks %q: %s", want, body)
+		}
+	}
+	// The rejected reset wrote nothing.
+	get := admin.request(http.MethodGet, "/api/v1/model-defaults", nil, nil)
+	assertStatus(t, get, http.StatusOK)
+	var stored modelDefaultsView
+	if err := json.Unmarshal(get.body, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Revision != 1 || stored.Params.MaxTokens != 4096 {
+		t.Fatalf("rejected reset changed defaults: %+v", stored)
+	}
+	if strings.Contains(logs.String(), `"action":"reset"`) {
+		t.Fatalf("rejected reset was audited: %s", logs.String())
+	}
+
+	// force accepts only the exact booleans used by the console.
+	for _, invalid := range []string{"maybe", "1", "TRUE"} {
+		if response := admin.request(http.MethodDelete, "/api/v1/model-defaults?revision=1&force="+invalid, nil, nil); response.status != http.StatusBadRequest {
+			t.Fatalf("invalid force=%s = %d %s", invalid, response.status, response.body)
+		}
+	}
+
+	forced := admin.request(http.MethodDelete, "/api/v1/model-defaults?revision=1&force=true", nil, nil)
+	assertStatus(t, forced, http.StatusOK)
+	var cleared modelDefaultsView
+	if err := json.Unmarshal(forced.body, &cleared); err != nil {
+		t.Fatal(err)
+	}
+	if cleared.Revision != 2 || cleared.Params != (store.ModelParams{}) {
+		t.Fatalf("forced reset = %+v", cleared)
+	}
+	audit := logs.String()
+	for _, want := range []string{`"event":"platform_audit"`, `"action":"reset"`, `"force"`, model.ID} {
+		if !strings.Contains(audit, want) {
+			t.Fatalf("forced reset audit lacks %q: %s", want, audit)
+		}
+	}
+
+	// With the defaults empty, a reset is a no-op: the model is already invalid
+	// against the current defaults, so it must not report defaults_in_use.
+	noop := admin.request(http.MethodDelete, "/api/v1/model-defaults?revision=2", nil, nil)
+	assertStatus(t, noop, http.StatusOK)
+	var noopView modelDefaultsView
+	if err := json.Unmarshal(noop.body, &noopView); err != nil {
+		t.Fatal(err)
+	}
+	if noopView.Revision != 3 {
+		t.Fatalf("empty defaults reset = %+v", noopView)
+	}
+
+	// A model that the forced reset already made invalid must not block an
+	// unrelated defaults update.
+	assertStatus(t, admin.json(http.MethodPut, "/api/v1/model-defaults", map[string]any{
+		"params": map[string]any{"rpm": 30}, "revision": 3,
+	}), http.StatusOK)
+}

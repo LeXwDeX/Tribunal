@@ -218,7 +218,11 @@ const NON_NEGATIVE_INT = /^\d+$/
 function validateModelForm(form: ModelForm, inheritedMaxTokens = 0): FormErrors {
   const errors: FormErrors = {}
   const maxTokens = form.maxTokens.trim()
-  const effectiveMaxTokens = maxTokens ? Number(maxTokens) : inheritedMaxTokens
+  const typedMaxTokens = maxTokens ? Number(maxTokens) : 0
+  // An explicit 0 is stored as "not sent" and still inherits the platform
+  // default, so the budget check must use the effective value, not the typed
+  // zero (#439).
+  const effectiveMaxTokens = typedMaxTokens > 0 ? typedMaxTokens : inheritedMaxTokens
   if (maxTokens) {
     if (!NON_NEGATIVE_INT.test(maxTokens)) errors.maxTokens = 'max_tokens 必须是不小于 0 的整数。'
     else if (form.protocol === 'anthropic' && Number(maxTokens) === 0 && inheritedMaxTokens <= 0) {
@@ -617,6 +621,9 @@ function ModelDefaultsPanel({
   const [pending, setPending] = useState(false)
   const [resetOpen, setResetOpen] = useState(false)
   const [resetError, setResetError] = useState<unknown>()
+  // Undefined means no conflict; an empty array still means the server
+  // reported defaults_in_use, so the next confirm must force.
+  const [resetBlocked, setResetBlocked] = useState<Array<{ field?: string; message?: string }>>()
   const id = useId()
   const ids = {
     tokens: `${id}-tokens`, context: `${id}-context`, concurrency: `${id}-concurrency`, rpm: `${id}-rpm`,
@@ -637,6 +644,7 @@ function ModelDefaultsPanel({
     setError(undefined)
     setStale(false)
     setResetError(undefined)
+    setResetBlocked(undefined)
     onReload()
   }
 
@@ -670,21 +678,29 @@ function ModelDefaultsPanel({
     }
   }
 
-  const reset = async () => {
+  const reset = async (force: boolean) => {
     setPending(true)
     setResetError(undefined)
     try {
-      const cleared = await deleteModelDefaults(revision)
+      const cleared = await deleteModelDefaults(revision, force)
       setResetOpen(false)
-      setStatus(`已重置全部默认值（revision ${cleared.revision}）。`)
+      setResetBlocked(undefined)
+      setStatus(force
+        ? `已强制重置全部默认值（revision ${cleared.revision}），请检查受影响模型。`
+        : `已重置全部默认值（revision ${cleared.revision}）。`)
       onSaved()
     } catch (err) {
       if (err instanceof ApiError && err.code === 'stale_revision') {
         // The dialog cannot refresh the query itself; surface the same reload
         // path as a save conflict instead of leaving a dead-end error.
         setResetOpen(false)
+        setResetBlocked(undefined)
         setError('已被他人修改，请重新加载后再重置。')
         setStale(true)
+      } else if (err instanceof ApiError && err.code === 'defaults_in_use') {
+        // Keep the dialog open and list the models the reset would break. The
+        // next confirm sends force=true and the server audits the override.
+        setResetBlocked(err.details ?? [])
       } else {
         setResetError(err)
       }
@@ -804,7 +820,7 @@ function ModelDefaultsPanel({
 
           <div className={styles.cardActions}>
             <Button onClick={() => { void save() }} loading={pending}>保存全局默认</Button>
-            <Button variant="secondary" onClick={() => { setResetError(undefined); setResetOpen(true) }} disabled={pending || revision === 0 || !hasDefaults}>重置</Button>
+            <Button variant="secondary" onClick={() => { setResetError(undefined); setResetBlocked(undefined); setResetOpen(true) }} disabled={pending || revision === 0 || !hasDefaults}>重置</Button>
           </div>
           {status ? <span className={styles.resultOk} role="status">{status}</span> : null}
           {error ? (
@@ -816,21 +832,44 @@ function ModelDefaultsPanel({
           <Note tone="neutral">
             只对 user: 模型生效；config: 模型由配置文件负责。模型显式值优先于默认值；
             整数字段的 0、布尔字段的 false 或留空表示未设置，继续使用内置/协议默认；temperature 是显式值，填 0 会覆盖默认。
-            保存时用候选值合并现有 user: 模型并按各自协议交叉校验，不可用组合会被拒绝且不写库。
+            保存与重置都会用候选值合并现有可用 user: 模型并按各自协议交叉校验；会让模型不可用的组合不写库，重置需再次确认才能强制执行。
             保存后对之后启动的评审生效。
           </Note>
         </form>
       </Panel>
       <ConfirmDialog
         open={resetOpen}
-        onClose={() => setResetOpen(false)}
-        onConfirm={() => { void reset() }}
+        onClose={() => { setResetOpen(false); setResetBlocked(undefined) }}
+        onConfirm={() => { void reset(resetBlocked !== undefined) }}
         title="重置全局默认参数"
-        description="清除全部平台默认参数？各 user: 模型会恢复为只使用自身参数与内置/协议默认。"
-        confirmLabel="重置"
+        description={resetBlocked !== undefined
+          ? '强制重置会清除全部默认值。依赖当前默认值的模型将不可用，需要补充模型参数或重新设置默认值。'
+          : '清除全部平台默认参数？依赖默认值的模型会恢复为只使用自身参数与内置/协议默认；依赖默认 max_tokens 的 anthropic 等模型可能变为不可用，存在此类模型时不会直接重置。'}
+        confirmLabel={resetBlocked !== undefined ? '仍然重置' : '重置'}
         pending={pending}
         error={resetError}
-      />
+      >
+        {resetBlocked !== undefined ? (
+          <Note tone="danger" role="alert">
+            {resetBlocked.length ? (
+              <>
+                <div>重置会让以下模型不可用：</div>
+                <ul className={styles.configDetails}>
+                  {resetBlocked.map((detail, index) => (
+                    <li key={`${detail.field ?? ''}-${index}`}>
+                      {detail.field ? <code>{detail.field}</code> : null}
+                      {detail.field && detail.message ? ' ' : null}
+                      {detail.message ? <span>{detail.message}</span> : null}
+                    </li>
+                  ))}
+                </ul>
+              </>
+            ) : (
+              <div>服务器未返回具体受影响模型；请先检查模型列表，确认影响后再强制重置。</div>
+            )}
+          </Note>
+        ) : null}
+      </ConfirmDialog>
     </>
   )
 }

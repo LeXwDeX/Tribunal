@@ -63,6 +63,13 @@
 - HTTP 测试覆盖 `GET/PUT/DELETE /api/v1/model-defaults` 的平台管理员与 CSRF 校验、未知/非法字段与 `params.price` 的 400、409 `stale_revision`（含 `revision=0` 重置冲突）、`user:` 模型继承/显式覆盖、`config:` 模型不受影响、模型视图 `effective_params`/`param_sources`、创建/整记录修改/参数合并/草稿测试先合并默认、保存默认值时按现有 `user:` 模型协议交叉校验（anthropic budget 512 与 effort none 返回 400 并列出受影响模型）；档位覆盖校验使用生效参数（继承的 `allow_reasoning_effort_none` 与 `max_tokens`）。控制台测试覆盖面板展示、保存、确认重置、409 保存/重置后重新加载、布尔字段错误、`config:` 模型说明、非管理员与 403 隐藏、Drawer 打开时保留未保存草稿、无默认值时禁用重置、被默认覆盖的显式 0/false 不再显示为生效值、anthropic 模型在编辑器中留空 `max_tokens` 继承全局默认，以及 390/1440 宽度与亮暗主题契约。
 - **BLOCKED**：未执行真实部署升级/回退演练（缺隔离部署环境）；升级前须按运维文档备份数据库及 WAL/SHM、工作区和密钥，回滚需恢复快照与匹配旧镜像。
 
+## 全局默认重置跨模型校验本地验证（#439）
+
+- 基于 `fix/439-model-defaults-reset` 的 rebase 后工作区，本地通过 `go build ./...`、`go vet ./...`、gofmt、`go test ./internal/server ./internal/store/... ./internal/llm -count=1`，以及 `go test -race ./internal/server ./internal/store/sqlite ./internal/llm -count=1`。前端 `npx tsc -b`、`npm run check:styles`、`npm test -- --coverage --maxWorkers=2 --testTimeout=20000`、`npm run build` 通过，`web/dist` 已重建。
+- HTTP 回归覆盖：DELETE 会令 anthropic 模型不可用时返回 409 `defaults_in_use` 且不写库、`revision` 不变；`revision` 不匹配优先返回 `stale_revision`；`force` 只接受 `true` / `false`，强制重置审计 `force` 与受影响字段；强制重置后已无效模型不再阻塞无关 PUT，空默认重置为 no-op；PUT/DELETE 跳过已因当前默认无效的模型。
+- 前端回归覆盖：409 时列出受影响字段与消息、确认按钮变为「仍然重置」、force 后刷新 models/config；无 `details` 时显示兜底提示；`ConfirmDialog` 无 children/error 时不渲染空 body；显式 `max_tokens=0` + 继承默认时 budget 校验报错；390/1440 宽度与亮暗主题契约。
+- GitHub Actions 的 go/web/docker 在 PR head 通过；**BLOCKED**：未运行自建 CI 与真实部署验收。
+
 ## v1.3.0 发布检查表（#294）
 
 | 检查项 | 状态 | 证据 / 原因 |

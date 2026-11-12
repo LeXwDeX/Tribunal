@@ -1087,7 +1087,7 @@ legacy `providers.*.price` 在 v1.4.0 仍会解析，仅用于兼容旧 YAML 和
 
 `0029_model_param_defaults.sql` 新建单行 `llm_model_defaults`，保存 `user:` 模型的平台级默认参数，不修改 `llm_models` 中已存的显式参数，也不涉及 `config:` 模型。该迁移只建表，没有数据转换，但仍不可逆：回退必须恢复升级前的数据库及 `-wal`/`-shm` 快照，并启动匹配的旧镜像；旧二进制不认识该表，不会使用默认值。
 
-升级后默认参数为空（`revision 0`），现有用户模型的生效参数与升级前一致。管理员在控制台「模型与档位」页或通过 `GET/PUT/DELETE /api/v1/model-defaults` 设置默认值后，新的模型读取、草稿测试和之后启动的评审使用合并后的参数；进行中的评审继续使用启动时的 client 快照。保存默认值时会用候选值合并每个现有可用 `user:` 模型并按协议交叉校验，会让模型变为不可用的组合（例如 anthropic 的 `thinking.budget_tokens` 1–1023 或 `reasoning.effort: none`）返回 400 且不写库；重置同样必须带当前 `revision`，尚无记录（`revision=0`）或版本不匹配返回 409。默认值进入被引用 `user:` 模型的档位哈希，修改默认值后重启恢复可能使未终态评审以 `profile_hash_changed` 取消，需要重新触发；不希望影响在途评审时先让其结束。token 预算与 token 统计（`tokens_in`、`tokens_out`、`budget.max_tokens`）不受该迁移影响。
+升级后默认参数为空（`revision 0`），现有用户模型的生效参数与升级前一致。管理员在控制台「模型与档位」页或通过 `GET/PUT/DELETE /api/v1/model-defaults` 设置默认值后，新的模型读取、草稿测试和之后启动的评审使用合并后的参数；进行中的评审继续使用启动时的 client 快照。保存默认值时会用候选值合并每个现有可用 `user:` 模型并按协议交叉校验，会让模型变为不可用的组合（例如 anthropic 的 `thinking.budget_tokens` 1–1023 或 `reasoning.effort: none`）返回 400 且不写库；已因当前默认无效的模型会跳过，不会阻塞无关的保存。重置（DELETE）先校验 `revision`，再以空候选默认做同一校验，会让现有可用 `user:` 模型不可用时返回 409 `defaults_in_use` 且不写库；当前默认本身为空时重置是 no-op 并直接成功。管理员确认后可用 `force=true` 强制重置（`force` 只接受 `true` / `false`），审计记录 `force` 与受影响字段。重置同样必须带当前 `revision`，尚无记录（`revision=0`）或版本不匹配返回 409 `stale_revision`。默认值进入被引用 `user:` 模型的档位哈希，修改默认值后重启恢复可能使未终态评审以 `profile_hash_changed` 取消，需要重新触发；不希望影响在途评审时先让其结束。token 预算与 token 统计（`tokens_in`、`tokens_out`、`budget.max_tokens`）不受该迁移影响。
 
 ### 通用升级与回滚步骤
 
