@@ -19,6 +19,16 @@ import { formatDuration, formatJson, formatNumber } from '../lib/format'
 import ui from '../styles/ui.module.css'
 import styles from './insights.module.css'
 
+// The file watcher publishes a new snapshot about 2-4s after an overlay
+// write. If the snapshot has not moved by then, or the snapshot request keeps
+// failing, stop blocking editing and surface the fallback (#441).
+const OVERLAY_APPLY_TIMEOUT_MS = 15_000
+
+interface PageNotice {
+  text: string
+  tone: 'success' | 'warn'
+}
+
 function fmt(value: number | undefined, suffix = ''): string {
   return typeof value === 'number' && Number.isFinite(value) ? `${formatNumber(value)}${suffix}` : '不可用'
 }
@@ -883,10 +893,13 @@ function presetLabel(preset: ModelPreset): string {
   return PRESET_LABELS[preset.id] ?? preset.display_name
 }
 
-function ModelCard({ model, canWrite, configProvider, origins, nodeOverrides, applying, onEdit, onEditConfig, onDelete, onClearNodeOverrides }: {
+function ModelCard({ model, canWrite, configProvider, configSnapshotReady, origins, nodeOverrides, applying, onEdit, onEditConfig, onDelete, onClearNodeOverrides }: {
   model: Model
   canWrite: boolean
   configProvider?: ConfigProviderView
+  // configSnapshotReady distinguishes a loaded snapshot that no longer names
+  // the provider from a snapshot that is unavailable or still loading.
+  configSnapshotReady: boolean
   origins?: Record<string, ConfigOrigin>
   nodeOverrides: ProfileNodeView[]
   applying?: boolean
@@ -902,6 +915,10 @@ function ModelCard({ model, canWrite, configProvider, origins, nodeOverrides, ap
   const p50 = typeof stats?.p50_latency_ms === 'number' ? formatDuration(stats.p50_latency_ms) : '不可用'
   const isConfig = model.source === 'config'
   const name = configName(model.id)
+  // A loaded snapshot without the provider means the provider was removed
+  // from the file configuration (for example after "重置为 base"); the
+  // runtime catalog still lists it until the next restart.
+  const removedFromConfig = isConfig && configSnapshotReady && !configProvider
   const protocol = isConfig ? (configProvider?.protocol ?? model.protocol) : model.protocol
   const upstreamModel = isConfig ? (configProvider?.model ?? model.model) : model.model
   const baseURL = isConfig ? (configProvider?.base_url ?? model.base_url) : model.base_url
@@ -965,7 +982,9 @@ function ModelCard({ model, canWrite, configProvider, origins, nodeOverrides, ap
       {canWrite ? (
         <div className={styles.cardActions}>
           {isConfig ? (
-            <Button variant="secondary" className={ui.smallButton} onClick={onEditConfig} disabled={!configProvider || applying}>编辑配置</Button>
+            removedFromConfig ? null : (
+              <Button variant="secondary" className={ui.smallButton} onClick={onEditConfig} disabled={!configProvider || applying}>编辑配置</Button>
+            )
           ) : (
             <>
               <Button variant="secondary" className={ui.smallButton} onClick={onEdit}>编辑</Button>
@@ -979,7 +998,9 @@ function ModelCard({ model, canWrite, configProvider, origins, nodeOverrides, ap
       ) : null}
       {isConfig && !configProvider ? (
         <span className="small muted">
-          {canWrite ? '配置文件快照不可用，暂不能在控制台编辑。' : '只读：仅平台管理员可通过配置文件（overlay）编辑。'}
+          {removedFromConfig
+            ? '已从配置移除，重启后消失。'
+            : canWrite ? '配置文件快照不可用，暂不能在控制台编辑。' : '只读：仅平台管理员可通过配置文件（overlay）编辑。'}
         </span>
       ) : null}
       {isConfig && applying ? <span className="small muted">配置快照应用中，稍后可再次编辑。</span> : null}
@@ -1697,7 +1718,7 @@ function ConfigModelDrawer({
               <Field label="协议" htmlFor={ids.protocol} hint={hintFor('protocol', 'openai-chat、openai-responses 或 anthropic。')} error={errors.protocol}>
                 <Select id={ids.protocol} value={form.protocol} options={PROTOCOL_OPTIONS} onChange={(value) => update({ protocol: value })} aria-invalid={errors.protocol ? true : undefined} />
               </Field>
-              <Field label="base_url" htmlFor={ids.base} hint={hintFor('base_url', '上游 API 根地址；凭据值不会回显。')} error={errors.baseURL}>
+              <Field label="base_url" htmlFor={ids.base} hint={hintFor('base_url', '上游 API 根地址；留空沿用协议适配器默认端点；凭据值不会回显。')} error={errors.baseURL}>
                 <input id={ids.base} className={ui.input} value={form.baseURL} aria-invalid={errors.baseURL ? true : undefined} onChange={(event) => update({ baseURL: event.target.value })} />
               </Field>
               <Field label="上游模型" htmlFor={ids.model} hint={hintFor('model', '发送给上游的模型 ID。')} error={errors.model}>
@@ -1939,35 +1960,60 @@ export function ModelsPage() {
   // The config snapshot is the file-effective view; it is the source for the
   // config: model editor and its per-field origins. Writes still go to the
   // overlay endpoint and need a restart before the runtime catalog changes.
-  // After a write, poll faster until the watcher has published the revision
-  // the write returned (~2-4s), then fall back to the normal refresh interval.
-  const [applyingOverlayRevision, setApplyingOverlayRevision] = useState<string>()
+  // After a write, poll faster until the watcher publishes a snapshot newer
+  // than the pre-save revision (~2-4s). Comparing against the baseline, not
+  // the revision returned by the write, also ends the state when another
+  // administrator writes during the watcher window (#441).
+  const [applyingOverlayBaseline, setApplyingOverlayBaseline] = useState<string>()
   const fileConfig = useQuery({
     queryKey: ['config'],
     queryFn: getConfig,
     retry: false,
     enabled: canWrite,
     refetchInterval: (query) => {
-      if (!applyingOverlayRevision) return 5000
-      return query.state.data?.overlay_revision === applyingOverlayRevision ? 5000 : 1000
+      if (applyingOverlayBaseline === undefined) return 5000
+      const snapshotRevision = query.state.data?.overlay_revision
+      return snapshotRevision !== undefined && snapshotRevision !== applyingOverlayBaseline ? 5000 : 1000
     },
   })
-  const configApplying = Boolean(
-    applyingOverlayRevision && fileConfig.data?.overlay_revision !== applyingOverlayRevision,
-  )
+  const overlaySnapshotUpdated = applyingOverlayBaseline !== undefined &&
+    fileConfig.data !== undefined && fileConfig.data.overlay_revision !== applyingOverlayBaseline
+  const configApplying = applyingOverlayBaseline !== undefined && !overlaySnapshotUpdated
   useEffect(() => {
-    if (!applyingOverlayRevision || fileConfig.data?.overlay_revision !== applyingOverlayRevision) return
-    setApplyingOverlayRevision(undefined)
+    if (!overlaySnapshotUpdated) return
+    setApplyingOverlayBaseline(undefined)
     setConfigNotice((current) => (
-      current?.startsWith('已保存到 overlay，正在应用')
-        ? '已保存到 overlay，待重启生效。重启服务可能取消在途评审。'
+      current?.text.startsWith('已保存到 overlay，正在应用')
+        ? { text: '已保存到 overlay，待重启生效。重启服务可能取消在途评审。', tone: 'success' }
         : current
     ))
-  }, [applyingOverlayRevision, fileConfig.data?.overlay_revision])
+  }, [overlaySnapshotUpdated])
+  // A missing snapshot update or a failing snapshot request must not disable
+  // editing forever; fall back to the normal refresh interval with a notice.
+  useEffect(() => {
+    if (applyingOverlayBaseline === undefined) return
+    const timer = window.setTimeout(() => {
+      setApplyingOverlayBaseline(undefined)
+      setConfigNotice({
+        text: '配置快照未在预期时间内更新，已恢复编辑；可稍后查看最新状态。',
+        tone: 'warn',
+      })
+    }, OVERLAY_APPLY_TIMEOUT_MS)
+    return () => window.clearTimeout(timer)
+  }, [applyingOverlayBaseline])
+  useEffect(() => {
+    if (applyingOverlayBaseline === undefined) return
+    if (!fileConfig.isError && !fileConfig.isRefetchError) return
+    setApplyingOverlayBaseline(undefined)
+    setConfigNotice({
+      text: '配置快照刷新失败，已恢复编辑；可稍后重试查看最新状态。',
+      tone: 'warn',
+    })
+  }, [applyingOverlayBaseline, fileConfig.isError, fileConfig.isRefetchError])
   const [profileEditing, setProfileEditing] = useState(false)
   const [editing, setEditing] = useState<Model>()
   const [configEditing, setConfigEditing] = useState<Model>()
-  const [configNotice, setConfigNotice] = useState<string>()
+  const [configNotice, setConfigNotice] = useState<PageNotice>()
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [deleting, setDeleting] = useState<Model>()
   const [deleteError, setDeleteError] = useState<unknown>()
@@ -1999,12 +2045,17 @@ export function ModelsPage() {
   const configSaved = (result: ConfigOverlayWriteResponse) => {
     setConfigEditing(undefined)
     if (!result.changed) {
-      setConfigNotice('没有需要保存的更改。')
+      setConfigNotice({ text: '没有需要保存的更改。', tone: 'success' })
     } else {
-      setApplyingOverlayRevision(result.overlay_revision)
-      setConfigNotice(result.restart_required
-        ? '已保存到 overlay，正在应用配置快照；待重启生效。重启服务可能取消在途评审。'
-        : '已保存到 overlay，正在应用配置快照。')
+      // previous_overlay_revision is the snapshot the write was based on, so
+      // any other revision means a newer snapshot has been published.
+      setApplyingOverlayBaseline(result.previous_overlay_revision)
+      setConfigNotice({
+        text: result.restart_required
+          ? '已保存到 overlay，正在应用配置快照；待重启生效。重启服务可能取消在途评审。'
+          : '已保存到 overlay，正在应用配置快照。',
+        tone: 'success',
+      })
     }
     saved()
     void fileConfig.refetch()
@@ -2059,7 +2110,7 @@ export function ModelsPage() {
           {models.isPending ? <LoadingState /> : null}
           {models.isError ? <ErrorState error={models.error} onRetry={models.refetch} /> : null}
           {models.isSuccess && models.data.models.length === 0 ? <EmptyState title="还没有模型" description="新增用户模型，或检查平台配置。" /> : null}
-          {configNotice ? <Note tone="success" role="status">{configNotice}</Note> : null}
+          {configNotice ? <Note tone={configNotice.tone} role="status">{configNotice.text}</Note> : null}
           {canWrite && fileConfig.isError && !(fileConfig.error instanceof ApiError && fileConfig.error.status === 403) ? (
             <Note tone="warn" role="status">配置文件快照不可用，config: 模型暂不能在控制台编辑。</Note>
           ) : null}
@@ -2070,6 +2121,7 @@ export function ModelsPage() {
                 model={model}
                 canWrite={canWrite}
                 configProvider={configProviderByName.get(configName(model.id))}
+                configSnapshotReady={fileConfig.data !== undefined}
                 origins={configOrigins}
                 nodeOverrides={configNodeOverrides(configNodes, configName(model.id))}
                 applying={configApplying && model.source === 'config'}

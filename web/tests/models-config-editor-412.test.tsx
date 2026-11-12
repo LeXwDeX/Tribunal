@@ -1,5 +1,7 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { ModelsPage } from '../src/pages/ModelsPage'
 import { installFetch, jsonResponse, renderWithProviders, viewerMe } from './test-utils'
@@ -97,6 +99,13 @@ interface RouteOptions {
   nodes?: unknown[]
   models?: unknown[]
   provider?: Record<string, unknown>
+  // watcherRevision models another administrator publishing a higher revision
+  // while the console waits for the watcher; the write response still names
+  // the revision saved by this request.
+  watcherRevision?: string
+  // holdSnapshot keeps the snapshot at its pre-save revision so the test can
+  // publish it later or exercise the timeout fallback.
+  holdSnapshot?: boolean
 }
 
 function routes(options: RouteOptions = {}) {
@@ -104,6 +113,7 @@ function routes(options: RouteOptions = {}) {
     provider: { ...configPayload().config.providers[0], ...options.provider } as Record<string, unknown> | undefined,
     origins: { ...configPayload().origins } as Record<string, string>,
     overlayRevision: 'overlay-rev-1',
+    configFails: false,
     patchBody: undefined as Record<string, unknown> | undefined,
     configReads: 0,
     modelReads: 0,
@@ -136,6 +146,8 @@ function routes(options: RouteOptions = {}) {
       state.patchBody = body
       if (options.overlay) return options.overlay(body)
       applyChanges(body)
+      if (options.holdSnapshot) state.overlayRevision = String(body.overlay_revision)
+      else if (options.watcherRevision) state.overlayRevision = options.watcherRevision
       return jsonResponse({
         dry_run: false, applied: true, changed: true,
         base_revision: body.base_revision,
@@ -147,6 +159,9 @@ function routes(options: RouteOptions = {}) {
     }
     if (url === '/api/v1/config') {
       state.configReads += 1
+      if (state.configFails) {
+        return jsonResponse({ error: { code: 'internal', message: 'snapshot unavailable' } }, 500)
+      }
       return jsonResponse({
         ...configPayload({ overlayRevision: state.overlayRevision }),
         config: { providers: state.provider ? [state.provider] : [] },
@@ -201,7 +216,10 @@ async function chooseOption(user: ReturnType<typeof userEvent.setup>, trigger: H
 }
 
 describe('config model overlay editor (#412)', () => {
-  afterEach(() => vi.unstubAllGlobals())
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+  })
 
   it('shows config model values with base/overlay/0028 sources and an edit action', async () => {
     const { fetchMock } = routes({ nodes: [nodeOverride] })
@@ -346,6 +364,7 @@ describe('config model overlay editor (#412)', () => {
     const dialog = await openConfigEditor(user)
     const form = within(dialog)
     expect(form.getByLabelText('base_url')).toHaveValue('')
+    expect(form.getByText(/留空沿用协议适配器默认端点/)).toBeInTheDocument()
 
     fireEvent.change(form.getByLabelText('base_url'), { target: { value: 'ftp://api.example.test/v1' } })
     await user.click(form.getByRole('button', { name: '保存' }))
@@ -450,6 +469,84 @@ describe('config model overlay editor (#412)', () => {
     expect(screen.queryByRole('dialog', { name: /编辑配置模型/ })).not.toBeInTheDocument()
   })
 
+  it('marks a reset overlay-only provider as removed from the config until restart', async () => {
+    const user = userEvent.setup()
+    routes()
+    const dialog = await openConfigEditor(user)
+    await user.click(within(dialog).getByRole('button', { name: '重置为 base' }))
+    const confirm = await screen.findByRole('dialog', { name: /重置配置模型/ })
+    await user.click(within(confirm).getByRole('button', { name: '重置为 base' }))
+
+    // The runtime catalog still lists the model until the next restart, but
+    // the file snapshot no longer defines the provider.
+    expect(await screen.findByText('已从配置移除，重启后消失。')).toBeInTheDocument()
+    expect(screen.getAllByText('primary').length).toBeGreaterThan(0)
+    expect(screen.queryByText('配置文件快照不可用，暂不能在控制台编辑。')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '编辑配置' })).not.toBeInTheDocument()
+  })
+
+  it('keeps the apply state while the snapshot is still at the pre-save revision', async () => {
+    const user = userEvent.setup()
+    const { state } = routes({ holdSnapshot: true })
+    const dialog = await openConfigEditor(user)
+    await user.clear(within(dialog).getByLabelText('max_tokens'))
+    await user.type(within(dialog).getByLabelText('max_tokens'), '4096')
+    await user.click(within(dialog).getByRole('button', { name: '保存' }))
+
+    expect(await screen.findByText('配置快照应用中，稍后可再次编辑。')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '编辑配置' })).toBeDisabled()
+    expect(screen.getByText(/正在应用配置快照/)).toBeInTheDocument()
+
+    state.overlayRevision = 'overlay-rev-2'
+    await waitFor(() => expect(screen.getByRole('button', { name: '编辑配置' })).toBeEnabled(), { timeout: 3000 })
+    expect(await screen.findByText(/已保存到 overlay，待重启生效/)).toBeInTheDocument()
+  })
+
+  it('ends the apply state when another writer publishes a higher revision', async () => {
+    const user = userEvent.setup()
+    routes({ watcherRevision: 'overlay-rev-3' })
+    const dialog = await openConfigEditor(user)
+    await user.clear(within(dialog).getByLabelText('max_tokens'))
+    await user.type(within(dialog).getByLabelText('max_tokens'), '4096')
+    await user.click(within(dialog).getByRole('button', { name: '保存' }))
+
+    // The write response names overlay-rev-2, but the snapshot jumps straight
+    // to overlay-rev-3; any newer revision ends the apply state (#441).
+    expect(await screen.findByText(/已保存到 overlay，待重启生效/)).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByRole('button', { name: '编辑配置' })).toBeEnabled())
+    expect(screen.queryByText('配置快照应用中，稍后可再次编辑。')).not.toBeInTheDocument()
+  })
+
+  it('falls back after the watcher timeout and re-enables editing', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+    routes({ holdSnapshot: true })
+    const dialog = await openConfigEditor(user)
+    await user.clear(within(dialog).getByLabelText('max_tokens'))
+    await user.type(within(dialog).getByLabelText('max_tokens'), '4096')
+    await user.click(within(dialog).getByRole('button', { name: '保存' }))
+    expect(await screen.findByText('配置快照应用中，稍后可再次编辑。')).toBeInTheDocument()
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(16_000)
+    })
+    expect(screen.getByText(/配置快照未在预期时间内更新，已恢复编辑/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '编辑配置' })).toBeEnabled()
+  })
+
+  it('falls back when the snapshot refresh fails and re-enables editing', async () => {
+    const user = userEvent.setup()
+    const { state } = routes({ holdSnapshot: true })
+    const dialog = await openConfigEditor(user)
+    await user.clear(within(dialog).getByLabelText('max_tokens'))
+    await user.type(within(dialog).getByLabelText('max_tokens'), '4096')
+    state.configFails = true
+    await user.click(within(dialog).getByRole('button', { name: '保存' }))
+
+    expect(await screen.findByText(/配置快照刷新失败，已恢复编辑/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '编辑配置' })).toBeEnabled()
+  })
+
   it('lists provider_in_use referrers when resetting the model to base and never touches the database', async () => {
     const user = userEvent.setup()
     const { state } = routes({
@@ -506,7 +603,14 @@ describe('config model overlay editor (#412)', () => {
     expect(screen.queryByRole('button', { name: '在评审档位中清除' })).not.toBeInTheDocument()
   })
 
-  it('renders the config editor at 390 and 1440 widths in both themes', async () => {
+  // jsdom has no layout engine, so this only proves the dialog renders at both
+  // widths and themes plus the responsive grid contract in the stylesheet.
+  // Pixel layout at 1440/390 is checked manually per AGENTS.md.
+  it('renders the config editor at 390 and 1440 widths in both themes (render-only)', async () => {
+    const css = readFileSync(resolve(process.cwd(), 'src/pages/insights.module.css'), 'utf8')
+    expect(css).toMatch(/\.modelFormGrid\s*\{[^}]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/)
+    expect(css).toMatch(/@media \(max-width: 640px\)\s*\{[\s\S]*?\.modelFormGrid\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/)
+
     const user = userEvent.setup()
     routes()
     const dialog = await openConfigEditor(user)

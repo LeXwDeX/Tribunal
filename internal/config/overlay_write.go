@@ -77,8 +77,10 @@ type OverlayWriteRequest struct {
 	DryRun          bool
 	// CheckRemovedProviders, when set, receives the providers the patch
 	// removes from the effective configuration before anything is written.
+	// It returns the stored referrers it found; the writer aggregates them
+	// with configuration profile references into one provider_in_use error.
 	// Returning an error aborts the write and the error is returned unchanged.
-	CheckRemovedProviders func(context.Context, []string) error
+	CheckRemovedProviders func(context.Context, []string) ([]string, error)
 }
 
 // OverlayWriteResult describes an applied or previewed patch.
@@ -332,16 +334,21 @@ func (w *OverlayWriter) Apply(ctx context.Context, req OverlayWriteRequest) (*Ov
 				details = append(details, ref+" refers to providers."+name)
 			}
 		}
+		// Configuration profiles and stored profile overrides are separate
+		// referrer sets. Collect both before rejecting so a single 409 lists
+		// every reference instead of forcing a second attempt.
+		if req.CheckRemovedProviders != nil {
+			stored, err := req.CheckRemovedProviders(ctx, removed)
+			if err != nil {
+				return nil, err
+			}
+			details = append(details, stored...)
+		}
 		if len(details) > 0 {
 			return nil, &OverlayWriteError{
 				Code:    OverlayErrorProviderInUse,
 				Message: "the provider is still referenced",
 				Details: details,
-			}
-		}
-		if req.CheckRemovedProviders != nil {
-			if err := req.CheckRemovedProviders(ctx, removed); err != nil {
-				return nil, err
 			}
 		}
 	}

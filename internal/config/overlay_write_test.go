@@ -265,8 +265,11 @@ func TestOverlayWriterRejectsInvalidValueTypes(t *testing.T) {
 		{"bool string", []string{"providers", "primary", "strict_role_alternation"}, "yes"},
 		{"temperature string", []string{"providers", "primary", "temperature"}, "hot"},
 		{"null string", []string{"providers", "primary", "model"}, nil},
-		{"api key env invalid", []string{"providers", "primary", "api_key_env"}, "BAD-NAME"},
-		{"api key env placeholder", []string{"providers", "primary", "api_key_env"}, "${SECRET}"},
+		// api_key_env takes an environment variable name, not a credential
+		// value. These two cases reject an invalid name and a placeholder
+		// used as a name; the writer does not detect a secret by its shape.
+		{"api key env name with hyphen", []string{"providers", "primary", "api_key_env"}, "BAD-NAME"},
+		{"api key env name with placeholder", []string{"providers", "primary", "api_key_env"}, "${SECRET}"},
 		{"ignore string", []string{"review_defaults", "ignore"}, "**/*.lock"},
 		{"profile by label list", []string{"review_defaults", "profile_by_label"}, []any{"default"}},
 		{"deadline invalid", []string{"profiles", "default", "budget", "deadline"}, "soon"},
@@ -611,6 +614,45 @@ profiles:
 	requireOverlayNoError(t, err)
 	if !result.Applied || result.Changed {
 		t.Fatalf("no-op result = %+v", result)
+	}
+}
+
+func TestOverlayWriterAggregatesConfigAndStoredProviderReferences(t *testing.T) {
+	const overlay = `providers:
+  extra:
+    protocol: openai-chat
+    model: gpt-test
+    api_key_env: SECONDARY_KEY
+profiles:
+  default:
+    lanes:
+      review:
+        provider: extra
+`
+	harness := newOverlayHarness(t, overlayTestBase, overlay)
+	before := harness.read()
+	req := harness.request(
+		OverlayChange{Path: []string{"providers", "extra"}, Delete: true},
+	)
+	req.CheckRemovedProviders = func(_ context.Context, removed []string) ([]string, error) {
+		if len(removed) != 1 || removed[0] != "extra" {
+			t.Fatalf("removed providers = %v, want [extra]", removed)
+		}
+		return []string{"overrides.lanes.review.model refers to providers.extra"}, nil
+	}
+	_, err := harness.apply(req)
+	writeErr := requireOverlayError(t, err, OverlayErrorProviderInUse)
+	joined := strings.Join(writeErr.Details, "\n")
+	for _, want := range []string{
+		"profiles.default.lanes.review.provider refers to providers.extra",
+		"overrides.lanes.review.model refers to providers.extra",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("referrer details lack %q:\n%s", want, joined)
+		}
+	}
+	if !bytes.Equal(before, harness.read()) {
+		t.Fatal("overlay changed after a referenced provider delete")
 	}
 }
 
