@@ -210,29 +210,23 @@ func (s *Server) writeConfigOverlayError(w http.ResponseWriter, r *http.Request,
 	writeError(w, r, status, writeErr.Code, writeErr.Message, details)
 }
 
-// checkOverlayProviderReferences rejects deleting a provider that a stored
-// profile override still names. The overrides are not modified.
-func (s *Server) checkOverlayProviderReferences(ctx context.Context, providers []string) error {
+// checkOverlayProviderReferences returns the stored profile override fields
+// that still name one of the providers being removed. The overrides are not
+// modified; the overlay writer aggregates these details with configuration
+// profile references into one provider_in_use rejection.
+func (s *Server) checkOverlayProviderReferences(ctx context.Context, providers []string) ([]string, error) {
 	if s.profileOverrides == nil || len(providers) == 0 {
-		return nil
+		return nil, nil
 	}
 	overrides, err := s.profileOverrides.GetProfileOverrides(ctx, "default")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	names := make(map[string]bool, len(providers))
 	for _, provider := range providers {
 		names[provider] = true
 	}
-	references := app.OverrideProviderReferences(overrides.OverridesJSON, names)
-	if len(references) == 0 {
-		return nil
-	}
-	return &config.OverlayWriteError{
-		Code:    config.OverlayErrorProviderInUse,
-		Message: "the provider is referenced by stored profile overrides",
-		Details: references,
-	}
+	return app.OverrideProviderReferences(overrides.OverridesJSON, names), nil
 }
 
 // auditConfigOverlay records actor, paths and revisions after a write. Values

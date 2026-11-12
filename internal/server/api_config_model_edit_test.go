@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"testing"
@@ -193,5 +194,58 @@ profiles:
 	}
 	if harness.readOverlay() != before {
 		t.Fatal("referenced provider delete modified the overlay")
+	}
+}
+
+// TestConfigModelOverlayEditAggregatesConfigAndStoredReferences returns both
+// referrer kinds in one 409, so a reset does not need a second attempt (#441).
+func TestConfigModelOverlayEditAggregatesConfigAndStoredReferences(t *testing.T) {
+	const overlay = `
+providers:
+  referenced-only:
+    protocol: openai-chat
+    model: gpt-test
+    api_key_env: SECONDARY_KEY
+profiles:
+  default:
+    lanes:
+      review:
+        provider: referenced-only
+`
+	harness := newOverlayAPIHarness(t, overlayAPIBase, overlay)
+	ctx := context.Background()
+	const overrides = `{"lanes":{"review":{"model":"config:referenced-only"}}}`
+	if _, err := harness.env.sqlite.PutProfileOverrides(ctx, "default", overrides, 0, 7); err != nil {
+		t.Fatalf("PutProfileOverrides: %v", err)
+	}
+	before := harness.readOverlay()
+	admin := harness.env.loginAs("code-admin")
+	response := harness.patch(admin, harness.requestBody(
+		deleteChange([]string{"providers", "referenced-only"}),
+	))
+	assertStatus(t, response, http.StatusConflict)
+	body := harness.env.decode(t, response)
+	if code := errorCode(t, body); code != config.OverlayErrorProviderInUse {
+		t.Fatalf("error code = %q, want %q", code, config.OverlayErrorProviderInUse)
+	}
+	details, _ := body["error"].(map[string]any)["details"].([]any)
+	joined := ""
+	for _, detail := range details {
+		joined += detail.(map[string]any)["message"].(string) + "\n"
+	}
+	for _, want := range []string{
+		"profiles.default.lanes.review.provider refers to providers.referenced-only",
+		"overrides.lanes.review.model refers to providers.referenced-only",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("details lack %q:\n%s", want, joined)
+		}
+	}
+	if harness.readOverlay() != before {
+		t.Fatal("referenced provider delete modified the overlay")
+	}
+	stored, err := harness.env.sqlite.GetProfileOverrides(ctx, "default")
+	if err != nil || stored.OverridesJSON != overrides {
+		t.Fatalf("stored overrides changed: %+v, %v", stored, err)
 	}
 }

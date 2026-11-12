@@ -29,6 +29,7 @@
 - **修正 `thinking_enabled` 审计语义并新增 `thinking_type`**（[#404](https://github.com/LeXwDeX/Tribunal/issues/404)）：`wire.thinking_enabled` 改为按协议反映实际 thinking 状态：`openai-chat` 为显式 `thinking.type=enabled`，`openai-responses` 为显式 `reasoning.effort` 非空且不是 `none`，`anthropic` 仍由 thinking budget 决定。新增 `wire.thinking_type` 记录实际发送的 thinking 开关（`openai-chat` 的 `enabled` / `disabled`；`anthropic` 开启 thinking 时为 `enabled`）。审计不记录 reasoning 正文或摘要。
 - **兼容性与已知限制**（[#404](https://github.com/LeXwDeX/Tribunal/issues/404)）：新增能力字段均为 `omitempty`，旧 provider identity JSON（评审执行身份）逐字节不变；未开启新能力时请求体与旧版一致。DeepSeek thinking + tools 要求后续请求完整回传 `reasoning_content`，否则可能返回 HTTP 400；该真实上游行为需用用户凭据验证，本次尚未验证。工具执行模型不变：`openai-chat` 只支持 function 类型工具，`openai-responses` 的 `parallel_tool_calls` 被上游忽略且并行始终开启，Tribunal 仍按顺序串行执行一条响应中的多个 `tool_calls`；没有工具名映射。
 - **控制台 DatePicker 支持模态内交互**（[#419](https://github.com/LeXwDeX/Tribunal/issues/419)）：`Dialog`/`Drawer` 内的日期弹层改为 portal 到最近模态容器，保持在 `aria-modal` 子树内，Tab/Shift+Tab 不会把焦点交给对话框关闭按钮；点击月份标题、星期行或弹层留白不再误关闭；月份导航后焦点留在按钮；disabled 关闭（焦点位于日历时）和极矮视口下焦点与可用高度有兜底。仍未覆盖自建模态容器与改变 fixed 包含块的 transform/filter 祖先。
+- **配置编辑的应用状态与重置边界**（[#441](https://github.com/LeXwDeX/Tribunal/issues/441)）：保存 overlay 后以保存前的 `overlay_revision` 为基线，快照出现任何不同 revision（包括其他管理员写入导致的更高 revision）即结束应用态并恢复「编辑配置」；15 秒未更新或快照请求失败时显示提示并恢复编辑，不再无限轮询。对只存在于 overlay 的 provider 执行「重置为 base」后，运行期目录仍列出卡片时显示「已从配置移除，重启后消失」并隐藏编辑入口，不再误报「配置文件快照不可用」。`409 provider_in_use` 现在一次返回配置 `profiles` 与迁移 0028 存储覆盖两类引用，且仍不写数据库。`base_url` 字段说明补充「留空沿用协议适配器默认端点」；`docs/design/07` 区分抽屉内的来源文字与卡片上的来源徽标。
 
 ### 新增
 
