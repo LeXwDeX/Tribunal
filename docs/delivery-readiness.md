@@ -70,6 +70,22 @@
 - 前端回归覆盖：409 时列出受影响字段与消息、确认按钮变为「仍然重置」、force 后刷新 models/config；无 `details` 时显示兜底提示；`ConfirmDialog` 无 children/error 时不渲染空 body；显式 `max_tokens=0` + 继承默认时 budget 校验报错；390/1440 宽度与亮暗主题契约。
 - GitHub Actions 的 go/web/docker 在 PR head 通过；**BLOCKED**：未运行自建 CI 与真实部署验收。
 
+## v1.4.0 发布检查表
+
+> 候选：`main` `c642c74` 加本次发布准备提交；发布时以实际 tag 提交为准。真实生产升级尚未执行，Stage 1–4 均为待执行/待完成，不能把本地验证、自建 CI 或 GitHub Actions 的结果写成生产 PASS。
+
+| 检查项 | 状态 | 证据 / 原因 |
+|---|---|---|
+| Stage 1 自建 CI（合并门禁） | 待执行 | 需对候选提交运行自建 CI，`summary.txt` 末行须为 `RESULT PASS` |
+| Stage 2 GitHub Runner | 待执行 | 需对同一候选提交运行 `ci.yml` 的 `go`、`web`、`docker`，三项全部通过 |
+| Stage 3 生产验收 | 待生产验收 | 部署到生产环境后填写：健康检查与 `/readyz`、迁移 `0029`/`0030` 应用、项目与历史评审可读、升级前一致性备份与回滚快照可用 |
+| Stage 4 tag `v1.4.0` 与 GitHub Release | 待完成 | 仅在 Stage 2 与 Stage 3 对同一提交通过后，由维护者或获授权的 agent 打 tag 并发布 |
+| 关键迁移 | 待验证 | `0029_model_param_defaults`、`0030_remove_cost`，均不可逆；`0030` 重建 `workflows`/`workflow_nodes` 并剥离模型参数中的 legacy `price` |
+| 升级影响 | 待验证 | 引用 legacy `price` 的 `user:` 模型的未终态评审会在升级重启后以 `profile_hash_changed` 取消；控制台成本展示已由 [#408](https://github.com/LeXwDeX/Tribunal/issues/408) 移除，前后端须同批发布 |
+| CHANGELOG 与发布文档 | 已完成（文档） | 本次发布准备提交更新 `CHANGELOG.md`、`docs/delivery-readiness.md` 与 `docs/operations.md` |
+
+本地验证记录见本文件上方“成本移除本地验证（#407，PR #430）”“user 模型全局默认参数本地验证（#413）”“全局默认重置跨模型校验本地验证（#439）”各节；迁移与回退边界见[迁移与回退边界](#迁移与回退边界)与[移除成本字段迁移](operations.md#移除成本字段迁移v140)。
+
 ## v1.3.0 发布检查表（#294）
 
 | 检查项 | 状态 | 证据 / 原因 |
