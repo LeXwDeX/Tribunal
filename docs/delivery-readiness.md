@@ -72,17 +72,19 @@
 
 ## v1.4.0 发布检查表
 
-> 候选：`main` `c642c74` 加本次发布准备提交；发布时以实际 tag 提交为准。真实生产升级尚未执行，Stage 1–4 均为待执行/待完成，不能把本地验证、自建 CI 或 GitHub Actions 的结果写成生产 PASS。
+> 候选：`main` `acbd90d`（发布准备提交的 squash 合并）；v1.4.0 已于 2026-11-12 完成自建 CI、GitHub CI、生产部署验收与 tag/Release；tag 指向已验收的候选提交。
 
 | 检查项 | 状态 | 证据 / 原因 |
 |---|---|---|
-| Stage 1 自建 CI（合并门禁） | 待执行 | 需对候选提交运行自建 CI，`summary.txt` 末行须为 `RESULT PASS` |
-| Stage 2 GitHub Runner | 待执行 | 需对同一候选提交运行 `ci.yml` 的 `go`、`web`、`docker`，三项全部通过 |
-| Stage 3 生产验收 | 待生产验收 | 部署到生产环境后填写：健康检查与 `/readyz`、迁移 `0029`/`0030` 应用、项目与历史评审可读、升级前一致性备份与回滚快照可用 |
-| Stage 4 tag `v1.4.0` 与 GitHub Release | 待完成 | 仅在 Stage 2 与 Stage 3 对同一提交通过后，由维护者或获授权的 agent 打 tag 并发布 |
-| 关键迁移 | 待验证 | `0029_model_param_defaults`、`0030_remove_cost`，均不可逆；`0030` 重建 `workflows`/`workflow_nodes` 并剥离模型参数中的 legacy `price` |
-| 升级影响 | 待验证 | 引用 legacy `price` 的 `user:` 模型的未终态评审会在升级重启后以 `profile_hash_changed` 取消；控制台成本展示已由 [#408](https://github.com/LeXwDeX/Tribunal/issues/408) 移除，前后端须同批发布 |
-| CHANGELOG 与发布文档 | 已完成（文档） | 本次发布准备提交更新 `CHANGELOG.md`、`docs/delivery-readiness.md` 与 `docs/operations.md` |
+| Stage 1 自建 CI（合并门禁） | PASS | 候选 `acbd90d` 的自建 CI `go`/`web`/`docker` 全部 PASS，`summary.txt` 末行 `RESULT PASS`；go 语句覆盖率 81.89%（最低要求 70%） |
+| Stage 2 GitHub Runner | PASS | 同一候选 `acbd90d` 的 `ci.yml` `go`、`web`、`docker` 全部通过 |
+| Stage 3 生产验收 | PASS | 部署镜像 digest `sha256:46687f2e…`；`/healthz` 与 `/readyz` 200；公网控制台加载新前端资源；迁移 `0029`、`0030` 已应用（29 条记录，最大 `0030`）；`workflows`/`workflow_nodes` 已无 `cost_micros`，`llm_model_defaults` 已建；21 个历史工作流、5 个项目可读，SQLite `integrity_check` 为 ok；启动日志无 ERROR/WARN，容器 0 重启；升级前停服一致性备份（数据库及 WAL/SHM、工作区、配置、镜像记录）已校验，旧镜像保留 |
+| Stage 4 tag `v1.4.0` 与 GitHub Release | PASS | tag `v1.4.0` 指向 `acbd90d`，GitHub Release 已发布为 Latest |
+| 关键迁移 | PASS | `0029_model_param_defaults`、`0030_remove_cost` 已在生产应用；`0030` 重建 `workflows`/`workflow_nodes` 并剥离模型参数中的 legacy `price`；均不可逆 |
+| 升级影响 | PASS | 生产升级后 21 个历史工作流与 5 个项目可读；控制台成本展示已由 #408 移除；引用 legacy `price` 的 user 模型在途评审会以 `profile_hash_changed` 取消的语义已在文档与测试中锁定 |
+| CHANGELOG 与发布文档 | PASS | `[1.4.0] - 2026-11-12` 发布摘要、检查表与运维说明已随 release candidate 合并 |
+
+生产升级记录只写公开标识与结果，不含环境地址、主机名或内部路径。
 
 本地验证记录见本文件上方“成本移除本地验证（#407，PR #430）”“user 模型全局默认参数本地验证（#413）”“全局默认重置跨模型校验本地验证（#439）”各节；迁移与回退边界见[迁移与回退边界](#迁移与回退边界)与[移除成本字段迁移](operations.md#移除成本字段迁移v140)。
 
