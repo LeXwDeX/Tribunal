@@ -621,11 +621,6 @@ func applyBudgetGap(result *SynthesisResult, exhausted bool) {
 	}})
 }
 
-// onboardingMaxTurns gives repository exploration more room than the
-// agent.DefaultMaxTurns used by review nodes (#255). Time, token and context
-// budgets can still end a run first.
-const onboardingMaxTurns = 90
-
 func (e *Executor) executeOnboarding(ctx context.Context, in dag.NodeInput) (dag.NodeOutput, error) {
 	params, err := decodeParams[onboardingParams](in.Node.Params)
 	if err != nil {
@@ -657,7 +652,6 @@ func (e *Executor) executeOnboarding(ctx context.Context, in dag.NodeInput) (dag
 		Task:       onboardingTask(e.deps.Dossier),
 		Builtins:   true,
 		BlockTools: true,
-		MaxTurns:   onboardingMaxTurns,
 		// Onboarding has no deterministic fallback; a partial overview from
 		// the evidence so far is better than a failed workspace.
 		BudgetSubmitPrompt: true,

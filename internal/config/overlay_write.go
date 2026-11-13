@@ -773,6 +773,7 @@ var profileLeafKinds = map[string]leafKind{
 	"plan.max_packages":          kindInt,
 	"budget.max_nodes":           kindInt,
 	"budget.max_tokens":          kindInt,
+	"budget.max_turns":           kindInt,
 	"budget.deadline":            kindDuration,
 }
 

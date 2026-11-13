@@ -67,7 +67,7 @@ func TestStatusGoalAttemptOrderingThroughJob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if body := f.gitlab.notes[0].Body; parseStatusPhase(body) != reviewStatusQueued || row.BodyHash != sha256Hex(body) {
+	if body := f.gitlab.notes[0].Body; parseStatusPhase(body) != reviewStatusPhase(reviewStatusQueued) || row.BodyHash != sha256Hex(body) {
 		t.Fatalf("retry not visible: %q %+v", body, row)
 	}
 }
@@ -86,7 +86,7 @@ type blockedLiveStatusGitLab struct {
 }
 
 func (g *blockedLiveStatusGitLab) UpdateMRNote(ctx context.Context, token string, projectID, iid, noteID int64, body string) error {
-	if parseStatusPhase(body) == reviewStatusRunning {
+	if parseStatusPhase(body) == reviewStatusPhase(reviewStatusRunning) {
 		close(g.entered)
 		select {
 		case <-g.release:
@@ -166,13 +166,13 @@ func TestStatusWaiterReadsGoalAfterPreviousWriterReleases(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := notes[0].Body
-	if parseStatusPhase(body) != reviewStatusPass || row.AppliedVersion != row.Version || row.BodyHash != sha256Hex(body) {
+	if parseStatusPhase(body) != reviewStatusPhase(reviewStatusPass) || row.AppliedVersion != row.Version || row.BodyHash != sha256Hex(body) {
 		t.Fatalf("waiter used stale goal: %q %+v", body, row)
 	}
 }
 
 func (g *lateStatusGitLab) UpdateMRNote(ctx context.Context, token string, projectID, iid, noteID int64, body string) error {
-	if parseStatusPhase(body) != reviewStatusRunning {
+	if parseStatusPhase(body) != reviewStatusPhase(reviewStatusRunning) {
 		return g.reviewGitLab.UpdateMRNote(ctx, token, projectID, iid, noteID, body)
 	}
 	go func() {
@@ -239,7 +239,7 @@ func TestStatusLateCompletionAfterCancellationRepairs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if body := notes[0].Body; parseStatusPhase(body) != reviewStatusPass || row.BodyHash != sha256Hex(body) {
+	if body := notes[0].Body; parseStatusPhase(body) != reviewStatusPhase(reviewStatusPass) || row.BodyHash != sha256Hex(body) {
 		t.Fatalf("late request not repaired: %q %+v", body, row)
 	}
 	if f.runner.count() != 0 {
@@ -609,7 +609,8 @@ func TestStatusVerificationSettlesTerminalError(t *testing.T) {
 		t.Fatal(err)
 	}
 	drainReviewJobs(t, f, "review.status")
-	f.gitlab.notes[0].Body = "<!-- gitlab-ce-review:status v1 -->\nstale"
+	staleBody := reviewStatusMarkerLine + "\nstale"
+	f.gitlab.notes[0].Body = staleBody
 	f.gitlab.statusNoteErr = &gitlab.Error{Op: "update_note", Status: 403}
 	if err := f.service.ReconcileSideEffects(ctx); err != nil {
 		t.Fatal(err)
@@ -633,14 +634,14 @@ func TestStatusVerificationSettlesTerminalError(t *testing.T) {
 		t.Fatal(err)
 	}
 	drainReviewJobs(t, f, "review.status")
-	if f.gitlab.notes[0].Body != "<!-- gitlab-ce-review:status v1 -->\nstale" {
+	if f.gitlab.notes[0].Body != staleBody {
 		t.Fatal("terminal version retried automatically")
 	}
 	if _, err := f.db.EnqueueReviewLatest(ctx, store.ReviewCommand{ProjectID: 42, MRIID: 7, HeadSHA: f.head}); err != nil {
 		t.Fatal(err)
 	}
 	drainReviewJobs(t, f, "review.status")
-	if got := parseStatusPhase(f.gitlab.notes[0].Body); got != reviewStatusQueued {
+	if got := parseStatusPhase(f.gitlab.notes[0].Body); got != reviewStatusPhase(reviewStatusQueued) {
 		t.Fatalf("new generation did not recover: %s", got)
 	}
 }
@@ -722,7 +723,7 @@ func TestStatusReconcilesLateRemoteOverwriteAfterApplied(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if body := f.gitlab.notes[0].Body; parseStatusPhase(body) != reviewStatusPass || after.BodyHash != sha256Hex(body) || after.AppliedVersion != after.Version || !after.UpdatedAt.Equal(before.UpdatedAt) {
+	if body := f.gitlab.notes[0].Body; parseStatusPhase(body) != reviewStatusPhase(reviewStatusPass) || after.BodyHash != sha256Hex(body) || after.AppliedVersion != after.Version || !after.UpdatedAt.Equal(before.UpdatedAt) {
 		t.Fatalf("late overwrite not repaired: body=%q row=%+v", body, after)
 	}
 }

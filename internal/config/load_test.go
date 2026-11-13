@@ -54,7 +54,8 @@ func TestLoadDefaults(t *testing.T) {
 		t.Errorf("default profile = %+v", profile)
 	}
 	if profile.Budget.MaxNodes != 30 || profile.Budget.MaxExtends != 0 ||
-		profile.Budget.Deadline != 30*time.Minute || profile.Budget.MaxTokens != 0 {
+		profile.Budget.Deadline != 0 || profile.Budget.MaxTokens != 0 ||
+		profile.Budget.MaxTurns != 0 {
 		t.Errorf("default budget = %+v", profile.Budget)
 	}
 	if len(profile.Propose) != 1 || profile.Propose[0].Block != "code-review" || profile.Propose[0].Provider != "" {
@@ -129,7 +130,7 @@ profiles:
 		t.Errorf("arrays must replace, got %v", got)
 	}
 	defaultProfile := cfg.Profiles["default"]
-	if defaultProfile.Plan.PackageTokens != 123 || defaultProfile.Budget.MaxNodes != 30 || defaultProfile.Budget.Deadline != 30*time.Minute {
+	if defaultProfile.Plan.PackageTokens != 123 || defaultProfile.Budget.MaxNodes != 30 || defaultProfile.Budget.Deadline != 0 {
 		t.Errorf("default profile lost merged values or defaults: %+v", defaultProfile)
 	}
 	if lanes := defaultProfile.Lanes; lanes == nil || lanes.Review.Provider != "base-review" || lanes.Reasoner.Provider != "override-reasoner" {
@@ -306,7 +307,22 @@ profiles:
 	if got := cfg.Profiles["default"].Budget.MaxTokens; got != 2500000 {
 		t.Errorf("explicit budget.max_tokens = %d, want 2500000", got)
 	}
-	if got := cfg.Profiles["default"].Budget.Deadline; got != 30*time.Minute {
-		t.Errorf("budget.deadline default = %v, want 30m", got)
+	if got := cfg.Profiles["default"].Budget.Deadline; got != 0 {
+		t.Errorf("budget.deadline default = %v, want no deadline", got)
+	}
+}
+
+// Agent nodes have no request-count limit by default (#451); an operator who
+// still wants one keeps it by setting a positive value.
+func TestLoadKeepsExplicitTurnBudget(t *testing.T) {
+	path := writeConfig(t, "turns.yaml", `
+profiles:
+  default:
+    budget:
+      max_turns: 120
+`)
+	cfg := loadConfig(t, path)
+	if got := cfg.Profiles["default"].Budget.MaxTurns; got != 120 {
+		t.Errorf("explicit budget.max_turns = %d, want 120", got)
 	}
 }

@@ -90,7 +90,6 @@ func TestValidateGraphErrors(t *testing.T) {
 		{name: "reserved id", spec: baseSpec(node("a.output.b"))},
 		{name: "duplicate id", spec: baseSpec(node("a"), node("a"))},
 		{name: "empty kind", spec: baseSpec(NodeSpec{ID: "a"})},
-		{name: "negative timeout", spec: baseSpec(NodeSpec{ID: "a", Kind: "x", Timeout: -1})},
 		{name: "invalid params", spec: baseSpec(NodeSpec{ID: "a", Kind: "x", Params: []byte("{")})},
 		{name: "missing dep", spec: baseSpec(node("a", "ghost"))},
 		{name: "self dep", spec: baseSpec(node("a", "a"))},

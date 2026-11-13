@@ -12,14 +12,16 @@ import (
 	"unicode"
 
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
+	"github.com/LeXwDeX/tribunal/internal/review"
 	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/internal/workspace"
 )
 
 const (
-	// reviewStatusMarkerPrefix identifies the single status note maintained by
-	// this service. It is separate from the summary, finding, and reply markers.
-	reviewStatusMarkerPrefix = "<!-- gitlab-ce-review:status"
+	// reviewStatusMarkerPrefix identifies the single review note maintained by
+	// this service. It uses the summary marker so the status worker and the
+	// publisher both find and edit the same MR note (#451).
+	reviewStatusMarkerPrefix = review.SummaryMarkerPrefix
 	reviewStatusMarkerLine   = reviewStatusMarkerPrefix + " v1 -->"
 	reviewStatusDetailRunes  = 160
 
@@ -69,6 +71,9 @@ type reviewStatusUpdate struct {
 	HeadSHA         string
 	Generation      int64
 	EstimateMinutes int
+	// FinalBody is the rendered review summary. When set, the status note
+	// carries it below the lifecycle lines, so the MR has one review note.
+	FinalBody string
 }
 
 // statusReporter writes the durable status and reaction goals to GitLab. It
@@ -254,6 +259,9 @@ func statusMayRegress(previousBody, nextState string) bool {
 		return true
 	}
 	switch parseStatusPhase(previousBody) {
+	case "进行中", "已完成", "失败":
+		return false
+	// Bodies written before the phase split stored the lifecycle state.
 	case reviewStatusRunning, reviewStatusPublishing,
 		reviewStatusPass, reviewStatusBlocking, reviewStatusIncomplete,
 		reviewStatusFailed, reviewStatusCancelled, reviewStatusStale:
@@ -286,6 +294,8 @@ func reviewStatusBody(update reviewStatusUpdate) string {
 	b.WriteString(reviewStatusLabel(update.State))
 	b.WriteString("**\n\n")
 	b.WriteString("- 阶段：`")
+	b.WriteString(reviewStatusPhase(update.State))
+	b.WriteString("`\n- 状态：`")
 	b.WriteString(sanitizeStatusDetail(update.State))
 	b.WriteString("`\n")
 	if update.Generation > 0 {
@@ -308,7 +318,42 @@ func reviewStatusBody(update reviewStatusUpdate) string {
 		b.WriteString(detail)
 		b.WriteString("\n")
 	}
+	if body := strings.TrimSpace(update.FinalBody); body != "" {
+		b.WriteString("\n")
+		b.WriteString(stripSummaryMarker(body))
+		b.WriteString("\n")
+	}
 	return gitlab.NeutralizeQuickActions(b.String())
+}
+
+// reviewStatusPhase maps a lifecycle state to the four visible phases.
+func reviewStatusPhase(state string) string {
+	switch state {
+	case reviewStatusReceived, reviewStatusQueued:
+		return "开始"
+	case reviewStatusRunning, reviewStatusPublishing:
+		return "进行中"
+	case reviewStatusPass, reviewStatusBlocking, reviewStatusIncomplete:
+		return "已完成"
+	case reviewStatusFailed, reviewStatusCancelled, reviewStatusStale:
+		return "失败"
+	default:
+		return sanitizeStatusDetail(state)
+	}
+}
+
+// stripSummaryMarker removes the comment's summary marker line, if present.
+// The status note keeps only its own first-line marker for recovery. A body
+// without a newline after the marker keeps the text after the prefix.
+func stripSummaryMarker(body string) string {
+	body = strings.TrimSpace(body)
+	if !strings.HasPrefix(body, review.SummaryMarkerPrefix) {
+		return body
+	}
+	if idx := strings.IndexByte(body, '\n'); idx >= 0 {
+		return strings.TrimSpace(body[idx+1:])
+	}
+	return strings.TrimSpace(body[len(review.SummaryMarkerPrefix):])
 }
 
 func reviewStatusLabel(state string) string {

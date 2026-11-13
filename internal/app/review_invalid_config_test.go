@@ -49,7 +49,7 @@ func TestInvalidRepoConfigNoteOutboundPolicy(t *testing.T) {
 			if mode == "cancelled" {
 				cancel()
 			}
-			f.service.noteInvalidRepoConfig(ctx, "token", 42, 7)
+			f.service.noteInvalidRepoConfig(ctx, "token", 42, 7, 0, "")
 			want := 0
 			if mode == "valid" {
 				want = 1
@@ -73,7 +73,7 @@ func TestInvalidRepoConfigNoteRevocationDrainsSend(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		f.service.noteInvalidRepoConfig(ctx, "token", 42, 7)
+		f.service.noteInvalidRepoConfig(ctx, "token", 42, 7, 0, "")
 	}()
 	awaitOutbound(t, block.entered, "invalid config note")
 	changed := make(chan error, 1)
@@ -100,7 +100,7 @@ func TestInvalidRepoConfigNoteSanitizesError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.service.noteInvalidRepoConfig(ctx, "token", 42, 7)
+	f.service.noteInvalidRepoConfig(ctx, "token", 42, 7, 0, "")
 	if !strings.Contains(logs.String(), "error_class") || strings.Contains(logs.String(), "secret-token-in-error") {
 		t.Fatalf("unsanitized note error log: %s", logs.String())
 	}
@@ -147,6 +147,7 @@ func TestInvalidRepoConfigRevokedDuringCollection(t *testing.T) {
 func TestRunReviewInvalidRepoConfigIsPermanentAndCommented(t *testing.T) {
 	ctx := context.Background()
 	f := newReviewFixture(t, reviewTestHead)
+	f.service.status = testStatusReporter(f.gitlab)
 	f.gitlab.docs[".gitlab-review.yml"] = "ignore: [\n"
 	job := f.seedRunFor(t, "invalid-config", reviewTestHead, "mr_open")
 
@@ -160,10 +161,11 @@ func TestRunReviewInvalidRepoConfigIsPermanentAndCommented(t *testing.T) {
 	if _, err := f.db.GetWorkflowByJob(ctx, job.ID); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("workflow was created for invalid configuration: %v", err)
 	}
+	drainReviewJobs(t, f, "review.status")
 	if f.gitlab.noteCount() != 1 {
 		t.Fatalf("notes = %d, want one explanation comment", f.gitlab.noteCount())
 	}
-	if body := f.gitlab.notes[0].Body; body != invalidRepoConfigNote {
+	if body := f.gitlab.notes[0].Body; !strings.Contains(body, invalidRepoConfigNote) {
 		t.Fatalf("note = %q, want %q", body, invalidRepoConfigNote)
 	}
 }
@@ -171,6 +173,7 @@ func TestRunReviewInvalidRepoConfigIsPermanentAndCommented(t *testing.T) {
 func TestStoredInvalidIgnorePolicyIsPermanent(t *testing.T) {
 	ctx := context.Background()
 	f := newReviewFixture(t, reviewTestHead)
+	f.service.status = testStatusReporter(f.gitlab)
 	if _, err := f.db.UpdateProject(ctx, 42, store.ProjectUpdate{Settings: []byte(`{"ignore":["!keep"]}`)}); err != nil {
 		t.Fatalf("UpdateProject: %v", err)
 	}
@@ -188,6 +191,7 @@ func TestStoredInvalidIgnorePolicyIsPermanent(t *testing.T) {
 	if calls != 0 {
 		t.Fatalf("model calls = %d, want 0", calls)
 	}
+	drainReviewJobs(t, f, "review.status")
 	if f.gitlab.noteCount() != 1 {
 		t.Fatalf("notes = %d, want one explanation", f.gitlab.noteCount())
 	}

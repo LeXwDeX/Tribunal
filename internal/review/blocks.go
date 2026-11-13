@@ -72,15 +72,16 @@ const (
 )
 
 const (
-	DefaultPlanTimeout       = 5 * time.Minute
-	DefaultExploreTimeout    = 5 * time.Minute
-	DefaultReviewTimeout     = 10 * time.Minute
+	DefaultPlanTimeout    = 5 * time.Minute
+	DefaultExploreTimeout = 5 * time.Minute
+	// DefaultReviewTimeout is negative: review nodes have no node-level deadline
+	// by default (#451). The workflow deadline, when configured, still applies.
+	DefaultReviewTimeout     = -1
 	DefaultGatherTimeout     = 2 * time.Minute
 	DefaultAdjudicateTimeout = 2 * time.Minute
 	DefaultSynthesizeTimeout = 10 * time.Minute
 	DefaultOnboardingTimeout = 15 * time.Minute
 	DefaultMaxFanOut         = 36
-	DefaultDeadline          = 20 * time.Minute
 	DefaultPackageTokens     = 60000
 )
 
@@ -469,11 +470,12 @@ func ValidateProfile(profile Profile) (Profile, error) {
 	if cfg.Budget.Deadline < 0 {
 		return Profile{}, &ProfileError{Field: "budget.deadline", Problem: "must not be negative"}
 	}
-	if cfg.Budget.Deadline == 0 {
-		cfg.Budget.Deadline = DefaultDeadline
-	}
+	// A zero deadline means no workflow deadline (#451).
 	if cfg.Budget.MaxTokens < 0 {
 		return Profile{}, &ProfileError{Field: "budget.max_tokens", Problem: "must not be negative"}
+	}
+	if cfg.Budget.MaxTurns < 0 {
+		return Profile{}, &ProfileError{Field: "budget.max_turns", Problem: "must not be negative"}
 	}
 	if onboarding {
 		if cfg.Agent == nil || strings.TrimSpace(cfg.Agent.Provider) == "" {
@@ -609,9 +611,7 @@ func graphBudget(in config.BudgetConfig) dag.Budget {
 	if budget.MaxNodes == 0 {
 		budget.MaxNodes = 30
 	}
-	if budget.Deadline == 0 {
-		budget.Deadline = DefaultDeadline
-	}
+	// A zero deadline stays zero: the workflow has no deadline (#451).
 	return budget
 }
 

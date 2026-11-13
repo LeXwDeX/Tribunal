@@ -418,13 +418,13 @@ tribunalctl projects residues clean --yes
 
 ### 状态评论恢复
 
-状态评论的待处理目标与已成功应用的目标共用按项目和 MR 的循环扫描。调度器每 5 分钟触发一次，每个项目每次最多选取 100 条；这不是每 5 分钟完成全量核对。从头扫描且集合稳定时，150 条需要两次触发才能扫完；触发、排队、GitLab 访问或失败重试还可能增加耗时，不提供完成时限。服务重启后从头扫描。表情补排、过期 eyes、未完成状态及排队取消也分别按项目分页扫描；活跃或失败的行不会阻塞后续行。某行入队失败时，扫描仍前进，等回绕后再尝试该行；候选集合最终稳定、扫描持续推进且服务持续运行，才有回绕机会。状态核对任务读取当前目标并更新评论，不重新运行模型。
+状态评论的待处理目标与已成功应用的目标共用按项目和 MR 的循环扫描。状态 worker 与 publisher 维护同一条 MR note：状态行先显示生命周期，工作流结算后同一 note 追加评审报告；两者都按 `<!-- gitlab-ce-review:summary` 标记查找，结果写入 `review_status.final_body`。调度器每 5 分钟触发一次，每个项目每次最多选取 100 条；这不是每 5 分钟完成全量核对。从头扫描且集合稳定时，150 条需要两次触发才能扫完；触发、排队、GitLab 访问或失败重试还可能增加耗时，不提供完成时限。服务重启后从头扫描。表情补排、过期 eyes、未完成状态及排队取消也分别按项目分页扫描；活跃或失败的行不会阻塞后续行。某行入队失败时，扫描仍前进，等回绕后再尝试该行；候选集合最终稳定、扫描持续推进且服务持续运行，才有回绕机会。状态核对任务读取当前目标并更新评论，不重新运行模型。
 
 终止错误（如 401、403、404、422）会停止该版本的自动重试，即使该版本曾经成功发布也是如此；在同一版本保持不变期间，旧请求迟到造成的远端覆盖也不会自动修复。这样可避免对同一版本无限快速重试。其他生命周期事件可以生成新版本：例如超过两小时的 running 或 publishing 状态，恢复流程可根据已完成工作流写入终态，并再次尝试状态发送；这不是重试原版本，也不重新调用模型。若没有新的状态版本，权限或资源恢复后仅等待不会恢复核对；有权限的用户可以重新触发评审，生成新代次。重新评审会调用模型。项目禁用时不能发送，恢复启用后才可继续。
 
 同一服务内的同一 MR 状态写入串行，但 GitLab 的更新没有条件写入：超时、取消、租约过期或进程退出不能撤回已经发出的请求，旧状态可能在新状态之后短暂出现。只有在旧请求最终停止、服务持续运行、任务能公平执行且 GitLab 读写最终成功并可见时，周期复核才会恢复当前状态；它不提供固定恢复时限。请求和评论列表并非原子操作，重复创建可能留下多个同 bot 标记；系统只更新列表中选中的一个，不删除评论，也不保证其他重复评论收敛。遇到重复标记时由有权人员人工核对。真实 GitLab 取消后的远端时序尚未验证。
 
-摘要评论创建的响应丢失后，重试前会回读本 bot 的摘要标记；身份或回读不可用时停止创建，稍后可重试发布。包含 #164 的版本在已绑定评论更新返回 404 时也会回读：旧评论不在列表中时，复用本 bot 的其他摘要标记，找不到才新建并更新绑定；旧评论仍可见时保留错误，不新建。写入前复核已存代次及非空 head，但检查与在途请求不是原子操作。回读与创建不是原子操作，不同工作流并发或 GitLab 列表延迟仍可能导致重复评论。系统不会自动删除已有重复评论；需要人工核对。
+评审评论（状态/结果同一条 note）创建的响应丢失后，重试前会回读本 bot 的摘要标记；身份或回读不可用时停止创建，稍后可重试发布。状态/结果评论与摘要不再分开维护：publisher 先写 `final_body`，再按同一 `reviewStatusBody` 更新 note；publisher 的 note 写入失败按发布失败路径重试，状态作业自身的失败随后由 `review.status` 作业对账重试。包含 #164 的版本在已绑定评论更新返回 404 时也会回读：旧评论不在列表中时，复用本 bot 的其他摘要标记，找不到才新建并更新绑定；旧评论仍可见时保留错误，不新建。写入前复核已存代次及非空 head，但检查与在途请求不是原子操作。回读与创建不是原子操作，不同工作流并发或 GitLab 列表延迟仍可能导致重复评论。系统不会自动删除已有重复评论；升级前的旧 summary note 和旧 `<!-- gitlab-ce-review:status` 评论也不会被识别或清理。需要人工核对。
 
 ### 项目授权、用户停用和凭据撤销
 
@@ -979,7 +979,7 @@ curl -fsS http://127.0.0.1:18080/readyz
 
 `0024_workflow_usage_incomplete.sql` 只向 `workflows` 和 `workflow_nodes` 追加非空 `usage_incomplete` 列，默认 false；无 down migration。历史行不回填，false 只能表示没有检测到缺失，不能证明历史账单或预算用量完整。新事件可带此字段；旧二进制可能因严格解码拒绝这些事件。升级前按第 7 节做一致性备份并核验数据库、工作区、配置和匹配镜像；不要只换回旧镜像。回退时先备份当前状态、核对事件与目标版本兼容性，并按第 7 节在隔离环境验证匹配的升级前快照和镜像；恢复旧快照会丢失之后的新本地数据，须另外核对 GitLab 等外部副作用。`0020` 已在 `cf29656` 合并，`0021`–`0023` 随 PR #180 合并；当前源码检查未发现这些迁移重建上述两张表，升级前仍须重新核验迁移编号、顺序及实际影响，不能据此承诺兼容回退。
 
-**token 预算默认关闭（#392）**：`profiles.default.budget.max_tokens` 默认 0，不做工作流 token 预算检查，用量由上游 LLM key 的额度决定；上游额度耗尽时节点以上游错误失败，评审结论为 INCOMPLETE。需要限制单次评审 token 时，在挂载配置中把它设为正数并重启。镜像不会改写挂载配置：从旧版 `config/server.example.yaml` 复制的配置带有显式 `max_tokens: 1500000`，升级时须删除该项或改为 0。下文与预算相关的行为只在 `max_tokens > 0` 时生效。
+**token 预算默认关闭（#392）**：`profiles.default.budget.max_tokens` 默认 0，不做工作流 token 预算检查，用量由上游 LLM key 的额度决定；上游额度耗尽时节点以上游错误失败，评审结论为 INCOMPLETE。需要限制单次评审 token 时，在挂载配置中把它设为正数并重启。镜像不会改写挂载配置：从旧版 `config/server.example.yaml` 复制的配置带有显式 `max_tokens: 1500000`，升级时须删除该项或改为 0。下文与预算相关的行为只在 `max_tokens > 0` 时生效。工作流 deadline 与每节点模型请求数的默认值变化见[评审回合、超时与评论合并](#评审回合超时与评论合并451)。
 
 **重启恢复与 token 预算（#325）**：进程被 SIGKILL 或崩溃后，启动恢复会重启运行中的节点（attempt+1），并把该工作流的用量标记为不完整（`usage_incomplete=true`，API 和控制台仍显示）。视图中的三个标记均由事件投影（#346 起 `usage_interruptions` 也通过评审详情、节点详情和图节点的 API 返回，为 0 时省略；控制台显示「单节点最多中断恢复 N 次」；`usage_unreported` 仍只在内部视图）：`usage_incomplete`（检测到任何缺失，含重启或中止）、`usage_unreported`（不完整源于进程中断以外的原因：节点上报不完整、无效用量或计数溢出）、`usage_interruptions`（任一单个节点被恢复重启并标记为不完整的最大次数；一轮恢复同时重启多个节点只计 1 次）。对设置了 `max_tokens > 0` 的工作流，仅当 `usage_unreported` 为真或 `usage_interruptions` 超过 3（同一节点被中断超过 3 次）时以 `unsafe_model_response` 阻断，否则以已提交用量作为下限继续运行。已接受的风险：每次中断可能丢失当时所有运行中节点的 attempt 尚未提交的全部用量（每一轮和节点内重试），实际花费可能超过记录总量；同一节点被中断超过 3 次后预算检查重新 fail-closed，工作流期限仍限制运行时长；被取代 attempt 的迟到提交会被丢弃且不记用量。需要核对实际开销时，以供应方账单为准。
 
@@ -1089,6 +1089,26 @@ legacy `providers.*.price` 在 v1.4.0 仍会解析，仅用于兼容旧 YAML 和
 
 升级后默认参数为空（`revision 0`），现有用户模型的生效参数与升级前一致。管理员在控制台「模型与档位」页或通过 `GET/PUT/DELETE /api/v1/model-defaults` 设置默认值后，新的模型读取、草稿测试和之后启动的评审使用合并后的参数；进行中的评审继续使用启动时的 client 快照。保存默认值时会用候选值合并每个现有可用 `user:` 模型并按协议交叉校验，会让模型变为不可用的组合（例如 anthropic 的 `thinking.budget_tokens` 1–1023 或 `reasoning.effort: none`）返回 400 且不写库；已因当前默认无效的模型会跳过，不会阻塞无关的保存。重置（DELETE）先校验 `revision`，再以空候选默认做同一校验，会让现有可用 `user:` 模型不可用时返回 409 `defaults_in_use` 且不写库；当前默认本身为空时重置是 no-op 并直接成功。管理员确认后可用 `force=true` 强制重置（`force` 只接受 `true` / `false`），审计记录 `force` 与受影响字段。重置同样必须带当前 `revision`，尚无记录（`revision=0`）或版本不匹配返回 409 `stale_revision`。默认值进入被引用 `user:` 模型的档位哈希，修改默认值后重启恢复可能使未终态评审以 `profile_hash_changed` 取消，需要重新触发；不希望影响在途评审时先让其结束。token 预算与 token 统计（`tokens_in`、`tokens_out`、`budget.max_tokens`）不受该迁移影响。
 
+### 评审回合、超时与评论合并（#451）
+
+**默认值变化**：`profiles.default.budget.deadline` 默认从 30m 改为 `0s`，表示不设工作流 deadline；新增 `budget.max_turns`，默认 0 表示每个 agent 节点不限制模型请求数；评审 agent 节点（`code-review`、`review`、`reasoner`、`validate`、`verify`）的默认节点级超时从 10m 改为无节点级 deadline。`explore`（5m）、`plan`（5m）、`gather`（2m）、`adjudicate`（2m）、`synthesize`（10m）和 onboarding（15m）仍保留固定超时。显式正数 `max_turns` 到达后仍未提交 `submit_result` 的节点失败；agent 运行仍会在 `submit_result`、上下文窗口、调用方 token 预算或 context deadline 时结束。需要恢复旧的硬限制时显式设置：
+
+```yaml
+profiles:
+  default:
+    budget: { max_nodes: 30, deadline: 30m, max_tokens: 0, max_turns: 30 }
+```
+
+镜像不会改写挂载配置：从旧版 `config/server.example.yaml` 复制的配置仍带有显式 `deadline: 30m`（以及可能的 `max_tokens: 1500000`），升级时须检查挂载文件并按需改为 0 或保留；未配置 `max_turns` 时按 0 处理。
+
+**档位哈希与在途评审**：新增 `max_turns` 字段和默认值变化会改变评审档位哈希。升级重启恢复时，未终态评审会以 `profile_hash_changed` 取消，需要重新触发；升级前先让在途评审结束，或接受取消后重新触发。
+
+**迁移 `0031_review_status_final_body`**：为 `review_status` 追加 `final_body TEXT NOT NULL DEFAULT ''`，只加列，不改写已有行。旧行 `final_body` 为空，状态评论继续显示旧正文，下一次评审覆盖。该迁移没有 down migration；回退须按第 7 节恢复升级前快照并启动匹配的旧镜像。
+
+**评论合并**：状态和评审结果现在是同一条 MR note（首行标记 `<!-- gitlab-ce-review:summary v1 -->`，正文包含四阶段状态行和结算后的评审报告，格式见[评论渲染](design/04-dag-and-contracts.md#91-评审评论状态与结果合并)）。升级不会迁移或删除升级前已有的 summary note 和旧状态评论（`<!-- gitlab-ce-review:status`）；新代码只按 summary 标记查找并更新其中一条，旧评论可能残留，需要人工核对清理。服务不删除评论，也不保证多条同标记评论收敛。`final_body` 先持久化并已入队 `review.status`；publisher 的 note 写入失败按发布失败路径重试，状态作业自身的失败由状态对账重试同一条 note，不改变已完成的评审结论。
+
+**旧行内讨论**：评论模板变化（标题格式、正文 400 字符）不改变 `publish_key`；旧讨论的正文哈希与按新模板渲染的正文不同，复用判定按现有安全策略把当前 finding 只放进汇总并追加警告，不修改旧讨论，也不会因此重复发布。服务不会自动改写或删除旧讨论，这是预期行为；需要核对时按 MR 人工检查发布记录和讨论正文。
+
 ### 通用升级与回滚步骤
 
 升级步骤：
@@ -1190,7 +1210,7 @@ v1.2.0 起，所有 `PUT /api/v1/block-bindings/{block}` 必须带 `expected_rev
 
 影响：
 
-- **token 用量预期更大。** 每次评审运行的 LLM agent 节点从原来的一两个增加到多个（`explore`、每个包的 `code-review` 与 `review`、`reasoner`、`validate`，另有每条 P0/P1 的 `verify`）。具体增幅以后另行测量，此处不给出数字；升级后按实际用量核对 `budget.max_tokens`。`budget.deadline` 默认从 20m 改为 30m。
+- **token 用量预期更大。** 每次评审运行的 LLM agent 节点从原来的一两个增加到多个（`explore`、每个包的 `code-review` 与 `review`、`reasoner`、`validate`，另有每条 P0/P1 的 `verify`）。具体增幅以后另行测量，此处不给出数字；升级后按实际用量核对 `budget.max_tokens`。`budget.deadline` 默认从 20m 改为 30m（本节的 30m 是 v1.3.0 的行为；后续 #451 已改为 0s，见[评审回合、超时与评论合并](#评审回合超时与评论合并451)）。
 - **工作流身份变化。** 提示词新增 `explore.md`、`review.md`、`validate.md`，`_platform_rules.md` 升到 v5，`TaskRenderVersion` 由 4 改为 5。评审档位和提示词身份已变化，升级前创建的未终态工作流在启动恢复时被取消，不会在新版本下续跑、重试或发布；升级前按[多 Provider 配置](#多-provider-配置)第 4 步核对未完成评审和待发布结果，需要时等待其结束或接受取消后重新触发。
 - **已有的 `reasoner` 块绑定开始生效。** reasoner 一路现在以块 `reasoner` 运行，此前登记在该块上的 MCP 工具和 Skill 绑定会开始作用于它；升级前核对这些绑定。
 - **挂载的配置文件需要手工补充工具授权。** 镜像不会改写已挂载的配置文件。要让 `explore` 和 `validate` 使用 codebase-memory 工具，把这两个块加入 `default_extensions.mcp_servers[].tools`（见 `config/server.example.yaml`）；否则这两路只带内置的 `read_file` / `grep` 运行。
@@ -1206,7 +1226,7 @@ v1.2.0 起，所有 `PUT /api/v1/block-bindings/{block}` 必须带 `expected_rev
 1. 先按第 8 节的通用步骤备份并记录当前镜像、实际挂载配置。
 2. 把 `profiles.default` 改成新字段：`propose` 改为 `provider` 与 `lanes.code_review` / `lanes.review`，`reasoner.provider` 改为 `lanes.reasoner.provider`，`challenge.provider: cross` 改为明确的 `challenge.provider`，不再写 `plan.mode`、`plan.provider`、`consensus`、`on_uncertain`、`synthesize`、`budget.max_extends`。
 3. 删除 `default`、`onboarding` 以外的档位，并清理引用它们的位置：项目的档位（用 `PATCH /api/v1/projects/{id}` 改为 `default`）、`settings.profile_by_label`、仓库 `.gitlab-review.yml` 的 `profile` 和评论命令。这些位置遗留的旧档位名在评审时按 `default` 处理，但保存时只接受 `default`：项目注册或更新为其他档位返回 400 `unknown profile`，`/review <名称>` 的名称不是 `default` 时命令被忽略；保存 `settings.profile_by_label` 时，值不是 `default` 的映射（包括 `onboarding` 和已移除的档位）被丢弃而不是被拒绝，遗留设置仍可编辑。`onboarding` 在这些位置都不被接受为评审档位。
-4. 运行 `--check-config` 并启动，检查启动日志**没有** `configuration was migrated or ignored` 告警（迁移告警在配置校验之前输出，校验失败时同样可见）。`plan.max_packages` 高于 `min(17, (budget.max_nodes − 9) / 2)`（至少 1）时被降到该上界并告警，未配置而上界低于默认值 6 时静默降低；`budget.deadline` 低于 30m 时也会告警。评审档位既没有 `provider` 也没有 `lanes.code_review.provider` 时，评审图构建失败，字段为 `provider`。若要 `explore` / `validate` 使用 codebase-memory 工具，先按上面的说明补充 `default_extensions.mcp_servers[].tools`。每条告警的字段名指出需要手工清理的配置；迁移得到的 provider 仍会被校验，错误会指向新字段，例如 `profiles.default.lanes.reasoner.provider`。
+4. 运行 `--check-config` 并启动，检查启动日志**没有** `configuration was migrated or ignored` 告警（迁移告警在配置校验之前输出，校验失败时同样可见）。`plan.max_packages` 高于 `min(17, (budget.max_nodes − 9) / 2)`（至少 1）时被降到该上界并告警，未配置而上界低于默认值 6 时静默降低；显式正数 `budget.deadline` 低于 30m 时也会告警（0 表示不设 deadline，不告警）。评审档位既没有 `provider` 也没有 `lanes.code_review.provider` 时，评审图构建失败，字段为 `provider`。若要 `explore` / `validate` 使用 codebase-memory 工具，先按上面的说明补充 `default_extensions.mcp_servers[].tools`。每条告警的字段名指出需要手工清理的配置；迁移得到的 provider 仍会被校验，错误会指向新字段，例如 `profiles.default.lanes.reasoner.provider`。
 5. 在控制台「模型与档位」确认只出现 `default` 评审档位及固定的八步拓扑，`onboarding` 单独显示为「项目接入」；项目注册、项目设置和手动触发对话框不再有档位选择，项目列表没有档位列。
 6. 在测试 MR 上触发一次完整评审并核对结果、用量和耗时；会产生模型费用，需事先取得授权。
 

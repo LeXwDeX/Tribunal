@@ -3,9 +3,16 @@ package review
 import (
 	"encoding/json"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 )
+
+// listedSummaryItem reports whether the summary lists title as its own
+// "#### [Pn]title" entry, not merely as a folded 相关描述 reference.
+func listedSummaryItem(body, title string) bool {
+	return regexp.MustCompile(`(?m)^#### \[[^\]]+\]` + regexp.QuoteMeta(title)).MatchString(body)
+}
 
 type summaryDupRow struct {
 	ID         string `json:"id"`
@@ -70,7 +77,7 @@ func TestSummaryFoldsReasonerDuplicatesOfInlineFindings(t *testing.T) {
 		"TokenBucket.allow 在 tokens 恰好等于 cost 时拒绝请求",
 		"purge 对目录等非普通文件调用 os.remove，会中断整轮清理",
 	} {
-		if strings.Contains(body, "#### ") && strings.Contains(body, "] "+dup) {
+		if listedSummaryItem(body, dup) {
 			t.Errorf("duplicate %q is still listed separately", dup)
 		}
 	}
@@ -90,7 +97,7 @@ func TestSummaryKeepsDissimilarUnpositionedFindings(t *testing.T) {
 		"session_id 未校验，os.path.join 可逃出 CACHE_DIR",
 		"没有任何代码创建 CACHE_DIR，会话模块首次使用即失败",
 	} {
-		if !strings.Contains(body, "] "+keep) {
+		if !listedSummaryItem(body, keep) {
 			t.Errorf("dissimilar unpositioned finding %q must stay listed:\n%s", keep, body)
 		}
 	}
@@ -113,10 +120,10 @@ func TestSummaryFoldKeepsStoredGroupsAndSeverityGuard(t *testing.T) {
 	far := same
 	far.ID, far.Severity = "c", SeverityP0
 	body := summaryFor(t, []Group{inline, same, far})
-	if !strings.Contains(body, "[P0] load_config") {
+	if !strings.Contains(body, "[P0]load_config") {
 		t.Errorf("a finding two severity levels away must stay listed:\n%s", body)
 	}
-	if strings.Contains(body, "#### [P2] load_config") {
+	if strings.Contains(body, "#### [P2]load_config") {
 		t.Errorf("same-severity duplicate must be folded:\n%s", body)
 	}
 }
@@ -169,7 +176,7 @@ func TestSummaryNeverFoldsMoreSevereOrDistinctFindings(t *testing.T) {
 	}
 	for _, c := range cases {
 		body := summaryFor(t, []Group{c.inline, c.cand})
-		if !strings.Contains(body, "#### ["+string(c.cand.Severity)+"] "+c.cand.Title) {
+		if !strings.Contains(body, "#### ["+string(c.cand.Severity)+"]"+c.cand.Title) {
 			t.Errorf("%s: candidate must stay listed:\n%s", c.name, body)
 		}
 	}
@@ -202,7 +209,7 @@ func TestSummaryDoesNotFoldSameTextOnDifferentSides(t *testing.T) {
 	oldSide := Group{ID: "a", Severity: SeverityP2, Path: "b.go", Line: 1, Side: SideOld, Title: "bad assignment", Body: "the assignment is wrong", Decision: publish}
 	newSide := oldSide
 	newSide.ID, newSide.Side = "b", SideNew
-	if body := summaryFor(t, []Group{oldSide, newSide}); strings.Count(body, "#### [P2] bad assignment") != 2 {
+	if body := summaryFor(t, []Group{oldSide, newSide}); strings.Count(body, "#### [P2]bad assignment") != 2 {
 		t.Fatalf("findings on different sides of one path must both stay listed:\n%s", body)
 	}
 }

@@ -397,7 +397,7 @@ func (s *ReviewService) cancelInvalidRepoConfig(ctx context.Context, workflow *s
 		profile = "default"
 	}
 	mrIID := dossier.MR.IID
-	s.noteInvalidRepoConfig(ctx, token, workflow.ProjectID, mrIID)
+	s.noteInvalidRepoConfig(ctx, token, workflow.ProjectID, mrIID, generation, dossier.DiffVersion.HeadSHA)
 	s.settleReviewStatus(ctx, workflow.ProjectID, mrIID, generation, 0,
 		dossier.DiffVersion.HeadSHA, profile, reviewStatusFailed, invalidRepoConfigDetail,
 		s.workflowNoteID(ctx, workflow.ID), reviewAwardNone)

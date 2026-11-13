@@ -1899,10 +1899,17 @@ function budgetLabel(budget?: Record<string, unknown>): string | undefined {
 }
 
 function budgetValue(key: string, value: unknown): string {
-  if (key === 'deadline' && typeof value === 'number' && Number.isFinite(value) && value >= 0) {
-    return formatDuration(value / 1_000_000)
+  const unset = value === 0 || value === null || value === undefined
+  if (key === 'deadline') {
+    if (unset) return '不限'
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+      return formatDuration(value / 1_000_000)
+    }
   }
-  if (key === 'max_tokens' && (value === 0 || value === null || value === undefined)) {
+  if (key === 'max_turns' && unset) {
+    return '不限'
+  }
+  if (key === 'max_tokens' && unset) {
     return '不限（由上游 key 额度决定）'
   }
   return typeof value === 'object' ? JSON.stringify(value) : String(value)

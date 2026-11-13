@@ -50,11 +50,13 @@ func TestReviewRunIncompleteWorkflowWritesFailedStatus(t *testing.T) {
 func TestStatusJobTerminalUpstreamErrorSettlesApplied(t *testing.T) {
 	f := newReviewFixture(t, reviewTestHead)
 	f.service.status = testStatusReporter(f.gitlab)
-	f.gitlab.statusNoteErr = &gitlab.Error{Op: "create_note", Status: 403}
 	job := f.seedReview(t, "job-status-terminal")
 	if err := f.service.Handle(context.Background(), job); err != nil {
 		t.Fatalf("Handle review: %v", err)
 	}
+	// The review note is shared with the status worker (#451); fail only the
+	// later status edit so the review itself has already succeeded.
+	f.gitlab.statusNoteErr = &gitlab.Error{Op: "create_note", Status: 403}
 	claimed, err := f.db.Claim(context.Background(), "status-worker", []string{"review.status"}, time.Minute)
 	if err != nil || claimed == nil {
 		t.Fatalf("claim status job = %+v, %v", claimed, err)

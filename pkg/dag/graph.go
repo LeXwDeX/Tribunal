@@ -99,9 +99,8 @@ func ValidateGraph(spec GraphSpec) error {
 		if node.Kind == "" {
 			return &GraphError{Field: field + ".kind", Problem: "kind is required"}
 		}
-		if node.Timeout < 0 {
-			return &GraphError{Field: field + ".timeout", Problem: "must not be negative"}
-		}
+		// A negative timeout is valid: it disables the node-level deadline
+		// and leaves only the workflow deadline (if any).
 		if len(node.Params) > 0 && !json.Valid(node.Params) {
 			return &GraphError{Field: field + ".params", Problem: "must be valid JSON"}
 		}

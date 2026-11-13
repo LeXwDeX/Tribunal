@@ -116,8 +116,11 @@ type NodeSpec struct {
 	Condition    string            `json:"condition,omitempty"`
 	InputMapping map[string]string `json:"input_mapping,omitempty"`
 	Params       json.RawMessage   `json:"params,omitempty"`
-	Timeout      time.Duration     `json:"timeout,omitempty"`
-	Expands      bool              `json:"expands,omitempty"`
+	// Timeout bounds queue wait and execution together. Zero uses the
+	// engine default; a negative value disables the node-level deadline, and
+	// only the workflow deadline can cancel the node.
+	Timeout time.Duration `json:"timeout,omitempty"`
+	Expands bool          `json:"expands,omitempty"`
 	// TokenFree marks a node that may still run after the workflow token
 	// budget is exhausted. Its executor must stop starting model calls once
 	// the budget is exhausted and settle with deterministic code instead.
@@ -125,7 +128,8 @@ type NodeSpec struct {
 }
 
 // Budget bounds one workflow. Zero values are normalized by Create: MaxNodes
-// defaults to 30 and MaxExtends to 1. Negative values are invalid.
+// defaults to 30 and MaxExtends to 1. Deadline zero means no workflow
+// deadline. Negative values are invalid.
 //
 // MaxTokens is a shared workflow budget. The scheduler and node executors
 // check committed usage before each request. A model request already in

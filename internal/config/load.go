@@ -63,7 +63,10 @@ profiles:
       package_tokens: 60000
     budget:
       max_nodes: 30
-      deadline: 30m
+      # 0: no workflow deadline (#451).
+      deadline: 0s
+      # 0: no per-node model request cap (#451).
+      max_turns: 0
       # 0: no workflow token cap; the upstream key quota limits usage (#392).
       max_tokens: 0
 mcp: {}
@@ -108,7 +111,10 @@ synthesize:
 budget:
   max_nodes: 30
   max_extends: 0
-  deadline: 30m
+  # 0: no workflow deadline (#451).
+  deadline: 0s
+  # 0: no per-node model request cap (#451).
+  max_turns: 0
   # 0: no workflow token cap; the upstream key quota limits usage (#392).
   max_tokens: 0
 `

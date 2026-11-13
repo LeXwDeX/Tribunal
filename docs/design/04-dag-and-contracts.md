@@ -27,7 +27,7 @@ Tribunal 只有一个评审档位 `default`，评审图固定（见 §3.1）。`
 - `plan` 不调用 LLM，依赖 `explore`（`explore` 是可选节点，失败不会级联，`plan` 照常运行）：按文件把变更切成若干包，每包估算 token 不超过 `plan.package_tokens`（默认 60k），同目录文件尽量放一起，包数不超过 `plan.max_packages`（默认 6）。
 - `gather`、`adjudicate`、`synthesize` 是代码节点，评审报告由代码渲染，不调用模型。
 - 四路评审节点（`code-review`、`review`、`reasoner`、`validate`）和 `explore` 都是可选节点；失败语义见 §5.4。
-- 所有 agent 节点使用同一个 agent 循环，因此最后一轮强制提交（[#255](https://github.com/LeXwDeX/Tribunal/issues/255)）和提交提示轮的不合法工具调用恢复（[#269](https://github.com/LeXwDeX/Tribunal/issues/269)）对新节点同样生效。
+- 所有 agent 节点使用同一个 agent 循环，因此最后一轮强制提交（[#255](https://github.com/LeXwDeX/Tribunal/issues/255)）和提交提示轮的不合法工具调用恢复（[#269](https://github.com/LeXwDeX/Tribunal/issues/269)）对新节点同样生效。循环默认不限制模型请求数（`budget.max_turns = 0`），只有显式正数上限到达时才进入“最后一轮”；`onboarding` 与评审节点使用同一套 `budget.max_turns` 配置（各自档位的 budget）。
 - 引擎仍能解码历史工作流里记录的旧节点种类（`review.standards`、`review.intent`、`review.gate`、agent 规划与 agent 汇总等），用于查看既有评审；新评审不再生成它们。
 
 ---
@@ -65,7 +65,7 @@ explore ─▶ plan(code) ──expands──▶ cr.p1 ─┐
 ```
 
 - 初始图有 `explore`、`plan`、`gather`、`adjudicate`、`synthesize` 五个节点；`plan` 依赖 `explore`，`gather` 依赖 `plan`。展开 `plan` 时，新增的 `cr.*`、`rv.*`、`reasoner`、`validate` 都依赖 `plan`，并被加进 `gather` 的依赖（见 §5.3）。
-- **探索**：`explore` 是可选的只读 agent 节点，超时 5 分钟。它的输出 `ExploreOut` 在展开 `plan` 时渲染成有界摘要（不超过 6000 字符，超出截断并标注），写入每路评审节点的 params（字段 `exploration`），因此节点任务仍是 params 与材料包的纯函数，重试和恢复不依赖读取兄弟节点。`explore` 未成功完成或输出不合法时，四路评审不带摘要运行，报告给出一条告警。
+- **探索**：`explore` 是可选的只读 agent 节点，超时 5 分钟。它的输出 `ExploreOut` 在展开 `plan` 时渲染成有界摘要（不超过 6000 字符，超出截断并标注），写入每路评审节点的 params（字段 `exploration`），因此节点任务仍是 params 与材料包的纯函数，重试和恢复不依赖读取兄弟节点。`explore` 未成功完成或输出不合法时，四路评审不带摘要运行，报告给出一条告警。四路评审和 `verify` 节点默认不设节点级 deadline（`DefaultReviewTimeout = -1`），只受工作流 deadline（若配置）或取消约束。
 - **四路评审并行**：每个包一个 `cr.<pkg>`（挂载内置 code-review Skill）和一个 `rv.<pkg>`，每个 MR 一个 `reasoner` 和一个 `validate`。节点数为 `包数 × 2 + 2`，配置校验要求 `plan.max_packages × 2 + 2 ≤ max_fan_out`（`max_fan_out` 默认 36），展开时再按实际包数检查一次。
 - **汇聚与挑战**：`gather` 把四路的 findings 归一化、去重（§7.1），只把 P0/P1 交给 `verify`；其余不挑战，直接进入 `adjudicate`。受 `max_nodes` 约束时，按严重级别优先选择挑战目标，超出节点容量的条目标记 `skipped` 并写 warning。不确定的挑战结果一律标记为「存疑」后发布。
 - **汇报**：`synthesize` 是代码节点，直接渲染 `adjudicate` 的结果，不再调用 LLM，图也不会在汇报阶段追加节点。
@@ -153,7 +153,8 @@ runNode(n):
   defer release()
   attempt := n.attempt
   emit node.started(attempt)
-  ctx, cancel := context.WithTimeout(wfCtx, n.Timeout - 已排队时长)
+  # timeout=0 用引擎默认；负值不设节点级 deadline
+  ctx, cancel := nodeDeadline(wfCtx, n.Timeout - 已排队时长)
   out, err := executor.Execute(ctx, input(n))
   if 当前 attempt != attempt 或工作流已终态: 丢弃结果; return
   if token 预算已耗尽: 按 required / optional 写 budget_exhausted，保留可得用量
@@ -192,6 +193,8 @@ finalize 若在重读时发现新节点，返回主循环继续调度，而不�
 | `explore` 未成功完成 | 四路评审不带探索摘要运行；报告给出一条告警，不产生证据缺口 |
 | `explore` 被跳过 | 只会发生在设置了 token 预算（`max_tokens > 0`）且预算在它开始前已耗尽时；此时 `plan` 也被跳过，工作流在没有结论的情况下结束 |
 
+节点级超时语义：`NodeSpec.Timeout` 为 0 时使用 `engine.default_node_timeout`（默认 10m）；正数同时约束排队等待和执行；负值不设节点级 deadline，节点只能由工作流 deadline（若配置）或取消终止。评审 agent 节点默认使用负值，`explore`、`plan`、`gather`、`adjudicate`、`synthesize` 和 `onboarding` 仍保留各自的固定超时。`budget.deadline` 为 0（默认）时不设工作流 deadline，因此节点超时为负值且未显式配置 deadline 时，工作流只能靠取消、进程停止或全部节点结算结束；调用方 context 截止仍可取消节点。
+
 ### 5.5 预算校验
 
 每次 `Create` / `Extend` 前检查：
@@ -199,6 +202,11 @@ finalize 若在重读时发现新节点，返回主循环继续调度，而不�
 - 节点总数 ≤ `budget.max_nodes`（默认 30）。
 - 显式补派（`source=extend`）次数 ≤ `budget.max_extends`。评审档位固定为 0（报告阶段不扩展图）；plan 和 gather 的正常 `fan_out` 不消耗此额度。
 - 累计 token 超过 `budget.max_tokens` 时（设计意图）：不再展开 verify（`gather` 只输出不挑战的结果），并在汇总里注明「预算不足，部分条目未经核验」。
+
+执行期约束：
+
+- 每个 agent 节点的模型请求数 ≤ `budget.max_turns`。默认 0 表示不限制；正数到达后仍未提交 `submit_result` 的节点失败，结论按 required / optional 处理。agent 运行仍会在 `submit_result`、上下文窗口、调用方 token 预算或 context deadline 时结束。
+- `budget.deadline` 为 0（默认）时不设工作流 deadline；正数到期后 `Cancel(wf, "deadline")`；负值在配置校验和评审档位校验中被拒绝。
 
 当前实现的 token 预算语义（仅在 `budget.max_tokens > 0` 时生效；默认 0 不做 token 预算检查，用量由上游 LLM key 的额度决定，见 [#392](https://github.com/LeXwDeX/Tribunal/issues/392)）：
 
@@ -449,10 +457,17 @@ user                本节点任务：MR 摘要、包内文件列表与 diff、f
 
 ## 9. 评论渲染
 
-### 9.1 汇总评论
+### 9.1 评审评论（状态与结果合并）
 
 ````markdown
-<!-- gitlab-ce-review:summary v1 fp=9f3c2a1:7be0… -->
+<!-- gitlab-ce-review:summary v1 -->
+**AI 评审：发现问题（BLOCKING）**
+
+- 阶段：`已完成`
+- 状态：`BLOCKING`
+- 代次：`3`
+- 提交：`9f3c2a1`
+
 ### AI 评审：🔴 BLOCKING
 
 **P1** × 2 · **P2** × 1
@@ -461,11 +476,11 @@ user                本节点任务：MR 摘要、包内文件列表与 diff、f
 
 ### 行内问题（1）
 
-- **[P1]** 标题 · `path/to/file.go`:18
+- **[P1]标题** · `path/to/file.go`:18
 
 ### 无法定位到行的问题（1）
 
-#### [P2] 标题
+#### [P2]标题
 
 `path/to/file.go`:42
 
@@ -475,7 +490,7 @@ user                本节点任务：MR 摘要、包内文件列表与 diff、f
 
 ### 存疑条目（1）
 
-#### [P1?] 标题
+#### [P1?]标题
 
 `path/to/file.go`:9
 
@@ -486,12 +501,13 @@ user                本节点任务：MR 摘要、包内文件列表与 diff、f
 <sub>head 9f3c2a1 · profile default · 用时 2m14s · <a href="…/reviews/0192f0c1">详情</a></sub>
 ````
 
-- 首行隐藏标记用于找到并就地更新这条评论（见 05-flows.md F7）。
+- 状态评论与评审结果是同一条 MR note。首行隐藏标记用于找到并就地更新这条评论（见 05-flows.md F7）；状态 worker 和 publisher 都按 `<!-- gitlab-ce-review:summary` 查找。原 summary 正文自己的 `fp=…` 标记行在合并时移除，只保留状态评论的首行标记。
+- 生命周期行固定为 `- 阶段：` 与 `- 状态：`。阶段只有四类：`开始`（`received`、`queued`）、`进行中`（`running`、`publishing`）、`已完成`（`PASS`、`BLOCKING`、`INCOMPLETE`）、`失败`（`failed`、`cancelled`、`stale`）；状态行保留原始状态值。工作流结算且 `review_status.final_body` 非空时，状态行后追加渲染好的评审正文；未结算或旧行为空时只显示状态。
 - 级别计数紧随结论，只列非零项；没有已发布问题时不输出计数行。
 - 行内问题的索引只列级别、标题和位置，不重复正文、建议与证据。存疑条目单独列出，不在行内问题索引中重复。
 - 写法规则在 `_platform_rules.md` 的 Reporting bar 与 Comment style：只报本次 MR 引入、作者会修的离散问题；`body` 为一段话，先写触发条件再写影响，代码不超过 3 行；`suggestion` 是一句话或替换被评论行的 GitLab `suggestion` 块。渲染器保留 Markdown 的标题、列表和代码内容，中和代码外的原始 HTML 与链接语法；代码中的 HTML 注释按字面显示。为防止列表提前结束围栏，缩进围栏会移到顶层，因此原列表可能分成两段。
 - 标题、提示、裁决原因和多行正文中的 GitLab 提及、引用（包括 commit SHA、项目引用）及自动链接按字面显示；代码块和行内代码按代码显示。路径中的有效空格不折叠。反引号围栏的 info 不得包含反引号，闭合围栏最多缩进三格；未闭合围栏在字段末尾闭合，不遮住后续条目。
-- 汇总条目正文最多 2000 字符、建议最多 1000 字符；超限时明确追加“内容已截断”，不再静默截到半句。完整正文仍在评审详情中。
+- 行内与汇总条目的正文最多渲染 400 字符，超出时明确追加“内容已截断”，不再静默截到半句；完整正文仍在存储和控制台中。建议仍为汇总条目最多 1000 字符、行内讨论最多 8000 字符；建议和证据的代码块渲染规则不变。
 - 存疑条目在汇总中保留折叠证据；可定位的存疑条目在行内讨论中也保留证据。这样即使复用的旧讨论属于已确认条目，证据仍可见，不需要创建或修改讨论。首行标记保持不变；汇总恢复只认首行，代码块内的标记文本不参与匹配。
 - PASS 用 🟢，评审未完成用 ⚪ 并说明原因。
 - 是否标注模型来源由项目设置 `show_model_attribution` 决定（默认关闭）。
@@ -502,7 +518,7 @@ user                本节点任务：MR 摘要、包内文件列表与 diff、f
 
 ~~~markdown
 <!-- gitlab-ce-review:finding key=3a91… -->
-**[P1] 并发写 map 未加锁**
+**[P1]并发写 map 未加锁**
 
 批量导入多于 1 个文件时，`handleBatch` 在多个 goroutine 中无锁写入 `results`，会触发 `concurrent map writes` panic。
 
@@ -510,7 +526,11 @@ user                本节点任务：MR 摘要、包内文件列表与 diff、f
 ~~~
 
 - 讨论挂在对应行上，正文不再重复位置。
+- 标题格式与汇总一致：`**[P1]标题**`，级别与标题之间没有空格；存疑条目使用 `**[P1 · 存疑]标题**`。
+- 正文最多渲染 400 字符，超出时追加“内容已截断”；完整正文在存储和控制台。建议与证据的代码块渲染不变。
 - `suggestion` 以围栏开头（如 GitLab `suggestion` 块）时原样输出，不加“建议”标签。
 - 证据只在存疑条目中以折叠的 `<details>` 保留；已确认条目的证据仍存在评审详情中。
 
 存疑条目（`mark`）的标题使用 `[P1 · 存疑]` 这样的单一标记；非空裁决原因在正文后显示，证据仍可展开查看。
+
+评审评论的 `publish_key` 由路径、规范化标题和代码片段计算，不随评论模板变化。升级后旧讨论的 `body_hash` 与按新模板渲染的正文不同，复用判定会把它视为历史内容不同：当前 finding 只进汇总并追加「部分问题的历史讨论内容与当前内容不同或无法确认，当前问题已保留在摘要中，未修改历史讨论。」警告，不修改旧讨论。这是现有安全策略的预期行为，不是重复发布。

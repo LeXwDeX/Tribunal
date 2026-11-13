@@ -19,6 +19,7 @@ func TestRecoverChecksIgnorePolicyWithoutConfigHash(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
 			f := newReviewFixture(t, reviewTestHead)
+			f.service.status = testStatusReporter(f.gitlab)
 			job := f.seedReview(t, "policy-recovery")
 			configHash, promptHash := currentReviewHashes(t, f)
 			dossier := testDossier(t, f.head)
@@ -64,6 +65,7 @@ func TestRecoverChecksIgnorePolicyWithoutConfigHash(t *testing.T) {
 				t.Fatalf("configuration read failure left workflow active: %+v", wf)
 			}
 			if invalidConfig {
+				drainReviewJobs(t, f, "review.status")
 				if wf.PublicationState != store.WorkflowPublicationSkipped || wf.PublicationError != invalidRepoConfigDetail {
 					t.Fatalf("configuration failure publication = %q/%q", wf.PublicationState, wf.PublicationError)
 				}

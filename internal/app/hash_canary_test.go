@@ -9,7 +9,7 @@ import (
 func TestReviewProfileHashCanary(t *testing.T) {
 	f := newReviewFixture(t, reviewTestHead)
 	got := f.service.reviewProfileHash(review.Profile{Name: "default", Config: f.profiles["default"]})
-	const want = "2ed94c4789723b975d47ee19c86e2a81b16f0adac01fe8a1d410eca655eac08a"
+	const want = "a6c0782a0e5c9f77e5630fcf58d7d97cd068cd8cfe68528e379473e4e7052c6f"
 	if got != want {
 		t.Fatalf("profile hash = %s, want %s", got, want)
 	}

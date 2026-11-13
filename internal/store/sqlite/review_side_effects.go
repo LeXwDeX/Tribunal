@@ -14,10 +14,13 @@ import (
 )
 
 const (
-	reviewStatusKind              = "review.status"
-	reviewReactionKind            = "review.reaction"
-	ReviewSideEffectMaxAttempts   = 5
-	maxReviewStatusDetailRunes    = 500
+	reviewStatusKind            = "review.status"
+	reviewReactionKind          = "review.reaction"
+	ReviewSideEffectMaxAttempts = 5
+	maxReviewStatusDetailRunes  = 500
+	// maxReviewStatusFinalBodyRunes bounds the rendered summary carried by the
+	// single status note. Findings are already bounded by their own contracts.
+	maxReviewStatusFinalBodyRunes = 128 * 1024
 	maxReviewSideEffectList       = 100
 	maxRecentReviewDurations      = 20
 	maxReviewStatusLastErrorRunes = 300
@@ -159,8 +162,8 @@ func (s *Store) setReviewStatusTx(ctx context.Context, tx *sql.Tx, goal store.Re
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO review_status
 		(project_id, mr_iid, generation, head_sha, attempt, profile, state, detail,
-		 note_id, body_hash, version, applied_version, last_error, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, '', 1, 0, '', ?)
+		 final_body, note_id, body_hash, version, applied_version, last_error, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', 1, 0, '', ?)
 		ON CONFLICT (project_id, mr_iid) DO UPDATE SET
 			generation = excluded.generation,
 			head_sha = CASE WHEN excluded.head_sha <> '' THEN excluded.head_sha ELSE review_status.head_sha END,
@@ -168,6 +171,12 @@ func (s *Store) setReviewStatusTx(ctx context.Context, tx *sql.Tx, goal store.Re
 			profile = CASE WHEN excluded.profile <> '' THEN excluded.profile ELSE review_status.profile END,
 			state = excluded.state,
 			detail = excluded.detail,
+			final_body = CASE
+				WHEN review_status.generation <> excluded.generation THEN excluded.final_body
+				WHEN excluded.head_sha <> '' AND lower(excluded.head_sha) <> lower(review_status.head_sha) THEN excluded.final_body
+				WHEN excluded.final_body <> '' THEN excluded.final_body
+				ELSE review_status.final_body
+			END,
 			note_id = NULL,
 			body_hash = '',
 			version = review_status.version + 1,
@@ -175,11 +184,72 @@ func (s *Store) setReviewStatusTx(ctx context.Context, tx *sql.Tx, goal store.Re
 			updated_at = excluded.updated_at`,
 		goal.ProjectID, goal.MRIID, goal.Generation,
 		strings.ToLower(strings.TrimSpace(goal.HeadSHA)), attempt, goal.Profile,
-		goal.State, goal.Detail, formatTime(now)); err != nil {
+		goal.State, goal.Detail, goal.FinalBody, formatTime(now)); err != nil {
 		return false, fmt.Errorf("sqlite: write review status: %w", err)
 	}
 	if err := s.enqueueReviewStatusJobTx(ctx, tx, goal.ProjectID, goal.MRIID, now); err != nil {
 		return false, err
+	}
+	return true, nil
+}
+
+// SetReviewStatusFinalBody stores the rendered review summary in the same
+// status row without changing the lifecycle state (#451). The status worker
+// is enqueued so the single review note is edited with the new body. This is
+// allowed after a terminal state: the summary is published after the workflow
+// settles, and the status note is the only review comment.
+func (s *Store) SetReviewStatusFinalBody(ctx context.Context, projectID, mrIID, generation int64, headSHA, body string) (bool, error) {
+	if projectID <= 0 || mrIID <= 0 {
+		return false, errors.New("sqlite: review status project id and mr iid are required")
+	}
+	if generation <= 0 {
+		return false, errors.New("sqlite: review status generation is required")
+	}
+	body = truncateRunes(body, maxReviewStatusFinalBodyRunes)
+	now := s.now().UTC()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("sqlite: begin review status body write: %w", err)
+	}
+	defer tx.Rollback()
+
+	control, err := getReviewControlTx(ctx, tx, projectID, mrIID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return false, fmt.Errorf("%w: review control for status body", store.ErrSuperseded)
+		}
+		return false, err
+	}
+	if control.Generation != generation {
+		return false, fmt.Errorf("%w: status body generation %d is not current", store.ErrSuperseded, generation)
+	}
+	if headSHA != "" && control.HeadSHA != "" && !strings.EqualFold(control.HeadSHA, headSHA) {
+		return false, fmt.Errorf("%w: status body head %s is not current", store.ErrSuperseded, headSHA)
+	}
+	existing, found, err := getReviewStatusTx(ctx, tx, projectID, mrIID)
+	if err != nil {
+		return false, err
+	}
+	if !found || existing.Generation != generation {
+		return false, fmt.Errorf("%w: review status row for project %d MR %d", store.ErrSuperseded, projectID, mrIID)
+	}
+	if headSHA != "" && existing.HeadSHA != "" && !strings.EqualFold(existing.HeadSHA, headSHA) {
+		return false, fmt.Errorf("%w: status body head %s does not match the stored head", store.ErrSuperseded, headSHA)
+	}
+	if existing.FinalBody == body {
+		return false, nil
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE review_status
+		SET final_body = ?, body_hash = '', version = version + 1, last_error = '', updated_at = ?
+		WHERE project_id = ? AND mr_iid = ?`,
+		body, formatTime(now), projectID, mrIID); err != nil {
+		return false, fmt.Errorf("sqlite: write review status body: %w", err)
+	}
+	if err := s.enqueueReviewStatusJobTx(ctx, tx, projectID, mrIID, now); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("sqlite: commit review status body: %w", err)
 	}
 	return true, nil
 }
@@ -365,7 +435,7 @@ func scanReviewStatus(row rowScanner) (*store.ReviewStatus, error) {
 		updatedRaw string
 	)
 	if err := row.Scan(&status.ProjectID, &status.MRIID, &status.Generation, &status.HeadSHA,
-		&status.Attempt, &status.Profile, &status.State, &status.Detail, &noteID,
+		&status.Attempt, &status.Profile, &status.State, &status.Detail, &status.FinalBody, &noteID,
 		&status.BodyHash, &status.Version, &status.AppliedVersion, &status.LastError,
 		&updatedRaw); err != nil {
 		return nil, err
@@ -380,7 +450,7 @@ func scanReviewStatus(row rowScanner) (*store.ReviewStatus, error) {
 }
 
 const reviewStatusColumns = `project_id, mr_iid, generation, head_sha, attempt, profile,
-	state, detail, note_id, body_hash, version, applied_version, last_error, updated_at`
+	state, detail, final_body, note_id, body_hash, version, applied_version, last_error, updated_at`
 
 func getReviewStatusTx(ctx context.Context, tx *sql.Tx, projectID, mrIID int64) (*store.ReviewStatus, bool, error) {
 	status, err := scanReviewStatus(tx.QueryRowContext(ctx,

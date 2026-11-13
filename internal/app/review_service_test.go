@@ -971,7 +971,7 @@ func TestReviewCancelSettlesRunningWorkflow(t *testing.T) {
 	if awards := f.gitlab.awardSnapshot(555); len(awards) != 0 {
 		t.Fatalf("review note awards = %+v, want bot eyes cleared", awards)
 	}
-	if phases := statusPhases(f.gitlab.statusUpdates); len(phases) != 1 || phases[0] != reviewStatusCancelled {
+	if phases := statusPhases(f.gitlab.statusUpdates); len(phases) != 1 || phases[0] != reviewStatusPhase(reviewStatusCancelled) {
 		t.Fatalf("status phases = %v, want one cancelled", phases)
 	}
 	if err := f.service.CancelReview(context.Background(), cancelJob); err != nil {
@@ -1224,7 +1224,7 @@ func TestCancelReviewQueuedClearsCancelNoteEyes(t *testing.T) {
 	if got := f.gitlab.noteCount(); got != 1 {
 		t.Fatalf("notes = %d, want only the status note", got)
 	}
-	if phases := statusPhases(f.gitlab.statusUpdates); len(phases) != 1 || phases[0] != reviewStatusCancelled {
+	if phases := statusPhases(f.gitlab.statusUpdates); len(phases) != 1 || phases[0] != reviewStatusPhase(reviewStatusCancelled) {
 		t.Fatalf("status phases = %v, want one cancelled", phases)
 	}
 }

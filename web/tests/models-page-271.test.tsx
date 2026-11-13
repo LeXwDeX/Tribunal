@@ -54,6 +54,14 @@ describe('models page display (#271)', () => {
     expect(budget).not.toHaveTextContent('max_tokens: 0')
   })
 
+  it('shows unset turn and deadline limits as unlimited (#451)', async () => {
+    renderModels({ max_nodes: 30, deadline: 0, max_turns: 0, max_tokens: 0 })
+    const budget = await screen.findByText(/^预算 /)
+    expect(budget).toHaveTextContent('deadline: 不限')
+    expect(budget).toHaveTextContent('max_turns: 不限')
+    expect(budget).not.toHaveTextContent('deadline: 0s')
+  })
+
   it('keeps a non-numeric deadline as sent', async () => {
     renderModels({ deadline: '20m' })
     expect(await screen.findByText(/^预算 /)).toHaveTextContent('deadline: 20m')

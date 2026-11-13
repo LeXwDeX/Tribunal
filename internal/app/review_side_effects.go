@@ -193,6 +193,7 @@ func (s *ReviewService) RunStatusJob(ctx context.Context, job *jobs.Job) error {
 		Detail:     row.Detail,
 		HeadSHA:    row.HeadSHA,
 		Generation: row.Generation,
+		FinalBody:  row.FinalBody,
 	}
 	switch row.State {
 	case reviewStatusQueued, reviewStatusRunning, reviewStatusPublishing:

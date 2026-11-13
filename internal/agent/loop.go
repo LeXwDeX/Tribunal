@@ -121,9 +121,11 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 		return nil, errors.New("agent: prompt must not be empty")
 	}
 
+	// Zero means no request-count limit. A negative value is treated the same
+	// way so callers can clear a configured bound without special-casing it.
 	maxTurns := spec.MaxTurns
-	if maxTurns <= 0 {
-		maxTurns = DefaultMaxTurns
+	if maxTurns < 0 {
+		maxTurns = 0
 	}
 	maxOutput := spec.MaxToolOutput
 	if maxOutput <= 0 {
@@ -269,12 +271,12 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 		return ok && remaining < budgetReserveTurns*largestTurnTokens
 	}
 
-	for turn := 1; turn <= maxTurns; turn++ {
+	for turn := 1; ; turn++ {
 		if err := ctx.Err(); err != nil {
 			return partial(err)
 		}
 		turnStarted := now()
-		lastTurn := turn == maxTurns
+		lastTurn := maxTurns > 0 && turn == maxTurns
 		nearLimit := nearContextLimit()
 		// Past the context limit another tool result could overflow the
 		// window, so the turn behaves like the last one.
@@ -445,7 +447,7 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 			return partial(ErrUnsafeResponse)
 		}
 		if len(calls) == 0 {
-			if resp.StopReason == llm.StopEndTurn && !askedForSubmit && turn < maxTurns {
+			if resp.StopReason == llm.StopEndTurn && !askedForSubmit && (maxTurns <= 0 || turn < maxTurns) {
 				messages = append(messages, llm.Message{
 					Role:  llm.RoleUser,
 					Parts: []llm.Part{{Type: llm.PartText, Text: mustSubmitPrompt}},
@@ -549,10 +551,16 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 		if submitFailures > maxSubmitRetries {
 			return partial(ErrInvalidSubmit)
 		}
+		if maxTurns > 0 && turn >= maxTurns {
+			break
+		}
 	}
 
 	if submitFailures > 0 {
 		return partial(ErrInvalidSubmit)
+	}
+	if maxTurns > 0 {
+		return partial(fmt.Errorf("%w after %d turns", ErrNoSubmit, maxTurns))
 	}
 	return partial(ErrNoSubmit)
 }

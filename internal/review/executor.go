@@ -361,9 +361,11 @@ func (e *Executor) Execute(ctx context.Context, in dag.NodeInput) (dag.NodeOutpu
 	}
 	ctx = context.WithValue(ctx, nodeIDKey{}, in.Node.ID)
 	timeout := in.Node.Timeout
-	if timeout <= 0 {
+	if timeout == 0 {
 		timeout = e.defaultTimeout
 	}
+	// A negative timeout disables the node-level deadline (#451). Only the
+	// workflow deadline or cancellation can stop the node then.
 	if timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
@@ -700,7 +702,8 @@ type agentOptions struct {
 	// BudgetSubmitPrompt asks for submit_result when the workflow token
 	// budget is nearly spent instead of failing at the budget.
 	BudgetSubmitPrompt bool
-	// MaxTurns bounds model requests; zero keeps agent.DefaultMaxTurns.
+	// MaxTurns bounds model requests; zero inherits the profile budget.
+	// Both zero and the inherited zero mean no request-count limit.
 	MaxTurns   int
 	BeforeTurn func(context.Context, llm.Usage) error
 	// ToolGaps, when set, receives MCP binding and runtime availability failures.
@@ -865,12 +868,16 @@ func (e *Executor) callAgent(ctx context.Context, in dag.NodeInput, opts agentOp
 			}
 		}
 	}
+	maxTurns := opts.MaxTurns
+	if maxTurns <= 0 {
+		maxTurns = e.profile.Config.Budget.MaxTurns
+	}
 	spec := agent.RunSpec{
 		System:     system,
 		Prompt:     built.User,
 		Tools:      tools,
 		Submit:     opts.Submit,
-		MaxTurns:   opts.MaxTurns,
+		MaxTurns:   maxTurns,
 		BeforeTurn: opts.BeforeTurn,
 		Outbound:   e.deps.Outbound,
 	}

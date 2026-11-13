@@ -165,8 +165,8 @@ func TestBuildGraphDockerProfiles(t *testing.T) {
 			t.Fatalf("default graph missing node %q", id)
 		}
 	}
-	if cfg.Profiles["default"].Flow != FlowLanes || defaultSpec.Budget.Deadline != 30*time.Minute {
-		t.Fatalf("shipped default profile must use the lanes flow with a 30m deadline: flow=%q deadline=%v",
+	if cfg.Profiles["default"].Flow != FlowLanes || defaultSpec.Budget.Deadline != 0 {
+		t.Fatalf("shipped default profile must use the lanes flow without a workflow deadline: flow=%q deadline=%v",
 			cfg.Profiles["default"].Flow, defaultSpec.Budget.Deadline)
 	}
 	for _, block := range []string{"explore", "validate"} {
