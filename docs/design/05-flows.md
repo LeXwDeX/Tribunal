@@ -36,7 +36,7 @@ sequenceDiagram
   end
   D-->>RS: workflow completed
   RS->>GL: GET MR（比对 head_sha）
-  RS->>GL: 更新汇总评论 / 新建行内讨论 / commit status
+  RS->>GL: 更新状态/结果评论（同一 note）/ 新建行内讨论 / commit status
   RS->>WS: 删除 worktree，RUnlock
 ```
 
@@ -68,7 +68,7 @@ sequenceDiagram
 >
 > 现有限制：最终检查与 GitLab 写入不是原子操作。新代次若在两者之间到来，旧摘要仍可能写入；后续评审成功发布时会更新汇总，没有后续成功发布时不保证自动纠正。因此不能把当前实现解释为「过期摘要绝不会发布」。
 
-**F1-失败分支**：工作流 `failed` 时，若项目设置 `post_failure_note=true`（默认 true），发布或更新汇总评论为「⚪ 评审未完成：<原因>」，不写 commit status。
+**F1-失败分支**：工作流 `failed` 时，若项目设置 `post_failure_note=true`（默认 true），发布或更新状态/结果评论为「⚪ 评审未完成：<原因>」，不写 commit status。
 
 模型循环在至少完成一轮后失败时，agent 会返回已发生的 partial usage。非 `synthesize` 节点仍只对 transport 错误重试；每次重试把上一次已知 partial usage 带入下一轮共享预算检查，最终节点 usage 也包含这些已知用量。上游未返回 usage 的请求仍无法精确计量，跨重试只能按已知 token 边界使用，不能当作完整用量。`synthesize` 的预算中断或 transport 失败不重试，直接使用确定性规则兜底，并保留这次调用已知的 partial usage；兜底不是重试成功。
 
@@ -156,23 +156,44 @@ M0 先把命令持久化为 `review.command`，以下 GitLab 校验由 worker �
 前置：工作流 `completed`。
 
 1. **fingerprint 校验**：重新检查当前 MR 的 head/base、有效配置哈希、prompt 版本和持久化评审代次。任一不一致则不发布，记录 stale 原因；不能只比对 `head_sha`。发布期间保持工作区读锁。
-2. **汇总评论**：
-   1. 查 `publications(kind=summary)`；有 `gitlab_id` → `PUT .../notes/:note_id` 更新。
-   2. 没有记录，或更新绑定评论返回 404 → 确认本 bot 身份并列出 MR notes。404 的旧评论若仍在列表中，保留错误而不新建；否则找作者为本 bot 且正文以 `<!-- gitlab-ce-review:summary` 开头的评论，找到则复用或更新，找不到才新建，再写入绑定。身份或列表查询失败时停止恢复。
-   3. 正常摘要、失败摘要和行内降级后的摘要使用相同恢复路径；恢复写入和重试前复核已存代次及非空 head。检查与在途 GitLab 请求不原子，不能保证旧写入绝不会发生。
+2. **状态/结果评论（同一 note）**：
+   1. Publisher 先调用 `SetReviewStatusFinalBody`，把渲染好的评审报告写入当前代次的 `review_status.final_body`，再用与状态 worker 相同的 `reviewStatusBody` 渲染（生命周期行 + 结果）并更新同一条 note；`publications(kind=summary)` 仍记录该 note，`gitlab_id` 指向它。写入 `final_body` 要求 generation/head 与当前 control 一致；终态后仍允许，因为 summary 在工作流结算后发布。没有评审 control 行时退回只维护独立 summary note（兼容路径）。
+   2. 独立 summary 兼容路径（没有评审 control 行）先查 `publications(kind=summary)`；有 `gitlab_id` → `PUT .../notes/:note_id` 更新。统一路径不读该绑定，直接进入下一步的标记查找，找到后再写回绑定。
+   3. 没有记录、统一路径未读取绑定，或更新绑定评论返回 404 → 确认本 bot 身份并列出 MR notes。404 的旧评论若仍在列表中，保留错误而不新建；否则找作者为本 bot 且正文以 `<!-- gitlab-ce-review:summary` 开头的评论，找到则复用或更新，找不到才新建，再写入绑定。身份或列表查询失败时停止恢复。
+   4. 正常摘要、失败摘要和行内降级后的摘要使用相同恢复路径；恢复写入和重试前复核已存代次及非空 head。检查与在途 GitLab 请求不原子，不能保证旧写入绝不会发生。
+   5. 同一条 note 由 publisher 与状态 worker 共同维护：publisher 先把 `final_body` 持久化并更新 note，写入失败按发布失败路径重试；状态 worker 之后用 `row.FinalBody` 渲染，两个写入方收敛到同一正文。状态作业自身的写入失败由 `review.status` 对账重试，不改变已完成的评审结论。
+   6. Publisher 的 summary/commit status 写入按 MR 锁串行；状态 worker 使用独立的按项目/MR 状态锁，两者不共享同一把锁。GitLab 没有条件写入，超时或崩溃后的旧请求仍可能短暂覆盖新内容；两个写入方渲染同一正文，下一次更新会收敛，周期复核会恢复当前状态（见[状态评论恢复](../operations.md#状态评论恢复)）。
 3. **行内讨论**：对 `decision ∈ {publish, mark}` 且 `position_ok` 的 finding：
    1. 用 `publish_key` 查 `publications(kind=discussion)`。跨工作流复用时，要求历史记录唯一匹配，且两条问题的侧别、非空侧别路径、类别一致，行号均为正数且相距不超过 3 行。空侧别按新侧处理；未知侧别、缺失路径或其他无法证明的情况不复用，当前问题留在摘要并提示发布标识冲突。同一工作流内的多个问题共用发布键时也留在摘要。无论是否同一工作流，正文哈希缺失或与当前渲染正文不同时，当前问题留在摘要并提示历史讨论未更新。哈希不能验证 GitLab 端的外部修改。复用的讨论仍归原工作流，反馈不会自动归因到新工作流。存疑条目的证据始终在汇总中保留，即使复用没有证据的旧行内讨论也可查看。历史讨论和记录不删除。
    2. 没有发布记录时先持久化意图，再 `POST .../discussions`，position 由 diff 索引生成；明确返回 400 则降级进汇总的「无法定位」区块。已有意图时不重复创建；未知远端 ID 须通过当前机器人身份和唯一首条标记恢复，否则保持待处理。
    3. 新建成功后写 `publications` 和正文哈希。仅从意图恢复的远端 ID 不证明工作流或正文，即使同一工作流重试也不补写发布记录；当前问题留在摘要并提示。
 4. **commit status**（项目开启时）：`POST /projects/:id/statuses/:head_sha`，`name=ai-review`，只有 PASS 写 `success`，BLOCKING 和 INCOMPLETE 写 `failed`，`target_url` 指向控制台评审详情，`description` ≤ 140 字符。调用成功后以 `publish_key=status:<head_sha>:<state>` 记录 `publications`；旧格式 `status:<head_sha>` 没有状态，评审详情视为未知，不根据 verdict 推断。commit status 的 failed 是评审结论，不是发布失败。
-5. 写 `publications` 与调用 GitLab 不在同一事务。崩溃导致漏记时，第 2.2 步的标记查找可以兜底汇总评论；行内讨论依靠先持久化的意图和远端标记避免盲目重建，未知结果保持待处理。存储或同步保障损坏、恢复旧快照等限制见运维文档。
+5. 写 `publications` 与调用 GitLab 不在同一事务。崩溃导致漏记时，第 2.3 步的标记查找可以兜底状态/结果评论；行内讨论依靠先持久化的意图和远端标记避免盲目重建，未知结果保持待处理。存储或同步保障损坏、恢复旧快照等限制见运维文档。
+
+**状态评论正文**：
+
+````markdown
+<!-- gitlab-ce-review:summary v1 -->
+**AI 评审：发现问题（BLOCKING）**
+
+- 阶段：`已完成`
+- 状态：`BLOCKING`
+- 代次：`3`
+- 提交：`9f3c2a1`
+
+<review_status.final_body 渲染出的评审报告，原 summary 首行 marker 已移除>
+````
+
+- 阶段只有四类：`开始`（`received`、`queued`）、`进行中`（`running`、`publishing`）、`已完成`（`PASS`、`BLOCKING`、`INCOMPLETE`）、`失败`（`failed`、`cancelled`、`stale`）。`- 状态：` 行保留原始状态值。
+- `final_body` 为空（例如升级前的旧行或尚未结算）时只显示生命周期状态；工作流结算后 publisher 写入结果，状态 worker 之后的更新继续携带同一个 `final_body`。`SetReviewStatus` 在新 generation 或 head 变化时清空 `final_body`，同代次保留。
+- 升级前由旧版本创建的独立 summary note 和 `<!-- gitlab-ce-review:status` 状态评论不会被迁移或自动删除；新代码只按 `<!-- gitlab-ce-review:summary` 查找和更新其中一条，旧评论可能残留，需要时人工清理。
 
 2026-10-25 用户确认 Issue #3 按上述发布键边界验收：相同事件 UUID、相同发布键和同一评审的重复发布不新增重复评论。显式新评审可创建新代次；`publish_key` 包含路径、规范化标题和代码片段，模型换措辞可能生成不同键并再次发布同一问题。本版不承诺跨次评审的语义去重。
 
 发布执行状态与 workflow 执行状态分开持久化：
 
 - `pending`：执行已终态但 GitLab 发布未完成，可能是等待中的重试；启动恢复会再次处理，运行期可手动 republish。没有独立的后台发布扫描。
-- `published`：汇总评论、失败摘要及需要写入的 commit status 已完成。
+- `published`：状态/结果评论、失败摘要及需要写入的 commit status 已完成。
 - `skipped`：fingerprint/head/config/prompt 已 stale、评审被取消或被新代次替换，或项目关闭 failure note；记录原因，不自动重发。
 - `failed`：无法继续的永久发布失败（如 MR 已关闭），记录脱敏原因，需控制台或 API 手动 republish。
 
@@ -185,7 +206,7 @@ M0 先把命令持久化为 `review.command`，以下 GitLab 校验由 worker �
 定时任务（默认每 6 小时）：
 
 1. 找出最近 14 天内**创建**且已完成的 review workflow（最多 5 页、每页 100 条），再读取对应 MR。MR 必须仍打开，或状态为 merged/locked 且 `merged_at` 在最近 3 天内；closed 或更早合并的 MR 不采集。
-2. 对汇总评论和行内讨论的**发布者首条 note** 调用 `GET .../notes/:note_id/award_emoji`，记录 👍（`thumbsup`）/ 👎（`thumbsdown`）。discussion 的后续 note 是 reviewer replies，其表情不视为对已发布 finding 的反馈。汇总评论的 award 保持未关联 finding。
+2. 对状态/结果评论和行内讨论的**发布者首条 note** 调用 `GET .../notes/:note_id/award_emoji`，记录 👍（`thumbsup`）/ 👎（`thumbsdown`）。discussion 的后续 note 是 reviewer replies，其表情不视为对已发布 finding 的反馈。状态/结果评论的 award 保持未关联 finding。
 3. 行内讨论先调用 `GET .../discussions/:discussion_id`。只有已 resolved 且能定位到 finding 时才判断：只处理 `line > 0` 且 `side` 为空或 `new` 的 finding；`published_head == current_head` 记为 `resolved_unchanged`，否则取回 current head 后执行零上下文 `git diff <published_head>..<current_head> -- <path>`：
    - finding 行落在删除或替换旧行的 hunk 内，或文件被删除 → `resolved_changed`。
    - 文件未变、纯重命名或 finding 行未被 hunk 覆盖 → `resolved_unchanged`。

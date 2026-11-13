@@ -320,6 +320,9 @@ type BudgetConfig struct {
 	MaxExtends int           `yaml:"max_extends" json:"max_extends"`
 	Deadline   time.Duration `yaml:"deadline" json:"deadline"`
 	MaxTokens  int64         `yaml:"max_tokens" json:"max_tokens"`
+	// MaxTurns bounds model requests per agent node. Zero or negative means
+	// no request-count limit (#451).
+	MaxTurns int `yaml:"max_turns" json:"max_turns"`
 }
 
 // AgentConfig selects the provider for agent-mode nodes.
@@ -686,8 +689,11 @@ func validateProfile(p *problems, providers map[string]ProviderConfig, field str
 	if profile.Budget.MaxExtends < 0 || profile.Budget.MaxExtends > 2 {
 		p.add("%s.budget.max_extends must be between 0 and 2", field)
 	}
-	if profile.Budget.Deadline <= 0 {
-		p.add("%s.budget.deadline must be positive", field)
+	if profile.Budget.Deadline < 0 {
+		p.add("%s.budget.deadline must not be negative", field)
+	}
+	if profile.Budget.MaxTurns < 0 {
+		p.add("%s.budget.max_turns must not be negative", field)
 	}
 }
 

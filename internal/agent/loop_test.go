@@ -788,6 +788,41 @@ func TestRunDeadlineReserveHasFloor(t *testing.T) {
 	}
 }
 
+func TestRunWithoutTurnLimitRunsPastThirtyTurns(t *testing.T) {
+	start := time.Now()
+	client := &steppingClient{clock: start, step: time.Second}
+	ctx, cancel := context.WithDeadline(context.Background(), start.Add(40*time.Second))
+	defer cancel()
+	spec := testSpec(client, echoTool{name: "echo"})
+	spec.Now = client.now
+	result, err := Run(ctx, spec)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// MaxTurns zero means no request-count limit: the run continues until the
+	// deadline prompt asks for submit_result, well past the old default of 30.
+	if result.Turns <= 30 {
+		t.Fatalf("turns = %d, want more than 30", result.Turns)
+	}
+}
+
+func TestRunTurnLimitErrorNamesTheTurns(t *testing.T) {
+	client := &fakeClient{replies: []*llm.Response{
+		toolResponse(llm.StopToolUse, call("c1", "echo", `{}`)),
+		toolResponse(llm.StopToolUse, call("c2", "echo", `{}`)),
+		toolResponse(llm.StopToolUse, call("c3", "echo", `{}`)),
+	}}
+	spec := testSpec(client, echoTool{name: "echo"})
+	spec.MaxTurns = 3
+	_, err := Run(context.Background(), spec)
+	if !errors.Is(err, ErrNoSubmit) {
+		t.Fatalf("error = %v, want ErrNoSubmit", err)
+	}
+	if !strings.Contains(err.Error(), "3 turns") {
+		t.Fatalf("error = %q, want the turn limit", err)
+	}
+}
+
 func TestRunKeepsAskingForSubmitNearDeadline(t *testing.T) {
 	start := time.Now()
 	client := &steppingClient{clock: start, step: time.Minute, ignore: 1}

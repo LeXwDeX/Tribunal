@@ -20,8 +20,10 @@ import (
 const (
 	// SubmitToolName is the tool every run must call to finish.
 	SubmitToolName = "submit_result"
-	// DefaultMaxTurns bounds model requests when RunSpec.MaxTurns is zero.
-	DefaultMaxTurns = 30
+	// DefaultMaxTurns is zero: a run has no request-count limit by default.
+	// It still ends at submit_result, the context window, the caller's token
+	// budget or the context deadline.
+	DefaultMaxTurns = 0
 	// DefaultMaxToolOutput bounds one tool result in characters.
 	DefaultMaxToolOutput = 20000
 	// maxSubmitRetries is the number of attempts after the first invalid
@@ -85,11 +87,13 @@ type SubmitSpec struct {
 //
 // MaxTokens is forwarded to llm.Request.MaxTokens when positive.
 type RunSpec struct {
-	Client        llm.Client
-	System        []llm.Block
-	Prompt        string
-	Tools         []Tool
-	Submit        SubmitSpec
+	Client llm.Client
+	System []llm.Block
+	Prompt string
+	Tools  []Tool
+	Submit SubmitSpec
+	// MaxTurns bounds model requests when positive. Zero or negative means
+	// no request-count limit.
 	MaxTurns      int
 	MaxToolOutput int
 	MaxTokens     int

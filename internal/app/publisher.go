@@ -1108,9 +1108,30 @@ func (p *Publisher) stale(ctx context.Context, workflowID, reason string) error 
 // upsertSummary finds or creates the summary note. The marker scan recovers a
 // note after a lost publication row or a deleted bound note. recheck runs before
 // every remote summary attempt; a control change can still race an in-flight request.
-func (p *Publisher) upsertSummary(ctx context.Context, projectID, mrIID int64, token, fingerprint, body, workflowID string, recheck func() error) (int64, error) {
+func (p *Publisher) upsertSummary(ctx context.Context, projectID, mrIID int64, token, fingerprint, body, workflowID string, recheck func() error) (id int64, err error) {
 	if err := recheck(); err != nil {
 		return 0, err
+	}
+	// #451: the status worker and this publisher share one review note. Store
+	// the rendered summary in the status row first so a later status edit
+	// keeps the result; then update the same note through the normal path.
+	// The publication row is still written by that path.
+	control, controlErr := p.store.GetReviewControl(ctx, projectID, mrIID)
+	if controlErr != nil && !errors.Is(controlErr, store.ErrNotFound) {
+		return 0, controlErr
+	}
+	if controlErr == nil {
+		if _, err := p.store.SetReviewStatusFinalBody(ctx, projectID, mrIID, control.Generation, control.HeadSHA, body); err != nil {
+			return 0, err
+		}
+		// Render the same body the status worker writes: lifecycle lines
+		// followed by the summary. Both writers therefore converge.
+		if row, err := p.store.GetReviewStatus(ctx, projectID, mrIID); err == nil && row != nil {
+			body = reviewStatusBody(reviewStatusUpdate{
+				State: row.State, Detail: row.Detail, HeadSHA: row.HeadSHA,
+				Generation: row.Generation, FinalBody: body,
+			})
+		}
 	}
 	var missingID int64
 	var missingErr error
@@ -1149,7 +1170,6 @@ func (p *Publisher) upsertSummary(ctx context.Context, projectID, mrIID int64, t
 	if user == nil || user.ID <= 0 {
 		return 0, errors.New("app: summary identity is unavailable")
 	}
-	var id int64
 	var last error
 	for attempt := 0; attempt < p.retries; attempt++ {
 		notes, err := p.gitlab.ListMRNotes(ctx, token, projectID, mrIID)

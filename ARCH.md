@@ -76,7 +76,7 @@ GitLab webhook / 评论命令 / 手动 API
 └───────────────────────────────────────────────────────────────────┘
         ▼
 ┌─[发布阶段 · 纯代码]──────────────────────────────────────────────┐
-│ fingerprint 比对 → 行号校验 → 汇总评论就地更新 → 行内讨论 →      │
+│ fingerprint 比对 → 行号校验 → 状态/结果评论就地更新 → 行内讨论 → │
 │ commit status (ai-review)                                        │
 └───────────────────────────────────────────────────────────────────┘
 ```
@@ -161,7 +161,7 @@ web/                   Web 控制台（M6）
 
 ### 4.4 回写
 
-- **汇总评论**：每个 MR 一条，内嵌隐藏标记 `<!-- gitlab-ce-review:summary -->`，重跑时就地更新，不重复发布。
+- **状态/结果评论（同一条 note）**：每个 MR 一条，内嵌隐藏标记 `<!-- gitlab-ce-review:summary`；状态 worker 先写生命周期状态，工作流结算后 publisher 把渲染好的评审报告追加到同一条 note，两者用相同渲染函数收敛到同一正文。重跑时就地更新，不重复发布。升级前遗留的单独 summary 或状态评论不会被迁移或删除，需要时人工清理。
 - **行内讨论**：Discussions API，`position_type=text`，带 `new_path` / `old_path` 和 `new_line` / `old_line`。行号**必须落在 diff hunk 内**，否则 GitLab 返回 400。校验不通过的条目降级并入汇总评论。
 - **commit status（可选）**：只有明确 PASS 写 `success`；BLOCKING 和 INCOMPLETE 都写名为 `ai-review` 的 `failed` 状态。项目开启「Pipelines must succeed」后即可拦截合并，这是 CE 不依赖付费审批规则也能做门禁的方式。是否默认开启，见 §16。
 - 发布前再次比对 MR 当前的 `head_sha`。如果已经变化，丢弃本次结果，不发布。
@@ -176,7 +176,7 @@ web/                   Web 控制台（M6）
 
 1. **explore**（可选，只读 agent 节点，超时 5 分钟）：只读探索本次 MR 的定义、调用方、配置和测试，输出已验证事实（附证据）、推断和未知项，不报告缺陷。其结论被渲染成不超过 6000 字符的摘要，写入每路评审节点的 params，作为待核实的线索而非证据交给它们；explore 未成功完成时四路评审不带摘要运行，报告给出告警。
 2. **plan**（代码节点，不调用模型，依赖 explore）：按文件把变更切成若干包（每包估算 token 不超过 `plan.package_tokens`，包数不超过 `plan.max_packages`），代码校验包的 ID、文件必须属于本次变更、总节点数受预算限制。
-3. **四路并行评审**：每个包一个 `code-review` 节点（挂载内置 code-review Skill）和一个 `review` 节点，每个 MR 一个 `reasoner` 节点和一个 `validate` 节点。四路都是可选节点，其中一路失败不影响其他路，缺失的一路使结论降为 INCOMPLETE（§5.5）。
+3. **四路并行评审**：每个包一个 `code-review` 节点（挂载内置 code-review Skill）和一个 `review` 节点，每个 MR 一个 `reasoner` 节点和一个 `validate` 节点。四路都是可选节点，其中一路失败不影响其他路，缺失的一路使结论降为 INCOMPLETE（§5.5）。评审 agent 节点默认不设节点级 deadline（`DefaultReviewTimeout = -1`），只受工作流 deadline（若配置）或取消约束；模型请求数默认也不设上限（`budget.max_turns = 0`），运行在 `submit_result`、上下文窗口、调用方 token 预算或 context deadline 时结束。
 4. **裁决**：`gather` 归一化并去重各路 findings，`verify.N` 对每条 P0/P1 做只读反证，`adjudicate` 按规则裁决。
 5. **汇报**：`synthesize` 是代码节点，直接渲染报告，不再调用模型。
 
@@ -274,7 +274,7 @@ I4 的「逐条反驳」规则参考 GraphAgent 的 accept 结算规则（裁决
 
 ### 6.1 数据模型
 
-- **节点**：一次子 agent 调用，或一段纯代码逻辑（如 `gather` 汇聚去重、`adjudicate` 规则裁决）。两类对引擎透明，都实现同一个执行器接口。字段：`id`、`kind`、`depends_on`、`required`、`input_mapping`（形如 `a.output.findings`）、`condition`、`params`、`timeout`、`expands`。节点种类、图模板和契约见 [docs/design/04-dag-and-contracts.md](docs/design/04-dag-and-contracts.md)。
+- **节点**：一次子 agent 调用，或一段纯代码逻辑（如 `gather` 汇聚去重、`adjudicate` 规则裁决）。两类对引擎透明，都实现同一个执行器接口。字段：`id`、`kind`、`depends_on`、`required`、`input_mapping`（形如 `a.output.findings`）、`condition`、`params`、`timeout`、`expands`。`timeout` 为 0 时使用引擎默认值，负值表示不设节点级 deadline（只受工作流 deadline 或取消约束）。节点种类、图模板和契约见 [docs/design/04-dag-and-contracts.md](docs/design/04-dag-and-contracts.md)。
 - **块（Block）**：可复用的子图模板，由编译器展开成节点。共定义 8 种块（7 种用于 MR 评审，1 种用于工作区）：
 
 | 块 | 展开结果 |
@@ -324,7 +324,7 @@ pending ─→ queued ─→ running ─→ completed
 - Kahn 拓扑排序加 ready 集合。
 - **两级限流**：全局并发信号量，加上**按 provider 的并发和速率限制**（多个 MR 同时到达时，不会把某个模型 API 打到限流）。
 - 节点先持久化为 `queued`，拿到许可后才发起 LLM 调用。
-- 排队等待时间计入节点超时。
+- 排队等待时间计入节点超时。节点 `timeout` 为 0 时使用 `engine.default_node_timeout`（默认 10m），为负值时不设节点级 deadline，只保留工作流 deadline（若配置）或取消。
 - 所有写入都带 attempt / `graph_rev` 栅栏，迟到的过期结果一律拒绝。
 
 ### 6.5 Fingerprint 与取消
@@ -338,7 +338,7 @@ pending ─→ queued ─→ running ─→ completed
 - `required` 节点失败 → 下游级联为不可满足 → 工作流 `failed`。此时在 MR 上发布一条简短的「评审未完成」说明（是否发布可配置）。
 - 可选节点失败 → 下游照常运行，对应输入用占位文本。四路评审节点和 `explore` 都是可选节点：`explore` 失败时四路评审不带探索摘要运行；任一路评审失败、被取消或被跳过，其他路照常发布，结论为 INCOMPLETE。
 - 依赖全部为 `skipped` 的节点级联 `skipped`。
-- 超时没有人工裁决环节：节点到期后取消其 context；执行器返回时不得把超时结果当作成功或展开，按 required / optional 语义处理并记录可得用量。context 取消不能强杀不协作的 Go 执行器；`Run` 为保护工作区会同步等待执行器退出，因此可能无限等待，不保证在截止时间内返回。
+- 超时没有人工裁决环节：节点到期后取消其 context；执行器返回时不得把超时结果当作成功或展开，按 required / optional 语义处理并记录可得用量。节点级超时只在 `timeout` 为正数（或 0 取引擎默认）时存在；评审 agent 节点默认不设节点级 deadline。工作流 `budget.deadline` 为 0（默认）时也没有工作流期限，节点运行只能在完成、取消、进程停止、调用方 context 截止或 agent 自身的上下文窗口/token 预算限制下结束。context 取消不能强杀不协作的 Go 执行器；`Run` 为保护工作区会同步等待执行器退出，因此可能无限等待，不保证在截止时间内返回。
 
 ### 6.7 恢复
 
@@ -346,7 +346,7 @@ pending ─→ queued ─→ running ─→ completed
 
 - 服务重启后，`running` 和 `queued` 的节点直接重新执行。LLM 调用无副作用，重跑是安全的。
 - 进程停机或 job 丢失租约只中断本进程的执行（`dag.ErrInterrupted`），不写入 durable 取消；只有用户取消、被新版本取代、超过截止时间才把工作流写成 `cancelled`。
-- 发布阶段另有幂等保护：汇总评论按隐藏标记就地更新；行内讨论按项目/MR 内的 `publish_key` 去重。该键包含路径、规范化标题和代码片段，不是语义相似度判断。2026-10-25 用户确认按此边界验收：显式重跑时模型换标题可能再次发布同一问题；本版不增加跨次问题语义去重。
+- 发布阶段另有幂等保护：状态/结果评论按隐藏标记就地更新；行内讨论按项目/MR 内的 `publish_key` 去重。该键包含路径、规范化标题和代码片段，不是语义相似度判断。2026-10-25 用户确认按此边界验收：显式重跑时模型换标题可能再次发布同一问题；本版不增加跨次问题语义去重。`publish_key` 不随评论标题格式变化；升级后旧行内讨论的正文哈希与按新模板渲染的正文不同，按既有安全策略只进汇总并追加警告，不修改旧讨论。
 - 评审执行状态与发布状态分开恢复：`publication_state=pending` 的终态工作流在启动后重试；failed execution 在启用 `commit_status` 时先发布 failed 状态，并在 `post_failure_note=true` 时发布未完成摘要；两者都关闭时记为 skipped。取消或 superseded 记为 skipped；自动恢复不会覆盖 published/failed（手动 republish 是显式例外）。失败原因有界脱敏保存，永久发布失败需要手动 republish。
 
 ### 6.8 预算
@@ -355,8 +355,13 @@ pending ─→ queued ─→ running ─→ completed
 |---|---|
 | 每个工作流的节点总数 | 30 |
 | extend 次数 | 0（评审图不在汇报阶段扩展） |
-| 每个工作流的 token 上限 / 时长上限 | `profiles.default.budget`（`deadline` 默认 30m；`max_tokens` 默认 0，即不设 token 上限，用量由上游 LLM key 的额度决定，见 [#392](https://github.com/LeXwDeX/Tribunal/issues/392)） |
+| 每个 agent 节点的模型请求数上限 | `budget.max_turns` 默认 0，即不限制；正数才设上限 |
+| 每个工作流的时长上限 | `budget.deadline` 默认 0s，即不设工作流 deadline；负值拒绝 |
+| 每个工作流的 token 上限 | `budget.max_tokens` 默认 0，即不设 token 上限，用量由上游 LLM key 的额度决定，见 [#392](https://github.com/LeXwDeX/Tribunal/issues/392) |
+| 节点级超时 | 评审 agent 节点默认负值（不设节点级 deadline）；`explore` 5m、`plan` 5m、`gather` 2m、`adjudicate` 2m、`synthesize` 10m、`onboarding` 15m；0 表示使用 `engine.default_node_timeout` |
 | 超出预算时 | 不再展开 verify，待挑战条目标记为未核验并在报告中注明；终止未完成的非 `TokenFree` 节点（见 04 §5.5） |
+
+`max_turns` 为 0 或负数时，agent 运行不限制模型请求数，仍会在 `submit_result`、上下文窗口、调用方 token 预算或 context deadline 时结束；显式正数上限到达后仍未提交时，运行以 `agent finished without submit_result after N turns` 失败。`deadline` 为 0 时工作流没有工作流级截止时间；节点超时为负值时也没有节点级截止时间。此时工作流主要由取消、进程停止、调用方 context 截止或全部节点结算来结束，单个 agent 仍受上下文窗口和显式 token 预算约束；恢复扫描与发布补偿仍按 §6.7 执行。
 
 `max_tokens` 为 0 时不做 token 预算检查，模型额度耗尽时由上游返回错误，按普通节点失败处理。设为正数时，`max_tokens` 是 workflow 共享预算，按 `input_tokens + output_tokens` 计算。cache read/write 和 reasoning 在 usage 中分别表示，但不额外加入预算，避免与 input/output 重复计数。调度器和节点执行器在每次模型请求前检查已提交用量加当前 attempt 已知的 partial usage；并发节点不预留额度，已发出的请求可能在检查后完成并造成超支，因此这是尽力上限，不是精确账单。transport 重试的已知 usage 计入下一次 attempt 的预算检查和最终节点用量；预算不足时保留已有结果，按 required / optional 和确定性规则兜底，不能无提示地给出 PASS。`usage_incomplete` 标记检测到的缺失或无法精确表示的用量；为 false 不证明历史用量完整。
 
@@ -564,7 +569,7 @@ profiles:
       code_review: { provider: local }
     challenge: { provider: gpt }
     plan:   { package_tokens: 60000, max_packages: 6 }
-    budget: { max_nodes: 30, deadline: 30m, max_tokens: 0 }   # 0 = 不设 token 上限
+    budget: { max_nodes: 30, deadline: 0s, max_tokens: 0, max_turns: 0 }   # 0 = 不设工作流 deadline / token 上限 / 每节点请求上限
   onboarding:
     agent: { provider: claude }
 

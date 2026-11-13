@@ -97,7 +97,7 @@ func TestHistoricalDiscussionContentReuse(t *testing.T) {
 						t.Fatalf("unchanged finding was treated as changed content: %s", summary)
 					}
 					if !strings.Contains(summary, "### 行内问题（1）") ||
-						!strings.Contains(summary, "- **[P2]** bad assignment · `main.go`:2") {
+						!strings.Contains(summary, "- **[P2]bad assignment** · `main.go`:2") {
 						t.Fatalf("inline issue index is missing: %s", summary)
 					}
 				}

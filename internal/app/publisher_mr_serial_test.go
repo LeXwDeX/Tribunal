@@ -445,7 +445,7 @@ func TestStandaloneSummaryRejectsNewerGeneration(t *testing.T) {
 	if !errors.Is(err, ErrStalePublication) {
 		t.Fatalf("standalone summary error = %v, want ErrStalePublication", err)
 	}
-	if len(f.gitlab.notes) != before || f.gitlab.notes[0].Body != review.SummaryMarkerPrefix+"first" {
+	if len(f.gitlab.notes) != before || !strings.Contains(f.gitlab.notes[0].Body, "first") {
 		t.Fatalf("stale standalone summary changed notes: %+v", f.gitlab.notes)
 	}
 }

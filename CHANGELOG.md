@@ -2,6 +2,15 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 行为变更
+
+- **解除 agent 回合上限与工作流 deadline 默认限制**（[#451](https://github.com/LeXwDeX/Tribunal/issues/451)）：新增 `budget.max_turns`，默认 0，0 或负数表示不限制每个 agent 节点的模型请求数；`budget.deadline` 默认从 30m 改为 `0s`，表示不设工作流 deadline；评审 agent 节点（`code-review`、`review`、`reasoner`、`validate`、`verify`）的默认节点级超时从 10m 改为负值（无节点级 deadline）。`onboarding` 删除 90 轮上限，与评审节点使用同一套 `budget.max_turns` 配置。运行仍会在 `submit_result`、上下文窗口、调用方 token 预算或 context deadline 时结束；显式正数 `max_turns` 到达后未提交时节点失败，错误为 `agent finished without submit_result after N turns`。`pkg/dag` 允许负 `NodeSpec.Timeout`（不设节点级 timer，工作流 deadline 或取消仍生效），`budget.deadline=0` 不再被归一化为 20m；`explore`、`plan`、`gather`、`adjudicate`、`synthesize` 和 onboarding 的固定超时不变。新增字段和默认值变化会改变评审档位哈希，升级重启后未终态评审会以 `profile_hash_changed` 取消，需要重新触发。配置校验拒绝负 `deadline` / `max_turns`；overlay 可写叶子新增 `budget.max_turns`；`config/server.example.yaml` 的 `budget` 行改为 `{ max_nodes: 30, deadline: 0s, max_tokens: 0, max_turns: 0 }`。需要旧限制时显式设置正数。
+- **评审状态与结果合并为一条 MR 评论**（[#451](https://github.com/LeXwDeX/Tribunal/issues/451)）：状态评论改用 summary 标记 `<!-- gitlab-ce-review:summary`，状态 worker 与 publisher 找到并更新同一条 note；正文新增 `- 阶段：`（开始 / 进行中 / 已完成 / 失败）和 `- 状态：`（原始状态值）两行，工作流结算后追加渲染好的评审报告。publisher 先通过 `SetReviewStatusFinalBody` 写入 `review_status.final_body`，再用与状态 worker 相同的渲染函数更新 note；`publications(kind=summary)` 仍记录该 note，`gitlab_id` 指向同一条评论。publisher 的 note 写入失败按现有发布失败路径重试；状态作业自身的写入失败由 `review.status` 对账重试，不影响已完成的评审。行内 discussion、commit status 和命令回执 note 不变。升级前的旧 summary/status 评论不迁移、不删除，可能残留，需要人工清理。
+- **新增迁移 `0031_review_status_final_body`**（[#451](https://github.com/LeXwDeX/Tribunal/issues/451)）：`review_status` 追加 `final_body TEXT NOT NULL DEFAULT ''`，存储已渲染的评审正文（按 128 × 1024 字符截断）；`SetReviewStatusFinalBody` 要求当前 generation/head，写入后重置 `body_hash`、递增 `version` 并入队 `review.status`，终态后仍允许；`SetReviewStatus` 在新 generation 或 head 变化时清空。迁移只加列，旧行 `final_body` 为空，状态评论保持旧正文，下一次评审覆盖；没有 down migration，回退需恢复升级前快照并启动匹配的旧镜像。
+- **收紧评审评论排版与正文长度**（[#451](https://github.com/LeXwDeX/Tribunal/issues/451)）：行内 finding 标题改为 `**[P1]标题**`（存疑为 `**[P1 · 存疑]标题**`），汇总索引为 `- **[P1]标题** · path:line`，汇总条目为 `#### [P1]标题`（存疑为 `#### [P1?]标题`）；行内与汇总条目的正文最多渲染 400 字符并追加「内容已截断」，完整正文仍在存储和控制台；建议与证据的代码块渲染不变。`publish_key` 不变；旧行内讨论的 `body_hash` 与按新模板渲染的正文不同，复用判定会把该 finding 只放进汇总并追加警告，不修改旧讨论，也不会因此重复发布。
+
 ## [1.4.0] - 2026-11-12
 
 > **发布摘要**

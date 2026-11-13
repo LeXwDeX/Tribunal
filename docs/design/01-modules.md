@@ -30,7 +30,7 @@ internal/review ──→ internal/agent ──→ internal/llm
 ## 2. 目录与文件
 
 > 实现偏差：本节文件清单是设计目标，当前实现有几处不同：
-> - 评审发布器在 `internal/app/publisher.go`，不在 `internal/gitlab/publish.go`。
+> - 评审发布器在 `internal/app/publisher.go`，不在 `internal/gitlab/publish.go`。评审状态和评审结果现在写在同一条 MR note：状态 worker 与 publisher 都按 `<!-- gitlab-ce-review:summary` 标记查找并更新它。
 > - GitLab 发布和评论命令处理在 `internal/app` 层（`publisher.go`、`webhook_service.go`、`command_worker.go`），不在 `internal/gitlab/publish.go` / `command.go`。
 > - `pkg/dag/validate.go` 未单独存在，图校验合并在 `pkg/dag/graph.go`。
 
@@ -73,7 +73,7 @@ internal/
     client.go                    client-go 封装；按项目缓存 client
     webhook.go                   webhook payload 结构体与解析
     diff.go                      diff 解析与 DiffIndex（行号 → GitLab position）
-    publish.go                   汇总评论 upsert、行内讨论、commit status
+    publish.go                   评审评论（状态 + 结果）upsert、行内讨论、commit status
     command.go                   解析评论命令（/review …）
   repo/
     git.go                       git 命令封装（mirror、fetch、worktree）
@@ -112,7 +112,7 @@ internal/
     adjudicate.go                裁决不变量 I1–I7
     dedupe.go                    finding 去重合并
     prompt.go                    prompt 组装（稳定前缀在前）
-    render.go                    汇总评论与行内评论的 Markdown 渲染
+    render.go                    评审评论与行内评论的 Markdown 渲染
   store/
     store.go                     各聚合的仓储接口
     sqlite/                      SQLite 实现（modernc.org/sqlite）
@@ -174,14 +174,14 @@ type NodeSpec struct {
 	Condition    string            `json:"condition,omitempty"`     // 例：gate.output.verdict == "BLOCKING"
 	InputMapping map[string]string `json:"input_mapping,omitempty"` // 例："findings": "cr_a.output.findings"
 	Params       json.RawMessage   `json:"params,omitempty"`        // kind 专用参数
-	Timeout      time.Duration     `json:"timeout,omitempty"`
+	Timeout      time.Duration     `json:"timeout,omitempty"`      // 0 用引擎默认；负值不设节点级 deadline
 	Expands      bool              `json:"expands,omitempty"`       // 完成后调用 Expander 生成新节点
 }
 
 type Budget struct {
 	MaxNodes   int           `json:"max_nodes"`
 	MaxExtends int           `json:"max_extends"`
-	Deadline   time.Duration `json:"deadline"`
+	Deadline   time.Duration `json:"deadline"`    // 0 = 不设工作流 deadline
 	MaxTokens  int64         `json:"max_tokens"`
 }
 
@@ -411,7 +411,7 @@ type RunSpec struct {
 	Prompt        string
 	Tools         []Tool
 	Submit        SubmitSpec
-	MaxTurns      int // 默认 30；onboarding 节点传 90
+	MaxTurns      int // 0 或负数表示不限制模型请求数；正数才是上限
 	MaxToolOutput int // 单次工具输出字符上限，默认 20000
 	Temperature   *float64
 	Reasoning     *llm.ReasoningOpts
@@ -429,12 +429,14 @@ var ErrNoSubmit = errors.New("agent finished without submit_result")
 func Run(ctx context.Context, spec RunSpec) (*RunResult, error)
 ```
 
-循环规则：
+`internal/review` 的 executor 在节点未单独指定 `MaxTurns`（0 或负数）时使用 `profile.Config.Budget.MaxTurns`；默认配置为 0，因此评审和 onboarding 节点默认不限制模型请求数。直接调用 `agent.Run` 时传入负数按 0 处理。
+
+循环规则（`MaxTurns` 为 0 或负数时不限制模型请求数；运行仍会在 `submit_result`、上下文窗口、调用方 token 预算或 context deadline 时结束。显式正数上限到达后仍未提交时返回 `ErrNoSubmit`，错误文本为 `agent finished without submit_result after N turns`）：
 
 1. 每轮调用 `Generate`；模型调用工具就执行并回填结果；工具名不存在时回填错误结果，不中断。
 2. 模型调用 `submit_result`：`Decode` 成功即结束；失败则把错误作为 `IsError` 的工具结果回给模型，最多重试 2 次。
 3. 模型没有调用 `submit_result` 就结束（`end_turn`）：追加一条提示「必须调用 submit_result 提交结果」，补问 1 次；仍然没有则返回 `ErrNoSubmit`。
-4. 达到 `MaxTurns`：provider 声明支持强制选择（`ProviderInfo.ForcedToolChoice`，见配置 `forced_tool_choice`）时，最后一轮设置 `ToolChoice=submit_result`；该请求若收到上游 400（`ErrBadRequest`，本地校验错误不算），同一轮改用 auto 重发；重发成功才在本进程记住该 provider，之后的运行不再尝试强制。审计请求元数据以 `forced_tool_choice` 标记强制请求，不记录工具名。不支持时不设置 `ToolChoice`（不发送函数级或 `required` 的选择，部分 thinking 模式网关会以 400 拒绝）。两种情况都在本次请求末尾追加一条一次性用户提示，要求立即调用 `submit_result`，并按严格 JSON 转义字符串中的双引号、反斜杠和换行（双引号也可改用「」）；该提示不写入 transcript。最后一轮只执行 `submit_result`，其他工具调用回填「未执行」的错误结果；模型仍未提交则返回 `ErrNoSubmit`。若 ctx 有截止时间，且剩余时间低于保留量（本次运行观测到的最慢一轮的 2 倍，且不少于开始时剩余时间的 1/8），之后每次请求都提前追加同一条提示。`runAgent` 传输重试时，把此前各次尝试中最慢的已完成轮次（含工具执行和 provider 层退避；失败的那一轮不计）作为新尝试的初始估计（`RunSpec.TurnEstimate`），靠近截止时间的重试第一次请求就会附上提示。这是取舍：重试从空 transcript 开始，提示只是要求提交，模型仍可调用工具；慢工具轮被继承时可能偏早收尾。`agent.Run` 的 `RunResult.LongestTurn` 返回该值，失败的部分结果同样返回；保留量下限按每次尝试开始时的剩余时间计算。Anthropic adapter 会把纯文本 user 消息并入紧邻的前一条 user 消息（工具结果仍在最前）。
+4. 达到显式正数 `MaxTurns`（默认 0 不限制，不进入此分支）：provider 声明支持强制选择（`ProviderInfo.ForcedToolChoice`，见配置 `forced_tool_choice`）时，最后一轮设置 `ToolChoice=submit_result`；该请求若收到上游 400（`ErrBadRequest`，本地校验错误不算），同一轮改用 auto 重发；重发成功才在本进程记住该 provider，之后的运行不再尝试强制。审计请求元数据以 `forced_tool_choice` 标记强制请求，不记录工具名。不支持时不设置 `ToolChoice`（不发送函数级或 `required` 的选择，部分 thinking 模式网关会以 400 拒绝）。两种情况都在本次请求末尾追加一条一次性用户提示，要求立即调用 `submit_result`，并按严格 JSON 转义字符串中的双引号、反斜杠和换行（双引号也可改用「」）；该提示不写入 transcript。最后一轮只执行 `submit_result`，其他工具调用回填「未执行」的错误结果；模型仍未提交则返回 `ErrNoSubmit`。若 ctx 有截止时间，且剩余时间低于保留量（本次运行观测到的最慢一轮的 2 倍，且不少于开始时剩余时间的 1/8），之后每次请求都提前追加同一条提示。`runAgent` 传输重试时，把此前各次尝试中最慢的已完成轮次（含工具执行和 provider 层退避；失败的那一轮不计）作为新尝试的初始估计（`RunSpec.TurnEstimate`），靠近截止时间的重试第一次请求就会附上提示。这是取舍：重试从空 transcript 开始，提示只是要求提交，模型仍可调用工具；慢工具轮被继承时可能偏早收尾。`agent.Run` 的 `RunResult.LongestTurn` 返回该值，失败的部分结果同样返回；保留量下限按每次尝试开始时的剩余时间计算。Anthropic adapter 会把纯文本 user 消息并入紧邻的前一条 user 消息（工具结果仍在最前）。
 5. 工具输出超出上限时截断，并在末尾注明 `[truncated: N chars omitted]`。
 6. 上下文压缩：provider 配置了 `context_window` 时，每轮按上一次响应的输入与输出 token（含推理 token；openai-chat 不回传推理历史，因此偏高、方向保守）加新回填工具结果的字节数 / 3 估算下一次请求的输入。估算达到窗口的 85% 时，保留初始任务和最近 3 轮工具结果，把更早的成功工具结果内容替换为「已省略」占位（错误结果保留，`submit_result` 的校验反馈不会丢）；释放量按字节数 / 4 计。仍不低于 85% 时依次只保留 2、1、0 轮，直到低于 85%。工具调用、call ID 配对和 `IsError` 不变，不额外调用 LLM；assistant 消息与推理块不改，DeepSeek 等走 openai-chat 的 thinking 模型消息形状与压缩前一致。压缩直接作用于 transcript，`RunResult.Transcript` 记录的是压缩后发给模型的内容。保留 0 轮后仍不低于 85% 时，本轮按最后一轮处理：追加规则 4 的提交提示，只执行 `submit_result`。未配置 `context_window` 时不压缩。估算依赖 provider 返回 usage。
 7. 预算临近（仅 onboarding，且仅在工作流 `max_tokens > 0` 时；默认 0 不提供）：onboarding 节点同时提供 `BudgetRemaining`（工作流 `max_tokens` 减去已用量，跨重试累计）。剩余量低于本次运行最大单轮用量（输入 + 输出）的 4 倍（多留两轮给规则 8 的重提交）时，每次请求都追加规则 4 的提交提示；只按已观测用量计算，不用 `providers.<name>.max_tokens`。其他节点保持原有的预算耗尽处理与告警（例如 synthesize 退回确定性规则裁决）。

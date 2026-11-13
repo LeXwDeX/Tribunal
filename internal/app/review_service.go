@@ -80,6 +80,7 @@ type ReviewStore interface {
 	ListFeedback(ctx context.Context, filter store.FeedbackFilter) ([]store.Feedback, string, error)
 	Enqueue(ctx context.Context, job store.Job) (string, bool, error)
 	SetReviewStatus(ctx context.Context, goal store.ReviewStatusGoal) (bool, error)
+	SetReviewStatusFinalBody(ctx context.Context, projectID, mrIID, generation int64, headSHA, body string) (bool, error)
 	GetReviewStatus(ctx context.Context, projectID, mrIID int64) (*store.ReviewStatus, error)
 	MarkReviewStatusApplied(ctx context.Context, projectID, mrIID int64, version, noteID int64, bodyHash, lastError string) error
 	ListReviewStatusesForVerification(ctx context.Context, projectID, afterMRIID int64) ([]store.ReviewStatus, error)
@@ -406,7 +407,7 @@ func (s *ReviewService) RunCandidate(ctx context.Context, job *jobs.Job) error {
 	cfg, err := resolveSecureReviewConfig(project, docs, s.reviewDefaults, s.profiles)
 	if err != nil {
 		if errors.Is(err, ErrInvalidRepoConfig) {
-			s.noteInvalidRepoConfig(ctx, token, payload.ProjectID, payload.MRIID)
+			s.noteInvalidRepoConfig(ctx, token, payload.ProjectID, payload.MRIID, payload.Generation, payload.HeadSHA)
 		}
 		return PermanentJob(err)
 	}
@@ -474,9 +475,16 @@ func (s *ReviewService) collectFilterInputs(ctx context.Context, project *store.
 // RunReview executes one review.run job.
 // noteInvalidRepoConfig leaves a visible explanation on the MR. It is also
 // used by the candidate path so automatic webhooks do not fail silently.
-func (s *ReviewService) noteInvalidRepoConfig(ctx context.Context, token string, projectID, mrIID int64) {
+func (s *ReviewService) noteInvalidRepoConfig(ctx context.Context, token string, projectID, mrIID, generation int64, headSHA string) {
 	if token == "" {
 		return
+	}
+	// Prefer the single review note (#451). The status worker edits it with
+	// the same text; only a run without a status row falls back to a new note.
+	if generation > 0 {
+		if _, err := s.store.SetReviewStatusFinalBody(ctx, projectID, mrIID, generation, headSHA, invalidRepoConfigNote); err == nil {
+			return
+		}
 	}
 	if err := sendOutbound(ctx, s.workspace.Get(projectID), func(callCtx context.Context) error {
 		_, err := s.gitlab.CreateMRNote(callCtx, token, projectID, mrIID, invalidRepoConfigNote)
@@ -536,7 +544,7 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 		}
 		if errors.Is(err, ErrInvalidRepoConfig) {
 			detail = invalidRepoConfigDetail
-			s.noteInvalidRepoConfig(ctx, token, payload.ProjectID, payload.MRIID)
+			s.noteInvalidRepoConfig(ctx, token, payload.ProjectID, payload.MRIID, payload.Generation, payload.HeadSHA)
 		}
 		s.settleReviewStatus(ctx, payload.ProjectID, payload.MRIID, payload.Generation,
 			job.Attempts, payload.HeadSHA, payload.Profile, state, detail,

@@ -67,7 +67,12 @@ func TestOnboardingSubmitsOnFinalTurnBehindThinkingGateway(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := &thinkingGatewayClient{submit: submit}
-	executor := newTestExecutor(t, ExecutorDeps{Profile: onboardingProfile(), Clients: metadataClients{"thinking": client}})
+	// Keep an explicit turn limit: the fake gateway takes no time and the
+	// input does not grow, so without a request cap or deadline nothing would
+	// ever ask for submit_result.
+	profile := onboardingProfile()
+	profile.Config.Budget.MaxTurns = 90
+	executor := newTestExecutor(t, ExecutorDeps{Profile: profile, Clients: metadataClients{"thinking": client}})
 	out, err := executor.Execute(context.Background(), dag.NodeInput{WorkflowID: "wf-255", Node: dag.NodeSpec{
 		ID: KindOnboarding, Kind: KindOnboarding, Params: json.RawMessage(`{"provider":"thinking"}`),
 	}})
@@ -80,8 +85,8 @@ func TestOnboardingSubmitsOnFinalTurnBehindThinkingGateway(t *testing.T) {
 	if len(forced) != 0 {
 		t.Fatalf("forced tool_choice sent %d times: %q", len(forced), forced)
 	}
-	if requests != onboardingMaxTurns {
-		t.Fatalf("requests = %d, want the onboarding turn limit %d", requests, onboardingMaxTurns)
+	if requests != 90 {
+		t.Fatalf("requests = %d, want the configured onboarding turn limit 90", requests)
 	}
 	decoded, err := DecodeStrict[*OnboardingOut](out.Data)
 	if err != nil || decoded.Overview != "overview" {
@@ -91,14 +96,16 @@ func TestOnboardingSubmitsOnFinalTurnBehindThinkingGateway(t *testing.T) {
 
 func TestAgentNodeTurnLimits(t *testing.T) {
 	var onboardingTurns int
-	onboarding := newTestExecutor(t, ExecutorDeps{Profile: onboardingProfile(), AgentRun: func(_ context.Context, spec agent.RunSpec) (*agent.RunResult, error) {
+	onboardingCfg := onboardingProfile()
+	onboardingCfg.Config.Budget.MaxTurns = 42
+	onboarding := newTestExecutor(t, ExecutorDeps{Profile: onboardingCfg, AgentRun: func(_ context.Context, spec agent.RunSpec) (*agent.RunResult, error) {
 		onboardingTurns = spec.MaxTurns
 		return &agent.RunResult{Output: &OnboardingOut{Overview: "ok"}}, nil
 	}})
 	if _, err := onboarding.Execute(context.Background(), dag.NodeInput{WorkflowID: "wf", Node: dag.NodeSpec{
 		ID: KindOnboarding, Kind: KindOnboarding, Params: json.RawMessage(`{"provider":"fake"}`),
-	}}); err != nil || onboardingTurns != onboardingMaxTurns {
-		t.Fatalf("onboarding max turns = %d, want %d (err=%v)", onboardingTurns, onboardingMaxTurns, err)
+	}}); err != nil || onboardingTurns != 42 {
+		t.Fatalf("onboarding max turns = %d, want the configured 42 (err=%v)", onboardingTurns, err)
 	}
 
 	profile := defaultProfile()
@@ -121,6 +128,6 @@ func TestAgentNodeTurnLimits(t *testing.T) {
 	}})
 	_, _ = synth.Execute(context.Background(), dag.NodeInput{WorkflowID: wf.ID, Node: mustNode(t, spec, NodeSynth)})
 	if synthTurns != 0 {
-		t.Fatalf("synthesize max turns = %d, want 0 (agent.DefaultMaxTurns)", synthTurns)
+		t.Fatalf("synthesize max turns = %d, want 0 (no request-count limit)", synthTurns)
 	}
 }

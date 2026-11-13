@@ -121,7 +121,7 @@ profiles:
       validate:    { provider: gpt }
     challenge: { provider: gpt }    # 可选：覆盖逐条反证（verify）
     plan:      { package_tokens: 60000, max_packages: 6 }
-    budget:    { max_nodes: 30, deadline: 30m, max_tokens: 0 }   # 0 = 不设 token 上限
+    budget:    { max_nodes: 30, deadline: 0s, max_tokens: 0, max_turns: 0 }   # 0 = 不设工作流 deadline / token 上限 / 每节点请求上限
   onboarding:
     agent:      { provider: claude }
 
@@ -187,7 +187,7 @@ review_defaults:                    # 项目设置的默认值（见 §3）
 允许写入的路径分为三组：
 
 - `providers.<name>`：`protocol`、`base_url`、`model`、`max_tokens`、`context_window`、`temperature`、`thinking.budget_tokens`、`thinking.type`、`reasoning.effort`、`max_concurrency`、`rpm`、`forced_tool_choice`、`strict_role_alternation`、`preserve_reasoning_content`、`allow_reasoning_effort_none`、`output_config_effort`、`responses_params`、`api_key_env`。`api_key_env` 只允许环境变量名，不写密钥值；允许删除整个 `providers.<name>`，以及删除 `thinking` / `reasoning` 子树。
-- `profiles.default`：`provider`、`explore.provider`、`lanes.code_review.provider`、`lanes.review.provider`、`lanes.reasoner.provider`、`lanes.validate.provider`、`plan.package_tokens`、`plan.max_packages`、`budget.max_nodes`、`budget.max_tokens`、`budget.deadline`。只允许能被 `NormalizeReviewProfile` 保留的字段；`plan.mode`、`plan.provider`、`reasoner.*`、`consensus`、`challenge.fallback`、`synthesize`、`agent`、`budget.max_extends`、`propose` 等派生或被忽略字段拒绝。
+- `profiles.default`：`provider`、`explore.provider`、`lanes.code_review.provider`、`lanes.review.provider`、`lanes.reasoner.provider`、`lanes.validate.provider`、`plan.package_tokens`、`plan.max_packages`、`budget.max_nodes`、`budget.max_tokens`、`budget.max_turns`、`budget.deadline`。只允许能被 `NormalizeReviewProfile` 保留的字段；`plan.mode`、`plan.provider`、`reasoner.*`、`consensus`、`challenge.fallback`、`synthesize`、`agent`、`budget.max_extends`、`propose` 等派生或被忽略字段拒绝。
 - `review_defaults`：全部字段，即 `language`、`skip_draft`、`target_branches`、`labels_include`、`labels_exclude`、`ignore`、`max_files`、`max_diff_lines`、`commit_status`、`post_failure_note`、`show_model_attribution`、`allow_repo_config`、`allow_repo_skills`、`profile_by_label`、`custom_rules`。
 
 永久只读：`price`、`mcp.config`、`storage.dsn`、`secrets.master_key_env`、`auth.bootstrap_token_env`、`auth.oauth.*_env`、`workspace.root`、`workspace.git_bin`、`prompts_dir`、`skills.dirs`、`blocks`、`default_extensions`，以及 `server`、`gitlab`、`jobs`、`engine`、`llm` 等其余全部路径。对未知、敏感或被忽略的路径设置、对非叶子路径设置、类型错误、重复或父子路径冲突，以及空 `changes`，返回 `400 invalid_change`。
@@ -260,6 +260,14 @@ type ProfileConfig struct {
 	// 另有 Propose、Reasoner、Consensus、OnUncertain、Synthesize 等旧字段：
 	// 仍可解码，由加载器迁移或忽略，见「评审档位」。
 }
+
+type BudgetConfig struct {
+	MaxNodes   int           `yaml:"max_nodes"`
+	MaxExtends int           `yaml:"max_extends"`
+	Deadline   time.Duration `yaml:"deadline"`   // 0 表示不设工作流 deadline；负值拒绝
+	MaxTokens  int64         `yaml:"max_tokens"` // 0 表示不设 token 上限
+	MaxTurns   int           `yaml:"max_turns"`  // 0 或负数表示不限制每节点模型请求数
+}
 ```
 
 ### provider 能力字段
@@ -287,7 +295,7 @@ type ProfileConfig struct {
 - `max_tokens` 不能为负，`anthropic` 必须为正；`max_concurrency`、`rpm`、`context_window` 和 `thinking.budget_tokens` 不能为负。`temperature` 在 0–2。
 - `reasoning.effort` 只能为空或 `low` / `medium` / `high` / `max`；`none` 仅在 `allow_reasoning_effort_none: true` 时通过校验，未声明时阻止启动；`anthropic` 协议声明 `none` 时无论能力开关如何都阻止启动。`thinking.type` 只能为空、`enabled` 或 `disabled`；`responses_params` 只能为空、`auto`、`supported` 或 `unsupported`。不适用的协议组合一般只在启动日志告警，不阻止启动（`anthropic` + `none` 除外）。
 - profile 中引用的 provider 都存在：`provider`、`explore.provider`、`lanes.*.provider`、`challenge.provider` 和 onboarding 的 `agent.provider`。留空表示沿用 `provider`，不做检查。
-- `budget.max_nodes` 在 1 到 100 之间，`budget.deadline` 为正。
+- `budget.max_nodes` 在 1 到 100 之间；`budget.deadline` 和 `budget.max_turns` 不能为负，0 分别表示不设工作流 deadline 和不限制每节点模型请求数。
 - `blocks` 中的 `mcp_tools` 名称格式为 `mcp__<server>__<tool>`，且 server 在 MCP 配置中存在（工具是否存在在启动后探测，不存在只告警）。
 - `secrets.master_key_env` 解码后必须为 32 字节。
 
@@ -306,11 +314,11 @@ Tribunal 只有一个评审档位 `default`，评审图固定：`explore` → �
 | `lanes.code_review.provider`、`lanes.review.provider`、`lanes.reasoner.provider`、`lanes.validate.provider` | 可选，分别覆盖四路评审；留空取 `provider` |
 | `challenge.provider` | 可选，覆盖逐条反证（`verify`）；留空取 `provider` |
 | `plan.package_tokens`、`plan.max_packages` | 分包上限：每包估算 token（默认 60000）和最大包数（默认 6，受下述上界限制） |
-| `budget.max_nodes`、`budget.deadline`、`budget.max_tokens` | 节点总数（默认 30）、总时长（默认 30m）、token 上限（默认 0，即不设上限，用量由上游 LLM key 的额度决定；填正数才启用工作流 token 预算，见 [#392](https://github.com/LeXwDeX/Tribunal/issues/392)） |
+| `budget.max_nodes`、`budget.deadline`、`budget.max_tokens`、`budget.max_turns` | 节点总数（默认 30）、工作流总时长（默认 0s，不设 deadline；负值拒绝）、token 上限（默认 0，即不设上限，用量由上游 LLM key 的额度决定；填正数才启用工作流 token 预算，见 [#392](https://github.com/LeXwDeX/Tribunal/issues/392)）、每个 agent 节点的模型请求数上限（默认 0，不限制；负值拒绝，填正数才设上限） |
 
 其余行为由代码固定，不可配置：plan 为 code 模式（不调用模型），P0/P1 逐条挑战，挑战结果不确定的条目标记为「存疑」后发布，报告由代码生成，评审图不在汇报阶段扩展。
 
-`Load` 会把 `plan.max_packages` 降到上界 `min(17, (budget.max_nodes − 9) / 2)`（至少 1）：配置值高于上界时降到上界，并在启动日志产生一行 WARN；未配置且上界低于默认值 6 时静默降到上界。此外 `budget.deadline` 低于 30m 时启动日志也会提示（探索、四路评审和逐条反证可能来不及完成）。
+`Load` 会把 `plan.max_packages` 降到上界 `min(17, (budget.max_nodes − 9) / 2)`（至少 1）：配置值高于上界时降到上界，并在启动日志产生一行 WARN；未配置且上界低于默认值 6 时静默降到上界。`budget.deadline` 为 0（默认）表示不设工作流 deadline，不产生告警；只有显式正数且低于 30m 时启动日志才提示（探索、四路评审和逐条反证可能来不及完成）。`budget.max_turns` 为 0 表示每个 agent 节点不限制模型请求数；正数到达后仍未提交 `submit_result` 的节点失败。评审 agent 节点默认也不设节点级 deadline（`DefaultReviewTimeout = -1`），需要限制时显式配置 `deadline` 或 `max_turns`。`budget` 下的字段都参与评审档位哈希，修改后重启恢复可能使未终态评审以 `profile_hash_changed` 取消。
 
 评审执行时（构建评审图）还会检查扇出上限：`plan.max_packages × 2 + 2 ≤ max_fan_out`（`max_fan_out` 默认 36），超出时拒绝该配置。每个包生成 `code-review` 和 `review` 各一个节点，`reasoner` 和 `validate` 每个 MR 各一个。
 

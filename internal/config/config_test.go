@@ -703,7 +703,7 @@ func TestValidatePositiveTimeoutsAndConcurrency(t *testing.T) {
 		},
 		{
 			name: "budget deadline",
-			body: validGitLab + "profiles:\n  default:\n    budget:\n      deadline: 0s\n",
+			body: validGitLab + "profiles:\n  default:\n    budget:\n      deadline: -1s\n",
 			want: "profiles.default.budget.deadline",
 		},
 	}

@@ -30,8 +30,23 @@ var tableInterruptRE = regexp.MustCompile(`^[ \t]*(?:#{1,6}[ \t]+|(?:[-+*]|[0-9]
 const (
 	summaryItemBodyRunes       = 2000
 	summaryItemSuggestionRunes = 1000
-	truncationNotice           = "\n\n…（内容已截断）"
+	// briefBodyRunes bounds the body published with a finding. Findings stay
+	// short by design; the suggestion and evidence blocks carry the longer
+	// material, and the full body stays in storage and the console.
+	briefBodyRunes   = 400
+	truncationNotice = "\n\n…（内容已截断）"
 )
+
+// briefBody renders a bounded finding body. The full body stays in storage
+// and in the console. Code blocks inside the bound keep their existing
+// rendering.
+func briefBody(value string, max int) string {
+	value = strings.TrimSpace(strings.ReplaceAll(value, "\r\n", "\n"))
+	if value == "" {
+		return ""
+	}
+	return renderMarkdown(value, max)
+}
 
 // SummaryInput is structured data for the summary note.
 type SummaryInput struct {
@@ -137,8 +152,9 @@ func RenderSummary(in SummaryInput) (string, error) {
 		for _, group := range positioned {
 			b.WriteString("- **[")
 			b.WriteString(string(group.EffectiveSeverity()))
-			b.WriteString("]** ")
+			b.WriteString("]")
 			b.WriteString(escapeOneLine(group.Title, MaxTitleRunes))
+			b.WriteString("**")
 			if group.Path != "" {
 				b.WriteString(" · ")
 				b.WriteString(inlineCode(group.Path))
@@ -225,8 +241,9 @@ func inlineRelatedLines(related []RelatedGroup) string {
 		}
 		b.WriteString("  - 相关描述：**[")
 		b.WriteString(string(r.Severity))
-		b.WriteString("]** ")
+		b.WriteString("]")
 		b.WriteString(escapeOneLine(r.Title, MaxTitleRunes))
+		b.WriteString("**")
 		b.WriteByte('\n')
 	}
 	return b.String()
@@ -272,7 +289,7 @@ func renderSummaryItem(group Group, marked bool) string {
 	var b strings.Builder
 	b.WriteString("#### [")
 	b.WriteString(display)
-	b.WriteString("] ")
+	b.WriteString("]")
 	b.WriteString(escapeOneLine(group.Title, MaxTitleRunes))
 	b.WriteString("\n\n")
 	if group.Path != "" {
@@ -300,7 +317,7 @@ func renderSummaryItem(group Group, marked bool) string {
 		b.WriteString(escapeOneLine(reason, 600))
 		b.WriteString("\n\n")
 	}
-	if body := renderMarkdown(group.Body, summaryItemBodyRunes); body != "" {
+	if body := briefBody(group.Body, briefBodyRunes); body != "" {
 		b.WriteString(body)
 		b.WriteString("\n\n")
 	}
@@ -358,11 +375,11 @@ func RenderFinding(group Group, opts FindingRenderOptions) (string, error) {
 	if group.Decision.Action == ActionMark {
 		b.WriteString(" · 存疑")
 	}
-	b.WriteString("] ")
+	b.WriteString("]")
 	b.WriteString(escapeOneLine(group.Title, MaxTitleRunes))
 	b.WriteString("**\n")
 	// The discussion is anchored on the line, so the location is not repeated.
-	if body := renderMarkdown(group.Body, MaxBodyRunes); body != "" {
+	if body := briefBody(group.Body, briefBodyRunes); body != "" {
 		b.WriteString("\n")
 		b.WriteString(body)
 		b.WriteByte('\n')

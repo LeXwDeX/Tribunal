@@ -127,7 +127,7 @@ func TestSummaryIdentityAndRestart(t *testing.T) {
 			api := &uncertainSummaryGitLab{reviewGitLab: f.gitlab, identity: tc.identity, identityErr: tc.identityErr, missingUser: tc.missingUser}
 			f.publisher.gitlab = api
 			err := f.publisher.publishStandaloneSummaryLocked(context.Background(), 42, 7, control.Generation, control.HeadSHA, "token", "new", review.SummaryMarkerPrefix+"new")
-			if (err != nil) != tc.wantErr || f.gitlab.notes[0].Body != review.SummaryMarkerPrefix+"other" {
+			if (err != nil) != tc.wantErr || authorNoteBody(f.gitlab.notes, 10) != review.SummaryMarkerPrefix+"other" {
 				t.Fatalf("err=%v notes=%+v", err, f.gitlab.notes)
 			}
 			if tc.wantErr && api.posts != 0 {
@@ -139,7 +139,7 @@ func TestSummaryIdentityAndRestart(t *testing.T) {
 				if err := p.publishStandaloneSummaryLocked(context.Background(), 42, 7, control.Generation, control.HeadSHA, "token", "another", review.SummaryMarkerPrefix+"updated"); err != nil {
 					t.Fatal(err)
 				}
-				if api.posts != 1 || f.gitlab.notes[1].Body != review.SummaryMarkerPrefix+"updated" {
+				if api.posts != 1 || !strings.Contains(authorNoteBody(f.gitlab.notes, 9), "updated") {
 					t.Fatalf("posts=%d notes=%+v", api.posts, f.gitlab.notes)
 				}
 			}
@@ -207,9 +207,19 @@ func TestSummaryMarkerOnLaterGitLabPage(t *testing.T) {
 	if err := f.publisher.publishStandaloneSummaryLocked(context.Background(), 42, 7, control.Generation, control.HeadSHA, "token", "hash", review.SummaryMarkerPrefix+"new"); err != nil {
 		t.Fatal(err)
 	}
-	if pages != 2 || f.gitlab.summaryCreates != 0 || f.gitlab.notes[0].Body != review.SummaryMarkerPrefix+"new" {
+	if pages != 2 || f.gitlab.summaryCreates != 0 || !strings.Contains(f.gitlab.notes[0].Body, "new") {
 		t.Fatalf("pages=%d creates=%d notes=%+v", pages, f.gitlab.summaryCreates, f.gitlab.notes)
 	}
+}
+
+// authorNoteBody returns the body of the first note by author.
+func authorNoteBody(notes []gitlab.Note, author int64) string {
+	for _, note := range notes {
+		if note.AuthorID == author {
+			return note.Body
+		}
+	}
+	return ""
 }
 
 type failSummaryStore struct {

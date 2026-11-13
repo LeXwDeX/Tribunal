@@ -194,7 +194,7 @@ func TestSummaryDeleted164Recovers(t *testing.T) {
 			if len(botNotes) != 1 || pub.GitlabID != strconv.FormatInt(botNotes[0].ID, 10) || pub.BodyHash != bodyHash(botNotes[0].Body) {
 				t.Fatalf("summary binding=%+v bot notes=%+v", pub, botNotes)
 			}
-			if (!tc.failure && botNotes[0].Body != deleted.Body) || (tc.failure && !strings.Contains(botNotes[0].Body, "review execution failed")) {
+			if (!tc.failure && summaryTailForTest(botNotes[0].Body) != summaryTailForTest(deleted.Body)) || (tc.failure && !strings.Contains(botNotes[0].Body, "review execution failed")) {
 				t.Fatalf("recovered summary has the wrong body: %q", botNotes[0].Body)
 			}
 			wantCreates := 1
@@ -208,16 +208,11 @@ func TestSummaryDeleted164Recovers(t *testing.T) {
 			if tc.uncertain {
 				wantScans = 2
 			}
-			if api.creates != wantCreates || api.scans != wantScans || len(api.updates) == 0 || api.updates[0] != deleted.ID {
-				t.Fatalf("creates=%d scans=%d updates=%v", api.creates, api.scans, api.updates)
+			if api.creates != wantCreates || api.scans != wantScans {
+				t.Fatalf("creates=%d scans=%d", api.creates, api.scans)
 			}
-			wantUpdates := 1
-			if tc.marker == "old" {
-				wantUpdates = 2
-			}
-			if len(api.updates) != wantUpdates {
-				t.Fatalf("updates=%v want %d", api.updates, wantUpdates)
-			}
+			// A deleted note is recreated from the marker scan (#451); the
+			// unified note path no longer updates the stale publication ID.
 			if err := f.publisher.Republish(ctx, wf.ID); err != nil {
 				t.Fatalf("repeat republish: %v", err)
 			}
@@ -516,4 +511,13 @@ func TestSummaryDeleted164DuringInlineFallback(t *testing.T) {
 	if api.scans != 2 || api.creates != 2 || len(api.updates) != 1 {
 		t.Fatalf("fallback calls: scans=%d creates=%d updates=%v", api.scans, api.creates, api.updates)
 	}
+}
+
+// summaryTailForTest drops the lifecycle lines that now precede the rendered
+// summary in the single review note (#451).
+func summaryTailForTest(body string) string {
+	if idx := strings.Index(body, "### AI 评审"); idx >= 0 {
+		return body[idx:]
+	}
+	return body
 }

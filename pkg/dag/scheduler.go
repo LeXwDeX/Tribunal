@@ -438,28 +438,36 @@ func (e *Engine) runNode(runCtx context.Context, handle *runHandle, wfID, nodeID
 		return
 	}
 	timeout := view.Spec.Timeout
-	if timeout <= 0 {
+	// A negative timeout disables the node-level deadline (#451). The
+	// workflow deadline, when configured, still cancels the run.
+	noTimeout := timeout < 0
+	if timeout == 0 {
 		timeout = e.opts.DefaultNodeTimeout
 	}
 	queuedAt := view.QueuedAt
 	if queuedAt.IsZero() {
 		queuedAt = e.clock()
 	}
-	queueDeadline := queuedAt.Add(timeout)
+	var queueDeadline time.Time
+	if !noTimeout {
+		queueDeadline = queuedAt.Add(timeout)
+	}
 
 	// Queue wait is measured with the engine clock, not wall time. Mixing
 	// context.WithDeadline (wall clock) with a custom engine clock makes a
 	// fixed test clock appear already expired.
 	var timeoutCh <-chan time.Time
-	if remaining := queueDeadline.Sub(e.clock()); remaining <= 0 {
-		if err := e.commitNodeFailure(runCtx, wfID, nodeID, view.Attempt, "queue_timeout", "queue wait exceeded node timeout"); err != nil {
-			handle.setErr(err)
+	if !noTimeout {
+		if remaining := queueDeadline.Sub(e.clock()); remaining <= 0 {
+			if err := e.commitNodeFailure(runCtx, wfID, nodeID, view.Attempt, "queue_timeout", "queue wait exceeded node timeout"); err != nil {
+				handle.setErr(err)
+			}
+			return
+		} else {
+			timer := time.NewTimer(remaining)
+			defer timer.Stop()
+			timeoutCh = timer.C
 		}
-		return
-	} else {
-		timer := time.NewTimer(remaining)
-		defer timer.Stop()
-		timeoutCh = timer.C
 	}
 	select {
 	case e.sem <- struct{}{}:
@@ -508,20 +516,24 @@ func (e *Engine) runNode(runCtx context.Context, handle *runHandle, wfID, nodeID
 		return
 	}
 
-	remaining := queueDeadline.Sub(e.clock())
-	if remaining <= 0 {
-		release()
-		if err := e.commitNodeFailure(runCtx, wfID, nodeID, view.Attempt, "queue_timeout", "queue wait exceeded node timeout"); err != nil {
-			handle.setErr(err)
-		}
-		return
-	}
 	nodeCtx, nodeCancel := context.WithCancelCause(runCtx)
 	handle.setNodeCancel(nodeID, view.Attempt, nodeCancel)
 	defer handle.clearNodeCancel(nodeID)
 	defer nodeCancel(nil)
-	execCtx, execCancel := context.WithTimeout(nodeCtx, remaining)
-	defer execCancel()
+	execCtx := nodeCtx
+	execCancel := func() {}
+	if !noTimeout {
+		remaining := queueDeadline.Sub(e.clock())
+		if remaining <= 0 {
+			release()
+			if err := e.commitNodeFailure(runCtx, wfID, nodeID, view.Attempt, "queue_timeout", "queue wait exceeded node timeout"); err != nil {
+				handle.setErr(err)
+			}
+			return
+		}
+		execCtx, execCancel = context.WithTimeout(nodeCtx, remaining)
+		defer execCancel()
+	}
 
 	input := buildNodeInput(wf, view.Spec, view.Attempt)
 	started, err := e.commitNodeStarted(runCtx, wfID, nodeID, view.Attempt, nodeMetadata(e.exec, input))

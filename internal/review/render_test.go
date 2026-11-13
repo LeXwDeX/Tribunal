@@ -79,7 +79,7 @@ func TestRenderSummarySectionsAndMarker(t *testing.T) {
 	if strings.Count(out, "**P1** × 2 · **P2** × 1") != 1 {
 		t.Fatalf("severity count line rendered more than once:\n%s", out)
 	}
-	for _, want := range []string{"**P1** × 2 · **P2** × 1", "无法定位到行的问题（1）", "存疑条目（1）", "#### [P1] Unpositioned issue\n", "#### [P1?] Marked issue\n\n`internal/a.go`:10", "head 9f3c2a<span></span>1", "profile deep", "2m14s", "详情"} {
+	for _, want := range []string{"**P1** × 2 · **P2** × 1", "无法定位到行的问题（1）", "存疑条目（1）", "#### [P1]Unpositioned issue\n", "#### [P1?]Marked issue\n\n`internal/a.go`:10", "head 9f3c2a<span></span>1", "profile deep", "2m14s", "详情"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in:\n%s", want, out)
 		}
@@ -92,10 +92,10 @@ func TestRenderSummarySectionsAndMarker(t *testing.T) {
 	}
 	overview := inlineOverview(out)
 	if !strings.Contains(overview, "### 行内问题（1）") || countOverviewBullets(overview) != 1 ||
-		!strings.Contains(overview, "- **[P2]** Positioned issue · `internal/a.go`:10") {
+		!strings.Contains(overview, "- **[P2]Positioned issue** · `internal/a.go`:10") {
 		t.Fatalf("overview = %q", overview)
 	}
-	if strings.Contains(out, "#### [P2] Positioned issue") || strings.Contains(out, "Inline body") {
+	if strings.Contains(out, "#### [P2]Positioned issue") || strings.Contains(out, "Inline body") {
 		t.Fatalf("positioned inline finding was duplicated with its full body:\n%s", out)
 	}
 	for _, unwanted := range []string{"| 级别 |", "**结论**", "P0**", "位置："} {
@@ -127,7 +127,7 @@ func TestRenderFindingIsConcise(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "<!-- gitlab-ce-review:finding key=" + group.PublishKey + " -->\n**[P1] Concise issue**\n\nFails when `x` is nil.\n\n**建议**：Handle the error.\n"
+	want := "<!-- gitlab-ce-review:finding key=" + group.PublishKey + " -->\n**[P1]Concise issue**\n\nFails when `x` is nil.\n\n**建议**：Handle the error.\n"
 	if out != want {
 		t.Fatalf("finding =\n%s\nwant\n%s", out, want)
 	}
@@ -195,7 +195,7 @@ func TestRenderSummaryEscapesMarkerAndLinks(t *testing.T) {
 	if strings.Contains(out, "](javascript:") || strings.Contains(out, "<b>") {
 		t.Fatalf("unsafe summary:\n%s", out)
 	}
-	if !strings.Contains(out, "#### [P2] Title &lt;\\!-- gitlab-ce-review\\:summary v1 --<span></span>&gt;") {
+	if !strings.Contains(out, "#### [P2]Title &lt;\\!-- gitlab-ce-review\\:summary v1 --<span></span>&gt;") {
 		t.Fatalf("summary item heading is missing or unsafe:\n%s", out)
 	}
 	if !strings.Contains(out, "&lt;!-- gitlab-ce-review") {
@@ -219,7 +219,7 @@ func TestRenderFindingStableMarkerAndMarkedPrefix(t *testing.T) {
 	if !strings.HasPrefix(first, "<!-- gitlab-ce-review:finding key="+group.PublishKey+" -->\n") {
 		t.Fatalf("marker = %q", strings.SplitN(first, "\n", 2)[0])
 	}
-	if !strings.Contains(first, "**[P1] Stable issue**") {
+	if !strings.Contains(first, "**[P1]Stable issue**") {
 		t.Fatalf("title line:\n%s", first)
 	}
 
@@ -230,7 +230,7 @@ func TestRenderFindingStableMarkerAndMarkedPrefix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(markedOut, "**[P2 · 存疑] Uncertain issue**") || strings.Contains(markedOut, "[存疑] [P2?]") || strings.Contains(markedOut, "**标记**") {
+	if !strings.Contains(markedOut, "**[P2 · 存疑]Uncertain issue**") || strings.Contains(markedOut, "[存疑] [P2?]") || strings.Contains(markedOut, "**标记**") {
 		t.Fatalf("marked title:\n%s", markedOut)
 	}
 	bodyAt := strings.Index(markedOut, "Body text.")
@@ -270,7 +270,7 @@ func TestDowngradeIsPublished(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "[P2] Downgraded issue") {
+	if !strings.Contains(out, "[P2]Downgraded issue") {
 		t.Fatalf("downgrade severity not applied:\n%s", out)
 	}
 	fallback := BuildRulesFallback([]Group{group}, nil)
@@ -399,7 +399,7 @@ func TestRenderFindingPreservesStructuredMarkdown(t *testing.T) {
 }
 
 func TestRenderSummaryPreservesStructuredMarkdownAndTruncation(t *testing.T) {
-	body := "### 触发条件\n\n```go\nif x {\n\treturn\n}\n```\n\n" + strings.Repeat("影", 400)
+	body := "### 触发条件\n\n```go\nif x {\n\treturn\n}\n```\n\n" + strings.Repeat("影", 200)
 	group := renderGroup("summary-markdown", ActionPublish, SeverityP1, false, "Structured summary issue", body)
 	group.Suggestion = "```suggestion\n\treturn nil\n```"
 	out, err := RenderSummary(SummaryInput{
@@ -475,10 +475,10 @@ func TestRenderSummaryItemHierarchyAndSeparation(t *testing.T) {
 	for _, want := range []string{
 		"### 无法定位到行的问题（2）",
 		"### 存疑条目（2）",
-		"#### [P1] First unpositioned\n\nFirst body.",
-		"#### [P2] Second unpositioned\n\n`internal/a.go`:10（新侧）\n\nSecond body.",
-		"#### [P1?] First marked\n\n`internal/a.go`:10（新侧）\n\n**标记原因**：挑战结果：missing context；on_uncertain=mark",
-		"#### [P2?] Second marked\n\n**标记原因**：挑战结果：evidence is incomplete；reason",
+		"#### [P1]First unpositioned\n\nFirst body.",
+		"#### [P2]Second unpositioned\n\n`internal/a.go`:10（新侧）\n\nSecond body.",
+		"#### [P1?]First marked\n\n`internal/a.go`:10（新侧）\n\n**标记原因**：挑战结果：missing context；on_uncertain=mark",
+		"#### [P2?]Second marked\n\n**标记原因**：挑战结果：evidence is incomplete；reason",
 		"**建议**：First suggestion.",
 		"Second marked suggestion.",
 	} {
@@ -487,16 +487,16 @@ func TestRenderSummaryItemHierarchyAndSeparation(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		"First suggestion.\n\n#### [P2] Second unpositioned",
+		"First suggestion.\n\n#### [P2]Second unpositioned",
 		"Second suggestion.\n\n### 存疑条目（2）",
 		"First marked suggestion.\n\n<details><summary>证据</summary>",
-		"</details>\n\n#### [P2?] Second marked",
+		"</details>\n\n#### [P2?]Second marked",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("items are not separated by a blank line: missing %q in:\n%s", want, out)
 		}
 	}
-	for _, unwanted := range []string{"**[P1] First unpositioned**", "**[P1?] First marked**"} {
+	for _, unwanted := range []string{"**[P1]First unpositioned**", "**[P1?]First marked**"} {
 		if strings.Contains(out, unwanted) {
 			t.Fatalf("summary item still uses a bare bold title %q:\n%s", unwanted, out)
 		}
@@ -532,8 +532,8 @@ func TestRenderSummaryInlineOverview(t *testing.T) {
 			groups:    []Group{first, downgraded, unpositioned, marked, dropped},
 			wantCount: 2,
 			wantOut: []string{
-				"- **[P1]** First positioned · `internal/a.go`:10\n- **[P2]** Downgraded issue · `internal/a.go`:10",
-				"#### [P2] Unpositioned issue", "Full fallback body", "#### [P1?] Marked issue", "**标记原因**",
+				"- **[P1]First positioned** · `internal/a.go`:10\n- **[P2]Downgraded issue** · `internal/a.go`:10",
+				"#### [P2]Unpositioned issue", "Full fallback body", "#### [P1?]Marked issue", "**标记原因**",
 			},
 			once:   []string{"Marked issue", "Unpositioned issue"},
 			notOut: []string{"First inline body", "Downgraded body", "First suggestion.", "Dropped issue"},
@@ -542,7 +542,7 @@ func TestRenderSummaryInlineOverview(t *testing.T) {
 			name:      "missing path and line",
 			groups:    []Group{noPath, noLine},
 			wantCount: 2,
-			wantOut:   []string{"- **[P1]** No path issue\n- **[P2]** No line issue · `internal/a.go`"},
+			wantOut:   []string{"- **[P1]No path issue**\n- **[P2]No line issue** · `internal/a.go`"},
 		},
 		{
 			name:      "hostile title and path",
@@ -618,7 +618,7 @@ func TestRenderSummaryInlineOverviewFollowsPositionOKChanges(t *testing.T) {
 		strings.Contains(overview, "First positioned") || !strings.Contains(overview, "Second positioned") {
 		t.Fatalf("overview did not follow PositionOK=false:\n%s", out)
 	}
-	if !strings.Contains(out, "### 无法定位到行的问题（1）") || !strings.Contains(out, "#### [P1] First positioned") {
+	if !strings.Contains(out, "### 无法定位到行的问题（1）") || !strings.Contains(out, "#### [P1]First positioned") {
 		t.Fatalf("full fallback is missing after PositionOK=false:\n%s", out)
 	}
 
@@ -679,7 +679,7 @@ func TestRenderOneLineGFMEscapesInSummaryAndFinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(finding, `**[P1 · 存疑] \@user**`) {
+	if !strings.Contains(finding, `**[P1 · 存疑]\@user**`) {
 		t.Fatalf("finding title lacks the GFM escape:\n%s", finding)
 	}
 	if !strings.Contains(finding, `**存疑原因**：see \@user at https\://example.invalid`) {
@@ -716,7 +716,7 @@ func TestRenderMarkedEvidenceForAllPositions(t *testing.T) {
 		t.Fatalf("fallback evidence count:\n%s", fallback)
 	}
 	for _, want := range []string{
-		"#### [P1?] Marked",
+		"#### [P1?]Marked",
 		"Body",
 		"**建议**：Handle the error.\n\n<details><summary>证据</summary>",
 		"**标记原因**",

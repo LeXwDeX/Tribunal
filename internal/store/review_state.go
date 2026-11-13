@@ -188,14 +188,17 @@ const (
 // and HeadSHA fence a late worker; Version/AppliedVersion let a retry detect
 // that a newer desired state replaced the one it started to publish.
 type ReviewStatus struct {
-	ProjectID      int64     `json:"project_id"`
-	MRIID          int64     `json:"mr_iid"`
-	Generation     int64     `json:"generation"`
-	HeadSHA        string    `json:"head_sha,omitempty"`
-	Attempt        int       `json:"attempt"`
-	Profile        string    `json:"profile,omitempty"`
-	State          string    `json:"state"`
-	Detail         string    `json:"detail,omitempty"`
+	ProjectID  int64  `json:"project_id"`
+	MRIID      int64  `json:"mr_iid"`
+	Generation int64  `json:"generation"`
+	HeadSHA    string `json:"head_sha,omitempty"`
+	Attempt    int    `json:"attempt"`
+	Profile    string `json:"profile,omitempty"`
+	State      string `json:"state"`
+	Detail     string `json:"detail,omitempty"`
+	// FinalBody is the rendered review summary placed in the same status note
+	// once the workflow settles (#451). Empty means a status-only body.
+	FinalBody      string    `json:"final_body,omitempty"`
 	NoteID         int64     `json:"note_id,omitempty"`
 	BodyHash       string    `json:"body_hash,omitempty"`
 	Version        int       `json:"version"`
@@ -215,6 +218,9 @@ type ReviewStatusGoal struct {
 	Profile    string
 	State      string
 	Detail     string
+	// FinalBody replaces the rendered body of the status note. Empty keeps
+	// the status-only body.
+	FinalBody string
 }
 
 // ReviewReaction is the desired reaction on one source note. Desired none
