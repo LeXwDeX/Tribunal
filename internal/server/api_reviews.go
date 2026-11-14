@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -56,10 +57,14 @@ type reviewNode struct {
 	DurationMS      *int64   `json:"duration_ms,omitempty"`
 	UsageIncomplete bool     `json:"usage_incomplete"`
 	// Reason is the durable failure class of a failed or skipped node:
-	// executor_error, timeout, budget_exhausted, sandbox_denied,
-	// required_node_failed, and so on. It stays empty for completed nodes and
-	// when an older store has no event log.
+	// executor_error, timeout, budget_exhausted, no_submit, invalid_submit,
+	// context_too_long, sandbox_denied, required_node_failed, and so on. It
+	// stays empty for completed nodes and when an older store has no event log.
 	Reason string `json:"reason,omitempty"`
+	// Failure is the sanitized, code-owned failure detail of a failed node.
+	// It is omitted for skipped nodes, whose status and reason already explain
+	// the outcome.
+	Failure string `json:"failure,omitempty"`
 	// UsageInterruptions counts recovery restarts of this node. It comes from
 	// the engine snapshot, not a stored column, and is omitted when zero.
 	UsageInterruptions int `json:"usage_interruptions,omitempty"`
@@ -399,10 +404,20 @@ func reviewNodes(nodes []store.WorkflowNode, snapshot *dag.WorkflowView) []revie
 			DurationMS:         nodeDuration(node),
 			UsageIncomplete:    node.UsageIncomplete,
 			Reason:             nodeReason(node, snapshot),
+			Failure:            nodeFailure(node),
 			TokenFree:          nodeTokenFree(node.ID, snapshot),
 		})
 	}
 	return out
+}
+
+// nodeFailure exposes the sanitized failure detail only for failed nodes.
+// Skipped nodes report their status and reason instead of a node error.
+func nodeFailure(node store.WorkflowNode) string {
+	if dag.NodeStatus(node.Status) != dag.NodeFailed {
+		return ""
+	}
+	return safeNodeError(node.Error)
 }
 
 func nodeTokenFree(nodeID string, snapshot *dag.WorkflowView) bool {
@@ -437,6 +452,18 @@ func nodeReason(node store.WorkflowNode, snapshot *dag.WorkflowView) string {
 		case "queue wait exceeded node timeout":
 			return "queue_timeout"
 		}
+		// Legacy stores have no projected class. The fixed detail prefixes are
+		// code-owned, so they still identify the failure class.
+		switch {
+		case strings.HasPrefix(node.Error, "submit_result missing"):
+			return "no_submit"
+		case strings.HasPrefix(node.Error, "submit_result rejected"):
+			return "invalid_submit"
+		case strings.HasPrefix(node.Error, "model context window exceeded"):
+			return "context_too_long"
+		case strings.HasPrefix(node.Error, "workflow token budget exhausted"):
+			return "budget_exhausted"
+		}
 		return "executor_error"
 	}
 	return ""
@@ -468,6 +495,11 @@ func reviewLevelDiagnostics(nodes []store.WorkflowNode) (string, []string, []rev
 	return "", nil, nil
 }
 
+// fixedFailureDetailRE matches the code-owned failure summaries the review
+// executor persists (#454). Their wording is fixed and contains only counts, so
+// they are safe to return; anything else keeps the historical collapse.
+var fixedFailureDetailRE = regexp.MustCompile(`^(submit_result (missing|rejected)( after [0-9]+ turns)?|model context window exceeded|workflow token budget exhausted( \([0-9]+ of [0-9]+ tokens\))?)$`)
+
 // safeNodeError keeps the engine's fixed failure messages and collapses
 // anything else, so a legacy row cannot leak an upstream body.
 func safeNodeError(message string) string {
@@ -476,9 +508,11 @@ func safeNodeError(message string) string {
 		"required node failed", "queue wait exceeded node timeout",
 		"required dependency did not complete":
 		return message
-	default:
-		return "node failed"
 	}
+	if fixedFailureDetailRE.MatchString(message) {
+		return message
+	}
+	return "node failed"
 }
 
 func nodeInterruptions(snapshot *dag.WorkflowView, nodeID string) int {
@@ -797,14 +831,23 @@ func (s *Server) handleReviewNode(w http.ResponseWriter, r *http.Request) {
 			output = nil
 		}
 		node.Output = output
-		node.Error = safeNodeError(node.Error)
 		snapshot := s.engineSnapshot(r.Context(), wfID)
+		// Compute the reason before clearing the error: a store without an
+		// event log derives queue_timeout/budget_exhausted from it.
+		reason := nodeReason(node, snapshot)
+		if dag.NodeStatus(node.Status) == dag.NodeSkipped {
+			// A skipped node is explained by its status and reason; returning
+			// the cascade message as a node error made the console show both.
+			node.Error = ""
+		} else {
+			node.Error = safeNodeError(node.Error)
+		}
 		purged, retentionHours := s.nodeCallsPurged(node)
 		writeJSON(w, http.StatusOK, nodeDetail{
 			WorkflowNode:        node,
 			DurationMS:          nodeDuration(node),
 			UsageInterruptions:  nodeInterruptions(snapshot, node.ID),
-			Reason:              nodeReason(node, snapshot),
+			Reason:              reason,
 			TokenFree:           nodeTokenFree(node.ID, snapshot),
 			CallsPurged:         purged,
 			CallsRetentionHours: retentionHours,
