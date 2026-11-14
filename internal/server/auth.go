@@ -872,7 +872,7 @@ func (s *Server) apiAuth(next http.HandlerFunc) http.HandlerFunc {
 					// rejected configuration write here.
 					s.logger.Info("configuration overlay write rejected", "event", "platform_audit",
 						"actor_id", value.user.ID, "action", "update", "paths", []string{},
-						"code", "forbidden", "dry_run", false)
+						"code", "csrf_invalid", "dry_run", false)
 				}
 				writeError(w, r, http.StatusForbidden, "csrf_invalid", "invalid CSRF token", nil)
 				return
