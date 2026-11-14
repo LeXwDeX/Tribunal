@@ -44,12 +44,14 @@ type fakeReviewStore struct {
 	events       dag.EventStore
 	stats        store.Stats
 
-	lastFilter     store.WorkflowFilter
-	lastLimit      int
-	lastCallFilter store.LLMCallFilter
-	lastStats      store.StatsFilter
-	accessByUser   map[int64]map[int64]bool
-	statusOnly     []store.StatusOnlyReview
+	lastFilter      store.WorkflowFilter
+	lastLimit       int
+	lastCallFilter  store.LLMCallFilter
+	lastStats       store.StatsFilter
+	lastReviewStats store.ReviewStatsFilter
+	reviewStats     store.ReviewStats
+	accessByUser    map[int64]map[int64]bool
+	statusOnly      []store.StatusOnlyReview
 
 	// Per-workflow and batched read counters let list tests prove the page is
 	// summarized with one query per kind of data instead of one per row.

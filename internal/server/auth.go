@@ -158,14 +158,61 @@ func (a *authService) signature(purpose, value string) string {
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
-func (a *authService) issueState() (string, error) {
+func (a *authService) issueState(returnTo string) (string, error) {
 	nonce, err := randomToken(18)
 	if err != nil {
 		return "", err
 	}
 	payload := strconv.FormatInt(a.now().Add(oauthStateTTL).Unix(), 10) + "." + nonce
+	if returnTo != "" && returnTo != "/" {
+		payload += "\n" + returnTo
+	}
 	encoded := base64.RawURLEncoding.EncodeToString([]byte(payload))
 	return encoded + "." + a.signature("state", encoded), nil
+}
+
+// stateReturnTo extracts the same-origin deep link carried by a signed state.
+// It never trusts the value: the callback validates it again.
+func (a *authService) stateReturnTo(state string) string {
+	encoded, _, ok := strings.Cut(state, ".")
+	if !ok {
+		return ""
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		return ""
+	}
+	_, nonceAndReturn, ok := strings.Cut(string(raw), ".")
+	if !ok {
+		return ""
+	}
+	_, returnTo, ok := strings.Cut(nonceAndReturn, "\n")
+	if !ok {
+		return ""
+	}
+	return returnTo
+}
+
+// safeReturnTo accepts only an absolute path on this origin. It rejects
+// protocol-relative URLs, backslashes, schemes, hosts and authentication
+// routes so the login flow cannot become an open redirect.
+func safeReturnTo(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 512 {
+		return "/"
+	}
+	if !strings.HasPrefix(value, "/") || strings.HasPrefix(value, "//") ||
+		strings.ContainsAny(value, "\\\r\n\x00") {
+		return "/"
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "" || parsed.Host != "" || parsed.User != nil {
+		return "/"
+	}
+	if parsed.Path == "/auth" || strings.HasPrefix(parsed.Path, "/auth/") {
+		return "/"
+	}
+	return parsed.RequestURI()
 }
 
 func (a *authService) validState(state string) bool {
@@ -195,7 +242,8 @@ func (a *authService) validState(state string) bool {
 }
 
 func (a *authService) sealSession(id string) string {
-	return id + "." + a.signature("session", id)
+	issued := strconv.FormatInt(a.now().Unix(), 10)
+	return id + "." + issued + "." + a.signature("session", id+"."+issued)
 }
 
 // csrfFor derives a stable per-session CSRF token from the signing key, so no
@@ -204,18 +252,33 @@ func (a *authService) csrfFor(id string) string {
 	return a.signature("csrf", id)
 }
 
-func (a *authService) openSession(value string) (string, bool) {
+// openSession verifies the signed cookie. hasIssued is true for the current
+// three-part form and false for a legacy two-part cookie; the issue time lets
+// an unexpired cookie whose row disappeared be reported as evicted instead of
+// expired.
+func (a *authService) openSession(value string) (id string, issued time.Time, hasIssued, ok bool) {
 	if len(value) > 256 {
-		return "", false
+		return "", time.Time{}, false, false
 	}
-	id, signature, ok := strings.Cut(value, ".")
-	if !ok || id == "" || signature == "" {
-		return "", false
+	first, rest, ok := strings.Cut(value, ".")
+	if !ok || first == "" {
+		return "", time.Time{}, false, false
 	}
-	if !hmac.Equal([]byte(signature), []byte(a.signature("session", id))) {
-		return "", false
+	issuedText, signature, current := strings.Cut(rest, ".")
+	if current {
+		if signature == "" || !hmac.Equal([]byte(signature), []byte(a.signature("session", first+"."+issuedText))) {
+			return "", time.Time{}, false, false
+		}
+		seconds, err := strconv.ParseInt(issuedText, 10, 64)
+		if err != nil {
+			return "", time.Time{}, false, false
+		}
+		return first, time.Unix(seconds, 0), true, true
 	}
-	return id, true
+	if rest == "" || !hmac.Equal([]byte(rest), []byte(a.signature("session", first))) {
+		return "", time.Time{}, false, false
+	}
+	return first, time.Time{}, false, true
 }
 
 type sessionUser struct {
@@ -242,6 +305,22 @@ type principal struct {
 }
 
 const principalKey contextKey = requestIDKey + 1
+
+// authFailure is the stable 401 code of an unauthenticated request. An empty
+// value means authentication succeeded.
+type authFailure string
+
+const (
+	authFailureNone            authFailure = ""
+	authFailureUnauthenticated authFailure = "unauthenticated"
+	authFailureSessionExpired  authFailure = "session_expired"
+	// authFailureSessionEvicted means a signed, unexpired cookie no longer has
+	// a stored session: another login exceeded the per-user limit.
+	authFailureSessionEvicted authFailure = "session_evicted"
+	// authFailureTokenExpired means the presented API token exists but passed
+	// its expiry. Unknown and revoked tokens stay unauthenticated.
+	authFailureTokenExpired authFailure = "token_expired"
+)
 
 func principalFrom(ctx context.Context) (principal, bool) {
 	value, ok := ctx.Value(principalKey).(principal)
@@ -286,7 +365,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		authError(w, r, http.StatusServiceUnavailable, "internal", "OAuth login is not configured", "oauth_disabled")
 		return
 	}
-	state, err := s.auth.issueState()
+	state, err := s.auth.issueState(safeReturnTo(r.URL.Query().Get("return_to")))
 	if err != nil {
 		authError(w, r, http.StatusInternalServerError, "internal", "internal error", "oauth_failed")
 		return
@@ -361,7 +440,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.setSessionCookie(w, s.auth.sealSession(entry.id))
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	http.Redirect(w, r, safeReturnTo(s.auth.stateReturnTo(state)), http.StatusSeeOther)
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -578,7 +657,7 @@ func (s *Server) deleteSession(ctx context.Context, r *http.Request) error {
 	if err != nil {
 		return nil
 	}
-	id, ok := s.auth.openSession(cookie.Value)
+	id, _, _, ok := s.auth.openSession(cookie.Value)
 	if !ok {
 		return nil
 	}
@@ -586,22 +665,28 @@ func (s *Server) deleteSession(ctx context.Context, r *http.Request) error {
 	return s.sessions.DeleteSession(ctx, sum[:])
 }
 
-func (s *Server) sessionFromRequest(r *http.Request) (session, bool) {
+func (s *Server) sessionFromRequest(r *http.Request) (session, authFailure) {
 	if s.sessions == nil {
-		return session{}, false
+		return session{}, authFailureUnauthenticated
 	}
 	cookie, err := r.Cookie(sessionCookieName)
 	if err != nil {
-		return session{}, false
+		return session{}, authFailureUnauthenticated
 	}
-	id, ok := s.auth.openSession(cookie.Value)
+	id, issued, hasIssued, ok := s.auth.openSession(cookie.Value)
 	if !ok {
-		return session{}, false
+		return session{}, authFailureUnauthenticated
 	}
 	sum := sha256.Sum256([]byte(id))
 	stored, err := s.sessions.GetSession(r.Context(), sum[:], s.auth.now())
 	if err != nil || stored == nil {
-		return session{}, false
+		// A valid, unexpired cookie without a stored row was evicted by the
+		// per-user session limit (or revoked). Legacy cookies carry no issue
+		// time, so they keep the expiry wording.
+		if hasIssued && s.auth.now().Before(issued.Add(s.auth.ttl)) {
+			return session{}, authFailureSessionEvicted
+		}
+		return session{}, authFailureSessionExpired
 	}
 	// Recompute both role sources on every request, not just at login.
 	user := sessionUser{
@@ -624,7 +709,7 @@ func (s *Server) sessionFromRequest(r *http.Request) (session, bool) {
 			s.logger.Warn("cannot refresh stored platform role", "user_id", user.ID, "error_class", errclass.Of(err))
 		}
 	}
-	return session{id: id, user: user, csrf: s.sessionCSRF(r.Context(), id, user.ID)}, true
+	return session{id: id, user: user, csrf: s.sessionCSRF(r.Context(), id, user.ID)}, authFailureNone
 }
 
 // syncPlatformRoles merges the configured and granted roles at startup.
@@ -691,39 +776,49 @@ func (s *Server) handleAPINotFound(w http.ResponseWriter, r *http.Request) {
 	writeError(w, r, http.StatusNotFound, "not_found", "not found", nil)
 }
 
+// authenticate keeps the boolean contract used by long-lived streams.
 func (s *Server) authenticate(r *http.Request) (principal, bool) {
+	value, failure := s.authenticateWithFailure(r)
+	return value, failure == authFailureNone
+}
+
+func (s *Server) authenticateWithFailure(r *http.Request) (principal, authFailure) {
 	if strings.TrimSpace(r.Header.Get("Authorization")) != "" {
 		if s.authorized(r) {
 			return principal{
 				user:            sessionUser{Username: "api", Name: "API client", Role: roleAdmin},
 				bearer:          true,
 				bootstrapBearer: true,
-			}, true
+			}, authFailureNone
 		}
 		raw := bearerValue(r)
 		if raw == "" || s.tokens == nil {
-			return principal{}, false
+			return principal{}, authFailureUnauthenticated
 		}
 		sum := sha256.Sum256([]byte(raw))
-		user, ok := s.authenticateAPIToken(r, sum[:])
-		if !ok {
-			return principal{}, false
+		user, failure := s.authenticateAPIToken(r, sum[:])
+		if failure != authFailureNone {
+			return principal{}, failure
 		}
-		return principal{user: user, bearer: true}, true
+		return principal{user: user, bearer: true}, authFailureNone
 	}
-	entry, ok := s.sessionFromRequest(r)
-	if !ok {
-		return principal{}, false
+	entry, failure := s.sessionFromRequest(r)
+	if failure != authFailureNone {
+		return principal{}, failure
 	}
-	return principal{user: entry.user, csrf: entry.csrf, sessionID: entry.id}, true
+	return principal{user: entry.user, csrf: entry.csrf, sessionID: entry.id}, authFailureNone
 }
 
-// authenticateAPIToken resolves a persisted token digest. Failures are
-// indistinguishable to the caller and never log token material.
-func (s *Server) authenticateAPIToken(r *http.Request, hash []byte) (sessionUser, bool) {
+// authenticateAPIToken resolves a persisted token digest. Revoked and unknown
+// tokens are indistinguishable; an expired token has its own code so a
+// script's operator knows to renew it.
+func (s *Server) authenticateAPIToken(r *http.Request, hash []byte) (sessionUser, authFailure) {
 	_, owner, err := s.tokens.FindAPITokenByHash(r.Context(), hash, s.now())
+	if errors.Is(err, store.ErrTokenExpired) {
+		return sessionUser{}, authFailureTokenExpired
+	}
 	if err != nil || owner == nil {
-		return sessionUser{}, false
+		return sessionUser{}, authFailureUnauthenticated
 	}
 	// Re-evaluate both role sources on each request. The configured bootstrap
 	// bearer token is authenticated separately and keeps admin.
@@ -733,7 +828,7 @@ func (s *Server) authenticateAPIToken(r *http.Request, hash []byte) (sessionUser
 		Name:     owner.Name,
 	}
 	user.Role = s.roleFor(r.Context(), user)
-	return user, true
+	return user, authFailureNone
 }
 
 // bearerValue extracts the trimmed bearer value. The bootstrap token check
@@ -754,18 +849,19 @@ func bearerValue(r *http.Request) string {
 // CSRF token.
 func (s *Server) apiAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		value, ok := s.authenticate(r)
-		if !ok {
+		value, failure := s.authenticateWithFailure(r)
+		if failure != authFailureNone {
 			w.Header().Set("WWW-Authenticate", "Bearer")
-			code, message := "unauthenticated", "authentication required"
-			// A session cookie proves the browser was logged in before; only
-			// then is the 401 an expiry instead of a first visit.
-			if strings.TrimSpace(r.Header.Get("Authorization")) == "" {
-				if _, err := r.Cookie(sessionCookieName); err == nil {
-					code, message = "session_expired", "session expired"
-				}
+			message := "authentication required"
+			switch failure {
+			case authFailureSessionExpired:
+				message = "session expired"
+			case authFailureSessionEvicted:
+				message = "session was replaced by another login"
+			case authFailureTokenExpired:
+				message = "API token expired; renew it in the console"
 			}
-			writeError(w, r, http.StatusUnauthorized, code, message, nil)
+			writeError(w, r, http.StatusUnauthorized, string(failure), message, nil)
 			return
 		}
 		if !safeMethod(r.Method) && !value.bearer {
@@ -776,9 +872,9 @@ func (s *Server) apiAuth(next http.HandlerFunc) http.HandlerFunc {
 					// rejected configuration write here.
 					s.logger.Info("configuration overlay write rejected", "event", "platform_audit",
 						"actor_id", value.user.ID, "action", "update", "paths", []string{},
-						"code", "forbidden", "dry_run", false)
+						"code", "csrf_invalid", "dry_run", false)
 				}
-				writeError(w, r, http.StatusForbidden, "forbidden", "invalid CSRF token", nil)
+				writeError(w, r, http.StatusForbidden, "csrf_invalid", "invalid CSRF token", nil)
 				return
 			}
 		}

@@ -31,6 +31,37 @@ describe('one-time API token display', () => {
     expect(screen.getByText(/平台管理面 bootstrap Bearer，无用户 ID 与项目 grant，不能读取项目业务数据/)).toBeInTheDocument()
   })
 
+  it('warns about expiry and renews the token under the same name', async () => {
+    const user = userEvent.setup()
+    let renewed = false
+    const tokens = [{
+      id: 't1', name: 'ci', created_at: new Date(Date.now() - 86_400_000 * 90).toISOString(),
+      expires_at: new Date(Date.now() - 86_400_000).toISOString(),
+    }, {
+      id: 't2', name: 'soon', created_at: new Date(Date.now() - 86_400_000).toISOString(),
+      expires_at: new Date(Date.now() + 86_400_000 * 3).toISOString(),
+    }]
+    installFetch((url, init) => {
+      if (url === '/api/v1/api-tokens/t1/renew' && init?.method === 'POST') {
+        renewed = true
+        return jsonResponse({ id: 't1', name: 'ci', token: 'crsec_renewed' })
+      }
+      if (url.startsWith('/api/v1/api-tokens')) return jsonResponse({ tokens })
+      return jsonResponse({})
+    })
+    renderWithProviders(<SystemPage />)
+    expect(await screen.findByText('已过期')).toBeInTheDocument()
+    expect(screen.getByText('3 天后过期')).toBeInTheDocument()
+
+    const row = (await screen.findByText('ci')).closest('tr')!
+    await user.click(within(row).getByRole('button', { name: '续期' }))
+    const dialog = await screen.findByRole('dialog', { name: '续期 API token' })
+    await user.click(within(dialog).getByRole('button', { name: '续期', exact: true }))
+    expect(await screen.findByDisplayValue('crsec_renewed')).toBeInTheDocument()
+    expect(renewed).toBe(true)
+    await user.click(screen.getByRole('button', { name: '我已复制，关闭' }))
+  })
+
   it('renders the secret only once and clears it when the dialog closes', async () => {
     const user = userEvent.setup()
     let created = false

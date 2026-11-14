@@ -72,6 +72,41 @@ describe('API client', () => {
     expect((error as ApiError).details?.[0]).toEqual({ field: 'token', message: 'missing scope' })
   })
 
+  it('refreshes /me once and retries a write after csrf_invalid', async () => {
+    setCsrfToken('stale-token')
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ error: { code: 'csrf_invalid', message: 'invalid CSRF token' } }, 403))
+      .mockResolvedValueOnce(jsonResponse({ id: 1, username: 'alice', role: 'admin', csrf_token: 'fresh-token' }))
+      .mockResolvedValueOnce(jsonResponse({ ok: true }))
+
+    await expect(request('/api/v1/projects', { method: 'Post', body: { project: 'g/r' } })).resolves.toEqual({ ok: true })
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/v1/me')
+    const retried = new Headers((fetchMock.mock.calls[2][1] as RequestInit).headers)
+    expect(retried.get('X-CSRF-Token')).toBe('fresh-token')
+    expect(getCsrfToken()).toBe('fresh-token')
+  })
+
+  it('retries only once and surfaces a second csrf_invalid failure', async () => {
+    setCsrfToken('stale-token')
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ error: { code: 'csrf_invalid', message: 'invalid CSRF token' } }, 403))
+      .mockResolvedValueOnce(jsonResponse({ id: 1, username: 'alice', role: 'admin', csrf_token: 'fresh-token' }))
+      .mockResolvedValue(jsonResponse({ error: { code: 'csrf_invalid', message: 'invalid CSRF token' } }, 403))
+    await expect(request('/api/v1/projects', { method: 'PATCH', body: {} })).rejects.toMatchObject({ status: 403, code: 'csrf_invalid' })
+    // original, /me refresh, one retry
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not retry csrf_invalid when /me cannot refresh the token', async () => {
+    setCsrfToken('stale-token')
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ error: { code: 'csrf_invalid', message: 'invalid CSRF token' } }, 403))
+      .mockResolvedValueOnce(jsonResponse({ error: { code: 'unauthenticated', message: 'login required' } }, 401))
+    await expect(request('/api/v1/projects', { method: 'DELETE' })).rejects.toMatchObject({ status: 403, code: 'csrf_invalid' })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
   it('encodes node path segments and query values', () => {
     expect(segment('verify.f7')).toBe('verify.f7')
     expect(segment('a/b c')).toBe('a%2Fb%20c')

@@ -888,6 +888,97 @@ func TestOverlayWriterNotConfigured(t *testing.T) {
 	}
 }
 
+func TestOverlayWriterCreatesMissingOverlayDirectory(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("PRIMARY_KEY", "primary-key-value")
+	t.Setenv("CANARY_BASE_URL", "https://canary.example.com/expanded-secret")
+	base := writeConfig(t, "server.yaml", overlayTestBase)
+	root := t.TempDir()
+	overlay := filepath.Join(root, "data", "config-overlay", "server.overlay.yaml")
+	writer, err := NewOverlayWriter(OverlayWriterOptions{
+		BasePaths:   []string{base},
+		OverlayPath: overlay,
+	})
+	if err != nil {
+		t.Fatalf("NewOverlayWriter: %v", err)
+	}
+	snapshot, err := LoadSnapshot([]string{base}, overlay)
+	if err != nil {
+		t.Fatalf("LoadSnapshot() error: %v", err)
+	}
+	result, err := writer.Apply(context.Background(), OverlayWriteRequest{
+		BaseRevision:    snapshot.BaseRevision,
+		OverlayRevision: snapshot.OverlayRevision,
+		Changes: []OverlayChange{
+			{Path: []string{"providers", "primary", "max_tokens"}, Value: 2048},
+		},
+	})
+	requireOverlayNoError(t, err)
+	if !result.Applied || !result.Changed {
+		t.Fatalf("result = %+v, want an applied change", result)
+	}
+	info, err := os.Stat(overlay)
+	if err != nil {
+		t.Fatalf("overlay was not written: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("overlay mode = %o, want 600", info.Mode().Perm())
+	}
+	dirInfo, err := os.Stat(filepath.Dir(overlay))
+	if err != nil {
+		t.Fatalf("overlay directory was not created: %v", err)
+	}
+	if !dirInfo.IsDir() || dirInfo.Mode().Perm() != 0o700 {
+		t.Fatalf("overlay directory = %v mode %o, want a directory with mode 700", dirInfo.IsDir(), dirInfo.Mode().Perm())
+	}
+	if !bytes.Contains(readFile(t, overlay), []byte("max_tokens: 2048")) {
+		t.Fatal("written overlay does not contain the patched value")
+	}
+}
+
+func TestOverlayWriterReportsDirectoryCreationFailure(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("PRIMARY_KEY", "primary-key-value")
+	base := writeConfig(t, "server.yaml", overlayTestBase)
+	root := t.TempDir()
+	blocked := filepath.Join(root, "blocked")
+	if err := os.WriteFile(blocked, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	overlay := filepath.Join(blocked, "config-overlay", "server.overlay.yaml")
+	writer, err := NewOverlayWriter(OverlayWriterOptions{
+		BasePaths:   []string{base},
+		OverlayPath: overlay,
+	})
+	if err != nil {
+		t.Fatalf("NewOverlayWriter: %v", err)
+	}
+	baseRevision, err := baseRevisionOf([]string{base})
+	if err != nil {
+		t.Fatalf("baseRevisionOf() error: %v", err)
+	}
+	_, err = writer.Apply(context.Background(), OverlayWriteRequest{
+		BaseRevision:    baseRevision,
+		OverlayRevision: "",
+		Changes: []OverlayChange{
+			{Path: []string{"providers", "primary", "max_tokens"}, Value: 2048},
+		},
+	})
+	writeErr := requireOverlayError(t, err, OverlayErrorDirectoryCreate)
+	if len(writeErr.Details) == 0 {
+		t.Fatal("directory creation failure has no actionable detail")
+	}
+}
+
+func readFile(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return data
+}
+
 func TestOverlayWriterNoopDeleteDoesNotRewrite(t *testing.T) {
 	harness := newOverlayHarness(t, overlayTestBase, overlayTestDocument)
 	before := harness.read()

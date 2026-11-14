@@ -346,7 +346,7 @@ describe('model form capability fields (#406)', () => {
     renderWithProviders(<ModelsPage />, { route: '/models' })
     await openCreate(user)
     await fillConnection(user)
-    await user.click(screen.getByRole('button', { name: '保存前测试' }))
+    await user.click(screen.getByRole('button', { name: '保存前连通性测试' }))
     expect(await screen.findByText('provider test failed')).toBeInTheDocument()
   })
 

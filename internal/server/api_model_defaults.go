@@ -110,6 +110,18 @@ func (s *Server) handlePutModelDefaults(w http.ResponseWriter, r *http.Request) 
 		writeError(w, r, http.StatusBadRequest, "validation_failed", "model defaults would make existing models invalid", crossDetails)
 		return
 	}
+	// Stored profile overrides inherit the candidate defaults. Revalidate them
+	// now instead of letting a review fail later with an unretryable
+	// bad_request from the provider.
+	overrideDetails, err := s.profileOverrideDefaultDetails(r.Context(), params)
+	if err != nil {
+		s.writeModelDefaultsError(w, r, err)
+		return
+	}
+	if len(overrideDetails) > 0 {
+		writeError(w, r, http.StatusBadRequest, "validation_failed", "model defaults would invalidate stored profile overrides", overrideDetails)
+		return
+	}
 	defaults, err := s.modelDefaults.PutModelDefaults(r.Context(), params, *request.Revision, currentUserID(r))
 	if err != nil {
 		s.writeModelDefaultsError(w, r, err)
@@ -164,6 +176,18 @@ func (s *Server) handleDeleteModelDefaults(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, http.StatusConflict, "defaults_in_use", "model defaults are required by existing models", crossDetails)
 		return
 	}
+	// A reset also removes capabilities stored overrides may rely on, such as
+	// allow_reasoning_effort_none for effort:none. Report the affected nodes
+	// instead of failing during a review.
+	overrideDetails, err := s.profileOverrideDefaultDetails(r.Context(), store.ModelParams{})
+	if err != nil {
+		s.writeModelDefaultsError(w, r, err)
+		return
+	}
+	if len(overrideDetails) > 0 && !force {
+		writeError(w, r, http.StatusConflict, "overrides_in_use", "model defaults are required by stored profile overrides", overrideDetails)
+		return
+	}
 	defaults, err := s.modelDefaults.DeleteModelDefaults(r.Context(), revision, currentUserID(r))
 	if err != nil {
 		s.writeModelDefaultsError(w, r, err)
@@ -173,6 +197,9 @@ func (s *Server) handleDeleteModelDefaults(w http.ResponseWriter, r *http.Reques
 	if force {
 		fields = append(fields, "force")
 		for _, detail := range crossDetails {
+			fields = append(fields, detail.Field)
+		}
+		for _, detail := range overrideDetails {
 			fields = append(fields, detail.Field)
 		}
 	}
@@ -338,4 +365,64 @@ func (s *Server) modelValidationParams(ctx context.Context, params store.ModelPa
 	}
 	merged, _ := store.MergeModelParams(params, defaults)
 	return merged, nil
+}
+
+// profileOverrideDefaultDetails revalidates the stored profile overrides
+// against candidate defaults. User models inherit the candidate values, while
+// configured models keep their file parameters. Each detail names the affected
+// override path and therefore the node.
+func (s *Server) profileOverrideDefaultDetails(ctx context.Context, params store.ModelParams) ([]app.Detail, error) {
+	if s.profileOverrides == nil || s.platform == nil {
+		return nil, nil
+	}
+	overrides, err := s.profileOverrides.GetProfileOverrides(ctx, "default")
+	if errors.Is(err, store.ErrNotFound) || overrides == nil {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	lookup, err := s.candidateModelLookup(ctx, params)
+	if err != nil {
+		return nil, err
+	}
+	raw, _ := s.platform.RawProfile("default")
+	normalized, _ := s.defaultProfile()
+	return app.ValidateProfileOverrides([]byte(overrides.OverridesJSON), raw, normalized, lookup), nil
+}
+
+// candidateModelLookup resolves catalog capabilities with the candidate
+// defaults applied to user models. Configured models ignore defaults, so the
+// current catalog value stays authoritative.
+func (s *Server) candidateModelLookup(ctx context.Context, params store.ModelParams) (func(string) (app.OverrideModel, bool), error) {
+	if s.models == nil {
+		return nil, nil
+	}
+	candidates := make(map[string]app.OverrideModel)
+	if s.modelsStore != nil {
+		models, err := s.modelsStore.ListModels(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, model := range models {
+			if !strings.HasPrefix(model.ID, "user:") || model.DeletedAt != nil {
+				continue
+			}
+			effective, _ := store.MergeModelParams(model.Params, params)
+			candidates[model.ID] = app.OverrideModel{
+				Protocol: model.Protocol, MaxTokens: effective.MaxTokens,
+				AllowReasoningEffortNone: effective.AllowReasoningEffortNone,
+			}
+		}
+	}
+	return func(id string) (app.OverrideModel, bool) {
+		if candidate, ok := candidates[id]; ok {
+			return candidate, true
+		}
+		model, ok := s.models.Resolve(id)
+		return app.OverrideModel{
+			Unavailable: model.Unavailable, Protocol: model.Protocol, MaxTokens: model.EffectiveParams.MaxTokens,
+			AllowReasoningEffortNone: model.EffectiveParams.AllowReasoningEffortNone,
+		}, ok
+	}, nil
 }

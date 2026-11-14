@@ -498,7 +498,7 @@ curl -fsS -X PUT \
      --api-token-env USER_TOKEN projects list
    ```
 
-   用户 token 在控制台“系统 → API Token”中创建，默认 90 天、最长 365 天；历史无过期时间的 token 在撤销前继续有效。
+   用户 token 在控制台“系统 → API Token”中创建，默认 90 天、最长 365 天；历史无过期时间的 token 在撤销前继续有效。可在同一页面续期，按同名轮换签发新明文并立即让旧明文失效；过期 token 的请求返回 401 `token_expired`，未知或已吊销的凭据仍返回 `unauthenticated`。
 
 **GitLab 退组、停用和撤销**
 
@@ -543,7 +543,7 @@ YAML
 
 overlay 位于数据卷中，镜像升级不会覆盖它；基础配置文件来自仓库，升级时仍需人工比对并按新版本更新。也可以在宿主机上按实际挂载路径维护同一个文件，但不要把它放进 `/app/config/` 的只读挂载。
 
-控制台也可通过 `PATCH /api/v1/config/overlay` 写回同一个 overlay；它只写 overlay 文件，不改基础配置挂载，也不要求宿主机直接写文件。控制台不能写入含 `${...}` 的新值、map 键或 provider 名称（返回 400），但 overlay 中已有的占位符在修改其他字段时保持不变；`delete` 请求可用于清理历史占位符命名的键，需要新增或修改占位符时请直接维护文件。overlay 路径不能与 `--config` 指向同一文件，否则服务启动失败。使用前确认 overlay 目录已存在且对容器用户可写；新建文件使用 `600`，已有文件沿用原权限。overlay 必须是普通文件，不能是符号链接；只读挂载、只读目录或 `EROFS` / `EBUSY` 等写入不可用时返回 `409 config_read_only`，符号链接（含 `<overlay>.lock`）返回 `409 config_symlink`。文件上限 1 MiB，超过返回 `413 config_too_large`。每次成功替换前，服务把当前 overlay 以 `600` 权限备份为 `<overlay>.bak`（原文件不存在时不生成），并用同目录的 `<overlay>.lock` sidecar 做跨进程 flock；等待锁超过请求 context 截止时间返回 `409 config_busy`，加锁后会清理上次中断留下的临时文件。`.bak` 和 `.lock` 都由服务维护，不是配置源，不要手工编辑。写入使用同目录临时文件、fsync、rename 和目录 fsync；失败时原文件字节不变，临时文件被清理，`500 config_write_failed` 表示 ENOSPC、备份 / fsync / rename 等失败。只有文件实际变化时响应才返回 `restart_required: true` 和重启提示；no-op 写入不要求重启。通过认证的写请求，其成功与失败（含 CSRF 失败和平台管理员校验失败）都会写 `platform_audit`（actor、路径、稳定错误码；成功时另记 revision 与 `changed`），不记录配置值。保存成功后仍需重启才作用于运行期，响应 `notice` 会提示重启可能取消在途评审；这里的 `restart_required` 只描述文件配置，扩展和块绑定等数据库变更（#402）保存后即可对新请求生效，不适用该提示。
+控制台也可通过 `PATCH /api/v1/config/overlay` 写回同一个 overlay；它只写 overlay 文件，不改基础配置挂载，也不要求宿主机直接写文件。控制台不能写入含 `${...}` 的新值、map 键或 provider 名称（返回 400），但 overlay 中已有的占位符在修改其他字段时保持不变；`delete` 请求可用于清理历史占位符命名的键，需要新增或修改占位符时请直接维护文件。overlay 路径不能与 `--config` 指向同一文件，否则服务启动失败。overlay 父目录不存在时，控制台写入前会自动创建（权限 `0700`）；创建失败返回 `config_directory_create_failed`，控制台显示中文指引。这修复了数据卷没有 `config-overlay` 目录时，保存或「重置为 base」必然返回 500 的问题；目录仍需对容器用户可写。新建文件使用 `600`，已有文件沿用原权限。overlay 必须是普通文件，不能是符号链接；只读挂载、只读目录或 `EROFS` / `EBUSY` 等写入不可用时返回 `409 config_read_only`，符号链接（含 `<overlay>.lock`）返回 `409 config_symlink`。文件上限 1 MiB，超过返回 `413 config_too_large`。每次成功替换前，服务把当前 overlay 以 `600` 权限备份为 `<overlay>.bak`（原文件不存在时不生成），并用同目录的 `<overlay>.lock` sidecar 做跨进程 flock；等待锁超过请求 context 截止时间返回 `409 config_busy`，加锁后会清理上次中断留下的临时文件。`.bak` 和 `.lock` 都由服务维护，不是配置源，不要手工编辑。写入使用同目录临时文件、fsync、rename 和目录 fsync；失败时原文件字节不变，临时文件被清理，`500 config_write_failed` 表示 ENOSPC、备份 / fsync / rename 等失败。只有文件实际变化时响应才返回 `restart_required: true` 和重启提示；no-op 写入不要求重启。通过认证的写请求，其成功与失败（含 CSRF 失败和平台管理员校验失败）都会写 `platform_audit`（actor、路径、稳定错误码；成功时另记 revision 与 `changed`），不记录配置值。保存成功后仍需重启才作用于运行期，响应 `notice` 会提示重启可能取消在途评审；这里的 `restart_required` 只描述文件配置，扩展和块绑定等数据库变更（#402）保存后即可对新请求生效，不适用该提示。
 
 「模型与档位」页的 `config:` 模型卡片也提供「编辑配置」入口：平台管理员在「编辑配置模型」抽屉中修改 allowlist 内的非密钥参数后，保存到同一个 `PATCH /api/v1/config/overlay`，只写 `providers.<name>.*` 叶子，不写数据库；保存且文件实际变化后仍需重启，界面提示「已保存到 overlay，待重启生效。重启服务可能取消在途评审。」，没有变化时不写文件并显示「没有需要保存的更改」。抽屉的「重置为 base」删除 overlay 中整个 `providers.<name>` 覆盖：若该 provider 只存在于 overlay，重启后会移除该模型，卡片显示「已从配置移除，重启后消失」并隐藏编辑入口；仍被配置中的 `profiles`（含 `profiles.default`）或迁移 0028 的节点覆盖引用时，一次 409 `provider_in_use` 同时列出两类引用路径，需要先在配置或「编辑评审档位」中清除引用，服务不会自动修改数据库或档位。overlay 不热替换，`409 provider_in_use` 只覆盖配置中的 `profiles`（含 `profiles.default`）与迁移 0028 的存储引用，不扫描运行中的工作流：删除正被在途评审使用的 provider 不会返回 409，重启后未终态评审可能以 `profile_hash_changed` 取消。保存成功后控制台会以保存前的 `overlay_revision` 为基线，以约 1 秒间隔轮询配置快照，快照出现任何不同的 revision（包括其他管理员写入导致的更高 revision）即结束；卡片在此期间提示「配置快照应用中，稍后可再次编辑」并禁用「编辑配置」，结束后恢复常规刷新并显示生效提示；15 秒仍未更新或快照请求失败时显示提示并恢复编辑；抽屉打开期间配置文件被外部编辑或重载时，表单按新快照重建并提示「配置已被他人修改，已重新加载。」。该抽屉只编辑现有 `config:` 模型，不提供新增 provider 或修改 provider 名称的入口；新增模型、重命名 provider 与维护 `${ENV}` 占位符仍需手工维护 overlay 文件。MCP env/headers 由 `mcp.config` 指向的外部文件维护，控制台不可编辑；`api_key_env` 只能写变量名，不能写密钥值。
 
@@ -794,7 +794,7 @@ docker run -d --name tribunal \
 - `read_user` 是登录所需的最小 scope；应用调用 GitLab `/api/v4/user` 获取用户名。
 - `bootstrap_admins: []` 不通过配置授予平台管理员标签，已有数据库授权仍然生效。需要通过配置授予时，先向用户确认实际 GitLab 数字用户 ID 和授权，再填写 `id:<GitLab 用户 ID>`；该写法只按 ID 匹配，GitLab 改名不影响。用户 ID 可在 GitLab 个人资料页或 `GET /api/v4/users?username=<name>` 查到。也兼容旧写法 GitLab **用户名**（不区分大小写，已弃用，见下文迁移步骤）：该用户名第一次以 admin 身份登录或访问时，Tribunal 把它绑定到当时的 GitLab 用户 ID 并写入 `admin_bindings`；之后其他账号即使改名为同一用户名，也不会从该配置获得管理员角色，日志记录 `bootstrap admin username is bound to another GitLab user`。未被禁用且匹配配置或数据库授权的用户获得平台 `admin` 标签；其他登录用户为 `viewer`。配置不会创建 GitLab 账号；它授予的平台管理员标签会让拥有本地用户 ID 的管理员隐式管理全部已登记项目，其他用户的项目权限仍需 `project_grants`。
 - 用户名绑定是首次使用即信任：升级前若该用户名已被他人占用，第一个登录的账号会拿到绑定。升级后请确认绑定正确（`SELECT username, user_id FROM admin_bindings;`），或直接改用 `id:` 写法。管理员 GitLab 账号重建、需要重新绑定时，先停服务，执行 `DELETE FROM admin_bindings WHERE username = '<小写用户名>';`，再启动并让正确账号登录；改用 `id:` 写法则不需要这一步。
-- 每个用户最多保留 10 个浏览器会话，再次登录会淘汰该用户自己最旧的会话，不影响其他用户；全局 4096 个会话只是存储兜底，触发时先淘汰非管理员的最旧会话，只有剩下的会话全部属于管理员时才淘汰管理员的会话。角色合并当前 `bootstrap_admins` 与数据库授权；用户名写法的管理员要等第一次使用、完成绑定之后才算管理员。
+- 每个用户最多保留 10 个浏览器会话，再次登录会淘汰该用户自己最旧的会话，不影响其他用户；被淘汰的会话即使 cookie 签名仍有效且未过期，也会返回 401 `session_evicted`（区别于 `session_expired`），控制台提示已在其他登录中被替换。全局 4096 个会话只是存储兜底，触发时先淘汰非管理员的最旧会话，只有剩下的会话全部属于管理员时才淘汰管理员的会话。角色合并当前 `bootstrap_admins` 与数据库授权；用户名写法的管理员要等第一次使用、完成绑定之后才算管理员。
 - OAuth 配置存在时，`client_id_env` 和 `client_secret_env` 必须同时设置，且两个环境变量都必须非空；`server.public_url` 必须是非空的绝对 HTTP(S) 地址，否则启动校验失败。
 - `REVIEW_ADMIN_TOKEN` 与 OAuth 相互独立；没有浏览器会话时仍可用它调用用户、授权和系统配置等平台管理 API。它没有用户 ID 和项目 grant，不能读取项目业务数据；轮换由部署方更新环境变量并重启。
 - 真实 OAuth 登录已在已验证快照的隔离测试实例验证；未单独复测其他生产 IdP 或所有设备场景。
@@ -988,6 +988,8 @@ curl -fsS http://127.0.0.1:18080/readyz
 新的 LLM 审计只写安全结构计数、用量及固定状态，不写 prompt、模型输出、工具参数/输出、推理内容、错误原文或上游响应 ID。`wire` 的 `thinking_type` 与 `reasoning_content_replayed` 只记录开关状态和是否回传，不记录 reasoning 正文或摘要；响应 usage 的 `cache_miss_tokens` 是 DeepSeek 报告的未命中缓存前缀 token 数（omitempty 明细，不重复计入 `input_tokens`）。调用列表使用本地 `id`；新旧行的顶层 `request_id` 不再对任何调用方返回。`include_payload=true` 仍要求项目 manage：历史 payload 不删除、不迁移，可能包含明文 prompt、输出和上游 ID。数据库、WAL、快照与备份也可能保有历史原文，限制访问并按组织的保留与密钥事件流程处理；不要将历史内容复制到日志、聊天或工单，也不要为升级擅自删除历史行。回退旧二进制可能再次暴露历史字段。
 
 新 payload 的 request、response 分别有 `_format=audit_metadata_v1`；未标记历史 payload 可能是完整旧请求/响应、旧元数据或截断摘要，甚至无法判别。升级依赖该接口的脚本以格式标记和字段类型分支处理，保留 unknown 分支，不得把新元数据的数字 `messages` 当成旧消息数组。详见[节点调用审计格式](design/03-http-api.md#节点调用审计格式)。
+
+`storage.llm_call_retention`（默认 720h）到期会删除 `llm_calls` 的逐次调用审计明细，节点和评审的用量汇总仍保留。所选统计范围早于截止点时，`GET /api/v1/stats/reviews` 返回 `model_details_purged=true`；节点详情和调用列表也会说明明细已按保留策略删除（`calls_purged` / `retention.details_purged`），空调用列表不等于代码节点。需要更长审计窗口时调大该值并重启。
 
 ### dossier 归属迁移（v1.2.0）
 

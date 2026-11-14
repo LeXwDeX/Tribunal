@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   createApiToken, deleteAdminGrant, deleteAdminUserGrant, fetchMe, getSettings, listAdminGrants,
-  listAdminProjects, listAdminUserGrants, listAdminUsers, listApiTokens, revokeAdminUserCredentials,
+  listAdminProjects, listAdminUserGrants, listAdminUsers, listApiTokens, renewApiToken, revokeAdminUserCredentials,
   revokeApiToken, setAdminGrant, setAdminUserDisabled, setAdminUserGrant, updateAdminUser,
 } from '../api/api'
 import { ApiError } from '../api/client'
@@ -170,6 +170,96 @@ function userLabel(user: AdminUser): string {
   return user.name ? `${user.name} (@${user.username})` : `@${user.username}`
 }
 
+const TOKEN_EXPIRY_WARNING_DAYS = 14
+
+// tokenExpiry surfaces the two states an operator must act on: already
+// expired and within the two-week warning window.
+function tokenExpiry(token: ApiToken): { label: string; tone: 'danger' | 'warn' } | null {
+  if (!token.expires_at) return null
+  const expires = new Date(token.expires_at).getTime()
+  if (Number.isNaN(expires)) return null
+  const days = Math.ceil((expires - Date.now()) / 86_400_000)
+  if (days <= 0) return { label: '已过期', tone: 'danger' }
+  if (days <= TOKEN_EXPIRY_WARNING_DAYS) return { label: `${days} 天后过期`, tone: 'warn' }
+  return null
+}
+
+function TokenRenewDialog({ token, open, onClose }: {
+  token: ApiToken | null
+  open: boolean
+  onClose: () => void
+}) {
+  const toast = useToast()
+  const queryClient = useQueryClient()
+  const [days, setDays] = useState('90')
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState<unknown>()
+  const [renewed, setRenewed] = useState<CreatedApiToken>()
+  const id = useId()
+
+  useEffect(() => {
+    if (!open) return
+    setDays('90')
+    setPending(false)
+    setError(undefined)
+    setRenewed(undefined)
+  }, [open, token?.id])
+
+  const submit = async () => {
+    if (!token) return
+    const parsed = Number(days)
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 365) {
+      setError(new Error('有效天数必须是 1 到 365 的整数。'))
+      return
+    }
+    setPending(true)
+    setError(undefined)
+    try {
+      setRenewed(await renewApiToken(token.id, parsed))
+      toast.push('success', 'API token 已续期；旧明文立即失效。')
+      await queryClient.invalidateQueries({ queryKey: ['api-tokens'] })
+    } catch (caught) {
+      setError(caught)
+    } finally {
+      setPending(false)
+    }
+  }
+
+  if (!token) return null
+  return (
+    <Dialog
+      open={open}
+      onClose={onClose}
+      title={renewed ? '复制新 API token' : '续期 API token'}
+      description={renewed
+        ? '明文 token 只显示这一次。关闭对话框后将从界面状态中清除。'
+        : `续期 ${tokenLabel(token)} 会立即签发同名新明文并让旧明文失效。`}
+      footer={renewed ? (
+        <Button variant="primary" onClick={onClose}>我已复制，关闭</Button>
+      ) : (
+        <>
+          <Button variant="secondary" onClick={onClose} disabled={pending}>取消</Button>
+          <Button variant="primary" onClick={() => { void submit() }} loading={pending}>续期</Button>
+        </>
+      )}
+    >
+      {renewed ? (
+        <>
+          <SecretField label="API token" value={renewed.token} />
+          <div className={styles.notice}>关闭后不会再次显示明文；旧 token 已失效。</div>
+        </>
+      ) : (
+        <>
+          {error ? <ErrorState error={error} title="续期失败" /> : null}
+          <Field label="有效天数" htmlFor={`${id}-days`} hint="正整数，最长 365 天。">
+            <NumberField id={`${id}-days`} min={1} max={365} value={days} onChange={(event) => setDays(event.target.value)} disabled={pending} />
+          </Field>
+        </>
+      )}
+    </Dialog>
+  )
+}
+
 function UserDrawer({ user, open, currentUserId, onClose }: {
   user: AdminUser | null
   open: boolean
@@ -194,6 +284,8 @@ function UserDrawer({ user, open, currentUserId, onClose }: {
   const saved = async () => {
     await queryClient.invalidateQueries({ queryKey: ['admin-users'] })
     await queryClient.invalidateQueries({ queryKey: ['admin-user-grants', user?.id] })
+    // A user write can rotate the current account's revision and CSRF token.
+    await queryClient.invalidateQueries({ queryKey: ['me'] })
   }
 
   const patch = async (body: { role?: 'admin' | 'viewer'; global_read?: boolean }) => {
@@ -359,12 +451,14 @@ function AdminUsersPanel() {
       setDisableTarget(null)
       toast.push('success', next ? '账号已停用。' : '账号已启用。')
       await queryClient.invalidateQueries({ queryKey: ['admin-users'] })
+      await queryClient.invalidateQueries({ queryKey: ['me'] })
     } catch (error) {
       if (error instanceof ApiError && error.code === 'stale_revision') {
         setDisableTarget(null)
         setDisableError(null)
         toast.push('error', '用户信息已被其他管理员更新，请刷新后重试。')
         await queryClient.invalidateQueries({ queryKey: ['admin-users'] })
+        await queryClient.invalidateQueries({ queryKey: ['me'] })
       } else {
         setDisableError(error)
       }
@@ -382,6 +476,7 @@ function AdminUsersPanel() {
       setRevokeTarget(null)
       toast.push('success', '该账号的全部凭据已撤销。')
       await queryClient.invalidateQueries({ queryKey: ['admin-users'] })
+      await queryClient.invalidateQueries({ queryKey: ['me'] })
     } catch (error) {
       setRevokeError(error)
     } finally {
@@ -418,7 +513,14 @@ function AdminUsersPanel() {
                 </tr>
               </thead>
               <tbody>
-                {users.items.map((user) => (
+                {users.items.map((user) => {
+                  const self = String(user.id) === String(me.data?.id)
+                  const disableBlocked = user.role_source === 'config' || self
+                  const disableReason = user.role_source === 'config'
+                    ? '配置来源的管理员由启动配置决定，不能在此停用；请修改 bootstrap_admins 配置。'
+                    : self ? '当前登录账号不能停用自己；请使用其他管理员账号操作。' : null
+                  const reasonId = `disable-reason-${user.id}`
+                  return (
                   <tr key={user.id}>
                     <td className="mono">{user.username}</td>
                     <td>{user.name || '—'}</td>
@@ -430,14 +532,22 @@ function AdminUsersPanel() {
                     <td>
                       <div className={insights.rowActions}>
                         <Button variant="secondary" className={ui.smallButton} onClick={() => setManageTarget(user)}>管理</Button>
-                        <Button variant="secondary" className={ui.smallButton} onClick={() => setDisableTarget(user)}>
+                        <Button
+                          variant="secondary"
+                          className={ui.smallButton}
+                          onClick={() => setDisableTarget(user)}
+                          disabled={disableBlocked}
+                          aria-describedby={disableReason ? reasonId : undefined}
+                        >
                           {user.disabled ? '启用账号' : '停用账号'}
                         </Button>
                         <Button variant="danger" className={ui.smallButton} onClick={() => setRevokeTarget(user)}>撤销全部凭据</Button>
                       </div>
+                      {disableReason ? <span id={reasonId} className={insights.rowHint}>{disableReason}</span> : null}
                     </td>
                   </tr>
-                ))}
+                  )
+                })}
               </tbody>
             </table>
           </div>
@@ -677,6 +787,7 @@ export function SystemPage() {
   const [tab, setTab] = useState('tokens')
   const [createOpen, setCreateOpen] = useState(false)
   const [revokeTarget, setRevokeTarget] = useState<ApiToken | null>(null)
+  const [renewTarget, setRenewTarget] = useState<ApiToken | null>(null)
   const [revokePending, setRevokePending] = useState(false)
   const [revokeError, setRevokeError] = useState<unknown>(null)
 
@@ -745,6 +856,7 @@ export function SystemPage() {
                 <>
                   {canSelfService ? '登录用户可管理自己的 token；写操作由 CSRF 保护。' : '当前会话不能创建或撤销 token。'}
                   用户 API token 由登录用户在控制台创建，供 tribunalctl 或脚本访问项目级 API，明文只在创建时显示一次。
+                  到期前 14 天会在此提示；续期会立即签发同名新明文，旧明文随即失效。
                   <br />
                   <code>REVIEW_ADMIN_TOKEN</code> 是部署方在环境变量配置的平台管理面 bootstrap Bearer，无用户 ID 与项目 grant，不能读取项目业务数据，也不能在控制台创建或轮换；修改它需改环境变量并重启。
                 </>
@@ -770,15 +882,28 @@ export function SystemPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {tokens.items.map((token) => (
+                      {tokens.items.map((token) => {
+                        const expiry = tokenExpiry(token)
+                        return (
                         <tr key={token.id}>
                           <td><b>{tokenLabel(token)}</b></td>
                           <td className="muted">{token.created_at ? formatDate(token.created_at) : '—'}</td>
-                          <td className="mono small">{token.expires_at ? formatDate(token.expires_at) : '—'}</td>
+                          <td>
+                            <span className="mono small">{token.expires_at ? formatDate(token.expires_at) : '—'}</span>
+                            {expiry ? <> <Badge tone={expiry.tone}>{expiry.label}</Badge></> : null}
+                          </td>
                           <td className="muted">{token.last_used_at ? formatDate(token.last_used_at) : '从未使用或未提供'}</td>
-                          {canSelfService ? <td className={insights.actionsCol}><Button variant="danger" className={ui.smallButton} onClick={() => setRevokeTarget(token)}>撤销</Button></td> : null}
+                          {canSelfService ? (
+                            <td className={insights.actionsCol}>
+                              <div className={insights.rowActions}>
+                                <Button variant="secondary" className={ui.smallButton} onClick={() => setRenewTarget(token)}>续期</Button>
+                                <Button variant="danger" className={ui.smallButton} onClick={() => setRevokeTarget(token)}>撤销</Button>
+                              </div>
+                            </td>
+                          ) : null}
                         </tr>
-                      ))}
+                        )
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -818,6 +943,9 @@ export function SystemPage() {
       </div>
 
       {canSelfService ? <TokenCreateDialog open={createOpen} onClose={() => setCreateOpen(false)} /> : null}
+      {canSelfService ? (
+        <TokenRenewDialog token={renewTarget} open={Boolean(renewTarget)} onClose={() => setRenewTarget(null)} />
+      ) : null}
 
       <ConfirmDialog
         open={Boolean(revokeTarget)}

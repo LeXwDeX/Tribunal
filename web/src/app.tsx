@@ -46,7 +46,7 @@ function AuthErrorToast({ message, onShown }: { message: string; onShown: () => 
 export function App() {
   const meQuery = useQuery({ queryKey: ['me'], queryFn: fetchMe })
   const authStatusQuery = useQuery({ queryKey: ['auth-status'], queryFn: fetchAuthStatus, staleTime: Infinity })
-  const [sessionEnded, setSessionEnded] = useState<'expired' | 'logout' | null>(null)
+  const [sessionEnded, setSessionEnded] = useState<'expired' | 'evicted' | 'logout' | null>(null)
   const [authError, setAuthError] = useState(() => authErrorMessage(window.location.search))
   const clearAuthError = useCallback(() => setAuthError(undefined), [])
 
@@ -68,7 +68,8 @@ export function App() {
       // After a successful /me, any 401 ends the session, including an
       // expired cookie the browser already dropped. A first visit without a
       // cookie stays on the login screen without an expiry notice.
-      if (meQuery.data || code === 'session_expired') setSessionEnded('expired')
+      if (code === 'session_evicted') setSessionEnded('evicted')
+      else if (meQuery.data || code === 'session_expired') setSessionEnded('expired')
     }
     const onLogout = () => setSessionEnded('logout')
     window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized)
@@ -84,12 +85,15 @@ export function App() {
   const meError = meQuery.error
   const unauthorizedError = meError instanceof ApiError && meError.status === 401
   const sessionExpired = meError instanceof ApiError && meError.status === 401 && meError.code === 'session_expired'
+  const sessionEvicted = meError instanceof ApiError && meError.status === 401 && meError.code === 'session_evicted'
   if (sessionEnded || unauthorizedError || !meQuery.data) {
     const notice = sessionEnded === 'logout'
       ? '已退出登录。'
-      : sessionEnded === 'expired' || sessionExpired
-        ? '会话已过期，请重新登录。'
-        : undefined
+      : sessionEnded === 'evicted' || sessionEvicted
+        ? '当前会话已在其他登录中被替换（每个账号最多保留 10 个会话），请重新登录。'
+        : sessionEnded === 'expired' || sessionExpired
+          ? '会话已过期，请重新登录。'
+          : undefined
     return (
       <ToastProvider>
         <AuthScreen

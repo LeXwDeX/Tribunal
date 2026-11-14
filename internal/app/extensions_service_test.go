@@ -462,7 +462,7 @@ func TestExtensionServiceTestProvider(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Errorf("decode request: %v", err)
 		}
-		sawMaxTokens = request.MaxTokens == 1
+		sawMaxTokens = request.MaxTokens == probeConnectivityMaxTokens
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"fake-model","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"pong"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
 	}))
@@ -493,7 +493,7 @@ func TestExtensionServiceTestProvider(t *testing.T) {
 		t.Fatalf("result = %+v", result)
 	}
 	if !sawMaxTokens {
-		t.Fatal("provider test did not send max_tokens=1")
+		t.Fatal("provider test did not send a usable max_tokens budget")
 	}
 
 	if _, err := service.TestProvider(ctx, "missing"); err == nil {

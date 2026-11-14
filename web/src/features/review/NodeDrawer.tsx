@@ -5,6 +5,7 @@ import {
   Badge, Button, CopyButton, Disclosure, Drawer, EmptyState, ErrorState, LoadingState, StatusBadge,
 } from '../../components/ui'
 import { usePaginated } from '../../lib/hooks'
+import { describeNodeReason } from '../../lib/diagnostics'
 import { formatDuration, formatJson, formatNumber } from '../../lib/format'
 import ui from '../../styles/ui.module.css'
 import styles from './review.module.css'
@@ -115,6 +116,10 @@ export function NodeDrawer({
   const data = detail.data
   const current = data || node
   const attempt = current?.attempt
+  const status = current?.status
+  const reason = describeNodeReason(data?.reason ?? node?.reason, status)
+  const callsPurged = data?.calls_purged || false
+  const retentionHours = data?.calls_retention_hours
   return (
     <Drawer
       open={open}
@@ -135,13 +140,16 @@ export function NodeDrawer({
       ) : null}
       {detail.isPending ? <LoadingState label="正在读取节点详情…" /> : null}
       {detail.isError ? <ErrorState error={detail.error} onRetry={() => { void detail.refetch() }} /> : null}
-      {data?.error ? (
+      {data?.error && status !== 'skipped' ? (
         <div className={styles.nodeError} role="alert">
           <strong>节点错误</strong>
           <pre>{data.error}</pre>
         </div>
       ) : null}
-      {current?.status === 'failed' && !data?.error && !detail.isPending ? (
+      {reason && status !== 'completed' ? (
+        <p className={styles.nodeReason} role="status">{reason}</p>
+      ) : null}
+      {status === 'failed' && !data?.error && !detail.isPending ? (
         <div className={styles.nodeError}>节点状态为失败，但服务端没有返回 error 字段。</div>
       ) : null}
       {data?.params !== undefined ? <ParamsSection value={data.params} /> : null}
@@ -161,7 +169,13 @@ export function NodeDrawer({
           <h3 className={styles.sectionLabel}>LLM 调用 · {calls.items.length}{calls.hasNextPage ? '+' : ''} 轮</h3>
           {calls.isPending ? <LoadingState label="正在读取模型调用…" /> : null}
           {calls.isError ? <ErrorState error={calls.error} onRetry={calls.retry} /> : null}
-          {calls.isSuccess && calls.items.length === 0 ? <span className="muted small">这是一段代码节点，没有模型调用。</span> : null}
+          {calls.isSuccess && calls.items.length === 0 ? (
+            callsPurged
+              ? <span className="muted small">该节点的模型调用明细已按保留策略删除{retentionHours ? `（保留 ${retentionHours} 小时）` : ''}，用量汇总仍保留。修改 <code>storage.llm_call_retention</code> 可延长保留期。</span>
+              : current?.token_free
+                ? <span className="muted small">这是一段代码节点，没有模型调用。</span>
+                : <span className="muted small">没有模型调用记录；服务端未记录该节点为代码节点。</span>
+          ) : null}
           {calls.items.length ? (
             <div className={styles.callList}>
               {calls.items.map((call, index) => <CallItem key={call.id || `${call.turn}-${index}`} call={call} />)}

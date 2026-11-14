@@ -43,6 +43,18 @@ describe('authentication boundary', () => {
     expect(screen.getAllByText('会话已过期，请重新登录。')).toHaveLength(1)
   })
 
+  it('explains a session replaced by another login', async () => {
+    installFetch(() => jsonResponse({ error: { code: 'session_evicted', message: 'session was replaced by another login' } }, 401))
+    render(
+      <QueryClientProvider client={createTestQueryClient()}>
+        <MemoryRouter initialEntries={['/']}>
+          <App />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+    expect(await screen.findByText(/当前会话已在其他登录中被替换/)).toBeInTheDocument()
+  })
+
   it('hides the login action when the server reports OAuth disabled', async () => {
     installFetch((url) => {
       if (url.endsWith('/auth/status')) return jsonResponse({ oauth_enabled: false })
@@ -57,6 +69,20 @@ describe('authentication boundary', () => {
     )
     expect(await screen.findByText(/平台尚未启用 GitLab OAuth 登录/)).toBeInTheDocument()
     expect(screen.queryByRole('link', { name: '通过 GitLab 登录' })).not.toBeInTheDocument()
+  })
+
+  it('carries the current deep link into the login action', async () => {
+    window.history.replaceState(null, '', '/reviews/wf-1?tab=findings')
+    installFetch(() => jsonResponse({ error: { code: 'unauthenticated', message: 'login required' } }, 401))
+    render(
+      <QueryClientProvider client={createTestQueryClient()}>
+        <MemoryRouter initialEntries={['/']}>
+          <App />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+    const login = await screen.findByRole('link', { name: '通过 GitLab 登录' })
+    expect(login).toHaveAttribute('href', '/auth/login?return_to=%2Freviews%2Fwf-1%3Ftab%3Dfindings')
   })
 
   it('shows a readable message for a failed browser login', async () => {
@@ -74,6 +100,8 @@ describe('authentication boundary', () => {
     )
     expect(await screen.findByText('登录状态已失效，请重试。')).toBeInTheDocument()
     expect(window.location.search).toBe('')
+    // The previous auth_error must not become the login return target.
+    expect(screen.getByRole('link', { name: '通过 GitLab 登录' })).toHaveAttribute('href', '/auth/login')
   })
 
   it('falls back for an unknown or inherited auth_error value', async () => {

@@ -26,7 +26,7 @@ describe('model draft test', () => {
     })
     renderWithProviders(<ModelsPage />, { route: '/models' })
     await user.click(await screen.findByRole('button', { name: '编辑' }))
-    await user.click(await screen.findByRole('button', { name: '保存前测试' }))
+    await user.click(await screen.findByRole('button', { name: '保存前连通性测试' }))
     expect(await screen.findByText(/测试失败/)).toBeInTheDocument()
     expect(screen.queryByText(/^测试成功/)).not.toBeInTheDocument()
   })

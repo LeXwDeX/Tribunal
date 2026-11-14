@@ -38,8 +38,12 @@ const blockTrendDay = {
 
 function routeStats(stats: Record<string, unknown>) {
   installFetch((url) => {
-    if (url.startsWith('/api/v1/projects')) return jsonResponse({ projects: [] })
-    if (url.startsWith('/api/v1/stats')) return jsonResponse(stats)
+    const path = new URL(url, 'http://localhost').pathname
+    if (path.startsWith('/api/v1/projects')) return jsonResponse({ projects: [] })
+    // The page also reads the review-scope view; this fixture only describes
+    // the mixed stats payload.
+    if (path === '/api/v1/stats/reviews') return jsonResponse({})
+    if (path === '/api/v1/stats') return jsonResponse(stats)
     return jsonResponse({})
   })
 }
@@ -433,8 +437,10 @@ describe('statistics daily trends', () => {
     }
     let statsCalls = 0
     installFetch((url) => {
-      if (url.startsWith('/api/v1/projects')) return jsonResponse({ projects: [] })
-      if (url.startsWith('/api/v1/stats')) {
+      const path = new URL(url, 'http://localhost').pathname
+      if (path.startsWith('/api/v1/projects')) return jsonResponse({ projects: [] })
+      if (path === '/api/v1/stats/reviews') return jsonResponse({})
+      if (path === '/api/v1/stats') {
         statsCalls += 1
         return jsonResponse(statsCalls === 1 ? fullStats : reordered)
       }

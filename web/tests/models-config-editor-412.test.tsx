@@ -96,6 +96,8 @@ const inheritedParamOverride = {
 
 interface RouteOptions {
   overlay?: (body: Record<string, unknown>) => Response
+  // probe answers POST /api/v1/models/{id}/probe; the default is success.
+  probe?: () => Response
   nodes?: unknown[]
   models?: unknown[]
   provider?: Record<string, unknown>
@@ -184,6 +186,13 @@ function routes(options: RouteOptions = {}) {
     if (url.startsWith('/api/v1/profiles')) return jsonResponse({ profiles: [] })
     if (url === '/api/v1/model-defaults') return jsonResponse({ params: {}, revision: 0 })
     if (url === '/api/v1/model-presets') return jsonResponse({ presets: [] })
+    if (url.endsWith('/probe') && init?.method === 'POST') {
+      if (options.probe) return options.probe()
+      return jsonResponse({ ok: true, model: 'deepseek-chat', latency_ms: 120, probe: 'tool_call', tool_call: true })
+    }
+    if (url.endsWith('/test') && init?.method === 'POST') {
+      return jsonResponse({ ok: true, model: 'deepseek-chat', latency_ms: 40 })
+    }
     if (url.startsWith('/api/v1/models')) {
       state.modelReads += 1
       return jsonResponse({ models: options.models ?? [configModel] })
@@ -347,6 +356,49 @@ describe('config model overlay editor (#412)', () => {
     expect(screen.getByRole('button', { name: '重新加载' })).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '重新加载' }))
     await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => url === '/api/v1/config').length).toBeGreaterThan(before))
+  })
+
+  it('explains a missing overlay directory with actionable guidance', async () => {
+    const user = userEvent.setup()
+    routes({
+      overlay: () => jsonResponse({
+        error: {
+          code: 'config_directory_create_failed',
+          message: 'cannot create the configuration overlay directory',
+          details: [{ field: 'changes', message: 'the overlay directory could not be created' }],
+        },
+      }, 500),
+    })
+    const dialog = await openConfigEditor(user)
+    await user.clear(within(dialog).getByLabelText('max_tokens'))
+    await user.type(within(dialog).getByLabelText('max_tokens'), '2048')
+    await user.click(within(dialog).getByRole('button', { name: '保存' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('无法创建 overlay 目录')
+    expect(screen.getByRole('alert')).toHaveTextContent('数据卷')
+  })
+
+  it('separates a connectivity test from a real tool-call probe', async () => {
+    const user = userEvent.setup()
+    routes()
+    const dialog = await openConfigEditor(user)
+    await user.click(within(dialog).getByRole('button', { name: '工具调用测试' }))
+    expect(await within(dialog).findByText(/工具调用测试成功/)).toHaveTextContent('submit_result')
+    await user.click(within(dialog).getByRole('button', { name: '连通性测试' }))
+    expect(await within(dialog).findByText(/连通性测试成功/)).toBeInTheDocument()
+    expect(within(dialog).getByText(/测试针对已保存的模型/)).toBeInTheDocument()
+  })
+
+  it('explains a model that cannot return the submit_result tool call', async () => {
+    const user = userEvent.setup()
+    routes({
+      probe: () => jsonResponse({
+        error: { code: 'tool_call_unsupported', message: 'model answered without the submit_result tool call' },
+      }, 422),
+    })
+    const dialog = await openConfigEditor(user)
+    await user.click(within(dialog).getByRole('button', { name: '工具调用测试' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('没有返回 submit_result 工具调用')
   })
 
   it('does not write when nothing changed', async () => {

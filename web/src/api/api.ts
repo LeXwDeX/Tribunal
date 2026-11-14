@@ -32,6 +32,7 @@ import type {
   ModelHealth,
   ModelParams,
   ModelPreset,
+  ModelToolProbeResult,
   ModelWrite,
   Me,
   CallPage,
@@ -58,6 +59,7 @@ import type {
   ReviewGraph,
   ReviewNodeDetail,
   ReviewSummary,
+  ReviewStats,
   Skill,
   SkillPage,
   Stats,
@@ -78,7 +80,21 @@ export async function logout(): Promise<void> {
   window.dispatchEvent(new Event(LOGOUT_EVENT))
 }
 
-export const authLoginUrl = '/auth/login'
+// authLoginUrl carries the current deep link so a login from an MR comment
+// returns to the review. The server validates the target again and rejects
+// anything that is not a same-origin path.
+export function authLoginUrl(returnTo?: string): string {
+  let current = returnTo
+  if (current === undefined && typeof window !== 'undefined') {
+    // Do not carry a previous auth_error back into the login round trip.
+    const url = new URL(window.location.href)
+    url.searchParams.delete('auth_error')
+    current = `${url.pathname}${url.search}`
+  }
+  const target = (current ?? '').trim()
+  if (!target || target === '/' || target.startsWith('/auth/')) return '/auth/login'
+  return withQuery('/auth/login', { return_to: target })
+}
 
 // Projects -----------------------------------------------------------------
 
@@ -408,6 +424,10 @@ export async function getStats(filters: StatsFilters = {}): Promise<Stats> {
   return request<Stats>(withQuery('/api/v1/stats', { ...filters }))
 }
 
+export async function getReviewStats(filters: StatsFilters = {}): Promise<ReviewStats> {
+  return request<ReviewStats>(withQuery('/api/v1/stats/reviews', { ...filters }))
+}
+
 export async function getSettings(): Promise<PlatformSettings> {
   return request<PlatformSettings>('/api/v1/settings')
 }
@@ -441,6 +461,15 @@ export async function createApiToken(input: { name: string; expires_in_days: num
 
 export async function revokeApiToken(id: string | number): Promise<void> {
   await request<void>(`/api/v1/api-tokens/${segment(id)}`, { method: 'DELETE' })
+}
+
+// renewApiToken replaces the secret and expiry under the same name. The old
+// secret stops working immediately, so the plaintext must be copied again.
+export async function renewApiToken(id: string | number, expiresInDays: number): Promise<CreatedApiToken> {
+  return request<CreatedApiToken>(`/api/v1/api-tokens/${segment(id)}/renew`, {
+    method: 'POST',
+    body: { expires_in_days: expiresInDays },
+  })
 }
 
 // Access administration ----------------------------------------------------
@@ -498,6 +527,10 @@ export async function testModel(id: string): Promise<ProviderTestResult> {
 
 export async function testModelDraft(input: ModelWrite): Promise<ProviderTestResult> {
   return request<ProviderTestResult>('/api/v1/models:test', { method: 'POST', body: input })
+}
+
+export async function probeModelTools(id: string): Promise<ModelToolProbeResult> {
+  return request<ModelToolProbeResult>(`/api/v1/models/${segment(id)}/probe`, { method: 'POST' })
 }
 
 export async function getDefaultProfile(): Promise<ProfileDetail> {

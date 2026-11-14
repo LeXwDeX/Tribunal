@@ -68,6 +68,68 @@ describe('user management drawer (#297)', () => {
     expect(screen.getByRole('button', { name: '降级为普通用户' })).toBeDisabled()
   })
 
+  it('refreshes the current user after a user write', async () => {
+    const state = { meReads: 0 }
+    installFetch((url, init) => {
+      const method = (init?.method || 'GET').toUpperCase()
+      const path = new URL(url, 'http://localhost').pathname
+      if (path === '/api/v1/me') {
+        state.meReads += 1
+        return jsonResponse({ id: 7, username: 'alice', role: 'admin', global_read: false, csrf_token: 'x' })
+      }
+      if (path === '/api/v1/admin/users' && method === 'GET') return jsonResponse({ users, next_cursor: '' })
+      if (path === '/api/v1/admin/users/8/grants') return jsonResponse({ grants: [], next_cursor: '' })
+      if (path.startsWith('/api/v1/admin/users/')) return jsonResponse(users[1])
+      return jsonResponse({})
+    })
+    const user = userEvent.setup()
+    await openUser(user, 'bob')
+    const before = state.meReads
+    await user.click(screen.getByRole('button', { name: '提升为管理员' }))
+    await user.click(screen.getByRole('button', { name: '确认' }))
+    await waitFor(() => expect(state.meReads).toBeGreaterThan(before))
+  })
+
+  it('disables the disable action for config-sourced and self accounts with the reason', async () => {
+    mock([])
+    const user = userEvent.setup()
+    renderWithProviders(<SystemPage />)
+    await user.click(screen.getByRole('tab', { name: '用户与账号' }))
+
+    const carol = (await screen.findByText('carol')).closest('tr')!
+    expect(within(carol).getByRole('button', { name: '停用账号' })).toBeDisabled()
+    expect(within(carol).getByText(/配置来源的管理员/)).toBeInTheDocument()
+
+    const alice = (await screen.findByText('alice')).closest('tr')!
+    expect(within(alice).getByRole('button', { name: '停用账号' })).toBeDisabled()
+    expect(within(alice).getByText(/当前登录账号/)).toBeInTheDocument()
+
+    const bob = (await screen.findByText('bob')).closest('tr')!
+    expect(within(bob).getByRole('button', { name: '停用账号' })).toBeEnabled()
+  })
+
+  it('explains a protected_user rejection instead of a generic permission error', async () => {
+    installFetch((url, init) => {
+      const method = (init?.method || 'GET').toUpperCase()
+      const path = new URL(url, 'http://localhost').pathname
+      if (path === '/api/v1/me') return jsonResponse({ id: 7, username: 'alice', role: 'admin', global_read: false, csrf_token: 'x' })
+      if (path === '/api/v1/admin/users' && method === 'GET') return jsonResponse({ users, next_cursor: '' })
+      if (path === '/api/v1/admin/users/8' && method === 'PATCH') {
+        return jsonResponse({ error: { code: 'protected_user', message: 'platform administrator cannot be changed' } }, 403)
+      }
+      return jsonResponse({})
+    })
+    const user = userEvent.setup()
+    renderWithProviders(<SystemPage />)
+    await user.click(screen.getByRole('tab', { name: '用户与账号' }))
+    const bob = (await screen.findByText('bob')).closest('tr')!
+    await user.click(within(bob).getByRole('button', { name: '停用账号' }))
+    const dialog = await screen.findByRole('dialog', { name: '停用账号？' })
+    await user.click(within(dialog).getByRole('button', { name: '停用' }))
+    expect(await within(dialog).findByText(/受配置保护/)).toBeInTheDocument()
+    expect(within(dialog).queryByText('没有访问权限')).not.toBeInTheDocument()
+  })
+
   it('adds a user-scoped project grant', async () => {
     const writes: Array<{ url: string; method?: string; body?: unknown }> = []
     mock(writes)

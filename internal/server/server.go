@@ -309,12 +309,14 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("POST /api/v1/models/{id}/preset", s.apiAuth(s.guard(policyPlatformAdmin, s.handleApplyModelPreset)))
 	mux.HandleFunc("DELETE /api/v1/models/{id}", s.apiAuth(s.guard(policyPlatformAdmin, s.handleDeleteModel)))
 	mux.HandleFunc("POST /api/v1/models/{id}/test", s.apiAuth(s.guard(policyPlatformAdmin, s.handleTestModel)))
+	mux.HandleFunc("POST /api/v1/models/{id}/probe", s.apiAuth(s.guard(policyPlatformAdmin, s.handleProbeModelTools)))
 	mux.HandleFunc("POST /api/v1/models:test", s.apiAuth(s.guard(policyPlatformAdmin, s.handleTestModelDraft)))
 	mux.HandleFunc("GET /api/v1/profiles", s.apiAuth(s.guard(policyPlatformAdmin, s.handleListProfiles)))
 	mux.HandleFunc("GET /api/v1/profiles/default", s.apiAuth(s.guard(policyPlatformAdmin, s.handleGetDefaultProfile)))
 	mux.HandleFunc("PUT /api/v1/profiles/default/overrides", s.apiAuth(s.guard(policyPlatformAdmin, s.handlePutProfileOverrides)))
 	mux.HandleFunc("DELETE /api/v1/profiles/default/overrides", s.apiAuth(s.guard(policyPlatformAdmin, s.handleDeleteProfileOverrides)))
 	mux.HandleFunc("GET /api/v1/stats", s.apiAuth(s.handleStats))
+	mux.HandleFunc("GET /api/v1/stats/reviews", s.apiAuth(s.handleReviewStats))
 	mux.HandleFunc("GET /api/v1/system/lock-stats", s.apiAuth(s.guard(policyPlatformAdmin, s.handleLockStats)))
 	mux.HandleFunc("GET /api/v1/settings", s.apiAuth(s.guard(policyPlatformAdmin, s.handleSettings)))
 	mux.HandleFunc("GET /api/v1/config", s.apiAuth(s.guard(policyPlatformAdmin, s.handleConfig)))
@@ -323,6 +325,7 @@ func New(cfg Config) (*Server, error) {
 	// API tokens (browser self-service; CSRF still applies).
 	mux.HandleFunc("GET /api/v1/api-tokens", s.apiAuth(s.guard(policyAuthenticated, s.handleListAPITokens)))
 	mux.HandleFunc("POST /api/v1/api-tokens", s.apiAuth(s.guard(policyAuthenticated, s.handleCreateAPIToken)))
+	mux.HandleFunc("POST /api/v1/api-tokens/{id}/renew", s.apiAuth(s.guard(policyAuthenticated, s.handleRenewAPIToken)))
 	mux.HandleFunc("DELETE /api/v1/api-tokens/{id}", s.apiAuth(s.guard(policyAuthenticated, s.handleDeleteAPIToken)))
 	// Access administration. The documented /admin surface and the /api/v1
 	// equivalent share handlers.

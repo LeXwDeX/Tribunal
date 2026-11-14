@@ -16,6 +16,7 @@ import { NodeDrawer } from '../features/review/NodeDrawer'
 import { findingFunnel, verdictCardState } from '../features/review/reviewView'
 import { useReviewStream } from '../features/review/useReviewStream'
 import { usePaginated } from '../lib/hooks'
+import { unresolvedKindLabel } from '../lib/diagnostics'
 import {
   formatDuration, formatJson, formatNumber, formatTokens, labelForChallenge, labelForDecision,
   labelForTrigger, safeExternalUrl, shortSha, stringifyUnknown,
@@ -413,8 +414,10 @@ function UsagePanel({ review }: { review: ReviewDetail }) {
   )
 }
 
-// Built only from findings_summary; nothing here is inferred.
-function summarySentence(summary?: FindingsSummary): string {
+// Built only from findings_summary; nothing here is inferred. The verdict
+// decides how an empty summary reads: zero findings on an INCOMPLETE or
+// unreviewed run must never read like a clean result.
+function summarySentence(summary?: FindingsSummary, verdict?: string | null): string {
   if (!summary) return ''
   const parts: string[] = []
   if (summary.published) parts.push(`已发布 ${summary.published} 条`)
@@ -423,7 +426,10 @@ function summarySentence(summary?: FindingsSummary): string {
   const severities = (['P0', 'P1', 'P2', 'info'] as const)
     .filter((key) => summary.by_severity?.[key])
     .map((key) => `${key} ×${summary.by_severity?.[key]}`)
-  if (!parts.length && !severities.length) return summary.by_severity ? '没有记录 Finding。' : ''
+  if (!parts.length && !severities.length) {
+    if (!summary.by_severity) return ''
+    return verdict === 'INCOMPLETE' ? '没有记录 Finding，且评审未完成。' : '没有记录 Finding。'
+  }
   return [parts.join(' · '), severities.length ? `级别 ${severities.join(' · ')}` : ''].filter(Boolean).join('；')
 }
 
@@ -447,11 +453,27 @@ function FindingsFunnel({ findings, partial }: { findings: Finding[]; partial: b
   )
 }
 
+function verdictScope(review: ReviewDetail): string {
+  const state = verdictCardState(review)
+  switch (state.tone) {
+    case 'FAILED':
+      return '未评审：执行失败，评审范围没有完成。'
+    case 'CANCELLED':
+      return '未评审：评审已取消，结果不能视为通过。'
+    case 'PENDING':
+      return '尚未评审：执行尚未给出结论。'
+    case 'INCOMPLETE':
+      return '未完成：已审范围不完整，零 Finding 不代表没有问题。'
+    default:
+      return '已审范围：评审在声明的覆盖范围内完成。'
+  }
+}
+
 function VerdictCard({
   review, findings, findingsLoaded, partial,
 }: { review: ReviewDetail; findings: Finding[]; findingsLoaded: boolean; partial: boolean }) {
   const state = verdictCardState(review)
-  const summary = summarySentence(review.findings_summary)
+  const summary = summarySentence(review.findings_summary, review.verdict)
   return (
     <section className={rv.verdictCard} data-verdict={state.tone} aria-label="评审结论">
       <div className={rv.verdictMark}>
@@ -459,6 +481,7 @@ function VerdictCard({
         <b>{state.mark}</b>
       </div>
       <div className={rv.verdictReason}>
+        <span className={rv.verdictScope}>{verdictScope(review)}</span>
         {review.error ? <span className={rv.verdictAlert} role="alert">执行失败：{review.error}</span> : null}
         {state.tone === 'FAILED' && !review.error ? <span className={rv.verdictAlert} role="alert">执行失败，服务端没有返回错误原因。</span> : null}
         {review.cancel_reason ? <span className={rv.verdictAlert}>取消原因：{review.cancel_reason}</span> : null}
@@ -471,6 +494,49 @@ function VerdictCard({
         <div><span className={rv.statLabel}>Tokens</span><b>{formatTokens(review.usage?.tokens_in, review.usage?.tokens_out)}</b></div>
       </div>
     </section>
+  )
+}
+
+// ReviewDiagnosticsPanel explains a verdict the workflow error cannot: the
+// synthesize node's summary, warnings and unresolved signals. Every item is
+// rendered from the API response, never inferred from node status.
+function ReviewDiagnosticsPanel({ review }: { review: ReviewDetail }) {
+  const unresolved = review.unresolved ?? []
+  const warnings = review.warnings ?? []
+  const incomplete = review.status === 'completed' && review.verdict === 'INCOMPLETE'
+  if (!incomplete && !warnings.length && !unresolved.length) return null
+  const title = incomplete ? '未完成原因' : '评审诊断'
+  return (
+    <Panel title={title}>
+      <div className={rv.diagnostics}>
+        {review.summary ? <p className={rv.diagnosticsSummary}>{review.summary}</p> : null}
+        {incomplete && !review.summary ? (
+          <p className={rv.diagnosticsSummary}>该评审没有保存摘要；请结合未解决信号、告警和节点状态判断覆盖范围。</p>
+        ) : null}
+        {unresolved.length ? (
+          <ul className={rv.diagnosticsList} aria-label="未解决信号">
+            {unresolved.map((signal, index) => (
+              <li key={`${signal.node}-${signal.kind}-${index}`}>
+                <Badge tone="warn" plain>{unresolvedKindLabel(signal.kind)}</Badge>
+                <span className="mono muted">{signal.node}</span>
+                <span>{signal.message}</span>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        {warnings.length ? (
+          <div className={rv.diagnosticsWarnings}>
+            <h3 className={rv.sectionLabel}>告警</h3>
+            <ul className={rv.diagnosticsList} aria-label="评审告警">
+              {warnings.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}
+            </ul>
+          </div>
+        ) : null}
+        {incomplete && !unresolved.length && !warnings.length && review.summary ? (
+          <p className={rv.diagnosticsEmpty}>服务端没有返回未解决信号或告警，未完成状态可能来自节点覆盖不足。</p>
+        ) : null}
+      </div>
+    </Panel>
   )
 }
 
@@ -667,6 +733,8 @@ export function ReviewDetailPage() {
           findingsLoaded={findings.isSuccess}
           partial={filtered || findings.hasNextPage}
         />
+
+        <ReviewDiagnosticsPanel review={review} />
 
         <Panel
           title={<>执行图 {graph.isSuccess ? <small>{graph.data.nodes.length} 个节点</small> : null}</>}

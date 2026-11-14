@@ -124,6 +124,7 @@ func (e *authEnv) start() {
 		Tokens:   e.db,
 		Access:   e.db,
 		Logger:   newTestLogger(e.logs),
+		Now:      e.clock.Now,
 	})
 	if err != nil {
 		e.t.Fatalf("server.New: %v", err)
@@ -693,7 +694,7 @@ func TestCSRFRequiredForUnsafeSessionRequests(t *testing.T) {
 	if resp.status != http.StatusForbidden {
 		t.Fatalf("missing CSRF status = %d, body=%s", resp.status, resp.body)
 	}
-	if code := decodeMap(t, resp.body)["error"].(map[string]any)["code"]; code != "forbidden" {
+	if code := decodeMap(t, resp.body)["error"].(map[string]any)["code"]; code != "csrf_invalid" {
 		t.Errorf("missing CSRF code = %v", code)
 	}
 

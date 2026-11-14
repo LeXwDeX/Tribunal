@@ -157,6 +157,57 @@
   font-weight: var(--fw-medium);
 }
 
+.verdictScope {
+  color: var(--muted-strong);
+}
+
+.diagnostics {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  font-size: var(--fs-body-sm);
+}
+
+.diagnosticsSummary {
+  margin: 0;
+}
+
+.diagnosticsList {
+  margin: 0;
+  padding-left: 1.2em;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  overflow-wrap: anywhere;
+}
+
+.diagnosticsList li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.diagnosticsWarnings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.diagnosticsEmpty {
+  margin: 0;
+  color: var(--muted);
+}
+
+.nodeReason {
+  margin: 0;
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-sm);
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  font-size: 13px;
+}
+
 .verdictCard[data-verdict="CANCELLED"] .verdictAlert { color: var(--warn-fg); }
 
 .funnel {

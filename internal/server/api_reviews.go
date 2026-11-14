@@ -55,9 +55,16 @@ type reviewNode struct {
 	Attempt         int      `json:"attempt"`
 	DurationMS      *int64   `json:"duration_ms,omitempty"`
 	UsageIncomplete bool     `json:"usage_incomplete"`
+	// Reason is the durable failure class of a failed or skipped node:
+	// executor_error, timeout, budget_exhausted, sandbox_denied,
+	// required_node_failed, and so on. It stays empty for completed nodes and
+	// when an older store has no event log.
+	Reason string `json:"reason,omitempty"`
 	// UsageInterruptions counts recovery restarts of this node. It comes from
 	// the engine snapshot, not a stored column, and is omitted when zero.
 	UsageInterruptions int `json:"usage_interruptions,omitempty"`
+	// TokenFree marks a deterministic node that never calls a model.
+	TokenFree bool `json:"token_free,omitempty"`
 }
 
 type reviewDetail struct {
@@ -71,6 +78,12 @@ type reviewDetail struct {
 	FindingsSummary    findingsSummary     `json:"findings_summary"`
 	Usage              reviewUsage         `json:"usage"`
 	Publications       publicationsSummary `json:"publications"`
+	// Summary, Warnings and Unresolved are the review-level diagnostics
+	// persisted with the last completed synthesize node. They explain an
+	// INCOMPLETE verdict that carries no workflow error.
+	Summary    string                    `json:"summary,omitempty"`
+	Warnings   []string                  `json:"warnings,omitempty"`
+	Unresolved []review.UnresolvedSignal `json:"unresolved,omitempty"`
 }
 
 type graphEdge struct {
@@ -83,6 +96,15 @@ type nodeDetail struct {
 	DurationMS         *int64    `json:"duration_ms,omitempty"`
 	Usage              nodeUsage `json:"usage"`
 	UsageInterruptions int       `json:"usage_interruptions,omitempty"`
+	// Reason is the durable failure class from the engine snapshot, or a
+	// legacy fallback derived from the stored status.
+	Reason string `json:"reason,omitempty"`
+	// TokenFree marks a deterministic node that never calls a model.
+	TokenFree bool `json:"token_free,omitempty"`
+	// CallsPurged reports that the node spent tokens and finished before the
+	// LLM call retention cutoff, so its audit rows were deleted.
+	CallsPurged         bool `json:"calls_purged,omitempty"`
+	CallsRetentionHours int  `json:"calls_retention_hours,omitempty"`
 }
 
 // workflowEventLoader is implemented by stores that keep the dag event log.
@@ -340,6 +362,7 @@ func (s *Server) handleGetReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	snapshot := s.engineSnapshot(r.Context(), wf.ID)
+	summary, warnings, unresolved := reviewLevelDiagnostics(nodes)
 	detail := reviewDetail{
 		Workflow:        *wf,
 		Access:          grantedAccess(r.Context()),
@@ -352,6 +375,9 @@ func (s *Server) handleGetReview(w http.ResponseWriter, r *http.Request) {
 			TokensOut: wf.TokensOut,
 		},
 		Publications: summarizePublications(publications),
+		Summary:      summary,
+		Warnings:     warnings,
+		Unresolved:   unresolved,
 	}
 	if snapshot != nil {
 		detail.UsageInterruptions = snapshot.UsageInterruptions
@@ -372,9 +398,87 @@ func reviewNodes(nodes []store.WorkflowNode, snapshot *dag.WorkflowView) []revie
 			Attempt:            node.Attempt,
 			DurationMS:         nodeDuration(node),
 			UsageIncomplete:    node.UsageIncomplete,
+			Reason:             nodeReason(node, snapshot),
+			TokenFree:          nodeTokenFree(node.ID, snapshot),
 		})
 	}
 	return out
+}
+
+func nodeTokenFree(nodeID string, snapshot *dag.WorkflowView) bool {
+	if snapshot == nil {
+		return false
+	}
+	return snapshot.Nodes[nodeID].Spec.TokenFree
+}
+
+// nodeReason prefers the durable failure class projected from the event log.
+// A store without an event log still yields the engine's fixed reasons for
+// failed and skipped nodes, never the stored message.
+func nodeReason(node store.WorkflowNode, snapshot *dag.WorkflowView) string {
+	if snapshot != nil {
+		if view, ok := snapshot.Nodes[node.ID]; ok && view.Reason != "" {
+			return view.Reason
+		}
+	}
+	switch dag.NodeStatus(node.Status) {
+	case dag.NodeSkipped:
+		switch node.Error {
+		case "workflow token budget exhausted":
+			return "budget_exhausted"
+		case "queue wait exceeded node timeout":
+			return "queue_timeout"
+		}
+		return "required_node_failed"
+	case dag.NodeFailed:
+		switch node.Error {
+		case "workflow token budget exhausted":
+			return "budget_exhausted"
+		case "queue wait exceeded node timeout":
+			return "queue_timeout"
+		}
+		return "executor_error"
+	}
+	return ""
+}
+
+// reviewLevelDiagnostics decodes the last completed synthesize output. The
+// output is passed through SafeDiagnosticOutput so diagnostics copied by older
+// versions from failed verify nodes are not echoed again.
+func reviewLevelDiagnostics(nodes []store.WorkflowNode) (string, []string, []review.UnresolvedSignal) {
+	for i := len(nodes) - 1; i >= 0; i-- {
+		node := nodes[i]
+		if node.Kind != review.KindSynthesize || node.Status != string(dag.NodeCompleted) {
+			continue
+		}
+		safe, err := review.SafeDiagnosticOutput(node.Kind, node.Output, diagnosticWorkflow(nodes))
+		if err != nil || len(safe) == 0 || string(safe) == "null" {
+			return "", nil, nil
+		}
+		var result struct {
+			Summary    string                    `json:"summary"`
+			Warnings   []string                  `json:"warnings"`
+			Unresolved []review.UnresolvedSignal `json:"unresolved"`
+		}
+		if err := json.Unmarshal(safe, &result); err != nil {
+			return "", nil, nil
+		}
+		return result.Summary, result.Warnings, result.Unresolved
+	}
+	return "", nil, nil
+}
+
+// safeNodeError keeps the engine's fixed failure messages and collapses
+// anything else, so a legacy row cannot leak an upstream body.
+func safeNodeError(message string) string {
+	switch message {
+	case "", "node execution failed", "workflow token budget exhausted",
+		"required node failed", "queue wait exceeded node timeout",
+		"required dependency did not complete":
+		return message
+	default:
+		return "node failed"
+	}
 }
 
 func nodeInterruptions(snapshot *dag.WorkflowView, nodeID string) int {
@@ -693,13 +797,17 @@ func (s *Server) handleReviewNode(w http.ResponseWriter, r *http.Request) {
 			output = nil
 		}
 		node.Output = output
-		if node.Error != "" {
-			node.Error = "node failed"
-		}
+		node.Error = safeNodeError(node.Error)
+		snapshot := s.engineSnapshot(r.Context(), wfID)
+		purged, retentionHours := s.nodeCallsPurged(node)
 		writeJSON(w, http.StatusOK, nodeDetail{
-			WorkflowNode:       node,
-			DurationMS:         nodeDuration(node),
-			UsageInterruptions: nodeInterruptions(s.engineSnapshot(r.Context(), wfID), node.ID),
+			WorkflowNode:        node,
+			DurationMS:          nodeDuration(node),
+			UsageInterruptions:  nodeInterruptions(snapshot, node.ID),
+			Reason:              nodeReason(node, snapshot),
+			TokenFree:           nodeTokenFree(node.ID, snapshot),
+			CallsPurged:         purged,
+			CallsRetentionHours: retentionHours,
 			Usage: nodeUsage{
 				TokensIn:  node.TokensIn,
 				TokensOut: node.TokensOut,
@@ -746,9 +854,11 @@ func (s *Server) handleNodeCalls(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	found := false
+	var target store.WorkflowNode
 	for _, node := range nodes {
 		if node.ID == nodeID {
 			found = true
+			target = node
 			break
 		}
 	}
@@ -770,7 +880,47 @@ func (s *Server) handleNodeCalls(w http.ResponseWriter, r *http.Request) {
 	if calls == nil {
 		calls = []store.LLMCall{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"calls": calls, "next_cursor": next})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"calls":       calls,
+		"next_cursor": next,
+		"retention":   s.llmCallRetentionView(target, r.URL.Query().Get("cursor") == "", len(calls) > 0),
+	})
+}
+
+// nodeCallsPurged reports whether the node's model-call details have passed
+// the retention cutoff. It requires evidence of spend: an empty list on a code
+// node is not a purge.
+func (s *Server) nodeCallsPurged(node store.WorkflowNode) (bool, int) {
+	if s.platform == nil || s.platform.Storage.LLMCallRetention <= 0 {
+		return false, 0
+	}
+	retention := s.platform.Storage.LLMCallRetention
+	spent := node.TokensIn > 0 || node.TokensOut > 0
+	if !spent || node.FinishedAt == nil {
+		return false, 0
+	}
+	cutoff := s.now().UTC().Add(-retention)
+	return node.FinishedAt.Before(cutoff), int(retention.Hours())
+}
+
+// llmCallRetentionView tells the console why an empty call list may not mean a
+// code node. A node with recorded token usage finished before the retention
+// cutoff but has no stored calls: its audit rows were purged. The result is
+// only asserted with evidence, never guessed from the node kind.
+func (s *Server) llmCallRetentionView(node store.WorkflowNode, firstPage, hasCalls bool) map[string]any {
+	view := map[string]any{"details_purged": false}
+	if s.platform == nil || s.platform.Storage.LLMCallRetention <= 0 {
+		return view
+	}
+	retention := s.platform.Storage.LLMCallRetention
+	cutoff := s.now().UTC().Add(-retention)
+	view["llm_call_retention_hours"] = int(retention.Hours())
+	view["purge_before"] = cutoff.Format(time.RFC3339)
+	purged, _ := s.nodeCallsPurged(node)
+	if firstPage && !hasCalls && purged {
+		view["details_purged"] = true
+	}
+	return view
 }
 
 func (s *Server) handleCancelReview(w http.ResponseWriter, r *http.Request) {

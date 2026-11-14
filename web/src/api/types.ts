@@ -43,7 +43,19 @@ export type ProviderPage = Page<Provider> & { providers: Provider[] }
 export type ProfilesPage = Page<Profile> & { profiles: Profile[] }
 export type ApiTokenPage = Page<ApiToken> & { tokens: ApiToken[] }
 export type ContextDocPage = Page<ContextDoc> & { documents: ContextDoc[] }
-export type CallPage = Page<LlmCall> & { calls: LlmCall[] }
+export type CallPage = Page<LlmCall> & { calls: LlmCall[]; retention?: CallRetention }
+
+export interface CallRetention {
+  llm_call_retention_hours?: number
+  purge_before?: string
+  details_purged?: boolean
+}
+
+export interface UnresolvedSignal {
+  node: string
+  kind: string
+  message: string
+}
 
 export interface AdminUser {
   id: number
@@ -191,6 +203,11 @@ export interface GraphNode {
   depends_on?: string[]
   provider?: string
   attempt?: number
+  duration_ms?: number
+  /** Durable failure class of a failed or skipped node. */
+  reason?: string
+  /** Deterministic node that never calls a model. */
+  token_free?: boolean
 }
 
 export interface GraphEdge {
@@ -282,6 +299,10 @@ export interface ReviewDetail extends ReviewSummary {
   error?: string
   cancel_reason?: string
   fingerprint?: string
+  /** Review-level diagnostics persisted with the synthesize node. */
+  summary?: string
+  warnings?: string[]
+  unresolved?: UnresolvedSignal[]
 }
 
 export interface Finding {
@@ -334,6 +355,13 @@ export interface ReviewNodeDetail {
   usage?: NodeUsage
   started_at?: string
   finished_at?: string
+  /** Durable failure class of a failed or skipped node. */
+  reason?: string
+  /** Deterministic node that never calls a model. */
+  token_free?: boolean
+  /** The node spent tokens and finished before the call retention cutoff. */
+  calls_purged?: boolean
+  calls_retention_hours?: number
 }
 
 export interface LlmCall {
@@ -526,6 +554,15 @@ export interface ProviderTestResult {
   [key: string]: unknown
 }
 
+/** Result of one real submit_result tool-call probe. */
+export interface ModelToolProbeResult {
+  ok: boolean
+  model: string
+  latency_ms: number
+  probe: string
+  tool_call: boolean
+}
+
 export interface ProfileConfig {
   flow?: string
   explore?: Record<string, unknown>
@@ -598,6 +635,39 @@ export interface ProviderQualityRow {
 }
 
 // Older servers omit some fields; render only keys that are actually present.
+export interface ReviewProjectStats {
+  project_id: number
+  runs: number
+  incomplete: number
+  blocking: number
+}
+
+export interface ReviewDailyStats {
+  day: string
+  runs: number
+  incomplete: number
+  blocking: number
+}
+
+/** Review-scope statistics from GET /api/v1/stats/reviews. */
+export interface ReviewStats extends Record<string, unknown> {
+  runs?: number
+  completed?: number
+  incomplete?: number
+  blocking?: number
+  failed?: number
+  cancelled?: number
+  blocking_ratio?: number | null
+  incomplete_ratio?: number | null
+  all_runs?: number
+  all_blocking?: number
+  all_blocking_ratio?: number | null
+  by_project?: ReviewProjectStats[]
+  trend?: ReviewDailyStats[]
+  llm_call_retention_hours?: number
+  model_details_purged?: boolean
+}
+
 export interface Stats extends Record<string, unknown> {
   duration_samples?: number
   trend?: DailyStats[]

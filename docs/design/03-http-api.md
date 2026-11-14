@@ -23,7 +23,7 @@
 
 `auth.bootstrap_token_env` 指定的静态 Bearer 只用于平台管理面：没有本地用户 ID，也没有任何项目 grant，不能读取项目业务数据——带项目范围的读取（项目详情、带 `project_id` 的统计、评审详情/流、项目扩展）返回 404，不带项目过滤的业务列表（如 `GET /api/v1/projects`、`GET /api/v1/reviews`、`GET /api/v1/stats`）返回 200 空结果/空聚合；它仍可调用管理面接口并注册项目，注册后不产生 owner grant。它的轮换由部署方更新环境变量并重启；`bootstrap_admins` 变化同样在重启后生效。
 
-浏览器会话保存在 SQLite `sessions` 表，cookie 保存随机 token 及其 HMAC 签名，数据库只保存 token 的 SHA-256。CSRF token 由会话 token 和 `TRIBUNAL_SESSION_KEY` 派生，不单独存储。固定 `TRIBUNAL_SESSION_KEY`（旧名 `CRC_SESSION_KEY` 仍兼容，新名优先）时，重启后未过期会话仍有效；未设置时进程内随机生成 key 并输出告警，旧 cookie 在重启后失效。
+浏览器会话保存在 SQLite `sessions` 表，cookie 保存随机 token 及其 HMAC 签名，数据库只保存 token 的 SHA-256。CSRF token 由会话 token 和 `TRIBUNAL_SESSION_KEY` 派生，不单独存储；无效 CSRF 返回 403 `csrf_invalid`，控制台收到后会重新读取 `/api/v1/me` 并自动重试一次写请求。固定 `TRIBUNAL_SESSION_KEY`（旧名 `CRC_SESSION_KEY` 仍兼容，新名优先）时，重启后未过期会话仍有效；未设置时进程内随机生成 key 并输出告警，旧 cookie 在重启后失效。
 
 ### 错误格式
 
@@ -34,8 +34,8 @@
 | HTTP | code |
 |---|---|
 | 400 | `bad_request`、`validation_failed`（附 `details` 字段数组） |
-| 401 | `unauthenticated`（无 session cookie，或 Bearer 凭据无效）；`session_expired`（无 Authorization 且带 session cookie，但会话不可用） |
-| 403 | `forbidden` |
+| 401 | `unauthenticated`（无 session cookie，或 Bearer 凭据无效，含未知/已吊销）；`session_expired`（无 Authorization 且带 session cookie，但会话不可用）；`session_evicted`（会话签名有效且未过期，但存储行已被每用户会话上限淘汰）；`token_expired`（API token 已过期） |
+| 403 | `forbidden`；`csrf_invalid`（浏览器会话的 CSRF token 无效） |
 | 404 | `not_found` |
 | 409 | `conflict`（如工作流已在运行、项目已注册） |
 | 422 | `gitlab_rejected`（GitLab 返回错误，附原始状态码） |
@@ -94,15 +94,16 @@ Note Hook 先入队 `review.command`，由 worker 请求 GitLab 校验身份、M
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/auth/status` | 公开；`{oauth_enabled}`，供控制台决定是否显示登录按钮 |
-| GET | `/auth/login` | 跳转 GitLab OAuth（scope：`read_user`）；未启用时 API 客户端收到 503，浏览器跳回 `/?auth_error=oauth_disabled` |
-| GET | `/auth/callback` | 回调；创建或更新 `users`，写会话 |
+| GET | `/auth/login` | 跳转 GitLab OAuth（scope：`read_user`）；接受同源路径 `return_to`，写入签名 OAuth state；未启用时 API 客户端收到 503，浏览器跳回 `/?auth_error=oauth_disabled` |
+| GET | `/auth/callback` | 回调；创建或更新 `users`，写会话；再次校验 `return_to` 后跳回原深链 |
 | POST | `/auth/logout` | 删除会话 |
 | GET | `/api/v1/me` | `{id, username, name, role, global_read, csrf_token}`；CSRF 由会话派生，不保存到 localStorage |
 | GET | `/api/v1/api-tokens` | 当前用户的 token 列表：`?limit=&cursor=`，响应 `{tokens, next_cursor}`，不含明文 |
 | POST | `/api/v1/api-tokens` | `{name, expires_in_days}` → `{id, token}`，明文只返回这一次 |
+| POST | `/api/v1/api-tokens/{id}/renew` | 浏览器会话 + CSRF：`{expires_in_days}`（1–365，默认 90）→ `{id, token}`；同名轮换明文，旧明文立即失效，只能操作本人的 token |
 | DELETE | `/api/v1/api-tokens/{id}` | 吊销 |
 
-浏览器导航请求（`Accept: text/html`）的登录和回调失败会以 303 跳回控制台，查询参数 `auth_error` 使用固定代码（`oauth_disabled`、`oauth_denied`、`oauth_state`、`oauth_forbidden`、`oauth_failed`）；API 客户端仍收到原有 JSON 错误。`api-tokens` 三个接口都要求浏览器会话；静态 bootstrap Bearer 和其他 bearer 客户端不能创建、列出或删除用户 token。新 token 的 `expires_in_days` 默认 90，范围 1–365；历史无过期时间的 token 可继续使用到撤销。普通用户只能管理自己的 token，不能停用账号或撤销他人凭据。`/api/v1/me` 只返回平台标签与 `global_read`，不返回逐项目授权；项目访问角色由项目或评审响应中的 `access` 字段给出。
+浏览器导航请求（`Accept: text/html`）的登录和回调失败会以 303 跳回控制台，查询参数 `auth_error` 使用固定代码（`oauth_disabled`、`oauth_denied`、`oauth_state`、`oauth_forbidden`、`oauth_failed`）；API 客户端仍收到原有 JSON 错误。`/auth/login` 的 `return_to` 必须是同源路径，写入签名 OAuth state；`/auth/callback` 再次做同源校验（拒绝协议相对 URL、反斜杠、带 scheme/host 和 `/auth/*` 目标）后跳回原深链。`api-tokens` 接口都要求浏览器会话；静态 bootstrap Bearer 和其他 bearer 客户端不能创建、列出、续期或删除用户 token。新 token 的 `expires_in_days` 默认 90，范围 1–365；历史无过期时间的 token 可继续使用到撤销。续期按原名称轮换明文并立即失效旧明文，明文只返回这一次。过期 API token 的请求返回 401 `token_expired`；未知或已吊销的 Bearer 凭据仍返回 `unauthenticated`。普通用户只能管理自己的 token，不能停用账号或撤销他人凭据。`/api/v1/me` 只返回平台标签与 `global_read`，不返回逐项目授权；项目访问角色由项目或评审响应中的 `access` 字段给出。
 
 ---
 
@@ -254,9 +255,11 @@ SSE 事件（`event:` 字段）：`node`（`{id, status, attempt}`）、`finding
 
 工作流详情顶层、详情与图中的每个节点以及节点详情另有可选整数 `usage_interruptions`（增量字段，为 0 时省略）：顶层为任一单个节点被进程重启恢复中断的最大次数，节点上为该节点自身次数。它来自引擎对事件日志的投影，不是存储列；列表项不返回。控制台在评审详情的用量面板显示「单节点最多中断恢复 N 次」。迁移与回退限制见[数据模型](02-data-model.md)及[运维说明](../operations.md#用量完整性与审计升级v120)。
 
+评审详情顶层新增可选 `summary`、`warnings`、`unresolved`：取自该评审最后一个完成的 `synthesize` 节点输出，经诊断脱敏；没有完成节点或输出无效时省略。列表、详情和图中的节点新增可选 `reason`（失败或跳过节点的稳定失败类，如 `executor_error`、`timeout`、`budget_exhausted`、`sandbox_denied`、`required_node_failed`；完成节点省略）和 `token_free`（确定性节点，不调用模型）。节点详情另含 `calls_purged`、`calls_retention_hours`，说明该节点是否因保留策略删除了调用明细。节点 `error` 不再把所有非空值统一改写为 `node failed`：引擎固定安全文案原样保留，其它历史值仍折叠为 `node failed`。`skipped` 节点带 `reason`（如 `required_node_failed`），表示依赖未完成或跳过，不表示节点执行出错。
+
 #### 节点调用审计格式
 
-`GET /api/v1/reviews/{wf_id}/nodes/{node_id}/calls` 返回 `{calls, next_cursor}`。项目 `read` 可读不带 payload 的列表；`include_payload=true` 需要项目 `manage`。默认不返回 `request`、`response`。请求 payload 的 `wire` 字段记录适配器实际发出的参数（`max_tokens`、`temperature`、`reasoning.effort`、`thinking.budget_tokens`、`thinking_enabled`、`thinking_type`、`reasoning_content_replayed`）；旧记录没有该字段。`thinking_enabled` 按协议反映实际状态：`openai-chat` 为显式 `thinking.type=enabled`，`openai-responses` 为显式 `reasoning.effort` 非空且不是 `none`，`anthropic` 由 thinking budget 决定。`thinking_type` 是实际发送的 thinking 开关（`openai-chat` 的 `enabled` / `disabled`；`anthropic` 开启 thinking 时为 `enabled`）。`reasoning.effort` 记录实际发送的 effort；`anthropic` 仅在 `output_config_effort: true` 时出现。`reasoning_content_replayed` 表示本请求是否回传了 `reasoning_content`；不记录 reasoning 正文或摘要。所有调用方均不再收到顶层 `request_id`，包括历史行；使用本地 `id` 关联调用。正在执行的 provider 接口仍可使用其响应 ID，但它不写入新的审计行。
+`GET /api/v1/reviews/{wf_id}/nodes/{node_id}/calls` 返回 `{calls, next_cursor, retention}`。`retention` 为 `{llm_call_retention_hours, purge_before, details_purged}`：`llm_call_retention_hours` 是配置的保留小时数，`purge_before` 是保留截止时间（RFC 3339），`details_purged` 仅在第一页、列表为空、节点有 token 用量且结束时间早于截止时间时为 `true`；没有保留策略时只返回 `{"details_purged": false}`。项目 `read` 可读不带 payload 的列表；`include_payload=true` 需要项目 `manage`。默认不返回 `request`、`response`。请求 payload 的 `wire` 字段记录适配器实际发出的参数（`max_tokens`、`temperature`、`reasoning.effort`、`thinking.budget_tokens`、`thinking_enabled`、`thinking_type`、`reasoning_content_replayed`）；旧记录没有该字段。`thinking_enabled` 按协议反映实际状态：`openai-chat` 为显式 `thinking.type=enabled`，`openai-responses` 为显式 `reasoning.effort` 非空且不是 `none`，`anthropic` 由 thinking budget 决定。`thinking_type` 是实际发送的 thinking 开关（`openai-chat` 的 `enabled` / `disabled`；`anthropic` 开启 thinking 时为 `enabled`）。`reasoning.effort` 记录实际发送的 effort；`anthropic` 仅在 `output_config_effort: true` 时出现。`reasoning_content_replayed` 表示本请求是否回传了 `reasoning_content`；不记录 reasoning 正文或摘要。所有调用方均不再收到顶层 `request_id`，包括历史行；使用本地 `id` 关联调用。正在执行的 provider 接口仍可使用其响应 ID，但它不写入新的审计行。
 
 启用 `include_payload=true` 时，存在的 `request` 和 `response` 分别是 JSON 对象。新记录各自带 `"_format":"audit_metadata_v1"`，例如：
 
@@ -382,11 +385,12 @@ MCP、Skill、块绑定列表使用游标分页。
 | PUT | `/api/v1/profiles/default/overrides` | 平台管理员：`{overrides, revision}` 整体替换覆盖文档；`revision` 不匹配返回 409 `stale_revision`；返回完整详情视图 |
 | DELETE | `/api/v1/profiles/default/overrides?revision=` | 平台管理员：清除全部覆盖，恢复为配置；`revision` 必须是当前版本，不匹配或尚无覆盖记录返回 409 `stale_revision`；返回完整详情视图（`revision` 为存储的新版本） |
 | GET | `/api/v1/stats` | `?from=&to=&project_id=`：运行次数（含 onboarding）、耗时、项目/provider/块统计与 UTC 日趋势、finding 处置分布、人工质量指标、按模型调用与反馈原始计数；`to` 为排他上界 |
+| GET | `/api/v1/stats/reviews` | `?from=&to=&project_id=`：仅统计 `kind=review`：`runs`、`completed`、`incomplete`、`blocking`、`failed`、`cancelled`、`blocking_ratio`（评审分母）、`incomplete_ratio`、`all_runs`/`all_blocking`/`all_blocking_ratio`（含 onboarding 的并列分母）、`by_project`、`trend`；另返回 `llm_call_retention_hours` 与 `model_details_purged`（所选 `from` 早于 `storage.llm_call_retention` 截止点时为 `true`）；项目/访问过滤与 `/stats` 相同，`to` 为排他上界 |
 | GET | `/api/v1/system/lock-stats` | 平台管理员：SQLite 连接等待（`wait_count`、`wait_duration_ms` 为累计值；`max_open_connections`、`in_use`、`idle` 为当前连接池值）与工作区锁等待（`wait_count`、`wait_duration_ms` 为累计值，`max_wait_ms` 为进程启动以来单次最长等待）；单连接下连接等待是 SQL 串行化的代理，不是 driver busy 重试计数 |
 | GET | `/api/v1/settings` | 平台配置的只读视图（脱敏） |
 | GET | `/api/v1/config` | 平台管理员：文件生效配置的脱敏 allowlist 视图、逐键 `origins`、`warnings`、`last_error`、`last_error_at`，以及 `base_revision`、`overlay_revision`、`overlay_present`、`applied`、`restart_required` |
 | GET | `/api/v1/config/status` | 平台管理员：仅返回 `applied`、`restart_required`、`base_revision`、`overlay_revision`、`overlay_present`、`warnings`、`last_error`、`last_error_at`、`updated_at`，不返回配置值 |
-| PATCH | `/api/v1/config/overlay` | 平台管理员：按 allowlist 原子修改 `--overlay` 文件；只写 overlay，不改写 `--config`；overlay 路径不得与任一 `--config` 指向同一文件（启动即失败）；`base_revision` / `overlay_revision` 与磁盘不一致返回 409；`dry_run` 只校验不写盘；文件实际变化时返回 `restart_required: true` |
+| PATCH | `/api/v1/config/overlay` | 平台管理员：按 allowlist 原子修改 `--overlay` 文件；只写 overlay，不改写 `--config`；overlay 路径不得与任一 `--config` 指向同一文件（启动即失败）；overlay 父目录不存在时自动创建（权限 0700），创建失败返回 `config_directory_create_failed`；`base_revision` / `overlay_revision` 与磁盘不一致返回 409；`dry_run` 只校验不写盘；文件实际变化时返回 `restart_required: true` |
 
 provider 和 profile 的基线以配置文件为准；改动配置需重启服务才能作用于运行期，当前进程不处理 `SIGHUP`。文件变化会刷新显示快照（后台约 2 秒轮询，连续两次观测一致后应用），`/api/v1/config` 和 `/api/v1/config/status` 反映的是该显示快照；运行期单例仍使用启动时读取的配置，`restart_required: true` 表示显示快照与运行中配置不一致。`default` 档位的节点模型和参数可经上面的 overrides 端点覆盖（见[配置设计 · 档位覆盖](06-config.md#档位覆盖节点模型与参数)），覆盖只作用于之后启动的工作流。`/providers`、`/profiles`、`/settings`、`/config`、`/config/status` 和 `PATCH /config/overlay` 仅平台管理员可访问。
 
@@ -451,6 +455,8 @@ provider 和 profile 的基线以配置文件为准；改动配置需重启服�
 控制台集合响应按资源命名：`{projects}`、`{reviews}`、`{findings}`、`{servers}`、`{skills}`、`{bindings}`、`{providers}`、`{presets}`、`{profiles}`、`{calls}`、`{documents}`、`{tokens}`；可分页的集合另带 `next_cursor`。不提供未发布的旧字段别名。
 
 `stats` 使用字段 `runs`、`blocking`、`blocking_ratio`、`published`、`overturned_ratio`、`avg_duration_ms`、`p95_duration_ms`、`duration_samples`、`trend`、`by_project`、`by_provider`、`by_block`、`by_model`、`decisions`、`quality_by_provider` 和 `feedback`。`runs` 统计窗口内全部 workflow（包括评审和 onboarding），不是仅评审次数；`blocking_ratio` 当前也是 `blocking / runs`，所以 onboarding 会稀释该比例。
+
+`GET /api/v1/stats/reviews` 是仅评审口径的并列视图，筛选、UTC 日桶和项目/访问过滤与 `/stats` 相同。它的 `blocking_ratio` 以评审 `runs` 为分母，`incomplete_ratio` 以评审 `runs` 为分母；`all_runs`、`all_blocking`、`all_blocking_ratio` 给出含 onboarding 的并列分母，便于与 `/stats` 对照。`by_project` 与 `trend` 只含评审计数。`llm_call_retention_hours` 为配置的调用明细保留小时数；`model_details_purged` 在所选 `from` 早于保留截止点时为 `true`，表示同一窗口的模型调用明细可能已被删除，不能据此判断模型从未被使用。
 
 运行统计按 workflow 的 `created_at` 落在 `[from, to)` 内筛选，所有维度都应用同一个项目筛选。每日趋势按该创建时间归入 UTC 日，不按完成时间或 LLM 调用时间分桶。日期控件使用本地日，因而一个本地日可能跨两个 UTC 日桶。
 
@@ -519,11 +525,12 @@ Provider 返回 `name`、`protocol`、`base_url`、`model`、`max_concurrency`�
 | PATCH | `/api/v1/models/{id}/params` | 参数级合并，必须带 `revision`：请求体为 `{"revision": N, "params": {…}}`，只更新 `params` 中出现的键，显式 `null` 清除可空参数（`temperature`、`reasoning`、`thinking`），未出现的键保持不变；`params` 为空、出现未知参数名或给非可空参数（含 `allow_reasoning_effort_none`、`preserve_reasoning_content`、`output_config_effort`、`responses_params`）传 `null` 返回 400；`thinking.type` 位于整体替换的 `thinking` 对象内，对象内出现 `null` 也返回 400；`max_tokens` 不能为负（`anthropic` 要求 > 0），`max_concurrency` 不能为负（0 表示不创建本地并发信号量）；合并后的生效参数按创建规则校验并返回逐字段 `details`；`revision` 过期返回 409 `stale_revision`；配置模型 403 `read_only`，未知或已删除模型 404；成功返回值同创建 |
 | POST | `/api/v1/models/{id}/preset` | 平台管理员：预览或应用内置预设到已保存用户模型，详见下文「模型预设」 |
 | DELETE | `/api/v1/models/{id}?revision=N` | 软删除；配置模型返回 403 `read_only` |
-| POST | `/api/v1/models/{id}/test` | 测试已保存模型；成功返回 `{"ok": true, "model": "...", "latency_ms": N}` |
+| POST | `/api/v1/models/{id}/test` | 测试已保存模型的连通性；成功返回 `{"ok": true, "model": "...", "latency_ms": N}`；探测请求的 `max_tokens` 为 64 |
+| POST | `/api/v1/models/{id}/probe` | 平台管理员：对已保存模型执行一次真实的 `submit_result` 工具调用探测；支持强制工具选择的模型用 `tool_choice=required`，否则 `auto`；成功返回 `{ok, model, latency_ms, probe, tool_call}`；模型只返回文本时 422 `tool_call_unsupported`，请求失败 422 `provider_test_failed`，未知模型 404，不可用模型 409 `model_unavailable` |
 | POST | `/api/v1/models:test` | 草稿测试，详见下文 |
 | GET | `/api/v1/model-defaults` | 平台管理员：`user:` 模型的平台默认参数 `{params, revision, updated_by?, updated_at?}`；尚无保存记录时 `revision=0`、`params` 全为未设置 |
-| PUT | `/api/v1/model-defaults` | 平台管理员：`{params, revision}` 整体替换默认参数；`params` 必须出现，空的 `{}` 表示清除全部默认值；`revision` 必须匹配当前版本（首次保存用 0），不匹配返回 409 `stale_revision`；未知参数、`params.price` 或非法值返回 400 逐字段 `details`；合并后会让现有可用 `user:` 模型按自身协议不可用的组合也返回 400（`details[].field` 为 `models.<id>.<字段>`）；已因当前默认而无效的模型不参与该检查；返回保存后的完整视图 |
-| DELETE | `/api/v1/model-defaults?revision=N[&force=true]` | 平台管理员：先校验 `revision`，不匹配返回 409 `stale_revision`（尚无记录即 `revision=0` 时同样返回 409），再校验跨模型影响；清除前用空候选默认合并现有可用 `user:` 模型并按其协议做与 PUT 相同的跨模型校验，会让模型不可用时返回 409 `defaults_in_use`（`details[].field` 为 `models.<id>.<字段>`，消息含模型显示名）且不写库；已因当前默认而无效的模型被跳过，当前默认本身为空时重置是 no-op、直接成功；显式 `force=true` 跳过该校验并强制重置，`force` 只接受 `true` / `false`（其他值返回 400，字段 `force`），审计记录受影响模型/字段；不清除行，`revision` 单调递增；返回清除后的完整视图 |
+| PUT | `/api/v1/model-defaults` | 平台管理员：`{params, revision}` 整体替换默认参数；`params` 必须出现，空的 `{}` 表示清除全部默认值；`revision` 必须匹配当前版本（首次保存用 0），不匹配返回 409 `stale_revision`；未知参数、`params.price` 或非法值返回 400 逐字段 `details`；合并后会让现有可用 `user:` 模型按自身协议不可用的组合也返回 400（`details[].field` 为 `models.<id>.<字段>`）；已因当前默认而无效的模型不参与该检查；还会用候选默认值合并后的 `user:` 模型参数复校已存的 `review_profile_overrides`，会让已存档位覆盖失效时返回 400 `validation_failed`（`details[].field` 如 `overrides.lanes.review.params.reasoning.effort`）；返回保存后的完整视图 |
+| DELETE | `/api/v1/model-defaults?revision=N[&force=true]` | 平台管理员：先校验 `revision`，不匹配返回 409 `stale_revision`（尚无记录即 `revision=0` 时同样返回 409），再校验跨模型影响；清除前用空候选默认合并现有可用 `user:` 模型并按其协议做与 PUT 相同的跨模型校验，会让模型不可用时返回 409 `defaults_in_use`（`details[].field` 为 `models.<id>.<字段>`，消息含模型显示名）且不写库；重置还会复校已存的 `review_profile_overrides`，会让覆盖失效时未带 `force=true` 返回 409 `overrides_in_use`（字段如 `overrides.lanes.review.params.reasoning.effort`）；已因当前默认而无效的模型被跳过，当前默认本身为空时重置是 no-op、直接成功；显式 `force=true` 跳过这些校验并强制重置，`force` 只接受 `true` / `false`（其他值返回 400，字段 `force`），审计记录受影响模型/字段；不清除行，`revision` 单调递增；返回清除后的完整视图 |
 
 两种修改语义不要混用：`PATCH /api/v1/models/{id}` 是整记录替换，适合提交完整表单；`PATCH /api/v1/models/{id}/params` 是参数级合并，只改提交的键，适合调整部分参数。两者都要求调用方提交 `revision` 做乐观锁。整记录替换在 `protocol` 或 `base_url` 的 scheme/host/port 变化时必须显式提供 `api_key`（已存模型没有密钥时不需要）；参数合并不改变 `protocol`、`base_url`，不涉及已存凭据的复用。端点预读只查询协议、地址与密钥存在性，`params_json` 损坏的记录仍可通过整记录替换修复。
 
@@ -533,7 +540,7 @@ Provider 返回 `name`、`protocol`、`base_url`、`model`、`max_concurrency`�
 
 #### user 模型全局默认参数（[#413](https://github.com/LeXwDeX/Tribunal/issues/413)）
 
-`GET/PUT/DELETE /api/v1/model-defaults` 读写 `llm_model_defaults` 单行，只作用于 `user:` 模型；`config:` 模型的参数仍由 base/overlay 配置负责。PUT 是整体替换：`params` 中未出现的参数在保存后视为未设置，而不是保留旧值；`params` 缺失返回 400（字段 `params`）。参数键与模型参数相同，`reasoning`、`thinking` 仍是整体对象；未知键（含 `price`）返回 400，字段路径形如 `params.<name>`；范围与枚举校验与模型参数一致（非负计数、`temperature` 0–2、`effort` 为 `low`/`medium`/`high`/`max`，`none` 需要同一文档声明 `allow_reasoning_effort_none`）。DELETE 与 PUT 使用同一跨模型校验：先以当前默认验证模型，已因当前默认无效（内存目录中的 validation 不可用）的模型跳过，避免其既有问题阻塞写入；再用候选默认合并每个剩余可用 `user:` 模型，会让模型变为不可用时返回 409 `defaults_in_use`，`details` 逐条给出 `models.<id>.<字段>` 与模型显示名，且不写库、`revision` 不变。DELETE 先校验 `revision` 再跑跨模型校验；`revision` 不匹配返回 409 `stale_revision`，不会返回 `defaults_in_use`。当前默认本身为空时重置是 no-op 并直接成功。管理员确认后可用 `force=true` 强制重置，`force` 只接受 `true` / `false`；审计动作仍为 `reset`，并记录 `force` 与受影响的 `models.<id>.<字段>`。写操作记录 `platform_audit`，动作 `update`/`reset`，只记录字段名（force 重置额外记录受影响的模型字段路径），不记录参数值。
+`GET/PUT/DELETE /api/v1/model-defaults` 读写 `llm_model_defaults` 单行，只作用于 `user:` 模型；`config:` 模型的参数仍由 base/overlay 配置负责。PUT 是整体替换：`params` 中未出现的参数在保存后视为未设置，而不是保留旧值；`params` 缺失返回 400（字段 `params`）。参数键与模型参数相同，`reasoning`、`thinking` 仍是整体对象；未知键（含 `price`）返回 400，字段路径形如 `params.<name>`；范围与枚举校验与模型参数一致（非负计数、`temperature` 0–2、`effort` 为 `low`/`medium`/`high`/`max`，`none` 需要同一文档声明 `allow_reasoning_effort_none`）。DELETE 与 PUT 使用同一跨模型校验：先以当前默认验证模型，已因当前默认无效（内存目录中的 validation 不可用）的模型跳过，避免其既有问题阻塞写入；再用候选默认合并每个剩余可用 `user:` 模型，会让模型变为不可用时返回 409 `defaults_in_use`，`details` 逐条给出 `models.<id>.<字段>` 与模型显示名，且不写库、`revision` 不变。DELETE 先校验 `revision` 再跑跨模型校验；`revision` 不匹配返回 409 `stale_revision`，不会返回 `defaults_in_use`。当前默认本身为空时重置是 no-op 并直接成功。管理员确认后可用 `force=true` 强制重置，`force` 只接受 `true` / `false`；审计动作仍为 `reset`，并记录 `force` 与受影响的 `models.<id>.<字段>`。PUT 和 DELETE 还会用候选默认值合并后的 `user:` 模型参数复校已存的 `review_profile_overrides`：会让覆盖失效时，PUT 返回 400 `validation_failed`，重置未带 `force=true` 返回 409 `overrides_in_use`，`details[].field` 指向受影响的覆盖路径（如 `overrides.lanes.review.params.reasoning.effort`）且不写库；强制重置会在审计中记录这些字段。写操作记录 `platform_audit`，动作 `update`/`reset`，只记录字段名（force 重置额外记录受影响的模型字段路径），不记录参数值。
 
 解析优先级为模型显式值 > 全局默认 > 内置/协议默认。非指针字段的零值（0、false、空串）表示“未设置”，因此全局默认会填补这些字段，显式 0/false 不能压过非零默认；指针字段（`temperature`、`reasoning`、`thinking`）的 `null` 表示未设置，显式 `temperature: 0` 会压过默认。默认值只改变生效参数，不改写已存模型的 `params`：模型视图同时返回 `params`（存储的显式值）、`effective_params`（合并后的生效值）与 `param_sources`（`model` 或 `default`；两层都未设置的参数不出现）。`config:` 模型的 `effective_params` 等于配置值，`param_sources` 为空对象。创建、整记录修改、参数合并和草稿测试先合并默认再跑协议校验，因此依赖默认 `max_tokens` 的 anthropic 用户模型可以保存。默认值是跨协议共享的，保存时还会用候选默认合并每个现有可用 `user:` 模型并按其协议跑 `ValidateProviderConfig`；会让已有模型变为不可用的组合返回 400 `validation_failed`，`details` 逐条给出 `models.<id>.<字段>` 与模型显示名，不写库，避免保存后目录把模型标记为 unavailable。保存后调用运行时刷新，下一次模型读取和之后启动的评审使用新值，无需重启。默认变化会改变被引用 `user:` 模型的档位哈希，重启后未终态评审可能以 `profile_hash_changed` 取消，与修改模型本身相同。
 

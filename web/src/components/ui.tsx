@@ -326,10 +326,21 @@ export function LoadingState({ label = '加载中…' }: { label?: string }) {
 
 export function ErrorState({ error, onRetry, title = '加载失败', hint }: { error: unknown; onRetry?: () => void; title?: string; hint?: string | null }) {
   const forbidden = error instanceof ApiError && error.status === 403
+  // Two 403s carry actionable meaning: a protected configured administrator
+  // and a CSRF token that rotated after an account change. Neither is a
+  // generic permission failure.
+  const protectedUser = error instanceof ApiError && error.code === 'protected_user'
+  const csrfInvalid = error instanceof ApiError && error.code === 'csrf_invalid'
+  const heading = protectedUser ? '该账号受配置保护' : csrfInvalid ? '会话凭据已失效' : forbidden ? '没有访问权限' : title
+  const message = protectedUser
+    ? '该账号由配置来源或当前登录账号保护，不能在此停用或降级。请修改配置来源，或改用其他管理员账号。'
+    : csrfInvalid
+      ? '控制台已自动刷新登录凭据并重试一次，仍被拒绝。请刷新页面后重新操作。'
+      : forbidden ? '当前账号没有执行此操作的权限。' : errorMessage(error)
   return (
     <div className={styles.errorBox} role="alert">
-      <strong>{forbidden ? '没有访问权限' : title}</strong>
-      <span>{forbidden ? '当前账号没有执行此操作的权限。' : errorMessage(error)}</span>
+      <strong>{heading}</strong>
+      <span>{message}</span>
       {hint && !forbidden ? <span>{hint}</span> : null}
       {onRetry && !forbidden ? <Button variant="secondary" className={styles.smallButton} onClick={onRetry}>重试</Button> : null}
     </div>
