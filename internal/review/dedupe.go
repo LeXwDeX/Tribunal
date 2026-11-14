@@ -223,7 +223,7 @@ func ProposalFromReasoner(node, provider, model string, attempt int, out Reasone
 		category := slugCategory(finding.Dimension)
 		title := oneLine(finding.Finding, MaxTitleRunes)
 		if title == "" {
-			title = "Reasoner finding"
+			title = "推理评审发现（未提供标题）"
 		}
 		body := finding.Why
 		if finding.Where != "" {

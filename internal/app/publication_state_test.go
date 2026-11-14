@@ -396,7 +396,7 @@ func TestReviewRunStoresDiffTruncationInDossier(t *testing.T) {
 		t.Fatalf("notes = %d, want one summary", len(f.gitlab.notes))
 	}
 	body := f.gitlab.notes[0].Body
-	for _, want := range []string{"评审未完成", "omitted 1 of 2", "max_files"} {
+	for _, want := range []string{"评审未完成", "共 2 个变更文件，有 1 个未进入评审材料", "超过文件数量上限"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("published coverage summary misses %q:\n%s", want, body)
 		}
@@ -581,10 +581,13 @@ func TestReviewAllDiffsUnavailableCannotPass(t *testing.T) {
 		t.Fatalf("notes = %d, want one summary", len(f.gitlab.notes))
 	}
 	body := f.gitlab.notes[0].Body
-	for _, want := range []string{"评审未完成", "omitted 1 of 1", "too_large=1", "big.bin", "GitLab did not provide"} {
+	for _, want := range []string{"评审未完成", "共 1 个变更文件，有 1 个未进入评审材料", "文件过大", "GitLab 未提供部分文件的 diff"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("all-omitted summary misses %q:\n%s", want, body)
 		}
+	}
+	if strings.Contains(body, "big.bin") {
+		t.Fatalf("omitted path was published instead of the localized reason:\n%s", body)
 	}
 }
 
@@ -646,7 +649,7 @@ func TestReviewInvalidPathsCannotPass(t *testing.T) {
 		t.Fatalf("notes = %d, want one summary", len(f.gitlab.notes))
 	}
 	body := f.gitlab.notes[0].Body
-	for _, want := range []string{"评审未完成", "omitted 1 of 1", "invalid_path=1", "invalid-path/"} {
+	for _, want := range []string{"评审未完成", "有 1 个未进入评审材料", "路径无效"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("invalid-path summary misses %q:\n%s", want, body)
 		}
@@ -694,7 +697,7 @@ func TestReviewMixedInvalidPathIsCoverageGap(t *testing.T) {
 		t.Fatalf("notes = %d, want one summary", len(f.gitlab.notes))
 	}
 	body := f.gitlab.notes[0].Body
-	for _, want := range []string{"评审未完成", "omitted 1 of 2", "invalid_path=1"} {
+	for _, want := range []string{"评审未完成", "共 2 个变更文件，有 1 个未进入评审材料", "路径无效"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("mixed invalid summary misses %q:\n%s", want, body)
 		}

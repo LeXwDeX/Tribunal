@@ -24,7 +24,7 @@ func TestEmptyDiffPublishesIncomplete(t *testing.T) {
 			summary = note.Body
 		}
 	}
-	if !strings.Contains(summary, "评审未完成") || !strings.Contains(summary, "没有可评审的变更") || !strings.Contains(summary, "empty diff") || strings.Contains(summary, "PASS") {
+	if !strings.Contains(summary, "评审未完成") || !strings.Contains(summary, "没有可评审的变更") || !strings.Contains(summary, "MR 的 diff 为空") || strings.Contains(summary, "PASS") {
 		t.Fatalf("summary = %q, want empty-diff INCOMPLETE", summary)
 	}
 	status, err := f.db.GetReviewStatus(context.Background(), 42, 7)

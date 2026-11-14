@@ -38,14 +38,14 @@ const (
 )
 
 // briefBody renders a bounded finding body. The full body stays in storage
-// and in the console. Code blocks inside the bound keep their existing
-// rendering.
-func briefBody(value string, max int) string {
+// and in the console; the second result reports whether the published text was
+// clipped. Code blocks inside the bound keep their existing rendering.
+func briefBody(value string, max int) (string, bool) {
 	value = strings.TrimSpace(strings.ReplaceAll(value, "\r\n", "\n"))
 	if value == "" {
-		return ""
+		return "", false
 	}
-	return renderMarkdown(value, max)
+	return renderMarkdown(value, max), utf8.RuneCountInString(value) > max
 }
 
 // SummaryInput is structured data for the summary note.
@@ -53,8 +53,8 @@ type SummaryInput struct {
 	Verdict string
 	Summary string
 	// RuleSummary marks Summary as the deterministic rule-mode text, whose
-	// published count is aligned with the listed entries. Model-written
-	// synthesis text is never rewritten.
+	// published count is rendered as a verdict/inline/summary-only breakdown.
+	// Model-written synthesis text is never rewritten.
 	RuleSummary          bool
 	Groups               []Group
 	Fingerprint          string
@@ -141,8 +141,10 @@ func RenderSummary(in SummaryInput) (string, error) {
 		b.WriteString("\n\n")
 	}
 	if summary != "" {
-		if in.RuleSummary {
-			summary = alignRuleSummaryCounts(summary, len(positioned)+len(unpositioned)+len(marked))
+		if localized, ok := localizeIncompleteSummary(summary, len(positioned), len(unpositioned)+len(marked)); ok && in.Verdict == VerdictIncomplete {
+			summary = localized
+		} else if in.RuleSummary {
+			summary = alignRuleSummaryCounts(summary, len(positioned), len(unpositioned)+len(marked))
 		}
 		b.WriteString(renderMarkdown(summary, MaxSummaryRunes))
 		b.WriteString("\n\n")
@@ -185,16 +187,28 @@ func RenderSummary(in SummaryInput) (string, error) {
 		}
 	}
 	if len(in.Warnings) > 0 {
-		fmt.Fprintf(&b, "\n### 评审提示（%d）\n\n", len(in.Warnings))
+		rendered := make([]string, 0, len(in.Warnings))
+		seen := make(map[string]bool, len(in.Warnings))
 		for _, warning := range in.Warnings {
-			b.WriteString("- ")
-			b.WriteString(escapeOneLine(warning, 500))
-			b.WriteByte('\n')
+			localized := escapeOneLine(localizeWarning(warning), 500)
+			if localized == "" || seen[localized] {
+				continue
+			}
+			seen[localized] = true
+			rendered = append(rendered, localized)
+		}
+		if len(rendered) > 0 {
+			fmt.Fprintf(&b, "\n### 评审提示（%d）\n\n", len(rendered))
+			for _, warning := range rendered {
+				b.WriteString("- ")
+				b.WriteString(warning)
+				b.WriteByte('\n')
+			}
 		}
 	}
 	if in.Verdict == VerdictIncomplete && strings.TrimSpace(in.IncompleteReason) != "" {
 		b.WriteString("\n> 评审未完成：")
-		b.WriteString(escapeOneLine(in.IncompleteReason, 500))
+		b.WriteString(escapeOneLine(localizeIncompleteReason(in.IncompleteReason), 500))
 		b.WriteByte('\n')
 	}
 
@@ -249,23 +263,46 @@ func inlineRelatedLines(related []RelatedGroup) string {
 	return b.String()
 }
 
-var ruleSummaryCountsRE = regexp.MustCompile(`^(规则模式汇总：共 [0-9]+ 条问题，已发布 )([0-9]+)( 条。)`)
+var ruleSummaryCountsRE = regexp.MustCompile(`^(规则模式汇总：共 )([0-9]+)( 条问题，已发布 )([0-9]+)( 条。)`)
 
-// alignRuleSummaryCounts makes the published count of the rule-mode summary
-// line the number of entries the summary lists, as the header counts do, and
-// states how many published findings were folded into 「相关描述」. The
-// synthesis text counts every published group; folding happens afterwards,
-// in the publish view, and never changes the stored text or findings.
-func alignRuleSummaryCounts(summary string, listed int) string {
+// alignRuleSummaryCounts replaces the rule-mode published count with an
+// explicit breakdown: the verdict published count, how many entries are inline,
+// how many are summary-only, and how many published findings were folded into
+// 「相关描述」. The synthesis text counts every published group; folding happens
+// afterwards, in the publish view, and never changes the stored text or
+// findings. Model-written synthesis text is never rewritten.
+func alignRuleSummaryCounts(summary string, inline, summaryOnly int) string {
 	match := ruleSummaryCountsRE.FindStringSubmatchIndex(summary)
 	if match == nil {
 		return summary
 	}
-	published, err := strconv.Atoi(summary[match[4]:match[5]])
-	if err != nil || published <= listed {
+	published, err := strconv.Atoi(summary[match[8]:match[9]])
+	if err != nil {
 		return summary
 	}
-	return summary[:match[4]] + strconv.Itoa(listed) + " 条（另有 " + strconv.Itoa(published-listed) + " 条并入相关描述）。" + summary[match[1]:]
+	listed := inline + summaryOnly
+	if published < listed {
+		published = listed
+	}
+	folded := published - listed
+	var b strings.Builder
+	b.WriteString("规则模式汇总：共 ")
+	b.WriteString(summary[match[4]:match[5]])
+	b.WriteString(" 条问题，裁决发布 ")
+	b.WriteString(strconv.Itoa(published))
+	b.WriteString(" 条（行内 ")
+	b.WriteString(strconv.Itoa(inline))
+	b.WriteString(" 条，仅汇总 ")
+	b.WriteString(strconv.Itoa(summaryOnly))
+	b.WriteString(" 条")
+	if folded > 0 {
+		b.WriteString("，另有 ")
+		b.WriteString(strconv.Itoa(folded))
+		b.WriteString(" 条并入相关描述")
+	}
+	b.WriteString("）。")
+	b.WriteString(summary[match[11]:])
+	return b.String()
 }
 
 // severityCountLine renders non-zero counts on one line, for example
@@ -317,7 +354,7 @@ func renderSummaryItem(group Group, marked bool) string {
 		b.WriteString(escapeOneLine(reason, 600))
 		b.WriteString("\n\n")
 	}
-	if body := briefBody(group.Body, briefBodyRunes); body != "" {
+	if body, _ := briefBody(group.Body, briefBodyRunes); body != "" {
 		b.WriteString(body)
 		b.WriteString("\n\n")
 	}
@@ -379,10 +416,15 @@ func RenderFinding(group Group, opts FindingRenderOptions) (string, error) {
 	b.WriteString(escapeOneLine(group.Title, MaxTitleRunes))
 	b.WriteString("**\n")
 	// The discussion is anchored on the line, so the location is not repeated.
-	if body := briefBody(group.Body, briefBodyRunes); body != "" {
+	// The full body stays in storage and the console; a clipped discussion says
+	// where to read it, since the inline note has no detail footer.
+	if body, truncated := briefBody(group.Body, briefBodyRunes); body != "" {
 		b.WriteString("\n")
 		b.WriteString(body)
 		b.WriteByte('\n')
+		if truncated {
+			b.WriteString("\n> 完整正文见控制台。\n")
+		}
 	}
 	if group.Decision.Action == ActionMark && strings.TrimSpace(group.Decision.Reason) != "" {
 		b.WriteString("\n**存疑原因**：")
@@ -438,6 +480,9 @@ func relatedDescriptions(group Group) string {
 		b.WriteString("- [" + escapeOneLine(label, 64) + "] " + escapeOneLine(related.Title, MaxTitleRunes))
 		if excerpt := escapeOneLine(related.Excerpt, relatedExcerptRunes); excerpt != "" {
 			b.WriteString("：" + excerpt)
+			if related.ExcerptTruncated && related.ID != "" {
+				b.WriteString("（编号 " + escapeOneLine(related.ID, 64) + "，完整描述见控制台）")
+			}
 		}
 		b.WriteByte('\n')
 	}
@@ -473,7 +518,80 @@ func modelAttribution(group Group, labels map[string]string) string {
 
 func oneLine(value string, max int) string {
 	value = strings.Join(strings.Fields(value), " ")
-	return truncateRunes(value, max)
+	return clipRunes(value, max)
+}
+
+// clipRunes bounds one logical line. A clipped value ends at the last sentence
+// boundary (or, failing that, the last word boundary) before the limit and
+// carries an ellipsis, so a published title or excerpt never stops mid-clause.
+func clipRunes(value string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= max {
+		return value
+	}
+	limit := max - 1
+	cut := limit
+	for i := limit - 1; i >= 0; i-- {
+		if sentenceEnd(runes, i) {
+			cut = i + 1
+			break
+		}
+	}
+	if cut == limit {
+		for i := limit - 1; i >= 0; i-- {
+			if unicode.IsSpace(runes[i]) {
+				cut = i
+				break
+			}
+		}
+	}
+	if cut <= 0 {
+		cut = limit
+	}
+	return strings.TrimRight(string(runes[:cut]), " ") + "…"
+}
+
+// sentenceEnd reports a sentence boundary. An ASCII period only counts when it
+// ends a sentence, so an abbreviation or a dotted file name is not a boundary.
+func sentenceEnd(runes []rune, i int) bool {
+	switch runes[i] {
+	case '。', '！', '？', '；', '!', '?', ';':
+		return true
+	case '.':
+		return i+1 >= len(runes) || unicode.IsSpace(runes[i+1]) || runes[i+1] == '"' || runes[i+1] == '”'
+	}
+	return false
+}
+
+// clipMarkdown bounds a multi-line Markdown value at a line or sentence
+// boundary. The caller appends the explicit truncation notice.
+func clipMarkdown(value string, max int) string {
+	runes := []rune(value)
+	if len(runes) <= max || max <= 0 {
+		return value
+	}
+	cut := max
+	for i := max - 1; i >= 0 && i >= max/2; i-- {
+		if runes[i] == '\n' {
+			cut = i
+			break
+		}
+	}
+	if cut == max {
+		for i := max - 1; i >= 0; i-- {
+			if sentenceEnd(runes, i) {
+				cut = i + 1
+				break
+			}
+		}
+	}
+	if cut <= 0 {
+		cut = max
+	}
+	return strings.TrimRight(string(runes[:cut]), " \n")
 }
 
 func escapeOneLine(value string, max int) string {
@@ -485,7 +603,7 @@ func escapeOneLine(value string, max int) string {
 // GitLab resolves after decoding Markdown entities.
 func escapeText(value string, max int) string {
 	value = strings.ReplaceAll(value, "\r\n", "\n")
-	value = truncateRunes(value, max)
+	value = clipRunes(value, max)
 	value = strings.NewReplacer(
 		`\`, `\\`,
 		`@`, `\@`,
@@ -553,7 +671,7 @@ func renderMarkdown(value string, max int) string {
 	}
 	truncated := false
 	if utf8.RuneCountInString(value) > max {
-		value = truncateRunes(value, max)
+		value = clipMarkdown(value, max)
 		truncated = true
 	}
 

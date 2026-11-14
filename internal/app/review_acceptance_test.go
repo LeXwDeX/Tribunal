@@ -538,7 +538,7 @@ func TestReviewOptionalVerifyFailureCompletesAsUncertain(t *testing.T) {
 		t.Fatalf("notes = %d, want 1", got)
 	}
 	body := f.gitlab.notes[0].Body
-	for _, want := range []string{"🔴 BLOCKING", "存疑条目（1）", "verify failed for group"} {
+	for _, want := range []string{"🔴 BLOCKING", "存疑条目（1）", "部分问题的二次验证未完成"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("summary is missing %q:\n%s", want, body)
 		}

@@ -659,10 +659,13 @@ func TestRenderIncompleteSummaryStatesGaps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"⚪ 评审未完成", "pipeline log unavailable"} {
+	for _, want := range []string{"⚪ 评审未完成", "未完成原因", "具体原因与日志见控制台"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("summary is missing %q:\n%s", want, body)
 		}
+	}
+	if strings.Contains(body, "pipeline log unavailable") {
+		t.Fatalf("unmatched machine diagnostic was published verbatim:\n%s", body)
 	}
 	if strings.Contains(body, "🟢 PASS") || strings.Contains(body, "🔴 BLOCKING") {
 		t.Fatalf("incomplete summary rendered a review verdict:\n%s", body)
