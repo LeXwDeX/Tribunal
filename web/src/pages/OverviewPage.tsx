@@ -66,7 +66,7 @@ interface ReviewIssue {
   kind: ReviewIssueKind
 }
 
-function buildAlerts(projects: Project[], providers: ModelHealth[], reviewIssues: ReviewIssue[]): Alert[] {
+function buildAlerts(projects: Project[], providers: ModelHealth[], reviewIssues: ReviewIssue[], reviews: ReviewSummary[]): Alert[] {
   const alerts: Alert[] = []
   const now = Date.now()
   for (const project of projects) {
@@ -151,6 +151,34 @@ function buildAlerts(projects: Project[], providers: ModelHealth[], reviewIssues
         action: '查看评审',
       })
     }
+  }
+  // Completed runs can settle without a workflow error and still be
+  // incomplete: an INCOMPLETE verdict or a failed/skipped node means the
+  // reviewed scope was not fully covered. Aggregate them so the panel is not
+  // silent while most reviews are INCOMPLETE.
+  const completed = reviews.filter((item) => item.status === 'completed')
+  const incomplete = completed.filter((item) => item.verdict === 'INCOMPLETE')
+  const nodeIssues = completed.filter((item) => item.verdict !== 'INCOMPLETE'
+    && (item.nodes || []).some((node) => node.status === 'failed' || node.status === 'skipped'))
+  if (incomplete.length) {
+    alerts.push({
+      id: 'reviews-incomplete',
+      tone: 'warn',
+      label: '评审未完成',
+      text: `${incomplete.length} 个已结束评审为 INCOMPLETE（未完成）：存在未解决的证据缺口或未执行节点，零 Finding 不代表没有问题。`,
+      href: '/reviews?verdict=INCOMPLETE',
+      action: '查看 INCOMPLETE 评审',
+    })
+  }
+  if (nodeIssues.length) {
+    alerts.push({
+      id: 'reviews-node-issues',
+      tone: 'warn',
+      label: '评审节点异常',
+      text: `${nodeIssues.length} 个已结束评审包含失败或跳过的节点，结果可能不完整。`,
+      href: '/reviews?status=completed',
+      action: '查看评审',
+    })
   }
   return alerts
 }
@@ -291,8 +319,8 @@ export function OverviewPage() {
     return Array.from(issues.values())
   }, [failedRuns.items, failedPublications.items, pendingPublications.items])
   const alerts = useMemo(
-    () => buildAlerts(projectsPage.items, providersPage.data?.models || [], reviewIssues),
-    [projectsPage.items, providersPage.data, reviewIssues],
+    () => buildAlerts(projectsPage.items, providersPage.data?.models || [], reviewIssues, recent.items),
+    [projectsPage.items, providersPage.data, reviewIssues, recent.items],
   )
   const issuesError = projectsPage.error || failedRuns.error || failedPublications.error
     || pendingPublications.error || (providersEnabled ? providersPage.error : null)
@@ -373,7 +401,7 @@ export function OverviewPage() {
           onRetry={() => { void stats.refetch() }}
         />
 
-          <Panel flush title="告警" aside={<><span>检查范围：token 过期、工作区异常、停用项目{providersEnabled ? '、provider 错误' : ''}、评审执行失败和发布失败</span>{alerts.length ? <span>{alerts.length}{hasMoreIssues ? '+' : ''} 项</span> : null}</>}>
+          <Panel flush title="告警" aside={<><span>检查范围：token 过期、工作区异常、停用项目{providersEnabled ? '、provider 错误' : ''}、评审执行失败和发布失败、已完成但未完成或含失败节点的评审</span>{alerts.length ? <span>{alerts.length}{hasMoreIssues ? '+' : ''} 项</span> : null}</>}>
             {hasIssuesError ? (
               <div className={overview.state}>
                 <ErrorState

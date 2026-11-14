@@ -78,7 +78,7 @@ describe('overview v2 layout', () => {
     const heading = screen.getByRole('heading', { name: '告警' })
     const header = heading.parentElement
     if (!header) throw new Error('alert header missing')
-    expect(within(header).getByText('检查范围：token 过期、工作区异常、停用项目、provider 错误、评审执行失败和发布失败')).toBeInTheDocument()
+    expect(within(header).getByText('检查范围：token 过期、工作区异常、停用项目、provider 错误、评审执行失败和发布失败、已完成但未完成或含失败节点的评审')).toBeInTheDocument()
     expect(await screen.findByText('无异常')).toBeInTheDocument()
   })
 
@@ -88,7 +88,7 @@ describe('overview v2 layout', () => {
     expect(await screen.findByText(/failed run.*执行失败/)).toBeInTheDocument()
     const header = screen.getByRole('heading', { name: '告警' }).parentElement
     if (!header) throw new Error('alert header missing')
-    expect(within(header).getByText('检查范围：token 过期、工作区异常、停用项目、评审执行失败和发布失败')).toBeInTheDocument()
+    expect(within(header).getByText('检查范围：token 过期、工作区异常、停用项目、评审执行失败和发布失败、已完成但未完成或含失败节点的评审')).toBeInTheDocument()
     expect(screen.queryByText('无异常')).not.toBeInTheDocument()
   })
 

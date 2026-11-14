@@ -504,6 +504,8 @@
 .resultOk { color: var(--ok-fg); }
 .resultError { color: var(--danger-fg); }
 
+.resultHint { color: var(--muted-strong); }
+
 .scopeBar {
   display: flex;
   flex-wrap: wrap;
