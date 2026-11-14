@@ -43,7 +43,47 @@ func unsafeUsageError() error {
 type usageError struct {
 	usage      dag.Usage
 	incomplete bool
+	turns      int
 	err        error
+}
+
+// tokenBudgetError adds the observed and configured workflow token counts to
+// the fixed budget failure class. Both values are code-owned numbers.
+type tokenBudgetError struct {
+	used int64
+	max  int64
+}
+
+func (e *tokenBudgetError) Error() string { return errTokenBudgetExhausted.Error() }
+
+func (e *tokenBudgetError) Unwrap() error { return errTokenBudgetExhausted }
+
+// PartialRunError reports an agent run that stopped before submit_result while
+// keeping the state collected so far: the fixed class, the turn count, known
+// usage and the partial result itself. A node layer that can represent an
+// evidence gap can read it with errors.As and downgrade the lane instead of
+// discarding everything the run learned.
+type PartialRunError struct {
+	Class      string
+	Turns      int
+	Usage      dag.Usage
+	Incomplete bool
+	Result     *agent.RunResult
+	err        error
+}
+
+func (e *PartialRunError) Error() string {
+	if e == nil || e.err == nil {
+		return "review: partial agent run"
+	}
+	return e.err.Error()
+}
+
+func (e *PartialRunError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
 }
 
 type unsafeAgentError struct{ err error }
@@ -66,6 +106,10 @@ func (e *usageError) Unwrap() error {
 }
 
 func knownUsage(err error) dag.Usage {
+	var partial *PartialRunError
+	if errors.As(err, &partial) && partial != nil {
+		return partial.Usage
+	}
 	var usageErr *usageError
 	if errors.As(err, &usageErr) && usageErr != nil {
 		return usageErr.usage
@@ -74,6 +118,10 @@ func knownUsage(err error) dag.Usage {
 }
 
 func knownUsageIncomplete(err error) bool {
+	var partial *PartialRunError
+	if errors.As(err, &partial) && partial != nil {
+		return partial.Incomplete
+	}
 	var usageErr *usageError
 	return errors.As(err, &usageErr) && usageErr != nil && usageErr.incomplete
 }
@@ -147,6 +195,9 @@ type ExecutorDeps struct {
 	// RepositorySkillsVerified is set only after the app layer revalidated the
 	// stored repository grants and the filtered snapshot for this execution.
 	RepositorySkillsVerified bool
+	// Now is the clock the agent loop uses to measure turns against the
+	// deadline. Nil uses time.Now; tests inject a fake clock.
+	Now func() time.Time
 	// Logger receives operational warnings; nil disables them.
 	Logger *slog.Logger
 }
@@ -371,6 +422,11 @@ func (e *Executor) Execute(ctx context.Context, in dag.NodeInput) (dag.NodeOutpu
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
+	// The engine enforces the workflow deadline with a timer, not a context,
+	// so the deadline must be attached here or the agent loop's nearDeadline
+	// check can never fire (#454).
+	ctx, workflowCancel := e.withWorkflowDeadline(ctx, in.WorkflowID)
+	defer workflowCancel()
 
 	var (
 		out dag.NodeOutput
@@ -419,14 +475,54 @@ func (e *Executor) Execute(ctx context.Context, in dag.NodeInput) (dag.NodeOutpu
 		usage := knownUsage(err)
 		incomplete := knownUsageIncomplete(err)
 		if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
+			e.logFailure(ctx, in, ctxErr, usage, incomplete)
 			return dag.NodeOutput{Usage: usage, UsageIncomplete: incomplete}, classifyError(fmt.Errorf("review: node %s: %w", in.Node.ID, ctxErr))
 		}
+		e.logFailure(ctx, in, err, usage, incomplete)
 		return dag.NodeOutput{Usage: usage, UsageIncomplete: incomplete}, classifyError(fmt.Errorf("review: node %s (%s): %w", in.Node.ID, in.Node.Kind, err))
 	}
 	if len(out.Data) == 0 || !json.Valid(out.Data) {
 		return dag.NodeOutput{Usage: out.Usage, UsageIncomplete: out.UsageIncomplete}, fmt.Errorf("review: node %s produced invalid JSON", in.Node.ID)
 	}
 	return out, nil
+}
+
+// withWorkflowDeadline scopes the node context to the workflow deadline when it
+// is earlier than the node-level deadline. The review control path runs the
+// workflow with a detached context and the engine enforces its deadline with a
+// timer, so this is the only place the agent loop can observe it (#454).
+func (e *Executor) withWorkflowDeadline(ctx context.Context, workflowID string) (context.Context, context.CancelFunc) {
+	if e == nil || e.deps.Snapshot == nil || workflowID == "" {
+		return ctx, func() {}
+	}
+	wf, err := e.deps.Snapshot(ctx, workflowID)
+	if err != nil || wf.Deadline.IsZero() {
+		return ctx, func() {}
+	}
+	if current, ok := ctx.Deadline(); ok && !wf.Deadline.Before(current) {
+		return ctx, func() {}
+	}
+	return context.WithDeadline(ctx, wf.Deadline)
+}
+
+// logFailure records one WARN per failed node. It logs identifiers, the fixed
+// failure class, turns and usage; the error text is never logged because it may
+// carry provider payload or secrets. A node cancelled with its workflow is not
+// recorded as failed by the engine, so it stays out of this log.
+func (e *Executor) logFailure(ctx context.Context, in dag.NodeInput, err error, usage dag.Usage, incomplete bool) {
+	if e == nil || e.deps.Logger == nil || err == nil || errors.Is(ctx.Err(), context.Canceled) {
+		return
+	}
+	e.deps.Logger.Warn("review node failed",
+		"workflow_id", in.WorkflowID,
+		"node_id", in.Node.ID,
+		"node_kind", in.Node.Kind,
+		"error_kind", failureClass(err),
+		"turns", failureTurns(err),
+		"input_tokens", usage.InputTokens,
+		"output_tokens", usage.OutputTokens,
+		"usage_incomplete", incomplete,
+	)
 }
 
 // Expand dispatches to the plan, gather, or synthesize expander.
@@ -880,6 +976,7 @@ func (e *Executor) callAgent(ctx context.Context, in dag.NodeInput, opts agentOp
 		MaxTurns:   maxTurns,
 		BeforeTurn: opts.BeforeTurn,
 		Outbound:   e.deps.Outbound,
+		Now:        e.deps.Now,
 	}
 	if opts.BudgetSubmitPrompt && opts.BeforeTurn != nil {
 		// Let the loop ask for submit_result before the workflow token budget
@@ -912,13 +1009,28 @@ func (e *Executor) callAgent(ctx context.Context, in dag.NodeInput, opts agentOp
 	if err != nil {
 		usage := dag.Usage{}
 		incomplete := false
+		turns := 0
 		if result != nil {
 			usage = e.dagUsage(result.Usage)
 			incomplete = result.Usage.Incomplete
+			turns = result.Turns
+		}
+		// A run that stopped before submit_result keeps its collected state in
+		// a typed error, so a node layer that can express evidence gaps can
+		// downgrade the lane instead of discarding everything (#454).
+		if result != nil && result.Partial {
+			return result, &PartialRunError{
+				Class:      partialRunClass(err),
+				Turns:      turns,
+				Usage:      usage,
+				Incomplete: incomplete,
+				Result:     result,
+				err:        err,
+			}
 		}
 		if incomplete || usage.InputTokens > 0 || usage.OutputTokens > 0 ||
 			usage.CacheReadTokens > 0 || usage.CacheWriteTokens > 0 || usage.ReasoningTokens > 0 {
-			return result, &usageError{usage: usage, incomplete: incomplete, err: err}
+			return result, &usageError{usage: usage, incomplete: incomplete, turns: turns, err: err}
 		}
 	}
 	return result, err
@@ -1089,8 +1201,9 @@ func (e *Executor) budgetHook(workflowID string) func(context.Context, llm.Usage
 		if err != nil {
 			return err
 		}
-		if max > 0 && sumTokens(base, usage.InputTokens, usage.OutputTokens) >= max {
-			return errTokenBudgetExhausted
+		used := sumTokens(base, usage.InputTokens, usage.OutputTokens)
+		if max > 0 && used >= max {
+			return &tokenBudgetError{used: used, max: max}
 		}
 		return nil
 	}

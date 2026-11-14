@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -574,7 +575,11 @@ func (e *Engine) runNode(runCtx context.Context, handle *runHandle, wfID, nodeID
 			reason = "timeout"
 		}
 		reason = errorReason(execErr, reason)
-		if err := e.commitNodeFailureUsage(runCtx, wfID, nodeID, view.Attempt, reason, errorStatus(execErr), "node execution failed", out.Usage, out.UsageIncomplete); err != nil {
+		message := "node execution failed"
+		if detail := errorDetail(execErr); detail != "" {
+			message = detail
+		}
+		if err := e.commitNodeFailureUsage(runCtx, wfID, nodeID, view.Attempt, reason, errorStatus(execErr), message, out.Usage, out.UsageIncomplete); err != nil {
 			handle.setErr(err)
 		}
 		return
@@ -606,8 +611,35 @@ type panicError struct{}
 func (panicError) Error() string      { return "executor panic" }
 func (panicError) ErrorClass() string { return "panic" }
 
-// errorReason prefers the error's optional fixed class over the engine's
-// generic reason. An invalid or empty class leaves the fallback unchanged.
+// ErrorDetailProvider optionally supplies a fixed, code-owned failure detail
+// for the durable node.failed event. The detail is normalized and bounded here;
+// it must never contain upstream text, paths or secrets.
+type ErrorDetailProvider interface {
+	ErrorDetail() string
+}
+
+// maxFailureDetailRunes bounds one persisted failure detail.
+const maxFailureDetailRunes = 160
+
+// sanitizeFailureDetail accepts only the short, ASCII summaries code-owned
+// failure paths produce. Any other character rejects the whole detail, so raw
+// upstream text cannot pass through as a transliterated fragment.
+func sanitizeFailureDetail(detail string) string {
+	detail = strings.TrimSpace(detail)
+	if detail == "" || len([]rune(detail)) > maxFailureDetailRunes {
+		return ""
+	}
+	for _, r := range detail {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == ' ', r == '_', r == '-', r == '.', r == ',', r == '(', r == ')', r == '=', r == '/', r == ':':
+		default:
+			return ""
+		}
+	}
+	return detail
+}
+
 // errorStatus returns a sanitized upstream status for the durable failure
 // event. Values outside the HTTP range are ignored.
 func errorStatus(err error) int {
@@ -622,6 +654,8 @@ func errorStatus(err error) int {
 	return status
 }
 
+// errorReason prefers the error's optional fixed class over the engine's
+// generic reason. An invalid or empty class leaves the fallback unchanged.
 func errorReason(err error, fallback string) string {
 	var classified ErrorClassifier
 	if errors.As(err, &classified) {
@@ -630,6 +664,17 @@ func errorReason(err error, fallback string) string {
 		}
 	}
 	return fallback
+}
+
+// errorDetail returns a sanitized, code-owned failure summary when the executor
+// provides one. Raw error text is never used, so payload and secrets cannot
+// reach the event log.
+func errorDetail(err error) string {
+	var detailed ErrorDetailProvider
+	if !errors.As(err, &detailed) {
+		return ""
+	}
+	return sanitizeFailureDetail(detailed.ErrorDetail())
 }
 
 // validErrorClass matches the sanitized class format used by errclass:

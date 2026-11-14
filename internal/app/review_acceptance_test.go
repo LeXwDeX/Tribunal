@@ -294,8 +294,8 @@ func TestReviewNoSubmitFailsRequiredNodeAndPublishesIncomplete(t *testing.T) {
 	if reviewNode.Status != dag.NodeFailed {
 		t.Fatalf("cr.p1 status = %s, want failed", reviewNode.Status)
 	}
-	if reviewNode.Error != "node execution failed" || reviewNode.Reason != "executor_error" {
-		t.Fatalf("cr.p1 error = %q reason = %q, want safe executor failure", reviewNode.Error, reviewNode.Reason)
+	if reviewNode.Error != "submit_result missing" || reviewNode.Reason != "no_submit" {
+		t.Fatalf("cr.p1 error = %q reason = %q, want the fixed no_submit failure", reviewNode.Error, reviewNode.Reason)
 	}
 	if got := f.gitlab.noteCount(); got != 1 {
 		t.Fatalf("notes = %d, want one INCOMPLETE summary", got)
