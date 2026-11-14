@@ -102,6 +102,9 @@ func (s *ReviewService) collectInputs(ctx context.Context, project *store.Projec
 	if err != nil {
 		return nil, err
 	}
+	if err := s.applyDiffScope(ctx, project.ID, token, version, mr.ChangesCount, diffs); err != nil {
+		return nil, err
+	}
 	inputs := &reviewInputs{MR: mr, Version: version, Diffs: diffs}
 	inputs.Pipeline = s.collectPipeline(ctx, token, project.ID, mrIID, head)
 	inputs.Issues = s.collectIssues(ctx, token, project.ID, mrIID)

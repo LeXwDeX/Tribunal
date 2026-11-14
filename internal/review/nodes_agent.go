@@ -406,6 +406,7 @@ func (e *Executor) executeSynthesize(ctx context.Context, in dag.NodeInput) (dag
 		applyUnresolved(&result, unresolved)
 		applyBudgetGap(&result, exhausted)
 		applyToolGaps(&result, toolGaps)
+		result.Scope = reviewScopeFor(e.deps.Dossier, result.Groups)
 		if err := result.Validate(); err != nil {
 			return dag.NodeOutput{}, err
 		}
@@ -423,6 +424,7 @@ func (e *Executor) executeSynthesize(ctx context.Context, in dag.NodeInput) (dag
 		applyUnresolved(&result, unresolved)
 		applyBudgetGap(&result, exhausted)
 		applyToolGaps(&result, toolGaps)
+		result.Scope = reviewScopeFor(e.deps.Dossier, result.Groups)
 		if err := result.Validate(); err != nil {
 			return dag.NodeOutput{}, err
 		}
@@ -555,6 +557,7 @@ func (e *Executor) executeSynthesize(ctx context.Context, in dag.NodeInput) (dag
 		applyUnresolved(&final, unresolved)
 		applyBudgetGap(&final, exhausted || budgetStopped)
 		applyToolGaps(&final, toolGaps)
+		final.Scope = reviewScopeFor(e.deps.Dossier, final.Groups)
 		if err := final.Validate(); err != nil {
 			return e.agentOutputError(result, err)
 		}
@@ -602,6 +605,7 @@ func (e *Executor) executeSynthesize(ctx context.Context, in dag.NodeInput) (dag
 	applyUnresolved(&final, mergeUnresolved(unresolved, groupProvenanceSignals(e.deps.Dossier, applied)))
 	applyBudgetGap(&final, exhausted)
 	applyToolGaps(&final, toolGaps)
+	final.Scope = reviewScopeFor(e.deps.Dossier, final.Groups)
 	if err := final.Validate(); err != nil {
 		return e.agentOutputError(result, err)
 	}

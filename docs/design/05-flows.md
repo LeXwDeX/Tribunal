@@ -48,12 +48,12 @@ sequenceDiagram
 | 2 | worker 领取 job | 租约 5 分钟，执行中每分钟续期 |
 | 3 | 取消旧工作流（F2；在采集和过滤后） | 过滤命中时不会到达此步 |
 | 4 | 拉取 MR 元数据：`GET /projects/:id/merge_requests/:iid` | MR 已关闭或合并 → job 完成，不评审 |
-| 5 | `GET .../merge_requests/:iid/versions` 取最新版本的三个 sha | 失败 → job 重试 |
-| 6 | `GET .../merge_requests/:iid/diffs`（翻页） | 同上 |
+| 5 | `GET .../merge_requests/:iid/versions` 取最新版本的三个 sha，并保留 `state`、`real_size` | 失败 → job 重试 |
+| 6 | `GET .../merge_requests/:iid/diffs`（翻页）；用 diff version 的 `state`/`real_size` 和 MR 的 `changes_count` 核对总数；`too_large`/`collapsed` 文件按上限用 repository files/raw API 拉取 base 与 head 正文并重建 diff | 失败 → job 重试；列表为空但 GitLab 报告仍有变更文件 → 可重试错误，不当作空 MR；`state` 不是 `collected` 或 `real_size` 带 `+` 时记录覆盖缺口 |
 | 7 | `GET .../merge_requests/:iid/pipelines`，取最新一条；有失败 job 时 `GET /projects/:id/pipelines/:pid/jobs` | 失败不阻塞，`Pipeline=nil` |
 | 8 | `GET .../merge_requests/:iid/closes_issues` | 失败不阻塞 |
 | 9 | 读目标分支上的 `.gitlab-review.yml`、`AGENTS.md`、`CLAUDE.md`：`GET /projects/:id/repository/files/:path/raw?ref=<target>` | 404 视为没有 |
-| 10 | 合并配置（平台 → 项目 → 仓库）；worker 按合并后的设置复核 Draft/标签/目标分支（`allow_repo_config=true` 时包含目标分支仓库配置）；计算 ignore；记录 included、ignored、omitted 和变更总数；增量范围 | 项目设置无法安全解析，或已启用的仓库配置 YAML 解析失败 → 停止此次执行，不回退为较宽松规则；被过滤的自动评审在创建 workflow 前结束 |
+| 10 | 合并配置（平台 → 项目 → 仓库）；worker 按合并后的设置复核 Draft/标签/目标分支（`allow_repo_config=true` 时包含目标分支仓库配置）；计算 ignore；记录 included、ignored、generated、omitted 和变更总数；增量范围 | 项目设置无法安全解析，或已启用的仓库配置 YAML 解析失败 → 停止此次执行，不回退为较宽松规则；被过滤的自动评审在创建 workflow 前结束 |
 | 11 | 工作区 `RLock`；`git fetch refs/merge-requests/<iid>/head`；`git worktree add <runs>/<wf> <head_sha>` | fetch 失败 → job 重试 |
 | 12 | 变更文件为 0：全被 ignore → 发布「无需评审」的汇总；全被采集缺口 omitted → 不建 workflow，发布 INCOMPLETE 摘要，列出 omitted 总数、原因计数和最多 4 条路径，其余只计数。两者都结束 | — |
 | 13 | `BuildGraph` → `Engine.Create` → `Engine.Run` | 工作流 failed → F1-失败分支 |
@@ -62,9 +62,9 @@ sequenceDiagram
 
 > 实际执行顺序：步骤 1–2 后，先做步骤 4–10 的采集、配置合并和过滤；未被过滤的自动评审才执行步骤 3 的取消，然后继续步骤 11。
 
-> 空评审（步骤 12）不创建工作流，也不新增 skipped 工作流记录。全部被 ignore 时仍是「无需评审」的 PASS 摘要；全部变更文件都因 `max_files`、`max_diff_lines`、`too_large` 或 `collapsed` 等采集缺口 omitted 时，不创建空 workflow，只发布 INCOMPLETE 摘要：列出 omitted 总数、原因计数和最多 4 条路径，其余只计数；正常 dossier 保留完整的 omitted 列表。该记录方式沿用 2026-10-23 用户确认的 Issue #10 本地验收口径；历史记录不补造不存在的 dossier 或逐路径 omitted 清单。发布前的最终代次检查会拒绝检查时已被新代次取代的结果。
+> 空评审（步骤 12）不创建工作流，也不新增 skipped 工作流记录。全部被 ignore 时仍是「无需评审」的 PASS 摘要；全部变更文件都是 generated 时同样发布「无需评审」摘要，而不是让 required 的 plan 报没有可评审文件；全部变更文件都因 `max_files`、`max_diff_lines` 等硬采集缺口 omitted 时，不创建空 workflow，只发布 INCOMPLETE 摘要：列出 omitted 总数、原因计数和最多 4 条路径，其余只计数；正常 dossier 保留完整的 omitted 列表。`too_large`/`collapsed` 文件先尝试按上限拉取正文参与评审；取不到时降级为 warning（明确列出未审文件），不单独把整单改判 INCOMPLETE。该记录方式沿用 2026-10-23 用户确认的 Issue #10 本地验收口径；历史记录不补造不存在的 dossier 或逐路径 omitted 清单。发布前的最终代次检查会拒绝检查时已被新代次取代的结果。
 
-> `DiffSummary.files` 表示进入材料快照的文件数，不是已评审数；`ignored` 是规则排除，不计为覆盖缺口。部分文件 omitted、评审节点实际遇到的文件/包文本截断、完成 plan 后非 generated included 文件未分配给评审节点、review 通道证据不足或 gate BLOCKING 无 accepted finding 时，评审继续执行但最终 verdict 为 INCOMPLETE，不能无提示 PASS。
+> `DiffSummary.files` 表示进入材料快照的文件数，不是已评审数；`ignored` 是规则排除，不算覆盖缺口；`generated` 是被跳过的生成文件数。硬 omitted、GitLab 报告但未送达的文件、评审节点实际遇到的文件/包文本截断、完成 plan 后 included 文件未分配给评审节点、review 通道证据不足或 gate BLOCKING 无 accepted finding 时，评审继续执行但最终 verdict 为 INCOMPLETE，不能无提示 PASS；已有已发布 P0/P1 时保留 BLOCKING。
 >
 > 现有限制：最终检查与 GitLab 写入不是原子操作。新代次若在两者之间到来，旧摘要仍可能写入；后续评审成功发布时会更新汇总，没有后续成功发布时不保证自动纠正。因此不能把当前实现解释为「过期摘要绝不会发布」。
 
@@ -78,6 +78,8 @@ Anthropic 的输入用量将未缓存、缓存读取和缓存创建各计一次�
 
 - 上次已发布的工作流记录了 `head_sha`。新工作流在 `trigger=mr_update` 且非 `full` 时，只把 `git diff <last_head>..<head>` 涉及的文件作为评审范围；diff 内容仍取 MR 相对 base 的完整 diff，以保证行号映射正确。
 - 上次的 head 不再是当前 head 的祖先（force push）→ 自动退回全量。
+- 过滤评审范围时，没有 `path` 的 finding 保留为「无法定位」条目并参与最终 verdict；某一路在范围外文件上报了 P0/P1 时，该 finding 仍被过滤，但同时产生一个未解决信号，避免窄范围结果被当成干净的 PASS。
+- 本次评审范围以结构化字段披露：dossier 的 `incremental`（是否全量、上次 head、增量文件）和 `SynthesisResult.scope`（`full`、`head`、`last_head`、`files`、`file_count`、`unlocated`）。`files` 最多保存 200 条，`file_count` 是完整增量文件数；摘要渲染为「评审范围」段（全量 / 增量、上次与本次 head、覆盖文件数、无法定位数；增量时明确「结论仅覆盖本次增量变更的文件」），生成文件的数量与路径同样在该段披露（`DiffSummary.generated` / `generated_paths`）。行内正文被截断时给出指向控制台详情的链接。
 
 ---
 

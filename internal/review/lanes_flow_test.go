@@ -619,8 +619,10 @@ func TestLanesValidateFailNeedsABlockingFindingInScope(t *testing.T) {
 		{name: "only a P2 finding", validate: failing(finding("a.go", 9, SeverityP2, "minor")), wantSignal: true},
 		{name: "P1 finding filtered out by the incremental scope", validate: failing(finding("b.go", 9, SeverityP1, "elsewhere")),
 			incremental: &IncrementalRange{Files: []string{"a.go"}}, wantSignal: true},
+		// A finding without a path cannot be attributed to an unchanged file,
+		// so it stays in the review scope and explains the FAIL.
 		{name: "P1 finding without a path in an incremental review", validate: failing(finding("", 0, SeverityP1, "pipeline")),
-			incremental: &IncrementalRange{Files: []string{"a.go"}}, wantSignal: true},
+			incremental: &IncrementalRange{Files: []string{"a.go"}}},
 		{name: "out-of-scope P1 beside an in-scope P2", validate: failing(finding("b.go", 9, SeverityP1, "elsewhere"), finding("a.go", 9, SeverityP2, "minor")),
 			incremental: &IncrementalRange{Files: []string{"a.go"}}, wantSignal: true},
 		{name: "in-scope P1 beside an out-of-scope P2", validate: failing(finding("a.go", 9, SeverityP1, "broken"), finding("b.go", 9, SeverityP2, "elsewhere")),

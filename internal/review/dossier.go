@@ -19,6 +19,9 @@ import (
 // DossierSchemaVersion is the persisted materials-snapshot version.
 const DossierSchemaVersion = 1
 
+// MaxGeneratedPaths bounds the recorded skipped generated paths.
+const MaxGeneratedPaths = 100
+
 // IgnorePolicyVersion identifies the supported effective-ignore semantics.
 const IgnorePolicyVersion = 2
 
@@ -88,6 +91,12 @@ type DiffSummary struct {
 	// Total is the number of changed paths seen before ignore rules.
 	// Zero means the field is absent (older snapshots).
 	Total int `json:"total,omitempty"`
+	// Generated is the number of changed paths skipped because GitLab marks
+	// them generated. They stay part of Total and are not reviewable.
+	Generated int `json:"generated,omitempty"`
+	// GeneratedPaths lists up to MaxGeneratedPaths skipped generated paths so
+	// the published summary can name them. Generated keeps the full count.
+	GeneratedPaths []string `json:"generated_paths,omitempty"`
 	// Omitted lists paths missing from the snapshot and why. Ignored paths
 	// are tracked separately in Dossier.Ignored and are not coverage gaps.
 	Omitted []OmittedFile `json:"omitted,omitempty"`
@@ -601,6 +610,20 @@ func ValidateDossier(d *Dossier) error {
 	}
 	if d.DiffSummary.Total > 0 && d.DiffSummary.Files > d.DiffSummary.Total {
 		return dossierErr("diff_summary.files", "must not exceed total")
+	}
+	if len(d.DiffSummary.GeneratedPaths) > d.DiffSummary.Generated {
+		return dossierErr("diff_summary.generated_paths", "must not exceed the generated count")
+	}
+	seenGenerated := make(map[string]struct{}, len(d.DiffSummary.GeneratedPaths))
+	for i, file := range d.DiffSummary.GeneratedPaths {
+		field := fmt.Sprintf("diff_summary.generated_paths[%d]", i)
+		if err := checkRepoPath(field, file, true); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidDossier, err)
+		}
+		if _, ok := seenGenerated[file]; ok {
+			return dossierErr(field, "duplicate path")
+		}
+		seenGenerated[file] = struct{}{}
 	}
 	for i, omitted := range d.DiffSummary.Omitted {
 		field := fmt.Sprintf("diff_summary.omitted[%d]", i)

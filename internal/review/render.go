@@ -65,12 +65,21 @@ type SummaryInput struct {
 	ShowModelAttribution bool
 	Warnings             []string
 	IncompleteReason     string
+	// Scope discloses the structured review coverage of the workflow result.
+	Scope *ReviewScope
+	// Generated is the number of generated changed paths skipped before
+	// review. GeneratedPaths names up to MaxGeneratedPaths of them.
+	Generated      int
+	GeneratedPaths []string
 }
 
 // FindingRenderOptions controls optional attribution in an inline discussion.
 type FindingRenderOptions struct {
 	ShowModelAttribution bool
 	ProviderLabels       map[string]string
+	// DetailURL points at the console review detail. A clipped inline body
+	// links to it instead of only naming the console.
+	DetailURL string
 }
 
 // SummaryMarkerLine returns the hidden first line of the summary note.
@@ -148,6 +157,9 @@ func RenderSummary(in SummaryInput) (string, error) {
 		}
 		b.WriteString(renderMarkdown(summary, MaxSummaryRunes))
 		b.WriteString("\n\n")
+	}
+	if section := reviewScopeSection(in.Scope, in.Generated, in.GeneratedPaths); section != "" {
+		b.WriteString(section)
 	}
 	if len(positioned) > 0 {
 		fmt.Fprintf(&b, "\n### 行内问题（%d）\n\n", len(positioned))
@@ -242,6 +254,72 @@ func verdictLabel(verdict string) string {
 	default:
 		return "⚪ 评审未完成"
 	}
+}
+
+// reviewScopeSection renders the structured review coverage and the skipped
+// generated file count. It is empty when the result has neither.
+func reviewScopeSection(scope *ReviewScope, generated int, generatedPaths []string) string {
+	if scope == nil && generated <= 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n### 评审范围\n\n")
+	if scope != nil {
+		if scope.Full {
+			b.WriteString("- 全量评审：覆盖本次变更的全部文件。\n")
+		} else {
+			total := scope.FileCount
+			if total <= 0 {
+				total = len(scope.Files)
+			}
+			fmt.Fprintf(&b, "- 增量评审：上次 head %s → 本次 head %s，覆盖 %d 个文件；结论仅覆盖本次增量变更的文件。\n",
+				scopeHeadLabel(scope.LastHead), scopeHeadLabel(scope.Head), total)
+			if scope.FileCount > maxScopeFiles {
+				fmt.Fprintf(&b, "- 范围文件列表超过 %d 条，摘要只保留计数，完整列表见控制台。\n", maxScopeFiles)
+			}
+		}
+		if scope.Unlocated > 0 {
+			fmt.Fprintf(&b, "- 其中 %d 条问题无法定位到具体文件，已列入「无法定位到行的问题」。\n", scope.Unlocated)
+		}
+	}
+	if generated > 0 {
+		if len(generatedPaths) > 0 {
+			fmt.Fprintf(&b, "- 生成文件：跳过 %d 个，未进入评审：%s。\n", generated, generatedPathList(generatedPaths))
+		} else {
+			fmt.Fprintf(&b, "- 生成文件：跳过 %d 个，未进入评审（路径见评审提示）。\n", generated)
+		}
+	}
+	b.WriteByte('\n')
+	return b.String()
+}
+
+// generatedPathList renders a bounded line of skipped generated paths.
+func generatedPathList(paths []string) string {
+	const maxShown = 12
+	shown, extra := paths, 0
+	if len(shown) > maxShown {
+		extra = len(shown) - maxShown
+		shown = shown[:maxShown]
+	}
+	parts := make([]string, 0, len(shown))
+	for _, filePath := range shown {
+		parts = append(parts, escapeOneLine(filePath, 200))
+	}
+	out := strings.Join(parts, "、")
+	if extra > 0 {
+		out += fmt.Sprintf(" 等 %d 个", len(paths))
+	}
+	return out
+}
+
+// scopeHeadLabel renders a scope head only when it looks like an object ID or
+// ref token; unexpected values stay unnamed.
+func scopeHeadLabel(head string) string {
+	head = strings.TrimSpace(head)
+	if head == "" || !markerFingerprintRE.MatchString(head) {
+		return "未知"
+	}
+	return escapeOneLine(head, 128)
 }
 
 // inlineRelatedLines renders unpositioned groups folded into an inline group
@@ -423,7 +501,11 @@ func RenderFinding(group Group, opts FindingRenderOptions) (string, error) {
 		b.WriteString(body)
 		b.WriteByte('\n')
 		if truncated {
-			b.WriteString("\n> 完整正文见控制台。\n")
+			if link := safeDetailURL(opts.DetailURL); link != "" {
+				fmt.Fprintf(&b, "\n> 完整正文见 <a href=\"%s\">控制台</a>。\n", link)
+			} else {
+				b.WriteString("\n> 完整正文见控制台。\n")
+			}
 		}
 	}
 	if group.Decision.Action == ActionMark && strings.TrimSpace(group.Decision.Reason) != "" {

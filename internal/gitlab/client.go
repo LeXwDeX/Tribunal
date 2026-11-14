@@ -66,6 +66,9 @@ type MergeRequest struct {
 	Draft           bool
 	Author          *User
 	WebURL          string
+	// ChangesCount is GitLab's reported changed-path count. It may end with
+	// "+" when GitLab truncated the count itself.
+	ChangesCount string
 }
 
 // HookSpec describes the project webhook M0 creates.
@@ -409,6 +412,7 @@ func (c *Client) GetMergeRequest(ctx context.Context, token string, projectID, i
 		Labels:          append([]string(nil), mr.Labels...),
 		Draft:           mr.Draft,
 		WebURL:          mr.WebURL,
+		ChangesCount:    mr.ChangesCount,
 	}
 	if mr.MergedAt != nil {
 		merged := *mr.MergedAt

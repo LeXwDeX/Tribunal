@@ -249,39 +249,25 @@ func (s *ReviewService) publishEmptyWithNote(ctx context.Context, project *store
 	fingerprint := sha256Hex(strings.Join([]string{
 		inputs.Version.HeadSHA, reviewConfigHash(cfg), profileName,
 	}, "\n"))
-	verdict := review.VerdictPass
-	// The settled status keeps a recognizable detail so the console can list
-	// this run, which has no workflow, and show why it ended this way.
-	statusDetail := store.StatusDetailNoReviewable
-	summaryText := "无需评审：所有变更文件均被忽略规则过滤。"
-	warnings := append(cfg.Warnings, "no reviewable files after ignore rules")
-	if len(inputs.Diffs) == 0 {
-		verdict = review.VerdictIncomplete
-		statusDetail = store.StatusDetailEmptyDiff
-		summaryText = "没有可评审的变更：MR 的 diff 为空。"
-		warnings = append(cfg.Warnings, "no changed files in merge request")
-	}
+	verdict, statusDetail, summaryText, incompleteReason, warnings := emptyReviewOutcome(inputs, cfg, summary, ignored)
 	summaryInput := review.SummaryInput{
-		Verdict: verdict,
-		Summary: summaryText,
-		IncompleteReason: func() string {
-			if verdict == review.VerdictIncomplete && len(inputs.Diffs) == 0 {
-				return "empty diff"
-			}
-			return ""
-		}(),
-		Fingerprint: fingerprint,
-		HeadSHA:     inputs.Version.HeadSHA,
-		Profile:     profileName,
-		Warnings:    warnings,
+		Verdict:          verdict,
+		Summary:          summaryText,
+		IncompleteReason: incompleteReason,
+		Fingerprint:      fingerprint,
+		HeadSHA:          inputs.Version.HeadSHA,
+		Profile:          profileName,
+		Warnings:         warnings,
+		Generated:        summary.Generated,
+		GeneratedPaths:   summary.GeneratedPaths,
 	}
 	if summary.Truncated || len(summary.Omitted) > 0 {
 		total := summary.Total
 		if total == 0 {
 			total = summary.Files + len(summary.Omitted) + len(inputs.Diffs)
 		}
-		reason := fmt.Sprintf("omitted %d of %d changed file(s) (included=%d, ignored=%d)",
-			len(summary.Omitted), total, summary.Files, len(ignored))
+		reason := fmt.Sprintf("omitted %d of %d changed file(s) (included=%d, ignored=%d, generated=%d)",
+			len(summary.Omitted), total, summary.Files, len(ignored), summary.Generated)
 		if len(summary.Omitted) > 0 {
 			reason += " before review:" + omittedPathList(summary.Omitted, 4)
 			reasons := make(map[string]int, len(summary.Omitted))
@@ -337,6 +323,32 @@ func (s *ReviewService) publishEmptyWithNote(ctx context.Context, project *store
 	return nil
 }
 
+// emptyReviewOutcome classifies a review with no reviewable file. The settled
+// status keeps a recognizable detail so the console can list the run and show
+// why it ended this way.
+func emptyReviewOutcome(inputs *reviewInputs, cfg effectiveReviewConfig, summary review.DiffSummary, ignored []string) (verdict, statusDetail, summaryText, incompleteReason string, warnings []string) {
+	verdict = review.VerdictPass
+	statusDetail = store.StatusDetailNoReviewable
+	summaryText = "无需评审：所有变更文件均被忽略规则过滤。"
+	warnings = append([]string(nil), cfg.Warnings...)
+	if len(inputs.Diffs) == 0 {
+		return review.VerdictIncomplete, store.StatusDetailEmptyDiff,
+			"没有可评审的变更：MR 的 diff 为空。", "empty diff",
+			append(warnings, "no changed files in merge request")
+	}
+	if summary.Generated > 0 && summary.Files == 0 && len(summary.Omitted) == 0 {
+		if len(ignored) > 0 {
+			summaryText = "无需评审：变更文件均为生成文件或被忽略规则过滤。"
+		} else {
+			summaryText = "无需评审：变更文件均为生成文件。"
+		}
+		warnings = append(warnings, fmt.Sprintf(
+			"no reviewable files: %d generated file(s) were skipped", summary.Generated))
+		return verdict, statusDetail, summaryText, "", warnings
+	}
+	return verdict, statusDetail, summaryText, "", append(warnings, "no reviewable files after ignore rules")
+}
+
 func sha256Hex(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])
@@ -370,6 +382,21 @@ func buildReviewFiles(diffs []gitlab.FileDiff, ignores []string, maxFiles, maxDi
 	ignored := make([]string, 0)
 	warnings := make([]string, 0)
 	summary := review.DiffSummary{Total: len(diffs)}
+	// GitLab reports the changed-path count of the diff version. When the
+	// collector recorded it, it is authoritative over the page we received.
+	if collection := diffCollection(diffs); collection != nil {
+		if collection.Total > 0 {
+			summary.Total = collection.Total
+		}
+		if collection.Truncated {
+			summary.Truncated = true
+			warnings = append(warnings, fmt.Sprintf(
+				"review coverage gap: GitLab diff collection is incomplete (state=%s, real_size=%s): %d of %d changed file(s) were provided; the remaining files were not reviewed",
+				safeDiffState(collection.State), safeCountLabel(collection.RealSize),
+				len(diffs), max(summary.Total, len(diffs))))
+		}
+	}
+	generated := make([]string, 0)
 	lines := 0
 	omittedByFiles := 0
 	omittedByLines := 0
@@ -412,21 +439,30 @@ func buildReviewFiles(diffs []gitlab.FileDiff, ignores []string, maxFiles, maxDi
 			warnings = append(warnings, fmt.Sprintf("review coverage gap: rename paths are incomplete for %s", filePath))
 			continue
 		}
+		if diff.GeneratedFile {
+			// Generated files are not hand-written source: planning and
+			// reviewing them would spend packages on machine output. The
+			// counts and paths stay visible as a warning.
+			summary.Generated++
+			generated = append(generated, filePath)
+			continue
+		}
 		if maxFiles > 0 && len(files) >= maxFiles {
 			omittedByFiles++
 			omitDiff(filePath, "max_files", diff)
 			continue
 		}
 		if diff.TooLarge || diff.Collapsed {
-			// GitLab withheld the body. Record the path and reason so the
-			// coverage gap is visible; never present it as reviewed content.
+			// GitLab withheld the body and the collector could not recover it.
+			// Record the path and reason so the omission is visible; never
+			// present it as reviewed content.
 			cause := "too_large"
 			if diff.Collapsed {
 				cause = "collapsed"
 			}
 			omitDiff(filePath, cause, diff)
 			warnings = append(warnings, fmt.Sprintf(
-				"review coverage gap: GitLab did not provide a diff for %s (%s)", filePath, cause))
+				"review coverage gap: GitLab withheld the diff for %s (%s); the file was not reviewed", filePath, cause))
 			continue
 		}
 		additions, deletions := countDiffLines(diff.Diff)
@@ -470,8 +506,38 @@ func buildReviewFiles(diffs []gitlab.FileDiff, ignores []string, maxFiles, maxDi
 		warnings = append(warnings, fmt.Sprintf(
 			"review truncated: %d changed file(s) omitted by max_diff_lines", omittedByLines))
 	}
+	if len(generated) > 0 {
+		sort.Strings(generated)
+		recorded := generated
+		if len(recorded) > review.MaxGeneratedPaths {
+			recorded = recorded[:review.MaxGeneratedPaths]
+		}
+		summary.GeneratedPaths = append([]string(nil), recorded...)
+		warnings = append(warnings, fmt.Sprintf(
+			"review skipped %d generated file(s), which were not reviewed: %s",
+			len(generated), boundedFilePathList(generated, 12)))
+	}
 	sort.Strings(ignored)
 	return files, ignored, summary, warnings
+}
+
+// boundedFilePathList renders a bounded, safe path list for warnings.
+func boundedFilePathList(paths []string, max int) string {
+	if len(paths) == 0 {
+		return ""
+	}
+	if max <= 0 || max > len(paths) {
+		max = len(paths)
+	}
+	shown := make([]string, 0, max)
+	for _, filePath := range paths[:max] {
+		shown = append(shown, truncateRunes(filePath, 120))
+	}
+	out := strings.Join(shown, ", ")
+	if len(paths) > max {
+		out += fmt.Sprintf(", ... (+%d more)", len(paths)-max)
+	}
+	return out
 }
 
 // ignoredOldPaths returns the pre-rename paths of ignored files and whether

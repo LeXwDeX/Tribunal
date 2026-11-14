@@ -209,9 +209,8 @@ func TestExecutorCoverageTaskLimitWithoutPerFileTruncation(t *testing.T) {
 func TestExecutorCoverageCollectionGapNamesCountsAndReasons(t *testing.T) {
 	dossier := validDossier(t)
 	dossier.DiffSummary = DiffSummary{
-		Total: 5, Files: 2, Truncated: true,
+		Total: 4, Files: 2, Truncated: true,
 		Omitted: []OmittedFile{
-			{Path: "big.bin", Reason: "too_large"},
 			{Path: "c.go", Reason: "max_files"},
 			{Path: "d.go", Reason: "max_diff_lines"},
 		},
@@ -223,10 +222,13 @@ func TestExecutorCoverageCollectionGapNamesCountsAndReasons(t *testing.T) {
 	if !ok {
 		t.Fatalf("gather unresolved = %+v", gathered.Unresolved)
 	}
-	for _, want := range []string{"5", "2", "3", "too_large", "max_files", "max_diff_lines", "big.bin", "c.go", "d.go"} {
+	for _, want := range []string{"4", "2", "max_files", "max_diff_lines", "c.go", "d.go"} {
 		if !strings.Contains(signal.Message, want) {
 			t.Fatalf("coverage message %q does not contain %q", signal.Message, want)
 		}
+	}
+	if strings.Contains(signal.Message, "too_large") || strings.Contains(signal.Message, "big.bin") {
+		t.Fatalf("soft omission treated as a hard gap: %q", signal.Message)
 	}
 	if strings.Contains(signal.Message, "actually reviewed") {
 		t.Fatalf("coverage message treats included files as reviewed: %q", signal.Message)
