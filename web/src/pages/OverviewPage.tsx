@@ -66,7 +66,7 @@ interface ReviewIssue {
   kind: ReviewIssueKind
 }
 
-function buildAlerts(projects: Project[], providers: ModelHealth[], reviewIssues: ReviewIssue[], reviews: ReviewSummary[]): Alert[] {
+function buildAlerts(projects: Project[], providers: ModelHealth[], reviewIssues: ReviewIssue[], reviews: ReviewListItem[]): Alert[] {
   const alerts: Alert[] = []
   const now = Date.now()
   for (const project of projects) {
@@ -156,7 +156,7 @@ function buildAlerts(projects: Project[], providers: ModelHealth[], reviewIssues
   // incomplete: an INCOMPLETE verdict or a failed/skipped node means the
   // reviewed scope was not fully covered. Aggregate them so the panel is not
   // silent while most reviews are INCOMPLETE.
-  const completed = reviews.filter((item) => item.status === 'completed')
+  const completed = reviews.filter((item): item is ReviewSummary => 'status' in item && item.status === 'completed')
   const incomplete = completed.filter((item) => item.verdict === 'INCOMPLETE')
   const nodeIssues = completed.filter((item) => item.verdict !== 'INCOMPLETE'
     && (item.nodes || []).some((node) => node.status === 'failed' || node.status === 'skipped'))

@@ -100,6 +100,8 @@ describe('authentication boundary', () => {
     )
     expect(await screen.findByText('登录状态已失效，请重试。')).toBeInTheDocument()
     expect(window.location.search).toBe('')
+    // The previous auth_error must not become the login return target.
+    expect(screen.getByRole('link', { name: '通过 GitLab 登录' })).toHaveAttribute('href', '/auth/login')
   })
 
   it('falls back for an unknown or inherited auth_error value', async () => {

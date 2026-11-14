@@ -48,10 +48,7 @@ function ProjectOverview({ project }: { project: Project }) {
   const workspaceState = workspace?.state || project.workspace_state
   // The indexer refusing a path by policy is a safe configuration outcome, not
   // a fault. Only a workspace state of error uses the danger color.
-  const indexBlocked = workspace?.index_status === 'degraded' && workspace?.last_error === 'index: blocked by ignore policy'
-  const workspaceErrorText = indexBlocked
-    ? describeWorkspaceError(workspace.last_error)
-    : workspace?.last_error ? describeWorkspaceError(workspace.last_error) : null
+  const workspaceErrorText = workspace?.last_error ? describeWorkspaceError(workspace.last_error) : null
   const workspaceErrorClass = workspace?.state === 'error' ? styles.resultError : styles.resultHint
   const webhookState = project.webhook_state || (project.hook_id ? 'unknown' : 'disabled')
 

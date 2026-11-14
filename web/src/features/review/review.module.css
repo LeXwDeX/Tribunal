@@ -201,7 +201,7 @@
 
 .nodeReason {
   margin: 0;
-  padding: 8px var(--space-md);
+  padding: var(--space-sm) var(--space-md);
   border-radius: var(--radius-sm);
   background: var(--warn-bg);
   color: var(--warn-fg);
