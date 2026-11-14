@@ -811,6 +811,10 @@ func TestRunTurnLimitErrorNamesTheTurns(t *testing.T) {
 		toolResponse(llm.StopToolUse, call("c1", "echo", `{}`)),
 		toolResponse(llm.StopToolUse, call("c2", "echo", `{}`)),
 		toolResponse(llm.StopToolUse, call("c3", "echo", `{}`)),
+		// The two grace turns after the configured limit also keep calling a
+		// tool instead of submitting, so the run finally fails.
+		toolResponse(llm.StopToolUse, call("c4", "echo", `{}`)),
+		toolResponse(llm.StopToolUse, call("c5", "echo", `{}`)),
 	}}
 	spec := testSpec(client, echoTool{name: "echo"})
 	spec.MaxTurns = 3

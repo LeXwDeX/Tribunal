@@ -31,7 +31,8 @@ func TestRunReportsLongestTurnOnFailure(t *testing.T) {
 	spec := testSpec(client, echoTool{name: "echo"})
 	spec.Now = client.now
 	spec.MaxTurns = 2
-	client.ignore = 1 // ignore the last-turn prompt, so the run fails
+	// Ignore the last-turn prompt and both grace prompts, so the run fails.
+	client.ignore = 3
 	result, err := Run(context.Background(), spec)
 	if err == nil || result == nil {
 		t.Fatalf("err=%v result=%v, want a partial failure", err, result)

@@ -40,6 +40,9 @@ const (
 	// maxInvalidRecoveries is how many prompted submit turns with corrupted
 	// tool calls are answered with feedback before the run fails closed.
 	maxInvalidRecoveries = 2
+	// maxGraceTurns is how many extra submit-only turns an explicit positive
+	// max_turns grants after a turn ends without an accepted submit_result.
+	maxGraceTurns = 2
 	// finalTurnFloorDivisor sets the minimum reserve to this fraction of the
 	// time left when the run started.
 	finalTurnFloorDivisor = 8
@@ -136,6 +139,9 @@ type RunResult struct {
 	Transcript []llm.Message
 	// LongestTurn is the slowest completed turn, including TurnEstimate.
 	LongestTurn time.Duration
+	// Partial reports that the run stopped before an accepted submit_result.
+	// Usage, Turns and Transcript still carry everything collected so far.
+	Partial bool
 }
 
 var (
