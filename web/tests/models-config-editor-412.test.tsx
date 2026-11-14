@@ -349,6 +349,26 @@ describe('config model overlay editor (#412)', () => {
     await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => url === '/api/v1/config').length).toBeGreaterThan(before))
   })
 
+  it('explains a missing overlay directory with actionable guidance', async () => {
+    const user = userEvent.setup()
+    routes({
+      overlay: () => jsonResponse({
+        error: {
+          code: 'config_directory_create_failed',
+          message: 'cannot create the configuration overlay directory',
+          details: [{ field: 'changes', message: 'the overlay directory could not be created' }],
+        },
+      }, 500),
+    })
+    const dialog = await openConfigEditor(user)
+    await user.clear(within(dialog).getByLabelText('max_tokens'))
+    await user.type(within(dialog).getByLabelText('max_tokens'), '2048')
+    await user.click(within(dialog).getByRole('button', { name: '保存' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('无法创建 overlay 目录')
+    expect(screen.getByRole('alert')).toHaveTextContent('数据卷')
+  })
+
   it('does not write when nothing changed', async () => {
     const user = userEvent.setup()
     const { state } = routes()

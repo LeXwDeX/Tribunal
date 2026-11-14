@@ -26,17 +26,18 @@ const (
 
 	// Stable error codes returned by the overlay writer. The HTTP layer maps
 	// them to status codes without inspecting the underlying error.
-	OverlayErrorNotConfigured = "overlay_not_configured"
-	OverlayErrorReadOnly      = "config_read_only"
-	OverlayErrorSymlink       = "config_symlink"
-	OverlayErrorTooLarge      = "config_too_large"
-	OverlayErrorStaleConfig   = "stale_config"
-	OverlayErrorInvalidChange = "invalid_change"
-	OverlayErrorInvalidConfig = "invalid_config"
-	OverlayErrorProviderInUse = "provider_in_use"
-	OverlayErrorWriteFailed   = "config_write_failed"
-	OverlayErrorPathConflict  = "overlay_conflicts_with_base"
-	OverlayErrorBusy          = "config_busy"
+	OverlayErrorNotConfigured   = "overlay_not_configured"
+	OverlayErrorReadOnly        = "config_read_only"
+	OverlayErrorSymlink         = "config_symlink"
+	OverlayErrorTooLarge        = "config_too_large"
+	OverlayErrorStaleConfig     = "stale_config"
+	OverlayErrorInvalidChange   = "invalid_change"
+	OverlayErrorInvalidConfig   = "invalid_config"
+	OverlayErrorProviderInUse   = "provider_in_use"
+	OverlayErrorWriteFailed     = "config_write_failed"
+	OverlayErrorDirectoryCreate = "config_directory_create_failed"
+	OverlayErrorPathConflict    = "overlay_conflicts_with_base"
+	OverlayErrorBusy            = "config_busy"
 )
 
 // OverlayWriteError is a classified overlay write failure. Details carry field
@@ -192,6 +193,9 @@ func (w *OverlayWriter) Apply(ctx context.Context, req OverlayWriteRequest) (*Ov
 		}
 	}
 	if err := validateOverlayRequest(req); err != nil {
+		return nil, err
+	}
+	if err := ensureOverlayDirectory(w.overlayPath); err != nil {
 		return nil, err
 	}
 	if err := probeOverlayPath(w.overlayPath); err != nil {
@@ -448,6 +452,23 @@ func (w *OverlayWriter) readCurrent() (*overlayCurrent, error) {
 	}
 	current.baseRevision = baseRevision
 	return current, nil
+}
+
+// ensureOverlayDirectory creates the overlay directory when the deployment
+// mounted a data volume without it. The console is the only writer, so a
+// missing directory is a fresh data volume, not a configuration conflict. The
+// directory is private because the overlay may name token environment sources.
+func ensureOverlayDirectory(overlayPath string) error {
+	dir := filepath.Dir(overlayPath)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return &OverlayWriteError{
+			Code:    OverlayErrorDirectoryCreate,
+			Message: "cannot create the configuration overlay directory",
+			Details: []string{"the overlay directory could not be created; check that the data volume exists and is writable, then restart the service"},
+			Err:     err,
+		}
+	}
+	return nil
 }
 
 // probeOverlayPath rejects a symlink, a non-regular file, an oversized file or

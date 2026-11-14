@@ -1542,6 +1542,7 @@ function configApiErrors(error: unknown, providerName: string): {
     invalid_change: error.message,
     invalid_config: error.message,
     config_write_failed: error.message,
+    config_directory_create_failed: '无法创建 overlay 目录。请确认数据卷已挂载且可写，然后重启服务再保存。',
     validation_failed: error.message,
     bad_request: error.message,
   }
