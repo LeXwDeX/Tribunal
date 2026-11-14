@@ -35,6 +35,7 @@ import type {
   ModelToolProbeResult,
   ModelWrite,
   Me,
+  WebhookDeliveryPage,
   CallPage,
   Page,
   ProjectAccess,
@@ -426,6 +427,15 @@ export async function getStats(filters: StatsFilters = {}): Promise<Stats> {
 
 export async function getReviewStats(filters: StatsFilters = {}): Promise<ReviewStats> {
   return request<ReviewStats>(withQuery('/api/v1/stats/reviews', { ...filters }))
+}
+
+export interface WebhookDeliveryFilters {
+  project_id?: number | string
+  mr_iid?: number | string
+}
+
+export async function listWebhookDeliveries(filters: WebhookDeliveryFilters = {}, cursor?: string): Promise<WebhookDeliveryPage> {
+  return request<WebhookDeliveryPage>(withQuery('/api/v1/webhook-deliveries', { ...filters, cursor }))
 }
 
 export async function getSettings(): Promise<PlatformSettings> {

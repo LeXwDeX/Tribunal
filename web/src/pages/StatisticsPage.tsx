@@ -1,12 +1,14 @@
 import { Fragment, useId, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getReviewStats, getStats, listProjects } from '../api/api'
-import type { DailyStats, Project, ProviderQualityRow, ReviewStats, Stats } from '../api/types'
+import type {
+  DailyStats, FeedbackCollectionState, ModelStatsRow, Project, ProviderQualityRow, ReviewStats, Stats, WorkspaceCapacity,
+} from '../api/types'
 import {
   Badge, Button, DatePicker, Disclosure, EmptyState, ErrorState, LoadingState, Metric, PageHeader, Panel, Select,
   TableNote, type SelectOption,
 } from '../components/ui'
-import { formatNumber } from '../lib/format'
+import { formatBytes, formatNumber, formatRelative } from '../lib/format'
 import { usePaginated } from '../lib/hooks'
 import { formatMs, formatRatio, statNumber } from '../lib/stats'
 import ui from '../styles/ui.module.css'
@@ -978,19 +980,149 @@ function StatsContent({ stats }: { stats: Stats }) {
       <QualityPanel value={stats.quality_by_provider} />
 
       <FeedbackPanel value={stats.feedback} />
+      <CollectionHealthPanel value={stats.feedback_collection} />
+      <WorkspaceCapacityPanel value={stats.workspace_capacity} />
 
       <ProjectStatsPanel value={stats.by_project} />
       <GroupStatsPanel value={stats.by_provider} dimension="provider" />
       <GroupStatsPanel value={stats.by_block} dimension="block" />
 
-      <Panel title="按模型" aside="from stats.by_model">
-        <DimensionTable rows={byModel} emptyLabel="没有按模型统计" />
-      </Panel>
+      <ModelStatsPanel rows={stats.by_model} fallback={byModel} />
 
       <Disclosure summary="查看原始 stats 响应">
         <pre className={`pre statsJson ${ui.jsonBlock}`}>{JSON.stringify(stripLegacyCostKeys(stats), null, 2)}</pre>
       </Disclosure>
     </>
+  )
+}
+
+// CollectionHealthPanel exposes the feedback collector state. A missing field
+// means an older server, not a healthy collector; a stored error class stays
+// visible until the next successful pass clears it.
+function CollectionHealthPanel({ value }: { value?: FeedbackCollectionState }) {
+  if (!value) {
+    return (
+      <Panel title="反馈采集健康" aside="来自 stats.feedback_collection">
+        <EmptyState title="反馈采集健康不可用" description="stats 未返回 feedback_collection；旧版服务端可能不支持该字段。" />
+      </Panel>
+    )
+  }
+  const failing = Boolean(value.last_error_class)
+  return (
+    <Panel
+      title="反馈采集健康"
+      aside="来自 stats.feedback_collection"
+      note="最后成功采集时间只在采集成功后推进；失败时保留上一次成功时间并记录固定错误类别。"
+    >
+      <div className={styles.statGrid}>
+        <Metric
+          label="最后成功采集"
+          value={value.last_collected_at ? formatRelative(value.last_collected_at) : '从未成功'}
+          note={value.last_collected_at ? value.last_collected_at : '尚无成功的采集记录'}
+        />
+        <Metric
+          label="最近错误类别"
+          value={failing ? value.last_error_class || '不可用' : '无错误'}
+          note={value.last_error_at ? `最近错误时间 ${formatRelative(value.last_error_at)}` : '没有记录错误时间'}
+        />
+      </div>
+      {failing ? (
+        <p className="small" role="alert">
+          反馈采集最近失败（{value.last_error_class}）；采集成功后该状态会被清除。
+        </p>
+      ) : (
+        <p className="small" role="status">当前没有记录的采集错误。</p>
+      )}
+    </Panel>
+  )
+}
+
+// WorkspaceCapacityPanel discloses the configured workspace cap and the last
+// measurement. Over-limit is an operational warning, never a silent state.
+function WorkspaceCapacityPanel({ value }: { value?: WorkspaceCapacity }) {
+  if (!value) {
+    return (
+      <Panel title="工作区容量" aside="来自 stats.workspace_capacity">
+        <EmptyState title="工作区容量不可用" description="stats 未返回 workspace_capacity；旧版服务端可能不支持该字段。" />
+      </Panel>
+    )
+  }
+  const limitConfigured = value.limit_bytes > 0
+  const ratio = limitConfigured ? value.total_bytes / value.limit_bytes : null
+  return (
+    <Panel
+      title="工作区容量"
+      aside="来自 stats.workspace_capacity"
+      note="容量按工作区根目录最近一次测量展示；未配置上限时 limit_bytes 为 0，不代表容量无限可用。"
+    >
+      <div className={styles.statGrid}>
+        <Metric
+          label="最近测量"
+          value={value.measured_at ? formatRelative(value.measured_at) : '尚未测量'}
+          note={value.measured_at || '没有测量时间'}
+        />
+        <Metric label="已用" value={formatBytes(value.total_bytes)} note={`${formatNumber(value.total_bytes)} 字节`} />
+        <Metric
+          label="上限"
+          value={limitConfigured ? formatBytes(value.limit_bytes) : '未配置'}
+          note={limitConfigured ? (ratio === null ? '' : `使用率 ${formatRatio(ratio)}`) : '容量回收默认禁用'}
+        />
+      </div>
+      {value.over_limit ? (
+        <p className="small" role="alert">
+          工作区容量已超过配置上限；回收默认禁用，需要人工清理或调整 workspace.max_bytes。
+        </p>
+      ) : null}
+    </Panel>
+  )
+}
+
+// ModelStatsPanel renders only the fields the API returns. The column names
+// stay the API field names used by the legacy table; errors_by_kind is the only
+// structured cell and never carries an upstream error body.
+function ModelStatsPanel({ rows, fallback }: { rows?: ModelStatsRow[]; fallback: Row[] }) {
+  if (!rows?.length) {
+    return (
+      <Panel title="按模型" aside="来自 stats.by_model">
+        <DimensionTable rows={fallback} emptyLabel="没有按模型统计" />
+      </Panel>
+    )
+  }
+  const columns = ['provider', 'model', 'calls', 'errors', 'error_rate', 'input_tokens', 'output_tokens', 'avg_latency_ms', 'p50_latency_ms', 'errors_by_kind']
+  return (
+    <Panel
+      title="按模型"
+      aside="来自 stats.by_model"
+      note="调用与错误来自调用明细或长期聚合；errors_by_kind 只记录固定错误类别，不包含上游响应正文。"
+    >
+      <div className="tableWrap">
+        <table className={`dataTable ${insights.autoTable}`}>
+          <thead><tr>{columns.map((column) => <th key={column} scope="col">{column}</th>)}</tr></thead>
+          <tbody>
+            {rows.map((row) => {
+              const kinds = Object.entries(row.errors_by_kind ?? {}).sort(([a], [b]) => a.localeCompare(b))
+              return (
+                <tr key={`${row.provider}/${row.model}`}>
+                  {columns.map((column) => (
+                    <td key={column} className={column === 'errors_by_kind' || typeof (row as unknown as Row)[column] === 'number' ? 'tabular' : undefined}>
+                      {column === 'errors_by_kind' ? (
+                        kinds.length ? (
+                          <span className={styles.budgetRow}>
+                            {kinds.map(([kind, count]) => <Badge key={kind} tone="warn">{kind}: {formatNumber(count)}</Badge>)}
+                          </span>
+                        ) : (
+                          <span className="small muted">无错误类别</span>
+                        )
+                      ) : cellValue((row as unknown as Row)[column])}
+                    </td>
+                  ))}
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </Panel>
   )
 }
 
