@@ -266,7 +266,7 @@ func (s *Store) FindAPITokenByHash(ctx context.Context, hash []byte, now time.Ti
 		return nil, nil, fmt.Errorf("sqlite: scan api token: %w", err)
 	}
 	if token.ExpiresAt != nil && !now.Before(*token.ExpiresAt) {
-		return nil, nil, fmt.Errorf("%w: api token expired", store.ErrNotFound)
+		return nil, nil, fmt.Errorf("%w: %w", store.ErrNotFound, store.ErrTokenExpired)
 	}
 	used := now.UTC()
 	if _, err := s.db.ExecContext(ctx, `UPDATE api_tokens SET last_used_at = ? WHERE id = ?`,
@@ -276,6 +276,43 @@ func (s *Store) FindAPITokenByHash(ctx context.Context, hash []byte, now time.Ti
 	token.LastUsedAt = &used
 	user.ID = token.UserID
 	return &token, &user, nil
+}
+
+// RenewAPIToken replaces one owned token's digest and expiry, keeping its
+// name. The old secret stops working immediately; another user's token is
+// reported as not found so IDs cannot be probed.
+func (s *Store) RenewAPIToken(ctx context.Context, userID int64, id string, tokenHash []byte, expiresAt time.Time) (*store.APIToken, error) {
+	if userID <= 0 || strings.TrimSpace(id) == "" {
+		return nil, errors.New("sqlite: api token user id and token id are required")
+	}
+	if len(tokenHash) != 32 {
+		return nil, errors.New("sqlite: api token hash must be 32 bytes")
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE api_tokens
+		SET token_hash = ?, expires_at = ?, last_used_at = NULL
+		WHERE id = ? AND user_id = ?`,
+		tokenHash, formatTime(expiresAt), id, userID)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: renew api token: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return nil, fmt.Errorf("sqlite: renew api token: %w", err)
+	} else if n != 1 {
+		return nil, fmt.Errorf("%w: api token %s", store.ErrNotFound, id)
+	}
+	return s.getAPIToken(ctx, userID, id)
+}
+
+func (s *Store) getAPIToken(ctx context.Context, userID int64, id string) (*store.APIToken, error) {
+	token, err := scanAPIToken(s.db.QueryRowContext(ctx,
+		`SELECT `+apiTokenColumns+` FROM api_tokens WHERE id = ? AND user_id = ?`, id, userID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("%w: api token %s", store.ErrNotFound, id)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: find api token: %w", err)
+	}
+	return token, nil
 }
 
 // DeleteAPIToken revokes one token owned by userID. A token owned by another

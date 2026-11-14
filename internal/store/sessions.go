@@ -1,6 +1,15 @@
 package store
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+// ErrTokenExpired marks an API token that exists but passed its expiry. It is
+// reported alongside ErrNotFound so callers that only care about validity keep
+// working, while the HTTP layer can answer token_expired without revealing
+// anything about another user's token.
+var ErrTokenExpired = errors.New("store: api token expired")
 
 // Session is one persisted browser session. IDHash is the SHA-256 digest of
 // the random cookie token; the plaintext token never reaches storage.

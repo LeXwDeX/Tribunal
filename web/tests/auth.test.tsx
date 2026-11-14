@@ -43,6 +43,18 @@ describe('authentication boundary', () => {
     expect(screen.getAllByText('会话已过期，请重新登录。')).toHaveLength(1)
   })
 
+  it('explains a session replaced by another login', async () => {
+    installFetch(() => jsonResponse({ error: { code: 'session_evicted', message: 'session was replaced by another login' } }, 401))
+    render(
+      <QueryClientProvider client={createTestQueryClient()}>
+        <MemoryRouter initialEntries={['/']}>
+          <App />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+    expect(await screen.findByText(/当前会话已在其他登录中被替换/)).toBeInTheDocument()
+  })
+
   it('hides the login action when the server reports OAuth disabled', async () => {
     installFetch((url) => {
       if (url.endsWith('/auth/status')) return jsonResponse({ oauth_enabled: false })

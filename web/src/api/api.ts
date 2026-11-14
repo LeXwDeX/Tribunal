@@ -457,6 +457,15 @@ export async function revokeApiToken(id: string | number): Promise<void> {
   await request<void>(`/api/v1/api-tokens/${segment(id)}`, { method: 'DELETE' })
 }
 
+// renewApiToken replaces the secret and expiry under the same name. The old
+// secret stops working immediately, so the plaintext must be copied again.
+export async function renewApiToken(id: string | number, expiresInDays: number): Promise<CreatedApiToken> {
+  return request<CreatedApiToken>(`/api/v1/api-tokens/${segment(id)}/renew`, {
+    method: 'POST',
+    body: { expires_in_days: expiresInDays },
+  })
+}
+
 // Access administration ----------------------------------------------------
 
 export async function listAdminUsers(cursor?: string): Promise<AdminUserPage> {

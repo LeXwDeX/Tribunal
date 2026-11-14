@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -123,6 +124,66 @@ func (s *Server) handleCreateAPIToken(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeError(w, r, http.StatusUnauthorized, "unauthorized", "browser session is no longer valid", nil)
+			return
+		}
+		s.writeStoreError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, createdAPIToken{APIToken: *token, Token: plaintext})
+}
+
+// tokenRenewer rotates one owned token in place. The narrow interface keeps
+// the token endpoint independent of the broader store surface.
+type tokenRenewer interface {
+	RenewAPIToken(ctx context.Context, userID int64, id string, tokenHash []byte, expiresAt time.Time) (*store.APIToken, error)
+}
+
+// handleRenewAPIToken replaces the secret and expiry of one owned token under
+// the same name. The old secret stops working immediately.
+func (s *Server) handleRenewAPIToken(w http.ResponseWriter, r *http.Request) {
+	user, ok := currentTokenUser(r)
+	if !ok {
+		writeError(w, r, http.StatusForbidden, "forbidden", "API tokens require a browser session", nil)
+		return
+	}
+	if s.tokens == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "internal", "token store is not configured", nil)
+		return
+	}
+	renewer, ok := s.tokens.(tokenRenewer)
+	if !ok {
+		writeError(w, r, http.StatusServiceUnavailable, "internal", "token renewal is unavailable", nil)
+		return
+	}
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" || len(id) > 128 {
+		validationFailed(w, r, "id", "id is required")
+		return
+	}
+	var request createAPITokenRequest
+	if err := decodeOptionalJSON(w, r, adminBodyLimit, &request); err != nil {
+		decodeRequestError(w, r, err)
+		return
+	}
+	days := apiTokenDefaultExpiresIn
+	if request.ExpiresInDays != nil {
+		days = *request.ExpiresInDays
+	}
+	if days < 1 || days > apiTokenMaxExpiresIn {
+		validationFailed(w, r, "expires_in_days", "expires_in_days must be between 1 and 365")
+		return
+	}
+	expiry := s.now().UTC().Add(time.Duration(days) * 24 * time.Hour)
+	plaintext, err := newAPIToken()
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "internal", "internal error", nil)
+		return
+	}
+	sum := sha256.Sum256([]byte(plaintext))
+	token, err := renewer.RenewAPIToken(r.Context(), user.ID, id, sum[:], expiry)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, r, http.StatusNotFound, "not_found", "token not found", nil)
 			return
 		}
 		s.writeStoreError(w, r, err)

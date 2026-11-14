@@ -124,6 +124,7 @@ func (e *authEnv) start() {
 		Tokens:   e.db,
 		Access:   e.db,
 		Logger:   newTestLogger(e.logs),
+		Now:      e.clock.Now,
 	})
 	if err != nil {
 		e.t.Fatalf("server.New: %v", err)

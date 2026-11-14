@@ -325,6 +325,7 @@ func New(cfg Config) (*Server, error) {
 	// API tokens (browser self-service; CSRF still applies).
 	mux.HandleFunc("GET /api/v1/api-tokens", s.apiAuth(s.guard(policyAuthenticated, s.handleListAPITokens)))
 	mux.HandleFunc("POST /api/v1/api-tokens", s.apiAuth(s.guard(policyAuthenticated, s.handleCreateAPIToken)))
+	mux.HandleFunc("POST /api/v1/api-tokens/{id}/renew", s.apiAuth(s.guard(policyAuthenticated, s.handleRenewAPIToken)))
 	mux.HandleFunc("DELETE /api/v1/api-tokens/{id}", s.apiAuth(s.guard(policyAuthenticated, s.handleDeleteAPIToken)))
 	// Access administration. The documented /admin surface and the /api/v1
 	// equivalent share handlers.
