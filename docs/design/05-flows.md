@@ -89,7 +89,7 @@ Anthropic 的输入用量将未缓存、缓存读取和缓存创建各计一次�
 4. 旧工作流不会发布任何内容。发布前同时检查代次与完整 fingerprint，拦住创建前取消、进程重启和迟到结果。
 5. 旧 job 结束后，新工作流开始 F1 第 4 步。即使 `jobs.workers=1`，控制路径也必须可执行。
 
-merge/close webhook 的自动取消只作用于仍有活跃或排队评审的 MR：从未评审过的 MR（没有 control/status 行，也没有活跃或排队的评审 job/workflow）与已有发布结果或已终态评审的 MR 会被忽略，webhook 结果为 `nothing_to_cancel`，不创建 control/status 行，也不产生「评审已取消」评论；已有发布结果时也不覆盖已发布的评审结论与 finding 列表。仍有活跃或排队评审时照常取消，状态变为 `cancelled`。已认证的 `/review cancel` 命令保持原有语义（见 F3）。
+merge/close webhook 的自动取消只在两种情况下被忽略：从未评审过的 MR（没有 control/status 行，也没有活跃或排队的评审 job/workflow），以及已终态但没有已发布正文的评审（如 failed/cancelled/stale 且 `final_body` 为空）；此时 webhook 结果为 `nothing_to_cancel`，不创建 control/status 行，也不产生「评审已取消」评论。已有已发布正文（`final_body` 非空且 `final_body_ready = 1`）的 MR 不再被忽略：取消照常推进 generation 并写入 `cancelled` 状态，但逐字保留 `final_body` 与 `final_body_ready`，合并评论只把生命周期头部改为取消阶段，原评审结论与 finding 列表不变。仍有活跃或排队评审时照常取消。`/review cancel` 命令与手工取消 API 的原有语义不变，只是同样保留已发布正文（见 F3）。
 
 ---
 
@@ -165,7 +165,7 @@ M0 先把命令持久化为 `review.command`，以下 GitLab 校验由 worker �
    4. 正常摘要、失败摘要和行内降级后的摘要使用相同恢复路径；恢复写入和重试前复核已存代次及非空 head。检查与在途 GitLab 请求不原子，不能保证旧写入绝不会发生。
    5. 同一条 note 由 publisher 与状态 worker 共同维护：publisher 先把 `final_body` 持久化并更新 note，写入失败按发布失败路径重试；状态 worker 之后用 `row.FinalBody` 渲染，两个写入方收敛到同一正文。状态作业自身的写入失败由 `review.status` 对账重试，不改变已完成的评审结论。
    6. Publisher 的 summary/commit status 写入按 MR 锁串行；状态 worker 使用独立的按项目/MR 状态锁，两者不共享同一把锁。GitLab 没有条件写入，超时或崩溃后的旧请求仍可能短暂覆盖新内容；两个写入方渲染同一正文，下一次更新会收敛，周期复核会恢复当前状态（见[状态评论恢复](../operations.md#状态评论恢复)）。
-   7. `review_status.final_body_ready = 0` 的历史行由状态 worker 继续用旧 `<!-- gitlab-ce-review:status` 标记原地更新旧状态评论，不按 summary 标记查找或改写已发布的评审报告评论；publisher 写入 `final_body` 后该行置为 1，转入上面的同一条 note 合并模式。旧状态评论在过渡期仍被识别和更新；行置为 1 后旧评论不再更新，也不会自动删除（GitLab 客户端没有删除 MR note 的能力），需要时人工清理。
+   7. `review_status.final_body_ready = 0` 的历史行由状态 worker 继续用旧 `<!-- gitlab-ce-review:status` 标记原地更新旧状态评论，不按 summary 标记查找或改写已发布的评审报告评论；publisher 写入 `final_body` 后该行置为 1，转入上面的同一条 note 合并模式。旧状态评论在过渡期仍被识别和更新；行置为 1 后旧评论不再更新，也不会自动删除（GitLab 客户端没有删除 MR note 的能力），需要时人工清理。取消不丢已发布结论：所有取消入口（webhook merge/close、`/review cancel`、手工取消 API）保留已发布的 `final_body` 与 `final_body_ready`，只更新生命周期头部；新评审导致的 generation 前进才清空正文，等待新发布重写。
 3. **行内讨论**：对 `decision ∈ {publish, mark}` 且 `position_ok` 的 finding：
    1. 用 `publish_key` 查 `publications(kind=discussion)`。跨工作流复用时，要求历史记录唯一匹配，且两条问题的侧别、非空侧别路径、类别一致，行号均为正数且相距不超过 3 行。空侧别按新侧处理；未知侧别、缺失路径或其他无法证明的情况不复用，当前问题留在摘要并提示发布标识冲突。同一工作流内的多个问题共用发布键时也留在摘要。无论是否同一工作流，正文哈希缺失或与当前渲染正文不同时，当前问题留在摘要并提示历史讨论未更新。哈希不能验证 GitLab 端的外部修改。复用的讨论仍归原工作流，反馈不会自动归因到新工作流。存疑条目的证据始终在汇总中保留，即使复用没有证据的旧行内讨论也可查看。历史讨论和记录不删除。
    2. 没有发布记录时先持久化意图，再 `POST .../discussions`，position 由 diff 索引生成；明确返回 400 则降级进汇总的「无法定位」区块。已有意图时不重复创建；未知远端 ID 须通过当前机器人身份和唯一首条标记恢复，否则保持待处理。
@@ -188,7 +188,7 @@ M0 先把命令持久化为 `review.command`，以下 GitLab 校验由 worker �
 ````
 
 - 阶段只有四类：`开始`（`received`、`queued`）、`进行中`（`running`、`publishing`）、`已完成`（`PASS`、`BLOCKING`、`INCOMPLETE`）、`失败`（`failed`、`cancelled`、`stale`）。`- 状态：` 行保留原始状态值。
-- `final_body` 为空（例如尚未结算，或 `final_body_ready = 0` 的历史行）时只显示生命周期状态；历史行此时继续写入旧 `<!-- gitlab-ce-review:status` 评论，而不是同一条 summary note。工作流结算后 publisher 写入结果并把该行置为 1，状态 worker 之后的更新继续携带同一个 `final_body`。`SetReviewStatus` 在新 generation 或 head 变化时清空 `final_body`，同代次（含 stale/cancel 更新）保留。
+- `final_body` 为空（例如尚未结算，或 `final_body_ready = 0` 的历史行）时只显示生命周期状态；历史行此时继续写入旧 `<!-- gitlab-ce-review:status` 评论，而不是同一条 summary note。工作流结算后 publisher 写入结果并把该行置为 1，状态 worker 之后的更新继续携带同一个 `final_body`。`SetReviewStatus` 在新评审或 head 变化时清空 `final_body`，同代次（含 stale/cancel 更新）保留；取消导致的 generation 前进在已有正文时通过 `PreserveFinalBody` 保留正文与 `final_body_ready`，只有生命周期头部变化，新评审才重置正文。
 - 升级前由旧版本创建的独立 summary note 和 `<!-- gitlab-ce-review:status` 状态评论不会被迁移或自动删除。`final_body_ready = 1` 的行只按 `<!-- gitlab-ce-review:summary` 查找和更新其中一条；`final_body_ready = 0` 的过渡期行仍由状态 worker 按旧 `:status` 标记原地更新旧状态评论，summary 评论不会被改写。行置为 1 之后旧状态评论不再更新，也不会自动删除；旧评论可能残留，需要时人工清理。
 
 2026-10-25 用户确认 Issue #3 按上述发布键边界验收：相同事件 UUID、相同发布键和同一评审的重复发布不新增重复评论。显式新评审可创建新代次；`publish_key` 包含路径、规范化标题和代码片段，模型换措辞可能生成不同键并再次发布同一问题。本版不承诺跨次评审的语义去重。

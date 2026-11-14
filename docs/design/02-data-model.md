@@ -324,7 +324,7 @@ CREATE TABLE review_status (
 );
 ```
 
-> `review_status` 每个 MR 一行，状态 worker 与 publisher 都按 `<!-- gitlab-ce-review:summary` 标记找到并更新同一条 note。`final_body` 保存已渲染的评审正文（通常是评审报告，也用于配置错误等用户可见说明）；`SetReviewStatusFinalBody` 按 128 × 1024 字符截断。终态后仍可写入：该方法要求当前 generation/head，写入后重置 `body_hash`、递增 `version` 并入队 `review.status`；`SetReviewStatus` 在新 generation 或 head 变化时清空 `final_body`，同代次（含 stale/cancel 更新）保留。`final_body_ready` 由 `0032` 引入：迁移时已有且 `final_body = ''` 的行回填 0，新行默认 1，`SetReviewStatusFinalBody` 写入正文时置 1。`final_body_ready = 0` 的历史行由状态 worker 继续用旧 `<!-- gitlab-ce-review:status` 标记原地更新旧状态评论，绝不接管 summary 评论；写入正文后转入同一条 summary note 的合并评论模式。
+> `review_status` 每个 MR 一行，状态 worker 与 publisher 都按 `<!-- gitlab-ce-review:summary` 标记找到并更新同一条 note。`final_body` 保存已渲染的评审正文（通常是评审报告，也用于配置错误等用户可见说明）；`SetReviewStatusFinalBody` 按 128 × 1024 字符截断。终态后仍可写入：该方法要求当前 generation/head，写入后重置 `body_hash`、递增 `version` 并入队 `review.status`；`SetReviewStatus` 在新评审或 head 变化时清空 `final_body`，同代次（含 stale/cancel 更新）保留；取消导致的 generation 前进在已有正文时通过写入目标上的 `PreserveFinalBody` 保留正文，该语句不改写 `final_body_ready`，因此正文与就绪标志随取消一起保留，只有生命周期头部变化。`final_body_ready` 由 `0032` 引入：迁移时已有且 `final_body = ''` 的行回填 0，新行默认 1，`SetReviewStatusFinalBody` 写入正文时置 1。`final_body_ready = 0` 的历史行由状态 worker 继续用旧 `<!-- gitlab-ce-review:status` 标记原地更新旧状态评论，绝不接管 summary 评论；写入正文后转入同一条 summary note 的合并评论模式。
 
 ```sql
 CREATE TABLE users (
