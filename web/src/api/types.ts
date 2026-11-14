@@ -43,7 +43,19 @@ export type ProviderPage = Page<Provider> & { providers: Provider[] }
 export type ProfilesPage = Page<Profile> & { profiles: Profile[] }
 export type ApiTokenPage = Page<ApiToken> & { tokens: ApiToken[] }
 export type ContextDocPage = Page<ContextDoc> & { documents: ContextDoc[] }
-export type CallPage = Page<LlmCall> & { calls: LlmCall[] }
+export type CallPage = Page<LlmCall> & { calls: LlmCall[]; retention?: CallRetention }
+
+export interface CallRetention {
+  llm_call_retention_hours?: number
+  purge_before?: string
+  details_purged?: boolean
+}
+
+export interface UnresolvedSignal {
+  node: string
+  kind: string
+  message: string
+}
 
 export interface AdminUser {
   id: number
@@ -191,6 +203,11 @@ export interface GraphNode {
   depends_on?: string[]
   provider?: string
   attempt?: number
+  duration_ms?: number
+  /** Durable failure class of a failed or skipped node. */
+  reason?: string
+  /** Deterministic node that never calls a model. */
+  token_free?: boolean
 }
 
 export interface GraphEdge {
@@ -282,6 +299,10 @@ export interface ReviewDetail extends ReviewSummary {
   error?: string
   cancel_reason?: string
   fingerprint?: string
+  /** Review-level diagnostics persisted with the synthesize node. */
+  summary?: string
+  warnings?: string[]
+  unresolved?: UnresolvedSignal[]
 }
 
 export interface Finding {
@@ -334,6 +355,13 @@ export interface ReviewNodeDetail {
   usage?: NodeUsage
   started_at?: string
   finished_at?: string
+  /** Durable failure class of a failed or skipped node. */
+  reason?: string
+  /** Deterministic node that never calls a model. */
+  token_free?: boolean
+  /** The node spent tokens and finished before the call retention cutoff. */
+  calls_purged?: boolean
+  calls_retention_hours?: number
 }
 
 export interface LlmCall {

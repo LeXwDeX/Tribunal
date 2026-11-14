@@ -26,6 +26,43 @@ const WORKSPACE_HINTS: Record<string, string> = {
   'onboarding: model provider unavailable': '模型服务不可用或过载，请稍后重试',
   'onboarding: model call timed out': '模型调用超时，请稍后重试',
   'onboarding: model call failed': '模型调用失败，请查看服务日志中的 error_class',
+  // The workspace indexer refuses to index by policy. This is a safe
+  // configuration outcome, not a failure.
+  'index: blocked by ignore policy': '已按 ignore 策略跳过索引，这是安全配置，不是故障。修改项目 ignore 配置后可重建索引',
+}
+
+// NODE_REASON_HINTS translates the durable DAG failure classes into an
+// actionable sentence. An unknown class is shown verbatim so operators can
+// match the server logs instead of losing the evidence.
+const NODE_REASON_HINTS: Record<string, string> = {
+  required_node_failed: '必需的前置节点失败，该节点未执行，评审范围因此不完整。',
+  budget_exhausted: '工作流 token 预算耗尽，该节点未执行。',
+  queue_timeout: '节点排队超时，未开始执行。',
+  timeout: '节点执行超时。',
+  executor_error: '节点执行失败。',
+  sandbox_denied: '证据沙箱或 ignore 策略拒绝了访问路径，这是安全配置。',
+  invalid_output: '模型输出未通过校验，节点结果未被采用。',
+  rate_limited: '模型服务限流，节点未完成。',
+  auth: '模型服务拒绝了凭据，节点未完成。',
+  unavailable: '模型服务不可用，节点未完成。',
+  panic: '节点执行器异常，节点未完成。',
+  canceled: '评审被取消，节点未完成。',
+}
+
+export function describeNodeReason(reason: string | undefined, status?: string): string | null {
+  if (reason) {
+    const hint = NODE_REASON_HINTS[reason]
+    return hint ? `${hint}（${reason}）` : `节点未完成（原因代码：${reason}）。`
+  }
+  if (status === 'skipped') return '该节点已跳过，评审范围不完整。'
+  if (status === 'failed') return '节点执行失败，服务端没有返回原因代码。'
+  return null
+}
+
+export function unresolvedKindLabel(kind: string): string {
+  if (kind === 'evidence_gap') return '证据缺口'
+  if (kind === 'review_blocking') return '评审阻断'
+  return '未解决信号'
 }
 
 export function describeWorkspaceError(message: string): string {
