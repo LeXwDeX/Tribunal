@@ -1118,6 +1118,21 @@ profiles:
 **旧行内讨论**：评论模板变化（标题格式、正文 400 字符）不改变 `publish_key`；旧讨论的正文哈希与按新模板渲染的正文不同，复用判定按现有安全策略把当前 finding 只放进汇总并追加警告，不修改旧讨论，也不会因此重复发布。服务不会自动改写或删除旧讨论，这是预期行为；需要核对时按 MR 人工检查发布记录和讨论正文。
 
 **评论文案本地化与截断（#456）**：MR 评论不展示内部节点 ID（`cr.p1`、`rv.p1` 等）和英文机器诊断。结论为 INCOMPLETE 时，评论显示「已评审范围的结论 + 中文未完成原因 + 下一步」；已知的上游模板映射为中文，未匹配的机器文本降级为通用中文提示，原始消息仍保存在工作流输出和控制台。标题、相关描述摘录、评审提示和汇总正文按句界截断并补「…」；正文超过 400 字的产品上限时，行内讨论追加「完整正文见控制台」。这些只改变评论渲染：存储的 finding、票数、裁决和 verdict 不变。超长 reasoner 标题会在入库前按句界截断，因此其标题文本与随标题计算的 `publish_key` 可能与升级前不同；其他条目的发布键规则不变。
+### 评审提交收敛与失败归因（#454）
+
+**默认值不变**：`budget.max_turns` 仍为 0，0 或负数表示不限制模型请求数；工作流 `budget.deadline` 仍为 0，表示不设 deadline；评审 agent 节点仍默认无节点级 deadline。本节不新增配置项，挂载配置无需修改。
+
+**收敛提示**：无回合上限时，每 10 个已完成的模型回合，或累计新增 250000 个输入+输出 token（两者先到者），服务在发往模型的下一次请求末尾追加一条提示，要求证据足够时立即调用 `submit_result`，否则只做结果仍需要的少量工具调用。该提示只存在于当次请求，不写入对话记录，也不改变工具权限（工具仍可执行）。LLM 调用审计的 `submit_prompt` 不记录该提示，仍只记 `last_turn` / `context` / `deadline` / `budget`。
+
+**临近工作流 deadline**：评审节点执行器读取工作流投影中的 deadline，仅当它早于节点级 deadline 时设置到节点 context，因此配置了 `budget.deadline` 时，agent 循环的“最后一轮”提交提示会按工作流 deadline 触发：剩余时间小于 `max(2 × 已观测最慢单轮耗时, 运行开始时剩余时间的 1/8)` 后，每次请求都追加提示，该轮只执行 `submit_result`，其他工具调用返回“只执行 submit_result”的错误结果、不真正执行。运行仍会在 `submit_result`、上下文窗口、调用方 token 预算或 context deadline 时结束。
+
+**显式正数 `max_turns` 的末轮兜底**：到达上限的那一轮没有产出合法 `submit_result`（提交被校验拒绝、模型只返回文本结束回合，或工具调用被拒）时，追加最多 2 个仅允许 `submit_result` 的 grace turn。grace turn 仍失败时，agent 运行返回已收集的部分状态（`RunResult.Partial=true`，仍含 turns、usage、transcript），执行器把它包装为 `review.PartialRunError`（固定失败类、回合数、用量、不完整标记、部分结果），节点层可据此把该 lane 降级为 evidence gap。默认不设限的语义不变。
+
+**失败类与可展示原因**：新增固定失败类 `no_submit`（`agent.ErrNoSubmit`）、`invalid_submit`（`agent.ErrInvalidSubmit`）、`context_too_long`（上游上下文超限）、`budget_exhausted`（工作流 token 预算耗尽）；`queue_timeout` 保持原有独立类。这五类不再归入 `executor_error`，unsafe/canceled/timeout 等 fail-closed 分类优先级不变。失败事件持久化净化后的固定原因（只含固定词和计数），节点错误列与详情接口可展示为 `submit_result missing`、`submit_result missing after N turns`、`submit_result rejected`、`submit_result rejected after N turns`、`model context window exceeded`、`workflow token budget exhausted`、`workflow token budget exhausted (used of max tokens)`、`queue wait exceeded node timeout`；用量、上限和回合数只以数字出现。DAG 引擎只通过可选接口接收这种固定原因，长度上限 160 字符，且只允许字母、数字和固定标点（空格 `_ - . , ( ) = / :`）；出现其他字符或超长时整条原因被丢弃并回退为 `node execution failed`，上游原始正文不会进入事件日志或数据库。
+
+**可观测性**：每个经节点执行器失败的节点记录一条 WARN 日志 `review node failed`，字段为 `workflow_id`、`node_id`、`node_kind`、`error_kind`（固定类，未知为 `executor_error`）、`turns`、`input_tokens`、`output_tokens`、`usage_incomplete`，不记录错误正文。评审节点列表接口返回的节点新增可选 `failure` 字段（仅失败节点，净化后的固定原因）；节点详情接口的 `error` 也返回同一固定原因，未知的历史文本仍统一显示 `node failed`。`reason` 仍是固定失败类；没有事件日志的旧数据会按固定原因前缀还原 `no_submit`、`invalid_submit`、`context_too_long`、`budget_exhausted`、`queue_timeout`。`skipped` 节点不再同时返回节点错误：详情接口省略 `error`，保留 `status=skipped` 和 `reason`。
+
+**兼容性**：不新增配置项、不改默认值语义、不需要数据库迁移（沿用既有错误列和用量列）。失败事件的既有字段（`error`、`error_kind`、`reason`、`usage`、`usage_incomplete`）不变，只是 `error` 现在可能是上述固定原因，`error_kind` / `reason` 可能是新增的固定类。
 
 ### 通用升级与回滚步骤
 
