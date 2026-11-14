@@ -78,7 +78,8 @@ web/
 | 区块 | 内容 | API |
 |---|---|---|
 | 头部 | MR 标题与链接、head sha、档位、触发方式、状态、结论、项目 `access`；操作按 `manage` 显示取消、重新发布、在 GitLab 中打开 | `GET /reviews/{id}` |
-| 未完成原因/评审诊断 | INCOMPLETE 评审或存在警告/未解决信号时显示「未完成原因」/「评审诊断」面板，展示 review 级 `summary`、`warnings`、`unresolved`；结论卡片区分未评审、评审失败与已审范围 | `GET /reviews/{id}` |
+| 未完成原因/评审诊断 | INCOMPLETE 评审或存在警告/未解决信号时显示「未完成原因」/「评审诊断」面板，展示 review 级 `summary`、`warnings`、`unresolved` 与 dossier 的 `material_warnings`（评审材料降级：受限 ignore、上下文未校验、base 不可用、背景截断）；结论卡片区分未评审、评审失败与已审范围 | `GET /reviews/{id}` |
+| 评审范围 | 有 `scope` 时显示全量/增量、上次→本次 head、覆盖文件数、无法定位问题数；`generated_files > 0` 时显示跳过的生成文件数量与路径（最多 12 条）。只展示 API 返回的字段，旧评审没有 `scope` 时不推断为全量 | `GET /reviews/{id}` |
 | DAG 视图 | 按层排列节点，颜色表示状态，点击打开节点抽屉 | `GET /reviews/{id}/graph` + SSE |
 | Findings | 表格：级别、标题、文件:行、来源（节点 / provider）、挑战结果、处置、处置理由；可按处置和级别过滤；展开看正文、证据和人工标注 | `GET /reviews/{id}/findings`、`PUT .../findings/{finding_id}/annotation` |
 | 发布 | `publication_state`、脱敏的 `publication_error`、汇总评论链接、行内讨论数量、commit status；failed 可重试，pending 等待发布完成（启动恢复或手动重试），skipped 显示原因且不重发 | 详情中的 `publication_state`、`publication_error`、`publications` |
@@ -138,7 +139,10 @@ web/
 ### 3.8 统计与反馈
 
 - 当前页面展示总体及按项目、provider、块的运行数、平均/P95 耗时、有效耗时样本数与 UTC 日趋势。项目统计工作流；provider/块统计已启动节点，每个当前节点行只计一次，不按 LLM 调用轮次或重试次数累加，无 provider 的代码节点只进入块统计。
-- 「评审口径」面板读取 `GET /api/v1/stats/reviews`，只统计 `kind=review`：`blocking_ratio` 以评审为分母，`all_*` 提供含 onboarding 的并列分母，便于和总体统计对照。所选 `from` 早于调用明细保留截止点时显示 `model_details_purged` 提示，说明模型明细已删除，零值不代表模型未被使用。
+- 「评审口径」面板读取 `GET /api/v1/stats/reviews`，只统计 `kind=review`：`blocking_ratio` 以评审为分母，`all_*` 提供含 onboarding 的并列分母，便于和总体统计对照。`model_details_purged=true` 时提示模型明细已删除、零值不代表模型未被使用；该字段与总体统计同为数据驱动，没有调用时为 `false`。
+- 「反馈采集健康」面板展示 `feedback_collection.last_collected_at`、`last_error_class`、`last_error_at`；有错误类别时用 `role="alert"`，成功后清除。字段缺失显示“不可用”，不显示为健康。
+- 「工作区容量」面板展示 `workspace_capacity.measured_at`、`total_bytes`、`limit_bytes`、`over_limit`；`over_limit=true` 时用 `role="alert"` 告警，`limit_bytes=0` 显示“未配置”而不是零容量。回收默认禁用。
+- 「按模型」表展示 `by_model[].calls`、`errors`、`error_rate`、token、平均延迟和 `errors_by_kind` 固定类别徽标；不显示上游错误正文。
 - 趋势用可横向滚动的日期表格；每个项目/provider/块可展开每日明细。筛选和日桶按 workflow 创建时间，日桶用 UTC；只返回有记录的日，不补零。节点指标仅表示最新一次尝试，不代表完整重试历史。
 - 运行次数含评审和 onboarding；`overturned_ratio` 标为「规则丢弃比例」，是规则裁决 `drop` 的占比，不是「被挑战推翻」或模型准确率。
 - 旧响应缺字段显示不可用，已知空数组显示空状态，非法趋势不显示部分合计。
@@ -146,7 +150,7 @@ web/
 
 ### 3.9 系统
 
-- 标签：API Token、平台配置（只读）、用户与账号、项目授权；平台配置、用户与账号、项目授权只对平台管理员显示。
+- 标签：API Token、Webhook 投递、平台配置（只读）、用户与账号、项目授权；平台配置、用户与账号、项目授权只对平台管理员显示。「Webhook 投递」对已登录用户可见，只读展示按项目与 MR 聚合的投递数量、最后投递时间、入队/忽略/拒绝计数与忽略原因；无 MR 的投递归入“未知 MR”。数据来自 `GET /api/v1/webhook-deliveries`，按调用者项目访问权限过滤。
 - API Token 标签在到期前 14 天显示提示；「续期」按同名签发新明文并立即让旧明文失效，新明文只显示一次。
 - 会话签名有效且未过期、但存储行已被每账号最多 10 个会话的上限淘汰时，控制台提示「已在其他登录中被替换」，需要重新登录。
 - 用户与账号列表中，配置来源账号（`role_source=config`）和当前登录账号的「停用账号」按钮禁用并显示原因；服务端拒绝时使用 `protected_user` 专门文案。

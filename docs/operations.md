@@ -384,7 +384,7 @@ fi
 
 包含 #164 的版本在请求体读取返回超时错误时回复 `503 {"ignored":"request_timeout","request_id":...}`，未读取完整的请求不会进入投递去重或入队；连接中断时 GitLab 未必收到响应。存储或入队失败仍返回 `503`，超大请求体和其他非超时读取错误仍返回 `200`。连续的 4xx/5xx 或连接失败可能使 GitLab 临时或永久停用 hook；触发条件、限制和功能开关随 GitLab 版本与实例配置而异，按该实例的 [GitLab webhook 文档](https://docs.gitlab.com/user/project/integrations/webhooks/#auto-disabled-webhooks)核对，不要依赖固定次数。
 
-认证失败的投递现在会写入投递记录（`outcome=rejected`、`reason=invalid_secret`），使用与真实投递不同的去重 UUID，不会冒充 GitLab 的重发。启动追赶扫描会核对每个已登记 hook 是否仍存在、是否被 GitLab 停用（`alert_status=disabled/temporarily_disabled`）并回写项目健康：缺失/停用/项目 token 被拒绝时项目在控制台标红；本功能写入的停用或缺失状态在 hook 恢复后自动清除。该核对目前只在启动扫描时执行，尚无独立周期任务；最后成功投递时间也尚未提供查询接口。
+认证失败的投递现在会写入投递记录（`outcome=rejected`、`reason=invalid_secret`），使用与真实投递不同的去重 UUID，不会冒充 GitLab 的重发。启动追赶扫描会核对每个已登记 hook 是否仍存在、是否被 GitLab 停用（`alert_status=disabled/temporarily_disabled`）并回写项目健康：缺失/停用/项目 token 被拒绝时项目在控制台标红；本功能写入的停用或缺失状态在 hook 恢复后自动清除。除启动检查外，服务每 30 分钟对所有已启用且记录了 `hook_id` 的项目后台核对一次；单个项目失败只记 WARN 并保留原状态，不中断整轮。恢复后只清除本功能写入的三种固定失败文案（停用、缺失、token 被拒绝），其他来源的失败状态保持不动。`GET /api/v1/webhook-deliveries` 按项目与 MR 聚合保留期内的投递，返回入队/忽略/拒绝计数、忽略原因、最后投递时间和 `rejected/invalid_secret` 数量；控制台「系统 → Webhook 投递」只读展示，按调用者项目访问权限过滤。该接口不返回请求正文、header 或 secret，未认证投递也不会改变项目健康。投递记录随 `storage.delivery_retention`（默认 14 天）清理。
 
 运维应监控 GitLab 的 hook 状态及失败投递，先排除 Tribunal、网络或反向代理的故障，再检查 GitLab 的「Recent events」。在记录仍可用且版本支持时，有权限的人员可用「Resend Request」手动重发；若重发保留原有效 `X-Gitlab-Event-UUID`，此前没有去重记录，且认证和事件过滤均通过，则可再次入队。不要假定所有 GitLab 版本的重发都保留该字段。Recent events 有保留和重发条件限制，无法保证每次失败都可重发，也不代表 GitLab 一定自动重试。对不可重发或未投递的事件，核对 GitLab 与评审状态后按权限采取人工补救；hook 若仍停用，依该 GitLab 版本检查是否需要手动恢复。请求详情可能含 secret 和请求体，不要复制到日志或聊天。操作说明见 [GitLab 请求历史](https://docs.gitlab.com/user/project/integrations/webhooks/#inspect-request-and-response-details)。
 
@@ -1147,7 +1147,19 @@ profiles:
 
 **配置默认禁用**：`workspace.max_bytes` 与 `workspace.reclaim_after` 默认均为 0，启用前不测量容量也不回收工作区；需要时在挂载配置中设置正数并重启，负数会被配置校验拒绝。工作区维护在每次 run cleanup 中执行：清理不再被保护的 `refs/merge-requests/<iid>/head` 后运行 `git gc --quiet --auto`，保护查询失败时跳过该项目的 ref 清理与 gc。启用回收后，长期不活跃项目的整个工作区目录可被删除，但无本进程注册 run、保护集合、活动时间、直接子目录与有效 managed marker 必须全部满足；被回收目录会在下次刷新或 onboarding 时重建。
 
-**按模型统计与 `model_details_purged`**：`GET /api/v1/stats` 的 `by_model` 在明细仍存在时使用明细（精确、含精确 p50），早于 `storage.llm_call_retention` 的区间改由三张聚合表提供（按 UTC 日粒度，边界日可能少计当天早期已删除的调用），因此按模型统计在明细清理后仍可用。窗口内混用了聚合数据时返回 `model_details_purged=true`；该字段与 `GET /api/v1/stats/reviews` 上 #458 的同名字段相互独立（后者仍按配置保留期判断）。`by_model[]` 新增 `errors_by_kind`。项目删除时同步删除该项目的三张聚合表行；聚合表不随明细保留期删除。
+**按模型统计与 `model_details_purged`**：`GET /api/v1/stats` 的 `by_model` 在明细仍存在时使用明细（精确、含精确 p50），早于 `storage.llm_call_retention` 的区间改由三张聚合表提供（按 UTC 日粒度，边界日可能少计当天早期已删除的调用），因此按模型统计在明细清理后仍可用。窗口内混用了聚合数据时返回 `model_details_purged=true`；`GET /api/v1/stats/reviews` 的同名字段使用同一数据驱动判定，窗口内没有调用时为 `false`（不再按配置保留期推断）。`by_model[]` 新增 `errors_by_kind`。项目删除时同步删除该项目的三张聚合表行；聚合表不随明细保留期删除。
+
+### 集成接缝与降级可见性（#466）
+
+**迁移 `0034_webhook_delivery_mr`（只追加，无 down migration）**：为 `webhook_deliveries` 追加 `mr_iid INTEGER NOT NULL DEFAULT 0` 与 `(project_id, mr_iid, received_at)` 索引，并从关联 job payload 的 `mr_iid` 回填有 job 的历史行；ignored/rejected 历史行没有 job，保持 0（控制台显示“未知 MR”）。迁移可重复执行，回滚需恢复升级前快照并启动匹配的旧二进制。新投递在事件可识别时记录 MR：Merge Request Hook 取 `object_attributes.iid`，Note Hook 取 `noteable_iid`（`object_attributes.iid` 是 note ID），Push Hook 不记录。
+
+**lane 降级与证据缺口**：评审 lane 在 `no_submit`、`invalid_submit`、`context_too_long` 且未被取消时，不再丢弃整条 lane。执行器从 `PartialRunError.Result` 的已解码输出或 transcript 中最后一次 `submit_result` 尝试恢复 finding（每条单独校验，最多 50 条），节点以 `PartialLaneOut` 完成；`gather` 仍写入携带 `error_kind`、回合数与输入/输出 token 的 evidence gap，因此 verdict 不会变成 `PASS`，已有 P0/P1 的 `BLOCKING` 保持。unsafe、取消、timeout 和 token 预算仍按原失败语义处理。降级另记一条 WARN `review lane downgraded to evidence gap`（含 `recovered_findings`），不记录错误正文。
+
+**引擎 WARN**：`pkg/dag` 新增可选 `Logger`；未注入时行为完全不变。调度器直接产生的 `queue_timeout`（排队判定与等待许可两条路径）、`expand_failed`、`invalid_output` 各记一条 WARN `dag node failed`，字段为 `workflow_id`、`node_id`、`node_kind`、`error_kind`，不含错误正文或凭据。生产装配已接入统一 logger。
+
+**评审详情与统计的降级可见性**：评审详情新增 `material_warnings`（dossier 的材料降级）、`scope`（全量/增量、head、文件数、无法定位数）、`generated_files`/`generated_paths`；控制台在“未完成原因/评审诊断”区展示材料降级，并新增“评审范围”面板。统计页展示 `feedback_collection`、`workspace_capacity`（超限 `role="alert"`）与 `by_model[].errors_by_kind`。旧服务端缺少这些字段时显示“不可用”，不显示为零或健康。
+
+**历史讨论 intent 清理**：项目删除时仍保留 `discussion_intents` 并把 `verification_required` 置 1（远端讨论仍在），但已删除项目的行永远无法再被确认。Retention 巡检新增 `PurgeOrphanedDiscussionIntents`，只删除项目已不存在的行；存活项目（包括未确认 intent）不受影响。该清理随 retention 启动时立即执行一次，之后按保留间隔运行。
 
 ### 通用升级与回滚步骤
 
