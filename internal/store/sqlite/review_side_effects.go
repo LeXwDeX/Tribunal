@@ -240,7 +240,8 @@ func (s *Store) SetReviewStatusFinalBody(ctx context.Context, projectID, mrIID, 
 		return false, nil
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE review_status
-		SET final_body = ?, body_hash = '', version = version + 1, last_error = '', updated_at = ?
+		SET final_body = ?, final_body_ready = 1, body_hash = '', version = version + 1,
+		    last_error = '', updated_at = ?
 		WHERE project_id = ? AND mr_iid = ?`,
 		body, formatTime(now), projectID, mrIID); err != nil {
 		return false, fmt.Errorf("sqlite: write review status body: %w", err)
@@ -435,7 +436,8 @@ func scanReviewStatus(row rowScanner) (*store.ReviewStatus, error) {
 		updatedRaw string
 	)
 	if err := row.Scan(&status.ProjectID, &status.MRIID, &status.Generation, &status.HeadSHA,
-		&status.Attempt, &status.Profile, &status.State, &status.Detail, &status.FinalBody, &noteID,
+		&status.Attempt, &status.Profile, &status.State, &status.Detail, &status.FinalBody,
+		&status.FinalBodyReady, &noteID,
 		&status.BodyHash, &status.Version, &status.AppliedVersion, &status.LastError,
 		&updatedRaw); err != nil {
 		return nil, err
@@ -450,7 +452,7 @@ func scanReviewStatus(row rowScanner) (*store.ReviewStatus, error) {
 }
 
 const reviewStatusColumns = `project_id, mr_iid, generation, head_sha, attempt, profile,
-	state, detail, final_body, note_id, body_hash, version, applied_version, last_error, updated_at`
+	state, detail, final_body, final_body_ready, note_id, body_hash, version, applied_version, last_error, updated_at`
 
 func getReviewStatusTx(ctx context.Context, tx *sql.Tx, projectID, mrIID int64) (*store.ReviewStatus, bool, error) {
 	status, err := scanReviewStatus(tx.QueryRowContext(ctx,

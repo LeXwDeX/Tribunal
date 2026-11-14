@@ -138,9 +138,14 @@ func (s *Store) RecordReviewDelivery(ctx context.Context, d store.Delivery, comm
 			// The deferred rollback also drops the delivery row.
 			return store.ReviewEnqueueResult{Skipped: true}, nil
 		}
-		jobID, generation, duplicate, err := s.enqueueReviewTx(ctx, tx, *command, now)
+		jobID, generation, duplicate, skipped, err := s.enqueueReviewTx(ctx, tx, *command, now)
 		if err != nil {
 			return store.ReviewEnqueueResult{}, err
+		}
+		if skipped {
+			// The deferred rollback also drops the delivery row, so a resend
+			// re-evaluates the same unchanged state.
+			return store.ReviewEnqueueResult{Skipped: true}, nil
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE webhook_deliveries SET job_id = ?
 			WHERE project_id = ? AND uuid = ?`, jobID, d.ProjectID, d.UUID); err != nil {
@@ -173,9 +178,14 @@ func (s *Store) EnqueueReviewLatest(ctx context.Context, command store.ReviewCom
 	}
 	defer tx.Rollback()
 
-	jobID, generation, duplicate, err := s.enqueueReviewTx(ctx, tx, command, now)
+	jobID, generation, duplicate, skipped, err := s.enqueueReviewTx(ctx, tx, command, now)
 	if err != nil {
 		return store.ReviewEnqueueResult{}, err
+	}
+	if skipped {
+		// No write is needed; the deferred rollback also drops a reserved
+		// command identity so a later retry re-evaluates the same state.
+		return store.ReviewEnqueueResult{Skipped: true}, nil
 	}
 	if err := tx.Commit(); err != nil {
 		return store.ReviewEnqueueResult{}, fmt.Errorf("sqlite: commit review enqueue: %w", err)
@@ -186,52 +196,65 @@ func (s *Store) EnqueueReviewLatest(ctx context.Context, command store.ReviewCom
 // enqueueReviewTx validates the command, increments review_controls, builds the
 // job payload with the assigned generation, and enqueues it. All writes share
 // the caller's transaction. A duplicate command identity returns the original
-// job ID with generation zero and writes nothing.
-func (s *Store) enqueueReviewTx(ctx context.Context, tx *sql.Tx, command store.ReviewCommand, now time.Time) (string, int64, bool, error) {
+// job ID with generation zero and writes nothing. A cancel with nothing live
+// to stop returns skipped=true and writes nothing (#453).
+func (s *Store) enqueueReviewTx(ctx context.Context, tx *sql.Tx, command store.ReviewCommand, now time.Time) (string, int64, bool, bool, error) {
 	if command.ProjectID <= 0 {
-		return "", 0, false, errors.New("sqlite: review command project id is required")
+		return "", 0, false, false, errors.New("sqlite: review command project id is required")
 	}
 	if command.MRIID <= 0 {
-		return "", 0, false, errors.New("sqlite: review command mr iid is required")
+		return "", 0, false, false, errors.New("sqlite: review command mr iid is required")
 	}
 	head, err := normalizeReviewHead(command.HeadSHA, command.Cancel)
 	if err != nil {
-		return "", 0, false, err
+		return "", 0, false, false, err
 	}
 	if err := requireProjectTx(ctx, tx, command.ProjectID); err != nil {
-		return "", 0, false, err
+		return "", 0, false, false, err
+	}
+	if command.Cancel {
+		needed, err := s.cancelReviewNeededTx(ctx, tx, command)
+		if err != nil {
+			return "", 0, false, false, err
+		}
+		if !needed {
+			// Closing an unreviewed MR or a merge request whose result is
+			// already published must not create a control/status row or a
+			// cancellation comment (#453).
+			return "", 0, false, true, nil
+		}
 	}
 	identity, replay, err := commandReplayIdentity(command)
 	if err != nil {
-		return "", 0, false, err
+		return "", 0, false, false, err
 	}
 	if replay {
 		jobID, duplicate, err := reserveCommandReplayTx(ctx, tx, command, identity, now)
 		if err != nil {
-			return "", 0, false, err
+			return "", 0, false, false, err
 		}
 		if duplicate {
-			return jobID, 0, true, nil
+			return jobID, 0, true, false, nil
 		}
 	}
 
 	generation, err := bumpReviewControlTx(ctx, tx, command, head, now)
 	if err != nil {
-		return "", 0, false, err
+		return "", 0, false, false, err
 	}
 	control, err := getReviewControlTx(ctx, tx, command.ProjectID, command.MRIID)
 	if err != nil {
-		return "", 0, false, err
+		return "", 0, false, false, err
 	}
 	if err := s.recordReviewSideEffectsTx(ctx, tx, command, control, generation, now); err != nil {
-		return "", 0, false, err
+		return "", 0, false, false, err
 	}
 	if command.MaxAttempts == 0 {
 		command.MaxAttempts = defaultReviewMaxAttempts
 	}
 	payload, err := reviewJobPayload(command, head, generation)
 	if err != nil {
-		return "", 0, false, err
+		return "", 0, false, false, err
 	}
 	kind, key := reviewJobKindKey(command)
 	job := store.Job{
@@ -241,18 +264,82 @@ func (s *Store) enqueueReviewTx(ctx context.Context, tx *sql.Tx, command store.R
 		MaxAttempts: command.MaxAttempts,
 	}
 	if err := s.prepareJob(&job, now); err != nil {
-		return "", 0, false, err
+		return "", 0, false, false, err
 	}
 	jobID, _, err := enqueueTx(ctx, tx, &job, true)
 	if err != nil {
-		return "", 0, false, err
+		return "", 0, false, false, err
 	}
 	if replay {
 		if err := attachCommandReplayTx(ctx, tx, command, identity, jobID); err != nil {
-			return "", 0, false, err
+			return "", 0, false, false, err
 		}
 	}
-	return jobID, generation, false, nil
+	return jobID, generation, false, false, nil
+}
+
+// cancelReviewNeededTx reports whether a cancel has live work to stop. Only an
+// automatic webhook close/merge may be dropped: it must not rewrite a published
+// result and a never-reviewed merge request must not gain review state or a
+// cancellation comment (#453). An authenticated /review cancel keeps its
+// replay, quarantine and supersession semantics.
+func (s *Store) cancelReviewNeededTx(ctx context.Context, tx *sql.Tx, command store.ReviewCommand) (bool, error) {
+	if reviewCommandTrigger(command.Payload) != "webhook" {
+		return true, nil
+	}
+	status, found, err := getReviewStatusTx(ctx, tx, command.ProjectID, command.MRIID)
+	if err != nil {
+		return false, err
+	}
+	if found && status.FinalBodyReady && strings.TrimSpace(status.FinalBody) != "" {
+		return false, nil
+	}
+	active, err := reviewWorkActiveTx(ctx, tx, command.ProjectID, command.MRIID)
+	if err != nil {
+		return false, err
+	}
+	if active {
+		return true, nil
+	}
+	if !found {
+		return false, nil
+	}
+	return !reviewStatusTerminal(status.State), nil
+}
+
+func reviewCommandTrigger(payload json.RawMessage) string {
+	var meta struct {
+		Trigger string `json:"trigger"`
+	}
+	if len(payload) == 0 || json.Unmarshal(payload, &meta) != nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(meta.Trigger))
+}
+
+func reviewWorkActiveTx(ctx context.Context, tx *sql.Tx, projectID, mrIID int64) (bool, error) {
+	prefix := strconv.FormatInt(projectID, 10) + ":" + strconv.FormatInt(mrIID, 10)
+	var one int
+	err := tx.QueryRowContext(ctx, `SELECT 1 FROM jobs
+		WHERE "key" IN (?, ?, ?) AND state IN (?, ?) LIMIT 1`,
+		"review:"+prefix, "review.cancel:"+prefix, "review.candidate:"+prefix,
+		store.JobQueued, store.JobRunning).Scan(&one)
+	if err == nil {
+		return true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return false, fmt.Errorf("sqlite: check active review jobs: %w", err)
+	}
+	err = tx.QueryRowContext(ctx, `SELECT 1 FROM workflows
+		WHERE project_id = ? AND mr_iid = ? AND kind = 'review'
+		  AND status IN ('pending', 'running') LIMIT 1`, projectID, mrIID).Scan(&one)
+	if err == nil {
+		return true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return false, fmt.Errorf("sqlite: check active review workflow: %w", err)
+	}
+	return false, nil
 }
 
 // Legacy review payloads passed numbers through float64; their reactions

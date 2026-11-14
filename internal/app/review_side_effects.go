@@ -193,7 +193,13 @@ func (s *ReviewService) RunStatusJob(ctx context.Context, job *jobs.Job) error {
 		Detail:     row.Detail,
 		HeadSHA:    row.HeadSHA,
 		Generation: row.Generation,
-		FinalBody:  row.FinalBody,
+		// Rows written before the merged note (#451) have no final body and
+		// keep updating their legacy status note; their published summary is a
+		// different note this writer must never take over (#453).
+		LegacyMarker: !row.FinalBodyReady,
+	}
+	if row.FinalBodyReady {
+		update.FinalBody = row.FinalBody
 	}
 	switch row.State {
 	case reviewStatusQueued, reviewStatusRunning, reviewStatusPublishing:

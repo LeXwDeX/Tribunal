@@ -98,8 +98,9 @@ type ReviewEnqueueResult struct {
 	JobID      string
 	Duplicate  bool
 	Generation int64
-	// Skipped reports that Expect no longer matched the review control, so
-	// nothing was written (the delivery is not consumed either).
+	// Skipped reports that nothing was written: either Expect no longer
+	// matched the review control, or a cancel had no live review to stop and
+	// no published result it may rewrite (#453). The delivery is not consumed.
 	Skipped bool
 }
 
@@ -198,7 +199,12 @@ type ReviewStatus struct {
 	Detail     string `json:"detail,omitempty"`
 	// FinalBody is the rendered review summary placed in the same status note
 	// once the workflow settles (#451). Empty means a status-only body.
-	FinalBody      string    `json:"final_body,omitempty"`
+	FinalBody string `json:"final_body,omitempty"`
+	// FinalBodyReady reports whether this row belongs to the merged note. Rows
+	// written before #452 keep final_body empty and stay on the legacy status
+	// marker so the status worker cannot overwrite a published summary. A new
+	// row or a publication writing final_body sets it.
+	FinalBodyReady bool      `json:"final_body_ready,omitempty"`
 	NoteID         int64     `json:"note_id,omitempty"`
 	BodyHash       string    `json:"body_hash,omitempty"`
 	Version        int       `json:"version"`

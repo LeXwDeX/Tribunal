@@ -368,7 +368,11 @@ func TestSummaryDeleted164Recheck404IsNotNote404(t *testing.T) {
 		}
 		return nil
 	}
-	_, err := f.publisher.upsertSummary(context.Background(), 42, 7, "token", before.Fingerprint, review.SummaryMarkerPrefix+"new", wf.ID, recheck)
+	record, err := f.db.GetWorkflowDossier(context.Background(), wf.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.publisher.upsertSummary(context.Background(), 42, 7, "token", before.Fingerprint, review.SummaryMarkerPrefix+"new", wf.ID, record.Generation, f.head, recheck)
 	if !gitlab.IsNotFound(err) || api.scans != 0 || api.creates != 0 || len(api.updates) != 0 {
 		t.Fatalf("recheck failure was treated as a missing note: error=%v scans=%d creates=%d updates=%v", err, api.scans, api.creates, api.updates)
 	}

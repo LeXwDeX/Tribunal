@@ -488,7 +488,7 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 	if err != nil {
 		return PermanentJob(fmt.Errorf("render summary: %w", err))
 	}
-	_, err = p.upsertSummary(ctx, loaded.project.ID, loaded.mrIID, loaded.token, loaded.record.Hash, body, workflowID, recheck)
+	_, err = p.upsertSummary(ctx, loaded.project.ID, loaded.mrIID, loaded.token, loaded.record.Hash, body, workflowID, loaded.record.Generation, loaded.dossier.DiffVersion.HeadSHA, recheck)
 	if err != nil {
 		return err
 	}
@@ -618,7 +618,7 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 			return PermanentJob(fmt.Errorf("render summary: %w", err))
 		}
 		if updated != body {
-			if _, err := p.upsertSummary(ctx, loaded.project.ID, loaded.mrIID, loaded.token, loaded.record.Hash, updated, workflowID, recheck); err != nil {
+			if _, err := p.upsertSummary(ctx, loaded.project.ID, loaded.mrIID, loaded.token, loaded.record.Hash, updated, workflowID, loaded.record.Generation, loaded.dossier.DiffVersion.HeadSHA, recheck); err != nil {
 				return err
 			}
 		}
@@ -774,7 +774,7 @@ func (p *Publisher) publishFailure(ctx context.Context, workflowID, reason strin
 	if err != nil {
 		return PermanentJob(fmt.Errorf("render failure summary: %w", err))
 	}
-	if _, err := p.upsertSummary(ctx, loaded.project.ID, loaded.mrIID, loaded.token, loaded.record.Hash, body, workflowID, recheck); err != nil {
+	if _, err := p.upsertSummary(ctx, loaded.project.ID, loaded.mrIID, loaded.token, loaded.record.Hash, body, workflowID, loaded.record.Generation, loaded.dossier.DiffVersion.HeadSHA, recheck); err != nil {
 		return err
 	}
 	return p.store.SetWorkflowPublicationState(ctx, workflowID, store.WorkflowPublicationPublished, "")
@@ -913,7 +913,7 @@ func (p *Publisher) publishStandaloneReviewLocked(ctx context.Context, projectID
 		}
 		return nil
 	}
-	if _, err = p.upsertSummary(ctx, projectID, mrIID, token, fingerprint, body, "", recheck); err != nil {
+	if _, err = p.upsertSummary(ctx, projectID, mrIID, token, fingerprint, body, "", generation, head, recheck); err != nil {
 		return err
 	}
 	if status != nil {
@@ -1105,10 +1105,20 @@ func (p *Publisher) stale(ctx context.Context, workflowID, reason string) error 
 	return PermanentJob(fmt.Errorf("%w: %s", ErrStalePublication, reason))
 }
 
+// summarySuperseded settles a publication whose review control advanced
+// between the caller's recheck and the final-body write. A workflow records
+// the skip; a standalone summary has no workflow row and only fails its job.
+func (p *Publisher) summarySuperseded(ctx context.Context, workflowID string) error {
+	if workflowID == "" {
+		return PermanentJob(fmt.Errorf("%w: review generation changed", ErrStalePublication))
+	}
+	return p.stale(ctx, workflowID, "review generation changed")
+}
+
 // upsertSummary finds or creates the summary note. The marker scan recovers a
 // note after a lost publication row or a deleted bound note. recheck runs before
 // every remote summary attempt; a control change can still race an in-flight request.
-func (p *Publisher) upsertSummary(ctx context.Context, projectID, mrIID int64, token, fingerprint, body, workflowID string, recheck func() error) (id int64, err error) {
+func (p *Publisher) upsertSummary(ctx context.Context, projectID, mrIID int64, token, fingerprint, body, workflowID string, generation int64, headSHA string, recheck func() error) (id int64, err error) {
 	if err := recheck(); err != nil {
 		return 0, err
 	}
@@ -1116,12 +1126,19 @@ func (p *Publisher) upsertSummary(ctx context.Context, projectID, mrIID int64, t
 	// the rendered summary in the status row first so a later status edit
 	// keeps the result; then update the same note through the normal path.
 	// The publication row is still written by that path.
-	control, controlErr := p.store.GetReviewControl(ctx, projectID, mrIID)
+	// The control is read only to keep the legacy no-control path.
+	_, controlErr := p.store.GetReviewControl(ctx, projectID, mrIID)
 	if controlErr != nil && !errors.Is(controlErr, store.ErrNotFound) {
 		return 0, controlErr
 	}
 	if controlErr == nil {
-		if _, err := p.store.SetReviewStatusFinalBody(ctx, projectID, mrIID, control.Generation, control.HeadSHA, body); err != nil {
+		// Write with this publication's own generation/head, never with the
+		// current control values. A review activated between recheck and this
+		// store call must reject the old summary instead of adopting it (#453).
+		if _, err := p.store.SetReviewStatusFinalBody(ctx, projectID, mrIID, generation, headSHA, body); err != nil {
+			if errors.Is(err, store.ErrSuperseded) {
+				return 0, p.summarySuperseded(ctx, workflowID)
+			}
 			return 0, err
 		}
 		// Render the same body the status worker writes: lifecycle lines
