@@ -1,6 +1,7 @@
 package review
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/LeXwDeX/tribunal/internal/agent"
 	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/llm"
 	"github.com/LeXwDeX/tribunal/pkg/dag"
 )
 
@@ -331,17 +333,52 @@ func withExploration(raw json.RawMessage, exploration string) (json.RawMessage, 
 }
 
 // explorationFromWorkflow renders the completed explore output, or returns
-// "" when explore failed, was skipped or produced an invalid result.
+// "" when explore failed, was skipped or produced an invalid result. A partial
+// explore keeps its validated digest when the stopped run decoded one.
 func explorationFromWorkflow(wf dag.WorkflowView) string {
 	node, ok := wf.Nodes[NodeExplore]
 	if !ok || node.Status != dag.NodeCompleted {
 		return ""
+	}
+	if partial, ok := decodePartialLaneOut(node.Output); ok {
+		if partial.Explore == nil {
+			return ""
+		}
+		return renderExploration(*partial.Explore)
 	}
 	out, err := DecodeStrict[*ExploreOut](node.Output)
 	if err != nil {
 		return ""
 	}
 	return renderExploration(*out)
+}
+
+// decodePartialLaneOut recognizes the code-owned downgrade envelope. The
+// fixed error kind is required so an ordinary lane contract never matches.
+func decodePartialLaneOut(raw json.RawMessage) (*PartialLaneOut, bool) {
+	if len(raw) == 0 {
+		return nil, false
+	}
+	var out PartialLaneOut
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&out); err != nil {
+		return nil, false
+	}
+	if out.Partial.ErrorKind == "" || len(out.Findings) > maxSalvagedFindings {
+		return nil, false
+	}
+	for _, finding := range out.Findings {
+		if err := finding.Validate(); err != nil {
+			return nil, false
+		}
+	}
+	if out.Explore != nil {
+		if err := out.Explore.Validate(); err != nil {
+			return nil, false
+		}
+	}
+	return &out, true
 }
 
 // renderExploration is the bounded, deterministic explore digest. Each section
@@ -532,6 +569,9 @@ func (e *Executor) executeExplore(ctx context.Context, in dag.NodeInput) (dag.No
 		ToolGaps:   &gaps,
 	})
 	if err != nil {
+		if out, ok := e.downgradePartialLane(ctx, in, err); ok {
+			return out, nil
+		}
 		return dag.NodeOutput{}, err
 	}
 	out, ok := result.Output.(*ExploreOut)
@@ -572,6 +612,9 @@ func (e *Executor) executeReviewLane(ctx context.Context, in dag.NodeInput) (dag
 		ToolGaps:   &gaps,
 	})
 	if err != nil {
+		if out, ok := e.downgradePartialLane(ctx, in, err); ok {
+			return out, nil
+		}
 		return dag.NodeOutput{}, err
 	}
 	out, ok := result.Output.(*ReviewOut)
@@ -610,6 +653,9 @@ func (e *Executor) executeValidate(ctx context.Context, in dag.NodeInput) (dag.N
 		ToolGaps:   &gaps,
 	})
 	if err != nil {
+		if out, ok := e.downgradePartialLane(ctx, in, err); ok {
+			return out, nil
+		}
 		return dag.NodeOutput{}, err
 	}
 	out, ok := result.Output.(*ValidateOut)
@@ -618,6 +664,207 @@ func (e *Executor) executeValidate(ctx context.Context, in dag.NodeInput) (dag.N
 	}
 	out.ToolGaps = gaps
 	return e.marshalAgentOutput(out, result.Usage)
+}
+
+// PartialLaneInfo is the fixed attribution of a lane whose run stopped before
+// a valid submit_result. It is code-owned: only the fixed failure class,
+// counts and usage ever enter the node output.
+type PartialLaneInfo struct {
+	ErrorKind       string    `json:"error_kind"`
+	Turns           int       `json:"turns,omitempty"`
+	Usage           dag.Usage `json:"usage"`
+	UsageIncomplete bool      `json:"usage_incomplete,omitempty"`
+}
+
+// PartialLaneOut is the code-owned node output of a downgraded lane. Its
+// presence tells gather that the lane did not complete: the recovered findings
+// still enter the review, but an evidence gap keeps the verdict from PASS
+// (#466). Findings are individually validated before they are stored.
+type PartialLaneOut struct {
+	Partial        PartialLaneInfo `json:"partial"`
+	Findings       []FindingOut    `json:"findings"`
+	Verdict        string          `json:"verdict,omitempty"`
+	EvidenceStatus string          `json:"evidence_status,omitempty"`
+	EvidenceGaps   []string        `json:"evidence_gaps,omitempty"`
+	Explore        *ExploreOut     `json:"explore,omitempty"`
+}
+
+// downgradePartialLane turns a downgradable partial run into a completed node
+// output that keeps the decoded structured result. Cancellation, unsafe output
+// and the engine-owned token budget keep their existing failure semantics, and
+// a run with nothing decodable keeps the old empty output.
+func (e *Executor) downgradePartialLane(ctx context.Context, in dag.NodeInput, err error) (dag.NodeOutput, bool) {
+	var partial *PartialRunError
+	if !errors.As(err, &partial) || partial == nil {
+		return dag.NodeOutput{}, false
+	}
+	// Fail-closed and caller-owned outcomes must not become a soft completion.
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return dag.NodeOutput{}, false
+	}
+	switch partial.Class {
+	case noSubmitClass, invalidSubmitClass, contextTooLongClass:
+	default:
+		return dag.NodeOutput{}, false
+	}
+	out := PartialLaneOut{Partial: PartialLaneInfo{
+		ErrorKind:       partial.Class,
+		Turns:           partial.Turns,
+		Usage:           partial.Usage,
+		UsageIncomplete: partial.Incomplete,
+	}}
+	out.Findings, out.Verdict, out.EvidenceStatus, out.EvidenceGaps = partialLaneResult(in.Node.Kind, partial)
+	if in.Node.Kind == KindExplore {
+		out.Explore = partialExplore(partial)
+		if out.Explore == nil {
+			return dag.NodeOutput{}, false
+		}
+	} else if len(out.Findings) == 0 && out.Verdict == "" && out.EvidenceStatus == "" {
+		// Nothing was decoded to carry forward; keep the failure instead of
+		// reporting an empty partial lane.
+		return dag.NodeOutput{}, false
+	}
+	raw, marshalErr := json.Marshal(out)
+	if marshalErr != nil {
+		return dag.NodeOutput{}, false
+	}
+	e.logPartialLane(ctx, in, partial, len(out.Findings))
+	return dag.NodeOutput{Data: raw, Usage: partial.Usage, UsageIncomplete: partial.Incomplete}, true
+}
+
+// partialLaneResult recovers the structured part of a stopped lane. The
+// decoded Result output wins; otherwise the last submit_result attempt in the
+// transcript is decoded strictly, and as a final step its findings are
+// validated one by one so a contract-level inconsistency does not discard
+// every finding the lane collected.
+func partialLaneResult(kind string, partial *PartialRunError) ([]FindingOut, string, string, []string) {
+	if partial == nil || partial.Result == nil {
+		return nil, "", "", nil
+	}
+	if partial.Result.Output != nil {
+		switch typed := partial.Result.Output.(type) {
+		case *ReviewOut:
+			if typed != nil {
+				return typed.Findings, typed.Verdict, typed.EvidenceStatus, typed.EvidenceGaps
+			}
+		case *ValidateOut:
+			if typed != nil {
+				return typed.Findings, "", "", nil
+			}
+		case *CodeReviewOut:
+			if typed != nil {
+				return typed.Findings, "", "", nil
+			}
+		case *ExploreOut:
+			return nil, "", "", nil
+		}
+	}
+	raw := lastSubmitInput(partial.Result.Transcript)
+	if len(raw) == 0 {
+		return nil, "", "", nil
+	}
+	switch kind {
+	case KindReview, KindReviewStd, KindReviewInt:
+		if out, err := DecodeStrict[*ReviewOut](raw); err == nil {
+			return out.Findings, out.Verdict, out.EvidenceStatus, out.EvidenceGaps
+		}
+	case KindValidate:
+		if out, err := DecodeStrict[*ValidateOut](raw); err == nil {
+			return out.Findings, "", "", nil
+		}
+	case KindCodeReview:
+		if out, err := DecodeStrict[*CodeReviewOut](raw); err == nil {
+			return out.Findings, "", "", nil
+		}
+	}
+	return salvageFindings(raw), "", "", nil
+}
+
+// partialExplore recovers a validated explore summary from a stopped request.
+func partialExplore(partial *PartialRunError) *ExploreOut {
+	if partial == nil || partial.Result == nil {
+		return nil
+	}
+	if typed, ok := partial.Result.Output.(*ExploreOut); ok && typed != nil {
+		return typed
+	}
+	raw := lastSubmitInput(partial.Result.Transcript)
+	if len(raw) == 0 {
+		return nil
+	}
+	out, err := DecodeStrict[*ExploreOut](raw)
+	if err != nil {
+		return nil
+	}
+	return out
+}
+
+// lastSubmitInput returns the most recent submit_result arguments in the
+// transcript. The loop stores rejected attempts too, which is what makes the
+// collected findings recoverable after the run stopped.
+func lastSubmitInput(transcript []llm.Message) json.RawMessage {
+	for i := len(transcript) - 1; i >= 0; i-- {
+		message := transcript[i]
+		if message.Role != llm.RoleAssistant {
+			continue
+		}
+		for j := len(message.Parts) - 1; j >= 0; j-- {
+			part := message.Parts[j]
+			if part.Type == llm.PartToolCall && part.ToolCall != nil && part.ToolCall.Name == agent.SubmitToolName {
+				return part.ToolCall.Input
+			}
+		}
+	}
+	return nil
+}
+
+// maxSalvagedFindings bounds one recovered lane so an oversized rejected
+// submit cannot grow the workflow snapshot.
+const maxSalvagedFindings = 50
+
+// salvageFindings keeps only findings that satisfy the finding contract on
+// their own. The array is decoded without the envelope so a rejected summary,
+// verdict or unknown top-level field does not discard valid findings.
+func salvageFindings(raw json.RawMessage) []FindingOut {
+	var payload struct {
+		Findings []json.RawMessage `json:"findings"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil
+	}
+	findings := make([]FindingOut, 0, len(payload.Findings))
+	for _, item := range payload.Findings {
+		if len(findings) >= maxSalvagedFindings {
+			break
+		}
+		var finding FindingOut
+		if err := json.Unmarshal(item, &finding); err != nil {
+			continue
+		}
+		if err := finding.Validate(); err != nil {
+			continue
+		}
+		findings = append(findings, finding)
+	}
+	return findings
+}
+
+// logPartialLane keeps a downgraded lane attributable. It logs the same
+// identifiers as the executor failure WARN and never the error text.
+func (e *Executor) logPartialLane(ctx context.Context, in dag.NodeInput, partial *PartialRunError, recovered int) {
+	if e == nil || e.deps.Logger == nil || partial == nil {
+		return
+	}
+	e.deps.Logger.Warn("review lane downgraded to evidence gap",
+		"workflow_id", in.WorkflowID,
+		"node_id", in.Node.ID,
+		"node_kind", in.Node.Kind,
+		"error_kind", partial.Class,
+		"turns", partial.Turns,
+		"input_tokens", partial.Usage.InputTokens,
+		"output_tokens", partial.Usage.OutputTokens,
+		"recovered_findings", recovered,
+	)
 }
 
 func exploreTask(d *Dossier) string {

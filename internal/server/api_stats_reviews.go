@@ -13,13 +13,13 @@ type reviewStatsStore interface {
 	ReviewStats(context.Context, store.ReviewStatsFilter) (store.ReviewStats, error)
 }
 
-// reviewStatsResponse adds the retention state to the review-scope counters.
-// An older range no longer has per-call audit rows, so model statistics in the
-// same view may read zero without meaning the models were never used.
+// reviewStatsResponse adds the retention window to the review-scope counters.
+// ModelDetailsPurged is computed by the store with the same data-driven rule
+// as GET /api/v1/stats and is embedded in store.ReviewStats; the retention
+// hours stay descriptive and never drive that boolean (#466).
 type reviewStatsResponse struct {
 	store.ReviewStats
-	LLMCallRetentionHours int  `json:"llm_call_retention_hours,omitempty"`
-	ModelDetailsPurged    bool `json:"model_details_purged"`
+	LLMCallRetentionHours int `json:"llm_call_retention_hours,omitempty"`
 }
 
 func (s *Server) handleReviewStats(w http.ResponseWriter, r *http.Request) {
@@ -76,11 +76,7 @@ func (s *Server) handleReviewStats(w http.ResponseWriter, r *http.Request) {
 	}
 	response := reviewStatsResponse{ReviewStats: stats}
 	if s.platform != nil && s.platform.Storage.LLMCallRetention > 0 {
-		retention := s.platform.Storage.LLMCallRetention
-		response.LLMCallRetentionHours = int(retention.Hours())
-		if !from.IsZero() && from.Before(s.now().UTC().Add(-retention)) {
-			response.ModelDetailsPurged = true
-		}
+		response.LLMCallRetentionHours = int(s.platform.Storage.LLMCallRetention.Hours())
 	}
 	writeJSON(w, http.StatusOK, response)
 }

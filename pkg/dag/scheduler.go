@@ -95,6 +95,7 @@ func (e *Engine) Run(ctx context.Context, wfID string) error {
 				}
 				return err
 			}
+			e.warnScheduledFailures(wfID, wf, events)
 			scheduleRetry.reset()
 			continue
 		}
@@ -782,8 +783,10 @@ func (e *Engine) commitNodeFailureUsage(ctx context.Context, wfID, nodeID string
 			return err
 		}
 		var ev Event
+		persistedKind := reason
 		if !view.Spec.TokenFree && view.Status == NodeRunning && (reason == "budget_exhausted" || (wf.Spec.Budget.MaxTokens > 0 && wf.Usage.totalTokens() >= wf.Spec.Budget.MaxTokens)) {
 			ev, err = tokenBudgetEvent(view, usage, incomplete, e.clock())
+			persistedKind = "budget_exhausted"
 		} else {
 			ev, err = makeEvent(EventNodeFailed, NodeFailedPayload{
 				NodeID: nodeID, Attempt: attempt, Error: message, ErrorKind: reason,
@@ -800,9 +803,60 @@ func (e *Engine) commitNodeFailureUsage(ctx context.Context, wfID, nodeID string
 			}
 			return err
 		}
+		e.warnNodeFailure(wfID, nodeID, view.Spec.Kind, persistedKind)
 		e.signal(wfID)
 		return nil
 	}
+}
+
+// engineFailureKinds are the scheduler-owned failures that never pass through
+// a node executor. Each gets one WARN so a failed node stays attributable when
+// the executor WARN cannot fire (#466).
+var engineFailureKinds = map[string]struct{}{
+	"queue_timeout":  {},
+	"expand_failed":  {},
+	"invalid_output": {},
+}
+
+// warnScheduledFailures logs the engine-owned failures planned by one
+// scheduling pass, after the batch was committed. Logging after the append
+// keeps a stale-revision retry from emitting duplicate warnings.
+func (e *Engine) warnScheduledFailures(workflowID string, wf WorkflowView, events []Event) {
+	if e == nil || e.opts.Logger == nil {
+		return
+	}
+	for _, ev := range events {
+		if ev.Type != EventNodeFailed {
+			continue
+		}
+		var payload NodeFailedPayload
+		if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+			continue
+		}
+		nodeKind := ""
+		if view, ok := wf.Nodes[payload.NodeID]; ok {
+			nodeKind = view.Spec.Kind
+		}
+		e.warnNodeFailure(workflowID, payload.NodeID, nodeKind, payload.ErrorKind)
+	}
+}
+
+// warnNodeFailure records one engine-owned node failure. It logs identifiers
+// and the fixed error kind only, because the error text may carry provider
+// payload or secrets. A nil logger keeps the historical silent behavior.
+func (e *Engine) warnNodeFailure(workflowID, nodeID, nodeKind, errorKind string) {
+	if e == nil || e.opts.Logger == nil {
+		return
+	}
+	if _, ok := engineFailureKinds[errorKind]; !ok {
+		return
+	}
+	e.opts.Logger.Warn("dag node failed",
+		"workflow_id", workflowID,
+		"node_id", nodeID,
+		"node_kind", nodeKind,
+		"error_kind", errorKind,
+	)
 }
 
 func (e *Engine) commitNodeSkipped(ctx context.Context, wfID, nodeID string, attempt int, reason string) error {

@@ -28,6 +28,9 @@ func TestReviewStatsEndpointUsesTheReviewScope(t *testing.T) {
 		AllRuns: 4, AllBlocking: 1, AllBlockingRatio: &all,
 		ByProject: []store.ReviewProjectStats{{ProjectID: 42, Runs: 3, Incomplete: 2, Blocking: 1}},
 		Trend:     []store.ReviewDailyStats{{Day: "2026-10-20", Runs: 3, Incomplete: 2, Blocking: 1}},
+		// The store owns the data-driven decision; the endpoint must pass it
+		// through instead of recomputing it from the configured retention.
+		ModelDetailsPurged: true,
 	}
 	platform := &config.Config{}
 	platform.Storage.LLMCallRetention = 720 * time.Hour
@@ -51,7 +54,7 @@ func TestReviewStatsEndpointUsesTheReviewScope(t *testing.T) {
 		t.Fatalf("retention = %v", body["llm_call_retention_hours"])
 	}
 	if body["model_details_purged"] != true {
-		t.Fatalf("model_details_purged = %v, want true for a range older than 720h", body["model_details_purged"])
+		t.Fatalf("model_details_purged = %v, want the store's data-driven value", body["model_details_purged"])
 	}
 	if fake.lastReviewStats.ProjectID == nil || *fake.lastReviewStats.ProjectID != 42 {
 		t.Fatalf("filter = %+v", fake.lastReviewStats)
@@ -70,6 +73,11 @@ func TestReviewStatsEndpointUsesTheReviewScope(t *testing.T) {
 		t.Fatalf("viewer access filter missing: %+v", fake.lastReviewStats)
 	}
 
+	// A window with no calls keeps the data-driven false even when it is older
+	// than the configured retention.
+	fake.mu.Lock()
+	fake.reviewStats.ModelDetailsPurged = false
+	fake.mu.Unlock()
 	recent := client.request(http.MethodGet,
 		"/api/v1/stats/reviews?from="+time.Now().Add(-24*time.Hour).UTC().Format(time.RFC3339)+
 			"&to="+time.Now().UTC().Format(time.RFC3339), nil, nil)

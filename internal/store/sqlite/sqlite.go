@@ -1198,10 +1198,10 @@ func (s *Store) RecordDelivery(ctx context.Context, d store.Delivery, j *store.J
 	defer tx.Rollback()
 
 	res, err := tx.ExecContext(ctx, `INSERT INTO webhook_deliveries
-		(project_id, uuid, event, outcome, reason, job_id, received_at)
-		VALUES (?, ?, ?, ?, ?, NULL, ?)
+		(project_id, uuid, event, outcome, reason, job_id, received_at, mr_iid)
+		VALUES (?, ?, ?, ?, ?, NULL, ?, ?)
 		ON CONFLICT (project_id, uuid) DO NOTHING`,
-		d.ProjectID, d.UUID, d.Event, d.Outcome, nullString(d.Reason), formatTime(d.ReceivedAt))
+		d.ProjectID, d.UUID, d.Event, d.Outcome, nullString(d.Reason), formatTime(d.ReceivedAt), d.MRIID)
 	if err != nil {
 		return "", false, fmt.Errorf("sqlite: insert delivery: %w", err)
 	}
