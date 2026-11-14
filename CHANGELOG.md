@@ -6,7 +6,7 @@
 
 ## [1.5.0] - 2026-11-14
 
-> v1.5.0 汇总 Milestone 8 的 8 个用户侧修复（[#453](https://github.com/LeXwDeX/Tribunal/issues/453)、[#454](https://github.com/LeXwDeX/Tribunal/issues/454)、[#455](https://github.com/LeXwDeX/Tribunal/issues/455)、[#456](https://github.com/LeXwDeX/Tribunal/issues/456)、[#457](https://github.com/LeXwDeX/Tribunal/issues/457)、[#458](https://github.com/LeXwDeX/Tribunal/issues/458)、[#459](https://github.com/LeXwDeX/Tribunal/issues/459)、[#466](https://github.com/LeXwDeX/Tribunal/issues/466)）。四个新迁移只追加、没有 down migration；升级前必须完成一致性备份与升级前快照，回滚需要快照加匹配的旧镜像。完整验证状态见 [v1.5.0 验证状态](docs/delivery-readiness.md#v150-验证状态)。
+> v1.5.0 汇总 Milestone 8 的 8 个用户侧修复（[#453](https://github.com/LeXwDeX/Tribunal/issues/453)、[#454](https://github.com/LeXwDeX/Tribunal/issues/454)、[#455](https://github.com/LeXwDeX/Tribunal/issues/455)、[#456](https://github.com/LeXwDeX/Tribunal/issues/456)、[#457](https://github.com/LeXwDeX/Tribunal/issues/457)、[#458](https://github.com/LeXwDeX/Tribunal/issues/458)、[#459](https://github.com/LeXwDeX/Tribunal/issues/459)、[#466](https://github.com/LeXwDeX/Tribunal/issues/466)）。四个新迁移只追加、没有 down migration；升级前必须完成一致性备份与升级前快照，回滚需要快照加匹配的旧镜像。完整验证状态见 [v1.5.0 验证状态](docs/delivery-readiness.md#v150-验证状态)。生产部署与验收已完成（沙盒项目端到端自测待用户执行）。
 
 ### 升级前必读
 
