@@ -2,7 +2,7 @@
 
 > 本文先列出 v1.2.0 候选批次（[#128](https://github.com/LeXwDeX/Tribunal/pull/128)）的本地修复验证，再记录版本与交付状态：
 >
-> 1. [v1.5.0 验证状态](#v150-验证状态)：当前版本的 CI、迁移演练、DEV 回归与生产验收检查表。
+> 1. [v1.5.0 验证状态](#v150-验证状态)：当前版本的 CI、迁移演练、DEV 回归、生产验收检查表与发布、清理记录。
 > 2. [v1.2.0（待发布）验证状态](#v120-验证状态)：v1.2.0 实际做过哪些验证、还有哪些没做。
 > 3. 升级、授权、验收矩阵与回退计划：与版本无关的操作模板，从[首次升级前记录](#首次升级前记录模板)到[放行与归档](#放行与归档)。
 > 4. [v1.0.0 历史验收记录（f143，仅供追溯）](#v100-历史验收记录f143仅供追溯)：v1.0.0 在隔离测试实例上的验收结果，**不能**用来证明后续版本的改动。
@@ -75,7 +75,7 @@
 
 ## v1.5.0 验证状态
 
-候选为 `main` `e2044ef`：Milestone 8 的 8 个 Issue（[#453](https://github.com/LeXwDeX/Tribunal/issues/453)–[#459](https://github.com/LeXwDeX/Tribunal/issues/459)、[#466](https://github.com/LeXwDeX/Tribunal/issues/466)）已全部合并。下表按四个阶段记录 v1.5.0 的验证状态。DEV 回归共 9 项，8 项 PASS；第 9 项为真实 GitLab opt-in 渲染测试，结果为 4 个 FAIL、2 个 SKIP，不计 PASS。未执行或受限项明确标为 **待执行** 或 **BLOCKED**，不写成 PASS。
+Stage 1–3 的候选为 `main` `e2044ef`：Milestone 8 的 8 个 Issue（[#453](https://github.com/LeXwDeX/Tribunal/issues/453)–[#459](https://github.com/LeXwDeX/Tribunal/issues/459)、[#466](https://github.com/LeXwDeX/Tribunal/issues/466)）已全部合并。发布 tag `v1.5.0` 指向 `df8d08a`（在 `e2044ef` 之后合并 PR #471 的发布文档与 PR #472 的 opt-in 渲染测试夹具修正），生产部署镜像由该 tag commit 构建。下表按四个阶段记录 v1.5.0 的验证状态。DEV 回归共 9 项，8 项 PASS；第 9 项为真实 GitLab opt-in 渲染测试，结果为 4 个 FAIL、2 个 SKIP，不计 PASS。未执行、受限或待用户执行的项明确标为 **BLOCKED** 或 **待用户执行**，不写成 PASS。
 
 ### v1.5.0 四阶段检查表
 
@@ -100,20 +100,36 @@
 | Stage 3：指定 GitLab 项目的真实依赖检查 | BLOCKED | `acceptance/gitlab.env` 的 `GITLAB_TEST_TOKEN` 已过期（401），指定项目 1350 的相关检查无法执行，需人类提供新 token；DEV 回归改用有效的 `sandbox.env`（沙盒项目 1353）完成 |
 | Stage 3：DeepSeek thinking + tools 契约 | BLOCKED | 未用真实凭据验证；`docs/operations.md` 自身标为 BLOCKED |
 | 全局：生产规模负载 | BLOCKED | 未压测 |
-| Stage 4：生产部署 | 待执行 | 需明确授权后执行 |
-| Stage 4：健康检查（`/healthz`、`/readyz`） | 待执行 | 部署后执行 |
-| Stage 4：schema=34 回读 | 待执行 | 部署后按已知版本集合核对 max=34、行数=33 |
-| Stage 4：沙盒项目端到端自测 | 待执行 | 部署后执行 |
+| Stage 4：生产部署 | PASS | 镜像 `tribunal:v1.5.0-df8d08a`，ID `sha256:0a526b39b7974bb75a1989b73615d2ba2ac20366f4fdef7cd23d2e987e5e465a`，在 DEV 机以 tag commit 干净 checkout 构建（`git describe --tags --exact-match` = `v1.5.0`、工作区干净、迁移到 `0034`、assets `index-BWWQ8olv.js`）；**生产未构建**。`docker save` 的 tar sha256 `29b841a6b2d2f634d9d829e00399b51a8066487f11b29fb7847be7712dc72d94`，生产 `sha256sum -c` **OK** 后 `docker load`，镜像 ID 与 DEV 一致。停容器后做一致性备份：`data.tar.gz` 2,914,610,911 字节、sha256 `eeea787cda300f8c0004d53263c0f16fd7f57aff1c8c17a6a52388014deaf686`，备份内 DB `integrity_check=ok`、schema 30/29、publications/findings/workflows = 19/17/25；另备份 server.docker.yaml / compose.override.yaml / compose.yaml / .env(0600) / old-image-id / old-container-labels。**双重防护消除静默降级陷阱**：① 部署目录 `src` 替换为 tag commit 干净 checkout（此前是 v1.2.0 源码，与运行镜像 v1.4.0 错配）；② 移除 compose override 的整个 `build:` 段（原指向仅存在于旧源码的 `Dockerfile.cache`），image 固定为 `v1.5.0-df8d08a`，保留 dns/logging/cpus 2.0/mem_limit 2g。`docker compose config --quiet` 通过，启动用 `up -d --no-build --pull never`。替换前把现配置复制进新 checkout，逐项核对保留 `auth.bootstrap_admins`、`providers.primary.max_tokens: 64000`、`reasoning.effort: max`、`profiles.default.budget {deadline: 30m, max_tokens: 0}`、skills `blocks: [code-review, review]`、MCP `verify: [get_code_snippet]`；未改动模型参数（`context_window`/`preserve_reasoning_content` 的建议需先确认网关行为，留作后续） |
+| Stage 4：健康检查（`/healthz`、`/readyz`） | PASS | 容器 `Up (healthy)`，镜像 digest 与 DEV 一致；`/healthz` **200**，`/readyz` = `{"database":"ok","status":"ready","worker":"ready"}`，**公网 HTTPS 入口 200**；启动日志出现 `OAuth login is enabled` 与 `server listening`，**0 WARN / 0 ERROR**；资源 53.21MiB / 2GiB、CPU 0.47%。新端点已路由（未认证返回 **401 而非 404**）：`/api/v1/webhook-deliveries`、`/api/v1/stats/reviews`、`/api/v1/config/status`、`/api/v1/stats`；控制台 assets 与 tag commit 一致（`index-BWWQ8olv.js` / `index-DB_vx7uL.css`） |
+| Stage 4：schema=34 回读 | PASS | `schema_migrations` **max=34、count=33**，版本集合 `1,3..34`（版本 2 历史缺失）；`PRAGMA integrity_check` = **ok**。业务数据零变化：publications 19 / findings 17 / workflows 25，7 个项目完好，历史 review verdicts 仍为 13 INCOMPLETE + 1 PASS。**`review_status` 7 行全部 `final_body_ready=0`**，state 分布 INCOMPLETE 1 + cancelled 6 不变，状态 worker 不会按 summary 标记接管已发布 summary（GitLab 只读回读仍受凭据限制，见上方 BLOCKED 行）；**6 条已发布 summary note 全部保留**：106713、105271、103934、105145、103779、103772。`llm_call_daily` 12 行，回填 `sum(input_tokens)=52,573,506`、`sum(output_tokens)=842,343`，与升级前 `llm_calls` 总量**逐位相同**；`llm_call_latency_daily` 1352 行、`llm_call_error_daily` 3 行、`feedback_collection_state` 1 行、`workspace_capacity` 1 行；`webhook_deliveries` 167 行不变，其中 11 行回填 `mr_iid`（有 job 的 enqueued）、156 行保持 0（历史 ignored/rejected 无 job，控制台显示「未知 MR」）。**`discussion_intents` 由 35 降为 13**：[#466](https://github.com/LeXwDeX/Tribunal/issues/466) 的孤儿清理在生产真实删除了已删项目遗留的 22 条。**对账降频生效**：启动后新增 `review.status` job = **0**（升级前每 5 分钟约 7 个） |
+| Stage 4：沙盒项目端到端自测 | 待用户执行 | 部署与自动化验证已完成并通知用户；用户明确表示生产发布后由其本人测试，**不写成 PASS**。已完成的等价自动化证据（DEV 回归 8/9 PASS）：ignore 基线下 dossier `context_docs_len=2480`、`mcp_eligible=true`、MCP daemon **11 次 `tools/call`**；201 个变更文件的 MR 整体 PASS、232,041ms；扫描 99 条 note，内部节点 ID/英文诊断命中 **0**；终态 MR 完成后两个对账 tick 新增 **0** 个 status job |
 
 状态口径：
 
 - **PASS**：有可复核证据且通过。
 - **BLOCKED**：未执行、环境或凭据受限，或结果为 FAIL/SKIP 而不能计为 PASS；均写明原因。
-- **待执行**：尚未开始，需在部署后执行。
+- **待用户执行**：部署与自动化验证已完成，端到端自测由用户执行；不计为 PASS。
 
 **迁移与回退**：v1.5.0 新增 `0031`–`0034`，均为 append-only、没有 down migration；生产升级前 schema=30，升级后 max=34、行数=33（版本 2 历史缺失）。回滚需恢复升级前一致性快照并启动匹配的旧镜像，不能只回退镜像。通用边界见[迁移与回退边界](#迁移与回退边界)。
 
-本节只记录实际做过的验证，不把 DEV 回归或迁移演练结果扩大为生产验收；Stage 4 完成前保持 **待执行**。
+### v1.5.0 DEV 发布记录
+
+持久 DEV 实例由 v1.3.0 原地升级到 v1.5.0（镜像 `tribunal:v1.5.0-df8d08a`）：schema **28/27 → 34/33**，`PRAGMA integrity_check` 为 **ok**，**77 个 workflows、3 个项目全部保留**。
+
+- 停容器后做一致性备份（首次运行中打包可能不一致，已重做），备份内 DB `integrity_check=ok`、schema 28/27。
+- 升级后 `/healthz` **200**、`/readyz` 全部 ok、未认证 API 返回 **401**；控制台 assets 为 `index-BWWQ8olv.js` / `index-DB_vx7uL.css`。
+- 新表全部建立并回填：`llm_call_daily` 13 行、`llm_call_latency_daily` 2610 行、`llm_call_error_daily` 0 行、`feedback_collection_state` 1 行、`workspace_capacity` 1 行；`review_status` 含 `final_body`/`final_body_ready`/`last_verified_at`，`webhook_deliveries` 含 `mr_iid`。
+- **新可观测性立即生效**：启动后日志出现 `WARN webhook health check failed project_id=1350 error_class=internal` 与 `catch-up could not list open merge requests`，对应 token 过期的项目；此前该类失败静默，不产生可见告警。
+
+### v1.5.0 清理记录
+
+- 生产机：删除已被取代的 `pre-v1.4.0` 备份（628M）与冗余旧源码副本 `src.pre-v1.5.0`（11M，v1.2.0，Git 中已有）；**保留最新一份 `pre-v1.5.0` 备份**（2.8G），它是不可逆迁移的唯一 DB 回滚路径，升级前备份只保留这一份。部署目录最终为 `backups/`、`compose.override.yaml`、`registration.json`、`scripts/`、`src/`。
+- DEV 机：删除升级前备份（15M）、**脱敏生产库副本与演练目录**（7.6M，含生产业务数据，不应留在测试机）、临时构建 checkout（36M）、临时回归 compose/配置；保留证据日志。删除被取代的中间镜像 `tribunal:v1.5.0-e2044ef`，未执行全局 prune。
+- 两端临时目录中的镜像 tar 与 bundle、本机临时 bundle 已删除。
+- 回滚镜像保留：生产机 `v1.4.0-acbd90d`、`v1.3.0`×3、`v1.2.0`；DEV 机同集合加 `v1.5.0-df8d08a`。
+
+本节只记录实际做过的验证，不把 DEV 回归或迁移演练结果扩大为生产验收；Stage 4 的部署、健康检查与 schema 回读已有生产实测结果，沙盒项目端到端自测待用户执行。
 
 ## v1.4.0 发布检查表
 
