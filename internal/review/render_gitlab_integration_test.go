@@ -88,6 +88,48 @@ func gitLabVisibleText(rendered string) string {
 	return text
 }
 
+// assertGitLabMarkupIsLiteral proves that raw HTML from untrusted Markdown was
+// neutralized. Each marker must appear as visible literal text, either escaped
+// in the HTML source or rendered inside a code block, and it must not survive
+// as a live element. The renderer legitimately emits <details><summary> evidence
+// wrappers, so that many live details tags are allowed; the fixtures using this
+// helper publish no marked finding and therefore expect none.
+func assertGitLabMarkupIsLiteral(t *testing.T, rendered string, markers ...string) {
+	t.Helper()
+	text, tags := scanGitLabHTML(rendered)
+	evidence := strings.Count(rendered, "<details><summary>")
+	for _, marker := range markers {
+		if !strings.Contains(text, marker) {
+			t.Errorf("injected markup %q was not rendered as escaped or fenced literal text:\n%s", marker, rendered)
+		}
+		prefix := strings.TrimSuffix(marker, ">")
+		live := 0
+		for _, tag := range tags {
+			if strings.HasPrefix(strings.ToLower(tag), strings.ToLower(prefix)) {
+				live++
+			}
+		}
+		want := 0
+		if prefix == "<details" || prefix == "</details" {
+			want = evidence
+		}
+		if live != want {
+			t.Errorf("injected markup %q rendered as %d live element(s), want %d:\n%s", marker, live, want, rendered)
+		}
+	}
+}
+
+// assertGitLabVisible checks the reader-facing text still contains each want.
+func assertGitLabVisible(t *testing.T, rendered string, wants ...string) {
+	t.Helper()
+	text := gitLabVisibleText(rendered)
+	for _, want := range wants {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing rendered %q:\n%s", want, rendered)
+		}
+	}
+}
+
 func gitLabSandboxHasLabel(t *testing.T, name string) bool {
 	t.Helper()
 	if os.Getenv("TRIBUNAL_TEST_GITLAB_MARKDOWN") != "1" {
@@ -163,13 +205,17 @@ func TestGitLabRenderedOneLineReferencesAndLiteralText(t *testing.T) {
 		}
 		t.Errorf("untrusted text produced a reference or HTML element:\n%s", rendered)
 	}
-	if count := strings.Count(gitLabVisibleText(rendered), literal); count != 3 {
-		t.Errorf("literal text appears %d times, want title, reason and warning:\n%s", count, rendered)
+	text := gitLabVisibleText(rendered)
+	if count := strings.Count(text, literal); count != 2 {
+		t.Errorf("literal text appears %d times, want title and reason (unmatched English warnings are localized):\n%s", count, rendered)
 	}
-	if !strings.Contains(gitLabVisibleText(rendered), "head "+sha) {
+	if !strings.Contains(text, unknownWarningNotice) {
+		t.Errorf("localized warning notice is missing or was hidden:\n%s", rendered)
+	}
+	if !strings.Contains(text, "head "+sha) {
 		t.Errorf("footer commit was shortened or hidden:\n%s", rendered)
 	}
-	if !strings.Contains(gitLabVisibleText(rendered), "profile "+sha) {
+	if !strings.Contains(text, "profile "+sha) {
 		t.Errorf("footer profile was shortened or hidden:\n%s", rendered)
 	}
 }
@@ -312,14 +358,11 @@ func TestGitLabRenderedMalformedFencesCannotHideFindings(t *testing.T) {
 				t.Fatal(err)
 			}
 			rendered := gitLabRenderedHTML(t, out)
-			if strings.Contains(rendered, "<details>") || !strings.Contains(rendered, ">[P2] Next issue<") || !strings.Contains(rendered, ">建议</strong>：Next suggestion") {
-				t.Errorf("next finding or suggestion was hidden or HTML was injected:\n%s", rendered)
+			assertGitLabMarkupIsLiteral(t, rendered, "<details>")
+			if !strings.Contains(rendered, ">[P2]Next issue<") || !strings.Contains(rendered, "</strong>：Next suggestion") || !strings.Contains(rendered, "<li") {
+				t.Errorf("next finding, suggestion or warning was hidden or HTML was injected:\n%s", rendered)
 			}
-			for _, want := range []string{"Next body", "Next warning", "internal/a  file.go"} {
-				if !strings.Contains(gitLabVisibleText(rendered), want) {
-					t.Errorf("missing rendered %q:\n%s", want, rendered)
-				}
-			}
+			assertGitLabVisible(t, rendered, "Next body", "Next suggestion", "internal/a  file.go", unknownWarningNotice)
 		})
 	}
 }
@@ -342,15 +385,15 @@ func TestGitLabRenderedBodyAndSuggestionCannotHideLaterContent(t *testing.T) {
 				t.Fatal(err)
 			}
 			rendered := gitLabRenderedHTML(t, out)
-			if strings.Contains(rendered, "<details>") || !strings.Contains(rendered, ">[P2] Next issue<") || !strings.Contains(rendered, ">建议</strong>：Next suggestion") {
-				t.Errorf("later finding or suggestion was hidden:\n%s", rendered)
+			assertGitLabMarkupIsLiteral(t, rendered, "<details>")
+			if !strings.Contains(rendered, ">[P1]First issue<") || !strings.Contains(rendered, ">[P2]Next issue<") ||
+				!strings.Contains(rendered, "</strong>：Next suggestion") || !strings.Contains(rendered, "<li") {
+				t.Errorf("later finding, suggestion or warning was hidden:\n%s", rendered)
 			}
-			if field == "body" && !strings.Contains(rendered, ">建议</strong>：First suggestion") {
+			if field == "body" && !strings.Contains(rendered, "</strong>：First suggestion") {
 				t.Errorf("first suggestion was hidden:\n%s", rendered)
 			}
-			if !strings.Contains(gitLabVisibleText(rendered), "Next warning") {
-				t.Errorf("warning was hidden:\n%s", rendered)
-			}
+			assertGitLabVisible(t, rendered, "Next body", "Next suggestion", unknownWarningNotice)
 		})
 	}
 }
@@ -371,9 +414,11 @@ func TestGitLabRenderedNestedFenceAndEscapedBacktickAreSafe(t *testing.T) {
 				t.Fatal(err)
 			}
 			rendered := gitLabRenderedHTML(t, out)
-			if strings.Contains(rendered, "<details>") || !strings.Contains(rendered, ">[P2] Next issue<") || !strings.Contains(rendered, ">建议</strong>：Next suggestion") {
+			assertGitLabMarkupIsLiteral(t, rendered, "<details>")
+			if !strings.Contains(rendered, ">[P2]Next issue<") || !strings.Contains(rendered, "</strong>：Next suggestion") {
 				t.Errorf("untrusted Markdown hid the following content:\n%s", rendered)
 			}
+			assertGitLabVisible(t, rendered, "Next issue", "Next suggestion", "Next body")
 		})
 	}
 }
