@@ -4,6 +4,39 @@
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-11-14
+
+> v1.5.0 汇总 Milestone 8 的 8 个用户侧修复（[#453](https://github.com/LeXwDeX/Tribunal/issues/453)、[#454](https://github.com/LeXwDeX/Tribunal/issues/454)、[#455](https://github.com/LeXwDeX/Tribunal/issues/455)、[#456](https://github.com/LeXwDeX/Tribunal/issues/456)、[#457](https://github.com/LeXwDeX/Tribunal/issues/457)、[#458](https://github.com/LeXwDeX/Tribunal/issues/458)、[#459](https://github.com/LeXwDeX/Tribunal/issues/459)、[#466](https://github.com/LeXwDeX/Tribunal/issues/466)）。四个新迁移只追加、没有 down migration；升级前必须完成一致性备份与升级前快照，回滚需要快照加匹配的旧镜像。完整验证状态见 [v1.5.0 验证状态](docs/delivery-readiness.md#v150-验证状态)。
+
+### 升级前必读
+
+#### 四个迁移（append-only，无 down migration）
+
+- `0031_review_status_final_body`（随 [#451](https://github.com/LeXwDeX/Tribunal/issues/451) 的状态评论合并引入，PR #452；生产此前未应用）：`review_status` 追加 `final_body`，保存已渲染的评审正文。
+- `0032_review_status_final_body_ready`（[#453](https://github.com/LeXwDeX/Tribunal/issues/453)）：把升级前 `final_body` 为空的历史行回填为 `final_body_ready=0`。这些行的状态 worker 继续使用旧 `<!-- gitlab-ce-review:status` 标记，不接管已发布的 summary 评论。
+- `0033_background_maintenance`（[#459](https://github.com/LeXwDeX/Tribunal/issues/459)）：`review_status.last_verified_at`、三张调用明细长期聚合表（`llm_call_daily`、`llm_call_latency_daily`、`llm_call_error_daily`）、`feedback_collection_state` 与 `workspace_capacity`，并从现有调用明细回填聚合。
+- `0034_webhook_delivery_mr`（[#466](https://github.com/LeXwDeX/Tribunal/issues/466)）：`webhook_deliveries.mr_iid` 与索引，并从 job payload 回填有 job 的历史行。
+
+生产升级前 schema=30；升级后 **max=34、行数=33**（版本 2 在历史上缺失，计数按已知版本集合核对，不把最大版本号当数量）。四个迁移都不可逆：回滚需恢复升级前的一致性快照并启动匹配的旧镜像，不能只回退镜像，也不能删除 `schema_migrations` 行绕过检查。升级操作见 [通用升级与回滚步骤](docs/operations.md#通用升级与回滚步骤)。
+
+#### 升级副作用
+
+1. **超 120 字的 reasoner 标题会改变发布键**：这类标题现在在计算 `publish_key` 之前按句界截断并补「…」。用户会看到：同一 finding 的键与旧运行不同，已发布的旧行内讨论会走内容不一致路径，退回汇总条目，原讨论保持不动。
+2. **被 400 字截断的行内正文新增「完整正文见控制台」链接**：正文与 `body_hash` 随之变化。用户会看到：升级前已发布且被 400 字截断的旧讨论不再匹配，相关 finding 退回汇总并带内容不一致提示。
+3. **旧状态评论不再自动删除**：`<!-- gitlab-ce-review:status` 评论不会被新版本自动清理（GitLab 客户端没有删除 MR note 的能力）。用户会看到：升级前的旧状态评论可能继续留在 MR 上，需要人工清理。
+4. **状态评论的恢复窗口从 5 分钟变为最长约 25 小时**：状态评论被人工修改或删除后，改由每小时的低频自愈扫描恢复，每行最多每 24 小时复查一次。用户会看到：人工改动后的状态评论不会在 5 分钟内被纠正；待处理状态仍在 5 分钟内收敛。
+5. **历史 webhook 投递的 MR 归属未知**：`webhook_deliveries` 中历史 ignored/rejected 行没有 job，`mr_iid` 保持 0。用户会看到：控制台「Webhook 投递」对这些行显示「未知 MR」，直到产生新的投递记录。
+6. **错误码变化影响外部脚本**：CSRF 失败的 403 code 从 `forbidden` 改为 `csrf_invalid`；过期 API token 的 401 改为 `token_expired`；会话被每用户上限淘汰改为 `session_evicted`。用户会看到：依赖旧 code 的外部脚本或告警需要调整，控制台已适配新 code。
+
+#### 默认值未变
+
+`DefaultMaxTurns=0`、`DefaultReviewTimeout=-1`、`budget.deadline=0`、`briefBodyRunes=400`、`MaxTitleRunes=120` 均保持不变（[#451](https://github.com/LeXwDeX/Tribunal/issues/451) 的产品决定）。本版本让「不限」在真实运行中可收敛、让超时与预算失败可归因，不是重新加上限。
+
+#### 新增配置与端点
+
+- 新增配置 `workspace.max_bytes` 与 `workspace.reclaim_after`：默认 0 表示禁用，负数会被配置校验拒绝；启用后按容量上限告警并可回收长期不活跃的工作区（见下方 #459 条目）。
+- 新增端点：`GET /api/v1/webhook-deliveries`（只读，按项目与 MR 聚合投递）、`GET /api/v1/stats/reviews`（只读，评审口径统计）、`POST /api/v1/models/{id}/probe`（平台管理员，真实工具调用探测）、`POST /api/v1/api-tokens/{id}/renew`（本人 API token 续期）。
+
 ### 行为变更
 
 - **后台对账降频、调用聚合与工作区回收**（[#459](https://github.com/LeXwDeX/Tribunal/issues/459)）：迁移 `0033_background_maintenance` 为长期运行部署补上状态对账、调用统计与工作区维护。`review_status` 新增 `last_verified_at`；每 5 分钟的状态对账只处理未应用期望版本的行（`applied_version < version`，含尚未应用的错误行），成功应用的终态行改由每小时低频自愈扫描按行最多每 24 小时复查一次，未到期先用本地 `last_verified_at` 短路、不调用 GitLab；`state=cancelled` 的 MR 停止状态复查。人工删除或修改已应用的状态评论后，最长约 24 小时（加最多 1 小时扫描间隔）内由自愈恢复，pending 行仍在 5 分钟内收敛；自愈只推进 `last_verified_at`（以及远端 `note_id`/`body_hash`），不改写期望版本，版本已被更新时本次自愈 no-op；终态错误行保持 settled，不会自动重试，新代次可覆盖。新增长期保留的三张调用日聚合表 `llm_call_daily`、`llm_call_latency_daily`、`llm_call_error_daily`（主键分别含 `(day, project_id, provider, model)`、精确 `latency_ms` 与 `error_kind`；`day` 取 workflow `created_at` 的 UTC 日，保持统计筛选口径），迁移从现有 `llm_calls JOIN workflows` 回填，回填语句可重复执行且不重复累计；`llm_calls` 明细仍按 `storage.llm_call_retention`（默认 720h）整行删除，删除项目时同步删除三张聚合表行。`GET /api/v1/stats` 的 `by_model` 在明细仍存在时使用明细（精确、含精确 p50），早于明细保留期的区间由日聚合表提供（UTC 日粒度，边界日可能少计当天早期已删除的调用）；窗口内混用了聚合数据时返回 `model_details_purged=true`；`GET /api/v1/stats/reviews` 的同名字段使用同一数据驱动判定（窗口内没有调用时为 `false`，不再按配置保留期推断）。`by_model[]` 新增 `errors_by_kind`。每次 run cleanup 在持有项目 workspace 写锁时清理 `refs/merge-requests/<iid>/head` 中不再被保护集合引用的 ref（保护集合为非终态 review workflow 与非终态 `review_status`，即 `queued`/`running`/`publishing`），再执行 `git gc --quiet --auto`；保护查询失败时跳过该项目的 ref 清理与 gc。新增配置 `workspace.max_bytes` 与 `workspace.reclaim_after`，默认均为 0 表示禁用，负数被配置校验拒绝；启用容量上限时每轮清理遍历工作区根目录（只读元数据、不跟随符号链接）统计总字节数，写入单行表 `workspace_capacity`，超限记 WARN；启用回收时长期不活跃项目的整个工作区目录可被删除，但必须同时满足无本进程注册 run、保护查询成功且不受保护（未终态 workflow、queued/running 的项目 job、`publication_state=pending` 的 dossier、非终态 `review_status` 一律保护）、活动时间早于阈值、目录是工作区根的直接子目录且带有效 managed marker（缺失、不可读、符号链接或项目不匹配一律保留），项目列表查询失败时整轮不回收，被回收目录会在下次刷新或 onboarding 时重建。合并后（merged/locked）MR 的反馈采集窗口从 3 天放宽到 14 天（与 workflow 扫描窗口一致），晚到的点赞不再永久丢失；采集失败按固定类别 `auth`、`not_found`、`rate_limited`、`upstream`、`store`、`credential`、`canceled`、`timeout` 记 WARN，日志只用标识与类别、不写原始错误正文，新增单行表 `feedback_collection_state` 记录 `last_collected_at` 与最近失败类别/时间。`GET /api/v1/stats` 新增 `model_details_purged`、`by_model[].errors_by_kind`、`feedback_collection`、`workspace_capacity`。迁移 `0033` 只做追加、没有 down migration，不可逆；回滚需要升级前的数据库快照与匹配的旧二进制，升级后需重启生效，新增配置默认禁用。
@@ -422,6 +455,7 @@ v1.0.0 之后的第一个版本：产品改名为 Tribunal，修复 1.0 复审�
 
 首个版本（GitHub Pre-release），交付 M0–M6 范围：webhook 与持久化队列、DAG 调度、主 agent 编排、对抗核验与裁决、GitLab 发布、三种 LLM 协议、工作区、MCP 与 Skill、OAuth、项目授权、Web 控制台和统计。详见 [Release v1.0.0](https://github.com/LeXwDeX/Tribunal/releases/tag/v1.0.0)。
 
+[1.5.0]: https://github.com/LeXwDeX/Tribunal/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/LeXwDeX/Tribunal/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/LeXwDeX/Tribunal/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/LeXwDeX/Tribunal/compare/v1.1.0...v1.2.0
