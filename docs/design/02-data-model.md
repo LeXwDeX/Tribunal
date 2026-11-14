@@ -16,7 +16,7 @@
 | `webhook_deliveries` | 入口 | webhook 去重 |
 | `jobs` | 入口 | 持久化任务队列 |
 | `review_controls`、`workflow_dossiers` | 入口/恢复 | 持久化评审代次和脱敏材料快照（0003） |
-| `review_status`、`review_reactions` | 发布 | 每个 MR 的状态/结果评论目标与源 note 表情（0011）；0031 追加 `final_body` |
+| `review_status`、`review_reactions` | 发布 | 每个 MR 的状态/结果评论目标与源 note 表情（0011）；0031 追加 `final_body`，0032 追加 `final_body_ready` |
 | `workflows`、`workflow_nodes`、`events` | 工作流 | DAG 读模型与事件日志 |
 | `findings` | 评审结果 | 统一 finding、挑战结果、裁决 |
 | `publications` | 发布 | 已发布到 GitLab 的对象，用于幂等 |
@@ -302,7 +302,7 @@ CREATE TABLE feedback (
 > `finding_id` 是归因到具体 finding 的唯一依据；只有 publication 在同一 workflow/project/MR 下唯一匹配到已持久化 finding 时才写入新归属。汇总评论的 award 不关联 finding；discussion 找不到匹配或 publication 身份不一致时，新 award 记录也不关联 finding。finding 查询出错或匹配多个 finding 时跳过该 discussion 本轮采集并告警，不写入新的无归属反馈。重复采集时，空 `finding_id` 不会清除已有非空归属；非空值可以更新归属。保留的历史归属不证明对应 finding 仍存在或仍可唯一匹配。`stats.feedback.by_provider` 按 `{provider, role, total, by_signal}` 返回：`proposer` 使用 `findings.origin_provider`，`challenger` 使用 `findings.challenge_node` 对应节点的 provider；只统计 `finding_id` 能精确连接 `findings.id` 的 discussion 反馈，summary/unlinked 不计入这组归因，但仍计入 `total`/`by_signal`。同一 signal 可以同时出现在两个角色中，因此这些是归因计数，不是准确率或误杀率，也不能把两个角色相加当作反馈总数。
 
 ```sql
--- 0011_review_side_effects.sql 建表；0031_review_status_final_body.sql 追加 final_body
+-- 0011_review_side_effects.sql 建表；0031_review_status_final_body.sql 追加 final_body；0032_review_status_final_body_ready.sql 追加 final_body_ready
 CREATE TABLE review_status (
   project_id      INTEGER NOT NULL,
   mr_iid          INTEGER NOT NULL,
@@ -313,6 +313,7 @@ CREATE TABLE review_status (
   state           TEXT    NOT NULL,   -- queued | running | publishing | PASS | BLOCKING | INCOMPLETE | failed | cancelled | stale
   detail          TEXT    NOT NULL DEFAULT '',
   final_body      TEXT    NOT NULL DEFAULT '', -- 0031：状态评论携带的已渲染评审正文；空表示只显示状态
+  final_body_ready INTEGER NOT NULL DEFAULT 1, -- 0032：0 为升级前的历史行，继续更新旧 :status 评论；1 为合并评论模式
   note_id         INTEGER,            -- 状态与结果共用的同一条 MR note
   body_hash       TEXT    NOT NULL DEFAULT '',
   version         INTEGER NOT NULL DEFAULT 1,
@@ -323,7 +324,7 @@ CREATE TABLE review_status (
 );
 ```
 
-> `review_status` 每个 MR 一行，状态 worker 与 publisher 都按 `<!-- gitlab-ce-review:summary` 标记找到并更新同一条 note。`final_body` 保存已渲染的评审正文（通常是评审报告，也用于配置错误等用户可见说明）；`SetReviewStatusFinalBody` 按 128 × 1024 字符截断。终态后仍可写入：该方法要求当前 generation/head，写入后重置 `body_hash`、递增 `version` 并入队 `review.status`；`SetReviewStatus` 在新 generation 或 head 变化时清空 `final_body`，同代次保留。迁移前写入的行 `final_body` 为空，状态评论保持旧正文，下一次评审覆盖。
+> `review_status` 每个 MR 一行，状态 worker 与 publisher 都按 `<!-- gitlab-ce-review:summary` 标记找到并更新同一条 note。`final_body` 保存已渲染的评审正文（通常是评审报告，也用于配置错误等用户可见说明）；`SetReviewStatusFinalBody` 按 128 × 1024 字符截断。终态后仍可写入：该方法要求当前 generation/head，写入后重置 `body_hash`、递增 `version` 并入队 `review.status`；`SetReviewStatus` 在新 generation 或 head 变化时清空 `final_body`，同代次（含 stale/cancel 更新）保留。`final_body_ready` 由 `0032` 引入：迁移时已有且 `final_body = ''` 的行回填 0，新行默认 1，`SetReviewStatusFinalBody` 写入正文时置 1。`final_body_ready = 0` 的历史行由状态 worker 继续用旧 `<!-- gitlab-ce-review:status` 标记原地更新旧状态评论，绝不接管 summary 评论；写入正文后转入同一条 summary note 的合并评论模式。
 
 ```sql
 CREATE TABLE users (
@@ -396,6 +397,8 @@ CREATE TABLE api_tokens (
 0030 重建 `workflows` 与 `workflow_nodes` 去掉 `cost_micros`，保留其余列、默认值、主键、索引和外键；迁移执行器在迁移期间关闭外键检查，实际应用迁移后恢复并执行 `foreign_key_check`。同一迁移从 `llm_models.params_json` 剥离 legacy `price`，无效 JSON 保持原样。该迁移不可逆，回滚需恢复升级前快照与匹配的旧镜像。
 
 0031 为 `review_status` 追加 `final_body TEXT NOT NULL DEFAULT ''`，只加列、不改写已有行；旧行读到空串，状态评论保持旧正文。该迁移不可逆，回滚需恢复升级前快照与匹配的旧镜像。字段语义见上文 `review_status` 说明；升级操作见[部署与运维 · 评审回合与评论合并](../operations.md#评审回合超时与评论合并451)。
+
+0032 为 `review_status` 追加 `final_body_ready INTEGER NOT NULL DEFAULT 1`，只加列，并按 `final_body = ''` 把迁移时的已有行回填为 0（历史行）；`final_body` 非空的行保持 1，迁移后新建的行默认 1，`SetReviewStatusFinalBody` 写入正文时也置 1。历史行由状态 worker 继续维护旧 `<!-- gitlab-ce-review:status` 评论，不接管 summary 评论。该迁移不可逆，回滚需恢复升级前快照与匹配的旧镜像；字段语义同上文 `review_status` 说明。
 
 模型参数的配置侧覆盖不写入数据库：不存在数据库模型级覆盖表。`config:` 模型的参数层级为 base < overlay（模型级）< 0028 节点覆盖（节点级）；base 与 overlay 均来自配置文件，overlay 由配置文件维护，控制台经 `PATCH /api/v1/config/overlay` 写回，服务不把模型级修改写入 SQLite。原计划的“0030 模型级覆盖”已取消；实际迁移 `0030_remove_cost.sql` 是移除 `cost_micros` 的成本字段迁移，不创建模型覆盖表。0028 只保存评审档位节点覆盖与模型引用，不保存模型级字段；0029 的 `llm_model_defaults` 只作用于 `user:` 模型，不覆盖 `config:` 模型。
 
