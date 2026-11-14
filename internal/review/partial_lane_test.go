@@ -12,15 +12,6 @@ import (
 	"github.com/LeXwDeX/tribunal/pkg/dag"
 )
 
-func partialLaneOutputRaw(t *testing.T, out PartialLaneOut) []byte {
-	t.Helper()
-	raw, err := json.Marshal(out)
-	if err != nil {
-		t.Fatalf("marshal partial lane output: %v", err)
-	}
-	return raw
-}
-
 func decodePartialLaneOutput(t *testing.T, out dag.NodeOutput) PartialLaneOut {
 	t.Helper()
 	partial, ok := decodePartialLaneOut(out.Data)
