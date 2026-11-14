@@ -208,7 +208,7 @@ M0 先把命令持久化为 `review.command`，以下 GitLab 校验由 worker �
 
 定时任务（默认每 6 小时）：
 
-1. 找出最近 14 天内**创建**且已完成的 review workflow（最多 5 页、每页 100 条），再读取对应 MR。MR 必须仍打开，或状态为 merged/locked 且 `merged_at` 在最近 3 天内；closed 或更早合并的 MR 不采集。
+1. 找出最近 14 天内**创建**且已完成的 review workflow（最多 5 页、每页 100 条），再读取对应 MR。MR 必须仍打开，或状态为 merged/locked 且 `merged_at` 在最近 14 天内（与 workflow 扫描窗口一致）；closed 或更早合并的 MR 不采集。
 2. 对状态/结果评论和行内讨论的**发布者首条 note** 调用 `GET .../notes/:note_id/award_emoji`，记录 👍（`thumbsup`）/ 👎（`thumbsdown`）。discussion 的后续 note 是 reviewer replies，其表情不视为对已发布 finding 的反馈。状态/结果评论的 award 保持未关联 finding。
 3. 行内讨论先调用 `GET .../discussions/:discussion_id`。只有已 resolved 且能定位到 finding 时才判断：只处理 `line > 0` 且 `side` 为空或 `new` 的 finding；`published_head == current_head` 记为 `resolved_unchanged`，否则取回 current head 后执行零上下文 `git diff <published_head>..<current_head> -- <path>`：
    - finding 行落在删除或替换旧行的 hunk 内，或文件被删除 → `resolved_changed`。
@@ -216,6 +216,8 @@ M0 先把命令持久化为 `review.command`，以下 GitLab 校验由 worker �
    - binary、无法映射到旧路径的 rename 或其他不可比较改动，或 old-side、缺行、MR/head 获取失败、diff 失败 → 不写 signal，留待下一轮重试。
 4. 写入 `feedback`；discussion 先按 publication 的 `publish_key` 在同一 workflow/project/MR 中定位已持久化 finding，唯一匹配时写入其精确 `finding_id`。finding 查询失败或匹配多个 finding 时，该讨论本轮不采集，记录告警并等待下次重试；不写入无归属 signal，也不猜测归属。没有匹配或 publication 身份不一致时，仍保存 award 原始 signal，但新记录的 `finding_id` 为空；resolve 缺少可用 finding 时不写 signal。`UpsertFeedback` 按 publication、signal 和 GitLab 用户匹配，匿名信号使用 `IS NULL` 匹配；重复采集时，空 `finding_id` 不覆盖已有非空归属，非空归属可更新原值。成功写入会用本次采集时间更新 `observed_at`，因此统计窗口按最近一次观察时间计算，不是首次创建时间。
 5. 控制台统计页展示 `stats.feedback` 的 `total`、`by_signal` 和 `by_provider` 原始计数，按项目和 `observed_at` 的 `[from, to)` 筛选（结束日映射到次日本地午夜）；空范围显示已知为零，旧响应缺少 `feedback` 字段时显示不可用。`by_provider` 每项为 `{provider, role, total, by_signal}`：`proposer` 取 `findings.origin_provider`，`challenger` 取 `challenge_node` 节点的 provider；只统计 `feedback.finding_id` 能精确连接 `findings.id` 且 publication 一致的 discussion；summary/unlinked 不计入 `by_provider`，但仍计入原始 `total`/`by_signal`。同一 signal 可同时计入两个角色。
+
+采集失败按固定类别记录 WARN：`auth`、`not_found`、`rate_limited`、`upstream`、`store`、`credential`、`canceled`、`timeout`；日志只使用 `project_id`、`mr_iid`、`workflow_id`、`publication_id` 等标识和类别，不写原始错误正文。单行表 `feedback_collection_state` 记录最近成功一轮的 `last_collected_at` 与最近失败类别/时间：成功只推进 `last_collected_at`，失败只更新 `last_error_class`/`last_error_at`，`last_collected_at` 晚于 `last_error_at` 表示已恢复；`GET /api/v1/stats` 以 `feedback_collection` 返回该状态。
 
 原始反馈不自动判断 finding 是否有效。管理员在评审详情展开 finding，选择有效、无效、未确定或清除后显式保存；标注接口记录认证用户名与服务端时间，viewer 只能读取。`ReplaceFindings` 在重新发布时保留同一 ID 的人工字段，不接受 producer 覆盖。标注更正不触发重新发布，也不改变 verdict。
 
