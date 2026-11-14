@@ -22,6 +22,21 @@ type Webhook struct {
 	Ref              string                  `json:"ref"`
 	Before           string                  `json:"before"`
 	After            string                  `json:"after"`
+	Changes          WebhookChanges          `json:"changes"`
+}
+
+// WebhookChange is one previous/current pair of a merge request update event.
+type WebhookChange[T any] struct {
+	Previous T `json:"previous"`
+	Current  T `json:"current"`
+}
+
+// WebhookChanges reports the fields an update event changed. GitLab only
+// includes entries that actually changed; a nil entry means "not reported".
+type WebhookChanges struct {
+	Draft        *WebhookChange[bool]   `json:"draft"`
+	Labels       *WebhookChange[Labels] `json:"labels"`
+	TargetBranch *WebhookChange[string] `json:"target_branch"`
 }
 
 // WebhookProject is the project portion of a webhook payload.

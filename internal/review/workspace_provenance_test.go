@@ -79,16 +79,14 @@ func TestExecutorRejectsUnprovenContextBeforeAgent(t *testing.T) {
 		change func(*Dossier)
 	}{
 		{"missing", func(d *Dossier) { d.WorkspaceProvenance = nil }},
-		{"wrong-target", func(d *Dossier) { d.WorkspaceProvenance.ContextBaseSHA = testBaseSHA }},
-		{"ignored", func(d *Dossier) {
-			d.WorkspaceProvenance.ContextBaseSHA = testStartSHA
-			d.IgnorePolicy.Patterns = []string{"private"}
-		}},
+		{"missing-base", func(d *Dossier) { d.WorkspaceProvenance.ContextBaseSHA = "" }},
+		{"invalid-base", func(d *Dossier) { d.WorkspaceProvenance.ContextBaseSHA = "bad" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d := validDossier(t)
 			d.IgnorePolicy = &IgnorePolicy{Version: IgnorePolicyVersion, Patterns: []string{}}
 			d.ContextDocs = "CANARY"
+			d.WorkspaceProvenance.ContextBaseSHA = testStartSHA
 			tc.change(d)
 			calls := 0
 			e := newTestExecutor(t, ExecutorDeps{Dossier: d, AgentRun: func(context.Context, agent.RunSpec) (*agent.RunResult, error) { calls++; return nil, nil }})
@@ -97,5 +95,20 @@ func TestExecutorRejectsUnprovenContextBeforeAgent(t *testing.T) {
 				t.Fatalf("err=%v agent calls=%d", err, calls)
 			}
 		})
+	}
+}
+
+func TestExecutorUsesContextFromAnotherBaseUnderRestrictedIgnore(t *testing.T) {
+	d := validDossier(t)
+	d.IgnorePolicy = &IgnorePolicy{Version: IgnorePolicyVersion, Patterns: []string{"private/**"}}
+	d.ContextDocs = "CANARY"
+	d.WorkspaceProvenance.ContextBaseSHA = testBaseSHA
+	calls := 0
+	e := newTestExecutor(t, ExecutorDeps{Dossier: d, AgentRun: func(context.Context, agent.RunSpec) (*agent.RunResult, error) {
+		calls++
+		return &agent.RunResult{Output: &CodeReviewOut{Summary: "ok", Findings: []FindingOut{}}}, nil
+	}})
+	if _, err := e.Execute(context.Background(), codeReviewInput(t)); err != nil || calls != 1 {
+		t.Fatalf("err=%v agent calls=%d", err, calls)
 	}
 }

@@ -274,8 +274,8 @@ func TestAutomaticRefreshSkipsLockedContext(t *testing.T) {
 		return validOnboardingContext(ctx, spec)
 	})
 	svc.contextRefresh.MaxAge = time.Nanosecond
-	if svc.shouldRefreshContext(context.Background(), 42, "", reviewTestHead, nil) {
-		t.Fatal("automatic refresh with empty old base must skip locked context")
+	if svc.shouldRefreshContext(context.Background(), 42, reviewTestHead, nil) {
+		t.Fatal("automatic refresh with an empty workspace state must skip locked context")
 	}
 	if err := svc.Refresh(context.Background(), 42, "main"); err != nil {
 		t.Fatalf("Refresh: %v", err)

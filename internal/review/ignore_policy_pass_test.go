@@ -5,11 +5,12 @@ import (
 	"testing"
 )
 
-// An ignore policy withholds MCP tools by design; it is a safety downgrade,
-// not a coverage gap, so a clean review must still settle PASS.
+// A restricted ignore policy withholds MCP tools by design; it is a safety
+// downgrade disclosed elsewhere, not a coverage gap, so a clean review still
+// settles PASS.
 func TestIgnorePolicyBlockedMCPDoesNotPreventPass(t *testing.T) {
 	d := validDossier(t)
-	d.IgnorePolicy = &IgnorePolicy{Version: IgnorePolicyVersion, Patterns: []string{"**/*.lock"}}
+	d.IgnorePolicy = &IgnorePolicy{Version: IgnorePolicyVersion, Patterns: []string{"private/**"}}
 	provider := &ignoreMetadataProvider{names: []string{"mcp__codebase-memory__search_graph"}}
 	var seen []string
 	e := newTestExecutor(t, ExecutorDeps{Dossier: d, Blocks: graphBlocks, Tools: provider, AgentRun: submitCodeReview(`{"summary":"ok","findings":[]}`, &seen)})
@@ -52,6 +53,24 @@ func TestIndexIdentityBlockedMCPStillRecordsGap(t *testing.T) {
 	}
 	result, err := DecodeStrict[*CodeReviewOut](out.Data)
 	if err != nil || len(result.ToolGaps) != 1 || provider.calls != 0 {
+		t.Fatalf("gaps=%v calls=%d err=%v", result.ToolGaps, provider.calls, err)
+	}
+}
+
+// The built-in ignore defaults only exclude build artifacts; they must not
+// withhold the code graph (#457).
+func TestBuiltInIgnoreDefaultsDoNotBlockMCP(t *testing.T) {
+	d := validDossier(t)
+	d.IgnorePolicy = &IgnorePolicy{Version: IgnorePolicyVersion, Patterns: []string{"**/*.lock", "**/vendor/**"}}
+	provider := &ignoreMetadataProvider{names: []string{"mcp__codebase-memory__search_graph"}}
+	var seen []string
+	e := newTestExecutor(t, ExecutorDeps{Dossier: d, Blocks: graphBlocks, Tools: provider, AgentRun: submitCodeReview(`{"summary":"ok","findings":[]}`, &seen)})
+	out, err := e.Execute(context.Background(), codeReviewInput(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := DecodeStrict[*CodeReviewOut](out.Data)
+	if err != nil || len(result.ToolGaps) != 0 || provider.calls != 1 {
 		t.Fatalf("gaps=%v calls=%d err=%v", result.ToolGaps, provider.calls, err)
 	}
 }

@@ -79,6 +79,13 @@ func (r *deliveryRecorder) note(d store.Delivery, kind string, payload json.RawM
 	r.payload = append(r.payload, payload)
 }
 
+func (r *deliveryRecorder) RecordDelivery(ctx context.Context, d store.Delivery, job *store.Job) (string, bool, error) {
+	if job != nil {
+		r.note(d, job.Kind, job.Payload)
+	}
+	return r.Store.RecordDelivery(ctx, d, job)
+}
+
 func (r *deliveryRecorder) RecordReviewDelivery(ctx context.Context, d store.Delivery, command *store.ReviewCommand) (store.ReviewEnqueueResult, error) {
 	r.note(d, "review.run", command.Payload)
 	return r.Store.RecordReviewDelivery(ctx, d, command)
@@ -186,8 +193,37 @@ func TestCatchUpUsesCandidatePathWhenRepoConfigAllowed(t *testing.T) {
 	}
 	f.rec.mu.Lock()
 	defer f.rec.mu.Unlock()
-	if len(f.rec.kinds) != 1 || f.rec.kinds[0] != "review.candidate" {
-		t.Fatalf("kinds = %+v, want the deferred candidate path the webhook uses", f.rec.kinds)
+	if len(f.rec.kinds) != 2 || f.rec.kinds[0] != "review.candidate" || f.rec.kinds[1] != "workspace.refresh" {
+		t.Fatalf("kinds = %+v, want the deferred candidate path and its base refresh", f.rec.kinds)
+	}
+}
+
+func TestCatchUpEnqueuesWorkspaceRefreshForEnqueuedReview(t *testing.T) {
+	svc, f := newCatchUp(t, defaultCatchUp, `{"allow_repo_config":false}`, openMR(7, shaOf("c")))
+	if _, err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	f.rec.mu.Lock()
+	defer f.rec.mu.Unlock()
+	found := false
+	for i, kind := range f.rec.kinds {
+		if kind != "workspace.refresh" {
+			continue
+		}
+		found = true
+		if f.rec.records[i].Event != catchUpRefreshEvent {
+			t.Fatalf("refresh event = %q", f.rec.records[i].Event)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(f.rec.payload[i], &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["branch"] != "main" || payload["after_sha"] != shaOf("c") {
+			t.Fatalf("refresh payload = %+v", payload)
+		}
+	}
+	if !found {
+		t.Fatalf("kinds = %+v, want a workspace.refresh", f.rec.kinds)
 	}
 }
 
@@ -448,5 +484,101 @@ func TestRecoverRunsCatchUpEvenWhenRecoveryFails(t *testing.T) {
 	}
 	if got := f.enqueued(); len(got) != 1 {
 		t.Fatalf("catch-up did not run after a failing recovery: %+v", got)
+	}
+}
+
+type hookLister struct {
+	*fakeOpenMRs
+	mu      sync.Mutex
+	hooks   map[int64][]gitlab.Hook
+	hookErr error
+	calls   int
+}
+
+func (h *hookLister) ListProjectHooks(_ context.Context, _ string, projectID int64) ([]gitlab.Hook, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.calls++
+	if h.hookErr != nil {
+		return nil, h.hookErr
+	}
+	return append([]gitlab.Hook(nil), h.hooks[projectID]...), nil
+}
+
+func newHookHealthFixture(t *testing.T, hooks []gitlab.Hook, hookErr error) (*CatchUpService, *catchUpFixture, *hookLister) {
+	t.Helper()
+	svc, f := newCatchUp(t, defaultCatchUp, `{"allow_repo_config":false}`)
+	lister := &hookLister{fakeOpenMRs: f.lister, hooks: map[int64][]gitlab.Hook{}, hookErr: hookErr}
+	if hookErr == nil {
+		lister.hooks[42] = hooks
+	}
+	svc.gitlab = lister
+	return svc, f, lister
+}
+
+func seedManagedHook(t *testing.T, f *catchUpFixture, hookID int64, state, errText string) {
+	t.Helper()
+	if err := f.st.UpdateProjectWebhook(context.Background(), 42, store.ProjectWebhookUpdate{
+		HookID: &hookID, State: state, Error: errText, Events: managedWebhookEvents,
+	}); err != nil {
+		t.Fatalf("seed webhook state: %v", err)
+	}
+}
+
+func TestCatchUpMarksDisabledHookFailed(t *testing.T) {
+	svc, f, _ := newHookHealthFixture(t, []gitlab.Hook{{ID: 77, URL: "https://tribunal.example.com/webhooks/gitlab", AlertStatus: "disabled"}}, nil)
+	seedManagedHook(t, f, 77, store.WebhookStateEnabled, "")
+	if _, err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	project, err := f.st.GetProject(context.Background(), 42)
+	if err != nil || project.WebhookState != store.WebhookStateFailed || !strings.Contains(project.WebhookError, "disabled") {
+		t.Fatalf("project = %+v, err = %v", project, err)
+	}
+}
+
+func TestCatchUpMarksMissingManagedHookFailed(t *testing.T) {
+	svc, f, _ := newHookHealthFixture(t, []gitlab.Hook{{ID: 99, AlertStatus: "executable"}}, nil)
+	seedManagedHook(t, f, 77, store.WebhookStateEnabled, "")
+	if _, err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	project, _ := f.st.GetProject(context.Background(), 42)
+	if project.WebhookState != store.WebhookStateFailed || !strings.Contains(project.WebhookError, "missing") {
+		t.Fatalf("project = %+v", project)
+	}
+}
+
+func TestCatchUpRestoresHealthyHook(t *testing.T) {
+	svc, f, _ := newHookHealthFixture(t, []gitlab.Hook{{ID: 77, AlertStatus: "executable"}}, nil)
+	seedManagedHook(t, f, 77, store.WebhookStateFailed, webhookDisabledMessage)
+	if _, err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	project, _ := f.st.GetProject(context.Background(), 42)
+	if project.WebhookState != store.WebhookStateEnabled || project.WebhookError != "" {
+		t.Fatalf("project = %+v", project)
+	}
+}
+
+func TestCatchUpHookHealthTokenRejection(t *testing.T) {
+	svc, f, _ := newHookHealthFixture(t, nil, &gitlab.Error{Op: "list_hooks", Status: 401})
+	seedManagedHook(t, f, 77, store.WebhookStateEnabled, "")
+	if _, err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	project, _ := f.st.GetProject(context.Background(), 42)
+	if project.WebhookState != store.WebhookStateFailed || !strings.Contains(project.WebhookError, "token") {
+		t.Fatalf("project = %+v", project)
+	}
+}
+
+func TestCatchUpSkipsHookHealthWithoutManagedHook(t *testing.T) {
+	svc, _, lister := newHookHealthFixture(t, nil, nil)
+	if _, err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if lister.calls != 0 {
+		t.Fatalf("hook list calls = %d, want 0 without a recorded hook", lister.calls)
 	}
 }

@@ -37,6 +37,15 @@ const (
 	reviewExecutionFailedReason = "review execution failed"
 	invalidRepoConfigDetail     = "repository or stored ignore configuration is invalid"
 	invalidRepoConfigNote       = "评审未启动：`.gitlab-review.yml` 或已保存的 ignore 规则无效（无法解析或包含不支持的写法）。请修正后重新触发评审。"
+	// Degradation warnings are persisted in the dossier and rendered on the MR
+	// so a withheld material is never silent (#457).
+	withoutCodeGraphWarning = "review ran without the code graph: project ignore rules blocked workspace indexing"
+	withoutContextWarning   = "review ran without the project context document: the stored document is not verified for review"
+	baseUnavailableWarning  = "review coverage gap: the merge request base commit is unavailable; changed lines were reviewed without a base checkout"
+	// A rejected project token is permanent until an administrator replaces it;
+	// retrying the same credentials cannot succeed (#457).
+	tokenRejectedDetail = "项目访问令牌被 GitLab 拒绝或权限不足；请更换令牌后重试"
+	tokenRejectedNote   = "评审未完成：项目访问令牌被 GitLab 拒绝或权限不足（HTTP 401/403），请更换令牌后重新触发评审。"
 )
 
 // ReviewStore is the persistence surface needed by review orchestration.
@@ -397,6 +406,11 @@ func (s *ReviewService) RunCandidate(ctx context.Context, job *jobs.Job) error {
 
 	mr, docs, err := s.collectFilterInputs(ctx, project, token, payload.MRIID, payload.HeadSHA)
 	if err != nil {
+		if tokenRejected(err) {
+			s.markProjectTokenRejected(ctx, project.ID, gitlab.StatusOf(err))
+			s.noteTokenRejected(ctx, token, payload.ProjectID, payload.MRIID, control.Generation, payload.HeadSHA)
+			return PermanentJob(err)
+		}
 		if errors.Is(err, ErrMRClosed) || errors.Is(err, ErrReviewSuperseded) {
 			s.logger.Info("review candidate event is no longer applicable",
 				"project_id", project.ID, "mr_iid", payload.MRIID, "error_class", jobSettleClass(err))
@@ -404,6 +418,7 @@ func (s *ReviewService) RunCandidate(ctx context.Context, job *jobs.Job) error {
 		}
 		return err
 	}
+	s.clearProjectTokenRejected(ctx, project.ID)
 	cfg, err := resolveSecureReviewConfig(project, docs, s.reviewDefaults, s.profiles)
 	if err != nil {
 		if errors.Is(err, ErrInvalidRepoConfig) {
@@ -532,17 +547,22 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 	// stage is a coarse marker for the permanent-failure log only.
 	stage := "control"
 	defer func() {
-		if err == nil || ctx.Err() != nil || !IsPermanentJob(err) {
+		authFailure := tokenRejected(err)
+		if err == nil || ctx.Err() != nil || (!IsPermanentJob(err) && !authFailure) {
 			return
 		}
 		s.logger.Warn("review run failed permanently",
 			"project_id", payload.ProjectID, "mr_iid", payload.MRIID, "generation", payload.Generation,
 			"error_class", errclass.Of(err), "stage", stage)
 		state, detail := reviewStatusFailed, reviewExecutionFailedReason
-		if errors.Is(err, ErrReviewSuperseded) || errors.Is(err, ErrMRClosed) {
+		switch {
+		case authFailure:
+			detail = tokenRejectedDetail
+			s.noteTokenRejected(ctx, token, payload.ProjectID, payload.MRIID, payload.Generation, payload.HeadSHA)
+			s.markProjectTokenRejected(ctx, payload.ProjectID, gitlab.StatusOf(err))
+		case errors.Is(err, ErrReviewSuperseded) || errors.Is(err, ErrMRClosed):
 			state, detail = reviewStatusStale, "review is no longer current"
-		}
-		if errors.Is(err, ErrInvalidRepoConfig) {
+		case errors.Is(err, ErrInvalidRepoConfig):
 			detail = invalidRepoConfigDetail
 			s.noteInvalidRepoConfig(ctx, token, payload.ProjectID, payload.MRIID, payload.Generation, payload.HeadSHA)
 		}
@@ -590,8 +610,9 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 	stage = "inputs"
 	inputs, err := s.collectInputs(ctx, project, token, control.MRIID, payload.HeadSHA)
 	if err != nil {
-		return err
+		return permanentTokenFailure(err)
 	}
+	s.clearProjectTokenRejected(ctx, project.ID)
 
 	stage = "config"
 	cfg, err := resolveSecureReviewConfig(project, inputs.RepoDocs, s.reviewDefaults, s.profiles)
@@ -679,7 +700,7 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 	}
 	defer execution.releaseResolverSet()
 	defer execution.cleanupRepositorySkills()
-	var head, baseDir, workspaceIdentity, indexSHA string
+	var head, baseDir, workspaceIdentity, baseIdentity, indexSHA string
 	var indexEligible bool
 	var cleanup func()
 	prepare := func() error {
@@ -693,9 +714,23 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 				cleanup()
 			}
 		}()
-		baseDir, workspaceIdentity, err = s.reviewBaseIdentity(ctx, project.ID, inputs.Version.StartSHA)
+		var baseCleanup func()
+		baseDir, baseIdentity, baseCleanup, err = s.prepareReviewBase(ctx, project, token, control.MRIID, job.ID, inputs.Version.StartSHA, inputs.MR.TargetBranch)
 		if err != nil {
 			return err
+		}
+		workspaceIdentity = s.workspaceMaterialIdentity(ctx, project.ID, baseDir, inputs.Version.StartSHA)
+		if baseCleanup != nil {
+			runCleanup := cleanup
+			cleanup = func() {
+				baseCleanup()
+				runCleanup()
+			}
+		}
+		if baseDir == "" {
+			// The review still runs on the head checkout, but the missing base
+			// is a coverage gap that must be visible in the dossier and summary.
+			cfg.Warnings = append(cfg.Warnings, baseUnavailableWarning)
 		}
 		indexSHA, indexEligible, err = s.reviewIndexState(ctx, project.ID, inputs.Version.StartSHA, cfg.Settings.Ignore)
 		if err != nil {
@@ -832,11 +867,25 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 			return s.publishEmptyWithNote(ctx, project, token, control, payload.NoteID, inputs, cfg, summary, ignored)
 		}
 		provenance := &review.WorkspaceProvenance{Version: review.WorkspaceProvenanceVersion, TargetSHA: inputs.Version.StartSHA}
-		contextDoc := ""
-		if len(cfg.Settings.Ignore) == 0 {
-			contextDoc, provenance.ContextBaseSHA = s.contextDoc(ctx, project.ID, inputs.Version.StartSHA)
+		dossierWarnings := make([]string, 0, 3)
+		contextDoc, contextBase, contextFound := s.contextDoc(ctx, project.ID)
+		if contextDoc != "" {
+			provenance.ContextBaseSHA = contextBase
+		} else if contextFound {
+			dossierWarnings = append(dossierWarnings, withoutContextWarning)
 		}
 		provenance.IndexSHA, provenance.MCPEligible = indexSHA, indexEligible
+		if config.ReviewIgnoreRestricted(cfg.Settings.Ignore) && !indexEligible {
+			dossierWarnings = append(dossierWarnings, withoutCodeGraphWarning)
+		}
+		repoDocs := filterRepoDocs(inputs.RepoDocs, cfg.Settings.Ignore)
+		if warning := review.BackgroundBudgetWarning(&review.Dossier{
+			Language: cfg.Settings.Language, CustomRules: cfg.Settings.CustomRules,
+			RepoDocs: repoDocs, ContextDocs: contextDoc,
+		}); warning != "" {
+			dossierWarnings = append(dossierWarnings, warning)
+		}
+		cfg.Warnings = append(cfg.Warnings, dossierWarnings...)
 		incremental := s.incrementalRange(ctx, project.ID, payload, control, payload.HeadSHA, files)
 		dossier, err = review.BuildDossier(review.DossierInput{
 			Project: review.ProjectRef{ID: project.ID, Path: project.PathWithNamespace, WebURL: project.WebURL},
@@ -858,8 +907,9 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 			RepositorySkillExcluded:   repositoryExcluded,
 			Pipeline:                  inputs.Pipeline,
 			Issues:                    inputs.Issues,
-			RepoDocs:                  filterRepoDocs(inputs.RepoDocs, cfg.Settings.Ignore),
+			RepoDocs:                  repoDocs,
 			ContextDocs:               contextDoc,
+			Warnings:                  append([]string(nil), cfg.Warnings...),
 			Language:                  cfg.Settings.Language,
 			CustomRules:               cfg.Settings.CustomRules,
 			Incremental:               incremental,
@@ -872,6 +922,7 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 				"prompt_hash":        promptHash,
 				"profile_hash":       profileHash,
 				"workspace_identity": workspaceIdentity,
+				"base_identity":      baseIdentity,
 				"execution_identity": executionIdentity,
 				"requested_profile":  payload.Profile,
 				"profile_explicit":   fmt.Sprint(profileExplicit(payload)),

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"slices"
 	"sort"
 	"strconv"
@@ -42,7 +43,25 @@ const (
 	publicationFailedReason = "publication is not possible"
 )
 
-var errDiscussionUnknown = errors.New("app: discussion outcome unknown")
+var (
+	errDiscussionUnknown = errors.New("app: discussion outcome unknown")
+	// errDiscussionAbsent is proof that a successful marker scan found no
+	// matching discussion. Unlike an unknown outcome it is safe to clear the
+	// intent fence (#457).
+	errDiscussionAbsent = errors.New("app: discussion marker is absent")
+)
+
+// permanentDiscussionStatus lists GitLab responses that definitively rejected
+// the create request. The intent fence can be cleared for these; every other
+// outcome stays unknown because the note may exist remotely.
+func permanentDiscussionStatus(status int) bool {
+	switch status {
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden,
+		http.StatusNotFound, http.StatusUnprocessableEntity:
+		return true
+	}
+	return false
+}
 
 // Publisher implements F7: fingerprint-checked, idempotent publication.
 type Publisher struct {
@@ -353,6 +372,12 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 	}
 	original := markPositions(result.Groups, index)
 	warnings := append(append([]string(nil), result.Warnings...), cfg.Warnings...)
+	// Dossier warnings disclose material degradation recorded at collection
+	// time (missing context, withheld code graph, truncated background) (#457).
+	warnings = append(warnings, loaded.dossier.Warnings...)
+	if warning := review.BackgroundBudgetWarning(loaded.dossier); warning != "" {
+		warnings = append(warnings, warning)
+	}
 	for i := range original {
 		original[i].PublishKey = review.GroupPublishKey(loaded.dossier, original[i])
 	}
@@ -549,6 +574,12 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 			if discussionID == "" {
 				var remoteBody string
 				discussionID, remoteBody, err = p.recoverDiscussionBody(callCtx, loaded.token, loaded.project.ID, loaded.mrIID, key)
+				if errors.Is(err, errDiscussionAbsent) {
+					if p.discussionAbsentProven(loaded) {
+						return errDiscussionAbsent
+					}
+					return errors.Join(errDiscussionUnknown, err)
+				}
 				if err != nil {
 					return errors.Join(errDiscussionUnknown, err)
 				}
@@ -568,9 +599,24 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 			adopted, err = lookup.provenOurs(callCtx, discussionID, findingBody)
 			return err
 		})
+		if errors.Is(err, errDiscussionAbsent) && !errors.Is(err, errDiscussionUnknown) {
+			// A successful marker scan of an old publication proved no remote
+			// discussion exists.
+			// Clearing the fence lets a later review post the finding again;
+			// this run keeps it in the summary and still terminates.
+			writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 4*time.Second)
+			rejectErr := p.store.RejectDiscussionIntent(writeCtx, loaded.project.ID, loaded.mrIID, key)
+			cancel()
+			if rejectErr != nil && !errors.Is(rejectErr, store.ErrConflict) {
+				return errors.Join(errDiscussionUnknown, rejectErr)
+			}
+			groups[i].PositionOK = false
+			fallback = true
+			continue
+		}
 		if err != nil {
 			if created {
-				if gitlab.StatusOf(err) == 400 && !errors.Is(err, errDiscussionUnknown) &&
+				if permanentDiscussionStatus(gitlab.StatusOf(err)) && !errors.Is(err, errDiscussionUnknown) &&
 					!errors.Is(err, workspace.ErrOutboundInvalidated) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 					if err := p.store.RejectDiscussionIntent(ctx, loaded.project.ID, loaded.mrIID, key); err != nil {
 						return errors.Join(errDiscussionUnknown, err)
@@ -625,6 +671,9 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 				return err
 			}
 		}
+	}
+	if err := p.reconcileDiscussions(ctx, loaded, groups, result.Verdict, lookup, recheck); err != nil {
+		return err
 	}
 
 	if cfg.Settings.CommitStatus {
@@ -1360,6 +1409,9 @@ func (l *discussionLookup) provenOurs(ctx context.Context, discussionID, wantBod
 
 func (p *Publisher) recoverDiscussion(ctx context.Context, token string, projectID, mrIID int64, key string) (string, error) {
 	id, _, err := p.recoverDiscussionBody(ctx, token, projectID, mrIID, key)
+	if errors.Is(err, errDiscussionAbsent) {
+		return "", errDiscussionUnknown
+	}
 	return id, err
 }
 
@@ -1387,9 +1439,151 @@ func (p *Publisher) recoverDiscussionBody(ctx context.Context, token string, pro
 		id, body = discussion.ID, discussion.Notes[0].Body
 	}
 	if id == "" {
-		return "", "", errDiscussionUnknown
+		return "", "", errDiscussionAbsent
 	}
 	return id, body, nil
+}
+
+// discussionAbsentProven reports that an old publication's empty marker scan
+// is conclusive. A fresh attempt keeps the deadline fence.
+func (p *Publisher) discussionAbsentProven(loaded *loadedReview) bool {
+	if loaded == nil || loaded.record == nil || loaded.record.UpdatedAt.IsZero() {
+		return false
+	}
+	return p.now().Sub(loaded.record.UpdatedAt) >= discussionAbsentProofAge
+}
+
+// discussionResolver is the optional GitLab capability for converging old
+// inline threads. A client without it keeps publication read-only.
+type discussionResolver interface {
+	ResolveDiscussion(ctx context.Context, token string, projectID, iid int64, discussionID string, resolved bool) error
+}
+
+// maxDiscussionLifecycleCalls bounds resolve/unresolve work per publication.
+const maxDiscussionLifecycleCalls = 50
+
+// discussionAbsentProofAge is how old a publication must be before an empty
+// marker scan counts as proof that no remote discussion exists. Immediate
+// retries stay conservative because GitLab reads can lag behind a write whose
+// response was lost (#457).
+const discussionAbsentProofAge = 24 * time.Hour
+
+// discussionResolution is one desired remote thread state.
+type discussionResolution struct {
+	ID       string
+	Resolved bool
+}
+
+// discussionTargets decides which bot discussions must converge. A finding
+// that is still present but resolved is reopened; a discussion whose finding
+// no longer appears in a complete review is resolved. An incomplete review
+// proves nothing about missing findings, so it never resolves threads (#457).
+func discussionTargets(discussions []gitlab.Discussion, botID int64, currentKeys map[string]struct{}, complete bool) []discussionResolution {
+	if !complete || botID <= 0 {
+		return nil
+	}
+	out := make([]discussionResolution, 0, len(discussions))
+	for _, discussion := range discussions {
+		if strings.TrimSpace(discussion.ID) == "" || len(discussion.Notes) == 0 {
+			continue
+		}
+		note := discussion.Notes[0]
+		if note.System || note.AuthorID != botID {
+			continue
+		}
+		key, ok := discussionPublishKey(note.Body)
+		if !ok {
+			continue
+		}
+		_, present := currentKeys[key]
+		switch {
+		case present && note.Resolved:
+			out = append(out, discussionResolution{ID: discussion.ID, Resolved: false})
+		case !present && !note.Resolved:
+			out = append(out, discussionResolution{ID: discussion.ID, Resolved: true})
+		}
+	}
+	return out
+}
+
+// discussionPublishKey parses the hidden finding key from the first note line.
+func discussionPublishKey(body string) (string, bool) {
+	line := strings.TrimSpace(strings.SplitN(body, "\n", 2)[0])
+	if !strings.HasPrefix(line, review.FindingMarkerPrefix) {
+		return "", false
+	}
+	rest := strings.TrimSpace(strings.TrimPrefix(line, review.FindingMarkerPrefix))
+	rest = strings.TrimSpace(strings.TrimPrefix(rest, "key="))
+	rest = strings.TrimSpace(strings.TrimSuffix(rest, "-->"))
+	if len(rest) != len("pk_")+32 || !strings.HasPrefix(rest, "pk_") {
+		return "", false
+	}
+	return rest, true
+}
+
+// reconcileDiscussions converges bot-authored inline threads after a complete
+// review. Failures are logged and never fail the publication; only a policy
+// cancellation or an expired generation stops it.
+func (p *Publisher) reconcileDiscussions(ctx context.Context, loaded *loadedReview, groups []review.Group, verdict string, lookup *discussionLookup, recheck func() error) error {
+	resolver, ok := p.gitlab.(discussionResolver)
+	if !ok {
+		return nil
+	}
+	if verdict != review.VerdictPass && verdict != review.VerdictBlocking {
+		return nil
+	}
+	current := make(map[string]struct{}, len(groups))
+	for _, group := range groups {
+		if !group.Published() {
+			continue
+		}
+		key := group.PublishKey
+		if key == "" {
+			key = review.PublishKeyFor(group.Path, group.Title, group.Evidence)
+		}
+		if key != "" {
+			current[key] = struct{}{}
+		}
+	}
+	if lookup == nil {
+		lookup = &discussionLookup{gl: p.gitlab, token: loaded.token, projectID: loaded.project.ID, mrIID: loaded.mrIID}
+	}
+	if lookup.userID <= 0 {
+		user, err := p.gitlab.CurrentUser(ctx, loaded.token)
+		if err != nil || user == nil || user.ID <= 0 {
+			p.logger.Warn("discussion lifecycle identity unavailable", "project_id", loaded.project.ID, "error_class", errclass.Of(err))
+			return nil
+		}
+		lookup.userID = user.ID
+	}
+	if !lookup.listed {
+		discussions, err := p.gitlab.ListDiscussions(ctx, loaded.token, loaded.project.ID, loaded.mrIID)
+		if err != nil {
+			p.logger.Warn("discussion lifecycle listing failed", "project_id", loaded.project.ID, "error_class", errclass.Of(err))
+			return nil
+		}
+		lookup.discussions, lookup.listed = discussions, true
+	}
+	for i, target := range discussionTargets(lookup.discussions, lookup.userID, current, true) {
+		if i >= maxDiscussionLifecycleCalls {
+			break
+		}
+		if err := recheck(); err != nil {
+			return err
+		}
+		resolved := target.Resolved
+		err := sendOutbound(ctx, p.workspace.Get(loaded.project.ID), func(callCtx context.Context) error {
+			return resolver.ResolveDiscussion(callCtx, loaded.token, loaded.project.ID, loaded.mrIID, target.ID, resolved)
+		})
+		if err != nil {
+			if errors.Is(err, workspace.ErrOutboundInvalidated) || ctx.Err() != nil {
+				return err
+			}
+			p.logger.Warn("discussion lifecycle update failed",
+				"project_id", loaded.project.ID, "mr_iid", loaded.mrIID, "error_class", errclass.Of(err))
+		}
+	}
+	return nil
 }
 
 // commitStatusPublishKey records the effective state with the SHA. GitLab

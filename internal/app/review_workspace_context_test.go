@@ -10,12 +10,14 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
-func TestReviewContextUsesTargetTipNotSharedWorkspaceBase(t *testing.T) {
+// The active document is injected with its own base; it does not need to match
+// the merge base and is not tied to the shared workspace base (#457).
+func TestReviewContextUsesActiveDocumentBase(t *testing.T) {
 	for _, tc := range []struct {
 		name, workspaceBase, docBase, want string
 	}{
-		{"locked-current-but-wrong-target", strings.Repeat("1", 40), strings.Repeat("1", 40), ""},
-		{"stale-but-matches-target", strings.Repeat("1", 40), strings.Repeat("2", 40), "CONTEXT_CANARY"},
+		{"locked-current-different-target", strings.Repeat("1", 40), strings.Repeat("1", 40), "CONTEXT_CANARY"},
+		{"document-base-differs-from-workspace", strings.Repeat("1", 40), strings.Repeat("2", 40), "CONTEXT_CANARY"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newReviewFixture(t, reviewTestHead)
@@ -58,10 +60,7 @@ func TestReviewContextUsesTargetTipNotSharedWorkspaceBase(t *testing.T) {
 			if d.ContextDocs != tc.want {
 				t.Fatalf("context = %q, want %q", d.ContextDocs, tc.want)
 			}
-			wantBase := ""
-			if tc.want != "" {
-				wantBase = tc.docBase
-			}
+			wantBase := tc.docBase
 			if d.WorkspaceProvenance == nil || d.WorkspaceProvenance.ContextBaseSHA != wantBase {
 				t.Fatalf("context provenance = %+v, want base %q", d.WorkspaceProvenance, wantBase)
 			}

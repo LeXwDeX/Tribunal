@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/LeXwDeX/tribunal/internal/config"
 	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/pkg/dag"
 )
@@ -24,7 +25,10 @@ func (s *ReviewService) reviewIndexState(ctx context.Context, projectID int64, t
 	if state == nil {
 		return "", false, nil
 	}
-	return state.IndexSHA, state.State == "ready" && state.LastError == "" && len(ignores) == 0 &&
+	// The built-in ignore defaults only exclude build artifacts; they must not
+	// disable the code graph. A project or repository rule still withholds it
+	// and the review discloses that degradation (#457).
+	return state.IndexSHA, state.State == "ready" && state.LastError == "" && !config.ReviewIgnoreRestricted(ignores) &&
 		shaRE.MatchString(target) && shaRE.MatchString(state.IndexSHA) && strings.EqualFold(state.IndexSHA, target), nil
 }
 

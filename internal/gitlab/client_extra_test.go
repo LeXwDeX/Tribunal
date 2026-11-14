@@ -711,3 +711,33 @@ func TestListOpenMergeRequestsStopsAtAgeWindow(t *testing.T) {
 		t.Fatalf("pages = %v, want paging to stop at the first MR older than the window", pages)
 	}
 }
+
+func TestResolveDiscussionSendsResolvedFlag(t *testing.T) {
+	var resolved string
+	client := newExtraClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/api/v4/projects/42/merge_requests/7/discussions/disc-1" {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		resolved = r.URL.Query().Get("resolved")
+		var body struct {
+			Resolved bool `json:"resolved"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body.Resolved {
+			resolved = "true"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"disc-1","notes":[]}`)
+	})
+	if err := client.ResolveDiscussion(context.Background(), "token", 42, 7, "disc-1", true); err != nil {
+		t.Fatalf("ResolveDiscussion: %v", err)
+	}
+	if resolved != "true" {
+		t.Fatalf("resolved flag = %q", resolved)
+	}
+	if err := client.ResolveDiscussion(context.Background(), "token", 42, 7, "", true); err == nil {
+		t.Fatal("empty discussion ID accepted")
+	}
+}

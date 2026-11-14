@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/errclass"
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/secret"
 	"github.com/LeXwDeX/tribunal/internal/store"
@@ -29,9 +30,15 @@ const (
 
 var shaRE = regexp.MustCompile(`^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$`)
 
+// webhookRejectionNamespace derives a separate delivery UUID for rejected
+// requests. A wrong secret must not consume the UUID of the genuine delivery,
+// which would suppress it as a duplicate.
+var webhookRejectionNamespace = uuid.MustParse("5b6c0a0e-9f6e-4c33-8a7e-0d4e1f2a3b6c")
+
 // WebhookStore is the persistence surface needed by WebhookService.
 type WebhookStore interface {
 	GetProject(ctx context.Context, id int64) (*store.Project, error)
+	GetReviewControl(ctx context.Context, projectID, mrIID int64) (*store.ReviewControl, error)
 	RecordDelivery(ctx context.Context, delivery store.Delivery, job *store.Job) (string, bool, error)
 	RecordReviewCandidateDelivery(ctx context.Context, delivery store.Delivery, candidate *store.ReviewCandidate) (store.ReviewEnqueueResult, error)
 }
@@ -138,17 +145,28 @@ func (s *WebhookService) Handle(ctx context.Context, req WebhookRequest) (Webhoo
 		return WebhookResult{Ignored: "project_not_registered"}, nil
 	}
 
+	eventUUID := strings.TrimSpace(req.UUID)
+	var parsedUUID uuid.UUID
+	if eventUUID != "" {
+		parsedUUID, err = uuid.Parse(eventUUID)
+		if err != nil {
+			parsedUUID = uuid.Nil
+		}
+	}
 	if !s.validToken(project, req.Token) {
 		s.logger.Warn("webhook authentication failed", "project_id", project.ID, "event", req.Event)
+		// Record the rejection when the envelope is identifiable. The delivery
+		// table then shows that GitLab called with a mismatched secret instead
+		// of reporting a silent green webhook (#457).
+		if parsedUUID != uuid.Nil {
+			s.recordRejected(ctx, project.ID, req.Event, parsedUUID.String(), "invalid_secret")
+		}
 		return WebhookResult{Unauthorized: true}, nil
 	}
-
-	eventUUID := strings.TrimSpace(req.UUID)
 	if eventUUID == "" {
 		return WebhookResult{Ignored: "missing_event_uuid"}, nil
 	}
-	parsedUUID, err := uuid.Parse(eventUUID)
-	if err != nil {
+	if parsedUUID == uuid.Nil {
 		return WebhookResult{Ignored: "invalid_event_uuid"}, nil
 	}
 	if reason := checkEventKind(req.Event, payload.ObjectKind); reason != "" {
@@ -161,7 +179,7 @@ func (s *WebhookService) Handle(ctx context.Context, req WebhookRequest) (Webhoo
 		return s.recordIgnored(ctx, project.ID, req.Event, parsedUUID.String(), "invalid_settings")
 	}
 
-	job, reason := s.decide(project, settings, payload)
+	job, reason := s.decide(ctx, project, settings, payload)
 	if reason != "" {
 		return s.recordIgnored(ctx, project.ID, req.Event, parsedUUID.String(), reason)
 	}
@@ -177,6 +195,19 @@ func (s *WebhookService) validToken(project *store.Project, presented string) bo
 		return false
 	}
 	return subtle.ConstantTimeCompare(expected, []byte(presented)) == 1
+}
+
+// recordRejected persists a delivery that failed authentication. It never
+// returns an error: the HTTP answer stays the fixed unauthorized response so a
+// caller cannot distinguish storage from authentication failure.
+func (s *WebhookService) recordRejected(ctx context.Context, projectID int64, event, eventUUID, reason string) {
+	rejectedUUID := uuid.NewSHA1(webhookRejectionNamespace, []byte(itoa(projectID)+":"+eventUUID)).String()
+	if _, _, err := s.store.RecordDelivery(ctx, store.Delivery{
+		UUID: rejectedUUID, ProjectID: projectID, Event: event,
+		Outcome: store.DeliveryRejected, Reason: reason, ReceivedAt: s.now().UTC(),
+	}, nil); err != nil {
+		s.logger.Warn("rejected delivery persistence failed", "project_id", projectID, "event", event, "error_class", errclass.Of(err))
+	}
 }
 
 func (s *WebhookService) recordIgnored(ctx context.Context, projectID int64, event, eventUUID, reason string) (WebhookResult, error) {
@@ -351,10 +382,37 @@ func checkEventKind(event, objectKind string) string {
 	return ""
 }
 
-func (s *WebhookService) decide(project *store.Project, settings config.ProjectSettings, payload *gitlab.Webhook) (*store.Job, string) {
+// enqueueCatchUpRefresh records one workspace refresh for a catch-up scan that
+// enqueued a review. It is best effort: a failed enqueue is logged by class and
+// never fails the scan.
+func (s *WebhookService) enqueueCatchUpRefresh(ctx context.Context, project *store.Project, head string) {
+	if project == nil || project.ID <= 0 || !shaRE.MatchString(head) {
+		return
+	}
+	branch := strings.TrimSpace(project.DefaultBranch)
+	if branch == "" {
+		return
+	}
+	eventUUID := uuid.NewSHA1(catchUpNamespace, []byte("refresh:"+itoa(project.ID)+":"+head)).String()
+	job := newJob("workspace.refresh", "ws:"+itoa(project.ID), map[string]any{
+		"project_id": project.ID,
+		"ref":        "refs/heads/" + branch,
+		"branch":     branch,
+		"after_sha":  head,
+		"trigger":    catchUpTrigger,
+	})
+	if _, _, err := s.store.RecordDelivery(ctx, store.Delivery{
+		UUID: eventUUID, ProjectID: project.ID, Event: catchUpRefreshEvent,
+		Outcome: store.DeliveryEnqueued, ReceivedAt: s.now().UTC(),
+	}, job); err != nil {
+		s.logger.Warn("catch-up workspace refresh enqueue failed", "project_id", project.ID, "error_class", errclass.Of(err))
+	}
+}
+
+func (s *WebhookService) decide(ctx context.Context, project *store.Project, settings config.ProjectSettings, payload *gitlab.Webhook) (*store.Job, string) {
 	switch payload.Event {
 	case "Merge Request Hook":
-		return s.decideMergeRequest(project, settings, payload)
+		return s.decideMergeRequest(ctx, project, settings, payload)
 	case "Note Hook":
 		return s.decideNote(project, settings, payload)
 	case "Push Hook":
@@ -364,7 +422,7 @@ func (s *WebhookService) decide(project *store.Project, settings config.ProjectS
 	}
 }
 
-func (s *WebhookService) decideMergeRequest(project *store.Project, settings config.ProjectSettings, payload *gitlab.Webhook) (*store.Job, string) {
+func (s *WebhookService) decideMergeRequest(ctx context.Context, project *store.Project, settings config.ProjectSettings, payload *gitlab.Webhook) (*store.Job, string) {
 	attrs := payload.ObjectAttributes
 	iid := attrs.IID
 	if iid <= 0 {
@@ -392,13 +450,65 @@ func (s *WebhookService) decideMergeRequest(project *store.Project, settings con
 	case "open", "reopen":
 		return s.newReviewJob(project, settings, payload, iid, "mr_open", true)
 	case "update":
+		// GitLab omits oldrev on some update events (for example a draft to
+		// ready transition). Compare the head with the durable review control
+		// and re-run when the head changed or a filter transition made the MR
+		// eligible (#457).
 		if strings.TrimSpace(attrs.OldRev) == "" {
-			return nil, "missing_oldrev"
+			if reason := s.reevaluateUpdateWithoutOldRev(ctx, project, settings, payload, iid); reason != "" {
+				return nil, reason
+			}
 		}
 		return s.newReviewJob(project, settings, payload, iid, "mr_update", false)
 	default:
 		return nil, "unsupported_action"
 	}
+}
+
+// reevaluateUpdateWithoutOldRev decides an update whose oldrev GitLab omitted.
+// It returns "" when the event must be reviewed and an ignored reason
+// otherwise. An unprovable decision keeps the previous drop behavior.
+func (s *WebhookService) reevaluateUpdateWithoutOldRev(ctx context.Context, project *store.Project, settings config.ProjectSettings, payload *gitlab.Webhook, iid int64) string {
+	attrs := payload.ObjectAttributes
+	head := strings.ToLower(strings.TrimSpace(attrs.LastCommit.ID))
+	if head == "" {
+		head = strings.ToLower(strings.TrimSpace(attrs.SHA))
+	}
+	if !shaRE.MatchString(head) {
+		return "missing_head_sha"
+	}
+	control, err := s.store.GetReviewControl(ctx, project.ID, iid)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		s.logger.Warn("review control lookup failed for update", "project_id", project.ID, "mr_iid", iid)
+		return "missing_oldrev"
+	}
+	if err != nil || control == nil || control.HeadSHA == "" || !strings.EqualFold(control.HeadSHA, head) {
+		// The head moved (or was never reviewed): this update is review-relevant.
+		return ""
+	}
+	if updateFilterTransition(payload.Changes, project, settings) {
+		return ""
+	}
+	return "missing_oldrev"
+}
+
+// updateFilterTransition reports a change that can turn a previously filtered
+// merge request eligible. Only an explicit previous/current pair counts.
+func updateFilterTransition(changes gitlab.WebhookChanges, project *store.Project, settings config.ProjectSettings) bool {
+	if changes.Draft != nil && changes.Draft.Previous && !changes.Draft.Current {
+		return true
+	}
+	if changes.Labels != nil &&
+		!LabelsAllowed(changes.Labels.Previous, settings.LabelsInclude, settings.LabelsExclude) &&
+		LabelsAllowed(changes.Labels.Current, settings.LabelsInclude, settings.LabelsExclude) {
+		return true
+	}
+	if changes.TargetBranch != nil &&
+		!BranchAllowed(changes.TargetBranch.Previous, project.DefaultBranch, settings.TargetBranches) &&
+		BranchAllowed(changes.TargetBranch.Current, project.DefaultBranch, settings.TargetBranches) {
+		return true
+	}
+	return false
 }
 
 func (s *WebhookService) newReviewJob(project *store.Project, settings config.ProjectSettings, payload *gitlab.Webhook, iid int64, trigger string, full bool) (*store.Job, string) {

@@ -256,8 +256,10 @@ func TestWorkspaceFailuresPersistAndLogOnlyFixedData(t *testing.T) {
 				t.Run(tc.name+"/"+mode+"/"+failure, func(t *testing.T) {
 					f := newReviewFixture(t, reviewTestHead)
 					oldBase := strings.Repeat("a", 40)
+					refreshAt := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
 					if _, err := f.db.SaveWorkspace(context.Background(), store.Workspace{
 						ProjectID: 42, State: "ready", BaseSHA: oldBase, IndexSHA: oldBase, ContextSHA: "old-context",
+						LastRefreshAt: &refreshAt,
 					}); err != nil {
 						t.Fatalf("SaveWorkspace: %v", err)
 					}
@@ -305,8 +307,8 @@ func TestWorkspaceFailuresPersistAndLogOnlyFixedData(t *testing.T) {
 					if mode == "refresh" && failure == "workspace" && state.BaseSHA != oldBase {
 						t.Errorf("failed refresh lost previous base: %q", state.BaseSHA)
 					}
-					if mode == "refresh" && failure == "index" && state.LastRefreshAt == nil {
-						t.Error("degraded refresh did not record refresh time")
+					if mode == "refresh" && failure == "index" && (state.LastRefreshAt == nil || !state.LastRefreshAt.Equal(refreshAt)) {
+						t.Errorf("degraded refresh changed the context refresh time: %v", state.LastRefreshAt)
 					}
 					if failure == "index" && state.BaseSHA != reviewTestHead {
 						t.Errorf("degraded %s base = %q, want %q", mode, state.BaseSHA, reviewTestHead)

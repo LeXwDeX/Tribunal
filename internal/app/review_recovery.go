@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/errclass"
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
@@ -438,11 +439,12 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 	if cleanup != nil {
 		defer cleanup()
 	}
-	baseDir, workspaceIdentity, err := s.reviewBaseIdentity(ctx, project.ID, version.StartSHA)
+	baseDir, _, err := s.reviewBaseIdentity(ctx, project.ID, version.StartSHA)
 	if err != nil {
 		return err
 	}
-	if workspaceIdentity == "" || dossier.Metadata["workspace_identity"] != workspaceIdentity {
+	workspaceIdentity := s.recoveryMaterialIdentity(ctx, project.ID, baseDir, record.JobID, version.StartSHA)
+	if dossier.Metadata["workspace_identity"] != workspaceIdentity {
 		return s.recoveryCancel(ctx, workflow.ID, "workspace_identity_changed", s.recoveryCancelWorkflow("superseded", "workspace_identity_changed"))
 	}
 	_, indexEligible, err := s.reviewIndexState(ctx, project.ID, version.StartSHA, currentConfig.Settings.Ignore)
@@ -645,6 +647,32 @@ func (s *ReviewService) failurePublicationEnabled(ctx context.Context, workflowI
 	return settings.PostFailureNote || settings.CommitStatus, nil
 }
 
+// recoveryMaterialIdentity predicts the execution material identity without
+// creating a worktree: it mirrors prepareReviewBase's shared-base and per-run
+// base selection so a restart resumes exactly what the worker would execute.
+func (s *ReviewService) recoveryMaterialIdentity(ctx context.Context, projectID int64, baseDir, runID, startSHA string) string {
+	if baseDir == "" && s.workspace != nil && shaRE.MatchString(startSHA) && strings.TrimSpace(runID) != "" {
+		if ws := s.workspace.Get(projectID); ws != nil {
+			if resolved, err := s.git.Resolve(ctx, ws.MirrorDir(), startSHA); err == nil && strings.EqualFold(resolved, startSHA) {
+				baseDir = filepath.Join(ws.Root, "runs", runID+"-base")
+			}
+		}
+	}
+	return s.workspaceMaterialIdentity(ctx, projectID, baseDir, startSHA)
+}
+
+// publicationUnknownTerminalAge bounds how long an unprovable discussion
+// outcome stays pending. After it, recovery records an explicit failed state.
+const (
+	publicationUnknownTerminalAge    = 7 * 24 * time.Hour
+	publicationUnknownTerminalReason = "publication outcome stayed unknown; review the merge request and publish again"
+)
+
+// publicationUnknownExpired reports an unknown outcome older than the bound.
+func publicationUnknownExpired(now, updated time.Time) bool {
+	return !updated.IsZero() && now.Sub(updated) >= publicationUnknownTerminalAge
+}
+
 // PublishPending retries terminal workflows whose publication state is still
 // pending. It is safe to call at startup and after a crash.
 func (s *ReviewService) PublishPending(ctx context.Context) error {
@@ -817,6 +845,21 @@ func (s *ReviewService) publishPendingItem(ctx context.Context, item store.Pendi
 		return false, nil
 	}
 	if err != nil {
+		if errors.Is(err, errDiscussionUnknown) && publicationUnknownExpired(s.now(), item.UpdatedAt) {
+			// The outcome cannot be proven and retrying will not change it.
+			// Record an explicit terminal state instead of pending forever.
+			if settleErr := s.store.SetWorkflowPublicationState(ctx, item.WorkflowID, store.WorkflowPublicationFailed, publicationUnknownTerminalReason); settleErr != nil {
+				return false, settleErr
+			}
+			s.logger.Warn("publication outcome stayed unknown; settled as failed",
+				"workflow_id", item.WorkflowID, "project_id", item.ProjectID, "mr_iid", item.MRIID)
+			if item.Status == string(dag.WorkflowCompleted) {
+				if settleErr := s.settlePendingCompleted(ctx, item); settleErr != nil {
+					return false, settleErr
+				}
+			}
+			return true, nil
+		}
 		if IsPermanentJob(err) && !errors.Is(err, errDiscussionUnknown) {
 			if item.Status == string(dag.WorkflowCompleted) {
 				if settleErr := s.settlePendingCompleted(ctx, item); settleErr != nil {

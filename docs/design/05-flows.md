@@ -54,13 +54,15 @@ sequenceDiagram
 | 8 | `GET .../merge_requests/:iid/closes_issues` | 失败不阻塞 |
 | 9 | 读目标分支上的 `.gitlab-review.yml`、`AGENTS.md`、`CLAUDE.md`：`GET /projects/:id/repository/files/:path/raw?ref=<target>` | 404 视为没有 |
 | 10 | 合并配置（平台 → 项目 → 仓库）；worker 按合并后的设置复核 Draft/标签/目标分支（`allow_repo_config=true` 时包含目标分支仓库配置）；计算 ignore；记录 included、ignored、generated、omitted 和变更总数；增量范围 | 项目设置无法安全解析，或已启用的仓库配置 YAML 解析失败 → 停止此次执行，不回退为较宽松规则；被过滤的自动评审在创建 workflow 前结束 |
-| 11 | 工作区 `RLock`；`git fetch refs/merge-requests/<iid>/head`；`git worktree add <runs>/<wf> <head_sha>` | fetch 失败 → job 重试 |
+| 11 | 工作区 `RLock`；`git fetch refs/merge-requests/<iid>/head`；`git worktree add <runs>/<wf> <head_sha>`；共享 `base/` 的 HEAD 不等于 MR `start_sha` 时 fetch 目标分支并创建 `<runs>/<wf>-base`；仍无法证明 base 时记录 `metadata.base_identity=absent` 与覆盖缺口警告 | fetch 失败 → job 重试；base 不可用不阻断评审，但缺口进入 dossier 与摘要评论 |
 | 12 | 变更文件为 0：全被 ignore → 发布「无需评审」的汇总；全被采集缺口 omitted → 不建 workflow，发布 INCOMPLETE 摘要，列出 omitted 总数、原因计数和最多 4 条路径，其余只计数。两者都结束 | — |
 | 13 | `BuildGraph` → `Engine.Create` → `Engine.Run` | 工作流 failed → F1-失败分支 |
 | 14 | 发布（F7） | GitLab 写入失败 → 重试 3 次；可重试失败保持 `publication_state=pending`，永久失败标为 `failed`；控制台可手动 republish |
 | 15 | 清理 worktree，释放锁 | 正常路径清理失败只记日志，不改变已完成评审；后台 run cleanup 定期删除未被引用且超过 `workspace.run_cleanup_after` 年龄的遗留 run |
 
 > 实际执行顺序：步骤 1–2 后，先做步骤 4–10 的采集、配置合并和过滤；未被过滤的自动评审才执行步骤 3 的取消，然后继续步骤 11。
+
+> 触发重判：MR update 缺少 `oldrev` 时，webhook 与持久化 `review_control.head_sha` 比较 head；head 变化直接入队。head 不变时只有事件携带 `changes` 且显示 Draft→Ready、标签或目标分支从「被过滤」转为「可评审」才入队，避免标签/描述编辑造成重复评审。认证失败的投递记录为 `rejected`（`invalid_secret`），项目 token 的 401/403 使任务立即终止重试并在控制台标红。
 
 > 空评审（步骤 12）不创建工作流，也不新增 skipped 工作流记录。全部被 ignore 时仍是「无需评审」的 PASS 摘要；全部变更文件都是 generated 时同样发布「无需评审」摘要，而不是让 required 的 plan 报没有可评审文件；全部变更文件都因 `max_files`、`max_diff_lines` 等硬采集缺口 omitted 时，不创建空 workflow，只发布 INCOMPLETE 摘要：列出 omitted 总数、原因计数和最多 4 条路径，其余只计数；正常 dossier 保留完整的 omitted 列表。`too_large`/`collapsed` 文件先尝试按上限拉取正文参与评审；取不到时降级为 warning（明确列出未审文件），不单独把整单改判 INCOMPLETE。该记录方式沿用 2026-10-23 用户确认的 Issue #10 本地验收口径；历史记录不补造不存在的 dossier 或逐路径 omitted 清单。发布前的最终代次检查会拒绝检查时已被新代次取代的结果。
 
@@ -115,8 +117,8 @@ M0 先把命令持久化为 `review.command`，以下 GitLab 校验由 worker �
 1. Push Hook 到达，`ref` 匹配目标分支 → 入队 `workspace.refresh`（key=`ws:<pid>`，自动合并重复）。
 2. 工作区 `Lock`（等待进行中的评审释放读锁，最长 10 分钟，超时则延后重试）。
 3. `git fetch`，`base/` 检出到新的 `after` sha；`workspaces.base_sha` 更新。
-4. 外部索引增量更新（如 `codebase-memory-mcp cli index_repository`，cwd 为 `base/`）。非取消的索引失败不阻断刷新，保留旧 `index_sha`；其他必要步骤及状态保存成功时最终 `state=ready` 并记录固定的索引失败消息。
-5. 判断是否重新生成上下文文档：自上次生成以来变更文件数 ≥ `context_refresh.changed_files`，或时间 ≥ `context_refresh.max_age`，且当前文档未锁定 → 运行 onboarding 工作流（F5 第 4 步起）。
+4. 外部索引增量更新（如 `codebase-memory-mcp cli index_repository`，cwd 为 `base/`）。只有项目或仓库追加的 ignore 规则（超出内置默认 6 条）才阻断索引；内置默认规则不再阻止索引和管理员绑定的 MCP 工具。非取消的索引失败不阻断刷新，保留旧 `index_sha`；其他必要步骤及状态保存成功时最终 `state=ready` 并记录固定的索引失败消息。
+5. 判断是否重新生成上下文文档：以当前生效上下文文档的 base 为起点，比较其到新 base 的**累计**变更文件数 ≥ `context_refresh.changed_files`，或距**最后一次成功生成**的时间 ≥ `context_refresh.max_age`，且当前文档未锁定 → 运行 onboarding 工作流（F5 第 4 步起）。普通工作区刷新不推进该时间锚点，持续小批量 push 会累计漂移。
 6. 释放锁。
 
 ---
@@ -173,7 +175,8 @@ M0 先把命令持久化为 `review.command`，以下 GitLab 校验由 worker �
    2. 没有发布记录时先持久化意图，再 `POST .../discussions`，position 由 diff 索引生成；明确返回 400 则降级进汇总的「无法定位」区块。已有意图时不重复创建；未知远端 ID 须通过当前机器人身份和唯一首条标记恢复，否则保持待处理。
    3. 新建成功后写 `publications` 和正文哈希。仅从意图恢复的远端 ID 不证明工作流或正文，即使同一工作流重试也不补写发布记录；当前问题留在摘要并提示。
 4. **commit status**（项目开启时）：`POST /projects/:id/statuses/:head_sha`，`name=ai-review`，只有 PASS 写 `success`，BLOCKING 和 INCOMPLETE 写 `failed`，`target_url` 指向控制台评审详情，`description` ≤ 140 字符。调用成功后以 `publish_key=status:<head_sha>:<state>` 记录 `publications`；旧格式 `status:<head_sha>` 没有状态，评审详情视为未知，不根据 verdict 推断。commit status 的 failed 是评审结论，不是发布失败。
-5. 写 `publications` 与调用 GitLab 不在同一事务。崩溃导致漏记时，第 2.3 步的标记查找可以兜底状态/结果评论；行内讨论依靠先持久化的意图和远端标记避免盲目重建，未知结果保持待处理。存储或同步保障损坏、恢复旧快照等限制见运维文档。
+5. 写 `publications` 与调用 GitLab 不在同一事务。崩溃导致漏记时，第 2.3 步的标记查找可以兜底状态/结果评论；行内讨论依靠先持久化的意图和远端标记避免盲目重建，未知结果保持待处理。创建讨论返回 400/401/403/404/422 时视为确定性拒绝：清除 intent、降级进摘要并终态发布；标记扫描成功但远端不存在对应讨论时同样清除 intent。未知结果超过 7 天由启动恢复记为 `failed`（固定原因），不再长期 pending。存储或同步保障损坏、恢复旧快照等限制见运维文档。
+6. **讨论生命周期**：评审结论为 PASS 或 BLOCKING 时，按首条标记识别本 bot 的 finding 讨论。当前 finding 仍存在但讨论已 resolved → 重新打开；讨论的 finding 不再出现在当前结果 → resolve。INCOMPLETE 评审不执行收敛，避免把未覆盖误判为已修复。GitLab 客户端只新增 resolve/unresolve，不提供删除 MR note 的能力。
 
 **状态评论正文**：
 

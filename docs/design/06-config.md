@@ -51,7 +51,9 @@ workspace:
   root: "data/workspaces"
   git_bin: "git"
   context_refresh:
+    # 与当前生效上下文文档的 base 比较累计变更文件数；不是两次刷新之间的差值。
     changed_files: 200
+    # 距最后一次成功生成上下文文档的时间；普通工作区刷新不重置。
     max_age: 168h
   run_cleanup_after: 1h             # run 目录年龄阈值；后台清理周期固定 1h
 
@@ -607,7 +609,7 @@ default_extensions:
 - `custom_rules` 作为项目规则注入 prompt 的项目背景段。
 - `ignore` 与平台默认值**合并**，不是替换。
 
-有效 ignore 会作为版本化策略保存到新 dossier。它用于 diff、仓库工具、证据、上下文生成及发布检查，不只筛选变更文件。非空策略下暂停无法证明安全读取范围的 MCP 工具和全量索引；这是安全降级，不记 `tool_gaps`，不影响评审结论；仅索引身份无法证明（ignore 为空）时，实际启用的绑定工具才记为覆盖缺口。默认 ignore 非空，默认图谱也会降级。旧索引、上下文和管理员绑定保留，策略明确为空时才保留原工具行为。升级后的旧工作流处理和输入限制见 [ignore 安全边界](../operations.md#ignore-安全边界)。
+有效 ignore 会作为版本化策略保存到新 dossier。它用于 diff、仓库工具、证据、上下文生成及发布检查，不只筛选变更文件。**内置默认 6 条规则只排除构建产物**，不再阻止工作区索引、项目上下文注入或 MCP 代码图谱绑定；只有项目设置或仓库 `.gitlab-review.yml` 追加的规则（超出内置默认）才视为受限策略。受限时暂停无法证明安全读取范围的 MCP 工具和全量索引，并把降级警告写入 dossier 的 `warnings` 和 MR 摘要评论，不再静默。仅索引身份无法证明时，实际启用的绑定工具才记为 `tool_gaps`。上下文文档可以来自与 MR `start_sha` 不同的 base（dossier 记录 `context_base_sha`）；无法校验的文档不被注入并产生警告。项目背景 prompt 按「评审语言 → 项目规则 → `.gitlab-review.yml` → AGENTS.md → CLAUDE.md → 工作区上下文文档」排序，20k 上限截断时优先保留项目规则。升级后的旧工作流处理和输入限制见 [ignore 安全边界](../operations.md#ignore-安全边界)。
 
 ---
 

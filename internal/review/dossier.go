@@ -175,10 +175,13 @@ func (d *Dossier) WorkspaceProvenanceValid() bool {
 	if d.ContextDocs != "" && p.ContextBaseSHA == "" {
 		return false
 	}
-	if p.ContextBaseSHA != "" && (!validObjectID(p.ContextBaseSHA) || !strings.EqualFold(p.ContextBaseSHA, p.TargetSHA) || len(d.IgnorePolicy.Patterns) != 0) {
+	// The active context document may have been generated from another commit
+	// than the merge base; its own base is recorded instead. Ignore patterns do
+	// not invalidate material that was produced under the same policy (#457).
+	if p.ContextBaseSHA != "" && !validObjectID(p.ContextBaseSHA) {
 		return false
 	}
-	return !p.MCPEligible || (len(d.IgnorePolicy.Patterns) == 0 && validObjectID(p.IndexSHA) && strings.EqualFold(p.IndexSHA, p.TargetSHA))
+	return !p.MCPEligible || (validObjectID(p.IndexSHA) && strings.EqualFold(p.IndexSHA, p.TargetSHA))
 }
 
 // MCPIndexEligible requires explicit evidence for this MR's target tip.
@@ -372,19 +375,22 @@ type Dossier struct {
 	// filtered repository Skill snapshot, including both sides of ignored
 	// renames and ignored ancestors. Recovery and publication reuse it instead
 	// of reconstructing paths from the reduced file list.
-	RepositorySkillExcluded []string          `json:"repository_skill_excluded,omitempty"`
-	Pipeline                *PipelineSummary  `json:"pipeline,omitempty"`
-	Issues                  []IssueRef        `json:"issues,omitempty"`
-	RepoDocs                RepoDocs          `json:"repo_docs,omitempty"`
-	ContextDocs             string            `json:"context_docs,omitempty"`
-	Language                string            `json:"language,omitempty"`
-	CustomRules             []string          `json:"custom_rules,omitempty"`
-	Incremental             *IncrementalRange `json:"incremental,omitempty"`
-	PriorFindings           []FindingOut      `json:"prior_findings,omitempty"`
-	HeadDir                 string            `json:"head_dir,omitempty"`
-	BaseDir                 string            `json:"base_dir,omitempty"`
-	Metadata                map[string]string `json:"metadata,omitempty"`
-	GeneratedAt             time.Time         `json:"generated_at"`
+	RepositorySkillExcluded []string         `json:"repository_skill_excluded,omitempty"`
+	Pipeline                *PipelineSummary `json:"pipeline,omitempty"`
+	Issues                  []IssueRef       `json:"issues,omitempty"`
+	RepoDocs                RepoDocs         `json:"repo_docs,omitempty"`
+	ContextDocs             string           `json:"context_docs,omitempty"`
+	// Warnings discloses review-material degradation that did not fail the run
+	// (missing context, withheld code graph, truncated background) (#457).
+	Warnings      []string          `json:"warnings,omitempty"`
+	Language      string            `json:"language,omitempty"`
+	CustomRules   []string          `json:"custom_rules,omitempty"`
+	Incremental   *IncrementalRange `json:"incremental,omitempty"`
+	PriorFindings []FindingOut      `json:"prior_findings,omitempty"`
+	HeadDir       string            `json:"head_dir,omitempty"`
+	BaseDir       string            `json:"base_dir,omitempty"`
+	Metadata      map[string]string `json:"metadata,omitempty"`
+	GeneratedAt   time.Time         `json:"generated_at"`
 }
 
 // DossierInput is the explicit, already-sanitized input to BuildDossier.
@@ -405,6 +411,7 @@ type DossierInput struct {
 	Issues                    []IssueRef
 	RepoDocs                  RepoDocs
 	ContextDocs               string
+	Warnings                  []string
 	Language                  string
 	CustomRules               []string
 	Incremental               *IncrementalRange
@@ -442,6 +449,7 @@ func BuildDossier(in DossierInput) (*Dossier, error) {
 		Issues:          append([]IssueRef(nil), in.Issues...),
 		RepoDocs:        in.RepoDocs,
 		ContextDocs:     in.ContextDocs,
+		Warnings:        append([]string(nil), in.Warnings...),
 		Language:        in.Language,
 		CustomRules:     append([]string(nil), in.CustomRules...),
 		PriorFindings:   append([]FindingOut(nil), in.PriorFindings...),

@@ -36,7 +36,7 @@ func TestReviewDossierOmitsIgnoredDocsAndUnprovenancedContext(t *testing.T) {
 		wantAgents  string
 		wantContext string
 	}{
-		{name: "ignore", ignore: []string{"AGENTS.md"}},
+		{name: "ignore", ignore: []string{"AGENTS.md"}, wantContext: "existing context"},
 		{name: "empty", wantAgents: "CANARY_AGENTS", wantContext: "existing context"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -53,6 +53,9 @@ func TestReviewDossierOmitsIgnoredDocsAndUnprovenancedContext(t *testing.T) {
 			f.service.agentRun = func(ctx context.Context, spec agent.RunSpec) (*agent.RunResult, error) {
 				mu.Lock()
 				prompts = append(prompts, spec.Prompt)
+				for _, block := range spec.System {
+					prompts = append(prompts, block.Text)
+				}
 				mu.Unlock()
 				return f.runner.Run(ctx, spec)
 			}
@@ -82,8 +85,11 @@ func TestReviewDossierOmitsIgnoredDocsAndUnprovenancedContext(t *testing.T) {
 			if calls == 0 {
 				t.Fatal("agent was not called")
 			}
-			if len(tc.ignore) > 0 && (strings.Contains(joinedPrompts, "CANARY_AGENTS") || strings.Contains(joinedPrompts, "existing context")) {
-				t.Fatal("ignored material reached the agent prompt")
+			if len(tc.ignore) > 0 && strings.Contains(joinedPrompts, "CANARY_AGENTS") {
+				t.Fatal("ignored repository document reached the agent prompt")
+			}
+			if tc.wantContext != "" && !strings.Contains(joinedPrompts, tc.wantContext) {
+				t.Fatal("verified project context did not reach the agent prompt")
 			}
 			current, err := f.db.GetCurrentContextDoc(context.Background(), 42, "agents")
 			if err != nil || current.Content != "existing context" || !current.Locked {

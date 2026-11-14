@@ -140,6 +140,31 @@ func DefaultReviewIgnorePatterns() []string {
 	return append([]string(nil), defaultReviewIgnorePatterns...)
 }
 
+// ReviewIgnoreRestricted reports whether the effective ignore list contains a
+// pattern beyond the built-in defaults. The defaults only exclude build
+// artifacts, so they must not disable workspace indexing, project context or
+// code-graph tools. An administrator or repository rule does express an
+// exclusion wish and keeps those materials withheld.
+func ReviewIgnoreRestricted(patterns []string) bool {
+	if len(patterns) == 0 {
+		return false
+	}
+	defaults := make(map[string]struct{}, len(defaultReviewIgnorePatterns))
+	for _, pattern := range defaultReviewIgnorePatterns {
+		defaults[pattern] = struct{}{}
+	}
+	for _, pattern := range patterns {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" {
+			continue
+		}
+		if _, ok := defaults[pattern]; !ok {
+			return true
+		}
+	}
+	return false
+}
+
 var (
 	envRefRE      = regexp.MustCompile(`\$\{([^}]*)\}`)
 	backtickValue = regexp.MustCompile("`[^`]*`")

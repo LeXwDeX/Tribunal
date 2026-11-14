@@ -326,3 +326,21 @@ profiles:
 		t.Errorf("explicit budget.max_turns = %d, want 120", got)
 	}
 }
+
+func TestReviewIgnoreRestricted(t *testing.T) {
+	if ReviewIgnoreRestricted(nil) {
+		t.Fatal("an empty ignore list must not count as restricted")
+	}
+	if ReviewIgnoreRestricted(DefaultReviewIgnorePatterns()) {
+		t.Fatal("the built-in ignore defaults must not count as restricted")
+	}
+	if ReviewIgnoreRestricted(append(DefaultReviewIgnorePatterns(), "private/**")) != true {
+		t.Fatal("an extra ignore pattern must count as restricted")
+	}
+	if ReviewIgnoreRestricted([]string{"**/*.lock", "secrets/**"}) != true {
+		t.Fatal("a custom list with a built-in and a custom pattern must count as restricted")
+	}
+	if ReviewIgnoreRestricted([]string{"**/*.lock", " **/*.lock "}) {
+		t.Fatal("whitespace around a built-in pattern must not count as restricted")
+	}
+}

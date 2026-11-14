@@ -384,6 +384,8 @@ fi
 
 包含 #164 的版本在请求体读取返回超时错误时回复 `503 {"ignored":"request_timeout","request_id":...}`，未读取完整的请求不会进入投递去重或入队；连接中断时 GitLab 未必收到响应。存储或入队失败仍返回 `503`，超大请求体和其他非超时读取错误仍返回 `200`。连续的 4xx/5xx 或连接失败可能使 GitLab 临时或永久停用 hook；触发条件、限制和功能开关随 GitLab 版本与实例配置而异，按该实例的 [GitLab webhook 文档](https://docs.gitlab.com/user/project/integrations/webhooks/#auto-disabled-webhooks)核对，不要依赖固定次数。
 
+认证失败的投递现在会写入投递记录（`outcome=rejected`、`reason=invalid_secret`），使用与真实投递不同的去重 UUID，不会冒充 GitLab 的重发。启动追赶扫描会核对每个已登记 hook 是否仍存在、是否被 GitLab 停用（`alert_status=disabled/temporarily_disabled`）并回写项目健康：缺失/停用/项目 token 被拒绝时项目在控制台标红；本功能写入的停用或缺失状态在 hook 恢复后自动清除。该核对目前只在启动扫描时执行，尚无独立周期任务；最后成功投递时间也尚未提供查询接口。
+
 运维应监控 GitLab 的 hook 状态及失败投递，先排除 Tribunal、网络或反向代理的故障，再检查 GitLab 的「Recent events」。在记录仍可用且版本支持时，有权限的人员可用「Resend Request」手动重发；若重发保留原有效 `X-Gitlab-Event-UUID`，此前没有去重记录，且认证和事件过滤均通过，则可再次入队。不要假定所有 GitLab 版本的重发都保留该字段。Recent events 有保留和重发条件限制，无法保证每次失败都可重发，也不代表 GitLab 一定自动重试。对不可重发或未投递的事件，核对 GitLab 与评审状态后按权限采取人工补救；hook 若仍停用，依该 GitLab 版本检查是否需要手动恢复。请求详情可能含 secret 和请求体，不要复制到日志或聊天。操作说明见 [GitLab 请求历史](https://docs.gitlab.com/user/project/integrations/webhooks/#inspect-request-and-response-details)。
 
 ### 启动追赶扫描
@@ -393,6 +395,7 @@ GitLab 对失败的 webhook 不保证重试，容器停机期间送达的 MR 事
 - 不会重复入队：该 head 已有控制记录（已评审、排队或运行中、入队后被过滤、被 `/review cancel` 取消）时跳过；每个（项目、MR、head）的投递 UUID 固定，重启多次也至多补评一次。关闭、合并和被过滤的 MR 遵守现有规则，不入队。
 - 有界且保守：只考虑最近 `gitlab.catch_up.max_age`（默认 24h）内有更新的 MR，按更新时间从新到旧分页，遇到窗口外的 MR 即停止；`max_per_project`（默认 10）和 `max_total`（默认 20）限制入队的评审数，已评审的 MR 不占用额度；每个项目最多检查 100 个最近更新的 MR，以此限制 GitLab 请求量。扫描整体最长 2 分钟，连续 3 个项目列出 MR 失败即停止。项目的锁只在判定和入队时持有，列出 MR 的网络请求期间不持锁；入队与评审控制记录的比较在同一事务内完成，列出之后到达的 webhook（更新的 head）不会被扫描覆盖。每入队一个 MR 输出 INFO `catch-up enqueued review`（`project_id`、`mr_iid`、`head` 短 SHA）。GitLab 请求走现有并发上限，一个项目失败只跳过该项目。`gitlab.catch_up.enabled: false` 关闭扫描。该配置只在启动时读取，修改后需重启。
 - 日志：完成时输出 INFO `catch-up scan finished`（`projects`、`mrs_checked`、`enqueued`）；单个项目失败输出 WARN，只含项目号和错误类别。
+- 工作区刷新：某次扫描至少入队一个评审时，会同时为该项目入队一个 `workspace.refresh`（投递事件 `Catch Up Refresh`，按项目+head 去重），让共享 base 与上下文跟上；评审自身在开始前也会 fetch MR `start_sha` 对应的 base。
 - 升级后首次启动：旧版本登记的项目里，窗口内仍打开、当前 head 没有评审记录的 MR（例如项目登记之后才更新、此前从未评审的 MR）会各入队一次，按默认上限最多 20 次评审，会产生相应的模型用量。若不希望首次升级触发评审，先在配置中设置 `gitlab.catch_up.enabled: false` 再启动，确认后按需改回（修改需重启）。
 - 增量范围：`catch_up` 评审与 `mr_update` 相同，已有上次发布的 head 时只评审其后变更的文件，否则为完整评审。评审范围以结构化字段保存（dossier 的 `incremental` 与 `SynthesisResult.scope`），评论在结论后输出「评审范围」段并披露上次/本次 head 与覆盖文件数；没有 `path` 的 finding 保留为「无法定位」并参与 verdict，评审范围外出现的 P0/P1 会产生未解决信号而不是被静默丢弃。
 - diff 采集：GitLab diff 版本不是 `collected`、`real_size` 带 `+`、或报告总数多于实际返回的 diff 条数时，未送达的文件计入覆盖缺口，评审不能得到干净 PASS；diff 列表为空但报告仍有变更文件时任务可重试，不会当成空 MR。单个 `too_large`/`collapsed` 文件先按上限（单文件 512 KiB、单次评审 2 MiB、最多 20 个）通过 repository files/raw API 拉取 base/head 正文参与评审；取不到、二进制或超限时降级为「该文件未审」的告警，不单独把整单判为 INCOMPLETE。
@@ -1536,7 +1539,7 @@ tribunalctl projects retry-onboarding <项目 ID>
 
 ### ignore 策略与索引
 
-项目 ignore 非空时，工作区索引会被有意阻断，接口返回 `index_status=degraded` 和 `last_error="index: blocked by ignore policy"`。控制台显示信息提示，不再把它当成索引故障。需要代码图谱索引时，先调整项目 ignore 配置，再执行重建索引；阻断本身是安全降级，不影响评审继续执行，详见 [ignore 安全边界](#ignore-安全边界)。
+只有项目或仓库 `.gitlab-review.yml` 追加的 ignore 规则（超出内置默认 6 条）才会阻断工作区索引，接口返回 `index_status=degraded` 和 `last_error="index: blocked by ignore policy"`。内置默认规则只排除构建产物，不再阻止索引、上下文注入或 MCP 工具绑定。受限策略造成的降级会写入 dossier 的 `warnings` 并显示在 MR 摘要评论中；没有项目上下文文档或文档未通过校验、MR base 提交不可用时同样会产生警告。需要代码图谱索引又确实要使用自定义 ignore 时，应权衡该策略与图谱覆盖；阻断本身不影响评审继续执行，详见 [ignore 安全边界](#ignore-安全边界)。
 
 ### 评审永久失败排查
 

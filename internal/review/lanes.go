@@ -21,7 +21,16 @@ import (
 // MaxExplorationRunes bounds the explore digest handed to every lane.
 const MaxExplorationRunes = 6000
 
-const explorationTruncatedMarker = "\n（探索结论已截断）\n"
+// The explore digest is split into reserved per-section budgets. Unknowns and
+// inferences are the decision-relevant output of exploration, so their budgets
+// are reserved before facts. Facts absorb the remaining space (#457).
+const (
+	explorationSummaryBudget   = 880
+	explorationUnknownBudget   = 1400
+	explorationInferenceBudget = 1200
+	explorationFactsBudget     = 2270
+	explorationReportReserve   = 200
+)
 
 // ExploreOut is the read-only explore node contract. It reduces decision
 // uncertainty for the lanes: evidenced facts, inferences and unknowns.
@@ -335,12 +344,23 @@ func explorationFromWorkflow(wf dag.WorkflowView) string {
 	return renderExploration(*out)
 }
 
-// renderExploration is the bounded, deterministic explore digest.
+// renderExploration is the bounded, deterministic explore digest. Each section
+// has its own budget; a section that overflows reports how many of its items
+// were dropped, and the reserved unknown/inference budgets survive a verbose
+// facts section.
 func renderExploration(out ExploreOut) string {
 	var b strings.Builder
-	b.WriteString("摘要：" + oneLinePromptText(out.Summary) + "\n")
+	summary := oneLinePromptText(out.Summary)
+	summaryTruncated := false
+	if utf8.RuneCountInString(summary) > explorationSummaryBudget {
+		summary = truncateRunes(summary, explorationSummaryBudget-1) + "…"
+		summaryTruncated = true
+	}
+	b.WriteString("摘要：" + summary + "\n")
+
+	var droppedReport []string
 	if len(out.Facts) > 0 {
-		b.WriteString("\n事实（附证据）：\n")
+		items := make([]string, 0, len(out.Facts))
 		for _, fact := range out.Facts {
 			location := ""
 			if fact.Path != "" {
@@ -350,26 +370,69 @@ func renderExploration(out ExploreOut) string {
 				}
 				location += "]"
 			}
-			b.WriteString("- " + oneLinePromptText(fact.Statement) + location + "；证据：" + oneLinePromptText(fact.Evidence) + "\n")
+			items = append(items, "- "+oneLinePromptText(fact.Statement)+location+"；证据："+oneLinePromptText(fact.Evidence)+"\n")
+		}
+		dropped := appendBudgetedSection(&b, "\n事实（附证据）：\n", items, explorationFactsBudget)
+		if dropped > 0 {
+			droppedReport = append(droppedReport, fmt.Sprintf("事实丢弃 %d 条", dropped))
 		}
 	}
 	for _, section := range []struct {
-		title string
-		items []string
-	}{{"推断（未证实）", out.Inferences}, {"未知项", out.Unknowns}} {
+		title  string
+		items  []string
+		budget int
+		label  string
+	}{
+		{"\n推断（未证实）：\n", out.Inferences, explorationInferenceBudget, "推断"},
+		{"\n未知项：\n", out.Unknowns, explorationUnknownBudget, "未知项"},
+	} {
 		if len(section.items) == 0 {
 			continue
 		}
-		b.WriteString("\n" + section.title + "：\n")
+		items := make([]string, 0, len(section.items))
 		for _, item := range section.items {
-			b.WriteString("- " + oneLinePromptText(item) + "\n")
+			items = append(items, "- "+oneLinePromptText(item)+"\n")
+		}
+		if dropped := appendBudgetedSection(&b, section.title, items, section.budget); dropped > 0 {
+			droppedReport = append(droppedReport, fmt.Sprintf("%s丢弃 %d 条", section.label, dropped))
 		}
 	}
-	text := b.String()
-	if utf8.RuneCountInString(text) <= MaxExplorationRunes {
-		return text
+	if len(droppedReport) == 0 && !summaryTruncated {
+		return b.String()
 	}
-	return truncateRunes(text, MaxExplorationRunes-utf8.RuneCountInString(explorationTruncatedMarker)) + explorationTruncatedMarker
+	if summaryTruncated {
+		droppedReport = append(droppedReport, "摘要超出长度上限")
+	}
+	b.WriteString("\n（探索摘要已截断：")
+	b.WriteString(strings.Join(droppedReport, "、"))
+	b.WriteString("。）\n")
+	rendered := b.String()
+	if n := utf8.RuneCountInString(rendered); n > MaxExplorationRunes {
+		rendered = truncateRunes(rendered, MaxExplorationRunes-utf8.RuneCountInString(explorationTruncatedMarker)) + explorationTruncatedMarker
+	}
+	return rendered
+}
+
+const explorationTruncatedMarker = "\n（探索结论已截断）\n"
+
+// appendBudgetedSection writes whole item lines until the section budget is
+// reached and returns the number of items that did not fit. The budget covers
+// the header, so a verbose section never steals another section's space.
+func appendBudgetedSection(b *strings.Builder, header string, items []string, budget int) int {
+	b.WriteString(header)
+	used := utf8.RuneCountInString(header)
+	if used > budget {
+		return len(items)
+	}
+	for i, item := range items {
+		width := utf8.RuneCountInString(item)
+		if used+width > budget {
+			return len(items) - i
+		}
+		b.WriteString(item)
+		used += width
+	}
+	return 0
 }
 
 // explorationSection is the task section a lane receives.
