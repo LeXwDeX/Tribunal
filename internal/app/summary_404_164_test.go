@@ -194,7 +194,7 @@ func TestSummaryDeleted164Recovers(t *testing.T) {
 			if len(botNotes) != 1 || pub.GitlabID != strconv.FormatInt(botNotes[0].ID, 10) || pub.BodyHash != bodyHash(botNotes[0].Body) {
 				t.Fatalf("summary binding=%+v bot notes=%+v", pub, botNotes)
 			}
-			if (!tc.failure && summaryTailForTest(botNotes[0].Body) != summaryTailForTest(deleted.Body)) || (tc.failure && !strings.Contains(botNotes[0].Body, "review execution failed")) {
+			if (!tc.failure && summaryTailForTest(botNotes[0].Body) != summaryTailForTest(deleted.Body)) || (tc.failure && !strings.Contains(botNotes[0].Body, "评审执行失败")) {
 				t.Fatalf("recovered summary has the wrong body: %q", botNotes[0].Body)
 			}
 			wantCreates := 1

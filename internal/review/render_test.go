@@ -333,8 +333,8 @@ func TestRenderUnicodeLengths(t *testing.T) {
 	if strings.Contains(out, strings.Repeat("文", MaxBodyRunes+1)) {
 		t.Fatal("body was not truncated by rune count")
 	}
-	if !strings.Contains(out, strings.Repeat("长", MaxTitleRunes)) {
-		t.Fatal("title truncation lost valid content")
+	if !strings.Contains(out, strings.Repeat("长", MaxTitleRunes-1)+"…") {
+		t.Fatal("title truncation lost valid content or its ellipsis")
 	}
 }
 
@@ -352,21 +352,24 @@ func TestRenderSummaryIncompleteAndBadFingerprint(t *testing.T) {
 	out, err := RenderSummary(SummaryInput{
 		Verdict:          VerdictIncomplete,
 		IncompleteReason: "provider timed out",
-		Warnings:         []string{"provider <slow>", "second warning"},
+		Warnings:         []string{"上游 <slow> 超时", "第二条提示"},
 		Fingerprint:      "abc",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	warnAt := strings.Index(out, "### 评审提示（2）")
-	reasonAt := strings.Index(out, "> 评审未完成：provider timed out")
+	reasonAt := strings.Index(out, "> 评审未完成：")
 	if warnAt < 0 || reasonAt < 0 || warnAt > reasonAt {
 		t.Fatalf("warnings and incomplete reason are missing or out of order:\n%s", out)
 	}
-	for _, want := range []string{"⚪ 评审未完成", "- provider &lt;slow<span></span>&gt;", "- second warning", "provider timed out"} {
+	for _, want := range []string{"⚪ 评审未完成", "- 上游 &lt;slow<span></span>&gt; 超时", "- 第二条提示", "具体原因与日志见控制台"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in:\n%s", want, out)
 		}
+	}
+	if strings.Contains(out, "provider timed out") {
+		t.Fatalf("unmatched machine reason was published verbatim:\n%s", out)
 	}
 	if strings.Contains(out, "×") {
 		t.Fatalf("incomplete summary without groups rendered a count line:\n%s", out)

@@ -25,7 +25,7 @@ func TestRuleSummaryCountsExcludeFoldedGroupsAndStateThem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(body, "共 4 条问题，已发布 2 条（另有 1 条并入相关描述）") {
+	if !strings.Contains(body, "共 4 条问题，裁决发布 3 条（行内 2 条，仅汇总 0 条，另有 1 条并入相关描述）") {
 		t.Fatalf("summary counts not aligned with the listed entries:\n%s", body)
 	}
 	if strings.Contains(body, "已发布 3 条") {
@@ -36,7 +36,7 @@ func TestRuleSummaryCountsExcludeFoldedGroupsAndStateThem(t *testing.T) {
 	}
 }
 
-func TestRuleSummaryCountsUnchangedWithoutFolding(t *testing.T) {
+func TestRuleSummaryCountsStateBreakdownWithoutFolding(t *testing.T) {
 	groups := countsFixture()[2:]
 	body, err := RenderSummary(SummaryInput{
 		Verdict: VerdictBlocking, Summary: "规则模式汇总：共 2 条问题，已发布 1 条。", RuleSummary: true, Groups: groups,
@@ -45,8 +45,8 @@ func TestRuleSummaryCountsUnchangedWithoutFolding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(body, "共 2 条问题，已发布 1 条。") || strings.Contains(body, "并入相关描述") {
-		t.Fatalf("unfolded summary must be untouched:\n%s", body)
+	if !strings.Contains(body, "共 2 条问题，裁决发布 1 条（行内 1 条，仅汇总 0 条）") || strings.Contains(body, "并入相关描述") {
+		t.Fatalf("unfolded summary must state the verdict and inline counts:\n%s", body)
 	}
 }
 
@@ -61,7 +61,7 @@ func TestRuleSummaryCountsIncludeSummaryFoldedGroups(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(body, "已发布 1 条（另有 1 条并入相关描述）") {
+	if !strings.Contains(body, "裁决发布 2 条（行内 1 条，仅汇总 0 条，另有 1 条并入相关描述）") {
 		t.Fatalf("summary-folded group not stated:\n%s", body)
 	}
 }

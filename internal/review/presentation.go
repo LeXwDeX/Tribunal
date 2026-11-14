@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // RelatedGroup records a group folded into another group's discussion by the
@@ -17,6 +18,9 @@ type RelatedGroup struct {
 	Line     int      `json:"line,omitempty"`
 	Title    string   `json:"title"`
 	Excerpt  string   `json:"excerpt,omitempty"`
+	// ExcerptTruncated reports that Excerpt was clipped, so the discussion
+	// keeps the finding ID as the way back to the full text in the console.
+	ExcerptTruncated bool `json:"excerpt_truncated,omitempty"`
 }
 
 // maxRelatedGroups bounds the 「相关描述」 list; the rest is counted.
@@ -24,6 +28,13 @@ const maxRelatedGroups = 5
 
 // relatedExcerptRunes bounds each body excerpt in the related list.
 const relatedExcerptRunes = 120
+
+// relatedExcerpt bounds a related body at a sentence boundary and reports
+// whether it was clipped.
+func relatedExcerpt(body string) (string, bool) {
+	flat := strings.Join(strings.Fields(body), " ")
+	return clipRunes(flat, relatedExcerptRunes), utf8.RuneCountInString(flat) > relatedExcerptRunes
+}
 
 // MergePresentation folds near-duplicate groups that are already decided to be
 // published into one discussion. It runs after adjudication and synthesis, so
@@ -64,9 +75,10 @@ func MergePresentation(groups []Group, dossier *Dossier) []Group {
 		display.Related = append([]RelatedGroup(nil), display.Related...)
 		for _, idx := range members {
 			member := &out[idx]
+			excerpt, truncated := relatedExcerpt(member.Body)
 			display.Related = append(display.Related, RelatedGroup{
 				ID: member.ID, Severity: member.EffectiveSeverity(), Category: member.Category,
-				Line: member.Line, Title: member.Title, Excerpt: oneLine(member.Body, relatedExcerptRunes),
+				Line: member.Line, Title: member.Title, Excerpt: excerpt, ExcerptTruncated: truncated,
 			})
 			member.Decision = &FindingDecision{
 				Action: ActionDrop, Reason: "merged into " + display.ID + " for presentation", Source: "presentation",
@@ -679,9 +691,10 @@ func foldUnpositionedForSummary(groups []Group) summaryFold {
 			fold.into[g.ID] = rep.ID
 			// The folded group's own related items (from MergePresentation)
 			// move along with it, so none of them disappears from the summary.
+			excerpt, truncated := relatedExcerpt(g.Body)
 			added := append([]RelatedGroup{{
 				ID: g.ID, Severity: g.EffectiveSeverity(), Category: g.Category,
-				Line: g.Line, Title: g.Title, Excerpt: oneLine(g.Body, relatedExcerptRunes),
+				Line: g.Line, Title: g.Title, Excerpt: excerpt, ExcerptTruncated: truncated,
 			}}, g.Related...)
 			fold.related[rep.ID] = append(fold.related[rep.ID], added...)
 			matched = true
@@ -702,7 +715,9 @@ func foldUnpositionedForSummary(groups []Group) summaryFold {
 // and a differently worded title, so the evidence is the named identifiers
 // (functions, parameters, exceptions) that one title shares with the other
 // group's title or body, together with shared title content. A listed title
-// without identifiers (a plain-prose title) only needs the first direction.
+// without identifiers (a plain-prose title) needs both title content and body
+// similarity; when long prose titles miss that coverage threshold, a file or
+// identifier named in both bodies is accepted as the remaining evidence.
 func unpositionedMatch(rep, g Group) bool {
 	if rep.Path != "" && g.Path != "" && (rep.Path != g.Path || normalizedSide(rep.Side) != normalizedSide(g.Side)) {
 		return false
@@ -715,16 +730,54 @@ func unpositionedMatch(rep, g Group) bool {
 		return false
 	}
 	if !identifiersReferenced(g.Title, rep.Title, rep.Body) {
-		return false
+		if len(titleIdentifiers(g.Title)) > 0 {
+			return false
+		}
 	}
 	contentMatch := summaryTitleContentMatches(rep.Title, g.Title)
 	similar := textSimilar(textTokens(rep.Title, rep.Body), Finding{Title: g.Title, Body: g.Body}, nearDuplicateSameCategory)
 	if len(titleIdentifiers(rep.Title)) == 0 {
 		// Nothing ties a prose-only title to the candidate's identifier except
-		// the body, so both content and text evidence are required.
-		return contentMatch && similar
+		// the body, so both content and text evidence are required. Long prose
+		// titles often miss the strict content coverage even when both bodies
+		// name the same file; that shared evidence plus body similarity keeps
+		// the same problem from being listed twice.
+		return (contentMatch && similar) || (similar && sharedBodyEvidence(rep, g))
 	}
 	return identifiersReferenced(rep.Title, g.Title, g.Body) && (contentMatch || similar)
+}
+
+// bodyEvidenceTokens returns file-like and identifier-like tokens named in a
+// group's title, body and evidence. Generic words are excluded, so only a
+// concrete path, qualified name or code identifier counts as evidence.
+func bodyEvidenceTokens(g Group) map[string]struct{} {
+	out := make(map[string]struct{})
+	fields := strings.FieldsFunc(g.Title+"\n"+g.Body+"\n"+g.Evidence, func(r rune) bool {
+		return !(r < 0x80 && (unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '.' || r == '-' || r == '/'))
+	})
+	for _, field := range fields {
+		field = strings.Trim(field, "._-/")
+		if len(field) < 4 || genericIdentifiers[strings.ToLower(field)] {
+			continue
+		}
+		if strings.ContainsAny(field, "._-/") || hasInnerUpper(field) {
+			out[strings.ToLower(field)] = struct{}{}
+		}
+	}
+	return out
+}
+
+// sharedBodyEvidence reports whether both groups name the same concrete file,
+// qualified name or code identifier.
+func sharedBodyEvidence(a, b Group) bool {
+	tokens := bodyEvidenceTokens(a)
+	other := bodyEvidenceTokens(b)
+	for token := range tokens {
+		if _, ok := other[token]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // SummaryFoldedGroups returns the groups the summary lists or counts: those

@@ -464,7 +464,7 @@ func TestRepoLanguageTooLongIsIgnoredWithWarning(t *testing.T) {
 	if f.gitlab.noteCount() != 1 {
 		t.Fatalf("notes = %d, want 1", f.gitlab.noteCount())
 	}
-	if body := f.gitlab.notes[0].Body; !strings.Contains(body, "language is too long") {
+	if body := f.gitlab.notes[0].Body; !strings.Contains(body, "语言过长") {
 		t.Fatalf("summary does not warn about the ignored language: %s", body)
 	}
 	for i, spec := range recorder.recorded() {
