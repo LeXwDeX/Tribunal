@@ -64,7 +64,7 @@ web/
 |---|---|---|
 | 运行中 | 正在运行的评审：项目、MR、当前阶段、已用时 | `GET /reviews?status=running` + SSE |
 | 近 7 天 | 运行次数（含评审与 onboarding）、BLOCKING 比例、发布条目数、规则丢弃比例、平均/P95 耗时 | `GET /stats` |
-| 需要处理 | 工作区异常、token 30 天内过期、发布失败，或带 `publication_error` 的 pending 重试；普通 pending 不告警；provider 连续错误只对平台管理员加载 | `GET /projects`、`GET /providers`、`GET /reviews?publication_state=failed`、`GET /reviews?publication_state=pending` |
+| 需要处理 | 工作区异常、token 30 天内过期、发布失败，或带 `publication_error` 的 pending 重试；普通 pending 不告警；provider 连续错误只对平台管理员加载。另含 `completed + verdict=INCOMPLETE` 与含 failed/skipped 节点的 completed 评审，按已加载的最近评审计数，合并为聚合告警 | `GET /projects`、`GET /providers`、`GET /reviews?publication_state=failed`、`GET /reviews?publication_state=pending`、`GET /reviews`（已加载的近期评审） |
 | 最近评审 | 最近 20 条 | `GET /reviews?limit=20` |
 
 ### 3.2 评审列表
@@ -78,10 +78,11 @@ web/
 | 区块 | 内容 | API |
 |---|---|---|
 | 头部 | MR 标题与链接、head sha、档位、触发方式、状态、结论、项目 `access`；操作按 `manage` 显示取消、重新发布、在 GitLab 中打开 | `GET /reviews/{id}` |
+| 未完成原因/评审诊断 | INCOMPLETE 评审或存在警告/未解决信号时显示「未完成原因」/「评审诊断」面板，展示 review 级 `summary`、`warnings`、`unresolved`；结论卡片区分未评审、评审失败与已审范围 | `GET /reviews/{id}` |
 | DAG 视图 | 按层排列节点，颜色表示状态，点击打开节点抽屉 | `GET /reviews/{id}/graph` + SSE |
 | Findings | 表格：级别、标题、文件:行、来源（节点 / provider）、挑战结果、处置、处置理由；可按处置和级别过滤；展开看正文、证据和人工标注 | `GET /reviews/{id}/findings`、`PUT .../findings/{finding_id}/annotation` |
 | 发布 | `publication_state`、脱敏的 `publication_error`、汇总评论链接、行内讨论数量、commit status；failed 可重试，pending 等待发布完成（启动恢复或手动重试），skipped 显示原因且不重发 | 详情中的 `publication_state`、`publication_error`、`publications` |
-| 节点抽屉 | 参数、输出 JSON、错误、每轮 LLM 调用（用量、耗时、stop reason，可展开请求和响应） | `GET /reviews/{id}/nodes/{node}`、`.../calls` |
+| 节点抽屉 | 参数、输出 JSON、错误、节点 `reason`/`token_free`、每轮 LLM 调用（用量、耗时、stop reason，可展开请求和响应）；skipped 节点显示 `reason` 而不显示红色错误框；空调用列表区分代码节点与「明细已按保留策略删除」，并显示保留小时数与截止时间 | `GET /reviews/{id}/nodes/{node}`、`.../calls` |
 
 `publications.commit_status` 仅含 `success`/`failed`；旧发布键没有状态时为 unknown，界面显示不可用。
 
@@ -106,6 +107,8 @@ web/
 
 平台管理员更新访问 Key 时可先做只读校验，返回的项目 ID 必须与当前项目一致；项目 `manage` 不要求调用 validate 端点，直接保存时由服务端校验凭据。该操作只更新平台保存的凭据，不在 GitLab 创建或撤销 token，也不自动初始化或触发评审。
 
+项目概览对 `index: blocked by ignore policy` 复用工作区页的安全中文文案，不显示原始错误；只有工作区 `state=error` 使用红色错误样式，索引降级不算错误。
+
 ### 3.6 扩展
 
 - **MCP 服务器**：列表（作用域、名称、命令、状态、工具数）；已有自定义服务器的编辑、删除、启停；「测试」列出工具。平台管理员可新增或粘贴 Claude Code 配置导入。
@@ -122,11 +125,12 @@ web/
 
 - 用户管理：用户列表显示角色来源、全局模式、项目授权数；管理抽屉可提升/降级管理员、开关全局模式、增删用户维度项目授权。新增项目授权默认 `manage`（可读、可写、可删除），也可改为 `read` 只读共享；平台管理员的项目数据访问不依赖这些授权。配置来源与自我降级不可操作。全局用户在页头显示标识，项目列表标记“只读（全局）”，评审页可切换“全部评审/我的项目”。
 - 模型列表：显示名、来源标签（配置/用户）、协议、上游 model、base_url host、参数摘要、API key 状态、可用性与原因、被引用节点、近 24 小时调用数/错误率/P50 延迟；同名模型显示短 ID。参数摘要对显式 0/false 给出语义标签；当字段来源为全局默认时显示实际生效值，不再显示未生效的零值标签。配置模型卡片显示逐字段来源徽标、YAML 字段路径和重启生效说明，平台管理员可通过「编辑配置」抽屉写回 overlay（见下）。文件快照已加载但不再包含该 provider（例如对只存在于 overlay 的 provider 执行「重置为 base」）时，卡片显示「已从配置移除，重启后消失」并隐藏编辑入口，直到重启后运行期目录刷新。非平台管理员看到只读提示，不显示编辑入口或管理员故障文案。
-- 「全局默认参数」面板：位于「模型」区块之前，只对平台管理员渲染，模型或档位 Drawer 打开时隐藏；隐藏期间未保存的草稿提升到页面状态保留。面板显示 `revision`，按参数分组编辑；「保存全局默认」整体 PUT 当前表单值与 revision；「重置」经确认后按当前 revision DELETE，尚无默认参数或 `revision=0` 时禁用。非指针字段的 0、false 或留空不提交；`temperature` 填 0 会覆盖默认；`reasoning.effort: none` 要求同时勾选 `allow_reasoning_effort_none`。400 的 `details[].field` 显示在对应控件下方，跨模型不兼容项显示在表单级错误中；409 `stale_revision` 显示提示与「重新加载」。重置会让现有可用模型不可用时返回 409 `defaults_in_use`，确认对话框保持打开并列出受影响模型与 `models.<id>.<字段>`，确认按钮变为「仍然重置」；服务端未返回 `details` 时显示兜底提示。再次确认以 `force=true` 强制重置，成功后关闭对话框、刷新模型与配置并提示检查受影响模型。确认文案说明依赖默认值的模型会恢复为只使用自身参数与内置/协议默认，依赖默认 `max_tokens` 的 anthropic 等模型可能变为不可用；进入强制模式后改为提示依赖当前默认值的模型将不可用、需要补充模型参数或重新设置默认值。面板说明明确只对 `user:` 模型生效，`config:` 模型由配置文件负责，并提示保存与重置都会对现有 `user:` 模型做协议交叉校验。用户模型卡片在参数下方列出「全局默认」继承项。
+- 「全局默认参数」面板：位于「模型」区块之前，只对平台管理员渲染，模型或档位 Drawer 打开时隐藏；隐藏期间未保存的草稿提升到页面状态保留。面板显示 `revision`，按参数分组编辑；「保存全局默认」整体 PUT 当前表单值与 revision；「重置」经确认后按当前 revision DELETE，尚无默认参数或 `revision=0` 时禁用。非指针字段的 0、false 或留空不提交；`temperature` 填 0 会覆盖默认；`reasoning.effort: none` 要求同时勾选 `allow_reasoning_effort_none`。400 的 `details[].field` 显示在对应控件下方，跨模型不兼容项显示在表单级错误中；409 `stale_revision` 显示提示与「重新加载」。重置会让现有可用模型不可用时返回 409 `defaults_in_use`，确认对话框保持打开并列出受影响模型与 `models.<id>.<字段>`，确认按钮变为「仍然重置」；服务端未返回 `details` 时显示兜底提示。再次确认以 `force=true` 强制重置，成功后关闭对话框、刷新模型与配置并提示检查受影响模型。确认文案说明依赖默认值的模型会恢复为只使用自身参数与内置/协议默认，依赖默认 `max_tokens` 的 anthropic 等模型可能变为不可用；进入强制模式后改为提示依赖当前默认值的模型将不可用、需要补充模型参数或重新设置默认值。面板说明明确只对 `user:` 模型生效，`config:` 模型由配置文件负责，并提示保存与重置都会对现有 `user:` 模型做协议交叉校验。保存或重置还会复校已存的 `review_profile_overrides`，失效字段以 `overrides.<节点>.params.<字段>` 路径显示：会让覆盖失效时，保存返回 400 `validation_failed`，重置未强制时返回 409 `overrides_in_use`；强制重置会提示审计记录受影响字段。用户模型卡片在参数下方列出「全局默认」继承项。
 - 「评审档位」区块顶部是「全局默认」卡片（`default` slot），显示生效模型（显示名与短 ID）、来源、配置值和生效参数（`effective_params`）及参数来源；下方 6 个可配置节点（explore、四路 lanes、challenge）逐项显示生效模型、来源标签（覆盖/全局默认/配置/配置默认/派生，以 API 返回的 `source` 为准）和生效参数/参数来源。多个节点的 `vote_identity` 相同时提示「这些节点会被计为同一模型」并列出节点（含全局默认）。
 - 管理员在 Drawer 中编辑两层：顶部「全局默认」卡片可设置模型与 `max_tokens`、`temperature`、`reasoning.effort`（含 `max`）、`thinking.budget_tokens`、`thinking.type`；下方 6 个节点用相同控件逐项覆盖。每个输入下方显示继承值与来源：未填写时显示「继承值 … · 来源 模型/全局默认」，已填写时显示「覆盖中」及清除后的继承值；修改全局默认会立即更新节点下方的继承提示。`thinking` 覆盖按对象整体生效：本层只要填写任一子字段，未填写的子字段不继承，界面提示整体覆盖；只有本层没有 thinking 覆盖时才显示继承的整个 thinking 对象。不能解析模型目录时继承值显示「未知」，不把已清除的旧值或节点自身的覆盖当成继承值。不可用模型禁用并显示原因。
 - 保存时只重建并提交实际填写了值的覆盖项（整体 PUT overrides 文档的协议不变），没有填写任何值的节点不会出现在文档中，已保存的覆盖会原样回填并保留；「清除<节点>覆盖」或「清除全局默认覆盖」清空表单后保存即恢复继承；「恢复为配置」调用 DELETE 清除全部覆盖。保存和恢复都带当前 revision：400 的 `details[].field` 路径显示在对应输入旁，错误与 409 刷新提示显示在全部字段集下方（409 提供重新加载）。非管理员只读，不渲染写控件。
 - 管理员可通过 Drawer 新增或编辑用户模型；表单按连接、采样、推理和限流分组。API key 三态（保持不变/替换/清除）只存在抽屉局部状态，关闭即清空；保存前测试调用草稿测试端点，编辑且 key 不变时不发送 key。预设入口只在新建模型时显示，从 `GET /api/v1/model-presets` 拉取，点击只填入本地表单，不立即写库；404 视为旧服务端并静默隐藏，非 404 失败显示可重试提示。`max_tokens` 留空表示模型默认（DeepSeek 默认 8K/64K/128K，不是最大输出），anthropic 留空时前端直接报错；`max_concurrency` 新建时默认留空，填 0 显示不限制本地并发的警告。anthropic 的 `thinking.budget_tokens` 为 0 或留空表示不设置，启用时必须不小于 1024 且小于生效的 `max_tokens`：模型显式填 0 或留空但继承全局默认时，按继承后的生效值校验。删除被引用模型显示 409 引用位置；revision 冲突提示重新加载；出站被拒显示专门说明。配置模型仍只读，模型级参数改用「编辑配置模型」抽屉写回 overlay。本页只允许平台管理员读取，其他用户看到权限错误，写入口隐藏。
+- 模型测试分为「连通性测试」与「工具调用测试」：前者验证端点可达；后者调用 `POST /api/v1/models/{id}/probe`，要求模型返回真实的 `submit_result` 工具调用，只返回文本时提示不支持。用户模型抽屉保留「保存前连通性测试」的草稿测试；「工具调用测试」只针对已保存模型。`config:` 模型的「连通性测试」与「工具调用测试」都针对已保存的文件生效配置，不测试抽屉中未保存的参数；保存并重启后新参数才参与运行。
 - 「编辑配置模型」抽屉：平台管理员在 `config:` 模型卡片点「编辑配置」打开，按连接、采样、推理与能力、限流与窗口分组；每个字段的说明文字显示来源（内置默认/基础配置/overlay），卡片上的来源标签才是徽标。`base_url` 可为空，留空时沿用协议适配器默认端点；非空时要求绝对 http(s) URL，且不含凭据、查询或片段。`reasoning.effort: none` 要求同时开启 `allow_reasoning_effort_none`。`max_concurrency` 与 `rpm` 的显式 0 显示为 0，`max_tokens` 与 `context_window` 的 0 显示为空。保存只提交实际变化的 `providers.<名称>.*` 叶子并带 `base_revision`、`overlay_revision`；保存后以保存前的 `overlay_revision` 为基线，按约 1 秒间隔轮询 `GET /api/v1/config`，快照出现任何不同的 revision（包括其他管理员写入导致的更高 revision）即结束并重新启用编辑；15 秒仍未更新或快照请求失败时显示提示并恢复编辑。无变化时不写文件。抽屉打开期间 revision 变化会重建表单并提示，避免静默丢弃草稿。「重置为 base」经确认后删除整个 `providers.<名称>` 覆盖；仍被 `profiles`（含 `profiles.default`）或 0028 节点覆盖引用时，一次 409 `provider_in_use` 同时列出两类引用，不修改数据库或档位。卡片与抽屉列出 0028 节点覆盖；「在评审档位中清除」打开既有档位抽屉。API key 只显示是否配置（只读），不回显凭据。仅平台管理员渲染写入口，服务端同样拒绝非管理员。overlay 不热替换，重启后未终态评审可能以 `profile_hash_changed` 取消。
 - 评审档位：只显示 `default`，标题为「评审档位」，按固定的八步拓扑列出各步骤及其 provider：探索（`explore`）、提出（`code-review`、`review`、`reasoner`、`validate`）、挑战（`verify`）、裁决（`adjudicate`）、汇报（`synthesize`），并展示预算。`onboarding` 单独标为「项目接入」，不是评审档位。
 - 手动触发评审的对话框也没有档位选择；评审详情的 DAG 阶段轨道中，`explore` 和 `plan` 归入「规划」，`code-review`、`review`、`reasoner` 和 `validate` 归入「提出」。「模型与档位」页的「项目接入」一行在 onboarding 没有配置 provider 时显示「未配置」。
@@ -134,6 +138,7 @@ web/
 ### 3.8 统计与反馈
 
 - 当前页面展示总体及按项目、provider、块的运行数、平均/P95 耗时、有效耗时样本数与 UTC 日趋势。项目统计工作流；provider/块统计已启动节点，每个当前节点行只计一次，不按 LLM 调用轮次或重试次数累加，无 provider 的代码节点只进入块统计。
+- 「评审口径」面板读取 `GET /api/v1/stats/reviews`，只统计 `kind=review`：`blocking_ratio` 以评审为分母，`all_*` 提供含 onboarding 的并列分母，便于和总体统计对照。所选 `from` 早于调用明细保留截止点时显示 `model_details_purged` 提示，说明模型明细已删除，零值不代表模型未被使用。
 - 趋势用可横向滚动的日期表格；每个项目/provider/块可展开每日明细。筛选和日桶按 workflow 创建时间，日桶用 UTC；只返回有记录的日，不补零。节点指标仅表示最新一次尝试，不代表完整重试历史。
 - 运行次数含评审和 onboarding；`overturned_ratio` 标为「规则丢弃比例」，是规则裁决 `drop` 的占比，不是「被挑战推翻」或模型准确率。
 - 旧响应缺字段显示不可用，已知空数组显示空状态，非法趋势不显示部分合计。
@@ -142,6 +147,9 @@ web/
 ### 3.9 系统
 
 - 标签：API Token、平台配置（只读）、用户与账号、项目授权；平台配置、用户与账号、项目授权只对平台管理员显示。
+- API Token 标签在到期前 14 天显示提示；「续期」按同名签发新明文并立即让旧明文失效，新明文只显示一次。
+- 会话签名有效且未过期、但存储行已被每账号最多 10 个会话的上限淘汰时，控制台提示「已在其他登录中被替换」，需要重新登录。
+- 用户与账号列表中，配置来源账号（`role_source=config`）和当前登录账号的「停用账号」按钮禁用并显示原因；服务端拒绝时使用 `protected_user` 专门文案。
 - 平台配置（只读）标签顶部有「配置来源与待重启」面板，约每 5 秒轮询 `GET /api/v1/config/status` 与 `GET /api/v1/config`，显示 applied / 待重启徽标、base 与 overlay 的短 revision（overlay 缺失时显示「未挂载」）、`last_error`（`role="alert"`）和 `warnings`（`role="status"`）。
 - 面板以表格列出文件生效的标量配置项：路径、值、来源徽标（内置默认/基础配置/overlay）。数组和映射只通过标量叶子显示；本页不提供编辑。配置模型的编辑入口在「模型与档位」页。
 - revision 变化时，前端让 settings、providers、profiles、models 和配置快照相关查询失效并重新拉取。
