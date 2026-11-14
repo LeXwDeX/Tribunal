@@ -19,6 +19,23 @@ import (
 const mustSubmitPrompt = "You must call the " + SubmitToolName +
 	" tool to finish. Do not end the turn with prose."
 
+// submitNudgePrompt is appended periodically while no request-count limit is
+// configured. It is a soft convergence reminder, not a last turn: tools stay
+// executable, so the model can finish one more evidence check and then submit.
+// Like finalTurnPrompt it is added to the request only, never to the
+// transcript.
+const submitNudgePrompt = "You have gathered a substantial amount of evidence. If it is enough for a defensible result, call the " +
+	SubmitToolName + " tool now with your best result. Otherwise make only the few targeted tool calls the result still needs, then submit."
+
+// submitNudgeTurns is how many completed model turns pass between convergence
+// prompts when the run has no request-count limit.
+const submitNudgeTurns = 10
+
+// submitNudgeTokens is how many additional input and output tokens may
+// accumulate between convergence prompts. It bounds a lane whose context grows
+// quickly even when its turn count does not.
+const submitNudgeTokens = 250_000
+
 // finalTurnPrompt is sent with the last request of a run, and with every
 // request once the context deadline leaves too little time for more
 // exploration. It is never stored in the transcript. The loop does not force
@@ -180,6 +197,12 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 	submitFailures := 0
 	askedForSubmit := false
 	invalidRecoveries := 0
+	graceUsed := 0
+	// nextNudgeTurn and nextNudgeTokens schedule convergence prompts for a run
+	// without a request-count limit. Both are advanced together so the two
+	// thresholds do not stack prompts on the same request.
+	nextNudgeTurn := submitNudgeTurns + 1
+	nextNudgeTokens := int64(submitNudgeTokens)
 	// resubmitReason carries the prompted reason into the resubmit turn.
 	resubmitReason := ""
 	longestTurn := max(spec.TurnEstimate, 0)
@@ -194,6 +217,7 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 			Turns:       turns,
 			Transcript:  append([]llm.Message(nil), messages...),
 			LongestTurn: longestTurn,
+			Partial:     true,
 		}, err
 	}
 	send := spec.Outbound
@@ -276,15 +300,20 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 			return partial(err)
 		}
 		turnStarted := now()
-		lastTurn := maxTurns > 0 && turn == maxTurns
+		// After an explicit limit is reached every grace turn stays submit-only,
+		// so turn >= maxTurns marks the whole tail of the run.
+		lastTurn := maxTurns > 0 && turn >= maxTurns
 		nearLimit := nearContextLimit()
 		// Past the context limit another tool result could overflow the
-		// window, so the turn behaves like the last one.
+		// window, so the turn behaves like the last one. Near the context
+		// deadline only submit_result may run: a tool call there could not
+		// finish before the workflow cancels the node.
+		deadlineSoon := nearDeadline()
 		resubmit := resubmitReason
 		resubmitReason = ""
 		// The resubmit turn stays submit-only even if its own reason lapsed,
 		// for example once the rejected output left the context estimate.
-		submitOnly := lastTurn || nearLimit || resubmit != ""
+		submitOnly := lastTurn || nearLimit || deadlineSoon || resubmit != ""
 		req := &llm.Request{
 			System:      spec.System,
 			Messages:    append([]llm.Message(nil), messages...),
@@ -299,21 +328,39 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 			reason = llm.SubmitPromptLastTurn
 		case nearLimit:
 			reason = llm.SubmitPromptContext
-		case nearDeadline():
+		case deadlineSoon:
 			reason = llm.SubmitPromptDeadline
 		case nearBudget():
 			reason = llm.SubmitPromptBudget
 		case resubmit != "":
 			reason = resubmit
 		}
+		// Without a request-count limit the run keeps working until the
+		// deadline or an explicit submit. A periodic convergence prompt keeps
+		// a chatty lane from exploring until the workflow cancels it.
+		nudge := false
+		if maxTurns <= 0 && reason == "" && turn > 1 {
+			total := usage.InputTokens + usage.OutputTokens
+			if turn >= nextNudgeTurn || total >= nextNudgeTokens {
+				nudge = true
+				nextNudgeTurn = turn + submitNudgeTurns
+				nextNudgeTokens = total + submitNudgeTokens
+			}
+		}
 		if lastTurn && forceSubmit {
 			// The prompt stays as well, in case the forced choice is rejected.
 			req.ToolChoice = SubmitToolName
 		}
-		if reason != "" {
+		switch {
+		case reason != "":
 			req.Messages = append(req.Messages, llm.Message{
 				Role:  llm.RoleUser,
 				Parts: []llm.Part{{Type: llm.PartText, Text: finalTurnPrompt}},
+			})
+		case nudge:
+			req.Messages = append(req.Messages, llm.Message{
+				Role:  llm.RoleUser,
+				Parts: []llm.Part{{Type: llm.PartText, Text: submitNudgePrompt}},
 			})
 		}
 
@@ -447,6 +494,18 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 			return partial(ErrUnsafeResponse)
 		}
 		if len(calls) == 0 {
+			// A turn that ends with prose after an explicit limit is a
+			// rejected last turn: grant a grace turn that asks once more.
+			if maxTurns > 0 && turn >= maxTurns && graceUsed < maxGraceTurns {
+				graceUsed++
+				messages = append(messages, llm.Message{
+					Role:  llm.RoleUser,
+					Parts: []llm.Part{{Type: llm.PartText, Text: mustSubmitPrompt}},
+				})
+				askedForSubmit = true
+				recordTurn(turnStarted)
+				continue
+			}
 			if resp.StopReason == llm.StopEndTurn && !askedForSubmit && (maxTurns <= 0 || turn < maxTurns) {
 				messages = append(messages, llm.Message{
 					Role:  llm.RoleUser,
@@ -549,9 +608,22 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 			}, nil
 		}
 		if submitFailures > maxSubmitRetries {
+			// The feedback budget is spent. An explicit positive limit still
+			// grants its grace turns, so a rejected last submit is not the end
+			// of an otherwise useful run.
+			if maxTurns > 0 && turn >= maxTurns && graceUsed < maxGraceTurns {
+				graceUsed++
+				continue
+			}
 			return partial(ErrInvalidSubmit)
 		}
 		if maxTurns > 0 && turn >= maxTurns {
+			// Grace turns are submit-only and bounded; after them the run
+			// fails with the state it collected instead of discarding it.
+			if graceUsed < maxGraceTurns {
+				graceUsed++
+				continue
+			}
 			break
 		}
 	}

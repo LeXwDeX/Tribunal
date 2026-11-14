@@ -193,7 +193,9 @@ finalize 若在重读时发现新节点，返回主循环继续调度，而不�
 | `explore` 未成功完成 | 四路评审不带探索摘要运行；报告给出一条告警，不产生证据缺口 |
 | `explore` 被跳过 | 只会发生在设置了 token 预算（`max_tokens > 0`）且预算在它开始前已耗尽时；此时 `plan` 也被跳过，工作流在没有结论的情况下结束 |
 
-节点级超时语义：`NodeSpec.Timeout` 为 0 时使用 `engine.default_node_timeout`（默认 10m）；正数同时约束排队等待和执行；负值不设节点级 deadline，节点只能由工作流 deadline（若配置）或取消终止。评审 agent 节点默认使用负值，`explore`、`plan`、`gather`、`adjudicate`、`synthesize` 和 `onboarding` 仍保留各自的固定超时。`budget.deadline` 为 0（默认）时不设工作流 deadline，因此节点超时为负值且未显式配置 deadline 时，工作流只能靠取消、进程停止或全部节点结算结束；调用方 context 截止仍可取消节点。
+失败原因：执行器可通过可选接口 `ErrorDetailProvider` 为失败事件提供固定、代码自有的原因；引擎只接受最长 160 字符、且仅含字母、数字、空格与固定标点 `_ - . , ( ) = / :` 的原因，出现其他字符或超长时整条丢弃并回退为 `node execution failed`，原始错误正文不会进入事件日志或数据库。评审执行器为已知失败持久化固定类 `no_submit`、`invalid_submit`、`context_too_long`、`budget_exhausted`（`queue_timeout` 保持独立），这些类不再归入 `executor_error`；unsafe、canceled、timeout 等 fail-closed 分类仍优先。对应的固定原因只含固定词和计数，例如 `submit_result missing after N turns`、`submit_result rejected`、`model context window exceeded`、`workflow token budget exhausted (used of max tokens)`、`queue wait exceeded node timeout`。
+
+节点级超时语义：`NodeSpec.Timeout` 为 0 时使用 `engine.default_node_timeout`（默认 10m）；正数同时约束排队等待和执行；负值不设节点级 deadline，节点只能由工作流 deadline（若配置）或取消终止。评审 agent 节点默认使用负值，`explore`、`plan`、`gather`、`adjudicate`、`synthesize` 和 `onboarding` 仍保留各自的固定超时。`budget.deadline` 为 0（默认）时不设工作流 deadline，因此节点超时为负值且未显式配置 deadline 时，工作流只能靠取消、进程停止或全部节点结算结束；调用方 context 截止仍可取消节点。评审节点执行器还会把工作流投影中的 deadline 附加到节点 context（仅当它早于节点级 deadline 时），因此配置了工作流 deadline 时，agent 循环的临近截止提交提示也能看到它。
 
 ### 5.5 预算校验
 
@@ -205,7 +207,7 @@ finalize 若在重读时发现新节点，返回主循环继续调度，而不�
 
 执行期约束：
 
-- 每个 agent 节点的模型请求数 ≤ `budget.max_turns`。默认 0 表示不限制；正数到达后仍未提交 `submit_result` 的节点失败，结论按 required / optional 处理。agent 运行仍会在 `submit_result`、上下文窗口、调用方 token 预算或 context deadline 时结束。
+- 每个 agent 节点的模型请求数 ≤ `budget.max_turns`。默认 0 表示不限制；正数到达后仍未提交 `submit_result` 时，先追加最多 2 个仅允许 `submit_result` 的 grace turn，仍失败则节点失败，结论按 required / optional 处理。grace turn 仍失败时执行器保留已收集的部分状态（`PartialRunError`），节点层可把该 lane 降级为 evidence gap。agent 运行仍会在 `submit_result`、上下文窗口、调用方 token 预算或 context deadline 时结束。
 - `budget.deadline` 为 0（默认）时不设工作流 deadline；正数到期后 `Cancel(wf, "deadline")`；负值在配置校验和评审档位校验中被拒绝。
 
 当前实现的 token 预算语义（仅在 `budget.max_tokens > 0` 时生效；默认 0 不做 token 预算检查，用量由上游 LLM key 的额度决定，见 [#392](https://github.com/LeXwDeX/Tribunal/issues/392)）：
