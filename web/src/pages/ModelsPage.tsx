@@ -3,12 +3,12 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCanWrite } from '../components/RoleContext'
 import {
   createModel, deleteModel, deleteModelDefaults, getConfig, getDefaultProfile, getModelDefaults, listModelPresets, listModels, listProfiles,
-  patchConfigOverlay, putModelDefaults, testModelDraft, updateModel,
+  patchConfigOverlay, putModelDefaults, probeModelTools, testModel, testModelDraft, updateModel,
 } from '../api/api'
 import { ApiError, errorMessage } from '../api/client'
 import type {
   ConfigFileResponse, ConfigOrigin, ConfigOverlayChange, ConfigOverlayWriteResponse, ConfigProviderView,
-  Model, ModelDefaults, ModelParams, ModelPreset, ModelWrite, ProfileConfig, ProfileDetail, ProfileNodeView, ProviderTestResult,
+  Model, ModelDefaults, ModelParams, ModelPreset, ModelToolProbeResult, ModelWrite, ProfileConfig, ProfileDetail, ProfileNodeView, ProviderTestResult,
 } from '../api/types'
 import {
   Badge, Button, Checkbox, ConfirmDialog, Disclosure, Drawer, EmptyState, ErrorState, Field, FieldHint, LoadingState,
@@ -631,9 +631,12 @@ function ModelDefaultsPanel({
   const [pending, setPending] = useState(false)
   const [resetOpen, setResetOpen] = useState(false)
   const [resetError, setResetError] = useState<unknown>()
-  // Undefined means no conflict; an empty array still means the server
-  // reported defaults_in_use, so the next confirm must force.
-  const [resetBlocked, setResetBlocked] = useState<Array<{ field?: string; message?: string }>>()
+  // Undefined means no conflict; an empty details list still means the server
+  // reported defaults_in_use or overrides_in_use, so the next confirm forces.
+  const [resetBlocked, setResetBlocked] = useState<{
+    kind: 'models' | 'overrides'
+    details: Array<{ field?: string; message?: string }>
+  }>()
   const id = useId()
   const ids = {
     tokens: `${id}-tokens`, context: `${id}-context`, concurrency: `${id}-concurrency`, rpm: `${id}-rpm`,
@@ -707,10 +710,11 @@ function ModelDefaultsPanel({
         setResetBlocked(undefined)
         setError('已被他人修改，请重新加载后再重置。')
         setStale(true)
-      } else if (err instanceof ApiError && err.code === 'defaults_in_use') {
-        // Keep the dialog open and list the models the reset would break. The
-        // next confirm sends force=true and the server audits the override.
-        setResetBlocked(err.details ?? [])
+      } else if (err instanceof ApiError && (err.code === 'defaults_in_use' || err.code === 'overrides_in_use')) {
+        // Keep the dialog open and list the models or override nodes the reset
+        // would break. The next confirm sends force=true and the server audits
+        // the override.
+        setResetBlocked({ kind: err.code === 'overrides_in_use' ? 'overrides' : 'models', details: err.details ?? [] })
       } else {
         setResetError(err)
       }
@@ -842,7 +846,7 @@ function ModelDefaultsPanel({
           <Note tone="neutral">
             只对 user: 模型生效；config: 模型由配置文件负责。模型显式值优先于默认值；
             整数字段的 0、布尔字段的 false 或留空表示未设置，继续使用内置/协议默认；temperature 是显式值，填 0 会覆盖默认。
-            保存与重置都会用候选值合并现有可用 user: 模型并按各自协议交叉校验；会让模型不可用的组合不写库，重置需再次确认才能强制执行。
+            保存与重置都会用候选值合并现有可用 user: 模型并按各自协议交叉校验，并复校已保存的评审档位覆盖（例如 <code>effort:none</code> 需要 <code>allow_reasoning_effort_none</code>）；会让模型或档位覆盖失效的组合不写库，重置需再次确认才能强制执行。
             保存后对之后启动的评审生效。
           </Note>
         </form>
@@ -853,7 +857,9 @@ function ModelDefaultsPanel({
         onConfirm={() => { void reset(resetBlocked !== undefined) }}
         title="重置全局默认参数"
         description={resetBlocked !== undefined
-          ? '强制重置会清除全部默认值。依赖当前默认值的模型将不可用，需要补充模型参数或重新设置默认值。'
+          ? resetBlocked.kind === 'overrides'
+            ? '强制重置会清除全部默认值。已保存的评审档位覆盖可能因此失效，需要在评审档位中修改或清除。'
+            : '强制重置会清除全部默认值。依赖当前默认值的模型将不可用，需要补充模型参数或重新设置默认值。'
           : '清除全部平台默认参数？依赖默认值的模型会恢复为只使用自身参数与内置/协议默认；依赖默认 max_tokens 的 anthropic 等模型可能变为不可用，存在此类模型时不会直接重置。'}
         confirmLabel={resetBlocked !== undefined ? '仍然重置' : '重置'}
         pending={pending}
@@ -861,11 +867,11 @@ function ModelDefaultsPanel({
       >
         {resetBlocked !== undefined ? (
           <Note tone="danger" role="alert">
-            {resetBlocked.length ? (
+            {resetBlocked.details.length ? (
               <>
-                <div>重置会让以下模型不可用：</div>
+                <div>{resetBlocked.kind === 'overrides' ? '重置会让以下评审档位覆盖失效：' : '重置会让以下模型不可用：'}</div>
                 <ul className={styles.configDetails}>
-                  {resetBlocked.map((detail, index) => (
+                  {resetBlocked.details.map((detail, index) => (
                     <li key={`${detail.field ?? ''}-${index}`}>
                       {detail.field ? <code>{detail.field}</code> : null}
                       {detail.field && detail.message ? ' ' : null}
@@ -875,7 +881,11 @@ function ModelDefaultsPanel({
                 </ul>
               </>
             ) : (
-              <div>服务器未返回具体受影响模型；请先检查模型列表，确认影响后再强制重置。</div>
+              <div>
+                {resetBlocked.kind === 'overrides'
+                  ? '服务器未返回具体受影响档位节点；请先检查评审档位，确认影响后再强制重置。'
+                  : '服务器未返回具体受影响模型；请先检查模型列表，确认影响后再强制重置。'}
+              </div>
             )}
           </Note>
         ) : null}
@@ -1029,6 +1039,8 @@ function ModelDrawer({
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string>()
   const [test, setTest] = useState<ProviderTestResult>()
+  const [toolTest, setToolTest] = useState<ModelToolProbeResult>()
+  const [toolTestError, setToolTestError] = useState<string>()
   const [presetNote, setPresetNote] = useState<string>()
   const id = useId()
   const ids = {
@@ -1045,6 +1057,8 @@ function ModelDrawer({
       setKeyMode('keep')
       setError(undefined)
       setTest(undefined)
+      setToolTest(undefined)
+      setToolTestError(undefined)
       setErrors({})
       setPresetNote(undefined)
       return
@@ -1054,6 +1068,8 @@ function ModelDrawer({
     setKeyMode('keep')
     setError(undefined)
     setTest(undefined)
+    setToolTest(undefined)
+    setToolTestError(undefined)
     setErrors({})
     setPresetNote(undefined)
   }, [open, model])
@@ -1146,6 +1162,30 @@ function ModelDrawer({
     }
   }
 
+  const runToolTest = async () => {
+    if (!model) {
+      setToolTestError('请先保存模型，再进行工具调用测试。')
+      return
+    }
+    setPending(true)
+    setError(undefined)
+    setToolTest(undefined)
+    setToolTestError(undefined)
+    try {
+      setToolTest(await probeModelTools(model.id))
+    } catch (err) {
+      if (err instanceof ApiError && err.code === 'tool_call_unsupported') {
+        setToolTestError('工具调用测试失败：模型没有返回 submit_result 工具调用，不能用于评审。')
+      } else if (err instanceof ApiError && err.code === 'egress_denied') {
+        setToolTestError('出站地址被拒绝：请检查 base_url 或服务端出站规则。')
+      } else {
+        setToolTestError(errorMessage(err))
+      }
+    } finally {
+      setPending(false)
+    }
+  }
+
   const configModel = model?.read_only ?? false
 
   return (
@@ -1156,7 +1196,8 @@ function ModelDrawer({
       description="API key 只保存在本次表单中；关闭后不会保留。"
       footer={(
         <>
-          <Button variant="secondary" onClick={() => { void runTest() }} loading={pending}>保存前测试</Button>
+          <Button variant="secondary" onClick={() => { void runTest() }} loading={pending}>保存前连通性测试</Button>
+          <Button variant="secondary" onClick={() => { void runToolTest() }} loading={pending} disabled={!model}>工具调用测试</Button>
           <Button variant="secondary" onClick={onClose}>取消</Button>
           <Button onClick={() => { void save() }} loading={pending}>{model ? '保存' : '创建'}</Button>
         </>
@@ -1315,10 +1356,17 @@ function ModelDrawer({
         {error ? <span className={styles.resultError}>{error}</span> : null}
         {test ? (
           <span className={test.ok === false ? styles.resultError : styles.resultOk}>
-            {test.ok === true ? '测试成功。' : '测试失败。'} {test.model ? `模型：${test.model}。` : ''}
+            {test.ok === true ? '连通性测试成功。' : '连通性测试失败。'} {test.model ? `模型：${test.model}。` : ''}
             {typeof test.latency_ms === 'number' ? `延迟：${formatDuration(test.latency_ms)}。` : ''}
           </span>
         ) : null}
+        {toolTest ? (
+          <span className={styles.resultOk}>
+            工具调用测试成功：模型返回了 submit_result。{toolTest.model ? `模型：${toolTest.model}。` : ''}
+            {typeof toolTest.latency_ms === 'number' ? `延迟：${formatDuration(toolTest.latency_ms)}。` : ''}
+          </span>
+        ) : null}
+        {toolTestError ? <span className={styles.resultError} role="alert">{toolTestError}</span> : null}
       </div>
     </Drawer>
   )
@@ -1584,6 +1632,7 @@ function ConfigModelDrawer({
   const [details, setDetails] = useState<string[]>([])
   const [stale, setStale] = useState(false)
   const [status, setStatus] = useState<string>()
+  const [probe, setProbe] = useState<{ ok: boolean; text: string }>()
   const [pending, setPending] = useState(false)
   const [resetOpen, setResetOpen] = useState(false)
   const id = useId()
@@ -1610,6 +1659,7 @@ function ConfigModelDrawer({
       setDetails([])
       setStale(false)
       setStatus(undefined)
+      setProbe(undefined)
       return
     }
     const previous = formSnapshot.current
@@ -1621,6 +1671,7 @@ function ConfigModelDrawer({
     setDetails([])
     setStale(false)
     setStatus(external ? '配置已被他人修改，已重新加载。' : undefined)
+    setProbe(undefined)
     formSnapshot.current = { id: model?.id, baseRevision, overlayRevision }
   }, [open, model?.id, baseRevision, overlayRevision])
 
@@ -1697,6 +1748,52 @@ function ConfigModelDrawer({
     }
   }
 
+  const runConnectivityTest = async () => {
+    if (!model) {
+      setProbe({ ok: false, text: '请先保存模型，再进行连通性测试。' })
+      return
+    }
+    setPending(true)
+    setProbe(undefined)
+    try {
+      const result = await testModel(model.id)
+      setProbe({
+        ok: true,
+        text: `连通性测试成功。模型：${result.model ?? model.model}。延迟：${formatDuration(result.latency_ms)}。`,
+      })
+    } catch (err) {
+      setProbe({ ok: false, text: `连通性测试失败：${errorMessage(err)}` })
+    } finally {
+      setPending(false)
+    }
+  }
+
+  const runToolProbe = async () => {
+    if (!model) {
+      setProbe({ ok: false, text: '请先保存模型，再进行工具调用测试。' })
+      return
+    }
+    setPending(true)
+    setProbe(undefined)
+    try {
+      const result = await probeModelTools(model.id)
+      setProbe({
+        ok: true,
+        text: `工具调用测试成功：模型返回了 submit_result。模型：${result.model || model.model}。延迟：${formatDuration(result.latency_ms)}。`,
+      })
+    } catch (err) {
+      if (err instanceof ApiError && err.code === 'tool_call_unsupported') {
+        setProbe({ ok: false, text: '工具调用测试失败：模型没有返回 submit_result 工具调用，不能用于评审。' })
+      } else if (err instanceof ApiError && err.code === 'egress_denied') {
+        setProbe({ ok: false, text: '出站地址被拒绝：请检查 base_url 或服务端出站规则。' })
+      } else {
+        setProbe({ ok: false, text: `工具调用测试失败：${errorMessage(err)}` })
+      }
+    } finally {
+      setPending(false)
+    }
+  }
+
   return (
     <>
       <Drawer
@@ -1706,6 +1803,8 @@ function ConfigModelDrawer({
         description={`通过 overlay 修改 providers.${providerName}；保存后需重启生效，重启可能取消在途评审。API key 与 api_key_env 只读。`}
         footer={(
           <>
+            <Button variant="secondary" onClick={() => { void runConnectivityTest() }} loading={pending} disabled={!model}>连通性测试</Button>
+            <Button variant="secondary" onClick={() => { void runToolProbe() }} loading={pending} disabled={!model}>工具调用测试</Button>
             <Button variant="secondary" onClick={() => setResetOpen(true)} loading={pending}>重置为 base</Button>
             <Button variant="secondary" onClick={onClose}>取消</Button>
             <Button onClick={() => { void save() }} loading={pending}>保存</Button>
@@ -1836,6 +1935,10 @@ function ConfigModelDrawer({
           </Note>
 
           {status ? <span className={styles.resultOk} role="status">{status}</span> : null}
+          <p className="small muted">连通性与工具调用测试针对已保存的模型；保存并重启后，表单中的新参数才会参与运行。</p>
+          {probe ? (
+            <span className={probe.ok ? styles.resultOk : styles.resultError} role={probe.ok ? 'status' : 'alert'}>{probe.text}</span>
+          ) : null}
           {error ? (
             <Note tone="danger" role="alert">
               <div>{error}</div>

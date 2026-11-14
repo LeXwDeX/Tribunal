@@ -76,14 +76,14 @@ describe('models page management (#292)', () => {
     const fetchMock = installFetch(routes())
     renderWithProviders(<ModelsPage />, { route: '/models' })
     await user.click(await screen.findByRole('button', { name: '编辑' }))
-    await user.click(screen.getByRole('button', { name: '保存前测试' }))
+    await user.click(screen.getByRole('button', { name: '保存前连通性测试' }))
     await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url === '/api/v1/models:test')).toBe(true))
     let body = JSON.parse(String(fetchMock.mock.calls.find(([url]) => url === '/api/v1/models:test')?.[1]?.body))
     expect(body.api_key).toBeUndefined()
 
     await chooseOption(user, screen.getByLabelText('API key 状态'), '替换')
     await user.type(screen.getByLabelText('API key', { selector: 'input' }), 'secret-canary')
-    await user.click(screen.getByRole('button', { name: '保存前测试' }))
+    await user.click(screen.getByRole('button', { name: '保存前连通性测试' }))
     await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => url === '/api/v1/models:test')).toHaveLength(2))
     const calls = fetchMock.mock.calls.filter(([url]) => url === '/api/v1/models:test')
     body = JSON.parse(String(calls[calls.length - 1][1]?.body))
@@ -124,7 +124,7 @@ describe('models page management (#292)', () => {
     })
     renderWithProviders(<ModelsPage />, { route: '/models' })
     await user.click(await screen.findByRole('button', { name: '编辑' }))
-    await user.click(screen.getByRole('button', { name: '保存前测试' }))
+    await user.click(screen.getByRole('button', { name: '保存前连通性测试' }))
     expect(await screen.findByText(/出站地址被拒绝/)).toBeInTheDocument()
   })
 
@@ -158,7 +158,7 @@ describe('models page management (#292)', () => {
     await user.click(await screen.findByRole('button', { name: '新增模型' }))
     expect(screen.getByLabelText('max_concurrency')).toHaveValue(null)
     await user.type(screen.getByLabelText('max_tokens'), '256')
-    await user.click(screen.getByRole('button', { name: '保存前测试' }))
+    await user.click(screen.getByRole('button', { name: '保存前连通性测试' }))
     await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url === '/api/v1/models:test')).toBe(true))
     let testCall = fetchMock.mock.calls.find(([url]) => url === '/api/v1/models:test')
     expect(JSON.parse(String(testCall?.[1]?.body)).params).toEqual({
@@ -167,7 +167,7 @@ describe('models page management (#292)', () => {
 
     await user.clear(screen.getByLabelText('max_concurrency'))
     await user.type(screen.getByLabelText('max_concurrency'), '0')
-    await user.click(screen.getByRole('button', { name: '保存前测试' }))
+    await user.click(screen.getByRole('button', { name: '保存前连通性测试' }))
     await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => url === '/api/v1/models:test')).toHaveLength(2))
     const calls = fetchMock.mock.calls.filter(([url]) => url === '/api/v1/models:test')
     testCall = calls[calls.length - 1]
@@ -176,7 +176,7 @@ describe('models page management (#292)', () => {
     })
 
     fireEvent.change(screen.getByLabelText('max_concurrency'), { target: { value: '-1' } })
-    await user.click(screen.getByRole('button', { name: '保存前测试' }))
+    await user.click(screen.getByRole('button', { name: '保存前连通性测试' }))
     expect(await screen.findByText('max_concurrency 必须是不小于 0 的整数。')).toBeInTheDocument()
     expect(fetchMock.mock.calls.filter(([url]) => url === '/api/v1/models:test')).toHaveLength(2)
   })

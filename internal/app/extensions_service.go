@@ -175,11 +175,34 @@ type BlockBindingInput struct {
 	Skills    []string
 }
 
-// ProviderTestResult is the outcome of a provider connectivity probe.
+// ProviderTestResult is the outcome of a provider probe. Probe names which
+// capability was checked: connectivity or a real tool call.
 type ProviderTestResult struct {
 	Model     string
 	LatencyMS int64
+	Probe     string
+	ToolCall  bool
 }
+
+const (
+	// ProbeConnectivity sends one short text request. The budget is large
+	// enough that a reasoning model can answer; one token only proved the
+	// endpoint existed.
+	ProbeConnectivity = "connectivity"
+	// ProbeToolCall asks for one submit_result call.
+	ProbeToolCall = "tool_call"
+
+	probeConnectivityMaxTokens = 64
+	probeToolMaxTokens         = 256
+)
+
+// ErrToolCallUnsupported reports a model that answered without the requested
+// tool call. It cannot be used by the review agent loop.
+var ErrToolCallUnsupported = errors.New("app: model did not return a tool call")
+
+// probeToolSchema is the smallest submit_result contract. The review agent
+// uses the same tool name, so a model that cannot call it cannot run a block.
+var probeToolSchema = json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string","description":"one-line result summary"}},"required":["summary"],"additionalProperties":false}`)
 
 // ExtensionServiceConfig configures the admin extension and system services.
 type ExtensionServiceConfig struct {
@@ -1386,8 +1409,8 @@ func (s *ExtensionService) TestProvider(ctx context.Context, name string) (Provi
 	return ProbeProvider(ctx, client)
 }
 
-// ProbeProvider sends the minimal one-token request used by provider tests.
-// Errors are classified without upstream URLs, bodies, or credentials.
+// ProbeProvider sends the minimal connectivity request used by provider
+// tests. Errors are classified without upstream URLs, bodies, or credentials.
 func ProbeProvider(ctx context.Context, client llm.Client) (ProviderTestResult, error) {
 	started := time.Now()
 	response, err := client.Generate(ctx, &llm.Request{
@@ -1395,7 +1418,7 @@ func ProbeProvider(ctx context.Context, client llm.Client) (ProviderTestResult, 
 			Role:  llm.RoleUser,
 			Parts: []llm.Part{{Type: llm.PartText, Text: "ping"}},
 		}},
-		MaxTokens: 1,
+		MaxTokens: probeConnectivityMaxTokens,
 	})
 	latency := time.Since(started).Milliseconds()
 	if err != nil {
@@ -1408,7 +1431,61 @@ func ProbeProvider(ctx context.Context, client llm.Client) (ProviderTestResult, 
 	if model == "" {
 		model = client.Info().Model
 	}
-	return ProviderTestResult{Model: model, LatencyMS: latency}, nil
+	return ProviderTestResult{Model: model, LatencyMS: latency, Probe: ProbeConnectivity}, nil
+}
+
+// ProbeProviderTools sends one request with a real submit_result tool. A
+// provider that accepts chat but cannot return a tool call fails here instead
+// of during a review. The request uses the same forced tool_choice capability
+// the agent loop reads.
+func ProbeProviderTools(ctx context.Context, client llm.Client) (ProviderTestResult, error) {
+	info := client.Info()
+	toolChoice := "required"
+	if !info.ForcedToolChoice {
+		toolChoice = "auto"
+	}
+	started := time.Now()
+	response, err := client.Generate(ctx, &llm.Request{
+		Messages: []llm.Message{{
+			Role: llm.RoleUser,
+			Parts: []llm.Part{{Type: llm.PartText,
+				Text: "Call the submit_result tool once with a one-line summary. Do not answer in text."}},
+		}},
+		Tools: []llm.ToolDef{{
+			Name:        "submit_result",
+			Description: "Submit the final result for this probe.",
+			InputSchema: probeToolSchema,
+		}},
+		ToolChoice: toolChoice,
+		MaxTokens:  probeToolMaxTokens,
+	})
+	latency := time.Since(started).Milliseconds()
+	if err != nil {
+		return ProviderTestResult{}, providerTestError(err)
+	}
+	model := ""
+	if response != nil {
+		model = response.Model
+	}
+	if model == "" {
+		model = info.Model
+	}
+	if response == nil || !hasSubmitResultCall(response.Message) {
+		return ProviderTestResult{}, ErrToolCallUnsupported
+	}
+	return ProviderTestResult{Model: model, LatencyMS: latency, Probe: ProbeToolCall, ToolCall: true}, nil
+}
+
+func hasSubmitResultCall(message llm.Message) bool {
+	for _, part := range message.Parts {
+		if part.Type != llm.PartToolCall || part.ToolCall == nil {
+			continue
+		}
+		if part.ToolCall.Name == "submit_result" && part.ToolCall.Invalid == "" {
+			return true
+		}
+	}
+	return false
 }
 
 func providerTestError(err error) error {

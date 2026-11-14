@@ -168,6 +168,39 @@ describe('platform model defaults (#413)', () => {
     await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => String(url).startsWith('/api/v1/config')).length).toBeGreaterThan(configBefore))
   })
 
+  it('lists affected profile override nodes when a reset would invalidate them', async () => {
+    let deletes = 0
+    const fetchMock = installFetch(routes({
+      remove: () => {
+        deletes += 1
+        if (deletes === 1) {
+          return jsonResponse({
+            error: {
+              code: 'overrides_in_use',
+              message: 'model defaults are required by stored profile overrides',
+              request_id: 'r1',
+              details: [
+                { field: 'overrides.lanes.review.params.reasoning.effort', message: 'none requires a model with allow_reasoning_effort_none' },
+              ],
+            },
+          }, 409)
+        }
+        return jsonResponse({ params: {}, revision: 4 })
+      },
+    }))
+    const user = await openPage()
+    await user.click(screen.getByRole('button', { name: '重置' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('button', { name: '重置' }))
+    expect(await within(dialog).findByText('overrides.lanes.review.params.reasoning.effort')).toBeInTheDocument()
+    expect(within(dialog).getByText(/重置会让以下评审档位覆盖失效/)).toBeInTheDocument()
+    expect(within(dialog).getByText(/已保存的评审档位覆盖可能因此失效/)).toBeInTheDocument()
+    await user.click(within(dialog).getByRole('button', { name: '仍然重置' }))
+    await waitFor(() => expect(screen.getByText(/已强制重置全部默认值/)).toBeInTheDocument())
+    const deleteCalls = fetchMock.mock.calls.filter(([url, init]) => String(url).startsWith('/api/v1/model-defaults') && init?.method === 'DELETE')
+    expect(String(deleteCalls[1]?.[0])).toBe('/api/v1/model-defaults?revision=3&force=true')
+  })
+
   it('keeps a non-conflict reset error in the dialog', async () => {
     installFetch(routes({
       remove: jsonResponse({ error: { code: 'unavailable', message: 'model defaults are unavailable', request_id: 'r1' } }, 503),

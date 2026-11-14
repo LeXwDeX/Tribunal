@@ -554,6 +554,15 @@ export interface ProviderTestResult {
   [key: string]: unknown
 }
 
+/** Result of one real submit_result tool-call probe. */
+export interface ModelToolProbeResult {
+  ok: boolean
+  model: string
+  latency_ms: number
+  probe: string
+  tool_call: boolean
+}
+
 export interface ProfileConfig {
   flow?: string
   explore?: Record<string, unknown>

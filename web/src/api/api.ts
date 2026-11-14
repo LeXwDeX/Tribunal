@@ -32,6 +32,7 @@ import type {
   ModelHealth,
   ModelParams,
   ModelPreset,
+  ModelToolProbeResult,
   ModelWrite,
   Me,
   CallPage,
@@ -511,6 +512,10 @@ export async function testModel(id: string): Promise<ProviderTestResult> {
 
 export async function testModelDraft(input: ModelWrite): Promise<ProviderTestResult> {
   return request<ProviderTestResult>('/api/v1/models:test', { method: 'POST', body: input })
+}
+
+export async function probeModelTools(id: string): Promise<ModelToolProbeResult> {
+  return request<ModelToolProbeResult>(`/api/v1/models/${segment(id)}/probe`, { method: 'POST' })
 }
 
 export async function getDefaultProfile(): Promise<ProfileDetail> {
