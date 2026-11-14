@@ -245,11 +245,13 @@ func (e *Engine) planSchedule(wf WorkflowView, now time.Time) ([]Event, []string
 			continue
 		}
 		if view.Status == NodeQueued {
+			// Zero uses the engine default; a negative timeout disables the
+			// node deadline (#451), so queue waiting has no limit either.
 			timeout := view.Spec.Timeout
-			if timeout <= 0 {
+			if timeout == 0 {
 				timeout = e.opts.DefaultNodeTimeout
 			}
-			if !view.QueuedAt.IsZero() && !now.Before(view.QueuedAt.Add(timeout)) {
+			if timeout > 0 && !view.QueuedAt.IsZero() && !now.Before(view.QueuedAt.Add(timeout)) {
 				ev, err := makeEvent(EventNodeFailed, NodeFailedPayload{
 					NodeID:    id,
 					Attempt:   view.Attempt,

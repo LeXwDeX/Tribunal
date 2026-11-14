@@ -238,7 +238,12 @@ func (s *WebhookService) recordJob(ctx context.Context, projectID int64, event, 
 			result, err = recorder.RecordReviewDelivery(ctx, delivery, command)
 			jobID, duplicate = result.JobID, result.Duplicate
 			if err == nil && result.Skipped {
-				return WebhookResult{Ignored: "control_changed"}, nil
+				if command.Expect != nil {
+					return WebhookResult{Ignored: "control_changed"}, nil
+				}
+				// A close/merge with nothing to cancel neither creates review
+				// state nor a cancellation comment (#453).
+				return WebhookResult{Ignored: "nothing_to_cancel"}, nil
 			}
 		} else {
 			jobID, duplicate, err = s.store.RecordDelivery(ctx, delivery, job)

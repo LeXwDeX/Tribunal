@@ -418,13 +418,13 @@ tribunalctl projects residues clean --yes
 
 ### 状态评论恢复
 
-状态评论的待处理目标与已成功应用的目标共用按项目和 MR 的循环扫描。状态 worker 与 publisher 维护同一条 MR note：状态行先显示生命周期，工作流结算后同一 note 追加评审报告；两者都按 `<!-- gitlab-ce-review:summary` 标记查找，结果写入 `review_status.final_body`。调度器每 5 分钟触发一次，每个项目每次最多选取 100 条；这不是每 5 分钟完成全量核对。从头扫描且集合稳定时，150 条需要两次触发才能扫完；触发、排队、GitLab 访问或失败重试还可能增加耗时，不提供完成时限。服务重启后从头扫描。表情补排、过期 eyes、未完成状态及排队取消也分别按项目分页扫描；活跃或失败的行不会阻塞后续行。某行入队失败时，扫描仍前进，等回绕后再尝试该行；候选集合最终稳定、扫描持续推进且服务持续运行，才有回绕机会。状态核对任务读取当前目标并更新评论，不重新运行模型。
+状态评论的待处理目标与已成功应用的目标共用按项目和 MR 的循环扫描。状态 worker 与 publisher 维护同一条 MR note：状态行先显示生命周期，工作流结算后同一 note 追加评审报告；两者都按 `<!-- gitlab-ce-review:summary` 标记查找，结果写入 `review_status.final_body`。`final_body_ready = 0` 的历史行是例外：状态 worker 继续使用旧状态评论标记 `<!-- gitlab-ce-review:status` 原地更新旧状态评论，不查找也不接管 summary 评论；publisher 写入正文后该行置为 1，转入同一条 summary note 的合并模式。调度器每 5 分钟触发一次，每个项目每次最多选取 100 条；这不是每 5 分钟完成全量核对。从头扫描且集合稳定时，150 条需要两次触发才能扫完；触发、排队、GitLab 访问或失败重试还可能增加耗时，不提供完成时限。服务重启后从头扫描。表情补排、过期 eyes、未完成状态及排队取消也分别按项目分页扫描；活跃或失败的行不会阻塞后续行。某行入队失败时，扫描仍前进，等回绕后再尝试该行；候选集合最终稳定、扫描持续推进且服务持续运行，才有回绕机会。状态核对任务读取当前目标并更新评论，不重新运行模型。
 
 终止错误（如 401、403、404、422）会停止该版本的自动重试，即使该版本曾经成功发布也是如此；在同一版本保持不变期间，旧请求迟到造成的远端覆盖也不会自动修复。这样可避免对同一版本无限快速重试。其他生命周期事件可以生成新版本：例如超过两小时的 running 或 publishing 状态，恢复流程可根据已完成工作流写入终态，并再次尝试状态发送；这不是重试原版本，也不重新调用模型。若没有新的状态版本，权限或资源恢复后仅等待不会恢复核对；有权限的用户可以重新触发评审，生成新代次。重新评审会调用模型。项目禁用时不能发送，恢复启用后才可继续。
 
 同一服务内的同一 MR 状态写入串行，但 GitLab 的更新没有条件写入：超时、取消、租约过期或进程退出不能撤回已经发出的请求，旧状态可能在新状态之后短暂出现。只有在旧请求最终停止、服务持续运行、任务能公平执行且 GitLab 读写最终成功并可见时，周期复核才会恢复当前状态；它不提供固定恢复时限。请求和评论列表并非原子操作，重复创建可能留下多个同 bot 标记；系统只更新列表中选中的一个，不删除评论，也不保证其他重复评论收敛。遇到重复标记时由有权人员人工核对。真实 GitLab 取消后的远端时序尚未验证。
 
-评审评论（状态/结果同一条 note）创建的响应丢失后，重试前会回读本 bot 的摘要标记；身份或回读不可用时停止创建，稍后可重试发布。状态/结果评论与摘要不再分开维护：publisher 先写 `final_body`，再按同一 `reviewStatusBody` 更新 note；publisher 的 note 写入失败按发布失败路径重试，状态作业自身的失败随后由 `review.status` 作业对账重试。包含 #164 的版本在已绑定评论更新返回 404 时也会回读：旧评论不在列表中时，复用本 bot 的其他摘要标记，找不到才新建并更新绑定；旧评论仍可见时保留错误，不新建。写入前复核已存代次及非空 head，但检查与在途请求不是原子操作。回读与创建不是原子操作，不同工作流并发或 GitLab 列表延迟仍可能导致重复评论。系统不会自动删除已有重复评论；升级前的旧 summary note 和旧 `<!-- gitlab-ce-review:status` 评论也不会被识别或清理。需要人工核对。
+评审评论（状态/结果同一条 note）创建的响应丢失后，重试前会回读本 bot 的摘要标记（`final_body_ready = 0` 的历史行回读旧状态标记）；身份或回读不可用时停止创建，稍后可重试发布。`final_body_ready = 1` 的行，状态/结果评论与摘要不再分开维护：publisher 先写 `final_body`，再按同一 `reviewStatusBody` 更新 note；publisher 的 note 写入失败按发布失败路径重试，状态作业自身的失败随后由 `review.status` 作业对账重试。包含 #164 的版本在已绑定评论更新返回 404 时也会回读：旧评论不在列表中时，复用本 bot 的其他摘要标记，找不到才新建并更新绑定；旧评论仍可见时保留错误，不新建。写入前复核已存代次及非空 head，但检查与在途请求不是原子操作。publisher 写 `final_body` 使用本次发布自己的 generation/head（来自 workflow dossier），期间有新评审激活时 store 以 `ErrSuperseded` 拒绝，过期正文不会进入新代次。所有取消入口（webhook merge/close、`/review cancel` 命令、手工取消 API）都会推进 generation 并写入取消状态，但保留已发布的 `final_body` 与 `final_body_ready`；状态 worker 与 publisher 据此渲染取消/失败阶段头部加原评审正文，不丢失已发布结论与 finding 列表。新评审导致的 generation 前进仍会清空正文，等待新发布重写。回读与创建不是原子操作，不同工作流并发或 GitLab 列表延迟仍可能导致重复评论。系统不会自动删除已有重复评论；升级前由旧版本创建的 summary note 不会被迁移或自动删除，发布与状态更新仍只按 summary 标记选中并更新其中一条，其余可能残留。旧 `<!-- gitlab-ce-review:status` 评论只在 `final_body_ready = 0` 的过渡期由状态 worker 继续识别和原地更新，行置为 1 后不再更新，也不会自动删除。需要人工核对。
 
 ### 项目授权、用户停用和凭据撤销
 
@@ -1105,9 +1105,15 @@ profiles:
 
 **档位哈希与在途评审**：新增 `max_turns` 字段和默认值变化会改变评审档位哈希。升级重启恢复时，未终态评审会以 `profile_hash_changed` 取消，需要重新触发；升级前先让在途评审结束，或接受取消后重新触发。
 
-**迁移 `0031_review_status_final_body`**：为 `review_status` 追加 `final_body TEXT NOT NULL DEFAULT ''`，只加列，不改写已有行。旧行 `final_body` 为空，状态评论继续显示旧正文，下一次评审覆盖。该迁移没有 down migration；回退须按第 7 节恢复升级前快照并启动匹配的旧镜像。
+**迁移 `0031_review_status_final_body`**：为 `review_status` 追加 `final_body TEXT NOT NULL DEFAULT ''`，只加列，不改写已有行。旧行 `final_body` 为空；同批应用的 `0032` 会把这类历史行留在旧状态评论，见下段。该迁移没有 down migration；回退须按第 7 节恢复升级前快照并启动匹配的旧镜像。
 
-**评论合并**：状态和评审结果现在是同一条 MR note（首行标记 `<!-- gitlab-ce-review:summary v1 -->`，正文包含四阶段状态行和结算后的评审报告，格式见[评论渲染](design/04-dag-and-contracts.md#91-评审评论状态与结果合并)）。升级不会迁移或删除升级前已有的 summary note 和旧状态评论（`<!-- gitlab-ce-review:status`）；新代码只按 summary 标记查找并更新其中一条，旧评论可能残留，需要人工核对清理。服务不删除评论，也不保证多条同标记评论收敛。`final_body` 先持久化并已入队 `review.status`；publisher 的 note 写入失败按发布失败路径重试，状态作业自身的失败由状态对账重试同一条 note，不改变已完成的评审结论。
+**迁移 `0032_review_status_final_body_ready`**：为 `review_status` 追加 `final_body_ready INTEGER NOT NULL DEFAULT 1`，只加列；迁移时把已有且 `final_body = ''` 的行回填为 0（升级前的历史行），`final_body` 非空的行保持 1，迁移后新建的行默认 1。该迁移同样没有 down migration，回退只能恢复升级前快照并启动匹配的旧镜像；升级后 schema 版本为 32。
+
+**历史行的过渡行为**：`final_body_ready = 0` 的历史行由状态 worker 继续使用旧状态评论标记 `<!-- gitlab-ce-review:status` 原地更新旧状态评论，不按 `<!-- gitlab-ce-review:summary` 查找或改写已发布的评审报告评论。旧状态评论存在时原地更新，不存在时才按旧格式新建；旧评论不会被自动删除，需要时人工在 GitLab 清理。行一旦由 `SetReviewStatusFinalBody` 写入正文即置为 1，此后状态 worker 与 publisher 共同维护同一条 summary 标记评论。publisher 写入正文使用本次发布自己的 generation/head；期间有新评审激活时 store 以 `ErrSuperseded` 拒绝写入，发布按 stale/skipped 结算。
+
+**评论合并**：状态和评审结果现在是同一条 MR note（首行标记 `<!-- gitlab-ce-review:summary v1 -->`，正文包含四阶段状态行和结算后的评审报告，格式见[评论渲染](design/04-dag-and-contracts.md#91-评审评论状态与结果合并)）。升级不会迁移或删除升级前已有的 summary note 和旧状态评论（`<!-- gitlab-ce-review:status`）。`final_body_ready = 1` 的行只按 summary 标记查找并更新其中一条；`final_body_ready = 0` 的过渡期行仍按旧状态标记原地更新旧状态评论，不接管 summary 评论。旧评论可能残留，需要人工核对清理；服务不删除评论，也不保证多条同标记评论收敛。新评审导致 generation 前进或 head 变化时清空 `final_body`；取消导致的 generation 前进在已有正文时保留正文，只更新生命周期头部。`final_body` 先持久化并已入队 `review.status`；publisher 的 note 写入失败按发布失败路径重试，状态作业自身的失败由状态对账重试同一条 note，不改变已完成的评审结论。
+
+**merge/close 的取消行为**：merge/close webhook 只在两种情况下忽略取消并返回 `nothing_to_cancel`：从未评审过的 MR（没有 control/status 行，也没有活跃或排队的评审 job/workflow），以及已终态但没有已发布正文的评审（如 failed/cancelled/stale 且 `final_body` 为空）。忽略时不创建 control/status 行，也不产生「评审已取消」评论。已有已发布正文（`final_body` 非空且 `final_body_ready = 1`）的 MR 不再被忽略：取消照常推进 generation 并写入 `cancelled` 状态，但逐字保留 `final_body` 与 `final_body_ready`，合并评论只把生命周期头部改为取消阶段，原评审结论与 finding 列表不变。仍有活跃或排队评审时照常取消。`/review cancel` 命令与手工取消 API 的 generation 前进、命令重放/隔离与回执语义不变，只是同样不再清空已发布正文。
 
 **旧行内讨论**：评论模板变化（标题格式、正文 400 字符）不改变 `publish_key`；旧讨论的正文哈希与按新模板渲染的正文不同，复用判定按现有安全策略把当前 finding 只放进汇总并追加警告，不修改旧讨论，也不会因此重复发布。服务不会自动改写或删除旧讨论，这是预期行为；需要核对时按 MR 人工检查发布记录和讨论正文。
 

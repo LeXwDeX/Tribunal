@@ -23,7 +23,12 @@ const (
 	// publisher both find and edit the same MR note (#451).
 	reviewStatusMarkerPrefix = review.SummaryMarkerPrefix
 	reviewStatusMarkerLine   = reviewStatusMarkerPrefix + " v1 -->"
-	reviewStatusDetailRunes  = 160
+	// reviewLegacyStatusMarkerPrefix is the pre-#452 status note marker. Rows
+	// upgraded from an older database keep updating that note instead of
+	// taking over the published summary (#453).
+	reviewLegacyStatusMarkerPrefix = "<!-- gitlab-ce-review:status"
+	reviewLegacyStatusMarkerLine   = reviewLegacyStatusMarkerPrefix + " v1 -->"
+	reviewStatusDetailRunes        = 160
 
 	reviewStatusReceived   = "received"
 	reviewStatusQueued     = store.ReviewStatusQueued
@@ -74,6 +79,10 @@ type reviewStatusUpdate struct {
 	// FinalBody is the rendered review summary. When set, the status note
 	// carries it below the lifecycle lines, so the MR has one review note.
 	FinalBody string
+	// LegacyMarker keeps a pre-upgrade row on the old status-marker note. Its
+	// published summary lives in a separate note that this writer must not
+	// find or edit.
+	LegacyMarker bool
 }
 
 // statusReporter writes the durable status and reaction goals to GitLab. It
@@ -121,12 +130,16 @@ func (r *statusReporter) writeStatus(ctx context.Context, projectID, mrIID int64
 	}
 	body := reviewStatusBody(update)
 	hash := sha256Hex(body)
+	marker := reviewStatusMarkerPrefix
+	if update.LegacyMarker {
+		marker = reviewLegacyStatusMarkerPrefix
+	}
 	notes, err := r.gitlab.ListMRNotes(ctx, token, projectID, mrIID)
 	if err != nil {
 		return 0, "", fmt.Errorf("app: status note lookup: %w", err)
 	}
 	for _, note := range notes {
-		if !strings.HasPrefix(note.Body, reviewStatusMarkerPrefix) {
+		if !strings.HasPrefix(note.Body, marker) {
 			continue
 		}
 		if note.AuthorID != user.ID {
@@ -288,7 +301,11 @@ func parseStatusPhase(body string) string {
 // hidden marker so repeated reports of the same state are no-ops.
 func reviewStatusBody(update reviewStatusUpdate) string {
 	var b strings.Builder
-	b.WriteString(reviewStatusMarkerLine)
+	if update.LegacyMarker {
+		b.WriteString(reviewLegacyStatusMarkerLine)
+	} else {
+		b.WriteString(reviewStatusMarkerLine)
+	}
 	b.WriteByte('\n')
 	b.WriteString("**AI 评审：")
 	b.WriteString(reviewStatusLabel(update.State))
@@ -318,7 +335,7 @@ func reviewStatusBody(update reviewStatusUpdate) string {
 		b.WriteString(detail)
 		b.WriteString("\n")
 	}
-	if body := strings.TrimSpace(update.FinalBody); body != "" {
+	if body := strings.TrimSpace(update.FinalBody); body != "" && !update.LegacyMarker {
 		b.WriteString("\n")
 		b.WriteString(stripSummaryMarker(body))
 		b.WriteString("\n")

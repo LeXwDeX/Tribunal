@@ -172,6 +172,11 @@ func (s *Store) setReviewStatusTx(ctx context.Context, tx *sql.Tx, goal store.Re
 			state = excluded.state,
 			detail = excluded.detail,
 			final_body = CASE
+				-- A cancel of an already-published generation keeps the
+				-- conclusion; only its lifecycle header changes (#453). A new
+				-- review does not set this flag and resets the body.
+				WHEN ? = 1 AND review_status.generation <> excluded.generation
+				     AND review_status.final_body <> '' THEN review_status.final_body
 				WHEN review_status.generation <> excluded.generation THEN excluded.final_body
 				WHEN excluded.head_sha <> '' AND lower(excluded.head_sha) <> lower(review_status.head_sha) THEN excluded.final_body
 				WHEN excluded.final_body <> '' THEN excluded.final_body
@@ -184,7 +189,7 @@ func (s *Store) setReviewStatusTx(ctx context.Context, tx *sql.Tx, goal store.Re
 			updated_at = excluded.updated_at`,
 		goal.ProjectID, goal.MRIID, goal.Generation,
 		strings.ToLower(strings.TrimSpace(goal.HeadSHA)), attempt, goal.Profile,
-		goal.State, goal.Detail, goal.FinalBody, formatTime(now)); err != nil {
+		goal.State, goal.Detail, goal.FinalBody, formatTime(now), goal.PreserveFinalBody); err != nil {
 		return false, fmt.Errorf("sqlite: write review status: %w", err)
 	}
 	if err := s.enqueueReviewStatusJobTx(ctx, tx, goal.ProjectID, goal.MRIID, now); err != nil {
@@ -240,7 +245,8 @@ func (s *Store) SetReviewStatusFinalBody(ctx context.Context, projectID, mrIID, 
 		return false, nil
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE review_status
-		SET final_body = ?, body_hash = '', version = version + 1, last_error = '', updated_at = ?
+		SET final_body = ?, final_body_ready = 1, body_hash = '', version = version + 1,
+		    last_error = '', updated_at = ?
 		WHERE project_id = ? AND mr_iid = ?`,
 		body, formatTime(now), projectID, mrIID); err != nil {
 		return false, fmt.Errorf("sqlite: write review status body: %w", err)
@@ -435,7 +441,8 @@ func scanReviewStatus(row rowScanner) (*store.ReviewStatus, error) {
 		updatedRaw string
 	)
 	if err := row.Scan(&status.ProjectID, &status.MRIID, &status.Generation, &status.HeadSHA,
-		&status.Attempt, &status.Profile, &status.State, &status.Detail, &status.FinalBody, &noteID,
+		&status.Attempt, &status.Profile, &status.State, &status.Detail, &status.FinalBody,
+		&status.FinalBodyReady, &noteID,
 		&status.BodyHash, &status.Version, &status.AppliedVersion, &status.LastError,
 		&updatedRaw); err != nil {
 		return nil, err
@@ -450,7 +457,7 @@ func scanReviewStatus(row rowScanner) (*store.ReviewStatus, error) {
 }
 
 const reviewStatusColumns = `project_id, mr_iid, generation, head_sha, attempt, profile,
-	state, detail, final_body, note_id, body_hash, version, applied_version, last_error, updated_at`
+	state, detail, final_body, final_body_ready, note_id, body_hash, version, applied_version, last_error, updated_at`
 
 func getReviewStatusTx(ctx context.Context, tx *sql.Tx, projectID, mrIID int64) (*store.ReviewStatus, bool, error) {
 	status, err := scanReviewStatus(tx.QueryRowContext(ctx,
