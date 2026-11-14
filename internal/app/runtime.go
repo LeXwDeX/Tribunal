@@ -64,6 +64,18 @@ func (r repoGit) IsAncestor(ctx context.Context, dir, ancestor, descendant strin
 	return r.git.IsAncestor(ctx, dir, ancestor, descendant)
 }
 
+func (r repoGit) MergeRequestRefs(ctx context.Context, mirror string) ([]repo.MergeRequestRef, error) {
+	return r.git.MergeRequestRefs(ctx, mirror)
+}
+
+func (r repoGit) DeleteMergeRequestRefs(ctx context.Context, mirror string, refs []repo.MergeRequestRef) (int, error) {
+	return r.git.DeleteMergeRequestRefs(ctx, mirror, refs)
+}
+
+func (r repoGit) GC(ctx context.Context, mirror string) error {
+	return r.git.GC(ctx, mirror)
+}
+
 // RuntimeDeps allows tests and the main package to replace external systems.
 // Required fields are Store, Cipher, and GitLab.
 type RuntimeDeps struct {
@@ -390,12 +402,19 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		}
 		return nil, err
 	}
+	var maintenance RunCleanupMaintenance
+	if candidate, ok := gitBackend.(RunCleanupMaintenance); ok {
+		maintenance = candidate
+	}
 	runCleanup, err := NewRunCleanupService(RunCleanupConfig{
 		Store:            deps.Store,
 		Workspace:        workspaceManager,
 		Git:              gitBackend,
+		Maintenance:      maintenance,
 		After:            cfg.Workspace.RunCleanupAfter,
 		DossierRetention: cfg.Storage.JobRetention,
+		MaxBytes:         cfg.Workspace.MaxBytes,
+		ReclaimAfter:     cfg.Workspace.ReclaimAfter,
 		Logger:           logger,
 		Now:              now,
 	})
@@ -658,6 +677,24 @@ func (r *Runtime) recoverThenCatchUp(ctx context.Context, engineRecover, reviews
 // reaction survives a worker crash.
 const reviewSideEffectReconcileInterval = 5 * time.Minute
 
+// reviewStatusSelfHealInterval is how long an applied terminal status note is
+// trusted before the low-frequency scan confirms it again. A note deleted or
+// edited by hand on GitLab is repaired within this window instead of the old
+// five-minute loop (#459).
+const reviewStatusSelfHealInterval = 24 * time.Hour
+
+// reviewStatusSelfHealScanInterval is how often the low-frequency scan runs;
+// each row still has its own reviewStatusSelfHealInterval gate.
+const reviewStatusSelfHealScanInterval = time.Hour
+
+// reviewStatusSelfHealPages and reviewStatusSelfHealPageSize bound one scan
+// pass per project. Applied rows leave the candidate set once verified, so a
+// large backlog still drains across passes without process-local cursors.
+const (
+	reviewStatusSelfHealPageSize = 100
+	reviewStatusSelfHealPages    = 5
+)
+
 // reconcileReviewSideEffects periodically re-enqueues pending side-effect
 // goals and settles rows that no live job can finish.
 func (r *Runtime) reconcileReviewSideEffects(ctx context.Context, interval time.Duration) {
@@ -678,15 +715,36 @@ func (r *Runtime) reconcileReviewSideEffects(ctx context.Context, interval time.
 	}
 }
 
-// StartBackground starts the feedback, retention, run-cleanup, and review
-// side-effect tickers.
+// reconcileAppliedReviewStatuses periodically confirms successfully applied
+// terminal status notes. It is deliberately separate from the five-minute
+// pending reconciliation so a settled merge request costs one check per day.
+func (r *Runtime) reconcileAppliedReviewStatuses(ctx context.Context, interval time.Duration) {
+	if r.reviews == nil {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := r.reviews.ReconcileAppliedStatuses(ctx); err != nil {
+				r.logger.Warn("review status self-heal failed", "error_class", errclass.Of(err))
+			}
+		}
+	}
+}
+
+// StartBackground starts the feedback, retention, run-cleanup, review
+// side-effect, and low-frequency status self-heal tickers.
 // The returned function stops them and waits at most five seconds; done closes when they exit.
 func (r *Runtime) StartBackground(ctx context.Context) (stop func(), done <-chan struct{}) {
 	r.startOnce.Do(func() {
 		bgCtx, cancel := context.WithCancel(ctx)
 		r.startStop = cancel
 		var wg sync.WaitGroup
-		wg.Add(4)
+		wg.Add(5)
 		go func() {
 			defer wg.Done()
 			r.feedback.Start(bgCtx, defaultFeedbackInterval)
@@ -702,6 +760,10 @@ func (r *Runtime) StartBackground(ctx context.Context) (stop func(), done <-chan
 		go func() {
 			defer wg.Done()
 			r.reconcileReviewSideEffects(bgCtx, reviewSideEffectReconcileInterval)
+		}()
+		go func() {
+			defer wg.Done()
+			r.reconcileAppliedReviewStatuses(bgCtx, reviewStatusSelfHealScanInterval)
 		}()
 		go func() {
 			wg.Wait()

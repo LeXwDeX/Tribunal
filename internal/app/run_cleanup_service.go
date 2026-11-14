@@ -9,10 +9,12 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/errclass"
+	"github.com/LeXwDeX/tribunal/internal/repo"
 	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/internal/workspace"
 )
@@ -41,30 +43,64 @@ type RunCleanupGit interface {
 	RemoveWorktree(ctx context.Context, mirror, dir string) error
 }
 
+// RunCleanupMaintenance is the optional mirror maintenance surface: prune MR
+// head refs no protected review needs and run an automatic git gc. A fake git
+// that predates it simply skips mirror maintenance.
+type RunCleanupMaintenance interface {
+	MergeRequestRefs(ctx context.Context, mirror string) ([]repo.MergeRequestRef, error)
+	DeleteMergeRequestRefs(ctx context.Context, mirror string, refs []repo.MergeRequestRef) (int, error)
+	GC(ctx context.Context, mirror string) error
+}
+
+// workspaceReclaimStore is the optional fail-closed protection surface for
+// workspace reclamation and MR ref pruning.
+type workspaceReclaimStore interface {
+	WorkspaceReclaimStatus(ctx context.Context, projectID int64) (store.WorkspaceReclaimStatus, error)
+	ProtectedMergeRequestIIDs(ctx context.Context, projectID int64) (map[int64]struct{}, error)
+}
+
+// workspaceCapacityRecorder persists the latest measurement for the stats
+// response.
+type workspaceCapacityRecorder interface {
+	RecordWorkspaceCapacity(ctx context.Context, capacity store.WorkspaceCapacity) error
+}
+
 // RunCleanupConfig configures RunCleanupService.
 type RunCleanupConfig struct {
 	Store     RunCleanupStore
 	Workspace *workspace.Manager
 	Git       RunCleanupGit
-	After     time.Duration
+	// Maintenance prunes stale mirror refs and runs git gc. Nil skips both; the
+	// run/context cleanup still works.
+	Maintenance RunCleanupMaintenance
+	After       time.Duration
 	// DossierRetention is the age after which an unreferenced project_id=0
 	// dossier is settled. Zero reuses After. Production wires the storage
 	// job retention here because a reservation cannot be retried once its
 	// job audit row is gone.
 	DossierRetention time.Duration
-	Now              func() time.Time
-	Logger           *slog.Logger
+	// MaxBytes caps the total workspace root size. Zero disables the cap.
+	MaxBytes int64
+	// ReclaimAfter removes an inactive project workspace after this long. Zero
+	// disables reclamation.
+	ReclaimAfter time.Duration
+	Now          func() time.Time
+	Logger       *slog.Logger
 }
 
 // RunCleanupService removes stale run worktrees and orphaned context version
 // directories that no persisted work references and that this process did not
-// register.
+// register. Each pass also maintains the mirror, records workspace capacity,
+// and reclaims inactive project workspaces (#459).
 type RunCleanupService struct {
 	store            RunCleanupStore
 	workspace        *workspace.Manager
 	git              RunCleanupGit
+	maintenance      RunCleanupMaintenance
 	after            time.Duration
 	dossierRetention time.Duration
+	maxBytes         int64
+	reclaimAfter     time.Duration
 	now              func() time.Time
 	logger           *slog.Logger
 }
@@ -86,6 +122,12 @@ func NewRunCleanupService(cfg RunCleanupConfig) (*RunCleanupService, error) {
 	if cfg.DossierRetention < 0 {
 		return nil, errors.New("app: dossier retention must not be negative")
 	}
+	if cfg.MaxBytes < 0 {
+		return nil, errors.New("app: workspace max bytes must not be negative")
+	}
+	if cfg.ReclaimAfter < 0 {
+		return nil, errors.New("app: workspace reclaim age must not be negative")
+	}
 	dossierRetention := cfg.DossierRetention
 	if dossierRetention == 0 {
 		dossierRetention = cfg.After
@@ -102,8 +144,11 @@ func NewRunCleanupService(cfg RunCleanupConfig) (*RunCleanupService, error) {
 		store:            cfg.Store,
 		workspace:        cfg.Workspace,
 		git:              cfg.Git,
+		maintenance:      cfg.Maintenance,
 		after:            cfg.After,
 		dossierRetention: dossierRetention,
+		maxBytes:         cfg.MaxBytes,
+		reclaimAfter:     cfg.ReclaimAfter,
 		now:              now,
 		logger:           logger,
 	}, nil
@@ -155,6 +200,7 @@ func (s *RunCleanupService) RunOnce(ctx context.Context) error {
 	var (
 		removedRuns     int
 		removedContexts int
+		reclaimed       int
 	)
 	for _, pid := range projectIDs {
 		if err := ctx.Err(); err != nil {
@@ -210,6 +256,16 @@ func (s *RunCleanupService) RunOnce(ctx context.Context) error {
 			continue
 		}
 		runs, contexts, err := s.cleanupWorkspace(ctx, ws, protected, protectedContext, cutoff)
+		if maintenanceErr := s.maintainMirror(ctx, ws); maintenanceErr != nil {
+			err = errors.Join(err, maintenanceErr)
+		}
+		reclaimedNow, reclaimErr := s.reclaimWorkspace(ctx, ws, project)
+		if reclaimedNow {
+			reclaimed++
+		}
+		if reclaimErr != nil {
+			err = errors.Join(err, reclaimErr)
+		}
 		unlock()
 		removedRuns += runs
 		removedContexts += contexts
@@ -217,15 +273,211 @@ func (s *RunCleanupService) RunOnce(ctx context.Context) error {
 			errs = append(errs, err)
 		}
 	}
+	if err := s.measureCapacity(ctx); err != nil {
+		errs = append(errs, err)
+	}
 	s.logger.Info("run cleanup finished",
 		"settled_dossiers", settledDossiers,
 		"removed_runs", removedRuns,
 		"removed_contexts", removedContexts,
+		"reclaimed_workspaces", reclaimed,
 		"errors", len(errs))
 	for _, err := range errs {
 		s.logger.Warn("run cleanup failed", "error_class", errclass.Of(err))
 	}
 	return errors.Join(errs...)
+}
+
+// maintainMirror prunes MR head refs that no unfinished review still needs and
+// runs git's automatic gc. Protection queries are fail-closed: when the store
+// cannot prove which merge requests are active, neither refs nor objects are
+// touched. The caller holds the workspace write lock, so no prepareRun can be
+// fetching a ref concurrently (#459).
+func (s *RunCleanupService) maintainMirror(ctx context.Context, ws *workspace.Workspace) error {
+	if s.maintenance == nil {
+		return nil
+	}
+	mirror := ws.MirrorDir()
+	info, err := os.Lstat(mirror)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil
+	case err != nil:
+		return fmt.Errorf("run cleanup: project %d: inspect mirror: %w", ws.ProjectID, err)
+	case info.Mode()&os.ModeSymlink != 0 || !info.IsDir():
+		return fmt.Errorf("run cleanup: project %d: unsafe mirror", ws.ProjectID)
+	}
+	protection, ok := s.store.(workspaceReclaimStore)
+	if !ok {
+		return nil
+	}
+	protected, err := protection.ProtectedMergeRequestIIDs(ctx, ws.ProjectID)
+	if err != nil {
+		return fmt.Errorf("run cleanup: project %d: list protected merge requests: %w", ws.ProjectID, err)
+	}
+	refs, err := s.maintenance.MergeRequestRefs(ctx, mirror)
+	if err != nil {
+		return fmt.Errorf("run cleanup: project %d: list merge request refs: %w", ws.ProjectID, err)
+	}
+	stale := make([]repo.MergeRequestRef, 0, len(refs))
+	for _, ref := range refs {
+		if _, keep := protected[ref.IID]; keep {
+			continue
+		}
+		stale = append(stale, ref)
+	}
+	if len(stale) > 0 {
+		deleted, err := s.maintenance.DeleteMergeRequestRefs(ctx, mirror, stale)
+		if deleted > 0 {
+			s.logger.Info("merge request refs pruned", "project_id", ws.ProjectID, "refs", deleted)
+		}
+		if err != nil {
+			return fmt.Errorf("run cleanup: project %d: delete merge request refs: %w", ws.ProjectID, err)
+		}
+	}
+	if err := s.maintenance.GC(ctx, mirror); err != nil {
+		return fmt.Errorf("run cleanup: project %d: gc mirror: %w", ws.ProjectID, err)
+	}
+	return nil
+}
+
+// reclaimWorkspace removes one inactive project workspace. The caller holds the
+// workspace write lock. Every check is fail-closed: registered in-process runs,
+// missing or invalid ownership metadata, an unprovable protection state, or
+// missing activity evidence all keep the directory.
+func (s *RunCleanupService) reclaimWorkspace(ctx context.Context, ws *workspace.Workspace, project *store.Project) (bool, error) {
+	if s.reclaimAfter <= 0 {
+		return false, nil
+	}
+	// A disabled project is paused on purpose; keep its checkout until it is
+	// enabled again or deleted explicitly.
+	if project == nil || !project.Enabled {
+		return false, nil
+	}
+	protection, ok := s.store.(workspaceReclaimStore)
+	if !ok {
+		return false, nil
+	}
+	if len(ws.RegisteredRuns()) > 0 {
+		return false, nil
+	}
+	status, err := protection.WorkspaceReclaimStatus(ctx, ws.ProjectID)
+	if err != nil {
+		return false, fmt.Errorf("run cleanup: project %d: workspace protection: %w", ws.ProjectID, err)
+	}
+	if status.Protected || status.LastActivity.IsZero() {
+		return false, nil
+	}
+	if s.now().UTC().Sub(status.LastActivity) < s.reclaimAfter {
+		return false, nil
+	}
+	if err := workspaceOwnership(ws); err != nil {
+		return false, nil
+	}
+	if err := removeWorkspaceRoot(s.workspace.Root(), ws); err != nil {
+		return false, fmt.Errorf("run cleanup: project %d: reclaim workspace: %w", ws.ProjectID, err)
+	}
+	s.logger.Info("workspace reclaimed", "project_id", ws.ProjectID,
+		"inactive_hours", int(s.now().UTC().Sub(status.LastActivity).Hours()))
+	return true, nil
+}
+
+// workspaceOwnership verifies the managed marker written by the workspace
+// manager. A missing or unreadable marker is not proof of ownership, so the
+// directory is kept.
+func workspaceOwnership(ws *workspace.Workspace) error {
+	info, err := os.Lstat(ws.Root)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return workspace.ErrUnsafePath
+	}
+	marker := filepath.Join(ws.Root, workspace.ManagedMarker)
+	markerInfo, err := os.Lstat(marker)
+	if err != nil || markerInfo.Mode()&os.ModeSymlink != 0 || !markerInfo.Mode().IsRegular() {
+		return workspace.ErrUnsafePath
+	}
+	data, err := os.ReadFile(marker)
+	if err != nil || strings.TrimSpace(string(data)) != workspace.ManagedMarkerValue(ws.ProjectID) {
+		return workspace.ErrUnsafePath
+	}
+	return nil
+}
+
+// removeWorkspaceRoot deletes exactly the direct project directory below the
+// manager root.
+func removeWorkspaceRoot(managerRoot string, ws *workspace.Workspace) error {
+	rel, err := filepath.Rel(managerRoot, ws.Root)
+	if err != nil || rel == "." || rel != strconv.FormatInt(ws.ProjectID, 10) {
+		return workspace.ErrUnsafePath
+	}
+	info, err := os.Lstat(ws.Root)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return workspace.ErrUnsafePath
+	}
+	return os.RemoveAll(ws.Root)
+}
+
+// measureCapacity walks the workspace root once per pass when a cap is
+// configured, persists the result, and warns when the cap is exceeded. The walk
+// is metadata-only and never follows symlinks.
+func (s *RunCleanupService) measureCapacity(ctx context.Context) error {
+	if s.maxBytes <= 0 {
+		return nil
+	}
+	total, err := directorySize(s.workspace.Root())
+	if err != nil {
+		return fmt.Errorf("run cleanup: measure workspace capacity: %w", err)
+	}
+	capacity := store.WorkspaceCapacity{
+		MeasuredAt: s.now().UTC(),
+		TotalBytes: total,
+		LimitBytes: s.maxBytes,
+		OverLimit:  total > s.maxBytes,
+	}
+	if recorder, ok := s.store.(workspaceCapacityRecorder); ok {
+		if err := recorder.RecordWorkspaceCapacity(ctx, capacity); err != nil {
+			return fmt.Errorf("run cleanup: record workspace capacity: %w", err)
+		}
+	}
+	if capacity.OverLimit {
+		s.logger.Warn("workspace capacity exceeded",
+			"total_bytes", capacity.TotalBytes, "limit_bytes", capacity.LimitBytes)
+	}
+	return nil
+}
+
+// directorySize sums regular file sizes below root. A missing root is empty.
+func directorySize(root string) (int64, error) {
+	var total int64
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		if !entry.Type().IsRegular() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		total += info.Size()
+		return nil
+	})
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, nil
+	}
+	return total, err
 }
 
 // cleanupWorkspace assumes the caller holds the workspace write lock. That

@@ -144,6 +144,13 @@ type WorkspaceConfig struct {
 	GitBin          string               `yaml:"git_bin" json:"git_bin"`
 	ContextRefresh  ContextRefreshConfig `yaml:"context_refresh" json:"context_refresh"`
 	RunCleanupAfter time.Duration        `yaml:"run_cleanup_after" json:"run_cleanup_after"`
+	// MaxBytes caps the total workspace root size. Zero disables the cap; the
+	// alert is reported through the stats response and a warning log (#459).
+	MaxBytes int64 `yaml:"max_bytes" json:"max_bytes"`
+	// ReclaimAfter removes a project workspace that has no activity evidence
+	// for this long. Zero disables reclamation; protected workspaces are never
+	// removed (#459).
+	ReclaimAfter time.Duration `yaml:"reclaim_after" json:"reclaim_after"`
 }
 
 // ContextRefreshConfig controls context document freshness.
@@ -506,6 +513,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Workspace.RunCleanupAfter <= 0 {
 		p.add("workspace.run_cleanup_after must be positive")
+	}
+	if c.Workspace.MaxBytes < 0 {
+		p.add("workspace.max_bytes must not be negative")
+	}
+	if c.Workspace.ReclaimAfter < 0 {
+		p.add("workspace.reclaim_after must not be negative")
 	}
 	if c.Jobs.Workers <= 0 {
 		p.add("jobs.workers must be positive")

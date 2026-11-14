@@ -110,18 +110,46 @@ func (s *Store) RecordLLMCall(ctx context.Context, call llm.CallRecord) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO llm_calls
+	// The detail row and the long-lived aggregate share one transaction: a
+	// detail row without its aggregate would silently disappear from the model
+	// statistics (and vice versa) after retention (#459).
+	latencyMS := call.Duration.Milliseconds()
+	errorKind := llmErrorKind(call.Err)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("sqlite: begin llm call: %w", err)
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `INSERT INTO llm_calls
 		(id, workflow_id, node_id, turn, provider, model, request, response,
 		 input_tokens, output_tokens, cache_read, cache_write, latency_ms,
 		 stop_reason, error_kind, request_id, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, call.Meta.WorkflowID, call.Meta.NodeID, call.Meta.Turn,
 		call.Provider, call.Model, request, response, inputTokens, outputTokens,
-		cacheRead, cacheWrite, call.Duration.Milliseconds(), nullString(stopReason),
-		nullString(llmErrorKind(call.Err)), nil,
+		cacheRead, cacheWrite, latencyMS, nullString(stopReason),
+		nullString(errorKind), nil,
 		formatTime(s.now().UTC()))
 	if err != nil {
 		return fmt.Errorf("sqlite: record llm call: %w", err)
+	}
+	counters := callDailyCounters{
+		calls:          1,
+		inputTokens:    inputTokens,
+		outputTokens:   outputTokens,
+		cacheRead:      cacheRead,
+		cacheWrite:     cacheWrite,
+		latencyMS:      latencyMS,
+		latencySamples: 1,
+	}
+	if errorKind != "" {
+		counters.errors = 1
+	}
+	if err := recordLLMCallAggregatesTx(ctx, tx, call, counters, errorKind); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("sqlite: commit llm call: %w", err)
 	}
 	return nil
 }
@@ -1533,67 +1561,12 @@ func (s *Store) Stats(ctx context.Context, filter store.StatsFilter) (store.Stat
 	}
 	stats.QualityByProvider = quality
 
-	modelIndex := make(map[string]int)
-	latencies := make(map[string][]float64)
-	latencyTotals := make(map[string]float64)
-	// Aggregate in Go: SQLite SUM fails with "integer overflow" when two
-	// legitimate rows hold values whose sum is outside int64.
-	modelRows, err := s.db.QueryContext(ctx, `SELECT
-		c.provider, c.model, c.error_kind, c.input_tokens, c.output_tokens, c.latency_ms
-		FROM llm_calls c JOIN workflows w ON w.id = c.workflow_id `+where+`
-		ORDER BY c.provider, c.model`, args...)
+	models, purged, err := s.modelStats(ctx, filter, where, args)
 	if err != nil {
-		return stats, fmt.Errorf("sqlite: stats llm calls: %w", err)
+		return stats, err
 	}
-	for modelRows.Next() {
-		var (
-			provider  string
-			model     string
-			errorKind sql.NullString
-			input     int64
-			output    int64
-			latencyMS int64
-		)
-		if err := modelRows.Scan(&provider, &model, &errorKind, &input, &output, &latencyMS); err != nil {
-			modelRows.Close()
-			return stats, fmt.Errorf("sqlite: scan stats llm call: %w", err)
-		}
-		key := provider + "\x00" + model
-		index, ok := modelIndex[key]
-		if !ok {
-			index = len(stats.ByModel)
-			modelIndex[key] = index
-			stats.ByModel = append(stats.ByModel, store.ModelStats{Provider: provider, Model: model})
-		}
-		entry := &stats.ByModel[index]
-		entry.Calls++
-		if errorKind.String != "" {
-			entry.Errors++
-		}
-		entry.InputTokens = saturatingAddInt64(entry.InputTokens, input)
-		entry.OutputTokens = saturatingAddInt64(entry.OutputTokens, output)
-		latencies[key] = append(latencies[key], float64(latencyMS))
-		latencyTotals[key] += float64(latencyMS)
-	}
-	if err := modelRows.Err(); err != nil {
-		modelRows.Close()
-		return stats, fmt.Errorf("sqlite: iterate stats llm calls: %w", err)
-	}
-	modelRows.Close()
-	for i := range stats.ByModel {
-		entry := &stats.ByModel[i]
-		key := entry.Provider + "\x00" + entry.Model
-		if entry.Calls > 0 {
-			rate := float64(entry.Errors) / float64(entry.Calls)
-			entry.ErrorRate = &rate
-			avg := latencyTotals[key] / float64(entry.Calls)
-			entry.AvgLatencyMS = &avg
-		}
-		if values := latencies[key]; len(values) > 0 {
-			p50 := percentile(values, 50)
-			entry.P50LatencyMS = &p50
-		}
-	}
+	stats.ByModel = models
+	stats.ModelDetailsPurged = purged
 
 	feedback, err := s.FeedbackTotals(ctx, store.FeedbackFilter{
 		ProjectID:    filter.ProjectID,
@@ -1605,6 +1578,17 @@ func (s *Store) Stats(ctx context.Context, filter store.StatsFilter) (store.Stat
 		return stats, fmt.Errorf("sqlite: stats feedback: %w", err)
 	}
 	stats.Feedback = &feedback
+
+	collection, err := s.FeedbackCollectionState(ctx)
+	if err != nil {
+		return stats, err
+	}
+	stats.FeedbackCollection = collection
+	capacity, err := s.WorkspaceCapacity(ctx)
+	if err != nil {
+		return stats, err
+	}
+	stats.WorkspaceCapacity = capacity
 
 	for i := range stats.ByProject {
 		projectID := stats.ByProject[i].ProjectID

@@ -105,7 +105,7 @@ func TestReviewAndFeedbackRequireCurrentProjectIdentity(t *testing.T) {
 					}
 				} else {
 					s := &FeedbackService{gitlab: client, git: git}
-					ok = s.ensureHead(ctx, "fake-token", project, manager.Get(42), 7, sha40)
+					ok, _ = s.ensureHead(ctx, "fake-token", project, manager.Get(42), 7, sha40)
 				}
 				if ok != tc.wantFetch {
 					t.Fatalf("success=%v want=%v", ok, tc.wantFetch)
@@ -212,7 +212,7 @@ func TestConcurrentReviewAndFeedbackDoNotInterleaveMirrorOrigin(t *testing.T) {
 		}
 		defer unlock()
 		feedback := &FeedbackService{gitlab: client, git: &missingConcurrentGit{git}}
-		if !feedback.ensureHead(ctx, "fake-token", project, manager.Get(42), 7, sha40) {
+		if ok, _ := feedback.ensureHead(ctx, "fake-token", project, manager.Get(42), 7, sha40); !ok {
 			done <- errors.New("feedback fetch failed")
 			return
 		}
