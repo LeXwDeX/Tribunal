@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
 	"strings"
 	"time"
 
@@ -23,6 +24,15 @@ const (
 	catchUpTrigger = "catch_up"
 	// catchUpEvent is the delivery event recorded for a catch-up enqueue.
 	catchUpEvent = "Catch Up"
+	// catchUpRefreshEvent records the workspace refresh requested alongside a
+	// catch-up review, so a missed MR also refreshes the base checkout (#457).
+	catchUpRefreshEvent = "Catch Up Refresh"
+
+	// Fixed hook-health messages. The console shows them as the failure reason;
+	// they never include upstream text or credentials.
+	webhookDisabledMessage      = "GitLab disabled the managed project webhook after repeated delivery failures"
+	webhookMissingMessage       = "the managed project webhook is missing or was deleted in GitLab"
+	webhookTokenRejectedMessage = "project token was rejected by GitLab while checking the webhook; replace the project token"
 )
 
 // catchUpNamespace derives the deterministic delivery UUID of a catch-up
@@ -181,6 +191,7 @@ func (s *CatchUpService) scanProject(ctx context.Context, projectID int64, budge
 	if !usable {
 		return 0, 0, catchUpSkipped
 	}
+	s.reconcileHookHealth(ctx, project, token)
 	if _, err := ResolveSettings(project.Settings, s.webhooks.reviewDefaults); err != nil {
 		s.logger.Warn("catch-up skipped project with invalid settings", "project_id", projectID)
 		return 0, 0, catchUpSkipped
@@ -199,6 +210,7 @@ func (s *CatchUpService) scanProject(ctx context.Context, projectID int64, budge
 		}
 		return 0, 0, catchUpListFailed
 	}
+	refreshHead := ""
 	for _, mr := range mrs {
 		if ctx.Err() != nil || enqueued >= budget {
 			break
@@ -212,9 +224,83 @@ func (s *CatchUpService) scanProject(ctx context.Context, projectID int64, budge
 		}
 		if queued {
 			enqueued++
+			if refreshHead == "" {
+				refreshHead = strings.ToLower(strings.TrimSpace(mr.SHA))
+			}
 		}
 	}
+	if enqueued > 0 {
+		// A missed review also means the workspace base may be stale. The review
+		// path fetches the MR base itself; this keeps the shared base current.
+		s.webhooks.enqueueCatchUpRefresh(ctx, project, refreshHead)
+	}
 	return checked, enqueued, catchUpScanned
+}
+
+// projectHookLister lists GitLab project hooks. The production client
+// implements it; a test or reduced client skips the health scan.
+type projectHookLister interface {
+	ListProjectHooks(ctx context.Context, token string, projectID int64) ([]gitlab.Hook, error)
+}
+
+type projectWebhookWriter interface {
+	UpdateProjectWebhook(ctx context.Context, id int64, update store.ProjectWebhookUpdate) error
+}
+
+// reconcileHookHealth compares the recorded managed hook with GitLab and writes
+// the health back to the project. GitLab disables a hook after repeated
+// delivery failures, and the console previously stayed green (#457). It never
+// fails a scan: an unreachable GitLab leaves the previous state.
+func (s *CatchUpService) reconcileHookHealth(ctx context.Context, project *store.Project, token string) {
+	if project == nil || project.HookID == nil {
+		return
+	}
+	lister, ok := s.gitlab.(projectHookLister)
+	if !ok {
+		return
+	}
+	writer, ok := s.webhooks.store.(projectWebhookWriter)
+	if !ok {
+		return
+	}
+	hooks, err := lister.ListProjectHooks(ctx, token, project.ID)
+	if err != nil {
+		if gitlab.StatusOf(err) == http.StatusUnauthorized || gitlab.StatusOf(err) == http.StatusForbidden {
+			s.setHookHealth(ctx, writer, project, store.WebhookStateFailed, webhookTokenRejectedMessage)
+		}
+		if ctx.Err() == nil {
+			s.logger.Warn("webhook health check failed", "project_id", project.ID, "error_class", errclass.Of(err))
+		}
+		return
+	}
+	var managed *gitlab.Hook
+	for i := range hooks {
+		if hooks[i].ID == *project.HookID {
+			managed = &hooks[i]
+			break
+		}
+	}
+	switch {
+	case managed == nil:
+		s.setHookHealth(ctx, writer, project, store.WebhookStateFailed, webhookMissingMessage)
+	case managed.AlertStatus == "disabled" || managed.AlertStatus == "temporarily_disabled":
+		s.setHookHealth(ctx, writer, project, store.WebhookStateFailed, webhookDisabledMessage)
+	case project.WebhookState == store.WebhookStateFailed &&
+		(project.WebhookError == webhookDisabledMessage || project.WebhookError == webhookMissingMessage || project.WebhookError == webhookTokenRejectedMessage):
+		// A hook that recovered is healthy again; unrelated failures stay.
+		s.setHookHealth(ctx, writer, project, store.WebhookStateEnabled, "")
+	}
+}
+
+func (s *CatchUpService) setHookHealth(ctx context.Context, writer projectWebhookWriter, project *store.Project, state, message string) {
+	if project.WebhookState == state && project.WebhookError == message {
+		return
+	}
+	if err := writer.UpdateProjectWebhook(ctx, project.ID, store.ProjectWebhookUpdate{
+		State: state, Error: message, Events: project.WebhookEvents,
+	}); err != nil {
+		s.logger.Warn("webhook health persistence failed", "project_id", project.ID)
+	}
 }
 
 func (s *CatchUpService) projectToken(ctx context.Context, projectID int64) (*store.Project, string, bool) {

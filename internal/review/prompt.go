@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/LeXwDeX/tribunal/prompts"
 )
@@ -57,6 +58,11 @@ type BuiltPrompt struct {
 	BundleHash  string
 	RoleVersion string
 	Nonce       string
+	// BackgroundRunes is the untruncated project-background length.
+	BackgroundRunes int
+	// BackgroundTruncated reports that MaxBackgroundRunes cut the background.
+	// Callers surface it instead of dropping project rules silently.
+	BackgroundTruncated bool
 }
 
 // BuildPrompt composes platform rules, role, project background, skills, and
@@ -78,6 +84,8 @@ func BuildPrompt(in PromptInput) (BuiltPrompt, error) {
 	}
 
 	background := strings.ReplaceAll(in.ProjectBackground, "\r\n", "\n")
+	backgroundRunes := utf8.RuneCountInString(background)
+	truncated := backgroundRunes > MaxBackgroundRunes
 	background = truncateRunes(background, MaxBackgroundRunes)
 	background = strings.ReplaceAll(background, "</project-background", "&lt;/project-background")
 
@@ -107,11 +115,13 @@ func BuildPrompt(in PromptInput) (BuiltPrompt, error) {
 	}
 
 	return BuiltPrompt{
-		System:      system,
-		User:        user.String(),
-		BundleHash:  in.Bundle.Hash,
-		RoleVersion: in.Bundle.RoleVersion(in.Role),
-		Nonce:       nonce,
+		System:              system,
+		User:                user.String(),
+		BundleHash:          in.Bundle.Hash,
+		RoleVersion:         in.Bundle.RoleVersion(in.Role),
+		Nonce:               nonce,
+		BackgroundRunes:     backgroundRunes,
+		BackgroundTruncated: truncated,
 	}, nil
 }
 

@@ -59,10 +59,11 @@ type reviewGitLab struct {
 	jobTraceErrs  map[int64]error
 	jobTraceCalls []int64
 
-	summaryCreates    int
-	summaryUpdates    int
-	discussionCreates int
-	statusUpdates     []string
+	summaryCreates     int
+	summaryUpdates     int
+	discussionCreates  int
+	discussionResolves []bool
+	statusUpdates      []string
 }
 
 func newReviewGitLab(head string) *reviewGitLab {
@@ -252,6 +253,22 @@ func (f *reviewGitLab) CreateDiscussion(_ context.Context, _ string, _, _ int64,
 	return &discussion, nil
 }
 
+func (f *reviewGitLab) ResolveDiscussion(_ context.Context, _ string, _, _ int64, discussionID string, resolved bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.discussionResolves = append(f.discussionResolves, resolved)
+	for i := range f.discussions {
+		if f.discussions[i].ID != discussionID {
+			continue
+		}
+		for j := range f.discussions[i].Notes {
+			f.discussions[i].Notes[j].Resolved = resolved
+		}
+		return nil
+	}
+	return &gitlab.Error{Op: "resolve_discussion", Status: 404}
+}
+
 func (f *reviewGitLab) SetCommitStatus(_ context.Context, _ string, _ int64, _ string, st gitlab.CommitStatus) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -301,6 +318,16 @@ func (f *reviewGitLab) noteCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.notes)
+}
+
+func (f *reviewGitLab) noteBodies() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, 0, len(f.notes))
+	for _, note := range f.notes {
+		out = append(out, note.Body)
+	}
+	return out
 }
 
 // fakeGitOps implements GitOps without touching a real repository.

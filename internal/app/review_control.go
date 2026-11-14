@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/errclass"
+	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/jobs"
 	"github.com/LeXwDeX/tribunal/internal/review"
 	"github.com/LeXwDeX/tribunal/internal/secret"
@@ -262,6 +264,112 @@ func (s *ReviewService) projectToken(ctx context.Context, projectID int64) (*sto
 		return nil, "", PermanentJob(fmt.Errorf("project token is unavailable"))
 	}
 	return project, string(token), nil
+}
+
+// workspaceMaterialIdentity salts the execution identity with the base
+// checkout and the current workspace index/context state, so a changed material
+// set rebuilds a resumed workflow even when no base checkout is provable (#457).
+func (s *ReviewService) workspaceMaterialIdentity(ctx context.Context, projectID int64, baseDir, startSHA string) string {
+	if baseDir == "" {
+		// No base checkout is part of the material set. Index/context changes
+		// alone must not rebuild a stored snapshot (and silently upgrade MCP).
+		return "absent"
+	}
+	indexSHA, contextBase := "", ""
+	if state, err := s.store.GetWorkspace(ctx, projectID); err == nil && state != nil {
+		indexSHA, contextBase = state.IndexSHA, state.ContextSHA
+	}
+	return sha256Hex(strings.Join([]string{baseDir, strings.ToLower(startSHA), indexSHA, contextBase}, "\n"))
+}
+
+// tokenRejected reports an upstream 401/403 from the project token. Retrying
+// the same credentials cannot help.
+func tokenRejected(err error) bool {
+	switch gitlab.StatusOf(err) {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return true
+	}
+	return false
+}
+
+// permanentTokenFailure stops retries for a rejected token; the deferred
+// handler settles a visible status and project health.
+func permanentTokenFailure(err error) error {
+	if tokenRejected(err) {
+		return PermanentJob(err)
+	}
+	return err
+}
+
+const (
+	tokenRejected401Message = "project token was rejected by GitLab (HTTP 401); replace the project token"
+	tokenRejected403Message = "project token was rejected by GitLab (HTTP 403); check its scopes and role"
+)
+
+// markProjectTokenRejected marks the project console as unhealthy. Only the
+// sanitized status is stored; the token and upstream body never are.
+func (s *ReviewService) markProjectTokenRejected(ctx context.Context, projectID int64, status int) {
+	writer, ok := s.store.(interface {
+		UpdateProjectWebhook(context.Context, int64, store.ProjectWebhookUpdate) error
+	})
+	if !ok {
+		return
+	}
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil || project == nil {
+		return
+	}
+	message := tokenRejected401Message
+	if status == http.StatusForbidden {
+		message = tokenRejected403Message
+	}
+	if err := writer.UpdateProjectWebhook(context.WithoutCancel(ctx), projectID, store.ProjectWebhookUpdate{
+		State: store.WebhookStateFailed, Error: message, Events: project.WebhookEvents,
+	}); err != nil {
+		s.logger.Warn("project token health persistence failed", "project_id", projectID)
+	}
+}
+
+// clearProjectTokenRejected restores a project marked unhealthy by a rejected
+// token once a GitLab call succeeds again.
+func (s *ReviewService) clearProjectTokenRejected(ctx context.Context, projectID int64) {
+	writer, ok := s.store.(interface {
+		UpdateProjectWebhook(context.Context, int64, store.ProjectWebhookUpdate) error
+	})
+	if !ok {
+		return
+	}
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil || project == nil || project.WebhookState != store.WebhookStateFailed {
+		return
+	}
+	if project.WebhookError != tokenRejected401Message && project.WebhookError != tokenRejected403Message {
+		return
+	}
+	if err := writer.UpdateProjectWebhook(context.WithoutCancel(ctx), projectID, store.ProjectWebhookUpdate{
+		State: store.WebhookStateEnabled, Events: project.WebhookEvents,
+	}); err != nil {
+		s.logger.Warn("project token health restore failed", "project_id", projectID)
+	}
+}
+
+// noteTokenRejected leaves a visible MR explanation. The same rejected token
+// usually cannot post it; the console status remains the durable record.
+func (s *ReviewService) noteTokenRejected(ctx context.Context, token string, projectID, mrIID, generation int64, headSHA string) {
+	if token == "" {
+		return
+	}
+	if generation > 0 {
+		if _, err := s.store.SetReviewStatusFinalBody(context.WithoutCancel(ctx), projectID, mrIID, generation, headSHA, tokenRejectedNote); err == nil {
+			return
+		}
+	}
+	if err := sendOutbound(ctx, s.workspace.Get(projectID), func(callCtx context.Context) error {
+		_, err := s.gitlab.CreateMRNote(callCtx, token, projectID, mrIID, tokenRejectedNote)
+		return err
+	}); err != nil {
+		s.logger.Warn("token rejection note failed", "project_id", projectID, "mr_iid", mrIID, "error_class", errclass.Of(err))
+	}
 }
 
 // resumableWorkflow returns the workflow this job is mapped to and reports

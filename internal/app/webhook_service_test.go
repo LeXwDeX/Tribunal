@@ -110,8 +110,12 @@ func TestWebhookProjectLookupAndAuthentication(t *testing.T) {
 		if err != nil || !result.Unauthorized {
 			t.Fatalf("result = %+v, err = %v", result, err)
 		}
-		if len(f.records()) != 0 {
-			t.Fatal("rejected delivery was recorded")
+		records := f.records()
+		if len(records) != 1 || records[0].Outcome != store.DeliveryRejected || records[0].Reason != "invalid_secret" {
+			t.Fatalf("records = %+v, want one rejected invalid_secret delivery", records)
+		}
+		if jobs := f.jobs(); len(jobs) != 0 {
+			t.Fatalf("jobs = %+v, want none for a rejected delivery", jobs)
 		}
 	})
 	t.Run("missing secret", func(t *testing.T) {
@@ -241,7 +245,7 @@ func TestWebhookMergeRequestDecisions(t *testing.T) {
 		{name: "immediate open", settings: `{"allow_repo_config":false}`, accepted: true, kind: "review.run", key: "review:42:7", trigger: "mr_open", full: true, wantHead: sha40, profile: "default"},
 		{name: "reopen", mutate: func(b map[string]any) { patchAttr(b, "action", "reopen") }, accepted: true, kind: "review.candidate", key: "review.candidate:42:7", trigger: "mr_open", full: true},
 		{name: "update", mutate: func(b map[string]any) { patchAttr(b, "action", "update"); patchAttr(b, "oldrev", sha40) }, accepted: true, kind: "review.candidate", key: "review.candidate:42:7", trigger: "mr_update", wantHead: sha40},
-		{name: "update without oldrev", mutate: func(b map[string]any) { patchAttr(b, "action", "update") }, ignored: "missing_oldrev"},
+		{name: "first update without oldrev", mutate: func(b map[string]any) { patchAttr(b, "action", "update") }, accepted: true, kind: "review.candidate", key: "review.candidate:42:7", trigger: "mr_update"},
 		{name: "close", mutate: func(b map[string]any) { patchAttr(b, "action", "close") }, accepted: true, kind: "review.cancel", key: "review.cancel:42:7"},
 		{name: "merge", mutate: func(b map[string]any) { patchAttr(b, "action", "merge") }, accepted: true, kind: "review.cancel", key: "review.cancel:42:7"},
 		{name: "draft flag", settings: `{"allow_repo_config":false}`, mutate: func(b map[string]any) { patchAttr(b, "draft", true) }, ignored: "draft"},
@@ -681,5 +685,126 @@ func TestWebhookInvalidCandidateDoesNotFallBackToGenericDelivery(t *testing.T) {
 	}
 	if got := len(f.records()); got != 0 {
 		t.Fatalf("invalid candidate wrote %d deliveries", got)
+	}
+}
+
+func patchChanges(body map[string]any, key string, previous, current any) {
+	changes, _ := body["changes"].(map[string]any)
+	if changes == nil {
+		changes = map[string]any{}
+		body["changes"] = changes
+	}
+	changes[key] = map[string]any{"previous": previous, "current": current}
+}
+
+func TestWebhookUpdateWithoutOldRevUsesReviewControl(t *testing.T) {
+	ctx := context.Background()
+	f := newWebhookFixture(t, `{"allow_repo_config":false}`)
+	if _, err := f.store.EnqueueReviewLatest(ctx, store.ReviewCommand{
+		ProjectID: 42, MRIID: 7, HeadSHA: sha40,
+		Payload: json.RawMessage(`{"trigger":"mr_open"}`), MaxAttempts: 3,
+	}); err != nil {
+		t.Fatalf("seed control: %v", err)
+	}
+
+	// The head is unchanged and the event shows no filter transition.
+	body := mrBody(42, 7, func(b map[string]any) { patchAttr(b, "action", "update") })
+	if result, err := f.request("Merge Request Hook", "whsec-test", body); err != nil || result.Ignored != "missing_oldrev" {
+		t.Fatalf("unchanged update = %+v, err = %v", result, err)
+	}
+
+	// A head change is review-relevant even without oldrev.
+	newHead := strings.Repeat("c", 40)
+	body = mrBody(42, 7, func(b map[string]any) {
+		patchAttr(b, "action", "update")
+		patchAttr(b, "last_commit", map[string]any{"id": newHead})
+	})
+	result, err := f.request("Merge Request Hook", "whsec-test", body)
+	if err != nil || !result.Accepted {
+		t.Fatalf("changed update = %+v, err = %v", result, err)
+	}
+	job := f.jobs()[len(f.jobs())-1]
+	var payload map[string]any
+	if err := json.Unmarshal(job.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["trigger"] != "mr_update" || payload["head_sha"] != newHead {
+		t.Fatalf("payload = %+v", payload)
+	}
+
+}
+
+func TestWebhookUpdateWithoutOldRevReevaluatesFilterTransition(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name     string
+		settings string
+		mutate   func(map[string]any)
+		excluded func(map[string]any)
+	}{
+		{
+			name:     "draft to ready",
+			settings: `{"allow_repo_config":false}`,
+			mutate: func(b map[string]any) {
+				patchChanges(b, "draft", true, false)
+			},
+			excluded: func(b map[string]any) { patchAttr(b, "draft", true) },
+		},
+		{
+			name:     "label removed",
+			settings: `{"allow_repo_config":false,"labels_exclude":["no-ai"]}`,
+			mutate: func(b map[string]any) {
+				patchChanges(b, "labels", []string{"no-ai"}, []string{})
+			},
+			excluded: func(b map[string]any) { patchAttr(b, "labels", []string{"no-ai"}) },
+		},
+		{
+			name:     "target branch changed",
+			settings: `{"allow_repo_config":false,"target_branches":["main"]}`,
+			mutate: func(b map[string]any) {
+				patchChanges(b, "target_branch", "feature", "main")
+			},
+			excluded: func(b map[string]any) {
+				patchAttr(b, "target_branch", "feature")
+				patchMR(b, "target_branch", "feature")
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newWebhookFixture(t, tc.settings)
+			if _, err := f.store.EnqueueReviewLatest(ctx, store.ReviewCommand{
+				ProjectID: 42, MRIID: 7, HeadSHA: sha40,
+				Payload: json.RawMessage(`{"trigger":"mr_open"}`), MaxAttempts: 3,
+			}); err != nil {
+				t.Fatalf("seed control: %v", err)
+			}
+			body := mrBody(42, 7, func(b map[string]any) {
+				patchAttr(b, "action", "update")
+				tc.mutate(b)
+			})
+			result, err := f.request("Merge Request Hook", "whsec-test", body)
+			if err != nil || !result.Accepted {
+				t.Fatalf("result = %+v, err = %v", result, err)
+			}
+		})
+	}
+}
+
+func TestWebhookUpdateWithoutOldRevIgnoresUnprovenTransition(t *testing.T) {
+	ctx := context.Background()
+	f := newWebhookFixture(t, `{"allow_repo_config":false}`)
+	if _, err := f.store.EnqueueReviewLatest(ctx, store.ReviewCommand{
+		ProjectID: 42, MRIID: 7, HeadSHA: sha40,
+		Payload: json.RawMessage(`{"trigger":"mr_open"}`), MaxAttempts: 3,
+	}); err != nil {
+		t.Fatalf("seed control: %v", err)
+	}
+	body := mrBody(42, 7, func(b map[string]any) {
+		patchAttr(b, "action", "update")
+		patchChanges(b, "draft", false, false)
+	})
+	result, err := f.request("Merge Request Hook", "whsec-test", body)
+	if err != nil || result.Ignored != "missing_oldrev" {
+		t.Fatalf("result = %+v, err = %v; a non-transition must not re-review", result, err)
 	}
 }

@@ -605,6 +605,16 @@ func (s *recordingDeliveryStore) GetProject(ctx context.Context, id int64) (*sto
 	return s.WebhookStore.GetProject(ctx, id)
 }
 
+func (s *recordingDeliveryStore) UpdateProjectWebhook(ctx context.Context, id int64, update store.ProjectWebhookUpdate) error {
+	writer, ok := s.WebhookStore.(interface {
+		UpdateProjectWebhook(context.Context, int64, store.ProjectWebhookUpdate) error
+	})
+	if !ok {
+		return errors.New("test store does not support webhook state writes")
+	}
+	return writer.UpdateProjectWebhook(ctx, id, update)
+}
+
 func (s *recordingDeliveryStore) RecordDelivery(ctx context.Context, d store.Delivery, j *store.Job) (string, bool, error) {
 	s.mu.Lock()
 	s.records = append(s.records, d)

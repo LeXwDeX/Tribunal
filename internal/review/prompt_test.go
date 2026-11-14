@@ -150,3 +150,27 @@ func sameSystem(a, b []SystemBlock) bool {
 	}
 	return true
 }
+
+func TestBuildPromptReportsBackgroundTruncation(t *testing.T) {
+	bundle, err := prompts.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fits, err := BuildPrompt(PromptInput{Bundle: bundle, Role: prompts.CodeReview, ProjectBackground: strings.Repeat("a", MaxBackgroundRunes-1)})
+	if err != nil || fits.BackgroundTruncated {
+		t.Fatalf("small background truncated = %v, err = %v", fits.BackgroundTruncated, err)
+	}
+	large, err := BuildPrompt(PromptInput{Bundle: bundle, Role: prompts.CodeReview, ProjectBackground: strings.Repeat("b", MaxBackgroundRunes+500)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !large.BackgroundTruncated || large.BackgroundRunes != MaxBackgroundRunes+500 {
+		t.Fatalf("truncated = %v runes = %d", large.BackgroundTruncated, large.BackgroundRunes)
+	}
+	if n := len([]rune(large.System[2].Text)); n > MaxBackgroundRunes+len([]rune(renderBackground(""))) {
+		t.Fatalf("rendered background runes = %d, budget %d", n, MaxBackgroundRunes)
+	}
+	if !strings.Contains(large.System[2].Text, strings.Repeat("b", 50)) {
+		t.Fatal("retained background prefix is missing")
+	}
+}

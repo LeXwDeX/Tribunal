@@ -58,7 +58,7 @@ func TestContextGeneratedRequiresSafeWorkflowEvidence(t *testing.T) {
 		{"legacy-no-marker", "generated", "", "42", target, true, false, false},
 		{"wrong-marker", "generated", "2", "42", target, true, false, false},
 		{"wrong-project", "generated", "1", "42", target, true, false, false},
-		{"wrong-base", "generated", "1", "42", strings.Repeat("1", 40), true, false, false},
+		{"different-base", "generated", "1", "42", strings.Repeat("1", 40), true, false, true},
 		{"unfinished", "generated", "1", "42", target, false, false, false},
 		{"unknown-source", "unknown", "1", "42", target, true, false, false},
 		{"verified", "generated", "1", "42", target, true, false, true},
@@ -74,10 +74,14 @@ func TestContextGeneratedRequiresSafeWorkflowEvidence(t *testing.T) {
 			if tc.name == "wrong-project" {
 				projectID = 43
 			}
-			f.service.store = contextEvidenceStore{ReviewStore: f.db, doc: store.ContextDoc{ProjectID: projectID, BaseSHA: target, Kind: "agents", Source: tc.source, Content: "CONTEXT_CANARY", WorkflowID: id, Active: true, Locked: true}}
-			content, base := f.service.contextDoc(context.Background(), projectID, target)
-			if (content == "CONTEXT_CANARY") != tc.want || (base == target) != tc.want {
-				t.Fatalf("context=%q base=%q", content, base)
+			docBase := target
+			if !tc.missing && tc.base != "" {
+				docBase = tc.base
+			}
+			f.service.store = contextEvidenceStore{ReviewStore: f.db, doc: store.ContextDoc{ProjectID: projectID, BaseSHA: docBase, Kind: "agents", Source: tc.source, Content: "CONTEXT_CANARY", WorkflowID: id, Active: true, Locked: true}}
+			content, base, _ := f.service.contextDoc(context.Background(), projectID)
+			if (content == "CONTEXT_CANARY") != tc.want || (tc.want && base != docBase) {
+				t.Fatalf("context=%q base=%q, want base %q", content, base, docBase)
 			}
 		})
 	}

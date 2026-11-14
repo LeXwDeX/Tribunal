@@ -377,7 +377,6 @@ func (s *WorkspaceService) refreshWithOptions(ctx context.Context, projectID int
 	}
 	s.saveWorkspace(ctx, store.Workspace{ProjectID: projectID, State: "refreshing", BaseSHA: state.BaseSHA, IndexSHA: state.IndexSHA, ContextSHA: state.ContextSHA})
 
-	oldBase := state.BaseSHA
 	newBase, err := s.refreshBase(ctx, ws, project, token, "", ref)
 	if err != nil {
 		s.markWorkspaceError(ctx, projectID, err)
@@ -392,7 +391,7 @@ func (s *WorkspaceService) refreshWithOptions(ctx context.Context, projectID int
 	indexSHA := state.IndexSHA
 	indexErr := ""
 	indexEligible := !reindex && state.State == "ready" && state.LastError == "" && shaRE.MatchString(newBase) && shaRE.MatchString(indexSHA) && strings.EqualFold(indexSHA, newBase)
-	if len(cfg.Settings.Ignore) > 0 {
+	if config.ReviewIgnoreRestricted(cfg.Settings.Ignore) {
 		indexErr = "index: blocked by ignore policy"
 	} else if reindex && s.mcpFactory != nil {
 		count, err := s.runIndex(ctx, projectID, ws.BaseDir())
@@ -413,11 +412,12 @@ func (s *WorkspaceService) refreshWithOptions(ctx context.Context, projectID int
 	} else if !indexEligible && (state.LastError != "" || strings.EqualFold(indexSHA, newBase) && indexSHA != "") {
 		indexErr = store.WorkspaceIndexFailed
 	}
-	regenerate := s.shouldRefreshContext(ctx, projectID, oldBase, newBase, state)
+	regenerate := s.shouldRefreshContext(ctx, projectID, newBase, state)
 	if options.RegenerateContext != nil {
 		regenerate = *options.RegenerateContext
 	}
 	contextAfter := state.ContextSHA
+	refreshAt := state.LastRefreshAt
 	if regenerate {
 		if err := s.generateContext(ctx, project, ws, newBase, docs, cfg, indexEligible && indexErr == ""); err != nil {
 			if errors.Is(err, ErrContextProjection) || errors.Is(err, workspace.ErrOutboundInvalidated) {
@@ -437,6 +437,10 @@ func (s *WorkspaceService) refreshWithOptions(ctx context.Context, projectID int
 				return err
 			}
 			_ = ws.SetContextStale(contextAfter, contextAfter != newBase)
+			// Only a real generation advances the context clock. Resetting it on
+			// every base refresh made a continuously pushed project look fresh
+			// forever (#457).
+			refreshAt = timePtr(s.now().UTC())
 		}
 	}
 	s.saveWorkspace(ctx, store.Workspace{
@@ -445,7 +449,7 @@ func (s *WorkspaceService) refreshWithOptions(ctx context.Context, projectID int
 		BaseSHA:       newBase,
 		IndexSHA:      indexSHA,
 		ContextSHA:    contextAfter,
-		LastRefreshAt: timePtr(s.now().UTC()),
+		LastRefreshAt: refreshAt,
 		LastError:     indexErr,
 	})
 	return nil
@@ -507,7 +511,7 @@ func (s *WorkspaceService) onboardLocked(ctx context.Context, project *store.Pro
 	}
 	indexed := false
 	indexErr := ""
-	if len(cfg.Settings.Ignore) > 0 {
+	if config.ReviewIgnoreRestricted(cfg.Settings.Ignore) {
 		indexErr = "index: blocked by ignore policy"
 	} else if s.mcpFactory != nil {
 		count, err := s.runIndex(ctx, project.ID, ws.BaseDir())
@@ -532,7 +536,7 @@ func (s *WorkspaceService) onboardLocked(ctx context.Context, project *store.Pro
 	indexSHA := ""
 	if indexed {
 		indexSHA = base
-	} else if len(cfg.Settings.Ignore) > 0 {
+	} else if config.ReviewIgnoreRestricted(cfg.Settings.Ignore) {
 		if state, err := s.store.GetWorkspace(ctx, project.ID); err == nil && state != nil {
 			indexSHA = state.IndexSHA
 		}
@@ -543,12 +547,13 @@ func (s *WorkspaceService) onboardLocked(ctx context.Context, project *store.Pro
 		return err
 	}
 	s.saveWorkspace(ctx, store.Workspace{
-		ProjectID:  project.ID,
-		State:      "ready",
-		BaseSHA:    base,
-		IndexSHA:   indexSHA,
-		ContextSHA: contextSHA,
-		LastError:  indexErr,
+		ProjectID:     project.ID,
+		State:         "ready",
+		BaseSHA:       base,
+		IndexSHA:      indexSHA,
+		ContextSHA:    contextSHA,
+		LastRefreshAt: timePtr(s.now().UTC()),
+		LastError:     indexErr,
 	})
 	return nil
 }
@@ -640,12 +645,30 @@ func (s *WorkspaceService) generateContext(ctx context.Context, project *store.P
 	return nil
 }
 
-func (s *WorkspaceService) shouldRefreshContext(ctx context.Context, projectID int64, oldBase, newBase string, state *store.Workspace) bool {
-	if current, err := s.store.GetCurrentContextDoc(ctx, projectID, "agents"); err == nil && current != nil && current.Locked {
+// shouldRefreshContext decides whether the project context document must be
+// regenerated. Freshness is measured against the base of the active context
+// version, so a run of small pushes accumulates drift instead of resetting the
+// clock on every workspace refresh (#457). It requires the workspace read lock
+// because it reads the mirror.
+func (s *WorkspaceService) shouldRefreshContext(ctx context.Context, projectID int64, newBase string, state *store.Workspace) bool {
+	current, err := s.store.GetCurrentContextDoc(ctx, projectID, "agents")
+	if err == nil && current != nil && current.Locked {
 		return false
 	}
-	if oldBase == "" || newBase == "" || strings.EqualFold(oldBase, newBase) {
-		return oldBase == ""
+	if !shaRE.MatchString(newBase) {
+		return false
+	}
+	contextBase := ""
+	if err == nil && current != nil && current.BaseSHA != "" {
+		contextBase = current.BaseSHA
+	} else if state != nil {
+		contextBase = state.ContextSHA
+	}
+	if !shaRE.MatchString(contextBase) {
+		return true
+	}
+	if strings.EqualFold(contextBase, newBase) {
+		return false
 	}
 	if s.contextRefresh.MaxAge > 0 {
 		if state == nil || state.LastRefreshAt == nil || s.now().Sub(*state.LastRefreshAt) >= s.contextRefresh.MaxAge {
@@ -659,7 +682,7 @@ func (s *WorkspaceService) shouldRefreshContext(ctx context.Context, projectID i
 	if ws == nil {
 		return false
 	}
-	changed, err := s.git.ChangedFiles(ctx, ws.MirrorDir(), oldBase, newBase)
+	changed, err := s.git.ChangedFiles(ctx, ws.MirrorDir(), contextBase, newBase)
 	if err != nil {
 		return false
 	}

@@ -159,9 +159,8 @@ func TestRetryRebuildsWhenExecutionIdentityChanges(t *testing.T) {
 			f.gitlab.version.StartSHA = strings.Repeat("4", 40)
 		}},
 		{"workspace", func(t *testing.T, f *reviewFixture) {
-			if err := os.MkdirAll(f.manager.Get(42).BaseDir(), 0700); err != nil {
-				t.Fatal(err)
-			}
+			// A provable base checkout becomes part of the material set.
+			f.service.git = &reviewBaseGitOps{fakeGitOps: f.git, knownRefs: map[string]bool{strings.Repeat("2", 40): true}}
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -220,9 +219,8 @@ func TestRecoveryRejectsChangedExecutionIdentity(t *testing.T) {
 			f.gitlab.version.StartSHA = strings.Repeat("4", 40)
 		}},
 		{"workspace", func(t *testing.T, f *reviewFixture) {
-			if err := os.MkdirAll(f.manager.Get(42).BaseDir(), 0700); err != nil {
-				t.Fatal(err)
-			}
+			// A provable base checkout becomes part of the material set.
+			f.service.git = &reviewBaseGitOps{fakeGitOps: f.git, knownRefs: map[string]bool{strings.Repeat("2", 40): true}}
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

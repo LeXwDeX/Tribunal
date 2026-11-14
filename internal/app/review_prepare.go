@@ -180,6 +180,83 @@ func (s *ReviewService) reviewBaseIdentity(ctx context.Context, projectID int64,
 	return base, sha256Hex(strings.Join([]string{base, strings.ToLower(head), state.IndexSHA, state.ContextSHA}, "\n")), nil
 }
 
+// prepareReviewBase resolves the MR base commit without trusting the shared
+// workspace base. It reuses the shared checkout only when its HEAD equals
+// startSHA; otherwise it fetches the target branch and creates a per-run base
+// worktree. An unproven base returns "absent" so the caller records a coverage
+// gap instead of silently reviewing without it (#457).
+func (s *ReviewService) prepareReviewBase(ctx context.Context, project *store.Project, token string, mrIID int64, runID, startSHA, targetBranch string) (baseDir, identity string, cleanup func(), err error) {
+	ws := s.workspace.Get(project.ID)
+	if ws == nil {
+		return "", "absent", nil, nil
+	}
+	dir, id, err := s.reviewBaseIdentity(ctx, project.ID, startSHA)
+	if err != nil {
+		return "", "", nil, err
+	}
+	if dir != "" {
+		return dir, id, nil, nil
+	}
+	if !shaRE.MatchString(startSHA) {
+		return "", "absent", nil, nil
+	}
+	if resolved, resolveErr := s.git.Resolve(ctx, ws.MirrorDir(), startSHA); resolveErr != nil || !strings.EqualFold(resolved, startSHA) {
+		remote, remoteErr := currentProjectRemote(ctx, s.gitlab, project, token)
+		if remoteErr != nil {
+			return "", "", nil, remoteErr
+		}
+		branch := strings.TrimSpace(targetBranch)
+		if branch == "" {
+			branch = project.DefaultBranch
+		}
+		ref := "refs/heads/" + branch
+		// A failed fetch keeps the review running; the base gap is disclosed.
+		if _, fetchErr := fetchProjectRef(ctx, ws, s.git, remote, repo.Auth{Token: token}, "+"+ref+":"+ref, ref); fetchErr != nil {
+			if ctx.Err() != nil {
+				return "", "", nil, ctx.Err()
+			}
+			return "", "absent", nil, nil
+		}
+		resolved, resolveErr = s.git.Resolve(ctx, ws.MirrorDir(), startSHA)
+		if resolveErr != nil || !strings.EqualFold(resolved, startSHA) {
+			return "", "absent", nil, nil
+		}
+	}
+
+	runsDir := filepath.Join(ws.Root, "runs")
+	info, statErr := os.Lstat(runsDir)
+	if statErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return "", "", nil, fmt.Errorf("app: run directory is unsafe")
+	}
+	base := filepath.Join(runsDir, runID+"-base")
+	if info, statErr := os.Lstat(base); statErr == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return "", "", nil, fmt.Errorf("app: review base path is not a directory")
+		}
+		if err := removeRunDir(base); err != nil {
+			return "", "", nil, err
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return "", "", nil, statErr
+	}
+	if err := s.git.AddWorktree(ctx, ws.MirrorDir(), base, strings.ToLower(startSHA)); err != nil {
+		if ctx.Err() != nil {
+			return "", "", nil, ctx.Err()
+		}
+		// The review can still run on the head checkout; the gap stays visible.
+		return "", "absent", nil, nil
+	}
+	cleanup = func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		if err := s.git.RemoveWorktree(cleanupCtx, ws.MirrorDir(), base); err != nil {
+			s.logger.Warn("review base worktree removal failed", "project_id", project.ID, "run_id", runID)
+		}
+		_ = os.RemoveAll(base)
+	}
+	return base, sha256Hex(strings.Join([]string{base, strings.ToLower(startSHA)}, "\n")), cleanup, nil
+}
+
 // ensureReviewRoot creates the project workspace root and rejects a symlinked
 // root or parent before a git or worktree write can follow it. Deeper
 // configured ancestors are trusted.

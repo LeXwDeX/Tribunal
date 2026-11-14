@@ -45,7 +45,7 @@ func TestWorkspaceEvidenceRetryRejectsLegacyAndContradictions(t *testing.T) {
 		{"version", func(d *review.Dossier) { d.WorkspaceProvenance.Version++ }},
 		{"context", func(d *review.Dossier) {
 			d.ContextDocs = "CANARY"
-			d.WorkspaceProvenance.ContextBaseSHA = strings.Repeat("1", 40)
+			d.WorkspaceProvenance.ContextBaseSHA = "bad"
 		}},
 		{"index", func(d *review.Dossier) {
 			d.WorkspaceProvenance.MCPEligible = true
@@ -315,7 +315,7 @@ func TestWorkspaceEvidencePendingPublication(t *testing.T) {
 							d.WorkspaceProvenance = nil
 						} else {
 							d.ContextDocs = "CANARY"
-							d.WorkspaceProvenance.ContextBaseSHA = strings.Repeat("1", 40)
+							d.WorkspaceProvenance.ContextBaseSHA = "bad"
 						}
 					})
 				}

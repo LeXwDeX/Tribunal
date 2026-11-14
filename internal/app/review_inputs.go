@@ -582,29 +582,38 @@ func (s *ReviewService) graphProviders() []string {
 	return out
 }
 
-func (s *ReviewService) contextDoc(ctx context.Context, projectID int64, targetSHA string) (string, string) {
+// contextDoc returns the verified active project context document and the
+// base it was generated from. found reports that an active document exists
+// even when it cannot be used; callers disclose that degradation. The document
+// may come from a different commit than the merge base: it describes the
+// project, and its own base is recorded as provenance (#457).
+func (s *ReviewService) contextDoc(ctx context.Context, projectID int64) (content, base string, found bool) {
 	doc, err := s.store.GetCurrentContextDoc(ctx, projectID, "agents")
-	if err != nil || doc == nil || doc.ProjectID != projectID || doc.Kind != "agents" || !doc.Active || !shaRE.MatchString(targetSHA) || !shaRE.MatchString(doc.BaseSHA) || !strings.EqualFold(doc.BaseSHA, targetSHA) {
-		return "", ""
+	if err != nil || doc == nil || doc.ProjectID != projectID || doc.Kind != "agents" || !doc.Active {
+		return "", "", false
+	}
+	found = true
+	if !shaRE.MatchString(doc.BaseSHA) {
+		return "", "", found
 	}
 	switch doc.Source {
 	case "manual":
 	case "generated":
 		if doc.WorkflowID == "" {
-			return "", ""
+			return "", "", found
 		}
 		snapshot, err := s.engine.Snapshot(ctx, doc.WorkflowID)
 		if err != nil || snapshot.Status != dag.WorkflowCompleted || snapshot.Meta["kind"] != "onboarding" ||
 			snapshot.Meta["project_id"] != itoa(projectID) || !strings.EqualFold(snapshot.Meta["base_sha"], doc.BaseSHA) ||
 			snapshot.Meta["workspace_material_version"] != contextMaterialVersion {
-			return "", ""
+			return "", "", found
 		}
 		node, ok := snapshot.Nodes["onboarding"]
 		if !ok || node.Status != dag.NodeCompleted || node.Spec.Kind != review.KindOnboarding {
-			return "", ""
+			return "", "", found
 		}
 	default:
-		return "", ""
+		return "", "", found
 	}
-	return doc.Content, doc.BaseSHA
+	return doc.Content, doc.BaseSHA, found
 }

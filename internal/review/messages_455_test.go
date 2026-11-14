@@ -227,3 +227,18 @@ func TestInlineTruncationWithoutURLKeepsConsoleHint(t *testing.T) {
 		t.Fatalf("fallback truncation notice is wrong:\n%s", out)
 	}
 }
+
+func TestLocalizeDegradationWarnings(t *testing.T) {
+	for _, message := range []string{
+		backgroundRulesTruncated,
+		backgroundContextTruncated,
+		"review ran without the code graph: project ignore rules blocked workspace indexing",
+		"review ran without the project context document: the stored document is not verified for review",
+		"review coverage gap: the merge request base commit is unavailable; changed lines were reviewed without a base checkout",
+	} {
+		text, ok := localizeMachineMessage(message)
+		if !ok || !hasHan(text) {
+			t.Errorf("%q -> %q, ok=%v", message, text, ok)
+		}
+	}
+}

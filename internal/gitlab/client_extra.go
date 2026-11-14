@@ -592,6 +592,26 @@ func (c *Client) CreateDiscussion(ctx context.Context, token string, projectID, 
 	return &mapped, nil
 }
 
+// ResolveDiscussion resolves or reopens one merge request discussion thread.
+// The caller must have proven that the discussion belongs to this bot.
+func (c *Client) ResolveDiscussion(ctx context.Context, token string, projectID, iid int64, discussionID string, resolved bool) error {
+	if !positiveIDs(projectID, iid) || strings.TrimSpace(discussionID) == "" {
+		return errors.New("gitlab: invalid project, merge request, or discussion ID")
+	}
+	reqCtx, client, done, err := c.prepare(ctx, token)
+	if err != nil {
+		return err
+	}
+	defer done()
+	_, resp, err := client.Discussions.ResolveMergeRequestDiscussion(projectID, iid, discussionID, &sdk.ResolveMergeRequestDiscussionOptions{
+		Resolved: &resolved,
+	}, sdk.WithContext(reqCtx))
+	if err != nil {
+		return mapError(reqCtx, "resolve_discussion", resp, err)
+	}
+	return nil
+}
+
 // SetCommitStatus writes the ai-review status for a commit SHA.
 func (c *Client) SetCommitStatus(ctx context.Context, token string, projectID int64, sha string, st CommitStatus) error {
 	if projectID <= 0 {
