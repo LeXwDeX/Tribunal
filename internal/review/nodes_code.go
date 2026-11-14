@@ -14,6 +14,10 @@ import (
 	"github.com/LeXwDeX/tribunal/pkg/dag"
 )
 
+// maxOutOfScopeSevereSignals bounds the evidence gaps recorded for severe
+// findings dropped by an incremental scope filter.
+const maxOutOfScopeSevereSignals = 12
+
 // GatherOut is the code node output for gather.
 type GatherOut struct {
 	Groups      []Group            `json:"groups"`
@@ -115,6 +119,102 @@ func (v VerifyResult) Validate() error {
 	return v.Result.Validate()
 }
 
+// ReviewScope is the structured coverage statement of one review. Full means
+// every changed file was in scope; otherwise Files lists the incremental
+// files. FileCount is the total incremental file count; Files is capped so a
+// very large push cannot bloat the snapshot. Unlocated counts published
+// findings without a path. Renderers own the wording; this type is the stable
+// source for summaries and status notes.
+type ReviewScope struct {
+	Full      bool     `json:"full"`
+	Reason    string   `json:"reason,omitempty"`
+	Head      string   `json:"head,omitempty"`
+	LastHead  string   `json:"last_head,omitempty"`
+	Files     []string `json:"files,omitempty"`
+	FileCount int      `json:"file_count,omitempty"`
+	Unlocated int      `json:"unlocated,omitempty"`
+}
+
+// maxScopeFiles bounds the persisted incremental file list.
+const maxScopeFiles = 200
+
+// Validate checks the code-owned scope fields.
+func (s ReviewScope) Validate() error {
+	if s.Head != "" && !validObjectID(s.Head) {
+		return invalid("head", "must be a 40 or 64 character object ID")
+	}
+	if s.LastHead != "" && !validObjectID(s.LastHead) {
+		return invalid("last_head", "must be a 40 or 64 character object ID")
+	}
+	if err := checkOneLine("reason", s.Reason, 256, false); err != nil {
+		return err
+	}
+	if len(s.Files) > maxScopeFiles {
+		return invalid("files", "must contain at most %d entries", maxScopeFiles)
+	}
+	if s.FileCount != 0 && s.FileCount < len(s.Files) {
+		return invalid("file_count", "must cover the listed files")
+	}
+	seen := make(map[string]struct{}, len(s.Files))
+	for i, file := range s.Files {
+		if err := checkRepoPath(fmt.Sprintf("files[%d]", i), file, true); err != nil {
+			return err
+		}
+		if _, ok := seen[file]; ok {
+			return invalid(fmt.Sprintf("files[%d]", i), "duplicate file")
+		}
+		seen[file] = struct{}{}
+	}
+	if s.Unlocated < 0 || s.Unlocated > MaxFindings {
+		return invalid("unlocated", "must be between 0 and %d", MaxFindings)
+	}
+	if !s.Full && len(s.Files) == 0 {
+		return invalid("files", "is required for an incremental scope")
+	}
+	return nil
+}
+
+// reviewScopeFor builds the structured coverage statement from the dossier.
+// A nil dossier (onboarding or synthetic workflows) has no review scope.
+func reviewScopeFor(d *Dossier, groups []Group) *ReviewScope {
+	if d == nil {
+		return nil
+	}
+	scope := &ReviewScope{
+		Full:      true,
+		Head:      d.DiffVersion.HeadSHA,
+		Unlocated: unlocatedPublished(groups),
+	}
+	if d.Incremental != nil {
+		scope.LastHead = d.Incremental.LastHead
+		scope.Reason = d.Incremental.Reason
+		if d.Incremental.Head != "" {
+			scope.Head = d.Incremental.Head
+		}
+		if !d.Incremental.Full && len(d.Incremental.Files) > 0 {
+			scope.Full = false
+			scope.FileCount = len(d.Incremental.Files)
+			files := d.Incremental.Files
+			if len(files) > maxScopeFiles {
+				files = files[:maxScopeFiles]
+			}
+			scope.Files = append([]string(nil), files...)
+		}
+	}
+	return scope
+}
+
+// unlocatedPublished counts findings that were published without a path.
+func unlocatedPublished(groups []Group) int {
+	count := 0
+	for _, group := range groups {
+		if group.Published() && strings.TrimSpace(group.Path) == "" {
+			count++
+		}
+	}
+	return count
+}
+
 // SynthesisResult is the synthesize node output. Output preserves the model
 // contract; Groups is the code-owned final state used by rendering/publishing.
 type SynthesisResult struct {
@@ -125,6 +225,8 @@ type SynthesisResult struct {
 	Unresolved []UnresolvedSignal `json:"unresolved,omitempty"`
 	Output     SynthesizeOut      `json:"output"`
 	Fallback   bool               `json:"fallback,omitempty"`
+	// Scope records the structured review coverage. Older snapshots have none.
+	Scope *ReviewScope `json:"scope,omitempty"`
 	// RuleSummary marks Summary as the deterministic rule-mode text.
 	RuleSummary bool `json:"rule_summary,omitempty"`
 }
@@ -149,6 +251,11 @@ func (s SynthesisResult) Validate() error {
 	}
 	if err := validateUnresolved(s.Unresolved); err != nil {
 		return wrapField("unresolved", err)
+	}
+	if s.Scope != nil {
+		if err := s.Scope.Validate(); err != nil {
+			return wrapField("scope", err)
+		}
 	}
 	if s.Verdict == VerdictIncomplete {
 		if len(s.Unresolved) == 0 {
@@ -343,12 +450,13 @@ func (e *Executor) executeGather(ctx context.Context, in dag.NodeInput) (dag.Nod
 	coverageSignals, coverageWarnings := e.coverageUnresolved(wf)
 	signals = append(signals, coverageSignals...)
 	warnings = mergeWarnings(warnings, coverageWarnings)
-	scope := e.incrementalFiles()
+	scope := scopeWithUnlocated(e.incrementalFiles())
 	dossier := e.deps.Dossier
 	if scope != nil {
 		filtered := make([]Proposal, 0, len(proposals))
 		allowed := make(map[Ref]struct{})
 		removed := false
+		var outOfScope []UnresolvedSignal
 		// Keep each original slice so gate refs and finding IDs retain their indices.
 		for _, proposal := range proposals {
 			matched := false
@@ -358,6 +466,16 @@ func (e *Executor) executeGather(ctx context.Context, in dag.NodeInput) (dag.Nod
 					allowed[Ref{Node: proposal.Node, Index: i}] = struct{}{}
 				} else {
 					removed = true
+					// A severe finding in a file this incremental review did not
+					// recheck must not vanish. Record it as an evidence gap so the
+					// verdict cannot claim the narrow scope is clean.
+					if (finding.Severity == SeverityP0 || finding.Severity == SeverityP1) && len(outOfScope) < maxOutOfScopeSevereSignals {
+						outOfScope = append(outOfScope, UnresolvedSignal{
+							Node: proposal.Node, Kind: UnresolvedEvidence,
+							Message: fmt.Sprintf("incremental review ignored a %s finding outside the reviewed file set: %s",
+								finding.Severity, oneLine(finding.Path, 200)),
+						})
+					}
 				}
 			}
 			if !matched {
@@ -368,6 +486,7 @@ func (e *Executor) executeGather(ctx context.Context, in dag.NodeInput) (dag.Nod
 		if removed {
 			warnings = appendUnique(warnings, "incremental review: findings outside the incremental file set were ignored")
 		}
+		signals = append(signals, outOfScope...)
 		proposals = filtered
 		filteredDropped := dropped[:0]
 		for _, drop := range dropped {
@@ -795,6 +914,13 @@ func buildCodePlan(params planParams, dossier *Dossier) (PlanOut, error) {
 			buckets = append(buckets, bucket{dirs: map[string]struct{}{}})
 		}
 		current := &buckets[len(buckets)-1]
+		// Split on both dimensions: a package may not exceed the hard file
+		// limit even when its diffs are small, and the token budget still
+		// bounds prompt size.
+		if len(current.files) >= HardMaxFiles && len(buckets) < maxPackages {
+			buckets = append(buckets, bucket{dirs: map[string]struct{}{}})
+			current = &buckets[len(buckets)-1]
+		}
 		if current.tokens > 0 && current.tokens+tokens > packageTokens && len(buckets) < maxPackages {
 			buckets = append(buckets, bucket{dirs: map[string]struct{}{}})
 			current = &buckets[len(buckets)-1]

@@ -1,6 +1,10 @@
 package gitlab
 
-import "time"
+import (
+	"strconv"
+	"strings"
+	"time"
+)
 
 // FileDiff is one changed file from the merge request diff endpoint.
 type FileDiff struct {
@@ -13,15 +17,50 @@ type FileDiff struct {
 	GeneratedFile bool
 	Collapsed     bool
 	TooLarge      bool
+	// Collection reports the diff version scope of the whole list. It is set
+	// on the first entry only, when the collector could read the merge
+	// request's reported changed-path count.
+	Collection *DiffCollection
+}
+
+// DiffCollection is the merge request diff version scope reported by GitLab.
+// Total is the number of changed paths GitLab reports for the version; when
+// Truncated is set, the returned diff list is a subset of that scope.
+type DiffCollection struct {
+	State     string
+	RealSize  string
+	Total     int
+	Truncated bool
+}
+
+// ParseChangedFileCount parses a GitLab real_size or changes_count value. A
+// trailing "+" marks a count that GitLab truncated at its own limit.
+func ParseChangedFileCount(value string) (count int, truncated bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false
+	}
+	if strings.HasSuffix(value, "+") {
+		truncated = true
+		value = strings.TrimSpace(strings.TrimSuffix(value, "+"))
+	}
+	count, err := strconv.Atoi(value)
+	if err != nil || count < 0 {
+		return 0, false
+	}
+	return count, truncated
 }
 
 // Version is a merge request diff version. The three SHAs are required for
-// inline discussion positions.
+// inline discussion positions. State and RealSize report the completeness of
+// the diff collection GitLab stored for this version.
 type Version struct {
 	ID       int64
 	BaseSHA  string
 	StartSHA string
 	HeadSHA  string
+	State    string
+	RealSize string
 }
 
 // Pipeline is the pipeline projection used in the review dossier.

@@ -394,7 +394,9 @@ GitLab 对失败的 webhook 不保证重试，容器停机期间送达的 MR 事
 - 有界且保守：只考虑最近 `gitlab.catch_up.max_age`（默认 24h）内有更新的 MR，按更新时间从新到旧分页，遇到窗口外的 MR 即停止；`max_per_project`（默认 10）和 `max_total`（默认 20）限制入队的评审数，已评审的 MR 不占用额度；每个项目最多检查 100 个最近更新的 MR，以此限制 GitLab 请求量。扫描整体最长 2 分钟，连续 3 个项目列出 MR 失败即停止。项目的锁只在判定和入队时持有，列出 MR 的网络请求期间不持锁；入队与评审控制记录的比较在同一事务内完成，列出之后到达的 webhook（更新的 head）不会被扫描覆盖。每入队一个 MR 输出 INFO `catch-up enqueued review`（`project_id`、`mr_iid`、`head` 短 SHA）。GitLab 请求走现有并发上限，一个项目失败只跳过该项目。`gitlab.catch_up.enabled: false` 关闭扫描。该配置只在启动时读取，修改后需重启。
 - 日志：完成时输出 INFO `catch-up scan finished`（`projects`、`mrs_checked`、`enqueued`）；单个项目失败输出 WARN，只含项目号和错误类别。
 - 升级后首次启动：旧版本登记的项目里，窗口内仍打开、当前 head 没有评审记录的 MR（例如项目登记之后才更新、此前从未评审的 MR）会各入队一次，按默认上限最多 20 次评审，会产生相应的模型用量。若不希望首次升级触发评审，先在配置中设置 `gitlab.catch_up.enabled: false` 再启动，确认后按需改回（修改需重启）。
-- 增量范围：`catch_up` 评审与 `mr_update` 相同，已有上次发布的 head 时只评审其后变更的文件，否则为完整评审。
+- 增量范围：`catch_up` 评审与 `mr_update` 相同，已有上次发布的 head 时只评审其后变更的文件，否则为完整评审。评审范围以结构化字段保存（dossier 的 `incremental` 与 `SynthesisResult.scope`），评论在结论后输出「评审范围」段并披露上次/本次 head 与覆盖文件数；没有 `path` 的 finding 保留为「无法定位」并参与 verdict，评审范围外出现的 P0/P1 会产生未解决信号而不是被静默丢弃。
+- diff 采集：GitLab diff 版本不是 `collected`、`real_size` 带 `+`、或报告总数多于实际返回的 diff 条数时，未送达的文件计入覆盖缺口，评审不能得到干净 PASS；diff 列表为空但报告仍有变更文件时任务可重试，不会当成空 MR。单个 `too_large`/`collapsed` 文件先按上限（单文件 512 KiB、单次评审 2 MiB、最多 20 个）通过 repository files/raw API 拉取 base/head 正文参与评审；取不到、二进制或超限时降级为「该文件未审」的告警，不单独把整单判为 INCOMPLETE。
+- generated 文件不进入评审：混合 MR 在评审提示中列出被跳过的路径和数量；全部变更文件都是 generated 时发布「无需评审」摘要。项目设置 `max_files` 上限为 200；计划按文件数和 token 双重分包，不会再因单包超过 200 个文件而失败。
 - 局限：停机期间被关闭后重新打开、head 未变的 MR 不会被补评（它与被 `/review cancel` 取消的 MR 无法区分）；只补评当前 head；超出窗口或上限的较旧 MR 需手动 `/review`。扫描不补发停机期间错过的 close/merge 取消事件。
 
 **恢复取消的原因对应**：恢复取消的工作流有两个原因字段。事件中的取消原因（engine reason）是粗粒度类别，多数情形为 `superseded`，`profile_hash_changed` 与 `execution_identity_changed` 使用自己的名称；发布跳过原因（API 的 `publication_error`）和评审状态详情为 `cancelled on recovery: <cause>`，`<cause>` 是真实原因，与启动日志 `recovery cancelling workflow` 的 `cause` 字段一致（如 `mr_inputs_unavailable`、`diff_version_changed`、`config_changed`）。因此 `superseded` 与 `cancelled on recovery: mr_inputs_unavailable` 描述同一次取消，排查以后者为准。
@@ -1240,8 +1242,8 @@ v1.2.0 起，所有 `PUT /api/v1/block-bindings/{block}` 必须带 `expected_rev
 - **已有的 `reasoner` 块绑定开始生效。** reasoner 一路现在以块 `reasoner` 运行，此前登记在该块上的 MCP 工具和 Skill 绑定会开始作用于它；升级前核对这些绑定。
 - **挂载的配置文件需要手工补充工具授权。** 镜像不会改写已挂载的配置文件。要让 `explore` 和 `validate` 使用 codebase-memory 工具，把这两个块加入 `default_extensions.mcp_servers[].tools`（见 `config/server.example.yaml`）；否则这两路只带内置的 `read_file` / `grep` 运行。
 - **MCP 绑定缺口会让评审不是干净的 PASS。** `explore`、`validate` 和 `reasoner` 与 `code-review`、`review` 一样在代码拥有的 `tool_gaps` 字段记录绑定工具缺失，原本的 PASS 改判 INCOMPLETE；已是 BLOCKING 的结论不变。
-- **验证通道不运行测试。** `validate` 只读 GitLab pipeline 状态、失败 job 日志片段和代码；没有 pipeline 或日志不足时报告「验证通道 BLOCKED：<原因>」告警，不降为 INCOMPLETE。`validate` 为 `FAIL` 时，增量过滤之后必须仍有该节点范围内的 P0/P1 finding 来解释，否则结论为 INCOMPLETE（而不是 PASS）；被 `verify.N` 反证的 P1 仍算作该 `FAIL` 的代码证据。
-- **任一路评审失败会使结论为 INCOMPLETE。** 其他各路的 findings 仍会发布。
+- **验证通道不运行测试。** `validate` 只读 GitLab pipeline 状态、失败 job 日志片段和代码；没有 pipeline 或日志不足时报告「验证通道 BLOCKED：<原因>」告警，不降为 INCOMPLETE。`validate` 为 `FAIL` 时，增量过滤之后必须仍有该节点范围内的 P0/P1 finding 来解释，否则结论为 INCOMPLETE（而不是 PASS）；无 `path` 的 finding 视为仍在范围内，已有已发布 P0/P1 时保留 BLOCKING；被 `verify.N` 反证的 P1 仍算作该 `FAIL` 的代码证据。
+- **任一路评审失败会使结论为 INCOMPLETE。** 其他各路的 findings 仍会发布；已有已发布 P0/P1 时 verdict 保持 BLOCKING，缺口写入评审提示。
 - **已知限制。** `explore` 是可选节点，但只在 token 预算在它开始前已耗尽时才会被跳过；此时 `plan` 也被跳过，工作流在没有结论的情况下结束。四路并行评审不预留 token 预算，有界超支随并行节点数增加。探索摘要（不超过 6000 字符）与 diff 共用任务预算。
 
 配置迁移：`config.Load` 不会因旧配置失败，但旧字段会被迁移或忽略，每项在启动日志产生一行 WARN `configuration was migrated or ignored: <字段…>`，只含字段名，不含值。逐项处理表见[配置设计 · 评审档位](design/06-config.md#评审档位profiles)。

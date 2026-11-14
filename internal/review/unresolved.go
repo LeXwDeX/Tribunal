@@ -181,10 +181,19 @@ func incompleteSummary(unresolved []UnresolvedSignal) string {
 	return truncateRunes(b.String(), MaxSummaryRunes)
 }
 
-// applyUnresolved makes unresolved evidence a hard INCOMPLETE result. The raw
-// model or rule verdict stays in Output; a PASS summary cannot mask the gaps.
+// applyUnresolved makes unresolved evidence incomplete unless the review is
+// already BLOCKING. Published P0/P1 findings outrank a coverage or evidence
+// gap, so a BLOCKING verdict stays blocking and the gaps are disclosed as
+// warnings. The contract only carries Unresolved with INCOMPLETE.
 func applyUnresolved(result *SynthesisResult, unresolved []UnresolvedSignal) {
 	if result == nil || len(unresolved) == 0 {
+		return
+	}
+	if result.Verdict == VerdictBlocking {
+		for _, signal := range unresolved {
+			result.Warnings = appendUnique(result.Warnings,
+				oneLine(signal.Node, maxUnresolvedNode)+": "+oneLine(signal.Message, maxUnresolvedMessage))
+		}
 		return
 	}
 	result.Unresolved = append([]UnresolvedSignal(nil), unresolved...)

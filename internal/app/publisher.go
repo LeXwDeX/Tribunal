@@ -428,7 +428,7 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 				}
 			}
 			if err == nil && publication.GitlabID != "" && !conflict {
-				body, renderErr := review.RenderFinding(*group, review.FindingRenderOptions{ShowModelAttribution: cfg.Settings.ShowModelAttribution, ProviderLabels: p.providerLabels()})
+				body, renderErr := review.RenderFinding(*group, review.FindingRenderOptions{ShowModelAttribution: cfg.Settings.ShowModelAttribution, ProviderLabels: p.providerLabels(), DetailURL: p.detailURL(workflowID)})
 				if renderErr != nil || publication.BodyHash == "" || publication.BodyHash != bodyHash(body) {
 					group.PositionOK = false
 					contentMismatch = true
@@ -482,6 +482,9 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 			DetailURL:            p.detailURL(workflowID),
 			ShowModelAttribution: cfg.Settings.ShowModelAttribution,
 			Warnings:             renderWarnings,
+			Scope:                result.Scope,
+			Generated:            loaded.dossier.DiffSummary.Generated,
+			GeneratedPaths:       loaded.dossier.DiffSummary.GeneratedPaths,
 		})
 	}
 	body, err := render()
@@ -511,7 +514,7 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			return err
 		}
-		findingBody, err := review.RenderFinding(group, review.FindingRenderOptions{ShowModelAttribution: cfg.Settings.ShowModelAttribution, ProviderLabels: p.providerLabels()})
+		findingBody, err := review.RenderFinding(group, review.FindingRenderOptions{ShowModelAttribution: cfg.Settings.ShowModelAttribution, ProviderLabels: p.providerLabels(), DetailURL: p.detailURL(workflowID)})
 		if err != nil {
 			groups[i].PositionOK = false
 			fallback = true

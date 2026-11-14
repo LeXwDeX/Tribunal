@@ -255,7 +255,7 @@ type CodeRef struct {
 
 生产裁决会针对固定 dossier 的 head/base 快照验证 CodeRef：路径必须存在、行号范围必须有效，`root` 为空时按 `head`；缺失快照或读取失败不能证明反驳，按 `UNCERTAIN` 处理。语法有效或 diff 外的合法代码位置都可能通过，但存在性检查不等于证明语义正确。
 
-材料覆盖使用 `DiffSummary`：`files` 是进入材料快照的 included 文件数，不是已评审数；omitted 文件另有带原因和路径的记录，不能从 included 数或总数反推原因。`total` 是 ignore 规则前的变更文件总数；`ignored` 是用户规则排除，不算覆盖缺口；`omitted` 记录 `max_files`、`max_diff_lines`、`too_large`、`collapsed`、`invalid_path` 等缺口及路径。上述 omitted 总是进入 unresolved；完成 plan 后未被分配评审节点的非 generated included 文件、以及评审节点实际遇到的文件/包文本截断，也会进入 unresolved，最终不能无提示 PASS。正常 dossier 保存完整的 omitted 路径列表；只有不创建 workflow 的独立摘要把路径展示限制为最多 4 条，其余只计数。
+材料覆盖使用 `DiffSummary`：`files` 是进入材料快照的 included 文件数，不是已评审数；omitted 文件另有带原因和路径的记录，不能从 included 数或总数反推原因。`total` 优先取 GitLab diff version 报告的变更路径总数（`state`/`real_size`），缺省时退回收到的 diff 条数；`ignored` 是用户规则排除，不算覆盖缺口；`generated` 是 GitLab 标记为生成文件、跳过评审的路径数（它们仍计入 total）；`omitted` 记录 `max_files`、`max_diff_lines`、`invalid_path` 等硬缺口及路径。硬 omitted 总是进入 unresolved；`too_large`、`collapsed` 是软缺口：采集阶段会先按上限通过 repository files/raw API 拉取 base 与 head 正文并重建统一 diff 参与评审；取不到时降级为 warning 并明确「该文件未审」，不单独把整单改成 INCOMPLETE。GitLab 报告的总数多于实际收到的 diff 条数（diff 版本被 GitLab 截断）时，未送达的文件进入 unresolved。完成 plan 后未被分配评审节点的 included 文件、以及评审节点实际遇到的文件/包文本截断，也会进入 unresolved，最终不能无提示 PASS。正常 dossier 保存完整的 omitted 路径列表；只有不创建 workflow 的独立摘要把路径展示限制为最多 4 条，其余只计数。全部变更文件都是 generated 时走「无需评审」摘要，而不是让 required 的 plan 失败。
 
 ### 6.2 各节点
 
@@ -373,7 +373,7 @@ type Module struct {
 | `FAIL` | 至少一条 `FAIL` 检查或至少一个 finding |
 | `BLOCKED` | `block_reason` 必填；不得包含 `FAIL` 检查（有 `FAIL` 检查时状态必须是 `FAIL`） |
 
-> 最终持久化和发布使用代码拥有的 `SynthesisResult`，它包含 `verdict`、`groups` 和 `unresolved`。上游证据/覆盖不足会把 `verdict` 覆盖为 `INCOMPLETE` 并携带具体信号。评审图不再有模型汇总节点，因此新评审不产生 `SynthesizeOut`、`ReviewGateOut` 或补派请求；这些契约只在解码历史工作流时保留。
+> 最终持久化和发布使用代码拥有的 `SynthesisResult`，它包含 `verdict`、`groups`、`unresolved` 和结构化的 `scope`（评审范围）。上游证据/覆盖不足会把 `verdict` 覆盖为 `INCOMPLETE` 并携带具体信号；已有 P0/P1 的 `BLOCKING` 不被降级。评审图不再有模型汇总节点，因此新评审不产生 `SynthesizeOut`、`ReviewGateOut` 或补派请求；这些契约只在解码历史工作流时保留。
 
 ### 6.3 严重级别与结论归一化
 
@@ -386,7 +386,9 @@ type Module struct {
 | validate | `FAIL`，且增量过滤之后该节点没有仍在评审范围内的 P0/P1 finding | 一个 `review_blocking` 未解决信号，结论为 `INCOMPLETE`，不会是 `PASS`。该检查在 `gather` 中于增量过滤之后执行；后来被 `verify.N` 反证的 P1 仍算作代码证据，对应的 `FAIL` 视为已有解释 |
 | validate | `BLOCKED` | 报告告警「验证通道 BLOCKED：<原因>」；**不是**未解决信号，没有 CI 的项目可以 `PASS` |
 | validate | 检查结果 `PRE_EXISTING` | 与本次变更无关的既有失败，不产生 finding |
-| 任一路 | 节点失败、被取消或被跳过 | 一个 `evidence_gap` 未解决信号「lane X did not complete」，结论为 `INCOMPLETE` |
+| 任一路 | 节点失败、被取消或被跳过 | 一个 `evidence_gap` 未解决信号「lane X did not complete」，结论为 `INCOMPLETE`，不会是 `PASS`；已有 P0/P1 时保留 `BLOCKING` 并写入 warning |
+| 增量评审 | 某一路在评审范围外的文件上报 P0/P1 finding | 过滤掉该 finding，同时写入一个 `evidence_gap` 未解决信号（含路径与级别），不能静默丢弃 |
+| 增量评审 | 无 `path` 的 finding | 无法归因到未改动文件，保留为「无法定位」条目并参与 verdict |
 | verify | `suggested_severity` | 仅供 adjudicate 参考，不直接覆盖 |
 
 ---
@@ -427,7 +429,7 @@ for g in groups:
 
 无法定位条目的摘要折叠（仅摘要）：reasoner 等节点常输出没有 `path`、或位置不可用（`position_ok=false`）的 finding，它们往往与已经发布的行内问题是同一件事。渲染摘要时，已决定发布的非 `mark` 的无法定位组，若与某个已发布的行内组（`position_ok` 且非 `mark`）或按固定顺序（严重级别、内容丰富度、位置、ID）更早保留的无法定位组相似，则不在「无法定位到行的问题」中单独列出，也不计入摘要头部的严重级别计数，改为作为该组的「相关描述」引用：行内问题概览行下的缩进子项，或无法定位条目内的相关描述列表，最多 5 条，其余显示「另有 N 条」。相似判定：两者都有路径且路径或侧（新/旧）不同则不合并；摘要折叠的「标题内容一致」比行内折叠严格：先从文本中去掉停用词（存在、问题、配置、文件、处理等）再取中文二元组，因此跨停用词的片段不计；英文词（3 个字母以上）排除两个标题中标识符及限定名各部分；中文需共享至少 2 个二元组并覆盖候选标题二元组的 30%，英文需共享至少 2 个词且占并集的 50%。行内折叠的标题内容规则（停用二元组、至少 2 个共享二元组或英文词）不变，两者停用词表相互独立。被折叠的无法定位条目自带的「相关描述」随之并入引用它的条目，合并后去重并按级别、行号、ID 排序再取前 5 条。无法定位条目不会折叠到级别更低的条目下（候选级别高于对方则不合并），且两者级别相差不到 2 级才合并；该组标题中的非通用标识符须出现在对方标题或正文中，对方标题含标识符时反向亦然，并且标题内容一致（摘要折叠使用更严格的规则，见下）或标题加正文词集相似度 ≥ 0.45；对方为纯中文标题（无标识符）时，标题内容一致与正文词集相似须同时满足。纯中文长标题经常达不到严格的内容覆盖率，此时允许用正文中的文件/标识符作为补充证据：两份组（标题、正文、证据）中出现同一个文件路径、限定名或代码标识符（含 `.`、`_`、`/`、`-` 或内部大写，去掉通用词），且标题加正文词集相似度 ≥ 0.45，同样折叠。只与保留组比较，不链式扩散，结果与输入顺序无关。该折叠不修改任何输入组：已发布行内讨论的正文和发布键不变（不向已发帖的讨论追加内容），存储的 finding、票数、裁决、verdict 不变；commit status 描述与摘要头部使用同一折叠后的计数（`SummaryFoldedGroups`）。与所有已发布组都不相似的无法定位问题继续列出。
 
-最终完成条件由代码执行：`review` 通道 `evidence_status=insufficient`、`review` 为 BLOCKING 却没有 finding、`validate` 为 FAIL 却没有仍在范围内的 P0/P1 finding、某一路评审没有完成、材料或提示词覆盖缺口、完成 plan 后非 generated 的 included 文件未被分配等上游信号会合并进 `unresolved`。只要存在 unresolved，最终 verdict 就是 INCOMPLETE；存储的 summary 保留内部节点与原始缺口文本，评论按 §9.1 渲染为中文未完成原因与下一步。存在最终 `publish` 的 P0/P1 时 verdict 为 BLOCKING（I6）。
+最终完成条件由代码执行：`review` 通道 `evidence_status=insufficient`、`review` 为 BLOCKING 却没有 finding、`validate` 为 FAIL 却没有仍在范围内的 P0/P1 finding、某一路评审没有完成、材料或提示词覆盖缺口、完成 plan 后 included 文件未被分配等上游信号会合并进 `unresolved`。unresolved 只把原本的 `PASS` 覆盖为 INCOMPLETE，并在 summary 列出具体缺口；已有最终 `publish` 的 P0/P1 时 verdict 为 BLOCKING，不会被 INCOMPLETE 降级，缺口改为写入评审提示（`warnings`）。无法定位（无 `path`）的 finding 在增量过滤中保留并参与最终 verdict，`SynthesisResult.scope` 的 `unlocated` 记录其条数。`SynthesisResult.scope` 还以结构化字段记录本次评审范围（是否全量、增量文件、上次 head、`file_count`），摘要按本文件 §9.1 输出中文评审范围；存储的 summary 保留内部节点与原始缺口文本，评论按 §9.1 渲染为中文未完成原因与下一步。`DiffSummary.generated` 记录被跳过的生成文件数，跳过路径通过评审提示披露。
 
 ---
 
@@ -476,6 +478,11 @@ user                本节点任务：MR 摘要、包内文件列表与 diff、f
 
 <synthesize.summary，1–3 句：结论与主要理由，不复述各条问题>
 
+### 评审范围
+
+- 增量评审：上次 head 9f3c2a1 → 本次 head 9f3c2b7，覆盖 12 个文件；结论仅覆盖本次增量变更的文件。
+- 生成文件：跳过 2 个，未进入评审：`api.pb.go`、`gen/x.go`。
+
 ### 行内问题（1）
 
 - **[P1]标题** · `path/to/file.go`:18
@@ -506,13 +513,14 @@ user                本节点任务：MR 摘要、包内文件列表与 diff、f
 - 状态评论与评审结果是同一条 MR note。首行隐藏标记用于找到并就地更新这条评论（见 05-flows.md F7）；状态 worker 和 publisher 都按 `<!-- gitlab-ce-review:summary` 查找。原 summary 正文自己的 `fp=…` 标记行在合并时移除，只保留状态评论的首行标记。
 - 生命周期行固定为 `- 阶段：` 与 `- 状态：`。阶段只有四类：`开始`（`received`、`queued`）、`进行中`（`running`、`publishing`）、`已完成`（`PASS`、`BLOCKING`、`INCOMPLETE`）、`失败`（`failed`、`cancelled`、`stale`）；状态行保留原始状态值。工作流结算且 `review_status.final_body` 非空时，状态行后追加渲染好的评审正文；未结算或旧行为空时只显示状态。
 - 级别计数紧随结论，只列非零项；没有已发布问题时不输出计数行。
+- 结论之后输出「评审范围」段：来自 `SynthesisResult.scope` 与 `DiffSummary.generated/generated_paths`，披露全量或增量（上次 head → 本次 head，`file_count` 个文件，`files` 超过 200 条时只保留计数）、无法定位的问题数，以及被跳过的生成文件数量与路径（最多展示 12 条）；增量评审明确「结论仅覆盖本次增量变更的文件」。评审范围为全量且没有生成文件时省略该段。机器诊断仍只出现在存储和控制台。
 - 结论为 INCOMPLETE 且 summary 是代码生成的证据缺口清单时，评论不原样展示内部节点 ID 与英文机器诊断：渲染为「已评审范围的结论 + 未完成原因（中文）+ 下一步」。已知模板（评审 lane 未完成、节点失败、预算耗尽、材料/提示词覆盖缺口、验证通道失败等）映射为中文，并给出可执行的下一步；未匹配的机器文本降级为通用中文提示，原文只保留在存储和控制台。评审提示使用同一映射，中文原文保持不变；映射后重复的提示只显示一次。
 - 「规则模式汇总：共 N 条问题，已发布 M 条」渲染为「裁决发布 M 条（行内 X 条，仅汇总 Y 条）」，被折叠条目另列「另有 Z 条并入相关描述」，不再把裁决发布数当成实际行内讨论数。
 - 行内问题的索引只列级别、标题和位置，不重复正文、建议与证据。存疑条目单独列出，不在行内问题索引中重复。
 - 写法规则在 `_platform_rules.md` 的 Reporting bar 与 Comment style：只报本次 MR 引入、作者会修的离散问题；`body` 为一段话，先写触发条件再写影响，代码不超过 3 行；`suggestion` 是一句话或替换被评论行的 GitLab `suggestion` 块。渲染器保留 Markdown 的标题、列表和代码内容，中和代码外的原始 HTML 与链接语法；代码中的 HTML 注释按字面显示。为防止列表提前结束围栏，缩进围栏会移到顶层，因此原列表可能分成两段。
 - 标题、提示、裁决原因和多行正文中的 GitLab 提及、引用（包括 commit SHA、项目引用）及自动链接按字面显示；代码块和行内代码按代码显示。路径中的有效空格不折叠。反引号围栏的 info 不得包含反引号，闭合围栏最多缩进三格；未闭合围栏在字段末尾闭合，不遮住后续条目。
 - 标题、相关描述摘录、评审提示和汇总正文按句界（句号、分号、感叹号、问号）截断，找不到句界时退到词界，截断处补「…」，不再静默切在半句或路径中间。相关描述摘录上限 120 字，被截断时保留该条 finding ID（「编号 …」）以便在控制台找到完整正文。
-- 行内与汇总条目的正文最多渲染 400 字符（#451 的产品上限，不随本规则变化），超出时明确追加“内容已截断”，不再静默截到半句；完整正文仍在存储和控制台中。正文被截断的行内讨论追加「完整正文见控制台」提示；汇总条目沿用底部的「详情」链接。建议仍为汇总条目最多 1000 字符、行内讨论最多 8000 字符；建议和证据的代码块渲染规则不变。
+- 行内与汇总条目的正文最多渲染 400 字符（#451 的产品上限，不随本规则变化），超出时明确追加“内容已截断”，不再静默截到半句；完整正文仍在存储和控制台中。正文被截断的行内讨论追加指向控制台评审详情的链接（`FindingRenderOptions.DetailURL`，与汇总底部「详情」链接使用同一 URL；没有公开 URL 时退回「完整正文见控制台」文字）；汇总条目沿用底部的「详情」链接。建议仍为汇总条目最多 1000 字符、行内讨论最多 8000 字符；建议和证据的代码块渲染规则不变。
 - 存疑条目在汇总中保留折叠证据；可定位的存疑条目在行内讨论中也保留证据。这样即使复用的旧讨论属于已确认条目，证据仍可见，不需要创建或修改讨论。首行标记保持不变；汇总恢复只认首行，代码块内的标记文本不参与匹配。
 - PASS 用 🟢，评审未完成用 ⚪ 并说明原因。
 - 是否标注模型来源由项目设置 `show_model_attribution` 决定（默认关闭）。

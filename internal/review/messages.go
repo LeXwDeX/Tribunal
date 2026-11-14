@@ -25,12 +25,22 @@ var (
 	nodeUnavailableRE   = regexp.MustCompile(`^node \S+ \(([^)]+)\) was (\S+) and its findings are unavailable$`)
 	nodeNoExploreRE     = regexp.MustCompile(`^node \S+ \(([^)]+)\) was (\S+); the lanes ran without the exploration digest$`)
 	coverageOmittedRE   = regexp.MustCompile(`^(?:diff collection omitted|omitted) (\d+) of (\d+) changed file\(s\)`)
+	coveragePathsRE     = regexp.MustCompile(`; omitted paths: (.+)$`)
+	coverageBeforePaths = regexp.MustCompile(`before review: \[([^\]]+)\]`)
 	coverageReasonsRE   = regexp.MustCompile(`; reasons: ([^;]+)`)
 	builtPromptGapRE    = regexp.MustCompile(`^built prompt did not include the complete diff for (\d+) of (\d+) file\(s\)`)
 	planPromptLimitRE   = regexp.MustCompile(`^plan prompt lists at most (\d+) files; (\d+) changed files were omitted before planning$`)
 	reviewTruncatedRE   = regexp.MustCompile(`^review truncated: (\d+) changed file\(s\) omitted by (max_files|max_diff_lines)$`)
 	noReviewableCountRE = regexp.MustCompile(`^no reviewable files: (\d+) changed file\(s\) omitted before review$`)
 	repoConfigFieldRE   = regexp.MustCompile(`^\.gitlab-review\.yml: unknown field ((?:review\.)?[A-Za-z0-9_.-]+) ignored$`)
+	// Templates added with the review-scope completeness work (#455).
+	withheldDiffRE          = regexp.MustCompile(`^review coverage gap: GitLab withheld the diff for (.+) \((too_large|collapsed)\); the file was not reviewed$`)
+	generatedSkippedRE      = regexp.MustCompile(`^review skipped (\d+) generated file\(s\), which were not reviewed: (.+)$`)
+	gitlabCollectionGapRE   = regexp.MustCompile(`^review coverage gap: GitLab diff collection is incomplete \(state=([^,]+), real_size=([^)]+)\): (\d+) of (\d+) changed file\(s\) were provided; the remaining files were not reviewed$`)
+	gitlabTruncatedGapRE    = regexp.MustCompile(`^diff collection was truncated by the GitLab diff limits: GitLab reported (\d+) changed file\(s\); (\d+) were delivered \([^)]*\); (\d+) file\(s\) were not delivered and were not reviewed$`)
+	gitlabNotCollectedGapRE = regexp.MustCompile(`^diff collection is marked incomplete by GitLab \(the diff version is not collected\): (\d+) changed file\(s\) were provided; whether every changed file was reviewed cannot be proven$`)
+	generatedNoReviewRE     = regexp.MustCompile(`^no reviewable files: (\d+) generated file\(s\) were skipped$`)
+	outOfScopeSevereRE      = regexp.MustCompile(`^incremental review ignored a (P0|P1) finding outside the reviewed file set: (.+)$`)
 )
 
 // kindLabels names review channels and coverage checks without exposing the
@@ -68,6 +78,15 @@ var coverageReasonLabels = map[string]string{
 	"max_diff_lines":      "超过 diff 行数上限",
 	"invalid_path":        "路径无效",
 	"missing_rename_path": "重命名路径缺失",
+}
+
+// diffStateLabels names a GitLab diff version state. An unknown state stays
+// unnamed rather than leaking machine text.
+var diffStateLabels = map[string]string{
+	"collected":     "已完整收集",
+	"overflow":      "超出收集上限",
+	"without_files": "未保存 diff",
+	"unknown":       "状态未知",
 }
 
 // exactDiagnostics maps message templates without parameters.
@@ -120,9 +139,48 @@ func localizeMachineMessage(message string) (string, bool) {
 		return fmt.Sprintf("探索通道未完成（%s），各评审通道在没有探索摘要的情况下运行，结论可能不完整。",
 			statusLabel(match[2])), true
 	}
+	if match := withheldDiffRE.FindStringSubmatch(message); match != nil {
+		reason := coverageReasonLabels[match[2]]
+		if reason == "" {
+			reason = "diff 不可用"
+		}
+		return fmt.Sprintf("GitLab 未提供 %s 的 diff（%s），该文件未被评审。", match[1], reason), true
+	}
+	if match := generatedSkippedRE.FindStringSubmatch(message); match != nil {
+		return fmt.Sprintf("已跳过 %s 个生成文件，未进入评审：%s。", match[1], match[2]), true
+	}
+	if match := gitlabCollectionGapRE.FindStringSubmatch(message); match != nil {
+		provided, total := atoiOrZero(match[3]), atoiOrZero(match[4])
+		remaining := total - provided
+		if remaining < 0 {
+			remaining = 0
+		}
+		return fmt.Sprintf("GitLab 的变更文件收集不完整（状态：%s，报告 %d 个变更文件）：仅收到 %d 个文件，其余 %d 个文件未被评审。",
+			diffStateLabel(match[1]), total, provided, remaining), true
+	}
+	if match := gitlabTruncatedGapRE.FindStringSubmatch(message); match != nil {
+		return fmt.Sprintf("GitLab 的变更文件收集被截断：报告 %s 个变更文件，实际收到 %s 个，有 %s 个文件未送达、未被评审。",
+			match[1], match[2], match[3]), true
+	}
+	if match := gitlabNotCollectedGapRE.FindStringSubmatch(message); match != nil {
+		return fmt.Sprintf("GitLab 未完整收集该 MR 的 diff：已收到 %s 个变更文件，无法证明所有变更文件都已评审。",
+			match[1]), true
+	}
+	if match := generatedNoReviewRE.FindStringSubmatch(message); match != nil {
+		return fmt.Sprintf("没有可评审的文件：已跳过 %s 个生成文件。", match[1]), true
+	}
+	if match := outOfScopeSevereRE.FindStringSubmatch(message); match != nil {
+		return fmt.Sprintf("增量评审未重新检查范围外文件 %s 中的 %s 问题，该问题已被过滤，结论不覆盖该文件。",
+			match[2], match[1]), true
+	}
 	if match := coverageOmittedRE.FindStringSubmatch(message); match != nil {
-		return fmt.Sprintf("变更文件收集不完整：共 %s 个变更文件，有 %s 个未进入评审材料%s",
-			match[2], match[1], coverageReasonText(message)), true
+		text := fmt.Sprintf("变更文件收集不完整：共 %s 个变更文件，有 %s 个未进入评审材料%s",
+			match[2], match[1], coverageReasonText(message))
+		text = strings.TrimSuffix(text, "。")
+		if paths := coverageOmittedPaths(message); paths != "" {
+			text += "；未进入评审的路径：" + paths
+		}
+		return text + "。", true
 	}
 	if match := builtPromptGapRE.FindStringSubmatch(message); match != nil {
 		return fmt.Sprintf("有 %s 个文件的完整 diff 未进入评审提示，相关内容可能未被完整评审。", match[1]), true
@@ -186,6 +244,21 @@ func kindLabel(kind string) string {
 	return "上游"
 }
 
+func atoiOrZero(value string) int {
+	count, err := strconv.Atoi(value)
+	if err != nil || count < 0 {
+		return 0
+	}
+	return count
+}
+
+func diffStateLabel(state string) string {
+	if label := diffStateLabels[state]; label != "" {
+		return label
+	}
+	return diffStateLabels["unknown"]
+}
+
 func statusLabel(status string) string {
 	if label := statusLabels[status]; label != "" {
 		return label
@@ -202,6 +275,19 @@ func laneAdvice(status string) string {
 	default:
 		return "：建议在控制台查看该通道状态后重新触发评审。"
 	}
+}
+
+// coverageOmittedPaths returns the recorded omitted paths of a coverage
+// message. Both the workflow signal and the standalone summary reason carry
+// them; an older snapshot without paths returns nothing.
+func coverageOmittedPaths(message string) string {
+	if match := coveragePathsRE.FindStringSubmatch(message); match != nil {
+		return strings.TrimSpace(match[1])
+	}
+	if match := coverageBeforePaths.FindStringSubmatch(message); match != nil {
+		return strings.TrimSpace(match[1])
+	}
+	return ""
 }
 
 // coverageReasonText renders the machine reason names of a coverage message.

@@ -581,13 +581,10 @@ func TestReviewAllDiffsUnavailableCannotPass(t *testing.T) {
 		t.Fatalf("notes = %d, want one summary", len(f.gitlab.notes))
 	}
 	body := f.gitlab.notes[0].Body
-	for _, want := range []string{"评审未完成", "共 1 个变更文件，有 1 个未进入评审材料", "文件过大", "GitLab 未提供部分文件的 diff"} {
+	for _, want := range []string{"评审未完成", "共 1 个变更文件", "有 1 个未进入评审材料", "文件过大", "big.bin", "该文件未被评审"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("all-omitted summary misses %q:\n%s", want, body)
 		}
-	}
-	if strings.Contains(body, "big.bin") {
-		t.Fatalf("omitted path was published instead of the localized reason:\n%s", body)
 	}
 }
 

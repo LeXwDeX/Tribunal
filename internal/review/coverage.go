@@ -98,8 +98,12 @@ func completedPlan(wf dag.WorkflowView) (PlanOut, bool) {
 }
 
 // collectionCoverageGap reports omitted collection scope with exact counts.
-// Older snapshots only carry truncated=true; their omitted paths stay unknown
-// and therefore fail closed.
+// GitLab-withheld too_large and collapsed files are soft omissions: the
+// collector already disclosed them as warnings and the review proceeds.
+// Files GitLab reported but never delivered, and hard omissions such as
+// max_files or max_diff_lines, stay hard evidence gaps. Older snapshots only
+// carry truncated=true; their omitted paths stay unknown and therefore fail
+// closed.
 func collectionCoverageGap(d *Dossier) string {
 	if d == nil {
 		return ""
@@ -110,20 +114,37 @@ func collectionCoverageGap(d *Dossier) string {
 	}
 	total := summary.Total
 	if total == 0 {
-		total = summary.Files + len(d.Ignored) + len(summary.Omitted)
+		if summary.Truncated && len(summary.Omitted) == 0 {
+			fmtTotal := summary.Files + len(d.Ignored) + summary.Generated + len(summary.Omitted)
+			return fmt.Sprintf("diff collection is truncated: %d changed file(s), %d included in the materials snapshot, %d ignored by rules; omitted paths were not recorded in this older snapshot, so the unreviewed scope is not fully known",
+				fmtTotal, summary.Files, len(d.Ignored))
+		}
+		total = summary.Files + len(d.Ignored) + summary.Generated + len(summary.Omitted)
+	}
+	delivered := summary.Files + len(d.Ignored) + summary.Generated + len(summary.Omitted)
+	missing := total - delivered
+	hard := hardOmitted(summary.Omitted)
+	if len(hard) == 0 && missing <= 0 {
+		if summary.Truncated && len(summary.Omitted) == 0 {
+			return fmt.Sprintf("diff collection is marked incomplete by GitLab (the diff version is not collected): %d changed file(s) were provided; whether every changed file was reviewed cannot be proven",
+				delivered)
+		}
+		return ""
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "diff collection omitted %d of %d changed file(s): %d included in the materials snapshot, %d ignored by rules",
-		len(summary.Omitted), total, summary.Files, len(d.Ignored))
-	if len(summary.Omitted) == 0 {
-		b.Reset()
-		fmt.Fprintf(&b, "diff collection is truncated: %d changed file(s), %d included in the materials snapshot, %d ignored by rules; omitted paths were not recorded in this older snapshot, so the unreviewed scope is not fully known",
-			total, summary.Files, len(d.Ignored))
+	if len(hard) == 0 {
+		fmt.Fprintf(&b, "diff collection was truncated by the GitLab diff limits: GitLab reported %d changed file(s); %d were delivered (%d included, %d ignored by rules, %d generated); %d file(s) were not delivered and were not reviewed",
+			total, delivered, summary.Files, len(d.Ignored), summary.Generated, max(missing, 0))
 		return b.String()
 	}
-	reasons := make(map[string]int, len(summary.Omitted))
-	paths := make([]string, 0, len(summary.Omitted))
-	for _, omitted := range summary.Omitted {
+	fmt.Fprintf(&b, "diff collection omitted %d of %d changed file(s): %d included in the materials snapshot, %d ignored by rules, %d generated",
+		len(hard), total, summary.Files, len(d.Ignored), summary.Generated)
+	if missing > 0 {
+		fmt.Fprintf(&b, "; GitLab reported %d more changed file(s) than it delivered, which were not reviewed", missing)
+	}
+	reasons := make(map[string]int, len(hard))
+	paths := make([]string, 0, len(hard))
+	for _, omitted := range hard {
 		reasons[omitted.Reason]++
 		paths = append(paths, omitted.Path)
 	}
@@ -141,6 +162,41 @@ func collectionCoverageGap(d *Dossier) string {
 	b.WriteString("; omitted paths: ")
 	b.WriteString(boundedPathList(paths, 12))
 	return b.String()
+}
+
+// hardOmitted drops the soft too_large and collapsed omissions. The app layer
+// discloses those as warnings; they do not make the whole review incomplete.
+func hardOmitted(omitted []OmittedFile) []OmittedFile {
+	if len(omitted) == 0 {
+		return nil
+	}
+	out := make([]OmittedFile, 0, len(omitted))
+	for _, file := range omitted {
+		switch file.Reason {
+		case "too_large", "collapsed":
+			continue
+		}
+		out = append(out, file)
+	}
+	return out
+}
+
+// scopeWithUnlocated lets findings without a path survive incremental
+// filtering: their file is unknown, so dropping them would hide a possible
+// defect. The empty key cannot match a real repository path.
+func scopeWithUnlocated(scope map[string]struct{}) map[string]struct{} {
+	if scope == nil {
+		return nil
+	}
+	if _, ok := scope[""]; ok {
+		return scope
+	}
+	out := make(map[string]struct{}, len(scope)+1)
+	for file := range scope {
+		out[file] = struct{}{}
+	}
+	out[""] = struct{}{}
+	return out
 }
 
 // unassignedCoverageGap reports included files that the planner never assigned

@@ -246,6 +246,8 @@ func (c *Client) LatestMRVersion(ctx context.Context, token string, projectID, i
 		BaseSHA:  latest.BaseCommitSHA,
 		StartSHA: latest.StartCommitSHA,
 		HeadSHA:  latest.HeadCommitSHA,
+		State:    latest.State,
+		RealSize: latest.RealSize,
 	}, nil
 }
 
