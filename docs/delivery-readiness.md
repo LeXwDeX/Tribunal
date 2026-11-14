@@ -1,10 +1,11 @@
 # 交付就绪、升级/回退与验收记录
 
-> 本文先列出 v1.2.0 候选批次（[#128](https://github.com/LeXwDeX/Tribunal/pull/128)）的本地修复验证，再分三部分记录版本与交付状态：
+> 本文先列出 v1.2.0 候选批次（[#128](https://github.com/LeXwDeX/Tribunal/pull/128)）的本地修复验证，再记录版本与交付状态：
 >
-> 1. [v1.2.0（待发布）验证状态](#v120-验证状态)：v1.2.0 实际做过哪些验证、还有哪些没做。
-> 2. 升级、授权、验收矩阵与回退计划：与版本无关的操作模板，从[首次升级前记录](#首次升级前记录模板)到[放行与归档](#放行与归档)。
-> 3. [v1.0.0 历史验收记录（f143，仅供追溯）](#v100-历史验收记录f143仅供追溯)：v1.0.0 在隔离测试实例上的验收结果，**不能**用来证明后续版本的改动。
+> 1. [v1.5.0 验证状态](#v150-验证状态)：当前版本的 CI、迁移演练、DEV 回归与生产验收检查表。
+> 2. [v1.2.0（待发布）验证状态](#v120-验证状态)：v1.2.0 实际做过哪些验证、还有哪些没做。
+> 3. 升级、授权、验收矩阵与回退计划：与版本无关的操作模板，从[首次升级前记录](#首次升级前记录模板)到[放行与归档](#放行与归档)。
+> 4. [v1.0.0 历史验收记录（f143，仅供追溯）](#v100-历史验收记录f143仅供追溯)：v1.0.0 在隔离测试实例上的验收结果，**不能**用来证明后续版本的改动。
 >
 > 本文不复制完整日志，也不把测试实例结果扩大为生产验收。
 
@@ -69,6 +70,50 @@
 - HTTP 回归覆盖：DELETE 会令 anthropic 模型不可用时返回 409 `defaults_in_use` 且不写库、`revision` 不变；`revision` 不匹配优先返回 `stale_revision`；`force` 只接受 `true` / `false`，强制重置审计 `force` 与受影响字段；强制重置后已无效模型不再阻塞无关 PUT，空默认重置为 no-op；PUT/DELETE 跳过已因当前默认无效的模型。
 - 前端回归覆盖：409 时列出受影响字段与消息、确认按钮变为「仍然重置」、force 后刷新 models/config；无 `details` 时显示兜底提示；`ConfirmDialog` 无 children/error 时不渲染空 body；显式 `max_tokens=0` + 继承默认时 budget 校验报错；390/1440 宽度与亮暗主题契约。
 - GitHub Actions 的 go/web/docker 在 PR head 通过；**BLOCKED**：未运行自建 CI 与真实部署验收。
+
+<a id="v150-验证状态"></a>
+
+## v1.5.0 验证状态
+
+候选为 `main` `e2044ef`：Milestone 8 的 8 个 Issue（[#453](https://github.com/LeXwDeX/Tribunal/issues/453)–[#459](https://github.com/LeXwDeX/Tribunal/issues/459)、[#466](https://github.com/LeXwDeX/Tribunal/issues/466)）已全部合并。下表按四个阶段记录 v1.5.0 的验证状态。DEV 回归共 9 项，8 项 PASS；第 9 项为真实 GitLab opt-in 渲染测试，结果为 4 个 FAIL、2 个 SKIP，不计 PASS。未执行或受限项明确标为 **待执行** 或 **BLOCKED**，不写成 PASS。
+
+### v1.5.0 四阶段检查表
+
+| 检查项 | 状态 | 证据 / 原因 |
+|---|---|---|
+| Stage 1：8 个 PR 的自建 CI | PASS | 8 个 PR 的 head 各自 `go`/`web`/`docker` 全部 PASS，`summary.txt` 末行 `RESULT PASS`，覆盖率均不低于 70% |
+| Stage 1：`main` `e2044ef` 全量自建 CI | PASS | run dir `ci/runs/20261114T190534-e2044ef8cfab`：`go`/`web`/`docker` 全部 PASS，go 语句覆盖率 **81.90%**（32935/40212，最低要求 70%），耗时 210s，`RESULT PASS` |
+| Stage 2：8 个 PR 的 GitHub 必需检查 | PASS | 8 个 PR 的必需检查全部成功；合并历史见 `main` 线性历史与 CHANGELOG |
+| Stage 2：#467 间歇失败复核 | PASS | 首跑 run `43579696989` 的 `go` job 有两个与本改动无关的负载型间歇失败：`cmd/server` 的 `TestStartupEphemeralSessionKeyWarning/legacy` 报 SQLite database is unavailable；`internal/llm` 的 `TestRegistryEnforcesMaxConcurrency` 报 max concurrency exceeded: 3。同 commit `e8bccdbe` 重跑 run `43579708691` 的 `go`/`web`/`docker` 全部成功。runner 上 `internal/app`/`internal/server` 耗时 609s/305s，远高于本地 403s/147s，符合负载下的间歇失败特征 |
+| 迁移演练：脱敏生产副本顺序应用 `0031`→`0034` | PASS | schema 从 30/29 变为 **max=34 / 行数=33**（版本 2 历史缺失）；`PRAGMA integrity_check` 为 **ok**；7/7 历史行 `final_body_ready=0`；`publications` 19、`findings` 17、`workflows` 25 零变化；6 条已发布 summary note（103772/103779/103934/105145/105271/106713）保留；`llm_call_daily` 回填 12 行、sum 逐位无损（52,573,506 in / 842,343 out）；`webhook_deliveries` 167 行不变（11 行回填 `mr_iid`，156 行保持 0） |
+| 升级后未接管已发布 summary（GitLab 回读） | BLOCKED | 副本凭据已清空，无法通过 GitLab 只读回读证明「没有对 6 条 summary note 发起更新」。可证明的是：本地无新 job、无 publication/status 变更（`max(updated_at)` 仍为 2026-11-13T08:53:22，早于启动）、无更新日志；自愈扫描为 1 小时 ticker，观察窗口内未运行 |
+| Stage 3：DEV 回归 1/8，ignore 基线下索引、上下文与 MCP 真正生效 | PASS | 镜像 `tribunal:v1.5.0-e2044ef`、独立实例端口 18421。dossier `context_docs_len=2480`、`mcp_eligible=true`；workspace `state=ready` 且 `last_error=NULL`；MCP daemon 日志 11 次 `tools/call`（list_projects 3、search_graph 3、get_architecture/index_status/query_graph/trace_path/check_index_coverage 各 1）；无 `index: blocked by ignore policy` |
+| Stage 3：DEV 回归 2/8，不再被 30 回合截断 | PASS | `budget={max_turns:0, deadline:30m, max_tokens:0}`；explore 实测 max(turn)=24（MR17）与 15（MR32），全部节点 completed 并提交；201 个变更文件的 MR32 整体 PASS，用时 232,041ms；无 `no_submit`/`budget_exhausted`。如实注明：真实运行未出现超过 30 回合的节点，「超过 30 后提交」分支未被真实触发，由 `internal/agent` 定向测试覆盖 |
+| Stage 3：DEV 回归 3/8，评论无内部节点 ID 或英文诊断 | PASS | 扫描 MR17 的 96 条与 MR32 的 3 条 note，`cr.p1\|rv.p1\|verify.N\|did not complete\|lane \|executor_error` 命中 0 |
+| Stage 3：DEV 回归 4/8，计数与截断呈现 | PASS | MR17 显示「共 33 条问题，裁决发布 33 条（行内 23 条，仅汇总 0 条，另有 10 条并入相关描述）」；MR32 显示「共 2 条问题，裁决发布 2 条（行内 1 条，仅汇总 1 条）」；MR32 出现 115 rune、以「…」结尾的截断标题 |
+| Stage 3：DEV 回归 5/8，控制台配置保存 | PASS | `PATCH /api/v1/config/overlay` 返回 200、`changed=true`、`restart_required=true`；overlay 目录权限 700、文件 600 |
+| Stage 3：DEV 回归 6/8，详情返回范围与降级字段 | PASS | 详情返回 `scope`、`generated_files=1`、`generated_paths=["package-lock.json"]`、`material_warnings`；无降级时按 `omitempty` 省略 |
+| Stage 3：DEV 回归 7/8，webhook 投递聚合与访问过滤 | PASS | 错误 secret 的真实 webhook 返回 401 后聚合为 `deliveries=1, rejected=1, rejected_invalid_secret=1`；无授权 viewer 查询返回空列表，带他人 `project_id` 返回 404 |
+| Stage 3：DEV 回归 8/8，终态 MR 不再每 5 分钟产生 status job | PASS | MR17 `version=applied_version=5`，完成后两个对账 tick 新增 0 个 status job；升级演练实例 7 条终态行启动后同样新增 0 个 |
+| Stage 3：真实 GitLab opt-in 渲染测试（4 个 FAIL） | BLOCKED | `TestGitLabRenderedOneLineReferencesAndLiteralText`、`TestGitLabRenderedMalformedFencesCannotHideFindings`、`TestGitLabRenderedBodyAndSuggestionCannotHideLaterContent`、`TestGitLabRenderedNestedFenceAndEscapedBacktickAreSafe` 失败。判定为测试夹具陈旧（#456 本地化后，渲染器合法输出 `<details><summary>证据</summary>`，与 blanket `!Contains("<details>")` 判据冲突），**非运行时回归**；已开 [#470](https://github.com/LeXwDeX/Tribunal/issues/470) 跟踪修正。这些测试由 `TRIBUNAL_TEST_GITLAB_MARKDOWN=1` 门控，在 CI 中一律 skip，故长期未暴露 |
+| Stage 3：真实 GitLab opt-in 渲染测试（2 个 SKIP） | BLOCKED | `TestGitLabRenderedUnmatchedTildesDoNotLink`（沙盒项目无 `bug` label）、`TestGitLabRenderedGLIssueReferenceIsLiteral`（缺 `TRIBUNAL_TEST_GITLAB_ISSUE_PROJECT`/`TRIBUNAL_TEST_GITLAB_ISSUE_IID`）。skip 不计 PASS |
+| Stage 3：指定 GitLab 项目的真实依赖检查 | BLOCKED | `acceptance/gitlab.env` 的 `GITLAB_TEST_TOKEN` 已过期（401），指定项目 1350 的相关检查无法执行，需人类提供新 token；DEV 回归改用有效的 `sandbox.env`（沙盒项目 1353）完成 |
+| Stage 3：DeepSeek thinking + tools 契约 | BLOCKED | 未用真实凭据验证；`docs/operations.md` 自身标为 BLOCKED |
+| 全局：生产规模负载 | BLOCKED | 未压测 |
+| Stage 4：生产部署 | 待执行 | 需明确授权后执行 |
+| Stage 4：健康检查（`/healthz`、`/readyz`） | 待执行 | 部署后执行 |
+| Stage 4：schema=34 回读 | 待执行 | 部署后按已知版本集合核对 max=34、行数=33 |
+| Stage 4：沙盒项目端到端自测 | 待执行 | 部署后执行 |
+
+状态口径：
+
+- **PASS**：有可复核证据且通过。
+- **BLOCKED**：未执行、环境或凭据受限，或结果为 FAIL/SKIP 而不能计为 PASS；均写明原因。
+- **待执行**：尚未开始，需在部署后执行。
+
+**迁移与回退**：v1.5.0 新增 `0031`–`0034`，均为 append-only、没有 down migration；生产升级前 schema=30，升级后 max=34、行数=33（版本 2 历史缺失）。回滚需恢复升级前一致性快照并启动匹配的旧镜像，不能只回退镜像。通用边界见[迁移与回退边界](#迁移与回退边界)。
+
+本节只记录实际做过的验证，不把 DEV 回归或迁移演练结果扩大为生产验收；Stage 4 完成前保持 **待执行**。
 
 ## v1.4.0 发布检查表
 

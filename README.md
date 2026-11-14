@@ -6,7 +6,7 @@ GitLab CE MR 多 agent 自动评审服务
 
 当前 M0–M6 功能已有本地实现，覆盖项目注册与 webhook、三种 LLM 协议、agent 工具循环、DAG 与持久化、只读探索与四路并行评审/对抗核验/裁决、GitLab 发布、工作区、MCP/Skill、OAuth 持久会话、项目 `read`/`manage` 授权与 CSRF、用户全局只读、平台角色管理、模型管理与评审档位节点覆盖、管理 API、React 控制台、API token、统计、反馈采集、人工标注与许可证清单。
 
-当前最新发布版本是 **v1.1.0**，待发布版本是 **v1.2.0**；变更和升级必读见 [CHANGELOG](CHANGELOG.md)。v1.2.0 尚未打 tag；范围已扩大到当前 `main`，包含 #143 与迁移 `0020`–`0024`。真实实例升级已验证迁移 `0016`–`0024` 的应用、健康检查、内置扩展和 #143 授权迁移；最新一次从 `a113e08` 升级到 `2621c44`。`0020`/`0022` 的带历史数据回填、完整 2 用户／2 项目矩阵和升级后新真实评审仍未验证；详见交付就绪文档。CI 以最终 tag commit 的 GitHub Actions 结果为准。完整验证状态见 [v1.2.0（待发布）验证状态](docs/delivery-readiness.md#v120-验证状态)。
+当前最新发布版本是 **v1.5.0**（2026-11-14），变更和升级必读见 [CHANGELOG](CHANGELOG.md)。v1.5.0 汇总 Milestone 8 的 8 个用户侧修复（#453–#459、#466），新增迁移 `0031`–`0034`（append-only、无 down migration）；升级前须按运维文档做一致性备份，回滚需恢复升级前快照并启动匹配的旧镜像。自建 CI、GitHub CI、迁移演练与 DEV 回归结果见 [v1.5.0 验证状态](docs/delivery-readiness.md#v150-验证状态)；生产部署验收待执行。CI 以最终 tag commit 的 GitHub Actions 结果为准。
 
 部署时：人工部署看 [部署与运维](docs/operations.md)，由 agent 代为部署和接入时用 [Agent 部署指南](docs/agent-deployment.md)。
 
@@ -256,7 +256,7 @@ go mod verify
 
 `go build` 依赖 `web/dist`，因此在全新检出上必须先执行前端构建。完整 Go 测试需要 Bash 和真实的 Python 3（注册文档测试会执行 Python 3）；`go test -race` 还需要启用 cgo 和可用的 C 编译器。自托管 runner 必须在运行前确认这些前提。生产二进制和部署运行不依赖 Python 3；上面的人工注册文档示例单独需要宿主机 Python 3。测试使用临时 SQLite 数据库和本地 HTTP 假 GitLab，覆盖注册、加密、认证、事件过滤、并发去重、租约恢复、旧 attempt 拒绝、CLI、工作流、发布、工作区、扩展和控制台静态资源。
 
-各版本做过哪些验证见 [交付就绪与验收记录](docs/delivery-readiness.md)：待发布版本看 [v1.2.0（待发布）验证状态](docs/delivery-readiness.md#v120-验证状态)，已发布版本看 [v1.1.x 验证状态](docs/delivery-readiness.md#当前版本v11x验证状态)，v1.0.0 的 f143 隔离实例验收看 [v1.0.0 历史验收记录](docs/delivery-readiness.md#v100-历史验收记录f143仅供追溯)。
+各版本做过哪些验证见 [交付就绪与验收记录](docs/delivery-readiness.md)：当前版本看 [v1.5.0 验证状态](docs/delivery-readiness.md#v150-验证状态)，此前的发布检查表见 [v1.4.0](docs/delivery-readiness.md#v140-发布检查表) 与 [v1.3.0](docs/delivery-readiness.md#v130-发布检查表294)，v1.0.0 的 f143 隔离实例验收看 [v1.0.0 历史验收记录](docs/delivery-readiness.md#v100-历史验收记录f143仅供追溯)。
 
 ## 主体已实现 / 范围外 / 已知限制
 
