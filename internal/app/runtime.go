@@ -238,6 +238,7 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		MaxConcurrentNodes: cfg.Engine.MaxConcurrentNodes,
 		DefaultNodeTimeout: cfg.Engine.DefaultNodeTimeout,
 		Clock:              now,
+		Logger:             logger,
 	})
 	publisher, err := NewPublisher(PublisherConfig{
 		Store:          deps.Store,
@@ -736,15 +737,37 @@ func (r *Runtime) reconcileAppliedReviewStatuses(ctx context.Context, interval t
 	}
 }
 
+// webhookHealthCheckInterval bounds how long a GitLab-disabled or deleted
+// managed webhook stays invisible after the startup check. The pass only reads
+// hook state and writes the project's fixed health fields (#466).
+const webhookHealthCheckInterval = 30 * time.Minute
+
+// reconcileWebhookHealth periodically revalidates managed project hooks.
+func (r *Runtime) reconcileWebhookHealth(ctx context.Context, interval time.Duration) {
+	if r.catchUp == nil {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			r.catchUp.ReconcileHookHealth(ctx)
+		}
+	}
+}
+
 // StartBackground starts the feedback, retention, run-cleanup, review
-// side-effect, and low-frequency status self-heal tickers.
+// side-effect, low-frequency status self-heal and webhook health tickers.
 // The returned function stops them and waits at most five seconds; done closes when they exit.
 func (r *Runtime) StartBackground(ctx context.Context) (stop func(), done <-chan struct{}) {
 	r.startOnce.Do(func() {
 		bgCtx, cancel := context.WithCancel(ctx)
 		r.startStop = cancel
 		var wg sync.WaitGroup
-		wg.Add(5)
+		wg.Add(6)
 		go func() {
 			defer wg.Done()
 			r.feedback.Start(bgCtx, defaultFeedbackInterval)
@@ -764,6 +787,10 @@ func (r *Runtime) StartBackground(ctx context.Context) (stop func(), done <-chan
 		go func() {
 			defer wg.Done()
 			r.reconcileAppliedReviewStatuses(bgCtx, reviewStatusSelfHealScanInterval)
+		}()
+		go func() {
+			defer wg.Done()
+			r.reconcileWebhookHealth(bgCtx, webhookHealthCheckInterval)
 		}()
 		go func() {
 			wg.Wait()

@@ -44,14 +44,17 @@ type fakeReviewStore struct {
 	events       dag.EventStore
 	stats        store.Stats
 
-	lastFilter      store.WorkflowFilter
-	lastLimit       int
-	lastCallFilter  store.LLMCallFilter
-	lastStats       store.StatsFilter
-	lastReviewStats store.ReviewStatsFilter
-	reviewStats     store.ReviewStats
-	accessByUser    map[int64]map[int64]bool
-	statusOnly      []store.StatusOnlyReview
+	lastFilter         store.WorkflowFilter
+	lastLimit          int
+	lastCallFilter     store.LLMCallFilter
+	lastStats          store.StatsFilter
+	lastReviewStats    store.ReviewStatsFilter
+	reviewStats        store.ReviewStats
+	deliverySummaries  []store.WebhookDeliverySummary
+	lastDeliveryFilter store.WebhookDeliveryFilter
+	deliveryErr        error
+	accessByUser       map[int64]map[int64]bool
+	statusOnly         []store.StatusOnlyReview
 
 	// Per-workflow and batched read counters let list tests prove the page is
 	// summarized with one query per kind of data instead of one per row.
@@ -1258,4 +1261,14 @@ func assertStatus(t *testing.T, response apiResponse, want int) {
 	if response.status != want {
 		t.Fatalf("status = %d, want %d, body=%s", response.status, want, response.body)
 	}
+}
+
+func (f *fakeReviewStore) ListWebhookDeliverySummaries(_ context.Context, filter store.WebhookDeliveryFilter, _ string, _ int) ([]store.WebhookDeliverySummary, string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastDeliveryFilter = filter
+	if f.deliveryErr != nil {
+		return nil, "", f.deliveryErr
+	}
+	return append([]store.WebhookDeliverySummary(nil), f.deliverySummaries...), "", nil
 }

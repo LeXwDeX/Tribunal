@@ -1750,6 +1750,10 @@ func (s *Store) ReviewStats(ctx context.Context, filter store.ReviewStatsFilter)
 	}
 	sort.Slice(stats.ByProject, func(i, j int) bool { return stats.ByProject[i].ProjectID < stats.ByProject[j].ProjectID })
 	sort.Slice(stats.Trend, func(i, j int) bool { return stats.Trend[i].Day < stats.Trend[j].Day })
+	stats.ModelDetailsPurged, err = s.modelDetailsPurged(ctx, store.StatsFilter(filter))
+	if err != nil {
+		return stats, err
+	}
 	return stats, nil
 }
 

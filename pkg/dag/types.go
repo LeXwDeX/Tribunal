@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 )
 
@@ -284,6 +285,11 @@ type Options struct {
 	MaxConcurrentNodes int
 	DefaultNodeTimeout time.Duration
 	Clock              func() time.Time
+	// Logger receives the engine-owned node failures that never reach an
+	// executor (queue_timeout, expand_failed, invalid_output). Nil keeps the
+	// old silent behavior. Only identifiers and the fixed error kind are
+	// logged; error text and credentials never are.
+	Logger *slog.Logger
 }
 
 // NodeView is the projected read model of one node. Meta is a copy of the

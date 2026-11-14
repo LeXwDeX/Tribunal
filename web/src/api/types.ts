@@ -290,6 +290,18 @@ export interface ReviewSummary {
   nodes?: GraphNode[]
 }
 
+// ReviewScope is the structured coverage statement from the synthesize node.
+// Older reviews have none; the console must not infer full coverage.
+export interface ReviewScope {
+  full: boolean
+  reason?: string
+  head?: string
+  last_head?: string
+  files?: string[]
+  file_count?: number
+  unlocated?: number
+}
+
 export interface ReviewDetail extends ReviewSummary {
   usage_incomplete?: boolean
   // Largest per-node recovery restart count; omitted when zero.
@@ -303,6 +315,13 @@ export interface ReviewDetail extends ReviewSummary {
   summary?: string
   warnings?: string[]
   unresolved?: UnresolvedSignal[]
+  /** Dossier review-material downgrades (restricted ignore, unverified context, missing base, truncated background). */
+  material_warnings?: string[]
+  /** Structured review coverage from the synthesize node. */
+  scope?: ReviewScope
+  /** Generated files skipped by GitLab's generated-file marking. */
+  generated_files?: number
+  generated_paths?: string[]
 }
 
 export interface Finding {
@@ -668,13 +687,56 @@ export interface ReviewStats extends Record<string, unknown> {
   model_details_purged?: boolean
 }
 
+export interface ModelStatsRow {
+  provider: string
+  model: string
+  calls: number
+  errors: number
+  error_rate?: number | null
+  input_tokens: number
+  output_tokens: number
+  avg_latency_ms?: number | null
+  p50_latency_ms?: number | null
+  errors_by_kind?: Record<string, number>
+}
+
+export interface FeedbackCollectionState {
+  last_collected_at?: string
+  last_error_class?: string
+  last_error_at?: string
+}
+
+export interface WorkspaceCapacity {
+  measured_at?: string
+  total_bytes: number
+  limit_bytes: number
+  over_limit: boolean
+}
+
+export interface WebhookDeliverySummary {
+  project_id: number
+  mr_iid: number
+  deliveries: number
+  enqueued: number
+  ignored: number
+  rejected: number
+  rejected_invalid_secret: number
+  last_received_at: string
+  reasons: Record<string, number>
+}
+
+export type WebhookDeliveryPage = Page<WebhookDeliverySummary> & { deliveries: WebhookDeliverySummary[] }
+
 export interface Stats extends Record<string, unknown> {
   duration_samples?: number
   trend?: DailyStats[]
   by_project?: ProjectStatsRow[]
   by_provider?: ProviderStatsRow[]
   by_block?: BlockStatsRow[]
+  by_model?: ModelStatsRow[]
   quality_by_provider?: ProviderQualityRow[]
+  feedback_collection?: FeedbackCollectionState
+  workspace_capacity?: WorkspaceCapacity
 }
 
 export interface PlatformSettings {

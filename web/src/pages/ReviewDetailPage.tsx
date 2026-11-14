@@ -503,8 +503,9 @@ function VerdictCard({
 function ReviewDiagnosticsPanel({ review }: { review: ReviewDetail }) {
   const unresolved = review.unresolved ?? []
   const warnings = review.warnings ?? []
+  const materialWarnings = review.material_warnings ?? []
   const incomplete = review.status === 'completed' && review.verdict === 'INCOMPLETE'
-  if (!incomplete && !warnings.length && !unresolved.length) return null
+  if (!incomplete && !warnings.length && !unresolved.length && !materialWarnings.length) return null
   const title = incomplete ? '未完成原因' : '评审诊断'
   return (
     <Panel title={title}>
@@ -532,8 +533,62 @@ function ReviewDiagnosticsPanel({ review }: { review: ReviewDetail }) {
             </ul>
           </div>
         ) : null}
-        {incomplete && !unresolved.length && !warnings.length && review.summary ? (
+        {materialWarnings.length ? (
+          <div className={rv.diagnosticsWarnings}>
+            <h3 className={rv.sectionLabel}>评审材料降级</h3>
+            <ul className={rv.diagnosticsList} aria-label="评审材料降级">
+              {materialWarnings.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}
+            </ul>
+          </div>
+        ) : null}
+        {incomplete && !unresolved.length && !warnings.length && !materialWarnings.length && review.summary ? (
           <p className={rv.diagnosticsEmpty}>服务端没有返回未解决信号或告警，未完成状态可能来自节点覆盖不足。</p>
+        ) : null}
+      </div>
+    </Panel>
+  )
+}
+
+// ReviewScopePanel renders only the structured coverage the API returns. It
+// never infers full coverage from a missing scope; older reviews keep the
+// existing verdict card explanation.
+function ReviewScopePanel({ review }: { review: ReviewDetail }) {
+  const scope = review.scope
+  const generated = review.generated_files ?? 0
+  const generatedPaths = review.generated_paths ?? []
+  if (!scope && generated <= 0 && !generatedPaths.length) return null
+  const fileCount = typeof scope?.file_count === 'number' ? scope.file_count : scope?.files?.length
+  return (
+    <Panel title="评审范围">
+      <div className={rv.diagnostics}>
+        {scope ? (
+          <ul className={rv.diagnosticsList} aria-label="评审范围">
+            <li>
+              <Badge plain tone={scope.full ? 'neutral' : 'info'}>{scope.full ? '全量评审' : '增量评审'}</Badge>
+              <span>{scope.full ? '覆盖本次 MR 的全部变更文件。' : '结论仅覆盖本次增量变更的文件。'}</span>
+            </li>
+            {scope.last_head || scope.head ? (
+              <li>
+                <span className="muted">head</span>
+                {scope.last_head ? <code>{shortSha(scope.last_head)}</code> : null}
+                {scope.last_head && scope.head ? <span aria-hidden="true">→</span> : null}
+                {scope.head ? <code>{shortSha(scope.head)}</code> : null}
+              </li>
+            ) : null}
+            {typeof fileCount === 'number' ? <li>覆盖文件：<span className="tabular">{formatNumber(fileCount)}</span> 个</li> : null}
+            {typeof scope.unlocated === 'number' && scope.unlocated > 0 ? (
+              <li>无法定位到行的问题：<span className="tabular">{formatNumber(scope.unlocated)}</span> 条</li>
+            ) : null}
+          </ul>
+        ) : null}
+        {generated > 0 || generatedPaths.length ? (
+          <div className={rv.diagnosticsWarnings}>
+            <h3 className={rv.sectionLabel}>生成文件</h3>
+            <p role="status">
+              跳过 <span className="tabular">{formatNumber(generated || generatedPaths.length)}</span> 个生成文件，未进入评审
+              {generatedPaths.length ? `：${generatedPaths.slice(0, 12).join('、')}${generatedPaths.length > 12 ? ` 等 ${generatedPaths.length} 个` : ''}。` : '。'}
+            </p>
+          </div>
         ) : null}
       </div>
     </Panel>
@@ -735,6 +790,8 @@ export function ReviewDetailPage() {
         />
 
         <ReviewDiagnosticsPanel review={review} />
+
+        <ReviewScopePanel review={review} />
 
         <Panel
           title={<>执行图 {graph.isSuccess ? <small>{graph.data.nodes.length} 个节点</small> : null}</>}

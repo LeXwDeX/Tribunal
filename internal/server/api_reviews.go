@@ -89,6 +89,20 @@ type reviewDetail struct {
 	Summary    string                    `json:"summary,omitempty"`
 	Warnings   []string                  `json:"warnings,omitempty"`
 	Unresolved []review.UnresolvedSignal `json:"unresolved,omitempty"`
+	// MaterialWarnings are the dossier's review-material downgrades (restricted
+	// ignore policy, unverified context, missing base, truncated background).
+	// They are separate from the synthesize warnings so the console can state
+	// where the degradation happened (#457, #466).
+	MaterialWarnings []string `json:"material_warnings,omitempty"`
+	// Scope is the structured review coverage from the last completed
+	// synthesize output: full or incremental, head range, file count and
+	// unlocated findings. Older reviews have none (#455, #466).
+	Scope *review.ReviewScope `json:"scope,omitempty"`
+	// GeneratedFiles and GeneratedPaths disclose generated files skipped by
+	// GitLab's generated-file marking. They stay part of the changed total
+	// but were not reviewed (#455, #466).
+	GeneratedFiles int      `json:"generated_files,omitempty"`
+	GeneratedPaths []string `json:"generated_paths,omitempty"`
 }
 
 type graphEdge struct {
@@ -361,17 +375,17 @@ func (s *Server) handleGetReview(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, r, err)
 		return
 	}
-	mrTitle, err := reviewMRTitle(r.Context(), s.store, wf.ID)
+	dossier, err := reviewDossierDiagnostics(r.Context(), s.store, wf.ID)
 	if err != nil {
 		s.writeStoreError(w, r, err)
 		return
 	}
 	snapshot := s.engineSnapshot(r.Context(), wf.ID)
-	summary, warnings, unresolved := reviewLevelDiagnostics(nodes)
+	summary, warnings, unresolved, scope := reviewLevelDiagnostics(nodes)
 	detail := reviewDetail{
 		Workflow:        *wf,
 		Access:          grantedAccess(r.Context()),
-		MRTitle:         mrTitle,
+		MRTitle:         dossier.title,
 		DurationMS:      workflowDuration(*wf),
 		Nodes:           reviewNodes(nodes, snapshot),
 		FindingsSummary: summarizeFindings(findings),
@@ -379,10 +393,14 @@ func (s *Server) handleGetReview(w http.ResponseWriter, r *http.Request) {
 			TokensIn:  wf.TokensIn,
 			TokensOut: wf.TokensOut,
 		},
-		Publications: summarizePublications(publications),
-		Summary:      summary,
-		Warnings:     warnings,
-		Unresolved:   unresolved,
+		Publications:     summarizePublications(publications),
+		Summary:          summary,
+		Warnings:         warnings,
+		Unresolved:       unresolved,
+		MaterialWarnings: dossier.warnings,
+		Scope:            scope,
+		GeneratedFiles:   dossier.generated,
+		GeneratedPaths:   dossier.generatedPaths,
 	}
 	if snapshot != nil {
 		detail.UsageInterruptions = snapshot.UsageInterruptions
@@ -472,7 +490,7 @@ func nodeReason(node store.WorkflowNode, snapshot *dag.WorkflowView) string {
 // reviewLevelDiagnostics decodes the last completed synthesize output. The
 // output is passed through SafeDiagnosticOutput so diagnostics copied by older
 // versions from failed verify nodes are not echoed again.
-func reviewLevelDiagnostics(nodes []store.WorkflowNode) (string, []string, []review.UnresolvedSignal) {
+func reviewLevelDiagnostics(nodes []store.WorkflowNode) (string, []string, []review.UnresolvedSignal, *review.ReviewScope) {
 	for i := len(nodes) - 1; i >= 0; i-- {
 		node := nodes[i]
 		if node.Kind != review.KindSynthesize || node.Status != string(dag.NodeCompleted) {
@@ -480,19 +498,20 @@ func reviewLevelDiagnostics(nodes []store.WorkflowNode) (string, []string, []rev
 		}
 		safe, err := review.SafeDiagnosticOutput(node.Kind, node.Output, diagnosticWorkflow(nodes))
 		if err != nil || len(safe) == 0 || string(safe) == "null" {
-			return "", nil, nil
+			return "", nil, nil, nil
 		}
 		var result struct {
 			Summary    string                    `json:"summary"`
 			Warnings   []string                  `json:"warnings"`
 			Unresolved []review.UnresolvedSignal `json:"unresolved"`
+			Scope      *review.ReviewScope       `json:"scope"`
 		}
 		if err := json.Unmarshal(safe, &result); err != nil {
-			return "", nil, nil
+			return "", nil, nil, nil
 		}
-		return result.Summary, result.Warnings, result.Unresolved
+		return result.Summary, result.Warnings, result.Unresolved, result.Scope
 	}
-	return "", nil, nil
+	return "", nil, nil, nil
 }
 
 // fixedFailureDetailRE matches the code-owned failure summaries the review
@@ -556,32 +575,94 @@ func summarizeFindings(findings []store.Finding) findingsSummary {
 	return summary
 }
 
-// reviewMRTitle reads the title from the stored dossier snapshot. A workflow
-// without a dossier has no title; it is never fetched from GitLab here.
-func reviewMRTitle(ctx context.Context, st Store, workflowID string) (*string, error) {
+// reviewDossier is the read-only slice of a stored dossier the review detail
+// exposes without decompressing it anywhere else.
+type reviewDossier struct {
+	title          *string
+	warnings       []string
+	generated      int
+	generatedPaths []string
+}
+
+// reviewDossierDiagnostics reads the stored dossier snapshot once for the MR
+// title, the review-material downgrade warnings and the generated-file
+// disclosure. A workflow without a dossier has none; it is never fetched from
+// GitLab here.
+func reviewDossierDiagnostics(ctx context.Context, st Store, workflowID string) (reviewDossier, error) {
+	var out reviewDossier
 	record, err := st.GetWorkflowDossier(ctx, workflowID)
 	if errors.Is(err, store.ErrNotFound) {
-		return nil, nil
+		return out, nil
 	}
 	if err != nil {
-		return nil, err
+		return out, err
 	}
 	if record == nil || len(record.Data) == 0 {
-		return nil, nil
+		return out, nil
 	}
 	var snapshot struct {
 		MR struct {
 			Title string `json:"title"`
 		} `json:"mr"`
+		Warnings    []string `json:"warnings"`
+		DiffSummary struct {
+			Generated      int      `json:"generated"`
+			GeneratedPaths []string `json:"generated_paths"`
+		} `json:"diff_summary"`
 	}
 	if err := json.Unmarshal(record.Data, &snapshot); err != nil {
-		return nil, nil
+		return out, nil
 	}
-	title := strings.TrimSpace(snapshot.MR.Title)
-	if title == "" {
-		return nil, nil
+	if trimmed := strings.TrimSpace(snapshot.MR.Title); trimmed != "" {
+		out.title = &trimmed
 	}
-	return &title, nil
+	out.warnings = sanitizeMaterialWarnings(snapshot.Warnings)
+	out.generated = snapshot.DiffSummary.Generated
+	if out.generated < 0 {
+		out.generated = 0
+	}
+	if len(snapshot.DiffSummary.GeneratedPaths) > 0 {
+		paths := make([]string, 0, len(snapshot.DiffSummary.GeneratedPaths))
+		for _, path := range snapshot.DiffSummary.GeneratedPaths {
+			if trimmed := strings.TrimSpace(path); trimmed != "" {
+				paths = append(paths, trimmed)
+			}
+		}
+		out.generatedPaths = paths
+	}
+	return out, nil
+}
+
+// maxMaterialWarnings bounds the dossier downgrade list returned by the API.
+const maxMaterialWarnings = 20
+
+// sanitizeMaterialWarnings keeps the stored code-owned messages one line each.
+// They are already sanitized at collection time; this is a bounded-response
+// guard shared by every client of the detail endpoint.
+func sanitizeMaterialWarnings(warnings []string) []string {
+	if len(warnings) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(warnings))
+	seen := make(map[string]struct{}, len(warnings))
+	for _, warning := range warnings {
+		line := strings.TrimSpace(strings.Join(strings.Fields(warning), " "))
+		if line == "" || len(line) > 500 {
+			continue
+		}
+		if _, ok := seen[line]; ok {
+			continue
+		}
+		seen[line] = struct{}{}
+		out = append(out, line)
+		if len(out) >= maxMaterialWarnings {
+			break
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // summarizePublications reports only what the store actually knows. A commit

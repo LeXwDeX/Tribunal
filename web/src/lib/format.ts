@@ -29,6 +29,23 @@ export function formatTokens(input: unknown, output?: unknown): string {
   return `${formatCompactNumber(input)} / ${formatCompactNumber(output)}`
 }
 
+const BYTE_UNITS = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB']
+
+// formatBytes renders a byte count with binary units. Non-finite or negative
+// values stay unavailable instead of showing a misleading zero.
+export function formatBytes(value: unknown): string {
+  const bytes = Number(value)
+  if (!Number.isFinite(bytes) || bytes < 0) return '不可用'
+  if (bytes < 1024) return `${Math.round(bytes)} B`
+  let scaled = bytes
+  let unit = 0
+  while (scaled >= 1024 && unit < BYTE_UNITS.length - 1) {
+    scaled /= 1024
+    unit++
+  }
+  return `${scaled >= 10 ? scaled.toFixed(0) : scaled.toFixed(1)} ${BYTE_UNITS[unit]}`
+}
+
 export function formatDate(value?: string): string {
   if (!value) return '—'
   const date = new Date(value)

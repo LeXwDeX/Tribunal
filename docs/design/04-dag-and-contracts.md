@@ -189,7 +189,8 @@ finalize 若在重读时发现新节点，返回主循环继续调度，而不�
 | 依赖全部 skipped | 节点 `skipped(deps_skipped)` |
 | verify 节点失败 | 对应 finding 的挑战结果记为 `uncertain` |
 | 工作流取消 | 运行中节点 `aborted`，未开始节点 `skipped(workflow_cancelled)` |
-| 四路评审节点（`cr.*`、`rv.*`、`reasoner`、`validate`）失败、被取消或被跳过 | 它们都是可选节点，其余各路继续运行并照常发布各自的 findings。`gather` 为缺失的一路写入证据缺口「lane X did not complete」，最终结论为 `INCOMPLETE`，不会是 `PASS` |
+| 四路评审节点（`cr.*`、`rv.*`、`reasoner`、`validate`）失败、被取消或被跳过 | 它们都是可选节点，其余各路继续运行并照常发布各自的 findings。失败节点（非取消）的缺口携带固定失败类、可用时的回合数和已记录用量；`gather` 最终结论为 `INCOMPLETE`，不会是 `PASS` |
+| 末轮未提交但已解码出结构化结果 | `executeReviewLane`、`executeValidate`、`executeExplore` 用 `errors.As` 读取 `PartialRunError`；仅 `no_submit`、`invalid_submit`、`context_too_long` 且未被取消时，把 `Result` 中已解码的输出（或 transcript 中最后一次 `submit_result` 尝试）作为该 lane 的部分结果提交。`review`/`validate` 的部分 finding 进入投票；每个 finding 单独校验，契约级不一致不会丢弃整个 lane。节点以 `PartialLaneOut` 完成，`gather` 仍写入携带 `error_kind`、回合数与用量的 evidence gap，因此 verdict 不能是 `PASS`；已有 P0/P1 的 `BLOCKING` 不被降级。unsafe、取消、timeout 与预算类保持原失败语义 |
 | `explore` 未成功完成 | 四路评审不带探索摘要运行；报告给出一条告警，不产生证据缺口 |
 | `explore` 被跳过 | 只会发生在设置了 token 预算（`max_tokens > 0`）且预算在它开始前已耗尽时；此时 `plan` 也被跳过，工作流在没有结论的情况下结束 |
 
@@ -207,7 +208,7 @@ finalize 若在重读时发现新节点，返回主循环继续调度，而不�
 
 执行期约束：
 
-- 每个 agent 节点的模型请求数 ≤ `budget.max_turns`。默认 0 表示不限制；正数到达后仍未提交 `submit_result` 时，先追加最多 2 个仅允许 `submit_result` 的 grace turn，仍失败则节点失败，结论按 required / optional 处理。grace turn 仍失败时执行器保留已收集的部分状态（`PartialRunError`），节点层可把该 lane 降级为 evidence gap。agent 运行仍会在 `submit_result`、上下文窗口、调用方 token 预算或 context deadline 时结束。
+- 每个 agent 节点的模型请求数 ≤ `budget.max_turns`。默认 0 表示不限制；正数到达后仍未提交 `submit_result` 时，先追加最多 2 个仅允许 `submit_result` 的 grace turn，仍失败则节点失败，结论按 required / optional 处理。grace turn 仍失败时执行器保留已收集的部分状态（`PartialRunError`），评审 lane 据此降级为携带部分结果的 evidence gap（见 §5.4）；降级时另记一条 WARN `review lane downgraded to evidence gap`，字段与失败 WARN 相同并增加 `recovered_findings`，不记录错误正文。agent 运行仍会在 `submit_result`、上下文窗口、调用方 token 预算或 context deadline 时结束。
 - `budget.deadline` 为 0（默认）时不设工作流 deadline；正数到期后 `Cancel(wf, "deadline")`；负值在配置校验和评审档位校验中被拒绝。
 
 当前实现的 token 预算语义（仅在 `budget.max_tokens > 0` 时生效；默认 0 不做 token 预算检查，用量由上游 LLM key 的额度决定，见 [#392](https://github.com/LeXwDeX/Tribunal/issues/392)）：

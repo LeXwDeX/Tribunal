@@ -153,13 +153,14 @@ func (s *WebhookService) Handle(ctx context.Context, req WebhookRequest) (Webhoo
 			parsedUUID = uuid.Nil
 		}
 	}
+	mrIID := webhookMRIID(req.Event, payload)
 	if !s.validToken(project, req.Token) {
 		s.logger.Warn("webhook authentication failed", "project_id", project.ID, "event", req.Event)
 		// Record the rejection when the envelope is identifiable. The delivery
 		// table then shows that GitLab called with a mismatched secret instead
 		// of reporting a silent green webhook (#457).
 		if parsedUUID != uuid.Nil {
-			s.recordRejected(ctx, project.ID, req.Event, parsedUUID.String(), "invalid_secret")
+			s.recordRejected(ctx, project.ID, req.Event, parsedUUID.String(), mrIID, "invalid_secret")
 		}
 		return WebhookResult{Unauthorized: true}, nil
 	}
@@ -170,20 +171,20 @@ func (s *WebhookService) Handle(ctx context.Context, req WebhookRequest) (Webhoo
 		return WebhookResult{Ignored: "invalid_event_uuid"}, nil
 	}
 	if reason := checkEventKind(req.Event, payload.ObjectKind); reason != "" {
-		return s.recordIgnored(ctx, project.ID, req.Event, parsedUUID.String(), reason)
+		return s.recordIgnored(ctx, project.ID, req.Event, parsedUUID.String(), mrIID, reason)
 	}
 
 	settings, err := ResolveSettings(project.Settings, s.reviewDefaults)
 	if err != nil {
 		s.logger.Warn("stored project settings are invalid", "project_id", project.ID)
-		return s.recordIgnored(ctx, project.ID, req.Event, parsedUUID.String(), "invalid_settings")
+		return s.recordIgnored(ctx, project.ID, req.Event, parsedUUID.String(), mrIID, "invalid_settings")
 	}
 
 	job, reason := s.decide(ctx, project, settings, payload)
 	if reason != "" {
-		return s.recordIgnored(ctx, project.ID, req.Event, parsedUUID.String(), reason)
+		return s.recordIgnored(ctx, project.ID, req.Event, parsedUUID.String(), mrIID, reason)
 	}
-	return s.recordJob(ctx, project.ID, req.Event, parsedUUID.String(), job, nil)
+	return s.recordJob(ctx, project.ID, req.Event, parsedUUID.String(), mrIID, job, nil)
 }
 
 func (s *WebhookService) validToken(project *store.Project, presented string) bool {
@@ -200,20 +201,21 @@ func (s *WebhookService) validToken(project *store.Project, presented string) bo
 // recordRejected persists a delivery that failed authentication. It never
 // returns an error: the HTTP answer stays the fixed unauthorized response so a
 // caller cannot distinguish storage from authentication failure.
-func (s *WebhookService) recordRejected(ctx context.Context, projectID int64, event, eventUUID, reason string) {
+func (s *WebhookService) recordRejected(ctx context.Context, projectID int64, event, eventUUID string, mrIID int64, reason string) {
 	rejectedUUID := uuid.NewSHA1(webhookRejectionNamespace, []byte(itoa(projectID)+":"+eventUUID)).String()
 	if _, _, err := s.store.RecordDelivery(ctx, store.Delivery{
-		UUID: rejectedUUID, ProjectID: projectID, Event: event,
+		UUID: rejectedUUID, ProjectID: projectID, MRIID: mrIID, Event: event,
 		Outcome: store.DeliveryRejected, Reason: reason, ReceivedAt: s.now().UTC(),
 	}, nil); err != nil {
 		s.logger.Warn("rejected delivery persistence failed", "project_id", projectID, "event", event, "error_class", errclass.Of(err))
 	}
 }
 
-func (s *WebhookService) recordIgnored(ctx context.Context, projectID int64, event, eventUUID, reason string) (WebhookResult, error) {
+func (s *WebhookService) recordIgnored(ctx context.Context, projectID int64, event, eventUUID string, mrIID int64, reason string) (WebhookResult, error) {
 	_, duplicate, err := s.store.RecordDelivery(ctx, store.Delivery{
 		UUID:       eventUUID,
 		ProjectID:  projectID,
+		MRIID:      mrIID,
 		Event:      event,
 		Outcome:    store.DeliveryIgnored,
 		Reason:     reason,
@@ -232,10 +234,11 @@ func (s *WebhookService) recordIgnored(ctx context.Context, projectID int64, eve
 // recordJob persists the delivery and job. A non-nil expect makes the enqueue
 // conditional on the review control (see store.ReviewControlExpect); a changed
 // control yields Ignored "control_changed" and writes nothing.
-func (s *WebhookService) recordJob(ctx context.Context, projectID int64, event, eventUUID string, job *store.Job, expect *store.ReviewControlExpect) (WebhookResult, error) {
+func (s *WebhookService) recordJob(ctx context.Context, projectID int64, event, eventUUID string, mrIID int64, job *store.Job, expect *store.ReviewControlExpect) (WebhookResult, error) {
 	delivery := store.Delivery{
 		UUID:       eventUUID,
 		ProjectID:  projectID,
+		MRIID:      mrIID,
 		Event:      event,
 		Outcome:    store.DeliveryEnqueued,
 		ReceivedAt: s.now().UTC(),
@@ -755,4 +758,27 @@ func isZeroSHA(sha string) bool {
 
 func itoa(value int64) string {
 	return strconv.FormatInt(value, 10)
+}
+
+// webhookMRIID extracts the merge request identity from an event. Note hooks
+// carry the note ID in object_attributes.iid, so the noteable or merge_request
+// fields are authoritative there. Push and unknown events have no MR.
+func webhookMRIID(event string, payload *gitlab.Webhook) int64 {
+	if payload == nil {
+		return 0
+	}
+	switch event {
+	case "Note Hook":
+		if payload.ObjectAttributes.NoteableIID > 0 {
+			return payload.ObjectAttributes.NoteableIID
+		}
+	case "Merge Request Hook":
+		if payload.ObjectAttributes.IID > 0 {
+			return payload.ObjectAttributes.IID
+		}
+	}
+	if payload.MergeRequest.IID > 0 {
+		return payload.MergeRequest.IID
+	}
+	return 0
 }

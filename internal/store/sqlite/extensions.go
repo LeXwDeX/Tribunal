@@ -14,11 +14,12 @@ import (
 )
 
 const (
-	listCursorProjects = "projects"
-	listCursorTokens   = "tokens"
-	listCursorMCP      = "mcp"
-	listCursorSkills   = "skills"
-	listCursorBindings = "bindings"
+	listCursorProjects   = "projects"
+	listCursorTokens     = "tokens"
+	listCursorMCP        = "mcp"
+	listCursorSkills     = "skills"
+	listCursorBindings   = "bindings"
+	listCursorDeliveries = "webhook-deliveries"
 )
 
 // listCursor is the shared opaque keyset cursor. Each list method fills only
@@ -30,6 +31,8 @@ type listCursor struct {
 	UserID       int64  `json:"user_id,omitempty"`
 	Scope        string `json:"scope,omitempty"`
 	ProjectID    *int64 `json:"project_id,omitempty"`
+	MRIID        int64  `json:"mr_iid,omitempty"`
+	RowMRIID     int64  `json:"row_mr_iid,omitempty"`
 	At           string `json:"at,omitempty"`
 	ID           string `json:"id,omitempty"`
 	RowScope     string `json:"row_scope,omitempty"`

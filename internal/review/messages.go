@@ -21,7 +21,8 @@ const (
 )
 
 var (
-	laneIncompleteRE    = regexp.MustCompile(`^lane \S+ \(([^)]+)\) did not complete: (\S+)$`)
+	laneIncompleteRE    = regexp.MustCompile(`^lane \S+ \(([^)]+)\) did not complete: (\S+)(?: \([^)]*\))?$`)
+	partialLaneRE       = regexp.MustCompile(`^lane \S+ \(([^)]+)\) stopped before submit_result: error_kind=(\S+) turns=(\d+) input_tokens=(\d+) output_tokens=(\d+) recovered_findings=(\d+)$`)
 	nodeUnavailableRE   = regexp.MustCompile(`^node \S+ \(([^)]+)\) was (\S+) and its findings are unavailable$`)
 	nodeNoExploreRE     = regexp.MustCompile(`^node \S+ \(([^)]+)\) was (\S+); the lanes ran without the exploration digest$`)
 	coverageOmittedRE   = regexp.MustCompile(`^(?:diff collection omitted|omitted) (\d+) of (\d+) changed file\(s\)`)
@@ -69,6 +70,21 @@ var statusLabels = map[string]string{
 	"completed": "已完成",
 	"pending":   "待执行",
 	"running":   "进行中",
+}
+
+// failureClassLabels names the fixed run-failure classes that can appear on a
+// degraded lane. Unknown values stay unnamed instead of leaking machine text.
+var failureClassLabels = map[string]string{
+	noSubmitClass:       "未提交最终结果",
+	invalidSubmitClass:  "最终结果未通过校验",
+	contextTooLongClass: "上下文超出模型窗口",
+}
+
+func failureClassLabel(class string) string {
+	if label, ok := failureClassLabels[class]; ok {
+		return label
+	}
+	return "固定失败类"
 }
 
 var coverageReasonLabels = map[string]string{
@@ -131,6 +147,10 @@ func localizeMachineMessage(message string) (string, bool) {
 	}
 	if text, ok := exactDiagnostics[message]; ok {
 		return text, true
+	}
+	if match := partialLaneRE.FindStringSubmatch(message); match != nil {
+		return fmt.Sprintf("%s通道在提交最终结果前结束（%s，%s 轮，输入 %s / 输出 %s tokens），已保留恢复的 %s 条问题；该通道未完成，结论不能为通过。",
+			kindLabel(match[1]), failureClassLabel(match[2]), match[3], match[4], match[5], match[6]), true
 	}
 	if match := laneIncompleteRE.FindStringSubmatch(message); match != nil {
 		return fmt.Sprintf("%s通道未完成（%s）%s",

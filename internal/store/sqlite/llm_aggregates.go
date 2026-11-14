@@ -311,7 +311,6 @@ func (s *Store) modelStats(ctx context.Context, filter store.StatsFilter, where 
 		return nil, false, fmt.Errorf("sqlite: iterate stats llm daily aggregates: %w", err)
 	}
 	dailyRows.Close()
-	purged := usedAggregates
 
 	if usedAggregates {
 		histogramRows, err := s.db.QueryContext(ctx, `SELECT
@@ -375,6 +374,13 @@ func (s *Store) modelStats(ctx context.Context, filter store.StatsFilter, where 
 			return nil, false, fmt.Errorf("sqlite: iterate stats llm error aggregates: %w", err)
 		}
 		errorRows.Close()
+	}
+
+	// Stats and stats/reviews share one data-driven predicate so the same field
+	// name cannot mean two different things (#466).
+	purged, err := s.modelDetailsPurged(ctx, filter)
+	if err != nil {
+		return nil, false, err
 	}
 
 	sort.Slice(order, func(i, j int) bool { return order[i] < order[j] })
@@ -450,6 +456,27 @@ func aggregateStatsConditions(filter store.StatsFilter, detailSince time.Time) (
 		args = append(args, accessArgs...)
 	}
 	return conditions, args
+}
+
+// modelDetailsPurged reports whether calls in the selected window are served
+// from the daily aggregates because their per-call detail rows were deleted.
+// It mirrors modelStats: aggregate-only rows that actually carry calls are the
+// evidence. A window with no calls never claims purged details, and a window
+// still covered by detail rows stays false (#466).
+func (s *Store) modelDetailsPurged(ctx context.Context, filter store.StatsFilter) (bool, error) {
+	detailSince, err := s.llmCallDetailSince(ctx)
+	if err != nil {
+		return false, err
+	}
+	conditions, args := aggregateStatsConditions(filter, detailSince)
+	conditions = append(conditions, "d.calls > 0")
+	var found int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM llm_call_daily d WHERE `+strings.Join(conditions, " AND ")+`)`,
+		args...).Scan(&found); err != nil {
+		return false, fmt.Errorf("sqlite: check purged model details: %w", err)
+	}
+	return found != 0, nil
 }
 
 // aggregateEndDay returns the exclusive day bound for an exclusive time bound.

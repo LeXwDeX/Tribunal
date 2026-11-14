@@ -2,12 +2,13 @@ import { useEffect, useId, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   createApiToken, deleteAdminGrant, deleteAdminUserGrant, fetchMe, getSettings, listAdminGrants,
-  listAdminProjects, listAdminUserGrants, listAdminUsers, listApiTokens, renewApiToken, revokeAdminUserCredentials,
-  revokeApiToken, setAdminGrant, setAdminUserDisabled, setAdminUserGrant, updateAdminUser,
+  listAdminProjects, listAdminUserGrants, listAdminUsers, listApiTokens, listProjects, listWebhookDeliveries,
+  renewApiToken, revokeAdminUserCredentials, revokeApiToken, setAdminGrant, setAdminUserDisabled, setAdminUserGrant,
+  updateAdminUser,
 } from '../api/api'
 import { ApiError } from '../api/client'
 import type {
-  AdminProject, AdminUser, ApiToken, CreatedApiToken, ProjectAccess, ProjectGrant,
+  AdminProject, AdminUser, ApiToken, CreatedApiToken, Project, ProjectAccess, ProjectGrant, WebhookDeliverySummary,
 } from '../api/types'
 import { useCanSelfService, useCanWrite } from '../components/RoleContext'
 import {
@@ -15,11 +16,105 @@ import {
   PageHeader, Panel, PanelBody, SecretField, Select, Tabs, useToast,
 } from '../components/ui'
 import { usePaginated } from '../lib/hooks'
-import { formatDate } from '../lib/format'
+import { formatDate, formatRelative } from '../lib/format'
 import { ConfigSourcesPanel } from './ConfigSourcesPanel'
 import ui from '../styles/ui.module.css'
 import styles from './pages.module.css'
 import insights from './insights.module.css'
+
+// WebhookDeliveriesPanel is the read-only "why was this MR not reviewed" view.
+// It shows only the fixed reasons and counts the API returns; the upstream
+// request body and the webhook secret are never available here.
+function WebhookDeliveriesPanel() {
+  const deliveries = usePaginated<WebhookDeliverySummary>(
+    ['webhook-deliveries'],
+    (cursor) => listWebhookDeliveries({}, cursor),
+    'deliveries',
+  )
+  const projects = useQuery({
+    queryKey: ['projects', 'webhook-deliveries'],
+    queryFn: () => listProjects({ limit: 200 }),
+    retry: false,
+  })
+  const projectNames = new Map((projects.data?.projects || []).map((item: Project) => [item.id, item.path_with_namespace]))
+  const items = deliveries.items
+  return (
+    <Panel
+      flush
+      title="Webhook 投递"
+      aside={deliveries.isSuccess ? `${items.length}${deliveries.hasNextPage ? '+' : ''} 个 MR` : undefined}
+      note="按项目与 MR 聚合最近保留期内的投递。忽略原因来自固定类别；rejected/invalid_secret 表示请求未通过密钥校验，不会把项目标红。只读。"
+    >
+      {deliveries.isPending ? <PanelBody><LoadingState label="正在读取 Webhook 投递…" /></PanelBody> : null}
+      {deliveries.isError ? (
+        <PanelBody>
+          <ErrorState error={deliveries.error} onRetry={deliveries.retry} title="Webhook 投递加载失败" />
+        </PanelBody>
+      ) : null}
+      {deliveries.isSuccess && !items.length ? (
+        <PanelBody>
+          <EmptyState title="没有 Webhook 投递" description="保留期内没有记录到投递；旧版服务端也可能没有该只读接口。" />
+        </PanelBody>
+      ) : null}
+      {items.length ? (
+        <div className="tableWrap">
+          <table className={`dataTable ${insights.min760}`}>
+            <thead>
+              <tr>
+                <th scope="col">项目</th>
+                <th scope="col">MR</th>
+                <th scope="col">最后投递</th>
+                <th scope="col">投递</th>
+                <th scope="col">入队</th>
+                <th scope="col">忽略</th>
+                <th scope="col">拒绝</th>
+                <th scope="col">无效密钥</th>
+                <th scope="col">忽略原因</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((row) => {
+                const reasons = Object.entries(row.reasons || {}).sort(([a], [b]) => a.localeCompare(b))
+                return (
+                  <tr key={`${row.project_id}-${row.mr_iid}`}>
+                    <td className="mono">{projectNames.get(row.project_id) || `项目 ${row.project_id}`}</td>
+                    <td className="mono">{row.mr_iid > 0 ? `!${row.mr_iid}` : '未知 MR'}</td>
+                    <td>{formatRelative(row.last_received_at)}</td>
+                    <td className="tabular">{row.deliveries}</td>
+                    <td className="tabular">{row.enqueued}</td>
+                    <td className="tabular">{row.ignored}</td>
+                    <td className="tabular">{row.rejected}</td>
+                    <td className="tabular">{row.rejected_invalid_secret}</td>
+                    <td>
+                      {reasons.length ? (
+                        <span className={styles.budgetRow}>
+                          {reasons.map(([reason, count]) => <Badge key={reason} plain tone="warn">{reason}: {count}</Badge>)}
+                        </span>
+                      ) : (
+                        <span className="small muted">无</span>
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+      {deliveries.hasNextPage ? (
+        <PanelBody>
+          <Button
+            variant="secondary"
+            onClick={deliveries.fetchNextPage}
+            loading={deliveries.isFetchingNextPage}
+          >
+            {deliveries.isFetchNextPageError ? '重试加载更多投递' : '加载更多投递'}
+          </Button>
+        </PanelBody>
+      ) : null}
+    </Panel>
+  )
+}
 
 function tokenLabel(token: ApiToken): string {
   return token.name || `token ${token.id}`
@@ -804,6 +899,7 @@ export function SystemPage() {
 
   const tabs = [
     { key: 'tokens', label: 'API Token', panelId: 'system-tabpanel-tokens' },
+    { key: 'deliveries', label: 'Webhook 投递', panelId: 'system-tabpanel-deliveries' },
     ...(isAdmin ? [
       { key: 'settings', label: '平台配置（只读）', panelId: 'system-tabpanel-settings' },
       { key: 'users', label: '用户与账号', panelId: 'system-tabpanel-users' },
@@ -916,6 +1012,7 @@ export function SystemPage() {
             </Panel>
           ) : null}
 
+          {tab === 'deliveries' ? <WebhookDeliveriesPanel /> : null}
           {tab === 'settings' && isAdmin ? (
             <>
               <ConfigSourcesPanel enabled={isAdmin && tab === 'settings'} />

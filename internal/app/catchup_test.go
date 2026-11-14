@@ -582,3 +582,51 @@ func TestCatchUpSkipsHookHealthWithoutManagedHook(t *testing.T) {
 		t.Fatalf("hook list calls = %d, want 0 without a recorded hook", lister.calls)
 	}
 }
+
+// Hook health is no longer limited to the startup catch-up scan: the periodic
+// pass must reconcile it even when the catch-up scan is disabled, and a
+// recovered hook must clear the failure this feature wrote.
+func TestPeriodicHookHealthRunsWithoutCatchUpScan(t *testing.T) {
+	settings := defaultCatchUp
+	settings.Enabled = false
+	svc, f := newCatchUp(t, settings, `{"allow_repo_config":false}`)
+	lister := &hookLister{fakeOpenMRs: f.lister, hooks: map[int64][]gitlab.Hook{
+		42: {{ID: 77, AlertStatus: "disabled"}},
+	}}
+	svc.gitlab = lister
+	seedManagedHook(t, f, 77, store.WebhookStateEnabled, "")
+
+	svc.ReconcileHookHealth(context.Background())
+	project, _ := f.st.GetProject(context.Background(), 42)
+	if project.WebhookState != store.WebhookStateFailed || project.WebhookError != webhookDisabledMessage {
+		t.Fatalf("project = %+v", project)
+	}
+
+	lister.mu.Lock()
+	lister.hooks[42] = []gitlab.Hook{{ID: 77, AlertStatus: "executable"}}
+	lister.mu.Unlock()
+	svc.ReconcileHookHealth(context.Background())
+	project, _ = f.st.GetProject(context.Background(), 42)
+	if project.WebhookState != store.WebhookStateEnabled || project.WebhookError != "" {
+		t.Fatalf("recovered project = %+v", project)
+	}
+}
+
+// The periodic pass must not clear a failure written by another feature.
+func TestPeriodicHookHealthKeepsUnrelatedFailure(t *testing.T) {
+	svc, f, _ := newHookHealthFixture(t, []gitlab.Hook{{ID: 77, AlertStatus: "executable"}}, nil)
+	seedManagedHook(t, f, 77, store.WebhookStateFailed, "unrelated upstream failure")
+	svc.ReconcileHookHealth(context.Background())
+	project, _ := f.st.GetProject(context.Background(), 42)
+	if project.WebhookState != store.WebhookStateFailed || project.WebhookError != "unrelated upstream failure" {
+		t.Fatalf("project = %+v", project)
+	}
+}
+
+func TestPeriodicHookHealthSkipsProjectsWithoutManagedHook(t *testing.T) {
+	svc, _, lister := newHookHealthFixture(t, nil, nil)
+	svc.ReconcileHookHealth(context.Background())
+	if lister.calls != 0 {
+		t.Fatalf("hook list calls = %d, want 0 without a recorded hook", lister.calls)
+	}
+}

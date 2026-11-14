@@ -14,7 +14,7 @@
 | `workspace_capacity` | 工作区 | 最近一次工作区根目录容量测量，单行（0033） |
 | `context_docs` | 项目 | 生成或人工维护的上下文文档版本，按 `(project, kind)` 维护 active 版本 |
 | `mcp_servers`、`skills`、`block_bindings` | 扩展 | MCP、Skill 注册与按块授权 |
-| `webhook_deliveries` | 入口 | webhook 去重 |
+| `webhook_deliveries` | 入口 | webhook 去重；0034 追加 `mr_iid`，供只读投递视图按 MR 聚合 |
 | `jobs` | 入口 | 持久化任务队列 |
 | `review_controls`、`workflow_dossiers` | 入口/恢复 | 持久化评审代次和脱敏材料快照（0003） |
 | `review_status`、`review_reactions` | 发布 | 每个 MR 的状态/结果评论目标与源 note 表情（0011）；0031 追加 `final_body`，0032 追加 `final_body_ready`，0033 追加 `last_verified_at` |
@@ -131,6 +131,7 @@ CREATE TABLE block_bindings (
 CREATE TABLE webhook_deliveries (
   uuid        TEXT    NOT NULL,       -- X-Gitlab-Event-UUID，按项目去重
   project_id  INTEGER NOT NULL,
+  mr_iid      INTEGER NOT NULL DEFAULT 0, -- 0034：0 = push/历史/无法识别
   event       TEXT    NOT NULL,       -- Merge Request Hook | Note Hook | Push Hook
   outcome     TEXT    NOT NULL,       -- enqueued | ignored | rejected
   reason      TEXT,
@@ -138,6 +139,7 @@ CREATE TABLE webhook_deliveries (
   received_at TEXT    NOT NULL,
   PRIMARY KEY (project_id, uuid)
 );
+-- 0034 追加 (project_id, mr_iid, received_at) 索引并从关联 job payload 回填 mr_iid。
 
 CREATE TABLE jobs (
   id          TEXT    PRIMARY KEY,

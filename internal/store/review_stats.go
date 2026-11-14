@@ -31,6 +31,11 @@ type ReviewStats struct {
 	AllBlockingRatio *float64             `json:"all_blocking_ratio"`
 	ByProject        []ReviewProjectStats `json:"by_project"`
 	Trend            []ReviewDailyStats   `json:"trend"`
+	// ModelDetailsPurged uses the same data-driven rule as Stats: it is true
+	// only when calls in the selected window are actually served from the
+	// long-lived daily aggregates because their per-call detail rows were
+	// deleted. A window with no calls stays false (#466).
+	ModelDetailsPurged bool `json:"model_details_purged"`
 }
 
 // ReviewProjectStats is the per-project review slice.

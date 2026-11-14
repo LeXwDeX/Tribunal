@@ -58,6 +58,14 @@ workspace:
     changed_files: 200
     max_age: 168h
   run_cleanup_after: 1h
+  # Capacity guard, disabled by default (0 = disabled). When set, the run
+  # cleanup measures the workspace root, reports it through
+  # GET /api/v1/stats (workspace_capacity) and logs a WARN over the limit.
+  # max_bytes: 53687091200   # 50 GiB
+  # Idle-workspace reclamation, disabled by default (0 = disabled). Protected
+  # workspaces are never removed; a reclaimed workspace is rebuilt on the next
+  # refresh or onboarding.
+  # reclaim_after: 720h      # 30 days
 
 jobs:
   workers: 4

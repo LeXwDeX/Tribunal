@@ -247,6 +247,34 @@ type projectWebhookWriter interface {
 	UpdateProjectWebhook(ctx context.Context, id int64, update store.ProjectWebhookUpdate) error
 }
 
+// ReconcileHookHealth checks every registered project with a managed hook.
+// The startup catch-up scan only sees this once; a hook disabled later keeps
+// failing silently until the next process start. The periodic pass reuses the
+// same reconciliation, so a recovered hook clears the failure this feature
+// wrote and unrelated failures stay. One project's error never aborts the pass.
+func (s *CatchUpService) ReconcileHookHealth(ctx context.Context) {
+	projects, err := s.store.ListProjects(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			s.logger.Warn("webhook health scan failed", "error_class", errclass.Of(err))
+		}
+		return
+	}
+	for _, project := range projects {
+		if ctx.Err() != nil {
+			return
+		}
+		if !project.Enabled || project.HookID == nil {
+			continue
+		}
+		loaded, token, usable := s.projectToken(ctx, project.ID)
+		if !usable {
+			continue
+		}
+		s.reconcileHookHealth(ctx, loaded, token)
+	}
+}
+
 // reconcileHookHealth compares the recorded managed hook with GitLab and writes
 // the health back to the project. GitLab disables a hook after repeated
 // delivery failures, and the console previously stayed green (#457). It never
@@ -400,7 +428,7 @@ func (s *WebhookService) enqueueCatchUp(ctx context.Context, project *store.Proj
 		return false, nil
 	}
 	eventUUID := uuid.NewSHA1(catchUpNamespace, []byte(itoa(project.ID)+":"+itoa(mr.IID)+":"+head)).String()
-	result, err := s.recordJob(ctx, project.ID, catchUpEvent, eventUUID, job, expect)
+	result, err := s.recordJob(ctx, project.ID, catchUpEvent, eventUUID, mr.IID, job, expect)
 	if err != nil {
 		return false, err
 	}

@@ -255,7 +255,7 @@ SSE 事件（`event:` 字段）：`node`（`{id, status, attempt}`）、`finding
 
 工作流详情顶层、详情与图中的每个节点以及节点详情另有可选整数 `usage_interruptions`（增量字段，为 0 时省略）：顶层为任一单个节点被进程重启恢复中断的最大次数，节点上为该节点自身次数。它来自引擎对事件日志的投影，不是存储列；列表项不返回。控制台在评审详情的用量面板显示「单节点最多中断恢复 N 次」。迁移与回退限制见[数据模型](02-data-model.md)及[运维说明](../operations.md#用量完整性与审计升级v120)。
 
-评审详情顶层新增可选 `summary`、`warnings`、`unresolved`：取自该评审最后一个完成的 `synthesize` 节点输出，经诊断脱敏；没有完成节点或输出无效时省略。列表、详情和图中的节点新增可选 `reason`（失败或跳过节点的稳定失败类，如 `executor_error`、`timeout`、`budget_exhausted`、`sandbox_denied`、`required_node_failed`；完成节点省略）和 `token_free`（确定性节点，不调用模型）。节点详情另含 `calls_purged`、`calls_retention_hours`，说明该节点是否因保留策略删除了调用明细。节点 `error` 不再把所有非空值统一改写为 `node failed`：引擎固定安全文案原样保留，其它历史值仍折叠为 `node failed`。`skipped` 节点带 `reason`（如 `required_node_failed`），表示依赖未完成或跳过，不表示节点执行出错。
+评审详情顶层新增可选 `summary`、`warnings`、`unresolved`、`scope`：前三个取自该评审最后一个完成的 `synthesize` 节点输出，经诊断脱敏；没有完成节点或输出无效时省略。`scope` 是结构化的评审范围 `{full, reason?, head?, last_head?, files?, file_count?, unlocated?}`：`full=false` 时 `files` 是本次增量文件（最多 200 条），`file_count` 为增量文件数，`unlocated` 是已发布但没有 `path` 的 finding 数；旧评审没有该字段。评审详情另有 `material_warnings`（dossier 记录的评审材料降级原因：受限 ignore、上下文未校验、base 不可用、背景截断等，去重并有界）以及 `generated_files`/`generated_paths`（dossier 中 `DiffSummary.generated` 与最多 100 条跳过路径）。这三类字段分别说明“结论覆盖到哪”“哪些材料被降级”“哪些生成文件未评审”，不改变 verdict。列表、详情和图中的节点新增可选 `reason`（失败或跳过节点的稳定失败类，如 `executor_error`、`timeout`、`budget_exhausted`、`sandbox_denied`、`required_node_failed`；完成节点省略）和 `token_free`（确定性节点，不调用模型）。节点详情另含 `calls_purged`、`calls_retention_hours`，说明该节点是否因保留策略删除了调用明细。节点 `error` 不再把所有非空值统一改写为 `node failed`：引擎固定安全文案原样保留，其它历史值仍折叠为 `node failed`。`skipped` 节点带 `reason`（如 `required_node_failed`），表示依赖未完成或跳过，不表示节点执行出错。
 
 #### 节点调用审计格式
 
@@ -385,7 +385,8 @@ MCP、Skill、块绑定列表使用游标分页。
 | PUT | `/api/v1/profiles/default/overrides` | 平台管理员：`{overrides, revision}` 整体替换覆盖文档；`revision` 不匹配返回 409 `stale_revision`；返回完整详情视图 |
 | DELETE | `/api/v1/profiles/default/overrides?revision=` | 平台管理员：清除全部覆盖，恢复为配置；`revision` 必须是当前版本，不匹配或尚无覆盖记录返回 409 `stale_revision`；返回完整详情视图（`revision` 为存储的新版本） |
 | GET | `/api/v1/stats` | `?from=&to=&project_id=`：运行次数（含 onboarding）、耗时、项目/provider/块统计与 UTC 日趋势、finding 处置分布、人工质量指标、按模型调用与反馈原始计数；`to` 为排他上界 |
-| GET | `/api/v1/stats/reviews` | `?from=&to=&project_id=`：仅统计 `kind=review`：`runs`、`completed`、`incomplete`、`blocking`、`failed`、`cancelled`、`blocking_ratio`（评审分母）、`incomplete_ratio`、`all_runs`/`all_blocking`/`all_blocking_ratio`（含 onboarding 的并列分母）、`by_project`、`trend`；另返回 `llm_call_retention_hours` 与 `model_details_purged`（所选 `from` 早于 `storage.llm_call_retention` 截止点时为 `true`）；项目/访问过滤与 `/stats` 相同，`to` 为排他上界 |
+| GET | `/api/v1/stats/reviews` | `?from=&to=&project_id=`：仅统计 `kind=review`：`runs`、`completed`、`incomplete`、`blocking`、`failed`、`cancelled`、`blocking_ratio`（评审分母）、`incomplete_ratio`、`all_runs`/`all_blocking`/`all_blocking_ratio`（含 onboarding 的并列分母）、`by_project`、`trend`；另返回 `llm_call_retention_hours` 与 `model_details_purged`（数据驱动：仅当所选窗口内的调用实际由日聚合表提供时为 `true`，没有调用时为 `false`，与 `/stats` 使用同一判定）；项目/访问过滤与 `/stats` 相同，`to` 为排他上界 |
+| GET | `/api/v1/webhook-deliveries` | `?project_id=&mr_iid=&limit=&cursor=`：只读的 webhook 投递聚合：按项目与 MR 返回 `deliveries`、`enqueued`、`ignored`、`rejected`、`rejected_invalid_secret`、`last_received_at` 与 `reasons`（仅 ignored 的固定原因计数）；受项目访问过滤；不返回上游请求正文或 secret |
 | GET | `/api/v1/system/lock-stats` | 平台管理员：SQLite 连接等待（`wait_count`、`wait_duration_ms` 为累计值；`max_open_connections`、`in_use`、`idle` 为当前连接池值）与工作区锁等待（`wait_count`、`wait_duration_ms` 为累计值，`max_wait_ms` 为进程启动以来单次最长等待）；单连接下连接等待是 SQL 串行化的代理，不是 driver busy 重试计数 |
 | GET | `/api/v1/settings` | 平台配置的只读视图（脱敏） |
 | GET | `/api/v1/config` | 平台管理员：文件生效配置的脱敏 allowlist 视图、逐键 `origins`、`warnings`、`last_error`、`last_error_at`，以及 `base_revision`、`overlay_revision`、`overlay_present`、`applied`、`restart_required` |
@@ -452,11 +453,15 @@ provider 和 profile 的基线以配置文件为准；改动配置需重启服�
 
 `/stats` 在聚合和分页前按当前用户的项目授权过滤；平台管理员不按 grant 过滤，统计全部已登记项目；其他用户按逐项目 grant 或有效的 `global_read` 过滤。指定 `project_id` 时还要求该项目 `read`（平台管理员隐式具备）。
 
+`GET /api/v1/webhook-deliveries` 是只读入口诊断：按 `(project_id, mr_iid)` 聚合保留期内的投递，按最后投递时间从新到旧排列，同时间按项目、MR 升序。每项字段为 `project_id`、`mr_iid`（0 表示 push 事件、历史行或无法从事件识别 MR）、`deliveries`、`enqueued`、`ignored`、`rejected`、`rejected_invalid_secret`、`last_received_at` 和 `reasons`（仅 ignored 投递的固定原因计数，如 `unsupported_action`、`not_review_command`、`branch_filtered`、`missing_oldrev`、`unsupported_noteable`、`branch_deleted`、`mr_closed`）。无原因时为 `{}`。响应为 `{deliveries, next_cursor}`；`project_id` 必须是调用者可读的项目，否则 404；聚合前应用与统计相同的项目/访问过滤，`global_read` 与平台管理员规则不变。cursor 绑定 `project_id`/`mr_iid` 筛选，跨筛选复用返回 400。该接口不返回上游请求正文、header、secret 或 job payload。投递记录本身只携带事件、固定结果/原因和 MR 标识；`rejected/invalid_secret` 表示未认证请求，不会改变项目健康状态。
+
 控制台集合响应按资源命名：`{projects}`、`{reviews}`、`{findings}`、`{servers}`、`{skills}`、`{bindings}`、`{providers}`、`{presets}`、`{profiles}`、`{calls}`、`{documents}`、`{tokens}`；可分页的集合另带 `next_cursor`。不提供未发布的旧字段别名。
 
-`stats` 使用字段 `runs`、`blocking`、`blocking_ratio`、`published`、`overturned_ratio`、`avg_duration_ms`、`p95_duration_ms`、`duration_samples`、`trend`、`by_project`、`by_provider`、`by_block`、`by_model`、`decisions`、`quality_by_provider` 和 `feedback`。`runs` 统计窗口内全部 workflow（包括评审和 onboarding），不是仅评审次数；`blocking_ratio` 当前也是 `blocking / runs`，所以 onboarding 会稀释该比例。
+`stats` 使用字段 `runs`、`blocking`、`blocking_ratio`、`published`、`overturned_ratio`、`avg_duration_ms`、`p95_duration_ms`、`duration_samples`、`trend`、`by_project`、`by_provider`、`by_block`、`by_model`、`decisions`、`quality_by_provider`、`feedback`、`model_details_purged`、`feedback_collection` 和 `workspace_capacity`。`runs` 统计窗口内全部 workflow（包括评审和 onboarding），不是仅评审次数；`blocking_ratio` 当前也是 `blocking / runs`，所以 onboarding 会稀释该比例。
 
-`GET /api/v1/stats/reviews` 是仅评审口径的并列视图，筛选、UTC 日桶和项目/访问过滤与 `/stats` 相同。它的 `blocking_ratio` 以评审 `runs` 为分母，`incomplete_ratio` 以评审 `runs` 为分母；`all_runs`、`all_blocking`、`all_blocking_ratio` 给出含 onboarding 的并列分母，便于与 `/stats` 对照。`by_project` 与 `trend` 只含评审计数。`llm_call_retention_hours` 为配置的调用明细保留小时数；`model_details_purged` 在所选 `from` 早于保留截止点时为 `true`，表示同一窗口的模型调用明细可能已被删除，不能据此判断模型从未被使用。
+`model_details_purged` 为 `true` 仅当窗口内至少一次按模型统计来自日聚合表（明细已被 `storage.llm_call_retention` 删除）；没有调用时为 `false`，因此不能用它区分“模型未被使用”。`by_model[]` 还返回 `errors_by_kind`（固定错误类别到计数的映射），不包含上游响应正文。`feedback_collection` 为可选对象 `{last_collected_at?, last_error_class?, last_error_at?}`：`last_collected_at` 只在一次采集成功后推进；`last_error_class` 是最近失败的固定类别，成功后清除。`workspace_capacity` 为可选对象 `{measured_at?, total_bytes, limit_bytes, over_limit}`：`limit_bytes` 为 0 表示未配置上限，`over_limit` 只在启用 `workspace.max_bytes` 且最近测量超限时为 `true`。旧响应缺少这些可选字段时表示不可用，不是零值或健康状态。
+
+`GET /api/v1/stats/reviews` 是仅评审口径的并列视图，筛选、UTC 日桶和项目/访问过滤与 `/stats` 相同。它的 `blocking_ratio` 以评审 `runs` 为分母，`incomplete_ratio` 以评审 `runs` 为分母；`all_runs`、`all_blocking`、`all_blocking_ratio` 给出含 onboarding 的并列分母，便于与 `/stats` 对照。`by_project` 与 `trend` 只含评审计数。`llm_call_retention_hours` 为配置的调用明细保留小时数。`model_details_purged` 与 `/stats` 使用同一数据驱动判定：仅当所选窗口内的模型调用实际由长期聚合表提供（明细已被保留策略删除）时为 `true`；窗口内没有调用时为 `false`，此时零值确实表示没有调用。它不再按配置保留期推断。
 
 运行统计按 workflow 的 `created_at` 落在 `[from, to)` 内筛选，所有维度都应用同一个项目筛选。每日趋势按该创建时间归入 UTC 日，不按完成时间或 LLM 调用时间分桶。日期控件使用本地日，因而一个本地日可能跨两个 UTC 日桶。
 

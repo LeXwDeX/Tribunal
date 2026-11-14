@@ -142,6 +142,24 @@ func (s *Store) RejectDiscussionIntent(ctx context.Context, projectID, mrIID int
 	return nil
 }
 
+// PurgeOrphanedDiscussionIntents deletes receipts whose project is no longer
+// registered. DeleteProject fences them with verification_required=1 and keeps
+// them because the remote thread remains; for a deleted project that fence can
+// never clear, so the terminal fallback was the only escape. Live projects are
+// never touched, including their uncertainty fences (#466).
+func (s *Store) PurgeOrphanedDiscussionIntents(ctx context.Context) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM discussion_intents
+		WHERE NOT EXISTS (SELECT 1 FROM projects p WHERE p.id = discussion_intents.project_id)`)
+	if err != nil {
+		return 0, fmt.Errorf("sqlite: purge orphaned discussion intents: %w", err)
+	}
+	removed, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("sqlite: purge orphaned discussion intents: %w", err)
+	}
+	return removed, nil
+}
+
 func (s *Store) HasUnknownDiscussionIntent(ctx context.Context, projectID, mrIID int64) (bool, error) {
 	var found int
 	err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM discussion_intents

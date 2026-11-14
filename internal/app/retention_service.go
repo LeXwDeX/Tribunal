@@ -19,6 +19,7 @@ type RetentionStore interface {
 	DeleteDeliveriesBefore(ctx context.Context, before time.Time) (int64, error)
 	DeleteTerminalJobsBefore(ctx context.Context, before time.Time) (int64, error)
 	PruneContextDocs(ctx context.Context, keep int) (int64, error)
+	PurgeOrphanedDiscussionIntents(ctx context.Context) (int64, error)
 }
 
 // RetentionConfig configures RetentionService.
@@ -110,7 +111,7 @@ func (s *RetentionService) RunOnce(ctx context.Context) error {
 		s.logger.Warn("retention cleanup failed", "category", category, "error_class", errclass.Of(err))
 	}
 
-	var llmCalls, deliveries, jobs, contextDocs int64
+	var llmCalls, deliveries, jobs, contextDocs, discussionIntents int64
 	var err error
 	if llmCalls, err = s.store.DeleteLLMCallsBefore(ctx, now.Add(-s.llmCallRetention)); err != nil {
 		fail("delete llm calls", err)
@@ -124,12 +125,18 @@ func (s *RetentionService) RunOnce(ctx context.Context) error {
 	if contextDocs, err = s.store.PruneContextDocs(ctx, s.contextVersions); err != nil {
 		fail("prune context documents", err)
 	}
+	// Deleted projects keep their discussion receipts as an uncertainty fence.
+	// That fence can never clear, so the orphaned rows are removed here (#466).
+	if discussionIntents, err = s.store.PurgeOrphanedDiscussionIntents(ctx); err != nil {
+		fail("purge orphaned discussion intents", err)
+	}
 
 	s.logger.Info("retention cleanup finished",
 		"llm_calls", llmCalls,
 		"deliveries", deliveries,
 		"jobs", jobs,
 		"context_docs", contextDocs,
+		"discussion_intents", discussionIntents,
 		"errors", len(errs))
 	return errors.Join(errs...)
 }

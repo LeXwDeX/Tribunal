@@ -90,6 +90,10 @@ func (c countingRetentionStore) PruneContextDocs(ctx context.Context, keep int) 
 	return n, err
 }
 
+func (c countingRetentionStore) PurgeOrphanedDiscussionIntents(ctx context.Context) (int64, error) {
+	return c.inner.PurgeOrphanedDiscussionIntents(ctx)
+}
+
 // retentionStub is a fixed-response store used for error isolation and Start.
 type retentionStub struct {
 	mu          sync.Mutex
@@ -145,6 +149,10 @@ func (s *retentionStub) DeleteTerminalJobsBefore(context.Context, time.Time) (in
 
 func (s *retentionStub) PruneContextDocs(context.Context, int) (int64, error) {
 	return s.record("context_docs"), nil
+}
+
+func (s *retentionStub) PurgeOrphanedDiscussionIntents(context.Context) (int64, error) {
+	return s.record("discussion_intents"), nil
 }
 
 func TestRetentionServiceRunOnceIsIdempotent(t *testing.T) {

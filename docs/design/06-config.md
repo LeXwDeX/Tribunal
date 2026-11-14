@@ -56,6 +56,8 @@ workspace:
     # 距最后一次成功生成上下文文档的时间；普通工作区刷新不重置。
     max_age: 168h
   run_cleanup_after: 1h             # run 目录年龄阈值；后台清理周期固定 1h
+  max_bytes: 0                      # 工作区根目录容量上限；0 = 禁用（默认）
+  reclaim_after: 0s                 # 无活动工作区的回收阈值；0 = 禁用（默认）
 
 jobs:
   workers: 4

@@ -675,7 +675,7 @@ func TestWebhookServiceRequiresDependencies(t *testing.T) {
 
 func TestWebhookInvalidCandidateDoesNotFallBackToGenericDelivery(t *testing.T) {
 	f := newWebhookFixture(t, "{}")
-	_, err := f.service.recordJob(context.Background(), 42, "Merge Request Hook", uuid.NewString(), &store.Job{
+	_, err := f.service.recordJob(context.Background(), 42, "Merge Request Hook", uuid.NewString(), 7, &store.Job{
 		Kind:        "review.candidate",
 		Payload:     json.RawMessage(`{"project_id":0}`),
 		MaxAttempts: 3,
@@ -806,5 +806,33 @@ func TestWebhookUpdateWithoutOldRevIgnoresUnprovenTransition(t *testing.T) {
 	result, err := f.request("Merge Request Hook", "whsec-test", body)
 	if err != nil || result.Ignored != "missing_oldrev" {
 		t.Fatalf("result = %+v, err = %v; a non-transition must not re-review", result, err)
+	}
+}
+
+// Deliveries record the MR identity when the event carries one, including the
+// noteable IID of a note hook (object_attributes.iid is the note ID there).
+func TestWebhookRecordsDeliveryMRIID(t *testing.T) {
+	f := newWebhookFixture(t, "{}")
+	if _, err := f.request("Merge Request Hook", "whsec-test", mrBody(42, 7, nil)); err != nil {
+		t.Fatalf("merge request hook: %v", err)
+	}
+	if _, err := f.request("Note Hook", "whsec-test", noteBody(42, 9, 555, 3, "dev", "/review help")); err != nil {
+		t.Fatalf("note hook: %v", err)
+	}
+	if _, err := f.request("Push Hook", "whsec-test", pushBody(42, "refs/heads/main", sha40)); err != nil {
+		t.Fatalf("push hook: %v", err)
+	}
+	records := f.records()
+	if len(records) != 3 {
+		t.Fatalf("records = %+v", records)
+	}
+	if records[0].MRIID != 7 {
+		t.Fatalf("merge request delivery mr = %d, want 7", records[0].MRIID)
+	}
+	if records[1].MRIID != 9 {
+		t.Fatalf("note delivery mr = %d, want the noteable IID 9", records[1].MRIID)
+	}
+	if records[2].MRIID != 0 {
+		t.Fatalf("push delivery mr = %d, want none", records[2].MRIID)
 	}
 }

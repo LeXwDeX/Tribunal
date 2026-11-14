@@ -96,11 +96,38 @@ type Job struct {
 // Delivery is a deduplicated webhook delivery record. It deliberately has no
 // field for the raw webhook body or secret.
 type Delivery struct {
-	UUID       string    `json:"uuid"`
-	ProjectID  int64     `json:"project_id"`
+	UUID      string `json:"uuid"`
+	ProjectID int64  `json:"project_id"`
+	// MRIID is the merge request the event belongs to, or 0 when the event has
+	// no MR identity (push hooks, unparseable payloads, historical rows).
+	MRIID      int64     `json:"mr_iid,omitempty"`
 	Event      string    `json:"event"`
 	Outcome    string    `json:"outcome"`
 	Reason     string    `json:"reason,omitempty"`
 	JobID      string    `json:"job_id,omitempty"`
 	ReceivedAt time.Time `json:"received_at"`
+}
+
+// WebhookDeliveryFilter narrows the read-only delivery aggregation. AccessUserID
+// restricts the result to projects granted to that user; nil is the trusted
+// platform path and a non-positive value matches nothing.
+type WebhookDeliveryFilter struct {
+	ProjectID    *int64
+	MRIID        *int64
+	AccessUserID *int64
+}
+
+// WebhookDeliverySummary groups recorded deliveries by project and merge
+// request. Reasons counts only ignored deliveries and uses the fixed reason
+// vocabulary; it never carries the upstream request body.
+type WebhookDeliverySummary struct {
+	ProjectID             int64            `json:"project_id"`
+	MRIID                 int64            `json:"mr_iid"`
+	Deliveries            int64            `json:"deliveries"`
+	Enqueued              int64            `json:"enqueued"`
+	Ignored               int64            `json:"ignored"`
+	Rejected              int64            `json:"rejected"`
+	RejectedInvalidSecret int64            `json:"rejected_invalid_secret"`
+	LastReceivedAt        time.Time        `json:"last_received_at"`
+	Reasons               map[string]int64 `json:"reasons,omitempty"`
 }

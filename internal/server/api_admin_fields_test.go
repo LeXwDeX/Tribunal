@@ -546,3 +546,115 @@ func TestProjectListReportsStoreBackendFailure(t *testing.T) {
 	response := env.businessClient().request(http.MethodGet, "/api/v1/projects", nil, nil)
 	assertStatus(t, response, http.StatusInternalServerError)
 }
+
+// The dossier keeps the review-material downgrades that the MR comment already
+// shows. The detail endpoint must return them next to the synthesize warnings.
+func TestReviewDetailReturnsDossierMaterialWarnings(t *testing.T) {
+	fake := newFakeReviewStore()
+	wf := reviewWorkflow("wf-material", 42, time.Now().UTC())
+	seedAdminReview(t, fake, wf)
+	fake.dossiers[wf.ID] = &store.WorkflowDossier{
+		WorkflowID: wf.ID,
+		Data: json.RawMessage(`{
+			"mr":{"title":"Material warnings"},
+			"warnings":[
+				"review ran without the code graph: project ignore rules blocked workspace indexing",
+				"",
+				"review ran without the code graph: project ignore rules blocked workspace indexing"
+			]
+		}`),
+	}
+	env := newM6Env(t, m6Options{store: &adminFieldsStore{fakeReviewStore: fake}})
+	response := env.businessClient().request(http.MethodGet, "/api/v1/reviews/"+wf.ID, nil, nil)
+	assertStatus(t, response, http.StatusOK)
+	body := env.decode(t, response)
+	warnings, ok := body["material_warnings"].([]any)
+	if !ok || len(warnings) != 1 {
+		t.Fatalf("material_warnings = %v", body["material_warnings"])
+	}
+	if warnings[0] != "review ran without the code graph: project ignore rules blocked workspace indexing" {
+		t.Fatalf("material warning = %v", warnings[0])
+	}
+}
+
+func TestReviewDetailOmitsMaterialWarningsWithoutDossier(t *testing.T) {
+	fake := newFakeReviewStore()
+	wf := reviewWorkflow("wf-no-material", 42, time.Now().UTC())
+	seedAdminReview(t, fake, wf)
+	env := newM6Env(t, m6Options{store: &adminFieldsStore{fakeReviewStore: fake}})
+	response := env.businessClient().request(http.MethodGet, "/api/v1/reviews/"+wf.ID, nil, nil)
+	assertStatus(t, response, http.StatusOK)
+	if _, present := env.decode(t, response)["material_warnings"]; present {
+		t.Fatalf("material_warnings present without a dossier: %s", response.body)
+	}
+}
+
+// The console renders the same structured coverage statement and generated
+// disclosure the MR comment uses (#455). The detail endpoint must expose them.
+func TestReviewDetailReturnsScopeAndGeneratedDisclosure(t *testing.T) {
+	fake := newFakeReviewStore()
+	wf := reviewWorkflow("wf-scope", 42, time.Now().UTC())
+	seedAdminReview(t, fake, wf)
+	fake.setNodes(wf.ID, store.WorkflowNode{
+		ID: "synthesize", Kind: "synthesize", Status: "completed",
+		Output: json.RawMessage(`{
+			"verdict":"INCOMPLETE",
+			"summary":"coverage is narrow",
+			"warnings":[],
+			"unresolved":[{"node":"validate","kind":"evidence_gap","message":"lane validate did not complete"}],
+			"scope":{
+				"full":false,
+				"head":"` + wf.HeadSHA + `",
+				"last_head":"` + wf.HeadSHA + `",
+				"files":["a.go"],
+				"file_count":12,
+				"unlocated":2
+			},
+			"output":{"verdict":"INCOMPLETE","summary":"coverage is narrow","decisions":[],"new_findings":[],"extend_requests":[]}
+		}`),
+	})
+	fake.dossiers[wf.ID] = &store.WorkflowDossier{
+		WorkflowID: wf.ID,
+		Data: json.RawMessage(`{
+			"mr":{"title":"Scope"},
+			"diff_summary":{"files":1,"generated":2,"generated_paths":["api.pb.go","gen/x.go"]}
+		}`),
+	}
+	env := newM6Env(t, m6Options{store: &adminFieldsStore{fakeReviewStore: fake}})
+	response := env.businessClient().request(http.MethodGet, "/api/v1/reviews/"+wf.ID, nil, nil)
+	assertStatus(t, response, http.StatusOK)
+	body := env.decode(t, response)
+	scope, ok := body["scope"].(map[string]any)
+	if !ok {
+		t.Fatalf("scope = %v", body["scope"])
+	}
+	if scope["full"] != false || scope["file_count"] != float64(12) || scope["unlocated"] != float64(2) {
+		t.Fatalf("scope = %v", scope)
+	}
+	files := scope["files"].([]any)
+	if len(files) != 1 || files[0] != "a.go" {
+		t.Fatalf("scope files = %v", scope["files"])
+	}
+	if body["generated_files"] != float64(2) {
+		t.Fatalf("generated_files = %v", body["generated_files"])
+	}
+	paths := body["generated_paths"].([]any)
+	if len(paths) != 2 || paths[0] != "api.pb.go" || paths[1] != "gen/x.go" {
+		t.Fatalf("generated_paths = %v", body["generated_paths"])
+	}
+}
+
+func TestReviewDetailOmitsScopeAndGeneratedWithoutThem(t *testing.T) {
+	fake := newFakeReviewStore()
+	wf := reviewWorkflow("wf-no-scope", 42, time.Now().UTC())
+	seedAdminReview(t, fake, wf)
+	env := newM6Env(t, m6Options{store: &adminFieldsStore{fakeReviewStore: fake}})
+	response := env.businessClient().request(http.MethodGet, "/api/v1/reviews/"+wf.ID, nil, nil)
+	assertStatus(t, response, http.StatusOK)
+	body := env.decode(t, response)
+	for _, key := range []string{"scope", "generated_files", "generated_paths"} {
+		if _, present := body[key]; present {
+			t.Fatalf("%s present without dossier/synthesis: %v", key, body[key])
+		}
+	}
+}

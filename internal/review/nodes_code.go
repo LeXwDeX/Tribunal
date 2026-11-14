@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -564,6 +565,32 @@ func (e *Executor) collectProposals(wf dag.WorkflowView) ([]Proposal, []DroppedF
 		provider := nodeProvider(node)
 		model := node.Model
 		lanes := isLanesFlow(e.profile.Config)
+		// A degraded lane completes with a code-owned partial envelope so its
+		// findings survive; it still contributes an evidence gap, never a clean
+		// PASS (#466). Failed nodes keep their empty output.
+		if node.Status == dag.NodeCompleted {
+			if partial, ok := decodePartialLaneOut(node.Output); ok {
+				switch node.Spec.Kind {
+				case KindExplore:
+					warnings = appendUnique(warnings, fmt.Sprintf(
+						"node %s (%s) was partial; its exploration digest may be incomplete",
+						node.ID, node.Spec.Kind))
+				default:
+					if proposal, ok := partialLaneProposal(node, partial); ok {
+						if len(proposal.Findings) > 0 {
+							proposals = append(proposals, proposal)
+						}
+						if lanes && isLaneKind(node.Spec.Kind) {
+							signals = append(signals, partialLaneSignal(node.ID, node.Spec.Kind, partial.Partial, len(proposal.Findings)))
+						}
+						warnings = appendUnique(warnings, fmt.Sprintf(
+							"lane %s (%s) stopped before submit_result; %d recovered finding(s) were kept",
+							node.ID, node.Spec.Kind, len(proposal.Findings)))
+					}
+				}
+				continue
+			}
+		}
 		switch node.Spec.Kind {
 		case KindCodeReview, KindReviewStd, KindReviewInt, KindReasoner, KindReviewGate, KindReview, KindValidate:
 		case KindExplore:
@@ -579,10 +606,12 @@ func (e *Executor) collectProposals(wf dag.WorkflowView) ([]Proposal, []DroppedF
 				warnings = appendUnique(warnings, fmt.Sprintf("node %s (%s) was %s and its findings are unavailable", node.ID, node.Spec.Kind, node.Status))
 				// A missing lane makes a lanes-flow review incomplete: the
 				// other lanes still publish, but the verdict cannot be PASS.
+				// The fixed class, detail (which carries the turn count) and
+				// usage stay attached so the gap is attributable (#466).
 				if lanes && isLaneKind(node.Spec.Kind) {
 					signals = append(signals, UnresolvedSignal{
 						Node: node.ID, Kind: UnresolvedEvidence,
-						Message: fmt.Sprintf("lane %s (%s) did not complete: %s", node.ID, node.Spec.Kind, node.Status),
+						Message: failedLaneMessage(node),
 					})
 				}
 			}
@@ -630,6 +659,72 @@ func (e *Executor) collectProposals(wf dag.WorkflowView) ([]Proposal, []DroppedF
 		}
 	}
 	return proposals, dropped, signals, warnings, nil
+}
+
+// partialLaneProposal maps a degraded lane envelope back to the shared
+// proposal shape. Only the recovered findings enter the vote; the verdict and
+// evidence status of a rejected submit stay diagnostic because the contract
+// itself did not validate.
+func partialLaneProposal(node dag.NodeView, partial *PartialLaneOut) (Proposal, bool) {
+	if partial == nil {
+		return Proposal{}, false
+	}
+	kind := ""
+	switch node.Spec.Kind {
+	case KindCodeReview:
+		kind = ContractCodeReview
+	case KindReviewStd, KindReviewInt, KindReview:
+		kind = ContractReview
+	case KindReasoner:
+		kind = ContractReasoner
+	case KindValidate:
+		kind = ContractValidate
+	default:
+		return Proposal{}, false
+	}
+	return Proposal{
+		Node:     node.ID,
+		Kind:     kind,
+		Provider: nodeProvider(node),
+		Model:    node.Model,
+		Attempt:  node.Attempt,
+		Findings: append([]FindingOut(nil), partial.Findings...),
+	}, true
+}
+
+// partialLaneSignal is the evidence gap of a degraded lane. It carries the
+// fixed failure class, the turn count and the recorded usage, so a review can
+// never claim PASS while the lane is missing from the vote (#466).
+func partialLaneSignal(nodeID, kind string, info PartialLaneInfo, recovered int) UnresolvedSignal {
+	return UnresolvedSignal{
+		Node: nodeID, Kind: UnresolvedEvidence,
+		Message: fmt.Sprintf("lane %s (%s) stopped before submit_result: error_kind=%s turns=%d input_tokens=%d output_tokens=%d recovered_findings=%d",
+			nodeID, kind, info.ErrorKind, info.Turns, info.Usage.InputTokens, info.Usage.OutputTokens, recovered),
+	}
+}
+
+// laneTurnsRE recognizes the fixed turn suffix of a submit failure. It is the
+// only part of a stored node error that may enter an evidence gap.
+var laneTurnsRE = regexp.MustCompile(`^(?:submit_result missing|submit_result rejected) after ([0-9]{1,6}) turns$`)
+
+// failedLaneMessage keeps the fixed failure class, the turn count when known
+// and the recorded usage on a lane that failed without a recoverable output.
+func failedLaneMessage(node dag.NodeView) string {
+	message := fmt.Sprintf("lane %s (%s) did not complete: %s", node.ID, node.Spec.Kind, node.Status)
+	extra := make([]string, 0, 4)
+	if node.Reason != "" {
+		extra = append(extra, "error_kind="+oneLine(node.Reason, 64))
+	}
+	// Only the code-owned turn suffix is read from the sanitized detail; a
+	// legacy event may still hold arbitrary provider text that must not be
+	// copied into a summary.
+	if match := laneTurnsRE.FindStringSubmatch(strings.TrimSpace(node.Error)); match != nil {
+		extra = append(extra, "turns="+match[1])
+	}
+	extra = append(extra,
+		fmt.Sprintf("input_tokens=%d", node.Usage.InputTokens),
+		fmt.Sprintf("output_tokens=%d", node.Usage.OutputTokens))
+	return oneLine(message+" ("+strings.Join(extra, " ")+")", maxUnresolvedMessage)
 }
 
 func nodeProvider(node dag.NodeView) string {
