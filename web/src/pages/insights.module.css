@@ -55,6 +55,14 @@
   gap: var(--space-sm);
 }
 
+.rowHint {
+  display: block;
+  margin-top: var(--space-xs);
+  text-align: right;
+  font-size: var(--fs-label);
+  color: var(--muted);
+}
+
 .actionsCol {
   text-align: right;
 }

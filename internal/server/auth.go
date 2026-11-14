@@ -158,14 +158,61 @@ func (a *authService) signature(purpose, value string) string {
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
-func (a *authService) issueState() (string, error) {
+func (a *authService) issueState(returnTo string) (string, error) {
 	nonce, err := randomToken(18)
 	if err != nil {
 		return "", err
 	}
 	payload := strconv.FormatInt(a.now().Add(oauthStateTTL).Unix(), 10) + "." + nonce
+	if returnTo != "" && returnTo != "/" {
+		payload += "\n" + returnTo
+	}
 	encoded := base64.RawURLEncoding.EncodeToString([]byte(payload))
 	return encoded + "." + a.signature("state", encoded), nil
+}
+
+// stateReturnTo extracts the same-origin deep link carried by a signed state.
+// It never trusts the value: the callback validates it again.
+func (a *authService) stateReturnTo(state string) string {
+	encoded, _, ok := strings.Cut(state, ".")
+	if !ok {
+		return ""
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		return ""
+	}
+	_, nonceAndReturn, ok := strings.Cut(string(raw), ".")
+	if !ok {
+		return ""
+	}
+	_, returnTo, ok := strings.Cut(nonceAndReturn, "\n")
+	if !ok {
+		return ""
+	}
+	return returnTo
+}
+
+// safeReturnTo accepts only an absolute path on this origin. It rejects
+// protocol-relative URLs, backslashes, schemes, hosts and authentication
+// routes so the login flow cannot become an open redirect.
+func safeReturnTo(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 512 {
+		return "/"
+	}
+	if !strings.HasPrefix(value, "/") || strings.HasPrefix(value, "//") ||
+		strings.ContainsAny(value, "\\\r\n\x00") {
+		return "/"
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "" || parsed.Host != "" || parsed.User != nil {
+		return "/"
+	}
+	if parsed.Path == "/auth" || strings.HasPrefix(parsed.Path, "/auth/") {
+		return "/"
+	}
+	return parsed.RequestURI()
 }
 
 func (a *authService) validState(state string) bool {
@@ -286,7 +333,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		authError(w, r, http.StatusServiceUnavailable, "internal", "OAuth login is not configured", "oauth_disabled")
 		return
 	}
-	state, err := s.auth.issueState()
+	state, err := s.auth.issueState(safeReturnTo(r.URL.Query().Get("return_to")))
 	if err != nil {
 		authError(w, r, http.StatusInternalServerError, "internal", "internal error", "oauth_failed")
 		return
@@ -361,7 +408,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.setSessionCookie(w, s.auth.sealSession(entry.id))
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	http.Redirect(w, r, safeReturnTo(s.auth.stateReturnTo(state)), http.StatusSeeOther)
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -778,7 +825,7 @@ func (s *Server) apiAuth(next http.HandlerFunc) http.HandlerFunc {
 						"actor_id", value.user.ID, "action", "update", "paths", []string{},
 						"code", "forbidden", "dry_run", false)
 				}
-				writeError(w, r, http.StatusForbidden, "forbidden", "invalid CSRF token", nil)
+				writeError(w, r, http.StatusForbidden, "csrf_invalid", "invalid CSRF token", nil)
 				return
 			}
 		}

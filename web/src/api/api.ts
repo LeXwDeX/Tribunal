@@ -78,7 +78,15 @@ export async function logout(): Promise<void> {
   window.dispatchEvent(new Event(LOGOUT_EVENT))
 }
 
-export const authLoginUrl = '/auth/login'
+// authLoginUrl carries the current deep link so a login from an MR comment
+// returns to the review. The server validates the target again and rejects
+// anything that is not a same-origin path.
+export function authLoginUrl(returnTo?: string): string {
+  const current = returnTo ?? (typeof window !== 'undefined' ? `${window.location.pathname}${window.location.search}` : '')
+  const target = current.trim()
+  if (!target || target === '/' || target.startsWith('/auth/')) return '/auth/login'
+  return withQuery('/auth/login', { return_to: target })
+}
 
 // Projects -----------------------------------------------------------------
 

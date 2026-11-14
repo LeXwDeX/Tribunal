@@ -194,6 +194,8 @@ function UserDrawer({ user, open, currentUserId, onClose }: {
   const saved = async () => {
     await queryClient.invalidateQueries({ queryKey: ['admin-users'] })
     await queryClient.invalidateQueries({ queryKey: ['admin-user-grants', user?.id] })
+    // A user write can rotate the current account's revision and CSRF token.
+    await queryClient.invalidateQueries({ queryKey: ['me'] })
   }
 
   const patch = async (body: { role?: 'admin' | 'viewer'; global_read?: boolean }) => {
@@ -359,12 +361,14 @@ function AdminUsersPanel() {
       setDisableTarget(null)
       toast.push('success', next ? '账号已停用。' : '账号已启用。')
       await queryClient.invalidateQueries({ queryKey: ['admin-users'] })
+      await queryClient.invalidateQueries({ queryKey: ['me'] })
     } catch (error) {
       if (error instanceof ApiError && error.code === 'stale_revision') {
         setDisableTarget(null)
         setDisableError(null)
         toast.push('error', '用户信息已被其他管理员更新，请刷新后重试。')
         await queryClient.invalidateQueries({ queryKey: ['admin-users'] })
+        await queryClient.invalidateQueries({ queryKey: ['me'] })
       } else {
         setDisableError(error)
       }
@@ -382,6 +386,7 @@ function AdminUsersPanel() {
       setRevokeTarget(null)
       toast.push('success', '该账号的全部凭据已撤销。')
       await queryClient.invalidateQueries({ queryKey: ['admin-users'] })
+      await queryClient.invalidateQueries({ queryKey: ['me'] })
     } catch (error) {
       setRevokeError(error)
     } finally {
@@ -418,7 +423,14 @@ function AdminUsersPanel() {
                 </tr>
               </thead>
               <tbody>
-                {users.items.map((user) => (
+                {users.items.map((user) => {
+                  const self = String(user.id) === String(me.data?.id)
+                  const disableBlocked = user.role_source === 'config' || self
+                  const disableReason = user.role_source === 'config'
+                    ? '配置来源的管理员由启动配置决定，不能在此停用；请修改 bootstrap_admins 配置。'
+                    : self ? '当前登录账号不能停用自己；请使用其他管理员账号操作。' : null
+                  const reasonId = `disable-reason-${user.id}`
+                  return (
                   <tr key={user.id}>
                     <td className="mono">{user.username}</td>
                     <td>{user.name || '—'}</td>
@@ -430,14 +442,22 @@ function AdminUsersPanel() {
                     <td>
                       <div className={insights.rowActions}>
                         <Button variant="secondary" className={ui.smallButton} onClick={() => setManageTarget(user)}>管理</Button>
-                        <Button variant="secondary" className={ui.smallButton} onClick={() => setDisableTarget(user)}>
+                        <Button
+                          variant="secondary"
+                          className={ui.smallButton}
+                          onClick={() => setDisableTarget(user)}
+                          disabled={disableBlocked}
+                          aria-describedby={disableReason ? reasonId : undefined}
+                        >
                           {user.disabled ? '启用账号' : '停用账号'}
                         </Button>
                         <Button variant="danger" className={ui.smallButton} onClick={() => setRevokeTarget(user)}>撤销全部凭据</Button>
                       </div>
+                      {disableReason ? <span id={reasonId} className={insights.rowHint}>{disableReason}</span> : null}
                     </td>
                   </tr>
-                ))}
+                  )
+                })}
               </tbody>
             </table>
           </div>

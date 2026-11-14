@@ -73,6 +73,30 @@ async function parseError(response: Response): Promise<ApiError> {
 }
 
 export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  return requestWithRetry<T>(path, options, false)
+}
+
+// refreshCsrfToken re-reads /me after the server rejected a write with
+// csrf_invalid. The token rotates when the account revision changes (for
+// example after an administrator edits the user), so one refresh and retry is
+// enough; a second failure is reported to the caller.
+async function refreshCsrfToken(): Promise<boolean> {
+  try {
+    const response = await fetch('/api/v1/me', {
+      headers: { Accept: 'application/json' },
+      credentials: 'same-origin',
+    })
+    if (!response.ok) return false
+    const body = (await response.json()) as { csrf_token?: unknown }
+    if (typeof body.csrf_token !== 'string' || !body.csrf_token) return false
+    setCsrfToken(body.csrf_token)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function requestWithRetry<T>(path: string, options: RequestOptions, retried: boolean): Promise<T> {
   const method = (options.method || 'GET').toUpperCase()
   const headers: Record<string, string> = { Accept: 'application/json', ...options.headers }
   let body: BodyInit | undefined
@@ -105,6 +129,9 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
 
   if (!response.ok) {
     const apiError = await parseError(response)
+    if (apiError.code === 'csrf_invalid' && isWrite(method) && !retried && await refreshCsrfToken()) {
+      return requestWithRetry<T>(path, options, true)
+    }
     if (response.status === 401 && typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT, { detail: { code: apiError.code } }))
     }

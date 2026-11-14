@@ -19,6 +19,7 @@ export function authErrorMessage(search: string): string | undefined {
 export function AuthScreen({
   notice, error, onRetry, oauthEnabled = true,
 }: { notice?: string; error?: unknown; onRetry?: () => void; oauthEnabled?: boolean }) {
+  const loginHref = authLoginUrl()
   return (
     <main className={styles.auth}>
       <div className={styles.authArt}>
@@ -49,7 +50,7 @@ export function AuthScreen({
           {error ? <ErrorState error={error} onRetry={onRetry} title="无法检查登录状态" /> : null}
           {oauthEnabled ? (
             <>
-              <ButtonLink href={authLoginUrl} variant="primary" className={styles.loginButton}>
+              <ButtonLink href={loginHref} variant="primary" className={styles.loginButton}>
                 通过 GitLab 登录
               </ButtonLink>
               <span className={styles.footer}>需要 GitLab OAuth 会话；本页不保存访问令牌。</span>

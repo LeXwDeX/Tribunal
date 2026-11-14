@@ -59,6 +59,20 @@ describe('authentication boundary', () => {
     expect(screen.queryByRole('link', { name: '通过 GitLab 登录' })).not.toBeInTheDocument()
   })
 
+  it('carries the current deep link into the login action', async () => {
+    window.history.replaceState(null, '', '/reviews/wf-1?tab=findings')
+    installFetch(() => jsonResponse({ error: { code: 'unauthenticated', message: 'login required' } }, 401))
+    render(
+      <QueryClientProvider client={createTestQueryClient()}>
+        <MemoryRouter initialEntries={['/']}>
+          <App />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+    const login = await screen.findByRole('link', { name: '通过 GitLab 登录' })
+    expect(login).toHaveAttribute('href', '/auth/login?return_to=%2Freviews%2Fwf-1%3Ftab%3Dfindings')
+  })
+
   it('shows a readable message for a failed browser login', async () => {
     window.history.replaceState(null, '', '/?auth_error=oauth_state')
     installFetch((url) => {
