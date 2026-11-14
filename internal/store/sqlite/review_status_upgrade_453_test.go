@@ -344,11 +344,10 @@ func TestRecordReviewDeliveryCancelWithoutReviewSkips(t *testing.T) {
 	}
 }
 
-func TestWebhookCancelAfterPublishedReviewKeepsResult(t *testing.T) {
+// seedPublishedReview leaves one terminal review with a published body.
+func seedPublishedReview(t *testing.T, s *Store, head string) store.ReviewEnqueueResult {
+	t.Helper()
 	ctx := context.Background()
-	s := openTestStore(t, newFakeClock())
-	mustProject(t, s, 42)
-	head := reviewHead("a")
 	run, err := s.EnqueueReviewLatest(ctx, store.ReviewCommand{ProjectID: 42, MRIID: 7, HeadSHA: head})
 	if err != nil {
 		t.Fatal(err)
@@ -368,6 +367,15 @@ func TestWebhookCancelAfterPublishedReviewKeepsResult(t *testing.T) {
 	if _, err := s.SetReviewStatusFinalBody(ctx, 42, 7, run.Generation, head, "published summary"); err != nil {
 		t.Fatal(err)
 	}
+	return run
+}
+
+func TestWebhookCancelAfterPublishedReviewPreservesBody(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t, newFakeClock())
+	mustProject(t, s, 42)
+	head := reviewHead("a")
+	run := seedPublishedReview(t, s, head)
 	before := mustReviewStatus(t, s, 42, 7)
 
 	result, err := s.EnqueueReviewLatest(ctx, store.ReviewCommand{
@@ -376,23 +384,86 @@ func TestWebhookCancelAfterPublishedReviewKeepsResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnqueueReviewLatest cancel: %v", err)
 	}
-	if !result.Skipped {
-		t.Fatalf("cancel after a published review = %+v, want skipped", result)
+	if result.Skipped || result.Generation <= run.Generation {
+		t.Fatalf("cancel after a published review = %+v, want an accepted successor", result)
 	}
 	after := mustReviewStatus(t, s, 42, 7)
-	if after.Generation != before.Generation || after.State != before.State ||
-		after.FinalBody != before.FinalBody || after.FinalBodyReady != before.FinalBodyReady {
-		t.Fatalf("cancel changed a published status: before %+v after %+v", before, after)
+	if after.Generation != result.Generation || after.State != store.ReviewStatusQueued {
+		t.Fatalf("cancel did not advance the status: %+v", after)
+	}
+	if after.FinalBody != before.FinalBody || after.FinalBodyReady != before.FinalBodyReady {
+		t.Fatalf("cancel cleared the published body: before %+v after %+v", before, after)
 	}
 	control, err := s.GetReviewControl(ctx, 42, 7)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if control.Generation != run.Generation || control.Cancelled {
-		t.Fatalf("cancel changed the published control: %+v", control)
+	if !control.Cancelled || control.Generation != result.Generation {
+		t.Fatalf("control = %+v", control)
 	}
-	if job, err := s.Claim(ctx, "worker", []string{reviewCancelKind}, time.Minute); err != nil || job != nil {
-		t.Fatalf("cancel job = %+v, %v; want none", job, err)
+	if job, err := s.Claim(ctx, "worker", []string{reviewCancelKind}, time.Minute); err != nil || job == nil {
+		t.Fatalf("cancel job = %+v, %v; want one", job, err)
+	}
+}
+
+func TestCancelPreservesPublishedBodyForCommandAndManual(t *testing.T) {
+	for _, trigger := range []string{"command", "manual"} {
+		t.Run(trigger, func(t *testing.T) {
+			ctx := context.Background()
+			s := openTestStore(t, newFakeClock())
+			mustProject(t, s, 42)
+			head := reviewHead("a")
+			run := seedPublishedReview(t, s, head)
+			before := mustReviewStatus(t, s, 42, 7)
+
+			result, err := s.EnqueueReviewLatest(ctx, store.ReviewCommand{
+				ProjectID: 42, MRIID: 7, Cancel: true,
+				Payload: json.RawMessage(`{"trigger":"` + trigger + `","note_id":777}`),
+			})
+			if err != nil {
+				t.Fatalf("EnqueueReviewLatest cancel: %v", err)
+			}
+			if result.Skipped || result.Generation <= run.Generation {
+				t.Fatalf("cancel = %+v, want an accepted successor", result)
+			}
+			after := mustReviewStatus(t, s, 42, 7)
+			if after.FinalBody != before.FinalBody || after.FinalBodyReady != before.FinalBodyReady {
+				t.Fatalf("cancel cleared the published body: before %+v after %+v", before, after)
+			}
+		})
+	}
+}
+
+func TestNewReviewAfterCancelResetsFinalBody(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t, newFakeClock())
+	mustProject(t, s, 42)
+	head := reviewHead("a")
+	run := seedPublishedReview(t, s, head)
+	before := mustReviewStatus(t, s, 42, 7)
+	if _, err := s.EnqueueReviewLatest(ctx, store.ReviewCommand{
+		ProjectID: 42, MRIID: 7, Cancel: true,
+		Payload: json.RawMessage(`{"trigger":"command","note_id":777}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if after := mustReviewStatus(t, s, 42, 7); after.FinalBody != before.FinalBody {
+		t.Fatalf("cancel cleared the published body: %+v", after)
+	}
+
+	// A new review (not a cancel) owns a new generation and starts without
+	// the previous conclusion.
+	nextHead := reviewHead("b")
+	next, err := s.EnqueueReviewLatest(ctx, store.ReviewCommand{ProjectID: 42, MRIID: 7, HeadSHA: nextHead})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.Generation <= run.Generation+1 {
+		t.Fatalf("new review generation = %d", next.Generation)
+	}
+	reset := mustReviewStatus(t, s, 42, 7)
+	if reset.Generation != next.Generation || reset.FinalBody != "" {
+		t.Fatalf("new review kept the previous body: %+v", reset)
 	}
 }
 

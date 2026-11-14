@@ -227,6 +227,10 @@ type ReviewStatusGoal struct {
 	// FinalBody replaces the rendered body of the status note. Empty keeps
 	// the status-only body.
 	FinalBody string
+	// PreserveFinalBody keeps an already-published final body when a cancel
+	// advances the generation. A new review leaves it false so the new
+	// generation starts without the previous conclusion (#453).
+	PreserveFinalBody bool
 }
 
 // ReviewReaction is the desired reaction on one source note. Desired none

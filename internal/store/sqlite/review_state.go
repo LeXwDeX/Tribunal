@@ -279,10 +279,11 @@ func (s *Store) enqueueReviewTx(ctx context.Context, tx *sql.Tx, command store.R
 }
 
 // cancelReviewNeededTx reports whether a cancel has live work to stop. Only an
-// automatic webhook close/merge may be dropped: it must not rewrite a published
-// result and a never-reviewed merge request must not gain review state or a
-// cancellation comment (#453). An authenticated /review cancel keeps its
-// replay, quarantine and supersession semantics.
+// automatic webhook close/merge may be dropped: a never-reviewed merge request
+// gains no review state or cancellation comment, and a terminal review without
+// a published body has nothing to add. A published body is preserved while the
+// cancel advances the generation and lifecycle state (#453). An authenticated
+// /review cancel keeps its replay, quarantine and supersession semantics.
 func (s *Store) cancelReviewNeededTx(ctx context.Context, tx *sql.Tx, command store.ReviewCommand) (bool, error) {
 	if reviewCommandTrigger(command.Payload) != "webhook" {
 		return true, nil
@@ -292,7 +293,8 @@ func (s *Store) cancelReviewNeededTx(ctx context.Context, tx *sql.Tx, command st
 		return false, err
 	}
 	if found && status.FinalBodyReady && strings.TrimSpace(status.FinalBody) != "" {
-		return false, nil
+		// The cancel still proceeds; setReviewStatusTx keeps the body.
+		return true, nil
 	}
 	active, err := reviewWorkActiveTx(ctx, tx, command.ProjectID, command.MRIID)
 	if err != nil {
@@ -805,6 +807,9 @@ func (s *Store) recordReviewSideEffectsTx(ctx context.Context, tx *sql.Tx, comma
 		HeadSHA:    control.HeadSHA,
 		Profile:    meta.Profile,
 		State:      store.ReviewStatusQueued,
+		// A cancel advances the generation but must not discard a published
+		// conclusion; a run starts a new generation without it (#453).
+		PreserveFinalBody: command.Cancel,
 	}
 	if _, err := s.setReviewStatusTx(ctx, tx, goal, now); err != nil {
 		return err

@@ -172,6 +172,11 @@ func (s *Store) setReviewStatusTx(ctx context.Context, tx *sql.Tx, goal store.Re
 			state = excluded.state,
 			detail = excluded.detail,
 			final_body = CASE
+				-- A cancel of an already-published generation keeps the
+				-- conclusion; only its lifecycle header changes (#453). A new
+				-- review does not set this flag and resets the body.
+				WHEN ? = 1 AND review_status.generation <> excluded.generation
+				     AND review_status.final_body <> '' THEN review_status.final_body
 				WHEN review_status.generation <> excluded.generation THEN excluded.final_body
 				WHEN excluded.head_sha <> '' AND lower(excluded.head_sha) <> lower(review_status.head_sha) THEN excluded.final_body
 				WHEN excluded.final_body <> '' THEN excluded.final_body
@@ -184,7 +189,7 @@ func (s *Store) setReviewStatusTx(ctx context.Context, tx *sql.Tx, goal store.Re
 			updated_at = excluded.updated_at`,
 		goal.ProjectID, goal.MRIID, goal.Generation,
 		strings.ToLower(strings.TrimSpace(goal.HeadSHA)), attempt, goal.Profile,
-		goal.State, goal.Detail, goal.FinalBody, formatTime(now)); err != nil {
+		goal.State, goal.Detail, goal.FinalBody, formatTime(now), goal.PreserveFinalBody); err != nil {
 		return false, fmt.Errorf("sqlite: write review status: %w", err)
 	}
 	if err := s.enqueueReviewStatusJobTx(ctx, tx, goal.ProjectID, goal.MRIID, now); err != nil {

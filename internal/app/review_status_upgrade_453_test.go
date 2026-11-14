@@ -186,13 +186,7 @@ func publishTerminalReview(t *testing.T, f *reviewFixture) string {
 		t.Fatal(err)
 	}
 	drainReviewSideEffects(t, f)
-	for _, note := range f.gitlab.notes {
-		if strings.HasPrefix(note.Body, review.SummaryMarkerPrefix) {
-			return note.Body
-		}
-	}
-	t.Fatal("published review note is missing")
-	return ""
+	return summaryNoteBody(t, f)
 }
 
 func TestMergeRequestNeverReviewedCreatesNothing(t *testing.T) {
@@ -220,45 +214,190 @@ func TestMergeRequestNeverReviewedCreatesNothing(t *testing.T) {
 	}
 }
 
-func TestMergeRequestKeepsPublishedReview(t *testing.T) {
+func summaryNoteBody(t *testing.T, f *reviewFixture) string {
+	t.Helper()
+	for _, note := range f.gitlab.notes {
+		if strings.HasPrefix(note.Body, review.SummaryMarkerPrefix) {
+			return note.Body
+		}
+	}
+	t.Fatal("published review note is missing")
+	return ""
+}
+
+func TestMergeRequestPreservesPublishedFindings(t *testing.T) {
 	f := newReviewFixture(t, reviewTestHead)
 	f.service.status = testStatusReporter(f.gitlab)
-	published := publishTerminalReview(t, f)
+	publishTerminalReview(t, f)
 	before, err := f.db.GetReviewStatus(context.Background(), 42, 7)
 	if err != nil {
 		t.Fatal(err)
 	}
-	notesBefore := len(f.gitlab.notes)
 	service := newMergeWebhook(t, f)
 
 	result := sendMergeAction(t, service, "merge")
-	if result.Ignored != "nothing_to_cancel" {
-		t.Fatalf("merge result = %+v, want nothing_to_cancel", result)
+	if !result.Accepted {
+		t.Fatalf("merge result = %+v, want an accepted cancel", result)
 	}
+	job, err := f.db.Claim(context.Background(), "worker", []string{"review.cancel"}, time.Minute)
+	if err != nil || job == nil {
+		t.Fatalf("cancel job = %+v, %v; want one", job, err)
+	}
+	if err := f.service.Handle(context.Background(), job); err != nil {
+		t.Fatalf("cancel handle: %v", err)
+	}
+	drainReviewSideEffects(t, f)
+
 	after, err := f.db.GetReviewStatus(context.Background(), 42, 7)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.Generation != before.Generation || after.State != before.State ||
-		after.FinalBody != before.FinalBody || !after.FinalBodyReady {
-		t.Fatalf("merge changed the published status: before %+v after %+v", before, after)
+	if after.Generation <= before.Generation || after.State != reviewStatusCancelled {
+		t.Fatalf("merge did not settle a cancelled successor: before %+v after %+v", before, after)
+	}
+	if after.FinalBody != before.FinalBody || !after.FinalBodyReady {
+		t.Fatalf("merge cleared the published body: before %+v after %+v", before, after)
 	}
 	control, err := f.db.GetReviewControl(context.Background(), 42, 7)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if control.Cancelled {
-		t.Fatalf("merge cancelled a published review: %+v", control)
+	if !control.Cancelled || control.Generation != after.Generation {
+		t.Fatalf("control = %+v", control)
 	}
-	if len(f.gitlab.notes) != notesBefore {
-		t.Fatalf("merge changed the comment count: %d -> %d", notesBefore, len(f.gitlab.notes))
+	body := summaryNoteBody(t, f)
+	if !strings.Contains(body, "[P1] 已发布的 finding 列表") || !strings.Contains(body, "## 评审结论") {
+		t.Fatalf("merge removed the published conclusions: %q", body)
 	}
-	if got := f.gitlab.notes[0].Body; got != published {
-		t.Fatalf("merge overwrote the published review:\n%s", got)
+	if parseStatusPhase(body) != reviewStatusPhase(reviewStatusCancelled) || !strings.Contains(body, "评审已取消") {
+		t.Fatalf("merge did not update the lifecycle header: %q", body)
 	}
-	job, err := f.db.Claim(context.Background(), "worker", []string{"review.cancel"}, time.Minute)
-	if err != nil || job != nil {
-		t.Fatalf("cancel job = %+v, %v; want none", job, err)
+}
+
+func TestCommandCancelKeepsPublishedFindings(t *testing.T) {
+	f := newReviewFixture(t, reviewTestHead)
+	f.service.status = testStatusReporter(f.gitlab)
+	publishTerminalReview(t, f)
+	before, err := f.db.GetReviewStatus(context.Background(), 42, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelJob := cancelJobWithNote(t, f, "job-cancel-published", 777)
+	if err := f.service.Handle(context.Background(), cancelJob); err != nil {
+		t.Fatalf("cancel handle: %v", err)
+	}
+	drainReviewSideEffects(t, f)
+
+	after, err := f.db.GetReviewStatus(context.Background(), 42, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Generation <= before.Generation || after.State != reviewStatusCancelled {
+		t.Fatalf("cancel did not advance the status: before %+v after %+v", before, after)
+	}
+	if after.FinalBody != before.FinalBody || !after.FinalBodyReady {
+		t.Fatalf("cancel cleared the published body: before %+v after %+v", before, after)
+	}
+	body := summaryNoteBody(t, f)
+	if !strings.Contains(body, "[P1] 已发布的 finding 列表") || !strings.Contains(body, "## 评审结论") {
+		t.Fatalf("cancel removed the published conclusions: %q", body)
+	}
+	if parseStatusPhase(body) != reviewStatusPhase(reviewStatusCancelled) {
+		t.Fatalf("cancel did not update the lifecycle header: %q", body)
+	}
+}
+
+func TestNewReviewAfterCancelResetsPublishedFindings(t *testing.T) {
+	f := newReviewFixture(t, reviewTestHead)
+	f.service.status = testStatusReporter(f.gitlab)
+	publishTerminalReview(t, f)
+	cancelJob := cancelJobWithNote(t, f, "job-cancel-before-new-review", 777)
+	if err := f.service.Handle(context.Background(), cancelJob); err != nil {
+		t.Fatalf("cancel handle: %v", err)
+	}
+	drainReviewSideEffects(t, f)
+	if body := summaryNoteBody(t, f); !strings.Contains(body, "[P1] 已发布的 finding 列表") {
+		t.Fatalf("cancel dropped the published findings: %q", body)
+	}
+
+	nextHead := strings.Repeat("c", 40)
+	next, err := f.db.EnqueueReviewLatest(context.Background(), store.ReviewCommand{
+		ProjectID: 42, MRIID: 7, HeadSHA: nextHead,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reset, err := f.db.GetReviewStatus(context.Background(), 42, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reset.Generation != next.Generation || reset.FinalBody != "" {
+		t.Fatalf("new review kept the previous body: %+v", reset)
+	}
+	drainReviewJobs(t, f, "review.status")
+	if body := summaryNoteBody(t, f); strings.Contains(body, "[P1] 已发布的 finding 列表") {
+		t.Fatalf("new review reused the previous findings: %q", body)
+	}
+	if body := summaryNoteBody(t, f); parseStatusPhase(body) != reviewStatusPhase(reviewStatusQueued) {
+		t.Fatalf("new review did not reset the note: %q", body)
+	}
+}
+
+func TestManualCancelAPIPreservesPublishedFindings(t *testing.T) {
+	ctx := context.Background()
+	f := newReviewFixture(t, reviewTestHead)
+	f.service.status = testStatusReporter(f.gitlab)
+	workflowID := seedReviewWorkflow(t, f.db)
+	control, err := f.db.GetReviewControl(ctx, 42, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.SetReviewStatus(ctx, store.ReviewStatusGoal{
+		ProjectID: 42, MRIID: 7, Generation: control.Generation, HeadSHA: sha40,
+		State: reviewStatusBlocking,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	body := review.SummaryMarkerPrefix + " v1 fp=manual -->\n\n## 评审结论\n\nBLOCKING\n\n[P1] 手工取消前的 finding\n"
+	if _, err := f.db.SetReviewStatusFinalBody(ctx, 42, 7, control.Generation, sha40, body); err != nil {
+		t.Fatal(err)
+	}
+	drainReviewSideEffects(t, f)
+	before, err := f.db.GetReviewStatus(ctx, 42, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dispatcher := newTestDispatcher(t, f.db, f.gitlab)
+	jobID, err := dispatcher.CancelReview(ctx, workflowID)
+	if err != nil {
+		t.Fatalf("CancelReview: %v", err)
+	}
+	job, err := f.db.Claim(ctx, "worker", []string{"review.cancel"}, time.Minute)
+	if err != nil || job == nil || job.ID != jobID {
+		t.Fatalf("claim cancel = %+v, %v", job, err)
+	}
+	if err := f.service.Handle(ctx, job); err != nil {
+		t.Fatalf("cancel handle: %v", err)
+	}
+	drainReviewSideEffects(t, f)
+
+	after, err := f.db.GetReviewStatus(ctx, 42, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Generation <= before.Generation || after.State != reviewStatusCancelled {
+		t.Fatalf("manual cancel did not advance the status: before %+v after %+v", before, after)
+	}
+	if after.FinalBody != before.FinalBody || !after.FinalBodyReady {
+		t.Fatalf("manual cancel cleared the published body: before %+v after %+v", before, after)
+	}
+	note := summaryNoteBody(t, f)
+	if !strings.Contains(note, "[P1] 手工取消前的 finding") || !strings.Contains(note, "## 评审结论") {
+		t.Fatalf("manual cancel removed the published conclusions: %q", note)
+	}
+	if parseStatusPhase(note) != reviewStatusPhase(reviewStatusCancelled) {
+		t.Fatalf("manual cancel did not update the lifecycle header: %q", note)
 	}
 }
 
