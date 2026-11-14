@@ -1,7 +1,7 @@
 import { Fragment, useId, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { getStats, listProjects } from '../api/api'
-import type { DailyStats, Project, ProviderQualityRow, Stats } from '../api/types'
+import { getReviewStats, getStats, listProjects } from '../api/api'
+import type { DailyStats, Project, ProviderQualityRow, ReviewStats, Stats } from '../api/types'
 import {
   Badge, Button, DatePicker, Disclosure, EmptyState, ErrorState, LoadingState, Metric, PageHeader, Panel, Select,
   TableNote, type SelectOption,
@@ -994,6 +994,49 @@ function StatsContent({ stats }: { stats: Stats }) {
   )
 }
 
+function readCount(stats: ReviewStats, key: keyof ReviewStats): number | null {
+  const value = stats[key]
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null
+}
+
+// ReviewScopePanel keeps the review counters separate from the mixed workflow
+// totals. Onboarding runs share the workflows table but never carry a review
+// verdict, so they cannot be part of a blocking ratio a reviewer interprets.
+function ReviewScopePanel({ stats }: { stats: ReviewStats }) {
+  const runs = readCount(stats, 'runs')
+  const incomplete = readCount(stats, 'incomplete')
+  const blocking = readCount(stats, 'blocking')
+  const allRuns = readCount(stats, 'all_runs')
+  const allBlocking = readCount(stats, 'all_blocking')
+  return (
+    <Panel title="评审口径" aside="来自 stats/reviews · kind=review">
+      <section className={ui.metricStrip} aria-label="评审口径指标">
+        <Metric
+          label="评审运行"
+          value={runs === null ? '不可用' : formatNumber(runs)}
+          note={`仅 kind=review；onboarding 不计入（全量 ${allRuns === null ? '不可用' : formatNumber(allRuns)} 次）`}
+        />
+        <Metric
+          label="INCOMPLETE"
+          value={incomplete === null ? '不可用' : formatNumber(incomplete)}
+          note={`占评审运行 ${formatRatio(stats.incomplete_ratio ?? null)}`}
+        />
+        <Metric
+          label="BLOCKING 比例"
+          value={formatRatio(stats.blocking_ratio ?? null)}
+          note={`评审分母 ${blocking === null ? '不可用' : formatNumber(blocking)}/${runs === null ? '不可用' : formatNumber(runs)}；全量含 onboarding ${formatRatio(stats.all_blocking_ratio ?? null)}（${allBlocking === null ? '不可用' : formatNumber(allBlocking)}/${allRuns === null ? '不可用' : formatNumber(allRuns)}）`}
+        />
+      </section>
+      {stats.model_details_purged ? (
+        <p className="small" role="status">
+          所选区间早于 LLM 调用明细保留期{typeof stats.llm_call_retention_hours === 'number' ? `（${stats.llm_call_retention_hours} 小时）` : ''}：
+          按模型与调用的明细已删除，下方模型统计显示 0 不代表没有调用；工作流用量汇总仍保留。
+        </p>
+      ) : null}
+    </Panel>
+  )
+}
+
 export function StatisticsPage() {
   const initial = useMemo(() => {
     const to = new Date()
@@ -1024,6 +1067,14 @@ export function StatisticsPage() {
     queryFn: () => {
       if (!range) throw new Error('日期范围无效。')
       return getStats({ from: range.from, to: range.to, project_id: applied.projectId || undefined })
+    },
+    enabled: range !== null,
+  })
+  const reviewStats = useQuery({
+    queryKey: ['stats', 'reviews', range?.from ?? '', range?.to ?? '', applied.projectId],
+    queryFn: () => {
+      if (!range) throw new Error('日期范围无效。')
+      return getReviewStats({ from: range.from, to: range.to, project_id: applied.projectId || undefined })
     },
     enabled: range !== null,
   })
@@ -1119,6 +1170,9 @@ export function StatisticsPage() {
           </div>
         ) : null}
 
+        {range && reviewStats.isPending ? <LoadingState label="正在读取评审口径统计…" /> : null}
+        {reviewStats.isError ? <ErrorState error={reviewStats.error} onRetry={() => { void reviewStats.refetch() }} title="评审口径统计加载失败" /> : null}
+        {reviewStats.data ? <ReviewScopePanel stats={reviewStats.data} /> : null}
         {range && stats.isPending ? <LoadingState label="正在读取统计数据…" /> : null}
         {stats.isError ? <ErrorState error={stats.error} onRetry={() => { void stats.refetch() }} title="统计数据加载失败" /> : null}
         {stats.isSuccess && !stats.data ? <EmptyState title="stats 返回了空响应" description="页面不会用示例数据补全；请检查服务端统计实现。" /> : null}

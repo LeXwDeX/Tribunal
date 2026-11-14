@@ -58,6 +58,7 @@ import type {
   ReviewGraph,
   ReviewNodeDetail,
   ReviewSummary,
+  ReviewStats,
   Skill,
   SkillPage,
   Stats,
@@ -414,6 +415,10 @@ export interface StatsFilters {
 
 export async function getStats(filters: StatsFilters = {}): Promise<Stats> {
   return request<Stats>(withQuery('/api/v1/stats', { ...filters }))
+}
+
+export async function getReviewStats(filters: StatsFilters = {}): Promise<ReviewStats> {
+  return request<ReviewStats>(withQuery('/api/v1/stats/reviews', { ...filters }))
 }
 
 export async function getSettings(): Promise<PlatformSettings> {

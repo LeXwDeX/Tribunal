@@ -1632,6 +1632,143 @@ type providerQualityAccumulator struct {
 // finding contributes to both roles when it has an origin provider and a
 // resolved challenge provider. Only findings attributed to a non-empty
 // provider enter the result.
+// reviewStatsConditions mirrors statsConditions for the review-scope filter.
+func reviewStatsConditions(filter store.ReviewStatsFilter, alias string) ([]string, []any) {
+	conditions := make([]string, 0, 3)
+	args := make([]any, 0, 3)
+	if !filter.From.IsZero() {
+		conditions = append(conditions, alias+".created_at >= ?")
+		args = append(args, formatTime(filter.From.UTC()))
+	}
+	if !filter.To.IsZero() {
+		conditions = append(conditions, alias+".created_at < ?")
+		args = append(args, formatTime(filter.To.UTC()))
+	}
+	if filter.ProjectID != nil {
+		conditions = append(conditions, alias+".project_id = ?")
+		args = append(args, *filter.ProjectID)
+	}
+	if clause, accessArgs := projectAccessClause(alias+".project_id", filter.AccessUserID); clause != "" {
+		conditions = append(conditions, clause)
+		args = append(args, accessArgs...)
+	}
+	return conditions, args
+}
+
+// ReviewStats counts review workflows separately from onboarding runs. Both
+// denominators are reported so the console can show the review-only ratio and
+// the mixed one side by side.
+func (s *Store) ReviewStats(ctx context.Context, filter store.ReviewStatsFilter) (store.ReviewStats, error) {
+	stats := store.ReviewStats{
+		ByProject: make([]store.ReviewProjectStats, 0),
+		Trend:     make([]store.ReviewDailyStats, 0),
+	}
+	if !filter.From.IsZero() && !filter.To.IsZero() && !filter.From.Before(filter.To) {
+		return stats, errors.New("sqlite: review stats from must be before to")
+	}
+	conditions, args := reviewStatsConditions(filter, "w")
+	where := ""
+	if len(conditions) > 0 {
+		where = "WHERE " + strings.Join(conditions, " AND ")
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT
+		w.kind, w.project_id, COALESCE(w.verdict, ''), w.status, w.created_at
+		FROM workflows w `+where, args...)
+	if err != nil {
+		return stats, fmt.Errorf("sqlite: review stats workflows: %w", err)
+	}
+	defer rows.Close()
+	projectIndex := make(map[int64]int)
+	dayIndex := make(map[string]int)
+	for rows.Next() {
+		var (
+			kind      string
+			projectID int64
+			verdict   string
+			status    string
+			created   string
+		)
+		if err := rows.Scan(&kind, &projectID, &verdict, &status, &created); err != nil {
+			return stats, fmt.Errorf("sqlite: scan review stats workflow: %w", err)
+		}
+		createdAt, err := parseTime(created)
+		if err != nil {
+			return stats, err
+		}
+		// The mixed denominator keeps every kind so a viewer still sees the
+		// historical ratio that included onboarding.
+		stats.AllRuns++
+		if verdict == "BLOCKING" {
+			stats.AllBlocking++
+		}
+		if kind != "review" {
+			continue
+		}
+		stats.Runs++
+		switch status {
+		case "completed":
+			stats.Completed++
+		case "failed":
+			stats.Failed++
+		case "cancelled":
+			stats.Cancelled++
+		}
+		incomplete := verdict == "INCOMPLETE"
+		blocking := verdict == "BLOCKING"
+		if incomplete {
+			stats.Incomplete++
+		}
+		if blocking {
+			stats.Blocking++
+		}
+		index, ok := projectIndex[projectID]
+		if !ok {
+			index = len(stats.ByProject)
+			projectIndex[projectID] = index
+			stats.ByProject = append(stats.ByProject, store.ReviewProjectStats{ProjectID: projectID})
+		}
+		project := &stats.ByProject[index]
+		project.Runs++
+		if incomplete {
+			project.Incomplete++
+		}
+		if blocking {
+			project.Blocking++
+		}
+		day := createdAt.UTC().Format("2006-01-02")
+		position, ok := dayIndex[day]
+		if !ok {
+			position = len(stats.Trend)
+			dayIndex[day] = position
+			stats.Trend = append(stats.Trend, store.ReviewDailyStats{Day: day})
+		}
+		bucket := &stats.Trend[position]
+		bucket.Runs++
+		if incomplete {
+			bucket.Incomplete++
+		}
+		if blocking {
+			bucket.Blocking++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return stats, fmt.Errorf("sqlite: iterate review stats workflows: %w", err)
+	}
+	if stats.Runs > 0 {
+		ratio := float64(stats.Blocking) / float64(stats.Runs)
+		stats.BlockingRatio = &ratio
+		incomplete := float64(stats.Incomplete) / float64(stats.Runs)
+		stats.IncompleteRatio = &incomplete
+	}
+	if stats.AllRuns > 0 {
+		ratio := float64(stats.AllBlocking) / float64(stats.AllRuns)
+		stats.AllBlockingRatio = &ratio
+	}
+	sort.Slice(stats.ByProject, func(i, j int) bool { return stats.ByProject[i].ProjectID < stats.ByProject[j].ProjectID })
+	sort.Slice(stats.Trend, func(i, j int) bool { return stats.Trend[i].Day < stats.Trend[j].Day })
+	return stats, nil
+}
+
 func (s *Store) providerQualityStats(ctx context.Context, where string, args []any) ([]store.ProviderQualityStats, error) {
 	findingWhere := where
 	if findingWhere == "" {

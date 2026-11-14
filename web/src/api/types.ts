@@ -626,6 +626,39 @@ export interface ProviderQualityRow {
 }
 
 // Older servers omit some fields; render only keys that are actually present.
+export interface ReviewProjectStats {
+  project_id: number
+  runs: number
+  incomplete: number
+  blocking: number
+}
+
+export interface ReviewDailyStats {
+  day: string
+  runs: number
+  incomplete: number
+  blocking: number
+}
+
+/** Review-scope statistics from GET /api/v1/stats/reviews. */
+export interface ReviewStats extends Record<string, unknown> {
+  runs?: number
+  completed?: number
+  incomplete?: number
+  blocking?: number
+  failed?: number
+  cancelled?: number
+  blocking_ratio?: number | null
+  incomplete_ratio?: number | null
+  all_runs?: number
+  all_blocking?: number
+  all_blocking_ratio?: number | null
+  by_project?: ReviewProjectStats[]
+  trend?: ReviewDailyStats[]
+  llm_call_retention_hours?: number
+  model_details_purged?: boolean
+}
+
 export interface Stats extends Record<string, unknown> {
   duration_samples?: number
   trend?: DailyStats[]
