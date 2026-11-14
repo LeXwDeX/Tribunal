@@ -224,10 +224,13 @@ func TestStatusLateCompletionAfterCancellationRepairs(t *testing.T) {
 	close(g.release)
 	<-g.done
 	// A new service has no in-memory locks or scan cursor from the old process.
+	// The row is successfully applied, so the repair comes from the
+	// low-frequency self-heal scan after its interval elapsed (#459).
 	oldService := f.service
 	f.service = &ReviewService{store: f.db, workspace: f.manager, cipher: oldService.cipher,
-		gitlab: f.gitlab, status: testStatusReporter(f.gitlab), logger: oldService.logger, now: time.Now}
-	if err := f.service.ReconcileSideEffects(ctx); err != nil {
+		gitlab: f.gitlab, status: testStatusReporter(f.gitlab), logger: oldService.logger,
+		now: func() time.Time { return time.Now().Add(reviewStatusSelfHealInterval + time.Minute) }}
+	if err := f.service.ReconcileAppliedStatuses(ctx); err != nil {
 		t.Fatal(err)
 	}
 	drainReviewJobs(t, f, "review.status")
@@ -259,6 +262,18 @@ func TestStatusVerificationScansBeyondFirstHundred(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// The self-heal scan only revisits terminal rows (#459); this test is
+		// about paging beyond the first hundred, so make every row terminal.
+		if ok, err := f.db.SetReviewStatus(ctx, store.ReviewStatusGoal{
+			ProjectID: 42, MRIID: iid, Generation: row.Generation,
+			Attempt: row.Attempt, HeadSHA: f.head, State: store.ReviewStatusPass,
+		}); err != nil || !ok {
+			t.Fatalf("set pass: %v %v", ok, err)
+		}
+		row, err = f.db.GetReviewStatus(ctx, 42, iid)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if err := f.db.MarkReviewStatusApplied(ctx, 42, iid, int64(row.Version), iid, "hash", ""); err != nil {
 			t.Fatal(err)
 		}
@@ -275,10 +290,9 @@ func TestStatusVerificationScansBeyondFirstHundred(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for pass := 0; pass < 2; pass++ {
-		if err := f.service.enqueueStatusVerification(ctx, 42); err != nil {
-			t.Fatal(err)
-		}
+	f.service.now = func() time.Time { return time.Now().Add(reviewStatusSelfHealInterval + time.Minute) }
+	if err := f.service.ReconcileAppliedStatuses(ctx); err != nil {
+		t.Fatal(err)
 	}
 	seen := map[int64]bool{}
 	for {
@@ -611,10 +625,17 @@ func TestStatusVerificationSettlesTerminalError(t *testing.T) {
 	drainReviewJobs(t, f, "review.status")
 	staleBody := reviewStatusMarkerLine + "\nstale"
 	f.gitlab.notes[0].Body = staleBody
-	f.gitlab.statusNoteErr = &gitlab.Error{Op: "update_note", Status: 403}
-	if err := f.service.ReconcileSideEffects(ctx); err != nil {
+	pending, err := f.db.GetReviewStatus(ctx, 42, 7)
+	if err != nil {
 		t.Fatal(err)
 	}
+	if ok, err := f.db.SetReviewStatus(ctx, store.ReviewStatusGoal{
+		ProjectID: 42, MRIID: 7, Generation: pending.Generation,
+		Attempt: pending.Attempt + 1, HeadSHA: f.head, State: reviewStatusRunning,
+	}); err != nil || !ok {
+		t.Fatalf("pending status: %v %v", ok, err)
+	}
+	f.gitlab.statusNoteErr = &gitlab.Error{Op: "update_note", Status: 403}
 	drainReviewJobs(t, f, "review.status")
 	row, err := f.db.GetReviewStatus(ctx, 42, 7)
 	if err != nil {
@@ -671,15 +692,22 @@ func TestTerminalStatusErrorCanBeSupersededByWorkflowRecovery(t *testing.T) {
 				t.Fatalf("set %s: %v %v", phase, ok, err)
 			}
 			drainReviewJobs(t, f, "review.status")
+			pending, err := f.db.GetReviewStatus(ctx, 42, 7)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ok, err := f.db.SetReviewStatus(ctx, store.ReviewStatusGoal{
+				ProjectID: 42, MRIID: 7, Generation: pending.Generation,
+				Attempt: pending.Attempt, HeadSHA: f.head, State: phase,
+			}); err != nil || !ok {
+				t.Fatalf("pending status: %v %v", ok, err)
+			}
 			for i := range f.gitlab.notes {
 				if strings.HasPrefix(f.gitlab.notes[i].Body, reviewStatusMarkerPrefix) {
 					f.gitlab.notes[i].Body = reviewStatusMarkerLine + "\nstale"
 				}
 			}
 			f.gitlab.statusNoteErr = &gitlab.Error{Op: "update_note", Status: 403}
-			if err := f.service.enqueueStatusVerification(ctx, 42); err != nil {
-				t.Fatal(err)
-			}
 			drainReviewJobs(t, f, "review.status")
 			failed, err := f.db.GetReviewStatus(ctx, 42, 7)
 			if err != nil || failed.LastError == "" || failed.State != phase {
@@ -715,7 +743,8 @@ func TestStatusReconcilesLateRemoteOverwriteAfterApplied(t *testing.T) {
 	}
 	// An old request completes remotely after the new receipt was committed.
 	f.gitlab.notes[0].Body = reviewStatusBody(reviewStatusUpdate{State: reviewStatusRunning, HeadSHA: f.head, Generation: r.Generation})
-	if err := f.service.ReconcileSideEffects(ctx); err != nil {
+	f.service.now = func() time.Time { return time.Now().Add(reviewStatusSelfHealInterval + time.Minute) }
+	if err := f.service.ReconcileAppliedStatuses(ctx); err != nil {
 		t.Fatal(err)
 	}
 	drainReviewJobs(t, f, "review.status")

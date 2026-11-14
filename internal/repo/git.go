@@ -20,6 +20,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -542,6 +543,101 @@ func (g *Git) RemoveWorktree(ctx context.Context, mirror, dir string) error {
 		return ErrUnsafePath
 	}
 	_, err = g.run(ctx, "remove worktree", mirror, Auth{}, "worktree", "remove", "--force", "--", dir)
+	return err
+}
+
+// MergeRequestRef is one refs/merge-requests/<iid>/head ref in a mirror.
+type MergeRequestRef struct {
+	IID  int64
+	Name string
+}
+
+var mergeRequestRefRE = regexp.MustCompile(`^refs/merge-requests/([0-9]{1,18})/head$`)
+
+// MergeRequestRefs lists the MR head refs a mirror still carries. Only the
+// canonical namespace is returned; other refs are never touched by cleanup.
+func (g *Git) MergeRequestRefs(ctx context.Context, mirror string) ([]MergeRequestRef, error) {
+	if err := validateAbsPath(mirror); err != nil {
+		return nil, err
+	}
+	if err := requireExistingDir(mirror); err != nil {
+		return nil, err
+	}
+	out, err := g.run(ctx, "list merge request refs", mirror, Auth{},
+		"for-each-ref", "--format=%(refname)", "refs/merge-requests/")
+	if err != nil {
+		return nil, err
+	}
+	refs := make([]MergeRequestRef, 0)
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		match := mergeRequestRefRE.FindStringSubmatch(line)
+		if match == nil {
+			continue
+		}
+		iid, err := strconv.ParseInt(match[1], 10, 64)
+		if err != nil || iid <= 0 {
+			continue
+		}
+		refs = append(refs, MergeRequestRef{IID: iid, Name: line})
+	}
+	sort.Slice(refs, func(i, j int) bool {
+		if refs[i].IID != refs[j].IID {
+			return refs[i].IID < refs[j].IID
+		}
+		return refs[i].Name < refs[j].Name
+	})
+	return refs, nil
+}
+
+// DeleteMergeRequestRefs deletes validated MR head refs. It returns how many
+// were deleted. A ref outside the canonical namespace is rejected before any
+// deletion happens.
+func (g *Git) DeleteMergeRequestRefs(ctx context.Context, mirror string, refs []MergeRequestRef) (int, error) {
+	if err := validateAbsPath(mirror); err != nil {
+		return 0, err
+	}
+	if err := requireExistingDir(mirror); err != nil {
+		return 0, err
+	}
+	for _, ref := range refs {
+		match := mergeRequestRefRE.FindStringSubmatch(ref.Name)
+		if match == nil {
+			return 0, ErrInvalidRef
+		}
+		iid, err := strconv.ParseInt(match[1], 10, 64)
+		if err != nil || iid != ref.IID || iid <= 0 {
+			return 0, ErrInvalidRef
+		}
+	}
+	deleted := 0
+	for _, ref := range refs {
+		if err := ctx.Err(); err != nil {
+			return deleted, fmt.Errorf("repo: delete merge request ref: %w", err)
+		}
+		if _, err := g.run(ctx, "delete merge request ref", mirror, Auth{},
+			"update-ref", "-d", "--no-deref", ref.Name); err != nil {
+			return deleted, err
+		}
+		deleted++
+	}
+	return deleted, nil
+}
+
+// GC runs Git's automatic garbage collection on a mirror. It only compacts a
+// mirror when Git's own thresholds are exceeded, so hourly maintenance passes
+// stay cheap. The caller serializes it with workspace mutations.
+func (g *Git) GC(ctx context.Context, mirror string) error {
+	if err := validateAbsPath(mirror); err != nil {
+		return err
+	}
+	if err := requireExistingDir(mirror); err != nil {
+		return err
+	}
+	_, err := g.run(ctx, "gc", mirror, Auth{}, "gc", "--quiet", "--auto")
 	return err
 }
 

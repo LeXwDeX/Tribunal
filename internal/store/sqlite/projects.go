@@ -336,6 +336,9 @@ func (s *Store) DeleteProject(ctx context.Context, id int64) error {
 		{`DELETE FROM review_status WHERE project_id = ?`, []any{id}},
 		{`DELETE FROM review_reactions WHERE project_id = ?`, []any{id}},
 		{`DELETE FROM llm_calls WHERE workflow_id IN (` + workflowScope + `)`, []any{id}},
+		{`DELETE FROM llm_call_daily WHERE project_id = ?`, []any{id}},
+		{`DELETE FROM llm_call_latency_daily WHERE project_id = ?`, []any{id}},
+		{`DELETE FROM llm_call_error_daily WHERE project_id = ?`, []any{id}},
 		{`DELETE FROM events WHERE workflow_id IN (` + workflowScope + `)`, []any{id}},
 		{`DELETE FROM workflow_dossiers WHERE project_id = ? OR workflow_id IN (` + workflowScope + `)`, []any{id, id}},
 		{`DELETE FROM jobs WHERE "key" IN (

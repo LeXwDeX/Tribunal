@@ -204,12 +204,16 @@ type ReviewStatus struct {
 	// written before #452 keep final_body empty and stay on the legacy status
 	// marker so the status worker cannot overwrite a published summary. A new
 	// row or a publication writing final_body sets it.
-	FinalBodyReady bool      `json:"final_body_ready,omitempty"`
-	NoteID         int64     `json:"note_id,omitempty"`
-	BodyHash       string    `json:"body_hash,omitempty"`
-	Version        int       `json:"version"`
-	AppliedVersion int       `json:"applied_version"`
-	LastError      string    `json:"last_error,omitempty"`
+	FinalBodyReady bool   `json:"final_body_ready,omitempty"`
+	NoteID         int64  `json:"note_id,omitempty"`
+	BodyHash       string `json:"body_hash,omitempty"`
+	Version        int    `json:"version"`
+	AppliedVersion int    `json:"applied_version"`
+	LastError      string `json:"last_error,omitempty"`
+	// LastVerifiedAt is when the applied remote note was last confirmed. The
+	// five-minute reconciliation ignores applied rows; a low-frequency self-heal
+	// scan revisits them at most once per interval (#459).
+	LastVerifiedAt time.Time `json:"last_verified_at,omitempty"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }
 

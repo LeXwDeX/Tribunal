@@ -162,8 +162,27 @@ func (s *ReviewService) RunStatusJob(ctx context.Context, job *jobs.Job) error {
 		}
 		return err
 	}
-	if row.AppliedVersion >= row.Version && row.LastError != "" {
-		return nil
+	selfHeal := false
+	if row.AppliedVersion >= row.Version {
+		if row.LastError != "" {
+			return nil
+		}
+		// Cancelled merge requests stop status re-verification (#459).
+		if row.State == reviewStatusCancelled {
+			return nil
+		}
+		// Only terminal rows are self-healed. An applied active row is stable;
+		// the unfinished-row reconciliation owns a stalled review.
+		if !terminalReviewStatus(row.State) {
+			return nil
+		}
+		// A successful applied row is only revisited by the low-frequency
+		// self-heal scan. Short-circuit locally so a duplicate or stale queue
+		// row cannot decrypt a token or call GitLab.
+		if !row.LastVerifiedAt.IsZero() && s.now().UTC().Sub(row.LastVerifiedAt) < reviewStatusSelfHealInterval {
+			return nil
+		}
+		selfHeal = true
 	}
 	project, token, err := s.projectToken(ctx, row.ProjectID)
 	if err != nil {
@@ -174,16 +193,16 @@ func (s *ReviewService) RunStatusJob(ctx context.Context, job *jobs.Job) error {
 	control, err := s.store.GetReviewControl(ctx, row.ProjectID, row.MRIID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return s.markStatusApplied(ctx, row, 0, "", "review control is missing")
+			return s.settleStatusVisit(ctx, row, selfHeal, 0, "", "review control is missing")
 		}
 		return err
 	}
 	if control.Generation != row.Generation ||
 		(row.HeadSHA != "" && !strings.EqualFold(control.HeadSHA, row.HeadSHA)) {
-		return s.markStatusApplied(ctx, row, 0, "", "review superseded")
+		return s.settleStatusVisit(ctx, row, selfHeal, 0, "", "review superseded")
 	}
 	if control.Cancelled && row.State != reviewStatusCancelled && row.State != reviewStatusStale {
-		return s.markStatusApplied(ctx, row, 0, "", "review cancelled")
+		return s.settleStatusVisit(ctx, row, selfHeal, 0, "", "review cancelled")
 	}
 	if s.status == nil {
 		return errors.New("app: status reporter is not configured")
@@ -216,9 +235,31 @@ func (s *ReviewService) RunStatusJob(ctx context.Context, job *jobs.Job) error {
 		if reviewSideEffectRetryable(err) {
 			return err
 		}
-		return s.markStatusApplied(ctx, row, 0, "", reviewSideEffectReason(err))
+		return s.settleStatusVisit(ctx, row, selfHeal, 0, "", reviewSideEffectReason(err))
 	}
-	return s.markStatusApplied(ctx, row, noteID, hash, "")
+	return s.settleStatusVisit(ctx, row, selfHeal, noteID, hash, "")
+}
+
+// settleStatusVisit records the outcome of one status write. The normal path
+// fences the applied version; a self-heal visit only advances the verification
+// clock, because the desired version was already applied and a newer version
+// must never be stamped by an older check (#459).
+func (s *ReviewService) settleStatusVisit(ctx context.Context, row *store.ReviewStatus, selfHeal bool, noteID int64, bodyHash, reason string) error {
+	if selfHeal {
+		store, ok := s.store.(reviewStatusSelfHealStore)
+		if !ok {
+			return nil
+		}
+		if reason != "" && s.logger != nil {
+			s.logger.Warn("review status self-heal failed", "project_id", row.ProjectID,
+				"mr_iid", row.MRIID, "generation", row.Generation)
+		}
+		if err := store.MarkReviewStatusVerified(ctx, row.ProjectID, row.MRIID, int64(row.Version), noteID, bodyHash, s.now().UTC()); err != nil {
+			return fmt.Errorf("app: mark review status verified: %w", err)
+		}
+		return nil
+	}
+	return s.markStatusApplied(ctx, row, noteID, bodyHash, reason)
 }
 
 func (s *ReviewService) markStatusApplied(ctx context.Context, row *store.ReviewStatus, noteID int64, bodyHash, reason string) error {
@@ -378,6 +419,59 @@ func (s *ReviewService) ReconcileSideEffects(ctx context.Context) error {
 		unlock()
 		if err != nil {
 			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// reviewStatusSelfHealStore is the optional low-frequency status surface. A
+// test double that predates it simply has no self-heal scan.
+type reviewStatusSelfHealStore interface {
+	ListAppliedReviewStatusesForSelfHeal(ctx context.Context, projectID, afterMRIID int64, verifiedBefore time.Time) ([]store.ReviewStatus, error)
+	MarkReviewStatusVerified(ctx context.Context, projectID, mrIID, version, noteID int64, bodyHash string, verifiedAt time.Time) error
+}
+
+// ReconcileAppliedStatuses runs the low-frequency self-heal scan: applied,
+// error-free, non-cancelled terminal rows that were not verified recently are
+// enqueued once more. It never re-runs a model and never touches a row whose
+// verification is still fresh (#459).
+func (s *ReviewService) ReconcileAppliedStatuses(ctx context.Context) error {
+	store, ok := s.store.(reviewStatusSelfHealStore)
+	if !ok {
+		return nil
+	}
+	projects, err := s.store.ListProjects(ctx)
+	if err != nil {
+		return err
+	}
+	cutoff := s.now().UTC().Add(-reviewStatusSelfHealInterval)
+	var errs []error
+	for _, project := range projects {
+		if !project.Enabled {
+			continue
+		}
+		after := int64(0)
+		for page := 0; page < reviewStatusSelfHealPages; page++ {
+			if err := ctx.Err(); err != nil {
+				return errors.Join(append(errs, err)...)
+			}
+			rows, err := store.ListAppliedReviewStatusesForSelfHeal(ctx, project.ID, after, cutoff)
+			if err != nil {
+				errs = append(errs, err)
+				break
+			}
+			for _, row := range rows {
+				if err := s.enqueueReviewSideEffectJob(ctx, "review.status",
+					"review.status:"+itoa(row.ProjectID)+":"+itoa(row.MRIID), map[string]any{
+						"project_id": row.ProjectID, "mr_iid": row.MRIID,
+					}); err != nil {
+					errs = append(errs, err)
+				}
+			}
+			if len(rows) < reviewStatusSelfHealPageSize {
+				break
+			}
+			after = rows[len(rows)-1].MRIID
 		}
 	}
 	return errors.Join(errs...)

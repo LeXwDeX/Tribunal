@@ -438,16 +438,24 @@ func scanReviewStatus(row rowScanner) (*store.ReviewStatus, error) {
 	var (
 		status     store.ReviewStatus
 		noteID     sql.NullInt64
+		verified   sql.NullString
 		updatedRaw string
 	)
 	if err := row.Scan(&status.ProjectID, &status.MRIID, &status.Generation, &status.HeadSHA,
 		&status.Attempt, &status.Profile, &status.State, &status.Detail, &status.FinalBody,
 		&status.FinalBodyReady, &noteID,
 		&status.BodyHash, &status.Version, &status.AppliedVersion, &status.LastError,
-		&updatedRaw); err != nil {
+		&verified, &updatedRaw); err != nil {
 		return nil, err
 	}
 	status.NoteID = noteID.Int64
+	if verified.Valid && verified.String != "" {
+		value, err := parseTime(verified.String)
+		if err != nil {
+			return nil, err
+		}
+		status.LastVerifiedAt = value
+	}
 	updated, err := parseTime(updatedRaw)
 	if err != nil {
 		return nil, err
@@ -457,7 +465,8 @@ func scanReviewStatus(row rowScanner) (*store.ReviewStatus, error) {
 }
 
 const reviewStatusColumns = `project_id, mr_iid, generation, head_sha, attempt, profile,
-	state, detail, final_body, final_body_ready, note_id, body_hash, version, applied_version, last_error, updated_at`
+	state, detail, final_body, final_body_ready, note_id, body_hash, version, applied_version, last_error,
+	last_verified_at, updated_at`
 
 func getReviewStatusTx(ctx context.Context, tx *sql.Tx, projectID, mrIID int64) (*store.ReviewStatus, bool, error) {
 	status, err := scanReviewStatus(tx.QueryRowContext(ctx,
@@ -553,9 +562,10 @@ func (s *Store) MarkReviewStatusApplied(ctx context.Context, projectID, mrIID in
 		SET applied_version = version,
 		    note_id = COALESCE(NULLIF(?, 0), note_id),
 		    body_hash = COALESCE(NULLIF(?, ''), body_hash),
-		    last_error = ?
+		    last_error = ?,
+		    last_verified_at = ?
 		WHERE project_id = ? AND mr_iid = ? AND version = ?`,
-		noteID, bodyHash, lastError, projectID, mrIID, version)
+		noteID, bodyHash, lastError, formatTime(s.now().UTC()), projectID, mrIID, version)
 	if err != nil {
 		return fmt.Errorf("sqlite: mark review status applied: %w", err)
 	}
@@ -567,6 +577,29 @@ func (s *Store) MarkReviewStatusApplied(ctx context.Context, projectID, mrIID in
 		return nil
 	}
 	return s.reviewStatusWriteMiss(ctx, projectID, mrIID, version)
+}
+
+// MarkReviewStatusVerified records a low-frequency self-heal check for exactly
+// one version. It never changes the applied version, so a remote note that still
+// matches only advances the verification clock. A newer version makes the write
+// a no-op; its own job and receipt own the row.
+func (s *Store) MarkReviewStatusVerified(ctx context.Context, projectID, mrIID, version, noteID int64, bodyHash string, verifiedAt time.Time) error {
+	if projectID <= 0 || mrIID <= 0 || version <= 0 {
+		return errors.New("sqlite: review status project id, mr iid, and version are required")
+	}
+	if verifiedAt.IsZero() {
+		return errors.New("sqlite: review status verification time is required")
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE review_status
+		SET note_id = COALESCE(NULLIF(?, 0), note_id),
+		    body_hash = COALESCE(NULLIF(?, ''), body_hash),
+		    last_verified_at = ?
+		WHERE project_id = ? AND mr_iid = ? AND version = ?`,
+		noteID, bodyHash, formatTime(verifiedAt.UTC()), projectID, mrIID, version)
+	if err != nil {
+		return fmt.Errorf("sqlite: mark review status verified: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) reviewStatusWriteMiss(ctx context.Context, projectID, mrIID, version int64) error {
@@ -632,12 +665,31 @@ func (s *Store) ListPendingReviewStatuses(ctx context.Context) ([]store.ReviewSt
 		WHERE applied_version < version ORDER BY updated_at, project_id, mr_iid LIMIT ?`, maxReviewSideEffectList)
 }
 
-// ListReviewStatusesForVerification returns a bounded page of pending or
-// successfully applied statuses. Terminal errors remain settled.
+// ListReviewStatusesForVerification returns a bounded page of desired statuses
+// that were not applied yet. Successfully applied rows are covered by the
+// low-frequency self-heal scan instead (#459); terminal errors stay settled.
 func (s *Store) ListReviewStatusesForVerification(ctx context.Context, projectID, afterMRIID int64) ([]store.ReviewStatus, error) {
 	return s.listReviewStatuses(ctx, `SELECT `+reviewStatusColumns+` FROM review_status
-		WHERE project_id = ? AND mr_iid > ? AND (applied_version < version OR last_error = '')
+		WHERE project_id = ? AND mr_iid > ? AND applied_version < version
 		ORDER BY mr_iid LIMIT ?`, projectID, afterMRIID, maxReviewSideEffectList)
+}
+
+// ListAppliedReviewStatusesForSelfHeal pages successful applied terminal rows
+// that were not verified since verifiedBefore. Cancelled merge requests stop
+// status re-verification; rows whose last attempt failed terminally stay
+// settled. The caller enforces the low-frequency schedule.
+func (s *Store) ListAppliedReviewStatusesForSelfHeal(ctx context.Context, projectID, afterMRIID int64, verifiedBefore time.Time) ([]store.ReviewStatus, error) {
+	if verifiedBefore.IsZero() {
+		return nil, errors.New("sqlite: self-heal cutoff is required")
+	}
+	return s.listReviewStatuses(ctx, `SELECT `+reviewStatusColumns+` FROM review_status
+		WHERE project_id = ? AND mr_iid > ? AND applied_version >= version AND last_error = ''
+		  AND state IN (?, ?, ?, ?, ?)
+		  AND last_verified_at < ?
+		ORDER BY mr_iid LIMIT ?`, projectID, afterMRIID,
+		store.ReviewStatusPass, store.ReviewStatusBlocking, store.ReviewStatusIncomplete,
+		store.ReviewStatusFailed, store.ReviewStatusStale,
+		formatTime(verifiedBefore.UTC()), maxReviewSideEffectList)
 }
 
 // ListReviewStatusesByState returns bounded rows in the given states, oldest

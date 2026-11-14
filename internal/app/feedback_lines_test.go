@@ -139,9 +139,12 @@ func TestFeedbackResolveSignalUsesPublishedLine(t *testing.T) {
 			if err != nil {
 				t.Fatalf("GetProject: %v", err)
 			}
-			got := service.resolveSignal(context.Background(), "token", project, publication, *workflow, &gitlab.MergeRequest{
+			got, class := service.resolveSignal(context.Background(), "token", project, publication, *workflow, &gitlab.MergeRequest{
 				IID: 7, State: "opened", SHA: current,
 			}, 7)
+			if class != "" {
+				t.Fatalf("resolveSignal class = %q, want none", class)
+			}
 			if got != tc.want {
 				t.Fatalf("resolveSignal() = %q, want %q", got, tc.want)
 			}
@@ -162,9 +165,12 @@ func TestFeedbackResolveSignalFetchesMissingHead(t *testing.T) {
 	}
 	project.WebURL = strings.TrimSuffix(remote, ".git")
 	f.gitlab.project = &gitlab.Project{ID: 42, PathWithNamespace: "group/repo", WebURL: project.WebURL, HTTPURLToRepo: remote}
-	got := service.resolveSignal(context.Background(), "token", project, publication, *workflow, &gitlab.MergeRequest{
+	got, class := service.resolveSignal(context.Background(), "token", project, publication, *workflow, &gitlab.MergeRequest{
 		IID: 7, State: "opened", SHA: current,
 	}, 7)
+	if class != "" {
+		t.Fatalf("resolveSignal class = %q, want none", class)
+	}
 	if got != "resolved_changed" {
 		t.Fatalf("resolveSignal() = %q, want resolved_changed", got)
 	}
@@ -264,8 +270,9 @@ func TestFeedbackCollectsMergedMROnlyWithinWindow(t *testing.T) {
 		mergedAt *time.Time
 		want     int
 	}{
-		{name: "merged within three days", state: "merged", mergedAt: feedbackTimePtr(now.Add(-time.Hour)), want: 1},
-		{name: "merged older than three days", state: "merged", mergedAt: feedbackTimePtr(now.Add(-4 * 24 * time.Hour)), want: 0},
+		{name: "merged recently", state: "merged", mergedAt: feedbackTimePtr(now.Add(-time.Hour)), want: 1},
+		{name: "merged within the widened window", state: "merged", mergedAt: feedbackTimePtr(now.Add(-10 * 24 * time.Hour)), want: 1},
+		{name: "merged older than the window", state: "merged", mergedAt: feedbackTimePtr(now.Add(-15 * 24 * time.Hour)), want: 0},
 		{name: "merged without timestamp", state: "merged", mergedAt: nil, want: 0},
 		{name: "opened", state: "opened", mergedAt: nil, want: 1},
 		{name: "closed", state: "closed", mergedAt: nil, want: 0},

@@ -124,6 +124,33 @@ type Workspace struct {
 	UpdatedAt     time.Time  `json:"updated_at"`
 }
 
+// WorkspaceReclaimStatus is the fail-closed evidence used before deleting an
+// inactive project workspace. Protected is true when any unfinished workflow,
+// queued or running project job, pending dossier, or active review status still
+// needs the directory. LastActivity is zero when no activity evidence exists;
+// such a workspace is never reclaimed.
+type WorkspaceReclaimStatus struct {
+	Protected    bool
+	LastActivity time.Time
+}
+
+// WorkspaceCapacity is the latest measured workspace root usage (#459).
+type WorkspaceCapacity struct {
+	MeasuredAt time.Time `json:"measured_at,omitempty"`
+	TotalBytes int64     `json:"total_bytes"`
+	LimitBytes int64     `json:"limit_bytes"`
+	OverLimit  bool      `json:"over_limit"`
+}
+
+// FeedbackCollectionState reports the last completed feedback pass and the most
+// recent sanitized error class. LastCollectedAt stays at the last successful
+// pass, so a failing collector is distinguishable from a genuinely empty one.
+type FeedbackCollectionState struct {
+	LastCollectedAt *time.Time `json:"last_collected_at,omitempty"`
+	LastErrorClass  string     `json:"last_error_class,omitempty"`
+	LastErrorAt     *time.Time `json:"last_error_at,omitempty"`
+}
+
 // ContextDoc is one generated or manually maintained context document
 // revision. Active is stored per (project, kind); Stale is computed from the
 // workspace base.
@@ -264,6 +291,9 @@ type ModelStats struct {
 	AvgLatencyMS *float64 `json:"avg_latency_ms"`
 	P50LatencyMS *float64 `json:"p50_latency_ms"`
 	ErrorRate    *float64 `json:"error_rate"`
+	// ErrorsByKind counts failed calls by the fixed audit error class. Detail
+	// rows and long-lived aggregates both feed it, so it survives retention.
+	ErrorsByKind map[string]int64 `json:"errors_by_kind,omitempty"`
 }
 
 // ProviderQualityStats combines a provider's proposer and challenger
@@ -308,4 +338,12 @@ type Stats struct {
 	// Feedback is a pointer so an older response without the field stays
 	// distinguishable from a counted empty range.
 	Feedback *FeedbackTotals `json:"feedback,omitempty"`
+	// ModelDetailsPurged is true when part of the model window was served from
+	// the long-lived aggregates because its per-call detail rows were deleted by
+	// storage.llm_call_retention. ByModel still carries those calls (#459).
+	ModelDetailsPurged bool `json:"model_details_purged"`
+	// FeedbackCollection exposes collector health next to the counted signals.
+	FeedbackCollection *FeedbackCollectionState `json:"feedback_collection,omitempty"`
+	// WorkspaceCapacity exposes the configured cap and the last measurement.
+	WorkspaceCapacity *WorkspaceCapacity `json:"workspace_capacity,omitempty"`
 }

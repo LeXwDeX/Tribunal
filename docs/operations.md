@@ -594,6 +594,7 @@ docker compose run --rm --no-deps review --config /app/config/server.yaml --chec
   - `tribunalctl` 的命令都走 HTTP API，不直接打开数据库，不受锁影响。用 `sqlite3` 等外部工具直接打开 `review.db` 不会检查这个锁；按第 7 节先停止服务再操作。
   - 持有数据目录锁意味着没有其他存活进程持有任务租约。服务在打开数据库后、worker 开始领取前，把上一个进程遗留的运行中任务立即释放为可领取，并记录 INFO 日志 `reclaimed stale job leases`（带 `count`）。因此 `kill -9` 或崩溃后重启不必再等任务租约（`jobs.lease`，默认 5 分钟）到期；尝试次数照常累计，超过上限的任务按失败处理。该释放只在锁被操作系统实际强制执行时进行（Linux 镜像、macOS、BSD）；在不支持 flock 的平台上跳过并记录 INFO 日志 `stale job lease reclaim skipped`。被释放任务的 `last_error` 为 `lease reclaimed at startup; retry scheduled`（超过尝试上限时为 `... after maximum attempts`），与租约自然过期的文案区分。任务因所有权被推迟（如与启动恢复争用同一评审）时，推迟窗口（`MaxDeferWindow`，15 分钟）从重启时刻起算。同一个评审的续跑仍由启动恢复和任务处理器按任务 ID 互斥，不会重复执行。
 - 后台 run cleanup 在启动后立即执行、之后每小时执行。它先查询 `workspaces`、run 保护集合和 context 保护 SHA，再触碰项目文件；只处理有 `workspaces` 记录的项目。超过 `workspace.run_cleanup_after` 的 `runs/<id>` 需未被未终态 workflow、queued/running job、`publication_state=pending` 的 dossier 或本进程注册 run 引用；`context/<sha>` 需未被任何 DB revision、当前 workspace base/context、未终态或待发布 workflow base 引用。locked/非法 metadata 保留并 fail closed；项目列表查询失败时整轮保留，某项保护查询失败时跳过该项目。
+- 同一轮 run cleanup 在持有项目 workspace 写锁时还会维护 mirror 与容量（#459）：先删除 `refs/merge-requests/<iid>/head` 中不再被保护集合引用的 ref（保护集合为非终态 review workflow 与非终态 `review_status`，即 `queued`/`running`/`publishing`），再执行 `git gc --quiet --auto`；保护查询失败时跳过该项目的 ref 清理与 gc（fail closed）。配置 `workspace.max_bytes`（默认 0 表示禁用）后，每轮清理遍历工作区根目录统计总字节数（只读元数据、不跟随符号链接），写入单行表 `workspace_capacity`，超限记 WARN 并通过 `GET /api/v1/stats` 的 `workspace_capacity` 暴露。配置 `workspace.reclaim_after`（默认 0 表示禁用）后，长期不活跃项目的整个工作区目录可被删除，但必须同时满足：没有本进程注册的 run；保护查询成功且不受保护（未终态 workflow、queued/running 的项目 job、`publication_state=pending` 的 dossier、非终态 `review_status` 均视为保护）；活动时间早于阈值；目录是工作区根的直接子目录且带有效 managed marker（缺失、不可读、符号链接或项目不匹配一律保留）。项目列表查询失败时整轮不回收，单项目保护查询失败只跳过该项目；被回收目录会在下次刷新或 onboarding 时重建。两个配置默认均为 0 表示禁用，负数会被配置校验拒绝。
 
 基础镜像标签已在本机联网核对 Docker Hub（2026-10-22）：
 
@@ -991,7 +992,7 @@ curl -fsS http://127.0.0.1:18080/readyz
 
 新 payload 的 request、response 分别有 `_format=audit_metadata_v1`；未标记历史 payload 可能是完整旧请求/响应、旧元数据或截断摘要，甚至无法判别。升级依赖该接口的脚本以格式标记和字段类型分支处理，保留 unknown 分支，不得把新元数据的数字 `messages` 当成旧消息数组。详见[节点调用审计格式](design/03-http-api.md#节点调用审计格式)。
 
-`storage.llm_call_retention`（默认 720h）到期会删除 `llm_calls` 的逐次调用审计明细，节点和评审的用量汇总仍保留。所选统计范围早于截止点时，`GET /api/v1/stats/reviews` 返回 `model_details_purged=true`；节点详情和调用列表也会说明明细已按保留策略删除（`calls_purged` / `retention.details_purged`），空调用列表不等于代码节点。需要更长审计窗口时调大该值并重启。
+`storage.llm_call_retention`（默认 720h）到期会删除 `llm_calls` 的逐次调用审计明细，节点和评审的用量汇总仍保留。所选统计范围早于截止点时，`GET /api/v1/stats/reviews` 返回 `model_details_purged=true`；节点详情和调用列表也会说明明细已按保留策略删除（`calls_purged` / `retention.details_purged`），空调用列表不等于代码节点。需要更长审计窗口时调大该值并重启。模型维度统计改由长期日聚合表（`llm_call_daily` 等，见[后台对账、调用聚合与工作区回收](#后台对账调用聚合与工作区回收459)）支撑：`GET /api/v1/stats` 的 `model_details_purged` 表示所选窗口混用了聚合数据（明细已删除），而不是模型未被使用；聚合表不随 `storage.llm_call_retention` 删除，只在删除项目时同步删除。
 
 ### dossier 归属迁移（v1.2.0）
 
@@ -1135,6 +1136,15 @@ profiles:
 **可观测性**：每个经节点执行器失败的节点记录一条 WARN 日志 `review node failed`，字段为 `workflow_id`、`node_id`、`node_kind`、`error_kind`（固定类，未知为 `executor_error`）、`turns`、`input_tokens`、`output_tokens`、`usage_incomplete`，不记录错误正文。评审节点列表接口返回的节点新增可选 `failure` 字段（仅失败节点，净化后的固定原因）；节点详情接口的 `error` 也返回同一固定原因，未知的历史文本仍统一显示 `node failed`。`reason` 仍是固定失败类；没有事件日志的旧数据会按固定原因前缀还原 `no_submit`、`invalid_submit`、`context_too_long`、`budget_exhausted`、`queue_timeout`。`skipped` 节点不再同时返回节点错误：详情接口省略 `error`，保留 `status=skipped` 和 `reason`。
 
 **兼容性**：不新增配置项、不改默认值语义、不需要数据库迁移（沿用既有错误列和用量列）。失败事件的既有字段（`error`、`error_kind`、`reason`、`usage`、`usage_incomplete`）不变，只是 `error` 现在可能是上述固定原因，`error_kind` / `reason` 可能是新增的固定类。
+### 后台对账、调用聚合与工作区回收（#459）
+
+**迁移 `0033_background_maintenance`（只追加，无 down migration）**：同一次迁移改三组结构。为 `review_status` 追加 `last_verified_at TEXT NOT NULL DEFAULT ''`，并按 `applied_version >= version` 用 `updated_at` 回填已应用行。新建三张长期保留的调用日聚合表 `llm_call_daily`、`llm_call_latency_daily`、`llm_call_error_daily`，并从现有 `llm_calls JOIN workflows` 回填；回填使用 `INSERT OR IGNORE`，可重复执行且不重复累计。新建两个单行状态表 `feedback_collection_state` 与 `workspace_capacity`，迁移时各插入 `id=1` 的空行。迁移不可逆：回滚只能恢复升级前的数据库及 `-wal`/`-shm` 快照，并启动匹配的旧二进制，不能只替换镜像。升级后需要重启服务，新的对账频率、清理行为与聚合回填在进程启动后生效。
+
+**升级后的状态评论行为**：每 5 分钟的状态对账只处理未应用期望版本的行（`applied_version < version`，含尚未应用的错误行）；成功应用的终态行改由每小时低频自愈扫描复查，每行最多每 24 小时确认一次，未到期时先用本地 `last_verified_at` 短路、不调用 GitLab。人工删除或修改已应用的状态评论后，最长约 24 小时（加最多 1 小时扫描间隔）内由自愈恢复，不再 5 分钟内重建；pending 行仍在 5 分钟内收敛；`state=cancelled` 的 MR 停止状态复查。自愈只推进 `last_verified_at`（以及远端 `note_id`/`body_hash`），不改写期望版本，版本已被更新时本次自愈 no-op；终态错误行保持 settled，不会自动重试，新代次可覆盖。
+
+**配置默认禁用**：`workspace.max_bytes` 与 `workspace.reclaim_after` 默认均为 0，启用前不测量容量也不回收工作区；需要时在挂载配置中设置正数并重启，负数会被配置校验拒绝。工作区维护在每次 run cleanup 中执行：清理不再被保护的 `refs/merge-requests/<iid>/head` 后运行 `git gc --quiet --auto`，保护查询失败时跳过该项目的 ref 清理与 gc。启用回收后，长期不活跃项目的整个工作区目录可被删除，但无本进程注册 run、保护集合、活动时间、直接子目录与有效 managed marker 必须全部满足；被回收目录会在下次刷新或 onboarding 时重建。
+
+**按模型统计与 `model_details_purged`**：`GET /api/v1/stats` 的 `by_model` 在明细仍存在时使用明细（精确、含精确 p50），早于 `storage.llm_call_retention` 的区间改由三张聚合表提供（按 UTC 日粒度，边界日可能少计当天早期已删除的调用），因此按模型统计在明细清理后仍可用。窗口内混用了聚合数据时返回 `model_details_purged=true`；该字段与 `GET /api/v1/stats/reviews` 上 #458 的同名字段相互独立（后者仍按配置保留期判断）。`by_model[]` 新增 `errors_by_kind`。项目删除时同步删除该项目的三张聚合表行；聚合表不随明细保留期删除。
 
 ### 通用升级与回滚步骤
 

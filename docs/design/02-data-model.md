@@ -11,17 +11,22 @@
 |---|---|---|
 | `projects` | 项目 | 注册信息、加密 token、项目级设置 |
 | `workspaces` | 项目 | 工作区状态 |
+| `workspace_capacity` | 工作区 | 最近一次工作区根目录容量测量，单行（0033） |
 | `context_docs` | 项目 | 生成或人工维护的上下文文档版本，按 `(project, kind)` 维护 active 版本 |
 | `mcp_servers`、`skills`、`block_bindings` | 扩展 | MCP、Skill 注册与按块授权 |
 | `webhook_deliveries` | 入口 | webhook 去重 |
 | `jobs` | 入口 | 持久化任务队列 |
 | `review_controls`、`workflow_dossiers` | 入口/恢复 | 持久化评审代次和脱敏材料快照（0003） |
-| `review_status`、`review_reactions` | 发布 | 每个 MR 的状态/结果评论目标与源 note 表情（0011）；0031 追加 `final_body`，0032 追加 `final_body_ready` |
+| `review_status`、`review_reactions` | 发布 | 每个 MR 的状态/结果评论目标与源 note 表情（0011）；0031 追加 `final_body`，0032 追加 `final_body_ready`，0033 追加 `last_verified_at` |
 | `workflows`、`workflow_nodes`、`events` | 工作流 | DAG 读模型与事件日志 |
 | `findings` | 评审结果 | 统一 finding、挑战结果、裁决 |
 | `publications` | 发布 | 已发布到 GitLab 的对象，用于幂等 |
 | `llm_calls` | 审计 | 每次模型调用 |
+| `llm_call_daily` | 统计 | 按 UTC 日的 provider/model 调用聚合，长期保留、不随明细保留期删除（0033） |
+| `llm_call_latency_daily` | 统计 | 按 UTC 日与精确毫秒的延迟直方图，长期保留（0033） |
+| `llm_call_error_daily` | 统计 | 按 UTC 日与 `error_kind` 的错误计数，长期保留（0033） |
 | `feedback` | 反馈 | 👍/👎、resolve 信号 |
+| `feedback_collection_state` | 反馈 | 反馈采集最近成功时间与最近错误类别，单行（0033） |
 | `users`、`sessions`、`api_tokens` | 访问控制 | 本地用户、停用状态、角色、全局只读（0027）、持久会话与 CLI token |
 | `llm_models` | 模型 | 用户模型、参数、加密凭据与软删除（0026） |
 | `llm_model_defaults` | 模型 | `user:` 模型的平台级默认参数，单行（0029） |
@@ -302,7 +307,63 @@ CREATE TABLE feedback (
 > `finding_id` 是归因到具体 finding 的唯一依据；只有 publication 在同一 workflow/project/MR 下唯一匹配到已持久化 finding 时才写入新归属。汇总评论的 award 不关联 finding；discussion 找不到匹配或 publication 身份不一致时，新 award 记录也不关联 finding。finding 查询出错或匹配多个 finding 时跳过该 discussion 本轮采集并告警，不写入新的无归属反馈。重复采集时，空 `finding_id` 不会清除已有非空归属；非空值可以更新归属。保留的历史归属不证明对应 finding 仍存在或仍可唯一匹配。`stats.feedback.by_provider` 按 `{provider, role, total, by_signal}` 返回：`proposer` 使用 `findings.origin_provider`，`challenger` 使用 `findings.challenge_node` 对应节点的 provider；只统计 `finding_id` 能精确连接 `findings.id` 的 discussion 反馈，summary/unlinked 不计入这组归因，但仍计入 `total`/`by_signal`。同一 signal 可以同时出现在两个角色中，因此这些是归因计数，不是准确率或误杀率，也不能把两个角色相加当作反馈总数。
 
 ```sql
--- 0011_review_side_effects.sql 建表；0031_review_status_final_body.sql 追加 final_body；0032_review_status_final_body_ready.sql 追加 final_body_ready
+-- 0033_background_maintenance.sql：长期保留的调用日聚合与单行维护状态
+CREATE TABLE llm_call_daily (
+  day             TEXT    NOT NULL,        -- workflow created_at 的 UTC 日
+  project_id      INTEGER NOT NULL,
+  provider        TEXT    NOT NULL,
+  model           TEXT    NOT NULL,
+  calls           INTEGER NOT NULL DEFAULT 0,
+  errors          INTEGER NOT NULL DEFAULT 0,
+  input_tokens    INTEGER NOT NULL DEFAULT 0,
+  output_tokens   INTEGER NOT NULL DEFAULT 0,
+  cache_read      INTEGER NOT NULL DEFAULT 0,
+  cache_write     INTEGER NOT NULL DEFAULT 0,
+  latency_ms_sum  INTEGER NOT NULL DEFAULT 0,
+  latency_samples INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (day, project_id, provider, model)
+);
+
+CREATE TABLE llm_call_latency_daily (
+  day         TEXT    NOT NULL,
+  project_id  INTEGER NOT NULL,
+  provider    TEXT    NOT NULL,
+  model       TEXT    NOT NULL,
+  latency_ms  INTEGER NOT NULL,        -- 精确毫秒，用于最近秩分位
+  samples     INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (day, project_id, provider, model, latency_ms)
+);
+
+CREATE TABLE llm_call_error_daily (
+  day        TEXT    NOT NULL,
+  project_id INTEGER NOT NULL,
+  provider   TEXT    NOT NULL,
+  model      TEXT    NOT NULL,
+  error_kind TEXT    NOT NULL,         -- 固定审计错误类别
+  calls      INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (day, project_id, provider, model, error_kind)
+);
+
+CREATE TABLE feedback_collection_state (
+  id                INTEGER PRIMARY KEY CHECK (id = 1),
+  last_collected_at TEXT,              -- 最近成功一轮；NULL 表示尚未成功
+  last_error_class  TEXT    NOT NULL DEFAULT '',
+  last_error_at     TEXT
+);
+
+CREATE TABLE workspace_capacity (
+  id          INTEGER PRIMARY KEY CHECK (id = 1),
+  measured_at TEXT,
+  total_bytes INTEGER NOT NULL DEFAULT 0,
+  limit_bytes INTEGER NOT NULL DEFAULT 0,
+  over_limit  INTEGER NOT NULL DEFAULT 0
+);
+```
+
+> `0033` 从现有 `llm_calls JOIN workflows` 回填三张聚合表：`day` 取 workflow `created_at` 的 UTC 日，回填使用 `INSERT OR IGNORE`，可重复执行且不重复累计。`feedback_collection_state` 与 `workspace_capacity` 在迁移时各插入 `id=1` 的空行。`feedback_collection_state` 成功一轮只推进 `last_collected_at`，失败只更新 `last_error_class` 与 `last_error_at`；`last_collected_at` 晚于 `last_error_at` 表示已恢复。`workspace_capacity` 由 run cleanup 在启用 `workspace.max_bytes` 时覆盖写入（`measured_at`、`total_bytes`、`limit_bytes`、`over_limit`）。该迁移只做追加、不可逆；回滚需恢复升级前快照并启动匹配的旧二进制。
+
+```sql
+-- 0011_review_side_effects.sql 建表；0031_review_status_final_body.sql 追加 final_body；0032_review_status_final_body_ready.sql 追加 final_body_ready；0033_background_maintenance.sql 追加 last_verified_at
 CREATE TABLE review_status (
   project_id      INTEGER NOT NULL,
   mr_iid          INTEGER NOT NULL,
@@ -320,11 +381,12 @@ CREATE TABLE review_status (
   applied_version INTEGER NOT NULL DEFAULT 0,
   last_error      TEXT    NOT NULL DEFAULT '',
   updated_at      TEXT    NOT NULL,
+  last_verified_at TEXT   NOT NULL DEFAULT '', -- 0033：最近一次确认远端 note 仍与已应用版本一致的时间
   PRIMARY KEY (project_id, mr_iid)
 );
 ```
 
-> `review_status` 每个 MR 一行，状态 worker 与 publisher 都按 `<!-- gitlab-ce-review:summary` 标记找到并更新同一条 note。`final_body` 保存已渲染的评审正文（通常是评审报告，也用于配置错误等用户可见说明）；`SetReviewStatusFinalBody` 按 128 × 1024 字符截断。终态后仍可写入：该方法要求当前 generation/head，写入后重置 `body_hash`、递增 `version` 并入队 `review.status`；`SetReviewStatus` 在新评审或 head 变化时清空 `final_body`，同代次（含 stale/cancel 更新）保留；取消导致的 generation 前进在已有正文时通过写入目标上的 `PreserveFinalBody` 保留正文，该语句不改写 `final_body_ready`，因此正文与就绪标志随取消一起保留，只有生命周期头部变化。`final_body_ready` 由 `0032` 引入：迁移时已有且 `final_body = ''` 的行回填 0，新行默认 1，`SetReviewStatusFinalBody` 写入正文时置 1。`final_body_ready = 0` 的历史行由状态 worker 继续用旧 `<!-- gitlab-ce-review:status` 标记原地更新旧状态评论，绝不接管 summary 评论；写入正文后转入同一条 summary note 的合并评论模式。
+> `review_status` 每个 MR 一行，状态 worker 与 publisher 都按 `<!-- gitlab-ce-review:summary` 标记找到并更新同一条 note。`final_body` 保存已渲染的评审正文（通常是评审报告，也用于配置错误等用户可见说明）；`SetReviewStatusFinalBody` 按 128 × 1024 字符截断。终态后仍可写入：该方法要求当前 generation/head，写入后重置 `body_hash`、递增 `version` 并入队 `review.status`；`SetReviewStatus` 在新评审或 head 变化时清空 `final_body`，同代次（含 stale/cancel 更新）保留；取消导致的 generation 前进在已有正文时通过写入目标上的 `PreserveFinalBody` 保留正文，该语句不改写 `final_body_ready`，因此正文与就绪标志随取消一起保留，只有生命周期头部变化。`final_body_ready` 由 `0032` 引入：迁移时已有且 `final_body = ''` 的行回填 0，新行默认 1，`SetReviewStatusFinalBody` 写入正文时置 1。`final_body_ready = 0` 的历史行由状态 worker 继续用旧 `<!-- gitlab-ce-review:status` 标记原地更新旧状态评论，绝不接管 summary 评论；写入正文后转入同一条 summary note 的合并评论模式。`last_verified_at` 由 `0033` 引入，记录低频自愈扫描最近一次确认远端状态评论仍与已应用版本一致的时间；5 分钟对账只处理未应用期望版本的行，已应用的终态行由每小时自愈扫描按行最多每 24 小时复查一次，未到期时用该列在本地短路，自愈只推进该列与远端 `note_id`/`body_hash`，不改写期望版本。
 
 ```sql
 CREATE TABLE users (
@@ -463,6 +525,8 @@ SQLite 必要的 PRAGMA：`journal_mode=WAL`、`busy_timeout=5000`、`foreign_ke
 | `jobs`（done/failed/cancelled） | 7 天 | `storage.job_retention` | 定时删除；queued/running 永不删除 |
 | `events`、`workflows`、`findings` | 长期 | — | 不清理；按需归档 |
 | `context_docs` | 每个 `(project, kind)` 保留最近 5 个非 active 且未锁定的历史版本；active 版本和所有 locked 版本永不删除 | `storage.context_versions` | 定时按 `(project_id, kind)` 窗口清理，每批最多 500 行 |
+
+> 模型调用明细 `llm_calls` 仍按 `storage.llm_call_retention`（默认 720h）整行删除。迁移 `0033` 新建的三张日聚合表（`llm_call_daily`、`llm_call_latency_daily`、`llm_call_error_daily`）长期保留，不随明细保留期清理；迁移从现有明细回填，项目删除时同步删除该项目的三张聚合表行。按模型统计在明细保留期内优先使用明细（精确、含精确 p50），更早区间由聚合表按 UTC 日桶提供；`llm_call_latency_daily` 保留精确毫秒直方图，用于在聚合区间计算最近秩分位。
 
 > 本地验收口径（2026-10-23 用户确认）：维持上表策略。每个 `(project, kind)` 保留 5 个未锁定且非 active 的历史版本；active 版本和所有 locked 版本额外保护，总数可以超过 5。不扩大删除范围。
 
