@@ -872,6 +872,46 @@ func TestValidateSharedBotTokenEnv(t *testing.T) {
 	}
 }
 
+func TestValidateProvisioningTokenEnv(t *testing.T) {
+	const provisioningToken = "glpat-provisioning-secret"
+	setRequiredEnv(t)
+	t.Setenv("TRIBUNAL_PROVISIONING_TOKEN", provisioningToken)
+	tests := []struct {
+		name    string
+		extra   string
+		wantErr string
+	}{
+		{name: "absent keeps manual shared hooks"},
+		{name: "present", extra: "  provisioning_token_env: TRIBUNAL_PROVISIONING_TOKEN\n"},
+		{name: "missing environment variable", extra: "  provisioning_token_env: TRIBUNAL_MISSING_PROVISIONING_TOKEN\n", wantErr: "gitlab.provisioning_token_env"},
+		{name: "invalid environment variable name", extra: "  provisioning_token_env: \"BAD NAME\"\n", wantErr: "gitlab.provisioning_token_env"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeConfig(t, "config.yaml", validGitLab+tt.extra)
+			cfg := loadConfig(t, path)
+			err := cfg.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() = %v", err)
+				}
+				return
+			}
+			requireErrorContains(t, err, tt.wantErr)
+			requireErrorNotContains(t, err, provisioningToken)
+		})
+	}
+}
+
+func TestProvisioningTokenEnvLoads(t *testing.T) {
+	setRequiredEnv(t)
+	path := writeConfig(t, "config.yaml", validGitLab+"  provisioning_token_env: TRIBUNAL_PROVISIONING_TOKEN\n")
+	cfg := loadConfig(t, path)
+	if cfg.GitLab.ProvisioningTokenEnv != "TRIBUNAL_PROVISIONING_TOKEN" {
+		t.Fatalf("provisioning_token_env = %q", cfg.GitLab.ProvisioningTokenEnv)
+	}
+}
+
 func TestSharedBotTokenEnvLoads(t *testing.T) {
 	setRequiredEnv(t)
 	path := writeConfig(t, "config.yaml", validGitLab+"  bot_token_env: TRIBUNAL_SHARED_BOT_TOKEN\n")

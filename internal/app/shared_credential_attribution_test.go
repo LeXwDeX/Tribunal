@@ -103,13 +103,13 @@ func TestMarkProjectTokenRejectedMarksProjectTokenProject(t *testing.T) {
 	}
 }
 
-func TestWebhookFailureNamesSharedCredential(t *testing.T) {
+func TestWebhookFailureNamesProvisioningCredential(t *testing.T) {
 	cases := []struct {
 		status int
 		field  string
 	}{
-		{status: 401, field: "shared_bot_credential"},
-		{status: 403, field: "shared_bot_access"},
+		{status: 401, field: "provisioning_credential"},
+		{status: 403, field: "provisioning_credential"},
 	}
 	for _, tc := range cases {
 		t.Run(fmt.Sprintf("%d", tc.status), func(t *testing.T) {
@@ -128,8 +128,11 @@ func TestWebhookFailureNamesSharedCredential(t *testing.T) {
 			if len(appErr.Details) != 1 || appErr.Details[0].Field != tc.field {
 				t.Fatalf("details = %+v, want field %q", appErr.Details, tc.field)
 			}
-			if strings.Contains(appErr.Details[0].Message, "project token") {
-				t.Fatalf("shared failure tells the user to replace a project token: %q", appErr.Details[0].Message)
+			if strings.Contains(appErr.Details[0].Message, "project token") || strings.Contains(appErr.Details[0].Message, "shared bot") {
+				t.Fatalf("shared hook failure misattributes the credential: %q", appErr.Details[0].Message)
+			}
+			if got := api.usedTokens("ListProjectHooks"); len(got) != 1 || got[0] != provisioningToken {
+				t.Fatalf("ListProjectHooks tokens = %v, want provisioning", got)
 			}
 			saved, err := st.GetProject(ctx, 42)
 			if err != nil {
@@ -138,7 +141,7 @@ func TestWebhookFailureNamesSharedCredential(t *testing.T) {
 			if saved.WebhookState != store.WebhookStateFailed {
 				t.Fatalf("state = %q", saved.WebhookState)
 			}
-			if !strings.Contains(saved.WebhookError, "shared bot") || strings.Contains(saved.WebhookError, "project token") {
+			if !strings.Contains(saved.WebhookError, "provisioning credential") || strings.Contains(saved.WebhookError, "project token") {
 				t.Fatalf("stored webhook error = %q", saved.WebhookError)
 			}
 		})
@@ -197,7 +200,7 @@ func (f *catchUpSharedAPI) ListOpenMergeRequests(context.Context, string, int64,
 	return nil, nil
 }
 
-func TestReconcileHookHealthNamesSharedCredential(t *testing.T) {
+func TestReconcileHookHealthSkipsSharedProjectWithoutProvisioning(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
 	api := newSharedBotAPI()
@@ -221,10 +224,45 @@ func TestReconcileHookHealthNamesSharedCredential(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.WebhookState != store.WebhookStateFailed || after.WebhookError != webhookSharedTokenRejectedMessage {
+	if after.WebhookState != saved.WebhookState || after.WebhookError != saved.WebhookError {
+		t.Fatalf("hook health changed without provisioning: %+v -> %+v", saved, after)
+	}
+	if api.callCount("ListProjectHooks") != 0 {
+		t.Fatalf("hook lifecycle ran without provisioning: %v", api.tokenUses)
+	}
+}
+
+func TestReconcileHookHealthNamesProvisioningCredential(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	api := newSharedBotAPI()
+	configureSharedBot(api)
+	_, saved := registerSharedWithHook(t, ctx, st, api)
+	if saved.HookID == nil {
+		t.Fatal("shared project has no hook id")
+	}
+	api.listHooksErr = &gitlab.Error{Op: "list_hooks", Status: 401}
+	service := &CatchUpService{
+		store:    st,
+		webhooks: &WebhookService{store: st},
+		gitlab:   &catchUpSharedAPI{sharedBotAPI: api},
+		cipher:   newTestCipher(t),
+		tokens:   newProjectTokenResolver(newTestCipher(t), sharedBotToken).WithProvisioning(provisioningToken),
+		logger:   discardLogger(),
+	}
+
+	service.ReconcileHookHealth(ctx)
+	after, err := st.GetProject(ctx, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.WebhookState != store.WebhookStateFailed || after.WebhookError != webhookProvisioningRejectedMessage {
 		t.Fatalf("hook health = %q/%q", after.WebhookState, after.WebhookError)
 	}
-	if strings.Contains(after.WebhookError, "project token") {
-		t.Fatalf("shared hook health mentions a project token: %q", after.WebhookError)
+	if strings.Contains(after.WebhookError, "project token") || strings.Contains(after.WebhookError, "shared bot") {
+		t.Fatalf("shared hook health misattributes the credential: %q", after.WebhookError)
+	}
+	if got := api.usedTokens("ListProjectHooks"); len(got) != 1 || got[0] != provisioningToken {
+		t.Fatalf("ListProjectHooks tokens = %v, want provisioning", got)
 	}
 }

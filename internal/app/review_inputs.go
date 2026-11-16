@@ -319,6 +319,13 @@ func resolveReviewConfig(project *store.Project, docs review.RepoDocs, defaults 
 	if out.Settings.MaxFiles <= 0 {
 		out.Settings.MaxFiles = review.DefaultMaxFiles
 	}
+	// A shared bot is only required to be Reporter, which cannot create commit
+	// statuses. Degrade the effective setting so every consumer (publisher,
+	// status and failure paths) agrees; results still publish as MR notes and
+	// inline discussions.
+	if sharedCredentialProject(project) {
+		out.Settings.CommitStatus = false
+	}
 	out.Settings.Language = strings.Join(strings.Fields(out.Settings.Language), " ")
 	if !out.Settings.AllowRepoConfig || strings.TrimSpace(docs.GitLabReviewConfig) == "" {
 		return out

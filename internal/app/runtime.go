@@ -86,14 +86,17 @@ type RuntimeDeps struct {
 	// SharedBotToken is the instance-wide GitLab bot token. Empty keeps the
 	// per-project-only behavior. It is never logged or persisted.
 	SharedBotToken string
-	LLM            review.ClientProvider
-	MCP            *mcp.Manager
-	Skills         review.SkillProvider
-	Workspace      *workspace.Manager
-	Git            GitOps
-	Prompts        prompts.Bundle
-	Logger         *slog.Logger
-	Now            func() time.Time
+	// ProvisioningToken manages webhooks for shared projects. It is never used
+	// for review reads or notes and is never logged or persisted.
+	ProvisioningToken string
+	LLM               review.ClientProvider
+	MCP               *mcp.Manager
+	Skills            review.SkillProvider
+	Workspace         *workspace.Manager
+	Git               GitOps
+	Prompts           prompts.Bundle
+	Logger            *slog.Logger
+	Now               func() time.Time
 }
 
 // Runtime is the composition root below main: store-backed dependencies,
@@ -452,6 +455,7 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		Profiles:          cfg.Profiles,
 		PublicURL:         cfg.Server.PublicURL,
 		SharedBotToken:    deps.SharedBotToken,
+		ProvisioningToken: deps.ProvisioningToken,
 		Workspace:         workspaceManager,
 		ProjectExtensions: projectExts,
 		GitLabURL:         cfg.GitLab.URL,
@@ -509,15 +513,16 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 	var catchUp *CatchUpService
 	if lister, ok := deps.GitLab.(OpenMergeRequestLister); ok {
 		catchUp, err = NewCatchUpService(CatchUpServiceConfig{
-			Store:          deps.Store,
-			GitLab:         lister,
-			Webhooks:       webhooks,
-			Workspace:      workspaceManager,
-			Cipher:         deps.Cipher,
-			SharedBotToken: deps.SharedBotToken,
-			Settings:       cfg.GitLab.CatchUp,
-			Logger:         logger,
-			MRLocks:        mrLocks,
+			Store:             deps.Store,
+			GitLab:            lister,
+			Webhooks:          webhooks,
+			Workspace:         workspaceManager,
+			Cipher:            deps.Cipher,
+			SharedBotToken:    deps.SharedBotToken,
+			ProvisioningToken: deps.ProvisioningToken,
+			Settings:          cfg.GitLab.CatchUp,
+			Logger:            logger,
+			MRLocks:           mrLocks,
 		})
 		if err != nil {
 			if ownedMCP {
@@ -595,7 +600,7 @@ func deniedEnvNames(cfg *config.Config) []string {
 			names = append(names, provider.APIKeyEnv)
 		}
 	}
-	for _, name := range []string{cfg.Secrets.MasterKeyEnv, cfg.Auth.BootstrapTokenEnv, cfg.GitLab.BotTokenEnv} {
+	for _, name := range []string{cfg.Secrets.MasterKeyEnv, cfg.Auth.BootstrapTokenEnv, cfg.GitLab.BotTokenEnv, cfg.GitLab.ProvisioningTokenEnv} {
 		if name != "" {
 			names = append(names, name)
 		}

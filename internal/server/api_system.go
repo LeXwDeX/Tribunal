@@ -313,6 +313,9 @@ type settingsGitLabView struct {
 	SharedBotCredentialState     string     `json:"shared_bot_credential_state"`
 	SharedBotCredentialExpiresAt *time.Time `json:"shared_bot_credential_expires_at,omitempty"`
 	SharedBotUsername            string     `json:"shared_bot_username,omitempty"`
+	// ProvisioningCredential reports whether the platform webhook credential
+	// is configured. Its variable name and value never appear in this view.
+	ProvisioningCredential bool `json:"provisioning_credential"`
 }
 
 type settingsAuthView struct {
@@ -437,6 +440,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			SharedBotCredentialState:     sharedBot.State,
 			SharedBotCredentialExpiresAt: sharedBot.ExpiresAt,
 			SharedBotUsername:            sharedBot.Username,
+			ProvisioningCredential:       cfg.GitLab.ProvisioningTokenEnv != "",
 		},
 		Auth: settingsAuthView{
 			BootstrapAdmins: cfg.Auth.BootstrapAdmins,

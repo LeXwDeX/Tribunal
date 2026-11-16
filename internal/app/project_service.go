@@ -234,8 +234,12 @@ type ProjectServiceConfig struct {
 	// per-project-only behavior; a project without its own token then fails
 	// with ErrSharedBotCredentialUnavailable.
 	SharedBotToken string
-	Logger         *slog.Logger
-	Now            func() time.Time
+	// ProvisioningToken creates, updates and deletes webhooks for shared
+	// projects. It is optional: without it, shared projects can only register
+	// with auto_webhook=false. It is never used for review reads or notes.
+	ProvisioningToken string
+	Logger            *slog.Logger
+	Now               func() time.Time
 }
 
 // NewProjectService builds the registration service.
@@ -271,7 +275,7 @@ func NewProjectService(cfg ProjectServiceConfig) (*ProjectService, error) {
 		store:             cfg.Store,
 		gitlab:            cfg.GitLab,
 		cipher:            cfg.Cipher,
-		tokens:            newProjectTokenResolver(cfg.Cipher, cfg.SharedBotToken),
+		tokens:            newProjectTokenResolver(cfg.Cipher, cfg.SharedBotToken).WithProvisioning(cfg.ProvisioningToken),
 		profiles:          cfg.Profiles,
 		publicURL:         publicURL,
 		hookURL:           hookURL,
@@ -294,8 +298,9 @@ const projectAlreadyRegisteredMessage = "project is already registered; ask a pl
 // Register validates the project token and scopes, optionally creates a
 // webhook, then atomically stores the project and onboarding job. In
 // shared-credential mode an empty AccessToken registers the project with a
-// zero-length token sentinel: the shared bot is used for every GitLab call
-// while the registrant's own access is verified separately.
+// zero-length token sentinel: the shared bot is used for review reads and note
+// writes while the registrant's own access is verified separately. Webhooks
+// are created with the platform provisioning credential instead.
 func (s *ProjectService) Register(ctx context.Context, in RegisterInput) (*Registration, error) {
 	ref, err := s.parseProjectRef(in.Project)
 	if err != nil {
@@ -369,14 +374,21 @@ func (s *ProjectService) Register(ctx context.Context, in RegisterInput) (*Regis
 		if err := validateSharedBotTokenInfo(info, s.now()); err != nil {
 			return nil, err
 		}
-		// The shared bot must be able to create the webhook and publish
-		// reviews, independent of who registers the project.
+		// The shared bot only needs Reporter: it reads code/MRs and writes review
+		// notes. Webhook lifecycle is handled by the provisioning credential.
 		if err := s.verifySharedBotMembership(ctx, project.ID); err != nil {
 			return nil, s.precheckFailure(in.TrustedPlatformAdmin, project.ID, "shared_bot_membership", err)
 		}
 		if !in.TrustedPlatformAdmin {
 			if err := s.verifySharedRegistrantMembership(ctx, project.ID, in.OwnerUserID); err != nil {
 				return nil, s.precheckFailure(in.TrustedPlatformAdmin, project.ID, "registrant_membership", err)
+			}
+		}
+		if in.AutoWebhook {
+			// Automatic webhook creation is impossible without the platform
+			// credential; fail before anything is persisted or created.
+			if err := s.validateProvisioningCredential(ctx); err != nil {
+				return nil, err
 			}
 		}
 	} else {
@@ -446,12 +458,18 @@ func (s *ProjectService) Register(ctx context.Context, in RegisterInput) (*Regis
 		return nil, conflictError("local project data remains; manual cleanup is required before registration")
 	}
 
+	// A shared project's hook is provisioned by the platform credential; a
+	// project-token deployment keeps using the project token exactly as before.
+	hookCredential := in.AccessToken
+	if sharedMode {
+		hookCredential = s.tokens.Provisioning()
+	}
 	webhookState := store.WebhookStateDisabled
 	webhookEvents := []string{}
 	webhookManagedBy := ""
 	var hookID *int64
 	if in.AutoWebhook {
-		created, err := s.gitlab.CreateProjectHook(ctx, credential, project.ID, gitlab.HookSpec{
+		created, err := s.gitlab.CreateProjectHook(ctx, hookCredential, project.ID, gitlab.HookSpec{
 			URL:                   s.hookURL,
 			Secret:                webhookSecret,
 			PushEvents:            true,
@@ -497,7 +515,7 @@ func (s *ProjectService) Register(ctx context.Context, in RegisterInput) (*Regis
 	}
 	if err != nil {
 		if hookID != nil {
-			if delErr := s.gitlab.DeleteProjectHook(context.WithoutCancel(ctx), credential, project.ID, *hookID); delErr != nil {
+			if delErr := s.gitlab.DeleteProjectHook(context.WithoutCancel(ctx), hookCredential, project.ID, *hookID); delErr != nil {
 				s.logger.Warn("webhook compensation failed", "project_id", project.ID)
 				return nil, &Error{Code: "internal", Message: "registration failed and webhook cleanup failed", Compensate: true}
 			}
@@ -561,9 +579,10 @@ func (s *ProjectService) verifyRegistrationMembership(ctx context.Context, token
 	return nil
 }
 
-// verifySharedBotMembership requires the shared bot to hold Maintainer on the
-// project before anything is persisted. Creating a webhook needs Maintainer;
-// failing here keeps registration atomic and names the actual credential.
+// verifySharedBotMembership requires the shared bot to hold Reporter on the
+// project before anything is persisted. Reporter is enough to read code/MRs
+// and write review notes; webhook lifecycle is delegated to provisioning.
+// Failing here keeps registration atomic and names the actual credential.
 func (s *ProjectService) verifySharedBotMembership(ctx context.Context, projectID int64) error {
 	_, _, err := s.sharedBotMembership(ctx, projectID)
 	return err
@@ -604,17 +623,19 @@ func (s *ProjectService) sharedBotMembership(ctx context.Context, projectID int6
 		}
 		return nil, 0, upstreamError(status)
 	}
-	if access < maintainerAccessLevel {
+	if access < reporterAccessLevel {
 		return nil, 0, sharedBotAccessError()
 	}
 	return user, access, nil
 }
 
 // sharedBotAccessError separates a shared-bot permission problem from a
-// registrant problem, so an operator knows which credential to fix.
+// registrant problem, so an operator knows which credential to fix. Reporter
+// is enough to read code, MRs and diffs and to write notes and discussions;
+// webhook creation is delegated to the provisioning credential.
 func sharedBotAccessError() error {
 	return validationError("shared bot access level is insufficient",
-		Detail{Field: "shared_bot_access", Message: "the shared bot needs Maintainer or higher on this project to create a webhook and publish reviews"})
+		Detail{Field: "shared_bot_access", Message: "the shared bot needs Reporter or higher on this project to read code and publish review notes"})
 }
 
 // verifySharedRegistrantMembership checks the registrant's own GitLab id with
@@ -706,6 +727,76 @@ func validateSharedBotTokenInfo(info *gitlab.TokenInfo, now time.Time) error {
 			Detail{Field: "shared_bot_credential", Message: scope + " scope is required"})
 	}
 	return nil
+}
+
+// validateProvisioningCredential proves the platform webhook credential is
+// configured, active and has the api scope before a shared registration
+// creates a hook. read_repository is not required: provisioning never reads
+// repository content.
+func (s *ProjectService) validateProvisioningCredential(ctx context.Context) error {
+	if !s.tokens.HasProvisioning() {
+		return provisioningCredentialRequiredError()
+	}
+	info, err := s.gitlab.GetTokenInfo(ctx, s.tokens.Provisioning())
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		status := gitlab.StatusOf(err)
+		s.logger.Warn("GitLab provisioning token lookup failed", "status", status)
+		if status == http.StatusUnauthorized || status == http.StatusForbidden {
+			return validationError("provisioning credential was rejected",
+				Detail{Field: "provisioning_credential", Message: "must be valid; update the credential referenced by gitlab.provisioning_token_env and restart the service"})
+		}
+		return upstreamError(status)
+	}
+	return validateProvisioningTokenInfo(info, s.now())
+}
+
+// provisioningCredentialRequiredError is the actionable failure for a shared
+// registration that asked for automatic webhook creation without the platform
+// credential. It happens before persistence and hook creation.
+func provisioningCredentialRequiredError() error {
+	return validationError("provisioning credential is required for automatic webhook creation",
+		Detail{Field: "provisioning_credential", Message: "configure gitlab.provisioning_token_env with a token that can manage project webhooks, then restart the service"})
+}
+
+// validateProvisioningTokenInfo applies the webhook-lifecycle requirements:
+// active, unexpired and api scope. read_repository is intentionally not
+// required because this credential never reads repository content.
+func validateProvisioningTokenInfo(info *gitlab.TokenInfo, now time.Time) error {
+	if info == nil {
+		return upstreamError(0)
+	}
+	if !info.Active || info.Revoked {
+		return validationError("provisioning credential is not active",
+			Detail{Field: "provisioning_credential", Message: "must be active and not revoked"})
+	}
+	if info.ExpiresAt != nil && now.UTC().Format("2006-01-02") > info.ExpiresAt.UTC().Format("2006-01-02") {
+		return validationError("provisioning credential is expired",
+			Detail{Field: "provisioning_credential", Message: "must not be expired"})
+	}
+	for _, scope := range info.Scopes {
+		if scope == "api" {
+			return nil
+		}
+	}
+	return validationError("provisioning credential scopes are insufficient",
+		Detail{Field: "provisioning_credential", Message: "api scope is required to manage webhooks"})
+}
+
+// hookToken resolves the stored project's webhook credential and converts a
+// missing provisioning configuration into the same actionable validation
+// error registration returns.
+func (s *ProjectService) hookToken(project *store.Project) (string, error) {
+	token, err := resolveHookToken(s.tokens, s.cipher, project)
+	if errors.Is(err, ErrProvisioningCredentialUnavailable) {
+		return "", provisioningCredentialRequiredError()
+	}
+	if err != nil {
+		return "", internalError()
+	}
+	return token, nil
 }
 
 // Validate performs a read-only connection check. It does not persist the
@@ -1218,9 +1309,9 @@ func (s *ProjectService) provisionWebhook(ctx context.Context, id int64, rotateS
 	if err != nil {
 		return nil, err
 	}
-	token, err := resolveProjectToken(s.tokens, s.cipher, project)
+	token, err := s.hookToken(project)
 	if err != nil {
-		return nil, internalError()
+		return nil, err
 	}
 
 	secret, secretEnc, err := s.webhookSecret(project, rotateSecret)
@@ -1325,9 +1416,9 @@ func (s *ProjectService) DisableWebhook(ctx context.Context, id int64) (*store.P
 		return nil, err
 	}
 	if project.HookID != nil {
-		token, err := resolveProjectToken(s.tokens, s.cipher, project)
+		token, err := s.hookToken(project)
 		if err != nil {
-			return nil, internalError()
+			return nil, err
 		}
 		if err := s.gitlab.DeleteProjectHook(context.WithoutCancel(ctx), token, id, *project.HookID); err != nil {
 			if gitlab.StatusOf(err) != 404 {
@@ -1374,13 +1465,13 @@ func (s *ProjectService) failWebhook(ctx context.Context, project *store.Project
 	switch status {
 	case http.StatusUnauthorized:
 		if s.tokens.UsesShared(project) {
-			message += ": shared bot credential rejected"
+			message += ": provisioning credential rejected"
 		} else {
 			message += ": project token rejected"
 		}
 	case http.StatusForbidden:
 		if s.tokens.UsesShared(project) {
-			message += ": shared bot lacks the Maintainer role"
+			message += ": provisioning credential lacks the Maintainer role"
 		} else {
 			message += ": Maintainer role required"
 		}
@@ -1392,19 +1483,20 @@ func (s *ProjectService) failWebhook(ctx context.Context, project *store.Project
 
 // webhookUpstreamError adds the actionable cause for the two statuses a token
 // problem produces; the error code stays gitlab_rejected for compatibility.
-// sharedCredential selects the message naming the credential that failed.
+// sharedCredential selects the platform provisioning credential, which owns
+// the webhook lifecycle in shared mode.
 func webhookUpstreamError(status int, sharedCredential bool) error {
 	err := upstreamError(status)
 	switch status {
 	case http.StatusUnauthorized:
 		if sharedCredential {
-			err.Details = []Detail{{Field: "shared_bot_credential", Message: "the shared bot credential is invalid, expired or revoked; update the credential referenced by gitlab.bot_token_env and restart the service"}}
+			err.Details = []Detail{{Field: "provisioning_credential", Message: "the provisioning credential is invalid, expired or revoked; update the credential referenced by gitlab.provisioning_token_env and restart the service"}}
 		} else {
 			err.Details = []Detail{{Field: "token", Message: "the project token is invalid, expired or revoked; replace it"}}
 		}
 	case http.StatusForbidden:
 		if sharedCredential {
-			err.Details = []Detail{{Field: "shared_bot_access", Message: "managing project webhooks requires the shared bot to hold Maintainer on this project; grant the role or have a Maintainer manage the webhook in GitLab"}}
+			err.Details = []Detail{{Field: "provisioning_credential", Message: "managing project webhooks requires the provisioning credential to hold Maintainer on this project; grant the role or have a Maintainer manage the webhook in GitLab"}}
 		} else {
 			err.Details = []Detail{{Field: "access_level", Message: "managing project webhooks requires the Maintainer role; use a Maintainer token or have a Maintainer manage the webhook in GitLab"}}
 		}
@@ -1506,8 +1598,8 @@ func (s *ProjectService) deleteProjectLocked(ctx context.Context, id int64) erro
 		return err
 	}
 	if project.HookID != nil {
-		if token, decErr := resolveProjectToken(s.tokens, s.cipher, project); decErr != nil {
-			s.logger.Warn("project credential resolution failed during delete", "project_id", id)
+		if token, decErr := resolveHookToken(s.tokens, s.cipher, project); decErr != nil {
+			s.logger.Warn("webhook credential resolution failed during delete", "project_id", id)
 		} else {
 			hookCtx, cancel := context.WithTimeout(ctx, defaultValidationTimeout)
 			delErr := s.gitlab.DeleteProjectHook(hookCtx, token, id, *project.HookID)

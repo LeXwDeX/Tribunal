@@ -204,9 +204,9 @@ tribunalctl users list
 
 默认每个项目使用自己的 Project Access Token。实例也可以通过 `gitlab.bot_token_env` 启用共享 bot：该配置只写环境变量名，token 值只从进程环境读取，不写入 YAML、数据库、API 响应或日志。启用后，注册请求省略项目 `token` 即表示使用共享 bot，项目以零长度 token 哨兵落库；显式提供项目 token 时仍优先使用项目级凭据。
 
-准备一个专用 GitLab bot 账号，创建至少带 `api` 和 `read_repository` scope 的 PAT，并在每个要接入的项目上授予 Maintainer（创建 Webhook 与发布评审）。在配置中设置 `gitlab.bot_token_env: TRIBUNAL_BOT_TOKEN`，把 token 放进权限 0600、已被 gitignore 的 env 文件或密钥管理器后重启服务。启动时会自动解析 bot 用户名并补充到 `bot_usernames` 用于自触发过滤；只有解析失败时才需要手工配置。
+准备一个专用 GitLab bot 账号，创建至少带 `api` 和 `read_repository` scope 的 PAT，并在每个要接入的项目上授予 Reporter（读代码/MR、发布评审注记与行内 discussion）。Webhook 由另一个平台 provisioning 凭据代办：设置 `gitlab.provisioning_token_env: TRIBUNAL_PROVISIONING_TOKEN`，用需要 `api` scope、并在项目上至少 Maintainer 的账号创建 PAT。两个 token 都放进权限 0600、已被 gitignore 的 env 文件或密钥管理器；provisioning 凭据建议使用短有效期并纳入到期监控。启动时会自动解析 bot 用户名并补充到 `bot_usernames`；只有解析失败时才需要手工配置。共享模式 + `auto_webhook=true` 要求 provisioning 凭据已配置且有效；`auto_webhook=false` 不需要它，但之后手工启用 Webhook 仍需配置。
 
-共享模式下，注册与「校验连接」都会先确认 bot 至少 Maintainer、当前登录用户至少 Reporter，并检查共享凭据的 scope 与有效期；任何一步失败都不会落库、不会创建 Webhook。CLI 在共享模式下可以省略 `--token-env`（`tribunalctl projects register --project <项目>`），CLI 会先读取 `/api/v1/me` 的能力位确认实例已启用；未启用时仍要求 `--token-env`。共享凭据过期、被撤销或 scope 不足是平台级故障：控制台设置页的 `gitlab.shared_bot_credential_state` 会显示 `expired` / `insufficient_scope` / `unreachable`（5 分钟缓存），更新环境变量中的凭据并重启即可恢复，已有项目级 token 不受影响。`GET /api/v1/config` 只返回 `bot_token_configured` 布尔值，不返回变量名或值。
+共享模式下，注册与「校验连接」都会先确认 bot 至少 Reporter、当前登录用户至少 Reporter，并检查共享凭据的 scope 与有效期；任何一步失败都不会落库、不会创建 Webhook。Reporter 无权写 commit status，因此共享模式会跳过 commit status，评审结果仍通过 MR 注记与行内 discussion 发布；项目级 token 模式照旧。CLI 在共享模式下可以省略 `--token-env`（`tribunalctl projects register --project <项目>`），CLI 会先读取 `/api/v1/me` 的能力位确认实例已启用；未启用时仍要求 `--token-env`。两个凭据的值都会加入子进程的拒绝环境变量列表，不会传给 MCP/Skill 子进程。共享凭据过期、被撤销或 scope 不足是平台级故障：控制台设置页的 `gitlab.shared_bot_credential_state` 会显示 `expired` / `insufficient_scope` / `unreachable`（5 分钟缓存），更新环境变量中的凭据并重启即可恢复，已有项目级 token 不受影响。`GET /api/v1/config` 只返回 `bot_token_configured` 与 `provisioning_token_configured` 布尔值，不返回变量名或值。
 
 ## 入口与队列
 

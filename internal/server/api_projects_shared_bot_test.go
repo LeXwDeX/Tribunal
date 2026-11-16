@@ -18,6 +18,8 @@ import (
 	workspacepkg "github.com/LeXwDeX/tribunal/internal/workspace"
 )
 
+const testProvisioningToken = "glpat-test-provisioning"
+
 func testSharedProjectService(t *testing.T, st *sqlite.Store, api gitlab.API, workspace, sharedToken string) *app.ProjectService {
 	t.Helper()
 	cipher, err := secret.New([]byte("0123456789abcdef0123456789abcdef"))
@@ -37,6 +39,7 @@ func testSharedProjectService(t *testing.T, st *sqlite.Store, api gitlab.API, wo
 		},
 		ValidationTimeout: 5 * time.Second,
 		SharedBotToken:    sharedToken,
+		ProvisioningToken: testProvisioningToken,
 	})
 	if err != nil {
 		t.Fatalf("NewProjectService: %v", err)
@@ -104,7 +107,7 @@ func TestRegisterExplicitAutoWebhookFalseKeepsManualPath(t *testing.T) {
 func TestRegisterSharedCredentialURLOnly(t *testing.T) {
 	const sharedToken = "glpat-shared-bot"
 	api := defaultStubGitLab()
-	api.memberAccess = 40 // shared bot Maintainer; the stub ignores user ids
+	api.memberAccess = 20 // shared bot Reporter; the stub ignores user ids
 	env := newM6Env(t, m6Options{adminFactory: func(st *sqlite.Store) AdminService {
 		return testSharedProjectService(t, st, api, t.TempDir(), sharedToken)
 	}})
@@ -166,10 +169,14 @@ func TestRegisterEmptyTokenWithoutSharedCredentialReturns400(t *testing.T) {
 
 func TestSettingsExposeSharedBotCredentialState(t *testing.T) {
 	const sharedToken = "glpat-shared-bot"
+	t.Setenv("TRIBUNAL_TEST_PROVISIONING_TOKEN", "glpat-provisioning-secret")
 	api := defaultStubGitLab()
-	env := newM6Env(t, m6Options{adminFactory: func(st *sqlite.Store) AdminService {
-		return testSharedProjectService(t, st, api, t.TempDir(), sharedToken)
-	}})
+	env := newM6Env(t, m6Options{
+		platform: &config.Config{GitLab: config.GitLabConfig{ProvisioningTokenEnv: "TRIBUNAL_TEST_PROVISIONING_TOKEN"}},
+		adminFactory: func(st *sqlite.Store) AdminService {
+			return testSharedProjectService(t, st, api, t.TempDir(), sharedToken)
+		},
+	})
 	admin := env.loginAs("code-admin")
 
 	response := admin.request(http.MethodGet, "/api/v1/settings", nil, nil)
@@ -180,16 +187,21 @@ func TestSettingsExposeSharedBotCredentialState(t *testing.T) {
 	if gitlabView["shared_bot_credential"] != true || gitlabView["shared_bot_credential_state"] != "ok" {
 		t.Fatalf("gitlab settings = %v", gitlabView)
 	}
+	if gitlabView["provisioning_credential"] != true {
+		t.Fatalf("provisioning_credential = %v", gitlabView["provisioning_credential"])
+	}
 	if gitlabView["shared_bot_username"] != "review-bot" {
 		t.Fatalf("shared bot username = %v", gitlabView["shared_bot_username"])
 	}
 	if _, ok := gitlabView["shared_bot_credential_expires_at"]; ok {
 		t.Fatalf("settings exposed an expiry the stub did not set: %v", gitlabView)
 	}
-	if bytes.Contains(response.body, []byte(sharedToken)) {
-		t.Fatal("settings response contains the shared token")
+	for _, secret := range []string{sharedToken, "glpat-provisioning-secret"} {
+		if bytes.Contains(response.body, []byte(secret)) {
+			t.Fatalf("settings response contains a credential value %q", secret)
+		}
 	}
-	for _, forbidden := range []string{"bot_token_env", "TRIBUNAL_BOT_TOKEN"} {
+	for _, forbidden := range []string{"bot_token_env", "TRIBUNAL_BOT_TOKEN", "provisioning_token_env", "TRIBUNAL_TEST_PROVISIONING_TOKEN"} {
 		if bytes.Contains(response.body, []byte(forbidden)) {
 			t.Fatalf("settings response contains the credential variable name %q", forbidden)
 		}
@@ -240,8 +252,8 @@ func TestRegisterSharedCredentialNonTrustedDenialsAreIndistinguishable(t *testin
 		name   string
 		access map[int64]int
 	}{
-		{name: "bot not maintainer", access: map[int64]int{9: 30, 8: 20}},
-		{name: "registrant not reporter", access: map[int64]int{9: 40, 8: 10}},
+		{name: "bot below reporter", access: map[int64]int{9: 10, 8: 20}},
+		{name: "registrant not reporter", access: map[int64]int{9: 20, 8: 10}},
 	}
 	type result struct {
 		status  int
@@ -315,7 +327,7 @@ func TestRegisterPerProjectTokenReportsNotShared(t *testing.T) {
 
 func TestValidateSharedCredentialHTTP(t *testing.T) {
 	api := defaultStubGitLab()
-	api.memberAccess = 40
+	api.memberAccess = 20
 	env := newM6Env(t, m6Options{adminFactory: func(st *sqlite.Store) AdminService {
 		return testSharedProjectService(t, st, api, t.TempDir(), "glpat-shared-bot")
 	}})
@@ -326,7 +338,7 @@ func TestValidateSharedCredentialHTTP(t *testing.T) {
 		t.Fatalf("validate = %d %s", response.status, response.body)
 	}
 	body := env.decode(t, response)
-	if body["shared_credential"] != true || body["username"] != "review-bot" || body["access_level"] != float64(40) {
+	if body["shared_credential"] != true || body["username"] != "review-bot" || body["access_level"] != float64(20) {
 		t.Fatalf("validation = %v", body)
 	}
 	if _, err := env.sqlite.GetProject(context.Background(), 42); err == nil {

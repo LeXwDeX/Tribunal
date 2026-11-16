@@ -87,8 +87,14 @@ type GitLabConfig struct {
 	// shared bot token. Non-empty enables shared-credential mode: projects
 	// registered without a project token use this bot. The token itself is
 	// read from the environment and never stored in configuration.
-	BotTokenEnv string        `yaml:"bot_token_env" json:"bot_token_env"`
-	CatchUp     CatchUpConfig `yaml:"catch_up" json:"catch_up"`
+	BotTokenEnv string `yaml:"bot_token_env" json:"bot_token_env"`
+	// ProvisioningTokenEnv names the environment variable holding the token
+	// that creates, updates and deletes project webhooks in shared-credential
+	// mode. It is only used for webhook lifecycle operations; review reads and
+	// note writes keep using the shared bot. Empty means automatic webhook
+	// creation is unavailable for shared projects.
+	ProvisioningTokenEnv string        `yaml:"provisioning_token_env" json:"provisioning_token_env"`
+	CatchUp              CatchUpConfig `yaml:"catch_up" json:"catch_up"`
 }
 
 // CatchUpConfig controls the one-time startup scan that enqueues reviews for
@@ -474,6 +480,14 @@ func (c *Config) Validate() error {
 	if c.GitLab.BotTokenEnv != "" {
 		if value, ok := p.env("gitlab.bot_token_env", c.GitLab.BotTokenEnv); ok && strings.TrimSpace(value) == "" {
 			p.add("gitlab.bot_token_env: environment variable %s must not be blank", c.GitLab.BotTokenEnv)
+		}
+	}
+	// Provisioning is optional; when set it follows the same environment
+	// contract as the shared bot. Shared mode requires it only for automatic
+	// webhook creation, which registration reports as a validation error.
+	if c.GitLab.ProvisioningTokenEnv != "" {
+		if value, ok := p.env("gitlab.provisioning_token_env", c.GitLab.ProvisioningTokenEnv); ok && strings.TrimSpace(value) == "" {
+			p.add("gitlab.provisioning_token_env: environment variable %s must not be blank", c.GitLab.ProvisioningTokenEnv)
 		}
 	}
 

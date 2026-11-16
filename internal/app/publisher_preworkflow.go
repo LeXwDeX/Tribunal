@@ -22,6 +22,11 @@ func (p *Publisher) PublishPreWorkflowFailure(ctx context.Context, projectID, mr
 	if projectID <= 0 || mrIID <= 0 || generation <= 0 || token == "" || !shaRE.MatchString(head) {
 		return PermanentJob(fmt.Errorf("pre-workflow failure target is incomplete"))
 	}
+	// Shared-credential projects use a Reporter-level bot, which cannot create
+	// commit statuses; the failure stays visible through review status/notes.
+	if p.sharedCredentialProjectState(ctx, projectID) {
+		return nil
+	}
 	unlock, err := p.lockMR(ctx, projectID, mrIID)
 	if err != nil {
 		return err

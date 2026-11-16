@@ -22,18 +22,36 @@ var (
 	// while shared-credential mode is not configured. Every such project is
 	// affected by the same configuration gap.
 	ErrSharedBotCredentialUnavailable = errors.New("app: shared bot credential is unavailable or not configured; the project has no access token")
+	// ErrProvisioningCredentialUnavailable marks a shared-credential project
+	// whose webhook lifecycle needs the platform provisioning credential, which
+	// is not configured. Review reads and note writes are unaffected.
+	ErrProvisioningCredentialUnavailable = errors.New("app: provisioning credential is unavailable or not configured")
 )
 
 // projectTokenResolver picks the GitLab credential for a project. A project
 // token always wins; an empty token sentinel falls back to the instance-wide
-// shared bot. A nil resolver behaves like a resolver without a shared token.
+// shared bot. Webhook lifecycle operations use a separate provisioning token
+// so a Reporter-level review bot never needs hook permissions.
 type projectTokenResolver struct {
-	cipher *secret.Cipher
-	shared string
+	cipher       *secret.Cipher
+	shared       string
+	provisioning string
 }
 
 func newProjectTokenResolver(cipher *secret.Cipher, shared string) *projectTokenResolver {
 	return &projectTokenResolver{cipher: cipher, shared: shared}
+}
+
+// WithProvisioning returns a copy configured with the webhook lifecycle
+// credential. The original resolver is left unchanged, so services that never
+// manage hooks keep provisioning out of their credential set.
+func (r *projectTokenResolver) WithProvisioning(token string) *projectTokenResolver {
+	if r == nil {
+		return &projectTokenResolver{provisioning: token}
+	}
+	copied := *r
+	copied.provisioning = token
+	return &copied
 }
 
 // HasShared reports whether shared-credential mode is enabled.
@@ -49,10 +67,52 @@ func (r *projectTokenResolver) Shared() string {
 	return r.shared
 }
 
+// HasProvisioning reports whether the webhook lifecycle credential is
+// configured.
+func (r *projectTokenResolver) HasProvisioning() bool {
+	return r != nil && r.provisioning != ""
+}
+
+// Provisioning returns the webhook lifecycle token, or an empty string when
+// unconfigured.
+func (r *projectTokenResolver) Provisioning() string {
+	if r == nil {
+		return ""
+	}
+	return r.provisioning
+}
+
+// sharedCredentialProject is the zero-length token sentinel predicate. The
+// resolver and configuration consumers without a resolver in scope share this
+// one definition; only resolver-based callers can additionally require that
+// shared mode is configured.
+func sharedCredentialProject(project *store.Project) bool {
+	return project != nil && len(project.TokenEnc) == 0
+}
+
 // UsesShared reports whether a project has no project-level token and would
 // therefore call GitLab as the shared bot.
 func (r *projectTokenResolver) UsesShared(project *store.Project) bool {
-	return project != nil && len(project.TokenEnc) == 0 && r.HasShared()
+	return sharedCredentialProject(project) && r.HasShared()
+}
+
+// HookToken returns the credential for webhook lifecycle operations. A shared
+// project uses the provisioning token; a project-token project keeps its own
+// token. Review reads and note writes must use Token instead.
+func (r *projectTokenResolver) HookToken(project *store.Project) (string, error) {
+	if project == nil {
+		return "", ErrProjectTokenUnavailable
+	}
+	if sharedCredentialProject(project) {
+		if !r.HasShared() {
+			return "", ErrSharedBotCredentialUnavailable
+		}
+		if !r.HasProvisioning() {
+			return "", ErrProvisioningCredentialUnavailable
+		}
+		return r.provisioning, nil
+	}
+	return r.Token(project)
 }
 
 // Token returns the credential to use for the project.
@@ -84,6 +144,16 @@ func resolveProjectToken(tokens *projectTokenResolver, cipher *secret.Cipher, pr
 		return tokens.Token(project)
 	}
 	return newProjectTokenResolver(cipher, "").Token(project)
+}
+
+// resolveHookToken resolves the webhook lifecycle credential. It never falls
+// back to the review credential for a shared project: a Reporter-level bot
+// must not be asked to manage hooks.
+func resolveHookToken(tokens *projectTokenResolver, cipher *secret.Cipher, project *store.Project) (string, error) {
+	if tokens != nil {
+		return tokens.HookToken(project)
+	}
+	return newProjectTokenResolver(cipher, "").HookToken(project)
 }
 
 // Shared bot credential health states. They are reported by the lazy health

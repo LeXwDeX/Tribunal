@@ -114,7 +114,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	sharedBotToken := sharedBotTokenFromEnv(cfg.GitLab.BotTokenEnv)
+	sharedBotToken := optionalTokenFromEnv(cfg.GitLab.BotTokenEnv)
+	provisioningToken := optionalTokenFromEnv(cfg.GitLab.ProvisioningTokenEnv)
 	adminToken, err := bootstrapToken(cfg.Auth.BootstrapTokenEnv)
 	if err != nil {
 		return err
@@ -193,11 +194,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 
 	runtime, err := app.NewRuntime(ctx, cfg, app.RuntimeDeps{
-		Store:          db,
-		Cipher:         cipher,
-		GitLab:         gitlabClient,
-		SharedBotToken: sharedBotToken,
-		Logger:         logger,
+		Store:             db,
+		Cipher:            cipher,
+		GitLab:            gitlabClient,
+		SharedBotToken:    sharedBotToken,
+		ProvisioningToken: provisioningToken,
+		Logger:            logger,
 	})
 	if err != nil {
 		return err
@@ -807,11 +809,11 @@ func decodeMasterKey(envName string) ([]byte, error) {
 	return key, nil
 }
 
-// sharedBotTokenFromEnv reads the optional instance-wide bot token. An empty
-// name keeps per-project credentials. Validate() already proved the variable
-// is present and non-blank when configured. The value is only handed to the app
-// layer; it is never logged or persisted.
-func sharedBotTokenFromEnv(envName string) string {
+// optionalTokenFromEnv reads an optional GitLab token named by an environment
+// variable. An empty name disables the feature. Validate() already proved the
+// variable is present and non-blank when configured. The value is only handed
+// to the app layer; it is never logged or persisted.
+func optionalTokenFromEnv(envName string) string {
 	if envName == "" {
 		return ""
 	}

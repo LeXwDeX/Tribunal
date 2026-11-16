@@ -207,7 +207,7 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
           ? '项目已保存，使用平台共享 bot 调用 GitLab；后台会拉取仓库并生成评审上下文，会调用模型并消耗 token，但不会修改仓库代码。'
           : '项目已保存。平台已加密保存访问 Key；后台会拉取仓库并生成评审上下文，会调用模型并消耗 token，但不会修改仓库代码。')
         : (sharedBotCredential
-          ? '只需填写项目地址：保存后使用平台共享 bot 校验权限、自动创建 Webhook 并初始化。选择性地填写项目 Key 可改用项目级凭据。会调用模型并消耗 token，不会修改仓库代码。'
+          ? '只需填写项目地址：保存后由平台校验权限、自动创建 Webhook 并初始化。选择性地填写项目 Key 可改用项目级凭据。会调用模型并消耗 token，不会修改仓库代码。'
           : '先只读校验连接，确认项目和权限；校验通过后才保存并初始化。保存会加密存储访问 Key，自动创建 Webhook，并在后台拉取仓库、生成评审上下文，会调用模型并消耗 token。不会修改仓库代码。')}
       wide
       footer={result ? (
@@ -248,7 +248,7 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
                 <strong>{result.project?.webhook_state === 'failed' ? 'Webhook 自动创建失败' : 'Webhook 未启用'}</strong>
                 <span className="small">
                   {result.project?.webhook_state === 'failed'
-                    ? `${result.project?.webhook_error || 'GitLab 拒绝了 Webhook 创建请求。'} 请在项目设置中检查 bot 权限后重试。`
+                    ? `${result.project?.webhook_error || 'GitLab 拒绝了 Webhook 创建请求。'} 请在项目设置中检查平台 Webhook 凭据权限后重试。`
                     : '没有可用的自动触发；需要自动评审时，在项目详情的「设置」中启用 Webhook。'}
                 </span>
                 {result.project?.id ? <Link to={`/projects/${result.project.id}/settings`} onClick={close}>前往项目设置</Link> : null}
@@ -340,7 +340,7 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
           </Disclosure>
           <div className={page.registrationNotice}>
             {sharedBotCredential
-              ? '保存并初始化会登记项目、自动创建 GitLab Webhook，使用平台共享 bot（填写项目 Key 时改用项目级凭据），并入队后台拉取与上下文生成；会调用模型并消耗 token。所有操作都不会修改仓库代码。'
+              ? '保存并初始化会登记项目、自动创建 GitLab Webhook（平台代建），评审使用平台共享 bot（填写项目 Key 时改用项目级凭据），并入队后台拉取与上下文生成；会调用模型并消耗 token。所有操作都不会修改仓库代码。'
               : '保存并初始化会登记项目、加密保存访问 Key、自动创建 GitLab Webhook，入队后台拉取与上下文生成；会调用模型并消耗 token。所有操作都不会修改仓库代码。'}
           </div>
         </>

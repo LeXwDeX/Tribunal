@@ -30,10 +30,10 @@ const (
 
 	// Fixed hook-health messages. The console shows them as the failure reason;
 	// they never include upstream text or credentials.
-	webhookDisabledMessage            = "GitLab disabled the managed project webhook after repeated delivery failures"
-	webhookMissingMessage             = "the managed project webhook is missing or was deleted in GitLab"
-	webhookTokenRejectedMessage       = "project token was rejected by GitLab while checking the webhook; replace the project token"
-	webhookSharedTokenRejectedMessage = "shared bot credential was rejected by GitLab while checking the webhook; update the credential referenced by gitlab.bot_token_env and restart the service"
+	webhookDisabledMessage             = "GitLab disabled the managed project webhook after repeated delivery failures"
+	webhookMissingMessage              = "the managed project webhook is missing or was deleted in GitLab"
+	webhookTokenRejectedMessage        = "project token was rejected by GitLab while checking the webhook; replace the project token"
+	webhookProvisioningRejectedMessage = "provisioning credential was rejected by GitLab while checking the webhook; update the credential referenced by gitlab.provisioning_token_env and restart the service"
 )
 
 // catchUpNamespace derives the deterministic delivery UUID of a catch-up
@@ -64,9 +64,11 @@ type CatchUpServiceConfig struct {
 	// SharedBotToken enables shared-credential fallback for projects without
 	// their own token.
 	SharedBotToken string
-	Settings       config.CatchUpConfig
-	Logger         *slog.Logger
-	Now            func() time.Time
+	// ProvisioningToken owns webhook lifecycle calls for shared projects.
+	ProvisioningToken string
+	Settings          config.CatchUpConfig
+	Logger            *slog.Logger
+	Now               func() time.Time
 	// MRLocks is the shared per-merge-request lock registry. Catch-up enqueues
 	// reviews, so it holds the same lock as every note writer (#475).
 	MRLocks *workflowLocks
@@ -116,7 +118,7 @@ func NewCatchUpService(cfg CatchUpServiceConfig) (*CatchUpService, error) {
 		webhooks:  cfg.Webhooks,
 		workspace: cfg.Workspace,
 		cipher:    cfg.Cipher,
-		tokens:    newProjectTokenResolver(cfg.Cipher, cfg.SharedBotToken),
+		tokens:    newProjectTokenResolver(cfg.Cipher, cfg.SharedBotToken).WithProvisioning(cfg.ProvisioningToken),
 		settings:  cfg.Settings,
 		mrLocks:   cfg.MRLocks,
 		logger:    logger,
@@ -279,8 +281,15 @@ func (s *CatchUpService) ReconcileHookHealth(ctx context.Context) {
 		if !project.Enabled || project.HookID == nil {
 			continue
 		}
-		loaded, token, usable := s.projectToken(ctx, project.ID)
+		loaded, _, usable := s.projectToken(ctx, project.ID)
 		if !usable {
+			continue
+		}
+		token, err := resolveHookToken(s.tokens, s.cipher, loaded)
+		if err != nil {
+			// Shared projects without the platform provisioning credential have
+			// no hook lifecycle to reconcile; review credential failures are
+			// already handled by projectToken above.
 			continue
 		}
 		s.reconcileHookHealth(ctx, loaded, token)
@@ -308,7 +317,7 @@ func (s *CatchUpService) reconcileHookHealth(ctx context.Context, project *store
 		if gitlab.StatusOf(err) == http.StatusUnauthorized || gitlab.StatusOf(err) == http.StatusForbidden {
 			message := webhookTokenRejectedMessage
 			if s.tokens.UsesShared(project) {
-				message = webhookSharedTokenRejectedMessage
+				message = webhookProvisioningRejectedMessage
 			}
 			s.setHookHealth(ctx, writer, project, store.WebhookStateFailed, message)
 		}
@@ -331,7 +340,7 @@ func (s *CatchUpService) reconcileHookHealth(ctx context.Context, project *store
 		s.setHookHealth(ctx, writer, project, store.WebhookStateFailed, webhookDisabledMessage)
 	case project.WebhookState == store.WebhookStateFailed &&
 		(project.WebhookError == webhookDisabledMessage || project.WebhookError == webhookMissingMessage ||
-			project.WebhookError == webhookTokenRejectedMessage || project.WebhookError == webhookSharedTokenRejectedMessage):
+			project.WebhookError == webhookTokenRejectedMessage || project.WebhookError == webhookProvisioningRejectedMessage):
 		// A hook that recovered is healthy again; unrelated failures stay.
 		s.setHookHealth(ctx, writer, project, store.WebhookStateEnabled, "")
 	}

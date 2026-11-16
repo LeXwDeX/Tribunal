@@ -1653,6 +1653,12 @@ func commitStatusPublishKey(sha, state string) string {
 }
 
 func (p *Publisher) publishCommitStatus(ctx context.Context, loaded *loadedReview, state, description string, recheck func() error) error {
+	// A Reporter-level shared bot cannot create commit statuses. The effective
+	// config disables this path; this guard also prevents a publication row for
+	// a status that was never written.
+	if sharedCredentialProject(loaded.project) {
+		return nil
+	}
 	status := gitlab.CommitStatus{
 		State: state, Name: "ai-review", TargetURL: p.detailURL(loaded.workflow.ID), Description: description,
 	}
@@ -1668,7 +1674,21 @@ func (p *Publisher) publishCommitStatus(ctx context.Context, loaded *loadedRevie
 	return err
 }
 
+// sharedCredentialProjectState looks up the sentinel predicate for callers
+// that only have a project ID, so no commit status request can be issued for a
+// shared project even through a direct path.
+func (p *Publisher) sharedCredentialProjectState(ctx context.Context, projectID int64) bool {
+	if p == nil || p.store == nil {
+		return false
+	}
+	project, err := p.store.GetProject(ctx, projectID)
+	return err == nil && sharedCredentialProject(project)
+}
+
 func (p *Publisher) setCommitStatus(ctx context.Context, token string, projectID int64, sha string, status gitlab.CommitStatus, recheck func() error) error {
+	if p.sharedCredentialProjectState(ctx, projectID) {
+		return nil
+	}
 	return p.retry(ctx, func() error {
 		if err := recheck(); err != nil {
 			return err

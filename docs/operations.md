@@ -382,21 +382,23 @@ fi
 
 ### 共享 bot 凭据（可选）
 
-实例级共享 bot 让项目可以只用项目地址注册，无需向每个项目分发 token。仅当 `gitlab.bot_token_env` 非空时启用；该配置保存环境变量名，token 值只存在于进程环境，不写入 YAML、数据库、API 响应或日志。
+实例级共享 bot 让项目可以只用项目地址注册，无需向每个项目分发 token。仅当 `gitlab.bot_token_env` 非空时启用；该配置保存环境变量名，token 值只存在于进程环境，不写入 YAML、数据库、API 响应或日志。共享 bot 只负责评审读写（Reporter 即可）；Webhook 生命周期由可选的 `gitlab.provisioning_token_env` 代办。
 
-1. 用专用 GitLab 账号创建 PAT，scope 至少 `api` 和 `read_repository`，并在每个要接入的项目上授予 Maintainer（创建 Webhook 与发布评审）。
-2. 在 `config/server.yaml` 或 overlay 设置 `gitlab.bot_token_env: TRIBUNAL_BOT_TOKEN`；把 `TRIBUNAL_BOT_TOKEN` 放进权限 0600、已被 gitignore 的 env 文件或密钥管理器，不要把值写入 YAML、仓库、日志或聊天。Compose 已按允许列表传入该变量；其他部署方式需自行把它注入容器环境。
-3. 重启服务。启动日志只包含变量名、不包含值；bot 用户名会自动解析并补充到 `bot_usernames`，只有解析失败时才需要手工写 `gitlab.bot_usernames`。
-4. 控制台「设置」的 GitLab 区域显示 `shared_bot_credential_state`：`ok`、`expired`、`insufficient_scope`、`unreachable`，缓存 5 分钟。注册与「校验连接」会在落库前检查共享凭据的 scope 和有效期、bot 的 Maintainer 角色，以及（非平台管理员）登录用户本人的 Reporter 角色；普通调用方看到的失败文案统一，不会暴露项目是否存在或 bot 的权限细节。
-5. 凭据轮换：先在 GitLab 生成新 PAT，更新 env 文件中的值并重启，再撤销旧 PAT。共享凭据被 GitLab 拒绝时按平台级故障处理：评审状态会提示更新 `gitlab.bot_token_env` 指向的凭据并重启；项目级 token 仍优先，不受共享凭据轮换影响。
+1. 用专用 GitLab 账号创建共享 bot PAT，scope 至少 `api` 和 `read_repository`，并在每个要接入的项目上授予 **Reporter**（读代码/MR/diff、发 note 与行内 discussion）。
+2. 用另一个（或同一具备权限的）账号创建 provisioning PAT，scope 至少 `api`，并在每个要自动接入的项目上授予 **Maintainer**；它只用于 hook 的 create/update/delete/list/get，不用于评审读写，建议使用较短有效期并纳入到期监控。
+3. 在 `config/server.yaml` 或 overlay 设置 `gitlab.bot_token_env: TRIBUNAL_BOT_TOKEN`；需要自动建 Webhook 时再设置 `gitlab.provisioning_token_env: TRIBUNAL_PROVISIONING_TOKEN`。把两个 token 放进权限 0600、已被 gitignore 的 env 文件或密钥管理器，不要把值写入 YAML、仓库、日志或聊天。Compose 已按允许列表传入这两个变量；其他部署方式需自行注入容器环境。两个变量都会加入子进程的拒绝环境变量列表，不会传给 MCP/Skill 子进程。
+4. 重启服务。启动日志只包含变量名、不包含值；bot 用户名会自动解析并补充到 `bot_usernames`，只有解析失败时才需要手工写 `gitlab.bot_usernames`。
+5. 控制台「设置」的 GitLab 区域显示 `shared_bot_credential_state`：`ok`、`expired`、`insufficient_scope`、`unreachable`，缓存 5 分钟；`provisioning_credential` 布尔表示平台 Webhook 凭据是否已配置。注册与「校验连接」会在落库前检查共享凭据的 scope 和有效期、bot 的 Reporter 角色，以及（非平台管理员）登录用户本人的 Reporter 角色；共享模式 + `auto_webhook=true` 还会检查 provisioning 凭据已配置、未过期且带 `api` scope。普通调用方看到的成员失败文案统一，不会暴露项目是否存在或 bot 的权限细节。
+6. 共享模式下 commit status 会被强制关闭：Reporter 无权 `create_commit_status`，评审结果仍以 MR 注记和行内 discussion 发布；项目级 token 模式不受影响。
+7. 凭据轮换：先在 GitLab 生成新 PAT，更新 env 文件中的值并重启，再撤销旧 PAT。共享凭据被拒绝时按平台级故障处理：评审状态会提示更新 `gitlab.bot_token_env` 指向的凭据并重启；provisioning 凭据被拒绝时 hook 健康会提示更新 `gitlab.provisioning_token_env`。项目级 token 仍优先，不受共享凭据轮换影响。
 
-CLI 在共享模式下可以省略 `--token-env`：`tribunalctl projects register --project <项目>`。CLI 会先读取 `/api/v1/me` 的 `shared_bot_credential` 能力位确认实例已启用；未启用时仍要求 `--token-env`，显式传入时项目级 token 仍优先。
+CLI 在共享模式下可以省略 `--token-env`：`tribunalctl projects register --project <项目>`。CLI 会先读取 `/api/v1/me` 的 `shared_bot_credential` 能力位确认实例已启用；未启用时仍要求 `--token-env`，显式传入时项目级 token 仍优先。自动建 hook 仍受服务端 provisioning 凭据约束。
 
 ### Webhook 失败与恢复
 
 包含 #164 的版本在请求体读取返回超时错误时回复 `503 {"ignored":"request_timeout","request_id":...}`，未读取完整的请求不会进入投递去重或入队；连接中断时 GitLab 未必收到响应。存储或入队失败仍返回 `503`，超大请求体和其他非超时读取错误仍返回 `200`。连续的 4xx/5xx 或连接失败可能使 GitLab 临时或永久停用 hook；触发条件、限制和功能开关随 GitLab 版本与实例配置而异，按该实例的 [GitLab webhook 文档](https://docs.gitlab.com/user/project/integrations/webhooks/#auto-disabled-webhooks)核对，不要依赖固定次数。
 
-认证失败的投递现在会写入投递记录（`outcome=rejected`、`reason=invalid_secret`），使用与真实投递不同的去重 UUID，不会冒充 GitLab 的重发。启动追赶扫描会核对每个已登记 hook 是否仍存在、是否被 GitLab 停用（`alert_status=disabled/temporarily_disabled`）并回写项目健康：缺失/停用/项目 token 被拒绝时项目在控制台标红；本功能写入的停用或缺失状态在 hook 恢复后自动清除。除启动检查外，服务每 30 分钟对所有已启用且记录了 `hook_id` 的项目后台核对一次；单个项目失败只记 WARN 并保留原状态，不中断整轮。恢复后只清除本功能写入的固定失败文案（停用、缺失、项目 token 被拒绝、共享 bot 凭据被拒绝），其他来源的失败状态保持不动。`GET /api/v1/webhook-deliveries` 按项目与 MR 聚合保留期内的投递，返回入队/忽略/拒绝计数、忽略原因、最后投递时间和 `rejected/invalid_secret` 数量；控制台「系统 → Webhook 投递」只读展示，按调用者项目访问权限过滤。该接口不返回请求正文、header 或 secret，未认证投递也不会改变项目健康。投递记录随 `storage.delivery_retention`（默认 14 天）清理。
+认证失败的投递现在会写入投递记录（`outcome=rejected`、`reason=invalid_secret`），使用与真实投递不同的去重 UUID，不会冒充 GitLab 的重发。启动追赶扫描会核对每个已登记 hook 是否仍存在、是否被 GitLab 停用（`alert_status=disabled/temporarily_disabled`）并回写项目健康：缺失/停用/项目 token 被拒绝时项目在控制台标红；本功能写入的停用或缺失状态在 hook 恢复后自动清除。除启动检查外，服务每 30 分钟对所有已启用且记录了 `hook_id` 的项目后台核对一次；单个项目失败只记 WARN 并保留原状态，不中断整轮。恢复后只清除本功能写入的固定失败文案（停用、缺失、项目 token 被拒绝、provisioning 凭据被拒绝），其他来源的失败状态保持不动。`GET /api/v1/webhook-deliveries` 按项目与 MR 聚合保留期内的投递，返回入队/忽略/拒绝计数、忽略原因、最后投递时间和 `rejected/invalid_secret` 数量；控制台「系统 → Webhook 投递」只读展示，按调用者项目访问权限过滤。该接口不返回请求正文、header 或 secret，未认证投递也不会改变项目健康。投递记录随 `storage.delivery_retention`（默认 14 天）清理。
 
 运维应监控 GitLab 的 hook 状态及失败投递，先排除 Tribunal、网络或反向代理的故障，再检查 GitLab 的「Recent events」。在记录仍可用且版本支持时，有权限的人员可用「Resend Request」手动重发；若重发保留原有效 `X-Gitlab-Event-UUID`，此前没有去重记录，且认证和事件过滤均通过，则可再次入队。不要假定所有 GitLab 版本的重发都保留该字段。Recent events 有保留和重发条件限制，无法保证每次失败都可重发，也不代表 GitLab 一定自动重试。对不可重发或未投递的事件，核对 GitLab 与评审状态后按权限采取人工补救；hook 若仍停用，依该 GitLab 版本检查是否需要手动恢复。请求详情可能含 secret 和请求体，不要复制到日志或聊天。操作说明见 [GitLab 请求历史](https://docs.gitlab.com/user/project/integrations/webhooks/#inspect-request-and-response-details)。
 

@@ -676,7 +676,10 @@ func (s *ReviewService) publishFailure(ctx context.Context, workflowID string, s
 // safely known and the configuration error stays the visible block.
 func (s *ReviewService) publishPreWorkflowFailure(ctx context.Context, project *store.Project, token string, control *store.ReviewControl, payload reviewRunPayload) error {
 	settings, err := ResolveSettings(project.Settings, s.reviewDefaults)
-	if err != nil || !settings.CommitStatus || s.publisher == nil {
+	// Reporter-level shared bots cannot write commit statuses. The effective
+	// config already disables this; the explicit guard keeps a direct call from
+	// sending a doomed request.
+	if err != nil || !settings.CommitStatus || sharedCredentialProject(project) || s.publisher == nil {
 		return nil
 	}
 	if err := s.publisher.PublishPreWorkflowFailure(ctx, project.ID, control.MRIID, payload.Generation, payload.HeadSHA, token); err != nil {

@@ -404,7 +404,7 @@ export function SettingsPanel({ project }: { project: Project }) {
             {project.shared_credential ? (
               <>
                 <span className="small muted">凭据来源：平台共享 bot（无项目级 token）</span>
-                <span className="small muted">评审与 Webhook 由平台共享 bot 执行；填写项目 Key 可切换为项目级凭据。</span>
+                <span className="small muted">评审使用平台共享 bot；Webhook 由平台代建。填写项目 Key 可切换为项目级凭据。</span>
               </>
             ) : (
               <>

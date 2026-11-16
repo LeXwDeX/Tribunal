@@ -126,6 +126,12 @@ func (f *sharedBotAPI) GetTokenInfo(ctx context.Context, token string) (*gitlab.
 	return f.fakeGitLab.GetTokenInfo(ctx, token)
 }
 
+func (f *sharedBotAPI) setHooks(hooks []gitlab.Hook) {
+	f.fakeGitLab.mu.Lock()
+	defer f.fakeGitLab.mu.Unlock()
+	f.hooks = hooks
+}
+
 func (f *sharedBotAPI) ListProjectHooks(ctx context.Context, token string, projectID int64) ([]gitlab.Hook, error) {
 	f.use("ListProjectHooks", token)
 	return f.fakeGitLab.ListProjectHooks(ctx, token, projectID)
@@ -136,6 +142,11 @@ func (f *sharedBotAPI) CreateProjectHook(ctx context.Context, token string, proj
 	return f.fakeGitLab.CreateProjectHook(ctx, token, projectID, spec)
 }
 
+func (f *sharedBotAPI) UpdateProjectHook(ctx context.Context, token string, projectID, hookID int64, spec gitlab.HookSpec) error {
+	f.use("UpdateProjectHook", token)
+	return f.fakeGitLab.UpdateProjectHook(ctx, token, projectID, hookID, spec)
+}
+
 func (f *sharedBotAPI) DeleteProjectHook(ctx context.Context, token string, projectID, hookID int64) error {
 	f.use("DeleteProjectHook", token)
 	return f.fakeGitLab.DeleteProjectHook(ctx, token, projectID, hookID)
@@ -143,15 +154,23 @@ func (f *sharedBotAPI) DeleteProjectHook(ctx context.Context, token string, proj
 
 const (
 	sharedBotToken    = "glpat-shared-bot"
+	provisioningToken = "glpat-provisioning"
 	projectAccessTok  = "glpat-project-token"
 	botUserID         = int64(9)
 	registrantUserID  = int64(7)
 	botUsername       = "tribunal"
 	registrantAccess  = reporterAccessLevel
-	botMaintainerRole = maintainerAccessLevel
+	// Reporter is enough for the shared bot to read code/MRs and write review
+	// notes; webhook lifecycle uses provisioningToken.
+	botReporterRole = reporterAccessLevel
 )
 
 func newSharedBotProjectService(t *testing.T, st *sqlite.Store, api gitlab.API, shared string, now func() time.Time) *ProjectService {
+	t.Helper()
+	return newSharedBotProjectServiceWithProvisioning(t, st, api, shared, provisioningToken, now)
+}
+
+func newSharedBotProjectServiceWithProvisioning(t *testing.T, st *sqlite.Store, api gitlab.API, shared, provisioning string, now func() time.Time) *ProjectService {
 	t.Helper()
 	// Registration grants manage access to a real user row; the HTTP layer
 	// relies on the logged-in user already existing, so seed the registrant.
@@ -161,14 +180,15 @@ func newSharedBotProjectService(t *testing.T, st *sqlite.Store, api gitlab.API, 
 		t.Fatalf("seed registrant: %v", err)
 	}
 	service, err := NewProjectService(ProjectServiceConfig{
-		Store:          st,
-		GitLab:         api,
-		Cipher:         newTestCipher(t),
-		Profiles:       testProfiles(),
-		PublicURL:      "https://review.example.com",
-		SharedBotToken: shared,
-		Workspace:      workspace.NewManager(t.TempDir(), nil),
-		GitLabURL:      "https://gitlab.example.com",
+		Store:             st,
+		GitLab:            api,
+		Cipher:            newTestCipher(t),
+		Profiles:          testProfiles(),
+		PublicURL:         "https://review.example.com",
+		SharedBotToken:    shared,
+		ProvisioningToken: provisioning,
+		Workspace:         workspace.NewManager(t.TempDir(), nil),
+		GitLabURL:         "https://gitlab.example.com",
 		ProbeRemote: func(context.Context, string, string) (string, error) {
 			return sha40, nil
 		},
@@ -183,10 +203,14 @@ func newSharedBotProjectService(t *testing.T, st *sqlite.Store, api gitlab.API, 
 
 func configureSharedBot(api *sharedBotAPI) {
 	api.users[sharedBotToken] = &gitlab.User{ID: botUserID, Username: botUsername}
-	api.setAccess(sharedBotToken, botUserID, botMaintainerRole)
+	api.setAccess(sharedBotToken, botUserID, botReporterRole)
 	api.setAccess(sharedBotToken, registrantUserID, registrantAccess)
 	api.infoByToken[sharedBotToken] = &gitlab.TokenInfo{
 		Scopes: []string{"api", "read_repository"}, Active: true,
+	}
+	// The provisioning credential only needs api for webhook lifecycle calls.
+	api.infoByToken[provisioningToken] = &gitlab.TokenInfo{
+		Scopes: []string{"api"}, Active: true,
 	}
 }
 
@@ -283,6 +307,33 @@ func TestProjectTokenResolver(t *testing.T) {
 	}
 }
 
+func TestHookTokenUsesProvisioningForSharedOnly(t *testing.T) {
+	cipher := newTestCipher(t)
+	projectEnc, err := cipher.Seal([]byte(projectAccessTok), secret.TokenAAD(42))
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared := newProjectTokenResolver(cipher, sharedBotToken).WithProvisioning(provisioningToken)
+	if token, err := shared.HookToken(&store.Project{ID: 42, TokenEnc: []byte{}}); err != nil || token != provisioningToken {
+		t.Fatalf("shared hook token = %q, %v", token, err)
+	}
+	if token, err := shared.HookToken(&store.Project{ID: 42, TokenEnc: projectEnc}); err != nil || token != projectAccessTok {
+		t.Fatalf("project hook token = %q, %v", token, err)
+	}
+	withoutProvisioning := newProjectTokenResolver(cipher, sharedBotToken)
+	if _, err := withoutProvisioning.HookToken(&store.Project{ID: 42, TokenEnc: []byte{}}); !errors.Is(err, ErrProvisioningCredentialUnavailable) {
+		t.Fatalf("missing provisioning error = %v", err)
+	}
+	withoutShared := newProjectTokenResolver(cipher, "")
+	if _, err := withoutShared.HookToken(&store.Project{ID: 42, TokenEnc: []byte{}}); !errors.Is(err, ErrSharedBotCredentialUnavailable) {
+		t.Fatalf("missing shared error = %v", err)
+	}
+	// The review credential never switches to provisioning.
+	if token, err := shared.Token(&store.Project{ID: 42, TokenEnc: []byte{}}); err != nil || token != sharedBotToken {
+		t.Fatalf("shared review token = %q, %v", token, err)
+	}
+}
+
 func TestRegisterSharedCredentialURLOnlyCreatesWebhook(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
@@ -314,13 +365,16 @@ func TestRegisterSharedCredentialURLOnlyCreatesWebhook(t *testing.T) {
 		t.Fatalf("webhook = %+v", saved)
 	}
 	if got := api.usedTokens("GetProject"); len(got) != 1 || got[0] != sharedBotToken {
-		t.Fatalf("GetProject tokens = %v", got)
+		t.Fatalf("GetProject tokens = %v, want the review bot", got)
 	}
-	if got := api.usedTokens("CreateProjectHook"); len(got) != 1 || got[0] != sharedBotToken {
-		t.Fatalf("CreateProjectHook tokens = %v", got)
+	if got := api.usedTokens("CurrentUser"); len(got) != 1 || got[0] != sharedBotToken {
+		t.Fatalf("CurrentUser tokens = %v, want the review bot", got)
 	}
-	if got := api.usedTokens("GetTokenInfo"); len(got) != 1 || got[0] != sharedBotToken {
-		t.Fatalf("GetTokenInfo calls = %v, want one shared-credential scope check", got)
+	if got := api.usedTokens("CreateProjectHook"); len(got) != 1 || got[0] != provisioningToken {
+		t.Fatalf("CreateProjectHook tokens = %v, want the provisioning credential", got)
+	}
+	if got := api.usedTokens("GetTokenInfo"); len(got) != 2 || got[0] != sharedBotToken || got[1] != provisioningToken {
+		t.Fatalf("GetTokenInfo calls = %v, want bot then provisioning", got)
 	}
 	hasGrant, err := st.HasProjectGrant(ctx, registrantUserID, 42)
 	if err != nil || !hasGrant {
@@ -335,17 +389,195 @@ func TestRegisterSharedCredentialURLOnlyCreatesWebhook(t *testing.T) {
 	}
 }
 
-func TestRegisterSharedCredentialRequiresMaintainerBot(t *testing.T) {
+func TestRegisterSharedCredentialAutoWebhookRequiresProvisioning(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
 	api := newSharedBotAPI()
 	configureSharedBot(api)
-	api.setAccess(sharedBotToken, botUserID, 30)
+	service := newSharedBotProjectServiceWithProvisioning(t, st, api, sharedBotToken, "", nil)
+
+	_, err := service.Register(ctx, RegisterInput{Project: "42", OwnerUserID: registrantUserID, AutoWebhook: true})
+	assertAppError(t, err, "validation_failed", "provisioning_credential")
+	assertRegisterResidueFree(t, ctx, st, api)
+	if api.callCount("CreateProjectHook") != 0 {
+		t.Fatalf("hook creation was attempted without provisioning: %v", api.tokenUses)
+	}
+}
+
+func TestRegisterSharedCredentialManualWebhookNeedsNoProvisioning(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	api := newSharedBotAPI()
+	configureSharedBot(api)
+	service := newSharedBotProjectServiceWithProvisioning(t, st, api, sharedBotToken, "", nil)
+
+	registration, err := service.Register(ctx, RegisterInput{
+		Project: "42", OwnerUserID: registrantUserID, AutoWebhook: false,
+	})
+	if err != nil {
+		t.Fatalf("Register without provisioning: %v", err)
+	}
+	if registration.WebhookSecret == "" {
+		t.Fatal("manual registration did not return a one-time secret")
+	}
+	if api.callCount("CreateProjectHook") != 0 {
+		t.Fatalf("manual registration created a hook: %v", api.tokenUses)
+	}
+}
+
+func TestRegisterSharedCredentialRejectsBadProvisioningCredential(t *testing.T) {
+	expired := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name string
+		info *gitlab.TokenInfo
+	}{
+		{name: "expired", info: &gitlab.TokenInfo{Scopes: []string{"api"}, Active: true, ExpiresAt: &expired}},
+		{name: "inactive", info: &gitlab.TokenInfo{Scopes: []string{"api"}, Active: false}},
+		{name: "missing api scope", info: &gitlab.TokenInfo{Scopes: []string{"read_repository"}, Active: true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			st := openTestStore(t)
+			api := newSharedBotAPI()
+			configureSharedBot(api)
+			api.infoByToken[provisioningToken] = tc.info
+			now := time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC)
+			service := newSharedBotProjectService(t, st, api, sharedBotToken, func() time.Time { return now })
+
+			_, err := service.Register(ctx, RegisterInput{Project: "42", OwnerUserID: registrantUserID, AutoWebhook: true})
+			assertAppError(t, err, "validation_failed", "provisioning_credential")
+			assertRegisterResidueFree(t, ctx, st, api)
+			if api.callCount("CreateProjectHook") != 0 {
+				t.Fatalf("hook creation was attempted with an unusable provisioning credential")
+			}
+		})
+	}
+}
+
+func TestRegisterSharedCredentialRejectedProvisioningNamesPlatformCredential(t *testing.T) {
+	ctx := context.Background()
+	api := newSharedBotAPI()
+	configureSharedBot(api)
+	api.infoErrs[provisioningToken] = &gitlab.Error{Op: "token_info", Status: 401}
+	service := newSharedBotProjectService(t, openTestStore(t), api, sharedBotToken, nil)
+
+	_, err := service.Register(ctx, RegisterInput{Project: "42", OwnerUserID: registrantUserID, AutoWebhook: true})
+	assertAppError(t, err, "validation_failed", "provisioning_credential")
+	if strings.Contains(err.Error(), provisioningToken) {
+		t.Fatalf("error leaked the provisioning token: %v", err)
+	}
+}
+
+func TestRegisterPerProjectTokenStillOwnsItsWebhook(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	cipher := newTestCipher(t)
+	api := newSharedBotAPI()
+	configureSharedBot(api)
+	service := newSharedBotProjectService(t, st, api, sharedBotToken, nil)
+
+	if _, err := service.Register(ctx, RegisterInput{
+		Project: "42", AccessToken: projectAccessTok, AutoWebhook: true, TrustedPlatformAdmin: true,
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if got := api.usedTokens("CreateProjectHook"); len(got) != 1 || got[0] != projectAccessTok {
+		t.Fatalf("CreateProjectHook tokens = %v, want the project token", got)
+	}
+	for _, use := range api.tokenUses {
+		if strings.HasPrefix(use, "CreateProjectHook "+provisioningToken) {
+			t.Fatalf("project-token registration used provisioning: %v", api.tokenUses)
+		}
+	}
+	saved, err := st.GetProject(ctx, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain, err := cipher.Open(saved.TokenEnc, secret.TokenAAD(42)); err != nil || string(plain) != projectAccessTok {
+		t.Fatalf("stored project token = %q, %v", plain, err)
+	}
+}
+
+func TestSharedWebhookLifecycleUsesProvisioning(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	api := newSharedBotAPI()
+	configureSharedBot(api)
+	service, saved := registerSharedWithHook(t, ctx, st, api)
+	if saved.HookID == nil {
+		t.Fatal("shared project has no hook")
+	}
+	api.setHooks([]gitlab.Hook{{ID: *saved.HookID}})
+
+	if _, err := service.RebuildWebhook(ctx, 42); err != nil {
+		t.Fatalf("RebuildWebhook: %v", err)
+	}
+	for _, call := range []string{"ListProjectHooks", "UpdateProjectHook"} {
+		tokens := api.usedTokens(call)
+		if len(tokens) != 1 || tokens[0] != provisioningToken {
+			t.Fatalf("%s tokens = %v, want provisioning", call, tokens)
+		}
+	}
+	if _, err := service.DisableWebhook(ctx, 42); err != nil {
+		t.Fatalf("DisableWebhook: %v", err)
+	}
+	if tokens := api.usedTokens("DeleteProjectHook"); len(tokens) != 1 || tokens[0] != provisioningToken {
+		t.Fatalf("DeleteProjectHook tokens = %v, want provisioning", tokens)
+	}
+}
+
+func TestSharedCredentialManualEnableRequiresProvisioning(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	api := newSharedBotAPI()
+	configureSharedBot(api)
+	service := newSharedBotProjectServiceWithProvisioning(t, st, api, sharedBotToken, "", nil)
+	if _, err := service.Register(ctx, RegisterInput{
+		Project: "42", OwnerUserID: registrantUserID, AutoWebhook: false,
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	_, err := service.CreateWebhook(ctx, 42)
+	assertAppError(t, err, "validation_failed", "provisioning_credential")
+	if api.callCount("ListProjectHooks") != 0 {
+		t.Fatalf("hook lifecycle ran without provisioning: %v", api.tokenUses)
+	}
+}
+
+func TestRegisterSharedCredentialRequiresReporterBot(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	api := newSharedBotAPI()
+	configureSharedBot(api)
+	api.setAccess(sharedBotToken, botUserID, 10)
 	service := newSharedBotProjectService(t, st, api, sharedBotToken, nil)
 
 	_, err := service.Register(ctx, RegisterInput{Project: "42", OwnerUserID: registrantUserID, AutoWebhook: true})
 	assertAppError(t, err, "validation_failed", "project")
 	assertRegisterResidueFree(t, ctx, st, api)
+}
+
+func TestRegisterSharedCredentialAcceptsReporterBot(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	api := newSharedBotAPI()
+	configureSharedBot(api)
+	api.setAccess(sharedBotToken, botUserID, reporterAccessLevel)
+	service := newSharedBotProjectService(t, st, api, sharedBotToken, nil)
+
+	if _, err := service.Register(ctx, RegisterInput{
+		Project: "42", OwnerUserID: registrantUserID, AutoWebhook: true,
+	}); err != nil {
+		t.Fatalf("Register with a Reporter bot: %v", err)
+	}
+	saved, err := st.GetProject(ctx, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.HookID == nil {
+		t.Fatal("Reporter bot registration did not create a webhook through provisioning")
+	}
 }
 
 func TestRegisterSharedCredentialRejectsNonMemberRegistrant(t *testing.T) {
@@ -420,9 +652,9 @@ func TestRegisterSharedCredentialNonTrustedPrechecksAreIndistinguishable(t *test
 		input     RegisterInput
 	}{
 		{
-			name: "bot not maintainer",
+			name: "bot below reporter",
 			configure: func(api *sharedBotAPI) {
-				api.setAccess(sharedBotToken, botUserID, 30)
+				api.setAccess(sharedBotToken, botUserID, 10)
 			},
 			input: RegisterInput{Project: "42", OwnerUserID: registrantUserID, AutoWebhook: true},
 		},
@@ -474,7 +706,7 @@ func TestRegisterSharedCredentialTrustedAdminKeepsDetailedPrecheck(t *testing.T)
 	st := openTestStore(t)
 	api := newSharedBotAPI()
 	configureSharedBot(api)
-	api.setAccess(sharedBotToken, botUserID, 30)
+	api.setAccess(sharedBotToken, botUserID, 10)
 	service := newSharedBotProjectService(t, st, api, sharedBotToken, nil)
 
 	_, err := service.Register(ctx, RegisterInput{
@@ -584,7 +816,7 @@ func TestValidateSharedCredentialWithoutProjectToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
-	if !result.SharedCredential || result.Username != botUsername || result.AccessLevel != botMaintainerRole {
+	if !result.SharedCredential || result.Username != botUsername || result.AccessLevel != botReporterRole {
 		t.Fatalf("validation = %+v", result)
 	}
 	if strings.Join(result.TokenScopes, ",") != "api,read_repository" || result.GitHead != sha40 {
@@ -620,8 +852,8 @@ func TestValidateSharedCredentialPrechecksAreIndistinguishable(t *testing.T) {
 		input     ValidateProjectInput
 	}{
 		{
-			name:      "bot not maintainer",
-			configure: func(api *sharedBotAPI) { api.setAccess(sharedBotToken, botUserID, 30) },
+			name:      "bot below reporter",
+			configure: func(api *sharedBotAPI) { api.setAccess(sharedBotToken, botUserID, 10) },
 			input:     ValidateProjectInput{Project: "42", OwnerUserID: registrantUserID},
 		},
 		{
@@ -672,7 +904,7 @@ func TestValidateSharedCredentialTrustedAdminSkipsRegistrantCheck(t *testing.T) 
 	if err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
-	if !result.SharedCredential || result.AccessLevel != botMaintainerRole {
+	if !result.SharedCredential || result.AccessLevel != botReporterRole {
 		t.Fatalf("validation = %+v", result)
 	}
 }
@@ -975,12 +1207,15 @@ func TestMergeSharedBotUsernameFeedsSelfTriggerFilter(t *testing.T) {
 	}
 }
 
-func TestDeniedEnvNamesIncludeSharedBotToken(t *testing.T) {
+func TestDeniedEnvNamesIncludeSharedBotAndProvisioningTokens(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Secrets.MasterKeyEnv = "REVIEW_MASTER_KEY"
 	cfg.GitLab.BotTokenEnv = "TRIBUNAL_BOT_TOKEN"
+	cfg.GitLab.ProvisioningTokenEnv = "TRIBUNAL_PROVISIONING_TOKEN"
 	names := deniedEnvNames(cfg)
-	want := map[string]bool{"REVIEW_MASTER_KEY": false, "TRIBUNAL_BOT_TOKEN": false}
+	want := map[string]bool{
+		"REVIEW_MASTER_KEY": false, "TRIBUNAL_BOT_TOKEN": false, "TRIBUNAL_PROVISIONING_TOKEN": false,
+	}
 	for _, name := range names {
 		if _, ok := want[name]; ok {
 			want[name] = true

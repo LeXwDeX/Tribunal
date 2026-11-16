@@ -189,7 +189,7 @@ docker compose up -d --force-recreate --wait --wait-timeout 120
 
 **共享 bot（可选，仅实例启用时）**
 
-实例配置 `gitlab.bot_token_env` 后，注册和「校验连接」都可以省略项目 token：`tribunalctl projects register --project <项目>`。共享 bot 必须在项目上至少 Maintainer，登录用户本人仍需至少 Reporter；服务端会在落库前检查共享凭据的 scope、有效期和这两项角色，失败不会注册项目或创建 Webhook。token 值只放在权限 0600、已被 gitignore 的 env 文件或密钥管理器中，由 `gitlab.bot_token_env` 指向的变量名读取；不要写入 YAML、命令行、日志或聊天。凭据过期或被撤销时更新该变量并重启，已有项目级 token 仍优先。
+实例配置 `gitlab.bot_token_env` 后，注册和「校验连接」都可以省略项目 token：`tribunalctl projects register --project <项目>`。共享 bot 必须在项目上至少 Reporter，登录用户本人仍需至少 Reporter；服务端会在落库前检查共享凭据的 scope、有效期和这两项角色。自动创建 Webhook 还需要 `gitlab.provisioning_token_env`：provisioning 凭据需带 `api` scope、在项目上至少 Maintainer，仅用于 hook 的 create/update/delete/list/get，不用于评审读写；未配置或无效时共享 + 自动建 hook 会在落库前被拒绝，`--auto-webhook=false` 不需要它。共享模式会跳过 commit status（Reporter 无该权限），评审结果仍走 MR 注记与行内 discussion。两个 token 值只放在权限 0600、已被 gitignore 的 env 文件或密钥管理器中，由对应变量名读取；不要写入 YAML、命令行、日志或聊天，并建议为 provisioning 凭据设置短有效期与到期监控。凭据过期或被撤销时更新该变量并重启，已有项目级 token 仍优先。
 
 **验证**
 
