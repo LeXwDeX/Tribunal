@@ -753,7 +753,7 @@ docker inspect --format '{{.State.Health.Status}}' tribunal
 
 GitLab 侧（每环境固定一个应用，先查重再创建）：
 
-1. **查重**：按固定应用名与回调 URI 查已有应用。生产用 `tribunal`，测试环境用 `tribunal-dev`。实例级应用可用管理员 `GET /api/v4/applications` 列出；该接口只返回 owner 为空的实例级应用，字段为 `id`、`application_id`、`application_name`、`callback_url`、`confidential`、`scopes`，不含 secret。用户级应用需在 GitLab 的 `/-/profile/applications` 页面核对；`GET /api/v4/users/:id/applications` 在 19.5 返回 404，不要依赖。
+1. **查重**：按固定应用名与回调 URI 查已有应用。生产用 `tribunal`，测试环境用 `tribunal-dev`。实例级应用可用管理员 `GET /api/v4/applications` 列出；该接口只返回 owner 为空的实例级应用，字段为 `id`、`application_id`、`application_name`、`callback_url`、`confidential`、`scopes`，不含 secret。用户级应用只能由 owner 本人枚举：`GET /api/v4/user/applications`，或在 GitLab 的 `/-/profile/applications` 页面核对；管理员 `GET /api/v4/applications` 看不到用户级应用，`GET /api/v4/users/:id/applications` 在 19.5 返回 404，不要依赖。
 2. **命中即复用**：沿用该应用的 client ID 和 client secret，经 `GITLAB_OAUTH_CLIENT_ID`、`GITLAB_OAUTH_CLIENT_SECRET` 注入，不新建应用。回调变化时编辑既有应用的 Redirect URI，固定为 `https://<公开域名>/auth/callback`。
 3. **未命中才创建**：先取得用户明确同意，再创建应用；应用名用固定名，Redirect URI 填 `https://<公开域名>/auth/callback`，scope 只选 `read_user`。
 4. 保存 client ID 和 client secret；secret 只写入受控环境变量，不落入仓库、YAML 或聊天记录。
@@ -827,13 +827,15 @@ docker run -d --name tribunal \
 #### 一次性收敛：bot 账号
 
 1. **先升级**：GitLab 19.5.1 存在严重 RCE（CVE-2026-110264），先把实例升级到 19.5.4 或更高。升级是独立运维项，另行授权。
-2. **确认 service account 能力**：目标实例为 GitLab CE 19.5.5（`GET /api/v4/version` 返回 `enterprise=false`）。CE 自 19.0 起提供 service account；官方文档写的 Free 18.11 GA 不能直接套用到 CE 二进制，CE 18.11 没有该功能。实例级上限 100 个，`GET /api/v4/service_accounts` 可核对现有数量（当前实例为空）。
-3. **创建账号**：用管理员创建实例级 service account，用户名填 `tribunal`。创建端点与参数以该版本的 service account API 文档为准（本仓库未验证）；创建后用 `GET /api/v4/service_accounts` 和 `GET /api/v4/users?search=tribunal` 核对。用户名当前无占用。
-4. **上传头像**：管理员用 `PUT /api/v4/users/:id` 的 multipart 字段 `avatar`，文件不超过 200KB；或由该账号本人用 `PUT /api/v4/user/avatar`（GitLab 17.0+，只能修改当前认证用户）。头像公开可见，不要使用含内部信息的图片。
-5. **授予权限**：按最小权限给需要接入评审的组或项目 Maintainer。创建 webhook 需 Maintainer/Owner，评论需 Reporter+，commit status 需 Developer+；组的 Maintainer 会继承到全部子组和项目。CE 没有 group webhook，只能逐项目建 hook，但同一个回调 URL 可以服务多个项目。不要授予实例管理员。
-6. **代发 PAT**：管理员用 `POST /api/v4/users/:id/personal_access_tokens` 代发，scope 用 `api`。有效期上限 365 天；self/rotate 默认 1 周；同一 token 族复用会触发吊销。因此创建时显式设置到期日并登记监控，不让 bot 走默认 1 周的 self/rotate 流程；轮换时先生成新 token、更新 env 并重建验证，再处理旧 token，不重复使用旧值。
+2. **确认 service account 能力**：在 GitLab CE 19.5.5 上核对（`GET /api/v4/version` 返回 `enterprise=false`）。CE 自 19.0 起提供 service account；官方文档写的 Free 18.11 GA 不能直接套用到 CE 二进制，CE 18.11 没有该功能。CE/Free 全实例上限 100 个（源码 `LIMIT_FOR_FREE=100`），付费 EE 无此限制；先调 `GET /api/v4/service_accounts` 核对现有数量，已存在目标用户名时直接复用，不要重复创建。
+3. **创建账号**：管理员调 `POST /api/v4/service_accounts`。字段全部可选：`name`（默认 `Service account user`）、`username`（省略则自动生成 `service_account_<hash>`；自定义遵循全局用户名规则：2–255 字符，只含字母数字与 `_-.`，不能以 `_-.` 开头）、`email`、`external`（默认 `true`，不影响加成员或调 API）。固定传 `username` 为 `tribunal`（测试环境 `tribunal-dev`）。创建后用 `GET /api/v4/service_accounts` 和 `GET /api/v4/users?search=tribunal` 核对；用户名全局唯一，已存在时复用，不要重复创建。
+4. **上传头像**：推荐管理员走 `PUT /api/v4/users/:id` 的 multipart 字段 `avatar`（源码类型 `WorkhorseFile`，文档未标大小上限）。账号本人也可用 `PUT /api/v4/user/avatar`（GitLab 17.0+，只改当前认证用户），该路径限制 ≤200KB、建议 192×192；service account 需先有自己的 PAT 才能调，因此不作为首选。头像公开可见，不要使用含内部信息的图片。
+5. **授予权限**：调 `POST /api/v4/groups/:id/members` 或 `POST /api/v4/projects/:id/members`，传 `user_id` 与 `access_level=40`（Maintainer）。按最小权限只给需要接入评审的组或项目。创建 webhook 需 Maintainer/Owner，评论需 Reporter+，commit status 需 Developer+；组的 Maintainer 会继承到全部子组和项目。CE 没有 group webhook，只能逐项目建 hook，但同一个回调 URL 可以服务多个项目。不要授予实例管理员。
+6. **代发 PAT**：实例级 service account 走 User tokens API：管理员 `POST /api/v4/users/:id/personal_access_tokens`，`name` 必填，`scopes` 必填（用 `["api"]`），`expires_at` 可选（`YYYY-MM-DD`）。token 只在创建响应中返回一次，立即写入受控 env。有效期受 `max_personal_access_token_lifetime` 限制，默认 365 天；CE 没有 service account 专用的免过期开关，沿用通用 Require expiration 设置。self/rotate 默认 1 周，同一 token 族复用会触发吊销；因此创建时显式设置到期日并登记监控，不让 bot 走默认 1 周的 self/rotate 流程；轮换时先生成新 token、更新 env 并重建验证，再处理旧 token，不重复使用旧值。
 7. **写配置**：把用户名写进 `gitlab.bot_usernames`（精确匹配、区分大小写，按 GitLab 返回的 `username` 填写）。共享 bot 必须写入，否则自触发过滤与 `@` 唤醒都不生效。PAT 不写进配置：`gitlab.bot_token_env` 的值是**环境变量名**（语义同 `secrets.master_key_env`），PAT 值放进该变量；变量来源必须是权限 `600` 且被 gitignore 的 env 文件或受控密钥管理器，不写入 YAML、镜像、仓库或聊天。
-8. **验证**：用该 PAT 调 `GET /api/v4/user`，确认身份是 `tribunal`。获授权后在试点项目触发一次评审，确认评论作者是共享 bot，且 Tribunal 不把自己的评论当作新命令再次触发。
+8. **验证**：用该 PAT 调 `GET /api/v4/user`，确认身份是台账中对应的 bot 用户名。获授权后在试点项目触发一次评审，确认评论作者是共享 bot，且 Tribunal 不把自己的评论当作新命令再次触发。
+
+GitLab 官方参考：[Service accounts](https://docs.gitlab.com/user/profile/service_accounts/)、[User applications API](https://docs.gitlab.com/api/user_applications/)、[Applications API](https://docs.gitlab.com/api/applications/)、[Users API](https://docs.gitlab.com/api/users/)、[User moderation](https://docs.gitlab.com/administration/moderate_users/)。
 
 **共享额度的爆炸半径**
 
@@ -847,8 +849,8 @@ docker run -d --name tribunal \
 
 #### 旧资源处置
 
-- **旧的项目级 bot 用户**（形如 `project_<项目ID>_bot_<哈希>`）：停用（block），不删除。先完成共享凭据切换并在试点项目验证通过，再逐项目确认没有配置、env 或触发器仍引用旧 bot，然后在管理员用户列表 block。block 后该用户不能再登录或使用已有 token，历史注记和作者归属保留；需要回退时可 unblock 恢复。删除用户会转移或丢失贡献归属且不可逆，禁止直接删除。
-- **重复的 OAuth 应用**：先出预览清单，字段包括应用名、`application_id`、回调 URI、实例级/用户级、scopes、是否被任何环境的 env 引用。清单经用户确认后，只删除未被任何 env 引用的精确重复项，每环境保留一个固定应用。用户级应用在 `/-/profile/applications` 核对；管理员 `GET /api/v4/applications` 只列实例级应用且不含 secret，可用于实例级核对。删除前再次确认目标不是当前生效应用。
+- **旧的项目级 bot 用户**（形如 `project_<项目ID>_bot_<哈希>`）：停用（block），不删除。先完成共享凭据切换并在试点项目验证通过，再逐项目确认没有配置、env 或触发器仍引用旧 bot，然后调 `POST /api/v4/users/:id/block`（201）。block 后注记与成员关系保留、不匿名化；PAT 认证被拒但不会被 revoke，unblock（`POST /api/v4/users/:id/unblock`）后未过期即可恢复；副作用是该用户的 pipeline 被丢弃、schedules 被禁用。官方停用 project access token 的路径是 `DELETE /api/v4/projects/:id/access_tokens/:token_id`；最后一个 token 撤销或过期后，GitLab 默认 30 天后删除该 bot 用户——要保留历史归属，就不要撤销其最后一个 token。删除用户会转移或丢失贡献归属且不可逆，禁止直接删除。
+- **重复的 OAuth 应用**：先出预览清单，字段包括应用名、`application_id`、回调 URI、实例级/用户级、scopes、是否被任何环境的 env 引用。用户级应用只能由 owner 本人枚举和删除：`GET /api/v4/user/applications`、`DELETE /api/v4/user/applications/:id`（204）；管理员 `GET /api/v4/applications` 只列实例级应用且不含 secret，`DELETE /api/v4/applications/:id` 对用户级应用返回 404，GraphQL 也没有对应 mutation。删除会级联删除该应用已发放的 access/refresh token 并撤销 consent（使用方立即 401），但不影响 GitLab Web 登录会话。清单经用户确认后，只删除未被任何 env 引用的精确重复项，每环境保留一个固定应用；删除前再次确认目标不是当前生效应用。
 - 本次文档交付只写规程，不执行任何 GitLab 写操作。
 
 ### bootstrap_admins 用户名写法弃用与迁移

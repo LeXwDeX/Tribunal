@@ -146,7 +146,7 @@ docker compose exec -T review /app/tribunalctl projects all
 只有用户需要控制台登录时才做这一步。先确认对外地址是 HTTPS，反向代理按 [运维 · 健康检查与 HTTPS 反向代理](operations.md#6-健康检查与-https-反向代理) 配好。
 
 1. **先查重复用，未命中再征得用户同意创建**。每个 GitLab 实例、每个环境只保留一个 OAuth 应用：生产用固定名 `tribunal`，测试环境用 `tribunal-dev`；应用名是查重约定，不随端口或部署次数变化。
-   - 查重：实例级应用用管理员 `GET <GITLAB_URL>/api/v4/applications`（只返回 owner 为空的实例级应用，含 `application_id`、`application_name`、`callback_url`、`scopes`，不含 secret）；用户级应用在 GitLab 的 `/-/profile/applications` 页面按应用名与回调 URI 核对。GitLab 19.5 的 `GET /api/v4/users/:id/applications` 返回 404，不要依赖。
+   - 查重：实例级应用用管理员 `GET <GITLAB_URL>/api/v4/applications`（只返回 owner 为空的实例级应用，含 `application_id`、`application_name`、`callback_url`、`scopes`，不含 secret）；用户级应用只能由 owner 本人用 `GET <GITLAB_URL>/api/v4/user/applications` 枚举，或在 `/-/profile/applications` 页面按应用名与回调 URI 核对。管理员 `GET /api/v4/applications` 看不到用户级应用；`GET /api/v4/users/:id/applications` 在 19.5 返回 404，不要依赖。
    - 命中：复用该应用的 client ID/secret，仍经 `GITLAB_OAUTH_CLIENT_ID`、`GITLAB_OAUTH_CLIENT_SECRET` 注入；回调地址变化时只编辑既有应用的 Redirect URI（固定为 `<TRIBUNAL_PUBLIC_URL>/auth/callback`），不新建应用。
    - 未命中：取得用户明确同意后创建，应用名用上面的固定名，scope 只选 `read_user`，Redirect URI 填 `<TRIBUNAL_PUBLIC_URL>/auth/callback`。
 2. 先向用户确认实际 GitLab 数字用户 ID 和本次平台管理员授权，再在 `.env` 里设置 `GITLAB_OAUTH_CLIENT_ID`、`GITLAB_OAUTH_CLIENT_SECRET`，以及 `GITLAB_ADMIN_USERNAME=id:<管理员 GitLab 用户 ID>`。用户 ID 可以用 `GET <GITLAB_URL>/api/v4/users?username=<name>` 查到。
