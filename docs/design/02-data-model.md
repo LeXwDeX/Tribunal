@@ -376,7 +376,7 @@ CREATE TABLE review_status (
   state           TEXT    NOT NULL,   -- queued | running | publishing | PASS | BLOCKING | INCOMPLETE | failed | cancelled | stale
   detail          TEXT    NOT NULL DEFAULT '',
   final_body      TEXT    NOT NULL DEFAULT '', -- 0031：状态评论携带的已渲染评审正文；空表示只显示状态
-  final_body_ready INTEGER NOT NULL DEFAULT 1, -- 0032：0 为升级前的历史行，继续更新旧 :status 评论；1 为合并评论模式
+  final_body_ready INTEGER NOT NULL DEFAULT 1, -- 0032：0 为升级前的历史行，只更新旧 :status 评论；1 拥有合并注记并可清理 legacy 注记
   note_id         INTEGER,            -- 状态与结果共用的同一条 MR note
   body_hash       TEXT    NOT NULL DEFAULT '',
   version         INTEGER NOT NULL DEFAULT 1,
@@ -388,7 +388,7 @@ CREATE TABLE review_status (
 );
 ```
 
-> `review_status` 每个 MR 一行，状态 worker 与 publisher 都按 `<!-- gitlab-ce-review:summary` 标记找到并更新同一条 note。`final_body` 保存已渲染的评审正文（通常是评审报告，也用于配置错误等用户可见说明）；`SetReviewStatusFinalBody` 按 128 × 1024 字符截断。终态后仍可写入：该方法要求当前 generation/head，写入后重置 `body_hash`、递增 `version` 并入队 `review.status`；`SetReviewStatus` 在新评审或 head 变化时清空 `final_body`，同代次（含 stale/cancel 更新）保留；取消导致的 generation 前进在已有正文时通过写入目标上的 `PreserveFinalBody` 保留正文，该语句不改写 `final_body_ready`，因此正文与就绪标志随取消一起保留，只有生命周期头部变化。`final_body_ready` 由 `0032` 引入：迁移时已有且 `final_body = ''` 的行回填 0，新行默认 1，`SetReviewStatusFinalBody` 写入正文时置 1。`final_body_ready = 0` 的历史行由状态 worker 继续用旧 `<!-- gitlab-ce-review:status` 标记原地更新旧状态评论，绝不接管 summary 评论；写入正文后转入同一条 summary note 的合并评论模式。`last_verified_at` 由 `0033` 引入，记录低频自愈扫描最近一次确认远端状态评论仍与已应用版本一致的时间；5 分钟对账只处理未应用期望版本的行，已应用的终态行由每小时自愈扫描按行最多每 24 小时复查一次，未到期时用该列在本地短路，自愈只推进该列与远端 `note_id`/`body_hash`，不改写期望版本。
+> `review_status` 每个 MR 一行，状态 worker 与 publisher 都按 `<!-- gitlab-ce-review:summary` 标记找到并更新同一条 note。`final_body` 保存已渲染的评审正文（通常是评审报告，也用于配置错误等用户可见说明）；`SetReviewStatusFinalBody` 按 128 × 1024 字符截断。终态后仍可写入：该方法要求当前 generation/head，写入后重置 `body_hash`、递增 `version` 并入队 `review.status`；`SetReviewStatus` 在新评审或 head 变化时清空 `final_body`，同代次（含 stale/cancel 更新）保留；取消导致的 generation 前进在已有正文时通过写入目标上的 `PreserveFinalBody` 保留正文，该语句不改写 `final_body_ready`，因此正文与就绪标志随取消一起保留，只有生命周期头部变化。`final_body_ready` 由 `0032` 引入：迁移时已有且 `final_body = ''` 的行回填 0，新行默认 1，`SetReviewStatusFinalBody` 写入正文时置 1。`final_body_ready = 0` 的历史行由状态 worker 继续用旧 `<!-- gitlab-ce-review:status` 标记原地更新旧状态评论，绝不接管 summary 评论；这条不变量在正常更新与终态回退（control 缺失、同代次 head 变化、当前代次取消）路径上都成立。写入正文后该行置为 1，转入同一条 summary note 的合并评论模式，拥有合并注记，并在每次收敛写入时删除本 bot 的旧 `:status` 注记（只匹配当前 token 身份与旧标记前缀）。`last_verified_at` 由 `0033` 引入，记录低频自愈扫描最近一次确认远端状态评论仍与已应用版本一致的时间；5 分钟对账只处理未应用期望版本的行，已应用的终态行由每小时自愈扫描按行最多每 24 小时复查一次，未到期时用该列在本地短路，自愈只推进该列与远端 `note_id`/`body_hash`，不改写期望版本。
 
 ```sql
 CREATE TABLE users (
@@ -462,7 +462,7 @@ CREATE TABLE api_tokens (
 
 0031 为 `review_status` 追加 `final_body TEXT NOT NULL DEFAULT ''`，只加列、不改写已有行；旧行读到空串，状态评论保持旧正文。该迁移不可逆，回滚需恢复升级前快照与匹配的旧镜像。字段语义见上文 `review_status` 说明；升级操作见[部署与运维 · 评审回合与评论合并](../operations.md#评审回合超时与评论合并451)。
 
-0032 为 `review_status` 追加 `final_body_ready INTEGER NOT NULL DEFAULT 1`，只加列，并按 `final_body = ''` 把迁移时的已有行回填为 0（历史行）；`final_body` 非空的行保持 1，迁移后新建的行默认 1，`SetReviewStatusFinalBody` 写入正文时也置 1。历史行由状态 worker 继续维护旧 `<!-- gitlab-ce-review:status` 评论，不接管 summary 评论。该迁移不可逆，回滚需恢复升级前快照与匹配的旧镜像；字段语义同上文 `review_status` 说明。
+0032 为 `review_status` 追加 `final_body_ready INTEGER NOT NULL DEFAULT 1`，只加列，并按 `final_body = ''` 把迁移时的已有行回填为 0（历史行）；`final_body` 非空的行保持 1，迁移后新建的行默认 1，`SetReviewStatusFinalBody` 写入正文时也置 1。历史行由状态 worker 继续维护旧 `<!-- gitlab-ce-review:status` 评论，不接管 summary 评论；行置为 1 后由合并注记承载正文，并在收敛写入时清理本 bot 的旧状态评论。该迁移不可逆，回滚需恢复升级前快照与匹配的旧镜像；字段语义同上文 `review_status` 说明。
 
 模型参数的配置侧覆盖不写入数据库：不存在数据库模型级覆盖表。`config:` 模型的参数层级为 base < overlay（模型级）< 0028 节点覆盖（节点级）；base 与 overlay 均来自配置文件，overlay 由配置文件维护，控制台经 `PATCH /api/v1/config/overlay` 写回，服务不把模型级修改写入 SQLite。原计划的“0030 模型级覆盖”已取消；实际迁移 `0030_remove_cost.sql` 是移除 `cost_micros` 的成本字段迁移，不创建模型覆盖表。0028 只保存评审档位节点覆盖与模型引用，不保存模型级字段；0029 的 `llm_model_defaults` 只作用于 `user:` 模型，不覆盖 `config:` 模型。
 

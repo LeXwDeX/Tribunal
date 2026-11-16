@@ -71,6 +71,15 @@
 - 前端回归覆盖：409 时列出受影响字段与消息、确认按钮变为「仍然重置」、force 后刷新 models/config；无 `details` 时显示兜底提示；`ConfirmDialog` 无 children/error 时不渲染空 body；显式 `max_tokens=0` + 继承默认时 budget 校验报错；390/1440 宽度与亮暗主题契约。
 - GitHub Actions 的 go/web/docker 在 PR head 通过；**BLOCKED**：未运行自建 CI 与真实部署验收。
 
+## 同一 MR 串行化、状态表格与 legacy 注记收敛验证（#475）
+
+- 基于 `fix/mr-serial-status` 的 `c3c0e08`（`62c2788` 实现 + `c3c0e08` 评审修复）。本轮只同步文档，未改代码与测试。本地通过 `go build ./...`、`go vet ./...`；`go test -race -timeout=40m -count=1 ./internal/app ./internal/gitlab ./internal/store/sqlite ./internal/server` 通过（app 545.135s、gitlab 2.006s、sqlite 270.891s、server 195.551s）；`go test ./scripts/ -count=1` 通过（114.245s，包含注册文档锁定测试）。文档改动另做只读链接/锚点检查：35 个 Markdown 文件共 257 个本地链接，除 `docs/design/06-config.md` 指向 `03-http-api.md#44-扩展mcp-skill块绑定` 的既有失效锚点外均可解析；该问题在本次改动前已存在，本轮未修改该文件。
+- 首轮 `62c2788` 的自建 Linux CI（run `20261116T151805-62c27884374c`）：go / web / docker 全部 PASS，语句覆盖率 81.92%（33032/40324，门槛 70%），耗时 478s，RESULT PASS。修复轮 `c3c0e08` 的 CI 由主会话稍后复跑，结果待补；本节不预填。
+- 单测覆盖：共享 per-MR 锁与锁内代次复核（`TestInFlightSummaryUpdateIsNotInterleavedByNewerGeneration`、`TestDispatcherStartReviewWaitsForMergeRequestLock`、`TestStatusWriterLockWaitHonorsCancellation`）、旧代次不得覆盖新代次（`TestOlderGenerationCannotRepublishAfterNewerGeneration`、`TestFailureSummaryCannotOverwriteNewerGeneration`）、ingress 不等待 MR 锁且守住 900ms 预算（`TestWebhookIngressDoesNotWaitForMergeRequestLock`）、v2 表格渲染与旧 bullet 解析（`TestReviewStatusBodyRendersMarkdownTable`、`TestParseStatusPhaseReadsLegacyBulletBody`）、单条注记原地编辑与删除后重建（`TestStatusWriterUpsertsSingleNote`、`TestStatusWriterIgnoresForeignNoteAndRecreatesAfterDelete`）、legacy 注记清理（`TestStatusWriterDeletesLegacyStatusNoteAfterMerge`、`TestPublishedSummaryDeletesLegacyStatusNote`）、终态写入（`TestStatusWriterSettlesMissingControl`、`TestStatusWriterSettlesHeadMismatch`、`TestStatusWriterSettlesCancelledCurrentGeneration`）、历史行不接管已发布 summary（`TestTerminalStatusVisitKeepsPublishedSummaryNote`、`TestStatusVerificationKeepsPreUpgradeSummaryNote`）、取消结算不采纳后继代次（`TestStatusWriterDoesNotAdoptSuccessorAfterCancelledWrite`）。
+- 升级影响：不新增数据库迁移，无 schema 或配置变更。升级后下一次收敛写入把状态注记渲染为 v2 表格（历史行的旧 `:status` 注记同样使用表格，但不追加已发布正文）。已应用的终态行（PASS / BLOCKING / INCOMPLETE / failed / stale）由每小时自愈扫描按行最多每 24 小时复查一次，pending 行仍按 5 分钟对账；已应用的非终态行不会仅因升级被扫描改写，等待下一次状态版本变化。只有 `final_body_ready = 1` 的行会在收敛写入时删除本 bot 的 legacy `:status` 注记；升级时仍为 0 的历史行继续原地更新旧注记，直到该 MR 的评审发布正文、行变为 1 后才清理。
+- 已知限制 F6：`applied_version >= version` 且仍非终态的状态行，如果 review control 缺失，不会进入终态写入：状态作业在自愈检查处直接短路，周期扫描也只取未应用行和待自愈的终态行。代码中没有在保留状态行的前提下删除 review control 的路径（项目删除会在同一事务中同时删除 `review_controls` 与 `review_status`），因此这条路径当前不可达；本轮不修，列为后续项。
+- **BLOCKED**：未在真实 GitLab 上验证 `DeleteMRNote`（权限、删除后的列表可见性）与真实 MR 上的 legacy 注记收敛/单条注记效果，这些行为只有单测覆盖；未执行真实环境升级/回退演练。
+
 <a id="v150-验证状态"></a>
 
 ## v1.5.0 验证状态
