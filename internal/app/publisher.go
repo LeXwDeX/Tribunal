@@ -82,13 +82,22 @@ type Publisher struct {
 	// locks serializes publication of one workflow within this process so
 	// startup recovery and the worker cannot both create the same discussion.
 	locks workflowLocks
-	// mrLocks serializes publication of one merge request across workflow
-	// generations. Lock order is workspace RLock, MR lock, workflow lock.
-	mrLocks workflowLocks
+	// mrLocks serializes publication and status writes for one merge request
+	// across workflow generations. The runtime injects one registry shared with
+	// the status writer and every generation-bump path so a bump cannot
+	// interleave with an in-flight note write (#475). Lock order is workspace
+	// lock (content), MR lock, workflow lock. Webhook ingress deliberately does
+	// not take this lock: it only records the delivery and generation bump, and
+	// its 900ms processing budget must not wait for remote note writes.
+	mrLocks *workflowLocks
 }
 
 // workflowLocks is a keyed mutex whose entries live only while held or awaited.
-// It guards both per-workflow and per-merge-request publication locks.
+// It guards per-workflow publication locks and the shared per-merge-request
+// registry used by the publisher, the review service, the dispatcher, the
+// command worker and catch-up. Webhook ingress does not take this lock: it only
+// records the delivery and enqueue in one DB transaction to keep its 900ms
+// processing budget (#475).
 type workflowLocks struct {
 	mu      sync.Mutex
 	entries map[string]*workflowLock
@@ -132,6 +141,35 @@ func (l *workflowLocks) lock(ctx context.Context, key string) (func(), error) {
 	}, nil
 }
 
+// reviewMRLockKey identifies the process-wide per-merge-request lock. Every
+// remote note writer (publisher, status worker, command replies and fallback
+// notes) and every generation-bump path outside webhook ingress uses the same
+// key, so a stale write cannot slip between a recheck and its remote call.
+func reviewMRLockKey(projectID, mrIID int64) string {
+	return itoa(projectID) + ":" + itoa(mrIID)
+}
+
+// defaultMRLocks backs a service built without the runtime registry (tests and
+// standalone helpers). Production injects one registry through the
+// constructors so publication, status writing and every generation bump share
+// it.
+var defaultMRLocks workflowLocks
+
+// mrLockRegistry returns the injected per-merge-request registry, or the
+// package default so bare service constructions still serialize with each
+// other. This differs from NewPublisher, which creates a private registry for a
+// nil config: production always injects the runtime registry through every
+// constructor, so the two nil branches only exist for tests and standalone
+// helpers. Do not unify them — fixture publishers rely on a private registry
+// for isolation. A bare construction that mixes the branches silently stops
+// sharing the lock.
+func mrLockRegistry(locks *workflowLocks) *workflowLocks {
+	if locks == nil {
+		return &defaultMRLocks
+	}
+	return locks
+}
+
 // PublisherConfig configures Publisher.
 type PublisherConfig struct {
 	Store          ReviewStore
@@ -147,6 +185,9 @@ type PublisherConfig struct {
 	Logger         *slog.Logger
 	Now            func() time.Time
 	Retries        int
+	// MRLocks is the shared per-merge-request lock registry. A nil value
+	// gives this publisher a private registry (tests and standalone builds).
+	MRLocks *workflowLocks
 }
 
 // NewPublisher validates dependencies and builds the publication service.
@@ -166,6 +207,15 @@ func NewPublisher(cfg PublisherConfig) (*Publisher, error) {
 	if retries <= 0 {
 		retries = defaultPublishRetries
 	}
+	mrLocks := cfg.MRLocks
+	if mrLocks == nil {
+		// A standalone publisher gets a private registry so test fixtures stay
+		// isolated; other services fall back to defaultMRLocks instead. The
+		// runtime always injects its shared registry, which every other service
+		// receives too, so a bare construction that omits it can silently stop
+		// sharing the lock with those services.
+		mrLocks = &workflowLocks{}
+	}
 	return &Publisher{
 		store:          cfg.Store,
 		workspace:      cfg.Workspace,
@@ -180,6 +230,7 @@ func NewPublisher(cfg PublisherConfig) (*Publisher, error) {
 		logger:         logger,
 		now:            now,
 		retries:        retries,
+		mrLocks:        mrLocks,
 	}, nil
 }
 
@@ -914,9 +965,12 @@ func (p *Publisher) lockWorkflow(ctx context.Context, id string) (context.Contex
 }
 
 // lockMR serializes summary and commit-status writes for one merge request.
-// Callers hold the project workspace read lock before taking it.
+// Callers hold the project workspace lock before taking it. The same registry
+// is shared with the status worker, dispatcher, command worker and catch-up;
+// webhook ingress does not hold it (DB-only enqueue within the 900ms budget,
+// #475).
 func (p *Publisher) lockMR(ctx context.Context, projectID, mrIID int64) (func(), error) {
-	return p.mrLocks.lock(ctx, fmt.Sprintf("%d:%d", projectID, mrIID))
+	return mrLockRegistry(p.mrLocks).lock(ctx, reviewMRLockKey(projectID, mrIID))
 }
 
 // lockReviewMR resolves the workflow's merge request and takes its lock. It

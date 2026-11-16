@@ -68,7 +68,7 @@ Web 控制台的“重试加载更多”复用失败请求的同一 cursor，不
 4. `X-Gitlab-Event-UUID` 缺失或非法时忽略；同一项目内已存在于 `webhook_deliveries` → `200 {"ignored":"duplicate"}`。
 5. 按事件类型过滤（见下表），命中则入队，返回 `200 {"accepted":true,"job_id":"…"}`；否则 `200 {"ignored":"<reason>"}`。
 
-认证失败返回 401；请求体读取返回超时错误时返回 `503 {"ignored":"request_timeout","request_id":...}`，未读取完整的请求不会写投递记录或入队。存储处理失败返回 `503 {"ignored":"storage_error","request_id":...}`。请求体超限和其他非超时读取错误分别返回 `200 {"ignored":"body_too_large",...}` 和 `200 {"ignored":"bad_request",...}`；输入错误、未登记项目、重复投递等也返回 200。处理超时预算为 900 毫秒，不做任何 GitLab 或 LLM 调用；读取失败时保留读取期限并要求关闭连接，客户端断连时响应未必送达。
+认证失败返回 401；请求体读取返回超时错误时返回 `503 {"ignored":"request_timeout","request_id":...}`，未读取完整的请求不会写投递记录或入队。存储处理失败返回 `503 {"ignored":"storage_error","request_id":...}`。请求体超限和其他非超时读取错误分别返回 `200 {"ignored":"body_too_large",...}` 和 `200 {"ignored":"bad_request",...}`；输入错误、未登记项目、重复投递等也返回 200。处理超时预算为 900 毫秒，不做任何 GitLab 或 LLM 调用；读取失败时保留读取期限并要求关闭连接，客户端断连时响应未必送达。ingress 也不持 per-MR 注记锁：它只记录投递、推进代次并在 DB 入队，同 MR 的远端注记全序由「所有写入方持同一把锁，需要代次栅栏的写入在锁内复核代次」保证；若让 ingress 等待长发布，push/note 事件会在 900 毫秒到期后返回 503 且不写投递记录，而 GitLab CE 不自动重试，事件会丢失。
 
 | 事件 | 条件 | 入队 |
 |---|---|---|

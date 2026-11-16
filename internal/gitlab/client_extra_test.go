@@ -288,7 +288,7 @@ func TestCreateDiscussionOmitsZeroLineFields(t *testing.T) {
 
 func TestNoteDiscussionAndAwardRequests(t *testing.T) {
 	var createdNoteBody, updatedNoteBody, addedAwardName string
-	var deletedAward bool
+	var deletedAward, deletedNote bool
 	client := newExtraClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -322,6 +322,9 @@ func TestNoteDiscussionAndAwardRequests(t *testing.T) {
 		case r.Method == http.MethodDelete && r.URL.Path == "/api/v4/projects/42/merge_requests/7/notes/11/award_emoji/3":
 			deletedAward = true
 			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v4/projects/42/merge_requests/7/notes/11":
+			deletedNote = true
+			w.WriteHeader(http.StatusNoContent)
 		default:
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
@@ -338,6 +341,9 @@ func TestNoteDiscussionAndAwardRequests(t *testing.T) {
 	}
 	if err := client.UpdateMRNote(context.Background(), "token", 42, 7, 11, "updated"); err != nil || updatedNoteBody != "updated" {
 		t.Fatalf("UpdateMRNote err = %v, body = %q", err, updatedNoteBody)
+	}
+	if err := client.DeleteMRNote(context.Background(), "token", 42, 7, 11); err != nil || !deletedNote {
+		t.Fatalf("DeleteMRNote err = %v, deleted = %v", err, deletedNote)
 	}
 	discussions, err := client.ListDiscussions(context.Background(), "token", 42, 7)
 	if err != nil || len(discussions) != 1 || discussions[0].ID != "d1" || len(discussions[0].Notes) != 1 ||
@@ -577,6 +583,7 @@ func TestExtraMethodsRejectMissingTokenAndInvalidIDs(t *testing.T) {
 		func() error { _, err := client.ListMRNotes(ctx, "token", 42, 0); return err },
 		func() error { _, err := client.CreateMRNote(ctx, "token", 42, 7, " "); return err },
 		func() error { return client.UpdateMRNote(ctx, "token", 42, 7, 0, "x") },
+		func() error { return client.DeleteMRNote(ctx, "token", 42, 7, 0) },
 		func() error { _, err := client.ListDiscussions(ctx, "token", 42, 0); return err },
 		func() error {
 			_, err := client.CreateDiscussion(ctx, "token", 42, 7, NewDiscussion{Body: "x", Position: &Position{}})

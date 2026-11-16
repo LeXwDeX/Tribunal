@@ -140,7 +140,8 @@ func (s *ReviewService) RunStatusJob(ctx context.Context, job *jobs.Job) error {
 		return err
 	}
 	defer unlock()
-	statusUnlock, err := s.statusLocks.lock(ctx, itoa(payload.ProjectID)+":"+itoa(payload.MRIID))
+	mrLocks := mrLockRegistry(s.mrLocks)
+	statusUnlock, err := mrLocks.lock(ctx, reviewMRLockKey(payload.ProjectID, payload.MRIID))
 	if err != nil {
 		return err
 	}
@@ -193,16 +194,23 @@ func (s *ReviewService) RunStatusJob(ctx context.Context, job *jobs.Job) error {
 	control, err := s.store.GetReviewControl(ctx, row.ProjectID, row.MRIID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return s.settleStatusVisit(ctx, row, selfHeal, 0, "", "review control is missing")
+			// No successor generation exists to settle this note; leaving the
+			// visible phase at running would strand it forever (#475).
+			return s.settleTerminalStatusVisit(ctx, ws, row, project.ID, token, "review control is missing", selfHeal)
 		}
 		return err
 	}
-	if control.Generation != row.Generation ||
-		(row.HeadSHA != "" && !strings.EqualFold(control.HeadSHA, row.HeadSHA)) {
+	if control.Generation != row.Generation {
+		// A newer generation owns the merge request and writes its own note.
 		return s.settleStatusVisit(ctx, row, selfHeal, 0, "", "review superseded")
 	}
+	if row.HeadSHA != "" && !strings.EqualFold(control.HeadSHA, row.HeadSHA) {
+		// Same generation but a moved head can never publish; terminate the
+		// note rather than retrying a doomed write (#475).
+		return s.settleTerminalStatusVisit(ctx, ws, row, project.ID, token, "review superseded", selfHeal)
+	}
 	if control.Cancelled && row.State != reviewStatusCancelled && row.State != reviewStatusStale {
-		return s.settleStatusVisit(ctx, row, selfHeal, 0, "", "review cancelled")
+		return s.settleCancelledStatusVisit(ctx, ws, row, project.ID, token, selfHeal)
 	}
 	if s.status == nil {
 		return errors.New("app: status reporter is not configured")
@@ -216,6 +224,9 @@ func (s *ReviewService) RunStatusJob(ctx context.Context, job *jobs.Job) error {
 		// keep updating their legacy status note; their published summary is a
 		// different note this writer must never take over (#453).
 		LegacyMarker: !row.FinalBodyReady,
+		// Once the merged note carries the published body, remove the bot's
+		// legacy status note so the MR keeps exactly one review note (#475).
+		CleanupLegacy: row.FinalBodyReady,
 	}
 	if row.FinalBodyReady {
 		update.FinalBody = row.FinalBody
@@ -238,6 +249,84 @@ func (s *ReviewService) RunStatusJob(ctx context.Context, job *jobs.Job) error {
 		return s.settleStatusVisit(ctx, row, selfHeal, 0, "", reviewSideEffectReason(err))
 	}
 	return s.settleStatusVisit(ctx, row, selfHeal, noteID, hash, "")
+}
+
+// settleTerminalStatusVisit writes a terminal note for a row whose control is
+// unusable (missing or moved head) and records the visit as applied. When the
+// row is already terminal its own state is preserved; otherwise the note shows
+// a superseded/stale terminal phase (#475).
+func (s *ReviewService) settleTerminalStatusVisit(ctx context.Context, ws *workspace.Workspace, row *store.ReviewStatus, projectID int64, token, reason string, selfHeal bool) error {
+	state, detail := reviewStatusStale, reason
+	if terminalReviewStatus(row.State) {
+		state, detail = row.State, row.Detail
+	}
+	return s.writeTerminalStatusVisit(ctx, ws, row, projectID, token, state, detail, reason, selfHeal)
+}
+
+// settleCancelledStatusVisit persists the cancelled state for the current
+// generation and writes its terminal note. A newer generation keeps ownership
+// and skips the write (#475).
+func (s *ReviewService) settleCancelledStatusVisit(ctx context.Context, ws *workspace.Workspace, row *store.ReviewStatus, projectID int64, token string, selfHeal bool) error {
+	written, err := s.store.SetReviewStatus(ctx, store.ReviewStatusGoal{
+		ProjectID: row.ProjectID, MRIID: row.MRIID, Generation: row.Generation,
+		Attempt: row.Attempt, HeadSHA: row.HeadSHA, Profile: row.Profile,
+		State: reviewStatusCancelled, Detail: "review cancelled", PreserveFinalBody: true,
+	})
+	if errors.Is(err, store.ErrSuperseded) || (err == nil && !written) {
+		return s.settleStatusVisit(ctx, row, selfHeal, 0, "", "review cancelled")
+	}
+	if err != nil {
+		return err
+	}
+	// Re-read only to pick up the version this write created and the body that
+	// PreserveFinalBody kept. A generation bump can land between the write and
+	// this read (webhook ingress no longer holds the MR lock), so adopt the row
+	// only when it still belongs to this generation. Otherwise the original row
+	// stays the settlement target: the successor's queued row must never be
+	// written as cancelled or marked applied by an older generation (#475).
+	if current, err := s.store.GetReviewStatus(ctx, row.ProjectID, row.MRIID); err == nil && current != nil &&
+		current.Generation == row.Generation && strings.EqualFold(current.HeadSHA, row.HeadSHA) {
+		row = current
+	}
+	return s.writeTerminalStatusVisit(ctx, ws, row, projectID, token, reviewStatusCancelled, "review cancelled", "", selfHeal)
+}
+
+// writeTerminalStatusVisit renders and writes one terminal note, then records
+// the visit. Transient upstream errors stay retryable; terminal ones settle the
+// row with a bounded reason.
+func (s *ReviewService) writeTerminalStatusVisit(ctx context.Context, ws *workspace.Workspace, row *store.ReviewStatus, projectID int64, token, state, detail, reason string, selfHeal bool) error {
+	if s.status == nil {
+		return errors.New("app: status reporter is not configured")
+	}
+	update := reviewStatusUpdate{
+		State:      state,
+		Detail:     detail,
+		HeadSHA:    row.HeadSHA,
+		Generation: row.Generation,
+		// A row without a final body predates the merged note (#451): its
+		// published summary is a separate note and its lifecycle lives in the
+		// legacy status note this writer must keep updating (#453, #475).
+		LegacyMarker: !row.FinalBodyReady,
+		// Only a row that owns the merged note may remove the legacy note.
+		CleanupLegacy: row.FinalBodyReady,
+	}
+	if row.FinalBodyReady {
+		update.FinalBody = row.FinalBody
+	}
+	reporter := *s.status
+	reporter.outbound = outboundSender(ws)
+	reporter.durable = true
+	noteID, hash, err := reporter.writeStatus(ctx, projectID, row.MRIID, token, update)
+	if err != nil {
+		if errors.Is(err, workspace.ErrOutboundInvalidated) {
+			return err
+		}
+		if reviewSideEffectRetryable(err) {
+			return err
+		}
+		return s.settleStatusVisit(ctx, row, selfHeal, 0, "", reviewSideEffectReason(err))
+	}
+	return s.settleStatusVisit(ctx, row, selfHeal, noteID, hash, reason)
 }
 
 // settleStatusVisit records the outcome of one status write. The normal path

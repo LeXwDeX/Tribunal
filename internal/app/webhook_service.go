@@ -173,6 +173,11 @@ func (s *WebhookService) Handle(ctx context.Context, req WebhookRequest) (Webhoo
 	if reason := checkEventKind(req.Event, payload.ObjectKind); reason != "" {
 		return s.recordIgnored(ctx, project.ID, req.Event, parsedUUID.String(), mrIID, reason)
 	}
+	// Ingress only records the delivery and the generation bump; it performs no
+	// remote call and must finish inside the 900ms HTTP processing budget, so it
+	// deliberately does not take the per-MR lock. The remote note order is kept
+	// by every note writer holding that lock and rechecking the generation
+	// inside it (#475).
 
 	settings, err := ResolveSettings(project.Settings, s.reviewDefaults)
 	if err != nil {

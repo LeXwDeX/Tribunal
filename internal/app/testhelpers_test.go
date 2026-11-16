@@ -403,6 +403,19 @@ func (f *fakeGitLab) UpdateMRNote(_ context.Context, _ string, _, _, noteID int6
 	return &gitlab.Error{Op: "update_note", Status: 404}
 }
 
+func (f *fakeGitLab) DeleteMRNote(_ context.Context, _ string, _, _, noteID int64) error {
+	f.record("DeleteMRNote")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.notes {
+		if f.notes[i].ID == noteID {
+			f.notes = append(f.notes[:i], f.notes[i+1:]...)
+			return nil
+		}
+	}
+	return &gitlab.Error{Op: "delete_note", Status: 404}
+}
+
 func (f *fakeGitLab) ListNoteAwards(_ context.Context, _ string, _, _, noteID int64) ([]gitlab.Award, error) {
 	f.record("ListNoteAwards")
 	f.mu.Lock()

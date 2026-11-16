@@ -63,6 +63,9 @@ type CatchUpServiceConfig struct {
 	Settings  config.CatchUpConfig
 	Logger    *slog.Logger
 	Now       func() time.Time
+	// MRLocks is the shared per-merge-request lock registry. Catch-up enqueues
+	// reviews, so it holds the same lock as every note writer (#475).
+	MRLocks *workflowLocks
 }
 
 // CatchUpService enqueues a review for open MR heads that were never reviewed,
@@ -76,8 +79,10 @@ type CatchUpService struct {
 	workspace *workspace.Manager
 	cipher    *secret.Cipher
 	settings  config.CatchUpConfig
-	logger    *slog.Logger
-	now       func() time.Time
+	// mrLocks serializes the catch-up generation bump with every note writer.
+	mrLocks *workflowLocks
+	logger  *slog.Logger
+	now     func() time.Time
 }
 
 // CatchUpResult summarizes one scan.
@@ -107,6 +112,7 @@ func NewCatchUpService(cfg CatchUpServiceConfig) (*CatchUpService, error) {
 		workspace: cfg.Workspace,
 		cipher:    cfg.Cipher,
 		settings:  cfg.Settings,
+		mrLocks:   cfg.MRLocks,
 		logger:    logger,
 		now:       now,
 	}, nil
@@ -385,6 +391,14 @@ func (s *CatchUpService) catchUpMR(ctx context.Context, projectID int64, mr gitl
 		}
 		expect = &store.ReviewControlExpect{Exists: true, Generation: control.Generation, CandidateSeq: control.CandidateSeq}
 	}
+	// The enqueue bumps the control and writes the queued status row; hold the
+	// shared per-MR lock so it cannot interleave with an in-flight note write
+	// for the same merge request (#475).
+	mrUnlock, err := mrLockRegistry(s.mrLocks).lock(ctx, reviewMRLockKey(projectID, mr.IID))
+	if err != nil {
+		return false, err
+	}
+	defer mrUnlock()
 	queued, err := s.webhooks.enqueueCatchUp(ctx, project, settings, mr, head, expect)
 	if queued {
 		s.logger.Info("catch-up enqueued review",

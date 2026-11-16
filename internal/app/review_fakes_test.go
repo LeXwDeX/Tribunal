@@ -50,7 +50,9 @@ type reviewGitLab struct {
 	addAwardErr   error
 	delAwardErr   error
 	noteUpdateErr error
+	noteDeleteErr error
 	statusNoteErr error
+	noteDeletes   int
 	currentUser   *gitlab.User
 
 	pipelines     []gitlab.Pipeline
@@ -223,6 +225,22 @@ func (f *reviewGitLab) UpdateMRNote(_ context.Context, _ string, _, _, noteID in
 		}
 	}
 	return &gitlab.Error{Op: "update_note", Status: 404}
+}
+
+func (f *reviewGitLab) DeleteMRNote(_ context.Context, _ string, _, _, noteID int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.noteDeleteErr != nil {
+		return f.noteDeleteErr
+	}
+	for i := range f.notes {
+		if f.notes[i].ID == noteID {
+			f.notes = append(f.notes[:i], f.notes[i+1:]...)
+			f.noteDeletes++
+			return nil
+		}
+	}
+	return &gitlab.Error{Op: "delete_note", Status: 404}
 }
 
 func (f *reviewGitLab) recordStatusBody(body string) {
@@ -491,6 +509,7 @@ func testReviewProfile() config.ProfileConfig {
 
 type reviewFixture struct {
 	db        *sqlite.Store
+	dbPath    string
 	gitlab    *reviewGitLab
 	git       *fakeGitOps
 	runner    *fakeAgentRunner
@@ -514,7 +533,7 @@ func newReviewFixture(t *testing.T, head string) *reviewFixture {
 // service is built, so the stored profile hash matches the adjusted profile.
 func newReviewFixtureWithProfile(t *testing.T, head string, adjust func(*config.ProfileConfig)) *reviewFixture {
 	t.Helper()
-	db := openTestStore(t)
+	db, dbPath := openTestStorePath(t)
 	cipher := newTestCipher(t)
 	seedProject(t, db, cipher, 42, "whsec", "{}", "default")
 	api := newReviewGitLab(head)
@@ -572,7 +591,7 @@ func newReviewFixtureWithProfile(t *testing.T, head string, adjust func(*config.
 		t.Fatalf("NewReviewService: %v", err)
 	}
 	return &reviewFixture{
-		db: db, gitlab: api, git: git, runner: runner, service: service,
+		db: db, dbPath: dbPath, gitlab: api, git: git, runner: runner, service: service,
 		engine: engine, executors: executors, manager: manager,
 		publisher: publisher, profiles: profiles, defaults: defaults,
 		bundle: bundle, head: head,

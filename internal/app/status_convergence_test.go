@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
 )
 
 func TestStatusConvergesAcrossGenerations(t *testing.T) {
@@ -568,7 +570,7 @@ func TestStatusWriterLockWaitHonorsCancellation(t *testing.T) {
 	if err != nil || job == nil {
 		t.Fatalf("claim: %v %v", job, err)
 	}
-	unlock, err := f.service.statusLocks.lock(ctx, "42:7")
+	unlock, err := f.service.mrLocks.lock(ctx, reviewMRLockKey(42, 7))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -583,13 +585,13 @@ func TestStatusWriterLockWaitHonorsCancellation(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("status job did not reach a lock wait")
 	}
-	f.service.statusLocks.mu.Lock()
-	entry := f.service.statusLocks.entries["42:7"]
+	f.service.mrLocks.mu.Lock()
+	entry := f.service.mrLocks.entries[reviewMRLockKey(42, 7)]
 	refs := 0
 	if entry != nil {
 		refs = entry.refs
 	}
-	f.service.statusLocks.mu.Unlock()
+	f.service.mrLocks.mu.Unlock()
 	if refs != 2 {
 		t.Fatalf("status lock references = %d, want holder and waiter", refs)
 	}
@@ -754,5 +756,241 @@ func TestStatusReconcilesLateRemoteOverwriteAfterApplied(t *testing.T) {
 	}
 	if body := f.gitlab.notes[0].Body; parseStatusPhase(body) != reviewStatusPhase(reviewStatusPass) || after.BodyHash != sha256Hex(body) || after.AppliedVersion != after.Version || !after.UpdatedAt.Equal(before.UpdatedAt) {
 		t.Fatalf("late overwrite not repaired: body=%q row=%+v", body, after)
+	}
+}
+
+// overrideStatusStore presents a synthetic control or status row while
+// delegating every other operation to the real store. It recreates the races
+// that leave a status note without a usable control (#475).
+type overrideStatusStore struct {
+	ReviewStore
+	control    *store.ReviewControl
+	controlErr error
+	status     *store.ReviewStatus
+}
+
+func (s *overrideStatusStore) GetReviewControl(ctx context.Context, projectID, mrIID int64) (*store.ReviewControl, error) {
+	if s.controlErr != nil {
+		return nil, s.controlErr
+	}
+	if s.control != nil {
+		control := *s.control
+		return &control, nil
+	}
+	return s.ReviewStore.GetReviewControl(ctx, projectID, mrIID)
+}
+
+func (s *overrideStatusStore) GetReviewStatus(ctx context.Context, projectID, mrIID int64) (*store.ReviewStatus, error) {
+	if s.status != nil {
+		row := *s.status
+		return &row, nil
+	}
+	return s.ReviewStore.GetReviewStatus(ctx, projectID, mrIID)
+}
+
+// TestStatusWriterSettlesCancelledCurrentGeneration proves a cancelled
+// generation still reaches a terminal note instead of leaving "running"
+// forever (#475).
+func TestStatusWriterSettlesCancelledCurrentGeneration(t *testing.T) {
+	ctx := context.Background()
+	f := newReviewFixture(t, reviewTestHead)
+	f.service.status = testStatusReporter(f.gitlab)
+	if _, err := f.db.EnqueueReviewLatest(ctx, store.ReviewCommand{ProjectID: 42, MRIID: 7, HeadSHA: f.head}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.EnqueueReviewLatest(ctx, store.ReviewCommand{ProjectID: 42, MRIID: 7, Cancel: true}); err != nil {
+		t.Fatal(err)
+	}
+	control, err := f.db.GetReviewControl(ctx, 42, 7)
+	if err != nil || !control.Cancelled {
+		t.Fatalf("control = %+v, %v; want a cancelled generation", control, err)
+	}
+	before, err := f.db.GetReviewStatus(ctx, 42, 7)
+	if err != nil || before.Generation != control.Generation || before.State != reviewStatusQueued {
+		t.Fatalf("queued status = %+v, %v", before, err)
+	}
+	drainReviewJobs(t, f, "review.status")
+
+	after, err := f.db.GetReviewStatus(ctx, 42, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.State != reviewStatusCancelled || after.AppliedVersion < after.Version || after.LastError != "" {
+		t.Fatalf("cancelled row not settled: %+v", after)
+	}
+	notes := f.gitlab.noteSnapshot()
+	if len(notes) != 1 {
+		t.Fatalf("notes = %+v, want one terminal status note", notes)
+	}
+	body := notes[0].Body
+	if parseStatusPhase(body) != reviewStatusPhase(reviewStatusCancelled) || !strings.Contains(body, "评审已取消") ||
+		!strings.Contains(body, "`cancelled`") || !strings.Contains(body, "review cancelled") {
+		t.Fatalf("cancelled status note = %q", body)
+	}
+}
+
+// TestStatusWriterSettlesMissingControl proves an orphaned row still writes a
+// terminal note; no successor generation exists to write it (#475).
+func TestStatusWriterSettlesMissingControl(t *testing.T) {
+	ctx := context.Background()
+	f := newReviewFixture(t, reviewTestHead)
+	f.service.status = testStatusReporter(f.gitlab)
+	if _, err := f.db.EnqueueReviewLatest(ctx, store.ReviewCommand{ProjectID: 42, MRIID: 7, HeadSHA: f.head}); err != nil {
+		t.Fatal(err)
+	}
+	f.service.store = &overrideStatusStore{ReviewStore: f.db, controlErr: store.ErrNotFound}
+	drainReviewJobs(t, f, "review.status")
+
+	row, err := f.db.GetReviewStatus(ctx, 42, 7)
+	if err != nil || row.AppliedVersion < row.Version || !strings.Contains(row.LastError, "control is missing") {
+		t.Fatalf("orphaned row not settled: %+v, %v", row, err)
+	}
+	notes := f.gitlab.noteSnapshot()
+	if len(notes) != 1 {
+		t.Fatalf("notes = %+v, want one terminal status note", notes)
+	}
+	body := notes[0].Body
+	if parseStatusPhase(body) != reviewStatusPhase(reviewStatusStale) || !strings.Contains(body, "评审已过期") {
+		t.Fatalf("orphaned status note = %q", body)
+	}
+}
+
+// TestStatusWriterSettlesHeadMismatch proves a same-generation head change
+// still terminates the note instead of stalling it (#475).
+func TestStatusWriterSettlesHeadMismatch(t *testing.T) {
+	ctx := context.Background()
+	f := newReviewFixture(t, reviewTestHead)
+	f.service.status = testStatusReporter(f.gitlab)
+	result, err := f.db.EnqueueReviewLatest(ctx, store.ReviewCommand{ProjectID: 42, MRIID: 7, HeadSHA: f.head})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.service.store = &overrideStatusStore{ReviewStore: f.db, control: &store.ReviewControl{
+		ProjectID: 42, MRIID: 7, Generation: result.Generation, HeadSHA: strings.Repeat("c", 40),
+	}}
+	drainReviewJobs(t, f, "review.status")
+
+	row, err := f.db.GetReviewStatus(ctx, 42, 7)
+	if err != nil || row.AppliedVersion < row.Version || row.LastError != "review superseded" {
+		t.Fatalf("superseded row not settled: %+v, %v", row, err)
+	}
+	notes := f.gitlab.noteSnapshot()
+	if len(notes) != 1 || parseStatusPhase(notes[0].Body) != reviewStatusPhase(reviewStatusStale) ||
+		!strings.Contains(notes[0].Body, "review superseded") {
+		t.Fatalf("superseded status note = %+v", notes)
+	}
+}
+
+// bumpAfterCancelledStatusStore activates a successor generation between the
+// cancelled status write and the writer's re-read. It recreates the window an
+// unsynchronized generation bump (webhook ingress) opens (#475).
+type bumpAfterCancelledStatusStore struct {
+	ReviewStore
+	db   *sqlite.Store
+	head string
+	once sync.Once
+	err  error
+}
+
+func (s *bumpAfterCancelledStatusStore) SetReviewStatus(ctx context.Context, goal store.ReviewStatusGoal) (bool, error) {
+	written, err := s.ReviewStore.SetReviewStatus(ctx, goal)
+	if err == nil && written && goal.State == reviewStatusCancelled {
+		s.once.Do(func() {
+			_, s.err = s.db.EnqueueReviewLatest(ctx, store.ReviewCommand{
+				ProjectID: goal.ProjectID, MRIID: goal.MRIID, HeadSHA: s.head,
+			})
+		})
+	}
+	return written, err
+}
+
+// TestStatusWriterDoesNotAdoptSuccessorAfterCancelledWrite proves the
+// cancelled terminal path only adopts a re-read row from its own generation. A
+// successor queued row must never be written as cancelled or marked applied by
+// the older generation, so the MR converges to the successor's phase (#475).
+func TestStatusWriterDoesNotAdoptSuccessorAfterCancelledWrite(t *testing.T) {
+	ctx := context.Background()
+	f := newReviewFixture(t, reviewTestHead)
+	f.service.status = testStatusReporter(f.gitlab)
+	if _, err := f.db.EnqueueReviewLatest(ctx, store.ReviewCommand{ProjectID: 42, MRIID: 7, HeadSHA: f.head}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.EnqueueReviewLatest(ctx, store.ReviewCommand{ProjectID: 42, MRIID: 7, Cancel: true}); err != nil {
+		t.Fatal(err)
+	}
+	control, err := f.db.GetReviewControl(ctx, 42, 7)
+	if err != nil || !control.Cancelled {
+		t.Fatalf("control = %+v, %v; want a cancelled generation", control, err)
+	}
+	storeWrapper := &bumpAfterCancelledStatusStore{ReviewStore: f.db, db: f.db, head: f.head}
+	f.service.store = storeWrapper
+	job, err := f.db.Claim(ctx, "status", []string{"review.status"}, time.Minute)
+	if err != nil || job == nil {
+		t.Fatalf("claim: %+v, %v", job, err)
+	}
+	if err := f.service.RunStatusJob(ctx, job); err != nil {
+		t.Fatalf("status job: %v", err)
+	}
+	if storeWrapper.err != nil {
+		t.Fatalf("activate successor: %v", storeWrapper.err)
+	}
+	successor, err := f.db.GetReviewStatus(ctx, 42, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if successor.Generation != control.Generation+1 || successor.State != reviewStatusQueued {
+		t.Fatalf("successor row = %+v, want a queued generation %d", successor, control.Generation+1)
+	}
+	if successor.AppliedVersion >= successor.Version {
+		t.Fatalf("the cancelled visit marked the successor applied: %+v", successor)
+	}
+	if err := f.db.Complete(ctx, *job); err != nil {
+		t.Fatal(err)
+	}
+
+	drainReviewJobs(t, f, "review.status")
+	final, err := f.db.GetReviewStatus(ctx, 42, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final.State != reviewStatusQueued || final.AppliedVersion < final.Version {
+		t.Fatalf("successor did not converge to its own queued phase: %+v", final)
+	}
+	notes := f.gitlab.noteSnapshot()
+	if len(notes) != 1 {
+		t.Fatalf("notes = %+v, want one merged status note", notes)
+	}
+	if phase := parseStatusPhase(notes[0].Body); phase != reviewStatusPhase(reviewStatusQueued) {
+		t.Fatalf("status note = %q, want the successor's queued phase", notes[0].Body)
+	}
+	if cells := statusTableCells(t, notes[0].Body); cells["代次"] != "`"+itoa(final.Generation)+"`" {
+		t.Fatalf("status note generation = %q, want %d: %q", cells["代次"], final.Generation, notes[0].Body)
+	}
+}
+
+// TestStatusWriterSkipsStaleRowWhenNewerGenerationExists keeps the ordering
+// hand-off: only the current generation writes a terminal note (#475).
+func TestStatusWriterSkipsStaleRowWhenNewerGenerationExists(t *testing.T) {
+	ctx := context.Background()
+	f := newReviewFixture(t, reviewTestHead)
+	f.service.status = testStatusReporter(f.gitlab)
+	first, err := f.db.EnqueueReviewLatest(ctx, store.ReviewCommand{ProjectID: 42, MRIID: 7, HeadSHA: f.head})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := f.db.EnqueueReviewLatest(ctx, store.ReviewCommand{ProjectID: 42, MRIID: 7, HeadSHA: f.head})
+	if err != nil || second.Generation <= first.Generation {
+		t.Fatalf("second generation = %+v, %v", second, err)
+	}
+	f.service.store = &overrideStatusStore{ReviewStore: f.db, status: &store.ReviewStatus{
+		ProjectID: 42, MRIID: 7, Generation: first.Generation, HeadSHA: f.head,
+		Attempt: 1, State: reviewStatusRunning, Version: 1, AppliedVersion: 0, UpdatedAt: time.Now().UTC(),
+	}}
+	drainReviewJobs(t, f, "review.status")
+	if notes := f.gitlab.noteSnapshot(); len(notes) != 0 {
+		t.Fatalf("a stale generation wrote a note: %+v", notes)
+	}
+	if len(f.gitlab.statusUpdates) != 0 {
+		t.Fatalf("a stale generation updated a note: %+v", f.gitlab.statusUpdates)
 	}
 }

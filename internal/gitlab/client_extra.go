@@ -510,6 +510,24 @@ func (c *Client) UpdateMRNote(ctx context.Context, token string, projectID, iid,
 	return nil
 }
 
+// DeleteMRNote deletes one merge request note.
+func (c *Client) DeleteMRNote(ctx context.Context, token string, projectID, iid, noteID int64) error {
+	if !positiveIDs(projectID, iid, noteID) {
+		return errors.New("gitlab: invalid project, merge request, or note ID")
+	}
+	reqCtx, client, done, err := c.prepare(ctx, token)
+	if err != nil {
+		return err
+	}
+	defer done()
+
+	resp, err := client.Notes.DeleteMergeRequestNote(projectID, iid, noteID, sdk.WithContext(reqCtx))
+	if err != nil {
+		return mapError(reqCtx, "delete_note", resp, err)
+	}
+	return nil
+}
+
 // ListDiscussions returns every merge request discussion and its notes.
 func (c *Client) ListDiscussions(ctx context.Context, token string, projectID, iid int64) ([]Discussion, error) {
 	if !positiveIDs(projectID, iid) {

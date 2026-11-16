@@ -465,13 +465,12 @@ user                本节点任务：MR 摘要、包内文件列表与 diff、f
 ### 9.1 评审评论（状态与结果合并）
 
 ````markdown
-<!-- gitlab-ce-review:summary v1 -->
+<!-- gitlab-ce-review:summary v2 -->
 **AI 评审：发现问题（BLOCKING）**
 
-- 阶段：`已完成`
-- 状态：`BLOCKING`
-- 代次：`3`
-- 提交：`9f3c2a1`
+| 阶段 | 状态 | 代次 | 提交 | 预计 | 详情 |
+| --- | --- | --- | --- | --- | --- |
+| 已完成 | `BLOCKING` | `3` | `9f3c2a1` | - | - |
 
 ### AI 评审：🔴 BLOCKING
 
@@ -511,8 +510,9 @@ user                本节点任务：MR 摘要、包内文件列表与 diff、f
 <sub>head 9f3c2a1 · profile default · 用时 2m14s · <a href="…/reviews/0192f0c1">详情</a></sub>
 ````
 
-- 状态评论与评审结果是同一条 MR note。首行隐藏标记用于找到并就地更新这条评论（见 05-flows.md F7）；状态 worker 和 publisher 都按 `<!-- gitlab-ce-review:summary` 查找。原 summary 正文自己的 `fp=…` 标记行在合并时移除，只保留状态评论的首行标记。
-- 生命周期行固定为 `- 阶段：` 与 `- 状态：`。阶段只有四类：`开始`（`received`、`queued`）、`进行中`（`running`、`publishing`）、`已完成`（`PASS`、`BLOCKING`、`INCOMPLETE`）、`失败`（`failed`、`cancelled`、`stale`）；状态行保留原始状态值。工作流结算且 `review_status.final_body` 非空时，状态行后追加渲染好的评审正文；未结算或旧行为空时只显示状态。
+- 状态评论与评审结果是同一条 MR note。合并注记首行使用隐藏标记 `<!-- gitlab-ce-review:summary v2 -->`（#475）；仍按不含版本的前缀 `<!-- gitlab-ce-review:summary` 查找和就地更新，独立 summary 兼容路径写入的标记仍是 `<!-- gitlab-ce-review:summary v1 fp=… -->`。原 summary 正文自己的 `fp=…` 标记行在合并时移除，只保留状态评论的首行标记。
+- 生命周期固定为一张 Markdown 表格，列依次为阶段、状态、代次、提交、预计、详情。阶段只有四类：`开始`（`received`、`queued`）、`进行中`（`running`、`publishing`）、`已完成`（`PASS`、`BLOCKING`、`INCOMPLETE`）、`失败`（`failed`、`cancelled`、`stale`）；状态列是反引号包裹的原始状态枚举，代次与 7 位短提交同样用反引号；预计显示「约 N 分钟」，未知时为 `-`；详情经清洗（控制字符转空格、token 与 URL 脱敏、160 rune 截断、表格管道符转义），为空时显示 `-`。工作流结算且 `review_status.final_body` 非空时，表格后追加渲染好的评审正文；未结算或旧行为空时只显示表格。历史行（`final_body_ready = 0`）继续写旧 `<!-- gitlab-ce-review:status v1 -->` 注记，正文使用同一张表，但不追加已发布正文；解析器按表头精确匹配新正文，同时兼容升级前的 `- 阶段：` 项目符号正文，使 queued 确认不会把可见阶段回退。
+- 一个 MR 只保留一条合并注记：状态 worker 按标记与当前 bot 作者身份找到既有注记，正文相同就不写，不同才原地更新，注记被删除时重建。行从历史行转入合并模式（`final_body_ready` 变为 1）后，收敛写入会删除本 bot 的旧 `<!-- gitlab-ce-review:status` 注记；外部作者的注记与合并注记永不匹配，升级前遗留的独立 summary note 也不在清理范围内。
 - 级别计数紧随结论，只列非零项；没有已发布问题时不输出计数行。
 - 结论之后输出「评审范围」段：来自 `SynthesisResult.scope` 与 `DiffSummary.generated/generated_paths`，披露全量或增量（上次 head → 本次 head，`file_count` 个文件，`files` 超过 200 条时只保留计数）、无法定位的问题数，以及被跳过的生成文件数量与路径（最多展示 12 条）；增量评审明确「结论仅覆盖本次增量变更的文件」。评审范围为全量且没有生成文件时省略该段。机器诊断仍只出现在存储和控制台。
 - 结论为 INCOMPLETE 且 summary 是代码生成的证据缺口清单时，评论不原样展示内部节点 ID 与英文机器诊断：渲染为「已评审范围的结论 + 未完成原因（中文）+ 下一步」。已知模板（评审 lane 未完成、节点失败、预算耗尽、材料/提示词覆盖缺口、验证通道失败等）映射为中文，并给出可执行的下一步；未匹配的机器文本降级为通用中文提示，原文只保留在存储和控制台。评审提示使用同一映射，中文原文保持不变；映射后重复的提示只显示一次。

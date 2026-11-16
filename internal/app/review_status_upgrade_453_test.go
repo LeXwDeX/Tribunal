@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"sync"
@@ -72,6 +73,48 @@ func TestStatusVerificationKeepsPreUpgradeSummaryNote(t *testing.T) {
 	if got := f.gitlab.notes[1]; !strings.HasPrefix(got.Body, legacyStatusMarkerPrefix) ||
 		!strings.Contains(got.Body, reviewStatusPass) {
 		t.Fatalf("legacy status note was not converged in place: %+v", got)
+	}
+}
+
+// TestPublishedSummaryDeletesLegacyStatusNote proves the convergence target:
+// once the merged row carries a final body, the status writer removes the
+// bot's legacy status note, leaving exactly one review note (#475).
+func TestPublishedSummaryDeletesLegacyStatusNote(t *testing.T) {
+	ctx := context.Background()
+	f := newReviewFixture(t, reviewTestHead)
+	f.service.status = testStatusReporter(f.gitlab)
+	run, err := f.db.EnqueueReviewLatest(ctx, store.ReviewCommand{
+		ProjectID: 42, MRIID: 7, HeadSHA: f.head,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	control, err := f.db.GetReviewControl(ctx, 42, 7)
+	if err != nil || control.Generation != run.Generation {
+		t.Fatalf("control = %+v, %v", control, err)
+	}
+	body := review.SummaryMarkerPrefix + " v1 fp=published -->\n\n## 评审结论\n\nPASS\n"
+	if _, err := f.db.SetReviewStatusFinalBody(ctx, 42, 7, control.Generation, f.head, body); err != nil {
+		t.Fatal(err)
+	}
+	f.gitlab.mu.Lock()
+	f.gitlab.notes = append(f.gitlab.notes, gitlab.Note{
+		ID: 701, AuthorID: f.gitlab.currentUser.ID,
+		Body: legacyStatusMarkerPrefix + " v1 -->\n\n**AI 评审：评审运行中**\n",
+	})
+	f.gitlab.mu.Unlock()
+
+	drainReviewJobs(t, f, "review.status")
+
+	notes := f.gitlab.noteSnapshot()
+	if len(notes) != 1 {
+		t.Fatalf("notes = %+v, want the merged review note only", notes)
+	}
+	if strings.HasPrefix(notes[0].Body, legacyStatusMarkerPrefix) {
+		t.Fatalf("legacy status note survived: %q", notes[0].Body)
+	}
+	if !strings.HasPrefix(notes[0].Body, reviewStatusMarkerPrefix) || !strings.Contains(notes[0].Body, "## 评审结论") {
+		t.Fatalf("merged note = %q", notes[0].Body)
 	}
 }
 
@@ -223,6 +266,123 @@ func summaryNoteBody(t *testing.T, f *reviewFixture) string {
 	}
 	t.Fatal("published review note is missing")
 	return ""
+}
+
+// markStatusRowHistorical rewrites the current row into the shape of a row
+// migrated from before #452: it owns no merged note body, so the status writer
+// must keep updating the legacy status-marker note (#453).
+func markStatusRowHistorical(t *testing.T, f *reviewFixture) {
+	t.Helper()
+	raw, err := sql.Open("sqlite", f.dbPath)
+	if err != nil {
+		t.Fatalf("open raw store: %v", err)
+	}
+	defer raw.Close()
+	if _, err := raw.ExecContext(context.Background(),
+		`UPDATE review_status SET final_body_ready = 0, final_body = '' WHERE project_id = 42 AND mr_iid = 7`); err != nil {
+		t.Fatalf("mark review status historical: %v", err)
+	}
+}
+
+// TestTerminalStatusVisitKeepsPublishedSummaryNote covers the terminal
+// fallbacks for rows migrated from before #452. Their published summary lives
+// in a separate note, so a terminal visit must update the legacy status note
+// and leave that summary byte-for-byte unchanged (#475).
+func TestTerminalStatusVisitKeepsPublishedSummaryNote(t *testing.T) {
+	summaryBody := review.SummaryMarkerPrefix + " v1 fp=historical -->\n\n## 评审结论\n\nPASS\n\n[P1] 保留的 finding 列表\n"
+	legacyBody := legacyStatusMarkerPrefix + " v1 -->\n\n**AI 评审：评审运行中**\n\n- 状态：`running`\n"
+
+	cases := []struct {
+		name   string
+		cancel bool
+		settle func(t *testing.T, f *reviewFixture, generation int64)
+		detail string
+	}{
+		{
+			name: "missing control",
+			settle: func(t *testing.T, f *reviewFixture, _ int64) {
+				f.service.store = &overrideStatusStore{ReviewStore: f.db, controlErr: store.ErrNotFound}
+			},
+			detail: "review control is missing",
+		},
+		{
+			name: "head mismatch",
+			settle: func(t *testing.T, f *reviewFixture, generation int64) {
+				f.service.store = &overrideStatusStore{ReviewStore: f.db, control: &store.ReviewControl{
+					ProjectID: 42, MRIID: 7, Generation: generation, HeadSHA: strings.Repeat("c", 40),
+				}}
+			},
+			detail: "review superseded",
+		},
+		{
+			name:   "cancelled",
+			cancel: true,
+			settle: func(*testing.T, *reviewFixture, int64) {},
+			detail: "review cancelled",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			f := newReviewFixture(t, reviewTestHead)
+			f.service.status = testStatusReporter(f.gitlab)
+			result, err := f.db.EnqueueReviewLatest(ctx, store.ReviewCommand{ProjectID: 42, MRIID: 7, HeadSHA: f.head})
+			if err != nil {
+				t.Fatal(err)
+			}
+			generation := result.Generation
+			if tc.cancel {
+				if _, err := f.db.EnqueueReviewLatest(ctx, store.ReviewCommand{ProjectID: 42, MRIID: 7, Cancel: true}); err != nil {
+					t.Fatal(err)
+				}
+				control, err := f.db.GetReviewControl(ctx, 42, 7)
+				if err != nil || !control.Cancelled {
+					t.Fatalf("control = %+v, %v; want a cancelled generation", control, err)
+				}
+				generation = control.Generation
+			}
+			markStatusRowHistorical(t, f)
+			f.gitlab.mu.Lock()
+			f.gitlab.notes = []gitlab.Note{
+				{ID: 700, AuthorID: f.gitlab.currentUser.ID, Body: summaryBody},
+				{ID: 701, AuthorID: f.gitlab.currentUser.ID, Body: legacyBody},
+			}
+			f.gitlab.mu.Unlock()
+			tc.settle(t, f, generation)
+			drainReviewJobs(t, f, "review.status")
+
+			notes := f.gitlab.noteSnapshot()
+			if len(notes) != 2 {
+				t.Fatalf("notes = %d, want the summary and one legacy status note: %+v", len(notes), notes)
+			}
+			summary, legacy := noteByID(notes, 700), noteByID(notes, 701)
+			if summary == nil || summary.Body != summaryBody {
+				t.Fatalf("published summary changed: %+v", summary)
+			}
+			if legacy == nil || !strings.HasPrefix(legacy.Body, legacyStatusMarkerPrefix) {
+				t.Fatalf("legacy status note = %+v", legacy)
+			}
+			if phase := parseStatusPhase(legacy.Body); phase != reviewStatusPhase(reviewStatusStale) {
+				t.Fatalf("legacy status note did not reach a terminal phase: %q", legacy.Body)
+			}
+			if !strings.Contains(legacy.Body, tc.detail) {
+				t.Fatalf("legacy status note = %q, want detail %q", legacy.Body, tc.detail)
+			}
+			row, err := f.db.GetReviewStatus(ctx, 42, 7)
+			if err != nil || row.AppliedVersion < row.Version {
+				t.Fatalf("terminal visit was not recorded: %+v, %v", row, err)
+			}
+		})
+	}
+}
+
+func noteByID(notes []gitlab.Note, id int64) *gitlab.Note {
+	for i := range notes {
+		if notes[i].ID == id {
+			return &notes[i]
+		}
+	}
+	return nil
 }
 
 func TestMergeRequestPreservesPublishedFindings(t *testing.T) {

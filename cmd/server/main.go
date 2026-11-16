@@ -211,6 +211,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		Cipher:     cipher,
 		Profiles:   cfg.Profiles,
 		Logger:     logger,
+		MRLocks:    runtime.MRLocks(),
 	})
 	if err != nil {
 		return err

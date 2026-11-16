@@ -51,8 +51,9 @@ func TestFeedbackRunOnceRecordsErrorClassAndWarn(t *testing.T) {
 	fixed := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
 	service.now = func() time.Time { return fixed }
 
+	upstreamErr := &gitlab.Error{Op: "get_merge_request", Status: 500}
 	f.gitlab.mu.Lock()
-	f.gitlab.mrErr = &gitlab.Error{Op: "get_merge_request", Status: 500}
+	f.gitlab.mrErr = upstreamErr
 	f.gitlab.mu.Unlock()
 	service.RunOnce(ctx)
 	state, err := f.db.FeedbackCollectionState(ctx)
@@ -69,7 +70,10 @@ func TestFeedbackRunOnceRecordsErrorClassAndWarn(t *testing.T) {
 	if !strings.Contains(logged, "error_class=upstream") || !strings.Contains(logged, "project_id=42") {
 		t.Fatalf("WARN missing class or identifiers: %s", logged)
 	}
-	if strings.Contains(logged, "get_merge_request") || strings.Contains(logged, "500") {
+	// Match the raw error text, not a bare status substring: a random workflow
+	// UUID can contain "500" (e.g. ...-c500-...) and false-positive this leak
+	// check under parallel CI load.
+	if strings.Contains(logged, "get_merge_request") || strings.Contains(logged, upstreamErr.Error()) {
 		t.Fatalf("WARN leaked raw upstream detail: %s", logged)
 	}
 
