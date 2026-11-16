@@ -1073,7 +1073,7 @@ func TestSupersededFallbackNoteIsNotAppended(t *testing.T) {
 		t.Fatal("successor wrote no status note")
 	}
 
-	f.service.noteTokenRejected(bound, "token", 42, 7, first.Generation, f.head)
+	f.service.noteTokenRejected(bound, "token", false, 42, 7, first.Generation, f.head)
 	f.service.noteInvalidRepoConfig(bound, "token", 42, 7, first.Generation, f.head)
 
 	if notes := f.gitlab.noteSnapshot(); len(notes) != before {
