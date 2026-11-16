@@ -48,9 +48,12 @@ func testProjectService(t *testing.T, st *sqlite.Store, api *stubGitLab, workspa
 
 func registerProject(t *testing.T, client *m6Client) {
 	t.Helper()
+	// Manual setup: these tests exercise the explicit webhook lifecycle, not
+	// the default-on registration path.
 	response := client.json(http.MethodPost, "/api/v1/projects", map[string]any{
-		"project": "42",
-		"token":   "glpat-project-token",
+		"project":      "42",
+		"token":        "glpat-project-token",
+		"auto_webhook": false,
 	})
 	if response.status != http.StatusCreated {
 		t.Fatalf("register = %d %s", response.status, response.body)

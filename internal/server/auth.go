@@ -469,14 +469,21 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		}
 		globalRead = user.GlobalRead && !user.Disabled
 	}
+	// The capability bit tells the console whether a project token is optional;
+	// it is configuration state, not credential health, so it never calls GitLab.
+	sharedBotCredential := false
+	if provider, ok := s.projects.(interface{ SharedBotCredentialConfigured() bool }); ok {
+		sharedBotCredential = provider.SharedBotCredentialConfigured()
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id":          value.user.ID,
-		"username":    value.user.Username,
-		"name":        value.user.Name,
-		"role":        value.user.Role,
-		"global_read": globalRead,
-		"csrf_token":  value.csrf,
+		"id":                    value.user.ID,
+		"username":              value.user.Username,
+		"name":                  value.user.Name,
+		"role":                  value.user.Role,
+		"global_read":           globalRead,
+		"csrf_token":            value.csrf,
+		"shared_bot_credential": sharedBotCredential,
 	})
 }
 

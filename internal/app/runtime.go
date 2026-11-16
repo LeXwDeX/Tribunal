@@ -13,6 +13,7 @@ import (
 
 	"github.com/LeXwDeX/tribunal/internal/config"
 	"github.com/LeXwDeX/tribunal/internal/errclass"
+	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/jobs"
 	"github.com/LeXwDeX/tribunal/internal/llm"
 	"github.com/LeXwDeX/tribunal/internal/mcp"
@@ -79,17 +80,20 @@ func (r repoGit) GC(ctx context.Context, mirror string) error {
 // RuntimeDeps allows tests and the main package to replace external systems.
 // Required fields are Store, Cipher, and GitLab.
 type RuntimeDeps struct {
-	Store     *sqlite.Store
-	Cipher    *secret.Cipher
-	GitLab    GitLabService
-	LLM       review.ClientProvider
-	MCP       *mcp.Manager
-	Skills    review.SkillProvider
-	Workspace *workspace.Manager
-	Git       GitOps
-	Prompts   prompts.Bundle
-	Logger    *slog.Logger
-	Now       func() time.Time
+	Store  *sqlite.Store
+	Cipher *secret.Cipher
+	GitLab GitLabService
+	// SharedBotToken is the instance-wide GitLab bot token. Empty keeps the
+	// per-project-only behavior. It is never logged or persisted.
+	SharedBotToken string
+	LLM            review.ClientProvider
+	MCP            *mcp.Manager
+	Skills         review.SkillProvider
+	Workspace      *workspace.Manager
+	Git            GitOps
+	Prompts        prompts.Bundle
+	Logger         *slog.Logger
+	Now            func() time.Time
 }
 
 // Runtime is the composition root below main: store-backed dependencies,
@@ -148,6 +152,7 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 	if now == nil {
 		now = time.Now
 	}
+	botUsernames := mergeSharedBotUsername(ctx, deps.GitLab, deps.SharedBotToken, cfg.GitLab.BotUsernames, logger)
 	bundle := deps.Prompts
 	if bundle.Files == nil {
 		loaded, err := prompts.Load(cfg.PromptsDir)
@@ -255,6 +260,7 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		GitLab:         deps.GitLab,
 		Git:            gitBackend,
 		Cipher:         deps.Cipher,
+		SharedBotToken: deps.SharedBotToken,
 		Engine:         engine,
 		ReviewDefaults: cfg.ReviewDefaults,
 		Profiles:       cfg.Profiles,
@@ -318,6 +324,7 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		Store:             deps.Store,
 		GitLab:            deps.GitLab,
 		Cipher:            deps.Cipher,
+		SharedBotToken:    deps.SharedBotToken,
 		Workspace:         workspaceManager,
 		Git:               gitBackend,
 		Engine:            engine,
@@ -354,6 +361,7 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		Queue:          deps.Store,
 		GitLab:         deps.GitLab,
 		Cipher:         deps.Cipher,
+		SharedBotToken: deps.SharedBotToken,
 		Workspace:      workspaceManager,
 		Git:            gitBackend,
 		Engine:         engine,
@@ -378,13 +386,14 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		return nil, err
 	}
 	feedback, err := NewFeedbackService(FeedbackServiceConfig{
-		Store:     deps.Store,
-		GitLab:    deps.GitLab,
-		Cipher:    deps.Cipher,
-		Git:       gitBackend,
-		Workspace: workspaceManager,
-		Logger:    logger,
-		Now:       now,
+		Store:          deps.Store,
+		GitLab:         deps.GitLab,
+		Cipher:         deps.Cipher,
+		SharedBotToken: deps.SharedBotToken,
+		Git:            gitBackend,
+		Workspace:      workspaceManager,
+		Logger:         logger,
+		Now:            now,
 	})
 	if err != nil {
 		if ownedMCP {
@@ -442,6 +451,7 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		Cipher:            deps.Cipher,
 		Profiles:          cfg.Profiles,
 		PublicURL:         cfg.Server.PublicURL,
+		SharedBotToken:    deps.SharedBotToken,
 		Workspace:         workspaceManager,
 		ProjectExtensions: projectExts,
 		GitLabURL:         cfg.GitLab.URL,
@@ -465,7 +475,7 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		Cipher:         deps.Cipher,
 		Profiles:       cfg.Profiles,
 		ReviewDefaults: cfg.ReviewDefaults,
-		BotUsernames:   cfg.GitLab.BotUsernames,
+		BotUsernames:   botUsernames,
 		Logger:         logger,
 		Now:            now,
 	})
@@ -480,8 +490,9 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		Workspace:             workspaceManager,
 		GitLab:                deps.GitLab,
 		Cipher:                deps.Cipher,
+		SharedBotToken:        deps.SharedBotToken,
 		Profiles:              cfg.Profiles,
-		BotUsernames:          cfg.GitLab.BotUsernames,
+		BotUsernames:          botUsernames,
 		MentionMinAccessLevel: cfg.GitLab.MentionMinAccessLevel,
 		ReviewDefaults:        cfg.ReviewDefaults,
 		Logger:                logger,
@@ -498,14 +509,15 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 	var catchUp *CatchUpService
 	if lister, ok := deps.GitLab.(OpenMergeRequestLister); ok {
 		catchUp, err = NewCatchUpService(CatchUpServiceConfig{
-			Store:     deps.Store,
-			GitLab:    lister,
-			Webhooks:  webhooks,
-			Workspace: workspaceManager,
-			Cipher:    deps.Cipher,
-			Settings:  cfg.GitLab.CatchUp,
-			Logger:    logger,
-			MRLocks:   mrLocks,
+			Store:          deps.Store,
+			GitLab:         lister,
+			Webhooks:       webhooks,
+			Workspace:      workspaceManager,
+			Cipher:         deps.Cipher,
+			SharedBotToken: deps.SharedBotToken,
+			Settings:       cfg.GitLab.CatchUp,
+			Logger:         logger,
+			MRLocks:        mrLocks,
 		})
 		if err != nil {
 			if ownedMCP {
@@ -583,13 +595,44 @@ func deniedEnvNames(cfg *config.Config) []string {
 			names = append(names, provider.APIKeyEnv)
 		}
 	}
-	for _, name := range []string{cfg.Secrets.MasterKeyEnv, cfg.Auth.BootstrapTokenEnv} {
+	for _, name := range []string{cfg.Secrets.MasterKeyEnv, cfg.Auth.BootstrapTokenEnv, cfg.GitLab.BotTokenEnv} {
 		if name != "" {
 			names = append(names, name)
 		}
 	}
 	sort.Strings(names)
 	return names
+}
+
+// botIdentityLookup is the minimal GitLab surface for resolving the shared
+// bot's username.
+type botIdentityLookup interface {
+	CurrentUser(ctx context.Context, token string) (*gitlab.User, error)
+}
+
+// mergeSharedBotUsername adds the resolved shared-bot username to the
+// configured self-trigger filter. A failed lookup is logged and does not block
+// startup: the health endpoint reports the credential state, and operators can
+// pin the name in gitlab.bot_usernames. No token value is logged.
+func mergeSharedBotUsername(ctx context.Context, client botIdentityLookup, token string, configured []string, logger *slog.Logger) []string {
+	names := append([]string(nil), configured...)
+	if token == "" || client == nil {
+		return names
+	}
+	user, err := client.CurrentUser(ctx, token)
+	if err != nil {
+		logger.Warn("shared bot identity lookup failed; set gitlab.bot_usernames to the shared bot username", "status", gitlab.StatusOf(err))
+		return names
+	}
+	if user == nil || strings.TrimSpace(user.Username) == "" {
+		return names
+	}
+	for _, name := range names {
+		if name == user.Username {
+			return names
+		}
+	}
+	return append(names, user.Username)
 }
 
 func providerNames(providers map[string]config.ProviderConfig) []string {

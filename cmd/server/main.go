@@ -114,6 +114,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	sharedBotToken := sharedBotTokenFromEnv(cfg.GitLab.BotTokenEnv)
 	adminToken, err := bootstrapToken(cfg.Auth.BootstrapTokenEnv)
 	if err != nil {
 		return err
@@ -192,10 +193,11 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 
 	runtime, err := app.NewRuntime(ctx, cfg, app.RuntimeDeps{
-		Store:  db,
-		Cipher: cipher,
-		GitLab: gitlabClient,
-		Logger: logger,
+		Store:          db,
+		Cipher:         cipher,
+		GitLab:         gitlabClient,
+		SharedBotToken: sharedBotToken,
+		Logger:         logger,
 	})
 	if err != nil {
 		return err
@@ -204,14 +206,15 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	lifecycle := runtime.Lifecycle()
 
 	dispatcher, err := app.NewDispatcher(app.DispatcherConfig{
-		Store:      db,
-		Workspace:  runtime.WorkspaceManager(),
-		Onboarding: runtime.WorkspaceService(),
-		GitLab:     gitlabClient,
-		Cipher:     cipher,
-		Profiles:   cfg.Profiles,
-		Logger:     logger,
-		MRLocks:    runtime.MRLocks(),
+		Store:          db,
+		Workspace:      runtime.WorkspaceManager(),
+		Onboarding:     runtime.WorkspaceService(),
+		GitLab:         gitlabClient,
+		Cipher:         cipher,
+		SharedBotToken: sharedBotToken,
+		Profiles:       cfg.Profiles,
+		Logger:         logger,
+		MRLocks:        runtime.MRLocks(),
 	})
 	if err != nil {
 		return err
@@ -802,6 +805,17 @@ func decodeMasterKey(envName string) ([]byte, error) {
 		return nil, fmt.Errorf("secrets: environment variable %s must be base64 of exactly 32 bytes", envName)
 	}
 	return key, nil
+}
+
+// sharedBotTokenFromEnv reads the optional instance-wide bot token. An empty
+// name keeps per-project credentials. Validate() already proved the variable
+// is present and non-blank when configured. The value is only handed to the app
+// layer; it is never logged or persisted.
+func sharedBotTokenFromEnv(envName string) string {
+	if envName == "" {
+		return ""
+	}
+	return strings.TrimSpace(os.Getenv(envName))
 }
 
 func bootstrapToken(envName string) (string, error) {

@@ -97,7 +97,7 @@ Note Hook 先入队 `review.command`，由 worker 请求 GitLab 校验身份、M
 | GET | `/auth/login` | 跳转 GitLab OAuth（scope：`read_user`）；接受同源路径 `return_to`，写入签名 OAuth state；未启用时 API 客户端收到 503，浏览器跳回 `/?auth_error=oauth_disabled` |
 | GET | `/auth/callback` | 回调；创建或更新 `users`，写会话；再次校验 `return_to` 后跳回原深链 |
 | POST | `/auth/logout` | 删除会话 |
-| GET | `/api/v1/me` | `{id, username, name, role, global_read, csrf_token}`；CSRF 由会话派生，不保存到 localStorage |
+| GET | `/api/v1/me` | `{id, username, name, role, global_read, csrf_token, shared_bot_credential}`；`shared_bot_credential=true` 表示实例启用了共享 bot 凭据、注册时项目 token 可省略；CSRF 由会话派生，不保存到 localStorage |
 | GET | `/api/v1/api-tokens` | 当前用户的 token 列表：`?limit=&cursor=`，响应 `{tokens, next_cursor}`，不含明文 |
 | POST | `/api/v1/api-tokens` | `{name, expires_in_days}` → `{id, token}`，明文只返回这一次 |
 | POST | `/api/v1/api-tokens/{id}/renew` | 浏览器会话 + CSRF：`{expires_in_days}`（1–365，默认 90）→ `{id, token}`；同名轮换明文，旧明文立即失效，只能操作本人的 token |
@@ -144,15 +144,18 @@ POST /api/v1/projects
 }
 ```
 
+`auto_webhook` 省略时默认为 `true`：注册同时创建 Webhook，响应不返回 secret；显式 `false` 时保持手工配置路径，只在响应中返回一次 `webhook_secret`。启用 `gitlab.bot_token_env` 后，`token` 可省略，注册只填项目地址即可（见步骤 2a）。
+
 服务端校验步骤：
 
-1. 用 token 调 `GET /projects/:id` 确认可访问；读出 `default_branch`、`web_url`。
+1. 用 token 调 `GET /projects/:id` 确认可访问；读出 `default_branch`、`web_url`。共享凭据模式下省略 token 时，改用共享 bot 调 GitLab。
 2. 普通注册人（非平台管理员、非静态 bootstrap Bearer）先用该 token 调 `GET /user` 识别所有者，再调 `GET /projects/:id/members/all/:user_id` 要求至少 Reporter。成员查询返回 404（非成员或未继承成员）或角色低于 Reporter 时返回 `400 validation_failed`（字段 `access_level`）；其他上游失败返回脱敏的上游错误。平台管理员与静态 bootstrap Bearer 跳过此步。
-3. 调 `GET /personal_access_tokens/self` 读取 scope 和过期时间；缺少 `api` 或 `read_repository` → `400 validation_failed`。
-4. `auto_webhook=true` 时直接调 `POST /projects/:id/hooks` 创建新 hook，不列出或复用已有 hook；需要 Maintainer。新 hook 使用期望 URL，勾选 Merge request、Comments、Push 事件并写入生成的 secret。注册流程不会修改或删除已有 hook，即使存在同 URL hook 也只创建新 hook。创建成功但入库失败时会补偿删除刚创建的 hook；创建失败则注册失败且不落库。
+2a. 共享凭据模式（注册请求省略 `token` 且已配置 `gitlab.bot_token_env`）改为：先用共享 bot 调 `GET /user`，再要求它在该项目至少 Maintainer（字段 `shared_bot_access`）；普通注册人再用共享 bot 的读取权限按自己的 GitLab 用户 ID 要求至少 Reporter（字段 `access_level`）；注册人没有可核验的身份时返回 `400 validation_failed`（字段 `token`）。两项检查都在落库前完成，任何一项失败都不落库、不创建 Webhook。项目级 token 存在时仍走步骤 2/3，项目级凭据优先。
+3. 调 `GET /personal_access_tokens/self` 读取 scope 和过期时间；缺少 `api` 或 `read_repository` → `400 validation_failed`。共享凭据模式且省略 token 时跳过此步，项目以零长度 token 哨兵落库。
+4. `auto_webhook=true`（默认）时直接调 `POST /projects/:id/hooks` 创建新 hook，不列出或复用已有 hook；需要 Maintainer（共享模式下由 bot 提供）。新 hook 使用期望 URL，勾选 Merge request、Comments、Push 事件并写入生成的 secret。注册流程不会修改或删除已有 hook，即使存在同 URL hook 也只创建新 hook。创建成功但入库失败时会补偿删除刚创建的 hook；创建失败则注册失败且不落库。
 5. 入库后入队 `workspace.onboard`。注册人是有用户 ID 的账号（浏览器会话或用户 API token）时，项目、工作区、onboarding 任务和注册人的 `manage` grant 在同一事务内写入；静态 bootstrap Bearer（用户 ID 0）不写 grant。
 
-注册响应：`201 {project, job_id, webhook_secret?}`。`auto_webhook` 默认 false，此时只在注册响应中返回一次 `webhook_secret`，供手工配置 webhook，`webhook_state=disabled`；自动创建时不返回 secret，`webhook_state=enabled`。项目列表支持 `q` / `enabled` 筛选和游标分页；筛选值会绑定到 cursor。
+注册响应：`201 {project, job_id, webhook_secret?, shared_credential}`。`shared_credential=true` 表示项目没有项目级 token、GitLab 调用使用平台共享 bot（此时 `token_scopes` 为空、`token_expires_at` 缺省）。`auto_webhook=true` 时 `webhook_state=enabled` 且不返回 secret；显式 `false` 时返回一次 `webhook_secret`，`webhook_state=disabled`。项目详情与列表同样带 `shared_credential`。项目列表支持 `q` / `enabled` 筛选和游标分页；筛选值会绑定到 cursor。
 
 项目 `webhook_state` / `webhook_events` / `webhook_error` 是安全字段，随项目详情和列表返回；secret 始终不返回。
 
@@ -395,7 +398,7 @@ MCP、Skill、块绑定列表使用游标分页。
 
 provider 和 profile 的基线以配置文件为准；改动配置需重启服务才能作用于运行期，当前进程不处理 `SIGHUP`。文件变化会刷新显示快照（后台约 2 秒轮询，连续两次观测一致后应用），`/api/v1/config` 和 `/api/v1/config/status` 反映的是该显示快照；运行期单例仍使用启动时读取的配置，`restart_required: true` 表示显示快照与运行中配置不一致。`default` 档位的节点模型和参数可经上面的 overrides 端点覆盖（见[配置设计 · 档位覆盖](06-config.md#档位覆盖节点模型与参数)），覆盖只作用于之后启动的工作流。`/providers`、`/profiles`、`/settings`、`/config`、`/config/status` 和 `PATCH /config/overlay` 仅平台管理员可访问。
 
-`/api/v1/config` 的 `config` 是文件生效值的脱敏 allowlist 视图，明确不含 DSN、`master_key_env`、bootstrap token 和 OAuth 的变量名、workspace root、`git_bin`、`mcp.config` 路径、`skills.dirs` 路径、`prompts_dir`、绝对路径或密钥/凭据类环境变量的值；provider 以 `api_key_configured` 布尔值代替 `api_key_env`，且不返回 `price`（成本字段随 #407 下线）。公共 URL 等非敏感配置若由 `${ENV}` 展开，返回展开后的值。`origins` 是点号路径到 `default` / `base` / `overlay` 的映射，同样过滤上述敏感字段路径（包括 `providers.*.price`）；`warnings` 无内容时为 `[]`。`base_revision` 由各 base 文件 SHA-256 按加载顺序再哈希得到，`overlay_revision` 为 overlay 文件的 SHA-256，overlay 缺失时为空串；两者均取自最近的 last-good 显示快照，不代表运行中配置。`applied` 表示显示快照与运行中配置一致，`restart_required` 为其反义。两个端点都返回脱敏的 `last_error` 和 `last_error_at`：无错误时分别为空串和 `null`；`last_error` 会对配置文件名只保留 basename，并对配置内路径值、源文件标量值（含 `%q`、单引号与反引号形式）和环境变量值做脱敏。`/api/v1/config/status` 不返回值内容，另有 `updated_at`，表示最近一次成功加载或替换显示快照的时间；真实启动时由初始成功加载设置，只有未接入时间戳的测试装配才为 `null`。未接入显示快照时（例如未由 `cmd/server` 启动的测试装配），两个端点返回 503。`GET /api/v1/settings` 仍描述运行期配置，语义不变。
+`/api/v1/config` 的 `config` 是文件生效值的脱敏 allowlist 视图，明确不含 DSN、`master_key_env`、bootstrap token 和 OAuth 的变量名、workspace root、`git_bin`、`mcp.config` 路径、`skills.dirs` 路径、`prompts_dir`、绝对路径或密钥/凭据类环境变量的值；provider 以 `api_key_configured` 布尔值代替 `api_key_env`，且不返回 `price`（成本字段随 #407 下线）。公共 URL 等非敏感配置若由 `${ENV}` 展开，返回展开后的值。`origins` 是点号路径到 `default` / `base` / `overlay` 的映射，同样过滤上述敏感字段路径（包括 `providers.*.price`）；`warnings` 无内容时为 `[]`。`base_revision` 由各 base 文件 SHA-256 按加载顺序再哈希得到，`overlay_revision` 为 overlay 文件的 SHA-256，overlay 缺失时为空串；两者均取自最近的 last-good 显示快照，不代表运行中配置。`applied` 表示显示快照与运行中配置一致，`restart_required` 为其反义。两个端点都返回脱敏的 `last_error` 和 `last_error_at`：无错误时分别为空串和 `null`；`last_error` 会对配置文件名只保留 basename，并对配置内路径值、源文件标量值（含 `%q`、单引号与反引号形式）和环境变量值做脱敏。`/api/v1/config/status` 不返回值内容，另有 `updated_at`，表示最近一次成功加载或替换显示快照的时间；真实启动时由初始成功加载设置，只有未接入时间戳的测试装配才为 `null`。未接入显示快照时（例如未由 `cmd/server` 启动的测试装配），两个端点返回 503。`GET /api/v1/settings` 仍描述运行期配置，语义不变；其 `gitlab` 视图额外包含 `shared_bot_credential` 布尔、`shared_bot_credential_state`（`not_configured` / `ok` / `expired` / `insufficient_scope` / `unreachable`）、`shared_bot_credential_expires_at?` 与 `shared_bot_username?`。状态由 `GetTokenInfo` 与 `CurrentUser` 懒检查得出，缓存 5 分钟；响应不含 token 值或其片段，也不返回变量名。
 
 覆盖文档的字段、白名单和解析顺序见配置设计。校验失败返回 400，`details` 的 `field` 指向出错路径：模型 ID 不存在或已删除为 `overrides.<节点>.model`（如 `overrides.default.model`），参数不合法或不在白名单内为 `overrides.<节点>.params`。
 

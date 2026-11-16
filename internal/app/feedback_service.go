@@ -48,6 +48,7 @@ type FeedbackService struct {
 	state     feedbackCollectionRecorder
 	gitlab    GitLabClient
 	cipher    *secret.Cipher
+	tokens    *projectTokenResolver
 	git       GitOps
 	diff      feedbackDiff
 	workspace *workspace.Manager
@@ -57,13 +58,16 @@ type FeedbackService struct {
 
 // FeedbackServiceConfig configures FeedbackService.
 type FeedbackServiceConfig struct {
-	Store     ReviewStore
-	GitLab    GitLabClient
-	Cipher    *secret.Cipher
-	Git       GitOps
-	Workspace *workspace.Manager
-	Logger    *slog.Logger
-	Now       func() time.Time
+	Store  ReviewStore
+	GitLab GitLabClient
+	Cipher *secret.Cipher
+	// SharedBotToken enables shared-credential fallback for projects without
+	// their own token.
+	SharedBotToken string
+	Git            GitOps
+	Workspace      *workspace.Manager
+	Logger         *slog.Logger
+	Now            func() time.Time
 }
 
 // NewFeedbackService builds the F8 collector.
@@ -92,6 +96,7 @@ func NewFeedbackService(cfg FeedbackServiceConfig) (*FeedbackService, error) {
 		state:     state,
 		gitlab:    cfg.GitLab,
 		cipher:    cfg.Cipher,
+		tokens:    newProjectTokenResolver(cfg.Cipher, cfg.SharedBotToken),
 		git:       cfg.Git,
 		diff:      diff,
 		workspace: cfg.Workspace,
@@ -514,16 +519,16 @@ func (s *FeedbackService) project(ctx context.Context, projectID int64) (*store.
 	if project == nil || !project.Enabled {
 		return nil, "", nil
 	}
-	token, err := s.cipher.Open(project.TokenEnc, secret.TokenAAD(project.ID))
+	token, err := resolveProjectToken(s.tokens, s.cipher, project)
 	if err != nil {
 		return nil, "", errFeedbackCredential
 	}
-	return project, string(token), nil
+	return project, token, nil
 }
 
-// errFeedbackCredential marks a project token that cannot be opened. The
-// sanitized class is enough for the collector state; the unseal error itself is
-// never logged.
+// errFeedbackCredential marks a project credential that cannot be resolved,
+// whether the stored token or the shared fallback. The sanitized class is
+// enough for the collector state; the underlying error is never logged.
 var errFeedbackCredential = errors.New("app: feedback credential unavailable")
 
 // feedbackErrorClass maps a collector error to a fixed category. It never

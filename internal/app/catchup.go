@@ -60,9 +60,12 @@ type CatchUpServiceConfig struct {
 	Webhooks  *WebhookService
 	Workspace *workspace.Manager
 	Cipher    *secret.Cipher
-	Settings  config.CatchUpConfig
-	Logger    *slog.Logger
-	Now       func() time.Time
+	// SharedBotToken enables shared-credential fallback for projects without
+	// their own token.
+	SharedBotToken string
+	Settings       config.CatchUpConfig
+	Logger         *slog.Logger
+	Now            func() time.Time
 	// MRLocks is the shared per-merge-request lock registry. Catch-up enqueues
 	// reviews, so it holds the same lock as every note writer (#475).
 	MRLocks *workflowLocks
@@ -78,6 +81,7 @@ type CatchUpService struct {
 	webhooks  *WebhookService
 	workspace *workspace.Manager
 	cipher    *secret.Cipher
+	tokens    *projectTokenResolver
 	settings  config.CatchUpConfig
 	// mrLocks serializes the catch-up generation bump with every note writer.
 	mrLocks *workflowLocks
@@ -111,6 +115,7 @@ func NewCatchUpService(cfg CatchUpServiceConfig) (*CatchUpService, error) {
 		webhooks:  cfg.Webhooks,
 		workspace: cfg.Workspace,
 		cipher:    cfg.Cipher,
+		tokens:    newProjectTokenResolver(cfg.Cipher, cfg.SharedBotToken),
 		settings:  cfg.Settings,
 		mrLocks:   cfg.MRLocks,
 		logger:    logger,
@@ -342,11 +347,11 @@ func (s *CatchUpService) projectToken(ctx context.Context, projectID int64) (*st
 	if err != nil || project == nil || !project.Enabled {
 		return nil, "", false
 	}
-	token, err := s.cipher.Open(project.TokenEnc, secret.TokenAAD(project.ID))
-	if err != nil || len(token) == 0 {
+	token, err := resolveProjectToken(s.tokens, s.cipher, project)
+	if err != nil || token == "" {
 		return nil, "", false
 	}
-	return project, string(token), true
+	return project, token, true
 }
 
 // catchUpMR enqueues a review when the MR's current head has no review

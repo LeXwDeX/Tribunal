@@ -8,7 +8,6 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/config"
 	"github.com/LeXwDeX/tribunal/internal/repo"
 	"github.com/LeXwDeX/tribunal/internal/review"
-	"github.com/LeXwDeX/tribunal/internal/secret"
 	"github.com/LeXwDeX/tribunal/internal/skill"
 	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/internal/workspace"
@@ -249,15 +248,15 @@ func (p *Publisher) repositorySkillPublicationCurrent(ctx context.Context, proje
 	if ws == nil {
 		return errors.New("app: repository skill publication workspace is unavailable")
 	}
-	token, err := p.cipher.Open(project.TokenEnc, secret.TokenAAD(project.ID))
+	token, err := resolveProjectToken(p.tokens, p.cipher, project)
 	if err != nil {
-		return errors.New("app: project token is unavailable")
+		return errors.New("app: project credential is unavailable")
 	}
 	deny, err := repositorySkillDenyFromEvidence(dossier.IgnorePolicy.Patterns, dossier.RepositorySkillExcluded)
 	if err != nil {
 		return err
 	}
-	sha, _, snapshot, err := loadRepositorySkillSnapshot(ctx, ws, source, p.gitlab, project, string(token), record.TargetBranch, deny, p.reviewDefaults, p.profiles)
+	sha, _, snapshot, err := loadRepositorySkillSnapshot(ctx, ws, source, p.gitlab, project, token, record.TargetBranch, deny, p.reviewDefaults, p.profiles)
 	if err != nil {
 		return err
 	}

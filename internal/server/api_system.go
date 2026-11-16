@@ -1,11 +1,13 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"sort"
 	"time"
 
+	"github.com/LeXwDeX/tribunal/internal/app"
 	"github.com/LeXwDeX/tribunal/internal/config"
 	"github.com/LeXwDeX/tribunal/internal/llm"
 	"github.com/LeXwDeX/tribunal/internal/store"
@@ -305,6 +307,12 @@ type settingsGitLabView struct {
 	RequestTimeout time.Duration `json:"request_timeout"`
 	MaxConcurrency int           `json:"max_concurrency"`
 	BotUsernames   []string      `json:"bot_usernames"`
+	// Shared bot credential is reported only as sanitized state. The token
+	// value and its environment variable name never appear in this view.
+	SharedBotCredential          bool       `json:"shared_bot_credential"`
+	SharedBotCredentialState     string     `json:"shared_bot_credential_state"`
+	SharedBotCredentialExpiresAt *time.Time `json:"shared_bot_credential_expires_at,omitempty"`
+	SharedBotUsername            string     `json:"shared_bot_username,omitempty"`
 }
 
 type settingsAuthView struct {
@@ -404,6 +412,14 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	if blocks == nil {
 		blocks = map[string]config.BlockBinding{}
 	}
+	// The probe is lazily cached by the project service for five minutes and
+	// returns sanitized state only.
+	sharedBot := app.SharedBotCredentialHealth{State: app.SharedBotStateNotConfigured}
+	if provider, ok := s.projects.(interface {
+		SharedBotCredentialHealth(context.Context) app.SharedBotCredentialHealth
+	}); ok {
+		sharedBot = provider.SharedBotCredentialHealth(r.Context())
+	}
 	view := settingsView{
 		Server: settingsServerView{
 			Listen:         cfg.Server.Listen,
@@ -413,10 +429,14 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			TrustedProxies: cfg.Server.TrustedProxies,
 		},
 		GitLab: settingsGitLabView{
-			URL:            cfg.GitLab.URL,
-			RequestTimeout: cfg.GitLab.RequestTimeout,
-			MaxConcurrency: cfg.GitLab.MaxConcurrency,
-			BotUsernames:   cfg.GitLab.BotUsernames,
+			URL:                          cfg.GitLab.URL,
+			RequestTimeout:               cfg.GitLab.RequestTimeout,
+			MaxConcurrency:               cfg.GitLab.MaxConcurrency,
+			BotUsernames:                 cfg.GitLab.BotUsernames,
+			SharedBotCredential:          sharedBot.Configured,
+			SharedBotCredentialState:     sharedBot.State,
+			SharedBotCredentialExpiresAt: sharedBot.ExpiresAt,
+			SharedBotUsername:            sharedBot.Username,
 		},
 		Auth: settingsAuthView{
 			BootstrapAdmins: cfg.Auth.BootstrapAdmins,

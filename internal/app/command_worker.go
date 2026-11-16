@@ -59,6 +59,7 @@ type CommandWorker struct {
 	workspace    *workspace.Manager
 	gitlab       CommandGitLab
 	cipher       *secret.Cipher
+	tokens       *projectTokenResolver
 	profiles     map[string]config.ProfileConfig
 	botUsernames map[string]bool
 	// mentionMinAccess gates @-mention wake-ups only; slash commands keep the
@@ -77,12 +78,15 @@ type CommandWorker struct {
 
 // CommandWorkerConfig configures CommandWorker.
 type CommandWorkerConfig struct {
-	Store        CommandStore
-	Workspace    *workspace.Manager
-	GitLab       CommandGitLab
-	Cipher       *secret.Cipher
-	Profiles     map[string]config.ProfileConfig
-	BotUsernames []string
+	Store     CommandStore
+	Workspace *workspace.Manager
+	GitLab    CommandGitLab
+	Cipher    *secret.Cipher
+	// SharedBotToken enables shared-credential fallback for projects without
+	// their own token.
+	SharedBotToken string
+	Profiles       map[string]config.ProfileConfig
+	BotUsernames   []string
 	// MentionMinAccessLevel is the configured gitlab.mention_min_access_level.
 	// Zero falls back to Developer (30).
 	MentionMinAccessLevel int
@@ -114,6 +118,7 @@ func NewCommandWorker(cfg CommandWorkerConfig) (*CommandWorker, error) {
 		workspace:        cfg.Workspace,
 		gitlab:           cfg.GitLab,
 		cipher:           cfg.Cipher,
+		tokens:           newProjectTokenResolver(cfg.Cipher, cfg.SharedBotToken),
 		profiles:         cfg.Profiles,
 		botUsernames:     bots,
 		mentionMinAccess: cfg.MentionMinAccessLevel,
@@ -190,13 +195,13 @@ func (w *CommandWorker) Handle(ctx context.Context, job *jobs.Job) error {
 	if payload.AuthorBot && payload.Trigger != "mention" {
 		return nil
 	}
-	token, err := w.cipher.Open(project.TokenEnc, secret.TokenAAD(project.ID))
+	token, err := resolveProjectToken(w.tokens, w.cipher, project)
 	if err != nil {
-		w.logger.Warn("command worker could not decrypt project token", "project_id", project.ID)
-		return errors.New("app: project token unavailable")
+		w.logger.Warn("command worker could not resolve project credential", "project_id", project.ID)
+		return errors.New("app: project credential unavailable")
 	}
 
-	current, err := w.gitlab.CurrentUser(ctx, string(token))
+	current, err := w.gitlab.CurrentUser(ctx, token)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err

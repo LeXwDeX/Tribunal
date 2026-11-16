@@ -839,3 +839,44 @@ func TestValidateRejectsUnsupportedIgnorePatterns(t *testing.T) {
 		t.Fatalf("Validate() = %v, want review_defaults.ignore error", err)
 	}
 }
+
+func TestValidateSharedBotTokenEnv(t *testing.T) {
+	const sharedToken = "glpat-shared-bot-secret"
+	setRequiredEnv(t)
+	t.Setenv("TRIBUNAL_SHARED_BOT_TOKEN", sharedToken)
+	tests := []struct {
+		name    string
+		extra   string
+		wantErr string
+	}{
+		{name: "absent keeps per-project mode"},
+		{name: "present", extra: "  bot_token_env: TRIBUNAL_SHARED_BOT_TOKEN\n"},
+		{name: "missing environment variable", extra: "  bot_token_env: TRIBUNAL_MISSING_BOT_TOKEN\n", wantErr: "gitlab.bot_token_env"},
+		{name: "invalid environment variable name", extra: "  bot_token_env: \"BAD NAME\"\n", wantErr: "gitlab.bot_token_env"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeConfig(t, "config.yaml", validGitLab+tt.extra)
+			cfg := loadConfig(t, path)
+			err := cfg.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() = %v", err)
+				}
+				return
+			}
+			requireErrorContains(t, err, tt.wantErr)
+			// The environment variable name may appear; its value must not.
+			requireErrorNotContains(t, err, sharedToken)
+		})
+	}
+}
+
+func TestSharedBotTokenEnvLoads(t *testing.T) {
+	setRequiredEnv(t)
+	path := writeConfig(t, "config.yaml", validGitLab+"  bot_token_env: TRIBUNAL_SHARED_BOT_TOKEN\n")
+	cfg := loadConfig(t, path)
+	if cfg.GitLab.BotTokenEnv != "TRIBUNAL_SHARED_BOT_TOKEN" {
+		t.Fatalf("bot_token_env = %q", cfg.GitLab.BotTokenEnv)
+	}
+}

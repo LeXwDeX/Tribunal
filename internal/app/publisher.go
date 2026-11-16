@@ -70,6 +70,7 @@ type Publisher struct {
 	gitlab         GitLabClient
 	git            GitOps
 	cipher         *secret.Cipher
+	tokens         *projectTokenResolver
 	engine         *dag.Engine
 	reviewDefaults config.ProjectSettings
 	profiles       map[string]config.ProfileConfig
@@ -172,11 +173,14 @@ func mrLockRegistry(locks *workflowLocks) *workflowLocks {
 
 // PublisherConfig configures Publisher.
 type PublisherConfig struct {
-	Store          ReviewStore
-	Workspace      *workspace.Manager
-	GitLab         GitLabClient
-	Git            GitOps
-	Cipher         *secret.Cipher
+	Store     ReviewStore
+	Workspace *workspace.Manager
+	GitLab    GitLabClient
+	Git       GitOps
+	Cipher    *secret.Cipher
+	// SharedBotToken enables shared-credential fallback for projects without
+	// their own token.
+	SharedBotToken string
 	Engine         *dag.Engine
 	ReviewDefaults config.ProjectSettings
 	Profiles       map[string]config.ProfileConfig
@@ -222,6 +226,7 @@ func NewPublisher(cfg PublisherConfig) (*Publisher, error) {
 		gitlab:         cfg.GitLab,
 		git:            cfg.Git,
 		cipher:         cfg.Cipher,
+		tokens:         newProjectTokenResolver(cfg.Cipher, cfg.SharedBotToken),
 		engine:         cfg.Engine,
 		reviewDefaults: cfg.ReviewDefaults,
 		profiles:       cfg.Profiles,
@@ -1063,16 +1068,16 @@ func (p *Publisher) load(ctx context.Context, workflowID string) (*loadedReview,
 	if project == nil || !project.Enabled {
 		return nil, PermanentJob(fmt.Errorf("project %d is disabled", workflow.ProjectID))
 	}
-	token, err := p.cipher.Open(project.TokenEnc, secret.TokenAAD(project.ID))
+	token, err := resolveProjectToken(p.tokens, p.cipher, project)
 	if err != nil {
-		return nil, PermanentJob(fmt.Errorf("project token is unavailable"))
+		return nil, PermanentJob(fmt.Errorf("project credential is unavailable"))
 	}
 	return &loadedReview{
 		workflow: workflow,
 		dossier:  &dossier,
 		record:   record,
 		project:  project,
-		token:    string(token),
+		token:    token,
 		mrIID:    *workflow.MRIID,
 	}, nil
 }

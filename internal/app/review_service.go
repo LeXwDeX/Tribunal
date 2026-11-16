@@ -115,6 +115,7 @@ type ReviewService struct {
 	store          ReviewStore
 	gitlab         GitLabClient
 	cipher         *secret.Cipher
+	tokens         *projectTokenResolver
 	workspace      *workspace.Manager
 	git            GitOps
 	engine         *dag.Engine
@@ -156,9 +157,12 @@ type ReviewService struct {
 
 // ReviewServiceConfig configures ReviewService.
 type ReviewServiceConfig struct {
-	Store          ReviewStore
-	GitLab         GitLabClient
-	Cipher         *secret.Cipher
+	Store  ReviewStore
+	GitLab GitLabClient
+	Cipher *secret.Cipher
+	// SharedBotToken enables shared-credential fallback for projects without
+	// their own token.
+	SharedBotToken string
 	Workspace      *workspace.Manager
 	Git            GitOps
 	Engine         *dag.Engine
@@ -254,6 +258,7 @@ func NewReviewService(cfg ReviewServiceConfig) (*ReviewService, error) {
 		store:          cfg.Store,
 		gitlab:         cfg.GitLab,
 		cipher:         cfg.Cipher,
+		tokens:         newProjectTokenResolver(cfg.Cipher, cfg.SharedBotToken),
 		workspace:      cfg.Workspace,
 		git:            cfg.Git,
 		engine:         engine,

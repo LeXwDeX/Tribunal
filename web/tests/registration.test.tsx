@@ -109,7 +109,7 @@ describe('project registration', () => {
     expect(screen.getByText(/加密保存访问 Key/)).toBeInTheDocument()
     expect(screen.getByText(/会调用模型并消耗 token/)).toBeInTheDocument()
     expect(screen.queryByText(/费用/)).not.toBeInTheDocument()
-    expect(dialog).toHaveTextContent('Webhook 需在项目设置中单独配置')
+    expect(dialog).toHaveTextContent('Webhook 未启用')
     expect(registerBodies).toHaveLength(1)
     expect(registerBodies[0]).toEqual({
       project: repositoryUrl,
@@ -233,6 +233,50 @@ describe('project registration', () => {
     await user.click(registerButtons[0])
     expect(screen.getByLabelText('访问 Key')).toHaveValue('')
     expect(screen.queryByText('校验通过，尚未保存')).not.toBeInTheDocument()
+  })
+
+  it('registers by URL only when the shared bot capability is enabled', async () => {
+    const registerBodies: Array<Record<string, unknown>> = []
+    const validateCalls: string[] = []
+    installFetch((url, init) => {
+      if (url === '/api/v1/projects/validate') validateCalls.push(url)
+      if (url === '/api/v1/projects' && init?.method === 'POST') {
+        registerBodies.push(JSON.parse(String(init.body)))
+        return jsonResponse({
+          project: project({ id: 42, webhook_state: 'enabled', hook_id: 99 }),
+          job_id: 'job-shared',
+          shared_credential: true,
+        }, 201)
+      }
+      return baseRoutes()(url, init)
+    })
+    const user = userEvent.setup()
+    renderWithProviders(<ProjectsPage />, {
+      route: '/projects',
+      me: { ...viewerMe, shared_bot_credential: true },
+    })
+    const registerButtons = await screen.findAllByRole('button', { name: '注册项目' })
+    await user.click(registerButtons[0])
+
+    expect(screen.getAllByText(/使用平台共享 bot/).length).toBeGreaterThan(0)
+    const key = screen.getByLabelText('访问 Key（可选）')
+    await user.type(screen.getByLabelText('仓库地址或项目 ID'), repositoryUrl)
+    const save = screen.getByRole('button', { name: '保存并初始化' })
+    expect(screen.getByRole('button', { name: '校验连接' })).toBeDisabled()
+    expect(save).toBeEnabled()
+    await user.click(save)
+
+    const dialog = await screen.findByRole('dialog', { name: '项目已保存，初始化已开始' })
+    expect(dialog).toHaveTextContent('平台共享 bot')
+    expect(dialog).toHaveTextContent('Webhook 已自动创建并启用')
+    expect(registerBodies).toEqual([{
+      project: repositoryUrl,
+      token: '',
+      profile: 'default',
+      settings: { skip_draft: true },
+    }])
+    expect(validateCalls).toEqual([])
+    expect(key).toHaveValue('')
   })
 })
 

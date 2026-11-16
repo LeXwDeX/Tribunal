@@ -13,7 +13,6 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/jobs"
 	"github.com/LeXwDeX/tribunal/internal/review"
-	"github.com/LeXwDeX/tribunal/internal/secret"
 	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/pkg/dag"
 )
@@ -259,11 +258,11 @@ func (s *ReviewService) projectToken(ctx context.Context, projectID int64) (*sto
 	if project == nil || !project.Enabled {
 		return nil, "", PermanentJob(fmt.Errorf("project %d is disabled", projectID))
 	}
-	token, err := s.cipher.Open(project.TokenEnc, secret.TokenAAD(project.ID))
+	token, err := resolveProjectToken(s.tokens, s.cipher, project)
 	if err != nil {
-		return nil, "", PermanentJob(fmt.Errorf("project token is unavailable"))
+		return nil, "", PermanentJob(fmt.Errorf("project credential is unavailable"))
 	}
-	return project, string(token), nil
+	return project, token, nil
 }
 
 // workspaceMaterialIdentity salts the execution identity with the base

@@ -10,6 +10,8 @@ interface Session {
   canRegisterProject: boolean
   // The logged-in browser session may manage its own credentials.
   canSelfService: boolean
+  // Shared-credential mode is enabled, so registration may omit a project key.
+  sharedBotCredential: boolean
 }
 
 const SessionContext = createContext<Session | null>(null)
@@ -18,7 +20,8 @@ export function SessionProvider({ me, children }: { me: Me; children: ReactNode 
   const canWrite = me.role === 'admin' && Boolean(me.csrf_token)
   const canRegisterProject = Boolean(me.csrf_token)
   const canSelfService = Boolean(me.csrf_token)
-  return <SessionContext.Provider value={{ me, canWrite, canRegisterProject, canSelfService }}>{children}</SessionContext.Provider>
+  const sharedBotCredential = Boolean(me.shared_bot_credential)
+  return <SessionContext.Provider value={{ me, canWrite, canRegisterProject, canSelfService, sharedBotCredential }}>{children}</SessionContext.Provider>
 }
 
 export function useSession(): Session {
@@ -37,4 +40,8 @@ export function useCanRegisterProject(): boolean {
 
 export function useCanSelfService(): boolean {
   return useSession().canSelfService
+}
+
+export function useSharedBotCredential(): boolean {
+  return useSession().sharedBotCredential
 }

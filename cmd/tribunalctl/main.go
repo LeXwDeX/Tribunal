@@ -587,7 +587,7 @@ type registerRequest struct {
 	Project     string          `json:"project"`
 	Token       string          `json:"token"`
 	Profile     string          `json:"profile,omitempty"`
-	AutoWebhook bool            `json:"auto_webhook,omitempty"`
+	AutoWebhook *bool           `json:"auto_webhook,omitempty"`
 	Settings    json.RawMessage `json:"settings,omitempty"`
 }
 
@@ -604,7 +604,7 @@ func (g *globals) register(ctx context.Context, args []string) error {
 	fs.StringVar(&project, "project", "", "GitLab project ID or namespace/path")
 	fs.StringVar(&tokenEnv, "token-env", "", "environment variable holding the project token")
 	fs.StringVar(&profile, "profile", "", "review profile")
-	fs.BoolVar(&autoWebhook, "auto-webhook", false, "create the GitLab webhook")
+	fs.BoolVar(&autoWebhook, "auto-webhook", true, "create the GitLab webhook (default true; pass --auto-webhook=false to configure it manually)")
 	fs.StringVar(&settings, "settings", "", "JSON project settings")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -637,7 +637,7 @@ func (g *globals) register(ctx context.Context, args []string) error {
 		Project:     project,
 		Token:       token,
 		Profile:     profile,
-		AutoWebhook: autoWebhook,
+		AutoWebhook: &autoWebhook,
 		Settings:    rawSettings,
 	}
 	raw, err := g.request(ctx, http.MethodPost, "/api/v1/projects", body)

@@ -82,8 +82,13 @@ type GitLabConfig struct {
 	BotUsernames   []string      `yaml:"bot_usernames" json:"bot_usernames"`
 	// MentionMinAccessLevel gates @-mention wake-ups. Slash commands keep the
 	// fixed Developer (30) threshold. bot_usernames empty disables mentions.
-	MentionMinAccessLevel int           `yaml:"mention_min_access_level" json:"mention_min_access_level"`
-	CatchUp               CatchUpConfig `yaml:"catch_up" json:"catch_up"`
+	MentionMinAccessLevel int `yaml:"mention_min_access_level" json:"mention_min_access_level"`
+	// BotTokenEnv names the environment variable holding the instance-wide
+	// shared bot token. Non-empty enables shared-credential mode: projects
+	// registered without a project token use this bot. The token itself is
+	// read from the environment and never stored in configuration.
+	BotTokenEnv string        `yaml:"bot_token_env" json:"bot_token_env"`
+	CatchUp     CatchUpConfig `yaml:"catch_up" json:"catch_up"`
 }
 
 // CatchUpConfig controls the one-time startup scan that enqueues reviews for
@@ -462,6 +467,14 @@ func (c *Config) Validate() error {
 	}
 	if c.GitLab.CatchUp.MaxTotal <= 0 {
 		p.add("gitlab.catch_up.max_total must be positive")
+	}
+	// An empty bot_token_env keeps per-project credentials; a non-empty value
+	// must name an existing, non-blank environment variable. Errors never
+	// include the token value.
+	if c.GitLab.BotTokenEnv != "" {
+		if value, ok := p.env("gitlab.bot_token_env", c.GitLab.BotTokenEnv); ok && strings.TrimSpace(value) == "" {
+			p.add("gitlab.bot_token_env: environment variable %s must not be blank", c.GitLab.BotTokenEnv)
+		}
 	}
 
 	if c.Auth.SessionTTL <= 0 {

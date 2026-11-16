@@ -177,8 +177,8 @@ docker compose up -d --force-recreate --wait --wait-timeout 120
 
 **Webhook**（二选一，都要先征得用户同意）
 
-- **自动（推荐）**：经用户同意后，在运维节注册命令的 `--profile default` 后添加 `--auto-webhook`。项目 token 需要 Maintainer 权限，并且 `TRIBUNAL_PUBLIC_URL` 能被 GitLab 访问。注册成功就说明 hook 已经建好。
-- **手动**：使用运维节默认的不带 `--auto-webhook` 的注册命令，响应文件里的 `webhook_secret` 只在这一次返回。在 GitLab 项目的 Webhooks 页面添加：
+- **自动（默认，推荐）**：经用户同意后，直接使用运维节注册命令（`--auto-webhook` 默认开启，也可显式传入）。项目 token 需要 Maintainer 权限，并且 `TRIBUNAL_PUBLIC_URL` 能被 GitLab 访问。注册成功就说明 hook 已经建好。
+- **手动**：经用户同意后，使用运维节注册命令并显式传入 `--auto-webhook=false`，响应文件里的 `webhook_secret` 只在这一次返回。在 GitLab 项目的 Webhooks 页面添加：
   - URL：`<TRIBUNAL_PUBLIC_URL>/webhooks/gitlab`；
   - Secret token：响应文件里的 `webhook_secret`；
   - 勾选 Merge request events、Comments、Push events。

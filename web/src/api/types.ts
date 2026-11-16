@@ -17,6 +17,8 @@ export interface Me {
   role: Role
   global_read?: boolean
   csrf_token: string
+  /** Instance-wide bot credential is configured; project tokens are optional. */
+  shared_bot_credential?: boolean
 }
 
 export interface ApiErrorBody {
@@ -134,6 +136,8 @@ export interface Project {
   default_branch?: string
   token_expires_at?: string
   token_scopes?: string[]
+  /** No project-level token: GitLab calls use the shared platform bot. */
+  shared_credential?: boolean
   hook_id?: number
   webhook_state?: 'disabled' | 'pending' | 'enabled' | 'failed' | 'unknown' | string
   webhook_events?: string[]
@@ -154,6 +158,7 @@ export interface Project {
 export interface ProjectRegistration {
   project: Project
   job_id: string
+  shared_credential?: boolean
 }
 
 export interface ProjectWebhookState {

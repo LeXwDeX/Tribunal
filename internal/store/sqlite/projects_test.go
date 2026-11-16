@@ -477,3 +477,59 @@ func TestDeleteProjectRemovesReviewSideEffectsAndJobs(t *testing.T) {
 }
 
 func ptrBool(value bool) *bool { return &value }
+
+// A zero-length token is the shared-bot sentinel. The column stays NOT NULL,
+// so the store must round-trip an empty BLOB rather than rejecting it or
+// writing SQL NULL.
+func TestRegisterProjectRoundTripsEmptyTokenSentinel(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t, newFakeClock())
+	for _, tt := range []struct {
+		name  string
+		token []byte
+	}{
+		{name: "empty blob", token: []byte{}},
+		{name: "nil normalized", token: nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			id := int64(80)
+			if tt.token == nil {
+				id = 81
+			}
+			_, err := s.RegisterProject(ctx, store.Project{
+				ID:                id,
+				PathWithNamespace: "group/shared",
+				WebURL:            "https://gitlab.example.com/group/shared",
+				DefaultBranch:     "main",
+				TokenEnc:          tt.token,
+				WebhookSecretEnc:  []byte{},
+			})
+			if err != nil {
+				t.Fatalf("RegisterProject: %v", err)
+			}
+			saved, err := s.GetProject(ctx, id)
+			if err != nil {
+				t.Fatalf("GetProject: %v", err)
+			}
+			if len(saved.TokenEnc) != 0 {
+				t.Fatalf("TokenEnc = %v, want empty", saved.TokenEnc)
+			}
+			list, err := s.ListProjects(ctx)
+			if err != nil {
+				t.Fatalf("ListProjects: %v", err)
+			}
+			found := false
+			for _, project := range list {
+				if project.ID == id {
+					found = true
+					if len(project.TokenEnc) != 0 {
+						t.Fatalf("listed TokenEnc = %v, want empty", project.TokenEnc)
+					}
+				}
+			}
+			if !found {
+				t.Fatalf("project %d missing from list", id)
+			}
+		})
+	}
+}

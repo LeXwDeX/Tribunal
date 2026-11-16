@@ -39,6 +39,7 @@ type Dispatcher struct {
 	onboarding *WorkspaceService
 	gitlab     DispatchGitLab
 	cipher     *secret.Cipher
+	tokens     *projectTokenResolver
 	profiles   map[string]config.ProfileConfig
 	// mrLocks is the shared per-merge-request registry. Manual review dispatch
 	// bumps the generation, so it holds the same lock as every note writer
@@ -54,8 +55,11 @@ type DispatcherConfig struct {
 	Onboarding *WorkspaceService
 	GitLab     DispatchGitLab
 	Cipher     *secret.Cipher
-	Profiles   map[string]config.ProfileConfig
-	Logger     *slog.Logger
+	// SharedBotToken enables shared-credential fallback for projects without
+	// their own token.
+	SharedBotToken string
+	Profiles       map[string]config.ProfileConfig
+	Logger         *slog.Logger
 	// MRLocks is the shared per-merge-request lock registry.
 	MRLocks *workflowLocks
 }
@@ -95,6 +99,7 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		onboarding: cfg.Onboarding,
 		gitlab:     cfg.GitLab,
 		cipher:     cfg.Cipher,
+		tokens:     newProjectTokenResolver(cfg.Cipher, cfg.SharedBotToken),
 		profiles:   cfg.Profiles,
 		mrLocks:    cfg.MRLocks,
 		logger:     logger,
@@ -127,11 +132,11 @@ func (d *Dispatcher) StartReview(ctx context.Context, projectID, mrIID int64, pr
 	if !project.Enabled {
 		return "", conflictError("project is disabled")
 	}
-	token, err := d.cipher.Open(project.TokenEnc, secret.TokenAAD(project.ID))
+	token, err := resolveProjectToken(d.tokens, d.cipher, project)
 	if err != nil {
 		return "", internalError()
 	}
-	mr, err := d.gitlab.GetMergeRequest(ctx, string(token), projectID, mrIID)
+	mr, err := d.gitlab.GetMergeRequest(ctx, token, projectID, mrIID)
 	if err != nil {
 		if gitlab.IsNotFound(err) {
 			return "", notFoundError("merge request not found")

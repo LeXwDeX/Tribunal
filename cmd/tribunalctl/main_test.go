@@ -116,6 +116,42 @@ func TestRegisterCommand(t *testing.T) {
 	}
 }
 
+// Registration creates the webhook by default; --auto-webhook=false keeps the
+// manual path and must be sent explicitly so the server cannot apply its
+// omitted-field default.
+func TestRegisterCommandAutoWebhookDefaultAndExplicitFalse(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "default on", want: true},
+		{name: "explicit false", args: []string{"--auto-webhook=false"}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var captured capturedRequest
+			ts := httptest.NewServer(captureHandler(t, http.StatusCreated,
+				`{"project":{"id":42},"job_id":"job-1"}`, &captured))
+			defer ts.Close()
+
+			args := []string{
+				"--url", ts.URL, "--api-token-env", "ADMIN_TOKEN",
+				"projects", "register", "--project", "group/repo", "--token-env", "PROJECT_TOKEN",
+			}
+			args = append(args, tt.args...)
+			if _, _, err := runCtl(t, args, map[string]string{
+				"ADMIN_TOKEN": "admin-secret-value", "PROJECT_TOKEN": "glpat-project-token",
+			}, ts.Client()); err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if got, ok := captured.body["auto_webhook"].(bool); !ok || got != tt.want {
+				t.Fatalf("auto_webhook = %v, want %v (body %v)", captured.body["auto_webhook"], tt.want, captured.body)
+			}
+		})
+	}
+}
+
 func TestListAndGetCommands(t *testing.T) {
 	t.Run("list", func(t *testing.T) {
 		var captured capturedRequest

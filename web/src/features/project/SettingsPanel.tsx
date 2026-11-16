@@ -401,9 +401,18 @@ export function SettingsPanel({ project }: { project: Project }) {
       <div className={styles.sideColumn}>
         <Panel title="访问凭据">
           <div className={ui.stack}>
-            <span className="small muted">token 过期时间：{project.token_expires_at ? formatDate(project.token_expires_at) : '未提供'}</span>
-            <span className="small muted">token scope：<span className="mono">{project.token_scopes?.join(', ') || '不可用'}</span></span>
-            <Button variant="secondary" onClick={openKeyDialog}>更新访问 Key</Button>
+            {project.shared_credential ? (
+              <>
+                <span className="small muted">凭据来源：平台共享 bot（无项目级 token）</span>
+                <span className="small muted">评审与 Webhook 由平台共享 bot 执行；填写项目 Key 可切换为项目级凭据。</span>
+              </>
+            ) : (
+              <>
+                <span className="small muted">token 过期时间：{project.token_expires_at ? formatDate(project.token_expires_at) : '未提供'}</span>
+                <span className="small muted">token scope：<span className="mono">{project.token_scopes?.join(', ') || '不可用'}</span></span>
+              </>
+            )}
+            <Button variant="secondary" onClick={openKeyDialog}>{project.shared_credential ? '设置项目级 Key' : '更新访问 Key'}</Button>
             <ActionHint>更新访问 Key 不会修改 GitLab Webhook。</ActionHint>
           </div>
         </Panel>
