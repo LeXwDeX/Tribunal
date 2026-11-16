@@ -94,7 +94,10 @@ type Publisher struct {
 
 // workflowLocks is a keyed mutex whose entries live only while held or awaited.
 // It guards per-workflow publication locks and the shared per-merge-request
-// registry used by webhook ingress, publication and status writing (#475).
+// registry used by the publisher, the review service, the dispatcher, the
+// command worker and catch-up. Webhook ingress does not take this lock: it only
+// records the delivery and enqueue in one DB transaction to keep its 900ms
+// processing budget (#475).
 type workflowLocks struct {
 	mu      sync.Mutex
 	entries map[string]*workflowLock
@@ -952,7 +955,9 @@ func (p *Publisher) lockWorkflow(ctx context.Context, id string) (context.Contex
 
 // lockMR serializes summary and commit-status writes for one merge request.
 // Callers hold the project workspace lock before taking it. The same registry
-// is shared with webhook ingress and the status writer (#475).
+// is shared with the status worker, dispatcher, command worker and catch-up;
+// webhook ingress does not hold it (DB-only enqueue within the 900ms budget,
+// #475).
 func (p *Publisher) lockMR(ctx context.Context, projectID, mrIID int64) (func(), error) {
 	return mrLockRegistry(p.mrLocks).lock(ctx, reviewMRLockKey(projectID, mrIID))
 }

@@ -243,8 +243,11 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		Clock:              now,
 		Logger:             logger,
 	})
-	// One per-merge-request lock registry is shared by webhook ingress,
-	// publication and status writing so generations cannot interleave (#475).
+	// One per-merge-request lock registry is shared by the publisher, the
+	// review service, the dispatcher, the command worker and catch-up so
+	// generation bumps cannot interleave with remote note writes. Webhook
+	// ingress only records the delivery and enqueue in one DB transaction and
+	// does not take this lock, keeping its 900ms processing budget (#475).
 	mrLocks := &workflowLocks{}
 	publisher, err := NewPublisher(PublisherConfig{
 		Store:          deps.Store,
