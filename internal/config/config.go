@@ -444,6 +444,11 @@ func (c *Config) Validate() error {
 	if c.GitLab.MaxConcurrency <= 0 {
 		p.add("gitlab.max_concurrency must be positive")
 	}
+	for i, name := range c.GitLab.BotUsernames {
+		if strings.TrimSpace(name) == "" {
+			p.add("gitlab.bot_usernames[%d] must not be blank", i)
+		}
+	}
 	switch c.GitLab.MentionMinAccessLevel {
 	case 10, 15, 20, 30, 40, 50:
 	default:

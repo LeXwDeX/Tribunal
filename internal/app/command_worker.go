@@ -64,6 +64,9 @@ type CommandWorker struct {
 	// mentionMinAccess gates @-mention wake-ups only; slash commands keep the
 	// fixed Developer threshold.
 	mentionMinAccess int
+	// reviewDefaults resolves per-project review filters (draft, labels,
+	// target branches) for mention wake-ups.
+	reviewDefaults config.ProjectSettings
 	// mrLocks is the shared per-merge-request registry. Command enqueues bump
 	// the generation and replies write MR notes, so both hold the same lock as
 	// publication and status writing (#475). A nil value falls back to the
@@ -83,7 +86,9 @@ type CommandWorkerConfig struct {
 	// MentionMinAccessLevel is the configured gitlab.mention_min_access_level.
 	// Zero falls back to Developer (30).
 	MentionMinAccessLevel int
-	Logger                *slog.Logger
+	// ReviewDefaults resolves the project filters applied to mention wake-ups.
+	ReviewDefaults config.ProjectSettings
+	Logger         *slog.Logger
 	// MRLocks is the shared per-merge-request lock registry.
 	MRLocks *workflowLocks
 }
@@ -98,7 +103,8 @@ func NewCommandWorker(cfg CommandWorkerConfig) (*CommandWorker, error) {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	bots := make(map[string]bool, len(cfg.BotUsernames))
-	for _, name := range cfg.BotUsernames {
+	for _, raw := range cfg.BotUsernames {
+		name := strings.TrimSpace(raw)
 		if name != "" {
 			bots[name] = true
 		}
@@ -111,6 +117,7 @@ func NewCommandWorker(cfg CommandWorkerConfig) (*CommandWorker, error) {
 		profiles:         cfg.Profiles,
 		botUsernames:     bots,
 		mentionMinAccess: cfg.MentionMinAccessLevel,
+		reviewDefaults:   cfg.ReviewDefaults,
 		mrLocks:          cfg.MRLocks,
 		logger:           logger,
 	}, nil
@@ -239,10 +246,20 @@ func (w *CommandWorker) Handle(ctx context.Context, job *jobs.Job) error {
 		minAccess = w.mentionMinAccess
 	}
 	if access < minAccess {
-		return w.reply(ctx, string(token), project, payload, replyAuthorID, head, 0, "denied", deniedReplyText(payload.Trigger, minAccess))
+		return w.reply(ctx, string(token), project, payload, replyAuthorID, head, 0, "denied", deniedReplyText(payload.Trigger, minAccess), false)
 	}
 	if payload.Command == commandHelp {
-		return w.reply(ctx, string(token), project, payload, replyAuthorID, head, 0, "help", helpReplyText(w.profiles))
+		return w.reply(ctx, string(token), project, payload, replyAuthorID, head, 0, "help", helpReplyText(w.profiles), false)
+	}
+	if payload.Trigger == "mention" {
+		settings, err := ResolveSettings(project.Settings, w.reviewDefaults)
+		if err != nil {
+			w.logger.Warn("mention project settings are invalid", "project_id", project.ID)
+			return nil
+		}
+		if reason := reviewFilterReason(payload.Trigger, mr, project, settings); reason != "" {
+			return w.reply(ctx, string(token), project, payload, replyAuthorID, head, 0, "filtered", filteredReplyText(reason), false)
+		}
 	}
 
 	if payload.Command == commandRun {
@@ -317,6 +334,19 @@ func deniedReplyText(trigger string, minAccess int) string {
 	return fmt.Sprintf("需要 %s（%d）及以上权限才能通过 @ 提及触发评审。", accessRoleName(minAccess), minAccess)
 }
 
+func filteredReplyText(reason string) string {
+	detail := "项目评审过滤规则"
+	switch reason {
+	case "draft":
+		detail = "草稿 MR"
+	case "labels_filtered":
+		detail = "标签不符合评审规则"
+	case "branch_filtered":
+		detail = "目标分支不符合评审规则"
+	}
+	return "未触发评审：该 MR 被项目过滤规则排除（" + detail + "）。如仍需评审，请移除过滤条件后重新 @，或使用 `/review` 命令。"
+}
+
 func accessRoleName(level int) string {
 	switch level {
 	case 10:
@@ -351,7 +381,7 @@ func (w *CommandWorker) enqueueReview(ctx context.Context, command store.ReviewC
 func (w *CommandWorker) finishCommand(ctx context.Context, token string, project *store.Project, payload commandPayload, replyAuthorID int64, head string, result store.ReviewEnqueueResult, err error) error {
 	if errors.Is(err, store.ErrLegacyCommandUncertain) {
 		w.logger.Warn("legacy review command acceptance uncertain", "project_id", project.ID, "mr_iid", payload.MRIID, "note_id", payload.NoteID, "command", payload.Command)
-		return w.reply(ctx, token, project, payload, replyAuthorID, head, 0, "uncertain", uncertainReplyText)
+		return w.reply(ctx, token, project, payload, replyAuthorID, head, 0, "uncertain", uncertainReplyText, false)
 	}
 	if err != nil {
 		return err
@@ -359,12 +389,15 @@ func (w *CommandWorker) finishCommand(ctx context.Context, token string, project
 	w.logAccepted(project.ID, payload, result.JobID, result.Duplicate)
 	if payload.Trigger == "mention" {
 		// A mention is answered inside its thread. Slash commands stay silent
-		// on acceptance, as before.
+		// on acceptance, as before. A duplicate command identity reports
+		// generation zero, so an existing acknowledgement must be preserved
+		// instead of being rewritten without its 代次 line.
 		kind := "accepted"
 		if payload.Command == commandCancel {
 			kind = "cancel"
 		}
-		return w.reply(ctx, token, project, payload, replyAuthorID, head, result.Generation, kind, acceptedReplyText(payload.Command))
+		preserve := result.Duplicate || result.Generation == 0
+		return w.reply(ctx, token, project, payload, replyAuthorID, head, result.Generation, kind, acceptedReplyText(payload.Command), preserve)
 	}
 	return nil
 }
@@ -376,7 +409,7 @@ func acceptedReplyText(command string) string {
 	return "已受理：正在按最新 head 排队评审。"
 }
 
-func (w *CommandWorker) reply(ctx context.Context, token string, project *store.Project, payload commandPayload, authorID int64, head string, generation int64, kind, text string) error {
+func (w *CommandWorker) reply(ctx context.Context, token string, project *store.Project, payload commandPayload, authorID int64, head string, generation int64, kind, text string, preserve bool) error {
 	// A command reply is a review note: hold the shared per-MR lock so it
 	// cannot interleave with publication or status writing (#475).
 	unlock, err := mrLockRegistry(w.mrLocks).lock(ctx, reviewMRLockKey(project.ID, payload.MRIID))
@@ -385,82 +418,64 @@ func (w *CommandWorker) reply(ctx context.Context, token string, project *store.
 	}
 	defer unlock()
 
-	discussionID, threadNotes, err := w.replyThread(ctx, token, project.ID, payload)
+	discussionID, threadNotes, listed, err := w.replyThread(ctx, token, project.ID, payload)
 	if err != nil {
 		return w.replyError(ctx, err)
 	}
 	if discussionID != "" {
 		body := commandReplyBody(payload.NoteID, kind, text) +
 			w.replyTraceSuffix(ctx, project, payload.MRIID, head, generation)
-		return w.upsertThreadReply(ctx, token, project.ID, payload.MRIID, payload.NoteID, discussionID, threadNotes, authorID, body)
+		return w.upsertThreadReply(ctx, token, project.ID, payload.MRIID, payload.NoteID, discussionID, threadNotes, listed, authorID, preserve, body)
 	}
 	body := commandReplyBody(payload.NoteID, kind, text)
-	prefix := commandReplyPrefix(payload.NoteID) + " "
-	notes, err := w.gitlab.ListMRNotes(ctx, token, project.ID, payload.MRIID)
-	if err != nil {
-		return w.replyError(ctx, err)
-	}
-	for _, note := range notes {
-		if !strings.HasPrefix(note.Body, prefix) {
-			continue
-		}
-		if authorID > 0 && note.AuthorID != authorID {
-			continue
-		}
-		if note.Body == body {
-			return nil
-		}
-		if err := w.gitlab.UpdateMRNote(ctx, token, project.ID, payload.MRIID, note.ID, body); err != nil {
-			return w.replyError(ctx, err)
-		}
-		return nil
-	}
-	if _, err := w.gitlab.CreateMRNote(ctx, token, project.ID, payload.MRIID, body); err != nil {
-		return w.replyError(ctx, err)
-	}
-	return nil
+	return w.upsertTopLevelReply(ctx, token, project.ID, payload.MRIID, payload.NoteID, authorID, preserve, body)
 }
 
 // replyThread resolves the thread the reply belongs to. A present
 // discussion_id wins; otherwise the source note is looked up in the
-// discussion listing so old payloads still answer inside their thread. An
-// empty result means the caller falls back to a top-level note.
-func (w *CommandWorker) replyThread(ctx context.Context, token string, projectID int64, payload commandPayload) (string, []gitlab.Note, error) {
+// discussion listing so old payloads still answer inside their thread. The
+// listed flag reports whether the thread was found in the listing, so a
+// missing explicit thread still gets a marker scan through the notes endpoint.
+func (w *CommandWorker) replyThread(ctx context.Context, token string, projectID int64, payload commandPayload) (string, []gitlab.Note, bool, error) {
 	discussions, err := w.gitlab.ListDiscussions(ctx, token, projectID, payload.MRIID)
 	if err != nil {
-		return "", nil, err
+		return "", nil, false, err
 	}
 	if payload.DiscussionID != "" {
 		for _, discussion := range discussions {
 			if discussion.ID == payload.DiscussionID {
-				return discussion.ID, discussion.Notes, nil
+				return discussion.ID, discussion.Notes, true, nil
 			}
 		}
-		// The thread was not in the listing (for example a page boundary).
-		// The webhook ID is authoritative, so reply into it without an
-		// in-thread duplicate scan.
-		return payload.DiscussionID, nil, nil
+		// The thread was not in the listing (for example a page boundary or
+		// a deleted thread). The webhook ID is still authoritative, so try it
+		// after a marker scan through the notes endpoint.
+		return payload.DiscussionID, nil, false, nil
 	}
 	for _, discussion := range discussions {
 		for _, note := range discussion.Notes {
 			if note.ID == payload.NoteID {
-				return discussion.ID, discussion.Notes, nil
+				return discussion.ID, discussion.Notes, true, nil
 			}
 		}
 	}
-	return "", nil, nil
+	return "", nil, false, nil
 }
 
-func (w *CommandWorker) upsertThreadReply(ctx context.Context, token string, projectID, mrIID, sourceNoteID int64, discussionID string, notes []gitlab.Note, authorID int64, body string) error {
+func (w *CommandWorker) upsertThreadReply(ctx context.Context, token string, projectID, mrIID, sourceNoteID int64, discussionID string, notes []gitlab.Note, listed bool, authorID int64, preserve bool, body string) error {
 	prefix := commandReplyPrefix(sourceNoteID) + " "
-	for _, note := range notes {
-		if !strings.HasPrefix(note.Body, prefix) {
-			continue
+	if !listed {
+		// The explicit thread was not in the discussion listing. The notes
+		// endpoint still sees its replies, so a retry can find and update an
+		// existing acknowledgement instead of appending a duplicate.
+		all, err := w.gitlab.ListMRNotes(ctx, token, projectID, mrIID)
+		if err != nil {
+			return w.replyError(ctx, err)
 		}
-		if authorID > 0 && note.AuthorID != authorID {
-			continue
-		}
-		if note.Body == body {
+		notes = all
+	}
+	if note, ok := findCommandReply(notes, prefix, authorID); ok {
+		if preserve || note.Body == body {
 			return nil
 		}
 		if err := w.gitlab.UpdateMRNote(ctx, token, projectID, mrIID, note.ID, body); err != nil {
@@ -469,9 +484,49 @@ func (w *CommandWorker) upsertThreadReply(ctx context.Context, token string, pro
 		return nil
 	}
 	if _, err := w.gitlab.AddDiscussionNote(ctx, token, projectID, mrIID, discussionID, body); err != nil {
+		if gitlab.IsNotFound(err) {
+			// The thread was deleted upstream. Keep the acknowledgement by
+			// falling back to the historical top-level reply instead of
+			// retrying a missing discussion until quarantine.
+			return w.upsertTopLevelReply(ctx, token, projectID, mrIID, sourceNoteID, authorID, preserve, body)
+		}
 		return w.replyError(ctx, err)
 	}
 	return nil
+}
+
+func (w *CommandWorker) upsertTopLevelReply(ctx context.Context, token string, projectID, mrIID, sourceNoteID, authorID int64, preserve bool, body string) error {
+	prefix := commandReplyPrefix(sourceNoteID) + " "
+	notes, err := w.gitlab.ListMRNotes(ctx, token, projectID, mrIID)
+	if err != nil {
+		return w.replyError(ctx, err)
+	}
+	if note, ok := findCommandReply(notes, prefix, authorID); ok {
+		if preserve || note.Body == body {
+			return nil
+		}
+		if err := w.gitlab.UpdateMRNote(ctx, token, projectID, mrIID, note.ID, body); err != nil {
+			return w.replyError(ctx, err)
+		}
+		return nil
+	}
+	if _, err := w.gitlab.CreateMRNote(ctx, token, projectID, mrIID, body); err != nil {
+		return w.replyError(ctx, err)
+	}
+	return nil
+}
+
+func findCommandReply(notes []gitlab.Note, prefix string, authorID int64) (gitlab.Note, bool) {
+	for _, note := range notes {
+		if !strings.HasPrefix(note.Body, prefix) {
+			continue
+		}
+		if authorID > 0 && note.AuthorID != authorID {
+			continue
+		}
+		return note, true
+	}
+	return gitlab.Note{}, false
 }
 
 // replyTraceSuffix renders the one-line provenance of a thread reply: head,

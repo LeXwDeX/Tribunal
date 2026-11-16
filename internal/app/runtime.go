@@ -483,6 +483,7 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		Profiles:              cfg.Profiles,
 		BotUsernames:          cfg.GitLab.BotUsernames,
 		MentionMinAccessLevel: cfg.GitLab.MentionMinAccessLevel,
+		ReviewDefaults:        cfg.ReviewDefaults,
 		Logger:                logger,
 		MRLocks:               mrLocks,
 	})

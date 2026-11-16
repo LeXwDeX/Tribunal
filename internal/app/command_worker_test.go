@@ -1098,6 +1098,7 @@ func TestCommandWorkerMentionThreadReplyRetryDoesNotDuplicate(t *testing.T) {
 func TestCommandWorkerThreadReplyUpdatesStaleBody(t *testing.T) {
 	ctx := context.Background()
 	fakeStore := openFakeStore(t, newTestCipher(t))
+	fakeStore.generation = 1
 	api := defaultFakeGitLab()
 	api.discussions = []gitlab.Discussion{{
 		ID: "disc-1",

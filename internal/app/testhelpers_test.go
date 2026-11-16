@@ -641,7 +641,7 @@ func defaultFakeGitLab() *fakeGitLab {
 		awards:      map[int64][]gitlab.Award{},
 		nextAwardID: 500,
 		user:        &gitlab.User{ID: 9, Username: "review-bot"},
-		mr:          &gitlab.MergeRequest{IID: 7, State: "opened", TargetProjectID: 42, SHA: sha40},
+		mr:          &gitlab.MergeRequest{IID: 7, State: "opened", TargetProjectID: 42, TargetBranch: "main", SHA: sha40},
 		access:      30,
 	}
 }

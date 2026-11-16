@@ -562,6 +562,6 @@ user                本节点任务：MR 摘要、包内文件列表与 diff、f
 | `trigger` | `command`（斜杠命令）或 `mention`（@ 唤醒） |
 | `discussion_id` | 源注记所在线程；旧 payload 缺省为空 |
 
-mention 命中时 ingress 固定写入 `command=run`、项目默认档位、`full=false`、`trigger=mention`，并透传 `discussion_id`；其权限门槛取 `gitlab.mention_min_access_level`（默认 30），斜杠命令仍固定要求 30。
+mention 命中时 ingress 固定写入 `command=run`、项目默认档位、`full=false`、`trigger=mention`，并透传 `discussion_id`；其权限门槛取 `gitlab.mention_min_access_level`（默认 30），斜杠命令仍固定要求 30。mention 与自动触发一样经过 `skip_draft`、标签和目标分支过滤，被排除时回 `filtered` 回执且不入队；mention 按全量范围评审（评审服务只对 `mr_update`/`catch_up` 使用增量范围）。
 
-回执正文只有三部分：ack（accepted / denied / help / cancel / uncertain）、一行 head/代次（head 为 7 位短 SHA，代次来自入队事务，未知时省略）、指向唯一状态注记的 permalink（`<project.web_url>/-/merge_requests/<iid>#note_<note_id>`，取不到 note ID 时省略）。回执不复制状态表格、不新增完成注记；隐藏 marker `<!-- gitlab-ce-review:command-reply note=<source_note_id>` 与源注记绑定，同一线程内按 marker + bot 作者幂等更新或新增。findings 仍通过行内 discussion 发布。
+回执正文只有三部分：ack（accepted / denied / help / cancel / uncertain / filtered）、一行 head/代次（head 为 7 位短 SHA，代次来自入队事务，未知时省略）、指向唯一状态注记的 permalink（`<project.web_url>/-/merge_requests/<iid>#note_<note_id>`，取不到 note ID 时省略）。回执不复制状态表格、不新增完成注记；隐藏 marker `<!-- gitlab-ce-review:command-reply note=<source_note_id>` 与源注记绑定，同一线程内按 marker + bot 作者幂等更新或新增；重复命令身份不重写已有 accepted 回执的「代次」行。findings 仍通过行内 discussion 发布。

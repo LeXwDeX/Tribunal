@@ -47,6 +47,19 @@ func TestValidateMentionMinAccessLevel(t *testing.T) {
 	}
 }
 
+func TestValidateBotUsernamesRejectsBlankEntries(t *testing.T) {
+	setRequiredEnv(t)
+	cfg := loadConfig(t, writeConfig(t, "blank.yaml", validGitLab+"  bot_usernames: [\"  \"]\n"))
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "gitlab.bot_usernames[0]") {
+		t.Fatalf("Validate() = %v, want gitlab.bot_usernames[0]", err)
+	}
+	cfg = loadConfig(t, writeConfig(t, "padded.yaml", validGitLab+"  bot_usernames: [\" tribunal-bot \"]\n"))
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("padded non-blank username: Validate() = %v", err)
+	}
+}
+
 func TestCatchUpDefaultsAndDisable(t *testing.T) {
 	setRequiredEnv(t)
 	cfg := loadConfig(t, writeConfig(t, "config.yaml", validGitLab))
