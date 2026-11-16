@@ -588,11 +588,30 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 	if err != nil {
 		return err
 	}
-	// stage is a coarse marker for the permanent-failure log only.
+	// stage is a coarse marker for the failure log only.
 	stage := "control"
 	defer func() {
+		if err == nil || ctx.Err() != nil {
+			return
+		}
 		authFailure := tokenRejected(err)
-		if err == nil || ctx.Err() != nil || (!IsPermanentJob(err) && !authFailure) {
+		// A retried job returns its error so the worker schedules another
+		// attempt. Only the attempt that spends the retry budget is terminal;
+		// leaving the row at running would strand the MR forever (#485).
+		// ErrDeferred is not a failed attempt: the worker releases the lease
+		// and extends the budget, and reconciliation settles a deferral that
+		// outlives MaxDeferWindow.
+		exhausted := !IsPermanentJob(err) && !authFailure && !errors.Is(err, jobs.ErrDeferred) &&
+			job.MaxAttempts > 0 && job.Attempts >= job.MaxAttempts
+		if !IsPermanentJob(err) && !authFailure && !exhausted {
+			return
+		}
+		if exhausted {
+			s.logger.Warn("review run exhausted its retry budget",
+				"project_id", payload.ProjectID, "mr_iid", payload.MRIID, "generation", payload.Generation,
+				"attempts", job.Attempts, "max_attempts", job.MaxAttempts,
+				"error_class", errclass.Of(err), "stage", stage)
+			s.settleExhaustedRun(ctx, payload)
 			return
 		}
 		s.logger.Warn("review run failed permanently",
@@ -1172,4 +1191,78 @@ func (s *ReviewService) settlePublishFailure(ctx context.Context, payload review
 	}
 	s.settleReviewStatus(ctx, payload.ProjectID, payload.MRIID, payload.Generation, attempt,
 		payload.HeadSHA, payload.Profile, state, detail, payload.NoteID, reaction)
+}
+
+// settleExhaustedRun settles the terminal failed state of a review.run job
+// that spent its retry budget. The worker will not call the handler again, so
+// this is the last chance to leave a visible third state (#485). The shared
+// per-MR lock serializes the write with publication, status and commands, and
+// the generation/head fence leaves a successor generation's note untouched.
+func (s *ReviewService) settleExhaustedRun(ctx context.Context, payload reviewRunPayload) {
+	warn := func(step string, err error) {
+		s.logger.Warn("review run failure settlement failed",
+			"project_id", payload.ProjectID, "mr_iid", payload.MRIID,
+			"generation", payload.Generation, "step", step, "error_class", errclass.Of(err))
+	}
+	unlock, err := mrLockRegistry(s.mrLocks).lock(ctx, reviewMRLockKey(payload.ProjectID, payload.MRIID))
+	if err != nil {
+		warn("lock", err)
+		return
+	}
+	defer unlock()
+	control, err := s.store.GetReviewControl(ctx, payload.ProjectID, payload.MRIID)
+	if err != nil {
+		warn("control", err)
+		return
+	}
+	if control.Cancelled || control.Generation != payload.Generation ||
+		!strings.EqualFold(control.HeadSHA, payload.HeadSHA) {
+		return
+	}
+	// A run whose workflow already completed is owned by publication
+	// recovery: declaring it failed would hide a finished review (#485).
+	if s.reviewRunCompleted(ctx, payload) {
+		return
+	}
+	row, err := s.store.GetReviewStatus(ctx, payload.ProjectID, payload.MRIID)
+	if err != nil {
+		warn("status", err)
+		return
+	}
+	if row.Generation != payload.Generation || terminalReviewStatus(row.State) {
+		return
+	}
+	if payload.NoteID > 0 {
+		defer s.setReviewReaction(ctx, payload.ProjectID, payload.MRIID, payload.NoteID,
+			payload.Generation, reviewAwardNone)
+	}
+	ws := s.workspace.Get(payload.ProjectID)
+	_, token, err := s.projectToken(ctx, payload.ProjectID)
+	if err != nil {
+		// The failed goal below stays durable and its status job retries the
+		// note once the credential is usable again.
+		warn("token", err)
+		token = ""
+	}
+	if err := s.settleFailedStatusVisit(ctx, ws, row, payload.ProjectID, token, reviewExecutionFailedReason); err != nil {
+		warn("note", err)
+	}
+}
+
+// reviewRunCompleted reports whether this run's own workflow already reached
+// the completed state. The dossier carries the generation because the workflow
+// row does not store it.
+func (s *ReviewService) reviewRunCompleted(ctx context.Context, payload reviewRunPayload) bool {
+	wf, err := s.store.LatestReviewWorkflow(ctx, payload.ProjectID, payload.MRIID)
+	if err != nil {
+		return false
+	}
+	if wf == nil || wf.Status != string(dag.WorkflowCompleted) {
+		return false
+	}
+	record, err := s.store.GetWorkflowDossier(ctx, wf.ID)
+	if err != nil {
+		return false
+	}
+	return record != nil && record.Generation == payload.Generation
 }

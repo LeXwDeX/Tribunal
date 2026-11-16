@@ -182,7 +182,11 @@ func (s *Store) setReviewStatusTx(ctx context.Context, tx *sql.Tx, goal store.Re
 				WHEN excluded.final_body <> '' THEN excluded.final_body
 				ELSE review_status.final_body
 			END,
-			note_id = NULL,
+			-- note_id is owned by the status writer receipt: the bot keeps one
+			-- status note per merge request, and readers (for example the
+			-- mention thread receipt) need its id before the next status job
+			-- runs. Only a write that creates or recreates the note replaces
+			-- the id, so a generation or state change must preserve it (#485).
 			body_hash = '',
 			version = review_status.version + 1,
 			last_error = '',

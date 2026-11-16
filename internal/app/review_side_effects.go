@@ -291,6 +291,44 @@ func (s *ReviewService) settleCancelledStatusVisit(ctx context.Context, ws *work
 	return s.writeTerminalStatusVisit(ctx, ws, row, projectID, token, reviewStatusCancelled, "review cancelled", "", selfHeal)
 }
 
+// settleFailedStatusVisit persists the terminal failed state and writes its
+// note. The durable goal is written before GitLab is called, so a transient
+// note failure leaves the row pending for its queued status job instead of
+// keeping the MR at running (#485).
+func (s *ReviewService) settleFailedStatusVisit(ctx context.Context, ws *workspace.Workspace, row *store.ReviewStatus, projectID int64, token, detail string) error {
+	written, err := s.store.SetReviewStatus(ctx, store.ReviewStatusGoal{
+		ProjectID: row.ProjectID, MRIID: row.MRIID, Generation: row.Generation,
+		Attempt: row.Attempt, HeadSHA: row.HeadSHA, Profile: row.Profile,
+		State: reviewStatusFailed, Detail: detail,
+	})
+	if errors.Is(err, store.ErrSuperseded) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !written {
+		// A terminal state or a higher attempt already owns this row.
+		return nil
+	}
+	// Re-read only to pick up the version this write created. A generation
+	// bump cannot land while the caller holds the shared per-MR lock, but a
+	// changed row still keeps the successor's ownership.
+	current, err := s.store.GetReviewStatus(ctx, row.ProjectID, row.MRIID)
+	if err != nil {
+		return err
+	}
+	if current.Generation != row.Generation || !strings.EqualFold(current.HeadSHA, row.HeadSHA) ||
+		current.State != reviewStatusFailed {
+		return nil
+	}
+	if ws == nil || token == "" || s.status == nil {
+		// The queued status job writes the note once the credential is usable.
+		return nil
+	}
+	return s.writeTerminalStatusVisit(ctx, ws, current, projectID, token, reviewStatusFailed, detail, "", false)
+}
+
 // writeTerminalStatusVisit renders and writes one terminal note, then records
 // the visit. Transient upstream errors stay retryable; terminal ones settle the
 // row with a bounded reason.
