@@ -105,6 +105,12 @@ type Note struct {
 	Resolved       bool
 	Position       *Position
 	CreatedAt      *time.Time
+	// DiscussionID is the thread the note belongs to. GitLab's notes API does
+	// not return discussion_id on note objects (the SDK Note has no such
+	// field), so this is populated only when a note is converted from a
+	// discussion (ListDiscussions, CreateDiscussion) and stays empty for
+	// ListMRNotes and note-creation responses.
+	DiscussionID string
 }
 
 // Discussion is a merge request discussion thread.
