@@ -70,6 +70,7 @@ type validateProjectResponse struct {
 	Warnings          []app.ProjectWarning `json:"warnings"`
 	TokenExpiresAt    *time.Time           `json:"token_expires_at,omitempty"`
 	GitHead           string               `json:"git_head"`
+	SharedCredential  bool                 `json:"shared_credential"`
 }
 
 type updateProjectRequest struct {
@@ -156,6 +157,7 @@ func (s *Server) handleValidateProject(w http.ResponseWriter, r *http.Request) {
 	result, err := s.projects.Validate(r.Context(), app.ValidateProjectInput{
 		Project:              request.Project,
 		AccessToken:          request.Token,
+		OwnerUserID:          max(currentUserID(r), 0),
 		TrustedPlatformAdmin: s.isPlatformAdmin(r) || currentUserID(r) == 0,
 	})
 	if err != nil {
@@ -181,6 +183,7 @@ func (s *Server) handleValidateProject(w http.ResponseWriter, r *http.Request) {
 		TokenExpiresAt:    result.TokenExpiresAt,
 		GitHead:           result.GitHead,
 		Warnings:          warningsOrEmpty(result.Warnings),
+		SharedCredential:  result.SharedCredential,
 	})
 }
 

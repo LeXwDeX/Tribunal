@@ -58,7 +58,10 @@ type RegisterInput struct {
 	// TrustedPlatformAdmin skips the GitLab membership check. Platform
 	// administrators manage every registered project, so they may register a
 	// project without joining it first; the static bootstrap bearer is also
-	// trusted because it has no GitLab identity to check.
+	// trusted because it has no GitLab identity to check. In shared-credential
+	// mode only the registrant check is skipped: the shared bot's Maintainer
+	// check always runs, and its failure keeps the detailed field for a
+	// trusted caller.
 	TrustedPlatformAdmin bool
 }
 
@@ -66,6 +69,9 @@ type RegisterInput struct {
 type ValidateProjectInput struct {
 	Project     string
 	AccessToken string
+	// OwnerUserID is the signed-in caller. Shared-credential validation checks
+	// that this GitLab user is at least a Reporter, matching Register.
+	OwnerUserID int64
 	// TrustedPlatformAdmin skips the Reporter membership requirement for
 	// platform administrators and the static bootstrap bearer, matching
 	// Register. The token owner is still identified for the response.
@@ -84,6 +90,9 @@ type ProjectValidation struct {
 	TokenExpiresAt    *time.Time
 	GitHead           string
 	Warnings          []ProjectWarning
+	// SharedCredential reports that the check used the platform shared bot
+	// because no project token was supplied.
+	SharedCredential bool
 }
 
 // ProjectWarning is a non-blocking, fixed-text notice about a project token.
@@ -174,6 +183,9 @@ type ProjectService struct {
 	mu             sync.Mutex
 	sharedHealthMu sync.Mutex
 	sharedHealth   *SharedBotCredentialHealth
+	// sharedHealthFlight lets concurrent cache misses share one in-flight probe
+	// without a resident goroutine; waiters block on its done channel.
+	sharedHealthFlight *sharedBotHealthFlight
 }
 
 // ErrProjectValidationUnavailable reports that read-only validation was not
@@ -319,28 +331,58 @@ func (s *ProjectService) Register(ctx context.Context, in RegisterInput) (*Regis
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, err
 		}
-		s.logger.Warn("GitLab project lookup failed", "status", gitlab.StatusOf(err))
-		return nil, upstreamError(gitlab.StatusOf(err))
+		status := gitlab.StatusOf(err)
+		s.logger.Warn("GitLab project lookup failed", "status", status)
+		if sharedMode && (status == http.StatusUnauthorized || status == http.StatusForbidden) {
+			// The shared credential itself failed, before any project-specific
+			// check; name the platform credential instead of a project token.
+			return nil, sharedBotCredentialError(status)
+		}
+		if !in.TrustedPlatformAdmin && (status == http.StatusForbidden || status == http.StatusNotFound) {
+			// A non-trusted caller must not be able to tell "the shared bot
+			// cannot see this project" from "it exists but I am not a member".
+			s.logger.Warn("project precheck denied", "reason", "project_lookup", "status", status)
+			return nil, registrationPrecheckDenied()
+		}
+		return nil, upstreamError(status)
 	}
 	if err := s.verifyProject(project, ref, false); err != nil {
 		return nil, err
 	}
 	var info *gitlab.TokenInfo
 	if sharedMode {
+		// The shared credential must be usable by itself, not only readable
+		// for this particular project: a missing scope would otherwise
+		// register successfully and fail every clone later.
+		info, err = s.gitlab.GetTokenInfo(ctx, s.tokens.Shared())
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return nil, err
+			}
+			status := gitlab.StatusOf(err)
+			s.logger.Warn("GitLab shared token lookup failed", "status", status)
+			if status == http.StatusUnauthorized || status == http.StatusForbidden {
+				return nil, sharedBotCredentialError(status)
+			}
+			return nil, upstreamError(status)
+		}
+		if err := validateSharedBotTokenInfo(info, s.now()); err != nil {
+			return nil, err
+		}
 		// The shared bot must be able to create the webhook and publish
 		// reviews, independent of who registers the project.
 		if err := s.verifySharedBotMembership(ctx, project.ID); err != nil {
-			return nil, err
+			return nil, s.precheckFailure(in.TrustedPlatformAdmin, project.ID, "shared_bot_membership", err)
 		}
 		if !in.TrustedPlatformAdmin {
 			if err := s.verifySharedRegistrantMembership(ctx, project.ID, in.OwnerUserID); err != nil {
-				return nil, err
+				return nil, s.precheckFailure(in.TrustedPlatformAdmin, project.ID, "registrant_membership", err)
 			}
 		}
 	} else {
 		if !in.TrustedPlatformAdmin {
 			if err := s.verifyRegistrationMembership(ctx, in.AccessToken, project.ID); err != nil {
-				return nil, err
+				return nil, s.precheckFailure(in.TrustedPlatformAdmin, project.ID, "registrant_membership", err)
 			}
 		}
 		info, err = s.gitlab.GetTokenInfo(ctx, in.AccessToken)
@@ -523,33 +565,49 @@ func (s *ProjectService) verifyRegistrationMembership(ctx context.Context, token
 // project before anything is persisted. Creating a webhook needs Maintainer;
 // failing here keeps registration atomic and names the actual credential.
 func (s *ProjectService) verifySharedBotMembership(ctx context.Context, projectID int64) error {
+	_, _, err := s.sharedBotMembership(ctx, projectID)
+	return err
+}
+
+// sharedBotMembership resolves the shared bot identity and its access on the
+// project. Validation reuses the pair for its response; registration only
+// needs the error.
+func (s *ProjectService) sharedBotMembership(ctx context.Context, projectID int64) (*gitlab.User, int, error) {
 	token := s.tokens.Shared()
 	user, err := s.gitlab.CurrentUser(ctx, token)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return err
+			return nil, 0, err
 		}
-		s.logger.Warn("shared bot identity lookup failed", "status", gitlab.StatusOf(err))
-		return upstreamError(gitlab.StatusOf(err))
+		status := gitlab.StatusOf(err)
+		s.logger.Warn("shared bot identity lookup failed", "status", status)
+		if status == http.StatusUnauthorized || status == http.StatusForbidden {
+			return nil, 0, sharedBotCredentialError(status)
+		}
+		return nil, 0, upstreamError(status)
 	}
 	if user == nil || user.ID <= 0 || strings.TrimSpace(user.Username) == "" {
-		return upstreamError(0)
+		return nil, 0, upstreamError(0)
 	}
 	access, err := s.gitlab.GetMemberAccess(ctx, token, projectID, user.ID)
 	if err != nil {
 		if gitlab.IsNotFound(err) {
-			return sharedBotAccessError()
+			return nil, 0, sharedBotAccessError()
 		}
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return err
+			return nil, 0, err
 		}
-		s.logger.Warn("shared bot member lookup failed", "status", gitlab.StatusOf(err))
-		return upstreamError(gitlab.StatusOf(err))
+		status := gitlab.StatusOf(err)
+		s.logger.Warn("shared bot member lookup failed", "status", status)
+		if status == http.StatusUnauthorized || status == http.StatusForbidden {
+			return nil, 0, sharedBotCredentialError(status)
+		}
+		return nil, 0, upstreamError(status)
 	}
 	if access < maintainerAccessLevel {
-		return sharedBotAccessError()
+		return nil, 0, sharedBotAccessError()
 	}
-	return nil
+	return user, access, nil
 }
 
 // sharedBotAccessError separates a shared-bot permission problem from a
@@ -577,8 +635,12 @@ func (s *ProjectService) verifySharedRegistrantMembership(ctx context.Context, p
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
 		}
-		s.logger.Warn("GitLab registrant member lookup failed", "status", gitlab.StatusOf(err))
-		return upstreamError(gitlab.StatusOf(err))
+		status := gitlab.StatusOf(err)
+		s.logger.Warn("GitLab registrant member lookup failed", "status", status)
+		if status == http.StatusUnauthorized || status == http.StatusForbidden {
+			return sharedBotCredentialError(status)
+		}
+		return upstreamError(status)
 	}
 	if access < reporterAccessLevel {
 		return validationError("access level is insufficient",
@@ -587,8 +649,69 @@ func (s *ProjectService) verifySharedRegistrantMembership(ctx context.Context, p
 	return nil
 }
 
+// precheckFailure keeps membership denial details for trusted operators while
+// giving every non-trusted caller the same sanitized text. The fine-grained
+// reason is written to the audit log, never to the response: otherwise any
+// signed-in user could enumerate shared-bot-visible projects and their access
+// state by comparing validation errors.
+func (s *ProjectService) precheckFailure(trusted bool, projectID int64, reason string, err error) error {
+	s.logger.Warn("project precheck denied", "project_id", projectID, "reason", reason, "status", gitlab.StatusOf(err))
+	if trusted {
+		return err
+	}
+	var appErr *Error
+	if errors.As(err, &appErr) && appErr.Code == "validation_failed" {
+		return registrationPrecheckDenied()
+	}
+	return err
+}
+
+// registrationPrecheckDenied is the single denial text non-trusted registrants
+// see for every precheck failure, whatever the real reason.
+func registrationPrecheckDenied() *Error {
+	return validationError("project registration is not permitted",
+		Detail{Field: "project", Message: "the project cannot be registered by this account"})
+}
+
+// sharedBotCredentialError names the instance-wide credential when GitLab
+// rejects the shared token itself. The message never contains the token.
+func sharedBotCredentialError(status int) error {
+	err := upstreamError(status)
+	switch status {
+	case http.StatusUnauthorized:
+		err.Details = []Detail{{Field: "shared_bot_credential", Message: "the shared bot credential is invalid, expired or revoked; update the credential referenced by gitlab.bot_token_env and restart the service"}}
+	case http.StatusForbidden:
+		err.Details = []Detail{{Field: "shared_bot_credential", Message: "the shared bot credential is not permitted; check its scopes and the shared bot's project role"}}
+	}
+	return err
+}
+
+// validateSharedBotTokenInfo applies the project-token scope and expiry rules
+// to the shared credential with shared-specific field names, before anything
+// is persisted or a webhook is created.
+func validateSharedBotTokenInfo(info *gitlab.TokenInfo, now time.Time) error {
+	if info == nil {
+		return upstreamError(0)
+	}
+	if !info.Active || info.Revoked {
+		return validationError("shared bot credential is not active",
+			Detail{Field: "shared_bot_credential", Message: "must be active and not revoked"})
+	}
+	if info.ExpiresAt != nil && now.UTC().Format("2006-01-02") > info.ExpiresAt.UTC().Format("2006-01-02") {
+		return validationError("shared bot credential is expired",
+			Detail{Field: "shared_bot_credential", Message: "must not be expired"})
+	}
+	if scope := missingTokenScope(info); scope != "" {
+		return validationError("shared bot credential scopes are insufficient",
+			Detail{Field: "shared_bot_credential", Message: scope + " scope is required"})
+	}
+	return nil
+}
+
 // Validate performs a read-only connection check. It does not persist the
 // project, encrypt the token, create a webhook, enqueue a job, or call a model.
+// In shared-credential mode an empty AccessToken validates the shared bot and
+// the caller's membership through the same prechecks Register performs.
 func (s *ProjectService) Validate(ctx context.Context, in ValidateProjectInput) (*ProjectValidation, error) {
 	if s.gitLabOrigin == nil || s.probeRemote == nil {
 		return nil, ErrProjectValidationUnavailable
@@ -597,52 +720,99 @@ func (s *ProjectService) Validate(ctx context.Context, in ValidateProjectInput) 
 	if err != nil {
 		return nil, validationError("invalid project", Detail{Field: "project", Message: "must be a positive numeric ID, namespace/path, or URL under the configured GitLab root"})
 	}
-	if strings.TrimSpace(in.AccessToken) == "" {
+	sharedMode := strings.TrimSpace(in.AccessToken) == "" && s.tokens.HasShared()
+	if strings.TrimSpace(in.AccessToken) == "" && !sharedMode {
 		return nil, validationError("access token is required", Detail{Field: "token", Message: "must not be empty"})
+	}
+	credential := in.AccessToken
+	if sharedMode {
+		credential = s.tokens.Shared()
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, s.validationTimeout)
 	defer cancel()
 
-	project, err := s.gitlab.GetProject(ctx, in.AccessToken, projectRefString(ref))
+	project, err := s.gitlab.GetProject(ctx, credential, projectRefString(ref))
 	if err != nil {
+		if sharedMode {
+			status := gitlab.StatusOf(err)
+			if status == http.StatusUnauthorized || status == http.StatusForbidden {
+				return nil, sharedBotCredentialError(status)
+			}
+			if !in.TrustedPlatformAdmin && gitlab.IsNotFound(err) {
+				s.logger.Warn("validation precheck denied", "reason", "project_lookup", "status", status)
+				return nil, registrationPrecheckDenied()
+			}
+		}
 		return nil, s.validationUpstreamError(ctx, "get_project", err)
 	}
 	if err := s.verifyProject(project, ref, true); err != nil {
 		return nil, err
 	}
 
-	user, err := s.gitlab.CurrentUser(ctx, in.AccessToken)
-	if err != nil {
-		return nil, s.validationUpstreamError(ctx, "current_user", err)
-	}
-	if user == nil || user.ID <= 0 || strings.TrimSpace(user.Username) == "" {
-		return nil, upstreamError(0)
-	}
-	access, memberErr := s.gitlab.GetMemberAccess(ctx, in.AccessToken, project.ID, user.ID)
-	if memberErr != nil {
-		if !in.TrustedPlatformAdmin {
-			if gitlab.IsNotFound(memberErr) {
-				return nil, validationError("access level is insufficient",
-					Detail{Field: "access_level", Message: "Reporter or higher is required"})
+	var (
+		username string
+		access   int
+		info     *gitlab.TokenInfo
+		warnings []ProjectWarning
+	)
+	if sharedMode {
+		info, err = s.gitlab.GetTokenInfo(ctx, credential)
+		if err != nil {
+			status := gitlab.StatusOf(err)
+			if status == http.StatusUnauthorized || status == http.StatusForbidden {
+				return nil, sharedBotCredentialError(status)
 			}
-			return nil, s.validationUpstreamError(ctx, "get_member", memberErr)
+			return nil, s.validationUpstreamError(ctx, "get_token", err)
 		}
-		access = 0
-	} else if access < reporterAccessLevel && !in.TrustedPlatformAdmin {
-		return nil, validationError("access level is insufficient",
-			Detail{Field: "access_level", Message: "Reporter or higher is required"})
+		if err := validateSharedBotTokenInfo(info, s.now()); err != nil {
+			return nil, err
+		}
+		user, botAccess, err := s.sharedBotMembership(ctx, project.ID)
+		if err != nil {
+			return nil, s.precheckFailure(in.TrustedPlatformAdmin, project.ID, "shared_bot_membership", err)
+		}
+		if !in.TrustedPlatformAdmin {
+			if err := s.verifySharedRegistrantMembership(ctx, project.ID, in.OwnerUserID); err != nil {
+				return nil, s.precheckFailure(in.TrustedPlatformAdmin, project.ID, "registrant_membership", err)
+			}
+		}
+		username, access = user.Username, botAccess
+	} else {
+		user, err := s.gitlab.CurrentUser(ctx, credential)
+		if err != nil {
+			return nil, s.validationUpstreamError(ctx, "current_user", err)
+		}
+		if user == nil || user.ID <= 0 || strings.TrimSpace(user.Username) == "" {
+			return nil, upstreamError(0)
+		}
+		var memberErr error
+		access, memberErr = s.gitlab.GetMemberAccess(ctx, credential, project.ID, user.ID)
+		if memberErr != nil {
+			if !in.TrustedPlatformAdmin {
+				if gitlab.IsNotFound(memberErr) {
+					return nil, validationError("access level is insufficient",
+						Detail{Field: "access_level", Message: "Reporter or higher is required"})
+				}
+				return nil, s.validationUpstreamError(ctx, "get_member", memberErr)
+			}
+			access = 0
+		} else if access < reporterAccessLevel && !in.TrustedPlatformAdmin {
+			return nil, validationError("access level is insufficient",
+				Detail{Field: "access_level", Message: "Reporter or higher is required"})
+		}
+		info, err = s.gitlab.GetTokenInfo(ctx, credential)
+		if err != nil {
+			return nil, s.validationUpstreamError(ctx, "get_token", err)
+		}
+		if err := validateTokenInfo(info, s.now()); err != nil {
+			return nil, err
+		}
+		username = user.Username
+		warnings = validationWarnings(access, in.TrustedPlatformAdmin)
 	}
 
-	info, err := s.gitlab.GetTokenInfo(ctx, in.AccessToken)
-	if err != nil {
-		return nil, s.validationUpstreamError(ctx, "get_token", err)
-	}
-	if err := validateTokenInfo(info, s.now()); err != nil {
-		return nil, err
-	}
-
-	head, err := s.probeRemote(ctx, project.HTTPURLToRepo, in.AccessToken)
+	head, err := s.probeRemote(ctx, project.HTTPURLToRepo, credential)
 	if err != nil {
 		if errors.Is(err, context.Canceled) && !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return nil, err
@@ -660,12 +830,13 @@ func (s *ProjectService) Validate(ctx context.Context, in ValidateProjectInput) 
 		PathWithNamespace: project.PathWithNamespace,
 		WebURL:            project.WebURL,
 		DefaultBranch:     project.DefaultBranch,
-		Username:          user.Username,
+		Username:          username,
 		AccessLevel:       access,
 		TokenScopes:       append([]string(nil), info.Scopes...),
 		TokenExpiresAt:    info.ExpiresAt,
 		GitHead:           strings.ToLower(head),
-		Warnings:          validationWarnings(access, in.TrustedPlatformAdmin),
+		Warnings:          warnings,
+		SharedCredential:  sharedMode,
 	}, nil
 }
 
@@ -1208,7 +1379,11 @@ func (s *ProjectService) failWebhook(ctx context.Context, project *store.Project
 			message += ": project token rejected"
 		}
 	case http.StatusForbidden:
-		message += ": Maintainer role required"
+		if s.tokens.UsesShared(project) {
+			message += ": shared bot lacks the Maintainer role"
+		} else {
+			message += ": Maintainer role required"
+		}
 	}
 	s.markWebhookFailed(ctx, project, message)
 	s.logger.Warn("GitLab webhook provisioning failed", "project_id", project.ID, "operation", operation, "status", status)
@@ -1222,13 +1397,17 @@ func webhookUpstreamError(status int, sharedCredential bool) error {
 	err := upstreamError(status)
 	switch status {
 	case http.StatusUnauthorized:
-		message := "the project token is invalid, expired or revoked; replace it"
 		if sharedCredential {
-			message = "the shared bot credential is invalid, expired or revoked; replace the environment variable and restart"
+			err.Details = []Detail{{Field: "shared_bot_credential", Message: "the shared bot credential is invalid, expired or revoked; update the credential referenced by gitlab.bot_token_env and restart the service"}}
+		} else {
+			err.Details = []Detail{{Field: "token", Message: "the project token is invalid, expired or revoked; replace it"}}
 		}
-		err.Details = []Detail{{Field: "token", Message: message}}
 	case http.StatusForbidden:
-		err.Details = []Detail{{Field: "access_level", Message: "managing project webhooks requires the Maintainer role; use a Maintainer token or have a Maintainer manage the webhook in GitLab"}}
+		if sharedCredential {
+			err.Details = []Detail{{Field: "shared_bot_access", Message: "managing project webhooks requires the shared bot to hold Maintainer on this project; grant the role or have a Maintainer manage the webhook in GitLab"}}
+		} else {
+			err.Details = []Detail{{Field: "access_level", Message: "managing project webhooks requires the Maintainer role; use a Maintainer token or have a Maintainer manage the webhook in GitLab"}}
+		}
 	}
 	return err
 }

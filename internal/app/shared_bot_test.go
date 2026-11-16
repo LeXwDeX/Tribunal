@@ -168,7 +168,12 @@ func newSharedBotProjectService(t *testing.T, st *sqlite.Store, api gitlab.API, 
 		PublicURL:      "https://review.example.com",
 		SharedBotToken: shared,
 		Workspace:      workspace.NewManager(t.TempDir(), nil),
-		Now:            now,
+		GitLabURL:      "https://gitlab.example.com",
+		ProbeRemote: func(context.Context, string, string) (string, error) {
+			return sha40, nil
+		},
+		ValidationTimeout: 2 * time.Second,
+		Now:               now,
 	})
 	if err != nil {
 		t.Fatalf("NewProjectService: %v", err)
@@ -314,8 +319,19 @@ func TestRegisterSharedCredentialURLOnlyCreatesWebhook(t *testing.T) {
 	if got := api.usedTokens("CreateProjectHook"); len(got) != 1 || got[0] != sharedBotToken {
 		t.Fatalf("CreateProjectHook tokens = %v", got)
 	}
-	if calls := api.callCount("GetTokenInfo"); calls != 0 {
-		t.Fatalf("GetTokenInfo calls = %d, want shared mode to skip project token info", calls)
+	if got := api.usedTokens("GetTokenInfo"); len(got) != 1 || got[0] != sharedBotToken {
+		t.Fatalf("GetTokenInfo calls = %v, want one shared-credential scope check", got)
+	}
+	hasGrant, err := st.HasProjectGrant(ctx, registrantUserID, 42)
+	if err != nil || !hasGrant {
+		t.Fatalf("owner grant = %v, %v; want manage grant", hasGrant, err)
+	}
+	grants, _, err := st.ListProjectGrants(ctx, 42, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(grants) != 1 || grants[0].UserID != registrantUserID || grants[0].Role != store.ProjectAccessManage {
+		t.Fatalf("owner grants = %+v, want one manage grant", grants)
 	}
 }
 
@@ -327,14 +343,9 @@ func TestRegisterSharedCredentialRequiresMaintainerBot(t *testing.T) {
 	api.setAccess(sharedBotToken, botUserID, 30)
 	service := newSharedBotProjectService(t, st, api, sharedBotToken, nil)
 
-	_, err := service.Register(ctx, RegisterInput{Project: "42", OwnerUserID: registrantUserID})
-	assertAppError(t, err, "validation_failed", "shared_bot_access")
-	if _, err := st.GetProject(ctx, 42); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("project persisted after bot check: %v", err)
-	}
-	if len(api.hookSpecs) != 0 {
-		t.Fatalf("hook created after bot check: %+v", api.hookSpecs)
-	}
+	_, err := service.Register(ctx, RegisterInput{Project: "42", OwnerUserID: registrantUserID, AutoWebhook: true})
+	assertAppError(t, err, "validation_failed", "project")
+	assertRegisterResidueFree(t, ctx, st, api)
 }
 
 func TestRegisterSharedCredentialRejectsNonMemberRegistrant(t *testing.T) {
@@ -345,11 +356,131 @@ func TestRegisterSharedCredentialRejectsNonMemberRegistrant(t *testing.T) {
 	api.setAccess(sharedBotToken, registrantUserID, 10)
 	service := newSharedBotProjectService(t, st, api, sharedBotToken, nil)
 
-	_, err := service.Register(ctx, RegisterInput{Project: "42", OwnerUserID: registrantUserID})
-	assertAppError(t, err, "validation_failed", "access_level")
+	_, err := service.Register(ctx, RegisterInput{Project: "42", OwnerUserID: registrantUserID, AutoWebhook: true})
+	assertAppError(t, err, "validation_failed", "project")
+	assertRegisterResidueFree(t, ctx, st, api)
+}
+
+// assertRegisterResidueFree proves a failed precheck left no project, owner
+// grant, workspace or GitLab hook behind.
+func assertRegisterResidueFree(t *testing.T, ctx context.Context, st *sqlite.Store, api *sharedBotAPI) {
+	t.Helper()
 	if _, err := st.GetProject(ctx, 42); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("project persisted after registrant denied: %v", err)
+		t.Fatalf("project persisted after failed precheck: %v", err)
 	}
+	if granted, err := st.HasProjectGrant(ctx, registrantUserID, 42); err != nil || granted {
+		t.Fatalf("owner grant after failed precheck = %v, %v", granted, err)
+	}
+	if projects, err := st.ListProjects(ctx); err != nil || len(projects) != 0 {
+		t.Fatalf("projects after failed precheck = %v, %v", projects, err)
+	}
+	if len(api.hookSpecs) != 0 || api.callCount("CreateProjectHook") != 0 {
+		t.Fatalf("hook created after failed precheck: %+v", api.hookSpecs)
+	}
+}
+
+func TestRegisterSharedCredentialMissingScopeRejectedBeforePersistence(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	api := newSharedBotAPI()
+	configureSharedBot(api)
+	api.infoByToken[sharedBotToken] = &gitlab.TokenInfo{Scopes: []string{"api"}, Active: true}
+	service := newSharedBotProjectService(t, st, api, sharedBotToken, nil)
+
+	_, err := service.Register(ctx, RegisterInput{Project: "42", OwnerUserID: registrantUserID, AutoWebhook: true})
+	assertAppError(t, err, "validation_failed", "shared_bot_credential")
+	assertRegisterResidueFree(t, ctx, st, api)
+	// Membership checks must not run once the credential itself is unusable.
+	if api.callCount("GetMemberAccess") != 0 {
+		t.Fatalf("member checks ran for an unusable shared credential: %v", api.tokenUses)
+	}
+}
+
+func TestRegisterSharedCredentialExpiredRejectedBeforePersistence(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	api := newSharedBotAPI()
+	configureSharedBot(api)
+	expired := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	api.infoByToken[sharedBotToken] = &gitlab.TokenInfo{
+		Scopes: []string{"api", "read_repository"}, Active: true, ExpiresAt: &expired,
+	}
+	now := time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC)
+	service := newSharedBotProjectService(t, st, api, sharedBotToken, func() time.Time { return now })
+
+	_, err := service.Register(ctx, RegisterInput{Project: "42", OwnerUserID: registrantUserID, AutoWebhook: true})
+	assertAppError(t, err, "validation_failed", "shared_bot_credential")
+	assertRegisterResidueFree(t, ctx, st, api)
+}
+
+func TestRegisterSharedCredentialNonTrustedPrechecksAreIndistinguishable(t *testing.T) {
+	cases := []struct {
+		name      string
+		configure func(*sharedBotAPI)
+		input     RegisterInput
+	}{
+		{
+			name: "bot not maintainer",
+			configure: func(api *sharedBotAPI) {
+				api.setAccess(sharedBotToken, botUserID, 30)
+			},
+			input: RegisterInput{Project: "42", OwnerUserID: registrantUserID, AutoWebhook: true},
+		},
+		{
+			name: "registrant not reporter",
+			configure: func(api *sharedBotAPI) {
+				api.setAccess(sharedBotToken, registrantUserID, 10)
+			},
+			input: RegisterInput{Project: "42", OwnerUserID: registrantUserID, AutoWebhook: true},
+		},
+		{
+			name:      "registrant identity missing",
+			configure: func(*sharedBotAPI) {},
+			input:     RegisterInput{Project: "42", AutoWebhook: true},
+		},
+	}
+	var first *Error
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			st := openTestStore(t)
+			api := newSharedBotAPI()
+			configureSharedBot(api)
+			tc.configure(api)
+			service := newSharedBotProjectService(t, st, api, sharedBotToken, nil)
+			_, err := service.Register(ctx, tc.input)
+			var appErr *Error
+			if !errors.As(err, &appErr) {
+				t.Fatalf("error = %v, want *app.Error", err)
+			}
+			if first == nil {
+				first = appErr
+				if appErr.Code != "validation_failed" || appErr.Message != "project registration is not permitted" {
+					t.Fatalf("unexpected unified error: %#v", appErr)
+				}
+			}
+			if appErr.Code != first.Code || appErr.Message != first.Message ||
+				len(appErr.Details) != len(first.Details) || len(appErr.Details) != 1 ||
+				appErr.Details[0] != first.Details[0] {
+				t.Fatalf("error differs between precheck causes: %#v vs %#v", appErr, first)
+			}
+			assertRegisterResidueFree(t, ctx, st, api)
+		})
+	}
+}
+
+func TestRegisterSharedCredentialTrustedAdminKeepsDetailedPrecheck(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	api := newSharedBotAPI()
+	configureSharedBot(api)
+	api.setAccess(sharedBotToken, botUserID, 30)
+	service := newSharedBotProjectService(t, st, api, sharedBotToken, nil)
+
+	_, err := service.Register(ctx, RegisterInput{
+		Project: "42", OwnerUserID: registrantUserID, AutoWebhook: true, TrustedPlatformAdmin: true,
+	})
+	assertAppError(t, err, "validation_failed", "shared_bot_access")
 }
 
 func TestRegisterSharedCredentialTrustedAdminSkipsRegistrantCheck(t *testing.T) {
@@ -379,8 +510,8 @@ func TestRegisterSharedCredentialRequiresRegistrantIdentity(t *testing.T) {
 	configureSharedBot(api)
 	service := newSharedBotProjectService(t, st, api, sharedBotToken, nil)
 
-	_, err := service.Register(ctx, RegisterInput{Project: "42"})
-	assertAppError(t, err, "validation_failed", "token")
+	_, err := service.Register(ctx, RegisterInput{Project: "42", AutoWebhook: true})
+	assertAppError(t, err, "validation_failed", "project")
 	if _, err := st.GetProject(ctx, 42); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("project persisted without registrant identity: %v", err)
 	}
@@ -442,6 +573,131 @@ func TestRegisterPerProjectTokenOutranksSharedCredential(t *testing.T) {
 	}
 }
 
+func TestValidateSharedCredentialWithoutProjectToken(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	api := newSharedBotAPI()
+	configureSharedBot(api)
+	service := newSharedBotProjectService(t, st, api, sharedBotToken, nil)
+
+	result, err := service.Validate(ctx, ValidateProjectInput{Project: "42", OwnerUserID: registrantUserID})
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !result.SharedCredential || result.Username != botUsername || result.AccessLevel != botMaintainerRole {
+		t.Fatalf("validation = %+v", result)
+	}
+	if strings.Join(result.TokenScopes, ",") != "api,read_repository" || result.GitHead != sha40 {
+		t.Fatalf("scopes/head = %v/%s", result.TokenScopes, result.GitHead)
+	}
+	if _, err := st.GetProject(ctx, 42); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("validation persisted a project: %v", err)
+	}
+	if len(api.hookSpecs) != 0 {
+		t.Fatalf("validation created a hook: %+v", api.hookSpecs)
+	}
+	for _, token := range api.usedTokens("GetProject") {
+		if token != sharedBotToken {
+			t.Fatalf("validation used %q instead of the shared bot", token)
+		}
+	}
+}
+
+func TestValidateSharedCredentialRejectsMissingScope(t *testing.T) {
+	api := newSharedBotAPI()
+	configureSharedBot(api)
+	api.infoByToken[sharedBotToken] = &gitlab.TokenInfo{Scopes: []string{"api"}, Active: true}
+	service := newSharedBotProjectService(t, openTestStore(t), api, sharedBotToken, nil)
+
+	_, err := service.Validate(context.Background(), ValidateProjectInput{Project: "42", OwnerUserID: registrantUserID})
+	assertAppError(t, err, "validation_failed", "shared_bot_credential")
+}
+
+func TestValidateSharedCredentialPrechecksAreIndistinguishable(t *testing.T) {
+	cases := []struct {
+		name      string
+		configure func(*sharedBotAPI)
+		input     ValidateProjectInput
+	}{
+		{
+			name:      "bot not maintainer",
+			configure: func(api *sharedBotAPI) { api.setAccess(sharedBotToken, botUserID, 30) },
+			input:     ValidateProjectInput{Project: "42", OwnerUserID: registrantUserID},
+		},
+		{
+			name:      "registrant not reporter",
+			configure: func(api *sharedBotAPI) { api.setAccess(sharedBotToken, registrantUserID, 10) },
+			input:     ValidateProjectInput{Project: "42", OwnerUserID: registrantUserID},
+		},
+		{
+			name:      "registrant identity missing",
+			configure: func(*sharedBotAPI) {},
+			input:     ValidateProjectInput{Project: "42"},
+		},
+	}
+	var first *Error
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			api := newSharedBotAPI()
+			configureSharedBot(api)
+			tc.configure(api)
+			service := newSharedBotProjectService(t, openTestStore(t), api, sharedBotToken, nil)
+			_, err := service.Validate(context.Background(), tc.input)
+			var appErr *Error
+			if !errors.As(err, &appErr) {
+				t.Fatalf("error = %v, want *app.Error", err)
+			}
+			if first == nil {
+				first = appErr
+			}
+			if appErr.Code != first.Code || appErr.Message != first.Message ||
+				len(appErr.Details) != 1 || first.Details[0] != appErr.Details[0] {
+				t.Fatalf("error differs between precheck causes: %#v vs %#v", appErr, first)
+			}
+		})
+	}
+}
+
+func TestValidateSharedCredentialTrustedAdminSkipsRegistrantCheck(t *testing.T) {
+	api := newSharedBotAPI()
+	configureSharedBot(api)
+	api.mu.Lock()
+	delete(api.access[sharedBotToken], registrantUserID)
+	api.mu.Unlock()
+	service := newSharedBotProjectService(t, openTestStore(t), api, sharedBotToken, nil)
+
+	result, err := service.Validate(context.Background(), ValidateProjectInput{
+		Project: "42", TrustedPlatformAdmin: true,
+	})
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !result.SharedCredential || result.AccessLevel != botMaintainerRole {
+		t.Fatalf("validation = %+v", result)
+	}
+}
+
+func TestValidatePerProjectTokenIsNotShared(t *testing.T) {
+	api := newSharedBotAPI()
+	configureSharedBot(api)
+	service := newSharedBotProjectService(t, openTestStore(t), api, sharedBotToken, nil)
+
+	result, err := service.Validate(context.Background(), ValidateProjectInput{
+		Project: "42", AccessToken: projectAccessTok, TrustedPlatformAdmin: true,
+	})
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if result.SharedCredential {
+		t.Fatalf("project token validation reported shared credential: %+v", result)
+	}
+	for _, token := range api.usedTokens("GetProject") {
+		if token == sharedBotToken {
+			t.Fatalf("project token validation used the shared bot: %v", api.tokenUses)
+		}
+	}
+}
+
 func TestSharedCredentialHealthStatesAndCache(t *testing.T) {
 	now := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
 	expired := now.Add(-48 * time.Hour)
@@ -491,6 +747,14 @@ func TestSharedCredentialHealthStatesAndCache(t *testing.T) {
 			wantState: SharedBotStateExpired,
 		},
 		{
+			name: "forbidden token", shared: sharedBotToken,
+			configure: func(api *sharedBotAPI) {
+				configureSharedBot(api)
+				api.infoErrs = map[string]error{sharedBotToken: &gitlab.Error{Op: "token_info", Status: 403}}
+			},
+			wantState: SharedBotStateInsufficient,
+		},
+		{
 			name: "unreachable", shared: sharedBotToken,
 			configure: func(api *sharedBotAPI) {
 				configureSharedBot(api)
@@ -519,7 +783,20 @@ func TestSharedCredentialHealthStatesAndCache(t *testing.T) {
 			if strings.Contains(health.Username, sharedBotToken) {
 				t.Fatal("health leaks the token")
 			}
+			if tt.shared == "" && api.callCount("GetTokenInfo") != 0 {
+				t.Fatalf("not-configured health called GitLab %d times", api.callCount("GetTokenInfo"))
+			}
 		})
+	}
+}
+
+func TestSharedCredentialHealthBareServiceDoesNotPanic(t *testing.T) {
+	if health := (&ProjectService{}).SharedBotCredentialHealth(context.Background()); health.State != SharedBotStateNotConfigured {
+		t.Fatalf("bare service state = %q", health.State)
+	}
+	bare := &ProjectService{tokens: newProjectTokenResolver(nil, sharedBotToken)}
+	if health := bare.SharedBotCredentialHealth(context.Background()); health.State != SharedBotStateUnreachable {
+		t.Fatalf("bare shared service state = %q", health.State)
 	}
 }
 
@@ -548,6 +825,132 @@ func TestSharedCredentialHealthUsesFiveMinuteCache(t *testing.T) {
 	service.SharedBotCredentialHealth(context.Background())
 	if calls := api.callCount("GetTokenInfo"); calls != 2 {
 		t.Fatalf("GetTokenInfo calls after TTL = %d, want 2", calls)
+	}
+}
+
+func TestSharedCredentialHealthCachesFailureForTTL(t *testing.T) {
+	now := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	api := newSharedBotAPI()
+	configureSharedBot(api)
+	api.infoErrs = map[string]error{sharedBotToken: &gitlab.Error{Op: "token_info", Status: 500}}
+	service := newSharedBotProjectService(t, openTestStore(t), api, sharedBotToken, func() time.Time { return now })
+
+	if health := service.SharedBotCredentialHealth(context.Background()); health.State != SharedBotStateUnreachable {
+		t.Fatalf("state = %q", health.State)
+	}
+	now = now.Add(4 * time.Minute)
+	service.SharedBotCredentialHealth(context.Background())
+	if calls := api.callCount("GetTokenInfo"); calls != 1 {
+		t.Fatalf("failed probe was not cached: %d calls", calls)
+	}
+	now = now.Add(2 * time.Minute)
+	service.SharedBotCredentialHealth(context.Background())
+	if calls := api.callCount("GetTokenInfo"); calls != 2 {
+		t.Fatalf("failed probe was not retried after TTL: %d calls", calls)
+	}
+}
+
+// gatedHealthAPI blocks the first probe so a second caller must join the
+// in-flight call instead of starting another one.
+type gatedHealthAPI struct {
+	*sharedBotAPI
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+
+	mu      sync.Mutex
+	entries int
+}
+
+func (f *gatedHealthAPI) GetTokenInfo(ctx context.Context, token string) (*gitlab.TokenInfo, error) {
+	f.mu.Lock()
+	f.entries++
+	f.mu.Unlock()
+	f.once.Do(func() { close(f.entered) })
+	select {
+	case <-f.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return f.sharedBotAPI.GetTokenInfo(ctx, token)
+}
+
+func (f *gatedHealthAPI) entryCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.entries
+}
+
+func TestSharedCredentialHealthSharesInflightProbe(t *testing.T) {
+	api := newSharedBotAPI()
+	configureSharedBot(api)
+	gated := &gatedHealthAPI{sharedBotAPI: api, entered: make(chan struct{}), release: make(chan struct{})}
+	service := newSharedBotProjectService(t, openTestStore(t), gated, sharedBotToken, nil)
+
+	results := make(chan SharedBotCredentialHealth, 2)
+	go func() { results <- service.SharedBotCredentialHealth(context.Background()) }()
+	<-gated.entered
+	go func() { results <- service.SharedBotCredentialHealth(context.Background()) }()
+	close(gated.release)
+	for i := 0; i < 2; i++ {
+		if health := <-results; health.State != SharedBotStateOK {
+			t.Fatalf("state = %q", health.State)
+		}
+	}
+	if entries := gated.entryCount(); entries != 1 {
+		t.Fatalf("concurrent cache miss probed %d times, want 1", entries)
+	}
+}
+
+// cancelAwareHealthAPI makes the first probe wait for its context, so the test
+// can cancel it and then prove the result was not cached.
+type cancelAwareHealthAPI struct {
+	*sharedBotAPI
+	entered chan struct{}
+	once    sync.Once
+
+	mu    sync.Mutex
+	calls int
+}
+
+func (f *cancelAwareHealthAPI) GetTokenInfo(ctx context.Context, token string) (*gitlab.TokenInfo, error) {
+	f.mu.Lock()
+	f.calls++
+	first := f.calls == 1
+	f.mu.Unlock()
+	if first {
+		f.once.Do(func() { close(f.entered) })
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return f.sharedBotAPI.GetTokenInfo(ctx, token)
+}
+
+func (f *cancelAwareHealthAPI) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+func TestSharedCredentialHealthCancellationIsNotCached(t *testing.T) {
+	api := newSharedBotAPI()
+	configureSharedBot(api)
+	cancelAware := &cancelAwareHealthAPI{sharedBotAPI: api, entered: make(chan struct{})}
+	service := newSharedBotProjectService(t, openTestStore(t), cancelAware, sharedBotToken, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-cancelAware.entered
+		cancel()
+	}()
+	if health := service.SharedBotCredentialHealth(ctx); health.State != SharedBotStateUnreachable {
+		t.Fatalf("cancelled state = %q", health.State)
+	}
+	if health := service.SharedBotCredentialHealth(context.Background()); health.State != SharedBotStateOK {
+		t.Fatalf("state after cancelled probe = %q, want a fresh probe", health.State)
+	}
+	if calls := cancelAware.callCount(); calls != 2 {
+		t.Fatalf("probe calls = %d, want the cancelled result not cached", calls)
 	}
 }
 

@@ -34,6 +34,43 @@ func seedLegacyProject(t *testing.T, st *sqlite.Store, cipher *secret.Cipher, id
 	}
 }
 
+func TestMigrateProjectSecretsKeepsSharedSentinel(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	cipher := newTestCipher(t)
+	// A shared-credential project has a zero-length token sentinel. A legacy
+	// webhook secret must still migrate without rejecting the empty token.
+	hookEnc, err := cipher.Encrypt([]byte("whsec-legacy"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.RegisterProject(ctx, store.Project{
+		ID: 20, PathWithNamespace: "group/shared", WebURL: "https://gitlab.example.com/group/shared",
+		DefaultBranch: "main", TokenEnc: []byte{}, TokenScopes: []string{},
+		WebhookSecretEnc: hookEnc, Profile: "default", Settings: json.RawMessage(`{}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := MigrateProjectSecrets(ctx, st, cipher, nil)
+	if err != nil || migrated != 1 {
+		t.Fatalf("migration = %d, %v; want 1", migrated, err)
+	}
+	project, err := st.GetProject(ctx, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(project.TokenEnc) != 0 {
+		t.Fatalf("sentinel token changed to %q", project.TokenEnc)
+	}
+	if got, err := cipher.Open(project.WebhookSecretEnc, secret.WebhookSecretAAD(20)); err != nil || string(got) != "whsec-legacy" {
+		t.Fatalf("webhook secret after migration = %q, %v", got, err)
+	}
+	if again, err := MigrateProjectSecrets(ctx, st, cipher, nil); err != nil || again != 0 {
+		t.Fatalf("second migration = %d, %v", again, err)
+	}
+}
+
 func TestMigrateProjectSecretsUpgradesLegacyOnce(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)

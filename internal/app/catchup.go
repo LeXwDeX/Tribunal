@@ -30,9 +30,10 @@ const (
 
 	// Fixed hook-health messages. The console shows them as the failure reason;
 	// they never include upstream text or credentials.
-	webhookDisabledMessage      = "GitLab disabled the managed project webhook after repeated delivery failures"
-	webhookMissingMessage       = "the managed project webhook is missing or was deleted in GitLab"
-	webhookTokenRejectedMessage = "project token was rejected by GitLab while checking the webhook; replace the project token"
+	webhookDisabledMessage            = "GitLab disabled the managed project webhook after repeated delivery failures"
+	webhookMissingMessage             = "the managed project webhook is missing or was deleted in GitLab"
+	webhookTokenRejectedMessage       = "project token was rejected by GitLab while checking the webhook; replace the project token"
+	webhookSharedTokenRejectedMessage = "shared bot credential was rejected by GitLab while checking the webhook; update the credential referenced by gitlab.bot_token_env and restart the service"
 )
 
 // catchUpNamespace derives the deterministic delivery UUID of a catch-up
@@ -305,7 +306,11 @@ func (s *CatchUpService) reconcileHookHealth(ctx context.Context, project *store
 	hooks, err := lister.ListProjectHooks(ctx, token, project.ID)
 	if err != nil {
 		if gitlab.StatusOf(err) == http.StatusUnauthorized || gitlab.StatusOf(err) == http.StatusForbidden {
-			s.setHookHealth(ctx, writer, project, store.WebhookStateFailed, webhookTokenRejectedMessage)
+			message := webhookTokenRejectedMessage
+			if s.tokens.UsesShared(project) {
+				message = webhookSharedTokenRejectedMessage
+			}
+			s.setHookHealth(ctx, writer, project, store.WebhookStateFailed, message)
 		}
 		if ctx.Err() == nil {
 			s.logger.Warn("webhook health check failed", "project_id", project.ID, "error_class", errclass.Of(err))
@@ -325,7 +330,8 @@ func (s *CatchUpService) reconcileHookHealth(ctx context.Context, project *store
 	case managed.AlertStatus == "disabled" || managed.AlertStatus == "temporarily_disabled":
 		s.setHookHealth(ctx, writer, project, store.WebhookStateFailed, webhookDisabledMessage)
 	case project.WebhookState == store.WebhookStateFailed &&
-		(project.WebhookError == webhookDisabledMessage || project.WebhookError == webhookMissingMessage || project.WebhookError == webhookTokenRejectedMessage):
+		(project.WebhookError == webhookDisabledMessage || project.WebhookError == webhookMissingMessage ||
+			project.WebhookError == webhookTokenRejectedMessage || project.WebhookError == webhookSharedTokenRejectedMessage):
 		// A hook that recovered is healthy again; unrelated failures stay.
 		s.setHookHealth(ctx, writer, project, store.WebhookStateEnabled, "")
 	}

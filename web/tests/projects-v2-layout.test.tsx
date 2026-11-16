@@ -107,6 +107,23 @@ describe('projects list v2 layout', () => {
     expect(within(admin).getByText('管理员')).toBeInTheDocument()
   })
 
+  it('shows the platform shared bot instead of a missing key expiry', async () => {
+    installFetch((url) => {
+      if (url.startsWith('/api/v1/projects')) {
+        return jsonResponse({
+          projects: [project({ shared_credential: true, token_expires_at: undefined, token_scopes: [] })],
+        })
+      }
+      return jsonResponse({})
+    })
+    renderProjects()
+
+    const row = (await screen.findByRole('link', { name: 'group/backend' })).closest('tr') as HTMLElement
+    const expiry = within(row).getAllByRole('cell')[3]
+    expect(expiry).toHaveTextContent('平台共享 bot')
+    expect(expiry).not.toHaveTextContent('未提供')
+  })
+
   it('opens the project when the row is clicked but not when its switch is toggled', async () => {
     installFetch((url, init) => {
       if (url.startsWith('/api/v1/projects/42') && init?.method === 'PATCH') return jsonResponse(project({ enabled: false }))

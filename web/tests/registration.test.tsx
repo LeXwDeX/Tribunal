@@ -239,7 +239,14 @@ describe('project registration', () => {
     const registerBodies: Array<Record<string, unknown>> = []
     const validateCalls: string[] = []
     installFetch((url, init) => {
-      if (url === '/api/v1/projects/validate') validateCalls.push(url)
+      if (url === '/api/v1/projects/validate') {
+        validateCalls.push(String(init?.body))
+        return jsonResponse({
+          project_id: 42, path_with_namespace: 'group/backend', web_url: 'https://gitlab.example.com/group/backend',
+          default_branch: 'main', username: 'review-bot', access_level: 40,
+          token_scopes: ['api', 'read_repository'], git_head: 'abc', shared_credential: true,
+        })
+      }
       if (url === '/api/v1/projects' && init?.method === 'POST') {
         registerBodies.push(JSON.parse(String(init.body)))
         return jsonResponse({
@@ -262,8 +269,13 @@ describe('project registration', () => {
     const key = screen.getByLabelText('访问 Key（可选）')
     await user.type(screen.getByLabelText('仓库地址或项目 ID'), repositoryUrl)
     const save = screen.getByRole('button', { name: '保存并初始化' })
-    expect(screen.getByRole('button', { name: '校验连接' })).toBeDisabled()
+    const validate = screen.getByRole('button', { name: '校验连接' })
+    expect(validate).toBeEnabled()
     expect(save).toBeEnabled()
+    await user.click(validate)
+    expect(await screen.findByText('校验通过，尚未保存')).toBeInTheDocument()
+    expect(screen.getByText('平台共享 bot', { selector: 'dd' })).toBeInTheDocument()
+    expect(validateCalls).toEqual([JSON.stringify({ project: repositoryUrl, token: '' })])
     await user.click(save)
 
     const dialog = await screen.findByRole('dialog', { name: '项目已保存，初始化已开始' })
@@ -275,7 +287,6 @@ describe('project registration', () => {
       profile: 'default',
       settings: { skip_draft: true },
     }])
-    expect(validateCalls).toEqual([])
     expect(key).toHaveValue('')
   })
 })

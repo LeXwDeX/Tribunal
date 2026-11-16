@@ -262,14 +262,14 @@ func TestRegisterValidation(t *testing.T) {
 func TestRegisterUpstreamFailureIsSanitized(t *testing.T) {
 	st := openTestStore(t)
 	api := defaultFakeGitLab()
-	api.projectErr = &gitlab.Error{Op: "get_project", Status: 403}
+	api.projectErr = &gitlab.Error{Op: "get_project", Status: 500}
 	service := newProjectService(t, st, api, newTestCipher(t), "")
 	_, err := service.Register(context.Background(), RegisterInput{Project: "42", AccessToken: "glpat-secret"})
 	if err == nil {
 		t.Fatal("expected error")
 	}
 	var appErr *Error
-	if !errors.As(err, &appErr) || appErr.Code != "gitlab_rejected" || appErr.Upstream != 403 {
+	if !errors.As(err, &appErr) || appErr.Code != "gitlab_rejected" || appErr.Upstream != 500 {
 		t.Fatalf("error = %#v", err)
 	}
 	for _, forbidden := range []string{"glpat-secret", "https://", "upstream"} {

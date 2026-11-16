@@ -373,10 +373,14 @@ func (s *Store) DeleteProject(ctx context.Context, id int64) error {
 // RewrapProjectSecrets replaces both encrypted columns only while they still
 // hold the expected values, so a concurrent token rotation or webhook rebuild
 // is never overwritten. It reports whether the row changed. The ciphertext
-// format is a storage detail, so updated_at is left alone.
+// format is a storage detail, so updated_at is left alone. A zero-length token
+// is the shared-credential sentinel and is preserved as-is.
 func (s *Store) RewrapProjectSecrets(ctx context.Context, id int64, oldToken, newToken, oldSecret, newSecret []byte) (bool, error) {
-	if len(newToken) == 0 {
-		return false, errors.New("sqlite: encrypted token is required")
+	if newToken == nil {
+		newToken = []byte{}
+	}
+	if oldToken == nil {
+		oldToken = []byte{}
 	}
 	if newSecret == nil {
 		newSecret = []byte{}

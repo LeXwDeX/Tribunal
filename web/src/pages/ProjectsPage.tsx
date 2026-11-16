@@ -23,6 +23,7 @@ function isAlreadyRegistered(error: unknown): boolean {
 }
 
 function tokenExpiry(project: Project): { label: string; tone: 'ok' | 'warn' | 'danger' | 'neutral' } {
+  if (project.shared_credential) return { label: '平台共享 bot', tone: 'neutral' }
   if (!project.token_expires_at) return { label: '未提供', tone: 'neutral' }
   const expires = new Date(project.token_expires_at).getTime()
   if (Number.isNaN(expires)) return { label: '日期无效', tone: 'warn' }
@@ -147,11 +148,6 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
     if (!token.trim() && !sharedBotCredential) nextErrors.token = '请输入访问 Key。'
     setErrors(nextErrors)
     if (Object.keys(nextErrors).length) return
-    if (!token.trim()) {
-      // Shared mode has no project key to validate. Registration performs the
-      // bot Maintainer and registrant Reporter checks server-side.
-      return
-    }
     const requestId = requestRef.current + 1
     requestRef.current = requestId
     setValidating(true)
@@ -219,7 +215,7 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
       ) : (
         <>
           <Button variant="secondary" onClick={close} disabled={pending}>取消</Button>
-          <Button variant="secondary" onClick={() => { void validate() }} loading={validating} disabled={saving || usesSharedBot}>校验连接</Button>
+          <Button variant="secondary" onClick={() => { void validate() }} loading={validating} disabled={saving}>校验连接</Button>
           <Button variant="primary" onClick={() => { void save() }} loading={saving} disabled={!canSave || validating}>保存并初始化</Button>
         </>
       )}
@@ -294,6 +290,7 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
                 <div><dt>项目 ID</dt><dd className="tabular">{validation.project_id}</dd></div>
                 <div><dt>当前身份</dt><dd>{validation.username}</dd></div>
                 <div><dt>项目角色</dt><dd>{accessLevelLabel(validation.access_level)}</dd></div>
+                {validation.shared_credential ? <div><dt>凭据</dt><dd>平台共享 bot</dd></div> : null}
                 <div><dt>默认分支</dt><dd className="mono">{validation.default_branch}</dd></div>
                 <div><dt>Key 有效期</dt><dd>{validation.token_expires_at ? formatDate(validation.token_expires_at) : '未提供'}</dd></div>
                 <div>

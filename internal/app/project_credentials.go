@@ -116,42 +116,78 @@ func (s *ProjectService) SharedBotCredentialConfigured() bool {
 
 // SharedBotCredentialHealth returns the cached shared-credential state. The
 // first call after startup or after the five-minute TTL probes GitLab with
-// GetTokenInfo and CurrentUser; concurrent callers may probe twice but never
-// corrupt the cache. Any caller cancellation propagates as unreachable and is
-// not cached.
+// GetTokenInfo and CurrentUser. Concurrent cache misses share one in-flight
+// probe; watchers wait on a channel rather than starting a resident goroutine.
+// Any caller cancellation propagates as unreachable and is not cached.
 func (s *ProjectService) SharedBotCredentialHealth(ctx context.Context) SharedBotCredentialHealth {
 	if !s.SharedBotCredentialConfigured() {
 		return SharedBotCredentialHealth{State: SharedBotStateNotConfigured}
 	}
-	now := s.now()
+	now := time.Now
+	if s.now != nil {
+		now = s.now
+	}
+	current := now()
 	s.sharedHealthMu.Lock()
-	if s.sharedHealth != nil && now.Sub(s.sharedHealth.CheckedAt) < sharedBotHealthCacheTTL {
+	if s.sharedHealth != nil && current.Sub(s.sharedHealth.CheckedAt) < sharedBotHealthCacheTTL {
 		cached := *s.sharedHealth
 		s.sharedHealthMu.Unlock()
 		return cached
 	}
+	if flight := s.sharedHealthFlight; flight != nil {
+		s.sharedHealthMu.Unlock()
+		select {
+		case <-flight.done:
+			return flight.health
+		case <-ctx.Done():
+			// The caller gave up; the shared probe result is not this caller's
+			// to cache, and the owner still reports the real outcome.
+			return SharedBotCredentialHealth{Configured: true, State: SharedBotStateUnreachable, CheckedAt: current}
+		}
+	}
+	flight := &sharedBotHealthFlight{done: make(chan struct{})}
+	s.sharedHealthFlight = flight
 	s.sharedHealthMu.Unlock()
 
 	probeCtx, cancel := context.WithTimeout(ctx, sharedBotHealthRequestTimeout)
-	health := s.probeSharedBotCredential(probeCtx, now)
+	health := s.probeSharedBotCredential(probeCtx, current)
 	cancel()
 	if ctx.Err() != nil {
 		// A caller cancellation says nothing about the credential.
-		return SharedBotCredentialHealth{Configured: true, State: SharedBotStateUnreachable, CheckedAt: now}
+		health = SharedBotCredentialHealth{Configured: true, State: SharedBotStateUnreachable, CheckedAt: current}
+	} else {
+		s.sharedHealthMu.Lock()
+		s.sharedHealth = &health
+		s.sharedHealthMu.Unlock()
 	}
+	flight.health = health
 	s.sharedHealthMu.Lock()
-	s.sharedHealth = &health
+	s.sharedHealthFlight = nil
 	s.sharedHealthMu.Unlock()
+	close(flight.done)
 	return health
+}
+
+// sharedBotHealthFlight is one in-flight shared-credential probe. health is
+// written once before done is closed; waiters read it only after the close.
+type sharedBotHealthFlight struct {
+	done   chan struct{}
+	health SharedBotCredentialHealth
 }
 
 func (s *ProjectService) probeSharedBotCredential(ctx context.Context, now time.Time) SharedBotCredentialHealth {
 	health := SharedBotCredentialHealth{Configured: true, State: SharedBotStateUnreachable, CheckedAt: now}
+	if s.gitlab == nil {
+		return health
+	}
 	token := s.tokens.Shared()
 	info, err := s.gitlab.GetTokenInfo(ctx, token)
 	if err != nil {
-		if gitlab.StatusOf(err) == http.StatusUnauthorized {
+		switch gitlab.StatusOf(err) {
+		case http.StatusUnauthorized:
 			health.State = SharedBotStateExpired
+		case http.StatusForbidden:
+			health.State = SharedBotStateInsufficient
 		}
 		return health
 	}

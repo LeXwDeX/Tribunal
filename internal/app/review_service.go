@@ -43,10 +43,24 @@ const (
 	withoutContextWarning   = "review ran without the project context document: the stored document is not verified for review"
 	baseUnavailableWarning  = "review coverage gap: the merge request base commit is unavailable; changed lines were reviewed without a base checkout"
 	// A rejected project token is permanent until an administrator replaces it;
-	// retrying the same credentials cannot succeed (#457).
-	tokenRejectedDetail = "项目访问令牌被 GitLab 拒绝或权限不足；请更换令牌后重试"
-	tokenRejectedNote   = "评审未完成：项目访问令牌被 GitLab 拒绝或权限不足（HTTP 401/403），请更换令牌后重新触发评审。"
+	// retrying the same credentials cannot succeed (#457). A shared credential
+	// failure names the instance-wide credential instead of an absent project
+	// token.
+	tokenRejectedDetail            = "项目访问令牌被 GitLab 拒绝或权限不足；请更换令牌后重试"
+	tokenRejectedNote              = "评审未完成：项目访问令牌被 GitLab 拒绝或权限不足（HTTP 401/403），请更换令牌后重新触发评审。"
+	sharedCredentialRejectedDetail = "平台共享 bot 凭据被 GitLab 拒绝或权限不足；请更新 gitlab.bot_token_env 指向的凭据并重启服务后重试"
+	sharedCredentialRejectedNote   = "评审未完成：平台共享 bot 凭据被 GitLab 拒绝或权限不足（HTTP 401/403），请管理员更新 gitlab.bot_token_env 指向的凭据并重启服务后重新触发评审。"
 )
+
+// tokenRejectedTexts returns the console detail and MR note for a rejected
+// credential. Shared-credential text names the platform credential so users
+// are not told to replace a project token that does not exist.
+func tokenRejectedTexts(shared bool) (detail, note string) {
+	if shared {
+		return sharedCredentialRejectedDetail, sharedCredentialRejectedNote
+	}
+	return tokenRejectedDetail, tokenRejectedNote
+}
 
 // ReviewStore is the persistence surface needed by review orchestration.
 type ReviewStore interface {
@@ -429,7 +443,7 @@ func (s *ReviewService) RunCandidate(ctx context.Context, job *jobs.Job) error {
 	if err != nil {
 		if tokenRejected(err) {
 			s.markProjectTokenRejected(ctx, project.ID, gitlab.StatusOf(err))
-			s.noteTokenRejected(ctx, token, payload.ProjectID, payload.MRIID, control.Generation, payload.HeadSHA)
+			s.noteTokenRejected(ctx, token, s.tokens.UsesShared(project), payload.ProjectID, payload.MRIID, control.Generation, payload.HeadSHA)
 			return PermanentJob(err)
 		}
 		if errors.Is(err, ErrMRClosed) || errors.Is(err, ErrReviewSuperseded) {
@@ -587,8 +601,9 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 		state, detail := reviewStatusFailed, reviewExecutionFailedReason
 		switch {
 		case authFailure:
-			detail = tokenRejectedDetail
-			s.noteTokenRejected(ctx, token, payload.ProjectID, payload.MRIID, payload.Generation, payload.HeadSHA)
+			shared := s.tokens.UsesShared(project)
+			detail, _ = tokenRejectedTexts(shared)
+			s.noteTokenRejected(ctx, token, shared, payload.ProjectID, payload.MRIID, payload.Generation, payload.HeadSHA)
 			s.markProjectTokenRejected(ctx, payload.ProjectID, gitlab.StatusOf(err))
 		case errors.Is(err, ErrReviewSuperseded) || errors.Is(err, ErrMRClosed):
 			state, detail = reviewStatusStale, "review is no longer current"

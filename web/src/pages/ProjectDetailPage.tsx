@@ -86,8 +86,8 @@ function ProjectOverview({ project }: { project: Project }) {
               <div><dt>默认分支</dt><dd className="mono">{project.default_branch || '—'}</dd></div>
               <div><dt>档位</dt><dd>{project.profile ? <Badge plain>{project.profile}</Badge> : '—'}</dd></div>
               <div><dt>启用</dt><dd>{project.enabled ? '启用' : '停用'}</dd></div>
-              <div><dt>token 过期</dt><dd>{project.token_expires_at ? formatDate(project.token_expires_at) : '未提供'}</dd></div>
-              <div><dt>token scopes</dt><dd className="mono">{project.token_scopes?.join(', ') || '不可用'}</dd></div>
+              <div><dt>token 过期</dt><dd>{project.shared_credential ? '平台共享 bot' : project.token_expires_at ? formatDate(project.token_expires_at) : '未提供'}</dd></div>
+              <div><dt>token scopes</dt><dd className="mono">{project.shared_credential ? '平台共享 bot（无项目级 token）' : project.token_scopes?.join(', ') || '不可用'}</dd></div>
               <div>
                 <dt>webhook</dt>
                 <dd>

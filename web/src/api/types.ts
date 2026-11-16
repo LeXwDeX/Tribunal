@@ -183,6 +183,8 @@ export interface ProjectValidation {
   token_expires_at?: string
   git_head: string
   warnings?: ProjectWarning[]
+  /** True when the check used the platform shared bot (no project key). */
+  shared_credential?: boolean
 }
 
 export interface ProjectWarning {

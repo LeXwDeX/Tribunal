@@ -7,6 +7,24 @@ import { installFetch, jsonResponse, renderWithProviders } from './test-utils'
 
 afterEach(() => vi.unstubAllGlobals())
 
+it('marks a shared-bot project as platform-managed instead of showing a missing token expiry', async () => {
+  installFetch((url) => {
+    const path = new URL(url, 'http://localhost').pathname
+    if (path === '/api/v1/projects/42') {
+      return jsonResponse(project({ shared_credential: true, token_scopes: [] }))
+    }
+    if (path === '/api/v1/stats') return jsonResponse({ runs: 0 })
+    if (path === '/api/v1/reviews') return jsonResponse({ reviews: [] })
+    return jsonResponse({})
+  })
+  renderWithProviders(<Routes><Route path="/projects/:id/:tab" element={<ProjectDetailPage />} /></Routes>, { route: '/projects/42/overview' })
+
+  const basic = (await screen.findByRole('heading', { name: '基本信息' })).closest('section')!
+  expect(within(basic).getByText('平台共享 bot')).toBeInTheDocument()
+  expect(within(basic).getByText('平台共享 bot（无项目级 token）')).toBeInTheDocument()
+  expect(within(basic).queryByText('未提供')).not.toBeInTheDocument()
+})
+
 it('places both project cards before the full-width recent reviews panel', async () => {
   installFetch((url) => {
     const path = new URL(url, 'http://localhost').pathname

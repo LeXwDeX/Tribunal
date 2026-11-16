@@ -16,7 +16,8 @@ gitlab:
   # Optional instance-wide bot credential, named by environment variable. When
   # set, projects registered without their own token use this bot; project
   # tokens still win. The bot needs Maintainer on each project it serves.
-  # Also add the bot username to bot_usernames for self-trigger filtering.
+  # The bot username is resolved at startup and appended to bot_usernames
+  # automatically; set it explicitly only if that lookup fails.
   # bot_token_env: TRIBUNAL_BOT_TOKEN
   # bot_usernames: ["tribunal"]
   # One-time scan after startup recovery: open MR heads that never got a review

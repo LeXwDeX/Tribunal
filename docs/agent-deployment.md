@@ -187,6 +187,10 @@ docker compose up -d --force-recreate --wait --wait-timeout 120
 - 自动注册或手动配置完成后，在同一个 shell 按运维节安全删除本次 `$REGISTRATION_FILE`；确认项目 token 已清除、响应路径可清除且路径和文件身份与只读标记一致，才删除文件。删除后须核验打开的文件已解除链接且原路径不存在，才清除 `REGISTRATION_FILE` 并关闭描述符。清除、删除或核验失败时返回失败，以便安全处理，不要盲目重试；路径缺失或文件不存在也按失败处理。处理完毕后，下一次注册使用新 shell。预检、删除、核验和清除变量并非原子操作，也不保护不可信同 UID 进程或不受控目录；删除后变量清理意外失败时需安全核对文件状态。
 - **以后再启用、重建或停用**：在控制台「项目 → 设置 → GitLab Webhook」里操作，需要该项目的 `manage` 权限。或者在第 6 步授权之后，用授权用户的 API token 调用 CLI（`--api-token-env USER_TOKEN projects webhook enable|rebuild|disable <项目ID>`）。重建会轮换 secret。
 
+**共享 bot（可选，仅实例启用时）**
+
+实例配置 `gitlab.bot_token_env` 后，注册和「校验连接」都可以省略项目 token：`tribunalctl projects register --project <项目>`。共享 bot 必须在项目上至少 Maintainer，登录用户本人仍需至少 Reporter；服务端会在落库前检查共享凭据的 scope、有效期和这两项角色，失败不会注册项目或创建 Webhook。token 值只放在权限 0600、已被 gitignore 的 env 文件或密钥管理器中，由 `gitlab.bot_token_env` 指向的变量名读取；不要写入 YAML、命令行、日志或聊天。凭据过期或被撤销时更新该变量并重启，已有项目级 token 仍优先。
+
 **验证**
 
 ```bash

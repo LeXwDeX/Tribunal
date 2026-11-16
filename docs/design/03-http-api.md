@@ -114,7 +114,7 @@ Note Hook 先入队 `review.command`，由 worker 请求 GitLab 校验身份、M
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/v1/projects` | 当前用户可见的项目列表：平台管理员为全部已登记项目，其他用户为已授权或 `global_read` 可见的项目；`?q=&enabled=&limit=&cursor=`，响应 `{projects, next_cursor}`，每项带 `access`，平台管理员另带 `access_source=admin`，只读项目带 `access_source=grant\|global` |
-| POST | `/api/v1/projects/validate` | 已认证用户只读连接校验：`{project, token}`；普通调用方的 token 需能识别出该项目至少 Reporter 的成员，平台管理员与静态 bootstrap Bearer 免检；不保存项目或凭据 |
+| POST | `/api/v1/projects/validate` | 已认证用户只读连接校验：`{project, token}`；普通调用方的 token 需能识别出该项目至少 Reporter 的成员，平台管理员与静态 bootstrap Bearer 免检；启用共享凭据后 `token` 可省略，改用共享 bot 检查 scope、有效期、bot Maintainer 与登录用户 Reporter；不保存项目或凭据。响应带 `shared_credential` 布尔值，表示本次校验使用的凭据来源 |
 | POST | `/api/v1/projects` | 已认证用户注册项目；普通调用方需至少 Reporter 成员，平台管理员与静态 bootstrap Bearer 免检；注册人自动获得该项目 `manage`（静态 Bearer 除外） |
 | GET | `/api/v1/projects/{id}` | 项目 `read`：详情（含工作区状态、最近评审和 `access`） |
 | PATCH | `/api/v1/projects/{id}` | 项目 `manage`：修改 `profile`（只接受 `default`，其他值返回 400 `unknown profile`）、`settings`（其中 `profile_by_label` 的值不是 `default` 的映射在保存时被丢弃，不报错）、`enabled` |
@@ -150,8 +150,8 @@ POST /api/v1/projects
 
 1. 用 token 调 `GET /projects/:id` 确认可访问；读出 `default_branch`、`web_url`。共享凭据模式下省略 token 时，改用共享 bot 调 GitLab。
 2. 普通注册人（非平台管理员、非静态 bootstrap Bearer）先用该 token 调 `GET /user` 识别所有者，再调 `GET /projects/:id/members/all/:user_id` 要求至少 Reporter。成员查询返回 404（非成员或未继承成员）或角色低于 Reporter 时返回 `400 validation_failed`（字段 `access_level`）；其他上游失败返回脱敏的上游错误。平台管理员与静态 bootstrap Bearer 跳过此步。
-2a. 共享凭据模式（注册请求省略 `token` 且已配置 `gitlab.bot_token_env`）改为：先用共享 bot 调 `GET /user`，再要求它在该项目至少 Maintainer（字段 `shared_bot_access`）；普通注册人再用共享 bot 的读取权限按自己的 GitLab 用户 ID 要求至少 Reporter（字段 `access_level`）；注册人没有可核验的身份时返回 `400 validation_failed`（字段 `token`）。两项检查都在落库前完成，任何一项失败都不落库、不创建 Webhook。项目级 token 存在时仍走步骤 2/3，项目级凭据优先。
-3. 调 `GET /personal_access_tokens/self` 读取 scope 和过期时间；缺少 `api` 或 `read_repository` → `400 validation_failed`。共享凭据模式且省略 token 时跳过此步，项目以零长度 token 哨兵落库。
+2a. 共享凭据模式（注册请求省略 `token` 且已配置 `gitlab.bot_token_env`）改为：先把共享凭据按与项目 token 相同的规则检查 scope 和有效期（失败返回 `400 validation_failed`，字段 `shared_bot_credential`）；再用共享 bot 调 `GET /user`，要求它在该项目至少 Maintainer（字段 `shared_bot_access`）；普通注册人再用共享 bot 的读取权限按自己的 GitLab 用户 ID 要求至少 Reporter（字段 `access_level`）；注册人没有可核验的身份时返回 `400 validation_failed`（字段 `token`）。上述检查都在落库前完成，任何一项失败都不落库、不创建 Webhook。对非 trusted 注册人，这些成员预检失败统一返回同一条 `400 validation_failed`（字段 `project`），细粒度原因只写审计日志，避免用可区分错误枚举 bot 可见项目和权限状态；平台管理员与静态 bootstrap Bearer 保留细粒度字段。项目级 token 存在时仍走步骤 2/3，项目级凭据优先。
+3. 调 `GET /personal_access_tokens/self` 读取 scope 和过期时间；缺少 `api` 或 `read_repository` → `400 validation_failed`。共享凭据模式且省略 token 时改查共享凭据本身（见步骤 2a），项目以零长度 token 哨兵落库。
 4. `auto_webhook=true`（默认）时直接调 `POST /projects/:id/hooks` 创建新 hook，不列出或复用已有 hook；需要 Maintainer（共享模式下由 bot 提供）。新 hook 使用期望 URL，勾选 Merge request、Comments、Push 事件并写入生成的 secret。注册流程不会修改或删除已有 hook，即使存在同 URL hook 也只创建新 hook。创建成功但入库失败时会补偿删除刚创建的 hook；创建失败则注册失败且不落库。
 5. 入库后入队 `workspace.onboard`。注册人是有用户 ID 的账号（浏览器会话或用户 API token）时，项目、工作区、onboarding 任务和注册人的 `manage` grant 在同一事务内写入；静态 bootstrap Bearer（用户 ID 0）不写 grant。
 

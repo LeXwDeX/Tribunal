@@ -10,6 +10,12 @@ server:
 
 gitlab:
   url: "${GITLAB_URL}"
+  # Optional instance-wide shared bot credential, off by default. To enable,
+  # uncomment bot_token_env and set TRIBUNAL_BOT_TOKEN in .env (Compose passes
+  # it through). The bot needs Maintainer on every project it serves; its
+  # username is resolved at startup and appended to bot_usernames.
+  # bot_token_env: TRIBUNAL_BOT_TOKEN
+  # bot_usernames: []
 
 auth:
   bootstrap_token_env: REVIEW_ADMIN_TOKEN

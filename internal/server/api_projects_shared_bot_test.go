@@ -3,19 +3,22 @@ package server
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/app"
 	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/secret"
 	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
 	workspacepkg "github.com/LeXwDeX/tribunal/internal/workspace"
 )
 
-func testSharedProjectService(t *testing.T, st *sqlite.Store, api *stubGitLab, workspace, sharedToken string) *app.ProjectService {
+func testSharedProjectService(t *testing.T, st *sqlite.Store, api gitlab.API, workspace, sharedToken string) *app.ProjectService {
 	t.Helper()
 	cipher, err := secret.New([]byte("0123456789abcdef0123456789abcdef"))
 	if err != nil {
@@ -186,6 +189,11 @@ func TestSettingsExposeSharedBotCredentialState(t *testing.T) {
 	if bytes.Contains(response.body, []byte(sharedToken)) {
 		t.Fatal("settings response contains the shared token")
 	}
+	for _, forbidden := range []string{"bot_token_env", "TRIBUNAL_BOT_TOKEN"} {
+		if bytes.Contains(response.body, []byte(forbidden)) {
+			t.Fatalf("settings response contains the credential variable name %q", forbidden)
+		}
+	}
 }
 
 func TestMeWithoutSharedCredentialCapability(t *testing.T) {
@@ -200,5 +208,128 @@ func TestMeWithoutSharedCredentialCapability(t *testing.T) {
 	}
 	if env.decode(t, me)["shared_bot_credential"] != false {
 		t.Fatalf("shared capability = %v", env.decode(t, me)["shared_bot_credential"])
+	}
+}
+
+// matrixGitLab gives the shared bot and the registrant different project
+// roles, which the single access-level stub cannot express.
+type matrixGitLab struct {
+	*stubGitLab
+	mu     sync.Mutex
+	access map[int64]int
+}
+
+func (s *matrixGitLab) CurrentUser(ctx context.Context, token string) (*gitlab.User, error) {
+	s.record("CurrentUser")
+	return &gitlab.User{ID: 9, Username: "review-bot"}, nil
+}
+
+func (s *matrixGitLab) GetMemberAccess(ctx context.Context, token string, projectID, userID int64) (int, error) {
+	s.record("GetMemberAccess")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if level, ok := s.access[userID]; ok {
+		return level, nil
+	}
+	return 0, &gitlab.Error{Op: "member_access", Status: 404}
+}
+
+func TestRegisterSharedCredentialNonTrustedDenialsAreIndistinguishable(t *testing.T) {
+	// GitLab user 9 is the shared bot; code-viewer is user 8.
+	variants := []struct {
+		name   string
+		access map[int64]int
+	}{
+		{name: "bot not maintainer", access: map[int64]int{9: 30, 8: 20}},
+		{name: "registrant not reporter", access: map[int64]int{9: 40, 8: 10}},
+	}
+	type result struct {
+		status  int
+		code    string
+		msg     string
+		details string
+	}
+	var first *result
+	for _, variant := range variants {
+		t.Run(variant.name, func(t *testing.T) {
+			api := &matrixGitLab{stubGitLab: defaultStubGitLab(), access: variant.access}
+			env := newM6Env(t, m6Options{adminFactory: func(st *sqlite.Store) AdminService {
+				return testSharedProjectService(t, st, api, t.TempDir(), "glpat-shared-bot")
+			}})
+			client := env.loginAs("code-viewer")
+			response := client.json(http.MethodPost, "/api/v1/projects", map[string]any{"project": "42"})
+			body := env.decode(t, response)
+			errorBody, _ := body["error"].(map[string]any)
+			code, _ := errorBody["code"].(string)
+			message, _ := errorBody["message"].(string)
+			got := &result{status: response.status, code: code, msg: message, details: fmt.Sprint(errorBody["details"])}
+			if first == nil {
+				first = got
+				if got.status != http.StatusBadRequest || got.code != "validation_failed" {
+					t.Fatalf("unexpected unified denial: %+v %s", got, response.body)
+				}
+			}
+			if *got != *first {
+				t.Fatalf("denial differs between causes: %+v vs %+v", got, first)
+			}
+			if _, err := env.sqlite.GetProject(context.Background(), 42); err == nil {
+				t.Fatal("denied registration persisted a project")
+			}
+		})
+	}
+}
+
+func TestRegisterPerProjectTokenReportsNotShared(t *testing.T) {
+	api := defaultStubGitLab()
+	api.memberAccess = 30
+	env := newM6Env(t, m6Options{adminFactory: func(st *sqlite.Store) AdminService {
+		return testProjectService(t, st, api, t.TempDir())
+	}})
+	client := env.loginAs("code-viewer")
+
+	created := client.json(http.MethodPost, "/api/v1/projects", map[string]any{
+		"project": "42", "token": "glpat-project-token", "auto_webhook": false,
+	})
+	if created.status != http.StatusCreated {
+		t.Fatalf("register = %d %s", created.status, created.body)
+	}
+	if env.decode(t, created)["shared_credential"] != false {
+		t.Fatalf("project-token registration marked shared: %s", created.body)
+	}
+	detail := client.request(http.MethodGet, "/api/v1/projects/42", nil, nil)
+	if detail.status != http.StatusOK || env.decode(t, detail)["shared_credential"] != false {
+		t.Fatalf("detail = %d %s", detail.status, detail.body)
+	}
+	list := client.request(http.MethodGet, "/api/v1/projects", nil, nil)
+	if list.status != http.StatusOK {
+		t.Fatalf("list = %d %s", list.status, list.body)
+	}
+	projects, _ := env.decode(t, list)["projects"].([]any)
+	if len(projects) != 1 {
+		t.Fatalf("projects = %v", projects)
+	}
+	if projects[0].(map[string]any)["shared_credential"] != false {
+		t.Fatalf("list marked a project token as shared: %v", projects[0])
+	}
+}
+
+func TestValidateSharedCredentialHTTP(t *testing.T) {
+	api := defaultStubGitLab()
+	api.memberAccess = 40
+	env := newM6Env(t, m6Options{adminFactory: func(st *sqlite.Store) AdminService {
+		return testSharedProjectService(t, st, api, t.TempDir(), "glpat-shared-bot")
+	}})
+	client := env.loginAs("code-viewer")
+
+	response := client.json(http.MethodPost, "/api/v1/projects/validate", map[string]any{"project": "42"})
+	if response.status != http.StatusOK {
+		t.Fatalf("validate = %d %s", response.status, response.body)
+	}
+	body := env.decode(t, response)
+	if body["shared_credential"] != true || body["username"] != "review-bot" || body["access_level"] != float64(40) {
+		t.Fatalf("validation = %v", body)
+	}
+	if _, err := env.sqlite.GetProject(context.Background(), 42); err == nil {
+		t.Fatal("validation persisted a project")
 	}
 }

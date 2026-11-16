@@ -200,6 +200,14 @@ tribunalctl users list
 
 查询用户需要平台管理员凭据；普通用户自己的 API token 只用于其已有项目 grant 的业务访问。首次授权前，目标用户需要先通过 OAuth 登录一次，才能在 `users list` 中得到 GitLab 用户 ID。`users disable` 会同时撤销该用户的全部会话和 API token；`users revoke` 只撤销凭据，不禁用账号。已有部署升级后普通用户默认没有 project grant；平台管理员对已登记项目隐式拥有 `manage`，不需要补 grant。先确认具体用户、项目和动作，再按[部署与运维](docs/operations.md#项目授权用户停用和凭据撤销)中的单次授权或用户停用步骤执行，不要默认授予任何用户。
 
+## 共享 bot 凭据（可选）
+
+默认每个项目使用自己的 Project Access Token。实例也可以通过 `gitlab.bot_token_env` 启用共享 bot：该配置只写环境变量名，token 值只从进程环境读取，不写入 YAML、数据库、API 响应或日志。启用后，注册请求省略项目 `token` 即表示使用共享 bot，项目以零长度 token 哨兵落库；显式提供项目 token 时仍优先使用项目级凭据。
+
+准备一个专用 GitLab bot 账号，创建至少带 `api` 和 `read_repository` scope 的 PAT，并在每个要接入的项目上授予 Maintainer（创建 Webhook 与发布评审）。在配置中设置 `gitlab.bot_token_env: TRIBUNAL_BOT_TOKEN`，把 token 放进权限 0600、已被 gitignore 的 env 文件或密钥管理器后重启服务。启动时会自动解析 bot 用户名并补充到 `bot_usernames` 用于自触发过滤；只有解析失败时才需要手工配置。
+
+共享模式下，注册与「校验连接」都会先确认 bot 至少 Maintainer、当前登录用户至少 Reporter，并检查共享凭据的 scope 与有效期；任何一步失败都不会落库、不会创建 Webhook。CLI 在共享模式下可以省略 `--token-env`（`tribunalctl projects register --project <项目>`），CLI 会先读取 `/api/v1/me` 的能力位确认实例已启用；未启用时仍要求 `--token-env`。共享凭据过期、被撤销或 scope 不足是平台级故障：控制台设置页的 `gitlab.shared_bot_credential_state` 会显示 `expired` / `insufficient_scope` / `unreachable`（5 分钟缓存），更新环境变量中的凭据并重启即可恢复，已有项目级 token 不受影响。`GET /api/v1/config` 只返回 `bot_token_configured` 布尔值，不返回变量名或值。
+
 ## 入口与队列
 
 | 入口 | 当前行为 |
