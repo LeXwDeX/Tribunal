@@ -75,6 +75,48 @@ func TestStatusVerificationKeepsPreUpgradeSummaryNote(t *testing.T) {
 	}
 }
 
+// TestPublishedSummaryDeletesLegacyStatusNote proves the convergence target:
+// once the merged row carries a final body, the status writer removes the
+// bot's legacy status note, leaving exactly one review note (#475).
+func TestPublishedSummaryDeletesLegacyStatusNote(t *testing.T) {
+	ctx := context.Background()
+	f := newReviewFixture(t, reviewTestHead)
+	f.service.status = testStatusReporter(f.gitlab)
+	run, err := f.db.EnqueueReviewLatest(ctx, store.ReviewCommand{
+		ProjectID: 42, MRIID: 7, HeadSHA: f.head,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	control, err := f.db.GetReviewControl(ctx, 42, 7)
+	if err != nil || control.Generation != run.Generation {
+		t.Fatalf("control = %+v, %v", control, err)
+	}
+	body := review.SummaryMarkerPrefix + " v1 fp=published -->\n\n## 评审结论\n\nPASS\n"
+	if _, err := f.db.SetReviewStatusFinalBody(ctx, 42, 7, control.Generation, f.head, body); err != nil {
+		t.Fatal(err)
+	}
+	f.gitlab.mu.Lock()
+	f.gitlab.notes = append(f.gitlab.notes, gitlab.Note{
+		ID: 701, AuthorID: f.gitlab.currentUser.ID,
+		Body: legacyStatusMarkerPrefix + " v1 -->\n\n**AI 评审：评审运行中**\n",
+	})
+	f.gitlab.mu.Unlock()
+
+	drainReviewJobs(t, f, "review.status")
+
+	notes := f.gitlab.noteSnapshot()
+	if len(notes) != 1 {
+		t.Fatalf("notes = %+v, want the merged review note only", notes)
+	}
+	if strings.HasPrefix(notes[0].Body, legacyStatusMarkerPrefix) {
+		t.Fatalf("legacy status note survived: %q", notes[0].Body)
+	}
+	if !strings.HasPrefix(notes[0].Body, reviewStatusMarkerPrefix) || !strings.Contains(notes[0].Body, "## 评审结论") {
+		t.Fatalf("merged note = %q", notes[0].Body)
+	}
+}
+
 // activatingControlStore activates a successor review exactly when the
 // publisher reads the control just before storing the final body.
 type activatingControlStore struct {

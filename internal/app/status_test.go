@@ -21,20 +21,7 @@ func testStatusReporter(api *reviewGitLab) *statusReporter {
 func statusPhases(updates []string) []string {
 	phases := make([]string, 0, len(updates))
 	for _, body := range updates {
-		remaining := body
-		for {
-			idx := strings.Index(remaining, "- 阶段：`")
-			if idx < 0 {
-				break
-			}
-			remaining = remaining[idx+len("- 阶段：`"):]
-			end := strings.IndexByte(remaining, '`')
-			if end < 0 {
-				break
-			}
-			phases = append(phases, remaining[:end])
-			remaining = remaining[end+1:]
-		}
+		phases = append(phases, parseStatusPhase(body))
 	}
 	return phases
 }
@@ -43,6 +30,77 @@ func (f *reviewGitLab) awardSnapshot(noteID int64) []gitlab.Award {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]gitlab.Award(nil), f.awards[noteID]...)
+}
+
+// statusTableCells parses the first data row of the status table into a
+// column-name map. It fails when the header or data row is missing.
+func statusTableCells(t *testing.T, body string) map[string]string {
+	t.Helper()
+	lines := strings.Split(body, "\n")
+	for i, line := range lines {
+		if strings.TrimSpace(line) != "| 阶段 | 状态 | 代次 | 提交 | 预计 | 详情 |" {
+			continue
+		}
+		if i+2 >= len(lines) {
+			t.Fatalf("status table has no data row: %q", body)
+		}
+		header := strings.Split(strings.Trim(strings.TrimSpace(line), "|"), "|")
+		// An escaped pipe belongs to the detail cell, not a column boundary.
+		row := strings.Split(strings.Trim(strings.TrimSpace(strings.ReplaceAll(lines[i+2], `\|`, "\x00")), "|"), "|")
+		if len(header) != len(row) {
+			t.Fatalf("status table header %v does not match row %v", header, row)
+		}
+		cells := make(map[string]string, len(header))
+		for j := range header {
+			cells[strings.TrimSpace(header[j])] = strings.ReplaceAll(strings.TrimSpace(row[j]), "\x00", `\|`)
+		}
+		return cells
+	}
+	t.Fatalf("status table missing: %q", body)
+	return nil
+}
+
+// TestReviewStatusBodyRendersMarkdownTable pins the table layout and per-cell
+// escaping of the single status note body (#475).
+func TestReviewStatusBodyRendersMarkdownTable(t *testing.T) {
+	body := reviewStatusBody(reviewStatusUpdate{
+		State: reviewStatusRunning, HeadSHA: reviewTestHead, Generation: 7,
+		EstimateMinutes: 3, Detail: "node a|b failed",
+	})
+	if !strings.HasPrefix(body, reviewStatusMarkerPrefix+" v2 -->") {
+		t.Fatalf("marker = %q, want v2", strings.SplitN(body, "\n", 2)[0])
+	}
+	if !strings.Contains(body, "| 阶段 | 状态 | 代次 | 提交 | 预计 | 详情 |") ||
+		!strings.Contains(body, "| --- | --- | --- | --- | --- | --- |") {
+		t.Fatalf("status table header or divider missing: %q", body)
+	}
+	cells := statusTableCells(t, body)
+	if cells["阶段"] != "进行中" || cells["状态"] != "`running`" || cells["代次"] != "`7`" ||
+		cells["提交"] != "`"+shortSHA(reviewTestHead)+"`" || cells["预计"] != "约 3 分钟" {
+		t.Fatalf("status table cells = %v", cells)
+	}
+	if !strings.Contains(body, `node a\|b failed`) {
+		t.Fatalf("detail pipe was not escaped: %q", body)
+	}
+
+	empty := reviewStatusBody(reviewStatusUpdate{State: reviewStatusQueued})
+	cells = statusTableCells(t, empty)
+	if cells["代次"] != "-" || cells["提交"] != "-" || cells["预计"] != "-" || cells["详情"] != "-" {
+		t.Fatalf("empty cells = %v", cells)
+	}
+}
+
+// TestParseStatusPhaseReadsLegacyBulletBody keeps upgrade compatibility: a
+// pre-table body is still parsed for the monotonic queued ack check.
+func TestParseStatusPhaseReadsLegacyBulletBody(t *testing.T) {
+	legacy := "<!-- gitlab-ce-review:summary v1 -->\n\n**AI 评审：评审运行中**\n\n- 阶段：`进行中`\n- 状态：`running`\n"
+	if got := parseStatusPhase(legacy); got != "进行中" {
+		t.Fatalf("legacy phase = %q, want 进行中", got)
+	}
+	table := reviewStatusBody(reviewStatusUpdate{State: reviewStatusPass})
+	if got := parseStatusPhase(table); got != "已完成" {
+		t.Fatalf("table phase = %q, want 已完成", got)
+	}
 }
 
 // drainReviewSideEffects runs every queued status/reaction job until none is
@@ -102,9 +160,14 @@ func TestStatusWriterUpsertsSingleNote(t *testing.T) {
 	if !strings.HasPrefix(api.notes[0].Body, reviewStatusMarkerLine) {
 		t.Fatalf("status marker missing: %q", api.notes[0].Body)
 	}
-	if !strings.Contains(api.notes[0].Body, "- 代次：`3`") ||
-		!strings.Contains(api.notes[0].Body, "- 预计：约 5 分钟") {
-		t.Fatalf("status body missing generation or estimate: %q", api.notes[0].Body)
+	cells := statusTableCells(t, api.notes[0].Body)
+	if cells["阶段"] != reviewStatusPhase(reviewStatusRunning) || cells["状态"] != "`running`" ||
+		cells["代次"] != "`3`" || cells["提交"] != "`"+shortSHA(reviewTestHead)+"`" ||
+		cells["预计"] != "约 5 分钟" {
+		t.Fatalf("status table cells = %v, body: %q", cells, api.notes[0].Body)
+	}
+	if !strings.Contains(api.notes[0].Body, "| 阶段 | 状态 | 代次 | 提交 | 预计 | 详情 |") {
+		t.Fatalf("status table header missing: %q", api.notes[0].Body)
 	}
 
 	if _, _, err := reporter.writeStatus(context.Background(), 42, 7, "token", reviewStatusUpdate{
@@ -155,6 +218,53 @@ func TestStatusWriterIgnoresForeignNoteAndRecreatesAfterDelete(t *testing.T) {
 	if _, _, err := reporter.writeStatus(context.Background(), 42, 7, "token", reviewStatusUpdate{State: reviewStatusFailed}); err == nil {
 		t.Fatal("a status GitLab failure was swallowed")
 	}
+}
+
+func TestStatusWriterDeletesLegacyStatusNoteAfterMerge(t *testing.T) {
+	api := newReviewGitLab(reviewTestHead)
+	botID := api.currentUser.ID
+	api.notes = []gitlab.Note{
+		{ID: 10, AuthorID: botID, Body: reviewLegacyStatusMarkerLine + "\nold status"},
+		{ID: 11, AuthorID: botID, Body: reviewStatusMarkerLine + "\nold merged"},
+		{ID: 12, AuthorID: botID + 1, Body: reviewLegacyStatusMarkerLine + "\nforeign"},
+	}
+	reporter := testStatusReporter(api)
+	final := review.SummaryMarkerPrefix + " v1 fp=x -->\n\n## 评审结论\n\nPASS\n"
+	update := reviewStatusUpdate{
+		State: reviewStatusPass, HeadSHA: reviewTestHead, Generation: 4,
+		FinalBody: final, CleanupLegacy: true,
+	}
+	if _, _, err := reporter.writeStatus(context.Background(), 42, 7, "token", update); err != nil {
+		t.Fatalf("writeStatus: %v", err)
+	}
+	notes := api.noteSnapshot()
+	if len(notes) != 2 {
+		t.Fatalf("notes = %+v, want the merged note and the foreign legacy note", notes)
+	}
+	if api.noteDeletes != 1 {
+		t.Fatalf("note deletes = %d, want one legacy delete", api.noteDeletes)
+	}
+	for _, note := range notes {
+		if note.ID == 10 {
+			t.Fatalf("bot legacy note survived convergence: %+v", notes)
+		}
+	}
+	if !strings.HasPrefix(notes[0].Body, reviewStatusMarkerLine) || !strings.Contains(notes[0].Body, "## 评审结论") {
+		t.Fatalf("merged note was not converged: %q", notes[0].Body)
+	}
+	// A repeated identical write is still a no-op and deletes nothing more.
+	if _, _, err := reporter.writeStatus(context.Background(), 42, 7, "token", update); err != nil {
+		t.Fatalf("idempotent writeStatus: %v", err)
+	}
+	if api.noteDeletes != 1 {
+		t.Fatalf("idempotent write deleted notes again: %d", api.noteDeletes)
+	}
+}
+
+func (f *reviewGitLab) noteSnapshot() []gitlab.Note {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]gitlab.Note(nil), f.notes...)
 }
 
 func TestReactionWriterConvergesOwnAwards(t *testing.T) {

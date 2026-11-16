@@ -68,8 +68,12 @@ type WebhookService struct {
 	profiles       map[string]config.ProfileConfig
 	reviewDefaults config.ProjectSettings
 	botUsernames   map[string]bool
-	logger         *slog.Logger
-	now            func() time.Time
+	// mrLocks is the shared per-merge-request registry. Ingress holds it while
+	// it bumps the generation and enqueues the job, so the write cannot
+	// interleave with an in-flight publication or status note (#475).
+	mrLocks *workflowLocks
+	logger  *slog.Logger
+	now     func() time.Time
 }
 
 // WebhookServiceConfig configures WebhookService.
@@ -82,6 +86,9 @@ type WebhookServiceConfig struct {
 	BotUsernames   []string
 	Logger         *slog.Logger
 	Now            func() time.Time
+	// MRLocks is the shared per-merge-request lock registry. A nil value
+	// gives this service a private registry (tests and standalone builds).
+	MRLocks *workflowLocks
 }
 
 // NewWebhookService builds the webhook ingress service.
@@ -103,6 +110,10 @@ func NewWebhookService(cfg WebhookServiceConfig) (*WebhookService, error) {
 			bots[name] = true
 		}
 	}
+	mrLocks := cfg.MRLocks
+	if mrLocks == nil {
+		mrLocks = &workflowLocks{}
+	}
 	return &WebhookService{
 		store:          cfg.Store,
 		workspace:      cfg.Workspace,
@@ -110,6 +121,7 @@ func NewWebhookService(cfg WebhookServiceConfig) (*WebhookService, error) {
 		profiles:       cfg.Profiles,
 		reviewDefaults: cfg.ReviewDefaults,
 		botUsernames:   bots,
+		mrLocks:        mrLocks,
 		logger:         logger,
 		now:            now,
 	}, nil
@@ -172,6 +184,16 @@ func (s *WebhookService) Handle(ctx context.Context, req WebhookRequest) (Webhoo
 	}
 	if reason := checkEventKind(req.Event, payload.ObjectKind); reason != "" {
 		return s.recordIgnored(ctx, project.ID, req.Event, parsedUUID.String(), mrIID, reason)
+	}
+	// Serialize the generation bump and queued status write with publication
+	// and status-note writes for this merge request. Lock order is lifecycle
+	// lock (held above), then the shared per-MR lock (#475).
+	if mrIID > 0 {
+		mrUnlock, err := s.mrLocks.lock(ctx, reviewMRLockKey(project.ID, mrIID))
+		if err != nil {
+			return WebhookResult{Ignored: "storage_error"}, err
+		}
+		defer mrUnlock()
 	}
 
 	settings, err := ResolveSettings(project.Settings, s.reviewDefaults)

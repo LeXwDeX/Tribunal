@@ -22,13 +22,20 @@ const (
 	// this service. It uses the summary marker so the status worker and the
 	// publisher both find and edit the same MR note (#451).
 	reviewStatusMarkerPrefix = review.SummaryMarkerPrefix
-	reviewStatusMarkerLine   = reviewStatusMarkerPrefix + " v1 -->"
+	reviewStatusMarkerLine   = reviewStatusMarkerPrefix + " v2 -->"
 	// reviewLegacyStatusMarkerPrefix is the pre-#452 status note marker. Rows
 	// upgraded from an older database keep updating that note instead of
-	// taking over the published summary (#453).
+	// taking over the published summary (#453) until the merged note carries
+	// the final body and cleanup removes it (#475).
 	reviewLegacyStatusMarkerPrefix = "<!-- gitlab-ce-review:status"
 	reviewLegacyStatusMarkerLine   = reviewLegacyStatusMarkerPrefix + " v1 -->"
 	reviewStatusDetailRunes        = 160
+
+	// reviewStatusTableHeader and reviewStatusTableDivider render the single
+	// status note as a deterministic Markdown table (#475). parseStatusPhase
+	// matches the header exactly, so keep the two in sync.
+	reviewStatusTableHeader  = "| 阶段 | 状态 | 代次 | 提交 | 预计 | 详情 |"
+	reviewStatusTableDivider = "| --- | --- | --- | --- | --- | --- |"
 
 	reviewStatusReceived   = "received"
 	reviewStatusQueued     = store.ReviewStatusQueued
@@ -63,6 +70,7 @@ type statusGitLab interface {
 	ListMRNotes(ctx context.Context, token string, projectID, iid int64) ([]gitlab.Note, error)
 	CreateMRNote(ctx context.Context, token string, projectID, iid int64, body string) (*gitlab.Note, error)
 	UpdateMRNote(ctx context.Context, token string, projectID, iid, noteID int64, body string) error
+	DeleteMRNote(ctx context.Context, token string, projectID, iid, noteID int64) error
 	ListNoteAwards(ctx context.Context, token string, projectID, iid, noteID int64) ([]gitlab.Award, error)
 	AddNoteAward(ctx context.Context, token string, projectID, iid, noteID int64, name string) (*gitlab.Award, error)
 	DeleteNoteAward(ctx context.Context, token string, projectID, iid, noteID, awardID int64) error
@@ -83,6 +91,9 @@ type reviewStatusUpdate struct {
 	// published summary lives in a separate note that this writer must not
 	// find or edit.
 	LegacyMarker bool
+	// CleanupLegacy removes the bot's legacy status note once the merged note
+	// carries the final body, so the MR keeps exactly one review note (#475).
+	CleanupLegacy bool
 }
 
 // statusReporter writes the durable status and reaction goals to GitLab. It
@@ -138,6 +149,8 @@ func (r *statusReporter) writeStatus(ctx context.Context, projectID, mrIID int64
 	if err != nil {
 		return 0, "", fmt.Errorf("app: status note lookup: %w", err)
 	}
+	noteID := int64(0)
+	noteHash := hash
 	for _, note := range notes {
 		if !strings.HasPrefix(note.Body, marker) {
 			continue
@@ -145,19 +158,21 @@ func (r *statusReporter) writeStatus(ctx context.Context, projectID, mrIID int64
 		if note.AuthorID != user.ID {
 			continue
 		}
+		noteID = note.ID
 		if note.Body == body {
-			return note.ID, hash, nil
+			break
 		}
 		// A queued acknowledgement may race a worker that already started the
 		// review. Never move a visible status backwards.
 		if !r.durable && !statusMayRegress(note.Body, update.State) {
-			return note.ID, sha256Hex(note.Body), nil
+			noteHash = sha256Hex(note.Body)
+			break
 		}
 		err := r.send(ctx, func(ctx context.Context) error {
 			return r.gitlab.UpdateMRNote(ctx, token, projectID, mrIID, note.ID, body)
 		})
 		if err == nil {
-			return note.ID, hash, nil
+			break
 		}
 		if errors.Is(err, workspace.ErrOutboundInvalidated) {
 			return 0, "", err
@@ -166,21 +181,55 @@ func (r *statusReporter) writeStatus(ctx context.Context, projectID, mrIID int64
 			return 0, "", fmt.Errorf("app: status note update: %w", err)
 		}
 		// The note was deleted between list and update. Recreate it below.
+		noteID = 0
 		break
 	}
-	var created *gitlab.Note
-	err = r.send(ctx, func(ctx context.Context) error {
-		var err error
-		created, err = r.gitlab.CreateMRNote(ctx, token, projectID, mrIID, body)
-		return err
-	})
-	if err != nil {
-		return 0, "", fmt.Errorf("app: status note creation: %w", err)
+	if noteID == 0 {
+		var created *gitlab.Note
+		err = r.send(ctx, func(ctx context.Context) error {
+			var err error
+			created, err = r.gitlab.CreateMRNote(ctx, token, projectID, mrIID, body)
+			return err
+		})
+		if err != nil {
+			return 0, "", fmt.Errorf("app: status note creation: %w", err)
+		}
+		if created == nil || created.ID <= 0 {
+			return 0, "", errors.New("app: status note creation returned no note")
+		}
+		noteID = created.ID
 	}
-	if created == nil || created.ID <= 0 {
-		return 0, "", errors.New("app: status note creation returned no note")
+	// Cleanup runs on every converged write, including the identical-body and
+	// refused-regression early paths, so a legacy note cannot survive a restart
+	// after the merged note is already current (#475).
+	if update.CleanupLegacy {
+		if err := r.deleteLegacyStatusNotes(ctx, projectID, mrIID, token, notes, user.ID); err != nil {
+			return 0, "", err
+		}
 	}
-	return created.ID, hash, nil
+	return noteID, noteHash, nil
+}
+
+// deleteLegacyStatusNotes removes the bot's own pre-#452 status notes. Foreign
+// notes and the merged note never match both the author and marker filters.
+func (r *statusReporter) deleteLegacyStatusNotes(ctx context.Context, projectID, mrIID int64, token string, notes []gitlab.Note, authorID int64) error {
+	for _, note := range notes {
+		if note.AuthorID != authorID || !strings.HasPrefix(note.Body, reviewLegacyStatusMarkerPrefix) {
+			continue
+		}
+		noteID := note.ID
+		err := r.send(ctx, func(ctx context.Context) error {
+			return r.gitlab.DeleteMRNote(ctx, token, projectID, mrIID, noteID)
+		})
+		if err == nil || gitlab.IsNotFound(err) {
+			continue
+		}
+		if errors.Is(err, workspace.ErrOutboundInvalidated) {
+			return err
+		}
+		return fmt.Errorf("app: legacy status note delete: %w", err)
+	}
+	return nil
 }
 
 // applyReaction converges the bot's own awards on one note to desired.
@@ -284,6 +333,31 @@ func statusMayRegress(previousBody, nextState string) bool {
 }
 
 func parseStatusPhase(body string) string {
+	lines := strings.Split(body, "\n")
+	for i, line := range lines {
+		if strings.TrimSpace(line) != reviewStatusTableHeader {
+			continue
+		}
+		for _, row := range lines[i+1:] {
+			row = strings.TrimSpace(row)
+			if row == "" || !strings.HasPrefix(row, "|") {
+				break
+			}
+			fields := strings.Split(row, "|")
+			if len(fields) < 3 {
+				continue
+			}
+			cell := strings.TrimSpace(fields[1])
+			if cell == "" || strings.Trim(cell, "-") == "" {
+				continue // divider row
+			}
+			return cell
+		}
+		break
+	}
+	// Bodies written before #475 stored the phase as a bullet. Keep parsing
+	// them so the monotonic queued acknowledgement check still works across
+	// the upgrade.
 	const prefix = "- 阶段：`"
 	idx := strings.Index(body, prefix)
 	if idx < 0 {
@@ -298,7 +372,8 @@ func parseStatusPhase(body string) string {
 }
 
 // reviewStatusBody renders a deterministic status note. The first line is the
-// hidden marker so repeated reports of the same state are no-ops.
+// hidden marker so repeated reports of the same state are no-ops. The lifecycle
+// fields are a Markdown table (#475).
 func reviewStatusBody(update reviewStatusUpdate) string {
 	var b strings.Builder
 	if update.LegacyMarker {
@@ -310,37 +385,60 @@ func reviewStatusBody(update reviewStatusUpdate) string {
 	b.WriteString("**AI 评审：")
 	b.WriteString(reviewStatusLabel(update.State))
 	b.WriteString("**\n\n")
-	b.WriteString("- 阶段：`")
+	b.WriteString(reviewStatusTableHeader)
+	b.WriteByte('\n')
+	b.WriteString(reviewStatusTableDivider)
+	b.WriteByte('\n')
+	b.WriteString("| ")
 	b.WriteString(reviewStatusPhase(update.State))
-	b.WriteString("`\n- 状态：`")
+	b.WriteString(" | `")
 	b.WriteString(sanitizeStatusDetail(update.State))
-	b.WriteString("`\n")
-	if update.Generation > 0 {
-		b.WriteString("- 代次：`")
-		b.WriteString(strconv.FormatInt(update.Generation, 10))
-		b.WriteString("`\n")
-	}
-	if head := strings.TrimSpace(update.HeadSHA); head != "" {
-		b.WriteString("- 提交：`")
-		b.WriteString(shortSHA(head))
-		b.WriteString("`\n")
-	}
-	if update.EstimateMinutes > 0 {
-		b.WriteString("- 预计：约 ")
-		b.WriteString(strconv.Itoa(update.EstimateMinutes))
-		b.WriteString(" 分钟\n")
-	}
-	if detail := sanitizeStatusDetail(update.Detail); detail != "" {
-		b.WriteString("- 详情：")
-		b.WriteString(detail)
-		b.WriteString("\n")
-	}
+	b.WriteString("` | ")
+	b.WriteString(statusGenerationCell(update.Generation))
+	b.WriteString(" | ")
+	b.WriteString(statusHeadCell(update.HeadSHA))
+	b.WriteString(" | ")
+	b.WriteString(statusEstimateCell(update.EstimateMinutes))
+	b.WriteString(" | ")
+	b.WriteString(statusDetailCell(update.Detail))
+	b.WriteString(" |\n")
 	if body := strings.TrimSpace(update.FinalBody); body != "" && !update.LegacyMarker {
 		b.WriteString("\n")
 		b.WriteString(stripSummaryMarker(body))
 		b.WriteString("\n")
 	}
 	return gitlab.NeutralizeQuickActions(b.String())
+}
+
+func statusGenerationCell(generation int64) string {
+	if generation <= 0 {
+		return "-"
+	}
+	return "`" + strconv.FormatInt(generation, 10) + "`"
+}
+
+func statusHeadCell(head string) string {
+	head = strings.TrimSpace(head)
+	if head == "" {
+		return "-"
+	}
+	return "`" + shortSHA(head) + "`"
+}
+
+func statusEstimateCell(minutes int) string {
+	if minutes <= 0 {
+		return "-"
+	}
+	return "约 " + strconv.Itoa(minutes) + " 分钟"
+}
+
+func statusDetailCell(detail string) string {
+	detail = sanitizeStatusDetail(detail)
+	if detail == "" {
+		return "-"
+	}
+	// A raw pipe would split the table cell.
+	return strings.ReplaceAll(detail, "|", `\|`)
 }
 
 // reviewStatusPhase maps a lifecycle state to the four visible phases.

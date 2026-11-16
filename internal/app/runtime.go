@@ -240,6 +240,9 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		Clock:              now,
 		Logger:             logger,
 	})
+	// One per-merge-request lock registry is shared by webhook ingress,
+	// publication and status writing so generations cannot interleave (#475).
+	mrLocks := &workflowLocks{}
 	publisher, err := NewPublisher(PublisherConfig{
 		Store:          deps.Store,
 		Workspace:      workspaceManager,
@@ -253,6 +256,7 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		PublicURL:      cfg.Server.PublicURL,
 		Logger:         logger,
 		Now:            now,
+		MRLocks:        mrLocks,
 	})
 	if err != nil {
 		if ownedMCP {
@@ -324,6 +328,7 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		Skills:            projectSkills,
 		Publisher:         publisher,
 		Status:            statusFeed,
+		MRLocks:           mrLocks,
 		AllowedProviders:  allowedProviders,
 		ProviderConfigs:   cloneProviderConfigs(cfg.Providers),
 		ProjectExtensions: projectExts,
@@ -457,6 +462,7 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		BotUsernames:   cfg.GitLab.BotUsernames,
 		Logger:         logger,
 		Now:            now,
+		MRLocks:        mrLocks,
 	})
 	if err != nil {
 		if ownedMCP {

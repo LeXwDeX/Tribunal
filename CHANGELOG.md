@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### 修复
+
+- **同一 MR 的评审写入串行化、状态表格化与 legacy 注记收敛**（[#475](https://github.com/LeXwDeX/Tribunal/issues/475)）：运行时新增进程内共享的 per-MR 锁，webhook ingress 的 generation bump+入队、publisher 整次发布（含行内讨论、summary、commit status）与状态 worker 的注记写入持有同一把锁，旧代次写入不会再落在新代次的「运行中」注记之后；连续 push、手动重审与取消仍保留 latest-wins 合并（只运行最新 head），但同一 MR 的远端写入严格按持锁顺序执行。状态注记改为 Markdown 表格（阶段/状态/代次/提交/预计/详情），首行标记升为 `<!-- gitlab-ce-review:summary v2 -->`；回收仍按不含版本的前缀匹配，旧 v1 正文继续可解析。状态注记在 control 缺失、同代次 head 变化或当前代次被取消时写入终态（已过期/已取消）而非静默跳过，终态不再卡在「运行中」；已有更新代次时仍跳过、由新代次写入。新增 GitLab 客户端删除 MR note 的能力：`final_body_ready` 翻为 1 后，状态 worker 删除本 bot 的旧 `<!-- gitlab-ce-review:status` 注记（只匹配旧标记且作者为当前 bot），使一个 MR 只保留一条评审注记；升级前遗留的独立 summary note 不在清理范围内。
+
 ## [1.5.0] - 2026-11-14
 
 > v1.5.0 汇总 Milestone 8 的 8 个用户侧修复（[#453](https://github.com/LeXwDeX/Tribunal/issues/453)、[#454](https://github.com/LeXwDeX/Tribunal/issues/454)、[#455](https://github.com/LeXwDeX/Tribunal/issues/455)、[#456](https://github.com/LeXwDeX/Tribunal/issues/456)、[#457](https://github.com/LeXwDeX/Tribunal/issues/457)、[#458](https://github.com/LeXwDeX/Tribunal/issues/458)、[#459](https://github.com/LeXwDeX/Tribunal/issues/459)、[#466](https://github.com/LeXwDeX/Tribunal/issues/466)）。四个新迁移只追加、没有 down migration；升级前必须完成一致性备份与升级前快照，回滚需要快照加匹配的旧镜像。完整验证状态见 [v1.5.0 验证状态](docs/delivery-readiness.md#v150-验证状态)。生产部署与验收已完成（沙盒项目端到端自测待用户执行）。

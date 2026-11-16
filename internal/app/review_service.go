@@ -112,32 +112,35 @@ type ReviewStore interface {
 // ReviewService implements F1/F2: MR review orchestration. It owns workflow
 // creation, execution, and the decision to publish.
 type ReviewService struct {
-	store             ReviewStore
-	gitlab            GitLabClient
-	cipher            *secret.Cipher
-	workspace         *workspace.Manager
-	git               GitOps
-	engine            *dag.Engine
-	executors         *executorRegistry
-	profiles          map[string]config.ProfileConfig
-	rawProfiles       map[string]config.ProfileConfig
-	blocks            map[string]config.BlockBinding
-	reviewDefaults    config.ProjectSettings
-	prompts           prompts.Bundle
-	clients           review.ClientProvider
-	catalog           *llm.Catalog
-	overrides         store.ProfileOverrideStore
-	agentRun          review.AgentRunner
-	tools             review.ToolProvider
-	skills            review.SkillProvider
-	providerNames     []string
-	providerConfig    json.RawMessage
-	extensions        *ProjectExtensionResolver
-	testIdentity      string
-	publisher         *Publisher
-	publicURL         string
-	status            *statusReporter
-	statusLocks       workflowLocks
+	store          ReviewStore
+	gitlab         GitLabClient
+	cipher         *secret.Cipher
+	workspace      *workspace.Manager
+	git            GitOps
+	engine         *dag.Engine
+	executors      *executorRegistry
+	profiles       map[string]config.ProfileConfig
+	rawProfiles    map[string]config.ProfileConfig
+	blocks         map[string]config.BlockBinding
+	reviewDefaults config.ProjectSettings
+	prompts        prompts.Bundle
+	clients        review.ClientProvider
+	catalog        *llm.Catalog
+	overrides      store.ProfileOverrideStore
+	agentRun       review.AgentRunner
+	tools          review.ToolProvider
+	skills         review.SkillProvider
+	providerNames  []string
+	providerConfig json.RawMessage
+	extensions     *ProjectExtensionResolver
+	testIdentity   string
+	publisher      *Publisher
+	publicURL      string
+	status         *statusReporter
+	// mrLocks is the shared per-merge-request registry injected by the
+	// runtime. Status writes and publications hold the same lock so one MR's
+	// note is never written by two generations at once (#475).
+	mrLocks           *workflowLocks
 	statusScanLocks   workflowLocks
 	statusScanMu      sync.Mutex
 	statusScanCursor  map[int64]int64
@@ -168,12 +171,15 @@ type ReviewServiceConfig struct {
 	Overrides      store.ProfileOverrideStore
 	// RawProfiles holds the review profile before normalization. Overrides
 	// merge into it; without it Profiles is used as the base.
-	RawProfiles       map[string]config.ProfileConfig
-	AgentRun          review.AgentRunner
-	Tools             review.ToolProvider
-	Skills            review.SkillProvider
-	Publisher         *Publisher
-	Status            *statusReporter
+	RawProfiles map[string]config.ProfileConfig
+	AgentRun    review.AgentRunner
+	Tools       review.ToolProvider
+	Skills      review.SkillProvider
+	Publisher   *Publisher
+	Status      *statusReporter
+	// MRLocks is the shared per-merge-request lock registry. A nil value reuses
+	// the publisher's registry, or a private one when no publisher exists.
+	MRLocks           *workflowLocks
 	AllowedProviders  []string
 	ProviderConfigs   map[string]config.ProviderConfig
 	ProjectExtensions *ProjectExtensionResolver
@@ -235,6 +241,14 @@ func NewReviewService(cfg ReviewServiceConfig) (*ReviewService, error) {
 	if wait <= 0 {
 		wait = defaultCancelWait
 	}
+	mrLocks := cfg.MRLocks
+	if mrLocks == nil {
+		if cfg.Publisher != nil && cfg.Publisher.mrLocks != nil {
+			mrLocks = cfg.Publisher.mrLocks
+		} else {
+			mrLocks = &workflowLocks{}
+		}
+	}
 	return &ReviewService{
 		store:          cfg.Store,
 		gitlab:         cfg.GitLab,
@@ -261,6 +275,7 @@ func NewReviewService(cfg ReviewServiceConfig) (*ReviewService, error) {
 		publisher:      cfg.Publisher,
 		publicURL:      strings.TrimRight(cfg.PublicURL, "/"),
 		status:         cfg.Status,
+		mrLocks:        mrLocks,
 		logger:         logger,
 		now:            now,
 		cancelPoll:     poll,

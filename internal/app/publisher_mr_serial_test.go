@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/LeXwDeX/tribunal/internal/agent"
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/review"
@@ -138,7 +140,7 @@ func mrSerialWritesBy(writes []mrSerialWrite, actor string) []mrSerialWrite {
 // mrLockRefs exposes the test-only view of the existing keyed-lock reference
 // count: one holder plus any waiters on the same merge request.
 func (p *Publisher) mrLockRefs(projectID, mrIID int64) int {
-	key := fmt.Sprintf("%d:%d", projectID, mrIID)
+	key := reviewMRLockKey(projectID, mrIID)
 	p.mrLocks.mu.Lock()
 	defer p.mrLocks.mu.Unlock()
 	entry := p.mrLocks.entries[key]
@@ -717,12 +719,12 @@ func TestStandaloneSummaryWaitsForPublicationLock(t *testing.T) {
 	}
 }
 
-// TestInFlightSummaryUpdateIsFollowedByNewerGeneration blocks the older
+// TestInFlightSummaryUpdateIsNotInterleavedByNewerGeneration blocks the older
 // generation inside the real UpdateMRNote call, after its final pre-write
-// recheck. The newer generation must wait on the same MR lock. The in-flight
-// old write completes, then the newer generation overwrites it; the old status
-// write is rejected as stale.
-func TestInFlightSummaryUpdateIsFollowedByNewerGeneration(t *testing.T) {
+// recheck. The newer generation arrives through the webhook ingress and must
+// wait on the shared per-MR lock: it may not bump the control or write a
+// status note until the in-flight summary write completes (#475).
+func TestInFlightSummaryUpdateIsNotInterleavedByNewerGeneration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	f := newReviewFixture(t, reviewTestHead)
@@ -791,32 +793,64 @@ func TestInFlightSummaryUpdateIsFollowedByNewerGeneration(t *testing.T) {
 		t.Fatalf("A did not reach the in-flight summary write: %v", ctx.Err())
 	}
 
-	bJobID, err := dispatcher.StartReview(ctx, 42, 7, "default", true)
+	// The successor event arrives while the old summary write is in flight.
+	// The ingress must block on the shared MR lock instead of bumping the
+	// generation or writing a queued/running status note underneath it.
+	webhookDefaults := f.defaults
+	webhookDefaults.AllowRepoConfig = false
+	webhooks, err := NewWebhookService(WebhookServiceConfig{
+		Store: f.db, Workspace: f.manager, Cipher: newTestCipher(t),
+		Profiles: f.profiles, ReviewDefaults: webhookDefaults,
+		MRLocks: f.publisher.mrLocks,
+	})
 	if err != nil {
-		t.Fatalf("enqueue B: %v", err)
+		t.Fatalf("NewWebhookService: %v", err)
 	}
-	bRun, err := f.db.Claim(ctx, "worker-B-run", []string{"review.run"}, time.Minute)
-	if err != nil || bRun == nil || bRun.ID != bJobID {
-		t.Fatalf("claim B review.run: job=%v err=%v", bRun, err)
-	}
-	bDone := make(chan error, 1)
+	ingressDone := make(chan struct{})
+	var ingressResult WebhookResult
+	var ingressErr error
 	go func() {
-		bDone <- f.service.RunReview(mrSerialActor(ctx, "B"), bRun)
+		ingressResult, ingressErr = webhooks.Handle(ctx, WebhookRequest{
+			Event: "Merge Request Hook", Token: "whsec", UUID: uuid.NewString(),
+			Body: mrBody(42, 7, func(body map[string]any) {
+				patchAttr(body, "action", "reopen")
+				patchAttr(body, "last_commit", map[string]any{"id": f.head})
+				patchMR(body, "last_commit", map[string]any{"id": f.head})
+			}),
+		})
+		close(ingressDone)
 	}()
-	control, err := f.db.GetReviewControl(ctx, 42, 7)
-	if err != nil || control.Generation <= aDossier.Generation {
-		t.Fatalf("control=%+v A generation=%d err=%v", control, aDossier.Generation, err)
-	}
 	mrSerialWaitRefs(t, ctx, f.publisher, 2)
+	control, err := f.db.GetReviewControl(ctx, 42, 7)
+	if err != nil || control.Generation != aDossier.Generation {
+		t.Fatalf("generation changed while the old summary was in flight: %+v, %v", control, err)
+	}
 	if writes := g.snapshot(); len(writes) != 0 {
 		close(g.updateRelease)
 		t.Fatalf("writes completed while the old summary write was still in flight: %+v", writes)
 	}
 	close(g.updateRelease)
 
-	if err := mrSerialWait(t, aDone, "A republish"); !errors.Is(err, ErrStalePublication) {
-		t.Fatalf("A republish error = %v, want ErrStalePublication", err)
+	if err := mrSerialWait(t, aDone, "A republish"); err != nil {
+		t.Fatalf("A republish: %v", err)
 	}
+	select {
+	case <-ingressDone:
+	case <-ctx.Done():
+		t.Fatalf("successor ingress did not finish: %v", ctx.Err())
+	}
+	if ingressErr != nil || !ingressResult.Accepted {
+		t.Fatalf("successor ingress = %+v, %v", ingressResult, ingressErr)
+	}
+
+	bRun, err := f.db.Claim(ctx, "worker-B-run", []string{"review.run"}, time.Minute)
+	if err != nil || bRun == nil || bRun.ID != ingressResult.JobID {
+		t.Fatalf("claim B review.run: job=%v err=%v want %s", bRun, err, ingressResult.JobID)
+	}
+	bDone := make(chan error, 1)
+	go func() {
+		bDone <- f.service.RunReview(mrSerialActor(ctx, "B"), bRun)
+	}()
 	if err := mrSerialWait(t, bDone, "B review"); err != nil {
 		t.Fatalf("B review: %v", err)
 	}
@@ -828,44 +862,113 @@ func TestInFlightSummaryUpdateIsFollowedByNewerGeneration(t *testing.T) {
 	}
 
 	writes := g.snapshot()
-	if len(writes) != 3 {
-		t.Fatalf("writes = %+v, want A summary, B summary, B status", writes)
+	if len(writes) < 2 || writes[0].actor != "A" || writes[0].kind != "summary-update" {
+		t.Fatalf("writes = %+v, want A's in-flight summary first", writes)
 	}
-	want := []struct{ actor, kind string }{{"A", "summary-update"}, {"B", "summary-update"}, {"B", "commit-status"}}
-	for i := range want {
-		if writes[i].actor != want[i].actor || writes[i].kind != want[i].kind {
-			t.Fatalf("write[%d] = %+v, want %+v", i, writes[i], want[i])
+	// The old generation's writes stay contiguous; once the successor writes,
+	// the old generation must never appear again.
+	successor := len(writes)
+	for i, write := range writes {
+		if write.actor != "A" {
+			successor = i
+			break
 		}
 	}
-	if !strings.Contains(writes[1].body, "BLOCKING") || writes[2].state != "failed" {
-		t.Fatalf("newer generation did not write the blocking result: %+v", writes[1:])
+	if successor == len(writes) {
+		t.Fatalf("successor generation wrote nothing: %+v", writes)
+	}
+	for _, write := range writes[successor:] {
+		if write.actor == "A" {
+			t.Fatalf("old generation wrote after the successor started: %+v", writes)
+		}
 	}
 	b, err := f.db.GetWorkflowByJob(ctx, bRun.ID)
 	if err != nil || b.Verdict != review.VerdictBlocking || b.PublicationState != store.WorkflowPublicationPublished {
 		t.Fatalf("B workflow=%+v err=%v", b, err)
 	}
 	summary, err := f.db.GetPublication(ctx, 42, 7, summaryPublishKind, summaryPublicationKey)
-	if err != nil || summary.WorkflowID != b.ID || summary.BodyHash != bodyHash(writes[1].body) {
+	if err != nil || summary.WorkflowID != b.ID {
 		t.Fatalf("final summary=%+v err=%v", summary, err)
 	}
-	status, err := f.db.GetPublication(ctx, 42, 7, statusPublishKind, commitStatusPublishKey(f.head, "failed"))
-	if err != nil || status.WorkflowID != b.ID {
-		t.Fatalf("final status=%+v err=%v", status, err)
-	}
 	f.gitlab.mu.Lock()
-	body := ""
+	var body string
 	for i := range f.gitlab.notes {
 		if f.gitlab.notes[i].ID == mustNoteID(t, summary.GitlabID) {
 			body = f.gitlab.notes[i].Body
 		}
 	}
 	f.gitlab.mu.Unlock()
-	if body != writes[1].body {
-		t.Fatalf("remote summary = %q, want the newer generation body", body)
+	if !strings.Contains(body, "BLOCKING") {
+		t.Fatalf("remote summary = %q, want the successor result", body)
 	}
-	aAfter, err := f.db.GetWorkflow(ctx, a.ID)
-	if err != nil || aAfter.PublicationState != store.WorkflowPublicationSkipped {
-		t.Fatalf("A state after stale republish=%+v err=%v", aAfter, err)
+	statusRow, err := f.db.GetReviewStatus(ctx, 42, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cells := statusTableCells(t, body); cells["代次"] != "`"+strconv.FormatInt(statusRow.Generation, 10)+"`" {
+		t.Fatalf("remote generation cell = %q, want %d: %q", cells["代次"], statusRow.Generation, body)
+	}
+}
+
+// TestWebhookIngressWaitsForMergeRequestLock pins the ingress half of the
+// shared per-MR lock: the generation bump and queued status write wait until
+// an in-flight publication releases it (#475).
+func TestWebhookIngressWaitsForMergeRequestLock(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	f := newReviewFixture(t, reviewTestHead)
+	webhookDefaults := f.defaults
+	webhookDefaults.AllowRepoConfig = false
+	webhooks, err := NewWebhookService(WebhookServiceConfig{
+		Store: f.db, Workspace: f.manager, Cipher: newTestCipher(t),
+		Profiles: f.profiles, ReviewDefaults: webhookDefaults,
+		MRLocks: f.publisher.mrLocks,
+	})
+	if err != nil {
+		t.Fatalf("NewWebhookService: %v", err)
+	}
+	unlock, err := f.publisher.mrLocks.lock(ctx, reviewMRLockKey(42, 7))
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	var result WebhookResult
+	var handleErr error
+	go func() {
+		result, handleErr = webhooks.Handle(ctx, WebhookRequest{
+			Event: "Merge Request Hook", Token: "whsec", UUID: uuid.NewString(),
+			Body: mrBody(42, 7, func(body map[string]any) {
+				patchAttr(body, "action", "reopen")
+				patchAttr(body, "last_commit", map[string]any{"id": f.head})
+				patchMR(body, "last_commit", map[string]any{"id": f.head})
+			}),
+		})
+		close(done)
+	}()
+	mrSerialWaitRefs(t, ctx, f.publisher, 2)
+	if _, err := f.db.GetReviewControl(ctx, 42, 7); !errors.Is(err, store.ErrNotFound) {
+		unlock()
+		t.Fatalf("ingress bumped the generation while the MR lock was held: %v", err)
+	}
+	unlock()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatalf("ingress did not finish: %v", ctx.Err())
+	}
+	if handleErr != nil || !result.Accepted {
+		t.Fatalf("ingress = %+v, %v", result, handleErr)
+	}
+	control, err := f.db.GetReviewControl(ctx, 42, 7)
+	if err != nil || control.Generation != 1 {
+		t.Fatalf("control = %+v, %v", control, err)
+	}
+	status, err := f.db.GetReviewStatus(ctx, 42, 7)
+	if err != nil || status.Generation != control.Generation || status.State != reviewStatusQueued {
+		t.Fatalf("queued status = %+v, %v", status, err)
+	}
+	if notes := f.gitlab.noteSnapshot(); len(notes) != 0 {
+		t.Fatalf("ingress wrote to GitLab: %+v", notes)
 	}
 }
 
