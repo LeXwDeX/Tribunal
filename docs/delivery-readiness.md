@@ -112,7 +112,20 @@
 
 ## 开发环境验收（#484）
 
-待补。
+验收基线 `main` `4a943cd`，在开发环境沙箱项目上执行；以下只记录环境中性结果，不含主机、地址、内部项目路径、note ID 或 MR 编号。
+
+- **部署**：用 `4a943cd` 构建镜像，仅重建开发环境评审容器，容器状态 `healthy`。`GET /api/v1/settings` 的共享凭据 `shared_bot_credential_state=ok`，`provisioning_credential=true`，启动日志解析出的 bot 用户名与配置一致。
+- **零 token 注册**：只提交项目路径（不带 token）注册返回 `201`，响应 `shared_credential=true`；Webhook 自动创建为 `enabled`，事件含 push / merge request / note；数据库 `projects.token_enc` 为零长度哨兵。
+- **自动评审**：评审只维护单条状态注记，正文为 Markdown 表格；跨阶段原地编辑时注记 ID 不变、`updated_at` 递增；注记作者为共享 bot；findings 以行内 discussion 发布；共享模式不写 commit status。
+- **@ 唤醒**：第三方（人类）账号在讨论中 @ bot 后，`review.run` 一次成功，workflow `trigger=mention`、generation 递增；线程内 ack 含 head、代次和状态注记 permalink，permalink 指向的注记与当前单条状态注记一致。编辑该 note 不重触发；bot 自身含 @ 的 note 不自触发。
+- **不穿插**：同一 MR 连续 push 时状态注记保持单条、代次递增；旧代次的写入先于新代次，`updated_at` 序列与持锁顺序一致。
+- **终态收敛**：各代次均一次成功，没有停留在 running；关闭 MR 后新代次自动收敛为 `cancelled`。
+- **凭据失效演练**：把共享凭据替换为无效值后，settings 健康位为 `expired`；注册返回 `422`，文案指向 `gitlab.bot_token_env` 对应的平台共享凭据，而不是项目 token。
+- **缺陷闭环**：首轮验收发现三处缺陷——mention 触发被存储层拒绝、线程回执缺少 permalink、重试耗尽后卡在 running；评审另发现取消安全边界。以上均由 [#485](https://github.com/LeXwDeX/Tribunal/issues/485)（PR [#486](https://github.com/LeXwDeX/Tribunal/pull/486)）修复并在本轮复验通过。
+- **遗留跟进**：跨代次的行内 finding discussion 会堆叠（既有行为，[#487](https://github.com/LeXwDeX/Tribunal/issues/487)）；迁移前老行从 legacy 注记切换到 merged 注记的窗口内，permalink 可能短暂死链（自愈，仅显示影响）。
+- **投递结果**：本轮 webhook 投递聚合中没有 `failed` outcome。
+
+本轮复验不扩大为生产验收；生产部署与验收按发布流程另行执行。
 
 <a id="v150-验证状态"></a>
 
