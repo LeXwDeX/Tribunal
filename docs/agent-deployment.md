@@ -145,9 +145,10 @@ docker compose exec -T review /app/tribunalctl projects all
 
 只有用户需要控制台登录时才做这一步。先确认对外地址是 HTTPS，反向代理按 [运维 · 健康检查与 HTTPS 反向代理](operations.md#6-健康检查与-https-反向代理) 配好。
 
-1. **先征得用户同意**，再在 GitLab 创建 OAuth Application：
-   - scope 只选 `read_user`；
-   - Redirect URI 填 `<TRIBUNAL_PUBLIC_URL>/auth/callback`。
+1. **先查重复用，未命中再征得用户同意创建**。每个 GitLab 实例、每个环境只保留一个 OAuth 应用：生产用固定名 `tribunal`，测试环境用 `tribunal-dev`；应用名是查重约定，不随端口或部署次数变化。
+   - 查重：实例级应用用管理员 `GET <GITLAB_URL>/api/v4/applications`（只返回 owner 为空的实例级应用，含 `application_id`、`application_name`、`callback_url`、`scopes`，不含 secret）；用户级应用在 GitLab 的 `/-/profile/applications` 页面按应用名与回调 URI 核对。GitLab 19.5 的 `GET /api/v4/users/:id/applications` 返回 404，不要依赖。
+   - 命中：复用该应用的 client ID/secret，仍经 `GITLAB_OAUTH_CLIENT_ID`、`GITLAB_OAUTH_CLIENT_SECRET` 注入；回调地址变化时只编辑既有应用的 Redirect URI（固定为 `<TRIBUNAL_PUBLIC_URL>/auth/callback`），不新建应用。
+   - 未命中：取得用户明确同意后创建，应用名用上面的固定名，scope 只选 `read_user`，Redirect URI 填 `<TRIBUNAL_PUBLIC_URL>/auth/callback`。
 2. 先向用户确认实际 GitLab 数字用户 ID 和本次平台管理员授权，再在 `.env` 里设置 `GITLAB_OAUTH_CLIENT_ID`、`GITLAB_OAUTH_CLIENT_SECRET`，以及 `GITLAB_ADMIN_USERNAME=id:<管理员 GitLab 用户 ID>`。用户 ID 可以用 `GET <GITLAB_URL>/api/v4/users?username=<name>` 查到。
 3. 在 `config/server.docker.yaml` 里取消 `oauth:`、`client_id_env:`、`client_secret_env:` 和 `bootstrap_admins:` 这几行的注释。
 4. 重建容器。`restart` 会重新读取已挂载的配置，但不会读入新的环境变量；本步骤修改了 `.env`，所以要用：
@@ -159,6 +160,8 @@ docker compose up -d --force-recreate --wait --wait-timeout 120
 **验证**：浏览器打开 `<TRIBUNAL_PUBLIC_URL>/auth/login`，应该跳到 GitLab 授权页；管理员登录后，控制台左下角显示「管理员」。
 
 `bootstrap_admins` 只授予平台管理标签；拥有本地用户 ID 的管理员据此对全部已登记项目隐式拥有 `manage`，普通用户的项目权限仍在第 6 步单独授予。静态 bootstrap Bearer（`REVIEW_ADMIN_TOKEN`，用户 ID 0）只用于平台管理面，不读业务数据。
+
+GitLab bot 账号与 OAuth 应用都按实例/环境固定，不随重建或换端口新建。实例还没有统一 bot 时，先按 [运维 · 固定 GitLab 身份](operations.md#固定-gitlab-身份每实例一个-bot每环境一个-oauth-应用) 完成一次性收敛，再进入第 5 步。
 
 ## 5. 接入 GitLab 项目
 
