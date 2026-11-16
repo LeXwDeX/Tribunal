@@ -476,14 +476,15 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		return nil, err
 	}
 	commands, err := NewCommandWorker(CommandWorkerConfig{
-		Store:        deps.Store,
-		Workspace:    workspaceManager,
-		GitLab:       deps.GitLab,
-		Cipher:       deps.Cipher,
-		Profiles:     cfg.Profiles,
-		BotUsernames: cfg.GitLab.BotUsernames,
-		Logger:       logger,
-		MRLocks:      mrLocks,
+		Store:                 deps.Store,
+		Workspace:             workspaceManager,
+		GitLab:                deps.GitLab,
+		Cipher:                deps.Cipher,
+		Profiles:              cfg.Profiles,
+		BotUsernames:          cfg.GitLab.BotUsernames,
+		MentionMinAccessLevel: cfg.GitLab.MentionMinAccessLevel,
+		Logger:                logger,
+		MRLocks:               mrLocks,
 	})
 	if err != nil {
 		if ownedMCP {

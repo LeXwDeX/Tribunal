@@ -548,3 +548,20 @@ user                本节点任务：MR 摘要、包内文件列表与 diff、f
 存疑条目（`mark`）的标题使用 `[P1 · 存疑]` 这样的单一标记；非空裁决原因在正文后显示，证据仍可展开查看。
 
 评审评论的 `publish_key` 由路径、规范化标题和代码片段计算，不随评论模板变化。升级后旧讨论的 `body_hash` 与按新模板渲染的正文不同，复用判定会把它视为历史内容不同：当前 finding 只进汇总并追加「部分问题的历史讨论内容与当前内容不同或无法确认，当前问题已保留在摘要中，未修改历史讨论。」警告，不修改旧讨论。这是现有安全策略的预期行为，不是重复发布。
+
+### 9.3 命令回执与线程回复
+
+`review.command` job payload 由 ingress 写入、worker 以 `DisallowUnknownFields` 解码：
+
+| 字段 | 说明 |
+| --- | --- |
+| `project_id` / `mr_iid` / `note_id` | 目标项目、MR 与源注记 |
+| `author_id` / `author_username` / `author_bot` | 作者身份；worker 按 `bot_usernames` 与 `CurrentUser` 复核 |
+| `command` | `run` / `cancel` / `help` |
+| `profile` / `profile_explicit` / `full` | 档位与评审范围 |
+| `trigger` | `command`（斜杠命令）或 `mention`（@ 唤醒） |
+| `discussion_id` | 源注记所在线程；旧 payload 缺省为空 |
+
+mention 命中时 ingress 固定写入 `command=run`、项目默认档位、`full=false`、`trigger=mention`，并透传 `discussion_id`；其权限门槛取 `gitlab.mention_min_access_level`（默认 30），斜杠命令仍固定要求 30。
+
+回执正文只有三部分：ack（accepted / denied / help / cancel / uncertain）、一行 head/代次（head 为 7 位短 SHA，代次来自入队事务，未知时省略）、指向唯一状态注记的 permalink（`<project.web_url>/-/merge_requests/<iid>#note_<note_id>`，取不到 note ID 时省略）。回执不复制状态表格、不新增完成注记；隐藏 marker `<!-- gitlab-ce-review:command-reply note=<source_note_id>` 与源注记绑定，同一线程内按 marker + bot 作者幂等更新或新增。findings 仍通过行内 discussion 发布。

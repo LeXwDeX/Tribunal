@@ -97,18 +97,21 @@ merge/close webhook 的自动取消只在两种情况下被忽略：从未评审
 
 ---
 
-## F3 评论命令
+## F3 评论命令与 @ 唤醒
 
-M0 先把命令持久化为 `review.command`，以下 GitLab 校验由 worker 执行，不在 webhook handler 内执行。worker 完成权限校验、help/拒绝回复和目标任务入队；它不执行评审。受理 run/cancel 时，入队事务记录源 note 的 eyes；help/拒绝不添加表情。webhook handler 不添加 emoji，也不做网络调用。
+Note Hook 统一先持久化为 `review.command`，以下 GitLab 校验由 worker 执行，不在 webhook handler 内执行。worker 完成权限校验、help/拒绝回复和目标任务入队；它不执行评审。受理 run/cancel 时，入队事务记录源 note 的 eyes；help/拒绝不添加表情。webhook handler 不添加 emoji，也不做网络调用。
 
-1. Note Hook 到达，正文以 `/review` 开头。
-2. 忽略：作者是项目 bot 用户；MR 已关闭或合并。
-3. 校验权限：`GET /projects/:id/members/all/:user_id`，`access_level < 30` → worker 回复一条「需要 Developer 及以上权限」说明，丢弃命令，不创建评审任务。
-4. 解析命令（03-http-api.md §6）：
+1. Note Hook 到达且 `action=create`。编辑注记不触发（保留 `action != create` 过滤）；MR 已关闭或合并时忽略。
+2. 判定触发类型：首行是 `/review` 斜杠命令时走命令分支；否则尝试 `@` 提及。
+3. 斜杠命令分支忽略 bot 作者的注记。mention 分支允许第三方 bot（`user.bot=true` 且用户名不在 `bot_usernames` 中，常用 access token 的 agent 即属此类），但仍忽略：`bot_usernames` 中的本服务账号，以及以 `command-reply`、summary、legacy status 标记开头的注记；worker 的 `CurrentUser` 身份比对是最后兜底。mention 目标取自 `gitlab.bot_usernames`，列表为空时禁用；匹配大小写不敏感、要求完整用户名边界（`@` 前一个字节与用户名后一个字节均为非词字符或行尾）。匹配前先剥离围栏代码块、行内代码、autolink、Markdown 链接目标与裸 http(s) URL，避免引用文本误触发。
+4. 校验权限：斜杠命令固定要求 Developer（30）；mention 使用 `gitlab.mention_min_access_level`（默认 30，允许 10/15/20/30/40/50）。不足时 worker 在源讨论线程内回复 denied 文案，丢弃命令，不创建评审任务。
+5. 解析命令（03-http-api.md §6）：
    - `/review`、`/review full`、`/review default` → 入队 `review.run`（trigger=`command`，带 `full`、`profile`、`triggered_by`）。
    - `/review cancel` → 入队 `review.cancel`。
    - `/review help` → worker 回复可用命令和档位说明，不创建评审任务。
-5. 两类回复都使用 worker 自己的隐藏 per-note marker（`command-reply note=<source_note_id>`），按源 note 查找并更新已有回复，因此任务重试不会重复创建。受理 run/cancel 时，入队事务在源 note 上设置 eyes；任务进入终态后，状态 worker 将自有 reaction 协调为完成/失败标记或清除。help/拒绝不添加表情；webhook 自身不添加 emoji，也不做网络调用。机器人评论和 command-reply note 不会再次触发。
+   - `@<bot>` → 入队 `review.run`（trigger=`mention`，项目默认档位，`full=false`），payload 透传源注记的 `discussion_id`。
+6. 回复都在源讨论线程内接续：`commandPayload.discussion_id` 非空时定位该线程；旧 payload 缺字段时先用 `ListDiscussions` 反查包含源 note 的线程，仍找不到才回落顶层注记（保持旧行为）。回复正文只包含 ack（accepted/denied/help/cancel/uncertain）、一行 head/代次和指向唯一状态注记的 permalink，不复制状态表格、不新增完成注记；finding 仍走行内 discussion。受理 run/cancel 时，入队事务在源 note 上设置 eyes；任务进入终态后，状态 worker 将自有 reaction 协调为完成/失败标记或清除。help/拒绝不添加表情；webhook 自身不添加 emoji，也不做网络调用。机器人评论、command-reply note 与本服务标记注记不会再次触发；同一源 note 不重复入队，同 head 的重复 @ 走既有 latest-wins 合并。
+7. 两类回复都使用 worker 自己的隐藏 per-note marker（`command-reply note=<source_note_id>`），按 marker + bot 作者在线程内查找并原地更新已有回复，因此任务重试不会重复创建。
 
 ---
 

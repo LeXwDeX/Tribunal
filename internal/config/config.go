@@ -80,7 +80,10 @@ type GitLabConfig struct {
 	RequestTimeout time.Duration `yaml:"request_timeout" json:"request_timeout"`
 	MaxConcurrency int           `yaml:"max_concurrency" json:"max_concurrency"`
 	BotUsernames   []string      `yaml:"bot_usernames" json:"bot_usernames"`
-	CatchUp        CatchUpConfig `yaml:"catch_up" json:"catch_up"`
+	// MentionMinAccessLevel gates @-mention wake-ups. Slash commands keep the
+	// fixed Developer (30) threshold. bot_usernames empty disables mentions.
+	MentionMinAccessLevel int           `yaml:"mention_min_access_level" json:"mention_min_access_level"`
+	CatchUp               CatchUpConfig `yaml:"catch_up" json:"catch_up"`
 }
 
 // CatchUpConfig controls the one-time startup scan that enqueues reviews for
@@ -440,6 +443,11 @@ func (c *Config) Validate() error {
 	}
 	if c.GitLab.MaxConcurrency <= 0 {
 		p.add("gitlab.max_concurrency must be positive")
+	}
+	switch c.GitLab.MentionMinAccessLevel {
+	case 10, 15, 20, 30, 40, 50:
+	default:
+		p.add("gitlab.mention_min_access_level must be one of 10, 15, 20, 30, 40, 50")
 	}
 	if c.GitLab.CatchUp.MaxPerProject <= 0 {
 		p.add("gitlab.catch_up.max_per_project must be positive")

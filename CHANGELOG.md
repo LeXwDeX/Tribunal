@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **MR 讨论中 @ 唤醒重审与线程内回执**（[#477](https://github.com/LeXwDeX/Tribunal/issues/477)）：Note Hook 在首行不是 `/review` 时识别对 `gitlab.bot_usernames` 中用户名的 `@` 提及（列表为空则禁用），命中后入队 `review.command`（`command=run`、`trigger=mention`、项目默认档位）并透传 `discussion_id`；匹配大小写不敏感、要求完整用户名边界，匹配前剥离围栏代码块、行内代码、autolink、Markdown 链接目标与裸 http(s) URL 中的文本。编辑注记不触发。mention 允许第三方 bot 作者（`user.bot=true` 且不在 `bot_usernames`），本服务账号及 command-reply、summary、legacy status 标记注记仍被忽略，worker 以 `CurrentUser` 身份比对兜底。新增 `gitlab.mention_min_access_level`（默认 30 Developer，允许 10/15/20/30/40/50，非法值启动校验失败），仅作用于 mention；斜杠命令仍固定要求 30。命令回执改为在源讨论线程内接续：`review.command` payload 新增 `discussion_id`（旧 payload 缺省时先反查包含源 note 的线程，找不到才回落顶层），回执只包含 ack、一行 head/代次与指向唯一状态注记的 permalink，不复制状态表格；重试按 marker + bot 作者幂等更新同一回复。webhook ingress 仍不持 per-MR 锁，线程写入在 worker 的 per-MR 锁内完成。
+
 ### 修复
 
 - **同一 MR 的评审写入串行化、状态表格化与 legacy 注记收敛**（[#475](https://github.com/LeXwDeX/Tribunal/issues/475)）：运行时新增进程内共享的 per-MR 锁：publisher（summary、行内讨论与 commit status）、状态 worker 与令牌/配置失败的回退注记在锁内复核代次与 head 后写入；命令回复同样持锁以保证写入顺序（其 ack 绑定源注记 ID，不做代次复核）；旧代次写入不会再落在新代次的「运行中」注记之后。generation bump 路径中，手动触发与取消、`/review` 命令、候选激活与启动 catch-up 均持锁；webhook ingress 在同一 DB 事务内推进 generation 与入队、**不持该锁**，以守住 900ms 处理预算。连续 push、手动重审与取消仍保留 latest-wins 合并（只运行最新 head），但同一 MR 的远端写入严格按持锁顺序执行。状态注记改为 Markdown 表格（阶段/状态/代次/提交/预计/详情），首行标记升为 `<!-- gitlab-ce-review:summary v2 -->`；回收仍按不含版本的前缀匹配，旧 v1 正文继续可解析。状态注记在 control 缺失、同代次 head 变化或当前代次被取消时写入终态（已过期/已取消）而非静默跳过，终态不再卡在「运行中」；已有更新代次时仍跳过、由新代次写入。`final_body_ready=0` 的历史行在这三条终态路径上继续更新旧 `<!-- gitlab-ce-review:status` 注记，绝不以合并标记覆盖其已发布的独立 summary；取消终态回读状态行时校验代次与 head，绝不把后继代次的 queued 行写成已取消或标记为已应用。新增 GitLab 客户端删除 MR note 的能力：`final_body_ready` 翻为 1 后，状态 worker 删除本 bot 的旧 `<!-- gitlab-ce-review:status` 注记（只匹配旧标记且作者为当前 bot），使一个 MR 只保留一条评审注记；升级前遗留的独立 summary note 不在清理范围内。

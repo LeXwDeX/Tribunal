@@ -24,6 +24,7 @@ gitlab:
   request_timeout: 30s
   max_concurrency: 16
   bot_usernames: []
+  mention_min_access_level: 30
   catch_up:
     enabled: true
     max_per_project: 10

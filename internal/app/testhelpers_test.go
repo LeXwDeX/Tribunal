@@ -271,6 +271,12 @@ type fakeGitLab struct {
 	noteCreates   int
 	noteUpdates   int
 
+	discussions        []gitlab.Discussion
+	discussionAdds     []string
+	listDiscussionErr  error
+	addDiscussionErr   error
+	discussionNoteAdds int
+
 	awards       map[int64][]gitlab.Award
 	nextAwardID  int64
 	listAwardErr error
@@ -397,10 +403,80 @@ func (f *fakeGitLab) UpdateMRNote(_ context.Context, _ string, _, _, noteID int6
 		if f.notes[i].ID == noteID {
 			f.notes[i].Body = body
 			f.noteUpdates++
+			f.updateDiscussionNote(noteID, body)
 			return nil
 		}
 	}
+	for i := range f.discussions {
+		for j := range f.discussions[i].Notes {
+			if f.discussions[i].Notes[j].ID == noteID {
+				f.discussions[i].Notes[j].Body = body
+				f.noteUpdates++
+				return nil
+			}
+		}
+	}
 	return &gitlab.Error{Op: "update_note", Status: 404}
+}
+
+// updateDiscussionNote mirrors a note update into the discussion copy, so a
+// repeated ListDiscussions observes the new body. The caller holds f.mu.
+func (f *fakeGitLab) updateDiscussionNote(noteID int64, body string) {
+	for i := range f.discussions {
+		for j := range f.discussions[i].Notes {
+			if f.discussions[i].Notes[j].ID == noteID {
+				f.discussions[i].Notes[j].Body = body
+				return
+			}
+		}
+	}
+}
+
+func (f *fakeGitLab) ListDiscussions(_ context.Context, _ string, _, _ int64) ([]gitlab.Discussion, error) {
+	f.record("ListDiscussions")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.listDiscussionErr != nil {
+		return nil, f.listDiscussionErr
+	}
+	out := make([]gitlab.Discussion, 0, len(f.discussions))
+	for _, discussion := range f.discussions {
+		copied := gitlab.Discussion{ID: discussion.ID, IndividualNote: discussion.IndividualNote}
+		copied.Notes = append([]gitlab.Note(nil), discussion.Notes...)
+		out = append(out, copied)
+	}
+	return out, nil
+}
+
+func (f *fakeGitLab) AddDiscussionNote(_ context.Context, _ string, _, _ int64, discussionID, body string) (*gitlab.Note, error) {
+	f.record("AddDiscussionNote")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.addDiscussionErr != nil {
+		return nil, f.addDiscussionErr
+	}
+	f.nextNoteID++
+	var authorID int64
+	if f.user != nil {
+		authorID = f.user.ID
+	}
+	note := gitlab.Note{ID: f.nextNoteID, Body: body, AuthorID: authorID, DiscussionID: discussionID}
+	f.notes = append(f.notes, note)
+	for i := range f.discussions {
+		if f.discussions[i].ID == discussionID {
+			f.discussions[i].Notes = append(f.discussions[i].Notes, note)
+			break
+		}
+	}
+	f.discussionAdds = append(f.discussionAdds, discussionID)
+	f.discussionNoteAdds++
+	return &note, nil
+}
+
+func (f *fakeGitLab) discussionAddSnapshot() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.discussionAdds...)
 }
 
 func (f *fakeGitLab) DeleteMRNote(_ context.Context, _ string, _, _, noteID int64) error {
@@ -466,6 +542,17 @@ func (f *fakeGitLab) noteSnapshot() []gitlab.Note {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]gitlab.Note(nil), f.notes...)
+}
+
+// allNoteSnapshot combines top-level notes and discussion notes.
+func (f *fakeGitLab) allNoteSnapshot() []gitlab.Note {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := append([]gitlab.Note(nil), f.notes...)
+	for _, discussion := range f.discussions {
+		out = append(out, discussion.Notes...)
+	}
+	return out
 }
 
 func (f *fakeGitLab) ListProjectHooks(_ context.Context, _ string, _ int64) ([]gitlab.Hook, error) {
@@ -677,6 +764,8 @@ type commandFakeStore struct {
 	jobs       []store.Job
 	enqueueErr error
 	duplicate  bool
+	generation int64
+	statusNote int64
 }
 
 func (s *commandFakeStore) GetProject(_ context.Context, id int64) (*store.Project, error) {
@@ -703,7 +792,16 @@ func (s *commandFakeStore) EnqueueReviewLatest(_ context.Context, command store.
 	s.jobs = append(s.jobs, store.Job{
 		Kind: kind, Key: key, Payload: command.Payload, MaxAttempts: command.MaxAttempts,
 	})
-	return store.ReviewEnqueueResult{JobID: "job-1", Duplicate: s.duplicate}, nil
+	return store.ReviewEnqueueResult{JobID: "job-1", Duplicate: s.duplicate, Generation: s.generation}, nil
+}
+
+func (s *commandFakeStore) GetReviewStatus(_ context.Context, projectID, mrIID int64) (*store.ReviewStatus, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.statusNote <= 0 {
+		return nil, store.ErrNotFound
+	}
+	return &store.ReviewStatus{ProjectID: projectID, MRIID: mrIID, NoteID: s.statusNote}, nil
 }
 
 func (s *commandFakeStore) enqueued() []store.Job {

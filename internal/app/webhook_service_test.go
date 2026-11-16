@@ -572,6 +572,194 @@ func TestWebhookConfiguredBotUsername(t *testing.T) {
 	}
 }
 
+// newMentionWebhookFixture builds the standard fixture with configured
+// mention targets. It reuses the seeded project and delivery recorder.
+func newMentionWebhookFixture(t *testing.T, bots []string) *webhookFixture {
+	t.Helper()
+	f := newWebhookFixture(t, "{}")
+	service, err := NewWebhookService(WebhookServiceConfig{
+		Store:          f.rec,
+		Workspace:      f.service.workspace,
+		Cipher:         newTestCipher(t),
+		Profiles:       testProfiles(),
+		ReviewDefaults: testDefaults(),
+		BotUsernames:   bots,
+	})
+	if err != nil {
+		t.Fatalf("NewWebhookService: %v", err)
+	}
+	f.service = service
+	return f
+}
+
+func noteBodyWithDiscussion(projectID, iid, noteID, authorID int64, username string, bot bool, note, discussionID string) []byte {
+	var generic map[string]any
+	if err := json.Unmarshal(noteBody(projectID, iid, noteID, authorID, username, note), &generic); err != nil {
+		panic(err)
+	}
+	generic["object_attributes"].(map[string]any)["discussion_id"] = discussionID
+	generic["user"].(map[string]any)["bot"] = bot
+	raw, _ := json.Marshal(generic)
+	return raw
+}
+
+func mentionJobPayload(t *testing.T, result WebhookResult, fixture *webhookFixture) map[string]any {
+	t.Helper()
+	job := fixture.job(result.JobID)
+	if job.Kind != "review.command" || job.Key != "review.command:42:555" {
+		t.Fatalf("job = %+v", job)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(job.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	return payload
+}
+
+func TestWebhookMentionTriggersReviewCommand(t *testing.T) {
+	f := newMentionWebhookFixture(t, []string{"tribunal-bot"})
+	result, err := f.request("Note Hook", "whsec-test",
+		noteBodyWithDiscussion(42, 7, 555, 12, "alice", false, "@tribunal-bot 请再审一次", "disc-9"))
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if !result.Accepted {
+		t.Fatalf("result = %+v", result)
+	}
+	payload := mentionJobPayload(t, result, f)
+	for key, want := range map[string]any{
+		"command":          "run",
+		"trigger":          "mention",
+		"discussion_id":    "disc-9",
+		"profile":          "default",
+		"profile_explicit": false,
+		"full":             false,
+		"author_id":        float64(12),
+		"note_id":          float64(555),
+	} {
+		if payload[key] != want {
+			t.Errorf("payload[%q] = %v, want %v", key, payload[key], want)
+		}
+	}
+}
+
+func TestWebhookMentionIgnoresQuotedAndAddressLikeText(t *testing.T) {
+	bodies := map[string]string{
+		"fenced backtick": "```\n@tribunal-bot\n```",
+		"fenced tilde":    "~~~text\n@tribunal-bot\n~~~",
+		"longer fence":    "````\ntext\n```\n@tribunal-bot\n````",
+		"inline code":     "`@tribunal-bot` 不是提及",
+		"double backtick": "``code ` @tribunal-bot``",
+		"markdown link":   "[看看](https://example.com/@tribunal-bot)",
+		"nested url":      "[看看](https://example.com/a(b)@tribunal-bot)",
+		"bare url":        "见 https://example.com/@tribunal-bot 说明",
+		"autolink":        "<https://example.com/@tribunal-bot>",
+		"username suffix": "@tribunal-botx",
+		"username prefix": "x@tribunal-bot",
+		"other name":      "@tribunal",
+	}
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			f := newMentionWebhookFixture(t, []string{"tribunal-bot"})
+			result, err := f.request("Note Hook", "whsec-test",
+				noteBodyWithDiscussion(42, 7, 555, 12, "alice", false, body, "disc-9"))
+			if err != nil {
+				t.Fatalf("Handle: %v", err)
+			}
+			if result.Accepted || result.Ignored != "not_review_command" {
+				t.Fatalf("result = %+v", result)
+			}
+			if jobs := f.jobs(); len(jobs) != 0 {
+				t.Fatalf("quoted text enqueued %d jobs", len(jobs))
+			}
+		})
+	}
+}
+
+func TestWebhookMentionBoundaries(t *testing.T) {
+	accepted := map[string]string{
+		"leading":      "@tribunal-bot",
+		"after space":  "hi @tribunal-bot please",
+		"after paren":  "( @tribunal-bot )",
+		"case folding": "@TRIBUNAL-BOT 看一下",
+		"line start":   "first line\n@tribunal-bot",
+	}
+	for name, body := range accepted {
+		t.Run(name, func(t *testing.T) {
+			f := newMentionWebhookFixture(t, []string{"Tribunal-Bot"})
+			result, err := f.request("Note Hook", "whsec-test",
+				noteBodyWithDiscussion(42, 7, 555, 12, "alice", false, body, "disc-9"))
+			if err != nil || !result.Accepted {
+				t.Fatalf("result = %+v, err = %v", result, err)
+			}
+		})
+	}
+}
+
+func TestWebhookMentionDisabledWithoutBotUsernames(t *testing.T) {
+	f := newMentionWebhookFixture(t, nil)
+	result, err := f.request("Note Hook", "whsec-test",
+		noteBodyWithDiscussion(42, 7, 555, 12, "alice", false, "@tribunal-bot please", "disc-9"))
+	if err != nil || result.Ignored != "not_review_command" {
+		t.Fatalf("result = %+v, err = %v", result, err)
+	}
+}
+
+func TestWebhookMentionIgnoresServiceNotes(t *testing.T) {
+	tests := []struct {
+		name     string
+		username string
+		bot      bool
+		note     string
+		ignored  string
+	}{
+		{name: "own bot username", username: "tribunal-bot", bot: true, note: "@tribunal-bot please", ignored: "bot_note"},
+		{name: "summary marker", username: "review-bot", note: "<!-- gitlab-ce-review:summary v2 -->\n@tribunal-bot", ignored: "service_note"},
+		{name: "status marker", username: "review-bot", note: "<!-- gitlab-ce-review:status v1 -->\n@tribunal-bot", ignored: "service_note"},
+		{name: "command reply marker", username: "review-bot", note: "<!-- gitlab-ce-review:command-reply note=1 kind=help v1 -->\n@tribunal-bot", ignored: "service_note"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newMentionWebhookFixture(t, []string{"tribunal-bot"})
+			result, err := f.request("Note Hook", "whsec-test",
+				noteBodyWithDiscussion(42, 7, 555, 12, tt.username, tt.bot, tt.note, "disc-9"))
+			if err != nil || result.Ignored != tt.ignored {
+				t.Fatalf("result = %+v, err = %v, want %q", result, err, tt.ignored)
+			}
+			if jobs := f.jobs(); len(jobs) != 0 {
+				t.Fatalf("service note enqueued %d jobs", len(jobs))
+			}
+		})
+	}
+}
+
+func TestWebhookMentionAllowsThirdPartyBot(t *testing.T) {
+	f := newMentionWebhookFixture(t, []string{"tribunal-bot"})
+	result, err := f.request("Note Hook", "whsec-test",
+		noteBodyWithDiscussion(42, 7, 555, 12, "agent-bot", true, "@tribunal-bot 第三方 agent 请求", "disc-9"))
+	if err != nil || !result.Accepted {
+		t.Fatalf("result = %+v, err = %v", result, err)
+	}
+	if payload := mentionJobPayload(t, result, f); payload["author_bot"] != true {
+		t.Fatalf("author_bot = %v", payload["author_bot"])
+	}
+}
+
+func TestWebhookEditedMentionDoesNotTrigger(t *testing.T) {
+	f := newMentionWebhookFixture(t, []string{"tribunal-bot"})
+	body := noteBodyWithDiscussion(42, 7, 555, 12, "alice", false, "@tribunal-bot please", "disc-9")
+	var generic map[string]any
+	if err := json.Unmarshal(body, &generic); err != nil {
+		t.Fatal(err)
+	}
+	generic["object_attributes"].(map[string]any)["action"] = "update"
+	body, _ = json.Marshal(generic)
+	result, err := f.request("Note Hook", "whsec-test", body)
+	if err != nil || result.Ignored != "unsupported_action" {
+		t.Fatalf("result = %+v, err = %v", result, err)
+	}
+}
+
 func TestWebhookPushDecisions(t *testing.T) {
 	tests := []struct {
 		name     string

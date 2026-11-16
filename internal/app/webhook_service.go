@@ -68,6 +68,9 @@ type WebhookService struct {
 	profiles       map[string]config.ProfileConfig
 	reviewDefaults config.ProjectSettings
 	botUsernames   map[string]bool
+	// mentionTargets are the lowercased bot_usernames entries in configured
+	// order. An empty list disables @-mention wake-ups (fail-safe).
+	mentionTargets []string
 	logger         *slog.Logger
 	now            func() time.Time
 }
@@ -98,9 +101,17 @@ func NewWebhookService(cfg WebhookServiceConfig) (*WebhookService, error) {
 		now = time.Now
 	}
 	bots := make(map[string]bool, len(cfg.BotUsernames))
+	var targets []string
+	seenTargets := make(map[string]bool, len(cfg.BotUsernames))
 	for _, name := range cfg.BotUsernames {
-		if name != "" {
-			bots[name] = true
+		if name == "" {
+			continue
+		}
+		bots[name] = true
+		lower := strings.ToLower(name)
+		if !seenTargets[lower] {
+			seenTargets[lower] = true
+			targets = append(targets, lower)
 		}
 	}
 	return &WebhookService{
@@ -110,6 +121,7 @@ func NewWebhookService(cfg WebhookServiceConfig) (*WebhookService, error) {
 		profiles:       cfg.Profiles,
 		reviewDefaults: cfg.ReviewDefaults,
 		botUsernames:   bots,
+		mentionTargets: targets,
 		logger:         logger,
 		now:            now,
 	}, nil
@@ -616,13 +628,39 @@ func (s *WebhookService) decideNote(project *store.Project, settings config.Proj
 	if user.ID <= 0 {
 		return nil, "bad_request"
 	}
+	command, profile, full, explicit, reason := parseCommand(attrs.Note, project.Profile, s.profiles)
+	if reason == "not_review_command" && s.mentionsBot(attrs.Note) {
+		// Mention wake-up. A third-party agent commonly authors notes through a
+		// bot token, so user.Bot alone must not drop it. Notes from this service
+		// are excluded by configured username and by the markers it writes; the
+		// worker's CurrentUser comparison is the final backstop.
+		if s.botUsernames[user.Username] {
+			return nil, "bot_note"
+		}
+		if isReviewServiceNoteBody(attrs.Note) {
+			return nil, "service_note"
+		}
+		return newJob("review.command", commandKey(project.ID, attrs.ID), map[string]any{
+			"project_id":       project.ID,
+			"mr_iid":           iid,
+			"note_id":          attrs.ID,
+			"author_id":        user.ID,
+			"author_username":  user.Username,
+			"author_bot":       user.Bot,
+			"command":          commandRun,
+			"profile":          project.Profile,
+			"profile_explicit": false,
+			"full":             false,
+			"trigger":          "mention",
+			"discussion_id":    attrs.DiscussionID,
+		}), ""
+	}
 	if user.Bot || s.botUsernames[user.Username] {
 		return nil, "bot_note"
 	}
 	if isCommandReplyBody(attrs.Note) {
 		return nil, "command_reply"
 	}
-	command, profile, full, explicit, reason := parseCommand(attrs.Note, project.Profile, s.profiles)
 	if reason != "" {
 		return nil, reason
 	}
@@ -638,6 +676,7 @@ func (s *WebhookService) decideNote(project *store.Project, settings config.Proj
 		"profile_explicit": explicit,
 		"full":             full,
 		"trigger":          "command",
+		"discussion_id":    attrs.DiscussionID,
 	}), ""
 }
 
@@ -699,6 +738,160 @@ func parseCommand(note, defaultProfile string, profiles map[string]config.Profil
 
 func isOpenState(state string) bool {
 	return state == "open" || state == "opened"
+}
+
+// isReviewServiceNoteBody reports whether this service wrote the note. A
+// mention must never wake the service from its own review text, which may
+// quote user content containing @names.
+func isReviewServiceNoteBody(body string) bool {
+	return isCommandReplyBody(body) ||
+		gitlab.HasSummaryMarker(body) ||
+		strings.HasPrefix(body, reviewLegacyStatusMarkerPrefix)
+}
+
+// mentionsBot reports whether the note addresses one of the configured
+// bot_usernames. An empty list disables mention detection entirely.
+func (s *WebhookService) mentionsBot(body string) bool {
+	if len(s.mentionTargets) == 0 {
+		return false
+	}
+	text := strings.ToLower(stripMentionNoise(body))
+	for _, target := range s.mentionTargets {
+		if containsMention(text, target) {
+			return true
+		}
+	}
+	return false
+}
+
+var (
+	autolinkRE = regexp.MustCompile(`<[^>\n]*>`)
+	linkDestRE = regexp.MustCompile(`\]\([^)\n]*\)`)
+	bareURLRE  = regexp.MustCompile(`(?i)https?://[^\s<>]+`)
+)
+
+// stripMentionNoise removes the regions where an @name is not an actual
+// mention: fenced code, inline code, autolinks, Markdown link targets and bare
+// URLs.
+func stripMentionNoise(body string) string {
+	text := stripFencedCode(body)
+	text = stripInlineCode(text)
+	text = autolinkRE.ReplaceAllString(text, " ")
+	// Remove bare URLs before Markdown destinations so a URL containing
+	// parentheses or @ is consumed whole instead of exposing its tail.
+	text = bareURLRE.ReplaceAllString(text, " ")
+	text = linkDestRE.ReplaceAllString(text, "] ")
+	return text
+}
+
+// stripFencedCode removes fenced code blocks with their fence lines. An
+// unclosed fence drops the rest of the note, which fails safe: no mention.
+func stripFencedCode(body string) string {
+	lines := strings.Split(body, "\n")
+	out := make([]string, 0, len(lines))
+	var (
+		fenceChar byte
+		fenceLen  int
+	)
+	for _, line := range lines {
+		trimmed := strings.TrimLeft(line, " \t")
+		if fenceChar == 0 {
+			if run := leadingFenceRun(trimmed); run >= 3 {
+				fenceChar = trimmed[0]
+				fenceLen = run
+				continue
+			}
+			out = append(out, line)
+			continue
+		}
+		run := leadingFenceRun(trimmed)
+		if run >= fenceLen && trimmed[0] == fenceChar && strings.TrimSpace(trimmed[run:]) == "" {
+			fenceChar = 0
+			fenceLen = 0
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+func leadingFenceRun(trimmed string) int {
+	if len(trimmed) < 3 || (trimmed[0] != '`' && trimmed[0] != '~') {
+		return 0
+	}
+	run := 0
+	for run < len(trimmed) && trimmed[run] == trimmed[0] {
+		run++
+	}
+	if run < 3 {
+		return 0
+	}
+	return run
+}
+
+func stripInlineCode(text string) string {
+	var out strings.Builder
+	out.Grow(len(text))
+	for i := 0; i < len(text); {
+		if text[i] != '`' {
+			out.WriteByte(text[i])
+			i++
+			continue
+		}
+		run := 1
+		for i+run < len(text) && text[i+run] == '`' {
+			run++
+		}
+		close := findBacktickRun(text, i+run, run)
+		if close < 0 {
+			// A stray delimiter is literal text; drop it so it cannot hide a
+			// following mention.
+			i += run
+			continue
+		}
+		i = close + run
+	}
+	return out.String()
+}
+
+func findBacktickRun(text string, from, size int) int {
+	for i := from; i < len(text); {
+		if text[i] != '`' {
+			i++
+			continue
+		}
+		run := 1
+		for i+run < len(text) && text[i+run] == '`' {
+			run++
+		}
+		if run == size {
+			return i
+		}
+		i += run
+	}
+	return -1
+}
+
+// containsMention applies the boundary rule to an already lowercased note:
+// the byte before @ and the byte after the username must not be word bytes.
+func containsMention(text, target string) bool {
+	needle := "@" + target
+	for offset := 0; offset+len(needle) <= len(text); {
+		idx := strings.Index(text[offset:], needle)
+		if idx < 0 {
+			return false
+		}
+		start := offset + idx
+		end := start + len(needle)
+		if (start == 0 || !isMentionWordByte(text[start-1])) &&
+			(end == len(text) || !isMentionWordByte(text[end])) {
+			return true
+		}
+		offset = start + 1
+	}
+	return false
+}
+
+func isMentionWordByte(b byte) bool {
+	return b == '_' || b >= '0' && b <= '9' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z'
 }
 
 func isDraft(attrs gitlab.WebhookObjectAttributes, mr gitlab.WebhookMergeRequest) bool {
