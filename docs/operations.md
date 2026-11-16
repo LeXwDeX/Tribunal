@@ -218,7 +218,7 @@ DeepSeek thinking + tools 要求后续请求完整回传 `reasoning_content`，�
 
 OAuth 默认关闭：API 客户端访问 `/auth/login` 得到 503 是预期行为，控制台登录页会隐藏登录按钮并提示缺少配置；Bearer API 和 CLI 仍可使用。启用控制台登录时：
 
-1. 在 GitLab 创建 OAuth Application，scope 为 `read_user`，回调 URI 为 `<TRIBUNAL_PUBLIC_URL>/auth/callback`。
+1. 先按固定应用名（生产 `tribunal`，测试环境 `tribunal-dev`）与回调 URI 查重，命中就复用既有应用的 client ID/secret；未命中才在取得用户明确同意后创建，scope 为 `read_user`，回调 URI 为 `<TRIBUNAL_PUBLIC_URL>/auth/callback`。换端口或重建部署只更新既有应用的 Redirect URI，不新建应用。查重、一次性收敛与环境台账见[固定 GitLab 身份](#固定-gitlab-身份每实例一个-bot每环境一个-oauth-应用)。
 2. 在 `.env` 设置 `GITLAB_OAUTH_CLIENT_ID`、`GITLAB_OAUTH_CLIENT_SECRET` 和 `GITLAB_ADMIN_USERNAME`。管理员值填写 `id:<GitLab 用户 ID>`，必须先向用户确认实际数字 ID 和授权；GitLab 用户名写法仍兼容但已弃用（见[用户名写法弃用与迁移](#bootstrap_admins-用户名写法弃用与迁移)）；留空不会给任何正常账号平台管理员标签。该标签同时让拥有本地用户 ID 的管理员隐式管理全部已登记项目；静态 bootstrap Bearer 仍只能访问平台管理面，项目授权见下文。
 3. 在 `config/server.docker.yaml` 取消 `oauth` 及两个子字段、`bootstrap_admins` 的注释。设置正确的 HTTPS `TRIBUNAL_PUBLIC_URL`，配置反向代理，再执行 `docker compose up -d --force-recreate --wait --wait-timeout 120`。
 
@@ -765,12 +765,12 @@ docker inspect --format '{{.State.Health.Status}}' tribunal
 
 默认不启用 OAuth：API 客户端访问 `/auth/login` 返回 503，控制台登录页隐藏登录按钮并提示配置，Bearer 认证仍可用。`config/server.example.yaml` 中提供了注释模板；启用时取消 `oauth` 映射的三行注释（`oauth:`、`client_id_env:`、`client_secret_env:`），并导出对应环境变量。
 
-GitLab 侧：
+GitLab 侧（每环境固定一个应用，先查重再创建）：
 
-1. 创建 OAuth Application。
-2. Redirect URI 填 `https://<公开域名>/auth/callback`，例如 `https://review.example.internal/auth/callback`。
-3. 勾选/使用 `read_user` scope。
-4. 保存 client ID 和 client secret。
+1. **查重**：按固定应用名与回调 URI 查已有应用。生产用 `tribunal`，测试环境用 `tribunal-dev`。实例级应用可用管理员 `GET /api/v4/applications` 列出；该接口只返回 owner 为空的实例级应用，字段为 `id`、`application_id`、`application_name`、`callback_url`、`confidential`、`scopes`，不含 secret。用户级应用只能由 owner 本人枚举：`GET /api/v4/user/applications`，或在 GitLab 的 `/-/profile/applications` 页面核对；管理员 `GET /api/v4/applications` 看不到用户级应用，`GET /api/v4/users/:id/applications` 在 19.5 返回 404，不要依赖。
+2. **命中即复用**：沿用该应用的 client ID 和 client secret，经 `GITLAB_OAUTH_CLIENT_ID`、`GITLAB_OAUTH_CLIENT_SECRET` 注入，不新建应用。回调变化时编辑既有应用的 Redirect URI，固定为 `https://<公开域名>/auth/callback`。
+3. **未命中才创建**：先取得用户明确同意，再创建应用；应用名用固定名，Redirect URI 填 `https://<公开域名>/auth/callback`，scope 只选 `read_user`。
+4. 保存 client ID 和 client secret；secret 只写入受控环境变量，不落入仓库、YAML 或聊天记录。
 
 配置侧：
 
@@ -818,6 +818,65 @@ docker run -d --name tribunal \
 - OAuth 配置存在时，`client_id_env` 和 `client_secret_env` 必须同时设置，且两个环境变量都必须非空；`server.public_url` 必须是非空的绝对 HTTP(S) 地址，否则启动校验失败。
 - `REVIEW_ADMIN_TOKEN` 与 OAuth 相互独立；没有浏览器会话时仍可用它调用用户、授权和系统配置等平台管理 API。它没有用户 ID 和项目 grant，不能读取项目业务数据；轮换由部署方更新环境变量并重启。
 - 真实 OAuth 登录已在已验证快照的隔离测试实例验证；未单独复测其他生产 IdP 或所有设备场景。
+
+### 固定 GitLab 身份：每实例一个 bot、每环境一个 OAuth 应用
+
+维护约定：**一个 GitLab 实例固定一个 bot 账号，一个环境固定一个 OAuth 应用**，测试环境最多再额外一套。全新实例按本节创建；已有实例按本节做一次性收敛。重建、换端口或重复部署都不得再新增 bot 账号或 OAuth 应用。下面的 GitLab 写操作必须先取得用户明确授权；本节只给规程，不在文档交付中执行。
+
+**命名约定**
+
+- bot 用户名：生产用 `tribunal`，测试环境需要与生产隔离时用 `tribunal-dev`。用户名短、可被 @，创建后不再变更。
+- OAuth 应用名：生产用 `tribunal`，测试环境用 `tribunal-dev`。应用名是查重约定，不随端口、域名或部署次数变化。
+- 回调 URI 统一为 `<TRIBUNAL_PUBLIC_URL>/auth/callback`；公开地址变化时只编辑既有应用，不新建。
+- 凭据按用途分离：bot 用自己的 PAT，项目接入与 hook 生命周期用 provisioning PAT；两者分别由 `gitlab.bot_token_env`、`gitlab.provisioning_token_env` 间接指向，不写值。建议变量名分别为 `GITLAB_BOT_TOKEN`、`GITLAB_PROVISIONING_TOKEN`。
+
+**环境台账（只记变量名与占位，不记凭据值）**
+
+| 环境 | GitLab 实例 | bot 用户名 | OAuth 应用名 | 回调 URI | client ID/secret 的 env 变量名 | bot PAT 的 env 变量名 | provisioning PAT 的 env 变量名 |
+|---|---|---|---|---|---|---|---|
+| 生产 | `<GITLAB_URL>` | `tribunal` | `tribunal` | `<TRIBUNAL_PUBLIC_URL>/auth/callback` | `GITLAB_OAUTH_CLIENT_ID` / `GITLAB_OAUTH_CLIENT_SECRET` | `GITLAB_BOT_TOKEN`（由 `gitlab.bot_token_env` 指向） | `GITLAB_PROVISIONING_TOKEN`（由 `gitlab.provisioning_token_env` 指向） |
+| 测试 | `<GITLAB_URL>` | `tribunal-dev`（不需要隔离时复用生产一套） | `tribunal-dev` | `<TRIBUNAL_PUBLIC_URL>/auth/callback` | `GITLAB_OAUTH_CLIENT_ID` / `GITLAB_OAUTH_CLIENT_SECRET` | `GITLAB_BOT_TOKEN`（由 `gitlab.bot_token_env` 指向） | `GITLAB_PROVISIONING_TOKEN`（由 `gitlab.provisioning_token_env` 指向） |
+
+每环境恰好一套。同一环境出现第二个账号或第二个应用，即视为收敛未完成；先按下面的旧资源处置查清并复用或清理，不得再新建。
+
+#### 一次性收敛：bot 账号
+
+1. **先升级**：GitLab 19.5.1 存在严重 RCE（CVE-2026-110264），先把实例升级到 19.5.4 或更高。升级是独立运维项，另行授权。
+2. **确认 service account 能力**：在 GitLab CE 19.5.5 上核对（`GET /api/v4/version` 返回 `enterprise=false`）。CE 自 19.0 起提供 service account；官方文档写的 Free 18.11 GA 不能直接套用到 CE 二进制，CE 18.11 没有该功能。CE/Free 全实例上限 100 个（源码 `LIMIT_FOR_FREE=100`），付费 EE 无此限制；先调 `GET /api/v4/service_accounts` 核对现有数量，已存在目标用户名时直接复用，不要重复创建。
+3. **创建账号**：管理员调 `POST /api/v4/service_accounts`。字段全部可选：`name`（默认 `Service account user`）、`username`（省略则自动生成 `service_account_<hash>`；自定义遵循全局用户名规则：2–255 字符，只含字母数字与 `_-.`，不能以 `_-.` 开头）、`email`、`external`（默认 `true`，不影响加成员或调 API）。固定传 `username` 为 `tribunal`（测试环境 `tribunal-dev`）。创建后用 `GET /api/v4/service_accounts` 和 `GET /api/v4/users?search=tribunal` 核对；用户名全局唯一，已存在时复用，不要重复创建。
+4. **上传头像**：推荐管理员走 `PUT /api/v4/users/:id` 的 multipart 字段 `avatar`（源码类型 `WorkhorseFile`，文档未标大小上限）。账号本人也可用 `PUT /api/v4/user/avatar`（GitLab 17.0+，只改当前认证用户），该路径限制 ≤200KB、建议 192×192；service account 需先有自己的 PAT 才能调，因此不作为首选。头像公开可见，不要使用含内部信息的图片。
+5. **授予权限**：最终模型是**只读 bot**。调 `POST /api/v4/groups/:id/members` 或 `POST /api/v4/projects/:id/members`，传 `user_id` 与 `access_level=20`（Reporter）。Reporter 能读代码、MR 与 diff，发 note 和行内 discussion，并 resolve 自己的线程；不能 push、管理成员、创建 webhook 或写 commit status。组的 Reporter 会继承到全部子组和项目；个人命名空间下的项目不在顶层组里，需要逐项目加 Reporter。CE 没有实例级只读角色（Auditor 属 EE Premium/Ultimate，custom roles 属 EE Ultimate），所以「根级只读所有项目」只能通过给这些项目所属的顶层组添加 bot 的 Reporter 成员身份实现。不要授予实例管理员或 Maintainer；webhook 由下一节的高权限凭据代建。
+6. **代发 PAT**：实例级 service account 走 User tokens API：管理员 `POST /api/v4/users/:id/personal_access_tokens`，`name` 必填，`scopes` 必填（用 `["api"]`），`expires_at` 可选（`YYYY-MM-DD`）。token 只在创建响应中返回一次，立即写入受控 env。有效期受 `max_personal_access_token_lifetime` 限制，默认 365 天；CE 没有 service account 专用的免过期开关，沿用通用 Require expiration 设置。self/rotate 默认 1 周，同一 token 族复用会触发吊销；因此创建时显式设置到期日并登记监控，不让 bot 走默认 1 周的 self/rotate 流程；轮换时先生成新 token、更新 env 并重建验证，再处理旧 token，不重复使用旧值。bot PAT 仍用 `api` scope，但 Reporter 角色限制其实际能力；provisioning PAT 与 bot PAT 是两枚不同凭据、不同用途，台账分行记录，不共用。
+7. **写配置**：把用户名写进 `gitlab.bot_usernames`（精确匹配、区分大小写，按 GitLab 返回的 `username` 填写）。共享 bot 必须写入，否则自触发过滤与 `@` 唤醒都不生效。PAT 不写进配置：`gitlab.bot_token_env` 的值是**环境变量名**（语义同 `secrets.master_key_env`），PAT 值放进该变量；变量来源必须是权限 `600` 且被 gitignore 的 env 文件或受控密钥管理器，不写入 YAML、镜像、仓库或聊天。
+8. **验证**：用该 PAT 调 `GET /api/v4/user`，确认身份是台账中对应的 bot 用户名。获授权后用 provisioning 凭据完成一次项目接入与 hook 代建，再在试点 MR 触发评审，确认评论作者是共享 bot，且 Tribunal 不把自己的评论当作新命令再次触发。
+
+GitLab 官方参考：[Service accounts](https://docs.gitlab.com/user/profile/service_accounts/)、[User applications API](https://docs.gitlab.com/api/user_applications/)、[Applications API](https://docs.gitlab.com/api/applications/)、[Users API](https://docs.gitlab.com/api/users/)、[User moderation](https://docs.gitlab.com/administration/moderate_users/)。
+
+**共享额度的爆炸半径**
+
+- Notes API 限流为 300 次/分钟/用户，配额按用户计算且跨项目共享。所有项目改用同一个 bot 后，一个项目的高频评论或状态更新会消耗其他项目的配额；共享不会让配额相加。
+- 控制并发和评论频率，避免逐条高频更新；出现 HTTP 429 时先降频并核对是否有重复发布。高流量实例可向 GitLab 管理员申请白名单或提高限额，具体范围按实际部署决定；隔离前不要让单个项目独占触发。
+
+**内网回调与 webhook 自动停用**
+
+- GitLab 默认拒绝向内网接收地址投递 webhook；需要管理员在设置中放行内网回调网段，放行范围按实际出口最小化。
+- 连续 4 次或累计 40 次失败后 GitLab 会自动停用 webhook。共享 bot 不改变阈值；同一回调 URL 服务多个项目时，按项目分别核对 hook 的 Recent events。
+
+#### webhook 代建凭据
+
+只读 bot 不能创建或维护 webhook，接入阶段改用独立的高权限凭据代建：
+
+- **配置**：`gitlab.provisioning_token_env` 的值是**环境变量名**（语义同 `gitlab.bot_token_env`、`secrets.master_key_env`），不是令牌值；它指向一枚只用于项目接入与 hook 生命周期管理的高权限凭据（管理员或 Maintainer PAT）。
+- **代建**：注册时 Tribunal 用它调 `POST /api/v4/projects/:id/hooks` 创建 hook，bot 不参与。hook 是**项目配置**而不是用户凭据（源码 `ProjectHook` 没有 creator 关联），代建后的投递与评审只依赖 bot 自身的读代码与评论权限；hook 的修改和删除仍需该高权限凭据。
+- **与 bot PAT 分离**：provisioning PAT 和 bot PAT 是两枚不同凭据、不同用途，环境台账分行记录，不共用。
+- **安全**：凭据放在权限 `600` 且被 gitignore 的 env 文件或受控密钥管理器；使用短有效期并登记到期监控；变量名加入 MCP 的 `DeniedEnv` 拒绝清单，禁止被 stdio MCP 子进程继承；不得用于评审读写或日常评论。
+- **共享模式的能力边界**：bot 只有 Reporter，GitLab 不允许其写 commit status（`create_commit_status` 需要 Developer+），因此共享模式下 commit status 降级为不发送；评审结果仍通过 MR 注记与行内 discussion 呈现。创建 webhook、管理成员等操作仍需 provisioning 凭据或项目 Maintainer。
+
+#### 旧资源处置
+
+- **旧的项目级 bot 用户**（形如 `project_<项目ID>_bot_<哈希>`）：停用（block），不删除。先完成共享凭据切换并在试点项目验证通过，再逐项目确认没有配置、env 或触发器仍引用旧 bot，然后调 `POST /api/v4/users/:id/block`（201）。block 后注记与成员关系保留、不匿名化；PAT 认证被拒但不会被 revoke，unblock（`POST /api/v4/users/:id/unblock`）后未过期即可恢复；副作用是该用户的 pipeline 被丢弃、schedules 被禁用。官方停用 project access token 的路径是 `DELETE /api/v4/projects/:id/access_tokens/:token_id`；最后一个 token 撤销或过期后，GitLab 默认 30 天后删除该 bot 用户——要保留历史归属，就不要撤销其最后一个 token。删除用户会转移或丢失贡献归属且不可逆，禁止直接删除。
+- **重复的 OAuth 应用**：先出预览清单，字段包括应用名、`application_id`、回调 URI、实例级/用户级、scopes、是否被任何环境的 env 引用。用户级应用只能由 owner 本人枚举和删除：`GET /api/v4/user/applications`、`DELETE /api/v4/user/applications/:id`（204）；管理员 `GET /api/v4/applications` 只列实例级应用且不含 secret，`DELETE /api/v4/applications/:id` 对用户级应用返回 404，GraphQL 也没有对应 mutation。删除会级联删除该应用已发放的 access/refresh token 并撤销 consent（使用方立即 401），但不影响 GitLab Web 登录会话。清单经用户确认后，只删除未被任何 env 引用的精确重复项，每环境保留一个固定应用；删除前再次确认目标不是当前生效应用。
+- 已有实例已按本节完成收敛：旧 bot 已 block、孤儿用户级应用已删除。具体账号与应用 ID、执行时间和回读结果只记内部台账，公开文档不写实例值。
 
 ### bootstrap_admins 用户名写法弃用与迁移
 
