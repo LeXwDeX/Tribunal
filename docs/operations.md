@@ -445,6 +445,20 @@ tribunalctl projects residues clean --yes
 
 评审评论（状态/结果同一条 note）创建的响应丢失后，重试前会回读本 bot 的摘要标记（`final_body_ready = 0` 的历史行回读旧状态标记）；身份或回读不可用时停止创建，稍后可重试发布。`final_body_ready = 1` 的行，状态/结果评论与摘要不再分开维护：publisher 先写 `final_body`，再按同一 `reviewStatusBody` 更新 note；publisher 的 note 写入失败按发布失败路径重试，状态作业自身的失败随后由 `review.status` 作业对账重试。包含 #164 的版本在已绑定评论更新返回 404 时也会回读：旧评论不在列表中时，复用本 bot 的其他摘要标记，找不到才新建并更新绑定；旧评论仍可见时保留错误，不新建。写入前复核已存代次及非空 head，且写入方在共享 per-MR 锁内完成复核，但检查与在途请求仍不是原子操作。publisher 写 `final_body` 使用本次发布自己的 generation/head（来自 workflow dossier），期间有新评审激活时 store 以 `ErrSuperseded` 拒绝，过期正文不会进入新代次。所有取消入口（webhook merge/close、`/review cancel` 命令、手工取消 API）都会推进 generation 并写入取消状态，但保留已发布的 `final_body` 与 `final_body_ready`；状态 worker 与 publisher 据此渲染取消/失败阶段头部加原评审正文，不丢失已发布结论与 finding 列表。新评审导致的 generation 前进仍会清空正文，等待新发布重写。回读与创建不是原子操作，不同工作流并发或 GitLab 列表延迟仍可能导致重复评论。系统不会自动删除升级前遗留的独立 summary note 或重复的 summary 评论；发布与状态更新仍只按 summary 标记选中并更新其中一条，其余可能残留。与早期版本不同，`final_body_ready = 1` 的行在每次收敛写入时都会删除本 bot 的旧 `<!-- gitlab-ce-review:status` 注记（只匹配当前 token 身份和旧标记前缀，外部作者的注记与合并注记不会命中），正文相同与拒绝回退的早退路径也会清理，因此重启后不会残留；`final_body_ready = 0` 的历史行仍继续更新旧注记，尚未收敛。需要人工核对残留的 summary 评论。
 
+### @ 唤醒与线程回执
+
+MR 讨论里的 `@<bot>` 可唤醒重审，回执写在被 @ 的原讨论线程内。触发与权限语义见 [HTTP API · Webhook](design/03-http-api.md#2-webhook) 和 [05 流程 · F3](design/05-flows.md#f3-评论命令与--唤醒)，本节只列运维配置与核查。
+
+- **配置**：在 `gitlab.bot_usernames` 写入可被 @ 的 bot 用户名（通常 `tribunal`），该列表同时作为自触发过滤名单；元素去掉首尾空白，纯空白项启动校验失败，空列表禁用 @ 唤醒。共享模式启动时会解析共享 bot 用户名并追加。`gitlab.mention_min_access_level` 默认 30，可按协作规范设为 10/15/20/30/40/50；它只影响 @ 唤醒，`/review` 斜杠命令仍固定要求 30。运行期不热加载，修改后需重启。
+- **触发**：正文首行不是 `/review` 时才检查 @；匹配不区分大小写并要求完整用户名边界；围栏代码块、缩进代码、行内代码、autolink、Markdown 链接目标和裸 URL 中的 `@` 不算提及；正文超过 128 KiB 按未提及处理；编辑已有注记（`action != create`）不触发。mention 按全量范围评审，只有 `mr_update` 与 `catch_up` 使用增量范围。
+- **谁可以触发**：人工账号按 `mention_min_access_level` 判定；第三方 agent bot（`user.bot=true` 且用户名不在 `bot_usernames` 中）也可以唤醒。`bot_usernames` 中的账号，以及本服务自己写的 command-reply、summary、legacy status、finding 标记注记不会触发；worker 还会用当前 token 的 `CurrentUser` 与作者比对兜底，防止共享账号自循环。
+- **被拒绝或被过滤**：权限不足时线程内回 `kind=denied`；命中项目 `skip_draft`、标签或目标分支过滤时回 `kind=filtered`，两者都不创建评审。mention 的 worker 侧过滤只读项目设置；仓库 `.gitlab-review.yml` 的最终过滤发生在 `review.run`，因此可能出现 accepted 回执后评审仍以 stale 结束，排查时以评审状态为准。
+- **线程回执**：回执包含 ack、head 短 SHA、代次（大于 0 时）和唯一状态注记的 permalink，不复制状态表格，也不新增完成注记；finding 仍走行内 discussion。同一源 note 按隐藏 marker + bot 作者幂等更新；重复 @ 不重写已有 accepted 回执的「代次」行。显式 `discussion_id` 不在讨论列表时先按 marker 反查；向已删除线程追加返回 404 时回落顶层回执，其他错误按任务重试。
+- **核查入口**：webhook 投递聚合的 ignored 原因可区分 `not_review_command`（未命中 @，或 `bot_usernames` 为空）与 `bot_note` / `service_note`（自触发过滤）。评审列表的 `trigger=mention` 表示由 @ 唤醒，`trigger=command` 表示斜杠命令。找不到线程回执时，先确认 Note Hook 是否携带 `discussion_id`，再检查 bot 是否仍能在该线程发注记。
+- **配额**：每条 mention 最多产生一条线程回执，另有状态注记的正常收敛写入；共享 bot 的 Notes API 配额为 300 次/分钟/用户且跨项目共享，批量 @ 会与其他项目争用配额，见[固定 GitLab 身份](#固定-gitlab-身份每实例一个-bot每环境一个-oauth-应用)中的「共享额度的爆炸半径」。出现 HTTP 429 时先降频并核对是否重复发布。
+
+已知限制：真实 GitLab CE 19.5 的 Note Hook `discussion_id` 与线程内回复的可见性应在试点 MR 上确认；升级前已有的顶层回执在后续重试时可能迁移到线程内一次。
+
 ### 项目授权、用户停用和凭据撤销
 
 普通用户的项目访问由 Tribunal 本地的 `project_grants` 和显式全局只读设置决定，不从 GitLab 组成员关系推导。`bootstrap_admins` 和已授予的平台角色决定平台管理标签；拥有本地用户 ID 的平台管理员对全部已登记项目隐式拥有 `manage`，不需要逐项目 grant 或 `global_read`。普通用户除下述注册人自动授权和显式分配外，默认没有任何授权。入口检查中，无读取权限或项目不存在统一返回 404，仅有 `read` 权限执行管理操作返回 403。下述 dispatch 锁内复核不满足 manage 时统一返回 404，包括入口检查之后被降为 read 的请求。
@@ -1384,7 +1398,7 @@ docker compose exec -T review /app/tribunalctl projects all
 
 ### 从 v1.1.0 升级到 v1.2.0
 
-**v1.2.0 尚未发布：版本说明已合并，尚未打 tag，也未发布 Release。** 以下步骤以当前 `main` 的代码为准；打 tag 后需要重新核对镜像 digest。完整变更见 [CHANGELOG](../CHANGELOG.md) 的 `[1.2.0] - 2026-10-29` 段，验证状态见 [v1.2.0 验证状态](delivery-readiness.md#v120-验证状态)。真实实例验收（[#108](https://github.com/LeXwDeX/Tribunal/issues/108)）已于 2026-10-29 在隔离实例执行并通过，覆盖 `a113e08` 的迁移 `0016`–`0019`；后续已补做从 `a113e08` 到 `2621c44` 的升级，应用 `0020`–`0024` 并验证 #143 授权迁移；`0020`/`0022` 带历史数据回填、完整 2×2 矩阵和升级后新真实评审仍未验证，详见[交付就绪](delivery-readiness.md#v120-真实实例升级验收-20261103)。GitHub Actions 以当前 head 的 run 结果为准；发布前仍由维护者核对[验证状态](delivery-readiness.md#v120-验证状态)。
+**v1.2.0 尚未发布：版本说明已合并，尚未打 tag，也未发布 Release。** 以下步骤以当前 `main` 的代码为准；打 tag 后需要重新核对镜像 digest。完整变更见 [CHANGELOG](../CHANGELOG.md) 的 `[1.2.0] - 2026-10-29` 段，验证状态见 [v1.2.0 验证状态](delivery-readiness.md#v120待发布验证状态)。真实实例验收（[#108](https://github.com/LeXwDeX/Tribunal/issues/108)）已于 2026-10-29 在隔离实例执行并通过，覆盖 `a113e08` 的迁移 `0016`–`0019`；后续已补做从 `a113e08` 到 `2621c44` 的升级，应用 `0020`–`0024` 并验证 #143 授权迁移；`0020`/`0022` 带历史数据回填、完整 2×2 矩阵和升级后新真实评审仍未验证，详见[交付就绪](delivery-readiness.md#v120-真实实例升级验收-20261103)。GitHub Actions 以当前 head 的 run 结果为准；发布前仍由维护者核对[验证状态](delivery-readiness.md#v120待发布验证状态)。
 
 先按第 8 节的通用步骤操作：记录当前镜像 tag/digest，核对生效路径和全部挂载，停止旧容器并备份数据库和所有工作区。本次升级有这些额外注意点：
 
@@ -1431,7 +1445,7 @@ v1.2.0 还会应用 `0020_review_command_replay`，新建受理身份、隔离�
     - `/readyz` 返回 200；已有项目可正常读取，已有评审列表可打开，旧评审显示 `!iid` 而不是报错。
     - MCP 服务器列表和详情返回 `config: {}`；内置 `codebase-memory` 仍在，默认 ignore 下评审不再因 MCP 工具记为覆盖缺口。
     - 触发一次新评审，确认列表能显示 `mr_title`，日志检索使用 `error_class` 仍能命中；被 ignore 的路径不出现在评论中。
-    - 真实实例升级已在隔离实例执行：较早一次覆盖 `a113e08` 的 `0016`–`0019`，后续升级应用 `0020`–`0024` 并验证 #143 授权迁移；`0020`/`0022` 带历史数据回填、完整 2×2 矩阵和升级后新真实评审仍未验证。实例验收不等于 GitHub Actions 通过，也不等于发布放行，发布前仍由维护者核对[验证状态](delivery-readiness.md#v120-验证状态)。
+    - 真实实例升级已在隔离实例执行：较早一次覆盖 `a113e08` 的 `0016`–`0019`，后续升级应用 `0020`–`0024` 并验证 #143 授权迁移；`0020`/`0022` 带历史数据回填、完整 2×2 矩阵和升级后新真实评审仍未验证。实例验收不等于 GitHub Actions 通过，也不等于发布放行，发布前仍由维护者核对[验证状态](delivery-readiness.md#v120待发布验证状态)。
 
 ## 9. 无外部凭据的本地烟测
 
@@ -1681,8 +1695,8 @@ reviews=... completed=... failed=... cancelled=... triggers_failed=... failure_r
 
 验证记录统一维护在 [交付就绪与验收记录](delivery-readiness.md)，本文不再重复：
 
-- 已发布版本：[v1.1.x 验证状态](delivery-readiness.md#v110-验证状态)。
-- 待发布版本：[v1.2.0 验证状态](delivery-readiness.md#v120-验证状态)。
+- 已发布版本：[v1.1.x 验证状态](delivery-readiness.md#v11x-验证状态已发布)。
+- 待发布版本：[v1.2.0 验证状态](delivery-readiness.md#v120待发布验证状态)。
 - v1.0.0（f143 快照）在隔离测试实例上的验收记录：[v1.0.0 历史验收记录](delivery-readiness.md#v100-历史验收记录f143仅供追溯)，仅供追溯，不覆盖 v1.1.x 和 v1.2.0 的改动。
 
 上面第 9 节的烟测不验证真实 GitLab、OAuth、webhook 或评审执行，不能当作集成验收。

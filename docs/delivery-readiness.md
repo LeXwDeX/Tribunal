@@ -3,7 +3,7 @@
 > 本文先列出 v1.2.0 候选批次（[#128](https://github.com/LeXwDeX/Tribunal/pull/128)）的本地修复验证，再记录版本与交付状态：
 >
 > 1. [v1.5.0 验证状态](#v150-验证状态)：当前版本的 CI、迁移演练、DEV 回归、生产验收检查表与发布、清理记录。
-> 2. [v1.2.0（待发布）验证状态](#v120-验证状态)：v1.2.0 实际做过哪些验证、还有哪些没做。
+> 2. [v1.2.0（待发布）验证状态](#v120待发布验证状态)：v1.2.0 实际做过哪些验证、还有哪些没做。
 > 3. 升级、授权、验收矩阵与回退计划：与版本无关的操作模板，从[首次升级前记录](#首次升级前记录模板)到[放行与归档](#放行与归档)。
 > 4. [v1.0.0 历史验收记录（f143，仅供追溯）](#v100-历史验收记录f143仅供追溯)：v1.0.0 在隔离测试实例上的验收结果，**不能**用来证明后续版本的改动。
 >
@@ -74,11 +74,45 @@
 ## 同一 MR 串行化、状态表格与 legacy 注记收敛验证（#475）
 
 - 基于 `fix/mr-serial-status` 的 `c3c0e08`（`62c2788` 实现 + `c3c0e08` 评审修复）。本轮只同步文档，未改代码与测试。本地通过 `go build ./...`、`go vet ./...`；`go test -race -timeout=40m -count=1 ./internal/app ./internal/gitlab ./internal/store/sqlite ./internal/server` 通过（app 545.135s、gitlab 2.006s、sqlite 270.891s、server 195.551s）；`go test ./scripts/ -count=1` 通过（114.245s，包含注册文档锁定测试）。文档改动另做只读链接/锚点检查：35 个 Markdown 文件共 257 个本地链接，除 `docs/design/06-config.md` 指向 `03-http-api.md#44-扩展mcp-skill块绑定` 的既有失效锚点外均可解析；该问题在本次改动前已存在，本轮未修改该文件。
-- 首轮 `62c2788` 的自建 Linux CI（run `20261116T151805-62c27884374c`）：go / web / docker 全部 PASS，语句覆盖率 81.92%（33032/40324，门槛 70%），耗时 478s，RESULT PASS。修复轮 `c3c0e08` 的 CI 由主会话稍后复跑，结果待补；本节不预填。
+- 首轮 `62c2788` 的自建 Linux CI（run `20261116T151805-62c27884374c`）：go / web / docker 全部 PASS，语句覆盖率 81.92%（33032/40324，门槛 70%），耗时 478s，RESULT PASS。修复轮 `c3c0e08` 的自建 Linux CI（run `20261116T174658-f9c323459e5a`）：go / web / docker 全部 PASS，语句覆盖率 81.91%，RESULT PASS。
 - 单测覆盖：共享 per-MR 锁与锁内代次复核（`TestInFlightSummaryUpdateIsNotInterleavedByNewerGeneration`、`TestDispatcherStartReviewWaitsForMergeRequestLock`、`TestStatusWriterLockWaitHonorsCancellation`）、旧代次不得覆盖新代次（`TestOlderGenerationCannotRepublishAfterNewerGeneration`、`TestFailureSummaryCannotOverwriteNewerGeneration`）、ingress 不等待 MR 锁且守住 900ms 预算（`TestWebhookIngressDoesNotWaitForMergeRequestLock`）、v2 表格渲染与旧 bullet 解析（`TestReviewStatusBodyRendersMarkdownTable`、`TestParseStatusPhaseReadsLegacyBulletBody`）、单条注记原地编辑与删除后重建（`TestStatusWriterUpsertsSingleNote`、`TestStatusWriterIgnoresForeignNoteAndRecreatesAfterDelete`）、legacy 注记清理（`TestStatusWriterDeletesLegacyStatusNoteAfterMerge`、`TestPublishedSummaryDeletesLegacyStatusNote`）、终态写入（`TestStatusWriterSettlesMissingControl`、`TestStatusWriterSettlesHeadMismatch`、`TestStatusWriterSettlesCancelledCurrentGeneration`）、历史行不接管已发布 summary（`TestTerminalStatusVisitKeepsPublishedSummaryNote`、`TestStatusVerificationKeepsPreUpgradeSummaryNote`）、取消结算不采纳后继代次（`TestStatusWriterDoesNotAdoptSuccessorAfterCancelledWrite`）。
 - 升级影响：不新增数据库迁移，无 schema 或配置变更。升级后下一次收敛写入把状态注记渲染为 v2 表格（历史行的旧 `:status` 注记同样使用表格，但不追加已发布正文）。已应用的终态行（PASS / BLOCKING / INCOMPLETE / failed / stale）由每小时自愈扫描按行最多每 24 小时复查一次，pending 行仍按 5 分钟对账；已应用的非终态行不会仅因升级被扫描改写，等待下一次状态版本变化。只有 `final_body_ready = 1` 的行会在收敛写入时删除本 bot 的 legacy `:status` 注记；升级时仍为 0 的历史行继续原地更新旧注记，直到该 MR 的评审发布正文、行变为 1 后才清理。
 - 已知限制 F6：`applied_version >= version` 且仍非终态的状态行，如果 review control 缺失，不会进入终态写入：状态作业在自愈检查处直接短路，周期扫描也只取未应用行和待自愈的终态行。代码中没有在保留状态行的前提下删除 review control 的路径（项目删除会在同一事务中同时删除 `review_controls` 与 `review_status`），因此这条路径当前不可达；本轮不修，列为后续项。
 - **BLOCKED**：未在真实 GitLab 上验证 `DeleteMRNote`（权限、删除后的列表可见性）与真实 MR 上的 legacy 注记收敛/单条注记效果，这些行为只有单测覆盖；未执行真实环境升级/回退演练。
+
+## 实例级共享 bot 凭据与零 token 注册验证（#476，PR #482）
+
+- 最终 head `7018638`，已 rebase 到含 #475/#477 的 `main`。本地通过 `go build ./...`、`go vet ./...`、gofmt；`go test -race -count=1` 通过：app 423.749s、config 4.680s、server 172.590s、store 1.324s、sqlite 222.189s、cmd/server 11.934s、cmd/tribunalctl 1.390s。`go test ./scripts/ -count=1` 通过（112.272s，含注册文档锁定测试）；前端 88 个文件、811 项测试通过，`npm run build` 成功且 `web/dist` 重建一致。
+- 自建 Linux CI（run `20261116T194822-70186389e1d3`）：go / web / docker 全部 PASS，语句覆盖率 81.99%（33606/40990，门槛 70%），耗时 538s，RESULT PASS。无新增数据库迁移；零长度 BLOB 哨兵满足 `token_enc` 的 NOT NULL。
+- 评审：正确性 + 对抗安全双评审二轮无 P1；11 项 P2/P3 修复均带回归（共享失效文案、scope 预检、CLI 零 token、config 变量名过滤、枚举 oracle 统一、Rewrap 哨兵、共享 Validate、前端展示、健康探针 403/并发/取消/TTL、部署文档）。组合 A 的凭据边界复审提出 1 个 P2（启动追赶扫描用评审凭据列 hook，403 误记为 provisioning 被拒）和 6 个 P3，修复轮 `28d3e6c` 闭合并经红→绿验证；provisioning 凭据只流向 hook 生命周期与注册代建，评审读写零接触，日志/API/前端/dist/文档无明文，`DeniedEnv` 变异探针有效。
+- 回归覆盖：共享/项目级 token 优先级与零哨兵回退；URL-only 注册的 bot ≥ Reporter、注册人 ≥ Reporter、trusted 旁路与失败前置；共享 + `auto_webhook=true` 的 provisioning 预检；`auto_webhook` 省略默认 true；项目详情/列表/注册响应 `shared_credential`；`/api/v1/me` 能力位；settings 健康状态枚举与 5 分钟缓存；config API 只暴露 `bot_token_configured` / `provisioning_token_configured` 且过滤变量名；共享模式 commit status 跳过；CLI 共享模式省略 `--token-env`。
+- 已知限制：共享模式强制跳过 commit status；共享凭据失效是平台级事件，不逐项目写 `webhook_state=failed`；健康为 5 分钟懒缓存，无后台监控，provisioning 只有「是否配置」布尔；共享自动建 hook 依赖 provisioning，`auto_webhook=false` 注册后启用/重建仍需 provisioning；已认证注册/校验端点可消耗 GitLab 配额，限流与预检短 TTL 缓存留后续 Issue；共享 bot 需 `api` + `read_repository`，provisioning 需 `api` + 项目 Maintainer；个人命名空间项目需逐项目加 Reporter。
+- 本轮未记录真实 GitLab 上的零 token 注册、共享 bot 评审与 provisioning 代建 hook 验收，待 dev-110 验收（见文末占位）。
+
+## MR 讨论 @ 唤醒与线程内回执验证（#477，PR #480 / #481）
+
+### 一期：客户端 discussion 能力（PR #480）
+
+- head `09d8e4c`（合并 `d0e332b`）。本地 `go build ./...`、`go vet ./...`、gofmt 通过；`go test -race -count=1 ./internal/gitlab/...` ok（2.455s）。自建 Linux CI（run `20261116T170537-09d8e4ca52ce`）：go / web / docker 全部 PASS，语句覆盖率 81.92%（32962/40238），耗时 248s，RESULT PASS。
+- 覆盖 Note Hook 与 `Note` 的 `discussion_id`、`AddDiscussionNote` 端点与参数校验（空/空白/255 长度/字符集边界）、401/403/404/429 分类、上游错误不泄漏 token 或响应正文；独立评审无 P1/P2，三条 P3 已修。
+
+### 二期：mention 触发与线程回执（PR #481）
+
+- 最终 head `bcf8806`（合并 `8caad16`）。`go build ./...`、`go vet ./...`、gofmt 通过；`go test -race -count=1`：app 434.447s、server 174.289s、config 4.525s，全部 ok。自建 Linux CI（run `20261116T191304-bcf88066ea7b`）：go / web / docker 全部 PASS，语句覆盖率 81.97%（33298/40621），耗时 533s，RESULT PASS。
+- 独立评审（正确性 + 对抗自触发/解析绕过）：首轮无 P1、1 个 P2（超线性剥离可拖垮 ingress）+ 7 个 P3；加固轮 `bcf8806` 全部修复后聚焦复核无 P1/P2 残留。实测 128 KiB 上限内最坏扫描 5.31ms，超限 5 MiB 短路 83ns/零分配（900ms 预算余量超过 150 倍）；变异探针证明关键测试能挡回归。
+- 回归覆盖：mention 触发与 `discussion_id` 透传、编辑不触发、围栏/缩进/行内代码/链接/裸 URL/autolink/用户名前后缀不触发、`bot_usernames` 空禁用、作者 trim、本服务 marker 不自触发、第三方 bot 放行、门槛配置与非法值、线程内 `AddDiscussionNote` 端点断言、重试原地更新、显式线程缺失/已删除回落、旧 payload replay、回复持锁。
+- 已知限制：真实 CE 19.5 Note Hook 的 `discussion_id` 与 `/notes` 可见的线程回复待 dev-110 实机确认；升级前顶层回执重放可能迁移一次位置；worker 侧过滤只用项目设置，仓库 `.gitlab-review.yml` 覆写（`skip_draft` / `labels_exclude`）的最终过滤仍发生在 `review.run`，可能 accepted 后置 stale（文档已写明）；缩进代码判定对 CommonMark 续行偏保守，只会漏触发，无自触发风险；`ResolveDiscussion` 的 discussionID 校验宽严与 `AddDiscussionNote` 不一致，留独立 Issue。
+
+## 固定 GitLab 身份规程验证（#478，PR #483）
+
+- 只改文档，未改代码与测试。`go test ./scripts/ -count=1` 通过（111.397s，含注册文档锁定测试）；新增内容的只读链接/锚点/表格校验通过。
+- 自建 Linux CI（run `20261116T193930-c592d4962047`，head `c592d49`）：go / web / docker 全部 PASS，语句覆盖率 81.97%，耗时 230s，RESULT PASS。
+- 事实核对：service account、PAT 代发、头像、成员、用户级 OAuth 应用、block 用户的端点与后果按 GitLab 19.5.5 官方文档与 v19.5.5-ee 源码核实（Auditor 属 EE Premium/Ultimate，custom roles 属 EE Ultimate，hook API 需 Maintainer，Reporter 可读与评论）；5 个官方链接实测 HTTP 200。公开文档 diff 复查无内网 IP、域名、主机别名、内部目录、实例 ID 或凭据值。
+- 本 PR 只写规程与台账，不执行任何 GitLab 写操作；实际收敛动作已在用户授权下另行执行，具体账号/应用 ID 与回读结果只记内部台账，公开文档不写实例值。
+
+## dev-110 验收（#484）
+
+待补。
 
 <a id="v150-验证状态"></a>
 
@@ -353,7 +387,7 @@ v1.2.0 尚未发布：版本说明已合并到 `main`，尚未打 tag，也未�
 
 ## v1.1.x 验证状态（已发布）
 
-变更清单见 [CHANGELOG](../CHANGELOG.md)，发布页见 [v1.1.0 Release](https://github.com/LeXwDeX/Tribunal/releases/tag/v1.1.0)。本节只记录 v1.1.x 实际做过的验证；待发布版本的状态见 [v1.2.0 验证状态](#v120-验证状态)。
+变更清单见 [CHANGELOG](../CHANGELOG.md)，发布页见 [v1.1.0 Release](https://github.com/LeXwDeX/Tribunal/releases/tag/v1.1.0)。本节只记录 v1.1.x 实际做过的验证；待发布版本的状态见 [v1.2.0 验证状态](#v120待发布验证状态)。
 
 **已完成**
 
@@ -548,7 +582,7 @@ docker compose exec -T review /app/tribunalctl projects all
 
 ## v1.0.0 历史验收记录（f143，仅供追溯）
 
-> 本节是 v1.0.0 发布前在隔离测试实例上的验收记录，对应 [PR #30](https://github.com/LeXwDeX/Tribunal/pull/30) 和 [v1.0.0 Release](https://github.com/LeXwDeX/Tribunal/releases/tag/v1.0.0)。它不覆盖后续版本的任何改动；待发布版本的状态见 [v1.2.0 验证状态](#v120-验证状态)。本节内容保持当时的事实，不随后续版本更新。
+> 本节是 v1.0.0 发布前在隔离测试实例上的验收记录，对应 [PR #30](https://github.com/LeXwDeX/Tribunal/pull/30) 和 [v1.0.0 Release](https://github.com/LeXwDeX/Tribunal/releases/tag/v1.0.0)。它不覆盖后续版本的任何改动；待发布版本的状态见 [v1.2.0 验证状态](#v120待发布验证状态)。本节内容保持当时的事实，不随后续版本更新。
 
 ### 结论
 

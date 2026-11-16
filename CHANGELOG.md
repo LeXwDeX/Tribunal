@@ -18,6 +18,7 @@
 ### 文档
 
 - 固定每 GitLab 实例一个 bot 账号、每环境一个 OAuth 应用：补查重复用、一次性收敛、环境台账与旧资源处置规程（[#478](https://github.com/LeXwDeX/Tribunal/issues/478)）。
+- 补齐 @ 唤醒、线程回执与共享 bot 的配置参考、Note Hook 接口说明和运维核查步骤，并记录 #475–#478 的验证结果（[#484](https://github.com/LeXwDeX/Tribunal/issues/484)）。
 
 ## [1.5.0] - 2026-11-14
 

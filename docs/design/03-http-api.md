@@ -76,14 +76,14 @@ Web 控制台的“重试加载更多”复用失败请求的同一 cursor，不
 | `Merge Request Hook` | `action=update` 且带 `oldrev` | `review.run`，trigger=`mr_update` |
 | `Merge Request Hook` | `action` 为 `close` / `merge` | `review.cancel` |
 | `Merge Request Hook` | `draft=true` 且项目设置跳过 Draft；`allow_repo_config=true` 时延迟到 worker 最终判断 | 忽略：`draft`（或在 worker 过滤） |
-| `Note Hook` | `noteable_type=MergeRequest` 且正文以 `/review` 开头 | 按命令入队（见 §6） |
+| `Note Hook` | `noteable_type=MergeRequest`、`action` 为空或 `create`，且 MR 未关闭；正文首行是 `/review`，或正文包含对 `gitlab.bot_usernames` 的 @ 提及 | 斜杠命令按 §6 入队；mention 入队 `review.command`（`trigger=mention`、`command=run`）；编辑注记不触发 |
 | `Push Hook` | `ref` 为目标分支（默认分支或设置中的分支） | `workspace.refresh` |
 
 `catch_up` 不来自 webhook：服务启动恢复完成后，追赶扫描对每个打开的 MR 的当前 head 构造同样的合成事件，经上表相同的过滤与入队路径入队（投递事件为 `Catch Up`，UUID 由项目、MR 和 head 确定，同一 head 至多补评一次），见[运维文档](../operations.md#启动追赶扫描)。该值也出现在评审列表的 `trigger` 字段和筛选中。
 
 `review.run` 的 job key：`review:<project_id>:<mr_iid>`。去重记录与入队在同一事务中提交，新 webhook 就地替换同 key、同 kind 的 queued 内容；running 内容不变，允许保留一个 queued 后继。取消任务使用独立 key `review.cancel:<project_id>:<mr_iid>`。工作流取消由评审处理器负责（见 05-flows.md F2）；webhook handler 本身不执行评审。
 
-Note Hook 先入队 `review.command`，由 worker 请求 GitLab 校验身份、MR 状态和权限后入队 run/cancel；这样 webhook handler 不等待网络调用。通过校验的 run 命令使用最新参数替换已有 queued run，保留 `full`、`profile` 和最新 `head_sha`；不覆盖 running 任务。`/review help` 和权限不足由 worker 各回复一条 GitLab note；回复正文以 `<!-- gitlab-ce-review:command-reply note=<note_id>` 隐藏 marker 开头，按源 note 幂等，重试时更新同一条回复。受理 run/cancel 时，入队事务记录源 note 的 eyes，终态由状态 worker 协调；help/拒绝不添加表情。Webhook 自身仍无网络调用，也会忽略机器人自己发出的 command-reply note。数据库失败返回 `503 {"ignored":"storage_error"}`，不会写入去重记录或假报 accepted。不得假定 GitLab 自动重试；记录仍可用且版本支持时可在「Recent events」手动重发。如果重发保留原有效事件 UUID、此前没有去重记录且认证和过滤通过，则可再次入队。连续失败可能使 hook 临时或永久停用，条件随版本和功能开关而异，见 [Webhook 失败与恢复](../operations.md#webhook-失败与恢复)。
+Note Hook 先入队 `review.command`，由 worker 请求 GitLab 校验身份、MR 状态和权限后入队 run/cancel；这样 webhook handler 不等待网络调用。job payload 携带源注记的 `discussion_id`（旧 payload 缺省为空）和触发来源 `trigger`（`command` 或 `mention`）。斜杠命令（正文首行 `/review`）与 @ 唤醒（`trigger=mention`）共用这个 job：mention 的权限门槛取 `gitlab.mention_min_access_level`（默认 30），斜杠命令固定 30；mention 与自动触发一样经过项目 `skip_draft`、标签和目标分支过滤，被排除时 worker 在源讨论线程内回 `kind=filtered` 回执且不创建评审，权限不足回 `kind=denied`。通过校验的 run 命令使用最新参数替换已有 queued run，保留 `full`、`profile` 和最新 `head_sha`；不覆盖 running 任务。`/review help`、拒绝和过滤同样各回一条 GitLab note；回执落在源讨论线程（`discussion_id` 缺失时先反查包含源 note 的线程，仍找不到才回落顶层），正文只含 ack、一行 head/代次与状态注记 permalink，不复制状态表格。回复正文以 `<!-- gitlab-ce-review:command-reply note=<note_id>` 隐藏 marker 开头，按源 note 幂等：重试更新同一条回复，显式线程已被删除（追加返回 404）时回落顶层。受理 run/cancel 时，入队事务记录源 note 的 eyes，终态由状态 worker 协调；help/拒绝/过滤不添加表情。Webhook 自身仍无网络调用，也会忽略机器人自己发出的 command-reply note、summary/legacy status/finding 标记注记和 `gitlab.bot_usernames` 中的作者；mention 允许第三方 bot 作者（agent 常用 access token 发注记）。编辑注记（`action != create`）不触发任何命令。数据库失败返回 `503 {"ignored":"storage_error"}`，不会写入去重记录或假报 accepted。不得假定 GitLab 自动重试；记录仍可用且版本支持时可在「Recent events」手动重发。如果重发保留原有效事件 UUID、此前没有去重记录且认证和过滤通过，则可再次入队。连续失败可能使 hook 临时或永久停用，条件随版本和功能开关而异，见 [Webhook 失败与恢复](../operations.md#webhook-失败与恢复)。
 
 自动触发（`mr_open` / `mr_update` / `catch_up`）在 worker 合并配置后做最终 Draft、标签和目标分支过滤。`allow_repo_config=true` 时，Draft 检查不在 webhook 做，避免 webhook 调用 GitLab；标签仍可先用项目设置快速过滤，仓库配置只能追加排除；目标分支条件不被仓库配置覆盖。手动命令不受这些自动过滤限制。
 
@@ -115,7 +115,7 @@ Note Hook 先入队 `review.command`，由 worker 请求 GitLab 校验身份、M
 |---|---|---|
 | GET | `/api/v1/projects` | 当前用户可见的项目列表：平台管理员为全部已登记项目，其他用户为已授权或 `global_read` 可见的项目；`?q=&enabled=&limit=&cursor=`，响应 `{projects, next_cursor}`，每项带 `access`，平台管理员另带 `access_source=admin`，只读项目带 `access_source=grant\|global` |
 | POST | `/api/v1/projects/validate` | 已认证用户只读连接校验：`{project, token}`；普通调用方的 token 需能识别出该项目至少 Reporter 的成员，平台管理员与静态 bootstrap Bearer 免检；启用共享凭据后 `token` 可省略，改用共享 bot 检查 scope、有效期、bot Reporter 与登录用户 Reporter；不保存项目或凭据。响应带 `shared_credential` 布尔值，表示本次校验使用的凭据来源 |
-| POST | `/api/v1/projects` | 已认证用户注册项目；普通调用方需至少 Reporter 成员，平台管理员与静态 bootstrap Bearer 免检；注册人自动获得该项目 `manage`（静态 Bearer 除外） |
+| POST | `/api/v1/projects` | 已认证用户注册项目；普通调用方需至少 Reporter 成员，平台管理员与静态 bootstrap Bearer 免检；注册人自动获得该项目 `manage`（静态 Bearer 除外）。启用共享凭据后 `token` 可省略；`auto_webhook` 省略默认 `true` |
 | GET | `/api/v1/projects/{id}` | 项目 `read`：详情（含工作区状态、最近评审和 `access`） |
 | PATCH | `/api/v1/projects/{id}` | 项目 `manage`：修改 `profile`（只接受 `default`，其他值返回 400 `unknown profile`）、`settings`（其中 `profile_by_label` 的值不是 `default` 的映射在保存时被丢弃，不报错）、`enabled` |
 | PUT | `/api/v1/projects/{id}/token` | 项目 `manage`：轮换 token：`{token}` |
@@ -609,3 +609,5 @@ Provider 返回 `name`、`protocol`、`base_url`、`model`、`max_concurrency`�
 | `/review help` | 回复命令说明 |
 
 权限：发起人在该项目的访问级别必须 **≥ Developer（30）**；否则 worker 回复一条说明并忽略命令，不创建评审任务。机器人自己的评论和命令回复 note 一律忽略，防止循环触发。`/review help` 回复可用命令和档位说明；两类回复都按源 note ID 使用隐藏 marker，重试幂等。受理 run/cancel 时通过入队事务记录源 note eyes；终态由状态 worker 协调为完成/失败标记或清除。help/拒绝不添加表情。
+
+正文首行不是 `/review` 时，注记中 `@<gitlab.bot_usernames 中的用户名>` 会唤醒评审（列表为空则禁用）：匹配不区分大小写、要求完整用户名边界，匹配前剥离围栏代码块、缩进代码、行内代码、autolink、Markdown 链接目标与裸 URL；正文超过 128 KiB 按未提及处理；编辑注记不触发。mention 的权限门槛取 `gitlab.mention_min_access_level`（默认 30，允许 10/15/20/30/40/50），斜杠命令仍固定 30；mention 与自动触发一样受项目 `skip_draft`、标签和目标分支过滤，被排除时线程内回 `filtered` 且不创建评审。回执落在源讨论线程内，按源 note 幂等，格式见 §2 与 [05 流程 · F3](05-flows.md#f3-评论命令与--唤醒)。
