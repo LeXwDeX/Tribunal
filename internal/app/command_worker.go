@@ -59,7 +59,12 @@ type CommandWorker struct {
 	cipher       *secret.Cipher
 	profiles     map[string]config.ProfileConfig
 	botUsernames map[string]bool
-	logger       *slog.Logger
+	// mrLocks is the shared per-merge-request registry. Command enqueues bump
+	// the generation and replies write MR notes, so both hold the same lock as
+	// publication and status writing (#475). A nil value falls back to the
+	// package default.
+	mrLocks *workflowLocks
+	logger  *slog.Logger
 }
 
 // CommandWorkerConfig configures CommandWorker.
@@ -71,6 +76,8 @@ type CommandWorkerConfig struct {
 	Profiles     map[string]config.ProfileConfig
 	BotUsernames []string
 	Logger       *slog.Logger
+	// MRLocks is the shared per-merge-request lock registry.
+	MRLocks *workflowLocks
 }
 
 // NewCommandWorker builds the bounded M0 command handler.
@@ -95,6 +102,7 @@ func NewCommandWorker(cfg CommandWorkerConfig) (*CommandWorker, error) {
 		cipher:       cfg.Cipher,
 		profiles:     cfg.Profiles,
 		botUsernames: bots,
+		mrLocks:      cfg.MRLocks,
 		logger:       logger,
 	}, nil
 }
@@ -224,7 +232,7 @@ func (w *CommandWorker) Handle(ctx context.Context, job *jobs.Job) error {
 	// eyes. A failed enqueue therefore leaves neither behind.
 	if payload.Command == commandCancel {
 		commandPayload := map[string]any{"project_id": project.ID, "mr_iid": payload.MRIID, "trigger": "command", "note_id": payload.NoteID, "author_id": payload.AuthorID}
-		result, err := w.store.EnqueueReviewLatest(ctx, store.ReviewCommand{
+		result, err := w.enqueueReview(ctx, store.ReviewCommand{
 			ProjectID:   project.ID,
 			MRIID:       payload.MRIID,
 			Cancel:      true,
@@ -257,7 +265,7 @@ func (w *CommandWorker) Handle(ctx context.Context, job *jobs.Job) error {
 		"full":             payload.Full,
 		"note_id":          payload.NoteID,
 	}
-	result, err := w.store.EnqueueReviewLatest(ctx, store.ReviewCommand{
+	result, err := w.enqueueReview(ctx, store.ReviewCommand{
 		ProjectID:   project.ID,
 		MRIID:       payload.MRIID,
 		HeadSHA:     strings.ToLower(strings.TrimSpace(mr.SHA)),
@@ -267,6 +275,18 @@ func (w *CommandWorker) Handle(ctx context.Context, job *jobs.Job) error {
 		MaxAttempts: 3,
 	})
 	return w.finishCommand(ctx, string(token), project, payload, replyAuthorID, result, err)
+}
+
+// enqueueReview bumps the control and writes the queued status row under the
+// shared per-MR lock, so a `/review` command cannot interleave with an
+// in-flight note write for the same merge request (#475).
+func (w *CommandWorker) enqueueReview(ctx context.Context, command store.ReviewCommand) (store.ReviewEnqueueResult, error) {
+	unlock, err := mrLockRegistry(w.mrLocks).lock(ctx, reviewMRLockKey(command.ProjectID, command.MRIID))
+	if err != nil {
+		return store.ReviewEnqueueResult{}, err
+	}
+	defer unlock()
+	return w.store.EnqueueReviewLatest(ctx, command)
 }
 
 func (w *CommandWorker) finishCommand(ctx context.Context, token string, project *store.Project, payload commandPayload, replyAuthorID int64, result store.ReviewEnqueueResult, err error) error {
@@ -282,6 +302,13 @@ func (w *CommandWorker) finishCommand(ctx context.Context, token string, project
 }
 
 func (w *CommandWorker) reply(ctx context.Context, token string, project *store.Project, payload commandPayload, authorID int64, kind, text string) error {
+	// A command reply is a review note: hold the shared per-MR lock so it
+	// cannot interleave with publication or status writing (#475).
+	unlock, err := mrLockRegistry(w.mrLocks).lock(ctx, reviewMRLockKey(project.ID, payload.MRIID))
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	body := commandReplyBody(payload.NoteID, kind, text)
 	prefix := commandReplyPrefix(payload.NoteID) + " "
 	notes, err := w.gitlab.ListMRNotes(ctx, token, project.ID, payload.MRIID)

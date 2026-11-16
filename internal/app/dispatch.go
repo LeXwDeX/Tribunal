@@ -40,7 +40,11 @@ type Dispatcher struct {
 	gitlab     DispatchGitLab
 	cipher     *secret.Cipher
 	profiles   map[string]config.ProfileConfig
-	logger     *slog.Logger
+	// mrLocks is the shared per-merge-request registry. Manual review dispatch
+	// bumps the generation, so it holds the same lock as every note writer
+	// (#475). A nil value falls back to the package default.
+	mrLocks *workflowLocks
+	logger  *slog.Logger
 }
 
 // DispatcherConfig configures Dispatcher.
@@ -52,6 +56,8 @@ type DispatcherConfig struct {
 	Cipher     *secret.Cipher
 	Profiles   map[string]config.ProfileConfig
 	Logger     *slog.Logger
+	// MRLocks is the shared per-merge-request lock registry.
+	MRLocks *workflowLocks
 }
 
 type dispatchAuthorizationKey struct{}
@@ -90,6 +96,7 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		gitlab:     cfg.GitLab,
 		cipher:     cfg.Cipher,
 		profiles:   cfg.Profiles,
+		mrLocks:    cfg.MRLocks,
 		logger:     logger,
 	}, nil
 }
@@ -152,7 +159,7 @@ func (d *Dispatcher) StartReview(ctx context.Context, projectID, mrIID int64, pr
 	if err != nil {
 		return "", internalError()
 	}
-	result, err := d.store.EnqueueReviewLatest(ctx, store.ReviewCommand{
+	result, err := d.enqueueReview(ctx, store.ReviewCommand{
 		ProjectID:   project.ID,
 		MRIID:       mrIID,
 		HeadSHA:     head,
@@ -176,7 +183,7 @@ func (d *Dispatcher) CancelReview(ctx context.Context, workflowID string) (strin
 	if err != nil {
 		return "", internalError()
 	}
-	result, err := d.store.EnqueueReviewLatest(ctx, store.ReviewCommand{
+	result, err := d.enqueueReview(ctx, store.ReviewCommand{
 		ProjectID:   workflow.ProjectID,
 		MRIID:       *workflow.MRIID,
 		Cancel:      true,
@@ -187,6 +194,18 @@ func (d *Dispatcher) CancelReview(ctx context.Context, workflowID string) (strin
 		return "", d.storeError(err)
 	}
 	return result.JobID, nil
+}
+
+// enqueueReview holds the shared per-MR lock across the generation bump and
+// the queued status write, so a manual dispatch cannot interleave with an
+// in-flight note write for the same merge request (#475).
+func (d *Dispatcher) enqueueReview(ctx context.Context, command store.ReviewCommand) (store.ReviewEnqueueResult, error) {
+	unlock, err := mrLockRegistry(d.mrLocks).lock(ctx, reviewMRLockKey(command.ProjectID, command.MRIID))
+	if err != nil {
+		return store.ReviewEnqueueResult{}, err
+	}
+	defer unlock()
+	return d.store.EnqueueReviewLatest(ctx, command)
 }
 
 // RepublishReview enqueues review.publish so the worker re-runs the publisher

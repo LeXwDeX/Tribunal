@@ -138,8 +138,9 @@ type ReviewService struct {
 	publicURL      string
 	status         *statusReporter
 	// mrLocks is the shared per-merge-request registry injected by the
-	// runtime. Status writes and publications hold the same lock so one MR's
-	// note is never written by two generations at once (#475).
+	// runtime. Candidate activation, status writes, fallback notes and
+	// publications hold the same lock so one MR's note is never written by two
+	// generations at once (#475).
 	mrLocks           *workflowLocks
 	statusScanLocks   workflowLocks
 	statusScanMu      sync.Mutex
@@ -449,6 +450,13 @@ func (s *ReviewService) RunCandidate(ctx context.Context, job *jobs.Job) error {
 		return nil
 	}
 
+	// Activation bumps the control and writes the successor's queued status
+	// row. Hold the shared per-MR lock so the bump cannot interleave with an
+	// in-flight note write for the previous generation (#475).
+	mrUnlock, err := mrLockRegistry(s.mrLocks).lock(ctx, reviewMRLockKey(payload.ProjectID, payload.MRIID))
+	if err != nil {
+		return err
+	}
 	runJobID, generation, err := s.store.ActivateReviewCandidate(ctx, store.ReviewCandidateActivation{
 		JobID:        job.ID,
 		LeaseOwner:   job.LeaseOwner,
@@ -458,6 +466,7 @@ func (s *ReviewService) RunCandidate(ctx context.Context, job *jobs.Job) error {
 		HeadSHA:      payload.HeadSHA,
 		CandidateSeq: payload.CandidateSeq,
 	})
+	mrUnlock()
 	switch {
 	case errors.Is(err, store.ErrSuperseded):
 		s.logger.Info("review candidate superseded before activation",
@@ -510,16 +519,14 @@ func (s *ReviewService) noteInvalidRepoConfig(ctx context.Context, token string,
 		return
 	}
 	// Prefer the single review note (#451). The status worker edits it with
-	// the same text; only a run without a status row falls back to a new note.
+	// the same text; only a run without a status row falls back to a new note,
+	// serialized and generation-checked like every other note write (#475).
 	if generation > 0 {
 		if _, err := s.store.SetReviewStatusFinalBody(ctx, projectID, mrIID, generation, headSHA, invalidRepoConfigNote); err == nil {
 			return
 		}
 	}
-	if err := sendOutbound(ctx, s.workspace.Get(projectID), func(callCtx context.Context) error {
-		_, err := s.gitlab.CreateMRNote(callCtx, token, projectID, mrIID, invalidRepoConfigNote)
-		return err
-	}); err != nil {
+	if err := s.createFallbackMRNote(ctx, token, projectID, mrIID, generation, headSHA, invalidRepoConfigNote); err != nil {
 		s.logger.Warn("invalid repository config note failed",
 			"project_id", projectID, "mr_iid", mrIID, "error_class", errclass.Of(err))
 	}

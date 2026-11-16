@@ -140,11 +140,7 @@ func (s *ReviewService) RunStatusJob(ctx context.Context, job *jobs.Job) error {
 		return err
 	}
 	defer unlock()
-	mrLocks := s.mrLocks
-	if mrLocks == nil {
-		// Standalone services (tests, recovery helpers) still serialize.
-		mrLocks = &defaultMRLocks
-	}
+	mrLocks := mrLockRegistry(s.mrLocks)
 	statusUnlock, err := mrLocks.lock(ctx, reviewMRLockKey(payload.ProjectID, payload.MRIID))
 	if err != nil {
 		return err
@@ -282,7 +278,14 @@ func (s *ReviewService) settleCancelledStatusVisit(ctx context.Context, ws *work
 	if err != nil {
 		return err
 	}
-	if current, err := s.store.GetReviewStatus(ctx, row.ProjectID, row.MRIID); err == nil && current != nil {
+	// Re-read only to pick up the version this write created and the body that
+	// PreserveFinalBody kept. A generation bump can land between the write and
+	// this read (webhook ingress no longer holds the MR lock), so adopt the row
+	// only when it still belongs to this generation. Otherwise the original row
+	// stays the settlement target: the successor's queued row must never be
+	// written as cancelled or marked applied by an older generation (#475).
+	if current, err := s.store.GetReviewStatus(ctx, row.ProjectID, row.MRIID); err == nil && current != nil &&
+		current.Generation == row.Generation && strings.EqualFold(current.HeadSHA, row.HeadSHA) {
 		row = current
 	}
 	return s.writeTerminalStatusVisit(ctx, ws, row, projectID, token, reviewStatusCancelled, "review cancelled", "", selfHeal)
@@ -296,10 +299,15 @@ func (s *ReviewService) writeTerminalStatusVisit(ctx context.Context, ws *worksp
 		return errors.New("app: status reporter is not configured")
 	}
 	update := reviewStatusUpdate{
-		State:         state,
-		Detail:        detail,
-		HeadSHA:       row.HeadSHA,
-		Generation:    row.Generation,
+		State:      state,
+		Detail:     detail,
+		HeadSHA:    row.HeadSHA,
+		Generation: row.Generation,
+		// A row without a final body predates the merged note (#451): its
+		// published summary is a separate note and its lifecycle lives in the
+		// legacy status note this writer must keep updating (#453, #475).
+		LegacyMarker: !row.FinalBodyReady,
+		// Only a row that owns the merged note may remove the legacy note.
 		CleanupLegacy: row.FinalBodyReady,
 	}
 	if row.FinalBodyReady {

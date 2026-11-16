@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/store/sqlite"
 )
 
 func TestStatusConvergesAcrossGenerations(t *testing.T) {
@@ -876,6 +878,93 @@ func TestStatusWriterSettlesHeadMismatch(t *testing.T) {
 	if len(notes) != 1 || parseStatusPhase(notes[0].Body) != reviewStatusPhase(reviewStatusStale) ||
 		!strings.Contains(notes[0].Body, "review superseded") {
 		t.Fatalf("superseded status note = %+v", notes)
+	}
+}
+
+// bumpAfterCancelledStatusStore activates a successor generation between the
+// cancelled status write and the writer's re-read. It recreates the window an
+// unsynchronized generation bump (webhook ingress) opens (#475).
+type bumpAfterCancelledStatusStore struct {
+	ReviewStore
+	db   *sqlite.Store
+	head string
+	once sync.Once
+	err  error
+}
+
+func (s *bumpAfterCancelledStatusStore) SetReviewStatus(ctx context.Context, goal store.ReviewStatusGoal) (bool, error) {
+	written, err := s.ReviewStore.SetReviewStatus(ctx, goal)
+	if err == nil && written && goal.State == reviewStatusCancelled {
+		s.once.Do(func() {
+			_, s.err = s.db.EnqueueReviewLatest(ctx, store.ReviewCommand{
+				ProjectID: goal.ProjectID, MRIID: goal.MRIID, HeadSHA: s.head,
+			})
+		})
+	}
+	return written, err
+}
+
+// TestStatusWriterDoesNotAdoptSuccessorAfterCancelledWrite proves the
+// cancelled terminal path only adopts a re-read row from its own generation. A
+// successor queued row must never be written as cancelled or marked applied by
+// the older generation, so the MR converges to the successor's phase (#475).
+func TestStatusWriterDoesNotAdoptSuccessorAfterCancelledWrite(t *testing.T) {
+	ctx := context.Background()
+	f := newReviewFixture(t, reviewTestHead)
+	f.service.status = testStatusReporter(f.gitlab)
+	if _, err := f.db.EnqueueReviewLatest(ctx, store.ReviewCommand{ProjectID: 42, MRIID: 7, HeadSHA: f.head}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.EnqueueReviewLatest(ctx, store.ReviewCommand{ProjectID: 42, MRIID: 7, Cancel: true}); err != nil {
+		t.Fatal(err)
+	}
+	control, err := f.db.GetReviewControl(ctx, 42, 7)
+	if err != nil || !control.Cancelled {
+		t.Fatalf("control = %+v, %v; want a cancelled generation", control, err)
+	}
+	storeWrapper := &bumpAfterCancelledStatusStore{ReviewStore: f.db, db: f.db, head: f.head}
+	f.service.store = storeWrapper
+	job, err := f.db.Claim(ctx, "status", []string{"review.status"}, time.Minute)
+	if err != nil || job == nil {
+		t.Fatalf("claim: %+v, %v", job, err)
+	}
+	if err := f.service.RunStatusJob(ctx, job); err != nil {
+		t.Fatalf("status job: %v", err)
+	}
+	if storeWrapper.err != nil {
+		t.Fatalf("activate successor: %v", storeWrapper.err)
+	}
+	successor, err := f.db.GetReviewStatus(ctx, 42, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if successor.Generation != control.Generation+1 || successor.State != reviewStatusQueued {
+		t.Fatalf("successor row = %+v, want a queued generation %d", successor, control.Generation+1)
+	}
+	if successor.AppliedVersion >= successor.Version {
+		t.Fatalf("the cancelled visit marked the successor applied: %+v", successor)
+	}
+	if err := f.db.Complete(ctx, *job); err != nil {
+		t.Fatal(err)
+	}
+
+	drainReviewJobs(t, f, "review.status")
+	final, err := f.db.GetReviewStatus(ctx, 42, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final.State != reviewStatusQueued || final.AppliedVersion < final.Version {
+		t.Fatalf("successor did not converge to its own queued phase: %+v", final)
+	}
+	notes := f.gitlab.noteSnapshot()
+	if len(notes) != 1 {
+		t.Fatalf("notes = %+v, want one merged status note", notes)
+	}
+	if phase := parseStatusPhase(notes[0].Body); phase != reviewStatusPhase(reviewStatusQueued) {
+		t.Fatalf("status note = %q, want the successor's queued phase", notes[0].Body)
+	}
+	if cells := statusTableCells(t, notes[0].Body); cells["代次"] != "`"+itoa(final.Generation)+"`" {
+		t.Fatalf("status note generation = %q, want %d: %q", cells["代次"], final.Generation, notes[0].Body)
 	}
 }
 

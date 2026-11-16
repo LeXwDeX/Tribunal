@@ -95,25 +95,28 @@ type RuntimeDeps struct {
 // Runtime is the composition root below main: store-backed dependencies,
 // services, the job handler set, recovery, and the feedback ticker.
 type Runtime struct {
-	cfg         *config.Config
-	store       *sqlite.Store
-	cipher      *secret.Cipher
-	gitlab      GitLabService
-	workspace   *workspace.Manager
-	git         GitOps
-	engine      *dag.Engine
-	executors   *executorRegistry
-	projects    *ProjectService
-	webhooks    *WebhookService
-	commands    *CommandWorker
-	catchUp     *CatchUpService
-	reviews     *ReviewService
-	workspaces  *WorkspaceService
-	feedback    *FeedbackService
-	retention   *RetentionService
-	runCleanup  *RunCleanupService
-	publisher   *Publisher
-	worker      *ReviewWorker
+	cfg        *config.Config
+	store      *sqlite.Store
+	cipher     *secret.Cipher
+	gitlab     GitLabService
+	workspace  *workspace.Manager
+	git        GitOps
+	engine     *dag.Engine
+	executors  *executorRegistry
+	projects   *ProjectService
+	webhooks   *WebhookService
+	commands   *CommandWorker
+	catchUp    *CatchUpService
+	reviews    *ReviewService
+	workspaces *WorkspaceService
+	feedback   *FeedbackService
+	retention  *RetentionService
+	runCleanup *RunCleanupService
+	publisher  *Publisher
+	worker     *ReviewWorker
+	// mrLocks is the process-wide per-merge-request registry shared by review
+	// publication, status writing and every generation-bump path (#475).
+	mrLocks     *workflowLocks
 	lifecycle   *Lifecycle
 	mcp         *mcp.Manager
 	projectExts *ProjectExtensionResolver
@@ -462,7 +465,6 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		BotUsernames:   cfg.GitLab.BotUsernames,
 		Logger:         logger,
 		Now:            now,
-		MRLocks:        mrLocks,
 	})
 	if err != nil {
 		if ownedMCP {
@@ -478,6 +480,7 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		Profiles:     cfg.Profiles,
 		BotUsernames: cfg.GitLab.BotUsernames,
 		Logger:       logger,
+		MRLocks:      mrLocks,
 	})
 	if err != nil {
 		if ownedMCP {
@@ -497,6 +500,7 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 			Cipher:    deps.Cipher,
 			Settings:  cfg.GitLab.CatchUp,
 			Logger:    logger,
+			MRLocks:   mrLocks,
 		})
 		if err != nil {
 			if ownedMCP {
@@ -525,6 +529,7 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		runCleanup:  runCleanup,
 		publisher:   publisher,
 		worker:      worker,
+		mrLocks:     mrLocks,
 		lifecycle:   &Lifecycle{},
 		mcp:         mcpManager,
 		projectExts: projectExts,
@@ -613,6 +618,10 @@ func (r *Runtime) WorkspaceService() *WorkspaceService { return r.workspaces }
 // directory owner. Context projections must reuse it instead of opening a
 // second manager.
 func (r *Runtime) WorkspaceManager() *workspace.Manager { return r.workspace }
+
+// MRLocks returns the process-wide per-merge-request lock registry, so
+// constructors outside the runtime (the dispatcher) share it (#475).
+func (r *Runtime) MRLocks() *workflowLocks { return r.mrLocks }
 
 // Feedback returns the feedback collector.
 func (r *Runtime) Feedback() *FeedbackService { return r.feedback }

@@ -364,12 +364,43 @@ func (s *ReviewService) noteTokenRejected(ctx context.Context, token string, pro
 			return
 		}
 	}
-	if err := sendOutbound(ctx, s.workspace.Get(projectID), func(callCtx context.Context) error {
-		_, err := s.gitlab.CreateMRNote(callCtx, token, projectID, mrIID, tokenRejectedNote)
-		return err
-	}); err != nil {
+	if err := s.createFallbackMRNote(ctx, token, projectID, mrIID, generation, headSHA, tokenRejectedNote); err != nil {
 		s.logger.Warn("token rejection note failed", "project_id", projectID, "mr_iid", mrIID, "error_class", errclass.Of(err))
 	}
+}
+
+// createFallbackMRNote writes an explanation note when the merged status note
+// cannot carry it. It holds the shared per-MR lock and rechecks the generation
+// inside the lock, so a superseded generation never appends a note after its
+// successor's note (#475). Callers must not already hold the MR lock.
+func (s *ReviewService) createFallbackMRNote(ctx context.Context, token string, projectID, mrIID, generation int64, headSHA, body string) error {
+	if token == "" {
+		return nil
+	}
+	unlock, err := mrLockRegistry(s.mrLocks).lock(ctx, reviewMRLockKey(projectID, mrIID))
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if generation > 0 {
+		control, err := s.store.GetReviewControl(ctx, projectID, mrIID)
+		switch {
+		case err == nil:
+			if control.Generation != generation ||
+				(headSHA != "" && control.HeadSHA != "" && !strings.EqualFold(control.HeadSHA, headSHA)) {
+				return nil
+			}
+		case errors.Is(err, store.ErrNotFound):
+			// No successor generation exists, so the explanation is still the
+			// only visible record.
+		default:
+			return err
+		}
+	}
+	return sendOutbound(ctx, s.workspace.Get(projectID), func(callCtx context.Context) error {
+		_, err := s.gitlab.CreateMRNote(callCtx, token, projectID, mrIID, body)
+		return err
+	})
 }
 
 // resumableWorkflow returns the workflow this job is mapped to and reports
