@@ -167,6 +167,9 @@ func discussionFromSDK(d *sdk.Discussion) Discussion {
 	out := Discussion{ID: d.ID, IndividualNote: d.IndividualNote}
 	for _, note := range d.Notes {
 		if mapped := noteFromSDK(note); mapped != nil {
+			// The SDK Note has no discussion_id, so the parent discussion is
+			// the only source for this field.
+			mapped.DiscussionID = d.ID
 			out.Notes = append(out.Notes, *mapped)
 		}
 	}
@@ -822,4 +825,57 @@ func (c *Client) ListOpenMergeRequests(ctx context.Context, token string, projec
 		page = resp.NextPage
 	}
 	return out, nil
+}
+
+// validateDiscussionID accepts the discussion IDs GitLab currently generates
+// (40-character SHA1 hex strings). The wider [A-Za-z0-9_-] set keeps other
+// safe ID shapes working while refusing characters that could alter the
+// request path.
+func validateDiscussionID(id string) error {
+	if id == "" || len(id) > 255 || strings.TrimSpace(id) != id {
+		return errors.New("gitlab: invalid discussion ID")
+	}
+	for _, r := range id {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && r != '-' && r != '_' {
+			return errors.New("gitlab: invalid discussion ID")
+		}
+	}
+	return nil
+}
+
+// AddDiscussionNote appends a note to an existing merge request discussion
+// thread. Unlike CreateMRNote, the reply stays inside the thread instead of
+// starting a new top-level note. The returned Note carries the supplied
+// discussion ID, which the response itself cannot report.
+func (c *Client) AddDiscussionNote(ctx context.Context, token string, projectID, mrIID int64, discussionID, body string) (*Note, error) {
+	if !positiveIDs(projectID, mrIID) {
+		return nil, errors.New("gitlab: invalid project or merge request ID")
+	}
+	if err := validateDiscussionID(discussionID); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(body) == "" {
+		return nil, errors.New("gitlab: note body is required")
+	}
+	body = NeutralizeQuickActions(body)
+	reqCtx, client, done, err := c.prepare(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	defer done()
+
+	note, resp, err := client.Discussions.AddMergeRequestDiscussionNote(projectID, mrIID, discussionID, &sdk.AddMergeRequestDiscussionNoteOptions{
+		Body: &body,
+	}, sdk.WithContext(reqCtx))
+	if err != nil {
+		return nil, mapError(reqCtx, "add_discussion_note", resp, err)
+	}
+	mapped := noteFromSDK(note)
+	if mapped == nil || mapped.ID <= 0 {
+		return nil, &Error{Op: "add_discussion_note"}
+	}
+	// The note was just posted into this thread, so the caller-supplied ID is
+	// authoritative even though the response body omits it.
+	mapped.DiscussionID = discussionID
+	return mapped, nil
 }

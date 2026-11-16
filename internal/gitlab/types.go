@@ -105,6 +105,13 @@ type Note struct {
 	Resolved       bool
 	Position       *Position
 	CreatedAt      *time.Time
+	// DiscussionID is the thread the note belongs to. The Note struct of SDK
+	// v1.46.0 has no discussion_id field, so notes parsed from the notes
+	// endpoint cannot carry it (ListMRNotes leaves this empty); it is set when
+	// a note is converted from a discussion (ListDiscussions, CreateDiscussion)
+	// or returned by AddDiscussionNote, where the thread is known from the
+	// parent discussion or the call itself.
+	DiscussionID string
 }
 
 // Discussion is a merge request discussion thread.

@@ -67,6 +67,9 @@ type WebhookObjectAttributes struct {
 	Draft           bool          `json:"draft"`
 	WorkInProgress  bool          `json:"work_in_progress"`
 	Title           string        `json:"title"`
+	// DiscussionID is set on note hooks; it names the thread the note belongs
+	// to and is absent on merge request hooks.
+	DiscussionID string `json:"discussion_id"`
 }
 
 // WebhookMergeRequest is the merge_request object included by MR and note hooks.

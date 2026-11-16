@@ -200,6 +200,9 @@ func TestCreateDiscussionSendsPosition(t *testing.T) {
 		discussion.Notes[0].Position.NewLine != 11 {
 		t.Fatalf("discussion = %+v", discussion)
 	}
+	if discussion.Notes[0].DiscussionID != discussion.ID {
+		t.Fatalf("note DiscussionID = %q, want the discussion ID %q", discussion.Notes[0].DiscussionID, discussion.ID)
+	}
 	if body.Body != "found a bug" || body.Position.BaseSHA != sha("a") || body.Position.PositionType != "text" ||
 		body.Position.OldLine != 11 || body.Position.NewLine != 11 || body.Position.OldPath != "a.go" {
 		t.Fatalf("request body = %+v", body)
@@ -579,6 +582,12 @@ func TestExtraMethodsRejectMissingTokenAndInvalidIDs(t *testing.T) {
 			_, err := client.CreateDiscussion(ctx, "token", 42, 7, NewDiscussion{Body: "x", Position: &Position{}})
 			return err
 		},
+		func() error { _, err := client.AddDiscussionNote(ctx, "", 42, 7, sha("d"), "x"); return err },
+		func() error { _, err := client.AddDiscussionNote(ctx, "token", 0, 7, sha("d"), "x"); return err },
+		func() error { _, err := client.AddDiscussionNote(ctx, "token", 42, 0, sha("d"), "x"); return err },
+		func() error { _, err := client.AddDiscussionNote(ctx, "token", 42, 7, "", "x"); return err },
+		func() error { _, err := client.AddDiscussionNote(ctx, "token", 42, 7, "bad/id", "x"); return err },
+		func() error { _, err := client.AddDiscussionNote(ctx, "token", 42, 7, sha("d"), " "); return err },
 		func() error { return client.SetCommitStatus(ctx, "token", 42, "short", CommitStatus{State: "success"}) },
 		func() error { _, err := client.ListNoteAwards(ctx, "token", 42, 7, 0); return err },
 		func() error { _, err := client.AddNoteAward(ctx, "token", 42, 7, 0, "eyes"); return err },
