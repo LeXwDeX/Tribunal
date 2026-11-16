@@ -457,6 +457,10 @@ func (s *ReviewService) RunCandidate(ctx context.Context, job *jobs.Job) error {
 	if err != nil {
 		return err
 	}
+	// The job worker recovers panics and keeps running. Release on every path,
+	// including a panic, or the registry entry would block every later note
+	// write for this merge request until the process restarts.
+	defer mrUnlock()
 	runJobID, generation, err := s.store.ActivateReviewCandidate(ctx, store.ReviewCandidateActivation{
 		JobID:        job.ID,
 		LeaseOwner:   job.LeaseOwner,
@@ -466,7 +470,6 @@ func (s *ReviewService) RunCandidate(ctx context.Context, job *jobs.Job) error {
 		HeadSHA:      payload.HeadSHA,
 		CandidateSeq: payload.CandidateSeq,
 	})
-	mrUnlock()
 	switch {
 	case errors.Is(err, store.ErrSuperseded):
 		s.logger.Info("review candidate superseded before activation",

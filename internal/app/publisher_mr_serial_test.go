@@ -137,17 +137,22 @@ func mrSerialWritesBy(writes []mrSerialWrite, actor string) []mrSerialWrite {
 	return out
 }
 
-// mrLockRefs exposes the test-only view of the existing keyed-lock reference
-// count: one holder plus any waiters on the same merge request.
-func (p *Publisher) mrLockRefs(projectID, mrIID int64) int {
+// mrRegistryRefs exposes the test-only view of the keyed-lock reference count:
+// one holder plus any waiters on the same merge request.
+func mrRegistryRefs(locks *workflowLocks, projectID, mrIID int64) int {
 	key := reviewMRLockKey(projectID, mrIID)
-	p.mrLocks.mu.Lock()
-	defer p.mrLocks.mu.Unlock()
-	entry := p.mrLocks.entries[key]
+	locks.mu.Lock()
+	defer locks.mu.Unlock()
+	entry := locks.entries[key]
 	if entry == nil {
 		return 0
 	}
 	return entry.refs
+}
+
+// mrLockRefs exposes the publisher registry's reference count.
+func (p *Publisher) mrLockRefs(projectID, mrIID int64) int {
+	return mrRegistryRefs(p.mrLocks, projectID, mrIID)
 }
 
 // mrSerialWaitRefs waits until exactly want references exist for the MR lock.
@@ -923,7 +928,8 @@ func TestInFlightSummaryUpdateIsNotInterleavedByNewerGeneration(t *testing.T) {
 
 // TestWebhookIngressDoesNotWaitForMergeRequestLock pins the ingress side of
 // the 900ms processing budget: ingress records the delivery and generation
-// bump without taking the per-MR lock, so a held lock cannot stall it (#475).
+// bump without taking the per-MR lock in either registry, so a held lock
+// cannot stall it (#475).
 func TestWebhookIngressDoesNotWaitForMergeRequestLock(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
@@ -937,11 +943,19 @@ func TestWebhookIngressDoesNotWaitForMergeRequestLock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWebhookService: %v", err)
 	}
-	unlock, err := f.publisher.mrLocks.lock(ctx, reviewMRLockKey(42, 7))
+	// Hold both the fixture's private registry and the package default: a
+	// regression that re-adds the ingress lock through either registry must
+	// block here instead of passing silently.
+	publisherUnlock, err := f.publisher.mrLocks.lock(ctx, reviewMRLockKey(42, 7))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer unlock()
+	defer publisherUnlock()
+	defaultUnlock, err := (&defaultMRLocks).lock(ctx, reviewMRLockKey(42, 7))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer defaultUnlock()
 	done := make(chan struct{})
 	var result WebhookResult
 	var handleErr error
@@ -958,10 +972,17 @@ func TestWebhookIngressDoesNotWaitForMergeRequestLock(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(900 * time.Millisecond):
-		t.Fatal("ingress waited for the held MR lock instead of completing its DB-only work")
+	case <-time.After(2 * time.Second):
+		t.Fatal("ingress waited for a held MR lock instead of completing its DB-only work")
 	}
-	// The lock is still held here: the ingress did not take it.
+	// Both locks are still held and only the test holds a reference: the
+	// ingress neither waited on nor lingered in either registry.
+	if refs := mrRegistryRefs(f.publisher.mrLocks, 42, 7); refs != 1 {
+		t.Fatalf("publisher registry refs = %d, want only the test holder", refs)
+	}
+	if refs := mrRegistryRefs(&defaultMRLocks, 42, 7); refs != 1 {
+		t.Fatalf("default registry refs = %d, want only the test holder", refs)
+	}
 	if handleErr != nil || !result.Accepted {
 		t.Fatalf("ingress = %+v, %v", result, handleErr)
 	}

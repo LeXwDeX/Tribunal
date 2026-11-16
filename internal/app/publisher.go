@@ -156,7 +156,13 @@ func reviewMRLockKey(projectID, mrIID int64) string {
 var defaultMRLocks workflowLocks
 
 // mrLockRegistry returns the injected per-merge-request registry, or the
-// package default so bare service constructions still serialize.
+// package default so bare service constructions still serialize with each
+// other. This differs from NewPublisher, which creates a private registry for a
+// nil config: production always injects the runtime registry through every
+// constructor, so the two nil branches only exist for tests and standalone
+// helpers. Do not unify them — fixture publishers rely on a private registry
+// for isolation. A bare construction that mixes the branches silently stops
+// sharing the lock.
 func mrLockRegistry(locks *workflowLocks) *workflowLocks {
 	if locks == nil {
 		return &defaultMRLocks
@@ -203,6 +209,11 @@ func NewPublisher(cfg PublisherConfig) (*Publisher, error) {
 	}
 	mrLocks := cfg.MRLocks
 	if mrLocks == nil {
+		// A standalone publisher gets a private registry so test fixtures stay
+		// isolated; other services fall back to defaultMRLocks instead. The
+		// runtime always injects its shared registry, which every other service
+		// receives too, so a bare construction that omits it can silently stop
+		// sharing the lock with those services.
 		mrLocks = &workflowLocks{}
 	}
 	return &Publisher{

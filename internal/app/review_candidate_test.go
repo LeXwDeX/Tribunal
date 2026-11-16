@@ -535,3 +535,58 @@ func TestCandidateMRClosedCompletesWithoutControlWrite(t *testing.T) {
 		t.Fatalf("closed MR enqueued review.run: %+v", run)
 	}
 }
+
+// panickingCandidateStore panics inside the candidate activation lock window.
+// The job worker recovers panics and keeps running, so the shared MR lock must
+// be released by defer instead of leaking its registry entry.
+type panickingCandidateStore struct {
+	ReviewStore
+	activations int
+}
+
+func (s *panickingCandidateStore) ActivateReviewCandidate(context.Context, store.ReviewCandidateActivation) (string, int64, error) {
+	s.activations++
+	panic("activation failed unexpectedly")
+}
+
+// TestCandidateActivationPanicReleasesMRLock recovers from a panic raised while
+// the per-MR lock is held and proves the same merge request is lockable again
+// (#475).
+func TestCandidateActivationPanicReleasesMRLock(t *testing.T) {
+	ctx := context.Background()
+	f := newReviewFixture(t, reviewTestHead)
+	candidate, result := f.sendMergeRequestWebhook(t, f.repoConfigWebhook(t), nil)
+	if !result.Accepted || candidate.Kind != "review.candidate" {
+		t.Fatalf("candidate = %+v job=%+v", result, candidate)
+	}
+	claimed, err := f.db.Claim(ctx, "candidate-panic", []string{"review.candidate"}, time.Minute)
+	if err != nil || claimed == nil || claimed.ID != candidate.ID {
+		t.Fatalf("claim = %+v, %v", claimed, err)
+	}
+	panicking := &panickingCandidateStore{ReviewStore: f.service.store}
+	f.service.store = panicking
+	func() {
+		defer func() {
+			if recovered := recover(); recovered == nil {
+				t.Fatal("candidate activation did not panic")
+			}
+		}()
+		_ = f.service.RunCandidate(ctx, &jobs.Job{
+			ID: claimed.ID, Kind: claimed.Kind, Payload: claimed.Payload,
+			MaxAttempts: claimed.MaxAttempts, LeaseOwner: claimed.LeaseOwner, Attempts: claimed.Attempts,
+		})
+	}()
+	if panicking.activations != 1 {
+		t.Fatalf("activation calls = %d, want 1", panicking.activations)
+	}
+	if refs := f.publisher.mrLockRefs(42, 7); refs != 0 {
+		t.Fatalf("MR lock refs = %d after a panic, want 0", refs)
+	}
+	lockCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	unlock, err := f.publisher.mrLocks.lock(lockCtx, reviewMRLockKey(42, 7))
+	if err != nil {
+		t.Fatalf("MR lock stayed held after a panic: %v", err)
+	}
+	unlock()
+}
