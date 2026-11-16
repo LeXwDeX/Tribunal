@@ -845,9 +845,8 @@ func validateDiscussionID(id string) error {
 
 // AddDiscussionNote appends a note to an existing merge request discussion
 // thread. Unlike CreateMRNote, the reply stays inside the thread instead of
-// starting a new top-level note. The returned Note leaves DiscussionID empty
-// because the notes API does not report it; the caller already knows which
-// discussion it posted to.
+// starting a new top-level note. The returned Note carries the supplied
+// discussion ID, which the response itself cannot report.
 func (c *Client) AddDiscussionNote(ctx context.Context, token string, projectID, mrIID int64, discussionID, body string) (*Note, error) {
 	if !positiveIDs(projectID, mrIID) {
 		return nil, errors.New("gitlab: invalid project or merge request ID")
@@ -875,5 +874,8 @@ func (c *Client) AddDiscussionNote(ctx context.Context, token string, projectID,
 	if mapped == nil || mapped.ID <= 0 {
 		return nil, &Error{Op: "add_discussion_note"}
 	}
+	// The note was just posted into this thread, so the caller-supplied ID is
+	// authoritative even though the response body omits it.
+	mapped.DiscussionID = discussionID
 	return mapped, nil
 }

@@ -200,6 +200,9 @@ func TestCreateDiscussionSendsPosition(t *testing.T) {
 		discussion.Notes[0].Position.NewLine != 11 {
 		t.Fatalf("discussion = %+v", discussion)
 	}
+	if discussion.Notes[0].DiscussionID != discussion.ID {
+		t.Fatalf("note DiscussionID = %q, want the discussion ID %q", discussion.Notes[0].DiscussionID, discussion.ID)
+	}
 	if body.Body != "found a bug" || body.Position.BaseSHA != sha("a") || body.Position.PositionType != "text" ||
 		body.Position.OldLine != 11 || body.Position.NewLine != 11 || body.Position.OldPath != "a.go" {
 		t.Fatalf("request body = %+v", body)

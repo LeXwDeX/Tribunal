@@ -3,6 +3,7 @@ package gitlab
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -45,7 +46,7 @@ func TestAddDiscussionNotePostsInsideThread(t *testing.T) {
 		t.Fatalf("AddDiscussionNote: %v", err)
 	}
 	if note == nil || note.ID != 31 || note.Body != "已重审" || note.AuthorID != 9 ||
-		note.AuthorUsername != "tribunal-bot" || !note.Resolvable {
+		note.AuthorUsername != "tribunal-bot" || !note.Resolvable || note.DiscussionID != discussion {
 		t.Fatalf("note = %+v", note)
 	}
 	if sentBody != "已重审\n&#47;close" {
@@ -122,6 +123,48 @@ func TestAddDiscussionNoteMapsUpstreamStatus(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestAddDiscussionNoteEmptyResponseFails checks the defensive branch for a
+// successful response that carries no usable note.
+func TestAddDiscussionNoteEmptyResponseFails(t *testing.T) {
+	client := newExtraClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{}`)
+	})
+	note, err := client.AddDiscussionNote(context.Background(), "token", 42, 7, sha("d"), "x")
+	var opErr *Error
+	if note != nil || !errors.As(err, &opErr) || opErr.Op != "add_discussion_note" || opErr.Status != 0 {
+		t.Fatalf("note = %+v, err = %v", note, err)
+	}
+}
+
+// TestAddDiscussionNoteDiscussionIDLengthBoundary checks that the maximum
+// accepted discussion ID length is 255 and that one more byte is rejected
+// before any request.
+func TestAddDiscussionNoteDiscussionIDLengthBoundary(t *testing.T) {
+	longest := strings.Repeat("a", 255)
+	tooLong := strings.Repeat("a", 256)
+	var requests atomic.Int32
+	client := newExtraClient(t, func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if r.URL.Path != "/api/v4/projects/42/merge_requests/7/discussions/"+longest+"/notes" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":32,"body":"ok","author":{"id":9,"username":"bot"}}`)
+	})
+
+	note, err := client.AddDiscussionNote(context.Background(), "token", 42, 7, longest, "x")
+	if err != nil || note == nil || note.ID != 32 || note.DiscussionID != longest {
+		t.Fatalf("255-char discussion ID: note = %+v, err = %v", note, err)
+	}
+	if _, err := client.AddDiscussionNote(context.Background(), "token", 42, 7, tooLong, "x"); err == nil {
+		t.Fatal("256-char discussion ID accepted")
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("requests = %d, want 1", requests.Load())
 	}
 }
 
