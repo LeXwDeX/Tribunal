@@ -87,7 +87,7 @@
 - 评审：正确性 + 对抗安全双评审二轮无 P1；11 项 P2/P3 修复均带回归（共享失效文案、scope 预检、CLI 零 token、config 变量名过滤、枚举 oracle 统一、Rewrap 哨兵、共享 Validate、前端展示、健康探针 403/并发/取消/TTL、部署文档）。组合 A 的凭据边界复审提出 1 个 P2（启动追赶扫描用评审凭据列 hook，403 误记为 provisioning 被拒）和 6 个 P3，修复轮 `28d3e6c` 闭合并经红→绿验证；provisioning 凭据只流向 hook 生命周期与注册代建，评审读写零接触，日志/API/前端/dist/文档无明文，`DeniedEnv` 变异探针有效。
 - 回归覆盖：共享/项目级 token 优先级与零哨兵回退；URL-only 注册的 bot ≥ Reporter、注册人 ≥ Reporter、trusted 旁路与失败前置；共享 + `auto_webhook=true` 的 provisioning 预检；`auto_webhook` 省略默认 true；项目详情/列表/注册响应 `shared_credential`；`/api/v1/me` 能力位；settings 健康状态枚举与 5 分钟缓存；config API 只暴露 `bot_token_configured` / `provisioning_token_configured` 且过滤变量名；共享模式 commit status 跳过；CLI 共享模式省略 `--token-env`。
 - 已知限制：共享模式强制跳过 commit status；共享凭据失效是平台级事件，不逐项目写 `webhook_state=failed`；健康为 5 分钟懒缓存，无后台监控，provisioning 只有「是否配置」布尔；共享自动建 hook 依赖 provisioning，`auto_webhook=false` 注册后启用/重建仍需 provisioning；已认证注册/校验端点可消耗 GitLab 配额，限流与预检短 TTL 缓存留后续 Issue；共享 bot 需 `api` + `read_repository`，provisioning 需 `api` + 项目 Maintainer；个人命名空间项目需逐项目加 Reporter。
-- 本轮未记录真实 GitLab 上的零 token 注册、共享 bot 评审与 provisioning 代建 hook 验收，待 dev-110 验收（见文末占位）。
+- 本轮未记录真实 GitLab 上的零 token 注册、共享 bot 评审与 provisioning 代建 hook 验收，待开发环境验收（见文末占位）。
 
 ## MR 讨论 @ 唤醒与线程内回执验证（#477，PR #480 / #481）
 
@@ -101,7 +101,7 @@
 - 最终 head `bcf8806`（合并 `8caad16`）。`go build ./...`、`go vet ./...`、gofmt 通过；`go test -race -count=1`：app 434.447s、server 174.289s、config 4.525s，全部 ok。自建 Linux CI（run `20261116T191304-bcf88066ea7b`）：go / web / docker 全部 PASS，语句覆盖率 81.97%（33298/40621），耗时 533s，RESULT PASS。
 - 独立评审（正确性 + 对抗自触发/解析绕过）：首轮无 P1、1 个 P2（超线性剥离可拖垮 ingress）+ 7 个 P3；加固轮 `bcf8806` 全部修复后聚焦复核无 P1/P2 残留。实测 128 KiB 上限内最坏扫描 5.31ms，超限 5 MiB 短路 83ns/零分配（900ms 预算余量超过 150 倍）；变异探针证明关键测试能挡回归。
 - 回归覆盖：mention 触发与 `discussion_id` 透传、编辑不触发、围栏/缩进/行内代码/链接/裸 URL/autolink/用户名前后缀不触发、`bot_usernames` 空禁用、作者 trim、本服务 marker 不自触发、第三方 bot 放行、门槛配置与非法值、线程内 `AddDiscussionNote` 端点断言、重试原地更新、显式线程缺失/已删除回落、旧 payload replay、回复持锁。
-- 已知限制：真实 CE 19.5 Note Hook 的 `discussion_id` 与 `/notes` 可见的线程回复待 dev-110 实机确认；升级前顶层回执重放可能迁移一次位置；worker 侧过滤只用项目设置，仓库 `.gitlab-review.yml` 覆写（`skip_draft` / `labels_exclude`）的最终过滤仍发生在 `review.run`，可能 accepted 后置 stale（文档已写明）；缩进代码判定对 CommonMark 续行偏保守，只会漏触发，无自触发风险；`ResolveDiscussion` 的 discussionID 校验宽严与 `AddDiscussionNote` 不一致，留独立 Issue。
+- 已知限制：真实 CE 19.5 Note Hook 的 `discussion_id` 与 `/notes` 可见的线程回复待开发环境实机确认；升级前顶层回执重放可能迁移一次位置；worker 侧过滤只用项目设置，仓库 `.gitlab-review.yml` 覆写（`skip_draft` / `labels_exclude`）的最终过滤仍发生在 `review.run`，可能 accepted 后置 stale（文档已写明）；缩进代码判定对 CommonMark 续行偏保守，只会漏触发，无自触发风险；`ResolveDiscussion` 的 discussionID 校验宽严与 `AddDiscussionNote` 不一致，留独立 Issue。
 
 ## 固定 GitLab 身份规程验证（#478，PR #483）
 
@@ -110,7 +110,7 @@
 - 事实核对：service account、PAT 代发、头像、成员、用户级 OAuth 应用、block 用户的端点与后果按 GitLab 19.5.5 官方文档与 v19.5.5-ee 源码核实（Auditor 属 EE Premium/Ultimate，custom roles 属 EE Ultimate，hook API 需 Maintainer，Reporter 可读与评论）；5 个官方链接实测 HTTP 200。公开文档 diff 复查无内网 IP、域名、主机别名、内部目录、实例 ID 或凭据值。
 - 本 PR 只写规程与台账，不执行任何 GitLab 写操作；实际收敛动作已在用户授权下另行执行，具体账号/应用 ID 与回读结果只记内部台账，公开文档不写实例值。
 
-## dev-110 验收（#484）
+## 开发环境验收（#484）
 
 待补。
 
