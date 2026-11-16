@@ -54,6 +54,10 @@ func TestTokenRejectedTextsNameSharedCredential(t *testing.T) {
 			t.Fatalf("shared health text for %d = %q", status, message)
 		}
 	}
+	shared403 := tokenRejectedHealthMessage(403, true)
+	if !strings.Contains(shared403, "Reporter") || strings.Contains(shared403, "Maintainer") {
+		t.Fatalf("shared 403 text must describe the Reporter threshold: %q", shared403)
+	}
 	projectMessage := tokenRejectedHealthMessage(401, false)
 	if !strings.Contains(projectMessage, "project token") {
 		t.Fatalf("project health text = %q", projectMessage)
@@ -196,8 +200,136 @@ func TestRegisterProjectLookupDenialIsIndistinguishable(t *testing.T) {
 // shared-bot fake for hook lookups.
 type catchUpSharedAPI struct{ *sharedBotAPI }
 
-func (f *catchUpSharedAPI) ListOpenMergeRequests(context.Context, string, int64, int, time.Time) ([]gitlab.MergeRequest, error) {
+func (f *catchUpSharedAPI) ListOpenMergeRequests(_ context.Context, token string, _ int64, _ int, _ time.Time) ([]gitlab.MergeRequest, error) {
+	f.use("ListOpenMergeRequests", token)
 	return nil, nil
+}
+
+func TestStartupScanReconcilesHookWithProvisioning(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	api := newSharedBotAPI()
+	configureSharedBot(api)
+	_, saved := registerSharedWithHook(t, ctx, st, api)
+	if saved.HookID == nil {
+		t.Fatal("shared project has no hook id")
+	}
+	service := &CatchUpService{
+		store:    st,
+		webhooks: &WebhookService{store: st},
+		gitlab:   &catchUpSharedAPI{sharedBotAPI: api},
+		cipher:   newTestCipher(t),
+		tokens:   newProjectTokenResolver(newTestCipher(t), sharedBotToken).WithProvisioning(provisioningToken),
+		logger:   discardLogger(),
+		now:      time.Now,
+	}
+
+	checked, enqueued, outcome := service.scanProject(ctx, 42, 1)
+	if outcome != catchUpScanned || checked != 0 || enqueued != 0 {
+		t.Fatalf("scan = %d/%d/%d", checked, enqueued, outcome)
+	}
+	if tokens := api.usedTokens("ListProjectHooks"); len(tokens) != 1 || tokens[0] != provisioningToken {
+		t.Fatalf("startup hook list tokens = %v, want provisioning", tokens)
+	}
+	if tokens := api.usedTokens("ListOpenMergeRequests"); len(tokens) != 1 || tokens[0] != sharedBotToken {
+		t.Fatalf("review listing tokens = %v, want the shared bot", tokens)
+	}
+}
+
+func TestStartupScanWithoutProvisioningLeavesHookHealthAlone(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	api := newSharedBotAPI()
+	configureSharedBot(api)
+	_, saved := registerSharedWithHook(t, ctx, st, api)
+	if saved.HookID == nil {
+		t.Fatal("shared project has no hook id")
+	}
+	service := &CatchUpService{
+		store:    st,
+		webhooks: &WebhookService{store: st},
+		gitlab:   &catchUpSharedAPI{sharedBotAPI: api},
+		cipher:   newTestCipher(t),
+		tokens:   newProjectTokenResolver(newTestCipher(t), sharedBotToken),
+		logger:   discardLogger(),
+		now:      time.Now,
+	}
+
+	if _, _, outcome := service.scanProject(ctx, 42, 1); outcome != catchUpScanned {
+		t.Fatalf("outcome = %d", outcome)
+	}
+	if calls := api.callCount("ListProjectHooks"); calls != 0 {
+		t.Fatalf("startup scan listed hooks without provisioning: %d", calls)
+	}
+	after, err := st.GetProject(ctx, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.WebhookState != saved.WebhookState || after.WebhookError != saved.WebhookError {
+		t.Fatalf("hook health changed without provisioning: %+v -> %+v", saved, after)
+	}
+}
+
+// reviewCredentialFailureStore fails any review-credential lookup. Hook health
+// reconciliation must not depend on it.
+type reviewCredentialFailureStore struct {
+	*sqlite.Store
+	getProjectCalls int
+}
+
+func (s *reviewCredentialFailureStore) GetProject(context.Context, int64) (*store.Project, error) {
+	s.getProjectCalls++
+	return nil, errors.New("review credential unavailable")
+}
+
+func TestReconcileHookHealthDoesNotRequireReviewCredential(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	api := newSharedBotAPI()
+	configureSharedBot(api)
+	_, saved := registerSharedWithHook(t, ctx, st, api)
+	if saved.HookID == nil {
+		t.Fatal("shared project has no hook id")
+	}
+	broken := &reviewCredentialFailureStore{Store: st}
+	service := &CatchUpService{
+		store:    st,
+		webhooks: &WebhookService{store: broken},
+		gitlab:   &catchUpSharedAPI{sharedBotAPI: api},
+		cipher:   newTestCipher(t),
+		tokens:   newProjectTokenResolver(newTestCipher(t), sharedBotToken).WithProvisioning(provisioningToken),
+		logger:   discardLogger(),
+	}
+
+	service.ReconcileHookHealth(ctx)
+	if broken.getProjectCalls != 0 {
+		t.Fatalf("hook health resolved a review credential %d times", broken.getProjectCalls)
+	}
+	if tokens := api.usedTokens("ListProjectHooks"); len(tokens) != 1 || tokens[0] != provisioningToken {
+		t.Fatalf("hook list tokens = %v, want provisioning", tokens)
+	}
+}
+
+func TestSharedHookCredentialConfigurationErrorIsNotInternal(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	cipher := newTestCipher(t)
+	seedProject(t, st, cipher, 42, "whsec", "{}", "default")
+	before, err := st.GetProject(ctx, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := st.RewrapProjectSecrets(ctx, 42, before.TokenEnc, []byte{}, before.WebhookSecretEnc, before.WebhookSecretEnc); err != nil || !ok {
+		t.Fatalf("convert to shared sentinel = %v, %v", ok, err)
+	}
+	api := newSharedBotAPI()
+	service := newSharedBotProjectServiceWithProvisioning(t, st, api, "", provisioningToken, nil)
+
+	_, err = service.CreateWebhook(ctx, 42)
+	assertAppError(t, err, "validation_failed", "shared_bot_credential")
+	if api.callCount("ListProjectHooks") != 0 {
+		t.Fatalf("hook lifecycle ran without a shared credential: %v", api.tokenUses)
+	}
 }
 
 func TestReconcileHookHealthSkipsSharedProjectWithoutProvisioning(t *testing.T) {

@@ -304,7 +304,7 @@ const (
 	tokenRejected401Message            = "project token was rejected by GitLab (HTTP 401); replace the project token"
 	tokenRejected403Message            = "project token was rejected by GitLab (HTTP 403); check its scopes and role"
 	sharedCredentialRejected401Message = "shared bot credential was rejected by GitLab (HTTP 401); update the credential referenced by gitlab.bot_token_env and restart the service"
-	sharedCredentialRejected403Message = "shared bot credential was rejected by GitLab (HTTP 403); check its scopes and the shared bot's Maintainer role"
+	sharedCredentialRejected403Message = "shared bot credential was rejected by GitLab (HTTP 403); check its scopes and that the shared bot has at least Reporter on the project"
 )
 
 // tokenRejectedHealthMessage returns the stored health text for a rejected
@@ -388,7 +388,7 @@ func (s *ReviewService) noteTokenRejected(ctx context.Context, token string, sha
 			return
 		}
 	}
-if err := s.createFallbackMRNote(ctx, token, projectID, mrIID, generation, headSHA, note); err != nil {
+	if err := s.createFallbackMRNote(ctx, token, projectID, mrIID, generation, headSHA, note); err != nil {
 		s.logger.Warn("token rejection note failed", "project_id", projectID, "mr_iid", mrIID, "error_class", errclass.Of(err))
 	}
 }

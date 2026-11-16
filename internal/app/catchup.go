@@ -205,7 +205,13 @@ func (s *CatchUpService) scanProject(ctx context.Context, projectID int64, budge
 	if !usable {
 		return 0, 0, catchUpSkipped
 	}
-	s.reconcileHookHealth(ctx, project, token)
+	// Hook health is a provisioning-credential operation. The review token is
+	// a Reporter-level shared bot and cannot list hooks; using it here wrote a
+	// false "provisioning rejected" failure. The review credential is only for
+	// listing merge requests below.
+	if hookToken, err := resolveHookToken(s.tokens, s.cipher, project); err == nil {
+		s.reconcileHookHealth(ctx, project, hookToken)
+	}
 	if _, err := ResolveSettings(project.Settings, s.webhooks.reviewDefaults); err != nil {
 		s.logger.Warn("catch-up skipped project with invalid settings", "project_id", projectID)
 		return 0, 0, catchUpSkipped
@@ -274,25 +280,22 @@ func (s *CatchUpService) ReconcileHookHealth(ctx context.Context) {
 		}
 		return
 	}
-	for _, project := range projects {
+	for i := range projects {
 		if ctx.Err() != nil {
 			return
 		}
+		project := &projects[i]
 		if !project.Enabled || project.HookID == nil {
 			continue
 		}
-		loaded, _, usable := s.projectToken(ctx, project.ID)
-		if !usable {
-			continue
-		}
-		token, err := resolveHookToken(s.tokens, s.cipher, loaded)
+		// Only the hook credential matters here. A missing or unusable review
+		// credential must not suppress hook health reconciliation when
+		// provisioning is valid.
+		token, err := resolveHookToken(s.tokens, s.cipher, project)
 		if err != nil {
-			// Shared projects without the platform provisioning credential have
-			// no hook lifecycle to reconcile; review credential failures are
-			// already handled by projectToken above.
 			continue
 		}
-		s.reconcileHookHealth(ctx, loaded, token)
+		s.reconcileHookHealth(ctx, project, token)
 	}
 }
 

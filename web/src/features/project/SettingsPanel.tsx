@@ -290,7 +290,7 @@ export function SettingsPanel({ project }: { project: Project }) {
             <div><dt>启用</dt><dd>{project.enabled ? '启用' : '停用'}</dd></div>
             <div><dt>评审语言</dt><dd>{String(project.settings?.language || '继承平台默认')}</dd></div>
             <div><dt>跳过 Draft</dt><dd>{project.settings?.skip_draft === undefined ? '继承平台默认' : project.settings.skip_draft ? '启用' : '禁用'}</dd></div>
-            <div><dt>commit status</dt><dd>{project.settings?.commit_status === undefined ? '继承平台默认' : project.settings.commit_status ? '启用' : '禁用'}</dd></div>
+            <div><dt>commit status</dt><dd>{project.shared_credential ? '共享模式不支持' : project.settings?.commit_status === undefined ? '继承平台默认' : project.settings.commit_status ? '启用' : '禁用'}</dd></div>
             <div><dt>webhook</dt><dd><Badge tone={webhookTone(webhookState)}>{labelForWebhookState(webhookState)}</Badge></dd></div>
             <div><dt>托管方</dt><dd>{webhookManagedByLabel(project.webhook_managed_by, project.hook_id)}</dd></div>
             {project.hook_id ? <div><dt>hook</dt><dd className="mono">#{project.hook_id}</dd></div> : null}
@@ -331,7 +331,17 @@ export function SettingsPanel({ project }: { project: Project }) {
               />
             </Field>
             <BoolSetting label="跳过 Draft MR" value={draft.skip_draft} onChange={(value) => updateDraft('skip_draft', value)} />
-            <BoolSetting label="BLOCKING 时写 commit status" value={draft.commit_status} onChange={(value) => updateDraft('commit_status', value)} />
+            <div className={ui.stack}>
+              <BoolSetting
+                label="BLOCKING 时写 commit status"
+                value={draft.commit_status}
+                disabled={project.shared_credential}
+                onChange={(value) => updateDraft('commit_status', value)}
+              />
+              {project.shared_credential ? (
+                <span className="small muted">共享模式不支持 commit status：共享 bot 只有 Reporter 权限，评审结果仍以 MR 注记与行内讨论发布。</span>
+              ) : null}
+            </div>
             <BoolSetting label="发布失败时写说明" value={draft.post_failure_note} onChange={(value) => updateDraft('post_failure_note', value)} />
             <BoolSetting label="显示模型署名" value={draft.show_model_attribution} onChange={(value) => updateDraft('show_model_attribution', value)} />
             <BoolSetting label="允许仓库内配置" value={draft.allow_repo_config} onChange={(value) => updateDraft('allow_repo_config', value)} />

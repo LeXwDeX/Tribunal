@@ -59,7 +59,7 @@ type RegisterInput struct {
 	// administrators manage every registered project, so they may register a
 	// project without joining it first; the static bootstrap bearer is also
 	// trusted because it has no GitLab identity to check. In shared-credential
-	// mode only the registrant check is skipped: the shared bot's Maintainer
+	// mode only the registrant check is skipped: the shared bot's Reporter
 	// check always runs, and its failure keeps the detailed field for a
 	// trusted caller.
 	TrustedPlatformAdmin bool
@@ -786,12 +786,16 @@ func validateProvisioningTokenInfo(info *gitlab.TokenInfo, now time.Time) error 
 }
 
 // hookToken resolves the stored project's webhook credential and converts a
-// missing provisioning configuration into the same actionable validation
-// error registration returns.
+// credential configuration gap into an actionable client error instead of an
+// internal 500.
 func (s *ProjectService) hookToken(project *store.Project) (string, error) {
 	token, err := resolveHookToken(s.tokens, s.cipher, project)
 	if errors.Is(err, ErrProvisioningCredentialUnavailable) {
 		return "", provisioningCredentialRequiredError()
+	}
+	if errors.Is(err, ErrSharedBotCredentialUnavailable) {
+		return "", validationError("shared bot credential is unavailable",
+			Detail{Field: "shared_bot_credential", Message: "configure gitlab.bot_token_env and restart the service"})
 	}
 	if err != nil {
 		return "", internalError()
