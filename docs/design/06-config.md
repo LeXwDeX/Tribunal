@@ -22,7 +22,8 @@ gitlab:
   url: "https://gitlab.example.internal"
   request_timeout: 30s
   max_concurrency: 16               # 对 GitLab API 的总并发
-  bot_usernames: []                 # 额外需要忽略的 bot 用户名（项目 bot 会自动识别；共享 bot 用户名也会在启动时补充）
+  bot_usernames: []                 # @ 唤醒目标 + 自触发过滤名单；元素 trim，空列表禁用 @ 唤醒
+  mention_min_access_level: 30      # @ 唤醒的权限门槛；10/15/20/30/40/50，斜杠命令仍固定 30
   bot_token_env: TRIBUNAL_BOT_TOKEN # 可选：实例级共享 bot 凭据所在的环境变量名；空 = 仅用项目级 token
   provisioning_token_env: TRIBUNAL_PROVISIONING_TOKEN # 可选：共享模式下代建/更新/删除 webhook 的凭据；空 = 共享项目只能手工配置 webhook
   catch_up:                         # 启动恢复后一次性补评停机期间错过的 MR head（#362）
@@ -163,7 +164,20 @@ review_defaults:                    # 项目设置的默认值（见 §3）
 
 需要授予平台管理员时，先向用户确认实际 GitLab 数字用户 ID 和本次授权，再填写 `id:<GitLab 用户 ID>`；修改后重启生效。用户名写法已弃用，将在下一个大版本移除。
 
-`gitlab.bot_token_env` 为空（默认）时凭据完全按项目解析；非空时必须指向存在且非空的环境变量，值为 GitLab PAT。启用后，注册时留空项目 token 的项目以零长度 token 哨兵落库，评审的读取、注释与行内 discussion 回退到该共享 bot，项目级 token 仍优先。共享 bot 只需在项目上至少 Reporter（读代码/MR/diff、发 note 与行内 discussion、resolve 自己的线程）；每个项目的注册仍需注册人本人至少 Reporter。Webhook 的 create/update/delete/list/get 由 `gitlab.provisioning_token_env` 指向的 provisioning 凭据代办，该凭据需要 `api` scope 与项目 Maintainer；共享模式 + `auto_webhook=true` 时它必须已配置且有效，`auto_webhook=false` 时不需要。Provisioning 凭据不用于评审读写。共享模式下 `commit_status` 被强制降级为关闭（Reporter 无 `create_commit_status`），评审结果仍以 MR 注记与行内 discussion 发布；项目级 token 模式不受影响。两个凭据的值都只从环境变量读取，不写入配置、数据库、API 响应或日志。`gitlab.bot_usernames` 建议显式包含共享 bot 用户名；启动时也会通过 GitLab 解析一次并补充。共享凭据健康状态通过 `GET /api/v1/settings` 的 `gitlab.shared_bot_credential_state`（`ok` / `expired` / `insufficient_scope` / `unreachable`）懒检查暴露，缓存 5 分钟，响应不含 token 值或其片段；同视图的 `gitlab.provisioning_credential` 布尔仅表示 provisioning 凭据是否已配置。
+### GitLab 凭据与 @ 唤醒字段
+
+| 字段（YAML 与 JSON 同名） | 默认 | 语义 |
+|---|---|---|
+| `gitlab.bot_usernames` | `[]` | 同时用作 **@ 唤醒目标**和**自触发过滤名单**。各使用方在构造时去掉元素首尾空白；纯空白项在启动校验时报 `gitlab.bot_usernames[<i>] must not be blank`。@ 目标匹配不区分大小写；注记作者过滤按 trim 后的用户名精确匹配。空列表禁用 @ 唤醒（fail-safe），斜杠命令不受影响。 |
+| `gitlab.mention_min_access_level` | `30` | 仅约束 @ 唤醒作者的 GitLab 项目访问级别；斜杠命令始终要求 Developer（30）。只接受 `10`（Guest）、`15`（Planner）、`20`（Reporter）、`30`（Developer）、`40`（Maintainer）、`50`（Owner），其他值启动校验失败。程序化构造时传 0 运行期回退为 30。 |
+| `gitlab.bot_token_env` | 空 | 实例级共享 bot 凭据所在的**环境变量名**，不是 token 值。空 = 仅使用项目级 token。 |
+| `gitlab.provisioning_token_env` | 空 | 共享模式下代建/更新/删除项目 webhook 的凭据变量名。空 = 共享项目只能手工配置 webhook；它不是共享模式的开关，单独配置不会让无项目 token 的项目可评审。 |
+
+`gitlab.bot_token_env` 为空（默认）时凭据完全按项目解析；非空时必须指向存在、非空且非纯空白的环境变量，值为 GitLab PAT。启用后，注册时留空项目 token 的项目以零长度 token 哨兵落库，评审的读取、注释与行内 discussion 回退到该共享 bot，项目级 token 仍优先。共享 bot 只需在项目上至少 Reporter（读代码/MR/diff、发 note 与行内 discussion、resolve 自己的线程）；每个项目的注册仍需注册人本人至少 Reporter（平台管理员与静态 bootstrap Bearer 除外）。Webhook 的 create/update/delete/list/get 由 `gitlab.provisioning_token_env` 指向的 provisioning 凭据代办，该凭据需要 `api` scope 与项目 Maintainer；共享模式 + `auto_webhook=true` 时它必须已配置且有效，`auto_webhook=false` 时不需要。Provisioning 凭据不用于评审读写。共享模式下 `commit_status` 被强制降级为关闭（Reporter 无 `create_commit_status`），评审结果仍以 MR 注记与行内 discussion 发布；项目级 token 模式不受影响。
+
+两个凭据字段都只保存**变量名**：变量名必须符合 `[A-Za-z_][A-Za-z0-9_]*`，对应变量必须存在且非空，否则启动失败；错误信息只含字段名和变量名，不含变量值。token 值只存在于进程环境，不写入配置、数据库、API 响应或日志，并加入 stdio MCP 子进程的 `DeniedEnv` 拒绝继承列表。`gitlab.bot_usernames` 建议显式包含共享 bot 用户名；共享模式启动时也会通过 GitLab 解析一次并追加，解析失败只告警，需要人工补写。共享凭据健康状态通过 `GET /api/v1/settings` 的 `gitlab.shared_bot_credential_state`（`ok` / `expired` / `insufficient_scope` / `unreachable`）懒检查暴露，缓存 5 分钟，响应不含 token 值或其片段；同视图的 `gitlab.provisioning_credential` 布尔仅表示 provisioning 凭据是否已配置。
+
+`gitlab.bot_usernames` 同时决定 @ 唤醒是否可用：Note Hook 正文首行不是 `/review` 时，ingress 查找 `@<列表元素>`，命中后入队 `review.command`（`trigger=mention`、`command=run`、项目默认档位、`full=false`）并透传源注记的 `discussion_id`。匹配前剥离围栏代码块、缩进代码、行内代码、autolink、Markdown 链接目标与裸 URL；正文超过 128 KiB 按未提及处理；编辑注记（`action != create`）不触发。第三方 bot 作者可触发；`bot_usernames` 中的账号和本服务自己写的 command-reply/summary/legacy status/finding 标记注记被忽略。mention 与自动触发一样经过项目 `skip_draft`、标签和目标分支过滤，被排除时在线程内回 `kind=filtered` 回执且不创建评审；作者权限不足回 `kind=denied`。完整流程和回执格式见 [05 流程 · F3](05-flows.md#f3-评论命令与--唤醒)。
 
 `server.write_timeout` 同时约束 MCP 连接测试的 handler 预算：测试超时取 `min(30s, 75% × write_timeout)`，为响应写出保留 25% 余量。默认 60 秒仍对应 30 秒测试上限；把 `write_timeout` 设到 40 秒以下会按比例缩短测试窗口（例如 30 秒配置对应 22.5 秒），过小的值会让连接、握手与工具列表来不及完成。该预算只影响测试端点，运行期 MCP 调用仍由各服务器的 `x-review.call_timeout` 控制。
 
@@ -306,6 +320,8 @@ type BudgetConfig struct {
 - `budget.max_nodes` 在 1 到 100 之间；`budget.deadline` 和 `budget.max_turns` 不能为负，0 分别表示不设工作流 deadline 和不限制每节点模型请求数。
 - `blocks` 中的 `mcp_tools` 名称格式为 `mcp__<server>__<tool>`，且 server 在 MCP 配置中存在（工具是否存在在启动后探测，不存在只告警）。
 - `secrets.master_key_env` 解码后必须为 32 字节。
+- `gitlab.bot_usernames` 的每个元素去掉首尾空白后必须非空；纯空白项报字段级错误。列表为空是合法值，表示禁用 @ 唤醒。
+- `gitlab.mention_min_access_level` 只能是 `10`、`15`、`20`、`30`、`40`、`50` 之一；省略时内置默认为 30。
 - `gitlab.bot_token_env` 为空表示不启用共享凭据；非空时必须是合法的环境变量名，且对应变量存在、非空、非纯空白。错误信息只包含字段名和变量名，不包含变量值。
 - `gitlab.provisioning_token_env` 遵循相同规则；为空表示共享项目只能手工配置 webhook。它不是启用共享模式的开关，单独配置不会让无项目 token 的项目可评审。
 
@@ -505,7 +521,7 @@ default_extensions:
 - **文件显式声明优先**：配置文件 `blocks` 显式声明某个块时，该块的默认授权跳过；数据库平台行释放后，以文件为准。释放条件见[文件声明与数据库绑定](#文件声明与数据库绑定)。即使 `default_extensions` 已清空，这条规则也不变。
 - **始终启用**：内置 Skill 和 MCP 服务器始终启用；升级、重启和内置配置同步都不会改变这一点。历史数据库中已被禁用的内置行会在下次启动时恢复启用。
 - **生效时机**：数据库中的扩展和绑定写操作成功后立即失效进程内缓存，下一次解析使用新配置，无需重启；平台 scope 失效全部项目，项目 scope 只失效该项目，失败的写操作不失效。配置文件中的 `default_extensions`、`blocks`、`mcp.config` 和 Skill 目录仍在启动时读取，修改后需要重启。管理员从某个块解绑后，重启不会恢复。
-- `skills: []` 只是不再登记新的默认项，不删除已登记的扩展和绑定。配置文件和 `mcp.config` 是部署者特权入口；HTTP API 的自定义 MCP 新增/导入和自定义 Skill 创建（zip 上传，或复制服务端目录的高级选项）都仅平台管理员可用，项目 scope 需要项目已登记。Skill 创建使用运行时加载器相同的严格 manifest 校验，上传和目录登记的限制见 [HTTP API · 扩展](03-http-api.md#44-扩展mcp-skill块绑定)；控制台的新增/导入界面另行交付。
+- `skills: []` 只是不再登记新的默认项，不删除已登记的扩展和绑定。配置文件和 `mcp.config` 是部署者特权入口；HTTP API 的自定义 MCP 新增/导入和自定义 Skill 创建（zip 上传，或复制服务端目录的高级选项）都仅平台管理员可用，项目 scope 需要项目已登记。Skill 创建使用运行时加载器相同的严格 manifest 校验，上传和目录登记的限制见 [HTTP API · 扩展](03-http-api.md#44-扩展mcpskill块绑定)；控制台的新增/导入界面另行交付。
 - 登记或更新失败（例如工作区不可写）会让启动失败；登记失败不写台账，下次启动重试。
 
 #### 文件声明与数据库绑定
