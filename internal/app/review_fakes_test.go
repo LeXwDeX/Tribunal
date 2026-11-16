@@ -257,6 +257,23 @@ func (f *reviewGitLab) ListDiscussions(context.Context, string, int64, int64) ([
 	return out, nil
 }
 
+func (f *reviewGitLab) AddDiscussionNote(_ context.Context, _ string, _, _ int64, discussionID, body string) (*gitlab.Note, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nextNoteID++
+	note := gitlab.Note{ID: f.nextNoteID, Body: body, DiscussionID: discussionID}
+	if f.currentUser != nil {
+		note.AuthorID = f.currentUser.ID
+	}
+	for i := range f.discussions {
+		if f.discussions[i].ID == discussionID {
+			f.discussions[i].Notes = append(f.discussions[i].Notes, note)
+			break
+		}
+	}
+	return &note, nil
+}
+
 func (f *reviewGitLab) CreateDiscussion(_ context.Context, _ string, _, _ int64, d gitlab.NewDiscussion) (*gitlab.Discussion, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -416,10 +416,11 @@ func profileExplicit(payload reviewRunPayload) bool {
 }
 
 // reviewFilterReason applies draft, label, and branch filters to automatic
-// triggers only. Manual commands keep their existing bypass semantics.
+// triggers and to @-mention wake-ups. Manual slash commands keep their
+// existing bypass semantics.
 func reviewFilterReason(trigger string, mr *gitlab.MergeRequest, project *store.Project, settings config.ProjectSettings) string {
 	switch trigger {
-	case "mr_open", "mr_update", catchUpTrigger:
+	case "mr_open", "mr_update", catchUpTrigger, "mention":
 	default:
 		return ""
 	}

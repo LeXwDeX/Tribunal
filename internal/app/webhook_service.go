@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/config"
 	"github.com/LeXwDeX/tribunal/internal/errclass"
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
+	"github.com/LeXwDeX/tribunal/internal/review"
 	"github.com/LeXwDeX/tribunal/internal/secret"
 	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/internal/workspace"
@@ -68,6 +70,9 @@ type WebhookService struct {
 	profiles       map[string]config.ProfileConfig
 	reviewDefaults config.ProjectSettings
 	botUsernames   map[string]bool
+	// mentionTargets are the lowercased bot_usernames entries in configured
+	// order. An empty list disables @-mention wake-ups (fail-safe).
+	mentionTargets []string
 	logger         *slog.Logger
 	now            func() time.Time
 }
@@ -98,9 +103,18 @@ func NewWebhookService(cfg WebhookServiceConfig) (*WebhookService, error) {
 		now = time.Now
 	}
 	bots := make(map[string]bool, len(cfg.BotUsernames))
-	for _, name := range cfg.BotUsernames {
-		if name != "" {
-			bots[name] = true
+	var targets []string
+	seenTargets := make(map[string]bool, len(cfg.BotUsernames))
+	for _, raw := range cfg.BotUsernames {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+		bots[name] = true
+		lower := strings.ToLower(name)
+		if !seenTargets[lower] {
+			seenTargets[lower] = true
+			targets = append(targets, lower)
 		}
 	}
 	return &WebhookService{
@@ -110,6 +124,7 @@ func NewWebhookService(cfg WebhookServiceConfig) (*WebhookService, error) {
 		profiles:       cfg.Profiles,
 		reviewDefaults: cfg.ReviewDefaults,
 		botUsernames:   bots,
+		mentionTargets: targets,
 		logger:         logger,
 		now:            now,
 	}, nil
@@ -616,13 +631,39 @@ func (s *WebhookService) decideNote(project *store.Project, settings config.Proj
 	if user.ID <= 0 {
 		return nil, "bad_request"
 	}
+	command, profile, full, explicit, reason := parseCommand(attrs.Note, project.Profile, s.profiles)
+	if reason == "not_review_command" && s.mentionsBot(attrs.Note) {
+		// Mention wake-up. A third-party agent commonly authors notes through a
+		// bot token, so user.Bot alone must not drop it. Notes from this service
+		// are excluded by configured username and by the markers it writes; the
+		// worker's CurrentUser comparison is the final backstop.
+		if s.botUsernames[user.Username] {
+			return nil, "bot_note"
+		}
+		if isReviewServiceNoteBody(attrs.Note) {
+			return nil, "service_note"
+		}
+		return newJob("review.command", commandKey(project.ID, attrs.ID), map[string]any{
+			"project_id":       project.ID,
+			"mr_iid":           iid,
+			"note_id":          attrs.ID,
+			"author_id":        user.ID,
+			"author_username":  user.Username,
+			"author_bot":       user.Bot,
+			"command":          commandRun,
+			"profile":          project.Profile,
+			"profile_explicit": false,
+			"full":             false,
+			"trigger":          "mention",
+			"discussion_id":    attrs.DiscussionID,
+		}), ""
+	}
 	if user.Bot || s.botUsernames[user.Username] {
 		return nil, "bot_note"
 	}
 	if isCommandReplyBody(attrs.Note) {
 		return nil, "command_reply"
 	}
-	command, profile, full, explicit, reason := parseCommand(attrs.Note, project.Profile, s.profiles)
 	if reason != "" {
 		return nil, reason
 	}
@@ -638,6 +679,7 @@ func (s *WebhookService) decideNote(project *store.Project, settings config.Proj
 		"profile_explicit": explicit,
 		"full":             full,
 		"trigger":          "command",
+		"discussion_id":    attrs.DiscussionID,
 	}), ""
 }
 
@@ -699,6 +741,250 @@ func parseCommand(note, defaultProfile string, profiles map[string]config.Profil
 
 func isOpenState(state string) bool {
 	return state == "open" || state == "opened"
+}
+
+// mentionNoteLimit bounds the note body inspected for @-mentions. Any commenter
+// can post an arbitrarily large note without the webhook secret, so looking for
+// mentions above this size would let them spend the ingress CPU/memory budget.
+// An oversized note is treated as not mentioning the bot.
+const mentionNoteLimit = 128 << 10
+
+// isReviewServiceNoteBody reports whether this service wrote the note. A
+// mention must never wake the service from its own review text, which may
+// quote user content containing @names.
+func isReviewServiceNoteBody(body string) bool {
+	return isCommandReplyBody(body) ||
+		gitlab.HasSummaryMarker(body) ||
+		strings.HasPrefix(body, reviewLegacyStatusMarkerPrefix) ||
+		strings.HasPrefix(body, review.FindingMarkerPrefix)
+}
+
+// mentionsBot reports whether the note addresses one of the configured
+// bot_usernames. An empty list disables mention detection entirely, and an
+// oversized body is treated as not mentioning (see mentionNoteLimit).
+func (s *WebhookService) mentionsBot(body string) bool {
+	if len(s.mentionTargets) == 0 || len(body) > mentionNoteLimit {
+		return false
+	}
+	text := strings.ToLower(stripMentionNoise(body))
+	for _, target := range s.mentionTargets {
+		if containsMention(text, target) {
+			return true
+		}
+	}
+	return false
+}
+
+var (
+	autolinkRE = regexp.MustCompile(`<[^>\n]*>`)
+	linkDestRE = regexp.MustCompile(`\]\([^)\n]*\)`)
+	bareURLRE  = regexp.MustCompile(`(?i)https?://[^\s<>]+`)
+)
+
+// stripMentionNoise removes the regions where an @name is not an actual
+// mention: code blocks and spans, autolinks, Markdown link targets and bare
+// URLs. Code regions are replaced with a space instead of being deleted so two
+// text fragments cannot splice into a mention.
+func stripMentionNoise(body string) string {
+	text := stripInlineCode(stripCodeBlocks(body))
+	text = autolinkRE.ReplaceAllString(text, " ")
+	// Remove bare URLs before Markdown destinations so a URL containing
+	// parentheses or @ is consumed whole instead of exposing its tail.
+	text = bareURLRE.ReplaceAllString(text, " ")
+	text = linkDestRE.ReplaceAllString(text, "] ")
+	return text
+}
+
+// stripCodeBlocks removes fenced code blocks and 4-space (or tab) indented
+// code lines. It walks the note line by line without materialising a slice, so
+// memory and time stay linear in the note size. One newline is kept per source
+// line, including dropped lines, so kept fragments never splice together.
+func stripCodeBlocks(body string) string {
+	var out strings.Builder
+	out.Grow(len(body))
+	var (
+		fenceChar byte
+		fenceLen  int
+	)
+	for start := 0; start < len(body); {
+		lineEnd := strings.IndexByte(body[start:], '\n')
+		hasNewline := lineEnd >= 0
+		if hasNewline {
+			lineEnd += start
+		} else {
+			lineEnd = len(body)
+		}
+		line := body[start:lineEnd]
+		keep := false
+		if fenceChar != 0 {
+			if isFenceClose(line, fenceChar, fenceLen) {
+				fenceChar, fenceLen = 0, 0
+			}
+		} else if indentedCode(line) {
+			// Drop the line; its newline is still emitted below.
+		} else if run, ch := fenceOpen(line); run > 0 {
+			fenceChar, fenceLen = ch, run
+		} else {
+			keep = true
+		}
+		if keep {
+			out.WriteString(line)
+		}
+		if !hasNewline {
+			break
+		}
+		out.WriteByte('\n')
+		start = lineEnd + 1
+	}
+	return out.String()
+}
+
+// indentedCode reports a CommonMark indented code line: at least four leading
+// spaces, or any leading tab (a tab advances to a tab stop at column four).
+func indentedCode(line string) bool {
+	spaces := 0
+	for i := 0; i < len(line); i++ {
+		switch line[i] {
+		case ' ':
+			spaces++
+			if spaces >= 4 {
+				return true
+			}
+		case '\t':
+			return true
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+// fenceOpen reports an opening fence run. Lines with four or more leading
+// spaces are handled as indented code before this check.
+func fenceOpen(line string) (int, byte) {
+	offset := 0
+	for offset < len(line) && offset < 3 && line[offset] == ' ' {
+		offset++
+	}
+	if offset >= len(line) || (line[offset] != '`' && line[offset] != '~') {
+		return 0, 0
+	}
+	ch := line[offset]
+	run := 0
+	for offset+run < len(line) && line[offset+run] == ch {
+		run++
+	}
+	if run < 3 {
+		return 0, 0
+	}
+	return run, ch
+}
+
+func isFenceClose(line string, ch byte, min int) bool {
+	offset := 0
+	for offset < len(line) && offset < 3 && line[offset] == ' ' {
+		offset++
+	}
+	if offset >= len(line) || line[offset] != ch {
+		return false
+	}
+	run := 0
+	for offset+run < len(line) && line[offset+run] == ch {
+		run++
+	}
+	if run < min {
+		return false
+	}
+	return strings.TrimSpace(line[offset+run:]) == ""
+}
+
+// stripInlineCode replaces inline code spans with a single space. Delimiters
+// are paired in one linear pass: a run of N backticks closes the earliest
+// unpaired run of the same length. Backslash-escaped backticks are literal
+// text and do not delimit a span.
+func stripInlineCode(text string) string {
+	type span struct{ start, end int }
+	pending := make(map[int]int)
+	var spans []span
+	for i := 0; i < len(text); {
+		switch text[i] {
+		case '\\':
+			run := 1
+			for i+run < len(text) && text[i+run] == '\\' {
+				run++
+			}
+			if run%2 == 1 && i+run < len(text) && text[i+run] == '`' {
+				i += run + 1
+				continue
+			}
+			i += run
+		case '`':
+			run := 1
+			for i+run < len(text) && text[i+run] == '`' {
+				run++
+			}
+			if start, ok := pending[run]; ok {
+				spans = append(spans, span{start, i + run})
+				delete(pending, run)
+			} else {
+				pending[run] = i
+			}
+			i += run
+		default:
+			i++
+		}
+	}
+	if len(spans) == 0 {
+		return text
+	}
+	sort.Slice(spans, func(i, j int) bool { return spans[i].start < spans[j].start })
+	var out strings.Builder
+	out.Grow(len(text))
+	cursor := 0
+	for _, s := range spans {
+		if s.start < cursor {
+			if s.end > cursor {
+				cursor = s.end
+			}
+			continue
+		}
+		out.WriteString(text[cursor:s.start])
+		out.WriteByte(' ')
+		cursor = s.end
+	}
+	out.WriteString(text[cursor:])
+	return out.String()
+}
+
+// containsMention applies the boundary rule to an already lowercased note: the
+// byte before @ must not be a word byte, and the byte after the username must
+// not be a GitLab username byte (letters, digits, '_', '.' or '-').
+func containsMention(text, target string) bool {
+	needle := "@" + target
+	for offset := 0; offset+len(needle) <= len(text); {
+		idx := strings.Index(text[offset:], needle)
+		if idx < 0 {
+			return false
+		}
+		start := offset + idx
+		end := start + len(needle)
+		if (start == 0 || !isMentionLeadByte(text[start-1])) &&
+			(end == len(text) || !isMentionUsernameByte(text[end])) {
+			return true
+		}
+		offset = start + 1
+	}
+	return false
+}
+
+func isMentionLeadByte(b byte) bool {
+	return b == '_' || b >= '0' && b <= '9' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z'
+}
+
+// isMentionUsernameByte follows GitLab's username character set, so a trailing
+// dot or dash means a longer username rather than a sentence boundary.
+func isMentionUsernameByte(b byte) bool {
+	return isMentionLeadByte(b) || b == '.' || b == '-'
 }
 
 func isDraft(attrs gitlab.WebhookObjectAttributes, mr gitlab.WebhookMergeRequest) bool {

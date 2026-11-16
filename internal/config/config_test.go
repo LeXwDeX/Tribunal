@@ -29,6 +29,37 @@ func TestValidateDefaultConfigWithoutProviders(t *testing.T) {
 	}
 }
 
+func TestValidateMentionMinAccessLevel(t *testing.T) {
+	setRequiredEnv(t)
+	for _, level := range []string{"10", "15", "20", "30", "40", "50"} {
+		cfg := loadConfig(t, writeConfig(t, "config-"+level+".yaml", validGitLab+"  mention_min_access_level: "+level+"\n"))
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("mention_min_access_level %s: Validate() = %v", level, err)
+		}
+		if cfg.GitLab.MentionMinAccessLevel == 0 {
+			t.Fatalf("mention_min_access_level %s decoded to zero", level)
+		}
+	}
+	cfg := loadConfig(t, writeConfig(t, "config-bad.yaml", validGitLab+"  mention_min_access_level: 25\n"))
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "gitlab.mention_min_access_level") {
+		t.Fatalf("Validate() = %v, want gitlab.mention_min_access_level", err)
+	}
+}
+
+func TestValidateBotUsernamesRejectsBlankEntries(t *testing.T) {
+	setRequiredEnv(t)
+	cfg := loadConfig(t, writeConfig(t, "blank.yaml", validGitLab+"  bot_usernames: [\"  \"]\n"))
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "gitlab.bot_usernames[0]") {
+		t.Fatalf("Validate() = %v, want gitlab.bot_usernames[0]", err)
+	}
+	cfg = loadConfig(t, writeConfig(t, "padded.yaml", validGitLab+"  bot_usernames: [\" tribunal-bot \"]\n"))
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("padded non-blank username: Validate() = %v", err)
+	}
+}
+
 func TestCatchUpDefaultsAndDisable(t *testing.T) {
 	setRequiredEnv(t)
 	cfg := loadConfig(t, writeConfig(t, "config.yaml", validGitLab))

@@ -980,3 +980,330 @@ func TestCommandWorkerRecordsQueuedStatusAndReaction(t *testing.T) {
 		t.Fatalf("command worker wrote GitLab before the side-effect job: %+v", api.noteSnapshot())
 	}
 }
+
+func mentionCommandPayload(discussionID string) commandPayload {
+	payload := defaultCommandPayload(commandRun)
+	payload.Trigger = "mention"
+	payload.DiscussionID = discussionID
+	return payload
+}
+
+func newMentionCommandTestWorker(t *testing.T, api *fakeGitLab, st *commandFakeStore, bots []string, minAccess int, locks *workflowLocks) *CommandWorker {
+	t.Helper()
+	worker, err := NewCommandWorker(CommandWorkerConfig{
+		Store:                 st,
+		Workspace:             workspace.NewManager(t.TempDir(), nil),
+		GitLab:                api,
+		Cipher:                newTestCipher(t),
+		Profiles:              testProfiles(),
+		BotUsernames:          bots,
+		MentionMinAccessLevel: minAccess,
+		MRLocks:               locks,
+	})
+	if err != nil {
+		t.Fatalf("NewCommandWorker: %v", err)
+	}
+	return worker
+}
+
+func commandReplyNote(t *testing.T, api *fakeGitLab, sourceNoteID int64) gitlab.Note {
+	t.Helper()
+	prefix := commandReplyPrefix(sourceNoteID) + " "
+	for _, note := range api.allNoteSnapshot() {
+		if strings.HasPrefix(note.Body, prefix) {
+			return note
+		}
+	}
+	t.Fatalf("no command reply for source note %d: %+v", sourceNoteID, api.allNoteSnapshot())
+	return gitlab.Note{}
+}
+
+func TestCommandWorkerMentionRepliesAcceptedInThread(t *testing.T) {
+	ctx := context.Background()
+	fakeStore := openFakeStore(t, newTestCipher(t))
+	fakeStore.generation = 3
+	fakeStore.statusNote = 8801
+	api := defaultFakeGitLab()
+	api.discussions = []gitlab.Discussion{{
+		ID:    "disc-1",
+		Notes: []gitlab.Note{{ID: 555, Body: "@review-bot please re-review", AuthorID: 12}},
+	}}
+	worker := newCommandTestWorker(t, api, fakeStore, []string{"review-bot"})
+	if err := worker.Handle(ctx, commandJob(t, mentionCommandPayload("disc-1"))); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	jobs := fakeStore.enqueued()
+	if len(jobs) != 1 || jobs[0].Kind != "review.run" {
+		t.Fatalf("jobs = %+v, want one review.run", jobs)
+	}
+	var run map[string]any
+	if err := json.Unmarshal(jobs[0].Payload, &run); err != nil {
+		t.Fatal(err)
+	}
+	if run["trigger"] != "mention" {
+		t.Fatalf("run trigger = %v", run["trigger"])
+	}
+	if adds := api.discussionAddSnapshot(); len(adds) != 1 || adds[0] != "disc-1" {
+		t.Fatalf("discussion adds = %v", adds)
+	}
+	if api.noteCreates != 0 {
+		t.Fatalf("top-level note created for a thread reply: %d", api.noteCreates)
+	}
+	reply := commandReplyNote(t, api, 555)
+	if !strings.Contains(reply.Body, "kind=accepted") {
+		t.Fatalf("reply kind missing: %q", reply.Body)
+	}
+	for _, want := range []string{
+		"head `aaaaaaa`",
+		"代次 3",
+		"https://gitlab.example.com/group/repo/-/merge_requests/7#note_8801",
+		"已受理",
+	} {
+		if !strings.Contains(reply.Body, want) {
+			t.Errorf("reply is missing %q: %q", want, reply.Body)
+		}
+	}
+	if strings.Contains(reply.Body, "| 阶段 |") {
+		t.Fatalf("reply copied the status table: %q", reply.Body)
+	}
+}
+
+func TestCommandWorkerMentionThreadReplyRetryDoesNotDuplicate(t *testing.T) {
+	ctx := context.Background()
+	fakeStore := openFakeStore(t, newTestCipher(t))
+	fakeStore.generation = 2
+	api := defaultFakeGitLab()
+	api.discussions = []gitlab.Discussion{{
+		ID:    "disc-1",
+		Notes: []gitlab.Note{{ID: 555, Body: "@review-bot", AuthorID: 12}},
+	}}
+	worker := newCommandTestWorker(t, api, fakeStore, []string{"review-bot"})
+	job := commandJob(t, mentionCommandPayload("disc-1"))
+	for i := 0; i < 2; i++ {
+		if err := worker.Handle(ctx, job); err != nil {
+			t.Fatalf("Handle %d: %v", i, err)
+		}
+	}
+	if api.discussionNoteAdds != 1 || api.noteCreates != 0 || api.noteUpdates != 0 {
+		t.Fatalf("reply writes = add %d create %d update %d", api.discussionNoteAdds, api.noteCreates, api.noteUpdates)
+	}
+	if notes := api.noteSnapshot(); len(notes) != 1 {
+		t.Fatalf("notes = %d, want only the one thread reply", len(notes))
+	}
+	if reply := commandReplyNote(t, api, 555); strings.Contains(reply.Body, "#note_") {
+		t.Fatalf("reply has a status permalink without a status row: %q", reply.Body)
+	}
+}
+
+func TestCommandWorkerThreadReplyUpdatesStaleBody(t *testing.T) {
+	ctx := context.Background()
+	fakeStore := openFakeStore(t, newTestCipher(t))
+	fakeStore.generation = 1
+	api := defaultFakeGitLab()
+	api.discussions = []gitlab.Discussion{{
+		ID: "disc-1",
+		Notes: []gitlab.Note{
+			{ID: 555, Body: "@review-bot", AuthorID: 12},
+			{ID: 556, Body: commandReplyBody(555, "accepted", "stale"), AuthorID: api.user.ID},
+		},
+	}}
+	worker := newCommandTestWorker(t, api, fakeStore, []string{"review-bot"})
+	if err := worker.Handle(ctx, commandJob(t, mentionCommandPayload("disc-1"))); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if api.discussionNoteAdds != 0 || api.noteUpdates != 1 {
+		t.Fatalf("reply writes = add %d update %d", api.discussionNoteAdds, api.noteUpdates)
+	}
+	reply := commandReplyNote(t, api, 555)
+	if strings.Contains(reply.Body, "stale") || !strings.Contains(reply.Body, "已受理") {
+		t.Fatalf("stale reply was not updated: %q", reply.Body)
+	}
+}
+
+func TestCommandWorkerMissingDiscussionIDLooksUpThread(t *testing.T) {
+	ctx := context.Background()
+	fakeStore := openFakeStore(t, newTestCipher(t))
+	api := defaultFakeGitLab()
+	api.discussions = []gitlab.Discussion{{
+		ID:    "disc-1",
+		Notes: []gitlab.Note{{ID: 555, Body: "@review-bot", AuthorID: 12}},
+	}}
+	worker := newCommandTestWorker(t, api, fakeStore, []string{"review-bot"})
+	if err := worker.Handle(ctx, commandJob(t, mentionCommandPayload(""))); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if adds := api.discussionAddSnapshot(); len(adds) != 1 || adds[0] != "disc-1" {
+		t.Fatalf("discussion adds = %v, want the reverse-looked-up thread", adds)
+	}
+	if api.noteCreates != 0 {
+		t.Fatalf("fallback created a top-level note despite a found thread: %d", api.noteCreates)
+	}
+}
+
+func TestCommandWorkerNoThreadFallsBackToTopLevelReply(t *testing.T) {
+	ctx := context.Background()
+	fakeStore := openFakeStore(t, newTestCipher(t))
+	api := defaultFakeGitLab()
+	worker := newCommandTestWorker(t, api, fakeStore, []string{"review-bot"})
+	if err := worker.Handle(ctx, commandJob(t, mentionCommandPayload(""))); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if api.discussionNoteAdds != 0 || api.noteCreates != 1 {
+		t.Fatalf("reply writes = add %d create %d", api.discussionNoteAdds, api.noteCreates)
+	}
+}
+
+func TestCommandWorkerLegacyPayloadWithoutDiscussionIDReplays(t *testing.T) {
+	ctx := context.Background()
+	fakeStore := openFakeStore(t, newTestCipher(t))
+	api := defaultFakeGitLab()
+	api.access = 20
+	worker := newCommandTestWorker(t, api, fakeStore, nil)
+	job := &store.Job{ID: "command-job", Kind: "review.command", Payload: json.RawMessage(
+		`{"project_id":42,"mr_iid":7,"note_id":555,"author_id":12,"author_username":"alice","command":"run","profile":"default","trigger":"command"}`)}
+	for i := 0; i < 2; i++ {
+		if err := worker.Handle(ctx, job); err != nil {
+			t.Fatalf("Handle %d: %v", i, err)
+		}
+	}
+	if notes := api.noteSnapshot(); len(notes) != 1 || api.noteCreates != 1 || api.noteUpdates != 0 {
+		t.Fatalf("legacy replay = notes %d create %d update %d", len(notes), api.noteCreates, api.noteUpdates)
+	}
+}
+
+func TestCommandWorkerMentionMinAccess(t *testing.T) {
+	tests := []struct {
+		name       string
+		trigger    string
+		access     int
+		minAccess  int
+		discussion string
+		enqueued   bool
+		wantText   string
+	}{
+		{name: "mention at threshold", trigger: "mention", access: 20, minAccess: 20, discussion: "disc-1", enqueued: true},
+		{name: "mention below threshold", trigger: "mention", access: 10, minAccess: 20, discussion: "disc-1", wantText: "Reporter（20）"},
+		{name: "command ignores mention threshold", trigger: "command", access: 20, minAccess: 10, wantText: "Developer（30）"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeStore := openFakeStore(t, newTestCipher(t))
+			api := defaultFakeGitLab()
+			api.access = tt.access
+			if tt.trigger == "mention" {
+				api.discussions = []gitlab.Discussion{{
+					ID:    tt.discussion,
+					Notes: []gitlab.Note{{ID: 555, Body: "@review-bot", AuthorID: 12}},
+				}}
+			}
+			worker := newMentionCommandTestWorker(t, api, fakeStore, []string{"review-bot"}, tt.minAccess, nil)
+			payload := defaultCommandPayload(commandRun)
+			payload.Trigger = tt.trigger
+			payload.DiscussionID = tt.discussion
+			if err := worker.Handle(context.Background(), commandJob(t, payload)); err != nil {
+				t.Fatalf("Handle: %v", err)
+			}
+			if got := len(fakeStore.enqueued()) > 0; got != tt.enqueued {
+				t.Fatalf("enqueued = %v, want %v", got, tt.enqueued)
+			}
+			if tt.enqueued {
+				if tt.trigger == "mention" && api.discussionNoteAdds != 1 {
+					t.Fatalf("accepted mention reply = %d thread notes, want 1", api.discussionNoteAdds)
+				}
+				return
+			}
+			if tt.trigger == "mention" && api.discussionNoteAdds != 1 {
+				t.Fatalf("denied mention reply = %d thread notes, want 1", api.discussionNoteAdds)
+			}
+			reply := commandReplyNote(t, api, 555)
+			if !strings.Contains(reply.Body, "kind=denied") || !strings.Contains(reply.Body, tt.wantText) {
+				t.Fatalf("denied reply = %q, want %q", reply.Body, tt.wantText)
+			}
+		})
+	}
+}
+
+func TestCommandWorkerMentionAuthorFilters(t *testing.T) {
+	t.Run("third-party bot allowed", func(t *testing.T) {
+		fakeStore := openFakeStore(t, newTestCipher(t))
+		api := defaultFakeGitLab()
+		api.discussions = []gitlab.Discussion{{
+			ID:    "disc-1",
+			Notes: []gitlab.Note{{ID: 555, Body: "@review-bot", AuthorID: 77}},
+		}}
+		worker := newCommandTestWorker(t, api, fakeStore, []string{"review-bot"})
+		payload := mentionCommandPayload("disc-1")
+		payload.AuthorID = 77
+		payload.AuthorUsername = "agent-bot"
+		payload.AuthorBot = true
+		if err := worker.Handle(context.Background(), commandJob(t, payload)); err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+		if len(fakeStore.enqueued()) != 1 {
+			t.Fatal("third-party bot mention was dropped")
+		}
+	})
+	t.Run("own bot username ignored", func(t *testing.T) {
+		fakeStore := openFakeStore(t, newTestCipher(t))
+		api := defaultFakeGitLab()
+		worker := newCommandTestWorker(t, api, fakeStore, []string{"review-bot"})
+		payload := mentionCommandPayload("disc-1")
+		payload.AuthorID = api.user.ID
+		payload.AuthorUsername = "review-bot"
+		payload.AuthorBot = true
+		if err := worker.Handle(context.Background(), commandJob(t, payload)); err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+		if len(fakeStore.enqueued()) != 0 || len(api.noteSnapshot()) != 0 {
+			t.Fatal("own bot mention was processed")
+		}
+	})
+}
+
+func TestCommandWorkerThreadReplyWaitsForMergeRequestLock(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	fakeStore := openFakeStore(t, newTestCipher(t))
+	api := defaultFakeGitLab()
+	api.access = 10 // denied: only the reply path takes the MR lock
+	api.discussions = []gitlab.Discussion{{
+		ID:    "disc-1",
+		Notes: []gitlab.Note{{ID: 555, Body: "@review-bot", AuthorID: 12}},
+	}}
+	locks := &workflowLocks{}
+	worker := newMentionCommandTestWorker(t, api, fakeStore, []string{"review-bot"}, 20, locks)
+	unlock, err := locks.lock(ctx, reviewMRLockKey(42, 7))
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- worker.Handle(ctx, commandJob(t, mentionCommandPayload("disc-1")))
+	}()
+	for {
+		if mrRegistryRefs(locks, 42, 7) == 2 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("reply never queued on the MR lock: %v", ctx.Err())
+		case <-time.After(2 * time.Millisecond):
+		}
+	}
+	if api.discussionNoteAdds != 0 {
+		unlock()
+		t.Fatal("reply wrote while the MR lock was held")
+	}
+	unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatalf("reply did not finish after unlock: %v", ctx.Err())
+	}
+	if api.discussionNoteAdds != 1 {
+		t.Fatalf("discussion adds = %d, want 1 after unlock", api.discussionNoteAdds)
+	}
+}

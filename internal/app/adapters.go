@@ -46,6 +46,7 @@ type GitLabClient interface {
 	UpdateMRNote(ctx context.Context, token string, projectID, iid, noteID int64, body string) error
 	DeleteMRNote(ctx context.Context, token string, projectID, iid, noteID int64) error
 	ListDiscussions(ctx context.Context, token string, projectID, iid int64) ([]gitlab.Discussion, error)
+	AddDiscussionNote(ctx context.Context, token string, projectID, mrIID int64, discussionID, body string) (*gitlab.Note, error)
 	CreateDiscussion(ctx context.Context, token string, projectID, iid int64, d gitlab.NewDiscussion) (*gitlab.Discussion, error)
 	SetCommitStatus(ctx context.Context, token string, projectID int64, sha string, st gitlab.CommitStatus) error
 	ListNoteAwards(ctx context.Context, token string, projectID, iid, noteID int64) ([]gitlab.Award, error)
