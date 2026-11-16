@@ -202,10 +202,17 @@ func TestReviewRunRetryExhaustionSettlesFailedStatus(t *testing.T) {
 // its last, so a retryable error exercises the terminal settlement.
 func seedExhaustibleReview(t *testing.T, f *reviewFixture) *jobs.Job {
 	t.Helper()
+	return seedReviewJob(t, f, 1, json.RawMessage(`{"trigger":"mr_update","profile":"default"}`))
+}
+
+// seedReviewJob queues and claims one review.run job with the given budget and
+// command payload.
+func seedReviewJob(t *testing.T, f *reviewFixture, maxAttempts int, payload json.RawMessage) *jobs.Job {
+	t.Helper()
 	result, err := f.db.EnqueueReviewLatest(context.Background(), store.ReviewCommand{
 		ProjectID: 42, MRIID: 7, HeadSHA: f.head,
-		Payload:     json.RawMessage(`{"trigger":"mr_update","profile":"default"}`),
-		MaxAttempts: 1,
+		Payload:     payload,
+		MaxAttempts: maxAttempts,
 	})
 	if err != nil {
 		t.Fatalf("EnqueueReviewLatest: %v", err)
@@ -364,5 +371,196 @@ func TestStatusWriterReassignsNoteIDToMergedNote(t *testing.T) {
 	}
 	if row.AppliedVersion != row.Version {
 		t.Fatalf("merged note was not recorded as applied: %+v", row)
+	}
+}
+
+// cancellingGitLab cancels the handler context while collecting inputs and
+// then fails, which is how a lost lease or a stopping process reaches the
+// handler.
+type cancellingGitLab struct {
+	*reviewGitLab
+	cancel context.CancelFunc
+}
+
+func (g *cancellingGitLab) GetMergeRequest(context.Context, string, int64, int64) (*gitlab.MergeRequest, error) {
+	g.cancel()
+	return nil, context.Canceled
+}
+
+// TestReviewRunExhaustionSettlesAfterContextCancel reproduces the cancellation
+// edge of #485: the worker does not call Fail after cancelling a handler, and
+// recovery dead-letters an expired final attempt without running it again, so
+// the terminal failed status must be written through a detached context.
+func TestReviewRunExhaustionSettlesAfterContextCancel(t *testing.T) {
+	f := newReviewFixture(t, reviewTestHead)
+	f.service.status = testStatusReporter(f.gitlab)
+	job := seedExhaustibleReview(t, f)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.service.gitlab = &cancellingGitLab{reviewGitLab: f.gitlab, cancel: cancel}
+
+	err := f.service.Handle(ctx, job)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Handle error = %v, want context.Canceled", err)
+	}
+	row, err := f.db.GetReviewStatus(context.Background(), 42, 7)
+	if err != nil {
+		t.Fatalf("GetReviewStatus: %v", err)
+	}
+	if row.State != reviewStatusFailed || row.Detail != reviewExecutionFailedReason ||
+		row.AppliedVersion != row.Version {
+		t.Fatalf("cancelled final attempt left status = %+v", row)
+	}
+	notes := f.gitlab.noteSnapshot()
+	if len(notes) != 1 {
+		t.Fatalf("notes = %d, want one terminal status note", len(notes))
+	}
+	if phase := parseStatusPhase(notes[0].Body); phase != reviewStatusPhase(reviewStatusFailed) {
+		t.Fatalf("status note phase = %q, want failed: %q", phase, notes[0].Body)
+	}
+}
+
+// TestReviewRunCancellationBeforeExhaustionKeepsRetryable proves the detached
+// settlement stays behind the budget fence: a cancelled attempt that still has
+// retries keeps its running row for the retry.
+func TestReviewRunCancellationBeforeExhaustionKeepsRetryable(t *testing.T) {
+	f := newReviewFixture(t, reviewTestHead)
+	f.service.status = testStatusReporter(f.gitlab)
+	job := seedReviewJob(t, f, 3, json.RawMessage(`{"trigger":"mr_update","profile":"default"}`))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.service.gitlab = &cancellingGitLab{reviewGitLab: f.gitlab, cancel: cancel}
+
+	err := f.service.Handle(ctx, job)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Handle error = %v, want context.Canceled", err)
+	}
+	row, err := f.db.GetReviewStatus(context.Background(), 42, 7)
+	if err != nil {
+		t.Fatalf("GetReviewStatus: %v", err)
+	}
+	if row.State != reviewStatusRunning || row.AppliedVersion >= row.Version {
+		t.Fatalf("retryable cancellation settled the row: %+v", row)
+	}
+	if notes := f.gitlab.noteSnapshot(); len(notes) != 0 {
+		t.Fatalf("retryable cancellation wrote %d notes", len(notes))
+	}
+}
+
+// TestReviewRunExhaustedSettlementSkipsCompletedWorkflow pins the guard that
+// leaves a completed run to publication recovery instead of declaring it
+// failed.
+func TestReviewRunExhaustedSettlementSkipsCompletedWorkflow(t *testing.T) {
+	ctx := context.Background()
+	f := newReviewFixture(t, reviewTestHead)
+	f.service.status = testStatusReporter(f.gitlab)
+	job := f.seedReview(t, "completed")
+	if err := f.service.Handle(ctx, job); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	before, err := f.db.GetReviewStatus(ctx, 42, 7)
+	if err != nil || !terminalReviewStatus(before.State) {
+		t.Fatalf("completed run status = %+v, %v", before, err)
+	}
+	// Make the row look like a final attempt that failed after the workflow
+	// completed; the guard must leave it to publication recovery.
+	if written, err := f.db.SetReviewStatus(ctx, store.ReviewStatusGoal{
+		ProjectID: 42, MRIID: 7, Generation: before.Generation,
+		Attempt: before.Attempt + 1, HeadSHA: f.head, Profile: "default",
+		State: reviewStatusRunning,
+	}); err != nil || !written {
+		t.Fatalf("SetReviewStatus running = %v, %v", written, err)
+	}
+	f.service.settleExhaustedRun(ctx, reviewRunPayload{
+		ProjectID: 42, MRIID: 7, Generation: before.Generation,
+		HeadSHA: f.head, Profile: "default",
+	})
+	row, err := f.db.GetReviewStatus(ctx, 42, 7)
+	if err != nil {
+		t.Fatalf("GetReviewStatus: %v", err)
+	}
+	if row.State != reviewStatusRunning {
+		t.Fatalf("completed workflow was declared failed: %+v", row)
+	}
+	notes := f.gitlab.noteSnapshot()
+	if len(notes) != 1 {
+		t.Fatalf("notes = %d, want the completed review note", len(notes))
+	}
+	if phase := parseStatusPhase(notes[0].Body); phase == reviewStatusPhase(reviewStatusFailed) {
+		t.Fatalf("completed review note was rewritten as failed: %q", notes[0].Body)
+	}
+}
+
+// TestReviewRunExhaustionClearsSourceNoteEyes covers the settlement reaction:
+// the source note must lose its eyes when the final attempt fails.
+func TestReviewRunExhaustionClearsSourceNoteEyes(t *testing.T) {
+	ctx := context.Background()
+	f := newReviewFixture(t, reviewTestHead)
+	f.service.status = testStatusReporter(f.gitlab)
+	job := seedReviewJob(t, f, 1, json.RawMessage(`{"trigger":"command","note_id":555}`))
+	reaction, err := f.db.GetReviewReaction(ctx, 42, 7, 555)
+	if err != nil || reaction.Desired != reviewAwardEyes {
+		t.Fatalf("source note reaction before run = %+v, %v", reaction, err)
+	}
+	f.gitlab.mrErr = errors.New("gitlab is unavailable")
+
+	if err := f.service.Handle(ctx, job); err == nil {
+		t.Fatal("retryable upstream failure settled the job as done")
+	}
+	reaction, err = f.db.GetReviewReaction(ctx, 42, 7, 555)
+	if err != nil {
+		t.Fatalf("GetReviewReaction: %v", err)
+	}
+	if reaction.Desired != reviewAwardNone {
+		t.Fatalf("source note reaction after exhaustion = %+v, want none", reaction)
+	}
+}
+
+// TestReviewRunFailureSettlementFallsBackToStatusJob proves the durable-goal
+// fallback: when the terminal note cannot be written, the failed row is
+// already durable and its status job converges the note later.
+func TestReviewRunFailureSettlementFallsBackToStatusJob(t *testing.T) {
+	ctx := context.Background()
+	f := newReviewFixture(t, reviewTestHead)
+	f.service.status = testStatusReporter(f.gitlab)
+	job := seedExhaustibleReview(t, f)
+	// The run fails and the status note write fails as well.
+	f.gitlab.mrErr = errors.New("gitlab is unavailable")
+	f.gitlab.mu.Lock()
+	f.gitlab.noteErr = errors.New("gitlab notes are unavailable")
+	f.gitlab.mu.Unlock()
+
+	if err := f.service.Handle(ctx, job); err == nil {
+		t.Fatal("retryable upstream failure settled the job as done")
+	}
+	row, err := f.db.GetReviewStatus(ctx, 42, 7)
+	if err != nil {
+		t.Fatalf("GetReviewStatus: %v", err)
+	}
+	if row.State != reviewStatusFailed || row.AppliedVersion >= row.Version {
+		t.Fatalf("failed goal was not persisted for the status job: %+v", row)
+	}
+	if notes := f.gitlab.noteSnapshot(); len(notes) != 0 {
+		t.Fatalf("status note was written while GitLab was unavailable: %d", len(notes))
+	}
+	// The upstream recovers; the queued status job converges the failed note.
+	f.gitlab.mu.Lock()
+	f.gitlab.noteErr = nil
+	f.gitlab.mu.Unlock()
+	drainReviewJobs(t, f, "review.status")
+
+	row, err = f.db.GetReviewStatus(ctx, 42, 7)
+	if err != nil {
+		t.Fatalf("GetReviewStatus after drain: %v", err)
+	}
+	if row.State != reviewStatusFailed || row.AppliedVersion != row.Version || row.NoteID <= 0 {
+		t.Fatalf("status job did not converge: %+v", row)
+	}
+	notes := f.gitlab.noteSnapshot()
+	if len(notes) != 1 {
+		t.Fatalf("notes = %d, want one recovered status note", len(notes))
+	}
+	if phase := parseStatusPhase(notes[0].Body); phase != reviewStatusPhase(reviewStatusFailed) {
+		t.Fatalf("recovered status phase = %q: %q", phase, notes[0].Body)
 	}
 }

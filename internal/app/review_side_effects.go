@@ -311,9 +311,10 @@ func (s *ReviewService) settleFailedStatusVisit(ctx context.Context, ws *workspa
 		// A terminal state or a higher attempt already owns this row.
 		return nil
 	}
-	// Re-read only to pick up the version this write created. A generation
-	// bump cannot land while the caller holds the shared per-MR lock, but a
-	// changed row still keeps the successor's ownership.
+	// Re-read only to pick up the version this write created. The real fence
+	// is the control check inside the write transaction plus the applied
+	// version CAS; webhook ingress can advance the generation without the
+	// shared per-MR lock (for example when repo config is disabled).
 	current, err := s.store.GetReviewStatus(ctx, row.ProjectID, row.MRIID)
 	if err != nil {
 		return err

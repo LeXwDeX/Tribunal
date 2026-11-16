@@ -35,8 +35,11 @@ const (
 	reviewSupersededReason      = "review superseded"
 	failureNoteDisabledReason   = "failure note disabled"
 	reviewExecutionFailedReason = "review execution failed"
-	invalidRepoConfigDetail     = "repository or stored ignore configuration is invalid"
-	invalidRepoConfigNote       = "评审未启动：`.gitlab-review.yml` 或已保存的 ignore 规则无效（无法解析或包含不支持的写法）。请修正后重新触发评审。"
+	// reviewFailureSettleTimeout bounds the detached write of a terminal
+	// status after the handler context was cancelled (#485).
+	reviewFailureSettleTimeout = 10 * time.Second
+	invalidRepoConfigDetail    = "repository or stored ignore configuration is invalid"
+	invalidRepoConfigNote      = "评审未启动：`.gitlab-review.yml` 或已保存的 ignore 规则无效（无法解析或包含不支持的写法）。请修正后重新触发评审。"
 	// Degradation warnings are persisted in the dossier and rendered on the MR
 	// so a withheld material is never silent (#457).
 	withoutCodeGraphWarning = "review ran without the code graph: project ignore rules blocked workspace indexing"
@@ -591,7 +594,7 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 	// stage is a coarse marker for the failure log only.
 	stage := "control"
 	defer func() {
-		if err == nil || ctx.Err() != nil {
+		if err == nil {
 			return
 		}
 		authFailure := tokenRejected(err)
@@ -599,19 +602,37 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 		// attempt. Only the attempt that spends the retry budget is terminal;
 		// leaving the row at running would strand the MR forever (#485).
 		// ErrDeferred is not a failed attempt: the worker releases the lease
-		// and extends the budget, and reconciliation settles a deferral that
-		// outlives MaxDeferWindow.
+		// and extends the budget. If the deferral window itself expires,
+		// recovery terminates the job; only running/publishing rows are later
+		// reconciled by the unfinished scan, while a queued row is retried
+		// only when its control is cancelled.
 		exhausted := !IsPermanentJob(err) && !authFailure && !errors.Is(err, jobs.ErrDeferred) &&
 			job.MaxAttempts > 0 && job.Attempts >= job.MaxAttempts
 		if !IsPermanentJob(err) && !authFailure && !exhausted {
 			return
 		}
 		if exhausted {
+			// The worker cancels the handler when the lease is lost or the
+			// process stops, and it does not call Fail afterwards. Recovery
+			// then dead-letters the expired job without running the handler
+			// again, so the terminal status must be written through a
+			// detached bounded context even though ctx is cancelled (#485).
+			settleCtx := ctx
+			if ctx.Err() != nil {
+				var cancel context.CancelFunc
+				settleCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), reviewFailureSettleTimeout)
+				defer cancel()
+			}
 			s.logger.Warn("review run exhausted its retry budget",
 				"project_id", payload.ProjectID, "mr_iid", payload.MRIID, "generation", payload.Generation,
 				"attempts", job.Attempts, "max_attempts", job.MaxAttempts,
 				"error_class", errclass.Of(err), "stage", stage)
-			s.settleExhaustedRun(ctx, payload)
+			s.settleExhaustedRun(settleCtx, payload)
+			return
+		}
+		// Permanent and auth failures keep their existing early exit: a
+		// cancelled context means the job will be retried or recovered.
+		if ctx.Err() != nil {
 			return
 		}
 		s.logger.Warn("review run failed permanently",
