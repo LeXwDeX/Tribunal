@@ -10,6 +10,16 @@ server:
 
 gitlab:
   url: "${GITLAB_URL}"
+  # Optional instance-wide shared bot credential, off by default. To enable,
+  # uncomment bot_token_env and set TRIBUNAL_BOT_TOKEN in .env (Compose passes
+  # it through). The bot needs Reporter on every project it serves; its
+  # username is resolved at startup and appended to bot_usernames.
+  # bot_token_env: TRIBUNAL_BOT_TOKEN
+  # bot_usernames: []
+  # Optional platform webhook credential for shared projects. Uncomment with
+  # bot_token_env and set TRIBUNAL_PROVISIONING_TOKEN in .env. It needs api
+  # scope and Maintainer; it creates/updates/deletes hooks only.
+  # provisioning_token_env: TRIBUNAL_PROVISIONING_TOKEN
 
 auth:
   bootstrap_token_env: REVIEW_ADMIN_TOKEN

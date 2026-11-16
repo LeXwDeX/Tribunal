@@ -19,34 +19,39 @@ const projectRecentReviewLimit = 20
 // existing flat response contract.
 type projectDetailResponse struct {
 	*store.Project
-	Access        string                   `json:"access"`
-	AccessSource  string                   `json:"access_source,omitempty"`
-	Workspace     *projectWorkspaceSummary `json:"workspace,omitempty"`
-	RecentReviews []reviewSummary          `json:"recent_reviews"`
+	Access           string                   `json:"access"`
+	AccessSource     string                   `json:"access_source,omitempty"`
+	SharedCredential bool                     `json:"shared_credential"`
+	Workspace        *projectWorkspaceSummary `json:"workspace,omitempty"`
+	RecentReviews    []reviewSummary          `json:"recent_reviews"`
 }
 
 // projectListItem is the list equivalent: stored fields stay flat, while
 // workspace and last_review carry the bounded admin summary.
 type projectListItem struct {
 	*store.Project
-	Access       string                   `json:"access"`
-	AccessSource string                   `json:"access_source,omitempty"`
-	Workspace    *projectWorkspaceSummary `json:"workspace,omitempty"`
-	LastReview   *reviewSummary           `json:"last_review,omitempty"`
+	Access           string                   `json:"access"`
+	AccessSource     string                   `json:"access_source,omitempty"`
+	SharedCredential bool                     `json:"shared_credential"`
+	Workspace        *projectWorkspaceSummary `json:"workspace,omitempty"`
+	LastReview       *reviewSummary           `json:"last_review,omitempty"`
 }
 
 type registerProjectRequest struct {
-	Project     string          `json:"project"`
-	Token       string          `json:"token"`
-	Profile     string          `json:"profile,omitempty"`
-	AutoWebhook bool            `json:"auto_webhook,omitempty"`
+	Project string `json:"project"`
+	Token   string `json:"token"`
+	Profile string `json:"profile,omitempty"`
+	// AutoWebhook defaults to true when omitted; an explicit false keeps the
+	// manual webhook setup path.
+	AutoWebhook *bool           `json:"auto_webhook,omitempty"`
 	Settings    json.RawMessage `json:"settings,omitempty"`
 }
 
 type registerProjectResponse struct {
-	Project       *store.Project `json:"project"`
-	JobID         string         `json:"job_id"`
-	WebhookSecret string         `json:"webhook_secret,omitempty"`
+	Project          *store.Project `json:"project"`
+	JobID            string         `json:"job_id"`
+	WebhookSecret    string         `json:"webhook_secret,omitempty"`
+	SharedCredential bool           `json:"shared_credential"`
 }
 
 type validateProjectRequest struct {
@@ -65,6 +70,7 @@ type validateProjectResponse struct {
 	Warnings          []app.ProjectWarning `json:"warnings"`
 	TokenExpiresAt    *time.Time           `json:"token_expires_at,omitempty"`
 	GitHead           string               `json:"git_head"`
+	SharedCredential  bool                 `json:"shared_credential"`
 }
 
 type updateProjectRequest struct {
@@ -113,11 +119,17 @@ func (s *Server) handleRegisterProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "validation_failed", "invalid JSON request body", nil)
 		return
 	}
+	// Auto-webhook is the default: a URL-only registration must produce a
+	// working review trigger without a second step.
+	autoWebhook := true
+	if request.AutoWebhook != nil {
+		autoWebhook = *request.AutoWebhook
+	}
 	registration, err := s.projects.Register(r.Context(), app.RegisterInput{
 		Project:              request.Project,
 		AccessToken:          request.Token,
 		Profile:              request.Profile,
-		AutoWebhook:          request.AutoWebhook,
+		AutoWebhook:          autoWebhook,
 		Settings:             request.Settings,
 		OwnerUserID:          max(currentUserID(r), 0),
 		TrustedPlatformAdmin: s.isPlatformAdmin(r) || currentUserID(r) == 0,
@@ -127,9 +139,10 @@ func (s *Server) handleRegisterProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, registerProjectResponse{
-		Project:       registration.Project,
-		JobID:         registration.JobID,
-		WebhookSecret: registration.WebhookSecret,
+		Project:          registration.Project,
+		JobID:            registration.JobID,
+		WebhookSecret:    registration.WebhookSecret,
+		SharedCredential: registration.Project != nil && len(registration.Project.TokenEnc) == 0,
 	})
 }
 
@@ -144,6 +157,7 @@ func (s *Server) handleValidateProject(w http.ResponseWriter, r *http.Request) {
 	result, err := s.projects.Validate(r.Context(), app.ValidateProjectInput{
 		Project:              request.Project,
 		AccessToken:          request.Token,
+		OwnerUserID:          max(currentUserID(r), 0),
 		TrustedPlatformAdmin: s.isPlatformAdmin(r) || currentUserID(r) == 0,
 	})
 	if err != nil {
@@ -169,6 +183,7 @@ func (s *Server) handleValidateProject(w http.ResponseWriter, r *http.Request) {
 		TokenExpiresAt:    result.TokenExpiresAt,
 		GitHead:           result.GitHead,
 		Warnings:          warningsOrEmpty(result.Warnings),
+		SharedCredential:  result.SharedCredential,
 	})
 }
 
@@ -242,7 +257,7 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				continue
 			}
-			items = append(items, projectListItem{Project: &projects[i], Access: access, AccessSource: s.projectAccessSourceFor(r, projects[i].ID, access, admin)})
+			items = append(items, projectListItem{Project: &projects[i], Access: access, AccessSource: s.projectAccessSourceFor(r, projects[i].ID, access, admin), SharedCredential: len(projects[i].TokenEnc) == 0})
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"projects": items, "next_cursor": next})
 		return
@@ -278,7 +293,8 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 		}
 		items = append(items, projectListItem{
 			Project: project, Access: access, AccessSource: s.projectAccessSourceFor(r, project.ID, access, admin),
-			Workspace: workspace, LastReview: lastReview,
+			SharedCredential: len(project.TokenEnc) == 0,
+			Workspace:        workspace, LastReview: lastReview,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"projects": items, "next_cursor": next})
@@ -338,7 +354,8 @@ func (s *Server) handleGetProject(w http.ResponseWriter, r *http.Request) {
 	if s.store == nil {
 		writeJSON(w, http.StatusOK, projectDetailResponse{
 			Project: project, Access: access, AccessSource: s.projectAccessSource(r, project.ID, access),
-			RecentReviews: []reviewSummary{},
+			SharedCredential: len(project.TokenEnc) == 0,
+			RecentReviews:    []reviewSummary{},
 		})
 		return
 	}
@@ -353,11 +370,12 @@ func (s *Server) handleGetProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, projectDetailResponse{
-		Project:       project,
-		Access:        access,
-		AccessSource:  s.projectAccessSource(r, project.ID, access),
-		Workspace:     workspace,
-		RecentReviews: reviews,
+		Project:          project,
+		Access:           access,
+		AccessSource:     s.projectAccessSource(r, project.ID, access),
+		SharedCredential: len(project.TokenEnc) == 0,
+		Workspace:        workspace,
+		RecentReviews:    reviews,
 	})
 }
 

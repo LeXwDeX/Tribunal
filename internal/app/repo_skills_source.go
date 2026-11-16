@@ -10,7 +10,6 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/repo"
 	"github.com/LeXwDeX/tribunal/internal/review"
-	"github.com/LeXwDeX/tribunal/internal/secret"
 	"github.com/LeXwDeX/tribunal/internal/skill"
 	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/internal/workspace"
@@ -234,11 +233,11 @@ func (d *Dispatcher) DiscoverRepositorySkills(ctx context.Context, projectID int
 	}
 	token := ""
 	if settings.AllowRepoSkills {
-		plaintext, err := d.cipher.Open(project.TokenEnc, secret.TokenAAD(projectID))
+		plaintext, err := resolveProjectToken(d.tokens, d.cipher, project)
 		if err != nil {
-			return nil, errors.New("app: project token is unavailable")
+			return nil, errors.New("app: project credential is unavailable")
 		}
-		token = string(plaintext)
+		token = plaintext
 	}
 	result, err := discoverRepositorySkills(ctx, ws, d.onboarding.git, d.onboarding.gitlab, project, token, branch, d.onboarding.reviewDefaults, d.onboarding.profiles)
 	if err != nil {

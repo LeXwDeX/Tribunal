@@ -22,7 +22,9 @@ gitlab:
   url: "https://gitlab.example.internal"
   request_timeout: 30s
   max_concurrency: 16               # 对 GitLab API 的总并发
-  bot_usernames: []                 # 额外需要忽略的 bot 用户名（项目 bot 会自动识别）
+  bot_usernames: []                 # 额外需要忽略的 bot 用户名（项目 bot 会自动识别；共享 bot 用户名也会在启动时补充）
+  bot_token_env: TRIBUNAL_BOT_TOKEN # 可选：实例级共享 bot 凭据所在的环境变量名；空 = 仅用项目级 token
+  provisioning_token_env: TRIBUNAL_PROVISIONING_TOKEN # 可选：共享模式下代建/更新/删除 webhook 的凭据；空 = 共享项目只能手工配置 webhook
   catch_up:                         # 启动恢复后一次性补评停机期间错过的 MR head（#362）
     enabled: true                   # false 关闭；仅启动时读取，修改需重启
     max_per_project: 10             # 每个项目一次扫描最多入队的评审数，须为正
@@ -160,6 +162,8 @@ review_defaults:                    # 项目设置的默认值（见 §3）
 ```
 
 需要授予平台管理员时，先向用户确认实际 GitLab 数字用户 ID 和本次授权，再填写 `id:<GitLab 用户 ID>`；修改后重启生效。用户名写法已弃用，将在下一个大版本移除。
+
+`gitlab.bot_token_env` 为空（默认）时凭据完全按项目解析；非空时必须指向存在且非空的环境变量，值为 GitLab PAT。启用后，注册时留空项目 token 的项目以零长度 token 哨兵落库，评审的读取、注释与行内 discussion 回退到该共享 bot，项目级 token 仍优先。共享 bot 只需在项目上至少 Reporter（读代码/MR/diff、发 note 与行内 discussion、resolve 自己的线程）；每个项目的注册仍需注册人本人至少 Reporter。Webhook 的 create/update/delete/list/get 由 `gitlab.provisioning_token_env` 指向的 provisioning 凭据代办，该凭据需要 `api` scope 与项目 Maintainer；共享模式 + `auto_webhook=true` 时它必须已配置且有效，`auto_webhook=false` 时不需要。Provisioning 凭据不用于评审读写。共享模式下 `commit_status` 被强制降级为关闭（Reporter 无 `create_commit_status`），评审结果仍以 MR 注记与行内 discussion 发布；项目级 token 模式不受影响。两个凭据的值都只从环境变量读取，不写入配置、数据库、API 响应或日志。`gitlab.bot_usernames` 建议显式包含共享 bot 用户名；启动时也会通过 GitLab 解析一次并补充。共享凭据健康状态通过 `GET /api/v1/settings` 的 `gitlab.shared_bot_credential_state`（`ok` / `expired` / `insufficient_scope` / `unreachable`）懒检查暴露，缓存 5 分钟，响应不含 token 值或其片段；同视图的 `gitlab.provisioning_credential` 布尔仅表示 provisioning 凭据是否已配置。
 
 `server.write_timeout` 同时约束 MCP 连接测试的 handler 预算：测试超时取 `min(30s, 75% × write_timeout)`，为响应写出保留 25% 余量。默认 60 秒仍对应 30 秒测试上限；把 `write_timeout` 设到 40 秒以下会按比例缩短测试窗口（例如 30 秒配置对应 22.5 秒），过小的值会让连接、握手与工具列表来不及完成。该预算只影响测试端点，运行期 MCP 调用仍由各服务器的 `x-review.call_timeout` 控制。
 
@@ -302,6 +306,8 @@ type BudgetConfig struct {
 - `budget.max_nodes` 在 1 到 100 之间；`budget.deadline` 和 `budget.max_turns` 不能为负，0 分别表示不设工作流 deadline 和不限制每节点模型请求数。
 - `blocks` 中的 `mcp_tools` 名称格式为 `mcp__<server>__<tool>`，且 server 在 MCP 配置中存在（工具是否存在在启动后探测，不存在只告警）。
 - `secrets.master_key_env` 解码后必须为 32 字节。
+- `gitlab.bot_token_env` 为空表示不启用共享凭据；非空时必须是合法的环境变量名，且对应变量存在、非空、非纯空白。错误信息只包含字段名和变量名，不包含变量值。
+- `gitlab.provisioning_token_env` 遵循相同规则；为空表示共享项目只能手工配置 webhook。它不是启用共享模式的开关，单独配置不会让无项目 token 的项目可评审。
 
 校验失败直接退出，并逐条打印错误。
 
@@ -650,6 +656,8 @@ review:
 | `REVIEW_ADMIN_TOKEN` | 平台管理面的 bootstrap Bearer token，至少 32 字节；无用户 ID 和项目 grant，轮换由部署方修改环境变量并重启 |
 | `TRIBUNAL_SESSION_KEY` | base64，解码后至少 32 字节；签名会话 cookie、OAuth state 和派生 CSRF。固定该值并复用 SQLite 时重启可继续登录；未设置或恰好为空字符串时回退旧名，旧名也未配置时每进程随机生成并告警，重启后旧会话失效。旧名 `CRC_SESSION_KEY` 仍兼容；新名非空时优先。新名非空但去除空白后为空（例如只含空格）或值非法时，启动失败，不回退旧值，也不生成临时 key |
 | `GITLAB_OAUTH_CLIENT_ID` / `GITLAB_OAUTH_CLIENT_SECRET` | 控制台登录 |
+| `TRIBUNAL_BOT_TOKEN` | 可选示例名：实例级共享 bot 的 GitLab PAT，实际变量名由 `gitlab.bot_token_env` 指定；启用后无项目 token 的项目使用该 bot 读取代码并发布评审注记，不写入配置/数据库/响应/日志 |
+| `TRIBUNAL_PROVISIONING_TOKEN` | 可选示例名：共享模式下代建/更新/删除 webhook 的 GitLab PAT，实际变量名由 `gitlab.provisioning_token_env` 指定；需要 `api` scope 与项目 Maintainer，仅用于 hook 生命周期，不用于评审读写，不写入配置/数据库/响应/日志 |
 | `ANTHROPIC_API_KEY`、`OPENAI_API_KEY`、… | 按 `providers.*.api_key_env` 自定义 |
 | `LLM_SECONDARY_PROTOCOL`、`LLM_SECONDARY_BASE_URL`、`LLM_SECONDARY_MODEL`、`LLM_SECONDARY_API_KEY` | Docker 模板中注释掉的 `secondary` provider 使用。Compose 将四个变量作为可选空值透传；只有取消 `providers.secondary` 注释后才需设置真实值。应用本身只读取 `providers.secondary.api_key_env` 指向的变量名 |
 | `REVIEW_LOG_LEVEL` | `debug` / `info` / `warn` / `error` |

@@ -13,7 +13,6 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/jobs"
 	"github.com/LeXwDeX/tribunal/internal/review"
-	"github.com/LeXwDeX/tribunal/internal/secret"
 	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/pkg/dag"
 )
@@ -259,11 +258,11 @@ func (s *ReviewService) projectToken(ctx context.Context, projectID int64) (*sto
 	if project == nil || !project.Enabled {
 		return nil, "", PermanentJob(fmt.Errorf("project %d is disabled", projectID))
 	}
-	token, err := s.cipher.Open(project.TokenEnc, secret.TokenAAD(project.ID))
+	token, err := resolveProjectToken(s.tokens, s.cipher, project)
 	if err != nil {
-		return nil, "", PermanentJob(fmt.Errorf("project token is unavailable"))
+		return nil, "", PermanentJob(fmt.Errorf("project credential is unavailable"))
 	}
-	return project, string(token), nil
+	return project, token, nil
 }
 
 // workspaceMaterialIdentity salts the execution identity with the base
@@ -302,12 +301,35 @@ func permanentTokenFailure(err error) error {
 }
 
 const (
-	tokenRejected401Message = "project token was rejected by GitLab (HTTP 401); replace the project token"
-	tokenRejected403Message = "project token was rejected by GitLab (HTTP 403); check its scopes and role"
+	tokenRejected401Message            = "project token was rejected by GitLab (HTTP 401); replace the project token"
+	tokenRejected403Message            = "project token was rejected by GitLab (HTTP 403); check its scopes and role"
+	sharedCredentialRejected401Message = "shared bot credential was rejected by GitLab (HTTP 401); update the credential referenced by gitlab.bot_token_env and restart the service"
+	sharedCredentialRejected403Message = "shared bot credential was rejected by GitLab (HTTP 403); check its scopes and that the shared bot has at least Reporter on the project"
 )
+
+// tokenRejectedHealthMessage returns the stored health text for a rejected
+// credential. Shared-credential text names the platform credential instead of
+// an absent project token.
+func tokenRejectedHealthMessage(status int, shared bool) string {
+	if shared {
+		if status == http.StatusForbidden {
+			return sharedCredentialRejected403Message
+		}
+		return sharedCredentialRejected401Message
+	}
+	if status == http.StatusForbidden {
+		return tokenRejected403Message
+	}
+	return tokenRejected401Message
+}
 
 // markProjectTokenRejected marks the project console as unhealthy. Only the
 // sanitized status is stored; the token and upstream body never are.
+//
+// A shared credential failure is platform-wide: every shared project would be
+// marked at once, and the per-project webhook state would stop describing that
+// project's own hook. It is logged and surfaced through the review status and
+// the settings health probe instead of overwriting each project's health.
 func (s *ReviewService) markProjectTokenRejected(ctx context.Context, projectID int64, status int) {
 	writer, ok := s.store.(interface {
 		UpdateProjectWebhook(context.Context, int64, store.ProjectWebhookUpdate) error
@@ -319,10 +341,11 @@ func (s *ReviewService) markProjectTokenRejected(ctx context.Context, projectID 
 	if err != nil || project == nil {
 		return
 	}
-	message := tokenRejected401Message
-	if status == http.StatusForbidden {
-		message = tokenRejected403Message
+	if s.tokens.UsesShared(project) {
+		s.logger.Warn("shared bot credential rejected during review", "project_id", projectID, "status", status)
+		return
 	}
+	message := tokenRejectedHealthMessage(status, false)
 	if err := writer.UpdateProjectWebhook(context.WithoutCancel(ctx), projectID, store.ProjectWebhookUpdate{
 		State: store.WebhookStateFailed, Error: message, Events: project.WebhookEvents,
 	}); err != nil {
@@ -355,16 +378,17 @@ func (s *ReviewService) clearProjectTokenRejected(ctx context.Context, projectID
 
 // noteTokenRejected leaves a visible MR explanation. The same rejected token
 // usually cannot post it; the console status remains the durable record.
-func (s *ReviewService) noteTokenRejected(ctx context.Context, token string, projectID, mrIID, generation int64, headSHA string) {
+func (s *ReviewService) noteTokenRejected(ctx context.Context, token string, shared bool, projectID, mrIID, generation int64, headSHA string) {
 	if token == "" {
 		return
 	}
+	_, note := tokenRejectedTexts(shared)
 	if generation > 0 {
-		if _, err := s.store.SetReviewStatusFinalBody(context.WithoutCancel(ctx), projectID, mrIID, generation, headSHA, tokenRejectedNote); err == nil {
+		if _, err := s.store.SetReviewStatusFinalBody(context.WithoutCancel(ctx), projectID, mrIID, generation, headSHA, note); err == nil {
 			return
 		}
 	}
-	if err := s.createFallbackMRNote(ctx, token, projectID, mrIID, generation, headSHA, tokenRejectedNote); err != nil {
+	if err := s.createFallbackMRNote(ctx, token, projectID, mrIID, generation, headSHA, note); err != nil {
 		s.logger.Warn("token rejection note failed", "project_id", projectID, "mr_iid", mrIID, "error_class", errclass.Of(err))
 	}
 }
@@ -652,7 +676,10 @@ func (s *ReviewService) publishFailure(ctx context.Context, workflowID string, s
 // safely known and the configuration error stays the visible block.
 func (s *ReviewService) publishPreWorkflowFailure(ctx context.Context, project *store.Project, token string, control *store.ReviewControl, payload reviewRunPayload) error {
 	settings, err := ResolveSettings(project.Settings, s.reviewDefaults)
-	if err != nil || !settings.CommitStatus || s.publisher == nil {
+	// Reporter-level shared bots cannot write commit statuses. The effective
+	// config already disables this; the explicit guard keeps a direct call from
+	// sending a doomed request.
+	if err != nil || !settings.CommitStatus || sharedCredentialProject(project) || s.publisher == nil {
 		return nil
 	}
 	if err := s.publisher.PublishPreWorkflowFailure(ctx, project.ID, control.MRIID, payload.Generation, payload.HeadSHA, token); err != nil {

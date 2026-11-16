@@ -4,7 +4,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { listProjects, registerProject, updateProject, validateProjectConnection } from '../api/api'
 import { ApiError, errorMessage } from '../api/client'
 import type { Project, ProjectRegistration, ProjectValidation } from '../api/types'
-import { useCanRegisterProject } from '../components/RoleContext'
+import { useCanRegisterProject, useSharedBotCredential } from '../components/RoleContext'
 import {
   Badge, Button, Checkbox, Dialog, Disclosure, EmptyState, ErrorState, ExternalLink, Field, LoadingState, PageHeader, Panel,
   PanelBody, RelativeTime, SearchField, Segmented, StatusBadge, Switch, Toolbar, VerdictBadge, useToast,
@@ -23,6 +23,7 @@ function isAlreadyRegistered(error: unknown): boolean {
 }
 
 function tokenExpiry(project: Project): { label: string; tone: 'ok' | 'warn' | 'danger' | 'neutral' } {
+  if (project.shared_credential) return { label: '平台共享 bot', tone: 'neutral' }
   if (!project.token_expires_at) return { label: '未提供', tone: 'neutral' }
   const expires = new Date(project.token_expires_at).getTime()
   if (Number.isNaN(expires)) return { label: '日期无效', tone: 'warn' }
@@ -72,6 +73,7 @@ function accessLevelLabel(level: number): string {
 function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const toast = useToast()
   const queryClient = useQueryClient()
+  const sharedBotCredential = useSharedBotCredential()
   const projectId = useId()
   const tokenId = useId()
   const branchesId = useId()
@@ -87,6 +89,10 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
   const [error, setError] = useState<unknown>(null)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [result, setResult] = useState<ProjectRegistration | null>(null)
+  // Shared mode with an empty key registers with the platform bot, so the
+  // read-only project-token validation step does not apply.
+  const usesSharedBot = sharedBotCredential && !token.trim()
+  const canSave = Boolean(project.trim()) && (usesSharedBot || Boolean(validation))
   const pending = validating || saving
 
   useEffect(() => {
@@ -139,7 +145,7 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
   const validate = async () => {
     const nextErrors: Record<string, string> = {}
     if (!project.trim()) nextErrors.project = '请输入仓库网址、项目路径或 ID。'
-    if (!token.trim()) nextErrors.token = '请输入访问 Key。'
+    if (!token.trim() && !sharedBotCredential) nextErrors.token = '请输入访问 Key。'
     setErrors(nextErrors)
     if (Object.keys(nextErrors).length) return
     const requestId = requestRef.current + 1
@@ -163,7 +169,7 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
   }
 
   const save = async () => {
-    if (!validation || pending) return
+    if (!canSave || pending) return
     setSaving(true)
     setError(null)
     try {
@@ -197,8 +203,12 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
       onClose={close}
       title={result ? '项目已保存，初始化已开始' : '接入 GitLab 项目'}
       description={result
-        ? '项目已保存。平台已加密保存访问 Key；后台会拉取仓库并生成评审上下文，会调用模型并消耗 token，但不会修改仓库代码。'
-        : '先只读校验连接，确认项目和权限；校验通过后才保存并初始化。保存会加密存储访问 Key，并在后台拉取仓库、生成评审上下文，会调用模型并消耗 token。不会修改仓库代码。'}
+        ? (result.shared_credential
+          ? '项目已保存，使用平台共享 bot 调用 GitLab；后台会拉取仓库并生成评审上下文，会调用模型并消耗 token，但不会修改仓库代码。'
+          : '项目已保存。平台已加密保存访问 Key；后台会拉取仓库并生成评审上下文，会调用模型并消耗 token，但不会修改仓库代码。')
+        : (sharedBotCredential
+          ? '只需填写项目地址：保存后由平台校验权限、自动创建 Webhook 并初始化。选择性地填写项目 Key 可改用项目级凭据。会调用模型并消耗 token，不会修改仓库代码。'
+          : '先只读校验连接，确认项目和权限；校验通过后才保存并初始化。保存会加密存储访问 Key，自动创建 Webhook，并在后台拉取仓库、生成评审上下文，会调用模型并消耗 token。不会修改仓库代码。')}
       wide
       footer={result ? (
         <Button variant="primary" onClick={close}>完成</Button>
@@ -206,7 +216,7 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
         <>
           <Button variant="secondary" onClick={close} disabled={pending}>取消</Button>
           <Button variant="secondary" onClick={() => { void validate() }} loading={validating} disabled={saving}>校验连接</Button>
-          <Button variant="primary" onClick={() => { void save() }} loading={saving} disabled={!validation || validating}>保存并初始化</Button>
+          <Button variant="primary" onClick={() => { void save() }} loading={saving} disabled={!canSave || validating}>保存并初始化</Button>
         </>
       )}
     >
@@ -216,23 +226,41 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
             <div><dt>项目</dt><dd className="mono">{result.project?.path_with_namespace || project}</dd></div>
             <div><dt>项目 ID</dt><dd className="tabular">{result.project?.id ?? '—'}</dd></div>
             <div><dt>默认分支</dt><dd className="mono">{result.project?.default_branch || '—'}</dd></div>
-            <div><dt>token scope</dt><dd className="mono">{result.project?.token_scopes?.join(', ') || '—'}</dd></div>
-            <div><dt>token 过期</dt><dd>{result.project?.token_expires_at ? formatDate(result.project.token_expires_at) : '未提供'}</dd></div>
+            {result.shared_credential ? (
+              <div><dt>凭据</dt><dd>平台共享 bot（无项目级 token）</dd></div>
+            ) : (
+              <>
+                <div><dt>token scope</dt><dd className="mono">{result.project?.token_scopes?.join(', ') || '—'}</dd></div>
+                <div><dt>token 过期</dt><dd>{result.project?.token_expires_at ? formatDate(result.project.token_expires_at) : '未提供'}</dd></div>
+              </>
+            )}
             <div><dt>初始化任务</dt><dd className="mono">{result.job_id || '—'}</dd></div>
           </dl>
           <div className={styles.notice} role="status">
-            <div className={ui.stack}>
-              <strong>Webhook 需在项目设置中单独配置</strong>
-              <span className="small">注册不会创建、启用或修改 GitLab Webhook。需要自动触发评审时，在项目详情的「设置」中单独启用 Webhook。</span>
-              {result.project?.id ? <Link to={`/projects/${result.project.id}/settings`} onClick={close}>前往项目设置</Link> : null}
-            </div>
+            {result.project?.webhook_state === 'enabled' ? (
+              <div className={ui.stack}>
+                <strong>Webhook 已自动创建并启用</strong>
+                <span className="small">后续 MR 更新会自动触发评审。可在项目设置中查看或重建 Webhook。</span>
+                {result.project?.id ? <Link to={`/projects/${result.project.id}/settings`} onClick={close}>前往项目设置</Link> : null}
+              </div>
+            ) : (
+              <div className={ui.stack}>
+                <strong>{result.project?.webhook_state === 'failed' ? 'Webhook 自动创建失败' : 'Webhook 未启用'}</strong>
+                <span className="small">
+                  {result.project?.webhook_state === 'failed'
+                    ? `${result.project?.webhook_error || 'GitLab 拒绝了 Webhook 创建请求。'} 请在项目设置中检查平台 Webhook 凭据权限后重试。`
+                    : '没有可用的自动触发；需要自动评审时，在项目详情的「设置」中启用 Webhook。'}
+                </span>
+                {result.project?.id ? <Link to={`/projects/${result.project.id}/settings`} onClick={close}>前往项目设置</Link> : null}
+              </div>
+            )}
           </div>
         </div>
       ) : (
         <>
           <ol className={page.stepper} aria-label="注册步骤">
-            <li className={`${page.step} ${page.stepOn}`} aria-current={validation ? undefined : 'step'}><b>1</b>校验连接</li>
-            <li className={validation ? `${page.step} ${page.stepOn}` : page.step} aria-current={validation ? 'step' : undefined}><b>2</b>保存并初始化</li>
+            <li className={`${page.step} ${!validation && !usesSharedBot ? page.stepOn : ''}`} aria-current={!validation && !usesSharedBot ? 'step' : undefined}><b>1</b>校验连接</li>
+            <li className={validation || usesSharedBot ? `${page.step} ${page.stepOn}` : page.step} aria-current={validation || usesSharedBot ? 'step' : undefined}><b>2</b>保存并初始化</li>
           </ol>
           {validationError ? <ErrorState error={validationError} title="校验失败" /> : null}
           {isAlreadyRegistered(error) ? (
@@ -262,6 +290,7 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
                 <div><dt>项目 ID</dt><dd className="tabular">{validation.project_id}</dd></div>
                 <div><dt>当前身份</dt><dd>{validation.username}</dd></div>
                 <div><dt>项目角色</dt><dd>{accessLevelLabel(validation.access_level)}</dd></div>
+                {validation.shared_credential ? <div><dt>凭据</dt><dd>平台共享 bot</dd></div> : null}
                 <div><dt>默认分支</dt><dd className="mono">{validation.default_branch}</dd></div>
                 <div><dt>Key 有效期</dt><dd>{validation.token_expires_at ? formatDate(validation.token_expires_at) : '未提供'}</dd></div>
                 <div>
@@ -286,7 +315,14 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
             <Field label="仓库地址或项目 ID" htmlFor={projectId} error={errors.project || errors.Project} hint="支持 GitLab 项目完整网址，也兼容 group/project 或项目 ID。">
               <input id={projectId} className="input" value={project} onChange={(event) => changeProject(event.target.value)} placeholder="https://gitlab.example.com/group/project" autoComplete="off" aria-invalid={Boolean(errors.project)} disabled={pending} />
             </Field>
-            <Field label="访问 Key" htmlFor={tokenId} error={errors.token || errors.Token} hint="需要 api 和 read_repository scope；只提交给服务端，不写入浏览器存储。">
+            <Field
+              label={sharedBotCredential ? '访问 Key（可选）' : '访问 Key'}
+              htmlFor={tokenId}
+              error={errors.token || errors.Token}
+              hint={sharedBotCredential
+                ? '留空即使用平台共享 bot，无需项目 Key；填写项目 Key 可改用项目级凭据。Key 只提交给服务端，不写入浏览器存储。'
+                : '需要 api 和 read_repository scope；只提交给服务端，不写入浏览器存储。'}
+            >
               <input id={tokenId} className="input" type="password" value={token} onChange={(event) => changeToken(event.target.value)} autoComplete="new-password" aria-invalid={Boolean(errors.token)} disabled={pending} />
             </Field>
           </div>
@@ -303,7 +339,9 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
             </div>
           </Disclosure>
           <div className={page.registrationNotice}>
-            保存并初始化会登记项目、加密保存访问 Key、入队后台拉取与上下文生成，会调用模型并消耗 token；不创建或修改 Webhook，Webhook 在项目设置中单独配置。所有操作都不会修改仓库代码。
+            {sharedBotCredential
+              ? '保存并初始化会登记项目、自动创建 GitLab Webhook（平台代建），评审使用平台共享 bot（填写项目 Key 时改用项目级凭据），并入队后台拉取与上下文生成；会调用模型并消耗 token。所有操作都不会修改仓库代码。'
+              : '保存并初始化会登记项目、加密保存访问 Key、自动创建 GitLab Webhook，入队后台拉取与上下文生成；会调用模型并消耗 token。所有操作都不会修改仓库代码。'}
           </div>
         </>
       )}

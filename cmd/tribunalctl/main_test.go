@@ -116,6 +116,118 @@ func TestRegisterCommand(t *testing.T) {
 	}
 }
 
+// Registration creates the webhook by default; --auto-webhook=false keeps the
+// manual path and must be sent explicitly so the server cannot apply its
+// omitted-field default.
+func TestRegisterCommandAutoWebhookDefaultAndExplicitFalse(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "default on", want: true},
+		{name: "explicit false", args: []string{"--auto-webhook=false"}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var captured capturedRequest
+			ts := httptest.NewServer(captureHandler(t, http.StatusCreated,
+				`{"project":{"id":42},"job_id":"job-1"}`, &captured))
+			defer ts.Close()
+
+			args := []string{
+				"--url", ts.URL, "--api-token-env", "ADMIN_TOKEN",
+				"projects", "register", "--project", "group/repo", "--token-env", "PROJECT_TOKEN",
+			}
+			args = append(args, tt.args...)
+			if _, _, err := runCtl(t, args, map[string]string{
+				"ADMIN_TOKEN": "admin-secret-value", "PROJECT_TOKEN": "glpat-project-token",
+			}, ts.Client()); err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if got, ok := captured.body["auto_webhook"].(bool); !ok || got != tt.want {
+				t.Fatalf("auto_webhook = %v, want %v (body %v)", captured.body["auto_webhook"], tt.want, captured.body)
+			}
+		})
+	}
+}
+
+func TestRegisterCommandSharedBotTokenOptional(t *testing.T) {
+	newServer := func(t *testing.T, shared bool, captured *capturedRequest) *httptest.Server {
+		t.Helper()
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/api/v1/me":
+				capability := "false"
+				if shared {
+					capability = "true"
+				}
+				_, _ = io.WriteString(w, `{"id":1,"username":"admin","role":"admin","shared_bot_credential":`+capability+`}`)
+			case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects":
+				captured.method, captured.path = r.Method, r.URL.Path
+				if r.Body != nil {
+					data, _ := io.ReadAll(r.Body)
+					if err := json.Unmarshal(data, &captured.body); err != nil {
+						t.Errorf("request body is not JSON: %s", data)
+					}
+				}
+				w.WriteHeader(http.StatusCreated)
+				_, _ = io.WriteString(w, `{"project":{"id":42},"job_id":"job-1"}`)
+			default:
+				t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+	}
+
+	t.Run("omitted token uses the shared bot", func(t *testing.T) {
+		var captured capturedRequest
+		ts := newServer(t, true, &captured)
+		defer ts.Close()
+		if _, _, err := runCtl(t, []string{
+			"--url", ts.URL, "--api-token-env", "ADMIN_TOKEN",
+			"projects", "register", "--project", "group/repo",
+		}, map[string]string{"ADMIN_TOKEN": "admin"}, ts.Client()); err != nil {
+			t.Fatalf("run: %v", err)
+		}
+		if captured.path != "/api/v1/projects" || captured.body["token"] != "" {
+			t.Fatalf("body = %v", captured.body)
+		}
+	})
+
+	t.Run("explicit token still wins", func(t *testing.T) {
+		var captured capturedRequest
+		ts := newServer(t, true, &captured)
+		defer ts.Close()
+		if _, _, err := runCtl(t, []string{
+			"--url", ts.URL, "--api-token-env", "ADMIN_TOKEN",
+			"projects", "register", "--project", "group/repo", "--token-env", "PROJECT_TOKEN",
+		}, map[string]string{"ADMIN_TOKEN": "admin", "PROJECT_TOKEN": "glpat-project-token"}, ts.Client()); err != nil {
+			t.Fatalf("run: %v", err)
+		}
+		if captured.body["token"] != "glpat-project-token" {
+			t.Fatalf("body = %v", captured.body)
+		}
+	})
+
+	t.Run("omitted token without the capability is rejected", func(t *testing.T) {
+		var captured capturedRequest
+		ts := newServer(t, false, &captured)
+		defer ts.Close()
+		_, _, err := runCtl(t, []string{
+			"--url", ts.URL, "--api-token-env", "ADMIN_TOKEN",
+			"projects", "register", "--project", "group/repo",
+		}, map[string]string{"ADMIN_TOKEN": "admin"}, ts.Client())
+		if err == nil || err.Error() != "--token-env must be a valid environment variable name" {
+			t.Fatalf("error = %v", err)
+		}
+		if captured.path != "" {
+			t.Fatalf("registration was attempted: %s", captured.path)
+		}
+	})
+}
+
 func TestListAndGetCommands(t *testing.T) {
 	t.Run("list", func(t *testing.T) {
 		var captured capturedRequest

@@ -853,8 +853,12 @@ func (s *Store) RegisterProjectWithOwner(ctx context.Context, p store.Project, o
 	if strings.TrimSpace(p.DefaultBranch) == "" {
 		return "", errors.New("sqlite: default branch is required")
 	}
-	if len(p.TokenEnc) == 0 {
-		return "", errors.New("sqlite: encrypted token is required")
+	// A zero-length token is the shared-credential sentinel: the project has no
+	// project-level token and resolves the instance-wide bot at call time.
+	// Normalize nil so the BLOB column receives an empty value instead of SQL
+	// NULL (the column is NOT NULL for historical compatibility).
+	if p.TokenEnc == nil {
+		p.TokenEnc = []byte{}
 	}
 	settings := p.Settings
 	if len(settings) == 0 {

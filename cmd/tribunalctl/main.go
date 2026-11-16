@@ -153,7 +153,7 @@ var commandHelp = &helpNode{
 			args:    "<action> [options]",
 			actions: []string{"register", "list", "get", "all", "retry-onboarding", "grants", "residues", "webhook"},
 			children: map[string]*helpNode{
-				"register":         {args: "--project ID --token-env NAME [--profile PROFILE] [--auto-webhook] [--settings JSON]"},
+				"register":         {args: "--project ID [--token-env NAME] [--profile PROFILE] [--auto-webhook=true|false] [--settings JSON]"},
 				"list":             {},
 				"get":              {args: "<project ID>"},
 				"retry-onboarding": {args: "<project ID>"},
@@ -587,7 +587,7 @@ type registerRequest struct {
 	Project     string          `json:"project"`
 	Token       string          `json:"token"`
 	Profile     string          `json:"profile,omitempty"`
-	AutoWebhook bool            `json:"auto_webhook,omitempty"`
+	AutoWebhook *bool           `json:"auto_webhook,omitempty"`
 	Settings    json.RawMessage `json:"settings,omitempty"`
 }
 
@@ -602,9 +602,9 @@ func (g *globals) register(ctx context.Context, args []string) error {
 		settings    string
 	)
 	fs.StringVar(&project, "project", "", "GitLab project ID or namespace/path")
-	fs.StringVar(&tokenEnv, "token-env", "", "environment variable holding the project token")
+	fs.StringVar(&tokenEnv, "token-env", "", "environment variable holding the project token (optional when the instance enables the shared bot)")
 	fs.StringVar(&profile, "profile", "", "review profile")
-	fs.BoolVar(&autoWebhook, "auto-webhook", false, "create the GitLab webhook")
+	fs.BoolVar(&autoWebhook, "auto-webhook", true, "create the GitLab webhook (default true; pass --auto-webhook=false to configure it manually)")
 	fs.StringVar(&settings, "settings", "", "JSON project settings")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -615,12 +615,25 @@ func (g *globals) register(ctx context.Context, args []string) error {
 	if project == "" {
 		return errors.New("--project is required")
 	}
-	if tokenEnv == "" || !envNameRE.MatchString(tokenEnv) {
-		return errors.New("--token-env must be a valid environment variable name")
-	}
-	token := g.getenv(tokenEnv)
-	if strings.TrimSpace(token) == "" {
-		return fmt.Errorf("environment variable %s is not set or empty", tokenEnv)
+	token := ""
+	if tokenEnv == "" {
+		// Omitting --token-env is only meaningful when the server advertises
+		// the shared-bot capability; otherwise keep the original requirement.
+		shared, err := g.sharedBotCredential(ctx)
+		if err != nil {
+			return err
+		}
+		if !shared {
+			return errors.New("--token-env must be a valid environment variable name")
+		}
+	} else {
+		if !envNameRE.MatchString(tokenEnv) {
+			return errors.New("--token-env must be a valid environment variable name")
+		}
+		token = g.getenv(tokenEnv)
+		if strings.TrimSpace(token) == "" {
+			return fmt.Errorf("environment variable %s is not set or empty", tokenEnv)
+		}
 	}
 	var rawSettings json.RawMessage
 	if settings != "" {
@@ -637,7 +650,7 @@ func (g *globals) register(ctx context.Context, args []string) error {
 		Project:     project,
 		Token:       token,
 		Profile:     profile,
-		AutoWebhook: autoWebhook,
+		AutoWebhook: &autoWebhook,
 		Settings:    rawSettings,
 	}
 	raw, err := g.request(ctx, http.MethodPost, "/api/v1/projects", body)
@@ -645,6 +658,22 @@ func (g *globals) register(ctx context.Context, args []string) error {
 		return err
 	}
 	return writeRaw(g.stdout, raw)
+}
+
+// sharedBotCredential asks the server whether the instance enables the shared
+// bot credential. The capability bit is configuration state, not a secret.
+func (g *globals) sharedBotCredential(ctx context.Context) (bool, error) {
+	raw, err := g.request(ctx, http.MethodGet, "/api/v1/me", nil)
+	if err != nil {
+		return false, err
+	}
+	var me struct {
+		SharedBotCredential bool `json:"shared_bot_credential"`
+	}
+	if err := json.Unmarshal(raw, &me); err != nil {
+		return false, errors.New("server returned invalid JSON")
+	}
+	return me.SharedBotCredential, nil
 }
 
 func (g *globals) request(ctx context.Context, method, path string, body any) (json.RawMessage, error) {

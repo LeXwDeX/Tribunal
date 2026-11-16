@@ -186,11 +186,11 @@ else
 fi
 ```
 
-`--project` 也可以是 GitLab 项目 ID 或配置的 GitLab 根地址下的完整 HTTP(S) 仓库 URL。命令块会尝试清除当前 shell 的项目 token；无法确认或清除时返回失败，保留响应路径并提示结束受影响的 shell。即使最后清除 token 失败，注册也可能已经成功；不要直接重试，先安全核对项目和 webhook 状态。信号中断可能跳过清理；中断后先尝试在当前 shell 清除 token，若不能确认清除则结束该 shell。清除当前变量也不会清除已继承 token 的子进程或其他副本。响应先写入新建的 0600 私有文件，标准输出只显示项目 ID；该正整数校验不能证明 onboarding 已完成，须另行检查任务状态。确认提示和不含秘密的错误信息写入标准错误。不要输出、复制到日志或直接打开响应文件。默认手工创建 webhook，响应中的 `webhook_secret` 只返回一次。如何通过受控渠道填写 GitLab 的 Secret token、清理私有文件，以及失败时如何处理，见[部署与运维的项目注册步骤](docs/operations.md#浏览器登录与项目注册)。URL 为服务地址加 `/webhooks/gitlab`，启用 Merge request、Comments 和 Push 事件。
+`--project` 也可以是 GitLab 项目 ID 或配置的 GitLab 根地址下的完整 HTTP(S) 仓库 URL。命令块会尝试清除当前 shell 的项目 token；无法确认或清除时返回失败，保留响应路径并提示结束受影响的 shell。即使最后清除 token 失败，注册也可能已经成功；不要直接重试，先安全核对项目和 webhook 状态。信号中断可能跳过清理；中断后先尝试在当前 shell 清除 token，若不能确认清除则结束该 shell。清除当前变量也不会清除已继承 token 的子进程或其他副本。响应先写入新建的 0600 私有文件，标准输出只显示项目 ID；该正整数校验不能证明 onboarding 已完成，须另行检查任务状态。确认提示和不含秘密的错误信息写入标准错误。不要输出、复制到日志或直接打开响应文件。注册命令默认自动创建 webhook（`--auto-webhook` 默认 true）；需要手工配置时显式传入 `--auto-webhook=false`，此时响应中的 `webhook_secret` 只返回一次。如何通过受控渠道填写 GitLab 的 Secret token、清理私有文件，以及失败时如何处理，见[部署与运维的项目注册步骤](docs/operations.md#浏览器登录与项目注册)。URL 为服务地址加 `/webhooks/gitlab`，启用 Merge request、Comments 和 Push 事件。
 
 控制台先「校验连接」，再「保存并初始化」。已认证用户均可调用 `POST /api/v1/projects/validate`，提交 `{project, token}`，只读验证身份、至少 Reporter 权限、scope、有效期和 Git HEAD；普通调用方的 token 必须能识别出该项目至少 Reporter 的成员，否则返回 `400 validation_failed`、字段 `access_level`；平台管理员（本地 `users.id>0` 且 `role=admin`）与静态 bootstrap Bearer（用户 ID 0）免检，管理员免检时 `access_level` 可能为 0。不会保存凭据、调用模型或创建 webhook。校验成功不证明完整 clone 或评论发布可用，详见 [项目 API](docs/design/03-http-api.md#41-项目)。设置页的「更新访问 Key」只更新本平台凭据，不在 GitLab 创建或撤销 token。
 
-自动创建时在同一个注册命令的 `--profile default` 后添加 `--auto-webhook`，仍须将响应写入私有文件并安全清理；把 `server.public_url` 配为 GitLab 能访问的服务地址。重复注册返回冲突，不覆盖已有凭据。自动创建 hook 成功但入库失败时会尝试删除刚创建的 hook；网络中断等异常仍可能需要管理员核对 GitLab 上的 hook。
+自动创建是注册命令的默认行为（`--auto-webhook` 默认 true），仍须将响应写入私有文件并安全清理；把 `server.public_url` 配为 GitLab 能访问的服务地址。重复注册返回冲突，不覆盖已有凭据。自动创建 hook 成功但入库失败时会尝试删除刚创建的 hook；网络中断等异常仍可能需要管理员核对 GitLab 上的 hook。需要手工配置 webhook 时显式传入 `--auto-webhook=false`。
 
 CLI 默认读取 `REVIEW_ADMIN_TOKEN`，可以用全局参数 `--api-token-env NAME` 改变环境变量名。注册响应和普通查询都不会返回项目 access token 或数据库密文。项目业务列表按当前 bearer 所属用户的项目授权过滤，平台管理员用户则返回全部已登记项目；静态 bootstrap token 没有用户 ID 和 grant，因此 `tribunalctl projects list` 返回空列表是正常的。管理面列出全部已登记项目用 `tribunalctl projects all`。用户和授权管理命令：
 
@@ -199,6 +199,14 @@ tribunalctl users list
 ```
 
 查询用户需要平台管理员凭据；普通用户自己的 API token 只用于其已有项目 grant 的业务访问。首次授权前，目标用户需要先通过 OAuth 登录一次，才能在 `users list` 中得到 GitLab 用户 ID。`users disable` 会同时撤销该用户的全部会话和 API token；`users revoke` 只撤销凭据，不禁用账号。已有部署升级后普通用户默认没有 project grant；平台管理员对已登记项目隐式拥有 `manage`，不需要补 grant。先确认具体用户、项目和动作，再按[部署与运维](docs/operations.md#项目授权用户停用和凭据撤销)中的单次授权或用户停用步骤执行，不要默认授予任何用户。
+
+## 共享 bot 凭据（可选）
+
+默认每个项目使用自己的 Project Access Token。实例也可以通过 `gitlab.bot_token_env` 启用共享 bot：该配置只写环境变量名，token 值只从进程环境读取，不写入 YAML、数据库、API 响应或日志。启用后，注册请求省略项目 `token` 即表示使用共享 bot，项目以零长度 token 哨兵落库；显式提供项目 token 时仍优先使用项目级凭据。
+
+准备一个专用 GitLab bot 账号，创建至少带 `api` 和 `read_repository` scope 的 PAT，并在每个要接入的项目上授予 Reporter（读代码/MR、发布评审注记与行内 discussion）。Webhook 由另一个平台 provisioning 凭据代办：设置 `gitlab.provisioning_token_env: TRIBUNAL_PROVISIONING_TOKEN`，用需要 `api` scope、并在项目上至少 Maintainer 的账号创建 PAT。两个 token 都放进权限 0600、已被 gitignore 的 env 文件或密钥管理器；provisioning 凭据建议使用短有效期并纳入到期监控。启动时会自动解析 bot 用户名并补充到 `bot_usernames`；只有解析失败时才需要手工配置。共享模式 + `auto_webhook=true` 要求 provisioning 凭据已配置且有效；`auto_webhook=false` 不需要它，但之后手工启用 Webhook 仍需配置。
+
+共享模式下，注册与「校验连接」都会先确认 bot 至少 Reporter、当前登录用户至少 Reporter，并检查共享凭据的 scope 与有效期；任何一步失败都不会落库、不会创建 Webhook。Reporter 无权写 commit status，因此共享模式会跳过 commit status，评审结果仍通过 MR 注记与行内 discussion 发布；项目级 token 模式照旧。CLI 在共享模式下可以省略 `--token-env`（`tribunalctl projects register --project <项目>`），CLI 会先读取 `/api/v1/me` 的能力位确认实例已启用；未启用时仍要求 `--token-env`。两个凭据的值都会加入子进程的拒绝环境变量列表，不会传给 MCP/Skill 子进程。共享凭据过期、被撤销或 scope 不足是平台级故障：控制台设置页的 `gitlab.shared_bot_credential_state` 会显示 `expired` / `insufficient_scope` / `unreachable`（5 分钟缓存），更新环境变量中的凭据并重启即可恢复，已有项目级 token 不受影响。`GET /api/v1/config` 只返回 `bot_token_configured` 与 `provisioning_token_configured` 布尔值，不返回变量名或值。
 
 ## 入口与队列
 

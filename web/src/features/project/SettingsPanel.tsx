@@ -290,7 +290,7 @@ export function SettingsPanel({ project }: { project: Project }) {
             <div><dt>启用</dt><dd>{project.enabled ? '启用' : '停用'}</dd></div>
             <div><dt>评审语言</dt><dd>{String(project.settings?.language || '继承平台默认')}</dd></div>
             <div><dt>跳过 Draft</dt><dd>{project.settings?.skip_draft === undefined ? '继承平台默认' : project.settings.skip_draft ? '启用' : '禁用'}</dd></div>
-            <div><dt>commit status</dt><dd>{project.settings?.commit_status === undefined ? '继承平台默认' : project.settings.commit_status ? '启用' : '禁用'}</dd></div>
+            <div><dt>commit status</dt><dd>{project.shared_credential ? '共享模式不支持' : project.settings?.commit_status === undefined ? '继承平台默认' : project.settings.commit_status ? '启用' : '禁用'}</dd></div>
             <div><dt>webhook</dt><dd><Badge tone={webhookTone(webhookState)}>{labelForWebhookState(webhookState)}</Badge></dd></div>
             <div><dt>托管方</dt><dd>{webhookManagedByLabel(project.webhook_managed_by, project.hook_id)}</dd></div>
             {project.hook_id ? <div><dt>hook</dt><dd className="mono">#{project.hook_id}</dd></div> : null}
@@ -331,7 +331,17 @@ export function SettingsPanel({ project }: { project: Project }) {
               />
             </Field>
             <BoolSetting label="跳过 Draft MR" value={draft.skip_draft} onChange={(value) => updateDraft('skip_draft', value)} />
-            <BoolSetting label="BLOCKING 时写 commit status" value={draft.commit_status} onChange={(value) => updateDraft('commit_status', value)} />
+            <div className={ui.stack}>
+              <BoolSetting
+                label="BLOCKING 时写 commit status"
+                value={draft.commit_status}
+                disabled={project.shared_credential}
+                onChange={(value) => updateDraft('commit_status', value)}
+              />
+              {project.shared_credential ? (
+                <span className="small muted">共享模式不支持 commit status：共享 bot 只有 Reporter 权限，评审结果仍以 MR 注记与行内讨论发布。</span>
+              ) : null}
+            </div>
             <BoolSetting label="发布失败时写说明" value={draft.post_failure_note} onChange={(value) => updateDraft('post_failure_note', value)} />
             <BoolSetting label="显示模型署名" value={draft.show_model_attribution} onChange={(value) => updateDraft('show_model_attribution', value)} />
             <BoolSetting label="允许仓库内配置" value={draft.allow_repo_config} onChange={(value) => updateDraft('allow_repo_config', value)} />
@@ -401,9 +411,18 @@ export function SettingsPanel({ project }: { project: Project }) {
       <div className={styles.sideColumn}>
         <Panel title="访问凭据">
           <div className={ui.stack}>
-            <span className="small muted">token 过期时间：{project.token_expires_at ? formatDate(project.token_expires_at) : '未提供'}</span>
-            <span className="small muted">token scope：<span className="mono">{project.token_scopes?.join(', ') || '不可用'}</span></span>
-            <Button variant="secondary" onClick={openKeyDialog}>更新访问 Key</Button>
+            {project.shared_credential ? (
+              <>
+                <span className="small muted">凭据来源：平台共享 bot（无项目级 token）</span>
+                <span className="small muted">评审使用平台共享 bot；Webhook 由平台代建。填写项目 Key 可切换为项目级凭据。</span>
+              </>
+            ) : (
+              <>
+                <span className="small muted">token 过期时间：{project.token_expires_at ? formatDate(project.token_expires_at) : '未提供'}</span>
+                <span className="small muted">token scope：<span className="mono">{project.token_scopes?.join(', ') || '不可用'}</span></span>
+              </>
+            )}
+            <Button variant="secondary" onClick={openKeyDialog}>{project.shared_credential ? '设置项目级 Key' : '更新访问 Key'}</Button>
             <ActionHint>更新访问 Key 不会修改 GitLab Webhook。</ActionHint>
           </div>
         </Panel>

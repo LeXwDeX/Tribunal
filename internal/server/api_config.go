@@ -13,7 +13,7 @@ import (
 // environment values.
 type configEffectiveView struct {
 	Server         config.ServerConfig             `json:"server"`
-	GitLab         config.GitLabConfig             `json:"gitlab"`
+	GitLab         configEffectiveGitLabView       `json:"gitlab"`
 	Auth           configEffectiveAuthView         `json:"auth"`
 	Storage        configEffectiveStorageView      `json:"storage"`
 	Secrets        configEffectiveSecretsView      `json:"secrets"`
@@ -27,6 +27,19 @@ type configEffectiveView struct {
 	Skills         configEffectiveSkillsView       `json:"skills"`
 	Blocks         map[string]config.BlockBinding  `json:"blocks"`
 	ReviewDefaults config.ProjectSettings          `json:"review_defaults"`
+}
+
+// configEffectiveGitLabView mirrors GitLabConfig without the credential
+// environment variable names. Both credentials are reported only as booleans
+// so neither a variable name nor its value leaves the process.
+type configEffectiveGitLabView struct {
+	URL                         string               `json:"url"`
+	RequestTimeout              time.Duration        `json:"request_timeout"`
+	MaxConcurrency              int                  `json:"max_concurrency"`
+	BotUsernames                []string             `json:"bot_usernames"`
+	BotTokenConfigured          bool                 `json:"bot_token_configured"`
+	ProvisioningTokenConfigured bool                 `json:"provisioning_token_configured"`
+	CatchUp                     config.CatchUpConfig `json:"catch_up"`
 }
 
 type configEffectiveAuthView struct {
@@ -216,7 +229,15 @@ func effectiveConfigView(cfg *config.Config) configEffectiveView {
 	}
 	return configEffectiveView{
 		Server: cfg.Server,
-		GitLab: cfg.GitLab,
+		GitLab: configEffectiveGitLabView{
+			URL:                         cfg.GitLab.URL,
+			RequestTimeout:              cfg.GitLab.RequestTimeout,
+			MaxConcurrency:              cfg.GitLab.MaxConcurrency,
+			BotUsernames:                cfg.GitLab.BotUsernames,
+			BotTokenConfigured:          cfg.GitLab.BotTokenEnv != "",
+			ProvisioningTokenConfigured: cfg.GitLab.ProvisioningTokenEnv != "",
+			CatchUp:                     cfg.GitLab.CatchUp,
+		},
 		Auth: configEffectiveAuthView{
 			BootstrapAdmins: cfg.Auth.BootstrapAdmins,
 			SessionTTL:      cfg.Auth.SessionTTL,
@@ -265,7 +286,7 @@ func internalConfigPath(path string) bool {
 	case "storage.dsn", "workspace.root", "workspace.git_bin",
 		"secrets.master_key_env", "auth.bootstrap_token_env",
 		"auth.oauth.client_id_env", "auth.oauth.client_secret_env",
-		"mcp.config", "prompts_dir":
+		"gitlab.bot_token_env", "gitlab.provisioning_token_env", "mcp.config", "prompts_dir":
 		return true
 	}
 	if strings.HasPrefix(path, "skills.dirs") || strings.HasPrefix(path, "default_extensions.") {

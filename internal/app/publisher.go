@@ -70,6 +70,7 @@ type Publisher struct {
 	gitlab         GitLabClient
 	git            GitOps
 	cipher         *secret.Cipher
+	tokens         *projectTokenResolver
 	engine         *dag.Engine
 	reviewDefaults config.ProjectSettings
 	profiles       map[string]config.ProfileConfig
@@ -172,11 +173,14 @@ func mrLockRegistry(locks *workflowLocks) *workflowLocks {
 
 // PublisherConfig configures Publisher.
 type PublisherConfig struct {
-	Store          ReviewStore
-	Workspace      *workspace.Manager
-	GitLab         GitLabClient
-	Git            GitOps
-	Cipher         *secret.Cipher
+	Store     ReviewStore
+	Workspace *workspace.Manager
+	GitLab    GitLabClient
+	Git       GitOps
+	Cipher    *secret.Cipher
+	// SharedBotToken enables shared-credential fallback for projects without
+	// their own token.
+	SharedBotToken string
 	Engine         *dag.Engine
 	ReviewDefaults config.ProjectSettings
 	Profiles       map[string]config.ProfileConfig
@@ -222,6 +226,7 @@ func NewPublisher(cfg PublisherConfig) (*Publisher, error) {
 		gitlab:         cfg.GitLab,
 		git:            cfg.Git,
 		cipher:         cfg.Cipher,
+		tokens:         newProjectTokenResolver(cfg.Cipher, cfg.SharedBotToken),
 		engine:         cfg.Engine,
 		reviewDefaults: cfg.ReviewDefaults,
 		profiles:       cfg.Profiles,
@@ -1063,16 +1068,16 @@ func (p *Publisher) load(ctx context.Context, workflowID string) (*loadedReview,
 	if project == nil || !project.Enabled {
 		return nil, PermanentJob(fmt.Errorf("project %d is disabled", workflow.ProjectID))
 	}
-	token, err := p.cipher.Open(project.TokenEnc, secret.TokenAAD(project.ID))
+	token, err := resolveProjectToken(p.tokens, p.cipher, project)
 	if err != nil {
-		return nil, PermanentJob(fmt.Errorf("project token is unavailable"))
+		return nil, PermanentJob(fmt.Errorf("project credential is unavailable"))
 	}
 	return &loadedReview{
 		workflow: workflow,
 		dossier:  &dossier,
 		record:   record,
 		project:  project,
-		token:    string(token),
+		token:    token,
 		mrIID:    *workflow.MRIID,
 	}, nil
 }
@@ -1648,6 +1653,12 @@ func commitStatusPublishKey(sha, state string) string {
 }
 
 func (p *Publisher) publishCommitStatus(ctx context.Context, loaded *loadedReview, state, description string, recheck func() error) error {
+	// A Reporter-level shared bot cannot create commit statuses. The effective
+	// config disables this path; this guard also prevents a publication row for
+	// a status that was never written.
+	if sharedCredentialProject(loaded.project) {
+		return nil
+	}
 	status := gitlab.CommitStatus{
 		State: state, Name: "ai-review", TargetURL: p.detailURL(loaded.workflow.ID), Description: description,
 	}
@@ -1663,7 +1674,21 @@ func (p *Publisher) publishCommitStatus(ctx context.Context, loaded *loadedRevie
 	return err
 }
 
+// sharedCredentialProjectState looks up the sentinel predicate for callers
+// that only have a project ID, so no commit status request can be issued for a
+// shared project even through a direct path.
+func (p *Publisher) sharedCredentialProjectState(ctx context.Context, projectID int64) bool {
+	if p == nil || p.store == nil {
+		return false
+	}
+	project, err := p.store.GetProject(ctx, projectID)
+	return err == nil && sharedCredentialProject(project)
+}
+
 func (p *Publisher) setCommitStatus(ctx context.Context, token string, projectID int64, sha string, status gitlab.CommitStatus, recheck func() error) error {
+	if p.sharedCredentialProjectState(ctx, projectID) {
+		return nil
+	}
 	return p.retry(ctx, func() error {
 		if err := recheck(); err != nil {
 			return err

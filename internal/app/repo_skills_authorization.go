@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/LeXwDeX/tribunal/internal/repo"
-	"github.com/LeXwDeX/tribunal/internal/secret"
 	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
@@ -116,11 +115,11 @@ func (d *Dispatcher) ReplaceRepositorySkillAuthorization(ctx context.Context, gr
 		if !store.ValidRepositorySkillSnapshotSHA256(snapshotSHA256) {
 			return nil, validationError("snapshot SHA-256 is required", Detail{Field: "snapshot_sha256", Message: "must identify the reviewed filtered snapshot"})
 		}
-		token, err := d.cipher.Open(project.TokenEnc, secret.TokenAAD(project.ID))
+		token, err := resolveProjectToken(d.tokens, d.cipher, project)
 		if err != nil {
-			return nil, errors.New("app: project token is unavailable")
+			return nil, errors.New("app: project credential is unavailable")
 		}
-		catalogue, err := discoverRepositorySkills(ctx, ws, d.onboarding.git, d.onboarding.gitlab, project, string(token), grant.TargetBranch, d.onboarding.reviewDefaults, d.onboarding.profiles)
+		catalogue, err := discoverRepositorySkills(ctx, ws, d.onboarding.git, d.onboarding.gitlab, project, token, grant.TargetBranch, d.onboarding.reviewDefaults, d.onboarding.profiles)
 		if err != nil {
 			return nil, err
 		}

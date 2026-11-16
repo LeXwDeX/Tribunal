@@ -41,6 +41,7 @@ type WorkspaceService struct {
 	queue          JobEnqueuer
 	gitlab         GitLabClient
 	cipher         *secret.Cipher
+	tokens         *projectTokenResolver
 	workspace      *workspace.Manager
 	git            GitOps
 	engine         *dag.Engine
@@ -62,10 +63,13 @@ type WorkspaceService struct {
 
 // WorkspaceServiceConfig configures WorkspaceService.
 type WorkspaceServiceConfig struct {
-	Store          ReviewStore
-	Queue          JobEnqueuer
-	GitLab         GitLabClient
-	Cipher         *secret.Cipher
+	Store  ReviewStore
+	Queue  JobEnqueuer
+	GitLab GitLabClient
+	Cipher *secret.Cipher
+	// SharedBotToken enables shared-credential fallback for projects without
+	// their own token.
+	SharedBotToken string
 	Workspace      *workspace.Manager
 	Git            GitOps
 	Engine         *dag.Engine
@@ -112,6 +116,7 @@ func NewWorkspaceService(cfg WorkspaceServiceConfig) (*WorkspaceService, error) 
 		queue:          cfg.Queue,
 		gitlab:         cfg.GitLab,
 		cipher:         cfg.Cipher,
+		tokens:         newProjectTokenResolver(cfg.Cipher, cfg.SharedBotToken),
 		workspace:      cfg.Workspace,
 		git:            cfg.Git,
 		engine:         engine,
@@ -807,11 +812,11 @@ func (s *WorkspaceService) projectToken(ctx context.Context, projectID int64) (*
 	if project == nil || !project.Enabled {
 		return nil, "", PermanentJob(fmt.Errorf("project is disabled"))
 	}
-	token, err := s.cipher.Open(project.TokenEnc, secret.TokenAAD(project.ID))
+	token, err := resolveProjectToken(s.tokens, s.cipher, project)
 	if err != nil {
-		return nil, "", PermanentJob(fmt.Errorf("project token is unavailable"))
+		return nil, "", PermanentJob(fmt.Errorf("project credential is unavailable"))
 	}
-	return project, string(token), nil
+	return project, token, nil
 }
 
 func (s *WorkspaceService) workspaceReviewConfig(ctx context.Context, project *store.Project, token, ref string) (review.RepoDocs, effectiveReviewConfig, error) {

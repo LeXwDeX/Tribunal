@@ -50,6 +50,12 @@ services:
       GITLAB_OAUTH_CLIENT_ID: "${GITLAB_OAUTH_CLIENT_ID:-}"
       GITLAB_OAUTH_CLIENT_SECRET: "${GITLAB_OAUTH_CLIENT_SECRET:-}"
       GITLAB_ADMIN_USERNAME: "${GITLAB_ADMIN_USERNAME:-}"
+      # Optional instance-wide shared bot credential; enable it by uncommenting
+      # gitlab.bot_token_env in config/server.docker.yaml and setting this name.
+      TRIBUNAL_BOT_TOKEN: "${TRIBUNAL_BOT_TOKEN:-}"
+      # Optional platform webhook credential for shared projects; enable it via
+      # gitlab.provisioning_token_env and set this name in .env.
+      TRIBUNAL_PROVISIONING_TOKEN: "${TRIBUNAL_PROVISIONING_TOKEN:-}"
     command: ["--config", "/app/config/server.yaml"]
 
 volumes:

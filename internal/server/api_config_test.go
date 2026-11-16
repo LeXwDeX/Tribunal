@@ -23,6 +23,8 @@ func writeConfigFile(t *testing.T, name, body string) string {
 const configEndpointBase = `
 gitlab:
   url: "https://gitlab.example.com"
+  bot_token_env: TRIBUNAL_CONFIG_TEST_BOT_TOKEN
+  provisioning_token_env: TRIBUNAL_CONFIG_TEST_PROVISIONING_TOKEN
 server:
   listen: ":9090"
 storage:
@@ -58,6 +60,8 @@ jobs:
 
 func loadConfigSnapshot(t *testing.T, overlayBody string) *config.Snapshot {
 	t.Helper()
+	t.Setenv("TRIBUNAL_CONFIG_TEST_BOT_TOKEN", "glpat-config-test-secret")
+	t.Setenv("TRIBUNAL_CONFIG_TEST_PROVISIONING_TOKEN", "glpat-config-provisioning-secret")
 	base := writeConfigFile(t, "server.yaml", configEndpointBase)
 	overlay := ""
 	if overlayBody != "" {
@@ -98,6 +102,8 @@ func TestConfigViewShowsFileEffectiveValuesAndOrigins(t *testing.T) {
 		"GITLAB_CLIENT_ID", "GITLAB_CLIENT_SECRET", "hunter2",
 		"/srv/private", "/etc/tribunal", "file:", "api_key_env", "master_key_env",
 		"bootstrap_token_env", "client_secret_env", "prompts_dir",
+		"TRIBUNAL_CONFIG_TEST_BOT_TOKEN", "glpat-config-test-secret", "bot_token_env",
+		"TRIBUNAL_CONFIG_TEST_PROVISIONING_TOKEN", "glpat-config-provisioning-secret", "provisioning_token_env",
 		`"price"`, "input_per_mtok", "output_per_mtok",
 	} {
 		if strings.Contains(text, forbidden) {
@@ -118,6 +124,19 @@ func TestConfigViewShowsFileEffectiveValuesAndOrigins(t *testing.T) {
 	storageView := effective["storage"].(map[string]any)
 	if _, ok := storageView["dsn"]; ok {
 		t.Fatalf("storage view leaked the DSN field: %v", storageView)
+	}
+	gitlabView := effective["gitlab"].(map[string]any)
+	if gitlabView["bot_token_configured"] != true {
+		t.Fatalf("gitlab view = %v", gitlabView)
+	}
+	if gitlabView["provisioning_token_configured"] != true {
+		t.Fatalf("provisioning_token_configured = %v", gitlabView["provisioning_token_configured"])
+	}
+	if _, ok := gitlabView["bot_token_env"]; ok {
+		t.Fatalf("gitlab view leaked the credential variable name: %v", gitlabView)
+	}
+	if _, ok := gitlabView["provisioning_token_env"]; ok {
+		t.Fatalf("gitlab view leaked the provisioning variable name: %v", gitlabView)
 	}
 	providers := effective["providers"].([]any)
 	if len(providers) != 1 {
@@ -143,8 +162,8 @@ func TestConfigViewShowsFileEffectiveValuesAndOrigins(t *testing.T) {
 	}
 	for _, hidden := range []string{"storage.dsn", "workspace.root", "workspace.git_bin", "secrets.master_key_env",
 		"auth.bootstrap_token_env", "auth.oauth.client_id_env", "auth.oauth.client_secret_env",
-		"mcp.config", "skills.dirs", "skills.dirs[0]", "prompts_dir", "providers.claude.api_key_env",
-		"providers.claude.price", "providers.claude.price.input_per_mtok"} {
+		"gitlab.bot_token_env", "gitlab.provisioning_token_env", "mcp.config", "skills.dirs", "skills.dirs[0]", "prompts_dir",
+		"providers.claude.api_key_env", "providers.claude.price", "providers.claude.price.input_per_mtok"} {
 		if _, ok := origins[hidden]; ok {
 			t.Errorf("origins exposed %s", hidden)
 		}

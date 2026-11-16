@@ -177,8 +177,8 @@ docker compose up -d --force-recreate --wait --wait-timeout 120
 
 **Webhook**（二选一，都要先征得用户同意）
 
-- **自动（推荐）**：经用户同意后，在运维节注册命令的 `--profile default` 后添加 `--auto-webhook`。项目 token 需要 Maintainer 权限，并且 `TRIBUNAL_PUBLIC_URL` 能被 GitLab 访问。注册成功就说明 hook 已经建好。
-- **手动**：使用运维节默认的不带 `--auto-webhook` 的注册命令，响应文件里的 `webhook_secret` 只在这一次返回。在 GitLab 项目的 Webhooks 页面添加：
+- **自动（默认，推荐）**：经用户同意后，直接使用运维节注册命令（`--auto-webhook` 默认开启，也可显式传入）。项目 token 需要 Maintainer 权限，并且 `TRIBUNAL_PUBLIC_URL` 能被 GitLab 访问。注册成功就说明 hook 已经建好。
+- **手动**：经用户同意后，使用运维节注册命令并显式传入 `--auto-webhook=false`，响应文件里的 `webhook_secret` 只在这一次返回。在 GitLab 项目的 Webhooks 页面添加：
   - URL：`<TRIBUNAL_PUBLIC_URL>/webhooks/gitlab`；
   - Secret token：响应文件里的 `webhook_secret`；
   - 勾选 Merge request events、Comments、Push events。
@@ -186,6 +186,10 @@ docker compose up -d --force-recreate --wait --wait-timeout 120
   只能按运维节说明通过受控渠道传递 secret，不要将它放入命令行参数、终端、日志或聊天。如果使用 `glab api` 或 GitLab API，须通过标准输入或受保护的请求体文件传递并禁止记录请求体；无法保证受控渠道时停止，由有权限的用户安全完成配置。
 - 自动注册或手动配置完成后，在同一个 shell 按运维节安全删除本次 `$REGISTRATION_FILE`；确认项目 token 已清除、响应路径可清除且路径和文件身份与只读标记一致，才删除文件。删除后须核验打开的文件已解除链接且原路径不存在，才清除 `REGISTRATION_FILE` 并关闭描述符。清除、删除或核验失败时返回失败，以便安全处理，不要盲目重试；路径缺失或文件不存在也按失败处理。处理完毕后，下一次注册使用新 shell。预检、删除、核验和清除变量并非原子操作，也不保护不可信同 UID 进程或不受控目录；删除后变量清理意外失败时需安全核对文件状态。
 - **以后再启用、重建或停用**：在控制台「项目 → 设置 → GitLab Webhook」里操作，需要该项目的 `manage` 权限。或者在第 6 步授权之后，用授权用户的 API token 调用 CLI（`--api-token-env USER_TOKEN projects webhook enable|rebuild|disable <项目ID>`）。重建会轮换 secret。
+
+**共享 bot（可选，仅实例启用时）**
+
+实例配置 `gitlab.bot_token_env` 后，注册和「校验连接」都可以省略项目 token：`tribunalctl projects register --project <项目>`。共享 bot 必须在项目上至少 Reporter，登录用户本人仍需至少 Reporter；服务端会在落库前检查共享凭据的 scope、有效期和这两项角色。自动创建 Webhook 还需要 `gitlab.provisioning_token_env`：provisioning 凭据需带 `api` scope、在项目上至少 Maintainer，仅用于 hook 的 create/update/delete/list/get，不用于评审读写；未配置或无效时共享 + 自动建 hook 会在落库前被拒绝，`--auto-webhook=false` 不需要它。共享模式会跳过 commit status（Reporter 无该权限），评审结果仍走 MR 注记与行内 discussion。两个 token 值只放在权限 0600、已被 gitignore 的 env 文件或密钥管理器中，由对应变量名读取；不要写入 YAML、命令行、日志或聊天，并建议为 provisioning 凭据设置短有效期与到期监控。凭据过期或被撤销时更新该变量并重启，已有项目级 token 仍优先。
 
 **验证**
 

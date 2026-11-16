@@ -30,9 +30,10 @@ const (
 
 	// Fixed hook-health messages. The console shows them as the failure reason;
 	// they never include upstream text or credentials.
-	webhookDisabledMessage      = "GitLab disabled the managed project webhook after repeated delivery failures"
-	webhookMissingMessage       = "the managed project webhook is missing or was deleted in GitLab"
-	webhookTokenRejectedMessage = "project token was rejected by GitLab while checking the webhook; replace the project token"
+	webhookDisabledMessage             = "GitLab disabled the managed project webhook after repeated delivery failures"
+	webhookMissingMessage              = "the managed project webhook is missing or was deleted in GitLab"
+	webhookTokenRejectedMessage        = "project token was rejected by GitLab while checking the webhook; replace the project token"
+	webhookProvisioningRejectedMessage = "provisioning credential was rejected by GitLab while checking the webhook; update the credential referenced by gitlab.provisioning_token_env and restart the service"
 )
 
 // catchUpNamespace derives the deterministic delivery UUID of a catch-up
@@ -60,9 +61,14 @@ type CatchUpServiceConfig struct {
 	Webhooks  *WebhookService
 	Workspace *workspace.Manager
 	Cipher    *secret.Cipher
-	Settings  config.CatchUpConfig
-	Logger    *slog.Logger
-	Now       func() time.Time
+	// SharedBotToken enables shared-credential fallback for projects without
+	// their own token.
+	SharedBotToken string
+	// ProvisioningToken owns webhook lifecycle calls for shared projects.
+	ProvisioningToken string
+	Settings          config.CatchUpConfig
+	Logger            *slog.Logger
+	Now               func() time.Time
 	// MRLocks is the shared per-merge-request lock registry. Catch-up enqueues
 	// reviews, so it holds the same lock as every note writer (#475).
 	MRLocks *workflowLocks
@@ -78,6 +84,7 @@ type CatchUpService struct {
 	webhooks  *WebhookService
 	workspace *workspace.Manager
 	cipher    *secret.Cipher
+	tokens    *projectTokenResolver
 	settings  config.CatchUpConfig
 	// mrLocks serializes the catch-up generation bump with every note writer.
 	mrLocks *workflowLocks
@@ -111,6 +118,7 @@ func NewCatchUpService(cfg CatchUpServiceConfig) (*CatchUpService, error) {
 		webhooks:  cfg.Webhooks,
 		workspace: cfg.Workspace,
 		cipher:    cfg.Cipher,
+		tokens:    newProjectTokenResolver(cfg.Cipher, cfg.SharedBotToken).WithProvisioning(cfg.ProvisioningToken),
 		settings:  cfg.Settings,
 		mrLocks:   cfg.MRLocks,
 		logger:    logger,
@@ -197,7 +205,13 @@ func (s *CatchUpService) scanProject(ctx context.Context, projectID int64, budge
 	if !usable {
 		return 0, 0, catchUpSkipped
 	}
-	s.reconcileHookHealth(ctx, project, token)
+	// Hook health is a provisioning-credential operation. The review token is
+	// a Reporter-level shared bot and cannot list hooks; using it here wrote a
+	// false "provisioning rejected" failure. The review credential is only for
+	// listing merge requests below.
+	if hookToken, err := resolveHookToken(s.tokens, s.cipher, project); err == nil {
+		s.reconcileHookHealth(ctx, project, hookToken)
+	}
 	if _, err := ResolveSettings(project.Settings, s.webhooks.reviewDefaults); err != nil {
 		s.logger.Warn("catch-up skipped project with invalid settings", "project_id", projectID)
 		return 0, 0, catchUpSkipped
@@ -266,18 +280,22 @@ func (s *CatchUpService) ReconcileHookHealth(ctx context.Context) {
 		}
 		return
 	}
-	for _, project := range projects {
+	for i := range projects {
 		if ctx.Err() != nil {
 			return
 		}
+		project := &projects[i]
 		if !project.Enabled || project.HookID == nil {
 			continue
 		}
-		loaded, token, usable := s.projectToken(ctx, project.ID)
-		if !usable {
+		// Only the hook credential matters here. A missing or unusable review
+		// credential must not suppress hook health reconciliation when
+		// provisioning is valid.
+		token, err := resolveHookToken(s.tokens, s.cipher, project)
+		if err != nil {
 			continue
 		}
-		s.reconcileHookHealth(ctx, loaded, token)
+		s.reconcileHookHealth(ctx, project, token)
 	}
 }
 
@@ -300,7 +318,11 @@ func (s *CatchUpService) reconcileHookHealth(ctx context.Context, project *store
 	hooks, err := lister.ListProjectHooks(ctx, token, project.ID)
 	if err != nil {
 		if gitlab.StatusOf(err) == http.StatusUnauthorized || gitlab.StatusOf(err) == http.StatusForbidden {
-			s.setHookHealth(ctx, writer, project, store.WebhookStateFailed, webhookTokenRejectedMessage)
+			message := webhookTokenRejectedMessage
+			if s.tokens.UsesShared(project) {
+				message = webhookProvisioningRejectedMessage
+			}
+			s.setHookHealth(ctx, writer, project, store.WebhookStateFailed, message)
 		}
 		if ctx.Err() == nil {
 			s.logger.Warn("webhook health check failed", "project_id", project.ID, "error_class", errclass.Of(err))
@@ -320,7 +342,8 @@ func (s *CatchUpService) reconcileHookHealth(ctx context.Context, project *store
 	case managed.AlertStatus == "disabled" || managed.AlertStatus == "temporarily_disabled":
 		s.setHookHealth(ctx, writer, project, store.WebhookStateFailed, webhookDisabledMessage)
 	case project.WebhookState == store.WebhookStateFailed &&
-		(project.WebhookError == webhookDisabledMessage || project.WebhookError == webhookMissingMessage || project.WebhookError == webhookTokenRejectedMessage):
+		(project.WebhookError == webhookDisabledMessage || project.WebhookError == webhookMissingMessage ||
+			project.WebhookError == webhookTokenRejectedMessage || project.WebhookError == webhookProvisioningRejectedMessage):
 		// A hook that recovered is healthy again; unrelated failures stay.
 		s.setHookHealth(ctx, writer, project, store.WebhookStateEnabled, "")
 	}
@@ -342,11 +365,11 @@ func (s *CatchUpService) projectToken(ctx context.Context, projectID int64) (*st
 	if err != nil || project == nil || !project.Enabled {
 		return nil, "", false
 	}
-	token, err := s.cipher.Open(project.TokenEnc, secret.TokenAAD(project.ID))
-	if err != nil || len(token) == 0 {
+	token, err := resolveProjectToken(s.tokens, s.cipher, project)
+	if err != nil || token == "" {
 		return nil, "", false
 	}
-	return project, string(token), true
+	return project, token, true
 }
 
 // catchUpMR enqueues a review when the MR's current head has no review
