@@ -91,8 +91,9 @@ type reviewStatusUpdate struct {
 	// published summary lives in a separate note that this writer must not
 	// find or edit.
 	LegacyMarker bool
-	// CleanupLegacy removes the bot's legacy status note once the merged note
-	// carries the final body, so the MR keeps exactly one review note (#475).
+	// CleanupLegacy selects the bot's legacy status notes for removal once the
+	// merged note carries the final body. writeStatus only reports them; the
+	// caller deletes them after the merged note id is durable (#475, #497).
 	CleanupLegacy bool
 }
 
@@ -124,20 +125,22 @@ func (r *statusReporter) send(ctx context.Context, call func(context.Context) er
 }
 
 // writeStatus creates or updates the single marker note and returns the note
-// ID and body hash for the applied row.
-func (r *statusReporter) writeStatus(ctx context.Context, projectID, mrIID int64, token string, update reviewStatusUpdate) (int64, string, error) {
+// ID, body hash, and the bot's legacy status notes still present. Deleting
+// them is the caller's job: the merged note id must be recorded first, so a
+// permalink never points at a deleted legacy note (#497).
+func (r *statusReporter) writeStatus(ctx context.Context, projectID, mrIID int64, token string, update reviewStatusUpdate) (int64, string, []int64, error) {
 	if r == nil || r.gitlab == nil {
-		return 0, "", errors.New("app: status reporter is not configured")
+		return 0, "", nil, errors.New("app: status reporter is not configured")
 	}
 	if projectID <= 0 || mrIID <= 0 || token == "" {
-		return 0, "", errors.New("app: review status ids and token are required")
+		return 0, "", nil, errors.New("app: review status ids and token are required")
 	}
 	user, err := r.gitlab.CurrentUser(ctx, token)
 	if err != nil {
-		return 0, "", fmt.Errorf("app: status identity lookup: %w", err)
+		return 0, "", nil, fmt.Errorf("app: status identity lookup: %w", err)
 	}
 	if user == nil || user.ID <= 0 {
-		return 0, "", errors.New("app: status identity is unavailable")
+		return 0, "", nil, errors.New("app: status identity is unavailable")
 	}
 	body := reviewStatusBody(update)
 	hash := sha256Hex(body)
@@ -147,7 +150,11 @@ func (r *statusReporter) writeStatus(ctx context.Context, projectID, mrIID int64
 	}
 	notes, err := r.gitlab.ListMRNotes(ctx, token, projectID, mrIID)
 	if err != nil {
-		return 0, "", fmt.Errorf("app: status note lookup: %w", err)
+		return 0, "", nil, fmt.Errorf("app: status note lookup: %w", err)
+	}
+	var legacy []int64
+	if update.CleanupLegacy {
+		legacy = legacyStatusNoteIDs(notes, user.ID)
 	}
 	noteID := int64(0)
 	noteHash := hash
@@ -175,10 +182,10 @@ func (r *statusReporter) writeStatus(ctx context.Context, projectID, mrIID int64
 			break
 		}
 		if errors.Is(err, workspace.ErrOutboundInvalidated) {
-			return 0, "", err
+			return 0, "", nil, err
 		}
 		if !gitlab.IsNotFound(err) {
-			return 0, "", fmt.Errorf("app: status note update: %w", err)
+			return 0, "", nil, fmt.Errorf("app: status note update: %w", err)
 		}
 		// The note was deleted between list and update. Recreate it below.
 		noteID = 0
@@ -192,34 +199,35 @@ func (r *statusReporter) writeStatus(ctx context.Context, projectID, mrIID int64
 			return err
 		})
 		if err != nil {
-			return 0, "", fmt.Errorf("app: status note creation: %w", err)
+			return 0, "", nil, fmt.Errorf("app: status note creation: %w", err)
 		}
 		if created == nil || created.ID <= 0 {
-			return 0, "", errors.New("app: status note creation returned no note")
+			return 0, "", nil, errors.New("app: status note creation returned no note")
 		}
 		noteID = created.ID
 	}
-	// Cleanup runs on every converged write, including the identical-body and
-	// refused-regression early paths, so a legacy note cannot survive a restart
-	// after the merged note is already current (#475).
-	if update.CleanupLegacy {
-		if err := r.deleteLegacyStatusNotes(ctx, projectID, mrIID, token, notes, user.ID); err != nil {
-			return 0, "", err
-		}
-	}
-	return noteID, noteHash, nil
+	return noteID, noteHash, legacy, nil
 }
 
-// deleteLegacyStatusNotes removes the bot's own pre-#452 status notes. Foreign
+// legacyStatusNoteIDs returns the bot's own pre-#452 status notes. Foreign
 // notes and the merged note never match both the author and marker filters.
-func (r *statusReporter) deleteLegacyStatusNotes(ctx context.Context, projectID, mrIID int64, token string, notes []gitlab.Note, authorID int64) error {
+func legacyStatusNoteIDs(notes []gitlab.Note, authorID int64) []int64 {
+	var ids []int64
 	for _, note := range notes {
 		if note.AuthorID != authorID || !strings.HasPrefix(note.Body, reviewLegacyStatusMarkerPrefix) {
 			continue
 		}
-		noteID := note.ID
+		ids = append(ids, note.ID)
+	}
+	return ids
+}
+
+// deleteLegacyStatusNotes removes the reported legacy status notes.
+func (r *statusReporter) deleteLegacyStatusNotes(ctx context.Context, projectID, mrIID int64, token string, noteIDs []int64) error {
+	for _, noteID := range noteIDs {
+		id := noteID
 		err := r.send(ctx, func(ctx context.Context) error {
-			return r.gitlab.DeleteMRNote(ctx, token, projectID, mrIID, noteID)
+			return r.gitlab.DeleteMRNote(ctx, token, projectID, mrIID, id)
 		})
 		if err == nil || gitlab.IsNotFound(err) {
 			continue

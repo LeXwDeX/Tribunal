@@ -484,6 +484,40 @@ func TestRotateTokenEmptyWithoutProvisioningWarnsHookHealthUnmonitored(t *testin
 	}
 }
 
+// A hook-less project has no hook health to monitor, so switching without a
+// provisioning credential must not warn about unmonitored hook health (#497).
+func TestRotateTokenHooklessWithoutProvisioningSkipsUnmonitoredWarning(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	api := newSharedBotAPI()
+	configureSharedBot(api)
+	api.setAccess(projectAccessTok, botUserID, reporterAccessLevel)
+	service := newSharedBotProjectServiceWithProvisioning(t, st, api, sharedBotToken, "", nil)
+	if _, err := service.Register(ctx, RegisterInput{
+		Project: "42", AccessToken: projectAccessTok, AutoWebhook: false, OwnerUserID: registrantUserID,
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	rotation, err := service.RotateToken(ctx, 42, "")
+	if err != nil {
+		t.Fatalf("switch to shared: %v", err)
+	}
+	if !hasWarning(rotation.Warnings, "shared_credential_unverified") {
+		t.Fatalf("switch warnings = %+v, want the unverified shared credential warning", rotation.Warnings)
+	}
+	if hasWarning(rotation.Warnings, "shared_hook_health_unmonitored") {
+		t.Fatalf("hook-less switch warned about hook health: %+v", rotation.Warnings)
+	}
+	saved, err := st.GetProject(ctx, 42)
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	if saved.HookID != nil || saved.WebhookState != store.WebhookStateDisabled || saved.WebhookError != "" {
+		t.Fatalf("hook-less switch state = %+v", saved)
+	}
+}
+
 // The periodic scan reads the project before it calls GitLab. A credential
 // switch that lands in between must not be overwritten by the stale
 // observation, which would otherwise restore the old token failure.

@@ -238,7 +238,7 @@ func (s *ReviewService) RunStatusJob(ctx context.Context, job *jobs.Job) error {
 	reporter := *s.status
 	reporter.outbound = outboundSender(ws)
 	reporter.durable = true
-	noteID, hash, err := reporter.writeStatus(ctx, project.ID, row.MRIID, token, update)
+	noteID, hash, legacy, err := reporter.writeStatus(ctx, project.ID, row.MRIID, token, update)
 	if err != nil {
 		if errors.Is(err, workspace.ErrOutboundInvalidated) {
 			return err
@@ -248,7 +248,7 @@ func (s *ReviewService) RunStatusJob(ctx context.Context, job *jobs.Job) error {
 		}
 		return s.settleStatusVisit(ctx, row, selfHeal, 0, "", reviewSideEffectReason(err))
 	}
-	return s.settleStatusVisit(ctx, row, selfHeal, noteID, hash, "")
+	return s.settleStatusWrite(ctx, ws, row, project.ID, token, noteID, hash, legacy, "", selfHeal)
 }
 
 // settleTerminalStatusVisit writes a terminal note for a row whose control is
@@ -337,6 +337,10 @@ func (s *ReviewService) writeTerminalStatusVisit(ctx context.Context, ws *worksp
 	if s.status == nil {
 		return errors.New("app: status reporter is not configured")
 	}
+	// The row is the durable display record: a terminal row that already
+	// carries a detail keeps it, so the note and the recovery/reconcile writes
+	// agree (#497).
+	detail = terminalStatusDetail(row, state, detail)
 	update := reviewStatusUpdate{
 		State:      state,
 		Detail:     detail,
@@ -355,7 +359,7 @@ func (s *ReviewService) writeTerminalStatusVisit(ctx context.Context, ws *worksp
 	reporter := *s.status
 	reporter.outbound = outboundSender(ws)
 	reporter.durable = true
-	noteID, hash, err := reporter.writeStatus(ctx, projectID, row.MRIID, token, update)
+	noteID, hash, legacy, err := reporter.writeStatus(ctx, projectID, row.MRIID, token, update)
 	if err != nil {
 		if errors.Is(err, workspace.ErrOutboundInvalidated) {
 			return err
@@ -365,7 +369,48 @@ func (s *ReviewService) writeTerminalStatusVisit(ctx context.Context, ws *worksp
 		}
 		return s.settleStatusVisit(ctx, row, selfHeal, 0, "", reviewSideEffectReason(err))
 	}
-	return s.settleStatusVisit(ctx, row, selfHeal, noteID, hash, reason)
+	return s.settleStatusWrite(ctx, ws, row, projectID, token, noteID, hash, legacy, reason, selfHeal)
+}
+
+// settleStatusWrite records the merged note id before removing the legacy note
+// and only then settles the visit. The order closes the permalink window: the
+// durable note id never names a deleted legacy note (#497). A failed delete
+// keeps the legacy note and leaves the applied version behind, so the next
+// visit retries the cleanup.
+func (s *ReviewService) settleStatusWrite(ctx context.Context, ws *workspace.Workspace, row *store.ReviewStatus, projectID int64, token string, noteID int64, bodyHash string, legacyNoteIDs []int64, reason string, selfHeal bool) error {
+	if len(legacyNoteIDs) == 0 {
+		return s.settleStatusVisit(ctx, row, selfHeal, noteID, bodyHash, reason)
+	}
+	if selfHeal {
+		if err := s.markStatusVerified(ctx, row, noteID, bodyHash, reason); err != nil {
+			return err
+		}
+	} else if err := s.recordStatusNoteID(ctx, row, noteID, bodyHash); err != nil {
+		return err
+	}
+	reporter := *s.status
+	reporter.outbound = outboundSender(ws)
+	if err := reporter.deleteLegacyStatusNotes(ctx, projectID, row.MRIID, token, legacyNoteIDs); err != nil {
+		if errors.Is(err, workspace.ErrOutboundInvalidated) || reviewSideEffectRetryable(err) {
+			return err
+		}
+		// A permanent delete failure keeps the legacy note and settles the
+		// receipt path with the bounded reason; note_id is already recorded.
+		return s.settleStatusVisit(ctx, row, selfHeal, 0, "", reviewSideEffectReason(err))
+	}
+	if selfHeal {
+		return nil
+	}
+	return s.markStatusApplied(ctx, row, noteID, bodyHash, reason)
+}
+
+// terminalStatusDetail keeps the row's own detail when the row already holds
+// the state being rendered; otherwise the caller's reason is the only source.
+func terminalStatusDetail(row *store.ReviewStatus, state, detail string) string {
+	if row != nil && row.State == state && strings.TrimSpace(row.Detail) != "" {
+		return row.Detail
+	}
+	return detail
 }
 
 // settleStatusVisit records the outcome of one status write. The normal path
@@ -374,20 +419,39 @@ func (s *ReviewService) writeTerminalStatusVisit(ctx context.Context, ws *worksp
 // must never be stamped by an older check (#459).
 func (s *ReviewService) settleStatusVisit(ctx context.Context, row *store.ReviewStatus, selfHeal bool, noteID int64, bodyHash, reason string) error {
 	if selfHeal {
-		store, ok := s.store.(reviewStatusSelfHealStore)
-		if !ok {
-			return nil
-		}
-		if reason != "" && s.logger != nil {
-			s.logger.Warn("review status self-heal failed", "project_id", row.ProjectID,
-				"mr_iid", row.MRIID, "generation", row.Generation)
-		}
-		if err := store.MarkReviewStatusVerified(ctx, row.ProjectID, row.MRIID, int64(row.Version), noteID, bodyHash, s.now().UTC()); err != nil {
-			return fmt.Errorf("app: mark review status verified: %w", err)
-		}
-		return nil
+		return s.markStatusVerified(ctx, row, noteID, bodyHash, reason)
 	}
 	return s.markStatusApplied(ctx, row, noteID, bodyHash, reason)
+}
+
+func (s *ReviewService) markStatusVerified(ctx context.Context, row *store.ReviewStatus, noteID int64, bodyHash, reason string) error {
+	store, ok := s.store.(reviewStatusSelfHealStore)
+	if !ok {
+		return nil
+	}
+	if reason != "" && s.logger != nil {
+		s.logger.Warn("review status self-heal failed", "project_id", row.ProjectID,
+			"mr_iid", row.MRIID, "generation", row.Generation)
+	}
+	if err := store.MarkReviewStatusVerified(ctx, row.ProjectID, row.MRIID, int64(row.Version), noteID, bodyHash, s.now().UTC()); err != nil {
+		return fmt.Errorf("app: mark review status verified: %w", err)
+	}
+	return nil
+}
+
+// recordStatusNoteID writes the remote note id without advancing the applied
+// version. It runs before the legacy note is deleted so the receipt never
+// points at a deleted note; a test double without the surface falls back to
+// the applied write, which records the same id (#497).
+func (s *ReviewService) recordStatusNoteID(ctx context.Context, row *store.ReviewStatus, noteID int64, bodyHash string) error {
+	writer, ok := s.store.(reviewStatusNoteIDStore)
+	if !ok {
+		return nil
+	}
+	if err := writer.RecordReviewStatusNoteID(ctx, row.ProjectID, row.MRIID, int64(row.Version), noteID, bodyHash); err != nil {
+		return fmt.Errorf("app: record review status note id: %w", err)
+	}
+	return nil
 }
 
 func (s *ReviewService) markStatusApplied(ctx context.Context, row *store.ReviewStatus, noteID int64, bodyHash, reason string) error {
@@ -557,6 +621,13 @@ func (s *ReviewService) ReconcileSideEffects(ctx context.Context) error {
 type reviewStatusSelfHealStore interface {
 	ListAppliedReviewStatusesForSelfHeal(ctx context.Context, projectID, afterMRIID int64, verifiedBefore time.Time) ([]store.ReviewStatus, error)
 	MarkReviewStatusVerified(ctx context.Context, projectID, mrIID, version, noteID int64, bodyHash string, verifiedAt time.Time) error
+}
+
+// reviewStatusNoteIDStore records the remote note id before legacy cleanup
+// without advancing the applied version. A store without it keeps the applied
+// write as the only receipt.
+type reviewStatusNoteIDStore interface {
+	RecordReviewStatusNoteID(ctx context.Context, projectID, mrIID, version, noteID int64, bodyHash string) error
 }
 
 // ReconcileAppliedStatuses runs the low-frequency self-heal scan: applied,

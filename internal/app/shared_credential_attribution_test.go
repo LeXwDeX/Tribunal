@@ -1,12 +1,14 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -104,6 +106,115 @@ func TestMarkProjectTokenRejectedMarksProjectTokenProject(t *testing.T) {
 	}
 	if after.WebhookState != store.WebhookStateFailed || after.WebhookError != tokenRejected403Message {
 		t.Fatalf("project health = %q/%q", after.WebhookState, after.WebhookError)
+	}
+}
+
+// interleavingProjectStore hands the caller the project snapshot read before
+// fn commits, which models a credential switch that lands between the read and
+// the health write.
+type interleavingProjectStore struct {
+	*sqlite.Store
+	once  sync.Once
+	fn    func(context.Context) error
+	fnErr error
+}
+
+func (s *interleavingProjectStore) GetProject(ctx context.Context, id int64) (*store.Project, error) {
+	project, err := s.Store.GetProject(ctx, id)
+	s.once.Do(func() { s.fnErr = s.fn(ctx) })
+	return project, err
+}
+
+// TestMarkProjectTokenRejectedKeepsNewerCredentialSwitch pins the review-side
+// health write as a compare-and-set: a credential switch that commits after the
+// observation was read wins, and the dropped write is not an error (#497).
+func TestMarkProjectTokenRejectedKeepsNewerCredentialSwitch(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	cipher := newTestCipher(t)
+	seedProject(t, st, cipher, 42, "whsec", "{}", "default")
+	// A managed hook makes the switch's resulting state observable: it moves
+	// the row to pending, which is the newer observation the stale health write
+	// must not overwrite.
+	hookID := int64(99)
+	if err := st.UpdateProjectWebhook(ctx, 42, store.ProjectWebhookUpdate{
+		State: store.WebhookStateEnabled, Events: []string{"merge_request"}, HookID: &hookID,
+	}); err != nil {
+		t.Fatalf("seed managed hook: %v", err)
+	}
+	logs := &bytes.Buffer{}
+	var switched bool
+	wrapped := &interleavingProjectStore{Store: st, fn: func(ctx context.Context) error {
+		switched = true
+		return st.SwitchProjectToSharedCredential(ctx, 42)
+	}}
+	service := &ReviewService{
+		store:  wrapped,
+		tokens: newProjectTokenResolver(cipher, sharedBotToken),
+		logger: slog.New(slog.NewTextHandler(logs, nil)),
+	}
+
+	service.markProjectTokenRejected(ctx, 42, 401)
+
+	if !switched {
+		t.Fatal("the credential switch did not commit during the observation")
+	}
+	if wrapped.fnErr != nil {
+		t.Fatalf("switch during observation: %v", wrapped.fnErr)
+	}
+	after, err := st.GetProject(ctx, 42)
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	if after.WebhookState != store.WebhookStatePending || after.WebhookError != "" {
+		t.Fatalf("stale token rejection overwrote the switch: %q/%q", after.WebhookState, after.WebhookError)
+	}
+	if strings.Contains(logs.String(), "health persistence failed") {
+		t.Fatalf("dropped compare-and-set logged an error: %q", logs.String())
+	}
+}
+
+// TestClearProjectTokenRejectedKeepsNewerCredentialSwitch pins the same
+// compare-and-set for the recovery path.
+func TestClearProjectTokenRejectedKeepsNewerCredentialSwitch(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	cipher := newTestCipher(t)
+	seedProject(t, st, cipher, 42, "whsec", "{}", "default")
+	if err := st.UpdateProjectWebhook(ctx, 42, store.ProjectWebhookUpdate{
+		State: store.WebhookStateFailed, Error: tokenRejected401Message,
+	}); err != nil {
+		t.Fatalf("seed token rejection: %v", err)
+	}
+	logs := &bytes.Buffer{}
+	var switched bool
+	wrapped := &interleavingProjectStore{Store: st, fn: func(ctx context.Context) error {
+		switched = true
+		return st.SwitchProjectToSharedCredential(ctx, 42)
+	}}
+	service := &ReviewService{
+		store:  wrapped,
+		tokens: newProjectTokenResolver(cipher, sharedBotToken),
+		logger: slog.New(slog.NewTextHandler(logs, nil)),
+	}
+
+	service.clearProjectTokenRejected(ctx, 42)
+
+	if !switched {
+		t.Fatal("the credential switch did not commit during the observation")
+	}
+	if wrapped.fnErr != nil {
+		t.Fatalf("switch during observation: %v", wrapped.fnErr)
+	}
+	after, err := st.GetProject(ctx, 42)
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	if after.WebhookState != store.WebhookStateDisabled || after.WebhookError != "" {
+		t.Fatalf("stale recovery overwrote the switch: %q/%q", after.WebhookState, after.WebhookError)
+	}
+	if strings.Contains(logs.String(), "health restore failed") {
+		t.Fatalf("dropped compare-and-set logged an error: %q", logs.String())
 	}
 }
 
