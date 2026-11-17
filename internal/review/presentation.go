@@ -1,7 +1,6 @@
 package review
 
 import (
-	"fmt"
 	"sort"
 	"strings"
 	"unicode"
@@ -828,46 +827,4 @@ func SortRelated(list []RelatedGroup) []RelatedGroup {
 		return a.ID < b.ID
 	})
 	return out
-}
-
-// PublishKeyConflictWarning is the 评审提示 for groups whose publish key
-// conflicted, so none of them got an inline discussion. It states where each
-// item is in the summary: listed on its own, or kept as a 「相关描述」 item
-// under the entry it was folded into.
-func PublishKeyConflictWarning(groups []Group, conflicted map[string]bool) string {
-	fold := foldUnpositionedForSummary(groups)
-	titles := make(map[string]string, len(groups))
-	for _, g := range groups {
-		titles[g.ID] = g.Title
-	}
-	foldedCount, listedCount := 0, 0
-	targets := map[string]struct{}{}
-	for _, g := range groups {
-		if !conflicted[g.ID] {
-			continue
-		}
-		if rep, ok := fold.into[g.ID]; ok {
-			foldedCount++
-			targets[oneLine(titles[rep], 60)] = struct{}{}
-		} else {
-			listedCount++
-		}
-	}
-	names := make([]string, 0, len(targets))
-	for title := range targets {
-		names = append(names, "「"+title+"」")
-	}
-	sort.Strings(names)
-	if len(names) > 3 {
-		names = append(names[:3], "等")
-	}
-	where := "以相关描述形式保留在" + strings.Join(names, "、") + "条目下"
-	switch {
-	case foldedCount == 0:
-		return "部分问题的发布标识冲突，未创建行内讨论，已在摘要中单独列出。"
-	case listedCount == 0:
-		return "部分问题的发布标识冲突，未创建行内讨论，" + where + "。"
-	default:
-		return fmt.Sprintf("部分问题的发布标识冲突，未创建行内讨论；其中 %d 条%s，其余在摘要中单独列出。", foldedCount, where)
-	}
 }

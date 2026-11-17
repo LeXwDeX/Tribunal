@@ -77,7 +77,7 @@ func TestRelatedExcerptEndsAtSentenceBoundary(t *testing.T) {
 	if !display.Related[0].ExcerptTruncated {
 		t.Fatalf("clipped excerpt must record that it was truncated: %+v", display.Related[0])
 	}
-	rendered, err := RenderFinding(display, FindingRenderOptions{})
+	rendered, err := renderFindingForTest(display, FindingRenderOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestRelatedExcerptEndsAtSentenceBoundary(t *testing.T) {
 func TestInlineBodyPublishesLongBodyCompletely(t *testing.T) {
 	body := strings.Repeat("长正文内容。", 120)
 	group := mkGroup("long-body", 20, "logic", SeverityP2, "很长的正文", body)
-	out, err := RenderFinding(group, FindingRenderOptions{})
+	out, err := renderFindingForTest(group, FindingRenderOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestInlineBodyPublishesLongBodyCompletely(t *testing.T) {
 
 func TestShortInlineBodyHasNoConsoleNotice(t *testing.T) {
 	group := mkGroup("short-body", 20, "logic", SeverityP2, "短正文", "一句话说明。")
-	out, err := RenderFinding(group, FindingRenderOptions{})
+	out, err := renderFindingForTest(group, FindingRenderOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

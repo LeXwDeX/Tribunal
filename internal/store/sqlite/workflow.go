@@ -990,6 +990,32 @@ func (s *Store) ListPublications(ctx context.Context, workflowID string) ([]stor
 	return publications, nil
 }
 
+// ListDiscussionPublications returns every discussion publication row recorded
+// for one merge request, newest first. Adoption scans these rows because old
+// fingerprint keys no longer match a reworded finding.
+func (s *Store) ListDiscussionPublications(ctx context.Context, projectID, mrIID int64) ([]store.Publication, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+publicationColumns+` FROM publications
+		 WHERE project_id = ? AND mr_iid = ? AND kind = 'discussion'
+		 ORDER BY updated_at DESC, id DESC`, projectID, mrIID)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: list discussion publications: %w", err)
+	}
+	defer rows.Close()
+	publications := make([]store.Publication, 0)
+	for rows.Next() {
+		p, err := scanPublication(rows)
+		if err != nil {
+			return nil, fmt.Errorf("sqlite: scan discussion publication: %w", err)
+		}
+		publications = append(publications, *p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sqlite: iterate discussion publications: %w", err)
+	}
+	return publications, nil
+}
+
 const findingColumns = `id, workflow_id, origin_node, origin_index, origin_provider,
 	severity, category, path, line, side, title, body, evidence, confidence,
 	dedupe_group, votes, challenge_status, challenge_node, challenge_evidence,

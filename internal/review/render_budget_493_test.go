@@ -66,7 +66,7 @@ func TestRenderFindingCodeFenceIsLinear(t *testing.T) {
 	group.Evidence = strings.Repeat("`", backticks)
 
 	start := time.Now()
-	out, err := RenderFinding(group, FindingRenderOptions{})
+	out, err := renderFindingForTest(group, FindingRenderOptions{})
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatal(err)

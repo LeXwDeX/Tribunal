@@ -214,13 +214,11 @@ func TestPublisherFallsBackToSummaryOnInlineRejection(t *testing.T) {
 func TestPublisherKeepsMarkedEvidenceWhenHistoricalFindingIsMissing(t *testing.T) {
 	const evidence = "bad := 1"
 	key := review.FindingPublishKey(testDossier(t, reviewTestHead), "main.go", review.SideNew, "Injected failing assignment", evidence, "historical")
-	previousBody, err := review.RenderFinding(review.Group{
-		Path: "main.go", Line: 2, Side: review.SideNew, Severity: review.SeverityP1, Title: "Injected failing assignment",
-		Body: "Confirmed finding.", Evidence: evidence, PublishKey: key, PositionOK: true,
-		Decision: &review.FindingDecision{Action: review.ActionPublish},
-	}, review.FindingRenderOptions{})
-	if err != nil || strings.Contains(previousBody, evidence) {
-		t.Fatalf("confirmed discussion unexpectedly includes evidence: %q, err = %v", previousBody, err)
+	// The historical thread was rendered before inline discussions used
+	// position keys, so its marker carries the fingerprint key and no position.
+	previousBody := review.FindingMarkerPrefix + " key=" + key + " -->\n**[P1]Injected failing assignment**\n\nConfirmed finding.\n"
+	if strings.Contains(previousBody, evidence) {
+		t.Fatalf("confirmed discussion unexpectedly includes evidence: %q", previousBody)
 	}
 	f, _, workflow, _ := runDeepReview(t, "job-marked-reuse", func(f *reviewFixture, runner *scriptedAgentRunner) {
 		runner.fail[prompts.Verify] = errors.New("synthetic verifier failure")
@@ -251,8 +249,9 @@ func TestPublisherKeepsMarkedEvidenceWhenHistoricalFindingIsMissing(t *testing.T
 			t.Fatalf("marked evidence is absent from the summary: %+v", f.gitlab.notes)
 		}
 		finding, err := f.db.ListFindings(context.Background(), store.FindingFilter{WorkflowID: workflow.ID})
+		positionKey := review.PositionPublishKey("main.go", 2, review.SideNew)
 		if err != nil || len(finding) != 1 || finding[0].PositionOK == nil || *finding[0].PositionOK ||
-			finding[0].Decision != string(review.ActionMark) || finding[0].Evidence != evidence || finding[0].PublishKey != key {
+			finding[0].Decision != string(review.ActionMark) || finding[0].Evidence != evidence || finding[0].PublishKey != positionKey {
 			t.Fatalf("historical finding was incorrectly reused = %+v, err = %v", finding, err)
 		}
 		publication, err := f.db.GetPublication(context.Background(), 42, 7, discussionPublishKind, key)

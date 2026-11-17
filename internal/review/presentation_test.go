@@ -155,7 +155,7 @@ func TestPresentationKeepsBothBodiesVisible(t *testing.T) {
 	if display.ID != "a" || !strings.Contains(display.Body, "requests.Timeout") {
 		t.Fatalf("display must be the highest-severity group: %+v", display)
 	}
-	body, err := RenderFinding(display, FindingRenderOptions{})
+	body, err := renderFindingForTest(display, FindingRenderOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +242,7 @@ func TestPresentationIsDeterministicAndCapsRelated(t *testing.T) {
 			if g.ID != "g7" || len(g.Related) != 7 {
 				t.Fatalf("display %s related %d, want P1 g7 with 7 related", g.ID, len(g.Related))
 			}
-			body, err := RenderFinding(g, FindingRenderOptions{})
+			body, err := renderFindingForTest(g, FindingRenderOptions{})
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -71,7 +71,7 @@ func TestRenderRisksAcrossPublishedFields(t *testing.T) {
 		t.Errorf("summary, body, suggestion, title or warning was unsafe:\n%s", out)
 	}
 	group.PositionOK = true
-	out, err = RenderFinding(group, FindingRenderOptions{})
+	out, err = renderFindingForTest(group, FindingRenderOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,7 @@ func TestGitLabRenderedTableAcrossPublishedFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	group.PositionOK = true
-	finding, err := RenderFinding(group, FindingRenderOptions{})
+	finding, err := renderFindingForTest(group, FindingRenderOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +222,7 @@ func TestGitLabRenderedGLIssueReferenceIsLiteral(t *testing.T) {
 		t.Fatal(err)
 	}
 	group.PositionOK = true
-	finding, err := RenderFinding(group, FindingRenderOptions{})
+	finding, err := renderFindingForTest(group, FindingRenderOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

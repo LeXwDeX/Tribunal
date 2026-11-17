@@ -123,7 +123,7 @@ func TestRenderSummaryOmitsCountLineWithoutFindings(t *testing.T) {
 
 func TestRenderFindingIsConcise(t *testing.T) {
 	group := renderGroup("concise", ActionPublish, SeverityP1, true, "Concise issue", "Fails when `x` is nil.")
-	out, err := RenderFinding(group, FindingRenderOptions{})
+	out, err := renderFindingForTest(group, FindingRenderOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestRenderFindingIsConcise(t *testing.T) {
 	}
 
 	group.Suggestion = "```suggestion\n\treturn nil\n```"
-	out, err = RenderFinding(group, FindingRenderOptions{})
+	out, err = renderFindingForTest(group, FindingRenderOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestRenderFindingIsConcise(t *testing.T) {
 	}
 
 	marked := renderGroup("concise-mark", ActionMark, SeverityP1, true, "Uncertain issue", "Body")
-	markedOut, err := RenderFinding(marked, FindingRenderOptions{})
+	markedOut, err := renderFindingForTest(marked, FindingRenderOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +157,7 @@ func TestRenderEscapesHTMLCommentsAndLinks(t *testing.T) {
 		"<script>alert(1)</script> [link](https://evil.example) `code`")
 	group.Path = "internal/a.go"
 	group.Evidence = "</details><!-- hidden -->"
-	out, err := RenderFinding(group, FindingRenderOptions{})
+	out, err := renderFindingForTest(group, FindingRenderOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,11 +205,11 @@ func TestRenderSummaryEscapesMarkerAndLinks(t *testing.T) {
 
 func TestRenderFindingStableMarkerAndMarkedPrefix(t *testing.T) {
 	group := renderGroup("stable", ActionPublish, SeverityP1, true, "Stable issue", "Body")
-	first, err := RenderFinding(group, FindingRenderOptions{})
+	first, err := renderFindingForTest(group, FindingRenderOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := RenderFinding(group, FindingRenderOptions{})
+	second, err := renderFindingForTest(group, FindingRenderOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +226,7 @@ func TestRenderFindingStableMarkerAndMarkedPrefix(t *testing.T) {
 	marked := renderGroup("marked", ActionMark, SeverityP2, true, "Uncertain issue", "Body text.")
 	marked.Decision.Reason = "needs <runtime> [check]"
 	marked.Suggestion = "Try again."
-	markedOut, err := RenderFinding(marked, FindingRenderOptions{ShowModelAttribution: true})
+	markedOut, err := renderFindingForTest(marked, FindingRenderOptions{ShowModelAttribution: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,7 +243,7 @@ func TestRenderFindingStableMarkerAndMarkedPrefix(t *testing.T) {
 		t.Fatalf("body, reason, suggestion, evidence or attribution order is wrong:\n%s", markedOut)
 	}
 	marked.Decision.Reason = ""
-	emptyOut, err := RenderFinding(marked, FindingRenderOptions{})
+	emptyOut, err := renderFindingForTest(marked, FindingRenderOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +251,7 @@ func TestRenderFindingStableMarkerAndMarkedPrefix(t *testing.T) {
 		t.Fatalf("empty decision reason rendered a reason block:\n%s", emptyOut)
 	}
 
-	attributed, err := RenderFinding(group, FindingRenderOptions{ShowModelAttribution: true})
+	attributed, err := renderFindingForTest(group, FindingRenderOptions{ShowModelAttribution: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,7 +266,7 @@ func TestDowngradeIsPublished(t *testing.T) {
 	if !group.Published() {
 		t.Fatal("downgrade must remain published")
 	}
-	out, err := RenderFinding(group, FindingRenderOptions{})
+	out, err := renderFindingForTest(group, FindingRenderOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,16 +281,16 @@ func TestDowngradeIsPublished(t *testing.T) {
 
 func TestRenderFindingRejectsNonPublishableAndBadKey(t *testing.T) {
 	dropped := renderGroup("drop", ActionDrop, SeverityP1, true, "Drop", "body")
-	if _, err := RenderFinding(dropped, FindingRenderOptions{}); err == nil {
+	if _, err := renderFindingForTest(dropped, FindingRenderOptions{}); err == nil {
 		t.Fatal("dropped group must not render inline")
 	}
 	bad := renderGroup("bad", ActionPublish, SeverityP1, true, "Title", "body")
 	bad.PublishKey = "bad"
-	if _, err := RenderFinding(bad, FindingRenderOptions{}); err == nil {
+	if _, err := renderFindingForTest(bad, FindingRenderOptions{}); err == nil {
 		t.Fatal("invalid publish key must fail")
 	}
 	unpositioned := renderGroup("unpositioned", ActionPublish, SeverityP1, false, "Title", "body")
-	if _, err := RenderFinding(unpositioned, FindingRenderOptions{}); err == nil {
+	if _, err := renderFindingForTest(unpositioned, FindingRenderOptions{}); err == nil {
 		t.Fatal("unpositioned finding must not render inline")
 	}
 }
@@ -323,7 +323,7 @@ func TestRenderUnicodeLengths(t *testing.T) {
 	longTitle := strings.Repeat("长", 200)
 	longBody := strings.Repeat("文", 9000)
 	group := renderGroup("unicode", ActionPublish, SeverityP2, true, longTitle, longBody)
-	out, err := RenderFinding(group, FindingRenderOptions{})
+	out, err := renderFindingForTest(group, FindingRenderOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -387,7 +387,7 @@ func TestRenderFindingPreservesStructuredMarkdown(t *testing.T) {
 	suggestion := "改成：\n\n```go\nif !x {\n\treturn\n}\n```"
 	group := renderGroup("markdown", ActionPublish, SeverityP2, true, "Structured issue", body)
 	group.Suggestion = suggestion
-	out, err := RenderFinding(group, FindingRenderOptions{})
+	out, err := renderFindingForTest(group, FindingRenderOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -439,7 +439,7 @@ func TestRenderSummaryPreservesStructuredMarkdownAndTruncation(t *testing.T) {
 
 func TestRenderMarkdownEscapesHTMLAndLinksButKeepsCode(t *testing.T) {
 	group := renderGroup("safe-markdown", ActionPublish, SeverityP2, true, "Safe", "<script>alert(1)</script> [link](javascript:alert(1)) `safe <tag>`")
-	out, err := RenderFinding(group, FindingRenderOptions{})
+	out, err := renderFindingForTest(group, FindingRenderOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -682,7 +682,7 @@ func TestRenderOneLineGFMEscapesInSummaryAndFinding(t *testing.T) {
 
 	marked := renderGroup("gfm-mark", ActionMark, SeverityP1, true, "@user", "Body")
 	marked.Decision.Reason = "see @user at https://example.invalid"
-	finding, err := RenderFinding(marked, FindingRenderOptions{})
+	finding, err := renderFindingForTest(marked, FindingRenderOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -706,7 +706,7 @@ func TestRenderMarkedEvidenceForAllPositions(t *testing.T) {
 	if strings.Count(positioned, "<details><summary>证据</summary>") != 1 {
 		t.Fatalf("positioned marked summary must retain evidence:\n%s", positioned)
 	}
-	inline, err := RenderFinding(group, FindingRenderOptions{})
+	inline, err := renderFindingForTest(group, FindingRenderOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -770,7 +770,7 @@ func countOverviewBullets(section string) int {
 func TestFindingAttributionUsesProviderLabels(t *testing.T) {
 	group := renderGroup("label", ActionPublish, SeverityP2, true, "title", "body")
 	group.Sources[0].Origin = Origin{Node: "n", Provider: "user:abc", Model: "m"}
-	out, err := RenderFinding(group, FindingRenderOptions{ShowModelAttribution: true, ProviderLabels: map[string]string{"user:abc": "My Model"}})
+	out, err := renderFindingForTest(group, FindingRenderOptions{ShowModelAttribution: true, ProviderLabels: map[string]string{"user:abc": "My Model"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -798,7 +798,7 @@ func assertNoQuickAction(t *testing.T, label, out string) {
 func TestRenderFindingNeutralizesQuickActions(t *testing.T) {
 	group := renderGroup("qa", ActionPublish, SeverityP1, true, "Title", quickActionText)
 	group.Suggestion = "/label ~x"
-	out, err := RenderFinding(group, FindingRenderOptions{})
+	out, err := renderFindingForTest(group, FindingRenderOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

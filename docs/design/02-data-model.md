@@ -248,7 +248,7 @@ CREATE TABLE findings (
   decision_reason    TEXT,
   final_severity     TEXT,
   position_ok        INTEGER,          -- I2：行号是否落在 diff 内
-  publish_key        TEXT,             -- 跨次运行去重：hash(path, 规范化标题, 行附近内容)
+  publish_key        TEXT,             -- 跨次运行去重：自 #487 起主 finding 存位置键 hash(file+line+side)；旧指纹键兼容保留
   annotation         TEXT NOT NULL DEFAULT '', -- '' | valid | invalid | uncertain，API 与 store 校验
   annotated_by       TEXT,             -- 认证用户的 username；配置 Bearer 为 api
   annotated_at       TEXT              -- 服务端 UTC 时间；清除标注时为 NULL

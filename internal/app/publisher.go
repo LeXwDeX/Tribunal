@@ -447,9 +447,23 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 		return groups[i].Decision != nil && groups[i].Decision.Source == "presentation" &&
 			(original[i].Decision == nil || original[i].Decision.Source != "presentation")
 	}
+	// Inline discussions converge on the diff anchor (file + line + side)
+	// instead of the finding wording. The primary group of each position
+	// records the position key; every finding keeps its own fingerprint key so
+	// feedback attribution and historical publication rows stay readable.
+	positions := collectInlinePositions(groups, index)
+	positionPrimary := make(map[int]string, len(positions))
+	positionKeys := make(map[string]struct{}, len(positions))
+	for _, position := range positions {
+		positionPrimary[position.indexes[0]] = position.key
+		positionKeys[position.key] = struct{}{}
+	}
 	// storedGroups returns the original groups with the position outcome of
 	// the view. A folded group is not posted, so it keeps no publish key: the
-	// display group alone owns the discussion and its feedback.
+	// display group alone owns the discussion and its feedback. A primary
+	// group with a diff anchor keeps the position key even when this run falls
+	// back to the summary, so one finding keeps one stable key across
+	// generations; findings without a position keep their fingerprint key.
 	storedGroups := func() []review.Group {
 		out := make([]review.Group, len(original))
 		copy(out, original)
@@ -459,79 +473,13 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 				continue
 			}
 			out[i].PositionOK = groups[i].PositionOK
+			if key, ok := positionPrimary[i]; ok {
+				out[i].PublishKey = key
+			}
 		}
 		return out
 	}
-	keyCounts := make(map[string]int, len(groups))
-	for i, group := range groups {
-		if folded(i) {
-			continue
-		}
-		keyCounts[group.PublishKey]++
-	}
-	collision := false
-	conflicted := map[string]bool{}
 	contentMismatch := false
-	for i := range groups {
-		group := &groups[i]
-		if !group.Published() || !group.PositionOK {
-			continue
-		}
-		conflict := keyCounts[group.PublishKey] > 1
-		if !conflict {
-			publication, err := p.store.GetPublication(ctx, loaded.project.ID, loaded.mrIID, discussionPublishKind, group.PublishKey)
-			if err != nil && !errors.Is(err, store.ErrNotFound) {
-				return err
-			}
-			if err == nil && publication.GitlabID != "" && publication.WorkflowID != workflowID {
-				conflict = true
-				if publication.WorkflowID != "" {
-					previous, err := p.store.ListFindings(ctx, store.FindingFilter{WorkflowID: publication.WorkflowID})
-					if err != nil {
-						return err
-					}
-					matches := 0
-					for _, finding := range previous {
-						if finding.PublishKey == group.PublishKey {
-							matches++
-							previousSide := review.Side(finding.Side)
-							validPreviousSide := previousSide == "" || previousSide == review.SideNew || previousSide == review.SideOld
-							validCurrentSide := group.Side == "" || group.Side == review.SideNew || group.Side == review.SideOld
-							if finding.Path != "" && finding.Path == group.Path && validPreviousSide && validCurrentSide && diffSide(previousSide) == diffSide(group.Side) && finding.Category == group.Category && finding.Line != nil && *finding.Line > 0 && group.Line > 0 {
-								delta := *finding.Line - group.Line
-								conflict = delta < -3 || delta > 3
-							}
-						}
-					}
-					if matches != 1 {
-						conflict = true
-					}
-				}
-			}
-			if err == nil && publication.GitlabID != "" && !conflict {
-				body, renderErr := review.RenderFinding(*group, review.FindingRenderOptions{ShowModelAttribution: cfg.Settings.ShowModelAttribution, ProviderLabels: p.providerLabels()})
-				if renderErr != nil || publication.BodyHash == "" || publication.BodyHash != bodyHash(body) {
-					group.PositionOK = false
-					contentMismatch = true
-				}
-			}
-		}
-		if conflict {
-			group.PositionOK = false
-			collision = true
-			conflicted[group.ID] = true
-		}
-	}
-	// The conflict warning is worded at render time: where an item ends up
-	// (listed on its own or as a related description) depends on the final
-	// summary view.
-	collisionAt := -1
-	if collision {
-		collisionAt = len(warnings)
-	}
-	if contentMismatch {
-		warnings = append(warnings, "部分问题的历史讨论内容与当前内容不同或无法确认，当前问题已保留在摘要中，未修改历史讨论。")
-	}
 	for _, group := range groups {
 		if group.Published() && index.AmbiguousPath(group.Path) {
 			warnings = append(warnings, "部分问题的路径可能对应多个变更、被忽略或省略的变更，文件归属存在歧义，已保留在摘要中。")
@@ -546,11 +494,6 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 	}
 
 	render := func() (string, error) {
-		renderWarnings := warnings
-		if collisionAt >= 0 {
-			renderWarnings = append(append(append([]string(nil), warnings[:collisionAt]...),
-				review.PublishKeyConflictWarning(groups, conflicted)), warnings[collisionAt:]...)
-		}
 		return review.RenderSummary(review.SummaryInput{
 			Verdict:              result.Verdict,
 			Summary:              result.Summary,
@@ -562,7 +505,7 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 			Duration:             workflowDuration(loaded.workflow),
 			DetailURL:            p.detailURL(workflowID),
 			ShowModelAttribution: cfg.Settings.ShowModelAttribution,
-			Warnings:             renderWarnings,
+			Warnings:             warnings,
 			Scope:                result.Scope,
 			Generated:            loaded.dossier.DiffSummary.Generated,
 			GeneratedPaths:       loaded.dossier.DiffSummary.GeneratedPaths,
@@ -579,139 +522,17 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 
 	fallback := false
 	var lookup *discussionLookup // per-run cache for adoption reads
-	for i := range groups {
-		group := groups[i]
-		if !group.Published() || !group.PositionOK {
-			continue
-		}
-		key := group.PublishKey
-		if key == "" {
-			key = review.PublishKeyFor(group.Path, group.Title, group.Evidence)
-		}
-		existing, err := p.store.GetPublication(ctx, loaded.project.ID, loaded.mrIID, discussionPublishKind, key)
-		if err == nil && existing.GitlabID != "" {
-			continue
-		}
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			return err
-		}
-		findingBody, err := review.RenderFinding(group, review.FindingRenderOptions{ShowModelAttribution: cfg.Settings.ShowModelAttribution, ProviderLabels: p.providerLabels()})
+	for _, position := range positions {
+		fellBack, unproven, err := p.publishInlinePosition(ctx, loaded, groups, position, positionKeys, index, workflowID, cfg, &lookup, recheck)
 		if err != nil {
-			groups[i].PositionOK = false
+			return err
+		}
+		if fellBack {
 			fallback = true
-			continue
 		}
-		position, ok := index.LocateUnambiguous(group.Path, group.Line, diffSide(group.Side))
-		if !ok {
-			groups[i].PositionOK = false
-			fallback = true
-			continue
-		}
-		if err := recheck(); err != nil {
-			return err
-		}
-		if lookup == nil {
-			lookup = &discussionLookup{gl: p.gitlab, token: loaded.token, projectID: loaded.project.ID, mrIID: loaded.mrIID}
-		}
-		baseBody := findingBody
-		findingBody = withWorkflowMarker(baseBody, workflowID)
-		var created, adopted bool
-		var discussionID string
-		err = sendOutbound(ctx, p.workspace.Get(loaded.project.ID), func(callCtx context.Context) error {
-			var err error
-			created, discussionID, err = p.store.ReserveDiscussionIntent(callCtx, loaded.project.ID, loaded.mrIID, key)
-			if err != nil {
-				return err
-			}
-			if created {
-				discussionID, err = p.createDiscussion(callCtx, loaded.token, loaded.project.ID, loaded.mrIID, key, findingBody, position)
-				return err
-			}
-			if discussionID == "" {
-				var remoteBody string
-				discussionID, remoteBody, err = p.recoverDiscussionBody(callCtx, loaded.token, loaded.project.ID, loaded.mrIID, key)
-				if errors.Is(err, errDiscussionAbsent) {
-					if p.discussionAbsentProven(loaded) {
-						return errDiscussionAbsent
-					}
-					return errors.Join(errDiscussionUnknown, err)
-				}
-				if err != nil {
-					return errors.Join(errDiscussionUnknown, err)
-				}
-				writeCtx, cancel := context.WithTimeout(context.WithoutCancel(callCtx), 4*time.Second)
-				defer cancel()
-				if err := p.store.ConfirmDiscussionIntent(writeCtx, loaded.project.ID, loaded.mrIID, key, discussionID); err != nil {
-					return errors.Join(errDiscussionUnknown, err)
-				}
-				// The marker scan already matched author, key and ID.
-				adopted = normalizeDiscussionBody(remoteBody) == normalizeDiscussionBody(findingBody)
-				return nil
-			}
-			// An intent proves a remote ID only; adopt it when the remote body
-			// proves this workflow and finding sent exactly the current content.
-			// The remote ID is already confirmed, so a failed read is an
-			// ordinary retryable error: nothing is re-posted on the retry.
-			adopted, err = lookup.provenOurs(callCtx, discussionID, findingBody)
-			return err
-		})
-		if errors.Is(err, errDiscussionAbsent) && !errors.Is(err, errDiscussionUnknown) {
-			// A successful marker scan of an old publication proved no remote
-			// discussion exists.
-			// Clearing the fence lets a later review post the finding again;
-			// this run keeps it in the summary and still terminates.
-			writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 4*time.Second)
-			rejectErr := p.store.RejectDiscussionIntent(writeCtx, loaded.project.ID, loaded.mrIID, key)
-			cancel()
-			if rejectErr != nil && !errors.Is(rejectErr, store.ErrConflict) {
-				return errors.Join(errDiscussionUnknown, rejectErr)
-			}
-			groups[i].PositionOK = false
-			fallback = true
-			continue
-		}
-		if err != nil {
-			if created {
-				if permanentDiscussionStatus(gitlab.StatusOf(err)) && !errors.Is(err, errDiscussionUnknown) &&
-					!errors.Is(err, workspace.ErrOutboundInvalidated) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-					if err := p.store.RejectDiscussionIntent(ctx, loaded.project.ID, loaded.mrIID, key); err != nil {
-						return errors.Join(errDiscussionUnknown, err)
-					}
-					groups[i].PositionOK = false
-					fallback = true
-					continue
-				}
-				return errors.Join(errDiscussionUnknown, err)
-			}
-			return err
-		}
-		if !created && !adopted {
-			// Unproven intents keep the conservative path: no workflow/content proof.
-			groups[i].PositionOK = false
-			fallback = true
-			if !contentMismatch {
-				warnings = append(warnings, "部分问题的历史讨论内容与当前内容不同或无法确认，当前问题已保留在摘要中，未修改历史讨论。")
-				contentMismatch = true
-			}
-			continue
-		}
-		if err := sendOutbound(ctx, p.workspace.Get(loaded.project.ID), func(callCtx context.Context) error {
-			if _, err := p.controlMatches(callCtx, loaded); err != nil {
-				return err
-			}
-			_, err := p.store.UpsertPublication(callCtx, store.Publication{
-				ProjectID:   loaded.project.ID,
-				MRIID:       loaded.mrIID,
-				Kind:        discussionPublishKind,
-				PublishKey:  key,
-				GitlabID:    discussionID,
-				WorkflowID:  workflowID,
-				Fingerprint: loaded.record.Hash,
-				BodyHash:    bodyHash(baseBody),
-			})
-			return err
-		}); err != nil {
-			return err
+		if unproven && !contentMismatch {
+			warnings = append(warnings, "部分问题的历史讨论内容与当前内容不同或无法确认，当前问题已保留在摘要中，未修改历史讨论。")
+			contentMismatch = true
 		}
 	}
 	if fallback {
@@ -728,7 +549,7 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 			}
 		}
 	}
-	if err := p.reconcileDiscussions(ctx, loaded, groups, result.Verdict, lookup, recheck); err != nil {
+	if err := p.reconcileDiscussions(ctx, loaded, groups, index, result.Verdict, lookup, recheck); err != nil {
 		return err
 	}
 
@@ -1410,6 +1231,472 @@ func (p *Publisher) createDiscussion(ctx context.Context, token string, projectI
 	return created.ID, nil
 }
 
+// inlinePosition groups the presentation groups that share one diff anchor.
+// Every group in one position updates the same discussion.
+type inlinePosition struct {
+	key     string
+	indexes []int
+}
+
+// collectInlinePositions returns one entry per diff anchor, in first-seen
+// order. Findings without a usable position stay in the summary. The key is
+// the canonical anchor identity, so findings reported on either side of one
+// unchanged line share a single thread.
+func collectInlinePositions(groups []review.Group, index *gitlab.DiffIndex) []inlinePosition {
+	byKey := make(map[string]int)
+	var out []inlinePosition
+	for i, group := range groups {
+		if !group.Published() || !group.PositionOK {
+			continue
+		}
+		anchor, ok := index.LocateUnambiguous(group.Path, group.Line, diffSide(group.Side))
+		if !ok {
+			continue
+		}
+		key := review.PositionAnchorKey(group.Path, group.Line, group.Side, anchor)
+		if key == "" {
+			continue
+		}
+		if at, ok := byKey[key]; ok {
+			out[at].indexes = append(out[at].indexes, i)
+			continue
+		}
+		byKey[key] = len(out)
+		out = append(out, inlinePosition{key: key, indexes: []int{i}})
+	}
+	return out
+}
+
+// publishInlinePosition creates, adopts, or updates the single discussion for
+// one diff position. fellBack reports that the position must stay in the
+// summary this run; unproven additionally means a historical thread exists but
+// could not be shown to belong to this bot.
+func (p *Publisher) publishInlinePosition(ctx context.Context, loaded *loadedReview, groups []review.Group, plan inlinePosition, positionKeys map[string]struct{}, index *gitlab.DiffIndex, workflowID string, cfg effectiveReviewConfig, lookup **discussionLookup, recheck func() error) (fellBack, unproven bool, retErr error) {
+	fallback := func(unproven bool) (bool, bool, error) {
+		for _, i := range plan.indexes {
+			groups[i].PositionOK = false
+		}
+		return true, unproven, nil
+	}
+	first := groups[plan.indexes[0]]
+	anchor, ok := index.LocateUnambiguous(first.Path, first.Line, diffSide(first.Side))
+	if !ok {
+		return fallback(false)
+	}
+	selected := make([]review.Group, 0, len(plan.indexes))
+	for _, i := range plan.indexes {
+		selected = append(selected, groups[i])
+	}
+	baseBody, err := review.RenderPositionThread(selected, anchor, review.FindingRenderOptions{
+		ShowModelAttribution: cfg.Settings.ShowModelAttribution,
+		ProviderLabels:       p.providerLabels(),
+		Generation:           loaded.record.Generation,
+	})
+	if err != nil {
+		return fallback(false)
+	}
+	body := withWorkflowMarker(baseBody, workflowID)
+
+	if *lookup == nil {
+		*lookup = &discussionLookup{gl: p.gitlab, token: loaded.token, projectID: loaded.project.ID, mrIID: loaded.mrIID}
+	}
+	lookupFor := *lookup
+	// Discussion reads race policy changes like any other remote call, so they
+	// run under the outbound lease and an invalidation cancels them.
+	prepare := func() error {
+		return sendOutbound(ctx, p.workspace.Get(loaded.project.ID), func(callCtx context.Context) error {
+			return lookupFor.prepare(callCtx)
+		})
+	}
+
+	publication, err := p.store.GetPublication(ctx, loaded.project.ID, loaded.mrIID, discussionPublishKind, plan.key)
+	switch {
+	case err == nil && publication.GitlabID != "":
+		if err := prepare(); err != nil {
+			return false, false, err
+		}
+		discussion, note, ok := lookupFor.findingDiscussionByID(publication.GitlabID)
+		if !ok {
+			// The recorded thread is gone, foreign, or unreadable. Keep the
+			// finding in the summary instead of stacking a second thread.
+			return fallback(true)
+		}
+		if !lookupFor.claim(discussion.ID) {
+			// Another position in this run already owns the thread. Updating
+			// it here would overwrite that position's body.
+			return fallback(true)
+		}
+		if normalizeDiscussionBody(body) != normalizeDiscussionBody(note.Body) {
+			if err := p.updateDiscussionNote(ctx, loaded, note.ID, body, recheck); err != nil {
+				if permanentDiscussionStatus(gitlab.StatusOf(err)) {
+					return fallback(true)
+				}
+				return false, false, err
+			}
+			lookupFor.rememberNoteBody(discussion.ID, note.ID, body)
+		}
+		if err := p.saveInlinePublication(ctx, loaded, plan, discussion.ID, workflowID, baseBody); err != nil {
+			return false, false, err
+		}
+		return false, false, nil
+	case err != nil && !errors.Is(err, store.ErrNotFound):
+		return false, false, err
+	}
+
+	if err := prepare(); err != nil {
+		return false, false, err
+	}
+	adopted, unprovenAdoption, err := p.adoptInlineDiscussion(ctx, loaded, lookupFor, groups, plan, positionKeys, anchor, body, baseBody, workflowID, recheck)
+	if err != nil {
+		return false, false, err
+	}
+	if adopted {
+		return false, false, nil
+	}
+	if unprovenAdoption {
+		return fallback(true)
+	}
+
+	// Create with the existing uncertainty fence: the intent proves a remote ID
+	// only, and adoption still requires the marker scan to match this content.
+	var created, proven bool
+	var discussionID string
+	err = sendOutbound(ctx, p.workspace.Get(loaded.project.ID), func(callCtx context.Context) error {
+		var err error
+		created, discussionID, err = p.store.ReserveDiscussionIntent(callCtx, loaded.project.ID, loaded.mrIID, plan.key)
+		if err != nil {
+			return err
+		}
+		if created {
+			discussionID, err = p.createDiscussion(callCtx, loaded.token, loaded.project.ID, loaded.mrIID, plan.key, body, anchor)
+			return err
+		}
+		if discussionID == "" {
+			var remoteBody string
+			discussionID, remoteBody, err = p.recoverDiscussionBody(callCtx, loaded.token, loaded.project.ID, loaded.mrIID, plan.key)
+			if errors.Is(err, errDiscussionAbsent) {
+				if p.discussionAbsentProven(loaded) {
+					return errDiscussionAbsent
+				}
+				return errors.Join(errDiscussionUnknown, err)
+			}
+			if err != nil {
+				return errors.Join(errDiscussionUnknown, err)
+			}
+			writeCtx, cancel := context.WithTimeout(context.WithoutCancel(callCtx), 4*time.Second)
+			defer cancel()
+			if err := p.store.ConfirmDiscussionIntent(writeCtx, loaded.project.ID, loaded.mrIID, plan.key, discussionID); err != nil {
+				return errors.Join(errDiscussionUnknown, err)
+			}
+			// The marker scan already matched author, key and ID.
+			proven = normalizeDiscussionBody(remoteBody) == normalizeDiscussionBody(body)
+			return nil
+		}
+		// An intent proves a remote ID only; adopt it when the remote body
+		// proves this workflow sent exactly the current content. The remote ID is
+		// already confirmed, so a failed read is an ordinary retryable error.
+		proven, err = lookupFor.provenOurs(callCtx, discussionID, body)
+		return err
+	})
+	if errors.Is(err, errDiscussionAbsent) && !errors.Is(err, errDiscussionUnknown) {
+		// A successful marker scan of an old publication proved no remote
+		// discussion exists. Clearing the fence lets a later review post the
+		// finding again; this run keeps it in the summary and still terminates.
+		writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 4*time.Second)
+		rejectErr := p.store.RejectDiscussionIntent(writeCtx, loaded.project.ID, loaded.mrIID, plan.key)
+		cancel()
+		if rejectErr != nil && !errors.Is(rejectErr, store.ErrConflict) {
+			return false, false, errors.Join(errDiscussionUnknown, rejectErr)
+		}
+		return fallback(false)
+	}
+	if err != nil {
+		if created {
+			if permanentDiscussionStatus(gitlab.StatusOf(err)) && !errors.Is(err, errDiscussionUnknown) &&
+				!errors.Is(err, workspace.ErrOutboundInvalidated) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				if rejectErr := p.store.RejectDiscussionIntent(ctx, loaded.project.ID, loaded.mrIID, plan.key); rejectErr != nil {
+					return false, false, errors.Join(errDiscussionUnknown, rejectErr)
+				}
+				return fallback(false)
+			}
+			return false, false, errors.Join(errDiscussionUnknown, err)
+		}
+		return false, false, err
+	}
+	if !created && !proven {
+		// Unproven intents keep the conservative path: no workflow/content proof.
+		return fallback(true)
+	}
+	if !lookupFor.claim(discussionID) {
+		// A recovered intent can point at a thread another position already
+		// bound this run; recording it again would move that position's body.
+		return fallback(true)
+	}
+	if err := p.saveInlinePublication(ctx, loaded, plan, discussionID, workflowID, baseBody); err != nil {
+		return false, false, err
+	}
+	return false, false, nil
+}
+
+// adoptInlineDiscussion reuses a historical finding thread at the same diff
+// anchor. Publication rows win over position scans because they identify a
+// thread even when GitLab omits note positions. Only our own note is updated;
+// the discussion and every reply stay in place. The caller's discussion set
+// guarantees one thread per run: a thread another position already bound is
+// never updated here.
+func (p *Publisher) adoptInlineDiscussion(ctx context.Context, loaded *loadedReview, lookup *discussionLookup, groups []review.Group, plan inlinePosition, positionKeys map[string]struct{}, anchor gitlab.Position, body, baseBody, workflowID string, recheck func() error) (adopted, unproven bool, retErr error) {
+	first := groups[plan.indexes[0]]
+	// Note positions on a context line carry both line numbers and, for a
+	// rename, both paths. Match the canonical anchor so either reported side
+	// reaches the same thread.
+	canonicalPath, line, side := review.NormalizeAnchorPosition(first.Path, first.Line, first.Side, anchor)
+	candidates := make(map[string]gitlab.Discussion)
+	missing := false
+	lookedUp := make(map[string]bool)
+	for _, i := range plan.indexes {
+		key := groups[i].PublishKey
+		if key == "" {
+			continue
+		}
+		lookedUp[key] = true
+		publication, err := p.store.GetPublication(ctx, loaded.project.ID, loaded.mrIID, discussionPublishKind, key)
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return false, false, err
+		}
+		if publication.GitlabID == "" {
+			continue
+		}
+		found := false
+		for _, discussion := range lookup.discussions {
+			if discussion.ID != publication.GitlabID {
+				continue
+			}
+			found = true
+			if len(discussion.Notes) > 0 && discussion.Notes[0].Position != nil {
+				if !notePositionMatches(*discussion.Notes[0].Position, canonicalPath, line, side) {
+					// The recorded thread sits at another anchor; reusing it
+					// would move this finding.
+					missing = true
+					break
+				}
+				candidates[discussion.ID] = discussion
+				break
+			}
+			// GitLab may omit note positions. The historical finding must still
+			// prove the same path, side, category, and a nearby line. The group
+			// that holds this key is the one proven, not whichever finding
+			// happened to come first at the anchor.
+			source, err := p.adoptionSourceMatches(ctx, publication.WorkflowID, key, groups[i])
+			if err != nil {
+				return false, false, err
+			}
+			if !source {
+				missing = true
+				break
+			}
+			candidates[discussion.ID] = discussion
+			break
+		}
+		if !found {
+			missing = true
+		}
+	}
+	// Old fingerprint rows are keyed by wording, so a changed title or
+	// evidence no longer matches the current key. Scan this MR's discussion
+	// rows and let the historical finding prove the same path, side, category
+	// and a nearby line before reusing a thread that carries no note position.
+	legacyRows, err := p.store.ListDiscussionPublications(ctx, loaded.project.ID, loaded.mrIID)
+	if err != nil {
+		return false, false, err
+	}
+	for _, publication := range legacyRows {
+		if publication.GitlabID == "" || lookedUp[publication.PublishKey] {
+			continue
+		}
+		if _, other := positionKeys[publication.PublishKey]; other {
+			// Another position owns this thread in the current run.
+			continue
+		}
+		discussion, note, visible := lookup.findingDiscussionByID(publication.GitlabID)
+		proven := false
+		if visible && note.Position != nil {
+			if !notePositionMatches(*note.Position, canonicalPath, line, side) {
+				continue
+			}
+			proven = true
+		} else {
+			for _, i := range plan.indexes {
+				source, err := p.adoptionSourceMatches(ctx, publication.WorkflowID, publication.PublishKey, groups[i])
+				if err != nil {
+					return false, false, err
+				}
+				if source {
+					proven = true
+					break
+				}
+			}
+		}
+		if !proven {
+			continue
+		}
+		if visible {
+			candidates[discussion.ID] = discussion
+			continue
+		}
+		// A proven historical thread is not visible; do not stack another.
+		missing = true
+	}
+	for _, discussion := range lookup.findingDiscussionsAt(canonicalPath, line, side) {
+		candidates[discussion.ID] = discussion
+	}
+	var best gitlab.Discussion
+	bestNoteID := int64(-1)
+	for _, discussion := range candidates {
+		if len(discussion.Notes) == 0 {
+			continue
+		}
+		if note := discussion.Notes[0]; note.ID > bestNoteID {
+			best, bestNoteID = discussion, note.ID
+		}
+	}
+	if bestNoteID < 0 {
+		if missing {
+			// A recorded historical thread is not visible; do not stack another.
+			return false, true, nil
+		}
+		return false, false, nil
+	}
+	note := best.Notes[0]
+	if note.System || note.AuthorID != lookup.userID {
+		return false, true, nil
+	}
+	markerKey, ok := discussionPublishKey(note.Body)
+	if !ok {
+		return false, true, nil
+	}
+	if markerKey != plan.key {
+		if _, other := positionKeys[markerKey]; other {
+			// The thread is the current thread of another position in this
+			// run; adopting it would overwrite that position's findings.
+			return false, true, nil
+		}
+	}
+	if lookup.isClaimed(best.ID) {
+		return false, true, nil
+	}
+	if position := note.Position; position != nil && !notePositionMatches(*position, canonicalPath, line, side) {
+		return false, true, nil
+	}
+	// Bind before writing: this run is sequential, so the claim cannot be
+	// stolen between the check above and here, and a later position must not
+	// update the same thread.
+	lookup.claim(best.ID)
+	// A crashed create attempt can leave an unconfirmed position intent. The
+	// adopted thread settles it, so the MR no longer reports an unknown
+	// remote discussion (#487). An intent already bound to another remote ID
+	// stays unresolved and this position falls back to the summary.
+	if err := sendOutbound(ctx, p.workspace.Get(loaded.project.ID), func(callCtx context.Context) error {
+		writeCtx, cancel := context.WithTimeout(context.WithoutCancel(callCtx), 4*time.Second)
+		defer cancel()
+		return p.store.ConfirmDiscussionIntent(writeCtx, loaded.project.ID, loaded.mrIID, plan.key, best.ID)
+	}); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			return false, true, nil
+		}
+		return false, false, err
+	}
+	if normalizeDiscussionBody(body) != normalizeDiscussionBody(note.Body) {
+		if err := p.updateDiscussionNote(ctx, loaded, note.ID, body, recheck); err != nil {
+			if permanentDiscussionStatus(gitlab.StatusOf(err)) {
+				return false, true, nil
+			}
+			return false, false, err
+		}
+		lookup.rememberNoteBody(best.ID, note.ID, body)
+	}
+	if err := p.saveInlinePublication(ctx, loaded, plan, best.ID, workflowID, baseBody); err != nil {
+		return false, false, err
+	}
+	return true, false, nil
+}
+
+// adoptionSourceMatches proves that a legacy publication row still describes
+// the same finding at the current position. It is the historical guard for
+// note rows that carry no GitLab position: exactly one finding under the key,
+// same path/side/category, and the **same line**. A nearby-line window was
+// rejected: it let a new finding one row below adopt (and rewrite) the
+// previous finding's thread, which also stopped that stale thread from being
+// resolved.
+func (p *Publisher) adoptionSourceMatches(ctx context.Context, workflowID, key string, current review.Group) (bool, error) {
+	if workflowID == "" {
+		return false, nil
+	}
+	findings, err := p.store.ListFindings(ctx, store.FindingFilter{WorkflowID: workflowID})
+	if err != nil {
+		return false, err
+	}
+	matches, nearby := 0, false
+	for _, finding := range findings {
+		if finding.PublishKey != key {
+			continue
+		}
+		matches++
+		previousSide := review.Side(finding.Side)
+		validPreviousSide := previousSide == "" || previousSide == review.SideNew || previousSide == review.SideOld
+		validCurrentSide := current.Side == "" || current.Side == review.SideNew || current.Side == review.SideOld
+		if finding.Path != "" && finding.Path == current.Path && validPreviousSide && validCurrentSide &&
+			diffSide(previousSide) == diffSide(current.Side) && finding.Category == current.Category &&
+			finding.Line != nil && *finding.Line > 0 && current.Line > 0 {
+			nearby = *finding.Line == current.Line
+		}
+	}
+	return matches == 1 && nearby, nil
+}
+
+// saveInlinePublication records the discussion row under the position key.
+// Legacy rows keep their fingerprint keys and are never rewritten.
+func (p *Publisher) saveInlinePublication(ctx context.Context, loaded *loadedReview, plan inlinePosition, discussionID, workflowID, baseBody string) error {
+	return sendOutbound(ctx, p.workspace.Get(loaded.project.ID), func(callCtx context.Context) error {
+		if _, err := p.controlMatches(callCtx, loaded); err != nil {
+			return err
+		}
+		_, err := p.store.UpsertPublication(callCtx, store.Publication{
+			ProjectID:   loaded.project.ID,
+			MRIID:       loaded.mrIID,
+			Kind:        discussionPublishKind,
+			PublishKey:  plan.key,
+			GitlabID:    discussionID,
+			WorkflowID:  workflowID,
+			Fingerprint: loaded.record.Hash,
+			BodyHash:    bodyHash(baseBody),
+		})
+		return err
+	})
+}
+
+// updateDiscussionNote updates only the bot-authored first note of a thread.
+func (p *Publisher) updateDiscussionNote(ctx context.Context, loaded *loadedReview, noteID int64, body string, recheck func() error) error {
+	return sendOutbound(ctx, p.workspace.Get(loaded.project.ID), func(callCtx context.Context) error {
+		if err := recheck(); err != nil {
+			return err
+		}
+		return p.gitlab.UpdateMRNote(callCtx, loaded.token, loaded.project.ID, loaded.mrIID, noteID, body)
+	})
+}
+
+// notePositionMatches compares a remote note anchor with the position key.
+func notePositionMatches(position gitlab.Position, path string, line int, side review.Side) bool {
+	if diffSide(side) == gitlab.SideOld {
+		return position.OldLine == line &&
+			(position.OldPath == path || (position.OldPath == "" && position.NewPath == path))
+	}
+	return position.NewLine == line &&
+		(position.NewPath == path || (position.NewPath == "" && position.OldPath == path))
+}
+
 // workflowMarkerPrefix tags a discussion body with the workflow that sent it.
 // Discussions from older versions lack it and stay on the conservative path.
 const workflowMarkerPrefix = "<!-- gitlab-ce-review:workflow id="
@@ -1432,6 +1719,110 @@ type discussionLookup struct {
 	userID      int64
 	discussions []gitlab.Discussion
 	listed      bool
+	// claimed records the discussion IDs already bound to a position in this
+	// run. One remote thread carries one position's body, so a second
+	// position must fall back to the summary instead of overwriting it.
+	claimed map[string]bool
+}
+
+// claim binds one discussion to the current position. It reports false when
+// another position in this run already owns the thread.
+func (l *discussionLookup) claim(discussionID string) bool {
+	if discussionID == "" {
+		return false
+	}
+	if l.claimed == nil {
+		l.claimed = make(map[string]bool)
+	}
+	if l.claimed[discussionID] {
+		return false
+	}
+	l.claimed[discussionID] = true
+	return true
+}
+
+func (l *discussionLookup) isClaimed(discussionID string) bool {
+	return l.claimed != nil && l.claimed[discussionID]
+}
+
+// prepare loads the bot identity and the discussion list once per run.
+func (l *discussionLookup) prepare(ctx context.Context) error {
+	if l.userID <= 0 {
+		user, err := l.gl.CurrentUser(ctx, l.token)
+		if err != nil || user == nil || user.ID <= 0 {
+			return errors.Join(errors.New("app: current user unavailable for inline finding publication"), err)
+		}
+		l.userID = user.ID
+	}
+	if !l.listed {
+		discussions, err := l.gl.ListDiscussions(ctx, l.token, l.projectID, l.mrIID)
+		if err != nil {
+			return err
+		}
+		l.discussions, l.listed = discussions, true
+	}
+	return nil
+}
+
+// findingDiscussionByID returns a recorded thread only when its first note is
+// still this bot's finding note. A deleted, foreign, or rewritten thread is
+// unproven and must not receive another duplicate at the same position.
+func (l *discussionLookup) findingDiscussionByID(id string) (gitlab.Discussion, gitlab.Note, bool) {
+	for _, discussion := range l.discussions {
+		if discussion.ID != id {
+			continue
+		}
+		if len(discussion.Notes) == 0 {
+			return discussion, gitlab.Note{}, false
+		}
+		note := discussion.Notes[0]
+		if note.System || note.AuthorID != l.userID {
+			return discussion, note, false
+		}
+		if _, ok := discussionPublishKey(note.Body); !ok {
+			return discussion, note, false
+		}
+		return discussion, note, true
+	}
+	return gitlab.Discussion{}, gitlab.Note{}, false
+}
+
+// findingDiscussionsAt lists bot finding threads anchored at one position,
+// regardless of author, so a foreign thread can block a duplicate.
+func (l *discussionLookup) findingDiscussionsAt(path string, line int, side review.Side) []gitlab.Discussion {
+	var out []gitlab.Discussion
+	for _, discussion := range l.discussions {
+		if len(discussion.Notes) == 0 {
+			continue
+		}
+		note := discussion.Notes[0]
+		if note.System || note.Position == nil {
+			continue
+		}
+		if _, ok := discussionPublishKey(note.Body); !ok {
+			continue
+		}
+		if !notePositionMatches(*note.Position, path, line, side) {
+			continue
+		}
+		out = append(out, discussion)
+	}
+	return out
+}
+
+// rememberNoteBody keeps the per-run listing in sync after an in-place update
+// so lifecycle reconciliation matches the new marker instead of resolving it.
+func (l *discussionLookup) rememberNoteBody(discussionID string, noteID int64, body string) {
+	for i := range l.discussions {
+		if l.discussions[i].ID != discussionID {
+			continue
+		}
+		for j := range l.discussions[i].Notes {
+			if l.discussions[i].Notes[j].ID == noteID {
+				l.discussions[i].Notes[j].Body = body
+			}
+		}
+	}
 }
 
 // provenOurs reports whether the remote discussion was authored by the current
@@ -1583,26 +1974,13 @@ func discussionPublishKey(body string) (string, bool) {
 // reconcileDiscussions converges bot-authored inline threads after a complete
 // review. Failures are logged and never fail the publication; only a policy
 // cancellation or an expired generation stops it.
-func (p *Publisher) reconcileDiscussions(ctx context.Context, loaded *loadedReview, groups []review.Group, verdict string, lookup *discussionLookup, recheck func() error) error {
+func (p *Publisher) reconcileDiscussions(ctx context.Context, loaded *loadedReview, groups []review.Group, index *gitlab.DiffIndex, verdict string, lookup *discussionLookup, recheck func() error) error {
 	resolver, ok := p.gitlab.(discussionResolver)
 	if !ok {
 		return nil
 	}
 	if verdict != review.VerdictPass && verdict != review.VerdictBlocking {
 		return nil
-	}
-	current := make(map[string]struct{}, len(groups))
-	for _, group := range groups {
-		if !group.Published() {
-			continue
-		}
-		key := group.PublishKey
-		if key == "" {
-			key = review.PublishKeyFor(group.Path, group.Title, group.Evidence)
-		}
-		if key != "" {
-			current[key] = struct{}{}
-		}
 	}
 	if lookup == nil {
 		lookup = &discussionLookup{gl: p.gitlab, token: loaded.token, projectID: loaded.project.ID, mrIID: loaded.mrIID}
@@ -1622,6 +2000,52 @@ func (p *Publisher) reconcileDiscussions(ctx context.Context, loaded *loadedRevi
 			return nil
 		}
 		lookup.discussions, lookup.listed = discussions, true
+	}
+	// A position key may only stand in for the group's key when a position
+	// thread actually exists. A fallback run whose remote thread still carries
+	// the fingerprint marker must keep that fingerprint key, or reconciliation
+	// would resolve a live discussion (#487).
+	live := make(map[string]struct{}, len(lookup.discussions))
+	remoteMarkers := make(map[string]struct{}, len(lookup.discussions))
+	for _, discussion := range lookup.discussions {
+		if discussion.ID != "" {
+			live[discussion.ID] = struct{}{}
+		}
+		if len(discussion.Notes) == 0 {
+			continue
+		}
+		if markerKey, ok := discussionPublishKey(discussion.Notes[0].Body); ok {
+			remoteMarkers[markerKey] = struct{}{}
+		}
+	}
+	current := make(map[string]struct{}, len(groups))
+	for _, group := range groups {
+		if !group.Published() {
+			continue
+		}
+		key := group.PublishKey
+		positionKey := review.PositionPublishKey(group.Path, group.Line, group.Side)
+		// Locate even when this run fell back to the summary: the anchor still
+		// names the thread that must stay current.
+		if index != nil {
+			if anchor, ok := index.LocateUnambiguous(group.Path, group.Line, diffSide(group.Side)); ok {
+				// Use the same canonical anchor identity as collection and
+				// rendering, so a context-line thread is never resolved just
+				// because the finding was reported on the other side.
+				positionKey = review.PositionAnchorKey(group.Path, group.Line, group.Side, anchor)
+			}
+		}
+		if positionKey != "" && p.positionThreadLive(ctx, loaded, positionKey, remoteMarkers, live) {
+			// A position thread is current even when this run only kept the
+			// finding in the summary; resolving it would hide the discussion.
+			key = positionKey
+		}
+		if key == "" {
+			key = review.PublishKeyFor(group.Path, group.Title, group.Evidence)
+		}
+		if key != "" {
+			current[key] = struct{}{}
+		}
 	}
 	for i, target := range discussionTargets(lookup.discussions, lookup.userID, current, true) {
 		if i >= maxDiscussionLifecycleCalls {
@@ -1643,6 +2067,23 @@ func (p *Publisher) reconcileDiscussions(ctx context.Context, loaded *loadedRevi
 		}
 	}
 	return nil
+}
+
+// positionThreadLive reports whether a position thread exists for this run: a
+// remote thread already carries the position marker, or the recorded position
+// publication still points at a visible discussion. Without either, the
+// finding's remote thread is still the older fingerprint thread and its
+// fingerprint key must stay current.
+func (p *Publisher) positionThreadLive(ctx context.Context, loaded *loadedReview, positionKey string, remoteMarkers, live map[string]struct{}) bool {
+	if _, ok := remoteMarkers[positionKey]; ok {
+		return true
+	}
+	publication, err := p.store.GetPublication(ctx, loaded.project.ID, loaded.mrIID, discussionPublishKind, positionKey)
+	if err != nil || publication.GitlabID == "" {
+		return false
+	}
+	_, ok := live[publication.GitlabID]
+	return ok
 }
 
 // commitStatusPublishKey records the effective state with the SHA. GitLab

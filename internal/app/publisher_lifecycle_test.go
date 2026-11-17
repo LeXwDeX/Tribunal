@@ -139,10 +139,12 @@ func TestPublisherResolvesAndReopensBotDiscussions(t *testing.T) {
 		t.Fatal("first review published no discussion")
 	}
 
-	// A different finding in the next complete review makes the old thread
-	// disappear from the current result: it must converge to resolved.
+	// A different finding at a different position in the next complete review
+	// makes the old thread disappear from the current result: it must converge
+	// to resolved.
 	f.runner.mu.Lock()
 	f.runner.findings = lifecycleFinding("different issue", "different := 2")
+	f.runner.findings[0].Line = 3
 	f.runner.mu.Unlock()
 	second := f.seedReview(t, "lifecycle-second")
 	if err := f.service.RunReview(ctx, second); err != nil {
