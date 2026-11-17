@@ -71,7 +71,7 @@ func TestWireAuditMatchesProtocolRequest(t *testing.T) {
 func TestWireAuditOpenAIEffortsAndAnthropicForcedChoice(t *testing.T) {
 	t.Setenv("WIRE_TEST_KEY", "test")
 	for _, protocol := range []string{"openai-chat", "openai-responses", "anthropic"} {
-		for _, value := range []string{"low", "medium", "high", "max"} {
+		for _, value := range []string{"low", "medium", "high", "xhigh", "max"} {
 			t.Run(protocol+"/"+value, func(t *testing.T) {
 				var body map[string]any
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

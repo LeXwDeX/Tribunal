@@ -324,7 +324,7 @@ type Request struct {
 }
 
 type ReasoningOpts struct {
-	Effort       string // low | medium | high | max；none 需 allow_reasoning_effort_none
+	Effort       string // low | medium | high | xhigh | max；none 需 allow_reasoning_effort_none
 	BudgetTokens int    // Anthropic thinking budget
 	ThinkingType string // openai-chat：enabled | disabled
 }
