@@ -131,7 +131,7 @@ Note Hook 先入队 `review.command`，由 worker 请求 GitLab 校验身份、M
 
 只读校验依次确认项目身份、当前用户及至少 Reporter 的项目权限、`api` 和 `read_repository` scope、有效期，以及 `git ls-remote ... HEAD`。普通调用方的 token 无法识别出该项目至少 Reporter 的成员时（成员查询 404 或返回更低角色）返回 `400 validation_failed`，字段 `access_level`；平台管理员与静态 bootstrap Bearer 跳过成员检查，此时 `access_level` 可能为 0。全程默认限时 30 秒。成功返回 `200 {project_id, path_with_namespace, web_url, default_branch, username, access_level, token_scopes, token_expires_at?, git_head}`；未配置可信 GitLab 根地址或 Git 探针时返回 503。校验不落库、不创建 webhook、不入队、不调用模型；读取 HEAD 不等于完整 clone 或评论写权限验证。注册仍独立复核凭据，不依赖先前校验结果。
 
-共享凭据模式下，相同校验（项目输入串、调用者用户 ID、trusted 标志与凭据指纹一致）在 `limits.precheck_cache_ttl`（默认 45s，0 禁用缓存）内直接复用上次成功结果，TTL 内不产生任何 GitLab 调用。缓存键由项目、用户与凭据 SHA-256 指纹组合而成，分项保存共享 bot 身份与项目 access、注册人 Reporter 成员关系（仅缓存成功）和完整的共享模式校验结果；provisioning 凭据有效性与共享 token info 按凭据指纹全局缓存。缓存不保存凭据明文，且只缓存成功的预检，失败或拒绝每次重新探测。项目级 token 的校验从不缓存，撤销立即生效。注册成功、切换共享凭据、轮换 token、启停（`PATCH enabled`）和删除项目会使该项目的相关缓存失效；权限撤销、token 轮换和项目状态变化最迟在 TTL 后生效。缓存与限流计数都在进程内存中，重启清零，多实例各自独立。
+共享凭据模式下，相同校验（项目输入串、调用者用户 ID、trusted 标志与凭据指纹一致）在 `limits.precheck_cache_ttl`（默认 45s，0 禁用缓存）内直接复用上次成功结果，TTL 内不产生任何 GitLab 调用。缓存键由项目、用户与凭据 SHA-256 指纹组合而成，分项保存共享 bot 身份与项目 access、注册人 Reporter 成员关系（仅缓存成功）和完整的共享模式校验结果；provisioning 凭据有效性与共享 token info 按凭据指纹全局缓存。缓存不保存凭据明文，且只缓存成功的预检，失败或拒绝每次重新探测。项目级 token 的校验从不缓存，撤销立即生效。注册成功、切换共享凭据、轮换 token、启停（`PATCH enabled`）和删除项目会使该项目的相关缓存失效；权限撤销、token 轮换和项目状态变化的可见延迟分两级：注册决策（成员资格与 provisioning 有效性）最迟在 TTL 后生效；一次校验可能复用接近 TTL 的分项缓存（共享 bot 成员、注册人成员、共享 token info），并把完整校验结果再缓存一个 TTL，因此校验响应中的成员/凭据事实最多可能滞后约 2×TTL。缓存与限流计数都在进程内存中，重启清零，多实例各自独立。
 
 注册请求：
 

@@ -1352,11 +1352,12 @@ func (s *ProjectService) RotateToken(ctx context.Context, id int64, token string
 		s.logger.Warn("project token persistence failed", "project_id", id)
 		return nil, internalError()
 	}
+	// The credential changed; drop prechecks even if the follow-up read fails.
+	s.InvalidatePrecheckCache(id)
 	saved, err := s.Get(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	s.InvalidatePrecheckCache(id)
 	return &TokenRotation{Project: saved, Warnings: tokenRoleWarnings(access)}, nil
 }
 
@@ -1377,11 +1378,12 @@ func (s *ProjectService) switchToSharedCredential(ctx context.Context, id int64)
 		s.logger.Warn("project shared credential switch failed", "project_id", id)
 		return nil, internalError()
 	}
+	// The credential mode changed; drop prechecks even if the read-back fails.
+	s.InvalidatePrecheckCache(id)
 	saved, err := s.Get(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	s.InvalidatePrecheckCache(id)
 	return &TokenRotation{Project: saved, Warnings: sharedSwitchWarnings(s.tokens)}, nil
 }
 
@@ -1692,9 +1694,6 @@ func (s *ProjectService) Delete(ctx context.Context, id int64) error {
 	err = ws.ChangeOutbound(ctx, func(ctx context.Context) error {
 		return s.deleteProjectLocked(ctx, id)
 	})
-	if err == nil {
-		s.InvalidatePrecheckCache(id)
-	}
 	return err
 }
 
@@ -1752,6 +1751,9 @@ func (s *ProjectService) deleteProjectLocked(ctx context.Context, id int64) erro
 		s.logger.Warn("project delete failed", "project_id", id)
 		return internalError()
 	}
+	// The registration is gone even if workspace cleanup below fails, so cached
+	// prechecks must not survive the Compensate error path either.
+	s.InvalidatePrecheckCache(id)
 	if err := s.removeProjectData(id); err != nil {
 		s.logger.Warn("project workspace cleanup failed after registration deletion", "project_id", id)
 		return &Error{Code: "internal", Message: "project registration deleted but local cleanup is incomplete", Compensate: true}
