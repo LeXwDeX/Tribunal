@@ -208,6 +208,68 @@ func TestSettingsExposeSharedBotCredentialState(t *testing.T) {
 	}
 }
 
+func TestSettingsExposeProvisioningCredentialState(t *testing.T) {
+	const sharedToken = "glpat-shared-bot"
+	const envToken = "glpat-provisioning-secret"
+	t.Setenv("TRIBUNAL_TEST_PROVISIONING_TOKEN", envToken)
+	expiry := time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC)
+	api := defaultStubGitLab()
+	api.tokenInfo = &gitlab.TokenInfo{Scopes: []string{"api"}, Active: true, ExpiresAt: &expiry}
+	env := newM6Env(t, m6Options{
+		platform: &config.Config{GitLab: config.GitLabConfig{ProvisioningTokenEnv: "TRIBUNAL_TEST_PROVISIONING_TOKEN"}},
+		adminFactory: func(st *sqlite.Store) AdminService {
+			return testSharedProjectService(t, st, api, t.TempDir(), sharedToken)
+		},
+	})
+	admin := env.loginAs("code-admin")
+
+	response := admin.request(http.MethodGet, "/api/v1/settings", nil, nil)
+	if response.status != http.StatusOK {
+		t.Fatalf("settings = %d %s", response.status, response.body)
+	}
+	gitlabView, _ := env.decode(t, response)["gitlab"].(map[string]any)
+	if gitlabView["provisioning_credential"] != true || gitlabView["provisioning_credential_state"] != "ok" {
+		t.Fatalf("provisioning settings = %v", gitlabView)
+	}
+	wantExpiry := expiry.UTC().Format(time.RFC3339)
+	if gitlabView["provisioning_credential_expires_at"] != wantExpiry {
+		t.Fatalf("provisioning expiry = %v, want %s", gitlabView["provisioning_credential_expires_at"], wantExpiry)
+	}
+	for _, secret := range []string{envToken, testProvisioningToken, sharedToken} {
+		if bytes.Contains(response.body, []byte(secret)) {
+			t.Fatalf("settings response contains a credential value %q", secret)
+		}
+	}
+	for _, forbidden := range []string{"provisioning_token_env", "TRIBUNAL_TEST_PROVISIONING_TOKEN"} {
+		if bytes.Contains(response.body, []byte(forbidden)) {
+			t.Fatalf("settings response contains the credential variable name %q", forbidden)
+		}
+	}
+}
+
+func TestSettingsProvisioningCredentialNotConfigured(t *testing.T) {
+	api := defaultStubGitLab()
+	env := newM6Env(t, m6Options{
+		platform: &config.Config{},
+		adminFactory: func(st *sqlite.Store) AdminService {
+			return testProjectService(t, st, api, t.TempDir())
+		},
+	})
+	admin := env.loginAs("code-admin")
+
+	response := admin.request(http.MethodGet, "/api/v1/settings", nil, nil)
+	if response.status != http.StatusOK {
+		t.Fatalf("settings = %d %s", response.status, response.body)
+	}
+	gitlabView, _ := env.decode(t, response)["gitlab"].(map[string]any)
+	if gitlabView["provisioning_credential"] != false || gitlabView["provisioning_credential_state"] != "not_configured" {
+		t.Fatalf("provisioning settings = %v", gitlabView)
+	}
+	if _, ok := gitlabView["provisioning_credential_expires_at"]; ok {
+		t.Fatalf("settings exposed an expiry for an unconfigured credential: %v", gitlabView)
+	}
+}
+
 func TestMeWithoutSharedCredentialCapability(t *testing.T) {
 	api := defaultStubGitLab()
 	env := newM6Env(t, m6Options{adminFactory: func(st *sqlite.Store) AdminService {

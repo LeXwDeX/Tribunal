@@ -288,6 +288,140 @@ func tokenInfoExpired(info *gitlab.TokenInfo, now time.Time) bool {
 		now.UTC().Format("2006-01-02") > info.ExpiresAt.UTC().Format("2006-01-02")
 }
 
+// Provisioning credential health shares the shared-credential state
+// vocabulary and probe cadence. The webhook lifecycle credential is only
+// reported as sanitized state; its token value and environment variable name
+// never appear in a result.
+const (
+	ProvisioningStateNotConfigured   = SharedBotStateNotConfigured
+	ProvisioningStateOK              = SharedBotStateOK
+	ProvisioningStateExpired         = SharedBotStateExpired
+	ProvisioningStateInsufficient    = SharedBotStateInsufficient
+	ProvisioningStateUnreachable     = SharedBotStateUnreachable
+	provisioningHealthCacheTTL       = sharedBotHealthCacheTTL
+	provisioningHealthRequestTimeout = sharedBotHealthRequestTimeout
+)
+
+// ProvisioningCredentialHealth is a cached, sanitized view of the platform
+// webhook lifecycle credential. ExpiresAt is the credential's GitLab expiry,
+// not the cache time.
+type ProvisioningCredentialHealth struct {
+	Configured bool       `json:"configured"`
+	State      string     `json:"state"`
+	ExpiresAt  *time.Time `json:"token_expires_at,omitempty"`
+	CheckedAt  time.Time  `json:"checked_at"`
+}
+
+// ProvisioningCredentialConfigured reports whether the webhook lifecycle
+// credential is configured without contacting GitLab.
+func (s *ProjectService) ProvisioningCredentialConfigured() bool {
+	return s != nil && s.tokens.HasProvisioning()
+}
+
+// ProvisioningCredentialHealth returns the cached provisioning-credential
+// state. The first call after startup or after the five-minute TTL probes
+// GitLab with GetTokenInfo; concurrent cache misses share one in-flight probe.
+// Any caller cancellation propagates as unreachable and is not cached.
+func (s *ProjectService) ProvisioningCredentialHealth(ctx context.Context) ProvisioningCredentialHealth {
+	if !s.ProvisioningCredentialConfigured() {
+		return ProvisioningCredentialHealth{State: ProvisioningStateNotConfigured}
+	}
+	now := time.Now
+	if s.now != nil {
+		now = s.now
+	}
+	current := now()
+	s.provisioningHealthMu.Lock()
+	if s.provisioningHealth != nil && current.Sub(s.provisioningHealth.CheckedAt) < provisioningHealthCacheTTL {
+		cached := *s.provisioningHealth
+		s.provisioningHealthMu.Unlock()
+		return cached
+	}
+	if flight := s.provisioningHealthFlight; flight != nil {
+		s.provisioningHealthMu.Unlock()
+		select {
+		case <-flight.done:
+			return flight.health
+		case <-ctx.Done():
+			// The caller gave up; the shared probe result is not this caller's
+			// to cache, and the owner still reports the real outcome.
+			return ProvisioningCredentialHealth{Configured: true, State: ProvisioningStateUnreachable, CheckedAt: current}
+		}
+	}
+	flight := &provisioningHealthFlight{done: make(chan struct{})}
+	s.provisioningHealthFlight = flight
+	s.provisioningHealthMu.Unlock()
+
+	probeCtx, cancel := context.WithTimeout(ctx, provisioningHealthRequestTimeout)
+	health := s.probeProvisioningCredential(probeCtx, current)
+	cancel()
+	if ctx.Err() != nil {
+		// A caller cancellation says nothing about the credential.
+		health = ProvisioningCredentialHealth{Configured: true, State: ProvisioningStateUnreachable, CheckedAt: current}
+	} else {
+		s.provisioningHealthMu.Lock()
+		s.provisioningHealth = &health
+		s.provisioningHealthMu.Unlock()
+	}
+	flight.health = health
+	s.provisioningHealthMu.Lock()
+	s.provisioningHealthFlight = nil
+	s.provisioningHealthMu.Unlock()
+	close(flight.done)
+	return health
+}
+
+// provisioningHealthFlight is one in-flight provisioning probe. health is
+// written once before done is closed; waiters read it only after the close.
+type provisioningHealthFlight struct {
+	done   chan struct{}
+	health ProvisioningCredentialHealth
+}
+
+func (s *ProjectService) probeProvisioningCredential(ctx context.Context, now time.Time) ProvisioningCredentialHealth {
+	health := ProvisioningCredentialHealth{Configured: true, State: ProvisioningStateUnreachable, CheckedAt: now}
+	if s.gitlab == nil {
+		return health
+	}
+	token := s.tokens.Provisioning()
+	info, err := s.gitlab.GetTokenInfo(ctx, token)
+	if err != nil {
+		switch gitlab.StatusOf(err) {
+		case http.StatusUnauthorized:
+			health.State = ProvisioningStateExpired
+		case http.StatusForbidden:
+			health.State = ProvisioningStateInsufficient
+		}
+		return health
+	}
+	if info == nil {
+		return health
+	}
+	health.ExpiresAt = info.ExpiresAt
+	if !info.Active || info.Revoked || tokenInfoExpired(info, now) {
+		health.State = ProvisioningStateExpired
+		return health
+	}
+	if missingProvisioningScope(info) {
+		health.State = ProvisioningStateInsufficient
+		return health
+	}
+	health.State = ProvisioningStateOK
+	return health
+}
+
+// missingProvisioningScope reports whether the webhook credential lacks the
+// api scope. read_repository is intentionally not required: provisioning
+// never reads repository content.
+func missingProvisioningScope(info *gitlab.TokenInfo) bool {
+	for _, scope := range info.Scopes {
+		if scope == "api" {
+			return false
+		}
+	}
+	return true
+}
+
 // missingTokenScope returns the first required scope the shared token lacks.
 func missingTokenScope(info *gitlab.TokenInfo) string {
 	scopes := make(map[string]bool, len(info.Scopes))

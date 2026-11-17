@@ -205,6 +205,12 @@ type ProjectService struct {
 	// sharedHealthFlight lets concurrent cache misses share one in-flight probe
 	// without a resident goroutine; waiters block on its done channel.
 	sharedHealthFlight *sharedBotHealthFlight
+
+	provisioningHealthMu sync.Mutex
+	provisioningHealth   *ProvisioningCredentialHealth
+	// provisioningHealthFlight mirrors sharedHealthFlight for the webhook
+	// lifecycle credential.
+	provisioningHealthFlight *provisioningHealthFlight
 }
 
 // ErrProjectValidationUnavailable reports that read-only validation was not
