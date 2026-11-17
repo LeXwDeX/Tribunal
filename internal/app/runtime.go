@@ -464,6 +464,7 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 			return git.RemoteHEAD(ctx, remoteURL, repo.Auth{Token: token})
 		},
 		ValidationTimeout: cfg.GitLab.RequestTimeout,
+		PrecheckCacheTTL:  cfg.Limits.PrecheckCacheTTL,
 		Logger:            logger,
 		Now:               now,
 	})

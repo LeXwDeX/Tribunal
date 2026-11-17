@@ -19,6 +19,10 @@ server:
   read_timeout: 15s
   write_timeout: 60s
   trusted_proxies: []
+limits:
+  register_per_minute: 10
+  validate_per_minute: 30
+  precheck_cache_ttl: 45s
 gitlab:
   url: ""
   request_timeout: 30s

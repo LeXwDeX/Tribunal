@@ -146,6 +146,8 @@ type Server struct {
 	lockStats        func() LockStats
 	streamPoll       time.Duration
 	now              func() time.Time
+	registerLimiter  *rateLimiter
+	validateLimiter  *rateLimiter
 	// mcpTestTimeout bounds one MCP connection test. It is derived from the
 	// runtime server.write_timeout so a test never outlives the response budget.
 	mcpTestTimeout time.Duration
@@ -233,6 +235,17 @@ func New(cfg Config) (*Server, error) {
 	if s.now == nil {
 		s.now = time.Now
 	}
+	registerPerMinute, validatePerMinute := defaultRegisterPerMinute, defaultValidatePerMinute
+	if cfg.Platform != nil {
+		if value := cfg.Platform.Limits.RegisterPerMinute; value > 0 {
+			registerPerMinute = value
+		}
+		if value := cfg.Platform.Limits.ValidatePerMinute; value > 0 {
+			validatePerMinute = value
+		}
+	}
+	s.registerLimiter = newRateLimiter(registerPerMinute, rateLimitWindow, s.now)
+	s.validateLimiter = newRateLimiter(validatePerMinute, rateLimitWindow, s.now)
 	if cfg.FileConfig != nil {
 		s.fileConfig.Store(cfg.FileConfig)
 	}
@@ -247,8 +260,8 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("GET /auth/callback", s.handleCallback)
 	mux.HandleFunc("POST /auth/logout", s.handleLogout)
 	mux.HandleFunc("GET /api/v1/me", s.apiAuth(s.handleMe))
-	mux.HandleFunc("POST /api/v1/projects", s.apiAuth(s.guard(policyAuthenticated, s.handleRegisterProject)))
-	mux.HandleFunc("POST /api/v1/projects/validate", s.apiAuth(s.guard(policyAuthenticated, s.handleValidateProject)))
+	mux.HandleFunc("POST /api/v1/projects", s.apiAuth(s.guard(policyAuthenticated, s.rateLimited("register", s.registerLimiter, s.handleRegisterProject))))
+	mux.HandleFunc("POST /api/v1/projects/validate", s.apiAuth(s.guard(policyAuthenticated, s.rateLimited("validate", s.validateLimiter, s.handleValidateProject))))
 	mux.HandleFunc("GET /api/v1/projects", s.apiAuth(s.handleListProjects))
 	mux.HandleFunc("GET /api/v1/projects/{id}", s.apiAuth(s.guard(policyProjectRead, s.handleGetProject)))
 	mux.HandleFunc("PATCH /api/v1/projects/{id}", s.apiAuth(s.guard(policyProjectManage, s.handleUpdateProject)))
