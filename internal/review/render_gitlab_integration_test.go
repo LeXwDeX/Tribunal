@@ -231,7 +231,7 @@ func TestGitLabRenderedInlineReferencesAndURLs(t *testing.T) {
 	group := renderGroup("inline-reference", ActionMark, SeverityP1, true, title, "Body")
 	group.Decision.Reason = reason
 	group.Evidence = ""
-	out, err := RenderFinding(group, FindingRenderOptions{})
+	out, err := renderFindingForTest(group, FindingRenderOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +331,7 @@ func TestGitLabRenderedEvidenceIsLiteralAndSafe(t *testing.T) {
 	}
 
 	marked.PositionOK = true
-	inline, err := RenderFinding(marked, FindingRenderOptions{})
+	inline, err := renderFindingForTest(marked, FindingRenderOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

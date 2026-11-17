@@ -89,6 +89,7 @@ type ReviewStore interface {
 	LastPublishedHead(ctx context.Context, projectID, mrIID int64) (string, error)
 	GetPublication(ctx context.Context, projectID, mrIID int64, kind, publishKey string) (*store.Publication, error)
 	ListPublications(ctx context.Context, workflowID string) ([]store.Publication, error)
+	ListDiscussionPublications(ctx context.Context, projectID, mrIID int64) ([]store.Publication, error)
 	UpsertPublication(ctx context.Context, p store.Publication) (*store.Publication, error)
 	ReserveDiscussionIntent(ctx context.Context, projectID, mrIID int64, key string) (bool, string, error)
 	ConfirmDiscussionIntent(ctx context.Context, projectID, mrIID int64, key, gitlabID string) error

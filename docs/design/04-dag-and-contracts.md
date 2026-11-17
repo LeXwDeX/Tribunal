@@ -541,17 +541,17 @@ user                本节点任务：MR 摘要、包内文件列表与 diff、f
 <!-- gitlab-ce-review:workflow id=0192f0c1… -->
 ~~~
 
-- 讨论按位置（file+line+side）唯一，不按 finding 逐条创建。位置键为 `review.PositionPublishKey(path, line, side)`：`pk_` + sha256 前 16 字节十六进制，只含规范化侧别（`old`；空或 `new` 按 `new`）、去首尾空白的路径和正整数行号，不含标题、证据、正文或工作流指纹；同一位置跨代次稳定。路径为空或 `line <= 0` 返回空键，问题只进汇总。
+- 讨论按位置（file+line+side）唯一，不按 finding 逐条创建。位置键为 `review.PositionPublishKey(path, line, side)`：`pk_` + sha256 前 16 字节十六进制，只含规范化侧别（`old`；空或 `new` 按 `new`）、去首尾空白的路径和正整数行号，不含标题、证据、正文或工作流指纹；同一位置跨代次稳定。锚点由 `gitlab.DiffIndex` 定位后经 `review.PositionAnchorKey` 规范化：context 行同时带 old/new 行号，同一物理行不论按哪一侧报告都归一到 new 侧及其 new 路径/行号、共用一条讨论；新增/删除行只有单侧行号，保持各自侧别。采集、渲染与生命周期收敛共用该函数。路径为空或 `line <= 0` 返回空键，问题只进汇总。
 - 讨论挂在对应行上，正文不再重复位置。首行是隐藏标记 `<!-- gitlab-ce-review:finding key=<位置键> -->`；随后的 `<sub>代次 N</sub>` 显示本次评审代次，让读者区分原地更新与新建讨论；末尾追加隐藏的 `<!-- gitlab-ce-review:workflow id=<工作流ID> -->`。
 - 同一位置有多个 finding 时共用一条 discussion，用 `### [P]标题` 分节（存疑为 `### [P · 存疑]标题`），按有效严重级别、规范化标题、ID 稳定排序；单条 finding 保持 `**[P]标题**` 平铺格式。标题格式与汇总一致：级别与标题之间没有空格，存疑条目使用 `[P1 · 存疑]` 单一标记。
 - 正文逐字完整发布，不再按 400 字符截断，也不追加「内容已截断」或「完整正文见控制台」。只有整条注记超过 GitLab 平台上限时应用统一兜底（见 §9.1）：逐条累计字节预算，放不下下一条完整条目时省略其后的所有条目，不切断代码块、`<details>` 块或多字节字符。同一位置讨论中的多个分节共用这一字节预算。建议与证据的代码块渲染不变。
 - `suggestion` 以围栏开头（如 GitLab `suggestion` 块）时原样输出，不加“建议”标签。
 - 证据只在存疑条目中以折叠的 `<details>` 保留；已确认条目的证据仍存在评审详情中。
 - 已有位置键发布记录时，按记录的 discussion ID 找到线程，只更新本 bot 的首条 note（`PUT .../notes/:note_id`），正文相同不写。更新路径不删除讨论、不 resolve、不改动用户回复；线程的 resolve/unresolve 只由讨论生命周期按当前结果执行。线程已不存在、首条作者不是当前 token 身份或首条没有 finding 标记时，该位置留在汇总并提示「历史讨论内容…无法确认」，不新建同位置讨论。
-- 没有位置键记录时先复用旧线程：候选为旧指纹键 `publications(kind=discussion)` 记录指向的线程，以及首条带 finding 标记、GitLab note position 的 path/line/side 与当前位置一致的线程；取 note ID 最大（最近）的一条，首条作者必须是当前 token 身份。更新正文后写入位置键发布记录；存在候选但归属无法证明时留在汇总，不新建重复讨论。旧 note 可能不返回 position：此时旧发布记录还必须能证明历史 finding 的路径、侧别、类别一致且行号相差不超过 3 行，否则视为无法证明；代码行号移动会形成新位置。
+- 没有位置键记录时先复用旧线程：候选为旧指纹键 `publications(kind=discussion)` 记录指向的线程、该 MR 其它历史 discussion 发布行指向的线程（措辞变化后当前指纹键不再命中旧行，改按 note position 或历史 finding 证据匹配），以及首条带 finding 标记、GitLab note position 的 path/line/side 与规范化锚点一致的线程；取 note ID 最大（最近）的一条，首条作者必须是当前 token 身份。首条标记键必须是当前位置键，或是本轮其他位置键之外的旧键；同一轮内每个 discussion 只绑定一个位置，已认领线程不再被复用。更新正文后写入位置键发布记录，并结算该位置键下未确认的讨论意图（已绑定其它远端 ID 的意图不覆盖，位置退回汇总）；存在候选但归属无法证明时留在汇总，不新建重复讨论。旧 note 可能不返回 position：此时旧发布记录还必须能证明持有该发布键的 finding（而非同锚点第一条 finding）路径、侧别、类别一致且行号相差不超过 3 行，否则视为无法证明；代码行号移动会形成新位置。
 - 没有候选时沿用讨论意图与 `POST .../discussions`，发布键改为位置键；400/401/403/404/422 的确定性拒绝和未知结果保持待处理的语义不变。升级前以指纹键写入的 `discussion` 行作为只读历史保留，不删除、不重写、不改归属；不需要数据库迁移。
-- 生命周期收敛的 current keys 对有可用位置（path+line）的已发布 finding 使用位置键；该代次只进摘要（未成功行内发布）时也保留位置键，避免把仍存在的讨论误判为过期；无可用位置的 finding 保留指纹键回退。PASS/BLOCKING 时仍存在但已 resolved 的讨论重新打开，不再出现的讨论（包括旧代次遗留的重复线程）resolve；只 resolve/unresolve，永不删除，INCOMPLETE 不收敛。
-- 反馈归因：每个位置只有主 finding（分组中的第一条）在 findings 表中保存位置键，`publicationFinding` 仍能唯一匹配；同位置其他 finding 保留原指纹键，旧工作流的指纹键 finding 和旧 `discussion` 行不变。
+- 生命周期收敛的 current keys 对有可用位置的已发布 finding 仅在该位置线程确实存在时使用规范化位置键（与发布同一 `review.PositionAnchorKey`）：远端正带该位置键 marker，或位置发布记录指向可见线程；否则沿用指纹键，避免把本轮只进摘要、远端仍是指纹键 marker 的线程误判为过期。已按位置成功发布（即使只进摘要）的线程保持当前；无可用位置的 finding 保留指纹键回退。PASS/BLOCKING 时仍存在但已 resolved 的讨论重新打开，不再出现的讨论（包括旧代次遗留的重复线程）resolve；只 resolve/unresolve，永不删除，INCOMPLETE 不收敛。
+- 反馈归因：每个位置只有主 finding（分组中的第一条）在 findings 表中保存位置键，`publicationFinding` 仍能唯一匹配；同位置其他 finding 保留原指纹键，旧工作流的指纹键 finding 和旧 `discussion` 行不变。同一 discussion 可能同时被旧指纹行和位置行引用：反馈采集只在首条 note 的隐藏标记仍等于本行 `publish_key` 时归属该行，标记指向其他键的历史行跳过，避免同一次 👍/resolved 重复计数。
 
 存疑条目（`mark`）的标题使用 `[P1 · 存疑]` 这样的单一标记；非空裁决原因在正文后显示，证据仍可展开查看。
 

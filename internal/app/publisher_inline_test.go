@@ -214,13 +214,11 @@ func TestPublisherFallsBackToSummaryOnInlineRejection(t *testing.T) {
 func TestPublisherKeepsMarkedEvidenceWhenHistoricalFindingIsMissing(t *testing.T) {
 	const evidence = "bad := 1"
 	key := review.FindingPublishKey(testDossier(t, reviewTestHead), "main.go", review.SideNew, "Injected failing assignment", evidence, "historical")
-	previousBody, err := review.RenderFinding(review.Group{
-		Path: "main.go", Line: 2, Side: review.SideNew, Severity: review.SeverityP1, Title: "Injected failing assignment",
-		Body: "Confirmed finding.", Evidence: evidence, PublishKey: key, PositionOK: true,
-		Decision: &review.FindingDecision{Action: review.ActionPublish},
-	}, review.FindingRenderOptions{})
-	if err != nil || strings.Contains(previousBody, evidence) {
-		t.Fatalf("confirmed discussion unexpectedly includes evidence: %q, err = %v", previousBody, err)
+	// The historical thread was rendered before inline discussions used
+	// position keys, so its marker carries the fingerprint key and no position.
+	previousBody := review.FindingMarkerPrefix + " key=" + key + " -->\n**[P1]Injected failing assignment**\n\nConfirmed finding.\n"
+	if strings.Contains(previousBody, evidence) {
+		t.Fatalf("confirmed discussion unexpectedly includes evidence: %q", previousBody)
 	}
 	f, _, workflow, _ := runDeepReview(t, "job-marked-reuse", func(f *reviewFixture, runner *scriptedAgentRunner) {
 		runner.fail[prompts.Verify] = errors.New("synthetic verifier failure")

@@ -193,7 +193,7 @@ func TestInlineLongBodyPublishesFullTextAndSummaryKeepsDetailURL(t *testing.T) {
 	body := strings.Repeat("长正文内容。", 120)
 	group := mkGroup("long-body", 20, "logic", SeverityP2, "很长的正文", body)
 	const detail = "https://review.example/reviews/wf-455"
-	out, err := RenderFinding(group, FindingRenderOptions{})
+	out, err := renderFindingForTest(group, FindingRenderOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +218,7 @@ func TestInlineLongBodyPublishesFullTextAndSummaryKeepsDetailURL(t *testing.T) {
 func TestLongInlineBodyHasNoConsoleHint(t *testing.T) {
 	body := strings.Repeat("长正文内容。", 120)
 	group := mkGroup("long-body", 20, "logic", SeverityP2, "很长的正文", body)
-	out, err := RenderFinding(group, FindingRenderOptions{})
+	out, err := renderFindingForTest(group, FindingRenderOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

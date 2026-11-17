@@ -302,6 +302,14 @@ func (s *FeedbackService) collectDiscussion(ctx context.Context, token string, p
 	// reviewer replies. Their reactions describe the discussion, not approval
 	// of the published finding.
 	publisherNote := notes[0]
+	// A thread carries the key of the publication that last wrote it. When
+	// adoption moved a legacy fingerprint thread onto its position key, the
+	// old workflow's row still points at the same discussion; collecting both
+	// rows would count one reaction twice. Only the row whose key is still on
+	// the thread reports feedback. An unreadable marker keeps the old path.
+	if markerKey, ok := discussionPublishKey(publisherNote.Body); ok && markerKey != publication.PublishKey {
+		return ""
+	}
 	findingID := ""
 	finding, err := s.publicationFinding(ctx, workflow, publication)
 	if err != nil {

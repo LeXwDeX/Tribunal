@@ -66,27 +66,6 @@ func TestRuleSummaryCountsIncludeSummaryFoldedGroups(t *testing.T) {
 	}
 }
 
-func TestPublishKeyConflictWarningSaysWhereTheItemIs(t *testing.T) {
-	listed := laneGroup("a", "cr.p1", 10, "logic", SeverityP1, "read_token 把支付令牌打印到标准输出", "read_token 调用 print 输出支付令牌到标准输出，日志可读取。")
-	dup := laneGroup("b", "reasoner", 0, "security", SeverityP1, "read_token 把支付令牌打印到标准输出", "read_token 调用 print 输出支付令牌到标准输出，日志可读取。")
-	dup.Path, dup.PositionOK = "", false
-	other := laneGroup("c", "cr.p1", 40, "security", SeverityP1, "令牌写入日志", "日志输出包含完整令牌字符串。")
-	other.PositionOK = false
-
-	got := PublishKeyConflictWarning([]Group{listed, dup, other}, map[string]bool{"b": true})
-	if !strings.Contains(got, "相关描述") || !strings.Contains(got, "read_token") || strings.Contains(got, "已保留在摘要中") {
-		t.Fatalf("folded item: %q", got)
-	}
-	got = PublishKeyConflictWarning([]Group{listed, dup, other}, map[string]bool{"c": true})
-	if !strings.Contains(got, "摘要中单独列出") || strings.Contains(got, "相关描述") {
-		t.Fatalf("listed item: %q", got)
-	}
-	got = PublishKeyConflictWarning([]Group{listed, dup, other}, map[string]bool{"b": true, "c": true})
-	if !strings.Contains(got, "相关描述") || !strings.Contains(got, "单独列出") {
-		t.Fatalf("mixed: %q", got)
-	}
-}
-
 func TestModelSummaryTextIsNeverRewritten(t *testing.T) {
 	groups := MergePresentation(countsFixture(), nil)
 	body, err := RenderSummary(SummaryInput{

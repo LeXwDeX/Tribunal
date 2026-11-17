@@ -9,7 +9,7 @@ import (
 func TestRenderFindingPublishesLongBodyVerbatim(t *testing.T) {
 	body := "先写触发条件。\n\n" + strings.Repeat("长正文内容。", 1000)
 	group := mkGroup("long-body-publish", 20, "logic", SeverityP2, "长正文", body)
-	out, err := RenderFinding(group, FindingRenderOptions{})
+	out, err := renderFindingForTest(group, FindingRenderOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,7 +28,7 @@ func TestRenderFindingPublishesLongEvidenceAndSuggestionVerbatim(t *testing.T) {
 	group.Decision.Action = ActionMark
 	group.Evidence = diff
 	group.Suggestion = suggestion
-	out, err := RenderFinding(group, FindingRenderOptions{})
+	out, err := renderFindingForTest(group, FindingRenderOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestRenderPublishesLongDoubtReasonVerbatim(t *testing.T) {
 	group.Decision.Action = ActionMark
 	group.Decision.Reason = reason
 	group.Challenge = &Challenge{Status: ChallengeUncertain, Reason: reason}
-	out, err := RenderFinding(group, FindingRenderOptions{})
+	out, err := renderFindingForTest(group, FindingRenderOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestRenderFindingPlatformLimitOmitsOverBudgetBlocks(t *testing.T) {
 	group := mkGroup("platform-inline", 20, "logic", SeverityP2, "平台上限", "正文。")
 	group.Decision.Action = ActionMark
 	group.Evidence = strings.Repeat("e", MaxPublishedNoteBytes)
-	out, err := RenderFinding(group, FindingRenderOptions{})
+	out, err := renderFindingForTest(group, FindingRenderOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
