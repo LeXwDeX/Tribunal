@@ -316,6 +316,9 @@ type settingsGitLabView struct {
 	// ProvisioningCredential reports whether the platform webhook credential
 	// is configured. Its variable name and value never appear in this view.
 	ProvisioningCredential bool `json:"provisioning_credential"`
+	// Provisioning credential health is reported as sanitized state only.
+	ProvisioningCredentialState     string     `json:"provisioning_credential_state"`
+	ProvisioningCredentialExpiresAt *time.Time `json:"provisioning_credential_expires_at,omitempty"`
 }
 
 type settingsAuthView struct {
@@ -423,6 +426,14 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	}); ok {
 		sharedBot = provider.SharedBotCredentialHealth(r.Context())
 	}
+	// The provisioning probe is independent of the shared bot probe and is
+	// likewise cached for five minutes; it returns sanitized state only.
+	provisioning := app.ProvisioningCredentialHealth{State: app.ProvisioningStateNotConfigured}
+	if provider, ok := s.projects.(interface {
+		ProvisioningCredentialHealth(context.Context) app.ProvisioningCredentialHealth
+	}); ok {
+		provisioning = provider.ProvisioningCredentialHealth(r.Context())
+	}
 	view := settingsView{
 		Server: settingsServerView{
 			Listen:         cfg.Server.Listen,
@@ -432,15 +443,17 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			TrustedProxies: cfg.Server.TrustedProxies,
 		},
 		GitLab: settingsGitLabView{
-			URL:                          cfg.GitLab.URL,
-			RequestTimeout:               cfg.GitLab.RequestTimeout,
-			MaxConcurrency:               cfg.GitLab.MaxConcurrency,
-			BotUsernames:                 cfg.GitLab.BotUsernames,
-			SharedBotCredential:          sharedBot.Configured,
-			SharedBotCredentialState:     sharedBot.State,
-			SharedBotCredentialExpiresAt: sharedBot.ExpiresAt,
-			SharedBotUsername:            sharedBot.Username,
-			ProvisioningCredential:       cfg.GitLab.ProvisioningTokenEnv != "",
+			URL:                             cfg.GitLab.URL,
+			RequestTimeout:                  cfg.GitLab.RequestTimeout,
+			MaxConcurrency:                  cfg.GitLab.MaxConcurrency,
+			BotUsernames:                    cfg.GitLab.BotUsernames,
+			SharedBotCredential:             sharedBot.Configured,
+			SharedBotCredentialState:        sharedBot.State,
+			SharedBotCredentialExpiresAt:    sharedBot.ExpiresAt,
+			SharedBotUsername:               sharedBot.Username,
+			ProvisioningCredential:          cfg.GitLab.ProvisioningTokenEnv != "",
+			ProvisioningCredentialState:     provisioning.State,
+			ProvisioningCredentialExpiresAt: provisioning.ExpiresAt,
 		},
 		Auth: settingsAuthView{
 			BootstrapAdmins: cfg.Auth.BootstrapAdmins,
