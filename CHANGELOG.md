@@ -2,6 +2,12 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.7.1] - 2026-11-17
+
+### 变更
+
+- **项目协议切换为 Apache License 2.0**（[#506](https://github.com/LeXwDeX/Tribunal/issues/506)）：`LICENSE` 替换为 Apache License 2.0 全文，附录版权行 `Copyright 2026 Lex`；README、AGENTS.md、ARCH.md、CONTRIBUTING.md 与 `web/package.json` 的项目协议表述同步更新。已发布版本（含 v1.7.0 及更早）仍按其发布时的 MIT 条款授权；本版不改变代码行为、依赖、数据库 schema 或第三方许可证记录，`licenses/THIRD_PARTY_NOTICES.txt` 不需要重新生成。
+
 ## [1.7.0] - 2026-11-17
 
 ### 新增
@@ -479,6 +485,7 @@ v1.0.0 之后的第一个版本：产品改名为 Tribunal，修复 1.0 复审�
 
 首个版本（GitHub Pre-release），交付 M0–M6 范围：webhook 与持久化队列、DAG 调度、主 agent 编排、对抗核验与裁决、GitLab 发布、三种 LLM 协议、工作区、MCP 与 Skill、OAuth、项目授权、Web 控制台和统计。详见 [Release v1.0.0](https://github.com/LeXwDeX/Tribunal/releases/tag/v1.0.0)。
 
+[1.7.1]: https://github.com/LeXwDeX/Tribunal/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/LeXwDeX/Tribunal/compare/v1.5.0...v1.7.0
 [1.5.0]: https://github.com/LeXwDeX/Tribunal/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/LeXwDeX/Tribunal/compare/v1.3.0...v1.4.0

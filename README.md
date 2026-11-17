@@ -2,7 +2,7 @@
 
 GitLab CE MR 多 agent 自动评审服务
 
-基于 Go 的 GitLab CE MR 自动评审服务，使用 MIT 协议。
+基于 Go 的 GitLab CE MR 自动评审服务，使用 [Apache License 2.0](LICENSE) 协议。
 
 当前 M0–M6 功能已有本地实现，覆盖项目注册与 webhook、三种 LLM 协议、agent 工具循环、DAG 与持久化、只读探索与四路并行评审/对抗核验/裁决、GitLab 发布、工作区、MCP/Skill、OAuth 持久会话、项目 `read`/`manage` 授权与 CSRF、用户全局只读、平台角色管理、模型管理与评审档位节点覆盖、管理 API、React 控制台、API token、统计、反馈采集、人工标注与许可证清单。
 

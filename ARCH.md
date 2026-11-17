@@ -8,7 +8,7 @@
 
 ## 1. 定位
 
-一个开源、MIT 协议、基于 Go 的 Web 服务，接入 **GitLab CE（社区版）**，对 Merge Request（下文统称 MR，即 PR）做 AI 自动评审：
+一个开源、Apache-2.0 协议、基于 Go 的 Web 服务，接入 **GitLab CE（社区版）**，对 Merge Request（下文统称 MR，即 PR）做 AI 自动评审：
 
 - 通过**项目级 Token** 授权，既能被 GitLab webhook 回调触发，也能主动触发评审，并把结果回写到 MR。
 - 服务拥有 clone 项目代码的权限，评审时不只看 diff，也能读取完整仓库上下文。
@@ -31,7 +31,7 @@
 |---|---|---|
 | D1 | 技术栈：Go Web 服务 | 已定 |
 | D2 | 对接 GitLab CE，使用项目级 Token 授权，具备 clone 权限 | 已定 |
-| D3 | 许可证 MIT，依赖必须与 MIT 兼容 | 已定 |
+| D3 | 许可证 Apache-2.0，依赖必须与 Apache-2.0 兼容 | 已定 |
 | D4 | 模型只用 API Key 计费方式，不支持订阅登录 | 已定 |
 | D5 | 支持三种协议：OpenAI Chat Completions、OpenAI Responses、Anthropic Messages | 已定 |
 | D6 | 能用官方 SDK 就用官方 SDK（`openai-go/v3`、`anthropic-sdk-go`、GitLab `client-go`） | 已定 |
@@ -622,7 +622,7 @@ blocks:                     # 按块授权 MCP 工具、挂载 Skill
 
 ## 13. 许可证与依赖
 
-- 本项目：**MIT**。
+- 本项目：**Apache-2.0**。
 - 依赖许可证（已核对）：
 
 | 依赖 | 许可证 | 说明 |
@@ -630,7 +630,7 @@ blocks:                     # 按块授权 MCP 工具、挂载 Skill
 | `github.com/openai/openai-go/v3` (v3.85.0) | Apache-2.0 | 分发时附带许可证文本 |
 | `github.com/anthropics/anthropic-sdk-go` (v1.84.0) | MIT | — |
 | `gitlab.com/gitlab-org/api/client-go` (v1.46.0) | Apache-2.0 | 间接依赖 `hashicorp/go-retryablehttp`、`go-cleanhttp`（MPL-2.0，不修改即可正常使用） |
-| `github.com/modelcontextprotocol/go-sdk` | MIT → Apache-2.0（迁移中） | 两者均与 MIT 兼容 |
+| `github.com/modelcontextprotocol/go-sdk` | MIT → Apache-2.0（迁移中） | 两者均与 Apache-2.0 兼容 |
 
 - 发布物使用单一声明文件 `licenses/THIRD_PARTY_NOTICES.txt`，由 `go run ./scripts/licensebundle` 生成。内容覆盖 Go 标准库、Linux/amd64 服务端链接的 40 个模块许可证，以及 9 个 production npm 包；本机 inventory 记录的主机模块为 42 个，运行时清单为 40 个；两者不同。CI 用 `go run ./scripts/licensebundle -check` 验证文件是否最新，并运行 `licensecheck`；本机验证还运行 `go mod verify`。
 - Dockerfile 把 `licenses/` 复制到 `/licenses/`，发布路径是 `/licenses/THIRD_PARTY_NOTICES.txt`。当前 Dockerfile 仍同时复制遗留的 `THIRD_PARTY_LICENSES`；新单文件是权威发布声明，旧文件不再作为生成目标。

@@ -14,5 +14,5 @@ test requirements, review workflow and release policy.
 - Do not commit secrets, `.env` files or local agent state.
 - Report security issues privately through [`SECURITY.md`](SECURITY.md).
 
-By contributing, you agree to license your contribution under the project's MIT
-license.
+By contributing, you agree to license your contribution under the Apache
+License, Version 2.0.
