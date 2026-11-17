@@ -66,16 +66,20 @@ const (
 	// HTTP 400. Keep ~86% headroom. UTF-8 Chinese characters are 3 bytes each,
 	// so roughly 300,000 Chinese characters fit in one note.
 	MaxPublishedNoteBytes = 900_000
-	// maxContentRunes disables content-length clipping in the renderer and its
-	// contracts. Output length is decided by prompts and node max_tokens;
+	// maxContentRunes disables content-length clipping in the renderer: the
+	// renderer publishes what the contracts accepted, in full.
 	// MaxPublishedNoteBytes is the only publishing bound.
 	maxContentRunes = math.MaxInt
-	// Evidence, suggestions and doubt reasons keep their constant names so
-	// existing call sites stay unchanged, but they no longer clip content.
-	MaxEvidenceRunes   = maxContentRunes
-	MaxSuggestionRunes = maxContentRunes
+	// MaxEvidenceRunes, MaxSuggestionRunes and MaxReasonRunes are
+	// generation-side contract limits, not publishing clips. Validate is the
+	// only enforcement point for providers that ignore jsonschema maxLength.
+	// The renderer never shortens a value to these sizes; longer output, when
+	// a deployment needs it, is decided by node max_tokens together with these
+	// limits.
+	MaxEvidenceRunes   = 64_000
+	MaxSuggestionRunes = 64_000
 	MaxSummaryRunes    = 3000
-	MaxReasonRunes     = maxContentRunes
+	MaxReasonRunes     = 8_000
 	MaxFindings        = 200
 	DefaultMaxPackages = 6
 	HardMaxPackages    = 100
@@ -141,8 +145,8 @@ type FindingOut struct {
 	Category   string     `json:"category" jsonschema:"pattern=^[a-z][a-z0-9_-]{0,31}$"`
 	Title      string     `json:"title" jsonschema:"minLength=1,maxLength=120"`
 	Body       string     `json:"body" jsonschema:"minLength=1,maxLength=8000,description=One short paragraph: trigger then impact. At most 3 lines of code."`
-	Suggestion string     `json:"suggestion,omitempty" jsonschema:"maxLength=8000,description=One sentence or a GitLab suggestion block replacing the commented line."`
-	Evidence   string     `json:"evidence" jsonschema:"minLength=1,maxLength=8000"`
+	Suggestion string     `json:"suggestion,omitempty" jsonschema:"maxLength=64000,description=One sentence or a GitLab suggestion block replacing the commented line."`
+	Evidence   string     `json:"evidence" jsonschema:"minLength=1,maxLength=64000"`
 	Confidence Confidence `json:"confidence" jsonschema:"enum=high,enum=medium,enum=low"`
 }
 
@@ -240,7 +244,7 @@ type Ref struct {
 // Rebut rejects one source finding with a reason.
 type Rebut struct {
 	Ref
-	Reason string `json:"reason" jsonschema:"minLength=1,maxLength=4000"`
+	Reason string `json:"reason" jsonschema:"minLength=1,maxLength=8000"`
 }
 
 // ReasonerOut is the design-reasoning node contract.
@@ -267,7 +271,7 @@ type ReasonerFinding struct {
 // VerifyOut is one challenger verdict.
 type VerifyOut struct {
 	Status            string    `json:"status" jsonschema:"enum=CONFIRMED,enum=REFUTED,enum=UNCERTAIN"`
-	Reason            string    `json:"reason" jsonschema:"minLength=1,maxLength=4000"`
+	Reason            string    `json:"reason" jsonschema:"minLength=1,maxLength=8000"`
 	Evidence          []CodeRef `json:"evidence" jsonschema:"maxItems=20"`
 	SuggestedSeverity Severity  `json:"suggested_severity,omitempty" jsonschema:"enum=P0,enum=P1,enum=P2,enum=info"`
 }
@@ -286,7 +290,7 @@ type Decision struct {
 	FindingID string   `json:"finding_id" jsonschema:"minLength=1"`
 	Action    string   `json:"action" jsonschema:"enum=publish,enum=drop,enum=mark,enum=downgrade"`
 	Severity  Severity `json:"severity,omitempty" jsonschema:"enum=P0,enum=P1,enum=P2,enum=info"`
-	Reason    string   `json:"reason" jsonschema:"minLength=1,maxLength=4000"`
+	Reason    string   `json:"reason" jsonschema:"minLength=1,maxLength=8000"`
 }
 
 // ExtendRequest asks the engine for one extra challenge or review node.

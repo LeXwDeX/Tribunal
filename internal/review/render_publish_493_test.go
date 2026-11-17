@@ -92,9 +92,10 @@ func TestRenderPublishesLongDoubtReasonVerbatim(t *testing.T) {
 	}
 }
 
-func TestRenderSummaryPlatformLimitCutsAtCompleteBlocks(t *testing.T) {
+func TestRenderSummaryPlatformLimitOmitsOverBudgetItems(t *testing.T) {
 	first := renderGroup("platform-first", ActionPublish, SeverityP1, false, "首条", "首条完整正文。")
 	first.PositionOK = false
+	first.Suggestion = ""
 	second := renderGroup("platform-second", ActionMark, SeverityP2, false, "次条", "次条正文。")
 	second.PositionOK = false
 	second.Evidence = strings.Repeat("e", MaxPublishedNoteBytes)
@@ -110,15 +111,18 @@ func TestRenderSummaryPlatformLimitCutsAtCompleteBlocks(t *testing.T) {
 	if !strings.HasSuffix(out, platformLimitNotice) {
 		t.Fatalf("over-limit summary lacks the platform notice:\n%s", out)
 	}
-	if !strings.Contains(out, "首条完整正文。") || !strings.Contains(out, "次条正文。") {
-		t.Fatalf("platform fallback dropped earlier complete items:\n%s", out)
+	if !strings.Contains(out, "首条完整正文。") {
+		t.Fatalf("platform budget dropped the complete first item:\n%s", out)
+	}
+	if strings.Contains(out, "次条正文。") {
+		t.Fatal("an over-budget item was cut and kept, want it omitted whole")
 	}
 	kept := strings.TrimSuffix(out, platformLimitNotice)
 	if strings.Count(kept, "```")%2 != 0 {
-		t.Fatalf("platform fallback cut inside a code block:\n%s", kept)
+		t.Fatalf("platform budget cut inside a code block:\n%s", kept)
 	}
 	if strings.Contains(kept, strings.Repeat("e", 1000)) {
-		t.Fatal("platform fallback kept a truncated evidence block instead of dropping it whole")
+		t.Fatal("platform budget kept a truncated evidence block instead of dropping it whole")
 	}
 }
 
@@ -141,12 +145,17 @@ func TestRenderSummaryPublishesChineseBodyUnderPlatformLimit(t *testing.T) {
 }
 
 func TestRenderSummaryPlatformLimitCountsBytesAndKeepsUTF8(t *testing.T) {
+	firstBody := strings.Repeat("汉字段落。\n\n", 100)
+	first := renderGroup("chinese-kept", ActionPublish, SeverityP2, false, "保留条目", firstBody)
+	first.PositionOK = false
+	first.Suggestion = ""
 	paragraph := "汉字段落。\n\n"
-	body := strings.Repeat(paragraph, 60_000) // 1,020,000 bytes, 420,000 runes
-	group := renderGroup("chinese-over-limit", ActionPublish, SeverityP2, false, "中文超限正文", body)
-	group.PositionOK = false
+	secondBody := strings.Repeat(paragraph, 60_000) // 1,020,000 bytes, 420,000 runes
+	second := renderGroup("chinese-over-limit", ActionPublish, SeverityP2, false, "中文超限正文", secondBody)
+	second.PositionOK = false
+	second.Suggestion = ""
 	out, err := RenderSummary(SummaryInput{
-		Verdict: VerdictBlocking, Summary: "发现问题", Groups: []Group{group}, Fingerprint: "abc",
+		Verdict: VerdictBlocking, Summary: "发现问题", Groups: []Group{first, second}, Fingerprint: "abc",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -155,18 +164,21 @@ func TestRenderSummaryPlatformLimitCountsBytesAndKeepsUTF8(t *testing.T) {
 		t.Fatalf("summary note bytes = %d, want at most %d", n, MaxPublishedNoteBytes)
 	}
 	if !utf8.ValidString(out) {
-		t.Fatal("platform fallback cut a multi-byte character")
+		t.Fatal("platform budget cut a multi-byte character")
 	}
 	if !strings.HasSuffix(out, platformLimitNotice) {
 		t.Fatalf("over-limit Chinese summary lacks the platform notice")
 	}
-	kept := strings.TrimSuffix(out, platformLimitNotice)
+	kept := strings.TrimRight(strings.TrimSuffix(out, platformLimitNotice), "\n")
 	if !strings.HasSuffix(kept, "汉字段落。") {
-		t.Fatal("platform fallback did not stop at a complete paragraph boundary")
+		t.Fatal("platform budget did not keep the complete first entry")
+	}
+	if strings.Contains(kept, "中文超限正文") {
+		t.Fatal("the over-budget Chinese entry was cut instead of omitted whole")
 	}
 }
 
-func TestRenderFindingPlatformLimitCutsAtCompleteBlocks(t *testing.T) {
+func TestRenderFindingPlatformLimitOmitsOverBudgetBlocks(t *testing.T) {
 	group := mkGroup("platform-inline", 20, "logic", SeverityP2, "平台上限", "正文。")
 	group.Decision.Action = ActionMark
 	group.Evidence = strings.Repeat("e", MaxPublishedNoteBytes)

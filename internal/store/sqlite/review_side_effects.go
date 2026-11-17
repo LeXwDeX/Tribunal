@@ -14,13 +14,10 @@ import (
 )
 
 const (
-	reviewStatusKind            = "review.status"
-	reviewReactionKind          = "review.reaction"
-	ReviewSideEffectMaxAttempts = 5
-	maxReviewStatusDetailRunes  = 500
-	// maxReviewStatusFinalBodyRunes bounds the rendered summary carried by the
-	// single status note. Findings are already bounded by their own contracts.
-	maxReviewStatusFinalBodyRunes = 128 * 1024
+	reviewStatusKind              = "review.status"
+	reviewReactionKind            = "review.reaction"
+	ReviewSideEffectMaxAttempts   = 5
+	maxReviewStatusDetailRunes    = 500
 	maxReviewSideEffectList       = 100
 	maxRecentReviewDurations      = 20
 	maxReviewStatusLastErrorRunes = 300
@@ -214,7 +211,6 @@ func (s *Store) SetReviewStatusFinalBody(ctx context.Context, projectID, mrIID, 
 	if generation <= 0 {
 		return false, errors.New("sqlite: review status generation is required")
 	}
-	body = truncateRunes(body, maxReviewStatusFinalBodyRunes)
 	now := s.now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
