@@ -605,7 +605,7 @@ func ValidateProviderConfig(field string, provider ProviderConfig, opts Provider
 		if provider.Reasoning.Effort == "none" {
 			p.add("%s.reasoning.effort none requires allow_reasoning_effort_none", field)
 		} else {
-			p.add("%s.reasoning.effort must be low, medium, high or max", field)
+			p.add("%s.reasoning.effort must be low, medium, high, xhigh or max", field)
 		}
 	}
 	// The Anthropic API has no "none" effort, so a provider that could start

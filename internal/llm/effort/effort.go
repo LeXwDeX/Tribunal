@@ -4,7 +4,7 @@ package effort
 // Valid reports whether value is a supported reasoning effort.
 func Valid(value string) bool {
 	switch value {
-	case "", "low", "medium", "high", "max":
+	case "", "low", "medium", "high", "xhigh", "max":
 		return true
 	default:
 		return false

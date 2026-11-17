@@ -371,7 +371,7 @@ func checkProviderEffort(cfg *Config) error {
 		if provider.Reasoning.Effort == "none" {
 			return fmt.Errorf("config: %s.reasoning.effort none requires allow_reasoning_effort_none", field)
 		}
-		return fmt.Errorf("config: %s.reasoning.effort must be low, medium, high or max", field)
+		return fmt.Errorf("config: %s.reasoning.effort must be low, medium, high, xhigh or max", field)
 	}
 	return nil
 }

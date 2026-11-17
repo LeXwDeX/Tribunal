@@ -85,9 +85,9 @@ func ValidateNodeParams(field string, p NodeParams) error {
 	if p.Reasoning != nil {
 		switch {
 		case p.Reasoning.Effort == "":
-			p2.add("%s.reasoning.effort must be low, medium, high or max; omit the field to inherit", field)
+			p2.add("%s.reasoning.effort must be low, medium, high, xhigh or max; omit the field to inherit", field)
 		case p.Reasoning.Effort != "none" && !effort.Valid(p.Reasoning.Effort):
-			p2.add("%s.reasoning.effort must be low, medium, high or max", field)
+			p2.add("%s.reasoning.effort must be low, medium, high, xhigh or max", field)
 		}
 	}
 	if p.Thinking != nil {
