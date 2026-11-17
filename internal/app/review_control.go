@@ -332,7 +332,7 @@ func tokenRejectedHealthMessage(status int, shared bool) string {
 // the settings health probe instead of overwriting each project's health.
 func (s *ReviewService) markProjectTokenRejected(ctx context.Context, projectID int64, status int) {
 	writer, ok := s.store.(interface {
-		UpdateProjectWebhook(context.Context, int64, store.ProjectWebhookUpdate) error
+		UpdateProjectWebhookHealth(context.Context, int64, string, string, store.ProjectWebhookUpdate) (bool, error)
 	})
 	if !ok {
 		return
@@ -346,7 +346,10 @@ func (s *ReviewService) markProjectTokenRejected(ctx context.Context, projectID 
 		return
 	}
 	message := tokenRejectedHealthMessage(status, false)
-	if err := writer.UpdateProjectWebhook(context.WithoutCancel(ctx), projectID, store.ProjectWebhookUpdate{
+	// Compare-and-set against the observation this call read: a credential
+	// switch or a newer health write that landed in between wins. A dropped
+	// write is not an error; the console already shows the newer state.
+	if _, err := writer.UpdateProjectWebhookHealth(context.WithoutCancel(ctx), projectID, project.WebhookState, project.WebhookError, store.ProjectWebhookUpdate{
 		State: store.WebhookStateFailed, Error: message, Events: project.WebhookEvents,
 	}); err != nil {
 		s.logger.Warn("project token health persistence failed", "project_id", projectID)
@@ -357,7 +360,7 @@ func (s *ReviewService) markProjectTokenRejected(ctx context.Context, projectID 
 // token once a GitLab call succeeds again.
 func (s *ReviewService) clearProjectTokenRejected(ctx context.Context, projectID int64) {
 	writer, ok := s.store.(interface {
-		UpdateProjectWebhook(context.Context, int64, store.ProjectWebhookUpdate) error
+		UpdateProjectWebhookHealth(context.Context, int64, string, string, store.ProjectWebhookUpdate) (bool, error)
 	})
 	if !ok {
 		return
@@ -369,7 +372,9 @@ func (s *ReviewService) clearProjectTokenRejected(ctx context.Context, projectID
 	if project.WebhookError != tokenRejected401Message && project.WebhookError != tokenRejected403Message {
 		return
 	}
-	if err := writer.UpdateProjectWebhook(context.WithoutCancel(ctx), projectID, store.ProjectWebhookUpdate{
+	// Compare-and-set for the same reason as the failure write: a switch or a
+	// newer observation wins and the stale recovery is dropped silently.
+	if _, err := writer.UpdateProjectWebhookHealth(context.WithoutCancel(ctx), projectID, project.WebhookState, project.WebhookError, store.ProjectWebhookUpdate{
 		State: store.WebhookStateEnabled, Events: project.WebhookEvents,
 	}); err != nil {
 		s.logger.Warn("project token health restore failed", "project_id", projectID)

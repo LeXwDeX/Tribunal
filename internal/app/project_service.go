@@ -1390,18 +1390,19 @@ func (s *ProjectService) switchToSharedCredential(ctx context.Context, id int64)
 	if err != nil {
 		return nil, err
 	}
-	return &TokenRotation{Project: saved, Warnings: sharedSwitchWarnings(s.tokens)}, nil
+	return &TokenRotation{Project: saved, Warnings: sharedSwitchWarnings(s.tokens, saved)}, nil
 }
 
 // sharedSwitchWarnings describes what the switch intentionally did not verify.
 // The first warning always applies because the switch performs no GitLab call;
-// the second applies when hook health cannot be monitored at all.
-func sharedSwitchWarnings(tokens *projectTokenResolver) []ProjectWarning {
+// the second only applies when a managed hook exists but its health cannot be
+// monitored at all. A hook-less project has nothing to monitor (#497).
+func sharedSwitchWarnings(tokens *projectTokenResolver, project *store.Project) []ProjectWarning {
 	warnings := []ProjectWarning{{
 		Code:    WarningSharedCredentialUnverified,
 		Message: "the shared bot's membership and credential validity in this project were not checked; run POST /api/v1/projects/validate with an empty token before switching",
 	}}
-	if !tokens.HasProvisioning() {
+	if project != nil && project.HookID != nil && !tokens.HasProvisioning() {
 		warnings = append(warnings, ProjectWarning{
 			Code:    WarningSharedHookHealthUnmonitored,
 			Message: "gitlab.provisioning_token_env is not configured, so this shared project's hook health is no longer monitored; configure the provisioning credential or verify the hook manually",

@@ -139,13 +139,13 @@ func TestStatusWriterUpsertsSingleNote(t *testing.T) {
 	api := newReviewGitLab(reviewTestHead)
 	reporter := testStatusReporter(api)
 
-	noteID, hash, err := reporter.writeStatus(context.Background(), 42, 7, "token", reviewStatusUpdate{
+	noteID, hash, _, err := reporter.writeStatus(context.Background(), 42, 7, "token", reviewStatusUpdate{
 		State: reviewStatusRunning, HeadSHA: reviewTestHead, Generation: 3, EstimateMinutes: 5,
 	})
 	if err != nil || noteID <= 0 || hash == "" {
 		t.Fatalf("first writeStatus = %d, %q, %v", noteID, hash, err)
 	}
-	sameID, sameHash, err := reporter.writeStatus(context.Background(), 42, 7, "token", reviewStatusUpdate{
+	sameID, sameHash, _, err := reporter.writeStatus(context.Background(), 42, 7, "token", reviewStatusUpdate{
 		State: reviewStatusRunning, HeadSHA: reviewTestHead, Generation: 3, EstimateMinutes: 5,
 	})
 	if err != nil || sameID != noteID || sameHash != hash {
@@ -170,7 +170,7 @@ func TestStatusWriterUpsertsSingleNote(t *testing.T) {
 		t.Fatalf("status table header missing: %q", api.notes[0].Body)
 	}
 
-	if _, _, err := reporter.writeStatus(context.Background(), 42, 7, "token", reviewStatusUpdate{
+	if _, _, _, err := reporter.writeStatus(context.Background(), 42, 7, "token", reviewStatusUpdate{
 		State: reviewStatusPublishing, HeadSHA: reviewTestHead, Generation: 3,
 	}); err != nil {
 		t.Fatalf("publishing writeStatus: %v", err)
@@ -189,7 +189,7 @@ func TestStatusWriterIgnoresForeignNoteAndRecreatesAfterDelete(t *testing.T) {
 		ID: 1, AuthorID: 3, Body: reviewStatusMarkerLine + "\nforeign status",
 	}}
 	reporter := testStatusReporter(api)
-	noteID, _, err := reporter.writeStatus(context.Background(), 42, 7, "token", reviewStatusUpdate{State: reviewStatusRunning})
+	noteID, _, _, err := reporter.writeStatus(context.Background(), 42, 7, "token", reviewStatusUpdate{State: reviewStatusRunning})
 	if err != nil || noteID == 1 {
 		t.Fatalf("writeStatus = %d, %v; want a new bot-owned note", noteID, err)
 	}
@@ -209,13 +209,13 @@ func TestStatusWriterIgnoresForeignNoteAndRecreatesAfterDelete(t *testing.T) {
 	}
 	api.notes = kept
 	api.mu.Unlock()
-	recreated, _, err := reporter.writeStatus(context.Background(), 42, 7, "token", reviewStatusUpdate{State: reviewStatusPublishing})
+	recreated, _, _, err := reporter.writeStatus(context.Background(), 42, 7, "token", reviewStatusUpdate{State: reviewStatusPublishing})
 	if err != nil || recreated == 0 {
 		t.Fatalf("recreate writeStatus = %d, %v", recreated, err)
 	}
 
 	api.statusNoteErr = errors.New("status unavailable")
-	if _, _, err := reporter.writeStatus(context.Background(), 42, 7, "token", reviewStatusUpdate{State: reviewStatusFailed}); err == nil {
+	if _, _, _, err := reporter.writeStatus(context.Background(), 42, 7, "token", reviewStatusUpdate{State: reviewStatusFailed}); err == nil {
 		t.Fatal("a status GitLab failure was swallowed")
 	}
 }
@@ -234,8 +234,14 @@ func TestStatusWriterDeletesLegacyStatusNoteAfterMerge(t *testing.T) {
 		State: reviewStatusPass, HeadSHA: reviewTestHead, Generation: 4,
 		FinalBody: final, CleanupLegacy: true,
 	}
-	if _, _, err := reporter.writeStatus(context.Background(), 42, 7, "token", update); err != nil {
+	if _, _, legacy, err := reporter.writeStatus(context.Background(), 42, 7, "token", update); err != nil {
 		t.Fatalf("writeStatus: %v", err)
+	} else if len(legacy) != 1 || legacy[0] != 10 {
+		t.Fatalf("legacy notes = %v, want the bot's pre-upgrade note only", legacy)
+	}
+	// The caller deletes the reported notes after recording the merged note id.
+	if err := reporter.deleteLegacyStatusNotes(context.Background(), 42, 7, "token", []int64{10}); err != nil {
+		t.Fatalf("deleteLegacyStatusNotes: %v", err)
 	}
 	notes := api.noteSnapshot()
 	if len(notes) != 2 {
@@ -252,9 +258,11 @@ func TestStatusWriterDeletesLegacyStatusNoteAfterMerge(t *testing.T) {
 	if !strings.HasPrefix(notes[0].Body, reviewStatusMarkerLine) || !strings.Contains(notes[0].Body, "## 评审结论") {
 		t.Fatalf("merged note was not converged: %q", notes[0].Body)
 	}
-	// A repeated identical write is still a no-op and deletes nothing more.
-	if _, _, err := reporter.writeStatus(context.Background(), 42, 7, "token", update); err != nil {
+	// A repeated identical write is still a no-op and reports nothing to delete.
+	if _, _, legacy, err := reporter.writeStatus(context.Background(), 42, 7, "token", update); err != nil {
 		t.Fatalf("idempotent writeStatus: %v", err)
+	} else if len(legacy) != 0 {
+		t.Fatalf("idempotent write reported legacy notes: %v", legacy)
 	}
 	if api.noteDeletes != 1 {
 		t.Fatalf("idempotent write deleted notes again: %d", api.noteDeletes)
@@ -499,10 +507,10 @@ func TestReviewStatusAutomaticHookHasNoReaction(t *testing.T) {
 func TestStatusWriterDoesNotRegressQueuedOverRunning(t *testing.T) {
 	api := newReviewGitLab(reviewTestHead)
 	reporter := testStatusReporter(api)
-	if _, _, err := reporter.writeStatus(context.Background(), 42, 7, "token", reviewStatusUpdate{State: reviewStatusRunning}); err != nil {
+	if _, _, _, err := reporter.writeStatus(context.Background(), 42, 7, "token", reviewStatusUpdate{State: reviewStatusRunning}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := reporter.writeStatus(context.Background(), 42, 7, "token", reviewStatusUpdate{State: reviewStatusQueued}); err != nil {
+	if _, _, _, err := reporter.writeStatus(context.Background(), 42, 7, "token", reviewStatusUpdate{State: reviewStatusQueued}); err != nil {
 		t.Fatal(err)
 	}
 	if got := api.noteCount(); got != 1 {

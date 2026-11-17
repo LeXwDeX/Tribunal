@@ -579,6 +579,26 @@ func (s *Store) MarkReviewStatusApplied(ctx context.Context, projectID, mrIID in
 	return s.reviewStatusWriteMiss(ctx, projectID, mrIID, version)
 }
 
+// RecordReviewStatusNoteID stores the merged note id and body hash for exactly
+// one version without advancing the applied version. A status writer records
+// this receipt before it deletes the legacy note, so a durable permalink never
+// names a note that is already gone; a failed delete leaves the visit pending
+// for its next attempt (#497).
+func (s *Store) RecordReviewStatusNoteID(ctx context.Context, projectID, mrIID int64, version, noteID int64, bodyHash string) error {
+	if projectID <= 0 || mrIID <= 0 || version <= 0 {
+		return errors.New("sqlite: review status project id, mr iid, and version are required")
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE review_status
+		SET note_id = COALESCE(NULLIF(?, 0), note_id),
+		    body_hash = COALESCE(NULLIF(?, ''), body_hash)
+		WHERE project_id = ? AND mr_iid = ? AND version = ?`,
+		noteID, bodyHash, projectID, mrIID, version)
+	if err != nil {
+		return fmt.Errorf("sqlite: record review status note id: %w", err)
+	}
+	return nil
+}
+
 // MarkReviewStatusVerified records a low-frequency self-heal check for exactly
 // one version. It never changes the applied version, so a remote note that still
 // matches only advances the verification clock. A newer version makes the write
