@@ -86,21 +86,18 @@ func TestRelatedExcerptEndsAtSentenceBoundary(t *testing.T) {
 	}
 }
 
-func TestInlineBodyTruncationPointsAtConsole(t *testing.T) {
+func TestInlineBodyPublishesLongBodyCompletely(t *testing.T) {
 	body := strings.Repeat("长正文内容。", 120)
 	group := mkGroup("long-body", 20, "logic", SeverityP2, "很长的正文", body)
 	out, err := RenderFinding(group, FindingRenderOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "内容已截断") {
-		t.Fatalf("long inline body lacks its truncation notice:\n%s", out)
+	if !strings.Contains(out, body) {
+		t.Fatalf("long inline body was clipped:\n%s", out)
 	}
-	if !strings.Contains(out, "完整正文见控制台") {
-		t.Fatalf("truncated inline discussion must point at the console:\n%s", out)
-	}
-	if briefBodyRunes != 400 {
-		t.Fatalf("briefBodyRunes = %d, the #451 product limit must stay 400", briefBodyRunes)
+	if strings.Contains(out, "内容已截断") || strings.Contains(out, "完整正文见控制台") {
+		t.Fatalf("complete inline body still carries a clipping notice:\n%s", out)
 	}
 }
 
@@ -133,7 +130,7 @@ func TestLongWarningClipsAtSentenceBoundary(t *testing.T) {
 	}
 }
 
-func TestLongSummaryClipsAtLineBoundary(t *testing.T) {
+func TestLongSummaryPublishesCompleteText(t *testing.T) {
 	summary := strings.Repeat("总览句子。", 700)
 	body, err := RenderSummary(SummaryInput{
 		Verdict: VerdictBlocking, Summary: summary,
@@ -142,8 +139,11 @@ func TestLongSummaryClipsAtLineBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(body, "。\n\n…（内容已截断）") {
-		t.Fatalf("long summary does not end at a sentence boundary:\n%s", body)
+	if !strings.Contains(body, summary) {
+		t.Fatalf("long summary was clipped:\n%s", body)
+	}
+	if strings.Contains(body, "内容已截断") {
+		t.Fatalf("long summary still carries a clipping notice:\n%s", body)
 	}
 }
 

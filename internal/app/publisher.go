@@ -509,7 +509,7 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 				}
 			}
 			if err == nil && publication.GitlabID != "" && !conflict {
-				body, renderErr := review.RenderFinding(*group, review.FindingRenderOptions{ShowModelAttribution: cfg.Settings.ShowModelAttribution, ProviderLabels: p.providerLabels(), DetailURL: p.detailURL(workflowID)})
+				body, renderErr := review.RenderFinding(*group, review.FindingRenderOptions{ShowModelAttribution: cfg.Settings.ShowModelAttribution, ProviderLabels: p.providerLabels()})
 				if renderErr != nil || publication.BodyHash == "" || publication.BodyHash != bodyHash(body) {
 					group.PositionOK = false
 					contentMismatch = true
@@ -595,7 +595,7 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			return err
 		}
-		findingBody, err := review.RenderFinding(group, review.FindingRenderOptions{ShowModelAttribution: cfg.Settings.ShowModelAttribution, ProviderLabels: p.providerLabels(), DetailURL: p.detailURL(workflowID)})
+		findingBody, err := review.RenderFinding(group, review.FindingRenderOptions{ShowModelAttribution: cfg.Settings.ShowModelAttribution, ProviderLabels: p.providerLabels()})
 		if err != nil {
 			groups[i].PositionOK = false
 			fallback = true

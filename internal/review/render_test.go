@@ -330,8 +330,8 @@ func TestRenderUnicodeLengths(t *testing.T) {
 	if strings.Contains(out, strings.Repeat("长", MaxTitleRunes+1)) {
 		t.Fatal("title was not truncated by rune count")
 	}
-	if strings.Contains(out, strings.Repeat("文", MaxBodyRunes+1)) {
-		t.Fatal("body was not truncated by rune count")
+	if !strings.Contains(out, longBody) {
+		t.Fatal("body was clipped by rune count")
 	}
 	if !strings.Contains(out, strings.Repeat("长", MaxTitleRunes-1)+"…") {
 		t.Fatal("title truncation lost valid content or its ellipsis")
@@ -423,13 +423,17 @@ func TestRenderSummaryPreservesStructuredMarkdownAndTruncation(t *testing.T) {
 		t.Fatalf("summary item under its own limit was truncated:\n%s", out)
 	}
 
-	long := renderGroup("long-summary", ActionPublish, SeverityP2, false, "Long", strings.Repeat("长", summaryItemBodyRunes+10))
+	longBody := strings.Repeat("长", 2010)
+	long := renderGroup("long-summary", ActionPublish, SeverityP2, false, "Long", longBody)
 	longOut, err := RenderSummary(SummaryInput{Verdict: VerdictPass, Summary: "ok", Groups: []Group{long}, Fingerprint: "abc"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(longOut, "…（内容已截断）") {
-		t.Fatalf("long summary item lacks a truncation notice:\n%s", longOut)
+	if !strings.Contains(longOut, longBody) {
+		t.Fatalf("long summary item was clipped:\n%s", longOut)
+	}
+	if strings.Contains(longOut, "…（内容已截断）") {
+		t.Fatalf("long summary item still carries a clipping notice:\n%s", longOut)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"path"
 	"reflect"
 	"regexp"
@@ -55,13 +56,26 @@ func (s Severity) Higher(other Severity) bool {
 }
 
 const (
-	MaxTitleRunes      = 120
-	MaxPathBytes       = 1024
-	MaxBodyRunes       = 8000
-	MaxEvidenceRunes   = 8000
-	MaxSuggestionRunes = 8000
+	MaxTitleRunes = 120
+	MaxPathBytes  = 1024
+	MaxBodyRunes  = 8000
+	// MaxPublishedNoteBytes bounds one published GitLab note and is the only
+	// publishing-time length limit. GitLab validates note size with
+	// `bytesize: {maximum: Gitlab::CurrentSettings.description_and_note_max_size}`,
+	// whose default is 1 MiB (1,048,576 bytes), and rejects longer notes with
+	// HTTP 400. Keep ~86% headroom. UTF-8 Chinese characters are 3 bytes each,
+	// so roughly 300,000 Chinese characters fit in one note.
+	MaxPublishedNoteBytes = 900_000
+	// maxContentRunes disables content-length clipping in the renderer and its
+	// contracts. Output length is decided by prompts and node max_tokens;
+	// MaxPublishedNoteBytes is the only publishing bound.
+	maxContentRunes = math.MaxInt
+	// Evidence, suggestions and doubt reasons keep their constant names so
+	// existing call sites stay unchanged, but they no longer clip content.
+	MaxEvidenceRunes   = maxContentRunes
+	MaxSuggestionRunes = maxContentRunes
 	MaxSummaryRunes    = 3000
-	MaxReasonRunes     = 4000
+	MaxReasonRunes     = maxContentRunes
 	MaxFindings        = 200
 	DefaultMaxPackages = 6
 	HardMaxPackages    = 100

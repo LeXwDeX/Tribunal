@@ -151,6 +151,10 @@ func safeDiagnosticGroups(doc map[string]json.RawMessage, failures map[string][]
 }
 
 func safeDiagnosticReason(value map[string]json.RawMessage, field string, failures []string, challenge bool) error {
+	// Older builds stored generated reasons truncated at 4000 runes. Keep
+	// recognizing that shape so historical rows are still redacted even though
+	// the renderer no longer clips reasons.
+	const legacyGeneratedReasonRunes = 4000
 	data, ok := value[field]
 	if !ok || string(data) == "null" {
 		return nil
@@ -174,7 +178,7 @@ func safeDiagnosticReason(value map[string]json.RawMessage, field string, failur
 				reason = "challenge failed: node failed; on_uncertain=" + policy
 				break
 			}
-			if reason == truncateRunes(generated, MaxReasonRunes) && len([]rune(generated)) > MaxReasonRunes {
+			if reason == truncateRunes(generated, legacyGeneratedReasonRunes) && len([]rune(generated)) > legacyGeneratedReasonRunes {
 				reason = "challenge failed: node failed"
 				break
 			}

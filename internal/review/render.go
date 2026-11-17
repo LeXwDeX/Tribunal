@@ -28,24 +28,20 @@ var tableDelimiterRE = regexp.MustCompile(`^[ \t]*\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t
 var tableInterruptRE = regexp.MustCompile(`^[ \t]*(?:#{1,6}[ \t]+|(?:[-+*]|[0-9]{1,9}[.)])[ \t]+)`)
 
 const (
-	summaryItemBodyRunes       = 2000
-	summaryItemSuggestionRunes = 1000
-	// briefBodyRunes bounds the body published with a finding. Findings stay
-	// short by design; the suggestion and evidence blocks carry the longer
-	// material, and the full body stays in storage and the console.
-	briefBodyRunes   = 400
-	truncationNotice = "\n\n…（内容已截断）"
+	// platformLimitNotice is the only publishing-time clip notice. It is added
+	// when a whole note would exceed the GitLab note size limit.
+	platformLimitNotice = "\n\n…（已达 GitLab 注记上限，余下内容见控制台）"
 )
 
-// briefBody renders a bounded finding body. The full body stays in storage
-// and in the console; the second result reports whether the published text was
-// clipped. Code blocks inside the bound keep their existing rendering.
-func briefBody(value string, max int) (string, bool) {
+// briefBody renders a published finding body. The renderer never clips content
+// by size; limitPublishedNote bounds the whole note at the GitLab platform
+// limit and points the reader at the console.
+func briefBody(value string) string {
 	value = strings.TrimSpace(strings.ReplaceAll(value, "\r\n", "\n"))
 	if value == "" {
-		return "", false
+		return ""
 	}
-	return renderMarkdown(value, max), utf8.RuneCountInString(value) > max
+	return renderMarkdown(value, maxContentRunes)
 }
 
 // SummaryInput is structured data for the summary note.
@@ -77,9 +73,6 @@ type SummaryInput struct {
 type FindingRenderOptions struct {
 	ShowModelAttribution bool
 	ProviderLabels       map[string]string
-	// DetailURL points at the console review detail. A clipped inline body
-	// links to it instead of only naming the console.
-	DetailURL string
 }
 
 // SummaryMarkerLine returns the hidden first line of the summary note.
@@ -155,7 +148,7 @@ func RenderSummary(in SummaryInput) (string, error) {
 		} else if in.RuleSummary {
 			summary = alignRuleSummaryCounts(summary, len(positioned), len(unpositioned)+len(marked))
 		}
-		b.WriteString(renderMarkdown(summary, MaxSummaryRunes))
+		b.WriteString(renderMarkdown(summary, maxContentRunes))
 		b.WriteString("\n\n")
 	}
 	if section := reviewScopeSection(in.Scope, in.Generated, in.GeneratedPaths); section != "" {
@@ -242,7 +235,7 @@ func RenderSummary(in SummaryInput) (string, error) {
 		b.WriteString(strings.Join(footer, " · "))
 		b.WriteString("</sub>\n")
 	}
-	return gitlab.NeutralizeQuickActions(b.String()), nil
+	return limitPublishedNote(gitlab.NeutralizeQuickActions(b.String())), nil
 }
 
 func verdictLabel(verdict string) string {
@@ -423,20 +416,20 @@ func renderSummaryItem(group Group, marked bool) string {
 	if marked {
 		reason := "挑战结果：UNCERTAIN"
 		if group.Challenge != nil && group.Challenge.Reason != "" {
-			reason = "挑战结果：" + oneLine(group.Challenge.Reason, 300)
+			reason = "挑战结果：" + oneLine(group.Challenge.Reason, MaxReasonRunes)
 		}
 		if group.Decision != nil && group.Decision.Reason != "" {
-			reason += "；" + oneLine(group.Decision.Reason, 300)
+			reason += "；" + oneLine(group.Decision.Reason, MaxReasonRunes)
 		}
 		b.WriteString("**标记原因**：")
-		b.WriteString(escapeOneLine(reason, 600))
+		b.WriteString(escapeOneLine(reason, maxContentRunes))
 		b.WriteString("\n\n")
 	}
-	if body, _ := briefBody(group.Body, briefBodyRunes); body != "" {
+	if body := briefBody(group.Body); body != "" {
 		b.WriteString(body)
 		b.WriteString("\n\n")
 	}
-	if suggestion := renderSuggestion(group.Suggestion, summaryItemSuggestionRunes); suggestion != "" {
+	if suggestion := renderSuggestion(group.Suggestion, MaxSuggestionRunes); suggestion != "" {
 		b.WriteString(suggestion)
 		b.WriteString("\n\n")
 	}
@@ -494,23 +487,16 @@ func RenderFinding(group Group, opts FindingRenderOptions) (string, error) {
 	b.WriteString(escapeOneLine(group.Title, MaxTitleRunes))
 	b.WriteString("**\n")
 	// The discussion is anchored on the line, so the location is not repeated.
-	// The full body stays in storage and the console; a clipped discussion says
-	// where to read it, since the inline note has no detail footer.
-	if body, truncated := briefBody(group.Body, briefBodyRunes); body != "" {
+	// The body is published in full; only the whole-note platform fallback can
+	// omit its tail, and it says so.
+	if body := briefBody(group.Body); body != "" {
 		b.WriteString("\n")
 		b.WriteString(body)
 		b.WriteByte('\n')
-		if truncated {
-			if link := safeDetailURL(opts.DetailURL); link != "" {
-				fmt.Fprintf(&b, "\n> 完整正文见 <a href=\"%s\">控制台</a>。\n", link)
-			} else {
-				b.WriteString("\n> 完整正文见控制台。\n")
-			}
-		}
 	}
 	if group.Decision.Action == ActionMark && strings.TrimSpace(group.Decision.Reason) != "" {
 		b.WriteString("\n**存疑原因**：")
-		b.WriteString(escapeOneLine(group.Decision.Reason, 500))
+		b.WriteString(escapeOneLine(group.Decision.Reason, MaxReasonRunes))
 		b.WriteByte('\n')
 	}
 	if suggestion := renderSuggestion(group.Suggestion, MaxSuggestionRunes); suggestion != "" {
@@ -537,7 +523,7 @@ func RenderFinding(group Group, opts FindingRenderOptions) (string, error) {
 	}
 	// Rendered bodies are the final text: hashes and remote comparisons use
 	// them, and GitLab must never see a line it would run as a quick action.
-	return gitlab.NeutralizeQuickActions(b.String()), nil
+	return limitPublishedNote(gitlab.NeutralizeQuickActions(b.String())), nil
 }
 
 // relatedDescriptions lists the groups folded into this discussion by
@@ -751,10 +737,8 @@ func renderMarkdown(value string, max int) string {
 	if value == "" {
 		return ""
 	}
-	truncated := false
 	if utf8.RuneCountInString(value) > max {
 		value = clipMarkdown(value, max)
-		truncated = true
 	}
 
 	var b strings.Builder
@@ -843,10 +827,62 @@ func renderMarkdown(value string, max int) string {
 		b.WriteByte('\n')
 	}
 	out := strings.TrimRight(b.String(), "\n")
-	if truncated {
-		out += truncationNotice
-	}
 	return out
+}
+
+// limitPublishedNote applies the only publishing-time bound: GitLab validates
+// note size in bytes (description_and_note_max_size, default 1 MiB) and rejects
+// longer notes with HTTP 400. A longer note is cut at the last complete block
+// boundary that fits and ends with platformLimitNotice, so the kept text never
+// stops inside a code fence, a <details> block, or mid-rune/mid-item.
+func limitPublishedNote(note string) string {
+	if len(note) <= MaxPublishedNoteBytes {
+		return note
+	}
+	budget := MaxPublishedNoteBytes - len(platformLimitNotice)
+	return strings.TrimRight(note[:completeBlockCut(note, budget)], "\n") + platformLimitNotice
+}
+
+// completeBlockCut returns the byte offset of the last blank line that ends a
+// block outside code fences and <details>, at or before budget bytes. Cutting
+// at a line boundary keeps the result valid UTF-8. It returns zero when no
+// such boundary fits, which publishes only the notice rather than a broken
+// block.
+func completeBlockCut(note string, budget int) int {
+	var (
+		cut       int
+		bytes     int
+		fenceChar byte
+		fenceLen  int
+		details   int
+		lineStart int
+	)
+	for lineStart < len(note) {
+		lineEnd := strings.IndexByte(note[lineStart:], '\n')
+		if lineEnd < 0 {
+			break
+		}
+		line := note[lineStart : lineStart+lineEnd]
+		next := lineStart + lineEnd + 1
+		trimmed := strings.TrimSpace(line)
+		if fenceChar != 0 {
+			if closesFence(line, fenceChar, fenceLen) {
+				fenceChar, fenceLen = 0, 0
+			}
+		} else if ch, n, ok := opensFence(line); ok {
+			fenceChar, fenceLen = ch, n
+		} else if strings.HasPrefix(trimmed, "<details") {
+			details++
+		} else if strings.HasPrefix(trimmed, "</details>") && details > 0 {
+			details--
+		}
+		bytes += next - lineStart
+		if trimmed == "" && fenceChar == 0 && details == 0 && bytes <= budget {
+			cut = next
+		}
+		lineStart = next
+	}
+	return cut
 }
 
 // GitLab splits table cells before parsing code spans. Escaped pipes stay in
@@ -1005,7 +1041,6 @@ func inlineCode(value string) string {
 }
 
 func codeFence(value string) string {
-	value = truncateRunes(value, MaxEvidenceRunes)
 	fence := "```"
 	for strings.Contains(value, fence) {
 		fence += "`"

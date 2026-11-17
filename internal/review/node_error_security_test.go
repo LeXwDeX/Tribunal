@@ -73,7 +73,8 @@ func TestSafeDiagnosticsDoesNotReplaceShortErrorInBusinessText(t *testing.T) {
 func TestSafeDiagnosticsRedactsTruncatedGeneratedDecision(t *testing.T) {
 	text := strings.Repeat("secret", 800)
 	wf := evidenceWorkflow(dag.NodeView{ID: "verify", Status: dag.NodeFailed, Error: text, Spec: dag.NodeSpec{Kind: KindVerify, Params: json.RawMessage(`{"group_id":"g"}`)}})
-	generated := truncateRunes("challenge failed: "+text+"; on_uncertain=mark", MaxReasonRunes)
+	// Historical rows stored generated reasons truncated at 4000 runes.
+	generated := truncateRunes("challenge failed: "+text+"; on_uncertain=mark", 4000)
 	raw, _ := json.Marshal(map[string]any{"groups": []any{}, "output": map[string]any{"decisions": []any{map[string]string{"finding_id": "g", "reason": generated}}}})
 	got, err := SafeDiagnosticOutput(KindSynthesize, raw, wf)
 	if err != nil {

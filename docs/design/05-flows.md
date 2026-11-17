@@ -81,7 +81,7 @@ Anthropic 的输入用量将未缓存、缓存读取和缓存创建各计一次�
 - 上次已发布的工作流记录了 `head_sha`。新工作流在 `trigger=mr_update` 且非 `full` 时，只把 `git diff <last_head>..<head>` 涉及的文件作为评审范围；diff 内容仍取 MR 相对 base 的完整 diff，以保证行号映射正确。
 - 上次的 head 不再是当前 head 的祖先（force push）→ 自动退回全量。
 - 过滤评审范围时，没有 `path` 的 finding 保留为「无法定位」条目并参与最终 verdict；某一路在范围外文件上报了 P0/P1 时，该 finding 仍被过滤，但同时产生一个未解决信号，避免窄范围结果被当成干净的 PASS。
-- 本次评审范围以结构化字段披露：dossier 的 `incremental`（是否全量、上次 head、增量文件）和 `SynthesisResult.scope`（`full`、`head`、`last_head`、`files`、`file_count`、`unlocated`）。`files` 最多保存 200 条，`file_count` 是完整增量文件数；摘要渲染为「评审范围」段（全量 / 增量、上次与本次 head、覆盖文件数、无法定位数；增量时明确「结论仅覆盖本次增量变更的文件」），生成文件的数量与路径同样在该段披露（`DiffSummary.generated` / `generated_paths`）。行内正文被截断时给出指向控制台详情的链接。
+- 本次评审范围以结构化字段披露：dossier 的 `incremental`（是否全量、上次 head、增量文件）和 `SynthesisResult.scope`（`full`、`head`、`last_head`、`files`、`file_count`、`unlocated`）。`files` 最多保存 200 条，`file_count` 是完整增量文件数；摘要渲染为「评审范围」段（全量 / 增量、上次与本次 head、覆盖文件数、无法定位数；增量时明确「结论仅覆盖本次增量变更的文件」），生成文件的数量与路径同样在该段披露（`DiffSummary.generated` / `generated_paths`）。行内正文与汇总条目逐字完整发布，不按内容长度截断；只有整条注记超过 GitLab 平台上限时统一截断并标注余下内容见控制台。结论长度由 `prompts/main.synthesize.md`（1–3 句、不超过 3000 字符）与节点级 `max_tokens`（控制台 `NodeParams`，键 `synthesize` / `synthesize.2`）决定。
 
 ---
 
