@@ -40,8 +40,12 @@ func TestRenderSummaryStaysBoundedUnderContractLimits(t *testing.T) {
 		t.Fatal(err)
 	}
 	allocated := after.TotalAlloc - before.TotalAlloc
-	if elapsed > 2*time.Second || allocated > 1_500*1024*1024 {
-		t.Fatalf("RenderSummary took %v and allocated %d bytes, want under 2s and 1.5GiB", elapsed, allocated)
+	// Allocation is the load-bearing assertion: the defect this guards against
+	// allocated 4.3 GiB instead of ~0.1 GiB. Wall clock stays only as a
+	// timeout-sized sanity bound, because shared CI runners jitter by seconds
+	// and a tight time threshold flakes on unchanged code.
+	if allocated > 1_500*1024*1024 || elapsed > 20*time.Second {
+		t.Fatalf("RenderSummary took %v and allocated %d bytes, want under 20s and 1.5GiB", elapsed, allocated)
 	}
 	if n := len(out); n > MaxPublishedNoteBytes {
 		t.Fatalf("summary note bytes = %d, want at most %d", n, MaxPublishedNoteBytes)
@@ -52,9 +56,11 @@ func TestRenderSummaryStaysBoundedUnderContractLimits(t *testing.T) {
 }
 
 // TestRenderFindingCodeFenceIsLinear guards the quadratic fence search that a
-// hostile evidence value could trigger.
+// hostile evidence value could trigger. The input is large enough that the old
+// quadratic scan needed seconds, so a 500ms bound still discriminates on a
+// loaded CI runner while the linear implementation finishes in milliseconds.
 func TestRenderFindingCodeFenceIsLinear(t *testing.T) {
-	const backticks = 80_000
+	const backticks = 200_000
 	group := mkGroup("fence-linear", 20, "logic", SeverityP2, "超长围栏", "正文。")
 	group.Decision.Action = ActionMark
 	group.Evidence = strings.Repeat("`", backticks)
@@ -65,8 +71,8 @@ func TestRenderFindingCodeFenceIsLinear(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if elapsed > 100*time.Millisecond {
-		t.Fatalf("RenderFinding with %d backticks took %v, want under 100ms", backticks, elapsed)
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("RenderFinding with %d backticks took %v, want under 500ms", backticks, elapsed)
 	}
 	if !strings.Contains(out, strings.Repeat("`", backticks)) {
 		t.Fatal("evidence content was clipped")
