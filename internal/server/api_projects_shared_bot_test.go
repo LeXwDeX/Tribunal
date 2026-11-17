@@ -345,3 +345,96 @@ func TestValidateSharedCredentialHTTP(t *testing.T) {
 		t.Fatal("validation persisted a project")
 	}
 }
+
+// An empty token on the rotate endpoint switches an existing project to the
+// shared bot when the instance configures it. The stored sentinel is a
+// zero-length value, the previous token failure is cleared, and the managed
+// hook is left untouched for the health scan to re-verify.
+func TestRotateEmptyTokenSwitchesToSharedCredentialHTTP(t *testing.T) {
+	const sharedToken = "glpat-shared-bot"
+	api := defaultStubGitLab()
+	api.memberAccess = 20
+	env := newM6Env(t, m6Options{adminFactory: func(st *sqlite.Store) AdminService {
+		return testSharedProjectService(t, st, api, t.TempDir(), sharedToken)
+	}})
+	client := env.loginAs("code-admin")
+	registerProject(t, client)
+	if err := env.sqlite.UpdateProjectWebhook(context.Background(), 42, store.ProjectWebhookUpdate{
+		State: store.WebhookStateFailed, Error: "project token was rejected by GitLab while checking the webhook; replace the project token",
+	}); err != nil {
+		t.Fatalf("seed failed webhook state: %v", err)
+	}
+	hookCalls := api.callCount("ListProjectHooks") + api.callCount("CreateProjectHook") +
+		api.callCount("UpdateProjectHook") + api.callCount("DeleteProjectHook")
+
+	rotated := client.json(http.MethodPut, "/api/v1/projects/42/token", map[string]any{"token": "   "})
+	if rotated.status != http.StatusOK {
+		t.Fatalf("switch = %d %s", rotated.status, rotated.body)
+	}
+	body := env.decode(t, rotated)
+	if body["id"] != float64(42) || body["path_with_namespace"] != "group/repo" {
+		t.Fatalf("switch response lost project fields: %v", body)
+	}
+	if body["webhook_state"] != store.WebhookStatePending || body["webhook_error"] != "" {
+		t.Fatalf("switch response webhook = %v/%v", body["webhook_state"], body["webhook_error"])
+	}
+	if _, ok := body["token_expires_at"]; ok {
+		t.Fatalf("switch response kept the expiry: %v", body)
+	}
+	if warnings, _ := body["warnings"].([]any); len(warnings) != 0 {
+		t.Fatalf("switch warnings = %v", body["warnings"])
+	}
+	for _, forbidden := range []string{sharedToken, "glpat-project-token"} {
+		if bytes.Contains(rotated.body, []byte(forbidden)) {
+			t.Fatalf("switch response contains a credential %q", forbidden)
+		}
+	}
+	if got := api.callCount("ListProjectHooks") + api.callCount("CreateProjectHook") +
+		api.callCount("UpdateProjectHook") + api.callCount("DeleteProjectHook"); got != hookCalls {
+		t.Fatalf("switch made %d hook calls", got-hookCalls)
+	}
+
+	saved, err := env.sqlite.GetProject(context.Background(), 42)
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	if len(saved.TokenEnc) != 0 || saved.TokenExpiresAt != nil || len(saved.TokenScopes) != 0 {
+		t.Fatalf("stored credential = %+v", saved)
+	}
+	detail := client.request(http.MethodGet, "/api/v1/projects/42", nil, nil)
+	if detail.status != http.StatusOK || env.decode(t, detail)["shared_credential"] != true {
+		t.Fatalf("detail after switch = %d %s", detail.status, detail.body)
+	}
+
+	// A non-empty token switches back to per-project mode.
+	restored := client.json(http.MethodPut, "/api/v1/projects/42/token", map[string]any{"token": "glpat-restored"})
+	if restored.status != http.StatusOK {
+		t.Fatalf("rotate back = %d %s", restored.status, restored.body)
+	}
+	detail = client.request(http.MethodGet, "/api/v1/projects/42", nil, nil)
+	if detail.status != http.StatusOK || env.decode(t, detail)["shared_credential"] != false {
+		t.Fatalf("detail after rotate back = %d %s", detail.status, detail.body)
+	}
+}
+
+func TestRotateEmptyTokenWithoutSharedCredentialHTTP(t *testing.T) {
+	api := defaultStubGitLab()
+	env := newM6Env(t, m6Options{adminFactory: func(st *sqlite.Store) AdminService {
+		return testProjectService(t, st, api, t.TempDir())
+	}})
+	client := env.loginAs("code-admin")
+	registerProject(t, client)
+
+	response := client.json(http.MethodPut, "/api/v1/projects/42/token", map[string]any{"token": "  "})
+	if response.status != http.StatusBadRequest {
+		t.Fatalf("switch without shared = %d %s", response.status, response.body)
+	}
+	errorBody, _ := env.decode(t, response)["error"].(map[string]any)
+	if errorBody["message"] != "access token is required" {
+		t.Fatalf("error = %v", errorBody)
+	}
+	saved, err := env.sqlite.GetProject(context.Background(), 42)
+	if err != nil || len(saved.TokenEnc) == 0 {
+		t.Fatalf("rejected switch changed the token: %+v, %v", saved, err)
+	}
+}

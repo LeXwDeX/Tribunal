@@ -336,15 +336,20 @@ func (s *CatchUpService) reconcileHookHealth(ctx context.Context, project *store
 			break
 		}
 	}
+	// A shared-credential switch marks the hook pending because the previous
+	// credential was rejected; a reachable managed hook verifies it. Failed
+	// states are only cleared when this feature wrote the fixed message, so
+	// unrelated failures stay.
+	recovered := project.WebhookState == store.WebhookStatePending ||
+		project.WebhookState == store.WebhookStateFailed &&
+			(project.WebhookError == webhookDisabledMessage || project.WebhookError == webhookMissingMessage ||
+				project.WebhookError == webhookTokenRejectedMessage || project.WebhookError == webhookProvisioningRejectedMessage)
 	switch {
 	case managed == nil:
 		s.setHookHealth(ctx, writer, project, store.WebhookStateFailed, webhookMissingMessage)
 	case managed.AlertStatus == "disabled" || managed.AlertStatus == "temporarily_disabled":
 		s.setHookHealth(ctx, writer, project, store.WebhookStateFailed, webhookDisabledMessage)
-	case project.WebhookState == store.WebhookStateFailed &&
-		(project.WebhookError == webhookDisabledMessage || project.WebhookError == webhookMissingMessage ||
-			project.WebhookError == webhookTokenRejectedMessage || project.WebhookError == webhookProvisioningRejectedMessage):
-		// A hook that recovered is healthy again; unrelated failures stay.
+	case recovered:
 		s.setHookHealth(ctx, writer, project, store.WebhookStateEnabled, "")
 	}
 }

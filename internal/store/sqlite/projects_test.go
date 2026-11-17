@@ -164,6 +164,68 @@ func TestProjectWebhookStateDefaultsAndUpdates(t *testing.T) {
 	}
 }
 
+// SwitchProjectToSharedCredential stores the zero-length sentinel and clears
+// the project-token diagnostics without touching the managed hook.
+func TestSwitchProjectToSharedCredential(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t, newFakeClock())
+	mustProject(t, s, 42)
+	expires := time.Date(2027, 1, 2, 0, 0, 0, 0, time.UTC)
+	if err := s.UpdateProjectToken(ctx, 42, store.ProjectTokenUpdate{
+		TokenEnc: []byte{1, 2, 3}, ExpiresAt: &expires, Scopes: []string{"api", "read_repository"},
+	}); err != nil {
+		t.Fatalf("UpdateProjectToken: %v", err)
+	}
+	hookID := int64(1234)
+	if err := s.UpdateProjectWebhook(ctx, 42, store.ProjectWebhookUpdate{
+		HookID: &hookID, SecretEnc: []byte{4, 5}, State: store.WebhookStateFailed,
+		Error:  "project token was rejected by GitLab while checking the webhook; replace the project token",
+		Events: []string{"push_events", "note_events"},
+	}); err != nil {
+		t.Fatalf("UpdateProjectWebhook: %v", err)
+	}
+
+	if err := s.SwitchProjectToSharedCredential(ctx, 42); err != nil {
+		t.Fatalf("SwitchProjectToSharedCredential: %v", err)
+	}
+	saved, err := s.GetProject(ctx, 42)
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	if len(saved.TokenEnc) != 0 {
+		t.Fatalf("token sentinel = %v (nil=%v), want a zero-length value", saved.TokenEnc, saved.TokenEnc == nil)
+	}
+	var sentinelType string
+	var sentinelLen int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT typeof(token_enc), length(token_enc) FROM projects WHERE id = 42`,
+	).Scan(&sentinelType, &sentinelLen); err != nil {
+		t.Fatalf("read token sentinel type: %v", err)
+	}
+	if sentinelType != "blob" || sentinelLen != 0 {
+		t.Fatalf("token sentinel = %s(%d), want a zero-length blob", sentinelType, sentinelLen)
+	}
+	if saved.TokenExpiresAt != nil {
+		t.Fatalf("token expiry = %v, want NULL", saved.TokenExpiresAt)
+	}
+	if len(saved.TokenScopes) != 0 {
+		t.Fatalf("token scopes = %v, want []", saved.TokenScopes)
+	}
+	if saved.WebhookState != store.WebhookStatePending || saved.WebhookError != "" {
+		t.Fatalf("webhook = %q/%q, want pending with no error", saved.WebhookState, saved.WebhookError)
+	}
+	if saved.HookID == nil || *saved.HookID != hookID || string(saved.WebhookSecretEnc) != string([]byte{4, 5}) {
+		t.Fatalf("switch touched the managed hook: %+v", saved)
+	}
+	if len(saved.WebhookEvents) != 2 || saved.WebhookEvents[0] != "push_events" {
+		t.Fatalf("switch replaced webhook events: %v", saved.WebhookEvents)
+	}
+
+	if err := s.SwitchProjectToSharedCredential(ctx, 999); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("missing project switch = %v", err)
+	}
+}
+
 func TestDeleteProjectCleansExtensionsAndBindings(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t, newFakeClock())

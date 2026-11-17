@@ -391,6 +391,7 @@ fi
 5. 控制台「设置」的 GitLab 区域显示 `shared_bot_credential_state`：`ok`、`expired`、`insufficient_scope`、`unreachable`，缓存 5 分钟；`provisioning_credential` 布尔表示平台 Webhook 凭据是否已配置。注册与「校验连接」会在落库前检查共享凭据的 scope 和有效期、bot 的 Reporter 角色，以及（非平台管理员）登录用户本人的 Reporter 角色；共享模式 + `auto_webhook=true` 还会检查 provisioning 凭据已配置、未过期且带 `api` scope。普通调用方看到的成员失败文案统一，不会暴露项目是否存在或 bot 的权限细节。
 6. 共享模式下 commit status 会被强制关闭：Reporter 无权 `create_commit_status`，评审结果仍以 MR 注记和行内 discussion 发布；项目级 token 模式不受影响。
 7. 凭据轮换：先在 GitLab 生成新 PAT，更新 env 文件中的值并重启，再撤销旧 PAT。共享凭据被拒绝时按平台级故障处理：评审状态会提示更新 `gitlab.bot_token_env` 指向的凭据并重启；provisioning 凭据被拒绝时 hook 健康会提示更新 `gitlab.provisioning_token_env`。项目级 token 仍优先，不受共享凭据轮换影响。
+8. 存量项目切换：`tribunalctl projects rotate-token <项目ID> --shared`（等价于 `PUT /api/v1/projects/{id}/token` 且 `{"token": ""}`）。切换把已存项目 token 换成零长度哨兵，清空 `token_expires_at`、`token_scopes` 与 `webhook_error`，把 `webhook_state` 置为 `pending`，并保留已记录的 hook 与 secret，无需重建 webhook。后台每 30 分钟的 hook 健康扫描用 provisioning 凭据核对：hook 正常时收敛为 `enabled`，异常时按 provisioning 凭据文案标红；项目级 token 失效的旧文案随之清除。未配置 `gitlab.provisioning_token_env` 时扫描跳过共享项目，`pending` 会保留到配置后收敛。回退：用新项目 token 再轮换一次（`--token-env` 或非空 `token`）即恢复项目级优先。切换要求共享凭据已配置，未配置时空 token 仍返回 `400 access token is required`；请求本身不调用 GitLab，凭据 scope、有效期与 bot 角色由共享凭据健康位和后续扫描承载。重复切换幂等。
 
 CLI 在共享模式下可以省略 `--token-env`：`tribunalctl projects register --project <项目>`。CLI 会先读取 `/api/v1/me` 的 `shared_bot_credential` 能力位确认实例已启用；未启用时仍要求 `--token-env`，显式传入时项目级 token 仍优先。自动建 hook 仍受服务端 provisioning 凭据约束。
 

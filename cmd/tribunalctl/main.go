@@ -151,9 +151,10 @@ var commandHelp = &helpNode{
 	children: map[string]*helpNode{
 		"projects": {
 			args:    "<action> [options]",
-			actions: []string{"register", "list", "get", "all", "retry-onboarding", "grants", "residues", "webhook"},
+			actions: []string{"register", "rotate-token", "list", "get", "all", "retry-onboarding", "grants", "residues", "webhook"},
 			children: map[string]*helpNode{
 				"register":         {args: "--project ID [--token-env NAME] [--profile PROFILE] [--auto-webhook=true|false] [--settings JSON]"},
+				"rotate-token":     {args: "<project ID> (--token-env NAME | --shared)"},
 				"list":             {},
 				"get":              {args: "<project ID>"},
 				"retry-onboarding": {args: "<project ID>"},
@@ -246,6 +247,8 @@ func (g *globals) runProjects(ctx context.Context, args []string) error {
 	switch args[0] {
 	case "register":
 		return g.register(ctx, args[1:])
+	case "rotate-token":
+		return g.rotateToken(ctx, args[1:])
 	case "list":
 		if len(args) != 1 {
 			return errors.New("projects list takes no arguments")
@@ -674,6 +677,89 @@ func (g *globals) sharedBotCredential(ctx context.Context) (bool, error) {
 		return false, errors.New("server returned invalid JSON")
 	}
 	return me.SharedBotCredential, nil
+}
+
+// dispatchFlagsFirst moves flags ahead of positional arguments so the
+// standard flag package, which stops parsing at the first positional, accepts
+// the documented "rotate-token <project ID> --shared" order. valueFlags names
+// the flags that consume the following argument.
+func dispatchFlagsFirst(args []string, valueFlags map[string]bool) []string {
+	flags := make([]string, 0, len(args))
+	positional := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			positional = append(positional, args[i+1:]...)
+			break
+		}
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			positional = append(positional, arg)
+			continue
+		}
+		flags = append(flags, arg)
+		name := strings.TrimLeft(arg, "-")
+		if strings.ContainsRune(name, '=') {
+			continue
+		}
+		if valueFlags[name] && i+1 < len(args) {
+			i++
+			flags = append(flags, args[i])
+		}
+	}
+	return append(flags, positional...)
+}
+
+// rotateToken replaces or clears the project credential. --shared sends an
+// empty token to switch the project to the instance shared bot; --token-env
+// keeps the per-project rotation path.
+func (g *globals) rotateToken(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("tribunalctl projects rotate-token", flag.ContinueOnError)
+	fs.SetOutput(g.stderr)
+	var (
+		tokenEnv string
+		shared   bool
+	)
+	fs.StringVar(&tokenEnv, "token-env", "", "environment variable holding the new project token")
+	fs.BoolVar(&shared, "shared", false, "switch the project to the instance shared bot credential (sends an empty token)")
+	if err := fs.Parse(dispatchFlagsFirst(args, map[string]bool{"token-env": true})); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("projects rotate-token requires exactly one project ID")
+	}
+	id, err := parsePositiveID(fs.Arg(0), "project ID")
+	if err != nil {
+		return err
+	}
+	token := ""
+	if shared {
+		if tokenEnv != "" {
+			return errors.New("--shared and --token-env are mutually exclusive")
+		}
+		// Fail before the write with an actionable message; the server enforces
+		// the same rule and answers 400 when the capability is missing.
+		enabled, err := g.sharedBotCredential(ctx)
+		if err != nil {
+			return err
+		}
+		if !enabled {
+			return errors.New("--shared requires the instance to enable the shared bot credential")
+		}
+	} else {
+		if !envNameRE.MatchString(tokenEnv) {
+			return errors.New("--token-env must be a valid environment variable name")
+		}
+		token = g.getenv(tokenEnv)
+		if strings.TrimSpace(token) == "" {
+			return fmt.Errorf("environment variable %s is not set or empty", tokenEnv)
+		}
+	}
+	raw, err := g.request(ctx, http.MethodPut,
+		"/api/v1/projects/"+strconv.FormatInt(id, 10)+"/token", map[string]any{"token": token})
+	if err != nil {
+		return err
+	}
+	return writeRaw(g.stdout, raw)
 }
 
 func (g *globals) request(ctx context.Context, method, path string, body any) (json.RawMessage, error) {

@@ -206,6 +206,35 @@ func (s *Store) UpdateProjectToken(ctx context.Context, id int64, update store.P
 	return nil
 }
 
+// SwitchProjectToSharedCredential replaces the stored project token with the
+// zero-length shared-credential sentinel and clears the stale token failure in
+// the same statement. The managed hook and its secret are deliberately kept:
+// switching the credential does not change the hook, and the periodic health
+// scan re-verifies it with the provisioning credential. "pending" is the
+// existing not-yet-verified state; the scan moves it to enabled or failed.
+func (s *Store) SwitchProjectToSharedCredential(ctx context.Context, id int64) error {
+	if id <= 0 {
+		return errors.New("sqlite: project id is required")
+	}
+	now := formatTime(s.now().UTC())
+	res, err := s.db.ExecContext(ctx, `UPDATE projects
+		SET token_enc = ?, token_expires_at = NULL, token_scopes = ?, webhook_state = ?, webhook_error = '',
+			webhook_updated_at = ?, updated_at = ?
+		WHERE id = ?`,
+		[]byte{}, "[]", store.WebhookStatePending, now, now, id)
+	if err != nil {
+		return fmt.Errorf("sqlite: switch project to shared credential: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("sqlite: switch project to shared credential: %w", err)
+	}
+	if n != 1 {
+		return fmt.Errorf("%w: project %d", store.ErrNotFound, id)
+	}
+	return nil
+}
+
 // UpdateProjectHook stores the service-created hook ID and its secret.
 func (s *Store) UpdateProjectHook(ctx context.Context, id int64, hookID *int64, secretEnc []byte) error {
 	if id <= 0 {
