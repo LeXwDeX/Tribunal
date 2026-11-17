@@ -228,6 +228,163 @@ func TestRegisterCommandSharedBotTokenOptional(t *testing.T) {
 	})
 }
 
+func TestRotateTokenCommand(t *testing.T) {
+	type rotateServer struct {
+		shared   bool
+		put      *capturedRequest
+		meCalls  int
+		putCalls int
+	}
+	newServer := func(t *testing.T, s *rotateServer) *httptest.Server {
+		t.Helper()
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/api/v1/me":
+				s.meCalls++
+				capability := "false"
+				if s.shared {
+					capability = "true"
+				}
+				_, _ = io.WriteString(w, `{"id":1,"username":"admin","role":"admin","shared_bot_credential":`+capability+`}`)
+			case r.Method == http.MethodPut && r.URL.Path == "/api/v1/projects/42/token":
+				s.putCalls++
+				s.put.method, s.put.path = r.Method, r.URL.Path
+				s.put.auth = r.Header.Get("Authorization")
+				data, _ := io.ReadAll(r.Body)
+				if err := json.Unmarshal(data, &s.put.body); err != nil {
+					t.Errorf("request body is not JSON: %s", data)
+				}
+				_, _ = io.WriteString(w, `{"id":42,"token_scopes":[]}`)
+			default:
+				t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+	}
+
+	t.Run("shared sends an empty token", func(t *testing.T) {
+		s := &rotateServer{shared: true, put: &capturedRequest{}}
+		ts := newServer(t, s)
+		defer ts.Close()
+		stdout, _, err := runCtl(t, []string{
+			"--url", ts.URL, "--api-token-env", "ADMIN_TOKEN",
+			"projects", "rotate-token", "42", "--shared",
+		}, map[string]string{"ADMIN_TOKEN": "admin"}, ts.Client())
+		if err != nil {
+			t.Fatalf("run: %v", err)
+		}
+		if s.meCalls != 1 || s.putCalls != 1 {
+			t.Fatalf("calls = me:%d put:%d", s.meCalls, s.putCalls)
+		}
+		if s.put.method != http.MethodPut || s.put.path != "/api/v1/projects/42/token" {
+			t.Fatalf("request = %s %s", s.put.method, s.put.path)
+		}
+		if s.put.auth != "Bearer admin" {
+			t.Fatalf("auth = %q", s.put.auth)
+		}
+		token, ok := s.put.body["token"].(string)
+		if !ok || token != "" {
+			t.Fatalf("token = %v, want an explicit empty string", s.put.body["token"])
+		}
+		if !strings.Contains(stdout, `"id": 42`) {
+			t.Fatalf("stdout = %q", stdout)
+		}
+	})
+
+	t.Run("token env rotates the project token", func(t *testing.T) {
+		s := &rotateServer{put: &capturedRequest{}}
+		ts := newServer(t, s)
+		defer ts.Close()
+		if _, _, err := runCtl(t, []string{
+			"--url", ts.URL, "--api-token-env", "ADMIN_TOKEN",
+			"projects", "rotate-token", "42", "--token-env", "PROJECT_TOKEN",
+		}, map[string]string{"ADMIN_TOKEN": "admin", "PROJECT_TOKEN": "glpat-new"}, ts.Client()); err != nil {
+			t.Fatalf("run: %v", err)
+		}
+		if s.meCalls != 0 || s.putCalls != 1 {
+			t.Fatalf("calls = me:%d put:%d", s.meCalls, s.putCalls)
+		}
+		if s.put.body["token"] != "glpat-new" {
+			t.Fatalf("body = %v", s.put.body)
+		}
+	})
+
+	t.Run("shared without the capability is rejected before the request", func(t *testing.T) {
+		s := &rotateServer{put: &capturedRequest{}}
+		ts := newServer(t, s)
+		defer ts.Close()
+		_, _, err := runCtl(t, []string{
+			"--url", ts.URL, "--api-token-env", "ADMIN_TOKEN",
+			"projects", "rotate-token", "42", "--shared",
+		}, map[string]string{"ADMIN_TOKEN": "admin"}, ts.Client())
+		if err == nil || !strings.Contains(err.Error(), "shared bot credential") {
+			t.Fatalf("error = %v", err)
+		}
+		if s.meCalls != 1 || s.putCalls != 0 {
+			t.Fatalf("calls = me:%d put:%d", s.meCalls, s.putCalls)
+		}
+	})
+
+	t.Run("shared and token env are mutually exclusive", func(t *testing.T) {
+		s := &rotateServer{shared: true, put: &capturedRequest{}}
+		ts := newServer(t, s)
+		defer ts.Close()
+		_, _, err := runCtl(t, []string{
+			"--url", ts.URL, "--api-token-env", "ADMIN_TOKEN",
+			"projects", "rotate-token", "42", "--shared", "--token-env", "PROJECT_TOKEN",
+		}, map[string]string{"ADMIN_TOKEN": "admin", "PROJECT_TOKEN": "glpat-new"}, ts.Client())
+		if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+			t.Fatalf("error = %v", err)
+		}
+		if s.meCalls != 0 || s.putCalls != 0 {
+			t.Fatalf("calls = me:%d put:%d", s.meCalls, s.putCalls)
+		}
+	})
+
+	t.Run("neither flag is rejected", func(t *testing.T) {
+		s := &rotateServer{shared: true, put: &capturedRequest{}}
+		ts := newServer(t, s)
+		defer ts.Close()
+		_, _, err := runCtl(t, []string{
+			"--url", ts.URL, "--api-token-env", "ADMIN_TOKEN",
+			"projects", "rotate-token", "42",
+		}, map[string]string{"ADMIN_TOKEN": "admin"}, ts.Client())
+		if err == nil || err.Error() != "one of --token-env or --shared is required" {
+			t.Fatalf("error = %v", err)
+		}
+		if s.meCalls != 0 || s.putCalls != 0 {
+			t.Fatalf("calls = me:%d put:%d", s.meCalls, s.putCalls)
+		}
+	})
+
+	t.Run("a missing project token env fails before the request", func(t *testing.T) {
+		s := &rotateServer{put: &capturedRequest{}}
+		ts := newServer(t, s)
+		defer ts.Close()
+		_, _, err := runCtl(t, []string{
+			"--url", ts.URL, "--api-token-env", "ADMIN_TOKEN",
+			"projects", "rotate-token", "42", "--token-env", "PROJECT_TOKEN",
+		}, map[string]string{"ADMIN_TOKEN": "admin"}, ts.Client())
+		if err == nil || !strings.Contains(err.Error(), "PROJECT_TOKEN") {
+			t.Fatalf("error = %v", err)
+		}
+		if s.putCalls != 0 {
+			t.Fatalf("request was sent: %d", s.putCalls)
+		}
+	})
+
+	t.Run("an invalid project id is rejected", func(t *testing.T) {
+		_, _, err := runCtl(t, []string{
+			"--url", "http://127.0.0.1:1", "--api-token-env", "ADMIN_TOKEN",
+			"projects", "rotate-token", "abc", "--shared",
+		}, map[string]string{"ADMIN_TOKEN": "admin"}, nil)
+		if err == nil || !strings.Contains(err.Error(), "positive integer") {
+			t.Fatalf("error = %v", err)
+		}
+	})
+}
+
 func TestListAndGetCommands(t *testing.T) {
 	t.Run("list", func(t *testing.T) {
 		var captured capturedRequest
@@ -414,6 +571,7 @@ func TestSubcommandHelp(t *testing.T) {
 		{"project get", []string{"projects", "get", "--help"}, []string{"Usage: tribunalctl projects get", "<project ID>"}},
 		{"project get after id", []string{"projects", "get", "42", "--help"}, []string{"Usage: tribunalctl projects get", "<project ID>"}},
 		{"retry onboarding", []string{"projects", "retry-onboarding", "--help"}, []string{"Usage: tribunalctl projects retry-onboarding", "<project ID>"}},
+		{"rotate token", []string{"projects", "rotate-token", "--help"}, []string{"Usage: tribunalctl projects rotate-token", "--shared"}},
 		{"users long", []string{"users", "--help"}, []string{"Usage: tribunalctl", "disable", "revoke"}},
 		{"user disable", []string{"users", "disable", "--help"}, []string{"Usage: tribunalctl users disable", "<user ID>"}},
 		{"grants", []string{"projects", "grants", "--help"}, []string{"Usage: tribunalctl projects grants", "list", "set", "delete"}},

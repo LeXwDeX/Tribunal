@@ -79,8 +79,11 @@ type updateProjectRequest struct {
 	Enabled  *bool            `json:"enabled,omitempty"`
 }
 
+// rotateProjectTokenRequest requires the token field to be present. An explicit
+// empty string asks for the shared-credential switch; an omitted or null field
+// stays a validation error so a client cannot clear the credential by accident.
 type rotateProjectTokenRequest struct {
-	Token string `json:"token"`
+	Token *string `json:"token"`
 }
 
 type projectWebhookResponse struct {
@@ -446,7 +449,12 @@ func (s *Server) handleRotateProjectToken(w http.ResponseWriter, r *http.Request
 		decodeRequestError(w, r, err)
 		return
 	}
-	rotation, err := s.projects.RotateToken(r.Context(), id, request.Token)
+	if request.Token == nil {
+		writeError(w, r, http.StatusBadRequest, "validation_failed", "access token is required",
+			[]app.Detail{{Field: "token", Message: "must not be empty"}})
+		return
+	}
+	rotation, err := s.projects.RotateToken(r.Context(), id, *request.Token)
 	if err != nil {
 		writeAppError(w, r, err)
 		return

@@ -206,6 +206,75 @@ func (s *Store) UpdateProjectToken(ctx context.Context, id int64, update store.P
 	return nil
 }
 
+// SwitchProjectToSharedCredential replaces the stored project token with the
+// zero-length shared-credential sentinel and clears the stale token failure in
+// the same statement. The managed hook and its secret are deliberately kept:
+// switching the credential does not change the hook, and the periodic health
+// scan re-verifies it with the provisioning credential. A project with a
+// managed hook is marked "pending" so the scan verifies it; a project without
+// one is left "disabled" because there is nothing to verify.
+func (s *Store) SwitchProjectToSharedCredential(ctx context.Context, id int64) error {
+	if id <= 0 {
+		return errors.New("sqlite: project id is required")
+	}
+	now := formatTime(s.now().UTC())
+	res, err := s.db.ExecContext(ctx, `UPDATE projects
+		SET token_enc = ?, token_expires_at = NULL, token_scopes = ?,
+			webhook_state = CASE WHEN hook_id IS NULL THEN ? ELSE ? END,
+			webhook_error = '', webhook_updated_at = ?, updated_at = ?
+		WHERE id = ?`,
+		[]byte{}, "[]", store.WebhookStateDisabled, store.WebhookStatePending, now, now, id)
+	if err != nil {
+		return fmt.Errorf("sqlite: switch project to shared credential: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("sqlite: switch project to shared credential: %w", err)
+	}
+	if n != 1 {
+		return fmt.Errorf("%w: project %d", store.ErrNotFound, id)
+	}
+	return nil
+}
+
+// UpdateProjectWebhookHealth stores one health observation only when the row
+// still holds the state and error the observation was based on. A credential
+// switch or another writer that changed the row after the scan read it wins;
+// the stale observation is dropped. It reports whether the write was applied.
+func (s *Store) UpdateProjectWebhookHealth(ctx context.Context, id int64, observedState, observedError string, update store.ProjectWebhookUpdate) (bool, error) {
+	if id <= 0 {
+		return false, errors.New("sqlite: project id is required")
+	}
+	switch update.State {
+	case store.WebhookStateDisabled, store.WebhookStatePending,
+		store.WebhookStateEnabled, store.WebhookStateFailed, store.WebhookStateUnknown:
+	default:
+		return false, errors.New("sqlite: invalid webhook state")
+	}
+	events := update.Events
+	if events == nil {
+		events = []string{}
+	}
+	eventsJSON, err := json.Marshal(events)
+	if err != nil {
+		return false, fmt.Errorf("sqlite: encode webhook events: %w", err)
+	}
+	now := formatTime(s.now().UTC())
+	res, err := s.db.ExecContext(ctx, `UPDATE projects
+		SET webhook_state = ?, webhook_error = ?, webhook_events = ?, webhook_updated_at = ?, updated_at = ?
+		WHERE id = ? AND webhook_state = ? AND webhook_error = ?`,
+		update.State, truncateWebhookError(update.Error), string(eventsJSON), now, now,
+		id, observedState, observedError)
+	if err != nil {
+		return false, fmt.Errorf("sqlite: update project webhook health: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("sqlite: update project webhook health: %w", err)
+	}
+	return n == 1, nil
+}
+
 // UpdateProjectHook stores the service-created hook ID and its secret.
 func (s *Store) UpdateProjectHook(ctx context.Context, id int64, hookID *int64, secretEnc []byte) error {
 	if id <= 0 {

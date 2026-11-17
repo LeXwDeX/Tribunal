@@ -263,8 +263,11 @@ type projectHookLister interface {
 	ListProjectHooks(ctx context.Context, token string, projectID int64) ([]gitlab.Hook, error)
 }
 
+// projectWebhookWriter persists hook health observations. The compare-and-set
+// write is required: a scan reads the project before it calls GitLab, and a
+// credential switch or another writer may change the row in between.
 type projectWebhookWriter interface {
-	UpdateProjectWebhook(ctx context.Context, id int64, update store.ProjectWebhookUpdate) error
+	UpdateProjectWebhookHealth(ctx context.Context, id int64, observedState, observedError string, update store.ProjectWebhookUpdate) (bool, error)
 }
 
 // ReconcileHookHealth checks every registered project with a managed hook.
@@ -336,15 +339,20 @@ func (s *CatchUpService) reconcileHookHealth(ctx context.Context, project *store
 			break
 		}
 	}
+	// A shared-credential switch marks the hook pending because the previous
+	// credential was rejected; a reachable managed hook verifies it. Failed
+	// states are only cleared when this feature wrote the fixed message, so
+	// unrelated failures stay.
+	recovered := project.WebhookState == store.WebhookStatePending ||
+		project.WebhookState == store.WebhookStateFailed &&
+			(project.WebhookError == webhookDisabledMessage || project.WebhookError == webhookMissingMessage ||
+				project.WebhookError == webhookTokenRejectedMessage || project.WebhookError == webhookProvisioningRejectedMessage)
 	switch {
 	case managed == nil:
 		s.setHookHealth(ctx, writer, project, store.WebhookStateFailed, webhookMissingMessage)
 	case managed.AlertStatus == "disabled" || managed.AlertStatus == "temporarily_disabled":
 		s.setHookHealth(ctx, writer, project, store.WebhookStateFailed, webhookDisabledMessage)
-	case project.WebhookState == store.WebhookStateFailed &&
-		(project.WebhookError == webhookDisabledMessage || project.WebhookError == webhookMissingMessage ||
-			project.WebhookError == webhookTokenRejectedMessage || project.WebhookError == webhookProvisioningRejectedMessage):
-		// A hook that recovered is healthy again; unrelated failures stay.
+	case recovered:
 		s.setHookHealth(ctx, writer, project, store.WebhookStateEnabled, "")
 	}
 }
@@ -353,7 +361,10 @@ func (s *CatchUpService) setHookHealth(ctx context.Context, writer projectWebhoo
 	if project.WebhookState == state && project.WebhookError == message {
 		return
 	}
-	if err := writer.UpdateProjectWebhook(ctx, project.ID, store.ProjectWebhookUpdate{
+	// Only apply the observation if the row still matches what this scan read;
+	// a concurrent credential switch or health write wins. A dropped write is
+	// not an error: the next pass re-reads the project.
+	if _, err := writer.UpdateProjectWebhookHealth(ctx, project.ID, project.WebhookState, project.WebhookError, store.ProjectWebhookUpdate{
 		State: state, Error: message, Events: project.WebhookEvents,
 	}); err != nil {
 		s.logger.Warn("webhook health persistence failed", "project_id", project.ID)

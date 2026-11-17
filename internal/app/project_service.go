@@ -40,6 +40,9 @@ type ProjectStore interface {
 	ListProjectsFiltered(ctx context.Context, filter store.ProjectFilter) ([]store.Project, error)
 	UpdateProject(ctx context.Context, id int64, update store.ProjectUpdate) (*store.Project, error)
 	UpdateProjectToken(ctx context.Context, id int64, update store.ProjectTokenUpdate) error
+	// SwitchProjectToSharedCredential stores the zero-length token sentinel and
+	// clears the project-token webhook failure in one statement.
+	SwitchProjectToSharedCredential(ctx context.Context, id int64) error
 	UpdateProjectHook(ctx context.Context, id int64, hookID *int64, secretEnc []byte) error
 	UpdateProjectWebhook(ctx context.Context, id int64, update store.ProjectWebhookUpdate) error
 	DeleteProject(ctx context.Context, id int64) error
@@ -104,6 +107,15 @@ type ProjectWarning struct {
 // WarningWebhookRequiresMaintainer reports a token that can read the
 // repository but cannot manage project webhooks.
 const WarningWebhookRequiresMaintainer = "webhook_requires_maintainer"
+
+// WarningSharedCredentialUnverified reports that a switch to the shared
+// credential did not check the shared bot's membership or validity for this
+// project. The caller should validate before switching.
+const WarningSharedCredentialUnverified = "shared_credential_unverified"
+
+// WarningSharedHookHealthUnmonitored reports that a shared project's hook
+// health cannot be re-checked because the provisioning credential is absent.
+const WarningSharedHookHealthUnmonitored = "shared_hook_health_unmonitored"
 
 // TokenRotation is the result of replacing a project token.
 type TokenRotation struct {
@@ -1203,6 +1215,12 @@ func (s *ProjectService) Update(ctx context.Context, id int64, in UpdateProjectI
 }
 
 // RotateToken revalidates access and scopes, then re-encrypts the new token.
+// An empty token is accepted only when the instance configures the shared bot:
+// it switches the project to that credential. Shared-credential validity is
+// carried by the health probe and the registration precheck rather than
+// re-checked here, so projects can be switched while a rotated bot token is
+// still propagating; a broken shared credential surfaces as the dedicated
+// shared-credential error at call time.
 func (s *ProjectService) RotateToken(ctx context.Context, id int64, token string) (*TokenRotation, error) {
 	if id <= 0 {
 		return nil, validationError("invalid project id", Detail{Field: "id", Message: "must be positive"})
@@ -1211,7 +1229,10 @@ func (s *ProjectService) RotateToken(ctx context.Context, id int64, token string
 		return nil, err
 	}
 	if strings.TrimSpace(token) == "" {
-		return nil, validationError("access token is required", Detail{Field: "token", Message: "must not be empty"})
+		if !s.tokens.HasShared() {
+			return nil, validationError("access token is required", Detail{Field: "token", Message: "must not be empty"})
+		}
+		return s.switchToSharedCredential(ctx, id)
 	}
 	project, err := s.gitlab.GetProject(ctx, token, fmt.Sprintf("%d", id))
 	if err != nil {
@@ -1278,6 +1299,47 @@ func (s *ProjectService) RotateToken(ctx context.Context, id int64, token string
 		return nil, err
 	}
 	return &TokenRotation{Project: saved, Warnings: tokenRoleWarnings(access)}, nil
+}
+
+// switchToSharedCredential stores the shared-credential sentinel. It makes no
+// GitLab call and does not modify the managed hook: the hook still belongs to
+// the project, and the periodic health scan re-verifies it with the
+// provisioning credential, converging the pending state to enabled or failed.
+// The switch itself cannot prove the shared bot is a member of this project or
+// that its credential is currently valid, so the result says so explicitly.
+func (s *ProjectService) switchToSharedCredential(ctx context.Context, id int64) (*TokenRotation, error) {
+	if err := s.store.SwitchProjectToSharedCredential(ctx, id); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, notFoundError("project not registered")
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+		s.logger.Warn("project shared credential switch failed", "project_id", id)
+		return nil, internalError()
+	}
+	saved, err := s.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return &TokenRotation{Project: saved, Warnings: sharedSwitchWarnings(s.tokens)}, nil
+}
+
+// sharedSwitchWarnings describes what the switch intentionally did not verify.
+// The first warning always applies because the switch performs no GitLab call;
+// the second applies when hook health cannot be monitored at all.
+func sharedSwitchWarnings(tokens *projectTokenResolver) []ProjectWarning {
+	warnings := []ProjectWarning{{
+		Code:    WarningSharedCredentialUnverified,
+		Message: "the shared bot's membership and credential validity in this project were not checked; run POST /api/v1/projects/validate with an empty token before switching",
+	}}
+	if !tokens.HasProvisioning() {
+		warnings = append(warnings, ProjectWarning{
+			Code:    WarningSharedHookHealthUnmonitored,
+			Message: "gitlab.provisioning_token_env is not configured, so this shared project's hook health is no longer monitored; configure the provisioning credential or verify the hook manually",
+		})
+	}
+	return warnings
 }
 
 // CreateWebhook explicitly enables the managed GitLab webhook. Repeated calls
