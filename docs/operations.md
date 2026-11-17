@@ -395,6 +395,23 @@ fi
 
 CLI 在共享模式下可以省略 `--token-env`：`tribunalctl projects register --project <项目>`。CLI 会先读取 `/api/v1/me` 的 `shared_bot_credential` 能力位确认实例已启用；未启用时仍要求 `--token-env`，显式传入时项目级 token 仍优先。自动建 hook 仍受服务端 provisioning 凭据约束。
 
+### 注册与校验限流及共享预检缓存
+
+`POST /api/v1/projects`（注册）与 `POST /api/v1/projects/validate`（校验）按已认证用户限流，两个端点各自独立计桶，默认每用户每分钟 10 / 30 次；静态 bootstrap Bearer（用户 ID 0）使用独立桶。认证先于限流，未认证请求仍返回 401 且不消耗配额，浏览器会话仍需 CSRF。超限返回 429 `rate_limited` 并带 `Retry-After`（固定窗口剩余秒数，1–60）。
+
+```yaml
+limits:
+  register_per_minute: 10
+  validate_per_minute: 30
+  precheck_cache_ttl: 45s
+```
+
+- **调优**：受信自测或 CI 可调高 `register_per_minute` / `validate_per_minute`；面向不可信用户开放注册与校验时调低。常见默认值为 10 / 30。
+- **TTL 取舍**：调大 `precheck_cache_ttl` 可减少 GitLab 调用，但会延长权限撤销、token 轮换和项目状态变化的可见延迟；建议 30–60s，0 关闭缓存。仅共享凭据模式缓存，项目级 token 校验从不缓存。
+- **固定窗口语义**：窗口边界附近最多可能出现约 2× 限额的突发；计数器是进程内内存，服务重启清零，多实例部署不共享配额。
+- **缓存内容与失效**：缓存键由项目、用户与凭据 SHA-256 指纹组合而成，分别保存共享 bot 身份与项目 access、注册人 Reporter 成员关系（仅成功）和完整的共享模式校验结果；provisioning 凭据有效性与共享 token info 按凭据指纹全局缓存。TTL 内相同校验不产生 GitLab 调用。注册、切换共享凭据、轮换 token、启停（`PATCH enabled`）和删除项目会清理该项目的成员与校验缓存，全局 provisioning 与共享 token info 缓存不随单项目写操作清除；失败或拒绝的预检不缓存，每次重新探测。
+- **日志与凭据**：限流日志只记录 `endpoint`、`user_id`、`retry_after_s`；缓存键只含凭据指纹，日志和响应不含凭据值。
+
 ### Webhook 失败与恢复
 
 包含 #164 的版本在请求体读取返回超时错误时回复 `503 {"ignored":"request_timeout","request_id":...}`，未读取完整的请求不会进入投递去重或入队；连接中断时 GitLab 未必收到响应。存储或入队失败仍返回 `503`，超大请求体和其他非超时读取错误仍返回 `200`。连续的 4xx/5xx 或连接失败可能使 GitLab 临时或永久停用 hook；触发条件、限制和功能开关随 GitLab 版本与实例配置而异，按该实例的 [GitLab webhook 文档](https://docs.gitlab.com/user/project/integrations/webhooks/#auto-disabled-webhooks)核对，不要依赖固定次数。

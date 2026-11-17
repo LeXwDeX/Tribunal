@@ -191,6 +191,13 @@ type ProjectService struct {
 	validationTimeout time.Duration
 	logger            *slog.Logger
 	now               func() time.Time
+	// Shared precheck caches; a zero TTL leaves all of them nil, which keeps
+	// every lookup a miss.
+	sharedMembershipCache *ttlCache[sharedMembershipResult]
+	registrantCache       *ttlCache[struct{}]
+	provisioningCache     *ttlCache[struct{}]
+	sharedTokenInfoCache  *ttlCache[gitlab.TokenInfo]
+	validationCache       *ttlCache[cachedValidation]
 
 	mu             sync.Mutex
 	sharedHealthMu sync.Mutex
@@ -250,8 +257,12 @@ type ProjectServiceConfig struct {
 	// projects. It is optional: without it, shared projects can only register
 	// with auto_webhook=false. It is never used for review reads or notes.
 	ProvisioningToken string
-	Logger            *slog.Logger
-	Now               func() time.Time
+	// PrecheckCacheTTL caches shared-bot membership, registrant membership,
+	// shared token info and provisioning validity for this long. Zero disables
+	// caching; permission changes take effect after at most this TTL.
+	PrecheckCacheTTL time.Duration
+	Logger           *slog.Logger
+	Now              func() time.Time
 }
 
 // NewProjectService builds the registration service.
@@ -284,21 +295,26 @@ func NewProjectService(cfg ProjectServiceConfig) (*ProjectService, error) {
 		timeout = defaultValidationTimeout
 	}
 	return &ProjectService{
-		store:             cfg.Store,
-		gitlab:            cfg.GitLab,
-		cipher:            cfg.Cipher,
-		tokens:            newProjectTokenResolver(cfg.Cipher, cfg.SharedBotToken).WithProvisioning(cfg.ProvisioningToken),
-		profiles:          cfg.Profiles,
-		publicURL:         publicURL,
-		hookURL:           hookURL,
-		workspace:         cfg.Workspace.Root(),
-		workspaces:        cfg.Workspace,
-		projectExtensions: cfg.ProjectExtensions,
-		gitLabOrigin:      origin,
-		probeRemote:       cfg.ProbeRemote,
-		validationTimeout: timeout,
-		logger:            logger,
-		now:               now,
+		store:                 cfg.Store,
+		gitlab:                cfg.GitLab,
+		cipher:                cfg.Cipher,
+		tokens:                newProjectTokenResolver(cfg.Cipher, cfg.SharedBotToken).WithProvisioning(cfg.ProvisioningToken),
+		profiles:              cfg.Profiles,
+		publicURL:             publicURL,
+		hookURL:               hookURL,
+		workspace:             cfg.Workspace.Root(),
+		workspaces:            cfg.Workspace,
+		projectExtensions:     cfg.ProjectExtensions,
+		gitLabOrigin:          origin,
+		probeRemote:           cfg.ProbeRemote,
+		validationTimeout:     timeout,
+		logger:                logger,
+		now:                   now,
+		sharedMembershipCache: newTTLCache[sharedMembershipResult](cfg.PrecheckCacheTTL, now),
+		registrantCache:       newTTLCache[struct{}](cfg.PrecheckCacheTTL, now),
+		provisioningCache:     newTTLCache[struct{}](cfg.PrecheckCacheTTL, now),
+		sharedTokenInfoCache:  newTTLCache[gitlab.TokenInfo](cfg.PrecheckCacheTTL, now),
+		validationCache:       newTTLCache[cachedValidation](cfg.PrecheckCacheTTL, now),
 	}, nil
 }
 
@@ -371,7 +387,7 @@ func (s *ProjectService) Register(ctx context.Context, in RegisterInput) (*Regis
 		// The shared credential must be usable by itself, not only readable
 		// for this particular project: a missing scope would otherwise
 		// register successfully and fail every clone later.
-		info, err = s.gitlab.GetTokenInfo(ctx, s.tokens.Shared())
+		info, err = s.sharedTokenInfo(ctx)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return nil, err
@@ -548,6 +564,9 @@ func (s *ProjectService) Register(ctx context.Context, in RegisterInput) (*Regis
 		s.logger.Warn("registered project read-back failed", "project_id", project.ID)
 		saved = &stored
 	}
+	// Registration changes the credential mode and enabled state, so cached
+	// prechecks for this project must not survive the write.
+	s.InvalidatePrecheckCache(project.ID)
 	s.logger.Info("project registered", "project_id", project.ID, "job_id", jobID)
 
 	result := &Registration{Project: saved, JobID: jobID}
@@ -605,6 +624,10 @@ func (s *ProjectService) verifySharedBotMembership(ctx context.Context, projectI
 // needs the error.
 func (s *ProjectService) sharedBotMembership(ctx context.Context, projectID int64) (*gitlab.User, int, error) {
 	token := s.tokens.Shared()
+	key := sharedMembershipCacheKey(projectID, token)
+	if cached, ok := s.sharedMembershipCache.get(key); ok {
+		return cached.user, cached.access, nil
+	}
 	user, err := s.gitlab.CurrentUser(ctx, token)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -638,6 +661,7 @@ func (s *ProjectService) sharedBotMembership(ctx context.Context, projectID int6
 	if access < reporterAccessLevel {
 		return nil, 0, sharedBotAccessError()
 	}
+	s.sharedMembershipCache.put(key, sharedMembershipResult{user: user, access: access})
 	return user, access, nil
 }
 
@@ -659,6 +683,10 @@ func (s *ProjectService) verifySharedRegistrantMembership(ctx context.Context, p
 			Detail{Field: "token", Message: "sign in with a GitLab account or provide a project access token"})
 	}
 	token := s.tokens.Shared()
+	key := registrantMembershipCacheKey(projectID, ownerUserID, token)
+	if _, ok := s.registrantCache.get(key); ok {
+		return nil
+	}
 	access, err := s.gitlab.GetMemberAccess(ctx, token, projectID, ownerUserID)
 	if err != nil {
 		if gitlab.IsNotFound(err) {
@@ -679,6 +707,7 @@ func (s *ProjectService) verifySharedRegistrantMembership(ctx context.Context, p
 		return validationError("access level is insufficient",
 			Detail{Field: "access_level", Message: "Reporter or higher is required to register this project"})
 	}
+	s.registrantCache.put(key, struct{}{})
 	return nil
 }
 
@@ -749,7 +778,12 @@ func (s *ProjectService) validateProvisioningCredential(ctx context.Context) err
 	if !s.tokens.HasProvisioning() {
 		return provisioningCredentialRequiredError()
 	}
-	info, err := s.gitlab.GetTokenInfo(ctx, s.tokens.Provisioning())
+	token := s.tokens.Provisioning()
+	key := provisioningCredentialCacheKey(token)
+	if _, ok := s.provisioningCache.get(key); ok {
+		return nil
+	}
+	info, err := s.gitlab.GetTokenInfo(ctx, token)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
@@ -762,7 +796,11 @@ func (s *ProjectService) validateProvisioningCredential(ctx context.Context) err
 		}
 		return upstreamError(status)
 	}
-	return validateProvisioningTokenInfo(info, s.now())
+	if err := validateProvisioningTokenInfo(info, s.now()); err != nil {
+		return err
+	}
+	s.provisioningCache.put(key, struct{}{})
+	return nil
 }
 
 // provisioningCredentialRequiredError is the actionable failure for a shared
@@ -835,6 +873,17 @@ func (s *ProjectService) Validate(ctx context.Context, in ValidateProjectInput) 
 	if sharedMode {
 		credential = s.tokens.Shared()
 	}
+	// Identical shared-mode validation requests reuse one short-lived result;
+	// a project or credential write invalidates it. Project-token validation
+	// always probes so a revoked project token is noticed immediately.
+	validationKey := ""
+	if sharedMode {
+		validationKey = validationCacheKey(strings.TrimSpace(in.Project), in.OwnerUserID, in.TrustedPlatformAdmin, credential)
+		if cached, ok := s.validationCache.get(validationKey); ok {
+			result := copyValidationResult(cached.result)
+			return &result, nil
+		}
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, s.validationTimeout)
 	defer cancel()
@@ -864,7 +913,7 @@ func (s *ProjectService) Validate(ctx context.Context, in ValidateProjectInput) 
 		warnings []ProjectWarning
 	)
 	if sharedMode {
-		info, err = s.gitlab.GetTokenInfo(ctx, credential)
+		info, err = s.sharedTokenInfo(ctx)
 		if err != nil {
 			status := gitlab.StatusOf(err)
 			if status == http.StatusUnauthorized || status == http.StatusForbidden {
@@ -932,7 +981,7 @@ func (s *ProjectService) Validate(ctx context.Context, in ValidateProjectInput) 
 		return nil, upstreamError(0)
 	}
 
-	return &ProjectValidation{
+	result := &ProjectValidation{
 		ProjectID:         project.ID,
 		PathWithNamespace: project.PathWithNamespace,
 		WebURL:            project.WebURL,
@@ -944,7 +993,11 @@ func (s *ProjectService) Validate(ctx context.Context, in ValidateProjectInput) 
 		GitHead:           strings.ToLower(head),
 		Warnings:          warnings,
 		SharedCredential:  sharedMode,
-	}, nil
+	}
+	if sharedMode {
+		s.validationCache.put(validationKey, cachedValidation{projectID: result.ProjectID, result: copyValidationResult(*result)})
+	}
+	return result, nil
 }
 
 // validationUpstreamError keeps GitLab and timeout failures sanitized. A
@@ -1211,6 +1264,11 @@ func (s *ProjectService) Update(ctx context.Context, id int64, in UpdateProjectI
 		s.logger.Warn("project update failed", "project_id", id)
 		return nil, internalError()
 	}
+	if in.Enabled != nil {
+		// Enabling or disabling changes whether cached validation and precheck
+		// results still describe the active project.
+		s.InvalidatePrecheckCache(id)
+	}
 	return project, nil
 }
 
@@ -1298,6 +1356,7 @@ func (s *ProjectService) RotateToken(ctx context.Context, id int64, token string
 	if err != nil {
 		return nil, err
 	}
+	s.InvalidatePrecheckCache(id)
 	return &TokenRotation{Project: saved, Warnings: tokenRoleWarnings(access)}, nil
 }
 
@@ -1322,6 +1381,7 @@ func (s *ProjectService) switchToSharedCredential(ctx context.Context, id int64)
 	if err != nil {
 		return nil, err
 	}
+	s.InvalidatePrecheckCache(id)
 	return &TokenRotation{Project: saved, Warnings: sharedSwitchWarnings(s.tokens)}, nil
 }
 
@@ -1629,9 +1689,13 @@ func (s *ProjectService) Delete(ctx context.Context, id int64) error {
 		return err
 	}
 	defer unlock()
-	return ws.ChangeOutbound(ctx, func(ctx context.Context) error {
+	err = ws.ChangeOutbound(ctx, func(ctx context.Context) error {
 		return s.deleteProjectLocked(ctx, id)
 	})
+	if err == nil {
+		s.InvalidatePrecheckCache(id)
+	}
+	return err
 }
 
 func (s *ProjectService) deleteProjectLocked(ctx context.Context, id int64) error {

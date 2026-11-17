@@ -23,6 +23,7 @@ import (
 // Config is the complete platform configuration.
 type Config struct {
 	Server         ServerConfig              `yaml:"server" json:"server"`
+	Limits         LimitsConfig              `yaml:"limits" json:"limits"`
 	GitLab         GitLabConfig              `yaml:"gitlab" json:"gitlab"`
 	Auth           AuthConfig                `yaml:"auth" json:"auth"`
 	Storage        StorageConfig             `yaml:"storage" json:"storage"`
@@ -72,6 +73,18 @@ type ServerConfig struct {
 	ReadTimeout    time.Duration `yaml:"read_timeout" json:"read_timeout"`
 	WriteTimeout   time.Duration `yaml:"write_timeout" json:"write_timeout"`
 	TrustedProxies []string      `yaml:"trusted_proxies" json:"trusted_proxies"`
+}
+
+// LimitsConfig bounds the GitLab work an authenticated caller can trigger
+// through project registration and validation, and controls how long shared
+// precheck results stay cached. Per-minute limits are enforced per user; the
+// static bootstrap bearer has its own bucket.
+type LimitsConfig struct {
+	RegisterPerMinute int `yaml:"register_per_minute" json:"register_per_minute"`
+	ValidatePerMinute int `yaml:"validate_per_minute" json:"validate_per_minute"`
+	// PrecheckCacheTTL bounds staleness of shared-bot membership, registrant
+	// membership and provisioning-credential checks. Zero disables caching.
+	PrecheckCacheTTL time.Duration `yaml:"precheck_cache_ttl" json:"precheck_cache_ttl"`
 }
 
 // GitLabConfig controls access to the GitLab instance.
@@ -444,6 +457,15 @@ func (c *Config) Validate() error {
 	}
 	if c.Server.WriteTimeout <= 0 {
 		p.add("server.write_timeout must be positive")
+	}
+	if c.Limits.RegisterPerMinute <= 0 {
+		p.add("limits.register_per_minute must be positive")
+	}
+	if c.Limits.ValidatePerMinute <= 0 {
+		p.add("limits.validate_per_minute must be positive")
+	}
+	if c.Limits.PrecheckCacheTTL < 0 {
+		p.add("limits.precheck_cache_ttl must not be negative")
 	}
 	oauthEnabled := c.Auth.OAuth.ClientIDEnv != "" || c.Auth.OAuth.ClientSecretEnv != ""
 	validateURL(&p, "server.public_url", c.Server.PublicURL, oauthEnabled)

@@ -39,6 +39,7 @@
 | 404 | `not_found` |
 | 409 | `conflict`（如工作流已在运行、项目已注册） |
 | 422 | `gitlab_rejected`（GitLab 返回错误，附原始状态码） |
+| 429 | `rate_limited`（注册/校验端点按用户限流；带 `Retry-After`） |
 | 500 | `internal` |
 | 503 | `unavailable`（依赖未配置，或服务端内部超时且客户端仍在连接） |
 
@@ -114,8 +115,8 @@ Note Hook 先入队 `review.command`，由 worker 请求 GitLab 校验身份、M
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/v1/projects` | 当前用户可见的项目列表：平台管理员为全部已登记项目，其他用户为已授权或 `global_read` 可见的项目；`?q=&enabled=&limit=&cursor=`，响应 `{projects, next_cursor}`，每项带 `access`，平台管理员另带 `access_source=admin`，只读项目带 `access_source=grant\|global` |
-| POST | `/api/v1/projects/validate` | 已认证用户只读连接校验：`{project, token}`；普通调用方的 token 需能识别出该项目至少 Reporter 的成员，平台管理员与静态 bootstrap Bearer 免检；启用共享凭据后 `token` 可省略，改用共享 bot 检查 scope、有效期、bot Reporter 与登录用户 Reporter；不保存项目或凭据。响应带 `shared_credential` 布尔值，表示本次校验使用的凭据来源 |
-| POST | `/api/v1/projects` | 已认证用户注册项目；普通调用方需至少 Reporter 成员，平台管理员与静态 bootstrap Bearer 免检；注册人自动获得该项目 `manage`（静态 Bearer 除外）。启用共享凭据后 `token` 可省略；`auto_webhook` 省略默认 `true` |
+| POST | `/api/v1/projects/validate` | 已认证用户只读连接校验：`{project, token}`；普通调用方的 token 需能识别出该项目至少 Reporter 的成员，平台管理员与静态 bootstrap Bearer 免检；启用共享凭据后 `token` 可省略，改用共享 bot 检查 scope、有效期、bot Reporter 与登录用户 Reporter；不保存项目或凭据。响应带 `shared_credential` 布尔值，表示本次校验使用的凭据来源。按用户每分钟限流（默认 30 次，`limits.validate_per_minute`），超限返回 429 + `Retry-After`；静态 bootstrap Bearer 使用独立桶；认证先于限流 |
+| POST | `/api/v1/projects` | 已认证用户注册项目；普通调用方需至少 Reporter 成员，平台管理员与静态 bootstrap Bearer 免检；注册人自动获得该项目 `manage`（静态 Bearer 除外）。启用共享凭据后 `token` 可省略；`auto_webhook` 省略默认 `true`。按用户每分钟限流（默认 10 次，`limits.register_per_minute`），与校验端点各自独立计桶，超限返回 429 + `Retry-After`；静态 bootstrap Bearer 使用独立桶；认证先于限流 |
 | GET | `/api/v1/projects/{id}` | 项目 `read`：详情（含工作区状态、最近评审和 `access`） |
 | PATCH | `/api/v1/projects/{id}` | 项目 `manage`：修改 `profile`（只接受 `default`，其他值返回 400 `unknown profile`）、`settings`（其中 `profile_by_label` 的值不是 `default` 的映射在保存时被丢弃，不报错）、`enabled` |
 | PUT | `/api/v1/projects/{id}/token` | 项目 `manage`：轮换 token：`{token}`，字段必须存在。启用共享凭据时，显式空或纯空白 `token` 表示切换为共享 bot：写零长度哨兵、清空 `token_expires_at`/`token_scopes`/`webhook_error`；有 managed hook 时 `webhook_state` 置 `pending` 待健康扫描，无 hook 时置 `disabled`；不修改 hook；缺省字段或 `null` 仍返回 400。非空 token 恢复项目级凭据。切换不校验共享 bot 成员/有效期（`warnings` 提示先以空 token 调 `/api/v1/projects/validate`），未配置 provisioning 凭据时另提示 hook 健康不再被监控 |
@@ -129,6 +130,8 @@ Note Hook 先入队 `review.command`，由 worker 请求 GitLab 校验身份、M
 `project` 支持正整数 ID、`namespace/path` 或配置的 GitLab 根地址下的完整 HTTP(S) 仓库 URL，可带 `.git` 后缀和尾斜杠。拒绝外域、URL 用户信息、query/fragment 和路径穿越；不会按用户输入连接任意主机。注册和连接校验对所有已认证用户开放，浏览器会话需 CSRF；普通调用方的 token 必须能识别出该项目至少 Reporter 的成员，平台管理员（本地用户 ID 且 `role=admin`）与静态 bootstrap Bearer（用户 ID 0）跳过成员检查。项目详情读取需要 `read`，项目设置写入、Key 轮换、webhook 启用/重建/停用和注销需要 `manage`。平台管理员对已登记项目隐式拥有 `manage`；普通用户的 `manage` 来自注册人自动授权或管理员分配，同一项目可有多个 `manage` 持有者，任一持有者都可删除项目。
 
 只读校验依次确认项目身份、当前用户及至少 Reporter 的项目权限、`api` 和 `read_repository` scope、有效期，以及 `git ls-remote ... HEAD`。普通调用方的 token 无法识别出该项目至少 Reporter 的成员时（成员查询 404 或返回更低角色）返回 `400 validation_failed`，字段 `access_level`；平台管理员与静态 bootstrap Bearer 跳过成员检查，此时 `access_level` 可能为 0。全程默认限时 30 秒。成功返回 `200 {project_id, path_with_namespace, web_url, default_branch, username, access_level, token_scopes, token_expires_at?, git_head}`；未配置可信 GitLab 根地址或 Git 探针时返回 503。校验不落库、不创建 webhook、不入队、不调用模型；读取 HEAD 不等于完整 clone 或评论写权限验证。注册仍独立复核凭据，不依赖先前校验结果。
+
+共享凭据模式下，相同校验（项目输入串、调用者用户 ID、trusted 标志与凭据指纹一致）在 `limits.precheck_cache_ttl`（默认 45s，0 禁用缓存）内直接复用上次成功结果，TTL 内不产生任何 GitLab 调用。缓存键由项目、用户与凭据 SHA-256 指纹组合而成，分项保存共享 bot 身份与项目 access、注册人 Reporter 成员关系（仅缓存成功）和完整的共享模式校验结果；provisioning 凭据有效性与共享 token info 按凭据指纹全局缓存。缓存不保存凭据明文，且只缓存成功的预检，失败或拒绝每次重新探测。项目级 token 的校验从不缓存，撤销立即生效。注册成功、切换共享凭据、轮换 token、启停（`PATCH enabled`）和删除项目会使该项目的相关缓存失效；权限撤销、token 轮换和项目状态变化最迟在 TTL 后生效。缓存与限流计数都在进程内存中，重启清零，多实例各自独立。
 
 注册请求：
 
