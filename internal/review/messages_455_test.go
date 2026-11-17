@@ -189,17 +189,19 @@ func TestRenderSummaryKeepsGeneratedPathsThroughLocalization(t *testing.T) {
 	}
 }
 
-func TestInlineTruncationLinksToDetailURL(t *testing.T) {
+func TestInlineLongBodyPublishesFullTextAndSummaryKeepsDetailURL(t *testing.T) {
 	body := strings.Repeat("长正文内容。", 120)
 	group := mkGroup("long-body", 20, "logic", SeverityP2, "很长的正文", body)
 	const detail = "https://review.example/reviews/wf-455"
-	out, err := RenderFinding(group, FindingRenderOptions{DetailURL: detail})
+	out, err := RenderFinding(group, FindingRenderOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	link := fmt.Sprintf(`<a href="%s">控制台</a>`, detail)
-	if !strings.Contains(out, link) {
-		t.Fatalf("truncated inline body has no detail link %q:\n%s", link, out)
+	if !strings.Contains(out, body) {
+		t.Fatalf("long inline body was clipped:\n%s", out)
+	}
+	if strings.Contains(out, "内容已截断") || strings.Contains(out, "完整正文见控制台") {
+		t.Fatalf("complete inline body still carries a clipping hint:\n%s", out)
 	}
 	summary, err := RenderSummary(SummaryInput{
 		Verdict: VerdictPass, Summary: "clean", Fingerprint: "fp", Groups: []Group{},
@@ -209,22 +211,19 @@ func TestInlineTruncationLinksToDetailURL(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(summary, detail) || !strings.Contains(summary, "详情") {
-		t.Fatalf("summary detail link differs from the inline link:\n%s", summary)
-	}
-	if briefBodyRunes != 400 {
-		t.Fatalf("briefBodyRunes = %d, the product limit must stay 400", briefBodyRunes)
+		t.Fatalf("summary detail link missing:\n%s", summary)
 	}
 }
 
-func TestInlineTruncationWithoutURLKeepsConsoleHint(t *testing.T) {
+func TestLongInlineBodyHasNoConsoleHint(t *testing.T) {
 	body := strings.Repeat("长正文内容。", 120)
 	group := mkGroup("long-body", 20, "logic", SeverityP2, "很长的正文", body)
 	out, err := RenderFinding(group, FindingRenderOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "完整正文见控制台") || strings.Contains(out, "<a href=") {
-		t.Fatalf("fallback truncation notice is wrong:\n%s", out)
+	if strings.Contains(out, "完整正文见控制台") || strings.Contains(out, "<a href=") {
+		t.Fatalf("complete inline body must not point at the console:\n%s", out)
 	}
 }
 

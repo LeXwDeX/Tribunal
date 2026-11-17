@@ -28,24 +28,20 @@ var tableDelimiterRE = regexp.MustCompile(`^[ \t]*\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t
 var tableInterruptRE = regexp.MustCompile(`^[ \t]*(?:#{1,6}[ \t]+|(?:[-+*]|[0-9]{1,9}[.)])[ \t]+)`)
 
 const (
-	summaryItemBodyRunes       = 2000
-	summaryItemSuggestionRunes = 1000
-	// briefBodyRunes bounds the body published with a finding. Findings stay
-	// short by design; the suggestion and evidence blocks carry the longer
-	// material, and the full body stays in storage and the console.
-	briefBodyRunes   = 400
-	truncationNotice = "\n\n…（内容已截断）"
+	// platformLimitNotice is the only publishing-time clip notice. It is added
+	// when a whole note would exceed the GitLab note size limit.
+	platformLimitNotice = "\n\n…（已达 GitLab 注记上限，余下内容见控制台）"
 )
 
-// briefBody renders a bounded finding body. The full body stays in storage
-// and in the console; the second result reports whether the published text was
-// clipped. Code blocks inside the bound keep their existing rendering.
-func briefBody(value string, max int) (string, bool) {
+// briefBody renders a published finding body. The renderer never clips content
+// by size; limitPublishedNote bounds the whole note at the GitLab platform
+// limit and points the reader at the console.
+func briefBody(value string) string {
 	value = strings.TrimSpace(strings.ReplaceAll(value, "\r\n", "\n"))
 	if value == "" {
-		return "", false
+		return ""
 	}
-	return renderMarkdown(value, max), utf8.RuneCountInString(value) > max
+	return renderMarkdown(value, maxContentRunes)
 }
 
 // SummaryInput is structured data for the summary note.
@@ -77,9 +73,6 @@ type SummaryInput struct {
 type FindingRenderOptions struct {
 	ShowModelAttribution bool
 	ProviderLabels       map[string]string
-	// DetailURL points at the console review detail. A clipped inline body
-	// links to it instead of only naming the console.
-	DetailURL string
 }
 
 // SummaryMarkerLine returns the hidden first line of the summary note.
@@ -155,48 +148,76 @@ func RenderSummary(in SummaryInput) (string, error) {
 		} else if in.RuleSummary {
 			summary = alignRuleSummaryCounts(summary, len(positioned), len(unpositioned)+len(marked))
 		}
-		b.WriteString(renderMarkdown(summary, MaxSummaryRunes))
+		b.WriteString(renderMarkdown(summary, maxContentRunes))
 		b.WriteString("\n\n")
 	}
 	if section := reviewScopeSection(in.Scope, in.Generated, in.GeneratedPaths); section != "" {
 		b.WriteString(section)
 	}
+
+	// The footer is fixed-shape and small; render it up front so the
+	// incremental budget can reserve its bytes instead of cutting it.
+	var footer strings.Builder
+	footerParts := make([]string, 0, 4)
+	if in.HeadSHA != "" && markerFingerprintRE.MatchString(in.HeadSHA) {
+		footerParts = append(footerParts, "head "+escapeOneLine(in.HeadSHA, 128))
+	}
+	if in.Profile != "" && markerFingerprintRE.MatchString(in.Profile) {
+		footerParts = append(footerParts, "profile "+escapeOneLine(in.Profile, 128))
+	}
+	if in.Duration > 0 {
+		footerParts = append(footerParts, "用时 "+in.Duration.Round(time.Second).String())
+	}
+	if link := safeDetailURL(in.DetailURL); link != "" {
+		footerParts = append(footerParts, fmt.Sprintf(`<a href="%s">详情</a>`, link))
+	}
+	if len(footerParts) > 0 {
+		footer.WriteString("\n<sub>")
+		footer.WriteString(strings.Join(footerParts, " · "))
+		footer.WriteString("</sub>\n")
+	}
+
+	budget := newNoteBudget(footer.Len())
+	budget.b.WriteString(b.String())
+
 	if len(positioned) > 0 {
-		fmt.Fprintf(&b, "\n### 行内问题（%d）\n\n", len(positioned))
-		for _, group := range positioned {
-			b.WriteString("- **[")
-			b.WriteString(string(group.EffectiveSeverity()))
-			b.WriteString("]")
-			b.WriteString(escapeOneLine(group.Title, MaxTitleRunes))
-			b.WriteString("**")
+		budget.writeSection(fmt.Sprintf("\n### 行内问题（%d）\n\n", len(positioned)), len(positioned), func(i int) string {
+			group := positioned[i]
+			var item strings.Builder
+			item.WriteString("- **[")
+			item.WriteString(string(group.EffectiveSeverity()))
+			item.WriteString("]")
+			item.WriteString(escapeOneLine(group.Title, MaxTitleRunes))
+			item.WriteString("**")
 			if group.Path != "" {
-				b.WriteString(" · ")
-				b.WriteString(inlineCode(group.Path))
+				item.WriteString(" · ")
+				item.WriteString(inlineCode(group.Path))
 				if group.Line > 0 {
-					fmt.Fprintf(&b, ":%d", group.Line)
+					fmt.Fprintf(&item, ":%d", group.Line)
 				}
 			}
-			b.WriteByte('\n')
-			b.WriteString(inlineRelatedLines(fold.related[group.ID]))
-		}
+			item.WriteByte('\n')
+			item.WriteString(inlineRelatedLines(fold.related[group.ID]))
+			return item.String()
+		})
 	}
 	if len(unpositioned) > 0 {
-		fmt.Fprintf(&b, "\n### 无法定位到行的问题（%d）\n\n", len(unpositioned))
-		for i, group := range unpositioned {
+		budget.writeSection(fmt.Sprintf("\n### 无法定位到行的问题（%d）\n\n", len(unpositioned)), len(unpositioned), func(i int) string {
+			item := renderSummaryItem(unpositioned[i], false)
 			if i > 0 {
-				b.WriteByte('\n')
+				item = "\n" + item
 			}
-			b.WriteString(renderSummaryItem(group, false))
-		}
+			return item
+		})
 	}
 	if len(marked) > 0 {
-		fmt.Fprintf(&b, "\n### 存疑条目（%d）\n\n", len(marked))
-		for i, group := range marked {
+		budget.writeSection(fmt.Sprintf("\n### 存疑条目（%d）\n\n", len(marked)), len(marked), func(i int) string {
+			item := renderSummaryItem(marked[i], true)
 			if i > 0 {
-				b.WriteByte('\n')
+				item = "\n" + item
 			}
-			b.WriteString(renderSummaryItem(group, true))
-		}
+			return item
+		})
 	}
 	if len(in.Warnings) > 0 {
 		rendered := make([]string, 0, len(in.Warnings))
@@ -210,39 +231,16 @@ func RenderSummary(in SummaryInput) (string, error) {
 			rendered = append(rendered, localized)
 		}
 		if len(rendered) > 0 {
-			fmt.Fprintf(&b, "\n### 评审提示（%d）\n\n", len(rendered))
-			for _, warning := range rendered {
-				b.WriteString("- ")
-				b.WriteString(warning)
-				b.WriteByte('\n')
-			}
+			budget.writeSection(fmt.Sprintf("\n### 评审提示（%d）\n\n", len(rendered)), len(rendered), func(i int) string {
+				return "- " + rendered[i] + "\n"
+			})
 		}
 	}
 	if in.Verdict == VerdictIncomplete && strings.TrimSpace(in.IncompleteReason) != "" {
-		b.WriteString("\n> 评审未完成：")
-		b.WriteString(escapeOneLine(localizeIncompleteReason(in.IncompleteReason), 500))
-		b.WriteByte('\n')
+		budget.write("\n> 评审未完成：" + escapeOneLine(localizeIncompleteReason(in.IncompleteReason), 500) + "\n")
 	}
 
-	footer := make([]string, 0, 4)
-	if in.HeadSHA != "" && markerFingerprintRE.MatchString(in.HeadSHA) {
-		footer = append(footer, "head "+escapeOneLine(in.HeadSHA, 128))
-	}
-	if in.Profile != "" && markerFingerprintRE.MatchString(in.Profile) {
-		footer = append(footer, "profile "+escapeOneLine(in.Profile, 128))
-	}
-	if in.Duration > 0 {
-		footer = append(footer, "用时 "+in.Duration.Round(time.Second).String())
-	}
-	if link := safeDetailURL(in.DetailURL); link != "" {
-		footer = append(footer, fmt.Sprintf(`<a href="%s">详情</a>`, link))
-	}
-	if len(footer) > 0 {
-		b.WriteString("\n<sub>")
-		b.WriteString(strings.Join(footer, " · "))
-		b.WriteString("</sub>\n")
-	}
-	return gitlab.NeutralizeQuickActions(b.String()), nil
+	return limitPublishedNote(gitlab.NeutralizeQuickActions(budget.finish(footer.String()))), nil
 }
 
 func verdictLabel(verdict string) string {
@@ -423,20 +421,20 @@ func renderSummaryItem(group Group, marked bool) string {
 	if marked {
 		reason := "挑战结果：UNCERTAIN"
 		if group.Challenge != nil && group.Challenge.Reason != "" {
-			reason = "挑战结果：" + oneLine(group.Challenge.Reason, 300)
+			reason = "挑战结果：" + oneLine(group.Challenge.Reason, maxContentRunes)
 		}
 		if group.Decision != nil && group.Decision.Reason != "" {
-			reason += "；" + oneLine(group.Decision.Reason, 300)
+			reason += "；" + oneLine(group.Decision.Reason, maxContentRunes)
 		}
 		b.WriteString("**标记原因**：")
-		b.WriteString(escapeOneLine(reason, 600))
+		b.WriteString(escapeOneLine(reason, maxContentRunes))
 		b.WriteString("\n\n")
 	}
-	if body, _ := briefBody(group.Body, briefBodyRunes); body != "" {
+	if body := briefBody(group.Body); body != "" {
 		b.WriteString(body)
 		b.WriteString("\n\n")
 	}
-	if suggestion := renderSuggestion(group.Suggestion, summaryItemSuggestionRunes); suggestion != "" {
+	if suggestion := renderSuggestion(group.Suggestion, maxContentRunes); suggestion != "" {
 		b.WriteString(suggestion)
 		b.WriteString("\n\n")
 	}
@@ -483,61 +481,46 @@ func RenderFinding(group Group, opts FindingRenderOptions) (string, error) {
 	}
 	severity := group.EffectiveSeverity()
 
-	var b strings.Builder
-	fmt.Fprintf(&b, "%s key=%s -->\n", FindingMarkerPrefix, key)
-	b.WriteString("**[")
-	b.WriteString(string(severity))
+	var head strings.Builder
+	fmt.Fprintf(&head, "%s key=%s -->\n", FindingMarkerPrefix, key)
+	head.WriteString("**[")
+	head.WriteString(string(severity))
 	if group.Decision.Action == ActionMark {
-		b.WriteString(" · 存疑")
+		head.WriteString(" · 存疑")
 	}
-	b.WriteString("]")
-	b.WriteString(escapeOneLine(group.Title, MaxTitleRunes))
-	b.WriteString("**\n")
+	head.WriteString("]")
+	head.WriteString(escapeOneLine(group.Title, MaxTitleRunes))
+	head.WriteString("**\n")
+
+	budget := newNoteBudget(0)
+	budget.write(head.String())
 	// The discussion is anchored on the line, so the location is not repeated.
-	// The full body stays in storage and the console; a clipped discussion says
-	// where to read it, since the inline note has no detail footer.
-	if body, truncated := briefBody(group.Body, briefBodyRunes); body != "" {
-		b.WriteString("\n")
-		b.WriteString(body)
-		b.WriteByte('\n')
-		if truncated {
-			if link := safeDetailURL(opts.DetailURL); link != "" {
-				fmt.Fprintf(&b, "\n> 完整正文见 <a href=\"%s\">控制台</a>。\n", link)
-			} else {
-				b.WriteString("\n> 完整正文见控制台。\n")
-			}
-		}
+	// The body is published in full; only the whole-note platform budget can
+	// omit its tail, and it says so.
+	if body := briefBody(group.Body); body != "" {
+		budget.write("\n" + body + "\n")
 	}
 	if group.Decision.Action == ActionMark && strings.TrimSpace(group.Decision.Reason) != "" {
-		b.WriteString("\n**存疑原因**：")
-		b.WriteString(escapeOneLine(group.Decision.Reason, 500))
-		b.WriteByte('\n')
+		budget.write("\n**存疑原因**：" + escapeOneLine(group.Decision.Reason, maxContentRunes) + "\n")
 	}
-	if suggestion := renderSuggestion(group.Suggestion, MaxSuggestionRunes); suggestion != "" {
-		b.WriteString("\n")
-		b.WriteString(suggestion)
-		b.WriteByte('\n')
+	if suggestion := renderSuggestion(group.Suggestion, maxContentRunes); suggestion != "" {
+		budget.write("\n" + suggestion + "\n")
 	}
 	// Evidence stays only on uncertain findings, where the reader must judge.
 	if group.Decision.Action == ActionMark && strings.TrimSpace(group.Evidence) != "" {
-		b.WriteString("\n<details><summary>证据</summary>\n\n")
-		b.WriteString(codeFence(group.Evidence))
-		b.WriteString("\n\n</details>\n")
+		budget.write("\n<details><summary>证据</summary>\n\n" + codeFence(group.Evidence) + "\n\n</details>\n")
 	}
 	if related := relatedDescriptions(group); related != "" {
-		b.WriteString("\n")
-		b.WriteString(related)
+		budget.write("\n" + related)
 	}
 	if opts.ShowModelAttribution {
 		if attribution := modelAttribution(group, opts.ProviderLabels); attribution != "" {
-			b.WriteString("\n<sub>来源：")
-			b.WriteString(attribution)
-			b.WriteString("</sub>\n")
+			budget.write("\n<sub>来源：" + attribution + "</sub>\n")
 		}
 	}
 	// Rendered bodies are the final text: hashes and remote comparisons use
 	// them, and GitLab must never see a line it would run as a quick action.
-	return gitlab.NeutralizeQuickActions(b.String()), nil
+	return limitPublishedNote(gitlab.NeutralizeQuickActions(budget.finish(""))), nil
 }
 
 // relatedDescriptions lists the groups folded into this discussion by
@@ -751,10 +734,8 @@ func renderMarkdown(value string, max int) string {
 	if value == "" {
 		return ""
 	}
-	truncated := false
 	if utf8.RuneCountInString(value) > max {
 		value = clipMarkdown(value, max)
-		truncated = true
 	}
 
 	var b strings.Builder
@@ -843,10 +824,136 @@ func renderMarkdown(value string, max int) string {
 		b.WriteByte('\n')
 	}
 	out := strings.TrimRight(b.String(), "\n")
-	if truncated {
-		out += truncationNotice
-	}
 	return out
+}
+
+// noteBudget renders a note block by block under the platform byte limit.
+// Once a block no longer fits, rendering stops for good: the remaining blocks
+// are omitted whole and finish appends platformLimitNotice. A block is never
+// cut, so fences and <details> blocks stay balanced. reserve is the size of a
+// fixed-shape tail (the summary footer) that finish appends after the budget.
+type noteBudget struct {
+	b       strings.Builder
+	limit   int
+	limited bool
+}
+
+func newNoteBudget(reserve int) *noteBudget {
+	limit := MaxPublishedNoteBytes - len(platformLimitNotice) - reserve
+	if limit < 0 {
+		limit = 0
+	}
+	return &noteBudget{limit: limit}
+}
+
+func (n *noteBudget) fits(block string) bool {
+	return n.b.Len()+len(block) <= n.limit
+}
+
+// write appends block when it still fits and reports whether it did.
+func (n *noteBudget) write(block string) bool {
+	if n.limited {
+		return false
+	}
+	if !n.fits(block) {
+		n.limited = true
+		return false
+	}
+	n.b.WriteString(block)
+	return true
+}
+
+// writeSection appends a section header followed by whole items, rendering one
+// item at a time so an over-budget tail is never rendered or appended. The
+// header is written only when the first item fits; the first item that does
+// not fit stops the whole note.
+func (n *noteBudget) writeSection(header string, count int, render func(int) string) {
+	if n.limited || count == 0 {
+		return
+	}
+	first := render(0)
+	if !n.fits(header + first) {
+		n.limited = true
+		return
+	}
+	n.b.WriteString(header)
+	n.b.WriteString(first)
+	for i := 1; i < count; i++ {
+		item := render(i)
+		if !n.fits(item) {
+			n.limited = true
+			return
+		}
+		n.b.WriteString(item)
+	}
+}
+
+// finish returns the note with its reserved tail and, when the budget was
+// exhausted, the platform notice. The notice is the last line so the reader
+// always sees why content ends.
+func (n *noteBudget) finish(tail string) string {
+	var b strings.Builder
+	b.WriteString(n.b.String())
+	b.WriteString(tail)
+	if n.limited {
+		b.WriteString(platformLimitNotice)
+	}
+	return b.String()
+}
+
+// limitPublishedNote applies the only publishing-time bound: GitLab validates
+// note size in bytes (description_and_note_max_size, default 1 MiB) and rejects
+// longer notes with HTTP 400. A longer note is cut at the last complete block
+// boundary that fits and ends with platformLimitNotice, so the kept text never
+// stops inside a code fence, a <details> block, or mid-rune/mid-item.
+func limitPublishedNote(note string) string {
+	if len(note) <= MaxPublishedNoteBytes {
+		return note
+	}
+	budget := MaxPublishedNoteBytes - len(platformLimitNotice)
+	return strings.TrimRight(note[:completeBlockCut(note, budget)], "\n") + platformLimitNotice
+}
+
+// completeBlockCut returns the byte offset of the last blank line that ends a
+// block outside code fences and <details>, at or before budget bytes. Cutting
+// at a line boundary keeps the result valid UTF-8. It returns zero when no
+// such boundary fits, which publishes only the notice rather than a broken
+// block.
+func completeBlockCut(note string, budget int) int {
+	var (
+		cut       int
+		bytes     int
+		fenceChar byte
+		fenceLen  int
+		details   int
+		lineStart int
+	)
+	for lineStart < len(note) {
+		lineEnd := strings.IndexByte(note[lineStart:], '\n')
+		if lineEnd < 0 {
+			break
+		}
+		line := note[lineStart : lineStart+lineEnd]
+		next := lineStart + lineEnd + 1
+		trimmed := strings.TrimSpace(line)
+		if fenceChar != 0 {
+			if closesFence(line, fenceChar, fenceLen) {
+				fenceChar, fenceLen = 0, 0
+			}
+		} else if ch, n, ok := opensFence(line); ok {
+			fenceChar, fenceLen = ch, n
+		} else if strings.HasPrefix(trimmed, "<details") {
+			details++
+		} else if strings.HasPrefix(trimmed, "</details>") && details > 0 {
+			details--
+		}
+		bytes += next - lineStart
+		if trimmed == "" && fenceChar == 0 && details == 0 && bytes <= budget {
+			cut = next
+		}
+		lineStart = next
+	}
+	return cut
 }
 
 // GitLab splits table cells before parsing code spans. Escaped pipes stay in
@@ -1004,12 +1111,25 @@ func inlineCode(value string) string {
 	return fence + value + fence
 }
 
+// codeFence wraps value in a fence longer than any backtick run in it. One
+// linear scan keeps hostile backtick runs from making the fence search
+// quadratic. A fence is always at least three backticks.
 func codeFence(value string) string {
-	value = truncateRunes(value, MaxEvidenceRunes)
-	fence := "```"
-	for strings.Contains(value, fence) {
-		fence += "`"
+	longest, run := 0, 0
+	for i := 0; i < len(value); i++ {
+		if value[i] != '`' {
+			run = 0
+			continue
+		}
+		run++
+		if run > longest {
+			longest = run
+		}
 	}
+	if longest < 2 {
+		longest = 2
+	}
+	fence := strings.Repeat("`", longest+1)
 	return fence + "\n" + value + "\n" + fence
 }
 

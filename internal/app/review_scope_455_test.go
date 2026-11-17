@@ -332,7 +332,7 @@ func TestReviewAllGeneratedFilesPublishNoReview(t *testing.T) {
 	}
 }
 
-func TestPublisherDisclosesScopeGeneratedAndInlineDetailLink(t *testing.T) {
+func TestPublisherDisclosesScopeGeneratedAndFullInlineBody(t *testing.T) {
 	f := newReviewFixture(t, reviewTestHead)
 	f.publisher.publicURL = "https://review.example"
 	f.gitlab.diffs = []gitlab.FileDiff{
@@ -376,12 +376,11 @@ func TestPublisherDisclosesScopeGeneratedAndInlineDetailLink(t *testing.T) {
 		t.Fatalf("discussions = %d, want one inline finding", len(f.gitlab.discussions))
 	}
 	body := f.gitlab.discussions[0].Notes[0].Body
-	if !strings.Contains(body, "内容已截断") {
-		t.Fatalf("long inline body was not clipped:\n%s", body)
+	if !strings.Contains(body, strings.Repeat("长正文内容。", 120)) {
+		t.Fatalf("long inline body was clipped:\n%s", body)
 	}
-	link := fmt.Sprintf(`<a href="%s">控制台</a>`, detail)
-	if !strings.Contains(body, link) {
-		t.Fatalf("inline body misses the detail link %q:\n%s", link, body)
+	if strings.Contains(body, "内容已截断") || strings.Contains(body, "完整正文见控制台") {
+		t.Fatalf("complete inline body still carries a clipping hint:\n%s", body)
 	}
 }
 

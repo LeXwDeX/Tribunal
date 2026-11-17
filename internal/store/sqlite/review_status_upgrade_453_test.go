@@ -517,3 +517,36 @@ func TestNewReviewStatusRowIsReadyForMergedNote(t *testing.T) {
 		t.Fatalf("new row generation = %d, want %d", status.Generation, run.Generation)
 	}
 }
+
+// TestSetReviewStatusFinalBodyKeepsLongBodyVerbatim guards #493: the store must
+// not clip the rendered summary. The publishing byte bound lives in the
+// renderer, so a body above the old 128 KiB rune cap round-trips unchanged and
+// the status worker rebuilds the same note.
+func TestSetReviewStatusFinalBodyKeepsLongBodyVerbatim(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t, newFakeClock())
+	mustProject(t, s, 42)
+	head := reviewHead("a")
+	run, err := s.EnqueueReviewLatest(ctx, store.ReviewCommand{ProjectID: 42, MRIID: 7, HeadSHA: head})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Repeat("长", 150_000) + "尾部标记：完整正文结束"
+	if runes := len([]rune(body)); runes <= 131_072 {
+		t.Fatalf("test body runes = %d, want above the removed 128 KiB cap", runes)
+	}
+	written, err := s.SetReviewStatusFinalBody(ctx, 42, 7, run.Generation, head, body)
+	if err != nil || !written {
+		t.Fatalf("SetReviewStatusFinalBody = %v, %v", written, err)
+	}
+	status := mustReviewStatus(t, s, 42, 7)
+	if status.FinalBody != body {
+		t.Fatalf("final body was clipped: got %d runes, want %d", len([]rune(status.FinalBody)), len([]rune(body)))
+	}
+	if !strings.HasSuffix(status.FinalBody, "尾部标记：完整正文结束") {
+		t.Fatal("final body lost its tail marker")
+	}
+	if !status.FinalBodyReady {
+		t.Fatal("final_body_ready = 0, want 1")
+	}
+}
