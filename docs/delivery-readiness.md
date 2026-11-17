@@ -2,11 +2,12 @@
 
 > 本文先列出 v1.2.0 候选批次（[#128](https://github.com/LeXwDeX/Tribunal/pull/128)）的本地修复验证，再记录版本与交付状态：
 >
-> 1. [v1.7.0 验证状态](#v170-验证状态)：v1.6.1 与 v1.7.0 的生产部署与验收记录。
-> 2. [v1.5.0 验证状态](#v150-验证状态)：v1.5.0 的 CI、迁移演练、DEV 回归、生产验收检查表与发布、清理记录。
-> 3. [v1.2.0（待发布）验证状态](#v120待发布验证状态)：v1.2.0 实际做过哪些验证、还有哪些没做。
-> 4. 升级、授权、验收矩阵与回退计划：与版本无关的操作模板，从[首次升级前记录](#首次升级前记录模板)到[放行与归档](#放行与归档)。
-> 5. [v1.0.0 历史验收记录（f143，仅供追溯）](#v100-历史验收记录f143仅供追溯)：v1.0.0 在隔离测试实例上的验收结果，**不能**用来证明后续版本的改动。
+> 1. [v1.7.1 验证状态](#v171-验证状态)：Apache License 2.0 协议切换版本的发布、生产部署与验收记录。
+> 2. [v1.7.0 验证状态](#v170-验证状态)：v1.6.1 与 v1.7.0 的生产部署与验收记录。
+> 3. [v1.5.0 验证状态](#v150-验证状态)：v1.5.0 的 CI、迁移演练、DEV 回归、生产验收检查表与发布、清理记录。
+> 4. [v1.2.0（待发布）验证状态](#v120待发布验证状态)：v1.2.0 实际做过哪些验证、还有哪些没做。
+> 5. 升级、授权、验收矩阵与回退计划：与版本无关的操作模板，从[首次升级前记录](#首次升级前记录模板)到[放行与归档](#放行与归档)。
+> 6. [v1.0.0 历史验收记录（f143，仅供追溯）](#v100-历史验收记录f143仅供追溯)：v1.0.0 在隔离测试实例上的验收结果，**不能**用来证明后续版本的改动。
 >
 > 本文不复制完整日志，也不把测试实例结果扩大为生产验收。
 
@@ -187,6 +188,33 @@ Stage 1–3 的候选为 `main` `e2044ef`：Milestone 8 的 8 个 Issue（[#453]
 - 回滚镜像保留：生产机 `v1.4.0-acbd90d`、`v1.3.0`×3、`v1.2.0`；DEV 机同集合加 `v1.5.0-df8d08a`。
 
 本节只记录实际做过的验证，不把 DEV 回归或迁移演练结果扩大为生产验收；Stage 4 的部署、健康检查与 schema 回读已有生产实测结果，沙盒项目端到端自测待用户执行。
+
+<a id="v171-验证状态"></a>
+
+## v1.7.1 验证状态
+
+v1.7.1 于 2026-11-17 发布，内容只有把项目协议切换为 Apache License 2.0（[#506](https://github.com/LeXwDeX/Tribunal/issues/506)，PR [#507](https://github.com/LeXwDeX/Tribunal/pull/507)），不改变代码行为、依赖、数据库 schema 或第三方许可证记录；已发布版本（含 v1.7.0 及更早）仍按其发布时的 MIT 条款授权。合并提交为 `440bdbf`（squash），发布 tag `v1.7.1` 指向本次文档提交。下述只记录环境中性结果。
+
+### v1.7.1 本地与 CI 验证
+
+- **许可证文件**：`LICENSE` 为 Apache License 2.0 官方全文，仅附录版权行填为 `Copyright 2026 Lex`；官方文本 sha256 前缀 `cfc7749b…23d30`；未新增 `NOTICE`。
+- **本地检查**：`go build ./...`、`go vet ./...`、`licensecheck`（65 modules / 1 bundled skill / 1 bundled executable）、`licensebundle -check`（up to date）、`go test ./scripts/ -count=1`（ok，116.2s）通过。
+- **文档检查**：全仓 Markdown 的相对链接与页内锚点校验通过，0 断链。
+- **CI**：自建 Linux CI 在合并提交 `440bdbf` 上 `RESULT PASS`（go / web / docker 全部 PASS，语句覆盖率 81.91%，238s）；GitHub PR #507 的 6 项检查全部 SUCCESS；Issue #506 已关闭。
+
+### v1.7.1 生产部署与验收（2026-11-17）
+
+生产运行镜像 `tribunal:v1.7.1-440bdbf0f922`（Image ID 前缀 `eb9688269996`，由提交 `440bdbf` 构建）。
+
+- **部署前基线**：旧镜像 `tribunal:v1.7.0-cbe2dca` healthy、重启 0、在途评审 0；compose 配置校验通过。
+- **升级**：生产源码由 `b2532f5` 快进到 `440bdbf`；自定义配置 `config/server.docker.yaml` 的 SHA-256 前后一致、未被覆盖；compose 与 override 的 DNS / 日志 / CPU / 内存设置未改，仅切换镜像 tag。
+- **停服备份**：对数据卷做一致性快照，`SHA256SUMS` 全部校验 OK；备份内 `PRAGMA integrity_check` 为 `ok`，schema max=34、count=33；关键计数为 7 个项目 / 34 个工作流 / 54 条 finding。
+- **健康与接口**：容器 healthy、重启 0；`/healthz` 返回 `{"status":"ok"}`；`/readyz` 的 database、status、worker 均 ready；公网入口 HTTP 200。
+- **凭据状态**：`GET /api/v1/settings` 回读 `shared_bot_credential_state=ok`、`provisioning_credential=true`、`provisioning_credential_state=ok`、`provisioning_credential_expires_at=2027-02-15`。
+- **许可证**：镜像内 `/licenses/LICENSE` 为 Apache License 2.0 全文（与官方文本仅附录版权行不同），第三方 notices 存在。
+- **启动日志**：无 panic、无 `review run failed permanently`、无 token budget unsafe；启动初期 6 条 `feedback collection failed`（`error_class=not_found`）WARN 为历史 publication 对应讨论已不存在的既有良性反馈采集行为，不影响启动或评审。
+- **迁移与回滚**：本版无数据库迁移。回滚为纯镜像回滚：把 override 的镜像换回 `tribunal:v1.7.0-cbe2dca`，以 `--no-build --pull never` 重启即可，不需恢复数据库快照；旧镜像与既有回滚快照保留。
+- **清理**：跨机传输的 tar / bundle、临时构建目录与临时 SQLite 校验工具已删除；验收后按「无迁移、纯镜像回滚」删除本轮的临时快照；生产保留既有两代快照与镜像回滚链。
 
 <a id="v170-验证状态"></a>
 
