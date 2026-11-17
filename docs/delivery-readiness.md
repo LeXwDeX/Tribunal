@@ -2,10 +2,11 @@
 
 > 本文先列出 v1.2.0 候选批次（[#128](https://github.com/LeXwDeX/Tribunal/pull/128)）的本地修复验证，再记录版本与交付状态：
 >
-> 1. [v1.5.0 验证状态](#v150-验证状态)：当前版本的 CI、迁移演练、DEV 回归、生产验收检查表与发布、清理记录。
-> 2. [v1.2.0（待发布）验证状态](#v120待发布验证状态)：v1.2.0 实际做过哪些验证、还有哪些没做。
-> 3. 升级、授权、验收矩阵与回退计划：与版本无关的操作模板，从[首次升级前记录](#首次升级前记录模板)到[放行与归档](#放行与归档)。
-> 4. [v1.0.0 历史验收记录（f143，仅供追溯）](#v100-历史验收记录f143仅供追溯)：v1.0.0 在隔离测试实例上的验收结果，**不能**用来证明后续版本的改动。
+> 1. [v1.7.0 验证状态](#v170-验证状态)：v1.6.1 生产部署与验收记录，以及 v1.7.0 的待验证项。
+> 2. [v1.5.0 验证状态](#v150-验证状态)：v1.5.0 的 CI、迁移演练、DEV 回归、生产验收检查表与发布、清理记录。
+> 3. [v1.2.0（待发布）验证状态](#v120待发布验证状态)：v1.2.0 实际做过哪些验证、还有哪些没做。
+> 4. 升级、授权、验收矩阵与回退计划：与版本无关的操作模板，从[首次升级前记录](#首次升级前记录模板)到[放行与归档](#放行与归档)。
+> 5. [v1.0.0 历史验收记录（f143，仅供追溯）](#v100-历史验收记录f143仅供追溯)：v1.0.0 在隔离测试实例上的验收结果，**不能**用来证明后续版本的改动。
 >
 > 本文不复制完整日志，也不把测试实例结果扩大为生产验收。
 
@@ -186,6 +187,37 @@ Stage 1–3 的候选为 `main` `e2044ef`：Milestone 8 的 8 个 Issue（[#453]
 - 回滚镜像保留：生产机 `v1.4.0-acbd90d`、`v1.3.0`×3、`v1.2.0`；DEV 机同集合加 `v1.5.0-df8d08a`。
 
 本节只记录实际做过的验证，不把 DEV 回归或迁移演练结果扩大为生产验收；Stage 4 的部署、健康检查与 schema 回读已有生产实测结果，沙盒项目端到端自测待用户执行。
+
+<a id="v170-验证状态"></a>
+
+## v1.7.0 验证状态
+
+v1.7.0 汇总 v1.5.0 之后的条目：实例级共享 bot 凭据与零 token 注册、MR 讨论 @ 唤醒与线程内回执、存量项目共享凭据切换、`xhigh` reasoning effort、移除评审渲染层裁剪与 `final_body` 截断、行内 finding discussion 按位置收敛、注册/校验限流与预检缓存、provisioning 凭据健康状态及四项收尾，完整清单见 [CHANGELOG](../CHANGELOG.md)。本版不新增数据库迁移，schema 最大版本仍为 `0034`。生产当前运行 v1.6.1，v1.7.0 的部署与验收尚未执行；下文能力标为**部署待验证**，不写成 PASS。
+
+### v1.6.1 生产部署与验收记录（2026-11-17）
+
+生产运行镜像 `tribunal:v1.6.1-f72279e`（由提交 `f72279e` 构建）。以下只记录环境中性结果，不含主机、地址、内部项目路径、note ID 或 MR 编号。
+
+- **升级与快照**：升级前做一致性快照，并校验 integrity（`PRAGMA integrity_check` 为 ok）、schema 版本与关键表计数；升级后回读 integrity、schema 版本与关键表计数，与升级前记录对比校验。
+- **模型参数按上游官方文档对齐**：上游模型别名 `deepseek`，`max_tokens` 64000、`context_window` 984576（1,048,576 上下文减去 64000 输出预留）、`reasoning.effort=max`、`forced_tool_choice=unsupported`、`preserve_reasoning_content=true`。
+- **凭据状态**：`GET /api/v1/settings` 的共享凭据健康（`shared_bot_credential_state`）为 `ok`，`provisioning_credential=true`（provisioning 凭据已配置）。
+- **临时验收 MR**：在专用验收项目上执行；验收 MR 已关闭，分支已删除。
+    - 状态注记：单条状态注记以 Markdown 表格原地编辑，代次从 gen1 递增到 gen2，注记 ID 不变。
+    - @ 唤醒：线程内 ack 包含状态注记 permalink，permalink 指向当前单条状态注记。
+    - 渲染：评审输出未出现「内容已截断」提示。
+    - commit status：计数为 0（共享凭据项目按设计跳过 commit status）。
+- **范围**：本记录覆盖 v1.6.1 的改动，不覆盖 v1.7.0 新增的条目（[#487](https://github.com/LeXwDeX/Tribunal/issues/487)、[#495](https://github.com/LeXwDeX/Tribunal/issues/495)、[#496](https://github.com/LeXwDeX/Tribunal/issues/496)、[#497](https://github.com/LeXwDeX/Tribunal/issues/497)）；不把临时验收结果扩大为 v1.7.0 的生产验收。
+
+### v1.7.0 待验证
+
+| 能力 | 验收要点 | 状态 |
+|---|---|---|
+| 行内 finding discussion 按位置收敛（[#487](https://github.com/LeXwDeX/Tribunal/issues/487)） | 同一位置跨代次更新同一条讨论，不再因措辞变化堆叠；同一位置的多个问题合入一条 discussion；旧指纹行只读保留，收敛时 resolve 重复线程 | 部署待验证 |
+| 注册/校验限流与共享预检缓存（[#495](https://github.com/LeXwDeX/Tribunal/issues/495)） | 超过每用户限额返回 429 `rate_limited` 与 `Retry-After`；`limits.precheck_cache_ttl` 内相同校验不再调用 GitLab；项目级 token 校验不缓存 | 部署待验证 |
+| provisioning 凭据健康状态（[#496](https://github.com/LeXwDeX/Tribunal/issues/496)） | `GET /api/v1/settings` 返回 `provisioning_credential_state` 与可选的 `provisioning_credential_expires_at`；401 / 403 / 网络错误分别映射为 `expired` / `insufficient_scope` / `unreachable` | 部署待验证 |
+| 四项收尾（[#497](https://github.com/LeXwDeX/Tribunal/issues/497)） | mention permalink 不再有指向已删除注记的窗口；健康写回为 compare-and-set；hook-less 项目切换共享凭据只返回 `shared_credential_unverified`；终态 detail 沿用状态行 | 部署待验证 |
+
+升级影响：无数据库迁移；新增配置项 `limits.register_per_minute`、`limits.validate_per_minute`、`limits.precheck_cache_ttl`，不配置时使用默认值（每用户每分钟 10 / 30 次、预检缓存 45s），启动校验拒绝非正数限额与负 TTL。部署后先做健康检查与 settings 回读，再按上表逐项验收。
 
 ## v1.4.0 发布检查表
 

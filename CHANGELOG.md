@@ -2,7 +2,7 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [1.7.0] - 2026-11-17
 
 ### 新增
 
@@ -20,13 +20,13 @@
 - **移除存储层对 `final_body` 的静默截断，发布改为逐条字节预算**（[#493](https://github.com/LeXwDeX/Tribunal/issues/493)）：`SetReviewStatusFinalBody` 删除写入前把 `final_body` 截到 128 KiB rune 的逻辑与常量，渲染层给出的正文按原样落库，状态 worker 按 `row.FinalBody` 重建同一条 MR 注记，不再出现先发布完整版、随后被重建为截断版且无提示的情况；发布侧唯一上限回到渲染层的 GitLab 注记字节兜底（`MaxPublishedNoteBytes` = 900,000 字节，约 86% of 1 MiB）。渲染改为逐条累计字节预算：逐条渲染，下一条完整条目放不下时就停止并省略其后的所有条目，不再先构建整条超长注记再回切，也不切断代码块、`<details>` 块或多字节字符，末尾追加「已达 GitLab 注记上限，余下内容见控制台」。同时恢复生成侧契约上限：`evidence` 与 `suggestion` 各 64,000 rune、`reason` 8,000 rune（`body` 8,000 rune、`title` 120 rune 不变），`Validate` 是唯一强制点（openai-chat 等 provider 不执行 jsonschema `maxLength`），渲染层仍不据此裁剪，运行中若需更长内容由节点 `max_tokens` 与契约上限共同决定。
 - **移除评审渲染层裁剪**（[#493](https://github.com/LeXwDeX/Tribunal/issues/493)）：正文、证据（含代码块/diff）、建议补丁与存疑原因改为逐字完整发布，删除 400/2000/8000/1000/4000 rune 的内容裁剪以及「内容已截断」「完整正文见控制台」提示；行内讨论不再输出仅用于截断提示的详情链接。结论长度改由 `prompts/main.synthesize.md`（1–3 句、不超过 3000 字符）与节点级 `max_tokens`（控制台档位覆盖的 `NodeParams`，键 `synthesize` / `synthesize.2`）决定。唯一兜底为 GitLab 注记平台上限：GitLab 以字节校验注记大小（`description_and_note_max_size` 默认 1,048,576 字节 = 1 MiB，超限返回 HTTP 400），单条注记超过 900,000 字节（约 86% of 1 MiB；UTF-8 中文每字 3 字节，约 30 万字即触顶）时，按逐条累计字节预算省略放不下的尾部完整条目，不切断代码块、`<details>` 块或多字节字符，优先保留靠前条目，并在末尾标注「已达 GitLab 注记上限，余下内容见控制台」。标题、路径等结构性字段的上限不变。
 - **@ 唤醒的 ingress 复杂度与边界修复**（[#477](https://github.com/LeXwDeX/Tribunal/issues/477)）：mention 文本剥离改为线性单遍扫描（围栏代码按起止长度配对、行内代码按等长反引号记账配对），不再为每个 opener 扫描到文末，也不再整篇 `strings.Split` 换行；正文超过 128 KiB 直接按未提及处理，避免任意评论者用超长注记消耗 ingress 的 CPU/内存与 900ms 预算。用户名后边界改用 GitLab 用户名字符集 `[A-Za-z0-9_.-]`，`@tribunal.helper`、`@tribunal-helper` 与句末 `@tribunal.` 不再误命中；`@` 前仍要求非词边界。剥离补齐 CommonMark 语义：4 空格/制表符缩进代码不触发，行内代码删除改为空格占位以免拼接出假提及，反斜杠转义反引号按字面处理。finding 标记加入本服务注记过滤。`gitlab.bot_usernames` 元素先 trim，纯空白项在启动校验时报错。mention 与自动触发一样经过 `skip_draft`、标签与目标分支过滤，被排除时 worker 在线程内回 `filtered` 说明且不入队；斜杠命令保持绕过过滤。重复命令身份（store 返回 duplicate/代次 0）不再重写已有 accepted 回执、抹掉「代次」行；显式 `discussion_id` 不在讨论列表时仍按 marker 去重，向已删除线程追加返回 404 时回落顶层回执，其他错误继续重试。
-
 - **同一 MR 的评审写入串行化、状态表格化与 legacy 注记收敛**（[#475](https://github.com/LeXwDeX/Tribunal/issues/475)）：运行时新增进程内共享的 per-MR 锁：publisher（summary、行内讨论与 commit status）、状态 worker 与令牌/配置失败的回退注记在锁内复核代次与 head 后写入；命令回复同样持锁以保证写入顺序（其 ack 绑定源注记 ID，不做代次复核）；旧代次写入不会再落在新代次的「运行中」注记之后。generation bump 路径中，手动触发与取消、`/review` 命令、候选激活与启动 catch-up 均持锁；webhook ingress 在同一 DB 事务内推进 generation 与入队、**不持该锁**，以守住 900ms 处理预算。连续 push、手动重审与取消仍保留 latest-wins 合并（只运行最新 head），但同一 MR 的远端写入严格按持锁顺序执行。状态注记改为 Markdown 表格（阶段/状态/代次/提交/预计/详情），首行标记升为 `<!-- gitlab-ce-review:summary v2 -->`；回收仍按不含版本的前缀匹配，旧 v1 正文继续可解析。状态注记在 control 缺失、同代次 head 变化或当前代次被取消时写入终态（已过期/已取消）而非静默跳过，终态不再卡在「运行中」；已有更新代次时仍跳过、由新代次写入。`final_body_ready=0` 的历史行在这三条终态路径上继续更新旧 `<!-- gitlab-ce-review:status` 注记，绝不以合并标记覆盖其已发布的独立 summary；取消终态回读状态行时校验代次与 head，绝不把后继代次的 queued 行写成已取消或标记为已应用。新增 GitLab 客户端删除 MR note 的能力：`final_body_ready` 翻为 1 后，状态 worker 删除本 bot 的旧 `<!-- gitlab-ce-review:status` 注记（只匹配旧标记且作者为当前 bot），使一个 MR 只保留一条评审注记；升级前遗留的独立 summary note 不在清理范围内。
 
 ### 文档
 
 - 固定每 GitLab 实例一个 bot 账号、每环境一个 OAuth 应用：补查重复用、一次性收敛、环境台账与旧资源处置规程（[#478](https://github.com/LeXwDeX/Tribunal/issues/478)）。
 - 补齐 @ 唤醒、线程回执与共享 bot 的配置参考、Note Hook 接口说明和运维核查步骤，并记录 #475–#478 的验证结果（[#484](https://github.com/LeXwDeX/Tribunal/issues/484)）。
+- 发布 v1.7.0：CHANGELOG 定版与 README 版本行同步，并在[交付就绪与验收记录](docs/delivery-readiness.md)补 v1.6.1 生产部署与验收记录、v1.7.0 待验证项（[#502](https://github.com/LeXwDeX/Tribunal/issues/502)）。
 
 ## [1.5.0] - 2026-11-14
 
@@ -479,6 +479,7 @@ v1.0.0 之后的第一个版本：产品改名为 Tribunal，修复 1.0 复审�
 
 首个版本（GitHub Pre-release），交付 M0–M6 范围：webhook 与持久化队列、DAG 调度、主 agent 编排、对抗核验与裁决、GitLab 发布、三种 LLM 协议、工作区、MCP 与 Skill、OAuth、项目授权、Web 控制台和统计。详见 [Release v1.0.0](https://github.com/LeXwDeX/Tribunal/releases/tag/v1.0.0)。
 
+[1.7.0]: https://github.com/LeXwDeX/Tribunal/compare/v1.5.0...v1.7.0
 [1.5.0]: https://github.com/LeXwDeX/Tribunal/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/LeXwDeX/Tribunal/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/LeXwDeX/Tribunal/compare/v1.2.0...v1.3.0
