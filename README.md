@@ -6,7 +6,7 @@ GitLab CE MR 多 agent 自动评审服务
 
 当前 M0–M6 功能已有本地实现，覆盖项目注册与 webhook、三种 LLM 协议、agent 工具循环、DAG 与持久化、只读探索与四路并行评审/对抗核验/裁决、GitLab 发布、工作区、MCP/Skill、OAuth 持久会话、项目 `read`/`manage` 授权与 CSRF、用户全局只读、平台角色管理、模型管理与评审档位节点覆盖、管理 API、React 控制台、API token、统计、反馈采集、人工标注与许可证清单。
 
-当前最新发布版本是 **v1.7.0**（2026-11-17），变更和升级必读见 [CHANGELOG](CHANGELOG.md)。v1.7.0 汇总 v1.5.0 之后的共享 bot 凭据与零 token 注册、MR 讨论 @ 唤醒与线程内回执、行内 finding discussion 按位置收敛、注册/校验限流与预检缓存、provisioning 凭据健康状态等新增与修复（#475–#497）；本版不新增数据库迁移，升级前仍须按运维文档做一致性备份。当前生产运行由提交 `f72279e` 构建的 v1.6.1 镜像，v1.7.0 的生产部署与验收待执行，待验证项见 [v1.7.0 验证状态](docs/delivery-readiness.md#v170-验证状态)。CI 以最终 tag commit 的 GitHub Actions 结果为准。
+当前最新发布版本是 **v1.7.0**（2026-11-17），变更和升级必读见 [CHANGELOG](CHANGELOG.md)。v1.7.0 汇总 v1.5.0 之后的共享 bot 凭据与零 token 注册、MR 讨论 @ 唤醒与线程内回执、行内 finding discussion 按位置收敛、注册/校验限流与预检缓存、provisioning 凭据健康状态等新增与修复（#475–#497）；本版不新增数据库迁移，升级前仍须按运维文档做一致性备份。当前生产运行由提交 `cbe2dca` 构建的 v1.7.0 镜像，生产部署与验收记录见 [v1.7.0 验证状态](docs/delivery-readiness.md#v170-验证状态)。CI 以最终 tag commit 的 GitHub Actions 结果为准。
 
 部署时：人工部署看 [部署与运维](docs/operations.md)，由 agent 代为部署和接入时用 [Agent 部署指南](docs/agent-deployment.md)。
 
