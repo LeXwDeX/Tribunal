@@ -4,7 +4,7 @@ This file is the single instruction file for every coding agent and contributor 
 
 ## 1. Project
 
-Tribunal is a multi-agent code review service for GitLab CE merge requests. It ships as a Go server with an embedded React console, SQLite storage and Docker Compose deployment. The project is MIT licensed. User-facing documentation is written in Chinese; source code, comments, commit subjects and this file are written in English unless a file states otherwise.
+Tribunal is a multi-agent code review service for GitLab CE merge requests. It ships as a Go server with an embedded React console, SQLite storage and Docker Compose deployment. The project is licensed under the Apache License, Version 2.0. User-facing documentation is written in Chinese; source code, comments, commit subjects and this file are written in English unless a file states otherwise.
 
 Goals:
 
@@ -71,7 +71,7 @@ bash scripts/docker-smoke.sh
 Run scoped checks while developing; run the full sequence before delivery when the environment supports it.
 ## 4. Open-source contribution rules
 
-- **License and provenance.** The project is MIT licensed. By contributing, you agree to license your contribution under the same terms. Keep copyright notices and `LICENSE` intact. Do not copy code, assets or prompts from another project unless the license is compatible and the provenance is recorded. Bundled executables and third-party assets need a version and license record under `third_party/` and a regenerated license bundle.
+- **License and provenance.** The project is licensed under the Apache License, Version 2.0. By contributing, you agree to license your contribution under the same terms. Keep copyright notices and `LICENSE` intact. Do not copy code, assets or prompts from another project unless the license is compatible and the provenance is recorded. Bundled executables and third-party assets need a version and license record under `third_party/` and a regenerated license bundle.
 - **Issue first.** One goal maps to one Issue with Why / Scope / Approach / Acceptance, and one PR. Small typo or dependency-bot fixes may skip the Issue only when repository policy allows it.
 - **Branches and commits.** Do not push directly to `main`. Use a topic branch, keep commits focused, and include an `Issue: #N` trailer in every commit. Never use `--no-verify`; when a guard rejects a commit, fix the checkpoint or trailer instead of bypassing it.
 - **Merge policy.** Squash-merge only, after the merge gate (section 9).
