@@ -42,7 +42,7 @@ func registerProjectTokenProject(t *testing.T, ctx context.Context, st *sqlite.S
 	return service
 }
 
-func TestRotateTokenEmptySwitchesProjectToSharedCredential(t *testing.T) {
+func TestRotateTokenEmptySwitchesHooklessProjectToSharedCredential(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
 	api := newSharedBotAPI()
@@ -63,8 +63,14 @@ func TestRotateTokenEmptySwitchesProjectToSharedCredential(t *testing.T) {
 	if got := api.totalCalls(); got != before {
 		t.Fatalf("switch called GitLab %d times", got-before)
 	}
-	if rotation == nil || rotation.Project == nil || len(rotation.Warnings) != 0 {
+	if rotation == nil || rotation.Project == nil {
 		t.Fatalf("rotation = %+v", rotation)
+	}
+	if !hasWarning(rotation.Warnings, "shared_credential_unverified") {
+		t.Fatalf("switch warnings = %+v, want the unverified shared credential warning", rotation.Warnings)
+	}
+	if hasWarning(rotation.Warnings, "shared_hook_health_unmonitored") {
+		t.Fatalf("switch warned about missing provisioning although it is configured: %+v", rotation.Warnings)
 	}
 	if len(rotation.Project.TokenEnc) != 0 {
 		t.Fatalf("rotation returned a stored token: %x", rotation.Project.TokenEnc)
@@ -83,14 +89,50 @@ func TestRotateTokenEmptySwitchesProjectToSharedCredential(t *testing.T) {
 	if len(saved.TokenScopes) != 0 {
 		t.Fatalf("token scopes were not cleared: %v", saved.TokenScopes)
 	}
-	if saved.WebhookState != store.WebhookStatePending || saved.WebhookError != "" {
-		t.Fatalf("webhook state = %q/%q, want pending with no error", saved.WebhookState, saved.WebhookError)
+	// Without a managed hook there is nothing to verify: the project must not
+	// strand in "pending".
+	if saved.WebhookState != store.WebhookStateDisabled || saved.WebhookError != "" {
+		t.Fatalf("webhook state = %q/%q, want disabled with no error", saved.WebhookState, saved.WebhookError)
 	}
 	if token, err := service.tokens.Token(saved); err != nil || token != sharedBotToken {
 		t.Fatalf("resolver token = %q, %v; want the shared bot", token, err)
 	}
 	if !service.tokens.UsesShared(saved) {
 		t.Fatal("resolver does not report the project as shared")
+	}
+
+	catchUp := &CatchUpService{
+		store:    st,
+		webhooks: &WebhookService{store: st},
+		gitlab:   &catchUpSharedAPI{sharedBotAPI: api},
+		cipher:   newTestCipher(t),
+		tokens:   newProjectTokenResolver(newTestCipher(t), sharedBotToken).WithProvisioning(provisioningToken),
+		logger:   discardLogger(),
+	}
+	catchUp.ReconcileHookHealth(ctx)
+	scanned, err := st.GetProject(ctx, 42)
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	if scanned.WebhookState != store.WebhookStateDisabled || scanned.WebhookError != "" {
+		t.Fatalf("hook-less state after health scan = %q/%q, want disabled", scanned.WebhookState, scanned.WebhookError)
+	}
+	if api.callCount("ListProjectHooks") != 0 {
+		t.Fatalf("health scan listed hooks for a hook-less project: %d", api.callCount("ListProjectHooks"))
+	}
+
+	// Switching back keeps the hook-less project disabled; the scan does not
+	// invent a webhook state.
+	api.setAccess("glpat-restored", botUserID, reporterAccessLevel)
+	if _, err := service.RotateToken(ctx, 42, "glpat-restored"); err != nil {
+		t.Fatalf("rotate back: %v", err)
+	}
+	restored, err := st.GetProject(ctx, 42)
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	if len(restored.TokenEnc) == 0 || restored.WebhookState != store.WebhookStateDisabled || restored.WebhookError != "" {
+		t.Fatalf("project after rotate back = %+v", restored)
 	}
 }
 
@@ -104,6 +146,18 @@ func TestRotateTokenNonEmptyRestoresProjectTokenAfterSharedSwitch(t *testing.T) 
 	if _, err := service.RotateToken(ctx, 42, ""); err != nil {
 		t.Fatalf("switch to shared: %v", err)
 	}
+	switched, err := st.GetProject(ctx, 42)
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	if switched.HookID == nil {
+		t.Fatal("switch dropped the managed hook")
+	}
+	// With a managed hook the switch waits for the health scan to verify it.
+	if switched.WebhookState != store.WebhookStatePending || switched.WebhookError != "" {
+		t.Fatalf("shared hook state = %q/%q, want pending", switched.WebhookState, switched.WebhookError)
+	}
+
 	api.setAccess("glpat-restored", botUserID, reporterAccessLevel)
 	rotation, err := service.RotateToken(ctx, 42, "glpat-restored")
 	if err != nil {
@@ -129,6 +183,30 @@ func TestRotateTokenNonEmptyRestoresProjectTokenAfterSharedSwitch(t *testing.T) 
 	}
 	if service.tokens.UsesShared(saved) {
 		t.Fatal("resolver still reports the project as shared")
+	}
+	// Rotating back does not clear the pending mark itself; the health scan
+	// re-verifies the hook with the restored project token.
+	if saved.WebhookState != store.WebhookStatePending || saved.WebhookError != "" {
+		t.Fatalf("hook state after rotate back = %q/%q, want pending", saved.WebhookState, saved.WebhookError)
+	}
+	catchUp := &CatchUpService{
+		store:    st,
+		webhooks: &WebhookService{store: st},
+		gitlab:   &catchUpSharedAPI{sharedBotAPI: api},
+		cipher:   newTestCipher(t),
+		tokens:   newProjectTokenResolver(newTestCipher(t), sharedBotToken).WithProvisioning(provisioningToken),
+		logger:   discardLogger(),
+	}
+	catchUp.ReconcileHookHealth(ctx)
+	verified, err := st.GetProject(ctx, 42)
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	if verified.WebhookState != store.WebhookStateEnabled || verified.WebhookError != "" {
+		t.Fatalf("hook state after scan = %q/%q, want enabled", verified.WebhookState, verified.WebhookError)
+	}
+	if tokens := api.usedTokens("ListProjectHooks"); len(tokens) == 0 || tokens[len(tokens)-1] != "glpat-restored" {
+		t.Fatalf("hook list credentials = %v, want the restored project token", tokens)
 	}
 }
 
@@ -171,7 +249,7 @@ func TestRotateTokenSharedSwitchIsIdempotent(t *testing.T) {
 	st := openTestStore(t)
 	api := newSharedBotAPI()
 	configureSharedBot(api)
-	service := registerProjectTokenProject(t, ctx, st, api, false)
+	service := registerProjectTokenProject(t, ctx, st, api, true)
 
 	for i := 0; i < 2; i++ {
 		rotation, err := service.RotateToken(ctx, 42, "")
@@ -180,6 +258,9 @@ func TestRotateTokenSharedSwitchIsIdempotent(t *testing.T) {
 		}
 		if rotation.Project == nil || len(rotation.Project.TokenEnc) != 0 {
 			t.Fatalf("switch %d project = %+v", i, rotation.Project)
+		}
+		if !hasWarning(rotation.Warnings, "shared_credential_unverified") {
+			t.Fatalf("switch %d warnings = %+v, want the unverified warning", i, rotation.Warnings)
 		}
 	}
 	saved, err := st.GetProject(ctx, 42)
@@ -214,6 +295,13 @@ func TestSharedCredentialSwitchHookHealthConverges(t *testing.T) {
 	}
 	if _, err := service.RotateToken(ctx, 42, ""); err != nil {
 		t.Fatalf("switch to shared: %v", err)
+	}
+	pending, err := st.GetProject(ctx, 42)
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	if pending.WebhookState != store.WebhookStatePending || pending.WebhookError != "" {
+		t.Fatalf("pre-scan hook state = %q/%q, want pending", pending.WebhookState, pending.WebhookError)
 	}
 	api.setHooks([]gitlab.Hook{{ID: *seeded.HookID, AlertStatus: "executable"}})
 
@@ -330,5 +418,123 @@ func TestConcurrentSharedSwitchHealthAndTokenReads(t *testing.T) {
 	}
 	if len(saved.TokenScopes) != 2 {
 		t.Fatalf("project token scopes = %v", saved.TokenScopes)
+	}
+}
+
+// hookListCallback runs after the fake enumerates hooks, which is after the
+// scan has already read the project row.
+type hookListCallback struct {
+	*catchUpSharedAPI
+	after func()
+}
+
+func (f *hookListCallback) ListProjectHooks(ctx context.Context, token string, projectID int64) ([]gitlab.Hook, error) {
+	hooks, err := f.catchUpSharedAPI.ListProjectHooks(ctx, token, projectID)
+	if f.after != nil {
+		f.after()
+	}
+	return hooks, err
+}
+
+// A shared project with a managed hook cannot be health-checked without the
+// provisioning credential. The switch says so instead of implying monitoring.
+func TestRotateTokenEmptyWithoutProvisioningWarnsHookHealthUnmonitored(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	api := newSharedBotAPI()
+	configureSharedBot(api)
+	api.setAccess(projectAccessTok, botUserID, reporterAccessLevel)
+	service := newSharedBotProjectServiceWithProvisioning(t, st, api, sharedBotToken, "", nil)
+	if _, err := service.Register(ctx, RegisterInput{
+		Project: "42", AccessToken: projectAccessTok, AutoWebhook: true, OwnerUserID: registrantUserID,
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	rotation, err := service.RotateToken(ctx, 42, "")
+	if err != nil {
+		t.Fatalf("switch to shared: %v", err)
+	}
+	if !hasWarning(rotation.Warnings, "shared_credential_unverified") ||
+		!hasWarning(rotation.Warnings, "shared_hook_health_unmonitored") {
+		t.Fatalf("switch warnings = %+v, want the unverified and unmonitored warnings", rotation.Warnings)
+	}
+	before := api.callCount("ListProjectHooks")
+
+	catchUp := &CatchUpService{
+		store:    st,
+		webhooks: &WebhookService{store: st},
+		gitlab:   &catchUpSharedAPI{sharedBotAPI: api},
+		cipher:   newTestCipher(t),
+		// No provisioning credential: the shared project's hook health is not
+		// monitored at all.
+		tokens: newProjectTokenResolver(newTestCipher(t), sharedBotToken),
+		logger: discardLogger(),
+	}
+	catchUp.ReconcileHookHealth(ctx)
+	if got := api.callCount("ListProjectHooks"); got != before {
+		t.Fatalf("hook health was checked without provisioning: %d -> %d", before, got)
+	}
+	saved, err := st.GetProject(ctx, 42)
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	if saved.WebhookState != store.WebhookStatePending || saved.WebhookError != "" {
+		t.Fatalf("unmonitored hook state = %q/%q, want pending", saved.WebhookState, saved.WebhookError)
+	}
+}
+
+// The periodic scan reads the project before it calls GitLab. A credential
+// switch that lands in between must not be overwritten by the stale
+// observation, which would otherwise restore the old token failure.
+func TestHookHealthScanDoesNotOverwriteConcurrentCredentialSwitch(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	api := newSharedBotAPI()
+	configureSharedBot(api)
+	service := registerProjectTokenProject(t, ctx, st, api, true)
+	seeded, err := st.GetProject(ctx, 42)
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	if seeded.HookID == nil {
+		t.Fatal("registration did not create the managed hook")
+	}
+	if err := st.UpdateProjectWebhook(ctx, 42, store.ProjectWebhookUpdate{
+		State: store.WebhookStateFailed, Error: webhookTokenRejectedMessage, Events: seeded.WebhookEvents,
+	}); err != nil {
+		t.Fatalf("seed failed webhook state: %v", err)
+	}
+
+	switched := false
+	switchingAPI := &hookListCallback{
+		catchUpSharedAPI: &catchUpSharedAPI{sharedBotAPI: api},
+		after: func() {
+			if _, err := service.RotateToken(ctx, 42, ""); err != nil {
+				t.Errorf("switch during health scan: %v", err)
+				return
+			}
+			switched = true
+		},
+	}
+	catchUp := &CatchUpService{
+		store:    st,
+		webhooks: &WebhookService{store: st},
+		gitlab:   switchingAPI,
+		cipher:   newTestCipher(t),
+		tokens:   newProjectTokenResolver(newTestCipher(t), sharedBotToken).WithProvisioning(provisioningToken),
+		logger:   discardLogger(),
+	}
+	catchUp.ReconcileHookHealth(ctx)
+
+	if !switched {
+		t.Fatal("the credential switch did not run during the health scan")
+	}
+	saved, err := st.GetProject(ctx, 42)
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	if saved.WebhookState != store.WebhookStatePending || saved.WebhookError != "" {
+		t.Fatalf("stale health scan overwrote the switch: %q/%q", saved.WebhookState, saved.WebhookError)
 	}
 }

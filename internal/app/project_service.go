@@ -108,6 +108,15 @@ type ProjectWarning struct {
 // repository but cannot manage project webhooks.
 const WarningWebhookRequiresMaintainer = "webhook_requires_maintainer"
 
+// WarningSharedCredentialUnverified reports that a switch to the shared
+// credential did not check the shared bot's membership or validity for this
+// project. The caller should validate before switching.
+const WarningSharedCredentialUnverified = "shared_credential_unverified"
+
+// WarningSharedHookHealthUnmonitored reports that a shared project's hook
+// health cannot be re-checked because the provisioning credential is absent.
+const WarningSharedHookHealthUnmonitored = "shared_hook_health_unmonitored"
+
 // TokenRotation is the result of replacing a project token.
 type TokenRotation struct {
 	Project  *store.Project
@@ -1296,6 +1305,8 @@ func (s *ProjectService) RotateToken(ctx context.Context, id int64, token string
 // GitLab call and does not modify the managed hook: the hook still belongs to
 // the project, and the periodic health scan re-verifies it with the
 // provisioning credential, converging the pending state to enabled or failed.
+// The switch itself cannot prove the shared bot is a member of this project or
+// that its credential is currently valid, so the result says so explicitly.
 func (s *ProjectService) switchToSharedCredential(ctx context.Context, id int64) (*TokenRotation, error) {
 	if err := s.store.SwitchProjectToSharedCredential(ctx, id); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -1311,7 +1322,24 @@ func (s *ProjectService) switchToSharedCredential(ctx context.Context, id int64)
 	if err != nil {
 		return nil, err
 	}
-	return &TokenRotation{Project: saved}, nil
+	return &TokenRotation{Project: saved, Warnings: sharedSwitchWarnings(s.tokens)}, nil
+}
+
+// sharedSwitchWarnings describes what the switch intentionally did not verify.
+// The first warning always applies because the switch performs no GitLab call;
+// the second applies when hook health cannot be monitored at all.
+func sharedSwitchWarnings(tokens *projectTokenResolver) []ProjectWarning {
+	warnings := []ProjectWarning{{
+		Code:    WarningSharedCredentialUnverified,
+		Message: "the shared bot's membership and credential validity in this project were not checked; run POST /api/v1/projects/validate with an empty token before switching",
+	}}
+	if !tokens.HasProvisioning() {
+		warnings = append(warnings, ProjectWarning{
+			Code:    WarningSharedHookHealthUnmonitored,
+			Message: "gitlab.provisioning_token_env is not configured, so this shared project's hook health is no longer monitored; configure the provisioning credential or verify the hook manually",
+		})
+	}
+	return warnings
 }
 
 // CreateWebhook explicitly enables the managed GitLab webhook. Repeated calls

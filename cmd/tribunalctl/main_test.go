@@ -342,6 +342,22 @@ func TestRotateTokenCommand(t *testing.T) {
 		}
 	})
 
+	t.Run("neither flag is rejected", func(t *testing.T) {
+		s := &rotateServer{shared: true, put: &capturedRequest{}}
+		ts := newServer(t, s)
+		defer ts.Close()
+		_, _, err := runCtl(t, []string{
+			"--url", ts.URL, "--api-token-env", "ADMIN_TOKEN",
+			"projects", "rotate-token", "42",
+		}, map[string]string{"ADMIN_TOKEN": "admin"}, ts.Client())
+		if err == nil || err.Error() != "one of --token-env or --shared is required" {
+			t.Fatalf("error = %v", err)
+		}
+		if s.meCalls != 0 || s.putCalls != 0 {
+			t.Fatalf("calls = me:%d put:%d", s.meCalls, s.putCalls)
+		}
+	})
+
 	t.Run("a missing project token env fails before the request", func(t *testing.T) {
 		s := &rotateServer{put: &capturedRequest{}}
 		ts := newServer(t, s)

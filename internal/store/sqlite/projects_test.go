@@ -221,8 +221,98 @@ func TestSwitchProjectToSharedCredential(t *testing.T) {
 		t.Fatalf("switch replaced webhook events: %v", saved.WebhookEvents)
 	}
 
+	// A project without a managed hook has nothing to verify: switching must
+	// leave it disabled instead of parking it in pending.
+	mustProject(t, s, 43)
+	if err := s.SwitchProjectToSharedCredential(ctx, 43); err != nil {
+		t.Fatalf("SwitchProjectToSharedCredential(hook-less): %v", err)
+	}
+	hookless, err := s.GetProject(ctx, 43)
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	if len(hookless.TokenEnc) != 0 || hookless.WebhookState != store.WebhookStateDisabled || hookless.WebhookError != "" {
+		t.Fatalf("hook-less switch = %+v, want disabled with no error", hookless)
+	}
+
 	if err := s.SwitchProjectToSharedCredential(ctx, 999); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("missing project switch = %v", err)
+	}
+}
+
+// UpdateProjectToken must keep rejecting the sentinel: only the dedicated
+// shared-credential switch may clear a project token.
+func TestUpdateProjectTokenRejectsEmptyToken(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t, newFakeClock())
+	mustProject(t, s, 42)
+	for _, tokenEnc := range [][]byte{nil, {}} {
+		err := s.UpdateProjectToken(ctx, 42, store.ProjectTokenUpdate{TokenEnc: tokenEnc})
+		if err == nil || !strings.Contains(err.Error(), "encrypted token is required") {
+			t.Fatalf("UpdateProjectToken(%v) = %v, want the encrypted-token guard", tokenEnc, err)
+		}
+	}
+	saved, err := s.GetProject(ctx, 42)
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	if len(saved.TokenEnc) == 0 {
+		t.Fatal("rejected update cleared the token")
+	}
+}
+
+// UpdateProjectWebhookHealth applies a health observation only when the row
+// still matches the observation the scan was based on.
+func TestUpdateProjectWebhookHealthCompareAndSet(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t, newFakeClock())
+	mustProject(t, s, 42)
+	hookID := int64(77)
+	if err := s.UpdateProjectWebhook(ctx, 42, store.ProjectWebhookUpdate{
+		HookID: &hookID, SecretEnc: []byte{1}, State: store.WebhookStateFailed, Error: "observed failure",
+	}); err != nil {
+		t.Fatalf("seed failed state: %v", err)
+	}
+
+	applied, err := s.UpdateProjectWebhookHealth(ctx, 42, store.WebhookStateFailed, "observed failure",
+		store.ProjectWebhookUpdate{State: store.WebhookStateEnabled, Events: []string{"push_events"}})
+	if err != nil || !applied {
+		t.Fatalf("matching observation = %v, %v", applied, err)
+	}
+	saved, err := s.GetProject(ctx, 42)
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	if saved.WebhookState != store.WebhookStateEnabled || saved.WebhookError != "" {
+		t.Fatalf("applied observation = %q/%q", saved.WebhookState, saved.WebhookError)
+	}
+
+	// Re-seed the observation and change the row as a credential switch would;
+	// the stale observation must be dropped.
+	if err := s.UpdateProjectWebhook(ctx, 42, store.ProjectWebhookUpdate{
+		State: store.WebhookStateFailed, Error: "observed failure",
+	}); err != nil {
+		t.Fatalf("re-seed failed state: %v", err)
+	}
+	if err := s.SwitchProjectToSharedCredential(ctx, 42); err != nil {
+		t.Fatalf("switch: %v", err)
+	}
+	applied, err = s.UpdateProjectWebhookHealth(ctx, 42, store.WebhookStateFailed, "observed failure",
+		store.ProjectWebhookUpdate{State: store.WebhookStateEnabled})
+	if err != nil || applied {
+		t.Fatalf("stale observation = %v, %v; want it dropped", applied, err)
+	}
+	saved, err = s.GetProject(ctx, 42)
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	if saved.WebhookState != store.WebhookStatePending || saved.WebhookError != "" {
+		t.Fatalf("stale write changed the row: %q/%q", saved.WebhookState, saved.WebhookError)
+	}
+
+	if _, err := s.UpdateProjectWebhookHealth(ctx, 42, store.WebhookStatePending, "",
+		store.ProjectWebhookUpdate{State: "bogus"}); err == nil {
+		t.Fatal("invalid health state was accepted")
 	}
 }
 

@@ -746,6 +746,9 @@ func (g *globals) rotateToken(ctx context.Context, args []string) error {
 			return errors.New("--shared requires the instance to enable the shared bot credential")
 		}
 	} else {
+		if tokenEnv == "" {
+			return errors.New("one of --token-env or --shared is required")
+		}
 		if !envNameRE.MatchString(tokenEnv) {
 			return errors.New("--token-env must be a valid environment variable name")
 		}

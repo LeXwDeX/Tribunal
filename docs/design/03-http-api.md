@@ -118,7 +118,7 @@ Note Hook 先入队 `review.command`，由 worker 请求 GitLab 校验身份、M
 | POST | `/api/v1/projects` | 已认证用户注册项目；普通调用方需至少 Reporter 成员，平台管理员与静态 bootstrap Bearer 免检；注册人自动获得该项目 `manage`（静态 Bearer 除外）。启用共享凭据后 `token` 可省略；`auto_webhook` 省略默认 `true` |
 | GET | `/api/v1/projects/{id}` | 项目 `read`：详情（含工作区状态、最近评审和 `access`） |
 | PATCH | `/api/v1/projects/{id}` | 项目 `manage`：修改 `profile`（只接受 `default`，其他值返回 400 `unknown profile`）、`settings`（其中 `profile_by_label` 的值不是 `default` 的映射在保存时被丢弃，不报错）、`enabled` |
-| PUT | `/api/v1/projects/{id}/token` | 项目 `manage`：轮换 token：`{token}`；启用共享凭据时 `token` 为空或纯空白表示切换为共享 bot（写零长度哨兵、清空 `token_expires_at`/`token_scopes`/`webhook_error`，`webhook_state` 置 `pending` 待健康扫描核对），非空 token 恢复项目级凭据 |
+| PUT | `/api/v1/projects/{id}/token` | 项目 `manage`：轮换 token：`{token}`，字段必须存在。启用共享凭据时，显式空或纯空白 `token` 表示切换为共享 bot：写零长度哨兵、清空 `token_expires_at`/`token_scopes`/`webhook_error`；有 managed hook 时 `webhook_state` 置 `pending` 待健康扫描，无 hook 时置 `disabled`；不修改 hook；缺省字段或 `null` 仍返回 400。非空 token 恢复项目级凭据。切换不校验共享 bot 成员/有效期（`warnings` 提示先以空 token 调 `/api/v1/projects/validate`），未配置 provisioning 凭据时另提示 hook 健康不再被监控 |
 | POST | `/api/v1/projects/{id}/webhook` | 项目 `manage`：显式启用 GitLab webhook；只复用仍存在的已记录 `hook_id`，沿用已存 secret |
 | POST | `/api/v1/projects/{id}/webhook/rebuild` | 项目 `manage`：轮换 secret 并重建 GitLab webhook；只复用仍存在的已记录 `hook_id`，没有可复用 hook 时创建 |
 | DELETE | `/api/v1/projects/{id}/webhook` | 项目 `manage`：停用 webhook，只删除已记录的 service hook，保留 secret 供再次启用 |
