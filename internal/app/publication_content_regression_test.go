@@ -10,16 +10,21 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/review"
 )
 
-func TestHistoricalDiscussionContentReuse(t *testing.T) {
+// TestHistoricalDiscussionContentUpdatesInPlace covers the #487 contract: a
+// finding at the same diff position updates the existing discussion instead of
+// stacking a new thread, whatever wording, severity, or stored body hash the
+// previous generation had.
+func TestHistoricalDiscussionContentUpdatesInPlace(t *testing.T) {
 	for _, tc := range []struct {
-		name, body            string
-		severity              review.Severity
-		missingHash, fallback bool
+		name, body   string
+		severity     review.Severity
+		missingHash  bool
+		indexedTitle string
 	}{
-		{name: "same body"},
-		{name: "changed body", body: "a different current explanation", fallback: true},
-		{name: "changed severity", severity: review.SeverityP1, fallback: true},
-		{name: "missing hash", missingHash: true, fallback: true},
+		{name: "same body", indexedTitle: "- **[P2]bad assignment** · `main.go`:2"},
+		{name: "changed body", body: "a different current explanation", indexedTitle: "- **[P2]bad assignment** · `main.go`:2"},
+		{name: "changed severity", severity: review.SeverityP1, indexedTitle: "- **[P1]bad assignment** · `main.go`:2"},
+		{name: "missing hash", missingHash: true, indexedTitle: "- **[P2]bad assignment** · `main.go`:2"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -75,35 +80,32 @@ func TestHistoricalDiscussionContentReuse(t *testing.T) {
 			}
 			check := func() {
 				t.Helper()
-				if f.gitlab.discussionCreates != 1 || feedbackDiscussionNote(t, f, oldPublication).Body != oldBody {
-					t.Fatalf("old discussion changed: creates=%d", f.gitlab.discussionCreates)
+				if f.gitlab.discussionCreates != 1 || len(f.gitlab.discussions) != 1 {
+					t.Fatalf("same position was stacked: creates=%d discussions=%d", f.gitlab.discussionCreates, len(f.gitlab.discussions))
+				}
+				updated := feedbackDiscussionNote(t, f, oldPublication).Body
+				if updated == oldBody || !strings.Contains(updated, "代次 2") {
+					t.Fatalf("discussion was not updated in place for generation 2: %q", updated)
+				}
+				if tc.body != "" && !strings.Contains(updated, tc.body) {
+					t.Fatalf("updated discussion lacks the current body: %q", updated)
+				}
+				if tc.severity != "" && !strings.Contains(updated, "[P1]") {
+					t.Fatalf("updated discussion lacks the current severity: %q", updated)
 				}
 				if len(f.gitlab.notes) != 1 {
 					t.Fatalf("summary notes: %+v", f.gitlab.notes)
 				}
 				summary := f.gitlab.notes[0].Body
-				if tc.fallback {
-					if !strings.Contains(summary, "历史讨论内容") || !strings.Contains(summary, "bad assignment") {
-						t.Fatalf("missing fallback: %s", summary)
-					}
-					if tc.body != "" && !strings.Contains(summary, tc.body) {
-						t.Fatalf("missing current body: %s", summary)
-					}
-					if tc.severity != "" && !strings.Contains(summary, "[P1]") {
-						t.Fatalf("missing current severity: %s", summary)
-					}
-				} else {
-					if strings.Contains(summary, "历史讨论内容") {
-						t.Fatalf("unchanged finding was treated as changed content: %s", summary)
-					}
-					if !strings.Contains(summary, "### 行内问题（1）") ||
-						!strings.Contains(summary, "- **[P2]bad assignment** · `main.go`:2") {
-						t.Fatalf("inline issue index is missing: %s", summary)
-					}
+				if strings.Contains(summary, "历史讨论内容") {
+					t.Fatalf("in-place update was treated as unproven content: %s", summary)
+				}
+				if !strings.Contains(summary, "### 行内问题（1）") || !strings.Contains(summary, tc.indexedTitle) {
+					t.Fatalf("inline issue index is missing: %s", summary)
 				}
 				stored, err := f.db.GetPublication(ctx, 42, 7, discussionPublishKind, oldPublication.PublishKey)
-				if err != nil || stored.ID != oldPublication.ID || stored.WorkflowID != oldWorkflow.ID || stored.GitlabID != oldPublication.GitlabID || stored.BodyHash != oldPublication.BodyHash {
-					t.Fatalf("old publication: %+v, %v", stored, err)
+				if err != nil || stored.ID != oldPublication.ID || stored.GitlabID != oldPublication.GitlabID || stored.WorkflowID != wf.ID {
+					t.Fatalf("position publication: %+v, %v", stored, err)
 				}
 				old := feedbackFindings(t, f, oldWorkflow.ID, oldPublication.PublishKey)
 				if len(old) != 1 || old[0].ID != oldFinding.ID || old[0].Body != oldFinding.Body {

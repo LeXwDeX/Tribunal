@@ -5,6 +5,7 @@ import (
 	"html"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -73,6 +74,9 @@ type SummaryInput struct {
 type FindingRenderOptions struct {
 	ShowModelAttribution bool
 	ProviderLabels       map[string]string
+	// Generation, when positive, adds the review generation to a position
+	// discussion so readers can tell an in-place update from a new comment.
+	Generation int64
 }
 
 // SummaryMarkerLine returns the hidden first line of the summary note.
@@ -479,20 +483,93 @@ func RenderFinding(group Group, opts FindingRenderOptions) (string, error) {
 	if !publishKeyRE.MatchString(key) {
 		return "", invalid("publish_key", "must be a stable pk_ key")
 	}
-	severity := group.EffectiveSeverity()
 
 	var head strings.Builder
 	fmt.Fprintf(&head, "%s key=%s -->\n", FindingMarkerPrefix, key)
-	head.WriteString("**[")
-	head.WriteString(string(severity))
-	if group.Decision.Action == ActionMark {
-		head.WriteString(" · 存疑")
-	}
-	head.WriteString("]")
-	head.WriteString(escapeOneLine(group.Title, MaxTitleRunes))
-	head.WriteString("**\n")
 
 	budget := newNoteBudget(0)
+	budget.write(head.String())
+	writeFindingSection(budget, group, opts, true)
+	// Rendered bodies are the final text: hashes and remote comparisons use
+	// them, and GitLab must never see a line it would run as a quick action.
+	return limitPublishedNote(gitlab.NeutralizeQuickActions(budget.finish(""))), nil
+}
+
+// RenderPositionThread renders the single inline discussion owned by one diff
+// position. Wording changes between review generations update this body; a
+// second distinct problem at the same anchor becomes a "### " section instead
+// of another discussion. The hidden first line carries the position key so
+// lifecycle reconciliation can keep the thread current.
+func RenderPositionThread(groups []Group, opts FindingRenderOptions) (string, error) {
+	if len(groups) == 0 {
+		return "", invalid("groups", "at least one finding is required")
+	}
+	key := PositionPublishKey(groups[0].Path, groups[0].Line, groups[0].Side)
+	if key == "" {
+		return "", invalid("position", "finding has no diff anchor")
+	}
+	for _, group := range groups {
+		if !group.Published() {
+			return "", invalid("decision", "only publish or mark groups can be rendered inline")
+		}
+		if !group.PositionOK {
+			return "", invalid("position_ok", "finding has no diff hunk and must be published in the summary only")
+		}
+		if PositionPublishKey(group.Path, group.Line, group.Side) != key {
+			return "", invalid("position", "all findings in one thread must share a position")
+		}
+	}
+	ordered := append([]Group(nil), groups...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		a, b := ordered[i], ordered[j]
+		if ra, rb := severityRank[a.EffectiveSeverity()], severityRank[b.EffectiveSeverity()]; ra != rb {
+			return ra < rb
+		}
+		if at, bt := NormalizeTitle(a.Title), NormalizeTitle(b.Title); at != bt {
+			return at < bt
+		}
+		return a.ID < b.ID
+	})
+
+	var head strings.Builder
+	fmt.Fprintf(&head, "%s key=%s -->\n", FindingMarkerPrefix, key)
+	if opts.Generation > 0 {
+		fmt.Fprintf(&head, "<sub>代次 %d</sub>\n", opts.Generation)
+	}
+	budget := newNoteBudget(0)
+	budget.write(head.String())
+	for _, group := range ordered {
+		writeFindingSection(budget, group, opts, len(ordered) == 1)
+	}
+	return limitPublishedNote(gitlab.NeutralizeQuickActions(budget.finish(""))), nil
+}
+
+// writeFindingSection appends one finding inside a rendered note. A flat
+// section keeps the single-finding title line; a sectioned one uses "### " so
+// several problems at one position stay visibly separate and ordered.
+func writeFindingSection(budget *noteBudget, group Group, opts FindingRenderOptions, flat bool) {
+	severity := group.EffectiveSeverity()
+
+	var head strings.Builder
+	if flat {
+		head.WriteString("**[")
+		head.WriteString(string(severity))
+		if group.Decision.Action == ActionMark {
+			head.WriteString(" · 存疑")
+		}
+		head.WriteString("]")
+		head.WriteString(escapeOneLine(group.Title, MaxTitleRunes))
+		head.WriteString("**\n")
+	} else {
+		head.WriteString("\n### [")
+		head.WriteString(string(severity))
+		if group.Decision.Action == ActionMark {
+			head.WriteString(" · 存疑")
+		}
+		head.WriteString("]")
+		head.WriteString(escapeOneLine(group.Title, MaxTitleRunes))
+		head.WriteString("\n")
+	}
 	budget.write(head.String())
 	// The discussion is anchored on the line, so the location is not repeated.
 	// The body is published in full; only the whole-note platform budget can
@@ -518,9 +595,6 @@ func RenderFinding(group Group, opts FindingRenderOptions) (string, error) {
 			budget.write("\n<sub>来源：" + attribution + "</sub>\n")
 		}
 	}
-	// Rendered bodies are the final text: hashes and remote comparisons use
-	// them, and GitLab must never see a line it would run as a quick action.
-	return limitPublishedNote(gitlab.NeutralizeQuickActions(budget.finish(""))), nil
 }
 
 // relatedDescriptions lists the groups folded into this discussion by

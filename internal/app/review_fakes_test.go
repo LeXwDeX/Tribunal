@@ -64,6 +64,7 @@ type reviewGitLab struct {
 	summaryCreates     int
 	summaryUpdates     int
 	discussionCreates  int
+	discussionUpdates  int
 	discussionResolves []bool
 	statusUpdates      []string
 }
@@ -222,6 +223,16 @@ func (f *reviewGitLab) UpdateMRNote(_ context.Context, _ string, _, _, noteID in
 			f.summaryUpdates++
 			f.recordStatusBody(body)
 			return nil
+		}
+	}
+	// GitLab's note update endpoint also edits finding discussion notes.
+	for i := range f.discussions {
+		for j := range f.discussions[i].Notes {
+			if f.discussions[i].Notes[j].ID == noteID {
+				f.discussions[i].Notes[j].Body = body
+				f.discussionUpdates++
+				return nil
+			}
 		}
 	}
 	return &gitlab.Error{Op: "update_note", Status: 404}

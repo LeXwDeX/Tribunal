@@ -12,12 +12,19 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
-func TestPublicationCollidingGroupsRemainInSummary(t *testing.T) {
+// #487 replaces publish-key collision fallbacks with position convergence:
+// findings folded to one position share one discussion, and a rerun updates it
+// instead of posting a second thread.
+func TestInlinePositionMergesCollidingFindings(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		line     int
-		category string
-	}{{"category", 2, "security"}, {"line distance", 6, "correctness"}} {
+		name        string
+		line        int
+		category    string
+		wantCreates int
+	}{
+		{"category", 2, "security", 1},
+		{"line distance", 6, "correctness", 2},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			f := newReviewFixture(t, reviewTestHead)
@@ -45,17 +52,20 @@ func TestPublicationCollidingGroupsRemainInSummary(t *testing.T) {
 			if err != nil || len(findings) != 2 {
 				t.Fatalf("findings = %+v, %v", findings, err)
 			}
-			if f.gitlab.discussionCreates != 0 || len(f.gitlab.notes) != 1 || strings.Count(f.gitlab.notes[0].Body, "bad assignment") != 3 || !strings.Contains(f.gitlab.notes[0].Body, "标识冲突") || !strings.Contains(f.gitlab.notes[0].Body, "以相关描述形式保留在「bad assignment」条目下") {
-				t.Fatalf("discussions=%d notes=%+v", f.gitlab.discussionCreates, f.gitlab.notes)
+			if f.gitlab.discussionCreates != tc.wantCreates || len(f.gitlab.discussions) != tc.wantCreates || len(f.gitlab.notes) != 1 {
+				t.Fatalf("discussions=%d creates=%d notes=%d, want %d", len(f.gitlab.discussions), f.gitlab.discussionCreates, len(f.gitlab.notes), tc.wantCreates)
 			}
-			if err := f.publisher.Publish(ctx, wf.ID); err != nil || f.gitlab.discussionCreates != 0 {
+			if strings.Contains(f.gitlab.notes[0].Body, "标识冲突") {
+				t.Fatalf("summary still reports a publish-key collision: %s", f.gitlab.notes[0].Body)
+			}
+			if err := f.publisher.Publish(ctx, wf.ID); err != nil || f.gitlab.discussionCreates != tc.wantCreates {
 				t.Fatalf("retry: discussions=%d err=%v", f.gitlab.discussionCreates, err)
 			}
 		})
 	}
 }
 
-func TestPublicationCollisionWithEarlierWorkflowRemainsInSummary(t *testing.T) {
+func TestInlinePositionUpdatesAcrossCategoryChange(t *testing.T) {
 	ctx := context.Background()
 	f := newReviewFixture(t, reviewTestHead)
 	if err := f.service.Handle(ctx, f.seedReview(t, "collision-earlier")); err != nil {
@@ -72,12 +82,21 @@ func TestPublicationCollisionWithEarlierWorkflowRemainsInSummary(t *testing.T) {
 	if err := f.service.Handle(ctx, f.seedReview(t, "collision-later")); err != nil {
 		t.Fatal(err)
 	}
-	if f.gitlab.discussionCreates != 1 || len(f.gitlab.notes) != 1 || !strings.Contains(f.gitlab.notes[0].Body, "标识冲突") || !strings.Contains(f.gitlab.notes[0].Body, "bad assignment") {
-		t.Fatalf("discussions=%d notes=%+v", f.gitlab.discussionCreates, f.gitlab.notes)
+	if f.gitlab.discussionCreates != 1 || len(f.gitlab.discussions) != 1 || len(f.gitlab.notes) != 1 {
+		t.Fatalf("discussions=%d creates=%d notes=%d", len(f.gitlab.discussions), f.gitlab.discussionCreates, len(f.gitlab.notes))
+	}
+	if !strings.Contains(f.gitlab.discussions[0].Notes[0].Body, "代次 2") {
+		t.Fatalf("same position was not updated in place: %q", f.gitlab.discussions[0].Notes[0].Body)
+	}
+	if strings.Contains(f.gitlab.notes[0].Body, "标识冲突") {
+		t.Fatalf("summary still reports a publish-key collision: %s", f.gitlab.notes[0].Body)
 	}
 }
 
-func TestPublicationOldSideDifferentRenameSourceRemainsInSummary(t *testing.T) {
+// A rename source change moves the position, so the two old-side findings are
+// separate threads. The older publication and its feedback attribution stay
+// untouched (legacy rows are read-only history).
+func TestInlinePositionKeepsRenameSourceDiscussionsSeparate(t *testing.T) {
 	ctx := context.Background()
 	f := newReviewFixture(t, reviewTestHead)
 	source := "a.go"
@@ -121,13 +140,16 @@ func TestPublicationOldSideDifferentRenameSourceRemainsInSummary(t *testing.T) {
 		t.Fatal(err)
 	}
 	findings, err := f.db.ListFindings(ctx, store.FindingFilter{WorkflowID: newWorkflow.ID})
-	if err != nil || len(findings) != 1 || findings[0].Path != source || findings[0].PublishKey != oldPublication.PublishKey {
+	if err != nil || len(findings) != 1 || findings[0].Path != source || findings[0].PublishKey == oldPublication.PublishKey {
 		t.Fatalf("new findings = %+v, err = %v", findings, err)
 	}
-	if f.gitlab.discussionCreates != 1 || len(f.gitlab.notes) != 1 || !strings.Contains(f.gitlab.notes[0].Body, "标识冲突") || !strings.Contains(f.gitlab.notes[0].Body, "bad assignment") || !strings.Contains(f.gitlab.notes[0].Body, "b.go") {
-		t.Fatalf("discussions=%d notes=%+v", f.gitlab.discussionCreates, f.gitlab.notes)
+	if f.gitlab.discussionCreates != 2 || len(f.gitlab.discussions) != 2 || len(f.gitlab.notes) != 1 {
+		t.Fatalf("discussions=%d creates=%d notes=%d", len(f.gitlab.discussions), f.gitlab.discussionCreates, len(f.gitlab.notes))
 	}
-	if err := f.publisher.Publish(ctx, newWorkflow.ID); err != nil || f.gitlab.discussionCreates != 1 {
+	if strings.Contains(f.gitlab.notes[0].Body, "标识冲突") {
+		t.Fatalf("summary still reports a publish-key collision: %s", f.gitlab.notes[0].Body)
+	}
+	if err := f.publisher.Publish(ctx, newWorkflow.ID); err != nil || f.gitlab.discussionCreates != 2 {
 		t.Fatalf("retry discussions=%d err=%v", f.gitlab.discussionCreates, err)
 	}
 	stored, err := f.db.GetPublication(ctx, 42, 7, discussionPublishKind, oldPublication.PublishKey)
@@ -145,7 +167,10 @@ func TestPublicationOldSideDifferentRenameSourceRemainsInSummary(t *testing.T) {
 	}
 }
 
-func TestPublicationHistoricalSourceUnavailableRemainsInSummary(t *testing.T) {
+// The position record, not the historical finding fields, owns the thread now.
+// Mutating the old path/side must not create a duplicate or leave the summary
+// for the current run.
+func TestInlinePositionIgnoresHistoricalFindingProvenance(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		mutate func(*store.Finding)
@@ -168,8 +193,14 @@ func TestPublicationHistoricalSourceUnavailableRemainsInSummary(t *testing.T) {
 			if err := f.service.Handle(ctx, f.seedReview(t, "source-unavailable-later")); err != nil {
 				t.Fatal(err)
 			}
-			if f.gitlab.discussionCreates != 1 || len(f.gitlab.notes) != 1 || !strings.Contains(f.gitlab.notes[0].Body, "标识冲突") || !strings.Contains(f.gitlab.notes[0].Body, "bad assignment") {
-				t.Fatalf("discussions=%d notes=%+v", f.gitlab.discussionCreates, f.gitlab.notes)
+			if f.gitlab.discussionCreates != 1 || len(f.gitlab.discussions) != 1 || len(f.gitlab.notes) != 1 {
+				t.Fatalf("discussions=%d creates=%d notes=%d", len(f.gitlab.discussions), f.gitlab.discussionCreates, len(f.gitlab.notes))
+			}
+			if !strings.Contains(f.gitlab.discussions[0].Notes[0].Body, "代次 2") {
+				t.Fatalf("position discussion was not updated: %q", f.gitlab.discussions[0].Notes[0].Body)
+			}
+			if strings.Contains(f.gitlab.notes[0].Body, "标识冲突") || strings.Contains(f.gitlab.notes[0].Body, "历史讨论内容") {
+				t.Fatalf("summary reports a stale fallback: %s", f.gitlab.notes[0].Body)
 			}
 		})
 	}
@@ -207,8 +238,9 @@ func TestPublicationSameSideAndPathReusesEarlierDiscussion(t *testing.T) {
 			if err := f.service.Handle(ctx, f.seedReview(t, "same-source-later")); err != nil {
 				t.Fatal(err)
 			}
-			if f.gitlab.discussionCreates != 1 || len(f.gitlab.notes) != 1 || strings.Contains(f.gitlab.notes[0].Body, "标识冲突") {
-				t.Fatalf("discussions=%d notes=%+v", f.gitlab.discussionCreates, f.gitlab.notes)
+			if f.gitlab.discussionCreates != 1 || len(f.gitlab.discussions) != 1 || len(f.gitlab.notes) != 1 ||
+				strings.Contains(f.gitlab.notes[0].Body, "标识冲突") {
+				t.Fatalf("discussions=%d creates=%d notes=%+v", len(f.gitlab.discussions), f.gitlab.discussionCreates, f.gitlab.notes)
 			}
 		})
 	}

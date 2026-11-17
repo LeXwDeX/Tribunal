@@ -1065,6 +1065,21 @@ func PublishKeyFor(path, title, snippet string) string {
 	return "pk_" + hex.EncodeToString(sum[:16])
 }
 
+// PositionPublishKey identifies one inline discussion by its diff anchor:
+// file, line and side. Wording is deliberately excluded so reruns and later
+// review generations update the same discussion instead of stacking new ones.
+// The key keeps the pk_ shape so existing marker parsing and reconciliation
+// accept it. An empty path or a non-positive line has no publishable position.
+func PositionPublishKey(path string, line int, side Side) string {
+	path = strings.TrimSpace(path)
+	if path == "" || line <= 0 {
+		return ""
+	}
+	value := "pos-v1\x00" + string(normalizedSide(side)) + "\x00" + path + "\x00" + fmt.Sprintf("%d", line)
+	sum := sha256.Sum256([]byte(value))
+	return "pk_" + hex.EncodeToString(sum[:16])
+}
+
 func snippetFor(finding Finding) string {
 	if strings.TrimSpace(finding.Evidence) != "" {
 		return finding.Evidence

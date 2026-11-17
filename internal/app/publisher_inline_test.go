@@ -251,8 +251,9 @@ func TestPublisherKeepsMarkedEvidenceWhenHistoricalFindingIsMissing(t *testing.T
 			t.Fatalf("marked evidence is absent from the summary: %+v", f.gitlab.notes)
 		}
 		finding, err := f.db.ListFindings(context.Background(), store.FindingFilter{WorkflowID: workflow.ID})
+		positionKey := review.PositionPublishKey("main.go", 2, review.SideNew)
 		if err != nil || len(finding) != 1 || finding[0].PositionOK == nil || *finding[0].PositionOK ||
-			finding[0].Decision != string(review.ActionMark) || finding[0].Evidence != evidence || finding[0].PublishKey != key {
+			finding[0].Decision != string(review.ActionMark) || finding[0].Evidence != evidence || finding[0].PublishKey != positionKey {
 			t.Fatalf("historical finding was incorrectly reused = %+v, err = %v", finding, err)
 		}
 		publication, err := f.db.GetPublication(context.Background(), 42, 7, discussionPublishKind, key)

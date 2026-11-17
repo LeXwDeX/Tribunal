@@ -91,13 +91,17 @@ func TestRecoveredDiscussionIntentDoesNotClaimNewWorkflowContent(t *testing.T) {
 	}
 }
 
-func TestSameWorkflowPublicationWithoutBodyHashFallsBack(t *testing.T) {
+// A position-owned thread no longer needs the stored body hash to be updated:
+// the position key and the bot-authored marker identify it. A missing hash is
+// repaired on the next publication instead of forcing a summary fallback.
+func TestPositionPublicationWithoutBodyHashStillOwnsThread(t *testing.T) {
 	ctx := context.Background()
 	f := newReviewFixture(t, reviewTestHead)
 	if err := f.service.Handle(ctx, f.seedReview(t, "intent-legacy-row")); err != nil {
 		t.Fatal(err)
 	}
 	wf, publication := feedbackPublication(t, f)
+	oldBody := feedbackDiscussionNote(t, f, publication).Body
 	publication.BodyHash = ""
 	if _, err := f.db.UpsertPublication(ctx, publication); err != nil {
 		t.Fatal(err)
@@ -106,14 +110,18 @@ func TestSameWorkflowPublicationWithoutBodyHashFallsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	findings, err := f.db.ListFindings(ctx, store.FindingFilter{WorkflowID: wf.ID})
-	if err != nil || len(findings) != 1 || findings[0].PositionOK == nil || *findings[0].PositionOK {
+	if err != nil || len(findings) != 1 || findings[0].PositionOK == nil || !*findings[0].PositionOK {
 		t.Fatalf("findings: %+v, %v", findings, err)
 	}
 	stored, err := f.db.GetPublication(ctx, 42, 7, discussionPublishKind, publication.PublishKey)
-	if err != nil || stored.ID != publication.ID || stored.WorkflowID != publication.WorkflowID || stored.BodyHash != "" {
-		t.Fatalf("publication changed: %+v, %v", stored, err)
+	if err != nil || stored.ID != publication.ID || stored.WorkflowID != wf.ID || stored.BodyHash == "" {
+		t.Fatalf("publication not repaired: %+v, %v", stored, err)
 	}
-	if f.gitlab.discussionCreates != 1 || len(f.gitlab.notes) != 1 || !strings.Contains(f.gitlab.notes[0].Body, "历史讨论内容") || !strings.Contains(f.gitlab.notes[0].Body, findings[0].Body) {
-		t.Fatalf("recovery effects: discussions=%d summaries=%+v", f.gitlab.discussionCreates, f.gitlab.notes)
+	if f.gitlab.discussionCreates != 1 || len(f.gitlab.discussions) != 1 ||
+		feedbackDiscussionNote(t, f, *stored).Body != oldBody {
+		t.Fatalf("position thread changed: discussions=%d", len(f.gitlab.discussions))
+	}
+	if len(f.gitlab.notes) != 1 || strings.Contains(f.gitlab.notes[0].Body, "历史讨论内容") {
+		t.Fatalf("summary reported an unproven thread: %+v", f.gitlab.notes)
 	}
 }

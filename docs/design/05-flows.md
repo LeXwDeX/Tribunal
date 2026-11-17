@@ -174,12 +174,15 @@ Note Hook 统一先持久化为 `review.command`，以下 GitLab 校验由 worke
    6. 同一 MR 的远端注记写入由进程内共享的 per-MR 锁串行（#475）：publisher 的 summary、行内讨论与 commit status，状态 worker，命令回复，以及令牌失效或仓库配置无效时的回落注记，全部持同一把锁（key 为 `projectID:mrIID`）；除 webhook ingress 在 DB 事务内推进代次外，所有 generation bump 路径（手动触发与取消、`/review` 命令、候选激活、启动 catch-up）也持同一把锁。需要代次栅栏的写入方（publisher、状态 worker、回落注记）在锁内复核 generation/head，过期代次不写；命令回复按源 note 幂等更新、不做代次栅栏，但同样持锁以避免与发布或状态写入交错。因此新代次的摘要/状态注记不会落在旧代次写入之前。webhook ingress 不持该锁：它只做投递记录、代次推进与 DB 入队，以守住 900ms 处理预算；注记全序由「写入方持锁 + 需要栅栏的写入在锁内复核代次」保证，而不是让 ingress 等待远端写入。锁序固定为生命周期锁 → 工作区内容锁 → per-MR 锁 → workflow 锁，不反向获取、不重入。GitLab 没有条件写入，超时或崩溃后的旧请求仍可能短暂覆盖新内容；两个写入方渲染同一正文，下一次更新会收敛，周期复核会恢复当前状态（见[状态评论恢复](../operations.md#状态评论恢复)）。
    7. `review_status.final_body_ready = 0` 的历史行由状态 worker 继续用旧 `<!-- gitlab-ce-review:status v1 -->` 标记原地更新旧状态评论，不按 summary 标记查找或改写已发布的评审报告评论；这条不变量在正常更新与终态回退（control 缺失、同代次 head 变化、当前代次取消）路径上都成立，历史行的已发布 summary 正文逐字不动。publisher 写入 `final_body` 后该行置为 1，转入上面的同一条 note 合并模式，由合并注记承载已发布正文，并在每次收敛写入时删除本 bot 的旧 `:status` 注记（只匹配当前 token 身份与旧标记前缀，外部作者和合并注记永不命中）；清理也覆盖正文相同与拒绝回退的早退路径，重启后不会残留。升级前遗留的独立 summary note 不在清理范围内。取消不丢已发布结论：所有取消入口（webhook merge/close、`/review cancel`、手工取消 API）保留已发布的 `final_body` 与 `final_body_ready`，只更新生命周期头部；新评审导致的 generation 前进才清空正文，等待新发布重写。
 3. **行内讨论**：对 `decision ∈ {publish, mark}` 且 `position_ok` 的 finding：
-   1. 用 `publish_key` 查 `publications(kind=discussion)`。跨工作流复用时，要求历史记录唯一匹配，且两条问题的侧别、非空侧别路径、类别一致，行号均为正数且相距不超过 3 行。空侧别按新侧处理；未知侧别、缺失路径或其他无法证明的情况不复用，当前问题留在摘要并提示发布标识冲突。同一工作流内的多个问题共用发布键时也留在摘要。无论是否同一工作流，正文哈希缺失或与当前渲染正文不同时，当前问题留在摘要并提示历史讨论未更新。哈希不能验证 GitLab 端的外部修改。复用的讨论仍归原工作流，反馈不会自动归因到新工作流。存疑条目的证据始终在汇总中保留，即使复用没有证据的旧行内讨论也可查看。历史讨论和记录不删除。
-   2. 没有发布记录时先持久化意图，再 `POST .../discussions`，position 由 diff 索引生成；明确返回 400 则降级进汇总的「无法定位」区块。已有意图时不重复创建；未知远端 ID 须通过当前机器人身份和唯一首条标记恢复，否则保持待处理。
-   3. 新建成功后写 `publications` 和正文哈希。仅从意图恢复的远端 ID 不证明工作流或正文，即使同一工作流重试也不补写发布记录；当前问题留在摘要并提示。
+   1. 发布键改为**位置键** `review.PositionPublishKey(path, line, side)`：`pk_` + sha256 前 16 字节十六进制，只含规范化侧别（`old`；空或 `new` 按 `new`）、去首尾空白的路径和正整数行号，不含标题、证据、正文或工作流指纹。同一位置跨代次稳定；路径为空或 `line <= 0` 返回空键，不发布行内讨论。
+   2. 按位置（file+line+side）分组发布一条讨论。同一位置有多个 finding 时渲染到同一条 discussion，用 `### [P]标题` 分节，按严重级别、规范化标题、ID 稳定排序；单条 finding 保持 `**[P]标题**` 平铺格式。正文首行仍是隐藏标记 `<!-- gitlab-ce-review:finding key=<位置键> -->`，下一行是可见的 `<sub>代次 N</sub>`，末尾仍追加隐藏的 workflow 标记。
+   3. 已有位置键发布记录时，按记录的 GitLab discussion ID 在讨论列表中找到该线程，只更新本 bot 的首条 note（`PUT .../notes/:note_id`）；更新路径不删除讨论、不 resolve、不改动用户回复；正文相同则不写。线程已不存在、首条作者不是当前 token 身份或首条没有 finding 标记时，本轮该位置留在摘要并提示「历史讨论内容…无法确认」，不再新建同位置讨论。
+   4. 没有位置键记录时先尝试复用旧线程。候选为：（a）当前 finding 旧指纹键对应的 `discussion` 发布记录所指线程；（b）远端首条带 finding 标记、且 GitLab note position 的 path/line/side 与当前位置一致的线程。取 note ID 最大（最近）的一条。首条作者必须是当前 token 身份；旧发布记录指向的线程若没有 GitLab position 元数据，还要求历史 finding 的路径、侧别、类别一致且行号相差不超过 3 行。更新正文后写入位置键记录。存在候选但归属无法证明时同样留在摘要，不新建重复讨论。旧指纹键的 `publications(kind=discussion)` 行作为只读历史保留，不删除、不重写、不改归属。
+   5. 没有候选时沿用既有讨论意图（`discussion_intents`）与 `POST .../discussions` 流程，发布键改为位置键；已有意图时不重复创建，未知远端 ID 须通过当前机器人身份和唯一首条标记恢复，否则保持待处理；400/401/403/404/422 的确定性拒绝语义不变。新建成功后写 `publications`（位置键）和正文哈希；仅从意图恢复的远端 ID 不证明工作流或正文，只有正文与当前渲染（含本工作流标记）完全一致时才补写发布记录，否则当前问题留在摘要并提示。
+   6. 每个位置只有分组中的第一条（主 finding）在 findings 表中保存位置键，同位置其他 finding 保留原指纹键，因此反馈采集仍按 publication 键唯一匹配；旧工作流的指纹键 finding 和旧 `discussion` 行不变。
 4. **commit status**（项目开启时）：`POST /projects/:id/statuses/:head_sha`，`name=ai-review`，只有 PASS 写 `success`，BLOCKING 和 INCOMPLETE 写 `failed`，`target_url` 指向控制台评审详情，`description` ≤ 140 字符。调用成功后以 `publish_key=status:<head_sha>:<state>` 记录 `publications`；旧格式 `status:<head_sha>` 没有状态，评审详情视为未知，不根据 verdict 推断。commit status 的 failed 是评审结论，不是发布失败。
 5. 写 `publications` 与调用 GitLab 不在同一事务。崩溃导致漏记时，第 2.3 步的标记查找可以兜底状态/结果评论；行内讨论依靠先持久化的意图和远端标记避免盲目重建，未知结果保持待处理。创建讨论返回 400/401/403/404/422 时视为确定性拒绝：清除 intent、降级进摘要并终态发布；标记扫描成功但远端不存在对应讨论时同样清除 intent。未知结果超过 7 天由启动恢复记为 `failed`（固定原因），不再长期 pending。存储或同步保障损坏、恢复旧快照等限制见运维文档。
-6. **讨论生命周期**：评审结论为 PASS 或 BLOCKING 时，按首条标记识别本 bot 的 finding 讨论。当前 finding 仍存在但讨论已 resolved → 重新打开；讨论的 finding 不再出现在当前结果 → resolve。INCOMPLETE 评审不执行收敛，避免把未覆盖误判为已修复。finding 讨论只做 resolve/unresolve，永不删除；GitLab 客户端新增的 `DeleteMRNote` 只用于清理本 bot 的 legacy `:status` 注记（见第 2.7 步）。
+6. **讨论生命周期**：评审结论为 PASS 或 BLOCKING 时，按首条标记识别本 bot 的 finding 讨论。current keys 对有可用位置（path+line）的已发布 finding 使用位置键；即使该代次只进摘要（未成功行内发布）也保留该位置键，避免把仍存在的讨论误判为过期。无可用位置的 finding 保留指纹键回退。当前 finding 仍存在但讨论已 resolved → 重新打开；讨论的 finding 不再出现在当前结果（包括旧代次遗留的重复线程）→ resolve。INCOMPLETE 评审不执行收敛，避免把未覆盖误判为已修复。finding 讨论只做 resolve/unresolve，永不删除；GitLab 客户端新增的 `DeleteMRNote` 只用于清理本 bot 的 legacy `:status` 注记（见第 2.7 步）。
 
 **状态评论正文**：
 
@@ -199,7 +202,7 @@ Note Hook 统一先持久化为 `review.command`，以下 GitLab 校验由 worke
 - control 缺失、同代次 head 变化或当前代次被取消时，状态 worker 写入终态（`stale` / `cancelled`）而不是永久停在「运行中」；已有更新代次时仍跳过，由新代次自己写。终态回退对历史行同样使用旧 `:status` 标记，绝不接管已发布的 summary 评论。取消结算回读状态行时校验 generation 与 head，只有仍属同一代次才采纳。
 - 行转入合并模式后，本 bot 的旧 `:status` 注记在收敛写入时删除（含正文相同与拒绝回退的早退路径）；升级前遗留的独立 summary note 不会被迁移或自动删除，需要时人工清理。
 
-2026-10-25 用户确认 Issue #3 按上述发布键边界验收：相同事件 UUID、相同发布键和同一评审的重复发布不新增重复评论。显式新评审可创建新代次；`publish_key` 包含路径、规范化标题和代码片段，模型换措辞可能生成不同键并再次发布同一问题。本版不承诺跨次评审的语义去重。
+2026-10-25 用户确认 Issue #3 按上述发布键边界验收：相同事件 UUID、相同发布键和同一评审的重复发布不新增重复评论。显式新评审仍可创建新代次；自 #487 起，行内讨论的发布键改为按 file+line+side 计算的位置键，不含标题、证据、正文或工作流指纹，同一位置跨代次更新同一条讨论，不再堆叠新评论。按位置收敛不等于跨位置的语义去重：代码行号移动会形成新位置，同一问题可能随位置变化另发一条讨论。
 
 发布执行状态与 workflow 执行状态分开持久化：
 
