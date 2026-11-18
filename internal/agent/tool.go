@@ -21,8 +21,8 @@ const (
 	// SubmitToolName is the tool every run must call to finish.
 	SubmitToolName = "submit_result"
 	// DefaultMaxTurns is zero: a run has no request-count limit by default.
-	// It still ends at submit_result, the context window, the caller's token
-	// budget or the context deadline.
+	// It still ends at submit_result, repeated submit-only refusals, the
+	// context window, the caller's token budget or the context deadline.
 	DefaultMaxTurns = 0
 	// DefaultMaxToolOutput bounds one tool result in characters.
 	DefaultMaxToolOutput = 20000
@@ -43,6 +43,12 @@ const (
 	// maxGraceTurns is how many extra submit-only turns an explicit positive
 	// max_turns grants after a turn ends without an accepted submit_result.
 	maxGraceTurns = 2
+	// maxSubmitOnlyRejections is how many consecutive submit-only turns may
+	// be refused for calling other tools before a run without max_turns stops
+	// with ErrNoSubmit. Each refusal appends a message that error compaction
+	// keeps, so an unbounded tail would keep growing the context until the
+	// provider's hard limit (#525).
+	maxSubmitOnlyRejections = 2
 	// finalTurnFloorDivisor sets the minimum reserve to this fraction of the
 	// time left when the run started.
 	finalTurnFloorDivisor = 8
