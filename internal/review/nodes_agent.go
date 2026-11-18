@@ -133,6 +133,14 @@ func (e *Executor) executeCodeReview(ctx context.Context, in dag.NodeInput) (dag
 		ToolGaps:   &gaps,
 	})
 	if err != nil {
+		// Only the lanes flow treats a stopped code-review lane as an optional
+		// lane; in the legacy flow the node is required and must stay failed,
+		// or a missing review would read as a completed one (#527).
+		if isLanesFlow(e.profile.Config) {
+			if out, ok := e.downgradePartialLane(ctx, in, err); ok {
+				return out, nil
+			}
+		}
 		return dag.NodeOutput{}, err
 	}
 	out, ok := result.Output.(*CodeReviewOut)
