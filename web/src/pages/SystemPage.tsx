@@ -293,7 +293,8 @@ function TokenRenewDialog({ token, open, onClose }: {
   const id = useId()
 
   useEffect(() => {
-    if (!open) return
+    // Clearing on close as well keeps the one-time plaintext out of state once
+    // the dialog is gone, matching the "cleared from UI state" copy.
     setDays('90')
     setPending(false)
     setError(undefined)
@@ -324,7 +325,7 @@ function TokenRenewDialog({ token, open, onClose }: {
   return (
     <Dialog
       open={open}
-      onClose={onClose}
+      onClose={pending ? () => {} : onClose}
       title={renewed ? '复制新 API token' : '续期 API token'}
       description={renewed
         ? '明文 token 只显示这一次。关闭对话框后将从界面状态中清除。'
