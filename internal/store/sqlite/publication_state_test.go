@@ -254,3 +254,40 @@ func TestSetWorkflowPublicationStateIfPendingDoesNotOverwriteSettledState(t *tes
 		t.Fatalf("missing workflow error = %v, want ErrNotFound", err)
 	}
 }
+
+// A duplicate publish attempt that raced a successful publication must not
+// move the published row back to pending or failed (#584).
+func TestSetWorkflowPublicationStateUnlessPublishedKeepsPublished(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t, newFakeClock())
+	mustProject(t, s, 42)
+	wfID := createPublicationWorkflow(t, s, 42)
+
+	if err := s.SetWorkflowPublicationStateUnlessPublished(ctx, wfID, store.WorkflowPublicationPending, "retry pending"); err != nil {
+		t.Fatalf("SetWorkflowPublicationStateUnlessPublished: %v", err)
+	}
+	wf, err := s.GetWorkflow(ctx, wfID)
+	if err != nil {
+		t.Fatalf("GetWorkflow: %v", err)
+	}
+	if wf.PublicationState != store.WorkflowPublicationPending || wf.PublicationError != "retry pending" {
+		t.Fatalf("pending update = %q/%q", wf.PublicationState, wf.PublicationError)
+	}
+
+	if err := s.SetWorkflowPublicationState(ctx, wfID, store.WorkflowPublicationPublished, ""); err != nil {
+		t.Fatalf("SetWorkflowPublicationState: %v", err)
+	}
+	if err := s.SetWorkflowPublicationStateUnlessPublished(ctx, wfID, store.WorkflowPublicationPending, "retry pending"); err != nil {
+		t.Fatalf("SetWorkflowPublicationStateUnlessPublished after publish: %v", err)
+	}
+	wf, err = s.GetWorkflow(ctx, wfID)
+	if err != nil {
+		t.Fatalf("GetWorkflow after publish: %v", err)
+	}
+	if wf.PublicationState != store.WorkflowPublicationPublished || wf.PublicationError != "" {
+		t.Fatalf("published state was overwritten: %q/%q", wf.PublicationState, wf.PublicationError)
+	}
+	if err := s.SetWorkflowPublicationStateUnlessPublished(ctx, "missing", store.WorkflowPublicationPending, "reason"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("missing workflow error = %v, want ErrNotFound", err)
+	}
+}

@@ -83,6 +83,7 @@ type ReviewStore interface {
 	SettleOrphanDossiers(ctx context.Context, projectID int64) error
 	SetWorkflowPublicationState(ctx context.Context, workflowID, state, reason string) error
 	SetWorkflowPublicationStateIfPending(ctx context.Context, workflowID, reason string) error
+	SetWorkflowPublicationStateUnlessPublished(ctx context.Context, workflowID, state, reason string) error
 	SetWorkflowVerdict(ctx context.Context, id, verdict string) error
 	ListPendingPublications(ctx context.Context, limit int) ([]store.PendingPublication, error)
 	ListWorkflows(ctx context.Context, filter store.WorkflowFilter, cursor string, limit int) ([]store.Workflow, string, error)

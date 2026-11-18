@@ -1508,6 +1508,42 @@ func (s *Store) SetWorkflowPublicationStateIfPending(ctx context.Context, workfl
 	return nil
 }
 
+// SetWorkflowPublicationStateUnlessPublished updates the publish state except
+// when the workflow already published. A retry that raced a successful
+// publication must not move a published row back to pending or failed (#584).
+func (s *Store) SetWorkflowPublicationStateUnlessPublished(ctx context.Context, workflowID, state, reason string) error {
+	switch state {
+	case store.WorkflowPublicationPending, store.WorkflowPublicationPublished,
+		store.WorkflowPublicationSkipped, store.WorkflowPublicationFailed:
+	default:
+		return fmt.Errorf("sqlite: invalid workflow publication state %q", state)
+	}
+	reason = normalizePublicationError(state, reason)
+	res, err := s.db.ExecContext(ctx, `UPDATE workflow_dossiers
+		SET publication_state = ?, publication_error = ?, updated_at = ?
+		WHERE workflow_id = ? AND publication_state <> ?`,
+		state, reason, formatTime(s.now().UTC()), workflowID, store.WorkflowPublicationPublished)
+	if err != nil {
+		return fmt.Errorf("sqlite: set workflow publication state: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("sqlite: set workflow publication state: %w", err)
+	}
+	if n == 1 {
+		return nil
+	}
+	var found int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM workflow_dossiers WHERE workflow_id = ?`, workflowID).Scan(&found); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: workflow dossier %s", store.ErrNotFound, workflowID)
+		}
+		return fmt.Errorf("sqlite: check workflow dossier: %w", err)
+	}
+	return nil
+}
+
 // ListPendingPublications returns terminal workflows that still need their
 // publish step. Completed rows publish the normal review; failed rows publish
 // the failure summary; cancelled rows only need a local skip. Unfinished

@@ -154,7 +154,7 @@ func (s *ReviewService) RepublishReview(ctx context.Context, job *jobs.Job) erro
 	if rejected, unknown, err := s.publisher.rejectRepositorySkillPublication(ctx, s.store, payload.WorkflowID); rejected || err != nil {
 		return repositorySkillPublicationError(unknown, err)
 	}
-	item, track, err := s.startRepublishStatus(ctx, payload.WorkflowID)
+	item, track, err := s.startRepublishStatus(ctx, payload.WorkflowID, false)
 	if err != nil {
 		return err
 	}
@@ -167,7 +167,10 @@ func (s *ReviewService) RepublishReview(ctx context.Context, job *jobs.Job) erro
 
 // startRepublishStatus makes a manual retry recoverable if it stops after the
 // publication state is saved but before the status and reaction are settled.
-func (s *ReviewService) startRepublishStatus(ctx context.Context, workflowID string) (store.PendingPublication, bool, error) {
+// requirePending makes the periodic scan recheck the dossier under the
+// publication locks: a job that completed publication after the scan listed
+// the workflow must not be republished or have its status rolled back (#584).
+func (s *ReviewService) startRepublishStatus(ctx context.Context, workflowID string, requirePending bool) (store.PendingPublication, bool, error) {
 	var item store.PendingPublication
 	wf, err := s.store.GetWorkflow(ctx, workflowID)
 	if err != nil {
@@ -184,6 +187,9 @@ func (s *ReviewService) startRepublishStatus(ctx context.Context, workflowID str
 	record, err := s.store.GetWorkflowDossier(ctx, workflowID)
 	if err != nil {
 		return item, false, err
+	}
+	if requirePending && (record == nil || record.PublicationState != store.WorkflowPublicationPending) {
+		return item, false, nil
 	}
 	var dossier review.Dossier
 	if record == nil || json.Unmarshal(record.Data, &dossier) != nil {
@@ -566,7 +572,11 @@ func (s *ReviewService) cancelInvalidRepoConfig(ctx context.Context, workflow *s
 	}
 	mrIID := dossier.MR.IID
 	s.noteInvalidRepoConfig(ctx, token, workflow.ProjectID, mrIID, generation, dossier.DiffVersion.HeadSHA)
-	s.settleReviewStatus(ctx, workflow.ProjectID, mrIID, generation, 0,
+	// An exhausted run may already hold a terminal row for this generation;
+	// settling at attempt 0 would be dropped by the store's terminal fence and
+	// leave the status disagreeing with the note (#584).
+	attempt := s.recoveryStatusAttempt(ctx, workflow.ProjectID, mrIID, generation, dossier.DiffVersion.HeadSHA)
+	s.settleReviewStatus(ctx, workflow.ProjectID, mrIID, generation, attempt,
 		dossier.DiffVersion.HeadSHA, profile, reviewStatusFailed, invalidRepoConfigDetail,
 		s.workflowNoteID(ctx, workflow.ID), reviewAwardNone)
 	return nil
