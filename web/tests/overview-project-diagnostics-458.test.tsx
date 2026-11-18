@@ -6,13 +6,16 @@ import { ProjectDetailPage } from '../src/pages/ProjectDetailPage'
 import { review } from './fixtures'
 import { installFetch, jsonResponse, renderWithProviders } from './test-utils'
 
-function routeOverview(reviews: unknown[]) {
+function routeOverview(reviews: unknown[], incomplete: unknown[] = [], incompleteNext?: string) {
   return installFetch((url) => {
     const parsed = new URL(url, 'http://localhost')
     if (parsed.pathname === '/api/v1/stats') return jsonResponse({ runs: 1 })
     if (parsed.pathname === '/api/v1/projects') return jsonResponse({ projects: [] })
     if (parsed.pathname === '/api/v1/models') return jsonResponse({ models: [] })
     if (parsed.pathname === '/api/v1/reviews') {
+      if (parsed.searchParams.get('verdict') === 'INCOMPLETE') {
+        return jsonResponse({ reviews: incomplete, next_cursor: incompleteNext })
+      }
       if (parsed.searchParams.get('status') || parsed.searchParams.get('publication_state')) return jsonResponse({ reviews: [] })
       return jsonResponse({ reviews })
     }
@@ -30,31 +33,49 @@ function alertPanel() {
 describe('overview incomplete review alerts', () => {
   afterEach(() => vi.unstubAllGlobals())
 
-  it('aggregates INCOMPLETE reviews and completed reviews with failed or skipped nodes', async () => {
-    routeOverview([
-      review({ id: 'incomplete-1', status: 'completed', verdict: 'INCOMPLETE', nodes: [] }),
-      review({ id: 'incomplete-2', status: 'completed', verdict: 'INCOMPLETE', nodes: [] }),
-      review({
-        id: 'node-failed', status: 'completed', verdict: 'BLOCKING',
-        nodes: [{ id: 'verify.f1', kind: 'verify', status: 'failed' }],
-      }),
-      review({
-        id: 'node-skipped', status: 'completed', verdict: 'PASS',
-        nodes: [{ id: 'verify.f2', kind: 'verify', status: 'skipped' }],
-      }),
-      review({ id: 'clean', status: 'completed', verdict: 'PASS', nodes: [{ id: 'p', kind: 'plan', status: 'completed' }] }),
-    ])
+  it('counts INCOMPLETE reviews from the server-filtered query and node issues from recent reviews', async () => {
+    routeOverview(
+      [
+        review({
+          id: 'node-failed', status: 'completed', verdict: 'BLOCKING',
+          nodes: [{ id: 'verify.f1', kind: 'verify', status: 'failed' }],
+        }),
+        review({
+          id: 'node-skipped', status: 'completed', verdict: 'PASS',
+          nodes: [{ id: 'verify.f2', kind: 'verify', status: 'skipped' }],
+        }),
+        review({ id: 'clean', status: 'completed', verdict: 'PASS', nodes: [{ id: 'p', kind: 'plan', status: 'completed' }] }),
+      ],
+      [
+        review({ id: 'incomplete-1', status: 'completed', verdict: 'INCOMPLETE', nodes: [] }),
+        review({ id: 'incomplete-2', status: 'completed', verdict: 'INCOMPLETE', nodes: [] }),
+      ],
+    )
     renderWithProviders(<OverviewPage />, { route: '/' })
 
     await screen.findByRole('heading', { name: '告警' })
     const panel = alertPanel()
     await waitFor(() => expect(within(panel).getByText('评审未完成')).toBeInTheDocument())
-    expect(within(panel).getByText(/2 个已结束评审为 INCOMPLETE/)).toBeInTheDocument()
+    expect(within(panel).getByText(/^2 个已结束评审为 INCOMPLETE/)).toBeInTheDocument()
     expect(within(panel).getByRole('link', { name: '查看 INCOMPLETE 评审' })).toHaveAttribute('href', '/reviews?verdict=INCOMPLETE')
     expect(within(panel).getByText('评审节点异常')).toBeInTheDocument()
-    expect(within(panel).getByText(/2 个已结束评审包含失败或跳过的节点/)).toBeInTheDocument()
+    expect(within(panel).getByText(/^2 个已结束评审包含失败或跳过的节点/)).toBeInTheDocument()
+    expect(within(panel).getByText(/按最近 3 条评审统计/)).toBeInTheDocument()
     expect(within(panel).getByRole('link', { name: '查看评审' })).toHaveAttribute('href', '/reviews?status=completed')
     expect(within(panel).getByText(/检查范围：token 过期、工作区异常、停用项目/)).toBeInTheDocument()
+  })
+
+  it('marks a truncated INCOMPLETE count with a plus instead of treating the first page as complete', async () => {
+    routeOverview(
+      [review({ id: 'clean', status: 'completed', verdict: 'PASS', nodes: [{ id: 'p', kind: 'plan', status: 'completed' }] })],
+      Array.from({ length: 50 }, (_, index) => review({ id: `incomplete-${index}`, status: 'completed', verdict: 'INCOMPLETE', nodes: [] })),
+      'next-page',
+    )
+    renderWithProviders(<OverviewPage />, { route: '/' })
+
+    const panel = await screen.findByRole('heading', { name: '告警' }).then((title) => title.closest('section')!)
+    await waitFor(() => expect(within(panel).getByText(/^50\+ 个已结束评审为 INCOMPLETE/)).toBeInTheDocument())
+    expect(within(panel).queryByText('无异常')).not.toBeInTheDocument()
   })
 
   it('does not alert for a clean completed review', async () => {

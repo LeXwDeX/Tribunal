@@ -64,8 +64,8 @@ web/
 |---|---|---|
 | 运行中 | 正在运行的评审：项目、MR、当前阶段、已用时 | `GET /reviews?status=running` + SSE |
 | 近 7 天 | 运行次数（含评审与 onboarding）、BLOCKING 比例、发布条目数、规则丢弃比例、平均/P95 耗时 | `GET /stats` |
-| 需要处理 | 工作区异常、token 30 天内过期、发布失败，或带 `publication_error` 的 pending 重试；普通 pending 不告警；provider 连续错误只对平台管理员加载。另含 `completed + verdict=INCOMPLETE` 与含 failed/skipped 节点的 completed 评审，按已加载的最近评审计数，合并为聚合告警 | `GET /projects`、`GET /providers`、`GET /reviews?publication_state=failed`、`GET /reviews?publication_state=pending`、`GET /reviews`（已加载的近期评审） |
-| 最近评审 | 最近 20 条 | `GET /reviews?limit=20` |
+| 需要处理 | 工作区异常、token 30 天内过期、发布失败，或带 `publication_error` 的 pending 重试；普通 pending 不告警；provider 连续错误只对平台管理员加载。另含 `completed + verdict=INCOMPLETE` 与含 failed/skipped 节点的 completed 评审：INCOMPLETE 用服务端过滤取首页，有下一页时显示 `N+`；失败/跳过节点没有服务端过滤参数，按已加载的最近评审计数并在文案中标注条数。两类合并为聚合告警 | `GET /projects`、`GET /providers`、`GET /reviews?publication_state=failed`、`GET /reviews?publication_state=pending`、`GET /reviews?status=completed&verdict=INCOMPLETE`、`GET /reviews`（已加载的近期评审） |
+| 最近评审 | 最近 50 条（服务端默认 `limit=50`） | `GET /reviews` |
 
 ### 3.2 评审列表
 
