@@ -1107,7 +1107,7 @@ curl -fsS http://127.0.0.1:18080/readyz
 
 新 payload 的 request、response 分别有 `_format=audit_metadata_v1`；未标记历史 payload 可能是完整旧请求/响应、旧元数据或截断摘要，甚至无法判别。升级依赖该接口的脚本以格式标记和字段类型分支处理，保留 unknown 分支，不得把新元数据的数字 `messages` 当成旧消息数组。详见[节点调用审计格式](design/03-http-api.md#节点调用审计格式)。
 
-`storage.llm_call_retention`（默认 720h）到期会删除 `llm_calls` 的逐次调用审计明细，节点和评审的用量汇总仍保留。所选统计范围早于截止点时，`GET /api/v1/stats/reviews` 返回 `model_details_purged=true`；节点详情和调用列表也会说明明细已按保留策略删除（`calls_purged` / `retention.details_purged`），空调用列表不等于代码节点。需要更长审计窗口时调大该值并重启。模型维度统计改由长期日聚合表（`llm_call_daily` 等，见[后台对账、调用聚合与工作区回收](#后台对账调用聚合与工作区回收459)）支撑：`GET /api/v1/stats` 的 `model_details_purged` 表示所选窗口混用了聚合数据（明细已删除），而不是模型未被使用；聚合表不随 `storage.llm_call_retention` 删除，只在删除项目时同步删除。
+`storage.llm_call_retention`（默认 720h）到期会删除 `llm_calls` 的逐次调用审计明细，节点和评审的用量汇总仍保留。所选统计范围早于截止点时，`GET /api/v1/stats/reviews` 返回 `model_details_purged=true`；节点详情和调用列表也会说明明细已按保留策略删除（`calls_purged` / `retention.details_purged`），空调用列表不等于代码节点。需要更长审计窗口时调大该值并重启。模型维度统计改由长期日聚合表（`llm_call_daily` 等，见[后台对账、调用聚合与工作区回收](#后台对账调用聚合与工作区回收459)）支撑：`GET /api/v1/stats` 的 `model_details_purged` 表示聚合表覆盖的 workflow 有明细行已被保留策略删除（聚合调用数超过同一 workflow 群体的剩余明细行数），而不是模型未被使用，也不会因为明细完整却仍从聚合表读取而误报；聚合表不随 `storage.llm_call_retention` 删除，只在删除项目时同步删除。
 
 ### dossier 归属迁移（v1.2.0）
 
@@ -1280,7 +1280,7 @@ profiles:
 
 **配置默认禁用**：`workspace.max_bytes` 与 `workspace.reclaim_after` 默认均为 0，启用前不测量容量也不回收工作区；需要时在挂载配置中设置正数并重启，负数会被配置校验拒绝。工作区维护在每次 run cleanup 中执行：清理不再被保护的 `refs/merge-requests/<iid>/head` 后运行 `git gc --quiet --auto`，保护查询失败时跳过该项目的 ref 清理与 gc。启用回收后，长期不活跃项目的整个工作区目录可被删除，但无本进程注册 run、保护集合、活动时间、直接子目录与有效 managed marker 必须全部满足；被回收目录会在下次刷新或 onboarding 时重建。
 
-**按模型统计与 `model_details_purged`**：`GET /api/v1/stats` 的 `by_model` 在明细仍存在时使用明细（精确、含精确 p50），早于 `storage.llm_call_retention` 的区间改由三张聚合表提供（按 UTC 日粒度，边界日可能少计当天早期已删除的调用），因此按模型统计在明细清理后仍可用。窗口内混用了聚合数据时返回 `model_details_purged=true`；`GET /api/v1/stats/reviews` 的同名字段使用同一数据驱动判定，窗口内没有调用时为 `false`（不再按配置保留期推断）。`by_model[]` 新增 `errors_by_kind`。项目删除时同步删除该项目的三张聚合表行；聚合表不随明细保留期删除。
+**按模型统计与 `model_details_purged`**：`GET /api/v1/stats` 的 `by_model` 以 workflow `created_at` 的 UTC 日划分数据来源：创建日不晚于最旧剩余调用所在 UTC 日的 workflow 由三张聚合表提供（按 UTC 日粒度），创建日更晚的 workflow 由明细提供（精确、含精确 p50）。最旧剩余调用所在日的所有调用都归聚合表，因此该日早于截止点被删除的调用仍计入，其余 workflow 的调用也不会同时出现在两处。聚合表覆盖的调用数超过同一 workflow 群体的剩余明细行数时返回 `model_details_purged=true`（明细完整时为 `false`）；`GET /api/v1/stats/reviews` 的同名字段使用同一数据驱动判定，窗口内没有调用时为 `false`（不再按配置保留期推断）。`by_model[]` 新增 `errors_by_kind`。项目删除时同步删除该项目的三张聚合表行；聚合表不随明细保留期删除。
 
 ### 集成接缝与降级可见性（#466）
 

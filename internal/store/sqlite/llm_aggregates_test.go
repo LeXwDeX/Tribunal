@@ -81,6 +81,142 @@ func TestModelStatsSurviveDetailRetention(t *testing.T) {
 	assertAggregateModel(t, unfiltered.ByModel)
 }
 
+// TestModelStatsCountsCrossMidnightCallOnce pins the boundary between detail
+// rows and daily aggregates to workflow creation days: a workflow created
+// before midnight whose surviving call happened after it must be served from
+// the aggregate only, not from both sources (#520).
+func TestModelStatsCountsCrossMidnightCallOnce(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	st := openTestStore(t, clock)
+	mustProject(t, st, 42)
+
+	clock.Advance(11*time.Hour + 50*time.Minute) // 2026-10-22T23:50Z
+	wfID := "wf-cross-midnight"
+	mustCreateWorkflow(t, st, wfID, reviewMeta(42, 9, "head"), clock.Now())
+	recordAggregateCall(t, st, wfID, "a", 1, 10, 4, time.Second, nil)
+	clock.Advance(20 * time.Minute) // 2026-10-23T00:10Z
+	recordAggregateCall(t, st, wfID, "a", 2, 20, 8, 2*time.Second, nil)
+
+	// Before retention the detail rows are complete: the aggregate-owned day
+	// must not claim purged details.
+	before, err := st.Stats(ctx, store.StatsFilter{ProjectID: ptrInt64(42)})
+	if err != nil {
+		t.Fatalf("Stats before retention: %v", err)
+	}
+	if before.ModelDetailsPurged {
+		t.Fatal("complete detail rows were reported as purged")
+	}
+	if len(before.ByModel) != 1 || before.ByModel[0].Calls != 2 {
+		t.Fatalf("model stats before retention = %+v, want 2 calls", before.ByModel)
+	}
+
+	// Retention keeps only the call after midnight, so MIN(created_at) falls
+	// on the next UTC day while both calls belong to the earlier day's
+	// aggregate row.
+	retainedFrom := time.Date(2026, 10, 23, 0, 0, 0, 0, time.UTC)
+	if _, err := st.DeleteLLMCallsBefore(ctx, retainedFrom); err != nil {
+		t.Fatalf("DeleteLLMCallsBefore: %v", err)
+	}
+
+	stats, err := st.Stats(ctx, store.StatsFilter{ProjectID: ptrInt64(42)})
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if len(stats.ByModel) != 1 {
+		t.Fatalf("by model = %+v", stats.ByModel)
+	}
+	model := stats.ByModel[0]
+	if model.Calls != 2 || model.InputTokens != 30 || model.OutputTokens != 12 {
+		t.Fatalf("model stats = %+v, want 2 calls and 30/12 tokens", model)
+	}
+	if model.AvgLatencyMS == nil || *model.AvgLatencyMS != 1500 {
+		t.Fatalf("avg latency = %v, want 1500ms", model.AvgLatencyMS)
+	}
+}
+
+// TestModelStatsKeepsRetentionBoundaryDayCalls covers the inverse gap: the
+// aggregate rows of the oldest retained call's UTC day must stay in the
+// aggregate window, because that day's earlier detail rows were deleted by
+// retention and are otherwise counted nowhere (#520).
+func TestModelStatsKeepsRetentionBoundaryDayCalls(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	st := openTestStore(t, clock)
+	mustProject(t, st, 42)
+
+	// wf-lost is created on the boundary day and its only call is deleted by
+	// retention, so it has no detail row left to be counted from.
+	clock.Advance(20 * time.Hour) // 2026-10-23T08:00Z
+	wfLost := "wf-lost"
+	mustCreateWorkflow(t, st, wfLost, reviewMeta(42, 9, "head"), clock.Now())
+	recordAggregateCall(t, st, wfLost, "a", 1, 10, 4, time.Second, nil)
+
+	// wf-survivor sets MIN(created_at) with its call at 12:00 after one of its
+	// two calls is deleted as well.
+	clock.Advance(3 * time.Hour) // 2026-10-23T11:00Z
+	wfSurvivor := "wf-survivor"
+	mustCreateWorkflow(t, st, wfSurvivor, reviewMeta(42, 10, "head"), clock.Now())
+	recordAggregateCall(t, st, wfSurvivor, "a", 1, 20, 8, time.Second, nil)
+	clock.Advance(time.Hour) // 2026-10-23T12:00Z
+	recordAggregateCall(t, st, wfSurvivor, "a", 2, 5, 2, 2*time.Second, nil)
+
+	if _, err := st.DeleteLLMCallsBefore(ctx, time.Date(2026, 10, 23, 11, 30, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("DeleteLLMCallsBefore: %v", err)
+	}
+
+	stats, err := st.Stats(ctx, store.StatsFilter{ProjectID: ptrInt64(42)})
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if len(stats.ByModel) != 1 {
+		t.Fatalf("by model = %+v", stats.ByModel)
+	}
+	model := stats.ByModel[0]
+	if model.Calls != 3 || model.InputTokens != 35 || model.OutputTokens != 14 {
+		t.Fatalf("model stats = %+v, want 3 calls and 35/14 tokens", model)
+	}
+}
+
+// TestModelStatsServesWorkflowsAfterDetailBoundaryFromDetails guards the other
+// side of the partition: workflows created after the boundary day are counted
+// exactly once from their retained detail rows (#520).
+func TestModelStatsServesWorkflowsAfterDetailBoundaryFromDetails(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	st := openTestStore(t, clock)
+	mustProject(t, st, 42)
+
+	// Old workflow whose surviving call sets MIN(created_at) to 2026-10-23.
+	wfOld := "wf-old"
+	mustCreateWorkflow(t, st, wfOld, reviewMeta(42, 9, "head"), clock.Now())
+	recordAggregateCall(t, st, wfOld, "a", 1, 10, 4, time.Second, nil)
+	clock.Advance(24 * time.Hour) // 2026-10-23T12:00Z
+	recordAggregateCall(t, st, wfOld, "a", 2, 20, 8, 2*time.Second, nil)
+
+	// A workflow created the day after the boundary is fully retained.
+	clock.Advance(21 * time.Hour) // 2026-10-24T09:00Z
+	wfNew := "wf-new"
+	mustCreateWorkflow(t, st, wfNew, reviewMeta(42, 10, "head"), clock.Now())
+	recordAggregateCall(t, st, wfNew, "a", 1, 5, 2, 3*time.Second, nil)
+
+	if _, err := st.DeleteLLMCallsBefore(ctx, time.Date(2026, 10, 23, 0, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("DeleteLLMCallsBefore: %v", err)
+	}
+
+	stats, err := st.Stats(ctx, store.StatsFilter{ProjectID: ptrInt64(42)})
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if len(stats.ByModel) != 1 {
+		t.Fatalf("by model = %+v", stats.ByModel)
+	}
+	model := stats.ByModel[0]
+	if model.Calls != 3 || model.InputTokens != 35 || model.OutputTokens != 14 {
+		t.Fatalf("model stats = %+v, want 3 calls and 35/14 tokens", model)
+	}
+}
+
 func assertAggregateModel(t *testing.T, models []store.ModelStats) {
 	t.Helper()
 	if len(models) != 1 {

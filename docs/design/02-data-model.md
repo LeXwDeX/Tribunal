@@ -362,7 +362,7 @@ CREATE TABLE workspace_capacity (
 );
 ```
 
-> `0033` 从现有 `llm_calls JOIN workflows` 回填三张聚合表：`day` 取 workflow `created_at` 的 UTC 日，回填使用 `INSERT OR IGNORE`，可重复执行且不重复累计。`feedback_collection_state` 与 `workspace_capacity` 在迁移时各插入 `id=1` 的空行。`feedback_collection_state` 成功一轮只推进 `last_collected_at`，失败只更新 `last_error_class` 与 `last_error_at`；`last_collected_at` 晚于 `last_error_at` 表示已恢复。`workspace_capacity` 由 run cleanup 在启用 `workspace.max_bytes` 时覆盖写入（`measured_at`、`total_bytes`、`limit_bytes`、`over_limit`）。该迁移只做追加、不可逆；回滚需恢复升级前快照并启动匹配的旧二进制。
+> `0033` 从现有 `llm_calls JOIN workflows` 回填三张聚合表：`day` 取 workflow `created_at` 的 UTC 日，回填使用 `INSERT OR IGNORE`，可重复执行且不重复累计。`feedback_collection_state` 与 `workspace_capacity` 在迁移时各插入 `id=1` 的空行。`feedback_collection_state` 成功一轮只推进 `last_collected_at`，失败只更新 `last_error_class` 与 `last_error_at`；`last_collected_at` 晚于 `last_error_at` 表示已恢复。`workspace_capacity` 由 run cleanup 在启用 `workspace.max_bytes` 时覆盖写入（`measured_at`、`total_bytes`、`limit_bytes`、`over_limit`）。该迁移只做追加、不可逆；回滚需恢复升级前快照并启动匹配的旧二进制。统计读取时以 workflow 创建日为唯一分区键：创建日不晚于最旧剩余明细调用所在 UTC 日的 workflow 由聚合表覆盖（明细查询按 `w.created_at >= 次日 00:00Z` 排除），创建日更晚的 workflow 由明细覆盖，因此保留策略删掉任何调用前后都不会重复或遗漏计数（#520）。
 
 ```sql
 -- 0011_review_side_effects.sql 建表；0031_review_status_final_body.sql 追加 final_body；0032_review_status_final_body_ready.sql 追加 final_body_ready；0033_background_maintenance.sql 追加 last_verified_at

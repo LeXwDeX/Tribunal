@@ -340,9 +340,10 @@ func TestProjectAccessFiltersQueryBeforePaging(t *testing.T) {
 	}
 	for _, call := range []struct {
 		id, workflow, provider string
+		project                int64
 	}{
-		{"call-42", "wf-42-0", "anthropic"},
-		{"call-43", "wf-43-0", "openai"},
+		{"call-42", "wf-42-0", "anthropic", 42},
+		{"call-43", "wf-43-0", "openai", 43},
 	} {
 		if _, err := s.db.ExecContext(ctx, `INSERT INTO llm_calls
 			(id, workflow_id, node_id, turn, provider, model, input_tokens,
@@ -350,6 +351,15 @@ func TestProjectAccessFiltersQueryBeforePaging(t *testing.T) {
 			VALUES (?, ?, 'n', 0, ?, 'm', 1, 1, 0, 0, 1, ?)`,
 			call.id, call.workflow, call.provider, formatTime(base)); err != nil {
 			t.Fatalf("insert llm call %s: %v", call.id, err)
+		}
+		// Production records the daily aggregate in the same transaction as
+		// the detail row; keep the fixture on that invariant (#520).
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO llm_call_daily
+			(day, project_id, provider, model, calls, errors, input_tokens,
+			 output_tokens, cache_read, cache_write, latency_ms_sum, latency_samples)
+			VALUES (?, ?, ?, 'm', 1, 0, 1, 1, 0, 0, 1, 1)`,
+			base.UTC().Format(dayLayout), call.project, call.provider); err != nil {
+			t.Fatalf("insert llm aggregate %s: %v", call.id, err)
 		}
 	}
 	// Started nodes and attributed findings give every stats branch data.
