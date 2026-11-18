@@ -28,6 +28,14 @@ const (
 	oauthStateTTL = 10 * time.Minute
 	oauthBodyMax  = 1 << 20
 
+	// maxReturnTo bounds the deep link accepted from the login query.
+	// maxState must stay above the signed encoding of a return_to at that
+	// limit: base64 expands expiry, nonce and return_to by 4/3 and the
+	// signature adds 44 characters, so 512 bytes become a 775-byte state.
+	// 1024 leaves room for a longer expiry prefix.
+	maxReturnTo = 512
+	maxState    = 1024
+
 	defaultSessionTTL = 168 * time.Hour
 
 	adminIDPrefix = "id:"
@@ -198,7 +206,7 @@ func (a *authService) stateReturnTo(state string) string {
 // routes so the login flow cannot become an open redirect.
 func safeReturnTo(value string) string {
 	value = strings.TrimSpace(value)
-	if value == "" || len(value) > 512 {
+	if value == "" || len(value) > maxReturnTo {
 		return "/"
 	}
 	if !strings.HasPrefix(value, "/") || strings.HasPrefix(value, "//") ||
@@ -216,7 +224,7 @@ func safeReturnTo(value string) string {
 }
 
 func (a *authService) validState(state string) bool {
-	if len(state) > 512 {
+	if len(state) > maxState {
 		return false
 	}
 	encoded, signature, ok := strings.Cut(state, ".")

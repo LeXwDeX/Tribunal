@@ -3,6 +3,8 @@ package server
 import (
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -40,6 +42,47 @@ func TestLoginReturnToRedirectsAfterCallback(t *testing.T) {
 	}
 	if location := callback.header.Get("Location"); location != "/reviews/wf-1?tab=findings" {
 		t.Fatalf("callback Location = %q, want the original deep link", location)
+	}
+}
+
+// TestLoginReturnToLengthBoundary pins the return_to limit and the state limit
+// together. A 315-byte return_to encodes to a 512-byte state, and 316 bytes
+// encode to 514: the two limits must not disagree, or a legitimate deep link
+// is rejected on the first login and lost.
+func TestLoginReturnToLengthBoundary(t *testing.T) {
+	for _, size := range []int{315, 316, 512} {
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
+			returnTo := "/" + strings.Repeat("a", size-1)
+			if len(returnTo) != size {
+				t.Fatalf("return_to length = %d, want %d", len(returnTo), size)
+			}
+			env := newAuthEnv(t)
+			client := env.client()
+			authorize := loginWithReturnTo(t, env, client, returnTo)
+			callback := env.callback(client, "code-admin", authorize.Query().Get("state"))
+			if callback.status != http.StatusSeeOther {
+				t.Fatalf("callback status = %d, body=%s", callback.status, callback.body)
+			}
+			if location := callback.header.Get("Location"); location != returnTo {
+				t.Fatalf("callback Location length = %d, want the %d-byte deep link", len(location), size)
+			}
+		})
+	}
+}
+
+// TestLoginReturnToOverLimitFallsBack keeps the upper bound: one byte over the
+// accepted length is still dropped rather than carried into the state.
+func TestLoginReturnToOverLimitFallsBack(t *testing.T) {
+	returnTo := "/" + strings.Repeat("a", 512)
+	env := newAuthEnv(t)
+	client := env.client()
+	authorize := loginWithReturnTo(t, env, client, returnTo)
+	callback := env.callback(client, "code-admin", authorize.Query().Get("state"))
+	if callback.status != http.StatusSeeOther {
+		t.Fatalf("callback status = %d, body=%s", callback.status, callback.body)
+	}
+	if location := callback.header.Get("Location"); location != "/" {
+		t.Fatalf("callback Location length = %d, want /", len(location))
 	}
 }
 
