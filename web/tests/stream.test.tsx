@@ -97,6 +97,21 @@ describe('review SSE lifecycle', () => {
     expect(FakeEventSource.instances[1].url).toBe('/api/v1/reviews/second.review/stream')
   })
 
+  it('reconciles detail and graph when the stream opens', async () => {
+    const client = createTestQueryClient()
+    const invalidate = vi.spyOn(client, 'invalidateQueries')
+    render(
+      <QueryClientProvider client={client}><Harness id="review.1" status="running" /></QueryClientProvider>,
+    )
+    await vi.waitFor(() => expect(FakeEventSource.instances).toHaveLength(1))
+    const source = FakeEventSource.instances[0]
+    await act(async () => {
+      source.dispatchEvent(new Event('open'))
+    })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['review', 'review.1', 'detail'] })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['review', 'review.1', 'graph'] })
+  })
+
   it('keeps list and stats caches on node events', async () => {
     const client = createTestQueryClient()
     const invalidate = vi.spyOn(client, 'invalidateQueries')
