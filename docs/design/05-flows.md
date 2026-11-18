@@ -206,7 +206,7 @@ Note Hook 统一先持久化为 `review.command`，以下 GitLab 校验由 worke
 
 发布执行状态与 workflow 执行状态分开持久化：
 
-- `pending`：执行已终态但 GitLab 发布未完成，可能是等待中的重试；启动恢复会再次处理，运行期可手动 republish。没有独立的后台发布扫描。
+- `pending`：执行已终态但 GitLab 发布未完成，可能是等待中的重试。启动恢复会先重试一轮；运行期每 5 分钟的 side-effect 对账也会扫描 completed/failed 的 pending 行并重试，同一工作流两次自动尝试至少间隔 15 分钟（dossier 的 `updated_at` 记录上次尝试），避免每次对账都翻转状态注记和 reaction。讨论结果未知（`publication_error` 为 `discussion outcome unknown`）不进入该扫描，仍按 7 天有界窗口结算；永久失败写为 `failed`，不自动重试。运行期也可手动 republish。
 - `published`：状态/结果评论、失败摘要及需要写入的 commit status 已完成。
 - `skipped`：fingerprint/head/config/prompt 已 stale、评审被取消或被新代次替换，或项目关闭 failure note；记录原因，不自动重发。
 - `failed`：无法继续的永久发布失败（如 MR 已关闭），记录脱敏原因，需控制台或 API 手动 republish。

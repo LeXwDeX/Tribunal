@@ -98,9 +98,28 @@ func (s *ReviewService) settleRecoveryCancel(ctx context.Context, workflowID, ca
 		}
 		return
 	}
-	s.settleReviewStatus(ctx, wf.ProjectID, *wf.MRIID, record.Generation, 0, head, wf.Profile,
+	attempt := s.recoveryStatusAttempt(ctx, wf.ProjectID, *wf.MRIID, record.Generation, head)
+	s.settleReviewStatus(ctx, wf.ProjectID, *wf.MRIID, record.Generation, attempt, head, wf.Profile,
 		reviewStatusCancelled, recoveryCancelReason(cause)+"; please re-trigger the review",
 		dossierNoteID(dossier), reviewAwardNone)
+}
+
+// recoveryStatusAttempt continues the attempt sequence of the current
+// generation. A terminal row blocks a same-attempt rewrite in the store, so
+// recovery uses the next attempt to replace an exhausted run's failed state
+// (#526). A newer generation or a different head starts from zero.
+func (s *ReviewService) recoveryStatusAttempt(ctx context.Context, projectID, mrIID, generation int64, head string) int {
+	row, err := s.store.GetReviewStatus(ctx, projectID, mrIID)
+	if err != nil || row == nil {
+		return 0
+	}
+	if row.Generation != generation || (head != "" && !strings.EqualFold(row.HeadSHA, head)) {
+		return 0
+	}
+	if terminalReviewStatus(row.State) {
+		return row.Attempt + 1
+	}
+	return row.Attempt
 }
 
 func (s *ReviewService) logRecoveryCancel(workflowID, cause string) {
@@ -490,7 +509,10 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 	s.executors.Register(workflow.ID, executor)
 	defer s.executors.Unregister(workflow.ID)
 	noteID := dossierNoteID(dossier)
-	s.setReviewStatus(ctx, project.ID, *workflow.MRIID, record.Generation, 0,
+	// One attempt covers the whole recovered run: the running write and every
+	// terminal write must pass the store's same-attempt fence (#526).
+	attempt := s.recoveryStatusAttempt(ctx, project.ID, *workflow.MRIID, record.Generation, dossier.DiffVersion.HeadSHA)
+	s.setReviewStatus(ctx, project.ID, *workflow.MRIID, record.Generation, attempt,
 		dossier.DiffVersion.HeadSHA, profileName, reviewStatusRunning, "")
 	superseded, err := s.runWithControl(ctx, project.ID, *workflow.MRIID, workflow.ID, record.Generation, dossier.DiffVersion.HeadSHA)
 	if err != nil {
@@ -512,7 +534,7 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 	cfg := s.resolveConfig(project, dossier.RepoDocs)
 	switch snapshot.Status {
 	case dag.WorkflowCompleted:
-		s.setReviewStatus(ctx, project.ID, *workflow.MRIID, record.Generation, 0,
+		s.setReviewStatus(ctx, project.ID, *workflow.MRIID, record.Generation, attempt,
 			dossier.DiffVersion.HeadSHA, profileName, reviewStatusPublishing, "")
 		if err := s.publish(ctx, workflow.ID); err != nil {
 			if errors.Is(err, workspace.ErrOutboundInvalidated) || errors.Is(err, errDiscussionUnknown) {
@@ -526,16 +548,16 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 				reaction = reviewAwardNone
 				detail = "review is no longer current"
 			}
-			s.settleReviewStatus(ctx, project.ID, *workflow.MRIID, record.Generation, 0,
+			s.settleReviewStatus(ctx, project.ID, *workflow.MRIID, record.Generation, attempt,
 				dossier.DiffVersion.HeadSHA, profileName, state, detail, noteID, reaction)
 			return err
 		}
 		state, reaction := reviewStatusForVerdict(s.workflowVerdict(ctx, workflow.ID))
-		s.settleReviewStatus(ctx, project.ID, *workflow.MRIID, record.Generation, 0,
+		s.settleReviewStatus(ctx, project.ID, *workflow.MRIID, record.Generation, attempt,
 			dossier.DiffVersion.HeadSHA, profileName, state, "", noteID, reaction)
 		return nil
 	case dag.WorkflowFailed:
-		s.setReviewStatus(ctx, project.ID, *workflow.MRIID, record.Generation, 0,
+		s.setReviewStatus(ctx, project.ID, *workflow.MRIID, record.Generation, attempt,
 			dossier.DiffVersion.HeadSHA, profileName, reviewStatusPublishing, "")
 		var publishErr error
 		if cfg.Settings.PostFailureNote || cfg.Settings.CommitStatus {
@@ -543,7 +565,7 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 		} else {
 			publishErr = s.skipPublication(ctx, workflow.ID, failureNoteDisabledReason)
 		}
-		s.settleReviewStatus(ctx, project.ID, *workflow.MRIID, record.Generation, 0,
+		s.settleReviewStatus(ctx, project.ID, *workflow.MRIID, record.Generation, attempt,
 			dossier.DiffVersion.HeadSHA, profileName, reviewStatusFailed, "", noteID, reviewAwardFail)
 		return publishErr
 	case dag.WorkflowCancelled:
@@ -553,7 +575,7 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 		}
 		s.logger.Info("recovery observed cancelled workflow", "workflow_id", workflow.ID, "cause", cause)
 		publishErr := s.skipPublication(ctx, workflow.ID, reviewCancelledReason)
-		s.settleReviewStatus(ctx, project.ID, *workflow.MRIID, record.Generation, 0,
+		s.settleReviewStatus(ctx, project.ID, *workflow.MRIID, record.Generation, attempt,
 			dossier.DiffVersion.HeadSHA, profileName, reviewStatusCancelled, "", noteID, reviewAwardNone)
 		return publishErr
 	}
@@ -574,7 +596,8 @@ func (s *ReviewService) settleRecoveredSuperseded(ctx context.Context, projectID
 	if noteID <= 0 {
 		noteID = s.workflowNoteID(ctx, workflowID)
 	}
-	s.settleReviewStatus(ctx, projectID, mrIID, generation, 0, head, profile, state, detail, noteID, reviewAwardNone)
+	attempt := s.recoveryStatusAttempt(ctx, projectID, mrIID, generation, head)
+	s.settleReviewStatus(ctx, projectID, mrIID, generation, attempt, head, profile, state, detail, noteID, reviewAwardNone)
 }
 
 // recoverRun requires the caller to hold the workspace read lock.

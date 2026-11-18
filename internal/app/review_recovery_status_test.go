@@ -130,3 +130,38 @@ func TestRecoveryCancelSettleSkipsNonCurrentControl(t *testing.T) {
 		t.Fatalf("settle attempted %d status writes for a non-current generation, want 0", counter.writes)
 	}
 }
+
+// A terminal failed row from an exhausted run must not block the recovery
+// cancel settlement: the cancel continues the attempt sequence (#526).
+func TestRecoveryCancelAdvancesPastTerminalAttempt(t *testing.T) {
+	ctx := context.Background()
+	f := newReviewFixture(t, reviewTestHead)
+	f.service.status = testStatusReporter(f.gitlab)
+	job := f.seedReview(t, "job-settle-terminal-attempt")
+	id := interruptReview(t, f, job)
+	row, err := f.db.GetReviewStatus(ctx, 42, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exhausted := row.Attempt + 3
+	written, err := f.db.SetReviewStatus(ctx, store.ReviewStatusGoal{
+		ProjectID: 42, MRIID: 7, Generation: row.Generation,
+		Attempt: exhausted, HeadSHA: row.HeadSHA, Profile: row.Profile,
+		State: reviewStatusFailed, Detail: reviewExecutionFailedReason,
+	})
+	if err != nil || !written {
+		t.Fatalf("seed exhausted status = %v, %v", written, err)
+	}
+	mutateDossierMetadata(t, f, id, "profile_hash", "sha256:other")
+	if err := f.service.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	drainReviewSideEffects(t, f)
+	status, err := f.db.GetReviewStatus(ctx, 42, 7)
+	if err != nil || status.State != reviewStatusCancelled || status.Attempt != exhausted+1 {
+		t.Fatalf("cancelled status = %+v, %v; want cancelled attempt %d", status, err, exhausted+1)
+	}
+	if !strings.Contains(status.Detail, "cancelled on recovery: profile_hash_changed") {
+		t.Fatalf("cancel detail = %q", status.Detail)
+	}
+}

@@ -564,3 +564,124 @@ func TestReviewRunFailureSettlementFallsBackToStatusJob(t *testing.T) {
 		t.Fatalf("recovered status phase = %q: %q", phase, notes[0].Body)
 	}
 }
+
+func statusPhasesOfNotes(f *reviewFixture) []string {
+	var phases []string
+	for _, note := range f.gitlab.noteSnapshot() {
+		phases = append(phases, parseStatusPhase(note.Body))
+	}
+	return phases
+}
+
+// assertConvergedStatusNote requires the expected terminal phase and rejects
+// any remaining failed rendering after convergence.
+func assertConvergedStatusNote(t *testing.T, f *reviewFixture, want string) {
+	t.Helper()
+	phases := statusPhasesOfNotes(f)
+	found := false
+	for _, phase := range phases {
+		if phase == reviewStatusPhase(reviewStatusFailed) {
+			t.Fatalf("status note still renders the failed phase: %v", phases)
+		}
+		if phase == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("status notes = %v, want phase %q", phases, want)
+	}
+}
+
+// TestRecoveryAfterExhaustionReplacesTerminalFailedStatus covers #526: after
+// the exhausted final attempt left a failed row for the current generation, a
+// successful recovery must continue the attempt sequence and replace both the
+// durable status and its note instead of hitting the same-attempt fence.
+func TestRecoveryAfterExhaustionReplacesTerminalFailedStatus(t *testing.T) {
+	ctx := context.Background()
+	f := newReviewFixture(t, reviewTestHead)
+	f.service.status = testStatusReporter(f.gitlab)
+	job := f.seedReview(t, "job-recovery-after-exhaustion")
+	wfID := interruptReview(t, f, job)
+	row, err := f.db.GetReviewStatus(ctx, 42, 7)
+	if err != nil || row.State != reviewStatusRunning {
+		t.Fatalf("interrupted status = %+v, %v", row, err)
+	}
+	// The third failed attempt settles the same generation as failed.
+	exhausted := row.Attempt + 3
+	written, err := f.db.SetReviewStatus(ctx, store.ReviewStatusGoal{
+		ProjectID: 42, MRIID: 7, Generation: row.Generation,
+		Attempt: exhausted, HeadSHA: row.HeadSHA, Profile: row.Profile,
+		State: reviewStatusFailed, Detail: reviewExecutionFailedReason,
+	})
+	if err != nil || !written {
+		t.Fatalf("seed exhausted status = %v, %v", written, err)
+	}
+	drainReviewSideEffects(t, f)
+	if phases := statusPhasesOfNotes(f); len(phases) == 0 || phases[0] != reviewStatusPhase(reviewStatusFailed) {
+		t.Fatalf("status notes = %v, want the exhausted failed phase", phases)
+	}
+
+	if err := f.service.Recover(ctx); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	drainReviewSideEffects(t, f)
+	workflow, err := f.db.GetWorkflow(ctx, wfID)
+	if err != nil || workflow.Status != "completed" {
+		t.Fatalf("recovered workflow = %+v, %v; want completed", workflow, err)
+	}
+	after, err := f.db.GetReviewStatus(ctx, 42, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := reviewStatusForVerdict(workflow.Verdict)
+	if after.State != want || after.Attempt != exhausted+1 {
+		t.Fatalf("recovered status = %+v, want %s attempt %d", after, want, exhausted+1)
+	}
+	assertConvergedStatusNote(t, f, reviewStatusPhase(want))
+}
+
+// TestReviewRunExhaustedCompletedWorkflowRecoversPendingPublication covers
+// #510: when the final attempt finds the workflow completed but publication
+// still pending, settling leaves the status untouched and the periodic
+// reconcile scan retries the publication without a restart.
+func TestReviewRunExhaustedCompletedWorkflowRecoversPendingPublication(t *testing.T) {
+	ctx := context.Background()
+	f := newReviewFixture(t, reviewTestHead)
+	f.service.status = testStatusReporter(f.gitlab)
+	workflow := reviewWithFailedNote(t, f, "job-exhausted-publication")
+	record, err := f.db.GetWorkflowDossier(ctx, workflow.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := f.db.GetReviewStatus(ctx, 42, 7)
+	if err != nil || !terminalReviewStatus(before.State) {
+		t.Fatalf("status before exhaustion = %+v, %v", before, err)
+	}
+	f.service.settleExhaustedRun(ctx, reviewRunPayload{
+		ProjectID: 42, MRIID: 7, Generation: record.Generation,
+		HeadSHA: f.head, Profile: "default",
+	})
+	untouched, err := f.db.GetReviewStatus(ctx, 42, 7)
+	if err != nil || untouched.State != before.State || untouched.Version != before.Version {
+		t.Fatalf("exhausted settlement rewrote the completed workflow status: %+v, %v", untouched, err)
+	}
+
+	f.service.now = func() time.Time { return time.Now().UTC().Add(publicationRetryInterval + time.Minute) }
+	if err := f.service.ReconcileSideEffects(ctx); err != nil {
+		t.Fatalf("ReconcileSideEffects: %v", err)
+	}
+	published, err := f.db.GetWorkflow(ctx, workflow.ID)
+	if err != nil || published.PublicationState != store.WorkflowPublicationPublished {
+		t.Fatalf("publication = %q/%q, %v; want published", published.PublicationState, published.PublicationError, err)
+	}
+	drainReviewSideEffects(t, f)
+	after, err := f.db.GetReviewStatus(ctx, 42, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := reviewStatusForVerdict(published.Verdict)
+	if after.State != want || after.Attempt != before.Attempt+1 {
+		t.Fatalf("recovered status = %+v, want %s attempt %d", after, want, before.Attempt+1)
+	}
+	assertConvergedStatusNote(t, f, reviewStatusPhase(want))
+}

@@ -587,14 +587,23 @@ func (s *ReviewService) settleCancellation(ctx context.Context, payload reviewCa
 	}
 }
 
+// publicationRetryInterval bounds how often the periodic scan retries one
+// pending publication. A retryable upstream error records its attempt in the
+// dossier update time, so a persistent failure costs at most one status and
+// reaction flip per interval instead of one per reconcile tick (#510).
+const publicationRetryInterval = 15 * time.Minute
+
 // ReconcileSideEffects re-enqueues pending durable writes and settles work
 // that no live job can finish. It never re-runs a model.
 func (s *ReviewService) ReconcileSideEffects(ctx context.Context) error {
+	var errs []error
+	if err := s.reconcilePendingPublications(ctx); err != nil {
+		errs = append(errs, err)
+	}
 	projects, err := s.store.ListProjects(ctx)
 	if err != nil {
-		return err
+		return errors.Join(append(errs, err)...)
 	}
-	var errs []error
 	for _, project := range projects {
 		ws := s.workspace.Get(project.ID)
 		if ws == nil {
@@ -611,6 +620,68 @@ func (s *ReviewService) ReconcileSideEffects(ctx context.Context) error {
 		unlock()
 		if err != nil {
 			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// reconcilePendingPublications retries terminal workflows whose publication
+// state is still pending, so a review exhausted by a short GitLab outage is
+// not stranded until the next restart (#510). An unknown discussion outcome
+// keeps its own bounded terminal-age path, permanent failures never select a
+// pending row, and the dossier update time enforces the retry backoff.
+func (s *ReviewService) reconcilePendingPublications(ctx context.Context) error {
+	if s.publisher == nil {
+		return nil
+	}
+	now := s.now().UTC()
+	var errs []error
+	for _, status := range []string{string(dag.WorkflowCompleted), string(dag.WorkflowFailed)} {
+		cursor := ""
+		for {
+			if err := ctx.Err(); err != nil {
+				return errors.Join(append(errs, err)...)
+			}
+			workflows, next, err := s.store.ListWorkflows(ctx, store.WorkflowFilter{
+				Kind: "review", Status: status, PublicationState: store.WorkflowPublicationPending,
+			}, cursor, 50)
+			if err != nil {
+				errs = append(errs, err)
+				break
+			}
+			for _, workflow := range workflows {
+				if err := ctx.Err(); err != nil {
+					return errors.Join(append(errs, err)...)
+				}
+				dossier, err := s.store.GetWorkflowDossier(ctx, workflow.ID)
+				if errors.Is(err, store.ErrNotFound) {
+					continue
+				}
+				if err != nil {
+					errs = append(errs, err)
+					continue
+				}
+				if dossier == nil || dossier.PublicationState != store.WorkflowPublicationPending ||
+					dossier.PublicationError == publicationUnknownReason {
+					continue
+				}
+				if !dossier.UpdatedAt.IsZero() && now.Sub(dossier.UpdatedAt) < publicationRetryInterval {
+					continue
+				}
+				item := store.PendingPublication{WorkflowID: workflow.ID, JobID: dossier.JobID,
+					ProjectID: workflow.ProjectID, HeadSHA: workflow.HeadSHA,
+					Generation: dossier.Generation, Status: workflow.Status, UpdatedAt: dossier.UpdatedAt}
+				if workflow.MRIID != nil {
+					item.MRIID = *workflow.MRIID
+				}
+				if _, err := s.publishPendingItem(ctx, item); err != nil {
+					errs = append(errs, err)
+				}
+			}
+			if next == "" || next == cursor {
+				break
+			}
+			cursor = next
 		}
 	}
 	return errors.Join(errs...)
