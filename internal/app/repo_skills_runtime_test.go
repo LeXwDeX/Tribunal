@@ -449,6 +449,33 @@ func TestRepositorySkillRuntimeFailsClosedWhenIgnoredRenameChangesSnapshot(t *te
 	}
 }
 
+func TestRepositorySkillRuntimeSnapshotFailureExplainsReauthorizationCannotResolve(t *testing.T) {
+	all, err := repo.RepositorySkillsSnapshotSHA256(map[string][]byte{
+		"demo/SKILL.md":   []byte(policyGateSkillBody),
+		"hidden/SKILL.md": []byte("---\nname: hidden\ndescription: hidden marker\n---\nhidden body\n"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, _ := repositoryRuntimeRenameFixture(t, all)
+	captureRepositorySkill(t, f)
+	job := f.seedReview(t, "repository-rename-snapshot-message")
+	err = f.service.RunReview(context.Background(), job)
+	if err == nil || !strings.Contains(err.Error(), "snapshot changed") {
+		t.Fatalf("unfiltered snapshot = %v", err)
+	}
+	message := err.Error()
+	if !strings.Contains(message, "this MR") || !strings.Contains(message, "cannot resolve") {
+		t.Fatalf("snapshot failure does not explain the MR cause: %v", err)
+	}
+	if strings.Contains(message, "reauthorize repository skills") {
+		t.Fatalf("snapshot failure still suggests reauthorization: %v", err)
+	}
+	if f.runner.count() != 0 {
+		t.Fatal("unfiltered repository snapshot reached a model")
+	}
+}
+
 func TestRepositorySkillRuntimeRecoveryAndRepublishUseStoredDenyEvidence(t *testing.T) {
 	f, _ := repositoryRuntimeRenameFixture(t, "")
 	job := f.seedReview(t, "repository-rename-recovery")
