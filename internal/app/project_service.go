@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/errclass"
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/repo"
 	"github.com/LeXwDeX/tribunal/internal/secret"
@@ -1492,10 +1493,21 @@ func (s *ProjectService) provisionWebhook(ctx context.Context, id int64, rotateS
 		return nil, s.failWebhook(ctx, project, "update", err)
 	}
 
+	// A hook GitLab automatically disabled may stay disabled across a
+	// configuration update, so an unconditional enabled write would advertise a
+	// hook that drops every event until the next health scan. Only a hook the
+	// earlier list already reported as disabled is re-checked; a freshly created
+	// hook has no delivery history.
+	state, message := store.WebhookStateEnabled, ""
+	if reused && hookAlertDisabledIn(hooks, hookID) && s.hookStillDisabled(ctx, token, id, hookID) {
+		state, message = store.WebhookStateFailed, webhookDisabledMessage
+	}
+
 	if err := s.store.UpdateProjectWebhook(ctx, id, store.ProjectWebhookUpdate{
 		HookID:    &hookID,
 		SecretEnc: secretEnc,
-		State:     store.WebhookStateEnabled,
+		State:     state,
+		Error:     message,
 		Events:    append([]string(nil), managedWebhookEvents...),
 		ManagedBy: store.WebhookManagedByService,
 	}); err != nil {
@@ -1509,7 +1521,39 @@ func (s *ProjectService) provisionWebhook(ctx context.Context, id int64, rotateS
 		s.logger.Warn("webhook state persistence failed", "project_id", id)
 		return nil, internalError()
 	}
-	return s.webhookResult(ctx, project, hookID, secretEnc), nil
+	return s.webhookResult(ctx, project, hookID, secretEnc, state, message), nil
+}
+
+// hookAlertDisabledIn reports whether the listed hook is disabled in GitLab.
+func hookAlertDisabledIn(hooks []gitlab.Hook, hookID int64) bool {
+	for _, hook := range hooks {
+		if hook.ID == hookID {
+			return hookAlertDisabled(hook.AlertStatus)
+		}
+	}
+	return false
+}
+
+// hookStillDisabled re-reads the managed hook after a configuration update,
+// because GitLab may or may not clear an automatic disable on update. A failed
+// read keeps the earlier disabled observation instead of claiming a recovery
+// nobody saw; the health scan corrects either way.
+func (s *ProjectService) hookStillDisabled(ctx context.Context, token string, projectID, hookID int64) bool {
+	hooks, err := s.gitlab.ListProjectHooks(ctx, token, projectID)
+	if err != nil {
+		if ctx.Err() == nil {
+			s.logger.Warn("webhook alert status read failed", "project_id", projectID, "error_class", errclass.Of(err))
+		}
+		return true
+	}
+	for _, hook := range hooks {
+		if hook.ID == hookID {
+			return hookAlertDisabled(hook.AlertStatus)
+		}
+	}
+	// The hook vanished from the list after the update; keep the earlier
+	// disabled observation rather than claiming it is enabled.
+	return true
 }
 
 // webhookSecret returns the plain secret and its ciphertext. Rebuild always
@@ -1665,7 +1709,7 @@ func (s *ProjectService) markWebhookFailed(ctx context.Context, project *store.P
 
 // webhookResult reads the committed row back, falling back to the known values
 // when the diagnostic read fails.
-func (s *ProjectService) webhookResult(ctx context.Context, fallback *store.Project, hookID int64, secretEnc []byte) *WebhookRegistration {
+func (s *ProjectService) webhookResult(ctx context.Context, fallback *store.Project, hookID int64, secretEnc []byte, state, message string) *WebhookRegistration {
 	saved, err := s.Get(ctx, fallback.ID)
 	if err != nil {
 		copy := *fallback
@@ -1673,9 +1717,9 @@ func (s *ProjectService) webhookResult(ctx context.Context, fallback *store.Proj
 		if len(secretEnc) > 0 {
 			copy.WebhookSecretEnc = secretEnc
 		}
-		copy.WebhookState = store.WebhookStateEnabled
+		copy.WebhookState = state
 		copy.WebhookEvents = append([]string(nil), managedWebhookEvents...)
-		copy.WebhookError = ""
+		copy.WebhookError = message
 		copy.WebhookManagedBy = store.WebhookManagedByService
 		s.logger.Warn("project read-back after webhook update failed", "project_id", fallback.ID)
 		saved = &copy

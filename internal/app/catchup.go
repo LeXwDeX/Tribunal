@@ -36,6 +36,13 @@ const (
 	webhookProvisioningRejectedMessage = "provisioning credential was rejected by GitLab while checking the webhook; update the credential referenced by gitlab.provisioning_token_env and restart the service"
 )
 
+// hookAlertDisabled reports whether GitLab stopped delivering the hook. GitLab
+// sets these statuses on hooks it disabled after repeated failures; "backoff"
+// is a transient retry window and stays enabled.
+func hookAlertDisabled(alertStatus string) bool {
+	return alertStatus == "disabled" || alertStatus == "temporarily_disabled"
+}
+
 // catchUpNamespace derives the deterministic delivery UUID of a catch-up
 // enqueue, so one (project, MR, head) is caught up at most once even if the
 // service restarts repeatedly.
@@ -350,7 +357,7 @@ func (s *CatchUpService) reconcileHookHealth(ctx context.Context, project *store
 	switch {
 	case managed == nil:
 		s.setHookHealth(ctx, writer, project, store.WebhookStateFailed, webhookMissingMessage)
-	case managed.AlertStatus == "disabled" || managed.AlertStatus == "temporarily_disabled":
+	case hookAlertDisabled(managed.AlertStatus):
 		s.setHookHealth(ctx, writer, project, store.WebhookStateFailed, webhookDisabledMessage)
 	case recovered:
 		s.setHookHealth(ctx, writer, project, store.WebhookStateEnabled, "")

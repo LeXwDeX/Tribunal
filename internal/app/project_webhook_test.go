@@ -579,6 +579,140 @@ func TestRebuildWebhookRecreatesExternallyDeletedHook(t *testing.T) {
 	}
 }
 
+// assertHookDisabledReport checks that provisioning reported the managed hook
+// as failed with the fixed disabled message instead of claiming it is enabled.
+func assertHookDisabledReport(t *testing.T, st ProjectStore, result *WebhookRegistration, hookID int64) {
+	t.Helper()
+	if result.Project.WebhookState != store.WebhookStateFailed || result.Project.WebhookError != webhookDisabledMessage {
+		t.Fatalf("response state = %q/%q, want failed with the fixed disabled message",
+			result.Project.WebhookState, result.Project.WebhookError)
+	}
+	saved, err := st.GetProject(context.Background(), 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.WebhookState != store.WebhookStateFailed || saved.WebhookError != webhookDisabledMessage {
+		t.Fatalf("stored state = %q/%q, want failed with the fixed disabled message",
+			saved.WebhookState, saved.WebhookError)
+	}
+	if saved.HookID == nil || *saved.HookID != hookID {
+		t.Fatalf("saved hook = %v, want %d", saved.HookID, hookID)
+	}
+}
+
+func TestRebuildWebhookReportsHookGitLabStillDisables(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	api := defaultFakeGitLab()
+	service := newProjectService(t, st, api, newTestCipher(t), "https://review.example.com")
+	if _, err := service.Register(ctx, RegisterInput{
+		Project: "42", AccessToken: "glpat-project-token", AutoWebhook: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// GitLab permanently disabled the managed hook after repeated delivery
+	// failures; updating the configuration does not clear that state.
+	api.mu.Lock()
+	api.hooks[0].AlertStatus = "disabled"
+	api.mu.Unlock()
+
+	result, err := service.RebuildWebhook(ctx, 42)
+	if err != nil {
+		t.Fatalf("RebuildWebhook: %v", err)
+	}
+	assertHookDisabledReport(t, st, result, 99)
+	if api.callCount("UpdateProjectHook") != 1 {
+		t.Fatalf("update calls = %d", api.callCount("UpdateProjectHook"))
+	}
+}
+
+func TestCreateWebhookReportsHookGitLabTemporarilyDisabled(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	api := defaultFakeGitLab()
+	service := newProjectService(t, st, api, newTestCipher(t), "https://review.example.com")
+	registerManualProject(t, service)
+	recorded := int64(55)
+	if err := st.UpdateProjectWebhook(ctx, 42, store.ProjectWebhookUpdate{
+		HookID: &recorded, State: store.WebhookStateUnknown,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	api.mu.Lock()
+	api.hooks = []gitlab.Hook{{ID: 55, URL: testHookURL, AlertStatus: "temporarily_disabled"}}
+	api.mu.Unlock()
+
+	result, err := service.CreateWebhook(ctx, 42)
+	if err != nil {
+		t.Fatalf("CreateWebhook: %v", err)
+	}
+	assertHookDisabledReport(t, st, result, 55)
+}
+
+func TestCreateWebhookReportsEnabledAfterGitLabClearsDisable(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	api := defaultFakeGitLab()
+	api.updateHookAlertStatus = "executable"
+	service := newProjectService(t, st, api, newTestCipher(t), "https://review.example.com")
+	registerManualProject(t, service)
+	recorded := int64(55)
+	if err := st.UpdateProjectWebhook(ctx, 42, store.ProjectWebhookUpdate{
+		HookID: &recorded, State: store.WebhookStateUnknown,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	api.mu.Lock()
+	api.hooks = []gitlab.Hook{{ID: 55, URL: testHookURL, AlertStatus: "disabled"}}
+	api.mu.Unlock()
+
+	result, err := service.CreateWebhook(ctx, 42)
+	if err != nil {
+		t.Fatalf("CreateWebhook: %v", err)
+	}
+	if result.Project.WebhookState != store.WebhookStateEnabled || result.Project.WebhookError != "" {
+		t.Fatalf("state = %q/%q, want enabled with no error", result.Project.WebhookState, result.Project.WebhookError)
+	}
+}
+
+// failingHookRereadAPI fails every hook list after the first, standing in for a
+// GitLab outage during the post-update alert status read.
+type failingHookRereadAPI struct {
+	*fakeGitLab
+	lists int
+}
+
+func (f *failingHookRereadAPI) ListProjectHooks(ctx context.Context, token string, projectID int64) ([]gitlab.Hook, error) {
+	f.lists++
+	if f.lists > 1 {
+		return nil, &gitlab.Error{Op: "list_hooks", Status: 503}
+	}
+	return f.fakeGitLab.ListProjectHooks(ctx, token, projectID)
+}
+
+func TestCreateWebhookKeepsFailedWhenAlertStatusReadFails(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	api := &failingHookRereadAPI{fakeGitLab: defaultFakeGitLab()}
+	service := newProjectService(t, st, api, newTestCipher(t), "https://review.example.com")
+	registerManualProject(t, service)
+	recorded := int64(55)
+	if err := st.UpdateProjectWebhook(ctx, 42, store.ProjectWebhookUpdate{
+		HookID: &recorded, State: store.WebhookStateUnknown,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	api.mu.Lock()
+	api.hooks = []gitlab.Hook{{ID: 55, URL: testHookURL, AlertStatus: "disabled"}}
+	api.mu.Unlock()
+
+	result, err := service.CreateWebhook(ctx, 42)
+	if err != nil {
+		t.Fatalf("CreateWebhook: %v", err)
+	}
+	assertHookDisabledReport(t, st, result, 55)
+}
+
 func TestDeleteProjectRemovesOnlyRecordedHook(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
