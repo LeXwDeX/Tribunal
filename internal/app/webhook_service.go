@@ -37,6 +37,18 @@ var shaRE = regexp.MustCompile(`^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$`)
 // which would suppress it as a duplicate.
 var webhookRejectionNamespace = uuid.MustParse("5b6c0a0e-9f6e-4c33-8a7e-0d4e1f2a3b6c")
 
+const (
+	// deliveryEventOther replaces an unrecognized X-Gitlab-Event header on a
+	// rejected delivery. The header is unauthenticated and may be almost as
+	// large as the server header limit (#522).
+	deliveryEventOther = "other"
+	// rejectedDeliveryBucket bounds persisted rejections to one row per
+	// project per bucket. The caller controls the event UUID, so keying the row
+	// by it would let a wrong-secret flood fill the single SQLite connection
+	// (#522).
+	rejectedDeliveryBucket = time.Minute
+)
+
 // WebhookStore is the persistence surface needed by WebhookService.
 type WebhookStore interface {
 	GetProject(ctx context.Context, id int64) (*store.Project, error)
@@ -142,22 +154,27 @@ func (s *WebhookService) Handle(ctx context.Context, req WebhookRequest) (Webhoo
 	if reason != "" {
 		return WebhookResult{Ignored: reason}, nil
 	}
+	// Check that the project is registered before creating any per-project
+	// state: the project ID comes from an unauthenticated body, so an unknown ID
+	// must not leave a workspace entry behind for the life of the process
+	// (#511). Only the rejection reason is used here; the project is re-read
+	// inside the lifecycle read lock below.
+	_, reason, err = s.lookupProject(ctx, projectID)
+	if reason != "" {
+		return WebhookResult{Ignored: reason}, err
+	}
+
 	unlock, err := s.workspace.Get(projectID).LifecycleRLock(ctx)
 	if err != nil {
 		return WebhookResult{Ignored: "storage_error"}, err
 	}
 	defer unlock()
 
-	project, err := s.store.GetProject(ctx, projectID)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return WebhookResult{Ignored: "project_not_registered"}, nil
-		}
-		s.logger.Warn("webhook project lookup failed", "project_id", projectID)
-		return WebhookResult{Ignored: "storage_error"}, err
-	}
-	if project == nil || !project.Enabled {
-		return WebhookResult{Ignored: "project_not_registered"}, nil
+	// Project deletion takes the lifecycle write lock, so a project that was
+	// registered before the lock may be gone now. Re-read it inside the lock.
+	project, reason, err := s.lookupProject(ctx, projectID)
+	if reason != "" {
+		return WebhookResult{Ignored: reason}, err
 	}
 
 	eventUUID := strings.TrimSpace(req.UUID)
@@ -170,12 +187,13 @@ func (s *WebhookService) Handle(ctx context.Context, req WebhookRequest) (Webhoo
 	}
 	mrIID := webhookMRIID(req.Event, payload)
 	if !s.validToken(project, req.Token) {
-		s.logger.Warn("webhook authentication failed", "project_id", project.ID, "event", req.Event)
+		event := deliveryEventName(req.Event)
+		s.logger.Warn("webhook authentication failed", "project_id", project.ID, "event", event)
 		// Record the rejection when the envelope is identifiable. The delivery
 		// table then shows that GitLab called with a mismatched secret instead
 		// of reporting a silent green webhook (#457).
 		if parsedUUID != uuid.Nil {
-			s.recordRejected(ctx, project.ID, req.Event, parsedUUID.String(), mrIID, "invalid_secret")
+			s.recordRejected(ctx, project.ID, event, mrIID, "invalid_secret")
 		}
 		return WebhookResult{Unauthorized: true}, nil
 	}
@@ -218,14 +236,50 @@ func (s *WebhookService) validToken(project *store.Project, presented string) bo
 	return subtle.ConstantTimeCompare(expected, []byte(presented)) == 1
 }
 
+// lookupProject reads a registered, enabled project. A non-empty reason is a
+// fixed ignored reason for a clean rejection; a non-nil error is a storage
+// failure. It never creates workspace state.
+func (s *WebhookService) lookupProject(ctx context.Context, projectID int64) (*store.Project, string, error) {
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, "project_not_registered", nil
+		}
+		s.logger.Warn("webhook project lookup failed", "project_id", projectID)
+		return nil, "storage_error", err
+	}
+	if project == nil || !project.Enabled {
+		return nil, "project_not_registered", nil
+	}
+	return project, "", nil
+}
+
+// deliveryEventName bounds the event name stored for a rejected delivery. Only
+// events the ingress understands are kept; any other unauthenticated header
+// value collapses to a fixed marker (#522).
+func deliveryEventName(event string) string {
+	switch event {
+	case "Merge Request Hook", "Note Hook", "Push Hook":
+		return event
+	}
+	return deliveryEventOther
+}
+
 // recordRejected persists a delivery that failed authentication. It never
 // returns an error: the HTTP answer stays the fixed unauthorized response so a
 // caller cannot distinguish storage from authentication failure.
-func (s *WebhookService) recordRejected(ctx context.Context, projectID int64, event, eventUUID string, mrIID int64, reason string) {
-	rejectedUUID := uuid.NewSHA1(webhookRejectionNamespace, []byte(itoa(projectID)+":"+eventUUID)).String()
+//
+// The row key is derived from the project and the current minute bucket rather
+// than the caller-controlled event UUID, so a wrong-secret flood costs at most
+// one row per project per minute; later rejections collapse into the first one
+// through the delivery primary key (#522).
+func (s *WebhookService) recordRejected(ctx context.Context, projectID int64, event string, mrIID int64, reason string) {
+	now := s.now().UTC()
+	bucket := now.Truncate(rejectedDeliveryBucket).Format(time.RFC3339)
+	rejectedUUID := uuid.NewSHA1(webhookRejectionNamespace, []byte(itoa(projectID)+":"+bucket)).String()
 	if _, _, err := s.store.RecordDelivery(ctx, store.Delivery{
 		UUID: rejectedUUID, ProjectID: projectID, MRIID: mrIID, Event: event,
-		Outcome: store.DeliveryRejected, Reason: reason, ReceivedAt: s.now().UTC(),
+		Outcome: store.DeliveryRejected, Reason: reason, ReceivedAt: now,
 	}, nil); err != nil {
 		s.logger.Warn("rejected delivery persistence failed", "project_id", projectID, "event", event, "error_class", errclass.Of(err))
 	}

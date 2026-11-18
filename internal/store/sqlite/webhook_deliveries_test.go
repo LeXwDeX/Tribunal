@@ -90,6 +90,49 @@ func TestListWebhookDeliverySummariesGroupsByMR(t *testing.T) {
 	}
 }
 
+// A pagination run is bound to the delivery time upper bound taken at its first
+// page. Without that snapshot an MR that receives a new delivery between two
+// pages moves ahead of the cursor and is skipped for the rest of the run (#521).
+func TestListWebhookDeliverySummariesSnapshotSkipsLaterDeliveries(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	st := openTestStore(t, clock)
+	mustProject(t, st, 42)
+	base := clock.Now()
+	recordDeliveryAt(t, st, store.Delivery{
+		UUID: "a1", ProjectID: 42, MRIID: 7, Event: "Note Hook",
+		Outcome: store.DeliveryIgnored, Reason: "unsupported_action",
+	}, base)
+	recordDeliveryAt(t, st, store.Delivery{
+		UUID: "b1", ProjectID: 42, MRIID: 8, Event: "Note Hook",
+		Outcome: store.DeliveryIgnored, Reason: "unsupported_action",
+	}, base.Add(time.Minute))
+
+	first, cursor, err := st.ListWebhookDeliverySummaries(ctx, store.WebhookDeliveryFilter{}, "", 1)
+	if err != nil || len(first) != 1 || first[0].MRIID != 8 || cursor == "" {
+		t.Fatalf("first page = %+v, cursor = %q, %v", first, cursor, err)
+	}
+	// MR 7 receives a newer delivery after page 1 was served.
+	recordDeliveryAt(t, st, store.Delivery{
+		UUID: "a2", ProjectID: 42, MRIID: 7, Event: "Note Hook",
+		Outcome: store.DeliveryIgnored, Reason: "unsupported_action",
+	}, base.Add(2*time.Minute))
+
+	second, next, err := st.ListWebhookDeliverySummaries(ctx, store.WebhookDeliveryFilter{}, cursor, 1)
+	if err != nil {
+		t.Fatalf("second page: %v", err)
+	}
+	if len(second) != 1 || second[0].MRIID != 7 {
+		t.Fatalf("second page = %+v, want MR 7", second)
+	}
+	if second[0].Deliveries != 1 {
+		t.Fatalf("second page deliveries = %d, want only the pre-snapshot delivery", second[0].Deliveries)
+	}
+	if next != "" {
+		t.Fatalf("next = %q, want the end of the snapshot", next)
+	}
+}
+
 func TestListWebhookDeliverySummariesCountsEnqueued(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t, newFakeClock())

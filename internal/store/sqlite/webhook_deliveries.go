@@ -2,8 +2,8 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -14,6 +14,11 @@ import (
 // and merge request for the read-only "why was this MR not reviewed" view. It
 // exposes counts and fixed reasons only; the upstream request body is never
 // stored, returned or logged. The access filter is applied before grouping.
+//
+// One pagination run is bound to the delivery time upper bound taken at its
+// first page, so a delivery that arrives between pages cannot move an MR across
+// the cursor and hide it from the rest of the run (#521). Grouping, ordering and
+// LIMIT happen in SQL, and the counts query reads only the selected page.
 func (s *Store) ListWebhookDeliverySummaries(ctx context.Context, filter store.WebhookDeliveryFilter, cursor string, limit int) ([]store.WebhookDeliverySummary, string, error) {
 	limit = normalizeLimit(limit)
 	conditions := []string{"1 = 1"}
@@ -30,13 +35,154 @@ func (s *Store) ListWebhookDeliverySummaries(ctx context.Context, filter store.W
 		conditions = append(conditions, clause)
 		args = append(args, accessArgs...)
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT
-		d.project_id, d.mr_iid, d.outcome, COALESCE(d.reason, ''), COUNT(*), MAX(d.received_at)
-		FROM webhook_deliveries d
-		WHERE `+strings.Join(conditions, " AND ")+`
-		GROUP BY d.project_id, d.mr_iid, d.outcome, COALESCE(d.reason, '')`, args...)
+
+	var (
+		bound    listCursor
+		snapshot time.Time
+		err      error
+	)
+	if cursor != "" {
+		bound, err = decodeListCursor(cursor, listCursorDeliveries)
+		if err != nil {
+			return nil, "", err
+		}
+		if !sameProjectID(bound.ProjectID, filter.ProjectID) {
+			return nil, "", fmt.Errorf("%w: webhook delivery filter changed", store.ErrInvalidCursor)
+		}
+		if !sameMRIID(bound.MRIID, filter.MRIID) {
+			return nil, "", fmt.Errorf("%w: webhook delivery filter changed", store.ErrInvalidCursor)
+		}
+		snapshot, err = parseTime(bound.Snapshot)
+		if err != nil || snapshot.IsZero() {
+			return nil, "", fmt.Errorf("%w: webhook delivery cursor", store.ErrInvalidCursor)
+		}
+	} else {
+		snapshot, err = s.webhookDeliverySnapshot(ctx, conditions, args)
+		if err != nil {
+			return nil, "", err
+		}
+	}
+
+	page, hasMore, err := s.webhookDeliveryPage(ctx, conditions, args, bound, snapshot, limit, cursor != "")
 	if err != nil {
-		return nil, "", fmt.Errorf("sqlite: list webhook deliveries: %w", err)
+		return nil, "", err
+	}
+	next := ""
+	if hasMore {
+		last := page[len(page)-1]
+		next = encodeListCursor(listCursor{
+			Kind:         listCursorDeliveries,
+			ProjectID:    filter.ProjectID,
+			MRIID:        optionalMRIID(filter.MRIID),
+			Snapshot:     formatTime(snapshot),
+			At:           formatTime(last.last),
+			RowProjectID: last.projectID,
+			RowMRIID:     last.mrIID,
+		})
+	}
+	if len(page) == 0 {
+		return nil, next, nil
+	}
+	summaries, err := s.webhookDeliveryCounts(ctx, page, snapshot)
+	if err != nil {
+		return nil, "", err
+	}
+	return summaries, next, nil
+}
+
+// webhookDeliverySnapshot fixes the upper bound for one pagination run: the
+// request time, raised to the newest stored delivery so a row written with a
+// slightly ahead clock is still inside the snapshot.
+func (s *Store) webhookDeliverySnapshot(ctx context.Context, conditions []string, args []any) (time.Time, error) {
+	var latest sql.NullString
+	if err := s.db.QueryRowContext(ctx, `SELECT MAX(d.received_at) FROM webhook_deliveries d
+		WHERE `+strings.Join(conditions, " AND "), args...).Scan(&latest); err != nil {
+		return time.Time{}, fmt.Errorf("sqlite: webhook delivery snapshot: %w", err)
+	}
+	snapshot := s.now().UTC()
+	if latest.Valid && latest.String != "" {
+		at, err := parseTime(latest.String)
+		if err != nil {
+			return time.Time{}, err
+		}
+		if at.After(snapshot) {
+			snapshot = at
+		}
+	}
+	return snapshot, nil
+}
+
+type webhookDeliveryPageRow struct {
+	projectID int64
+	mrIID     int64
+	last      time.Time
+}
+
+// webhookDeliveryPage selects one page of (project, MR) keys ordered by last
+// delivery time. The GROUP BY, keyset bound and LIMIT all run in SQL; the
+// snapshot keeps the selected row set immutable for the run.
+func (s *Store) webhookDeliveryPage(ctx context.Context, conditions []string, args []any, bound listCursor, snapshot time.Time, limit int, hasCursor bool) ([]webhookDeliveryPageRow, bool, error) {
+	pageConditions := append(append([]string(nil), conditions...), "d.received_at <= ?")
+	pageArgs := append(append([]any(nil), args...), formatTime(snapshot))
+	having := ""
+	if hasCursor {
+		having = ` HAVING MAX(d.received_at) < ? OR (MAX(d.received_at) = ? AND (d.project_id > ? OR (d.project_id = ? AND d.mr_iid > ?)))`
+		pageArgs = append(pageArgs, bound.At, bound.At, bound.RowProjectID, bound.RowProjectID, bound.RowMRIID)
+	}
+	pageArgs = append(pageArgs, limit+1)
+	rows, err := s.db.QueryContext(ctx, `SELECT d.project_id, d.mr_iid, MAX(d.received_at) AS last_received
+		FROM webhook_deliveries d
+		WHERE `+strings.Join(pageConditions, " AND ")+`
+		GROUP BY d.project_id, d.mr_iid`+having+`
+		ORDER BY last_received DESC, d.project_id ASC, d.mr_iid ASC
+		LIMIT ?`, pageArgs...)
+	if err != nil {
+		return nil, false, fmt.Errorf("sqlite: list webhook deliveries: %w", err)
+	}
+	defer rows.Close()
+
+	page := make([]webhookDeliveryPageRow, 0, limit+1)
+	for rows.Next() {
+		var (
+			row      webhookDeliveryPageRow
+			received string
+		)
+		if err := rows.Scan(&row.projectID, &row.mrIID, &received); err != nil {
+			return nil, false, fmt.Errorf("sqlite: scan webhook delivery: %w", err)
+		}
+		at, err := parseTime(received)
+		if err != nil {
+			return nil, false, err
+		}
+		row.last = at
+		page = append(page, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("sqlite: iterate webhook deliveries: %w", err)
+	}
+	hasMore := len(page) > limit
+	if hasMore {
+		page = page[:limit]
+	}
+	return page, hasMore, nil
+}
+
+// webhookDeliveryCounts aggregates outcome and reason counts for exactly the
+// selected page keys, within the same snapshot.
+func (s *Store) webhookDeliveryCounts(ctx context.Context, page []webhookDeliveryPageRow, snapshot time.Time) ([]store.WebhookDeliverySummary, error) {
+	keyConditions := make([]string, 0, len(page))
+	countArgs := make([]any, 0, len(page)*2+1)
+	countArgs = append(countArgs, formatTime(snapshot))
+	for _, row := range page {
+		keyConditions = append(keyConditions, `(d.project_id = ? AND d.mr_iid = ?)`)
+		countArgs = append(countArgs, row.projectID, row.mrIID)
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT d.project_id, d.mr_iid, d.outcome, COALESCE(d.reason, ''), COUNT(*)
+		FROM webhook_deliveries d
+		WHERE d.received_at <= ? AND (`+strings.Join(keyConditions, " OR ")+`)
+		GROUP BY d.project_id, d.mr_iid, d.outcome, COALESCE(d.reason, '')`, countArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: list webhook deliveries: %w", err)
 	}
 	defer rows.Close()
 
@@ -44,8 +190,14 @@ func (s *Store) ListWebhookDeliverySummaries(ctx context.Context, filter store.W
 		projectID int64
 		mrIID     int64
 	}
-	groups := make(map[summaryKey]*store.WebhookDeliverySummary)
-	order := make([]summaryKey, 0)
+	summaries := make(map[summaryKey]*store.WebhookDeliverySummary, len(page))
+	for _, row := range page {
+		summaries[summaryKey{projectID: row.projectID, mrIID: row.mrIID}] = &store.WebhookDeliverySummary{
+			ProjectID:      row.projectID,
+			MRIID:          row.mrIID,
+			LastReceivedAt: row.last,
+		}
+	}
 	for rows.Next() {
 		var (
 			projectID int64
@@ -53,26 +205,15 @@ func (s *Store) ListWebhookDeliverySummaries(ctx context.Context, filter store.W
 			outcome   string
 			reason    string
 			count     int64
-			received  string
 		)
-		if err := rows.Scan(&projectID, &mrIID, &outcome, &reason, &count, &received); err != nil {
-			return nil, "", fmt.Errorf("sqlite: scan webhook delivery: %w", err)
+		if err := rows.Scan(&projectID, &mrIID, &outcome, &reason, &count); err != nil {
+			return nil, fmt.Errorf("sqlite: scan webhook delivery: %w", err)
 		}
-		at, err := parseTime(received)
-		if err != nil {
-			return nil, "", err
-		}
-		key := summaryKey{projectID: projectID, mrIID: mrIID}
-		summary, ok := groups[key]
+		summary, ok := summaries[summaryKey{projectID: projectID, mrIID: mrIID}]
 		if !ok {
-			summary = &store.WebhookDeliverySummary{ProjectID: projectID, MRIID: mrIID}
-			groups[key] = summary
-			order = append(order, key)
+			continue
 		}
 		summary.Deliveries += count
-		if at.After(summary.LastReceivedAt) {
-			summary.LastReceivedAt = at
-		}
 		switch outcome {
 		case store.DeliveryEnqueued:
 			summary.Enqueued += count
@@ -92,80 +233,16 @@ func (s *Store) ListWebhookDeliverySummaries(ctx context.Context, filter store.W
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, "", fmt.Errorf("sqlite: iterate webhook deliveries: %w", err)
+		return nil, fmt.Errorf("sqlite: iterate webhook deliveries: %w", err)
 	}
 
-	summaries := make([]store.WebhookDeliverySummary, 0, len(order))
-	for _, key := range order {
-		summaries = append(summaries, *groups[key])
-	}
-	sort.Slice(summaries, func(i, j int) bool {
-		return deliverySummaryBefore(summaries[i], summaries[j])
-	})
-
-	start := 0
-	if cursor != "" {
-		bound, err := decodeListCursor(cursor, listCursorDeliveries)
-		if err != nil {
-			return nil, "", err
-		}
-		if !sameProjectID(bound.ProjectID, filter.ProjectID) {
-			return nil, "", fmt.Errorf("%w: webhook delivery filter changed", store.ErrInvalidCursor)
-		}
-		if !sameMRIID(bound.MRIID, filter.MRIID) {
-			return nil, "", fmt.Errorf("%w: webhook delivery filter changed", store.ErrInvalidCursor)
-		}
-		boundAt, err := parseTime(bound.At)
-		if err != nil {
-			return nil, "", fmt.Errorf("%w: webhook delivery cursor", store.ErrInvalidCursor)
-		}
-		for start < len(summaries) && !deliverySummaryAfter(summaries[start], boundAt, bound.RowProjectID, bound.RowMRIID) {
-			start++
+	result := make([]store.WebhookDeliverySummary, 0, len(page))
+	for _, row := range page {
+		if summary, ok := summaries[summaryKey{projectID: row.projectID, mrIID: row.mrIID}]; ok {
+			result = append(result, *summary)
 		}
 	}
-	end := start + limit
-	next := ""
-	if end < len(summaries) {
-		last := summaries[end-1]
-		next = encodeListCursor(listCursor{
-			Kind:         listCursorDeliveries,
-			ProjectID:    filter.ProjectID,
-			MRIID:        optionalMRIID(filter.MRIID),
-			At:           formatTime(last.LastReceivedAt),
-			RowProjectID: last.ProjectID,
-			RowMRIID:     last.MRIID,
-		})
-	} else {
-		end = len(summaries)
-	}
-	if start > end {
-		start = end
-	}
-	page := append([]store.WebhookDeliverySummary(nil), summaries[start:end]...)
-	return page, next, nil
-}
-
-// deliverySummaryBefore is the display order: most recently active MR first,
-// then project and MR for a stable tie-break.
-func deliverySummaryBefore(a, b store.WebhookDeliverySummary) bool {
-	if !a.LastReceivedAt.Equal(b.LastReceivedAt) {
-		return a.LastReceivedAt.After(b.LastReceivedAt)
-	}
-	if a.ProjectID != b.ProjectID {
-		return a.ProjectID < b.ProjectID
-	}
-	return a.MRIID < b.MRIID
-}
-
-// deliverySummaryAfter reports whether row sorts after the cursor position.
-func deliverySummaryAfter(row store.WebhookDeliverySummary, at time.Time, projectID, mrIID int64) bool {
-	if !row.LastReceivedAt.Equal(at) {
-		return row.LastReceivedAt.Before(at)
-	}
-	if row.ProjectID != projectID {
-		return row.ProjectID > projectID
-	}
-	return row.MRIID > mrIID
+	return result, nil
 }
 
 func sameMRIID(cursor int64, filter *int64) bool {

@@ -69,6 +69,8 @@ Web 控制台的“重试加载更多”复用失败请求的同一 cursor，不
 4. `X-Gitlab-Event-UUID` 缺失或非法时忽略；同一项目内已存在于 `webhook_deliveries` → `200 {"ignored":"duplicate"}`。
 5. 按事件类型过滤（见下表），命中则入队，返回 `200 {"accepted":true,"job_id":"…"}`；否则 `200 {"ignored":"<reason>"}`。
 
+项目查找发生在创建进程内 workspace 条目之前：未注册或已禁用的项目不会留下条目；取得项目生命周期读锁后会再次读取项目，删除期间到达的 webhook 仍得到 `project_not_registered`。认证失败的投递按「项目 + 分钟桶」去重，同一项目同一分钟内的后续错误 secret 请求折叠为已有记录；其中只保存固定事件名，`Merge Request Hook`、`Note Hook`、`Push Hook` 之外的 `X-Gitlab-Event` 记为 `other`。
+
 认证失败返回 401；请求体读取返回超时错误时返回 `503 {"ignored":"request_timeout","request_id":...}`，未读取完整的请求不会写投递记录或入队。存储处理失败返回 `503 {"ignored":"storage_error","request_id":...}`。请求体超限和其他非超时读取错误分别返回 `200 {"ignored":"body_too_large",...}` 和 `200 {"ignored":"bad_request",...}`；输入错误、未登记项目、重复投递等也返回 200。处理超时预算为 900 毫秒，不做任何 GitLab 或 LLM 调用；读取失败时保留读取期限并要求关闭连接，客户端断连时响应未必送达。ingress 也不持 per-MR 注记锁：它只记录投递、推进代次并在 DB 入队，同 MR 的远端注记全序由「所有写入方持同一把锁，需要代次栅栏的写入在锁内复核代次」保证；若让 ingress 等待长发布，push/note 事件会在 900 毫秒到期后返回 503 且不写投递记录，而 GitLab CE 不自动重试，事件会丢失。
 
 | 事件 | 条件 | 入队 |
@@ -459,7 +461,7 @@ provider 和 profile 的基线以配置文件为准；改动配置需重启服�
 
 `/stats` 在聚合和分页前按当前用户的项目授权过滤；平台管理员不按 grant 过滤，统计全部已登记项目；其他用户按逐项目 grant 或有效的 `global_read` 过滤。指定 `project_id` 时还要求该项目 `read`（平台管理员隐式具备）。
 
-`GET /api/v1/webhook-deliveries` 是只读入口诊断：按 `(project_id, mr_iid)` 聚合保留期内的投递，按最后投递时间从新到旧排列，同时间按项目、MR 升序。每项字段为 `project_id`、`mr_iid`（0 表示 push 事件、历史行或无法从事件识别 MR）、`deliveries`、`enqueued`、`ignored`、`rejected`、`rejected_invalid_secret`、`last_received_at` 和 `reasons`（仅 ignored 投递的固定原因计数，如 `unsupported_action`、`not_review_command`、`branch_filtered`、`missing_oldrev`、`unsupported_noteable`、`branch_deleted`、`mr_closed`）。无原因时为 `{}`。响应为 `{deliveries, next_cursor}`；`project_id` 必须是调用者可读的项目，否则 404；聚合前应用与统计相同的项目/访问过滤，`global_read` 与平台管理员规则不变。cursor 绑定 `project_id`/`mr_iid` 筛选，跨筛选复用返回 400。该接口不返回上游请求正文、header、secret 或 job payload。投递记录本身只携带事件、固定结果/原因和 MR 标识；`rejected/invalid_secret` 表示未认证请求，不会改变项目健康状态。
+`GET /api/v1/webhook-deliveries` 是只读入口诊断：按 `(project_id, mr_iid)` 聚合保留期内的投递，按最后投递时间从新到旧排列，同时间按项目、MR 升序。每项字段为 `project_id`、`mr_iid`（0 表示 push 事件、历史行或无法从事件识别 MR）、`deliveries`、`enqueued`、`ignored`、`rejected`、`rejected_invalid_secret`、`last_received_at` 和 `reasons`（仅 ignored 投递的固定原因计数，如 `unsupported_action`、`not_review_command`、`branch_filtered`、`missing_oldrev`、`unsupported_noteable`、`branch_deleted`、`mr_closed`）。无原因时为 `{}`。响应为 `{deliveries, next_cursor}`；`project_id` 必须是调用者可读的项目，否则 404；聚合前应用与统计相同的项目/访问过滤，`global_read` 与平台管理员规则不变。cursor 绑定 `project_id`/`mr_iid` 筛选，跨筛选复用返回 400。游标还绑定首次请求时确定的投递时间上界快照：同一轮翻页中新到达的投递不进入结果，也不会把尚未返回的 MR 推过游标；分组、排序与 LIMIT 在 SQL 中完成，计数只读取当前页的项目/MR 键。缺少快照的旧游标按无效游标返回 400，重新从第一页拉取即可。该接口不返回上游请求正文、header、secret 或 job payload。投递记录本身只携带事件、固定结果/原因和 MR 标识；`rejected/invalid_secret` 表示未认证请求，不会改变项目健康状态。
 
 控制台集合响应按资源命名：`{projects}`、`{reviews}`、`{findings}`、`{servers}`、`{skills}`、`{bindings}`、`{providers}`、`{presets}`、`{profiles}`、`{calls}`、`{documents}`、`{tokens}`；可分页的集合另带 `next_cursor`。不提供未发布的旧字段别名。
 
