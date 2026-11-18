@@ -42,7 +42,10 @@ func TestLoadStreamSnapshotRevisionBounds(t *testing.T) {
 			unchanged.Nodes, unchanged.Findings, unchanged.Publications)
 	}
 
-	rev = mustAppendEvent(t, st, "wf-stream", rev, queuedEvent(t, "a", 1, clock.Now()))
+	eventRev := mustAppendEvent(t, st, "wf-stream", rev, queuedEvent(t, "a", 1, clock.Now()))
+	if eventRev == rev {
+		t.Fatalf("AppendEvent did not advance the workflow revision: still %d", eventRev)
+	}
 	nodesMoved, err := st.LoadStreamSnapshot(ctx, "wf-stream", first.Revision)
 	if err != nil {
 		t.Fatalf("node LoadStreamSnapshot: %v", err)
