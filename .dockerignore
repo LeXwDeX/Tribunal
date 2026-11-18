@@ -6,6 +6,8 @@
 .idea
 .vscode
 .DS_Store
+._*
+**/._*
 
 # Local data and build artifacts
 data

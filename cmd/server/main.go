@@ -149,7 +149,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		owner.lock = dataLock
 	}
 	defer owner.Finish()
-	db, err := sqlite.Open(ctx, cfg.Storage.DSN)
+	db, err := sqlite.Open(ctx, cfg.Storage.DSN, sqlite.WithLogger(logger))
 	if err != nil {
 		logStorageOpenFailure(logger, err)
 		return errors.New("open storage: SQLite database is unavailable")
