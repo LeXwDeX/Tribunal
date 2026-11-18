@@ -62,6 +62,69 @@ describe('one-time API token display', () => {
     await user.click(screen.getByRole('button', { name: '我已复制，关闭' }))
   })
 
+  it.each(['Escape', '遮罩', '关闭按钮'])('keeps the renew dialog open while the renewal is pending (%s)', async (method) => {
+    const user = userEvent.setup()
+    const pending = deferredResponse()
+    let renews = 0
+    const tokens = [{
+      id: 't1', name: 'ci', created_at: new Date(Date.now() - 86_400_000).toISOString(),
+      expires_at: new Date(Date.now() - 86_400_000).toISOString(),
+    }]
+    installFetch((url, init) => {
+      if (url === '/api/v1/api-tokens/t1/renew' && init?.method === 'POST') {
+        renews += 1
+        return pending.promise
+      }
+      if (url.startsWith('/api/v1/api-tokens')) return jsonResponse({ tokens })
+      return jsonResponse({})
+    })
+    renderWithProviders(<SystemPage />)
+    const row = (await screen.findByText('ci')).closest('tr')!
+    await user.click(within(row).getByRole('button', { name: '续期' }))
+    const dialog = await screen.findByRole('dialog', { name: '续期 API token' })
+    await user.click(within(dialog).getByRole('button', { name: '续期', exact: true }))
+    expect(within(dialog).getByRole('button', { name: '取消' })).toBeDisabled()
+
+    if (method === 'Escape') await user.keyboard('{Escape}')
+    else if (method === '遮罩') fireEvent.mouseDown(dialog.parentElement!)
+    else await user.click(within(dialog).getByRole('button', { name: '关闭对话框' }))
+
+    expect(screen.getByRole('dialog', { name: '续期 API token' })).toBeInTheDocument()
+    expect(renews).toBe(1)
+
+    await act(async () => pending.resolve(jsonResponse({ id: 't1', name: 'ci', token: 'crsec_renewed' })))
+    expect(await screen.findByDisplayValue('crsec_renewed')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '我已复制，关闭' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('does not show a renewed secret again after the dialog is closed and reopened', async () => {
+    const user = userEvent.setup()
+    const tokens = [{
+      id: 't1', name: 'ci', created_at: new Date(Date.now() - 86_400_000).toISOString(),
+      expires_at: new Date(Date.now() - 86_400_000).toISOString(),
+    }]
+    installFetch((url, init) => {
+      if (url === '/api/v1/api-tokens/t1/renew' && init?.method === 'POST') {
+        return jsonResponse({ id: 't1', name: 'ci', token: 'crsec_after_close' })
+      }
+      if (url.startsWith('/api/v1/api-tokens')) return jsonResponse({ tokens })
+      return jsonResponse({})
+    })
+    renderWithProviders(<SystemPage />)
+    const openRow = async () => (await screen.findByText('ci')).closest('tr')!
+    await user.click(within(await openRow()).getByRole('button', { name: '续期' }))
+    const dialog = await screen.findByRole('dialog', { name: '续期 API token' })
+    await user.click(within(dialog).getByRole('button', { name: '续期', exact: true }))
+    expect(await screen.findByDisplayValue('crsec_after_close')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '我已复制，关闭' }))
+    await user.click(within(await openRow()).getByRole('button', { name: '续期' }))
+    const reopened = await screen.findByRole('dialog', { name: '续期 API token' })
+    expect(within(reopened).queryByDisplayValue('crsec_after_close')).not.toBeInTheDocument()
+    expect(within(reopened).getByRole('button', { name: '续期', exact: true })).toBeEnabled()
+  })
+
   it('renders the secret only once and clears it when the dialog closes', async () => {
     const user = userEvent.setup()
     let created = false
