@@ -2,6 +2,12 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 修复
+
+- **切换项目/共享凭据后汇总注记按当前身份重新绑定**（[#514](https://github.com/LeXwDeX/Tribunal/issues/514)）：存在评审 control 行的统一发布路径不再直接使用 `publications(kind=summary)` 记录的旧 `note_id`，而是先用 `CurrentUser` + `ListMRNotes` 按 `<!-- gitlab-ce-review:summary` 前缀与当前 bot 作者找到本身份可编辑的注记，更新后再写回绑定。切换项目/共享凭据或更换 GitLab 用户后，旧绑定属于另一身份，按旧 `note_id` 更新会被 GitLab 以 403 拒绝并使发布永久停在 pending、SSE 不结束；修复后旧身份注记保持不动，找不到本身份注记时新建并重绑。没有 control 行的兼容路径仍按旧绑定更新并在 404 时回退标记扫描，「可见但不可更新」的防重保留。设计文档与运维文档同步补充身份归属与兼容路径说明。
+
 ## [1.7.1] - 2026-11-17
 
 ### 变更

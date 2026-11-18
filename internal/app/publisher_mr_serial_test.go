@@ -547,6 +547,9 @@ func TestSummaryUpdateRetryRechecksGeneration(t *testing.T) {
 	if err := f.publisher.Publish(ctx, wf.ID); err != nil {
 		t.Fatalf("initial publish: %v", err)
 	}
+	// Force the republish to rewrite the note, so the first update reaches the
+	// retrying transport below.
+	staleSummaryBody514(t, f.gitlab)
 	api := &summaryUpdateRetryGitLab{reviewGitLab: f.gitlab, bump: mrSerialBumpControl(t, f)}
 	f.publisher.gitlab = api
 	err := f.publisher.Republish(ctx, wf.ID)
@@ -773,6 +776,9 @@ func TestInFlightSummaryUpdateIsNotInterleavedByNewerGeneration(t *testing.T) {
 		updateArrived: make(chan struct{}),
 		updateRelease: make(chan struct{}),
 	}
+	// Force A's republish to rewrite the existing summary note; an identical
+	// body would skip the update and never reach the in-flight barrier (#514).
+	staleSummaryBody514(t, f.gitlab)
 	f.publisher.gitlab = g
 	dispatcher, err := NewDispatcher(DispatcherConfig{
 		Store: f.db, Workspace: f.manager, GitLab: f.gitlab,

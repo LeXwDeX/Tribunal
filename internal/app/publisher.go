@@ -1084,7 +1084,12 @@ func (p *Publisher) upsertSummary(ctx context.Context, projectID, mrIID int64, t
 	}
 	var missingID int64
 	var missingErr error
-	if workflowID != "" {
+	// A review control means the status worker and this publisher share one
+	// note, which is found by marker and current identity below. The persisted
+	// binding is not trustworthy there: after a credential switch it still
+	// points at the previous bot's note and GitLab answers 403 to edits by
+	// another author (#514). Only the legacy no-control path updates it.
+	if controlErr != nil && workflowID != "" {
 		existing, err := p.store.GetPublication(ctx, projectID, mrIID, summaryPublishKind, summaryPublicationKey)
 		switch {
 		case err == nil:

@@ -287,6 +287,9 @@ func TestDispatcherRepublishEnqueuesPublishAndWorkerRunsIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetWorkflowByJob: %v", err)
 	}
+	// The republish must observe a stale note body to prove it re-ran the
+	// publication; the unified path skips an already-matching note (#514).
+	staleSummaryBody514(t, f.gitlab)
 	dispatcher := newTestDispatcher(t, f.db, f.gitlab)
 
 	publishID, err := dispatcher.RepublishReview(ctx, workflow.ID)

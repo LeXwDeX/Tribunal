@@ -23,7 +23,6 @@ type deletedSummary164GitLab struct {
 	identityErr      error
 	scanErr          error
 	createErr        error
-	onMissing        func()
 	onScan           func()
 	uncertainCreate  bool
 	deleteOnPosition bool
@@ -54,9 +53,6 @@ func (g *deletedSummary164GitLab) UpdateMRNote(ctx context.Context, token string
 	err := g.updateErr
 	if err == nil {
 		err = g.reviewGitLab.UpdateMRNote(ctx, token, projectID, iid, noteID, body)
-	}
-	if gitlab.IsNotFound(err) && g.onMissing != nil {
-		g.onMissing()
 	}
 	return err
 }
@@ -216,7 +212,9 @@ func TestSummaryDeleted164Recovers(t *testing.T) {
 			if err := f.publisher.Republish(ctx, wf.ID); err != nil {
 				t.Fatalf("repeat republish: %v", err)
 			}
-			if api.creates != wantCreates || api.scans != wantScans || summaryPublication164(t, f).GitlabID != pub.GitlabID {
+			// The unified path finds the note by marker and identity on every
+			// publish, so the repeat rescans without creating (#514).
+			if api.creates != wantCreates || api.scans != wantScans+1 || summaryPublication164(t, f).GitlabID != pub.GitlabID {
 				t.Fatalf("repeat created or scanned again: creates=%d scans=%d", api.creates, api.scans)
 			}
 			if got := workflowPublication(t, f, wf.ID).PublicationState; got != store.WorkflowPublicationPublished {
@@ -233,20 +231,27 @@ func TestSummaryDeleted164RecoveryErrors(t *testing.T) {
 		identityErr error
 		scanErr     error
 		createErr   error
+		marker      bool
 		wantScans   int
 		wantCreates int
+		wantUpdates int
 	}{
-		{name: "bad request", updateErr: &gitlab.Error{Op: "update_note", Status: 400}},
-		{name: "forbidden", updateErr: &gitlab.Error{Op: "update_note", Status: 403}},
-		{name: "server failure", updateErr: &gitlab.Error{Op: "update_note", Status: 503}},
-		{name: "transport failure", updateErr: errors.New("transport " + publicationSecret)},
-		{name: "identity failure", identityErr: errSummaryTransport},
+		// Update errors surface while refreshing the bot's own marker note;
+		// the unified path never edits another identity's stale binding (#514).
+		{name: "bad request", updateErr: &gitlab.Error{Op: "update_note", Status: 400}, marker: true, wantScans: 1, wantUpdates: 1},
+		{name: "forbidden", updateErr: &gitlab.Error{Op: "update_note", Status: 403}, marker: true, wantScans: 1, wantUpdates: 1},
+		{name: "server failure", updateErr: &gitlab.Error{Op: "update_note", Status: 503}, marker: true, wantScans: 1, wantUpdates: 1},
+		{name: "transport failure", updateErr: errors.New("transport " + publicationSecret), marker: true, wantScans: 1, wantUpdates: 1},
+		{name: "identity failure", identityErr: errSummaryTransport, wantScans: 0},
 		{name: "scan failure", scanErr: errSummaryTransport, wantScans: 1},
 		{name: "create 404", createErr: &gitlab.Error{Op: "create_note", Status: 404}, wantScans: 1, wantCreates: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f, wf, before, deleted := publishedSummary164(t, false)
 			deleteSummary164(t, f, deleted.ID)
+			if tc.marker {
+				f.gitlab.notes = append(f.gitlab.notes, gitlab.Note{ID: 302, AuthorID: 9, Body: review.SummaryMarkerPrefix + "old"})
+			}
 			api := &deletedSummary164GitLab{reviewGitLab: f.gitlab, updateErr: tc.updateErr, identityErr: tc.identityErr, scanErr: tc.scanErr, createErr: tc.createErr}
 			f.publisher.gitlab, f.publisher.retries = api, 1
 			var logs bytes.Buffer
@@ -261,7 +266,7 @@ func TestSummaryDeleted164RecoveryErrors(t *testing.T) {
 				t.Fatalf("wrong recovery error for %s", tc.name)
 			}
 			after := summaryPublication164(t, f)
-			if *after != *before || api.scans != tc.wantScans || api.creates != tc.wantCreates || len(api.updates) != 1 {
+			if *after != *before || api.scans != tc.wantScans || api.creates != tc.wantCreates || len(api.updates) != tc.wantUpdates {
 				t.Fatalf("binding changed or unexpected calls: before=%+v after=%+v scans=%d creates=%d updates=%v", before, after, api.scans, api.creates, api.updates)
 			}
 			if wf := workflowPublication(t, f, wf.ID); wf.PublicationState != store.WorkflowPublicationPending || wf.PublicationError != publicationRetryReason {
@@ -276,13 +281,12 @@ func TestSummaryDeleted164StaleDuringRecovery(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		marker string
-		atScan bool
 	}{
 		{name: "before create"},
 		{name: "before marker update", marker: "old"},
-		{name: "during scan before create", atScan: true},
-		{name: "during scan before marker update", marker: "old", atScan: true},
-		{name: "during scan before identical marker adoption", marker: "identical", atScan: true},
+		{name: "during scan before create"},
+		{name: "during scan before marker update", marker: "old"},
+		{name: "during scan before identical marker adoption", marker: "identical"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f, wf, before, deleted := publishedSummary164(t, false)
@@ -294,18 +298,16 @@ func TestSummaryDeleted164StaleDuringRecovery(t *testing.T) {
 				}
 				f.gitlab.notes = append(f.gitlab.notes, gitlab.Note{ID: 302, AuthorID: 9, Body: body})
 			}
+			// The unified path rechecks after the marker scan and before any
+			// write, so the bump lands before note adoption or creation (#514).
 			api := &deletedSummary164GitLab{reviewGitLab: f.gitlab}
-			if tc.atScan {
-				api.onScan = mrSerialBumpControl(t, f)
-			} else {
-				api.onMissing = mrSerialBumpControl(t, f)
-			}
+			api.onScan = mrSerialBumpControl(t, f)
 			f.publisher.gitlab, f.publisher.retries = api, 1
 			err := f.publisher.Republish(context.Background(), wf.ID)
 			if !errors.Is(err, ErrStalePublication) {
 				t.Fatalf("error=%v, want stale publication", err)
 			}
-			if after := summaryPublication164(t, f); *after != *before || api.creates != 0 || len(api.updates) != 1 || api.updates[0] != deleted.ID {
+			if after := summaryPublication164(t, f); *after != *before || api.creates != 0 || len(api.updates) != 0 {
 				t.Fatalf("stale recovery changed publication: before=%+v after=%+v creates=%d updates=%v", before, after, api.creates, api.updates)
 			}
 			if got := workflowPublication(t, f, wf.ID).PublicationState; got != store.WorkflowPublicationSkipped {
@@ -349,7 +351,7 @@ func TestSummaryDeleted164HeadChangesDuringScan(t *testing.T) {
 			if !errors.Is(err, ErrStalePublication) {
 				t.Fatalf("error=%v, want stale publication", err)
 			}
-			if after := summaryPublication164(t, f); *after != *before || api.creates != 0 || len(api.updates) != 1 {
+			if after := summaryPublication164(t, f); *after != *before || api.creates != 0 || len(api.updates) != 0 {
 				t.Fatalf("head change did not stop recovery: before=%+v after=%+v creates=%d updates=%v", before, after, api.creates, api.updates)
 			}
 		})
@@ -373,7 +375,7 @@ func TestSummaryDeleted164Recheck404IsNotNote404(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = f.publisher.upsertSummary(context.Background(), 42, 7, "token", before.Fingerprint, review.SummaryMarkerPrefix+"new", wf.ID, record.Generation, f.head, recheck)
-	if !gitlab.IsNotFound(err) || api.scans != 0 || api.creates != 0 || len(api.updates) != 0 {
+	if !gitlab.IsNotFound(err) || api.scans != 1 || api.creates != 0 || len(api.updates) != 0 {
 		t.Fatalf("recheck failure was treated as a missing note: error=%v scans=%d creates=%d updates=%v", err, api.scans, api.creates, api.updates)
 	}
 	if after := summaryPublication164(t, f); *after != *before {
@@ -440,9 +442,9 @@ func TestSummaryDeleted164RetryRechecksGeneration(t *testing.T) {
 			if !errors.Is(err, ErrStalePublication) {
 				t.Fatalf("retry error=%v, want stale publication", err)
 			}
-			wantCreates, wantUpdates := 1, 1
+			wantCreates, wantUpdates := 1, 0
 			if mode == "update" {
-				wantCreates, wantUpdates = 0, 2
+				wantCreates, wantUpdates = 0, 1
 				if f.gitlab.notes[0].Body != review.SummaryMarkerPrefix+"old" {
 					t.Fatalf("stale retry changed marker: %+v", f.gitlab.notes[0])
 				}
@@ -512,7 +514,7 @@ func TestSummaryDeleted164DuringInlineFallback(t *testing.T) {
 	if api.deletedBody == "" || len(f.gitlab.notes) != 1 || f.gitlab.notes[0].Body == api.deletedBody || pub.GitlabID != strconv.FormatInt(f.gitlab.notes[0].ID, 10) || pub.WorkflowID != wf.ID || pub.BodyHash != bodyHash(f.gitlab.notes[0].Body) {
 		t.Fatalf("fallback binding=%+v notes=%+v", pub, f.gitlab.notes)
 	}
-	if api.scans != 2 || api.creates != 2 || len(api.updates) != 1 {
+	if api.scans != 2 || api.creates != 2 || len(api.updates) != 0 {
 		t.Fatalf("fallback calls: scans=%d creates=%d updates=%v", api.scans, api.creates, api.updates)
 	}
 }
