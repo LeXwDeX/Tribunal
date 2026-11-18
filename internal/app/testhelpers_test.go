@@ -257,11 +257,14 @@ type fakeGitLab struct {
 	listHooksErr  error
 	updateHookErr error
 	deleteErr     error
-	hookSpecs     []gitlab.HookSpec
-	hooks         []gitlab.Hook
-	editedHooks   []int64
-	deletedHooks  []int64
-	calls         []string
+	// updateHookAlertStatus, when set, replaces the alert status of an updated
+	// hook, standing in for a GitLab instance that clears an automatic disable.
+	updateHookAlertStatus string
+	hookSpecs             []gitlab.HookSpec
+	hooks                 []gitlab.Hook
+	editedHooks           []int64
+	deletedHooks          []int64
+	calls                 []string
 
 	notes         []gitlab.Note
 	nextNoteID    int64
@@ -601,6 +604,9 @@ func (f *fakeGitLab) UpdateProjectHook(_ context.Context, _ string, _, hookID in
 		f.hooks[i].MergeRequestsEvents = spec.MergeRequestsEvents
 		f.hooks[i].NoteEvents = spec.NoteEvents
 		f.hooks[i].EnableSSLVerification = spec.EnableSSLVerification
+		if f.updateHookAlertStatus != "" {
+			f.hooks[i].AlertStatus = f.updateHookAlertStatus
+		}
 		return nil
 	}
 	return &gitlab.Error{Op: "update_hook", Status: 404}
