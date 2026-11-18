@@ -84,15 +84,26 @@ func (s *Server) handleAdminSetUserDisabled(w http.ResponseWriter, r *http.Reque
 		ActorID: currentUserID(r), AdminIDs: ids, AdminUsernames: names,
 	})
 	if err != nil {
+		s.logger.Info("platform user change rejected", "event", "platform_audit", "actor_id", currentUserID(r),
+			"action", "update_user", "target_id", userID, "code", accessWriteCode(err), "result", "rejected")
 		s.writeAccessError(w, r, err)
 		return
 	}
-	if oldRole != newRole || grantChanged {
-		s.logger.Info("platform role changed", "event", "platform_audit", "actor_id", currentUserID(r), "target_id", userID, "old_role", oldRole, "new_role", newRole, "grant_changed", grantChanged)
+	// One audit line per accepted write, including disabled-only changes that
+	// leave the role and grants untouched.
+	attrs := []any{
+		"event", "platform_audit", "actor_id", currentUserID(r),
+		"action", "update_user", "target_id", userID,
+		"old_role", oldRole, "new_role", newRole, "grant_changed", grantChanged,
+		"result", "ok",
+	}
+	if request.Disabled != nil {
+		attrs = append(attrs, "disabled", *request.Disabled)
 	}
 	if request.GlobalRead != nil {
-		s.logger.Info("global read updated", "event", "platform_audit", "actor_id", currentUserID(r), "target_id", userID, "global_read", *request.GlobalRead)
+		attrs = append(attrs, "global_read", *request.GlobalRead)
 	}
+	s.logger.Info("platform user changed", attrs...)
 	response := map[string]any{"id": userID, "role": newRole}
 	if request.Disabled != nil {
 		response["disabled"] = *request.Disabled
@@ -143,9 +154,13 @@ func (s *Server) handleAdminRevokeCredentials(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if err := s.access.RevokeUserCredentials(r.Context(), userID); err != nil {
+		s.logger.Info("user credential revocation rejected", "event", "platform_audit", "actor_id", currentUserID(r),
+			"action", "revoke_credentials", "target_id", userID, "code", accessWriteCode(err), "result", "rejected")
 		s.writeAccessError(w, r, err)
 		return
 	}
+	s.logger.Info("user credentials revoked", "event", "platform_audit", "actor_id", currentUserID(r),
+		"action", "revoke_credentials", "target_id", userID, "result", "ok")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -248,9 +263,14 @@ func (s *Server) handleAdminSetGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.access.SetProjectGrant(r.Context(), projectID, userID, role); err != nil {
+		s.logger.Info("project grant change rejected", "event", "platform_audit", "actor_id", currentUserID(r),
+			"action", "grant", "target_id", userID, "project_id", projectID, "role", role,
+			"code", accessWriteCode(err), "result", "rejected")
 		s.writeAccessError(w, r, err)
 		return
 	}
+	s.logger.Info("project grant changed", "event", "platform_audit", "actor_id", currentUserID(r),
+		"action", "grant", "target_id", userID, "project_id", projectID, "role", role, "result", "ok")
 	writeJSON(w, http.StatusOK, store.ProjectGrant{ProjectID: projectID, UserID: userID, Role: role})
 }
 
@@ -269,10 +289,32 @@ func (s *Server) handleAdminDeleteGrant(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if err := s.access.DeleteProjectGrant(r.Context(), projectID, userID); err != nil {
+		s.logger.Info("project grant revocation rejected", "event", "platform_audit", "actor_id", currentUserID(r),
+			"action", "revoke_grant", "target_id", userID, "project_id", projectID,
+			"code", accessWriteCode(err), "result", "rejected")
 		s.writeAccessError(w, r, err)
 		return
 	}
+	s.logger.Info("project grant revoked", "event", "platform_audit", "actor_id", currentUserID(r),
+		"action", "revoke_grant", "target_id", userID, "project_id", projectID, "result", "ok")
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// accessWriteCode maps access-store sentinels to the stable codes that
+// writeAccessError returns. Audit lines use it instead of the raw error text.
+func accessWriteCode(err error) string {
+	switch {
+	case errors.Is(err, store.ErrPlatformUserProtected):
+		return "protected_user"
+	case errors.Is(err, store.ErrStaleRevision):
+		return "stale_revision"
+	case errors.Is(err, store.ErrNotFound):
+		return "not_found"
+	case errors.Is(err, store.ErrInvalidCursor):
+		return "bad_request"
+	default:
+		return "internal"
+	}
 }
 
 // writeAccessError maps access-store sentinels without logging row content.
@@ -336,6 +378,8 @@ func (s *Server) handleAdminCleanupProjectResidues(w http.ResponseWriter, r *htt
 	}
 	result, err := s.residues.CleanupProjectResidues(r.Context())
 	if err != nil {
+		s.logger.Info("project residue cleanup rejected", "event", "platform_audit", "actor_id", currentUserID(r),
+			"action", "cleanup_residues", "code", "cleanup_failed", "result", "rejected")
 		s.writeServiceError(w, r, err)
 		return
 	}
@@ -346,5 +390,9 @@ func (s *Server) handleAdminCleanupProjectResidues(w http.ResponseWriter, r *htt
 			Failed:  []app.ProjectResidueFailure{},
 		}
 	}
+	// Counts only: residue paths are host paths and stay out of the log.
+	s.logger.Info("project residue cleanup completed", "event", "platform_audit", "actor_id", currentUserID(r),
+		"action", "cleanup_residues", "removed", len(result.Removed), "kept", len(result.Kept),
+		"failed", len(result.Failed), "result", "ok")
 	writeJSON(w, http.StatusOK, result)
 }

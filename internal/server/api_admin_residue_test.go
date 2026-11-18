@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -132,6 +133,47 @@ func TestAdminResiduesUnwired(t *testing.T) {
 	status, _ = residueRequest(t, ts, http.MethodPost, "/api/v1/admin/projects/residues/cleanup", `{"confirm":true}`)
 	if status != http.StatusServiceUnavailable {
 		t.Fatalf("cleanup status = %d", status)
+	}
+}
+
+func TestAdminResidueCleanupAudited(t *testing.T) {
+	service := &residueTestService{result: &app.ProjectResidueCleanup{
+		Removed: []app.ProjectResidue{{ProjectID: 42, Path: "/data/workspaces/42", Kind: app.ProjectResidueWorkspace, Removable: true}},
+		Kept:    []app.ProjectResidue{{ProjectID: 43, Path: "/data/workspaces/43", Kind: app.ProjectResidueWorkspace}},
+		Failed: []app.ProjectResidueFailure{{
+			Path: "/data/workspaces/44", Error: "disk full at /data/workspaces/44",
+		}},
+	}}
+	var logs bytes.Buffer
+	apiServer, err := New(Config{
+		AdminToken: testAdminToken,
+		Projects:   stubAdmin{},
+		Residues:   service,
+		Webhooks:   stubWebhookAcceptor{},
+		Logger:     newTestLogger(&logs),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ts := httptest.NewServer(apiServer.Handler())
+	t.Cleanup(ts.Close)
+
+	status, body := residueRequest(t, ts, http.MethodPost, "/api/v1/admin/projects/residues/cleanup", `{"confirm":true}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", status, body)
+	}
+	text := logs.String()
+	for _, want := range []string{
+		`"event":"platform_audit"`, `"action":"cleanup_residues"`, `"actor_id":0`,
+		`"removed":1`, `"kept":1`, `"failed":1`, `"result":"ok"`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("audit log missing %s:\n%s", want, text)
+		}
+	}
+	// Residue paths are host paths; only counts may reach the audit log.
+	if strings.Contains(text, "/data/workspaces") || strings.Contains(text, "disk full") {
+		t.Fatalf("audit log leaked a residue path or error text:\n%s", text)
 	}
 }
 
