@@ -189,6 +189,9 @@ func (s *Server) handleRenewAPIToken(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, r, err)
 		return
 	}
+	// The rotation revokes the old plaintext; open streams that authenticated
+	// with it must re-check on their next poll.
+	s.invalidateStreamAuth()
 	writeJSON(w, http.StatusCreated, createdAPIToken{APIToken: *token, Token: plaintext})
 }
 

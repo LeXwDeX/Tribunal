@@ -72,6 +72,10 @@ type fakeReviewStore struct {
 	streamRevision int64
 	snapshotProbes int
 	snapshotLoads  int
+	// getWorkflowHook runs on every GetWorkflow call after the lookup lock is
+	// released. Tests use it to interleave a revocation between request
+	// authentication and the stream handler.
+	getWorkflowHook func()
 }
 
 func newFakeReviewStore() *fakeReviewStore {
@@ -221,16 +225,33 @@ func (f *fakeReviewStore) ListStatusOnlyReviews(_ context.Context, filter store.
 	return rows[start:end], next, nil
 }
 
-func (f *fakeReviewStore) GetWorkflow(ctx context.Context, id string) (*store.Workflow, error) {
+func (f *fakeReviewStore) GetWorkflow(_ context.Context, id string) (*store.Workflow, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
+	hook := f.getWorkflowHook
+	var found *store.Workflow
 	for i := range f.workflows {
 		if f.workflows[i].ID == id {
 			wf := f.workflows[i]
-			return &wf, nil
+			found = &wf
+			break
 		}
 	}
-	return nil, store.ErrNotFound
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	if found == nil {
+		return nil, store.ErrNotFound
+	}
+	return found, nil
+}
+
+// setGetWorkflowHook installs a hook run outside the store lock on every
+// GetWorkflow call; nil removes it.
+func (f *fakeReviewStore) setGetWorkflowHook(hook func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.getWorkflowHook = hook
 }
 
 func (f *fakeReviewStore) setWorkflow(wf store.Workflow) {
