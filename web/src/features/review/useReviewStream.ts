@@ -47,7 +47,16 @@ export function useReviewStream(reviewId: string | undefined, review: ReviewDeta
       void queryClient.invalidateQueries({ queryKey: ['stats'] })
     }
 
-    const onOpen = () => setState('open')
+    // The server snapshots its diff baseline before writing the response
+    // headers, so a change that landed after the detail/graph fetch but before
+    // that baseline would otherwise stay invisible until the next event.
+    // Reconciling on open is safe: the refetch reads at or after the baseline,
+    // so it can never be older than the stream's diff source.
+    const onOpen = () => {
+      void queryClient.invalidateQueries({ queryKey: ['review', reviewId, 'detail'] })
+      void queryClient.invalidateQueries({ queryKey: ['review', reviewId, 'graph'] })
+      setState('open')
+    }
     const onError = () => {
       setState('error')
       setError('实时连接中断。可重试；页面数据不会因此显示为成功。')
