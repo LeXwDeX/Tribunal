@@ -45,6 +45,7 @@ func TestIgnoredAgentOutputChecksAllFindingContracts(t *testing.T) {
 			"code-review": &CodeReviewOut{Findings: []FindingOut{{Path: path}}},
 			"review":      &ReviewOut{Findings: []FindingOut{{Path: path}}},
 			"reasoner":    &ReasonerOut{Findings: []ReasonerFinding{{Path: path}}},
+			"validate":    &ValidateOut{Findings: []FindingOut{{Path: path}}},
 			"verify":      &VerifyOut{Evidence: []CodeRef{{Path: path, StartLine: 1, EndLine: 1, Note: "ok"}}},
 			"synthesize":  &SynthesizeOut{NewFindings: []FindingOut{{Path: path}}},
 			"extend":      &SynthesizeOut{ExtendRequests: []ExtendRequest{{Files: []string{path}}}},

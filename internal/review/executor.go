@@ -1074,6 +1074,8 @@ func (e *Executor) ignoredAgentOutput(output any) bool {
 		return out != nil && ignoredFindings(out.Findings)
 	case *ReviewOut:
 		return out != nil && ignoredFindings(out.Findings)
+	case *ValidateOut:
+		return out != nil && ignoredFindings(out.Findings)
 	case *ReasonerOut:
 		if out != nil {
 			for _, f := range out.Findings {

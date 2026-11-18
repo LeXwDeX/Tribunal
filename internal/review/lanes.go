@@ -714,6 +714,13 @@ func (e *Executor) downgradePartialLane(ctx context.Context, in dag.NodeInput, e
 		UsageIncomplete: partial.Incomplete,
 	}}
 	out.Findings, out.Verdict, out.EvidenceStatus, out.EvidenceGaps = partialLaneResult(in.Node.Kind, partial)
+	if dropped := e.dropIgnoredFindings(&out); dropped > 0 {
+		// The publisher rejects a review that still carries a finding on an
+		// ignored path, so a recovered finding must be filtered here; the
+		// dropped count stays in the evidence gaps (#513).
+		out.EvidenceGaps = append(out.EvidenceGaps,
+			fmt.Sprintf("partial lane: %d recovered finding(s) in ignored paths were dropped", dropped))
+	}
 	if in.Node.Kind == KindExplore {
 		out.Explore = partialExplore(partial)
 		if out.Explore == nil {
@@ -730,6 +737,26 @@ func (e *Executor) downgradePartialLane(ctx context.Context, in dag.NodeInput, e
 	}
 	e.logPartialLane(ctx, in, partial, len(out.Findings))
 	return dag.NodeOutput{Data: raw, Usage: partial.Usage, UsageIncomplete: partial.Incomplete}, true
+}
+
+// dropIgnoredFindings removes recovered findings whose path the dossier policy
+// ignores. A downgraded lane must not hand the publisher a finding that would
+// reject the whole review (#513).
+func (e *Executor) dropIgnoredFindings(out *PartialLaneOut) int {
+	if out == nil || e.deps.Dossier == nil {
+		return 0
+	}
+	kept := out.Findings[:0]
+	dropped := 0
+	for _, f := range out.Findings {
+		if e.deps.Dossier.IgnoresPath(f.Path) {
+			dropped++
+			continue
+		}
+		kept = append(kept, f)
+	}
+	out.Findings = kept
+	return dropped
 }
 
 // partialLaneResult recovers the structured part of a stopped lane. The

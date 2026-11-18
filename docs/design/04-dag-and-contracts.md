@@ -190,7 +190,7 @@ finalize 若在重读时发现新节点，返回主循环继续调度，而不�
 | verify 节点失败 | 对应 finding 的挑战结果记为 `uncertain` |
 | 工作流取消 | 运行中节点 `aborted`，未开始节点 `skipped(workflow_cancelled)` |
 | 四路评审节点（`cr.*`、`rv.*`、`reasoner`、`validate`）失败、被取消或被跳过 | 它们都是可选节点，其余各路继续运行并照常发布各自的 findings。失败节点（非取消）的缺口携带固定失败类、可用时的回合数和已记录用量；`gather` 最终结论为 `INCOMPLETE`，不会是 `PASS` |
-| 末轮未提交但已解码出结构化结果 | `executeReviewLane`、`executeValidate`、`executeExplore` 用 `errors.As` 读取 `PartialRunError`；仅 `no_submit`、`invalid_submit`、`context_too_long` 且未被取消时，把 `Result` 中已解码的输出（或 transcript 中最后一次 `submit_result` 尝试）作为该 lane 的部分结果提交。`review`/`validate` 的部分 finding 进入投票；每个 finding 单独校验，契约级不一致不会丢弃整个 lane。节点以 `PartialLaneOut` 完成，`gather` 仍写入携带 `error_kind`、回合数与用量的 evidence gap，因此 verdict 不能是 `PASS`；已有 P0/P1 的 `BLOCKING` 不被降级。unsafe、取消、timeout 与预算类保持原失败语义 |
+| 末轮未提交但已解码出结构化结果 | `executeReviewLane`、`executeValidate`、`executeExplore` 与 lanes 流的 `executeCodeReview` 用 `errors.As` 读取 `PartialRunError`；仅 `no_submit`、`invalid_submit`、`context_too_long` 且未被取消时，把 `Result` 中已解码的输出（或 transcript 中最后一次 `submit_result` 尝试）作为该 lane 的部分结果提交；legacy 流的 code-review 节点是 required，保持原失败语义。回收的 finding 先按 `Dossier.IgnoresPath` 过滤，命中忽略路径的丢弃并在 `PartialLaneOut.EvidenceGaps` 记录丢弃条数，避免发布器因 ignored finding 把整份评审判为 stale。`review`/`validate`/`code-review` 的部分 finding 进入投票；每个 finding 单独校验，契约级不一致不会丢弃整个 lane。节点以 `PartialLaneOut` 完成，`gather` 仍写入携带 `error_kind`、回合数与用量的 evidence gap，因此 verdict 不能是 `PASS`；已有 P0/P1 的 `BLOCKING` 不被降级。unsafe、取消、timeout 与预算类保持原失败语义 |
 | `explore` 未成功完成 | 四路评审不带探索摘要运行；报告给出一条告警，不产生证据缺口 |
 | `explore` 被跳过 | 只会发生在设置了 token 预算（`max_tokens > 0`）且预算在它开始前已耗尽时；此时 `plan` 也被跳过，工作流在没有结论的情况下结束 |
 
