@@ -83,7 +83,10 @@ func (s *ReviewService) resolveRepositorySkillRuntime(ctx context.Context, proje
 			return nil, PermanentJob(errors.New("app: repository skill target changed; reauthorize repository skills"))
 		}
 		if !store.ValidRepositorySkillSnapshotSHA256(grant.SnapshotSHA256) || grant.SnapshotSHA256 != snapshot {
-			return nil, PermanentJob(errors.New("app: repository skill snapshot changed; reauthorize repository skills"))
+			// This branch filters with the deny set derived from the MR diff while
+			// authorization is stored with ignore rules alone, so reauthorizing on
+			// the same target commit cannot make the hashes match.
+			return nil, PermanentJob(errors.New("app: repository skill snapshot changed: this MR's changes alter the authorized skill set; reauthorizing repository skills cannot resolve it"))
 		}
 	}
 	blocks, identities, err := applyRepositorySkillAuthorizations(baseBlocks, project.ID, branch, sha, grants)
