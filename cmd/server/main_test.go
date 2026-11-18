@@ -379,6 +379,38 @@ func TestRunRefusesLockedDataDirectory(t *testing.T) {
 	}
 }
 
+func TestRunLogsSanitizedStorageOpenFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := writeRunConfig(t, dir, 1)
+	dbPath := filepath.Join(dir, "review.db")
+	if err := os.WriteFile(dbPath, []byte("not a sqlite database"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	err := run(context.Background(), []string{"--config", path, "--overlay", ""}, &bytes.Buffer{}, &logs)
+	if err == nil || err.Error() != "open storage: SQLite database is unavailable" {
+		t.Fatalf("run error = %v, want the generic storage error", err)
+	}
+	output := logs.String()
+	for _, want := range []string{"storage open failed", "error_class=", "stage="} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("startup log does not contain %q: %s", want, output)
+		}
+	}
+	// Reproduce the raw failure to prove the log carries classified fields
+	// instead of the underlying driver text.
+	raw, rawErr := sqlite.Open(context.Background(), "file:"+dbPath)
+	if raw != nil {
+		raw.Close()
+	}
+	if rawErr == nil {
+		t.Fatal("corrupt database opened without an error")
+	}
+	if strings.Contains(output, rawErr.Error()) {
+		t.Fatalf("startup log leaks the raw storage error %q: %s", rawErr.Error(), output)
+	}
+}
+
 func TestRunRejectsWrongMCPKeyAndReleasesResources(t *testing.T) {
 	dir := t.TempDir()
 	path := writeRunConfig(t, dir, 1)

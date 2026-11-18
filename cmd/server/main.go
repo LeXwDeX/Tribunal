@@ -151,6 +151,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	defer owner.Finish()
 	db, err := sqlite.Open(ctx, cfg.Storage.DSN)
 	if err != nil {
+		logStorageOpenFailure(logger, err)
 		return errors.New("open storage: SQLite database is unavailable")
 	}
 	owner.db = db
@@ -774,6 +775,28 @@ func readHeaderTimeout(readTimeout time.Duration) time.Duration {
 		return maximum
 	}
 	return readTimeout
+}
+
+// logStorageOpenFailure records a classified cause for a failed sqlite.Open.
+// Store errors may embed SQL text or payloads, so only the stage, migration
+// file, table, SQLite result code and errclass are logged; the generic startup
+// error stays unchanged.
+func logStorageOpenFailure(logger *slog.Logger, err error) {
+	attributes := []any{"error_class", errclass.Of(err)}
+	var openErr *sqlite.OpenError
+	if errors.As(err, &openErr) {
+		attributes = append(attributes, "stage", openErr.Stage)
+		if openErr.Migration != "" {
+			attributes = append(attributes, "migration", openErr.Migration)
+		}
+		if openErr.Table != "" {
+			attributes = append(attributes, "table", openErr.Table)
+		}
+		if openErr.Code != 0 {
+			attributes = append(attributes, "sqlite_code", openErr.Code)
+		}
+	}
+	logger.Error("storage open failed; refusing to start", attributes...)
 }
 
 // masterKeyMismatch logs the operator-facing cause of a rejected master key and

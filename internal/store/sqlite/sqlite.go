@@ -60,6 +60,48 @@ func WithClock(now func() time.Time) Option {
 	}
 }
 
+// Open stages reported by OpenError. Callers log the stage and the other
+// structured fields instead of the raw driver text.
+const (
+	StageOpen     = "open"
+	StageMigrate  = "migrate"
+	StageBackfill = "backfill"
+	StageFKCheck  = "fk_check"
+)
+
+// OpenError reports where opening the store failed. The message is the
+// preserved cause text; the structured fields carry the stage, migration file,
+// table and SQLite result code for callers that must log without raw errors.
+type OpenError struct {
+	Stage     string
+	Migration string
+	Table     string
+	Code      int
+	Err       error
+}
+
+func (e *OpenError) Error() string {
+	if e.Err != nil {
+		return e.Err.Error()
+	}
+	return "sqlite: " + e.Stage
+}
+
+// Unwrap exposes the underlying cause.
+func (e *OpenError) Unwrap() error { return e.Err }
+
+func newOpenError(stage, migration, table string, err error) *OpenError {
+	return &OpenError{Stage: stage, Migration: migration, Table: table, Code: sqliteResultCode(err), Err: err}
+}
+
+func sqliteResultCode(err error) int {
+	var sqliteErr *sqlitedrv.Error
+	if errors.As(err, &sqliteErr) {
+		return sqliteErr.Code()
+	}
+	return 0
+}
+
 // Open opens dsn, applies the required pragmas on every connection, runs the
 // embedded migrations, and returns a ready store. The caller owns Close.
 func Open(ctx context.Context, dsn string, opts ...Option) (*Store, error) {
@@ -71,7 +113,7 @@ func Open(ctx context.Context, dsn string, opts ...Option) (*Store, error) {
 	}
 	db, err := sql.Open("sqlite", withPragmas(dsn))
 	if err != nil {
-		return nil, fmt.Errorf("sqlite: open: %w", err)
+		return nil, newOpenError(StageOpen, "", "", fmt.Errorf("sqlite: open: %w", err))
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
@@ -87,7 +129,7 @@ func Open(ctx context.Context, dsn string, opts ...Option) (*Store, error) {
 	}
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("sqlite: ping: %w", err)
+		return nil, newOpenError(StageOpen, "", "", fmt.Errorf("sqlite: ping: %w", err))
 	}
 	if err := migrate(ctx, db, s.now); err != nil {
 		_ = db.Close()
@@ -95,7 +137,7 @@ func Open(ctx context.Context, dsn string, opts ...Option) (*Store, error) {
 	}
 	if err := backfillReviewCommandReplays(ctx, db, s.now().UTC()); err != nil {
 		_ = db.Close()
-		return nil, err
+		return nil, newOpenError(StageBackfill, "", "", err)
 	}
 	return s, nil
 }
@@ -151,28 +193,28 @@ func (s *Store) Ping(ctx context.Context) error {
 func migrate(ctx context.Context, db *sql.DB, now func() time.Time) error {
 	before, err := appliedMigrationCount(ctx, db)
 	if err != nil {
-		return err
+		return newOpenError(StageMigrate, "", "", err)
 	}
 	if _, err := db.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
-		return fmt.Errorf("sqlite: disable foreign keys for migrations: %w", err)
+		return newOpenError(StageMigrate, "", "", fmt.Errorf("sqlite: disable foreign keys for migrations: %w", err))
 	}
 	applyErr := applyMigrations(ctx, db, now)
 	if _, err := db.ExecContext(ctx, `PRAGMA foreign_keys=ON`); err != nil && applyErr == nil {
-		return fmt.Errorf("sqlite: re-enable foreign keys: %w", err)
+		return newOpenError(StageMigrate, "", "", fmt.Errorf("sqlite: re-enable foreign keys: %w", err))
 	}
 	if applyErr != nil {
 		return applyErr
 	}
 	after, err := appliedMigrationCount(ctx, db)
 	if err != nil {
-		return err
+		return newOpenError(StageMigrate, "", "", err)
 	}
 	if after == before {
 		return nil
 	}
 	rows, err := db.QueryContext(ctx, `PRAGMA foreign_key_check`)
 	if err != nil {
-		return fmt.Errorf("sqlite: foreign key check: %w", err)
+		return newOpenError(StageFKCheck, "", "", fmt.Errorf("sqlite: foreign key check: %w", err))
 	}
 	defer rows.Close()
 	if rows.Next() {
@@ -183,12 +225,12 @@ func migrate(ctx context.Context, db *sql.DB, now func() time.Time) error {
 			fkID   int
 		)
 		if err := rows.Scan(&table, &rowID, &parent, &fkID); err != nil {
-			return fmt.Errorf("sqlite: scan foreign key violation: %w", err)
+			return newOpenError(StageFKCheck, "", "", fmt.Errorf("sqlite: scan foreign key violation: %w", err))
 		}
-		return fmt.Errorf("sqlite: migration left a foreign key violation in table %q", table)
+		return newOpenError(StageFKCheck, "", table, fmt.Errorf("sqlite: migration left a foreign key violation in table %q", table))
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("sqlite: foreign key check: %w", err)
+		return newOpenError(StageFKCheck, "", "", fmt.Errorf("sqlite: foreign key check: %w", err))
 	}
 	return nil
 }
@@ -217,11 +259,11 @@ func applyMigrations(ctx context.Context, db *sql.DB, now func() time.Time) erro
 		name TEXT NOT NULL,
 		applied_at TEXT NOT NULL
 	)`); err != nil {
-		return fmt.Errorf("sqlite: create schema_migrations: %w", err)
+		return newOpenError(StageMigrate, "", "", fmt.Errorf("sqlite: create schema_migrations: %w", err))
 	}
 	entries, err := fs.ReadDir(migrations.FS, ".")
 	if err != nil {
-		return fmt.Errorf("sqlite: read migrations: %w", err)
+		return newOpenError(StageMigrate, "", "", fmt.Errorf("sqlite: read migrations: %w", err))
 	}
 	var names []string
 	for _, entry := range entries {
@@ -234,31 +276,31 @@ func applyMigrations(ctx context.Context, db *sql.DB, now func() time.Time) erro
 	applied := make(map[int]bool)
 	rows, err := db.QueryContext(ctx, `SELECT version FROM schema_migrations`)
 	if err != nil {
-		return fmt.Errorf("sqlite: list migrations: %w", err)
+		return newOpenError(StageMigrate, "", "", fmt.Errorf("sqlite: list migrations: %w", err))
 	}
 	for rows.Next() {
 		var version int
 		if err := rows.Scan(&version); err != nil {
 			rows.Close()
-			return fmt.Errorf("sqlite: scan migration: %w", err)
+			return newOpenError(StageMigrate, "", "", fmt.Errorf("sqlite: scan migration: %w", err))
 		}
 		applied[version] = true
 	}
 	if err := rows.Close(); err != nil {
-		return fmt.Errorf("sqlite: close migration rows: %w", err)
+		return newOpenError(StageMigrate, "", "", fmt.Errorf("sqlite: close migration rows: %w", err))
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("sqlite: iterate migrations: %w", err)
+		return newOpenError(StageMigrate, "", "", fmt.Errorf("sqlite: iterate migrations: %w", err))
 	}
 
 	seen := make(map[int]string)
 	for _, name := range names {
 		version, err := migrationVersion(name)
 		if err != nil {
-			return err
+			return newOpenError(StageMigrate, name, "", err)
 		}
 		if previous, ok := seen[version]; ok {
-			return fmt.Errorf("sqlite: duplicate migration version %d: %s and %s", version, previous, name)
+			return newOpenError(StageMigrate, name, "", fmt.Errorf("sqlite: duplicate migration version %d: %s and %s", version, previous, name))
 		}
 		seen[version] = name
 		if applied[version] {
@@ -266,24 +308,24 @@ func applyMigrations(ctx context.Context, db *sql.DB, now func() time.Time) erro
 		}
 		body, err := migrations.FS.ReadFile(name)
 		if err != nil {
-			return fmt.Errorf("sqlite: read migration %s: %w", name, err)
+			return newOpenError(StageMigrate, name, "", fmt.Errorf("sqlite: read migration %s: %w", name, err))
 		}
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
-			return fmt.Errorf("sqlite: begin migration %s: %w", name, err)
+			return newOpenError(StageMigrate, name, "", fmt.Errorf("sqlite: begin migration %s: %w", name, err))
 		}
 		if _, err := tx.ExecContext(ctx, string(body)); err != nil {
 			_ = tx.Rollback()
-			return fmt.Errorf("sqlite: apply migration %s: %w", name, err)
+			return newOpenError(StageMigrate, name, "", fmt.Errorf("sqlite: apply migration %s: %w", name, err))
 		}
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)`,
 			version, name, formatTime(now())); err != nil {
 			_ = tx.Rollback()
-			return fmt.Errorf("sqlite: record migration %s: %w", name, err)
+			return newOpenError(StageMigrate, name, "", fmt.Errorf("sqlite: record migration %s: %w", name, err))
 		}
 		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("sqlite: commit migration %s: %w", name, err)
+			return newOpenError(StageMigrate, name, "", fmt.Errorf("sqlite: commit migration %s: %w", name, err))
 		}
 	}
 	return nil
