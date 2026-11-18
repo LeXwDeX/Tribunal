@@ -293,7 +293,7 @@ func (s *Server) modelDefaultCrossModelDetails(ctx context.Context, current, par
 func modelParamsDetails(model store.Model, params store.ModelParams) []app.Detail {
 	candidate := model
 	candidate.Params = params
-	err := config.ValidateProviderConfig("model", llm.ModelConfig(candidate), config.ProviderValidationOptions{})
+	err := config.ValidateProviderConfig("model", llm.ModelConfig(candidate), config.ProviderValidationOptions{EnforceThinkingBudget: true})
 	if err == nil {
 		return nil
 	}

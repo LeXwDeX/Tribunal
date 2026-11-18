@@ -618,6 +618,10 @@ func (c *Config) Validate() error {
 // ProviderValidationOptions selects validation needed for environment-backed providers.
 type ProviderValidationOptions struct {
 	RequireAPIKeyEnv bool
+	// EnforceThinkingBudget rejects an anthropic thinking budget that is not
+	// below max_tokens (#512). Config-file providers only warn at load so an
+	// existing deployment still starts; API writes reject the value.
+	EnforceThinkingBudget bool
 }
 
 // ValidateProviderConfig validates both configured providers and stored models.
@@ -666,6 +670,12 @@ func ValidateProviderConfig(field string, provider ProviderConfig, opts Provider
 		// and then fail every request.
 		if provider.Protocol == "anthropic" && provider.Thinking.BudgetTokens > 0 && provider.Thinking.BudgetTokens < 1024 {
 			p.add("%s.thinking.budget_tokens must be at least 1024 for anthropic", field)
+		}
+		// Anthropic requires budget_tokens < max_tokens; otherwise every
+		// request fails with a non-retryable 400 (#512).
+		if provider.Protocol == "anthropic" && opts.EnforceThinkingBudget && provider.MaxTokens > 0 &&
+			provider.Thinking.BudgetTokens > 0 && provider.Thinking.BudgetTokens >= provider.MaxTokens {
+			p.add("%s.thinking.budget_tokens must be less than max_tokens for anthropic", field)
 		}
 		switch provider.Thinking.Type {
 		case "", "enabled", "disabled":

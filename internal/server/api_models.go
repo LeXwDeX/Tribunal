@@ -648,7 +648,7 @@ func modelDetails(model store.Model) []app.Detail {
 		strings.IndexFunc(model.DisplayName, unicode.IsControl) >= 0 {
 		details = append(details, app.Detail{Field: "display_name", Message: "display_name must be 1-128 printable characters"})
 	}
-	err := config.ValidateProviderConfig("model", llm.ModelConfig(model), config.ProviderValidationOptions{})
+	err := config.ValidateProviderConfig("model", llm.ModelConfig(model), config.ProviderValidationOptions{EnforceThinkingBudget: true})
 	if err == nil {
 		return details
 	}

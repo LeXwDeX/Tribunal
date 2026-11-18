@@ -270,7 +270,7 @@ func TestAnthropicThinkingRoundTrip(t *testing.T) {
 		Model:          "claude-test",
 		APIKeyEnv:      "TEST_ANTHROPIC_KEY",
 		MaxConcurrency: 2,
-		MaxTokens:      512,
+		MaxTokens:      8192,
 		Temperature:    floatPtr(0.3),
 		Thinking:       &config.ThinkingConfig{BudgetTokens: 2048},
 	})
@@ -361,7 +361,7 @@ func TestAnthropicThinkingRoundTrip(t *testing.T) {
 	}
 	firstBody := recorder.body(0)
 	assertContains(t, firstBody, `"cache_control":{"type":"ephemeral"}`)
-	assertContains(t, firstBody, `"max_tokens":512`)
+	assertContains(t, firstBody, `"max_tokens":8192`)
 	assertContains(t, firstBody, `"thinking":{"budget_tokens":4096,"type":"enabled"}`)
 	assertContains(t, firstBody, `"tool_choice":{"type":"auto"}`)
 	assertNotContains(t, firstBody, `"temperature"`)
@@ -384,7 +384,7 @@ func TestAnthropicForcedToolChoiceDisablesThinking(t *testing.T) {
 		Model:          "claude-test",
 		APIKeyEnv:      "TEST_ANTHROPIC_KEY",
 		MaxConcurrency: 2,
-		MaxTokens:      512,
+		MaxTokens:      4096,
 		Thinking:       &config.ThinkingConfig{BudgetTokens: 2048},
 	})
 
