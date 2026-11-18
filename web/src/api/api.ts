@@ -5,6 +5,7 @@ import type {
   AdminProjectPage,
   AdminUser,
   AdminUserPage,
+  AdminUserWriteResult,
   ApiToken,
   ApiTokenPage,
   BlockBinding,
@@ -564,8 +565,8 @@ export interface AdminUserPatch {
   revision: number
 }
 
-export async function updateAdminUser(id: number | string, patch: AdminUserPatch): Promise<AdminUser> {
-  return request<AdminUser>(`/api/v1/admin/users/${segment(id)}`, { method: 'PATCH', body: patch })
+export async function updateAdminUser(id: number | string, patch: AdminUserPatch): Promise<AdminUserWriteResult> {
+  return request<AdminUserWriteResult>(`/api/v1/admin/users/${segment(id)}`, { method: 'PATCH', body: patch })
 }
 
 export async function listAdminUserGrants(userId: number | string, cursor?: string): Promise<ProjectGrantPage> {
