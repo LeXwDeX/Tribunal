@@ -195,6 +195,7 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 	var usage llm.Usage
 	var turns int
 	submitFailures := 0
+	submitOnlyRejections := 0
 	askedForSubmit := false
 	invalidRecoveries := 0
 	graceUsed := 0
@@ -523,6 +524,7 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 
 		results := make([]llm.Part, 0, len(calls))
 		submitted := false
+		attemptedSubmit := false
 		var output any
 
 		for _, call := range calls {
@@ -533,6 +535,7 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 			}
 
 			if call.Name == SubmitToolName {
+				attemptedSubmit = true
 				out, decodeErr := decodeSubmit(spec.Submit, call.Input)
 				if decodeErr != nil {
 					submitFailures++
@@ -616,6 +619,20 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 				continue
 			}
 			return partial(ErrInvalidSubmit)
+		}
+		// Refused submit-only turns make no progress and their error results
+		// are kept by compaction, so the context only grows. Without an
+		// explicit max_turns nothing else bounds that tail: stop with the
+		// state collected once the refusals stop looking like a one-off.
+		if submitOnly {
+			if !attemptedSubmit {
+				submitOnlyRejections++
+			}
+		} else {
+			submitOnlyRejections = 0
+		}
+		if maxTurns <= 0 && submitOnlyRejections >= maxSubmitOnlyRejections {
+			return partial(ErrNoSubmit)
 		}
 		if maxTurns > 0 && turn >= maxTurns {
 			// Grace turns are submit-only and bounded; after them the run

@@ -219,3 +219,31 @@ func TestRunGraceExhaustionReturnsPartialResult(t *testing.T) {
 		t.Fatal("the partial result lost the transcript")
 	}
 }
+
+// A model that keeps calling other tools after the context reached the
+// compaction threshold must not spin until the provider's hard context limit:
+// without an explicit turn limit each refused turn only grows the context, so
+// the run stops with the state it collected and ErrNoSubmit.
+func TestRunStopsAfterRepeatedSubmitOnlyRefusals(t *testing.T) {
+	client := &windowClient{window: 10000, ignore: 100}
+	spec := testSpec(client, bigTool(10))
+	spec.Prompt = strings.Repeat("p", 36000) // 9000 tokens, 90% of the window
+	result, err := Run(context.Background(), spec)
+	if !errors.Is(err, ErrNoSubmit) {
+		t.Fatalf("error = %v, want ErrNoSubmit", err)
+	}
+	if result == nil || !result.Partial {
+		t.Fatalf("result = %+v, want a partial result", result)
+	}
+	// Turn 1 explores; the following turns are submit-only and refused.
+	if result.Turns != 3 {
+		t.Fatalf("turns = %d, want 3 (one exploring turn plus two refused submit-only turns)", result.Turns)
+	}
+	reqs := client.reqs
+	if len(reqs) != 3 {
+		t.Fatalf("requests = %d, want 3", len(reqs))
+	}
+	if !hasSubmitPrompt(reqs[1]) {
+		t.Fatal("the refused turns did not carry the submit prompt")
+	}
+}
