@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -216,6 +217,103 @@ func TestModelWriteEndpointsRejectPrice(t *testing.T) {
 		t.Fatalf("update status = %d updated = %+v, want 400 and no store call", response.Code, fake.updated)
 	}
 	assertPriceField("update", response)
+}
+
+// TestModelWriteReportsCatalogRefreshFailure covers a committed model write
+// whose catalog refresh failed. The catalog stays stale until another write
+// succeeds or the process restarts, so the response must report that instead
+// of only claiming effectiveness for new workflows.
+func TestModelWriteReportsCatalogRefreshFailure(t *testing.T) {
+	catalog, err := llm.NewCatalog(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := func() *store.Model {
+		return &store.Model{
+			ID: "user:x", DisplayName: "m", Protocol: "openai-chat", BaseURL: "https://example.com",
+			Model: "m", Revision: 1, Params: store.ModelParams{MaxTokens: 16, MaxConcurrency: 1},
+		}
+	}
+	const createBody = `{"display_name":"m","protocol":"openai-chat","base_url":"https://example.com","model":"m","params":{"max_tokens":16,"max_concurrency":1}}`
+	const updateBody = `{"display_name":"m","protocol":"openai-chat","base_url":"https://example.com","model":"m","params":{"max_tokens":16,"max_concurrency":1},"revision":1}`
+	cases := []struct {
+		name, method, path, id, body string
+		call                         func(*Server, http.ResponseWriter, *http.Request)
+	}{
+		{"create", http.MethodPost, "/api/v1/models", "", createBody,
+			func(s *Server, w http.ResponseWriter, r *http.Request) { s.handleCreateModel(w, r) }},
+		{"update", http.MethodPatch, "/api/v1/models/user:x", "user:x", updateBody,
+			func(s *Server, w http.ResponseWriter, r *http.Request) { s.handleUpdateModel(w, r) }},
+		{"params", http.MethodPatch, "/api/v1/models/user:x/params", "user:x", `{"revision":1,"params":{"temperature":0.5}}`,
+			func(s *Server, w http.ResponseWriter, r *http.Request) { s.handleUpdateModelParams(w, r) }},
+		{"delete", http.MethodDelete, "/api/v1/models/user:x?revision=1", "user:x", "",
+			func(s *Server, w http.ResponseWriter, r *http.Request) { s.handleDeleteModel(w, r) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server, logs := newModelTestServer(t, catalog, &fakeModelStore{stored: stored()})
+			server.refreshModels = func(context.Context) error { return errors.New("catalog unavailable") }
+			request := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+			if tc.id != "" {
+				request.SetPathValue("id", tc.id)
+			}
+			response := httptest.NewRecorder()
+			tc.call(server, response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d body = %s, want 200", response.Code, response.Body.String())
+			}
+			if !strings.Contains(response.Body.String(), `"catalog_refresh_failed":true`) {
+				t.Fatalf("body = %s, want catalog_refresh_failed", response.Body.String())
+			}
+			if !strings.Contains(response.Body.String(), `"effective":"new_workflows"`) {
+				t.Fatalf("body = %s, want the existing effective field", response.Body.String())
+			}
+			if !strings.Contains(logs.String(), `"event":"model_refresh_failed"`) {
+				t.Fatalf("logs = %s, want a refresh failure event", logs.String())
+			}
+		})
+	}
+}
+
+// TestModelWriteRefreshSurvivesRequestCancellation pins the refresh to a
+// context detached from the request: a client that disconnects after the
+// database commit must not leave the catalog stale.
+func TestModelWriteRefreshSurvivesRequestCancellation(t *testing.T) {
+	catalog, err := llm.NewCatalog(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, _ := newModelTestServer(t, catalog, &fakeModelStore{})
+	refreshed := false
+	var refreshCtxErr error
+	var hasDeadline bool
+	server.refreshModels = func(ctx context.Context) error {
+		refreshed = true
+		refreshCtxErr = ctx.Err()
+		_, hasDeadline = ctx.Deadline()
+		return refreshCtxErr
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/models", strings.NewReader(`{"display_name":"m","protocol":"openai-chat","base_url":"https://example.com","model":"m","params":{"max_tokens":16,"max_concurrency":1}}`))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	request = request.WithContext(ctx)
+	response := httptest.NewRecorder()
+	server.handleCreateModel(response, request)
+	if !refreshed {
+		t.Fatal("catalog refresh was not attempted")
+	}
+	if refreshCtxErr != nil {
+		t.Fatalf("refresh context error = %v, want a detached context", refreshCtxErr)
+	}
+	if !hasDeadline {
+		t.Fatal("refresh context has no deadline")
+	}
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s, want 200", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "catalog_refresh_failed") {
+		t.Fatalf("body = %s, want no refresh failure marker", response.Body.String())
+	}
 }
 
 func TestDeleteReferencedModelReturnsReferences(t *testing.T) {

@@ -38,6 +38,10 @@ type modelPresetResponse struct {
 	Changes   []llm.PresetChange    `json:"changes"`
 	Conflicts []modelPresetConflict `json:"conflicts"`
 	Effective string                `json:"effective,omitempty"`
+	// CatalogRefreshFailed marks a committed write whose catalog rebuild
+	// failed: the change is durable but not effective until a later refresh
+	// succeeds or the process restarts.
+	CatalogRefreshFailed bool `json:"catalog_refresh_failed,omitempty"`
 }
 
 func (s *Server) handleListModelPresets(w http.ResponseWriter, r *http.Request) {
@@ -118,10 +122,8 @@ func (s *Server) handleApplyModelPreset(w http.ResponseWriter, r *http.Request) 
 	// credentials stay out.
 	s.logger.Info("model changed", "event", "platform_audit", "actor_id", currentUserID(r),
 		"target_id", id, "action", "apply_preset", "preset", preset.ID, "fields", patch.Fields())
-	if s.refreshModels != nil {
-		if err := s.refreshModels(r.Context()); err != nil {
-			s.logger.Error("refresh models failed", "event", "model_refresh_failed", "model_id", id)
-		}
+	if !s.refreshModelCatalog(r, "model_id", id) {
+		response.CatalogRefreshFailed = true
 	}
 	response.Applied = true
 	response.Revision = updated.Revision

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -510,4 +511,39 @@ func TestModelDefaultsResetRejectsCrossModelBreakage(t *testing.T) {
 	assertStatus(t, admin.json(http.MethodPut, "/api/v1/model-defaults", map[string]any{
 		"params": map[string]any{"rpm": 30}, "revision": 3,
 	}), http.StatusOK)
+}
+
+// TestModelDefaultsWritesReportCatalogRefreshFailure keeps both defaults
+// writes honest when the committed change could not rebuild the catalog: the
+// saved defaults are durable, but every user model keeps its stale effective
+// parameters until another successful refresh or a restart.
+func TestModelDefaultsWritesReportCatalogRefreshFailure(t *testing.T) {
+	env := newM6Env(t, m6Options{})
+	wireModelDefaults(t, env, nil)
+	env.api.refreshModels = func(context.Context) error { return errors.New("catalog unavailable") }
+	admin := env.loginAs("code-admin")
+	type defaultsResponse struct {
+		Revision             int64 `json:"revision"`
+		CatalogRefreshFailed bool  `json:"catalog_refresh_failed"`
+	}
+	put := admin.json(http.MethodPut, "/api/v1/model-defaults", map[string]any{
+		"params": map[string]any{"max_tokens": 4096}, "revision": 0,
+	})
+	assertStatus(t, put, http.StatusOK)
+	var updated defaultsResponse
+	if err := json.Unmarshal(put.body, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if !updated.CatalogRefreshFailed || updated.Revision != 1 {
+		t.Fatalf("put response = %+v, want catalog_refresh_failed at revision 1", updated)
+	}
+	reset := admin.request(http.MethodDelete, "/api/v1/model-defaults?revision=1", nil, nil)
+	assertStatus(t, reset, http.StatusOK)
+	var cleared defaultsResponse
+	if err := json.Unmarshal(reset.body, &cleared); err != nil {
+		t.Fatal(err)
+	}
+	if !cleared.CatalogRefreshFailed || cleared.Revision != 2 {
+		t.Fatalf("reset response = %+v, want catalog_refresh_failed at revision 2", cleared)
+	}
 }
