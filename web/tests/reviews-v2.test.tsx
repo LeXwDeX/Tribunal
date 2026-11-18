@@ -71,6 +71,28 @@ describe('review filter controls', () => {
     await waitFor(() => expect(reviewCalls.some((url) => new URL(url, 'http://localhost').searchParams.get('verdict') === 'BLOCKING')).toBe(true))
   })
 
+  it.each(['abc', '2026-13-99', '2026-1-1', '20260615'])(
+    'ignores a malformed since=%s instead of crashing the page',
+    async (value) => {
+      const reviewCalls: string[] = []
+      installFetch((url) => {
+        if (url.startsWith('/api/v1/reviews')) {
+          reviewCalls.push(url)
+          return jsonResponse({ reviews: [] })
+        }
+        if (url.startsWith('/api/v1/projects')) return jsonResponse({ projects: [] })
+        if (url.startsWith('/api/v1/profiles')) return jsonResponse({ profiles: [] })
+        return jsonResponse({})
+      })
+      renderWithProviders(<ReviewsPage />, { route: `/reviews?since=${encodeURIComponent(value)}` })
+
+      expect(await screen.findByRole('heading', { name: '评审记录' })).toBeInTheDocument()
+      expect(screen.getByLabelText('起始日期')).toHaveValue('')
+      await waitFor(() => expect(reviewCalls.length).toBeGreaterThan(0))
+      expect(reviewCalls.every((url) => !new URL(url, 'http://localhost').searchParams.has('since'))).toBe(true)
+    },
+  )
+
   it('sends the selected start date as local midnight', async () => {
     const reviewCalls: string[] = []
     installFetch((url) => {
