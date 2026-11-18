@@ -89,7 +89,7 @@ func (s *ReviewService) prepareRun(ctx context.Context, project *store.Project, 
 	if err != nil {
 		return fail(err)
 	}
-	if err := ensureReviewRoot(ws.Root); err != nil {
+	if err := ws.EnsureRoot(); err != nil {
 		return fail(err)
 	}
 	auth := repo.Auth{Token: token}
@@ -255,50 +255,6 @@ func (s *ReviewService) prepareReviewBase(ctx context.Context, project *store.Pr
 		_ = os.RemoveAll(base)
 	}
 	return base, sha256Hex(strings.Join([]string{base, strings.ToLower(startSHA)}, "\n")), cleanup, nil
-}
-
-// ensureReviewRoot creates the project workspace root and rejects a symlinked
-// root or parent before a git or worktree write can follow it. Deeper
-// configured ancestors are trusted.
-func ensureReviewRoot(root string) error {
-	if !filepath.IsAbs(root) {
-		return fmt.Errorf("app: workspace root is not absolute")
-	}
-	info, err := os.Lstat(root)
-	switch {
-	case err == nil:
-		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-			return fmt.Errorf("app: workspace root is unsafe")
-		}
-	case !errors.Is(err, os.ErrNotExist):
-		return fmt.Errorf("app: inspect workspace root: %w", err)
-	}
-	parent := filepath.Dir(root)
-	parentInfo, err := os.Lstat(parent)
-	switch {
-	case err == nil:
-		if parentInfo.Mode()&os.ModeSymlink != 0 || !parentInfo.IsDir() {
-			return fmt.Errorf("app: workspace parent is unsafe")
-		}
-	case errors.Is(err, os.ErrNotExist):
-		if err := os.MkdirAll(parent, 0o700); err != nil {
-			return fmt.Errorf("app: create workspace parent: %w", err)
-		}
-		parentInfo, err = os.Lstat(parent)
-		if err != nil || parentInfo.Mode()&os.ModeSymlink != 0 || !parentInfo.IsDir() {
-			return fmt.Errorf("app: workspace parent is unsafe")
-		}
-	default:
-		return fmt.Errorf("app: inspect workspace parent: %w", err)
-	}
-	if err := os.Mkdir(root, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-		return fmt.Errorf("app: create workspace root: %w", err)
-	}
-	info, err = os.Lstat(root)
-	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return fmt.Errorf("app: workspace root is unsafe")
-	}
-	return nil
 }
 
 // publishEmpty publishes the "nothing to review" summary without a workflow.

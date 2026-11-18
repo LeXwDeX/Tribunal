@@ -313,7 +313,7 @@ func pinRepositorySkillTarget(ctx context.Context, ws *workspace.Workspace, git 
 	if err != nil {
 		return "", err
 	}
-	if err := ensureReviewRoot(ws.Root); err != nil {
+	if err := ws.EnsureRoot(); err != nil {
 		return "", err
 	}
 	unlock, err := ws.LockMirror(ctx)
