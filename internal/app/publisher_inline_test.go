@@ -260,3 +260,41 @@ func TestPublisherKeepsMarkedEvidenceWhenHistoricalFindingIsMissing(t *testing.T
 		}
 	}
 }
+
+// inlineGenerationBumpStore advances the review control on the discussion
+// publication read, which runs after the last publication recheck and before
+// the create closure. The closure must recheck the generation before reserving
+// an intent, so a superseded generation never creates the thread (#519).
+type inlineGenerationBumpStore struct {
+	ReviewStore
+	once sync.Once
+	bump func()
+}
+
+func (s *inlineGenerationBumpStore) GetPublication(ctx context.Context, projectID, mrIID int64, kind, key string) (*store.Publication, error) {
+	if kind == discussionPublishKind {
+		s.once.Do(s.bump)
+	}
+	return s.ReviewStore.GetPublication(ctx, projectID, mrIID, kind, key)
+}
+
+func TestInlineDiscussionCreateRechecksGenerationBeforeReserve(t *testing.T) {
+	ctx := context.Background()
+	f := newReviewFixture(t, reviewTestHead)
+	wf := reviewWithFailedNote(t, f, "inline-generation-recheck")
+	f.publisher.store = &inlineGenerationBumpStore{ReviewStore: f.db, bump: mrSerialBumpControl(t, f)}
+	err := f.publisher.Publish(ctx, wf.ID)
+	if !errors.Is(err, ErrStalePublication) {
+		t.Fatalf("publish error = %v, want ErrStalePublication", err)
+	}
+	if got := f.gitlab.discussionCreates; got != 0 {
+		t.Fatalf("discussion creates = %d, want 0 after the generation changed", got)
+	}
+	if got := countPublicationEffects(f).discussions; got != 0 {
+		t.Fatalf("discussion publications = %d, want 0", got)
+	}
+	unknown, err := f.db.HasUnknownDiscussionIntent(ctx, 42, 7)
+	if err != nil || unknown {
+		t.Fatalf("unknown discussion intent = %v, err = %v", unknown, err)
+	}
+}

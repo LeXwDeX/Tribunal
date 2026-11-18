@@ -1360,10 +1360,15 @@ func (p *Publisher) publishInlinePosition(ctx context.Context, loaded *loadedRev
 
 	// Create with the existing uncertainty fence: the intent proves a remote ID
 	// only, and adoption still requires the marker scan to match this content.
+	// The generation is rechecked inside the lease so a bump that landed after
+	// the last pre-send check cannot reserve and create a superseded thread.
 	var created, proven bool
 	var discussionID string
 	err = sendOutbound(ctx, p.workspace.Get(loaded.project.ID), func(callCtx context.Context) error {
 		var err error
+		if err := recheck(); err != nil {
+			return err
+		}
 		created, discussionID, err = p.store.ReserveDiscussionIntent(callCtx, loaded.project.ID, loaded.mrIID, plan.key)
 		if err != nil {
 			return err
