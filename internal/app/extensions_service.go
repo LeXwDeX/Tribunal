@@ -196,6 +196,17 @@ const (
 	probeToolMaxTokens         = 256
 )
 
+// probeMaxTokens keeps a probe request above the provider's Anthropic
+// thinking budget. The API rejects max_tokens <= thinking.budget_tokens, so a
+// fixed 64/256 request fails every thinking provider before the model answers;
+// floor remains the answer allowance on top of the budget (#524).
+func probeMaxTokens(info llm.ProviderInfo, floor int) int {
+	if info.Protocol == "anthropic" && info.ThinkingBudget > 0 {
+		return info.ThinkingBudget + floor
+	}
+	return floor
+}
+
 // ErrToolCallUnsupported reports a model that answered without the requested
 // tool call. It cannot be used by the review agent loop.
 var ErrToolCallUnsupported = errors.New("app: model did not return a tool call")
@@ -1412,13 +1423,14 @@ func (s *ExtensionService) TestProvider(ctx context.Context, name string) (Provi
 // ProbeProvider sends the minimal connectivity request used by provider
 // tests. Errors are classified without upstream URLs, bodies, or credentials.
 func ProbeProvider(ctx context.Context, client llm.Client) (ProviderTestResult, error) {
+	info := client.Info()
 	started := time.Now()
 	response, err := client.Generate(ctx, &llm.Request{
 		Messages: []llm.Message{{
 			Role:  llm.RoleUser,
 			Parts: []llm.Part{{Type: llm.PartText, Text: "ping"}},
 		}},
-		MaxTokens: probeConnectivityMaxTokens,
+		MaxTokens: probeMaxTokens(info, probeConnectivityMaxTokens),
 	})
 	latency := time.Since(started).Milliseconds()
 	if err != nil {
@@ -1429,7 +1441,7 @@ func ProbeProvider(ctx context.Context, client llm.Client) (ProviderTestResult, 
 		model = response.Model
 	}
 	if model == "" {
-		model = client.Info().Model
+		model = info.Model
 	}
 	return ProviderTestResult{Model: model, LatencyMS: latency, Probe: ProbeConnectivity}, nil
 }
@@ -1457,7 +1469,7 @@ func ProbeProviderTools(ctx context.Context, client llm.Client) (ProviderTestRes
 			InputSchema: probeToolSchema,
 		}},
 		ToolChoice: toolChoice,
-		MaxTokens:  probeToolMaxTokens,
+		MaxTokens:  probeMaxTokens(info, probeToolMaxTokens),
 	})
 	latency := time.Since(started).Milliseconds()
 	if err != nil {

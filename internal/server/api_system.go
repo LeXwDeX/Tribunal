@@ -159,7 +159,12 @@ func (s *Server) handleTestProvider(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusServiceUnavailable, "internal", "provider tester is not configured", nil)
 		return
 	}
-	result, err := s.llm.TestProvider(r.Context(), name)
+	// Bound the probe: an upstream that accepts the connection but never
+	// answers would otherwise keep this handler and its client alive until the
+	// caller disconnects (#532).
+	ctx, cancel := context.WithTimeout(r.Context(), draftTestTimeout)
+	defer cancel()
+	result, err := s.llm.TestProvider(ctx, name)
 	if err != nil {
 		if errors.Is(err, llm.ErrEgressDenied) {
 			s.logger.Warn("provider connectivity test failed", "provider", name, "error_class", "egress_denied")

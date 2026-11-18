@@ -513,8 +513,17 @@ func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusServiceUnavailable, "unavailable", "provider testing is unavailable", nil)
 		return
 	}
-	result, err := s.llm.TestProvider(r.Context(), id)
+	// Bound the probe like the draft test: without a deadline an upstream that
+	// never answers keeps the handler running until the client disconnects
+	// (#532).
+	ctx, cancel := context.WithTimeout(r.Context(), draftTestTimeout)
+	defer cancel()
+	result, err := s.llm.TestProvider(ctx, id)
 	if err != nil {
+		if errors.Is(err, llm.ErrEgressDenied) {
+			writeError(w, r, http.StatusUnprocessableEntity, "egress_denied", "provider destination denied", nil)
+			return
+		}
 		writeError(w, r, http.StatusUnprocessableEntity, "provider_test_failed", "provider test failed", nil)
 		return
 	}
