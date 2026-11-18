@@ -57,6 +57,10 @@ type Watcher struct {
 	published       bool
 	lastPublished   State
 	lastLoggedError string
+	// loggedWarnings holds the normalization warnings already reported for
+	// this watcher. The initial snapshot's warnings were logged by startup,
+	// so a reload only reports entries that are new to it.
+	loggedWarnings map[string]bool
 }
 
 // NewWatcher builds a watcher that starts from opts.Initial. It observes the
@@ -69,9 +73,12 @@ func NewWatcher(opts WatcherOptions) *Watcher {
 	if now == nil {
 		now = time.Now
 	}
-	watcher := &Watcher{opts: opts, now: now}
+	watcher := &Watcher{opts: opts, now: now, loggedWarnings: map[string]bool{}}
 	if opts.Initial != nil {
 		watcher.state = State{Snapshot: opts.Initial, UpdatedAt: now()}
+		for _, warning := range opts.Initial.Warnings {
+			watcher.loggedWarnings[warning] = true
+		}
 	}
 	observed := observeFiles(opts.BasePaths, opts.OverlayPath)
 	if opts.Initial != nil &&
@@ -172,12 +179,28 @@ func (w *Watcher) succeed(snapshot *Snapshot) {
 	w.state.LastErrorAt = time.Time{}
 	w.state.UpdatedAt = w.now()
 	w.lastLoggedError = ""
+	w.logNewWarnings(snapshot.Warnings)
 	if w.opts.Logger != nil {
 		w.opts.Logger.Info("configuration files changed; display snapshot reloaded",
 			"base_revision", shortRevision(snapshot.BaseRevision),
 			"overlay_present", snapshot.OverlayPresent)
 	}
 	w.publish()
+}
+
+// logNewWarnings reports normalization warnings that were not present in the
+// previous applied snapshot, matching the startup WARNING behavior. A warning
+// that disappears and later returns is reported again. Messages name fields
+// only, never values.
+func (w *Watcher) logNewWarnings(warnings []string) {
+	current := make(map[string]bool, len(warnings))
+	for _, warning := range warnings {
+		current[warning] = true
+		if w.opts.Logger != nil && !w.loggedWarnings[warning] {
+			w.opts.Logger.Warn("configuration was migrated or ignored: " + warning)
+		}
+	}
+	w.loggedWarnings = current
 }
 
 func (w *Watcher) fail(err error, snapshot *Snapshot) {

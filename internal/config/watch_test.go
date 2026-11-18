@@ -3,6 +3,7 @@ package config
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +21,11 @@ type watcherHarness struct {
 }
 
 func newWatcherHarness(t *testing.T, baseBody string, overlayBody string) *watcherHarness {
+	t.Helper()
+	return newWatcherHarnessWithLogger(t, baseBody, overlayBody, nil)
+}
+
+func newWatcherHarnessWithLogger(t *testing.T, baseBody string, overlayBody string, logger *slog.Logger) *watcherHarness {
 	t.Helper()
 	setRequiredEnv(t)
 	base := writeConfig(t, "server.yaml", baseBody)
@@ -39,6 +45,7 @@ func newWatcherHarness(t *testing.T, baseBody string, overlayBody string) *watch
 		OverlayPath: overlay,
 		Interval:    time.Millisecond,
 		Initial:     snapshot,
+		Logger:      logger,
 		OnState:     func(state State) { states <- state },
 	})
 	return &watcherHarness{watcher: watcher, states: states, base: base, overlay: overlay}
