@@ -394,3 +394,27 @@ func TestParseSettingsRejectsMaxFilesAboveHardLimit(t *testing.T) {
 		t.Fatalf("max_files at the hard limit rejected: %v", err)
 	}
 }
+
+// Recovery attempts are bounded even when every body is unavailable. A
+// project with many withheld files must not trigger one request per file.
+func TestApplyDiffScopeBoundsFailedRecoveryAttempts(t *testing.T) {
+	fake := &rawFileGitLab{reviewGitLab: newReviewGitLab(scopeHeadSHA)}
+	service := newScopeService(fake)
+	diffs := make([]gitlab.FileDiff, 40)
+	for i := range diffs {
+		path := fmt.Sprintf("assets/f%d.css", i)
+		diffs[i] = gitlab.FileDiff{OldPath: path, NewPath: path, TooLarge: true}
+	}
+	version := &gitlab.Version{HeadSHA: scopeHeadSHA, StartSHA: scopeStartSHA, State: "collected", RealSize: "40"}
+	if err := service.applyDiffScope(context.Background(), 42, "token", version, "40", diffs); err != nil {
+		t.Fatalf("applyDiffScope: %v", err)
+	}
+	if fake.calls != maxRecoveredFiles {
+		t.Fatalf("raw file reads = %d, want %d", fake.calls, maxRecoveredFiles)
+	}
+	for _, diff := range diffs {
+		if diff.Diff != "" {
+			t.Fatalf("unavailable body was recovered: %q", diff.Diff)
+		}
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 
@@ -60,6 +61,36 @@ func sanitizeJobTrace(trace string) string {
 // be applied safely. It is permanent until the file is fixed.
 var ErrInvalidRepoConfig = errors.New("invalid repository review configuration")
 
+// loadRepoDoc reads one target-branch document through the bounded raw-file
+// client. A missing file is an empty document. An oversized review config is
+// a permanent configuration failure: treating it as missing would silently
+// drop its ignore rules. An oversized prompt document is optional context and
+// is skipped with a warning.
+func loadRepoDoc(ctx context.Context, client GitLabClient, logger *slog.Logger, token string, projectID int64, path, ref string) (string, error) {
+	data, err := client.GetRawFile(ctx, token, projectID, path, ref)
+	if err != nil {
+		switch {
+		case gitlab.IsNotFound(err):
+			return "", nil
+		case errors.Is(err, gitlab.ErrFileTooLarge):
+			if path == ".gitlab-review.yml" {
+				return "", fmt.Errorf("%w: .gitlab-review.yml exceeds the repository file size limit", ErrInvalidRepoConfig)
+			}
+			if logger != nil {
+				logger.Warn("repository document exceeds the size limit and was skipped",
+					"project_id", projectID, "path", path)
+			}
+			return "", nil
+		default:
+			if logger != nil {
+				logger.Warn("repository document lookup failed", "project_id", projectID, "path", path)
+			}
+			return "", err
+		}
+	}
+	return string(data), nil
+}
+
 // reviewInputs is the sanitized GitLab input for one review.
 type reviewInputs struct {
 	MR       *gitlab.MergeRequest
@@ -110,6 +141,9 @@ func (s *ReviewService) collectInputs(ctx context.Context, project *store.Projec
 	inputs.Issues = s.collectIssues(ctx, token, project.ID, mrIID)
 	docs, err := s.repoDocs(ctx, token, project.ID, mr.TargetBranch)
 	if err != nil {
+		if errors.Is(err, ErrInvalidRepoConfig) {
+			return nil, PermanentJob(err)
+		}
 		return nil, err
 	}
 	inputs.RepoDocs = docs
@@ -222,15 +256,7 @@ func (s *ReviewService) collectIssues(ctx context.Context, token string, project
 }
 
 func (s *ReviewService) rawDoc(ctx context.Context, token string, projectID int64, path, ref string) (string, error) {
-	data, err := s.gitlab.GetRawFile(ctx, token, projectID, path, ref)
-	if err != nil {
-		if !gitlab.IsNotFound(err) {
-			s.logger.Warn("repository document lookup failed", "project_id", projectID, "path", path)
-			return "", err
-		}
-		return "", nil
-	}
-	return string(data), nil
+	return loadRepoDoc(ctx, s.gitlab, s.logger, token, projectID, path, ref)
 }
 
 func mrMeta(mr *gitlab.MergeRequest) review.MRMeta {

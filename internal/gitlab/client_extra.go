@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/url"
 	"strings"
 	"time"
@@ -20,8 +19,8 @@ const (
 	maxDescription = 140
 	maxAwardName   = 100
 
-	// maxJobTraceBytes caps one job log. The SDK downloads the whole trace, so
-	// the cap limits what the review reads and forwards, not network use.
+	// maxJobTraceBytes caps one job log. The client stops reading at the cap,
+	// so a large trace is never buffered whole.
 	maxJobTraceBytes        = 64 << 10
 	jobTraceTruncatedMarker = "\n[日志已截断：仅保留前 64 KiB]"
 )
@@ -327,30 +326,26 @@ func (c *Client) ListPipelineJobs(ctx context.Context, token string, projectID, 
 }
 
 // GetJobTrace reads the log of one job. The returned text is capped at 64 KiB.
-// Log text is never logged or wrapped in an error.
+// The trace is read through the bounded raw client instead of the SDK, which
+// buffers the whole response before returning. Log text is never logged or
+// wrapped in an error.
 func (c *Client) GetJobTrace(ctx context.Context, token string, projectID, jobID int64) (string, error) {
 	if !positiveIDs(projectID, jobID) {
 		return "", errors.New("gitlab: invalid project or job ID")
 	}
-	reqCtx, client, done, err := c.prepare(ctx, token)
+	reqCtx, _, done, err := c.prepare(ctx, token)
 	if err != nil {
 		return "", err
 	}
 	defer done()
 
-	reader, resp, err := client.Jobs.GetTraceFile(projectID, jobID, sdk.WithContext(reqCtx))
+	rawURL := fmt.Sprintf("%s/api/v4/projects/%d/jobs/%d/trace", c.baseURL, projectID, jobID)
+	raw, tooLarge, err := c.getBounded(reqCtx, token, "get_job_trace", rawURL, maxJobTraceBytes)
 	if err != nil {
-		return "", mapError(reqCtx, "get_job_trace", resp, err)
-	}
-	if reader == nil {
-		return "", &Error{Op: "get_job_trace"}
-	}
-	raw, err := io.ReadAll(io.LimitReader(reader, maxJobTraceBytes+1))
-	if err != nil {
-		return "", mapError(reqCtx, "get_job_trace", resp, err)
+		return "", err
 	}
 	trace := string(raw)
-	if len(raw) > maxJobTraceBytes {
+	if tooLarge {
 		trace = truncateJobTrace(trace) + jobTraceTruncatedMarker
 	}
 	return trace, nil
@@ -404,7 +399,9 @@ func (c *Client) ListClosingIssues(ctx context.Context, token string, projectID,
 	return out, nil
 }
 
-// GetRawFile reads a file from the given ref, normally the target branch.
+// GetRawFile reads a file from the given ref, normally the target branch. The
+// body is bounded by MaxRawFileBytes while it is read: a larger file returns
+// ErrFileTooLarge instead of being buffered whole and rejected afterwards.
 func (c *Client) GetRawFile(ctx context.Context, token string, projectID int64, path, ref string) ([]byte, error) {
 	if projectID <= 0 {
 		return nil, errors.New("gitlab: invalid project ID")
@@ -415,17 +412,21 @@ func (c *Client) GetRawFile(ctx context.Context, token string, projectID int64, 
 	if err := validateRef(ref); err != nil {
 		return nil, err
 	}
-	reqCtx, client, done, err := c.prepare(ctx, token)
+	reqCtx, _, done, err := c.prepare(ctx, token)
 	if err != nil {
 		return nil, err
 	}
 	defer done()
 
-	body, resp, err := client.RepositoryFiles.GetRawFile(projectID, path, &sdk.GetRawFileOptions{
-		Ref: &ref,
-	}, sdk.WithContext(reqCtx))
+	// Path and query escaping match the SDK so the request stays identical.
+	rawURL := fmt.Sprintf("%s/api/v4/projects/%d/repository/files/%s/raw?ref=%s",
+		c.baseURL, projectID, sdk.PathEscape(path), url.QueryEscape(ref))
+	body, tooLarge, err := c.getBounded(reqCtx, token, "get_raw_file", rawURL, MaxRawFileBytes)
 	if err != nil {
-		return nil, mapError(reqCtx, "get_raw_file", resp, err)
+		return nil, err
+	}
+	if tooLarge {
+		return nil, ErrFileTooLarge
 	}
 	return body, nil
 }

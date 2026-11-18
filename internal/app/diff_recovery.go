@@ -12,13 +12,14 @@ import (
 )
 
 const (
-	// maxRecoveredFileBytes bounds one side of a recovered file body. GitLab
-	// withholds a diff when the patch exceeds its diff size limit; a larger
-	// body is not worth inlining into a review prompt.
-	maxRecoveredFileBytes = 512 << 10
+	// maxRecoveredFileBytes bounds one side of a recovered file body. It is
+	// the GitLab client's raw-file bound, so a body the client rejects is
+	// treated here as unavailable instead of being fetched twice.
+	maxRecoveredFileBytes = gitlab.MaxRawFileBytes
 	// maxRecoveredReviewBytes bounds the total recovered bodies per review.
 	maxRecoveredReviewBytes = 2 << 20
-	// maxRecoveredFiles bounds the number of files recovered per review.
+	// maxRecoveredFiles bounds the number of recovery attempts per review,
+	// successful or not, so withheld bodies cannot trigger one request each.
 	maxRecoveredFiles = 20
 	// maxRecoveredDiffBytes bounds one synthesized unified diff.
 	maxRecoveredDiffBytes = 1 << 20
@@ -42,15 +43,16 @@ func (s *ReviewService) applyDiffScope(ctx context.Context, projectID int64, tok
 		return nil
 	}
 	diffs[0].Collection = collection
-	recoveredFiles, recoveredBytes := 0, 0
+	recoveredBytes, attempts := 0, 0
 	for i := range diffs {
-		if recoveredFiles >= maxRecoveredFiles || recoveredBytes >= maxRecoveredReviewBytes {
+		if attempts >= maxRecoveredFiles || recoveredBytes >= maxRecoveredReviewBytes {
 			break
 		}
 		diff := &diffs[i]
 		if (!diff.TooLarge && !diff.Collapsed) || strings.TrimSpace(diff.Diff) != "" {
 			continue
 		}
+		attempts++
 		body, ok := s.recoverWithheldDiff(ctx, token, projectID, version, *diff)
 		if !ok || recoveredBytes+len(body) > maxRecoveredReviewBytes {
 			continue
@@ -59,7 +61,6 @@ func (s *ReviewService) applyDiffScope(ctx context.Context, projectID int64, tok
 		// The body was recovered, so the file is reviewable content now.
 		diff.TooLarge = false
 		diff.Collapsed = false
-		recoveredFiles++
 		recoveredBytes += len(body)
 	}
 	return nil

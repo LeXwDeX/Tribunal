@@ -829,11 +829,11 @@ func (s *WorkspaceService) workspaceReviewConfig(ctx context.Context, project *s
 		{"AGENTS.md", &docs.AGENTS},
 		{"CLAUDE.md", &docs.CLAUDE},
 	} {
-		data, err := s.gitlab.GetRawFile(ctx, token, project.ID, item.path, ref)
-		if err != nil && !gitlab.IsNotFound(err) {
+		value, err := loadRepoDoc(ctx, s.gitlab, s.logger, token, project.ID, item.path, ref)
+		if err != nil {
 			return review.RepoDocs{}, effectiveReviewConfig{}, err
 		}
-		*item.target = string(data)
+		*item.target = value
 	}
 	cfg, err := resolveSecureReviewConfig(project, docs, s.reviewDefaults, s.profiles)
 	return docs, cfg, err

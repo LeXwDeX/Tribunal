@@ -942,6 +942,9 @@ func (p *Publisher) freshConfig(ctx context.Context, loaded *loadedReview) (effe
 	}
 	configDoc, err := p.rawDoc(ctx, loaded.token, loaded.project.ID, ".gitlab-review.yml", mr.TargetBranch)
 	if err != nil {
+		if errors.Is(err, ErrInvalidRepoConfig) {
+			return effectiveReviewConfig{}, PermanentJob(err)
+		}
 		return effectiveReviewConfig{}, err
 	}
 	agents, err := p.rawDoc(ctx, loaded.token, loaded.project.ID, "AGENTS.md", mr.TargetBranch)
@@ -996,14 +999,7 @@ func (p *Publisher) checkPublicationPolicy(ctx context.Context, workflowID strin
 }
 
 func (p *Publisher) rawDoc(ctx context.Context, token string, projectID int64, path, ref string) (string, error) {
-	data, err := p.gitlab.GetRawFile(ctx, token, projectID, path, ref)
-	if err != nil {
-		if gitlab.IsNotFound(err) {
-			return "", nil
-		}
-		return "", err
-	}
-	return string(data), nil
+	return loadRepoDoc(ctx, p.gitlab, p.logger, token, projectID, path, ref)
 }
 
 // preserveUnknown prevents later policy or GitLab errors from turning an

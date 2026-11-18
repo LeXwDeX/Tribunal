@@ -360,6 +360,11 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 	}
 	mr, _, err := s.collectFilterInputs(ctx, project, token, *workflow.MRIID, dossier.DiffVersion.HeadSHA)
 	if err != nil {
+		if errors.Is(err, ErrInvalidRepoConfig) {
+			return s.recoveryCancel(ctx, workflow.ID, "repo_config_invalid", func(ctx context.Context, _ string) error {
+				return s.cancelInvalidRepoConfig(ctx, &workflow, &dossier, record.Generation, token)
+			})
+		}
 		if IsPermanentJob(err) {
 			return s.recoveryCancel(ctx, workflow.ID, "mr_inputs_unavailable", s.recoveryCancelWorkflow("superseded", "mr_inputs_unavailable"))
 		}
@@ -378,6 +383,11 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 	}
 	docs, err := s.repoDocs(ctx, token, project.ID, mr.TargetBranch)
 	if err != nil {
+		if errors.Is(err, ErrInvalidRepoConfig) {
+			return s.recoveryCancel(ctx, workflow.ID, "repo_config_invalid", func(ctx context.Context, _ string) error {
+				return s.cancelInvalidRepoConfig(ctx, &workflow, &dossier, record.Generation, token)
+			})
+		}
 		return err
 	}
 	currentConfig, err := resolveSecureReviewConfig(project, docs, s.reviewDefaults, s.profiles)
