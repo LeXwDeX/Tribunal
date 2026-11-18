@@ -9,18 +9,6 @@ import (
 	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
-func insertStatsOverflowCall(t *testing.T, st *Store, id, workflowID string, input, output int64, latencyMS int64, at time.Time) {
-	t.Helper()
-	_, err := st.db.ExecContext(context.Background(), `INSERT INTO llm_calls
-		(id, workflow_id, node_id, turn, provider, model, input_tokens, output_tokens,
-		 cache_read, cache_write, latency_ms, created_at)
-		VALUES (?, ?, 'a', 1, 'p', 'm', ?, ?, 0, 0, ?, ?)`,
-		id, workflowID, input, output, latencyMS, formatTime(at))
-	if err != nil {
-		t.Fatalf("insert llm call %s: %v", id, err)
-	}
-}
-
 func setStatsOverflowNode(t *testing.T, st *Store, workflowID, nodeID string, at time.Time) {
 	t.Helper()
 	result, err := st.db.ExecContext(context.Background(), `UPDATE workflow_nodes
@@ -59,8 +47,8 @@ func TestStatsSaturatesExtremeTokenAggregates(t *testing.T) {
 	wfID := "wf-overflow"
 	mustCreateWorkflow(t, st, wfID, reviewMeta(42, 9, "head-overflow"), at)
 
-	insertStatsOverflowCall(t, st, "call-huge", wfID, math.MaxInt64, math.MaxInt64, 100, at)
-	insertStatsOverflowCall(t, st, "call-one", wfID, 1, 1, 300, at)
+	recordAggregateCall(t, st, wfID, "a", 1, math.MaxInt64, math.MaxInt64, 100*time.Millisecond, nil)
+	recordAggregateCall(t, st, wfID, "a", 2, 1, 1, 300*time.Millisecond, nil)
 	setStatsOverflowNode(t, st, wfID, "a", at)
 	setStatsOverflowNode(t, st, wfID, "b", at)
 
@@ -98,8 +86,8 @@ func TestStatsKeepsLegacyNegativeTokenSums(t *testing.T) {
 	wfID := "wf-negative"
 	mustCreateWorkflow(t, st, wfID, reviewMeta(44, 9, "head-negative"), at)
 
-	insertStatsOverflowCall(t, st, "call-negative", wfID, -5, -5, 100, at)
-	insertStatsOverflowCall(t, st, "call-positive", wfID, 3, 3, 300, at)
+	recordAggregateCall(t, st, wfID, "a", 1, -5, -5, 100*time.Millisecond, nil)
+	recordAggregateCall(t, st, wfID, "a", 2, 3, 3, 300*time.Millisecond, nil)
 
 	stats, err := st.Stats(ctx, store.StatsFilter{ProjectID: ptrInt64(44)})
 	if err != nil {

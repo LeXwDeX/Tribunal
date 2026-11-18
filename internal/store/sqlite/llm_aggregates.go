@@ -196,9 +196,9 @@ func (m *modelTelemetry) addErrorKind(kind string) {
 }
 
 // modelStats builds the per-model view. Detail rows are the exact source while
-// they exist; rows older than the retained detail window are served from the
-// long-lived daily aggregates, and ModelDetailsPurged tells the caller that the
-// window mixes both (#459).
+// they exist; workflows whose calls can no longer all be in the detail table
+// are served from the long-lived daily aggregates, and ModelDetailsPurged
+// tells the caller that the window mixes both (#459, #520).
 func (s *Store) modelStats(ctx context.Context, filter store.StatsFilter, where string, args []any) ([]store.ModelStats, bool, error) {
 	detailSince, err := s.llmCallDetailSince(ctx)
 	if err != nil {
@@ -217,20 +217,24 @@ func (s *Store) modelStats(ctx context.Context, filter store.StatsFilter, where 
 		return telemetry
 	}
 
-	detailLower := filter.From
-	if !detailSince.IsZero() && (detailLower.IsZero() || detailLower.Before(detailSince)) {
-		detailLower = detailSince
+	// Detail rows own workflows created after the oldest retained call's UTC
+	// day: every call of those workflows is still present. Workflows created on
+	// or before that day may have lost calls to retention, so the aggregates
+	// own them entirely, including calls that still have detail rows (#520).
+	var detailFrom time.Time
+	if !detailSince.IsZero() {
+		detailFrom = detailOwnershipBoundary(detailSince)
 	}
 	detailWhere := where
 	detailArgs := append([]any(nil), args...)
-	if !detailLower.IsZero() {
+	if !detailFrom.IsZero() {
 		if detailWhere == "" {
 			detailWhere = "WHERE "
 		} else {
 			detailWhere += " AND "
 		}
-		detailWhere += "c.created_at >= ?"
-		detailArgs = append(detailArgs, formatTime(detailLower.UTC()))
+		detailWhere += "w.created_at >= ?"
+		detailArgs = append(detailArgs, formatTime(detailFrom))
 	}
 	detailRows, err := s.db.QueryContext(ctx, `SELECT
 		c.provider, c.model, c.error_kind, c.input_tokens, c.output_tokens, c.latency_ms
@@ -410,8 +414,8 @@ func (s *Store) modelStats(ctx context.Context, filter store.StatsFilter, where 
 }
 
 // llmCallDetailSince returns the oldest remaining detail row, or zero when the
-// audit table is empty. It delimits the range that the daily aggregates must
-// cover without double counting (#459).
+// audit table is empty. It delimits the boundary between workflows owned by
+// the daily aggregates and workflows owned by the detail table (#459, #520).
 func (s *Store) llmCallDetailSince(ctx context.Context) (time.Time, error) {
 	var raw sql.NullString
 	if err := s.db.QueryRowContext(ctx, `SELECT MIN(created_at) FROM llm_calls`).Scan(&raw); err != nil {
@@ -423,25 +427,38 @@ func (s *Store) llmCallDetailSince(ctx context.Context) (time.Time, error) {
 	return parseTime(raw.String)
 }
 
-// aggregateStatsConditions bounds the daily rows to the part of the window
-// that no longer has detail rows. When details are gone entirely the whole
-// window is served from aggregates at day granularity.
-func aggregateStatsConditions(filter store.StatsFilter, detailSince time.Time) ([]string, []any) {
-	conditions := make([]string, 0, 4)
-	args := make([]any, 0, 4)
+// aggregateStatsBounds returns the inclusive and exclusive UTC days whose
+// workflows are owned by the daily aggregates. The boundary day is included:
+// its earlier calls were deleted by retention and can only be counted from the
+// aggregates, while the detail query excludes exactly those workflows (#520).
+func aggregateStatsBounds(filter store.StatsFilter, detailSince time.Time) (string, string) {
+	from := ""
 	if !filter.From.IsZero() {
-		conditions = append(conditions, "d.day >= ?")
-		args = append(args, filter.From.UTC().Format(dayLayout))
+		from = filter.From.UTC().Format(dayLayout)
 	}
 	end := ""
 	if !filter.To.IsZero() {
 		end = aggregateEndDay(filter.To)
 	}
 	if !detailSince.IsZero() {
-		detailDay := detailSince.UTC().Format(dayLayout)
-		if end == "" || detailDay < end {
-			end = detailDay
+		detailEnd := detailOwnershipBoundary(detailSince).Format(dayLayout)
+		if end == "" || detailEnd < end {
+			end = detailEnd
 		}
+	}
+	return from, end
+}
+
+// aggregateStatsConditions bounds the daily rows to the part of the window
+// served by the aggregates. When details are gone entirely the whole window is
+// served from aggregates at day granularity.
+func aggregateStatsConditions(filter store.StatsFilter, detailSince time.Time) ([]string, []any) {
+	from, end := aggregateStatsBounds(filter, detailSince)
+	conditions := make([]string, 0, 4)
+	args := make([]any, 0, 4)
+	if from != "" {
+		conditions = append(conditions, "d.day >= ?")
+		args = append(args, from)
 	}
 	if end != "" {
 		conditions = append(conditions, "d.day < ?")
@@ -460,23 +477,71 @@ func aggregateStatsConditions(filter store.StatsFilter, detailSince time.Time) (
 
 // modelDetailsPurged reports whether calls in the selected window are served
 // from the daily aggregates because their per-call detail rows were deleted.
-// It mirrors modelStats: aggregate-only rows that actually carry calls are the
-// evidence. A window with no calls never claims purged details, and a window
-// still covered by detail rows stays false (#466).
+// It mirrors modelStats: the aggregate-owned days that actually carry calls are
+// compared with the detail rows of the same workflows, so only detail rows
+// that are missing from the aggregates' population count as purged. A window
+// with no calls never claims purged details, and a window fully backed by
+// detail rows stays false (#466, #520).
 func (s *Store) modelDetailsPurged(ctx context.Context, filter store.StatsFilter) (bool, error) {
 	detailSince, err := s.llmCallDetailSince(ctx)
 	if err != nil {
 		return false, err
 	}
+	fromDay, endDay := aggregateStatsBounds(filter, detailSince)
 	conditions, args := aggregateStatsConditions(filter, detailSince)
 	conditions = append(conditions, "d.calls > 0")
-	var found int
+	var aggregated int64
 	if err := s.db.QueryRowContext(ctx,
-		`SELECT EXISTS (SELECT 1 FROM llm_call_daily d WHERE `+strings.Join(conditions, " AND ")+`)`,
-		args...).Scan(&found); err != nil {
-		return false, fmt.Errorf("sqlite: check purged model details: %w", err)
+		`SELECT COALESCE(SUM(d.calls), 0) FROM llm_call_daily d WHERE `+strings.Join(conditions, " AND "),
+		args...).Scan(&aggregated); err != nil {
+		return false, fmt.Errorf("sqlite: count aggregated model details: %w", err)
 	}
-	return found != 0, nil
+	if aggregated == 0 {
+		return false, nil
+	}
+
+	// The aggregate day bounds map one-to-one onto workflow created_at days,
+	// so the matching detail population uses the same day bounds. Aggregates
+	// never shrink while retention can only delete detail rows, so any excess
+	// is evidence of purged details.
+	detailConditions := make([]string, 0, 4)
+	detailArgs := make([]any, 0, 4)
+	if fromDay != "" {
+		detailConditions = append(detailConditions, "w.created_at >= ?")
+		detailArgs = append(detailArgs, fromDay)
+	}
+	if endDay != "" {
+		detailConditions = append(detailConditions, "w.created_at < ?")
+		detailArgs = append(detailArgs, endDay)
+	}
+	if filter.ProjectID != nil {
+		detailConditions = append(detailConditions, "w.project_id = ?")
+		detailArgs = append(detailArgs, *filter.ProjectID)
+	}
+	if clause, accessArgs := projectAccessClause("w.project_id", filter.AccessUserID); clause != "" {
+		detailConditions = append(detailConditions, clause)
+		detailArgs = append(detailArgs, accessArgs...)
+	}
+	detailWhere := ""
+	if len(detailConditions) > 0 {
+		detailWhere = "WHERE " + strings.Join(detailConditions, " AND ")
+	}
+	var detailed int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM llm_calls c JOIN workflows w ON w.id = c.workflow_id `+detailWhere,
+		detailArgs...).Scan(&detailed); err != nil {
+		return false, fmt.Errorf("sqlite: count retained model details: %w", err)
+	}
+	return aggregated > detailed, nil
+}
+
+// detailOwnershipBoundary returns the first workflow-creation instant whose
+// calls are guaranteed to be fully retained: the UTC midnight after the oldest
+// retained call's day. Workflows created at or after it are served from detail
+// rows, earlier ones from the daily aggregates (#520).
+func detailOwnershipBoundary(detailSince time.Time) time.Time {
+	utc := detailSince.UTC()
+	return time.Date(utc.Year(), utc.Month(), utc.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, 1)
 }
 
 // aggregateEndDay returns the exclusive day bound for an exclusive time bound.
