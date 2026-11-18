@@ -97,15 +97,18 @@ func TestReviewStreamEmitsNodeAndWorkflowEvents(t *testing.T) {
 	_, events := streamEvents(t, env, "wf-s")
 
 	// Wait for the connection preamble to be consumed, then advance the
-	// workflow. The handler already has its initial snapshot.
+	// workflow. The handler already has its initial snapshot. Nodes settle
+	// before the workflow row turns terminal: a poll can run between the two
+	// fake-store writes, and a terminal workflow ends the stream, so writing
+	// the terminal row first would hide the node changes from an unlucky poll.
 	time.Sleep(20 * time.Millisecond)
-	fake.setWorkflow(store.Workflow{ID: "wf-s", Kind: "review", ProjectID: 42, Trigger: "api",
-		Status: "completed", Verdict: "PASS", CreatedAt: started, StartedAt: &started})
 	fake.setNodes("wf-s",
 		store.WorkflowNode{WorkflowID: "wf-s", ID: "plan", Kind: "plan", Status: "completed", Attempt: 1},
 		store.WorkflowNode{WorkflowID: "wf-s", ID: "review.std.p1", Kind: "review.standards",
 			Status: "completed", DependsOn: []string{"plan"}, Attempt: 1},
 	)
+	fake.setWorkflow(store.Workflow{ID: "wf-s", Kind: "review", ProjectID: 42, Trigger: "api",
+		Status: "completed", Verdict: "PASS", CreatedAt: started, StartedAt: &started})
 
 	received := drainEvents(t, events)
 	var sawPlan, sawReview, sawWorkflow bool
