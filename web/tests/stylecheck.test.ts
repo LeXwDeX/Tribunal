@@ -48,6 +48,11 @@ describe('web style checks', () => {
     expect(diagnostics.filter((d) => d.rule === 'root-scrollbar-gutter' || d.rule === 'overlay-gutter')).toEqual([])
   })
 
+  it('finds no color or scale literal violations in the application styles', () => {
+    const diagnostics = checkDir('src')
+    expect(diagnostics.filter((d) => d.rule === 'color-literal' || d.rule === 'scale-literal')).toEqual([])
+  })
+
   it('rejects color literals in component CSS', () => {
     const diagnostics = scanCss('.x { color: #ffffff; background: rgba(0, 0, 0, .2); }', 'x.module.css')
     expect(diagnostics.filter((d) => d.rule === 'color-literal')).toHaveLength(2)

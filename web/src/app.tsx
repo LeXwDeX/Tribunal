@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from 'react'
 import { QueryClient, useQuery } from '@tanstack/react-query'
-import { Route, Routes } from 'react-router-dom'
+import { Route, Routes, useLocation } from 'react-router-dom'
 import { fetchAuthStatus, fetchMe } from './api/api'
 import { ApiError, LOGOUT_EVENT, UNAUTHORIZED_EVENT, setCsrfToken } from './api/client'
 import { AuthScreen, BootLoading, authErrorMessage } from './components/AuthScreen'
 import { AppShell } from './components/AppShell'
+import { ErrorBoundary } from './components/ErrorBoundary'
 import { ToastProvider, useToast } from './components/ui'
 import { OverviewPage } from './pages/OverviewPage'
 import { ReviewsPage } from './pages/ReviewsPage'
@@ -44,6 +45,7 @@ function AuthErrorToast({ message, onShown }: { message: string; onShown: () => 
 }
 
 export function App() {
+  const location = useLocation()
   const meQuery = useQuery({ queryKey: ['me'], queryFn: fetchMe })
   const authStatusQuery = useQuery({ queryKey: ['auth-status'], queryFn: fetchAuthStatus, staleTime: Infinity })
   const [sessionEnded, setSessionEnded] = useState<'expired' | 'evicted' | 'logout' | null>(null)
@@ -109,20 +111,22 @@ export function App() {
   return (
     <ToastProvider>
       {authError ? <AuthErrorToast message={authError} onShown={clearAuthError} /> : null}
-      <Routes>
-        <Route element={<AppShell me={meQuery.data} />}>
-          <Route index element={<OverviewPage />} />
-          <Route path="reviews" element={<ReviewsPage />} />
-          <Route path="reviews/:id" element={<ReviewDetailPage />} />
-          <Route path="projects" element={<ProjectsPage />} />
-          <Route path="projects/:id/:tab?" element={<ProjectDetailPage />} />
-          <Route path="extensions/:tab?" element={<ExtensionsPage />} />
-          <Route path="models" element={<ModelsPage />} />
-          <Route path="statistics" element={<StatisticsPage />} />
-          <Route path="system" element={<SystemPage />} />
-          <Route path="*" element={<NotFoundPage />} />
-        </Route>
-      </Routes>
+      <ErrorBoundary scope="app" resetKey={location.key}>
+        <Routes>
+          <Route element={<AppShell me={meQuery.data} />}>
+            <Route index element={<OverviewPage />} />
+            <Route path="reviews" element={<ReviewsPage />} />
+            <Route path="reviews/:id" element={<ReviewDetailPage />} />
+            <Route path="projects" element={<ProjectsPage />} />
+            <Route path="projects/:id/:tab?" element={<ProjectDetailPage />} />
+            <Route path="extensions/:tab?" element={<ExtensionsPage />} />
+            <Route path="models" element={<ModelsPage />} />
+            <Route path="statistics" element={<StatisticsPage />} />
+            <Route path="system" element={<SystemPage />} />
+            <Route path="*" element={<NotFoundPage />} />
+          </Route>
+        </Routes>
+      </ErrorBoundary>
     </ToastProvider>
   )
 }

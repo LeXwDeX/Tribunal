@@ -5,6 +5,7 @@ import { getProject, getReview, listReviews, logout } from '../api/api'
 import type { Me, ReviewSummary } from '../api/types'
 import { usePaginated } from '../lib/hooks'
 import { BrandMark, Icon } from './Icons'
+import { ErrorBoundary } from './ErrorBoundary'
 import { classNames, useToast } from './ui'
 import { SessionProvider } from './RoleContext'
 import styles from './AppShell.module.css'
@@ -294,7 +295,9 @@ export function AppShell({ me }: { me: Me }) {
           <div className={styles.topbar}>
             <Breadcrumbs />
           </div>
-          <Outlet />
+          <ErrorBoundary resetKey={location.key}>
+            <Outlet />
+          </ErrorBoundary>
         </div>
       </div>
     </SessionProvider>

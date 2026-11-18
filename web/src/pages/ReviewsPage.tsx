@@ -7,7 +7,7 @@ import { ReviewTable } from '../components/ReviewTable'
 import { TriggerReviewDialog } from '../components/TriggerReviewDialog'
 import {
   Button, DatePicker, EmptyState, ErrorState, LoadingState, Note, PageHeader, Panel, Segmented, Select, Toolbar,
-  type SelectOption, useToast,
+  parseLocalDate, type SelectOption, useToast,
 } from '../components/ui'
 import { useLoadMoreFocus, usePaginated } from '../lib/hooks'
 import ui from '../styles/ui.module.css'
@@ -57,8 +57,12 @@ export function ReviewsPage() {
   const verdict = params.get('verdict') || ''
   const profile = params.get('profile') || ''
   const trigger = params.get('trigger') || ''
-  const sinceDate = params.get('since') ? params.get('since')!.slice(0, 10) : ''
-  const since = sinceDate ? new Date(`${sinceDate}T00:00:00`).toISOString() : undefined
+  // A shared or hand-edited link can carry a malformed since value. Ignore it
+  // instead of formatting an Invalid Date, which would throw during render.
+  const sinceText = params.get('since')?.slice(0, 10) ?? ''
+  const sinceDay = parseLocalDate(sinceText)
+  const sinceDate = sinceDay ? sinceText : ''
+  const since = sinceDay ? sinceDay.toISOString() : undefined
   const scope = params.get('access') === 'mine' ? 'mine' : 'all'
 
   const filtersKey = [projectId, status, verdict, profile, trigger, since, scope]
