@@ -124,6 +124,15 @@ func repositorySkillDenyPaths(dossier *review.Dossier, diffs []gitlab.FileDiff) 
 			mark(child)
 		}
 	}
+	// Invalid diff paths cannot name a repository Skill and the deny evidence
+	// is validated entry by entry, so they must not be stored. They still
+	// propagated through rename links and child edges above, and the filter
+	// itself keeps rejecting them.
+	for name := range denied {
+		if !validRepoPath(name) {
+			delete(denied, name)
+		}
+	}
 	return denied, patterns, nil
 }
 

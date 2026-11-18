@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -493,5 +494,65 @@ func TestRepositorySkillReplaceLockWaitsUseCallerContext(t *testing.T) {
 				t.Fatalf("writes = %d", backend.writes)
 			}
 		})
+	}
+}
+
+// Invalid diff paths (a backslash path is legal in a Linux tree and an
+// overlong path exceeds the contract limit) cannot name a repository Skill,
+// but the diff API still reports them. They stay denied and propagate through
+// rename links; they must never enter the stored deny evidence, because both
+// repositorySkillDenyFromEvidence and ValidateDossier reject the whole
+// snapshot on an invalid entry and the review fails permanently.
+func TestRepositorySkillDenyEvidenceOmitsInvalidDiffPaths(t *testing.T) {
+	patterns := []string{"**/private/**"}
+	overlong := strings.Repeat("a", review.MaxPathBytes+1)
+	diffs := []gitlab.FileDiff{
+		{OldPath: `bad\path.txt`, NewPath: ".claude/skills/renamed/SKILL.md", RenamedFile: true},
+		{OldPath: overlong, NewPath: ".claude/skills/long/SKILL.md", RenamedFile: true},
+		{OldPath: ".claude/skills/ok/SKILL.md", NewPath: ".claude/skills/ok/SKILL.md"},
+	}
+	dossier := &review.Dossier{IgnorePolicy: &review.IgnorePolicy{Version: review.IgnorePolicyVersion, Patterns: patterns}}
+	denied, _, err := repositorySkillDenyPaths(dossier, diffs)
+	if err != nil {
+		t.Fatalf("deny paths: %v", err)
+	}
+	excluded := make([]string, 0, len(denied))
+	for name := range denied {
+		if !validRepoPath(name) {
+			t.Fatalf("invalid path %q in deny evidence", name)
+		}
+		excluded = append(excluded, name)
+	}
+	sort.Strings(excluded)
+	if len(excluded) != 2 || excluded[0] != ".claude/skills/long/SKILL.md" || excluded[1] != ".claude/skills/renamed/SKILL.md" {
+		t.Fatalf("deny evidence = %+v", excluded)
+	}
+	deny, err := repositorySkillDenyFromEvidence(patterns, excluded)
+	if err != nil {
+		t.Fatalf("stored evidence no longer rebuilds: %v", err)
+	}
+	for _, name := range excluded {
+		if !deny(name) {
+			t.Fatalf("invalid rename source no longer denies its valid counterpart %q", name)
+		}
+	}
+	if deny(".claude/skills/ok/SKILL.md") {
+		t.Fatal("unrelated valid skill path denied")
+	}
+	if !deny(`bad\path.txt`) || !deny(overlong) {
+		t.Fatal("invalid paths must stay denied")
+	}
+	stored := &review.Dossier{
+		SchemaVersion:           review.DossierSchemaVersion,
+		Project:                 review.ProjectRef{ID: 1, Path: "group/project"},
+		MR:                      review.MRMeta{IID: 1, Title: "t", SourceBranch: "feature", TargetBranch: "main"},
+		DiffVersion:             gitlab.Version{HeadSHA: strings.Repeat("a", 40)},
+		Files:                   []review.FileChange{},
+		IgnorePolicy:            &review.IgnorePolicy{Version: review.IgnorePolicyVersion, Patterns: patterns},
+		RepositorySkillExcluded: excluded,
+		GeneratedAt:             time.Now(),
+	}
+	if err := review.ValidateDossier(stored); err != nil {
+		t.Fatalf("dossier with deny evidence rejected: %v", err)
 	}
 }
