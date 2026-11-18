@@ -57,6 +57,51 @@ describe('user management drawer (#297)', () => {
     await waitFor(() => expect(writes.some((write) => write.method === 'PATCH' && (write.body as { global_read?: boolean })?.global_read === true)).toBe(true))
   })
 
+  it('reuses the refetched revision after a successful role change (#539)', async () => {
+    const writes: Array<{ url: string; method?: string; body?: Record<string, unknown> }> = []
+    let revision = 2
+    let role = 'viewer'
+    let globalRead = false
+    installFetch((url, init) => {
+      const method = (init?.method || 'GET').toUpperCase()
+      const path = new URL(url, 'http://localhost').pathname
+      if (method !== 'GET') writes.push({ url, method, body: init?.body ? JSON.parse(String(init.body)) : undefined })
+      if (path === '/api/v1/me') return jsonResponse({ id: 7, username: 'alice', role: 'admin', global_read: false, csrf_token: 'x' })
+      if (path === '/api/v1/admin/users' && method === 'GET') {
+        return jsonResponse({
+          users: [users[0], { ...users[1], revision, role, global_read: globalRead }, users[2]],
+          next_cursor: '',
+        })
+      }
+      if (path === '/api/v1/admin/users/8/grants') return jsonResponse({ grants: [], next_cursor: '' })
+      if (path === '/api/v1/admin/users/8' && method === 'PATCH') {
+        const body = JSON.parse(String(init?.body)) as { revision?: number; role?: string; global_read?: boolean }
+        if (body.revision !== revision) {
+          return jsonResponse({ error: { code: 'stale_revision', message: 'user revision is stale' } }, 409)
+        }
+        revision += 1
+        if (body.role) role = body.role
+        if (typeof body.global_read === 'boolean') globalRead = body.global_read
+        return jsonResponse({ id: 8, role, disabled: false, global_read: globalRead })
+      }
+      return jsonResponse({})
+    })
+    const user = userEvent.setup()
+    await openUser(user, 'bob')
+    await user.click(screen.getByRole('button', { name: '提升为管理员' }))
+    await user.click(screen.getByRole('button', { name: '确认' }))
+    await waitFor(() => expect(writes.some((write) => write.method === 'PATCH' && write.body?.role === 'admin')).toBe(true))
+    // The drawer renders from the refetched list, so the new role is visible
+    // without closing and reopening it.
+    expect(await screen.findByRole('button', { name: '降级为普通用户' })).toBeEnabled()
+    await user.click(screen.getByRole('button', { name: '开启全局模式' }))
+    await user.click(screen.getByRole('button', { name: '确认' }))
+    await waitFor(() => expect(writes.some((write) => write.method === 'PATCH' && write.body?.global_read === true)).toBe(true))
+    const globalWrite = writes.find((write) => write.method === 'PATCH' && write.body?.global_read === true)
+    expect(globalWrite?.body).toMatchObject({ revision: 3 })
+    expect(screen.queryByText(/用户信息已被其他管理员更新|stale/)).not.toBeInTheDocument()
+  })
+
   it('disables self demotion and configured roles', async () => {
     mock([])
     const user = userEvent.setup()

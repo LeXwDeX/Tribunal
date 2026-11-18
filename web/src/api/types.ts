@@ -72,6 +72,16 @@ export interface AdminUser {
   last_login_at?: string
 }
 
+// AdminUserWriteResult is the PATCH /admin/users/{id} response. It carries only
+// the fields the write changed; the full row (including revision) comes from
+// the refetched user list.
+export interface AdminUserWriteResult {
+  id: number
+  role: Role
+  disabled?: boolean
+  global_read?: boolean
+}
+
 export interface AdminProject {
   id: number
   path_with_namespace: string

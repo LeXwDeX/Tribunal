@@ -533,8 +533,14 @@ function AdminUsersPanel() {
   const [revokeTarget, setRevokeTarget] = useState<AdminUser | null>(null)
   const [revokePending, setRevokePending] = useState(false)
   const [revokeError, setRevokeError] = useState<unknown>(null)
-  const [manageTarget, setManageTarget] = useState<AdminUser | null>(null)
+  const [manageTargetId, setManageTargetId] = useState<number | null>(null)
   const me = useQuery({ queryKey: ['me'], queryFn: fetchMe, retry: false })
+  // The drawer reads the refetched list instead of keeping a snapshot: a
+  // successful write advances the server-side revision, and the next write
+  // must send that new revision. Stale snapshots made consecutive edits 409.
+  const manageTarget = manageTargetId == null
+    ? null
+    : users.items.find((user) => user.id === manageTargetId) ?? null
 
   const toggleDisabled = async () => {
     if (!disableTarget) return
@@ -626,7 +632,7 @@ function AdminUsersPanel() {
                     <td>{user.last_login_at ? formatDate(user.last_login_at) : '从未登录'}</td>
                     <td>
                       <div className={insights.rowActions}>
-                        <Button variant="secondary" className={ui.smallButton} onClick={() => setManageTarget(user)}>管理</Button>
+                        <Button variant="secondary" className={ui.smallButton} onClick={() => setManageTargetId(user.id)}>管理</Button>
                         <Button
                           variant="secondary"
                           className={ui.smallButton}
@@ -672,7 +678,7 @@ function AdminUsersPanel() {
         user={manageTarget}
         open={Boolean(manageTarget)}
         currentUserId={me.data?.id}
-        onClose={() => setManageTarget(null)}
+        onClose={() => setManageTargetId(null)}
       />
 
       <ConfirmDialog
