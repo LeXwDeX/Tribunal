@@ -1085,7 +1085,7 @@ func (s *Store) RegisterProjectWithOwner(ctx context.Context, p store.Project, o
 const projectColumns = `id, path_with_namespace, web_url, default_branch, token_enc,
 	token_expires_at, token_scopes, webhook_secret_enc, hook_id, webhook_state,
 	webhook_events, webhook_error, webhook_managed_by, webhook_created_at,
-	webhook_updated_at, profile, settings, enabled, created_at, updated_at`
+	webhook_updated_at, profile, settings, enabled, revision, created_at, updated_at`
 
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -1109,7 +1109,7 @@ func scanProject(row rowScanner) (*store.Project, error) {
 		&p.TokenEnc, &tokenExpires, &scopesText, &p.WebhookSecretEnc, &hookID,
 		&p.WebhookState, &eventsText, &p.WebhookError,
 		&p.WebhookManagedBy, &webhookCreated, &webhookUpdated,
-		&p.Profile, &settings, &enabled, &createdAt, &updatedAt); err != nil {
+		&p.Profile, &settings, &enabled, &p.Revision, &createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
 	if webhookCreated.Valid {

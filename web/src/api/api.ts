@@ -132,6 +132,8 @@ export interface UpdateProjectInput {
   profile?: string
   settings?: Record<string, unknown>
   enabled?: boolean
+  /** Optimistic-concurrency token; omit only for pre-existing scripted callers. */
+  revision?: number
 }
 
 export async function updateProject(id: number | string, input: UpdateProjectInput): Promise<Project> {

@@ -165,6 +165,10 @@ type UpdateProjectInput struct {
 	Profile  *string
 	Settings *json.RawMessage
 	Enabled  *bool
+	// Revision is optional. When set, the write only applies if the stored
+	// project revision still matches; callers get store.ErrStaleRevision
+	// otherwise. Omitting it keeps the pre-fence unconditional write.
+	Revision *int64
 }
 
 // WebhookRegistration is the outcome of (re)creating a project webhook. The
@@ -1215,7 +1219,10 @@ func (s *ProjectService) Update(ctx context.Context, id int64, in UpdateProjectI
 		return nil, validationError("at least one project field is required",
 			Detail{Field: "body", Message: "provide profile, settings or enabled"})
 	}
-	update := store.ProjectUpdate{Enabled: in.Enabled}
+	if in.Revision != nil && *in.Revision <= 0 {
+		return nil, validationError("invalid project revision", Detail{Field: "revision", Message: "must be positive"})
+	}
+	update := store.ProjectUpdate{Enabled: in.Enabled, Revision: in.Revision}
 	if in.Profile != nil {
 		profile := strings.TrimSpace(*in.Profile)
 		if !isReviewProfile(s.profiles, profile) {
@@ -1266,6 +1273,11 @@ func (s *ProjectService) Update(ctx context.Context, id int64, in UpdateProjectI
 		}
 		if errors.Is(err, store.ErrNotFound) {
 			return nil, notFoundError("project not registered")
+		}
+		// The handler maps this to the 409 stale_revision contract; it is an
+		// expected conflict, not an internal failure.
+		if errors.Is(err, store.ErrStaleRevision) {
+			return nil, err
 		}
 		s.logger.Warn("project update failed", "project_id", id)
 		return nil, internalError()

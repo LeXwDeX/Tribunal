@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  rotateProjectToken, unregisterProject, updateProject, validateProjectConnection,
+  getProject, rotateProjectToken, unregisterProject, updateProject, validateProjectConnection,
 } from '../../api/api'
 import { ApiError, errorMessage } from '../../api/client'
 import type { Project, ProjectValidation } from '../../api/types'
@@ -151,11 +151,28 @@ export function SettingsPanel({ project }: { project: Project }) {
     setSaving(true)
     setSaveError(null)
     try {
-      await updateProject(project.id, { settings: draft })
+      await updateProject(project.id, { settings: draft, revision: project.revision })
       toast.push('success', '项目设置已保存。')
       await queryClient.invalidateQueries({ queryKey: ['project', project.id] })
       await queryClient.invalidateQueries({ queryKey: ['projects'] })
     } catch (error) {
+      if (error instanceof ApiError && error.code === 'stale_revision') {
+        // The draft is a mount-time snapshot, so a conflict must be resolved by
+        // replacing it with the writer's saved settings instead of retrying the
+        // same stale payload.
+        try {
+          const latest = await getProject(project.id)
+          queryClient.setQueryData(['project', project.id], latest)
+          setDraft({ ...(latest.settings || {}) })
+          setJsonText(JSON.stringify(latest.settings || {}, null, 2))
+          setJsonError(null)
+          await queryClient.invalidateQueries({ queryKey: ['projects'] })
+        } catch {
+          // Keep the conflict notice; the user can still reload the page.
+        }
+        setSaveError(new Error('设置已被其他人修改，已重新加载最新设置，请确认后再次保存。'))
+        return
+      }
       setSaveError(error)
     } finally {
       setSaving(false)

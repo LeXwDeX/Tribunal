@@ -72,8 +72,11 @@ type Project struct {
 	Profile           string          `json:"profile"`
 	Settings          json.RawMessage `json:"settings"`
 	Enabled           bool            `json:"enabled"`
-	CreatedAt         time.Time       `json:"created_at"`
-	UpdatedAt         time.Time       `json:"updated_at"`
+	// Revision fences concurrent settings writes. It only changes when the
+	// management API writes profile, settings or enabled.
+	Revision  int64     `json:"revision"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // Job is the persistent queue record. State is managed by the store.

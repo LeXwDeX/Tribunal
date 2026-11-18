@@ -20,6 +20,11 @@ type ProjectUpdate struct {
 	Profile  *string
 	Settings json.RawMessage
 	Enabled  *bool
+	// Revision is the optimistic-concurrency token the caller loaded. A nil
+	// value keeps the pre-fence semantics: the write always applies. A
+	// non-nil value applies only when it matches the stored revision, otherwise
+	// the store returns ErrStaleRevision. Every applied write advances it.
+	Revision *int64
 }
 
 // ProjectTokenUpdate rotates the encrypted project access token together with
