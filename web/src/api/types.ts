@@ -148,6 +148,8 @@ export interface Project {
   profile: string
   settings: ProjectSettings
   enabled: boolean
+  /** Bumped by profile/settings/enabled writes; absent on older servers. */
+  revision?: number
   created_at?: string
   updated_at?: string
   workspace?: ProjectWorkspaceSummary
@@ -196,6 +198,7 @@ export interface PatchProject {
   profile?: string
   settings?: ProjectSettings
   enabled?: boolean
+  revision?: number
 }
 
 export type Severity = 'P0' | 'P1' | 'P2' | 'info'

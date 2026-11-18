@@ -77,6 +77,10 @@ type updateProjectRequest struct {
 	Profile  *string          `json:"profile,omitempty"`
 	Settings *json.RawMessage `json:"settings,omitempty"`
 	Enabled  *bool            `json:"enabled,omitempty"`
+	// Revision is optional: API-token scripts that never read a project keep
+	// the unconditional write, while the console sends the revision it loaded
+	// and receives 409 stale_revision when another writer got there first.
+	Revision *int64 `json:"revision,omitempty"`
 }
 
 // rotateProjectTokenRequest requires the token field to be present. An explicit
@@ -430,8 +434,13 @@ func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
 		Profile:  request.Profile,
 		Settings: request.Settings,
 		Enabled:  request.Enabled,
+		Revision: request.Revision,
 	})
 	if err != nil {
+		if errors.Is(err, store.ErrStaleRevision) {
+			writeError(w, r, http.StatusConflict, "stale_revision", "revision does not match", nil)
+			return
+		}
 		writeAppError(w, r, err)
 		return
 	}

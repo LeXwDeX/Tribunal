@@ -56,6 +56,7 @@ CREATE TABLE projects (
   profile             TEXT    NOT NULL DEFAULT 'default',
   settings            TEXT    NOT NULL DEFAULT '{}',-- JSON，结构见 06-config.md §3
   enabled             INTEGER NOT NULL DEFAULT 1,
+  revision            INTEGER NOT NULL DEFAULT 1,   -- 设置乐观并发版本；仅 profile/settings/enabled 写入递增
   created_at          TEXT    NOT NULL,
   updated_at          TEXT    NOT NULL
 );

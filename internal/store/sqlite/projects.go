@@ -124,12 +124,18 @@ func (s *Store) ListProjectsFilteredPage(ctx context.Context, filter store.Proje
 }
 
 // UpdateProject replaces the provided profile, settings and enabled fields.
+// Every applied write advances revision. When update.Revision is set the write
+// is conditional on the stored revision and reports ErrStaleRevision on a
+// mismatch instead of overwriting a newer settings draft.
 func (s *Store) UpdateProject(ctx context.Context, id int64, update store.ProjectUpdate) (*store.Project, error) {
 	if id <= 0 {
 		return nil, errors.New("sqlite: project id is required")
 	}
-	sets := make([]string, 0, 4)
-	args := make([]any, 0, 5)
+	if update.Revision != nil && *update.Revision <= 0 {
+		return nil, errors.New("sqlite: project revision must be positive")
+	}
+	sets := make([]string, 0, 5)
+	args := make([]any, 0, 7)
 	if update.Profile != nil {
 		if strings.TrimSpace(*update.Profile) == "" {
 			return nil, errors.New("sqlite: project profile is required")
@@ -155,10 +161,15 @@ func (s *Store) UpdateProject(ctx context.Context, id int64, update store.Projec
 	if len(sets) == 0 {
 		return nil, errors.New("sqlite: project update has no fields")
 	}
-	sets = append(sets, "updated_at = ?")
+	sets = append(sets, "updated_at = ?", "revision = revision + 1")
 	args = append(args, formatTime(s.now().UTC()), id)
+	where := "id = ?"
+	if update.Revision != nil {
+		where += " AND revision = ?"
+		args = append(args, *update.Revision)
+	}
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE projects SET `+strings.Join(sets, ", ")+` WHERE id = ?`, args...)
+		`UPDATE projects SET `+strings.Join(sets, ", ")+` WHERE `+where, args...)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: update project: %w", err)
 	}
@@ -167,6 +178,13 @@ func (s *Store) UpdateProject(ctx context.Context, id int64, update store.Projec
 		return nil, fmt.Errorf("sqlite: update project: %w", err)
 	}
 	if n != 1 {
+		if update.Revision != nil {
+			if _, err := s.GetProject(ctx, id); err == nil {
+				return nil, fmt.Errorf("%w: project %d", store.ErrStaleRevision, id)
+			} else if !errors.Is(err, store.ErrNotFound) {
+				return nil, err
+			}
+		}
 		return nil, fmt.Errorf("%w: project %d", store.ErrNotFound, id)
 	}
 	return s.GetProject(ctx, id)
