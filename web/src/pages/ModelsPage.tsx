@@ -1129,8 +1129,12 @@ function ModelDrawer({
     setErrors({})
     setError(undefined)
     try {
-      if (model) await updateModel(model.id, input())
-      else await createModel(input())
+      if (model) {
+        // PATCH /models/{id} 不接受 id 字段（后端 DisallowUnknownFields），id 由路径给出。
+        const body = input()
+        delete body.id
+        await updateModel(model.id, body)
+      } else await createModel(input())
       onSaved()
       onClose()
     } catch (err) {
