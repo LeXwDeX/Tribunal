@@ -22,6 +22,10 @@ type modelDefaultsView struct {
 	Revision  int64             `json:"revision"`
 	UpdatedBy int64             `json:"updated_by,omitempty"`
 	UpdatedAt *time.Time        `json:"updated_at,omitempty"`
+	// CatalogRefreshFailed marks a committed write whose catalog rebuild
+	// failed: the change is durable but not effective until a later refresh
+	// succeeds or the process restarts.
+	CatalogRefreshFailed bool `json:"catalog_refresh_failed,omitempty"`
 }
 
 func modelDefaultsViewOf(defaults *store.ModelDefaults) modelDefaultsView {
@@ -128,8 +132,11 @@ func (s *Server) handlePutModelDefaults(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	s.auditModelDefaults(r, "update", patch.Fields())
-	s.refreshModelCatalogAfterDefaults(r)
-	writeJSON(w, http.StatusOK, modelDefaultsViewOf(defaults))
+	view := modelDefaultsViewOf(defaults)
+	if !s.refreshModelCatalog(r, "target", "model_defaults") {
+		view.CatalogRefreshFailed = true
+	}
+	writeJSON(w, http.StatusOK, view)
 }
 
 func (s *Server) handleDeleteModelDefaults(w http.ResponseWriter, r *http.Request) {
@@ -204,8 +211,11 @@ func (s *Server) handleDeleteModelDefaults(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	s.auditModelDefaults(r, "reset", fields)
-	s.refreshModelCatalogAfterDefaults(r)
-	writeJSON(w, http.StatusOK, modelDefaultsViewOf(defaults))
+	view := modelDefaultsViewOf(defaults)
+	if !s.refreshModelCatalog(r, "target", "model_defaults") {
+		view.CatalogRefreshFailed = true
+	}
+	writeJSON(w, http.StatusOK, view)
 }
 
 // modelDefaultsDecodeError maps an unknown top-level request field to its own
@@ -322,17 +332,6 @@ func (s *Server) writeModelDefaultsError(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	writeError(w, r, http.StatusServiceUnavailable, "unavailable", "model defaults are unavailable", nil)
-}
-
-// refreshModelCatalogAfterDefaults rebuilds the catalog because the effective
-// parameters of every user model may have changed.
-func (s *Server) refreshModelCatalogAfterDefaults(r *http.Request) {
-	if s.refreshModels == nil {
-		return
-	}
-	if err := s.refreshModels(r.Context()); err != nil {
-		s.logger.Error("refresh models failed", "event", "model_refresh_failed", "target", "model_defaults")
-	}
 }
 
 func (s *Server) auditModelDefaults(r *http.Request, action string, fields []string) {

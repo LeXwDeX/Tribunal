@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -390,6 +391,32 @@ func TestModelPresetEqualOverrideValueIsNotAConflict(t *testing.T) {
 	}
 	if fake.paramsCalls != 1 {
 		t.Fatalf("apply calls = %d, want 1", fake.paramsCalls)
+	}
+}
+
+// TestModelPresetApplyReportsCatalogRefreshFailure keeps the preset response
+// honest when the committed parameter write could not rebuild the catalog.
+func TestModelPresetApplyReportsCatalogRefreshFailure(t *testing.T) {
+	fake := &fakeModelStore{stored: presetTestModel()}
+	server, logs := newParamsTestServer(t, fake)
+	server.refreshModels = func(context.Context) error { return errors.New("catalog unavailable") }
+	response := applyModelPreset(server, "user:deepseek", `{"preset":"deepseek-flash-max","revision":5,"dry_run":false}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s, want 200", response.Code, response.Body.String())
+	}
+	var body struct {
+		Applied              bool   `json:"applied"`
+		Effective            string `json:"effective"`
+		CatalogRefreshFailed bool   `json:"catalog_refresh_failed"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.Applied || body.Effective != "new_workflows" || !body.CatalogRefreshFailed {
+		t.Fatalf("body = %+v, want applied with catalog_refresh_failed", body)
+	}
+	if !strings.Contains(logs.String(), `"event":"model_refresh_failed"`) {
+		t.Fatalf("logs = %s, want a refresh failure event", logs.String())
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 
 	"github.com/LeXwDeX/tribunal/internal/app"
 	"github.com/LeXwDeX/tribunal/internal/config"
+	"github.com/LeXwDeX/tribunal/internal/errclass"
 	"github.com/LeXwDeX/tribunal/internal/llm"
 	"github.com/LeXwDeX/tribunal/internal/store"
 )
@@ -688,12 +689,34 @@ func (s *Server) requireModelStore(w http.ResponseWriter, r *http.Request) bool 
 }
 
 func (s *Server) finishModelWrite(w http.ResponseWriter, r *http.Request, id string) {
-	if s.refreshModels != nil {
-		if err := s.refreshModels(r.Context()); err != nil {
-			s.logger.Error("refresh models failed", "event", "model_refresh_failed", "model_id", id)
-		}
+	response := map[string]any{"id": id, "effective": "new_workflows"}
+	if !s.refreshModelCatalog(r, "model_id", id) {
+		response["catalog_refresh_failed"] = true
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": id, "effective": "new_workflows"})
+	writeJSON(w, http.StatusOK, response)
+}
+
+// modelRefreshTimeout bounds the catalog rebuild that follows a committed
+// model or defaults write.
+const modelRefreshTimeout = 10 * time.Second
+
+// refreshModelCatalog rebuilds the in-memory catalog after a committed write
+// and reports whether it reflects that write. The refresh runs on a context
+// detached from the request so a client that disconnects right after the
+// database commit does not leave the catalog stale. A failure is not a write
+// error: the change is durable, so callers keep the success status and mark
+// the response with catalog_refresh_failed instead of inviting a retry.
+func (s *Server) refreshModelCatalog(r *http.Request, logKey, logValue string) bool {
+	if s.refreshModels == nil {
+		return true
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), modelRefreshTimeout)
+	defer cancel()
+	if err := s.refreshModels(ctx); err != nil {
+		s.logger.Error("refresh models failed", "event", "model_refresh_failed", logKey, logValue, "error_class", errclass.Of(err))
+		return false
+	}
+	return true
 }
 
 func (s *Server) auditModel(r *http.Request, id, action string, request modelWriteRequest) {
