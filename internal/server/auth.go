@@ -448,6 +448,9 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.setSessionCookie(w, s.auth.sealSession(entry.id))
+	// Creating a session may evict another session of the same user; open
+	// streams that still hold the evicted session must close promptly.
+	s.invalidateStreamAuth()
 	http.Redirect(w, r, safeReturnTo(s.auth.stateReturnTo(state)), http.StatusSeeOther)
 }
 
@@ -456,6 +459,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "internal", "internal error", nil)
 		return
 	}
+	s.invalidateStreamAuth()
 	s.clearSessionCookie(w)
 	w.WriteHeader(http.StatusNoContent)
 }

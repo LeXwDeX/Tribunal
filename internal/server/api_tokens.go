@@ -211,6 +211,7 @@ func (s *Server) handleDeleteAPIToken(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, r, err)
 		return
 	}
+	s.invalidateStreamAuth()
 	w.WriteHeader(http.StatusNoContent)
 }
 

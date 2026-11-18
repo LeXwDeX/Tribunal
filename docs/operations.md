@@ -410,9 +410,12 @@ limits:
   register_per_minute: 10
   validate_per_minute: 30
   precheck_cache_ttl: 45s
+  stream_max_concurrent: 64
+  stream_max_per_user: 4
 ```
 
 - **调优**：受信自测或 CI 可调高 `register_per_minute` / `validate_per_minute`；面向不可信用户开放注册与校验时调低。常见默认值为 10 / 30。
+- **SSE 并发**：`stream_max_concurrent` / `stream_max_per_user` 限制同时打开的评审事件流，默认 64 / 4；为 0 或未设置时使用同一默认值，负数在启动校验时被拒绝。每个连接的空闲轮询只读一行工作流状态，节点、发现与发布数据仅在其变更后重新读取，鉴权结论最多复用 10 秒（经 API 的吊销会立即失效）。超限在建立连接前返回 429 `stream_limit_exceeded`；浏览器页面通常只保持一条流，因此调低每用户上限主要影响多标签页或脚本客户端。
 - **TTL 取舍**：调大 `precheck_cache_ttl` 可减少 GitLab 调用，但会延长权限撤销、token 轮换和项目状态变化的可见延迟：注册决策（成员资格与 provisioning 有效性）最迟在 TTL 后生效；一次校验可能复用接近 TTL 的分项缓存（共享 bot 成员、注册人成员、共享 token info），并把完整校验结果再缓存一个 TTL，因此校验响应中的成员/凭据事实最多可能滞后约 2×TTL。建议 30–60s，0 关闭缓存。仅共享凭据模式缓存，项目级 token 校验从不缓存。
 - **固定窗口语义**：窗口边界附近最多可能出现约 2× 限额的突发；计数器是进程内内存，服务重启清零，多实例部署不共享配额。
 - **缓存内容与失效**：缓存键由项目、用户与凭据 SHA-256 指纹组合而成，分别保存共享 bot 身份与项目 access、注册人 Reporter 成员关系（仅成功）和完整的共享模式校验结果；provisioning 凭据有效性与共享 token info 按凭据指纹全局缓存。TTL 内相同校验不产生 GitLab 调用。注册、切换共享凭据、轮换 token、启停（`PATCH enabled`）和删除项目会清理该项目的成员与校验缓存，全局 provisioning 与共享 token info 缓存不随单项目写操作清除；失败或拒绝的预检不缓存，每次重新探测。
@@ -958,6 +961,7 @@ location / {
 
 - `proxy_buffering off` 关闭缓冲；`proxy_cache off` 避免缓存事件流。
 - `proxy_read_timeout` 要覆盖最长评审时间；SSE 每 15 秒发送心跳，但代理不应在评审结束前断开。
+- 并发 SSE 连接按用户和总量设上限（默认每用户 4、全局 64），超限在建立连接前返回 429 `stream_limit_exceeded`；可用 `limits.stream_max_per_user` / `limits.stream_max_concurrent` 调整。每个连接的空闲轮询只读一行工作流状态，节点、发现与发布数据仅在其变更后重新读取；鉴权结论最多复用 10 秒，经 API 撤销会话、token、grant 或角色时立即失效并在下一次轮询关闭流。代理侧不要再叠加更高的连接上限，以免把 429 变成排队。
 - 若使用 OAuth，`server.public_url` 必须是 HTTPS；应用据此设置安全 Cookie。
 - 只将 `8080` 绑定到本机或内网，由反向代理暴露 HTTPS。不要把明文管理接口直接暴露到公网。
 - `/healthz` 不检查数据库，适合存活探测；`/readyz` 才适合就绪探测和流量接入。

@@ -104,6 +104,7 @@ func (s *Server) handleAdminSetUserDisabled(w http.ResponseWriter, r *http.Reque
 		attrs = append(attrs, "global_read", *request.GlobalRead)
 	}
 	s.logger.Info("platform user changed", attrs...)
+	s.invalidateStreamAuth()
 	response := map[string]any{"id": userID, "role": newRole}
 	if request.Disabled != nil {
 		response["disabled"] = *request.Disabled
@@ -161,6 +162,7 @@ func (s *Server) handleAdminRevokeCredentials(w http.ResponseWriter, r *http.Req
 	}
 	s.logger.Info("user credentials revoked", "event", "platform_audit", "actor_id", currentUserID(r),
 		"action", "revoke_credentials", "target_id", userID, "result", "ok")
+	s.invalidateStreamAuth()
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -271,6 +273,7 @@ func (s *Server) handleAdminSetGrant(w http.ResponseWriter, r *http.Request) {
 	}
 	s.logger.Info("project grant changed", "event", "platform_audit", "actor_id", currentUserID(r),
 		"action", "grant", "target_id", userID, "project_id", projectID, "role", role, "result", "ok")
+	s.invalidateStreamAuth()
 	writeJSON(w, http.StatusOK, store.ProjectGrant{ProjectID: projectID, UserID: userID, Role: role})
 }
 
@@ -297,6 +300,7 @@ func (s *Server) handleAdminDeleteGrant(w http.ResponseWriter, r *http.Request) 
 	}
 	s.logger.Info("project grant revoked", "event", "platform_audit", "actor_id", currentUserID(r),
 		"action", "revoke_grant", "target_id", userID, "project_id", projectID, "result", "ok")
+	s.invalidateStreamAuth()
 	w.WriteHeader(http.StatusNoContent)
 }
 

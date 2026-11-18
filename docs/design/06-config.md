@@ -22,6 +22,8 @@ limits:
   register_per_minute: 10
   validate_per_minute: 30
   precheck_cache_ttl: 45s
+  stream_max_concurrent: 64
+  stream_max_per_user: 4
 
 gitlab:
   url: "https://gitlab.example.internal"
@@ -256,6 +258,8 @@ type LimitsConfig struct {
 	RegisterPerMinute int           `yaml:"register_per_minute"` // 每用户每分钟注册请求上限，必须为正
 	ValidatePerMinute int           `yaml:"validate_per_minute"` // 每用户每分钟校验请求上限，必须为正
 	PrecheckCacheTTL  time.Duration `yaml:"precheck_cache_ttl"`  // 共享预检缓存有效期；0 禁用，不能为负
+	StreamMaxConcurrent int         `yaml:"stream_max_concurrent"` // 同时打开的评审 SSE 流总上限；0 取默认 64，不能为负
+	StreamMaxPerUser    int         `yaml:"stream_max_per_user"`   // 每用户同时打开的评审 SSE 流上限；0 取默认 4，不能为负
 }
 
 type ProviderConfig struct {
@@ -326,6 +330,7 @@ type BudgetConfig struct {
 ### 启动校验（`Config.Validate()`）
 
 - `limits.register_per_minute` 和 `limits.validate_per_minute` 必须为正，分别限制每个已认证用户对注册与校验端点的每分钟请求数（固定 1 分钟窗口）；`limits.precheck_cache_ttl` 不能为负，0 表示禁用共享预检缓存。默认注册 10、校验 30、缓存 45s。静态 bootstrap Bearer（用户 ID 0）使用独立的限流桶，不与普通用户共享配额。
+- `limits.stream_max_concurrent` 和 `limits.stream_max_per_user` 不能为负，分别限制同时打开的评审 SSE 流总量与每用户数量；0 取默认值 64 / 4。超限的新连接在建立流之前返回 429 `stream_limit_exceeded`。
 - 每个 provider 的 `protocol` 合法，`model` 非空且不全为空白，`api_key_env` 对应的环境变量存在且非空；`base_url` 可为空，非空时校验地址格式。
 - `max_tokens` 不能为负，`anthropic` 必须为正；`max_concurrency`、`rpm`、`context_window` 和 `thinking.budget_tokens` 不能为负。`temperature` 在 0–2。
 - `reasoning.effort` 只能为空或 `low` / `medium` / `high` / `xhigh` / `max`；`none` 仅在 `allow_reasoning_effort_none: true` 时通过校验，未声明时阻止启动；`anthropic` 协议声明 `none` 时无论能力开关如何都阻止启动。`thinking.type` 只能为空、`enabled` 或 `disabled`；`responses_params` 只能为空、`auto`、`supported` 或 `unsupported`。不适用的协议组合一般只在启动日志告警，不阻止启动（`anthropic` + `none` 除外）。
