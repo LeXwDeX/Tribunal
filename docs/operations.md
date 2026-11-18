@@ -719,7 +719,7 @@ docker build -t tribunal:local .
 
 构建需要网络拉取基础镜像、Debian 包、Go 模块和 npm 依赖。`web/dist` 即使在本地已存在也会被 `.dockerignore` 排除；镜像内始终由 `web` 阶段重新构建，然后复制给 Go 阶段。
 
-从 macOS 打包源码到 Linux 构建时，使用 `COPYFILE_DISABLE=1 tar --no-xattrs ...` 并核对归档文件清单，不能携带 AppleDouble 的 `._*` 文件。实跑中 `._*.sql` 被 `go:embed *.sql` 一并嵌入，导致迁移文件名非法、服务无法启动；配置检查不能发现此问题。应重新打包干净源码，不放宽迁移校验，也不删除数据库。
+从 macOS 打包源码到 Linux 构建时，使用 `COPYFILE_DISABLE=1 tar --no-xattrs ...` 并核对归档文件清单，不能携带 AppleDouble 的 `._*` 文件。实跑中 `._*.sql` 被 `go:embed *.sql` 一并嵌入，导致迁移文件名非法、服务无法启动；配置检查不能发现此问题。迁移加载器只接受 `^[0-9]{4,}_[A-Za-z0-9_.-]+\.sql$`，不符合的文件（包括 `._*.sql`）会在执行任何 SQL 前按文件名明确报错并拒绝启动，不会跳过；`.dockerignore` 已排除 `._*` 与 `**/._*`（含子目录），Docker 构建不会带入这类文件。出现该错误时应重新打包干净源码，不放宽迁移校验，也不删除数据库。
 
 构建顺序固定为前端在前、Go 在后。若 `npm ci` 或 `npm run build` 失败，不会继续生成 Go 二进制。
 
@@ -1176,18 +1176,20 @@ v1.2.0 新增迁移 `0020_review_command_replay`。`0020` 新建已受理身份�
 
 现象：服务启动时记录一行 ERROR `storage open failed; refusing to start`，随后以 `open storage: SQLite database is unavailable` 退出。该行带结构化字段，用于区分失败阶段，不包含原始驱动错误文本、DSN 或凭据：
 
-- `stage`：`open`（DSN、连接或 ping）、`migrate`（schema 迁移）、`backfill`（启动回填）或 `fk_check`（迁移后的外键检查）。
+- `stage`：`open`（DSN、连接或 ping）、`migrate`（schema 迁移）、`backfill`（启动回填）或 `fk_check`（外键检查；每次启动都执行，本次启动应用了迁移且违规时拒绝启动）。
 - `migration`：失败的迁移文件名，仅在迁移阶段出现。
 - `table`：外键检查违规的表名，仅在 `fk_check` 阶段出现。
 - `sqlite_code`：驱动报告的 SQLite 结果码（若可得）。
 - `error_class`：按 `internal/errclass` 归类的错误类别（如 `internal`、`timeout`、`canceled`）。
+
+本次启动没有应用迁移时，检查结果不阻止启动：每张有违规的表记录一行 WARN `foreign key violations in stored data; continuing startup`，附 `table` 与 `violations`（该表的违规行数）。存量孤儿行不会因此被修复，应尽快按 `PRAGMA foreign_key_check` 的结果核对并处置。该检查在每次启动时扫描所有带外键的表，数据量很大时会增加启动耗时，这是有意取舍。
 
 排查：
 
 1. `stage=open`：检查 DSN、数据目录权限和磁盘空间，确认数据库路径不是目录且可读写。容器反复重启时先 `docker compose stop`。
 2. `stage=migrate`：按 `migration` 找到失败的迁移文件；迁移按文件独立提交，失败的文件会回滚，已提交的版本保留在 `schema_migrations`。不要删除迁移记录强行启动，先停服、按第 7 节备份并核对。
 3. `stage=backfill`：启动回填（命令重放标记）失败，常见原因是表缺失或数据库损坏；从一致性备份恢复后重试。
-4. `stage=fk_check`：迁移已提交但留下了外键违规，`table` 指出表名；服务拒绝启动。先备份数据库，按迁移记录和 `PRAGMA foreign_key_check` 的结果人工核对，再决定修复或恢复快照。
+4. `stage=fk_check`：本次启动应用了迁移，但迁移后仍有外键违规，`table` 指出表名；服务拒绝启动。先备份数据库，按迁移记录和 `PRAGMA foreign_key_check` 的结果人工核对，再决定修复或恢复快照。未应用迁移时的存量违规只记录上述 WARN，不阻止启动，但仍应尽快核对。
 
 结果码提示：`19`（含扩展码低 8 位为 19）表示约束失败，`26` 表示文件不是数据库或已损坏，`14` 通常表示文件无法打开（权限、路径或磁盘）。原始错误文本仅保留在代码内的 `errors.Unwrap` 链上，不写入日志。
 
@@ -1211,7 +1213,7 @@ v1.2.0 新增迁移 `0020_review_command_replay`。`0020` 新建已受理身份�
 
 ### 移除成本字段迁移（v1.4.0）
 
-`0030_remove_cost.sql` 重建 `workflows` 和 `workflow_nodes` 去掉 `cost_micros`，保留原有索引、外键和约束；同时从 `llm_models.params_json` 剥离 legacy `price` 键，无效 JSON 保持原样。迁移执行器在迁移期间关闭外键检查，实际应用迁移后恢复并对全部表运行 `foreign_key_check`；违规时错误会指出表名。该迁移没有 down migration，不可逆；生产升级前必须按第 7 节停服做一致性备份，保存数据库及可能存在的 `-wal`/`-shm`、全部工作区、实际配置、加密主密钥和镜像 digest；回滚只能恢复升级前的数据库快照并启动匹配的旧镜像，不能只换镜像或让旧镜像直接使用已迁移的数据库。旧事件和旧节点 usage JSON 中的 `cost_micros` 仍可解码，但投影和新 API 不再暴露该字段。
+`0030_remove_cost.sql` 重建 `workflows` 和 `workflow_nodes` 去掉 `cost_micros`，保留原有索引、外键和约束；同时从 `llm_models.params_json` 剥离 legacy `price` 键，无效 JSON 保持原样。迁移执行器在迁移期间关闭外键检查，恢复后每次启动都对全部表运行 `foreign_key_check`：本次启动应用了迁移且检出违规时拒绝启动并指出表名；未应用迁移时按表记录 WARN 后继续启动。该迁移没有 down migration，不可逆；生产升级前必须按第 7 节停服做一致性备份，保存数据库及可能存在的 `-wal`/`-shm`、全部工作区、实际配置、加密主密钥和镜像 digest；回滚只能恢复升级前的数据库快照并启动匹配的旧镜像，不能只换镜像或让旧镜像直接使用已迁移的数据库。旧事件和旧节点 usage JSON 中的 `cost_micros` 仍可解码，但投影和新 API 不再暴露该字段。
 
 **在途工作流影响**：`profile_hash` 只包含档位实际引用的 `user:` 模型设置。升级前保存了 `price` 的 `user:` 模型现在不再把 `price` 纳入档位哈希（`profile_hash`），因此引用带 legacy `price` 的 `user:` 模型的未终态工作流，在升级重启恢复时会以 `profile_hash_changed` 取消，需要重新触发；未保存 `price` 的 `user:` 模型和 config provider 不受影响。需要保留在途结果时，生产升级前应让评审结束，或接受取消后重新触发。
 

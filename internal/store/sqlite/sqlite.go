@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -44,6 +46,7 @@ const MaxDeferWindow = 15 * time.Minute
 type Store struct {
 	db          *sql.DB
 	now         func() time.Time
+	logger      *slog.Logger
 	mcpCipher   atomic.Pointer[secret.Cipher]
 	modelCipher atomic.Pointer[secret.Cipher]
 }
@@ -57,6 +60,14 @@ func WithClock(now func() time.Time) Option {
 		if now != nil {
 			s.now = now
 		}
+	}
+}
+
+// WithLogger lets startup checks report non-fatal findings. A nil logger
+// disables those reports.
+func WithLogger(logger *slog.Logger) Option {
+	return func(s *Store) {
+		s.logger = logger
 	}
 }
 
@@ -131,7 +142,7 @@ func Open(ctx context.Context, dsn string, opts ...Option) (*Store, error) {
 		_ = db.Close()
 		return nil, newOpenError(StageOpen, "", "", fmt.Errorf("sqlite: ping: %w", err))
 	}
-	if err := migrate(ctx, db, s.now); err != nil {
+	if err := migrate(ctx, db, s.now, s.logger); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -187,10 +198,12 @@ func (s *Store) Ping(ctx context.Context) error {
 // migrate applies the embedded migrations with foreign key enforcement
 // disabled. SQLite's documented table-rebuild procedure requires this: with
 // enforcement on, DROP TABLE performs an implicit DELETE that cascades into
-// child tables and loses rows. Enforcement is restored and, when this call
-// actually applied a migration, every remaining reference is checked before
-// migrate returns.
-func migrate(ctx context.Context, db *sql.DB, now func() time.Time) error {
+// child tables and loses rows. Enforcement is restored and every startup then
+// checks every remaining reference: a violation is fatal when this call
+// actually applied a migration, and otherwise reported as structured warnings
+// so a stable database with pre-existing orphan rows does not enter a restart
+// loop.
+func migrate(ctx context.Context, db *sql.DB, now func() time.Time, logger *slog.Logger) error {
 	before, err := appliedMigrationCount(ctx, db)
 	if err != nil {
 		return newOpenError(StageMigrate, "", "", err)
@@ -198,7 +211,7 @@ func migrate(ctx context.Context, db *sql.DB, now func() time.Time) error {
 	if _, err := db.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
 		return newOpenError(StageMigrate, "", "", fmt.Errorf("sqlite: disable foreign keys for migrations: %w", err))
 	}
-	applyErr := applyMigrations(ctx, db, now)
+	applyErr := applyMigrations(ctx, db, now, migrations.FS)
 	if _, err := db.ExecContext(ctx, `PRAGMA foreign_keys=ON`); err != nil && applyErr == nil {
 		return newOpenError(StageMigrate, "", "", fmt.Errorf("sqlite: re-enable foreign keys: %w", err))
 	}
@@ -209,15 +222,41 @@ func migrate(ctx context.Context, db *sql.DB, now func() time.Time) error {
 	if err != nil {
 		return newOpenError(StageMigrate, "", "", err)
 	}
-	if after == before {
+	violations, err := foreignKeyViolations(ctx, db)
+	if err != nil {
+		return err
+	}
+	tables := sortedViolationTables(violations)
+	if after != before {
+		if len(tables) > 0 {
+			return newOpenError(StageFKCheck, "", tables[0], fmt.Errorf("sqlite: migration left a foreign key violation in table %q", tables[0]))
+		}
 		return nil
 	}
+	// Every migration was already recorded, so this startup cannot repair the
+	// stored data. Keep the check visible instead of silently accepting it, but
+	// do not refuse to start: a pre-existing orphan row would otherwise turn
+	// into a restart loop that never runs the service.
+	if logger != nil {
+		for _, table := range tables {
+			logger.Warn("foreign key violations in stored data; continuing startup",
+				"table", table, "violations", violations[table])
+		}
+	}
+	return nil
+}
+
+// foreignKeyViolations runs PRAGMA foreign_key_check and counts violations per
+// table. The check scans every table with a foreign key, so it runs once per
+// startup and returns only integer counts and table names.
+func foreignKeyViolations(ctx context.Context, db *sql.DB) (map[string]int, error) {
 	rows, err := db.QueryContext(ctx, `PRAGMA foreign_key_check`)
 	if err != nil {
-		return newOpenError(StageFKCheck, "", "", fmt.Errorf("sqlite: foreign key check: %w", err))
+		return nil, newOpenError(StageFKCheck, "", "", fmt.Errorf("sqlite: foreign key check: %w", err))
 	}
 	defer rows.Close()
-	if rows.Next() {
+	counts := make(map[string]int)
+	for rows.Next() {
 		var (
 			table  string
 			rowID  sql.NullInt64
@@ -225,14 +264,23 @@ func migrate(ctx context.Context, db *sql.DB, now func() time.Time) error {
 			fkID   int
 		)
 		if err := rows.Scan(&table, &rowID, &parent, &fkID); err != nil {
-			return newOpenError(StageFKCheck, "", "", fmt.Errorf("sqlite: scan foreign key violation: %w", err))
+			return nil, newOpenError(StageFKCheck, "", "", fmt.Errorf("sqlite: scan foreign key violation: %w", err))
 		}
-		return newOpenError(StageFKCheck, "", table, fmt.Errorf("sqlite: migration left a foreign key violation in table %q", table))
+		counts[table]++
 	}
 	if err := rows.Err(); err != nil {
-		return newOpenError(StageFKCheck, "", "", fmt.Errorf("sqlite: foreign key check: %w", err))
+		return nil, newOpenError(StageFKCheck, "", "", fmt.Errorf("sqlite: foreign key check: %w", err))
 	}
-	return nil
+	return counts, nil
+}
+
+func sortedViolationTables(counts map[string]int) []string {
+	tables := make([]string, 0, len(counts))
+	for table := range counts {
+		tables = append(tables, table)
+	}
+	sort.Strings(tables)
+	return tables
 }
 
 // appliedMigrationCount reports how many migrations are recorded. A database
@@ -253,7 +301,7 @@ func appliedMigrationCount(ctx context.Context, db *sql.DB) (int, error) {
 	return count, nil
 }
 
-func applyMigrations(ctx context.Context, db *sql.DB, now func() time.Time) error {
+func applyMigrations(ctx context.Context, db *sql.DB, now func() time.Time, files fs.FS) error {
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version INTEGER PRIMARY KEY,
 		name TEXT NOT NULL,
@@ -261,15 +309,27 @@ func applyMigrations(ctx context.Context, db *sql.DB, now func() time.Time) erro
 	)`); err != nil {
 		return newOpenError(StageMigrate, "", "", fmt.Errorf("sqlite: create schema_migrations: %w", err))
 	}
-	entries, err := fs.ReadDir(migrations.FS, ".")
+	entries, err := fs.ReadDir(files, ".")
 	if err != nil {
 		return newOpenError(StageMigrate, "", "", fmt.Errorf("sqlite: read migrations: %w", err))
 	}
 	var names []string
 	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") {
-			names = append(names, entry.Name())
+		if entry.IsDir() {
+			continue
 		}
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".sql") {
+			continue
+		}
+		// go:embed *.sql also matches AppleDouble names such as
+		// ._0001_init.sql. Refuse any file that does not match the documented
+		// pattern, naming it, instead of skipping it or failing later with a
+		// vague parse error.
+		if !migrationNamePattern.MatchString(name) {
+			return newOpenError(StageMigrate, name, "", fmt.Errorf("sqlite: migration %q does not match the required NNNN_name.sql pattern", name))
+		}
+		names = append(names, name)
 	}
 	sort.Strings(names)
 
@@ -306,7 +366,7 @@ func applyMigrations(ctx context.Context, db *sql.DB, now func() time.Time) erro
 		if applied[version] {
 			continue
 		}
-		body, err := migrations.FS.ReadFile(name)
+		body, err := fs.ReadFile(files, name)
 		if err != nil {
 			return newOpenError(StageMigrate, name, "", fmt.Errorf("sqlite: read migration %s: %w", name, err))
 		}
@@ -330,6 +390,10 @@ func applyMigrations(ctx context.Context, db *sql.DB, now func() time.Time) erro
 	}
 	return nil
 }
+
+// migrationNamePattern is the only accepted migration file name: a version of
+// at least four digits, an underscore, a name, and the .sql suffix.
+var migrationNamePattern = regexp.MustCompile(`^[0-9]{4,}_[A-Za-z0-9_.-]+\.sql$`)
 
 func migrationVersion(name string) (int, error) {
 	prefix, _, ok := strings.Cut(name, "_")

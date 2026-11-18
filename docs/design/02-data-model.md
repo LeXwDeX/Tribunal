@@ -458,7 +458,7 @@ CREATE TABLE api_tokens (
 
 0029 新建单行 `llm_model_defaults`（`id=1`，`params_json` 与 `llm_models.params_json` 同构，另含单调递增的 `revision`、`updated_by`、`updated_at`），保存 `user:` 模型的平台级默认参数。没有种子行：未保存时读取返回空文档和 `revision 0`，首次 PUT 用 `revision 0` 插入；DELETE 清空 `params_json` 并递增 `revision`，不删除行。`config:` 模型不使用该表。字段零值（0、false、空串、null）表示未设置，用户模型只存储显式值；读取时按“模型显式值 > 全局默认 > 内置/协议默认”合并，对象参数（`reasoning`、`thinking`）按整体继承或覆盖。该迁移不可逆，回滚需恢复升级前快照与匹配的旧镜像。
 
-0030 重建 `workflows` 与 `workflow_nodes` 去掉 `cost_micros`，保留其余列、默认值、主键、索引和外键；迁移执行器在迁移期间关闭外键检查，实际应用迁移后恢复并执行 `foreign_key_check`。同一迁移从 `llm_models.params_json` 剥离 legacy `price`，无效 JSON 保持原样。该迁移不可逆，回滚需恢复升级前快照与匹配的旧镜像。
+0030 重建 `workflows` 与 `workflow_nodes` 去掉 `cost_micros`，保留其余列、默认值、主键、索引和外键；迁移执行器在迁移期间关闭外键检查，恢复后每次启动都执行 `foreign_key_check`：本次启动应用了迁移且检出违规时拒绝启动；未应用迁移时按表记录 WARN 后继续启动。同一迁移从 `llm_models.params_json` 剥离 legacy `price`，无效 JSON 保持原样。该迁移不可逆，回滚需恢复升级前快照与匹配的旧镜像。
 
 0031 为 `review_status` 追加 `final_body TEXT NOT NULL DEFAULT ''`，只加列、不改写已有行；旧行读到空串，状态评论保持旧正文。该迁移不可逆，回滚需恢复升级前快照与匹配的旧镜像。字段语义见上文 `review_status` 说明；升级操作见[部署与运维 · 评审回合与评论合并](../operations.md#评审回合超时与评论合并451)。
 
