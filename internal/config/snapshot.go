@@ -77,7 +77,9 @@ type State struct {
 // optional overlay, then records per-key origins. An empty overlayPath disables
 // the overlay. A configured but missing overlay is treated as an empty
 // document; other overlay read errors fail the load. Base files are read first
-// so a missing base is reported before an overlay problem.
+// so a missing base is reported before an overlay problem. Review defaults
+// that the policy rejects are normalized with a warning instead of failing the
+// load (#540).
 func LoadSnapshot(basePaths []string, overlayPath string) (*Snapshot, error) {
 	baseSources, baseRevisions, err := readBaseSources(basePaths)
 	if err != nil {
@@ -87,7 +89,13 @@ func LoadSnapshot(basePaths []string, overlayPath string) (*Snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	return buildSnapshot(baseSources, baseRevisions, overlay)
+	snapshot, err := buildSnapshot(baseSources, baseRevisions, overlay)
+	if err != nil {
+		return nil, err
+	}
+	normalizeReviewDefaults(snapshot.Config)
+	snapshot.Warnings = append([]string(nil), snapshot.Config.Warnings...)
+	return snapshot, nil
 }
 
 // readOverlaySource reads and pre-validates the optional overlay. The returned

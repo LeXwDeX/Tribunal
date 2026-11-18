@@ -43,9 +43,11 @@ type Config struct {
 	// DefaultExtensions are platform extensions registered once on first start.
 	DefaultExtensions DefaultExtensionsConfig `yaml:"default_extensions" json:"default_extensions"`
 
-	// Warnings lists configuration that Load ignored or migrated, for example
-	// removed review profiles or legacy profile fields. They are logged once
-	// at startup and never contain configuration values other than names.
+	// Warnings lists configuration that Load ignored, normalized or migrated,
+	// for example removed review profiles, legacy profile fields or
+	// review_defaults values replaced by their built-in default. They are
+	// logged once at startup and never contain configuration values other than
+	// names.
 	Warnings []string `yaml:"-" json:"-"`
 
 	// RawProfiles keeps the review profile as written, before

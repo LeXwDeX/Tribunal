@@ -596,6 +596,8 @@ fi
 
 基础配置仍是启动必需文件，Compose 默认把它只读挂载到 `/app/config/server.yaml`。overlay 是叠加在基础配置之上的可选层，默认路径 `/app/data/config-overlay/server.overlay.yaml`，位于持久化数据卷内；文件不存在等价空 overlay，属正常状态。加载顺序为内置默认 < `--config` < overlay。传 `--overlay ""` 可关闭 overlay，`--overlay <path>` 可改用其他路径。
 
+加载时（启动、`--check-config` 与 watcher 重载）会把不可用的 `review_defaults` 策略归一为内置默认并在日志中记 WARNING，不拒绝启动：`max_files` / `max_diff_lines` 非正数、空 `language`、空或非法 `target_branches` glob、空列表项、指向未知评审档位的 `profile_by_label`。非法 `target_branches` 项被丢弃；全部丢弃后按空列表处理，即只评审项目默认分支。控制台 `PATCH /api/v1/config/overlay` 仍只对本次请求直接写入的字段返回 400，继承自基础配置的坏值不会阻塞其他字段的保存；运行期评审遇到非法分支 glob 时记录 warning 并忽略该模式。
+
 创建或修改 overlay 时，直接在数据卷内写文件，不要改只读的基础配置挂载。沿用数据卷属主（默认 `10001:10001`），文件权限设为 `600`；目录不存在时先创建。例如：
 
 ```bash
