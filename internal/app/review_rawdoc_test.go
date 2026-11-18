@@ -151,3 +151,47 @@ func TestRawDocTreatsOnlyNotFoundAsEmpty(t *testing.T) {
 }
 
 const transientRawErrorPath = ".gitlab-review.yml"
+
+// An oversized .gitlab-review.yml must fail closed. Treating it as a missing
+// document would drop the repository ignore rules and review files the
+// repository excluded (#518).
+func TestRepoDocsOversizedConfigFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	f := newReviewFixture(t, reviewTestHead)
+	f.setRawError(".gitlab-review.yml", gitlab.ErrFileTooLarge)
+	if _, err := f.service.repoDocs(ctx, "token", 42, "main"); !errors.Is(err, ErrInvalidRepoConfig) {
+		t.Fatalf("repoDocs error = %v, want ErrInvalidRepoConfig", err)
+	}
+
+	job := f.seedRunFor(t, "job-raw-doc-oversized", reviewTestHead, "mr_open")
+	err := f.service.RunReview(ctx, job)
+	if err == nil || !IsPermanentJob(err) || !errors.Is(err, ErrInvalidRepoConfig) {
+		t.Fatalf("RunReview = %v, want a permanent ErrInvalidRepoConfig", err)
+	}
+	status, err := f.db.GetReviewStatus(ctx, 42, 7)
+	if err != nil || status.State != reviewStatusFailed || status.Detail != invalidRepoConfigDetail {
+		t.Fatalf("status = %+v, %v", status, err)
+	}
+	if _, err := f.db.GetWorkflowByJob(ctx, job.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("a workflow was created from an oversized config: %v", err)
+	}
+}
+
+// Oversized prompt documents are optional context: they are skipped with a
+// warning instead of forcing an empty (fail-open) configuration.
+func TestRepoDocsSkipsOversizedPromptDocs(t *testing.T) {
+	f := newReviewFixture(t, reviewTestHead)
+	f.gitlab.mu.Lock()
+	f.gitlab.docs["AGENTS.md"] = "agents"
+	f.gitlab.docs["CLAUDE.md"] = "claude"
+	f.gitlab.rawErr["AGENTS.md"] = gitlab.ErrFileTooLarge
+	f.gitlab.mu.Unlock()
+
+	docs, err := f.service.repoDocs(context.Background(), "token", 42, "main")
+	if err != nil {
+		t.Fatalf("repoDocs: %v", err)
+	}
+	if docs.AGENTS != "" || docs.CLAUDE != "claude" {
+		t.Fatalf("docs = %+v, want AGENTS skipped and CLAUDE kept", docs)
+	}
+}

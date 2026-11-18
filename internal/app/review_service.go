@@ -455,6 +455,10 @@ func (s *ReviewService) RunCandidate(ctx context.Context, job *jobs.Job) error {
 				"project_id", project.ID, "mr_iid", payload.MRIID, "error_class", jobSettleClass(err))
 			return nil
 		}
+		if errors.Is(err, ErrInvalidRepoConfig) {
+			s.noteInvalidRepoConfig(ctx, token, payload.ProjectID, payload.MRIID, payload.Generation, payload.HeadSHA)
+			return PermanentJob(err)
+		}
 		return err
 	}
 	s.clearProjectTokenRejected(ctx, project.ID)
@@ -532,6 +536,9 @@ func (s *ReviewService) collectFilterInputs(ctx context.Context, project *store.
 	}
 	configDoc, err := s.rawDoc(ctx, token, project.ID, ".gitlab-review.yml", mr.TargetBranch)
 	if err != nil {
+		if errors.Is(err, ErrInvalidRepoConfig) {
+			return nil, review.RepoDocs{}, PermanentJob(err)
+		}
 		return nil, review.RepoDocs{}, err
 	}
 	return mr, review.RepoDocs{GitLabReviewConfig: configDoc}, nil
