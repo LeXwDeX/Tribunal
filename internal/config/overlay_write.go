@@ -311,13 +311,26 @@ func (w *OverlayWriter) Apply(ctx context.Context, req OverlayWriteRequest) (*Ov
 			Message: "the base configuration changed during the write; retry",
 		}
 	}
-	if details := validateReviewDefaultsPolicy(candidate.Config); len(details) > 0 {
+	// Only fields this request writes can fail the write. Invalid values
+	// inherited from a base file are normalized below with warnings, matching
+	// the startup load, so one bad base value does not block every console
+	// write (#540).
+	touched := reviewDefaultsFieldsChanged(req.Changes)
+	var details []string
+	for _, problem := range validateReviewDefaultsPolicy(candidate.Config) {
+		if touched["*"] || touched[problem.field] {
+			details = append(details, problem.message)
+		}
+	}
+	if len(details) > 0 {
 		return nil, &OverlayWriteError{
 			Code:    OverlayErrorInvalidConfig,
 			Message: "candidate review_defaults is invalid",
 			Details: details,
 		}
 	}
+	normalizeReviewDefaults(candidate.Config)
+	candidate.Warnings = append([]string(nil), candidate.Config.Warnings...)
 
 	// Compare the effective provider sets before and after the patch. Fall back
 	// to raw merged names when the current configuration is too broken to load.
@@ -1412,50 +1425,58 @@ func mappingNodeFromStrings(values map[string]string) (*yaml.Node, error) {
 	return node, nil
 }
 
+// reviewDefaultsProblem names the review_defaults field that violates the
+// policy. Message is safe to return to the console.
+type reviewDefaultsProblem struct {
+	field   string
+	message string
+}
+
 // validateReviewDefaultsPolicy applies the project settings rules that the
-// platform config loader does not enforce. It returns field-level messages.
-func validateReviewDefaultsPolicy(cfg *Config) []string {
+// platform config loader normalizes rather than rejects. It returns field-level
+// problems.
+func validateReviewDefaultsPolicy(cfg *Config) []reviewDefaultsProblem {
 	defaults := cfg.ReviewDefaults
-	var details []string
-	add := func(format string, args ...any) {
-		details = append(details, fmt.Sprintf(format, args...))
+	var details []reviewDefaultsProblem
+	add := func(field, format string, args ...any) {
+		details = append(details, reviewDefaultsProblem{field: field, message: fmt.Sprintf(format, args...)})
 	}
 	if defaults.MaxFiles <= 0 {
-		add("review_defaults.max_files must be positive")
+		add("max_files", "review_defaults.max_files must be positive")
 	}
 	if defaults.MaxDiffLines <= 0 {
-		add("review_defaults.max_diff_lines must be positive")
+		add("max_diff_lines", "review_defaults.max_diff_lines must be positive")
 	}
 	if strings.TrimSpace(defaults.Language) == "" {
-		add("review_defaults.language must not be empty")
+		add("language", "review_defaults.language must not be empty")
 	}
 	for i, pattern := range defaults.TargetBranches {
 		if strings.TrimSpace(pattern) == "" {
-			add("review_defaults.target_branches[%d] must not be empty", i)
+			add("target_branches", "review_defaults.target_branches[%d] must not be empty", i)
 			continue
 		}
 		if _, err := path.Match(pattern, "probe"); err != nil {
-			add("review_defaults.target_branches[%d] is not a valid glob", i)
+			add("target_branches", "review_defaults.target_branches[%d] is not a valid glob", i)
 		}
 	}
 	for i, value := range defaults.LabelsInclude {
 		if strings.TrimSpace(value) == "" {
-			add("review_defaults.labels_include[%d] must not be empty", i)
+			add("labels_include", "review_defaults.labels_include[%d] must not be empty", i)
 		}
 	}
 	for i, value := range defaults.LabelsExclude {
 		if strings.TrimSpace(value) == "" {
-			add("review_defaults.labels_exclude[%d] must not be empty", i)
+			add("labels_exclude", "review_defaults.labels_exclude[%d] must not be empty", i)
 		}
 	}
 	for i, value := range defaults.Ignore {
 		if strings.TrimSpace(value) == "" {
-			add("review_defaults.ignore[%d] must not be empty", i)
+			add("ignore", "review_defaults.ignore[%d] must not be empty", i)
 		}
 	}
 	for i, value := range defaults.CustomRules {
 		if strings.TrimSpace(value) == "" {
-			add("review_defaults.custom_rules[%d] must not be empty", i)
+			add("custom_rules", "review_defaults.custom_rules[%d] must not be empty", i)
 		}
 	}
 	labels := make([]string, 0, len(defaults.ProfileByLabel))
@@ -1465,19 +1486,36 @@ func validateReviewDefaultsPolicy(cfg *Config) []string {
 	sort.Strings(labels)
 	for _, label := range labels {
 		if strings.TrimSpace(label) == "" {
-			add("review_defaults.profile_by_label must not contain an empty label")
+			add("profile_by_label", "review_defaults.profile_by_label must not contain an empty label")
 			continue
 		}
 		profile := defaults.ProfileByLabel[label]
 		if strings.TrimSpace(profile) == "" {
-			add("review_defaults.profile_by_label.%s must not be empty", label)
+			add("profile_by_label", "review_defaults.profile_by_label.%s must not be empty", label)
 			continue
 		}
 		if profile != ReviewProfile {
-			add("review_defaults.profile_by_label.%s refers to unknown review profile %q", label, profile)
+			add("profile_by_label", "review_defaults.profile_by_label.%s refers to unknown review profile %q", label, profile)
 		}
 	}
 	return details
+}
+
+// reviewDefaultsFieldsChanged returns the review_defaults fields a request
+// writes. "*" means the whole mapping is touched.
+func reviewDefaultsFieldsChanged(changes []OverlayChange) map[string]bool {
+	fields := make(map[string]bool)
+	for _, change := range changes {
+		if len(change.Path) == 0 || change.Path[0] != "review_defaults" {
+			continue
+		}
+		if len(change.Path) == 1 {
+			fields["*"] = true
+			continue
+		}
+		fields[change.Path[1]] = true
+	}
+	return fields
 }
 
 // removedProviders reports providers that existed before the patch and no

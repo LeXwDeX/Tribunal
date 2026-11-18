@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"path"
 	"sort"
 	"strings"
@@ -295,7 +296,8 @@ func ProfileForLabels(labels []string, fallback string, settings config.ProjectS
 }
 
 // BranchAllowed reports whether branch matches the configured patterns. An
-// empty pattern list means the project default branch only.
+// empty pattern list means the project default branch only. An invalid glob is
+// reported and ignored instead of silently filtering every branch (#540).
 func BranchAllowed(branch, defaultBranch string, patterns []string) bool {
 	if branch == "" {
 		return false
@@ -303,8 +305,14 @@ func BranchAllowed(branch, defaultBranch string, patterns []string) bool {
 	if len(patterns) == 0 {
 		return branch == defaultBranch
 	}
-	for _, pattern := range patterns {
-		if ok, err := path.Match(pattern, branch); err == nil && ok {
+	for i, pattern := range patterns {
+		ok, err := path.Match(pattern, branch)
+		if err != nil {
+			slog.Warn("target branch pattern is not a valid glob; it was ignored",
+				"field", "target_branches", "index", i)
+			continue
+		}
+		if ok {
 			return true
 		}
 	}

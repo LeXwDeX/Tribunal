@@ -1,8 +1,10 @@
 package app
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"reflect"
 	"strings"
 	"testing"
@@ -114,6 +116,26 @@ func TestBranchAllowed(t *testing.T) {
 		if got := BranchAllowed(tt.branch, tt.defaultBranch, tt.patterns); got != tt.want {
 			t.Errorf("BranchAllowed(%q, %q, %v) = %v, want %v", tt.branch, tt.defaultBranch, tt.patterns, got, tt.want)
 		}
+	}
+}
+
+// #540: an invalid glob must not be swallowed silently; it is reported while
+// the remaining patterns keep deciding the result.
+func TestBranchAllowedWarnsOnInvalidPattern(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	if !BranchAllowed("main", "main", []string{"[bad", "main"}) {
+		t.Fatal("BranchAllowed = false, want the valid main pattern to match")
+	}
+	text := logs.String()
+	if !strings.Contains(text, "target_branches") || !strings.Contains(text, "not a valid glob") {
+		t.Fatalf("warning = %q, want an invalid target_branches warning", text)
+	}
+	if strings.Contains(text, "[bad") {
+		t.Fatalf("warning leaked the configured pattern: %q", text)
 	}
 }
 
