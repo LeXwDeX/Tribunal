@@ -66,7 +66,13 @@ interface ReviewIssue {
   kind: ReviewIssueKind
 }
 
-function buildAlerts(projects: Project[], providers: ModelHealth[], reviewIssues: ReviewIssue[], reviews: ReviewListItem[]): Alert[] {
+function buildAlerts(
+  projects: Project[],
+  providers: ModelHealth[],
+  reviewIssues: ReviewIssue[],
+  reviews: ReviewListItem[],
+  incomplete: { count: number; hasMore: boolean },
+): Alert[] {
   const alerts: Alert[] = []
   const now = Date.now()
   for (const project of projects) {
@@ -153,19 +159,20 @@ function buildAlerts(projects: Project[], providers: ModelHealth[], reviewIssues
     }
   }
   // Completed runs can settle without a workflow error and still be
-  // incomplete: an INCOMPLETE verdict or a failed/skipped node means the
-  // reviewed scope was not fully covered. Aggregate them so the panel is not
-  // silent while most reviews are INCOMPLETE.
+  // incomplete. INCOMPLETE is counted server-side so reviews beyond the
+  // loaded recent page are not missed; the first page plus hasNextPage is
+  // enough to show "N+". Failed or skipped nodes have no server-side filter,
+  // so they stay client-side over the loaded recent reviews and the alert
+  // states that scope.
   const completed = reviews.filter((item): item is ReviewSummary => 'status' in item && item.status === 'completed')
-  const incomplete = completed.filter((item) => item.verdict === 'INCOMPLETE')
   const nodeIssues = completed.filter((item) => item.verdict !== 'INCOMPLETE'
     && (item.nodes || []).some((node) => node.status === 'failed' || node.status === 'skipped'))
-  if (incomplete.length) {
+  if (incomplete.count) {
     alerts.push({
       id: 'reviews-incomplete',
       tone: 'warn',
       label: '评审未完成',
-      text: `${incomplete.length} 个已结束评审为 INCOMPLETE（未完成）：存在未解决的证据缺口或未执行节点，零 Finding 不代表没有问题。`,
+      text: `${incomplete.count}${incomplete.hasMore ? '+' : ''} 个已结束评审为 INCOMPLETE（未完成）：存在未解决的证据缺口或未执行节点，零 Finding 不代表没有问题。`,
       href: '/reviews?verdict=INCOMPLETE',
       action: '查看 INCOMPLETE 评审',
     })
@@ -175,7 +182,7 @@ function buildAlerts(projects: Project[], providers: ModelHealth[], reviewIssues
       id: 'reviews-node-issues',
       tone: 'warn',
       label: '评审节点异常',
-      text: `${nodeIssues.length} 个已结束评审包含失败或跳过的节点，结果可能不完整。`,
+      text: `${nodeIssues.length} 个已结束评审包含失败或跳过的节点，结果可能不完整（按最近 ${reviews.length} 条评审统计）。`,
       href: '/reviews?status=completed',
       action: '查看评审',
     })
@@ -297,6 +304,14 @@ export function OverviewPage() {
     (cursor) => listReviews({}, cursor),
     'reviews',
   )
+  // The alert count for INCOMPLETE verdicts must not depend on the loaded
+  // recent page. Only the first filtered page and hasNextPage are used, so
+  // the alert can show "N+"; the link opens the full filtered list.
+  const incompleteReviews = usePaginated<ReviewListItem>(
+    ['reviews', 'overview', 'incomplete'],
+    (cursor) => listReviews({ status: 'completed', verdict: 'INCOMPLETE' }, cursor),
+    'reviews',
+  )
   const stats = useQuery({
     queryKey: ['stats', 'overview', range.from, range.to],
     queryFn: () => getStats(range),
@@ -319,13 +334,19 @@ export function OverviewPage() {
     return Array.from(issues.values())
   }, [failedRuns.items, failedPublications.items, pendingPublications.items])
   const alerts = useMemo(
-    () => buildAlerts(projectsPage.items, providersPage.data?.models || [], reviewIssues, recent.items),
-    [projectsPage.items, providersPage.data, reviewIssues, recent.items],
+    () => buildAlerts(
+      projectsPage.items,
+      providersPage.data?.models || [],
+      reviewIssues,
+      recent.items,
+      { count: incompleteReviews.items.length, hasMore: incompleteReviews.hasNextPage },
+    ),
+    [projectsPage.items, providersPage.data, reviewIssues, recent.items, incompleteReviews.items.length, incompleteReviews.hasNextPage],
   )
   const issuesError = projectsPage.error || failedRuns.error || failedPublications.error
-    || pendingPublications.error || (providersEnabled ? providersPage.error : null)
+    || pendingPublications.error || incompleteReviews.error || (providersEnabled ? providersPage.error : null)
   const hasIssuesError = projectsPage.isError || failedRuns.isError || failedPublications.isError
-    || pendingPublications.isError || (providersEnabled && providersPage.isError)
+    || pendingPublications.isError || incompleteReviews.isError || (providersEnabled && providersPage.isError)
   // Cached queries paused offline are neither pending nor fetching.
   const pausedIssues = useSyncExternalStore(
     queryClient.getQueryCache().subscribe,
@@ -334,6 +355,7 @@ export function OverviewPage() {
       ['reviews', 'overview', 'failed'],
       ['reviews', 'overview', 'publication-failed'],
       ['reviews', 'overview', 'publication-pending'],
+      ['reviews', 'overview', 'incomplete'],
       ...(providersEnabled ? [['models', 'overview']] : []),
     ].some((key) => queryClient.getQueryState(key)?.fetchStatus === 'paused'),
     () => false,
@@ -345,6 +367,7 @@ export function OverviewPage() {
   )
   const issuesPending = pausedIssues || projectsPage.isPending || projectsPage.isFetching || failedRuns.isPending || failedRuns.isFetching
     || failedPublications.isPending || failedPublications.isFetching || pendingPublications.isPending || pendingPublications.isFetching
+    || incompleteReviews.isPending || incompleteReviews.isFetching
     || (providersEnabled && (providersPage.isPending || providersPage.isFetching))
   const reviewAlertsFetching = failedRuns.isFetchingNextPage || failedPublications.isFetchingNextPage || pendingPublications.isFetchingNextPage
   const reviewAlertsBlocked = pausedIssues || [failedRuns, failedPublications, pendingPublications]
@@ -401,13 +424,13 @@ export function OverviewPage() {
           onRetry={() => { void stats.refetch() }}
         />
 
-          <Panel flush title="告警" aside={<><span>检查范围：token 过期、工作区异常、停用项目{providersEnabled ? '、provider 错误' : ''}、评审执行失败和发布失败、已完成但未完成或含失败节点的评审</span>{alerts.length ? <span>{alerts.length}{hasMoreIssues ? '+' : ''} 项</span> : null}</>}>
+          <Panel flush title="告警" aside={<><span>检查范围：token 过期、工作区异常、停用项目{providersEnabled ? '、provider 错误' : ''}、评审执行失败和发布失败、已完成但未完成（服务端计数）或含失败/跳过节点（按最近加载的评审计数）的评审</span>{alerts.length ? <span>{alerts.length}{hasMoreIssues ? '+' : ''} 项</span> : null}</>}>
             {hasIssuesError ? (
               <div className={overview.state}>
                 <ErrorState
                   error={issuesError}
                   onRetry={() => {
-                    for (const source of [projectsPage, failedRuns, failedPublications, pendingPublications]) {
+                    for (const source of [projectsPage, failedRuns, failedPublications, pendingPublications, incompleteReviews]) {
                       if (source.isError && !source.isFetching && !pausedIssues) source.retry()
                     }
                     if (providersEnabled && providersPage.isError && !providersPage.isFetching && !pausedIssues) void providersPage.refetch()
