@@ -33,7 +33,14 @@ const (
 	maxURLLen    = 2048
 	maxPathLen   = 4096
 	gitWaitDelay = 5 * time.Second
+	// maxGitOutput bounds stdout for a generic command.
+	maxGitOutput = 32 << 20
+	// maxFileDiffOutput bounds the zero-context diff of one file.
+	maxFileDiffOutput = 2 << 20
 )
+
+// ErrOutputLimit reports stdout above the per-call bound.
+var ErrOutputLimit = errors.New("repo: git output exceeds limit")
 
 // Auth carries a project token for one operation. An empty token means
 // anonymous access.
@@ -115,6 +122,24 @@ func (s *stderrScan) Write(p []byte) (int, error) {
 	}
 	s.buf = append(s.buf, p...)
 	return n, nil
+}
+
+// boundedOutput caps stdout at limit bytes and records an overrun instead of
+// growing. Once the bound is hit the pipe is closed, so git usually dies from
+// SIGPIPE; the flag distinguishes that expected overrun from a real failure,
+// because Wait reports the process exit before the write error.
+type boundedOutput struct {
+	buf      bytes.Buffer
+	limit    int
+	exceeded bool
+}
+
+func (b *boundedOutput) Write(p []byte) (int, error) {
+	if len(p) > b.limit-b.buf.Len() {
+		b.exceeded = true
+		return 0, ErrOutputLimit
+	}
+	return b.buf.Write(p)
 }
 
 // gitStderrMarkers map stable English git and GitLab messages to a reason.
@@ -335,6 +360,10 @@ func (g *Git) run(ctx context.Context, op, dir string, a Auth, args ...string) (
 }
 
 func (g *Git) runWithWaitDelay(ctx context.Context, op, dir string, a Auth, waitDelay time.Duration, args ...string) ([]byte, error) {
+	return g.runBounded(ctx, op, dir, a, waitDelay, maxGitOutput, args...)
+}
+
+func (g *Git) runBounded(ctx context.Context, op, dir string, a Auth, waitDelay time.Duration, limit int, args ...string) ([]byte, error) {
 	env, err := g.buildEnv(a)
 	if err != nil {
 		return nil, wrapEnvError(err)
@@ -349,8 +378,8 @@ func (g *Git) runWithWaitDelay(ctx context.Context, op, dir string, a Auth, wait
 	cmd := exec.CommandContext(ctx, g.bin(), full...)
 	cmd.Env = env
 	cmd.WaitDelay = waitDelay
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
+	stdout := &boundedOutput{limit: limit}
+	cmd.Stdout = stdout
 	var stderr stderrScan
 	cmd.Stderr = &stderr
 
@@ -358,8 +387,11 @@ func (g *Git) runWithWaitDelay(ctx context.Context, op, dir string, a Auth, wait
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return nil, fmt.Errorf("repo: %s: %w", op, ctxErr)
 	}
+	if stdout.exceeded {
+		return nil, fmt.Errorf("repo: %s: %w", op, ErrOutputLimit)
+	}
 	if runErr == nil {
-		return stdout.Bytes(), nil
+		return stdout.buf.Bytes(), nil
 	}
 	var exitErr *exec.ExitError
 	if errors.As(runErr, &exitErr) {
@@ -807,6 +839,11 @@ func (g *Git) FileDiff(ctx context.Context, dir, from, to, pathValue string) (*F
 	out, err := g.run(ctx, "diff names", dir, Auth{},
 		"diff", "--name-status", "-z", "--find-renames", "--no-ext-diff", "--no-textconv", from, to)
 	if err != nil {
+		if errors.Is(err, ErrOutputLimit) {
+			// The change list is too large to locate the path; report the
+			// path as incomparable rather than guessing or retrying.
+			return &FileDiff{Incomparable: true}, nil
+		}
 		return nil, err
 	}
 	entries, err := parseNameStatus(out)
@@ -863,8 +900,14 @@ func (g *Git) diffHunks(ctx context.Context, dir, from, to string, change *FileD
 		}
 		args = append(args, ":(literal)"+target)
 	}
-	out, err := g.run(ctx, "diff hunks", dir, Auth{}, args...)
+	out, err := g.runBounded(ctx, "diff hunks", dir, Auth{}, gitWaitDelay, maxFileDiffOutput, args...)
 	if err != nil {
+		if errors.Is(err, ErrOutputLimit) {
+			// A diff this large cannot be mapped back to a line; callers
+			// treat the path as incomparable instead of retrying the diff.
+			change.Incomparable = true
+			return change, nil
+		}
 		return nil, err
 	}
 	change.Hunks, change.Binary = parseDiffHunks(out)
