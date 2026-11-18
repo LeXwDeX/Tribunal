@@ -1172,6 +1172,25 @@ v1.2.0 新增迁移 `0020_review_command_replay`。`0020` 新建已受理身份�
 
 迁移只清空当前逻辑列，不保证历史 WAL、SQLite 空闲页、文件系统快照或备份中的明文已擦除。继续限制这些文件的访问；本升级不自动删除或重写历史副本。
 
+### 存储打开失败时的启动日志（#543）
+
+现象：服务启动时记录一行 ERROR `storage open failed; refusing to start`，随后以 `open storage: SQLite database is unavailable` 退出。该行带结构化字段，用于区分失败阶段，不包含原始驱动错误文本、DSN 或凭据：
+
+- `stage`：`open`（DSN、连接或 ping）、`migrate`（schema 迁移）、`backfill`（启动回填）或 `fk_check`（迁移后的外键检查）。
+- `migration`：失败的迁移文件名，仅在迁移阶段出现。
+- `table`：外键检查违规的表名，仅在 `fk_check` 阶段出现。
+- `sqlite_code`：驱动报告的 SQLite 结果码（若可得）。
+- `error_class`：按 `internal/errclass` 归类的错误类别（如 `internal`、`timeout`、`canceled`）。
+
+排查：
+
+1. `stage=open`：检查 DSN、数据目录权限和磁盘空间，确认数据库路径不是目录且可读写。容器反复重启时先 `docker compose stop`。
+2. `stage=migrate`：按 `migration` 找到失败的迁移文件；迁移按文件独立提交，失败的文件会回滚，已提交的版本保留在 `schema_migrations`。不要删除迁移记录强行启动，先停服、按第 7 节备份并核对。
+3. `stage=backfill`：启动回填（命令重放标记）失败，常见原因是表缺失或数据库损坏；从一致性备份恢复后重试。
+4. `stage=fk_check`：迁移已提交但留下了外键违规，`table` 指出表名；服务拒绝启动。先备份数据库，按迁移记录和 `PRAGMA foreign_key_check` 的结果人工核对，再决定修复或恢复快照。
+
+结果码提示：`19`（含扩展码低 8 位为 19）表示约束失败，`26` 表示文件不是数据库或已损坏，`14` 通常表示文件无法打开（权限、路径或磁盘）。原始错误文本仅保留在代码内的 `errors.Unwrap` 链上，不写入日志。
+
 ### 主密钥不匹配时拒绝启动
 
 现象：服务启动时记录一行 ERROR `master key does not match stored encrypted data; refusing to start`，附带属性 `env=<变量名>`（`secrets.master_key_env` 指定的环境变量，默认 `REVIEW_MASTER_KEY`；日志不含密钥值），随后以 `initialize secrets: master key does not match stored encrypted data` 退出。

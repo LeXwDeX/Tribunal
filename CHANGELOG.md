@@ -6,6 +6,7 @@
 
 ### 修复
 
+- **启动时存储打开失败的原因写入结构化日志**（[#543](https://github.com/LeXwDeX/Tribunal/issues/543)）：`sqlite.Open` 失败（DSN、连接、迁移、启动回填、迁移后外键检查）现在返回带阶段、迁移文件名、表名和 SQLite 结果码的 `*sqlite.OpenError`，底层错误仍可经 `errors.Unwrap` 取得；`cmd/server` 在退出前记录 `storage open failed; refusing to start`，附 `error_class`、`stage`、`migration`、`table`、`sqlite_code` 字段，不记录原始错误文本。对外仍返回既有的通用错误 `open storage: SQLite database is unavailable`。无 schema 变更。
 - **原始文件与 job 日志改为限量读取**（[#518](https://github.com/LeXwDeX/Tribunal/issues/518)、[#528](https://github.com/LeXwDeX/Tribunal/issues/528)）：GitLab 客户端不再让 SDK 把整条 raw 文件或 job trace 先缓冲进内存。`GetRawFile` 在读取阶段以 512 KiB 为上限（只读取上限 + 1 字节，超限立即关闭响应并返回独立的 `ErrFileTooLarge`），diff 恢复把该错误视为内容不可用；`.gitlab-review.yml` 超限按非法仓库配置 fail-closed（终态失败并沿用既有提示，不会静默丢弃 ignore 规则），`AGENTS.md`/`CLAUDE.md` 超限跳过并记录结构化 warning。`GetJobTrace` 绕过 SDK 的全量缓冲，直接从 trace 接口读取前 64 KiB + 1 字节并沿用截断标记。diff 恢复的单文件与总字节上限行为不变，恢复尝试次数（含失败）计入每轮上限。新增回归测试覆盖大响应、超限与截断边界。
 - **切换项目/共享凭据后汇总注记按当前身份重新绑定**（[#514](https://github.com/LeXwDeX/Tribunal/issues/514)）：存在评审 control 行的统一发布路径不再直接使用 `publications(kind=summary)` 记录的旧 `note_id`，而是先用 `CurrentUser` + `ListMRNotes` 按 `<!-- gitlab-ce-review:summary` 前缀与当前 bot 作者找到本身份可编辑的注记，更新后再写回绑定。切换项目/共享凭据或更换 GitLab 用户后，旧绑定属于另一身份，按旧 `note_id` 更新会被 GitLab 以 403 拒绝并使发布永久停在 pending、SSE 不结束；修复后旧身份注记保持不动，找不到本身份注记时新建并重绑。没有 control 行的兼容路径仍按旧绑定更新并在 404 时回退标记扫描，「可见但不可更新」的防重保留。设计文档与运维文档同步补充身份归属与兼容路径说明。
 
