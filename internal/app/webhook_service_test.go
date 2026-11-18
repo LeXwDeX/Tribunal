@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -994,6 +995,125 @@ func TestWebhookUpdateWithoutOldRevIgnoresUnprovenTransition(t *testing.T) {
 	result, err := f.request("Merge Request Hook", "whsec-test", body)
 	if err != nil || result.Ignored != "missing_oldrev" {
 		t.Fatalf("result = %+v, err = %v; a non-transition must not re-review", result, err)
+	}
+}
+
+// A webhook for an unregistered or disabled project must be rejected before a
+// workspace entry is created. The project id comes from an unauthenticated
+// body, so creating the per-project entry first lets anyone grow the in-process
+// manager map without bound (#511).
+func TestWebhookUnknownProjectDoesNotCreateWorkspace(t *testing.T) {
+	t.Run("unregistered", func(t *testing.T) {
+		st := openTestStore(t)
+		cipher := newTestCipher(t)
+		manager := workspace.NewManager(t.TempDir(), nil)
+		service, err := NewWebhookService(WebhookServiceConfig{
+			Store: st, Workspace: manager, Cipher: cipher,
+			Profiles: testProfiles(), ReviewDefaults: testDefaults(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := service.Handle(context.Background(), WebhookRequest{
+			Event: "Merge Request Hook", Token: "whsec-test", UUID: uuid.NewString(), Body: mrBody(999, 7, nil),
+		})
+		if err != nil || result.Ignored != "project_not_registered" {
+			t.Fatalf("result = %+v, err = %v", result, err)
+		}
+		if got := manager.Count(); got != 0 {
+			t.Fatalf("webhook for an unregistered project created %d workspace entries, want 0", got)
+		}
+	})
+	t.Run("disabled", func(t *testing.T) {
+		st := openTestStore(t)
+		cipher := newTestCipher(t)
+		project := seedProject(t, st, cipher, 42, "whsec-test", "{}", "default")
+		disabled := *project
+		disabled.Enabled = false
+		manager := workspace.NewManager(t.TempDir(), nil)
+		service, err := NewWebhookService(WebhookServiceConfig{
+			Store: &recordingDeliveryStore{WebhookStore: st, project: &disabled}, Workspace: manager, Cipher: cipher,
+			Profiles: testProfiles(), ReviewDefaults: testDefaults(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := service.Handle(context.Background(), WebhookRequest{
+			Event: "Merge Request Hook", Token: "whsec-test", UUID: uuid.NewString(), Body: mrBody(42, 7, nil),
+		})
+		if err != nil || result.Ignored != "project_not_registered" {
+			t.Fatalf("result = %+v, err = %v", result, err)
+		}
+		if got := manager.Count(); got != 0 {
+			t.Fatalf("webhook for a disabled project created %d workspace entries, want 0", got)
+		}
+	})
+}
+
+// The rejected-delivery row is keyed by project and minute bucket, not by the
+// caller-controlled event UUID, so a wrong-secret flood costs at most one row
+// per project per minute (#522).
+func TestWebhookRejectedDeliveriesCollapsePerMinute(t *testing.T) {
+	f := newWebhookFixture(t, "{}")
+	now := time.Date(2026, 11, 18, 9, 30, 0, 0, time.UTC)
+	f.service.now = func() time.Time { return now }
+	for i := 0; i < 5; i++ {
+		result, err := f.send("Merge Request Hook", uuid.NewString(), "wrong", mrBody(42, 7, nil))
+		if err != nil || !result.Unauthorized {
+			t.Fatalf("attempt %d = %+v, %v", i, result, err)
+		}
+	}
+	if got := rejectedDeliveries(t, f); got != 1 {
+		t.Fatalf("rejected rows within one minute = %d, want 1", got)
+	}
+	now = now.Add(time.Minute)
+	if _, err := f.send("Merge Request Hook", uuid.NewString(), "wrong", mrBody(42, 7, nil)); err != nil {
+		t.Fatalf("next minute: %v", err)
+	}
+	if got := rejectedDeliveries(t, f); got != 2 {
+		t.Fatalf("rejected rows after two minutes = %d, want 2", got)
+	}
+}
+
+func rejectedDeliveries(t *testing.T, f *webhookFixture) int64 {
+	t.Helper()
+	rows, _, err := f.store.ListWebhookDeliverySummaries(context.Background(), store.WebhookDeliveryFilter{}, "", 50)
+	if err != nil {
+		t.Fatalf("ListWebhookDeliverySummaries: %v", err)
+	}
+	var total int64
+	for _, row := range rows {
+		total += row.Rejected
+	}
+	return total
+}
+
+// The event header is unauthenticated. A rejected delivery stores only a known
+// event name; any other value collapses to a fixed marker instead of the raw
+// header, which can be close to the server header limit (#522).
+func TestWebhookRejectedDeliveryBoundsEventName(t *testing.T) {
+	tests := []struct {
+		event string
+		want  string
+	}{
+		{event: "Merge Request Hook", want: "Merge Request Hook"},
+		{event: strings.Repeat("x", 4096), want: "other"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.want, func(t *testing.T) {
+			f := newWebhookFixture(t, "{}")
+			result, err := f.send(tc.event, uuid.NewString(), "wrong", mrBody(42, 7, nil))
+			if err != nil || !result.Unauthorized {
+				t.Fatalf("result = %+v, err = %v", result, err)
+			}
+			records := f.records()
+			if len(records) != 1 {
+				t.Fatalf("records = %d, want 1", len(records))
+			}
+			if records[0].Event != tc.want {
+				t.Fatalf("stored event = %q, want %q", records[0].Event, tc.want)
+			}
+		})
 	}
 }
 

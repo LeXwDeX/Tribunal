@@ -532,8 +532,15 @@ func TestLifecycleProducerWaitsBeforeProjectReadOrSkillCreation(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("operation did not reach lock")
 			}
-			if operation == "webhook" && observed.reads.Load() != 0 {
-				t.Error("webhook read project before taking lock")
+			if operation == "webhook" {
+				// The entry performs exactly one project lookup before the
+				// lifecycle lock so an unauthenticated project ID cannot create
+				// a workspace entry (#511). Every authoritative read and write
+				// still waits for the lock; no further lookup may happen while
+				// it is held.
+				if got := observed.reads.Load(); got != 1 {
+					t.Errorf("webhook project reads before the lock = %d, want the single pre-check", got)
+				}
 			}
 			cancel()
 			if err := <-done; !errors.Is(err, context.Canceled) {

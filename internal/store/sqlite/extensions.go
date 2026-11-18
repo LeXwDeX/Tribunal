@@ -34,6 +34,7 @@ type listCursor struct {
 	MRIID        int64  `json:"mr_iid,omitempty"`
 	RowMRIID     int64  `json:"row_mr_iid,omitempty"`
 	At           string `json:"at,omitempty"`
+	Snapshot     string `json:"snapshot,omitempty"`
 	ID           string `json:"id,omitempty"`
 	RowScope     string `json:"row_scope,omitempty"`
 	RowProjectID int64  `json:"row_project_id,omitempty"`
@@ -59,6 +60,11 @@ func decodeListCursor(raw, kind string) (listCursor, error) {
 	}
 	if cursor.At != "" {
 		if _, err := parseTime(cursor.At); err != nil {
+			return cursor, fmt.Errorf("%w: %s cursor", store.ErrInvalidCursor, kind)
+		}
+	}
+	if cursor.Snapshot != "" {
+		if _, err := parseTime(cursor.Snapshot); err != nil {
 			return cursor, fmt.Errorf("%w: %s cursor", store.ErrInvalidCursor, kind)
 		}
 	}

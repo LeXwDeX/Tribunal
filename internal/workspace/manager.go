@@ -88,6 +88,17 @@ func (m *Manager) Root() string {
 	return m.root
 }
 
+// Count reports how many project workspaces this manager has cached. It is a
+// read-only accessor for tests and diagnostics; it never creates an entry.
+func (m *Manager) Count() int {
+	if m == nil {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.byID)
+}
+
 // LockStats aggregates content, lifecycle and mirror lock waits across every
 // workspace this manager has created.
 func (m *Manager) LockStats() LockStats {
