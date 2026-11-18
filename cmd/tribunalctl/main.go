@@ -380,9 +380,7 @@ func (g *globals) runUsers(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		raw, err := g.request(ctx, http.MethodPatch,
-			"/api/v1/admin/users/"+strconv.FormatInt(id, 10),
-			map[string]any{"disabled": args[0] == "disable"})
+		raw, err := g.setUserDisabled(ctx, id, args[0] == "disable")
 		if err != nil {
 			return err
 		}
@@ -545,6 +543,75 @@ func (g *globals) listUsers(ctx context.Context) error {
 		return errors.New("encode user list")
 	}
 	return writeRaw(g.stdout, merged)
+}
+
+// setUserDisabled applies a disable or enable with the revision the server
+// requires. The revision is read immediately before the write; a concurrent
+// change makes the write fail with 409 stale_revision, which is retried once
+// with a freshly read revision.
+func (g *globals) setUserDisabled(ctx context.Context, id int64, disabled bool) (json.RawMessage, error) {
+	path := "/api/v1/admin/users/" + strconv.FormatInt(id, 10)
+	revision, err := g.userRevision(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := g.request(ctx, http.MethodPatch, path, map[string]any{"disabled": disabled, "revision": revision})
+	if isStaleRevision(err) {
+		revision, err = g.userRevision(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		raw, err = g.request(ctx, http.MethodPatch, path, map[string]any{"disabled": disabled, "revision": revision})
+	}
+	if err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+// userRevision reads the target user's current revision from the paginated
+// admin user list; there is no single-user read endpoint.
+func (g *globals) userRevision(ctx context.Context, id int64) (int64, error) {
+	cursor := ""
+	seen := map[string]bool{}
+	for {
+		path := "/api/v1/admin/users?limit=200"
+		if cursor != "" {
+			path += "&cursor=" + url.QueryEscape(cursor)
+		}
+		raw, err := g.request(ctx, http.MethodGet, path, nil)
+		if err != nil {
+			return 0, err
+		}
+		var page struct {
+			Users []struct {
+				ID       int64 `json:"id"`
+				Revision int64 `json:"revision"`
+			} `json:"users"`
+			NextCursor string `json:"next_cursor"`
+		}
+		if err := json.Unmarshal(raw, &page); err != nil {
+			return 0, errors.New("server returned an invalid user list")
+		}
+		for _, user := range page.Users {
+			if user.ID != id {
+				continue
+			}
+			if user.Revision <= 0 {
+				return 0, fmt.Errorf("server returned user %d without a revision", id)
+			}
+			return user.Revision, nil
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		if seen[page.NextCursor] {
+			return 0, errors.New("server returned a repeating user cursor")
+		}
+		seen[page.NextCursor] = true
+		cursor = page.NextCursor
+	}
+	return 0, fmt.Errorf("user %d not found", id)
 }
 
 // listProjects follows next_cursor so the CLI keeps its historical "list all
@@ -818,17 +885,40 @@ type errorEnvelope struct {
 func responseError(status int, body []byte) error {
 	var envelope errorEnvelope
 	if err := json.Unmarshal(body, &envelope); err == nil && envelope.Error.Code != "" {
-		message := fmt.Sprintf("server returned HTTP %d (%s)", status, envelope.Error.Code)
-		if envelope.Error.RequestID != "" {
-			message += " request_id=" + envelope.Error.RequestID
-		}
-		if envelope.Error.Message != "" {
-			message += ": " + envelope.Error.Message
-		}
-		return errors.New(message)
+		return &serverError{status: status, code: envelope.Error.Code, requestID: envelope.Error.RequestID, message: envelope.Error.Message}
 	}
 	// Do not echo arbitrary response text; it may contain upstream details.
-	return fmt.Errorf("server returned HTTP %d", status)
+	return &serverError{status: status}
+}
+
+// serverError is a non-2xx management API response. Callers react to specific
+// error codes through it instead of matching message text.
+type serverError struct {
+	status    int
+	code      string
+	requestID string
+	message   string
+}
+
+func (e *serverError) Error() string {
+	if e.code == "" {
+		return fmt.Sprintf("server returned HTTP %d", e.status)
+	}
+	message := fmt.Sprintf("server returned HTTP %d (%s)", e.status, e.code)
+	if e.requestID != "" {
+		message += " request_id=" + e.requestID
+	}
+	if e.message != "" {
+		message += ": " + e.message
+	}
+	return message
+}
+
+// isStaleRevision matches the conflict the server returns when the row changed
+// between the revision read and the write.
+func isStaleRevision(err error) bool {
+	var apiErr *serverError
+	return errors.As(err, &apiErr) && apiErr.status == http.StatusConflict && apiErr.code == "stale_revision"
 }
 
 func sanitizeTransportError(err error) string {
