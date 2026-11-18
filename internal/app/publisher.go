@@ -1925,12 +1925,40 @@ type discussionResolution struct {
 	Resolved bool
 }
 
+// discussionScope bounds which absence a review may prove. A complete review
+// covers every file, so it may resolve any stale thread. An incremental review
+// re-reviewed only some files: its absence evidence covers those files alone,
+// and a thread anchored elsewhere must stay open (#515).
+type discussionScope struct {
+	complete bool
+	files    map[string]struct{}
+}
+
+// resolves reports whether a thread anchored at position may be resolved
+// because its finding is missing from this review. A thread whose anchor is
+// unknown cannot be attributed to a re-reviewed file and stays open.
+func (s discussionScope) resolves(position *gitlab.Position) bool {
+	if s.complete {
+		return true
+	}
+	if position == nil {
+		return false
+	}
+	if _, ok := s.files[position.NewPath]; ok {
+		return true
+	}
+	_, ok := s.files[position.OldPath]
+	return ok
+}
+
 // discussionTargets decides which bot discussions must converge. A finding
 // that is still present but resolved is reopened; a discussion whose finding
-// no longer appears in a complete review is resolved. An incomplete review
-// proves nothing about missing findings, so it never resolves threads (#457).
-func discussionTargets(discussions []gitlab.Discussion, botID int64, currentKeys map[string]struct{}, complete bool) []discussionResolution {
-	if !complete || botID <= 0 {
+// no longer appears in a review that proves the absence is resolved. An
+// incomplete review proves nothing about missing findings, so it never
+// resolves threads (#457); an incremental review proves absence only for the
+// files in its scope (#515).
+func discussionTargets(discussions []gitlab.Discussion, botID int64, currentKeys map[string]struct{}, scope discussionScope) []discussionResolution {
+	if (!scope.complete && scope.files == nil) || botID <= 0 {
 		return nil
 	}
 	out := make([]discussionResolution, 0, len(discussions))
@@ -1950,7 +1978,7 @@ func discussionTargets(discussions []gitlab.Discussion, botID int64, currentKeys
 		switch {
 		case present && note.Resolved:
 			out = append(out, discussionResolution{ID: discussion.ID, Resolved: false})
-		case !present && !note.Resolved:
+		case !present && !note.Resolved && scope.resolves(note.Position):
 			out = append(out, discussionResolution{ID: discussion.ID, Resolved: true})
 		}
 	}
@@ -1972,9 +2000,10 @@ func discussionPublishKey(body string) (string, bool) {
 	return rest, true
 }
 
-// reconcileDiscussions converges bot-authored inline threads after a complete
-// review. Failures are logged and never fail the publication; only a policy
-// cancellation or an expired generation stops it.
+// reconcileDiscussions converges bot-authored inline threads after a review.
+// An incremental review only resolves threads anchored to the files it
+// re-reviewed (#515). Failures are logged and never fail the publication; only
+// a policy cancellation or an expired generation stops it.
 func (p *Publisher) reconcileDiscussions(ctx context.Context, loaded *loadedReview, groups []review.Group, index *gitlab.DiffIndex, verdict string, lookup *discussionLookup, recheck func() error) error {
 	resolver, ok := p.gitlab.(discussionResolver)
 	if !ok {
@@ -2048,7 +2077,14 @@ func (p *Publisher) reconcileDiscussions(ctx context.Context, loaded *loadedRevi
 			current[key] = struct{}{}
 		}
 	}
-	for i, target := range discussionTargets(lookup.discussions, lookup.userID, current, true) {
+	scope := discussionScope{complete: true}
+	if incremental := loaded.dossier.Incremental; incremental != nil && !incremental.Full {
+		scope = discussionScope{files: make(map[string]struct{}, len(incremental.Files))}
+		for _, file := range incremental.Files {
+			scope.files[file] = struct{}{}
+		}
+	}
+	for i, target := range discussionTargets(lookup.discussions, lookup.userID, current, scope) {
 		if i >= maxDiscussionLifecycleCalls {
 			break
 		}

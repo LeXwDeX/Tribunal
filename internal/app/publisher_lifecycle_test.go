@@ -101,7 +101,7 @@ func TestDiscussionTargetsConvergeOnlyOnCompleteReviews(t *testing.T) {
 		discussion("absent-resolved", absent, true),
 		{ID: "foreign", Notes: []gitlab.Note{{ID: 2, AuthorID: 77, Body: review.FindingMarkerPrefix + " key=" + absent + " -->"}}},
 	}
-	targets := discussionTargets(discussions, bot, keys, true)
+	targets := discussionTargets(discussions, bot, keys, discussionScope{complete: true})
 	got := map[string]bool{}
 	for _, target := range targets {
 		got[target.ID] = target.Resolved
@@ -112,8 +112,60 @@ func TestDiscussionTargetsConvergeOnlyOnCompleteReviews(t *testing.T) {
 	if _, ok := got["foreign"]; ok {
 		t.Fatalf("foreign discussion touched: %+v", targets)
 	}
-	if len(discussionTargets(discussions, bot, keys, false)) != 0 {
+	if len(discussionTargets(discussions, bot, keys, discussionScope{})) != 0 {
 		t.Fatal("an incomplete review must not resolve discussions")
+	}
+}
+
+// An incremental scope only proves absence on the files it re-reviewed: a
+// stale thread anchored elsewhere or without a usable anchor must stay open,
+// while a present-but-resolved thread still reopens because presence is
+// positive evidence in either direction (#515).
+func TestDiscussionTargetsIncrementalScopeKeepsUnreviewedThreads(t *testing.T) {
+	bot := int64(9)
+	discussion := func(id string, position *gitlab.Position, key string, resolved bool) gitlab.Discussion {
+		return gitlab.Discussion{ID: id, Notes: []gitlab.Note{{
+			ID: 1, AuthorID: bot, Resolvable: true, Resolved: resolved, Position: position,
+			Body: review.FindingMarkerPrefix + " key=" + key + " -->\n**body**\n",
+		}}}
+	}
+	present := "pk_" + strings.Repeat("a", 32)
+	absent := "pk_" + strings.Repeat("b", 32)
+	keys := map[string]struct{}{present: {}}
+	discussions := []gitlab.Discussion{
+		discussion("unreviewed", &gitlab.Position{NewPath: "main.go", NewLine: 2}, absent, false),
+		discussion("reviewed-stale", &gitlab.Position{NewPath: "other.go", NewLine: 2}, absent, false),
+		discussion("unanchored", nil, absent, false),
+		discussion("reviewed-present-resolved", &gitlab.Position{NewPath: "other.go", NewLine: 4}, present, true),
+		discussion("unreviewed-present-resolved", &gitlab.Position{NewPath: "main.go", NewLine: 4}, present, true),
+	}
+	scope := discussionScope{files: map[string]struct{}{"other.go": {}}}
+	got := map[string]bool{}
+	for _, target := range discussionTargets(discussions, bot, keys, scope) {
+		got[target.ID] = target.Resolved
+	}
+	if len(got) != 3 {
+		t.Fatalf("targets = %+v, want only the reviewed stale and the resolved threads", got)
+	}
+	if resolved, ok := got["reviewed-stale"]; !ok || !resolved {
+		t.Fatalf("targets = %+v, want the reviewed stale thread resolved", got)
+	}
+	if _, ok := got["unreviewed"]; ok {
+		t.Fatalf("targets = %+v, resolved a thread on an unreviewed file", got)
+	}
+	if _, ok := got["unanchored"]; ok {
+		t.Fatalf("targets = %+v, resolved a thread without a usable anchor", got)
+	}
+	if resolved, ok := got["reviewed-present-resolved"]; !ok || resolved {
+		t.Fatalf("targets = %+v, want the resolved present thread reopened", got)
+	}
+	if resolved, ok := got["unreviewed-present-resolved"]; !ok || resolved {
+		t.Fatalf("targets = %+v, want the resolved present thread reopened despite the path", got)
+	}
+	// The empty incremental scope in this test proves absence nowhere, so no
+	// stale thread may be resolved there either.
+	if len(discussionTargets(discussions, bot, keys, discussionScope{files: map[string]struct{}{}})) != 2 {
+		t.Fatal("an empty incremental scope must not resolve stale threads")
 	}
 }
 
@@ -194,6 +246,65 @@ func TestPublisherResolvesAndReopensBotDiscussions(t *testing.T) {
 	}
 	if matching != 1 {
 		t.Fatalf("bad assignment discussions = %d, want the existing thread reused", matching)
+	}
+}
+
+// An incremental review re-reviewed only some files. The absence of a finding
+// on a file outside that scope proves nothing, so its existing discussion
+// thread must stay open until a complete review converges it (#515).
+func TestIncrementalReviewKeepsUnreviewedThreadsOpen(t *testing.T) {
+	ctx := context.Background()
+	f := newReviewFixture(t, reviewTestHead)
+	profile := f.profiles["default"]
+	profile.Challenge.Only = []string{"info"}
+	f.profiles["default"] = profile
+
+	first := f.seedRunFor(t, "job-incremental-lifecycle-first", reviewTestHead, "mr_open")
+	if err := f.service.Handle(ctx, first); err != nil {
+		t.Fatalf("first Handle: %v", err)
+	}
+	f.gitlab.mu.Lock()
+	if len(f.gitlab.discussions) != 1 {
+		f.gitlab.mu.Unlock()
+		t.Fatalf("discussions = %d, want one main.go finding thread", len(f.gitlab.discussions))
+	}
+	// The remote API returns the note anchor on the discussion; the fake does
+	// not record it at creation, so attach it where GitLab reports it.
+	f.gitlab.discussions[0].Notes[0].Position = &gitlab.Position{NewPath: "main.go", NewLine: 2}
+	f.gitlab.discussionResolves = nil
+	f.gitlab.mu.Unlock()
+
+	// The push only touches other.go; the runner no longer reports main.go.
+	f.runner.mu.Lock()
+	f.runner.findings = []review.FindingOut{{
+		Path: "other.go", Line: 2, Side: "new", Severity: review.SeverityP2,
+		Category: "correctness", Title: "new issue", Body: "the new assignment is wrong",
+		Evidence: "y := 2", Confidence: review.ConfidenceHigh,
+	}}
+	f.runner.mu.Unlock()
+	setIncrementalHead(f, strings.Repeat("c", 40), "other.go")
+	second := f.seedRunFor(t, "job-incremental-lifecycle-second", f.head, "mr_update")
+	if err := f.service.Handle(ctx, second); err != nil {
+		t.Fatalf("second Handle: %v", err)
+	}
+	dossier := secondRoundDossier(t, f, second)
+	if dossier.Incremental == nil || dossier.Incremental.Full {
+		t.Fatalf("incremental = %+v, want a narrow scope", dossier.Incremental)
+	}
+	if len(dossier.Incremental.Files) != 1 || dossier.Incremental.Files[0] != "other.go" {
+		t.Fatalf("incremental files = %v, want [other.go]", dossier.Incremental.Files)
+	}
+
+	f.gitlab.mu.Lock()
+	defer f.gitlab.mu.Unlock()
+	if f.gitlab.discussions[0].Notes[0].Resolved {
+		t.Fatal("incremental review resolved a thread on an unreviewed file")
+	}
+	if len(f.gitlab.discussionResolves) != 0 {
+		t.Fatalf("resolutions = %v, want none for an unreviewed file", f.gitlab.discussionResolves)
+	}
+	if len(f.gitlab.discussions) != 2 {
+		t.Fatalf("discussions = %d, want the new other.go thread", len(f.gitlab.discussions))
 	}
 }
 
