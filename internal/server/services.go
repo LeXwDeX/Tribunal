@@ -29,6 +29,10 @@ type Store interface {
 	SetFindingAnnotation(ctx context.Context, workflowID, findingID, annotation, annotatedBy string) (store.Finding, error)
 	ListLLMCalls(ctx context.Context, filter store.LLMCallFilter) ([]store.LLMCall, string, error)
 	ListPublications(ctx context.Context, workflowID string) ([]store.Publication, error)
+	// LoadStreamSnapshot returns one workflow with its stream revision. The
+	// narrow node, finding and publication projections are only included when
+	// revision differs; a negative revision loads every collection.
+	LoadStreamSnapshot(ctx context.Context, workflowID string, revision int64) (*store.StreamSnapshot, error)
 	Stats(ctx context.Context, filter store.StatsFilter) (store.Stats, error)
 
 	GetWorkspace(ctx context.Context, projectID int64) (*store.Workspace, error)

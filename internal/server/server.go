@@ -107,6 +107,14 @@ type Config struct {
 	OverlayWriter *config.OverlayWriter
 	LockStats     func() LockStats
 	StreamPoll    time.Duration
+	// StreamMaxConcurrent and StreamMaxPerUser bound concurrently open review
+	// streams. They override limits.stream_*; zero falls back to the platform
+	// limits and then to the built-in defaults.
+	StreamMaxConcurrent int
+	StreamMaxPerUser    int
+	// StreamAuthTTL bounds how long an open stream reuses its last successful
+	// authorization check. Zero uses the built-in default.
+	StreamAuthTTL time.Duration
 	Now           func() time.Time
 }
 
@@ -145,9 +153,15 @@ type Server struct {
 	overlayWriter    *config.OverlayWriter
 	lockStats        func() LockStats
 	streamPoll       time.Duration
-	now              func() time.Time
-	registerLimiter  *rateLimiter
-	validateLimiter  *rateLimiter
+	// streams bounds concurrent review streams; streamAuthEpoch advances when
+	// a handler revokes a credential or grant so cached stream authorization
+	// does not outlive the revocation.
+	streams         *streamLimiter
+	streamAuthTTL   time.Duration
+	streamAuthEpoch atomic.Uint64
+	now             func() time.Time
+	registerLimiter *rateLimiter
+	validateLimiter *rateLimiter
 	// mcpTestTimeout bounds one MCP connection test. It is derived from the
 	// runtime server.write_timeout so a test never outlives the response budget.
 	mcpTestTimeout time.Duration
@@ -234,6 +248,26 @@ func New(cfg Config) (*Server, error) {
 	s.mcpTestTimeout = mcpTestTimeoutFor(writeTimeout)
 	if s.now == nil {
 		s.now = time.Now
+	}
+	streamMaxConcurrent, streamMaxPerUser := defaultStreamMaxConcurrent, defaultStreamMaxPerUser
+	if cfg.Platform != nil {
+		if value := cfg.Platform.Limits.StreamMaxConcurrent; value > 0 {
+			streamMaxConcurrent = value
+		}
+		if value := cfg.Platform.Limits.StreamMaxPerUser; value > 0 {
+			streamMaxPerUser = value
+		}
+	}
+	if cfg.StreamMaxConcurrent > 0 {
+		streamMaxConcurrent = cfg.StreamMaxConcurrent
+	}
+	if cfg.StreamMaxPerUser > 0 {
+		streamMaxPerUser = cfg.StreamMaxPerUser
+	}
+	s.streams = newStreamLimiter(streamMaxConcurrent, streamMaxPerUser)
+	s.streamAuthTTL = cfg.StreamAuthTTL
+	if s.streamAuthTTL <= 0 {
+		s.streamAuthTTL = defaultStreamAuthTTL
 	}
 	registerPerMinute, validatePerMinute := defaultRegisterPerMinute, defaultValidatePerMinute
 	if cfg.Platform != nil {
@@ -388,6 +422,13 @@ func (s *Server) SetConfigState(state *config.State) {
 // http.Server.RegisterOnShutdown; it is safe to call more than once.
 func (s *Server) BeginShutdown() {
 	s.shutdownOnce.Do(func() { close(s.shutdown) })
+}
+
+// invalidateStreamAuth makes every open review stream re-authenticate on its
+// next poll. Handlers that revoke a session, API token, grant or role call it
+// so the cached authorization never outlives their own write.
+func (s *Server) invalidateStreamAuth() {
+	s.streamAuthEpoch.Add(1)
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {

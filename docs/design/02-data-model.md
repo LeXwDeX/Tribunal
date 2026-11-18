@@ -19,6 +19,7 @@
 | `review_controls`、`workflow_dossiers` | 入口/恢复 | 持久化评审代次和脱敏材料快照（0003） |
 | `review_status`、`review_reactions` | 发布 | 每个 MR 的状态/结果评论目标与源 note 表情（0011）；0031 追加 `final_body`，0032 追加 `final_body_ready`，0033 追加 `last_verified_at` |
 | `workflows`、`workflow_nodes`、`events` | 工作流 | DAG 读模型与事件日志 |
+| `workflow_stream_revisions` | 工作流 | 评审事件流的变更计数器，由 0036 的触发器维护 |
 | `findings` | 评审结果 | 统一 finding、挑战结果、裁决 |
 | `publications` | 发布 | 已发布到 GitLab 的对象，用于幂等 |
 | `llm_calls` | 审计 | 每次模型调用 |
@@ -364,6 +365,8 @@ CREATE TABLE workspace_capacity (
 ```
 
 > `0033` 从现有 `llm_calls JOIN workflows` 回填三张聚合表：`day` 取 workflow `created_at` 的 UTC 日，回填使用 `INSERT OR IGNORE`，可重复执行且不重复累计。`feedback_collection_state` 与 `workspace_capacity` 在迁移时各插入 `id=1` 的空行。`feedback_collection_state` 成功一轮只推进 `last_collected_at`，失败只更新 `last_error_class` 与 `last_error_at`；`last_collected_at` 晚于 `last_error_at` 表示已恢复。`workspace_capacity` 由 run cleanup 在启用 `workspace.max_bytes` 时覆盖写入（`measured_at`、`total_bytes`、`limit_bytes`、`over_limit`）。该迁移只做追加、不可逆；回滚需恢复升级前快照并启动匹配的旧二进制。统计读取时以 workflow 创建日为唯一分区键：创建日不晚于最旧剩余明细调用所在 UTC 日的 workflow 由聚合表覆盖（明细查询按 `w.created_at >= 次日 00:00Z` 排除），创建日更晚的 workflow 由明细覆盖，因此保留策略删掉任何调用前后都不会重复或遗漏计数（#520）。
+
+> `0036_stream_revisions.sql` 新建 `workflow_stream_revisions`（每个 workflow 一行单调递增的 `revision`），并在 `findings`、`workflow_nodes`、`publications` 的 INSERT/UPDATE 上安装触发器，在同一写入事务内递增对应 workflow 的计数（删除只发生在 `ReplaceFindings` 的整批替换中，随后的插入同样会递增；项目删除显式清理计数行）。SSE 轮询用它判断节点、发现与发布投影是否变化：计数未变时只读工作流一行；变化时读取窄列投影（`id/status/attempt`、`id/decision`、`id/kind/gitlab_id`）。触发器只在 workflow 仍存在时写入，级联删除不会留下复活行；迁移同时为 `publications (workflow_id)` 建索引。该迁移只做追加、不可逆，回滚需恢复升级前快照并启动匹配的旧二进制。
 
 ```sql
 -- 0011_review_side_effects.sql 建表；0031_review_status_final_body.sql 追加 final_body；0032_review_status_final_body_ready.sql 追加 final_body_ready；0033_background_maintenance.sql 追加 last_verified_at

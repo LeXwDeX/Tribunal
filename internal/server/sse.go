@@ -7,12 +7,65 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/store"
 )
 
 const streamHeartbeatInterval = 15 * time.Second
+
+const (
+	// defaultStreamMaxConcurrent and defaultStreamMaxPerUser bound concurrently
+	// open review streams. Each stream costs one small indexed query per poll
+	// and shares the single SQLite connection with every other request, so an
+	// unbounded number of connections would starve reviews and health checks.
+	defaultStreamMaxConcurrent = 64
+	defaultStreamMaxPerUser    = 4
+	// defaultStreamAuthTTL bounds how long a poll reuses the authorization
+	// decision of the previous poll. Server-mediated revocations invalidate the
+	// cache immediately; the TTL only bounds changes made behind the API.
+	defaultStreamAuthTTL = 10 * time.Second
+)
+
+// streamLimiter counts open review streams per user and in total.
+type streamLimiter struct {
+	mu         sync.Mutex
+	maxTotal   int
+	maxPerUser int
+	total      int
+	perUser    map[int64]int
+}
+
+func newStreamLimiter(maxTotal, maxPerUser int) *streamLimiter {
+	return &streamLimiter{maxTotal: maxTotal, maxPerUser: maxPerUser, perUser: map[int64]int{}}
+}
+
+// acquire reserves one stream slot. It reports false when either bound would
+// be exceeded; the caller answers 429 instead of opening the stream.
+func (l *streamLimiter) acquire(userID int64) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.total >= l.maxTotal || l.perUser[userID] >= l.maxPerUser {
+		return false
+	}
+	l.total++
+	l.perUser[userID]++
+	return true
+}
+
+func (l *streamLimiter) release(userID int64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.total > 0 {
+		l.total--
+	}
+	if count := l.perUser[userID]; count <= 1 {
+		delete(l.perUser, userID)
+	} else {
+		l.perUser[userID] = count - 1
+	}
+}
 
 type streamNodeEvent struct {
 	ID      string `json:"id"`
@@ -51,6 +104,9 @@ type streamPublication struct {
 // the store because no pub/sub bus exists in the single-process deployment;
 // two snapshots are diffed per tick and flushes happen immediately.
 type streamSnapshot struct {
+	// revision is the store's change counter for the collections below. Polls
+	// pass it back so unchanged collections are not reloaded.
+	revision         int64
 	projectID        int64
 	status           string
 	verdict          string
@@ -83,46 +139,52 @@ func (snap *streamSnapshot) terminal() bool {
 	}
 }
 
-func (s *Server) loadStreamSnapshot(ctx context.Context, workflowID string) (*streamSnapshot, error) {
-	wf, err := s.store.GetWorkflow(ctx, workflowID)
-	if err != nil {
-		return nil, err
+// loadStreamSnapshot loads the workflow row and, unless the store reports the
+// same revision as previous, the narrow node, finding and publication states.
+// Unchanged collections keep the maps the diff baseline already holds so the
+// next diff only reports real changes. A nil previous loads everything.
+func (s *Server) loadStreamSnapshot(ctx context.Context, workflowID string, previous *streamSnapshot) (*streamSnapshot, error) {
+	revision := int64(-1)
+	if previous != nil {
+		revision = previous.revision
 	}
-	nodes, err := s.store.GetWorkflowNodes(ctx, workflowID)
-	if err != nil {
-		return nil, err
-	}
-	findings, err := s.store.ListFindings(ctx, store.FindingFilter{WorkflowID: workflowID})
-	if err != nil {
-		return nil, err
-	}
-	publications, err := s.store.ListPublications(ctx, workflowID)
+	state, err := s.store.LoadStreamSnapshot(ctx, workflowID, revision)
 	if err != nil {
 		return nil, err
 	}
 	snap := &streamSnapshot{
-		projectID:        wf.ProjectID,
-		status:           wf.Status,
-		verdict:          wf.Verdict,
-		publicationState: wf.PublicationState,
-		publicationError: wf.PublicationError,
-		nodes:            make(map[string]streamNode, len(nodes)),
-		findings:         make(map[string]string, len(findings)),
-		publications:     make(map[string]streamPublication, len(publications)),
+		revision:         state.Revision,
+		projectID:        state.ProjectID,
+		status:           state.Status,
+		verdict:          state.Verdict,
+		publicationState: state.PublicationState,
+		publicationError: state.PublicationError,
 	}
-	for _, node := range nodes {
+	if state.Nodes == nil {
+		// Idle poll: the store skipped every collection query.
+		if previous != nil {
+			snap.nodeOrder, snap.nodes = previous.nodeOrder, previous.nodes
+			snap.findingOrder, snap.findings = previous.findingOrder, previous.findings
+			snap.publicationOrder, snap.publications = previous.publicationOrder, previous.publications
+		}
+		return snap, nil
+	}
+	snap.nodes = make(map[string]streamNode, len(state.Nodes))
+	for _, node := range state.Nodes {
 		if _, seen := snap.nodes[node.ID]; !seen {
 			snap.nodeOrder = append(snap.nodeOrder, node.ID)
 		}
 		snap.nodes[node.ID] = streamNode{status: node.Status, attempt: node.Attempt}
 	}
-	for _, finding := range findings {
+	snap.findings = make(map[string]string, len(state.Findings))
+	for _, finding := range state.Findings {
 		if _, seen := snap.findings[finding.ID]; !seen {
 			snap.findingOrder = append(snap.findingOrder, finding.ID)
 		}
 		snap.findings[finding.ID] = finding.Decision
 	}
-	for _, publication := range publications {
+	snap.publications = make(map[string]streamPublication, len(state.Publications))
+	for _, publication := range state.Publications {
 		if _, seen := snap.publications[publication.ID]; !seen {
 			snap.publicationOrder = append(snap.publicationOrder, publication.ID)
 		}
@@ -230,19 +292,34 @@ func writeSSEEvent(w io.Writer, name string, value any) error {
 // handleReviewStream serves GET /api/v1/reviews/{wf_id}/stream. Events are
 // produced by polling the store every streamPoll interval (2s by default) and
 // diffing snapshots; a comment line every 15s keeps proxies from closing an
-// idle connection. The handler ends when the workflow reaches a terminal
-// state, when the client disconnects, or when the workflow disappears. All
-// work happens in the request goroutine, so no leaked goroutines remain.
+// idle connection. Concurrent streams are bounded per user and in total; an
+// idle poll reads one workflow row and re-authenticates at most every
+// streamAuthTTL, or immediately after a revocation handled by this server.
+// The handler ends when the workflow reaches a terminal state, when the client
+// disconnects, or when the workflow disappears. All work happens in the
+// request goroutine, so no leaked goroutines remain.
 func (s *Server) handleReviewStream(w http.ResponseWriter, r *http.Request) {
 	if !s.requireStore(w, r) {
 		return
 	}
+	value, _ := principalFrom(r.Context())
+	if !s.streams.acquire(value.user.ID) {
+		writeError(w, r, http.StatusTooManyRequests, "stream_limit_exceeded",
+			"too many concurrent review streams; retry later", nil)
+		return
+	}
+	defer s.streams.release(value.user.ID)
 	wfID := r.PathValue("wf_id")
-	snapshot, err := s.loadStreamSnapshot(r.Context(), wfID)
+	snapshot, err := s.loadStreamSnapshot(r.Context(), wfID, nil)
 	if err != nil {
 		s.writeStoreError(w, r, err)
 		return
 	}
+	// Authentication just ran in apiAuth; remember it instead of repeating the
+	// full check on the first tick. A revocation bumps the epoch and forces the
+	// next poll to re-authenticate.
+	verifiedAt := s.now()
+	authEpoch := s.streamAuthEpoch.Load()
 	controller := http.NewResponseController(w)
 	// Clear the server write deadline for this long-lived response; the
 	// request context, server shutdown, and terminal workflow state end the
@@ -290,12 +367,18 @@ func (s *Server) handleReviewStream(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		case <-ticker.C:
-			// Re-authenticate every poll: a revoked session or API token, a
-			// disabled user, or a removed grant must close an open stream.
-			if !s.streamStillAuthorized(r, snapshot.projectID) {
-				return
+			// Re-authenticate when the cache expired or a revocation handled
+			// by this server invalidated it: a revoked session or API token, a
+			// disabled user, or a removed grant closes an open stream.
+			epoch := s.streamAuthEpoch.Load()
+			if epoch != authEpoch || s.now().Sub(verifiedAt) >= s.streamAuthTTL {
+				if !s.streamStillAuthorized(r, snapshot.projectID) {
+					return
+				}
+				verifiedAt = s.now()
+				authEpoch = epoch
 			}
-			next, err := s.loadStreamSnapshot(r.Context(), wfID)
+			next, err := s.loadStreamSnapshot(r.Context(), wfID, snapshot)
 			if err != nil {
 				if errors.Is(err, store.ErrNotFound) || r.Context().Err() != nil {
 					return

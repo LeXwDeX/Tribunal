@@ -190,7 +190,7 @@ POST /api/v1/projects
 | PUT | `/api/v1/reviews/{wf_id}/findings/{finding_id}/annotation` | 项目 `manage` 人工标注：`{annotation}`，返回完整 Finding |
 | GET | `/api/v1/reviews/{wf_id}/nodes/{node_id}` | 节点详情：参数、输出、错误 |
 | GET | `/api/v1/reviews/{wf_id}/nodes/{node_id}/calls` | 该节点的 LLM 调用：`?include_payload=&limit=&cursor=` |
-| GET | `/api/v1/reviews/{wf_id}/stream` | SSE：节点状态变化、finding 新增、发布结果 |
+| GET | `/api/v1/reviews/{wf_id}/stream` | SSE：节点状态变化、finding 新增、发布结果；并发超限返回 429 `stream_limit_exceeded` |
 | POST | `/api/v1/reviews/{wf_id}/cancel` | 项目 `manage` 取消 |
 | POST | `/api/v1/reviews/{wf_id}/republish` | 项目 `manage`：对 completed 工作流重新发布，或对 failed 工作流重新发布未完成摘要；fingerprint 失效仍会转为 skipped |
 
@@ -227,7 +227,7 @@ POST /api/v1/projects
 }
 ```
 
-SSE 事件（`event:` 字段）：`node`（`{id, status, attempt}`）、`finding`（`{id, decision}`）、`workflow`（`{status, verdict, publication_state?, publication_error?}`）、`published`（`{kind, gitlab_id}`）。`workflow` 事件同时传播执行状态和发布状态；只有在 workflow 终态且 `publication_state` 为 `published`、`skipped`、`failed` 或空（旧数据）时，服务端才结束流。每轮轮询都重新认证并检查项目访问权限（平台管理员隐式 `manage`、逐项目 grant 或有效的 `global_read`）；撤权、停用或 token 失效会关闭已打开的流。
+SSE 事件（`event:` 字段）：`node`（`{id, status, attempt}`）、`finding`（`{id, decision}`）、`workflow`（`{status, verdict, publication_state?, publication_error?}`）、`published`（`{kind, gitlab_id}`）。`workflow` 事件同时传播执行状态和发布状态；只有在 workflow 终态且 `publication_state` 为 `published`、`skipped`、`failed` 或空（旧数据）时，服务端才结束流。同时打开的流按用户与总量设上限（`limits.stream_max_per_user` / `limits.stream_max_concurrent`，默认 4 / 64），超限在建立连接前返回 429 `stream_limit_exceeded`。轮询读取增量投影：空闲轮询只读工作流一行，节点、发现与发布数据仅在其变更（`workflow_stream_revisions` 计数前进）后重新读取。鉴权结论最多复用 10 秒；登出、会话轮换、token 删除、用户停用/凭据撤销、grant 与角色变更即刻使缓存失效，并在下一次轮询关闭已打开的流，直接改库的吊销最迟 10 秒生效。撤权、停用或 token 失效都会关闭已打开的流。
 
 `mr_title` 从该工作流已存储的 dossier 快照读取；没有 dossier、数据为空或标题为空时省略，不在详情请求中调用 GitLab。`publications.commit_status` 从成功发布写入的 `status:<head_sha>:<state>` 发布键解析，只接受 `success` 或 `failed`；旧格式 `status:<head_sha>` 没有状态记录，此时字段缺失（unknown），不根据 verdict 猜测。SSE 仍由服务端每 2 秒轮询数据库生成，不是事件推送。
 

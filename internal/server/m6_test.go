@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -66,6 +67,11 @@ type fakeReviewStore struct {
 	// mrTitles is the persisted title per workflow, as the SQLite store keeps
 	// it next to the dossier.
 	mrTitles map[string]string
+	// streamRevision advances on every node, finding or publication write,
+	// mirroring the SQLite stream revision triggers.
+	streamRevision int64
+	snapshotProbes int
+	snapshotLoads  int
 }
 
 func newFakeReviewStore() *fakeReviewStore {
@@ -336,18 +342,81 @@ func (f *fakeReviewStore) setNodes(workflowID string, nodes ...store.WorkflowNod
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.nodes[workflowID] = nodes
+	f.streamRevision++
 }
 
 func (f *fakeReviewStore) setFindings(workflowID string, findings ...store.Finding) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.findings[workflowID] = findings
+	f.streamRevision++
 }
 
 func (f *fakeReviewStore) setPublications(workflowID string, publications ...store.Publication) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.publications[workflowID] = publications
+	f.streamRevision++
+}
+
+func (f *fakeReviewStore) snapshotCollectionLoads() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.snapshotLoads
+}
+
+func (f *fakeReviewStore) snapshotProbeCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.snapshotProbes
+}
+
+// LoadStreamSnapshot mirrors the SQLite contract: the workflow row is always
+// returned and collections are only loaded when the revision moved.
+func (f *fakeReviewStore) LoadStreamSnapshot(_ context.Context, workflowID string, revision int64) (*store.StreamSnapshot, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.snapshotProbes++
+	var wf *store.Workflow
+	for i := range f.workflows {
+		if f.workflows[i].ID == workflowID {
+			wf = &f.workflows[i]
+			break
+		}
+	}
+	if wf == nil {
+		return nil, fmt.Errorf("%w: workflow %s", store.ErrNotFound, workflowID)
+	}
+	snap := &store.StreamSnapshot{
+		ProjectID:        wf.ProjectID,
+		Status:           wf.Status,
+		Verdict:          wf.Verdict,
+		PublicationState: wf.PublicationState,
+		PublicationError: wf.PublicationError,
+		Revision:         f.streamRevision,
+	}
+	if revision >= 0 && revision == snap.Revision {
+		return snap, nil
+	}
+	f.snapshotLoads++
+	nodes := f.nodes[workflowID]
+	snap.Nodes = make([]store.StreamNode, 0, len(nodes))
+	for _, node := range nodes {
+		snap.Nodes = append(snap.Nodes, store.StreamNode{ID: node.ID, Status: node.Status, Attempt: node.Attempt})
+	}
+	findings := f.findings[workflowID]
+	snap.Findings = make([]store.StreamFinding, 0, len(findings))
+	for _, finding := range findings {
+		snap.Findings = append(snap.Findings, store.StreamFinding{ID: finding.ID, Decision: finding.Decision})
+	}
+	publications := f.publications[workflowID]
+	snap.Publications = make([]store.StreamPublication, 0, len(publications))
+	for _, publication := range publications {
+		snap.Publications = append(snap.Publications, store.StreamPublication{
+			ID: publication.ID, Kind: publication.Kind, GitlabID: publication.GitlabID,
+		})
+	}
+	return snap, nil
 }
 
 func (f *fakeReviewStore) setCalls(workflowID, nodeID string, calls ...store.LLMCall) {
@@ -923,7 +992,12 @@ type m6Options struct {
 	adminFactory func(*sqlite.Store) AdminService
 	platform     *config.Config
 	streamPoll   time.Duration
-	noContexts   bool
+	// streamMaxConcurrent, streamMaxPerUser and streamAuthTTL override the
+	// review stream bounds the server derives from platform limits.
+	streamMaxConcurrent int
+	streamMaxPerUser    int
+	streamAuthTTL       time.Duration
+	noContexts          bool
 	// profileOverrides wires the sqlite store as the profile override store.
 	profileOverrides bool
 	models           *llm.Catalog
@@ -1006,20 +1080,23 @@ func newM6Env(t *testing.T, opts m6Options) *m6Env {
 			HTTPClient:      gitlab.Client(),
 			Now:             time.Now,
 		},
-		Store:         view,
-		Access:        st,
-		Reviews:       reviews,
-		Workspace:     workspace,
-		Contexts:      contexts,
-		Extensions:    extensions,
-		MCP:           mcp,
-		LLM:           llm,
-		Tokens:        st,
-		Platform:      platform,
-		Models:        opts.models,
-		OverlayWriter: opts.overlayWriter,
-		StreamPoll:    streamPoll,
-		Logger:        newTestLogger(logWriter),
+		Store:               view,
+		Access:              st,
+		Reviews:             reviews,
+		Workspace:           workspace,
+		Contexts:            contexts,
+		Extensions:          extensions,
+		MCP:                 mcp,
+		LLM:                 llm,
+		Tokens:              st,
+		Platform:            platform,
+		Models:              opts.models,
+		OverlayWriter:       opts.overlayWriter,
+		StreamPoll:          streamPoll,
+		Logger:              newTestLogger(logWriter),
+		StreamMaxConcurrent: opts.streamMaxConcurrent,
+		StreamMaxPerUser:    opts.streamMaxPerUser,
+		StreamAuthTTL:       opts.streamAuthTTL,
 	})
 	if err != nil {
 		t.Fatalf("server.New: %v", err)

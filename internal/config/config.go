@@ -85,6 +85,12 @@ type LimitsConfig struct {
 	// PrecheckCacheTTL bounds staleness of shared-bot membership, registrant
 	// membership and provisioning-credential checks. Zero disables caching.
 	PrecheckCacheTTL time.Duration `yaml:"precheck_cache_ttl" json:"precheck_cache_ttl"`
+	// StreamMaxConcurrent and StreamMaxPerUser bound concurrently open review
+	// streams. Every stream holds a small share of the single SQLite
+	// connection, so unbounded streams would starve other requests. Zero uses
+	// the built-in defaults.
+	StreamMaxConcurrent int `yaml:"stream_max_concurrent" json:"stream_max_concurrent"`
+	StreamMaxPerUser    int `yaml:"stream_max_per_user" json:"stream_max_per_user"`
 }
 
 // GitLabConfig controls access to the GitLab instance.
@@ -466,6 +472,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Limits.PrecheckCacheTTL < 0 {
 		p.add("limits.precheck_cache_ttl must not be negative")
+	}
+	if c.Limits.StreamMaxConcurrent < 0 {
+		p.add("limits.stream_max_concurrent must not be negative")
+	}
+	if c.Limits.StreamMaxPerUser < 0 {
+		p.add("limits.stream_max_per_user must not be negative")
 	}
 	oauthEnabled := c.Auth.OAuth.ClientIDEnv != "" || c.Auth.OAuth.ClientSecretEnv != ""
 	validateURL(&p, "server.public_url", c.Server.PublicURL, oauthEnabled)

@@ -23,6 +23,8 @@ limits:
   register_per_minute: 10
   validate_per_minute: 30
   precheck_cache_ttl: 45s
+  stream_max_concurrent: 64
+  stream_max_per_user: 4
 gitlab:
   url: ""
   request_timeout: 30s
