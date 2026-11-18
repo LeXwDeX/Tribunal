@@ -391,6 +391,12 @@ func appendProviderWarnings(cfg *Config) {
 		if (provider.Protocol == "openai-chat" || provider.Protocol == "openai-responses") && provider.Thinking != nil && provider.Thinking.BudgetTokens != 0 {
 			cfg.Warnings = append(cfg.Warnings, field+".thinking.budget_tokens is not sent by "+provider.Protocol)
 		}
+		// Configuration files keep loading on a thinking budget that Anthropic
+		// rejects; API writes reject the same mismatch (#512).
+		if provider.Protocol == "anthropic" && provider.Thinking != nil && provider.Thinking.BudgetTokens > 0 &&
+			provider.MaxTokens > 0 && provider.Thinking.BudgetTokens >= provider.MaxTokens {
+			cfg.Warnings = append(cfg.Warnings, field+".thinking.budget_tokens must be less than max_tokens for anthropic")
+		}
 		if provider.Protocol != "openai-chat" && provider.Thinking != nil && provider.Thinking.Type != "" {
 			cfg.Warnings = append(cfg.Warnings, field+".thinking.type is not sent by "+provider.Protocol)
 		}

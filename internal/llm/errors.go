@@ -265,6 +265,13 @@ func sdkError(err error) *Error {
 		failure.responseObserved = ae.Response != nil
 		return failure
 	}
+	// The Anthropic SDK refuses some non-streaming requests before sending
+	// them when the estimated duration is too long. That is a caller
+	// parameter problem, not a transport failure, so it must not be retried
+	// (#551). Only the sanitized classification leaves this function.
+	if strings.Contains(err.Error(), "streaming is required for operations that may take longer than 10 minutes") {
+		return &Error{Kind: ErrBadRequest, Err: errors.New("request parameters rejected by the provider SDK"), cause: err}
+	}
 	return &Error{Kind: ErrTransient, Err: errors.New("transport failure"), cause: err}
 }
 

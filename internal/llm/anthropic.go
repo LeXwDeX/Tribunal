@@ -5,10 +5,18 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
 
 	anthropic "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 )
+
+// anthropicRequestTimeout is passed to the SDK so it skips its own
+// non-streaming duration estimate. Without an explicit timeout the SDK
+// refuses requests whose estimated duration exceeds ten minutes, before
+// sending anything (#551). The value matches the SDK estimate ceiling; a
+// shorter caller context deadline still bounds the request.
+const anthropicRequestTimeout = time.Hour
 
 type anthropicAdapter struct {
 	info ProviderInfo
@@ -21,6 +29,7 @@ func newAnthropicAdapter(info ProviderInfo, cfg providerDefaults, apiKey string,
 		option.WithAPIKey(apiKey),
 		option.WithHTTPClient(httpClient),
 		option.WithMaxRetries(0),
+		option.WithRequestTimeout(anthropicRequestTimeout),
 	}
 	if info.BaseURL != "" {
 		opts = append(opts, option.WithBaseURL(info.BaseURL))
@@ -54,6 +63,11 @@ func (a *anthropicAdapter) GenerateWithWire(ctx context.Context, req *Request) (
 	}
 	if thinking && effective.budgetTokens < 1024 {
 		return nil, nil, badRequestf("thinking budget_tokens must be at least 1024")
+	}
+	// Anthropic rejects budget_tokens >= max_tokens with a 400, so a registry
+	// built without configuration validation still fails closed (#512).
+	if thinking && effective.budgetTokens >= effective.maxTokens {
+		return nil, nil, badRequestf("thinking.budget_tokens must be less than max_tokens")
 	}
 	messages, err := anthropicMessages(req.Messages)
 	if err != nil {
