@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 )
@@ -687,20 +689,6 @@ func TestAdminUserAndGrantCommands(t *testing.T) {
 			wantOutput: true,
 		},
 		{
-			name: "disable", args: []string{"users", "disable", "7"},
-			method: http.MethodPatch, path: "/api/v1/admin/users/7", status: http.StatusOK,
-			response:   `{"id":7,"disabled":true}`,
-			wantBody:   map[string]any{"disabled": true},
-			wantOutput: true,
-		},
-		{
-			name: "enable", args: []string{"users", "enable", "7"},
-			method: http.MethodPatch, path: "/api/v1/admin/users/7", status: http.StatusOK,
-			response:   `{"id":7,"disabled":false}`,
-			wantBody:   map[string]any{"disabled": false},
-			wantOutput: true,
-		},
-		{
 			name: "revoke credentials", args: []string{"users", "revoke", "7"},
 			method: http.MethodDelete, path: "/api/v1/admin/users/7/credentials", status: http.StatusNoContent,
 		},
@@ -753,6 +741,202 @@ func TestAdminUserAndGrantCommands(t *testing.T) {
 				t.Fatalf("stdout = %q, want empty", stdout)
 			}
 		})
+	}
+}
+
+type userAdminCall struct {
+	method string
+	path   string
+	query  string
+	body   map[string]any
+}
+
+// userAdminServer emulates the admin user endpoints with the revision contract
+// of the real server: every read returns the next configured revision, and a
+// PATCH without a positive revision is rejected with 400. patch decides the
+// answer for a well-formed PATCH.
+func userAdminServer(t *testing.T, userID int64, revisions []int64, patch func(revision int64, body map[string]any) (int, string)) (*httptest.Server, func() []userAdminCall) {
+	t.Helper()
+	var mu sync.Mutex
+	var calls []userAdminCall
+	read := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if r.Body != nil {
+			data, _ := io.ReadAll(r.Body)
+			if len(data) > 0 {
+				if err := json.Unmarshal(data, &body); err != nil {
+					t.Errorf("request body is not JSON: %s", data)
+				}
+			}
+		}
+		mu.Lock()
+		calls = append(calls, userAdminCall{method: r.Method, path: r.URL.Path, query: r.URL.RawQuery, body: body})
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/admin/users":
+			mu.Lock()
+			revision := int64(0)
+			if read < len(revisions) {
+				revision = revisions[read]
+			}
+			read++
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprintf(w, `{"users":[{"id":%d,"revision":%d}],"next_cursor":""}`, userID, revision)
+		case r.Method == http.MethodPatch && r.URL.Path == fmt.Sprintf("/api/v1/admin/users/%d", userID):
+			revision, _ := body["revision"].(float64)
+			if revision <= 0 {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, `{"error":{"code":"validation_failed","message":"revision is required"}}`)
+				return
+			}
+			status, response := patch(int64(revision), body)
+			w.WriteHeader(status)
+			_, _ = io.WriteString(w, response)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"error":{"code":"bad_request"}}`)
+		}
+	}))
+	return ts, func() []userAdminCall {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]userAdminCall(nil), calls...)
+	}
+}
+
+func TestUsersStateChangeSendsCurrentRevision(t *testing.T) {
+	for _, tc := range []struct {
+		action   string
+		disabled bool
+	}{
+		{"disable", true},
+		{"enable", false},
+	} {
+		t.Run(tc.action, func(t *testing.T) {
+			ts, calls := userAdminServer(t, 7, []int64{3}, func(revision int64, body map[string]any) (int, string) {
+				if revision != 3 {
+					t.Errorf("revision = %d, want 3", revision)
+				}
+				if body["disabled"] != tc.disabled {
+					t.Errorf("disabled = %v, want %v", body["disabled"], tc.disabled)
+				}
+				return http.StatusOK, fmt.Sprintf(`{"id":7,"disabled":%t}`, tc.disabled)
+			})
+			defer ts.Close()
+			stdout, _, err := runCtl(t, []string{"--url", ts.URL, "users", tc.action, "7"},
+				map[string]string{"REVIEW_ADMIN_TOKEN": "admin"}, ts.Client())
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			got := calls()
+			if len(got) != 2 || got[0].method != http.MethodGet || got[1].method != http.MethodPatch {
+				t.Fatalf("requests = %+v, want GET then PATCH", got)
+			}
+			if strings.TrimSpace(stdout) == "" {
+				t.Fatal("stdout is empty")
+			}
+		})
+	}
+}
+
+func TestUsersStateChangeRetriesStaleRevision(t *testing.T) {
+	ts, calls := userAdminServer(t, 7, []int64{3, 4}, func(revision int64, body map[string]any) (int, string) {
+		if revision == 3 {
+			return http.StatusConflict, `{"error":{"code":"stale_revision","message":"user revision is stale"}}`
+		}
+		if revision != 4 {
+			t.Errorf("retry revision = %d, want 4", revision)
+		}
+		if body["disabled"] != true {
+			t.Errorf("disabled = %v, want true", body["disabled"])
+		}
+		return http.StatusOK, `{"id":7,"disabled":true}`
+	})
+	defer ts.Close()
+
+	stdout, _, err := runCtl(t, []string{"--url", ts.URL, "users", "disable", "7"},
+		map[string]string{"REVIEW_ADMIN_TOKEN": "admin"}, ts.Client())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := calls()
+	want := []string{http.MethodGet, http.MethodPatch, http.MethodGet, http.MethodPatch}
+	if len(got) != len(want) {
+		t.Fatalf("request count = %d (%+v), want %d", len(got), got, len(want))
+	}
+	for i := range want {
+		if got[i].method != want[i] {
+			t.Fatalf("request %d = %s, want %s", i, got[i].method, want[i])
+		}
+	}
+	if got[1].body["revision"] != float64(3) || got[3].body["revision"] != float64(4) {
+		t.Fatalf("revisions sent = %v, %v; want 3, 4", got[1].body["revision"], got[3].body["revision"])
+	}
+	if strings.TrimSpace(stdout) == "" {
+		t.Fatal("stdout is empty")
+	}
+}
+
+func TestUsersStateChangeReportsUnresolvedStaleRevision(t *testing.T) {
+	ts, calls := userAdminServer(t, 7, []int64{3, 3}, func(revision int64, body map[string]any) (int, string) {
+		return http.StatusConflict, `{"error":{"code":"stale_revision","message":"user revision is stale"}}`
+	})
+	defer ts.Close()
+
+	_, _, err := runCtl(t, []string{"--url", ts.URL, "users", "disable", "7"},
+		map[string]string{"REVIEW_ADMIN_TOKEN": "admin"}, ts.Client())
+	if err == nil || !strings.Contains(err.Error(), "stale_revision") {
+		t.Fatalf("err = %v, want stale_revision failure", err)
+	}
+	got := calls()
+	patches := 0
+	for _, call := range got {
+		if call.method == http.MethodPatch {
+			patches++
+		}
+	}
+	if patches != 2 {
+		t.Fatalf("PATCH count = %d (%+v), want 2 (one retry)", patches, got)
+	}
+}
+
+func TestUsersRevisionLookupRejectsUnknownUser(t *testing.T) {
+	var mu sync.Mutex
+	var methods []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		methods = append(methods, r.Method)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Query().Get("cursor") {
+		case "":
+			_, _ = io.WriteString(w, `{"users":[{"id":8,"revision":1}],"next_cursor":"page-two"}`)
+		case "page-two":
+			_, _ = io.WriteString(w, `{"users":[],"next_cursor":""}`)
+		default:
+			http.Error(w, "bad cursor", http.StatusBadRequest)
+		}
+	}))
+	defer ts.Close()
+
+	_, _, err := runCtl(t, []string{"--url", ts.URL, "users", "disable", "7"},
+		map[string]string{"REVIEW_ADMIN_TOKEN": "admin"}, ts.Client())
+	if err == nil || !strings.Contains(err.Error(), "user 7 not found") {
+		t.Fatalf("err = %v, want missing user failure", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, method := range methods {
+		if method != http.MethodGet {
+			t.Fatalf("methods = %v, want only GET before the user is found", methods)
+		}
+	}
+	if len(methods) != 2 {
+		t.Fatalf("requests = %v, want two paginated reads", methods)
 	}
 }
 

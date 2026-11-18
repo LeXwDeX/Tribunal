@@ -561,6 +561,7 @@ curl -fsS -X PUT \
 
 - 从 GitLab 组移除用户不会自动撤销 Tribunal 授权。Tribunal 不轮询组成员关系；本地 grant、会话和 API token 仍然有效，GitLab 账号未禁用时还可能重新 OAuth 登录。退组后必须显式处理：删除项目 grant（保留其他项目访问）或停用本地用户（撤销全部访问）。
 - `users disable <id>` 在一个事务中标记账号 disabled 并删除该用户的全部会话和 API token；之后的 OAuth 登录、token 签发和已有凭据认证都会被拒绝，已打开的 SSE 在下一次轮询关闭。
+- `users disable <id>` 与 `users enable <id>` 提交前先从管理面用户列表读取该用户当前的 `revision`（列表按 `limit=200` 分页，目标用户不在列表中时报 `user <id> not found`）。读取与写入之间若被并发修改、服务端返回 409 `stale_revision`，CLI 重读一次 revision 后重试；再次冲突则报错退出，不继续重试。控制台操作受同一 revision 校验保护。
 - `users revoke <id>` 只撤销会话和 API token，不禁用账号；用户重新 OAuth 登录后可以继续使用已有项目 grant。需要阻止重新登录时使用 `users disable`。
 - `users enable <id>` 恢复登录，但不会恢复已撤销的会话或 token。恢复后需重新登录并重新创建 token；项目 grant 不受停用影响。
 - 普通用户可以在控制台撤销自己的 API token，不能停用账号、撤销他人凭据或管理 grant。跨用户停用、撤销和 grant 管理只允许平台管理员。
