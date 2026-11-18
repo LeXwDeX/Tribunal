@@ -364,6 +364,10 @@ type ProviderInfo struct {
 	// ForcedToolChoice reports that the agent loop may force submit_result
 	// with tool_choice on the last turn (#259).
 	ForcedToolChoice bool `json:"forced_tool_choice,omitempty"`
+	// ThinkingBudget is the configured extended-thinking budget for an
+	// Anthropic provider; zero means thinking is disabled. The API rejects a
+	// request whose max_tokens does not exceed this budget (#524).
+	ThinkingBudget int `json:"thinking_budget,omitempty"`
 	// Unavailable marks a configured provider whose base URL cannot pass the
 	// outbound egress policy. The process still starts; calls fail closed.
 	Unavailable       bool   `json:"unavailable,omitempty"`

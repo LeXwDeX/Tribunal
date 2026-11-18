@@ -423,6 +423,9 @@ func newProviderClientWithKey(name string, cfg config.ProviderConfig, apiKey str
 	}
 	info := ProviderInfo{Name: name, Protocol: cfg.Protocol, Model: cfg.Model, BaseURL: cfg.BaseURL,
 		ContextWindow: cfg.ContextWindow, ForcedToolChoice: forcedToolChoiceSupported(cfg)}
+	if cfg.Protocol == "anthropic" && cfg.Thinking != nil {
+		info.ThinkingBudget = cfg.Thinking.BudgetTokens
+	}
 	adapter, err := newAdapter(info, cfg, apiKey, httpClient)
 	if err != nil {
 		return nil, fmt.Errorf("llm: provider %q: %w", name, err)
