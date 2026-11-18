@@ -154,10 +154,12 @@ func (s *WebhookService) Handle(ctx context.Context, req WebhookRequest) (Webhoo
 	if reason != "" {
 		return WebhookResult{Ignored: reason}, nil
 	}
-	// Look the project up before creating any per-project state: the project ID
-	// comes from an unauthenticated body, so an unknown ID must not leave a
-	// workspace entry behind for the life of the process (#511).
-	project, reason, err := s.lookupProject(ctx, projectID)
+	// Check that the project is registered before creating any per-project
+	// state: the project ID comes from an unauthenticated body, so an unknown ID
+	// must not leave a workspace entry behind for the life of the process
+	// (#511). Only the rejection reason is used here; the project is re-read
+	// inside the lifecycle read lock below.
+	_, reason, err = s.lookupProject(ctx, projectID)
 	if reason != "" {
 		return WebhookResult{Ignored: reason}, err
 	}
@@ -170,7 +172,7 @@ func (s *WebhookService) Handle(ctx context.Context, req WebhookRequest) (Webhoo
 
 	// Project deletion takes the lifecycle write lock, so a project that was
 	// registered before the lock may be gone now. Re-read it inside the lock.
-	project, reason, err = s.lookupProject(ctx, projectID)
+	project, reason, err := s.lookupProject(ctx, projectID)
 	if reason != "" {
 		return WebhookResult{Ignored: reason}, err
 	}
