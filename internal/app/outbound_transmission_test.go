@@ -438,6 +438,9 @@ func TestPolicyChangeCancelsOtherPublicationWrites(t *testing.T) {
 				if err := f.f.publisher.Publish(context.Background(), wf.ID); err != nil {
 					t.Fatal(err)
 				}
+				// Rewrite the note so the stage-update republish issues an
+				// update; an identical body would be skipped (#514).
+				staleSummaryBody514(t, f.f.gitlab)
 			}
 			block := newBlockedOutbound(t)
 			api := &blockedPublicationGitLab{reviewGitLab: f.f.gitlab, blockedOutbound: block, stage: stage}
