@@ -77,6 +77,9 @@ type GitOps interface {
 }
 
 func fetchProjectRef(ctx context.Context, ws *workspace.Workspace, git GitOps, remote string, auth repo.Auth, refspec, ref string) (string, error) {
+	if err := ws.EnsureRoot(); err != nil {
+		return "", err
+	}
 	unlock, err := ws.LockMirror(ctx)
 	if err != nil {
 		return "", err

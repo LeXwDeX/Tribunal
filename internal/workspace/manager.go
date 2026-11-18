@@ -548,6 +548,39 @@ func (w *Workspace) checkManagedMarker() error {
 	return w.verifyManagedMarker()
 }
 
+// EnsureRoot creates the project root and its managed marker, or verifies an
+// existing root. Creation paths that write into the root through another
+// component (the bare mirror) must call this first, otherwise ensureDir never
+// observes a missing root and the marker is never written. The direct parent
+// must be a real directory so a symlinked workspace parent cannot redirect the
+// project tree. Existing roots without a marker are accepted as legacy and are
+// not claimed.
+func (w *Workspace) EnsureRoot() error {
+	if w == nil || w.ProjectID <= 0 || !filepath.IsAbs(w.Root) {
+		return ErrUnsafePath
+	}
+	parent := filepath.Dir(w.Root)
+	info, err := os.Lstat(parent)
+	switch {
+	case err == nil:
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return ErrUnsafePath
+		}
+	case errors.Is(err, fs.ErrNotExist):
+		if err := os.MkdirAll(parent, dirMode); err != nil {
+			return fmt.Errorf("workspace: create workspace parent: %w", err)
+		}
+		info, err = os.Lstat(parent)
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return ErrUnsafePath
+		}
+	default:
+		return fmt.Errorf("workspace: inspect workspace parent: %w", err)
+	}
+	_, err = w.ensureDir()
+	return err
+}
+
 func (w *Workspace) ensureDir(parts ...string) (string, error) {
 	if w == nil || w.ProjectID <= 0 || !filepath.IsAbs(w.Root) {
 		return "", ErrUnsafePath
