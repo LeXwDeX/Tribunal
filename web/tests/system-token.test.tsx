@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { SystemPage } from '../src/pages/SystemPage'
+import { SystemPage, RENEW_TIMEOUT_MS } from '../src/pages/SystemPage'
 import { installFetch, jsonResponse, renderWithProviders } from './test-utils'
 
 function deferredResponse() {
@@ -324,5 +324,71 @@ describe('one-time API token display', () => {
     unmount()
     expect(signal?.aborted).toBe(true)
     await act(async () => pending.reject(new DOMException('aborted', 'AbortError')))
+  })
+
+  it('marks the close control as unavailable while the renewal is pending', async () => {
+    const user = userEvent.setup()
+    const pending = deferredResponse()
+    const tokens = [{
+      id: 't1', name: 'ci', created_at: new Date(Date.now() - 90 * 86_400_000).toISOString(),
+      expires_at: new Date(Date.now() - 86_400_000).toISOString(),
+    }]
+    installFetch((url, init) => {
+      if (url === '/api/v1/api-tokens/t1/renew' && init?.method === 'POST') return pending.promise
+      if (url.startsWith('/api/v1/api-tokens')) return jsonResponse({ tokens })
+      return jsonResponse({})
+    })
+    renderWithProviders(<SystemPage />)
+    const row = (await screen.findByText('ci')).closest('tr')!
+    await user.click(within(row).getByRole('button', { name: '续期' }))
+    const dialog = await screen.findByRole('dialog', { name: '续期 API token' })
+    await user.click(within(dialog).getByRole('button', { name: '续期', exact: true }))
+
+    const close = within(dialog).getByRole('button', { name: '关闭对话框' })
+    expect(close).toBeDisabled()
+    expect(close).toHaveAttribute('aria-disabled', 'true')
+    expect(within(dialog).getByRole('status')).toHaveTextContent('正在续期')
+    fireEvent.mouseDown(dialog.parentElement!)
+    await user.keyboard('{Escape}')
+    expect(screen.getByRole('dialog', { name: '续期 API token' })).toBeInTheDocument()
+
+    await act(async () => pending.resolve(jsonResponse({ id: 't1', name: 'ci', token: 'crsec_renewed' })))
+    expect(await screen.findByDisplayValue('crsec_renewed')).toBeInTheDocument()
+  })
+
+  it('stops waiting after a bounded timeout and reports an unknown outcome', async () => {
+    const tokens = [{
+      id: 't1', name: 'ci', created_at: new Date(Date.now() - 90 * 86_400_000).toISOString(),
+      expires_at: new Date(Date.now() - 86_400_000).toISOString(),
+    }]
+    installFetch((url, init) => {
+      if (url === '/api/v1/api-tokens/t1/renew' && init?.method === 'POST') {
+        return new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => reject(new DOMException('The operation was aborted.', 'AbortError')))
+        })
+      }
+      if (url.startsWith('/api/v1/api-tokens')) return jsonResponse({ tokens })
+      return jsonResponse({})
+    })
+    renderWithProviders(<SystemPage />)
+    const row = (await screen.findByText('ci')).closest('tr')!
+
+    vi.useFakeTimers()
+    try {
+      fireEvent.click(within(row).getByRole('button', { name: '续期' }))
+      const dialog = screen.getByRole('dialog', { name: '续期 API token' })
+      fireEvent.click(within(dialog).getByRole('button', { name: '续期', exact: true }))
+      expect(within(dialog).getByRole('status')).toHaveTextContent('正在续期')
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(RENEW_TIMEOUT_MS) })
+
+      expect(within(dialog).getByRole('alert')).toHaveTextContent(/结果未知/)
+      const close = within(dialog).getByRole('button', { name: '关闭对话框' })
+      expect(close).toBeEnabled()
+      fireEvent.click(close)
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

@@ -75,6 +75,11 @@ function isNewer(candidate?: string, reference?: string): boolean {
   return new Date(candidate).getTime() > new Date(reference).getTime()
 }
 
+// An action only succeeded when the server state it returns matches the goal.
+function actionSucceeded(action: WebhookAction, state: string): boolean {
+  return action === 'disable' ? state === 'disabled' : state === 'enabled'
+}
+
 // WebhookPanel owns the explicit enable / rebuild / disable flow. Its state is
 // independent from the project settings form: an action refreshes only the
 // project queries and never touches unsaved settings.
@@ -116,13 +121,22 @@ export function WebhookPanel({ project }: { project: Project }) {
       const call = action === 'enable' ? enableWebhook : action === 'rebuild' ? rebuildWebhook : disableWebhook
       const response = await call(project.id)
       if (requestRef.current !== requestId) return
-      if (response) setLatest(viewFromResponse(response))
-      setDone(action)
+      const nextView = response ? viewFromResponse(response) : null
+      if (nextView) setLatest(nextView)
       setDialog(null)
-      const hookId = response?.hook_id
-      toast.push('success', action === 'disable'
-        ? 'GitLab webhook 已禁用；未删除手动或外部 hook。'
-        : `GitLab webhook 已${action === 'enable' ? '启用' : '重建'}${hookId ? `（#${hookId}）` : ''}。`)
+      // HTTP 200 only means the request completed: GitLab can still have the
+      // managed hook disabled, and the server reports that as state=failed.
+      if (nextView && actionSucceeded(action, nextView.state)) {
+        setDone(action)
+        const hookId = response?.hook_id
+        toast.push('success', action === 'disable'
+          ? 'GitLab webhook 已禁用；未删除手动或外部 hook。'
+          : `GitLab webhook 已${action === 'enable' ? '启用' : '重建'}${hookId ? `（#${hookId}）` : ''}。`)
+      } else {
+        setDone(null)
+        const detail = nextView?.error || '服务端未返回错误详情'
+        toast.push('error', `GitLab webhook 状态为「${labelForWebhookState(nextView?.state)}」：${detail}`)
+      }
       await queryClient.invalidateQueries({ queryKey: ['project', project.id] })
       await queryClient.invalidateQueries({ queryKey: ['projects'] })
     } catch (error) {
@@ -148,6 +162,9 @@ export function WebhookPanel({ project }: { project: Project }) {
 
   const busy = pending !== null
   const enabled = view.state === 'enabled'
+  // The success badge echoes the state the panel currently shows, so a later
+  // project read that reports a failure removes it again.
+  const doneLabel = !pending && done && actionSucceeded(done, view.state) ? SUCCESS_LABELS[done] : null
 
   return (
     <Panel
@@ -192,7 +209,7 @@ export function WebhookPanel({ project }: { project: Project }) {
               ) : null}
             </div>
             {pending ? <span className="small" role="status">{PENDING_LABELS[pending]}</span> : null}
-            {!pending && done ? <span role="status"><Badge tone="ok">{SUCCESS_LABELS[done]}</Badge></span> : null}
+            {!pending && doneLabel ? <span role="status"><Badge tone="ok">{doneLabel}</Badge></span> : null}
             {enableError ? <ErrorState error={enableError} title="启用 Webhook 失败" hint={webhookFailureHint(enableError)} /> : null}
           </>
         ) : null}

@@ -1604,19 +1604,24 @@ interface DialogProps {
   children?: ReactNode
   footer?: ReactNode
   wide?: boolean
+  // A pending operation can make closing unsafe. Hiding the action is not
+  // enough: the close control, the overlay and Escape must stop doing anything
+  // and say so through the disabled semantics instead of failing silently.
+  closeDisabled?: boolean
 }
 
-export function Dialog({ open, onClose, title, description, children, footer, wide }: DialogProps) {
+export function Dialog({ open, onClose, title, description, children, footer, wide, closeDisabled = false }: DialogProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const titleId = useId()
   const descriptionId = useId()
-  useModalFocus(open, onClose, containerRef)
+  const requestClose = closeDisabled ? () => {} : onClose
+  useModalFocus(open, requestClose, containerRef)
   if (!open) return null
   return createPortal(
     <ModalContainerContext.Provider value={containerRef}>
       <div
         className={styles.modalOverlay}
-        onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}
+        onMouseDown={(event) => { if (event.target === event.currentTarget) requestClose() }}
       >
         <div
           ref={containerRef}
@@ -1632,7 +1637,14 @@ export function Dialog({ open, onClose, title, description, children, footer, wi
               <h2 className={styles.modalTitle} id={titleId}>{title}</h2>
               {description ? <p className={styles.modalDescription} id={descriptionId}>{description}</p> : null}
             </div>
-            <button type="button" className={styles.iconButton} onClick={onClose} aria-label="关闭对话框">
+            <button
+              type="button"
+              className={styles.iconButton}
+              onClick={requestClose}
+              disabled={closeDisabled}
+              aria-disabled={closeDisabled || undefined}
+              aria-label="关闭对话框"
+            >
               <Icon name="close" />
             </button>
           </div>
