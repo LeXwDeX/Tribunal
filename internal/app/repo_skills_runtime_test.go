@@ -2,13 +2,16 @@ package app
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/agent"
+	"github.com/LeXwDeX/tribunal/internal/errclass"
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/repo"
 	"github.com/LeXwDeX/tribunal/internal/review"
@@ -179,7 +182,7 @@ func TestRepositorySkillRuntimeRejectsTargetAndSnapshotMismatch(t *testing.T) {
 	}
 	prompt, _ := captureRepositorySkill(t, f)
 	job := f.seedReview(t, "repository-snapshot-mismatch")
-	if err := f.service.RunReview(ctx, job); err == nil || !strings.Contains(err.Error(), "snapshot changed") {
+	if err := f.service.RunReview(ctx, job); err == nil || !strings.Contains(err.Error(), "snapshot changed") || !strings.Contains(err.Error(), "reauthorize repository skills") {
 		t.Fatalf("snapshot mismatch = %v", err)
 	}
 	if f.runner.count() != 0 || strings.Contains(*prompt, "repo:demo") {
@@ -372,9 +375,7 @@ func repositoryRuntimeRenameFixture(t *testing.T, grantSnapshot string) (*review
 	}
 	if grantSnapshot == "" {
 		var err error
-		grantSnapshot, err = repo.RepositorySkillsSnapshotSHA256(map[string][]byte{
-			"demo/SKILL.md": []byte(policyGateSkillBody),
-		})
+		grantSnapshot, err = repo.RepositorySkillsSnapshotSHA256(files)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -425,54 +426,55 @@ func TestRepositorySkillRuntimeDenySetIncludesIgnoredRenames(t *testing.T) {
 	if !excluded[".claude/skills/hidden/SKILL.md"] || !excluded["private/secret.txt"] {
 		t.Fatalf("exclusion evidence = %+v", dossier.RepositorySkillExcluded)
 	}
-	if dossier.RepositorySkillProvenance == nil || dossier.RepositorySkillProvenance.SnapshotSHA256 != grant.SnapshotSHA256 {
-		t.Fatalf("provenance = %+v, grant snapshot = %q", dossier.RepositorySkillProvenance, grant.SnapshotSHA256)
-	}
-}
-
-func TestRepositorySkillRuntimeFailsClosedWhenIgnoredRenameChangesSnapshot(t *testing.T) {
-	all, err := repo.RepositorySkillsSnapshotSHA256(map[string][]byte{
+	authorized, err := repo.RepositorySkillsSnapshotSHA256(map[string][]byte{
 		"demo/SKILL.md":   []byte(policyGateSkillBody),
 		"hidden/SKILL.md": []byte("---\nname: hidden\ndescription: hidden marker\n---\nhidden body\n"),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	f, _ := repositoryRuntimeRenameFixture(t, all)
+	if dossier.RepositorySkillProvenance == nil || dossier.RepositorySkillProvenance.SnapshotSHA256 != authorized || authorized != grant.SnapshotSHA256 {
+		t.Fatalf("provenance = %+v, authorized snapshot = %q, grant snapshot = %q", dossier.RepositorySkillProvenance, authorized, grant.SnapshotSHA256)
+	}
+}
+
+func TestRepositorySkillRuntimeFailsClosedWhenAuthorizedSkillIsExcluded(t *testing.T) {
+	files := map[string][]byte{
+		"demo/SKILL.md":    []byte(policyGateSkillBody),
+		"demo/renamed.txt": []byte("ignored authorized resource"),
+		"hidden/SKILL.md":  []byte("---\nname: hidden\ndescription: hidden marker\n---\nhidden body\n"),
+	}
+	authorized, err := repo.RepositorySkillsSnapshotSHA256(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, _ := repositoryRuntimeRenameFixture(t, authorized)
+	source := f.service.git.(*runtimeRepositorySource)
+	source.files["demo/renamed.txt"] = files["demo/renamed.txt"]
+	f.gitlab.diffs = []gitlab.FileDiff{{
+		OldPath: "private/secret.txt", NewPath: ".claude/skills/demo/renamed.txt", RenamedFile: true,
+	}}
 	prompt, _ := captureRepositorySkill(t, f)
-	job := f.seedReview(t, "repository-rename-snapshot")
-	if err := f.service.RunReview(context.Background(), job); err == nil || !strings.Contains(err.Error(), "snapshot changed") {
-		t.Fatalf("unfiltered snapshot = %v", err)
+	job := f.seedReview(t, "repository-authorized-excluded")
+	err = f.service.RunReview(context.Background(), job)
+	if err == nil || !errors.Is(err, ErrRepositorySkillExcludedByMR) {
+		t.Fatalf("authorized skill exclusion = %v", err)
 	}
-	if f.runner.count() != 0 || strings.Contains(*prompt, "repo:hidden") {
-		t.Fatal("unfiltered repository snapshot reached a model")
+	if errclass.Of(err) != "repo_skill_excluded_by_mr" || jobSettleClass(err) != "repo_skill_excluded_by_mr" {
+		t.Fatalf("error classes = %q / %q", errclass.Of(err), jobSettleClass(err))
 	}
-}
-
-func TestRepositorySkillRuntimeSnapshotFailureExplainsReauthorizationCannotResolve(t *testing.T) {
-	all, err := repo.RepositorySkillsSnapshotSHA256(map[string][]byte{
-		"demo/SKILL.md":   []byte(policyGateSkillBody),
-		"hidden/SKILL.md": []byte("---\nname: hidden\ndescription: hidden marker\n---\nhidden body\n"),
-	})
+	if strings.Contains(err.Error(), "reauthorize") {
+		t.Fatalf("exclusion failure suggests reauthorization: %v", err)
+	}
+	status, err := f.db.GetReviewStatus(context.Background(), 42, 7)
 	if err != nil {
 		t.Fatal(err)
 	}
-	f, _ := repositoryRuntimeRenameFixture(t, all)
-	captureRepositorySkill(t, f)
-	job := f.seedReview(t, "repository-rename-snapshot-message")
-	err = f.service.RunReview(context.Background(), job)
-	if err == nil || !strings.Contains(err.Error(), "snapshot changed") {
-		t.Fatalf("unfiltered snapshot = %v", err)
+	if status == nil || status.State != reviewStatusFailed || status.Detail != repositorySkillExcludedDetail {
+		t.Fatalf("review status = %+v", status)
 	}
-	message := err.Error()
-	if !strings.Contains(message, "this MR") || !strings.Contains(message, "cannot resolve") {
-		t.Fatalf("snapshot failure does not explain the MR cause: %v", err)
-	}
-	if strings.Contains(message, "reauthorize repository skills") {
-		t.Fatalf("snapshot failure still suggests reauthorization: %v", err)
-	}
-	if f.runner.count() != 0 {
-		t.Fatal("unfiltered repository snapshot reached a model")
+	if f.runner.count() != 0 || strings.Contains(*prompt, "repo:demo") {
+		t.Fatal("excluded authorized skill reached a model")
 	}
 }
 
@@ -537,7 +539,7 @@ func TestRepositorySkillRetryRebuildsFreshDenyAfterEnablement(t *testing.T) {
 	if err := f.db.SetProjectGrant(ctx, 42, 7, store.ProjectAccessManage); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := repo.RepositorySkillsSnapshotSHA256(map[string][]byte{"demo/SKILL.md": []byte(policyGateSkillBody)})
+	snapshot, err := repo.RepositorySkillsSnapshotSHA256(files)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -582,5 +584,188 @@ func TestRepositorySkillRetryRebuildsFreshDenyAfterEnablement(t *testing.T) {
 	}
 	if f.runner.count() == 0 {
 		t.Fatal("rebuilt execution did not run")
+	}
+}
+
+func TestRepositorySkillRuntimeFiles(t *testing.T) {
+	demo := []byte(policyGateSkillBody)
+	hidden := []byte("---\nname: hidden\ndescription: hidden marker\n---\nhidden body\n")
+	base := func() map[string][]byte {
+		return map[string][]byte{
+			"demo/SKILL.md":        demo,
+			"demo/nested/SKILL.md": []byte("nested manifest is not a skill"),
+			"demo/resource.txt":    []byte("resource"),
+			"hidden/SKILL.md":      hidden,
+			"hidden/resource.txt":  []byte("hidden resource"),
+			"notes.txt":            []byte("top-level file"),
+		}
+	}
+	all := []string{"demo/SKILL.md", "demo/nested/SKILL.md", "demo/resource.txt", "hidden/SKILL.md", "hidden/resource.txt", "notes.txt"}
+	without := func(drop ...string) []string {
+		excluded := make(map[string]bool, len(drop))
+		for _, name := range drop {
+			excluded[name] = true
+		}
+		out := make([]string, 0, len(all))
+		for _, name := range all {
+			if !excluded[name] {
+				out = append(out, name)
+			}
+		}
+		return out
+	}
+	denyPath := func(paths ...string) func(string) bool {
+		return func(name string) bool {
+			for _, path := range paths {
+				if name == path || strings.HasPrefix(name, path+"/") {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	denyNone := func(string) bool { return false }
+	duplicate := base()
+	duplicate["dup/SKILL.md"] = []byte("---\nname: demo\ndescription: duplicate\n---\n")
+	cases := []struct {
+		name         string
+		files        map[string][]byte
+		deny         func(string) bool
+		granted      []string
+		want         []string
+		wantExcluded bool
+		wantMessage  string
+	}{
+		{name: "unmatched deny keeps every file", files: base(), deny: denyPath("private/secret.txt"), granted: []string{"repo:demo"}, want: all},
+		{name: "authorized resource excluded", files: base(), deny: denyPath(".claude/skills/demo/resource.txt"), granted: []string{"repo:demo"}, wantExcluded: true},
+		{name: "nested authorized manifest excluded", files: base(), deny: denyPath(".claude/skills/demo/nested/SKILL.md"), granted: []string{"repo:demo"}, wantExcluded: true},
+		{name: "deny at skills ancestor", files: base(), deny: denyPath(".claude/skills"), granted: []string{"repo:demo"}, wantExcluded: true},
+		{name: "deny at claude ancestor", files: base(), deny: denyPath(".claude"), granted: []string{"repo:demo"}, wantExcluded: true},
+		{name: "unauthorized skill excluded", files: base(), deny: denyPath(".claude/skills/hidden/SKILL.md"), granted: []string{"repo:demo"}, want: without("hidden/SKILL.md")},
+		{name: "top-level non-skill file excluded", files: base(), deny: denyPath(".claude/skills/notes.txt"), granted: []string{"repo:demo"}, want: without("notes.txt")},
+		{name: "authorized name missing from snapshot", files: base(), deny: denyNone, granted: []string{"repo:other"}, wantMessage: "reauthorize repository skills"},
+		{name: "duplicate skill names", files: duplicate, deny: denyNone, granted: []string{"repo:demo"}, wantMessage: "reauthorize repository skills"},
+		{name: "nil deny with a grant", files: base(), granted: []string{"repo:demo"}, wantMessage: "repository skill filter is unavailable"},
+		{name: "union of granted blocks", files: base(), deny: denyPath(".claude/skills/hidden/resource.txt"), granted: []string{"repo:demo", "repo:hidden"}, wantExcluded: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := repositorySkillRuntimeFiles(tc.files, tc.deny, tc.granted)
+			switch {
+			case tc.wantExcluded:
+				if !errors.Is(err, ErrRepositorySkillExcludedByMR) || !IsPermanentJob(err) {
+					t.Fatalf("error = %v, want a permanent ErrRepositorySkillExcludedByMR", err)
+				}
+				if errclass.Of(err) != "repo_skill_excluded_by_mr" || jobSettleClass(err) != "repo_skill_excluded_by_mr" {
+					t.Fatalf("error classes = %q / %q", errclass.Of(err), jobSettleClass(err))
+				}
+				if got != nil {
+					t.Fatalf("files = %v on exclusion failure", got)
+				}
+			case tc.wantMessage != "":
+				if err == nil || !IsPermanentJob(err) || !strings.Contains(err.Error(), tc.wantMessage) || errors.Is(err, ErrRepositorySkillExcludedByMR) {
+					t.Fatalf("error = %v, want permanent message %q", err, tc.wantMessage)
+				}
+			default:
+				if err != nil {
+					t.Fatal(err)
+				}
+				keys := make([]string, 0, len(got))
+				for key := range got {
+					keys = append(keys, key)
+				}
+				sort.Strings(keys)
+				if strings.Join(keys, ",") != strings.Join(tc.want, ",") {
+					t.Fatalf("files = %v, want %v", keys, tc.want)
+				}
+			}
+		})
+	}
+}
+
+func repositorySkillDigest(t *testing.T, f *reviewFixture, deny func(string) bool) (string, *review.RepositorySkillProvenance) {
+	t.Helper()
+	ctx := context.Background()
+	unlock, err := f.service.workspace.Get(42).RLock(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	project, err := f.db.GetProject(ctx, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution, err := f.service.resolveReviewExecution(ctx, project, "", review.Profile{Name: "default", Config: f.profiles["default"]}, "main", deny)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer execution.releaseResolverSet()
+	defer execution.cleanupRepositorySkills()
+	return hex.EncodeToString(execution.digest), execution.repository
+}
+
+func TestRepositorySkillExecutionIdentityUnaffectedByUnauthorizedExclusions(t *testing.T) {
+	f, _ := repositoryRuntimeRenameFixture(t, "")
+	denyHidden := func(name string) bool {
+		return name == ".claude/skills/hidden" || strings.HasPrefix(name, ".claude/skills/hidden/")
+	}
+	excluded, _ := repositorySkillDigest(t, f, denyHidden)
+	unfiltered, _ := repositorySkillDigest(t, f, func(string) bool { return false })
+	if excluded != unfiltered {
+		t.Fatalf("execution identity changed by unauthorized exclusions: %s != %s", excluded, unfiltered)
+	}
+
+	// A deny set that removes no authorized file must leave provenance and the
+	// execution identity untouched. A literal digest cannot be pinned here
+	// because the store assigns a random grant revision per fixture; equality
+	// of the derived identities is the invariant.
+	plain, grant := repositoryRuntimeFixture(t, "")
+	untouched, provenance := repositorySkillDigest(t, plain, func(string) bool { return false })
+	if provenance == nil || provenance.Mode != "repository" || provenance.TargetBranch != "main" ||
+		provenance.TargetSHA != plain.head || provenance.SnapshotSHA256 != grant.SnapshotSHA256 ||
+		provenance.GrantRevisions["code-review"] != grant.Revision {
+		t.Fatalf("execution provenance = %+v", provenance)
+	}
+	irrelevant, _ := repositorySkillDigest(t, plain, func(name string) bool { return name == "private/secret.txt" })
+	if untouched != irrelevant {
+		t.Fatalf("execution identity changed by an unrelated exclusion: %s != %s", untouched, irrelevant)
+	}
+}
+
+func TestRepositorySkillPublicationRejectsExcludedAuthorizedFiles(t *testing.T) {
+	f, _ := repositoryRuntimeRenameFixture(t, "")
+	ctx := context.Background()
+	job := f.seedReview(t, "repository-publication-excluded")
+	if err := f.service.RunReview(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	workflow, err := f.db.GetWorkflowByJob(ctx, job.ID)
+	if err != nil || workflow.PublicationState != store.WorkflowPublicationPublished {
+		t.Fatalf("initial publication = %+v, %v", workflow, err)
+	}
+	record, err := f.db.GetWorkflowDossier(ctx, workflow.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dossier review.Dossier
+	if err := json.Unmarshal(record.Data, &dossier); err != nil {
+		t.Fatal(err)
+	}
+	dossier.RepositorySkillExcluded = append(dossier.RepositorySkillExcluded, ".claude/skills/demo/SKILL.md")
+	data, err := json.Marshal(dossier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Data = data
+	record.Hash = ""
+	if _, err := f.db.SaveWorkflowDossier(ctx, *record); err != nil {
+		t.Fatal(err)
+	}
+	before := f.gitlab.noteCount()
+	if err := f.publisher.Republish(ctx, workflow.ID); !errors.Is(err, ErrStalePublication) {
+		t.Fatalf("republish with an excluded authorized file = %v", err)
+	}
+	if got := f.gitlab.noteCount(); got != before {
+		t.Fatalf("stale publication sent %d notes", got-before)
 	}
 }

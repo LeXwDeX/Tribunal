@@ -319,11 +319,49 @@ func (l *Loader) Catalogue() []Skill {
 	return out
 }
 
+// RepositorySkillDirs maps repository skill names to their top-level
+// directory relative to .claude/skills. Names have the same repo:<name> form
+// as Catalogue entries. Only a direct <dir>/SKILL.md manifest declares a
+// skill; a nested SKILL.md and an invalid manifest are skipped, and two
+// directories declaring the same name are an error. RepositoryCatalogue uses
+// the same resolution rules.
+func RepositorySkillDirs(files map[string][]byte) (map[string]string, error) {
+	manifests, err := repositorySkillManifests(files)
+	if err != nil {
+		return nil, err
+	}
+	dirs := make(map[string]string, len(manifests))
+	for name, manifest := range manifests {
+		dirs[name] = manifest.dir
+	}
+	return dirs, nil
+}
+
 // RepositoryCatalogue reads metadata only from an already verified and
 // ignore-filtered snapshot. It does not authorize a block or verify the
 // snapshot's project, target branch or provenance.
 func RepositoryCatalogue(files map[string][]byte) ([]Skill, error) {
-	items := make(map[string]Skill)
+	manifests, err := repositorySkillManifests(files)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Skill, 0, len(manifests))
+	for name, manifest := range manifests {
+		out = append(out, Skill{Name: name, Description: manifest.description})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+type repositorySkillManifest struct {
+	dir         string
+	description string
+}
+
+// repositorySkillManifests is the single parsing path shared by discovery and
+// runtime directory resolution.
+func repositorySkillManifests(files map[string][]byte) (map[string]repositorySkillManifest, error) {
+	items := make(map[string]repositorySkillManifest)
 	for path, data := range files {
 		dir, file, ok := strings.Cut(path, "/")
 		if !ok || dir == "" || file != "SKILL.md" || strings.Contains(path, "\\") || !safeResourcePath(path) || len(data) > maxSkillFileBytes {
@@ -337,14 +375,9 @@ func RepositoryCatalogue(files map[string][]byte) ([]Skill, error) {
 		if _, exists := items[name]; exists {
 			return nil, fmt.Errorf("%w: duplicate repository skill name", ErrInvalidSkill)
 		}
-		items[name] = Skill{Name: name, Description: fm.Description}
+		items[name] = repositorySkillManifest{dir: dir, description: fm.Description}
 	}
-	out := make([]Skill, 0, len(items))
-	for _, item := range items {
-		out = append(out, item)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out, nil
+	return items, nil
 }
 
 // Warnings returns skipped-skill diagnostics in scan order.
