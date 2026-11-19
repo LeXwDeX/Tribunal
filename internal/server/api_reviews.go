@@ -143,11 +143,16 @@ func unresolvedDetails(signals []review.UnresolvedSignal) []unresolvedDetail {
 
 // consoleWarnings returns nil when there are no warnings. A non-nil empty result
 // is kept so the API sends [] and the console does not show the raw warnings.
-func consoleWarnings(warnings []string, unresolved []review.UnresolvedSignal) []string {
+// A warning prefix is read as a node only when it names a node of this workflow.
+func consoleWarnings(warnings []string, unresolved []review.UnresolvedSignal, nodes []store.WorkflowNode) []string {
 	if len(warnings) == 0 {
 		return nil
 	}
-	return review.ConsoleWarnings(warnings, unresolved)
+	ids := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		ids = append(ids, node.ID)
+	}
+	return review.ConsoleWarnings(warnings, unresolved, ids)
 }
 
 type graphEdge struct {
@@ -443,7 +448,7 @@ func (s *Server) handleGetReview(w http.ResponseWriter, r *http.Request) {
 		Summary:          summary,
 		SummaryText:      summaryText,
 		Warnings:         warnings,
-		WarningsText:     consoleWarnings(warnings, unresolved),
+		WarningsText:     consoleWarnings(warnings, unresolved, nodes),
 		Unresolved:       unresolvedDetails(unresolved),
 		MaterialWarnings: dossier.warnings,
 		Scope:            scope,

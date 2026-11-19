@@ -201,24 +201,28 @@ func (item summaryItem) label() string {
 	return fmt.Sprintf("%s 等 %d 个节点", item.nodes[0], len(item.nodes))
 }
 
-// summaryItems builds the summary entries in first-seen order. Signals whose
-// message maps to the same Chinese cause form one entry; a message without a
-// known template says nothing about a shared cause and is never merged.
+// summaryItems builds the summary entries in first-seen order. Signals form one
+// entry when they have the same console category and the same Chinese cause, the
+// pair the console groups by, so an evidence gap and a blocking signal never
+// merge. The cause is read from the whole message and only the shown text is
+// clipped. A message without a known template says nothing about a shared cause
+// and is never merged.
 func summaryItems(unresolved []UnresolvedSignal) []summaryItem {
 	items := make([]summaryItem, 0, len(unresolved))
 	byCause := make(map[string]int, len(unresolved))
 	for _, signal := range unresolved {
 		node := oneLine(signal.Node, 64)
 		message := oneLine(signal.Message, 200)
-		cause, known := localizeMachineMessage(message)
+		cause, known := localizeMachineMessage(strings.Join(strings.Fields(signal.Message), " "))
 		if known {
-			if at, ok := byCause[cause]; ok {
+			key := UnresolvedCategory(signal) + "\x00" + cause
+			if at, ok := byCause[key]; ok {
 				if !slices.Contains(items[at].nodes, node) {
 					items[at].nodes = append(items[at].nodes, node)
 				}
 				continue
 			}
-			byCause[cause] = len(items)
+			byCause[key] = len(items)
 		}
 		items = append(items, summaryItem{nodes: []string{node}, message: message})
 	}

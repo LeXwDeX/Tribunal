@@ -105,6 +105,10 @@ describe('unresolved signal groups (#603)', () => {
     expect(within(tool).getByText('工具不可用')).toBeInTheDocument()
     expect(within(tool).getByText(INDEX_TEXT)).toBeInTheDocument()
     expect(within(tool).getByText('explore · cr.p1 · cr.p2 · rv.p1 · reasoner')).toBeInTheDocument()
+    // The node list is announced with a label, not as a bare run of ids.
+    const nodes = within(tool).getByText('explore · cr.p1 · cr.p2 · rv.p1 · reasoner')
+    expect(nodes.previousElementSibling).toHaveTextContent('涉及节点：')
+    expect(nodes.previousElementSibling).toHaveClass('srOnly')
     expect(within(tool).queryByText('证据缺口')).not.toBeInTheDocument()
     // The status label must not call a missing tool an evidence gap.
     expect(screen.getAllByText('工具不可用')).toHaveLength(1)
@@ -167,6 +171,8 @@ describe('unresolved signal groups (#603)', () => {
     expect(within(rows[1]).getByText('评审阻断')).toBeInTheDocument()
     expect(within(rows[1]).getByText('档位给出阻断但没有 finding')).toBeInTheDocument()
     expect(screen.queryByText('工具不可用')).not.toBeInTheDocument()
+    // Every row that lists nodes labels them.
+    expect(screen.getAllByText('涉及节点：')).toHaveLength(2)
   })
 })
 

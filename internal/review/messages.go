@@ -42,20 +42,26 @@ var (
 	gitlabNotCollectedGapRE = regexp.MustCompile(`^diff collection is marked incomplete by GitLab \(the diff version is not collected\): (\d+) changed file\(s\) were provided; whether every changed file was reviewed cannot be proven$`)
 	generatedNoReviewRE     = regexp.MustCompile(`^no reviewable files: (\d+) generated file\(s\) were skipped$`)
 	outOfScopeSevereRE      = regexp.MustCompile(`^incremental review ignored a (P0|P1) finding outside the reviewed file set: (.+)$`)
-	// indexIdentityGapRE reads the commits a collapsed index identity gap names.
-	// Each is a short commit id or "unknown".
-	indexIdentityGapRE = regexp.MustCompile(`blocked by workspace index identity \(index ([^\s,)]+), target ([^\s,)]+)\)`)
-	shortCommitRE      = regexp.MustCompile(`^[0-9a-fA-F]{7,40}$`)
+	// toolGapRE is the shape of the gap the executor records when bound MCP tools
+	// cannot be used: "block <block>: MCP tools unavailable: <detail>". Model
+	// evidence gaps are copied into signals verbatim, so a message is a tool gap
+	// only by this shape; text that merely mentions the phrase is not one.
+	toolGapRE = regexp.MustCompile(`^block [^\s:]+: MCP tools unavailable: `)
+	// indexIdentityGapRE is the same shape for the withheld index identity: the
+	// current form counts the bound tools and names both commits, a short commit
+	// id or "unknown" each; a workflow stored before that names one tool and no
+	// commits.
+	indexIdentityGapRE = regexp.MustCompile(`^block [^\s:]+: MCP tools unavailable: (?:\d+ bound tool\(s\)|tool "[^"]+") blocked by workspace index identity(?: \(index ([^\s,)]+), target ([^\s,)]+)\))?$`)
+	// toolGapWarningRE is a tool gap as a warning: applyToolGaps puts the node in
+	// front of the gap message.
+	toolGapWarningRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}: (block [^\s:]+: MCP tools unavailable: .+)$`)
+	shortCommitRE    = regexp.MustCompile(`^[0-9a-fA-F]{7,40}$`)
 	// collapsedNodeRE matches the node of a summary item that stands for several
 	// nodes with the same cause: "<first node> 等 <n> 个节点".
 	collapsedNodeRE = regexp.MustCompile(`^(\S+) 等 \d+ 个节点$`)
 )
 
 const (
-	// toolGapMarker identifies a gap recorded when bound MCP tools could not be
-	// used. The executor writes it as "block <block>: MCP tools unavailable: ...".
-	toolGapMarker = "MCP tools unavailable"
-
 	indexMismatchFormat  = "代码图谱索引（%s）与本 MR 目标提交（%s）不一致，本次未启用代码图谱工具，相关范围可能未被完整评审。"
 	indexUnconfirmedText = "无法确认代码图谱索引与本 MR 目标提交一致（工作区索引未就绪或索引失败），本次未启用代码图谱工具，相关范围可能未被完整评审。"
 )
@@ -272,11 +278,11 @@ func localizeMachineMessage(message string) (string, bool) {
 		return "部分新增问题未完成二次验证，未发布。", true
 	case strings.HasPrefix(message, "verify failed for group "), strings.HasPrefix(message, "verify result missing for group "):
 		return "部分问题的二次验证未完成，已按存疑处理。", true
-	case strings.Contains(message, "blocked by workspace index identity"):
+	case indexIdentityGapRE.MatchString(message):
 		// More specific than the generic tool gap below. Older workflows stored
 		// one gap per tool with the same cause and no commits.
 		return localizeIndexIdentityGap(message), true
-	case strings.Contains(message, toolGapMarker):
+	case toolGapRE.MatchString(message):
 		return "部分评审工具不可用，相关范围可能未被完整评审。", true
 	}
 	return "", false
@@ -285,7 +291,8 @@ func localizeMachineMessage(message string) (string, bool) {
 // localizeIndexIdentityGap words the index identity gap by what is proven. Only
 // two known commits that differ prove a mismatch; equal commits, an unknown
 // commit or a legacy gap without commits only show that the identity could not
-// be confirmed, for example because the workspace was not ready.
+// be confirmed, for example because the workspace was not ready. The message
+// must already match indexIdentityGapRE.
 func localizeIndexIdentityGap(message string) string {
 	if match := indexIdentityGapRE.FindStringSubmatch(message); match != nil {
 		index, target := match[1], match[2]
@@ -294,6 +301,12 @@ func localizeIndexIdentityGap(message string) string {
 		}
 	}
 	return indexUnconfirmedText
+}
+
+// isToolGap reports whether a message has the shape of a tool gap the executor
+// recorded.
+func isToolGap(message string) bool {
+	return toolGapRE.MatchString(strings.TrimSpace(message))
 }
 
 // sameShortCommit compares two abbreviated commit ids; one that is a prefix of
@@ -389,6 +402,10 @@ func localizeWarning(warning string) string {
 	warning = strings.TrimSpace(warning)
 	if warning == "" {
 		return ""
+	}
+	if match := toolGapWarningRE.FindStringSubmatch(warning); match != nil {
+		// The node in front of a tool gap is not part of the gap.
+		warning = match[1]
 	}
 	if text, ok := localizeMachineMessage(warning); ok {
 		return text

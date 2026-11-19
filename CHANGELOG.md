@@ -9,9 +9,10 @@
 - **索引身份缺口每个节点只记一条，未完成原因合并同类项并显示中文说明**（[#603](https://github.com/LeXwDeX/Tribunal/issues/603)）：工作区代码图谱索引无法对应 MR 目标提交时，带绑定工具的评审节点此前为每个绑定工具各记一条 `tool_gaps`，近乎相同的缺口行会淹没评审真实的证据缺口；控制台逐条显示英文原文，MR 评论只有笼统的「部分评审工具不可用」。
   - 记录：每个节点只记一条 `block <block>: MCP tools unavailable: N bound tool(s) blocked by workspace index identity (index <short>, target <short>)`，写明被拦下的绑定工具数，以及索引与 MR 目标提交取前 8 位的短 ID（缺失时为 `unknown`）。判定语义不变：仍是覆盖缺口，原本的 PASS 仍改判 INCOMPLETE，已是 BLOCKING 的结论不变；受限 ignore 引起的 MCP 降级仍不记缺口，只有部分绑定工具可用时仍每个缺失工具各记一条。
   - 中文说明：只有两个短 ID 都是有效提交 ID 且不同，才写「代码图谱索引（…）与本 MR 目标提交（…）不一致」；两者相同、缺失、不是有效提交 ID，或升级前存储的逐工具旧缺口（不含短 ID），只写「无法确认代码图谱索引与本 MR 目标提交一致（工作区索引未就绪或索引失败）」，不断言不一致。该文案同样用于 MR 评论的未完成原因与评审提示；存储的英文原文不改。
-  - 未完成摘要：存储的摘要里，中文原因相同的信号合并为一项（`首个节点 等 N 个节点: …`）后再套用 8 项上限，`另有 N 项` 改为按原因计数，同一原因不再把其他缺口挤出摘要；没有已知模板的消息不合并。
-  - API（只增字段）：`GET /api/v1/reviews/{id}` 的 `unresolved[]` 每项新增 `category`（`tool_unavailable`、`evidence_gap`、`review_blocking`）与中文 `text`，顶层新增 `summary_text`（未完成摘要的单段中文读法）和 `warnings_text`（`warnings` 的中文读法，相同文本合并并列出节点，已由未解决信号显示的原因不再重复）。新字段在读取时由脱敏后的存储值派生，不落库；`summary`、`warnings`、`unresolved[].message` 与评审结论不变。
-  - 控制台：「未完成原因」面板按 `category` 显示徽标（工具不可用 / 证据缺口 / 评审阻断），同一原因的跨节点信号合并为一行并列出节点 ID，原始英文消息收在折叠的「技术详情」；摘要与告警改用 `summary_text`、`warnings_text`。节点抽屉为 `unsafe_model_response`、`unsatisfied` 与各类取消原因补齐中文提示，原因代码仍保留在括号内。响应缺少新字段时回退为按 `kind`、`message`、`summary`、`warnings` 显示。
+  - 工具缺口的识别：只按执行器写入的固定形态 `block <block>: MCP tools unavailable: ` 识别，分类 `tool_unavailable` 还要求 `kind` 为 `evidence_gap`。模型文本里即使提到这句话，也保持「证据缺口」分类和自己的原文，不被当作工具缺口，也不并入工具缺口的合并。
+  - 未完成摘要：存储的摘要里，分类与中文原因都相同的信号才合并为一项（`首个节点 等 N 个节点: …`），再套用 8 项上限；`另有 N 项` 改为按原因计数，同一原因不再把其他缺口挤出摘要。没有已知模板的消息不合并，证据缺口与评审阻断即使中文原因相同也各占一项。
+  - API（只增字段）：`GET /api/v1/reviews/{id}` 的 `unresolved[]` 每项新增 `category`（`tool_unavailable`、`evidence_gap`、`review_blocking`）与中文 `text`，顶层新增 `summary_text`（未完成摘要的单段中文读法）和 `warnings_text`（`warnings` 的中文读法：开头的 `<节点>: ` 只有前缀是本评审的工作流节点、未解决信号的节点或 `coverage`、`provenance`、`budget` 时才拆出，相同文本合并并列出节点，只有同一节点已在未解决信号里显示相同文本的告警才去重）。新字段在读取时由脱敏后的存储值派生，不落库；`summary`、`warnings`、`unresolved[].message` 与评审结论不变。
+  - 控制台：「未完成原因」面板按 `category` 显示徽标（工具不可用 / 证据缺口 / 评审阻断），分类与中文说明都相同的跨节点信号合并为一行并列出节点 ID，原始英文消息收在折叠的「技术详情」；摘要与告警改用 `summary_text`、`warnings_text`。节点抽屉为 `unsafe_model_response`、`unsatisfied` 与各类取消原因补齐中文提示，原因代码仍保留在括号内。响应缺少新字段时回退为按 `kind`、`message`、`summary`、`warnings` 显示。
   - 无配置项、数据库迁移或依赖变更。
 - **控制台视觉风格整体替换为方案 A（机房）**（[#601](https://github.com/LeXwDeX/Tribunal/issues/601)）：只改样式层（含导航图标的尺寸与线宽），信息架构、导航结构、页面内容与交互不变；无 API、配置项、数据库迁移或依赖变更。主题机制不变，仍默认跟随系统，偏好存储键不变。
   - 色板：暗色与亮色各一套中性石墨灰阶，文字色分三级；强调色只有一种青色，仅用于实时状态、当前选择、焦点环、当前阶段与图表主系列；主按钮在暗色下为米白底深色字、亮色下为深色底白字；边框为细线。

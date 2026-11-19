@@ -34,6 +34,27 @@ func TestUnresolvedCategoryNamesToolGapsApartFromEvidenceGaps(t *testing.T) {
 			want:   UnresolvedEvidence,
 		},
 		{
+			name:   "model gap that mentions the phrase mid-text",
+			signal: UnresolvedSignal{Node: "rv.p1", Kind: UnresolvedEvidence, Message: "the build log says MCP tools unavailable: retry later"},
+			want:   UnresolvedEvidence,
+		},
+		{
+			name: "model gap that mentions the index identity mid-text",
+			signal: UnresolvedSignal{Node: "rv.p1", Kind: UnresolvedEvidence,
+				Message: "evidence is blocked by workspace index identity (index abcdef01, target 33333333)"},
+			want: UnresolvedEvidence,
+		},
+		{
+			name:   "the warning form with a node is not the shape of a signal",
+			signal: UnresolvedSignal{Node: "cr.p1", Kind: UnresolvedEvidence, Message: "cr.p1: " + indexGapMessage},
+			want:   UnresolvedEvidence,
+		},
+		{
+			name:   "a blocking signal is never a tool gap",
+			signal: UnresolvedSignal{Node: "cr.p1", Kind: UnresolvedBlocking, Message: indexGapMessage},
+			want:   UnresolvedBlocking,
+		},
+		{
 			name:   "review blocking",
 			signal: UnresolvedSignal{Node: "review.gate", Kind: UnresolvedBlocking, Message: "review gate reported BLOCKING with no accepted findings"},
 			want:   UnresolvedBlocking,
@@ -63,6 +84,12 @@ func TestUnresolvedTextIsChineseForKnownMessagesAndRawOtherwise(t *testing.T) {
 		{"generic tool gap", `block review: MCP tools unavailable: mcp: server "x": connect failed`, genericToolLabel},
 		{"lane did not complete", "lane cr.p1 (code-review) did not complete: skipped", "代码审查通道未完成（已跳过）：该通道未运行，建议检查评审配置后重新触发评审。"},
 		{"no mapping keeps the raw message", "pipeline log unavailable", "pipeline log unavailable"},
+		{"model prose that mentions the phrase keeps its text", "the build log says MCP tools unavailable: retry later", "the build log says MCP tools unavailable: retry later"},
+		{
+			"model prose that mentions the index identity keeps its text",
+			"evidence is blocked by workspace index identity (index abcdef01, target 33333333)",
+			"evidence is blocked by workspace index identity (index abcdef01, target 33333333)",
+		},
 		{"chinese prose stays", "缺少流水线日志", "缺少流水线日志"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

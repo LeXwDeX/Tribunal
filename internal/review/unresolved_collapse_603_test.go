@@ -160,3 +160,89 @@ func TestLocalizeIncompleteSummaryStripsTheNodeCountForFallbackLabels(t *testing
 		t.Fatalf("fallback label of the first node was lost:\n%s", text)
 	}
 }
+
+// Model-supplied evidence gaps are copied into signals verbatim. Text that only
+// mentions the tool gap phrase is not a code-owned cause, so it is never merged
+// and never takes the place of a real tool gap.
+func TestIncompleteSummaryDoesNotMergeModelGapsThatMentionTheToolPhrase(t *testing.T) {
+	const prose = "the build log says MCP tools unavailable: retry later"
+	signals := []UnresolvedSignal{
+		{Node: "rv.p1", Kind: UnresolvedEvidence, Message: prose},
+		{Node: "rv.p2", Kind: UnresolvedEvidence, Message: prose},
+		{Node: "rv.p3", Kind: UnresolvedEvidence, Message: "evidence is blocked by workspace index identity (index abcdef01, target 33333333)"},
+	}
+	signals = append(signals, indexGapSignals("explore", "cr.p1")...)
+	summary := incompleteSummary(signals)
+	for _, want := range []string{"rv.p1: " + prose, "rv.p2: " + prose, "rv.p3: evidence is blocked by workspace index identity", "explore 等 2 个节点: "} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary lacks %q: %q", want, summary)
+		}
+	}
+	if strings.Contains(summary, "等 3 个节点") || strings.Contains(summary, "rv.p1 等") {
+		t.Fatalf("summary merged model text into a tool gap: %q", summary)
+	}
+	published, ok := localizeIncompleteSummary(summary, 0, 0)
+	if !ok {
+		t.Fatal("summary was not localized")
+	}
+	if got := strings.Count(published, genericToolLabel); got != 0 {
+		t.Fatalf("model prose was worded as a tool gap:\n%s", published)
+	}
+}
+
+// The merge key is the cause and the kind: an evidence gap and a blocking
+// signal that read the same stay two lines, as they are two console groups.
+func TestIncompleteSummaryKeepsEvidenceAndBlockingApart(t *testing.T) {
+	const message = "review channel reported BLOCKING with no findings"
+	summary := incompleteSummary([]UnresolvedSignal{
+		{Node: "rv.p1", Kind: UnresolvedEvidence, Message: message},
+		{Node: "rv.p2", Kind: UnresolvedBlocking, Message: message},
+	})
+	if strings.Contains(summary, "等 2 个节点") {
+		t.Fatalf("an evidence gap and a blocking signal were merged: %q", summary)
+	}
+	for _, want := range []string{"rv.p1: " + message, "rv.p2: " + message} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary lacks %q: %q", want, summary)
+		}
+	}
+	// The same kind still merges.
+	merged := incompleteSummary([]UnresolvedSignal{
+		{Node: "rv.p1", Kind: UnresolvedBlocking, Message: message},
+		{Node: "rv.p2", Kind: UnresolvedBlocking, Message: message},
+	})
+	if !strings.Contains(merged, "rv.p1 等 2 个节点: "+message) {
+		t.Fatalf("two blocking signals with one cause were not merged: %q", merged)
+	}
+}
+
+// The cause is read from the whole message and only the shown text is clipped:
+// two gaps that differ after the clip point are two causes.
+func TestIncompleteSummaryReadsTheCauseFromTheWholeMessage(t *testing.T) {
+	const head = "diff collection omitted 2 of 40 changed file(s): 38 included in the materials snapshot, 2 ignored by rules; reasons: too_large=2; omitted paths: "
+	long := func(last string) string { return head + strings.Repeat("dir/", 60) + last }
+	a, b := long("a.go"), long("b.go")
+	if oneLine(a, 200) != oneLine(b, 200) {
+		t.Fatal("fixture: the messages must be equal once clipped")
+	}
+	summary := incompleteSummary([]UnresolvedSignal{
+		{Node: "coverage", Kind: UnresolvedEvidence, Message: a},
+		{Node: "plan", Kind: UnresolvedEvidence, Message: b},
+	})
+	if strings.Contains(summary, "等 2 个节点") {
+		t.Fatalf("gaps that differ after the clip point were merged: %q", summary)
+	}
+	for _, node := range []string{"coverage: ", "；plan: "} {
+		if !strings.Contains(summary, node) {
+			t.Fatalf("summary lacks the item of %q: %q", node, summary)
+		}
+	}
+	// Identical long messages are one cause and still merge.
+	merged := incompleteSummary([]UnresolvedSignal{
+		{Node: "coverage", Kind: UnresolvedEvidence, Message: a},
+		{Node: "plan", Kind: UnresolvedEvidence, Message: a},
+	})
+	if !strings.Contains(merged, "coverage 等 2 个节点: ") {
+		t.Fatalf("the same long gap on two nodes was not merged: %q", merged)
+	}
+}

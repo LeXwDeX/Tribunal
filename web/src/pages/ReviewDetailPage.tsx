@@ -529,7 +529,12 @@ function ReviewDiagnosticsPanel({ review }: { review: ReviewDetail }) {
                   <Badge tone={unresolvedCategoryTone(group.category)} plain>{unresolvedCategoryLabel(group.category)}</Badge>
                   <span className={rv.signalText}>{group.text}</span>
                 </div>
-                {group.nodes.length ? <span className={classNames('mono', 'muted', rv.signalNodes)}>{group.nodes.join(' · ')}</span> : null}
+                {group.nodes.length ? (
+                  <>
+                    <span className="srOnly">涉及节点：</span>
+                    <span className={classNames('mono', 'muted', rv.signalNodes)}>{group.nodes.join(' · ')}</span>
+                  </>
+                ) : null}
                 {group.technical ? (
                   <Disclosure summary="技术详情" className={rv.signalDisclosure}>
                     <div className={rv.signalRaw}>

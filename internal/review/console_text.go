@@ -2,7 +2,6 @@ package review
 
 import (
 	"fmt"
-	"regexp"
 	"slices"
 	"strings"
 )
@@ -17,10 +16,12 @@ const UnresolvedCategoryTool = "tool_unavailable"
 
 // UnresolvedCategory classifies a signal for the console. A tool gap is a
 // missing capability of the review run, not missing evidence about the change,
-// so it is reported apart from the evidence gaps that share its kind. Any other
-// signal keeps its kind, so an unknown kind is passed through, never invented.
+// so it is reported apart from the evidence gaps that share its kind. Only an
+// evidence gap with the shape the executor writes is a tool gap: a model gap
+// that mentions the phrase keeps its kind. Any other signal keeps its kind, so
+// an unknown kind is passed through, never invented.
 func UnresolvedCategory(signal UnresolvedSignal) string {
-	if strings.Contains(signal.Message, toolGapMarker) {
+	if signal.Kind == UnresolvedEvidence && isToolGap(signal.Message) {
 		return UnresolvedCategoryTool
 	}
 	return signal.Kind
@@ -60,23 +61,41 @@ func IncompleteSummaryText(summary string) (string, bool) {
 	return b.String(), true
 }
 
-// warningNodeRE matches the "<node>: " prefix that applyToolGaps and
-// applyUnresolved put before a warning. A node id starts with a letter or a
-// digit and holds no space, so the words before a colon and a file name such as
-// ".gitlab-review.yml" are not read as nodes.
-var warningNodeRE = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9._-]{0,127}): (.+)$`)
+// signalPseudoNodes are the node names code-owned signals use for checks that
+// are not DAG nodes, so a warning that names one still reads as a node.
+var signalPseudoNodes = []string{"coverage", "provenance", "budget"}
 
 // ConsoleWarnings renders the synthesize warnings as Chinese lines for the
-// console. A warning with a node prefix is read as a node and a message; the
-// message is worded like an unresolved signal, so one without a template keeps
-// its original text. Warnings with the same text become one line that lists
-// their nodes, "<text>（<node> · <node>）". A text that an unresolved signal
-// already shows is dropped, so the panel states a cause once. The result is
-// never nil: an empty one means every warning repeated an unresolved signal.
-func ConsoleWarnings(warnings []string, unresolved []UnresolvedSignal) []string {
-	shown := make(map[string]struct{}, len(unresolved))
+// console. applyToolGaps and applyUnresolved put "<node>: " in front of a
+// warning; the prefix is read as a node only when it names a node of the
+// workflow (nodeIDs), a node of an unresolved signal or a code-owned check, so
+// any other word before a colon stays in the text. The message is worded like an
+// unresolved signal: one without a template keeps its original text. Warnings
+// with the same text become one line that lists their nodes,
+// "<text>（<node> · <node>）". A warning is dropped when an unresolved signal
+// already shows its text for its node, so the panel states a cause once. The
+// result is never nil: an empty one means every warning repeated an unresolved
+// signal.
+func ConsoleWarnings(warnings []string, unresolved []UnresolvedSignal, nodeIDs []string) []string {
+	known := make(map[string]struct{}, len(nodeIDs)+len(signalPseudoNodes)+len(unresolved))
+	for _, id := range nodeIDs {
+		known[id] = struct{}{}
+	}
+	for _, id := range signalPseudoNodes {
+		known[id] = struct{}{}
+	}
+	// shown maps the text of each unresolved group to the nodes it lists.
+	shown := make(map[string]map[string]struct{}, len(unresolved))
 	for _, signal := range unresolved {
-		shown[UnresolvedText(signal)] = struct{}{}
+		if signal.Node == "" {
+			continue
+		}
+		known[signal.Node] = struct{}{}
+		text := UnresolvedText(signal)
+		if shown[text] == nil {
+			shown[text] = make(map[string]struct{})
+		}
+		shown[text][signal.Node] = struct{}{}
 	}
 	type line struct {
 		text  string
@@ -86,14 +105,19 @@ func ConsoleWarnings(warnings []string, unresolved []UnresolvedSignal) []string 
 	byText := make(map[string]*line, len(warnings))
 	for _, warning := range warnings {
 		node, message := "", strings.TrimSpace(warning)
-		if match := warningNodeRE.FindStringSubmatch(message); match != nil {
-			node, message = match[1], match[2]
+		if prefix, rest, ok := strings.Cut(message, ": "); ok && strings.TrimSpace(rest) != "" {
+			if _, isNode := known[prefix]; isNode {
+				node, message = prefix, strings.TrimSpace(rest)
+			}
 		}
 		if message == "" {
 			continue
 		}
-		text := UnresolvedText(UnresolvedSignal{Message: message})
-		if _, repeated := shown[text]; repeated {
+		text, mapped := localizeMachineMessage(message)
+		if !mapped {
+			text = message
+		}
+		if _, repeated := shown[text][node]; node != "" && repeated {
 			continue
 		}
 		entry, ok := byText[text]

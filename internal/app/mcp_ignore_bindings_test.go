@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -66,6 +68,9 @@ func (p *countingIgnoreBindingProvider) Tools(ctx context.Context, block string)
 	return p.projectAwareToolProvider.Tools(ctx, block)
 }
 
+// boundToolGapRE reads the count of a node's index identity gap.
+var boundToolGapRE = regexp.MustCompile(`^block code-review: MCP tools unavailable: (\d+) bound tool\(s\) blocked by workspace index identity \(index \S+, target \S+\)$`)
+
 func TestIgnoreProjectBindingStubsDoNotCreateFalseGaps(t *testing.T) {
 	target := strings.Repeat("2", 40)
 	for _, tc := range []struct {
@@ -77,19 +82,22 @@ func TestIgnoreProjectBindingStubsDoNotCreateFalseGaps(t *testing.T) {
 		wantGap   bool
 		wantTools int32
 		state     *store.Workspace
+		// second binds one more effective tool, so the gap must count two.
+		second bool
 	}{
-		{"no-bindings", false, false, true, true, false, 0, nil},
-		{"platform-inherited", true, false, true, true, false, 0, nil},
-		{"project-empty-override", true, true, true, true, false, 0, nil},
-		{"project-only-binding", false, true, true, true, false, 0, nil},
-		{"disabled-server", true, false, false, true, false, 0, nil},
-		{"empty-policy-allows-mcp", true, false, true, false, false, 1, &store.Workspace{State: "ready", BaseSHA: strings.Repeat("1", 40), IndexSHA: target}},
-		{"index-mismatch", true, false, true, false, true, 0, &store.Workspace{State: "ready", IndexSHA: strings.Repeat("1", 40)}},
-		{"index-invalid", true, false, true, false, true, 0, &store.Workspace{State: "ready", IndexSHA: "bad"}},
-		{"index-missing", true, false, true, false, true, 0, nil},
-		{"index-error", true, false, true, false, true, 0, &store.Workspace{State: "ready", IndexSHA: target, LastError: store.WorkspaceIndexFailed}},
-		{"workspace-error", true, false, true, false, true, 0, &store.Workspace{State: "error", IndexSHA: target}},
-		{"disabled-server-missing-index", true, false, false, false, false, 0, nil},
+		{"no-bindings", false, false, true, true, false, 0, nil, false},
+		{"platform-inherited", true, false, true, true, false, 0, nil, false},
+		{"project-empty-override", true, true, true, true, false, 0, nil, false},
+		{"project-only-binding", false, true, true, true, false, 0, nil, false},
+		{"disabled-server", true, false, false, true, false, 0, nil, false},
+		{"empty-policy-allows-mcp", true, false, true, false, false, 1, &store.Workspace{State: "ready", BaseSHA: strings.Repeat("1", 40), IndexSHA: target}, false},
+		{"index-mismatch", true, false, true, false, true, 0, &store.Workspace{State: "ready", IndexSHA: strings.Repeat("1", 40)}, false},
+		{"index-invalid", true, false, true, false, true, 0, &store.Workspace{State: "ready", IndexSHA: "bad"}, false},
+		{"index-missing", true, false, true, false, true, 0, nil, false},
+		{"index-error", true, false, true, false, true, 0, &store.Workspace{State: "ready", IndexSHA: target, LastError: store.WorkspaceIndexFailed}, false},
+		{"workspace-error", true, false, true, false, true, 0, &store.Workspace{State: "error", IndexSHA: target}, false},
+		{"disabled-server-missing-index", true, false, false, false, false, 0, nil, false},
+		{"index-mismatch-two-bindings", true, false, true, false, true, 0, &store.Workspace{State: "ready", IndexSHA: strings.Repeat("1", 40)}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -114,7 +122,11 @@ func TestIgnoreProjectBindingStubsDoNotCreateFalseGaps(t *testing.T) {
 			}
 			blocks := map[string]config.BlockBinding{}
 			if tc.platform {
-				blocks[review.BlockCodeReview] = config.BlockBinding{MCPTools: []string{"mcp__remote__echo"}}
+				tools := []string{"mcp__remote__echo"}
+				if tc.second {
+					tools = append(tools, "mcp__remote__second")
+				}
+				blocks[review.BlockCodeReview] = config.BlockBinding{MCPTools: tools}
 			}
 			if tc.override {
 				project := int64(42)
@@ -190,6 +202,10 @@ func TestIgnoreProjectBindingStubsDoNotCreateFalseGaps(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			wantBound := 1
+			if tc.second {
+				wantBound = 2
+			}
 			gaps := 0
 			for _, node := range snapshot.Nodes {
 				if node.Spec.Kind != review.KindCodeReview {
@@ -201,10 +217,12 @@ func TestIgnoreProjectBindingStubsDoNotCreateFalseGaps(t *testing.T) {
 				}
 				gaps += len(out.ToolGaps)
 				for _, gap := range out.ToolGaps {
-					// The node's single gap counts the effective bindings: the
-					// fixture binds one tool, and the project stub is not a tool.
-					if strings.Contains(gap, projectMCPStub) || !strings.Contains(gap, "1 bound tool(s) blocked by workspace index identity") {
-						t.Fatalf("gap does not count exactly the one effective binding: %s", gap)
+					// The node's single gap counts the effective bindings, not the
+					// one-item stub the static executor binding carries, so a second
+					// binding must change the count; "11 bound" must not pass for 1.
+					match := boundToolGapRE.FindStringSubmatch(gap)
+					if match == nil || match[1] != strconv.Itoa(wantBound) {
+						t.Fatalf("gap does not count exactly %d effective binding(s): %s", wantBound, gap)
 					}
 				}
 			}

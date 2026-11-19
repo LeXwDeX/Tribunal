@@ -32,8 +32,9 @@ const (
 )
 
 // seedSynthesisWorkflow stores a completed review whose synthesize output
-// carries the given review-level fields (summary, warnings, unresolved).
-func seedSynthesisWorkflow(env *m6Env, wfID, verdict string, fields map[string]any) {
+// carries the given review-level fields (summary, warnings, unresolved). The
+// workflow also has a completed review node for each of nodeIDs.
+func seedSynthesisWorkflow(env *m6Env, wfID, verdict string, fields map[string]any, nodeIDs ...string) {
 	mrIID := int64(11)
 	started := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
 	finished := started.Add(2 * time.Minute)
@@ -52,12 +53,15 @@ func seedSynthesisWorkflow(env *m6Env, wfID, verdict string, fields map[string]a
 		body[key] = value
 	}
 	synthesis, _ := json.Marshal(body)
-	fake.setNodes(wfID,
-		store.WorkflowNode{
-			WorkflowID: wfID, ID: "synthesize", Kind: "synthesize", Status: "completed",
-			Required: true, Attempt: 1, Output: synthesis,
-		},
-	)
+	nodes := make([]store.WorkflowNode, 0, len(nodeIDs)+1)
+	for _, id := range nodeIDs {
+		nodes = append(nodes, store.WorkflowNode{WorkflowID: wfID, ID: id, Kind: "code-review", Status: "completed", Attempt: 1})
+	}
+	nodes = append(nodes, store.WorkflowNode{
+		WorkflowID: wfID, ID: "synthesize", Kind: "synthesize", Status: "completed",
+		Required: true, Attempt: 1, Output: synthesis,
+	})
+	fake.setNodes(wfID, nodes...)
 }
 
 // seedUnresolvedWorkflow stores a completed INCOMPLETE review whose synthesize
@@ -243,7 +247,7 @@ func TestReviewDetailLocalizesWarningsAndDropsWhatUnresolvedAlreadyShows(t *test
 			{"node": "cr.p1", "kind": "evidence_gap", "message": indexGapMessage603},
 			{"node": "coverage", "kind": "evidence_gap", "message": "pipeline log unavailable"},
 		},
-	})
+	}, "explore", "cr.p1", "rv.p1", "reasoner")
 	response := env.businessClient().request(http.MethodGet, "/api/v1/reviews/wf-603-warnings", nil, nil)
 	assertStatus(t, response, http.StatusOK)
 	body := env.decode(t, response)
@@ -275,7 +279,7 @@ func TestReviewDetailAggregatesTheWarningsOfABlockingReview(t *testing.T) {
 			"cr.p1: " + indexGapMessage603,
 			"budget exhausted: some findings were not verified",
 		},
-	})
+	}, "explore", "cr.p1")
 	response := env.businessClient().request(http.MethodGet, "/api/v1/reviews/wf-603-blocking", nil, nil)
 	assertStatus(t, response, http.StatusOK)
 	body := env.decode(t, response)
@@ -301,7 +305,7 @@ func TestReviewDetailSendsAnEmptyWarningsTextWhenEveryWarningRepeats(t *testing.
 		"summary":    storedSummary603,
 		"warnings":   []string{"explore: " + indexGapMessage603},
 		"unresolved": []map[string]string{{"node": "explore", "kind": "evidence_gap", "message": indexGapMessage603}},
-	})
+	}, "explore")
 	response := env.businessClient().request(http.MethodGet, "/api/v1/reviews/wf-603-repeat", nil, nil)
 	assertStatus(t, response, http.StatusOK)
 	body := env.decode(t, response)
@@ -334,5 +338,98 @@ func TestReviewDetailLocalizesTheSanitizedWarnings(t *testing.T) {
 	}
 	if strings.Contains(string(response.body), "leaked upstream body") {
 		t.Fatalf("response leaks the stored verify diagnostic: %s", response.body)
+	}
+}
+
+// A warning is read as "<node>: <message>" only when the prefix names a node of
+// this workflow; any other prefix is part of the warning.
+func TestReviewDetailKeepsWarningsWithAnUnknownPrefixWhole(t *testing.T) {
+	fake := newFakeReviewStore()
+	env := newM6Env(t, m6Options{store: fake})
+	seedSynthesisWorkflow(env, "wf-603-prefix", "BLOCKING", map[string]any{
+		"summary": "发现 1 个 P1 问题。",
+		"warnings": []string{
+			"error: " + indexGapMessage603,
+			"P1: missing null check in the loader",
+			"explore: " + indexGapMessage603,
+		},
+	}, "explore")
+	response := env.businessClient().request(http.MethodGet, "/api/v1/reviews/wf-603-prefix", nil, nil)
+	assertStatus(t, response, http.StatusOK)
+	want := []string{
+		"error: " + indexGapMessage603,
+		"P1: missing null check in the loader",
+		indexMismatchText + "（explore）",
+	}
+	if got := stringList(t, env.decode(t, response)["warnings_text"]); !reflect.DeepEqual(got, want) {
+		t.Fatalf("warnings_text:\n got %q\nwant %q", got, want)
+	}
+}
+
+// The unresolved group lists explore only, so the same cause on cr.p1 is not a
+// repeat and stays in the warnings.
+func TestReviewDetailDropsAWarningOnlyForTheNodeOfItsUnresolvedGroup(t *testing.T) {
+	fake := newFakeReviewStore()
+	env := newM6Env(t, m6Options{store: fake})
+	seedSynthesisWorkflow(env, "wf-603-node", "INCOMPLETE", map[string]any{
+		"summary":    storedSummary603,
+		"warnings":   []string{"explore: " + indexGapMessage603, "cr.p1: " + indexGapMessage603},
+		"unresolved": []map[string]string{{"node": "explore", "kind": "evidence_gap", "message": indexGapMessage603}},
+	}, "explore", "cr.p1")
+	response := env.businessClient().request(http.MethodGet, "/api/v1/reviews/wf-603-node", nil, nil)
+	assertStatus(t, response, http.StatusOK)
+	want := []string{indexMismatchText + "（cr.p1）"}
+	if got := stringList(t, env.decode(t, response)["warnings_text"]); !reflect.DeepEqual(got, want) {
+		t.Fatalf("warnings_text:\n got %q\nwant %q", got, want)
+	}
+}
+
+// Model-supplied evidence gaps reach the API as signals verbatim. Only the shape
+// the executor writes is a tool gap: text that mentions the phrase keeps its
+// category and its own wording, in the signals, the summary and the warnings.
+func TestReviewDetailDoesNotTreatModelGapsAsToolGaps(t *testing.T) {
+	const (
+		prose   = "the build log says MCP tools unavailable: retry later"
+		indexed = "evidence is blocked by workspace index identity (index abcdef01, target 33333333)"
+	)
+	fake := newFakeReviewStore()
+	env := newM6Env(t, m6Options{store: fake})
+	seedSynthesisWorkflow(env, "wf-603-spoof", "INCOMPLETE", map[string]any{
+		"summary": "评审未完成：上游评审存在未解决的证据不足或阻断，不能给出 PASS。具体缺口：rv.p1: " + prose + "；rv.p2: " + indexed,
+		"warnings": []string{
+			"reasoner: " + prose,
+			"validate: " + indexed,
+		},
+		"unresolved": []map[string]string{
+			{"node": "rv.p1", "kind": "evidence_gap", "message": prose},
+			{"node": "rv.p2", "kind": "evidence_gap", "message": indexed},
+			{"node": "explore", "kind": "evidence_gap", "message": indexGapMessage603},
+		},
+	}, "explore", "rv.p1", "rv.p2", "reasoner", "validate")
+	response := env.businessClient().request(http.MethodGet, "/api/v1/reviews/wf-603-spoof", nil, nil)
+	assertStatus(t, response, http.StatusOK)
+	body := env.decode(t, response)
+
+	items := unresolvedItems(t, body)
+	if len(items) != 3 {
+		t.Fatalf("unresolved = %v", items)
+	}
+	for i, want := range []struct{ category, text string }{
+		{"evidence_gap", prose},
+		{"evidence_gap", indexed},
+		{"tool_unavailable", indexMismatchText},
+	} {
+		if items[i]["category"] != want.category || items[i]["text"] != want.text {
+			t.Fatalf("unresolved[%d] category/text = %v / %v, want %s / %s", i, items[i]["category"], items[i]["text"], want.category, want.text)
+		}
+	}
+	// The same sentences as warnings keep their own wording and their node.
+	wantWarnings := []string{prose + "（reasoner）", indexed + "（validate）"}
+	if got := stringList(t, body["warnings_text"]); !reflect.DeepEqual(got, wantWarnings) {
+		t.Fatalf("warnings_text:\n got %q\nwant %q", got, wantWarnings)
+	}
+	text, _ := body["summary_text"].(string)
+	if text == "" || strings.Contains(text, genericToolText) || strings.Contains(text, "不一致") {
+		t.Fatalf("summary_text words model text as a tool gap: %q", text)
 	}
 }
