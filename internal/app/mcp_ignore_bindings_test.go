@@ -201,8 +201,10 @@ func TestIgnoreProjectBindingStubsDoNotCreateFalseGaps(t *testing.T) {
 				}
 				gaps += len(out.ToolGaps)
 				for _, gap := range out.ToolGaps {
-					if strings.Contains(gap, projectMCPStub) || !strings.Contains(gap, "mcp__remote__echo") {
-						t.Fatalf("gap does not name an effective binding: %s", gap)
+					// The node's single gap counts the effective bindings: the
+					// fixture binds one tool, and the project stub is not a tool.
+					if strings.Contains(gap, projectMCPStub) || !strings.Contains(gap, "1 bound tool(s) blocked by workspace index identity") {
+						t.Fatalf("gap does not count exactly the one effective binding: %s", gap)
 					}
 				}
 			}

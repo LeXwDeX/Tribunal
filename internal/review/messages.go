@@ -256,6 +256,10 @@ func localizeMachineMessage(message string) (string, bool) {
 		return "部分新增问题未完成二次验证，未发布。", true
 	case strings.HasPrefix(message, "verify failed for group "), strings.HasPrefix(message, "verify result missing for group "):
 		return "部分问题的二次验证未完成，已按存疑处理。", true
+	case strings.Contains(message, "blocked by workspace index identity"):
+		// More specific than the generic tool gap below. Older workflows stored
+		// one gap per tool with the same cause.
+		return "代码图谱索引提交与本 MR 目标提交不一致，本次未启用代码图谱工具，相关范围可能未被完整评审。", true
 	case strings.Contains(message, "MCP tools unavailable"):
 		return "部分评审工具不可用，相关范围可能未被完整评审。", true
 	}
