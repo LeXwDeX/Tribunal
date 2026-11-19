@@ -428,7 +428,7 @@ func TestRunReviewContinuesWithoutTargetGraphWhenUnavailable(t *testing.T) {
 		t.Fatal(err)
 	}
 	gaps := codeReviewToolGaps(t, f.reviewFixture, wf.ID)
-	if wf.Verdict != review.VerdictIncomplete || len(gaps) != 1 || !strings.Contains(gaps[0], "mcp__graph__search_graph") {
+	if wf.Verdict != review.VerdictIncomplete || len(gaps) != 1 || !strings.Contains(gaps[0], "1 bound tool(s) blocked by workspace index identity") {
 		t.Fatalf("verdict = %s, gaps = %v; want the existing disclosed tool gap", wf.Verdict, gaps)
 	}
 	if f.sharedHits.Load() != 0 || f.targetHits.Load() != 0 {
