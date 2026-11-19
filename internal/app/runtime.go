@@ -723,10 +723,27 @@ func (r *Runtime) Handlers() map[string]jobs.Handler {
 
 // Recover runs engine recovery, rebuilds review executors, and retries pending
 // publications, then runs the catch-up scan for MR heads whose webhook was
-// missed while the service was down (#362). It must be called after the job
-// worker starts. The catch-up setting is read once at startup.
+// missed while the service was down (#362) and queues the refreshes that heal
+// workspaces left stale by an ignore verdict from before #457 (#618). It must
+// be called after the job worker starts. The catch-up setting is read once at
+// startup.
 func (r *Runtime) Recover(ctx context.Context) error {
-	return r.recoverThenCatchUp(ctx, r.engine.Recover, r.reviews.Recover)
+	err := r.recoverThenCatchUp(ctx, r.engine.Recover, r.reviews.Recover)
+	r.healStaleIgnoreBlocked(ctx)
+	return err
+}
+
+// healStaleIgnoreBlocked queues the one-shot refreshes of workspaces whose
+// stored "blocked by ignore policy" text no longer matches the current policy.
+// It is best effort and never fails recovery: like the catch-up scan it runs
+// even when recovery reported an error.
+func (r *Runtime) healStaleIgnoreBlocked(ctx context.Context) {
+	if r.workspaces == nil || ctx.Err() != nil {
+		return
+	}
+	if _, err := r.workspaces.RefreshStaleIgnoreBlocked(ctx); err != nil && ctx.Err() == nil {
+		r.logger.Warn("stale ignore block check failed", "error_class", errclass.Of(err))
+	}
 }
 
 // recoverThenCatchUp always runs the catch-up scan after recovery, even when

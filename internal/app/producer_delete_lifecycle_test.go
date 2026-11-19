@@ -267,9 +267,12 @@ func (s *barrierWorkspaceEnqueue) Enqueue(ctx context.Context, job store.Job) (s
 }
 
 func TestLifecycleDeleteWaitsForProducerEnqueue(t *testing.T) {
-	for _, operation := range []string{"webhook", "dispatch-review", "dispatch-refresh", "command", "onboard", "refresh"} {
+	for _, operation := range []string{"webhook", "dispatch-review", "dispatch-refresh", "command", "onboard", "refresh", "stale-ignore"} {
 		t.Run(operation, func(t *testing.T) {
 			r := newLifecycleRuntime(t)
+			if operation == "stale-ignore" {
+				seedStaleIgnoreBlocked(t, r.store, 42)
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			b := &enqueueBarrier{entered: make(chan struct{}), release: make(chan struct{})}
@@ -301,6 +304,8 @@ func TestLifecycleDeleteWaitsForProducerEnqueue(t *testing.T) {
 					_, err = r.workspaces.EnqueueOnboard(ctx, 42)
 				case "refresh":
 					_, err = r.workspaces.EnqueueRefresh(ctx, 42, "refs/heads/main", "main", sha40)
+				case "stale-ignore":
+					_, err = r.workspaces.RefreshStaleIgnoreBlocked(ctx)
 				}
 				done <- err
 			}()

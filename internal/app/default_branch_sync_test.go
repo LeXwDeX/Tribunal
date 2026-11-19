@@ -847,6 +847,7 @@ func TestDefaultBranchRefreshTriggersFollowCurrentDefault(t *testing.T) {
 		{trigger: "manual", ref: "refs/heads/main", want: "+refs/heads/develop:refs/workspace/base"},
 		{trigger: catchUpTrigger, ref: "refs/heads/main", want: "+refs/heads/develop:refs/workspace/base"},
 		{trigger: "default_branch_changed", ref: "", want: "+refs/heads/develop:refs/workspace/base"},
+		{trigger: staleIgnoreBlockedTrigger, ref: "refs/heads/release", want: "+refs/heads/develop:refs/workspace/base"},
 		{trigger: "push", ref: "refs/heads/release", want: "+refs/heads/release:refs/workspace/base"},
 		{name: "push to the previous default", trigger: "push", ref: "refs/heads/main", want: "+refs/heads/develop:refs/workspace/base"},
 		{name: "push to the unchanged default", trigger: "push", ref: "refs/heads/main", gitlab: "main", want: "+refs/heads/main:refs/workspace/base"},

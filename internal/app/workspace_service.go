@@ -186,7 +186,7 @@ func (s *WorkspaceService) Handle(ctx context.Context, job *jobs.Job) error {
 		} else {
 			ref := payload.Ref
 			switch payload.Trigger {
-			case "manual", catchUpTrigger, defaultBranchChangedTrigger:
+			case "manual", catchUpTrigger, defaultBranchChangedTrigger, staleIgnoreBlockedTrigger:
 				// These refreshes mean "the default branch" and captured it when
 				// they were queued. Follow the current default instead, which
 				// refreshBase synchronizes from GitLab first (#604).
@@ -284,12 +284,19 @@ func (s *WorkspaceService) lockEnqueueProject(ctx context.Context, projectID int
 }
 
 func enqueueJob(ctx context.Context, queue JobEnqueuer, kind, key string, payload any) (string, error) {
+	id, _, err := enqueueJobOnce(ctx, queue, kind, key, payload)
+	return id, err
+}
+
+// enqueueJobOnce is enqueueJob that also reports whether a job with the same
+// key was already queued: the queue then returns that job's ID and leaves its
+// payload alone.
+func enqueueJobOnce(ctx context.Context, queue JobEnqueuer, kind, key string, payload any) (id string, duplicate bool, err error) {
 	encoded, err := json.Marshal(payload)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	id, _, err := queue.Enqueue(ctx, store.Job{Kind: kind, Key: key, Payload: encoded, MaxAttempts: 3})
-	return id, err
+	return queue.Enqueue(ctx, store.Job{Kind: kind, Key: key, Payload: encoded, MaxAttempts: 3})
 }
 
 // consumerJobExists checks the original persisted job while holding its
@@ -400,12 +407,20 @@ func (s *WorkspaceService) refreshWithOptions(ctx context.Context, projectID int
 		s.markWorkspaceError(ctx, projectID, err)
 		return err
 	}
+	restricted := config.ReviewIgnoreRestricted(cfg.Settings.Ignore)
 	reindex := options.Reindex == nil || *options.Reindex
+	// "Blocked by ignore policy" under a policy that no longer restricts is stale
+	// (the state a pre-#457 refresh left behind). A refresh without reindex
+	// would rewrite it as an indexing failure that never ran, so rebuild the
+	// index instead (#618).
+	if !restricted && state.LastError == store.WorkspaceIndexBlockedByIgnore {
+		reindex = true
+	}
 	indexSHA := state.IndexSHA
 	indexErr := ""
 	indexEligible := !reindex && state.State == "ready" && state.LastError == "" && shaRE.MatchString(newBase) && shaRE.MatchString(indexSHA) && strings.EqualFold(indexSHA, newBase)
-	if config.ReviewIgnoreRestricted(cfg.Settings.Ignore) {
-		indexErr = "index: blocked by ignore policy"
+	if restricted {
+		indexErr = store.WorkspaceIndexBlockedByIgnore
 	} else if reindex && s.mcpFactory != nil {
 		count, err := s.runIndex(ctx, projectID, ws.BaseDir())
 		switch {
@@ -528,7 +543,7 @@ func (s *WorkspaceService) onboardLocked(ctx context.Context, project *store.Pro
 	indexed := false
 	indexErr := ""
 	if config.ReviewIgnoreRestricted(cfg.Settings.Ignore) {
-		indexErr = "index: blocked by ignore policy"
+		indexErr = store.WorkspaceIndexBlockedByIgnore
 	} else if s.mcpFactory != nil {
 		count, err := s.runIndex(ctx, project.ID, ws.BaseDir())
 		switch {

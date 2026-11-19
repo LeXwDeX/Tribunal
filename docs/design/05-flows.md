@@ -130,11 +130,11 @@ Note Hook 统一先持久化为 `review.command`，以下 GitLab 校验由 worke
 1. Push Hook 到达，`ref` 匹配目标分支 → 入队 `workspace.refresh`（key=`ws:<pid>`，自动合并重复）。
 2. 工作区 `Lock`（等待进行中的评审释放读锁，最长 10 分钟，超时则延后重试）。
 3. `git fetch`，`base/` 检出到新的 `after` sha；`workspaces.base_sha` 更新。
-4. 外部索引增量更新（如 `codebase-memory-mcp cli index_repository`，cwd 为 `base/`）。只有项目或仓库追加的 ignore 规则（超出内置默认 6 条）才阻断索引；内置默认规则不再阻止索引和管理员绑定的 MCP 工具。非取消的索引失败不阻断刷新，保留旧 `index_sha`；其他必要步骤及状态保存成功时最终 `state=ready` 并记录固定的索引失败消息。
+4. 外部索引增量更新（如 `codebase-memory-mcp cli index_repository`，cwd 为 `base/`）。只有项目或仓库追加的 ignore 规则（超出内置默认 6 条）才阻断索引；内置默认规则不再阻止索引和管理员绑定的 MCP 工具。工作区 `last_error` 仍是 `index: blocked by ignore policy` 而当前策略已不受限时（#457 之前写入的过期状态），无论是否请求 reindex 都重建索引（[#618](https://github.com/LeXwDeX/Tribunal/issues/618)）。非取消的索引失败不阻断刷新，保留旧 `index_sha`；其他必要步骤及状态保存成功时最终 `state=ready` 并记录固定的索引失败消息。
 5. 判断是否重新生成上下文文档：以当前生效上下文文档的 base 为起点，比较其到新 base 的**累计**变更文件数 ≥ `context_refresh.changed_files`，或距**最后一次成功生成**的时间 ≥ `context_refresh.max_age`，且当前文档未锁定 → 运行 onboarding 工作流（F5 第 4 步起）。普通工作区刷新不推进该时间锚点，持续小批量 push 会累计漂移。
 6. 释放锁。
 
-**其他刷新触发与默认分支**（[#604](https://github.com/LeXwDeX/Tribunal/issues/604)）：`workspace.refresh` 也由手动刷新（控制台「刷新工作区」或 `POST /api/v1/projects/{id}/workspace/refresh`）、启动追赶扫描（trigger `catch_up`）和评审准备或 webhook 载荷（`project.default_branch` 与存储值不同）发现默认分支变化（trigger `default_branch_changed`）入队。这三类都表示“刷新默认分支”：执行时不使用入队时记下的分支，而是在读取 GitLab 项目时先同步存储的默认分支（`projects.default_branch`；GitLab 报告的值非空、是合法分支名且与存储值不同才更新），再取当前默认分支的最新提交作为第 3 步检出的目标。push 触发的刷新（trigger `push`）仍取 push 的 `ref`，只有推的正是同步前存储的旧默认分支且默认分支已变化时改取新默认分支。onboarding（F5 第 4 步）同理。同步失败只记 WARN，不影响刷新。同步条件、日志与限制见[运维手册](../operations.md#默认分支同步)。
+**其他刷新触发与默认分支**（[#604](https://github.com/LeXwDeX/Tribunal/issues/604)）：`workspace.refresh` 也由手动刷新（控制台「刷新工作区」或 `POST /api/v1/projects/{id}/workspace/refresh`）、启动追赶扫描（trigger `catch_up`）和评审准备或 webhook 载荷（`project.default_branch` 与存储值不同）发现默认分支变化（trigger `default_branch_changed`）入队；启动时对 #457 之前写入的过期 ignore 阻断状态另排队一次带 `reindex=true` 的刷新（trigger `stale_ignore_block`，见[运维手册](../operations.md#ignore-策略与索引)）。这几类都表示“刷新默认分支”：执行时不使用入队时记下的分支，而是在读取 GitLab 项目时先同步存储的默认分支（`projects.default_branch`；GitLab 报告的值非空、是合法分支名且与存储值不同才更新），再取当前默认分支的最新提交作为第 3 步检出的目标。push 触发的刷新（trigger `push`）仍取 push 的 `ref`，只有推的正是同步前存储的旧默认分支且默认分支已变化时改取新默认分支。onboarding（F5 第 4 步）同理。同步失败只记 WARN，不影响刷新。同步条件、日志与限制见[运维手册](../operations.md#默认分支同步)。
 
 ---
 

@@ -2,6 +2,20 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 升级前必读
+
+- **升级后首次启动会为部分项目排队一次完整索引**（[#618](https://github.com/LeXwDeX/Tribunal/issues/618)）：[#457](https://github.com/LeXwDeX/Tribunal/issues/457)（v1.5.0）之前登记或刷新、此后默认分支没有新 push 的项目，工作区仍停在 `index: blocked by ignore policy` 的过期状态。启动恢复为这类项目（已启用、工作区 `ready`、按平台默认与项目设置已不受限）各排队至多一次工作区刷新并重建索引，每个这样的项目是一次完整索引（占用 CPU、磁盘和时间）；没有这类项目时不排队任何任务。无数据库迁移，无配置变更。见[ignore 策略与索引](docs/operations.md#ignore-策略与索引)。
+
+### 修复
+
+- **启动时自愈 [#457](https://github.com/LeXwDeX/Tribunal/issues/457) 之前写入的过期 ignore 阻断状态**（[#618](https://github.com/LeXwDeX/Tribunal/issues/618)）：工作区的 ignore 判定只在 onboarding 与刷新时求值，结果写进 `last_error`，此后不再重新求值。#457（v1.5.0）之前只要有效 ignore 非空就算受限，而内置默认规则恒在，所以当时登记或刷新的项目都被存成 `state=ready`、`index_sha` 为空、`last_error` 为 `index: blocked by ignore policy`。升级后这些项目按当前规则已不受限，但只要默认分支没有新的 push，状态就一直停在原处：共享工作区索引始终没有建立（评审为目标提交建立目标图谱时每次都要完整索引一次，更早的版本则直接扣留代码图谱工具）；控制台对没有任何 ignore 配置的项目显示「已按 ignore 策略跳过索引，这是安全配置」；手动的普通「刷新工作区」（不带 reindex）还把文案改写成 `index: code graph indexing failed`，仍然不建索引，原因被掩盖。现在：
+  - 启动自愈：`Runtime.Recover` 在恢复与 catch-up 扫描之后做一次检查，遍历已启用的项目，工作区 `state=ready`、`last_error` 正好是该文案、且按平台 `review_defaults` 加项目设置求值已不受限的，各排队一次 `workspace.refresh`（key `ws:<项目 ID>`，trigger `stale_ignore_block`，`reindex=true`，不重新生成上下文，跟随默认分支）。该项目已有排队中的刷新时不重复入队，也不改写原任务；入队持项目生命周期读锁并在锁内重读项目，不取工作区内容读锁。刷新重建索引后 `last_error` 被清空，之后再启动不会重复入队。INFO `stale ignore block refresh enqueued`（字段 `project_id`）；入队失败只记 WARN `stale ignore block refresh enqueue failed`（字段 `project_id`、`error_class`），整个检查失败记 WARN `stale ignore block check failed`（字段 `error_class`），都不影响启动恢复。
+  - 仓库 `.gitlab-review.yml` 仍追加 ignore 规则的项目：检查不访问 GitLab，只看平台默认与项目设置，所以仍会为它排队刷新；刷新按完整规则求值，仍然受限就写回同一文案、不建索引，行为正确，但这类项目每次启动都会多排队一次不建索引的刷新。
+  - 手动刷新：`last_error` 是该文案而当前已不受限时，即使请求 `reindex=false` 也重建索引，不再改写成 `index: code graph indexing failed`；仍然受限时行为不变。
+  - 成本与范围：每个受影响项目在升级后首次启动时完整索引一次 base checkout；没有受影响项目时启动不排队任何任务。没有配置索引命令（`x-review.index_command`）的部署，这次刷新不建索引，`last_error` 改为 `index: code graph indexing failed`，与任何一次普通刷新的结果一致。无数据库迁移，无配置变更；不改变 ignore 受限的判定规则，也不增加周期性检查。
+
 ## [1.9.0] - 2026-11-20
 
 ### 升级前必读
