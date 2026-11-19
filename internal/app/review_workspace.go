@@ -36,18 +36,21 @@ func (s *ReviewService) reviewIndexState(ctx context.Context, projectID int64, t
 
 // canBuildTargetGraph reports whether a review may get a per-run code graph at
 // all. A restricted ignore policy never reaches an index, the same boundary as
-// the shared workspace index.
+// the shared workspace index, and an index nobody can read is not worth building:
+// a block the review graph runs must bind a tool of an index-backed server.
 func (s *ReviewService) canBuildTargetGraph(execution *reviewExecution, ignores []string) bool {
-	return s.targetGraphs != nil && execution != nil && execution.mcp != nil && !config.ReviewIgnoreRestricted(ignores)
+	return s.targetGraphs != nil && execution != nil && execution.mcp != nil &&
+		!config.ReviewIgnoreRestricted(ignores) && execution.bindsIndexedTool()
 }
 
 // useTargetGraph indexes the review base into a graph of its own when the shared
 // workspace index is not at startSHA, and routes the index-backed MCP tools of
-// execution to it. It returns nil without a graph when none applies or none
-// could be built, and the review then continues without those tools. A caller
-// that is done or a revoked outbound policy stop the review instead. The caller
-// closes the graph before it removes baseDir, holds the workspace read lock and
-// passes a context bound to the workspace's outbound gate.
+// execution to it. It returns nil without a graph when none applies (see
+// canBuildTargetGraph) or none could be built, and the review then continues
+// without those tools. A caller that is done or a revoked outbound policy stop
+// the review instead. The caller closes the graph before it removes baseDir,
+// holds the workspace read lock and passes a context bound to the workspace's
+// outbound gate.
 func (s *ReviewService) useTargetGraph(ctx context.Context, project *store.Project, ws *workspace.Workspace, execution *reviewExecution, runID, baseDir, startSHA string, ignores []string) (*targetGraph, error) {
 	if baseDir == "" || !s.canBuildTargetGraph(execution, ignores) {
 		return nil, nil
@@ -60,6 +63,7 @@ func (s *ReviewService) useTargetGraph(ctx context.Context, project *store.Proje
 		StartSHA:  startSHA,
 		MCP:       execution.mcpConfig,
 		DeniedEnv: execution.deniedEnv,
+		Ignore:    ignores,
 	})
 	var unavailable *targetGraphUnavailable
 	switch {
@@ -70,6 +74,12 @@ func (s *ReviewService) useTargetGraph(ctx context.Context, project *store.Proje
 	case err != nil:
 		return nil, err
 	case graph == nil:
+		// A remote index-backed server serves its own index, so there is nothing
+		// to build per run. Say so once, without naming the servers.
+		if _, local := indexedLocalServers(execution.mcpConfig); !local {
+			s.logger.Debug("target code graph skipped: an index-backed MCP server is not a local stdio server",
+				"project_id", project.ID)
+		}
 		return nil, nil
 	}
 	execution.tools = routeTargetGraphTools(execution.mcp, graph, execution.blocks)

@@ -132,6 +132,8 @@ func TestClassifyGitStderr(t *testing.T) {
 		"fatal: unable to access 'https://h/x.git/': TLS connect error: error:0A000126:SSL routines::unexpected eof while reading":                                ReasonNetwork,
 		"fatal: unable to access 'https://h/x.git/': SSL: no alternative certificate subject name matches target host name 'h'":                                   ReasonNetwork,
 		"fatal: unable to access 'https://h/x.git/': gnutls_recv: error (-110)":                                                                                   ReasonNetwork,
+		"fatal: '/runs/job-base' is a missing but already registered worktree;\nuse 'add -f' to override, or 'prune' or 'remove' to clear":                        ReasonWorktreeRegistered,
+		"fatal: '/runs/job-base' is a missing but locked worktree;\nuse 'add -f -f' to override, or 'unlock' and 'prune' or 'remove' to clear":                    "",
 		"fatal: something else entirely": "",
 		"":                               "",
 	}

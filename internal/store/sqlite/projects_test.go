@@ -398,6 +398,64 @@ func TestUpdateProjectDefaultBranchRejectsInvalidInput(t *testing.T) {
 	}
 }
 
+// The application validates a default branch as a Git ref before it calls the
+// store; the store still refuses names no branch should carry, so a caller that
+// skipped the check cannot persist an option-like, control-character or
+// oversized value.
+func TestUpdateProjectDefaultBranchRejectsUnsafeNames(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t, newFakeClock())
+	mustProject(t, s, 42)
+
+	rejected := map[string]string{
+		"leading dash":              "-x",
+		"option-like":               "--upload-pack=x",
+		"space":                     "a b",
+		"leading space":             " main",
+		"trailing space":            "main ",
+		"tab":                       "a\tb",
+		"newline":                   "a\nb",
+		"carriage return":           "a\rb",
+		"NUL":                       "a\x00b",
+		"escape":                    "a\x1bb",
+		"DEL":                       "a\x7fb",
+		"C1 control":                "a\u0090b",
+		"non-breaking space":        "a\u00a0b",
+		"line separator":            "a\u2028b",
+		"256 bytes":                 strings.Repeat("a", maxDefaultBranchBytes+1),
+		"256 bytes, multibyte":      strings.Repeat("a", maxDefaultBranchBytes-2) + "孙",
+		"few characters, 258 bytes": strings.Repeat("孙", 86),
+	}
+	for name, next := range rejected {
+		applied, err := s.UpdateProjectDefaultBranch(ctx, 42, "main", next)
+		if err == nil || applied {
+			t.Errorf("%s (%q) = %v, %v; want an error", name, next, applied, err)
+		}
+	}
+	// A rejected name is an error even when it equals the stored value.
+	if applied, err := s.UpdateProjectDefaultBranch(ctx, 42, "a b", "a b"); err == nil || applied {
+		t.Errorf("unchanged unsafe name = %v, %v; want an error", applied, err)
+	}
+	saved, err := s.GetProject(ctx, 42)
+	if err != nil || saved.DefaultBranch != "main" {
+		t.Fatalf("rejected updates changed the row: %+v, %v", saved, err)
+	}
+
+	// Ordinary names, including the longest allowed one, still go through.
+	previous := "main"
+	for _, next := range []string{
+		"develop", "release/1.0", "feature/ü-ж", "v1.2.3-rc.1", "a-b_c",
+		strings.Repeat("b", maxDefaultBranchBytes),
+		strings.Repeat("孙", maxDefaultBranchBytes/3),
+	} {
+		applied, err := s.UpdateProjectDefaultBranch(ctx, 42, previous, next)
+		if err != nil || !applied {
+			t.Fatalf("%q = %v, %v; want it stored", next, applied, err)
+		}
+		previous = next
+	}
+}
+
 func TestDeleteProjectCleansExtensionsAndBindings(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t, newFakeClock())

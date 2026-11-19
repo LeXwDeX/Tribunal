@@ -186,7 +186,7 @@ func (s *WorkspaceService) Handle(ctx context.Context, job *jobs.Job) error {
 		} else {
 			ref := payload.Ref
 			switch payload.Trigger {
-			case "manual", catchUpTrigger, "default_branch_changed":
+			case "manual", catchUpTrigger, defaultBranchChangedTrigger:
 				// These refreshes mean "the default branch" and captured it when
 				// they were queued. Follow the current default instead, which
 				// refreshBase synchronizes from GitLab first (#604).
@@ -713,6 +713,7 @@ func (s *WorkspaceService) refreshBase(ctx context.Context, ws *workspace.Worksp
 	// The lookup above reports the live default branch. Follow a change before
 	// a branch is chosen below, so this refresh and the context generated from
 	// it use the new default instead of the registered one (#604).
+	previousDefault := project.DefaultBranch
 	syncDefaultBranch(ctx, s.store, s.logger, project, current)
 	auth := repo.Auth{Token: token}
 	if strings.TrimSpace(ref) == "" {
@@ -723,6 +724,12 @@ func (s *WorkspaceService) refreshBase(ctx context.Context, ws *workspace.Worksp
 	}
 	if !strings.HasPrefix(ref, "refs/") {
 		ref = "refs/heads/" + ref
+	}
+	// A push refresh queued for the branch that was the default (a push to it
+	// passed the stored-default filter) must not keep fetching that branch once
+	// the default moved on, whether this call or a concurrent writer moved it.
+	if project.DefaultBranch != previousDefault && ref == "refs/heads/"+previousDefault {
+		ref = "refs/heads/" + project.DefaultBranch
 	}
 	sha, err := fetchProjectRef(ctx, ws, s.git, remote, auth, "+"+ref+":refs/workspace/base", "refs/workspace/base")
 	if err != nil {

@@ -610,7 +610,7 @@ default_extensions:
 
 `HOME` 必须由应用在工作区内创建并校验；脚本不是文件系统沙箱，也不替代应用的环境变量和工具白名单。
 
-**运行时目录与 socket 路径长度**：Unix socket 对路径长度有限制。codebase-memory-mcp 0.12.1 在 `CBM_RUNTIME_DIR` 下建 `cbm-<id>.sock`，运行时目录超过约 60 字节时所有调用（含 `cli index_repository`）都会失败。脚本在 `$HOME/run` 不超过 48 字节时保持原样；更长时改用 `/tmp/tcbm-<uid>/<HOME 的 SHA-256 前 16 位>`（目录权限 0700）。父目录 `/tmp/tcbm-<uid>` 必须是当前用户自己的真实目录，符号链接、他人目录或非目录都会让脚本报错退出，不会被采用（fail closed）；`/tmp` 须对服务用户可写，回退路径还需要 `sha256sum` 或 `shasum` 计算哈希，两者都没有时脚本同样报错退出。只有协调文件移出，图谱数据和缓存仍在 `HOME` 内，每个 `HOME` 仍有各自的运行时目录，隔离不变。脚本启动时还会尽力删除该父目录下其他 `HOME` 的、超过两天未变的叶子目录（`find -mtime +2`，GNU find 按整日向下取整，实际为至少 3 个整日；失败被忽略）。标准 Docker 布局（`workspace.root: /app/data/workspaces`，`home: .mcp/codebase-memory/home`）下 `$HOME/run` 至少 52 字节，因此总是使用回退目录；每个评审的目标图谱 `HOME` 在 `graphs/<runID>/` 之下、路径更深，同样走回退。因此保持工作区根路径较短不再是内置 wrapper 的前提，但自写启动脚本或其他基于 unix socket 的 MCP 服务器仍须自行保证路径长度。
+**运行时目录与 socket 路径长度**：Unix socket 对路径长度有限制。codebase-memory-mcp 0.12.1 在 `CBM_RUNTIME_DIR` 下建 `cbm-<id>.sock`，运行时目录超过约 60 字节时所有调用（含 `cli index_repository`）都会失败。脚本在 `$HOME/run` 不超过 57 字节时保持原样（macOS 上实测运行时目录 60 字节可用、70 字节失败）；更长时改用 `/tmp/tcbm-<uid>/<HOME 的 SHA-256 前 16 位>`（目录权限 0700）。父目录 `/tmp/tcbm-<uid>` 必须是当前用户自己的真实目录，符号链接、他人目录或非目录都会让脚本报错退出，不会被采用（fail closed）；已存在的自有目录会被收紧为 0700，收紧失败同样报错退出；`/tmp` 须对服务用户可写，回退路径还需要 `sha256sum` 或 `shasum` 计算哈希，两者都没有时脚本同样报错退出。只有协调文件移出，图谱数据和缓存仍在 `HOME` 内，每个 `HOME` 仍有各自的运行时目录，隔离不变。每个这样的运行时目录在 `.home` 里记录它服务的 `HOME`（HOME 路径含换行时不写记录）；脚本启动时尽力删除该父目录下其他目录中记录的 `HOME` 已不存在的（评审结束后目标图谱的 `HOME` 被删除，其目录不会再被用到）。判断依据是 `HOME` 是否还在，不看修改时间，长期空闲的 server 的目录不会被误删；名称不是 16 位小写十六进制、不是真实目录、没有 `.home` 或 `.home` 不可信（符号链接、非普通文件、超过 4096 字节、不是单行绝对路径）的目录一律不动；清理失败被忽略。标准 Docker 布局（`workspace.root: /app/data/workspaces`，`home: .mcp/codebase-memory/home`）下 `$HOME/run` 为 52 到 57 字节（项目 ID 不超过 6 位），不超过阈值，保持在 `HOME` 下；每个评审的目标图谱 `HOME` 在 `graphs/<runID>/` 之下、路径更深，走回退目录。因此保持工作区根路径较短不再是内置 wrapper 的前提，但自写启动脚本或其他基于 unix socket 的 MCP 服务器仍须自行保证路径长度。
 
 在新平台或新上游版本上，需重新验证两个项目并发连接、索引复用和未授权工具拒绝，不能只凭 `index_status=ready` 判断隔离成功。
 
@@ -629,7 +629,7 @@ default_extensions:
 
 - **没有新配置项**：是否启用只取决于 MCP 配置和 ignore。有效 ignore 未受限，且平台与项目配置合并后所有设置了 `x-review.index_command` 的服务器都是 stdio 时才启用；其中有 http 类型的服务器时不启用。示例配置和 Docker 配置中的内置 `codebase-memory` 满足这些条件。
 - **隔离方式**：评审用一个只含这些带索引命令服务器的独立 MCP manager 运行 `index_command`，它的工作区是项目工作区下的 `graphs/<runID>/`，所以相对路径的 `x-review.home` 落在该目录之下，这些服务器的 `HOME` 和图谱只含这一份；`{base_dir}` 是本次评审的 base checkout。带索引命令服务器的工具从这个 manager 绑定，其他 MCP 服务器仍走项目共享 manager。
-- **生命周期与上限**：等同一次评审 run，评审结束先关闭 manager 再删除目录，不跨评审缓存。等待并发名额加索引合计最多 10 分钟，进程内最多 2 个目标图谱索引同时运行；两者都是代码常量，不可配置。每次需要目标图谱的评审都会完整索引一次 base checkout，默认分支 MR 在工作区索引已跟上时不额外索引。
+- **生命周期与上限**：等同一次评审 run，评审结束先关闭 manager 再删除目录，不跨评审缓存。等待并发名额最多 5 分钟，取得名额后索引最多 10 分钟，进程内最多 2 个目标图谱索引同时运行，同一项目、提交与索引配置的可降级失败在 15 分钟内不重试；这些都是代码常量，不可配置。每次需要目标图谱的评审都会完整索引一次 base checkout，默认分支 MR 在工作区索引已跟上时不额外索引。
 - **资格证明不放宽**：目标图谱的索引 SHA 仍须等于目标提交。dossier 的 `workspace_provenance` 新增可选字段 `index_source`：`workspace` 为共享工作区索引，`run` 为本次评审的目标图谱；`version` 不变，缺少该字段的旧 dossier 按共享工作区索引解释，照常读取与恢复。
 - **提示词不变**：`_platform_rules.md` 的图谱时效规则不变，图谱仍只描述目标分支的 base 侧，见下文「6. prompt 覆盖」中的图谱时效规则。
 

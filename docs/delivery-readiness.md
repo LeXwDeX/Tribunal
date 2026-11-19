@@ -148,8 +148,8 @@
 - 基于 `main` `8b6226a` 的分支。改动含后端（评审的目标图谱、默认分支同步、内置 wrapper 的运行时目录回退、run cleanup 的 `graphs/` 清理）、dossier 可选字段 `workspace_provenance.index_source` 和相应文档；无数据库迁移、无配置项变更，范围见 [CHANGELOG](../CHANGELOG.md) 的 Unreleased 段。随代码提交的单测覆盖：目标图谱的构建、降级、工具路由与清理（`internal/app`、`internal/workspace`），评审与恢复路径对目标图谱的使用，默认分支同步的比较更新与刷新入队，`index_source` 的合法性与旧 dossier 兼容，run cleanup 对 `graphs/` 的保护规则，`UpdateProjectDefaultBranch` 的比较更新，以及 wrapper 的运行时目录回退（`scripts`）。
 - **待记录**：本地检查、自建 CI 的 `RESULT PASS` 摘要行（含被测提交 SHA）和 GitHub Actions 的 go / web / docker 结果在对应 PR 中记录，此处不预填；未运行的检查不计为 PASS。
 - **BLOCKED**：真实部署验收未执行。缺：一套隔离的测试部署（含真实 GitLab 测试项目，以及模型 provider 的凭据与端点），和一个目标分支不是默认分支的 MR。待验证的内容：该 MR 的评审得到目标图谱（没有 `target code graph unavailable; continuing without it` 告警，dossier 的 `workspace_provenance.index_source` 为 `run`，评审不因图谱工具缺口降为 INCOMPLETE），评审结束后 `graphs/<runID>` 已删除。在真实 GitLab 上改默认分支后的同步与刷新，以及进程重启后重建目标图谱的恢复，同样只有单测覆盖。
-- **BLOCKED**：用镜像内真实 codebase-memory-mcp 二进制对长 `HOME`（`graphs/<runID>/` 之下的深路径，走 wrapper 的 `/tmp/tcbm-<uid>/<hash>` 回退）建索引并经 MCP 调用的 Docker smoke 未执行（缺可运行 Docker smoke 的环境）。现有 Docker smoke 的索引 `HOME` 路径很短，`$HOME/run` 不超过 48 字节，没有走回退；wrapper 的回退只有替身二进制的单测，目标图谱的单测用注入的索引命令与 MCP 替身，没有运行真实索引命令。
-- **BLOCKED**：目标图谱在真实大型仓库上的索引耗时、内存和磁盘占用没有测量记录；单次 10 分钟上限与进程内 2 个并发名额是代码常量，不能据此声称满足容量目标。
+- **BLOCKED**：用镜像内真实 codebase-memory-mcp 二进制对长 `HOME`（`graphs/<runID>/` 之下的深路径，走 wrapper 的 `/tmp/tcbm-<uid>/<hash>` 回退）建索引并经 MCP 调用的 Docker smoke 未执行（缺可运行 Docker smoke 的环境）。现有 Docker smoke 的索引 `HOME` 路径很短，`$HOME/run` 不超过 57 字节，没有走回退；wrapper 的回退只有替身二进制的单测，目标图谱的单测用注入的索引命令与 MCP 替身，没有运行真实索引命令。
+- **BLOCKED**：目标图谱在真实大型仓库上的索引耗时、内存和磁盘占用没有测量记录；等待名额 5 分钟、单次索引 10 分钟上限与进程内 2 个并发名额是代码常量，不能据此声称满足容量目标。
 - 升级与回退：无迁移，升级后的行为变化见[运维文档](operations.md#目标提交代码图谱与默认分支同步604)。
 
 <a id="v180-验证状态"></a>

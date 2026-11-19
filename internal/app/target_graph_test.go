@@ -80,8 +80,9 @@ func newTargetGraphFixture(t *testing.T) *targetGraphFixture {
 	f.builder = newTargetGraphBuilder(git)
 	f.builder.slots = make(chan struct{}, 1)
 	// Tests that wait for a signal fail after this long instead of the
-	// production ten minutes; tests about timing set their own.
-	f.builder.timeout = 30 * time.Second
+	// production budgets; tests about timing set their own.
+	f.builder.slotTimeout = 30 * time.Second
+	f.builder.indexTimeout = 30 * time.Second
 	newManager := f.builder.newManager
 	f.builder.newManager = func(opts mcp.Options) (*mcp.Manager, error) {
 		manager, err := newManager(opts)
@@ -94,11 +95,19 @@ func newTargetGraphFixture(t *testing.T) *targetGraphFixture {
 		}
 		return manager, err
 	}
+	// The review base is a checkout the workspace made: below its runs directory.
+	if err := ws.EnsureRoot(); err != nil {
+		t.Fatalf("EnsureRoot: %v", err)
+	}
+	baseDir := filepath.Join(ws.Root, "runs", "run-1-base")
+	if err := os.MkdirAll(baseDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	f.req = targetGraphRequest{
 		ProjectID: 42,
 		Workspace: ws,
 		RunID:     "run-1",
-		BaseDir:   t.TempDir(),
+		BaseDir:   baseDir,
 		StartSHA:  targetGraphTestStart,
 		MCP: mcp.Config{MCPServers: map[string]mcp.ServerConfig{
 			"graph": {Command: indexTrueCommand, XReview: mcp.XReviewConfig{IndexCommand: []string{indexTrueCommand}}},
@@ -169,6 +178,28 @@ func requirePlainContextError(t *testing.T, graph *targetGraph, err, want error)
 	if !errors.Is(err, want) || errors.As(err, &unavailable) {
 		t.Fatalf("err = %v, want a plain %v that callers do not mistake for a degradation", err, want)
 	}
+}
+
+// targetGraphClock is a clock that moves only when a test says so.
+type targetGraphClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func newTargetGraphClock() *targetGraphClock {
+	return &targetGraphClock{now: time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)}
+}
+
+func (c *targetGraphClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *targetGraphClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
 }
 
 func TestTargetGraphBuildSkipsWithoutLocalIndexedServers(t *testing.T) {
@@ -383,21 +414,43 @@ func TestTargetGraphBuildDegradesWhenTheGraphCannotBeSetUp(t *testing.T) {
 func TestTargetGraphBuildDegradesOnTimeout(t *testing.T) {
 	t.Run("waiting for a slot", func(t *testing.T) {
 		f := newTargetGraphFixture(t)
-		f.builder.timeout = 30 * time.Millisecond
+		f.builder.slotTimeout = 30 * time.Millisecond
+		// The wait has a budget of its own: a generous index budget must not
+		// let a build queue for longer than that.
+		f.builder.indexTimeout = time.Hour
+		indexRuns := 0
+		f.builder.runIndex = func(context.Context, *mcp.Manager, string) (int, error) {
+			indexRuns++
+			return 1, nil
+		}
 		f.builder.slots <- struct{}{}
 		graph, err := f.builder.Build(f.ctx, f.req)
-		requireTargetGraphUnavailable(t, graph, err, "timeout")
+		requireTargetGraphUnavailable(t, graph, err, "slot_busy")
 		f.assertNothingCreated()
 		if calls := f.git.resolveCalls(); len(calls) != 0 {
 			t.Fatalf("git consulted before a slot was held: %v", calls)
 		}
+		if indexRuns != 0 {
+			t.Fatalf("the index ran %d times without a slot", indexRuns)
+		}
 		if got := len(f.builder.slots); got != 1 {
 			t.Fatalf("slots held = %d, want the occupant's slot untouched", got)
+		}
+		// Queueing says nothing about the input: once a slot is free the
+		// same input is indexed instead of being reported as recently failed.
+		<-f.builder.slots
+		graph, err = f.builder.Build(f.ctx, f.req)
+		if err != nil || graph == nil {
+			t.Fatalf("Build after a busy slot = %v, %v; want a graph", graph, err)
+		}
+		graph.Close()
+		if indexRuns != 1 {
+			t.Fatalf("index runs after the slot freed = %d, want 1", indexRuns)
 		}
 	})
 	t.Run("indexing", func(t *testing.T) {
 		f := newTargetGraphFixture(t)
-		f.builder.timeout = 30 * time.Millisecond
+		f.builder.indexTimeout = 30 * time.Millisecond
 		f.builder.runIndex = func(ctx context.Context, _ *mcp.Manager, _ string) (int, error) {
 			<-ctx.Done()
 			return 0, ctx.Err()
@@ -511,7 +564,10 @@ func TestTargetGraphBuildPassesOutboundInvalidationThrough(t *testing.T) {
 
 func TestTargetGraphBuildReleasesItsSlot(t *testing.T) {
 	f := newTargetGraphFixture(t)
-	f.builder.timeout = 5 * time.Second
+	f.builder.slotTimeout = 5 * time.Second
+	// The failed input is remembered for a while; the second build comes later.
+	clock := newTargetGraphClock()
+	f.builder.now = clock.Now
 	indexErr := errors.New("index failed")
 	f.builder.runIndex = func(context.Context, *mcp.Manager, string) (int, error) {
 		if indexErr != nil {
@@ -523,6 +579,7 @@ func TestTargetGraphBuildReleasesItsSlot(t *testing.T) {
 		t.Fatalf("first Build = %+v, %v; want a failure", graph, err)
 	}
 	indexErr = nil
+	clock.Advance(targetGraphFailureTTL)
 	graph, err := f.builder.Build(f.ctx, f.req)
 	if err != nil || graph == nil {
 		t.Fatalf("second Build with a single slot = %+v, %v", graph, err)
@@ -543,6 +600,15 @@ func TestTargetGraphBuildRejectsInvalidRequests(t *testing.T) {
 		{"unsafe run ID", func(r *targetGraphRequest) { r.RunID = "../evil" }},
 		{"empty run ID", func(r *targetGraphRequest) { r.RunID = "" }},
 		{"empty base directory", func(r *targetGraphRequest) { r.BaseDir = " " }},
+		{"relative base directory", func(r *targetGraphRequest) { r.BaseDir = "runs/run-1-base" }},
+		{"base directory outside the workspace", func(r *targetGraphRequest) { r.BaseDir = filepath.Dir(r.Workspace.Root) }},
+		{"base directory of another project", func(r *targetGraphRequest) {
+			r.BaseDir = filepath.Join(filepath.Dir(r.Workspace.Root), "43", "base")
+		}},
+		{"runs directory itself", func(r *targetGraphRequest) { r.BaseDir = filepath.Join(r.Workspace.Root, "runs") }},
+		{"graph directory", func(r *targetGraphRequest) { r.BaseDir = filepath.Join(r.Workspace.Root, "graphs", "run-1") }},
+		{"base directory that is not clean", func(r *targetGraphRequest) { r.BaseDir = r.Workspace.Root + "/runs/../base" }},
+		{"base directory that climbs out of runs", func(r *targetGraphRequest) { r.BaseDir = r.Workspace.Root + "/runs/../../x" }},
 		{"start SHA is a ref", func(r *targetGraphRequest) { r.StartSHA = "main" }},
 		{"start SHA is short", func(r *targetGraphRequest) { r.StartSHA = targetGraphTestStart[:12] }},
 	} {
@@ -558,6 +624,374 @@ func TestTargetGraphBuildRejectsInvalidRequests(t *testing.T) {
 				t.Fatalf("graphs dir touched for an invalid request: %v", statErr)
 			}
 		})
+	}
+}
+
+// The review base is either a checkout of its own below runs/ or, when the
+// shared base is already at the start commit, the shared base itself.
+func TestTargetGraphBuildAcceptsTheSharedBaseAndRunCheckouts(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		dir  func(f *targetGraphFixture) string
+	}{
+		{"shared base", func(f *targetGraphFixture) string { return f.ws.BaseDir() }},
+		{"run checkout", func(f *targetGraphFixture) string { return filepath.Join(f.ws.Root, "runs", "other-base") }},
+		{"deeper in the runs directory", func(f *targetGraphFixture) string { return filepath.Join(f.ws.Root, "runs", "other-base", "sub") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newTargetGraphFixture(t)
+			f.req.BaseDir = tc.dir(f)
+			if err := os.MkdirAll(f.req.BaseDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			graph, err := f.builder.Build(f.ctx, f.req)
+			if err != nil || graph == nil {
+				t.Fatalf("Build(%s) = %+v, %v; want a graph", f.req.BaseDir, graph, err)
+			}
+			graph.Close()
+		})
+	}
+}
+
+// A restricted ignore policy must never reach an index. Build refuses on its own
+// account, with no side effect, even if a caller forgot its gate.
+func TestTargetGraphBuildDoesNothingUnderRestrictedIgnorePolicy(t *testing.T) {
+	f := newTargetGraphFixture(t)
+	indexRuns := 0
+	f.builder.runIndex = func(context.Context, *mcp.Manager, string) (int, error) {
+		indexRuns++
+		return 1, nil
+	}
+	f.req.Ignore = append(config.DefaultReviewIgnorePatterns(), "private/**")
+	// A request that is invalid for another reason still ends the same way: the
+	// ignore boundary is checked before anything else is looked at.
+	f.req.RunID = "../evil"
+
+	graph, err := f.builder.Build(f.ctx, f.req)
+	if graph != nil || err != nil {
+		t.Fatalf("Build = %+v, %v; want nil, nil", graph, err)
+	}
+	f.assertNothingCreated()
+	if calls := f.git.resolveCalls(); len(calls) != 0 {
+		t.Fatalf("git consulted under a restricted policy: %v", calls)
+	}
+	if indexRuns != 0 || len(f.builder.slots) != 0 {
+		t.Fatalf("index runs = %d, slots held = %d; nothing may start", indexRuns, len(f.builder.slots))
+	}
+	if _, statErr := os.Lstat(f.ws.GraphsDir()); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("graphs dir touched under a restricted policy: %v", statErr)
+	}
+}
+
+// The built-in ignore defaults only exclude build artifacts and are no
+// restriction.
+func TestTargetGraphBuildIndexesUnderTheDefaultIgnorePolicy(t *testing.T) {
+	f := newTargetGraphFixture(t)
+	f.req.Ignore = config.DefaultReviewIgnorePatterns()
+	graph, err := f.builder.Build(f.ctx, f.req)
+	if err != nil || graph == nil {
+		t.Fatalf("Build = %+v, %v; want a graph", graph, err)
+	}
+	graph.Close()
+}
+
+// The index budget starts when the slot is held, not when the build starts
+// queueing: a build that waited for longer than the whole index budget still
+// gets all of it.
+func TestTargetGraphBuildStartsTheIndexBudgetWhenTheSlotIsHeld(t *testing.T) {
+	f := newTargetGraphFixture(t)
+	f.builder.slotTimeout = time.Minute
+	f.builder.indexTimeout = 250 * time.Millisecond
+	started := make(chan struct{})
+	f.builder.runIndex = func(ctx context.Context, _ *mcp.Manager, _ string) (int, error) {
+		close(started)
+		<-ctx.Done()
+		return 0, ctx.Err()
+	}
+	f.builder.slots <- struct{}{}
+	type result struct {
+		graph *targetGraph
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		graph, err := f.builder.Build(f.ctx, f.req)
+		done <- result{graph, err}
+	}()
+
+	time.Sleep(2 * f.builder.indexTimeout)
+	<-f.builder.slots
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the index never started: the wait for a slot used up the index budget")
+	}
+	got := <-done
+	requireTargetGraphUnavailable(t, got.graph, got.err, "timeout")
+	f.assertNoLeftovers()
+	if n := len(f.builder.slots); n != 0 {
+		t.Fatalf("slots held after the timeout = %d, want 0", n)
+	}
+}
+
+// failedTargetGraphBuilds makes every build attempt of f fail with class and
+// returns the number of attempts so far, counted as managers the builder began
+// to create.
+func failedTargetGraphBuilds(t *testing.T, f *targetGraphFixture, class string) *atomic.Int32 {
+	t.Helper()
+	switch class {
+	case targetGraphIndexFailed:
+		f.builder.runIndex = func(context.Context, *mcp.Manager, string) (int, error) {
+			return 0, errors.New(targetGraphTestCanary)
+		}
+	case targetGraphIndexIncomplete:
+		f.builder.runIndex = func(context.Context, *mcp.Manager, string) (int, error) { return 0, nil }
+	case errclass.Timeout:
+		f.builder.indexTimeout = 100 * time.Millisecond
+		f.builder.runIndex = func(ctx context.Context, _ *mcp.Manager, _ string) (int, error) {
+			<-ctx.Done()
+			return 0, ctx.Err()
+		}
+	case targetGraphSetupFailed:
+		f.builder.newManager = func(mcp.Options) (*mcp.Manager, error) {
+			return nil, errors.New(targetGraphTestCanary)
+		}
+	default:
+		t.Fatalf("no recipe for class %q", class)
+	}
+	attempts := new(atomic.Int32)
+	inner := f.builder.newManager
+	f.builder.newManager = func(opts mcp.Options) (*mcp.Manager, error) {
+		attempts.Add(1)
+		return inner(opts)
+	}
+	return attempts
+}
+
+// An input whose build failed in a way that is likely to repeat is not built
+// again for a while: the skip costs no slot, no manager and no index run.
+func TestTargetGraphBuildSkipsAnInputThatFailedRecently(t *testing.T) {
+	for _, class := range []string{targetGraphIndexFailed, targetGraphIndexIncomplete, errclass.Timeout, targetGraphSetupFailed} {
+		t.Run(class, func(t *testing.T) {
+			f := newTargetGraphFixture(t)
+			clock := newTargetGraphClock()
+			f.builder.now = clock.Now
+			attempts := failedTargetGraphBuilds(t, f, class)
+
+			graph, err := f.builder.Build(f.ctx, f.req)
+			requireTargetGraphUnavailable(t, graph, err, class)
+			if got := attempts.Load(); got != 1 {
+				t.Fatalf("attempts after the first build = %d, want 1", got)
+			}
+			resolves := len(f.git.resolveCalls())
+
+			clock.Advance(targetGraphFailureTTL - time.Second)
+			graph, err = f.builder.Build(f.ctx, f.req)
+			requireTargetGraphUnavailable(t, graph, err, targetGraphRecentlyFailed)
+			if got := attempts.Load(); got != 1 || len(f.git.resolveCalls()) != resolves {
+				t.Fatalf("a skipped build did work: attempts = %d, git calls = %d (was %d)", got, len(f.git.resolveCalls()), resolves)
+			}
+			if got := len(f.builder.slots); got != 0 {
+				t.Fatalf("slots held after a skipped build = %d, want 0", got)
+			}
+
+			clock.Advance(2 * time.Second)
+			graph, err = f.builder.Build(f.ctx, f.req)
+			requireTargetGraphUnavailable(t, graph, err, class)
+			if got := attempts.Load(); got != 2 {
+				t.Fatalf("attempts after the memory expired = %d, want 2", got)
+			}
+		})
+	}
+}
+
+// The memory is per input: another start commit or another index configuration
+// is its own build, and a build that worked clears the note.
+func TestTargetGraphBuildFailureMemoryIsPerInput(t *testing.T) {
+	f := newTargetGraphFixture(t)
+	clock := newTargetGraphClock()
+	f.builder.now = clock.Now
+	var runs atomic.Int32
+	f.builder.runIndex = func(context.Context, *mcp.Manager, string) (int, error) {
+		runs.Add(1)
+		return 0, errors.New(targetGraphTestCanary)
+	}
+
+	graph, err := f.builder.Build(f.ctx, f.req)
+	requireTargetGraphUnavailable(t, graph, err, targetGraphIndexFailed)
+	graph, err = f.builder.Build(f.ctx, f.req)
+	requireTargetGraphUnavailable(t, graph, err, targetGraphRecentlyFailed)
+	if got := runs.Load(); got != 1 {
+		t.Fatalf("index runs = %d, want the second build skipped", got)
+	}
+
+	otherCommit := f.req
+	otherCommit.StartSHA = targetGraphTestOther
+	f.git.heads = []string{targetGraphTestOther}
+	graph, err = f.builder.Build(f.ctx, otherCommit)
+	requireTargetGraphUnavailable(t, graph, err, targetGraphIndexFailed)
+	if got := runs.Load(); got != 2 {
+		t.Fatalf("index runs = %d, want another start commit built on its own", got)
+	}
+
+	f.git.heads = []string{targetGraphTestStart}
+	otherConfig := f.req
+	otherConfig.MCP = mcp.Config{MCPServers: map[string]mcp.ServerConfig{
+		"graph": {Command: indexTrueCommand, XReview: mcp.XReviewConfig{IndexCommand: []string{indexTrueCommand, "--other"}}},
+	}}
+	graph, err = f.builder.Build(f.ctx, otherConfig)
+	requireTargetGraphUnavailable(t, graph, err, targetGraphIndexFailed)
+	if got := runs.Load(); got != 3 {
+		t.Fatalf("index runs = %d, want another index configuration built on its own", got)
+	}
+
+	// After the memory expired the input is built, and a success clears the note,
+	// so the next failure is a fresh one.
+	clock.Advance(targetGraphFailureTTL)
+	f.builder.runIndex = func(context.Context, *mcp.Manager, string) (int, error) { return 1, nil }
+	graph, err = f.builder.Build(f.ctx, f.req)
+	if err != nil || graph == nil {
+		t.Fatalf("Build after the memory expired = %+v, %v", graph, err)
+	}
+	graph.Close()
+	if got := len(f.builder.failures.until); got != 2 {
+		t.Fatalf("remembered inputs = %d, want only the two inputs that did not build since", got)
+	}
+}
+
+// Only failures that say something about the input are remembered. A moved base
+// and a caller that is done describe one run.
+func TestTargetGraphBuildDoesNotRememberFailuresOfASingleRun(t *testing.T) {
+	t.Run("base moved", func(t *testing.T) {
+		f := newTargetGraphFixture(t)
+		clock := newTargetGraphClock()
+		f.builder.now = clock.Now
+		f.git.heads = []string{targetGraphTestOther}
+		graph, err := f.builder.Build(f.ctx, f.req)
+		requireTargetGraphUnavailable(t, graph, err, targetGraphBaseUnverified)
+
+		f.git.heads = []string{targetGraphTestStart}
+		graph, err = f.builder.Build(f.ctx, f.req)
+		if err != nil || graph == nil {
+			t.Fatalf("Build with the base back at the start commit = %+v, %v; want a graph", graph, err)
+		}
+		graph.Close()
+	})
+	t.Run("caller done", func(t *testing.T) {
+		f := newTargetGraphFixture(t)
+		clock := newTargetGraphClock()
+		f.builder.now = clock.Now
+		ctx, cancel := context.WithCancel(f.ctx)
+		f.builder.runIndex = func(c context.Context, _ *mcp.Manager, _ string) (int, error) {
+			cancel()
+			<-c.Done()
+			return 0, c.Err()
+		}
+		graph, err := f.builder.Build(ctx, f.req)
+		requirePlainContextError(t, graph, err, context.Canceled)
+
+		f.builder.runIndex = func(context.Context, *mcp.Manager, string) (int, error) { return 1, nil }
+		graph, err = f.builder.Build(f.ctx, f.req)
+		if err != nil || graph == nil {
+			t.Fatalf("Build after a cancelled one = %+v, %v; want a graph", graph, err)
+		}
+		graph.Close()
+	})
+}
+
+func TestTargetGraphFailuresKeepInputsApartAndExpire(t *testing.T) {
+	var failures targetGraphFailures
+	clock := newTargetGraphClock()
+	key := targetGraphFailureKey{projectID: 42, startSHA: targetGraphTestStart, config: "a"}
+	for name, other := range map[string]targetGraphFailureKey{
+		"project": {projectID: 43, startSHA: targetGraphTestStart, config: "a"},
+		"commit":  {projectID: 42, startSHA: targetGraphTestOther, config: "a"},
+		"config":  {projectID: 42, startSHA: targetGraphTestStart, config: "b"},
+	} {
+		if failures.recent(other, clock.Now()) {
+			t.Fatalf("%s: unknown input reported as failed", name)
+		}
+	}
+	failures.record(key, clock.Now())
+	if !failures.recent(key, clock.Now()) {
+		t.Fatal("recorded input not reported")
+	}
+	for name, other := range map[string]targetGraphFailureKey{
+		"project": {projectID: 43, startSHA: targetGraphTestStart, config: "a"},
+		"commit":  {projectID: 42, startSHA: targetGraphTestOther, config: "a"},
+		"config":  {projectID: 42, startSHA: targetGraphTestStart, config: "b"},
+	} {
+		if failures.recent(other, clock.Now()) {
+			t.Fatalf("%s: another input reported as failed", name)
+		}
+	}
+	clock.Advance(targetGraphFailureTTL - time.Nanosecond)
+	if !failures.recent(key, clock.Now()) {
+		t.Fatal("note expired early")
+	}
+	clock.Advance(time.Nanosecond)
+	if failures.recent(key, clock.Now()) || len(failures.until) != 0 || len(failures.order) != 0 {
+		t.Fatalf("expired note kept: until = %v, order = %v", failures.until, failures.order)
+	}
+}
+
+func TestTargetGraphFailuresAreBoundedAndForgetTheOldestFirst(t *testing.T) {
+	var failures targetGraphFailures
+	clock := newTargetGraphClock()
+	key := func(i int) targetGraphFailureKey {
+		return targetGraphFailureKey{projectID: int64(i), startSHA: targetGraphTestStart, config: "a"}
+	}
+	for i := range targetGraphFailureEntries + 44 {
+		failures.record(key(i), clock.Now())
+		clock.Advance(time.Second)
+	}
+	if got := len(failures.until); got != targetGraphFailureEntries || len(failures.order) != targetGraphFailureEntries {
+		t.Fatalf("remembered inputs = %d (order %d), want the bound %d", got, len(failures.order), targetGraphFailureEntries)
+	}
+	if failures.recent(key(0), clock.Now()) || failures.recent(key(43), clock.Now()) {
+		t.Fatal("the oldest inputs are still remembered")
+	}
+	if !failures.recent(key(44), clock.Now()) || !failures.recent(key(targetGraphFailureEntries+43), clock.Now()) {
+		t.Fatal("recent inputs were forgotten")
+	}
+	// A repeated failure refreshes its note instead of adding a second one.
+	failures.record(key(44), clock.Now())
+	if got := len(failures.until); got != targetGraphFailureEntries {
+		t.Fatalf("remembered inputs after a repeat = %d", got)
+	}
+	if last := failures.order[len(failures.order)-1]; last != key(44) {
+		t.Fatalf("repeated input is not the newest: %+v", last)
+	}
+	// Expired notes make room before live ones are dropped.
+	clock.Advance(targetGraphFailureTTL)
+	failures.record(key(9999), clock.Now())
+	if got := len(failures.until); got != 1 {
+		t.Fatalf("remembered inputs after everything expired = %d, want only the new one", got)
+	}
+}
+
+// The record is shared by every review of the process.
+func TestTargetGraphFailuresAreSafeForConcurrentUse(t *testing.T) {
+	var failures targetGraphFailures
+	now := newTargetGraphClock().Now()
+	var wg sync.WaitGroup
+	for worker := range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range 200 {
+				key := targetGraphFailureKey{projectID: int64(worker*1000 + i), startSHA: targetGraphTestStart, config: "a"}
+				failures.record(key, now)
+				failures.recent(key, now)
+				if i%3 == 0 {
+					failures.forget(key)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if got := len(failures.until); got > targetGraphFailureEntries || got != len(failures.order) {
+		t.Fatalf("until = %d, order = %d, bound = %d", got, len(failures.order), targetGraphFailureEntries)
 	}
 }
 

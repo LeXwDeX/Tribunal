@@ -2,8 +2,10 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -22,11 +24,28 @@ import (
 // on it. A target graph is the per-review alternative: the review's own base
 // checkout is indexed by a private MCP manager whose workspace, and therefore
 // whose server HOME, is graphs/<runID>. That directory holds exactly one graph,
-// for exactly one review. Nothing is cached between reviews: Close stops the
-// servers and removes the directory.
+// for exactly one review. No graph outlives its review: Close stops the servers
+// and removes the directory. Only the fact that an input failed to build is
+// remembered, for a short while and in memory (targetGraphFailures).
 
-// targetGraphTimeout bounds one Build: waiting for a slot plus indexing.
-const targetGraphTimeout = 10 * time.Minute
+// A Build waits for an index slot and then indexes, and the two have separate
+// budgets. Queueing behind other reviews is bounded by targetGraphSlotTimeout;
+// the index run, with the checks around it, gets targetGraphIndexTimeout counted
+// from the moment the slot is held, so a long queue never eats the time the
+// index itself needs.
+const (
+	targetGraphSlotTimeout  = 5 * time.Minute
+	targetGraphIndexTimeout = 10 * time.Minute
+)
+
+const (
+	// targetGraphFailureTTL is how long a build whose failure is likely to repeat
+	// is not attempted again for the same input. Without it every review of the
+	// same base would pay for the same failing index.
+	targetGraphFailureTTL = 15 * time.Minute
+	// targetGraphFailureEntries bounds that record; the oldest entry goes first.
+	targetGraphFailureEntries = 256
+)
 
 // targetGraphSlots limits the index runs a process executes at once. Indexing
 // a whole repository is the heaviest thing a review starts.
@@ -40,6 +59,11 @@ const (
 	targetGraphSetupFailed     = "setup_failed"
 	targetGraphIndexFailed     = "index_failed"
 	targetGraphIndexIncomplete = "index_incomplete"
+	// targetGraphRecentlyFailed marks a Build that was skipped because the same
+	// input failed a moment ago.
+	targetGraphRecentlyFailed = "recently_failed"
+	// targetGraphSlotBusy: no index slot became free in time; nothing was run.
+	targetGraphSlotBusy = "slot_busy"
 )
 
 var (
@@ -67,9 +91,10 @@ func (e *targetGraphUnavailable) ErrorCode() string { return e.class }
 
 // targetGraphRequest names the checkout to index. ProjectID must be the
 // project of Workspace, and BaseDir the review's base checkout, already at
-// StartSHA. The caller holds the workspace read lock for the whole review and
-// passes a context bound to the workspace's outbound gate, because indexing
-// runs administrator-configured commands.
+// StartSHA: an absolute, clean path that is the workspace's shared base or lies
+// below its runs directory. The caller holds the workspace read lock for the
+// whole review and passes a context bound to the workspace's outbound gate,
+// because indexing runs administrator-configured commands.
 type targetGraphRequest struct {
 	ProjectID int64
 	Workspace *workspace.Workspace
@@ -80,6 +105,9 @@ type targetGraphRequest struct {
 	// command are copied into the target graph's manager.
 	MCP       mcp.Config
 	DeniedEnv []string
+	// Ignore is the review's effective ignore policy. A restricted policy never
+	// reaches an index: Build then does nothing, whatever the caller checked.
+	Ignore []string
 }
 
 // targetGraph is one review's private code graph: a manager whose servers see
@@ -114,21 +142,25 @@ func (g *targetGraph) Close() {
 
 // targetGraphBuilder indexes a review's base checkout into a target graph.
 type targetGraphBuilder interface {
-	// Build returns (nil, nil) when the project has nothing to index locally.
-	// It returns a *targetGraphUnavailable when the graph could not be built
-	// and the review should degrade. Any other error, a done caller or a
-	// revoked outbound policy, stops the review. A non-nil graph belongs to the
-	// caller, who must Close it.
+	// Build returns (nil, nil) when the project has nothing to index locally
+	// or the request's ignore policy is restricted. It returns a
+	// *targetGraphUnavailable when the graph could not be built, or was not
+	// tried because the same input failed a moment ago, and the review should
+	// degrade. Any other error, a done caller or a revoked outbound policy,
+	// stops the review. A non-nil graph belongs to the caller, who must Close
+	// it.
 	Build(ctx context.Context, req targetGraphRequest) (*targetGraph, error)
 }
 
 // defaultTargetGraphBuilder is the production targetGraphBuilder. The func
 // fields are seams for tests.
 type defaultTargetGraphBuilder struct {
-	git     GitOps
-	slots   chan struct{}
-	timeout time.Duration
-	now     func() time.Time
+	git          GitOps
+	slots        chan struct{}
+	slotTimeout  time.Duration
+	indexTimeout time.Duration
+	now          func() time.Time
+	failures     targetGraphFailures
 
 	newManager func(mcp.Options) (*mcp.Manager, error)
 	runIndex   func(ctx context.Context, manager *mcp.Manager, baseDir string) (int, error)
@@ -138,11 +170,12 @@ var _ targetGraphBuilder = (*defaultTargetGraphBuilder)(nil)
 
 func newTargetGraphBuilder(git GitOps) *defaultTargetGraphBuilder {
 	return &defaultTargetGraphBuilder{
-		git:        git,
-		slots:      targetGraphSlots,
-		timeout:    targetGraphTimeout,
-		now:        time.Now,
-		newManager: mcp.New,
+		git:          git,
+		slots:        targetGraphSlots,
+		slotTimeout:  targetGraphSlotTimeout,
+		indexTimeout: targetGraphIndexTimeout,
+		now:          time.Now,
+		newManager:   mcp.New,
 		runIndex: func(ctx context.Context, manager *mcp.Manager, baseDir string) (int, error) {
 			return manager.RunIndex(ctx, baseDir)
 		},
@@ -150,18 +183,47 @@ func newTargetGraphBuilder(git GitOps) *defaultTargetGraphBuilder {
 }
 
 func (b *defaultTargetGraphBuilder) Build(ctx context.Context, req targetGraphRequest) (*targetGraph, error) {
+	// Fail closed: callers already keep a restricted policy away from an index,
+	// and this is the last place that can still refuse before anything runs.
+	if config.ReviewIgnoreRestricted(req.Ignore) {
+		return nil, nil
+	}
 	indexed, local := indexedLocalServers(req.MCP)
 	if !local || len(indexed) == 0 {
 		return nil, nil
 	}
-	if req.Workspace == nil || req.Workspace.ProjectID != req.ProjectID || !workspace.ValidRunID(req.RunID) ||
-		strings.TrimSpace(req.BaseDir) == "" || !shaRE.MatchString(req.StartSHA) {
+	if !validTargetGraphRequest(req) {
 		return nil, &targetGraphUnavailable{class: targetGraphInvalidRequest}
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
+	// The same input that failed a moment ago is not worth another index run.
+	key := targetGraphFailureKey{
+		projectID: req.ProjectID,
+		startSHA:  strings.ToLower(req.StartSHA),
+		config:    targetGraphFingerprint(indexed, req.DeniedEnv),
+	}
+	remember := key.config != ""
+	if remember && b.failures.recent(key, b.now()) {
+		return nil, &targetGraphUnavailable{class: targetGraphRecentlyFailed}
+	}
+	graph, err := b.build(ctx, req, indexed)
+	if remember {
+		var unavailable *targetGraphUnavailable
+		switch {
+		case err == nil && graph != nil:
+			b.failures.forget(key)
+		case errors.As(err, &unavailable) && repeatsTargetGraphFailure(unavailable.class):
+			b.failures.record(key, b.now())
+		}
+	}
+	return graph, err
+}
+
+// build indexes the request. indexed is the request's validated server set.
+func (b *defaultTargetGraphBuilder) build(ctx context.Context, req targetGraphRequest, indexed map[string]mcp.ServerConfig) (*targetGraph, error) {
 	// A failure leaves neither a running server nor a directory behind, not
 	// even a directory an earlier attempt of this run left: the manager is
 	// closed first, then the directory goes.
@@ -177,14 +239,26 @@ func (b *defaultTargetGraphBuilder) Build(ctx context.Context, req targetGraphRe
 		_ = req.Workspace.RemoveGraphDir(req.RunID)
 	}()
 
-	tctx, cancel := context.WithTimeout(ctx, b.timeout)
-	defer cancel()
+	// Waiting for a slot has a budget of its own, so queueing behind other
+	// reviews never counts against the index.
+	waitCtx, cancelWait := context.WithTimeout(ctx, b.slotTimeout)
 	select {
 	case b.slots <- struct{}{}:
+		cancelWait()
 		defer func() { <-b.slots }()
-	case <-tctx.Done():
-		return nil, degradeTargetGraph(ctx, tctx.Err(), targetGraphIndexFailed)
+	case <-waitCtx.Done():
+		cancelWait()
+		// Every slot stayed taken by other reviews. That says nothing about
+		// this input, so it is reported, and remembered, apart from a timeout
+		// of the index itself.
+		if err := degradeTargetGraph(ctx, waitCtx.Err(), targetGraphSlotBusy); !isTargetGraphUnavailable(err) {
+			return nil, err
+		}
+		return nil, &targetGraphUnavailable{class: targetGraphSlotBusy}
 	}
+	// The index budget starts here, with the slot in hand.
+	tctx, cancel := context.WithTimeout(ctx, b.indexTimeout)
+	defer cancel()
 	if err := tctx.Err(); err != nil {
 		return nil, degradeTargetGraph(ctx, err, targetGraphIndexFailed)
 	}
@@ -235,6 +309,125 @@ func (b *defaultTargetGraphBuilder) Build(ctx context.Context, req targetGraphRe
 		dir:     dir,
 		remove:  func() error { return req.Workspace.RemoveGraphDir(req.RunID) },
 	}, nil
+}
+
+// validTargetGraphRequest is the request self-check: the workspace must belong
+// to the project, the run ID and start commit must be well formed, and BaseDir
+// must be a checkout the workspace itself made.
+func validTargetGraphRequest(req targetGraphRequest) bool {
+	return req.Workspace != nil && req.Workspace.ProjectID == req.ProjectID &&
+		workspace.ValidRunID(req.RunID) && shaRE.MatchString(req.StartSHA) &&
+		targetGraphBaseAllowed(req.Workspace, req.BaseDir)
+}
+
+// targetGraphBaseAllowed reports whether dir may be indexed for ws: the shared
+// base, or a directory below the workspace's runs directory. The path must be
+// absolute and already clean, because a ".." that follows a symlink does not
+// mean what its lexical cleaning says.
+func targetGraphBaseAllowed(ws *workspace.Workspace, dir string) bool {
+	if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir {
+		return false
+	}
+	if dir == filepath.Clean(ws.BaseDir()) {
+		return true
+	}
+	rel, err := filepath.Rel(filepath.Join(ws.Root, "runs"), dir)
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// repeatsTargetGraphFailure reports whether a degradation class says the same
+// input is likely to fail again. A moved base, a caller that is done and an
+// invalid request describe one run, not the input.
+func repeatsTargetGraphFailure(class string) bool {
+	switch class {
+	case targetGraphIndexFailed, targetGraphIndexIncomplete, targetGraphSetupFailed, errclass.Timeout:
+		return true
+	}
+	return false
+}
+
+// targetGraphFingerprint identifies what an index run depends on besides the
+// commit: the index-backed servers and the environment they are denied. It is
+// empty when the input cannot be encoded.
+func targetGraphFingerprint(indexed map[string]mcp.ServerConfig, deniedEnv []string) string {
+	data, err := json.Marshal(struct {
+		Servers   map[string]mcp.ServerConfig
+		DeniedEnv []string
+	}{indexed, deniedEnv})
+	if err != nil {
+		return ""
+	}
+	return sha256Hex(string(data))
+}
+
+// targetGraphFailureKey is the input of one index run.
+type targetGraphFailureKey struct {
+	projectID int64
+	startSHA  string
+	config    string
+}
+
+// targetGraphFailures remembers recent failed builds in memory. Every entry
+// lives the same time, so the oldest entry is also the one that expires first.
+// The zero value is ready to use.
+type targetGraphFailures struct {
+	mu    sync.Mutex
+	until map[targetGraphFailureKey]time.Time
+	order []targetGraphFailureKey // oldest first
+}
+
+// recent reports whether key failed less than targetGraphFailureTTL ago.
+func (f *targetGraphFailures) recent(key targetGraphFailureKey, now time.Time) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	until, ok := f.until[key]
+	if !ok {
+		return false
+	}
+	if !now.Before(until) {
+		f.dropLocked(key)
+		return false
+	}
+	return true
+}
+
+// record notes a failed build of key, replacing an older note of the same key.
+// A full record loses its oldest entries first.
+func (f *targetGraphFailures) record(key targetGraphFailureKey, now time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.until == nil {
+		f.until = make(map[targetGraphFailureKey]time.Time)
+	}
+	f.dropLocked(key)
+	for len(f.order) > 0 && !now.Before(f.until[f.order[0]]) {
+		f.dropLocked(f.order[0])
+	}
+	for len(f.order) >= targetGraphFailureEntries {
+		f.dropLocked(f.order[0])
+	}
+	f.until[key] = now.Add(targetGraphFailureTTL)
+	f.order = append(f.order, key)
+}
+
+// forget drops the note of key, as after a build that worked.
+func (f *targetGraphFailures) forget(key targetGraphFailureKey) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.dropLocked(key)
+}
+
+func (f *targetGraphFailures) dropLocked(key targetGraphFailureKey) {
+	if _, ok := f.until[key]; !ok {
+		return
+	}
+	delete(f.until, key)
+	for i, queued := range f.order {
+		if queued == key {
+			f.order = append(f.order[:i], f.order[i+1:]...)
+			break
+		}
+	}
 }
 
 // verifyBase proves the base checkout is still at the review's start commit.
@@ -387,4 +580,9 @@ func (p *routedToolProvider) BoundToolNames(ctx context.Context, block string) (
 		names = append(names, got...)
 	}
 	return names, nil
+}
+
+func isTargetGraphUnavailable(err error) bool {
+	var unavailable *targetGraphUnavailable
+	return errors.As(err, &unavailable)
 }

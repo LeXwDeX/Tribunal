@@ -90,7 +90,7 @@ Anthropic 的输入用量将未缓存、缓存读取和缓存创建各计一次�
 - **启用条件**（同时满足）：共享索引不满足使用条件（`index_sha` 与 `start_sha` 不一致，或工作区不是 `ready`、带有 `last_error`）；有效 ignore 未受限；所有配置了 `x-review.index_command` 的 MCP 服务器都是 stdio。共享索引满足条件时不额外索引。
 - **时机**：在持工作区读锁、base checkout 已在 `start_sha`、且步骤 12 确认有文件要评审之后才建，全被 ignore 或全被 omitted 的空评审不付索引成本。续跑原快照允许 MCP 的评审（job 重试续跑，或进程重启后的恢复，见 F6 第 3 步）时重新建。
 - **建立与路由**：创建空的 `graphs/<runID>/`，用一个只含这些服务器、以该目录为工作区的独立 MCP manager 运行 `index_command`，前后核对 base 的 HEAD 仍是 `start_sha`；带索引命令服务器的工具从该 manager 绑定，其他 MCP 服务器仍走项目共享 manager。dossier 的 `workspace_provenance` 记 `index_sha=start_sha`、`index_source=run`、`mcp_eligible=true`；资格证明不放宽，索引 SHA 仍须等于目标提交。
-- **降级**：建图谱失败或超时（等待名额加索引最长 10 分钟，进程内最多 2 个同时运行）不使评审失败。评审照常完成，按原规则不提供已绑定的 MCP 工具并记录 `tool_gaps`（不能 PASS），同时记 WARN `target code graph unavailable; continuing without it`，字段只有 `project_id` 与固定词 `error_class`。父任务取消或出站令牌失效时，评审报错并按 job 重试，不降级。
+- **降级**：建图谱失败或超时（等待并发名额最长 5 分钟，取得名额后索引最长 10 分钟，进程内最多 2 个同时运行；同一提交与索引配置失败后 15 分钟内不重试）不使评审失败。评审照常完成，按原规则不提供已绑定的 MCP 工具并记录 `tool_gaps`（不能 PASS），同时记 WARN `target code graph unavailable; continuing without it`，字段只有 `project_id` 与固定词 `error_class`。父任务取消或出站令牌失效时，评审报错并按 job 重试，不降级。
 - **生命周期**：等同这次 run，不跨评审缓存。步骤 15 先关闭 manager 再删除 `graphs/<runID>/`；进程崩溃遗留的目录由后台 run cleanup 回收（F6 第 5 步）。
 
 ---
@@ -134,7 +134,7 @@ Note Hook 统一先持久化为 `review.command`，以下 GitLab 校验由 worke
 5. 判断是否重新生成上下文文档：以当前生效上下文文档的 base 为起点，比较其到新 base 的**累计**变更文件数 ≥ `context_refresh.changed_files`，或距**最后一次成功生成**的时间 ≥ `context_refresh.max_age`，且当前文档未锁定 → 运行 onboarding 工作流（F5 第 4 步起）。普通工作区刷新不推进该时间锚点，持续小批量 push 会累计漂移。
 6. 释放锁。
 
-**其他刷新触发与默认分支**（[#604](https://github.com/LeXwDeX/Tribunal/issues/604)）：`workspace.refresh` 也由手动刷新（控制台「刷新工作区」或 `POST /api/v1/projects/{id}/workspace/refresh`）、启动追赶扫描（trigger `catch_up`）和评审准备发现默认分支变化（trigger `default_branch_changed`）入队。这三类都表示“刷新默认分支”：执行时不使用入队时记下的分支，而是在读取 GitLab 项目时先同步存储的默认分支（`projects.default_branch`；GitLab 报告的值非空、是合法分支名且与存储值不同才更新），再取当前默认分支的最新提交作为第 3 步检出的目标。push 触发的刷新（trigger `push`）仍取 push 的 `ref`。onboarding（F5 第 4 步）同理。同步失败只记 WARN，不影响刷新。同步条件、日志与限制见[运维手册](../operations.md#默认分支同步)。
+**其他刷新触发与默认分支**（[#604](https://github.com/LeXwDeX/Tribunal/issues/604)）：`workspace.refresh` 也由手动刷新（控制台「刷新工作区」或 `POST /api/v1/projects/{id}/workspace/refresh`）、启动追赶扫描（trigger `catch_up`）和评审准备或 webhook 载荷（`project.default_branch` 与存储值不同）发现默认分支变化（trigger `default_branch_changed`）入队。这三类都表示“刷新默认分支”：执行时不使用入队时记下的分支，而是在读取 GitLab 项目时先同步存储的默认分支（`projects.default_branch`；GitLab 报告的值非空、是合法分支名且与存储值不同才更新），再取当前默认分支的最新提交作为第 3 步检出的目标。push 触发的刷新（trigger `push`）仍取 push 的 `ref`，只有推的正是同步前存储的旧默认分支且默认分支已变化时改取新默认分支。onboarding（F5 第 4 步）同理。同步失败只记 WARN，不影响刷新。同步条件、日志与限制见[运维手册](../operations.md#默认分支同步)。
 
 ---
 

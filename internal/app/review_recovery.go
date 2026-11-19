@@ -300,6 +300,26 @@ func (s *ReviewService) settleOrphanDossiers(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
+// recoveryControlCurrent checks that a recovered workflow still belongs to the
+// current generation of its merge request. A replaced workflow is cancelled and
+// its publication skipped; handled is then true and err the outcome of that
+// cleanup. A transient failure of the check itself is returned with handled
+// false, so the workflow is recovered again later.
+func (s *ReviewService) recoveryControlCurrent(ctx context.Context, projectID int64, workflowID string, mrIID, generation int64, head string) (handled bool, err error) {
+	if _, err := s.currentControl(ctx, projectID, mrIID, generation, head); err != nil {
+		if !IsPermanentJob(err) {
+			return false, err
+		}
+		s.logRecoveryCancel(workflowID, "control_not_current")
+		if cancelErr := s.engine.Cancel(context.WithoutCancel(ctx), workflowID, "superseded"); cancelErr != nil &&
+			!errors.Is(cancelErr, dag.ErrNotFound) {
+			return true, cancelErr
+		}
+		return true, s.skipPublication(ctx, workflowID, reviewSupersededReason)
+	}
+	return false, nil
+}
+
 func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Workflow) error {
 	if workflow.MRIID == nil || s.publisher == nil {
 		return nil
@@ -360,15 +380,7 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 	if dossier.Project.ID != workflow.ProjectID || dossier.MR.IID != *workflow.MRIID {
 		return s.recoveryCancel(ctx, workflow.ID, "dossier_mismatch", s.recoveryCancelWorkflow("superseded", "dossier_mismatch"))
 	}
-	if _, err := s.currentControl(ctx, project.ID, *workflow.MRIID, record.Generation, dossier.DiffVersion.HeadSHA); err != nil {
-		if IsPermanentJob(err) {
-			s.logRecoveryCancel(workflow.ID, "control_not_current")
-			if cancelErr := s.engine.Cancel(context.WithoutCancel(ctx), workflow.ID, "superseded"); cancelErr != nil &&
-				!errors.Is(cancelErr, dag.ErrNotFound) {
-				return cancelErr
-			}
-			return s.skipPublication(ctx, workflow.ID, reviewSupersededReason)
-		}
+	if handled, err := s.recoveryControlCurrent(ctx, project.ID, workflow.ID, *workflow.MRIID, record.Generation, dossier.DiffVersion.HeadSHA); handled || err != nil {
 		return err
 	}
 	if !validPublicationPolicy(&dossier) {
@@ -487,6 +499,13 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 		runID := record.JobID
 		if runID == "" {
 			runID = workflow.ID
+		}
+		if s.canBuildTargetGraph(execution, currentConfig.Settings.Ignore) {
+			// The rebuild fetches the base and indexes it, which takes a while. A
+			// successor may own this MR since the check above: stop here then.
+			if handled, err := s.recoveryControlCurrent(ctx, project.ID, workflow.ID, *workflow.MRIID, record.Generation, dossier.DiffVersion.HeadSHA); handled || err != nil {
+				return err
+			}
 		}
 		graphBase, graphCleanup, err := s.rebuildTargetGraph(ctx, project, token, ws, execution, *workflow.MRIID, runID, version.StartSHA, dossier.MR.TargetBranch, currentConfig.Settings.Ignore)
 		if err != nil {

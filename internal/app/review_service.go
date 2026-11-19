@@ -868,6 +868,13 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 			return nil
 		}
 		graphTried = true
+		if baseDir != "" && s.canBuildTargetGraph(execution, cfg.Settings.Ignore) {
+			// An index can take minutes, and a successor generation may own this
+			// MR by now. Do not start one for a run that is no longer current.
+			if _, err := s.currentControl(ctx, project.ID, control.MRIID, payload.Generation, payload.HeadSHA); err != nil {
+				return err
+			}
+		}
 		built, err := s.useTargetGraph(ctx, project, ws, execution, job.ID, baseDir, inputs.Version.StartSHA, cfg.Settings.Ignore)
 		if err != nil {
 			return err
@@ -906,14 +913,7 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 			if err := review.ValidateDossier(previous); err != nil {
 				changed = true
 			}
-			if resumable && previous.WorkspaceProvenanceValid() && previous.WorkspaceProvenance.MCPEligible {
-				// The stored dossier promised a code graph; rebuild it for this
-				// run before deciding the workspace changed.
-				if err := ensureGraph(); err != nil {
-					return err
-				}
-			}
-			if !previous.WorkspaceProvenanceValid() || (resumable && previous.WorkspaceProvenance.MCPEligible && !indexEligible) {
+			if !previous.WorkspaceProvenanceValid() {
 				changed = true
 				workspaceChanged = true
 			}
@@ -930,6 +930,19 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 				!strings.EqualFold(previous.DiffVersion.StartSHA, inputs.Version.StartSHA) ||
 				!strings.EqualFold(previous.DiffVersion.HeadSHA, inputs.Version.HeadSHA) {
 				changed = true
+			}
+			if !changed && resumable && previous.WorkspaceProvenanceValid() && previous.WorkspaceProvenance.MCPEligible {
+				// The stored dossier promised a code graph. Every other check
+				// passed, so only a missing graph can still stop this workflow:
+				// rebuild it for this run before deciding the workspace changed.
+				// A workflow that is being replaced anyway never pays for one.
+				if err := ensureGraph(); err != nil {
+					return err
+				}
+				if !indexEligible {
+					changed = true
+					workspaceChanged = true
+				}
 			}
 		}
 		if changed {

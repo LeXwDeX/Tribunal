@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"math/rand/v2"
 	"os"
 	"os/exec"
@@ -18,7 +19,11 @@ import (
 
 // runtimeDirMaxBytes mirrors the wrapper's threshold: "$HOME/run" is kept up to
 // this many bytes; a longer one moves to a short private directory under /tmp.
-const runtimeDirMaxBytes = 48
+// 57 keeps the standard Docker layout
+// (/app/data/workspaces/<id>/.mcp/codebase-memory/home/run, 52 to 57 bytes for
+// project ids up to 6 digits) under HOME; runtime dirs of 60 bytes still work
+// with codebase-memory-mcp 0.12.1 on macOS and 70 do not.
+const runtimeDirMaxBytes = 57
 
 // TestCodebaseMemoryMCPWrapperConfinesHome proves the wrapper replaces
 // inherited shared cache/runtime values with per-HOME directories.
@@ -187,28 +192,40 @@ func TestCodebaseMemoryMCPWrapperKeepsShortRuntimeDirUnderHome(t *testing.T) {
 				t.Fatalf("runtime dir = %q, want %q", env[2], want)
 			}
 			assertPrivateDir(t, env[2])
+			if _, err := os.Lstat(filepath.Join(env[2], ".home")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("%s/.home exists (err %v); only a runtime directory under /tmp records its HOME", env[2], err)
+			}
 		})
+	}
+}
+
+// TestCodebaseMemoryMCPWrapperKeepsStandardDockerLayoutUnderHome pins the case
+// the threshold was chosen for: the standard layout's "$HOME/run" is 52 bytes
+// for a one-digit project id and 57 for six digits, and stays under HOME.
+func TestCodebaseMemoryMCPWrapperKeepsStandardDockerLayoutUnderHome(t *testing.T) {
+	const layout = "/app/data/workspaces/%d/.mcp/codebase-memory/home/run"
+	for _, id := range []int{1, 42, 123456} {
+		if got, limit := len(fmt.Sprintf(layout, id)), runtimeDirMaxBytes; got < 52 || got > limit {
+			t.Fatalf("standard layout for project %d is %d bytes, want 52 to %d", id, got, limit)
+		}
+	}
+	if got := len(fmt.Sprintf(layout, 1234567)); got <= runtimeDirMaxBytes {
+		t.Fatalf("a seven-digit project id gives %d bytes; the layout no longer crosses the limit at seven digits", got)
 	}
 }
 
 // TestCodebaseMemoryMCPWrapperUsesShortRuntimeDirForLongHome proves a HOME whose
 // "$HOME/run" is over the limit gets a short private directory under /tmp,
 // keyed by uid and a digest of HOME, while the graph cache stays under HOME.
+// A fake id moves the parent to a uid no account has, so the wrapper never
+// creates or prunes anything under the real /tmp/tcbm-<uid>.
 func TestCodebaseMemoryMCPWrapperUsesShortRuntimeDirForLongHome(t *testing.T) {
 	bin := fakeCodebaseMemoryMCPBinary(t)
-	parent := "/tmp/tcbm-" + strconv.Itoa(os.Geteuid())
-	if _, err := os.Lstat(parent); errors.Is(err, os.ErrNotExist) {
-		// The wrapper creates it; remove it again once the leaves are gone
-		// (os.Remove fails on a directory that still holds anything).
-		t.Cleanup(func() { _ = os.Remove(parent) })
-	}
-	// leafFor names the directory the wrapper must pick for home and removes
-	// that one leaf afterwards, leaving any other leaf under parent alone.
+	parent := fakeUIDParent(t, bin)
+	// leafFor names the directory the wrapper must pick for home.
 	leafFor := func(t *testing.T, home string) string {
 		t.Helper()
-		leaf := filepath.Join(parent, sha256Prefix16(home))
-		t.Cleanup(func() { _ = os.Remove(leaf) })
-		return leaf
+		return filepath.Join(parent, sha256Prefix16(home))
 	}
 
 	for _, tc := range []struct {
@@ -234,8 +251,10 @@ func TestCodebaseMemoryMCPWrapperUsesShortRuntimeDirForLongHome(t *testing.T) {
 			if len(leaf) > runtimeDirMaxBytes {
 				t.Fatalf("runtime dir %q is %d bytes, want at most %d", leaf, len(leaf), runtimeDirMaxBytes)
 			}
+			assertPrivateDir(t, parent)
 			assertPrivateDir(t, leaf)
 			assertPrivateDir(t, wantCache)
+			assertOwnerRecord(t, leaf, home)
 			if _, err := os.Lstat(filepath.Join(home, "run")); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("%s/run exists (err %v); only the runtime directory may leave HOME", home, err)
 			}
@@ -254,6 +273,28 @@ func TestCodebaseMemoryMCPWrapperUsesShortRuntimeDirForLongHome(t *testing.T) {
 		}
 		if other != leafB || other == first {
 			t.Fatalf("runtime dir for another HOME = %q, want %q, different from %q", other, leafB, first)
+		}
+		// Starting again rewrites each record in place and leaves no temporary
+		// file behind.
+		assertOwnerRecord(t, leafA, homeA)
+		assertOwnerRecord(t, leafB, homeB)
+	})
+
+	// A record is one line, so a HOME with a newline gets none and its
+	// directory is never pruned.
+	t.Run("HOME with a newline has no owner record", func(t *testing.T) {
+		home := homeOfLength(t, 90, "h")
+		home = filepath.Join(filepath.Dir(home), "a\nb"+filepath.Base(home))
+		leaf := leafFor(t, home)
+		logPath := filepath.Join(t.TempDir(), "calls.log")
+		_, stderr, exit := runCodebaseMemoryMCPWrapper(t,
+			codebaseMemoryMCPEnv(bin, logPath, home, "FAKE_STDOUT=mcp-ok"), "--ui=false")
+		if exit != 0 {
+			t.Fatalf("exit = %d, want 0\nstderr:\n%s", exit, stderr)
+		}
+		assertPrivateDir(t, leaf)
+		if entries, err := os.ReadDir(leaf); err != nil || len(entries) != 0 {
+			t.Fatalf("%s holds %v (err %v), want it empty", leaf, entries, err)
 		}
 	})
 }
@@ -277,38 +318,40 @@ func TestCodebaseMemoryMCPWrapperRuntimeParent(t *testing.T) {
 		}
 	})
 
-	t.Run("prunes stale leaves of other HOMEs only", func(t *testing.T) {
+	t.Run("narrows the mode of an existing parent", func(t *testing.T) {
 		bin := fakeCodebaseMemoryMCPBinary(t)
 		parent := fakeUIDParent(t, bin)
 		if err := os.Mkdir(parent, 0o700); err != nil {
 			t.Fatal(err)
 		}
+		// Mkdir is subject to the umask; chmod sets the mode outright.
+		if err := os.Chmod(parent, 0o755); err != nil {
+			t.Fatal(err)
+		}
 		home := homeOfLength(t, 90, "h")
-		own := filepath.Join(parent, sha256Prefix16(home))
-		stale := filepath.Join(parent, "0123456789abcdef")
-		fresh := filepath.Join(parent, "fedcba9876543210")
-		other := filepath.Join(parent, "not-a-runtime-leaf")
-		old := time.Now().Add(-72 * time.Hour)
-		for _, dir := range []string{own, stale, fresh, other} {
-			if err := os.Mkdir(dir, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if dir != fresh {
-				if err := os.Chtimes(dir, old, old); err != nil {
-					t.Fatal(err)
-				}
-			}
+		if got, want := wrapperChildEnv(t, bin, home)[2], filepath.Join(parent, sha256Prefix16(home)); got != want {
+			t.Fatalf("runtime dir = %q, want %q", got, want)
 		}
-		if got := wrapperChildEnv(t, bin, home)[2]; got != own {
-			t.Fatalf("runtime dir = %q, want %q", got, own)
+		assertPrivateDir(t, parent)
+	})
+
+	t.Run("fails closed when the parent cannot be made private", func(t *testing.T) {
+		bin := fakeCodebaseMemoryMCPBinary(t)
+		parent := fakeUIDParent(t, bin)
+		writeExecutable(t, filepath.Join(bin, "chmod"), "#!/bin/sh\nexit 1\n")
+		home := homeOfLength(t, 90, "h")
+		logPath := filepath.Join(t.TempDir(), "calls.log")
+
+		stdout, stderr, exit := runCodebaseMemoryMCPWrapper(t,
+			codebaseMemoryMCPEnv(bin, logPath, home), "--ui=false")
+		if exit == 0 {
+			t.Fatalf("exit = 0, want failure\nstderr:\n%s", stderr)
 		}
-		if _, err := os.Lstat(stale); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("stale leaf %s still exists (err %v), want it pruned", stale, err)
+		if stdout != "" || !strings.Contains(stderr, "wrapper: "+parent+" could not be made private") {
+			t.Fatalf("stdout = %q, stderr = %q, want empty stdout and the wrapper's own refusal", stdout, stderr)
 		}
-		for _, keep := range []string{own, fresh, other} {
-			if _, err := os.Lstat(keep); err != nil {
-				t.Fatalf("%s was removed (err %v), want it kept", keep, err)
-			}
+		if invocations := readFakeCBMInvocations(t, logPath); len(invocations) != 0 {
+			t.Fatalf("invocations = %v, want none before the runtime directory is trusted", invocations)
 		}
 	})
 
@@ -387,6 +430,158 @@ func TestCodebaseMemoryMCPWrapperRuntimeParent(t *testing.T) {
 	}
 }
 
+// TestCodebaseMemoryMCPWrapperPrunesRuntimeDirsOfRemovedHomes covers the clean
+// up of the per-uid parent: a leaf is removed only when the HOME it records no
+// longer exists. Review target graphs delete their HOME when the review ends,
+// so their leaves would otherwise pile up, while the leaf of a live server must
+// survive however long it has been idle (a modification time proves nothing).
+// Every other directory entry, and every leaf whose record cannot be trusted,
+// is left alone.
+func TestCodebaseMemoryMCPWrapperPrunesRuntimeDirsOfRemovedHomes(t *testing.T) {
+	bin := fakeCodebaseMemoryMCPBinary(t)
+	parent := fakeUIDParent(t, bin)
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alive := t.TempDir()
+	gone := filepath.Join(t.TempDir(), "removed-home") // absolute, never created
+	longAgo := time.Now().Add(-72 * time.Hour)
+	dangling := filepath.Join(t.TempDir(), "dangling-home")
+	if err := os.Symlink(filepath.Join(t.TempDir(), "missing"), dangling); err != nil {
+		t.Fatal(err)
+	}
+
+	// leaf creates parent/name with the given ".home" content ("" = no record)
+	// and ages it, so nothing here can be spared by its modification time.
+	leaf := func(t *testing.T, name, record string) string {
+		t.Helper()
+		dir := filepath.Join(parent, name)
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if record != "" {
+			if err := os.WriteFile(filepath.Join(dir, ".home"), []byte(record), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Chtimes(dir, longAgo, longAgo); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+
+	pruned := []string{
+		leaf(t, "0123456789abcdef", gone+"\n"),
+		leaf(t, "0123456789abcdee", gone+"\n"),
+	}
+	// What a finished review leaves behind holds more than the record.
+	if err := os.WriteFile(filepath.Join(pruned[1], "cbm-1.sock"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(pruned[1], "sub", "dir"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	kept := map[string]string{
+		"HOME still exists":         leaf(t, "1123456789abcdef", alive+"\n"),
+		"no record":                 leaf(t, "2123456789abcdef", ""),
+		"name is not hex":           leaf(t, "not-a-runtime-leaf", gone+"\n"),
+		"name is uppercase hex":     leaf(t, "FEDCBA9876543210", gone+"\n"),
+		"name is one digit short":   leaf(t, "0123456789abcde", gone+"\n"),
+		"name is one digit long":    leaf(t, "0123456789abcdef0", gone+"\n"),
+		"record is a relative path": leaf(t, "5123456789abcdef", "relative/removed-home\n"),
+		"record has a second line":  leaf(t, "6123456789abcdef", gone+"\n"+alive+"\n"),
+		"record has no newline":     leaf(t, "6223456789abcdef", gone),
+		"record is empty":           leaf(t, "6323456789abcdef", "\n"),
+		// A HOME whose parent cannot be seen is not provably removed: a failed
+		// stat (an unmounted volume) must not free a live leaf.
+		"HOME's parent is missing":  leaf(t, "6423456789abcdef", filepath.Join(gone, "home")+"\n"),
+		"HOME is a dangling link":   leaf(t, "6523456789abcdef", dangling+"\n"),
+		"record is over 4096 bytes": leaf(t, "4123456789abcdef", gone+strings.Repeat("x", 5000)+"\n"),
+		"record is a directory":     leaf(t, "7123456789abcdef", ""),
+		"record is a symbolic link": leaf(t, "3123456789abcdef", ""),
+		"leaf is a symbolic link":   filepath.Join(parent, "8123456789abcdef"),
+		"leaf is a regular file":    filepath.Join(parent, "9123456789abcdef"),
+	}
+	if err := os.Mkdir(filepath.Join(kept["record is a directory"], ".home"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	recordTarget := filepath.Join(t.TempDir(), "record")
+	if err := os.WriteFile(recordTarget, []byte(gone+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(recordTarget, filepath.Join(kept["record is a symbolic link"], ".home")); err != nil {
+		t.Fatal(err)
+	}
+	// A symbolic link named like a leaf must not be followed or removed; the
+	// directory it points to holds a record of a removed HOME.
+	linkTarget := t.TempDir()
+	if err := os.WriteFile(filepath.Join(linkTarget, ".home"), []byte(gone+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(linkTarget, kept["leaf is a symbolic link"]); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(kept["leaf is a regular file"], []byte(gone+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	home := homeOfLength(t, 90, "h")
+	own := filepath.Join(parent, sha256Prefix16(home))
+	if got := wrapperChildEnv(t, bin, home)[2]; got != own {
+		t.Fatalf("runtime dir = %q, want %q", got, own)
+	}
+
+	for _, dir := range pruned {
+		if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("leaf %s of a removed HOME still exists (err %v), want it pruned", dir, err)
+		}
+	}
+	for why, path := range kept {
+		if _, err := os.Lstat(path); err != nil {
+			t.Errorf("%s was removed (err %v), want it kept: %s", path, err, why)
+		}
+	}
+	if got, err := os.ReadFile(filepath.Join(linkTarget, ".home")); err != nil || string(got) != gone+"\n" {
+		t.Errorf("the target of a symbolic link leaf changed: %q, %v", got, err)
+	}
+	assertOwnerRecord(t, own, home)
+}
+
+// TestCodebaseMemoryMCPWrapperKeepsItsOwnRuntimeDir proves the directory in use
+// is never pruned, even when its record names a removed HOME and could not be
+// refreshed. Recording is best effort, so a failed write leaves an older record
+// next to a directory the wrapper is about to hand to the server; the test makes
+// the rename fail with a fake mv.
+func TestCodebaseMemoryMCPWrapperKeepsItsOwnRuntimeDir(t *testing.T) {
+	bin := fakeCodebaseMemoryMCPBinary(t)
+	parent := fakeUIDParent(t, bin)
+	writeExecutable(t, filepath.Join(bin, "mv"), "#!/bin/sh\nexit 1\n")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	home := homeOfLength(t, 90, "h")
+	own := filepath.Join(parent, sha256Prefix16(home))
+	if err := os.Mkdir(own, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(t.TempDir(), "removed-home") // absolute, never created
+	if err := os.WriteFile(filepath.Join(own, ".home"), []byte(stale+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := wrapperChildEnv(t, bin, home)[2]; got != own {
+		t.Fatalf("runtime dir = %q, want %q", got, own)
+	}
+	// The failed rename left the old record and no temporary file.
+	if got, err := os.ReadFile(filepath.Join(own, ".home")); err != nil || string(got) != stale+"\n" {
+		t.Fatalf("record = %q, %v; want the old record kept", got, err)
+	}
+	if entries, err := os.ReadDir(own); err != nil || len(entries) != 1 {
+		t.Fatalf("%s holds %v (err %v), want only the old record", own, entries, err)
+	}
+}
+
 // TestCodebaseMemoryMCPWrapperRuntimeDirHashTool proves the leaf name comes
 // from sha256sum when installed and from "shasum -a 256" otherwise, and that a
 // missing or unusable hash tool fails closed. PATH holds only fakes plus a few
@@ -416,7 +611,7 @@ func TestCodebaseMemoryMCPWrapperRuntimeDirHashTool(t *testing.T) {
 			if tc.shasum != "" {
 				writeExecutable(t, filepath.Join(bin, "shasum"), fakeHashTool("-a 256", tc.shasum))
 			}
-			path := "PATH=" + bin + ":" + realToolsBin(t, "cat", "cut", "mkdir")
+			path := "PATH=" + bin + ":" + realToolsBin(t, "cat", "chmod", "cut", "dirname", "find", "mkdir", "mv", "rm")
 			home := homeOfLength(t, 90, "h")
 
 			if tc.wantLeaf != "" {
@@ -590,6 +785,31 @@ func assertPrivateDir(t *testing.T, dir string) {
 	}
 	if !info.IsDir() || info.Mode().Perm() != 0o700 {
 		t.Fatalf("%s mode = %v, want private directory 0700", dir, info.Mode())
+	}
+}
+
+// assertOwnerRecord checks the ".home" record the wrapper keeps in a runtime
+// directory under /tmp: a private regular file holding HOME on one line, with
+// no temporary file left next to it.
+func assertOwnerRecord(t *testing.T, leaf, home string) {
+	t.Helper()
+	record := filepath.Join(leaf, ".home")
+	info, err := os.Lstat(record)
+	if err != nil {
+		t.Fatalf("owner record: %v", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		t.Fatalf("%s mode = %v, want a private regular file 0600", record, info.Mode())
+	}
+	got, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != home+"\n" {
+		t.Fatalf("%s = %q, want the HOME %q on one line", record, got, home)
+	}
+	if entries, err := os.ReadDir(leaf); err != nil || len(entries) != 1 {
+		t.Fatalf("%s holds %v (err %v), want only the record", leaf, entries, err)
 	}
 }
 

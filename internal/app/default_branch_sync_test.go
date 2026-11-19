@@ -12,11 +12,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/LeXwDeX/tribunal/internal/agent"
 	"github.com/LeXwDeX/tribunal/internal/config"
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/repo"
 	"github.com/LeXwDeX/tribunal/internal/store"
+	"github.com/LeXwDeX/tribunal/internal/workspace"
 )
 
 // The registered default branch follows the branch GitLab reports (#604):
@@ -829,22 +832,38 @@ func TestRuntimeGivesReviewServiceTheWorkspaceQueue(t *testing.T) {
 // TestDefaultBranchRefreshTriggersFollowCurrentDefault covers refresh jobs that
 // captured the default branch when they were queued (manual and catch-up). After
 // GitLab renames the default branch they must fetch the new default, not the
-// stale ref in the payload; a push refresh keeps its explicit ref (#604).
+// stale ref in the payload. A push refresh keeps its explicit ref, except a push
+// to the branch that was the default: it passed the stored-default filter, and
+// that branch is no longer the one to follow once the sync moved the default
+// (#604).
 func TestDefaultBranchRefreshTriggersFollowCurrentDefault(t *testing.T) {
 	for _, tc := range []struct {
+		name    string
 		trigger string
 		ref     string
+		gitlab  string // default branch GitLab reports; "" = develop
 		want    string
 	}{
 		{trigger: "manual", ref: "refs/heads/main", want: "+refs/heads/develop:refs/workspace/base"},
 		{trigger: catchUpTrigger, ref: "refs/heads/main", want: "+refs/heads/develop:refs/workspace/base"},
 		{trigger: "default_branch_changed", ref: "", want: "+refs/heads/develop:refs/workspace/base"},
 		{trigger: "push", ref: "refs/heads/release", want: "+refs/heads/release:refs/workspace/base"},
+		{name: "push to the previous default", trigger: "push", ref: "refs/heads/main", want: "+refs/heads/develop:refs/workspace/base"},
+		{name: "push to the unchanged default", trigger: "push", ref: "refs/heads/main", gitlab: "main", want: "+refs/heads/main:refs/workspace/base"},
+		{name: "push to the new default", trigger: "push", ref: "refs/heads/develop", want: "+refs/heads/develop:refs/workspace/base"},
+		{name: "push to a branch named like the previous default", trigger: "push", ref: "refs/heads/main-2", want: "+refs/heads/main-2:refs/workspace/base"},
 	} {
-		t.Run(tc.trigger, func(t *testing.T) {
+		name := tc.name
+		if name == "" {
+			name = tc.trigger
+		}
+		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
 			f := newReviewFixture(t, reviewTestHead)
 			f.gitlab.project.DefaultBranch = "develop"
+			if tc.gitlab != "" {
+				f.gitlab.project.DefaultBranch = tc.gitlab
+			}
 			payload, err := json.Marshal(map[string]any{
 				"project_id": 42, "ref": tc.ref, "branch": strings.TrimPrefix(tc.ref, "refs/heads/"), "trigger": tc.trigger,
 			})
@@ -869,4 +888,506 @@ func TestDefaultBranchRefreshTriggersFollowCurrentDefault(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The webhook filters events with the stored default branch and never asks
+// GitLab, so after a rename every event on the new default branch is filtered
+// out and nothing would ever read the project from GitLab. The payload's
+// project.default_branch is only a hint: it queues a refresh, which verifies the
+// change with GitLab before the store follows it (#604).
+
+// withDefaultBranch sets project.default_branch in a webhook body.
+func withDefaultBranch(t *testing.T, body []byte, defaultBranch string) []byte {
+	t.Helper()
+	var generic map[string]any
+	if err := json.Unmarshal(body, &generic); err != nil {
+		t.Fatalf("decode webhook body: %v", err)
+	}
+	project, ok := generic["project"].(map[string]any)
+	if !ok {
+		t.Fatalf("webhook body has no project object: %s", body)
+	}
+	project["default_branch"] = defaultBranch
+	out, err := json.Marshal(generic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// mrTargeting is a merge request open event whose target branch is branch.
+func mrTargeting(branch string) func(map[string]any) {
+	return func(body map[string]any) {
+		patchAttr(body, "target_branch", branch)
+		body["merge_request"].(map[string]any)["target_branch"] = branch
+	}
+}
+
+// defaultBranchRefreshes returns the hint deliveries and jobs the service tried
+// to record (a duplicate delivery is still listed) and the number of hint
+// deliveries the store accepted.
+func (f *webhookFixture) defaultBranchRefreshes() (records []store.Delivery, jobs []*store.Job) {
+	for _, d := range f.records() {
+		if d.Event == defaultBranchRefreshEvent {
+			records = append(records, d)
+		}
+	}
+	for _, j := range f.jobs() {
+		if j.Kind == "workspace.refresh" && strings.Contains(string(j.Payload), `"trigger":"`+defaultBranchChangedTrigger+`"`) {
+			jobs = append(jobs, j)
+		}
+	}
+	return records, jobs
+}
+
+// storedDeliveries counts the stored push-group deliveries (no merge request)
+// by outcome: the hint deliveries are enqueued, the filtered events ignored.
+func (f *webhookFixture) storedDeliveries(t *testing.T) (enqueued, ignored int64) {
+	t.Helper()
+	zero := int64(0)
+	rows, _, err := f.store.ListWebhookDeliverySummaries(context.Background(), store.WebhookDeliveryFilter{MRIID: &zero}, "", 50)
+	if err != nil {
+		t.Fatalf("ListWebhookDeliverySummaries: %v", err)
+	}
+	for _, row := range rows {
+		enqueued += row.Enqueued
+		ignored += row.Ignored
+	}
+	return enqueued, ignored
+}
+
+func (f *webhookFixture) storedDefault(t *testing.T) string {
+	t.Helper()
+	project, err := f.store.GetProject(context.Background(), 42)
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	return project.DefaultBranch
+}
+
+func TestWebhookDefaultBranchHintQueuesRefresh(t *testing.T) {
+	// The stored default is main; the payloads report develop.
+	for _, tc := range []struct {
+		name     string
+		event    string
+		body     func(t *testing.T) []byte
+		accepted bool   // the event's own decision
+		ignored  string // the event's own decision
+	}{
+		{
+			name: "push to the new default", event: "Push Hook", ignored: "branch_filtered",
+			body: func(t *testing.T) []byte {
+				return withDefaultBranch(t, pushBody(42, "refs/heads/develop", sha40), "develop")
+			},
+		},
+		{
+			name: "push to another branch", event: "Push Hook", ignored: "branch_filtered",
+			body: func(t *testing.T) []byte {
+				return withDefaultBranch(t, pushBody(42, "refs/heads/feature", sha40), "develop")
+			},
+		},
+		{
+			name: "merge request targeting the new default", event: "Merge Request Hook", ignored: "branch_filtered",
+			body: func(t *testing.T) []byte {
+				return withDefaultBranch(t, mrBody(42, 7, mrTargeting("develop")), "develop")
+			},
+		},
+		{
+			name: "merge request closed", event: "Merge Request Hook", accepted: true,
+			body: func(t *testing.T) []byte {
+				return withDefaultBranch(t, mrBody(42, 7, func(b map[string]any) { patchAttr(b, "action", "close") }), "develop")
+			},
+		},
+		{
+			name: "review command note", event: "Note Hook", accepted: true,
+			body: func(t *testing.T) []byte {
+				return withDefaultBranch(t, noteBody(42, 7, 555, 12, "alice", "/review"), "develop")
+			},
+		},
+		{
+			name: "event ignored for another reason", event: "Note Hook", ignored: "not_review_command",
+			body: func(t *testing.T) []byte {
+				return withDefaultBranch(t, noteBody(42, 7, 556, 12, "alice", "thanks"), "develop")
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newWebhookFixture(t, "{}")
+			result, err := f.request(tc.event, "whsec-test", tc.body(t))
+			if err != nil {
+				t.Fatalf("Handle: %v", err)
+			}
+			// The event keeps the decision the stored default gives it.
+			if result.Accepted != tc.accepted || result.Ignored != tc.ignored {
+				t.Fatalf("result = %+v, want accepted %v ignored %q", result, tc.accepted, tc.ignored)
+			}
+			records, jobs := f.defaultBranchRefreshes()
+			if len(records) != 1 || len(jobs) != 1 {
+				t.Fatalf("hint records %d, jobs %d; want one of each", len(records), len(jobs))
+			}
+			if records[0].Outcome != store.DeliveryEnqueued || records[0].ProjectID != 42 || records[0].MRIID != 0 {
+				t.Fatalf("hint delivery = %+v", records[0])
+			}
+			job := jobs[0]
+			if job.Kind != "workspace.refresh" || job.Key != "ws:42" {
+				t.Fatalf("hint job = %+v, want workspace.refresh keyed ws:42", job)
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(job.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]any{"project_id": float64(42), "ref": "", "branch": "", "after_sha": "", "trigger": "default_branch_changed"}
+			if len(payload) != len(want) {
+				t.Fatalf("payload = %v, want %v", payload, want)
+			}
+			for key, value := range want {
+				if payload[key] != value {
+					t.Fatalf("payload = %v, want %v", payload, want)
+				}
+			}
+			// A hint is never written: only a refresh that reads GitLab may.
+			if got := f.storedDefault(t); got != "main" {
+				t.Fatalf("stored default branch = %q, want main", got)
+			}
+		})
+	}
+}
+
+// The hint is recorded before the event's own job. A queued push refresh keeps
+// the key of the hint's job, so it replaces it and still synchronizes the
+// default when it runs; recording them the other way round would drop the
+// pushed branch instead.
+func TestWebhookDefaultBranchHintDoesNotReplaceTheEventsOwnRefresh(t *testing.T) {
+	f := newWebhookFixture(t, "{}")
+	result, err := f.request("Push Hook", "whsec-test", withDefaultBranch(t, pushBody(42, "refs/heads/main", sha40), "develop"))
+	if err != nil || !result.Accepted {
+		t.Fatalf("result = %+v, err = %v; want the push to the stored default accepted", result, err)
+	}
+	records := f.records()
+	if len(records) != 2 || records[0].Event != defaultBranchRefreshEvent || records[1].Event != "Push Hook" {
+		t.Fatalf("records = %+v, want the hint first and the push second", records)
+	}
+	job := f.job(result.JobID)
+	var payload map[string]any
+	if err := json.Unmarshal(job.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["trigger"] != "push" || payload["ref"] != "refs/heads/main" {
+		t.Fatalf("queued job payload = %v, want the push refresh", payload)
+	}
+}
+
+func TestWebhookDefaultBranchHintIgnoresUnusableHints(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		hint string
+	}{
+		{name: "absent", hint: ""},
+		{name: "same as stored", hint: "main"},
+		{name: "option-like", hint: "-x"},
+		{name: "option-like with value", hint: "--upload-pack=x"},
+		{name: "double dot", hint: "a..b"},
+		{name: "full ref", hint: "refs/heads/develop"},
+		{name: "leading space", hint: " develop"},
+		{name: "trailing space", hint: "develop "},
+		{name: "inner space", hint: "dev elop"},
+		{name: "control character", hint: "dev\x00elop"},
+		{name: "reflog syntax", hint: "dev@{1}"},
+		{name: "trailing slash", hint: "develop/"},
+		{name: "lock suffix", hint: "develop.lock"},
+		{name: "too long", hint: strings.Repeat("a", 5000)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newWebhookFixture(t, "{}")
+			body := pushBody(42, "refs/heads/main", sha40)
+			if tc.hint != "" {
+				body = withDefaultBranch(t, body, tc.hint)
+			}
+			result, err := f.request("Push Hook", "whsec-test", body)
+			if err != nil || !result.Accepted {
+				t.Fatalf("result = %+v, err = %v; want the push accepted as before", result, err)
+			}
+			if records, jobs := f.defaultBranchRefreshes(); len(records) != 0 || len(jobs) != 0 {
+				t.Fatalf("hint records %d, jobs %d; want none", len(records), len(jobs))
+			}
+			if got := len(f.records()); got != 1 {
+				t.Fatalf("recorded %d deliveries, want only the push", got)
+			}
+			if got := f.storedDefault(t); got != "main" {
+				t.Fatalf("stored default branch = %q, want main", got)
+			}
+		})
+	}
+
+	t.Run("a hint without the project id is not attributed to the project", func(t *testing.T) {
+		f := newWebhookFixture(t, "{}")
+		raw, err := json.Marshal(map[string]any{
+			"object_kind": "push", "project_id": 42, "project": map[string]any{"default_branch": "develop"},
+			"ref": "refs/heads/main", "before": sha40, "after": sha40,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := f.request("Push Hook", "whsec-test", raw)
+		if err != nil || !result.Accepted {
+			t.Fatalf("result = %+v, err = %v; want the push accepted", result, err)
+		}
+		if records, _ := f.defaultBranchRefreshes(); len(records) != 0 {
+			t.Fatalf("hint records %d, want none", len(records))
+		}
+	})
+
+	t.Run("an unauthenticated delivery queues nothing", func(t *testing.T) {
+		f := newWebhookFixture(t, "{}")
+		result, err := f.request("Push Hook", "wrong-secret", withDefaultBranch(t, pushBody(42, "refs/heads/develop", sha40), "develop"))
+		if err != nil || !result.Unauthorized {
+			t.Fatalf("result = %+v, err = %v; want unauthorized", result, err)
+		}
+		if records, _ := f.defaultBranchRefreshes(); len(records) != 0 {
+			t.Fatalf("hint records %d, want none", len(records))
+		}
+	})
+
+	t.Run("an event of the wrong kind queues nothing", func(t *testing.T) {
+		f := newWebhookFixture(t, "{}")
+		result, err := f.request("Merge Request Hook", "whsec-test", withDefaultBranch(t, pushBody(42, "refs/heads/develop", sha40), "develop"))
+		if err != nil || result.Ignored != "event_mismatch" {
+			t.Fatalf("result = %+v, err = %v; want event_mismatch", result, err)
+		}
+		if records, _ := f.defaultBranchRefreshes(); len(records) != 0 {
+			t.Fatalf("hint records %d, want none", len(records))
+		}
+	})
+}
+
+// Every event of a project carries the changed default until a refresh has
+// synchronized it, so the hint is recorded once per project, reported branch and
+// minute. A refresh that could not synchronize is queued again by a later
+// minute, and another reported branch is a different change.
+func TestWebhookDefaultBranchHintIsBoundedPerMinute(t *testing.T) {
+	f := newWebhookFixture(t, "{}")
+	now := time.Date(2026, 11, 19, 10, 0, 5, 0, time.UTC)
+	f.service.now = func() time.Time { return now }
+	push := func(hint string) {
+		t.Helper()
+		result, err := f.request("Push Hook", "whsec-test", withDefaultBranch(t, pushBody(42, "refs/heads/"+hint, sha40), hint))
+		if err != nil || result.Ignored != "branch_filtered" {
+			t.Fatalf("result = %+v, err = %v; want branch_filtered", result, err)
+		}
+	}
+	counts := func() (enqueued, ignored int64) { return f.storedDeliveries(t) }
+
+	for range 3 {
+		push("develop")
+	}
+	if enqueued, ignored := counts(); enqueued != 1 || ignored != 3 {
+		t.Fatalf("after three events in one minute: %d hint deliveries, %d ignored events; want 1 and 3", enqueued, ignored)
+	}
+
+	now = now.Add(30 * time.Second) // still the same minute
+	push("develop")
+	if enqueued, _ := counts(); enqueued != 1 {
+		t.Fatalf("a later event in the same minute stored %d hint deliveries, want 1", enqueued)
+	}
+
+	push("trunk")
+	if enqueued, _ := counts(); enqueued != 2 {
+		t.Fatalf("another reported branch stored %d hint deliveries, want 2", enqueued)
+	}
+
+	now = now.Add(time.Minute) // the next minute retries
+	push("develop")
+	if enqueued, ignored := counts(); enqueued != 3 || ignored != 6 {
+		t.Fatalf("after the next minute: %d hint deliveries, %d ignored events; want 3 and 6", enqueued, ignored)
+	}
+}
+
+// hintFailureStore fails only the delivery that carries the hint.
+type hintFailureStore struct {
+	WebhookStore
+}
+
+func (s hintFailureStore) RecordDelivery(ctx context.Context, d store.Delivery, j *store.Job) (string, bool, error) {
+	if d.Event == defaultBranchRefreshEvent {
+		return "", false, errors.New("disk full while recording develop for group/repo")
+	}
+	return s.WebhookStore.RecordDelivery(ctx, d, j)
+}
+
+// A failed hint never fails the event, and its log names neither the branch nor
+// the raw error.
+func TestWebhookDefaultBranchHintFailureDoesNotFailTheEvent(t *testing.T) {
+	f := newWebhookFixture(t, "{}")
+	var logs bytes.Buffer
+	f.service.logger = jsonLogger(&logs)
+	f.service.store = hintFailureStore{WebhookStore: f.service.store}
+
+	result, err := f.request("Push Hook", "whsec-test", withDefaultBranch(t, pushBody(42, "refs/heads/develop", sha40), "develop"))
+	if err != nil || result.Ignored != "branch_filtered" {
+		t.Fatalf("result = %+v, err = %v; want the event's own outcome", result, err)
+	}
+	failed := logRecordsWith(decodeLogRecords(t, &logs), "default branch refresh enqueue failed")
+	if len(failed) != 1 {
+		t.Fatalf("failure log records = %v, want exactly one", failed)
+	}
+	requireLogFields(t, failed[0], "WARN", "project_id", "error_class")
+	requireNoLogLeak(t, &logs, "develop", "disk full", "group/repo")
+
+	// The event's own delivery was recorded as usual.
+	if _, ignored := f.storedDeliveries(t); ignored != 1 {
+		t.Fatalf("ignored deliveries = %d, want the event's own record", ignored)
+	}
+}
+
+// TestWebhookDefaultBranchHintTakesNoWorkspaceLock guards the lock order. The
+// ingress holds the project lifecycle read lock; the workspace content lock is
+// writer preferring and held for a whole refresh or review, and the ingress has
+// a 900ms budget. Queuing the hint through WorkspaceService.EnqueueRefresh would
+// wait for it.
+func TestWebhookDefaultBranchHintTakesNoWorkspaceLock(t *testing.T) {
+	ctx := context.Background()
+	f := newWebhookFixture(t, "{}")
+	manager := workspace.NewManager(t.TempDir(), nil)
+	f.service.workspace = manager
+	release, err := manager.Get(42).Lock(ctx) // a running refresh holds the write lock
+	if err != nil {
+		t.Fatalf("Lock: %v", err)
+	}
+	defer release()
+
+	body := withDefaultBranch(t, pushBody(42, "refs/heads/develop", sha40), "develop")
+	handled := make(chan error, 1)
+	go func() {
+		result, err := f.request("Push Hook", "whsec-test", body)
+		if err == nil && result.Ignored != "branch_filtered" {
+			err = fmt.Errorf("result = %+v, want branch_filtered", result)
+		}
+		handled <- err
+	}()
+	select {
+	case err := <-handled:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the webhook blocked behind the workspace content lock")
+	}
+	if records, _ := f.defaultBranchRefreshes(); len(records) != 1 {
+		t.Fatalf("hint records %d, want 1", len(records))
+	}
+}
+
+// TestWebhookDefaultBranchHintSelfHealsThroughRefreshJob follows the hint end to
+// end on the real store and queue: the event is filtered by the stale default,
+// the queued job is the one the workspace handler runs, GitLab confirms the new
+// default, and the next event on that branch is accepted.
+func TestWebhookDefaultBranchHintSelfHealsThroughRefreshJob(t *testing.T) {
+	ctx := context.Background()
+	newHook := func(t *testing.T, f *reviewFixture) *WebhookService {
+		t.Helper()
+		hook, err := NewWebhookService(WebhookServiceConfig{
+			Store:          f.db,
+			Workspace:      f.manager,
+			Cipher:         newTestCipher(t),
+			Profiles:       testProfiles(),
+			ReviewDefaults: testDefaults(),
+		})
+		if err != nil {
+			t.Fatalf("NewWebhookService: %v", err)
+		}
+		return hook
+	}
+	push := func(t *testing.T, hook *WebhookService, ref, hint string) WebhookResult {
+		t.Helper()
+		result, err := hook.Handle(ctx, WebhookRequest{
+			Event: "Push Hook", Token: "whsec", UUID: uuid.NewString(),
+			Body: withDefaultBranch(t, pushBody(42, ref, sha40), hint),
+		})
+		if err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+		return result
+	}
+	runRefresh := func(t *testing.T, f *reviewFixture) *baseFetchRecorder {
+		t.Helper()
+		job, err := f.db.Claim(ctx, "test-worker", []string{"workspace.refresh"}, time.Minute)
+		if err != nil || job == nil {
+			t.Fatalf("Claim = %+v, %v; want the queued refresh", job, err)
+		}
+		service := unrestrictedIndexService(t, f)
+		git := &baseFetchRecorder{fakeGitOps: f.git}
+		service.git = git
+		if err := service.Handle(ctx, job); err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+		return git
+	}
+
+	t.Run("push to the new default", func(t *testing.T) {
+		f := newReviewFixture(t, reviewTestHead)
+		f.gitlab.project.DefaultBranch = "develop"
+		hook := newHook(t, f)
+
+		if result := push(t, hook, "refs/heads/develop", "develop"); result.Ignored != "branch_filtered" {
+			t.Fatalf("first push = %+v, want branch_filtered by the stale default", result)
+		}
+		if got := storedDefaultBranch(t, f); got != "main" {
+			t.Fatalf("stored default branch = %q before the refresh, want main", got)
+		}
+		git := runRefresh(t, f)
+		if got := git.fetched(); len(got) != 1 || got[0] != "+refs/heads/develop:refs/workspace/base" {
+			t.Fatalf("refresh fetched %q, want the new default branch only", got)
+		}
+		if got := storedDefaultBranch(t, f); got != "develop" {
+			t.Fatalf("stored default branch = %q after the refresh, want develop", got)
+		}
+		result := push(t, hook, "refs/heads/develop", "develop")
+		if !result.Accepted {
+			t.Fatalf("second push = %+v, want it accepted once the default followed", result)
+		}
+		job, err := f.db.GetJob(ctx, result.JobID)
+		if err != nil {
+			t.Fatalf("GetJob: %v", err)
+		}
+		if !strings.Contains(string(job.Payload), `"trigger":"push"`) {
+			t.Fatalf("second push job = %s, want a push refresh", job.Payload)
+		}
+	})
+
+	t.Run("push to the previous default", func(t *testing.T) {
+		f := newReviewFixture(t, reviewTestHead)
+		f.gitlab.project.DefaultBranch = "develop"
+		hook := newHook(t, f)
+
+		// The stale default still admits a push to main, so this event queues a
+		// push refresh on top of the hint and replaces it.
+		if result := push(t, hook, "refs/heads/main", "develop"); !result.Accepted {
+			t.Fatalf("push = %+v, want it accepted by the stale default", result)
+		}
+		git := runRefresh(t, f)
+		if got := git.fetched(); len(got) != 1 || got[0] != "+refs/heads/develop:refs/workspace/base" {
+			t.Fatalf("refresh fetched %q, want the new default branch, not the pushed old one", got)
+		}
+		if got := storedDefaultBranch(t, f); got != "develop" {
+			t.Fatalf("stored default branch = %q, want develop", got)
+		}
+	})
+
+	t.Run("GitLab keeps the old default", func(t *testing.T) {
+		f := newReviewFixture(t, reviewTestHead)
+		f.gitlab.project.DefaultBranch = "main"
+		hook := newHook(t, f)
+
+		// A stale or forged hint changes nothing: the refresh trusts GitLab.
+		if result := push(t, hook, "refs/heads/develop", "develop"); result.Ignored != "branch_filtered" {
+			t.Fatalf("push = %+v, want branch_filtered", result)
+		}
+		git := runRefresh(t, f)
+		if got := git.fetched(); len(got) != 1 || got[0] != "+refs/heads/main:refs/workspace/base" {
+			t.Fatalf("refresh fetched %q, want the default GitLab reports", got)
+		}
+		if got := storedDefaultBranch(t, f); got != "main" {
+			t.Fatalf("stored default branch = %q, want main", got)
+		}
+	})
 }

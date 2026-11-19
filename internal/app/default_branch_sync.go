@@ -7,12 +7,35 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/LeXwDeX/tribunal/internal/errclass"
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/repo"
 	"github.com/LeXwDeX/tribunal/internal/store"
 )
+
+const (
+	// defaultBranchChangedTrigger marks a workspace refresh queued because the
+	// default branch moved. It means "the default branch": the refresh does not
+	// use a branch captured when it was queued.
+	defaultBranchChangedTrigger = "default_branch_changed"
+	// defaultBranchRefreshEvent names the delivery record of a refresh that a
+	// webhook payload requested.
+	defaultBranchRefreshEvent = "Default Branch Refresh"
+	// defaultBranchRefreshBucket bounds those refreshes to one delivery record
+	// per project and reported branch in each bucket. Every event of a project
+	// carries the changed default until a refresh has synchronized it, so a
+	// busy branch would otherwise queue one refresh per event; a refresh that
+	// could not synchronize (GitLab unreachable) is retried by a later bucket.
+	defaultBranchRefreshBucket = time.Minute
+)
+
+// defaultBranchRefreshNamespace derives the deterministic delivery UUID of a
+// webhook-requested default branch refresh.
+var defaultBranchRefreshNamespace = uuid.MustParse("d9d73817-5457-4c19-902c-a32157980b67")
 
 // defaultBranchStore is the persistence surface of syncDefaultBranch.
 type defaultBranchStore interface {
@@ -104,9 +127,51 @@ func (s *ReviewService) syncProjectDefaultBranch(ctx context.Context, project *s
 		"ref":        "",
 		"branch":     "",
 		"after_sha":  "",
-		"trigger":    "default_branch_changed",
+		"trigger":    defaultBranchChangedTrigger,
 	})
 	if err != nil {
 		loggerOrDiscard(s.logger).Warn("default branch refresh enqueue failed", "project_id", project.ID, "error_class", errclass.Of(err))
+	}
+}
+
+// requestDefaultBranchRefresh queues a workspace refresh when an authenticated
+// webhook payload names a default branch other than the stored one (#604). The
+// stored value filters every event, so after a rename in GitLab each event on
+// the new default branch is dropped as branch_filtered, and the ingress never
+// asks GitLab: without this the change would wait for an unrelated review run
+// or a manual refresh. The payload is only a hint. It never writes the project;
+// the refresh reads the project from GitLab and syncDefaultBranch stores the
+// value only when GitLab reports it. The event's own decision is unchanged.
+//
+// The job is recorded like the catch-up refresh. It takes no workspace lock:
+// the webhook path holds the project lifecycle read lock, and the workspace
+// read lock that WorkspaceService.EnqueueRefresh takes could wait behind a
+// queued refresh writer. A failure is logged and never fails the event; a later
+// event carries the hint again.
+func (s *WebhookService) requestDefaultBranchRefresh(ctx context.Context, project *store.Project, payload *gitlab.Webhook) {
+	if project == nil || payload == nil || payload.Project.ID != project.ID {
+		return
+	}
+	hint := payload.Project.DefaultBranch
+	if hint == project.DefaultBranch || !validDefaultBranch(hint) {
+		return
+	}
+	now := s.now().UTC()
+	bucket := now.Truncate(defaultBranchRefreshBucket).Format(time.RFC3339)
+	job := newJob("workspace.refresh", "ws:"+itoa(project.ID), map[string]any{
+		"project_id": project.ID,
+		"ref":        "",
+		"branch":     "",
+		"after_sha":  "",
+		"trigger":    defaultBranchChangedTrigger,
+	})
+	if _, _, err := s.store.RecordDelivery(ctx, store.Delivery{
+		UUID:       uuid.NewSHA1(defaultBranchRefreshNamespace, []byte(itoa(project.ID)+":"+hint+":"+bucket)).String(),
+		ProjectID:  project.ID,
+		Event:      defaultBranchRefreshEvent,
+		Outcome:    store.DeliveryEnqueued,
+		ReceivedAt: now,
+	}, job); err != nil {
+		s.logger.Warn("default branch refresh enqueue failed", "project_id", project.ID, "error_class", errclass.Of(err))
 	}
 }

@@ -12,14 +12,17 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/LeXwDeX/tribunal/internal/agent"
 	"github.com/LeXwDeX/tribunal/internal/config"
 	"github.com/LeXwDeX/tribunal/internal/gitlab"
 	"github.com/LeXwDeX/tribunal/internal/mcp"
+	"github.com/LeXwDeX/tribunal/internal/repo"
 	"github.com/LeXwDeX/tribunal/internal/review"
 	"github.com/LeXwDeX/tribunal/internal/store"
 	"github.com/LeXwDeX/tribunal/internal/workspace"
+	"github.com/LeXwDeX/tribunal/pkg/dag"
 )
 
 // These tests cover how a review and its recovery use a target graph: the
@@ -134,9 +137,10 @@ func graphFails(err error) targetGraphAnswer {
 }
 
 // targetGraphReviewFixture is a review fixture whose project has one MCP
-// server, "graph", that block code-review is bound to. The shared manager
-// serves it from sharedURL; a target graph serves it from targetURL, so a
-// request count shows which of the two the review used.
+// server, "graph", that block code-review is bound to. It has an index command,
+// which makes it an index-backed server; the builder here is a fake, so it never
+// runs. The shared manager serves it from sharedURL; a target graph serves it
+// from targetURL, so a request count shows which of the two the review used.
 type targetGraphReviewFixture struct {
 	*reviewFixture
 	t          *testing.T
@@ -166,23 +170,32 @@ func newTargetGraphReviewFixture(t *testing.T) *targetGraphReviewFixture {
 	f.service.logger = slog.New(slog.NewTextHandler(f.logs, nil))
 	f.sharedURL, f.sharedHits = newCountingMCP(t, "search_graph")
 	f.targetURL, f.targetHits = newCountingMCP(t, "search_graph")
-	resolver, err := NewProjectExtensionResolver(ProjectExtensionResolverConfig{
-		Store:     f.db,
-		Workspace: t.TempDir(),
-		Blocks: map[string]config.BlockBinding{
-			review.BlockCodeReview: {MCPTools: []string{"mcp__graph__search_graph"}},
-		},
-		MCP:       mcp.Config{MCPServers: map[string]mcp.ServerConfig{"graph": {URL: f.sharedURL}}},
-		DeniedEnv: []string{"GITLAB_TOKEN"},
-	})
-	if err != nil {
-		t.Fatalf("NewProjectExtensionResolver: %v", err)
-	}
-	t.Cleanup(func() { _ = resolver.Close() })
-	f.service.extensions = resolver
+	f.useExtensions(
+		mcp.ServerConfig{URL: f.sharedURL, XReview: mcp.XReviewConfig{IndexCommand: []string{indexTrueCommand}}},
+		map[string]config.BlockBinding{review.BlockCodeReview: {MCPTools: []string{"mcp__graph__search_graph"}}},
+	)
 	f.builder = &recordingTargetGraphBuilder{events: f.events, answers: []targetGraphAnswer{f.liveGraph}}
 	f.service.targetGraphs = f.builder
 	return f
+}
+
+// useExtensions gives the project the one MCP server "graph" and the block
+// bindings blocks. The server is configured by server; its tools are always
+// served from the fixture's shared URL.
+func (f *targetGraphReviewFixture) useExtensions(server mcp.ServerConfig, blocks map[string]config.BlockBinding) {
+	f.t.Helper()
+	resolver, err := NewProjectExtensionResolver(ProjectExtensionResolverConfig{
+		Store:     f.db,
+		Workspace: f.t.TempDir(),
+		Blocks:    blocks,
+		MCP:       mcp.Config{MCPServers: map[string]mcp.ServerConfig{"graph": server}},
+		DeniedEnv: []string{"GITLAB_TOKEN"},
+	})
+	if err != nil {
+		f.t.Fatalf("NewProjectExtensionResolver: %v", err)
+	}
+	f.t.Cleanup(func() { _ = resolver.Close() })
+	f.service.extensions = resolver
 }
 
 // liveGraph answers Build like the production builder after a successful
@@ -712,5 +725,404 @@ func TestRetryResumesIneligibleWorkflowWithoutTargetGraph(t *testing.T) {
 	}
 	if got := len(f.builder.calls()); got != 1 {
 		t.Fatalf("Build calls = %d, want only the first run's attempt", got)
+	}
+}
+
+// supersedeAfterBaseGit advances the MR generation, as a newer push would, as
+// soon as the review base checkout exists: after the run's own preparation and
+// before the first thing that could use a code graph.
+type supersedeAfterBaseGit struct {
+	GitOps
+	once      sync.Once
+	supersede func()
+}
+
+func (g *supersedeAfterBaseGit) AddWorktree(ctx context.Context, mirror, dir, sha string) error {
+	err := g.GitOps.AddWorktree(ctx, mirror, dir, sha)
+	if err == nil && strings.HasSuffix(dir, "-base") {
+		g.once.Do(g.supersede)
+	}
+	return err
+}
+
+// supersedeOnVersionGitLab advances the MR generation the first time a recovery
+// asks GitLab for the latest MR version, which a recovery does after its first
+// look at the review control and before it rebuilds a graph.
+type supersedeOnVersionGitLab struct {
+	*reviewGitLab
+	once      sync.Once
+	supersede func()
+}
+
+func (g *supersedeOnVersionGitLab) LatestMRVersion(ctx context.Context, token string, projectID, iid int64) (*gitlab.Version, error) {
+	g.once.Do(g.supersede)
+	return g.reviewGitLab.LatestMRVersion(ctx, token, projectID, iid)
+}
+
+// newerGeneration enqueues a newer review of the same merge request, which makes
+// the generation of every earlier job stale.
+func (f *targetGraphReviewFixture) newerGeneration() {
+	f.t.Helper()
+	if _, err := f.db.EnqueueReviewLatest(context.Background(), store.ReviewCommand{
+		ProjectID:   42,
+		MRIID:       7,
+		HeadSHA:     f.head,
+		Payload:     json.RawMessage(`{"trigger":"mr_update","profile":"default","full":true}`),
+		MaxAttempts: 3,
+	}); err != nil {
+		f.t.Errorf("EnqueueReviewLatest: %v", err)
+	}
+}
+
+// TestRunReviewDoesNotBuildTargetGraphForSupersededRun keeps a run that a newer
+// generation has replaced from paying for an index that nobody will read.
+func TestRunReviewDoesNotBuildTargetGraphForSupersededRun(t *testing.T) {
+	ctx := context.Background()
+	f := newTargetGraphReviewFixture(t)
+	job := f.seedReview(t, "target-graph-superseded")
+	f.service.git = &supersedeAfterBaseGit{GitOps: f.service.git, supersede: f.newerGeneration}
+
+	err := f.service.RunReview(ctx, job)
+
+	if !errors.Is(err, ErrReviewSuperseded) || !IsPermanentJob(err) {
+		t.Fatalf("RunReview err = %v, want the permanent ErrReviewSuperseded", err)
+	}
+	if got := len(f.builder.calls()); got != 0 {
+		t.Fatalf("Build calls = %d; a superseded run must not index", got)
+	}
+	if got := f.openWorktrees(); got != 0 {
+		t.Fatalf("%d worktrees left behind", got)
+	}
+	assertMissing(t, filepath.Join(f.manager.Get(42).GraphsDir(), job.ID))
+}
+
+// TestRecoverDoesNotBuildTargetGraphForSupersededWorkflow is the recovery side:
+// a successor that appears while the recovery prepares its inputs ends the
+// recovery before the base is fetched and indexed.
+func TestRecoverDoesNotBuildTargetGraphForSupersededWorkflow(t *testing.T) {
+	ctx := context.Background()
+	f := newTargetGraphReviewFixture(t)
+	job := f.seedReview(t, "target-graph-recover-superseded")
+	id := interruptReview(t, f.reviewFixture, job)
+	f.service.gitlab = &supersedeOnVersionGitLab{reviewGitLab: f.gitlab, supersede: f.newerGeneration}
+	agentCalls := f.runner.count()
+
+	if err := f.service.Recover(ctx); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+
+	if got := len(f.builder.calls()); got != 1 {
+		t.Fatalf("Build calls = %d, want only the interrupted run's own", got)
+	}
+	snapshot, err := f.engine.Snapshot(ctx, id)
+	if err != nil || snapshot.Status != dag.WorkflowCancelled {
+		t.Fatalf("snapshot = %+v, err = %v; want the superseded workflow cancelled", snapshot.Status, err)
+	}
+	old, err := f.db.GetWorkflowDossier(ctx, id)
+	if err != nil || old.PublicationState != store.WorkflowPublicationSkipped {
+		t.Fatalf("old record = %+v, err = %v; want publication skipped", old, err)
+	}
+	if f.runner.count() != agentCalls {
+		t.Fatal("a superseded workflow executed review nodes")
+	}
+	if !strings.Contains(f.logs.String(), "cause=control_not_current") {
+		t.Fatalf("recovery log lacks the cause:\n%s", f.logs.String())
+	}
+	if f.openWorktrees() != 0 {
+		t.Fatalf("%d worktrees left behind", f.openWorktrees())
+	}
+}
+
+// TestRetryDoesNotBuildTargetGraphForWorkflowWhoseConfigChanged keeps a resumable
+// workflow that is being replaced anyway from paying for a graph build. The new
+// diff has nothing to review, so the replacing run needs no graph either.
+func TestRetryDoesNotBuildTargetGraphForWorkflowWhoseConfigChanged(t *testing.T) {
+	ctx := context.Background()
+	f := newTargetGraphReviewFixture(t)
+	job := f.seedReview(t, "target-graph-retry-config")
+	id := interruptReview(t, f.reviewFixture, job)
+	f.gitlab.mu.Lock()
+	f.gitlab.docs["AGENTS.md"] = "changed repository configuration"
+	f.gitlab.mu.Unlock()
+	f.gitlab.diffs = []gitlab.FileDiff{}
+
+	if err := f.service.Handle(ctx, job); err != nil {
+		t.Fatalf("retried Handle: %v", err)
+	}
+
+	if got := len(f.builder.calls()); got != 1 {
+		t.Fatalf("Build calls = %d, want only the interrupted run's own: a workflow being replaced needs no graph", got)
+	}
+	snapshot, err := f.engine.Snapshot(ctx, id)
+	if err != nil || snapshot.Status != dag.WorkflowCancelled {
+		t.Fatalf("snapshot = %+v, err = %v; want the old workflow cancelled", snapshot.Status, err)
+	}
+	old, err := f.db.GetWorkflowDossier(ctx, id)
+	if err != nil || old.PublicationState != store.WorkflowPublicationSkipped {
+		t.Fatalf("old record = %+v, err = %v; want publication skipped", old, err)
+	}
+	if f.openWorktrees() != 0 {
+		t.Fatalf("%d worktrees left behind", f.openWorktrees())
+	}
+}
+
+// A restricted ignore policy is a different configuration from the one a stored
+// workflow ran under, so the resume path replaces the workflow, and neither it
+// nor the run that replaces it indexes anything.
+func TestRetryDoesNotBuildTargetGraphUnderRestrictedIgnorePolicy(t *testing.T) {
+	ctx := context.Background()
+	f := newTargetGraphReviewFixture(t)
+	job := f.seedReview(t, "target-graph-retry-restricted")
+	id := interruptReview(t, f.reviewFixture, job)
+	f.restrictIgnore()
+
+	if err := f.service.Handle(ctx, job); err != nil {
+		t.Fatalf("retried Handle: %v", err)
+	}
+
+	if got := len(f.builder.calls()); got != 1 {
+		t.Fatalf("Build calls = %d; a restricted policy must never be indexed", got)
+	}
+	wf, err := f.db.GetWorkflowByJob(ctx, job.ID)
+	if err != nil || wf.ID == id {
+		t.Fatalf("workflow = %+v, err = %v; want a fresh workflow instead of the old one", wf, err)
+	}
+	dossier, provenance := f.provenance(job.ID)
+	if provenance.MCPEligible || provenance.IndexSource != "" || !dossierWarningContains(dossier, "without the code graph") {
+		t.Fatalf("provenance = %+v, warnings = %v; want a review without the code graph", provenance, dossier.Warnings)
+	}
+}
+
+// The recovery of a workflow whose ignore policy has become restricted ends
+// before anything is prepared for a graph.
+func TestRecoverDoesNotBuildTargetGraphUnderRestrictedIgnorePolicy(t *testing.T) {
+	ctx := context.Background()
+	f := newTargetGraphReviewFixture(t)
+	job := f.seedReview(t, "target-graph-recover-restricted")
+	id := interruptReview(t, f.reviewFixture, job)
+	f.restrictIgnore()
+	agentCalls := f.runner.count()
+
+	if err := f.service.Recover(ctx); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+
+	if got := len(f.builder.calls()); got != 1 {
+		t.Fatalf("Build calls = %d; a restricted policy must never be indexed", got)
+	}
+	snapshot, err := f.engine.Snapshot(ctx, id)
+	if err != nil || snapshot.Status != dag.WorkflowCancelled {
+		t.Fatalf("snapshot = %+v, err = %v; want the workflow cancelled", snapshot.Status, err)
+	}
+	if f.runner.count() != agentCalls {
+		t.Fatal("recovery executed a review under a changed ignore policy")
+	}
+	if !strings.Contains(f.logs.String(), "cause=config_changed") {
+		t.Fatalf("recovery log lacks the cause:\n%s", f.logs.String())
+	}
+}
+
+// resolveExecution pins the project's extensions like a review does and returns
+// the execution; the caller holds nothing afterwards.
+func (f *targetGraphReviewFixture) resolveExecution() *reviewExecution {
+	f.t.Helper()
+	ctx := context.Background()
+	unlock, err := f.manager.Get(42).RLock(ctx)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	f.t.Cleanup(unlock)
+	project, err := f.db.GetProject(ctx, 42)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	execution, err := f.service.resolveReviewExecution(ctx, project, "", review.Profile{Name: "default", Config: f.profiles["default"]}, "main", nil)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	f.t.Cleanup(execution.releaseResolverSet)
+	return execution
+}
+
+// Rebuilding a graph for a restricted policy must not even prepare the base
+// checkout: no fetch, no worktree, no Build.
+func TestRebuildTargetGraphPreparesNothingUnderRestrictedIgnorePolicy(t *testing.T) {
+	ctx := context.Background()
+	f := newTargetGraphReviewFixture(t)
+	execution := f.resolveExecution()
+	project, err := f.db.GetProject(ctx, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fetches := f.service.git.(*loggedRemovalGit).fetchCount()
+	restricted := append(config.DefaultReviewIgnorePatterns(), "private/**")
+
+	base, cleanup, err := f.service.rebuildTargetGraph(ctx, project, "", f.manager.Get(42), execution, 7, "target-graph-rebuild", strings.Repeat("2", 40), "main", restricted)
+
+	if base != "" || cleanup != nil || err != nil {
+		t.Fatalf("rebuildTargetGraph = %q, %v, %v; want nothing", base, cleanup != nil, err)
+	}
+	if got := len(f.builder.calls()); got != 0 {
+		t.Fatalf("Build calls = %d, want none", got)
+	}
+	if got := f.service.git.(*loggedRemovalGit).fetchCount(); got != fetches || f.openWorktrees() != 0 {
+		t.Fatalf("fetches = %d (was %d), worktrees = %d; nothing may be prepared", got, fetches, f.openWorktrees())
+	}
+}
+
+func TestReviewExecutionBindsIndexedTool(t *testing.T) {
+	indexed := mcp.ServerConfig{Command: indexTrueCommand, XReview: mcp.XReviewConfig{IndexCommand: []string{indexTrueCommand}}}
+	plain := mcp.ServerConfig{Command: indexTrueCommand}
+	servers := map[string]mcp.ServerConfig{"graph": indexed, "docs": plain}
+	active := map[string]bool{"code-review": true, "verify": true}
+	for _, tc := range []struct {
+		name      string
+		blocks    map[string]config.BlockBinding
+		active    map[string]bool
+		want      bool
+		noServers bool
+	}{
+		{"bound in an active block", map[string]config.BlockBinding{"code-review": {MCPTools: []string{"mcp__docs__lookup", "mcp__graph__search_graph"}}}, active, true, false},
+		{"bound in another active block", map[string]config.BlockBinding{"verify": {MCPTools: []string{"mcp__graph__trace_path"}}}, active, true, false},
+		{"bound only in a block the graph does not run", map[string]config.BlockBinding{"reasoner": {MCPTools: []string{"mcp__graph__search_graph"}}}, active, false, false},
+		{"active block binds only a server without an index", map[string]config.BlockBinding{"code-review": {MCPTools: []string{"mcp__docs__lookup"}}}, active, false, false},
+		{"active block binds nothing", map[string]config.BlockBinding{"code-review": {}}, active, false, false},
+		{"malformed tool name", map[string]config.BlockBinding{"code-review": {MCPTools: []string{"graph"}}}, active, false, false},
+		{"server nobody configured", map[string]config.BlockBinding{"code-review": {MCPTools: []string{"mcp__gone__tool"}}}, active, false, false},
+		{"no active blocks", map[string]config.BlockBinding{"code-review": {MCPTools: []string{"mcp__graph__search_graph"}}}, nil, false, false},
+		{"no bindings", nil, active, false, false},
+		{"no servers", map[string]config.BlockBinding{"code-review": {MCPTools: []string{"mcp__graph__search_graph"}}}, active, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			execution := &reviewExecution{blocks: tc.blocks, activeBlocks: tc.active, mcpConfig: mcp.Config{MCPServers: servers}}
+			if tc.noServers {
+				execution.mcpConfig = mcp.Config{}
+			}
+			if got := execution.bindsIndexedTool(); got != tc.want {
+				t.Fatalf("bindsIndexedTool() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRunReviewBuildsNoTargetGraphWhenNoActiveBlockBindsAnIndexedTool keeps a
+// review from indexing a base that none of its blocks could query.
+func TestRunReviewBuildsNoTargetGraphWhenNoActiveBlockBindsAnIndexedTool(t *testing.T) {
+	ctx := context.Background()
+	f := newTargetGraphReviewFixture(t)
+	// The default profile runs code-review and verify. The legacy reasoner
+	// passes no block to an agent call, so a binding on it is never used.
+	f.useExtensions(
+		mcp.ServerConfig{URL: f.sharedURL, XReview: mcp.XReviewConfig{IndexCommand: []string{indexTrueCommand}}},
+		map[string]config.BlockBinding{review.BlockReasoner: {MCPTools: []string{"mcp__graph__search_graph"}}},
+	)
+	job := f.seedReview(t, "target-graph-unbound")
+
+	if err := f.service.RunReview(ctx, job); err != nil {
+		t.Fatalf("RunReview: %v", err)
+	}
+
+	if got := len(f.builder.calls()); got != 0 {
+		t.Fatalf("Build calls = %d; an index no active block can query must not be built", got)
+	}
+	_, provenance := f.provenance(job.ID)
+	if provenance.MCPEligible || provenance.IndexSource != "" {
+		t.Fatalf("provenance = %+v, want no code graph", provenance)
+	}
+	if f.openWorktrees() != 0 {
+		t.Fatalf("%d worktrees left behind", f.openWorktrees())
+	}
+}
+
+// A remote index-backed server serves its own index, so there is no graph to
+// build per run. The review says so once, at debug level and without naming the
+// server; a local one has nothing to report.
+func TestRunReviewLogsWhenAnIndexedServerIsRemote(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		server func(f *targetGraphReviewFixture) mcp.ServerConfig
+		want   int
+	}{
+		{"remote server", func(f *targetGraphReviewFixture) mcp.ServerConfig {
+			return mcp.ServerConfig{URL: f.sharedURL, XReview: mcp.XReviewConfig{IndexCommand: []string{indexTrueCommand}}}
+		}, 1},
+		{"local server", func(*targetGraphReviewFixture) mcp.ServerConfig {
+			return mcp.ServerConfig{Command: indexTrueCommand, XReview: mcp.XReviewConfig{IndexCommand: []string{indexTrueCommand}}}
+		}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			f := newTargetGraphReviewFixture(t)
+			f.service.logger = slog.New(slog.NewTextHandler(f.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			f.useExtensions(tc.server(f), map[string]config.BlockBinding{review.BlockCodeReview: {MCPTools: []string{"mcp__graph__search_graph"}}})
+			// What the production builder answers for a remote server: nothing.
+			f.answers(func(targetGraphRequest) (*targetGraph, error) { return nil, nil })
+			job := f.seedReview(t, "target-graph-remote")
+
+			if err := f.service.RunReview(ctx, job); err != nil {
+				t.Fatalf("RunReview: %v", err)
+			}
+
+			var lines []string
+			for _, line := range strings.Split(f.logs.String(), "\n") {
+				if strings.Contains(line, "target code graph skipped") {
+					lines = append(lines, line)
+				}
+			}
+			if len(lines) != tc.want {
+				t.Fatalf("skip log lines = %q, want %d", lines, tc.want)
+			}
+			for _, line := range lines {
+				if !strings.Contains(line, "level=DEBUG") || !strings.Contains(line, "project_id=42") || strings.Contains(line, "server=") || strings.Contains(line, "error") {
+					t.Fatalf("log line = %q, want a debug line with project_id only", line)
+				}
+			}
+		})
+	}
+}
+
+// The production wiring: a review service built from its configuration owns a
+// builder that is ready to index, so the feature cannot be silently off.
+func TestNewReviewServiceWiresTheTargetGraphBuilder(t *testing.T) {
+	f := newReviewFixture(t, reviewTestHead)
+	assertProductionTargetGraphBuilder(t, f.service)
+}
+
+func TestNewRuntimeWiresTheTargetGraphBuilder(t *testing.T) {
+	st := openTestStore(t)
+	cfg := &config.Config{
+		Workspace: config.WorkspaceConfig{Root: t.TempDir(), RunCleanupAfter: time.Hour},
+		Storage:   config.StorageConfig{LLMCallRetention: time.Hour, DeliveryRetention: time.Hour, JobRetention: time.Hour, ContextVersions: 1},
+		Engine:    config.EngineConfig{MaxConcurrentNodes: 1, DefaultNodeTimeout: time.Minute},
+		Profiles:  testProfiles(),
+	}
+	runtime, err := NewRuntime(context.Background(), cfg, RuntimeDeps{
+		Store:  st,
+		Cipher: newTestCipher(t),
+		GitLab: newRuntimeTestGitLab(),
+		LLM:    runtimeTestClients{},
+		Git:    repoGit{git: &repo.Git{}},
+	})
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+	assertProductionTargetGraphBuilder(t, runtime.reviews)
+}
+
+func assertProductionTargetGraphBuilder(t *testing.T, service *ReviewService) {
+	t.Helper()
+	builder, ok := service.targetGraphs.(*defaultTargetGraphBuilder)
+	if !ok || builder == nil {
+		t.Fatalf("targetGraphs = %T, want the production builder", service.targetGraphs)
+	}
+	if builder.git == nil || builder.git != service.git {
+		t.Fatalf("builder git = %v, want the service's git", builder.git)
+	}
+	if builder.slots == nil || cap(builder.slots) == 0 || builder.now == nil || builder.newManager == nil || builder.runIndex == nil {
+		t.Fatalf("builder = %+v, want slots and seams set", builder)
+	}
+	if builder.slotTimeout != targetGraphSlotTimeout || builder.indexTimeout != targetGraphIndexTimeout {
+		t.Fatalf("builder timeouts = %v / %v, want %v / %v", builder.slotTimeout, builder.indexTimeout, targetGraphSlotTimeout, targetGraphIndexTimeout)
 	}
 }
