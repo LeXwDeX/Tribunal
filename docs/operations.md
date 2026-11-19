@@ -665,7 +665,7 @@ docker compose run --rm --no-deps review --config /app/config/server.yaml --chec
   - 锁基于 `flock`，在 Linux（Docker 镜像）、macOS 和 BSD 上生效。Windows 等没有 `flock` 的平台只创建锁文件、不加锁，不在支持范围内。`flock` 只在同一内核内可靠：同一台宿主机上的多个容器共用一个卷可以互斥，跨主机共享的 NFS 等网络文件系统不受保护，不要把数据目录放在网络文件系统上。
   - `tribunalctl` 的命令都走 HTTP API，不直接打开数据库，不受锁影响。用 `sqlite3` 等外部工具直接打开 `review.db` 不会检查这个锁；按第 7 节先停止服务再操作。
   - 持有数据目录锁意味着没有其他存活进程持有任务租约。服务在打开数据库后、worker 开始领取前，把上一个进程遗留的运行中任务立即释放为可领取，并记录 INFO 日志 `reclaimed stale job leases`（带 `count`）。因此 `kill -9` 或崩溃后重启不必再等任务租约（`jobs.lease`，默认 5 分钟）到期；尝试次数照常累计，超过上限的任务按失败处理。该释放只在锁被操作系统实际强制执行时进行（Linux 镜像、macOS、BSD）；在不支持 flock 的平台上跳过并记录 INFO 日志 `stale job lease reclaim skipped`。被释放任务的 `last_error` 为 `lease reclaimed at startup; retry scheduled`（超过尝试上限时为 `... after maximum attempts`），与租约自然过期的文案区分。任务因所有权被推迟（如与启动恢复争用同一评审）时，推迟窗口（`MaxDeferWindow`，15 分钟）从重启时刻起算。同一个评审的续跑仍由启动恢复和任务处理器按任务 ID 互斥，不会重复执行。
-- 后台 run cleanup 在启动后立即执行、之后每小时执行。它先查询 `workspaces`、run 保护集合和 context 保护 SHA，再触碰项目文件；只处理有 `workspaces` 记录的项目。超过 `workspace.run_cleanup_after` 的 `runs/<id>` 需未被未终态 workflow、queued/running job、`publication_state=pending` 的 dossier 或本进程注册 run 引用；`context/<sha>` 需未被任何 DB revision、当前 workspace base/context、未终态或待发布 workflow base 引用。locked/非法 metadata 保留并 fail closed；项目列表查询失败时整轮保留，某项保护查询失败时跳过该项目。
+- 后台 run cleanup 在启动后立即执行、之后每小时执行。它先查询 `workspaces`、run 保护集合和 context 保护 SHA，再触碰项目文件；只处理有 `workspaces` 记录的项目。超过 `workspace.run_cleanup_after` 的 `runs/<id>` 需未被未终态 workflow、queued/running job、`publication_state=pending` 的 dossier 或本进程注册 run 引用；`context/<sha>` 需未被任何 DB revision、当前 workspace base/context、未终态或待发布 workflow base 引用。locked/非法 metadata 保留并 fail closed；项目列表查询失败时整轮保留，某项保护查询失败时跳过该项目。持有项目 workspace 写锁时，同一轮清理还会删除 `graphs/` 下崩溃残留的目标图谱目录：评审结束时会自行删除 `graphs/<runID>`（见[目标提交代码图谱](#目标提交代码图谱)），且整个评审期间持工作区读锁，所以写锁下仍存在的目录是进程崩溃遗留。只有早于 `workspace.run_cleanup_after`、run ID 不在上述保护集合且不是本进程注册 run 的目录才删除，符号链接、普通文件和名称不是合法 run ID 的条目保留。清理完成时的 INFO 日志 `run cleanup finished` 用 `removed_graphs` 记录本轮删除的目录数，与 `removed_runs`、`removed_contexts` 并列。
 - 同一轮 run cleanup 在持有项目 workspace 写锁时还会维护 mirror 与容量（#459）：先删除 `refs/merge-requests/<iid>/head` 中不再被保护集合引用的 ref（保护集合为非终态 review workflow 与非终态 `review_status`，即 `queued`/`running`/`publishing`），再执行 `git gc --quiet --auto`；保护查询失败时跳过该项目的 ref 清理与 gc（fail closed）。配置 `workspace.max_bytes`（默认 0 表示禁用）后，每轮清理遍历工作区根目录统计总字节数（只读元数据、不跟随符号链接），写入单行表 `workspace_capacity`，超限记 WARN 并通过 `GET /api/v1/stats` 的 `workspace_capacity` 暴露。配置 `workspace.reclaim_after`（默认 0 表示禁用）后，长期不活跃项目的整个工作区目录可被删除，但必须同时满足：没有本进程注册的 run；保护查询成功且不受保护（未终态 workflow、queued/running 的项目 job、`publication_state=pending` 的 dossier、非终态 `review_status` 均视为保护）；活动时间早于阈值；目录是工作区根的直接子目录且带有效 managed marker（缺失、不可读、符号链接或项目不匹配一律保留）。项目列表查询失败时整轮不回收，单项目保护查询失败只跳过该项目；被回收目录会在下次刷新或 onboarding 时重建。新建项目从首次 onboarding 或评审准备起即带 managed marker；升级前缺少 marker 的旧目录不会自动获得，仍按未知归属保留，需按「项目删除后的残留核对」人工确认后手工创建标记。两个配置默认均为 0 表示禁用，负数会被配置校验拒绝。
 
 基础镜像标签已在本机联网核对 Docker Hub（2026-10-22）：
@@ -689,7 +689,7 @@ docker compose run --rm --no-deps review --config /app/config/server.yaml --chec
 | `/usr/local/bin/crc-codebase-memory-mcp` | 指向 wrapper 的旧名兼容链接 |
 | `/licenses/codebase-memory-mcp/` | 上游 `LICENSE` 与 `THIRD_PARTY_NOTICES.md` |
 
-镜像不运行上游 `install`，不写任何 agent 配置或 hooks。示例配置和 `config/server.docker.yaml` 的 `default_extensions` 在首次启动时登记平台级 stdio 服务器 `codebase-memory`（`--tool-profile=analysis`），并为 `explore`、`code-review`、`review` 各授权 11 项只读图谱工具，为 `validate` 和 `verify` 各授权 `get_code_snippet`、`search_graph`、`trace_path`、`search_code`，为 `onboarding` 授权 `get_architecture`、`get_graph_schema`；`reasoner`、`synthesize` 不默认授权。有效 ignore 为空时，项目 onboarding 和刷新可用 CLI 为固定的 `base/` 建索引；非空时按下节停用这些执行路径。每个项目的 `HOME`、`CBM_CACHE_DIR`、`CBM_RUNTIME_DIR` 都在该项目工作区内，项目之间查不到彼此的索引；auto_index、watcher 和 UI 均关闭。规则详见 [默认扩展](design/06-config.md#默认扩展default_extensions) 和 [内置 codebase-memory-mcp](design/06-config.md#内置-codebase-memory-mcp)。
+镜像不运行上游 `install`，不写任何 agent 配置或 hooks。示例配置和 `config/server.docker.yaml` 的 `default_extensions` 在首次启动时登记平台级 stdio 服务器 `codebase-memory`（`--tool-profile=analysis`），并为 `explore`、`code-review`、`review` 各授权 11 项只读图谱工具，为 `validate` 和 `verify` 各授权 `get_code_snippet`、`search_graph`、`trace_path`、`search_code`，为 `onboarding` 授权 `get_architecture`、`get_graph_schema`；`reasoner`、`synthesize` 不默认授权。ignore 未受限时（项目设置和仓库配置都没有追加超出内置默认规则的项），项目 onboarding 和刷新可用 CLI 为固定的 `base/` 建索引；受限时按下节停用这些执行路径。评审的目标提交与工作区索引不一致时，另见[目标提交代码图谱](#目标提交代码图谱)。每个项目的 `HOME` 和 `CBM_CACHE_DIR` 都在该项目工作区内，项目之间查不到彼此的索引；`CBM_RUNTIME_DIR` 默认是 `$HOME/run`，路径较长时由 wrapper 改用 `/tmp` 下的短目录（见[图谱管理与排查](#图谱管理与排查)的「运行时目录」）；auto_index、watcher 和 UI 均关闭。规则详见 [默认扩展](design/06-config.md#默认扩展default_extensions) 和 [内置 codebase-memory-mcp](design/06-config.md#内置-codebase-memory-mcp)。
 
 ### GitLab 正文中的 quick action
 
@@ -699,19 +699,19 @@ GitLab 会以发评论的账号执行评论中首字节为 `/` 的行（如 `/cl
 
 新评审保存合并后的有效 ignore 策略。规则写法做了规范化：去掉前导 `/` 和 `./`；`dir/` 匹配任意层级的目录。`!` 否定和 `[...]` 字符类不支持：保存项目设置时返回 400，平台配置在配置检查时拒绝；仓库配置中出现这类规则会让评审永久失败。旧配置已经包含这类写法时，评审会以配置错误永久失败；底层匹配器也按“全部忽略”兜底，不会静默放行。被忽略的 diff、仓库读取、遍历和证据路径使用相同规则，目录祖先和符号链接目标也受检查。重命名的任一侧被忽略时，整个 diff 和对应新路径均被排除。允许读取未被忽略的非 diff 文件作为证据，但行内定位只使用 dossier 接收的 diff。明确指向 ignored 路径的模型结果会被拒绝，不会降为汇总评论发布。被忽略文件只扣留其自身及重命名关联的路径的行内定位：同一 MR 中的其他代码文件仍可发布行内讨论；以下情形才保守地扣留全部路径：截断但未记录省略路径；renamed/copied 文件缺少 `old_path`；省略原因为 `invalid_path` 或 `missing_rename_path`；被忽略的重命名缺少一侧路径（此时不写 `path_alias_info`）；旧版本生成的快照。回退提示：本版本写入的快照被旧版本二进制读取时，退化为全部歧义，发布键可能与新版本不同，崩溃后的讨论采纳可能无法匹配。
 
-有效 ignore 非空时还有以下变化：
+ignore 受限时（项目设置或仓库 `.gitlab-review.yml` 追加了超出内置默认 6 条的规则；内置默认规则只排除构建产物，不算受限）还有以下变化：
 
-- 不执行 MCP 工具或全量图谱索引，因为现有服务无法证明其读取范围符合 ignore。这是有意的安全降级，不是覆盖缺口：不记录 `tool_gaps`，不把 MCP 工具交给 agent，评审照常进行，结论不受影响（控制台工作区页显示 `index: blocked by ignore policy` 作为可见提示）。被忽略文件本身同样不算覆盖缺口。
+- 不执行 MCP 工具或全量图谱索引（包括评审的[目标提交代码图谱](#目标提交代码图谱)），因为现有服务无法证明其读取范围符合 ignore。这是有意的安全降级，不是覆盖缺口：不记录 `tool_gaps`，不把 MCP 工具交给 agent，评审照常进行，结论不受影响（控制台工作区页显示 `index: blocked by ignore policy` 作为可见提示）。被忽略文件本身同样不算覆盖缺口。
 - 旧索引和 `index_sha` 保留，但不会用于上述工具调用。刷新后索引状态为 `degraded`，固定原因是 `index: blocked by ignore policy`，即使旧 SHA 等于 base SHA 也不显示 ready。
 - 不注入无来源证明的历史 context 文档，不删除、解锁或改写这些文档。初始化和刷新生成新上下文时，仓库读取同样受策略限制。
 - `AGENTS.md`、`CLAUDE.md` 和 `.gitlab-review.yml` 按来源路径过滤。被忽略的仓库配置仍可在本地用于控制规则，但其原文、语言和自定义规则不作为模型输入。配置读取或解析失败会停止该次执行，而不是当成空规则。`.gitlab-review.yml` 解析失败或包含不支持的 ignore 写法时，评审永久失败、不重试，并在 MR 中留一条说明评论；修正文件后重新触发评审。启动恢复遇到这类错误会终结对应工作流；网络等临时读取错误仍保留为可恢复。
 - git log 只返回提交 hash 和作者时间，不返回可包含任意文本的提交说明；git blame 不返回可能由 `.mailmap` 提供的作者元数据。独立于 checkout 的平台 Skill 仍可用；与 checkout 重叠、互为祖先或来源无法确认的 Skill 会阻止该次 agent 调用，不会先发送其描述或正文。
 
-默认 ignore 非空，因此默认图谱会受到上述限制。项目和仓库规则只能追加到平台规则；不要为了恢复图谱而移除需要保护的规则。即使有效规则为空，MR 评审也仅注入来源 SHA 等于该 MR 目标分支 tip 的 context；锁定文档不会被修改或解锁。MCP 还要求工作区 ready、没有错误，且有效 index SHA 等于同一 tip。工作区锁保证并发，不证明材料来自目标分支。有效 ignore 为空而索引身份无法证明时，实际启用的绑定受阻会产生覆盖缺口；没有绑定不会产生缺口。
+内置默认 ignore 只排除构建产物，不属于受限策略，默认图谱不受上述限制（见 [ignore 策略与索引](#ignore-策略与索引)）；项目或仓库追加的规则才会触发。项目和仓库规则只能追加到平台规则；不要为了恢复图谱而移除需要保护的规则。即使 ignore 未受限，MR 评审也仅注入来源 SHA 等于该 MR 目标分支 tip 的 context；锁定文档不会被修改或解锁。MCP 还要求索引身份可证明：共享索引需工作区 ready、没有错误，且有效 index SHA 等于同一 tip；共享索引不满足这些条件时，可由本次评审建立的目标图谱提供同样的证明（dossier 记 `index_source=run`，见[目标提交代码图谱](#目标提交代码图谱)），其索引 SHA 同样必须等于目标提交。工作区锁保证并发，不证明材料来自目标分支。ignore 未受限而索引身份无法证明时，实际启用的绑定受阻会产生覆盖缺口；没有绑定不会产生缺口。
 
 旧 dossier 缺少版本化策略时，程序仍可读取其历史记录，但不会复用旧节点输出继续调用模型或发布。启动恢复会取消旧的未完成工作流，待发布结果会跳过，手动重发也会拒绝；需要重新触发评审。已有发布或失败终态不因此改写；只有仓库 Skill 来源有明确证明时，正常 job 重试才可能通过新 dossier 重建。旧数据库、索引、备份及已经外发的内容不会自动清除。
 
-同样，缺少版本化工作区来源证明或来源矛盾的旧 dossier 不会续跑或发布，需重新触发评审。续跑原本允许 MCP 的快照前，会在工作区锁内重新检查索引；索引不再安全时保留旧快照并取消续跑。原本禁用 MCP 的快照不会在续跑时自动获得权限。已完成且来源证明有效的快照不因之后共享索引变化而被拒绝发布。
+同样，缺少版本化工作区来源证明或来源矛盾的旧 dossier 不会续跑或发布，需重新触发评审。续跑原本允许 MCP 的快照前，会在工作区锁内重新检查索引。共享索引仍不匹配时，按[目标提交代码图谱](#目标提交代码图谱)的条件为该次评审重建 per-run base 与目标图谱后继续；仍无法证明索引安全时保留旧快照并取消续跑，取消原因为 `index_ineligible`。原本禁用 MCP 的快照不会在续跑时自动获得权限。已完成且来源证明有效的快照不因之后共享索引变化而被拒绝发布。来源证明里的可选字段 `workspace_provenance.index_source` 记录索引来源（`workspace` 为共享工作区索引，`run` 为本次评审的目标图谱），provenance 版本号不变；缺少该字段的旧 dossier 按共享工作区索引解释，照常可读、可恢复。
 
 升级前自动生成的 context 即使 SHA 匹配，也可能使用过其他分支的索引。缺少安全生成工作流证明的文档仍保留并在控制台显示，但不再注入 MR 评审；锁定状态不会自动改变。管理员可解锁后重新生成，或检查内容并显式手工保存以确认。手工保存的 context 仍须匹配 MR 目标分支 tip。
 
@@ -726,9 +726,40 @@ GitLab 会以发评论的账号执行评论中首字节为 `/` 的行（如 `/cl
 - **查看和测试**：控制台「扩展」页列出 `codebase-memory`；「测试并列出工具」返回的列表不含 `index_repository`、`delete_project`、`ingest_traces`、`manage_adr`。
 - **内置标识**：它带「内置」标签，始终启用，不能停用或删除。名称和配置随平台版本走，不能在控制台编辑；禁用、删除、改名、改配置都返回 409。
 - **禁用**：已有自定义 MCP 可在编辑窗口把「启用」改为「停用」，或 `PUT /api/v1/mcp-servers/{id}` 设置 `"enabled": false`；保存后立即对本进程的下一次评审生效，无需重启。重启和升级都保持停用。内置 `codebase-memory` 始终启用，停用请求返回 409；启动同步会把历史停用状态恢复为启用。
-- **故障表现**：二进制缺失或无法启动时评审照常完成，但没有图谱工具；评审结论里出现 `MCP tools unavailable` 告警，原本会 PASS 的评审显示为 INCOMPLETE（`explore`、`code-review`、`review`、`reasoner`、`validate` 绑定的工具缺失都会记为 `tool_gaps`）。非取消的建索引失败不阻断 onboarding 或刷新；其他必要步骤及状态保存成功时工作区最终为 `ready`，`last_error` 为固定消息 `index: code graph indexing failed`，刷新保留旧 `index_sha`。ignore 阻断索引时 `index_status` 为 `degraded`；其他情况下比较已存的 SHA，不代表当前索引健康。
+- **故障表现**：二进制缺失或无法启动时评审照常完成，但没有图谱工具；评审结论里出现 `MCP tools unavailable` 告警，原本会 PASS 的评审显示为 INCOMPLETE（`explore`、`code-review`、`review`、`reasoner`、`validate` 绑定的工具缺失都会记为 `tool_gaps`）。非取消的建索引失败不阻断 onboarding 或刷新；其他必要步骤及状态保存成功时工作区最终为 `ready`，`last_error` 为固定消息 `index: code graph indexing failed`，刷新保留旧 `index_sha`。ignore 阻断索引时 `index_status` 为 `degraded`；其他情况下比较已存的 SHA，不代表当前索引健康。评审的目标图谱建不出来时同样不阻断评审：按原规则不提供已绑定的 MCP 工具并记录 `tool_gaps`，日志为 `target code graph unavailable; continuing without it`，见[目标提交代码图谱](#目标提交代码图谱)。
 - **验证记录**：2026-11-02 在 Docker 部署环境用 `9c3b4e2` 镜像验证：容器内 `codebase-memory-mcp --version` 为 `0.12.1`；`POST /api/v1/mcp-servers/{id}/test` 返回 13 个只读工具；真实 MR 评审完成并发布 summary。该项目使用非空 ignore policy，因此评审未注入 MCP 工具，符合上文的预期安全降级。
-- **排查信息**：索引失败告警 `code graph index failed; continuing without it` 和一般工作区失败告警 `workspace operation failed` 含 `project_id` 与 `error_class`；工作区/onboarding 类别包括模型 provider 侧的 `upstream_auth`、`rate_limited`、`network`、`config`、`overloaded`、`context_too_long`，GitLab/git 侧的 `gitlab_auth`、`gitlab_forbidden`、`gitlab_not_found`、`gitlab_rate_limited`、`gitlab_unavailable`、`gitlab_rejected`、`gitlab_project_changed`、`git_auth`、`git_forbidden`、`git_repository_not_found`、`git_ref_not_found`、`git_network`、`git_failed`，以及 `timeout`、`canceled`、`panic`、`internal`；未知类别归为 `internal`，GitLab 或模型 provider 有 HTTP 响应时另带脱敏的 `upstream_status`，各类别含义和处理见第 10 节。 节点失败事件优先使用执行器提供的固定类别（如 `auth`、`rate_limited`、`sandbox_denied`、`panic`），没有分类时仍是 `executor_error`、`timeout` 或 `expand_failed`；`panic` 不记录 panic 值。这些日志和工作区 API 不提供原始原因；按项目 ID 在受控环境中检查索引配置、可执行文件和运行环境。旧数据库和备份可能仍含错误原文，读取接口不会清除它们；应限制数据库和备份访问，回退旧版可能重新暴露原文。
+- **排查信息**：索引失败告警 `code graph index failed; continuing without it` 和一般工作区失败告警 `workspace operation failed` 含 `project_id` 与 `error_class`；工作区/onboarding 类别包括模型 provider 侧的 `upstream_auth`、`rate_limited`、`network`、`config`、`overloaded`、`context_too_long`，GitLab/git 侧的 `gitlab_auth`、`gitlab_forbidden`、`gitlab_not_found`、`gitlab_rate_limited`、`gitlab_unavailable`、`gitlab_rejected`、`gitlab_project_changed`、`git_auth`、`git_forbidden`、`git_repository_not_found`、`git_ref_not_found`、`git_network`、`git_failed`，以及 `timeout`、`canceled`、`panic`、`internal`；未知类别归为 `internal`，GitLab 或模型 provider 有 HTTP 响应时另带脱敏的 `upstream_status`，各类别含义和处理见第 10 节。 节点失败事件优先使用执行器提供的固定类别（如 `auth`、`rate_limited`、`sandbox_denied`、`panic`），没有分类时仍是 `executor_error`、`timeout` 或 `expand_failed`；`panic` 不记录 panic 值。这些日志和工作区 API 不提供原始原因；按项目 ID 在受控环境中检查索引配置、可执行文件和运行环境。旧数据库和备份可能仍含错误原文，读取接口不会清除它们；应限制数据库和备份访问，回退旧版可能重新暴露原文。评审的目标图谱失败告警 `target code graph unavailable; continuing without it` 同样只含 `project_id` 与固定词 `error_class`，取值见[目标提交代码图谱](#目标提交代码图谱)；默认分支同步的日志见[默认分支同步](#默认分支同步)。
+- **运行时目录**：codebase-memory-mcp 0.12.1 在 `CBM_RUNTIME_DIR` 下建 unix socket（`cbm-<id>.sock`），运行时目录超过约 60 字节时所有调用（含 `cli index_repository`）都会失败。wrapper 在 `$HOME/run` 不超过 48 字节时保持原样；更长时改用 `/tmp/tcbm-<uid>/<HOME 的 SHA-256 前 16 位>`（目录权限 0700）。`/tmp/tcbm-<uid>` 必须是当前用户自己的真实目录：符号链接、他人目录或非目录都会让 wrapper 报错退出，不会被采用（fail closed）；`/tmp` 须对服务用户可写，启用只读根文件系统的自定义部署要为 `/tmp` 提供 tmpfs 或可写卷。图谱数据与缓存仍在 `HOME` 内，只有协调文件移出，每个 `HOME` 仍有各自的运行时目录。标准镜像布局（`workspace.root: /app/data/workspaces`，`x-review.home: .mcp/codebase-memory/home`）下 `$HOME/run` 至少 52 字节，因此项目的图谱服务总是使用回退目录，镜像用户 UID 为 10001，即 `/tmp/tcbm-10001/`；每个评审的目标图谱 `HOME` 在 `graphs/<runID>/` 之下、路径更深，同样走回退。wrapper 启动时会尽力删除该父目录下其他 `HOME` 的、超过两天未变的叶子目录（`find -mtime +2`，GNU find 按整日向下取整，实际为至少 3 个整日；删除失败被忽略），评审结束后遗留的目标图谱协调目录因此会被后续启动的 wrapper 回收。
+
+### 目标提交代码图谱
+
+MCP 代码图谱工具只在图谱描述的就是评审目标提交（MR diff 的 `start_sha`）时才交给 agent。共享工作区索引（`workspaces.index_sha`）只跟随一个提交；它不能证明就是目标提交时（最常见的是 `index_sha` 与目标提交不一致，例如 MR 的目标分支不是默认分支，或默认分支的索引还没刷新到 `start_sha`；工作区不是 `ready` 或带有 `last_error` 时同样不能证明），评审会为本次评审自己的 base checkout 建一份只属于这次评审的图谱，称为目标图谱。没有它时，这类评审只能不提供已绑定的 MCP 工具并记录 `tool_gaps`，原本会 PASS 的评审显示为 INCOMPLETE。
+
+**启用条件**（同时满足）：
+
+1. 共享索引不满足使用条件（见 [ignore 安全边界](#ignore-安全边界)中的 MCP 索引身份要求）：`workspaces.index_sha` 与目标提交不一致，或工作区不是 `ready`、带有 `last_error`。共享索引满足条件时不额外索引，所以默认分支 MR 在工作区索引已跟上时没有额外成本。
+2. 有效 ignore 未受限（见 [ignore 安全边界](#ignore-安全边界)）。受限时完全不建索引，安全边界不变。
+3. 平台与项目配置合并后的 MCP 服务器中，所有设置了 `x-review.index_command` 的服务器都是 stdio。其中有 http 类型时不启用目标图谱。
+
+**建立与使用**：评审在准备阶段持工作区读锁，为本次评审的 base checkout（已在 `start_sha`）在工作区的 `graphs/<runID>/` 下建立图谱。它用一个只含这些带索引命令服务器、以该目录为工作区的独立 MCP manager 运行 `index_command`，因此这些服务器的 `HOME` 和图谱只含这一份，读不到共享索引或其他评审的图谱。带索引命令服务器的工具从这个 manager 绑定，其他 MCP 服务器仍走项目共享 manager。建索引前后都会核对 base checkout 的 HEAD 仍是 `start_sha`。资格证明不放宽：索引 SHA 仍须等于目标提交；dossier `workspace_provenance` 的可选字段 `index_source` 记录来源（`workspace` 为共享工作区索引，`run` 为本次评审的目标图谱），provenance 版本号不变，缺少该字段的旧 dossier 照常可读、可恢复。
+
+**生命周期**：等同一次评审 run。评审结束时先关闭 manager 再删除 `graphs/<runID>/`，不跨评审缓存。进程崩溃遗留的目录由后台 run cleanup 回收，规则见[镜像内容与边界](#1-镜像内容与边界)中的 run cleanup 说明（日志字段 `removed_graphs`）。
+
+**成本与上限**：每次需要目标图谱的评审都会完整索引一次 base checkout，占用 CPU、磁盘和时间。等待并发名额加索引合计最多 10 分钟（代码常量，不可配置）；进程内最多 2 个目标图谱索引同时运行，超出的评审等待空闲名额，等待时间计入同一个 10 分钟。工作区带有 `last_error`（例如上次建索引失败）时共享索引同样不满足条件，评审会尝试目标图谱；索引命令本身持续失败时，每次评审都会先耗掉一次失败的建索引时间再降级，应先修复工作区的索引问题。
+
+**失败与降级**：建图谱失败或超时不使评审失败。评审照常完成，按原规则不提供已绑定的 MCP 工具并记录 `tool_gaps`（不能 PASS），同时记录 WARN `target code graph unavailable; continuing without it`，字段只有 `project_id` 与 `error_class`，`error_class` 是固定词，不含错误正文或命令输出。父任务取消或出站令牌失效时，评审报错并按任务重试，而不是降级。
+
+| `error_class` | 含义 | 排查方向 |
+|---|---|---|
+| `invalid_request` | 内部请求自检未通过：工作区与项目不符，或 run ID、base 目录、`start_sha` 不合法 | 不应出现；保留日志并结合同一评审的其他日志排查 |
+| `base_unverified` | 无法证明 base checkout 位于 `start_sha`：解析 HEAD 失败、HEAD 与 `start_sha` 不一致，或建索引后复核不一致 | 检查工作区 git 状态和磁盘，重新触发评审 |
+| `setup_failed` | 无法创建 `graphs/<runID>/`，或无法建立目标图谱的 MCP manager（路径不安全、权限、磁盘，或服务器配置无效） | 检查工作区目录权限、磁盘空间和 `x-review` 配置 |
+| `index_failed` | 索引命令失败：非零退出、无法运行，或环境被拒绝（例如绝对路径的 `x-review.home` 落在 `graphs/<runID>/` 之外） | 索引命令的输出不会记录；在受控环境用同一 `index_command` 对一份检出手动运行，并检查可执行文件、磁盘和内存 |
+| `index_incomplete` | 索引没有覆盖每一个带索引命令的服务器 | 核对各服务器的 `index_command`；持续出现请反馈 |
+| `timeout` | 等待名额加索引超过 10 分钟 | 检查并发评审数、仓库规模和宿主机负载 |
+| `canceled` | 建图谱被取消，但评审任务本身仍有效 | 通常是瞬时现象，重新触发评审；持续出现请结合服务日志排查 |
+
+**崩溃恢复**：进程重启后恢复 `MCPEligible` 的工作流时，若共享索引仍不匹配，会重建 per-run base 与目标图谱后继续；仍无法证明才按原规则以 `index_ineligible` 取消，见第 8 节「恢复取消的原因」。配置侧的规则见[目标提交代码图谱（配置设计）](design/06-config.md#目标提交代码图谱)。
 
 ## 2. 构建
 
@@ -1021,7 +1052,7 @@ docker cp tribunal:/app/data/. "$BACKUP_DIR/"
 - `review.db-shm`（若存在）
 - `workspaces/`（原数据中存在时）
 
-`workspaces/` 包含项目 checkout、运行目录和上下文文件，属于恢复所需数据；上下文文档的元数据同时记录在数据库中。停止容器后复制的数据库与工作区处于同一静止时间点。备份中没有 `workspaces/` 时，先确认原数据确实没有该目录，不能把复制不完整当成空工作区。
+`workspaces/` 包含项目 checkout、运行目录（`runs/`）、评审期间临时存在的目标图谱目录（`graphs/`，评审结束即删除，崩溃遗留的由 run cleanup 回收）和上下文文件，属于恢复所需数据；上下文文档的元数据同时记录在数据库中。停止容器后复制的数据库与工作区处于同一静止时间点。备份中没有 `workspaces/` 时，先确认原数据确实没有该目录，不能把复制不完整当成空工作区。
 
 ### 校验备份
 
@@ -1314,6 +1345,17 @@ profiles:
 **评审详情与统计的降级可见性**：评审详情新增 `material_warnings`（dossier 的材料降级）、`scope`（全量/增量、head、文件数、无法定位数）、`generated_files`/`generated_paths`；控制台在“未完成原因/评审诊断”区展示材料降级，并新增“评审范围”面板。统计页展示 `feedback_collection`、`workspace_capacity`（超限 `role="alert"`）与 `by_model[].errors_by_kind`。旧服务端缺少这些字段时显示“不可用”，不显示为零或健康。
 
 **历史讨论 intent 清理**：项目删除时仍保留 `discussion_intents` 并把 `verification_required` 置 1（远端讨论仍在），但已删除项目的行永远无法再被确认。Retention 巡检新增 `PurgeOrphanedDiscussionIntents`，只删除项目已不存在的行；存活项目（包括未确认 intent）不受影响。该清理随 retention 启动时立即执行一次，之后按保留间隔运行。
+
+### 目标提交代码图谱与默认分支同步（#604）
+
+**无迁移、无必改配置**：本次变更不新增数据库迁移和配置项，已挂载的配置继续有效（包括 `default_extensions` 与 `x-review.index_command`）。内置 wrapper 随镜像发布，升级镜像即生效；非容器部署需把仓库中更新后的 `scripts/codebase-memory-mcp.sh` 重新安装到 `/usr/local/bin/tribunal-codebase-memory-mcp`。升级与回滚仍按[通用升级与回滚步骤](#通用升级与回滚步骤)执行。
+
+升级后可见的行为变化：
+
+- 共享索引不能证明就是目标提交的评审（主要是目标提交与工作区索引不一致），现在每次都会完整索引一次本次评审的 base checkout（见[目标提交代码图谱](#目标提交代码图谱)）：占用 CPU、磁盘和时间，单次等待加索引最长 10 分钟，进程内最多 2 个同时运行；规划容量时按这类评审的并发数估算。默认分支 MR 在工作区索引已跟上时不额外索引。
+- 项目默认分支会随 GitLab 自动同步（见[默认分支同步](#默认分支同步)）。登记后在 GitLab 上改过默认分支的项目，会在升级后的第一次工作区刷新、onboarding 或评审准备时被更新，并改变未配置 `target_branches` 时哪些 MR 被评审、哪些 push 触发刷新。
+- 标准镜像布局下，wrapper 的运行时目录移到 `/tmp/tcbm-10001/`（见[图谱管理与排查](#图谱管理与排查)的「运行时目录」），`/tmp` 须对服务用户可写；图谱数据和缓存位置不变。
+- dossier `workspace_provenance` 新增的 `index_source` 是可选字段：升级前生成的 dossier 没有它，按共享工作区索引解释，照常可读、可恢复。
 
 ### 通用升级与回滚步骤
 
@@ -1650,7 +1692,7 @@ docker run --rm --entrypoint stat tribunal:local -c '%u:%g %a' /app/data
 | `gitlab: project identity changed` | GitLab 不再在登记的路径/URL 上返回登记的项目（已迁移或改名） | 重新登记项目 |
 | `git: authentication failed` / `git: access denied` | clone/fetch 认证失败或无权限 | 同 401/403，检查 token 和角色 |
 | `git: repository not found` | 仓库不存在或不可见 | 核对仓库地址和 token 可见范围 |
-| `git: branch not found` | 默认分支或推送的 ref 不存在 | 核对默认分支和 MR 源分支 |
+| `git: branch not found` | 默认分支或推送的 ref 不存在 | 核对默认分支和 MR 源分支；默认分支在 GitLab 上改名后会自动同步，见[默认分支同步](#默认分支同步) |
 | `git: network error` | clone/fetch 网络失败 | 检查 DNS、代理、防火墙 |
 | `git: operation failed` | git 的其他失败 | 查看服务日志的 `error_class` 并检查仓库状态 |
 | `workspace: operation timed out` / `workspace: operation canceled` | 工作区操作超时或被取消 | 检查任务取消和负载后重试 |
@@ -1703,9 +1745,18 @@ tribunalctl projects retry-onboarding <项目 ID>
 
 该命令调用 `POST /api/v1/admin/projects/{id}/onboarding/retry`，需要 `auth.bootstrap_token_env` 指向的平台管理员 token；不需要项目 `manage` 授权或浏览器会话，项目侧 `POST /api/v1/projects/{id}/workspace/refresh` 的权限不变。命令返回 `{"job_id":...}`，工作区状态会重新进入 `onboarding`。任务仍在 queued 时重复执行会返回同一个任务；任务开始执行或失败后可再次创建。旧失败记录保留，执行前先确认当前状态。
 
+### 默认分支同步
+
+项目的默认分支（`projects.default_branch`，API 字段 `default_branch`）此前只在登记时写入：GitLab 上改名或切换默认分支后，工作区刷新与索引仍取旧分支（旧分支被删除时刷新以 `git: branch not found` 失败），未配置 `target_branches` 的项目还会把新默认分支的 MR 与 push 过滤掉。现在它会在下列三处读取 GitLab 项目时自动跟随：工作区刷新、onboarding 和每次评审准备。
+
+- **同步条件**：GitLab 报告的默认分支非空、是合法的短分支名（不是 `refs/...` 全名，没有首尾空白，能作为 Git ref 使用），且与存储值不同。写入按旧值比较，只在存储值仍是读到的旧值时更新；并发的另一路径已经改过时采用对方写入的值，同一次变化只处理一次。空仓库（GitLab 没有默认分支）和不合法的名称保持存储值不变。该写入不改变项目的 `revision`。
+- **后续刷新**：评审准备发现变化时，额外排队一次工作区刷新（任务 trigger 为 `default_branch_changed`，不指定分支），让 `base/` 与工作区索引跟上新默认分支。onboarding 和不指定分支的刷新读到变化时，同一次操作直接使用新默认分支。手动刷新、catch-up 刷新和 `default_branch_changed` 刷新都表示“刷新默认分支”：执行时不使用入队时记下的分支，而是先同步再取当前默认分支。push 触发的刷新仍取 push 的分支。
+- **日志**：INFO `project default branch synchronized`（`project_id`）；WARN `project default branch sync failed`（`project_id`、`error_class`）只表示这次没有同步，不影响刷新或评审，下一次读取 GitLab 项目时会再比较；WARN `default branch refresh enqueue failed`（`project_id`、`error_class`）表示评审路径的后续刷新没能入队，评审不受影响，下一次刷新或 push 会让工作区跟上。
+- **影响范围**：默认分支同时决定未配置 `target_branches` 时哪些 MR 被评审、哪些 push 触发刷新，同步后按新默认分支生效。webhook 入口不请求 GitLab，也不做同步：在 GitLab 上变更默认分支后，到下一次同步发生前，webhook 仍按存储值判断。需要立即生效时，在控制台工作区页点「刷新工作区」或调用 `POST /api/v1/projects/{id}/workspace/refresh`，让刷新读到 GitLab 项目。
+
 ### ignore 策略与索引
 
-只有项目或仓库 `.gitlab-review.yml` 追加的 ignore 规则（超出内置默认 6 条）才会阻断工作区索引，接口返回 `index_status=degraded` 和 `last_error="index: blocked by ignore policy"`。内置默认规则只排除构建产物，不再阻止索引、上下文注入或 MCP 工具绑定。受限策略造成的降级会写入 dossier 的 `warnings` 并显示在 MR 摘要评论中；没有项目上下文文档或文档未通过校验、MR base 提交不可用时同样会产生警告。需要代码图谱索引又确实要使用自定义 ignore 时，应权衡该策略与图谱覆盖；阻断本身不影响评审继续执行，详见 [ignore 安全边界](#ignore-安全边界)。
+只有项目或仓库 `.gitlab-review.yml` 追加的 ignore 规则（超出内置默认 6 条）才会阻断工作区索引，接口返回 `index_status=degraded` 和 `last_error="index: blocked by ignore policy"`。内置默认规则只排除构建产物，不再阻止索引、上下文注入或 MCP 工具绑定。受限策略造成的降级会写入 dossier 的 `warnings` 并显示在 MR 摘要评论中；没有项目上下文文档或文档未通过校验、MR base 提交不可用时同样会产生警告。需要代码图谱索引又确实要使用自定义 ignore 时，应权衡该策略与图谱覆盖；阻断本身不影响评审继续执行，详见 [ignore 安全边界](#ignore-安全边界)；受限时评审同样不会为目标提交建立目标图谱，见[目标提交代码图谱](#目标提交代码图谱)。
 
 ### 评审永久失败排查
 

@@ -182,6 +182,9 @@ type ReviewService struct {
 	// queue schedules the workspace refresh that follows a default branch
 	// change found during a run; nil skips the refresh, not the synchronization.
 	queue JobEnqueuer
+	// targetGraphs indexes a review's base commit into a private code graph when
+	// the shared workspace index describes another commit; nil turns it off.
+	targetGraphs targetGraphBuilder
 }
 
 // ReviewServiceConfig configures ReviewService.
@@ -319,6 +322,7 @@ func NewReviewService(cfg ReviewServiceConfig) (*ReviewService, error) {
 		cancelPoll:     poll,
 		cancelWait:     wait,
 		queue:          cfg.Queue,
+		targetGraphs:   newTargetGraphBuilder(cfg.Git),
 	}, nil
 }
 
@@ -810,7 +814,7 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 	}
 	defer execution.releaseResolverSet()
 	defer execution.cleanupRepositorySkills()
-	var head, baseDir, workspaceIdentity, baseIdentity, indexSHA string
+	var head, baseDir, workspaceIdentity, baseIdentity, indexSHA, indexSource string
 	var indexEligible bool
 	var cleanup func()
 	prepare := func() error {
@@ -846,6 +850,32 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 		if err != nil {
 			return err
 		}
+		indexSource = ""
+		if indexEligible {
+			indexSource = review.IndexSourceWorkspace
+		}
+		return nil
+	}
+	// ensureGraph gives the review base a code graph of its own when the shared
+	// index follows another commit. It is called only where the graph is used
+	// (a resumed dossier that relied on it, or a new dossier with files), so an
+	// empty or unusable run never pays for an index. The graph is closed by a
+	// deferred call registered after the checkout cleanup, so it runs first.
+	var graph *targetGraph
+	graphTried := false
+	ensureGraph := func() error {
+		if indexEligible || graphTried || head == "" {
+			return nil
+		}
+		graphTried = true
+		built, err := s.useTargetGraph(ctx, project, ws, execution, job.ID, baseDir, inputs.Version.StartSHA, cfg.Settings.Ignore)
+		if err != nil {
+			return err
+		}
+		if built != nil {
+			graph = built
+			indexSHA, indexEligible, indexSource = strings.ToLower(inputs.Version.StartSHA), true, review.IndexSourceRun
+		}
 		return nil
 	}
 	// Terminal snapshots need publication checks, not a new worktree.
@@ -855,6 +885,7 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 			return err
 		}
 		defer cleanup()
+		defer func() { graph.Close() }()
 	}
 	var previous *review.Dossier
 	if workflow != nil {
@@ -874,6 +905,13 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 			}
 			if err := review.ValidateDossier(previous); err != nil {
 				changed = true
+			}
+			if resumable && previous.WorkspaceProvenanceValid() && previous.WorkspaceProvenance.MCPEligible {
+				// The stored dossier promised a code graph; rebuild it for this
+				// run before deciding the workspace changed.
+				if err := ensureGraph(); err != nil {
+					return err
+				}
 			}
 			if !previous.WorkspaceProvenanceValid() || (resumable && previous.WorkspaceProvenance.MCPEligible && !indexEligible) {
 				changed = true
@@ -944,6 +982,7 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 			return err
 		}
 		defer cleanup()
+		defer func() { graph.Close() }()
 	}
 	if !resumable {
 		// Filtering happens first so an excluded update does not cancel a review.
@@ -976,6 +1015,9 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 			}
 			return s.publishEmptyWithNote(ctx, project, token, control, payload.NoteID, inputs, cfg, summary, ignored)
 		}
+		if err := ensureGraph(); err != nil {
+			return err
+		}
 		provenance := &review.WorkspaceProvenance{Version: review.WorkspaceProvenanceVersion, TargetSHA: inputs.Version.StartSHA}
 		dossierWarnings := make([]string, 0, 3)
 		contextDoc, contextBase, contextFound := s.contextDoc(ctx, project.ID)
@@ -985,6 +1027,9 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 			dossierWarnings = append(dossierWarnings, withoutContextWarning)
 		}
 		provenance.IndexSHA, provenance.MCPEligible = indexSHA, indexEligible
+		if indexEligible {
+			provenance.IndexSource = indexSource
+		}
 		if config.ReviewIgnoreRestricted(cfg.Settings.Ignore) && !indexEligible {
 			dossierWarnings = append(dossierWarnings, withoutCodeGraphWarning)
 		}

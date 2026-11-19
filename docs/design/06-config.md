@@ -597,27 +597,41 @@ default_extensions:
 
 | `x-review` 字段 | 含义 |
 |---|---|
-| `index_command` | onboarding 和刷新时执行的建索引命令；`{base_dir}`、`{workspace}` 为占位符 |
+| `index_command` | onboarding 和刷新时执行的建索引命令；`{base_dir}`、`{workspace}` 为占位符。评审的[目标图谱](#目标提交代码图谱)也用它为本次评审的 base checkout 建索引，此时 `{base_dir}` 是该 base checkout，`{workspace}` 是 `graphs/<runID>` |
 | `env_allowlist` | 子进程可继承的环境变量；默认只有 `PATH` |
-| `home` | 工作区内的相对目录或绝对目录；应用创建并校验该目录，用作子进程 `HOME`。此字段不展开 `{workspace}` |
+| `home` | 工作区内的相对目录或绝对目录；应用创建并校验该目录，用作子进程 `HOME`。此字段不展开 `{workspace}`。目标图谱的工作区是 `graphs/<runID>`，`home` 必须在它之下，指向其他位置的绝对路径会被拒绝并使该次索引失败，所以带索引命令的服务器应使用相对目录（如示例的 `.mcp/codebase-memory/home`） |
 | `call_timeout`、`max_output_chars`、`idle_timeout` | 调用超时、输出上限、空闲回收时间 |
 
 `index_command` 中的工具参数以实际版本的 `codebase-memory-mcp cli --help` 为准。
 
 示例使用仓库的 [MCP 隔离启动脚本](../../scripts/codebase-memory-mcp.sh)，而不是直接启动上游二进制。由部署管理员把脚本安装或只读挂载到 `/usr/local/bin/tribunal-codebase-memory-mcp`，并把上游 `codebase-memory-mcp` 放到服务的 `PATH`。主机上已安装的旧名 wrapper 必须重命名或提供兼容符号链接：旧路径 `crc-codebase-memory-mcp` 只有在主机仍保留该名称时才可解析，否则 MCP server 启动失败。标准 Docker 镜像已内置校验过的上游 0.12.1 二进制、该 wrapper 和 `crc-codebase-memory-mcp` 兼容链接（见下文）；非容器部署仍需自行安装。不要挂载 Docker socket。
 
-脚本同时供 MCP server 和 `index_command` 使用。它把 `CBM_CACHE_DIR` 与 `CBM_RUNTIME_DIR` 固定在应用提供的项目 `HOME` 下，并关闭自动索引、watcher 和 UI。0.12.1 的 daemon 默认按账号共享，只有不同 `HOME` 或 `XDG_RUNTIME_DIR` 不足以隔离：第二个项目可能因 cache 不同而连接失败。不要把所有项目改用共享 cache 来消除报错，那会让代码地图跨项目可见。
+脚本同时供 MCP server 和 `index_command` 使用。它把 `CBM_CACHE_DIR` 固定在应用提供的 `HOME` 下；`CBM_RUNTIME_DIR` 默认是 `$HOME/run`，路径较长时改用 `/tmp` 下的短目录（见下）。它还关闭自动索引、watcher 和 UI。0.12.1 的 daemon 默认按账号共享，只有不同 `HOME` 或 `XDG_RUNTIME_DIR` 不足以隔离：第二个项目可能因 cache 不同而连接失败。不要把所有项目改用共享 cache 来消除报错，那会让代码地图跨项目可见。
 
-`HOME` 必须由应用在工作区内创建并校验；脚本不是文件系统沙箱，也不替代应用的环境变量和工具白名单。Unix socket 对路径长度有限制，应保持工作区根路径较短，例如 `/app/data/workspaces`。在新平台或新上游版本上，需重新验证两个项目并发连接、索引复用和未授权工具拒绝，不能只凭 `index_status=ready` 判断隔离成功。
+`HOME` 必须由应用在工作区内创建并校验；脚本不是文件系统沙箱，也不替代应用的环境变量和工具白名单。
+
+**运行时目录与 socket 路径长度**：Unix socket 对路径长度有限制。codebase-memory-mcp 0.12.1 在 `CBM_RUNTIME_DIR` 下建 `cbm-<id>.sock`，运行时目录超过约 60 字节时所有调用（含 `cli index_repository`）都会失败。脚本在 `$HOME/run` 不超过 48 字节时保持原样；更长时改用 `/tmp/tcbm-<uid>/<HOME 的 SHA-256 前 16 位>`（目录权限 0700）。父目录 `/tmp/tcbm-<uid>` 必须是当前用户自己的真实目录，符号链接、他人目录或非目录都会让脚本报错退出，不会被采用（fail closed）；`/tmp` 须对服务用户可写，回退路径还需要 `sha256sum` 或 `shasum` 计算哈希，两者都没有时脚本同样报错退出。只有协调文件移出，图谱数据和缓存仍在 `HOME` 内，每个 `HOME` 仍有各自的运行时目录，隔离不变。脚本启动时还会尽力删除该父目录下其他 `HOME` 的、超过两天未变的叶子目录（`find -mtime +2`，GNU find 按整日向下取整，实际为至少 3 个整日；失败被忽略）。标准 Docker 布局（`workspace.root: /app/data/workspaces`，`home: .mcp/codebase-memory/home`）下 `$HOME/run` 至少 52 字节，因此总是使用回退目录；每个评审的目标图谱 `HOME` 在 `graphs/<runID>/` 之下、路径更深，同样走回退。因此保持工作区根路径较短不再是内置 wrapper 的前提，但自写启动脚本或其他基于 unix socket 的 MCP 服务器仍须自行保证路径长度。
+
+在新平台或新上游版本上，需重新验证两个项目并发连接、索引复用和未授权工具拒绝，不能只凭 `index_status=ready` 判断隔离成功。
 
 ### 内置 codebase-memory-mcp
 
 - **镜像**：Dockerfile 固定 `CODEBASE_MEMORY_MCP_VERSION=0.12.1`，按 `TARGETARCH`（amd64/arm64）下载上游 `-portable` 静态链接发布包，并用写死在 Dockerfile 中的 SHA-256 校验。非 portable 的 glibc 版本需要 `GLIBC_2.38`，bookworm 运行镜像只有 2.36，不能使用。镜像只复制二进制和许可证文本，不运行上游 `install`（它会写 agent 配置和 hooks）。二进制在 `/usr/local/bin/codebase-memory-mcp`，wrapper 在 `/usr/local/bin/tribunal-codebase-memory-mcp`，许可证在 `/licenses/codebase-memory-mcp/`；均属 root，服务以 UID 10001 运行。
 - **默认登记**：示例配置和 Docker 配置通过 `default_extensions.mcp_servers` 登记内置平台服务器 `codebase-memory`，规则见 [默认扩展](#默认扩展default_extensions)。
-- **隔离**：项目 MCP 管理器以项目工作区为 cwd 和 `HOME` 根，wrapper 把 `CBM_CACHE_DIR`、`CBM_RUNTIME_DIR` 放在该 `HOME` 下，因此每个项目使用自己的索引和 daemon，查不到其他项目的索引；不使用账号级 daemon。`auto_index`、`auto_watch`、`watcher_enabled`、`ui_enabled` 都被关闭，不启动 CBM Lens UI。
-- **降级**：二进制缺失或 MCP 启动、列工具失败时，评审节点不带 MCP 工具继续执行，并在节点输出中记录代码生成的 `tool_gaps`。只有部分绑定工具可用时（服务器未公布某个工具，或工具带写入注解被跳过），可用工具照常提供，每个缺失工具各记一条 `tool_gaps`；汇总把它们写入告警，原本的 PASS 改为 INCOMPLETE，原有 BLOCKING 结论保持不变。`explore`、`validate` 和 `reasoner` 节点与 `code-review`、`review` 一样记录 `tool_gaps`，所以任一路绑定工具缺失都会使评审不会得到干净的 PASS。建索引失败不阻断 onboarding 或刷新，工作区记录 `last_error`，刷新时继续使用上一次索引。已有自定义服务器停用后，绑定中引用它的工具直接不提供，不算降级。
+- **隔离**：项目 MCP 管理器以项目工作区为 cwd 和 `HOME` 根，wrapper 把 `CBM_CACHE_DIR` 放在该 `HOME` 下，`CBM_RUNTIME_DIR` 默认也在其下（`$HOME/run`），路径较长时改用 `/tmp` 下按 `HOME` 哈希命名的短目录（见上文），因此每个项目使用自己的索引和 daemon，查不到其他项目的索引；不使用账号级 daemon。`auto_index`、`auto_watch`、`watcher_enabled`、`ui_enabled` 都被关闭，不启动 CBM Lens UI。
+- **降级**：二进制缺失或 MCP 启动、列工具失败时，评审节点不带 MCP 工具继续执行，并在节点输出中记录代码生成的 `tool_gaps`。只有部分绑定工具可用时（服务器未公布某个工具，或工具带写入注解被跳过），可用工具照常提供，每个缺失工具各记一条 `tool_gaps`；汇总把它们写入告警，原本的 PASS 改为 INCOMPLETE，原有 BLOCKING 结论保持不变。`explore`、`validate` 和 `reasoner` 节点与 `code-review`、`review` 一样记录 `tool_gaps`，所以任一路绑定工具缺失都会使评审不会得到干净的 PASS。建索引失败不阻断 onboarding 或刷新，工作区记录 `last_error`，刷新时继续使用上一次索引。评审的[目标图谱](#目标提交代码图谱)建不出来时同样不阻断评审，按同一规则记录 `tool_gaps`。已有自定义服务器停用后，绑定中引用它的工具直接不提供，不算降级。
 - **停用**：已有自定义 MCP 可在编辑窗口把「启用」改为「停用」，或调用 `PUT /api/v1/mcp-servers/{id}` 设置 `enabled: false`；保存后立即对本进程的下一次解析生效，无需重启。重启和升级都保持停用。内置 `codebase-memory` 始终启用，停用请求返回 409，启动同步会恢复启用。要让新部署不登记内置服务器，把配置中的 `mcp_servers` 设为 `[]`。
 - **升级版本**：同时修改 Dockerfile 中的版本和两个 SHA-256（取自上游 release 资产和 `checksums.txt`）、`third_party/codebase-memory-mcp/VERSION` 和 `LICENSE`，用 `gh attestation verify <archive> -R DeusData/codebase-memory-mcp` 核对 SLSA provenance，再运行 `go run ./scripts/licensebundle`、`go test ./scripts/...` 和 Docker smoke。新版本须重新确认 analysis profile 不含写入工具。已部署实例在新镜像首次启动时同步内置服务器的配置和默认工具白名单，见上文规则。
+
+### 目标提交代码图谱
+
+共享工作区索引（`workspaces.index_sha`）只跟随一个提交。它不能证明就是评审的目标提交（MR diff 的 `start_sha`）时（主要是 `index_sha` 与目标提交不一致），评审为自己的 base checkout 建一份只属于这次评审的图谱，称为目标图谱。运行时行为、失败表现和日志见[运维手册](../operations.md#目标提交代码图谱)，本节只记与配置和契约有关的规则：
+
+- **没有新配置项**：是否启用只取决于 MCP 配置和 ignore。有效 ignore 未受限，且平台与项目配置合并后所有设置了 `x-review.index_command` 的服务器都是 stdio 时才启用；其中有 http 类型的服务器时不启用。示例配置和 Docker 配置中的内置 `codebase-memory` 满足这些条件。
+- **隔离方式**：评审用一个只含这些带索引命令服务器的独立 MCP manager 运行 `index_command`，它的工作区是项目工作区下的 `graphs/<runID>/`，所以相对路径的 `x-review.home` 落在该目录之下，这些服务器的 `HOME` 和图谱只含这一份；`{base_dir}` 是本次评审的 base checkout。带索引命令服务器的工具从这个 manager 绑定，其他 MCP 服务器仍走项目共享 manager。
+- **生命周期与上限**：等同一次评审 run，评审结束先关闭 manager 再删除目录，不跨评审缓存。等待并发名额加索引合计最多 10 分钟，进程内最多 2 个目标图谱索引同时运行；两者都是代码常量，不可配置。每次需要目标图谱的评审都会完整索引一次 base checkout，默认分支 MR 在工作区索引已跟上时不额外索引。
+- **资格证明不放宽**：目标图谱的索引 SHA 仍须等于目标提交。dossier 的 `workspace_provenance` 新增可选字段 `index_source`：`workspace` 为共享工作区索引，`run` 为本次评审的目标图谱；`version` 不变，缺少该字段的旧 dossier 按共享工作区索引解释，照常读取与恢复。
+- **提示词不变**：`_platform_rules.md` 的图谱时效规则不变，图谱仍只描述目标分支的 base 侧，见下文「6. prompt 覆盖」中的图谱时效规则。
 
 ---
 
@@ -647,6 +661,7 @@ default_extensions:
 ```
 
 - 未设置的字段取平台 `review_defaults`。
+- `target_branches`：生效值（项目设置，未设置时取平台 `review_defaults`）为空时，只评审目标分支是项目默认分支的 MR，也只有推送到默认分支才触发工作区刷新。默认分支（`projects.default_branch`）随 GitLab 同步，规则见[默认分支同步](../operations.md#默认分支同步)。
 - `profile_by_label`：MR 带指定标签时使用对应档位。评审档位只有 `default`，值只能写 `default`，其他值的映射保存时被丢弃（不报错）；已保存的旧值（指向已移除的档位）在评审时按 `default` 处理。
 - `custom_rules` 作为项目规则注入 prompt 的项目背景段。
 - `ignore` 与平台默认值**合并**，不是替换。
@@ -724,7 +739,7 @@ review:
 
 所选全部 prompt 的内容和版本，加上代码拥有的任务渲染版本（`prompts.TaskRenderVersion`，覆盖任务布局与覆盖语义），合成一个 bundle hash，记录为 dossier 的 `prompt_hash`，并参与工作流 fingerprint。任务渲染版本不能通过 `prompts_dir` 覆盖，因此外部 prompt 文件内容不变时，升级后的 hash 仍然变化。内置 bundle 的 hash 固定在 `prompts/prompts_test.go` 的 `embeddedBundleHash` 中：修改任何内置 prompt 或任务渲染语义都必须提升对应版本、更新这个常量，并在 PR 中写明。
 
-**图谱时效规则**：`_platform_rules.md`（v2 起）规定 codebase-memory 图谱只反映固定 `base/` 的目标分支版本；MR 改动过的文件和符号以 worktree 中 `read_file`、`grep` 的结果为准，图谱结果只作 base 侧线索，不能作为改动后的事实或 finding 的唯一证据。规则放在所有块共享的平台规则里，管理员把图谱工具绑定到其他块时同样生效。用 `prompts_dir` 覆盖 `_platform_rules.md` 的部署须自行保留这条规则。
+**图谱时效规则**：`_platform_rules.md`（v2 起）规定 codebase-memory 图谱只反映固定 `base/` 的目标分支版本；评审用的图谱可能是共享工作区索引，也可能是工作区索引未跟上目标提交时为本次评审建立的[目标图谱](#目标提交代码图谱)，两者描述的都是目标分支的 base 侧，规则文本不变。MR 改动过的文件和符号以 worktree 中 `read_file`、`grep` 的结果为准，图谱结果只作 base 侧线索，不能作为改动后的事实或 finding 的唯一证据。规则放在所有块共享的平台规则里，管理员把图谱工具绑定到其他块时同样生效。用 `prompts_dir` 覆盖 `_platform_rules.md` 的部署须自行保留这条规则。
 
 **hash 变化的影响**：升级到 prompt bundle 不同的版本（或修改 `prompts_dir` 中的文件）后：
 

@@ -30,6 +30,11 @@ type reviewExecution struct {
 	repository        *review.RepositorySkillProvenance
 	repositoryCleanup func()
 	releaseSet        func()
+	// mcp, mcpConfig and deniedEnv are the project's MCP runtime. They stay
+	// empty without project extensions, which keeps a per-run target graph off.
+	mcp       *mcp.Manager
+	mcpConfig mcp.Config
+	deniedEnv []string
 }
 
 // releaseResolverSet drops the project extension lease. The caller must keep
@@ -70,6 +75,7 @@ func (s *ReviewService) resolveReviewExecution(ctx context.Context, project *sto
 		if len(set.mcpConfig.MCPServers) > 0 {
 			deniedEnv = append([]string(nil), s.extensions.deniedEnv...)
 		}
+		execution.mcp, execution.mcpConfig, execution.deniedEnv = set.mcp, set.mcpConfig, deniedEnv
 	}
 	repository, err := s.resolveRepositorySkillRuntime(ctx, project, token, targetBranch, deny, execution.blocks, execution.skills)
 	if err != nil {

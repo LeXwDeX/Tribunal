@@ -184,7 +184,15 @@ func (s *WorkspaceService) Handle(ctx context.Context, job *jobs.Job) error {
 		} else if payload.ProjectID <= 0 {
 			err = PermanentJob(fmt.Errorf("invalid workspace project"))
 		} else {
-			err = s.refreshWithOptions(ctx, payload.ProjectID, payload.Ref, WorkspaceRefreshOptions{
+			ref := payload.Ref
+			switch payload.Trigger {
+			case "manual", catchUpTrigger, "default_branch_changed":
+				// These refreshes mean "the default branch" and captured it when
+				// they were queued. Follow the current default instead, which
+				// refreshBase synchronizes from GitLab first (#604).
+				ref = ""
+			}
+			err = s.refreshWithOptions(ctx, payload.ProjectID, ref, WorkspaceRefreshOptions{
 				RegenerateContext: payload.RegenerateContext,
 				Reindex:           payload.Reindex,
 			}, job)

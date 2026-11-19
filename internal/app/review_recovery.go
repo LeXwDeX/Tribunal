@@ -481,6 +481,23 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 		return err
 	}
 	if dossier.WorkspaceProvenance.MCPEligible && !indexEligible {
+		// The review had code-graph tools but the shared index no longer matches
+		// its base, as when a per-run graph served it. Build that graph again
+		// instead of dropping the review. The run ID is the one recoverRun uses.
+		runID := record.JobID
+		if runID == "" {
+			runID = workflow.ID
+		}
+		graphBase, graphCleanup, err := s.rebuildTargetGraph(ctx, project, token, ws, execution, *workflow.MRIID, runID, version.StartSHA, dossier.MR.TargetBranch, currentConfig.Settings.Ignore)
+		if err != nil {
+			return err
+		}
+		if graphCleanup != nil {
+			defer graphCleanup()
+			baseDir, indexEligible = graphBase, true
+		}
+	}
+	if dossier.WorkspaceProvenance.MCPEligible && !indexEligible {
 		return s.recoveryCancel(ctx, workflow.ID, "index_ineligible", s.recoveryCancelThenSettle(s.cancelWorkspaceWorkflow, "index_ineligible"))
 	}
 	index := dossierDiffIndex(dossier.DiffVersion, &dossier)

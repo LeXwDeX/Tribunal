@@ -825,3 +825,48 @@ func TestRuntimeGivesReviewServiceTheWorkspaceQueue(t *testing.T) {
 		t.Fatalf("review queue = %v, workspace queue = %v; want the same queue", runtime.reviews.queue, runtime.workspaces.queue)
 	}
 }
+
+// TestDefaultBranchRefreshTriggersFollowCurrentDefault covers refresh jobs that
+// captured the default branch when they were queued (manual and catch-up). After
+// GitLab renames the default branch they must fetch the new default, not the
+// stale ref in the payload; a push refresh keeps its explicit ref (#604).
+func TestDefaultBranchRefreshTriggersFollowCurrentDefault(t *testing.T) {
+	for _, tc := range []struct {
+		trigger string
+		ref     string
+		want    string
+	}{
+		{trigger: "manual", ref: "refs/heads/main", want: "+refs/heads/develop:refs/workspace/base"},
+		{trigger: catchUpTrigger, ref: "refs/heads/main", want: "+refs/heads/develop:refs/workspace/base"},
+		{trigger: "default_branch_changed", ref: "", want: "+refs/heads/develop:refs/workspace/base"},
+		{trigger: "push", ref: "refs/heads/release", want: "+refs/heads/release:refs/workspace/base"},
+	} {
+		t.Run(tc.trigger, func(t *testing.T) {
+			ctx := context.Background()
+			f := newReviewFixture(t, reviewTestHead)
+			f.gitlab.project.DefaultBranch = "develop"
+			payload, err := json.Marshal(map[string]any{
+				"project_id": 42, "ref": tc.ref, "branch": strings.TrimPrefix(tc.ref, "refs/heads/"), "trigger": tc.trigger,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := f.db.Enqueue(ctx, store.Job{Kind: "workspace.refresh", Key: "ws:42", Payload: payload, MaxAttempts: 3}); err != nil {
+				t.Fatalf("Enqueue: %v", err)
+			}
+			job, err := f.db.Claim(ctx, "test-worker", []string{"workspace.refresh"}, time.Minute)
+			if err != nil || job == nil {
+				t.Fatalf("Claim = %+v, %v", job, err)
+			}
+			service := unrestrictedIndexService(t, f)
+			git := &baseFetchRecorder{fakeGitOps: f.git}
+			service.git = git
+			if err := service.Handle(ctx, job); err != nil {
+				t.Fatalf("Handle: %v", err)
+			}
+			if got := git.fetched(); len(got) != 1 || got[0] != tc.want {
+				t.Fatalf("refresh fetched %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
