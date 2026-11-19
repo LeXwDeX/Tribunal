@@ -14,6 +14,10 @@
   - 状态呈现：状态徽标与严重级别改为「小方点 + 文字」的安静样式，「待发布」「内置」等静态信息标签改为中性色，青色只留给运行中与当前阶段；系统页等多 Tab 在窄屏下的标签重叠一并修复；去掉实时徽标的脉冲动画、评审结论卡与执行图背景的渐变、节点卡的彩色左边条与悬停上浮。
   - 验证：正文与次级文字对比度按新色板人工计算不低于 4.5:1；README 所述的 WCAG 2.1 AA 自动化审计尚未对新色板复核，真实部署环境下的视觉验收也尚未进行，范围与未验证项见[交付就绪与验收记录](docs/delivery-readiness.md#控制台视觉改版本地验证601)。
 
+### 修复
+
+- **普通轮次的损坏工具调用可恢复，不再直接判节点失败**（[#605](https://github.com/LeXwDeX/Tribunal/issues/605)）：推理网关在长参数里漏转义引号等损坏是已知现象（[#269](https://github.com/LeXwDeX/Tribunal/issues/269)），但循环此前只在提交提示轮丢弃这类损坏调用并要求重发；探索或评审的普通轮遇到同样的损坏会直接返回 `unsafe_model_response`，整个节点失败，此前所有轮次的 token 白花，评审覆盖随之下降（实测一个 explore 节点在第 18 轮因一个参数约 9.9KB、不是合法 JSON 的调用失败）。现在任何一轮（最后一轮除外）遇到可恢复的损坏调用（`invalid_json`、`not_object`、`empty_input`、`non_string_field`、`empty_id`、`empty_name`、`duplicate_id`）时，整批调用都不执行，循环丢弃这批调用和该轮推理内容（assistant 文本保留），追加一条只含类别名和严格 JSON 转义要求的固定反馈，让模型把刚才想调用的工具用合法 JSON 重发。普通轮的反馈不限定 `submit_result`，恢复轮仍是普通轮；提交提示轮的反馈与行为不变。普通轮有独立的每次运行两次上限（`maxOrdinaryInvalidRecoveries`），与提交提示轮的两次（`maxInvalidRecoveries`）互不占用；恢复占用一次模型请求，计入 `max_turns` 和用量，不延长上限。恢复次数用尽、最后一轮、协议异常（`unsupported_item`、`malformed_list` 等）和非 tool_use 的 stop reason 下的不合法调用仍以 `unsafe_model_response` 结束运行。被恢复的那次调用仍写 `llm_calls` 审计行，`error_kind` 为 `unsafe_model_response` 并带 `invalid_tool_call` 元数据（记录器的预分类，行为不变），所以按模型统计里的该类错误计数包含已恢复的调用，可高于因它失败的节点数。`docs/operations.md` 与设计文档同步说明；无配置项、API 或数据库迁移变更。
+
 ## [1.8.0] - 2026-11-19
 
 ### 修复

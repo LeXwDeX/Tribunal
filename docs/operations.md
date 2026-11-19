@@ -71,7 +71,14 @@ LLM 默认允许私有网络和 loopback 地址，拒绝链路本地、未指定
 
 是否发生压缩或提前要求提交，可在 LLM 调用审计的请求元数据中看到：`submit_prompt` 记录原因（`last_turn`、`context`、`deadline`、`budget`），`compacted_tool_results` 记录本次运行累计压缩的工具结果数。onboarding 在工作流 token 预算剩余不足最近最大单轮用量（输入 + 输出）的 4 倍时也会提前要求提交，多出的两倍留给最多两次重提交；该阈值只按已观测用量计算，不受 `providers.<name>.max_tokens` 影响。其他节点的预算耗尽处理不变。
 
-提交提示轮若模型返回的工具调用参数或标识不合法（`invalid_json`、`not_object`、`empty_input`、`non_string_field`、`empty_id`、`empty_name`、`duplicate_id`；`unsupported_item`、`malformed_list` 等协议异常不恢复，同批中只要有一个协议异常就不恢复；恢复轮沿用原提示原因，只执行 `submit_result`），循环会丢弃该调用，追加一条只含类别名和严格 JSON 转义要求的固定反馈，让模型重新提交，每次运行最多两次。排查时看响应元数据：`invalid_tool_call` 是首个不合法调用（优先于 `rejected_batch`、`unexpected_stop`）的固定类别，`invalid_tool_input_bytes` 是其参数字节数；`invalid_tool_call` 缺省表示没有被拒绝的调用；`invalid_tool_input_bytes` 为 0 或参数无法读取时也会省略；均不含工具名和参数。被拒绝那次调用的审计行 `error_kind` 仍为 `unsafe_model_response`，但若随后重提交成功，运行本身成功；恢复两次后仍不合法、普通轮、最后一轮或非 tool_use 的 stop reason 下的不合法调用则以 `unsafe_model_response` 结束运行。`unexpected_stop` 表示非 tool_use 的 stop reason 下返回了工具调用。
+模型返回的工具调用参数或标识不合法时，agent 循环会先恢复，而不是直接以 `unsafe_model_response` 判节点失败。可恢复的类别是 `invalid_json`、`not_object`、`empty_input`、`non_string_field`、`empty_id`、`empty_name`、`duplicate_id`；`unsupported_item`、`malformed_list` 等协议异常不恢复，同批中只要有一个协议异常就不恢复。恢复时整批调用都不执行（同批中的合法调用也不执行），循环丢弃这一批调用和该轮的推理内容，只保留 assistant 文本，再追加一条只含类别名和严格 JSON 转义要求的固定反馈，让模型重新发起调用。恢复分两类轮次，每次 agent 运行各最多两次，两个上限互相独立：
+
+- 提交提示轮（[#269](https://github.com/LeXwDeX/Tribunal/issues/269)，请求元数据的 `submit_prompt` 为 `context`、`deadline` 或 `budget`）：反馈要求重新调用 `submit_result`；恢复轮沿用原提示原因，只执行 `submit_result`。
+- 普通轮（[#605](https://github.com/LeXwDeX/Tribunal/issues/605)，请求元数据没有 `submit_prompt`，例如探索和评审过程中的轮次）：反馈要求重发刚才想调用的工具，不限定 `submit_result`；恢复轮仍是普通轮，其他已授权的工具照常可用。普通轮的恢复不会占用提交提示轮的两次。
+
+恢复本身占用一次模型请求，计入 `max_turns` 和用量，不会延长上限。最后一轮不恢复（显式正数 `max_turns` 到达上限的那一轮及其后的 grace turn；默认 `max_turns = 0` 不限制请求数，没有最后一轮）。本类次数用尽后再次出现不合法调用，以及最后一轮、协议异常、非 tool_use 的 stop reason 下的不合法调用，仍以 `unsafe_model_response` 结束运行。
+
+排查时看响应元数据：`invalid_tool_call` 是首个不合法调用（优先于 `rejected_batch`、`unexpected_stop`）的固定类别，`invalid_tool_input_bytes` 是其参数字节数；`invalid_tool_call` 缺省表示没有被拒绝的调用；`invalid_tool_input_bytes` 为 0 或参数无法读取时也会省略；均不含工具名和参数。被恢复的那次调用仍会写一行 `llm_calls` 审计：`error_kind` 为 `unsafe_model_response`，响应元数据带 `invalid_tool_call`。这是记录器对该次响应的预分类，与循环随后是否恢复无关，行为不变，所以这样一行不等于节点失败；恢复后运行继续并成功时，运行本身成功。`unexpected_stop` 表示非 tool_use 的 stop reason 下返回了工具调用。
 
 ### 最后一轮强制提交（forced_tool_choice）
 
@@ -1294,7 +1301,7 @@ profiles:
 
 **配置默认禁用**：`workspace.max_bytes` 与 `workspace.reclaim_after` 默认均为 0，启用前不测量容量也不回收工作区；需要时在挂载配置中设置正数并重启，负数会被配置校验拒绝。工作区维护在每次 run cleanup 中执行：清理不再被保护的 `refs/merge-requests/<iid>/head` 后运行 `git gc --quiet --auto`，保护查询失败时跳过该项目的 ref 清理与 gc。启用回收后，长期不活跃项目的整个工作区目录可被删除，但无本进程注册 run、保护集合、活动时间、直接子目录与有效 managed marker 必须全部满足；被回收目录会在下次刷新或 onboarding 时重建。新建项目自首次 onboarding 或评审准备起写入 managed marker；升级前已存在且缺少 marker 的旧目录不会自动获得，仍按未知归属保留，需人工确认后手工创建标记。
 
-**按模型统计与 `model_details_purged`**：`GET /api/v1/stats` 的 `by_model` 以 workflow `created_at` 的 UTC 日划分数据来源：创建日不晚于最旧剩余调用所在 UTC 日的 workflow 由三张聚合表提供（按 UTC 日粒度），创建日更晚的 workflow 由明细提供（精确、含精确 p50）。最旧剩余调用所在日的所有调用都归聚合表，因此该日早于截止点被删除的调用仍计入，其余 workflow 的调用也不会同时出现在两处。聚合表覆盖的调用数超过同一 workflow 群体的剩余明细行数时返回 `model_details_purged=true`（明细完整时为 `false`）；`GET /api/v1/stats/reviews` 的同名字段使用同一数据驱动判定，窗口内没有调用时为 `false`（不再按配置保留期推断）。`by_model[]` 新增 `errors_by_kind`。项目删除时同步删除该项目的三张聚合表行；聚合表不随明细保留期删除。
+**按模型统计与 `model_details_purged`**：`GET /api/v1/stats` 的 `by_model` 以 workflow `created_at` 的 UTC 日划分数据来源：创建日不晚于最旧剩余调用所在 UTC 日的 workflow 由三张聚合表提供（按 UTC 日粒度），创建日更晚的 workflow 由明细提供（精确、含精确 p50）。最旧剩余调用所在日的所有调用都归聚合表，因此该日早于截止点被删除的调用仍计入，其余 workflow 的调用也不会同时出现在两处。聚合表覆盖的调用数超过同一 workflow 群体的剩余明细行数时返回 `model_details_purged=true`（明细完整时为 `false`）；`GET /api/v1/stats/reviews` 的同名字段使用同一数据驱动判定，窗口内没有调用时为 `false`（不再按配置保留期推断）。`by_model[]` 新增 `errors_by_kind`。`errors` 与 `errors_by_kind` 按调用审计行计数：agent 循环随后恢复的损坏工具调用（[#269](https://github.com/LeXwDeX/Tribunal/issues/269)、[#605](https://github.com/LeXwDeX/Tribunal/issues/605)）那一行仍计为 `unsafe_model_response`，所以该类计数可以高于因它失败的节点数；恢复规则见[上下文窗口与压缩](#上下文窗口与压缩)。项目删除时同步删除该项目的三张聚合表行；聚合表不随明细保留期删除。
 
 ### 集成接缝与降级可见性（#466）
 

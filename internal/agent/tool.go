@@ -40,6 +40,10 @@ const (
 	// maxInvalidRecoveries is how many prompted submit turns with corrupted
 	// tool calls are answered with feedback before the run fails closed.
 	maxInvalidRecoveries = 2
+	// maxOrdinaryInvalidRecoveries is the same bound for ordinary exploration
+	// turns (#605). It is a separate budget, so recovering from corrupted
+	// exploration calls never takes away the retries of the submit turn.
+	maxOrdinaryInvalidRecoveries = 2
 	// maxGraceTurns is how many extra submit-only turns an explicit positive
 	// max_turns grants after a turn ends without an accepted submit_result.
 	maxGraceTurns = 2

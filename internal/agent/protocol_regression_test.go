@@ -61,9 +61,7 @@ func TestProtocolRegressionOpenAIArgumentWireTypes(t *testing.T) {
 							calls[0], calls[1] = calls[1], calls[0]
 						}
 					}
-					client, count, records, _ := safetyClient(t, protocol, protocolJSON(t, body))
-					result, tools, submits, err := safetyRun(client)
-					assertSafetyFailure(t, result, err, tools, submits, count, *records, llm.StopToolUse)
+					assertCorruptedRepliesFailClosed(t, protocol, protocolJSON(t, body))
 				})
 			}
 		}
@@ -103,9 +101,7 @@ func TestProtocolRegressionIdentityWireTypes(t *testing.T) {
 							item[field] = value.raw
 						}
 					}
-					client, count, records, _ := safetyClient(t, protocol, protocolJSON(t, body))
-					result, tools, submits, err := safetyRun(client)
-					assertSafetyFailure(t, result, err, tools, submits, count, *records, llm.StopToolUse)
+					assertCorruptedRepliesFailClosed(t, protocol, protocolJSON(t, body))
 				})
 			}
 		}

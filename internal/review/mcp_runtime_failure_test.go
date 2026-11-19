@@ -31,13 +31,19 @@ type runtimeGapModel struct {
 	t     *testing.T
 	turn  int
 	input json.RawMessage
+	// repeat answers every turn with the same call, like a gateway that
+	// corrupts each resend, so the run ends once the loop gives up.
+	repeat bool
 }
 
 func (m *runtimeGapModel) Info() llm.ProviderInfo { return llm.ProviderInfo{} }
 func (m *runtimeGapModel) Generate(_ context.Context, req *llm.Request) (*llm.Response, error) {
 	m.turn++
 	name, input := "mcp__remote__inspect", m.input
-	if m.turn == 2 {
+	switch {
+	case m.repeat:
+		// Every turn sends the same call.
+	case m.turn == 2:
 		last := req.Messages[len(req.Messages)-1]
 		if len(last.Parts) != 1 || last.Parts[0].ToolResult == nil || !last.Parts[0].ToolResult.IsError {
 			m.t.Fatalf("model did not receive tool error: %+v", last)
@@ -46,7 +52,7 @@ func (m *runtimeGapModel) Generate(_ context.Context, req *llm.Request) (*llm.Re
 			m.t.Fatal("server error leaked")
 		}
 		name, input = agent.SubmitToolName, json.RawMessage(`{"summary":"no issues","findings":[]}`)
-	} else if m.turn != 1 {
+	case m.turn != 1:
 		m.t.Fatalf("unexpected model turn %d", m.turn)
 	}
 	return &llm.Response{StopReason: llm.StopToolUse, Message: llm.Message{Role: llm.RoleAssistant, Parts: []llm.Part{{Type: llm.PartToolCall, ToolCall: &llm.ToolCall{ID: name, Name: name, Input: input}}}}}, nil
@@ -130,14 +136,17 @@ func TestRuntimeMCPFailurePreventsCleanPass(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tool := localReviewMCPWithDisconnect(t, tc.handler, 150*time.Millisecond, tc.disconnect)
-			model := &runtimeGapModel{t: t, input: tc.input}
+			model := &runtimeGapModel{t: t, input: tc.input, repeat: tc.name == "invalid arguments"}
 			executor := newTestExecutor(t, ExecutorDeps{Dossier: validDossier(t), Blocks: map[string]config.BlockBinding{BlockCodeReview: {MCPTools: []string{tool.Def().Name}}}, Tools: actualMCPTools{tool}, AgentRun: func(ctx context.Context, spec agent.RunSpec) (*agent.RunResult, error) {
 				spec.Client = model
 				return agent.Run(ctx, spec)
 			}})
 			out, err := executor.Execute(context.Background(), codeReviewInput(t))
 			if tc.name == "invalid arguments" {
-				if !errors.Is(err, agent.ErrUnsafeResponse) || model.turn != 1 || len(out.Data) != 0 {
+				// The loop resends rejected calls (#605), so only a model that
+				// keeps sending invalid arguments fails closed: one request and
+				// two ordinary recoveries. The server never sees any of them.
+				if !errors.Is(err, agent.ErrUnsafeResponse) || model.turn != 3 || len(out.Data) != 0 {
 					t.Fatalf("invalid arguments should fail closed: error=%v turns=%d output=%s", err, model.turn, out.Data)
 				}
 				return

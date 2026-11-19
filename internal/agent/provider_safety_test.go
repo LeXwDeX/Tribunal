@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -143,19 +144,33 @@ func safetyRun(client llm.Client) (*RunResult, int, int, error) {
 
 func assertSafetyFailure(t *testing.T, result *RunResult, err error, tools, submits int, count *atomic.Int32, records []llm.CallRecord, stop llm.StopReason) {
 	t.Helper()
+	assertSafetyFailureAfter(t, 1, result, err, tools, submits, count, records, stop)
+}
+
+// assertSafetyFailureAfter checks a run that failed closed on its responses-th
+// provider response, every response having carried the same unsafe content.
+// Each response costs one request, one record and 11 input and 7 output tokens.
+func assertSafetyFailureAfter(t *testing.T, responses int, result *RunResult, err error, tools, submits int, count *atomic.Int32, records []llm.CallRecord, stop llm.StopReason) {
+	t.Helper()
 	if !errors.Is(err, ErrUnsafeResponse) || tools != 0 || submits != 0 {
 		t.Fatalf("unsafe response accepted: err=%v tool calls=%d submits=%d", err, tools, submits)
 	}
-	if count.Load() != 1 || len(records) != 1 {
-		t.Fatalf("provider retried: requests=%d records=%d", count.Load(), len(records))
+	if int(count.Load()) != responses || len(records) != responses {
+		t.Fatalf("provider retried: requests=%d records=%d, want %d", count.Load(), len(records), responses)
 	}
-	if result == nil || result.Usage.InputTokens != 11 || result.Usage.OutputTokens != 7 || result.Turns != 1 {
+	if result == nil || result.Usage.InputTokens != int64(11*responses) || result.Usage.OutputTokens != int64(7*responses) || result.Turns != responses {
 		t.Fatalf("partial usage lost: %+v", result)
 	}
-	if records[0].Response == nil || records[0].Response.StopReason != stop {
-		t.Fatalf("provider stop reason not preserved: %+v", records[0].Response)
+	for i, record := range records {
+		if record.Response == nil || record.Response.StopReason != stop {
+			t.Fatalf("provider stop reason not preserved on response %d: %+v", i, record.Response)
+		}
 	}
-	for name, value := range map[string]any{"audit record": records[0], "transcript": result.Transcript} {
+	values := map[string]any{"transcript": result.Transcript}
+	for i, record := range records {
+		values["audit record "+strconv.Itoa(i)] = record
+	}
+	for name, value := range values {
 		raw, marshalErr := json.Marshal(value)
 		if marshalErr != nil {
 			t.Fatalf("%s not serializable: %v", name, marshalErr)
@@ -167,6 +182,28 @@ func assertSafetyFailure(t *testing.T, result *RunResult, err error, tools, subm
 	if strings.Contains(err.Error(), safetySecret) || strings.Contains(err.Error(), "safety-key-canary") {
 		t.Fatal("error leaked parameters or key")
 	}
+}
+
+// assertCorruptedRepliesFailClosed answers every request with the same
+// corrupted reply. A corrupted ordinary turn is recovered (#605), so only a
+// provider that corrupts every resend fails the run closed, after
+// maxOrdinaryInvalidRecoveries+1 requests. The rejected batches must never
+// run, leak, or be replayed to the provider. It returns the run error.
+func assertCorruptedRepliesFailClosed(t *testing.T, protocol string, reply []byte) error {
+	t.Helper()
+	replies := make([][]byte, maxOrdinaryInvalidRecoveries+1)
+	for i := range replies {
+		replies[i] = reply
+	}
+	client, count, records, requests := safetyClient(t, protocol, replies...)
+	result, tools, submits, err := safetyRun(client)
+	assertSafetyFailureAfter(t, len(replies), result, err, tools, submits, count, *records, llm.StopToolUse)
+	for i, request := range (*requests)[1:] {
+		if strings.Contains(request, safetySecret) {
+			t.Fatalf("request %d replays a rejected call", i+2)
+		}
+	}
+	return err
 }
 
 func TestProviderSafetyInvalidToolInputs(t *testing.T) {
@@ -195,9 +232,7 @@ func TestProviderSafetyInvalidToolInputs(t *testing.T) {
 						} else if protocol == "openai-responses" {
 							stop = ""
 						}
-						client, count, records, _ := safetyClient(t, protocol, safetyResponse(t, protocol, stop, false, calls, false))
-						result, tools, submits, err := safetyRun(client)
-						assertSafetyFailure(t, result, err, tools, submits, count, *records, llm.StopToolUse)
+						assertCorruptedRepliesFailClosed(t, protocol, safetyResponse(t, protocol, stop, false, calls, false))
 					})
 				}
 			}
@@ -538,9 +573,7 @@ func TestProviderSafetyMissingOrDuplicateToolIdentity(t *testing.T) {
 					} else if protocol == "openai-responses" {
 						stop = ""
 					}
-					client, count, records, _ := safetyClient(t, protocol, safetyResponse(t, protocol, stop, false, calls, false))
-					result, tools, submits, err := safetyRun(client)
-					assertSafetyFailure(t, result, err, tools, submits, count, *records, llm.StopToolUse)
+					err := assertCorruptedRepliesFailClosed(t, protocol, safetyResponse(t, protocol, stop, false, calls, false))
 					if strings.Contains(err.Error(), "c1") || strings.Contains(err.Error(), "s1") {
 						t.Fatal("error echoed an attacker-controlled call identity")
 					}
