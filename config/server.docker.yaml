@@ -183,6 +183,6 @@ default_extensions:
           - check_index_coverage
         review: *codebase_memory_read_tools
         explore: *codebase_memory_read_tools
-        validate: &codebase_memory_verify_tools [get_code_snippet, search_graph, trace_path, search_code]
+        validate: &codebase_memory_verify_tools [list_projects, get_code_snippet, search_graph, trace_path, search_code]
         verify: *codebase_memory_verify_tools
         onboarding: [get_architecture, get_graph_schema]

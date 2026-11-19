@@ -24,14 +24,15 @@ var codebaseMemoryReadTools = []string{
 
 // wantCodebaseMemoryTools is the complete shipped authorization matrix. The
 // review and explore blocks get the read-only tool set, validate, verify and
-// onboarding get only the tools their prompts need, and reasoning/synthesis
-// get no graph tools.
+// onboarding get only the tools their prompts need (validate and verify also
+// list_projects, since a per-review target graph has its own project name),
+// and reasoning/synthesis get no graph tools.
 var wantCodebaseMemoryTools = map[string][]string{
 	"code-review": codebaseMemoryReadTools,
 	"review":      codebaseMemoryReadTools,
 	"explore":     codebaseMemoryReadTools,
-	"validate":    {"get_code_snippet", "search_graph", "trace_path", "search_code"},
-	"verify":      {"get_code_snippet", "search_graph", "trace_path", "search_code"},
+	"validate":    {"list_projects", "get_code_snippet", "search_graph", "trace_path", "search_code"},
+	"verify":      {"list_projects", "get_code_snippet", "search_graph", "trace_path", "search_code"},
 	"onboarding":  {"get_architecture", "get_graph_schema"},
 }
 

@@ -240,7 +240,7 @@ UUID 在项目内去重，去重记录和入队在同一事务中提交。同一
 - 在「块绑定」中把它从某个块移除后，重启不会恢复；升级也不会改写管理员改过的绑定。
 - 配置 `default_extensions.skills: []` 可以让新部署不登记默认 Skill。详见 [默认扩展配置](docs/design/06-config.md#默认扩展default_extensions)。
 
-Docker 镜像还内置校验过的 [codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp) 0.12.1（MIT）代码图谱服务和隔离 wrapper `/usr/local/bin/tribunal-codebase-memory-mcp`。示例配置和 `config/server.docker.yaml` 会登记内置平台 MCP 服务器 `codebase-memory`（只读 analysis 工具面）：`explore`、`code-review` 和 `review` 各授权 11 项只读图谱工具，`validate` 和 `verify` 各授权 `get_code_snippet`、`search_graph`、`trace_path`、`search_code`，`onboarding` 授权 `get_architecture`、`get_graph_schema`，`reasoner` 和 `synthesize` 不默认授权；注册项目后 onboarding 用 CLI 为 `base/` 建索引，每个项目的索引只在自己的工作区内可见。
+Docker 镜像还内置校验过的 [codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp) 0.12.1（MIT）代码图谱服务和隔离 wrapper `/usr/local/bin/tribunal-codebase-memory-mcp`。示例配置和 `config/server.docker.yaml` 会登记内置平台 MCP 服务器 `codebase-memory`（只读 analysis 工具面）：`explore`、`code-review` 和 `review` 各授权 11 项只读图谱工具，`validate` 和 `verify` 各授权 `list_projects`、`get_code_snippet`、`search_graph`、`trace_path`、`search_code`，`onboarding` 授权 `get_architecture`、`get_graph_schema`，`reasoner` 和 `synthesize` 不默认授权；注册项目后 onboarding 用 CLI 为 `base/` 建索引，每个项目的索引只在自己的工作区内可见。
 
 - 控制台「扩展 → MCP 服务器」中它带「内置」标签，可以测试，但始终启用，不能停用、编辑或删除（API 返回 409）。平台管理员可通过 API 新增和导入自定义 MCP，项目 scope 还要求项目已登记；控制台的新增/导入入口另行交付。
 - 平台升级后，下次启动会把它的配置和默认工具白名单更新为新版本附带的内容，并保持启用；管理员改过的块绑定不变。
