@@ -2,6 +2,7 @@ package review
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -158,27 +159,74 @@ func gateUnresolved(node string, out ReviewGateOut) []UnresolvedSignal {
 }
 
 // incompleteSummary states the actual gaps so the published note is useful.
+// Signals that share one known cause take one slot before the item cap is
+// applied, so the same cause reported by many nodes cannot push other gaps out.
 func incompleteSummary(unresolved []UnresolvedSignal) string {
 	var b strings.Builder
 	b.WriteString(unresolvedSummaryPrefix)
-	shown := unresolved
+	items := summaryItems(unresolved)
+	shown := items
 	extra := 0
 	if len(shown) > maxUnresolvedSummaryItems {
 		shown = shown[:maxUnresolvedSummaryItems]
-		extra = len(unresolved) - maxUnresolvedSummaryItems
+		extra = len(items) - maxUnresolvedSummaryItems
 	}
-	for i, signal := range shown {
+	for i, item := range shown {
 		if i > 0 {
 			b.WriteString("；")
 		}
-		b.WriteString(oneLine(signal.Node, 64))
+		b.WriteString(item.label())
 		b.WriteString(": ")
-		b.WriteString(oneLine(signal.Message, 200))
+		b.WriteString(item.message)
 	}
 	if extra > 0 {
 		fmt.Fprintf(&b, "；另有 %d 项", extra)
 	}
 	return truncateRunes(b.String(), MaxSummaryRunes)
+}
+
+// summaryItem is one entry of the stored incomplete summary: the first signal
+// of a cause and every node that reported it.
+type summaryItem struct {
+	nodes   []string
+	message string
+}
+
+// label names the first node; when several nodes share the cause it also gives
+// their count as "<first> 等 <n> 个节点". The summary reader strips that suffix.
+func (item summaryItem) label() string {
+	if len(item.nodes) <= 1 {
+		return item.nodes[0]
+	}
+	return fmt.Sprintf("%s 等 %d 个节点", item.nodes[0], len(item.nodes))
+}
+
+// summaryItems builds the summary entries in first-seen order. Signals form one
+// entry when they have the same console category and the same Chinese cause, the
+// pair the console groups by, so an evidence gap and a blocking signal never
+// merge. The cause is read from the whole message and only the shown text is
+// clipped. A message without a known template says nothing about a shared cause
+// and is never merged.
+func summaryItems(unresolved []UnresolvedSignal) []summaryItem {
+	items := make([]summaryItem, 0, len(unresolved))
+	byCause := make(map[string]int, len(unresolved))
+	for _, signal := range unresolved {
+		node := oneLine(signal.Node, 64)
+		message := oneLine(signal.Message, 200)
+		cause, known := localizeMachineMessage(strings.Join(strings.Fields(signal.Message), " "))
+		if known {
+			key := UnresolvedCategory(signal) + "\x00" + cause
+			if at, ok := byCause[key]; ok {
+				if !slices.Contains(items[at].nodes, node) {
+					items[at].nodes = append(items[at].nodes, node)
+				}
+				continue
+			}
+			byCause[key] = len(items)
+		}
+		items = append(items, summaryItem{nodes: []string{node}, message: message})
+	}
+	return items
 }
 
 // applyUnresolved makes unresolved evidence incomplete unless the review is

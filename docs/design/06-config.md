@@ -651,7 +651,7 @@ default_extensions:
 - `custom_rules` 作为项目规则注入 prompt 的项目背景段。
 - `ignore` 与平台默认值**合并**，不是替换。
 
-有效 ignore 会作为版本化策略保存到新 dossier。它用于 diff、仓库工具、证据、上下文生成及发布检查，不只筛选变更文件。**内置默认 6 条规则只排除构建产物**，不再阻止工作区索引、项目上下文注入或 MCP 代码图谱绑定；只有项目设置或仓库 `.gitlab-review.yml` 追加的规则（超出内置默认）才视为受限策略。受限时暂停无法证明安全读取范围的 MCP 工具和全量索引，并把降级警告写入 dossier 的 `warnings` 和 MR 摘要评论，不再静默。仅索引身份无法证明时，实际启用的绑定工具才记为 `tool_gaps`。上下文文档可以来自与 MR `start_sha` 不同的 base（dossier 记录 `context_base_sha`）；无法校验的文档不被注入并产生警告。项目背景 prompt 按「评审语言 → 项目规则 → `.gitlab-review.yml` → AGENTS.md → CLAUDE.md → 工作区上下文文档」排序，20k 上限截断时优先保留项目规则。升级后的旧工作流处理和输入限制见 [ignore 安全边界](../operations.md#ignore-安全边界)。
+有效 ignore 会作为版本化策略保存到新 dossier。它用于 diff、仓库工具、证据、上下文生成及发布检查，不只筛选变更文件。**内置默认 6 条规则只排除构建产物**，不再阻止工作区索引、项目上下文注入或 MCP 代码图谱绑定；只有项目设置或仓库 `.gitlab-review.yml` 追加的规则（超出内置默认）才视为受限策略。受限时暂停无法证明安全读取范围的 MCP 工具和全量索引，并把降级警告写入 dossier 的 `warnings` 和 MR 摘要评论，不再静默。仅索引身份无法证明时，实际启用并绑定了工具的评审节点才记 `tool_gaps`，且每个节点只记一条：写明被拦下的绑定工具数，以及索引与 MR 目标提交取前 8 位的短 ID（缺失时为 `unknown`），如 `3 bound tool(s) blocked by workspace index identity (index abcdef01, target 33333333)`，不再每个工具一条；判定语义不变，仍是覆盖缺口。上下文文档可以来自与 MR `start_sha` 不同的 base（dossier 记录 `context_base_sha`）；无法校验的文档不被注入并产生警告。项目背景 prompt 按「评审语言 → 项目规则 → `.gitlab-review.yml` → AGENTS.md → CLAUDE.md → 工作区上下文文档」排序，20k 上限截断时优先保留项目规则。升级后的旧工作流处理和输入限制见 [ignore 安全边界](../operations.md#ignore-安全边界)。
 
 ---
 

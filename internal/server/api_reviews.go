@@ -86,9 +86,17 @@ type reviewDetail struct {
 	// Summary, Warnings and Unresolved are the review-level diagnostics
 	// persisted with the last completed synthesize node. They explain an
 	// INCOMPLETE verdict that carries no workflow error.
-	Summary    string                    `json:"summary,omitempty"`
-	Warnings   []string                  `json:"warnings,omitempty"`
-	Unresolved []review.UnresolvedSignal `json:"unresolved,omitempty"`
+	Summary string `json:"summary,omitempty"`
+	// SummaryText is the stored incomplete summary as plain Chinese for the
+	// console. It is omitted for any other summary.
+	SummaryText string   `json:"summary_text,omitempty"`
+	Warnings    []string `json:"warnings,omitempty"`
+	// WarningsText is Warnings in Chinese for the console, merged by text with
+	// their nodes listed, and without the causes that Unresolved already shows.
+	// It is absent when the review has no warnings; an empty array means every
+	// warning repeated an unresolved signal.
+	WarningsText []string           `json:"warnings_text,omitzero"`
+	Unresolved   []unresolvedDetail `json:"unresolved,omitempty"`
 	// MaterialWarnings are the dossier's review-material downgrades (restricted
 	// ignore policy, unverified context, missing base, truncated background).
 	// They are separate from the synthesize warnings so the console can state
@@ -103,6 +111,48 @@ type reviewDetail struct {
 	// but were not reviewed (#455, #466).
 	GeneratedFiles int      `json:"generated_files,omitempty"`
 	GeneratedPaths []string `json:"generated_paths,omitempty"`
+}
+
+// unresolvedDetail is one stored unresolved signal with its console reading.
+// Node, kind and message are the stored values; category and text are derived
+// from them and never persisted.
+type unresolvedDetail struct {
+	review.UnresolvedSignal
+	// Category is "tool_unavailable" for a gap caused by an unavailable MCP
+	// tool; every other signal keeps its kind.
+	Category string `json:"category"`
+	// Text is the Chinese reading of the message. A message that no template
+	// maps keeps its original text.
+	Text string `json:"text"`
+}
+
+func unresolvedDetails(signals []review.UnresolvedSignal) []unresolvedDetail {
+	if len(signals) == 0 {
+		return nil
+	}
+	out := make([]unresolvedDetail, 0, len(signals))
+	for _, signal := range signals {
+		out = append(out, unresolvedDetail{
+			UnresolvedSignal: signal,
+			Category:         review.UnresolvedCategory(signal),
+			Text:             review.UnresolvedText(signal),
+		})
+	}
+	return out
+}
+
+// consoleWarnings returns nil when there are no warnings. A non-nil empty result
+// is kept so the API sends [] and the console does not show the raw warnings.
+// A warning prefix is read as a node only when it names a node of this workflow.
+func consoleWarnings(warnings []string, unresolved []review.UnresolvedSignal, nodes []store.WorkflowNode) []string {
+	if len(warnings) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		ids = append(ids, node.ID)
+	}
+	return review.ConsoleWarnings(warnings, unresolved, ids)
 }
 
 type graphEdge struct {
@@ -382,6 +432,7 @@ func (s *Server) handleGetReview(w http.ResponseWriter, r *http.Request) {
 	}
 	snapshot := s.engineSnapshot(r.Context(), wf.ID)
 	summary, warnings, unresolved, scope := reviewLevelDiagnostics(nodes)
+	summaryText, _ := review.IncompleteSummaryText(summary)
 	detail := reviewDetail{
 		Workflow:        *wf,
 		Access:          grantedAccess(r.Context()),
@@ -395,8 +446,10 @@ func (s *Server) handleGetReview(w http.ResponseWriter, r *http.Request) {
 		},
 		Publications:     summarizePublications(publications),
 		Summary:          summary,
+		SummaryText:      summaryText,
 		Warnings:         warnings,
-		Unresolved:       unresolved,
+		WarningsText:     consoleWarnings(warnings, unresolved, nodes),
+		Unresolved:       unresolvedDetails(unresolved),
 		MaterialWarnings: dossier.warnings,
 		Scope:            scope,
 		GeneratedFiles:   dossier.generated,

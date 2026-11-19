@@ -778,6 +778,34 @@ func toolGapMessage(block string, err error) string {
 	return oneLine(fmt.Sprintf("block %s: MCP tools unavailable: %v", block, err), maxToolGapRunes)
 }
 
+// indexIdentityReason is why the bound MCP tools are withheld when the
+// workspace code graph index cannot be tied to the MR target commit.
+const indexIdentityReason = "workspace index identity"
+
+// indexIdentityGap describes the single gap of a node whose bound tools are all
+// withheld for the same reason: one line per tool would bury the review's real
+// evidence gaps. Missing evidence reads "unknown" and is never guessed.
+func indexIdentityGap(d *Dossier, tools int) error {
+	index, target := "unknown", "unknown"
+	if d != nil && d.WorkspaceProvenance != nil {
+		index, target = shortCommit(d.WorkspaceProvenance.IndexSHA), shortCommit(d.WorkspaceProvenance.TargetSHA)
+	}
+	return fmt.Errorf("%d bound tool(s) blocked by %s (index %s, target %s)", tools, indexIdentityReason, index, target)
+}
+
+// shortCommit keeps the first 8 characters of a commit id for a diagnostic.
+// An empty value reads "unknown"; a shorter value is kept whole.
+func shortCommit(sha string) string {
+	sha = strings.TrimSpace(sha)
+	if sha == "" {
+		return "unknown"
+	}
+	if runes := []rune(sha); len(runes) > 8 {
+		return string(runes[:8])
+	}
+	return sha
+}
+
 type gapRecordingTool struct {
 	agent.Tool
 	block string
@@ -850,7 +878,6 @@ func (e *Executor) callAgent(ctx context.Context, in dag.NodeInput, opts agentOp
 	// is an execution gap.
 	mcpBound := opts.BlockTools && len(binding.MCPTools) > 0 && !ignoreBlocked
 	if mcpBound && indexBlocked {
-		const reason = "workspace index identity"
 		names := binding.MCPTools
 		if provider, ok := e.deps.Tools.(ToolBindingProvider); ok {
 			var err error
@@ -860,12 +887,10 @@ func (e *Executor) callAgent(ctx context.Context, in dag.NodeInput, opts agentOp
 			}
 		}
 		if len(names) > 0 && opts.ToolGaps == nil && !onboarding {
-			return nil, fmt.Errorf("review: bound MCP tools blocked by %s", reason)
+			return nil, fmt.Errorf("review: bound MCP tools blocked by %s", indexIdentityReason)
 		}
-		if opts.ToolGaps != nil {
-			for _, name := range names {
-				*opts.ToolGaps = append(*opts.ToolGaps, toolGapMessage(opts.Block, fmt.Errorf("tool %q blocked by %s", name, reason)))
-			}
+		if opts.ToolGaps != nil && len(names) > 0 {
+			*opts.ToolGaps = append(*opts.ToolGaps, toolGapMessage(opts.Block, indexIdentityGap(e.deps.Dossier, len(names))))
 		}
 	} else if mcpBound && e.deps.Tools != nil {
 		mcpTools, err := e.deps.Tools.Tools(ctx, opts.Block)

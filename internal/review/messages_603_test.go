@@ -1,0 +1,153 @@
+package review
+
+import (
+	"strings"
+	"testing"
+)
+
+const (
+	// indexMismatchLabel is used only when both commits are known and differ.
+	indexMismatchLabel = "代码图谱索引（abcdef01）与本 MR 目标提交（33333333）不一致，本次未启用代码图谱工具，相关范围可能未被完整评审。"
+	// indexUnconfirmedLabel is used when the identity cannot be confirmed but
+	// no mismatch is proven: equal commits, a missing commit, or no commit at all.
+	indexUnconfirmedLabel = "无法确认代码图谱索引与本 MR 目标提交一致（工作区索引未就绪或索引失败），本次未启用代码图谱工具，相关范围可能未被完整评审。"
+	genericToolLabel      = "部分评审工具不可用，相关范围可能未被完整评审。"
+)
+
+func TestLocalizeToolGapNamesTheIndexIdentityCause(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		message string
+		want    string
+	}{
+		{
+			name:    "collapsed gap of one node with differing commits",
+			message: "block code-review: MCP tools unavailable: 7 bound tool(s) blocked by workspace index identity (index abcdef01, target 33333333)",
+			want:    indexMismatchLabel,
+		},
+		{
+			name:    "unknown index and target never claim a mismatch",
+			message: "block code-review: MCP tools unavailable: 7 bound tool(s) blocked by workspace index identity (index unknown, target unknown)",
+			want:    indexUnconfirmedLabel,
+		},
+		{
+			name:    "unknown index with a known target",
+			message: "block code-review: MCP tools unavailable: 3 bound tool(s) blocked by workspace index identity (index unknown, target 33333333)",
+			want:    indexUnconfirmedLabel,
+		},
+		{
+			name:    "known index with an unknown target",
+			message: "block code-review: MCP tools unavailable: 3 bound tool(s) blocked by workspace index identity (index abcdef01, target unknown)",
+			want:    indexUnconfirmedLabel,
+		},
+		{
+			name:    "equal commits mean the workspace was not ready, not a mismatch",
+			message: "block review: MCP tools unavailable: 3 bound tool(s) blocked by workspace index identity (index 33333333, target 33333333)",
+			want:    indexUnconfirmedLabel,
+		},
+		{
+			name:    "equal commits differing only in letter case",
+			message: "block review: MCP tools unavailable: 3 bound tool(s) blocked by workspace index identity (index ABCDEF01, target abcdef01)",
+			want:    indexUnconfirmedLabel,
+		},
+		{
+			name:    "an index that is not a commit id is not reported as a commit",
+			message: "block review: MCP tools unavailable: 3 bound tool(s) blocked by workspace index identity (index bad, target 33333333)",
+			want:    indexUnconfirmedLabel,
+		},
+		{
+			name:    "per-tool gap stored by an older workflow has no commits",
+			message: `block explore: MCP tools unavailable: tool "mcp__codebase-memory__search_graph" blocked by workspace index identity`,
+			want:    indexUnconfirmedLabel,
+		},
+		{
+			name:    "text after the index identity shape is a generic tool gap",
+			message: "block code-review: MCP tools unavailable: 7 bound tool(s) blocked by workspace index identity (index abcdef01, target 33333333) and more",
+			want:    genericToolLabel,
+		},
+		{
+			name:    "an unknown tool count wording is a generic tool gap",
+			message: "block code-review: MCP tools unavailable: some tools blocked by workspace index identity (index abcdef01, target 33333333)",
+			want:    genericToolLabel,
+		},
+		{
+			name:    "other unavailable tools keep the generic label",
+			message: `block code-review: MCP tools unavailable: mcp: server "codebase-memory": connect failed`,
+			want:    genericToolLabel,
+		},
+		{
+			name:    "runtime unavailability keeps the generic label",
+			message: `block review: MCP tools unavailable: tool "mcp__codebase-memory__trace_path" became unavailable`,
+			want:    genericToolLabel,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			text, ok := localizeMachineMessage(tc.message)
+			if !ok || text != tc.want {
+				t.Fatalf("localizeMachineMessage(%q) = %q, %v; want %q", tc.message, text, ok, tc.want)
+			}
+		})
+	}
+}
+
+// Nodes of different blocks report the same cause; the published summary lists
+// it once and does not push other gaps out behind a long run of repeats.
+func TestIncompleteSummaryListsIndexIdentityCauseOnce(t *testing.T) {
+	var signals []UnresolvedSignal
+	for _, lane := range []struct{ node, block string }{
+		{"explore", "explore"}, {"cr.p1", "code-review"}, {"cr.p2", "code-review"},
+		{"rv.p1", "review"}, {"reasoner", "reasoner"}, {"validate", "validate"},
+	} {
+		signals = append(signals, UnresolvedSignal{
+			Node: lane.node, Kind: UnresolvedEvidence,
+			Message: "block " + lane.block + ": MCP tools unavailable: 7 bound tool(s) blocked by workspace index identity (index abcdef01, target 33333333)",
+		})
+	}
+	text, ok := localizeIncompleteSummary(incompleteSummary(signals), 0, 0)
+	if !ok {
+		t.Fatal("summary was not localized")
+	}
+	if got := strings.Count(text, indexMismatchLabel); got != 1 {
+		t.Fatalf("summary lists the index identity cause %d times, want once:\n%s", got, text)
+	}
+	if strings.Contains(text, "另有") || strings.Contains(text, genericToolLabel) {
+		t.Fatalf("summary adds unrelated lines:\n%s", text)
+	}
+}
+
+// Only the shape the executor writes is a tool gap. Model-supplied evidence
+// gaps are copied into signals verbatim, so prose that merely mentions the
+// phrase must not be worded as a code-owned gap.
+func TestLocalizeMachineMessageIgnoresToolGapPhrasesInOtherText(t *testing.T) {
+	for _, message := range []string{
+		"the build log says MCP tools unavailable: retry later",
+		"evidence is blocked by workspace index identity (index abcdef01, target 33333333)",
+		"the log: 7 bound tool(s) blocked by workspace index identity (index abcdef01, target 33333333)",
+		"MCP tools unavailable: 7 bound tool(s) blocked by workspace index identity (index abcdef01, target 33333333)",
+		"block code-review MCP tools unavailable: x",
+		"block code review: MCP tools unavailable: x",
+		"Block code-review: MCP tools unavailable: x",
+		// The warning form carries the node in front; only localizeWarning reads it.
+		"cr.p1: block code-review: MCP tools unavailable: 7 bound tool(s) blocked by workspace index identity (index abcdef01, target 33333333)",
+	} {
+		if text, ok := localizeMachineMessage(message); ok {
+			t.Fatalf("localizeMachineMessage(%q) = %q, want no template", message, text)
+		}
+	}
+}
+
+// A published warning carries the node of the gap in front of it.
+func TestLocalizeWarningReadsTheNodeOfAToolGapWarning(t *testing.T) {
+	for _, tc := range []struct{ name, warning, want string }{
+		{"index identity gap", "cr.p1: " + indexGapMessage, indexMismatchLabel},
+		{"generic tool gap", `rv.p1: block review: MCP tools unavailable: mcp: server "x": connect failed`, genericToolLabel},
+		{"a sentence that only mentions the phrase", "the build log says MCP tools unavailable: retry later", unknownWarningNotice},
+		{"another prefix before prose", "error: the build log says MCP tools unavailable: retry later", unknownWarningNotice},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := localizeWarning(tc.warning); got != tc.want {
+				t.Fatalf("localizeWarning(%q) = %q, want %q", tc.warning, got, tc.want)
+			}
+		})
+	}
+}

@@ -2,6 +2,7 @@ package review
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -54,6 +55,9 @@ func TestIndexIdentityBlockedMCPStillRecordsGap(t *testing.T) {
 	result, err := DecodeStrict[*CodeReviewOut](out.Data)
 	if err != nil || len(result.ToolGaps) != 1 || provider.calls != 0 {
 		t.Fatalf("gaps=%v calls=%d err=%v", result.ToolGaps, provider.calls, err)
+	}
+	if !strings.Contains(result.ToolGaps[0], "1 bound tool(s) blocked by workspace index identity") {
+		t.Fatalf("gap = %q, want the node's single index identity gap", result.ToolGaps[0])
 	}
 }
 

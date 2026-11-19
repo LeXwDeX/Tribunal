@@ -8,15 +8,15 @@ import type { Finding, FindingAnnotation, FindingsSummary, ReviewDetail } from '
 import { Icon } from '../components/Icons'
 import { TriggerReviewDialog } from '../components/TriggerReviewDialog'
 import {
-  ActionHint, Badge, Button, ButtonLink, ConfirmDialog, EmptyState, ErrorState, LoadingState, Panel, PanelBody, PublicationBadge,
-  RelativeTime, Segmented, Select, SeverityBadge, StatusBadge, classNames, useToast,
+  ActionHint, Badge, Button, ButtonLink, ConfirmDialog, Disclosure, EmptyState, ErrorState, LoadingState, Panel, PanelBody,
+  PublicationBadge, RelativeTime, Segmented, Select, SeverityBadge, StatusBadge, classNames, useToast,
 } from '../components/ui'
 import { ExecutionGraph } from '../features/review/ExecutionGraph'
 import { NodeDrawer } from '../features/review/NodeDrawer'
 import { findingFunnel, verdictCardState } from '../features/review/reviewView'
 import { useReviewStream } from '../features/review/useReviewStream'
 import { usePaginated } from '../lib/hooks'
-import { unresolvedKindLabel } from '../lib/diagnostics'
+import { groupUnresolved, unresolvedCategoryLabel, unresolvedCategoryTone } from '../lib/diagnostics'
 import {
   formatDuration, formatJson, formatNumber, formatTokens, labelForChallenge, labelForDecision,
   labelForTrigger, safeExternalUrl, shortSha, stringifyUnknown,
@@ -499,28 +499,51 @@ function VerdictCard({
 
 // ReviewDiagnosticsPanel explains a verdict the workflow error cannot: the
 // synthesize node's summary, warnings and unresolved signals. Every item is
-// rendered from the API response, never inferred from node status.
+// rendered from the API response, never inferred from node status. Signals that
+// share a category and a text are one row; their stored messages stay in a
+// collapsed 技术详情 so diagnosis keeps the original text.
 function ReviewDiagnosticsPanel({ review }: { review: ReviewDetail }) {
   const unresolved = review.unresolved ?? []
-  const warnings = review.warnings ?? []
+  const groups = groupUnresolved(unresolved)
+  // warnings_text is the server's Chinese reading of the warnings. An empty
+  // array means each one repeats an unresolved signal above, so the raw
+  // warnings stay hidden; only a response without the field shows them.
+  const warnings = review.warnings_text ?? review.warnings ?? []
   const materialWarnings = review.material_warnings ?? []
+  const summary = review.summary_text || review.summary
   const incomplete = review.status === 'completed' && review.verdict === 'INCOMPLETE'
   if (!incomplete && !warnings.length && !unresolved.length && !materialWarnings.length) return null
   const title = incomplete ? '未完成原因' : '评审诊断'
   return (
     <Panel title={title}>
       <div className={rv.diagnostics}>
-        {review.summary ? <p className={rv.diagnosticsSummary}>{review.summary}</p> : null}
-        {incomplete && !review.summary ? (
+        {summary ? <p className={rv.diagnosticsSummary}>{summary}</p> : null}
+        {incomplete && !summary ? (
           <p className={rv.diagnosticsSummary}>该评审没有保存摘要；请结合未解决信号、告警和节点状态判断覆盖范围。</p>
         ) : null}
-        {unresolved.length ? (
-          <ul className={rv.diagnosticsList} aria-label="未解决信号">
-            {unresolved.map((signal, index) => (
-              <li key={`${signal.node}-${signal.kind}-${index}`}>
-                <Badge tone="warn" plain>{unresolvedKindLabel(signal.kind)}</Badge>
-                <span className="mono muted">{signal.node}</span>
-                <span>{signal.message}</span>
+        {groups.length ? (
+          <ul className={rv.signalList} aria-label="未解决信号">
+            {groups.map((group) => (
+              <li key={group.key} className={rv.signalGroup}>
+                <div className={rv.signalHead}>
+                  <Badge tone={unresolvedCategoryTone(group.category)} plain>{unresolvedCategoryLabel(group.category)}</Badge>
+                  <span className={rv.signalText}>{group.text}</span>
+                </div>
+                {group.nodes.length ? (
+                  <>
+                    <span className="srOnly">涉及节点：</span>
+                    <span className={classNames('mono', 'muted', rv.signalNodes)}>{group.nodes.join(' · ')}</span>
+                  </>
+                ) : null}
+                {group.technical ? (
+                  <Disclosure summary="技术详情" className={rv.signalDisclosure}>
+                    <div className={rv.signalRaw}>
+                      {group.signals.map((signal, index) => (
+                        <div key={`${signal.node}-${index}`} className="mono">{signal.node}: {signal.message}</div>
+                      ))}
+                    </div>
+                  </Disclosure>
+                ) : null}
               </li>
             ))}
           </ul>
@@ -541,7 +564,7 @@ function ReviewDiagnosticsPanel({ review }: { review: ReviewDetail }) {
             </ul>
           </div>
         ) : null}
-        {incomplete && !unresolved.length && !warnings.length && !materialWarnings.length && review.summary ? (
+        {incomplete && !unresolved.length && !warnings.length && !materialWarnings.length && summary ? (
           <p className={rv.diagnosticsEmpty}>服务端没有返回未解决信号或告警，未完成状态可能来自节点覆盖不足。</p>
         ) : null}
       </div>
