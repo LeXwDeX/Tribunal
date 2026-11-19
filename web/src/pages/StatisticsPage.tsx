@@ -5,17 +5,22 @@ import type {
   DailyStats, FeedbackCollectionState, ModelStatsRow, Project, ProviderQualityRow, ReviewStats, Stats, WorkspaceCapacity,
 } from '../api/types'
 import {
-  Badge, Button, DatePicker, Disclosure, EmptyState, ErrorState, LoadingState, Metric, PageHeader, Panel, Select,
-  TableNote, type SelectOption,
+  Badge, Button, DataTable, DatePicker, Disclosure, EmptyState, ErrorState, LoadingState, Metric, PageHeader, Panel,
+  ReasonBadge, Select, TABLE_PAGE_SIZE, TableAction, TableActions, TableNote, TablePager, classNames, tableCell,
+  type SelectOption,
 } from '../components/ui'
-import { formatBytes, formatNumber, formatRelative } from '../lib/format'
-import { usePaginated } from '../lib/hooks'
+import { formatBytes, formatLatency, formatNumber, formatPercent, formatRelative } from '../lib/format'
+import { useClientPage, usePaginated } from '../lib/hooks'
 import { formatMs, formatRatio, statNumber } from '../lib/stats'
 import ui from '../styles/ui.module.css'
 import styles from './pages.module.css'
 import insights from './insights.module.css'
 
 type Row = Record<string, unknown>
+
+// Short identifiers (provider, block, project, day) stay on one line instead of
+// breaking mid-word when a wide table squeezes its columns.
+const identCell = classNames(tableCell.mono, tableCell.nowrap)
 
 // Cost fields are removed from the API (#407/#430). Older responses may still
 // carry them, but the console never renders them, including the raw dump.
@@ -223,7 +228,7 @@ function QualityRate({ numerator, denominator }: { numerator: number; denominato
   const ratio = Math.min(Math.max(numerator / denominator, 0), 1)
   return (
     <div className={insights.ratio}>
-      <b className="tabular">{formatRatio(ratio)}</b>
+      <b>{formatPercent(ratio)}</b>
       <span className={insights.ratioBar} aria-hidden="true">
         {/* stylecheck-allow-inline: computed ratio width */}
         <i className={insights.ratioFill} style={{ width: `${Number((ratio * 100).toFixed(2))}%` }} />
@@ -234,66 +239,80 @@ function QualityRate({ numerator, denominator }: { numerator: number; denominato
 }
 
 function ProposerQualityTable({ rows }: { rows: ProviderQualityRow[] }) {
+  const paged = useClientPage(rows, TABLE_PAGE_SIZE)
   return (
-    <div className="tableWrap">
-      <table className={`dataTable ${insights.min760}`} aria-label="按提出方统计的人工质量指标">
+    <>
+      <DataTable
+        label="按提出方统计的人工质量指标"
+        minWidth="lg"
+        isEmpty={rows.length === 0}
+        empty={<p className="small muted">没有提出方样本。</p>}
+      >
         <thead>
           <tr>
-            <th scope="col">Provider</th>
-            <th scope="col">提出问题</th>
-            <th scope="col">已复核</th>
-            <th scope="col">有效</th>
-            <th scope="col">无效</th>
-            <th scope="col">准确率</th>
-            <th scope="col">被推翻</th>
-            <th scope="col">推翻率</th>
+            <th scope="col">提供方</th>
+            <th scope="col" className={tableCell.num}>提出问题</th>
+            <th scope="col" className={tableCell.num}>已复核</th>
+            <th scope="col" className={tableCell.num}>有效</th>
+            <th scope="col" className={tableCell.num}>无效</th>
+            <th scope="col" className={tableCell.num}>准确率</th>
+            <th scope="col" className={tableCell.num}>被推翻</th>
+            <th scope="col" className={tableCell.num}>推翻率</th>
           </tr>
         </thead>
         <tbody>
-          {rows.map((row) => (
+          {paged.items.map((row) => (
             <tr key={row.provider}>
-              <td className="mono">{row.provider}</td>
-              <td className="tabular">{formatNumber(row.proposed)}</td>
-              <td className="tabular">{formatNumber(row.reviewed)}</td>
-              <td className="tabular">{formatNumber(row.valid)}</td>
-              <td className="tabular">{formatNumber(row.invalid)}</td>
-              <td><QualityRate numerator={row.valid} denominator={row.reviewed} /></td>
-              <td className="tabular">{formatNumber(row.overturned)}</td>
-              <td><QualityRate numerator={row.overturned} denominator={row.proposed} /></td>
+              <td className={identCell}>{row.provider}</td>
+              <td className={tableCell.num}>{formatNumber(row.proposed)}</td>
+              <td className={tableCell.num}>{formatNumber(row.reviewed)}</td>
+              <td className={tableCell.num}>{formatNumber(row.valid)}</td>
+              <td className={tableCell.num}>{formatNumber(row.invalid)}</td>
+              <td className={tableCell.num}><QualityRate numerator={row.valid} denominator={row.reviewed} /></td>
+              <td className={tableCell.num}>{formatNumber(row.overturned)}</td>
+              <td className={tableCell.num}><QualityRate numerator={row.overturned} denominator={row.proposed} /></td>
             </tr>
           ))}
         </tbody>
-      </table>
-    </div>
+      </DataTable>
+      <TablePager page={paged.page} pageCount={paged.pageCount} total={paged.total} onChange={paged.setPage} />
+    </>
   )
 }
 
 function ChallengerQualityTable({ rows }: { rows: ProviderQualityRow[] }) {
+  const paged = useClientPage(rows, TABLE_PAGE_SIZE)
   return (
-    <div className="tableWrap">
-      <table className={`dataTable ${insights.min560}`} aria-label="按挑战方统计的人工质量指标">
+    <>
+      <DataTable
+        label="按挑战方统计的人工质量指标"
+        minWidth="md"
+        isEmpty={rows.length === 0}
+        empty={<p className="small muted">没有挑战方样本。</p>}
+      >
         <thead>
           <tr>
-            <th scope="col">Provider</th>
-            <th scope="col">反驳数</th>
-            <th scope="col">复核反驳</th>
-            <th scope="col">误杀</th>
-            <th scope="col">误杀率</th>
+            <th scope="col">提供方</th>
+            <th scope="col" className={tableCell.num}>反驳数</th>
+            <th scope="col" className={tableCell.num}>复核反驳</th>
+            <th scope="col" className={tableCell.num}>误杀</th>
+            <th scope="col" className={tableCell.num}>误杀率</th>
           </tr>
         </thead>
         <tbody>
-          {rows.map((row) => (
+          {paged.items.map((row) => (
             <tr key={row.provider}>
-              <td className="mono">{row.provider}</td>
-              <td className="tabular">{formatNumber(row.refuted)}</td>
-              <td className="tabular">{formatNumber(row.refuted_reviewed)}</td>
-              <td className="tabular">{formatNumber(row.false_refuted)}</td>
-              <td><QualityRate numerator={row.false_refuted} denominator={row.refuted_reviewed} /></td>
+              <td className={identCell}>{row.provider}</td>
+              <td className={tableCell.num}>{formatNumber(row.refuted)}</td>
+              <td className={tableCell.num}>{formatNumber(row.refuted_reviewed)}</td>
+              <td className={tableCell.num}>{formatNumber(row.false_refuted)}</td>
+              <td className={tableCell.num}><QualityRate numerator={row.false_refuted} denominator={row.refuted_reviewed} /></td>
             </tr>
           ))}
         </tbody>
-      </table>
-    </div>
+      </DataTable>
+      <TablePager page={paged.page} pageCount={paged.pageCount} total={paged.total} onChange={paged.setPage} />
+    </>
   )
 }
 
@@ -322,24 +341,16 @@ function QualityPanel({ value }: { value: unknown }) {
     <Panel
       title="人工质量指标"
       aside="来自 stats.quality_by_provider"
-      note="准确率 = 人工标注有效 / 已复核（有效+无效）；推翻率 = 提出方被挑战推翻 / 提出问题；误杀率 = 反驳后人工判有效 / 复核反驳。未标注、未确定不计入准确率与误杀率分母，但仍计入提出数、反驳数和推翻率。缺少 provider 归因的角色不计入。零分母显示“无样本”，不显示 0.0%。人工标注不改变发布结果或评审结论，也不同于下方 GitLab 反馈信号。"
+      note="准确率 = 人工标注有效 / 已复核（有效+无效）；推翻率 = 提出方被挑战推翻 / 提出问题；误杀率 = 反驳后人工判有效 / 复核反驳。未标注、未确定不计入准确率与误杀率分母，但仍计入提出数、反驳数和推翻率。缺少 provider 归因的角色不计入。零分母显示“无样本”，不显示 0%。人工标注不改变发布结果或评审结论，也不同于下方 GitLab 反馈信号。"
     >
       {state.rows.length === 0 ? (
         <EmptyState title="没有人工质量样本" description="筛选范围内没有可归因的提出或反驳记录；这是空结果，不是不可用。" />
       ) : (
         <>
           <h3 className={insights.subTitle}>提出方</h3>
-          {proposed.length ? (
-            <ProposerQualityTable rows={proposed} />
-          ) : (
-            <p className="small muted">没有提出方样本。</p>
-          )}
+          <ProposerQualityTable rows={proposed} />
           <h3 className={insights.subTitle}>挑战方</h3>
-          {refuted.length ? (
-            <ChallengerQualityTable rows={refuted} />
-          ) : (
-            <p className="small muted">没有挑战方样本。</p>
-          )}
+          <ChallengerQualityTable rows={refuted} />
         </>
       )}
     </Panel>
@@ -510,15 +521,43 @@ function parseGroupStats(value: unknown, keyName: 'provider' | 'block'): Breakdo
   return { kind: 'ok', rows }
 }
 
-function cellValue(value: unknown): string {
+// Chinese header for a stats field. Fields without an entry keep their API name.
+const COLUMN_LABELS: Record<string, string> = {
+  key: '名称',
+  value: '值',
+  provider: '提供方',
+  model: '模型',
+  calls: '调用数',
+  errors: '错误数',
+  error_rate: '错误率',
+  input_tokens: '输入 token',
+  output_tokens: '输出 token',
+  avg_latency_ms: '平均延迟',
+  p50_latency_ms: 'P50 延迟',
+  errors_by_kind: '错误类别',
+}
+
+function columnLabel(column: string): string {
+  return COLUMN_LABELS[column] ?? column
+}
+
+// cellValue renders one generic cell. Numbers never show as raw floats: rate
+// and ratio fields become percentages, *_ms fields latencies, the rest grouped
+// numbers.
+function cellValue(column: string, value: unknown): string {
   if (value === null || value === undefined) return '—'
-  if (typeof value === 'number') return Number.isInteger(value) ? new Intl.NumberFormat('zh-CN').format(value) : String(value)
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return String(value)
+    if (/(^|_)(rate|ratio)$/.test(column)) return formatPercent(value)
+    if (/_ms$/.test(column)) return formatLatency(value)
+    return formatNumber(value)
+  }
   if (typeof value === 'string') return value
   if (typeof value === 'boolean') return value ? 'true' : 'false'
   try { return JSON.stringify(value) } catch { return String(value) }
 }
 
-function DimensionTable({ rows, emptyLabel }: { rows: Row[]; emptyLabel: string }) {
+function DimensionTable({ rows, emptyLabel, label }: { rows: Row[]; emptyLabel: string; label: string }) {
   const columns = useMemo(() => {
     const set = new Set<string>()
     for (const row of rows.slice(0, 12)) {
@@ -528,61 +567,84 @@ function DimensionTable({ rows, emptyLabel }: { rows: Row[]; emptyLabel: string 
     }
     return Array.from(set)
   }, [rows])
-  if (!rows.length) return <EmptyState title={emptyLabel} description="stats API 没有返回该维度的数据。" />
+  // A column is numeric when every value it carries is a number, so its header
+  // and cells align the same way.
+  const numeric = useMemo(() => new Set(columns.filter((column) => {
+    const values = rows.map((row) => row[column]).filter((value) => value !== null && value !== undefined)
+    return values.length > 0 && values.every((value) => typeof value === 'number')
+  })), [columns, rows])
+  const paged = useClientPage(rows, TABLE_PAGE_SIZE)
   return (
-    <div className="tableWrap">
-      <table className={`dataTable ${insights.autoTable}`}>
-        <thead><tr>{columns.map((column) => <th key={column} scope="col">{column}</th>)}</tr></thead>
+    <>
+      <DataTable
+        label={label}
+        minWidth="md"
+        isEmpty={rows.length === 0}
+        empty={<EmptyState title={emptyLabel} description="stats API 没有返回该维度的数据。" />}
+      >
+        <thead>
+          <tr>
+            {columns.map((column) => (
+              <th key={column} scope="col" className={numeric.has(column) ? tableCell.num : undefined}>{columnLabel(column)}</th>
+            ))}
+          </tr>
+        </thead>
         <tbody>
-          {rows.map((row, index) => (
+          {paged.items.map((row, index) => (
             <tr key={String(row.id ?? row.key ?? index)}>
-              {columns.map((column) => <td key={column} className={typeof row[column] === 'number' ? 'tabular' : undefined}>{cellValue(row[column])}</td>)}
+              {columns.map((column) => (
+                <td key={column} className={numeric.has(column) ? tableCell.num : undefined}>{cellValue(column, row[column])}</td>
+              ))}
             </tr>
           ))}
         </tbody>
-      </table>
-    </div>
+      </DataTable>
+      <TablePager page={paged.page} pageCount={paged.pageCount} total={paged.total} onChange={paged.setPage} />
+    </>
   )
 }
 
 function ProviderAttribution({ providers }: { providers: ProviderFeedbackCounts[] | null }) {
+  const paged = useClientPage(providers ?? [], TABLE_PAGE_SIZE)
   return (
     <>
       <h3 className={insights.subTitle}>按 provider 与角色归因</h3>
-      {providers === null ? (
-        <EmptyState title="按 provider 归因不可用" description="stats.feedback 未返回 by_provider；旧版服务端可能不支持归因。原始信号总数仍显示在上方。" />
-      ) : providers.length === 0 ? (
-        <EmptyState title="没有可归因的反馈" description="当前筛选范围内没有同时关联 finding 与挑战节点的反馈；summary、未关联或关联不一致的不计入。" />
-      ) : (
-        <div className="tableWrap">
-          <table className={`dataTable ${insights.min480}`}>
-            <thead>
-              <tr>
-                <th scope="col">Provider</th>
-                <th scope="col">角色</th>
-                <th scope="col">计数</th>
-                <th scope="col">信号</th>
-              </tr>
-            </thead>
-            <tbody>
-              {providers.map((row) => (
-                <tr key={`${row.provider}:${row.role}`}>
-                  <td className="mono">{row.provider}</td>
-                  <td><Badge tone={row.role === 'proposer' ? 'info' : 'neutral'}>{ROLE_LABELS[row.role]}</Badge></td>
-                  <td className="tabular">{row.total}</td>
-                  <td>
-                    <span className={ui.inlineList}>
-                      {row.signals.map((signal) => (
-                        <span key={signal.label} className="small">{signal.label}: {signal.count}</span>
-                      ))}
-                    </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <DataTable
+        label="按 Provider 与角色归因的反馈计数"
+        minWidth="sm"
+        isEmpty={paged.total === 0}
+        empty={providers === null ? (
+          <EmptyState title="按 provider 归因不可用" description="stats.feedback 未返回 by_provider；旧版服务端可能不支持归因。原始信号总数仍显示在上方。" />
+        ) : (
+          <EmptyState title="没有可归因的反馈" description="当前筛选范围内没有同时关联 finding 与挑战节点的反馈；summary、未关联或关联不一致的不计入。" />
+        )}
+      >
+        <thead>
+          <tr>
+            <th scope="col">提供方</th>
+            <th scope="col">角色</th>
+            <th scope="col" className={tableCell.num}>计数</th>
+            <th scope="col">信号</th>
+          </tr>
+        </thead>
+        <tbody>
+          {paged.items.map((row) => (
+            <tr key={`${row.provider}:${row.role}`}>
+              <td className={identCell}>{row.provider}</td>
+              <td><Badge tone={row.role === 'proposer' ? 'info' : 'neutral'}>{ROLE_LABELS[row.role]}</Badge></td>
+              <td className={tableCell.num}>{formatNumber(row.total)}</td>
+              <td>
+                <span className={ui.inlineList}>
+                  {row.signals.map((signal) => (
+                    <span key={signal.label} className="small">{signal.label}: {formatNumber(signal.count)}</span>
+                  ))}
+                </span>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </DataTable>
+      <TablePager page={paged.page} pageCount={paged.pageCount} total={paged.total} onChange={paged.setPage} />
       <TableNote>
         计数是反馈归因，不代表正确率或误杀率。同一信号可同时计入提出方和挑战方，两个角色计数不能相加当作反馈总数。summary、未关联或关联不一致的不计入。
       </TableNote>
@@ -633,40 +695,49 @@ function FeedbackPanel({ value }: { value: unknown }) {
 }
 
 function DailyTrendTable({ rows, label, countLabel }: { rows: DailyStats[]; label: string; countLabel: string }) {
+  const paged = useClientPage(rows, TABLE_PAGE_SIZE)
   return (
-    <div className="tableWrap">
-      <table className={`dataTable ${insights.min640}`} aria-label={label}>
+    <>
+      <DataTable label={label} minWidth="md">
         <caption className={`small ${insights.trendCaption}`}>
           按工作流创建时间归属 UTC 日；只显示有执行的日期，不补零。
         </caption>
         <thead>
           <tr>
             <th scope="col">日期 (UTC)</th>
-            <th scope="col">{countLabel}</th>
-            <th scope="col">平均用时</th>
-            <th scope="col">P95 用时</th>
-            <th scope="col">耗时样本</th>
+            <th scope="col" className={tableCell.num}>{countLabel}</th>
+            <th scope="col" className={tableCell.num}>平均用时</th>
+            <th scope="col" className={tableCell.num}>P95 用时</th>
+            <th scope="col" className={tableCell.num}>耗时样本</th>
           </tr>
         </thead>
         <tbody>
-          {rows.map((row) => (
+          {paged.items.map((row) => (
             <tr key={row.day}>
-              <td><time dateTime={`${row.day}T00:00:00Z`} className="mono">{row.day}</time></td>
-              <td className="tabular">{formatNumber(row.runs)}</td>
-              <td className="tabular">{formatMs(row.avg_duration_ms)}</td>
-              <td className="tabular">{formatMs(row.p95_duration_ms)}</td>
-              <td className="tabular">{formatNumber(row.duration_samples)}</td>
+              <td className={identCell}>
+                <time dateTime={`${row.day}T00:00:00Z`}>{row.day}</time>
+              </td>
+              <td className={tableCell.num}>{formatNumber(row.runs)}</td>
+              <td className={tableCell.num}>{formatMs(row.avg_duration_ms)}</td>
+              <td className={tableCell.num}>{formatMs(row.p95_duration_ms)}</td>
+              <td className={tableCell.num}>{formatNumber(row.duration_samples)}</td>
             </tr>
           ))}
         </tbody>
-      </table>
-    </div>
+      </DataTable>
+      <TablePager page={paged.page} pageCount={paged.pageCount} total={paged.total} onChange={paged.setPage} />
+    </>
   )
 }
 
+const TREND_REASONS = {
+  missing: '该行没有每日趋势数据；旧版服务端可能不支持。',
+  invalid: '该行每日趋势格式无效，未显示任何行。',
+} as const
+
 function DimensionTrend({ trend, label, countLabel }: { trend: Trend; label: string; countLabel: string }) {
-  if (trend.kind === 'missing') return <p className="small muted">该行没有每日趋势数据；旧版服务端可能不支持。</p>
-  if (trend.kind === 'invalid') return <p className="small muted">该行每日趋势格式无效，未显示任何行。</p>
+  if (trend.kind === 'missing') return <p className="small muted">{TREND_REASONS.missing}</p>
+  if (trend.kind === 'invalid') return <p className="small muted">{TREND_REASONS.invalid}</p>
   if (trend.kind === 'empty') return <p className="small muted">该范围内没有每日执行数据。</p>
   return <DailyTrendTable rows={trend.rows} label={label} countLabel={countLabel} />
 }
@@ -740,9 +811,82 @@ function OverallTrend({ trend }: { trend: Trend }) {
   )
 }
 
-function ProjectStatsPanel({ value }: { value: unknown }) {
+function ProjectStatsTable({ rows }: { rows: ProjectRow[] }) {
   const [expanded, setExpanded] = useState<number | null>(null)
   const detailBase = useId()
+  const paged = useClientPage(rows, TABLE_PAGE_SIZE)
+  return (
+    <>
+      <DataTable label="按项目统计明细" minWidth="xl">
+        <thead>
+          <tr>
+            <th scope="col">项目</th>
+            <th scope="col" className={tableCell.num}>工作流次数</th>
+            <th scope="col" className={tableCell.num}>BLOCKING</th>
+            <th scope="col" className={tableCell.num}>已发布</th>
+            <th scope="col" className={tableCell.num}>平均用时</th>
+            <th scope="col" className={tableCell.num}>P95 用时</th>
+            <th scope="col" className={tableCell.num}>耗时样本</th>
+            <th scope="col" className={tableCell.actions}>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {paged.items.map((row) => {
+            const label = `项目 #${row.project_id}`
+            const open = expanded === row.project_id
+            const detailId = `${detailBase}-${row.project_id}`
+            return (
+              <Fragment key={row.project_id}>
+                <tr>
+                  <td className={identCell}>{label}</td>
+                  <td className={tableCell.num}>{formatNumber(row.runs)}</td>
+                  <td className={tableCell.num}>{formatNumber(row.blocking)}</td>
+                  <td className={tableCell.num}>{formatNumber(row.published)}</td>
+                  <td className={tableCell.num}>{formatMs(row.avg_duration_ms)}</td>
+                  <td className={tableCell.num}>{formatMs(row.p95_duration_ms)}</td>
+                  <td className={tableCell.num}>{row.duration_samples === null ? '不可用' : formatNumber(row.duration_samples)}</td>
+                  <td className={tableCell.actions}>
+                    {row.trend.kind === 'missing' || row.trend.kind === 'invalid' ? (
+                      <ReasonBadge
+                        tone={row.trend.kind === 'missing' ? 'neutral' : 'warn'}
+                        reason={TREND_REASONS[row.trend.kind]}
+                      >
+                        {row.trend.kind === 'missing' ? '不可用' : '格式无效'}
+                      </ReasonBadge>
+                    ) : (
+                      <TableActions>
+                        <TableAction
+                          aria-expanded={open}
+                          aria-controls={open ? detailId : undefined}
+                          aria-label={`${open ? '收起' : '查看'} ${label} 每日趋势`}
+                          onClick={() => setExpanded(open ? null : row.project_id)}
+                        >
+                          {open ? '收起' : '每日趋势'}
+                        </TableAction>
+                      </TableActions>
+                    )}
+                  </td>
+                </tr>
+                {open ? (
+                  <tr>
+                    <td colSpan={8} className={insights.trendCell}>
+                      <div id={detailId} role="group" aria-label={`${label} 每日趋势`}>
+                        <DimensionTrend trend={row.trend} label={`${label} 每日趋势`} countLabel="工作流次数" />
+                      </div>
+                    </td>
+                  </tr>
+                ) : null}
+              </Fragment>
+            )
+          })}
+        </tbody>
+      </DataTable>
+      <TablePager page={paged.page} pageCount={paged.pageCount} total={paged.total} onChange={paged.setPage} />
+    </>
+  )
+}
+
+function ProjectStatsPanel({ value }: { value: unknown }) {
   const state = parseProjectStats(value)
 
   if (state.kind === 'missing') {
@@ -773,74 +917,74 @@ function ProjectStatsPanel({ value }: { value: unknown }) {
       aside="来自 stats.by_project"
       note="运行次数统计窗口内全部工作流（含评审与 onboarding）；BLOCKING 与已发布也按项目统计。日期按工作流创建时间归入 UTC 日；筛选按浏览器本地日。"
     >
-      <div className="tableWrap">
-        <table className={`dataTable ${insights.min920}`} aria-label="按项目统计明细">
-          <thead>
-            <tr>
-              <th scope="col">项目</th>
-              <th scope="col">工作流次数</th>
-              <th scope="col">BLOCKING</th>
-              <th scope="col">已发布</th>
-              <th scope="col">平均用时</th>
-              <th scope="col">P95 用时</th>
-              <th scope="col">耗时样本</th>
-              <th scope="col">每日趋势</th>
-            </tr>
-          </thead>
-          <tbody>
-            {state.rows.map((row, index) => {
-              const label = `项目 #${row.project_id}`
-              const open = expanded === row.project_id
-              const detailId = `${detailBase}-${index}`
-              return (
-                <Fragment key={row.project_id}>
-                  <tr>
-                    <td className="mono">{label}</td>
-                    <td className="tabular">{formatNumber(row.runs)}</td>
-                    <td className="tabular">{formatNumber(row.blocking)}</td>
-                    <td className="tabular">{formatNumber(row.published)}</td>
-                    <td className="tabular">{formatMs(row.avg_duration_ms)}</td>
-                    <td className="tabular">{formatMs(row.p95_duration_ms)}</td>
-                    <td className="tabular">{row.duration_samples === null ? '不可用' : formatNumber(row.duration_samples)}</td>
-                    <td>
-                      {row.trend.kind === 'missing' || row.trend.kind === 'invalid' ? (
-                        <span className="small muted">{row.trend.kind === 'missing' ? '不可用' : '格式无效'}</span>
-                      ) : (
-                        <button
-                          type="button"
-                          className={styles.expandButton}
-                          aria-expanded={open}
-                          aria-controls={open ? detailId : undefined}
-                          aria-label={`${open ? '收起' : '查看'} ${label} 每日趋势`}
-                          onClick={() => setExpanded(open ? null : row.project_id)}
-                        >
-                          {open ? '收起' : '每日趋势'}
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                  {open ? (
-                    <tr>
-                      <td colSpan={8} className={insights.trendCell}>
-                        <div id={detailId} role="group" aria-label={`${label} 每日趋势`}>
-                          <DimensionTrend trend={row.trend} label={`${label} 每日趋势`} countLabel="工作流次数" />
-                        </div>
-                      </td>
-                    </tr>
-                  ) : null}
-                </Fragment>
-              )
-            })}
-          </tbody>
-        </table>
-      </div>
+      <ProjectStatsTable rows={state.rows} />
     </Panel>
   )
 }
 
-function GroupStatsPanel({ value, dimension }: { value: unknown; dimension: 'provider' | 'block' }) {
+function GroupStatsTable({ rows, dimension }: { rows: GroupRow[]; dimension: 'provider' | 'block' }) {
   const [expanded, setExpanded] = useState<string | null>(null)
   const detailBase = useId()
+  const paged = useClientPage(rows, TABLE_PAGE_SIZE)
+  const keyLabel = dimension === 'provider' ? 'Provider' : 'Block'
+  return (
+    <>
+      <DataTable label={`按 ${keyLabel} 统计明细`} minWidth="lg">
+        <thead>
+          <tr>
+            <th scope="col">{dimension === 'provider' ? '提供方' : 'Block'}</th>
+            <th scope="col" className={tableCell.num}>已启动节点数</th>
+            <th scope="col" className={tableCell.num}>平均用时</th>
+            <th scope="col" className={tableCell.num}>P95 用时</th>
+            <th scope="col" className={tableCell.num}>耗时样本</th>
+            <th scope="col" className={tableCell.actions}>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {paged.items.map((row, index) => {
+            const open = expanded === row.key
+            const detailId = `${detailBase}-${index}`
+            return (
+              <Fragment key={row.key}>
+                <tr>
+                  <td className={identCell}>{row.key}</td>
+                  <td className={tableCell.num}>{formatNumber(row.runs)}</td>
+                  <td className={tableCell.num}>{formatMs(row.avg_duration_ms)}</td>
+                  <td className={tableCell.num}>{formatMs(row.p95_duration_ms)}</td>
+                  <td className={tableCell.num}>{formatNumber(row.duration_samples)}</td>
+                  <td className={tableCell.actions}>
+                    <TableActions>
+                      <TableAction
+                        aria-expanded={open}
+                        aria-controls={open ? detailId : undefined}
+                        aria-label={`${open ? '收起' : '查看'} ${row.key} 每日趋势`}
+                        onClick={() => setExpanded(open ? null : row.key)}
+                      >
+                        {open ? '收起' : '每日趋势'}
+                      </TableAction>
+                    </TableActions>
+                  </td>
+                </tr>
+                {open ? (
+                  <tr>
+                    <td colSpan={6} className={insights.trendCell}>
+                      <div id={detailId} role="group" aria-label={`${row.key} 每日趋势`}>
+                        <DimensionTrend trend={row.trend} label={`${row.key} 每日趋势`} countLabel="已启动节点数" />
+                      </div>
+                    </td>
+                  </tr>
+                ) : null}
+              </Fragment>
+            )
+          })}
+        </tbody>
+      </DataTable>
+      <TablePager page={paged.page} pageCount={paged.pageCount} total={paged.total} onChange={paged.setPage} />
+    </>
+  )
+}
+
+function GroupStatsPanel({ value, dimension }: { value: unknown; dimension: 'provider' | 'block' }) {
   const state = parseGroupStats(value, dimension)
   const title = dimension === 'provider' ? 'Provider 统计' : 'Block 统计'
 
@@ -874,58 +1018,7 @@ function GroupStatsPanel({ value, dimension }: { value: unknown; dimension: 'pro
         ? '已启动节点数：节点有 started_at 就计入，每个当前保存的节点行只计一次。不按状态筛选，运行中、已完成和失败的节点都计入；不等于 LLM 调用次数或重试尝试次数。无 provider 的节点只计入 block。这里显示当前保存的最新一次尝试，不是重试历史。'
         : '与 Provider 统计同一已启动节点口径；Block 始终存在，无 provider 的节点也会显示在这里。'}
     >
-      <div className="tableWrap">
-        <table className={`dataTable ${insights.min820}`} aria-label={`按 ${dimension} 统计明细`}>
-          <thead>
-            <tr>
-              <th scope="col">{dimension === 'provider' ? 'Provider' : 'Block'}</th>
-              <th scope="col">已启动节点数</th>
-              <th scope="col">平均用时</th>
-              <th scope="col">P95 用时</th>
-              <th scope="col">耗时样本</th>
-              <th scope="col">每日趋势</th>
-            </tr>
-          </thead>
-          <tbody>
-            {state.rows.map((row, index) => {
-              const open = expanded === row.key
-              const detailId = `${detailBase}-${index}`
-              return (
-                <Fragment key={row.key}>
-                  <tr>
-                    <td className="mono">{row.key}</td>
-                    <td className="tabular">{formatNumber(row.runs)}</td>
-                    <td className="tabular">{formatMs(row.avg_duration_ms)}</td>
-                    <td className="tabular">{formatMs(row.p95_duration_ms)}</td>
-                    <td className="tabular">{formatNumber(row.duration_samples)}</td>
-                    <td>
-                      <button
-                        type="button"
-                        className={styles.expandButton}
-                        aria-expanded={open}
-                        aria-controls={open ? detailId : undefined}
-                        aria-label={`${open ? '收起' : '查看'} ${row.key} 每日趋势`}
-                        onClick={() => setExpanded(open ? null : row.key)}
-                      >
-                        {open ? '收起' : '每日趋势'}
-                      </button>
-                    </td>
-                  </tr>
-                  {open ? (
-                    <tr>
-                      <td colSpan={6} className={insights.trendCell}>
-                        <div id={detailId} role="group" aria-label={`${row.key} 每日趋势`}>
-                          <DimensionTrend trend={row.trend} label={`${row.key} 每日趋势`} countLabel="已启动节点数" />
-                        </div>
-                      </td>
-                    </tr>
-                  ) : null}
-                </Fragment>
-              )
-            })}
-          </tbody>
-        </table>
-      </div>
+      <GroupStatsTable rows={state.rows} dimension={dimension} />
     </Panel>
   )
 }
@@ -1077,51 +1170,89 @@ function WorkspaceCapacityPanel({ value }: { value?: WorkspaceCapacity }) {
   )
 }
 
-// ModelStatsPanel renders only the fields the API returns. The column names
-// stay the API field names used by the legacy table; errors_by_kind is the only
-// structured cell and never carries an upstream error body.
+// ModelStatsTable renders only the fields the API returns, under Chinese
+// headers. errors_by_kind is the only structured cell: it holds fixed error
+// categories (never an upstream error body) as badges that wrap instead of
+// truncating.
+function ModelStatsTable({ rows }: { rows: ModelStatsRow[] }) {
+  const paged = useClientPage(rows, TABLE_PAGE_SIZE)
+  return (
+    <>
+      <DataTable label="按模型统计明细" minWidth="lg">
+        <thead>
+          <tr>
+            <th scope="col">模型 / 提供方</th>
+            <th scope="col" className={tableCell.num}>{COLUMN_LABELS.calls}</th>
+            <th scope="col" className={tableCell.num}>错误 / 错误率</th>
+            <th scope="col" className={tableCell.num}>输入 / 输出 token</th>
+            <th scope="col" className={tableCell.num}>平均 / P50 延迟</th>
+            <th scope="col">{COLUMN_LABELS.errors_by_kind}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {paged.items.map((row) => {
+            const kinds = Object.entries(row.errors_by_kind ?? {}).sort(([a], [b]) => a.localeCompare(b))
+            return (
+              <tr key={`${row.provider}/${row.model}`}>
+                <td>
+                  <span className={insights.stacked}>
+                    <span className={insights.stackedMono}>{row.model}</span>
+                    <span className={insights.stackedSub}>{row.provider}</span>
+                  </span>
+                </td>
+                <td className={tableCell.num}>{formatNumber(row.calls)}</td>
+                <td className={tableCell.num}>
+                  <span className={insights.stackedEnd}>
+                    <span>{formatNumber(row.errors)}</span>
+                    <span className={insights.stackedSub}>{formatPercent(row.error_rate)}</span>
+                  </span>
+                </td>
+                <td className={tableCell.num}>
+                  <span className={insights.stackedEnd}>
+                    <span>{formatNumber(row.input_tokens)}</span>
+                    <span className={insights.stackedSub}>{formatNumber(row.output_tokens)}</span>
+                  </span>
+                </td>
+                <td className={tableCell.num}>
+                  <span className={insights.stackedEnd}>
+                    <span>{formatLatency(row.avg_latency_ms)}</span>
+                    <span className={insights.stackedSub}>{formatLatency(row.p50_latency_ms)}</span>
+                  </span>
+                </td>
+                <td>
+                  {kinds.length ? (
+                    <span className={insights.kindList}>
+                      {kinds.map(([kind, count]) => <Badge key={kind} tone="warn">{kind}: {formatNumber(count)}</Badge>)}
+                    </span>
+                  ) : (
+                    <span className={tableCell.muted}>无错误类别</span>
+                  )}
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </DataTable>
+      <TablePager page={paged.page} pageCount={paged.pageCount} total={paged.total} onChange={paged.setPage} />
+    </>
+  )
+}
+
 function ModelStatsPanel({ rows, fallback }: { rows?: ModelStatsRow[]; fallback: Row[] }) {
   if (!rows?.length) {
     return (
       <Panel title="按模型" aside="来自 stats.by_model">
-        <DimensionTable rows={fallback} emptyLabel="没有按模型统计" />
+        <DimensionTable rows={fallback} emptyLabel="没有按模型统计" label="按模型统计明细" />
       </Panel>
     )
   }
-  const columns = ['provider', 'model', 'calls', 'errors', 'error_rate', 'input_tokens', 'output_tokens', 'avg_latency_ms', 'p50_latency_ms', 'errors_by_kind']
   return (
     <Panel
       title="按模型"
       aside="来自 stats.by_model"
-      note="调用与错误来自调用明细或长期聚合；errors_by_kind 只记录固定错误类别，不包含上游响应正文。"
+      note="调用与错误来自调用明细或长期聚合；错误类别（errors_by_kind）只记录固定类别，不包含上游响应正文。"
     >
-      <div className="tableWrap">
-        <table className={`dataTable ${insights.autoTable}`}>
-          <thead><tr>{columns.map((column) => <th key={column} scope="col">{column}</th>)}</tr></thead>
-          <tbody>
-            {rows.map((row) => {
-              const kinds = Object.entries(row.errors_by_kind ?? {}).sort(([a], [b]) => a.localeCompare(b))
-              return (
-                <tr key={`${row.provider}/${row.model}`}>
-                  {columns.map((column) => (
-                    <td key={column} className={column === 'errors_by_kind' || typeof (row as unknown as Row)[column] === 'number' ? 'tabular' : undefined}>
-                      {column === 'errors_by_kind' ? (
-                        kinds.length ? (
-                          <span className={styles.budgetRow}>
-                            {kinds.map(([kind, count]) => <Badge key={kind} tone="warn">{kind}: {formatNumber(count)}</Badge>)}
-                          </span>
-                        ) : (
-                          <span className="small muted">无错误类别</span>
-                        )
-                      ) : cellValue((row as unknown as Row)[column])}
-                    </td>
-                  ))}
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
-      </div>
+      <ModelStatsTable rows={rows} />
     </Panel>
   )
 }

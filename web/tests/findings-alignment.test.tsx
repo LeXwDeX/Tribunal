@@ -2,27 +2,26 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { render, screen, within } from '@testing-library/react'
+import { DataTable } from '../src/components/ui'
 import { FindingRow } from '../src/pages/ReviewDetailPage'
 import { finding } from './fixtures'
 
-// The bundled stylesheet emits global.css after CSS Modules, so .dataTable td
-// and .findingsTable td have the same specificity and the later global rule
-// wins. This assertion pins a selector that is stronger than the global rule
-// without changing the shared table styles.
+// The findings table renders through the shared DataTable, whose cells are all
+// vertically centred. The review module must neither restyle table elements
+// nor top-align cells again.
 describe('findings row alignment', () => {
-  it('centers all data cells against the same row middle line', () => {
+  it('leaves cell alignment to the shared table styles', () => {
     const css = readFileSync(resolve(process.cwd(), 'src/features/review/review.module.css'), 'utf8')
-    const rules = css.match(/\.findingsTable[^{]*\{[^}]*\}/g) ?? []
-    expect(rules.length).toBeGreaterThan(0)
-    const cellRule = rules.find((rule) => /^\.findingsTable\s+tbody\s+td\s*\{/.test(rule))
-    expect(cellRule).toContain('vertical-align: middle')
-    expect(rules.some((rule) => rule.includes('vertical-align: top'))).toBe(false)
+    expect(css).not.toContain('.findingsTable')
+    expect(css).not.toContain('vertical-align: top')
+    const shared = readFileSync(resolve(process.cwd(), 'src/styles/ui.module.css'), 'utf8')
+    expect(shared).toMatch(/\.table td \{[^}]*vertical-align: middle/)
   })
 
   it('renders a long title, downgraded severity and annotation in one four-cell row', () => {
     const longTitle = `并发写 map 未加锁${'，缺少同步保护'.repeat(40)}`
     render(
-      <table className="dataTable">
+      <DataTable label="问题列表">
         <tbody>
           <FindingRow
             finding={finding({
@@ -38,7 +37,7 @@ describe('findings row alignment', () => {
             onToggle={() => {}}
           />
         </tbody>
-      </table>,
+      </DataTable>,
     )
 
     const rows = screen.getAllByRole('row')

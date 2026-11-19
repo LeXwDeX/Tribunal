@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
-import { ReviewTable } from '../src/components/ReviewTable'
+import { ReviewTable, publicationReasonLabel } from '../src/components/ReviewTable'
 import { ReviewDetailPage } from '../src/pages/ReviewDetailPage'
 import { finding, review } from './fixtures'
 import { installFetch, jsonResponse, renderWithProviders } from './test-utils'
@@ -71,11 +72,55 @@ describe('review publication state', () => {
     expect(screen.getByRole('columnheader', { name: '发布' })).toBeInTheDocument()
     expect(screen.getAllByText('已完成')).toHaveLength(2)
     expect(screen.getByText('发布失败')).toBeInTheDocument()
-    expect(screen.getByText('merge request is not available')).toBeInTheDocument()
     expect(screen.getByText('待发布')).toBeInTheDocument()
     expect(screen.getByText('不适用')).toBeInTheDocument()
     expect(screen.getByText(/INCOMPLETE/)).toBeInTheDocument()
     expect(screen.getByText(/未完成/)).toBeInTheDocument()
+  })
+
+  it('keeps the publication reason out of the cell and in the badge description', () => {
+    renderTable()
+    const failed = screen.getByText('发布失败')
+    expect(failed.closest('td')).toHaveTextContent(/^发布失败$/)
+    expect(failed.closest('[tabindex]')).toHaveAccessibleDescription('合并请求不可用')
+    expect(screen.queryByText('merge request is not available')).not.toBeInTheDocument()
+    // A state without a reason is a plain badge with no tooltip anchor.
+    expect(screen.getByText('待发布').closest('[tabindex]')).toBeNull()
+  })
+
+  it('shows only 已跳过 for a cancelled review and describes it in Chinese', async () => {
+    const user = userEvent.setup()
+    renderTable([review({
+      id: 'r-cancelled',
+      mr_iid: 330,
+      status: 'cancelled',
+      verdict: null,
+      publication_state: 'skipped',
+      publication_error: 'review cancelled',
+    })])
+    const table = screen.getByRole('table', { name: '评审列表' })
+    const badge = within(table).getByText('已跳过')
+    expect(badge.closest('td')).toHaveTextContent(/^已跳过$/)
+    expect(within(table).queryByText('review cancelled')).not.toBeInTheDocument()
+    expect(screen.queryByText('review cancelled')).not.toBeInTheDocument()
+
+    const anchor = badge.closest('[tabindex]') as HTMLElement
+    expect(anchor).toHaveAccessibleDescription('评审已取消')
+    // Tab order: the MR link first, then the keyboard-focusable status badge.
+    await user.tab()
+    await user.tab()
+    expect(anchor).toHaveFocus()
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('评审已取消')
+  })
+
+  it('translates known publication reasons and keeps unknown ones as stored', () => {
+    expect(publicationReasonLabel('review cancelled')).toBe('评审已取消')
+    expect(publicationReasonLabel('review superseded')).toBe('已被新一轮评审取代')
+    expect(publicationReasonLabel('retry pending')).toBe('发布失败，等待重试')
+    expect(publicationReasonLabel('stale: merge request head changed')).toBe('结果已过期：合并请求有新提交（head 已变化）')
+    expect(publicationReasonLabel('stale: ignore policy unavailable; rerun review')).toBe('结果已过期：忽略规则不可用，请重新评审')
+    expect(publicationReasonLabel('stale: something new')).toBe('结果已过期：something new')
+    expect(publicationReasonLabel('a reason the server added later')).toBe('a reason the server added later')
   })
 
   it('shows publication state and the sanitized reason in review detail', async () => {

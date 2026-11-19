@@ -6,8 +6,9 @@ import { ApiError, errorMessage } from '../api/client'
 import type { Project, ProjectRegistration, ProjectValidation } from '../api/types'
 import { useCanRegisterProject, useSharedBotCredential } from '../components/RoleContext'
 import {
-  Badge, Button, Checkbox, Dialog, Disclosure, EmptyState, ErrorState, ExternalLink, Field, LoadingState, PageHeader, Panel,
-  PanelBody, RelativeTime, SearchField, Segmented, StatusBadge, Switch, Toolbar, VerdictBadge, useToast,
+  Badge, Button, Checkbox, DataTable, Dialog, Disclosure, EmptyState, ErrorState, ExternalLink, Field, LoadingState, PageHeader,
+  Pagination, Panel, PanelBody, RelativeTime, SearchField, Segmented, StatusBadge, Switch, Toolbar, VerdictBadge, classNames,
+  tableCell, useToast,
 } from '../components/ui'
 import { usePaginated } from '../lib/hooks'
 import { formatDate, labelForStatus, labelForWebhookState, webhookTone } from '../lib/format'
@@ -436,84 +437,83 @@ export function ProjectsPage() {
             /></PanelBody>
           ) : null}
           {projects.items.length ? (
-            <div className="tableWrap">
-              <table className={page.projectTable}>
-                <thead>
-                  <tr>
-                    <th scope="col">项目</th>
-                    <th scope="col">工作区</th>
-                    <th scope="col">最近评审</th>
-                    <th scope="col">Key 过期</th>
-                    <th scope="col">webhook</th>
-                    <th scope="col">权限</th>
-                    <th scope="col">启用</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {projects.items.map((project) => {
-                    const expiry = tokenExpiry(project)
-                    const workspaceState = project.workspace?.state || project.workspace_state
-                    const webhookState = project.webhook_state || (project.hook_id ? 'unknown' : 'disabled')
-                    const lastReview = project.last_review
-                    return (
-                      <tr
-                        key={project.id}
-                        className="clickable"
-                        onClick={(event) => {
-                          // Links, switches and buttons inside the row keep their own behavior.
-                          if ((event.target as HTMLElement).closest('a, button, input, label')) return
-                          navigate(`/projects/${project.id}`)
-                        }}
-                      >
-                        <td>
+            <DataTable label="项目列表" minWidth="xl">
+              <thead>
+                <tr>
+                  <th scope="col">项目</th>
+                  <th scope="col">工作区</th>
+                  <th scope="col">最近评审</th>
+                  <th scope="col">Key 过期</th>
+                  <th scope="col">Webhook</th>
+                  <th scope="col">权限</th>
+                  <th scope="col">启用</th>
+                </tr>
+              </thead>
+              <tbody>
+                {projects.items.map((project) => {
+                  const expiry = tokenExpiry(project)
+                  const workspaceState = project.workspace?.state || project.workspace_state
+                  const webhookState = project.webhook_state || (project.hook_id ? 'unknown' : 'disabled')
+                  const lastReview = project.last_review
+                  return (
+                    <tr
+                      key={project.id}
+                      className={page.rowLink}
+                      onClick={(event) => {
+                        // Links, switches and buttons inside the row keep their own behavior.
+                        if ((event.target as HTMLElement).closest('a, button, input, label')) return
+                        navigate(`/projects/${project.id}`)
+                      }}
+                    >
+                      <td>
+                        <div className={styles.tablePrimary}>
+                          <Link to={`/projects/${project.id}`} className={page.pathCell}>{project.path_with_namespace}</Link>
+                          <span className={styles.tableMeta}>ID {project.id}{project.default_branch ? ` · 默认分支 ${project.default_branch}` : ''}</span>
+                        </div>
+                      </td>
+                      <td className={page.fit}>{workspaceState ? <StatusBadge status={workspaceState} label={labelForStatus(workspaceState)} /> : <span className={tableCell.muted}>未提供</span>}</td>
+                      <td>
+                        {lastReview ? (
                           <div className={styles.tablePrimary}>
-                            <Link to={`/projects/${project.id}`} className={page.pathCell}>{project.path_with_namespace}</Link>
-                            <span className={styles.tableMeta}>ID {project.id}{project.default_branch ? ` · 默认分支 ${project.default_branch}` : ''}</span>
+                            <span className={page.reviewCell}>
+                              {lastReview.verdict ? <VerdictBadge verdict={lastReview.verdict} /> : <StatusBadge status={lastReview.status} />}
+                              <Link to={`/reviews/${encodeURIComponent(lastReview.id)}`}>!{lastReview.mr_iid} {lastReview.mr_title || ''}</Link>
+                            </span>
+                            <span className={styles.tableMeta}>
+                              {labelForStatus(lastReview.status)}
+                              {lastReview.created_at ? <> · <RelativeTime value={lastReview.created_at} /></> : null}
+                            </span>
                           </div>
-                        </td>
-                        <td>{workspaceState ? <StatusBadge status={workspaceState} label={labelForStatus(workspaceState)} /> : <span className="muted">未提供</span>}</td>
-                        <td>
-                          {lastReview ? (
-                            <div className={styles.tablePrimary}>
-                              <span className={page.reviewCell}>
-                                {lastReview.verdict ? <VerdictBadge verdict={lastReview.verdict} /> : <StatusBadge status={lastReview.status} />}
-                                <Link to={`/reviews/${encodeURIComponent(lastReview.id)}`}>!{lastReview.mr_iid} {lastReview.mr_title || ''}</Link>
-                              </span>
-                              <span className={styles.tableMeta}>
-                                {labelForStatus(lastReview.status)}
-                                {lastReview.created_at ? <> · <RelativeTime value={lastReview.created_at} /></> : null}
-                              </span>
-                            </div>
-                          ) : <span className="muted">—</span>}
-                        </td>
-                        <td><span className={[page.expiry, EXPIRY_TONES[expiry.tone]].filter(Boolean).join(' ')}>{expiry.label}</span></td>
-                        <td>
-                          <Badge tone={webhookTone(webhookState)}>{labelForWebhookState(webhookState)}</Badge>
-                          {project.hook_id ? <span className={styles.tableMeta}> · #{project.hook_id}</span> : null}
-                        </td>
-                        <td className="muted">{project.access_source === 'admin' ? '管理员' : project.access === 'read' && project.access_source === 'global' ? '只读（全局）' : project.access ? ACCESS_LABELS[project.access] || project.access : '—'}</td>
-                        <td>
-                          {project.access === 'manage' ? (
-                            <Switch
-                              checked={project.enabled}
-                              label={`启用 ${project.path_with_namespace}`}
-                              disabled={pendingIds.has(project.id)}
-                              onChange={(next) => { void toggleProject(project, next) }}
-                            />
-                          ) : <Badge tone={project.enabled ? 'ok' : 'neutral'}>{project.enabled ? '启用' : '停用'}</Badge>}
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-            </div>
+                        ) : <span className={tableCell.muted}>—</span>}
+                      </td>
+                      <td><span className={classNames(page.expiry, EXPIRY_TONES[expiry.tone])}>{expiry.label}</span></td>
+                      <td className={classNames(page.fit, tableCell.nowrap)}>
+                        <Badge tone={webhookTone(webhookState)}>{labelForWebhookState(webhookState)}</Badge>
+                        {project.hook_id ? <span className={styles.tableMeta}> · #{project.hook_id}</span> : null}
+                      </td>
+                      <td className={classNames(tableCell.muted, tableCell.nowrap)}>{project.access_source === 'admin' ? '管理员' : project.access === 'read' && project.access_source === 'global' ? '只读（全局）' : project.access ? ACCESS_LABELS[project.access] || project.access : '—'}</td>
+                      <td className={page.fit}>
+                        {project.access === 'manage' ? (
+                          <Switch
+                            checked={project.enabled}
+                            label={`启用 ${project.path_with_namespace}`}
+                            disabled={pendingIds.has(project.id)}
+                            onChange={(next) => { void toggleProject(project, next) }}
+                          />
+                        ) : <Badge tone={project.enabled ? 'ok' : 'neutral'}>{project.enabled ? '启用' : '停用'}</Badge>}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </DataTable>
           ) : null}
-          {projects.hasNextPage ? (
-            <div className={`${styles.actionsRight} ${page.tableFooter}`}>
-              <Button variant="secondary" onClick={projects.fetchNextPage} loading={projects.isFetchingNextPage}>加载更多项目</Button>
-            </div>
-          ) : null}
+          <Pagination
+            hasNextPage={projects.hasNextPage}
+            loading={projects.isFetchingNextPage}
+            onLoadMore={projects.fetchNextPage}
+            label="加载更多项目"
+          />
         </Panel>
       </div>
 

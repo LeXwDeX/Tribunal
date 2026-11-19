@@ -286,3 +286,22 @@ export function stringifyUnknown(value: unknown): string {
   if (typeof value === 'string') return value
   return formatJson(value)
 }
+
+// formatPercent renders a 0..1 ratio as a percentage with at most two
+// decimals below 1% and one decimal above (0.0013 → 0.13%, 0.25 → 25%).
+export function formatPercent(ratio: unknown): string {
+  if (typeof ratio !== 'number' || !Number.isFinite(ratio)) return '—'
+  const percent = ratio * 100
+  const digits = Math.abs(percent) < 1 ? 2 : 1
+  return `${new Intl.NumberFormat('zh-CN', { maximumFractionDigits: digits }).format(percent)}%`
+}
+
+// formatLatency renders milliseconds in a readable unit: sub-second values
+// keep ms (412ms), values below a minute use seconds with one decimal
+// (6815 → 6.8s), longer ones fall back to formatDuration.
+export function formatLatency(ms: unknown): string {
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return '—'
+  if (ms < 1000) return `${Math.round(ms)}ms`
+  if (ms < 60_000) return `${new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 1 }).format(ms / 1000)}s`
+  return formatDuration(ms)
+}

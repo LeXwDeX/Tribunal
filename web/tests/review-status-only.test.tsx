@@ -32,7 +32,7 @@ describe('review list status-only rows', () => {
     expect(within(row).getByText('group/backend')).toBeInTheDocument()
     expect(within(row).getByText('abcdef12')).toBeInTheDocument()
     expect(within(row).queryByRole('link')).toBeNull()
-    expect(row).not.toHaveClass('clickable')
+    expect(row.className).not.toMatch(/rowLink/)
   })
 
   it('keeps workflow rows linked next to status-only rows', () => {

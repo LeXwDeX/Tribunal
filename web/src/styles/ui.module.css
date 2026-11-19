@@ -143,6 +143,17 @@
   color: var(--on-danger-solid);
 }
 
+.dangerOutline {
+  background: transparent;
+  border-color: color-mix(in srgb, var(--danger-fg) 45%, transparent);
+  color: var(--danger-fg);
+}
+
+.dangerOutline:hover:not(:disabled) {
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+}
+
 .smallButton {
   min-height: 28px;
   height: 28px;
@@ -1780,4 +1791,154 @@
   .dateInputWrap .dateInput {
     padding-right: var(--space-4xl);
   }
+}
+
+/* ---------------------------------------------------------------------------
+   Shared table primitive (DataTable in ui.tsx). Page modules must not style
+   table elements; see docs/design/07-web-console.md. */
+/* Tables never scroll vertically. At desktop widths they must fit (columns
+   adapt, text wraps); only below 720px may a table keep its minimum width
+   and scroll horizontally inside this container. */
+.tableScroll {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-body-sm);
+  text-align: left;
+}
+
+.tableFixed {
+  table-layout: fixed;
+}
+
+.table th {
+  height: 36px;
+  padding: 0 var(--space-md);
+  font-size: var(--fs-meta);
+  font-weight: var(--fw-regular);
+  color: var(--muted);
+  text-align: left;
+  vertical-align: middle;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.table td {
+  height: 44px;
+  padding: var(--space-sm) var(--space-md);
+  vertical-align: middle;
+  border-bottom: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+
+.table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.table tbody tr:hover td {
+  background: var(--surface-2);
+}
+
+.table .cellNum {
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.table .cellMono {
+  font-family: var(--font-mono);
+  font-size: var(--fs-meta);
+}
+
+.table .cellNowrap {
+  white-space: nowrap;
+}
+
+.table .cellMuted {
+  color: var(--muted);
+}
+
+.table .cellActions {
+  width: 1%;
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* Badges never clip inside tables: auto layout widens the column instead. */
+.table .badge {
+  max-width: none;
+  overflow: visible;
+  text-overflow: clip;
+}
+
+/* Row headers (<th scope="row">) read like body cells. */
+.table tbody th {
+  height: 44px;
+  padding: var(--space-sm) var(--space-md);
+  font-size: var(--fs-body-sm);
+  font-weight: var(--fw-medium);
+  color: var(--text);
+  background: transparent;
+  white-space: normal;
+}
+
+.table tbody tr:last-child th {
+  border-bottom: 0;
+}
+
+.tableActions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-xs);
+}
+
+.reasonAnchor {
+  display: inline-flex;
+  border-radius: var(--radius-sm);
+}
+
+.reasonAnchor:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-sm) var(--space-md);
+  padding: var(--space-sm) var(--space-md);
+  border-top: 1px solid var(--border);
+}
+
+.pagerStatus {
+  font-size: var(--fs-meta);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.pagerButtons {
+  display: flex;
+  gap: var(--space-xs);
+}
+
+@media (max-width: 720px) {
+  .tableScroll {
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-inline: contain;
+  }
+
+  .tableMinSm { min-width: 480px; }
+  .tableMinMd { min-width: 640px; }
+  .tableMinLg { min-width: 760px; }
+  .tableMinXl { min-width: 920px; }
 }

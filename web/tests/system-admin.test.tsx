@@ -58,11 +58,14 @@ describe('admin user and grant management', () => {
     await user.click(screen.getByRole('tab', { name: '用户与账号' }))
     const alice = (await screen.findByText('alice')).closest('tr')!
     const bob = screen.getByText('bob').closest('tr')!
-    expect(within(alice).getByText('管理员（配置）')).toBeInTheDocument()
-    expect(within(alice).getByText('开')).toBeInTheDocument()
-    expect(within(alice).getByText('3')).toBeInTheDocument()
-    expect(within(bob).getByText('普通（无）')).toBeInTheDocument()
-    expect(within(bob).getByText('关')).toBeInTheDocument()
+    expect(within(alice).getByText('管理员')).toBeInTheDocument()
+    expect(within(alice).getByText('配置文件')).toBeInTheDocument()
+    expect(within(alice).getByText('已开启')).toBeInTheDocument()
+    // Platform administrators have implicit manage on every project.
+    expect(within(alice).getByText('全部')).toBeInTheDocument()
+    expect(within(bob).getByText('普通用户')).toBeInTheDocument()
+    expect(within(bob).getByText('默认')).toBeInTheDocument()
+    expect(within(bob).getByText('未开启')).toBeInTheDocument()
     expect(within(bob).getByText('0')).toBeInTheDocument()
   })
 
@@ -203,7 +206,7 @@ describe('admin user and grant management', () => {
       url: '/api/v1/admin/projects/7/grants/1', method: 'PUT', body: { role: 'manage' },
     }))
 
-    await user.click(screen.getByRole('button', { name: '撤销' }))
+    await user.click(screen.getByRole('button', { name: /^撤销 .+ 的授权$/ }))
     const deleteDialog = await screen.findByRole('dialog', { name: '撤销项目授权？' })
     await user.click(within(deleteDialog).getByRole('button', { name: '撤销授权' }))
     await waitFor(() => expect(writes).toContainEqual({

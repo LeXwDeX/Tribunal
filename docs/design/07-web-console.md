@@ -69,9 +69,11 @@ web/
 
 ### 3.2 评审列表
 
-过滤：项目、状态、结论、档位、触发方式、时间。列：MR、项目、档位、状态、结论、P0/P1/P2 数、用时、时间。
+过滤：项目、状态、结论、档位、触发方式、时间。列：MR、项目、档位、状态、发布、结论、P0/P1/P2 数、用时、时间。
 
-未创建评审任务的结果（API 中 `kind: "status_only"`，如 MR diff 为空）也出现在此列表以及概览、项目页的最近评审表中：该行不可点击，显示 MR、项目、短 head SHA、原因行（如「原因：没有可评审的变更（empty diff）」）、中性徽标「未创建评审任务」和结论徽标。这类行没有评审详情页。
+未创建评审任务的结果（API 中 `kind: "status_only"`，如 MR diff 为空）也出现在此列表以及概览、项目页的最近评审表中：该行不可点击，MR 单元格显示 MR、项目、短 head SHA 和一行中文原因（如「原因：没有可评审的变更（empty diff）」），状态列只放中性徽标「未创建评审任务」，另有结论徽标。这类行没有评审详情页。
+
+本页以及概览、项目页共用同一个评审表，其「发布」列只放一个发布状态徽标，原因不单独占一行：发布原因（`publication_error`）以中文放在徽标的 Tooltip 中（已收录的原因码显示中文，未收录的按存储原文显示），完整原因见评审详情的发布区块（3.3）。表格通用约定见 [4.3 表格规范](#43-表格规范)。
 
 ### 3.3 评审详情（核心页面）
 
@@ -143,7 +145,7 @@ web/
 - 「反馈采集健康」面板展示 `feedback_collection.last_collected_at`、`last_error_class`、`last_error_at`；有错误类别时用 `role="alert"`，成功后清除。字段缺失显示“不可用”，不显示为健康。
 - 「工作区容量」面板展示 `workspace_capacity.measured_at`、`total_bytes`、`limit_bytes`、`over_limit`；`over_limit=true` 时用 `role="alert"` 告警，`limit_bytes=0` 显示“未配置”而不是零容量。回收默认禁用。
 - 「按模型」表展示 `by_model[].calls`、`errors`、`error_rate`、token、平均延迟和 `errors_by_kind` 固定类别徽标；不显示上游错误正文。
-- 趋势用可横向滚动的日期表格；每个项目/provider/块可展开每日明细。筛选和日桶按 workflow 创建时间，日桶用 UTC；只返回有记录的日，不补零。节点指标仅表示最新一次尝试，不代表完整重试历史。
+- 趋势用日期表格：宽屏下不横向滚动，仅视口宽度不超过 720px 时在表格自己的容器内横向滚动（见 [4.3 表格规范](#43-表格规范)）；每个项目/provider/块可展开每日明细。筛选和日桶按 workflow 创建时间，日桶用 UTC；只返回有记录的日，不补零。节点指标仅表示最新一次尝试，不代表完整重试历史。
 - 运行次数含评审和 onboarding；`overturned_ratio` 标为「规则丢弃比例」，是规则裁决 `drop` 的占比，不是「被挑战推翻」或模型准确率。
 - 旧响应缺字段显示不可用，已知空数组显示空状态，非法趋势不显示部分合计。
 - 反馈原始计数、provider/角色归因、人工质量指标的定义与样本口径见 [HTTP API](03-http-api.md#45-系统)；界面只展示接口返回值，不显示部分或伪造的百分比。
@@ -167,7 +169,7 @@ web/
 - 长操作（注册、刷新、触发评审）返回 job ID，页面用 toast 提示并跳转到对应详情。
 - 分页列表的「重试加载更多」复用失败请求的同一 cursor，保留已加载项；「刷新」重新加载已加载页并从第一页开始。
 - 时间显示为相对时间，悬停显示绝对时间（本地时区）。
-- 表格超出宽度时在容器内横向滚动；窄屏下侧边导航收起为顶部菜单。
+- 表格超出宽度时在容器内横向滚动（宽度、滚动、分页与单元格约定见 [4.3 表格规范](#43-表格规范)）；窄屏下侧边导航收起为顶部菜单。
 
 ### 4.1 说明文字位置
 
@@ -195,3 +197,25 @@ web/
 | `Disclosure` | 保留 `<details>` / `<summary>` 语义，隐藏原生 marker，使用自定义 chevron。 |
 
 例外：移动端原生日期滚轮、滚动条、密码管理器、textarea resize、焦点与选区仍保留浏览器行为；这些原语不新增 npm 依赖。
+
+### 4.3 表格规范
+
+控制台所有数据表都通过 `web/src/components/ui.tsx` 的 `DataTable` 渲染。页面不直接写 `<table>`，页面样式模块也不设置 `table`、`thead`、`tbody`、`tr`、`th`、`td` 元素选择器；列宽等差异用单元格（表头）上的 class 设置。
+
+| 原语 | 约定 |
+| --- | --- |
+| `DataTable` | `label` 必填，是表格的可访问名称，使用中文。`minWidth` 取 `none` / `sm` / `md` / `lg` / `xl`（缺省 `md`），分别为不设最小宽度或 480 / 640 / 760 / 920px，仅在视口宽度不超过 720px 时生效。`fixed` 启用固定布局，列宽由表头 class 决定。`isEmpty`（没有数据行）时不渲染空表：`loading` 显示共享的 `LoadingState`，`error` 显示 `ErrorState`（传 `onRetry` 时带「重试」按钮，`errorTitle` 改标题），都没有则显示 `empty`（缺省为标题「暂无数据」的 `EmptyState`）。已有数据行时刷新失败，错误显示在表格上方，表格保留。 |
+| `tableCell` | `num`（右对齐、`tabular-nums`、不换行）、`mono`（等宽小字）、`nowrap`（不换行）、`muted`（弱化文字色）、`actions`（右对齐、不换行，用于操作列）。同一列的 `<th>` 和 `<td>` 都加同一个 class，表头与单元格共用同一种对齐。 |
+| `TableActions` / `TableAction` | `TableActions` 把一行的操作按钮右对齐排列。`TableAction` 是行内唯一允许的按钮：紧凑尺寸、统一的次要视觉权重，`tone="danger"` 为描边危险样式；破坏性操作仍用 `ConfirmDialog` 二次确认。 |
+| `ReasonBadge` | 状态徽标。可选的 `reason` 显示在 `Tooltip` 中并通过 `aria-describedby` 关联，徽标的锚点可用键盘聚焦；没有 `reason` 时只渲染徽标。 |
+| `TablePager` / `useClientPage` | 数据已在客户端时的分页：`useClientPage`（`web/src/lib/hooks.ts`）按每页 20 行（`TABLE_PAGE_SIZE`）切出当前页，`TablePager` 显示「第 x / y 页 · 共 N 条」与「上一页」「下一页」，只有一页时不渲染。游标 API 不用它们，沿用共享的 `Pagination`「加载更多」。 |
+
+- **垂直居中与尺寸**：所有 `th`、`td` 都是 `vertical-align: middle`。表头行高 36px，数据行最小高度 44px，数据单元格内边距 8px × 12px（`--space-sm` × `--space-md`），表头左右内边距同为 12px；悬停行底色用 `--surface-2`。
+- **滚动与分页**：表格没有内部纵向滚动：不设 `max-height`，不出现内部纵向滚动条，每一行都显示；长列表靠分页，客户端已有的数据超过 20 行用 `TablePager`，游标 API 用「加载更多」。宽屏下不出现横向滚动：表格宽度 100%，列宽自适应，长文本换行；徽标必须完整显示，不得被裁切（`Badge` 本身对溢出内容会截断，列宽要为它留足）。只有视口宽度不超过 720px 时，表格才按 `minWidth` 保持最小宽度并在自己的容器内横向滚动，页面本身仍不横向滚动。
+- **数字**：数字列的 `th` 与 `td` 都用 `tableCell.num`。整数用 `formatNumber`（千分位），比例用 `formatPercent`（1% 以下最多 2 位小数，其余最多 1 位，如 0.14%、25%），延迟用 `formatLatency`（如 412ms、6.8s、1m 30s），耗时用 `formatDuration`，均在 `web/src/lib/format.ts`。不显示原始浮点数。
+- **状态列**：一个状态单元格只放一个徽标（如「已发布」「已跳过」「失败」）。原因放进徽标的 Tooltip（`ReasonBadge`）并用中文表述，例如原始值 `review cancelled` 显示为「评审已取消」，不在单元格里另起一行；详情页可以展示完整原因。
+- **表头**：表头用中文，如「提供方」「模型」「调用数」「错误数」「错误率」「输入 token」「输出 token」「平均延迟」「P50 延迟」「错误类别」；原始字段名只允许出现在 Tooltip 中。
+- **重复说明**：每一行都会重复的说明（例如某个操作为什么被禁用）不写进每一行，放进控件上的 Tooltip（`aria-describedby`），或表格下方的一条说明（`TableNote` 或 `Panel` 的 `note`，位置见 4.1）。
+- **操作列**：放在最后一列并右对齐，`th` 与 `td` 都用 `tableCell.actions`，表头文字为「操作」。
+- **回归检查**：`web/tests/table-primitive.test.tsx` 随 `npm test` 运行，拒绝 `ui.tsx` 之外的 `<table>`、源码中残留的旧 `dataTable` / `tableWrap` 类、`styles/ui.module.css` 与 `styles/global.css` 以外样式里的 `table` / `thead` / `tbody` / `tr` / `th` / `td` 元素选择器，以及共享样式中 `.tableScroll` 上的 `max-height` 或内部纵向滚动、`th` / `td` 丢失 `vertical-align: middle`。
+- **视觉检查**：改动表格的页面，按 `AGENTS.md` §6 在 1440 与 390 宽度、亮色与暗色主题下检查。

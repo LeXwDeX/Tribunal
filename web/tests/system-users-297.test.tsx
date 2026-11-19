@@ -125,6 +125,77 @@ describe('user management drawer (#297)', () => {
     expect(within(role).queryByRole('button')).not.toBeInTheDocument()
   })
 
+  it('shows full project access instead of grants for an administrator', async () => {
+    const writes: Array<{ url: string; method?: string; body?: unknown }> = []
+    installFetch((url, init) => {
+      const method = (init?.method || 'GET').toUpperCase()
+      const path = new URL(url, 'http://localhost').pathname
+      if (method !== 'GET') writes.push({ url, method })
+      if (path === '/api/v1/me') return jsonResponse({ id: 7, username: 'alice', role: 'admin', global_read: false, csrf_token: 'x' })
+      if (path === '/api/v1/admin/users') return jsonResponse({ users: [users[0], users[1], { ...users[2], grant_count: 3 }], next_cursor: '' })
+      if (path.endsWith('/grants')) throw new Error('administrator grants must not be fetched')
+      return jsonResponse({})
+    })
+    const user = userEvent.setup()
+    await openUser(user, 'carol')
+    const drawer = screen.getByRole('dialog', { name: 'Carol (@carol)' })
+    const access = within(drawer).getByRole('region', { name: '项目访问' })
+    expect(within(access).getByText('全部项目')).toBeInTheDocument()
+    expect(within(access).getByText(/无需单独授权/)).toBeInTheDocument()
+    expect(within(access).getByText(/保留的 3 条项目授权不生效，降级为普通用户后恢复生效/)).toBeInTheDocument()
+    expect(within(drawer).queryByRole('region', { name: '项目授权' })).not.toBeInTheDocument()
+    expect(within(drawer).queryByLabelText('项目 ID')).not.toBeInTheDocument()
+    expect(within(drawer).queryByRole('button', { name: '添加授权' })).not.toBeInTheDocument()
+  })
+
+  it('shows an add-grant failure next to the form and clears it on edit', async () => {
+    installFetch((url, init) => {
+      const method = (init?.method || 'GET').toUpperCase()
+      const path = new URL(url, 'http://localhost').pathname
+      if (path === '/api/v1/me') return jsonResponse({ id: 7, username: 'alice', role: 'admin', global_read: false, csrf_token: 'x' })
+      if (path === '/api/v1/admin/users') return jsonResponse({ users, next_cursor: '' })
+      if (path === '/api/v1/admin/users/8/grants') return jsonResponse({ grants: [], next_cursor: '' })
+      if (method === 'PUT') return jsonResponse({ error: { code: 'not_found', message: 'not found' } }, 404)
+      return jsonResponse({})
+    })
+    const user = userEvent.setup()
+    await openUser(user, 'bob')
+    await user.type(screen.getByLabelText('项目 ID'), '404{Enter}')
+    expect(await screen.findByText('添加授权失败')).toBeInTheDocument()
+    await user.type(screen.getByLabelText('项目 ID'), '1')
+    expect(screen.queryByText('添加授权失败')).not.toBeInTheDocument()
+  })
+
+  it('keeps the delete confirmation open with the error when deleting fails', async () => {
+    installFetch((url, init) => {
+      const method = (init?.method || 'GET').toUpperCase()
+      const path = new URL(url, 'http://localhost').pathname
+      if (path === '/api/v1/me') return jsonResponse({ id: 7, username: 'alice', role: 'admin', global_read: false, csrf_token: 'x' })
+      if (path === '/api/v1/admin/users') return jsonResponse({ users, next_cursor: '' })
+      if (path === '/api/v1/admin/users/8/grants') return jsonResponse({ grants: [{ project_id: 42, user_id: 8, role: 'read' }], next_cursor: '' })
+      if (method === 'DELETE') return jsonResponse({ error: { code: 'internal', message: 'boom' } }, 500)
+      return jsonResponse({})
+    })
+    const user = userEvent.setup()
+    await openUser(user, 'bob')
+    await user.click(await screen.findByRole('button', { name: '删除 项目 #42 的授权' }))
+    const dialog = await screen.findByRole('dialog', { name: '删除项目授权？' })
+    await user.click(within(dialog).getByRole('button', { name: '删除' }))
+    expect(await within(dialog).findByRole('alert')).toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: '删除项目授权？' })).toBeInTheDocument()
+  })
+
+  it('does not carry form state from one user to another', async () => {
+    mock([])
+    const user = userEvent.setup()
+    await openUser(user, 'bob')
+    await user.type(screen.getByLabelText('项目 ID'), '42')
+    await user.click(screen.getByRole('button', { name: '关闭抽屉' }))
+    const row = (await screen.findByText('bob')).closest('tr')!
+    await user.click(within(row).getByRole('button', { name: '管理' }))
+    expect(screen.getByLabelText('项目 ID')).toHaveValue('')
+  })
+
   it('shows the current global mode state', async () => {
     mock([])
     const user = userEvent.setup()
@@ -220,12 +291,16 @@ describe('user management drawer (#297)', () => {
     await user.click(screen.getByRole('tab', { name: '用户与账号' }))
 
     const carol = (await screen.findByText('carol')).closest('tr')!
-    expect(within(carol).getByRole('button', { name: '停用账号' })).toBeDisabled()
-    expect(within(carol).getByText(/配置来源的管理员/)).toBeInTheDocument()
+    const carolDisable = within(carol).getByRole('button', { name: '停用账号' })
+    expect(carolDisable).toBeDisabled()
+    expect(carolDisable).toHaveAccessibleDescription(/配置来源的管理员/)
+    // The reason is not repeated as row text.
+    expect(within(carol).queryByText(/配置来源的管理员/)).not.toBeInTheDocument()
 
     const alice = (await screen.findByText('alice')).closest('tr')!
-    expect(within(alice).getByRole('button', { name: '停用账号' })).toBeDisabled()
-    expect(within(alice).getByText(/当前登录账号/)).toBeInTheDocument()
+    const aliceDisable = within(alice).getByRole('button', { name: '停用账号' })
+    expect(aliceDisable).toBeDisabled()
+    expect(aliceDisable).toHaveAccessibleDescription(/当前登录账号/)
 
     const bob = (await screen.findByText('bob')).closest('tr')!
     expect(within(bob).getByRole('button', { name: '停用账号' })).toBeEnabled()

@@ -18,21 +18,23 @@ export function classNames(...values: Array<string | false | null | undefined>):
   return values.filter(Boolean).join(' ')
 }
 
-type ButtonVariant = 'primary' | 'secondary' | 'danger' | 'ghost'
+type ButtonVariant = 'primary' | 'secondary' | 'danger' | 'dangerOutline' | 'ghost'
 
 interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: ButtonVariant
+  /** sm is the compact row/inline size (28px, 44px touch target on mobile). */
+  size?: 'md' | 'sm'
   loading?: boolean
 }
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
-  { variant = 'secondary', loading, children, className, disabled, type = 'button', ...props }, ref,
+  { variant = 'secondary', size = 'md', loading, children, className, disabled, type = 'button', ...props }, ref,
 ) {
   return (
     <button
       ref={ref}
       type={type}
-      className={classNames(styles.button, styles[variant], className)}
+      className={classNames(styles.button, styles[variant], size === 'sm' && styles.smallButton, className)}
       disabled={disabled || loading}
       aria-busy={loading || undefined}
       {...props}
@@ -355,6 +357,124 @@ export function Pagination({
     <div className={styles.loadMore}>
       <Button variant="secondary" onClick={onLoadMore} loading={loading}>{label}</Button>
     </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Shared table primitive. Every data table in the console renders through
+// DataTable (tests/table-primitive.test.tsx enforces it). Rules:
+// - every cell is vertically centred; one padding and row height;
+// - no inner vertical scrolling: all rows render, long lists paginate
+//   (cursor APIs use Pagination, client data uses TablePager/useClientPage);
+// - no horizontal scrolling at wide sizes; below 720px the table keeps a
+//   minimum width and scrolls inside its own container;
+// - numeric columns use tableCell.num, actions use TableActions/TableAction,
+//   a status cell holds one badge and puts its reason in a Tooltip
+//   (ReasonBadge).
+export type TableMinWidth = 'none' | 'sm' | 'md' | 'lg' | 'xl'
+
+const TABLE_MIN_WIDTH: Record<TableMinWidth, string | undefined> = {
+  none: undefined, sm: styles.tableMinSm, md: styles.tableMinMd, lg: styles.tableMinLg, xl: styles.tableMinXl,
+}
+
+export const tableCell = {
+  num: styles.cellNum,
+  mono: styles.cellMono,
+  nowrap: styles.cellNowrap,
+  actions: styles.cellActions,
+  muted: styles.cellMuted,
+} as const
+
+export function DataTable({
+  label, minWidth = 'md', fixed, className, children, isEmpty = false, loading, error, onRetry, errorTitle, empty,
+}: {
+  /** Accessible name of the table. */
+  label: string
+  /** Minimum width kept below 720px, where the table scrolls in its container. */
+  minWidth?: TableMinWidth
+  /** Fixed layout: column widths come from header classes. */
+  fixed?: boolean
+  className?: string
+  children: ReactNode
+  /** True when there are no rows to render. */
+  isEmpty?: boolean
+  loading?: boolean
+  error?: unknown
+  onRetry?: () => void
+  errorTitle?: string
+  /** Rendered instead of the table when isEmpty and not loading or failed. */
+  empty?: ReactNode
+}) {
+  if (isEmpty) {
+    if (loading) return <LoadingState />
+    if (error) return <ErrorState error={error} onRetry={onRetry} title={errorTitle} />
+    return <>{empty ?? <EmptyState title="暂无数据" />}</>
+  }
+  return (
+    <>
+      {error ? <ErrorState error={error} onRetry={onRetry} title={errorTitle} /> : null}
+      <div className={styles.tableScroll}>
+        <table
+          className={classNames(styles.table, fixed && styles.tableFixed, TABLE_MIN_WIDTH[minWidth], className)}
+          aria-label={label}
+        >
+          {children}
+        </table>
+      </div>
+    </>
+  )
+}
+
+// TableActions right-aligns a row's compact action buttons.
+export function TableActions({ children }: { children: ReactNode }) {
+  return <div className={styles.tableActions}>{children}</div>
+}
+
+// TableAction is the only button used inside a table row: compact, secondary
+// weight, and an outlined danger tone for destructive actions.
+export const TableAction = forwardRef<HTMLButtonElement, Omit<ButtonProps, 'variant'> & { tone?: 'default' | 'danger' }>(
+  function TableAction({ tone = 'default', className, ...props }, ref) {
+    return (
+      <Button
+        ref={ref}
+        variant={tone === 'danger' ? 'dangerOutline' : 'secondary'}
+        size="sm"
+        className={className}
+        {...props}
+      />
+    )
+  },
+)
+
+// ReasonBadge is a status badge whose optional reason is shown in a Tooltip
+// and exposed to assistive technology through aria-describedby.
+export function ReasonBadge({
+  tone = 'neutral', live, plain, reason, children,
+}: { tone?: 'ok' | 'warn' | 'danger' | 'info' | 'neutral'; live?: boolean; plain?: boolean; reason?: ReactNode; children: ReactNode }) {
+  const badge = <Badge tone={tone} live={live} plain={plain}>{children}</Badge>
+  if (reason === null || reason === undefined || reason === '') return badge
+  return (
+    <Tooltip content={reason}>
+      <span className={styles.reasonAnchor} tabIndex={0}>{badge}</span>
+    </Tooltip>
+  )
+}
+
+export const TABLE_PAGE_SIZE = 20
+
+// TablePager pages rows that are already in the client.
+export function TablePager({
+  page, pageCount, total, onChange,
+}: { page: number; pageCount: number; total: number; onChange: (page: number) => void }) {
+  if (pageCount <= 1) return null
+  return (
+    <nav className={styles.pager} aria-label="表格分页">
+      <span className={styles.pagerStatus}>第 {page} / {pageCount} 页 · 共 {total} 条</span>
+      <div className={styles.pagerButtons}>
+        <Button variant="secondary" size="sm" disabled={page <= 1} onClick={() => onChange(page - 1)}>上一页</Button>
+        <Button variant="secondary" size="sm" disabled={page >= pageCount} onClick={() => onChange(page + 1)}>下一页</Button>
+      </div>
+    </nav>
   )
 }
 

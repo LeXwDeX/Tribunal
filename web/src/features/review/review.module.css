@@ -478,17 +478,8 @@
   min-width: 0;
 }
 
-/* Narrow screens scroll the table inside .tableWrap instead of squeezing it. */
-.findingsTable {
-  min-width: 720px;
-}
-
-/* Global table rules are emitted after this module, so keep the extra tbody
-   specificity; the shared .dataTable styles must not change. */
-.findingsTable tbody td {
-  vertical-align: middle;
-}
-
+/* The findings table renders through DataTable, which owns the table, row and
+   cell styles; the classes below only style the content of a cell. */
 .sevCell {
   width: 56px;
 }
@@ -745,13 +736,6 @@
 .annotationOptions button {
   flex: 1;
   justify-content: center;
-}
-
-.loadMore {
-  display: flex;
-  justify-content: center;
-  padding: var(--space-md);
-  border-top: 1px solid var(--border);
 }
 
 /* Side column */

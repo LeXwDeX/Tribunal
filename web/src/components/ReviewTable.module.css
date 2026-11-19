@@ -1,20 +1,34 @@
-.table {
-  min-width: 1040px;
+/* Table chrome (padding, borders, alignment, scrolling) comes from DataTable;
+   this module only styles what sits inside the cells. */
+.rowLink {
+  cursor: pointer;
+}
+
+/* Badge and count columns keep their natural width: when the table is narrow
+   only the title column gives way, so a badge never breaks mid-word. The
+   min-width sits on the cell content because browsers ignore an intrinsic
+   min-width on the cell itself. */
+.fit > * {
+  min-width: max-content;
 }
 
 .primary {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  min-width: 220px;
+  min-width: 0;
 }
 
+/* The title wraps to two lines at most, so its column can shrink with the
+   table instead of forcing the table wider than its container. */
 .titleLink,
 .titleText {
+  display: -webkit-box;
   max-width: 46ch;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow-wrap: anywhere;
   color: var(--text);
   font-weight: var(--fw-medium);
 }
@@ -32,8 +46,9 @@
 
 .meta {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-sm);
+  gap: 0 var(--space-sm);
   min-width: 0;
   color: var(--muted);
   font-size: var(--fs-meta);
@@ -46,22 +61,6 @@
 }
 
 .project {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.publicationCell {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  min-width: 96px;
-}
-
-.publicationError {
-  max-width: 220px;
-  color: var(--danger-fg);
-  font-size: var(--fs-meta);
+  min-width: 0;
   overflow-wrap: anywhere;
 }

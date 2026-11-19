@@ -174,6 +174,15 @@ describe('findings table', () => {
     void fetchMock
   })
 
+  it('renders findings in the shared table and spans the expanded detail across every column', async () => {
+    renderDetail(review({ id: 'wf-table', status: 'completed', verdict: 'PASS' }), [finding()])
+    const table = await screen.findByRole('table', { name: '问题列表' })
+    expect(within(table).getAllByRole('columnheader').map((header) => header.textContent))
+      .toEqual(['级别', '标题', '提出 → 挑战 → 裁决', '人工'])
+    await userEvent.setup().click(within(table).getByRole('button', { name: /展开：并发写 map 未加锁/ }))
+    expect(within(table).getByText('问题正文').closest('td')).toHaveAttribute('colspan', '4')
+  })
+
   it('strikes through dropped findings and shows the evidence chain', async () => {
     renderDetail(review({ id: 'wf-chain', status: 'completed', verdict: 'PASS' }), [
       finding({ id: 'drop', title: '已丢弃的问题', challenge_status: 'refuted', decision: 'drop', origin_provider: 'claude' }),

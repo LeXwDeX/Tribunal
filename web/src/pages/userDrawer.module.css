@@ -70,14 +70,6 @@
   align-items: end;
 }
 
-.grantTable {
-  table-layout: fixed;
-}
-
-.projectCol {
-  width: auto;
-}
-
 .roleCol {
   width: 6.5rem;
 }
@@ -85,10 +77,6 @@
 .actionsCol {
   width: 5rem;
   text-align: right;
-}
-
-.grantTable tbody td {
-  vertical-align: middle;
 }
 
 .projectName {
@@ -102,11 +90,6 @@
   font-size: var(--fs-meta);
   color: var(--muted);
   font-variant-numeric: tabular-nums;
-}
-
-.loadMore {
-  display: flex;
-  justify-content: center;
 }
 
 @media (max-width: 480px) {
@@ -125,4 +108,17 @@
   .actionsCol {
     width: 4.5rem;
   }
+}
+
+/* User list (System → 用户与账号) role cell: badge plus source label. */
+.roleCell {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  white-space: nowrap;
+}
+
+.roleSource {
+  font-size: var(--fs-meta);
+  color: var(--muted);
 }

@@ -87,7 +87,7 @@ describe('quality ratio', () => {
     expect(within(accuracy).getByText('无样本')).toBeInTheDocument()
     expect(accuracy.querySelector('[class*="ratioFill"]')).toBeNull()
 
-    expect(within(overturned).getByText('20.0%')).toBeInTheDocument()
+    expect(within(overturned).getByText('20%')).toBeInTheDocument()
     expect(within(overturned).getByText('2 / 10')).toBeInTheDocument()
     const fill = overturned.querySelector('[class*="ratioFill"]') as HTMLElement
     expect(fill).not.toBeNull()
