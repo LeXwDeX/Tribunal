@@ -6,7 +6,7 @@ GitLab CE MR 多 agent 自动评审服务
 
 当前 M0–M6 功能已有本地实现，覆盖项目注册与 webhook、三种 LLM 协议、agent 工具循环、DAG 与持久化、只读探索与四路并行评审/对抗核验/裁决、GitLab 发布、工作区、MCP/Skill、OAuth 持久会话、项目 `read`/`manage` 授权与 CSRF、用户全局只读、平台角色管理、模型管理与评审档位节点覆盖、管理 API、React 控制台、API token、统计、反馈采集、人工标注与许可证清单。
 
-当前最新发布版本是 **v1.9.0**（2026-11-20）。本版汇总 v1.8.0 之后的评审改进：共享工作区索引与 MR 目标提交不一致时，评审为目标提交建立隔离的代码图谱，项目默认分支随 GitLab 自动同步，内置 codebase-memory wrapper 在运行时目录路径过长时回退到 `/tmp`（#604）；服务器连接被中断的 MCP 调用向模型返回重试提示，成功重试后不再留下工具缺口（#613）；默认配置为 `validate` 与 `verify` 授权 `list_projects`（#615）。同批还有控制台视觉改版（#601）、共享表格规范与用户详情抽屉重新设计（#610）、索引身份缺口合并与中文未完成原因（#603、#608），以及普通轮次损坏工具调用可恢复（#605）。本版不新增数据库迁移（schema 仍为 36），也没有必改配置；#615 的新默认授权在已部署实例上需先更新挂载配置才会生效，变更见 [CHANGELOG](CHANGELOG.md)。当前生产运行由提交 `cb8a7e8` 构建的 v1.9.0 镜像，本轮部署与验收记录见 [v1.9.0 验证状态](docs/delivery-readiness.md#v190-验证状态)。上一版本 v1.8.0 汇总全系统审查修复（#510–#552）与后续跨 PR 复核修复，新增迁移 `0035` 与 `0036`，其生产部署与验收记录见 [v1.8.0 验证状态](docs/delivery-readiness.md#v180-验证状态)。CI 以最终 tag commit 的 GitHub Actions 结果为准。
+当前最新发布版本是 **v1.9.1**（2026-11-20）。本版是只含一个修复的补丁版本（#618）：启动时为 #457（v1.5.0）之前写入的过期 ignore 阻断状态的项目各排队一次重建索引，手动刷新遇到过期状态时也重建索引。本版不新增数据库迁移（schema 仍为 36），也没有配置变更，变更见 [CHANGELOG](CHANGELOG.md)。当前生产运行由提交 `654059e` 构建的 v1.9.1 镜像，本轮部署与验收记录见 [v1.9.1 验证状态](docs/delivery-readiness.md#v191-验证状态)。上一版本 v1.9.0 汇总目标提交代码图谱、MCP 中断重试与控制台改版批次，其生产部署与验收记录见 [v1.9.0 验证状态](docs/delivery-readiness.md#v190-验证状态)。CI 以最终 tag commit 的 GitHub Actions 结果为准。
 
 部署时：人工部署看 [部署与运维](docs/operations.md)，由 agent 代为部署和接入时用 [Agent 部署指南](docs/agent-deployment.md)。
 
@@ -264,7 +264,7 @@ go mod verify
 
 `go build` 依赖 `web/dist`，因此在全新检出上必须先执行前端构建。完整 Go 测试需要 Bash 和真实的 Python 3（注册文档测试会执行 Python 3）；`go test -race` 还需要启用 cgo 和可用的 C 编译器。自托管 runner 必须在运行前确认这些前提。生产二进制和部署运行不依赖 Python 3；上面的人工注册文档示例单独需要宿主机 Python 3。测试使用临时 SQLite 数据库和本地 HTTP 假 GitLab，覆盖注册、加密、认证、事件过滤、并发去重、租约恢复、旧 attempt 拒绝、CLI、工作流、发布、工作区、扩展和控制台静态资源。
 
-各版本做过哪些验证见 [交付就绪与验收记录](docs/delivery-readiness.md)：当前版本看 [v1.9.0 验证状态](docs/delivery-readiness.md#v190-验证状态)，上一版本看 [v1.8.0 验证状态](docs/delivery-readiness.md#v180-验证状态)，此前的验证状态与发布检查表见 [v1.7.1](docs/delivery-readiness.md#v171-验证状态)、[v1.5.0](docs/delivery-readiness.md#v150-验证状态)、[v1.4.0](docs/delivery-readiness.md#v140-发布检查表) 与 [v1.3.0](docs/delivery-readiness.md#v130-发布检查表294)，v1.0.0 的 f143 隔离实例验收看 [v1.0.0 历史验收记录](docs/delivery-readiness.md#v100-历史验收记录f143仅供追溯)。
+各版本做过哪些验证见 [交付就绪与验收记录](docs/delivery-readiness.md)：当前版本看 [v1.9.1 验证状态](docs/delivery-readiness.md#v191-验证状态)，上一版本看 [v1.9.0 验证状态](docs/delivery-readiness.md#v190-验证状态)，此前的验证状态与发布检查表见 [v1.8.0](docs/delivery-readiness.md#v180-验证状态)、[v1.7.1](docs/delivery-readiness.md#v171-验证状态)、[v1.5.0](docs/delivery-readiness.md#v150-验证状态)、[v1.4.0](docs/delivery-readiness.md#v140-发布检查表) 与 [v1.3.0](docs/delivery-readiness.md#v130-发布检查表294)，v1.0.0 的 f143 隔离实例验收看 [v1.0.0 历史验收记录](docs/delivery-readiness.md#v100-历史验收记录f143仅供追溯)。
 
 ## 主体已实现 / 范围外 / 已知限制
 
