@@ -83,15 +83,20 @@ func TestAdminGrantAndCredentialWritesAudited(t *testing.T) {
 	assertStatus(t, revoked, http.StatusNoContent)
 	missing := admin.json(http.MethodPut, "/api/v1/admin/projects/42/grants/999", map[string]any{"role": "read"})
 	assertStatus(t, missing, http.StatusNotFound)
+	missingRevoke := admin.request(http.MethodDelete, "/api/v1/admin/projects/42/grants/999", nil, nil)
+	assertStatus(t, missingRevoke, http.StatusNotFound)
 
 	text := logs.String()
 	requireAuditFields(t, text, "grant",
 		`"actor_id":7`, `"target_id":8`, `"project_id":42`, `"role":"manage"`, `"result":"ok"`)
+	// The revoke line records the role of the grant that was removed.
 	requireAuditFields(t, text, "revoke_grant",
-		`"actor_id":7`, `"target_id":8`, `"project_id":42`, `"result":"ok"`)
+		`"actor_id":7`, `"target_id":8`, `"project_id":42`, `"role":"manage"`, `"result":"ok"`)
 	requireAuditFields(t, text, "revoke_credentials",
 		`"actor_id":7`, `"target_id":8`, `"result":"ok"`)
 	// Rejected writes carry a stable code instead of the raw store error.
 	requireAuditFields(t, text, "grant",
+		`"target_id":999`, `"project_id":42`, `"code":"not_found"`, `"result":"rejected"`)
+	requireAuditFields(t, text, "revoke_grant",
 		`"target_id":999`, `"project_id":42`, `"code":"not_found"`, `"result":"rejected"`)
 }

@@ -291,15 +291,25 @@ func (s *Server) handleAdminDeleteGrant(w http.ResponseWriter, r *http.Request) 
 		validationFailed(w, r, "user_id", "user_id must be a positive integer")
 		return
 	}
-	if err := s.access.DeleteProjectGrant(r.Context(), projectID, userID); err != nil {
+	// Read the grant before revoking so the audit line records the removed
+	// role. A missing grant is reported by both calls with the same code.
+	role, err := s.access.ProjectGrantRole(r.Context(), projectID, userID)
+	if err != nil {
 		s.logger.Info("project grant revocation rejected", "event", "platform_audit", "actor_id", currentUserID(r),
 			"action", "revoke_grant", "target_id", userID, "project_id", projectID,
 			"code", accessWriteCode(err), "result", "rejected")
 		s.writeAccessError(w, r, err)
 		return
 	}
+	if err := s.access.DeleteProjectGrant(r.Context(), projectID, userID); err != nil {
+		s.logger.Info("project grant revocation rejected", "event", "platform_audit", "actor_id", currentUserID(r),
+			"action", "revoke_grant", "target_id", userID, "project_id", projectID, "role", role,
+			"code", accessWriteCode(err), "result", "rejected")
+		s.writeAccessError(w, r, err)
+		return
+	}
 	s.logger.Info("project grant revoked", "event", "platform_audit", "actor_id", currentUserID(r),
-		"action", "revoke_grant", "target_id", userID, "project_id", projectID, "result", "ok")
+		"action", "revoke_grant", "target_id", userID, "project_id", projectID, "role", role, "result", "ok")
 	s.invalidateStreamAuth()
 	w.WriteHeader(http.StatusNoContent)
 }

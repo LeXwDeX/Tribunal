@@ -332,6 +332,26 @@ func (s *Store) SetProjectGrant(ctx context.Context, projectID, userID int64, ro
 	return nil
 }
 
+// ProjectGrantRole returns the role of one direct project grant so audit lines
+// can record the grant being revoked. A missing grant is ErrNotFound; global
+// read is not a grant and does not answer this lookup.
+func (s *Store) ProjectGrantRole(ctx context.Context, projectID, userID int64) (string, error) {
+	if projectID <= 0 || userID <= 0 {
+		return "", errors.New("sqlite: project id and user id are required")
+	}
+	var role string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT role FROM project_grants WHERE project_id = ? AND user_id = ?`,
+		projectID, userID).Scan(&role)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("%w: project %d grant for user %d", store.ErrNotFound, projectID, userID)
+	}
+	if err != nil {
+		return "", fmt.Errorf("sqlite: get project grant role: %w", err)
+	}
+	return role, nil
+}
+
 // DeleteProjectGrant removes one grant. A missing grant is ErrNotFound.
 func (s *Store) DeleteProjectGrant(ctx context.Context, projectID, userID int64) error {
 	if projectID <= 0 || userID <= 0 {

@@ -496,7 +496,7 @@ MR 讨论里的 `@<bot>` 可唤醒重审，回执写在被 @ 的原讨论线程�
 
 平台管理员可通过用户管理 API 为已登录的 GitLab 用户授予或撤销平台管理员角色。配置指定的管理员不能降级或禁用；不能降级或禁用自己，也不能移除最后一个生效的管理员。更新用户时先读取用户列表，并在 PATCH 请求中提交该用户的 `revision`；旧的仅含 `disabled` 的请求需要补充该字段，缺少 `revision` 返回 400，版本过期返回 409 `stale_revision`。角色变更在下一次请求生效，降级会使旧 CSRF token 失效，但不会删除该用户的全部会话或 API token；需要立即清除全部凭据时另行调用凭据撤销接口。新增迁移 `0025` 不可逆，升级前应按本手册备份数据库及其 WAL/SHM、工作区、配置、镜像和加密密钥；回滚时恢复匹配的备份和旧版镜像。
 
-上述访问管理写入（平台角色与 `global_read`、停用/启用、项目授权新增与撤销、凭据撤销、项目残留目录清理）成功后都会写 `platform_audit` 日志：包含 `actor_id`、`action`、`target_id`，项目相关操作另含 `project_id` 与 `role`，停用/启用含 `disabled`，平台角色与全局只读变更含 `old_role`/`new_role`/`global_read`；成功行带 `result=ok`。被存储层拒绝的写入（如 `stale_revision`、`protected_user`、`not_found`）另记稳定的 `code` 与 `result=rejected`，不记录原始错误文本。残留清理只记录 removed/kept/failed 计数，不记录宿主机路径。
+上述访问管理写入（平台角色与 `global_read`、停用/启用、项目授权新增与撤销、凭据撤销、项目残留目录清理）成功后都会写 `platform_audit` 日志：包含 `actor_id` 与 `action`；停用/启用、项目授权新增与撤销、凭据撤销另含 `target_id`（目标用户 ID），项目授权新增与撤销另含 `project_id` 与 `role`（撤销时记录被删除 grant 的角色），停用/启用含 `disabled`，平台角色与全局只读变更含 `old_role`/`new_role`/`global_read`；成功行带 `result=ok`。被存储层拒绝的写入（如 `stale_revision`、`protected_user`、`not_found`）另记稳定的 `code` 与 `result=rejected`，不记录原始错误文本。残留清理是跨全部未登记项目的批量操作，可能同时涉及多个项目和无法确定归属的目录，因此只记录 `actor_id`、`action` 与 removed/kept/failed 计数，不记录 `target_id`、`project_id`、`role`，也不记录宿主机路径。
 
 手动触发评审、刷新工作区、取消及重发评审会在项目生命周期锁内重新确认当前用户是否具备 manage（平台管理员隐式通过）和用户启用状态，再访问项目凭据或入队。项目删除与重新登记使用同一锁；旧请求在删除后继续执行时，没有新 grant 且不是平台管理员则拒绝。复核时已有新 grant 的请求仍可继续。grant 或用户状态的独立变更不与此锁串行，复核之后的撤销不能保证阻止正在进行的请求；会话和 API token 仍按入口认证，不在此处再次核验。其他项目写接口（包括项目配置、webhook、上下文、扩展和问题标注）没有此项锁内授权保证，不能将此修复视为所有在途请求的即时撤销。
 
