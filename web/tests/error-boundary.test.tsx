@@ -8,6 +8,25 @@ import { AppShell } from '../src/components/AppShell'
 import { ErrorBoundary } from '../src/components/ErrorBoundary'
 import { ToastProvider } from '../src/components/ui'
 import { adminMe, createTestQueryClient, installFetch, jsonResponse } from './test-utils'
+import { App } from '../src/app'
+
+// The injectable crashing route: the page-level boundary in AppShell guards
+// the outlet, so the shell itself must throw to exercise the app-level
+// boundary that App owns. The mock delegates every other route unchanged.
+vi.mock('../src/components/AppShell', async () => {
+  const actual = await vi.importActual<typeof import('../src/components/AppShell')>('../src/components/AppShell')
+  const router = await vi.importActual<typeof import('react-router-dom')>('react-router-dom')
+  return {
+    AppShell: (props: Parameters<typeof actual.AppShell>[0]) => {
+      const location = router.useLocation()
+      if (location.pathname === '/models') throw new Error('render failed at /srv/internal/path')
+      return <actual.AppShell {...props} />
+    },
+  }
+})
+vi.mock('../src/pages/OverviewPage', () => ({
+  OverviewPage: () => <p>总览内容</p>,
+}))
 
 function BrokenPage(): ReactNode {
   throw new Error('render failed at /srv/internal/path')
@@ -75,5 +94,30 @@ describe('console error boundary', () => {
     expect(screen.getByRole('link', { name: '返回总览' })).toHaveAttribute('href', '/')
     expect(screen.getByRole('button', { name: '重新加载' })).toBeInTheDocument()
     expect(screen.getByRole('alert')).not.toHaveTextContent('/srv/internal/path')
+  })
+
+  it('installs the app-level fallback in the real App and resets it on navigation', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    installFetch((url) => {
+      if (url.endsWith('/auth/status')) return jsonResponse({ oauth_enabled: true })
+      if (url.endsWith('/api/v1/me')) return jsonResponse(adminMe)
+      return jsonResponse({})
+    })
+    render(
+      <QueryClientProvider client={createTestQueryClient()}>
+        <MemoryRouter initialEntries={['/models']}>
+          <App />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+
+    expect(await screen.findByRole('heading', { name: '控制台遇到错误' })).toBeInTheDocument()
+    expect(screen.getByRole('alert')).not.toHaveTextContent('/srv/internal/path')
+
+    await user.click(screen.getByRole('link', { name: '返回总览' }))
+
+    expect(await screen.findByText('总览内容')).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: '控制台遇到错误' })).not.toBeInTheDocument()
   })
 })

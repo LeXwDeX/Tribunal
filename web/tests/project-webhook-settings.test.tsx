@@ -272,6 +272,42 @@ describe('project webhook settings', () => {
     expect(calls).toEqual([{ url: '/api/v1/projects/42/webhook', method: 'POST' }])
   })
 
+  it('reports a failed server state instead of success after enabling', async () => {
+    const disabled = project({ webhook_state: 'disabled', hook_id: undefined })
+    installFetch(routes(disabled, [], () => jsonResponse(webhookResponse({
+      hook_id: 55, state: 'failed', last_error: 'GitLab webhook is disabled',
+    }))))
+    renderWithProviders(<SettingsPanel project={disabled} />)
+    const user = userEvent.setup()
+
+    await user.click(webhookPanel().getByRole('button', { name: '启用 GitLab Activity' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('GitLab webhook is disabled')
+    expect(webhookPanel().queryByText('Webhook 已启用')).not.toBeInTheDocument()
+    expect(screen.queryByText(/GitLab webhook 已启用/)).not.toBeInTheDocument()
+    expect(webhookPanel().getByText('配置失败')).toBeInTheDocument()
+  })
+
+  it('does not badge a rebuild as complete while the server state stays failed', async () => {
+    const enabled = project({ hook_id: 99, webhook_state: 'enabled', webhook_managed_by: 'crc' })
+    installFetch(routes(enabled, [], () => jsonResponse(webhookResponse({
+      hook_id: 99, state: 'failed', last_error: 'GitLab webhook is disabled',
+    }))))
+    renderWithProviders(<SettingsPanel project={enabled} />)
+    const user = userEvent.setup()
+
+    await user.click(webhookPanel().getByRole('button', { name: '重建 webhook' }))
+    const dialog = screen.getByRole('dialog', { name: '重建 GitLab webhook？' })
+    await user.click(within(dialog).getByRole('button', { name: '重建 webhook' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('GitLab webhook is disabled')
+    expect(webhookPanel().queryByText('Webhook 已重建')).not.toBeInTheDocument()
+    expect(screen.queryByText(/GitLab webhook 已重建/)).not.toBeInTheDocument()
+    expect(webhookPanel().getByText('配置失败')).toBeInTheDocument()
+  })
+
   it('never touches the webhook when only project settings are saved', async () => {
     const calls: Array<{ url: string; method: string }> = []
     const patches: Array<Record<string, unknown>> = []

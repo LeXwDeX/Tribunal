@@ -279,6 +279,12 @@ function tokenExpiry(token: ApiToken): { label: string; tone: 'danger' | 'warn' 
   return null
 }
 
+// A renewal replaces a credential: an unbounded wait would leave the dialog
+// frozen with no way to act, so the client abandons the request after this
+// budget and says that the outcome is unknown.
+export const RENEW_TIMEOUT_MS = 30_000
+const RENEW_TIMEOUT_SECONDS = RENEW_TIMEOUT_MS / 1000
+
 function TokenRenewDialog({ token, open, onClose }: {
   token: ApiToken | null
   open: boolean
@@ -289,7 +295,9 @@ function TokenRenewDialog({ token, open, onClose }: {
   const [days, setDays] = useState('90')
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<unknown>()
+  const [notice, setNotice] = useState('')
   const [renewed, setRenewed] = useState<CreatedApiToken>()
+  const activeRequest = useRef<{ controller: AbortController; timedOut: boolean } | null>(null)
   const id = useId()
 
   useEffect(() => {
@@ -298,26 +306,44 @@ function TokenRenewDialog({ token, open, onClose }: {
     setDays('90')
     setPending(false)
     setError(undefined)
+    setNotice('')
     setRenewed(undefined)
   }, [open, token?.id])
 
   const submit = async () => {
-    if (!token) return
+    if (!token || activeRequest.current) return
     const parsed = Number(days)
     if (!Number.isInteger(parsed) || parsed < 1 || parsed > 365) {
       setError(new Error('有效天数必须是 1 到 365 的整数。'))
       return
     }
+    const request = { controller: new AbortController(), timedOut: false }
+    activeRequest.current = request
     setPending(true)
     setError(undefined)
+    setNotice('')
+    const timer = window.setTimeout(() => {
+      request.timedOut = true
+      request.controller.abort()
+    }, RENEW_TIMEOUT_MS)
     try {
-      setRenewed(await renewApiToken(token.id, parsed))
+      setRenewed(await renewApiToken(token.id, parsed, request.controller.signal))
       toast.push('success', 'API token 已续期；旧明文立即失效。')
       await queryClient.invalidateQueries({ queryKey: ['api-tokens'] })
     } catch (caught) {
-      setError(caught)
+      if (request.timedOut) {
+        // The server may still have rotated the secret after the client gave up.
+        setNotice(`续期请求超过 ${RENEW_TIMEOUT_SECONDS} 秒未完成，已停止等待。结果未知：旧 token 可能已失效，请刷新 token 列表确认后再决定是否重试。`)
+        void queryClient.invalidateQueries({ queryKey: ['api-tokens'] })
+      } else {
+        setError(caught)
+      }
     } finally {
-      setPending(false)
+      window.clearTimeout(timer)
+      if (activeRequest.current === request) {
+        activeRequest.current = null
+        setPending(false)
+      }
     }
   }
 
@@ -325,7 +351,8 @@ function TokenRenewDialog({ token, open, onClose }: {
   return (
     <Dialog
       open={open}
-      onClose={pending ? () => {} : onClose}
+      onClose={onClose}
+      closeDisabled={pending}
       title={renewed ? '复制新 API token' : '续期 API token'}
       description={renewed
         ? '明文 token 只显示这一次。关闭对话框后将从界面状态中清除。'
@@ -334,7 +361,7 @@ function TokenRenewDialog({ token, open, onClose }: {
         <Button variant="primary" onClick={onClose}>我已复制，关闭</Button>
       ) : (
         <>
-          <Button variant="secondary" onClick={onClose} disabled={pending}>取消</Button>
+          <Button variant="secondary" onClick={onClose} disabled={pending} aria-disabled={pending || undefined}>取消</Button>
           <Button variant="primary" onClick={() => { void submit() }} loading={pending}>续期</Button>
         </>
       )}
@@ -347,6 +374,12 @@ function TokenRenewDialog({ token, open, onClose }: {
       ) : (
         <>
           {error ? <ErrorState error={error} title="续期失败" /> : null}
+          {notice ? <div className={styles.warning} role="alert">{notice}</div> : null}
+          {pending ? (
+            <div className={styles.notice} role="status">
+              正在续期。请求完成前不能关闭对话框；超过 {RENEW_TIMEOUT_SECONDS} 秒会停止等待并提示结果未知。
+            </div>
+          ) : null}
           <Field label="有效天数" htmlFor={`${id}-days`} hint="正整数，最长 365 天。">
             <NumberField id={`${id}-days`} min={1} max={365} value={days} onChange={(event) => setDays(event.target.value)} disabled={pending} />
           </Field>
