@@ -135,6 +135,14 @@
 - 基于 `main` `6b6ae70` 的未提交工作区，本地通过 `go test -count=1 ./internal/app ./internal/repo ./internal/skill`（2026-11-19；app 164.421s、repo 7.749s、skill 0.374s）。覆盖：与已授权 Skill 无关的忽略 rename 不再使整单失败；被授权 Skill 被剔除时 fail-closed，`error_class` 为 `repo_skill_excluded_by_mr` 且状态 detail 为专用文案；`repositorySkillRuntimeFiles` 表驱动规则；`FilterRepositorySkillFiles` 与 `ReadRepositorySkills` 等价；`RepositorySkillDirs` 重名、嵌套与无效 manifest；发布复核拒绝剔除已授权文件的 dossier；未授权排除不改变执行身份。
 - **BLOCKED**：「旧二进制中断、新二进制恢复」的真实环境演练未执行（缺隔离部署环境）；单测覆盖恢复路径，不代替跨二进制升级演练。升级与回退边界见[设计文档](design/08-repository-skill-snapshot.md) §4.6。
 
+## 控制台视觉改版本地验证（#601）
+
+- 基于 `main` `51ea4fc` 的未提交工作区（2026-11-19）。改动只在前端样式层（含导航图标的尺寸与线宽），不涉及后端、API、配置、数据库迁移或依赖。`npm run check:styles` 0 错误、0 警告；`npm test -- --coverage` 通过 96 个文件、856 项测试，覆盖率高于 `web/vite.config.ts` 的阈值；`web/dist` 已重建。
+- 文字对比度按新色板人工计算，正文与次级文字对比度不低于 4.5:1；这是人工计算，不是自动化检查结果。
+- 在 mock 后端上对总览、评审列表、评审详情（含运行中与已完成）、项目列表与项目详情（概览、工作区、设置等标签）、扩展（三个标签）、模型与档位、统计与反馈、系统（五个标签）以及对话框、抽屉、下拉、Toast、移动端导航抽屉，在 1440 / 390 宽度与亮 / 暗主题下做了人工视觉核验与脚本化检查（横向滚动、最小字号、强调色分布、焦点环、控件高度），不是真实部署。
+- **待验证**：真实部署环境下的视觉验收尚未执行；mock 后端上的核验不代替它。
+- **待验证**：README 所述的 WCAG 2.1 AA 自动化审计（总览页与评审详情页，#195）针对改版前的色板，尚未对新色板复核。
+
 <a id="v180-验证状态"></a>
 
 ## v1.8.0 验证状态

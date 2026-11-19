@@ -234,7 +234,7 @@ export function AppShell({ me }: { me: Me }) {
                     className={({ isActive }) => classNames(styles.navItem, isActive && styles.navItemActive)}
                     onClick={() => setMenuOpen(false)}
                   >
-                    <Icon name={item.icon} size={17} />
+                    <Icon name={item.icon} size={16} strokeWidth={1.5} />
                     {item.label}
                     {item.runningCount && runningCount ? (
                       <>

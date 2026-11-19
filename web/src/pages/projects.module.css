@@ -2,7 +2,7 @@
 
 .pathCell {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--fs-body-sm);
   font-weight: var(--fw-semibold);
 }
 
@@ -17,6 +17,7 @@
 .expiry {
   font-family: var(--font-mono);
   font-size: var(--fs-label);
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
@@ -50,14 +51,16 @@
 .step b {
   width: 20px;
   height: 20px;
-  border-radius: 50%;
+  border-radius: var(--radius-sm);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   font-size: var(--fs-micro);
+  font-variant-numeric: tabular-nums;
   background: var(--surface-3);
 }
 
+/* The current step is the only accent in the stepper. */
 .stepOn {
   color: var(--text);
   border-color: var(--accent);
@@ -70,14 +73,14 @@
 }
 
 .resultOk {
-  padding: var(--space-md) 14px;
-  border-radius: var(--radius-sm);
+  padding: var(--space-md);
+  border-radius: var(--radius-md);
   background: var(--ok-bg);
   color: var(--ok-fg);
-  font-size: 13px;
+  font-size: var(--fs-body-sm);
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-sm);
 }
 
 .resultOk dl {
@@ -85,8 +88,8 @@
 }
 
 .registrationNotice {
-  padding: 10px 14px;
-  border-radius: var(--radius-sm);
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-md);
   background: var(--warn-bg);
   color: var(--warn-fg);
   font-size: var(--fs-label);
@@ -95,7 +98,7 @@
 /* 项目详情页头 */
 .projectTitle {
   font-family: var(--font-mono);
-  font-size: 20px;
+  font-size: var(--fs-h2);
 }
 
 .overviewCards {
@@ -113,7 +116,7 @@
 }
 
 .statusTiles > div {
-  padding: 14px 18px;
+  padding: var(--space-md) var(--space-lg);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
@@ -134,6 +137,7 @@
 .tileValue {
   font-family: var(--font-mono);
   font-size: var(--fs-body);
+  font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
 }
 
@@ -142,7 +146,7 @@
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-sm) var(--space-md);
-  padding: var(--space-md) 18px;
+  padding: var(--space-md) var(--space-lg);
   border-top: 1px solid var(--border);
 }
 
@@ -156,7 +160,7 @@
 }
 
 .manualOperations {
-  padding: var(--space-md) 18px;
+  padding: var(--space-md) var(--space-lg);
   border-top: 1px solid var(--border);
 }
 
@@ -174,7 +178,7 @@
 .manualChevron {
   flex: none;
   color: var(--muted);
-  transition: transform var(--dur-fast);
+  transition: transform var(--dur-fast) var(--ease);
 }
 
 .manualChevronOpen {
@@ -192,7 +196,7 @@
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: var(--space-xs);
+  gap: var(--space-sm);
 }
 
 .manualHints {
@@ -218,10 +222,11 @@
 .manualStatus::before {
   content: '';
   flex: none;
-  width: var(--space-xs);
-  height: var(--space-xs);
-  margin-top: var(--space-xs);
-  border-radius: 50%;
+  width: 6px;
+  height: 6px;
+  /* Centers the dot on the first line: (1.5 line height - 6px / 12px) / 2 = 0.5em. */
+  margin-top: 0.5em;
+  border-radius: 2px;
   background: var(--info-dot);
 }
 
@@ -229,7 +234,7 @@
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2xs) var(--space-lg);
-  padding: 10px 18px;
+  padding: var(--space-sm) var(--space-lg);
   border-top: 1px solid var(--border);
   font-size: var(--fs-meta);
   color: var(--muted);
@@ -240,7 +245,7 @@
 }
 
 .tileAlert {
-  margin: 0 18px 14px;
+  margin: 0 var(--space-lg) var(--space-md);
 }
 
 /* 上下文文档：左侧版本列表，右侧预览与编辑 */
@@ -268,43 +273,47 @@
 .docItem {
   display: flex;
   flex-direction: column;
-  gap: 3px;
-  padding: 10px var(--space-lg);
+  gap: var(--space-2xs);
+  padding: var(--space-md) var(--space-lg);
   border: 0;
   border-bottom: 1px solid var(--border);
   background: transparent;
   color: inherit;
   text-align: left;
   font: inherit;
-  font-size: 13px;
+  font-size: var(--fs-body-sm);
   cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease);
 }
 
 .docItem:hover {
   background: var(--surface-2);
 }
 
+/* The open version is a raised neutral row; no accent bar marks it. */
 .docItemActive {
-  background: var(--accent-soft);
-  box-shadow: inset 2px 0 0 var(--accent);
+  background: var(--surface-3);
+  box-shadow: var(--raised-shadow);
+  color: var(--text);
+  font-weight: var(--fw-semibold);
 }
 
 .docItemTop {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-xs);
+  gap: var(--space-sm);
   align-items: center;
 }
 
 .docListFooter {
-  padding: 10px var(--space-lg);
+  padding: var(--space-md) var(--space-lg);
 }
 
 .docBody {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 14px var(--space-lg);
+  gap: var(--space-md);
+  padding: var(--space-lg);
   min-width: 0;
 }
 
@@ -385,7 +394,7 @@
 }
 
 .tableFooter {
-  padding: var(--space-md) 18px;
+  padding: var(--space-md) var(--space-lg);
   border-top: 1px solid var(--border);
 }
 

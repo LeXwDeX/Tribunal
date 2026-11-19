@@ -7,27 +7,28 @@
   gap: var(--space-md);
 }
 
+/* The global default is a summary card, not a selection, so it stays neutral. */
 .globalDefault {
   display: flex;
   flex-direction: column;
-  gap: var(--space-xs);
+  gap: var(--space-sm);
   min-width: 0;
   margin-bottom: var(--space-md);
   padding: var(--space-md);
-  background: var(--accent-soft);
-  border: 1px solid var(--accent-ring);
-  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
 }
 
 .node {
   display: flex;
   flex-direction: column;
-  gap: var(--space-xs);
+  gap: var(--space-sm);
   min-width: 0;
   padding: var(--space-md);
   background: var(--surface-2);
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
 }
 
 .nodeHead {
@@ -39,7 +40,7 @@
 
 .nodeName {
   margin: 0;
-  font: 600 var(--fs-body-sm) var(--font-mono);
+  font: var(--fw-semibold) var(--fs-body-sm) var(--font-mono);
 }
 
 .nodeModel {
@@ -71,12 +72,12 @@
   padding: var(--space-md);
   min-width: 0;
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
 }
 
 .globalCard {
-  background: var(--accent-soft);
-  border-color: var(--accent-ring);
+  background: var(--surface-2);
+  border-color: var(--border-strong);
 }
 
 .nodeActions {
@@ -87,8 +88,8 @@
 }
 
 .legend {
-  padding: 0 var(--space-xs);
-  font: 600 var(--fs-label) var(--font-mono);
+  padding: 0 var(--space-2xs);
+  font: var(--fw-semibold) var(--fs-label) var(--font-mono);
 }
 
 .paramGrid {

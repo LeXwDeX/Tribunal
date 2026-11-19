@@ -10,9 +10,9 @@
 
 .compactState {
   margin: 0;
-  padding: var(--space-md) 18px;
+  padding: var(--space-md) var(--space-lg);
   color: var(--muted-strong);
-  font-size: 13px;
+  font-size: var(--fs-body-sm);
 }
 
 .liveList {
@@ -26,8 +26,8 @@
 .liveItem {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 10px var(--space-lg);
-  padding: 14px 18px;
+  gap: var(--space-sm) var(--space-lg);
+  padding: var(--space-md) var(--space-lg);
   border-bottom: 1px solid var(--border);
 }
 
@@ -51,7 +51,8 @@
 }
 
 .liveTitle:hover {
-  color: var(--accent);
+  color: var(--text);
+  text-decoration: underline;
 }
 
 .meta {
@@ -65,12 +66,13 @@
 }
 
 .mrRef {
-  font: 500 12.5px var(--font-mono);
+  font: var(--fw-medium) var(--fs-meta) var(--font-mono);
+  font-variant-numeric: tabular-nums;
   color: var(--muted-strong);
 }
 
 .elapsed {
-  font: 500 13px var(--font-mono);
+  font: var(--fw-medium) var(--fs-body-sm) var(--font-mono);
   font-variant-numeric: tabular-nums;
   color: var(--muted-strong);
   text-align: right;
@@ -90,36 +92,44 @@
 .stage {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: var(--space-2xs);
   font-size: var(--fs-caption);
   color: var(--muted);
 }
 
 .stage i {
+  position: relative;
   display: block;
   height: 4px;
   border-radius: 2px;
   background: var(--surface-3);
+  overflow: hidden;
 }
 
 .stageDone i {
   background: var(--ok-dot);
 }
 
+/* The current stage is live state, so it takes the accent rather than the neutral info tone. */
 .stageNow {
-  color: var(--info-fg);
+  color: var(--accent);
   font-weight: var(--fw-medium);
 }
 
-.stageNow i {
-  background: linear-gradient(90deg, var(--info-dot) 55%, var(--surface-3) 55%);
+/* The current stage is half filled; a pseudo-element draws it without a gradient. */
+.stageNow i::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 55%;
+  background: var(--accent);
 }
 
 .alert {
   display: flex;
   align-items: flex-start;
   gap: var(--space-md);
-  padding: 13px 18px;
+  padding: var(--space-md) var(--space-lg);
   border-bottom: 1px solid var(--border);
 }
 
@@ -133,7 +143,7 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-2xs);
-  font-size: 13px;
+  font-size: var(--fs-body-sm);
   overflow-wrap: anywhere;
 }
 
@@ -148,12 +158,12 @@
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: var(--space-sm);
-  padding: var(--space-md) 18px;
+  padding: var(--space-md) var(--space-lg);
   border-top: 1px solid var(--border);
 }
 
 .state {
-  padding: var(--space-lg) 18px;
+  padding: var(--space-lg);
 }
 
 @media (max-width: 900px) {

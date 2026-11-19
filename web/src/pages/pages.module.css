@@ -48,13 +48,14 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 10px 14px;
-  padding: 11px var(--space-md);
+  gap: var(--space-sm) var(--space-lg);
+  padding: var(--space-md);
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   color: var(--text);
   text-decoration: none;
   min-width: 0;
+  transition: background-color var(--dur-fast) var(--ease);
 }
 
 .listItem:hover {
@@ -78,11 +79,17 @@
   overflow-wrap: anywhere;
 }
 
+/* A link in the meta line takes the body link color so it does not read as plain
+   muted text; the underline on hover comes from the global a:hover rule. */
+a.listMeta {
+  color: var(--link);
+}
+
 .alert {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
-  padding: 10px 0;
+  gap: var(--space-sm);
+  padding: var(--space-sm) 0;
   border-top: 1px solid var(--border);
 }
 
@@ -96,11 +103,11 @@
   flex-direction: column;
   gap: 2px;
   min-width: 0;
-  font-size: 13px;
+  font-size: var(--fs-body-sm);
 }
 
 .alertAction {
-  font-size: 13px;
+  font-size: var(--fs-body-sm);
   display: inline-flex;
   min-height: var(--control-h);
   align-items: center;
@@ -110,7 +117,7 @@
 .filterChipsColumn {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-xs);
+  gap: var(--space-sm);
   flex-direction: column;
   align-items: flex-start;
 }
@@ -128,26 +135,27 @@
   min-height: var(--control-h);
   padding: 0 var(--space-md);
   border: 1px solid var(--control-border);
-  border-radius: 999px;
+  border-radius: var(--radius-md);
   background: var(--surface);
   color: var(--text);
   font-family: inherit;
-  font-size: 13px;
+  font-size: var(--fs-body-sm);
+  transition: background-color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
 }
 
 .chip:hover {
   background: var(--surface-2);
 }
 
+/* The chosen chip is the current selection, so it keeps the accent. */
 .chipActive {
-  background: var(--accent);
+  background: var(--accent-soft);
   border-color: var(--accent);
-  color: var(--on-accent);
+  color: var(--text);
 }
 
 .chipActive:hover {
-  background: var(--accent-hover);
-  color: var(--on-accent);
+  background: var(--accent-soft);
 }
 
 .inlineFilters {
@@ -200,21 +208,21 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-sm);
 }
 
 .reviewTitle {
   font-size: var(--fs-h1);
-  font-weight: 700;
+  font-weight: var(--fw-semibold);
   overflow-wrap: anywhere;
 }
 
 .reviewMeta {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-xs) 18px;
+  gap: var(--space-sm) var(--space-lg);
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--fs-body-sm);
   min-width: 0;
 }
 
@@ -243,10 +251,10 @@
   gap: var(--space-2xs);
   width: 192px;
   min-height: 96px;
-  padding: 9px 10px;
+  padding: var(--space-sm) var(--space-md);
   box-sizing: border-box;
   border: 1px solid var(--control-border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: var(--surface);
   color: var(--text);
   text-align: left;
@@ -257,9 +265,10 @@
 }
 
 .nodeCard:hover {
-  background: var(--accent-soft);
+  background: var(--surface-2);
 }
 
+/* The selected node is the current selection, so it keeps the accent. */
 .nodeCardSelected {
   border: 2px solid var(--accent);
   background: var(--accent-soft);
@@ -292,7 +301,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-xs);
+  gap: var(--space-sm);
   width: 100%;
   margin-top: auto;
 }
@@ -301,6 +310,7 @@
   color: var(--muted);
   font-size: var(--fs-micro);
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
 .findingsTable {
@@ -312,7 +322,7 @@
 .findingBody {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-sm);
 }
 
 .findingBody h4 {
@@ -326,7 +336,7 @@
 .findingBody p {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  font-size: 13px;
+  font-size: var(--fs-body-sm);
   line-height: var(--lh-relaxed);
 }
 
@@ -334,8 +344,8 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-xs) 10px;
-  margin-bottom: 10px;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-sm);
   min-width: 0;
   overflow-wrap: anywhere;
 }
@@ -357,12 +367,13 @@
 
 .expandButton {
   min-height: var(--control-h);
-  padding: 0 10px;
+  padding: 0 var(--space-md);
   border: 1px solid transparent;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--link);
   font-size: var(--fs-meta);
+  transition: background-color var(--dur-fast) var(--ease);
 }
 
 .expandButton:hover { background: var(--surface-2); }
@@ -378,7 +389,7 @@
 
 .callDetails {
   border-top: 1px solid var(--border);
-  padding-top: var(--space-xs);
+  padding-top: var(--space-sm);
 }
 
 .callDetails summary {
@@ -401,8 +412,8 @@
   min-width: 0;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  padding: 14px var(--space-lg);
+  border-radius: var(--radius-lg);
+  padding: var(--space-lg);
   display: flex;
   flex-direction: column;
   gap: var(--space-2xs);
@@ -416,7 +427,7 @@
 .docMeta {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-2xs) 14px;
+  gap: var(--space-2xs) var(--space-lg);
   color: var(--muted);
   font-size: var(--fs-meta);
 }
@@ -431,12 +442,13 @@
   width: 100%;
   padding: var(--space-sm);
   border: 1px solid transparent;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--text);
   text-align: left;
   font-size: var(--fs-meta);
   cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease);
 }
 
 .historyItem:hover { background: var(--surface-2); }
@@ -445,7 +457,7 @@
 .projectTitleMono {
   font-family: var(--font-mono);
   font-size: var(--fs-h1);
-  font-weight: 700;
+  font-weight: var(--fw-semibold);
   overflow-wrap: anywhere;
 }
 
@@ -460,11 +472,11 @@
   min-width: 0;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  padding: var(--space-lg) 18px;
+  border-radius: var(--radius-lg);
+  padding: var(--space-lg);
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-md);
   min-height: 0;
 }
 
@@ -481,7 +493,7 @@
 .cardMeta {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-2xs) 14px;
+  gap: var(--space-2xs) var(--space-lg);
   color: var(--muted);
   font-size: var(--fs-meta);
 }
@@ -510,7 +522,7 @@
   display: flex;
   flex-wrap: wrap;
   align-items: flex-end;
-  gap: 10px;
+  gap: var(--space-md);
 }
 
 .scopeBar .field {
@@ -520,7 +532,7 @@
 .field {
   display: flex;
   flex-direction: column;
-  gap: var(--space-xs);
+  gap: var(--space-sm);
   min-width: 0;
 }
 
@@ -533,12 +545,12 @@
   width: 100%;
   min-width: 760px;
   border-collapse: collapse;
-  font-size: 13px;
+  font-size: var(--fs-body-sm);
 }
 
 .matrix th,
 .matrix td {
-  padding: 7px;
+  padding: var(--space-sm);
   border-bottom: 1px solid var(--border);
   text-align: center;
 }
@@ -576,18 +588,20 @@
   width: var(--control-h);
   height: var(--control-h);
   border: 1px solid var(--control-border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: var(--surface);
   color: var(--text);
   font-family: inherit;
   font-size: var(--fs-h4);
-  font-weight: 700;
+  font-weight: var(--fw-semibold);
+  transition: background-color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
 }
 
+/* A bound cell is the current selection, so it keeps the accent (soft tint). */
 .matrixCellOn {
-  background: var(--accent);
+  background: var(--accent-soft);
   border-color: var(--accent);
-  color: var(--on-accent);
+  color: var(--accent);
 }
 
 .matrixCell:disabled {
@@ -613,16 +627,16 @@
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 3px;
-  padding: 9px 11px;
+  gap: var(--space-2xs);
+  padding: var(--space-sm) var(--space-md);
   background: var(--surface-2);
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   font-size: var(--fs-meta);
 }
 
-.profileStepN { color: var(--muted); font-size: var(--fs-micro); }
-.profileStepWhat { font-weight: var(--fw-medium); font-size: 13px; overflow-wrap: anywhere; }
+.profileStepN { color: var(--muted); font-size: var(--fs-micro); font-variant-numeric: tabular-nums; }
+.profileStepWhat { font-weight: var(--fw-medium); font-size: var(--fs-body-sm); overflow-wrap: anywhere; }
 .profileStepWho { color: var(--link); font-family: var(--font-mono); overflow-wrap: anywhere; }
 
 .budgetRow {
@@ -631,6 +645,7 @@
   gap: var(--space-2xs) var(--space-lg);
   font-size: var(--fs-meta);
   color: var(--muted-strong);
+  font-variant-numeric: tabular-nums;
 }
 
 
@@ -647,19 +662,19 @@
 }
 
 .notice {
-  padding: 10px var(--space-md);
+  padding: var(--space-sm) var(--space-md);
   background: var(--info-bg);
   color: var(--info-fg);
-  border-radius: var(--radius-sm);
-  font-size: 13px;
+  border-radius: var(--radius-md);
+  font-size: var(--fs-body-sm);
 }
 
 .warning {
-  padding: 10px var(--space-md);
+  padding: var(--space-sm) var(--space-md);
   background: var(--warn-bg);
   color: var(--warn-fg);
-  border-radius: var(--radius-sm);
-  font-size: 13px;
+  border-radius: var(--radius-md);
+  font-size: var(--fs-body-sm);
   line-height: 1.6;
 }
 
@@ -678,8 +693,8 @@
 }
 
 @media (max-width: 720px) {
-  .reviewTitle { font-size: 19px; }
-  .projectTitleMono { font-size: 18px; }
+  .reviewTitle { font-size: var(--fs-h2); }
+  .projectTitleMono { font-size: var(--fs-h2); }
   .inlineFilters > * { flex: 1 1 100%; }
   .publicationCard { flex-basis: 100%; }
   .infoCard { flex-basis: 100%; }
@@ -688,10 +703,10 @@
 
 .docPreview {
   margin: 0;
-  padding: 14px;
+  padding: var(--space-md);
   background: var(--preview-bg);
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   color: var(--text);
   max-height: 480px;
   overflow: auto;

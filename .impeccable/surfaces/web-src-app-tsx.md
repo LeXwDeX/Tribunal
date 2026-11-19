@@ -17,9 +17,11 @@ or visual choice is claimed. The brief already pins structure and visual identit
 THESIS: A review is traceable from proposal through challenge to disposition. Keep
 the existing working console, not a marketing dashboard or a new visual world.
 
-OWN-WORLD: Preserve the prototype's charcoal navigation, blue actions, cool light
-canvas, white panels, restrained borders, Chinese sans labels, and monospace code.
-Status uses both text and color. Provide a corresponding dark theme.
+OWN-WORLD: Follow the #601 "control room" direction: neutral graphite surfaces
+(dark first, with a matching light theme whose sidebar is also light), one cyan
+accent reserved for live status, current selection, focus and the current stage,
+off-white primary actions on dark, hairline borders, Chinese sans labels, and
+monospace for IDs, durations and figures. Status uses both text and color.
 
 STORY: Find a run, inspect the execution graph, read the evidence and challenge,
 then act on a failure or publication. Administrators can register projects and

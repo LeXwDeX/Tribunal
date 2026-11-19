@@ -2,12 +2,12 @@
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2xs) var(--space-md);
-  padding: var(--space-sm) 18px;
+  padding: var(--space-sm) var(--space-lg);
   border-bottom: 1px solid var(--border);
 }
 
 .state {
-  padding: var(--space-lg) 18px;
+  padding: var(--space-lg);
 }
 
 /* Six statuses do not fit a phone row; scroll them instead of wrapping labels. */

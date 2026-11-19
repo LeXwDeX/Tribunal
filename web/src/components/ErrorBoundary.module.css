@@ -2,13 +2,13 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-lg);
-  padding: var(--space-2xl) 18px;
+  padding: var(--space-2xl) var(--space-xl);
 }
 
 .message {
   margin: 0;
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--fs-body-sm);
 }
 
 .actions {

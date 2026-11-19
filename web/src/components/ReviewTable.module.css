@@ -26,7 +26,8 @@
 }
 
 .titleLink:hover {
-  color: var(--accent);
+  color: var(--text);
+  text-decoration: underline;
 }
 
 .meta {
@@ -39,7 +40,8 @@
 }
 
 .mrRef {
-  font: 500 12.5px var(--font-mono);
+  font: var(--fw-medium) var(--fs-meta) var(--font-mono);
+  font-variant-numeric: tabular-nums;
   color: var(--muted-strong);
 }
 
