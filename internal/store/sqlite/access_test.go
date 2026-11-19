@@ -754,3 +754,30 @@ func TestHasProjectGrant(t *testing.T) {
 		t.Fatalf("grant after = %v, %v", granted, err)
 	}
 }
+
+// ProjectGrantRole returns the direct grant role so audit lines can record the
+// grant being revoked, not the effective access (which includes global read).
+func TestProjectGrantRole(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t, newFakeClock())
+	mustAccessUser(t, s, 8, "bob", "viewer")
+	mustProject(t, s, 42)
+	if _, err := s.ProjectGrantRole(ctx, 42, 8); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("missing grant = %v", err)
+	}
+	for _, role := range []string{store.ProjectAccessRead, store.ProjectAccessManage} {
+		if err := s.SetProjectGrant(ctx, 42, 8, role); err != nil {
+			t.Fatalf("SetProjectGrant(%s): %v", role, err)
+		}
+		got, err := s.ProjectGrantRole(ctx, 42, 8)
+		if err != nil || got != role {
+			t.Fatalf("ProjectGrantRole = %q, %v; want %q", got, err, role)
+		}
+	}
+	if _, err := s.ProjectGrantRole(ctx, 0, 8); err == nil {
+		t.Fatal("ProjectGrantRole accepted project id 0")
+	}
+	if _, err := s.ProjectGrantRole(ctx, 42, 0); err == nil {
+		t.Fatal("ProjectGrantRole accepted user id 0")
+	}
+}

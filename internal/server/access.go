@@ -19,6 +19,9 @@ type AccessStore interface {
 	RevokeUserCredentials(ctx context.Context, userID int64) error
 	ListProjectGrants(ctx context.Context, projectID int64, cursor string, limit int) ([]store.ProjectGrant, string, error)
 	SetProjectGrant(ctx context.Context, projectID, userID int64, role string) error
+	// ProjectGrantRole reports one direct grant's role; a missing grant is
+	// store.ErrNotFound. Audit lines use it before a revoke.
+	ProjectGrantRole(ctx context.Context, projectID, userID int64) (string, error)
 	DeleteProjectGrant(ctx context.Context, projectID, userID int64) error
 	HasProjectGrant(ctx context.Context, userID, projectID int64) (bool, error)
 }

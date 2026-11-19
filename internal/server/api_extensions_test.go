@@ -276,7 +276,10 @@ func (paginationAccess) ListProjectGrants(context.Context, int64, string, int) (
 	return nil, "", nil
 }
 func (paginationAccess) SetProjectGrant(context.Context, int64, int64, string) error { return nil }
-func (paginationAccess) DeleteProjectGrant(context.Context, int64, int64) error      { return nil }
+func (paginationAccess) ProjectGrantRole(context.Context, int64, int64) (string, error) {
+	return "", store.ErrNotFound
+}
+func (paginationAccess) DeleteProjectGrant(context.Context, int64, int64) error { return nil }
 func (paginationAccess) HasProjectGrant(context.Context, int64, int64) (bool, error) {
 	return false, nil
 }

@@ -175,6 +175,13 @@ func TestAdminResidueCleanupAudited(t *testing.T) {
 	if strings.Contains(text, "/data/workspaces") || strings.Contains(text, "disk full") {
 		t.Fatalf("audit log leaked a residue path or error text:\n%s", text)
 	}
+	// Cleanup spans every unregistered project, including paths whose owner is
+	// unknown, so the line deliberately carries no target_id, project_id or role.
+	for _, field := range []string{`"target_id":`, `"project_id":`, `"role":`} {
+		if strings.Contains(text, field) {
+			t.Fatalf("cleanup audit must not claim %s:\n%s", field, text)
+		}
+	}
 }
 
 func TestAdminResiduesMapsSanitizedErrors(t *testing.T) {
