@@ -27,7 +27,7 @@ Tribunal 只有一个评审档位 `default`，评审图固定（见 §3.1）。`
 - `plan` 不调用 LLM，依赖 `explore`（`explore` 是可选节点，失败不会级联，`plan` 照常运行）：按文件把变更切成若干包，每包估算 token 不超过 `plan.package_tokens`（默认 60k），同目录文件尽量放一起，包数不超过 `plan.max_packages`（默认 6）。
 - `gather`、`adjudicate`、`synthesize` 是代码节点，评审报告由代码渲染，不调用模型。
 - 四路评审节点（`code-review`、`review`、`reasoner`、`validate`）和 `explore` 都是可选节点；失败语义见 §5.4。
-- 所有 agent 节点使用同一个 agent 循环，因此最后一轮强制提交（[#255](https://github.com/LeXwDeX/Tribunal/issues/255)）和提交提示轮的不合法工具调用恢复（[#269](https://github.com/LeXwDeX/Tribunal/issues/269)）对新节点同样生效。循环默认不限制模型请求数（`budget.max_turns = 0`），只有显式正数上限到达时才进入“最后一轮”；`onboarding` 与评审节点使用同一套 `budget.max_turns` 配置（各自档位的 budget）。
+- 所有 agent 节点使用同一个 agent 循环，因此最后一轮强制提交（[#255](https://github.com/LeXwDeX/Tribunal/issues/255)）和不合法工具调用的恢复（提交提示轮 [#269](https://github.com/LeXwDeX/Tribunal/issues/269)，普通轮 [#605](https://github.com/LeXwDeX/Tribunal/issues/605)；两类各有独立的每次运行两次上限，最后一轮不恢复，规则见 [01-modules.md](01-modules.md) §5 循环规则 8）对新节点同样生效。循环默认不限制模型请求数（`budget.max_turns = 0`），只有显式正数上限到达时才进入“最后一轮”；`onboarding` 与评审节点使用同一套 `budget.max_turns` 配置（各自档位的 budget）。
 - 引擎仍能解码历史工作流里记录的旧节点种类（`review.standards`、`review.intent`、`review.gate`、agent 规划与 agent 汇总等），用于查看既有评审；新评审不再生成它们。
 
 ---

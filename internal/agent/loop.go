@@ -59,6 +59,15 @@ func invalidToolCallFeedback(kind string) string {
 		" tool once more, with its arguments as one complete, valid JSON object. Do not call any other tool. " + strictJSONHint
 }
 
+// invalidToolCallResendFeedback answers a rejected ordinary turn (#605). The
+// run is still exploring, so the model is asked to resend its call and stays
+// free to use any tool. It names only the fixed rejection category, never
+// provider text.
+func invalidToolCallResendFeedback(kind string) string {
+	return "Your previous tool call was rejected and not executed (" + kind + "). Resend the call you intended, " +
+		"with its arguments as one complete, valid JSON object. " + strictJSONHint
+}
+
 // recoverableToolCall reports whether a rejection category is a corrupted
 // call the model can resend. Unsupported items and malformed lists are
 // protocol violations and still fail closed.
@@ -198,6 +207,7 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 	submitOnlyRejections := 0
 	askedForSubmit := false
 	invalidRecoveries := 0
+	ordinaryInvalidRecoveries := 0
 	graceUsed := 0
 	// nextNudgeTurn and nextNudgeTokens schedule convergence prompts for a run
 	// without a request-count limit. Both are advanced together so the two
@@ -460,18 +470,33 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 		if resp.StopReason != llm.StopToolUse && resp.StopReason != llm.StopEndTurn {
 			return partial(ErrUnsafeResponse)
 		}
-		// A reasoning gateway can corrupt the large arguments of a prompted
-		// submit (#269). Nothing ran, so up to maxInvalidRecoveries times per
-		// run, with a turn left, the cleared calls are dropped and the model
-		// is told the fixed category.
+		// A reasoning gateway can corrupt the large arguments of a tool call,
+		// of a prompted submit (#269) as well as of an ordinary exploration
+		// turn (#605). Nothing ran, so, with a turn left, the cleared calls
+		// are dropped and the model is told the fixed category: up to
+		// maxInvalidRecoveries times per run for prompted turns, which are
+		// asked to submit again and stay prompted, and up to
+		// maxOrdinaryInvalidRecoveries times for ordinary turns, which are
+		// asked to resend their call while the run goes on exploring. The two
+		// budgets are separate, so exploration never uses up the submit turn's.
 		kind, _ := llm.ToolCallIssue(message)
-		if invalid && recoverableBatch(message) && resp.StopReason == llm.StopToolUse && reason != "" && !lastTurn && invalidRecoveries < maxInvalidRecoveries {
-			invalidRecoveries++
-			resubmitReason = reason
+		recoveriesLeft := invalidRecoveries < maxInvalidRecoveries
+		if reason == "" {
+			recoveriesLeft = ordinaryInvalidRecoveries < maxOrdinaryInvalidRecoveries
+		}
+		if invalid && recoverableBatch(message) && resp.StopReason == llm.StopToolUse && !lastTurn && recoveriesLeft {
+			feedbackText := invalidToolCallResendFeedback(kind)
+			if reason != "" {
+				invalidRecoveries++
+				resubmitReason = reason
+				feedbackText = invalidToolCallFeedback(kind)
+			} else {
+				ordinaryInvalidRecoveries++
+			}
 			messages = messages[:len(messages)-1]
 			feedback := llm.Message{
 				Role:  llm.RoleUser,
-				Parts: []llm.Part{{Type: llm.PartText, Text: invalidToolCallFeedback(kind)}},
+				Parts: []llm.Part{{Type: llm.PartText, Text: feedbackText}},
 			}
 			// The rejected calls and reasoning are not replayed; size the
 			// context from the request plus what is replayed.

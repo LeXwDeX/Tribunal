@@ -772,7 +772,10 @@ func (c *providerClient) record(ctx context.Context, attempt int, req *Request, 
 		}
 	}
 	// Only agent calls set Turn. This mirrors the agent's batch/stop checks
-	// without changing the response or provider retry policy.
+	// without changing the response or provider retry policy. It only
+	// classifies the audited call: the agent loop still receives the response
+	// and may recover from a corrupted call (#269, #605), so the row is not
+	// the node's outcome.
 	if err == nil && resp != nil && CallMetaFromContext(ctx).Turn > 0 {
 		_, invalid := SanitizeToolCalls(resp.Message, resp.StopReason == StopToolUse)
 		calls := 0

@@ -118,16 +118,6 @@ func TestRunFailsClosedOnceRecoveriesAreSpent(t *testing.T) {
 	}
 }
 
-func TestRunFailsClosedOnInvalidCallWithoutSubmitPrompt(t *testing.T) {
-	client := &fakeClient{replies: []*llm.Response{
-		toolResponse(llm.StopToolUse, call("bad", "echo", corruptSubmitInput)),
-	}}
-	_, err := Run(context.Background(), testSpec(client, echoTool{name: "echo"}))
-	if !errors.Is(err, ErrUnsafeResponse) {
-		t.Fatalf("err = %v, want unsafe on an ordinary turn", err)
-	}
-}
-
 func TestRunFailsClosedOnInvalidCallOnLastTurn(t *testing.T) {
 	client := &promptedInvalidClient{prompted: []*llm.Response{
 		toolResponse(llm.StopToolUse, call("bad", SubmitToolName, corruptSubmitInput)),

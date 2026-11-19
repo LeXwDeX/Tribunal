@@ -442,14 +442,26 @@ func TestRunCallMetaKeepsWorkflowAndSetsTurn(t *testing.T) {
 }
 
 func TestRunRejectsDuplicateCallIDs(t *testing.T) {
-	client := &fakeClient{replies: []*llm.Response{
-		toolResponse(llm.StopToolUse,
+	// A duplicate id is a corrupted batch the model may resend (#605); only a
+	// provider that keeps sending one exhausts the recoveries and fails the run.
+	var replies []*llm.Response
+	for i := 0; i <= maxOrdinaryInvalidRecoveries; i++ {
+		replies = append(replies, toolResponse(llm.StopToolUse,
 			call("same", "echo", `{}`),
-			call("same", SubmitToolName, `{}`)),
+			call("same", SubmitToolName, `{}`)))
+	}
+	client := &fakeClient{replies: replies}
+	executed := 0
+	tool := echoTool{name: "echo", fn: func(context.Context, json.RawMessage) (Result, error) {
+		executed++
+		return Result{Content: "ok"}, nil
 	}}
-	_, err := Run(context.Background(), testSpec(client, echoTool{name: "echo"}))
+	_, err := Run(context.Background(), testSpec(client, tool))
 	if !errors.Is(err, ErrUnsafeResponse) || strings.Contains(err.Error(), "same") {
 		t.Fatalf("error = %v", err)
+	}
+	if executed != 0 || len(client.requests()) != maxOrdinaryInvalidRecoveries+1 {
+		t.Fatalf("executed=%d requests=%d, want a rejected batch that never runs and %d requests", executed, len(client.requests()), maxOrdinaryInvalidRecoveries+1)
 	}
 }
 
