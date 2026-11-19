@@ -431,7 +431,7 @@ provider 和 profile 的基线以配置文件为准；改动配置需重启服�
 | 状态码 | `code` | 条件 |
 |---|---|---|
 | 400 | `invalid_change` | 未知、敏感或被忽略的路径，对非叶子路径设置，类型错误，新值 / map 键 / 路径段含 `${...}` 占位符，重复或父子路径冲突，或 `changes` 为空 |
-| 400 | `invalid_config` | 候选合并配置 Load 或 Validate 失败（在展开后的副本上），或 `review_defaults` 补充校验失败（`max_files` / `max_diff_lines` 必须为正、`language` 非空、`target_branches` 合法 glob、`custom_rules` / `ignore` / labels 不含空项、`profile_by_label` 只能指向 `default`）；原文件不变 |
+| 400 | `invalid_config` | 候选合并配置 Load 或 Validate 失败（在展开后的副本上），或 `review_defaults` 补充校验失败（`max_files` / `max_diff_lines` 必须为正、`max_files` 必须在 1–200、`language` 非空、`target_branches` 合法 glob、`custom_rules` / `ignore` / labels 不含空项、`profile_by_label` 只能指向 `default`；补充校验只针对本次请求写入的字段：直接写入的超限 `max_files` 返回 400 `invalid_config`，从基础配置继承的超限值只在加载时归一为 200 并告警，不阻塞其他字段保存）；原文件不变 |
 | 409 | `stale_config` | `base_revision` 或 `overlay_revision` 与磁盘不一致 |
 | 409 | `overlay_not_configured` | 未配置 overlay（例如 `--overlay ""`） |
 | 409 | `config_read_only` | 只读目录、只读挂载、`EROFS` / `EBUSY` 或权限错误 |
