@@ -21,6 +21,7 @@ import { ConfigSourcesPanel } from './ConfigSourcesPanel'
 import ui from '../styles/ui.module.css'
 import styles from './pages.module.css'
 import insights from './insights.module.css'
+import drawer from './userDrawer.module.css'
 
 // WebhookDeliveriesPanel is the read-only "why was this MR not reviewed" view.
 // It shows only the fixed reasons and counts the API returns; the upstream
@@ -389,6 +390,8 @@ function TokenRenewDialog({ token, open, onClose }: {
   )
 }
 
+const ROLE_SOURCE_LABELS: Record<string, string> = { config: '配置文件', granted: '控制台授权', none: '默认' }
+
 function UserDrawer({ user, open, currentUserId, onClose }: {
   user: AdminUser | null
   open: boolean
@@ -397,18 +400,29 @@ function UserDrawer({ user, open, currentUserId, onClose }: {
 }) {
   const toast = useToast()
   const queryClient = useQueryClient()
+  const headingId = useId()
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<unknown>(null)
+  const [addError, setAddError] = useState<unknown>(null)
   const [projectID, setProjectID] = useState('')
   const [grantRole, setGrantRole] = useState<ProjectAccess>('manage')
   const [confirm, setConfirm] = useState<{ role?: 'admin' | 'viewer'; global?: boolean } | null>(null)
-  const [removeTarget, setRemoveTarget] = useState<{ projectId: number; role: string } | null>(null)
+  const [removeTarget, setRemoveTarget] = useState<{ projectId: number; role: string; label: string } | null>(null)
   const grants = usePaginated<ProjectGrant>(
     ['admin-user-grants', user?.id],
     (cursor) => listAdminUserGrants(user!.id, cursor),
     'grants',
     { enabled: open && Boolean(user) },
   )
+  // Grant rows carry only the project ID. Names come from the admin project
+  // list (shared cache with the 项目授权 tab); unmatched IDs fall back to #ID.
+  const projects = usePaginated<AdminProject>(
+    ['admin-projects'],
+    (cursor) => listAdminProjects(cursor),
+    'projects',
+    { enabled: open && Boolean(user) },
+  )
+  const projectNames = new Map(projects.items.map((project) => [project.id, project.path_with_namespace]))
 
   const saved = async () => {
     await queryClient.invalidateQueries({ queryKey: ['admin-users'] })
@@ -436,13 +450,14 @@ function UserDrawer({ user, open, currentUserId, onClose }: {
   const addGrant = async () => {
     if (!user || !projectID.trim()) return
     setPending(true)
-    setError(null)
+    setAddError(null)
     try {
       await setAdminUserGrant(user.id, projectID.trim(), grantRole)
       setProjectID('')
+      toast.push('success', '项目授权已添加。')
       await saved()
     } catch (err) {
-      setError(err)
+      setAddError(err)
     } finally {
       setPending(false)
     }
@@ -455,6 +470,7 @@ function UserDrawer({ user, open, currentUserId, onClose }: {
     try {
       await deleteAdminUserGrant(user.id, projectId)
       setRemoveTarget(null)
+      toast.push('success', '项目授权已删除。')
       await saved()
     } catch (err) {
       setError(err)
@@ -467,34 +483,69 @@ function UserDrawer({ user, open, currentUserId, onClose }: {
   const configured = user.role_source === 'config'
   const self = String(user.id) === String(currentUserId)
   const admin = user.role === 'admin'
+  const roleLock = configured
+    ? '由配置文件提供，修改需改配置并重启。'
+    : self && admin ? '当前登录账号，不能降级自己。' : null
+  const roleId = `${headingId}-role`
+  const globalId = `${headingId}-global`
+  const grantsId = `${headingId}-grants`
+  const projectLabel = (projectId: number) => projectNames.get(projectId) ?? `项目 #${projectId}`
   return (
     <Drawer open={open} onClose={onClose} title={userLabel(user)} description="角色与全局模式变更在下次请求生效；全局模式只读。">
-      <div className={styles.stack}>
-        <section>
-          <h3>角色</h3>
-          <p className="small muted">来源：{{ config: '配置', granted: '授权', none: '无' }[user.role_source ?? 'none'] ?? '无'}</p>
-          <Button
-            variant={admin ? 'danger' : 'primary'}
-            disabled={configured || (self && admin) || pending}
-            onClick={() => setConfirm({ role: admin ? 'viewer' : 'admin' })}
+      <div className={drawer.sections}>
+        <section className={drawer.section} aria-labelledby={roleId}>
+          <div className={drawer.sectionHead}>
+            <h3 className={drawer.sectionTitle} id={roleId}>平台角色</h3>
+            <div className={drawer.badges}>
+              <Badge tone={admin ? 'info' : 'neutral'}>{admin ? '管理员' : '普通用户'}</Badge>
+              <Badge tone="neutral" plain>来源：{ROLE_SOURCE_LABELS[user.role_source ?? 'none'] ?? '默认'}</Badge>
+            </div>
+          </div>
+          {roleLock ? <p className={drawer.note}>{roleLock}</p> : (
+            <>
+              <p className={drawer.note}>
+                {admin ? '管理员可管理全部项目、用户与平台配置。' : '提升后该用户可管理全部项目、用户与平台配置。'}
+              </p>
+              <div className={drawer.actions}>
+                <Button variant="secondary" disabled={pending} onClick={() => { setError(null); setConfirm({ role: admin ? 'viewer' : 'admin' }) }}>
+                  {admin ? '降级为普通用户' : '提升为管理员'}
+                </Button>
+              </div>
+            </>
+          )}
+        </section>
+
+        <section className={drawer.section} aria-labelledby={globalId}>
+          <div className={drawer.sectionHead}>
+            <h3 className={drawer.sectionTitle} id={globalId}>全局模式</h3>
+            <Badge tone={user.global_read ? 'ok' : 'neutral'}>{user.global_read ? '已开启' : '未开启'}</Badge>
+          </div>
+          <p className={drawer.note}>开启后该用户可查看全部项目和全部评审（只读）。</p>
+          <div className={drawer.actions}>
+            <Button variant="secondary" disabled={pending} onClick={() => { setError(null); setConfirm({ global: !user.global_read }) }}>
+              {user.global_read ? '关闭全局模式' : '开启全局模式'}
+            </Button>
+          </div>
+        </section>
+
+        <section className={drawer.section} aria-labelledby={grantsId}>
+          <div className={drawer.sectionHead}>
+            <h3 className={drawer.sectionTitle} id={grantsId}>项目授权</h3>
+            {grants.isSuccess ? <span className={drawer.sectionMeta}>{grants.items.length}{grants.hasNextPage ? '+' : ''} 项</span> : null}
+          </div>
+          <form
+            className={drawer.grantForm}
+            onSubmit={(event) => { event.preventDefault(); void addGrant() }}
           >
-            {admin ? '降级为普通用户' : '提升为管理员'}
-          </Button>
-          {configured ? <ActionHint>由配置文件提供，修改需改配置并重启。</ActionHint> : null}
-          {self && admin ? <ActionHint>不能对自己降级。</ActionHint> : null}
-        </section>
-        <section>
-          <h3>全局模式</h3>
-          <Button variant="secondary" disabled={pending} onClick={() => setConfirm({ global: !user.global_read })}>
-            {user.global_read ? '关闭全局模式' : '开启全局模式'}
-          </Button>
-          <ActionHint>该用户将能查看全部项目和全部评审（只读）。</ActionHint>
-        </section>
-        <section>
-          <h3>项目授权</h3>
-          <div className={styles.inlineForm}>
             <Field label="项目 ID" htmlFor={`grant-project-${user.id}`}>
-              <input id={`grant-project-${user.id}`} className={ui.input} value={projectID} onChange={(event) => setProjectID(event.target.value)} />
+              <input
+                id={`grant-project-${user.id}`}
+                className={ui.input}
+                inputMode="numeric"
+                autoComplete="off"
+                value={projectID}
+                onChange={(event) => setProjectID(event.target.value)}
+              />
             </Field>
             <Field label="角色" htmlFor={`grant-role-${user.id}`}>
               <Select
@@ -504,28 +555,63 @@ function UserDrawer({ user, open, currentUserId, onClose }: {
                 onChange={(value) => setGrantRole(value as ProjectAccess)}
               />
             </Field>
-            <Button variant="secondary" onClick={() => { void addGrant() }} loading={pending}>添加授权</Button>
-          </div>
+            <Button type="submit" variant="primary" disabled={!projectID.trim()} loading={pending}>添加授权</Button>
+          </form>
+          {addError ? <ErrorState error={addError} title="添加授权失败" /> : null}
           {grants.isPending ? <LoadingState label="正在读取授权…" /> : null}
-          {grants.isError ? <ErrorState error={grants.error} onRetry={grants.retry} /> : null}
-          {grants.isSuccess && grants.items.length === 0 ? <p className="small muted">没有项目授权。</p> : null}
-          <ul>
-            {grants.items.map((grant) => (
-              <li key={grant.project_id}>
-                {grant.project_id} · {grant.role}
-                <Button
-                  variant="danger"
-                  className={ui.smallButton}
-                  disabled={pending}
-                  onClick={() => { setError(null); setRemoveTarget({ projectId: grant.project_id, role: grant.role }) }}
-                >
-                  删除
-                </Button>
-              </li>
-            ))}
-          </ul>
+          {grants.isError ? <ErrorState error={grants.error} onRetry={grants.retry} title="授权列表加载失败" /> : null}
+          {grants.isSuccess && grants.items.length === 0 ? (
+            <EmptyState title="没有项目授权" description="输入项目 ID 并选择角色即可添加 read 或 manage 授权。" />
+          ) : null}
+          {grants.items.length ? (
+            <div className="tableWrap">
+              <table className={`dataTable ${drawer.grantTable}`} aria-label="项目授权列表">
+                <thead>
+                  <tr>
+                    <th scope="col" className={drawer.projectCol}>项目</th>
+                    <th scope="col" className={drawer.roleCol}>角色</th>
+                    <th scope="col" className={drawer.actionsCol}>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {grants.items.map((grant) => {
+                    const name = projectNames.get(grant.project_id)
+                    const label = projectLabel(grant.project_id)
+                    return (
+                      <tr key={grant.project_id}>
+                        <td>
+                          {name ? (
+                            <>
+                              <span className={drawer.projectName}>{name}</span>
+                              <span className={drawer.projectId}>#{grant.project_id}</span>
+                            </>
+                          ) : <span className={drawer.projectName}>{label}</span>}
+                        </td>
+                        <td><Badge tone={grant.role === 'manage' ? 'info' : 'neutral'} plain>{grant.role}</Badge></td>
+                        <td className={drawer.actionsCol}>
+                          <Button
+                            variant="danger"
+                            className={ui.smallButton}
+                            disabled={pending}
+                            aria-label={`删除 ${label} 的授权`}
+                            onClick={() => { setError(null); setRemoveTarget({ projectId: grant.project_id, role: grant.role, label }) }}
+                          >
+                            删除
+                          </Button>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+          {grants.hasNextPage ? (
+            <div className={drawer.loadMore}>
+              <Button variant="secondary" onClick={grants.fetchNextPage} loading={grants.isFetchingNextPage}>加载更多授权</Button>
+            </div>
+          ) : null}
         </section>
-        {error ? <ErrorState error={error} title="操作失败" /> : null}
       </div>
       <ConfirmDialog
         open={Boolean(confirm)}
@@ -546,7 +632,7 @@ function UserDrawer({ user, open, currentUserId, onClose }: {
         onConfirm={() => { if (removeTarget) void removeGrant(removeTarget.projectId) }}
         title="删除项目授权？"
         description={removeTarget
-          ? `将移除 ${userLabel(user)} 在项目 #${removeTarget.projectId} 的 ${removeTarget.role} 授权。`
+          ? `将移除 ${userLabel(user)} 在 ${removeTarget.label} 的 ${removeTarget.role} 授权，该用户会立即失去对应的项目访问能力。`
           : ''}
         confirmLabel="删除"
         pending={pending}

@@ -1,0 +1,128 @@
+/* User details drawer (System → 用户与账号 → 管理). */
+
+.sections {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  min-width: 0;
+  padding-block: var(--space-xl);
+  border-top: 1px solid var(--border);
+}
+
+.section:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.section:last-child {
+  padding-bottom: 0;
+}
+
+.sectionHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm) var(--space-md);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.sectionTitle {
+  margin: 0;
+  font-size: var(--fs-h4);
+  font-weight: var(--fw-semibold);
+}
+
+.sectionMeta {
+  font-size: var(--fs-meta);
+  color: var(--muted);
+}
+
+.badges {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  flex-wrap: wrap;
+}
+
+.note {
+  margin: 0;
+  font-size: var(--fs-body-sm);
+  color: var(--muted);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+.grantForm {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(8rem, 10rem) auto;
+  gap: var(--space-md);
+  align-items: end;
+}
+
+.grantTable {
+  table-layout: fixed;
+}
+
+.projectCol {
+  width: auto;
+}
+
+.roleCol {
+  width: 6.5rem;
+}
+
+.actionsCol {
+  width: 5rem;
+  text-align: right;
+}
+
+.grantTable tbody td {
+  vertical-align: middle;
+}
+
+.projectName {
+  display: block;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+
+.projectId {
+  display: block;
+  font-size: var(--fs-meta);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.loadMore {
+  display: flex;
+  justify-content: center;
+}
+
+@media (max-width: 480px) {
+  .grantForm {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .grantForm > :first-child {
+    grid-column: 1 / -1;
+  }
+
+  .roleCol {
+    width: 5.5rem;
+  }
+
+  .actionsCol {
+    width: 4.5rem;
+  }
+}
