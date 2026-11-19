@@ -6,7 +6,7 @@ GitLab CE MR 多 agent 自动评审服务
 
 当前 M0–M6 功能已有本地实现，覆盖项目注册与 webhook、三种 LLM 协议、agent 工具循环、DAG 与持久化、只读探索与四路并行评审/对抗核验/裁决、GitLab 发布、工作区、MCP/Skill、OAuth 持久会话、项目 `read`/`manage` 授权与 CSRF、用户全局只读、平台角色管理、模型管理与评审档位节点覆盖、管理 API、React 控制台、API token、统计、反馈采集、人工标注与许可证清单。
 
-当前最新发布版本是 **v1.7.1**（2026-11-17）。本版只把项目协议切换为 [Apache License 2.0](LICENSE)，不改变代码行为、依赖或数据库 schema；已发布版本（含 v1.7.0 及更早）仍按其发布时的 MIT 条款授权；变更见 [CHANGELOG](CHANGELOG.md)。当前生产运行由提交 `440bdbf` 构建的 v1.7.1 镜像，本轮部署与验收记录见 [v1.7.1 验证状态](docs/delivery-readiness.md#v171-验证状态)。上一版本 v1.7.0 汇总 v1.5.0 之后的共享 bot 凭据与零 token 注册、MR 讨论 @ 唤醒与线程内回执、行内 finding discussion 按位置收敛、注册/校验限流与预检缓存、provisioning 凭据健康状态等新增与修复（#475–#497），不新增数据库迁移，其生产部署与验收记录见 [v1.7.0 验证状态](docs/delivery-readiness.md#v170-验证状态)。CI 以最终 tag commit 的 GitHub Actions 结果为准。
+当前最新发布版本是 **v1.8.0**（2026-11-19）。本版汇总 2026-11-18/19 的全系统审查修复（#510–#552）与后续跨 PR 复核修复，涉及认证与事件流、webhook 入口与投递、发布与恢复、配置归一、工作区、审计与控制台；新增迁移 `0035`（项目设置 revision）与 `0036`（评审事件流增量计数器），均为 append-only、没有 down migration，变更见 [CHANGELOG](CHANGELOG.md)。当前生产运行由提交 `f886e59` 构建的 v1.8.0 镜像，本轮部署与验收记录见 [v1.8.0 验证状态](docs/delivery-readiness.md#v180-验证状态)。上一版本 v1.7.1 只把项目协议切换为 [Apache License 2.0](LICENSE)，不改变代码行为、依赖或数据库 schema；已发布版本（含 v1.7.0 及更早）仍按其发布时的 MIT 条款授权，其生产部署与验收记录见 [v1.7.1 验证状态](docs/delivery-readiness.md#v171-验证状态)。CI 以最终 tag commit 的 GitHub Actions 结果为准。
 
 部署时：人工部署看 [部署与运维](docs/operations.md)，由 agent 代为部署和接入时用 [Agent 部署指南](docs/agent-deployment.md)。
 
@@ -264,7 +264,7 @@ go mod verify
 
 `go build` 依赖 `web/dist`，因此在全新检出上必须先执行前端构建。完整 Go 测试需要 Bash 和真实的 Python 3（注册文档测试会执行 Python 3）；`go test -race` 还需要启用 cgo 和可用的 C 编译器。自托管 runner 必须在运行前确认这些前提。生产二进制和部署运行不依赖 Python 3；上面的人工注册文档示例单独需要宿主机 Python 3。测试使用临时 SQLite 数据库和本地 HTTP 假 GitLab，覆盖注册、加密、认证、事件过滤、并发去重、租约恢复、旧 attempt 拒绝、CLI、工作流、发布、工作区、扩展和控制台静态资源。
 
-各版本做过哪些验证见 [交付就绪与验收记录](docs/delivery-readiness.md)：当前版本看 [v1.7.1 验证状态](docs/delivery-readiness.md#v171-验证状态)，上一版本看 [v1.7.0 验证状态](docs/delivery-readiness.md#v170-验证状态)（含 v1.6.1 生产部署与验收记录），此前的验证状态与发布检查表见 [v1.5.0](docs/delivery-readiness.md#v150-验证状态)、[v1.4.0](docs/delivery-readiness.md#v140-发布检查表) 与 [v1.3.0](docs/delivery-readiness.md#v130-发布检查表294)，v1.0.0 的 f143 隔离实例验收看 [v1.0.0 历史验收记录](docs/delivery-readiness.md#v100-历史验收记录f143仅供追溯)。
+各版本做过哪些验证见 [交付就绪与验收记录](docs/delivery-readiness.md)：当前版本看 [v1.8.0 验证状态](docs/delivery-readiness.md#v180-验证状态)，上一版本看 [v1.7.1 验证状态](docs/delivery-readiness.md#v171-验证状态)，此前的验证状态与发布检查表见 [v1.5.0](docs/delivery-readiness.md#v150-验证状态)、[v1.4.0](docs/delivery-readiness.md#v140-发布检查表) 与 [v1.3.0](docs/delivery-readiness.md#v130-发布检查表294)，v1.0.0 的 f143 隔离实例验收看 [v1.0.0 历史验收记录](docs/delivery-readiness.md#v100-历史验收记录f143仅供追溯)。
 
 ## 主体已实现 / 范围外 / 已知限制
 

@@ -2,12 +2,13 @@
 
 > 本文先列出 v1.2.0 候选批次（[#128](https://github.com/LeXwDeX/Tribunal/pull/128)）的本地修复验证，再记录版本与交付状态：
 >
-> 1. [v1.7.1 验证状态](#v171-验证状态)：Apache License 2.0 协议切换版本的发布、生产部署与验收记录。
-> 2. [v1.7.0 验证状态](#v170-验证状态)：v1.6.1 与 v1.7.0 的生产部署与验收记录。
-> 3. [v1.5.0 验证状态](#v150-验证状态)：v1.5.0 的 CI、迁移演练、DEV 回归、生产验收检查表与发布、清理记录。
-> 4. [v1.2.0（待发布）验证状态](#v120待发布验证状态)：v1.2.0 实际做过哪些验证、还有哪些没做。
-> 5. 升级、授权、验收矩阵与回退计划：与版本无关的操作模板，从[首次升级前记录](#首次升级前记录模板)到[放行与归档](#放行与归档)。
-> 6. [v1.0.0 历史验收记录（f143，仅供追溯）](#v100-历史验收记录f143仅供追溯)：v1.0.0 在隔离测试实例上的验收结果，**不能**用来证明后续版本的改动。
+> 1. [v1.8.0 验证状态](#v180-验证状态)：全系统审查修复批次（#510–#552 与后续跨 PR 复核修复）的 CI、生产部署与验收记录。
+> 2. [v1.7.1 验证状态](#v171-验证状态)：Apache License 2.0 协议切换版本的发布、生产部署与验收记录。
+> 3. [v1.7.0 验证状态](#v170-验证状态)：v1.6.1 与 v1.7.0 的生产部署与验收记录。
+> 4. [v1.5.0 验证状态](#v150-验证状态)：v1.5.0 的 CI、迁移演练、DEV 回归、生产验收检查表与发布、清理记录。
+> 5. [v1.2.0（待发布）验证状态](#v120待发布验证状态)：v1.2.0 实际做过哪些验证、还有哪些没做。
+> 6. 升级、授权、验收矩阵与回退计划：与版本无关的操作模板，从[首次升级前记录](#首次升级前记录模板)到[放行与归档](#放行与归档)。
+> 7. [v1.0.0 历史验收记录（f143，仅供追溯）](#v100-历史验收记录f143仅供追溯)：v1.0.0 在隔离测试实例上的验收结果，**不能**用来证明后续版本的改动。
 >
 > 本文不复制完整日志，也不把测试实例结果扩大为生产验收。
 
@@ -133,6 +134,38 @@
 
 - 基于 `main` `6b6ae70` 的未提交工作区，本地通过 `go test -count=1 ./internal/app ./internal/repo ./internal/skill`（2026-11-19；app 164.421s、repo 7.749s、skill 0.374s）。覆盖：与已授权 Skill 无关的忽略 rename 不再使整单失败；被授权 Skill 被剔除时 fail-closed，`error_class` 为 `repo_skill_excluded_by_mr` 且状态 detail 为专用文案；`repositorySkillRuntimeFiles` 表驱动规则；`FilterRepositorySkillFiles` 与 `ReadRepositorySkills` 等价；`RepositorySkillDirs` 重名、嵌套与无效 manifest；发布复核拒绝剔除已授权文件的 dossier；未授权排除不改变执行身份。
 - **BLOCKED**：「旧二进制中断、新二进制恢复」的真实环境演练未执行（缺隔离部署环境）；单测覆盖恢复路径，不代替跨二进制升级演练。升级与回退边界见[设计文档](design/08-repository-skill-snapshot.md) §4.6。
+
+<a id="v180-验证状态"></a>
+
+## v1.8.0 验证状态
+
+v1.8.0 于 2026-11-19 定版，汇总 2026-11-18/19 的全系统审查修复（[#510](https://github.com/LeXwDeX/Tribunal/issues/510)–[#552](https://github.com/LeXwDeX/Tribunal/issues/552)）与后续跨 PR 复核修复，完整清单见 [CHANGELOG](../CHANGELOG.md)。本批新增迁移 `0035_project_revision`（[#517](https://github.com/LeXwDeX/Tribunal/issues/517)，项目设置 revision）与 `0036_stream_revisions`（[#531](https://github.com/LeXwDeX/Tribunal/issues/531)，评审事件流增量计数器），两者均为 append-only、没有 down migration，生产 schema 由 34 升至 36。Stage 1–3 的候选为 `main` `f886e59`；下述只记录环境中性结果。
+
+### v1.8.0 Stage 1：自建 CI
+
+- 自建 Linux CI 在 `f886e59` 上 `RESULT PASS`：go / web / docker 全部 PASS，语句覆盖率 **82.02%**，耗时 261s（run `20261119T122852-f886e5901e37`）。
+
+### v1.8.0 Stage 2：GitHub Actions
+
+- GitHub Actions 在 `f886e59` 的 main push run `44458453121` 中 go / web / docker 三个作业全部 success。
+
+### v1.8.0 Stage 3：生产部署与验收（2026-11-19）
+
+生产运行镜像 `tribunal:v1.8.0-f886e5901e37`（Image ID 前缀 `f95d5fa7d46e`，由提交 `f886e59` 构建）。
+
+- **健康与接口**：容器 healthy；`/healthz` 与 `/readyz` ok；公网入口 HTTP 200。
+- **迁移与数据**：迁移 `0035`/`0036` 应用后 schema 36；在线副本 `PRAGMA integrity_check` 为 ok。
+- **控制台资产**：前端资产与仓库 `web/dist` 一致。
+- **启动日志**：ERROR 0；5 条既有 `feedback collection failed`（`error_class=not_found`）WARN 为历史 publication 对应讨论已不存在的既有良性反馈采集行为，不影响启动或评审。
+
+### v1.8.0 已知缺口
+
+- **BLOCKED**：「旧二进制中断、新二进制恢复」的真实环境演练未执行（缺隔离部署环境）；恢复路径只有单测覆盖，不代替跨二进制升级演练。
+
+### v1.8.0 备份与回退
+
+- 升级前停服一致性备份在验收通过后按规则删除；旧镜像 v1.7.1（`tribunal:v1.7.1-440bdbf0f922`）保留，仅支持镜像级回滚。
+- schema 36 不可逆（没有 down migration），完整回退需恢复升级前快照并启动匹配的旧镜像。
 
 <a id="v150-验证状态"></a>
 
