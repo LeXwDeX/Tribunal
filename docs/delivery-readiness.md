@@ -2,13 +2,14 @@
 
 > 本文先列出 v1.2.0 候选批次（[#128](https://github.com/LeXwDeX/Tribunal/pull/128)）的本地修复验证，再记录版本与交付状态：
 >
-> 1. [v1.8.0 验证状态](#v180-验证状态)：全系统审查修复批次（#510–#552 与后续跨 PR 复核修复）的 CI、生产部署与验收记录。
-> 2. [v1.7.1 验证状态](#v171-验证状态)：Apache License 2.0 协议切换版本的发布、生产部署与验收记录。
-> 3. [v1.7.0 验证状态](#v170-验证状态)：v1.6.1 与 v1.7.0 的生产部署与验收记录。
-> 4. [v1.5.0 验证状态](#v150-验证状态)：v1.5.0 的 CI、迁移演练、DEV 回归、生产验收检查表与发布、清理记录。
-> 5. [v1.2.0（待发布）验证状态](#v120待发布验证状态)：v1.2.0 实际做过哪些验证、还有哪些没做。
-> 6. 升级、授权、验收矩阵与回退计划：与版本无关的操作模板，从[首次升级前记录](#首次升级前记录模板)到[放行与归档](#放行与归档)。
-> 7. [v1.0.0 历史验收记录（f143，仅供追溯）](#v100-历史验收记录f143仅供追溯)：v1.0.0 在隔离测试实例上的验收结果，**不能**用来证明后续版本的改动。
+> 1. [v1.9.0 验证状态](#v190-验证状态)：v1.8.0 之后合并的目标提交代码图谱、MCP 中断重试与控制台改版批次的 CI、开发环境验收、生产部署与验收记录。
+> 2. [v1.8.0 验证状态](#v180-验证状态)：全系统审查修复批次（#510–#552 与后续跨 PR 复核修复）的 CI、生产部署与验收记录。
+> 3. [v1.7.1 验证状态](#v171-验证状态)：Apache License 2.0 协议切换版本的发布、生产部署与验收记录。
+> 4. [v1.7.0 验证状态](#v170-验证状态)：v1.6.1 与 v1.7.0 的生产部署与验收记录。
+> 5. [v1.5.0 验证状态](#v150-验证状态)：v1.5.0 的 CI、迁移演练、DEV 回归、生产验收检查表与发布、清理记录。
+> 6. [v1.2.0（待发布）验证状态](#v120待发布验证状态)：v1.2.0 实际做过哪些验证、还有哪些没做。
+> 7. 升级、授权、验收矩阵与回退计划：与版本无关的操作模板，从[首次升级前记录](#首次升级前记录模板)到[放行与归档](#放行与归档)。
+> 8. [v1.0.0 历史验收记录（f143，仅供追溯）](#v100-历史验收记录f143仅供追溯)：v1.0.0 在隔离测试实例上的验收结果，**不能**用来证明后续版本的改动。
 >
 > 本文不复制完整日志，也不把测试实例结果扩大为生产验收。
 
@@ -145,12 +146,59 @@
 
 ## 目标提交代码图谱与默认分支同步本地验证（#604）
 
-- 基于 `main` `8b6226a` 的分支。改动含后端（评审的目标图谱、默认分支同步、内置 wrapper 的运行时目录回退、run cleanup 的 `graphs/` 清理）、dossier 可选字段 `workspace_provenance.index_source` 和相应文档；无数据库迁移、无配置项变更，范围见 [CHANGELOG](../CHANGELOG.md) 的 Unreleased 段。随代码提交的单测覆盖：目标图谱的构建、降级、工具路由与清理（`internal/app`、`internal/workspace`），评审与恢复路径对目标图谱的使用，默认分支同步的比较更新与刷新入队，`index_source` 的合法性与旧 dossier 兼容，run cleanup 对 `graphs/` 的保护规则，`UpdateProjectDefaultBranch` 的比较更新，以及 wrapper 的运行时目录回退（`scripts`）。
+- 基于 `main` `8b6226a` 的分支。改动含后端（评审的目标图谱、默认分支同步、内置 wrapper 的运行时目录回退、run cleanup 的 `graphs/` 清理）、dossier 可选字段 `workspace_provenance.index_source` 和相应文档；无数据库迁移、无配置项变更，范围见 [CHANGELOG](../CHANGELOG.md) 的 1.9.0 段。随代码提交的单测覆盖：目标图谱的构建、降级、工具路由与清理（`internal/app`、`internal/workspace`），评审与恢复路径对目标图谱的使用，默认分支同步的比较更新与刷新入队，`index_source` 的合法性与旧 dossier 兼容，run cleanup 对 `graphs/` 的保护规则，`UpdateProjectDefaultBranch` 的比较更新，以及 wrapper 的运行时目录回退（`scripts`）。
 - **待记录**：本地检查、自建 CI 的 `RESULT PASS` 摘要行（含被测提交 SHA）和 GitHub Actions 的 go / web / docker 结果在对应 PR 中记录，此处不预填；未运行的检查不计为 PASS。
-- **BLOCKED**：真实部署验收未执行。缺：一套隔离的测试部署（含真实 GitLab 测试项目，以及模型 provider 的凭据与端点），和一个目标分支不是默认分支的 MR。待验证的内容：该 MR 的评审得到目标图谱（没有 `target code graph unavailable; continuing without it` 告警，dossier 的 `workspace_provenance.index_source` 为 `run`，评审不因图谱工具缺口降为 INCOMPLETE），评审结束后 `graphs/<runID>` 已删除。在真实 GitLab 上改默认分支后的同步与刷新，以及进程重启后重建目标图谱的恢复，同样只有单测覆盖。
-- **BLOCKED**：用镜像内真实 codebase-memory-mcp 二进制对长 `HOME`（`graphs/<runID>/` 之下的深路径，走 wrapper 的 `/tmp/tcbm-<uid>/<hash>` 回退）建索引并经 MCP 调用的 Docker smoke 未执行（缺可运行 Docker smoke 的环境）。现有 Docker smoke 的索引 `HOME` 路径很短，`$HOME/run` 不超过 57 字节，没有走回退；wrapper 的回退只有替身二进制的单测，目标图谱的单测用注入的索引命令与 MCP 替身，没有运行真实索引命令。
+- **BLOCKED（合并前）**：真实部署验收未执行。缺：一套隔离的测试部署（含真实 GitLab 测试项目，以及模型 provider 的凭据与端点），和一个目标分支不是默认分支的 MR。待验证的内容：该 MR 的评审得到目标图谱（没有 `target code graph unavailable; continuing without it` 告警，dossier 的 `workspace_provenance.index_source` 为 `run`，评审不因图谱工具缺口降为 INCOMPLETE），评审结束后 `graphs/<runID>` 已删除。在真实 GitLab 上改默认分支后的同步与刷新，以及进程重启后重建目标图谱的恢复，同样只有单测覆盖。
+- **BLOCKED（合并前）**：用镜像内真实 codebase-memory-mcp 二进制对长 `HOME`（`graphs/<runID>/` 之下的深路径，走 wrapper 的 `/tmp/tcbm-<uid>/<hash>` 回退）建索引并经 MCP 调用的 Docker smoke 未执行（缺可运行 Docker smoke 的环境）。现有 Docker smoke 的索引 `HOME` 路径很短，`$HOME/run` 不超过 57 字节，没有走回退；wrapper 的回退只有替身二进制的单测，目标图谱的单测用注入的索引命令与 MCP 替身，没有运行真实索引命令。发布后已在生产容器内用真实二进制对长 `HOME` 做了手工索引回归，见 [v1.9.0 Stage 3](#v190-stage-3生产部署与验收2026-11-20)。
 - **BLOCKED**：目标图谱在真实大型仓库上的索引耗时、内存和磁盘占用没有测量记录；等待名额 5 分钟、单次索引 10 分钟上限与进程内 2 个并发名额是代码常量，不能据此声称满足容量目标。
 - 升级与回退：无迁移，升级后的行为变化见[运维文档](operations.md#目标提交代码图谱与默认分支同步604)。
+
+<a id="v190-验证状态"></a>
+
+## v1.9.0 验证状态
+
+v1.9.0 于 2026-11-20 定版，汇总 v1.8.0 之后合并的 8 个 PR，完整清单见 [CHANGELOG](../CHANGELOG.md)：控制台视觉改版（[#601](https://github.com/LeXwDeX/Tribunal/issues/601)，PR [#602](https://github.com/LeXwDeX/Tribunal/pull/602)）、普通轮次损坏工具调用可恢复（[#605](https://github.com/LeXwDeX/Tribunal/issues/605)，PR [#606](https://github.com/LeXwDeX/Tribunal/pull/606)）、索引身份缺口合并与中文未完成原因（[#603](https://github.com/LeXwDeX/Tribunal/issues/603)，PR [#607](https://github.com/LeXwDeX/Tribunal/pull/607)）、未完成摘要按结构化信号计数（[#608](https://github.com/LeXwDeX/Tribunal/issues/608)，PR [#609](https://github.com/LeXwDeX/Tribunal/pull/609)）、共享表格规范与用户详情抽屉重新设计（[#610](https://github.com/LeXwDeX/Tribunal/issues/610)，PR [#611](https://github.com/LeXwDeX/Tribunal/pull/611)）、评审的目标提交代码图谱、默认分支同步与 wrapper 运行时目录回退（[#604](https://github.com/LeXwDeX/Tribunal/issues/604)，PR [#612](https://github.com/LeXwDeX/Tribunal/pull/612)）、服务器连接被中断的 MCP 调用可重试（[#613](https://github.com/LeXwDeX/Tribunal/issues/613)，PR [#614](https://github.com/LeXwDeX/Tribunal/pull/614)）、默认配置为 `validate` 与 `verify` 授权 `list_projects`（[#615](https://github.com/LeXwDeX/Tribunal/issues/615)，PR [#616](https://github.com/LeXwDeX/Tribunal/pull/616)）。本批不新增迁移，生产 schema 仍为 36。Stage 1–3 的候选为 `main` `cb8a7e8`；下述只记录环境中性结果。
+
+### v1.9.0 Stage 1：自建 CI
+
+- 自建 Linux CI 在 `cb8a7e8` 上 `RESULT PASS`：go / web / docker 全部 PASS，语句覆盖率 **82.30%**，耗时 263s（run `20261120T000429-cb8a7e8e42e0`）。
+
+### v1.9.0 Stage 2：GitHub Actions
+
+- GitHub Actions 在 `cb8a7e8` 的 main push run `44551898867` 中 go / web / docker 三个作业全部 success。
+
+### v1.9.0 开发环境验收
+
+开发环境部署镜像 `tribunal:v1.9.0-cb8a7e8e42e0`（Image ID 前缀 `f833d339a02a`）。
+
+- **健康与接口**：容器 healthy；`/healthz` 与 `/readyz` ok；启动日志无 ERROR。
+- **#615 升级语义**：更新挂载配置后，`validate` 与 `verify` 的平台绑定含 `list_projects`，与 [CHANGELOG](../CHANGELOG.md) 对 #615 升级方式的描述一致。
+- **BLOCKED**：目标分支不是默认分支的 MR 的真实评审（应得到目标图谱，dossier 的 `workspace_provenance.index_source` 为 `run`）未在开发环境执行。缺有效的测试凭据和可新开 MR 的账号，需人工补齐后补做。
+
+### v1.9.0 Stage 3：生产部署与验收（2026-11-20）
+
+生产运行镜像 `tribunal:v1.9.0-cb8a7e8e42e0`（Image ID 前缀 `f833d339a02a`，由提交 `cb8a7e8` 构建）。
+
+- **健康与接口**：容器 healthy；`/healthz` 与 `/readyz` ok；公网入口 HTTP 200。
+- **迁移与数据**：本版无新迁移，schema 仍为 36。
+- **控制台资产**：前端资产（`index.html` 及其引用的 js/css）与仓库 `web/dist` 一致。
+- **启动日志**：ERROR 0；1 条既有 `feedback collection failed`（`error_class=not_found`）WARN 为历史 publication 对应讨论已不存在的既有良性反馈采集行为（与 v1.8.0 记录的同类），不影响启动或评审。
+- **配置**：生产挂载配置已更新，`validate` 与 `verify` 含 `list_projects`；其余沿用生产自己的本地配置选择。
+- **平台回归**：配置状态 `applied`、无需重启；`primary` 提供方连通测试 ok（约 1s）；内置 `codebase-memory` 服务器与各块绑定按挂载配置生效。
+- **目标图谱手工索引回归**：在生产容器内以服务用户、按目标图谱的目录深度（`$HOME/run` 为 111 字节，wrapper 回退到 `/tmp/tcbm-<uid>/<哈希>`），对三个真实项目的 base checkout 各做一次完整索引，均在 10 分钟上限内完成：约 260MB 工作区 5s（图谱 5.9MB），约 370MB 工作区 32s（图谱 193MB），最大的约 17GB 工作区（含镜像与上下文）137s（图谱 345MB）；索引后 `list_projects` 与 `search_graph` 正常返回。本回归只直接运行索引命令，没有走评审路径（`index_source`、`graphs/<runID>` 清理与降级告警），也未触及 10 分钟上限与 2 个并发名额。期间容器保持 healthy、无 OOM、无重启，索引结束时容器内存约 1.1GiB（上限 2GiB）。回归用的临时图谱目录与 `/tmp` 运行时目录在验证后已删除。
+
+### v1.9.0 已知缺口
+
+- **BLOCKED**：目标分支不是默认分支的 MR 的真实评审（`index_source` 为 `run`）未在开发环境执行；原因见上文「v1.9.0 开发环境验收」。
+- **部分验证**：目标图谱的索引成本与长 `HOME` 的 `/tmp` 回退已在生产容器内对三个真实仓库手工测量（见上文 Stage 3）；两个目标图谱同时索引的并发成本，以及一次完整真实评审中的目标图谱路径，未在真实部署下测量。
+- **已知缺陷（[#618](https://github.com/LeXwDeX/Tribunal/issues/618)，下一版本修复）**：[#457](https://github.com/LeXwDeX/Tribunal/issues/457)（v1.5.0）之前登记或刷新的项目，工作区可能仍留着旧规则写入的 `index: blocked by ignore policy`、没有共享索引，直到默认分支上有新的 push 才会恢复。生产回归中 15 个项目里有 5 个处于这种状态。v1.9.0 下这类项目的评审仍可用（每次评审为目标提交建立目标图谱），但每次都要付出完整索引的成本；控制台把它们显示为按 ignore 策略跳过索引。
+- **上游缺陷（未修复）**：codebase-memory-mcp 0.12.1 的共享 daemon 在并发负载下，客户端带着未完成的请求断开会使 daemon 退出并断开所有会话。缺陷在上游，本版没有修复；[#613](https://github.com/LeXwDeX/Tribunal/issues/613) 只通过模型重试与缺口推迟结算缓解。
+
+### v1.9.0 备份与回退
+
+- 受支持的回退按 [通用升级与回滚步骤](operations.md#通用升级与回滚步骤) 执行：把升级前的数据库与全部工作区快照恢复到新的空卷，隔离入站与出站，再用匹配的旧镜像、配置和原主密钥启动；只替换镜像不是受支持的回退路径，本版没有迁移也不改变这一点。
+- 本次生产升级前没有做停服一致性快照（本版无迁移，schema 仍为 36），因此无法按上述流程回退到升级前的状态。升级前生产运行的镜像 `tribunal:v1.8.0-b440ffea67e0` 仍然保留（由 v1.8.0 之后的 `main` `b440ffe` 构建，即 #609 合并后的提交，在 v1.8.0 定版后部署）；需要回退时，先停服备份当前数据库与全部工作区，再按上述流程的隔离要求评估是否换回该镜像。
+- 升级用的临时配置副本在验收通过后删除。
 
 <a id="v180-验证状态"></a>
 

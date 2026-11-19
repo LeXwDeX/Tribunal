@@ -2,13 +2,14 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [1.9.0] - 2026-11-20
 
 ### 升级前必读
 
 - **无数据库迁移，无必改配置**（[#604](https://github.com/LeXwDeX/Tribunal/issues/604)）：不新增迁移和配置项，已挂载的配置（含 `x-review.index_command`）继续有效；内置 wrapper 随镜像发布，升级镜像即生效。非容器部署需把仓库中更新后的 `scripts/codebase-memory-mcp.sh` 重新安装到 `/usr/local/bin/tribunal-codebase-memory-mcp`。升级与回滚仍按[通用升级与回滚步骤](docs/operations.md#通用升级与回滚步骤)执行。
 - **评审成本**：共享索引不能证明就是目标提交的评审（主要是目标提交与工作区索引不一致），每次都会完整索引一次本次评审的 base checkout（占用 CPU、磁盘和时间；等待并发名额最长 5 分钟，取得名额后索引最长 10 分钟，进程内最多 2 个同时运行）；默认分支 MR 在工作区索引已跟上时不额外索引。见下文「新增」与[目标提交代码图谱](docs/operations.md#目标提交代码图谱)。
 - **默认分支随 GitLab 同步**：存储的默认分支此前只在登记时写入，现在会自动跟随 GitLab；它也决定未配置 `target_branches` 时哪些 MR 被评审、哪些 push 触发刷新，同步后按新默认分支生效。见[默认分支同步](docs/operations.md#默认分支同步)。
+- **已知问题**（[#618](https://github.com/LeXwDeX/Tribunal/issues/618)，下一版本修复）：v1.5.0 之前登记或刷新、此后默认分支上没有新 push 的项目，工作区可能仍留着旧规则写入的 `index: blocked by ignore policy` 而没有共享索引；本版下这类项目每次评审都会完整索引一次目标提交。手动重建索引可立即恢复。
 - **wrapper 的运行时目录在路径过长时移到 `/tmp`**：wrapper 在 `$HOME/run` 不超过 57 字节时保持原样；标准镜像布局（`workspace.root: /app/data/workspaces`，`x-review.home: .mcp/codebase-memory/home`）下项目 ID 不超过 6 位时为 52 到 57 字节，项目的协调文件位置不变。更长的路径（评审目标图谱的 `HOME`，以及 7 位以上的项目 ID）改放 `/tmp/tcbm-10001/<16 位哈希>`，`/tmp` 须对服务用户可写（启用只读根文件系统的自定义部署须为 `/tmp` 提供 tmpfs 或可写卷）。图谱数据与缓存位置不变。
 
 ### 新增
@@ -588,6 +589,7 @@ v1.0.0 之后的第一个版本：产品改名为 Tribunal，修复 1.0 复审�
 
 首个版本（GitHub Pre-release），交付 M0–M6 范围：webhook 与持久化队列、DAG 调度、主 agent 编排、对抗核验与裁决、GitLab 发布、三种 LLM 协议、工作区、MCP 与 Skill、OAuth、项目授权、Web 控制台和统计。详见 [Release v1.0.0](https://github.com/LeXwDeX/Tribunal/releases/tag/v1.0.0)。
 
+[1.9.0]: https://github.com/LeXwDeX/Tribunal/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/LeXwDeX/Tribunal/compare/v1.7.1...v1.8.0
 [1.7.1]: https://github.com/LeXwDeX/Tribunal/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/LeXwDeX/Tribunal/compare/v1.5.0...v1.7.0

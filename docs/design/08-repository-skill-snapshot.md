@@ -167,7 +167,7 @@
 
 实现 PR 已同步：
 
-- [`CHANGELOG.md`](../../CHANGELOG.md)：`[Unreleased]` 的 #545 条目已由 PR #582 的提示文案变更改写，写明行为变化：与被授权 Skill 无关的 rename 不再使整单失败；被授权 Skill 受 MR 影响成为单独的失败类别（`repo_skill_excluded_by_mr`）及其提示；哈希不等的提示改回建议重新授权。
+- [`CHANGELOG.md`](../../CHANGELOG.md)：`[1.8.0]` 的 #545 条目已由 PR #582 的提示文案变更改写，写明行为变化：与被授权 Skill 无关的 rename 不再使整单失败；被授权 Skill 受 MR 影响成为单独的失败类别（`repo_skill_excluded_by_mr`）及其提示；哈希不等的提示改回建议重新授权。
 - [`docs/operations.md`](../operations.md)：「仓库 Skill 授权迁移（v1.2.0）」一节已写明快照语义（哈希只按 ignore 策略过滤，与授权同口径；MR 派生排除只决定哪些文件进入评审）；「评审永久失败排查」一节已补充新的 `error_class` 与处置（调整 MR，使其不把已授权 Skill 的文件移入或移出 ignore 路径；或由管理员调整授权，之后重新触发评审）。
 - 本文状态已改为已实现；实现偏差按 [README](README.md) 的约定登记在「实现状态与偏差」。
 
