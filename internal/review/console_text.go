@@ -46,6 +46,43 @@ func IncompleteSummaryText(summary string) (string, bool) {
 	if !ok {
 		return "", false
 	}
+	return renderIncompleteSummaryText(reasons, extra), true
+}
+
+// IncompleteSummaryTextFor is IncompleteSummaryText with the structured
+// signals of the same workflow. When signals exist, the causes and the
+// overflow count come from them, grouped like the console rows (category plus
+// Chinese text), instead of from the stored summary: a summary stored before
+// #603 counted every per-tool gap, so its "另有 N 项" overstated the distinct
+// causes. Without signals the stored summary is parsed as before.
+func IncompleteSummaryTextFor(summary string, unresolved []UnresolvedSignal) (string, bool) {
+	if len(unresolved) == 0 {
+		return IncompleteSummaryText(summary)
+	}
+	if _, _, ok := parseIncompleteSummary(summary); !ok {
+		return "", false
+	}
+	type cause struct{ category, text string }
+	seen := make(map[cause]struct{}, len(unresolved))
+	reasons := make([]string, 0, maxUnresolvedSummaryItems)
+	groups := 0
+	for _, signal := range unresolved {
+		key := cause{UnresolvedCategory(signal), UnresolvedText(signal)}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		groups++
+		if len(reasons) < maxUnresolvedSummaryItems {
+			reasons = append(reasons, key.text)
+		}
+	}
+	return renderIncompleteSummaryText(reasons, groups-len(reasons)), true
+}
+
+// renderIncompleteSummaryText joins the stored lead, the causes and the
+// overflow count into one plain paragraph.
+func renderIncompleteSummaryText(reasons []string, extra int) string {
 	var b strings.Builder
 	b.WriteString(unresolvedSummaryPrefix)
 	for i, reason := range reasons {
@@ -58,7 +95,7 @@ func IncompleteSummaryText(summary string) (string, bool) {
 	if extra > 0 {
 		fmt.Fprintf(&b, "另有 %d 项检查未完成。", extra)
 	}
-	return b.String(), true
+	return b.String()
 }
 
 // signalPseudoNodes are the node names code-owned signals use for checks that

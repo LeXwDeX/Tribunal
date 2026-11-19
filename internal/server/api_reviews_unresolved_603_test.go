@@ -145,9 +145,9 @@ func TestReviewDetailClassifiesAndLocalizesUnresolvedSignals(t *testing.T) {
 func TestReviewDetailLocalizesTheIncompleteSummaryAsPlainText(t *testing.T) {
 	fake := newFakeReviewStore()
 	env := newM6Env(t, m6Options{store: fake})
-	seedUnresolvedWorkflow(env, "wf-603-summary", storedSummary603, []map[string]string{
-		{"node": "explore", "kind": "evidence_gap", "message": indexGapMessage603},
-	})
+	// No structured signals: summary_text falls back to parsing the stored
+	// summary (#608 builds it from the signals when they exist).
+	seedUnresolvedWorkflow(env, "wf-603-summary", storedSummary603, nil)
 	response := env.businessClient().request(http.MethodGet, "/api/v1/reviews/wf-603-summary", nil, nil)
 	assertStatus(t, response, http.StatusOK)
 	body := env.decode(t, response)
@@ -428,8 +428,12 @@ func TestReviewDetailDoesNotTreatModelGapsAsToolGaps(t *testing.T) {
 	if got := stringList(t, body["warnings_text"]); !reflect.DeepEqual(got, wantWarnings) {
 		t.Fatalf("warnings_text:\n got %q\nwant %q", got, wantWarnings)
 	}
+	// summary_text is built from the signals (#608): the model text keeps its
+	// own wording, and only the real index gap is worded as a mismatch.
 	text, _ := body["summary_text"].(string)
-	if text == "" || strings.Contains(text, genericToolText) || strings.Contains(text, "不一致") {
+	if text == "" || strings.Contains(text, genericToolText) ||
+		!strings.Contains(text, prose) || !strings.Contains(text, indexed) ||
+		strings.Count(text, "不一致") != 1 || !strings.Contains(text, strings.TrimSuffix(indexMismatchText, "。")) {
 		t.Fatalf("summary_text words model text as a tool gap: %q", text)
 	}
 }

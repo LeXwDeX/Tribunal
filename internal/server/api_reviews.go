@@ -432,7 +432,7 @@ func (s *Server) handleGetReview(w http.ResponseWriter, r *http.Request) {
 	}
 	snapshot := s.engineSnapshot(r.Context(), wf.ID)
 	summary, warnings, unresolved, scope := reviewLevelDiagnostics(nodes)
-	summaryText, _ := review.IncompleteSummaryText(summary)
+	summaryText, _ := review.IncompleteSummaryTextFor(summary, unresolved)
 	detail := reviewDetail{
 		Workflow:        *wf,
 		Access:          grantedAccess(r.Context()),
