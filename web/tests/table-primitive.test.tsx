@@ -131,6 +131,10 @@ describe('table formatters', () => {
     expect(formatPercent(0.25)).toBe('25%')
     expect(formatPercent(0)).toBe('0%')
     expect(formatPercent(undefined)).toBe('—')
+    // Near-zero and near-one ratios never round to a misleading 0% or 100%.
+    expect(formatPercent(0.000001)).toBe('<0.01%')
+    expect(formatPercent(0.99999)).toBe('>99.9%')
+    expect(formatPercent(1)).toBe('100%')
   })
 
   it('formats latencies in readable units', () => {

@@ -292,18 +292,24 @@ describe('user management drawer (#297)', () => {
 
     const carol = (await screen.findByText('carol')).closest('tr')!
     const carolDisable = within(carol).getByRole('button', { name: '停用账号' })
-    expect(carolDisable).toBeDisabled()
+    // aria-disabled keeps the control focusable so keyboard users can open the reason.
+    expect(carolDisable).toHaveAttribute('aria-disabled', 'true')
+    expect(carolDisable).not.toBeDisabled()
+    carolDisable.focus()
+    expect(carolDisable).toHaveFocus()
+    await user.click(carolDisable)
+    expect(screen.queryByRole('dialog', { name: '停用账号？' })).not.toBeInTheDocument()
     expect(carolDisable).toHaveAccessibleDescription(/配置来源的管理员/)
     // The reason is not repeated as row text.
     expect(within(carol).queryByText(/配置来源的管理员/)).not.toBeInTheDocument()
 
     const alice = (await screen.findByText('alice')).closest('tr')!
     const aliceDisable = within(alice).getByRole('button', { name: '停用账号' })
-    expect(aliceDisable).toBeDisabled()
+    expect(aliceDisable).toHaveAttribute('aria-disabled', 'true')
     expect(aliceDisable).toHaveAccessibleDescription(/当前登录账号/)
 
     const bob = (await screen.findByText('bob')).closest('tr')!
-    expect(within(bob).getByRole('button', { name: '停用账号' })).toBeEnabled()
+    expect(within(bob).getByRole('button', { name: '停用账号' })).not.toHaveAttribute('aria-disabled')
   })
 
   it('explains a protected_user rejection instead of a generic permission error', async () => {

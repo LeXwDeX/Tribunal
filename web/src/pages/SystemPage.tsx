@@ -777,7 +777,10 @@ function AdminUsersPanel() {
                       <TableActions>
                         <TableAction onClick={() => setManageTargetId(user.id)}>管理</TableAction>
                         <Tooltip content={disableReason}>
-                          <TableAction onClick={() => setDisableTarget(user)} disabled={disableBlocked}>
+                          <TableAction
+                            aria-disabled={disableBlocked || undefined}
+                            onClick={() => { if (!disableBlocked) setDisableTarget(user) }}
+                          >
                             {user.disabled ? '启用账号' : '停用账号'}
                           </TableAction>
                         </Tooltip>

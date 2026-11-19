@@ -291,6 +291,9 @@ export function stringifyUnknown(value: unknown): string {
 // decimals below 1% and one decimal above (0.0013 → 0.13%, 0.25 → 25%).
 export function formatPercent(ratio: unknown): string {
   if (typeof ratio !== 'number' || !Number.isFinite(ratio)) return '—'
+  // Never round a non-zero ratio to 0% or a ratio below one to 100%.
+  if (ratio > 0 && ratio < 0.0001) return '<0.01%'
+  if (ratio < 1 && ratio > 0.9995) return '>99.9%'
   const percent = ratio * 100
   const digits = Math.abs(percent) < 1 ? 2 : 1
   return `${new Intl.NumberFormat('zh-CN', { maximumFractionDigits: digits }).format(percent)}%`
