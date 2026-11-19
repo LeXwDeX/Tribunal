@@ -606,7 +606,13 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 				return partial(gateErr)
 			}
 			if callErr != nil {
-				res = Result{Content: "tool execution failed; " + validationFeedback(builtinFeedback(tool, callErr)), IsError: true}
+				// An interrupted tool server carries a fixed retry hint; every
+				// other failure keeps the generic feedback.
+				feedback := retryFeedback(callErr)
+				if feedback == "" {
+					feedback = validationFeedback(builtinFeedback(tool, callErr))
+				}
+				res = Result{Content: "tool execution failed; " + feedback, IsError: true}
 			} else if res.IsError {
 				// MCP errors can carry secrets even when the Go error is nil.
 				res = Result{Content: "tool execution failed; check the tool schema and access rules", IsError: true}

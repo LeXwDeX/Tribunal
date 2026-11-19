@@ -24,6 +24,11 @@ func TestStdioHelperProcess(t *testing.T) {
 		// stderr is discarded by the manager; keep this diagnostic local.
 		os.Stderr.WriteString("stdio helper: " + err.Error() + "\n")
 	}
+	if helperHungUp.Load() {
+		// Stay alive after the stream ended, so that the parent has to end the
+		// process.
+		time.Sleep(helperHangFor)
+	}
 }
 
 func newStdioManager(t *testing.T, review XReviewConfig, denied []string) (*Manager, string) {

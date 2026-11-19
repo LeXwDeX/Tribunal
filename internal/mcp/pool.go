@@ -239,8 +239,14 @@ func (m *Manager) acquire(ctx context.Context, server string) (*serverEntry, err
 		return nil, fmt.Errorf("%w: %q", ErrUnknownServer, server)
 	}
 	key := entryKey{workspace: m.workspace, server: server, fingerprint: fingerprint(cfg)}
-	for range 2 {
+	// An entry can die between the watcher marking it and removing it, and
+	// between the lookup and begin. Each gets a fresh entry, so a call that
+	// races the watcher is served instead of failing.
+	for range 3 {
 		entry, err := m.entryFor(ctx, key, cfg)
+		if errors.Is(err, ErrConnectionClosed) {
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -287,8 +293,17 @@ func (m *Manager) await(ctx context.Context, entry *serverEntry) (*serverEntry, 
 	entry.mu.Lock()
 	err := entry.err
 	dead := entry.dead
+	connected := entry.connected
 	session := entry.session
 	entry.mu.Unlock()
+	// A session that was up and has since ended is a closed connection. Its
+	// err only records why it ended, so it is not a connect failure. The
+	// watcher removes the entry too; doing it here lets the caller's next
+	// lookup build a fresh one.
+	if dead && connected {
+		m.remove(entry)
+		return nil, fmt.Errorf("%w: %q", ErrConnectionClosed, entry.key.server)
+	}
 	if err != nil {
 		return nil, entry.connectError()
 	}
@@ -423,13 +438,57 @@ func (entry *serverEntry) takeIdle(now time.Time) bool {
 }
 
 func (entry *serverEntry) markDead(err error) {
+	entry.setDead(err)
+	entry.m.remove(entry)
+}
+
+func (entry *serverEntry) setDead(err error) {
 	entry.mu.Lock()
 	entry.dead = true
 	if entry.err == nil {
 		entry.err = err
 	}
 	entry.mu.Unlock()
-	entry.m.remove(entry)
+}
+
+// evict stops reuse of an entry whose connection ended under a call and
+// releases its session in the background. A session that has not ended on its
+// own, such as an HTTP request cut off mid-call, would otherwise stay open
+// with no owner in the cache and keep Close waiting. Closing a session that
+// already ended is a no-op. Close waits for the release; once the manager is
+// closed, Close's own pass over the cache already owns the entry.
+func (entry *serverEntry) evict(cause error) {
+	entry.setDead(cause)
+	if !entry.m.detach(entry) {
+		return
+	}
+	go func() {
+		defer entry.m.wg.Done()
+		_ = entry.close()
+	}()
+}
+
+// detach removes entry from the cache. Unless the manager is closed, it also
+// registers a background task with wg and reports true; the caller must end it
+// with Done. Registering under the lock Close takes to mark the manager closed
+// keeps the Add before Close's Wait.
+func (m *Manager) detach(entry *serverEntry) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if current := m.entries[entry.key]; current == entry {
+		delete(m.entries, entry.key)
+	}
+	if m.closed {
+		return false
+	}
+	m.wg.Add(1)
+	return true
+}
+
+func (m *Manager) isClosed() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.closed
 }
 
 func (entry *serverEntry) close() error {
