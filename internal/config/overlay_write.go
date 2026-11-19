@@ -1444,6 +1444,9 @@ func validateReviewDefaultsPolicy(cfg *Config) []reviewDefaultsProblem {
 	if defaults.MaxFiles <= 0 {
 		add("max_files", "review_defaults.max_files must be positive")
 	}
+	if defaults.MaxFiles > reviewMaxFilesHardLimit {
+		add("max_files", "review_defaults.max_files must be at most %d", reviewMaxFilesHardLimit)
+	}
 	if defaults.MaxDiffLines <= 0 {
 		add("max_diff_lines", "review_defaults.max_diff_lines must be positive")
 	}
