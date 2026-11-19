@@ -15,6 +15,7 @@
 | [05-flows.md](05-flows.md) | 评审、取消、命令、刷新、onboarding、崩溃恢复、发布幂等、反馈收集 | M1–M5 |
 | [06-config.md](06-config.md) | 平台配置、MCP 配置、项目设置、仓库配置、环境变量 | M0 起 |
 | [07-web-console.md](07-web-console.md) | 控制台技术选型、页面与所用 API | M6 |
+| [08-repository-skill-snapshot.md](08-repository-skill-snapshot.md) | 仓库 Skill 快照哈希口径、MR 派生 deny 与被授权 Skill 受影响时的失败类别、恢复与发布复核、测试与验收（已实现；Issue #545） | M5 |
 
 ## 实现状态与偏差（当前本地实现）
 
@@ -27,6 +28,7 @@
 - [05-flows.md](05-flows.md)：全部 ignore 发布「无需评审」且不建 workflow，全部采集 omitted 也不建 workflow，只发布 INCOMPLETE 摘要（omitted 总数、原因计数和最多 4 条路径，其余只计数；正常 dossier 保留完整列表）；部分 omitted、提示词截断或完成 plan 后未分配的非 generated included 文件由 unresolved 传播为 INCOMPLETE；发布状态独立为 pending/published/skipped/failed，启动恢复 pending，取消/stale/关闭 failure note 记 skipped，失败可手动 republish；F3 的 help 和权限拒绝由 worker 回复，使用 per-note 隐藏 marker 幂等；受理 run/cancel 时入队事务记录源 note eyes，终态由状态 worker 协调，webhook 无网络且不添加 emoji；F8 仍从最近 14 天创建的已完成 workflow 中筛选，合并 MR 只采集 3 天；讨论只采集发布者首条 note，old-side、缺失行和取证失败不写 signal；按持久化 FindingID 精确匹配后归因 provider，summary/unlinked 不计入，同一 signal 可计入两个角色；原始信号不自动生成标注，人工指标独立计算。run cleanup 先查询保护集合，再清理超过年龄的 `runs/<id>` 和 `context/<sha>`；run 保护覆盖未终态 workflow、queued/running job、`publication_state=pending` dossier 和本进程注册 run，context 保护覆盖所有 DB revision base、当前 workspace base/context、未终态和待发布 workflow base，locked/非法 metadata fail closed；缺失 mirror 时只有满足年龄、未保护、未注册和路径检查的 run 才删除。
 - [06-config.md](06-config.md)：`bootstrap_admins` 只决定平台 admin 标签，拥有本地用户 ID 的管理员对已登记项目隐式拥有 `manage`，其他用户的项目数据仍需 grant；`REVIEW_ADMIN_TOKEN` 仅平台管理面并由部署方轮换；仓库配置只在 worker 按目标分支合并；`allow_repo_config=true` 时 Draft 由 worker 最终判断，标签只追加排除，目标分支不可覆盖，仓库 `profile` 优先于隐式选择；`language` 单行最多 128 字符并放入 scoped 项目背景。示例配置缺 `providers` 和 `propose`，不能直接跑真实评审。MCP 示例改用 `scripts/codebase-memory-mcp.sh` 固定每个项目的 cache/runtime 目录；隔离仍需部署方安装上游二进制并重新验证，wrapper 不是文件系统沙箱。真实 MCP stdio 已测；每个 HTTP backend 的完整覆盖不在本次 v1 范围。
 - [07-web-console.md](07-web-console.md)：项目写按钮由 API 返回的 `access=manage` 控制，平台管理员对已登记项目隐式拥有 `manage` 因而可写，普通用户仍按该字段判定；个人 API token 由用户自助管理，用户停用、凭据撤销和项目授权仅平台管理员可见；评审详情显示独立发布状态/原因、INCOMPLETE 和 BLOCKING 的 commit status 区别，发布失败可重试，skipped 不重发；`workspace.index_status` 描述已存储索引检查点，不证明实时健康；项目设置的写接口已实现；统计页提供总体/项目/provider/块的运行统计和 UTC 日趋势，项目按工作流、provider/块按已启动节点计数；finding 展开行提供人工标注，质量面板显示提出方准确率、挑战方误杀率及样本数，原始反馈独立显示。`stats.runs` 包含评审与 onboarding，`blocking_ratio` 仍以全部 workflow 为分母。已验证快照的 `web/dist` 未变；f143 隔离实例在 1440 管理设置页和 390 viewer 设置页完成实际截图与 DOM 读取（浏览器传输于 2026-10-25T05:14Z 恢复）。390 视口为 390×844、scrollWidth 390，无横向溢出；viewer 页仅显示只读说明，无管理按钮。此前的截图工具超时和传输挂起是临时工具故障，不是产品失败；这不等同物理设备或完整 WCAG 验收。
+- [08-repository-skill-snapshot.md](08-repository-skill-snapshot.md)：已按方案 B 实现（Issue #545）。测试计划中「以改动前 digest 字面量固化执行身份」未采用字面量：授权 revision 由存储层每次随机生成并进入 provenance 与执行身份，字面量无法稳定；改为在同一 fixture 上断言排除未授权 Skill 前后 `resolveReviewExecution` 的 digest 相等，并逐项核对 provenance 与授权记录一致。
 
 OpenAI Responses adapter 在每次 Generate 时通过 SDK option 发送请求级随机不透明 `X-Session-Id`。这是网关兼容措施，不是 OpenAI 标准、会话认证或幂等保证；仅适用于 Responses 协议，不新增配置、依赖或 400 重试。已部署网关内部实现未证实，可能增加缓存/握手成本。
 

@@ -1095,9 +1095,9 @@ curl -fsS http://127.0.0.1:18080/readyz
 
 ### 仓库 Skill 授权迁移（v1.2.0）
 
-`0021_repository_skill_authorizations` 新建独立授权表，不转换旧的块绑定。`0023_repository_skill_snapshot_sha256` 追加 `snapshot_sha256 TEXT NOT NULL DEFAULT ''`，两个迁移都不可回退。非空授权保存项目、目标分支、块、管理员核对的完整目标 commit SHA 和过滤后仓库 Skill 快照的 SHA-256；空授权清空两个 SHA。快照按相对 `.claude/skills` 的路径字节排序，逐文件依次计算路径长度、路径、内容长度和内容，长度为无符号 64 位大端序；空文件、二进制和名称变更都参与计算，错误信息不输出文件内容。存储写入使用版本比较，撤销也会产生新版本，过期写入不会覆盖已保存的撤销。授权写入重新发现同一目标 commit，并核对调用者明确提供的目标 SHA 和快照 hash；ignore 放宽、文件内容或名称变化时返回冲突且不修改记录。读取时无法证明目标 SHA 的授权会被拒绝；执行或应用时还要求非空授权带有格式有效的快照 hash，缺失或格式无效时拒绝。该 hash 由授权写入基于重新发现的结果核对，不能据此推断数据库外写入或完整端到端快照校验已经完成。评审运行时在执行前重新拉取目标分支 tip，要求它与授权记录的目标 SHA 相等，且当前过滤快照的 SHA-256 与授权记录一致；分支移动、快照变化或无法验证时 fail closed 并需要重新授权。目标分支变更不会自动授权新 commit。
+`0021_repository_skill_authorizations` 新建独立授权表，不转换旧的块绑定。`0023_repository_skill_snapshot_sha256` 追加 `snapshot_sha256 TEXT NOT NULL DEFAULT ''`，两个迁移都不可回退。非空授权保存项目、目标分支、块、管理员核对的完整目标 commit SHA 和过滤后仓库 Skill 快照的 SHA-256；空授权清空两个 SHA。快照按相对 `.claude/skills` 的路径字节排序，逐文件依次计算路径长度、路径、内容长度和内容，长度为无符号 64 位大端序；空文件、二进制和名称变更都参与计算，错误信息不输出文件内容。存储写入使用版本比较，撤销也会产生新版本，过期写入不会覆盖已保存的撤销。授权写入重新发现同一目标 commit，并核对调用者明确提供的目标 SHA 和快照 hash；ignore 放宽、文件内容或名称变化时返回冲突且不修改记录。读取时无法证明目标 SHA 的授权会被拒绝；执行或应用时还要求非空授权带有格式有效的快照 hash，缺失或格式无效时拒绝。该 hash 由授权写入基于重新发现的结果核对，不能据此推断数据库外写入或完整端到端快照校验已经完成。评审运行时在执行前重新拉取目标分支 tip，要求它与授权记录的目标 SHA 相等，且快照的 SHA-256 与授权记录一致；分支移动、快照变化或无法验证时 fail closed 并需要重新授权。快照 SHA-256 只按项目 ignore 策略过滤，与授权写入同口径；MR diff 派生的排除集合（含 ignore 命中的路径、rename 两侧和被拒目录下的子路径）只决定哪些文件进入临时目录并挂载，不参与哈希比较。被排除的文件不落盘；未被排除的未授权 Skill 文件仍会写入临时目录，但不绑定、不挂载。MR 使任一已授权 Skill 目录下的文件被排除时，评审 fail closed，日志 `error_class=repo_skill_excluded_by_mr`，状态详情说明是该 MR 的改动导致无法使用已授权 Skill，重新授权同一目标 commit 不能解决。目标分支变更不会自动授权新 commit。
 
-仓库 Skill 发现和授权 HTTP 路由已经注册：`GET /api/v1/admin/projects/{id}/repository-skills` 返回目标分支当前 tip、过滤快照 hash 和可用 Skill；`GET`/`PUT /api/v1/admin/projects/{id}/repository-skill-authorizations` 读取或按 revision 替换某个块的授权。需要平台管理员；管理员对已登记项目隐式具备 `manage`，不需要逐项目 grant。项目设置中的“允许仓库内 Skill”开启后，评审运行时只接受当前目标分支 tip 等于授权 commit、且过滤快照 hash 与授权记录一致的 `repo:` Skill；没有非空授权时不加载仓库 Skill。评审和 onboarding 执行器仍会拒绝没有已验证仓库来源的 `repo:` Skill。这不改变普通仓库文件评审的现有 ignore 规则，不构成对所有仓库文件的禁发保证。项目级外发门禁会使旧令牌失效，取消并等待已接入的发送结束，再提交策略或授权变更；超时不会提交变更，但旧令牌仍失效。该门禁只在本进程生效，也不能撤回远端已经收到的数据。恢复和发布会在原执行身份之外重新校验授权 revision、目标 SHA 和过滤快照 hash；授权撤销、目标移动或快照变化后不会续跑或重发，需要重新触发评审并重新授权。`0021` 升级前保存的非空授权没有快照 hash，读取路径会返回空值，执行路径必须拒绝；管理员可以按现有 revision 撤销，或在重新发现后重新授权。
+仓库 Skill 发现和授权 HTTP 路由已经注册：`GET /api/v1/admin/projects/{id}/repository-skills` 返回目标分支当前 tip、过滤快照 hash 和可用 Skill；`GET`/`PUT /api/v1/admin/projects/{id}/repository-skill-authorizations` 读取或按 revision 替换某个块的授权。需要平台管理员；管理员对已登记项目隐式具备 `manage`，不需要逐项目 grant。项目设置中的“允许仓库内 Skill”开启后，评审运行时只接受当前目标分支 tip 等于授权 commit、且过滤快照 hash 与授权记录一致的 `repo:` Skill；没有非空授权时不加载仓库 Skill。评审和 onboarding 执行器仍会拒绝没有已验证仓库来源的 `repo:` Skill。这不改变普通仓库文件评审的现有 ignore 规则，不构成对所有仓库文件的禁发保证。项目级外发门禁会使旧令牌失效，取消并等待已接入的发送结束，再提交策略或授权变更；超时不会提交变更，但旧令牌仍失效。该门禁只在本进程生效，也不能撤回远端已经收到的数据。恢复和发布会在原执行身份之外重新校验授权 revision、目标 SHA 和过滤快照 hash，并按 dossier 的排除证据重做被授权 Skill 目录的剔除检查；授权撤销、目标移动、快照变化或已授权 Skill 的文件被排除后不会续跑或重发，需要重新触发评审；剔除失败需先调整 MR，或由管理员调整授权后再重新触发。`0021` 升级前保存的非空授权没有快照 hash，读取路径会返回空值，执行路径必须拒绝；管理员可以按现有 revision 撤销，或在重新发现后重新授权。
 
 启用前，必须验证项目级门禁覆盖每次外发及所有生效策略与授权写入，并核对它和工作区 lifecycle、内容、mirror、MR、workflow 锁的统一顺序；不能在已持有工作区内容锁时递归获取该锁。恢复与待发布结果必须验证完整授权、目标 SHA 和过滤快照身份。取消不能收回已经发送的内容，本服务的锁也不能阻止远端分支推送。
 
@@ -1703,6 +1703,8 @@ tribunalctl projects retry-onboarding <项目 ID>
 ### 评审永久失败排查
 
 评审以 `review execution failed` 结束且不会重试时，服务端会记录 WARN `review run failed permanently`，字段为 `project_id`、`mr_iid`、`generation`、`error_class` 和 `stage`；不记录原始错误。先按 `project_id` 与 `mr_iid` 定位该次评审，再看 `stage` 判断失败发生在哪一环节：`control`、`inputs`、`config`、`execution`、`prepare`、`graph`、`workflow`。`error_class` 给出失败类别，两者结合缩小排查范围；若怀疑与模型有关，到「模型与档位」页核对档位覆盖引用的模型是否存在且未被删除。处理后重新触发评审。
+
+`error_class=repo_skill_excluded_by_mr` 是仓库 Skill 专用类别：该 MR 把已授权仓库 Skill 的文件移入或移出 ignore 路径（包括 rename 两侧），评审无法使用这些 Skill，不会重试；重新授权同一目标 commit 不能解决。处置：调整 MR，使已授权 Skill 的文件不再经过 ignore 路径；或由管理员调整该分支的仓库 Skill 授权，之后重新触发评审。失败提示包含 `reauthorize repository skills` 的快照变化失败则相反，通常由项目 ignore 策略变化或授权快照 hash 缺失/不符引起，按提示重新授权即可。
 
 ## 11. 并发压测
 

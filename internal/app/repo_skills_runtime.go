@@ -17,6 +17,20 @@ type repositorySkillGrantLister interface {
 	ListRepositorySkillAuthorizations(context.Context, int64, string) ([]store.RepositorySkillAuthorization, error)
 }
 
+// ErrRepositorySkillExcludedByMR marks a review that cannot use an authorized
+// repository Skill because this MR moves its files into or out of ignored
+// paths. It is a permanent, MR-specific failure: reauthorizing the same
+// target commit cannot resolve it.
+var ErrRepositorySkillExcludedByMR repositorySkillExcludedError
+
+type repositorySkillExcludedError struct{}
+
+func (repositorySkillExcludedError) Error() string {
+	return "app: merge request excludes authorized repository skill files"
+}
+
+func (repositorySkillExcludedError) ErrorCode() string { return "repo_skill_excluded_by_mr" }
+
 type repositorySkillRuntime struct {
 	blocks     map[string]config.BlockBinding
 	skills     review.SkillProvider
@@ -74,7 +88,7 @@ func (s *ReviewService) resolveRepositorySkillRuntime(ctx context.Context, proje
 	if !ok || source == nil || s.gitlab == nil {
 		return nil, PermanentJob(errors.New("app: repository skill source is unavailable; reauthorize repository skills"))
 	}
-	sha, files, snapshot, err := loadRepositorySkillSnapshot(ctx, ws, source, s.gitlab, project, token, branch, deny, s.reviewDefaults, s.profiles)
+	sha, files, snapshot, err := loadRepositorySkillSnapshot(ctx, ws, source, s.gitlab, project, token, branch, s.reviewDefaults, s.profiles)
 	if err != nil {
 		return nil, err
 	}
@@ -83,17 +97,18 @@ func (s *ReviewService) resolveRepositorySkillRuntime(ctx context.Context, proje
 			return nil, PermanentJob(errors.New("app: repository skill target changed; reauthorize repository skills"))
 		}
 		if !store.ValidRepositorySkillSnapshotSHA256(grant.SnapshotSHA256) || grant.SnapshotSHA256 != snapshot {
-			// This branch filters with the deny set derived from the MR diff while
-			// authorization is stored with ignore rules alone, so reauthorizing on
-			// the same target commit cannot make the hashes match.
-			return nil, PermanentJob(errors.New("app: repository skill snapshot changed: this MR's changes alter the authorized skill set; reauthorizing repository skills cannot resolve it"))
+			return nil, PermanentJob(errors.New("app: repository skill snapshot changed; reauthorize repository skills"))
 		}
 	}
 	blocks, identities, err := applyRepositorySkillAuthorizations(baseBlocks, project.ID, branch, sha, grants)
 	if err != nil {
 		return nil, PermanentJob(errors.New("app: repository skill authorization is unavailable; reauthorize repository skills"))
 	}
-	dir, remove, err := repo.MaterializeRepositorySkills(ctx, ws.Root, files)
+	runtimeFiles, err := repositorySkillRuntimeFiles(files, deny, repositorySkillGrantedNames(granted))
+	if err != nil {
+		return nil, err
+	}
+	dir, remove, err := repo.MaterializeRepositorySkills(ctx, ws.Root, runtimeFiles)
 	if err != nil {
 		return nil, PermanentJob(errors.New("app: repository skill snapshot is unsafe; reauthorize repository skills"))
 	}
@@ -130,8 +145,10 @@ func (e *reviewExecution) repositorySkillsVerified() bool {
 }
 
 // loadRepositorySkillSnapshot pins the authenticated target branch and returns
-// the exact commit, filtered files and snapshot hash that authorization uses.
-func loadRepositorySkillSnapshot(ctx context.Context, ws *workspace.Workspace, source repositorySkillSourceGit, client GitLabClient, project *store.Project, token, branch string, deny func(string) bool, defaults config.ProjectSettings, profiles map[string]config.ProfileConfig) (string, map[string][]byte, string, error) {
+// the exact commit, the files filtered by the project ignore policy alone, and
+// their snapshot hash. Authorization, execution, recovery and publication all
+// compare this hash; MR-derived exclusions decide only what may be mounted.
+func loadRepositorySkillSnapshot(ctx context.Context, ws *workspace.Workspace, source repositorySkillSourceGit, client GitLabClient, project *store.Project, token, branch string, defaults config.ProjectSettings, profiles map[string]config.ProfileConfig) (string, map[string][]byte, string, error) {
 	sha, err := pinRepositorySkillTarget(ctx, ws, source, client, project, token, branch)
 	if err != nil {
 		return "", nil, "", err
@@ -153,11 +170,7 @@ func loadRepositorySkillSnapshot(ctx context.Context, ws *workspace.Workspace, s
 		return "", nil, "", err
 	}
 	policy := &review.Dossier{IgnorePolicy: &review.IgnorePolicy{Version: review.IgnorePolicyVersion, Patterns: append([]string{}, cfg.Settings.Ignore...)}}
-	filter := policy.IgnoresPath
-	if deny != nil {
-		filter = func(name string) bool { return policy.IgnoresPath(name) || deny(name) }
-	}
-	files, err := source.ReadRepositorySkills(ctx, ws.MirrorDir(), sha, filter)
+	files, err := source.ReadRepositorySkills(ctx, ws.MirrorDir(), sha, policy.IgnoresPath)
 	if err != nil {
 		return "", nil, "", err
 	}
@@ -168,69 +181,126 @@ func loadRepositorySkillSnapshot(ctx context.Context, ws *workspace.Workspace, s
 	return sha, files, snapshot, nil
 }
 
+// repositorySkillGrantedNames returns the union of skill names across the
+// non-empty grants of one target branch.
+func repositorySkillGrantedNames(grants []store.RepositorySkillAuthorization) []string {
+	out := make([]string, 0)
+	for _, grant := range grants {
+		out = append(out, grant.Skills...)
+	}
+	return out
+}
+
+// repositorySkillRuntimeFiles narrows the ignore-filtered snapshot r0 to the
+// files this review may materialize. deny is the MR-derived exclusion set.
+// Files of an authorized Skill must all survive: if any is excluded, the MR is
+// moving authorized content through ignored paths and the review fails closed.
+// Excluded files of unauthorized Skills and of top-level non-Skill files are
+// simply not materialized.
+func repositorySkillRuntimeFiles(r0 map[string][]byte, deny func(string) bool, grantedNames []string) (map[string][]byte, error) {
+	if deny == nil {
+		return nil, PermanentJob(errors.New("app: repository skill filter is unavailable"))
+	}
+	dirs, err := skill.RepositorySkillDirs(r0)
+	if err != nil {
+		return nil, PermanentJob(errors.New("app: repository skill snapshot is inconsistent; reauthorize repository skills"))
+	}
+	files := repo.FilterRepositorySkillFiles(r0, deny)
+	checked := make(map[string]bool, len(grantedNames))
+	for _, name := range grantedNames {
+		if checked[name] {
+			continue
+		}
+		checked[name] = true
+		dir, ok := dirs[name]
+		if !ok {
+			return nil, PermanentJob(errors.New("app: repository skill snapshot is inconsistent; reauthorize repository skills"))
+		}
+		prefix := dir + "/"
+		for path := range r0 {
+			if !strings.HasPrefix(path, prefix) {
+				continue
+			}
+			if _, kept := files[path]; !kept {
+				return nil, PermanentJob(ErrRepositorySkillExcludedByMR)
+			}
+		}
+	}
+	return files, nil
+}
+
 // repositorySkillProvenanceCurrent checks stored grants against the
 // provenance recorded by the original execution. It never reads repository
 // content; execution validates content separately.
 func repositorySkillProvenanceCurrent(ctx context.Context, lister repositorySkillGrantLister, project *store.Project, defaults config.ProjectSettings, dossier *review.Dossier, record *review.RepositorySkillProvenance) error {
+	_, err := repositorySkillProvenanceGrants(ctx, lister, project, defaults, dossier, record)
+	return err
+}
+
+// repositorySkillProvenanceGrants performs the same check and returns the
+// non-empty grants read during it, so callers that also need the granted names
+// cannot observe a different authorization between two reads.
+func repositorySkillProvenanceGrants(ctx context.Context, lister repositorySkillGrantLister, project *store.Project, defaults config.ProjectSettings, dossier *review.Dossier, record *review.RepositorySkillProvenance) ([]store.RepositorySkillAuthorization, error) {
 	if record == nil || record.Mode == "none" {
-		return nil
+		return nil, nil
 	}
 	if record.Mode != "repository" || dossier == nil || dossier.MR.TargetBranch != record.TargetBranch {
-		return errors.New("app: repository skill provenance is unavailable")
+		return nil, errors.New("app: repository skill provenance is unavailable")
 	}
 	if project == nil || !project.Enabled {
-		return errors.New("app: repository skill project is unavailable")
+		return nil, errors.New("app: repository skill project is unavailable")
 	}
 	settings, err := ResolveSettings(project.Settings, defaults)
 	if err != nil || !settings.AllowRepoSkills {
-		return errors.New("app: repository skills are disabled")
+		return nil, errors.New("app: repository skills are disabled")
 	}
 	if lister == nil {
-		return errors.New("app: repository skill grants are unavailable")
+		return nil, errors.New("app: repository skill grants are unavailable")
 	}
 	grants, err := lister.ListRepositorySkillAuthorizations(ctx, project.ID, record.TargetBranch)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	current := make(map[string]store.RepositorySkillAuthorization, len(grants))
 	for _, grant := range grants {
 		current[grant.Block] = grant
 	}
-	authorized := false
+	granted := make([]store.RepositorySkillAuthorization, 0, len(grants))
 	for block, revision := range record.GrantRevisions {
 		grant, ok := current[block]
 		if !ok {
 			grant = store.RepositorySkillAuthorization{ProjectID: project.ID, TargetBranch: record.TargetBranch, Block: block, Skills: []string{}, Revision: store.BlockBindingAbsentRevision}
 		}
 		if grant.Revision != revision {
-			return errors.New("app: repository skill authorization changed")
+			return nil, errors.New("app: repository skill authorization changed")
 		}
 		if len(grant.Skills) > 0 {
 			if !strings.EqualFold(grant.TargetSHA, record.TargetSHA) || grant.SnapshotSHA256 != record.SnapshotSHA256 {
-				return errors.New("app: repository skill authorization changed")
+				return nil, errors.New("app: repository skill authorization changed")
 			}
-			authorized = true
+			granted = append(granted, grant)
 		}
 	}
-	if !authorized {
-		return errors.New("app: repository skill authorization is absent")
+	if len(granted) == 0 {
+		return nil, errors.New("app: repository skill authorization is absent")
 	}
 	for block, grant := range current {
 		if len(grant.Skills) == 0 {
 			continue
 		}
 		if _, ok := record.GrantRevisions[block]; !ok {
-			return errors.New("app: repository skill authorization changed")
+			return nil, errors.New("app: repository skill authorization changed")
 		}
 	}
-	return nil
+	return granted, nil
 }
 
 // repositorySkillPublicationCurrent reauthenticates the recorded repository
 // capability before any pending or manually requested publication. It checks
 // the stored grants first, then fetches the target branch tip again and
-// recomputes the filtered snapshot, so branch movement or a filter change
-// cannot publish output derived from a stale capability.
+// recomputes the ignore-filtered snapshot, so branch movement or a filter
+// change cannot publish output derived from a stale capability. It then redoes
+// the excluded-file check with the deny set rebuilt from the dossier evidence.
 func (p *Publisher) repositorySkillPublicationCurrent(ctx context.Context, project *store.Project, dossier *review.Dossier) error {
 	if p == nil || dossier == nil || dossier.RepositorySkillProvenance == nil || dossier.RepositorySkillProvenance.Mode == "none" {
 		return nil
@@ -240,7 +310,8 @@ func (p *Publisher) repositorySkillPublicationCurrent(ctx context.Context, proje
 		return errors.New("app: repository skill provenance is unavailable")
 	}
 	lister, _ := p.store.(repositorySkillGrantLister)
-	if err := repositorySkillProvenanceCurrent(ctx, lister, project, p.reviewDefaults, dossier, record); err != nil {
+	grants, err := repositorySkillProvenanceGrants(ctx, lister, project, p.reviewDefaults, dossier, record)
+	if err != nil {
 		return err
 	}
 	source, ok := p.git.(repositorySkillSourceGit)
@@ -259,7 +330,7 @@ func (p *Publisher) repositorySkillPublicationCurrent(ctx context.Context, proje
 	if err != nil {
 		return err
 	}
-	sha, _, snapshot, err := loadRepositorySkillSnapshot(ctx, ws, source, p.gitlab, project, token, record.TargetBranch, deny, p.reviewDefaults, p.profiles)
+	sha, files, snapshot, err := loadRepositorySkillSnapshot(ctx, ws, source, p.gitlab, project, token, record.TargetBranch, p.reviewDefaults, p.profiles)
 	if err != nil {
 		return err
 	}
@@ -269,5 +340,6 @@ func (p *Publisher) repositorySkillPublicationCurrent(ctx context.Context, proje
 	if snapshot != record.SnapshotSHA256 {
 		return errors.New("app: repository skill snapshot changed")
 	}
-	return nil
+	_, err = repositorySkillRuntimeFiles(files, deny, repositorySkillGrantedNames(grants))
+	return err
 }

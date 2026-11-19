@@ -129,6 +129,11 @@
 
 本轮复验不扩大为生产验收；生产部署与验收按发布流程另行执行。
 
+## 仓库 Skill 快照语义本地验证（#545）
+
+- 基于 `main` `6b6ae70` 的未提交工作区，本地通过 `go test -count=1 ./internal/app ./internal/repo ./internal/skill`（2026-11-19；app 164.421s、repo 7.749s、skill 0.374s）。覆盖：与已授权 Skill 无关的忽略 rename 不再使整单失败；被授权 Skill 被剔除时 fail-closed，`error_class` 为 `repo_skill_excluded_by_mr` 且状态 detail 为专用文案；`repositorySkillRuntimeFiles` 表驱动规则；`FilterRepositorySkillFiles` 与 `ReadRepositorySkills` 等价；`RepositorySkillDirs` 重名、嵌套与无效 manifest；发布复核拒绝剔除已授权文件的 dossier；未授权排除不改变执行身份。
+- **BLOCKED**：「旧二进制中断、新二进制恢复」的真实环境演练未执行（缺隔离部署环境）；单测覆盖恢复路径，不代替跨二进制升级演练。升级与回退边界见[设计文档](design/08-repository-skill-snapshot.md) §4.6。
+
 <a id="v150-验证状态"></a>
 
 ## v1.5.0 验证状态

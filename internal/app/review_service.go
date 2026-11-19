@@ -40,6 +40,10 @@ const (
 	reviewFailureSettleTimeout = 10 * time.Second
 	invalidRepoConfigDetail    = "repository or stored ignore configuration is invalid"
 	invalidRepoConfigNote      = "评审未启动：`.gitlab-review.yml` 或已保存的 ignore 规则无效（无法解析或包含不支持的写法）。请修正后重新触发评审。"
+	// repositorySkillExcludedDetail must stay within reviewStatusDetailRunes and
+	// must not suggest reauthorization, which cannot resolve an MR-caused
+	// exclusion.
+	repositorySkillExcludedDetail = "this MR moves authorized repository skill files into or out of ignored paths; the review cannot use them. Rerun after merging or adjusting the authorization"
 	// Degradation warnings are persisted in the dossier and rendered on the MR
 	// so a withheld material is never silent (#457).
 	withoutCodeGraphWarning = "review ran without the code graph: project ignore rules blocked workspace indexing"
@@ -656,6 +660,8 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 			s.markProjectTokenRejected(ctx, payload.ProjectID, gitlab.StatusOf(err))
 		case errors.Is(err, ErrReviewSuperseded) || errors.Is(err, ErrMRClosed):
 			state, detail = reviewStatusStale, "review is no longer current"
+		case errors.Is(err, ErrRepositorySkillExcludedByMR):
+			detail = repositorySkillExcludedDetail
 		case errors.Is(err, ErrInvalidRepoConfig):
 			detail = invalidRepoConfigDetail
 			s.noteInvalidRepoConfig(ctx, token, payload.ProjectID, payload.MRIID, payload.Generation, payload.HeadSHA)

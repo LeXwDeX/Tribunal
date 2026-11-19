@@ -119,9 +119,9 @@ func (g *Git) verifySkillCommit(ctx context.Context, dir, sha string) error {
 // ReadRepositorySkills returns only non-ignored regular files from a pinned
 // commit's .claude/skills tree. Paths in the result are relative to that tree.
 // The caller must first authenticate the project and verify that sha is the
-// fetched target-branch tip. deny must include the effective ignore policy and
-// any additional excluded paths, such as the other side of an ignored rename.
-// This method does not authorize or mount the returned files.
+// fetched target-branch tip. deny must be the effective ignore policy; MR
+// derived exclusions are applied by FilterRepositorySkillFiles. This method
+// does not authorize or mount the returned files.
 func (g *Git) ReadRepositorySkills(ctx context.Context, dir, sha string, deny func(string) bool) (map[string][]byte, error) {
 	if err := validateAbsPath(dir); err != nil {
 		return nil, err
@@ -245,6 +245,26 @@ func (g *Git) ReadRepositorySkills(ctx context.Context, dir, sha string, deny fu
 		return nil, errRepositorySkills
 	}
 	return result, nil
+}
+
+// FilterRepositorySkillFiles returns the files whose full .claude/skills path
+// is not denied. Keys are relative to .claude/skills while deny accepts
+// repository-relative paths, so each key is checked with that prefix. A nil
+// deny excludes every file, matching ReadRepositorySkills and keeping an
+// absent filter fail-closed. For the same tree and non-nil filter it returns
+// the same files as ReadRepositorySkills. The input map is not modified.
+func FilterRepositorySkillFiles(files map[string][]byte, deny func(string) bool) map[string][]byte {
+	out := make(map[string][]byte, len(files))
+	if deny == nil || deniedRepositorySkillPath(deny, repositorySkillsRoot) {
+		return out
+	}
+	for name, data := range files {
+		if deniedRepositorySkillPath(deny, repositorySkillsRoot+"/"+name) {
+			continue
+		}
+		out[name] = data
+	}
+	return out
 }
 
 func skillObjectSize(line []byte, oid string) (int64, bool) {

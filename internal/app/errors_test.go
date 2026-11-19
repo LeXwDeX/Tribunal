@@ -17,6 +17,7 @@ func TestJobSettleClassNamesReasonWithoutErrorText(t *testing.T) {
 		{"mr closed", PermanentJob(fmt.Errorf("%w: state SECRET", ErrMRClosed)), "mr_closed"},
 		{"superseded", fmt.Errorf("%w: head SECRET", ErrReviewSuperseded), "review_superseded"},
 		{"stale", fmt.Errorf("SECRET: %w", ErrStalePublication), "stale_publication"},
+		{"repository skill excluded", PermanentJob(ErrRepositorySkillExcludedByMR), "repo_skill_excluded_by_mr"},
 		{"coded", PermanentJob(&Error{Code: "gitlab_rejected", Message: "SECRET"}), "gitlab_rejected"},
 		{"timeout", PermanentJob(fmt.Errorf("SECRET: %w", context.DeadlineExceeded)), "timeout"},
 		{"permanent", PermanentJob(errors.New("build dossier: SECRET")), "permanent_job"},

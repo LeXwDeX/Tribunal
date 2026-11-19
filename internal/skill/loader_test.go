@@ -224,6 +224,23 @@ func TestRepositoryCatalogueUsesOnlyProvidedFilteredManifests(t *testing.T) {
 	}
 }
 
+func TestRepositorySkillDirsResolvesTopLevelManifestsOnly(t *testing.T) {
+	files := map[string][]byte{
+		"allowed/SKILL.md":     []byte("---\nname: allowed\ndescription: visible\n---\nbody\n"),
+		"allowed/private.txt":  []byte("resource"),
+		"nested/deep/SKILL.md": []byte("---\nname: nested\ndescription: not a direct child\n---\n"),
+		"invalid/SKILL.md":     []byte("---\nname: INVALID\ndescription: invalid\n---\n"),
+	}
+	dirs, err := RepositorySkillDirs(files)
+	if err != nil || len(dirs) != 1 || dirs["repo:allowed"] != "allowed" {
+		t.Fatalf("repository dirs = %+v, %v", dirs, err)
+	}
+	files["duplicate/SKILL.md"] = []byte("---\nname: allowed\ndescription: collision\n---\n")
+	if _, err := RepositorySkillDirs(files); err == nil {
+		t.Fatal("duplicate repository names accepted")
+	}
+}
+
 func TestBindingValidation(t *testing.T) {
 	platform := t.TempDir()
 	writeSkillFile(t, platform, "security", "security", "security", "body\n")

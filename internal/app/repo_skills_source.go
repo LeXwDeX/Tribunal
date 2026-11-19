@@ -53,9 +53,11 @@ type RepositorySkillDiscovery struct {
 	Skills         []RepositorySkillMetadata `json:"skills"`
 }
 
-// repositorySkillDenyPaths carries both sides of ignored renames into the
-// source filter and returns the exact propagated deny set. Dossier.Ignored
-// alone may only contain the destination path.
+// repositorySkillDenyPaths derives the repository-relative deny set from the
+// MR diff, including both sides of ignored renames, and returns the exact
+// propagated set. Dossier.Ignored alone may only contain the destination path.
+// The set decides which files may be materialized; it is not part of the
+// authorized snapshot hash.
 func repositorySkillDenyPaths(dossier *review.Dossier, diffs []gitlab.FileDiff) (map[string]bool, []string, error) {
 	if dossier == nil || dossier.IgnorePolicy == nil || dossier.IgnorePolicy.Version != review.IgnorePolicyVersion || dossier.IgnorePolicy.Patterns == nil || len(diffs) > 100000 || len(dossier.Ignored) > 100000 {
 		return nil, nil, errors.New("app: repository skill ignore policy unavailable")
@@ -282,7 +284,7 @@ func discoverRepositorySkills(ctx context.Context, ws *workspace.Workspace, git 
 	if !ok || source == nil || client == nil {
 		return nil, errors.New("app: repository skill source unavailable")
 	}
-	sha, files, snapshot, err := loadRepositorySkillSnapshot(ctx, ws, source, client, project, token, branch, nil, defaults, profiles)
+	sha, files, snapshot, err := loadRepositorySkillSnapshot(ctx, ws, source, client, project, token, branch, defaults, profiles)
 	if err != nil {
 		return nil, err
 	}

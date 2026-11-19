@@ -104,6 +104,21 @@ func TestRepositorySkillSnapshotUsesDossierIgnoreAndRenamePaths(t *testing.T) {
 			t.Fatalf("ignored path in snapshot: %q", path)
 		}
 	}
+	// The ignore-filtered snapshot with MR exclusions applied must match the
+	// runtime filter used to materialize files.
+	unfiltered, err := (&repo.Git{}).ReadRepositorySkills(context.Background(), dir, sha, dossier.IgnoresPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeFiles := repo.FilterRepositorySkillFiles(unfiltered, deny)
+	if len(runtimeFiles) != len(snapshot) {
+		t.Fatalf("runtime filter = %v, snapshot = %v", runtimeFiles, snapshot)
+	}
+	for path, data := range snapshot {
+		if string(runtimeFiles[path]) != string(data) {
+			t.Fatalf("runtime filter diverges at %q", path)
+		}
+	}
 	mount := t.TempDir()
 	for path, data := range snapshot {
 		file := filepath.Join(mount, filepath.FromSlash(path))
