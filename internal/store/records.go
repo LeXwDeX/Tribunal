@@ -54,6 +54,11 @@ type LLMCallFilter struct {
 const (
 	WorkspaceOperationFailed = "workspace operation failed"
 	WorkspaceIndexFailed     = "index: code graph indexing failed"
+	// WorkspaceIndexBlockedByIgnore is stored when a refresh or onboarding
+	// found the effective ignore policy restricted and withheld indexing on
+	// purpose. It is a safe configuration state, not a failure; the console
+	// shows it as such.
+	WorkspaceIndexBlockedByIgnore = "index: blocked by ignore policy"
 
 	WorkspaceGitLabTokenRejected  = "gitlab: project token rejected (401)"
 	WorkspaceGitLabForbidden      = "gitlab: access denied (403)"

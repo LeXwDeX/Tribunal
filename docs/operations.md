@@ -1707,7 +1707,7 @@ docker run --rm --entrypoint stat tribunal:local -c '%u:%g %a' /app/data
 | `onboarding: model call timed out` | 模型调用超时 | 检查 provider 延迟和 profile 期限 |
 | `onboarding: model call failed` | 其他模型失败（含 `unsafe_model_response`、`context_too_long`、请求配置错误） | 检查模型名、协议、参数和上下文长度 |
 | `index: code graph indexing failed` | 代码图谱索引失败 | 见下文 ignore 策略与索引 |
-| `index: blocked by ignore policy` | 因 ignore 策略有意阻断索引 | 见下文 ignore 策略与索引 |
+| `index: blocked by ignore policy` | 因 ignore 策略有意阻断索引；项目设置和仓库都没有追加 ignore 却出现时，是 #457 之前写入的过期状态 | 见下文 ignore 策略与索引；过期状态在服务重启时自动重建索引，也可手动刷新 |
 | `workspace operation failed` | 未分类，或历史原始文本 | 用日志 `error_class` 定位 |
 
 git 类别由 clone/fetch 的 stderr 文本分类；stderr 不入库、不记日志。git 子进程的消息固定为 C locale（设置 `LC_MESSAGES=C`、`LANGUAGE=C`，移除 `LC_ALL`），使分类不受宿主语言影响。
@@ -1762,6 +1762,14 @@ tribunalctl projects retry-onboarding <项目 ID>
 ### ignore 策略与索引
 
 只有项目或仓库 `.gitlab-review.yml` 追加的 ignore 规则（超出内置默认 6 条）才会阻断工作区索引，接口返回 `index_status=degraded` 和 `last_error="index: blocked by ignore policy"`。内置默认规则只排除构建产物，不再阻止索引、上下文注入或 MCP 工具绑定。受限策略造成的降级会写入 dossier 的 `warnings` 并显示在 MR 摘要评论中；没有项目上下文文档或文档未通过校验、MR base 提交不可用时同样会产生警告。需要代码图谱索引又确实要使用自定义 ignore 时，应权衡该策略与图谱覆盖；阻断本身不影响评审继续执行，详见 [ignore 安全边界](#ignore-安全边界)；受限时评审同样不会为目标提交建立目标图谱，见[目标提交代码图谱](#目标提交代码图谱)。
+
+**过期的阻断状态**（[#618](https://github.com/LeXwDeX/Tribunal/issues/618)）：ignore 判定只在 onboarding 与刷新时求值，结果写进工作区 `last_error`，此后不会自行更新。#457（v1.5.0）之前只要有效 ignore 非空就算受限，而内置默认规则恒在，所以当时登记或刷新的项目都被存成 `state=ready`、`index_sha` 为空、`last_error=index: blocked by ignore policy`。升级后它们按当前规则已不受限，但只要默认分支没有新的 push，状态就不变：共享工作区索引始终没有建立，控制台对没有任何 ignore 配置的项目仍显示「已按 ignore 策略跳过索引」。判断方法：项目设置与仓库 `.gitlab-review.yml` 都没有追加 ignore，工作区却是这个状态。现在有两条自愈路径：
+
+- **启动时自愈**：`Runtime.Recover` 在恢复与 catch-up 扫描之后做一次检查（只在启动时，没有周期性检查；改 ignore 配置也不会立即排队）。同时满足以下条件的项目，各排队一次 `workspace.refresh`：项目已启用；服务配置了 MCP；工作区 `state=ready` 且 `last_error` 正好是该文案；按平台 `review_defaults` 加项目设置求值，有效 ignore 未超出内置默认 6 条。任务的 key 是 `ws:<项目 ID>`，trigger 是 `stale_ignore_block`，带 `reindex=true`、`regenerate_context=false`，与手动刷新一样跟随默认分支，不重新生成上下文。刷新重建索引后 `last_error` 被清空，之后再启动不会重复入队。每个这样的项目是一次完整索引（占用 CPU、磁盘和时间），没有这类项目时启动不排队任何任务。没有配置索引命令（`x-review.index_command`）的部署，这次刷新不建索引，`last_error` 改为 `index: code graph indexing failed`，与任何一次普通刷新的结果一致。
+- **入队方式**：持项目生命周期读锁，并在锁内重读项目（并发的删除或停用优先）；不取工作区内容读锁，避免排在刷新写者之后互相等待。该项目已有排队中的刷新时不重复入队，也不改写那个任务的内容，它自己会重建索引；正在运行的刷新不算排队中，此时仍会排一个后继任务。
+- **仓库配置仍追加 ignore 的项目**：检查不访问 GitLab，不读仓库的 `.gitlab-review.yml`，所以仍会为这类项目排队刷新；刷新按完整规则求值，仍然受限就写回同一文案、不建索引，行为正确，但这类项目每次启动都会多一次不建索引的刷新。
+- **手动刷新**：工作区 `last_error` 是该文案、而当前有效 ignore 已不受限时，手动刷新（控制台「刷新工作区」或 `POST /api/v1/projects/{id}/workspace/refresh`）即使 `reindex` 为 `false` 也重建索引，不再改写成 `index: code graph indexing failed`。仍然受限时行为不变。
+- **日志**：INFO `stale ignore block refresh enqueued`（字段 `project_id`），每个排了刷新的项目一条；WARN `stale ignore block refresh enqueue failed`（字段 `project_id`、`error_class`）表示这个项目没能排上，跳过后继续检查其他项目，下次启动会再试；WARN `stale ignore block check failed`（字段 `error_class`）表示项目列表读取失败，整次检查没有进行。三者都不影响启动恢复。
 
 ### 评审永久失败排查
 

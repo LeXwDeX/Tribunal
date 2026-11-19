@@ -31,7 +31,7 @@ func workspaceIndexStatus(workspace *store.Workspace) string {
 	if workspace == nil {
 		return "unknown"
 	}
-	if workspace.LastError == "index: blocked by ignore policy" {
+	if workspace.LastError == store.WorkspaceIndexBlockedByIgnore {
 		return "degraded"
 	}
 	base := strings.TrimSpace(workspace.BaseSHA)
@@ -65,8 +65,8 @@ func workspaceLastError(workspace *store.Workspace) string {
 	if workspace.LastError == "" {
 		return ""
 	}
-	if workspace.LastError == "index: blocked by ignore policy" {
-		return "index: blocked by ignore policy"
+	if workspace.LastError == store.WorkspaceIndexBlockedByIgnore {
+		return store.WorkspaceIndexBlockedByIgnore
 	}
 	if workspace.State == "ready" && strings.HasPrefix(workspace.LastError, "index: ") {
 		return store.WorkspaceIndexFailed
