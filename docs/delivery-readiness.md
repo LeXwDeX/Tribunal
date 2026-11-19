@@ -148,8 +148,8 @@
 
 - 基于 `main` `8b6226a` 的分支。改动含后端（评审的目标图谱、默认分支同步、内置 wrapper 的运行时目录回退、run cleanup 的 `graphs/` 清理）、dossier 可选字段 `workspace_provenance.index_source` 和相应文档；无数据库迁移、无配置项变更，范围见 [CHANGELOG](../CHANGELOG.md) 的 1.9.0 段。随代码提交的单测覆盖：目标图谱的构建、降级、工具路由与清理（`internal/app`、`internal/workspace`），评审与恢复路径对目标图谱的使用，默认分支同步的比较更新与刷新入队，`index_source` 的合法性与旧 dossier 兼容，run cleanup 对 `graphs/` 的保护规则，`UpdateProjectDefaultBranch` 的比较更新，以及 wrapper 的运行时目录回退（`scripts`）。
 - **待记录**：本地检查、自建 CI 的 `RESULT PASS` 摘要行（含被测提交 SHA）和 GitHub Actions 的 go / web / docker 结果在对应 PR 中记录，此处不预填；未运行的检查不计为 PASS。
-- **BLOCKED**：真实部署验收未执行。缺：一套隔离的测试部署（含真实 GitLab 测试项目，以及模型 provider 的凭据与端点），和一个目标分支不是默认分支的 MR。待验证的内容：该 MR 的评审得到目标图谱（没有 `target code graph unavailable; continuing without it` 告警，dossier 的 `workspace_provenance.index_source` 为 `run`，评审不因图谱工具缺口降为 INCOMPLETE），评审结束后 `graphs/<runID>` 已删除。在真实 GitLab 上改默认分支后的同步与刷新，以及进程重启后重建目标图谱的恢复，同样只有单测覆盖。
-- **BLOCKED**：用镜像内真实 codebase-memory-mcp 二进制对长 `HOME`（`graphs/<runID>/` 之下的深路径，走 wrapper 的 `/tmp/tcbm-<uid>/<hash>` 回退）建索引并经 MCP 调用的 Docker smoke 未执行（缺可运行 Docker smoke 的环境）。现有 Docker smoke 的索引 `HOME` 路径很短，`$HOME/run` 不超过 57 字节，没有走回退；wrapper 的回退只有替身二进制的单测，目标图谱的单测用注入的索引命令与 MCP 替身，没有运行真实索引命令。
+- **BLOCKED（合并前）**：真实部署验收未执行。缺：一套隔离的测试部署（含真实 GitLab 测试项目，以及模型 provider 的凭据与端点），和一个目标分支不是默认分支的 MR。待验证的内容：该 MR 的评审得到目标图谱（没有 `target code graph unavailable; continuing without it` 告警，dossier 的 `workspace_provenance.index_source` 为 `run`，评审不因图谱工具缺口降为 INCOMPLETE），评审结束后 `graphs/<runID>` 已删除。在真实 GitLab 上改默认分支后的同步与刷新，以及进程重启后重建目标图谱的恢复，同样只有单测覆盖。
+- **BLOCKED（合并前）**：用镜像内真实 codebase-memory-mcp 二进制对长 `HOME`（`graphs/<runID>/` 之下的深路径，走 wrapper 的 `/tmp/tcbm-<uid>/<hash>` 回退）建索引并经 MCP 调用的 Docker smoke 未执行（缺可运行 Docker smoke 的环境）。现有 Docker smoke 的索引 `HOME` 路径很短，`$HOME/run` 不超过 57 字节，没有走回退；wrapper 的回退只有替身二进制的单测，目标图谱的单测用注入的索引命令与 MCP 替身，没有运行真实索引命令。发布后已在生产容器内用真实二进制对长 `HOME` 做了手工索引回归，见 [v1.9.0 Stage 3](#v190-stage-3生产部署与验收2026-11-20)。
 - **BLOCKED**：目标图谱在真实大型仓库上的索引耗时、内存和磁盘占用没有测量记录；等待名额 5 分钟、单次索引 10 分钟上限与进程内 2 个并发名额是代码常量，不能据此声称满足容量目标。
 - 升级与回退：无迁移，升级后的行为变化见[运维文档](operations.md#目标提交代码图谱与默认分支同步604)。
 
@@ -173,7 +173,7 @@ v1.9.0 于 2026-11-20 定版，汇总 v1.8.0 之后合并的 8 个 PR，完整�
 
 - **健康与接口**：容器 healthy；`/healthz` 与 `/readyz` ok；启动日志无 ERROR。
 - **#615 升级语义**：更新挂载配置后，`validate` 与 `verify` 的平台绑定含 `list_projects`，与 [CHANGELOG](../CHANGELOG.md) 对 #615 升级方式的描述一致。
-- **BLOCKED**：目标分支不是默认分支的 MR 的真实评审（应得到目标图谱，dossier 的 `workspace_provenance.index_source` 为 `run`）未在开发环境执行。验收用的 GitLab 测试令牌已过期（返回 401），开发环境的 bot 账号只有 Reporter 权限、无法新开 MR；需人工签发新的测试令牌后补做。
+- **BLOCKED**：目标分支不是默认分支的 MR 的真实评审（应得到目标图谱，dossier 的 `workspace_provenance.index_source` 为 `run`）未在开发环境执行。缺有效的测试凭据和可新开 MR 的账号，需人工补齐后补做。
 
 ### v1.9.0 Stage 3：生产部署与验收（2026-11-20）
 
@@ -185,7 +185,7 @@ v1.9.0 于 2026-11-20 定版，汇总 v1.8.0 之后合并的 8 个 PR，完整�
 - **启动日志**：ERROR 0；1 条既有 `feedback collection failed`（`error_class=not_found`）WARN 为历史 publication 对应讨论已不存在的既有良性反馈采集行为（与 v1.8.0 记录的同类），不影响启动或评审。
 - **配置**：生产挂载配置已更新，`validate` 与 `verify` 含 `list_projects`；其余沿用生产自己的本地配置选择。
 - **平台回归**：配置状态 `applied`、无需重启；`primary` 提供方连通测试 ok（约 1s）；内置 `codebase-memory` 服务器与各块绑定按挂载配置生效。
-- **目标图谱索引回归**：在生产容器内以服务用户、按目标图谱的目录深度（`$HOME/run` 为 111 字节，wrapper 回退到 `/tmp/tcbm-<uid>/<哈希>`），对三个真实项目的 base checkout 各做一次完整索引，均在 10 分钟上限内完成：约 260MB 工作区 5s（图谱 5.9MB），约 370MB 工作区 32s（图谱 193MB），最大的约 17GB 工作区（含镜像与上下文）137s（图谱 345MB）；索引后 `list_projects` 与 `search_graph` 正常返回。期间容器保持 healthy、无 OOM、无重启，索引结束时容器内存约 1.1GiB（上限 2GiB）。回归用的临时图谱目录与 `/tmp` 运行时目录在验证后已删除。
+- **目标图谱手工索引回归**：在生产容器内以服务用户、按目标图谱的目录深度（`$HOME/run` 为 111 字节，wrapper 回退到 `/tmp/tcbm-<uid>/<哈希>`），对三个真实项目的 base checkout 各做一次完整索引，均在 10 分钟上限内完成：约 260MB 工作区 5s（图谱 5.9MB），约 370MB 工作区 32s（图谱 193MB），最大的约 17GB 工作区（含镜像与上下文）137s（图谱 345MB）；索引后 `list_projects` 与 `search_graph` 正常返回。本回归只直接运行索引命令，没有走评审路径（`index_source`、`graphs/<runID>` 清理与降级告警），也未触及 10 分钟上限与 2 个并发名额。期间容器保持 healthy、无 OOM、无重启，索引结束时容器内存约 1.1GiB（上限 2GiB）。回归用的临时图谱目录与 `/tmp` 运行时目录在验证后已删除。
 
 ### v1.9.0 已知缺口
 
