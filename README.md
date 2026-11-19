@@ -6,7 +6,7 @@ GitLab CE MR 多 agent 自动评审服务
 
 当前 M0–M6 功能已有本地实现，覆盖项目注册与 webhook、三种 LLM 协议、agent 工具循环、DAG 与持久化、只读探索与四路并行评审/对抗核验/裁决、GitLab 发布、工作区、MCP/Skill、OAuth 持久会话、项目 `read`/`manage` 授权与 CSRF、用户全局只读、平台角色管理、模型管理与评审档位节点覆盖、管理 API、React 控制台、API token、统计、反馈采集、人工标注与许可证清单。
 
-当前最新发布版本是 **v1.9.1**（2026-11-20）。本版是只含一个修复的补丁版本（#618）：启动时为 #457（v1.5.0）之前写入的过期 ignore 阻断状态的项目各排队一次重建索引，手动刷新遇到过期状态时也重建索引。本版不新增数据库迁移（schema 仍为 36），也没有配置变更，变更见 [CHANGELOG](CHANGELOG.md)。当前生产运行由提交 `654059e` 构建的 v1.9.1 镜像，本轮部署与验收记录见 [v1.9.1 验证状态](docs/delivery-readiness.md#v191-验证状态)。上一版本 v1.9.0 汇总目标提交代码图谱、MCP 中断重试与控制台改版批次，其生产部署与验收记录见 [v1.9.0 验证状态](docs/delivery-readiness.md#v190-验证状态)。CI 以最终 tag commit 的 GitHub Actions 结果为准。
+当前最新发布版本是 **v1.9.1**（2026-11-20）。本版是只含一个修复的补丁版本（#618）：启动时为 #457（v1.5.0）之前写入的过期 ignore 阻断状态的项目各排队一次重建索引，手动刷新遇到过期状态时也重建索引。本版不新增数据库迁移（schema 仍为 36），也没有配置变更，变更见 [CHANGELOG](CHANGELOG.md)。当前生产运行由提交 `654059e` 构建的 v1.9.1 镜像，本轮部署与验收记录见 [v1.9.1 验证状态](docs/delivery-readiness.md#v191-验证状态)。上一版本 v1.9.0 汇总目标提交代码图谱、MCP 中断重试与控制台改版批次（从 v1.8.0 直接升级时，另见 CHANGELOG 1.9.0 的「升级前必读」：#615 的新默认授权需先更新挂载配置才会生效），其生产部署与验收记录见 [v1.9.0 验证状态](docs/delivery-readiness.md#v190-验证状态)。CI 以最终 tag commit 的 GitHub Actions 结果为准。
 
 部署时：人工部署看 [部署与运维](docs/operations.md)，由 agent 代为部署和接入时用 [Agent 部署指南](docs/agent-deployment.md)。
 

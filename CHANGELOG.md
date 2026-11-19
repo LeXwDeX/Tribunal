@@ -14,7 +14,7 @@
   - 启动自愈：`Runtime.Recover` 在恢复与 catch-up 扫描之后做一次检查，遍历已启用的项目，工作区 `state=ready`、`last_error` 正好是该文案、且按平台 `review_defaults` 加项目设置求值已不受限的，各排队一次 `workspace.refresh`（key `ws:<项目 ID>`，trigger `stale_ignore_block`，`reindex=true`，不重新生成上下文，跟随默认分支）。该项目已有排队中的刷新时不重复入队，也不改写原任务；入队持项目生命周期读锁并在锁内重读项目，不取工作区内容读锁。刷新重建索引后 `last_error` 被清空，之后再启动不会重复入队。INFO `stale ignore block refresh enqueued`（字段 `project_id`）；入队失败只记 WARN `stale ignore block refresh enqueue failed`（字段 `project_id`、`error_class`），整个检查失败记 WARN `stale ignore block check failed`（字段 `error_class`），都不影响启动恢复。
   - 仓库 `.gitlab-review.yml` 仍追加 ignore 规则的项目：检查不访问 GitLab，只看平台默认与项目设置，所以仍会为它排队刷新；刷新按完整规则求值，仍然受限就写回同一文案、不建索引，行为正确，但这类项目每次启动都会多排队一次不建索引的刷新。
   - 手动刷新：`last_error` 是该文案而当前已不受限时，即使请求 `reindex=false` 也重建索引，不再改写成 `index: code graph indexing failed`；仍然受限时行为不变。
-  - 成本与范围：每个受影响项目在升级后首次启动时完整索引一次 base checkout；没有受影响项目时启动不排队任何任务。没有配置索引命令（`x-review.index_command`）的部署，这次刷新不建索引，`last_error` 改为 `index: code graph indexing failed`，与任何一次普通刷新的结果一致。无数据库迁移，无配置变更；不改变 ignore 受限的判定规则，也不增加周期性检查。
+  - 成本与范围：每个受影响项目在升级后首次启动时完整索引一次 base checkout；没有受影响项目时启动不排队任何任务。已配置 MCP 但没有配置索引命令（`x-review.index_command`）的部署，这次刷新不建索引，`last_error` 改为 `index: code graph indexing failed`，与任何一次普通刷新的结果一致。无数据库迁移，无配置变更；不改变 ignore 受限的判定规则，也不增加周期性检查。
 
 ## [1.9.0] - 2026-11-20
 
